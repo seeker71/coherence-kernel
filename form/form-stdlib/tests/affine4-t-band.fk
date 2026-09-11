@@ -1,0 +1,93 @@
+; preludes: form-stdlib/backprop-msl.bml form-stdlib/native-affine-metal.bml
+; Expected: 63
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+; witnessed: 2026-09-10 -> 63
+;
+; affine4-t-band — dx = W^T dy through an affine 4-bit weight, walked down its columns
+; (form_affine4_t_f32, backprop-msl.bml), held three ways.
+;
+; Exactness is arranged: scales are 1/64, 2/64 or 3/64 and biases -1/8 or -2/8 — exact in f32,
+; f16 AND bf16 — so every dequantized weight is a multiple of 1/64 below 1 in size; dy and x sit
+; on a 1/64 grid inside +-0.47. Every product is then a multiple of 1/4096 and every partial sum
+; stays far inside the 2^24 a binary32 holds exactly, so fold order cannot move a single bit, and
+; different kernels folding in different orders have nothing left to disagree about, down to the BYTE.
+;
+; Verdict 63:
+;   1   the emitted kernel mints on this host, header-less
+;   2   f32 scales: byte-identical to nam_affine's own transposed path (a simdgroup per output,
+;       lanes striding rows, simd_sum — different kernel, different fold, same bytes)
+;   4   f32 scales: byte-identical to a Form fold over the dequantized weights
+;   8   f16 scales: byte-identical to nam_affine's transposed path
+;   16  bf16 scales: byte-identical to nam_affine's transposed path
+;   32  it IS the transpose: <W x, dy> from the FORWARD nam_affine equals <x, W^T dy> from this
+;       kernel, exactly — a witness from the forward direction, not from either reverse
+(do
+    ; nibble at flat index i, and the byte pairs it packs into (low nibble first)
+    (defn at-nib (i) (mod (add (mul i 7) 3) 16))
+    (defn at-wbytes (n k acc) (if (ge k n) acc (at-wbytes n (add k 1) (str_concat acc (byte_to_str (add (at-nib (mul k 2)) (mul 16 (at-nib (add (mul k 2) 1)))))))))
+    (defn at-scale (g) (div (add (mod g 3) 1.0) 64.0))
+    (defn at-bias (g) (sub 0.0 (div (add (mod g 2) 1.0) 8.0)))
+    (defn at-grid (n seed acc) (if (le n 0) acc (at-grid (sub n 1) seed (cons (div (add (sub (mod (add (mul n 29) (mul seed 17)) 61) 30) 0.0) 64.0) acc))))
+    ; group values in the three storage widths
+    (defn at-g32 (f n g acc) (if (ge g n) acc (at-g32 f n (add g 1) (str_concat acc (md-le32 (md-f32-bits (if (eq f 0) (at-scale g) (at-bias g))))))))
+    (defn at-g16 (f n g acc) (if (ge g n) acc (at-g16 f n (add g 1) (str_concat acc (md-le16 (md-f16-bits (if (eq f 0) (at-scale g) (at-bias g))))))))
+    (defn at-gbf (f n g acc) (if (ge g n) acc (at-gbf f n (add g 1) (str_concat acc (md-le16 (div (md-f32-bits (if (eq f 0) (at-scale g) (at-bias g))) 65536))))))
+    (defn at-groups (ty f n) (if (eq ty 0) (at-g32 f n 0 "") (if (eq ty 1) (at-g16 f n 0 "") (at-gbf f n 0 ""))))
+    (defn at-bytes-buf (bytes) (nam-write (nam-alloc (div (add (str_len bytes) 3) 4)) bytes))
+    (defn at-view (rows cols group ty)
+        (list (at-bytes-buf (at-wbytes (div (mul rows cols) 2) 0 ""))
+              (at-bytes-buf (at-groups ty 0 (div (mul rows cols) group)))
+              (at-bytes-buf (at-groups ty 1 (div (mul rows cols) group)))
+              rows cols group ty))
+    ; the dequantized weight and the Form fold, ascending rows
+    (defn at-w (i j cols group) (add (mul (at-nib (add (mul i cols) j)) (at-scale (div (add (mul i cols) j) group))) (at-bias (div (add (mul i cols) j) group))))
+    (defn at-col (dys t j i rows cols group acc) (if (ge i rows) acc (at-col dys t j (add i 1) rows cols group (add acc (mul (at-w i j cols group) (nth dys (add (mul t rows) i)))))))
+    (defn at-ref (dys t j rows cols group tokens acc)
+        (if (ge t tokens) acc
+            (if (ge j cols) (at-ref dys (add t 1) 0 rows cols group tokens acc)
+                (at-ref dys t (add j 1) rows cols group tokens (str_concat acc (md-le32 (md-f32-bits (at-col dys t j 0 rows cols group 0.0))))))))
+    (defn at-dot (xs ys acc) (if (or (nil? xs) (nil? ys)) acc (at-dot (tail xs) (tail ys) (add acc (mul (head xs) (head ys))))))
+
+    ; both transposed kernels on one view, bytes out: (bpm-bytes nam-bytes)
+    (defn at-pair (view dyh tokens)
+        (do (let n (mul tokens (nth view 4)))
+            (let db (nam-alloc n))
+            (let dn (nam-alloc n))
+            (let e1 (bpm-affine4-t view dyh db tokens))
+            (let e2 (nam-linear-lanes view dyh dn tokens 1))
+            (let s (nam-sync))
+            (let out (list (metal_buf_read db 0 (mul 4 n)) (metal_buf_read dn 0 (mul 4 n))))
+            (let freed (nam-free (list db dn)))
+            out))
+    (defn at-free-view (v) (nam-free (list (nth v 0) (nth v 1) (nth v 2))))
+
+    (let rows 64) (let cols 96) (let group 32) (let tokens 3)
+    (let minted (bpm-mint))
+    (let c0 (if (gt minted 0) 1 0))
+    (let dys (at-grid (mul tokens rows) 7 (empty)))
+    (let dyh (nam-buffer dys))
+    (let v0 (at-view rows cols group 0))
+    (let p0 (at-pair v0 dyh tokens))
+    (let c1 (if (str_eq (head p0) (nth p0 1)) 2 0))
+    (let c2 (if (str_eq (head p0) (at-ref dys 0 0 rows cols group tokens "")) 4 0))
+    (let v1 (at-view rows cols group 1))
+    (let p1 (at-pair v1 dyh tokens))
+    (let c3 (if (and (str_eq (head p1) (nth p1 1)) (str_eq (head p1) (head p0))) 8 0))
+    (let v2 (at-view rows cols group 2))
+    (let p2 (at-pair v2 dyh tokens))
+    (let c4 (if (and (str_eq (head p2) (nth p2 1)) (str_eq (head p2) (head p0))) 16 0))
+    ; the adjoint identity, read from the forward direction
+    (let xs (at-grid (mul tokens cols) 3 (empty)))
+    (let xh (nam-buffer xs))
+    (let yh (nam-alloc (mul tokens rows)))
+    (let dxh (nam-alloc (mul tokens cols)))
+    (let f (nam-linear v0 xh yh tokens 0))
+    (let b (bpm-affine4-t v0 dyh dxh tokens))
+    (let s (nam-sync))
+    (let lhs (at-dot (nam-read yh (mul tokens rows)) dys 0.0))
+    (let rhs (at-dot xs (nam-read dxh (mul tokens cols)) 0.0))
+    (let c5 (if (and (eq lhs rhs) (not (eq lhs 0.0))) 32 0))
+    (let freed (nam-free (list dyh xh yh dxh)))
+    (let fv (list (at-free-view v0) (at-free-view v1) (at-free-view v2)))
+    (print (list "minted" minted "adjoint" lhs rhs "live" (nth (metal_live) 2)))
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))

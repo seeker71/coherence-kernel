@@ -1,0 +1,382 @@
+; preludes: form/form-stdlib/metal-door.fk form/form-stdlib/tensor-ir.fk form/form-stdlib/jit-tensor-emit.fk form/form-stdlib/f16-decode.fk form/form-stdlib/lora-adapter.bml
+; Expected: 2097151
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+;
+; precision-lanes-metal-live-band — the half and bfloat lanes of the families whose recipe takes an
+; element type, FED and RUN on this Mac's GPU, not only minted.
+;
+; observe/msl-mint-run.fk offered every family in f16 and bf16 to the compiler on 2026-09-10 and all
+; of them were whole on first asking. A mint says the text is a kernel; it cannot say the kernel reads
+; its own format. This band asks for the number.
+;
+; Two kinds of exactness, both arranged rather than hoped for.
+;
+; The matvecs and the rank-1 accumulate store their answer in float. Every weight is an integer in
+; [-8, 8] and every vector entry in [-4, 4], exact in half AND bfloat, and no partial sum leaves the
+; range an f32 holds exactly. So a lane that widens at the load and folds in float agrees with Form's
+; f64 fold to the byte, or it has changed the arithmetic.
+;
+; affine-train and ffn-fwd store in the element format: w and b after the step, y after the forward.
+; Every intermediate stays in float. So on inputs exact in both formats, each half or bfloat lane is its
+; own f32 twin with the stored values rounded once — loss, h1 and a byte-identical, and w, b, y the
+; twin's float rounded to nearest-even BY FORM (md-f16-bits over the decoded word, md-bf16-round over
+; the word itself), never by the GPU's own conversion.
+;
+; The witness NOT made of the same material is bit 128. One 16-bit word, 0x3C01, is 1 + 2^-10 read as
+; half and 2^-7 + 2^-14 read as bfloat. Fed to both lanes, it returns both numbers, each written
+; here from the format's definition rather than from the door's encoders — so a carrier that aliased
+; bfloat to half, or a door that converted the bytes on the way in, answers one number twice.
+;
+; Verdict 16383:
+;     1  all twelve pipelines mint (matvec bf16, matvec-T f32/f16/bf16, outer-acc f16/bf16, affine-train
+;        and ffn-fwd f32/f16/bf16), and every run reads back
+;     2  matvec bf16, the IR lane where w, x AND y are bfloat: every row is Form's fold, byte for byte
+;     4  matvec-T f16 (64 x 64): y byte-identical to Form's ascending fold
+;     8  matvec-T bf16: the same bytes
+;    16  and both byte-identical to the f32 lane of the SAME kernel on the same values: the element type
+;        moves storage, never arithmetic
+;    32  outer-acc f16: after one apply, M = alpha * (u x w) exactly
+;    64  outer-acc bf16: after two applies, every element exactly doubled — it accumulates
+;   128  THE LANES READ DIFFERENT FORMATS: the one word 0x3C01 gives 1 + 2^-10 in the half lane and
+;        2^-7 + 2^-14 in the bfloat lane
+;   256  the door's bf16 encoder rounds to nearest, ties to even (Form only, no GPU): 1.0, -2.0, a value
+;        under half an ulp, one over it, and both ties
+;   512  affine-train f16: loss byte-identical to the f32 twin; updated w and b are the twin's, rounded
+;        once to half by Form
+;  1024  affine-train bf16: the same, rounded once to bfloat
+;  2048  ffn-fwd f16: h1 and a byte-identical to the f32 twin; y is the twin's y rounded once to half
+;  4096  ffn-fwd bf16: the same, rounded once to bfloat
+;  8192  THE ROUNDING IS EXERCISED: among the values the f32 twins would store, some are not exact in
+;        half and some are not exact in bfloat — so bits 512..4096 test a rounding, not an identity
+;
+; The training families, fed 2026-09-11 (they had been minted in both formats and never run). Each
+; stores its parameters in the element format and keeps every intermediate in float, so each lane is
+; held to its own f32 twin the same way: the float outputs byte-identical, each stored parameter the
+; twin's float rounded once by Form. The twins themselves answer to their recipes in
+; mlp-train-metal-live-band, resid-train-metal-live-band and attn-train-metal-live-band.
+;  16384  mlp-train f16 (indim 2, hid 3, outd 2; 32 threads across three barriers): loss, h1, a, gy, dh1
+;         byte-identical; w1 b1 w2 b2 the twin's, rounded once to half
+;  32768  mlp-train bf16: the same, rounded once to bfloat
+;  65536  resid-train f16 (layernorm, FFN, residual; indim 3, hid 4): the six float outputs byte-identical,
+;         the four stored parameters rounded once to half
+; 131072  resid-train bf16: the same, rounded once to bfloat
+; 262144  attn-train f16 (dmodel 3, dq 2, dv 3, three keys): nine float outputs byte-identical, wq and wo
+;         rounded once to half
+; 524288  attn-train bf16: the same, rounded once to bfloat
+; 1048576 the training twins' stored values include one not exact in half and one not exact in bfloat —
+;         the rounding is exercised here too
+(do
+    (defn pl-w (i j) (sub (mod (add (mul i 7) (mul j 13)) 17) 8))
+    (defn pl-v (i) (sub (mod (mul i 11) 9) 4))
+    (defn pl-u (i) (sub (mod (mul i 5) 7) 3))
+
+    (defn pl-width (fmt) (if (str_eq fmt "f32") 4 2))
+    (defn pl-enc (fmt x)
+        (if (str_eq fmt "f16") (md-le16 (md-f16-bits x))
+            (if (str_eq fmt "bf16") (md-le16 (md-bf16-bits x)) (md-le32 (md-f32-bits x)))))
+    (defn pl-encs (fmt xs) (if (eq (len xs) 0) "" (str_concat (pl-enc fmt (head xs)) (pl-encs fmt (tail xs)))))
+
+    ; W row-major, rows x cols, in the lane's own element format
+    (defn pl-mat (fmt rows cols i j acc)
+        (if (ge i rows) acc
+            (if (ge j cols) (pl-mat fmt rows cols (add i 1) 0 acc)
+                (pl-mat fmt rows cols i (add j 1) (str_concat acc (pl-enc fmt (add (pl-w i j) 0.0)))))))
+    (defn pl-vbytes (fmt n i acc)
+        (if (ge i n) acc (pl-vbytes fmt n (add i 1) (str_concat acc (pl-enc fmt (add (pl-v i) 0.0))))))
+    (defn pl-ubytes (fmt n i acc)
+        (if (ge i n) acc (pl-ubytes fmt n (add i 1) (str_concat acc (pl-enc fmt (add (pl-u i) 0.0))))))
+    (defn pl-zeros (n i acc) (if (ge i n) acc (pl-zeros n (add i 1) (str_concat acc (md-le32 0)))))
+
+    ; references, all in Form f64 — exact by the arrangement above
+    (defn pl-dot-t (rows j i acc)
+        (if (ge i rows) acc (pl-dot-t rows j (add i 1) (add acc (mul (add (pl-w i j) 0.0) (add (pl-v i) 0.0))))))
+    (defn pl-ref-t (rows cols j acc)
+        (if (ge j cols) acc (pl-ref-t rows cols (add j 1) (str_concat acc (md-le32 (md-f32-bits (pl-dot-t rows j 0 0.0)))))))
+    (defn pl-dot-f (cols i j acc)
+        (if (ge j cols) acc (pl-dot-f cols i (add j 1) (add acc (mul (add (pl-w i j) 0.0) (add (pl-v j) 0.0))))))
+    (defn pl-ref-f (rows cols i acc)
+        (if (ge i rows) acc (pl-ref-f rows cols (add i 1) (str_concat acc (md-le16 (md-bf16-bits (pl-dot-f cols i 0 0.0)))))))
+    (defn pl-oref (rows cols k i acc)
+        (if (ge i rows) acc (pl-oref rows cols k (add i 1) (str_concat acc (pl-orow cols k i 0 "")))))
+    (defn pl-orow (cols k i j acc)
+        (if (ge j cols) acc
+            (pl-orow cols k i (add j 1)
+                (str_concat acc (md-le32 (md-f32-bits (mul (mul (add k 0.0) (mul 2.0 (add (pl-u i) 0.0))) (add (pl-v j) 0.0))))))))
+
+    ; the twin's f32 words rounded once by Form: to half through the decoded value, to bfloat on the word
+    (defn pl-r16 (s i n acc)
+        (if (ge i n) acc (pl-r16 s (add i 1) n (str_concat acc (md-le16 (md-f16-bits (ln-f32-decode (ln-u32-le s (mul 4 i)))))))))
+    (defn pl-rbf (s i n acc)
+        (if (ge i n) acc (pl-rbf s (add i 1) n (str_concat acc (md-le16 (md-bf16-round (ln-u32-le s (mul 4 i))))))))
+    ; a stored value that is not the twin's float: bfloat keeps only the top sixteen bits of the word,
+    ; half keeps what its own round trip returns
+    (defn pl-any-bf? (s i n) (if (ge i n) 0 (if (eq (mod (ln-u32-le s (mul 4 i)) 65536) 0) (pl-any-bf? s (add i 1) n) 1)))
+    (defn pl-f (s i) (ln-f32-decode (ln-u32-le s (mul 4 i))))
+    (defn pl-any-16? (s i n) (if (ge i n) 0 (if (eq (fd-f16 (md-f16-bits (pl-f s i))) (pl-f s i)) (pl-any-16? s (add i 1) n) 1)))
+
+    ; the runs — each answers "" when its pipeline did not mint, so a kernel the compiler did not take
+    ; reads as a mismatch
+    (defn pl-run-t (p fmt rows cols)
+        (if (le p 0) ""
+            (do (let wh (metal_buf_alloc (mul (pl-width fmt) (mul rows cols))))
+                (let vh (metal_buf_alloc (mul (pl-width fmt) rows)))
+                (let yh (metal_buf_alloc (mul 4 cols)))
+                (let w1 (metal_buf_write wh 0 (pl-mat fmt rows cols 0 0 "")))
+                (let w2 (metal_buf_write vh 0 (pl-vbytes fmt rows 0 "")))
+                (let e (metal_enqueue p (md-bind (list wh vh yh) (list rows cols)) cols))
+                (let s (metal_sync))
+                (if (lt s 0) "" (metal_buf_read yh 0 (mul 4 cols))))))
+    (defn pl-run-f (p fmt rows cols)
+        (if (le p 0) ""
+            (do (let wh (metal_buf_alloc (mul (pl-width fmt) (mul rows cols))))
+                (let xh (metal_buf_alloc (mul (pl-width fmt) cols)))
+                (let yh (metal_buf_alloc (mul (pl-width fmt) rows)))
+                (let w1 (metal_buf_write wh 0 (pl-mat fmt rows cols 0 0 "")))
+                (let w2 (metal_buf_write xh 0 (pl-vbytes fmt cols 0 "")))
+                (let e (metal_enqueue p (md-bind (list wh xh yh) (list rows cols)) rows))
+                (let s (metal_sync))
+                (if (lt s 0) "" (metal_buf_read yh 0 (mul (pl-width fmt) rows))))))
+    (defn pl-fire (p bind threads n) (if (le n 0) 0 (do (let e (metal_enqueue p bind threads)) (pl-fire p bind threads (sub n 1)))))
+    (defn pl-run-o (p fmt rows cols times)
+        (if (le p 0) ""
+            (do (let mh (metal_buf_alloc (mul 4 (mul rows cols))))
+                (let uh (metal_buf_alloc (mul (pl-width fmt) rows)))
+                (let vh (metal_buf_alloc (mul (pl-width fmt) cols)))
+                (let z (metal_buf_write mh 0 (pl-zeros (mul rows cols) 0 "")))
+                (let w1 (metal_buf_write uh 0 (pl-ubytes fmt rows 0 "")))
+                (let w2 (metal_buf_write vh 0 (pl-vbytes fmt cols 0 "")))
+                (let e (pl-fire p (md-bind (list mh uh vh) (list rows cols (md-f32-bits 2.0))) rows times))
+                (let s (metal_sync))
+                (if (lt s 0) "" (metal_buf_read mh 0 (mul 4 (mul rows cols)))))))
+    ; the canary: one raw word as the only weight, 1.0 in the lane's own format as the only v
+    (defn pl-run-word (p one)
+        (if (le p 0) ""
+            (do (let wh (metal_buf_alloc 2)) (let vh (metal_buf_alloc 2)) (let yh (metal_buf_alloc 4))
+                (let w1 (metal_buf_write wh 0 (md-le16 15361)))
+                (let w2 (metal_buf_write vh 0 (md-le16 one)))
+                (let e (metal_enqueue p (md-bind (list wh vh yh) (list 1 1)) 1))
+                (let s (metal_sync))
+                (if (lt s 0) "" (metal_buf_read yh 0 4)))))
+    ; one affine step, 4 x 4, lr 1/8: answers (w b loss) as read back
+    (defn pl-run-a (p fmt w b x t)
+        (if (le p 0) (list "" "" "")
+            (do (let wh (metal_buf_alloc (mul (pl-width fmt) 16)))
+                (let bh (metal_buf_alloc (mul (pl-width fmt) 4)))
+                (let xh (metal_buf_alloc (mul (pl-width fmt) 4)))
+                (let th (metal_buf_alloc (mul (pl-width fmt) 4)))
+                (let lh (metal_buf_alloc 16))
+                (let z1 (metal_buf_write wh 0 (pl-encs fmt w)))
+                (let z2 (metal_buf_write bh 0 (pl-encs fmt b)))
+                (let z3 (metal_buf_write xh 0 (pl-encs fmt x)))
+                (let z4 (metal_buf_write th 0 (pl-encs fmt t)))
+                (let e (metal_enqueue p (md-bind (list wh bh xh th lh) (list 4 4 (md-f32-bits 0.125))) 4))
+                (let s (metal_sync))
+                (if (lt s 0) (list "" "" "")
+                    (list (metal_buf_read wh 0 (mul (pl-width fmt) 16))
+                          (metal_buf_read bh 0 (mul (pl-width fmt) 4))
+                          (metal_buf_read lh 0 16))))))
+    ; one forward, 4 in, 3 hidden, 2 out, one threadgroup of 32: answers (y h1 a) as read back
+    (defn pl-run-n (p fmt w1 b1 w2 b2 x)
+        (if (le p 0) (list "" "" "")
+            (do (let hw1 (metal_buf_alloc (mul (pl-width fmt) 12)))
+                (let hb1 (metal_buf_alloc (mul (pl-width fmt) 3)))
+                (let hw2 (metal_buf_alloc (mul (pl-width fmt) 6)))
+                (let hb2 (metal_buf_alloc (mul (pl-width fmt) 2)))
+                (let hx (metal_buf_alloc (mul (pl-width fmt) 4)))
+                (let hy (metal_buf_alloc (mul (pl-width fmt) 2)))
+                (let hh (metal_buf_alloc 12))
+                (let ha (metal_buf_alloc 12))
+                (let z1 (metal_buf_write hw1 0 (pl-encs fmt w1)))
+                (let z2 (metal_buf_write hb1 0 (pl-encs fmt b1)))
+                (let z3 (metal_buf_write hw2 0 (pl-encs fmt w2)))
+                (let z4 (metal_buf_write hb2 0 (pl-encs fmt b2)))
+                (let z5 (metal_buf_write hx 0 (pl-encs fmt x)))
+                (let e (metal_enqueue p (md-bind16 (list hw1 hb1 hw2 hb2 hx hy hh ha) (list 4 3 2) 32 0 0 0) 32))
+                (let s (metal_sync))
+                (if (lt s 0) (list "" "" "")
+                    (list (metal_buf_read hy 0 (mul (pl-width fmt) 2))
+                          (metal_buf_read hh 0 12)
+                          (metal_buf_read ha 0 12))))))
+
+    (let pf16 (metal_pipeline (jte-matvec-msl-fmt "pl_mvbf" "bf16") "pl_mvbf"))
+    (let pt32 (metal_pipeline (jte-matvec-t-msl-fmt "pl_mvt32" "f32") "pl_mvt32"))
+    (let pt16 (metal_pipeline (jte-matvec-t-msl-fmt "pl_mvt16" "f16") "pl_mvt16"))
+    (let ptbf (metal_pipeline (jte-matvec-t-msl-fmt "pl_mvtbf" "bf16") "pl_mvtbf"))
+    (let po16 (metal_pipeline (jte-outer-acc-msl-fmt "pl_oa16" "f16") "pl_oa16"))
+    (let pobf (metal_pipeline (jte-outer-acc-msl-fmt "pl_oabf" "bf16") "pl_oabf"))
+    (let pa32 (metal_pipeline (jte-affine-train-msl-fmt "pl_at32" "f32") "pl_at32"))
+    (let pa16 (metal_pipeline (jte-affine-train-msl-fmt "pl_at16" "f16") "pl_at16"))
+    (let pabf (metal_pipeline (jte-affine-train-msl-fmt "pl_atbf" "bf16") "pl_atbf"))
+    (let pn32 (metal_pipeline (jte-mlp-fwd-msl-fmt "pl_ff32" "f32") "pl_ff32"))
+    (let pn16 (metal_pipeline (jte-mlp-fwd-msl-fmt "pl_ff16" "f16") "pl_ff16"))
+    (let pnbf (metal_pipeline (jte-mlp-fwd-msl-fmt "pl_ffbf" "bf16") "pl_ffbf"))
+
+    (let fbf (pl-run-f pf16 "bf16" 16 8))
+    (let t32 (pl-run-t pt32 "f32" 64 64))
+    (let t16 (pl-run-t pt16 "f16" 64 64))
+    (let tbf (pl-run-t ptbf "bf16" 64 64))
+    (let o16 (pl-run-o po16 "f16" 32 16 1))
+    (let obf (pl-run-o pobf "bf16" 32 16 2))
+    (let wh16 (pl-run-word pt16 15360))
+    (let whbf (pl-run-word ptbf 16256))
+
+    ; inputs exact in half and in bfloat: at most three significant bits each
+    (let AW (list 0.5 -0.25 0.125 0.375 -0.375 0.625 0.25 -0.125 0.25 0.5 -0.75 0.125 0.625 -0.5 0.375 0.25))
+    (let AB (list 0.0625 -0.1875 0.125 -0.25))
+    (let AX (list 1.5 -0.75 0.5 0.25))
+    (let AT (list 0.25 -0.5 0.75 -0.125))
+    (let NW1 (list 0.5 -0.25 0.125 0.375 -0.375 0.625 0.25 -0.125 0.25 0.5 -0.75 0.125))
+    (let NB1 (list 0.0625 -0.1875 0.125))
+    (let NW2 (list 0.625 -0.5 0.375 0.25 0.5 -0.25))
+    (let NB2 (list 0.125 -0.0625))
+    (let a32 (pl-run-a pa32 "f32" AW AB AX AT))
+    (let a16 (pl-run-a pa16 "f16" AW AB AX AT))
+    (let abf (pl-run-a pabf "bf16" AW AB AX AT))
+    (let n32 (pl-run-n pn32 "f32" NW1 NB1 NW2 NB2 AX))
+    (let n16 (pl-run-n pn16 "f16" NW1 NB1 NW2 NB2 AX))
+    (let nbf (pl-run-n pnbf "bf16" NW1 NB1 NW2 NB2 AX))
+
+    (defn pl-all-pos? (xs) (if (eq (len xs) 0) 1 (if (gt (head xs) 0) (pl-all-pos? (tail xs)) 0)))
+    (defn pl-all-read? (xs) (if (eq (len xs) 0) 1 (if (gt (str_len (head xs)) 0) (pl-all-read? (tail xs)) 0)))
+    (let c0 (if (eq (pl-all-pos? (list pf16 pt32 pt16 ptbf po16 pobf pa32 pa16 pabf pn32 pn16 pnbf)) 1)
+            (if (eq (pl-all-read? (list fbf t32 t16 tbf o16 obf wh16 whbf
+                                        (nth a32 0) (nth a16 0) (nth abf 0) (nth n32 0) (nth n16 0) (nth nbf 0))) 1) 1 0) 0))
+
+    (let reft (pl-ref-t 64 64 0 ""))
+    (let c1 (if (str_eq fbf (pl-ref-f 16 8 0 "")) 2 0))
+    (let c2 (if (str_eq t16 reft) 4 0))
+    (let c3 (if (str_eq tbf reft) 8 0))
+    (let c4 (if (and (gt (str_len t32) 0) (and (str_eq t16 t32) (str_eq tbf t32))) 16 0))
+    (let c5 (if (str_eq o16 (pl-oref 32 16 1 0 "")) 32 0))
+    (let c6 (if (str_eq obf (pl-oref 32 16 2 0 "")) 64 0))
+
+    ; 0x3C01 = 15361. As half: exponent 15 - 15 = 0, mantissa 1/1024. As bfloat: exponent 120 - 127 = -7,
+    ; mantissa 1/128. Written from the definitions, not through md-f16-bits or md-bf16-bits.
+    (let as-half (add 1.0 (div 1.0 1024.0)))
+    (let as-bfloat (mul (div 1.0 128.0) (add 1.0 (div 1.0 128.0))))
+    (let c7 (if (str_eq wh16 (md-le32 (md-f32-bits as-half)))
+            (if (str_eq whbf (md-le32 (md-f32-bits as-bfloat)))
+            (if (eq (str_eq wh16 whbf) 0) 128 0) 0) 0))
+
+    ; bf16 words: 1.0 = 0x3F80, -2.0 = 0xC000; 1 + 2^-9 is under half an ulp (2^-8) and falls to 1.0;
+    ; 1 + 3*2^-9 is over it and rises to 0x3F81; 1 + 2^-8 is a tie and stays on even 0x3F80;
+    ; 1 + 3*2^-8 is a tie and rises to even 0x3F82
+    (let c8 (if (and (eq (md-bf16-bits 1.0) 16256)
+                (and (eq (md-bf16-bits -2.0) 49152)
+                (and (eq (md-bf16-bits (add 1.0 (div 1.0 512.0))) 16256)
+                (and (eq (md-bf16-bits (add 1.0 (div 3.0 512.0))) 16257)
+                (and (eq (md-bf16-bits (add 1.0 (div 1.0 256.0))) 16256)
+                     (eq (md-bf16-bits (add 1.0 (div 3.0 256.0))) 16258)))))) 256 0))
+
+    ; the train and forward lanes against their own f32 twin — only once the twin read back whole
+    (let aok (and (eq (str_len (nth a32 0)) 64) (and (eq (str_len (nth a32 1)) 16) (eq (str_len (nth a32 2)) 16))))
+    (let nok (and (eq (str_len (nth n32 0)) 8) (and (eq (str_len (nth n32 1)) 12) (eq (str_len (nth n32 2)) 12))))
+    (let c9 (if aok (if (and (str_eq (nth a16 2) (nth a32 2))
+                        (and (str_eq (nth a16 0) (pl-r16 (nth a32 0) 0 16 ""))
+                             (str_eq (nth a16 1) (pl-r16 (nth a32 1) 0 4 "")))) 512 0) 0))
+    (let c10 (if aok (if (and (str_eq (nth abf 2) (nth a32 2))
+                         (and (str_eq (nth abf 0) (pl-rbf (nth a32 0) 0 16 ""))
+                              (str_eq (nth abf 1) (pl-rbf (nth a32 1) 0 4 "")))) 1024 0) 0))
+    (let c11 (if nok (if (and (str_eq (nth n16 1) (nth n32 1))
+                         (and (str_eq (nth n16 2) (nth n32 2))
+                              (str_eq (nth n16 0) (pl-r16 (nth n32 0) 0 2 "")))) 2048 0) 0))
+    (let c12 (if nok (if (and (str_eq (nth nbf 1) (nth n32 1))
+                         (and (str_eq (nth nbf 2) (nth n32 2))
+                              (str_eq (nth nbf 0) (pl-rbf (nth n32 0) 0 2 "")))) 4096 0) 0))
+    (let stored (str_concat (nth a32 0) (str_concat (nth a32 1) (nth n32 0))))
+    (let c13 (if (and aok nok)
+             (if (and (eq (pl-any-bf? stored 0 22) 1) (eq (pl-any-16? stored 0 22) 1)) 8192 0) 0))
+
+    ; ---- the training families: the FFN step, the residual step and the attention step, in half and
+    ; bfloat. Their stored parameters take the element format and every intermediate stays float, so on
+    ; inputs exact in both formats each lane is its own f32 twin: the float outputs byte for byte, each
+    ; stored parameter the twin's float rounded once by Form. ----
+    (defn pl-put (fmt xs)
+        (do (let h (metal_buf_alloc (mul (pl-width fmt) (len xs))))
+            (let w (metal_buf_write h 0 (pl-encs fmt xs)))
+            h))
+    (defn pl-pick (hs keep) (if (eq (len keep) 0) (empty) (cons (nth hs (head keep)) (pl-pick hs (tail keep)))))
+    (defn pl-read-all (hs ns)
+        (if (eq (len hs) 0) (empty) (cons (metal_buf_read (head hs) 0 (head ns)) (pl-read-all (tail hs) (tail ns)))))
+    (defn pl-go (p hs consts tpg threads keep sizes)
+        (do (let e (metal_enqueue p (md-bind16 hs consts tpg 0 0 0) threads))
+            (let s (metal_sync))
+            (if (lt s 0) (empty) (pl-read-all (pl-pick hs keep) sizes))))
+    ; FFN step, indim 2, hid 3, outd 2, 32 threads: (w1 b1 w2 b2 | loss h1 a gy dh1)
+    (defn pl-run-m (p fmt w1 b1 w2 b2 x t)
+        (if (le p 0) (empty)
+            (pl-go p (list (pl-put fmt w1) (pl-put fmt b1) (pl-put fmt w2) (pl-put fmt b2) (pl-put fmt x) (pl-put fmt t)
+                           (metal_buf_alloc 8) (metal_buf_alloc 12) (metal_buf_alloc 12) (metal_buf_alloc 8) (metal_buf_alloc 12))
+                   (list 2 3 2 (md-f32-bits 0.125)) 32 32
+                   (list 0 1 2 3 6 7 8 9 10)
+                   (list (mul (pl-width fmt) 6) (mul (pl-width fmt) 3) (mul (pl-width fmt) 6) (mul (pl-width fmt) 2) 8 12 12 8 12))))
+    ; residual step, indim 3, hid 4, outd 3, 32 threads: (w1 b1 w2 b2 | loss h1 a gy dh1 z)
+    (defn pl-run-r (p fmt w1 b1 w2 b2 h t)
+        (if (le p 0) (empty)
+            (pl-go p (list (pl-put fmt w1) (pl-put fmt b1) (pl-put fmt w2) (pl-put fmt b2) (pl-put fmt h) (pl-put fmt t)
+                           (metal_buf_alloc 12) (metal_buf_alloc 16) (metal_buf_alloc 16) (metal_buf_alloc 12) (metal_buf_alloc 16) (metal_buf_alloc 12))
+                   (list 3 4 3 (md-f32-bits 0.125) (md-f32-bits 0.00001)) 32 32
+                   (list 0 1 2 3 6 7 8 9 10 11)
+                   (list (mul (pl-width fmt) 12) (mul (pl-width fmt) 4) (mul (pl-width fmt) 12) (mul (pl-width fmt) 3) 12 16 16 12 16 12))))
+    ; attention step, dmodel 3, dq 2, dv 3, nk 3, one thread: (wq wo | loss n q alpha att gy datt dqg es)
+    (defn pl-run-q (p fmt wq wo x t ks vs)
+        (if (le p 0) (empty)
+            (pl-go p (list (pl-put fmt wq) (pl-put fmt wo) (pl-put fmt x) (pl-put fmt t) (pl-put fmt ks) (pl-put fmt vs)
+                           (metal_buf_alloc 4) (metal_buf_alloc 12) (metal_buf_alloc 8) (metal_buf_alloc 12) (metal_buf_alloc 12)
+                           (metal_buf_alloc 12) (metal_buf_alloc 12) (metal_buf_alloc 8) (metal_buf_alloc 12))
+                   (list 3 2 3 3 (md-f32-bits 0.7071067811865476) (md-f32-bits 0.125) (md-f32-bits 0.00001)) 1 1
+                   (list 0 1 6 7 8 9 10 11 12 13 14)
+                   (list (mul (pl-width fmt) 6) (mul (pl-width fmt) 9) 4 12 8 12 12 12 12 8 12))))
+    (defn pl-round (fmt s n) (if (str_eq fmt "f16") (pl-r16 s 0 n "") (pl-rbf s 0 n "")))
+    (defn pl-stored? (fmt lane twin i ns)
+        (if (eq (len ns) 0) 1
+            (if (str_eq (nth lane i) (pl-round fmt (nth twin i) (head ns))) (pl-stored? fmt lane twin (add i 1) (tail ns)) 0)))
+    (defn pl-floats? (lane twin i n)
+        (if (ge i n) 1 (if (str_eq (nth lane i) (nth twin i)) (pl-floats? lane twin (add i 1) n) 0)))
+    ; a lane is held to its twin only when both read back whole
+    (defn pl-lane? (fmt lane twin ns n)
+        (if (and (eq (len lane) n) (and (eq (len twin) n) (and (eq (pl-all-read? lane) 1) (eq (pl-all-read? twin) 1))))
+            (if (eq (pl-stored? fmt lane twin 0 ns) 1) (pl-floats? lane twin (len ns) n) 0) 0))
+
+    (let MW1 (list 0.5 -0.25 0.125 0.75 -0.375 0.625))
+    (let MB1 (list 0.25 -0.5 0.125))
+    (let MW2 (list 0.75 -0.125 0.5 -0.25 0.375 -0.625))
+    (let MB2 (list 0.0625 -0.1875))
+    (let MX (list 1.5 -0.75))
+    (let MT (list 0.25 -0.5))
+    (let RW1 (list 0.5 -0.25 0.125 0.75 0.375 -0.5 -0.125 0.625 0.25 0.25 -0.75 0.5))
+    (let RB1 (list 0.25 -0.5 0.125 0.375))
+    (let RW2 (list 0.5 -0.25 0.75 0.125 -0.375 0.625 -0.125 0.5 0.25 0.125 -0.625 0.375))
+    (let RB2 (list 0.0625 -0.1875 0.125))
+    (let RH (list 1.5 -0.75 0.5))
+    (let RT (list 0.25 -0.5 0.75))
+    (let QWQ (list 0.5 -0.25 0.125 -0.375 0.625 0.25))
+    (let QWO (list 0.75 -0.125 0.5 0.25 0.625 -0.375 -0.5 0.125 0.875))
+    (let QKS (list 1.0 -0.5 -0.25 0.75 0.5 0.25))
+    (let QVS (list 0.5 -0.25 0.125 -0.75 0.5 0.25 0.25 0.125 -0.5))
+
+    (let m32 (pl-run-m (metal_pipeline (jte-mlp-train-msl-fmt "pl_mt32" "f32") "pl_mt32") "f32" MW1 MB1 MW2 MB2 MX MT))
+    (let m16 (pl-run-m (metal_pipeline (jte-mlp-train-msl-fmt "pl_mt16" "f16") "pl_mt16") "f16" MW1 MB1 MW2 MB2 MX MT))
+    (let mbf (pl-run-m (metal_pipeline (jte-mlp-train-msl-fmt "pl_mtbf" "bf16") "pl_mtbf") "bf16" MW1 MB1 MW2 MB2 MX MT))
+    (let r32 (pl-run-r (metal_pipeline (jte-resid-train-msl-fmt "pl_rt32" "f32") "pl_rt32") "f32" RW1 RB1 RW2 RB2 RH RT))
+    (let r16 (pl-run-r (metal_pipeline (jte-resid-train-msl-fmt "pl_rt16" "f16") "pl_rt16") "f16" RW1 RB1 RW2 RB2 RH RT))
+    (let rbf (pl-run-r (metal_pipeline (jte-resid-train-msl-fmt "pl_rtbf" "bf16") "pl_rtbf") "bf16" RW1 RB1 RW2 RB2 RH RT))
+    (let q32 (pl-run-q (metal_pipeline (jte-attn-train-msl-fmt "pl_qt32" "f32") "pl_qt32") "f32" QWQ QWO RH RT QKS QVS))
+    (let q16 (pl-run-q (metal_pipeline (jte-attn-train-msl-fmt "pl_qt16" "f16") "pl_qt16") "f16" QWQ QWO RH RT QKS QVS))
+    (let qbf (pl-run-q (metal_pipeline (jte-attn-train-msl-fmt "pl_qtbf" "bf16") "pl_qtbf") "bf16" QWQ QWO RH RT QKS QVS))
+
+    (let c14 (if (eq (pl-lane? "f16" m16 m32 (list 6 3 6 2) 9) 1) 16384 0))
+    (let c15 (if (eq (pl-lane? "bf16" mbf m32 (list 6 3 6 2) 9) 1) 32768 0))
+    (let c16 (if (eq (pl-lane? "f16" r16 r32 (list 12 4 12 3) 10) 1) 65536 0))
+    (let c17 (if (eq (pl-lane? "bf16" rbf r32 (list 12 4 12 3) 10) 1) 131072 0))
+    (let c18 (if (eq (pl-lane? "f16" q16 q32 (list 6 9) 11) 1) 262144 0))
+    (let c19 (if (eq (pl-lane? "bf16" qbf q32 (list 6 9) 11) 1) 524288 0))
+    (let tok (and (eq (len m32) 9) (and (eq (len r32) 10) (eq (len q32) 11))))
+    (let tstored (if tok (str_concat (nth m32 0) (str_concat (nth m32 1) (str_concat (nth m32 2) (str_concat (nth m32 3)
+                 (str_concat (nth r32 0) (str_concat (nth r32 1) (str_concat (nth r32 2) (str_concat (nth r32 3)
+                 (str_concat (nth q32 0) (nth q32 1)))))))))) ""))
+    (let c20 (if tok (if (and (eq (pl-any-bf? tstored 0 63) 1) (eq (pl-any-16? tstored 0 63) 1)) 1048576 0) 0))
+
+    (add (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7
+         (add c8 (add c9 (add c10 (add c11 (add c12 c13)))))))))))))
+         (add c14 (add c15 (add c16 (add c17 (add c18 (add c19 c20))))))))

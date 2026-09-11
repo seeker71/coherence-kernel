@@ -1,0 +1,124 @@
+//////////////////////////////////////////////////////////////////////
+// whisper-shape.bml — a whisper model's own shape, read from the model.
+//
+// ear-native.fk carries its dimensions as typed-in numbers: D 384,
+// H 6, F 1536, V 51865, four encoder layers, eighty mels, and eight
+// special-token ids. Every one of them is whisper-TINY's. The pass is
+// the body's own kernels and the floor is this Mac's bandwidth, so
+// nothing about the hardware says tiny — the ceiling is ninety typed
+// numbers (corpus row 1417 tinyweld).
+//
+// This door reads the shape instead, from either of the two ways a
+// whisper model arrives on this host: a numpy .npz (tiny) or a
+// safetensors file (large-v3-turbo). Both carry every dimension in
+// their own table; neither needs a config file beside it.
+//
+// The special tokens need no table at all. Whisper lays them at the
+// END of the vocabulary and the timestamps are always 1501 wide, so
+// from V alone:
+//
+//   ts0 = V - 1501     notimestamps = ts0 - 1   nospeech = ts0 - 2
+//   startofprev = ts0 - 3   startoflm = ts0 - 4  transcribe = ts0 - 5
+//   translate = ts0 - 6     lang-hi = ts0 - 7    lang-lo = 50259
+//
+// which gives 99 tongues at V 51865 and 100 at V 51866 — large-v3
+// added Cantonese, and the whole ladder shifts by one. The ear had
+// all eight written down as tiny's.
+// preludes: form/form-stdlib/core.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/safetensors-header.fk form/form-stdlib/ear-npz.fk form/form-stdlib/bml/number.bml
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormWhisperShape {
+        // ---- which of the two ways this model arrived -------------------------------
+        def ws-tail4(p) = substring(p, sub(str_len(p), 4), str_len(p));
+        def ws-format(p) = if str_eq(ws-tail4(p), ".npz") then "npz" else "safetensors";
+
+        // ---- safetensors: the header is JSON and every shape is in it ---------------
+        def ws-sf-header(p) = sfh-header(read_file_slice(p, 0, add(8, sfh-header-len(read_file_slice(p, 0, 8)))));
+        // the k-th integer of this tensor's "shape":[...]
+        def ws-sf-shape-at(h, name, k) {
+            let at = str_find(h, name, 0);
+            if lt(at, 0) then sub(0, 1) else ws-sf-shape-from(h, str_find(h, "\"shape\":[", at), k);
+        }
+        def ws-sf-shape-from(h, at, k) = if lt(at, 0) then sub(0, 1) else ws-nth-int(h, add(at, 9), k);
+        def ws-nth-int(h, i, k) = if le(k, 0) then ws-int-at(h, i) else ws-nth-int(h, add(ws-int-end(h, i), 1), sub(k, 1));
+        def ws-digit?(b) = if and(ge(b, 48), le(b, 57)) then 1 else 0;
+        def ws-int-end(h, i) = if ge(i, str_len(h)) then i else if eq(ws-digit?(str_byte_at(h, i)), 1) then ws-int-end(h, add(i, 1)) else i;
+        def ws-int-at(h, i) = str_to_int(substring(h, i, ws-int-end(h, i)));
+        // how many blocks this file carries under a prefix
+        def ws-sf-count(h, pre, n) = if lt(str_find(h, str_concat(pre, str_concat(int_to_str(n), ".")), 0), 0) then n else ws-sf-count(h, pre, add(n, 1));
+
+        // ---- npz: the ear's own zip table already reads every shape -----------------
+        def ws-npz-row(rows, name) = if eq(len(rows), 0) then list() else if str_eq(head(head(rows)), name) then head(rows) else ws-npz-row(tail(rows), name);
+        def ws-npz-shape-at(rows, name, k) {
+            let r = ws-npz-row(rows, name);
+            if eq(len(r), 0) then sub(0, 1) else ws-nth-of(en-shape-of(r), k);
+        }
+        def ws-nth-of(xs, k) = if ge(k, len(xs)) then sub(0, 1) else nth(xs, k);
+        def ws-npz-count(rows, pre, n) = if eq(len(ws-npz-any(rows, str_concat(pre, str_concat(int_to_str(n), ".")))), 0) then n else ws-npz-count(rows, pre, add(n, 1));
+        def ws-npz-any(rows, pre) = if eq(len(rows), 0) then list() else if ge(str_find(head(head(rows)), pre, 0), 0) then head(rows) else ws-npz-any(tail(rows), pre);
+
+        // ---- one door over both -----------------------------------------------------
+        // a handle: (format, header-or-rows)
+        def ws-open(p) = if str_eq(ws-format(p), "npz") then list("npz", en-table(p)) else list("safetensors", ws-sf-header(p));
+        def ws-kind(w) = head(w);
+        def ws-body(w) = nth(w, 1);
+        def ws-npz?(w) = str_eq(ws-kind(w), "npz");
+        def ws-at(w, name, k) = if eq(ws-npz?(w), 1) then ws-npz-shape-at(ws-body(w), name, k) else ws-sf-shape-at(ws-body(w), name, k);
+        def ws-count(w, pre) = if eq(ws-npz?(w), 1) then ws-npz-count(ws-body(w), pre, 0) else ws-sf-count(ws-body(w), pre, 0);
+
+        // ---- the dimensions, each from the tensor that carries it -------------------
+        def ws-V(w) = ws-at(w, "decoder.token_embedding.weight", 0);
+        def ws-D(w) = ws-at(w, "decoder.token_embedding.weight", 1);
+        def ws-CTX(w) = ws-at(w, "decoder.positional_embedding", 0);
+        // conv1 is (out, kernel, mels) in these exports; the mel count is the last
+        def ws-mels(w) = ws-at(w, "encoder.conv1.weight", 2);
+        def ws-enc-layers(w) = ws-count(w, "encoder.blocks.");
+        def ws-dec-layers(w) = ws-count(w, "decoder.blocks.");
+        // the feed-forward width, under either naming this export uses
+        def ws-F(w) = ws-pick(ws-at(w, "decoder.blocks.0.mlp1.weight", 0), ws-at(w, "decoder.blocks.0.mlp.0.weight", 0));
+        def ws-pick(a, b) = if gt(a, 0) then a else b;
+        // whisper's head dimension is 64 at every size; the head count follows the width
+        def ws-HD() = 64;
+        def ws-H(w) = div(ws-D(w), ws-HD());
+
+        // ---- the special tokens, from V alone ---------------------------------------
+        def ws-ts0(v) = sub(v, 1501);
+        def ws-notimestamps(v) = sub(ws-ts0(v), 1);
+        def ws-nospeech(v) = sub(ws-ts0(v), 2);
+        def ws-startofprev(v) = sub(ws-ts0(v), 3);
+        def ws-startoflm(v) = sub(ws-ts0(v), 4);
+        def ws-transcribe(v) = sub(ws-ts0(v), 5);
+                // Two names, because one name cost a band bit the first time this was read: the LAST
+        // language token, and the exclusive END the ear scans to. ear-native.fk's enw-lang-hi is
+        // 50358 and this file first asserted the same number for the last tongue, which is 50357.
+        // Both were right; one word was carrying two meanings, which is how an off-by-one lives
+        // for a year in a window that still looks correct.
+        def ws-lang-last(v) = sub(ws-ts0(v), 7);
+        def ws-lang-end(v) = sub(ws-ts0(v), 6);
+        def ws-lang-lo() = 50259;
+        def ws-lang-count(v) = add(sub(ws-lang-last(v), ws-lang-lo()), 1);
+        def ws-sot() = 50258;
+        def ws-eot() = 50257;
+
+        // ---- what a pass over this model costs in bytes, which is what the floor is made of ----
+        // Every tensor whose name begins with the prefix, summed. In safetensors the two
+        // data_offsets are the tensor's own brim; in an npz the row already carries its length.
+        def ws-sf-bytes(h, pre, from, acc) {
+            let at = str_find(h, pre, from);
+            if lt(at, 0) then acc else ws-sf-bytes(h, pre, add(at, 1), add(acc, ws-sf-span(h, str_find(h, "\"data_offsets\":[", at))));
+        }
+        def ws-sf-span(h, d) = if lt(d, 0) then 0 else sub(ws-nth-int(h, add(d, 16), 1), ws-nth-int(h, add(d, 16), 0));
+        def ws-npz-bytes(rows, pre, acc) = if eq(len(rows), 0) then acc else ws-npz-bytes(tail(rows), pre, if ge(str_find(head(head(rows)), pre, 0), 0) then add(acc, en-bytes(head(rows))) else acc);
+        def ws-bytes(w, pre) = if eq(ws-npz?(w), 1) then ws-npz-bytes(ws-body(w), pre, 0) else ws-sf-bytes(ws-body(w), pre, 0, 0);
+        // numbers come from number.bml, which says to-float once for the whole body — this file
+        // carried its own add(n, 0.0) for an afternoon, the tenth copy of a
+        // workaround for a promotion that was never missing (corpus row 1419 ninenames)
+        def ws-mib(b) = mib(b);
+        def ws-floor-ms(bytes, gbs) = floor-ms(bytes, gbs);
+        def ws-2dp(x) = two-dp(x);
+
+        def ws-line(w) = str_concat(ws-kind(w), str_concat("  D=", str_concat(int_to_str(ws-D(w)), str_concat("  H=", str_concat(int_to_str(ws-H(w)), str_concat("  F=", str_concat(int_to_str(ws-F(w)), str_concat("  V=", str_concat(int_to_str(ws-V(w)), str_concat("  mels=", str_concat(int_to_str(ws-mels(w)), str_concat("  enc=", str_concat(int_to_str(ws-enc-layers(w)), str_concat("  dec=", str_concat(int_to_str(ws-dec-layers(w)), str_concat("  ctx=", str_concat(int_to_str(ws-CTX(w)), str_concat("  tongues=", int_to_str(ws-lang-count(ws-V(w)))))))))))))))))))));
+        0;
+    }
+    0;
+}

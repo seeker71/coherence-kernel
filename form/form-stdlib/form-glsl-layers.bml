@@ -1,0 +1,289 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glsl-layers.bml — the layers of a transformer, a diffusion model
+// and a mixture of experts as Vulkan compute shaders, written from Form.
+//
+// Twins, not ports: each shader folds in the order its recipe folds and
+// computes its transcendentals the recipe's way — tn-exp's halving and
+// 14-term Taylor, tn-tanh through it, tn-sqrt's fifty Newton steps from
+// g = v, the logistic through tn-exp — so the answer can be held to the
+// fp64 recipe itself at fp32 epsilon. The exp/tanh/gelu spine is
+// tensor-ir's own text (tir-transcendentals-ty), the one every MSL and CUDA
+// family here already carries; nothing in it is written a second time.
+//
+//   gelu, residual, swiglu     one invocation per element
+//   softmax, layernorm, rmsnorm one invocation per row (layernorm and
+//                              rmsnorm carry their gain, layernorm its bias)
+//   proj                        Y[t] = W . X[t] + b, one invocation per (t, o)
+//   attention                   one invocation per (query, head): scores by
+//                              tb-dot's right fold, tn-softmax, then V weighted
+//                              forward; heads share key/value heads nh/nkv to
+//                              one (GQA), and causal=1 lets query t see keys up
+//                              to nk-nq+t, which is prefill at nq = nk and a
+//                              KV-cached decode step at nq = 1
+//   rope                        the rotation, with the angle table the recipe's
+//                              own fcos/fsin computed (rope.fk, trig.fk): the
+//                              trigonometry keeps one home
+//   affine-train                tensor-ir's own training kernel, GLSL table
+//   mlp-train                   the FFN training step, one workgroup, barriers
+//                              between phases (twin of jte-mlp-train-msl)
+//   conv2d, groupnorm           twins of diffusion-msl.bml, which twin conv2d.fk
+//   moe-route, moe-mix          moe-gate.fk: softmax router, top-k mask
+//                              renormalized, then the gated sum of expert
+//                              matvecs in expert order
+//
+// Buffers are float storage, bound in the order a kernel lists them; the
+// scalars ride push constants. vk-door.bml runs them.
+//
+// preludes: form/form-stdlib/core.fk form/form-stdlib/tensor-ir.fk form/form-stdlib/voice-msl.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormGlslLayers {
+        // a buffer is float unless its name says "u:" — then it holds raw 32-bit words, as a
+        // quantized tensor's bytes do
+        def fgl-buf-type(name) = if eq(str_find(name, "u:", 0), 0) then "uint" else "float";
+        def fgl-buf-name(name) = if eq(str_find(name, "u:", 0), 0) then substring(name, 2, str_len(name)) else name;
+        def fgl-bufs(names, i) = if nil?(names) then "" else str_concat("layout(std430, binding = ", str_concat(int_to_str(i), str_concat(") coherent buffer B", str_concat(int_to_str(i), str_concat(" { ", str_concat(fgl-buf-type(head(names)), str_concat(" ", str_concat(fgl-buf-name(head(names)), str_concat("[]; };\n", fgl-bufs(tail(names), add(i, 1)))))))))));
+
+        // Q8_0, the format of the model the Qwen lane runs: q8-0-msl.fk's attestant matvec, one
+        // invocation per row, the weight d * q read from the block's own 34 bytes (f16 d at bytes
+        // 0..1, the signed byte at 2 + i), folded down the row as tb-dot folds
+        def fgl-q80-matvec() = fgl-kernel(list("u:qb", "x", "y"), "uint rows; uint cols;", list(
+            "uint q80_byte(uint o) { return (qb[o >> 2u] >> ((o & 3u) * 8u)) & 255u; }",
+            "float q80_w(uint idx) {",
+            "  uint blk = idx / 32u; uint i = idx - blk * 32u; uint b = blk * 34u;",
+            "  float d = unpackHalf2x16(q80_byte(b) | (q80_byte(b + 1u) << 8u)).x;",
+            "  uint u = q80_byte(b + 2u + i); int q = int(u) - ((u >= 128u) ? 256 : 0);",
+            "  return d * float(q);",
+            "}",
+            "void main() {",
+            "  uint i = gl_GlobalInvocationID.x;",
+            "  if (i >= rows) { return; }",
+            "  precise float acc = 0.0;",
+            "  uint j = cols;",
+            "  while (j > 0u) { j -= 1u; precise float p = q80_w(i * cols + j) * x[j]; acc = p + acc; }",
+            "  y[i] = acc;",
+            "}"));
+        def fgl-head(names, push) = str_concat("#version 450\nlayout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;\n", str_concat(fgl-bufs(names, 0), str_concat("layout(push_constant) uniform P { ", str_concat(push, " };\n"))));
+        def fgl-spine() = str_concat(tir-transcendentals-ty("float"), str_concat("\n", vm-lines(list(
+            "float fsqrtn(float v) { if (v <= 0.0) { return 0.0; } float g = v; for (int it = 0; it < 50; it++) { g = 0.5 * (g + v / g); } return g; }",
+            "float fsigmoid(float x) { return 1.0 / (1.0 + fexp(0.0 - x)); }"))));
+        def fgl-kernel(names, push, body) = str_concat(fgl-head(names, push), str_concat(fgl-spine(), str_concat("\n", str_concat(vm-lines(body), "\n"))));
+
+        def fgl-gelu() = fgl-kernel(list("x", "y"), "uint n;", list(
+            "void main() {",
+            "  uint i = gl_GlobalInvocationID.x;",
+            "  if (i >= n) { return; }",
+            "  y[i] = fgelu(x[i]);",
+            "}"));
+
+        def fgl-residual() = fgl-kernel(list("a", "b", "y"), "uint n;", list(
+            "void main() {",
+            "  uint i = gl_GlobalInvocationID.x;",
+            "  if (i >= n) { return; }",
+            "  precise float s = a[i] + b[i];",
+            "  y[i] = s;",
+            "}"));
+
+        def fgl-swiglu() = fgl-kernel(list("g", "u", "y"), "uint n;", list(
+            "void main() {",
+            "  uint i = gl_GlobalInvocationID.x;",
+            "  if (i >= n) { return; }",
+            "  precise float sg = g[i] * fsigmoid(g[i]);",
+            "  precise float r = sg * u[i];",
+            "  y[i] = r;",
+            "}"));
+
+        def fgl-softmax() = fgl-kernel(list("x", "y"), "uint rows; uint n;", list(
+            "void main() {",
+            "  uint r = gl_GlobalInvocationID.x;",
+            "  if (r >= rows) { return; }",
+            "  uint o = r * n;",
+            "  float m = x[o];",
+            "  for (uint j = 1u; j < n; j++) { if (x[o + j] > m) { m = x[o + j]; } }",
+            "  precise float s = 0.0;",
+            "  for (uint j = 0u; j < n; j++) { s = s + fexp(x[o + j] - m); }",
+            "  precise float inv = 1.0 / s;",
+            "  for (uint j = 0u; j < n; j++) { precise float e = fexp(x[o + j] - m); y[o + j] = e * inv; }",
+            "}"));
+
+        def fgl-layernorm() = fgl-kernel(list("x", "g", "b", "y"), "uint rows; uint n; float eps;", list(
+            "void main() {",
+            "  uint r = gl_GlobalInvocationID.x;",
+            "  if (r >= rows) { return; }",
+            "  uint o = r * n; float fn = float(n);",
+            "  precise float s = 0.0;",
+            "  for (uint j = 0u; j < n; j++) { s = s + x[o + j]; }",
+            "  precise float m = s / fn;",
+            "  precise float v = 0.0;",
+            "  for (uint j = 0u; j < n; j++) { precise float d = x[o + j] - m; precise float q = d * d; v = v + q; }",
+            "  precise float var = v / fn;",
+            "  precise float inv = 1.0 / fsqrtn(var + eps);",
+            "  for (uint j = 0u; j < n; j++) { precise float z = (x[o + j] - m) * inv; precise float zg = z * g[j]; y[o + j] = zg + b[j]; }",
+            "}"));
+
+        def fgl-rmsnorm() = fgl-kernel(list("x", "g", "y"), "uint rows; uint n; float eps;", list(
+            "void main() {",
+            "  uint r = gl_GlobalInvocationID.x;",
+            "  if (r >= rows) { return; }",
+            "  uint o = r * n;",
+            "  precise float ss = 0.0;",
+            "  for (uint j = 0u; j < n; j++) { precise float q = x[o + j] * x[o + j]; ss = ss + q; }",
+            "  precise float ms = ss / float(n);",
+            "  precise float inv = 1.0 / fsqrtn(ms + eps);",
+            "  for (uint j = 0u; j < n; j++) { precise float z = x[o + j] * inv; y[o + j] = z * g[j]; }",
+            "}"));
+
+        def fgl-proj() = fgl-kernel(list("x", "w", "b", "y"), "uint T; uint din; uint dout;", list(
+            "void main() {",
+            "  uint gid = gl_GlobalInvocationID.x;",
+            "  if (gid >= T * dout) { return; }",
+            "  uint t = gid / dout; uint o = gid % dout;",
+            "  precise float acc = 0.0;",
+            "  uint j = din;",
+            "  while (j > 0u) { j -= 1u; precise float p = w[o * din + j] * x[t * din + j]; acc = p + acc; }",
+            "  y[gid] = acc + b[o];",
+            "}"));
+
+        def fgl-attention() = fgl-kernel(list("q", "k", "v", "o", "s"), "uint nq; uint nk; uint d; uint nh; uint nkv; float scale; uint causal;", list(
+            "void main() {",
+            "  uint gid = gl_GlobalInvocationID.x;",
+            "  if (gid >= nq * nh) { return; }",
+            "  uint t = gid / nh; uint h = gid % nh; uint hk = h / (nh / nkv);",
+            "  uint cnt = (causal != 0u) ? (nk - nq + t + 1u) : nk;",
+            "  uint qo = (t * nh + h) * d; uint so = gid * nk;",
+            "  for (uint j = 0u; j < cnt; j++) {",
+            "    uint ko = (j * nkv + hk) * d;",
+            "    precise float acc = 0.0; uint c = d;",
+            "    while (c > 0u) { c -= 1u; precise float p = q[qo + c] * k[ko + c]; acc = p + acc; }",
+            "    precise float sc = acc * scale; s[so + j] = sc;",
+            "  }",
+            "  float m = s[so];",
+            "  for (uint j = 1u; j < cnt; j++) { if (s[so + j] > m) { m = s[so + j]; } }",
+            "  precise float sum = 0.0;",
+            "  for (uint j = 0u; j < cnt; j++) { sum = sum + fexp(s[so + j] - m); }",
+            "  precise float inv = 1.0 / sum;",
+            "  for (uint c = 0u; c < d; c++) {",
+            "    precise float acc = 0.0;",
+            "    for (uint j = 0u; j < cnt; j++) { uint vo = (j * nkv + hk) * d; precise float al = fexp(s[so + j] - m) * inv; precise float tv = v[vo + c] * al; acc = acc + tv; }",
+            "    o[qo + c] = acc;",
+            "  }",
+            "}"));
+
+        def fgl-rope() = fgl-kernel(list("x", "cs", "y"), "uint T; uint d;", list(
+            "void main() {",
+            "  uint gid = gl_GlobalInvocationID.x;",
+            "  uint hd2 = d / 2u;",
+            "  if (gid >= T * hd2) { return; }",
+            "  uint t = gid / hd2; uint p = gid % hd2; uint i = t * d + 2u * p;",
+            "  float c = cs[2u * gid]; float sn = cs[2u * gid + 1u];",
+            "  precise float a0 = x[i] * c; precise float a1 = x[i + 1u] * sn;",
+            "  precise float b0 = x[i] * sn; precise float b1 = x[i + 1u] * c;",
+            "  y[i] = a0 - a1;",
+            "  y[i + 1u] = b0 + b1;",
+            "}"));
+
+        def fgl-affine-train() = str_concat(fgl-head(list("w", "b", "x", "t", "loss"), "uint rows; uint cols; float lr;"), str_concat(tir-affine-train-glsl("main()"), "\n"));
+
+        def fgl-mlp-train() = fgl-kernel(list("w1", "b1", "w2", "b2", "x", "t", "loss", "h1", "a", "gy", "dh1"), "uint indim; uint hid; uint outd; float lr;", list(
+            "void main() {",
+            "  uint tid = gl_LocalInvocationID.x; uint tgs = gl_WorkGroupSize.x;",
+            "  for (uint k = tid; k < hid; k += tgs) { precise float acc = 0.0; uint j = indim; while (j > 0u) { j -= 1u; precise float p = w1[k * indim + j] * x[j]; acc = p + acc; } precise float hk = acc + b1[k]; h1[k] = hk; a[k] = fgelu(hk); }",
+            "  memoryBarrierBuffer(); barrier();",
+            "  for (uint i = tid; i < outd; i += tgs) { precise float acc = 0.0; uint k = hid; while (k > 0u) { k -= 1u; precise float p = w2[i * hid + k] * a[k]; acc = p + acc; } precise float yi = acc + b2[i]; precise float d = yi - t[i]; loss[i] = d * d; gy[i] = 2.0 * d; }",
+            "  memoryBarrierBuffer(); barrier();",
+            "  for (uint k = tid; k < hid; k += tgs) { precise float s = 0.0; for (uint i = 0u; i < outd; i++) { precise float q = gy[i] * w2[i * hid + k]; s = s + q; } dh1[k] = s * fgelud(h1[k]); }",
+            "  memoryBarrierBuffer(); barrier();",
+            "  for (uint i = tid; i < outd; i += tgs) { uint k = hid; while (k > 0u) { k -= 1u; w2[i * hid + k] = w2[i * hid + k] - lr * gy[i] * a[k]; } b2[i] = b2[i] - lr * gy[i]; }",
+            "  for (uint k = tid; k < hid; k += tgs) { uint j = indim; while (j > 0u) { j -= 1u; w1[k * indim + j] = w1[k * indim + j] - lr * dh1[k] * x[j]; } b1[k] = b1[k] - lr * dh1[k]; }",
+            "}"));
+
+        def fgl-conv2d() = fgl-kernel(list("x", "w", "b", "y"), "uint H; uint W; uint Cin; uint Cout; uint KH; uint KW; uint PAD; uint STRIDE; uint OH; uint OW;", list(
+            "void main() {",
+            "  uint gid = gl_GlobalInvocationID.x;",
+            "  if (gid >= OH * OW * Cout) { return; }",
+            "  uint co = gid % Cout; uint t = gid / Cout; uint ow = t % OW; uint oh = t / OW;",
+            "  precise float acc = 0.0;",
+            "  for (int i = int(KH) - 1; i >= 0; i--) {",
+            "    precise float racc = 0.0;",
+            "    for (int j = int(KW) - 1; j >= 0; j--) {",
+            "      int r = int(oh * STRIDE) + i - int(PAD); int c = int(ow * STRIDE) + j - int(PAD);",
+            "      bool inb = (r >= 0) && (r < int(H)) && (c >= 0) && (c < int(W));",
+            "      precise float pix = 0.0;",
+            "      for (int k = int(Cin) - 1; k >= 0; k--) {",
+            "        float xv = 0.0;",
+            "        if (inb) { xv = x[(uint(r) * W + uint(c)) * Cin + uint(k)]; }",
+            "        precise float pr = w[((co * KH + uint(i)) * KW + uint(j)) * Cin + uint(k)] * xv;",
+            "        pix = pr + pix;",
+            "      }",
+            "      racc = pix + racc;",
+            "    }",
+            "    acc = racc + acc;",
+            "  }",
+            "  y[gid] = acc + b[co];",
+            "}"));
+
+        def fgl-groupnorm() = fgl-kernel(list("x", "y"), "uint N; uint L; uint G; float EPS;", list(
+            "void main() {",
+            "  uint g = gl_GlobalInvocationID.x;",
+            "  if (g >= G) { return; }",
+            "  uint per = (N / G) * L; uint base = g * per; float n = float(per);",
+            "  precise float s = 0.0;",
+            "  for (uint i = 0u; i < per; i++) { s = s + x[base + i]; }",
+            "  precise float m = s / n;",
+            "  precise float v = 0.0;",
+            "  for (uint i = 0u; i < per; i++) { precise float d = x[base + i] - m; precise float q = d * d; v = v + q; }",
+            "  precise float var = v / n;",
+            "  precise float inv = 1.0 / fsqrtn(var + EPS);",
+            "  for (uint i = 0u; i < per; i++) { precise float z = x[base + i] - m; y[base + i] = z * inv; }",
+            "}"));
+
+        def fgl-moe-route() = fgl-kernel(list("wr", "x", "gate"), "uint E; uint d; uint k;", list(
+            "void main() {",
+            "  if (gl_GlobalInvocationID.x != 0u) { return; }",
+            "  for (uint e = 0u; e < E; e++) { precise float acc = 0.0; uint j = d; while (j > 0u) { j -= 1u; precise float p = wr[e * d + j] * x[j]; acc = p + acc; } gate[e] = acc; }",
+            "  float m = gate[0];",
+            "  for (uint e = 1u; e < E; e++) { if (gate[e] > m) { m = gate[e]; } }",
+            "  precise float s = 0.0;",
+            "  for (uint e = 0u; e < E; e++) { s = s + fexp(gate[e] - m); }",
+            "  precise float inv = 1.0 / s;",
+            "  for (uint e = 0u; e < E; e++) { precise float pe = fexp(gate[e] - m); gate[e] = pe * inv; }",
+            "  float tmp[64]; uint cnt = E;",
+            "  for (uint e = 0u; e < E; e++) { tmp[e] = gate[e]; }",
+            "  for (uint r = 1u; r < k; r++) {",
+            "    float mx = tmp[0];",
+            "    for (uint q = 1u; q < cnt; q++) { if (tmp[q] > mx) { mx = tmp[q]; } }",
+            "    bool gone = false; uint w = 0u;",
+            "    for (uint q = 0u; q < cnt; q++) { if (!gone && tmp[q] == mx) { gone = true; } else { tmp[w] = tmp[q]; w++; } }",
+            "    cnt = w;",
+            "  }",
+            "  float thr = tmp[0];",
+            "  for (uint q = 1u; q < cnt; q++) { if (tmp[q] > thr) { thr = tmp[q]; } }",
+            "  precise float s2 = 0.0;",
+            "  for (uint e = 0u; e < E; e++) { float kv = gate[e] >= thr ? gate[e] : 0.0; s2 = s2 + kv; }",
+            "  precise float inv2 = 1.0 / s2;",
+            "  for (uint e = 0u; e < E; e++) { float kv = gate[e] >= thr ? gate[e] : 0.0; gate[e] = kv * inv2; }",
+            "}"));
+
+        def fgl-moe-mix() = fgl-kernel(list("ex", "x", "gate", "y"), "uint E; uint din; uint dout;", list(
+            "void main() {",
+            "  uint i = gl_GlobalInvocationID.x;",
+            "  if (i >= dout) { return; }",
+            "  precise float acc = 0.0;",
+            "  for (uint e = 0u; e < E; e++) {",
+            "    float g = gate[e];",
+            "    if (g == 0.0) { continue; }",
+            "    precise float dacc = 0.0; uint j = din;",
+            "    while (j > 0u) { j -= 1u; precise float p = ex[(e * dout + i) * din + j] * x[j]; dacc = p + dacc; }",
+            "    precise float tv = g * dacc; acc = acc + tv;",
+            "  }",
+            "  y[i] = acc;",
+            "}"));
+
+        def fgl-names() = list("gelu", "residual", "swiglu", "softmax", "layernorm", "rmsnorm", "proj", "attention", "rope", "affine-train", "mlp-train", "conv2d", "groupnorm", "moe-route", "moe-mix");
+        0;
+    }
+    0;
+}

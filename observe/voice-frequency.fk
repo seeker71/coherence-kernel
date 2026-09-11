@@ -41,6 +41,25 @@
             (str_concat out (byte_to_str (if (and (ge b 65) (le b 90)) (add b 32) b)))))))
   (defn vf-lower (s) (vf-lower-go s 0 (str_len s) ""))
 
+  ; THE THIRD STONE, LAID 2026-09-09 alongside the second. vf-lower builds its
+  ; answer one byte at a time with str_concat, which copies the whole prefix
+  ; each step: the mirror was O(n^2) in the file it was reading. Measured on
+  ; this host before the heal — 8 KB in 0 s, 32 KB in 9 s, and CURRENT_FLOOR.md at
+  ; 158 KB past the 120 s it was given. The body could not hold this mirror to its own floor,
+  ; which is a held no wearing the shape of a cost. So the scan reads the RAW
+  ; text and folds case one byte at a time as it compares: no copy, no
+  ; allocation, one pass per word. Only the short letter-run after a hit is
+  ; ever lowered, and that is bounded by a word. vf-lower stays for that.
+  (defn vf-lb (b) (if (and (ge b 65) (le b 90)) (add b 32) b))
+  (defn vf-at? (text word at k wlen)
+    (if (ge k wlen) 1
+      (if (eq (vf-lb (str_byte_at text (add at k))) (str_byte_at word k))
+        (vf-at? text word at (add k 1) wlen) 0)))
+  (defn vf-find-ci (text word from wlen n)
+    (if (gt (add from wlen) n) (sub 0 1)
+      (if (eq (vf-at? text word from 0 wlen) 1) from
+        (vf-find-ci text word (add from 1) wlen n))))
+
   ; THE NEXT STONE, LAID 2026-08-17. The header above promised word boundaries
   ; "if the fuzz ever misleads". It misled: a diff carrying the word "flaw"
   ; twice was mirrored back as "law: 2", so the writer's attention was sent to
@@ -51,19 +70,47 @@
   (defn vf-letter? (b)
     (if (and (ge b 97) (le b 122)) 1
       (if (and (ge b 65) (le b 90)) 1 0)))
-  (defn vf-edge-free? (text at wlen n)
-    (if (eq (if (le at 0) 0 (vf-letter? (str_byte_at text (sub at 1)))) 1) 0
-      (do (let after (add at wlen))
-          (if (ge after n) 1
-            (if (eq (vf-letter? (str_byte_at text after)) 1) 0 1)))))
-  (defn vf-count-go (text word from count n)
-    (do (let at (str_find text word from))
+  (defn vf-left-free? (text at)
+    (if (le at 0) 1 (if (eq (vf-letter? (str_byte_at text (sub at 1))) 1) 0 1)))
+
+  ; THE STONE AFTER IT, LAID 2026-09-09. The boundary above over-corrected:
+  ; it kept "flaw" from reading as "law" by demanding a non-letter on BOTH
+  ; sides, which also made every inflection invisible. "refused", "refusal",
+  ; "enforced", "gates", "violations", "forbidden", "strictly" — none of them
+  ; were sightings. So the mirror could not see the drift list its own
+  ; teaching prints in capitals: it read a cell whose every unhealed line said
+  ; REFUSED and answered "the mirror shows a clear register" (corpus row 1381
+  ; heldno). The left edge still guards "flaw". The right edge now reads the
+  ; whole letter run that follows and asks whether that run is an ENDING —
+  ; so "gates" and "gated" are sightings while "gateway" and "gather" are not,
+  ; and "mustard" and "lawyer" are still nobody's word. A word ending in `e`
+  ; is searched by its stem, which is how "refuse" finds "refusing".
+  ; Still not seen, and named rather than hidden: "complied", "compliance",
+  ; "lawful", "unenforceable" — a stem list is attention, never a census.
+  (defn vf-endings ()
+    (list "s" "d" "e" "es" "ed" "en" "den" "ing" "al" "als" "ally" "ly"
+          "ment" "ments" "ement" "ements" "ness" "able" "ible"))
+  (defn vf-in? (xs s)
+    (if (eq (len xs) 0) 0 (if (str_eq (head xs) s) 1 (vf-in? (tail xs) s))))
+  (defn vf-run-end (text i n)
+    (if (ge i n) i
+      (if (eq (vf-letter? (str_byte_at text i)) 1) (vf-run-end text (add i 1) n) i)))
+  ; a stem: "refuse" is searched as "refus", so one walk finds every inflection
+  (defn vf-root (w)
+    (if (eq (str_byte_at w (sub (str_len w) 1)) 101) (substring w 0 (sub (str_len w) 1)) w))
+  (defn vf-tail-ok? (text at rlen n bare)
+    (do (let after (add at rlen))
+        (let run (vf-lower (substring text after (vf-run-end text after n))))
+        (if (eq (str_len run) 0) bare (vf-in? (vf-endings) run))))
+  (defn vf-count-go (text root rlen bare from count n)
+    (do (let at (vf-find-ci text root from rlen n))
         (if (lt at 0) count
-          (vf-count-go text word (add at (str_len word))
-            (add count (vf-edge-free? text at (str_len word) n))
+          (vf-count-go text root rlen bare (add at rlen)
+            (add count (if (eq (vf-left-free? text at) 1) (vf-tail-ok? text at rlen n bare) 0))
             n))))
   (defn vf-count (text word)
-    (do (let t (vf-lower text)) (vf-count-go t word 0 0 (str_len t))))
+    (do (let r (vf-root word))
+        (vf-count-go text r (str_len r) (if (str_eq r word) 1 0) 0 0 (str_len text))))
 
   ; rows of (word count), only the words that appear
   (defn vf-rows-go (words text out)

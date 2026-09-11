@@ -22,11 +22,16 @@
 ; GroupNorm fixture: 4 channel-vectors split into 2 groups of 2. Group 1 pools {1,2,3,4}: mean 2.5,
 ; var 1.25, so (1-2.5)/√(1.25+1e-5) = -1.341635 → -1341635 ; group sum of normalized values = 0.
 ;
-; Verdict 15 when every claim lands:
+; Verdict 255 when every claim lands:
 ;   1   the full 4×4 conv2d output equals the pinned grid (×1e6, exact)
 ;   2   the output shape is 4 rows × 4 cols × 1 channel (conv is a function of the grid, not a constant)
 ;   4   the full groupnorm output equals the pinned vectors (×1e6, exact)
 ;   8   groupnorm conserves per-group zero mean: Σ of each group's normalized values = 0 (the GN invariant)
+;   16  BATCHNORM: each channel normalized across the batch, not within the sample — pinned (×1e6, exact)
+;   32  the BN invariant: every channel sums to zero ACROSS the batch
+;   64  and carries variance one, less exactly what eps takes (within 1e-4 at var 2/3, 1e-6 at var 200/3)
+;   128 tn-rsqrt, the explicit reciprocal-sqrt recipe, answers to 1/tn-sqrt within 1e-12 relative from
+;       1e-6 to 1e20 — two independent Newton walks, one of them division-free after its seed
 
 (do
     ; --- value reducers: a grid / vec-list → flat list of (round (x·1e6)) integers ---
@@ -82,4 +87,18 @@
     (let g2 (cv-cat (cvb-vec-ints (nth gn 2)) (cvb-vec-ints (nth gn 3))))
     (let c3 (if (eq (cvb-isum g1) 0) (if (eq (cvb-isum g2) 0) 8 0) 0))
 
-    (add c0 (add c1 (add c2 c3))))
+    ; --- batchnorm: 3 samples x 2 channels, eps 1e-5; normalized by tn-rsqrt ---
+    (let bn (cv2d-batchnorm (list (list 1.0 10.0) (list 2.0 20.0) (list 3.0 30.0)) 0.00001))
+    (let bn-want (list -1224736 -1224745 0 0 1224736 1224745))
+    (let c4 (if (cvb-ieq (cvb-list-ints bn) bn-want) 16 0))
+    (let c5 (if (eq (cvb-isum (cvb-vec-ints (cv2d-bn-col bn 0))) 0) (if (eq (cvb-isum (cvb-vec-ints (cv2d-bn-col bn 1))) 0) 32 0) 0))
+    (defn cvb-absf (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn cvb-sqsum (v) (if (eq (len v) 0) 0.0 (add (mul (head v) (head v)) (cvb-sqsum (tail v)))))
+    (let m0 (div (cvb-sqsum (cv2d-bn-col bn 0)) 3.0))
+    (let m1 (div (cvb-sqsum (cv2d-bn-col bn 1)) 3.0))
+    (let c6 (if (lt (cvb-absf (sub m0 1.0)) 0.0001) (if (lt (cvb-absf (sub m1 1.0)) 0.000001) 64 0) 0))
+    (defn cvb-rq (v) (cvb-absf (div (sub (tn-rsqrt v) (div 1.0 (tn-sqrt v))) (div 1.0 (tn-sqrt v)))))
+    (defn cvb-rsqrt-ok? (vs) (if (eq (len vs) 0) true (if (lt (cvb-rq (head vs)) 0.000000000001) (cvb-rsqrt-ok? (tail vs)) false)))
+    (let c7 (if (cvb-rsqrt-ok? (list 0.000001 0.25 2.0 9.0 12345.678 1000000.0 100000000000000000000.0)) 128 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))

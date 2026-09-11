@@ -42,7 +42,7 @@
 #   B5  THE WIDTH IS READ, NOT ASSUMED  threadExecutionWidth must be 32 or the harness SKIPs.
 #
 # Run:  form/native/metal/metal_batched_prefill.sh [nsteps] ["prompt"]        (defaults 12)
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal row in GPU_GAPS.md.
+# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form

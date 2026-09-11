@@ -1,0 +1,179 @@
+// Each reverse kernel of the native Llama lane, held against a finite
+// difference of the FORWARD kernel the live model runs. The reverse texts
+// live in native-llama-backward.bml; the forwards live in
+// native-affine-metal.bml and native-llama-metal.bml. Nothing here knows the
+// reverse arithmetic: a loss L = <w, f(x)> is folded from what the forward
+// hands back, each input entry is moved by +e and -e, and the difference of
+// the two losses over 2e is set beside the entry the reverse kernel computed.
+// Every entry is checked, not the largest one.
+//
+// Exactness is arranged where it can be: inputs sit on a 1/64 (or 1/32, 1/16)
+// grid and e is 1/128, so x-e, x and x+e are each exact binary32 and the
+// denominator of every difference is exactly 2e. What remains is the
+// truncation of a central difference and the rounding of the forward, and
+// the tolerance is named where the band reads it.
+// preludes: form-stdlib/native-llama-backward.bml
+section [form.bml] {
+ class NativeReverseFd {
+  def nrf-grid(n, seed, den) = if le(n, 0) then list() else cons(div(add(sub(mod(add(mul(n, 29), mul(seed, 17)), 61), 30), 0.0), den), nrf-grid(sub(n, 1), seed, den));
+  def nrf-gains(n) = if le(n, 0) then list() else cons(div(add(mod(n, 5), 4.0), 8.0), nrf-gains(sub(n, 1)));
+  def nrf-freqs(n) = if le(n, 0) then list() else cons(div(add(n, 4.0), 8.0), nrf-freqs(sub(n, 1)));
+  def nrf-dot(xs, ys, acc) = if or(nil?(xs), nil?(ys)) then acc else nrf-dot(tail(xs), tail(ys), add(acc, mul(head(xs), head(ys))));
+  def nrf-poke(h, i, v) = if eq(metal_buf_write(h, mul(i, 4), md-le32(md-f32-bits(v))), 4) then 1 else form_error("reverse witness poke did not land four bytes");
+  def nrf-bigger(a, b) = if gt(b, a) then b else a;
+ }
+ 0;
+}
+section [form.bml] {
+ class NativeReverseFdLoss {
+  // Form holds no first-class functions, so the forward is named, not passed.
+  def nrf-loss(op, st) = if str_eq(op, "rms") then nrf-loss-rms(st) else if str_eq(op, "rope") then nrf-loss-rope(st) else if str_eq(op, "swiglu") then nrf-loss-swiglu(st) else nrf-loss-attn(st);
+  // rms state: x gain y inv d t w eps
+  def nrf-loss-rms(st) {
+   let run = nam-rms(nth(st, 0), nth(st, 1), nth(st, 2), nth(st, 3), nth(st, 4), nth(st, 5), nth(st, 7));
+   let done = nam-sync();
+   nrf-dot(nth(st, 6), nam-read(nth(st, 2), mul(nth(st, 4), nth(st, 5))), 0.0);
+  }
+  // rope state: source geo heads tokens xs w work. The rotation is in place,
+  // so every evaluation copies the (poked) source into the work buffer first.
+  def nrf-loss-rope(st) {
+   let n = mul(nth(st, 3), mul(nth(st, 2), nth(nth(st, 1), 4)));
+   let copy = nam-run("nam_copy", list(nth(st, 0), nth(st, 6)), list(n), n, 0);
+   let turn = nll-rope(nth(st, 6), nth(st, 1), nth(st, 2), nth(st, 3), 0, 0);
+   let done = nam-sync();
+   nrf-dot(nth(st, 5), nam-read(nth(st, 6), n), 0.0);
+  }
+  // swiglu state: gate up y n w
+  def nrf-loss-swiglu(st) {
+   let run = nam-swiglu(nth(st, 0), nth(st, 1), nth(st, 2), nth(st, 3));
+   let done = nam-sync();
+   nrf-dot(nth(st, 4), nam-read(nth(st, 2), nth(st, 3)), 0.0);
+  }
+  // attn state: q kcache vcache p out t nq nk hd w — the training shape, offset 0, causal
+  def nrf-loss-attn(st) {
+   let s = nll-run("nll_scores", list(nth(st, 0), nth(st, 1), nth(st, 3)), list(nth(st, 5), nth(st, 6), nth(st, 7), nth(st, 8), 0), mul(nth(st, 5), nth(st, 6)), 1);
+   let a = nll-run("nll_attend", list(nth(st, 3), nth(st, 2), nth(st, 4)), list(nth(st, 5), nth(st, 6), nth(st, 7), nth(st, 8), 0), mul(nth(st, 5), nth(st, 6)), 1);
+   let done = nam-sync();
+   nrf-dot(nth(st, 9), nam-read(nth(st, 4), mul(nth(st, 5), mul(nth(st, 6), nth(st, 8)))), 0.0);
+  }
+ }
+ 0;
+}
+section [form.bml] {
+ class NativeReverseFdWalk {
+  def nrf-fd-at(op, st, h, i, x0, e) {
+   let up = nrf-poke(h, i, add(x0, e));
+   let lp = nrf-loss(op, st);
+   let dn = nrf-poke(h, i, sub(x0, e));
+   let lm = nrf-loss(op, st);
+   let back = nrf-poke(h, i, x0);
+   div(sub(lp, lm), mul(2.0, e));
+  }
+  def nrf-fd-all(op, st, h, xs, i, e, acc) = if nil?(xs) then reverse(acc) else nrf-fd-all(op, st, h, tail(xs), add(i, 1), e, cons(nrf-fd-at(op, st, h, i, head(xs), e), acc));
+  // (ok total worst): entries inside |a - n| <= tola + tolr |n|, how many, the largest gap
+  def nrf-ok(a, n, tola, tolr) = le(abs(sub(a, n)), add(tola, mul(tolr, abs(n))));
+  def nrf-match-go(as, ns, tola, tolr, ok, worst) = if or(nil?(as), nil?(ns)) then list(ok, worst) else nrf-match-go(tail(as), tail(ns), tola, tolr, if nrf-ok(head(as), head(ns), tola, tolr) then add(ok, 1) else ok, nrf-bigger(worst, abs(sub(head(as), head(ns)))));
+  def nrf-match(as, ns, tola, tolr) = if eq(len(as), len(ns)) then nrf-match-of(len(as), nrf-match-go(as, ns, tola, tolr, 0, 0.0)) else list(sub(0, 1), len(as), 0.0);
+  def nrf-match-of(n, r) = list(head(r), n, nth(r, 1));
+  def nrf-whole?(r) = and(gt(nth(r, 1), 0), eq(head(r), nth(r, 1)));
+ }
+ 0;
+}
+section [form.bml] {
+ class NativeReverseFdOps {
+  def nrf-rms(d, t, e, tola, tolr) {
+   let n = mul(d, t);
+   let xs = nrf-grid(n, 3, 64.0);
+   let w = nrf-grid(n, 11, 64.0);
+   let xh = nam-buffer(xs);
+   let gh = nam-buffer(nrf-gains(d));
+   let yh = nam-alloc(n);
+   let ih = nam-alloc(t);
+   let dyh = nam-buffer(w);
+   let dxh = nam-alloc(n);
+   let st = list(xh, gh, yh, ih, d, t, w, 0.00001);
+   let fwd = nrf-loss-rms(st);
+   let back = nlb-rms(xh, gh, ih, dyh, dxh, d, t);
+   let done = nam-sync();
+   let analytic = nam-read(dxh, n);
+   let numeric = nrf-fd-all("rms", st, xh, xs, 0, e, list());
+   let freed = nam-free(list(xh, gh, yh, ih, dyh, dxh));
+   nrf-match(analytic, numeric, tola, tolr);
+  }
+  // inverse = 1 is the reverse the trainer calls; inverse = 0 hands back the
+  // forward rotation, which is not its own transpose, so the check turns it away.
+  def nrf-rope(heads, hd, tokens, e, inverse, tola, tolr) {
+   let n = mul(tokens, mul(heads, hd));
+   let xs = nrf-grid(n, 5, 64.0);
+   let w = nrf-grid(n, 13, 64.0);
+   let fr = nam-buffer(nrf-freqs(div(hd, 2)));
+   let g = list(0, 0, 0, 0, hd, 0, 0, 0.0, 0, 0, fr);
+   let sh = nam-buffer(xs);
+   let xh = nam-alloc(n);
+   let wh = nam-buffer(w);
+   let turn = nll-rope(wh, g, heads, tokens, 0, inverse);
+   let done = nam-sync();
+   let analytic = nam-read(wh, n);
+   let st = list(sh, g, heads, tokens, xs, w, xh);
+   let numeric = nrf-fd-all("rope", st, sh, xs, 0, e, list());
+   let freed = nam-free(list(fr, sh, xh, wh));
+   nrf-match(analytic, numeric, tola, tolr);
+  }
+  def nrf-swiglu(n, e, tola, tolr) {
+   let gs = nrf-grid(n, 7, 16.0);
+   let us = nrf-grid(n, 19, 32.0);
+   let w = nrf-grid(n, 23, 64.0);
+   let gh = nam-buffer(gs);
+   let uh = nam-buffer(us);
+   let yh = nam-alloc(n);
+   let dyh = nam-buffer(w);
+   let dgh = nam-alloc(n);
+   let duh = nam-alloc(n);
+   let back = nlb-run("nlb_swiglu", list(gh, uh, dyh, dgh, duh), list(n), n, 0);
+   let done = nam-sync();
+   let ag = nam-read(dgh, n);
+   let au = nam-read(duh, n);
+   let st = list(gh, uh, yh, n, w);
+   let ng = nrf-fd-all("swiglu", st, gh, gs, 0, e, list());
+   let nu = nrf-fd-all("swiglu", st, uh, us, 0, e, list());
+   let freed = nam-free(list(gh, uh, yh, dyh, dgh, duh));
+   nrf-match(append(ag, au), append(ng, nu), tola, tolr);
+  }
+  // (dq dk dv) matches, each against the forward moved in that input alone
+  def nrf-attn(t, nq, nk, hd, e, tola, tolr) {
+   let nqd = mul(t, mul(nq, hd));
+   let nkd = mul(t, mul(nk, hd));
+   let np = mul(t, mul(nq, t));
+   let qs = nrf-grid(nqd, 29, 32.0);
+   let ks = nrf-grid(nkd, 31, 32.0);
+   let vs = nrf-grid(nkd, 37, 32.0);
+   let w = nrf-grid(nqd, 41, 64.0);
+   let qh = nam-buffer(qs);
+   let kh = nam-buffer(ks);
+   let vh = nam-buffer(vs);
+   let ph = nam-alloc(np);
+   let oh = nam-alloc(nqd);
+   let st = list(qh, kh, vh, ph, oh, t, nq, nk, hd, w);
+   let fwd = nrf-loss-attn(st);
+   let dyh = nam-buffer(w);
+   let dph = nam-alloc(np);
+   let dqh = nam-alloc(nqd);
+   let dkh = nam-alloc(nkd);
+   let dvh = nam-alloc(nkd);
+   let dp0 = nlb-run("nlb_dp", list(dyh, vh, dph), list(t, nq, nk, hd), np, 0);
+   let ds = nlb-run("nlb_softmax", list(ph, dph), list(t, nq, hd), mul(t, nq), 1);
+   let dq = nlb-run("nlb_dq", list(dph, kh, dqh), list(t, nq, nk, hd), nqd, 0);
+   let dkv = nlb-run("nlb_dkv", list(ph, dph, qh, dyh, dkh, dvh), list(t, nq, nk, hd), nkd, 0);
+   let done = nam-sync();
+   let aq = nam-read(dqh, nqd);
+   let ak = nam-read(dkh, nkd);
+   let av = nam-read(dvh, nkd);
+   let nqs = nrf-fd-all("attn", st, qh, qs, 0, e, list());
+   let nks = nrf-fd-all("attn", st, kh, ks, 0, e, list());
+   let nvs = nrf-fd-all("attn", st, vh, vs, 0, e, list());
+   let freed = nam-free(list(qh, kh, vh, ph, oh, dyh, dph, dqh, dkh, dvh));
+   list(nrf-match(aq, nqs, tola, tolr), nrf-match(ak, nks, tola, tolr), nrf-match(av, nvs, tola, tolr));
+  }
+ }
+ 0;
+}

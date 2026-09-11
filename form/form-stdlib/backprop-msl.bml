@@ -1,0 +1,44 @@
+//////////////////////////////////////////////////////////////////////
+// backprop-msl.bml — reverse-walk kernels the body emits, one thread per
+// output, in the direction the machine reads.
+//
+// form_affine4_t_f32:  dx = W^T dy  for an affine 4-bit weight in the MLX
+// layout nam_affine reads — two nibbles per byte, low nibble first; one
+// scale and one bias per `group` consecutive weights of a row, stored f32,
+// f16 or bf16 as `ty` says (0, 1, 2). The weight is the same weight
+// nam_affine reads (nibble times scale, plus bias), walked down its
+// COLUMNS: thread (t, j) folds rows i ascending, so adjacent threads read
+// adjacent nibbles of one row and share that row's scale and bias.
+//
+// nam-linear's transposed product is this kernel. nam-linear-lanes keeps
+// nam_affine's own walk — one simdgroup per output, 32 lanes striding 32
+// different rows when transposed, which on the 3B's 3072-wide rows is 32
+// cache lines per step where the column walk needs one. On the 3B's own
+// weights the column walk is 12.5x faster on the tied head and 7x on a
+// layer's seven projections (observe/native-lora-reach-run.bml): the
+// direction the dense Wᵀv read the machine's way (corpus row 1422 walltest).
+//
+// A fragment carries no header: `half` is a language type, as_type is
+// the language's reinterpretation, and nothing reaches <metal_stdlib>.
+// Contraction is off in the unit, so every product rounds once and every
+// add rounds once.
+// preludes: form/form-stdlib/metal-door.fk
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormBackpropMsl {
+        def bpm-read-msl() = "static inline float bpm_read(device const uchar* p, uint i, uint ty) { uint at = i * (ty == 0u ? 4u : 2u); uint bits = uint(p[at]) | (uint(p[at + 1u]) << 8); if (ty == 0u) { return as_type<float>(bits | (uint(p[at + 2u]) << 16) | (uint(p[at + 3u]) << 24)); } if (ty == 1u) { return float(as_type<half>(ushort(bits))); } return as_type<float>(bits << 16); } ";
+        def bpm-affine4-t-msl(fname) = str_concat("kernel void ", str_concat(fname, " (device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* dy [[buffer(3)]], device float* dx [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], uint gid [[thread_position_in_grid]]) { uint t = gid / cols; uint j = gid - t * cols; if (t >= tokens) return; uint gpr = cols / group; uint gj = j / group; uint sh = (j % 2u) * 4u; float acc = 0.0f; uint i = 0u; while (i < rows) { uint wi = i * cols + j; float q = float((uint(w[wi / 2u]) >> sh) & 15u); uint si = i * gpr + gj; float sc = bpm_read(s, si, ty); float bi = bpm_read(b, si, ty); float qs = q * sc; float wv = qs + bi; float p = wv * dy[t * rows + i]; acc = acc + p; i += 1u; } dx[t * cols + j] = acc; }"));
+        def bpm-unit() = str_concat("#pragma clang fp contract(off)\n", str_concat(bpm-read-msl(), bpm-affine4-t-msl("form_affine4_t_f32")));
+        // the pipeline, or the carrier's non-positive answer: a caller that
+        // wants to know whether it minted asks this, not bpm-pipe
+        def bpm-mint() = metal_pipeline(bpm-unit(), "form_affine4_t_f32");
+        def bpm-pipe() = bpm-held(bpm-mint());
+        def bpm-held(p) = if le(p, 0) then form_error("backprop-msl: form_affine4_t_f32 did not mint") else p;
+        // view: (w s b rows cols group ty) — nam-view's own tuple, so any view
+        // nam-linear reads, this reads
+        def bpm-affine4-t-with(p, view, dy, dx, tokens) = bpm-sent(metal_enqueue(p, md-bind(list(nth(view, 0), nth(view, 1), nth(view, 2), dy, dx), list(nth(view, 3), nth(view, 4), tokens, nth(view, 5), nth(view, 6))), mul(tokens, nth(view, 4))));
+        def bpm-affine4-t(view, dy, dx, tokens) = bpm-affine4-t-with(bpm-pipe(), view, dy, dx, tokens);
+        def bpm-sent(rc) = if lt(rc, 0) then form_error("backprop-msl: form_affine4_t_f32 dispatch did not go") else rc;
+    }
+    0;
+}

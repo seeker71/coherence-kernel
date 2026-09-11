@@ -43,7 +43,8 @@ block, GLSL matvec and GLSL feed-forward checks with exact verdicts **8191**,
 returns **7**. Generation,
 control, publication and new observations use `organ-health.bml`.
 
-The PTX templates currently declare PTX 8.3 and `sm_89`. These witnesses prove
+The PTX templates declare PTX 8.3 and `sm_80`, the floor that the sm_86 RTX
+3050 cell and the sm_89 RTX 4070 cell both load. These witnesses prove
 source bytes on `fkwu`; they do not establish CUDA or Vulkan execution on this
 Mac. GPU device execution and numeric equivalence require their device
 witnesses. Dynamic target selection and RAM admission remain the direction

@@ -1,0 +1,75 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/sampling.fk form-stdlib/moe-gate.fk form-stdlib/conv-stem.fk form-stdlib/conv2d.fk form/form-stdlib/form-glsl-layers.bml form/form-stdlib/vk-door.bml
+; Expected: 63
+; PROOF LEVEL: FKWU-STAGED / FOURTH-ARM ONLY (vulkan door: run_vk through host-exec)
+;
+; vk-diffusion-moe-live-band — the diffusion layers and the mixture-of-experts step as Vulkan compute
+; on this host's GPU, held to conv2d.fk and moe-gate.fk. The conv folds its three nested right folds
+; in the recipe's order (in-channels, then the taps of a kernel row, then the rows), with a padded
+; tap entering as a real w * 0.0; GroupNorm pools each group; the router is a softmax over expert
+; logits whose top-k survive and are renormalized, ties broken the way smp-kth-largest drops them;
+; the mix adds each surviving expert's matvec, scaled by its gate, in expert order.
+;
+; Verdict 63 when the device answers:
+;    1  the four shaders mint and the device names itself
+;    2  a 3x3 conv, pad 1, stride 1, two channels in and out, over a 4x4 image, is cv2d-conv
+;    4  a 2x2 conv, pad 0, stride 2, over the same image, is cv2d-conv
+;    8  GroupNorm over four vectors in two groups is cv2d-groupnorm
+;   16  the router's gates over four experts, top 2, are moe-gate-topk of moe-router: two survive,
+;       renormalized to sum one, and two are exactly zero
+;   32  the gated mix is moe-forward
+(do
+    (defn vdb-bit (ok w) (if (eq ok 1) w 0))
+    (defn vdb-v (i j s) (div (sub (mod (add (add (mul i 7) (mul j 5)) (mul s 3)) 13) 6) 8.0))
+    (defn vdb-row (i j c s) (if (ge j c) (empty) (cons (vdb-v i j s) (vdb-row i (add j 1) c s))))
+    (defn vdb-mat (i r c s) (if (ge i r) (empty) (cons (vdb-row i 0 c s) (vdb-mat (add i 1) r c s))))
+    ; a pixel is its channels; a kernel is kh rows of kw taps of cin channels
+    (defn vdb-px (r c) (list (div (sub (mod (add (mul r 4) c) 5) 2) 4.0) (div (sub (mod (add r (mul 2 c)) 3) 1) 2.0)))
+    (defn vdb-img-row (r c w) (if (ge c w) (empty) (cons (vdb-px r c) (vdb-img-row r (add c 1) w))))
+    (defn vdb-img (r h w) (if (ge r h) (empty) (cons (vdb-img-row r 0 w) (vdb-img (add r 1) h w))))
+    (defn vdb-kern (o kh kw s) (vdb-kern-rows o 0 kh kw s))
+    (defn vdb-kern-rows (o i kh kw s) (if (ge i kh) (empty) (cons (vdb-kern-taps o i 0 kw s) (vdb-kern-rows o (add i 1) kh kw s))))
+    (defn vdb-kern-taps (o i j kw s) (if (ge j kw) (empty) (cons (list (vdb-v (add o i) j s) (vdb-v i (add o j) (add s 1))) (vdb-kern-taps o i (add j 1) kw s))))
+    (defn vdb-ws (o cout kh kw s) (if (ge o cout) (empty) (cons (vdb-kern o kh kw s) (vdb-ws (add o 1) cout kh kw s))))
+    (defn vdb-flat2 (xss) (if (eq (len xss) 0) (empty) (vkd-cat (vkd-flat (head xss)) (vdb-flat2 (tail xss)))))
+    (defn vdb-flat3 (xsss) (if (eq (len xsss) 0) (empty) (vkd-cat (vdb-flat2 (head xsss)) (vdb-flat3 (tail xsss)))))
+    (defn vdb-zeros-in (gs) (if (eq (len gs) 0) 0 (add (if (eq (head gs) 0.0) 1 0) (vdb-zeros-in (tail gs)))))
+
+    (let IMG (vdb-img 0 4 4))
+    (let WA (vdb-ws 0 2 3 3 1)) (let BA (list 1.0 -2.0))
+    (let WB (vdb-ws 0 2 2 2 2)) (let BB (list 0.0 3.0))
+    (let GXS (list (list 1.0 3.0) (list 1.0 3.0) (list 0.0 4.0) (list 4.0 0.0)))
+    (let WR (vdb-mat 0 4 3 3))
+    (let EXPERTS (list (vdb-mat 0 3 3 4) (vdb-mat 0 3 3 5) (vdb-mat 0 3 3 6) (vdb-mat 0 3 3 7)))
+    (let MX (list 1.0 -0.5 0.75))
+
+    (let e-ca (vdb-flat2 (cv2d-conv WA BA IMG 1 1 3 3)))
+    (let e-cb (vdb-flat2 (cv2d-conv WB BB IMG 0 2 2 2)))
+    (let e-gn (vkd-flat (cv2d-groupnorm GXS 2 0.0)))
+    (let e-gate (moe-gate-topk (moe-router WR MX) 2))
+    (let e-moe (moe-forward WR EXPERTS MX 2))
+
+    (let mints (vkd-plan (list (vkd-mint "fgl-conv2d" (fgl-conv2d)) (vkd-mint "fgl-groupnorm" (fgl-groupnorm))
+                               (vkd-mint "fgl-moe-route" (fgl-moe-route)) (vkd-mint "fgl-moe-mix" (fgl-moe-mix)))))
+    (let plan (vkd-plan (list
+        (vkd-spv "fgl-conv2d") (vkd-spv "fgl-groupnorm") (vkd-spv "fgl-moe-route") (vkd-spv "fgl-moe-mix")
+        (vkd-buf (vdb-flat2 IMG)) (vkd-buf (vdb-flat3 WA)) (vkd-buf BA) (vkd-zero 32)   ;  0  1  2  3
+        (vkd-buf (vdb-flat3 WB)) (vkd-buf BB) (vkd-zero 8)                            ;  4  5  6
+        (vkd-buf (vkd-flat GXS)) (vkd-zero 8)                                         ;  7  8
+        (vkd-buf (vkd-flat WR)) (vkd-buf MX) (vkd-zero 4)                             ;  9 10 11
+        (vkd-buf (vdb-flat2 EXPERTS)) (vkd-zero 3)                                    ; 12 13
+        (vkd-run 0 (list 0 1 2 3) (list 4 4 2 2 3 3 1 1 4 4) 1)
+        (vkd-run 0 (list 0 4 5 6) (list 4 4 2 2 2 2 0 2 2 2) 1)
+        (vkd-run 1 (list 7 8) (list 4 2 2 (vkd-f 0.0)) 1)
+        (vkd-run 2 (list 9 10 11) (list 4 3 2) 1)
+        (vkd-run 3 (list 12 10 11 13) (list 4 3 3) 1)
+        (vkd-read 3) (vkd-read 6) (vkd-read 8) (vkd-read 11) (vkd-read 13))))
+    (let out (if (eq (vkd-ready?) 1) (vkd-exec "diffusion-moe" plan) ""))
+
+    (let gates (vkd-read-floats out 11))
+    (let c0 (if (and (str_eq mints "") (gt (str_len (vkd-device out)) 0)) 1 0))
+    (let c1 (vdb-bit (vkd-agree? (vkd-read-floats out 3) e-ca (vkd-eps)) 2))
+    (let c2 (vdb-bit (vkd-agree? (vkd-read-floats out 6) e-cb (vkd-eps)) 4))
+    (let c3 (vdb-bit (vkd-agree? (vkd-read-floats out 8) e-gn (vkd-eps)) 8))
+    (let c4 (vdb-bit (if (and (eq (vkd-agree? gates e-gate (vkd-eps)) 1) (eq (vdb-zeros-in gates) 2)) 1 0) 16))
+    (let c5 (vdb-bit (vkd-agree? (vkd-read-floats out 13) e-moe (vkd-eps)) 32))
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))

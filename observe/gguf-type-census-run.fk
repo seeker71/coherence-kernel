@@ -1,0 +1,53 @@
+; preludes: form-stdlib/core.fk form-stdlib/model-registry.bml form-stdlib/gguf-type-census.bml
+;
+; gguf-type-census-run — every model file the registry names, read for the tensor types its header
+; lists and held against the formats this body carves (form-stdlib/gguf-type-census.bml).
+;
+; A split file is read shard by shard: each shard's header lists only the tensors that shard holds.
+; `!` marks a type no carver reads. The verdict is the count of tensors on this disk, among the
+; registered files, that no carver reads — the precision work those files actually owe.
+(do
+    (defn gtr-at (path) (str_find path "-00001-of-" 0))
+    (defn gtr-of (path)
+        (if (lt (gtr-at path) 0) 1
+            (float_to_int (str_to_float (substring path (add (gtr-at path) 10) (add (gtr-at path) 15))))))
+    (defn gtr-shard (path i)
+        (if (lt (gtr-at path) 0) path
+            (str_concat (substring path 0 (add (gtr-at path) 1))
+                (str_concat (mr-pad5 i) (substring path (add (gtr-at path) 6) (str_len path))))))
+    (defn gtr-cat (xs acc) (if (eq (len xs) 0) acc (gtr-cat (tail xs) (cons (head xs) acc))))
+
+    ; every shard of one registered file: list(state, types)
+    (defn gtr-gather (path i n st acc)
+        (if (gt i n) (list st acc)
+            (do (let f (gtc-file (gtr-shard path i)))
+                (gtr-gather path (add i 1) n
+                    (if (str_eq (nth f 0) "read") st (nth f 0))
+                    (gtr-cat (nth f 1) acc)))))
+
+    ; one registry row, printed; answers list(tensors, unread)
+    (defn gtr-row (r)
+        (do (let path (mr-path r))
+            (let n (gtr-of path))
+            (let g (gtr-gather path 1 n "read" (list)))
+            (let types (nth g 1))
+            (let unread (gtc-unread types 0))
+            (print_str (str_concat "  " (str_concat (mr-name r)
+                (str_concat "  shards " (str_concat (int_to_str n)
+                (str_concat "  " (str_concat (nth g 0)
+                (str_concat "  tensors " (str_concat (int_to_str (len types))
+                (str_concat "  unread " (str_concat (int_to_str unread)
+                (str_concat "  types" (gtc-line (gtc-distinct types (list)) types)))))))))))))
+            (list (len types) unread)))
+
+    (defn gtr-all (rows t u)
+        (if (eq (len rows) 0) (list t u)
+            (do (let x (gtr-row (head rows)))
+                (gtr-all (tail rows) (add t (nth x 0)) (add u (nth x 1))))))
+
+    (print_str "── GGUF tensor types in the registered model files, against the carvers ──")
+    (let tot (gtr-all (mr-registry) 0 0))
+    (print_str (str_concat "files " (str_concat (int_to_str (len (mr-registry)))
+               (str_concat "   tensors " (str_concat (int_to_str (nth tot 0))
+               (str_concat "   no carver " (int_to_str (nth tot 1))))))))
+    (nth tot 1))

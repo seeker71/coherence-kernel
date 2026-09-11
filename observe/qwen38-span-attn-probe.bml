@@ -1,0 +1,73 @@
+//////////////////////////////////////////////////////////////////////
+//
+// qwen38-span-attn-probe.bml — how much of a prefill is the attention
+// kernel itself?
+//
+// Opens Qwen3.8-27B-Q8_0 and takes the lane's OWN span-attention pipeline
+// (form_gqa_span_f32, the one q38-full-attn-span dispatches) with the lane's
+// own geometry, then dispatches it alone over a span of the length the fold
+// A/B prefilled: one warm dispatch, three timed, each its own command
+// buffer. Scores are one thread per (token, head) with a scratch row per
+// thread, so this is the cost a flash-style tiled kernel would be buying down.
+//
+//   ./fkwu observe/qwen38-span-attn-probe.bml
+//
+// Each line: GPU busy microseconds for one dispatch; then the geometry, the
+// number of full-attention layers, and the attention kernel's GPU per
+// prefill. Nothing is written.
+//
+// Effectful: maps the 27 GB GGUF and drives the GPU. Do not preflight.
+// preludes: form/form-stdlib/form-cli-model-generate.fk form/form-stdlib/model-registry.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class Qwen38SpanAttnProbe {
+        def qsp-gpu() = mbw-status-int(metal_status(), "gpu_busy_us_total");
+        def qsp-one(p, bufs, consts, threads) {
+            let s0 = metal_sync();
+            let g0 = qsp-gpu();
+            let t0 = now_unix_ms();
+            // barrier_before stays 0: it is legal only inside a concurrent batch, and a
+            // serial batch already orders its dispatches
+            let e = metal_enqueue(p, q38-b16(bufs, consts, 0, 0), threads);
+            let s1 = metal_sync();
+            let t1 = now_unix_ms();
+            let d = sub(qsp-gpu(), g0);
+            let shown = print(list("pipeline", p, "enqueue", e, "sync", s1, "gpu-us", d, "host-ms", sub(t1, t0)));
+            d;
+        }
+        // the kernel writes e = fexp(s - max) into the scratch's second half; over zero
+        // inputs every score is 0, so the first such word must read 1.0 once it has run
+        def qsp-ran?(sc, e0) = if str_eq(metal_buf_read(sc, mul(4, e0), 4), md-le32(md-f32-bits(1.0))) then 1 else 0;
+        def qsp-report() {
+            let path = mr-path(mr-find("qwen38-q8"));
+            let ntok = 577;
+            let ctx = q38-open-span(path, add(ntok, 64), add(ntok, 64));
+            let ps = nth(ctx, 0);
+            let geo = nth(ctx, 2);
+            let nq = nth(geo, 12);
+            let nkv = nth(geo, 13);
+            let hd = nth(geo, 14);
+            let sstride = nth(geo, 18);
+            let told = print(list("geo", "n_head", nq, "n_head_kv", nkv, "head_dim", hd, "sstride", sstride, "layers", nth(geo, 21), "full-every", nth(geo, 22)));
+            let q = metal_buf_alloc(mul(4, mul(ntok, mul(nq, hd))));
+            let kc = metal_buf_alloc(mul(4, mul(ntok, mul(nkv, hd))));
+            let vc = metal_buf_alloc(mul(4, mul(ntok, mul(nkv, hd))));
+            let y = metal_buf_alloc(mul(4, mul(ntok, mul(nq, hd))));
+            let sc = metal_buf_alloc(mul(4, mul(2, mul(ntok, mul(nq, sstride)))));
+            let bufs = list(q, kc, vc, y, sc);
+            let consts = list(0, nq, nkv, hd, nth(geo, 17), sstride, ntok);
+            let w = qsp-one(nth(ps, 38), bufs, consts, mul(nq, ntok));
+            let st = print(metal_status());
+            let ran = print(list("kernel-ran", qsp-ran?(sc, mul(ntok, mul(nq, sstride)))));
+            let t1 = qsp-one(nth(ps, 38), bufs, consts, mul(nq, ntok));
+            let t2 = qsp-one(nth(ps, 38), bufs, consts, mul(nq, ntok));
+            let t3 = qsp-one(nth(ps, 38), bufs, consts, mul(nq, ntok));
+            let full = div(nth(geo, 21), nth(geo, 22));
+            let said = print(list("span-attn-us", "warm", w, "reads", t1, t2, t3, "tokens", ntok, "full-attention-layers", full, "per-prefill-ms", div(mul(full, add(t1, add(t2, t3))), 3000)));
+            1;
+        }
+    }
+    qsp-report();
+}

@@ -1,6 +1,6 @@
 ; sampling.fk — token-SAMPLING filters for serving: temperature, softmax, top-k, top-p (nucleus).
 ;
-; preludes: form-stdlib/transformer-numerics.fk
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk
 ;
 ; transformer-generate.fk closes the decode loop with tb-argmax — greedy, the single most-likely
 ; token. Serving needs the rung above greedy: shape the distribution BEFORE the choice. This stone is
@@ -119,3 +119,35 @@
       (do
         (let st2 (smp-minstd state))
         (cons (smp-sample probs (smp-uniform st2)) (smp-draw-seq probs st2 (sub n 1))))))
+
+; --- beam search: the rung beside greedy. Keep the `width` best partial sequences by summed
+; log-probability instead of the single best next token, so a choice that looks worse at step one can
+; win at step two — which greedy, by construction, can never see. The model is a TABLE: row i holds the
+; log-probability of every next token after token i. A table and not a function, because a defn handed
+; to another defn is not callable in this kernel; any model that can be read as a row per token fits.
+; Width 1 IS greedy: one beam, extended by its best token, every step. Selection is repeated-max
+; extraction, as top-k's is above, first-found on ties — determinism, not speed, is the point. ---
+(defn smp-bm-seq-eq (a b)
+  (if (eq (len a) 0) (eq (len b) 0)
+      (if (eq (len b) 0) false (if (eq (head a) (head b)) (smp-bm-seq-eq (tail a) (tail b)) false))))
+(defn smp-bm-same (x y) (if (eq (head x) (head y)) (smp-bm-seq-eq (nth x 1) (nth y 1)) false))
+; a beam is (score tokens-newest-first); every beam extended by every next token
+(defn smp-bm-extend-one (tbl sc seq j n acc)
+  (if (ge j n) acc
+      (smp-bm-extend-one tbl sc seq (add j 1) n (cons (list (add sc (nth (nth tbl (head seq)) j)) (cons j seq)) acc))))
+(defn smp-bm-extend (tbl beams n acc)
+  (if (eq (len beams) 0) acc
+      (smp-bm-extend tbl (tail beams) n (smp-bm-extend-one tbl (head (head beams)) (nth (head beams) 1) 0 n acc))))
+(defn smp-bm-best (cs b) (if (eq (len cs) 0) b (smp-bm-best (tail cs) (if (gt (head (head cs)) (head b)) (head cs) b))))
+(defn smp-bm-without (cs x)
+  (if (eq (len cs) 0) (empty) (if (smp-bm-same (head cs) x) (tail cs) (cons (head cs) (smp-bm-without (tail cs) x)))))
+(defn smp-bm-top (cs k)
+  (if (or (le k 0) (eq (len cs) 0)) (empty)
+      (cons (smp-bm-best (tail cs) (head cs)) (smp-bm-top (smp-bm-without cs (smp-bm-best (tail cs) (head cs))) (sub k 1)))))
+(defn smp-bm-walk (tbl beams n width steps)
+  (if (le steps 0) beams (smp-bm-walk tbl (smp-bm-top (smp-bm-extend tbl beams n (empty)) width) n width (sub steps 1))))
+(defn smp-bm-pack (b) (list (head b) (reverse (nth b 1))))
+; the answer: (score tokens-in-the-order-chosen) of the best beam after `steps` steps from `start`
+(defn smp-beam (tbl start width steps)
+  (smp-bm-pack (smp-bm-best (tail (smp-bm-walk tbl (list (list 0.0 (list start))) (len (head tbl)) width steps))
+                            (head (smp-bm-walk tbl (list (list 0.0 (list start))) (len (head tbl)) width steps)))))

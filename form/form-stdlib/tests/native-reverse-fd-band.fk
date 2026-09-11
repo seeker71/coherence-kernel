@@ -1,0 +1,47 @@
+; preludes: form-stdlib/tests/native-reverse-fd.bml
+; Expected: 255
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+; witnessed: 2026-09-10 -> 255
+;
+; native-reverse-fd-band — the four reverse kernels a LoRA step walks through, each against a
+; finite difference of the forward kernel the live 3B runs, EVERY entry.
+;
+; native-llama-backward-band (7) checks the loss end to end, at the largest entry of each factor's
+; gradient. This band asks the other question: which kernel, and all of its entries. A reverse
+; that is wrong only in its small entries, or only past the first position, passes a largest-entry
+; check and fails here, and the failing bit names the kernel.
+;
+; The witness is not made of the reverse's material: L = <w, f(x)> is folded in Form from what the
+; FORWARD kernel hands back, and the reverse arithmetic is never consulted to build it.
+;
+; Verdict 255:
+;   1   nlb_rms            RMSNorm reverse, every dx entry, against nam_rms (d 48, two rows)
+;   2   nll_rope inverse   RoPE reverse at positions 0..3, every entry, against nll_rope forward
+;   4   the check has teeth: the FORWARD rotation offered as its own reverse is turned away by it
+;   8   nlb_swiglu         dgate and dup, every entry, against nam_swiglu
+;   16  nlb_dp -> nlb_softmax -> nlb_dq    dq, every entry, against nll_scores + nll_attend (causal, GQA 4 over 2)
+;   32  nlb_dkv            dK over the whole cache, every entry
+;   64  nlb_dkv            dV over the whole cache, every entry
+;   128 nothing leaks: the live buffer count returns to where it began
+(do
+    (let live0 (nth (metal_live) 2))
+    (let e 0.0078125)
+    ; gap allowed per entry: 1e-4 + 0.1% of the difference. Witnessed worst on 2026-09-10: 1.7e-5
+    ; (rms), everything else below 8e-6 — the tolerance sits six times above what was seen.
+    (let tola 0.0001)
+    (let tolr 0.001)
+    (let rms (nrf-rms 48 2 e tola tolr))
+    (let rope (nrf-rope 2 8 4 e 1 tola tolr))
+    (let teeth (nrf-rope 2 8 4 e 0 tola tolr))
+    (let glu (nrf-swiglu 32 e tola tolr))
+    (let att (nrf-attn 4 4 2 8 e tola tolr))
+    (let live1 (nth (metal_live) 2))
+    (print (list "rms" rms "rope" rope "teeth" teeth "swiglu" glu "dq" (nth att 0) "dk" (nth att 1) "dv" (nth att 2) "live" live0 live1))
+    (add (if (nrf-whole? rms) 1 0)
+    (add (if (nrf-whole? rope) 2 0)
+    (add (if (and (gt (nth teeth 1) 0) (lt (head teeth) (nth teeth 1))) 4 0)
+    (add (if (nrf-whole? glu) 8 0)
+    (add (if (nrf-whole? (nth att 0)) 16 0)
+    (add (if (nrf-whole? (nth att 1)) 32 0)
+    (add (if (nrf-whole? (nth att 2)) 64 0)
+         (if (eq live1 live0) 128 0)))))))))

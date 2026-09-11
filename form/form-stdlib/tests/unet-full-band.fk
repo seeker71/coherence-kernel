@@ -1,0 +1,82 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/conv-stem.fk form-stdlib/conv2d.fk form-stdlib/llama-numerics.fk form-stdlib/unet.fk
+; Expected: 255
+;
+; unet-full-band — a whole UNet and a VAE decoder, composed from pieces that already stood four-way.
+;
+; unet.fk composes a whole UNet and a VAE decoder, and four small
+; pieces beside them: skip concatenation, spatial self-attention over every pixel, the timestep embedding
+; (positional.fk's own sinusoid read at t), and the time-conditioned resblock. Nothing is new arithmetic.
+;
+; The pins below were emitted FROM the recipe and frozen; what makes them mean anything is the other
+; kernels computing the same digits. The other bits are witnesses the recipe cannot fake by agreeing with
+; itself: uniform attention, sin 0 and cos 0, a shape that survives a round trip.
+;
+; Verdict 255:
+;    1  skip concatenation: a 2x2x1 grid and a 2x2x2 grid become one 2x2x3, every value carried
+;    2  the timestep embedding at t = 0 is sin 0, sin 0, cos 0, cos 0 — and it moves at t = 1
+;    4  attention with zero query and key weights is UNIFORM: every one of sixteen pixels receives the same
+;       vector, float for float, before the residual is added back
+;    8  the timed resblock hears the time: t = 0 and t = 3 give different grids of the same shape
+;   16  the VAE decoder doubles the spatial size and lands on three channels: 2x2x2 latent -> 4x4x3
+;   32  and its whole output is pinned, x1e6
+;   64  the UNet returns its input's shape, 4x4x2, through down, mid attention, up and the skip
+;  128  and its whole output is pinned, x1e6
+(do
+    ; parameters by pattern: every weight a multiple of 1/8 in [-1/2, 1/2], exact in binary
+    (defn unb-v (s) (mul (add (sub (mod s 9) 4) 0.0) 0.125))
+    (defn unb-tap (s o i j cin k) (if (ge k cin) (empty) (cons (unb-v (add s (add (mul o 7) (add (mul i 5) (add (mul j 3) k))))) (unb-tap s o i j cin (add k 1)))))
+    (defn unb-wrow (s o i j kw cin) (if (ge j kw) (empty) (cons (unb-tap s o i j cin 0) (unb-wrow s o i (add j 1) kw cin))))
+    (defn unb-wout (s o i kh kw cin) (if (ge i kh) (empty) (cons (unb-wrow s o i 0 kw cin) (unb-wout s o (add i 1) kh kw cin))))
+    (defn unb-ws (s o cout kh kw cin) (if (ge o cout) (empty) (cons (unb-wout s o 0 kh kw cin) (unb-ws s (add o 1) cout kh kw cin))))
+    (defn unb-vec (s i n) (if (ge i n) (empty) (cons (unb-v (add s (mul i 3))) (unb-vec s (add i 1) n))))
+    (defn unb-mrow (s r c n) (if (ge c n) (empty) (cons (unb-v (add s (add (mul r 5) (mul c 3)))) (unb-mrow s r (add c 1) n))))
+    (defn unb-mat (s r rows cols) (if (ge r rows) (empty) (cons (unb-mrow s r 0 cols) (unb-mat s (add r 1) rows cols))))
+    (defn unb-zeros (n) (if (le n 0) (empty) (cons 0.0 (unb-zeros (sub n 1)))))
+    (defn unb-zmat (rows cols) (if (le rows 0) (empty) (cons (unb-zeros cols) (unb-zmat (sub rows 1) cols))))
+    (defn unb-pixel (s r c ch) (unb-vec (add s (add (mul r 11) (mul c 7))) 0 ch))
+    (defn unb-grow (s r c w ch) (if (ge c w) (empty) (cons (unb-pixel s r c ch) (unb-grow s r (add c 1) w ch))))
+    (defn unb-grid (s r h w ch) (if (ge r h) (empty) (cons (unb-grow s r 0 w ch) (unb-grid s (add r 1) h w ch))))
+    (defn unb-vi (v) (if (eq (len v) 0) (empty) (cons (round (mul (head v) 1000000.0)) (unb-vi (tail v)))))
+    (defn unb-ri (row) (if (eq (len row) 0) (empty) (cv-cat (unb-vi (head row)) (unb-ri (tail row)))))
+    (defn unb-gi (g) (if (eq (len g) 0) (empty) (cv-cat (unb-ri (head g)) (unb-gi (tail g)))))
+    (defn unb-ieq (a b) (if (eq (len a) 0) (eq (len b) 0) (if (eq (len b) 0) false (if (eq (head a) (head b)) (unb-ieq (tail a) (tail b)) false))))
+    (defn unb-feq (a b) (if (eq (len a) 0) (eq (len b) 0) (if (eq (head a) (head b)) (unb-feq (tail a) (tail b)) false)))
+    (defn unb-allsame (vs v) (if (eq (len vs) 0) true (if (unb-feq (head vs) v) (unb-allsame (tail vs) v) false)))
+    (defn unb-shape? (g h w c) (if (eq (len g) h) (if (eq (len (head g)) w) (eq (len (head (head g))) c) false) false))
+
+    (let a (unb-grid 1 0 2 2 1))
+    (let b (unb-grid 2 0 2 2 2))
+    (let ab (un-concat-grid a b))
+    (let c0 (if (unb-shape? ab 2 2 3)
+                (if (unb-feq (nth (nth ab 1) 1) (cv-cat (nth (nth a 1) 1) (nth (nth b 1) 1))) 1 0) 0))
+    (let e0 (un-time-embed 0 4))
+    (let e1 (un-time-embed 1 4))
+    (let c1 (if (unb-ieq (unb-vi e0) (list 0 0 1000000 1000000)) (if (unb-ieq (unb-vi e1) (unb-vi e0)) 0 2) 0))
+    (let g4 (unb-grid 3 0 4 4 4))
+    (let tokens (tb-attn-sub (un-flatten-grid (un-gn-grid g4 2 0.00001)) (unb-zmat 4 4) (unb-zeros 4) (unb-zmat 4 4) (unb-zeros 4)
+                             (unb-mat 5 0 4 4) (unb-vec 6 0 4) (unb-mat 7 0 4 4) (unb-vec 8 0 4) 0.5))
+    (let c2 (if (eq (len tokens) 16) (if (unb-allsame tokens (head tokens)) 4 0) 0))
+    (let x4 (unb-grid 9 0 4 4 4))
+    (let rbt (list (unb-mat 10 0 4 4) (unb-vec 11 0 4) (unb-ws 12 0 4 3 3 4) (unb-vec 13 0 4) (unb-ws 14 0 4 3 3 4) (unb-vec 15 0 4)))
+    (let r0 (un-rbt x4 (un-time-embed 0 4) rbt 2 0.00001))
+    (let r3 (un-rbt x4 (un-time-embed 3 4) rbt 2 0.00001))
+    (let c3 (if (unb-shape? r3 4 4 4) (if (unb-ieq (unb-gi r0) (unb-gi r3)) 0 8) 0))
+    (let z (unb-grid 16 0 2 2 2))
+    (let vae (un-vae-decode z (unb-ws 17 0 4 3 3 2) (unb-vec 18 0 4)
+                 (list (unb-ws 19 0 4 3 3 4) (unb-vec 20 0 4) (unb-ws 21 0 4 3 3 4) (unb-vec 22 0 4))
+                 (list (unb-mat 23 0 4 4) (unb-vec 24 0 4) (unb-mat 25 0 4 4) (unb-vec 26 0 4) (unb-mat 27 0 4 4) (unb-vec 28 0 4) (unb-mat 29 0 4 4) (unb-vec 30 0 4))
+                 (list (unb-ws 31 0 4 3 3 4) (unb-vec 32 0 4) (unb-ws 33 0 4 3 3 4) (unb-vec 34 0 4))
+                 (list (unb-ws 35 0 4 3 3 4) (unb-vec 36 0 4) (unb-ws 37 0 4 3 3 4) (unb-vec 38 0 4))
+                 (unb-ws 39 0 3 3 3 4) (unb-vec 40 0 3) 2 0.00001 0.5))
+    (let c4 (if (unb-shape? vae 4 4 3) 16 0))
+    (let c5 (if (unb-ieq (unb-gi vae) (list 22129 1035621 -852656 281245 -106777 -475907 -1155945 -701243 1360854 -960027 1782291 -130773 724477 222055 -222411 -25508 912084 -645743 2016061 658088 -2531997 -359168 199854 -1808832 -1097581 -488243 1505732 871170 642945 -1017221 175932 191327 -571190 2251092 584189 -1398473 507497 495555 -1017596 -597681 -177435 437213 -262572 609069 -330709 -548826 -189235 638770)) 32 0))
+    (let xu (unb-grid 41 0 4 4 2))
+    (let un (un-unet xu (un-time-embed 2 4) (unb-ws 42 0 4 3 3 2) (unb-vec 43 0 4)
+                (list (unb-mat 44 0 4 4) (unb-vec 45 0 4) (unb-ws 46 0 4 3 3 4) (unb-vec 47 0 4) (unb-ws 48 0 4 3 3 4) (unb-vec 49 0 4))
+                (list (unb-mat 50 0 4 4) (unb-vec 51 0 4) (unb-ws 52 0 4 3 3 4) (unb-vec 53 0 4) (unb-ws 54 0 4 3 3 4) (unb-vec 55 0 4))
+                (list (unb-mat 56 0 4 4) (unb-vec 57 0 4) (unb-mat 58 0 4 4) (unb-vec 59 0 4) (unb-mat 60 0 4 4) (unb-vec 61 0 4) (unb-mat 62 0 4 4) (unb-vec 63 0 4))
+                (list (unb-mat 64 0 4 4) (unb-vec 65 0 4) (unb-ws 66 0 4 3 3 8) (unb-vec 67 0 4) (unb-ws 68 0 4 3 3 4) (unb-vec 69 0 4) (unb-ws 70 0 4 1 1 8) (unb-vec 71 0 4))
+                (unb-ws 72 0 2 3 3 4) (unb-vec 73 0 2) 2 0.00001 0.5))
+    (let c6 (if (unb-shape? un 4 4 2) 64 0))
+    (let c7 (if (unb-ieq (unb-gi un) (list -485384 -161668 -1816263 486888 1915799 664645 -184421 -1469865 -161712 513278 811651 -873248 -2460528 -676302 512823 1956225 -898439 -330036 -668247 1645652 1441807 -28552 -1256263 -2640881 772682 -171354 -134225 -765945 -1390649 192006 269592 548080)) 128 0))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))

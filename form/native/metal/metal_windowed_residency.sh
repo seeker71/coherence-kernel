@@ -40,7 +40,7 @@
 #   4  PAST-CEILING BYTE-EXACT a tensor whose absolute offset is beyond maxBufferLength, read from view 1
 #
 # Run:  form/native/metal/metal_windowed_residency.sh
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal row in GPU_GAPS.md.
+# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form

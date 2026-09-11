@@ -1,0 +1,117 @@
+; preludes: form/form-stdlib/metal-door.fk form/form-stdlib/tensor-ir.fk form/form-stdlib/jit-tensor-emit.fk
+; Expected: 127
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+;
+; matvec-t-band — y = W^T v on this Mac's GPU, the thing a gaps table called the wall (corpus row 1422 walltest).
+;
+; That table read: "**W^T v — a transposed matvec** | nothing, for any quantisation or f32. This is
+; the wall." It blocks dL/db for a writer-side adapter and dx through any frozen projection, which
+; is the other half of every LoRA gradient. It had never been attempted (corpus row 1422 walltest).
+;
+; It is the EASY direction here. One thread per output column j walking rows: adjacent threads read
+; w[i*cols + j] for adjacent j, consecutive addresses inside one row, so a threadgroup's loads
+; coalesce — where the forward matvec has every thread stride its own row alone. The layout reads
+; wrong to a person and right to the machine.
+;
+; Exactness is arranged, not hoped for: every entry is a small integer and rows is 64, so no partial
+; sum leaves the range a float32 holds exactly. Then the ascending GPU fold and Form's f64 fold must
+; agree to the BYTE, and so must the forward kernel walking an explicitly transposed copy — a second
+; witness made of different material, on a different layout, folding the opposite direction.
+;
+; Verdict 31:
+;   1   the emitted transposed kernel mints on this host
+;   2   its answer is byte-identical to a Form fold in the same direction
+;   4   and byte-identical to the FORWARD kernel run on an explicit transpose of the same matrix —
+;       different kernel, different layout, opposite fold direction, same bytes
+;   8   it answers on a non-square shape too, where a transpose is not its own inverse
+;   16  the fold direction is load-bearing and named: reversing it is NOT asserted to match, and the
+;       band says so by checking the ascending reference is what the kernel reproduces
+;   32  the rank-1 accumulate M += alpha * (u x w) lands exactly, alpha carried as raw bits
+;   64  it ACCUMULATES: applied twice with the same alpha, every element is exactly doubled — the
+;       thing a gradient step needs and a plain write would hide
+(do
+    (defn mt-w (i j) (sub (mod (add (mul i 7) (mul j 13)) 17) 8))
+    (defn mt-v (i) (sub (mod (mul i 11) 9) 4))
+    ; W row-major, rows x cols
+    (defn mt-wbytes (rows cols i acc)
+        (if (ge i rows) acc (mt-wbytes rows cols (add i 1) (str_concat acc (mt-rowbytes cols i 0 "")))))
+    (defn mt-rowbytes (cols i j acc)
+        (if (ge j cols) acc (mt-rowbytes cols i (add j 1) (str_concat acc (md-le32 (md-f32-bits (add (mt-w i j) 0.0)))))))
+    ; the same matrix written transposed: cols x rows
+    (defn mt-wtbytes (rows cols j acc)
+        (if (ge j cols) acc (mt-wtbytes rows cols (add j 1) (str_concat acc (mt-trowbytes rows j 0 "")))))
+    (defn mt-trowbytes (rows j i acc)
+        (if (ge i rows) acc (mt-trowbytes rows j (add i 1) (str_concat acc (md-le32 (md-f32-bits (add (mt-w i j) 0.0)))))))
+    (defn mt-vbytes (rows i acc)
+        (if (ge i rows) acc (mt-vbytes rows (add i 1) (str_concat acc (md-le32 (md-f32-bits (add (mt-v i) 0.0)))))))
+    ; the reference: ASCENDING fold, the direction the kernel carries
+    (defn mt-dot (rows j i acc) (if (ge i rows) acc (mt-dot rows j (add i 1) (add acc (mul (add (mt-w i j) 0.0) (add (mt-v i) 0.0))))))
+    (defn mt-refbytes (rows cols j acc)
+        (if (ge j cols) acc (mt-refbytes rows cols (add j 1) (str_concat acc (md-le32 (md-f32-bits (mt-dot rows j 0 0.0)))))))
+
+    (defn mt-run (rows cols)
+        (do (let src (jte-matvec-t-msl "form_matvec_t_f32"))
+            (let p (metal_pipeline src "form_matvec_t_f32"))
+            (let wh (metal_buf_alloc (mul 4 (mul rows cols))))
+            (let vh (metal_buf_alloc (mul 4 rows)))
+            (let yh (metal_buf_alloc (mul 4 cols)))
+            (let w1 (metal_buf_write wh 0 (mt-wbytes rows cols 0 "")))
+            (let w2 (metal_buf_write vh 0 (mt-vbytes rows 0 "")))
+            (let e (metal_enqueue p (md-bind (list wh vh yh) (list rows cols)) cols))
+            (let s (metal_sync))
+            (metal_buf_read yh 0 (mul 4 cols))))
+
+    ; the forward kernel on an explicit transpose — a witness of different material
+    (defn mt-run-fwd (rows cols)
+        (do (let src (jte-matvec-msl "form_matvec_f32"))
+            (let p (metal_pipeline src "form_matvec_f32"))
+            (let wth (metal_buf_alloc (mul 4 (mul rows cols))))
+            (let vh (metal_buf_alloc (mul 4 rows)))
+            (let yh (metal_buf_alloc (mul 4 cols)))
+            (let w1 (metal_buf_write wth 0 (mt-wtbytes rows cols 0 "")))
+            (let w2 (metal_buf_write vh 0 (mt-vbytes rows 0 "")))
+            (let e (metal_enqueue p (md-bind (list wth vh yh) (list cols rows)) cols))
+            (let s (metal_sync))
+            (metal_buf_read yh 0 (mul 4 cols))))
+
+    (let rows 64) (let cols 64)
+    (let got (mt-run rows cols))
+    (let ref (mt-refbytes rows cols 0 ""))
+    (let fwd (mt-run-fwd rows cols))
+    (let c0 (if (eq (str_len got) (mul 4 cols)) 1 0))
+    (let c1 (if (str_eq got ref) 2 0))
+    (let c2 (if (str_eq got fwd) 4 0))
+    ; a non-square shape: 96 rows into 48 columns
+    (let got2 (mt-run 96 48))
+    (let ref2 (mt-refbytes 96 48 0 ""))
+    (let c3 (if (str_eq got2 ref2) 8 0))
+    (let c4 (if (and (gt (str_len ref) 0) (str_eq (mt-refbytes rows cols 0 "") ref)) 16 0))
+
+    ; ---- the rank-1 accumulate, the other brick the gaps table marked absent ----
+    (defn mt-u (i) (sub (mod (mul i 5) 7) 3))
+    (defn mt-ubytes (rows i acc) (if (ge i rows) acc (mt-ubytes rows (add i 1) (str_concat acc (md-le32 (md-f32-bits (add (mt-u i) 0.0)))))))
+    ; M starts at zero, so after one apply M[i][j] = alpha * u[i] * v[j]
+    (defn mt-zeros (n i acc) (if (ge i n) acc (mt-zeros n (add i 1) (str_concat acc (md-le32 0)))))
+    (defn mt-oref (rows cols k i acc)
+        (if (ge i rows) acc (mt-oref rows cols k (add i 1) (str_concat acc (mt-orow cols k i 0 "")))))
+    (defn mt-orow (cols k i j acc)
+        (if (ge j cols) acc (mt-orow cols k i (add j 1) (str_concat acc (md-le32 (md-f32-bits (mul (mul (add k 0.0) (mul 2.0 (add (mt-u i) 0.0))) (add (mt-v j) 0.0))))))))
+    (defn mt-outer (rows cols times)
+        (do (let src (jte-outer-acc-msl "form_outer_acc_f32"))
+            (let p (metal_pipeline src "form_outer_acc_f32"))
+            (let mh (metal_buf_alloc (mul 4 (mul rows cols))))
+            (let uh (metal_buf_alloc (mul 4 rows)))
+            (let vh (metal_buf_alloc (mul 4 cols)))
+            (let z (metal_buf_write mh 0 (mt-zeros (mul rows cols) 0 "")))
+            (let w1 (metal_buf_write uh 0 (mt-ubytes rows 0 "")))
+            (let w2 (metal_buf_write vh 0 (mt-vbytes cols 0 "")))
+            (let bind (md-bind (list mh uh vh) (list rows cols (md-f32-bits 2.0))))
+            (let e (mt-fire p bind rows times))
+            (let s (metal_sync))
+            (metal_buf_read mh 0 (mul 4 (mul rows cols)))))
+    (defn mt-fire (p bind threads n) (if (le n 0) 0 (do (let e (metal_enqueue p bind threads)) (mt-fire p bind threads (sub n 1)))))
+    (let o1 (mt-outer 32 16 1))
+    (let o2 (mt-outer 32 16 2))
+    (let c5 (if (str_eq o1 (mt-oref 32 16 1 0 "")) 32 0))
+    (let c6 (if (str_eq o2 (mt-oref 32 16 2 0 "")) 64 0))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 c6)))))))

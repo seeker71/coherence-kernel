@@ -1,0 +1,155 @@
+//////////////////////////////////////////////////////////////////////
+//
+// moe-gather-msl.bml — the expert gather and the weighted expert sum,
+// done ON THE DEVICE, by lifting kernels this body already emits.
+//
+//////////////////////////////////////////////////////////////////////
+//
+// What moe-msl.fk left, in its own words: the gather was closed by
+// ARITHMETIC ON AN OFFSET — `t.off + e * nb02`, bound by the host — and
+// "what it costs instead is a ROUND TRIP: the routing ids must reach the
+// host before the expert matvecs can be encoded, so the per-token command
+// buffer is cut once per layer." On dolphin-mixtral that was 560 cuts for
+// nine forwards (receipts/2026-07-22-first-form-native-moe-token.md), and a
+// prefill, which routes differently per position, has no host offset to
+// compute at all.
+//
+// ds4's kernel_mul_mv_id (metal/moe.metal:3521-3597, read, never run) is a
+// thin wrapper: read one expert id from a device buffer, move the weight
+// base by id * nb02, run the unchanged matvec. This cell does the same
+// thing to ANY kernel the body emits, as a text LIFT:
+//
+//   mgx-id-lift  reads the kernel's signature, renames its first device
+//                buffer to mgx_base, adds `device const uint* mgx_ids` after
+//                the device buffers and `constant uint& mgx_nb02, mgx_slot`
+//                after the constants, renumbers every binding to md-bind's
+//                layout (buffers first, then constants), and opens the body
+//                with one line that gives the original name back:
+//                    T* w = (T*)((device const uchar*)mgx_base
+//                                + ulong(mgx_ids[mgx_slot]) * ulong(mgx_nb02));
+//                Everything after the `{` is the original text byte for
+//                byte. mgx-body-kept asks exactly that, so "the decode
+//                arithmetic is untouched" is something a band reads rather
+//                than something a comment says.
+//   mgx-w-lift   the same move for a `constant float& a`: the constant
+//                goes, `device const float* mgx_w` arrives, and the body
+//                opens with `float a = mgx_w[mgx_slot];`. The router's
+//                weight is read where the router wrote it.
+//
+// With mm-route-msl (moe-msl.fk), the routed half of an MoE FFN — route,
+// the chosen experts' matvecs, their weighted sum — runs in ONE command
+// buffer, and nothing about which expert was chosen crosses to the host.
+//
+// nb02 is in BYTES, ggml's meaning, whatever the element type: a Q6_K
+// expert is 210-byte superblocks and an f32 expert is 4-byte floats, and
+// one number spells both.
+//
+// mgx_slot is which choice a dispatch computes — the first, the second —
+// a number the host holds before the router runs. Which EXPERT that choice
+// is lives only in mgx_ids.
+//
+// RADIUS. The lift reads the signature shape every family here shares:
+// `kernel void NAME(PARAMS) { BODY`, PARAMS separated by ", ", ending at the
+// first ") {", each bound parameter carrying [[buffer(k)]]. A text without
+// that shape lifts to "" and mints nothing, which the band sees at the mint.
+// The id lift moves the FIRST device buffer; in every matvec family this
+// body emits, that buffer is the weight. The band holds it on three: the
+// f32 IR matvec, the Q6_K lane kernel and the Q4_K lane kernel.
+//
+// Parens and braces the lift writes are built from bytes, so no literal in
+// this file carries an unbalanced one into the lowered text.
+//
+// Kin: moe-msl.fk (mm-route-msl, mm-scale-msl, mm-axpy-msl — the router
+// and the sum this lifts), qk-matvec-lane.fk (qml-lane-msl, the lane
+// kernel), jit-tensor-emit.fk (jte-matvec-msl, the f32 matvec).
+//
+// Proven by: form-stdlib/tests/moe-gather-msl-band.fk (on this Mac's GPU).
+//
+// preludes: form-stdlib/core.fk form-stdlib/jit-tensor-emit.fk form-stdlib/qk-matvec-lane.fk form-stdlib/moe-msl.fk
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class MoeGatherMsl {
+        // ---- the bytes the lift writes around what it keeps
+        def mgx-lp() = byte_to_str(40);
+        def mgx-rp() = byte_to_str(41);
+        def mgx-lb() = byte_to_str(123);
+        def mgx-paren(s) = str_concat(mgx-lp(), str_concat(s, mgx-rp()));
+        def mgx-bind-mark() = str_concat(" [[buffer", mgx-lp());
+        def mgx-open-mark() = str_concat(mgx-rp(), str_concat(" ", mgx-lb()));
+
+        // ---- reading a kernel: kernel void NAME(PARAMS) { BODY
+        def mgx-open(k) = str_find(k, mgx-lp(), 0);
+        def mgx-close(k) = str_find(k, mgx-open-mark(), mgx-open(k));
+        def mgx-reads(k) = if lt(mgx-open(k), 0) then 0 else ge(mgx-close(k), 0);
+        def mgx-sig(k) = substring(k, add(mgx-open(k), 1), mgx-close(k));
+        def mgx-rest(k) = substring(k, add(mgx-close(k), 3), str_len(k));
+        def mgx-split(s, from, acc) {
+            let j = str_find(s, ", ", from);
+            if lt(j, 0) then reverse(cons(substring(s, from, str_len(s)), acc)) else mgx-split(s, add(j, 2), cons(substring(s, from, j), acc));
+        }
+        def mgx-params(k) = mgx-split(mgx-sig(k), 0, list());
+
+        // ---- a parameter is a device buffer (0), a constant (1), or a thread attribute (2)
+        def mgx-bound(p) = ge(str_find(p, mgx-bind-mark(), 0), 0);
+        def mgx-lead(p, pre) = eq(str_find(p, pre, 0), 0);
+        def mgx-bound-kind(p) = if mgx-lead(p, "device ") then 0 else 1;
+        def mgx-kind(p) = if mgx-bound(p) then mgx-bound-kind(p) else 2;
+        def mgx-decl(p) = substring(p, 0, str_find(p, mgx-bind-mark(), 0));
+        def mgx-shape(p, want) = if eq(want, 2) then p else mgx-decl(p);
+        def mgx-keep(ps, want) = if eq(len(ps), 0) then list() else if eq(mgx-kind(head(ps)), want) then cons(mgx-shape(head(ps), want), mgx-keep(tail(ps), want)) else mgx-keep(tail(ps), want);
+
+        // ---- a declaration "device const float* w" splits at its last space
+        def mgx-lastsp(s, from, best) {
+            let j = str_find(s, " ", from);
+            if lt(j, 0) then best else mgx-lastsp(s, add(j, 1), j);
+        }
+        def mgx-type(d) = substring(d, 0, mgx-lastsp(d, 0, 0));
+        def mgx-name(d) = substring(d, add(mgx-lastsp(d, 0, 0), 1), str_len(d));
+
+        // ---- writing the new signature: md-bind's layout, buffers 0.. then constants
+        def mgx-number(ds, k) = if eq(len(ds), 0) then list() else cons(str_concat(head(ds), str_concat(" [[buffer", str_concat(mgx-paren(int_to_str(k)), "]]"))), mgx-number(tail(ds), add(k, 1)));
+        def mgx-join(xs) = if eq(len(xs), 0) then "" else if eq(len(xs), 1) then head(xs) else str_concat(head(xs), str_concat(", ", mgx-join(tail(xs))));
+        def mgx-cat(a, b) = if eq(len(a), 0) then b else cons(head(a), mgx-cat(tail(a), b));
+        def mgx-drop(xs, d) = if eq(len(xs), 0) then list() else if str_eq(head(xs), d) then mgx-drop(tail(xs), d) else cons(head(xs), mgx-drop(tail(xs), d));
+        def mgx-kernel(fname, devs, consts, attrs, pro, rest) = str_concat("kernel void ", str_concat(fname, str_concat(mgx-paren(mgx-join(mgx-cat(mgx-number(mgx-cat(devs, consts), 0), attrs))), str_concat(" ", str_concat(mgx-lb(), str_concat(" ", str_concat(pro, rest)))))));
+
+        // ---- the id lift: the weight base moves by mgx_ids[mgx_slot] * mgx_nb02 bytes
+        def mgx-id-pro(ty, nm) = str_concat(ty, str_concat(" ", str_concat(nm, str_concat(" = ", str_concat(mgx-paren(ty), str_concat("((device const uchar*)mgx_base + ulong(mgx_ids[mgx_slot]) * ulong(mgx_nb02))", "; "))))));
+        def mgx-id-lifted(ps, rest, fname) {
+            let devs = mgx-keep(ps, 0);
+            let ty = mgx-type(head(devs));
+            let nm = mgx-name(head(devs));
+            let ndevs = cons(str_concat(ty, " mgx_base"), mgx-cat(tail(devs), list("device const uint* mgx_ids")));
+            let ncons = mgx-cat(mgx-keep(ps, 1), list("constant uint& mgx_nb02", "constant uint& mgx_slot"));
+            mgx-kernel(fname, ndevs, ncons, mgx-keep(ps, 2), mgx-id-pro(ty, nm), rest);
+        }
+        def mgx-id-lift(k, fname) = if mgx-reads(k) then mgx-id-lifted(mgx-params(k), mgx-rest(k), fname) else "";
+
+        // ---- the weight lift: a constant float becomes the router's weight at mgx_slot
+        def mgx-w-lifted(ps, rest, fname, aname) {
+            let ndevs = mgx-cat(mgx-keep(ps, 0), list("device const float* mgx_w"));
+            let ncons = mgx-cat(mgx-drop(mgx-keep(ps, 1), str_concat("constant float& ", aname)), list("constant uint& mgx_slot"));
+            let pro = str_concat("float ", str_concat(aname, " = mgx_w[mgx_slot]; "));
+            mgx-kernel(fname, ndevs, ncons, mgx-keep(ps, 2), pro, rest);
+        }
+        def mgx-w-lift(k, fname, aname) = if mgx-reads(k) then mgx-w-lifted(mgx-params(k), mgx-rest(k), fname, aname) else "";
+
+        // ---- the claim a band reads: the lifted text ENDS with the original body, byte for byte
+        def mgx-tail-of(s, n) = substring(s, sub(str_len(s), n), str_len(s));
+        def mgx-body-kept(k, lifted) = if lt(str_len(lifted), str_len(mgx-rest(k))) then 0 else str_eq(mgx-tail-of(lifted, str_len(mgx-rest(k))), mgx-rest(k));
+
+        // ---- entry points
+        def mgx-matvec-id-msl(fname) = mgx-id-lift(jte-matvec-msl("form_matvec_f32"), fname);
+        def mgx-q6k-lane-id-msl(fname) = mgx-id-lift(qml-lane-msl("form_q6k_matvec_lane_f32", "q6k", "210"), fname);
+        def mgx-q4k-lane-id-msl(fname) = mgx-id-lift(qml-lane-msl("form_q4k_matvec_lane_f32", "q4k", "144"), fname);
+        def mgx-scale-w-msl(fname) = mgx-w-lift(mm-scale-msl("form_scale_f32"), fname, "a");
+        def mgx-axpy-w-msl(fname) = mgx-w-lift(mm-axpy-msl("form_axpy_f32"), fname, "a");
+
+        // header-free: MSL built-ins only, appendable to any unit
+        def mgx-msl-appendix() = str_concat(mgx-matvec-id-msl("form_matvec_id_f32"), str_concat(mgx-scale-w-msl("form_moe_scale_w_f32"), mgx-axpy-w-msl("form_moe_axpy_w_f32")));
+        // for a unit that already carries <metal_stdlib>, the q6k and q4k spines and qml-msl-splits
+        def mgx-lane-appendix() = str_concat(mgx-q6k-lane-id-msl("form_q6k_matvec_lane_id_f32"), mgx-q4k-lane-id-msl("form_q4k_matvec_lane_id_f32"));
+    }
+    0;
+}

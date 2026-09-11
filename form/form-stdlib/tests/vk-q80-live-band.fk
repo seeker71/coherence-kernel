@@ -1,0 +1,56 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form/form-stdlib/form-glsl-layers.bml form/form-stdlib/vk-door.bml
+; Expected: 7
+; PROOF LEVEL: FKWU-STAGED / FOURTH-ARM ONLY (vulkan door: run_vk through host-exec)
+;
+; vk-q80-live-band — a Q8_0 tensor read on the GPU through the Vulkan driver, the format of the
+; model the Qwen lane runs, so the Vulkan lane can carry that model's weights and not only f32.
+;
+; The tensor crosses as raw 32-bit words, its 34-byte blocks packed little-endian end to end, and the
+; shader reads each block's f16 scale and signed bytes out of them itself — the same layout
+; q8-0-msl.fk's attestant reads on Metal. Form builds the blocks from scales and quants it chose, and
+; the recipe is those same weights, d * q, through tb-matvec.
+;
+; Verdict 7 when the device answers:
+;   1  the shader mints and the device names itself
+;   2  4 rows x 64 columns (two blocks a row) is Form's fold of d * q
+;   4  3 rows x 96 columns (three blocks a row), every block its own scale, so a block stride read
+;      one byte off would take the wrong scale and the wrong bytes: Form's fold again
+(do
+    (defn vqb-bit (ok w) (if (eq ok 1) w 0))
+    (defn vqb-d (r b) (nth (list 0.5 0.25 0.125 1.0 0.0625 2.0 0.75 0.375) (mod (add (mul r 3) b) 8)))
+    (defn vqb-q (r j) (sub (mod (add (mul r 7) (mul j 3)) 15) 7))
+    (defn vqb-u8 (q) (if (lt q 0) (add q 256) q))
+    (defn vqb-qs (r b i) (if (ge i 32) (empty) (cons (vqb-u8 (vqb-q r (add (mul b 32) i))) (vqb-qs r b (add i 1)))))
+    (defn vqb-block (r b)
+        (cons (mod (md-f16-bits (vqb-d r b)) 256) (cons (div (md-f16-bits (vqb-d r b)) 256) (vqb-qs r b 0))))
+    (defn vqb-row (r b nb) (if (ge b nb) (empty) (vkd-cat (vqb-block r b) (vqb-row r (add b 1) nb))))
+    (defn vqb-bytes (r rows nb) (if (ge r rows) (empty) (vkd-cat (vqb-row r 0 nb) (vqb-bytes (add r 1) rows nb))))
+    (defn vqb-pad (bs) (if (eq (mod (len bs) 4) 0) bs (vqb-pad (vkd-cat bs (list 0)))))
+    (defn vqb-words (bs)
+        (if (eq (len bs) 0) (empty)
+            (cons (add (nth bs 0) (add (mul (nth bs 1) 256) (add (mul (nth bs 2) 65536) (mul (nth bs 3) 16777216))))
+                  (vqb-words (tail (tail (tail (tail bs))))))))
+    ; the recipe's weights: w(r, j) = d(r, block of j) * q(r, j)
+    (defn vqb-wrow (r j cols) (if (ge j cols) (empty) (cons (mul (vqb-d r (div j 32)) (add (vqb-q r j) 0.0)) (vqb-wrow r (add j 1) cols))))
+    (defn vqb-w (r rows cols) (if (ge r rows) (empty) (cons (vqb-wrow r 0 cols) (vqb-w (add r 1) rows cols))))
+    (defn vqb-x (j n) (if (ge j n) (empty) (cons (div (add (sub (mod (mul j 5) 9) 4) 0.0) 4.0) (vqb-x (add j 1) n))))
+
+    (let XA (vqb-x 0 64))
+    (let XB (vqb-x 0 96))
+    (let e-a (tb-matvec (vqb-w 0 4 64) XA))
+    (let e-b (tb-matvec (vqb-w 0 3 96) XB))
+
+    (let mints (vkd-mint "fgl-q80-matvec" (fgl-q80-matvec)))
+    (let plan (vkd-plan (list
+        (vkd-spv "fgl-q80-matvec")
+        (vkd-bufu (vqb-words (vqb-pad (vqb-bytes 0 4 2)))) (vkd-buf XA) (vkd-zero 4)    ; 0 1 2
+        (vkd-bufu (vqb-words (vqb-pad (vqb-bytes 0 3 3)))) (vkd-buf XB) (vkd-zero 3)    ; 3 4 5
+        (vkd-run 0 (list 0 1 2) (list 4 64) 1)
+        (vkd-run 0 (list 3 4 5) (list 3 96) 1)
+        (vkd-read 2) (vkd-read 5))))
+    (let out (if (eq (vkd-ready?) 1) (vkd-exec "q80" plan) ""))
+
+    (let c0 (if (and (str_eq mints "") (gt (str_len (vkd-device out)) 0)) 1 0))
+    (let c1 (vqb-bit (vkd-agree? (vkd-read-floats out 2) e-a (vkd-eps)) 2))
+    (let c2 (vqb-bit (vkd-agree? (vkd-read-floats out 5) e-b (vkd-eps)) 4))
+    (add c0 (add c1 c2)))

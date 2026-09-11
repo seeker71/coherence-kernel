@@ -1,0 +1,191 @@
+//////////////////////////////////////////////////////////////////////
+//
+// native-lora-reach-run.bml — how far one full LoRA step reaches on this
+// Mac, measured on the real Llama 3.2 3B and its 56-pair voice adapter:
+// the forward that keeps its tape, then the reverse through every adapted
+// layer, at three sequence lengths — and then where one adapted layer's
+// reverse spends its GPU time, kernel class by kernel class.
+//
+//   ./fkwu observe/native-lora-reach-run.bml
+//
+// Step lines: tokens, forward and backward wall ms, the GPU busy
+// microseconds of each, tokens per second over the pair, how many device
+// buffers the tape holds, the loss.
+//
+// Anatomy lines (layer 20, the real views and the real adapter pairs, one
+// class at a time between syncs): the tied head's transposed product, the
+// seven base transposes through nam_affine's transposed path and through
+// the column walk (form_affine4_t_f32, backprop-msl.bml), the LoRA
+// factor products, the attention reverse with both inverse ropes, and the
+// SwiGLU/RMSNorm/residual kernels.
+//
+// Nothing is written and nothing is stepped: the adapter is read, its
+// gradient is computed, and everything is released. Timing is a reading,
+// not a verdict — another process on the same GPU moves it.
+//
+// preludes: form-stdlib/backprop-msl.bml form-stdlib/native-llama-backward.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class NativeLoraReach {
+        def lreach-ids(n, i, acc) = if ge(i, n) then reverse(acc) else lreach-ids(n, add(i, 1), cons(add(1000, mod(mul(i, 7919), 90000)), acc));
+        def lreach-step(model, t) {
+            let ids = lreach-ids(add(t, 1), 0, list());
+            let inputs = take(t, ids);
+            let targets = tail(ids);
+            let ctx = nll-context(model, t);
+            let state = nlb-state(model);
+            let g0 = metal_live();
+            let t0 = host_monotonic_ms();
+            let r = nll-forward(model, ctx, inputs, 0, 1);
+            let t1 = host_monotonic_ms();
+            let g1 = metal_live();
+            let loss = nlb-backward(model, r, targets, state, 1.0);
+            let t2 = host_monotonic_ms();
+            let g2 = metal_live();
+            let closed = nll-forward-close(r);
+            let freed = nlb-state-close(state);
+            let cfree = nll-context-close(ctx);
+            let fwd = sub(t1, t0);
+            let bwd = sub(t2, t1);
+            let shown = print(list("tokens", t, "forward-ms", fwd, "backward-ms", bwd, "forward-gpu-us", sub(nth(g1, 11), nth(g0, 11)), "backward-gpu-us", sub(nth(g2, 11), nth(g1, 11)), "tokens-per-s", div(mul(t, 1000.0), add(add(fwd, bwd), 0.0)), "tape-buffers", sub(nth(g1, 2), nth(g0, 2)), "loss", loss));
+            sub(nth(g2, 11), nth(g1, 11));
+        }
+    }
+    0;
+}
+section [form.bml] {
+    class NativeLoraAnatomy {
+        // a vector of n floats on the device, laid down from one 1024-float
+        // chunk so no long vector ever becomes a Form list or string
+        def lreach-chunk(n, i, acc) = if ge(i, n) then acc else lreach-chunk(n, add(i, 1), str_concat(acc, md-le32(md-f32-bits(div(add(sub(mod(mul(i, 29), 61), 30), 0.0), 64.0)))));
+        def lreach-fill(h, n) = lreach-fill-go(h, 0, n, lreach-chunk(1024, 0, ""));
+        def lreach-fill-go(h, i, n, c) = if ge(i, n) then h else lreach-fill-step(h, i, n, c, metal_buf_write(h, mul(i, 4), if gt(sub(n, i), 1024) then c else substring(c, 0, mul(sub(n, i), 4))));
+        def lreach-fill-step(h, i, n, c, rc) = if le(rc, 0) then form_error("reach door: a fill write did not land") else lreach-fill-go(h, add(i, 1024), n, c);
+        def lreach-buf(n) = lreach-fill(nam-alloc(n), n);
+        def lreach-l20(model) = nth(nth(model, 1), 20);
+        def lreach-projs(l) = list(nth(l, 1), nth(l, 2), nth(l, 3), nth(l, 4), nth(l, 6), nth(l, 7), nth(l, 8));
+        // the tied head's transposed product: vocab rows walked down 3072 columns
+        def lreach-head(model, t, col) {
+            let view = nth(model, 2);
+            let dz = lreach-buf(mul(t, nth(view, 3)));
+            let dn = nam-alloc(mul(t, nth(view, 4)));
+            let run = if col then bpm-affine4-t(view, dz, dn, t) else nam-linear-lanes(view,dz, dn, t, 1);
+            list(dz, dn);
+        }
+        def lreach-tx-go(ps, t, col, acc) = if nil?(ps) then acc else lreach-tx-go(tail(ps), t, col, append(lreach-tx-one(head(ps), t, col), acc));
+        def lreach-tx-one(p, t, col) {
+            let view = head(p);
+            let dy = lreach-buf(mul(t, nth(view, 3)));
+            let dx = nam-alloc(mul(t, nth(view, 4)));
+            let run = if col then bpm-affine4-t(view, dy, dx, t) else nam-linear-lanes(view,dy, dx, t, 1);
+            list(dy, dx);
+        }
+        // the five factor products nlb-linear-pair dispatches for one pair
+        def lreach-lora-go(ps, t, acc) = if nil?(ps) then acc else lreach-lora-go(tail(ps), t, append(lreach-lora-one(nth(head(ps), 1), t), acc));
+        def lreach-lora-one(pair, t) {
+            let din = nth(pair, 3);
+            let rank = nth(pair, 4);
+            let dout = nth(pair, 5);
+            let x = lreach-buf(mul(t, din));
+            let dy = lreach-buf(mul(t, dout));
+            let u = nam-alloc(mul(t, rank));
+            let du = nam-alloc(mul(t, rank));
+            let da = nam-alloc(mul(din, rank));
+            let db = nam-alloc(mul(rank, dout));
+            let dx = nam-alloc(mul(t, din));
+            let a = nam-mm(x, nth(pair, 1), u, t, din, rank, 0, 0, 1.0, 0);
+            let b = nam-mm(u, dy, db, rank, t, dout, 1, 0, nth(pair, 6), 0);
+            let c = nam-mm(dy, nth(pair, 2), du, t, dout, rank, 0, 1, nth(pair, 6), 0);
+            let d = nam-mm(x, du, da, din, t, rank, 1, 0, 1.0, 0);
+            let e = nam-mm(du, nth(pair, 1), dx, t, rank, din, 0, 1, 1.0, 0);
+            list(x, dy, u, du, da, db, dx);
+        }
+        // the attention reverse nlb-block dispatches, with both inverse ropes
+        def lreach-attn(g, t) {
+            let d = nth(g, 0);
+            let nq = nth(g, 2);
+            let nk = nth(g, 3);
+            let hd = nth(g, 4);
+            let kd = mul(nk, hd);
+            let dy = lreach-buf(mul(t, d));
+            let v = lreach-buf(mul(t, kd));
+            let k = lreach-buf(mul(t, kd));
+            let q = lreach-buf(mul(t, d));
+            let p = lreach-buf(mul(t, mul(nq, t)));
+            let dp = nam-alloc(mul(t, mul(nq, t)));
+            let dq = nam-alloc(mul(t, d));
+            let dk = nam-alloc(mul(t, kd));
+            let dv = nam-alloc(mul(t, kd));
+            let a = nlb-run("nlb_dp", list(dy, v, dp), list(t, nq, nk, hd), mul(t, mul(t, nq)), 0);
+            let b = nlb-run("nlb_softmax", list(p, dp), list(t, nq, hd), mul(t, nq), 1);
+            let c = nlb-run("nlb_dq", list(dp, k, dq), list(t, nq, nk, hd), mul(t, d), 0);
+            let e = nlb-run("nlb_dkv", list(p, dp, q, dy, dk, dv), list(t, nq, nk, hd), mul(t, kd), 0);
+            let rq = nll-rope(dq, g, nq, t, 0, 1);
+            let rk = nll-rope(dk, g, nk, t, 0, 1);
+            list(dy, v, k, q, p, dp, dq, dk, dv);
+        }
+        // SwiGLU reverse, both RMSNorm reverses, the four residual/join adds
+        def lreach-elem(g, l, t) {
+            let d = nth(g, 0);
+            let ff = nth(g, 1);
+            let ga = lreach-buf(mul(t, ff));
+            let up = lreach-buf(mul(t, ff));
+            let dact = lreach-buf(mul(t, ff));
+            let dg = nam-alloc(mul(t, ff));
+            let du = nam-alloc(mul(t, ff));
+            let x = lreach-buf(mul(t, d));
+            let inv = lreach-buf(t);
+            let dyd = lreach-buf(mul(t, d));
+            let dx = nam-alloc(mul(t, d));
+            let s = nlb-run("nlb_swiglu", list(ga, up, dact, dg, du), list(mul(t, ff)), mul(t, ff), 0);
+            let r1 = nlb-rms(x, nth(l, 5), inv, dyd, dx, d, t);
+            let r2 = nlb-rms(x, nth(l, 0), inv, dyd, dx, d, t);
+            let a1 = nam-add(dx, dyd, dx, mul(t, d), 1.0);
+            let a2 = nam-add(dx, dyd, dx, mul(t, d), 1.0);
+            let a3 = nam-add(dx, dyd, dx, mul(t, d), 1.0);
+            let a4 = nam-add(dx, dyd, dx, mul(t, d), 1.0);
+            list(ga, up, dact, dg, du, x, inv, dyd, dx);
+        }
+        // Form holds no first-class functions, so the class is named
+        def lreach-class(model, t, tag) = if str_eq(tag, "head-nam") then lreach-head(model, t, 0) else if str_eq(tag, "head-col") then lreach-head(model, t, 1) else if str_eq(tag, "tx-nam") then lreach-tx-go(lreach-projs(lreach-l20(model)), t, 0, list()) else if str_eq(tag, "tx-col") then lreach-tx-go(lreach-projs(lreach-l20(model)), t, 1, list()) else if str_eq(tag, "lora") then lreach-lora-go(lreach-projs(lreach-l20(model)), t, list()) else if str_eq(tag, "attn") then lreach-attn(head(model), t) else lreach-elem(head(model), lreach-l20(model), t);
+        def lreach-timed(model, t, tag) {
+            let s0 = nam-sync();
+            let g0 = nth(metal_live(), 11);
+            let owned = lreach-class(model, t, tag);
+            let s1 = nam-sync();
+            let us = sub(nth(metal_live(), 11), g0);
+            let freed = nam-free(owned);
+            let shown = print(list("anatomy", tag, "tokens", t, "gpu-us", us, "us-per-token", div(add(us, 0.0), t)));
+            us;
+        }
+        def lreach-anatomy(model, t, stepus) {
+            let hn = lreach-timed(model, t, "head-nam");
+            let hc = lreach-timed(model, t, "head-col");
+            let tn = lreach-timed(model, t, "tx-nam");
+            let tc = lreach-timed(model, t, "tx-col");
+            let lo = lreach-timed(model, t, "lora");
+            let at = lreach-timed(model, t, "attn");
+            let el = lreach-timed(model, t, "elem");
+            let layer = add(tn, add(lo, add(at, el)));
+            let walked = add(hn, mul(8, layer));
+            let shown = print(list("anatomy-sum", "tokens", t, "one-layer-us", layer, "head-plus-8-layers-us", walked, "measured-backward-us", stepus, "column-walk-saves-us", add(sub(hn, hc), mul(8, sub(tn, tc)))));
+            walked;
+        }
+        def lreach-report() {
+            let base = mr-path(mr-find("llama32-3b-mlx-4bit"));
+            let o0 = host_monotonic_ms();
+            let model = nll-open(base, "form/form-stdlib/adapters/llama-3.2-3b-voice");
+            let opened = print(list("model", base, "pairs", nll-pair-count(nth(model, 1)), "open-ms", sub(host_monotonic_ms(), o0)));
+            let a = lreach-step(model, 16);
+            let b = lreach-step(model, 64);
+            let c = lreach-step(model, 256);
+            let anatomy = lreach-anatomy(model, 64, b);
+            let closed = nll-close(model);
+            let left = print(list("live-buffers-after", nth(metal_live(), 2)));
+            1;
+        }
+    }
+    lreach-report();
+}

@@ -246,6 +246,78 @@
             (qmb-batch-msl-n "form_q8_0_matmul_batch_f32" "q8_0"
                 (qmb-q80-stride) (qmb-q80-block))))
 
+    ; ── the shared-activation twin ─────────────────────────────────────────
+    ; The batched kernel above re-reads a tile's activations once per weight row: for a 17408 x 5120
+    ; FFN tensor at 577 tokens, 17408 row-walks over the same x. Timed alone on the Qwen lane
+    ; (observe/qwen38-span-matmul-probe.bml, 2026-09-11) it ran at 146 to 458 GFLOPS against the
+    ; 25.77 TFLOPS the floor lens read. This twin hands a threadgroup G rows and stages the tile of x
+    ; in threadgroup memory one KC-wide chunk at a time, so each activation is read once per G rows.
+    ; Every (row, token) sum is walked in the batched kernel's own order — the chunks count down and
+    ; the lane's steps inside a chunk count down, so j = lane + 32k descends exactly as before — the
+    ; weight is decoded by the same helpers and simd_sum closes the same 32 partial sums. It answers
+    ; the batched kernel's bytes, not an epsilon of them (q8-0-matmul-tg-band). No helpers of its own:
+    ; it follows qmb-q80-batch in the unit. Grid: ceil(rows / G) * ntile * 32G, group 32G.
+    (defn qmb-batch-tg-msl-n (fname pfx stride blockn T G KC)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant uint& ystride [[buffer(6)]], uint gid [[thread_position_in_grid]]) { "
+        (str_concat (str_concat "threadgroup float xs[" (str_concat (int_to_str (mul T KC)) "]; "))
+        (str_concat (str_concat "uint gs = " (str_concat (int_to_str (mul 32 G)) "u; uint tid = gid % gs; uint grp = gid / gs; uint sg = tid / 32u; uint lane = tid % 32u; "))
+        (str_concat (str_concat "uint ntile = (ntok + " (str_concat (int_to_str (sub T 1)) (str_concat "u) / " (str_concat (int_to_str T) "u; uint rg = grp / ntile; uint tile = grp - rg * ntile; "))))
+        (str_concat (str_concat "uint r = rg * " (str_concat (int_to_str G) (str_concat "u + sg; uint t0 = tile * " (str_concat (int_to_str T) "u; bool live = r < rows; "))))
+        (str_concat (str_concat "float acc[" (str_concat (int_to_str T) (str_concat "]; for (uint i = 0; i < " (str_concat (int_to_str T) "u; ++i) { acc[i] = 0.0f; } uint curblk = 4294967295u; uint b = 0u; float2 inv = float2(0.0f, 0.0f); "))))
+        (str_concat (str_concat "uint c = (cols + " (str_concat (int_to_str (sub KC 1)) (str_concat "u) / " (str_concat (int_to_str KC) (str_concat "u; while (c > 0u) { c -= 1u; uint kc = c * " (str_concat (int_to_str KC) "u; "))))))
+        (str_concat "threadgroup_barrier(metal::mem_flags::mem_threadgroup); "
+        (str_concat (str_concat "for (uint q = tid; q < " (str_concat (int_to_str (mul T KC)) (str_concat "u; q += gs) { uint ti = q / " (str_concat (int_to_str KC) (str_concat "u; uint jj = q - ti * " (str_concat (int_to_str KC) "u; uint tq = t0 + ti; uint jq = kc + jj; xs[q] = (tq < ntok && jq < cols) ? x[tq * cols + jq] : 0.0f; } "))))))
+        (str_concat "threadgroup_barrier(metal::mem_flags::mem_threadgroup); "
+        (str_concat (str_concat "if (live) { uint m = " (str_concat (int_to_str (div KC 32)) "u; while (m > 0u) { m -= 1u; uint j = kc + lane + m * 32u; if (j < cols) { "))
+        (str_concat (str_concat "uint idx = r * cols + j; uint blk = idx / " (str_concat blockn (str_concat "u; if (blk != curblk) { curblk = blk; b = blk * " (str_concat stride (str_concat "u; inv = " (str_concat pfx (str_concat "_inv(qb, b); } float w = " (str_concat pfx (str_concat "_wi(qb, b, int(idx - blk * " (str_concat blockn "u), inv); "))))))))))
+        (str_concat (str_concat "for (uint i = 0; i < " (str_concat (int_to_str T) (str_concat "u; ++i) { uint t = t0 + i; if (t < ntok) { float pr = w * xs[i * " (str_concat (int_to_str KC) "u + (j - kc)]; acc[i] = pr + acc[i]; } } } } } } "))))
+                    (str_concat (str_concat "for (uint i = 0; i < " (str_concat (int_to_str T) "u; ++i) { float s = metal::simd_sum(acc[i]); uint t = t0 + i; if (live && lane == 0 && t < ntok) { y[t * ystride + r] = s; } } }")) "")))))))))))))))))
+
+    ; the Q8_0 instance the Qwen lane dispatches: eight tokens a tile (the batched kernel's own
+    ; tile, so the token tiling and every sum are unchanged), eight rows a group, 256-wide chunks
+    (defn qmb-q80-tg-t () 8)
+    (defn qmb-q80-tg-g () 8)
+    (defn qmb-q80-batch-tg ()
+        (qmb-batch-tg-msl-n "form_q8_0_matmul_batch_tg_f32" "q8_0"
+            (qmb-q80-stride) (qmb-q80-block) (qmb-q80-tg-t) (qmb-q80-tg-g) 256))
+    (defn qmb-tg-groups (rows ntok) (mul (div (add rows (sub (qmb-q80-tg-g) 1)) (qmb-q80-tg-g)) (qmb-ntile ntok)))
+
+    ; ── the matrix-unit twin ───────────────────────────────────────────────
+    ; The shared-activation twin kept every byte and did not move the time: gate and up ran as long
+    ; as before, because the batched kernel spends its time in scalar multiply-adds, one weight at a
+    ; time, and staging the activations changes none of them. This one spends it where the hardware
+    ; is: simdgroup_multiply_accumulate over 8x8 tiles, the unit llama-bench reports on this M4 Max
+    ; ("simdgroup matrix mul. = true") and ear-msl.fk's ear_gemm_f already uses. Its shape is that
+    ; kernel's: a 32-token x 32-row output tile, 256 threads as 8 simdgroups each owning an 8x16 block
+    ; through two accumulators, K walked 32 at a time — and a Q8_0 block IS 32 weights, so each step
+    ; dequantizes one block per row into threadgroup memory (d * q as float: 19 bits, which half would
+    ; round) beside the 32 x 32 activations, and the tile lands through the same memory for a bounded
+    ; write. The hardware chooses the association, so this answers to an epsilon, and it is the one
+    ; the lane already names: any association of `cols` terms is bounded by qmb-bound-coeff(cols) * u *
+    ; sum|term| (q8-0-matmul-mma-band). Dispatched as threadgroups: ceil(ntok/32) * ceil(rows/32), 256.
+    (defn qmb-q80-mma ()
+        (str_concat "kernel void form_q8_0_matmul_mma_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant uint& ystride [[buffer(6)]], uint gr [[threadgroup_position_in_grid]], uint lt [[thread_index_in_threadgroup]]) { "
+        (str_concat "threadgroup float xs[1024]; threadgroup float ws[1024]; "
+        (str_concat "uint tilesN = (rows + 31u) / 32u; uint tgx = gr % tilesN; uint tgy = gr / tilesN; uint n0 = tgx * 32u; uint t0 = tgy * 32u; "
+        (str_concat "uint sg = lt / 32u; uint r4 = sg / 2u; uint c2 = sg - r4 * 2u; "
+        (str_concat "metal::simdgroup_float8x8 acc0 = metal::simdgroup_float8x8(0.0f); metal::simdgroup_float8x8 acc1 = metal::simdgroup_float8x8(0.0f); "
+        (str_concat "uint xr = lt / 8u; uint xc = (lt % 8u) * 4u; uint xt = t0 + xr; uint wn = lt / 8u; uint wc = (lt % 8u) * 4u; uint wrow = n0 + wn; "
+        (str_concat "for (uint k0 = 0u; k0 < cols; k0 += 32u) { "
+        (str_concat "for (uint j = 0u; j < 4u; j++) { xs[xr * 32u + xc + j] = (xt < ntok) ? x[xt * cols + k0 + xc + j] : 0.0f; } "
+        (str_concat "float d = 0.0f; uint b = 0u; if (wrow < rows) { b = ((wrow * cols + k0) / 32u) * 34u; ushort h = (ushort)qb[b] | ((ushort)qb[b + 1u] << 8); d = float(as_type<half>(h)); } "
+        (str_concat "for (uint j = 0u; j < 4u; j++) { ws[(wc + j) * 32u + wn] = (wrow < rows) ? d * float((char)qb[b + 2u + wc + j]) : 0.0f; } "
+        (str_concat "threadgroup_barrier(metal::mem_flags::mem_threadgroup); "
+        (str_concat "for (uint kb = 0u; kb < 4u; kb++) { metal::simdgroup_float8x8 a; metal::simdgroup_float8x8 b0m; metal::simdgroup_float8x8 b1m; "
+        (str_concat "metal::simdgroup_load(a, xs + (r4 * 8u) * 32u + kb * 8u, 32); metal::simdgroup_load(b0m, ws + (kb * 8u) * 32u + c2 * 16u, 32); metal::simdgroup_load(b1m, ws + (kb * 8u) * 32u + c2 * 16u + 8u, 32); "
+        (str_concat "metal::simdgroup_multiply_accumulate(acc0, a, b0m, acc0); metal::simdgroup_multiply_accumulate(acc1, a, b1m, acc1); } "
+        (str_concat "threadgroup_barrier(metal::mem_flags::mem_threadgroup); } "
+        (str_concat "metal::simdgroup_store(acc0, xs + (r4 * 8u) * 32u + c2 * 16u, 32); metal::simdgroup_store(acc1, xs + (r4 * 8u) * 32u + c2 * 16u + 8u, 32); "
+        (str_concat "threadgroup_barrier(metal::mem_flags::mem_threadgroup); "
+                    "uint tx = lt % 16u; uint ty = lt / 16u; for (uint i = 0u; i < 2u; i++) { uint t = t0 + ty * 2u + i; if (t >= ntok) { continue; } for (uint j = 0u; j < 2u; j++) { uint n = n0 + tx * 2u + j; if (n >= rows) { continue; } y[t * ystride + n] = xs[(ty * 2u + i) * 32u + tx * 2u + j]; } } }"))))))))))))))))))
+    (defn qmb-mma-groups (rows ntok) (mul (div (add ntok 31) 32) (div (add rows 31) 32)))
+
     (defn qmb-msl-appendix ()
         (str_concat (qmb-batch-msl "form_q6k_matmul_batch_f32" "q6k" "210")
                     (qmb-batch-msl "form_q4k_matmul_batch_f32" "q4k" "144")))

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# metal_whole_tensor_residency_audit.sh — GPU_GAPS §C beyond one tile, made a witness.
+# metal_whole_tensor_residency_audit.sh — the witness that whole quantized tensors, not one tile, live on the device.
 #
 # The claim, and nothing wider: the WHOLE of llama3.2:3b lives on the GPU in its QUANTIZED form —
 # every one of its 3 212 749 888 weights, all 28 layers, 2 011 539 712 bytes — mapped once and never
@@ -44,7 +44,7 @@
 #                                           many steps with zero reallocation, contents verified.
 #
 # Run:  form/native/metal/metal_whole_tensor_residency_audit.sh [iters] [steps]     (defaults 200 64)
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal row in GPU_GAPS.md.
+# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form

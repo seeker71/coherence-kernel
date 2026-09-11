@@ -1,0 +1,143 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/llama-block.fk form-stdlib/bml/form-glsl.bml form/form-stdlib/form-glsl-layers.bml form/form-stdlib/vk-door.bml
+; Expected: 31
+; PROOF LEVEL: FKWU-STAGED / FOURTH-ARM ONLY (vulkan door: run_vk through host-exec)
+;
+; vk-blocks-live-band — whole blocks as Vulkan kernel graphs on this host's GPU: the FFN that
+; bml/form-glsl.bml emits as one dispatch, a pre-LN transformer block, and a Llama decoder block both
+; bidirectional and causal, each composed from the layer shaders and each held to the recipe the
+; block IS — tb-ffn, tb-block, lblk-block, lblk-block-causal. One plan, one command buffer, 37
+; dispatches with a barrier between neighbours; intermediates never leave the device.
+;
+; RoPE's angles come from rope.fk's own rope-angle through trig.fk's fcos and fsin, computed once in
+; Form and handed to the rotation as a table: the trigonometry keeps one home. Head dim 4 over a
+; width of 4, so the two pairs turn at different rates (10000^0 and 10000^-1/2).
+;
+; Verdict 31 when the graphs run:
+;    1  the nine shaders mint and the device names itself
+;    2  the single-dispatch FFN (fglsl-ffn-fwd) is tb-ffn
+;    4  layernorm, q/k/v, attention, o, residual, layernorm, FFN, residual is tb-block
+;    8  rmsnorm, q/k/v, RoPE on q and k, attention, o, residual, rmsnorm, SwiGLU FFN, residual is
+;       lblk-block
+;   16  the same Llama block with causal attention is lblk-block-causal
+(do
+    (defn vbb-bit (ok w) (if (eq ok 1) w 0))
+    (defn vbb-v (i j s) (div (sub (mod (add (add (mul i 7) (mul j 5)) (mul s 3)) 13) 6) 8.0))
+    (defn vbb-row (i j c s) (if (ge j c) (empty) (cons (vbb-v i j s) (vbb-row i (add j 1) c s))))
+    (defn vbb-mat (i r c s) (if (ge i r) (empty) (cons (vbb-row i 0 c s) (vbb-mat (add i 1) r c s))))
+    (defn vbb-cs (t p T hp HD)
+        (if (ge t T) (empty)
+            (if (ge p hp) (vbb-cs (add t 1) 0 T hp HD)
+                (cons (fcos (rope-angle t (mod (mul 2 p) HD) HD))
+                      (cons (fsin (rope-angle t (mod (mul 2 p) HD) HD))
+                            (vbb-cs t (add p 1) T hp HD))))))
+
+    ; --- the single-dispatch FFN: indim 3, hid 4, outd 2 ---
+    (let FW1 (vbb-mat 0 4 3 1)) (let FC1 (vbb-row 0 0 4 2)) (let FW2 (vbb-mat 0 2 4 3)) (let FC2 (vbb-row 1 0 2 4))
+    (let FX (list 1.0 -0.5 0.25))
+    (let e-ffn (tb-ffn FW1 FC1 FW2 FC2 FX))
+
+    ; --- the pre-LN transformer block: 2 tokens, width 4, hidden 6 ---
+    (let XS (list (list 0.5 -1.0 0.25 1.5) (list -0.75 0.5 1.0 -0.25)))
+    (let EPS 0.00001)
+    (let G1 (list 1.0 0.5 1.5 -1.0)) (let BE1 (list 0.0 0.25 -0.25 0.5))
+    (let WQ (vbb-mat 0 4 4 5)) (let BQ (vbb-row 2 0 4 6))
+    (let WK (vbb-mat 0 4 4 7)) (let BK (vbb-row 3 0 4 8))
+    (let WV (vbb-mat 0 4 4 9)) (let BV (vbb-row 4 0 4 10))
+    (let WO (vbb-mat 0 4 4 11)) (let BO (vbb-row 5 0 4 12))
+    (let G2 (list 0.75 1.25 -0.5 1.0)) (let BE2 (list 0.125 0.0 -0.125 0.25))
+    (let W1 (vbb-mat 0 6 4 13)) (let C1 (vbb-row 6 0 6 14))
+    (let W2 (vbb-mat 0 4 6 15)) (let C2 (vbb-row 7 0 4 16))
+    (let SCALE 0.5)
+    (let e-blk (vkd-flat (tb-block XS EPS G1 BE1 WQ BQ WK BK WV BV WO BO SCALE G2 BE2 W1 C1 W2 C2)))
+
+    ; --- the Llama block: 3 tokens, width 4, head dim 4, hidden 6, no biases ---
+    (let LX (list (list 0.5 -1.0 0.25 1.5) (list -0.75 0.5 1.0 -0.25) (list 1.25 0.75 -0.5 0.125)))
+    (let LG1 (list 1.0 0.5 1.5 -1.0)) (let LG2 (list 0.75 1.25 -0.5 1.0))
+    (let LWQ (vbb-mat 0 4 4 17)) (let LWK (vbb-mat 0 4 4 18)) (let LWV (vbb-mat 0 4 4 19)) (let LWO (vbb-mat 0 4 4 20))
+    (let LWG (vbb-mat 0 6 4 21)) (let LWU (vbb-mat 0 6 4 22)) (let LWD (vbb-mat 0 4 6 23))
+    (let CS (vbb-cs 0 0 3 2 4))
+    (let e-lb (vkd-flat (lblk-block LX LG1 EPS LWQ LWK LWV LWO SCALE 4 LG2 LWG LWU LWD)))
+    (let e-lbc (vkd-flat (lblk-block-causal LX LG1 EPS LWQ LWK LWV LWO SCALE 4 LG2 LWG LWU LWD)))
+
+    (let mints (vkd-plan (list (vkd-mint "fglsl-ffn" (fglsl-ffn-fwd "64")) (vkd-mint "fgl-layernorm" (fgl-layernorm))
+                               (vkd-mint "fgl-proj" (fgl-proj)) (vkd-mint "fgl-attention" (fgl-attention))
+                               (vkd-mint "fgl-residual" (fgl-residual)) (vkd-mint "fgl-gelu" (fgl-gelu))
+                               (vkd-mint "fgl-rmsnorm" (fgl-rmsnorm)) (vkd-mint "fgl-rope" (fgl-rope)) (vkd-mint "fgl-swiglu" (fgl-swiglu)))))
+    (let ea (vkd-f EPS))
+    (let sa (vkd-f SCALE))
+    (let plan (vkd-plan (list
+        (vkd-spv "fglsl-ffn") (vkd-spv "fgl-layernorm") (vkd-spv "fgl-proj") (vkd-spv "fgl-attention") (vkd-spv "fgl-residual")
+        (vkd-spv "fgl-gelu") (vkd-spv "fgl-rmsnorm") (vkd-spv "fgl-rope") (vkd-spv "fgl-swiglu")
+        ; FFN                                                                         0..6
+        (vkd-buf (vkd-flat FW1)) (vkd-buf FC1) (vkd-buf (vkd-flat FW2)) (vkd-buf FC2) (vkd-buf FX) (vkd-zero 2) (vkd-zero 4)
+        ; transformer block                                                           7..36
+        (vkd-buf (vkd-flat XS)) (vkd-buf G1) (vkd-buf BE1) (vkd-zero 8)
+        (vkd-buf (vkd-flat WQ)) (vkd-buf BQ) (vkd-buf (vkd-flat WK)) (vkd-buf BK) (vkd-buf (vkd-flat WV)) (vkd-buf BV)
+        (vkd-zero 8) (vkd-zero 8) (vkd-zero 8) (vkd-zero 8) (vkd-zero 4)
+        (vkd-buf (vkd-flat WO)) (vkd-buf BO) (vkd-zero 8) (vkd-zero 8)
+        (vkd-buf G2) (vkd-buf BE2) (vkd-zero 8)
+        (vkd-buf (vkd-flat W1)) (vkd-buf C1) (vkd-zero 12) (vkd-zero 12)
+        (vkd-buf (vkd-flat W2)) (vkd-buf C2) (vkd-zero 8) (vkd-zero 8)
+        ; Llama block                                                                 37..65
+        (vkd-buf (vkd-flat LX)) (vkd-buf LG1) (vkd-zero 12)
+        (vkd-buf (vkd-flat LWQ)) (vkd-buf (vkd-flat LWK)) (vkd-buf (vkd-flat LWV)) (vkd-zero 4)
+        (vkd-zero 12) (vkd-zero 12) (vkd-zero 12)
+        (vkd-buf CS) (vkd-zero 12) (vkd-zero 12)
+        (vkd-zero 12) (vkd-zero 9)
+        (vkd-buf (vkd-flat LWO)) (vkd-zero 12) (vkd-zero 12)
+        (vkd-buf LG2) (vkd-zero 12)
+        (vkd-buf (vkd-flat LWG)) (vkd-buf (vkd-flat LWU)) (vkd-zero 6) (vkd-zero 18) (vkd-zero 18) (vkd-zero 18)
+        (vkd-buf (vkd-flat LWD)) (vkd-zero 12) (vkd-zero 12)
+        ; the causal Llama tail                                                       66..75
+        (vkd-zero 12) (vkd-zero 9) (vkd-zero 12) (vkd-zero 12) (vkd-zero 12)
+        (vkd-zero 18) (vkd-zero 18) (vkd-zero 18) (vkd-zero 12) (vkd-zero 12)
+        ; FFN
+        (vkd-run 0 (list 0 1 2 3 4 5 6) (list 3 4 2) 1)
+        ; transformer block
+        (vkd-run 1 (list 7 8 9 10) (list 2 4 ea) 1)
+        (vkd-run 2 (list 10 11 12 17) (list 2 4 4) 1)
+        (vkd-run 2 (list 10 13 14 18) (list 2 4 4) 1)
+        (vkd-run 2 (list 10 15 16 19) (list 2 4 4) 1)
+        (vkd-run 3 (list 17 18 19 20 21) (list 2 2 4 1 1 sa 0) 1)
+        (vkd-run 2 (list 20 22 23 24) (list 2 4 4) 1)
+        (vkd-run 4 (list 7 24 25) (list 8) 1)
+        (vkd-run 1 (list 25 26 27 28) (list 2 4 ea) 1)
+        (vkd-run 2 (list 28 29 30 31) (list 2 4 6) 1)
+        (vkd-run 5 (list 31 32) (list 12) 1)
+        (vkd-run 2 (list 32 33 34 35) (list 2 6 4) 1)
+        (vkd-run 4 (list 25 35 36) (list 8) 1)
+        ; Llama block
+        (vkd-run 6 (list 37 38 39) (list 3 4 ea) 1)
+        (vkd-run 2 (list 39 40 43 44) (list 3 4 4) 1)
+        (vkd-run 2 (list 39 41 43 45) (list 3 4 4) 1)
+        (vkd-run 2 (list 39 42 43 46) (list 3 4 4) 1)
+        (vkd-run 7 (list 44 47 48) (list 3 4) 1)
+        (vkd-run 7 (list 45 47 49) (list 3 4) 1)
+        (vkd-run 3 (list 48 49 46 50 51) (list 3 3 4 1 1 sa 0) 1)
+        (vkd-run 2 (list 50 52 43 53) (list 3 4 4) 1)
+        (vkd-run 4 (list 37 53 54) (list 12) 1)
+        (vkd-run 6 (list 54 55 56) (list 3 4 ea) 1)
+        (vkd-run 2 (list 56 57 59 60) (list 3 4 6) 1)
+        (vkd-run 2 (list 56 58 59 61) (list 3 4 6) 1)
+        (vkd-run 8 (list 60 61 62) (list 18) 1)
+        (vkd-run 2 (list 62 63 43 64) (list 3 6 4) 1)
+        (vkd-run 4 (list 54 64 65) (list 12) 1)
+        ; the causal Llama tail, from the same roped q and k
+        (vkd-run 3 (list 48 49 46 66 67) (list 3 3 4 1 1 sa 1) 1)
+        (vkd-run 2 (list 66 52 43 68) (list 3 4 4) 1)
+        (vkd-run 4 (list 37 68 69) (list 12) 1)
+        (vkd-run 6 (list 69 55 70) (list 3 4 ea) 1)
+        (vkd-run 2 (list 70 57 59 71) (list 3 4 6) 1)
+        (vkd-run 2 (list 70 58 59 72) (list 3 4 6) 1)
+        (vkd-run 8 (list 71 72 73) (list 18) 1)
+        (vkd-run 2 (list 73 63 43 74) (list 3 6 4) 1)
+        (vkd-run 4 (list 69 74 75) (list 12) 1)
+        (vkd-read 5) (vkd-read 36) (vkd-read 65) (vkd-read 75))))
+    (let out (if (eq (vkd-ready?) 1) (vkd-exec "blocks" plan) ""))
+
+    (let c0 (if (and (str_eq mints "") (gt (str_len (vkd-device out)) 0)) 1 0))
+    (let c1 (vbb-bit (vkd-agree? (vkd-read-floats out 5) e-ffn (vkd-eps)) 2))
+    (let c2 (vbb-bit (vkd-agree? (vkd-read-floats out 36) e-blk (vkd-eps)) 4))
+    (let c3 (vbb-bit (vkd-agree? (vkd-read-floats out 65) e-lb (vkd-eps)) 8))
+    (let c4 (vbb-bit (vkd-agree? (vkd-read-floats out 75) e-lbc (vkd-eps)) 16))
+    (add c0 (add c1 (add c2 (add c3 c4)))))

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# metal_weight_residency_audit.sh — GPU_GAPS §C "Weight load -> device", made a witness.
+# metal_weight_residency_audit.sh — the witness that real weights load onto the device.
 #
 # The claim, and nothing wider: REAL llama3.2:3b Q6_K weights, located by NAME in the 2 GB blob and
 # dequantized by Form's own recipes, are uploaded ONCE into an MTLBuffer, stay RESIDENT there across
@@ -32,7 +32,7 @@
 #                                 output checksum after the last dispatch.
 #
 # Run:  form/native/metal/metal_weight_residency_audit.sh [rows cols iters]   (defaults 256 256 200)
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal row in GPU_GAPS.md.
+# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form

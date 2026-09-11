@@ -1,0 +1,90 @@
+; preludes: form-stdlib/core.fk form-stdlib/metal-door.fk form-stdlib/f16-decode.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matmul-batch.fk form-stdlib/lora-adapter.bml
+; Expected: 15
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+;
+; q8-0-matmul-mma-band — the matrix-unit twin of the batched Q8_0 matmul answers the recipe within
+; the bound the lane already names, on this Mac's GPU.
+;
+; The twin (qmb-q80-mma) folds each (row, token) sum through simdgroup_multiply_accumulate, so the
+; hardware picks the association and bytes are not the claim. The claim is the lane's own epsilon:
+; any association of `cols` products lies within qmb-bound-coeff(cols) * 2^-24 * sum|term| of the
+; exact sum. Form computes that exact sum in fp64 for every output, and its sum of magnitudes, and
+; holds the twin to it — and holds the batched kernel to the same bound beside it, so the band would
+; notice a bound too loose to separate them.
+;
+; The data is chosen to make order show: activations are fractions of 13, the f16 scales sit off the
+; powers of two, and the shapes end partway through a 32-row tile, a 32-token tile and (for the
+; first) nowhere near a round number of blocks.
+;
+; Verdict 15:
+;   1  both kernels mint in one unit and both dispatches come back clean
+;   2  77 rows x 320 columns x 21 tokens: every twin output within the bound of the fp64 sum
+;   4  64 rows x 544 columns x 45 tokens: the same
+;   8  the batched kernel is within the same bound on both shapes, and neither output is all zeros
+(do
+    (defn qmm-d (r b) (nth (list 0.0123 -0.0457 0.0311 0.0089 -0.0205 0.0662 -0.0149 0.0278) (mod (add (mul r 3) b) 8)))
+    (defn qmm-q (r j) (sub (mod (add (mul r 37) (mul j 11)) 255) 127))
+    (defn qmm-u8 (q) (if (lt q 0) (add q 256) q))
+    (defn qmm-qs (r b i acc) (if (ge i 32) acc (qmm-qs r b (add i 1) (str_concat acc (byte_to_str (qmm-u8 (qmm-q r (add (mul b 32) i))))))))
+    (defn qmm-block (r b)
+        (str_concat (str_concat (byte_to_str (mod (md-f16-bits (qmm-d r b)) 256)) (byte_to_str (div (md-f16-bits (qmm-d r b)) 256)))
+                    (qmm-qs r b 0 "")))
+    (defn qmm-put-w (h r rows nb b)
+        (if (ge r rows) h
+            (if (ge b nb) (qmm-put-w h (add r 1) rows nb 0)
+                (do (let w (metal_buf_write h (mul 34 (add (mul r nb) b)) (qmm-block r b)))
+                    (qmm-put-w h r rows nb (add b 1))))))
+    (defn qmm-x (t j) (div (add (sub (mod (add (mul t 29) (mul j 7)) 97) 48) 0.0) 13.0))
+    (defn qmm-xrow (t j cols acc) (if (ge j cols) acc (qmm-xrow t (add j 1) cols (str_concat acc (md-le32 (md-f32-bits (qmm-x t j)))))))
+    (defn qmm-put-x (h t ntok cols)
+        (if (ge t ntok) h
+            (do (let w (metal_buf_write h (mul 4 (mul t cols)) (qmm-xrow t 0 cols "")))
+                (qmm-put-x h (add t 1) ntok cols))))
+    ; the weight the block holds, decoded the way the recipe reads f16 (fd-f16 of the stored bits)
+    (defn qmm-w (r j) (mul (fd-f16 (md-f16-bits (qmm-d r (div j 32)))) (add (qmm-q r j) 0.0)))
+    (defn qmm-abs (v) (if (lt v 0.0) (sub 0.0 v) v))
+    ; (exact-sum abs-sum) for output (t, r), in fp64
+    (defn qmm-sums (r t j cols s a)
+        (if (ge j cols) (list s a)
+            (qmm-sums r t (add j 1) cols (add s (mul (qmm-w r j) (qmm-x t j))) (add a (qmm-abs (mul (qmm-w r j) (qmm-x t j)))))))
+    (defn qmm-f (bytes i) (ln-f32-decode (ln-u32-le bytes (mul 4 i))))
+    ; every output within coeff * 2^-24 * sum|term| of the fp64 sum; y is token-major with ystride = rows
+    (defn qmm-within? (bytes rows cols ntok t r coeff)
+        (if (ge t ntok) 1
+            (if (ge r rows) (qmm-within? bytes rows cols ntok (add t 1) 0 coeff)
+                (do (let sa (qmm-sums r t 0 cols 0.0 0.0))
+                    (let got (qmm-f bytes (add (mul t rows) r)))
+                    (if (le (qmm-abs (sub got (nth sa 0))) (mul (mul coeff 0.000000059604644775390625) (add (nth sa 1) 0.000000000001)))
+                        (qmm-within? bytes rows cols ntok t (add r 1) coeff) 0)))))
+    (defn qmm-zero? (s i n) (if (ge i n) 1 (if (eq (str_byte_at s i) 0) (qmm-zero? s (add i 1) n) 0)))
+    ; answers (batched-bytes mma-bytes clean)
+    (defn qmm-run (pb pm rows cols ntok)
+        (do (let nb (div cols 32))
+            (let qh (qmm-put-w (metal_buf_alloc (mul 34 (mul rows nb))) 0 rows nb 0))
+            (let xh (qmm-put-x (metal_buf_alloc (mul 4 (mul ntok cols))) 0 ntok cols))
+            (let yb (metal_buf_alloc (mul 4 (mul ntok rows))))
+            (let ym (metal_buf_alloc (mul 4 (mul ntok rows))))
+            (let e1 (metal_enqueue pb (md-bind16 (list qh xh yb) (list rows cols ntok rows) 256 0 0 0)
+                        (mul (mul rows (qmb-ntile ntok)) 32)))
+            (let e2 (metal_enqueue pm (md-bind16 (list qh xh ym) (list rows cols ntok rows) 256 0 1 0)
+                        (qmb-mma-groups rows ntok)))
+            (let s (metal_sync))
+            (list (metal_buf_read yb 0 (mul 4 (mul ntok rows)))
+                  (metal_buf_read ym 0 (mul 4 (mul ntok rows)))
+                  (if (and (eq e1 1) (and (eq e2 1) (ge s 0))) 1 0))))
+
+    (let unit (str_concat "#include <metal_stdlib>\n" (str_concat (qmb-q80-batch) (qmb-q80-mma))))
+    (let pb (metal_pipeline unit "form_q8_0_matmul_batch_f32"))
+    (let pm (metal_pipeline unit "form_q8_0_matmul_mma_f32"))
+    (let a (qmm-run pb pm 77 320 21))
+    (let b (qmm-run pb pm 64 544 45))
+    (let ca (qmb-bound-coeff 320))
+    (let cb (qmb-bound-coeff 544))
+
+    (let c0 (if (and (gt pb 0) (and (gt pm 0) (and (eq (nth a 2) 1) (eq (nth b 2) 1)))) 1 0))
+    (let c1 (if (eq (qmm-within? (nth a 1) 77 320 21 0 0 ca) 1) 2 0))
+    (let c2 (if (eq (qmm-within? (nth b 1) 64 544 45 0 0 cb) 1) 4 0))
+    (let c3 (if (and (eq (qmm-within? (nth a 0) 77 320 21 0 0 ca) 1)
+                (and (eq (qmm-within? (nth b 0) 64 544 45 0 0 cb) 1)
+                (and (eq (qmm-zero? (nth a 1) 0 (str_len (nth a 1))) 0) (eq (qmm-zero? (nth b 1) 0 (str_len (nth b 1))) 0)))) 8 0))
+    (add c0 (add c1 (add c2 c3))))

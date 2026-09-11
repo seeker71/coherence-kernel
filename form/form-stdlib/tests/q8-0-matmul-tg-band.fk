@@ -1,0 +1,71 @@
+; preludes: form-stdlib/core.fk form-stdlib/metal-door.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matmul-batch.fk form-stdlib/lora-adapter.bml
+; Expected: 15
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+;
+; q8-0-matmul-tg-band — the shared-activation twin of the batched Q8_0 matmul answers the batched
+; kernel's own bytes on this Mac's GPU.
+;
+; The batched kernel (qmb-q80-batch) walks each (row, token) sum lane by lane down the columns and
+; closes it with simd_sum; it re-reads the activations once per weight row. The twin
+; (qmb-q80-batch-tg) stages each tile of activations in threadgroup memory once for eight rows and
+; walks every sum in the same order. Equality here is byte equality of the whole output, on data where
+; the association would show: the activations are fractions of 13, inexact in binary, and the scales
+; are f16 values chosen off the powers of two.
+;
+; The shapes are chosen to land on every edge the twin adds: rows that do not fill a group of eight,
+; columns that end partway through a 256-wide chunk and partway through a 32-weight block, and token
+; counts that do not fill a tile of eight.
+;
+; Verdict 15:
+;   1  both kernels mint in one unit, and both dispatches come back clean
+;   2  77 rows x 320 columns x 21 tokens: the twin's output is the batched kernel's, byte for byte
+;   4  200 rows x 1056 columns x 13 tokens: the same
+;   8  the outputs are not the zeros they started as: both kernels ran
+(do
+    (defn qtb-d (r b) (nth (list 0.0123 -0.0457 0.0311 0.0089 -0.0205 0.0662 -0.0149 0.0278) (mod (add (mul r 3) b) 8)))
+    (defn qtb-q (r j) (sub (mod (add (mul r 37) (mul j 11)) 255) 127))
+    (defn qtb-u8 (q) (if (lt q 0) (add q 256) q))
+    (defn qtb-qs (r b i acc) (if (ge i 32) acc (qtb-qs r b (add i 1) (str_concat acc (byte_to_str (qtb-u8 (qtb-q r (add (mul b 32) i))))))))
+    (defn qtb-block (r b)
+        (str_concat (str_concat (byte_to_str (mod (md-f16-bits (qtb-d r b)) 256)) (byte_to_str (div (md-f16-bits (qtb-d r b)) 256)))
+                    (qtb-qs r b 0 "")))
+    ; blocks are laid row-major, one write each at blk * 34
+    (defn qtb-put-w (h r rows nb b)
+        (if (ge r rows) h
+            (if (ge b nb) (qtb-put-w h (add r 1) rows nb 0)
+                (do (let w (metal_buf_write h (mul 34 (add (mul r nb) b)) (qtb-block r b)))
+                    (qtb-put-w h r rows nb (add b 1))))))
+    (defn qtb-x (t j) (div (add (sub (mod (add (mul t 29) (mul j 7)) 97) 48) 0.0) 13.0))
+    (defn qtb-xrow (t j cols acc) (if (ge j cols) acc (qtb-xrow t (add j 1) cols (str_concat acc (md-le32 (md-f32-bits (qtb-x t j)))))))
+    (defn qtb-put-x (h t ntok cols)
+        (if (ge t ntok) h
+            (do (let w (metal_buf_write h (mul 4 (mul t cols)) (qtb-xrow t 0 cols "")))
+                (qtb-put-x h (add t 1) ntok cols))))
+    (defn qtb-zero? (s i n) (if (ge i n) 1 (if (eq (str_byte_at s i) 0) (qtb-zero? s (add i 1) n) 0)))
+    ; answers (batched-bytes twin-bytes enqueue-sync-ok)
+    (defn qtb-run (pb pt rows cols ntok)
+        (do (let nb (div cols 32))
+            (let qh (qtb-put-w (metal_buf_alloc (mul 34 (mul rows nb))) 0 rows nb 0))
+            (let xh (qtb-put-x (metal_buf_alloc (mul 4 (mul ntok cols))) 0 ntok cols))
+            (let yb (metal_buf_alloc (mul 4 (mul ntok rows))))
+            (let yt (metal_buf_alloc (mul 4 (mul ntok rows))))
+            (let e1 (metal_enqueue pb (md-bind16 (list qh xh yb) (list rows cols ntok rows) 256 0 0 0)
+                        (mul (mul rows (qmb-ntile ntok)) 32)))
+            (let e2 (metal_enqueue pt (md-bind16 (list qh xh yt) (list rows cols ntok rows) 256 0 0 0)
+                        (mul (qmb-tg-groups rows ntok) 256)))
+            (let s (metal_sync))
+            (list (metal_buf_read yb 0 (mul 4 (mul ntok rows)))
+                  (metal_buf_read yt 0 (mul 4 (mul ntok rows)))
+                  (if (and (eq e1 1) (and (eq e2 1) (ge s 0))) 1 0))))
+
+    (let unit (str_concat "#include <metal_stdlib>\n" (str_concat (qmb-q80-batch) (qmb-q80-batch-tg))))
+    (let pb (metal_pipeline unit "form_q8_0_matmul_batch_f32"))
+    (let pt (metal_pipeline unit "form_q8_0_matmul_batch_tg_f32"))
+    (let a (qtb-run pb pt 77 320 21))
+    (let b (qtb-run pb pt 200 1056 13))
+
+    (let c0 (if (and (gt pb 0) (and (gt pt 0) (and (eq (nth a 2) 1) (eq (nth b 2) 1)))) 1 0))
+    (let c1 (if (and (gt (str_len (nth a 0)) 0) (str_eq (nth a 0) (nth a 1))) 2 0))
+    (let c2 (if (and (gt (str_len (nth b 0)) 0) (str_eq (nth b 0) (nth b 1))) 4 0))
+    (let c3 (if (and (eq (qtb-zero? (nth a 1) 0 (str_len (nth a 1))) 0) (eq (qtb-zero? (nth b 0) 0 (str_len (nth b 0))) 0)) 8 0))
+    (add c0 (add c1 (add c2 c3))))

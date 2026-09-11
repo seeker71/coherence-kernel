@@ -46,7 +46,7 @@
 #   9  ONE HEADER, ONE SPINE     exactly one metal_stdlib, zero using-namespace, one spine, 5 kernels
 #
 # Run:  form/native/metal/metal_mla_gpu.sh [iters]     (default 200)
-# Off-Mac (or no swiftc) it SKIPs with exit 2, like every Metal row in GPU_GAPS.md.
+# Off-Mac (or no swiftc) it SKIPs with exit 2, like every other Metal witness here.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form

@@ -13,7 +13,7 @@
 ; tile, and the cross attention is a chunk pass plus a fold instead of six lonely threadgroups. Each
 ; costs a launch and saves far more than a launch. The four cross gemms share ONE ln_post reading
 ; because they all read the same rows.
-; preludes: form/form-stdlib/ear-npz.fk form/form-stdlib/ear-msl.fk form/form-stdlib/metal-door.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/base64.fk form-stdlib/ear-geometry.bml
+; preludes: form/form-stdlib/ear-npz.fk form/form-stdlib/ear-msl.fk form/form-stdlib/metal-door.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/base64.fk form-stdlib/ear-geometry.bml form/form-stdlib/bml/transcript-languages.bml
 (do
     (defn enw-held (h) (if (le h 0) (form_error (str_concat "native ear allocation refused: " (metal_status))) h))
     (defn enw-alloc (n) (enw-held (metal_buf_alloc n)))
@@ -220,7 +220,7 @@
             (enw-argmax-bind st lo hi lo2 hi2)))))
     ; ---- the model's own doubt ----
     ; A float word off a device buffer: the same IEEE-754 read the band and the tongue's logits use.
-    (defn enw-f32-of (b i) (do (let bits (en-u32 b i)) (let s (div bits 2147483648)) (let e (mod (div bits 8388608) 256)) (let m (mod bits 8388608)) (if (eq e 0) (mul (if (eq s 1) -1.0 1.0) (mul (div m 8388608.0) (fq-pow2 -126))) (if (eq e 255) (form_error "native ear non-finite float readback") (mul (if (eq s 1) -1.0 1.0) (mul (add 1.0 (div (str_to_float (int_to_str m)) 8388608.0)) (fq-pow2 (sub e 127))))))))
+    (defn enw-f32-of (b i) (do (let bits (en-u32 b i)) (let s (div bits 2147483648)) (let e (mod (div bits 8388608) 256)) (let m (mod bits 8388608)) (if (eq e 0) (mul (if (eq s 1) -1.0 1.0) (mul (div m 8388608.0) (fq-pow2 -126))) (if (eq e 255) (form_error "native ear non-finite float readback") (mul (if (eq s 1) -1.0 1.0) (mul (add 1.0 (div (add m 0.0) 8388608.0)) (fq-pow2 (sub e 127))))))))
     ; one probability off the resident logits: softmax over [lo, hi) read at idx, landing as float bits at dout[slot]
     (defn enw-softp-bind (st lo hi idx stage slot) (md-bind16 (list (enw-b st 15) (enw-b st 16) (enw-b st 28)) (list lo hi idx stage (em-argmax-G) slot) 256 0 1 0))
     (defn enw-softp-go (st lo hi idx slot)
@@ -471,11 +471,23 @@
             (en-u32 (en-text (metal_buf_read (enw-b st 16) 0 4)) 0)))
     ; transcribe from a tick with the tongue known (or detected when lang < 0) and an agreed text prefix prefilled;
     ; returns (lang ids nospeech-prob tongue-prob) where ids = prefix + what the decoder added (timestamps kept)
-    ; the tongue: the argmax over the language window, unless it lies outside the three the glass offers and one of them is within 3 logits of it
+    ; the tongue: the argmax over the language window, unless it lies outside the tongues the glass
+    ; OFFERS and one of them is within 3 logits of it. The offered list is the catalog's own
+    ; (tln-default-toks, or whatever the door was given) — it used to be three tokens written here by
+    ; hand under a comment that already said "the three the glass offers" while the glass offered
+    ; four. The one left out was Indonesian, in a house that speaks Indonesian: the ear could not
+    ; hear the room it lives in, and nothing said so, because a shortlist that is never asked about
+    ; its source cannot disagree with anything (corpus row 1416 heardshort).
     (defn enw-lang-logit (b tok) (enw-f32-of b (mul 4 (sub tok (enw-lang-lo)))))
-    (defn enw-three () (list 50259 50300 50267))
+    (defn enw-offered () (tln-default-toks))
+    (defn enw-has? (toks t) (if (eq (len toks) 0) 0 (if (eq (head toks) t) 1 (enw-has? (tail toks) t))))
     (defn enw-best-of (b toks best bv) (if (eq (len toks) 0) (list best bv) (do (let v (enw-lang-logit b (head toks))) (if (gt v bv) (enw-best-of b (tail toks) (head toks) v) (enw-best-of b (tail toks) best bv)))))
-    (defn enw-lang-pick (st top) (if (or (eq top 50259) (or (eq top 50300) (eq top 50267))) top (do (let b (en-text (metal_buf_read (enw-b st 15) (mul 4 (enw-lang-lo)) (mul 4 (eng-languages st))))) (let three (enw-best-of b (enw-three) 50259 -99999.0)) (if (ge (add (nth three 1) 3.0) (enw-lang-logit b top)) (head three) top))))
+    (defn enw-lang-pick2 (st top toks)
+        (if (eq (enw-has? toks top) 1) top
+            (do (let b (en-text (metal_buf_read (enw-b st 15) (mul 4 (enw-lang-lo)) (mul 4 (eng-languages st)))))
+                (let best (enw-best-of b toks (if (eq (len toks) 0) 50259 (head toks)) -99999.0))
+                (if (ge (add (nth best 1) 3.0) (enw-lang-logit b top)) (head best) top))))
+    (defn enw-lang-pick (st top) (enw-lang-pick2 st top (enw-offered)))
     (defn enw-transcribe-from2 (st Te tick cap lang prefix)
         (do (let l (if (lt lang 0) (enw-lang-pick st (enw-prefill st (list (enw-sot)) 0 Te (enw-lang-lo) (eng-lang-hi st) 0 0)) lang))
             ; the detection prefill leaves the sot logits standing, so the doubt is free there; when the tongue

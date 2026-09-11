@@ -54,7 +54,7 @@
 #   9  A TOKEN                       greedy decode emits ids; legal vocab indices; input-dependent.
 #
 # Run:  form/native/metal/metal_moe_token.sh [nsteps] ["prompt"]     (defaults 4, a fixed prompt)
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal row in GPU_GAPS.md.
+# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form

@@ -1,6 +1,6 @@
 ; loss.fk — the TRAINING LOSS surface as pure Form recipes: MAE, natural-log, softmax cross-entropy.
 ;
-; preludes: form-stdlib/transformer-numerics.fk
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk
 ;
 ; transformer-backprop.fk closes the backward pass on ONE loss: sum-of-squared-error (tbp-sse), exact
 ; and integer-clean, the right loss to prove a gradient against. Training needs the rung above SSE — the
@@ -52,3 +52,37 @@
 (defn loss-logsumexp (l) (do (let m (tn-max l)) (add m (loss-ln (tn-sum (loss-exp-shift l m))))))
 (defn loss-softmax-ce (logits target_index)
   (sub (loss-logsumexp logits) (nth logits target_index)))
+
+; --- batch training: a loss over many examples, and the gradient that takes them together ---
+; The mean cross-entropy over a batch, and its gradient with respect to a bias shared by every
+; example's logits (logits_b = z_b + b): dL/db = (1/B) * sum_b (softmax(z_b + b) - onehot(t_b)).
+; A bias, because a SHARED parameter is where batching means anything — each example's gradient with
+; respect to its own logits is independent of every other.
+;
+; Accumulation across microbatches is the place this goes wrong in practice. Each microbatch must add
+; its SUM, divided by the grand total — token-weighted — and then any split, of any sizes, lands on the
+; whole batch's gradient. The tempting alternative, averaging each microbatch's own mean, is right only
+; when every microbatch is the same size; it is kept below by name so a band can show it failing.
+(defn loss-ce-sum (bl bt)
+  (if (eq (len bl) 0) 0.0 (add (loss-softmax-ce (head bl) (head bt)) (loss-ce-sum (tail bl) (tail bt)))))
+(defn loss-ce-batch (bl bt) (div (loss-ce-sum bl bt) (tn-flen bl)))
+(defn loss-vadd (a b) (if (eq (len a) 0) (empty) (cons (add (head a) (head b)) (loss-vadd (tail a) (tail b)))))
+(defn loss-vscale (a s) (if (eq (len a) 0) (empty) (cons (mul (head a) s) (loss-vscale (tail a) s))))
+; one example's gradient with respect to its logits: softmax minus the one-hot target
+(defn loss-onehot-sub (p t i)
+  (if (eq (len p) 0) (empty) (cons (if (eq i t) (sub (head p) 1.0) (head p)) (loss-onehot-sub (tail p) t (add i 1)))))
+(defn loss-ce-grad (logits t) (loss-onehot-sub (tn-softmax logits) t 0))
+; the bias gradient summed over a batch, then divided by the count it is told to divide by
+(defn loss-bgrad-sum (bz bt b)
+  (if (eq (len bz) 0) (loss-vscale b 0.0)
+      (loss-vadd (loss-ce-grad (loss-vadd (head bz) b) (head bt)) (loss-bgrad-sum (tail bz) (tail bt) b))))
+(defn loss-bgrad (bz bt b total) (loss-vscale (loss-bgrad-sum bz bt b) (div 1.0 total)))
+; token-weighted accumulation: every microbatch divides by the GRAND total
+(defn loss-bgrad-acc (mbz mbt b total)
+  (if (eq (len mbz) 0) (loss-vscale b 0.0)
+      (loss-vadd (loss-bgrad (head mbz) (head mbt) b total) (loss-bgrad-acc (tail mbz) (tail mbt) b total))))
+; the mean of microbatch means — each divides by its OWN size, then the means are averaged
+(defn loss-bgrad-mom-sum (mbz mbt b)
+  (if (eq (len mbz) 0) (loss-vscale b 0.0)
+      (loss-vadd (loss-bgrad (head mbz) (head mbt) b (tn-flen (head mbz))) (loss-bgrad-mom-sum (tail mbz) (tail mbt) b))))
+(defn loss-bgrad-mom (mbz mbt b) (loss-vscale (loss-bgrad-mom-sum mbz mbt b) (div 1.0 (tn-flen mbz))))

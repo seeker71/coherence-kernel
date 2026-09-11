@@ -88,4 +88,4 @@ said `allocation refused`, and for a moment the fix looked false. The mtime answ
 file came from the failed run, because the spawn door appends. That doubt became the third
 heal.
 
-Corpus row 1414, `ghostrefusal`: a refusal spoken in the voice of an organ that never ran.
+Corpus row 1433, `ghostrefusal`: a refusal spoken in the voice of an organ that never ran.
