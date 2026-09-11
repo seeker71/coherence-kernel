@@ -450,10 +450,13 @@ fk_expand_file_deps() {
 }
 
 fk_expand_declared_deps() {
+    local f
     fk_expand_seen=()
     fk_expand_added=()
     fk_import_expanded=()
-    fk_expand_file_deps "$1"
+    for f in "$@"; do
+        fk_expand_file_deps "$f"
+    done
 }
 
 # Source-compiled preludes are cached by CONTENT (file + compiler chain): the
@@ -478,7 +481,7 @@ compiler_stamp="$(form_hash16 "${compiler_chain[@]}" "${FKWU_SRC:-}" "$GO_BIN")"
 prepared_args=()
 # Strips a source's own "; preludes:"/"import" header lines. prepare_sources
 # feeds every arm an EXPLICIT, already-ordered file list (typed by the caller,
-# or auto-expanded by fk_expand_declared_deps for the single-file case below)
+# or auto-expanded by fk_expand_declared_deps for every explicit file below)
 # -- so by the time a file reaches prepared_args, every dependency it would
 # name is already present as its own separate, independently prepared entry.
 # The header is therefore pure redundancy for this pipeline, and since
@@ -503,12 +506,11 @@ fk_strip_prelude_header() {
 }
 
 # True when $1's own "preludes:" directive (";"-led for .fk, "//"-led for
-# .bml -- form-source-compile-file's lowering keeps a .bml's original
-# comment lines, so a LOWERED file can carry either marker too) names a
-# ".bml" dependency. Single-file auto-expansion follows both .fk and .bml
-# now. Explicit multi-file callers can still rely on the kernels' directive
-# walk for BML dependencies, so those source headers remain available to the
-# kernels' own recursive BML lowering as well as the prepared source list.
+# .bml) names a ".bml" dependency. A lowered .bml keeps only ";" lines:
+# form-source-compile-file drops every "//" line, its preludes directive with
+# it, so explicit mode expands each file's declared chain before lowering. A
+# lowered file that still names a ".bml" (a ";"-led header) keeps exactly
+# those names for the kernels' own recursive BML lowering.
 fk_prelude_has_bml_dep() {
     grep -Eq '^(;|//)[[:space:]]*preludes:.*\.bml([[:space:]]|,|$)' "$1"
 }
@@ -855,13 +857,16 @@ staged=0
 # --- explicit mode: validate one file list as one workload --------------
 if [[ $# -gt 0 ]]; then
     explicit_args=("$@")
-    # Single band file: honor declared imports like the full stdlib/tests sweep.
-    if [[ $# -eq 1 ]]; then
-        f="$1"
-        fk_expand_declared_deps "$f"
-        if [[ ${#fk_import_expanded[@]} -gt 0 ]]; then
-            explicit_args=(form-stdlib/core.fk "${fk_import_expanded[@]}" "$f")
-        fi
+    # Band files honor their declared imports like the full stdlib/tests sweep:
+    # every file's chain expands into one list, each dependency once, and the
+    # files follow in the order given (one that is another's dependency is
+    # already in the list).
+    fk_expand_declared_deps "$@"
+    if [[ ${#fk_import_expanded[@]} -gt 0 ]]; then
+        explicit_args=(form-stdlib/core.fk "${fk_import_expanded[@]}")
+        for f in "$@"; do
+            fk_added_contains "$f" || explicit_args+=("$f")
+        done
     fi
     # A missing input file is not a kernel divergence. Without this guard the
     # three walkers each open the absent path and emit a DIFFERENT file-not-found
