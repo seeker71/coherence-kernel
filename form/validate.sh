@@ -14,6 +14,9 @@
 
 set -euo pipefail
 cd "$(dirname "$0")"
+# A verdict never depends on what a terminal types: every kernel this script starts reads end of
+# input. binary-freshness-band's EOF canary reads stdin, and an open tty or socket never ends.
+exec < /dev/null
 
 if [[ "${1:-}" == "--bench" ]]; then
     cd ..
