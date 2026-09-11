@@ -100,6 +100,18 @@ documented in [native BML execution learning](../docs/native-bml-execution-learn
 Preflights closed without errors or unresolved calls; the drift door returned
 8191/8191 with zero refusals before landing.
 
+After rebasing onto current main, kernel freshness returned 15. Rebuilding the
+checkout witness restored 31, and all six successful generated functions again
+passed their 36 execution checks. The native guide now reports one remaining
+Python implementation elsewhere in the repository; this movement introduced none.
+
+The repository knowledge source list also omitted this learning guide. Adding it
+and republishing produced 1,985 source-attributed examples from 1,178 source units.
+Both guide sections follow the existing whole-document held-out split. Source
+rehashing and manifest checks passed; train/held-out prompt and answer overlaps
+were zero. This publication adds available source knowledge, with zero training
+updates; the five completed session updates above remain a separate measurement.
+
 The exchange stayed alive by asking local Qwen, executing its proposals, and
 letting failed execution change the next native action. The surprising teaching
 was how one wrong token could survive otherwise near-perfect target prediction.
