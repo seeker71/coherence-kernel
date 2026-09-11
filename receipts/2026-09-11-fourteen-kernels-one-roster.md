@@ -142,15 +142,33 @@ unlinked. The census now only reads; the guarded, per-pid burial is the lucid-le
 At 10:26 the body read host 9, roster 9, no untracked, no stale, no orphans, no duplicates: Urs's glass
 (Terminal 8897), one Codex review (codex 9139), the census itself.
 
+## The glass census, refuted
+
+The census was built onto the glass and handed to two verifiers, and both refuted it. The cell was argv's
+last word, so `./fkwu cell.fk 10` — the way MANIFEST.md runs ground-recursive — read "10"; a first reading
+published every kernel as tracked and live; the adopting tick showed the reading from before its adoption;
+"duplicate" compared cell strings, not files; and seven overview rows fell below the fold at 100 columns.
+Under all of it sat what no verifier can settle: the glass's ProcessPrivacyRule keeps command arguments and
+other processes' names out of Form, and errandsight is made of both. The build is parked whole on
+glass-errandsight-wip (4b56afba) until Urs says which gives way.
+
+The two faults main already carried — the cell word, and a kernel under another binary name counted stale —
+are healed in 8d042149, and the six roster bands now declare FOURTH-ARM ONLY, so form/validate.sh runs each
+of them (all pass) instead of holding them pending.
+
+One slip of mine on the way: in zsh a variable holding eleven paths is one word, so `git add -- $F` staged
+nothing, the switch to main refused, and a checkout meant to carry the relabels onto main put the old labels
+back over them. They were redone from the record.
+
 ## With Urs
 
-- **Three Claude sessions Urs did not start** run beside this one: pensive-wilbur (its review delivered),
-  lucid-lehmann (the burial guard), upbeat-mclean (the session learner's allocation error). Archiving one stops it;
-  that is his word.
-- **The main checkout has no `form/native/metal/fk-metal-carrier.dylib`**, so its ear hears nothing and
-  re-stands its live lane every 120 s. Building it opens the microphone lane; that is his word too.
-- **None of this reaches a running kernel** until it is on main and each checkout rebuilds its
-  `./fkwu`. The commits are local on reunion-2026-09-10.
+- **The glass's privacy rule**: putting errandsight on the glass means changing ProcessPrivacyRule, or
+  keeping the glass to counts alone. That is his word.
+- **The glass carrier 3596** still runs the build of Sep 10; its organs run main's seed. Restarting it is
+  his call.
+- **The ear hears** since another session built the Metal carrier in the main checkout at 11:09. Pressing z
+  in the glass quiets it.
+- **Sessions**: several Claude sessions run beside this one; archiving one stops it, and that is his word.
 
 ## Surprise, and where the discomfort went
 
