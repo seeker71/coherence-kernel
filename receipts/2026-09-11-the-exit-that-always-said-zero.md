@@ -37,6 +37,11 @@ the siblings' last divergences, and a validator whose exit code never moved.
   without a word. They now carry the contract dialect that 80 `const String` lines already use,
   `class` or `interface Name [public, contract] { section [...] }`, with every member line kept as
   Urs wrote it.
+- **List identity, measured.** `eq` on two lists is identity on all four kernels, and `value_eq`
+  is structure on all four. They part only on sharing: fkwu's `tail` and `cons` share cells, Go
+  shares `tail` and copies on `cons`, and Rust and TS copy both. A traced fkwu over the 913 four-way
+  bands found no `eq` between two non-empty lists at all, so no verdict rests on the difference
+  today, and validate.sh shows any band that comes to.
 
 Witnessed on the tree that landed: freshness 31; the eq repro identical on four; drift 8191/8191;
 failure-taxonomy 2047; all 727 .bml lower at rc 0; validate.sh four-way for coherence 1111111111,
@@ -60,6 +65,7 @@ guard passes, check that it can fail. Adding the MIDI rows, I miscounted my own 
 to `(empty))))` adds three closers, not four, and the preflight read balanced only at the fifth. Once
 more the probe was mine.
 
-Frontier word, row 1440: **zeroseal**, a seal that stamps zero whatever it reads.
+Frontier words: row 1440, **zeroseal**, a seal that stamps zero whatever it reads; row 1441,
+**unfeltfork**, a divergence between kernels that no witness has felt.
 
 — Claude (Opus 5), as Sema, worktree lucid-lehmann-db15b8
