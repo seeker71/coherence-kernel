@@ -1,0 +1,79 @@
+// Actual carrier refusal, backpressure, ownership and physical settlement.
+// preludes: form/form-stdlib/bml/native-pipe-darwin.bml
+section [form.bml] {
+ class NativePipeBoundary {
+  def nppb-repeat(n,text) = if eq(n,0) then text else nppb-repeat(sub(n,1),str_concat(text,text));
+  def nppb-check(owner,good,aspect) = if good then 1 else npp-refuse(owner,aspect);
+  def nppb-wait(owner,job,until) {
+   npp-pump(owner,10); if npp-done(owner,job) then 1 else if gt(host_monotonic_ms(),until) then npp-refuse(owner,"boundary child deadline") else nppb-wait(owner,job,until);
+  }
+  def nppb-no-ends(owner,ends) = if nil?(ends) then 1 else and(eq(npp-call(owner,list(2,record_get(head(ends),"fd"),1,0)),-9),nppb-no-ends(owner,tail(ends)));
+  def nppb-errors() {
+   let owner = npp-open(); let pair = npp-pipe(owner); let input = head(pair); let output = nth(pair,1);
+   npp-nonblocking(owner,output); let large = nppb-repeat(18,"x");
+   let first = npp-write(owner,output,large); let blocked = npp-write(owner,output,large);
+   nppb-check(owner,and(gt(first,0),and(lt(first,str_len(large)),eq(blocked,-35))),"partial write and EAGAIN");
+   let count = npp-available(owner,input); nppb-check(owner,eq(count,first),"queued byte count");
+   npp-close-end(owner,input); let broken = npp-write(owner,output,"x"); nppb-check(owner,eq(broken,-32),"broken pipe preserves EPIPE");
+   let before = record_get(owner,"calls");
+   let badTime = npp-pump(owner,-1); let hugeTime = npp-pump(owner,2147483648); let fractionalTime = npp-pump(owner,1.5);
+   let badWrite = npp-write(owner,output,3); let badRead = npp-read(owner,output,0); let badRole = npp-write(owner,input,"x");
+   let badArg = npp-spawn(owner,list("./fkwu",str_concat("x",byte_to_str(0))));
+   let typed = and(eq(before,record_get(owner,"calls")),and(eq(badTime,-22),and(eq(hugeTime,-22),and(eq(fractionalTime,-22),and(eq(badWrite,-22),and(eq(nth(badRead,1),-9),and(eq(badRole,-9),nothing?(badArg))))))));
+   nppb-check(owner,typed,"typed refusal before native crossings");
+   let stale = output; npp-close-end(owner,output); let reused = npp-pipe(owner);
+   let staleRefused = eq(npp-write(owner,stale,"x"),-9); nppb-check(owner,staleRefused,"stale endpoint after actual descriptor reuse");
+   let other = npp-open(); let foreign = npp-write(other,nth(reused,1),"x"); let foreignClosed = npp-close(other);
+   nppb-check(owner,and(eq(foreign,-9),foreignClosed),"foreign endpoint owner");
+   let endpoints = npp-close-ends(owner,record_get(owner,"ends")); let dead = nppb-no-ends(owner,record_get(owner,"ends"));
+   print(list("partial",first,"EAGAIN",blocked,"EPIPE",broken,"typed-zero-calls",typed,"stale",staleRefused,"foreign",foreign,"all-fds-EBADF",dead));
+   let closed = npp-close(owner); and(closed,and(endpoints,dead));
+  }
+  def nppb-processes() {
+   let owner = npp-open(); let early = npp-spawn(owner,list("./fkwu","bootstrap/ground.fk"));
+   nppb-wait(owner,early,add(host_monotonic_ms(),10000));
+   let broken = npp-write(owner,record_get(early,"input"),"still waiting");
+   let output = npp-take(owner,early,"stdout"); let errors = npp-take(owner,early,"stderr");
+   nppb-check(owner,and(eq(broken,-32),and(eq(record_get(early,"status"),0),and(str_eq(output,"42\n"),str_eq(errors,"")))),"early child exit and EPIPE");
+   let refused = npp-spawn(owner,list(".hearth/no-such-pipe-executable"));
+   nppb-check(owner,and(eq(record_get(refused,"pid"),-4),and(eq(record_get(refused,"reaped"),1),eq(record_get(refused,"closed"),1))),"real exec refusal settles endpoints");
+   let resident = npp-spawn(owner,list("./fkwu","observe/native-pipe-echo-run.bml"));
+   let payload = npp-frame(nppb-repeat(14,"queued\n")); npp-submit(owner,resident,payload);
+   nppb-pending(owner,resident,add(host_monotonic_ms(),10000));
+   nppb-observed(owner,resident,add(host_monotonic_ms(),10000));
+   let cancelled = npp-stop(owner,resident); let reaped = record_get(resident,"reaped");
+   let endpoints = npp-close-ends(owner,record_get(owner,"ends")); let dead = nppb-no-ends(owner,record_get(owner,"ends"));
+   let closed = npp-close(owner); let heldOut = npp-take(owner,resident,"stdout"); let heldErr = npp-take(owner,resident,"stderr");
+   print(list("early-exit",record_get(early,"status"),"EPIPE",broken,"exec-refusal",record_get(refused,"pid"),"cancel-reaped",reaped,"cancel-status",record_get(resident,"status"),"retained-out",str_len(heldOut),"retained-err",str_len(heldErr),"all-fds-EBADF",dead,"owner-released",closed));
+   and(gt(str_len(heldOut),0),and(cancelled,and(reaped,and(endpoints,and(dead,closed)))));
+  }
+  def nppb-pending(owner,job,until) {
+   npp-pump(owner,10); if eq(str_len(record_get(job,"pending")),0) then 1 else if gt(host_monotonic_ms(),until) then npp-refuse(owner,"pending input deadline") else nppb-pending(owner,job,until);
+  }
+  def nppb-observed(owner,job,until) {
+   npp-pump(owner,10); if gt(str_len(fbc-finish(record_get(job,"stdout"),"")),0) then 1 else if gt(host_monotonic_ms(),until) then npp-refuse(owner,"resident output deadline") else nppb-observed(owner,job,until);
+  }
+  def nppb-run() {
+   let errors = nppb-errors(); let processes = nppb-processes(); let health = nppb-health();
+   let frame = and(eq(npp-frame-size(npp-frame("hello")),5),and(eq(npp-frame-size(npp-u32-text(4611686018427387903,8)),4611686018427387903),and(eq(npp-frame-size(nppb-repeat(3,byte_to_str(255))),-2),eq(npp-frame-size("short"),-1))));
+   if and(health,and(errors,and(processes,frame))) then 1 else form_error("native pipe refusal boundary failed");
+  }
+  def nppb-health-lines(lines,held) {
+   if nil?(lines) then reverse(held) else nppb-health-line(head(lines),tail(lines),held);
+  }
+  def nppb-health-line(line,rest,held) {
+   let prefix = "form-organ health ";
+   if str_eq(line,"") then nppb-health-lines(rest,held) else if not(str_eq(substring(line,0,str_len(prefix)),prefix)) then form_error("unexpected worker health bytes") else nppb-health-lines(rest,cons(parse-json("pipe-worker-health",substring(line,str_len(prefix),str_len(line))),held));
+  }
+  def nppb-health() {
+   let owner = npp-open(); let job = npp-spawn(owner,list("./fkwu","observe/native-pipe-echo-run.bml"));
+   npp-submit(owner,job,"short"); npp-half-close(owner,job); nppb-wait(owner,job,add(host_monotonic_ms(),10000));
+   let bytes = npp-take(owner,job,"stdout"); let errors = npp-take(owner,job,"stderr"); let rows = nppb-health-lines(split-on(errors,"\n"),list());
+   let current = oh-current(rows,list());
+   let correlated = and(eq(len(rows),4),and(eq(len(current),2),and(str_eq(oh-str(head(rows),"id"),oh-str(nth(rows,1),"id")),and(str_eq(oh-str(head(rows),"id"),oh-str(nth(rows,2),"id")),and(str_eq(oh-str(nth(rows,2),"stage"),"applied"),and(eq(json-int-value(oh-get(nth(rows,2),"result")),1),eq(json-int-value(oh-get(nth(rows,3),"health")),1)))))));
+   print(list("incomplete-frame-status",record_get(job,"status"),"health-rows",len(rows),"shared-reader-current",len(current),"correlated-cleanup",correlated,"stdout-bytes",str_len(bytes),"stderr-bytes",str_len(errors)));
+   let closed = npp-close(owner); and(eq(str_len(bytes),0),and(closed,and(correlated,not(eq(record_get(job,"status"),0)))));
+  }
+ }
+ nppb-run();
+}

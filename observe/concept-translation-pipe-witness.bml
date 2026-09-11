@@ -1,0 +1,117 @@
+// Actual retained corpus preparation and decoding across three resident Form workers.
+// No provider request is made by this witness.
+// preludes: form/form-stdlib/bml/concept-translation-worker.bml observe/concept-translation-witness.bml
+section [form.bml] {
+ class ConceptTranslationPipeWitness {
+  def ctpw-need(owner,ok,aspect) = if ok then 1 else npp-refuse(owner,aspect);
+  def ctpw-prepare(id,labels,target) = json-node-object(list(oh-s("id",id),oh-s("operation","prepare"),json-node-pair("labels",json-node-array(ctwk-json-strings(labels))),oh-s("target",target),oh-n("maxRows",100),oh-n("maxUnits",2200)));
+  def ctpw-decode(id,rows) = json-node-object(list(oh-s("id",id),oh-s("operation","decode"),oh-s("payload",ctw-json(ctr-join(rows,"\n",list(),1))),oh-n("expected",len(rows)),oh-n("requireNonempty",0)));
+  def ctpw-job(owner) = record_new(0,"job",npp-spawn(owner,list("./fkwu","observe/concept-translation-worker-run.bml")),"bins",list(),"health-bins",list(),"bytes",0,"size",-1);
+  def ctpw-submit(owner,work,node) {
+   let wire = npp-frame(json-emit-precise(node));
+   ctpw-need(owner,gt(str_len(wire),8191),"whole corpus request exceeds line carrier");
+   ctpw-need(owner,npp-submit(owner,record_get(work,"job"),wire),"corpus request submission");
+   record_set(work,"bins",list()); record_set(work,"bytes",0); record_set(work,"size",-1); str_len(wire);
+  }
+  def ctpw-collect(owner,works) = if nil?(works) then 1 else ctpw-collected(owner,head(works),tail(works));
+  def ctpw-collected(owner,work,rest) {
+   let job = record_get(work,"job"); let bytes = npp-take(owner,job,"stdout"); let errors = npp-take(owner,job,"stderr");
+   if gt(str_len(errors),0) then record_set(work,"health-bins",fbc-put(record_get(work,"health-bins"),errors)) else 0;
+   ctpw-need(owner,str_eq(record_get(job,"error"),""),"worker transport error remains absent");
+   if gt(str_len(bytes),0) then ctpw-bytes(work,bytes) else 0;
+   ctpw-collect(owner,rest);
+  }
+  def ctpw-bytes(work,bytes) {
+   record_set(work,"bins",fbc-put(record_get(work,"bins"),bytes)); record_set(work,"bytes",add(record_get(work,"bytes"),str_len(bytes)));
+   if and(eq(record_get(work,"size"),-1),ge(record_get(work,"bytes"),8)) then ctpw-header(work) else 0;
+  }
+  def ctpw-header(work) {
+   let bytes = fbc-finish(record_get(work,"bins"),""); record_set(work,"bins",fbc-put(list(),bytes)); record_set(work,"size",npp-frame-size(bytes));
+  }
+  def ctpw-ready(works) = if nil?(works) then 1 else and(ge(record_get(head(works),"size"),0),and(ge(record_get(head(works),"bytes"),add(8,record_get(head(works),"size"))),ctpw-ready(tail(works))));
+  def ctpw-wait(owner,works,until) {
+   npp-pump(owner,10); ctpw-collect(owner,works);
+   if ctpw-ready(works) then 1 else if gt(host_monotonic_ms(),until) then npp-refuse(owner,"corpus worker response deadline") else ctpw-wait(owner,works,until);
+  }
+  def ctpw-result(owner,work,id,kind) {
+   let wire = fbc-finish(record_get(work,"bins"),"");
+   ctpw-need(owner,eq(str_len(wire),add(8,record_get(work,"size"))),"one complete framed response without trailing bytes");
+   let text = substring(wire,8,str_len(wire));
+   ctpw-need(owner,and(fbc-utf8(text,0),jwa-valid(text)),"complete worker UTF-8 JSON response");
+   let node = parse-json("corpus-worker-result",text);
+   let identity = and(str_eq(oh-str(node,"schema"),"form-translation-work-v1"),str_eq(oh-str(node,"id"),id));
+   let operation = and(eq(json-int-value(oh-get(node,"ok")),1),str_eq(oh-str(node,"kind"),kind));
+   ctpw-need(owner,and(identity,operation),"response identity and operation");
+   node;
+  }
+  def ctpw-prepared(owner,work,request) {
+   let actual = ctpw-result(owner,work,oh-str(request,"id"),"queries"); let expected = ctwk-prepare(request);
+   ctpw-need(owner,node_eq(actual,expected),"all 10000 labels retain query bytes across process boundary");
+   ctpw-need(owner,eq(len(json-array-elements(oh-get(actual,"value"))),100),"100 complete prepared batches");
+  }
+  def ctpw-decoded(owner,work,id,rows) {
+   let actual = ctpw-result(owner,work,id,"cells");
+   ctpw-need(owner,node_eq(oh-get(actual,"value"),json-node-array(ctwk-json-strings(rows))),"all 10000 current cells retain exact bytes across process boundary");
+  }
+  def ctpw-resident(works) = if nil?(works) then 1 else and(eq(record_get(record_get(head(works),"job"),"reaped"),0),ctpw-resident(tail(works)));
+  def ctpw-finish(owner,works) = if nil?(works) then 1 else ctpw-finishing(owner,head(works),tail(works));
+  def ctpw-finishing(owner,work,rest) {
+   npp-half-close(owner,record_get(work,"job")); ctpw-finish(owner,rest);
+  }
+  def ctpw-done(owner,works) = if nil?(works) then 1 else and(npp-done(owner,record_get(head(works),"job")),ctpw-done(owner,tail(works)));
+  def ctpw-reap(owner,works,until) {
+   npp-pump(owner,10);
+   if ctpw-done(owner,works) then 1 else if gt(host_monotonic_ms(),until) then npp-refuse(owner,"corpus workers EOF and reap deadline") else ctpw-reap(owner,works,until);
+  }
+  def ctpw-status(owner,works) = if nil?(works) then 1 else ctpw-status-row(owner,head(works),tail(works));
+  def ctpw-health-lines(owner,lines,out) = if nil?(lines) then reverse(out) else if str_eq(head(lines),"") then ctpw-health-lines(owner,tail(lines),out) else ctpw-health-line(owner,head(lines),tail(lines),out);
+  def ctpw-health-line(owner,line,rest,out) {
+   let prefix = "form-organ health "; let text = substring(line,str_len(prefix),str_len(line));
+   if not(and(eq(str_find(line,prefix,0),0),jwa-valid(text))) then print(list("unexpected-worker-diagnostic",line)) else 0;
+   ctpw-need(owner,and(eq(str_find(line,prefix,0),0),jwa-valid(text)),"stderr contains complete typed organ health only");
+   let row = parse-json("translation-worker-health",text);
+   ctpw-need(owner,and(oh-valid(row),str_eq(oh-str(row,"organ"),"translation-worker")),"translation worker owns its diagnostic identity");
+   ctpw-health-lines(owner,rest,cons(row,out));
+  }
+  def ctpw-health-current(rows) = if nil?(rows) then 1 else and(str_eq(oh-str(head(rows),"stage"),"applied"),and(eq(json-int-value(oh-get(head(rows),"result")),1),ctpw-health-current(tail(rows))));
+  def ctpw-health-triple(rows,flow) {
+   let reading = head(rows); let response = nth(rows,1); let applied = nth(rows,2);
+   let stages = and(str_eq(oh-str(reading,"stage"),"observe"),and(str_eq(oh-str(response,"stage"),"response"),str_eq(oh-str(applied,"stage"),"applied")));
+   let identity = and(str_eq(oh-str(reading,"id"),oh-str(response,"id")),str_eq(oh-str(reading,"id"),oh-str(applied,"id")));
+   let selected = and(str_eq(oh-select(reading,response,"retain"),"deliver"),str_eq(oh-str(applied,"selected"),"deliver"));
+   and(stages,and(identity,and(selected,and(str_eq(oh-str(reading,"flow"),flow),eq(json-int-value(oh-get(applied,"result")),1)))));
+  }
+  def ctpw-status-row(owner,work,rest) {
+   let job = record_get(work,"job");
+   ctpw-need(owner,eq(record_get(work,"bytes"),add(8,record_get(work,"size"))),"complete response keeps exact frame length through final EOF");
+   ctpw-need(owner,and(eq(record_get(job,"status"),0),and(str_eq(npp-take(owner,job,"stdout"),""),str_eq(npp-take(owner,job,"stderr"),""))),"worker exit zero and exact frame boundary through EOF");
+   let bytes = fbc-finish(record_get(work,"health-bins"),"");
+   ctpw-need(owner,and(gt(str_len(bytes),0),eq(str_byte_at(bytes,sub(str_len(bytes),1)),10)),"health stream completes its final line");
+   let rows = ctpw-health-lines(owner,split-on(bytes,"\n"),list()); let current = oh-current(rows,list());
+   ctpw-need(owner,and(eq(len(rows),6),and(eq(len(current),2),ctpw-health-current(current))),"both worker deliveries have complete correlated observations responses and applied results");
+   ctpw-need(owner,and(ctpw-health-triple(rows,"0"),ctpw-health-triple(drop(3,rows),"1")),"each delivery retains its ordered observe response and applied stages");
+   ctpw-status(owner,rest);
+  }
+  def ctpw-fds(owner,ends) = if nil?(ends) then 1 else and(eq(npp-call(owner,list(2,record_get(head(ends),"fd"),1,0)),-9),ctpw-fds(owner,tail(ends)));
+  def ctpw-run() {
+   let state = cmm-state(".","form-sha256"); let labels = ctw-labels(csa-file(state,"model/concept-10000-ranked.dat"),0,list());
+   let rows = take(10000,tail(ctr-lines(csa-file(state,"cognition/concept-nl-semantic-13-machine.tsv"),0,0,list())));
+   let ca = ctw-column(rows,1,list()); let cb = ctw-column(rows,2,list()); let cc = ctw-column(rows,3,list());
+   let owner = npp-open(); let a = ctpw-job(owner); let b = ctpw-job(owner); let c = ctpw-job(owner); let works = list(a,b,c);
+   let qa = ctpw-prepare("prepare-id",labels,"id"); let qb = ctpw-prepare("prepare-fr",labels,"fr"); let qc = ctpw-prepare("prepare-de",labels,"de");
+   let sent = add(ctpw-submit(owner,a,qa),add(ctpw-submit(owner,b,qb),ctpw-submit(owner,c,qc)));
+   ctpw-wait(owner,works,add(host_monotonic_ms(),120000));
+   ctpw-prepared(owner,a,qa); ctpw-prepared(owner,b,qb); ctpw-prepared(owner,c,qc);
+   ctpw-need(owner,ctpw-resident(works),"three workers remain resident between requests");
+   let total = add(sent,add(ctpw-submit(owner,a,ctpw-decode("decode-id",ca)),add(ctpw-submit(owner,b,ctpw-decode("decode-fr",cb)),ctpw-submit(owner,c,ctpw-decode("decode-de",cc)))));
+   ctpw-wait(owner,works,add(host_monotonic_ms(),120000));
+   ctpw-decoded(owner,a,"decode-id",ca); ctpw-decoded(owner,b,"decode-fr",cb); ctpw-decoded(owner,c,"decode-de",cc);
+   ctpw-finish(owner,works); ctpw-reap(owner,works,add(host_monotonic_ms(),20000)); ctpw-collect(owner,works); ctpw-status(owner,works);
+   let settled = npp-settle(owner,record_get(owner,"processes")); let dead = ctpw-fds(owner,record_get(owner,"ends"));
+   let report = list("translation-workers",3,"resident-rounds",2,"prepared-labels",30000,"decoded-current-cells",30000,"request-bytes",total,"response-bytes",record_get(owner,"read-bytes"),"native-calls",record_get(owner,"calls"),"partial-writes",record_get(owner,"partial-writes"),"EAGAIN",record_get(owner,"would-block"),"reaped",settled,"all-fds-EBADF",dead);
+   let closed = npp-close(owner); print(append(report,list("owner-released",closed)));
+   if and(settled,and(dead,closed)) then 1 else form_error("corpus translation worker resources not fully released");
+  }
+ }
+ ctpw-run();
+}

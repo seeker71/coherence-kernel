@@ -26,6 +26,7 @@ Form owns the following executing surfaces. Each linked page names its public do
 | [Concept construction and audit](native-concept-source-audit.md) | Form owns canonical projection, all lexical candidate groups, attributed corpus reindexing, complete WordNet sense construction, binary indices, offsets, metadata, staged publication, stable IDs, aliases, provenance and exact held-byte hashing; portable and explicitly selected ARM64 policies agree |
 | [Terminal acceptance](glass-keyboard.md) | Form owns real Darwin ARM64 PTYs, immediate input checks, signals, exact termios restoration, deadlines and independently supervised resource release |
 | [Ordered CPU mathematics](native-fp64-matrix.md) | Form emits binary64 MXFP8 matrix code in RAM; repeated calls reuse owned output memory without boxing intermediate products or sums |
+| [RAM pipe workers](native-pipe-workers.md) | Form emits Darwin ARM64 pipe and readiness operations in RAM, supervises resident workers, preserves complete binary frames and correlated stderr health, and settles partial writes, EOF, cancellation and physical release |
 
 The deterministic substantive build and its three downstream generators share
 one `fkwu` process through `observe/concept-substantive-build-run.bml`. Form
@@ -34,6 +35,14 @@ repairs and 1,443 attributed language cells. Current generated metadata and all
 10,000 rank/repair queries are executable witnesses. Fresh acquisition and
 translation retain their separate JavaScript responsibilities until a native
 acquisition receipt and proposed projection are admitted and observed.
+
+Three resident Form translation workers prepare and decode retained corpus
+bytes through RAM pipes. Typed request admission checks integer lexemes before
+conversion; Form owns query encoding, complete HTTP framing, ordered response
+segments, explicit row splitting and cell policy. The live provider attempt
+returned HTTP 429 on all five requests and published no translation. The
+[worker evidence](evidence/fkwu/native-pipe-translation.json) distinguishes
+retained-data execution from fresh acquisition.
 
 [Native source inspection](native-source-inventory.md) captures source lists into owned files and checks child exit status, exact reads and NUL termination. `observe/carrier-mass.bml` counts source bytes in Form, including unknown-extension shebangs and paths containing spaces or newlines. It retains the complete source reading at `.hearth/carrier-mass-current.json`; weighted exclusions remain present in that evidence. The native authoring guide retains its separate Python inventory at `.hearth/native-authoring-current.json`. Neither lexical inventory establishes execution or native ownership by itself.
 
