@@ -10848,8 +10848,8 @@ static long long fk_walk(long long i, long long fp) {
         } else {
             be = fk_walk(fk_node[i][2], fp);
         }
-        if (fk_isf(ae) || fk_isf(be)) {
-            return (fk_num(ae) == fk_num(be)) ? 2 : 0;
+        if (fk_isf(ae) || fk_isf(be)) {   /* a float meets numbers only: fk_num would read nil's word 1 as 0.0 */
+            return (((ae & 1) == 0 || fk_isf(ae)) && ((be & 1) == 0 || fk_isf(be)) && fk_num(ae) == fk_num(be)) ? 2 : 0;
         }
         /* Both words must actually BE node boxes. A node box is
          * 0 - ((i << 1) | 1), so its word is negative and ODD; an integer is
