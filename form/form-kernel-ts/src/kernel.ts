@@ -4687,6 +4687,12 @@ function walkCompare(
   //
   // Width-mixing: if either side is float, compare as float; if either
   // side is bigint, compare as bigint; else as int.
+  // eq and ne where a non-number arrives ask fkwu's question — are these the
+  // same word (cmpWordEqual) — rather than dying in expectInt.
+  if ((op === RCmp.EQ || op === RCmp.NE) && !(cmpNumberKind(av) && cmpNumberKind(bv))) {
+    const same = cmpWordEqual(av, bv);
+    return boolInt(op === RCmp.EQ ? same : !same);
+  }
   let r: boolean;
   if (av.kind === "f32" || av.kind === "f64" || bv.kind === "f32" || bv.kind === "f64") {
     const a = av.kind === "bool" ? (av.bool ? 1 : 0) : expectFloat(av, "compare");
@@ -4726,6 +4732,51 @@ function walkCompare(
     }
   }
   return boolInt(r);
+}
+
+// cmpNumberKind — the kinds the compare lane coerces: every int and float
+// width and the 0/1 bool states. Anything else reaching eq/ne meets
+// cmpWordEqual.
+function cmpNumberKind(v: Value): boolean {
+  return v.kind === "bool" || isNumericValue(v);
+}
+
+// cmpWordEqual — fkwu's eq where a non-number takes part (runtime/fkwu-uni.c,
+// tag 102): every value is one word, and eq asks whether the two words are the
+// same. So kinds never meet across — a list, a string, a record or null is not
+// 0, and null is not the empty list. Strings are one word per content (fkwu
+// interns them), so equal text is equal. A list is its first cons pair: every
+// empty list is the one nil word, and a non-empty list equals only itself,
+// never a separately built list of the same items. NodeIDs meet by their four
+// coordinates; records and closures by identity. Siblings to Go's cmpWordEqual
+// and Rust's cmp_word_equal.
+function cmpWordEqual(a: Value, b: Value): boolean {
+  if (a.kind !== b.kind) return false;
+  switch (a.kind) {
+    case "null":
+      return true;
+    case "str":
+      return a.str === (b as { str: string }).str;
+    case "list": {
+      const bl = (b as { list: Value[] }).list;
+      return a.list === bl || (a.list.length === 0 && bl.length === 0);
+    }
+    case "nodeid": {
+      const bn = (b as { nodeid: NodeID }).nodeid;
+      return (
+        a.nodeid.pkg === bn.pkg &&
+        a.nodeid.level === bn.level &&
+        a.nodeid.type === bn.type &&
+        a.nodeid.inst === bn.inst
+      );
+    }
+    case "record":
+      return a.record === (b as { record: Record }).record;
+    case "closure":
+      return a.closure === (b as { closure: Closure }).closure;
+    default:
+      return a === b;
+  }
 }
 
 function valueEqual(a: Value, b: Value): boolean {

@@ -6161,6 +6161,33 @@ fn value_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
+// cmp_number_kind — the kinds the compare lane coerces: ints, floats and the
+// 0/1 bool states. Anything else reaching eq/ne meets cmp_word_equal.
+fn cmp_number_kind(v: &Value) -> bool {
+    matches!(v, Value::Int(_) | Value::Float(_) | Value::Bool(_))
+}
+
+// cmp_word_equal — fkwu's eq where a non-number takes part (runtime/fkwu-uni.c,
+// tag 102): every value is one word, and eq asks whether the two words are the
+// same. So kinds never meet across — a list, a string, a record or null is not
+// 0, and null is not the empty list. Strings are one word per content (fkwu
+// interns them), so equal text is equal. A list is its first cons pair: every
+// empty list is the one nil word, and a non-empty list equals only itself,
+// never a separately built list of the same items. NodeIDs meet by their four
+// coordinates; records and closures by identity. Siblings to Go's cmpWordEqual
+// and TypeScript's cmpWordEqual.
+fn cmp_word_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::List(xs), Value::List(ys)) => (xs.is_empty() && ys.is_empty()) || Arc::ptr_eq(xs, ys),
+        (Value::Nid(x), Value::Nid(y)) => x == y,
+        (Value::Record(x), Value::Record(y)) => Arc::ptr_eq(x, y),
+        (Value::Closure(x), Value::Closure(y)) => Arc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
 fn walk_match_switch(
     k: &mut Kernel,
     a: &mut Arena,
@@ -6307,7 +6334,14 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                 // (axiom-1, core-axioms.form) so its answer flows directly
                 // into arithmetic — the same shape the JIT's i64 ABI already
                 // lands. Proven three-way by tests/eq-shape-band.fk.
-                if matches!(lv, Value::Float(_)) || matches!(rv, Value::Float(_)) {
+                // eq and ne where a non-number arrives ask fkwu's question —
+                // are these the same word (cmp_word_equal) — rather than
+                // dying in as_int.
+                if (cat.inst == RCMP_EQ || cat.inst == RCMP_NE)
+                    && !(cmp_number_kind(&lv) && cmp_number_kind(&rv))
+                {
+                    bool_int(cmp_word_equal(&lv, &rv) == (cat.inst == RCMP_EQ))
+                } else if matches!(lv, Value::Float(_)) || matches!(rv, Value::Float(_)) {
                     let l = lv.as_float();
                     let r = rv.as_float();
                     bool_int(match cat.inst {

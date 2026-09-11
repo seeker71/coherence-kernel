@@ -4314,6 +4314,11 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 			// core-axioms.form) so its answer flows directly into arithmetic —
 			// the same shape every JIT lane already lands at the i64 ABI.
 			// Proven three-way by tests/eq-shape-band.fk.
+			// eq and ne where a non-number arrives ask fkwu's question — are
+			// these the same word (cmpWordEqual) — rather than dying in AsInt.
+			if (cat.Inst == RCompareEq || cat.Inst == RCompareNe) && !(cmpNumberKind(lv) && cmpNumberKind(rv)) {
+				return boolInt(cmpWordEqual(lv, rv) == (cat.Inst == RCompareEq))
+			}
 			if lv.Kind == VFloat || rv.Kind == VFloat {
 				l := lv.AsFloat()
 				r := rv.AsFloat()
@@ -4676,6 +4681,42 @@ func valueEqual(a, b Value) bool {
 	default:
 		return false
 	}
+}
+
+// cmpNumberKind — the kinds the compare lane coerces: ints, floats and the
+// 0/1 bool states. Anything else reaching eq/ne meets cmpWordEqual.
+func cmpNumberKind(v Value) bool {
+	return v.Kind == VInt || v.Kind == VFloat || v.Kind == VBool
+}
+
+// cmpWordEqual — fkwu's eq where a non-number takes part (runtime/fkwu-uni.c,
+// tag 102): every value is one word, and eq asks whether the two words are the
+// same. So kinds never meet across — a list, a string, a record or null is not
+// 0, and null is not the empty list. Strings are one word per content (fkwu
+// interns them), so equal text is equal. A list is its first cons pair: every
+// empty list is the one nil word, and a non-empty list equals only itself,
+// never a separately built list of the same items. NodeIDs meet by their four
+// coordinates; records and closures by identity. Siblings to Rust's
+// cmp_word_equal and TypeScript's cmpWordEqual.
+func cmpWordEqual(a, b Value) bool {
+	if a.Kind != b.Kind {
+		return false
+	}
+	switch a.Kind {
+	case VNull:
+		return true
+	case VStr:
+		return a.Str == b.Str
+	case VList:
+		return len(a.List) == len(b.List) && (len(a.List) == 0 || &a.List[0] == &b.List[0])
+	case VNodeID:
+		return a.Nid == b.Nid
+	case VRecord:
+		return a.Rec == b.Rec
+	case VClosure:
+		return a.Cl == b.Cl
+	}
+	return false
 }
 
 func (k *Kernel) walkMatchSwitch(node NodeID, kids []NodeID, env *Frame) Value {
