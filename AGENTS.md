@@ -318,9 +318,11 @@ Naming it *is* the practice.
 
    It forces a fresh compile (an existing image replaces the error with a tally — no name, no line), checks that
    the surface closes without running anything, and answers the one question the compiler cannot: `[unresolved-call] 'x'`
-   is **nonspecific** (corpus row 955) — one red line with two opposite repairs. Either nobody defines `x` (a
-   TYPO — fix the cell) or another kernel defines it and this one does not (a LANE SEAM — fix the preludes, or
-   declare the lane). Preflight offers the name to all four kernels and tells you which.
+   is **nonspecific** (corpus row 955) — one red line with three repairs. Nobody defines `x` (a TYPO — fix the
+   cell); a unit in this tree defines it and the chain does not load that unit (UNPRELUDED — add the unit
+   preflight names to `; preludes:`); or another kernel resolves it and this one does not (a LANE SEAM — fix the
+   preludes, or declare the lane). Preflight offers the name to all four kernels, searches the tree for the unit
+   that defines it, and tells you which.
 
    It reads the lane a unit actually travels, because that is what decides which cache stands between you and
    today's diagnostics: a direct-source `.fk` replaces its suffix (`x.fkb`, `x.sym`), while `.bml` — and any `.fk`
