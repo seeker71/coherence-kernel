@@ -1,0 +1,75 @@
+// Complete typed translation work over owned binary frames. Preparation and
+// decoding are useful without contacting a provider; translate is explicit.
+// preludes: form/form-stdlib/bml/concept-translation-transport.bml
+section [form.bml] {
+ class ConceptTranslationWorker {
+  def ctwk-str(node,key) = json-string-value(json-object-get(node,key));
+  def ctwk-num(node,key) = json-int-value(json-object-get(node,key));
+  def ctwk-type(node,key,kind) = and(json-object-has?(node,key),eq(node_type(json-object-get(node,key)),kind));
+  def ctwk-strings(nodes,out) = if nil?(nodes) then ctr-ok(reverse(out)) else if ne(node_type(head(nodes)),2) then ctr-bad("labels must contain only strings") else ctwk-strings(tail(nodes),cons(json-string-value(head(nodes)),out));
+  def ctwk-labels(node) = if not(ctr-array(json-object-get(node,"labels"))) then ctr-bad("labels array required") else ctwk-strings(json-array-elements(json-object-get(node,"labels")),list());
+  def ctwk-fields(pairs,allowed,seen) = if nil?(pairs) then eq(len(seen),len(allowed)) else ctwk-field(head(pairs),tail(pairs),allowed,seen);
+  def ctwk-field(pair,rest,allowed,seen) = and(oh-has(allowed,json-pair-key(pair)),and(not(oh-has(seen,json-pair-key(pair))),ctwk-fields(rest,allowed,cons(json-pair-key(pair),seen))));
+  // Inspect exact numeric lexemes before the generic JSON materializer can
+  // convert them. This request schema admits only nonnegative tagged integers.
+  // Quoted provider payloads and labels keep their own uninterpreted bytes.
+  def ctwk-integers(text,at) = if ge(at,str_len(text)) then 1 else ctwk-integer-byte(text,at,str_byte_at(text,at));
+  def ctwk-integer-byte(text,at,byte) = if eq(byte,34) then ctwk-integers(text,faj-string(text,add(at,1))) else if or(eq(byte,45),fat-digit(byte)) then ctwk-integer-token(text,at,faj-number(text,at)) else ctwk-integers(text,add(at,1));
+  def ctwk-integer-token(text,start,end) = and(ge(nhr-number(substring(text,start,end),10,4611686018427387903,0,0),0),ctwk-integers(text,end));
+  def ctwk-syntax(text) = if not(and(str_eq(value_kind(text),"string"),and(fbc-utf8(text,0),jwa-valid(text)))) then ctr-bad("complete UTF-8 work JSON required") else if not(ctwk-integers(text,0)) then ctr-bad("work integer lexeme outside nonnegative tagged range") else ctwk-node(parse-json("translation-worker",text));
+  def ctwk-node(node) = if not(node_eq(node_category(node),JSON-OBJECT())) then ctr-bad("work object required") else if not(and(ctwk-type(node,"operation",2),ctwk-type(node,"id",2))) then ctr-bad("string operation and id required") else if not(ctr-label(ctwk-str(node,"id"))) then ctr-bad("nonempty work identity without controls required") else ctwk-operation(node,ctwk-str(node,"operation"));
+  def ctwk-operation(node,operation) = if str_eq(operation,"decode") then ctwk-decode-admit(node) else if or(str_eq(operation,"prepare"),str_eq(operation,"translate")) then ctwk-source-admit(node,operation) else ctr-bad("unknown translation operation");
+  def ctwk-empty-policy(node) = and(ctwk-type(node,"requireNonempty",1),or(eq(ctwk-num(node,"requireNonempty"),0),eq(ctwk-num(node,"requireNonempty"),1)));
+  def ctwk-decode-admit(node) = if not(and(ctwk-fields(json-object-pairs(node),list("id","operation","payload","expected","requireNonempty"),list()),and(ctwk-type(node,"payload",2),and(ctwk-type(node,"expected",1),and(ctr-positive(ctwk-num(node,"expected")),ctwk-empty-policy(node)))))) then ctr-bad("exact typed decode fields required") else ctr-ok(node);
+  def ctwk-source-admit(node,operation) {
+   let common = list("id","operation","labels","target","maxRows","maxUnits");
+   let keys = if str_eq(operation,"prepare") then common else append(common,list("maxAttempts","delayMs","retryTransport","requireNonempty"));
+   if not(and(ctwk-fields(json-object-pairs(node),keys,list()),and(ctwk-type(node,"target",2),and(ctr-target(ctwk-str(node,"target")),and(ctwk-type(node,"maxRows",1),and(ctr-positive(ctwk-num(node,"maxRows")),and(ctwk-type(node,"maxUnits",1),ctr-positive(ctwk-num(node,"maxUnits"))))))))) then ctr-bad("exact typed source fields required")
+   else if and(str_eq(operation,"translate"),not(ctwk-policy(node))) then ctr-bad("explicit typed retry and cell policy required")
+   else ctwk-source-labels(node,ctwk-labels(node));
+  }
+  def ctwk-policy(node) = and(ctwk-type(node,"maxAttempts",1),and(ctwk-type(node,"delayMs",1),and(ctwk-type(node,"retryTransport",1),and(ctt-policy(ctwk-num(node,"maxAttempts"),ctwk-num(node,"delayMs"),ctwk-num(node,"retryTransport")),ctwk-empty-policy(node)))));
+  def ctwk-source-labels(node,labels) = if not(ctr-good(labels)) then labels else if not(and(gt(len(ctr-value(labels)),0),ctr-labels(ctr-value(labels)))) then ctr-bad("nonempty complete labels required") else ctr-ok(node);
+  def ctwk-json-strings(values) = if nil?(values) then list() else cons(json-node-string(head(values)),ctwk-json-strings(tail(values)));
+  def ctwk-answer(id,ok,kind,value) = json-node-object(list(oh-s("schema","form-translation-work-v1"),oh-s("id",id),oh-n("ok",ok),oh-s("kind",kind),json-node-pair("value",value)));
+  def ctwk-error(id,reason) = ctwk-answer(id,0,"refused",json-node-string(reason));
+  def ctwk-queries(batches,target,out) = if nil?(batches) then reverse(out) else ctwk-query(head(batches),tail(batches),target,out);
+  def ctwk-query(values,rest,target,out) {
+   let query = ctr-query-for(values,target);
+   if not(ctr-good(query)) then form_error(ctr-reason(query)) else ctwk-queries(rest,target,cons(json-node-object(list(oh-n("rows",len(values)),oh-s("query",ctr-value(query)))),out));
+  }
+  def ctwk-prepare(node) {
+   let values = ctr-value(ctwk-labels(node)); let batches = ctr-batches(values,ctwk-num(node,"maxRows"),ctwk-num(node,"maxUnits"));
+   if not(ctr-good(batches)) then ctwk-error(ctwk-str(node,"id"),ctr-reason(batches)) else ctwk-answer(ctwk-str(node,"id"),1,"queries",json-node-array(ctwk-queries(ctr-value(batches),ctwk-str(node,"target"),list())));
+  }
+  def ctwk-decode(node) {
+   let response = ctr-response(ctwk-str(node,"payload"),ctwk-num(node,"expected"));
+   if not(ctr-good(response)) then ctwk-error(ctwk-str(node,"id"),ctr-reason(response)) else ctwk-decoded(node,ctr-value(response));
+  }
+  def ctwk-decoded(node,value) = if str_eq(head(value),"split") then ctwk-answer(ctwk-str(node,"id"),1,"split",json-node-object(list(oh-n("middle",nth(value,1)),oh-n("observedRows",nth(value,2))))) else ctwk-cells(node,ctr-cells(nth(value,1),ctwk-num(node,"requireNonempty"),list()));
+  def ctwk-cells(node,result) = if not(ctr-good(result)) then ctwk-error(ctwk-str(node,"id"),ctr-reason(result)) else ctwk-answer(ctwk-str(node,"id"),1,"cells",json-node-array(ctwk-json-strings(ctr-value(result))));
+  def ctwk-translate(pipe,errors,node) {
+   let owner = ctt-owner(ctwk-str(node,"id"),ctwk-num(node,"maxAttempts"),ctwk-num(node,"delayMs"),ctwk-num(node,"retryTransport"));
+   record_set(owner,"pipe-owner",pipe); record_set(owner,"health-pipe",errors);
+   let values = ctr-value(ctwk-labels(node));
+   let rows = ctt-translate(owner,values,ctwk-str(node,"target"),ctwk-num(node,"maxRows"),ctwk-num(node,"maxUnits"),ctwk-num(node,"requireNonempty"));
+   ctwk-answer(ctwk-str(node,"id"),1,"cells",json-node-array(ctwk-json-strings(rows)));
+  }
+  def ctwk-dispatch(pipe,errors,node) = if str_eq(ctwk-str(node,"operation"),"prepare") then ctwk-prepare(node) else if str_eq(ctwk-str(node,"operation"),"decode") then ctwk-decode(node) else ctwk-translate(pipe,errors,node);
+  def ctwk-handle(pipe,output,errors,bytes) {
+   let request = ctwk-syntax(bytes);
+   let result = if ctr-good(request) then ctwk-dispatch(pipe,errors,ctr-value(request)) else ctwk-error("",ctr-reason(request));
+   let wire = npp-frame(json-emit-precise(result));
+   let ordinal = if record_has(pipe,"translation-work-count") then record_get(pipe,"translation-work-count") else 0;
+   record_set(pipe,"translation-work-count",add(ordinal,1));
+   let reading = oh-reading("translation-worker",int_to_str(ordinal),"response-delivery",json-node-int(str_len(wire)),json-node-int(str_len(wire)),json-node-int(1),list(),list("deliver","retain"),json-node-object(list(oh-n("requestBytes",str_len(bytes)),oh-s("responseKind",oh-str(result,"kind")),oh-n("admitted",json-int-value(oh-get(result,"ok"))))));
+   let sink = record_new(0,"pipe-owner",pipe,"health-pipe",errors);
+   ctt-voice(sink,reading); let response = oh-response(reading,"deliver"); ctt-voice(sink,response);
+   let selected = oh-select(reading,response,"retain");
+   if not(str_eq(selected,"deliver")) then npp-refuse(pipe,"translation response delivery not selected") else 0;
+   let delivered = nppc-write(pipe,output,wire,0);
+   ctt-voice(sink,oh-applied(reading,selected,json-node-int(delivered)));
+  }
+ }
+ 0;
+}

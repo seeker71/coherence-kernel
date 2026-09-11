@@ -1,0 +1,89 @@
+// The held Form request crosses the existing dynamically admitted TLS carrier
+// once. Complete HTTP framing and translation meaning remain owned here.
+// The carrier is synchronous; a Form process owner supplies concurrent work
+// and deadlines. Each exchange closes its TCP and TLS resources in the seed.
+// preludes: form/form-stdlib/bml/concept-translation.bml form/form-stdlib/bml/native-http-response.bml form/form-stdlib/bml/native-pipe-worker.bml form-stdlib/organ-health.bml
+section [form.bml] {
+ class ConceptTranslationTransport {
+  def ctt-host() = "translate.googleapis.com";
+  def ctt-path() = "/translate_a/single";
+  def ctt-agent() = "coherence-kernel-concept-surface/1";
+  def ctt-wire(query) = str_concat("GET ",str_concat(ctt-path(),str_concat("?",str_concat(query,str_concat(" HTTP/1.1\r\nHost: ",str_concat(ctt-host(),str_concat("\r\nUser-Agent: ",str_concat(ctt-agent(),"\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"))))))));
+  def ctt-fetch(values,target) {
+   let query = ctr-query-for(values,target);
+   if not(ctr-good(query)) then nhr-bad(ctr-reason(query)) else ctt-query(ctr-value(query));
+  }
+  def ctt-query(query) = nhr-parse(tls_request(ctt-host(),"443",ctt-wire(query)));
+  def ctt-voice(owner,row) = if record_has(owner,"health-pipe") then ctt-pipe-health(owner,row) else oh-voice(row);
+  def ctt-pipe-health(owner,row) {
+   oh-frame(row);
+   nppc-write(record_get(owner,"pipe-owner"),record_get(owner,"health-pipe"),str_concat("form-organ health ",str_concat(json-emit-precise(row),"\n")),0);
+  }
+  def ctt-observe(owner,aspect,ok,action,status,expected,actual) {
+   let ordinal = record_get(owner,"observations");
+   let evidence = json-node-object(list(oh-n("status",status),oh-n("sourceRows",expected),oh-n("responseRows",actual),oh-n("requestOrdinal",record_get(owner,"requests"))));
+   let reading = oh-reading("concept-translation",str_concat(record_get(owner,"id"),str_concat(":",int_to_str(ordinal))),aspect,json-node-int(1),json-node-int(ok),json-node-int(ok),if ok then list() else list(oh-need("complete-attributed-translation",evidence)),list("continue","retry","split","request-evidence"),evidence);
+   ctt-voice(owner,reading); let response = oh-response(reading,action); ctt-voice(owner,response);
+   let selected = oh-select(reading,response,"request-evidence");
+   record_set(owner,"observations",add(ordinal,1));
+   record_set(owner,"reading",reading); record_set(owner,"selected",selected); record_set(owner,"evidence",evidence);
+   selected;
+  }
+  def ctt-applied(owner) = ctt-voice(owner,oh-applied(record_get(owner,"reading"),record_get(owner,"selected"),record_get(owner,"evidence")));
+  // The existing sleep carrier uses a signed 64-bit nanosecond deadline.
+  // Admit against that actual representation, then recheck before each sleep.
+  def ctt-sleep-limit() = sub(9223372036854,add(host_monotonic_ms(),1));
+  def ctt-policy(attempts,delay,retryTransport) = and(ctr-positive(attempts),and(str_eq(value_kind(delay),"int"),and(ge(delay,0),and(str_eq(value_kind(retryTransport),"int"),and(or(eq(retryTransport,0),eq(retryTransport,1)),or(eq(attempts,1),le(delay,div(ctt-sleep-limit(),sub(attempts,1)))))))));
+  def ctt-owner(id,attempts,delay,retryTransport) = if not(and(ctr-label(id),ctt-policy(attempts,delay,retryTransport))) then form_error("translation request policy refused") else record_new(0,"id",id,"attempts",attempts,"delay",delay,"retry-transport",retryTransport,"split-resets-attempt",0,"requests",0,"observations",0);
+  def ctt-exchange(owner,values,target,attempt) {
+   record_set(owner,"requests",add(record_get(owner,"requests"),1));
+   let response = ctt-fetch(values,target);
+   if not(nhr-good(response)) then ctt-failed(owner,values,target,attempt,0,nhr-reason(response),record_get(owner,"retry-transport"))
+   else if or(lt(nhr-status(response),200),ge(nhr-status(response),300)) then ctt-failed(owner,values,target,attempt,nhr-status(response),"HTTP translation status",1)
+   else ctt-decoded(owner,values,target,attempt,ctr-response(nhr-body(response),len(values)));
+  }
+  def ctt-failed(owner,values,target,attempt,status,reason,retryAllowed) {
+   let retry = and(retryAllowed,lt(add(attempt,1),record_get(owner,"attempts")));
+   let selected = ctt-observe(owner,reason,0,if retry then "retry" else "request-evidence",status,len(values),0);
+   if and(retry,str_eq(selected,"retry")) then ctt-retry(owner,values,target,attempt) else ctt-refused(owner,reason);
+  }
+  def ctt-retry(owner,values,target,attempt) {
+   if gt(record_get(owner,"delay"),div(ctt-sleep-limit(),add(attempt,1))) then ctt-refused(owner,"retry deadline exceeds sleep carrier representation") else 0;
+   host_sleep_ms(mul(record_get(owner,"delay"),add(attempt,1)));
+   ctt-applied(owner);
+   ctt-exchange(owner,values,target,add(attempt,1));
+  }
+  def ctt-refused(owner,reason) {
+   ctt-applied(owner);
+   if record_has(owner,"pipe-owner") then npp-refuse(record_get(owner,"pipe-owner"),str_concat("translation refused: ",reason)) else form_error(str_concat("translation refused: ",reason));
+  }
+  def ctt-decoded(owner,values,target,attempt,decoded) = if not(ctr-good(decoded)) then ctt-invalid(owner,values,ctr-reason(decoded)) else if str_eq(head(ctr-value(decoded)),"split") then ctt-split(owner,values,target,attempt,nth(ctr-value(decoded),1),nth(ctr-value(decoded),2)) else ctt-complete(owner,values,nth(ctr-value(decoded),1));
+  def ctt-invalid(owner,values,reason) {
+   ctt-observe(owner,reason,0,"request-evidence",200,len(values),0); ctt-refused(owner,reason);
+  }
+  def ctt-complete(owner,values,rows) {
+   ctt-observe(owner,"complete-response-rows",1,"continue",200,len(values),len(rows)); ctt-applied(owner); rows;
+  }
+  def ctt-split(owner,values,target,attempt,middle,actual) {
+   let selected = ctt-observe(owner,"response-row-cardinality",0,"split",200,len(values),actual);
+   if not(str_eq(selected,"split")) then ctt-refused(owner,"split response not selected") else ctt-split-selected(owner,values,target,if record_get(owner,"split-resets-attempt") then 0 else attempt,middle);
+  }
+  def ctt-split-selected(owner,values,target,attempt,middle) {
+   let left = take(middle,values); let right = drop(middle,values);
+   ctt-applied(owner);
+   append(ctt-exchange(owner,left,target,attempt),ctt-exchange(owner,right,target,attempt));
+  }
+  def ctt-batches(owner,batches,target,out) = if nil?(batches) then reverse(out) else ctt-batch-result(owner,tail(batches),target,out,ctt-exchange(owner,head(batches),target,0));
+  def ctt-batch-result(owner,rest,target,out,rows) = ctt-batches(owner,rest,target,append(reverse(rows),out));
+  def ctt-translate(owner,values,target,maxRows,maxUnits,requireNonempty) {
+   let batches = ctr-batches(values,maxRows,maxUnits);
+   if not(ctr-good(batches)) then form_error(ctr-reason(batches)) else ctt-translate-batches(owner,values,target,ctr-value(batches),requireNonempty);
+  }
+  def ctt-translate-batches(owner,values,target,batches,requireNonempty) {
+   let rows = ctt-batches(owner,batches,target,list());
+   let cells = ctr-cells(rows,requireNonempty,list());
+   if not(and(ctr-good(cells),eq(len(rows),len(values)))) then ctt-invalid(owner,values,"translation coverage or cells refused") else ctr-value(cells);
+  }
+ }
+ 0;
+}

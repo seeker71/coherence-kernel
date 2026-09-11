@@ -1,0 +1,79 @@
+// preludes: form/form-stdlib/bml/concept-translation.bml form/form-stdlib/bml/native-http-response.bml form-stdlib/bml/concept-materializer.bml
+section [form.bml] {
+ class ConceptTranslationWitness {
+  def ctw-check(state,aspect,ok) = csa-check(state,str_concat("translation-",aspect),ok,"native query, complete wire, exact current concept cells");
+  def ctw-json(text) = json-emit-precise(json-node-array(list(json-node-array(list(json-node-array(list(json-node-string(text))))))));
+  def ctw-flatten(batches,out) = if nil?(batches) then reverse(out) else ctw-flatten(tail(batches),append(reverse(head(batches)),out));
+  def ctw-labels(bytes,id,out) = if eq(id,10000) then reverse(out) else ctw-labels(bytes,add(id,1),cons(csa-label(substring(bytes,mul(id,30),add(mul(id,30),20))),out));
+  def ctw-column(rows,at,out) = if nil?(rows) then reverse(out) else ctw-column(tail(rows),at,cons(nth(split-on(head(rows),"\t"),at),out));
+  def ctw-columns(state,rows,at) {
+   if eq(at,13) then 12 else ctw-column-proof(state,rows,at);
+  }
+  def ctw-column-proof(state,rows,at) {
+   let column = ctw-column(rows,at,list());
+   let encoded = ctw-json(ctr-join(column,"\n",list(),1));
+   let decoded = ctr-response(encoded,10000);
+   let cells = if ctr-good(decoded) then ctr-cells(nth(ctr-value(decoded),1),0,list()) else decoded;
+   ctw-check(state,str_concat("complete-current-column-",int_to_str(at)),and(ctr-good(cells),str_eq(ctr-join(ctr-value(cells),"\n",list(),1),ctr-join(column,"\n",list(),1))));
+   ctw-columns(state,rows,add(at,1));
+  }
+  def ctw-http(state,name,wire,status,body) {
+   let result = nhr-parse(wire);
+   ctw-check(state,name,and(nhr-good(result),and(eq(nhr-status(result),status),str_eq(nhr-body(result),body))));
+  }
+  def ctw-http-refuse(state,rows) = if nil?(rows) then 1 else ctw-http-refusal(state,head(rows),tail(rows));
+  def ctw-http-refusal(state,row,rest) {
+   ctw-check(state,head(row),not(nhr-good(nhr-parse(nth(row,1)))));
+   ctw-http-refuse(state,rest);
+  }
+  def ctw-run() {
+   let state = cmm-state(".","form-sha256");
+   let query = ctr-query-for(list("a b~*","héllo","😀"),"zh-CN");
+   ctw-check(state,"query-form-encoding",and(ctr-good(query),str_eq(ctr-value(query),"client=gtx&sl=en&tl=zh-CN&dt=t&q=a+b%7E*%0Ah%C3%A9llo%0A%F0%9F%98%80")));
+   ctw-check(state,"utf16-units",eq(ctr-units("aé😀",0,0),4));
+   let pieces = ctr-batches(list("😀","ab","c"),100,5);
+   ctw-check(state,"unicode-batch-boundary",and(ctr-good(pieces),and(eq(len(ctr-value(pieces)),2),str_eq(ctr-join(head(ctr-value(pieces)),"|",list(),1),"😀"))));
+   let oversized = ctr-batches(list("longer","x"),1,2);
+   ctw-check(state,"single-label-never-truncated",and(ctr-good(oversized),str_eq(head(head(ctr-value(oversized))),"longer")));
+   ctw-check(state,"invalid-label-and-policy-refusal",and(not(ctr-good(ctr-batches(list("a\nb"),100,2200))),and(not(ctr-good(ctr-batches(list("a"),0,2200))),not(ctr-good(ctr-query-for(list("a"),"en\r\nX"))))));
+   let segmented = ctr-response("[[[\"satu\\r\\n\"],[null],[\"dua\"]],null,\"en\"]",2);
+   ctw-check(state,"ordered-segments-and-cr-removal",and(ctr-good(segmented),str_eq(ctr-join(nth(ctr-value(segmented),1),"|",list(),1),"satu|dua")));
+   ctw-check(state,"mismatch-selects-balanced-split",str_eq(head(ctr-value(ctr-response(ctw-json("one"),5))),"split"));
+   ctw-check(state,"singleton-mismatch-refuses",not(ctr-good(ctr-response(ctw-json("one\ntwo"),1))));
+   ctw-check(state,"trailing-empty-row-preserved",eq(len(nth(ctr-value(ctr-response(ctw-json("one\n"),2)),1)),2));
+   ctw-check(state,"json-and-typed-text-refusals",and(not(ctr-good(ctr-response("[[[7]]]",1))),and(not(ctr-good(ctr-response("[[[\"x\"]]] trailing",1))),not(ctr-good(ctr-response("[[[\"\\u0000\"]]]",1))))));
+   let cleaned = ctr-cells(list(" a\t\r\nb ",""),0,list());
+   ctw-check(state,"cell-cleaning-and-explicit-empty-policy",and(ctr-good(cleaned),and(str_eq(head(ctr-value(cleaned))," a b "),not(ctr-good(ctr-cells(list(" \t"),1,list()))))));
+   let ranked = csa-file(state,"model/concept-10000-ranked.dat");
+   ctw-check(state,"current-ranked-extent",eq(str_len(ranked),300000));
+   let labels = ctw-labels(ranked,0,list()); let batches = ctr-batches(labels,100,2200);
+   ctw-check(state,"all-current-labels-and-batch-order",and(ctr-good(batches),and(eq(len(ctr-value(batches)),100),str_eq(ctr-join(ctw-flatten(ctr-value(batches),list()),"\n",list(),1),ctr-join(labels,"\n",list(),1)))));
+   let machine = csa-file(state,"cognition/concept-nl-semantic-13-machine.tsv");
+   let lines = ctr-lines(machine,0,0,list());
+   ctw-check(state,"current-machine-row-framing",and(eq(len(lines),10002),str_eq(nth(lines,10001),"")));
+   ctw-columns(state,take(10000,tail(lines)),1);
+   ctw-http(state,"length-response","HTTP/1.1 200 OK\r\ncontent-length: 5\r\nContent-Encoding: identity\r\n\r\nhello",200,"hello");
+   ctw-http(state,"interim-and-multichunk-trailer","HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3;x=y\r\nhé\r\n3\r\nllo\r\n0\r\nX-Trace: held\r\n\r\n",200,"héllo");
+   ctw-http(state,"explicit-empty-response","HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n",200,"");
+   ctw-http(state,"bodyless-status","HTTP/1.1 204 No Content\r\n\r\n",204,"");
+   ctw-http-refuse(state,list(
+    list("http-partial-length-refuses","HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhell"),
+    list("http-extra-body-refuses","HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nhello"),
+    list("http-unframed-refuses","HTTP/1.1 200 OK\r\n\r\nhello"),
+    list("http-partial-headers-refuses","HTTP/1.1 200 OK\r\nContent-Length: 5\r\nhello"),
+    list("http-numeric-suffix-refuses","HTTP/1.1 200 OK\r\nContent-Length: 5x\r\n\r\nhello"),
+    list("http-numeric-overflow-refuses","HTTP/1.1 200 OK\r\nContent-Length: 9999999999999999999999999999999\r\n\r\nhello"),
+    list("http-duplicate-length-refuses","HTTP/1.1 200 OK\r\nContent-Length: 5\r\ncontent-length: 5\r\n\r\nhello"),
+    list("http-double-framing-refuses","HTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\nhello"),
+    list("http-unknown-coding-refuses","HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Encoding: gzip\r\n\r\nhello"),
+    list("http-chunk-short-refuses","HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhell"),
+    list("http-chunk-terminator-missing-refuses","HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n"),
+    list("http-chunk-trailing-bytes-refuses","HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nx"),
+    list("http-framing-trailer-refuses","HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nContent-Length: 0\r\n\r\n"),
+    list("http-upgrade-refuses","HTTP/1.1 101 Switching Protocols\r\n\r\n")));
+   print(list("translation","current-labels",10000,"current-cells",120000,"observations",record_get(state,"observations")));
+   1;
+  }
+ }
+ 0;
+}

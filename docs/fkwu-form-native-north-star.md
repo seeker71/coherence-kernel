@@ -37,6 +37,12 @@ The same ownership applies to inspections, generators, numerical references, bui
 
 Every admitted source construct reaches an explicit Form interpretation, native emission or visible admission refusal. Grammar and dispatch evolve in Form. New behavior meets executable observations and independent proof execution before it becomes available to subsequent work.
 
+Resident workers receive complete owned messages and keep their programs and
+working state available across requests. Readiness, backpressure, deadlines,
+result framing and diagnostic flow remain Form-owned. The owner admits
+completion only after submitted obligations and inherited streams are observed;
+cleanup preserves the channel needed to witness its own completion.
+
 ## Native programs and resident data
 
 CPU and device code is generated and admitted in RAM. Metal is discovered and loaded dynamically; executables do not link its framework. Compiled caches carry exact source, entry, target and ABI identities. Required reuse either meets that identity or reports a miss. Selection is explicit.
