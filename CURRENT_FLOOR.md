@@ -849,7 +849,8 @@ Mach VM statistics (`host_vm_stat`, `sysctl.hw.memsize`), load from
 `getloadavg` (`host_load_avg`), disk from every block storage driver's
 cumulative statistics (`host_disk_stat`, IOKit by name; rates are the reader's
 deltas), processes from libproc (`host_processes name` → pid, resident bytes,
-CPU microseconds, elapsed seconds; no `ps`, no `pgrep`), the governor and
+CPU microseconds, elapsed seconds; a name ending in `*` is a prefix, so
+`fkwu*` is every kernel binary's name; no `ps`, no `pgrep`), the governor and
 launch refresh by argv (`host_capture` where an answer is needed). `tools/`
 carries no glass script; the observer carries no text parser for a tool's
 output. Tags 151–161.
