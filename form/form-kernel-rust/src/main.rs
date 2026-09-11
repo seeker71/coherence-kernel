@@ -9240,10 +9240,17 @@ fn ensure_bmf_bootstrap(stdlib_abs: &std::path::Path) -> Result<Arc<Vec<u8>>, St
         return Ok(b.clone());
     }
     let fkb_path = stdlib_abs.join(".cache").join("bmf-bootstrap.fkb");
-    let prelude_paths: Vec<PathBuf> = SOURCE_COMPILE_PRELUDES
+    // The source-compile preludes name entry units; the bootstrap is their
+    // closure, so a dependency their headers declare (fol-bp, through
+    // form-ontology-source-categories.fk) is both compiled in and watched.
+    let entry_paths: Vec<String> = SOURCE_COMPILE_PRELUDES
         .iter()
-        .map(|n| stdlib_abs.join(n))
+        .map(|n| stdlib_abs.join(n).to_string_lossy().to_string())
         .collect();
+    let closure = load_form_source_closure(&entry_paths).map_err(|e| {
+        format!("bmf bootstrap: {} (is --stdlib {} correct?)", e, stdlib_abs.display())
+    })?;
+    let prelude_paths: Vec<PathBuf> = closure.iter().map(|(p, _)| PathBuf::from(p)).collect();
     let fkb_mtime = fs::metadata(&fkb_path).and_then(|m| m.modified()).ok();
     let stale = match fkb_mtime {
         None => true,
@@ -9255,18 +9262,11 @@ fn ensure_bmf_bootstrap(stdlib_abs: &std::path::Path) -> Result<Arc<Vec<u8>>, St
         }),
     };
     let bytes = if stale {
-        let mut parts = Vec::with_capacity(prelude_paths.len());
-        for p in &prelude_paths {
-            parts.push(fs::read_to_string(p).map_err(|e| {
-                format!(
-                    "bmf bootstrap: read prelude {}: {} (is --stdlib {} correct?)",
-                    p.display(),
-                    e,
-                    stdlib_abs.display()
-                )
-            })?);
-        }
-        let src = parts.join("\n");
+        let src = closure
+            .iter()
+            .map(|(_, source)| source.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         let emitted = std::thread::Builder::new()
             .name("bmf-bootstrap-emit".to_string())
             .stack_size(form_kernel_stack_bytes())
@@ -9536,23 +9536,21 @@ fn source_compile_manifest_recipe_object(
     let compile_result = (|| {
         let mut k = Kernel::new();
         let mut roots = Vec::new();
-        for name in SOURCE_ROUTE_LANGUAGE_PRELUDES {
-            let source_path = stdlib_abs.join(name);
-            let source = fs::read_to_string(&source_path).map_err(|e| {
-                format!(
-                    "source-compile: route-language prelude {}: {} (is --stdlib {} correct?)",
-                    source_path.display(),
-                    e,
-                    stdlib_dir
-                )
-            })?;
-            compile_route_source_into_recipe(
-                &mut k,
-                &mut roots,
-                &source_path.to_string_lossy(),
-                &source,
-                &stdlib_abs,
-            )?;
+        // The route-language preludes name entry units; their own `; preludes:`
+        // headers carry the rest (form-ontology-loader.fk reaches fol-bp that
+        // way), so the language is their closure, as Go's route compile loads it.
+        let entry_paths: Vec<String> = SOURCE_ROUTE_LANGUAGE_PRELUDES
+            .iter()
+            .map(|name| stdlib_abs.join(name).to_string_lossy().to_string())
+            .collect();
+        let language = load_form_source_closure(&entry_paths).map_err(|e| {
+            format!(
+                "source-compile: route-language closure: {} (is --stdlib {} correct?)",
+                e, stdlib_dir
+            )
+        })?;
+        for (source_path, source) in &language {
+            compile_route_source_into_recipe(&mut k, &mut roots, source_path, source, &stdlib_abs)?;
         }
         let route_source = fs::read_to_string(&routes_abs)
             .map_err(|e| format!("source-compile: read routes {}: {}", routes_abs, e))?;
@@ -11910,6 +11908,17 @@ mod route_spec_tests {
 
     static CONFIG_ISOLATION_LOCK: Mutex<()> = Mutex::new(());
 
+    // Fixtures resolve from this crate's own directory. The source-compile
+    // paths move the process cwd while they run, so a relative "../" read in a
+    // parallel test lands wherever another test's compile left the cwd.
+    fn form_dir_path(rel: &str) -> String {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(rel)
+            .to_string_lossy()
+            .to_string()
+    }
+
     struct ExplicitConfigGuard {
         old: Option<String>,
         path: PathBuf,
@@ -12008,7 +12017,7 @@ mod route_spec_tests {
         let cache_key = volatile_coord("github.branch_head_sha", "seeker71/Coherence-Network|main");
         volatile_table().lock().unwrap().cells.remove(&cache_key);
 
-        let manifest = fs::read_to_string("../apps/coherence-network/api.bml")
+        let manifest = fs::read_to_string(form_dir_path("apps/coherence-network/api.bml"))
             .expect("read BML front-door catalog");
         let path = env::temp_dir().join(format!(
             "form-rust-no-egress-catalog-{}.bml",
@@ -12016,7 +12025,7 @@ mod route_spec_tests {
         ));
         fs::write(&path, manifest).expect("write route manifest copy");
         let path_str = path.to_string_lossy().to_string();
-        let compiled = source_compile_manifest_recipe_object(&path_str, "../form-stdlib")
+        let compiled = source_compile_manifest_recipe_object(&path_str, &form_dir_path("form-stdlib"))
             .expect("source route manifest compiles");
         let program = RouteProgram::RecipeObject(Arc::new(compiled));
         let (mut kernel, mut arena, routes, _) =
@@ -12185,7 +12194,7 @@ mod route_spec_tests {
         ));
         fs::write(&path, manifest).expect("write source route manifest");
         let path_str = path.to_string_lossy().to_string();
-        let compiled = source_compile_manifest_recipe_object(&path_str, "../form-stdlib")
+        let compiled = source_compile_manifest_recipe_object(&path_str, &form_dir_path("form-stdlib"))
             .expect("source route manifest compiles to recipe object");
         assert!(compiled.kernel.by_id.contains_key(&compiled.root));
 
@@ -12219,12 +12228,12 @@ mod route_spec_tests {
     #[test]
     fn source_compiled_workload_executes_bml_tending_cells() {
         let paths = vec![
-            "../form-stdlib/core.fk".to_string(),
-            "../form-stdlib/kernel-http.fk".to_string(),
-            "../form-stdlib/native-route-goal-cells.bml".to_string(),
-            "../form-stdlib/queries/native-route-goal-tending.fk".to_string(),
+            form_dir_path("form-stdlib/core.fk"),
+            form_dir_path("form-stdlib/kernel-http.fk"),
+            form_dir_path("form-stdlib/native-route-goal-cells.bml"),
+            form_dir_path("form-stdlib/queries/native-route-goal-tending.fk"),
         ];
-        let mut compiled = source_compile_file_workload_recipe_object(&paths, "../form-stdlib")
+        let mut compiled = source_compile_file_workload_recipe_object(&paths, &form_dir_path("form-stdlib"))
             .expect("source-authored workload compiles");
         let value = execute_root(&mut compiled.kernel, compiled.root);
         let rendered = value.display();
@@ -12340,7 +12349,7 @@ mod route_spec_tests {
 
     #[test]
     fn source_bml_catalog_template_routes_select_natively_in_rust() {
-        let manifest = fs::read_to_string("../apps/coherence-network/api.bml")
+        let manifest = fs::read_to_string(form_dir_path("apps/coherence-network/api.bml"))
             .expect("read BML front-door catalog");
         let path = env::temp_dir().join(format!(
             "form-rust-router-template-catalog-{}.bml",
@@ -12348,7 +12357,7 @@ mod route_spec_tests {
         ));
         fs::write(&path, manifest).expect("write route manifest copy");
         let path_str = path.to_string_lossy().to_string();
-        let compiled = source_compile_manifest_recipe_object(&path_str, "../form-stdlib")
+        let compiled = source_compile_manifest_recipe_object(&path_str, &form_dir_path("form-stdlib"))
             .expect("source route manifest compiles");
         let program = RouteProgram::RecipeObject(Arc::new(compiled));
         let (_, _, routes, _) =
