@@ -85,8 +85,10 @@ for that same input after the serving adapter changes. Healing includes recalled
 experience in that input, so changed context also permits a fresh attempt. An explicit coding
 model is respected.
 Generic generated prose is labelled an unverified proposal. All token streams
-use the existing dynamic native generation path, including cancellation and
-observed context/memory pressure. There is no fixed total generation budget.
+use the existing dynamic native generation path, including cancellation,
+observed context/memory pressure and observed repetition. Repetition is read
+with case and line wrapping folded, at sentence and paragraph length. There is
+no fixed total generation budget.
 
 The serialized learner consumes resource needs through `organ-care.bml`.
 Its native verified-memory responder accepts an offered retrieval action,
