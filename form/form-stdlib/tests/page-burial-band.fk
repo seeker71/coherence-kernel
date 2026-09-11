@@ -1,18 +1,19 @@
 ; preludes: form-stdlib/core.fk form/form-stdlib/roster-census.bml
-; Expected: 1023
-; PROOF LEVEL: FOURTH-ARM ONLY (host_spawn, host_kill, shm_offer, the live pages, kernel_page_ended and kernel_page_bury: pf-arm-mask 8 each)
+; Expected: 2047
+; PROOF LEVEL: FOURTH-ARM ONLY (host_spawn, host_kill, shm_offer, the live pages, kernel_page_ended, kernel_page_bury and kernel_page_hot: pf-arm-mask 8 each)
 ;
 ; page-burial-band — a kernel's live page ends with the kernel, a page another kernel left is read and buried
-; only by an explicit call for its pid, and no page is buried unless its kernel has ended.
+; only by an explicit call for its pid, no page is buried unless its kernel has ended, and a kernel born on a
+; pid that left a page standing opens a fresh one.
 ;
 ; Every kernel maps a 128 MiB live page, /fg-k<pid>, and buries its own page, store and program surface at
 ; exit. A page a kernel left (killed after its roster slot was gone) is named by rce-ended, which reads and
 ; never unlinks; kernel_page_bury pid buries that one pid. The host hands a pid out again within minutes, and
-; a kernel that takes it reopens the page its pid left standing, so a page is buried only when it names its
+; a kernel that takes it opens a fresh page under the same name, so a page is buried only when it names its
 ; pid, says it ended or was opened before the pid was seen gone, and the pid is still gone once the page has
 ; been read. The band buries only its own fixtures.
 ;
-; Verdict 1023:
+; Verdict 2047:
 ;    1  a sleeper that ends on its own leaves no page behind
 ;    2  a sleeper forgotten by the roster and then killed (no final note, no slot) leaves its page standing
 ;    4  rce-ended names the killed sleeper and not the resting one, and the killed one's page still stands
@@ -25,6 +26,10 @@
 ;  128  a page opened after the pid was seen gone, saying alive, stands (a kernel that took the pid)
 ;  256  the same page saying it ended is buried
 ;  512  a page opened before the pid was seen gone, saying alive, is buried (a killed kernel's)
+; a pid that left a page standing:
+; 1024  a sleeper born on a pid holding a 4096-byte leftover opens a fresh page: it names the sleeper, says
+;       alive, and kernel_page_hot reads its rows (it reads none from a page smaller than the layout); the
+;       sleeper exits 0 and its page goes with it
 (do
     (defn pbb-cmd () (list "./fkwu" "observe/tests/roster-sleeper.fk"))
     ; a page by hand: word 0 the live-page magic (read off this kernel's own page), 1 the pid, 2 start-ms,
@@ -83,8 +88,23 @@
     (let wd (host_wait d))
     (let dFree (and (gt d 0) (and (eq (host_alive d) 0) (eq (len (kernel_live d)) 0))))
     (let hand (if dFree (pbb-hand d (str_concat "/fg-k" (int_to_str d))) (list -1 -1 -1 -1 -1 -1 -1 -1)))
+    ; a pid that left a page standing: a shell holds the pid while an ended kernel's 4096-byte page is written
+    ; under it, then execs a sleeper in place (a pid survives exec; no door execs in place). A shm object here
+    ; takes its size once, so a leftover the sleeper kept would stay 16 KiB under its 128 MiB layout.
+    (let t0 (now_unix_ms))
+    (let r (host_spawn_quiet (list "/bin/sh" "-c" "sleep 1; exec ./fkwu observe/tests/roster-sleeper.fk")))
+    (let rl (pbb-page (str_concat "/fg-k" (int_to_str r)) (pbb-words r 1000 0)))
+    (let rleft (kernel_live r))
+    (let rstaged (and (gt r 0) (and (eq (len rleft) 34) (and (eq (nth rleft 1) r) (lt (sub (now_unix_ms) t0) 500)))))
+    (let rrest (host_sleep_ms 1600))
+    (let rpage (kernel_live r))
+    (let rhot (kernel_page_hot r 1))
+    (let rw (host_wait r))
+    (let rgone (len (kernel_live r)))
+    (let rb (kernel_page_bury r))
 
     (let told (print (list "a" a "b" b "c" c "pageA" (len pageA) "pageB" (len pageB) "ended" (len ended) "ended-b" (rce-in? b ended) "ended-c" (rce-in? c ended) "b-before" (len pageBpre) "buried" buried "pageB-after" (len pageB2) "me" (len pageMe) "c-page" (len pageC) "c-in-roster" cIn "d" d "hand" hand)))
+    (let told2 (print (list "r" r "staged" rstaged "r-page" (len rpage) "r-hot" (len rhot) "r-wait" rw "r-after" rgone "r-buried" rb)))
     (let c0 (if (eq (len pageA) 0) 1 0))
     (let c1 (if (and (eq fb 1) (and (ge (len pageB) 20) (eq (nth pageB 19) 1))) 2 0))
     (let c2 (if (and (eq (rce-in? b ended) 1) (and (eq (rce-in? c ended) 0) (ge (len pageBpre) 20))) 4 0))
@@ -95,4 +115,6 @@
     (let h1 (if (and (eq (nth hand 2) 0) (ge (nth hand 3) 20)) 128 0))
     (let h2 (if (and (eq (nth hand 4) 1) (eq (nth hand 5) 0)) 256 0))
     (let h3 (if (and (eq (nth hand 6) 1) (eq (nth hand 7) 0)) 512 0))
-    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add h0 (add h1 (add h2 h3))))))))))
+    (let r0 (if (and rstaged (and (eq (len rpage) 34) (and (eq (nth rpage 1) r) (and (eq (nth rpage 19) 1)
+                (and (gt (len rhot) 0) (and (eq rw 0) (eq rgone 0))))))) 1024 0))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add h0 (add h1 (add h2 (add h3 r0)))))))))))
