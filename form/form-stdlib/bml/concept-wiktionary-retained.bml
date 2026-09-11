@@ -1,0 +1,92 @@
+// Re-observe every retained revision from complete actual source bytes.
+// This attests the existing source set, not a new selection or translation.
+// preludes: form/form-stdlib/bml/concept-wiktionary-admission.bml
+section [form.bml] {
+ class ConceptWiktionaryRetained {
+  def cwr-held(state,bytes) {
+   let lines = ctr-lines(bytes,0,0,list());
+   cwp-check(state,"held-evidence-header-present",gt(len(lines),1));
+   let meta = cwp-object(state,cwp-json(state,head(lines)),"_meta");
+   cwp-check(state,"held-evidence-schema",str_eq(json-string-value(cwp-field(state,meta,"schema",2)),"coherence-kernel.substantive-concept-repair.v1"));
+   cwp-check(state,"held-evidence-selected-count",eq(json-int-value(cwp-field(state,meta,"selected",1)),111));
+   cwr-rows(state,tail(lines),list());
+  }
+  def cwr-rows(state,lines,out) = if nil?(lines) then reverse(out) else if str_eq(head(lines),"") then cwr-empty(state,tail(lines),out) else cwr-row(state,head(lines),tail(lines),out);
+  def cwr-empty(state,rest,out) {
+   cwp-check(state,"held-evidence-no-interior-empty-row",nil?(rest)); reverse(out);
+  }
+  def cwr-row(state,bytes,rest,out) {
+   let node = cwp-json(state,bytes);
+   let revision = json-int-value(cwp-field(state,node,"revisionId",1));
+   let page = json-int-value(cwp-field(state,node,"pageId",1));
+   cwp-check(state,"held-identities-positive",and(gt(revision,0),gt(page,0)));
+   cwp-check(state,"held-revision-page-unique",and(csa-unique(state,"held-revision:",int_to_str(revision)),csa-unique(state,"held-page:",int_to_str(page))));
+   cwr-rows(state,rest,cons(node,out));
+  }
+  def cwr-ids(rows) = if nil?(rows) then list() else cons(int_to_str(ctwk-num(head(rows),"revisionId")),cwr-ids(tail(rows)));
+  def cwr-wire(rows) = str_concat("GET /w/api.php?action=query&format=json&formatversion=2&prop=revisions&rvprop=ids%7Ctimestamp%7Ccontent&rvslots=main&revids=",str_concat(ctr-query(csa-join(cwr-ids(rows),"|"),0,list())," HTTP/1.1\r\nHost: en.wiktionary.org\r\nUser-Agent: coherence-kernel/1.0 (https://github.com/seeker71/coherence-kernel; stable substantive concept repair)\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"));
+  def cwr-find(pages,pageId) = if nil?(pages) then nothing() else if eq(ctwk-num(head(pages),"pageid"),pageId) then head(pages) else cwr-find(tail(pages),pageId);
+  def cwr-pages(state,pages,seen) = if nil?(pages) then 1 else cwr-page(state,head(pages),tail(pages),seen);
+  def cwr-page(state,page,rest,seen) {
+   let id = json-int-value(cwp-field(state,page,"pageid",1));
+   cwp-check(state,"response-page-positive",gt(id,0));
+   cwp-check(state,"response-page-unique",not(cwm-member-code(id,seen)));
+   cwp-field(state,page,"title",2);
+   cwr-pages(state,rest,cons(id,seen));
+  }
+  def cwr-source(state,expected,pages) {
+   let pageId = ctwk-num(expected,"pageId"); let revision = ctwk-num(expected,"revisionId");
+   let page = cwr-find(pages,pageId);
+   cwp-check(state,"requested-page-present",not(nothing?(page)));
+   cwp-check(state,"held-page-title",str_eq(ctwk-str(page,"title"),json-string-value(cwp-field(state,expected,"canonicalLabel",2))));
+   let rev = cwp-one(state,page,"revisions");
+   cwp-check(state,"held-revision-and-timestamp",and(eq(json-int-value(cwp-field(state,rev,"revid",1)),revision),str_eq(json-string-value(cwp-field(state,rev,"timestamp",2)),json-string-value(cwp-field(state,expected,"timestamp",2)))));
+   let main = cwp-object(state,cwp-object(state,rev,"slots"),"main");
+   let source = json-string-value(cwp-field(state,main,"content",2));
+   cwp-write(state,str_concat(int_to_str(revision),".wiki"),source);
+   let english = cwm-english(source); cwp-check(state,"complete-english-source",ctr-good(english));
+   let bytes = ctr-value(english); let hash = csa-hash(state,bytes);
+   cwp-check(state,"held-english-sha256",str_eq(hash,json-string-value(cwp-field(state,expected,"englishSha256",2))));
+   let meaning = cwm-meaning(bytes);
+   cwp-check(state,"selected-meaning-present",and(ctr-good(meaning),not(nothing?(ctr-value(meaning)))));
+   cwp-check(state,"held-section-and-definition",and(str_eq(head(ctr-value(meaning)),json-string-value(cwp-field(state,expected,"section",2))),str_eq(nth(ctr-value(meaning),1),json-string-value(cwp-field(state,expected,"definition",2)))));
+   json-node-object(list(oh-n("pageId",pageId),oh-n("revisionId",revision),oh-s("title",ctwk-str(page,"title")),oh-n("sourceBytes",str_len(source)),oh-s("sourceSha256",csa-hash(state,source)),oh-n("englishBytes",str_len(bytes)),oh-s("englishSha256",hash),oh-s("meaning","held section and definition reproduced")));
+  }
+  def cwr-sources(state,rows,pages,out) = if nil?(rows) then reverse(out) else cwr-sources(state,tail(rows),pages,cons(cwr-source(state,head(rows),pages),out));
+  def cwr-batch(state,rows,ordinal) {
+   let wire = cwr-wire(rows); let stem = str_concat("batch-",int_to_str(ordinal));
+   cwp-write(state,str_concat(stem,"-request.http"),wire);
+   let started = host_monotonic_ms(); let raw = tls_request("en.wiktionary.org","443",wire); let elapsed = sub(host_monotonic_ms(),started);
+   cwp-check(state,"tls-returned-held-string",str_eq(value_kind(raw),"string"));
+   cwp-write(state,str_concat(stem,"-response.http"),raw);
+   let response = nhr-parse(raw);
+   cwp-write(state,str_concat(stem,"-transport.json"),json-emit-precise(json-node-object(list(oh-n("ordinal",ordinal),oh-n("elapsedMs",elapsed),oh-n("responseBytes",str_len(raw)),oh-n("framingAccepted",nhr-good(response)),oh-n("status",nhr-status(response)),oh-s("reason",nhr-reason(response)),oh-n("requestedRevisions",len(rows))))));
+   cwp-check(state,"complete-http-framing",nhr-good(response));
+   cwp-check(state,"successful-http-status",eq(nhr-status(response),200));
+   cwr-admit(state,rows,nhr-body(response));
+  }
+  def cwr-admit(state,rows,bytes) {
+   let node = cwp-json(state,bytes); let query = cwp-object(state,node,"query");
+   cwp-check(state,"unique-pages-array",and(eq(cwp-key-count(json-object-pairs(query),"pages"),1),ctr-array(json-object-get(query,"pages"))));
+   let pages = json-array-elements(json-object-get(query,"pages"));
+   cwp-check(state,"complete-requested-page-count",eq(len(pages),len(rows)));
+   cwr-pages(state,pages,list());
+   cwr-sources(state,rows,pages,list());
+  }
+  def cwr-batches(state,rows,ordinal,out) = if nil?(rows) then list(ordinal,out) else cwr-next(state,drop(25,rows),ordinal,out,cwr-batch(state,take(25,rows),ordinal));
+  def cwr-next(state,rest,ordinal,out,received) = cwr-batches(state,rest,add(ordinal,1),append(out,received));
+  def cwr-run() {
+   let state = cmm-state(".","form-sha256"); record_set(state,"evidence",nsi-directory(".hearth","wiktionary-retained-",0)); record_set(state,"ordinal",0);
+   let path = "model/concept-10000-substantive-repair-evidence.jsonl"; let held = csa-file(state,path);
+   let rows = cwr-held(state,held);
+   cwp-check(state,"retained-row-count",eq(len(rows),111));
+   let received = cwr-batches(state,rows,0,list());
+   cwp-check(state,"complete-retained-source-count",eq(len(nth(received,1)),len(rows)));
+   cwp-check(state,"held-source-still-current",csa-fresh(state,record_get(state,"files")));
+   let report = json-emit-precise(json-node-object(list(oh-s("schema","retained-wiktionary-acquisition-v1"),oh-n("observedAtMs",now_unix_ms()),oh-n("requests",head(received)),oh-n("revisions",len(rows)),oh-s("heldEvidenceSha256",csa-file-hash(state,path)),oh-n("currentPublication",0),oh-s("selection","retained pinned revisions"),oh-s("translation","none"),json-node-pair("sources",json-node-array(nth(received,1))))));
+   cwp-write(state,"sources.json",report);
+   print(list("retained-revisions",len(rows),"requests",head(received),"evidence",record_get(state,"evidence"),"currentPublication",0)); 1;
+  }
+ }
+ 0;
+}

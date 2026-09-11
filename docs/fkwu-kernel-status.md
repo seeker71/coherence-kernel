@@ -27,6 +27,7 @@ Form owns the following executing surfaces. Each linked page names its public do
 | [Terminal acceptance](glass-keyboard.md) | Form owns real Darwin ARM64 PTYs, immediate input checks, signals, exact termios restoration, deadlines and independently supervised resource release |
 | [Ordered CPU mathematics](native-fp64-matrix.md) | Form emits binary64 MXFP8 matrix code in RAM; repeated calls reuse owned output memory without boxing intermediate products or sums |
 | [RAM pipe workers](native-pipe-workers.md) | Form emits Darwin ARM64 pipe and readiness operations in RAM, supervises resident workers, preserves complete binary frames and correlated stderr health, and settles partial writes, EOF, cancellation and physical release |
+| [Pinned Wiktionary sources](native-wiktionary-source.md) | Form reacquires the complete 111 retained revisions, binds page/revision/timestamp identities and reproduces their English hashes and selected meanings; actual acquisition and retained-response replay remain distinct |
 
 The deterministic substantive build and its three downstream generators share
 one `fkwu` process through `observe/concept-substantive-build-run.bml`. Form
@@ -42,7 +43,9 @@ conversion; Form owns query encoding, complete HTTP framing, ordered response
 segments, explicit row splitting and cell policy. The live provider attempt
 returned HTTP 429 on all five requests and published no translation. The
 [worker evidence](evidence/fkwu/native-pipe-translation.json) distinguishes
-retained-data execution from fresh acquisition.
+retained-data execution from fresh acquisition. Native pinned-source acquisition
+reproduces the existing Wiktionary revision set; fresh selection, rights,
+translation and new-generation publication remain separate work.
 
 [Native source inspection](native-source-inventory.md) captures source lists into owned files and checks child exit status, exact reads and NUL termination. `observe/carrier-mass.bml` counts source bytes in Form, including unknown-extension shebangs and paths containing spaces or newlines. It retains the complete source reading at `.hearth/carrier-mass-current.json`; weighted exclusions remain present in that evidence. The native authoring guide retains its separate Python inventory at `.hearth/native-authoring-current.json`. Neither lexical inventory establishes execution or native ownership by itself.
 
@@ -53,6 +56,15 @@ The shared BML dependency reader distinguishes actual directives from quoted exa
 Semicolon-bearing string leaves require byte construction and balanced concatenation; ordinary string leaves remain literals. The balanced tree avoids copying each growing suffix but still performs construction work unless subsequently folded. Handwritten direct `.fk` source still passes through the seed's quote-insensitive dependency collector; the Form emitter repair applies to generated string leaves.
 
 ## Ownership boundary
+
+Shared-field admission preserves a local list prefix and its already shared
+tail, including nested lists and scalar values. The
+[ownership witness](../observe/shared-field-ownership-witness.bml) uses fresh
+identities so a previously interned value cannot mask a first-admission defect.
+The [execution evidence](evidence/fkwu/shared-field-ownership.json) binds the
+seed transport to its source and independent observations. The field and its
+sharing implementation remain seed-owned; Form-owned contexts and sharing are
+the destination.
 
 Each frame job retains its capture, program, policy, output and actual fence. Timeout retains that identity. Cancellation discards an eventual result while resources remain owned. Failed or indeterminate submissions do not publish results. Releases are recorded after carrier confirmation.
 
