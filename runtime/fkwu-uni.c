@@ -20810,7 +20810,13 @@ static int fk_run_feval(const char *path) {
      * IS the body; form-eval is read live from grammars/form-eval.fk, never a drifting C-string
      * copy). */
     long long w = 0;
-    long long cap = 262143;
+    /* the bundle's size is known before it is built: the helpers, form-eval itself, the
+     * recipe escaped at most two bytes per byte, and the (fe-eval "...") frame */
+    struct stat fe_st;
+    if (stat("grammars/form-eval.fk", &fe_st) != 0) {
+        return 5;
+    }
+    long long cap = 256 + (long long)fe_st.st_size + 2 * rg;
     fk_srctext_reserve(cap + 1);
     const char *helpers =
         "(defn char_at (s i) (substring s i (add i 1)))\n(defn ord (c) (str_byte_at c 0))\n";
