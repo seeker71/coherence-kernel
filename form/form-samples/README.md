@@ -34,7 +34,7 @@ The kernels read S-expression syntax that maps directly onto substrate recipes:
 | `(defn <name> (params...) <body>)` | FNDEF | |
 | `(<name> <args>...)` | FNCALL | shorthand for both user fns and natives |
 
-Natives (called via `(<name> ...)` when no user binding shadows): `print`, `list`, `cons`, `head`, `tail`, `len`, `nth`, `empty`, `str_len`, `substring`, `char_at`, `str_concat`, `str_eq`, `int_to_str`, `str_to_int`, `ord`, `read_file`, `read_file_bytes`.
+Natives (a present native answers `(<name> ...)` on every kernel; a same-named `defn` stands in only where the native is absent): `print`, `list`, `cons`, `head`, `tail`, `len`, `nth`, `empty`, `str_len`, `substring`, `char_at`, `str_concat`, `str_eq`, `int_to_str`, `str_to_int`, `ord`, `read_file`, `read_file_bytes`.
 
 Binary fixtures live alongside the `.fk` samples: [`tiny.png`](tiny.png) is a 45-byte 1x1 PNG (signature + IHDR + IEND) that exercises `read_file_bytes` and `form/form-stdlib/grammars/png.fk`.
 
