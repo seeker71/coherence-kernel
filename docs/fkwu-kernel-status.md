@@ -6,6 +6,17 @@ The [north star](fkwu-form-native-north-star.md) defines the complete Form-nativ
 
 Form source and executable BML run through `fkwu`. BML lowers in memory; native artifacts are reusable caches. Source admission materializes a whole unit synchronously. The Form table compiler generates the bootstrap table and emitted CLI carrier, with source and generation identities checked by the canonical builder.
 
+[Native BML admission](native-bml-admission.md) owns statement and balanced-body
+boundaries in Form. Inline and multiline class/function bodies preserve their
+statements; nested `do` expressions retain ordering, bindings and selected
+branches. Class descriptors and ref resolution follow the same lexical spans.
+Incomplete expressions and unconsumed suffixes refuse admission. The separate
+cursor grammar remains an explicit proof surface; executable `form.bml` has one
+source owner. Compiler dependency identity participates in BML cache renewal.
+The [32-case execution](evidence/fkwu/bml-admission.json) retains actual success
+and refusal statuses. A [direct cache renewal](evidence/fkwu/bml-cache-renewal.json)
+executes the complete body with the root binary and C source unchanged.
+
 Metal is loaded dynamically through a selected adapter. The root and emitted CLI executable link only libSystem on this Darwin host. Form generates Metal source, identifies program/entry/target, and chooses RAM admission or an explicit compiled-archive mode. Shader source files and shader compiler subprocesses are unnecessary.
 
 Form owns BMP validation, the nine-field integer interpretation, policy thresholds, GPU source generation, captures, submissions and result eligibility. Several versions can use one captured input. Its 144-byte ARM64 frame fold reads each pixel once through three synchronous borrowed-string calls for a normal frame. Larger rectangles subdivide according to the integer result capacity. The interpreter is an explicitly requested equivalence reference.
@@ -57,6 +68,9 @@ The three large-model comparison callers use native Form references and
 generation. Their [source-bound evidence](evidence/fkwu/dsv4-oracle.json)
 records all 1,106 consumer checks passing at existing tolerances; the replaced
 Python oracle is removed.
+The [held-source re-observation](evidence/fkwu/dsv4-held-source-rewitness.json)
+checks all 81 recorded source rows and rejects a changed final hash without
+relabeling those numerical executions.
 Native terminal acceptance executes on Darwin ARM64; another native target still
 needs an observed admission and full behavior check. Shell orchestration,
 JavaScript builders, target-language specimens, proof siblings and platform

@@ -37,6 +37,13 @@ The same ownership applies to inspections, generators, numerical references, bui
 
 Every admitted source construct reaches an explicit Form interpretation, native emission or visible admission refusal. Grammar and dispatch evolve in Form. New behavior meets executable observations and independent proof execution before it becomes available to subsequent work.
 
+Source admission preserves every statement, scope, selected effect and final
+value. Changing layout cannot discard a refusal or alter a program's meaning.
+An incomplete interpretation stays unadmitted. The
+[native BML boundary](native-bml-admission.md) makes this obligation executable;
+compiler identity participates in cache identity so Form can renew this meaning
+without editing the handwritten seed.
+
 Resident workers receive complete owned messages and keep their programs and
 working state available across requests. Readiness, backpressure, deadlines,
 result framing and diagnostic flow remain Form-owned. The owner admits

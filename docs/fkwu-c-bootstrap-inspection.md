@@ -6,21 +6,21 @@ The complete lexical census indexes every function definition, file-scope declar
 
 ## Current seed census
 
-The inspected seed contains 896,371 bytes and 21,681 source lines. The census
+The inspected seed contains 892,265 bytes and 21,626 source lines. The census
 includes every conditional branch; the Clang reconciliation describes the
 active Darwin build.
 
 | Population | Count |
 | --- | ---: |
-| Function definitions across source branches | 672 |
-| Distinct function names across source branches | 607 |
+| Function definitions across source branches | 671 |
+| Distinct function names across source branches | 606 |
 | Top-level declaration units | 698 |
 | Distinct global names | 379 |
 | Individual file-scope global declarations | 400 |
 | Local-static declaration units | 64 |
 | Preprocessor directives | 330 |
 | Unresolved top-level units | 0 |
-| Active Darwin Clang functions | 573 |
+| Active Darwin Clang functions | 572 |
 | Active Darwin Clang globals | 368 |
 
 The active AST additionally sees `__sigbits` from host headers and `fk_optab`, `fk_optab_n`, `fk_rwtab`, `fk_rwtab_n` from the generated opcode header. Conditional source branches and the active platform are different populations.
