@@ -33,8 +33,16 @@ section [form.bml] {
         def rce-in?(x, xs) = if nil?(xs) then 0 else if eq(head(xs), x) then 1 else rce-in?(x, tail(xs));
         def rce-minus(xs, ys) = if nil?(xs) then list() else if eq(rce-in?(head(xs), ys), 1) then rce-minus(tail(xs), ys) else cons(head(xs), rce-minus(tail(xs), ys));
         def rce-both(xs, ys) = if nil?(xs) then list() else if eq(rce-in?(head(xs), ys), 1) then cons(head(xs), rce-both(tail(xs), ys)) else rce-both(tail(xs), ys);
-        def rce-host() = rce-pids(host_processes("fkwu"));
         def rce-roster() = kernel_live_pids();
+        // host_processes finds a process by its exact name, fkwu. A living kernel whose binary has another name
+        // (fourth-arm.sh names its fkwu-<stamp>; a copy can be named anything) still holds a roster slot, and
+        // read by name alone it would be called stale. A roster pid whose binary's name begins with fkwu counts
+        // with the host's kernels.
+        def rce-fkwu-named?(name) = if lt(str_len(name), 4) then 0 else if str_eq(substring(name, 0, 4), "fkwu") then 1 else 0;
+        def rce-kin-of(row) = if eq(row, sub(0, 1)) then 0 else rce-fkwu-named?(rce-base(nth(row, 2)));
+        def rce-kin-in(roster, named) = if nil?(roster) then list() else if eq(rce-in?(head(roster), named), 1) then rce-kin-in(tail(roster), named) else if eq(rce-kin-of(host_process(head(roster))), 1) then cons(head(roster), rce-kin-in(tail(roster), named)) else rce-kin-in(tail(roster), named);
+        def rce-host-of(named, roster) = append(named, rce-kin-in(roster, named));
+        def rce-host() = rce-host-of(rce-pids(host_processes("fkwu")), rce-roster());
         // a kernel whose parent is pid 1, or a shell whose own parent is pid 1, was left running by whoever
         // started it: nobody waits for it and nobody will stop it. host_processes rows carry the parent pid sixth.
         def rce-parent-in(pid, rows) = if nil?(rows) then 0 else if eq(head(head(rows)), pid) then nth(head(rows), 5) else rce-parent-in(pid, tail(rows));
@@ -45,7 +53,8 @@ section [form.bml] {
         def rce-shells() = append(host_processes("sh"), append(host_processes("bash"), append(host_processes("zsh"), host_processes("dash"))));
         def rce-orphans(rows) = rce-orphans-with(rows, rce-shells());
         // what each kernel runs and for whom. host_process answers (pid ppid exe cwd argv), or -1 once the pid
-        // has ended. The cell is argv's last word (./fkwu CELL). The owner is the first ancestor that is neither
+        // has ended. The cell is the first word after the binary that is not a flag: fkwu runs argv[1] and
+        // reads a word after it as a number (./fkwu CELL N), and --src comes before the cell. The owner is the first ancestor that is neither
         // a kernel, a shell nor login, named by its binary's last path segment; ("launchd" 1) when the chain
         // ends at pid 1, ("gone" pid) when an ancestor ended while it was being read, ("unread" 0) when the host
         // would not say an ancestor's parent — never read as pid 1.
@@ -54,8 +63,10 @@ section [form.bml] {
         def rce-passes?(name) = if str_eq(name, "fkwu") then 1 else if str_eq(name, "sh") then 1 else if str_eq(name, "bash") then 1 else if str_eq(name, "zsh") then 1 else if str_eq(name, "dash") then 1 else if str_eq(name, "login") then 1 else 0;
         def rce-owner-of(ppid, depth) = if eq(ppid, 1) then list("launchd", 1) else if le(ppid, 0) then list("unread", 0) else if le(depth, 0) then list("unwalked", ppid) else rce-owner-at(host_process(ppid), ppid, depth);
         def rce-owner-at(row, ppid, depth) = if eq(row, sub(0, 1)) then list("gone", ppid) else if eq(rce-passes?(rce-base(nth(row, 2))), 1) then rce-owner-of(nth(row, 1), sub(depth, 1)) else list(rce-base(nth(row, 2)), ppid);
-        def rce-last(xs) = if nil?(tail(xs)) then head(xs) else rce-last(tail(xs));
-        def rce-cell(argv) = if lt(len(argv), 2) then "" else rce-last(argv);
+        // a word that is empty or begins with "-" is a flag, not the cell
+        def rce-flag?(w) = if eq(str_len(w), 0) then 1 else if eq(str_byte_at(w, 0), 45) then 1 else 0;
+        def rce-cell-in(words) = if nil?(words) then "" else if eq(rce-flag?(head(words)), 1) then rce-cell-in(tail(words)) else head(words);
+        def rce-cell(argv) = if nil?(argv) then "" else rce-cell-in(tail(argv));
         // (pid cell cwd exe owner owner-pid), or an empty list when the pid has ended
         def rce-kernel-of(row) = if eq(row, sub(0, 1)) then list() else rce-kernel-row(row, rce-owner-of(nth(row, 1), 8));
         def rce-kernel-row(row, owner) = list(nth(row, 0), rce-cell(nth(row, 4)), nth(row, 3), nth(row, 2), nth(owner, 0), nth(owner, 1));
@@ -87,8 +98,8 @@ section [form.bml] {
         // (host-count roster-count untracked stale orphans), from one read of each
         def rce-take() {
             let rows = host_processes("fkwu");
-            let host = rce-pids(rows);
             let roster = rce-roster();
+            let host = rce-host-of(rce-pids(rows), roster);
             list(len(host), len(roster), rce-minus(host, roster), rce-minus(roster, host), rce-orphans(rows));
         }
         // taken twice: only what is untracked, stale or orphaned in both reads is reported
