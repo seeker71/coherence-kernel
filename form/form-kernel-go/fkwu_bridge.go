@@ -47,7 +47,8 @@ func FkwuEvalWithInput(fkwuBin, tablePath string, scalar int64, input []byte) (s
 
 // runFkwu invokes the fkwu binary. When input is non-nil it is written to a
 // temp file passed as argv[3] (staged into fk_src). The first stdout line is
-// the verdict; stderr is surfaced on failure.
+// the verdict; on failure both streams are surfaced, since the emitted walker
+// writes its own diagnostics to stdout.
 func runFkwu(fkwuBin, tablePath string, scalar int64, input []byte) (string, error) {
 	args := []string{tablePath, fmt.Sprintf("%d", scalar)}
 	if input != nil {
@@ -71,7 +72,8 @@ func runFkwu(fkwuBin, tablePath string, scalar int64, input []byte) (string, err
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("fkwu run %s: %w (stderr: %s)", tablePath, err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("fkwu run %s: %w (stdout: %s; stderr: %s)", tablePath, err,
+			strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
 	}
 	sc := bufio.NewScanner(&stdout)
 	if sc.Scan() {
