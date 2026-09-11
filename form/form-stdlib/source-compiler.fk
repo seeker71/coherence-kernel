@@ -86,27 +86,25 @@
         (if (eq (str_len line) 0) false
             (str_eq (char_at line (fsc-last-char-index line)) "{")))
 
-    ;; An unclosed section used to recurse forever: at end-of-string
-    ;; fsc-line-next answers the SAME index, so the walk stood still at 100%
-    ;; CPU on every arm alike (witnessed 600s+ on fkwu, 2026-08-18, via an
-    ;; inline fixture whose `}` never stood alone on a line). End of input
-    ;; with depth open is a refusal, not a treadmill.
-    (defn fsc-section-end-depth (s i depth)
-        (do
-            (if (ge i (str_len s))
-                (fsc-compiler-error "section not closed before end of source")
-                0)
-            (let e (fsc-line-end s i))
-            (let line (fsc-trim (fsc-sub s i e)))
-            (if (str_eq line "}")
-                (if (eq depth 0) i
-                    (fsc-section-end-depth s (fsc-line-next s i) (sub depth 1)))
-                (if (fsc-line-opens-block? line)
-                    (fsc-section-end-depth s (fsc-line-next s i) (add depth 1))
-                    (fsc-section-end-depth s (fsc-line-next s i) depth)))))
-
     (defn fsc-section-end (s i)
-        (fsc-section-end-depth s i 0))
+        (fsc-section-brace-end s i 0))
+
+    ;; BMF/custom sections carry rule data. Words such as do/end and pattern
+    ;; parentheses do not introduce executable BML scope in that data.
+    (defn fsc-section-brace-end (s i depth)
+        (do
+            (let p (fsc-bml-skip-trivia s i (str_len s)))
+            (if (ge p (str_len s))
+                (fsc-compiler-error "section not closed before end of source")
+                (do
+                    (let after (fsc-bml-token-after s p (str_len s)))
+                    (let token (fsc-sub s p after))
+                    (if (str_eq token "{")
+                        (fsc-section-brace-end s after (add depth 1))
+                        (if (str_eq token "}")
+                            (if (eq depth 0) p
+                                (fsc-section-brace-end s after (sub depth 1)))
+                            (fsc-section-brace-end s after depth)))))))
 
     ;; --- output strings ----------------------------------------------
 
@@ -328,15 +326,106 @@
         (fsc-bml-find-comma-loop s i 0 false))
 
     (defn fsc-bml-block-end (body i depth)
+        (fsc-bml-span-end body i (str_len body)
+            (fsc-bml-brace-stack (add depth 1)) "group"))
+
+    ;; One lexical boundary owns statements, headers and balanced bodies.
+    ;; Positions refer to the original source; physical lines carry no scope.
+    (defn fsc-bml-brace-stack (depth)
+        (if (le depth 0) (empty)
+            (cons "}" (fsc-bml-brace-stack (sub depth 1)))))
+
+    (defn fsc-bml-comment-at? (s i)
+        (or (fsc-find-string-at? s "//" i 0)
+            (and (str_eq (char_at s i) ";")
+                 (fsc-section-line-open? s i))))
+
+    (defn fsc-bml-skip-trivia (s i end)
+        (if (ge i end) end
+            (if (fsc-space? (char_at s i))
+                (fsc-bml-skip-trivia s (add i 1) end)
+                (if (fsc-bml-comment-at? s i)
+                    (fsc-bml-skip-trivia s (fsc-line-next s i) end)
+                    i))))
+
+    (defn fsc-bml-punctuation? (ch)
+        (or (str_eq ch "(") (or (str_eq ch ")")
+        (or (str_eq ch "{") (or (str_eq ch "}")
+        (or (str_eq ch "[") (or (str_eq ch "]")
+        (or (str_eq ch ";") (or (str_eq ch ",")
+            (str_eq ch "="))))))))))
+
+    (defn fsc-bml-token-end (s i end)
+        (if (ge i end) end
+            (if (or (fsc-space? (char_at s i))
+                    (or (fsc-bml-punctuation? (char_at s i))
+                        (or (str_eq (char_at s i) "\"")
+                            (fsc-find-string-at? s "//" i 0)))) i
+                (fsc-bml-token-end s (add i 1) end))))
+
+    (defn fsc-bml-token-after (s i end)
+        (if (str_eq (char_at s i) "\"")
+            (do
+                (let close (fsc-read-quoted-end s (add i 1)))
+                (if (ge close end)
+                    (fsc-compiler-error "unterminated string in form.bml source")
+                    (add close 1)))
+            (if (fsc-bml-punctuation? (char_at s i)) (add i 1)
+                (fsc-bml-token-end s (add i 1) end))))
+
+    (defn fsc-bml-token-closer (s token after end)
+        (if (str_eq token "(") ")"
+        (if (str_eq token "{") "}"
+        (if (str_eq token "[") "]"
+        (if (str_eq token "do")
+            (do
+                (let next (fsc-bml-skip-trivia s after end))
+                (if (or (str_eq (char_at s next) "{")
+                        (str_eq (char_at s after) "(")) "" "end"))
+            "")))))
+
+    (defn fsc-bml-span-end (s i end stack mode)
         (do
-            (let e (fsc-line-end body i))
-            (let line (fsc-trim (fsc-sub body i e)))
-            (if (str_eq line "}")
-                (if (eq depth 0) i
-                    (fsc-bml-block-end body (fsc-line-next body i) (sub depth 1)))
-                (if (fsc-line-opens-block? line)
-                    (fsc-bml-block-end body (fsc-line-next body i) (add depth 1))
-                    (fsc-bml-block-end body (fsc-line-next body i) depth)))))
+            (let p (fsc-bml-skip-trivia s i end))
+            (if (ge p end)
+                (if (eq (len stack) 0) end
+                    (fsc-compiler-error-line "unclosed form.bml body" (head stack)))
+            (do
+                (let after (fsc-bml-token-after s p end))
+                (let token (fsc-sub s p after))
+                (let closer (fsc-bml-token-closer s token after end))
+                (if (and (eq (len stack) 0)
+                         (and (str_eq mode "header")
+                              (or (str_eq token "{")
+                                  (or (str_eq token "=") (str_eq token ";"))))) p
+                (if (and (eq (len stack) 0)
+                         (and (str_eq mode "statement") (str_eq token ";"))) after
+                (if (gt (str_len closer) 0)
+                    (fsc-bml-span-end s after end (cons closer stack) mode)
+                (if (or (str_eq token ")") (or (str_eq token "}")
+                        (or (str_eq token "]")
+                            (and (str_eq token "end")
+                                 (and (gt (len stack) 0) (str_eq (head stack) "end"))))))
+                    (if (or (eq (len stack) 0) (not (str_eq token (head stack))))
+                        (fsc-compiler-error-line "mismatched form.bml delimiter" token)
+                        (if (and (eq (len stack) 1) (str_eq mode "group")) p
+                            (fsc-bml-span-end s after end (tail stack) mode)))
+                    (fsc-bml-span-end s after end stack mode)))))))))
+
+    (defn fsc-bml-header-end (body p end)
+        (fsc-bml-span-end body p end (empty) "header"))
+
+    (defn fsc-bml-source-head (body p end)
+        (do
+            (let stop (fsc-bml-header-end body p end))
+            (fsc-bml-normalize-ws (fsc-sub body p
+                (if (lt stop end) (add stop 1) stop)))))
+
+    (defn fsc-bml-body-start (body p end)
+        (do
+            (let stop (fsc-bml-header-end body p end))
+            (if (str_eq (char_at body stop) "{") (add stop 1)
+                (fsc-compiler-error "form.bml block header requires '{'"))))
 
     (defn fsc-bml-comment-line? (line)
         (if (fsc-skip-rule-line? line) true
@@ -370,13 +459,17 @@
         (if (ge i (str_len s)) i
             (do
                 (let ch (char_at s i))
-                (if (or (str_eq ch "\"") (fsc-space? ch)) i
+                (if (or (str_eq ch "\"") (or (fsc-space? ch)
+                        (fsc-find-string-at? s "//" i 0))) i
                     (fsc-bml-nw-plain-end s (add i 1))))))
 
     (defn fsc-bml-normalize-ws-loop (s i saw-space acc)
         (if (ge i (str_len s)) acc
             (do
                 (let ch (char_at s i))
+                (if (fsc-find-string-at? s "//" i 0)
+                    (fsc-bml-normalize-ws-loop s (fsc-line-next s i) true
+                        (if saw-space acc (str_concat acc " ")))
                 (if (str_eq ch "\"")
                     (do
                         (let close (fsc-bml-nw-quoted-end s (add i 1)))
@@ -389,33 +482,13 @@
                         (do
                             (let stop (fsc-bml-nw-plain-end s (add i 1)))
                             (fsc-bml-normalize-ws-loop s stop false
-                                (str_concat acc (fsc-sub s i stop)))))))))
+                                (str_concat acc (fsc-sub s i stop))))))))))
 
     (defn fsc-bml-normalize-ws (s)
         (fsc-trim (fsc-bml-normalize-ws-loop s 0 false "")))
 
-    (defn fsc-bml-stmt-end-loop (body i end depth quoted)
-        (if (ge i end) end
-            (do
-                (let ch (char_at body i))
-                (if quoted
-                    (if (and (str_eq ch "\\") (lt (add i 1) end))
-                        (fsc-bml-stmt-end-loop body (add i 2) end depth quoted)
-                        (if (str_eq ch "\"")
-                            (fsc-bml-stmt-end-loop body (add i 1) end depth false)
-                            (fsc-bml-stmt-end-loop body (add i 1) end depth quoted)))
-                    (if (str_eq ch "\"")
-                        (fsc-bml-stmt-end-loop body (add i 1) end depth true)
-                        (if (str_eq ch "(")
-                            (fsc-bml-stmt-end-loop body (add i 1) end (add depth 1) quoted)
-                            (if (str_eq ch ")")
-                                (fsc-bml-stmt-end-loop body (add i 1) end (sub depth 1) quoted)
-                                (if (and (eq depth 0) (str_eq ch ";"))
-                                    (add i 1)
-                                    (fsc-bml-stmt-end-loop body (add i 1) end depth quoted)))))))))
-
     (defn fsc-bml-stmt-end (body i end)
-        (fsc-bml-stmt-end-loop body i end 0 false))
+        (fsc-bml-span-end body i end (empty) "statement"))
 
     (defn fsc-high-level-form-dialect? (dialect-name)
         (or (str_eq dialect-name "form.bml")
@@ -781,75 +854,40 @@
 
     (defn fsc-compile-form-bml-call-recipe (expr open)
         (do
-            (let close (fsc-last-char-index expr))
+            (let close (fsc-bml-span-end expr (add open 1) (str_len expr) (list ")") "group"))
             (let name (fsc-trim (fsc-sub expr 0 open)))
+            (if (and (eq close (fsc-last-char-index expr)) (fsc-bml-expression-name? name)) 0
+                (fsc-compiler-error-line "form.bml call requires one complete expression" expr))
             (let args (fsc-sub expr (add open 1) close))
             (let arg-recipes (if (eq (str_len (fsc-trim args)) 0) (empty)
                                  (fsc-bml-args-recipes-loop args 0 (empty))))
             (fsc-rec-form-call name arg-recipes)))
 
-    ;; Match inline `if ... then ... else ...` at the top level. The scanner
-    ;; respects strings, call parentheses, and nested top-level if branches.
-    (defn fsc-bml-prev-token-boundary? (s i)
-        (if (le i 0) true
-            (do
-                (let prev (char_at s (sub i 1)))
-                (or (fsc-space? prev)
-                    (or (str_eq prev "(") (str_eq prev ","))))))
-
-    (defn fsc-bml-if-token-at? (s i)
-        (and (fsc-bml-prev-token-boundary? s i)
-             (fsc-find-string-at? s "if " i 0)))
-
-    (defn fsc-bml-find-top-then-loop (s i depth quoted)
-        (if (ge i (str_len s)) (sub 0 1)
-            (do
-                (let ch (char_at s i))
-                (if quoted
-                    (if (and (str_eq ch "\\") (lt (add i 1) (str_len s)))
-                        (fsc-bml-find-top-then-loop s (add i 2) depth quoted)
-                        (if (str_eq ch "\"")
-                            (fsc-bml-find-top-then-loop s (add i 1) depth false)
-                            (fsc-bml-find-top-then-loop s (add i 1) depth quoted)))
-                    (if (str_eq ch "\"")
-                        (fsc-bml-find-top-then-loop s (add i 1) depth true)
-                        (if (str_eq ch "(")
-                            (fsc-bml-find-top-then-loop s (add i 1) (add depth 1) quoted)
-                            (if (str_eq ch ")")
-                                (fsc-bml-find-top-then-loop s (add i 1) (sub depth 1) quoted)
-                                (if (and (eq depth 0) (fsc-find-string-at? s " then " i 0))
-                                    i
-                                    (fsc-bml-find-top-then-loop s (add i 1) depth quoted)))))))))
-
     (defn fsc-bml-find-top-then (s)
-        (fsc-bml-find-top-then-loop s 0 0 false))
-
-    (defn fsc-bml-find-matching-else-loop (s i depth quoted nested)
-        (if (ge i (str_len s)) (sub 0 1)
-            (do
-                (let ch (char_at s i))
-                (if quoted
-                    (if (and (str_eq ch "\\") (lt (add i 1) (str_len s)))
-                        (fsc-bml-find-matching-else-loop s (add i 2) depth quoted nested)
-                        (if (str_eq ch "\"")
-                            (fsc-bml-find-matching-else-loop s (add i 1) depth false nested)
-                            (fsc-bml-find-matching-else-loop s (add i 1) depth quoted nested)))
-                    (if (str_eq ch "\"")
-                        (fsc-bml-find-matching-else-loop s (add i 1) depth true nested)
-                        (if (str_eq ch "(")
-                            (fsc-bml-find-matching-else-loop s (add i 1) (add depth 1) quoted nested)
-                            (if (str_eq ch ")")
-                                (fsc-bml-find-matching-else-loop s (add i 1) (sub depth 1) quoted nested)
-                                (if (and (eq depth 0) (fsc-bml-if-token-at? s i))
-                                    (fsc-bml-find-matching-else-loop s (add i 3) depth quoted (add nested 1))
-                                    (if (and (eq depth 0) (fsc-find-string-at? s " else " i 0))
-                                        (if (eq nested 0)
-                                            i
-                                            (fsc-bml-find-matching-else-loop s (add i 6) depth quoted (sub nested 1)))
-                                        (fsc-bml-find-matching-else-loop s (add i 1) depth quoted nested))))))))))
+        (fsc-bml-branch-token s 0 "then" 0))
 
     (defn fsc-bml-find-matching-else (s then-pos)
-        (fsc-bml-find-matching-else-loop s (add then-pos 6) 0 false 0))
+        (fsc-bml-branch-token s (add then-pos 4) "else" 0))
+
+    ;; Branch words inside a grouped expression belong to that expression.
+    (defn fsc-bml-branch-token (s i wanted nested)
+        (do
+            (let p (fsc-bml-skip-trivia s i (str_len s)))
+            (if (ge p (str_len s)) (sub 0 1)
+            (do
+                (let after (fsc-bml-token-after s p (str_len s)))
+                (let token (fsc-sub s p after))
+                (let closer (fsc-bml-token-closer s token after (str_len s)))
+                (if (gt (str_len closer) 0)
+                    (fsc-bml-branch-token s
+                        (add (fsc-bml-span-end s after (str_len s) (list closer) "group")
+                             (str_len closer)) wanted nested)
+                (if (and (str_eq wanted "else") (str_eq token "if"))
+                    (fsc-bml-branch-token s after wanted (add nested 1))
+                (if (str_eq token wanted)
+                    (if (eq nested 0) p
+                        (fsc-bml-branch-token s after wanted (sub nested 1)))
+                    (fsc-bml-branch-token s after wanted nested))))))))
 
     (defn fsc-compile-form-bml-if-recipe (expr)
         (do
@@ -862,8 +900,11 @@
                 (fsc-compiler-error-line "form.bml if missing matching 'else'" expr)
             (do
             (let cond-text (fsc-trim (fsc-sub expr 3 then-pos)))
-            (let yes-text (fsc-trim (fsc-sub expr (add then-pos 6) else-pos)))
-            (let no-text (fsc-trim (fsc-sub expr (add else-pos 6) (str_len expr))))
+            (let yes-text (fsc-trim (fsc-sub expr (add then-pos 4) else-pos)))
+            (let no-text (fsc-trim (fsc-sub expr (add else-pos 4) (str_len expr))))
+            (if (or (eq (str_len cond-text) 0)
+                    (or (eq (str_len yes-text) 0) (eq (str_len no-text) 0)))
+                (fsc-compiler-error-line "form.bml if requires condition and both branches" expr) 0)
             (fsc-rec-if3 (fsc-compile-form-bml-expr-recipe cond-text)
                          (fsc-compile-form-bml-expr-recipe yes-text)
                          (fsc-compile-form-bml-expr-recipe no-text))))))))
@@ -995,6 +1036,8 @@
         (do
             (let open (fsc-bml-find-top-brace expr))
             (let close (fsc-bml-find-matching-brace expr open))
+            (if (eq close (fsc-last-char-index expr)) 0
+                (fsc-compiler-error-line "unconsumed form.bml match suffix" expr))
             (let scrutinee-text (fsc-trim (fsc-sub expr 6 open)))
             (let arms-text (fsc-sub expr (add open 1) close))
             (let arm-recipes
@@ -1003,12 +1046,47 @@
                 (cons (fsc-compile-form-bml-expr-recipe scrutinee-text)
                       arm-recipes))))
 
+    (defn fsc-bml-expression-name-loop? (s i)
+        (if (ge i (str_len s)) true
+            (do
+                (let ch (char_at s i))
+                (if (or (fsc-word-char? ch)
+                        (or (str_eq ch "?") (or (str_eq ch "!")
+                        (or (str_eq ch ".") (or (str_eq ch ":")
+                        (or (str_eq ch "+") (or (str_eq ch "*")
+                        (or (str_eq ch "/") (str_eq ch "%")))))))))
+                    (fsc-bml-expression-name-loop? s (add i 1)) false))))
+
+    (defn fsc-bml-expression-name? (s)
+        (and (gt (str_len s) 0) (fsc-bml-expression-name-loop? s 0)))
+
+    (defn fsc-compile-form-bml-do-recipe (expr start)
+        (do
+            (let p (fsc-bml-skip-trivia expr start (str_len expr)))
+            (let braced (str_eq (char_at expr p) "{"))
+            (let body-start (if braced (add p 1) p))
+            (let closer (if braced "}" "end"))
+            (let close (fsc-bml-span-end expr body-start (str_len expr) (list closer) "group"))
+            (if (eq (add close (str_len closer)) (str_len expr)) 0
+                (fsc-compiler-error-line "unconsumed form.bml do suffix" expr))
+            (fsc-rec-do (fsc-bml-block-stmts-recipes-loop expr body-start close (empty)))))
+
     (defn fsc-compile-form-bml-expr-recipe (raw)
         (do
             (let expr (fsc-bml-normalize-ws (fsc-strip-semi raw)))
             (let open (fsc-find-char-from expr "(" 0))
             (let eq-pos (fsc-bml-find-top-eqeq expr))
             (if (eq (str_len expr) 0) (fsc-rec-call "empty" (empty))
+            (if (or (fsc-prefix? expr "do ") (fsc-prefix? expr "do{"))
+                (fsc-compile-form-bml-do-recipe expr 2)
+            (if (fsc-prefix? expr "{")
+                (fsc-compile-form-bml-do-recipe expr 0)
+            (if (str_eq (char_at expr 0) "(")
+                (do
+                    (let close (fsc-bml-span-end expr 1 (str_len expr) (list ")") "group"))
+                    (if (eq close (fsc-last-char-index expr))
+                        (fsc-compile-form-bml-expr-recipe (fsc-sub expr 1 close))
+                        (fsc-compiler-error-line "unconsumed form.bml parenthesized suffix" expr)))
             (if (fsc-prefix? expr "if ")
                 (fsc-compile-form-bml-if-recipe expr)
             (if (fsc-prefix? expr "match ")
@@ -1024,9 +1102,12 @@
             (if (fsc-float? expr) (intern_trivial_float expr)
             (if (fsc-int? expr) (intern_trivial_int (str_to_int expr))
             (if (str_eq (char_at expr 0) "\"")
-                (intern_trivial_string
-                    (fsc-unescape-str (fsc-sub expr 1 (fsc-last-char-index expr))))
-                (fsc-rec-ident expr)))))))))))))))
+                (if (eq (fsc-bml-token-after expr 0 (str_len expr)) (str_len expr))
+                    (intern_trivial_string
+                        (fsc-unescape-str (fsc-sub expr 1 (fsc-last-char-index expr))))
+                    (fsc-compiler-error-line "unconsumed form.bml string suffix" expr))
+                (if (fsc-bml-expression-name? expr) (fsc-rec-ident expr)
+                    (fsc-compiler-error-line "unconsumed form.bml expression" expr)))))))))))))))))))
 
     (defn fsc-compile-form-bml-def-recipe (line)
         (do
@@ -1038,8 +1119,8 @@
             (if (lt close 0)
                 (fsc-compiler-error-line "form.bml def missing closing ')' on the definition line" line)
             (do
-            (let eq-pos (fsc-find-char-from line "=" close))
-            (if (lt eq-pos 0)
+            (let eq-pos (fsc-bml-skip-trivia line (add close 1) (str_len line)))
+            (if (not (str_eq (char_at line eq-pos) "="))
                 (fsc-compiler-error-line "form.bml def missing '=' before body" line)
             (do
             (let name (fsc-trim (fsc-sub line 4 open)))
@@ -1088,20 +1169,19 @@
 
     (defn fsc-bml-template-members-loop (body i end acc)
         (do
-            (let p (fsc-skip-spaces body i))
+            (let p (fsc-bml-skip-trivia body i end))
             (if (ge p end) (fsc-rev acc)
                 (do
-                    (let line-end (fsc-line-end body p))
-                    (let line (fsc-trim (fsc-sub body p line-end)))
+                    (let stmt-end (fsc-bml-stmt-end body p end))
+                    (let line (fsc-bml-normalize-ws (fsc-sub body p stmt-end)))
                     (if (fsc-bml-comment-line? line)
                         (fsc-bml-template-members-loop body
                             (fsc-line-next body p) end acc)
                     (if (fsc-prefix? line "member ")
                         (fsc-bml-template-members-loop body
-                            (fsc-line-next body p) end
+                            stmt-end end
                             (cons (fsc-compile-form-bml-template-member-recipe line) acc))
-                        (fsc-bml-template-members-loop body
-                            (fsc-line-next body p) end acc)))))))
+                        (fsc-compiler-error-line "unrecognized form.bml template member" line)))))))
 
     (defn fsc-compile-form-bml-template-block-recipe (body line body-start)
         (do
@@ -1178,44 +1258,42 @@
     (defn fsc-bml-class-method-defs-loop
         (body i end class-name acc)
         (do
-            (let p (fsc-skip-spaces body i))
+            (let p (fsc-bml-skip-trivia body i end))
             (if (ge p end) (fsc-rev acc)
                 (do
-                    (let line-end (fsc-line-end body p))
-                    (let line (fsc-trim (fsc-sub body p line-end)))
+                    (let line (fsc-bml-source-head body p end))
                     (if (fsc-bml-comment-line? line)
                         (fsc-bml-class-method-defs-loop body
                             (fsc-line-next body p) end class-name acc)
                     (if (and (fsc-prefix? line "def ") (fsc-line-opens-block? line))
                         (do
-                            (let method-start (fsc-line-next body p))
+                            (let method-start (fsc-bml-body-start body p end))
                             (let method-end (fsc-bml-block-end body method-start 0))
                             (fsc-bml-class-method-defs-loop body
-                                (fsc-line-next body method-end) end class-name
+                                (add method-end 1) end class-name
                                 (cons
                                     (fsc-compile-form-bml-class-def-block-recipe
                                         body line method-start class-name)
                                     acc)))
                         (fsc-bml-class-method-defs-loop body
-                            (fsc-line-next body p) end class-name acc)))))))
+                            (fsc-bml-stmt-end body p end) end class-name acc)))))))
 
     (defn fsc-bml-class-member-recipes-loop
         (body i end class-name template-name type-args acc)
         (do
-            (let p (fsc-skip-spaces body i))
+            (let p (fsc-bml-skip-trivia body i end))
             (if (ge p end) (fsc-rev acc)
                 (do
-                    (let line-end (fsc-line-end body p))
-                    (let line (fsc-trim (fsc-sub body p line-end)))
+                    (let line (fsc-bml-source-head body p end))
                     (if (fsc-bml-comment-line? line)
                         (fsc-bml-class-member-recipes-loop body
                             (fsc-line-next body p) end class-name template-name type-args acc)
                     (if (and (fsc-prefix? line "def ") (fsc-line-opens-block? line))
                         (do
-                            (let method-start (fsc-line-next body p))
+                            (let method-start (fsc-bml-body-start body p end))
                             (let method-end (fsc-bml-block-end body method-start 0))
                             (fsc-bml-class-member-recipes-loop body
-                                (fsc-line-next body method-end) end class-name template-name type-args
+                                (add method-end 1) end class-name template-name type-args
                                 (cons
                                     (fsc-compile-form-bml-class-method-member-recipe line class-name)
                                     acc)))
@@ -1227,7 +1305,7 @@
                                 (list
                                     (fsc-compile-form-bml-language-class-block-route-recipe
                                         stmt class-name template-name type-args))
-                                (empty)))
+                                (fsc-compiler-error-line "unrecognized form.bml language class member" stmt)))
                         (fsc-bml-class-member-recipes-loop body stmt-end end class-name template-name type-args
                             (fsc-rec-append-rev member-recipes acc)))))))))
 
@@ -1276,7 +1354,7 @@
 
     (defn fsc-bml-block-stmts-recipes-loop (body i end acc)
         (do
-            (let p (fsc-skip-spaces body i))
+            (let p (fsc-bml-skip-trivia body i end))
             (if (ge p end) (fsc-rev acc)
                 (do
                     (let line-end (fsc-line-end body p))
@@ -1406,20 +1484,19 @@
     ;; ride the flat def lowerers; field/ref/thought ride the nullary lowerer.
     (defn fsc-bml-generic-class-defs-loop (body i end acc)
         (do
-            (let p (fsc-skip-spaces body i))
+            (let p (fsc-bml-skip-trivia body i end))
             (if (ge p end) (fsc-rev acc)
                 (do
-                    (let line-end (fsc-line-end body p))
-                    (let line (fsc-trim (fsc-sub body p line-end)))
+                    (let line (fsc-bml-source-head body p end))
                     (if (fsc-bml-comment-line? line)
                         (fsc-bml-generic-class-defs-loop body
                             (fsc-line-next body p) end acc)
                     (if (and (fsc-prefix? line "def ") (fsc-line-opens-block? line))
                         (do
-                            (let method-start (fsc-line-next body p))
+                            (let method-start (fsc-bml-body-start body p end))
                             (let method-end (fsc-bml-block-end body method-start 0))
                             (fsc-bml-generic-class-defs-loop body
-                                (fsc-line-next body method-end) end
+                                (add method-end 1) end
                                 (cons (fsc-compile-form-bml-def-block-recipe body line method-start)
                                       acc)))
                     ;; flat def and field/ref/thought members walk to their own
@@ -1440,27 +1517,25 @@
                             (let stmt (fsc-bml-normalize-ws (fsc-sub body p stmt-end)))
                             (fsc-bml-generic-class-defs-loop body stmt-end end
                                 (cons (fsc-compile-form-bml-nullary-recipe stmt) acc)))
-                        (fsc-bml-generic-class-defs-loop body
-                            (fsc-line-next body p) end acc)))))))))
+                        (fsc-compiler-error-line "unrecognized form.bml class member" line)))))))))
 
     ;; Walk the class body once more, collecting (kind name) pairs. Skips def
     ;; block bodies so an inner `field` line inside a method is never miscounted.
     (defn fsc-bml-class-member-pairs-loop (body i end acc)
         (do
-            (let p (fsc-skip-spaces body i))
+            (let p (fsc-bml-skip-trivia body i end))
             (if (ge p end) (fsc-rev acc)
                 (do
-                    (let line-end (fsc-line-end body p))
-                    (let line (fsc-trim (fsc-sub body p line-end)))
+                    (let line (fsc-bml-source-head body p end))
                     (if (fsc-bml-comment-line? line)
                         (fsc-bml-class-member-pairs-loop body
                             (fsc-line-next body p) end acc)
                     (if (and (fsc-prefix? line "def ") (fsc-line-opens-block? line))
                         (do
-                            (let method-start (fsc-line-next body p))
+                            (let method-start (fsc-bml-body-start body p end))
                             (let method-end (fsc-bml-block-end body method-start 0))
                             (fsc-bml-class-member-pairs-loop body
-                                (fsc-line-next body method-end) end
+                                (add method-end 1) end
                                 (cons (list "method" (fsc-bml-def-line-name line)) acc)))
                     ;; names live on the first line; the ADVANCE must still
                     ;; walk the whole statement so a member body's tail lines
@@ -1474,8 +1549,7 @@
                             (fsc-bml-stmt-end body p end) end
                             (cons (list (fsc-bml-class-member-kind line)
                                         (fsc-bml-nullary-line-name line)) acc))
-                        (fsc-bml-class-member-pairs-loop body
-                            (fsc-line-next body p) end acc)))))))))
+                        (fsc-compiler-error-line "unrecognized form.bml class member" line)))))))))
 
     (defn fsc-bml-names-of-kind (pairs kind)
         (if (fsc-empty? pairs) (empty)
@@ -1517,36 +1591,35 @@
 
     (defn fsc-form-bml-lines-recipes-loop (body i acc)
         (do
-            (let p (fsc-skip-spaces body i))
+            (let p (fsc-bml-skip-trivia body i (str_len body)))
             (if (ge p (str_len body)) (fsc-rev acc)
             (do
-                (let e (fsc-line-end body p))
-                (let line (fsc-trim (fsc-sub body p e)))
+                (let line (fsc-bml-source-head body p (str_len body)))
                 (if (and (fsc-prefix? line "template ") (fsc-line-opens-block? line))
                     (do
-                        (let body-start (fsc-line-next body p))
+                        (let body-start (fsc-bml-body-start body p (str_len body)))
                         (let body-end (fsc-bml-block-end body body-start 0))
                         (fsc-form-bml-lines-recipes-loop body
-                            (fsc-line-next body body-end)
+                            (add body-end 1)
                             (cons (fsc-compile-form-bml-template-block-recipe body line body-start)
                                   acc)))
                 (if (and (fsc-prefix? line "class ") (fsc-line-opens-block? line))
                     (do
-                        (let body-start (fsc-line-next body p))
+                        (let body-start (fsc-bml-body-start body p (str_len body)))
                         (let body-end (fsc-bml-block-end body body-start 0))
                         (let class-recipes
                             (if (fsc-bml-class-header-has-colon? line)
                                 (fsc-compile-form-bml-language-class-block-recipes body line body-start)
                                 (fsc-compile-form-bml-generic-class-block-recipes body line body-start)))
                         (fsc-form-bml-lines-recipes-loop body
-                            (fsc-line-next body body-end)
+                            (add body-end 1)
                             (fsc-rec-append-rev class-recipes acc)))
                 (if (and (fsc-prefix? line "def ") (fsc-line-opens-block? line))
                     (do
-                        (let body-start (fsc-line-next body p))
+                        (let body-start (fsc-bml-body-start body p (str_len body)))
                         (let body-end (fsc-bml-block-end body body-start 0))
                         (fsc-form-bml-lines-recipes-loop body
-                            (fsc-line-next body body-end)
+                            (add body-end 1)
                             (cons (fsc-compile-form-bml-def-block-recipe body line body-start)
                                   acc)))
                 ;; comment lines step line-wise; every other flat statement is
@@ -1598,27 +1671,51 @@
                 (fsc-bml-unresolved-refs known (tail targets))
                 (cons (head targets) (fsc-bml-unresolved-refs known (tail targets))))))
 
-    ;; one line-scan, dispatched by prefix, collecting whichever names the
-    ;; caller asked for: "class " names, "import " names, or "ref " targets.
-    (defn fsc-bml-section-names-loop (body i prefix kind acc)
+    ;; Name resolution follows the same lexical spans as recipe emission.
+    ;; Only class bodies expose member declarations; method and template
+    ;; bodies are skipped whole. Accumulators stay reversed across nested
+    ;; class spans, then the public traversal restores source order once.
+    (defn fsc-bml-names-collect (stmt prefix kind acc)
+        (if (not (fsc-prefix? stmt prefix)) acc
+            (do
+                (let name
+                    (if (str_eq kind "ref")
+                        (do
+                            (let eq-pos (fsc-find-char-from stmt "=" (str_len prefix)))
+                            (if (lt eq-pos 0)
+                                (fsc-compiler-error-line "form.bml ref missing '=' before target" stmt)
+                                (fsc-bml-leading-name
+                                    (fsc-sub stmt (add eq-pos 1) (str_len stmt)))))
+                        (fsc-bml-leading-name
+                            (fsc-sub stmt (str_len prefix) (str_len stmt)))))
+                (if (eq (str_len name) 0)
+                    (fsc-compiler-error-line "form.bml declaration requires a name" stmt)
+                    (cons name acc)))))
+
+    (defn fsc-bml-names-span-loop (body i end prefix kind acc)
         (do
-            (let p (fsc-skip-spaces body i))
-            (if (ge p (str_len body)) (fsc-rev acc)
+            (let p (fsc-bml-skip-trivia body i end))
+            (if (ge p end) acc
                 (do
-                    (let e (fsc-line-end body p))
-                    (let line (fsc-trim (fsc-sub body p e)))
-                    (if (fsc-prefix? line prefix)
-                        (fsc-bml-section-names-loop body (fsc-line-next body p) prefix kind
-                            (cons
-                                (if (str_eq kind "ref")
-                                    (do
-                                        (let eq-pos (fsc-find-char-from line "=" (str_len prefix)))
-                                        (fsc-bml-leading-name
-                                            (fsc-sub line (add eq-pos 1) (str_len line))))
-                                    (fsc-bml-leading-name
-                                        (fsc-sub line (str_len prefix) (str_len line))))
-                                acc))
-                        (fsc-bml-section-names-loop body (fsc-line-next body p) prefix kind acc))))))
+                    (let head (fsc-bml-source-head body p end))
+                    (if (fsc-line-opens-block? head)
+                        (do
+                            (let body-start (fsc-bml-body-start body p end))
+                            (let body-end (fsc-bml-block-end body body-start 0))
+                            (let named (fsc-bml-names-collect head prefix kind acc))
+                            (let members
+                                (if (fsc-prefix? head "class ")
+                                    (fsc-bml-names-span-loop body body-start body-end prefix kind named)
+                                    named))
+                            (fsc-bml-names-span-loop body (add body-end 1) end prefix kind members))
+                        (do
+                            (let stmt-end (fsc-bml-stmt-end body p end))
+                            (let stmt (fsc-bml-normalize-ws (fsc-sub body p stmt-end)))
+                            (fsc-bml-names-span-loop body stmt-end end prefix kind
+                                (fsc-bml-names-collect stmt prefix kind acc))))))))
+
+    (defn fsc-bml-section-names-loop (body i prefix kind acc)
+        (fsc-rev (fsc-bml-names-span-loop body i (str_len body) prefix kind acc)))
 
     (defn fsc-bml-check-section-refs (body)
         (do
@@ -2977,14 +3074,9 @@
     (defn fsc-strip-bml-comments (s)
         (fsc-strip-bml-comments-loop s 0))
 
-    ;; A section opens only where a LINE opens it: `section [` preceded on its
-    ;; line by nothing but whitespace. codec.bml:8 carries that text inside a
-    ;; comment (a witness ABOUT sections), and the unanchored find read the
-    ;; comment as a door -- extracted a nonsense body across real code, refused,
-    ;; and on fkwu the refusal itself was numb (form_error answers nothing
-    ;; there), so the whole lensed text nothinged to a 0-byte file that
-    ;; printed success. Text about a form is not the form; the scanner now
-    ;; asks the line, not the bytes.
+    ;; A section opens at a whitespace-only line prefix or immediately after
+    ;; the preceding fully consumed section. Searching past other source text
+    ;; cannot create a new immediate boundary inside a comment or string.
     (defn fsc-line-start-of (s i)
         (if (le i 0) 0
             (if (str_eq (char_at s (sub i 1)) "\n") i
@@ -2996,12 +3088,30 @@
                 false)))
     (defn fsc-section-line-open? (s pos)
         (fsc-only-ws-between? s (fsc-line-start-of s pos) pos))
-    (defn fsc-find-section-open (src i)
+    (defn fsc-find-section-open-from (src i boundary)
         (do
             (let pos (fsc-find-string-from src "section [" i))
             (if (lt pos 0) pos
-                (if (fsc-section-line-open? src pos) pos
-                    (fsc-find-section-open src (add pos 9))))))
+                (if (or (fsc-section-line-open? src pos)
+                        (fsc-only-ws-between? src boundary pos)) pos
+                    (fsc-find-section-open-from src (add pos 9) boundary)))))
+
+    (defn fsc-find-section-open (src i)
+        (fsc-find-section-open-from src i i))
+
+    ;; A whitespace-only section terminator line contributes no extra module
+    ;; separator. A same-line source suffix remains part of the next span.
+    (defn fsc-section-after-spaces (src i)
+        (if (ge i (str_len src)) i
+            (if (or (str_eq (char_at src i) " ")
+                    (or (str_eq (char_at src i) "\t") (str_eq (char_at src i) "\r")))
+                (fsc-section-after-spaces src (add i 1)) i)))
+
+    (defn fsc-section-after (src close)
+        (do
+            (let start (add close 1))
+            (let p (fsc-section-after-spaces src start))
+            (if (str_eq (char_at src p) "\n") (add p 1) start)))
 
     (defn form-source-compile-loop (src out-path i)
         (do
@@ -3011,14 +3121,16 @@
                     (let dialect-start (add pos 9))
                     (let dialect-end (fsc-find-char-from src "]" dialect-start))
                     (let open (fsc-find-char-from src "{" dialect-end))
-                    (let close (fsc-section-end src (add open 1)))
                     (let dialect-name (fsc-sub src dialect-start dialect-end))
+                    (let close (if (fsc-high-level-form-dialect? dialect-name)
+                        (fsc-bml-block-end src (add open 1) 0)
+                        (fsc-section-end src (add open 1))))
                     (let body (fsc-sub src (add open 1) close))
                         (str_concat
                             (fsc-strip-bml-comments (fsc-sub src i pos))
                             (str_concat
                             (fsc-compile-section dialect-name body out-path)
-                            (form-source-compile-loop src out-path (fsc-line-next src close))))))))
+                            (form-source-compile-loop src out-path (fsc-section-after src close))))))))
 
     (defn form-source-compile-text (src out-path)
         (form-source-compile-loop src out-path 0))

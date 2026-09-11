@@ -37,7 +37,15 @@ An unloaded carrier is named in the learner's error, never read as an allocator
 refusal. Recording does not wait for GPU training during a session.
 Normal session close and the one-shot embodiment door retain the parent process
 until the supervisor returns; an external interruption keeps the immutable queue
-for the next drain. Each new training example
+for the next drain. If that parent observes a positive nonzero exit before the
+supervisor publishes `worker.rc`, it retains the matching owner's exit and
+diagnostic and reports `failed-supervisor-exit`. Unknown wait results remain
+indeterminate. A later launch clears the current wait record while retaining
+the failed attempt's diagnostic; pending examples keep their original bytes.
+The [supervisor-exit observations](evidence/fkwu/session-supervisor-exit.json)
+exercise actual child refusal, matching-owner admission, unknown waits,
+successor replacement, existing terminal status and diagnostic retention.
+Each new training example
 gets one full-gradient round, including rehearsal of the last promoted example
 when it has a different prompt. The next round restores the candidate's adapter,
 Adam moments and optimizer step. Candidate generations and the serving selection
@@ -166,8 +174,7 @@ while running. `.hearth/session-learning/evidence-current.json` exposes the
 current requests; each training row retains `training-evidence.json`. Original
 observation, named response, delivered references, fresh resource observation,
 consumption and subsequent loss readings remain in the normal event flow.
-The old standalone learning-policy band is released. Promotion consumes the
-actual emitted progress and per-row health readings; identity binding and
+Promotion consumes the actual emitted progress and per-row health readings; identity binding and
 assessment exclusion remain at the executing boundaries.
 
 An interrupted trainer also uses the care carrier. The learner observes missing

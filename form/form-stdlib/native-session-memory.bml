@@ -87,6 +87,7 @@ section [form.bml] {
   }
   def nsm-kick-held(home) {
    let stale = fs-remove-file(nsm-at(home,"worker.rc"));
+   let waited = fs-remove-file(nsm-at(home,"worker.wait.json"));
    let pid = nsm-child(home,"supervise","","worker");
    let owner = nag-write(nsm-at(home,"worker.pid"),int_to_str(pid));
    if gt(pid,0) then "launched" else nsm-launch-failed(home,pid);
@@ -189,13 +190,13 @@ section [form.bml] {
    let dir = nsm-at(nsm-at(home,"rows"),name);
    if and(gt(file_size(nsm-at(dir,"record.json")),0),le(file_size(nsm-at(dir,"result.json")),0)) then cons(dir,nsm-pending(home,rest)) else nsm-pending(home,rest);
   }
-  def nsm-worker-state(home) = if nsm-running(home) then "running" else if gt(file_size(nsm-at(home,"worker.rc")),0) then if str_eq(trim(nsm-text(nsm-at(home,"worker.rc"))),"0") then "completed" else str_concat("failed-exit-",trim(nsm-text(nsm-at(home,"worker.rc")))) else "idle-or-interrupted;inspect-events";
+  def nsm-worker-state(home) = if nsm-running(home) then "running" else if gt(file_size(nsm-at(home,"worker.rc")),0) then if str_eq(trim(nsm-text(nsm-at(home,"worker.rc"))),"0") then "completed" else str_concat("failed-exit-",trim(nsm-text(nsm-at(home,"worker.rc")))) else nsm-wait-worker-state(nsm-wait-admitted(home));
   def nsm-results(home,names) = if nil?(names) then list() else nsm-result-one(home,head(names),tail(names));
   def nsm-result-one(home,name,rest) {
    let dir = nsm-at(nsm-at(home,"rows"),name); let result = nsm-json(nsm-at(dir,"result.json"));
    if str_eq(nsm-str(result,"status"),"refused") then cons(json-node-object(list(nsm-s("id",name),nsm-s("reason",nsm-str(result,"reason")),nsm-s("evidence",dir))),nsm-results(home,rest)) else nsm-results(home,rest);
   }
-  def nsm-status(home) = json-node-object(list(nsm-s("home",home),nsm-n("enabled",nsm-enabled(home)),nsm-n("worker_alive",nsm-running(home)),nsm-s("worker_status",nsm-worker-state(home)),nsm-n("pending",len(nsm-pending(home,nsm-dirs(home)))),json-node-pair("session_corpus",nsm-census(home,nsm-dirs(home),0,list())),json-node-pair("experience_corpus",nsm-experience-census(home)),json-node-pair("repository_corpus",nsm-json(nsm-at(nsm-knowledge-home(home),"current.json"))),nsm-s("adapter_pair_units","LoRA A/B weight matrices, not training examples or sessions"),json-node-pair("refused",json-node-array(nsm-results(home,nsm-dirs(home)))),json-node-pair("state",nsm-state(home)),nsm-s("events",nsm-at(home,"events.jsonl")),nsm-s("worker_stderr",nsm-at(home,"learner.err"))));
+  def nsm-status(home) = nsm-wait-status(home,json-node-object(list(nsm-s("home",home),nsm-n("enabled",nsm-enabled(home)),nsm-n("worker_alive",nsm-running(home)),nsm-s("worker_status",nsm-worker-state(home)),nsm-n("pending",len(nsm-pending(home,nsm-dirs(home)))),json-node-pair("session_corpus",nsm-census(home,nsm-dirs(home),0,list())),json-node-pair("experience_corpus",nsm-experience-census(home)),json-node-pair("repository_corpus",nsm-json(nsm-at(nsm-knowledge-home(home),"current.json"))),nsm-s("adapter_pair_units","LoRA A/B weight matrices, not training examples or sessions"),json-node-pair("refused",json-node-array(nsm-results(home,nsm-dirs(home)))),json-node-pair("state",nsm-state(home)),nsm-s("events",nsm-at(home,"events.jsonl")),nsm-s("worker_stderr",nsm-at(home,"learner.err")))));
   def nsm-model-proposal(home,prompt,required) {
    let made = nsm-init(home); let stem = str_concat("ask-",nsm-id());
    let request = json-node-object(list(nsm-s("prompt",prompt),nsm-n("require_serving",required),nsm-s("output",nsm-at(home,str_concat(stem,".reply.json"))),nsm-s("events",nsm-at(home,str_concat(stem,".events.jsonl"))),nsm-s("stream",nsm-at(home,str_concat(stem,".stream"))),nsm-s("cancel",nsm-at(home,str_concat(stem,".cancel")))));
@@ -215,19 +216,62 @@ section [form.bml] {
    let pid = str_to_int(trim(nsm-text(nsm-at(home,"worker.pid"))));
    let event = nsm-event(home,"settle-begin",list(nsm-s("worker",kicked),nsm-n("worker_pid",pid),nsm-s("selected","retain-parent-until-supervised-exit")));
    let rc = if gt(pid,0) then host_wait(pid) else -1;
-   nsm-settle-wait(home,rc);
+   nsm-settle-wait(home,pid,rc);
   }
-  def nsm-settle-wait(home,rc) {
-   if nsm-running(home) then nsm-settle-pause(home,rc) else nsm-settle-observed(home,rc);
+  def nsm-settle-wait(home,pid,rc) {
+   if nsm-running(home) then nsm-settle-pause(home,pid,rc) else nsm-settle-observed(home,pid,rc);
   }
-  def nsm-settle-pause(home,rc) {
+  def nsm-settle-pause(home,pid,rc) {
    let pause = host_sleep_ms(250);
-   nsm-settle-wait(home,rc);
+   nsm-settle-wait(home,pid,rc);
   }
-  def nsm-settle-observed(home,rc) {
+  def nsm-settle-observed(home,pid,rc) {
+   let retained = nsm-wait-retain(home,pid,rc);
    let observed = nsm-event(home,"settle-observed",list(nsm-n("wait_exit",rc),nsm-s("worker_status",nsm-worker-state(home)),nsm-n("pending",len(nsm-pending(home,nsm-dirs(home))))));
    nsm-status(home);
   }
+  // The parent can observe a supervisor failure before the supervisor publishes
+  // its learner exit. A non-child wait (-1) is indeterminate and publishes none.
+  def nsm-wait-current(home,pid,rc) = and(gt(rc,0),and(gt(pid,0),and(str_eq(int_to_str(pid),trim(nsm-text(nsm-at(home,"worker.pid")))),and(not(nsm-running(home)),le(file_size(nsm-at(home,"worker.rc")),0)))));
+  def nsm-wait-record(home) = nsm-json(nsm-at(home,"worker.wait.json"));
+  def nsm-wait-admitted(home) = if gt(file_size(nsm-at(home,"worker.rc")),0) then json-node-null() else nsm-wait-admitted-record(home,nsm-wait-record(home));
+  def nsm-wait-admitted-record(home,record) = if nsm-wait-record-known(home,record) then record else json-node-null();
+  def nsm-wait-worker-state(record) = if gt(nsm-num(record,"wait_exit"),0) then str_concat("failed-supervisor-exit-",int_to_str(nsm-num(record,"wait_exit"))) else "idle-or-interrupted;inspect-events";
+  def nsm-wait-record-known(home,record) = and(str_eq(nsm-str(record,"schema"),"native-session-supervisor-wait-v1"),and(eq(node_type(json-object-get(record,"worker_pid")),node_type(json-node-int(0))),and(eq(node_type(json-object-get(record,"wait_exit")),node_type(json-node-int(0))),and(gt(nsm-num(record,"worker_pid"),0),and(gt(nsm-num(record,"wait_exit"),0),str_eq(int_to_str(nsm-num(record,"worker_pid")),trim(nsm-text(nsm-at(home,"worker.pid")))))))));
+  def nsm-wait-status(home,status) = if nsm-running(home) then status else nsm-wait-status-record(status,nsm-wait-admitted(home));
+  def nsm-wait-status-record(status,record) = if gt(nsm-num(record,"wait_exit"),0) then nsm-wait-status-failed(status,record) else status;
+  def nsm-wait-status-failed(status,record) = oh-set(oh-set(oh-set(status,"worker_stderr",json-node-string(nsm-str(record,"stderr"))),"worker_stderr_state",json-node-string(nsm-str(record,"stderr_state"))),"supervisor_wait_exit",json-node-int(nsm-num(record,"wait_exit")));
+  def nsm-wait-capture(home,pid) {
+   let source = nsm-at(home,"worker.err"); let size = file_size(source);
+   if lt(size,0) then json-node-object(list(nsm-s("stderr",source),nsm-s("stderr_state","absent"),nsm-n("stderr_bytes",size))) else nsm-wait-capture-read(home,pid,source,size,read_file(source));
+  }
+  def nsm-wait-capture-read(home,pid,source,size,text) {
+   if or(nothing?(text),or(ne(str_len(text),size),ne(file_size(source),size))) then json-node-object(list(nsm-s("stderr",source),nsm-s("stderr_state","unreadable-or-changed"),nsm-n("stderr_bytes",size))) else nsm-wait-capture-write(home,pid,source,text);
+  }
+  def nsm-wait-capture-write(home,pid,source,text) {
+   let path = nsm-at(home,str_concat("worker-failure-",str_concat(int_to_str(pid),str_concat("-",str_concat(nsm-id(),".err")))));
+   let written = write_file(path,text);
+   let exact = and(eq(written,str_len(text)),and(eq(file_size(path),str_len(text)),str_eq(nsm-text(path),text)));
+   json-node-object(list(nsm-s("stderr",if exact then path else source),nsm-s("stderr_state",if exact then "retained" else "retention-refused"),nsm-n("stderr_bytes",str_len(text)),nsm-s("retention_path",path)));
+  }
+  def nsm-wait-retain(home,pid,rc) = if not(nsm-wait-current(home,pid,rc)) then 0 else nsm-wait-publish(home,pid,rc,nsm-wait-capture(home,pid));
+  def nsm-wait-publish(home,pid,rc,captured) {
+   if not(nsm-wait-current(home,pid,rc)) then 0 else nsm-wait-publish-current(home,pid,rc,captured);
+  }
+  def nsm-wait-publish-current(home,pid,rc,captured) {
+   let record = json-node-object(append(list(nsm-s("schema","native-session-supervisor-wait-v1"),nsm-n("worker_pid",pid),nsm-n("observer_pid",host_pid()),nsm-n("wait_exit",rc),nsm-n("observed_at_ms",now_unix_ms())),json-object-pairs(captured)));
+   let path = nsm-at(home,"worker.wait.json");
+   let reading = oh-reading("session-learning",home,"supervisor-exit-publication",json-node-int(0),json-node-int(rc),json-node-int(0),list(oh-need("supervisor-completion",oh-reference(nsm-str(record,"stderr")))),list("retain-pending","defer"),record);
+   let observed = nsm-event(home,"organ-health",list(json-node-pair("health",reading)));
+   let response = oh-response(reading,"retain-pending");
+   let responded = nsm-event(home,"organ-response",list(json-node-pair("health",response)));
+   let selected = oh-select(reading,response,"defer");
+   let current = nsm-wait-current(home,pid,rc);
+   let saved = if current then nsm-atomic(path,record) else json-node-null();
+   let applied = nsm-event(home,"organ-action-observed",list(json-node-pair("health",oh-applied(reading,selected,json-node-object(list(nsm-s("terminal_record",path),nsm-n("published",current),nsm-n("wait_exit",rc),nsm-n("pending",len(nsm-pending(home,nsm-dirs(home)))),nsm-s("pending_action","preserved"),nsm-s("stderr_state",nsm-str(captured,"stderr_state"))))))));
+   current;
+  }
+  def nsm-settle-exit(status) = if and(eq(str_find(nsm-str(status,"worker_status"),"failed-",0),0),gt(nsm-num(status,"pending"),0)) then form_error("session learner failed; retained examples stay pending; worker_stderr names the cause") else 0;
   def nsm-teach(home,raw) {
    let doc = parse-json("session-teaching",raw); let session = nsm-str(doc,"session");
    let key = nsm-str(doc,"event");

@@ -32,9 +32,11 @@ file reading, not an atomic snapshot of a changing repository.
 `observe/native-authoring-guide-run.fk` retains the Python implementation and
 invocation-candidate reading at `.hearth/native-authoring-current.json`. Report
 publication verifies the written bytes before atomic rename. The public reading
-shows unread paths explicitly. The current guide identifies the active
-large-model MLA numerical oracle and the real terminal acceptance test as the
-two remaining Python implementations.
+shows unread paths explicitly. The current guide identifies one Python
+implementation: the POSIX/Linux terminal acceptance test. Form owns the
+[large-model MLA numerical oracle](native-dsv4-oracle.md) and the observed
+[Darwin ARM64 terminal acceptance](glass-keyboard.md). Native Linux admission
+and its full terminal behavior remain to be observed before that owner is removed.
 
 The structural gate rejects an absent, non-directory or unreadable root. It
 preserves names through NUL-delimited traversal and prunes `.git` and `.claude`.
