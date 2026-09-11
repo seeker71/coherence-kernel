@@ -2473,7 +2473,11 @@ func (k *Kernel) registerNatives() {
 		}
 		return args[0].List[0]
 	})
+	// A receiver that is not a list has no tail and answers null, as head and nth answer.
 	k.registerNative("tail", catListNat(), func(_ *Kernel, args []Value) Value {
+		if args[0].Kind != VList {
+			return Value{Kind: VNull}
+		}
 		if len(args[0].List) == 0 {
 			return Value{Kind: VList, List: []Value{}}
 		}

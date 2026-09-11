@@ -10643,17 +10643,26 @@ static long long fk_walk(long long i, long long fp) {
         fk_vsp = fk_vsp - 2;
         return (fk_hp << 1) | 1;
     }
+    /* head, tail, nth — a list is an odd, non-negative word; an int is even and a string or
+     * nothing odd-negative, so each door reads the tag bit before it walks, as len does. A
+     * receiver that is not a list, and an element that is not there, answer nothing (go, rust
+     * and ts answer null); the tail of a list is a list. */
     if (t == 20) {
-        long long p = fk_walk(fk_node[i][1], fp) >> 1;
-        if (p < 1 || !FK_POK(p)) {
-            return 1;
+        long long v20 = fk_walk(fk_node[i][1], fp);
+        long long p = v20 >> 1;
+        if ((v20 & 1) == 0 || p < 1 || !FK_POK(p)) {
+            return fk_nothing;
         }
         return FK_HH(p);
     }
     if (t == 21) {
-        long long p = fk_walk(fk_node[i][1], fp) >> 1;
-        if (p < 1 || !FK_POK(p)) {
+        long long v21 = fk_walk(fk_node[i][1], fp);
+        if (v21 == 1) {
             return 1;
+        }
+        long long p = v21 >> 1;
+        if ((v21 & 1) == 0 || p < 1 || !FK_POK(p)) {
+            return fk_nothing;
         }
         return FK_HT(p);
     }
@@ -10688,13 +10697,14 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(x23);
         long long k23 = fk_walk(fk_node[i][2], fp) >> 1;
         fk_vsp = fk_vsp - 1;
-        long long p = fk_vs[fk_vsp] >> 1;
+        long long l23 = fk_vs[fk_vsp];
+        long long p = (l23 & 1) ? l23 >> 1 : 0;
         while (p >= 1 && FK_POK(p) && k23 > 0) {
             p = FK_HT(p) >> 1;
             k23 = k23 - 1;
         }
-        if (p < 1 || !FK_POK(p)) {
-            return 1;
+        if (p < 1 || !FK_POK(p) || k23 < 0) {
+            return fk_nothing;
         }
         return FK_HH(p);
     }

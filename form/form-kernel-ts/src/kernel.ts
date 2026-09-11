@@ -1729,14 +1729,17 @@ export class Kernel {
       const tail = argList(args, 1);
       return { kind: "list", list: [head, ...tail] };
     });
+    // A receiver that is not a list answers null, as nth does; the tail of a list is a list.
     this.registerNative("head", catListNat(), (_k, args) => {
-      const lst = argList(args, 0);
-      return lst[0] ?? { kind: "null" };
+      const xs = args[0];
+      if (xs?.kind !== "list") return { kind: "null" };
+      return xs.list[0] ?? { kind: "null" };
     });
-    this.registerNative("tail", catListNat(), (_k, args) => ({
-      kind: "list",
-      list: argList(args, 0).slice(1),
-    }));
+    this.registerNative("tail", catListNat(), (_k, args) => {
+      const xs = args[0];
+      if (xs?.kind !== "list") return { kind: "null" };
+      return { kind: "list", list: xs.list.slice(1) };
+    });
     // len is HONEST cell count. Dicts ride on list values tagged with the
     // string "__dict__", but the tag is in-band: any plain list may carry
     // that string as pooled DATA (the flatten string pool does, at the cell
