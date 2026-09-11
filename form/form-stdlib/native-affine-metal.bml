@@ -1,7 +1,7 @@
 // Form owns affine quantization and linear/LoRA arithmetic on shared Metal buffers.
 // The immutable checkpoint has U32 packed nibbles and per-group scales/biases.
 // No interpreter, subprocess, or host weight expansion participates.
-// preludes: form-stdlib/safetensors-index.bml form-stdlib/lora-adapter.bml
+// preludes: form-stdlib/safetensors-index.bml form-stdlib/lora-adapter.bml form-stdlib/metal-carrier.bml
 section [form.bml] {
  class NativeAffineMetal {
   def nam-msl() = str_concat("#include <metal_stdlib>\nusing namespace metal;\n", str_concat(nam-linear-msl(), nam-basic-msl()));
@@ -25,14 +25,17 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
 ";
   def nam-type(dtype) = if str_eq(dtype, "F32") then 0 else if str_eq(dtype, "F16") then 1 else if str_eq(dtype, "BF16") then 2 else form_error("native affine scalar dtype refused");
   def nam-pipe(name) = nam-held-pipe(metal_pipeline(nam-msl(), name));
-  def nam-held-pipe(p) = if le(p, 0) then form_error("native affine Metal compile refused") else p;
+  def nam-held-pipe(p) = if le(p, 0) then nam-refused("Metal compile") else p;
+  // A 0 handle from an unloaded carrier is an absence, not a device refusal.
+  def nam-refused(what) = nam-refused-in(what, metal_status());
+  def nam-refused-in(what, status) = if ge(str_find(status, "metal_loaded=false", 0), 0) then form_error(str_concat("native affine Metal carrier not admitted: ", mca-reason(status))) else form_error(str_concat("native affine ", str_concat(what, str_concat(" refused: ", mca-reason(status)))));
   def nam-run(name, handles, values, count, grouped) {
    let p = nam-pipe(name);
    let rc = metal_enqueue(p, if grouped then md-bind16(handles, values, 32, 0, 1, 0) else md-bind(handles, values), count);
    if lt(rc, 0) then form_error(str_concat("native affine dispatch refused: ", name)) else rc;
   }
   def nam-alloc(n) = if le(n, 0) then form_error("native affine empty allocation") else nam-held(metal_buf_alloc(mul(n, 4)));
-  def nam-held(h) = if le(h, 0) then form_error("native affine allocation refused") else h;
+  def nam-held(h) = if le(h, 0) then nam-refused("allocation") else h;
   def nam-sync() = if lt(metal_sync(), 0) then form_error("native affine GPU completion refused") else 1;
   def nam-free(handles) = if nil?(handles) then 1 else nam-free-next(metal_buf_free(head(handles)), tail(handles));
   def nam-free-next(rc, rest) = if lt(rc, 0) then form_error("native affine release refused") else nam-free(rest);
