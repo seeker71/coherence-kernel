@@ -10730,7 +10730,7 @@ static long long fk_field_share_value(long long v) {
         long long at = base + k;
         fk_fph[at] = fk_field_share_value(FK_HH(q));
         long long tail = FK_HT(q);
-        fk_fpt[at] = (k + 1 < n) ? (((FK_PAIR_BASE + at + 1) << 1) | 1) : ((tail & 1) && (tail >> 1) >= 1 ? 1 : tail);
+        fk_fpt[at] = (k + 1 < n) ? (((FK_PAIR_BASE + at + 1) << 1) | 1) : fk_field_share_value(tail);
         q = tail >> 1;
         k = k + 1;
     }

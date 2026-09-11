@@ -90,6 +90,12 @@ Micro-thoughts and choice paths are short, inspectable computations with explici
 
 Language sources retain their contributors, review state and complete set of candidate meanings. A context may rank those meanings while their ambiguity remains inspectable. Reindexing or changing a policy preserves the source bytes that support the comparison. Attribution, observation, interpretation and selection stay distinct, so a new interpretation can replace an old one without rewriting its evidence.
 
+A source can be re-observed by revision and complete byte identity. Reproducing
+an existing meaning, selecting a fresh source and publishing a changed meaning
+are separate observable operations. Each can refuse without erasing the current
+generation. Shared values preserve their complete structure when ownership
+crosses between local and resident storage.
+
 Evidence expiry stops authorizing new choices without cancelling the lifetime obligations of submitted choices. General reasoning competence requires its own evaluations. A policy witness establishes only the domain and behavior it exercised.
 
 Embodied knowing means a claim meets real input, can be rejected by an executable check, carries execution identities and costs, and remains available for re-witnessing. What no longer serves can be released without making current meaning depend on a narrative of its origin.

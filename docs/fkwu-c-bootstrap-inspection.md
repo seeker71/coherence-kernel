@@ -52,6 +52,13 @@ The Form reference walker carries lexical frames, retained source and explicit r
 
 Seed intern pools, record metadata, parser state and other globals still require ownership migration. Cooperative Form resource owners do not establish protected address spaces or independently destroyable seed contexts. The current tests exercise 320 simultaneous CPU admissions and a 16,392-byte image; the absence of a fixed table or image ceiling does not promise unlimited physical memory.
 
+The seed's field-sharing transfer preserves complete mixed local/shared lists.
+The [current ownership evidence](evidence/fkwu/shared-field-ownership.json)
+checks first admission with fresh identities, nested lists, scalar prefixes,
+existing shared lists and empty lists. Its Form-native destination is the
+context-owned sharing operation; this transport correction adds no function or
+global.
+
 ## Review contract
 
 For each function and mutable declaration, identify its ABI operation and owner; keep interpretation and policy in Form; carry bulk data through resident spans and completion dependencies; establish behavior and failure witnesses; then delete an implementation when its observed replacement owns every active caller.

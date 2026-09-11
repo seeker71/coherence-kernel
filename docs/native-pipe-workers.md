@@ -87,11 +87,12 @@ refuse because this carrier cannot attest an orderly read end. The parser's
 framing follows [HTTP/1.1](https://www.rfc-editor.org/rfc/rfc9112.html);
 query encoding follows the [form URL format](https://url.spec.whatwg.org/#application/x-www-form-urlencoded).
 
-The observed live provider attempt returned HTTP 429 on all five requests and
-refused without publication. Fresh translation and acquisition remain active
-JavaScript responsibilities. A successful native provider exchange, complete
-acquisition receipt and full generation publication must be observed before
-those implementations are removed.
+The observed live translation attempt returned HTTP 429 on all five requests
+and refused without publication. [Pinned Wiktionary acquisition](native-wiktionary-source.md)
+now runs in Form and reproduces all 111 retained source revisions. Fresh
+selection, rights acquisition, translation and new-generation publication remain
+active JavaScript responsibilities until their complete native executions are
+observed.
 
 ## Executable observations
 
@@ -109,3 +110,10 @@ final EOF, ordered and correlated health stages, actual exit status, physical
 descriptor release and native owner retirement. These observations establish
 the exercised bulk message path. They do not establish maximum bandwidth or
 complete OS process isolation.
+
+Worker image admission and message execution have distinct diagnostics. A new
+seed build can emit cache-renewal warnings before the worker's Form entry runs.
+The verification records image admission through owned pipe EOF, retains those
+diagnostic bytes and confirms process release. The subsequent message witnesses
+still require exact result and diagnostic streams; no warning is discarded to
+make a protocol check pass.
