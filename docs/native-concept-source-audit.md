@@ -184,6 +184,61 @@ NUL paths, source-identity changes and changes after staging. It returns `1`
 with exit zero. The two public doors preserve their effectful preflight marker;
 the witness library can be preflighted without acquiring or publishing data.
 
-Acquisition, translation and other builders still have JavaScript owners.
-The deterministic substantive builder has private complete-byte and publication
-proofs; its acquisition and refresh responsibilities remain active in JavaScript.
+## Deterministic substantive construction
+
+`form-run ./fkwu observe/concept-substantive-build-run.bml </dev/null` rebuilds
+the substantive carriers and their downstream projections in one native
+process. The optional `root`/`hash` JSON request follows the same complete,
+unique string-field admission. Empty paths, NUL bytes, unknown fields and
+unknown policies refuse before source work. Portable Form SHA is the default;
+`arm64-sha256` selects the explicitly admitted native CPU image.
+
+The source owner admits the ordered manifest and four exact held inputs:
+ranked bytes, evidence JSONL, the translation table and its source matrix.
+Complete typed evidence objects bind all 111 stable IDs and legacy labels to
+their defect rows, ordered ranks, frequencies, page/revision identities and
+translation rows. The recorded source hash and commit also agree with the
+existing frequency provenance authority. This verifies held provenance; it
+does not reacquire the frequency source or recompute absent full English
+revision sections. Translated cells remain attributed and unreviewed.
+
+Form constructs the ranked overlay, complete lexical and alias indices,
+semantic index and payload, migration table, both executable metadata files
+and the eleven-entry manifest. Balanced byte accumulation and native byte-order
+mergesort retain every row. The six data carriers remain byte-identical to the
+current source generation. Metadata carries current source descriptions and
+the ordinary `current-rank` argument for IDs outside the repair set.
+
+The proposed generation passes the complete source audit before staging. All
+held dependencies and existing destinations join the freshness boundary; the
+shared publication owner stages exact bytes, rereads inputs, publishes each
+file with readback, and releases its owned stages. The manifest is last within
+the nine-artifact substantive publication. A damaged derived artifact can be
+reconstructed from admitted input evidence.
+
+The workflow then invokes native materialization, lexical candidate
+construction and attributed corpus reindexing, in that order, in the same
+process. The four owners publish 21 artifacts altogether. Each owner reports
+its completed prefix and stage disposition on refusal; the workflow does not
+claim an atomic transaction across all files.
+
+`form-run ./fkwu observe/concept-substantive-builder-witness.bml` prepares a
+complete private source snapshot and exercises the actual public door. It
+compares all 21 prepared artifacts, executes the privately generated Form
+authorities, damages the alias carrier and repeats the complete workflow using
+the default portable hash policy. The witness retains child stdout, stderr,
+exit status and exact file evidence. Its successful final value is `1`.
+
+`form-run ./fkwu observe/concept-substantive-runtime-witness.bml` independently
+reads the evidence and checks all 10,000 generated rank and repaired-ID
+queries, three boundary IDs, all 111 ID/rank list entries, every path door and
+all 112 overlay offsets against actual newline boundaries. It returns `1` with
+exit zero. The existing substantive semantic band remains the independent
+4095 consumer check.
+
+The existing source command delegates its non-refresh entry to this native
+workflow. The JavaScript refresh owner still acquires the pinned frequency source,
+selects revision-bound Wiktionary definitions, obtains translations and builds
+fresh evidence. Fresh acquisition needs its own admitted receipt and complete
+proposed projection before replacing current manifest-bound inputs. Those
+responsibilities remain explicit until native ownership is observed.
