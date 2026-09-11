@@ -1,0 +1,405 @@
+// Independent GGUF, quantization and fp64 reference recipes.
+// Recipe source: ds4-engine/ds4.c; no production MLA/HC/MoE recipe imports.
+// preludes: form-stdlib/core.fk form-stdlib/bml/formbin-codec.bml form-stdlib/bml/dsv4-numeric-reference.bml form/form-stdlib/bml/dsv4-oracle-tables.bml form/form-stdlib/bml/dsv4-oracle-angle.bml
+section [form.bml] {
+ class Dsv4FileOracle {
+  def dfo-require(ok,reason) = if ok then 1 else form_error(str_concat("DSV4 oracle: ",reason));
+  def dfo-min(a,b) = if lt(a,b) then a else b;
+  def dfo-max(a,b) = if gt(a,b) then a else b;
+  def dfo-natural(n) = and(str_eq(value_kind(n),"int"),ge(n,0));
+  def dfo-positive(n) = and(dfo-natural(n),gt(n,0));
+  def dfo-product(a,b) = if not(and(dfo-natural(a),dfo-natural(b))) then nothing() else if eq(a,0) then 0 else if gt(b,div(4611686018427387903,a)) then nothing() else mul(a,b);
+  def dfo-sum(a,b) = if not(and(dfo-natural(a),dfo-natural(b))) then nothing() else if gt(b,sub(4611686018427387903,a)) then nothing() else add(a,b);
+  def dfo-size(n) {
+   dfo-require(not(nothing?(n)),"inexact or overflowing extent"); n;
+  }
+  def dfo-positive-dims(xs) = if nil?(xs) then 1 else and(dfo-positive(head(xs)),dfo-positive-dims(tail(xs)));
+  def dfo-dim-cells(xs,n) = if nil?(xs) then n else dfo-dim-cells(tail(xs),dfo-size(dfo-product(n,head(xs))));
+  def dfo-pow-positive(x,n,acc) = if eq(n,0) then acc else dfo-pow-positive(mul(x,x),div(n,2),if eq(mod(n,2),1) then mul(acc,x) else acc);
+  def dfo-pow2(n) = if lt(n,0) then dfo-pow-positive(0.5,sub(0,n),1.0) else dfo-pow-positive(2.0,n,1.0);
+  def dfo-reader(path) {
+   let size = file_size(path);
+   dfo-require(ge(size,24),"missing or truncated GGUF header");
+   record_new(0,"path",path,"extent",size,"start",0,"bytes","","meta",record_new(0),"tensors",record_new(0),"tensor-names",list(),"matrix-mx8",dfo-ref-mx8,"matrix-f16",dfo-ref-f16,"matrix-expert",dfo-ref-expert,"matrix-out-a",dfo-ref-out-a);
+  }
+  def dfo-span(r,at,n) {
+   dfo-require(and(dfo-natural(at),and(dfo-natural(n),and(le(at,record_get(r,"extent")),le(n,sub(record_get(r,"extent"),at))))),"file span exceeds observed extent");
+   if and(ge(at,record_get(r,"start")),le(add(at,n),add(record_get(r,"start"),str_len(record_get(r,"bytes"))))) then record_get(r,"bytes")
+   else dfo-window(r,at,n);
+  }
+  def dfo-window(r,at,n) {
+   let extent = record_get(r,"extent");
+   let amount = dfo-min(sub(extent,at),dfo-max(n,65536));
+   let bytes = read_file_slice(record_get(r,"path"),at,amount);
+   dfo-require(and(eq(file_size(record_get(r,"path")),extent),and(not(nothing?(bytes)),eq(str_len(bytes),amount))),"incomplete or changed file read");
+   record_set(r,"start",at); record_set(r,"bytes",bytes); bytes;
+  }
+  def dfo-bytes(r,at,n) {
+   let src = dfo-span(r,at,n); let local = sub(at,record_get(r,"start")); substring(src,local,add(local,n));
+  }
+  def dfo-le(src,at,n) = if eq(n,0) then 0 else add(str_byte_at(src,at),mul(256,dfo-le(src,add(at,1),sub(n,1))));
+  def dfo-uint(r,at,n) {
+   let src = dfo-span(r,at,n); let local = sub(at,record_get(r,"start")); if eq(n,8) then dfo-require(lt(str_byte_at(src,add(local,7)),64),"unsigned extent exceeds native exact integer domain") else 1; dfo-le(src,local,n);
+  }
+  def dfo-string-end(r,at) {
+   let size = dfo-uint(r,at,8); dfo-require(le(size,sub(record_get(r,"extent"),add(at,8))),"truncated string extent"); add(add(at,8),size);
+  }
+  def dfo-string(r,at) {
+   let end = dfo-string-end(r,at); let value = dfo-bytes(r,add(at,8),sub(end,add(at,8))); dfo-require(fbc-utf8(value,0),"invalid UTF8 name"); value;
+  }
+  def dfo-width(t) = if or(eq(t,0),or(eq(t,1),eq(t,7))) then 1 else if or(eq(t,2),eq(t,3)) then 2 else if or(eq(t,4),or(eq(t,5),eq(t,6))) then 4 else if or(eq(t,10),or(eq(t,11),eq(t,12))) then 8 else 0;
+  def dfo-value-end(r,at,t) = if eq(t,8) then dfo-string-end(r,at) else if eq(t,9) then dfo-array-end(r,add(at,12),dfo-uint(r,at,4),dfo-uint(r,add(at,4),8)) else dfo-fixed-end(r,at,dfo-width(t),1);
+  def dfo-fixed-end(r,at,width,count) {
+   dfo-require(gt(width,0),"unknown GGUF metadata value type"); dfo-require(le(count,div(sub(record_get(r,"extent"),at),width)),"truncated metadata extent"); add(at,mul(width,count));
+  }
+  def dfo-array-end(r,at,t,count) = if gt(dfo-width(t),0) then dfo-fixed-end(r,at,dfo-width(t),count) else if not(or(eq(t,8),eq(t,9))) then form_error("unknown GGUF array value type") else if eq(count,0) then at else dfo-array-end(r,dfo-value-end(r,at,t),t,sub(count,1));
+  def dfo-metadata(r,at,left) = if eq(left,0) then at else dfo-metadata-next(r,at,left);
+  def dfo-metadata-next(r,at,left) {
+    let key = dfo-string(r,at); let next = dfo-string-end(r,at); let t = dfo-uint(r,next,4); let value = add(next,4); let end = dfo-value-end(r,value,t);
+    dfo-require(not(record_has(record_get(r,"meta"),key)),"duplicate metadata key");
+    record_set(record_get(r,"meta"),key,list(t,value,end));
+    dfo-metadata(r,end,sub(left,1));
+  }
+  def dfo-dims(r,at,n,acc) = if eq(n,0) then reverse(acc) else dfo-dim-next(r,at,n,acc,dfo-uint(r,at,8));
+  def dfo-dim-next(r,at,n,acc,value) {
+   dfo-require(dfo-positive(value),"tensor dimension must be an exact positive integer"); dfo-dims(r,add(at,8),sub(n,1),cons(value,acc));
+  }
+  def dfo-tensor-table(r,at,left) = if eq(left,0) then at else dfo-tensor-next(r,at,left);
+  def dfo-tensor-next(r,at,left) {
+    let key = dfo-string(r,at); let next = dfo-string-end(r,at); let nd = dfo-uint(r,next,4); let start = add(next,4);
+    dfo-require(and(gt(nd,0),le(nd,div(sub(record_get(r,"extent"),start),8))),"invalid tensor dimension extent");
+    let dims = dfo-dims(r,start,nd,list()); let cells = dfo-dim-cells(dims,1); let tt = dfo-size(dfo-sum(start,dfo-product(nd,8))); let ty = dfo-uint(r,tt,4); let rel = dfo-uint(r,add(tt,4),8);
+    dfo-require(not(record_has(record_get(r,"tensors"),key)),"duplicate tensor name");
+    record_set(record_get(r,"tensors"),key,list(ty,dims,rel));
+    record_set(r,"tensor-names",cons(key,record_get(r,"tensor-names")));
+    dfo-tensor-table(r,add(tt,12),sub(left,1));
+  }
+  def dfo-open(path) {
+   let r = dfo-reader(path);
+   dfo-require(str_eq(dfo-bytes(r,0,4),"GGUF"),"bad GGUF magic");
+   dfo-require(eq(dfo-uint(r,4,4),3),"GGUF version must be3");
+   let nt = dfo-uint(r,8,8); let nk = dfo-uint(r,16,8);
+   let ti = dfo-metadata(r,24,nk); let end = dfo-tensor-table(r,ti,nt);
+   let alignment = if record_has(record_get(r,"meta"),"general.alignment") then dfo-meta(r,"general.alignment") else 32;
+   dfo-require(and(dfo-positive(alignment),and(dfo-metadata-kind(r,"general.alignment","integer"),le(alignment,sub(record_get(r,"extent"),end)))),"invalid GGUF alignment");
+   record_set(r,"data",mul(div(dfo-size(dfo-sum(end,sub(alignment,1))),alignment),alignment)); record_set(r,"tensor-count",nt); record_set(r,"metadata-count",nk); record_set(r,"tensor-names",reverse(record_get(r,"tensor-names"))); r;
+  }
+  def dfo-float-fields(sign,exponent,mantissa,bias,mantBits,maxExp) = mul(sign,if eq(exponent,0) then mul(mul(1.0,mantissa),dfo-pow2(sub(sub(1,bias),mantBits))) else if eq(exponent,maxExp) then if eq(mantissa,0) then div(1.0,0.0) else div(0.0,0.0) else mul(add(1.0,div(mul(1.0,mantissa),dfo-pow2(mantBits))),dfo-pow2(sub(exponent,bias))));
+  def dfo-f16(bits) = dfo-float-fields(if ge(bits,32768) then -1.0 else 1.0,mod(div(bits,1024),32),mod(bits,1024),15,10,31);
+  def dfo-f32(bits) = dfo-float-fields(if ge(bits,2147483648) then -1.0 else 1.0,mod(div(bits,8388608),256),mod(bits,8388608),127,23,255);
+  def dfo-f64(src) {
+   let lo = dfo-le(src,0,4); let hi = dfo-le(src,4,4); dfo-float-fields(if ge(hi,2147483648) then -1.0 else 1.0,mod(div(hi,1048576),2048),add(lo,mul(mod(hi,1048576),4294967296)),1023,52,2047);
+  }
+  def dfo-signed(value,bits) = if ge(value,dfo-pow2(sub(bits,1))) then sub(value,trunc(dfo-pow2(bits))) else value;
+  def dfo-value(r,at,t) = if eq(t,8) then dfo-string(r,at) else if eq(t,9) then dfo-array(r,add(at,12),dfo-uint(r,at,4),dfo-uint(r,add(at,4),8),list()) else if eq(t,6) then dfo-f32(dfo-uint(r,at,4)) else if eq(t,12) then dfo-f64(dfo-bytes(r,at,8)) else if or(eq(t,10),eq(t,11)) then dfo-wide64(dfo-bytes(r,at,8),eq(t,11)) else if or(eq(t,1),or(eq(t,3),eq(t,5))) then dfo-signed(dfo-uint(r,at,dfo-width(t)),mul(8,dfo-width(t))) else dfo-uint(r,at,dfo-width(t));
+  def dfo-wide64(raw,signed) {
+   let lo = dfo-le(raw,0,4); let hi = dfo-le(raw,4,4);
+   if lt(hi,1073741824) then add(lo,mul(hi,4294967296)) else if and(signed,ge(hi,3221225472)) then add(lo,mul(sub(hi,4294967296),4294967296)) else record_new(0,"kind",if signed then "gguf-i64" else "gguf-u64","raw",raw,"lo",lo,"hi",hi);
+  }
+  def dfo-array(r,at,t,n,acc) = if eq(n,0) then reverse(acc) else dfo-array(r,dfo-value-end(r,at,t),t,sub(n,1),cons(dfo-value(r,at,t),acc));
+  def dfo-meta(r,key) {
+   dfo-require(record_has(record_get(r,"meta"),key),str_concat("missing metadata: ",key)); let row = record_get(record_get(r,"meta"),key); dfo-value(r,nth(row,1),head(row));
+  }
+  def dfo-tensor(r,key) {
+   dfo-require(record_has(record_get(r,"tensors"),key),str_concat("missing tensor: ",key)); record_get(record_get(r,"tensors"),key);
+  }
+  def dfo-abs(r,tensor) = dfo-size(dfo-sum(record_get(r,"data"),nth(tensor,2)));
+  def dfo-floats(src,ty,i,n,acc) = if eq(i,n) then reverse(acc) else dfo-floats(src,ty,add(i,1),n,cons(if eq(ty,1) then dfo-f16(dfo-le(src,mul(i,2),2)) else dfo-f32(dfo-le(src,mul(i,4),4)),acc));
+  def dfo-plain(r,key,row) {
+   let t = dfo-tensor(r,key); let ty = head(t); let width = head(nth(t,1)); let size = if eq(ty,1) then 2 else 4;
+   dfo-require(and(or(eq(ty,0),eq(ty,1)),and(le(len(nth(t,1)),2),and(str_eq(value_kind(row),"int"),and(ge(row,0),lt(row,if eq(len(nth(t,1)),1) then 1 else nth(nth(t,1),1)))))),"plain tensor type or row extent");
+   dfo-require(dfo-positive-dims(nth(t,1)),"plain tensor dimensions"); let stride = dfo-size(dfo-product(width,size));
+   dfo-floats(dfo-bytes(r,dfo-size(dfo-sum(dfo-abs(r,t),dfo-product(row,stride))),stride),ty,0,width,list());
+  }
+  def dfo-e4m3(b) {
+   let a = mod(b,128); let e = div(a,8); let m = mod(a,8); mul(if ge(b,128) then -1.0 else 1.0,if eq(e,0) then mul(m,0.001953125) else mul(add(1.0,mul(m,0.125)),dfo-pow2(sub(e,7))));
+  }
+  def dfo-mx8-group(data,at,x,left,sum) = if eq(left,0) then list(sum,x) else dfo-mx8-group(data,add(at,1),tail(x),sub(left,1),add(sum,mul(dfo-e4m3(str_byte_at(data,at)),head(x))));
+  def dfo-mx8-groups(data,scales,at,x,group,n,sum) = if eq(group,n) then sum else dfo-mx8-next(data,scales,at,group,n,sum,dfo-mx8-group(data,at,x,32,0.0));
+  def dfo-mx8-next(data,scales,at,group,n,sum,part) = dfo-mx8-groups(data,scales,add(at,32),nth(part,1),add(group,1),n,add(sum,mul(head(part),dfo-pow2(sub(str_byte_at(scales,group),127)))));
+  def dfo-mx8-row(r,key,row,x) {
+   let t = dfo-tensor(r,key); let dims = nth(t,1); let cols = head(dims); let rows = nth(dims,1); let at = dfo-abs(r,t);
+   dfo-require(and(eq(head(t),41),and(eq(mod(cols,32),0),and(eq(len(x),cols),and(ge(row,0),lt(row,rows))))),"MXFP8 row geometry mismatch");
+   let data = dfo-bytes(r,add(at,mul(row,cols)),cols); let scales = dfo-bytes(r,add(add(at,mul(rows,cols)),mul(row,div(cols,32))),div(cols,32));
+   dfo-mx8-groups(data,scales,0,x,0,div(cols,32),0.0);
+  }
+  // Matrices hold their two complete planes once. Row traversal never reloads
+  // overlapping windows or reconstructs a dequantized matrix.
+  def dfo-plane-groups(data,scales,at,x,group,end,sum) = if eq(group,end) then sum else dfo-plane-next(data,scales,at,group,end,sum,dfo-mx8-group(data,at,x,32,0.0));
+  def dfo-plane-next(data,scales,at,group,end,sum,part) = dfo-plane-groups(data,scales,add(at,32),nth(part,1),add(group,1),end,add(sum,mul(head(part),dfo-pow2(sub(str_byte_at(scales,group),127)))));
+  def dfo-mx8-rows(data,scales,cols,row,rows,x,acc) = if eq(row,rows) then reverse(acc) else dfo-mx8-rows(data,scales,cols,add(row,1),rows,x,cons(dfo-plane-groups(data,scales,mul(row,cols),x,mul(row,div(cols,32)),mul(add(row,1),div(cols,32)),0.0),acc));
+  def dfo-mx8(r,key,x) {
+   let run = record_get(r,"matrix-mx8"); run(r,key,x);
+  }
+  def dfo-ref-mx8(r,key,x) {
+   let t = dfo-tensor(r,key); let dims = nth(t,1); let cols = head(dims); let rows = nth(dims,1); let at = dfo-abs(r,t); let cells = mul(rows,cols);
+   dfo-require(and(eq(head(t),41),and(eq(mod(cols,32),0),eq(len(x),cols))),str_concat("MXFP8 matrix geometry: ",key));
+   let data = dfo-bytes(r,at,cells); let scales = dfo-bytes(r,add(at,cells),div(cells,32));
+   dfo-mx8-rows(data,scales,cols,0,rows,x,list());
+  }
+  def dfo-f16-dot(src,at,x,sum) = if nil?(x) then sum else dfo-f16-dot(src,add(at,2),tail(x),add(sum,mul(dfo-f16(dfo-le(src,at,2)),head(x))));
+  def dfo-f16-rows(src,cols,row,rows,x,acc) = if eq(row,rows) then reverse(acc) else dfo-f16-rows(src,cols,add(row,1),rows,x,cons(dfo-f16-dot(src,mul(mul(row,cols),2),x,0.0),acc));
+  def dfo-f16-matrix(r,key,x) {
+   let run = record_get(r,"matrix-f16"); run(r,key,x);
+  }
+  def dfo-ref-f16(r,key,x) {
+   let t = dfo-tensor(r,key); let dims = nth(t,1); let cols = head(dims); let rows = nth(dims,1);
+   dfo-require(and(eq(head(t),1),eq(len(x),cols)),str_concat("F16 matrix geometry: ",key));
+   dfo-f16-rows(dfo-bytes(r,dfo-abs(r,t),mul(mul(cols,rows),2)),cols,0,rows,x,list());
+  }
+  def dfo-e2m1(b) {
+   let e = mod(div(b,2),4); let m = mod(b,2);
+   mul(if ge(b,8) then -1.0 else 1.0,if eq(e,0) then mul(m,0.5) else mul(dfo-pow2(sub(e,1)),add(1.0,mul(m,0.5))));
+  }
+  def dfo-mx4-group(data,at,x,left,even,odd) = if eq(left,0) then list(add(even,odd),x) else dfo-mx4-group(data,add(at,1),tail(tail(x)),sub(left,1),add(even,mul(dfo-e2m1(mod(str_byte_at(data,at),16)),head(x))),add(odd,mul(dfo-e2m1(div(str_byte_at(data,at),16)),nth(x,1))));
+  def dfo-mx4-groups(data,scales,at,x,group,end,sum) = if eq(group,end) then sum else dfo-mx4-next(data,scales,at,group,end,sum,dfo-mx4-group(data,at,x,16,0.0,0.0));
+  def dfo-mx4-next(data,scales,at,group,end,sum,part) = dfo-mx4-groups(data,scales,add(at,16),nth(part,1),add(group,1),end,add(sum,mul(head(part),dfo-pow2(sub(str_byte_at(scales,group),127)))));
+  def dfo-mx4-rows(data,scales,cols,row,rows,x,acc) = if eq(row,rows) then reverse(acc) else dfo-mx4-rows(data,scales,cols,add(row,1),rows,x,cons(dfo-mx4-groups(data,scales,mul(row,div(cols,2)),x,mul(row,div(cols,32)),mul(add(row,1),div(cols,32)),0.0),acc));
+  def dfo-mx4(r,t,expert,x) {
+   let dims = nth(t,1); let cols = head(dims); let rows = nth(dims,1); let cells = mul(rows,cols); let stride = add(div(cells,2),div(cells,32)); let at = add(dfo-abs(r,t),mul(expert,stride));
+   dfo-require(and(eq(mod(cols,32),0),eq(len(x),cols)),"MXFP4 expert geometry");
+   let data = dfo-bytes(r,at,div(cells,2)); let scales = dfo-bytes(r,add(at,div(cells,2)),div(cells,32));
+   dfo-mx4-rows(data,scales,cols,0,rows,x,list());
+  }
+  def dfo-grid-byte(grid,gi,j) {
+   let at = add(mul(gi,16),mul(sub(7,j),2));
+   add(mul(hex-digit-value(str_byte_at(grid,at)),16),hex-digit-value(str_byte_at(grid,add(at,1))));
+  }
+  def dfo-iq-dot8(grid,gi,sign,x,j,sum) = if eq(j,8) then list(sum,x) else dfo-iq-dot8(grid,gi,div(sign,2),tail(x),add(j,1),add(sum,mul(mul(if eq(mod(sign,2),0) then 1.0 else -1.0,dfo-grid-byte(grid,gi,j)),head(x))));
+  def dfo-iq-group(data,at,aux,grid,signs,x,j,sum) = if eq(j,4) then list(sum,x) else dfo-iq-group-next(data,at,aux,grid,signs,j,sum,dfo-iq-dot8(grid,str_byte_at(data,add(at,j)),nth(signs,mod(aux,128)),x,0,0.0));
+  def dfo-iq-group-next(data,at,aux,grid,signs,j,sum,part) = dfo-iq-group(data,at,div(aux,128),grid,signs,nth(part,1),add(j,1),add(sum,head(part)));
+  def dfo-iq-groups(data,at,d,grid,signs,x,j,sum) = if eq(j,8) then list(sum,x) else dfo-iq-group-scaled(data,at,d,grid,signs,x,j,sum,dfo-le(data,add(at,4),4));
+  def dfo-iq-group-scaled(data,at,d,grid,signs,x,j,sum,aux) = dfo-iq-groups-next(data,at,d,grid,signs,j,sum,mul(mul(0.125,d),add(mul(2,div(aux,268435456)),1)),dfo-iq-group(data,at,aux,grid,signs,x,0,0.0));
+  def dfo-iq-groups-next(data,at,d,grid,signs,j,sum,scale,part) = dfo-iq-groups(data,add(at,8),d,grid,signs,nth(part,1),add(j,1),add(sum,mul(scale,head(part))));
+  def dfo-iq-blocks(data,at,x,left,grid,signs,sum) = if eq(left,0) then sum else dfo-iq-block-next(data,at,left,grid,signs,dfo-iq-groups(data,add(at,2),dfo-f16(dfo-le(data,at,2)),grid,signs,x,0,sum));
+  def dfo-iq-block-next(data,at,left,grid,signs,part) = dfo-iq-blocks(data,add(at,66),nth(part,1),sub(left,1),grid,signs,head(part));
+  def dfo-iq-rows(data,cols,row,rows,x,grid,signs,acc) = if eq(row,rows) then reverse(acc) else dfo-iq-rows(data,cols,add(row,1),rows,x,grid,signs,cons(dfo-iq-blocks(data,mul(mul(row,div(cols,256)),66),x,div(cols,256),grid,signs,0.0),acc));
+  def dfo-iq2(r,t,expert,x) {
+   let dims = nth(t,1); let cols = head(dims); let rows = nth(dims,1); let stride = mul(mul(rows,div(cols,256)),66);
+   dfo-require(and(eq(mod(cols,256),0),eq(len(x),cols)),"IQ2_XXS expert geometry");
+   dfo-iq-rows(dfo-bytes(r,add(dfo-abs(r,t),mul(expert,stride)),stride),cols,0,rows,x,dfo-iq-grid-hex(),dfo-iq-signs(),list());
+  }
+  def dfo-expert-matrix(r,key,expert,x) {
+   let run = record_get(r,"matrix-expert"); run(r,key,expert,x);
+  }
+  def dfo-ref-expert(r,key,expert,x) {
+   let t = dfo-tensor(r,key);
+   dfo-require(and(eq(len(nth(t,1)),3),and(ge(expert,0),lt(expert,nth(nth(t,1),2)))),"expert outside tensor stack");
+   if eq(head(t),40) then dfo-mx4(r,t,expert,x) else if eq(head(t),16) then dfo-iq2(r,t,expert,x) else form_error(str_concat("DSV4 oracle: unsupported expert type for ",key));
+  }
+  def dfo-round-even(x) {
+   let low = floor(x); let part = sub(x,mul(1.0,low));
+   if lt(part,0.5) then low else if gt(part,0.5) then add(low,1) else if eq(mod(low,2),0) then low else add(low,1);
+  }
+  def dfo-exponent-adjust(x,e) = if lt(x,dfo-pow2(e)) then dfo-exponent-adjust(x,sub(e,1)) else if ge(x,dfo-pow2(add(e,1))) then dfo-exponent-adjust(x,add(e,1)) else e;
+  def dfo-exponent(x) = dfo-exponent-adjust(x,floor(div(math_log(x),math_log(2.0))));
+  def dfo-round-width(x,mant,minimum,maximum) = if eq(x,0.0) then x else dfo-round-width-step(x,mant,minimum,maximum,dfo-pow2(dfo-max(minimum,sub(dfo-exponent(abs(x)),mant))));
+  def dfo-round-width-step(x,mant,minimum,maximum,step) = mul(if lt(x,0.0) then -1.0 else 1.0,dfo-min(maximum,mul(mul(1.0,dfo-round-even(div(abs(x),step))),step)));
+  def dfo-round16(x) {
+   dfo-require(dfo-finite-number(x),"f16 state rounding requires finite numeric input"); dfo-round-width(x,10,-24,65504.0);
+  }
+  def dfo-f32-finite-input(x) = and(or(str_eq(value_kind(x),"float"),str_eq(value_kind(x),"int")),and(eq(x,x),lt(abs(x),sub(dfo-pow2(128),dfo-pow2(103)))));
+  def dfo-round32(x) {
+   dfo-require(dfo-f32-finite-input(x),"f32 state rounding overflow or nonfinite input"); dfo-round-width(x,23,-149,div(1.0,0.0));
+  }
+  def dfo-round-list(x,kind,acc) = if nil?(x) then reverse(acc) else dfo-round-list(tail(x),kind,cons(if eq(kind,16) then dfo-round16(head(x)) else dfo-round32(head(x)),acc));
+  def dfo-e4-floor(x,lo,hi) = if eq(lo,hi) then lo else dfo-e4-floor-next(x,lo,hi,div(add(add(lo,hi),1),2));
+  def dfo-e4-floor-next(x,lo,hi,mid) = if le(dfo-e4m3(mid),x) then dfo-e4-floor(x,mid,hi) else dfo-e4-floor(x,lo,sub(mid,1));
+  def dfo-e4-nearest(x,lo) = if eq(lo,126) then dfo-e4m3(lo) else dfo-e4-tie(x,lo,sub(x,dfo-e4m3(lo)),sub(dfo-e4m3(add(lo,1)),x));
+  def dfo-e4-tie(x,lo,down,up) = dfo-e4m3(if or(lt(up,down),and(eq(up,down),eq(mod(lo,2),1))) then add(lo,1) else lo);
+  // ds4.c:3198-3203 explicitly resolves an equal-distance pair to even.
+  def dfo-round8(x) = mul(if lt(x,0.0) then -1.0 else 1.0,dfo-e4-nearest(dfo-min(abs(x),448.0),dfo-e4-floor(dfo-min(abs(x),448.0),0,126)));
+  def dfo-maxabs(x,best) = if nil?(x) then best else dfo-maxabs(tail(x),dfo-max(abs(head(x)),best));
+  def dfo-fp8-block(x,scale) = if nil?(x) then list() else cons(mul(dfo-round8(div(head(x),scale)),scale),dfo-fp8-block(tail(x),scale));
+  def dfo-fp8-nope(x,left) = if eq(left,0) then x else dnr-cat(dfo-fp8-block(dnr-take(x,64),dfo-pow2(sub(0,floor(sub(0.0,div(math_log(div(dfo-max(0.0001,dfo-maxabs(dnr-take(x,64),0.0)),448.0)),math_log(2.0))))))),dfo-fp8-nope(dnr-drop(x,64),sub(left,64)));
+  def dfo-kv-round(x,hd,nrot) {
+   dfo-require(dfo-finite-numbers(x),"KV rounding requires finite numeric values");
+   dfo-require(and(eq(len(x),hd),eq(mod(sub(hd,nrot),64),0)),"KV NOPE extent must contain complete64-wide groups");
+   dfo-round-list(dfo-fp8-nope(x,sub(hd,nrot)),16,list());
+  }
+  def dfo-option(r,key,defaultValue) = if record_has(record_get(r,"meta"),key) then dfo-meta(r,key) else defaultValue;
+  def dfo-geometry-fields(r) = record_new(0,
+   "e",dfo-meta(r,"deepseek4.embedding_length"),"nh",dfo-meta(r,"deepseek4.attention.head_count"),"nkv",dfo-meta(r,"deepseek4.attention.head_count_kv"),"hd",dfo-meta(r,"deepseek4.attention.key_length"),"nrot",dfo-meta(r,"deepseek4.rope.dimension_count"),"eps",dfo-meta(r,"deepseek4.attention.layer_norm_rms_epsilon"),"qr",dfo-meta(r,"deepseek4.attention.q_lora_rank"),"ng",dfo-meta(r,"deepseek4.attention.output_group_count"),"rank",dfo-meta(r,"deepseek4.attention.output_lora_rank"),"hc",dfo-option(r,"deepseek4.hyper_connection.count",4),"iterations",dfo-option(r,"deepseek4.hyper_connection.sinkhorn_iterations",20),"hc-eps",dfo-option(r,"deepseek4.hyper_connection.epsilon",0.000001));
+  def dfo-finite-number(x) = and(or(str_eq(value_kind(x),"int"),str_eq(value_kind(x),"float")),and(eq(x,x),le(abs(x),1.7976931348623157e308)));
+  def dfo-positive-number(x) = and(dfo-finite-number(x),gt(x,0.0));
+  def dfo-geometry-ints(g,keys) = if nil?(keys) then 1 else and(dfo-positive(record_get(g,head(keys))),and(le(record_get(g,head(keys)),576460752303423487),dfo-geometry-ints(g,tail(keys))));
+  def dfo-geometry-good(g) = if not(record?(g)) then 0 else if not(dfo-geometry-ints(g,list("e","nh","nkv","hd","nrot","qr","ng","rank","hc","iterations"))) then 0 else if not(and(dfo-positive-number(record_get(g,"eps")),dfo-positive-number(record_get(g,"hc-eps")))) then 0 else dfo-geometry-relations(g);
+  def dfo-geometry-relations(g) {
+   let hd = record_get(g,"hd"); let nrot = record_get(g,"nrot"); let nh = record_get(g,"nh"); let ng = record_get(g,"ng");
+   let heads = dfo-product(nh,hd); let state = dfo-product(record_get(g,"e"),record_get(g,"hc")); let grouped = dfo-product(ng,record_get(g,"rank")); let combine = dfo-product(record_get(g,"hc"),record_get(g,"hc"));
+   if or(nothing?(heads),or(nothing?(state),or(nothing?(grouped),nothing?(combine)))) then 0 else and(eq(record_get(g,"nkv"),1),and(le(nrot,hd),and(eq(mod(nrot,2),0),and(eq(mod(sub(hd,nrot),64),0),and(eq(mod(nh,ng),0),and(eq(mod(div(heads,ng),32),0),and(le(heads,576460752303423487),and(le(state,576460752303423487),and(le(grouped,576460752303423487),not(nothing?(dfo-sum(combine,dfo-product(2,record_get(g,"hc"))))))))))))));
+  }
+  def dfo-geometry(r) {
+   let g = dfo-geometry-fields(r); dfo-require(dfo-geometry-good(g),"typed finite supported MLA/HC geometry"); g;
+  }
+  def dfo-integer-type(t) = or(le(t,5),or(eq(t,10),eq(t,11)));
+  def dfo-number-type(t) = or(dfo-integer-type(t),or(eq(t,6),eq(t,12)));
+  def dfo-metadata-kind(r,key,kind) = if not(record_has(record_get(r,"meta"),key)) then 1 else dfo-metadata-row-kind(r,record_get(record_get(r,"meta"),key),kind);
+  def dfo-metadata-row-kind(r,row,kind) = if str_eq(kind,"integer") then dfo-integer-type(head(row)) else if str_eq(kind,"number") then dfo-number-type(head(row)) else if not(eq(head(row),9)) then 0 else if str_eq(kind,"integer-array") then dfo-integer-type(dfo-uint(r,nth(row,1),4)) else dfo-number-type(dfo-uint(r,nth(row,1),4));
+  def dfo-metadata-kinds(r,keys,kind) = if nil?(keys) then 1 else and(dfo-metadata-kind(r,str_concat("deepseek4.",head(keys)),kind),dfo-metadata-kinds(r,tail(keys),kind));
+  def dfo-natural-list(xs) = if not(fbc-list?(xs)) then 0 else if nil?(xs) then 1 else and(dfo-natural(head(xs)),dfo-natural-list(tail(xs)));
+  def dfo-finite-numbers(xs) = if not(fbc-list?(xs)) then 0 else if nil?(xs) then 1 else and(dfo-finite-number(head(xs)),dfo-finite-numbers(tail(xs)));
+  def dfo-nonnegative-numbers(xs) = if not(fbc-list?(xs)) then 0 else if nil?(xs) then 1 else and(dfo-finite-number(head(xs)),and(ge(head(xs),0.0),dfo-nonnegative-numbers(tail(xs))));
+  def dfo-admit-model(r) {
+   let ints = dfo-metadata-kinds(r,list("embedding_length","attention.head_count","attention.head_count_kv","attention.key_length","rope.dimension_count","attention.q_lora_rank","attention.output_group_count","attention.output_lora_rank","hyper_connection.count","hyper_connection.sinkhorn_iterations","block_count","expert_used_count","rope.scaling.original_context_length"),"integer");
+   let nums = dfo-metadata-kinds(r,list("attention.layer_norm_rms_epsilon","hyper_connection.epsilon","rope.freq_base","rope.scaling.factor","attention.compress_rope_freq_base","rope.scaling.yarn_beta_fast","rope.scaling.yarn_beta_slow","expert_weights_scale"),"number");
+   dfo-require(and(ints,and(nums,and(dfo-metadata-kind(r,"deepseek4.attention.compress_ratios","integer-array"),dfo-metadata-kind(r,"deepseek4.swiglu_clamp_exp","number-array")))),"GGUF model metadata type tags");
+   let g = dfo-geometry(r); let layers = dfo-meta(r,"deepseek4.block_count"); let used = dfo-meta(r,"deepseek4.expert_used_count"); let ratios = dfo-meta(r,"deepseek4.attention.compress_ratios"); let clamps = dfo-meta(r,"deepseek4.swiglu_clamp_exp");
+   dfo-require(and(dfo-positive(layers),dfo-positive(used)),"positive layer and selected expert counts");
+   dfo-require(and(dfo-natural-list(ratios),and(ge(len(ratios),layers),and(dfo-finite-numbers(clamps),ge(len(clamps),layers)))),"complete typed per-layer compression and clamp arrays");
+   dfo-require(and(dfo-positive-number(dfo-meta(r,"deepseek4.rope.freq_base")),dfo-positive-number(dfo-meta(r,"deepseek4.expert_weights_scale"))),"finite positive RoPE base and expert weight scale");
+   dfo-require(dfo-nonnegative-numbers(list(dfo-option(r,"deepseek4.rope.scaling.factor",0.0),dfo-option(r,"deepseek4.attention.compress_rope_freq_base",0.0))),"finite nonnegative compressed RoPE configuration");
+   dfo-require(and(dfo-natural(dfo-option(r,"deepseek4.rope.scaling.original_context_length",0)),and(dfo-positive-number(dfo-option(r,"deepseek4.rope.scaling.yarn_beta_fast",32.0)),dfo-positive-number(dfo-option(r,"deepseek4.rope.scaling.yarn_beta_slow",1.0)))),"finite typed YaRN configuration");
+   let embedding = dfo-tensor(r,"token_embd.weight"); let ed = nth(embedding,1); dfo-require(and(eq(len(ed),2),eq(head(ed),record_get(g,"e"))),"embedding geometry");
+   dfo-admit-tensor(r,"token_embd.weight",list(1),ed); record_set(r,"admitted-geometry",g); record_set(r,"admitted-vocabulary",nth(ed,1)); dfo-admit-layer-counts(r,0,layers,used); record_set(r,"model-admitted",1); 1;
+  }
+  def dfo-admit-layer-counts(r,il,layers,used) = if eq(il,layers) then 1 else dfo-admit-layer-count(r,il,layers,used);
+  def dfo-admit-layer-count(r,il,layers,used) {
+   let key = str_concat("blk.",str_concat(int_to_str(il),".ffn_gate_exps.weight")); let t = dfo-tensor(r,key); let dims = nth(t,1);
+   dfo-require(and(eq(len(dims),3),and(dfo-positive-dims(dims),le(used,nth(dims,2)))),"selected expert count exceeds layer tensor");
+   dfo-require(dfo-rope-parameters-good(dfo-rope-params(r,il)),"finite derived per-layer YaRN parameters");
+   dfo-admit-layer-shapes(r,record_get(r,"admitted-geometry"),il,used,dims); dfo-admit-layer-counts(r,add(il,1),layers,used);
+  }
+  def dfo-equal-dims(a,b) = if or(nil?(a),nil?(b)) then and(nil?(a),nil?(b)) else and(eq(head(a),head(b)),dfo-equal-dims(tail(a),tail(b)));
+  def dfo-type-in(kind,kinds) = if nil?(kinds) then 0 else or(eq(kind,head(kinds)),dfo-type-in(kind,tail(kinds)));
+  def dfo-tensor-size(t) {
+   let kind = head(t); let dims = nth(t,1); let cells = dfo-dim-cells(dims,1); let group = if eq(kind,16) then 256 else if or(eq(kind,40),eq(kind,41)) then 32 else 1;
+   dfo-require(eq(mod(head(dims),group),0),"quantized tensor column group extent");
+   dfo-size(if or(eq(kind,0),eq(kind,26)) then dfo-product(cells,4) else if eq(kind,1) then dfo-product(cells,2) else if eq(kind,16) then dfo-product(div(cells,256),66) else if eq(kind,40) then dfo-sum(div(cells,2),div(cells,32)) else if eq(kind,41) then dfo-sum(cells,div(cells,32)) else nothing());
+  }
+  def dfo-admit-tensor(r,key,kinds,dims) {
+   let t = dfo-tensor(r,key); dfo-require(and(dfo-type-in(head(t),kinds),and(dfo-positive-dims(nth(t,1)),dfo-equal-dims(nth(t,1),dims))),str_concat("tensor format/dimensions: ",key));
+   let bytes = dfo-tensor-size(t); let at = dfo-abs(r,t); dfo-require(and(le(at,record_get(r,"extent")),le(bytes,sub(record_get(r,"extent"),at))),str_concat("complete tensor byte extent: ",key)); 1;
+  }
+  def dfo-admit-tensor-rows(r,p,rows) = if nil?(rows) then 1 else dfo-admit-tensor-row(r,p,head(rows),tail(rows));
+  def dfo-admit-tensor-row(r,p,row,rest) {
+   dfo-admit-tensor(r,str_concat(p,head(row)),nth(row,1),nth(row,2)); dfo-admit-tensor-rows(r,p,rest);
+  }
+  def dfo-admit-layer-shapes(r,g,il,used,expert) {
+   let p = str_concat("blk.",str_concat(int_to_str(il),".")); let e = record_get(g,"e"); let nh = record_get(g,"nh"); let hd = record_get(g,"hd"); let qr = record_get(g,"qr"); let ng = record_get(g,"ng"); let rank = record_get(g,"rank"); let hidden = nth(expert,1); let count = nth(expert,2);
+   let shared = nth(dfo-tensor(r,str_concat(p,"ffn_gate_shexp.weight")),1); dfo-require(and(eq(len(shared),2),eq(head(shared),e)),"shared expert input geometry"); let sh = nth(shared,1);
+   let router = nth(dfo-tensor(r,str_concat(p,"ffn_gate_inp.weight")),1); dfo-require(and(eq(len(router),2),and(eq(head(router),e),ge(nth(router,1),count))),"router rows cover actual stored experts"); let nr = nth(router,1);
+   dfo-admit-tensor-rows(r,p,list(list("attn_norm.weight",list(0),list(e)),list("attn_q_a.weight",list(41),list(e,qr)),list("attn_q_a_norm.weight",list(0),list(qr)),list("attn_q_b.weight",list(41),list(qr,mul(nh,hd))),list("attn_kv.weight",list(41),list(e,hd)),list("attn_kv_a_norm.weight",list(0),list(hd)),list("attn_sinks.weight",list(0),list(nh)),list("attn_output_a.weight",list(41),list(div(mul(nh,hd),ng),mul(ng,rank))),list("attn_output_b.weight",list(41),list(mul(ng,rank),e)),list("ffn_norm.weight",list(0),list(e)),list("ffn_gate_inp.weight",list(1),list(e,nr)),list("ffn_gate_exps.weight",list(40,16),list(e,hidden,count)),list("ffn_up_exps.weight",list(40,16),list(e,hidden,count)),list("ffn_down_exps.weight",list(40,16),list(hidden,e,count)),list("ffn_gate_shexp.weight",list(41),list(e,sh)),list("ffn_up_shexp.weight",list(41),list(e,sh)),list("ffn_down_shexp.weight",list(41),list(sh,e))));
+   dfo-admit-hc-shapes(r,g,str_concat(p,"hc_attn")); dfo-admit-hc-shapes(r,g,str_concat(p,"hc_ffn"));
+   if record_has(record_get(r,"tensors"),str_concat(p,"ffn_gate_tid2eid.weight")) then dfo-admit-tensor(r,str_concat(p,"ffn_gate_tid2eid.weight"),list(26),list(used,record_get(r,"admitted-vocabulary"))) else dfo-admit-tensor(r,str_concat(p,"exp_probs_b.bias"),list(0),list(nr)); 1;
+  }
+  def dfo-admit-hc-shapes(r,g,p) {
+   let hc = record_get(g,"hc"); let mix = add(mul(hc,hc),mul(2,hc));
+   dfo-admit-tensor-rows(r,p,list(list("_fn.weight",list(1),list(mul(hc,record_get(g,"e")),mix)),list("_scale.weight",list(0),list(3)),list("_base.weight",list(0),list(mix)))); 1;
+  }
+  def dfo-rope-params(r,il) {
+   let ratios = dfo-meta(r,"deepseek4.attention.compress_ratios"); dfo-require(lt(il,len(ratios)),"layer missing compression ratio");
+   let ratio = nth(ratios,il); let compressed = not(eq(ratio,0)); let factor = dfo-option(r,"deepseek4.rope.scaling.factor",0.0); let cb = dfo-option(r,"deepseek4.attention.compress_rope_freq_base",0.0);
+   let base = if and(compressed,gt(cb,0.0)) then cb else dfo-meta(r,"deepseek4.rope.freq_base"); let scale = if and(compressed,gt(factor,0.0)) then div(1.0,factor) else 1.0; let ext = if and(compressed,gt(factor,1.0)) then 1.0 else 0.0;
+   record_new(0,"phase-owner",r,"ratio",ratio,"base",base,"scale",scale,"ext",ext,"attn",if gt(ext,0.0) then div(1.0,add(1.0,mul(0.1,math_log(div(1.0,scale))))) else 1.0,"ctx",if compressed then dfo-option(r,"deepseek4.rope.scaling.original_context_length",0) else 0,"fast",dfo-option(r,"deepseek4.rope.scaling.yarn_beta_fast",32.0),"slow",dfo-option(r,"deepseek4.rope.scaling.yarn_beta_slow",1.0));
+  }
+  def dfo-corr(nrot,ctx,beta,base) = div(mul(mul(1.0,nrot),math_log(div(mul(1.0,ctx),mul(beta,6.283185307179586)))),mul(2.0,math_log(base)));
+  def dfo-rope-parameters-good(rp) = if not(and(dfo-positive-number(record_get(rp,"base")),and(dfo-positive-number(record_get(rp,"scale")),and(dfo-positive-number(record_get(rp,"attn")),and(dfo-natural(record_get(rp,"ctx")),and(dfo-positive-number(record_get(rp,"fast")),dfo-positive-number(record_get(rp,"slow")))))))) then 0 else if not(and(dfo-finite-number(record_get(rp,"ext")),and(ge(record_get(rp,"ext"),0.0),le(record_get(rp,"ext"),1.0)))) then 0 else if and(gt(record_get(rp,"ext"),0.0),gt(record_get(rp,"ctx"),0)) then dfo-rope-correction-good(rp) else 1;
+  def dfo-rope-correction-good(rp) {
+   let base = record_get(rp,"base"); let fast = mul(record_get(rp,"fast"),6.283185307179586); let slow = mul(record_get(rp,"slow"),6.283185307179586); let ctx = mul(1.0,record_get(rp,"ctx"));
+   if or(eq(base,1.0),not(and(dfo-positive-number(fast),dfo-positive-number(slow)))) then 0 else and(dfo-positive-number(div(ctx,fast)),dfo-positive-number(div(ctx,slow)));
+  }
+  def dfo-rope-position-good(rp,nrot,pos) = if not(and(dfo-rope-parameters-good(rp),and(dfo-positive(nrot),and(eq(mod(nrot,2),0),dfo-natural(pos))))) then 0 else dfo-rope-position-derived(rp,nrot,pos);
+  def dfo-rope-position-derived(rp,nrot,pos) {
+   let base = record_get(rp,"base"); let ext = record_get(rp,"ext"); let ctx = record_get(rp,"ctx"); let scale = record_get(rp,"scale"); let step = math_pow(base,div(-2.0,mul(1.0,nrot)));
+   let mscale = mul(record_get(rp,"attn"),if gt(ext,0.0) then add(1.0,mul(0.1,math_log(div(1.0,scale)))) else 1.0);
+   let corrections = if and(gt(ext,0.0),gt(ctx,0)) then and(dfo-finite-number(dfo-corr(nrot,ctx,record_get(rp,"fast"),base)),dfo-finite-number(dfo-corr(nrot,ctx,record_get(rp,"slow"),base))) else 1;
+   if not(and(corrections,and(dfo-positive-number(step),dfo-finite-number(mscale)))) then 0 else dfo-rope-angle-domain(mul(1.0,pos),step,scale,div(nrot,2));
+  }
+  def dfo-rope-angle-domain(theta,step,scale,left) = if eq(left,0) then 1 else if not(and(dfo-finite-number(theta),dfo-finite-number(mul(theta,scale)))) then 0 else dfo-rope-angle-domain(mul(theta,step),step,scale,sub(left,1));
+  def dfo-admit-position(r,pos) {
+   dfo-require(dfo-natural(pos),"exact nonnegative requested position"); dfo-admit-position-layers(r,pos,0,dfo-meta(r,"deepseek4.block_count"),record_get(record_get(r,"admitted-geometry"),"nrot")); 1;
+  }
+  def dfo-admit-position-layers(r,pos,il,layers,nrot) = if eq(il,layers) then 1 else dfo-admit-position-layer(r,pos,il,layers,nrot);
+  def dfo-admit-position-layer(r,pos,il,layers,nrot) {
+   dfo-require(dfo-rope-position-good(dfo-rope-params(r,il),nrot,pos),"finite derived rotation at requested position"); dfo-admit-position-layers(r,pos,add(il,1),layers,nrot);
+  }
+  def dfo-rope-factors(r,nrot,pos,inverse) {
+   let base = record_get(r,"base"); let ext = record_get(r,"ext"); let ctx = record_get(r,"ctx"); let scale = record_get(r,"scale");
+   let low = if and(gt(ext,0.0),gt(ctx,0)) then dfo-rope-low(dfo-corr(nrot,ctx,record_get(r,"fast"),base),nrot) else 0;
+   let high = if and(gt(ext,0.0),gt(ctx,0)) then dfo-rope-high(dfo-corr(nrot,ctx,record_get(r,"slow"),base),nrot) else 0;
+   let mscale = mul(record_get(r,"attn"),if gt(ext,0.0) then add(1.0,mul(0.1,math_log(div(1.0,scale)))) else 1.0);
+   let owner = if record_has(r,"phase-owner") then record_get(r,"phase-owner") else r;
+   dfo-rope-factor-loop(owner,nrot,0,mul(1.0,pos),math_pow(base,div(-2.0,mul(1.0,nrot))),scale,ext,mscale,low,high,if inverse then -1.0 else 1.0,list());
+  }
+  def dfo-rope-low(correction,nrot) = floor(dfo-min(mul(1.0,nrot),dfo-max(0.0,correction)));
+  def dfo-rope-high(correction,nrot) = sub(0,floor(sub(0.0,dfo-min(mul(1.0,sub(nrot,1)),dfo-max(0.0,correction)))));
+  def dfo-rope-factor-loop(owner,nrot,i,theta,step,scale,ext,mscale,low,high,sign,acc) = if eq(i,nrot) then reverse(acc) else dfo-rope-factor-next(owner,nrot,i,theta,step,scale,ext,mscale,low,high,sign,acc,mul(ext,sub(1.0,dfo-min(1.0,dfo-max(0.0,div(sub(mul(1.0,div(i,2)),low),dfo-max(0.001,sub(high,low))))))));
+  def dfo-rope-factor-next(owner,nrot,i,theta,step,scale,ext,mscale,low,high,sign,acc,ramp) = dfo-rope-factor-angle(owner,nrot,i,theta,step,scale,ext,mscale,low,high,sign,acc,add(mul(mul(theta,scale),sub(1.0,ramp)),mul(theta,ramp)));
+  def dfo-rope-factor-angle(owner,nrot,i,theta,step,scale,ext,mscale,low,high,sign,acc,angle) {
+   let pair = dsa-pair(owner,angle);
+   dfo-rope-factor-loop(owner,nrot,add(i,2),mul(theta,step),step,scale,ext,mscale,low,high,sign,cons(list(mul(nth(pair,1),mscale),mul(mul(head(pair),mscale),sign)),acc));
+  }
+  def dfo-rope-pairs(x,factors) = if nil?(factors) then list() else cons(sub(mul(head(x),head(head(factors))),mul(nth(x,1),nth(head(factors),1))),cons(add(mul(head(x),nth(head(factors),1)),mul(nth(x,1),head(head(factors)))),dfo-rope-pairs(dnr-drop(x,2),tail(factors))));
+  def dfo-rope-heads(x,hd,nrot,factors) = if nil?(x) then list() else dnr-cat(dnr-take(x,sub(hd,nrot)),dnr-cat(dfo-rope-pairs(dnr-take(dnr-drop(x,sub(hd,nrot)),nrot),factors),dfo-rope-heads(dnr-drop(x,hd),hd,nrot,factors)));
+  def dfo-weighted-streams(x,weights,e,out) = if nil?(weights) then out else dfo-weighted-streams(dnr-drop(x,e),tail(weights),e,dnr-add(out,dnr-scale(dnr-take(x,e),head(weights))));
+  def dfo-hc-pre(r,p,kind,resid,g) {
+   let n = record_get(g,"hc"); let e = record_get(g,"e"); let stem = str_concat(p,str_concat("hc_",kind));
+   let flat = dnr-rms(resid,record_get(g,"eps")); let mix = dfo-f16-matrix(r,str_concat(stem,"_fn.weight"),flat);
+   let split = dnr-hc-split(mix,dfo-plain(r,str_concat(stem,"_scale.weight"),0),dfo-plain(r,str_concat(stem,"_base.weight"),0),n,record_get(g,"iterations"),record_get(g,"hc-eps"));
+   record_new(0,"flat",flat,"mix",mix,"post",dnr-slice(split,n,n),"comb",dnr-drop(split,mul(2,n)),"cur",dfo-weighted-streams(resid,dnr-take(split,n),e,dnr-fill(e,0.0)));
+  }
+  def dfo-hc-post-weights(comb,n,dst,src) = if eq(src,n) then list() else cons(nth(comb,add(dst,mul(src,n))),dfo-hc-post-weights(comb,n,dst,add(src,1)));
+  def dfo-hc-post-loop(block,resid,post,comb,n,e,dst) = if eq(dst,n) then list() else dnr-cat(dfo-weighted-streams(resid,dfo-hc-post-weights(comb,n,dst,0),e,dnr-scale(block,nth(post,dst))),dfo-hc-post-loop(block,resid,post,comb,n,e,add(dst,1)));
+  def dfo-hc-post(block,resid,pre,g) = dfo-hc-post-loop(block,resid,record_get(pre,"post"),record_get(pre,"comb"),record_get(g,"hc"),record_get(g,"e"),0);
+  def dfo-out-a-rows(data,scales,cols,row,end,x,acc) = if eq(row,end) then reverse(acc) else dfo-out-a-rows(data,scales,cols,add(row,1),end,x,cons(dfo-plane-groups(data,scales,mul(row,cols),x,mul(row,div(cols,32)),mul(add(row,1),div(cols,32)),0.0),acc));
+  def dfo-out-a-groups(data,scales,cols,rank,group,groups,x) = if eq(group,groups) then list() else dnr-cat(dfo-out-a-rows(data,scales,cols,mul(group,rank),mul(add(group,1),rank),dnr-take(x,cols),list()),dfo-out-a-groups(data,scales,cols,rank,add(group,1),groups,dnr-drop(x,cols)));
+  def dfo-out-a(r,key,x,g) {
+   let run = record_get(r,"matrix-out-a"); run(r,key,x,g);
+  }
+  def dfo-ref-out-a(r,key,x,g) {
+   let t = dfo-tensor(r,key); let cols = head(nth(t,1)); let rows = nth(nth(t,1),1); let groups = record_get(g,"ng"); let rank = record_get(g,"rank"); let cells = mul(cols,rows); let at = dfo-abs(r,t);
+   dfo-require(and(eq(head(t),41),and(eq(rows,mul(groups,rank)),eq(len(x),mul(groups,cols)))),"grouped output factor geometry");
+   let data = dfo-bytes(r,at,cells); let scales = dfo-bytes(r,add(at,cells),div(cells,32));
+   dfo-out-a-groups(data,scales,cols,rank,0,groups,x);
+  }
+  def dfo-mla(r,p,x,g,il,pos,history) {
+   let rope = dfo-rope-params(r,il); let hd = record_get(g,"hd"); let nrot = record_get(g,"nrot"); let eps = record_get(g,"eps");
+   let xn = dnr-rms-weight(x,dfo-plain(r,str_concat(p,"attn_norm.weight"),0),eps);
+   let qlatn = dnr-rms-weight(dfo-mx8(r,str_concat(p,"attn_q_a.weight"),xn),dfo-plain(r,str_concat(p,"attn_q_a_norm.weight"),0),eps);
+   let qpre = dfo-mx8(r,str_concat(p,"attn_q_b.weight"),qlatn); let qhr = dnr-head-rms(qpre,hd,eps);
+   let kvnorm = dnr-rms-weight(dfo-mx8(r,str_concat(p,"attn_kv.weight"),xn),dfo-plain(r,str_concat(p,"attn_kv_a_norm.weight"),0),eps);
+   let forward = dfo-rope-factors(rope,nrot,pos,0); let q = dfo-rope-heads(qhr,hd,nrot,forward); let kvroped = dfo-rope-heads(kvnorm,hd,nrot,forward); let kv = dfo-kv-round(kvroped,hd,nrot); let rows = dnr-cat(history,list(kv));
+   let attended = dnr-heads(q,rows,hd,div(1.0,math_sqrt(mul(1.0,hd))),dfo-plain(r,str_concat(p,"attn_sinks.weight"),0));
+   let heads = dfo-rope-heads(attended,hd,nrot,dfo-rope-factors(rope,nrot,pos,1)); let low = dfo-out-a(r,str_concat(p,"attn_output_a.weight"),heads,g); let out = dfo-mx8(r,str_concat(p,"attn_output_b.weight"),low);
+   record_new(0,"xn",xn,"qlatn",qlatn,"q_preheadrms",qpre,"q_headrms",qhr,"q",q,"kv_norm",kvnorm,"kv_roped",kvroped,"kv",kv,"heads_attn",attended,"heads",heads,"low",low,"attn_out",out,"rope",rope,"history",rows);
+  }
+  def dfo-log1p(x) = if eq(add(1.0,x),1.0) then x else mul(math_log(add(1.0,x)),div(x,sub(add(1.0,x),1.0)));
+  def dfo-softplus(x) = if gt(x,20.0) then x else if lt(x,-20.0) then math_exp(x) else dfo-log1p(math_exp(x));
+  def dfo-probs(x) = if nil?(x) then list() else cons(math_sqrt(dfo-softplus(head(x))),dfo-probs(tail(x)));
+  def dfo-i32-values(bytes,i,n,acc) = if eq(i,n) then reverse(acc) else dfo-i32-values(bytes,add(i,1),n,cons(dfo-signed(dfo-le(bytes,mul(i,4),4),32),acc));
+  def dfo-i32-row(r,key,row) {
+   let t = dfo-tensor(r,key); let dims = nth(t,1); let n = head(dims);
+   dfo-require(and(eq(head(t),26),and(eq(len(dims),2),and(ge(row,0),lt(row,nth(dims,1))))),"hash routing I32 row geometry");
+   dfo-i32-values(dfo-bytes(r,add(dfo-abs(r,t),mul(mul(row,n),4)),mul(n,4)),0,n,list());
+  }
+  def dfo-ids-valid(ids,limit) = if nil?(ids) then 1 else and(and(ge(head(ids),0),lt(head(ids),limit)),dfo-ids-valid(tail(ids),limit));
+  def dfo-route(r,p,probs,token) {
+   let used = dfo-meta(r,"deepseek4.expert_used_count"); let hashed = record_has(record_get(r,"tensors"),str_concat(p,"ffn_gate_tid2eid.weight"));
+   let ids = if hashed then dfo-i32-row(r,str_concat(p,"ffn_gate_tid2eid.weight"),token) else dnr-top(dnr-add(probs,dfo-plain(r,str_concat(p,"exp_probs_b.bias"),0)),used);
+   let count = nth(nth(dfo-tensor(r,str_concat(p,"ffn_gate_exps.weight")),1),2);
+   dfo-require(and(eq(len(ids),used),and(dfo-ids-valid(ids,count),dfo-ids-valid(ids,len(probs)))),"router selected an unavailable expert");
+   let raw = dnr-gather(probs,ids); let weights = dnr-router-weights(raw,dfo-max(dnr-sum(raw),0.00006103515625),dfo-meta(r,"deepseek4.expert_weights_scale"));
+   record_new(0,"selected",ids,"expert_w",weights,"regime",if hashed then "hash" else "topk","n_exp_stack",count);
+  }
+  def dfo-experts(r,p,x,ids,weights,limit,out,rows) = if nil?(ids) then list(out,reverse(rows)) else dfo-expert-next(r,p,x,ids,weights,limit,out,rows);
+  def dfo-expert-next(r,p,x,ids,weights,limit,out,rows) {
+   let expert = head(ids); let gate = dfo-expert-matrix(r,str_concat(p,"ffn_gate_exps.weight"),expert,x); let up = dfo-expert-matrix(r,str_concat(p,"ffn_up_exps.weight"),expert,x);
+   let mid = dnr-mid(gate,up,head(weights),limit); let down = dfo-expert-matrix(r,str_concat(p,"ffn_down_exps.weight"),expert,mid);
+   dfo-experts(r,p,x,tail(ids),tail(weights),limit,dnr-add(out,down),cons(list(expert,gate,up,mid,down),rows));
+  }
+  def dfo-ffn(r,p,resid,g,token,il) {
+   let limits = dfo-meta(r,"deepseek4.swiglu_clamp_exp"); dfo-require(lt(il,len(limits)),"layer missing SwiGLU clamp"); let limit = nth(limits,il);
+   let pre = dfo-hc-pre(r,p,"ffn",resid,g); let norm = dnr-rms-weight(record_get(pre,"cur"),dfo-plain(r,str_concat(p,"ffn_norm.weight"),0),record_get(g,"eps"));
+   let logits = dfo-f16-matrix(r,str_concat(p,"ffn_gate_inp.weight"),norm); let probs = dfo-probs(logits); let route = dfo-route(r,p,probs,token);
+   let experts = dfo-experts(r,p,norm,record_get(route,"selected"),record_get(route,"expert_w"),limit,dnr-fill(record_get(g,"e"),0.0),list());
+   let sg = dfo-mx8(r,str_concat(p,"ffn_gate_shexp.weight"),norm); let su = dfo-mx8(r,str_concat(p,"ffn_up_shexp.weight"),norm); let smid = dnr-mid(sg,su,1.0,limit); let shared = dfo-mx8(r,str_concat(p,"ffn_down_shexp.weight"),smid); let ffn = dnr-add(head(experts),shared); let out = dfo-hc-post(ffn,resid,pre,g);
+   record_new(0,"ffn_flat",record_get(pre,"flat"),"ffn_mix",record_get(pre,"mix"),"ffn_post_w",record_get(pre,"post"),"ffn_comb",record_get(pre,"comb"),"ffn_cur",record_get(pre,"cur"),"ffn_norm",norm,"router_logits",logits,"router_probs",probs,"selected",record_get(route,"selected"),"expert_w",record_get(route,"expert_w"),"regime",record_get(route,"regime"),"n_exp_stack",record_get(route,"n_exp_stack"),"clamp",limit,"moe",head(experts),"per_expert",nth(experts,1),"shared",shared,"sh_gate",sg,"sh_up",su,"sh_mid",smid,"ffn_out",ffn,"out_hc",out);
+  }
+  def dfo-attention-half(r,p,resid,g,il,pos,history) {
+   let pre = dfo-hc-pre(r,p,"attn",resid,g); let mla = dfo-mla(r,p,record_get(pre,"cur"),g,il,pos,history);
+   record_set(mla,"hc_flat",record_get(pre,"flat")); record_set(mla,"hc_mix",record_get(pre,"mix")); record_set(mla,"hc_post_w",record_get(pre,"post")); record_set(mla,"hc_comb",record_get(pre,"comb")); record_set(mla,"hc_cur",record_get(pre,"cur")); record_set(mla,"hc_resid",resid); record_set(mla,"after_attn_hc",dfo-hc-post(record_get(mla,"attn_out"),resid,pre,g)); mla;
+  }
+ }
+ 0;
+}

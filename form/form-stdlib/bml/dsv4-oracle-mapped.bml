@@ -1,0 +1,81 @@
+// The independent oracle borrows read-only weight spans directly from its map.
+// Only small configuration vectors and decoded activations enter Form lists.
+// preludes: form/form-stdlib/bml/dsv4-oracle-resources.bml form/form-stdlib/bml/dsv4-oracle-file-map.bml
+section [form.bml] {
+ class Dsv4MappedOracle {
+  def dqm-open(path) = dqm-admit(dqa-open(path));
+  def dqm-open-at(path,pos) = dqm-admit(dqa-open-at(path,pos));
+  def dqm-admit(r) {
+   let file = dqf-open(record_get(r,"path")); dqm-finish-open(r,file);
+  }
+  def dqm-finish-open(r,file) {
+   record_set(r,"model-map",file);
+   if not(dqf-ready(file)) then dqm-open-refused(r) else dqm-open-ready(r);
+  }
+  def dqm-open-refused(r) {
+   let closed = dqm-close(r); record_set(r,"ready",0); record_set(r,"admission-released",closed); r;
+  }
+  def dqm-open-ready(r) {
+   record_set(r,"ready",1); record_set(r,"matrix-mx8",dqm-mx8); record_set(r,"matrix-f16",dqm-f16); record_set(r,"matrix-expert",dqm-expert); record_set(r,"matrix-out-a",dqm-out-a);
+   record_set(r,"borrowed-matrix-bytes",0); record_set(r,"matrix-calls",0); record_set(r,"maximum-matrix-span",0); record_set(r,"memory-observer",dqm-memory); r;
+  }
+  def dqm-owner(r,kind) = if eq(kind,41) then record_get(r,"native-mx8") else if eq(kind,1) then record_get(r,"native-f16") else if eq(kind,40) then record_get(r,"native-mx4") else if eq(kind,16) then record_get(r,"native-iq2") else form_error("mapped numerical format unavailable");
+  def dqm-shape(kind,bytes,scaleBytes,x,rows) = if not(fbc-list?(x)) then nothing() else dqm-shape-match(dqa-shape(list(kind,list(len(x),rows),0),x,2),bytes,scaleBytes);
+  def dqm-shape-match(shape,bytes,scaleBytes) = if nothing?(shape) then nothing() else if not(and(dfo-natural(bytes),and(dfo-natural(scaleBytes),and(eq(bytes,record_get(shape,"data")),eq(scaleBytes,record_get(shape,"scales")))))) then nothing() else shape;
+  def dqm-submit(r,kind,at,bytes,scaleAt,scaleBytes,x,rows) {
+   let shape = dqm-shape(kind,bytes,scaleBytes,x,rows); dfo-require(not(nothing?(shape)),"mapped matrix request geometry");
+   let owner = dqm-owner(r,kind); let file = record_get(r,"model-map");
+   dfo-require(and(eq(record_get(r,"ready"),1),and(nfm-active(owner),if eq(kind,41) then not(record_has(owner,"format")) else eq(record_get(owner,"format"),kind))),"mapped matrix owner admission");
+   if eq(kind,16) then dfo-require(and(str_eq(value_kind(record_get(r,"iq-tables")),"string"),eq(str_len(record_get(r,"iq-tables")),2176)),"mapped IQ2 lookup table extent") else 1;
+   let data = dqf-span(file,at,bytes); let scales = if eq(kind,16) then 0 else dqf-span(file,scaleAt,scaleBytes);
+   dfo-require(and(not(nothing?(data)),not(nothing?(scales))),"mapped weight spans");
+   let vector = nfm-vector(x); let region = dqa-workspace(owner,rows); let out = npd-owned-span(record_get(owner,"memory"),region,0,mul(rows,8));
+   dfo-require(and(not(nothing?(data)),and(not(nothing?(scales)),not(nothing?(out)))),"mapped numerical span admission");
+   let args = if eq(kind,16) then list(data,bytes,record_get(r,"iq-tables"),record_get(vector,"bytes"),out,rows) else list(data,bytes,scales,scaleBytes,record_get(vector,"bytes"),out,rows);
+   let ran = jit_leaf_inram(record_get(owner,"request"),args); if eq(ran,rows) then record_set(owner,"code-live",1) else 0;
+   dfo-require(and(eq(ran,rows),eq(file_size(record_get(r,"path")),record_get(r,"extent"))),"mapped numerical execution/source extent");
+   record_set(r,"matrix-calls",add(record_get(r,"matrix-calls"),1)); record_set(r,"borrowed-matrix-bytes",add(record_get(r,"borrowed-matrix-bytes"),add(bytes,scaleBytes))); record_set(r,"maximum-matrix-span",dfo-max(record_get(r,"maximum-matrix-span"),add(bytes,scaleBytes)));
+   let decoded = nfm-read-output(region,0,rows,list()); dfo-require(dfo-finite-vector(decoded),"mapped numerical output must be finite"); decoded;
+  }
+  def dqm-mx8(r,key,x) {
+   let t = dfo-tensor(r,key); let shape = dqa-layout(r,t,x,2); let rows = record_get(shape,"rows"); let cells = record_get(shape,"cells"); let at = dfo-abs(r,t); dfo-require(eq(head(t),41),"mapped MXFP8 type");
+   dqm-submit(r,41,at,cells,add(at,cells),div(cells,32),x,rows);
+  }
+  def dqm-f16(r,key,x) {
+   let t = dfo-tensor(r,key); let shape = dqa-layout(r,t,x,2); let at = dfo-abs(r,t); dfo-require(eq(head(t),1),"mapped F16 type");
+   dqm-submit(r,1,at,record_get(shape,"data"),at,0,x,record_get(shape,"rows"));
+  }
+  def dqm-expert(r,key,expert,x) {
+   let t = dfo-tensor(r,key); let shape = dqa-layout(r,t,x,3); let dims = nth(t,1); let cols = record_get(shape,"cols"); let rows = record_get(shape,"rows"); let kind = head(t); let cells = record_get(shape,"cells");
+   dfo-require(and(dfo-natural(expert),lt(expert,nth(dims,2))),"mapped expert index");
+   if eq(kind,40) then dqm-mx4(r,t,expert,x,cells,rows) else if eq(kind,16) then dqm-iq(r,t,expert,x,cols,rows) else form_error("unsupported mapped expert format");
+  }
+  def dqm-mx4(r,t,expert,x,cells,rows) {
+   dfo-require(eq(mod(len(x),32),0),"mapped MXFP4 complete groups"); let stride = add(div(cells,2),div(cells,32)); let at = add(dfo-abs(r,t),mul(expert,stride));
+   dqm-submit(r,40,at,div(cells,2),add(at,div(cells,2)),div(cells,32),x,rows);
+  }
+  def dqm-iq(r,t,expert,x,cols,rows) {
+   dfo-require(eq(mod(cols,256),0),"mapped IQ2 complete blocks"); let stride = mul(mul(rows,div(cols,256)),66); let at = add(dfo-abs(r,t),mul(expert,stride));
+   dqm-submit(r,16,at,stride,at,0,x,rows);
+  }
+  def dqm-out-a(r,key,x,g) {
+   let t = dfo-tensor(r,key); let shape = dqa-output-layout(r,t,x,g); let cols = record_get(shape,"cols"); let rows = record_get(shape,"rows"); let groups = record_get(g,"ng"); let rank = record_get(g,"rank"); let at = dfo-abs(r,t);
+   dqm-out-groups(r,at,add(at,mul(cols,rows)),cols,rank,0,groups,x);
+  }
+  def dqm-out-groups(r,at,scaleAt,cols,rank,group,groups,x) = if eq(group,groups) then list() else dnr-cat(dqm-submit(r,41,add(at,mul(mul(group,rank),cols)),mul(rank,cols),add(scaleAt,div(mul(mul(group,rank),cols),32)),div(mul(rank,cols),32),dnr-take(x,cols),rank),dqm-out-groups(r,at,scaleAt,cols,rank,add(group,1),groups,dnr-drop(x,cols)));
+  def dqm-workspace-bytes(owner) = if and(record_has(owner,"workspace"),eq(record_get(record_get(owner,"workspace"),"active"),1)) then record_get(record_get(owner,"workspace"),"bytes") else 0;
+  def dqm-memory(r,stage) {
+   let at = now_unix_ms(); let floats = kernel_stat(8); let crossings = kernel_stat(47);
+   print(list("ORACLE_MEMORY",stage,"rss-kib",host_capture(list("/bin/ps","-o","rss=","-p",int_to_str(host_pid()))),"floats",floats,"float-capacity",kernel_stat(56),"strings",kernel_stat(5),"cons",kernel_stat(6),"decoded-header-window-bytes",str_len(record_get(r,"bytes")),"mapped-file-virtual-bytes",if eq(record_get(record_get(r,"model-map"),"active"),1) then record_get(r,"extent") else 0,"matrix-calls",record_get(r,"matrix-calls"),"borrowed-matrix-bytes",record_get(r,"borrowed-matrix-bytes"),"copied-matrix-bytes",0,"maximum-matrix-span",record_get(r,"maximum-matrix-span"),"workspace-bytes",list(dqm-workspace-bytes(record_get(r,"native-mx8")),dqm-workspace-bytes(record_get(r,"native-f16")),dqm-workspace-bytes(record_get(r,"native-mx4")),dqm-workspace-bytes(record_get(r,"native-iq2"))),"decoded-activation-widths",record_get(r,"decoded-activation-widths"),"at-ms",at,"since-previous-observation-ms",if record_has(r,"memory-last-ms") then sub(at,record_get(r,"memory-last-ms")) else 0,"float-growth",if record_has(r,"memory-last-floats") then sub(floats,record_get(r,"memory-last-floats")) else 0,"total-native-crossings",crossings,"native-crossing-growth",if record_has(r,"memory-last-crossings") then sub(crossings,record_get(r,"memory-last-crossings")) else 0));
+   record_set(r,"memory-last-ms",at); record_set(r,"memory-last-floats",floats); record_set(r,"memory-last-crossings",crossings); 1;
+  }
+  def dqm-close(r) {
+   let mapped = dqf-close(record_get(r,"model-map")); let numerical = dqa-close(r); if and(eq(mapped,1),eq(numerical,1)) then 1 else nothing();
+  }
+  def dqm-one(path,token,pos,il,mode,out) {
+   let r = dqm-open-at(path,pos); dfo-require(eq(record_get(r,"ready"),1),"mapped oracle admission refused; owned release state retained"); dqm-memory(r,"admitted"); let result = dfo-one-in(r,token,pos,il,mode,out); dqm-memory(r,"published"); let closed = dqm-close(r);
+   dfo-require(and(eq(result,1),eq(closed,1)),"mapped oracle completion"); 1;
+  }
+ }
+ 0;
+}

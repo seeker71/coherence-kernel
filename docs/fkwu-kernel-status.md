@@ -26,6 +26,8 @@ Form owns the following executing surfaces. Each linked page names its public do
 | [Concept construction and audit](native-concept-source-audit.md) | Form owns canonical projection, all lexical candidate groups, attributed corpus reindexing, complete WordNet sense construction, binary indices, offsets, metadata, staged publication, stable IDs, aliases, provenance and exact held-byte hashing; portable and explicitly selected ARM64 policies agree |
 | [Terminal acceptance](glass-keyboard.md) | Form owns real Darwin ARM64 PTYs, immediate input checks, signals, exact termios restoration, deadlines and independently supervised resource release |
 | [Ordered CPU mathematics](native-fp64-matrix.md) | Form emits binary64 MXFP8 matrix code in RAM; repeated calls reuse owned output memory without boxing intermediate products or sums |
+| [Real-model numerical oracle](native-dsv4-oracle.md) | Form owns GGUF admission, independent quantized CPU arithmetic, complete layer and token histories, exact retained vectors and tensor-sized Metal view plans |
+| [DSV4 proof generation](native-dsv4-proof-emission.md) | Form owns shader composition, complete GGUF metadata, typed requests, checked output settlement and proof archive retention |
 | [RAM pipe workers](native-pipe-workers.md) | Form emits Darwin ARM64 pipe and readiness operations in RAM, supervises resident workers, preserves complete binary frames and correlated stderr health, and settles partial writes, EOF, cancellation and physical release |
 | [Pinned Wiktionary sources](native-wiktionary-source.md) | Form reacquires the complete 111 retained revisions, binds page/revision/timestamp identities and reproduces their English hashes and selected meanings; actual acquisition and retained-response replay remain distinct |
 
@@ -49,11 +51,29 @@ translation and new-generation publication remain separate work.
 
 [Native source inspection](native-source-inventory.md) captures source lists into owned files and checks child exit status, exact reads and NUL termination. `observe/carrier-mass.bml` counts source bytes in Form, including unknown-extension shebangs and paths containing spaces or newlines. It retains the complete source reading at `.hearth/carrier-mass-current.json`; weighted exclusions remain present in that evidence. The native authoring guide retains its separate Python inventory at `.hearth/native-authoring-current.json`. Neither lexical inventory establishes execution or native ownership by itself.
 
-The current guide identifies two Python implementations: `dsv4-mla-core-oracle.py` supplies the active large-model numerical reference, and `test_glass_keyboard_pty.py` retains POSIX/Linux terminal acceptance. The native terminal acceptance executes on Darwin ARM64; another native target still needs an observed admission and full behavior check. Shell orchestration, JavaScript builders, target-language specimens, proof siblings and platform carriers also remain visible in the broader source reading. The checkout is not entirely Form-owned.
+The current guide identifies one retained Python implementation:
+`test_glass_keyboard_pty.py` retains POSIX/Linux terminal acceptance.
+The three large-model comparison callers use native Form references and
+generation. Their [source-bound evidence](evidence/fkwu/dsv4-oracle.json)
+records all 1,106 consumer checks passing at existing tolerances; the replaced
+Python oracle is removed.
+Native terminal acceptance executes on Darwin ARM64; another native target still
+needs an observed admission and full behavior check. Shell orchestration,
+JavaScript builders, target-language specimens, proof siblings and platform
+carriers remain visible in the broader source reading. The checkout is not
+entirely Form-owned.
 
 The shared BML dependency reader distinguishes actual directives from quoted examples and multiline strings. Direct Form preparation selects semicolon-comment semantics explicitly. Form string emission represents semicolons through byte construction, preserving their value across the seed's dependency-reading boundary. BML-generated strings can carry dependency examples without importing them.
 
 Semicolon-bearing string leaves require byte construction and balanced concatenation; ordinary string leaves remain literals. The balanced tree avoids copying each growing suffix but still performs construction work unless subsequently folded. Handwritten direct `.fk` source still passes through the seed's quote-insensitive dependency collector; the Form emitter repair applies to generated string leaves.
+
+Form owns six-place numeric display in `core.fk`, including fractional carry,
+large finite values, scientific notation and exact tagged integer extrema.
+The [display evidence](evidence/fkwu/float-display.json) checks 34 individual
+health observations and an actual failing child. Exact binary64 serialization
+uses its separate precise-JSON owner. A large plain-decimal BML source literal
+still refuses before execution; runtime string parsing does not establish that
+source-emission capability.
 
 ## Ownership boundary
 
@@ -94,7 +114,16 @@ Handle widths, device capabilities and observed allocation limits are explicit. 
 
 The [CPU benchmark](../observe/frame-cpu-benchmark-run.fk) and [GPU benchmark](../observe/frame-metal-benchmark-run.fk) expose admission and execution costs over synthetic captured bytes. Current [CPU](evidence/fkwu/cpu-benchmark.txt) and [Metal](evidence/fkwu/metal-benchmark.txt) samples retain the complete result rows and crossing counts. The fixture is 1,050,678 bytes; the CPU sample takes three native calls per fold, while the GPU sample includes upload, submission, wait, readback and cleanup.
 
-[Identities](evidence/fkwu/identities.json) bind current sources and artifacts. `observe/fkwu-current-identities-run.bml` regenerates them with Form's ARM64 SHA program. The canonical CLI build answers `pong`; root and CLI linkage reads show libSystem only. An explicitly unavailable Metal adapter returns the absence verdict `31`. The bounded glass sample observed twenty frames under 50 ms, with first/max 47 ms and warm maximum 14 ms. Without a standing hearth, the counsel's eleven unobserved lanes remain unobserved.
+[Identities](evidence/fkwu/identities.json) bind current sources and artifacts. `observe/fkwu-current-identities-run.bml` regenerates them with Form's ARM64 SHA program. The canonical CLI build answers `pong`; root and CLI linkage reads show libSystem only. An explicitly unavailable Metal adapter returns the absence verdict `31`.
+
+The [bounded Glass observation](evidence/fkwu/glass-stage-observation.json)
+records 19 of 20 frames under 50 ms, with
+first/max 119 ms and warm maximum 45 ms during concurrent proof work.
+Its complete stage rows place 91 ms of the first frame in heat/fast/kernel
+work and 30 ms of the slowest warm frame in flow/render. These measurements
+locate observed time; they do not establish its cause. The all-frames target
+remains unmet. Without a standing hearth, the counsel's eleven unobserved lanes
+remain unobserved.
 
 Each result applies to its recorded source and host. A zero-millisecond sample is below the clock's resolution; these fixture samples do not establish maximum hardware bandwidth. The [per-symbol census](evidence/fkwu/c-bootstrap-audit.json) is a lexical inventory with active-platform reconciliation, not a semantic proof of every function.
 

@@ -1,57 +1,18 @@
-; dsv4-stack-real.fk — STONE 39: STACKING the 43 HETEROGENEOUS DeepSeek-V4-Flash layers.
+; DeepSeek-V4 heterogeneous stack recipes from the actual tensor table.
+; Each layer reads its expert count and separate gate/up/down formats, token-table
+; or biased-top-k routing, and ordinary or compressed RoPE configuration.
+; Routing weights use unbiased probabilities; pruning is carried by the bias.
+; Four hyper-connection streams pass through both frames at every layer, with
+; a separate ordered KV history for each layer and each supplied token.
 ;
-; Stone 37 built ONE complete layer (metal_dsv4_layer_join.sh, 31 gates) on blk.0's weights. Stacking is
-; NOT that layer run 43 times. The file's own tensor table says the layers differ on FOUR independent
-; per-layer decisions, and a blk.0-shaped stack is right-shaped, right-magnitude and silently wrong:
-;
-;   1. THE EXPERT COUNT IS NOT THE METADATA'S. deepseek4.expert_count = 256 and it is true only for
-;      layers 0, 1, 2. Layers 3..42 carry ffn_gate_exps with dim[2] = 192 — REAP-25 pruning — while the
-;      router still projects 256 logits at EVERY layer (ffn_gate_inp is [4096, 256] throughout). The
-;      per-layer count is the tensor's own dim[2], never the KV's.
-;      HOW THE FILE KEEPS THE TWO CONSISTENT, read from the file and not assumed: exp_probs_b.bias
-;      carries -1e30 on exactly the 64 pruned indices 192..255 at every pruned layer, so biased top-k
-;      can never reach one. The pruning is carried in the BIAS, not in the router's width.
-;   2. THE EXPERT TYPES CHANGE PER LAYER, and independently for gate/up vs down, across six groups:
-;        gate/up 40  down 16  n_exp 256  hash   layers 0, 1
-;        gate/up 40  down 40  n_exp 256  hash   layer  2
-;        gate/up 40  down 40  n_exp 192  topk   layers 3, 4, 7, 8
-;        gate/up 40  down 16  n_exp 192  topk   layers 5, 6, 10, 11, 12
-;        gate/up 16  down 16  n_exp 192  topk   layers 9, 13..25, 27, 28, 30, 32, 34..38, 41
-;        gate/up 16  down 40  n_exp 192  topk   layers 26, 29, 31, 33, 39, 40, 42
-;      The dispatch reads the TYPE off each tensor. Both matvecs already exist and are already proven;
-;      what is new is that the choice of which one is a per-layer READ.
-;   3. ROUTING CHANGES AT LAYER 3 (deepseek4.hash_layer_count = 3). Layers 0..2 carry ffn_gate_tid2eid
-;      and route by an I32 table read on the TOKEN id (forepick, corpus row 867). Layers 3+ carry
-;      exp_probs_b.bias and route by BIASED top-k while weighting by the UNBIASED prob. That asymmetry
-;      is the whole recipe (ds4.c:10665) and this band adds the kernel for it.
-;   4. ROPE GOES COMPRESSED AT LAYER 2 — and it needs NO NEW KERNEL. In rope_tail_ext_inplace
-;      (ds4.c:10102) the YaRN magnitude cancels exactly, because rope_tail_layer_inplace (:10175) sets
-;      attn_factor to the reciprocal of the very factor the helper then multiplies back in; and the
-;      angle reduces to theta = theta_extrap * (freq_scale*(1 - ramp_k) + ramp_k), a PER-PAIR SCALE of
-;      the same theta_extrap. form_mla_rope_f32 already takes a per-pair freqs[] and computes
-;      pos * freqs[k]. So a compressed layer is the existing kernel with a different freqs[], computed
-;      once per layer on the host from the file's own KV.
-;
-; THE EVIDENCE CLASS, per surface (twinblind, corpus row 868):
-;   CHOOSING  — the per-layer routing regime, the biased-top-k selection with unbiased weighting, WHICH
-;               expert-type kernel a layer's gate/up and down take, the compressed-RoPE reduction, and
-;               how the four hyper-connection streams compose from one layer to the next. A self-carve
-;               inherits every one of those on both sides. They are proven against the rented fp64 ds4.c
-;               transcription in form-stdlib/tests/dsv4-mla-core-oracle.py's new `stack` mode, which
-;               carries its own state through all 43 layers and shares no code with this band.
-;   CANONICAL — the MXFP4 / IQ2_XXS / MXFP8 / F16 decodes and their matvecs, unchanged from Stones
-;               33/34/35 and re-witnessed by the oracle's own independent decode.
-;
-; halfrent (corpus row 870) DEEPENS here, and it is said out loud. ds4.c is a valid reference for this
-; architecture and cannot run this file: beyond the two FFN refusals Stone 37 named, tensor validation
-; itself refuses — tensor_expect_routed_expert (:4641, called at :4892/:5003/:5054) demands
-; dim[2] == DS4_N_EXPERT == 256 and exits(1) on every layer 3..42, which carry 192. What is rented is
-; the ORDER and the SCALARS; the arithmetic for these types is re-derived on both sides.
+; Independent Form fp64 decoding and control: form-stdlib/bml/dsv4-oracle-stack.bml.
+; GPU arithmetic is authored separately; actual and injected executions retain
+; their own intermediate outputs and history. Every dispatch is sentinelled and
+; checked against its unchanged numerical bound and input-perturbation envelope.
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/dsv4-kv-cache.fk form-stdlib/dsv4-compressor.fk form-stdlib/ds4-order-match.fk native/metal/dsv4-layer-real.fk
 ;
-; Proven by: native/metal/metal_dsv4_stack.sh (every dispatch sentinelled before and cb.error/cb.status
-; checked after; every layer's output compared against the rented oracle's own layer output).
+; Proven by: native/metal/metal_dsv4_stack_oracle.sh.
 
 (do
     ; The real-stack decode seam: the cache append is authored by the Form body and compiled as its
@@ -59,13 +20,15 @@
     ; Keeping it separate avoids adding host-authored Metal to the 43-layer runner.
     ; The COMPRESSED cache rides in the same unit: it is the second lane of the same seam, and the
     ; carrier binds both from the same place. dsv4-compressor.fk holds the recipe and the text.
-    (defn dsv4-stack-kv-unit ()
-        (do
-            (print "MSL")
-            (print (str_concat "#include <metal_stdlib>\n"
+    (defn dsv4-stack-kv-source ()
+            (str_concat "#include <metal_stdlib>\n"
                     (str_concat (dkv-append-msl-body)
                     (str_concat "kernel void form_dsv4_control_logit_adapter (device float* logits [[buffer(0)]], device const float* weights [[buffer(1)]], constant uint& first [[buffer(2)]], constant uint& count [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i < count) logits[first + i] += weights[i]; } "
                                 (str_concat (dcp-msl-appendix) (dom-msl-appendix))))))
+    (defn dsv4-stack-kv-unit ()
+        (do
+            (print "MSL")
+            (print (dsv4-stack-kv-source))
             (print "END")
             0))
 
@@ -76,7 +39,7 @@
     ; THE ASYMMETRY IS LOAD-BEARING and it is why this cannot be the hash kernel with a sort bolted on:
     ; the bias enters the SELECTION score and never the WEIGHT. weight[j] = probs[selected[j]] is the
     ; UNBIASED prob. A kernel that weighted by the biased score would be right-shaped, right-magnitude
-    ; and silently wrong — exactly the failure mode the rented oracle exists to catch.
+    ; and silently wrong — the independent Form reference observes this distinction.
     ;
     ; probs[] uses the SAME stable softplus as form_dsv4_hash_weights (ds4.c:10424): z above 20 passes
     ; through, z below -20 is exp(z), otherwise ln(1+exp(z)). dm_exp / dm_ln / dm_sqrt are the enclosing
@@ -135,15 +98,17 @@
     ; --- the stack's FFN translation unit: Stone 37's unit (the dm_ spine once, the clamped SwiGLU,
     ; scale, axpy, the hash table read and the hash weights) with the biased-top-k kernel appended.
     ; ONE unit, so the two routing regimes cannot drift apart in their softplus or their sqrt.
-    (defn dsv4-stack-ffn-unit ()
-        (do
-            (print "MSL")
-            (print (str_concat (dsv4-moe-msl-unit)
+    (defn dsv4-stack-ffn-source ()
+            (str_concat (dsv4-moe-msl-unit)
                     (str_concat (dsv4-hash-select-body)
                      (str_concat (str_concat (dsv4-hash-probs-body) (str_concat (dsv4-hash-wts-body) (dsv4-hash-weights-body)))
         (str_concat (dsv4-topk-weights-body)
         (str_concat (dsv4-topk-split-body)
         (str_concat (dsv4-topk-select-tg-body) (str_concat (dsv4-topk-select-tg6-body) (dom-ffn-appendix)))))))))
+    (defn dsv4-stack-ffn-unit ()
+        (do
+            (print "MSL")
+            (print (dsv4-stack-ffn-source))
             (print "END")
             0))
 

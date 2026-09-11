@@ -55,11 +55,13 @@
     ; r*cols+... indices start at the expert, exactly as Stage 2 bound output.weight at its inner. nel is
     ; the PER-EXPERT element count (rows*cols); the E8M0 scale plane sits at nel/2 within the slice. This
     ; is mxfp4-msl.fk's mx4m-matvec-body, reused with our entry name and NOTHING else changed.
+    (defn dsv4-mx4-matvec-source ()
+        (str_concat (qml-msl-header)
+                    (mx4m-matvec-msl "form_dsv4_mx4_matvec")))
     (defn dsv4-mx4-matvec-msl ()
         (do
             (print "MSL")
-            (print (str_concat (qml-msl-header)
-                    (mx4m-matvec-msl "form_dsv4_mx4_matvec")))
+            (print (dsv4-mx4-matvec-source))
             (print "END")
             0))
 
@@ -68,26 +70,12 @@
     ; r in 0..256, cols=4096. One thread per output row, a straight sequential fold — the SAME fold order
     ; the carrier's CPU reference uses, so this is an EQUALITY check with no reassociation (no simd_sum).
     ; `float(as_type<half>(h))` is the exact IEEE half->single widening, the value the carrier decodes too.
+    (defn dsv4-router-f16-source ()
+        "#include <metal_stdlib>\nusing namespace metal;\nkernel void form_dsv4_router_f16(device const uchar* qb [[buffer(0)]],\n                                 device const float* x [[buffer(1)]],\n                                 device float* y [[buffer(2)]],\n                                 constant uint& rows [[buffer(3)]],\n                                 constant uint& cols [[buffer(4)]],\n                                 uint r [[thread_position_in_grid]]) {\n    if (r >= rows) return;\n    float acc = 0.0f;\n    ulong base = (ulong)r * (ulong)cols;\n    for (uint j = 0u; j < cols; ++j) {\n        ushort h = *(device const ushort*)(qb + (base + (ulong)j) * 2ul);\n        acc = acc + float(as_type<half>(h)) * x[j];\n    }\n    y[r] = acc;\n}")
     (defn dsv4-router-f16-msl ()
         (do
             (print "MSL")
-            (print "#include <metal_stdlib>")
-            (print "using namespace metal;")
-            (print "kernel void form_dsv4_router_f16(device const uchar* qb [[buffer(0)]],")
-            (print "                                 device const float* x [[buffer(1)]],")
-            (print "                                 device float* y [[buffer(2)]],")
-            (print "                                 constant uint& rows [[buffer(3)]],")
-            (print "                                 constant uint& cols [[buffer(4)]],")
-            (print "                                 uint r [[thread_position_in_grid]]) {")
-            (print "    if (r >= rows) return;")
-            (print "    float acc = 0.0f;")
-            (print "    ulong base = (ulong)r * (ulong)cols;")
-            (print "    for (uint j = 0u; j < cols; ++j) {")
-            (print "        ushort h = *(device const ushort*)(qb + (base + (ulong)j) * 2ul);")
-            (print "        acc = acc + float(as_type<half>(h)) * x[j];")
-            (print "    }")
-            (print "    y[r] = acc;")
-            (print "}")
+            (print (dsv4-router-f16-source))
             (print "END")
             0))
 
@@ -101,17 +89,19 @@
     ; lane reduction reassociates. `qb` is bound by the carrier at the expert's block-0 byte base, so the
     ; flat element index r*cols+j addresses inside the expert slice — no 32-bit offset for the 85 GiB file.
     ; IQ2_XXS is a pure block format (no appended scale plane), so no nel argument is needed.
-    (defn dsv4-iq2-matvec-msl ()
-        (do
-            (print "MSL")
+    (defn dsv4-iq2-matvec-source ()
             ; the dm_ spine joins this unit because dom-iq2-experts4-pair-swiglu-body ENDS in the
             ; clamped SwiGLU, and the only honest way to end in it is to call dsv4-moe-msl.fk's own
             ; dm_cl_hi / dm_cl_lo / dm_silu — the functions form_dsv4_swiglu_experts calls in the FFN
             ; unit. One definition, emitted into both units; never a second transcription.
-            (print (str_concat (qml-msl-header)
+            (str_concat (qml-msl-header)
                     (str_concat (dsv4-moe-msl-spine)
                     (str_concat (iq2m-msl-helpers)
                         (str_concat "kernel void form_dsv4_iq2_matvec (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0u) { k -= 1u; uint j = lane + k * 32u; uint idx = r * cols + j; acc = iq2_w(qb, idx) * x[j] + acc; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }" (dom-iq2-appendix))))))
+    (defn dsv4-iq2-matvec-msl ()
+        (do
+            (print "MSL")
+            (print (dsv4-iq2-matvec-source))
             (print "END")
             0))
     ; --- Q2_K, the mainline Mac quant's w2/down projections. Same lane-strided fold as the IQ2

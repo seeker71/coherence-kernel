@@ -1,0 +1,111 @@
+// Complete stdin bytes belong to an observed pipe or regular-file lifetime.
+// No numerical/model admission occurs here. The borrowed descriptor stays open.
+// preludes: form/form-stdlib/bml/dsv4-oracle-request.bml form-stdlib/bml/native-pipe-darwin.bml form-stdlib/bml/json-wire-admission.bml
+section [form.bml] {
+ class Dsv4OracleInput {
+  def dsi-image() {
+   let rows = npd-cat(list(npd-route(0,"pid"),npd-route(1,"stat"),npd-route(2,"seek"),list(fa-movz-x(0,22),npd-branch(14,"negate")),list(npd-label("pid")),npd-sys(20),list(npd-label("stat")),npd-shift2(),npd-sys(339),list(npd-label("seek")),npd-shift3(),npd-sys(199),list(npd-label("syscall"),fa-movk-x-16(16,512),fa-svc(128),npd-branch(3,"return"),npd-label("negate"),fa-asm(3405774848,list(1,32,65536),list(0,31,0)),npd-label("return"),fa-ret())));
+   fa-image(npd-emit(rows,npd-labels(rows,0,list()),0));
+  }
+  def dsi-open(fd,until) {
+   let pipe = npp-open();
+   let owner = record_new(0,"pipe",pipe,"fd",fd,"until",until,"bytes",0,"resource","unobserved","code-live",0);
+   record_set(owner,"flow",str_concat("stdin-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(owner)))));
+   let image = dsi-image(); let identity = intern_node(make_nodeid(31,2,0,189),cons(intern_trivial_string("oracle-input-darwin-arm64-v1"),cons(intern_trivial_int(owner),npd-nodes(image))));
+   record_set(owner,"identity",identity); record_set(owner,"request",list(0,identity,image));
+   let observed = dsi-call(owner,list(0)); record_set(owner,"code-live",if eq(observed,host_pid()) then 1 else 0);
+   record_set(owner,"ready",eq(observed,host_pid())); owner;
+  }
+  def dsi-call(owner,args) = if or(eq(record_get(owner,"code-live"),2),not(npp-active(record_get(owner,"pipe")))) then nothing() else jit_leaf_inram(record_get(owner,"request"),args);
+  def dsi-stat-part(owner,at,n) = npd-peek(record_get(record_get(owner,"pipe"),"control"),add(64,at),n);
+  def dsi-stat-parts(owner,offsets) = if nil?(offsets) then list() else cons(dsi-stat-part(owner,head(offsets),4),dsi-stat-parts(owner,tail(offsets)));
+  // Darwin stat64: device/mode/inode/identity; omit access time, which reading changes.
+  // Modification, change and birth timestamps, size and generation remain bound.
+  def dsi-stat(owner) {
+   let status = dsi-call(owner,list(1,record_get(owner,"fd"),npp-control(record_get(owner,"pipe"),64,144)));
+   if ne(status,0) then list(status) else dsi-stat-ready(owner);
+  }
+  def dsi-stat-ready(owner) {
+   let hi = dsi-stat-part(owner,100,4); let mode = dsi-stat-part(owner,4,2);
+   let size = if ge(hi,1073741824) then -1 else add(dsi-stat-part(owner,96,4),mul(hi,4294967296));
+   list(0,mod(div(mode,4096),16),size,dsi-stat-parts(owner,list(0,4,8,12,16,20,24,48,52,56,60,64,68,72,76,80,84,88,92,96,100,120)));
+  }
+  def dsi-same(left,right) = if nil?(left) then nil?(right) else if nil?(right) then 0 else and(eq(head(left),head(right)),dsi-same(tail(left),tail(right)));
+  def dsi-stat-same(before,after) = and(eq(head(after),0),and(eq(nth(before,1),nth(after,1)),and(eq(nth(before,2),nth(after,2)),dsi-same(nth(before,3),nth(after,3)))));
+  def dsi-offset(owner) = dsi-call(owner,list(2,record_get(owner,"fd"),0,1));
+  def dsi-expired(owner) = if nothing?(record_get(owner,"until")) then 0 else gt(host_monotonic_ms(),record_get(owner,"until"));
+  def dsi-good(bytes) = list(1,"complete observed input",bytes);
+  def dsi-bad(reason) = list(0,reason,"");
+  def dsi-read(owner) = if not(record_get(owner,"ready")) then dsi-bad("native stdin metadata capability refused") else dsi-classify(owner,dsi-stat(owner));
+  def dsi-classify(owner,stat) {
+   if ne(head(stat),0) then dsi-bad("stdin fstat refused") else if eq(nth(stat,1),8) then dsi-file-open(owner,stat) else if eq(nth(stat,1),1) then dsi-pipe-open(owner,stat) else dsi-bad("stdin resource must be a regular file or pipe");
+  }
+  def dsi-file-open(owner,stat) {
+   record_set(owner,"resource","regular-file"); let at = dsi-offset(owner); record_set(owner,"start-offset",at);
+   if or(lt(at,0),or(lt(nth(stat,2),0),gt(at,nth(stat,2)))) then dsi-bad("stdin regular-file offset or extent refused") else dsi-file(owner,stat,at,list());
+  }
+  def dsi-file(owner,stat,at,bins) = if dsi-expired(owner) then dsi-bad("stdin file deadline") else if eq(at,nth(stat,2)) then dsi-file-end(owner,stat,at,bins) else dsi-file-chunk(owner,stat,at,bins,min2(sub(nth(stat,2),at),65536));
+  def dsi-file-chunk(owner,stat,at,bins,amount) {
+   let bytes = file_read(record_get(owner,"fd"),amount);
+   if or(nothing?(bytes),or(eq(str_len(bytes),0),gt(str_len(bytes),amount))) then dsi-bad("stdin file refused before observed extent") else dsi-file-after(owner,stat,at,bins,bytes);
+  }
+  def dsi-file-after(owner,stat,at,bins,bytes) {
+   record_set(owner,"bytes",add(record_get(owner,"bytes"),str_len(bytes)));
+   let next = add(at,str_len(bytes)); let offset = dsi-offset(owner); let observed = dsi-stat(owner);
+   if not(and(eq(offset,next),dsi-stat-same(stat,observed))) then dsi-bad("stdin file identity extent or offset changed") else dsi-file-counted(owner,stat,next,bins,bytes);
+  }
+  def dsi-file-counted(owner,stat,next,bins,bytes) {
+   dsi-file(owner,stat,next,fbc-put(bins,bytes));
+  }
+  def dsi-file-end(owner,stat,at,bins) = if not(and(eq(dsi-offset(owner),at),dsi-stat-same(stat,dsi-stat(owner)))) then dsi-bad("stdin file completion identity refused") else dsi-good(fbc-finish(bins,""));
+  def dsi-pipe-open(owner,stat) {
+   record_set(owner,"resource","pipe");
+   let input = npp-borrow-end(record_get(owner,"pipe"),record_get(owner,"fd"),"read"); record_set(owner,"input",input);
+   if nothing?(input) then dsi-bad("stdin pipe descriptor admission refused") else dsi-pipe(owner,stat,list());
+  }
+  def dsi-pipe(owner,stat,bins) = if dsi-expired(owner) then dsi-bad("stdin pipe deadline") else dsi-pipe-result(owner,stat,bins,npp-read(record_get(owner,"pipe"),record_get(owner,"input"),if nothing?(record_get(owner,"until")) then 1000 else min2(1000,max2(0,sub(record_get(owner,"until"),host_monotonic_ms())))));
+  def dsi-pipe-result(owner,stat,bins,result) = if str_eq(head(result),"bytes") then dsi-pipe-chunk(owner,stat,bins,nth(result,1)) else if str_eq(head(result),"eof") then dsi-pipe-end(owner,stat,bins) else if str_eq(head(result),"wait") then dsi-pipe(owner,stat,bins) else if and(str_eq(value_kind(nth(result,1)),"int"),eq(nth(result,1),-4)) then dsi-pipe(owner,stat,bins) else dsi-bad("stdin pipe read or readiness refused");
+  def dsi-pipe-chunk(owner,stat,bins,bytes) {
+   record_set(owner,"bytes",add(record_get(owner,"bytes"),str_len(bytes))); dsi-pipe(owner,stat,fbc-put(bins,bytes));
+  }
+  // Pipe timestamps/size describe traffic. Identity is type, device and inode.
+  def dsi-pipe-end(owner,stat,bins) {
+   let after = dsi-stat(owner);
+   if not(and(eq(head(after),0),and(eq(nth(after,1),1),dsi-same(dnr-take(nth(stat,3),4),dnr-take(nth(after,3),4))))) then dsi-bad("stdin pipe identity changed") else dsi-good(fbc-finish(bins,""));
+  }
+  def dsi-json-fields(nodes,out) = if nil?(nodes) then reverse(out) else if ne(node_type(head(nodes)),2) then nothing() else dsi-json-fields(tail(nodes),cons(json-string-value(head(nodes)),out));
+  def dsi-json(bytes) = if not(and(fbc-utf8(bytes,0),jwa-valid(bytes))) then dqi-refused("complete framed UTF-8 JSON required") else dsi-json-node(parse-json("oracle-input",bytes));
+  def dsi-json-node(node) = if not(node_eq(node_category(node),JSON-ARRAY())) then dqi-refused("framed request must be an array of twelve strings") else dqi-parse(dsi-json-fields(json-array-elements(node),list()));
+  def dsi-without-final-lf(bytes) = if and(gt(str_len(bytes),0),eq(str_byte_at(bytes,sub(str_len(bytes),1)),10)) then substring(bytes,0,sub(str_len(bytes),1)) else bytes;
+  def dsi-parse(bytes) = if eq(str_find(bytes,str_concat("DFO2",byte_to_str(0)),0),0) then dqi-nul-frame(split-on(dsi-without-final-lf(bytes),byte_to_str(0))) else if eq(str_find(bytes,"DFO1\n",0),0) then dqi-parse(split-on(dsi-without-final-lf(bytes),"\n")) else dsi-framed(bytes,npp-frame-size(bytes));
+  def dsi-framed(bytes,size) = if or(lt(size,0),not(eq(size,sub(str_len(bytes),8)))) then dqi-refused("exactly one complete length-framed request required") else dsi-json(substring(bytes,8,str_len(bytes)));
+  def dsi-release-code(owner) = if eq(record_get(owner,"code-live"),2) then 1 else dsi-code-released(owner,jit_leaf_inram(list(1,record_get(owner,"identity"),list()),0));
+  def dsi-code-released(owner,status) {
+   let settled = or(eq(status,1),and(eq(record_get(owner,"code-live"),0),eq(status,0)));
+   if settled then record_set(owner,"code-live",2) else 0; settled;
+  }
+  def dsi-release-pipe(owner) = if eq(record_get(record_get(owner,"pipe"),"active"),0) then 1 else npp-close(record_get(owner,"pipe"));
+  def dsi-retry(request) = if not(record_has(request,"input-release-owner")) then request else dsi-retry-owner(record_get(request,"input-release-owner"));
+  def dsi-retry-owner(owner) = if record_has(owner,"settled-request") then record_get(owner,"settled-request") else dsi-finish-with(owner,record_get(owner,"retained-input"),record_get(owner,"retained-parser"));
+  def dsi-finish(owner,result) = dsi-finish-with(owner,result,dsi-parse);
+  def dsi-finish-with(owner,result,parser) {
+   let code = dsi-release-code(owner); let memory = dsi-release-pipe(owner); let released = and(code,eq(memory,1));
+   let request = if not(released) then dqi-refused("stdin native resource retirement refused") else if eq(head(result),1) then parser(nth(result,2)) else dqi-refused(nth(result,1));
+   if released then record_set(owner,"retained-input",nothing()) else record_set(owner,"retained-input",result);
+   if released then record_set(owner,"retained-parser",nothing()) else record_set(owner,"retained-parser",parser);
+   if released then 0 else record_set(request,"input-release-owner",owner);
+   record_set(request,"input-resource",record_get(owner,"resource")); record_set(request,"input-bytes",record_get(owner,"bytes")); record_set(request,"input-released",released); record_set(request,"input-eof-observed",eq(head(result),1));
+   if released then record_set(owner,"settled-request",request) else 0;
+   let accepted = and(released,eq(record_get(request,"ready"),1));
+   let evidence = json-node-object(list(oh-s("resource",record_get(owner,"resource")),oh-n("bytes",record_get(owner,"bytes")),oh-n("inputComplete",eq(head(result),1)),oh-s("admission",record_get(request,"reason")),oh-n("nativeCodeReleased",code),oh-n("nativeOwnerReleased",memory),oh-s("descriptorOwnership","borrowed; enclosing process retains descriptor")));
+   let reading = oh-reading("dsv4-oracle-input",record_get(owner,"flow"),"complete-input-and-release",json-node-int(1),json-node-int(accepted),json-node-int(accepted),list(),list("continue","abstain"),evidence);
+   oh-voice(reading); let response = oh-response(reading,if accepted then "continue" else "abstain"); oh-voice(response); oh-voice(oh-applied(reading,oh-select(reading,response,"abstain"),evidence)); request;
+  }
+  def dsi-read-at(fd,until) = dsi-read-at-with(fd,until,dsi-parse);
+  def dsi-read-at-with(fd,until,parser) = if not(and(dfo-natural(fd),and(le(fd,2147483647),or(nothing?(until),dfo-natural(until))))) then dqi-refused("stdin descriptor or deadline policy refused") else dsi-read-owned-with(dsi-open(fd,until),parser);
+  def dsi-read-owned(owner) = dsi-read-owned-with(owner,dsi-parse);
+  def dsi-read-owned-with(owner,parser) = dsi-finish-with(owner,dsi-read(owner),parser);
+  def dsi-read-request() = dsi-read-at(0,nothing());
+ }
+ 0;
+}

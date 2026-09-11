@@ -6,17 +6,22 @@ The complete lexical census indexes every function definition, file-scope declar
 
 ## Current seed census
 
+The inspected seed contains 896,371 bytes and 21,681 source lines. The census
+includes every conditional branch; the Clang reconciliation describes the
+active Darwin build.
+
 | Population | Count |
 | --- | ---: |
-| Function definitions across source branches | 643 |
-| Top-level declaration units | 658 |
-| Distinct global names | 374 |
-| Individual file-scope global declarations | 395 |
-| Local-static declaration units | 58 |
-| Preprocessor directives | 304 |
+| Function definitions across source branches | 672 |
+| Distinct function names across source branches | 607 |
+| Top-level declaration units | 698 |
+| Distinct global names | 379 |
+| Individual file-scope global declarations | 400 |
+| Local-static declaration units | 64 |
+| Preprocessor directives | 330 |
 | Unresolved top-level units | 0 |
-| Active Darwin Clang functions | 562 |
-| Active Darwin Clang globals | 365 |
+| Active Darwin Clang functions | 573 |
+| Active Darwin Clang globals | 368 |
 
 The active AST additionally sees `__sigbits` from host headers and `fk_optab`, `fk_optab_n`, `fk_rwtab`, `fk_rwtab_n` from the generated opcode header. Conditional source branches and the active platform are different populations.
 
@@ -53,11 +58,43 @@ The Form reference walker carries lexical frames, retained source and explicit r
 Seed intern pools, record metadata, parser state and other globals still require ownership migration. Cooperative Form resource owners do not establish protected address spaces or independently destroyable seed contexts. The current tests exercise 320 simultaneous CPU admissions and a 16,392-byte image; the absence of a fixed table or image ceiling does not promise unlimited physical memory.
 
 The seed's field-sharing transfer preserves complete mixed local/shared lists.
-The [current ownership evidence](evidence/fkwu/shared-field-ownership.json)
+The [source-bound ownership evidence](evidence/fkwu/shared-field-ownership.json)
 checks first admission with fresh identities, nested lists, scalar prefixes,
 existing shared lists and empty lists. Its Form-native destination is the
 context-owned sharing operation; this transport correction adds no function or
 global.
+
+The process observer still parses platform records in C. Its argument result
+holds at most 64 words; the Linux reader uses a single read of at most 65,535
+bytes. The result does not distinguish a complete argument vector from these
+truncations. Darwin process fields use fixed platform structure offsets and
+bounded buffers. A Form-owned observer must carry exact byte extents, field
+availability and completion before treating those rows as complete process
+identity. The roster keeps a process-lifetime mapping with 256 slots and
+compares process IDs when claiming or clearing a slot; this is not a general
+generation-qualified context capability.
+
+Opening this process's live page first unlinks its own PID-derived name, so a
+recycled PID can receive a newly sized object while existing readers retain
+their mappings. The unlink result is unchecked. If unlink fails and an existing
+object cannot grow, the shared-memory opener can still return an undersized
+mapping. The fresh-page behavior therefore does not establish complete failure
+handling or a generation-qualified observation contract.
+
+The Windows branch has additional unobserved ownership and status boundaries.
+Its 64-entry process table replaces slot zero when full, closing a retained
+handle before its child's status is collected. Its wait adapter ignores the
+wait and exit-code query results; its flag adapter returns success without
+performing an operation. Redirected spawning temporarily changes the parent's
+standard descriptors, without checking every duplication or restoration.
+Its formatted output has a fixed 4,095-byte payload bound. These source findings
+do not establish Windows runtime correctness. Platform ABI calls remain a seed
+shrink target: Form must own admission, complete transfer, failure disposition,
+process handles and retryable release, with actual Windows witnesses before
+claiming that contract on that host.
+
+Ownership observations apply to their recorded source identities and executions.
+They do not establish a semantic audit of every function in this census.
 
 ## Review contract
 

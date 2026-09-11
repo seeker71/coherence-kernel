@@ -1,0 +1,98 @@
+// Complete checked GGUF metadata with the existing manifest stream contract.
+// preludes: form-stdlib/gguf-manifest.fk form/form-stdlib/bml/dsv4-oracle-execution.bml
+section [form.bml] {
+ class Dsv4ProofMetadata {
+  def dsm-block(t) = if or(eq(t,8),or(eq(t,20),or(eq(t,40),eq(t,41)))) then 32 else if or(eq(t,10),or(eq(t,12),or(eq(t,13),or(eq(t,14),or(eq(t,16),or(eq(t,17),or(eq(t,18),eq(t,23)))))))) then 256 else 1;
+  def dsm-dim(dims,at) = if lt(at,len(dims)) then nth(dims,at) else 1;
+  def dsm-shape(r,names) = if nil?(names) then 1 else dsm-tensor(r,names,dfo-tensor(r,head(names)));
+  def dsm-tensor(r,names,t) {
+   let dims = nth(t,1); let ty = head(t); dfo-require(le(len(dims),4),"manifest supports up to four tensor dimensions");
+   let nel = dfo-size(dfo-product(head(dims),dsm-dim(dims,1))); let slices = dfo-size(dfo-product(dsm-dim(dims,2),dsm-dim(dims,3)));
+   dfo-require(gm-priced?(ty),"unpriced tensor type"); let block = dsm-block(ty);
+   dfo-require(eq(mod(nel,block),0),"incomplete priced tensor block");
+   let perSlice = dfo-size(dfo-product(div(nel,block),gm-slice-bytes(ty,block))); let bytes = dfo-size(dfo-product(slices,perSlice)); let absolute = dfo-abs(r,t);
+   dfo-require(and(le(absolute,record_get(r,"extent")),le(bytes,sub(record_get(r,"extent"),absolute))),"manifest tensor exceeds complete file extent");
+   dsm-shape(r,tail(names));
+  }
+  def dsm-open(path) {
+   let r = dfo-reader(path); dfo-require(str_eq(dfo-bytes(r,0,4),"GGUF"),"bad GGUF magic"); dfo-require(eq(dfo-uint(r,4,4),3),"GGUF version must be3");
+   let nt = dfo-uint(r,8,8); let nk = dfo-uint(r,16,8); let extent = record_get(r,"extent");
+   dfo-require(and(le(nt,div(sub(extent,24),32)),le(nk,div(sub(extent,24),13))),"GGUF count exceeds minimum complete rows");
+   let ti = dfo-metadata(r,24,nk); let end = dfo-tensor-table(r,ti,nt);
+   let alignment = if record_has(record_get(r,"meta"),"general.alignment") then dfo-meta(r,"general.alignment") else gm-alignment();
+   dfo-require(and(dfo-positive(alignment),dfo-metadata-kind(r,"general.alignment","integer")),"invalid GGUF alignment");
+   let base = dfo-size(dfo-product(div(dfo-size(dfo-sum(end,sub(alignment,1))),alignment),alignment)); dfo-require(le(base,extent),"incomplete GGUF header padding");
+   record_set(r,"data",base); record_set(r,"tensor-names",reverse(record_get(r,"tensor-names"))); record_set(r,"tensor-count",nt); record_set(r,"metadata-count",nk); record_set(r,"tinfo-start",ti); record_set(r,"tinfo-end",end);
+   dsm-shape(r,record_get(r,"tensor-names"));
+   let header = dfo-bytes(r,0,end); dfo-require(and(eq(str_len(header),end),eq(file_size(path),extent)),"complete saved header and stable extent"); dsm-snapshot(r,header,nt,nk,ti,end,base);
+  }
+  def dsm-snapshot(r,header,nt,nk,ti,end,base) {
+   let extent = record_get(r,"extent"); record_set(r,"bytes",header); record_set(r,"start",0); record_set(r,"extent",end); record_set(r,"meta",record_new(0)); record_set(r,"tensors",record_new(0)); record_set(r,"tensor-names",list());
+   dfo-require(and(str_eq(dfo-bytes(r,0,4),"GGUF"),and(eq(dfo-uint(r,4,4),3),and(eq(dfo-uint(r,8,8),nt),eq(dfo-uint(r,16,8),nk)))),"saved header identity changed");
+   let savedTi = dfo-metadata(r,24,nk); let savedEnd = dfo-tensor-table(r,savedTi,nt);
+   dfo-require(and(eq(savedTi,ti),eq(savedEnd,end)),"saved header directory extent changed");
+   let alignment = if record_has(record_get(r,"meta"),"general.alignment") then dfo-meta(r,"general.alignment") else gm-alignment();
+   dfo-require(and(dfo-positive(alignment),dfo-metadata-kind(r,"general.alignment","integer")),"saved header alignment type");
+   dfo-require(eq(dfo-size(dfo-product(div(dfo-size(dfo-sum(end,sub(alignment,1))),alignment),alignment)),base),"saved header alignment changed");
+   record_set(r,"extent",extent); record_set(r,"tensor-names",reverse(record_get(r,"tensor-names"))); dsm-shape(r,record_get(r,"tensor-names")); record_set(r,"header",header); r;
+  }
+  // Two 32-bit limbs retain the complete unsigned wire magnitude, including
+  // signed metadata whose manifest representation explicitly carries `u`.
+  def dsm-u64(hi,lo,out) = if and(eq(hi,0),eq(lo,0)) then if str_eq(out,"") then "0" else out else dsm-u64-step(hi,add(mul(mod(hi,10),4294967296),lo),out);
+  def dsm-u64-step(hi,low,out) = dsm-u64(div(hi,10),div(low,10),str_concat(byte_to_str(add(48,mod(low,10))),out));
+  def dsm-unsigned(src,at,width) = if eq(width,8) then dsm-u64(dfo-le(src,add(at,4),4),dfo-le(src,at,4),"") else int_to_str(dfo-le(src,at,width));
+  def dsm-line-bytes(text,at,token) = if eq(at,str_len(text)) then 1 else if or(eq(str_byte_at(text,at),0),or(eq(str_byte_at(text,at),10),or(eq(str_byte_at(text,at),13),and(token,or(le(str_byte_at(text,at),32),eq(str_byte_at(text,at),127)))))) then 0 else dsm-line-bytes(text,add(at,1),token);
+  def dsm-line-field(text,token) {
+   dfo-require(and(fbc-utf8(text,0),and(or(not(token),gt(str_len(text),0)),dsm-line-bytes(text,0,token))),"metadata field cannot be represented by the complete line stream"); text;
+  }
+  def dsm-float(v) {
+   dfo-require(dfo-finite(v),"nonfinite manifest numeric value"); if eq(v,0.0) then if lt(div(1.0,v),0.0) then "-0" else "0" else dsm-float-exact(v,jpf-exact(abs(v)));
+  }
+  def dsm-float-exact(v,exact) = str_concat(if lt(v,0.0) then "-" else "",dsm-shortest(abs(v),head(exact),nth(exact,1),1));
+  def dsm-shortest(v,digits,e,n) = dsm-shortest-pair(v,digits,e,n,jpf-round(digits,n,e));
+  def dsm-shortest-pair(v,digits,e,n,pair) = if eq(str_to_float(jpf-render(head(pair),nth(pair,1))),v) then dsm-float-layout(head(pair),nth(pair,1)) else if lt(n,17) then dsm-shortest(v,digits,e,add(n,1)) else form_error("shortest manifest float unavailable");
+  def dsm-float-layout(digits,e) = if or(lt(e,-4),ge(e,6)) then dsm-exponent(fstr-trim-trailing-zeros(digits),e) else jpf-render(digits,e);
+  def dsm-exponent(digits,e) = str_concat(substring(digits,0,1),str_concat(if gt(str_len(digits),1) then str_concat(".",substring(digits,1,str_len(digits))) else "",str_concat("e",str_concat(if lt(e,0) then "-" else "+",fstr-pad-left(int_to_str(abs(e)),2)))));
+  def dsm-string-value(text) {
+   dfo-require(fbc-utf8(text,0),"invalid UTF8 metadata string"); if dsm-line-bytes(text,0,0) then str_concat("  KVSTR ",text) else str_concat("  KVSTRJSON ",json-quote-string(text));
+  }
+  def dsm-kv-value(src,off) {
+   let t = gmt-vtype(src,off); let at = gmt-valoff(src,off);
+   if eq(gm-intish?(t),1) then str_concat("  KVINT u ",dsm-unsigned(src,at,egg-vtype-size(t))) else if eq(t,9) then str_concat("  KVARR ",str_concat(int_to_str(gmt-arr-etype(src,off)),str_concat(" ",int_to_str(gmt-arr-count(src,off))))) else if eq(t,8) then dsm-string-value(substring(src,add(at,8),add(add(at,8),egg-u64(src,at)))) else if eq(t,6) then str_concat("  KVF32\n",dsm-float(dfo-f32(dfo-le(src,at,4)))) else if eq(t,12) then str_concat("  KVF64\n",dsm-float(dfo-f64(substring(src,at,add(at,8))))) else form_error("unsupported manifest scalar type");
+  }
+  def dsm-kvs(src,at,left,index,bins) = if eq(left,0) then fbc-finish(bins,"") else dsm-kv-next(src,at,left,index,bins);
+  def dsm-kv-next(src,at,left,index,bins) {
+   dsm-line-field(gm-key(src,at),1); let row = str_concat(gm-kv-head(src,at,index),str_concat("\n",str_concat(dsm-kv-value(src,at),"\n"))); dsm-kvs(src,egg-kv-next(src,at),sub(left,1),add(index,1),fbc-put(bins,row));
+  }
+  def dsm-ints(values) = if nil?(values) then "" else str_concat(int_to_str(head(values)),if nil?(tail(values)) then "" else str_concat(" ",dsm-ints(tail(values))));
+  def dsm-trows(r,names,bins) = if nil?(names) then fbc-finish(bins,"") else dsm-trow(r,head(names),tail(names),bins);
+  def dsm-trow(r,name,rest,bins) {
+   dsm-line-field(name,1); let t = dfo-tensor(r,name); let dims = nth(t,1); let nel = mul(head(dims),dsm-dim(dims,1)); let slices = mul(dsm-dim(dims,2),dsm-dim(dims,3));
+   let row = str_concat("T ",str_concat(name,str_concat(" ",str_concat(dsm-ints(list(head(t),len(dims),head(dims),dsm-dim(dims,1),dsm-dim(dims,2),dfo-abs(r,t),nel,slices,mul(slices,gm-slice-bytes(head(t),nel)))),"\n")))); dsm-trows(r,rest,fbc-put(bins,row));
+  }
+  def dsm-manifest(r) {
+   let src = record_get(r,"header"); let head = str_concat("MAGICOK 1\nVERSION 3\nNTENSORS ",str_concat(int_to_str(record_get(r,"tensor-count")),str_concat("\nNKV ",str_concat(int_to_str(record_get(r,"metadata-count")),"\n"))));
+   let meta = dsm-kvs(src,24,record_get(r,"metadata-count"),0,list()); let table = str_concat("TINFOSTART ",str_concat(int_to_str(record_get(r,"tinfo-start")),str_concat("\nTINFOEND ",str_concat(int_to_str(record_get(r,"tinfo-end")),str_concat("\nDATABASE ",str_concat(int_to_str(record_get(r,"data")),"\n"))))));
+   str_concat(head,str_concat(meta,str_concat(table,str_concat(dsm-trows(r,record_get(r,"tensor-names"),list()),"END\n"))));
+  }
+  def dsm-array-values(src,at,t,index,n,bins) = if eq(index,n) then fbc-finish(bins,"") else dsm-array-next(src,at,t,index,n,bins);
+  def dsm-array-next(src,at,t,index,n,bins) {
+   let value = if eq(t,6) then str_concat("  A\n",dsm-float(dfo-f32(dfo-le(src,at,4)))) else str_concat("  A u ",dsm-unsigned(src,at,egg-vtype-size(t)));
+   dsm-array-values(src,add(at,egg-vtype-size(t)),t,add(index,1),n,fbc-put(bins,str_concat(value,"\n")));
+  }
+  def dsm-array(r,key) {
+   dsm-line-field(key,1); let src = record_get(r,"header"); let off = gmt-find(src,key);
+   if eq(off,gmt-absent()) then dsm-array-message("ABSENT ",key) else if not(eq(gmt-vtype(src,off),9)) then dsm-array-message("NOTARRAY ",key) else dsm-array-present(src,off,key);
+  }
+  def dsm-array-message(prefix,key) {
+   str_concat(prefix,str_concat(key,"\n"));
+  }
+  def dsm-array-present(src,off,key) {
+    let t = gmt-arr-etype(src,off); let n = gmt-arr-count(src,off); dfo-require(or(eq(gm-intish?(t),1),eq(t,6)),"requested array element type has no manifest value representation");
+    let values = dsm-array-values(src,gmt-arr-first(src,off),t,0,n,list());
+    let header = str_concat("ARR ",str_concat(key,str_concat(" ",str_concat(int_to_str(t),str_concat(" ",str_concat(int_to_str(n),"\n"))))));
+    str_concat(header,str_concat(values,"END\n"));
+  }
+ }
+ 0;
+}

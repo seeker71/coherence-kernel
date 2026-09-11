@@ -1,0 +1,90 @@
+// Native execution, retained fp64 vectors and organ observations.
+// preludes: form/form-stdlib/bml/dsv4-oracle-reference.bml form-stdlib/organ-health.bml form-stdlib/json-precise.bml
+section [form.bml] {
+ class Dsv4OracleExecution {
+  def dfo-finite(x) = and(eq(x,x),le(abs(x),1.7976931348623157e308));
+  def dfo-finite-vector(xs) = if nil?(xs) then 1 else and(dfo-finite(head(xs)),dfo-finite-vector(tail(xs)));
+  def dfo-number(x) = if and(eq(x,0.0),lt(div(1.0,x),0.0)) then "-0" else float-precise-str(mul(1.0,x));
+  def dfo-file-number(x) = if not(dfo-finite(x)) then form_error("nonfinite oracle file value") else if eq(x,0.0) then if lt(div(1.0,x),0.0) then "-0" else "0" else dfo-file-sign(x,jpf-exact(abs(x)));
+  def dfo-file-sign(x,exact) = dfo-file-rounded(x,jpf-round(head(exact),17,nth(exact,1)));
+  def dfo-file-rounded(x,pair) = str_concat(if lt(x,0.0) then "-" else "",jpf-render(head(pair),nth(pair,1)));
+  def dfo-numbers(xs,bins) = if nil?(xs) then fbc-finish(bins,"") else dfo-numbers(tail(xs),fbc-put(bins,str_concat(dfo-file-number(head(xs)),"\n")));
+  def dfo-prefix(xs,i) = if or(nil?(xs),eq(i,8)) then "" else str_concat(dfo-number(head(xs)),if or(nil?(tail(xs)),eq(i,7)) then "" else str_concat(" ",dfo-prefix(tail(xs),add(i,1))));
+  def dfo-all-values(xs,bins) = if nil?(xs) then fbc-finish(bins,"") else dfo-all-values(tail(xs),fbc-put(bins,str_concat(dfo-number(head(xs)),if nil?(tail(xs)) then "" else " ")));
+  def dfo-same-float(a,b) = and(dfo-finite(b),and(eq(a,b),if eq(a,0.0) then eq(lt(div(1.0,a),0.0),lt(div(1.0,b),0.0)) else 1));
+  def dfo-readback-numbers(text,at,x) = if nil?(x) then eq(at,str_len(text)) else dfo-readback-line(text,at,x,str_find(text,"\n",at));
+  def dfo-readback-line(text,at,x,end) = if le(end,at) then 0 else and(dfo-same-float(head(x),str_to_float(substring(text,at,end))),dfo-readback-numbers(text,add(end,1),tail(x)));
+  def dfo-minimum(xs,best) = if nil?(xs) then best else dfo-minimum(tail(xs),dfo-min(head(xs),best));
+  def dfo-maximum(xs,best) = if nil?(xs) then best else dfo-maximum(tail(xs),dfo-max(head(xs),best));
+  def dfo-vec-summary(key,x) = str_concat("SUM ",str_concat(key,str_concat(" n=",str_concat(int_to_str(len(x)),str_concat(" sumsq=",str_concat(dfo-number(dnr-dot(x,x)),str_concat(" min=",str_concat(dfo-number(dfo-minimum(tail(x),head(x))),str_concat(" max=",dfo-number(dfo-maximum(tail(x),head(x))))))))))));
+  def dfo-vec-prefix(key,x,i) = if or(nil?(x),eq(i,8)) then 0 else dfo-vec-prefix-next(key,x,i);
+  def dfo-vec-prefix-next(key,x,i) {
+   let label = str_concat("ORA ",str_concat(key,str_concat(" ",int_to_str(i))));
+   print(str_concat(label,str_concat(" ",dfo-number(head(x))))); dfo-vec-prefix(key,tail(x),add(i,1));
+  }
+  def dfo-save-vector(out,key,x) {
+   dfo-require(and(gt(len(x),0),dfo-finite-vector(x)),str_concat("incomplete or nonfinite output vector: ",key));
+   if str_eq(out,"") then 1 else dfo-publish-vector(out,key,x);
+   print(dfo-vec-summary(key,x)); dfo-vec-prefix(key,x,0); 1;
+  }
+  def dfo-publish-vector(out,key,x) {
+   let text = dfo-numbers(x,list()); let path = str_concat(out,str_concat("/oracle-",str_concat(key,".f64")));
+   let written = write_file(path,text); let held = fbc-read-exact(path,0);
+   dfo-require(and(eq(written,str_len(text)),and(fbc-good(held),and(str_eq(fbc-value(held),text),dfo-readback-numbers(fbc-value(held),0,x)))),str_concat("output write count or numeric readback mismatch: ",key));
+   1;
+  }
+  def dfo-save-keys(out,prefix,row,keys) = if nil?(keys) then 0 else dfo-save-key(out,prefix,row,head(keys),tail(keys));
+  def dfo-save-key(out,prefix,row,key,rest) {
+   dfo-save-vector(out,str_concat(prefix,key),record_get(row,key)); dfo-save-keys(out,prefix,row,rest);
+  }
+  def dfo-mla-keys() = list("xn","qlatn","q_preheadrms","q_headrms","q","kv_norm","kv_roped","kv","heads_attn","heads","low","attn_out");
+  def dfo-hc-keys() = list("hc_resid","hc_flat","hc_mix","hc_post_w","hc_comb","hc_cur","after_attn_hc");
+  def dfo-ffn-keys() = list("ffn_flat","ffn_mix","ffn_post_w","ffn_comb","ffn_cur","router_logits","router_probs","expert_w","sh_gate","sh_up","sh_mid","shared","moe","ffn_out","out_hc","selected");
+  def dfo-save-experts(out,rows,i) = if nil?(rows) then 0 else dfo-save-expert(out,head(rows),tail(rows),i);
+  def dfo-save-expert(out,row,rest,i) {
+   let prefix = str_concat("exp",int_to_str(i));
+   dfo-save-vector(out,str_concat(prefix,"_gate"),nth(row,1)); dfo-save-vector(out,str_concat(prefix,"_up"),nth(row,2)); dfo-save-vector(out,str_concat(prefix,"_mid"),nth(row,3)); dfo-save-vector(out,str_concat(prefix,"_down"),nth(row,4)); dfo-save-experts(out,rest,add(i,1));
+  }
+  def dfo-health(job,aspect,width,x,evidence) {
+   let finite = dfo-finite-vector(x); let valid = and(eq(len(x),width),finite);
+   let expected = str_concat(int_to_str(width)," finite values"); let observed = str_concat(int_to_str(len(x)),if finite then " finite values" else " values carrying nonfinite data");
+   let reading = oh-reading("dsv4-native-oracle",job,aspect,json-node-string(expected),json-node-string(observed),json-node-int(valid),if valid then list() else list(oh-need("numerical-evidence",oh-reference(evidence))),list("continue","retain"),oh-reference(evidence));
+   oh-voice(reading); let response = oh-response(reading,if valid then "continue" else "retain"); oh-voice(response);
+   let selected = oh-select(reading,response,"retain"); oh-voice(oh-applied(reading,selected,oh-reference(evidence)));
+   dfo-require(and(valid,str_eq(selected,"continue")),"numerical stage refused");
+  }
+  def dfo-one(path,token,pos,il,mode,out) = dfo-one-in(dfo-open(path),token,pos,il,mode,out);
+  def dfo-dim-text(xs) = if nil?(xs) then "" else str_concat(int_to_str(head(xs)),if nil?(tail(xs)) then "" else str_concat(",",dfo-dim-text(tail(xs))));
+  def dfo-one-in(r,token,pos,il,mode,out) {
+   let started = now_unix_ms(); let job = str_concat("dsv4-oracle-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(started))));
+   dfo-require(and(dfo-natural(token),and(dfo-natural(pos),and(dfo-natural(il),lt(il,dfo-meta(r,"deepseek4.block_count"))))),"single-layer token position or layer index");
+   let path = record_get(r,"path"); let g = dfo-geometry(r); let rp = dfo-rope-params(r,il); let p = str_concat("blk.",str_concat(int_to_str(il),"."));
+   dfo-require(eq(record_get(rp,"ratio"),0),"probe/hc/layer modes require an uncompressed layer");
+   dfo-require(or(str_eq(mode,"probe"),or(str_eq(mode,"hc"),str_eq(mode,"layer"))),"unknown non-stack oracle mode");
+   let made = if str_eq(out,"") then 0 else host_dir_mkdir(out); let embed = dfo-plain(r,"token_embd.weight",token); let resid = dnr-flat(dnr-fill(record_get(g,"hc"),embed));
+   print(str_concat("ORACLE dsv4-mla-core layer ",str_concat(int_to_str(il),str_concat(" token ",str_concat(int_to_str(token),str_concat(" pos ",int_to_str(pos)))))));
+   dfo-describe(r,g,rp,p,mode);
+   dfo-health(job,"embedding",record_get(g,"e"),embed,path);
+   let a = if str_eq(mode,"probe") then dfo-mla(r,p,embed,g,il,pos,list()) else dfo-attention-half(r,p,resid,g,il,pos,list());
+   dfo-health(job,"attention",record_get(g,"e"),record_get(a,"attn_out"),path); dfo-save-keys(out,"",a,dfo-mla-keys());
+   if not(str_eq(mode,"probe")) then dfo-save-keys(out,"",a,dfo-hc-keys()) else 0;
+   if str_eq(mode,"layer") then dfo-one-ffn(r,p,a,g,token,il,out,job) else 0;
+   print(str_concat("ELAPSED_MS ",int_to_str(sub(now_unix_ms(),started)))); print("END"); 1;
+  }
+  def dfo-description-fields(rows) = if nil?(rows) then "" else str_concat(" ",str_concat(head(head(rows)),str_concat(" ",str_concat(dfo-number(nth(head(rows),1)),dfo-description-fields(tail(rows))))));
+  def dfo-describe(r,g,rp,p,mode) {
+   print(str_concat("GEOM",dfo-description-fields(list(list("n_embd",record_get(g,"e")),list("n_head",record_get(g,"nh")),list("n_head_kv",record_get(g,"nkv")),list("head_dim",record_get(g,"hd")),list("n_rot",record_get(g,"nrot")),list("q_rank",record_get(g,"qr")),list("groups",record_get(g,"ng")),list("rank",record_get(g,"rank"))))));
+   print(str_concat("ROPE",dfo-description-fields(list(list("freq_base",record_get(rp,"base")),list("freq_scale",record_get(rp,"scale")),list("ratio",record_get(rp,"ratio"))))));
+   let a = dfo-dim-text(nth(dfo-tensor(r,str_concat(p,"attn_output_a.weight")),1)); let b = dfo-dim-text(nth(dfo-tensor(r,str_concat(p,"attn_output_b.weight")),1)); let dense = record_has(record_get(r,"tensors"),str_concat(p,"attn_output.weight"));
+   print(str_concat("OUTPATH grouped a=",str_concat(a,str_concat(" b=",str_concat(b,str_concat(" dense_present=",int_to_str(dense)))))));
+   print(str_concat("MODE ",str_concat(mode,dfo-description-fields(list(list("n_hc",record_get(g,"hc")),list("sinkhorn_iters",record_get(g,"iterations")),list("hc_eps",record_get(g,"hc-eps"))))))); 1;
+  }
+  def dfo-one-ffn(r,p,a,g,token,il,out,job) {
+   let f = dfo-ffn(r,p,record_get(a,"after_attn_hc"),g,token,il);
+   dfo-health(job,"complete-layer",mul(record_get(g,"e"),record_get(g,"hc")),record_get(f,"out_hc"),if str_eq(out,"") then record_get(r,"path") else str_concat(out,"/oracle-after_attn_hc.f64"));
+   print(str_concat("FFN clamp ",str_concat(dfo-number(record_get(f,"clamp")),str_concat(" selected ",str_concat(dfo-all-values(record_get(f,"selected"),list()),str_concat(" weights ",dfo-all-values(record_get(f,"expert_w"),list())))))));
+   dfo-save-keys(out,"",f,dfo-ffn-keys()); dfo-save-vector(out,"ffn_normed",record_get(f,"ffn_norm")); dfo-save-experts(out,record_get(f,"per_expert"),0); 1;
+  }
+ }
+ 0;
+}

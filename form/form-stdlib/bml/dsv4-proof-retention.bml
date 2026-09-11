@@ -1,0 +1,68 @@
+// Preserve a completed proof directory before its caller removes that directory.
+// Form owns the request, complete process capture, new archive and readback.
+// tar carries the filesystem archive operation; captured streams stay private.
+// The caller owns the source directory and the archive's subsequent lifetime.
+// preludes: form-stdlib/bml/native-source-inventory.bml form-stdlib/bml/dsv4-oracle-input.bml form-stdlib/bml/dsv4-view-publication.bml
+section [form.bml] {
+ class Dsv4ProofRetention {
+  def dpa-parse(bytes) {
+   let fields = split-on(dsi-without-final-lf(bytes),byte_to_str(0));
+   if not(eq(len(fields),5)) then dqi-refused("four NUL-terminated archive fields required") else if not(and(str_eq(head(fields),"DPA1"),and(str_eq(nth(fields,3),"END"),str_eq(nth(fields,4),"")))) then dqi-refused("complete archive framing required") else if not(and(dqi-path(nth(fields,1)),dqi-path(nth(fields,2)))) then dqi-refused("nonempty source directory and new archive paths required") else record_new(0,"ready",1,"reason","complete proof archive request","source",nth(fields,1),"destination",nth(fields,2));
+  }
+  def dpa-observe(id,aspect,ok,evidence) {
+   let row = oh-reading("dsv4-proof-retention",id,aspect,json-node-int(1),json-node-int(ok),json-node-int(ok),list(),list("continue","request-evidence"),evidence);
+   oh-voice(row); let response = oh-response(row,if ok then "continue" else "request-evidence"); oh-voice(response);
+   let action = oh-select(row,response,"request-evidence"); oh-voice(oh-applied(row,action,evidence)); ok;
+  }
+  def dpa-argv(source) = list("/usr/bin/tar","-cf","-","-C",source,".");
+  def dpa-operating-path(path) = if str_eq(substring(path,0,1),"/") then path else str_concat("./",path);
+  // The child carries only directory operations. Form reads its complete physical
+  // cwd and decides containment; one final output LF is transport, not path data.
+  def dpa-directory(path) {
+   let argv = list("/bin/sh","-c","CDPATH= cd -P -- \"$1\" && /bin/pwd -P","proof-directory",dpa-operating-path(path));
+   if not(npp-argv(argv)) then record_new(0,"ready",0,"path","","capture","") else dpa-directory-read(nsi-capture(argv));
+  }
+  def dpa-directory-read(captured) {
+   let text = nsi-text(captured);
+   let ready = and(nsi-ok(captured),and(gt(str_len(text),1),and(str_eq(substring(text,0,1),"/"),str_eq(substring(text,sub(str_len(text),1),str_len(text)),"\n"))));
+   record_new(0,"ready",ready,"path",if ready then dsi-without-final-lf(text) else "","capture",nsi-evidence(captured));
+  }
+  def dpa-within(path,directory) = or(str_eq(directory,"/"),or(str_eq(path,directory),eq(str_find(path,str_concat(directory,"/"),0),0)));
+  def dpa-refused(reason) {
+   dpa-observe(str_concat("archive-admission-",int_to_str(host_pid())),"complete-archive-admission",0,json-node-string(reason));
+   record_new(0,"ready",0,"reason",reason,"capture","","child-exit",-1);
+  }
+  def dpa-retain(source,destination) = if not(and(dqi-path(source),dqi-path(destination))) then dpa-refused("complete NUL-free source and archive paths required") else if not(npp-argv(dpa-argv(source))) then dpa-carrier-refused() else dpa-directories(source,destination);
+  def dpa-directories(source,destination) {
+   let parent = dpa-directory(fs-path-dirname(destination)); let input = dpa-directory(source); let captures = dpa-directory(".hearth");
+   if not(eq(record_get(parent,"ready"),1)) then dpa-directory-refused(parent) else if not(eq(record_get(input,"ready"),1)) then dpa-directory-refused(input) else if not(eq(record_get(captures,"ready"),1)) then dpa-directory-refused(captures) else dpa-directories-admitted(record_get(input,"path"),record_get(parent,"path"),record_get(captures,"path"),destination);
+  }
+  def dpa-directory-refused(directory) {
+   let refused = dpa-refused("complete physical directory admission refused; OS capture retained"); record_set(refused,"capture",record_get(directory,"capture")); refused;
+  }
+  def dpa-directories-admitted(input,parent,captures,destination) = if or(dpa-within(parent,input),dpa-within(captures,input)) then dpa-refused("archive and capture directories must remain outside the source directory") else if not(npp-argv(dpa-argv(input))) then dpa-carrier-refused() else dpa-capture(dpa-argv(input),fs-path-join(parent,fs-path-basename(destination)));
+  def dpa-carrier-refused() {
+   dpa-observe(str_concat("archive-argv-",int_to_str(host_pid())),"complete-argv-admission",0,json-node-string("current host argv carrier cannot preserve this request"));
+   record_new(0,"ready",0,"reason","current host argv carrier cannot preserve this request","capture","","child-exit",-1);
+  }
+  def dpa-capture(argv,destination) {
+   let captured = nsi-capture(argv);
+   let job = nsi-evidence(captured); let complete = and(nsi-ok(captured),gt(str_len(nsi-text(captured)),0));
+   dpa-observe(job,"complete-archive-capture",complete,oh-reference(nsi-path(job,"capture.json")));
+   if not(complete) then record_new(0,"ready",0,"reason","archive command or complete stream refused","capture",job,"child-exit",nsi-status(captured)) else dpa-publish(captured,destination);
+  }
+  def dpa-publish(captured,destination) {
+   let published = dtvp-new(destination,nsi-text(captured)); let job = nsi-evidence(captured);
+   let held = if eq(record_get(published,"ready"),1) then fbc-read-exact(destination,0) else nothing();
+   let ready = if nothing?(held) then 0 else and(fbc-good(held),str_eq(fbc-value(held),nsi-text(captured)));
+   dpa-observe(job,"exclusive-archive-publication",ready,json-node-object(list(oh-s("archive",destination),oh-n("bytes",str_len(nsi-text(captured))),oh-n("ready",ready),oh-s("disposition",record_get(published,"disposition")))));
+   record_new(0,"ready",ready,"reason",if ready then "complete new archive and settled publication" else "archive publication or readback refused","capture",job,"child-exit",nsi-status(captured),"publication",published,"archive",destination,"bytes",str_len(nsi-text(captured)));
+  }
+  def dpa-run(request) {
+   dfo-require(eq(record_get(request,"ready"),1),record_get(request,"reason"));
+   let result = dpa-retain(record_get(request,"source"),record_get(request,"destination"));
+   dfo-require(eq(record_get(result,"ready"),1),record_get(result,"reason")); 1;
+  }
+ }
+ 0;
+}

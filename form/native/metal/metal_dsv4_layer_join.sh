@@ -1,50 +1,18 @@
 #!/usr/bin/env bash
-# metal_dsv4_layer_join.sh — STONE 37, Stage 1: ONE COMPLETE DeepSeek-V4-Flash LAYER at REAL DIMS.
-#
-# Two halves were standing and had never been joined:
-#   * the ATTENTION half — Stone 36, metal_dsv4_layer.sh (30 gates): HC-pre -> MLA -> HC-post on the real
-#     layer-0 activations, proven against a rented fp64 ds4.c transcription.
-#   * the FFN half — Stone 34, metal_dsv4_forward.sh (8 gates): the hash table read, the F16 router
-#     matvec, MXFP4 gate/up and the fused IQ2_XXS down, each self-carved at real dims.
-# The join is the SECOND hyper-connection frame. HC is this model's residual stream — there is no plain
-# residual anywhere in it — so a complete layer is two blocks inside two independent HC frames:
-#     hc_pre(attn) -> MLA -> hc_post(attn) -> hc_pre(ffn) -> ffn_norm -> MoE+shared -> hc_post(ffn)
-# and that whole chain, on the file's own blk.0 weights through the overlapping views, is what this
-# harness runs and gates. Its output is out_hc: the four hyper-connection streams the NEXT layer receives.
-#
-# THE EVIDENCE CLASS PER STAGE (twinblind, corpus row 868), named because they are not the same:
-#   CHOOSING  — the two HC frames, ffn_norm's placement, the gating function sqrt(softplus(.)), the hash
-#               selection on the TOKEN id, the floored-sum weight normalisation and the 1.5 scale, the
-#               clamp's asymmetry, the router weight multiplying the MID, the shared expert being added.
-#               A self-carve inherits every one of those on BOTH sides and is blind to all of them, so
-#               they are proven against form-stdlib/tests/dsv4-mla-core-oracle.py in `layer` mode: an
-#               independent fp64 transcription of ds4.c's control flow that parses the same GGUF itself
-#               and shares no code, no buffer and no arithmetic with the band, the MSL or this carrier.
-#   CANONICAL — the MXFP4 / IQ2_XXS / MXFP8 / F16 decodes. One right answer; Stones 33/34/35 self-carved
-#               them at real dims (GPU through the view vs an independent CPU decode of the same bytes),
-#               and those harnesses still gate them. Here the oracle's own independent decode re-witnesses
-#               them, which is a strictly stronger check than a second copy of the same code.
-#
-# THE RECIPE GAP, said out loud (aporon). ds4.c cannot execute this file's FFN: matvec_experts_mid_prequant
-# (:9349) refuses type-40 gate/up and layer_shared_ffn_one (:10460) demands a Q8_0 shared expert where
-# this file carries type 41. So the oracle rents ds4.c's ORDER and its scalars and feeds each expert
-# matvec the EXACT activation — ds4.c's own ds4_vec_dot_iq2_xxs_f32 (:3779) control flow — rather than its
-# Q8_K-prequantised path. What is proven stops exactly there.
-#
-# hushfold (corpus row 859): RoPE is the identity at position 0, so the whole layer is run at TWO
-# positions and the two outputs are required to DIFFER while each agrees with its own oracle.
-# zerobirth/edgedrop: every output buffer is NaN-sentinelled before its dispatch and cb.error / cb.status
-# checked after; a dead view or an unrun kernel reads as a sentinel the comparator rejects.
-# onelean/lapspan: the 85 GiB file exceeds maxBufferLength, so every weight is reached through the
-# overlapping page-aligned bytesNoCopy view set the body's own residency plan lays out.
-#
-# Run:  form/native/metal/metal_dsv4_layer_join.sh   (optional: FORM_DS4_PROMPT_TOKEN=<id>)
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
+# One complete DeepSeek-V4 layer: HC-pre(attn), MLA, HC-post(attn),
+# HC-pre(FFN), normalization, routed MoE plus shared expert, HC-post(FFN).
+# An independent Form fp64 reference owns model decoding and all control
+# choices; the Form-authored Metal shaders have separate arithmetic.
+# Actual four-stream output is compared at positions0/7 with each dispatch
+# sentinelled and every command completion checked at unchanged thresholds.
+# Run: form/native/metal/metal_dsv4_layer_join.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form
-GO_BIN="$ROOT/form-kernel-go/bin-go"
 BLOB="${FORM_DS4_BLOB:-$HOME/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf}"
+case "$BLOB" in /*) ;; *) BLOB="$PWD/$BLOB" ;; esac
+PROOF_ARCHIVE="${FORM_DS4_PROOF_ARCHIVE:-}"
+case "$PROOF_ARCHIVE" in ""|/*) ;; *) PROOF_ARCHIVE="$PWD/$PROOF_ARCHIVE" ;; esac
 CACHE="$ROOT/native/metal/.metallib-cache"
 TOKEN="${FORM_DS4_PROMPT_TOKEN:-671}"
 LAYER=0
@@ -55,19 +23,26 @@ fi
 if [[ ! -f "$BLOB" ]]; then
     echo "SKIP  the ds4 GGUF is not on this host: $BLOB   (set FORM_DS4_BLOB)"; exit 2
 fi
-if [[ ! -x "$GO_BIN" ]]; then
-    echo "  building the Go kernel..."; (cd "$ROOT/form-kernel-go" && go build -o bin-go .) || { echo "FAIL go build"; exit 1; }
-fi
 FSIZE=$(stat -f%z "$BLOB")
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+work="$(mktemp -d)" || exit 1
+proof_cleanup() {
+    local result=$?
+    trap - EXIT
+    if [[ -n "$PROOF_ARCHIVE" ]]; then
+        if ! ( cd "$ROOT/.." && printf '%s\0' DPA1 "$work" "$PROOF_ARCHIVE" END | ./fkwu observe/dsv4-proof-retention-run.bml ); then
+            echo "FAIL proof retention; work remains at $work" >&2
+            (( result != 0 )) || result=1
+            exit "$result"
+        fi
+    fi
+    if ! rm -rf "$work"; then (( result != 0 )) || result=1; fi
+    exit "$result"
+}
+trap proof_cleanup EXIT
 echo "ds4 blob: $FSIZE bytes at $(date '+%H:%M:%S')   ONE COMPLETE LAYER (blk.$LAYER, token=$TOKEN)"
 
-# ── the `; preludes:` directives are LIVE recursive load instructions; walked, never hand-catted ──
-fk_deps(){ awk 'BEGIN{IGNORECASE=1} /^;[ \t]*preludes:/{ s=$0; sub(/^;[ \t]*preludes:[ \t]*/,"",s); n=split(s,a,/[ \t]+/); for(i=1;i<=n;i++){ if(a[i]=="\\"||tolower(a[i])=="none"||tolower(a[i])=="(none)"||a[i]=="")continue; if(a[i]~/\.fk$/)print a[i] } }' "$1" 2>/dev/null; }
-fk_path(){ local dir; dir="$(dirname "$1")"; if [[ -f "$dir/$2" ]]; then printf '%s\n' "$dir/$2"; elif [[ -f "$2" ]]; then printf '%s\n' "$2"; elif [[ "$2" == form/* && -f "${2#form/}" ]]; then printf '%s\n' "${2#form/}"; else printf '%s\n' "$dir/$2"; fi; }
-fk_expand(){ local f="$1" d p; case " $FK_SEEN " in *" $f "*) return ;; esac; FK_SEEN="$FK_SEEN $f"; while read -r d; do [[ -z "$d" ]] && continue; p="$(fk_path "$f" "$d")"; fk_expand "$p"; done < <(fk_deps "$f"); printf '%s\n' "$f"; }
+# Native source loading and emission are owned by the Form door.
 cd "$ROOT"
-FK_SEEN=""; FILES=(); while read -r x; do FILES+=("$x"); done < <(fk_expand native/metal/dsv4-layer-real.fk)
 
 # ── 1. measure the device ─────────────────────────────────────────────────────────────────────────
 cat > "$work/probe.swift" <<'SWIFT'
@@ -84,14 +59,13 @@ echo "device: $DEVNAME  maxBufferLength=$MAXBUF  page=$PAGE"
 
 # ── 2. the body's residency plan + the manifest, walked over the LIVE file ─────────────────────────
 echo "walking the file header for the residency plan and the manifest..."
-printf '(wre-emit "%s" %s %s %s)\n' "$BLOB" "$FSIZE" "$MAXBUF" "$PAGE" > "$work/plan.fk"
-"$GO_BIN" "${FILES[@]}" "$work/plan.fk" > "$work/plan.out" 2>"$work/plan.err" || { echo "FAIL plan emission"; tail -5 "$work/plan.err"; exit 1; }
+( cd "$ROOT/.." && printf '%s\0' DTV1 "$BLOB" "$MAXBUF" "$PAGE" "$work/views.txt" END | ./fkwu observe/dsv4-tensor-views-run.bml ) > "$work/plan.out" 2> "$work/plan.err" || { echo "FAIL tensor-view plan emission"; tail -5 "$work/plan.err"; exit 1; }
 grep -qx 'END' "$work/plan.out" || { echo "FAIL plan stream truncated"; exit 1; }
-WR=($(awk '$1=="WR"{print; exit}' "$work/plan.out"))
-STEP=${WR[7]}; VIEWLIMIT=${WR[5]}; NVIEWS=${WR[9]}
-printf '(gm-emit-manifest "%s")\n' "$BLOB" > "$work/man.fk"
-"$GO_BIN" "${FILES[@]}" "$work/man.fk" > "$work/man.out" 2>"$work/man.err" || { echo "FAIL manifest emission"; tail -5 "$work/man.err"; exit 1; }
-echo "  plan: view_limit=$VIEWLIMIT step=$STEP nviews=$NVIEWS"
+VR=($(awk '$1=="VR"{print; exit}' "$work/plan.out"))
+MAXVIEW=${VR[5]}; NVIEWS=${VR[7]}
+( cd "$ROOT/.." && printf '%s\0' DSE1 manifest "$BLOB" "" END | ./fkwu observe/dsv4-proof-emission-run.bml ) > "$work/man.out" 2>"$work/man.err" || { echo "FAIL manifest emission"; tail -5 "$work/man.err"; exit 1; }
+grep -qx 'END' "$work/man.out" || { echo "FAIL manifest stream truncated"; exit 1; }
+echo "  plan: maximum_tensor_view=$MAXVIEW nviews=$NVIEWS"
 
 tv()  { awk -v n="$1" -v f="$2" '$1=="TV" && $2==n {print $(f); exit}' "$work/plan.out"; }  # 3=abs 4=bytes 5=idx 6=inner 7=holds
 trow(){ awk -v n="$1" -v f="$2" '$1=="T"  && $2==n {print $(f); exit}' "$work/man.out"; }    # T name type ndim d0 d1 d2 abs nelslice slices bytes
@@ -137,8 +111,6 @@ N_HC=4; HC_ITERS=20; HC_EPS=0.0000009999999975; RMS_EPS=0.0000009999999975
 N_EXPERT=256; N_USED=6; N_FF=2048; WSCALE=1.5; CLAMP=10.0
 POS_A=0; POS_B=7
 cat >> "$work/params.txt" <<EOF
-STEP $STEP
-VIEWLIMIT $VIEWLIMIT
 NVIEWS $NVIEWS
 TOKEN $TOKEN
 N_EMBD $N_EMBD
@@ -159,15 +131,16 @@ RMS_EPS $RMS_EPS
 WSCALE $WSCALE
 CLAMP $CLAMP
 EOF
+cat "$work/views.txt" >> "$work/params.txt"
 awk '{ if ($2 == "" ) { print "FAIL missing value for " $1 > "/dev/stderr"; exit 1 } }' "$work/params.txt" || exit 1
 
-# ── 2b. THE RENTED ORACLE, in `layer` mode, at BOTH positions (hushfold) ───────────────────────────
-ORACLE="$ROOT/form-stdlib/tests/dsv4-mla-core-oracle.py"
-[[ -f "$ORACLE" ]] || { echo "FAIL the rented oracle is missing: $ORACLE"; exit 1; }
+# ── 2b. THE INDEPENDENT FORM ORACLE, in `layer` mode, at BOTH positions (hushfold) ───────────────────────────
+ORACLE="$ROOT/../observe/dsv4-oracle-run.bml"
+[[ -f "$ORACLE" ]] || { echo "FAIL the native oracle source is missing: $ORACLE"; exit 1; }
 for POS in "$POS_A" "$POS_B"; do
     mkdir -p "$work/ora$POS"
-    echo "  renting the oracle in LAYER mode at pos=$POS (independent fp64 transcription of ds4.c)..."
-    DSV4_ORACLE_MODE=layer DSV4_ORACLE_OUT="$work/ora$POS" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS" "$LAYER" \
+    echo "  running the native oracle in LAYER mode at pos=$POS (independent fp64 transcription of ds4.c)..."
+    ( cd "$ROOT/.." && printf '%s\0' DFO2 "$BLOB" "$TOKEN" "$POS" "$LAYER" layer "$work/ora$POS" 0 0 0 "" END | ./fkwu "$ORACLE" ) \
         > "$work/ora$POS.txt" 2>"$work/ora$POS.err" \
         || { echo "FAIL oracle layer-mode run at pos=$POS"; tail -5 "$work/ora$POS.err"; exit 1; }
     grep -qx 'END' "$work/ora$POS.txt" || { echo "FAIL oracle stream truncated at pos=$POS"; exit 1; }
@@ -180,10 +153,11 @@ fi
 echo "  hushfold: the ORACLE's layer output already differs between pos $POS_A and pos $POS_B — the GPU must too"
 
 # ── 3. compile the translation units, cached by sha ────────────────────────────────────────────────
-compile_unit() { # $1 emit-form  $2 grep-token  $3 cache-prefix -> echoes LIB path
-    local form="$1" tok="$2" pre="$3" lib sha
-    echo "($form)" > "$work/$pre.fk"
-    "$GO_BIN" "${FILES[@]}" "$work/$pre.fk" > "$work/$pre.out" 2>"$work/$pre.err" || { echo "FAIL $pre MSL emission" >&2; cat "$work/$pre.err" >&2; return 1; }
+compile_unit() { # $1 source entry, $2 kernel name, $3 cache prefix -> library path
+    local form="$1" tok="$2" pre="$3" lib sha detail=""
+    [[ "$form" != dsv4-hc-unit ]] || detail=hc-precision
+    ( cd "$ROOT/.." && printf '%s\0' DSE1 shader "$form" "$detail" END | ./fkwu observe/dsv4-proof-emission-run.bml ) > "$work/$pre.out" 2>"$work/$pre.err" || { echo "FAIL $pre MSL emission" >&2; cat "$work/$pre.err" >&2; return 1; }
+    grep -qx 'MSL' "$work/$pre.out" && grep -qx 'END' "$work/$pre.out" || { echo "FAIL $pre shader stream truncated" >&2; return 1; }
     awk '/^MSL$/{d=1;next} /^END$/{d=0;next} d{print}' "$work/$pre.out" > "$work/$pre.metal"
     grep -q "$tok" "$work/$pre.metal" || { echo "FAIL $pre kernel $tok not emitted" >&2; return 1; }
     sha="$(shasum -a 256 "$work/$pre.metal" | cut -c1-16)"; lib="$CACHE/$pre-$sha.metallib"
@@ -242,7 +216,7 @@ let hff = T("HFF"), hfs = T("HFS"), hfb = T("HFB")
 let fnw = T("FN"), rt = T("RT"), ht = T("HT")
 let gx = T("GX"), ux = T("UX"), dx = T("DX"), sgw = T("SG"), suw = T("SU"), sdw = T("SD")
 
-let step = I("STEP"), viewLimit = I("VIEWLIMIT"), nviews = I("NVIEWS"), token = I("TOKEN")
+let nviews = I("NVIEWS"), token = I("TOKEN")
 let nEmbd = I("N_EMBD"), nHead = I("N_HEAD"), headDim = I("HEAD_DIM"), nRot = I("N_ROT"), oRank = I("O_RANK")
 let nHc = I("N_HC"), hcIters = I("HC_ITERS"), nExpert = I("N_EXPERT"), nUsed = I("N_USED"), nFf = I("N_FF")
 let posA = I("POS_A"), posB = I("POS_B")
@@ -257,25 +231,32 @@ var failures = 0, gpuErrors = 0
 var gpuFirstError: String? = nil
 func check(_ ok: Bool, _ pass: String, _ fail: String) { if ok { print("PASS  " + pass) } else { print("FAIL  " + fail); failures += 1 } }
 
-// ---- the file, mmapped once and wrapped in the body's own overlapping views (onelean/lapspan) ----
+// The proof process owns one whole-file mapping and Form's exact tensor views.
 let fd = open(blobPath, O_RDONLY)
 guard fd >= 0 else { print("FAIL cannot open blob"); exit(1) }
-var st = stat(); fstat(fd, &st)
+var st = stat()
+guard fstat(fd, &st) == 0, st.st_size > 0, st.st_size <= Int.max else { print("FAIL exact source fstat extent"); close(fd); exit(1) }
 let fileLen = Int(st.st_size); let page = Int(getpagesize())
-let mapLen = (fileLen + page - 1) / page * page
+guard page > 0, fileLen == I("PLAN_EXTENT"), page == I("PLAN_PAGE") else { print("FAIL source extent or platform page changed after the Form plan"); close(fd); exit(1) }
+let padding = (page - fileLen % page) % page
+guard fileLen <= Int.max - padding else { print("FAIL aligned map extent overflows"); close(fd); exit(1) }
+let mapLen = fileLen + padding
 guard let mapped0 = mmap(nil, mapLen, PROT_READ, MAP_PRIVATE, fd, 0), mapped0 != MAP_FAILED else { print("FAIL mmap failed"); exit(1) }
 
 var views: [MTLBuffer] = []
 for i in 0..<nviews {
-    let vs = i*step; let vlen = min(viewLimit, mapLen - vs)
-    guard vs % page == 0 else { print("FAIL view \(i) start not page-aligned"); exit(1) }
+    let vs = I("VIEW_\(i)_START"), vlen = I("VIEW_\(i)_BYTES")
+    guard vs >= 0, vlen > 0, vs <= mapLen, vlen <= mapLen - vs,
+          vs % page == 0, vlen % page == 0, vlen <= dev.maxBufferLength else {
+        print("FAIL tensor view \(i) violates its file, alignment or device extent"); exit(1)
+    }
     guard let buf = dev.makeBuffer(bytesNoCopy: mapped0.advanced(by: vs), length: vlen, options: .storageModeShared, deallocator: nil) else {
         print("FAIL view \(i) makeBuffer failed"); failures += 1; break
     }
     views.append(buf)
 }
 check(views.count == nviews,
-  "gate 0 the views map: all \(nviews) overlapping page-aligned bytesNoCopy views of the \(fileLen) B file wrap on \(dev.name) — one buffer over the whole file cannot (maxBufferLength \(dev.maxBufferLength))",
+  "gate 0 the views map: all \(nviews) complete page-aligned bytesNoCopy tensor resources of the \(fileLen) B file wrap on \(dev.name)",
   "gate 0 only \(views.count)/\(nviews) views mapped")
 if failures > 0 { print("VERDICT FAIL the views did not map"); exit(1) }
 
@@ -286,7 +267,13 @@ let all: [(String, Tn)] = [("token_embd", emb), ("attn_norm", nrm), ("attn_q_a",
     ("ffn_norm", fnw), ("ffn_gate_inp", rt), ("ffn_gate_tid2eid", ht), ("ffn_gate_exps", gx),
     ("ffn_up_exps", ux), ("ffn_down_exps", dx), ("ffn_gate_shexp", sgw), ("ffn_up_shexp", suw),
     ("ffn_down_shexp", sdw)]
-let spanning = all.filter { $0.1.holds != 1 || $0.1.idx >= nviews }
+func resident(_ t: Tn) -> Bool {
+    guard t.idx >= 0, t.idx < views.count else { return false }
+    let length = views[t.idx].length, start = I("VIEW_\(t.idx)_START")
+    return t.holds == 1 && t.abs >= 0 && t.abs <= fileLen && t.bytes > 0 && t.bytes <= fileLen - t.abs &&
+           t.inner >= 0 && t.inner <= length && t.bytes <= length - t.inner && t.abs == start + t.inner
+}
+let spanning = all.filter { !resident($0.1) }
 check(spanning.isEmpty,
   "gate 1 residency: all \(all.count) tensors a complete layer touches — the attention block, BOTH hyper-connection frames, the router, the hash table, the 256-expert stacks and the shared expert — each lie wholly inside one view",
   "gate 1 these tensors span views or index past the set: \(spanning.map { $0.0 })")
@@ -365,7 +352,7 @@ let pGrouped = pipe(lCore, "form_dsv4_mx8_matvec_grouped")
 let pKvq = pipe(lCore, "form_dsv4_kv_fp8_f16_round")
 let pF16mv = pipe(lCore, "form_dsv4_f16_matvec")
 let pHcBcast = pipe(lHc, "form_hc_broadcast_f32")
-let pHcRmsNw = pipe(lHc, "form_hc_rmsnorm_nw_f32")
+let pHcRmsNw = pipe(lHc, "form_dsv4_hc_rms_precise")
 let pHcSplit = pipe(lHc, "form_hc_split_f32")
 let pHcWsum = pipe(lHc, "form_hc_wsum_f32")
 let pHcPost = pipe(lHc, "form_hc_post_f32")
@@ -491,6 +478,7 @@ do { var b64 = UInt64(emb.inner + rowOff), c32 = UInt32(nEmbd)
      enc(pEmb, nEmbd, 256) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x0, offset: 0, index: 1)
                                   c.setBytes(&b64, length: 8, index: 2); c.setBytes(&c32, length: 4, index: 3) } }
 let hcDim = nHc * nEmbd
+guard hcDim > 0 && hcDim <= 16777216 && eps.isFinite && eps > 0 else { print("FAIL precise HC RMS geometry or epsilon"); exit(1) }
 // ds4.c:9764 — the plain embedding broadcast to every hyper-connection stream. THE layer-0 input.
 let residHc = sentinelled(hcDim)
 do { var a = UInt32(nHc), b = UInt32(nEmbd)
@@ -628,7 +616,7 @@ func gateLayer(_ pos: Int, _ oraDir: String, _ base: Int, _ verbose: Bool) {
         guard ref.count == cnt else { print("FAIL gate \(n) oracle \(key) has \(ref.count) entries, expected \(cnt)"); failures += 1; layerFail += 1; return }
         let (ok, ma, mr, nn, ds, mn, mx) = cmpOra(fp(buf, cnt), ref, absB, relB, 1e-2)
         check(ok && gpuErrors == 0,
-          "gate \(n) \(passText) [RENTED ORACLE, pos \(pos)] (maxAbs \(ma), maxRel \(mr) above |1e-2|; \(ds) distinct, range [\(mn),\(mx)]; \(nn) NaN)",
+          "gate \(n) \(passText) [INDEPENDENT FORM ORACLE, pos \(pos)] (maxAbs \(ma), maxRel \(mr) above |1e-2|; \(ds) distinct, range [\(mn),\(mx)]; \(nn) NaN)",
           "gate \(n) \(key) pos \(pos): maxAbs \(ma) maxRel \(mr) nan \(nn) distinct \(ds) gpuErrors \(gpuErrors)")
         if !(ok && gpuErrors == 0) { layerFail += 1 }
     }
@@ -645,7 +633,7 @@ func gateLayer(_ pos: Int, _ oraDir: String, _ base: Int, _ verbose: Bool) {
     // forepick (row 867): the selection is a TABLE READ on the token id, and it is bit-exact.
     let oraSel = readOracle(oraDir, "selected").map { Int($0) }
     check(R.ids == oraSel && !R.ids.isEmpty,
-      "gate \(base+4) forepick — the layer-\(0) HASH selection [RENTED ORACLE, pos \(pos)]: the GPU read ffn_gate_tid2eid's I32 row for token \(token) through view \(ht.idx) and got experts \(R.ids), bit-identical to the oracle's. The router did NOT choose these; the table did (ds4.c:4806/:10567, n_hash_layer 3)",
+      "gate \(base+4) forepick — the layer-\(0) HASH selection [INDEPENDENT FORM ORACLE, pos \(pos)]: the GPU read ffn_gate_tid2eid's I32 row for token \(token) through view \(ht.idx) and got experts \(R.ids), bit-identical to the oracle's. The router did NOT choose these; the table did (ds4.c:4806/:10567, n_hash_layer 3)",
       "gate \(base+4) hash selection: GPU \(R.ids) vs oracle \(oraSel)")
     if R.ids != oraSel { failures += 1; layerFail += 1 }
     G(base+5, sentinelledCopy(R.wts), nUsed, "expert_w", 2e-5, 2e-5,
@@ -700,7 +688,7 @@ if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(
 print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — the model is mmapped and wrapped, not copied (onelean)", dev.currentAllocatedSize, Double(dev.currentAllocatedSize)/1073741824.0))
 
 let ok = failures == 0 && gpuErrors == 0
-if ok { print("VERDICT PASS  31 gates — ONE COMPLETE DeepSeek-V4-Flash LAYER at real dims over the 85 GiB file: hc_pre(attn) -> MLA -> hc_post(attn) -> hc_pre(ffn) -> ffn_norm -> hash-routed MoE over 6 of 256 experts + the shared expert -> hc_post(ffn), at TWO positions, every choosing surface against a rented fp64 ds4.c transcription and every dispatch sentinelled") }
+if ok { print("VERDICT PASS  31 gates — ONE COMPLETE DeepSeek-V4-Flash LAYER at real dims over the 85 GiB file: hc_pre(attn) -> MLA -> hc_post(attn) -> hc_pre(ffn) -> ffn_norm -> hash-routed MoE over 6 of 256 experts + the shared expert -> hc_post(ffn), at TWO positions, every choosing surface against an independent Form fp64 reference and every dispatch sentinelled") }
 else { print("VERDICT FAIL  \(failures) gate(s), \(gpuErrors) cb errors") }
 exit(ok ? 0 : 1)
 SWIFT

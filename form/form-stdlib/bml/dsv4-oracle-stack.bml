@@ -1,0 +1,76 @@
+// One resident independent oracle carries all layers and per-layer KV histories.
+// preludes: form/form-stdlib/bml/dsv4-oracle-resources.bml
+section [form.bml] {
+ class Dsv4OracleStack {
+  def dqs-tilt(xs,size,i,acc) = if nil?(xs) then reverse(acc) else dqs-tilt(tail(xs),size,add(i,1),cons(mul(head(xs),add(1.0,mul(size,if eq(mod(i,2),0) then 1.0 else -1.0))),acc));
+  def dqs-perturb(xs,size) = if eq(size,0.0) then xs else dqs-tilt(xs,size,0,list());
+  def dqs-next-state(xs,options) = dqs-perturb(if eq(record_get(options,"f32"),1) then dfo-round-list(xs,32,list()) else xs,record_get(options,"per-step"));
+  def dqs-done-text(i,end) = if eq(i,end) then "" else str_concat(int_to_str(i),str_concat("\n",dqs-done-text(add(i,1),end)));
+  def dqs-done(out,il) {
+   let path = str_concat(out,"/oracle-done.txt"); let before = fbc-read-exact(path,0);
+   dfo-require(and(fbc-good(before),str_eq(fbc-value(before),dqs-done-text(0,il))),"stack completion prefix changed");
+   let line = str_concat(int_to_str(il),"\n"); let wrote = sbt-append-count(path,line); let after = fbc-read-exact(path,0);
+   dfo-require(and(eq(wrote,str_len(line)),and(fbc-good(after),str_eq(fbc-value(after),dqs-done-text(0,add(il,1))))),"stack completion append or readback"); 1;
+  }
+  def dqs-pairs(out,prefix,rows) = if nil?(rows) then 1 else dqs-pair(out,prefix,head(rows),tail(rows));
+  def dqs-pair(out,prefix,row,rest) {
+   dfo-save-vector(out,str_concat(prefix,head(row)),nth(row,1)); dqs-pairs(out,prefix,rest);
+  }
+  def dqs-save(out,il,a,f) {
+   let e = head(record_get(f,"per_expert")); let prefix = str_concat("L",str_concat(int_to_str(il),"-"));
+   dqs-pairs(out,prefix,list(list("kv_hist",dnr-flat(record_get(a,"history"))),list("q_roped",record_get(a,"q")),list("kv_q",record_get(a,"kv")),list("heads_attn",record_get(a,"heads_attn")),list("attn_out",record_get(a,"attn_out")),list("after_attn_hc",record_get(a,"after_attn_hc")),list("ffn_cur",record_get(f,"ffn_cur")),list("ffn_normed",record_get(f,"ffn_norm")),list("router_logits",record_get(f,"router_logits")),list("expert_w",record_get(f,"expert_w")),list("selected",record_get(f,"selected")),list("exp0_gate",nth(e,1)),list("exp0_up",nth(e,2)),list("exp0_mid",nth(e,3)),list("exp0_down",nth(e,4)),list("moe",record_get(f,"moe")),list("shared",record_get(f,"shared")),list("ffn_out",record_get(f,"ffn_out")),list("out_hc",record_get(f,"out_hc"))));
+   dqs-done(out,il);
+  }
+  def dqs-layer-line(r,p,il,a,f) {
+   let rp = record_get(a,"rope");
+   let left = str_concat("LAYER ",str_concat(int_to_str(il),str_concat(" ratio ",str_concat(int_to_str(record_get(rp,"ratio")),str_concat(" freq_base ",str_concat(dfo-number(record_get(rp,"base")),str_concat(" freq_scale ",dfo-number(record_get(rp,"scale")))))))));
+   let types = str_concat(" n_exp ",str_concat(int_to_str(record_get(f,"n_exp_stack")),str_concat(" gate_t ",str_concat(int_to_str(head(dfo-tensor(r,str_concat(p,"ffn_gate_exps.weight")))),str_concat(" up_t ",str_concat(int_to_str(head(dfo-tensor(r,str_concat(p,"ffn_up_exps.weight")))),str_concat(" down_t ",int_to_str(head(dfo-tensor(r,str_concat(p,"ffn_down_exps.weight")))))))))));
+   print(str_concat(left,str_concat(types,str_concat(" regime ",str_concat(record_get(f,"regime"),str_concat(" selected ",str_concat(dfo-all-values(record_get(f,"selected"),list()),str_concat(" weights ",dfo-all-values(record_get(f,"expert_w"),list())))))))));
+  }
+  def dqs-layers(r,g,history,resid,token,pos,il,layers,gated,options) = if eq(il,layers) then resid else dqs-layer(r,g,history,resid,token,pos,il,layers,gated,options);
+  def dqs-layer(r,g,history,resid,token,pos,il,layers,gated,options) {
+   let p = str_concat("blk.",str_concat(int_to_str(il),".")); let key = int_to_str(il); let prior = if record_has(history,key) then record_get(history,key) else list();
+   dqs-memory(r,str_concat("before-layer-",int_to_str(il)));
+   let a = dfo-attention-half(r,p,resid,g,il,pos,prior); record_set(history,key,record_get(a,"history"));
+   let f = dfo-ffn(r,p,record_get(a,"after_attn_hc"),g,token,il);
+   record_set(r,"decoded-activation-widths",list(len(resid),len(record_get(a,"q")),len(record_get(a,"kv")),len(record_get(f,"out_hc"))));
+   dqs-memory(r,str_concat("computed-layer-",int_to_str(il)));
+   if gated then dqs-layer-line(r,p,il,a,f) else 0;
+   if and(gated,not(str_eq(record_get(options,"out"),""))) then dqs-save(record_get(options,"out"),il,a,f) else 0;
+   dqs-memory(r,str_concat("published-layer-",int_to_str(il)));
+   dfo-health(record_get(options,"job"),str_concat("layer-",str_concat(int_to_str(il),str_concat("-position-",int_to_str(pos)))),mul(record_get(g,"hc"),record_get(g,"e")),record_get(f,"out_hc"),record_get(r,"path"));
+   dqs-layers(r,g,history,dqs-next-state(record_get(f,"out_hc"),options),token,pos,add(il,1),layers,gated,options);
+  }
+  def dqs-memory(r,stage) = if record_has(r,"memory-observer") then dqs-memory-call(record_get(r,"memory-observer"),r,stage) else 0;
+  def dqs-memory-call(observe,r,stage) = observe(r,stage);
+  def dqs-positions(r,g,history,seq,p,options) = if nil?(seq) then 1 else dqs-position(r,g,history,seq,p,options);
+  def dqs-position(r,g,history,seq,p,options) {
+   let token = head(seq); let pos = if eq(record_get(options,"sequence"),1) then p else record_get(options,"position"); let gated = nil?(tail(seq));
+   let embed = dqs-perturb(dfo-plain(r,"token_embd.weight",token),record_get(options,"perturb")); let resid = dnr-flat(dnr-fill(record_get(g,"hc"),embed));
+   if and(gated,not(str_eq(record_get(options,"out"),""))) then dfo-save-vector(record_get(options,"out"),"embed",embed) else 0;
+   dqs-layers(r,g,history,resid,token,pos,0,record_get(options,"layers"),gated,options);
+   dqs-positions(r,g,history,tail(seq),add(p,1),options);
+  }
+  def dqs-stack(path,token,pos,layers,out,f32,perturb,perStep,tokens) = dqs-stack-in(dqa-open-at(path,pos),dqa-close,token,pos,layers,out,f32,perturb,perStep,tokens);
+  def dqs-stack-in(r,closeOwner,token,pos,layers,out,f32,perturb,perStep,tokens) {
+   let path = record_get(r,"path"); let g = dfo-geometry(r); let start = now_unix_ms(); let job = str_concat("dsv4-stack-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(start))));
+   dfo-require(and(str_eq(value_kind(layers),"int"),and(gt(layers,0),le(layers,dfo-meta(r,"deepseek4.block_count")))),"stack layer extent");
+   dfo-require(and(ge(pos,0),and(str_eq(value_kind(pos),"int"),and(or(eq(f32,0),eq(f32,1)),and(dfo-finite(perturb),dfo-finite(perStep))))),"stack perturbation/position admission");
+   let sequence = not(nil?(tokens)); dfo-require(or(not(sequence),eq(len(tokens),add(pos,1))),"sequence must end at requested position");
+   let options = record_new(0,"out",out,"f32",f32,"perturb",perturb,"per-step",perStep,"sequence",sequence,"position",pos,"layers",layers,"job",job);
+   if str_eq(out,"") then 1 else dqs-init-output(out);
+   print(str_concat("ORACLE dsv4-stack token ",str_concat(int_to_str(token),str_concat(" pos ",str_concat(int_to_str(pos),str_concat(" layers ",int_to_str(layers)))))));
+   if eq(f32,1) then print("F32STATE 1 (the inter-layer state is rounded to f32; all arithmetic stays fp64)") else 0; if not(eq(perturb,0.0)) then print(str_concat("PERTURB ",str_concat(dfo-number(perturb)," (one-sided per element, alternating sign)"))) else 0; if not(eq(perStep,0.0)) then print(str_concat("PERTURB_EVERY ",str_concat(dfo-number(perStep)," (applied to the state after every layer)"))) else 0;
+   if sequence then print(str_concat("SEQUENCE ",str_concat(dfo-dim-text(tokens),str_concat(" (gating position ",str_concat(int_to_str(pos),str_concat(", ",str_concat(int_to_str(pos)," prefix positions carry KV)"))))))) else 0;
+   print(str_concat("STACKGEOM",dfo-description-fields(list(list("n_embd",record_get(g,"e")),list("n_hc",record_get(g,"hc")),list("layers",layers),list("token",token),list("pos",pos)))));
+   let history = record_new(0); let result = dqs-positions(r,g,history,if sequence then tokens else list(token),0,options);
+   if sequence then print(str_concat("KVHIST ",str_concat(int_to_str(layers),str_concat(" layers each carrying ",str_concat(int_to_str(len(record_get(history,"0")))," rows into the gated position"))))) else 0;
+   let closed = closeOwner(r); dfo-require(and(eq(result,1),eq(closed,1)),"resident stack completion"); dqs-memory(r,"released");
+   print(str_concat("ELAPSED_MS ",int_to_str(sub(now_unix_ms(),start)))); print(str_concat("STACKEND ",int_to_str(layers))); print("END"); 1;
+  }
+  def dqs-init-output(out) {
+   host_dir_mkdir(out); let done = str_concat(out,"/oracle-done.txt"); let initialized = write_file(done,""); let prefix = fbc-read-exact(done,0); dfo-require(and(eq(initialized,0),and(fbc-good(prefix),str_eq(fbc-value(prefix),""))),"stack completion prefix write and exact readback"); 1;
+  }
+ }
+ 0;
+}

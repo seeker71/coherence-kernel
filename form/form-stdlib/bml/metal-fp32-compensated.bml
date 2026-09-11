@@ -1,0 +1,22 @@
+// Paired fp32 arithmetic retains product and sum residuals inside GPU RAM;
+// the final normalized pair collapses into the existing fp32 output buffer.
+// Helpers consume internally normalized finite pairs. Overflow/underflow and
+// universally exact accumulation or rounding are outside this contract.
+// MXFP8 requires32 lanes per SIMD group, a threadgroup width multiple32,
+// positive rows/cols, cols divisible32, nel=rows*cols and u32-safe offsets.
+// RMS requires positive n exactly representable in float and a positive finite
+// mean/reciprocal-sqrt seed. Actual observed normalization widths are 512 and 16384.
+// preludes: form-stdlib/mxfp8-msl.fk
+section [form.bml] {
+ class MetalFp32Compensated {
+  def mfc-helpers() = "\n#pragma clang fp reassociate(off)\n#pragma clang fp contract(off)\nstatic inline float2 fpc_norm(float h, float l) { float s=h+l; return float2(s,l-(s-h)); }\nstatic inline float2 fpc_add(float2 a,float2 b) { float s=a.x+b.x; float v=s-a.x; float e=(a.x-(s-v))+(b.x-v); e=e+(a.y+b.y); return fpc_norm(s,e); }\nstatic inline float2 fpc_mul(float2 a,float2 b) { float p=a.x*b.x; float e=metal::fma(a.x,b.x,-p); e=e+(a.x*b.y+a.y*b.x); e=e+a.y*b.y; return fpc_norm(p,e); }\nstatic inline float2 fpc_div(float2 a,float b) { float q=a.x/b; float r=metal::fma(-q,b,a.x)+a.y; return fpc_norm(q,r/b); }\n";
+  def mfc-mx8(name) = str_concat("kernel void ",str_concat(name,"(device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r=gid/32u; if(r>=rows)return; uint ng=cols/32u; uint g0=(r*cols)/32u; float2 sum=float2(0.0f); for(uint g=lane;g<ng;g+=32u) { float scale=mxm_e8m0(int(qb[nel+g0+g])); uint p=r*cols+g*32u; float2 acc=float2(0.0f); for(uint m=0u;m<32u;++m) acc=fpc_add(acc,fpc_mul(float2(x[g*32u+m],0.0f),float2(mx8_val(int(qb[p+m])),0.0f))); sum=fpc_add(sum,float2(acc.x*scale,acc.y*scale)); } for(uint delta=16u;delta>0u;delta>>=1u) { float2 other=float2(metal::simd_shuffle_down(sum.x,delta),metal::simd_shuffle_down(sum.y,delta)); if(lane+delta<32u)sum=fpc_add(sum,other); } if(lane==0u)y[r]=sum.x+sum.y; }\n"));
+  def mfc-rms-shaped(name,args,value) = str_concat("kernel void ",str_concat(name,str_concat(args,str_concat(" { if(i!=0u || n==0u)return; float2 sum=float2(0.0f); for(uint j=0u;j<n;++j)sum=fpc_add(sum,fpc_mul(float2(x[j],0.0f),float2(x[j],0.0f))); float2 mean=fpc_add(fpc_div(sum,float(n)),float2(eps,0.0f)); float seed=metal::rsqrt(mean.x); float2 square=fpc_mul(float2(seed,0.0f),float2(seed,0.0f)); float2 prod=fpc_mul(mean,square); float2 residual=fpc_add(float2(1.0f,0.0f),-prod); float2 inverse=fpc_add(float2(seed,0.0f),fpc_mul(float2(seed*0.5f,0.0f),residual)); for(uint j=0u;j<n;++j) { float2 value=",str_concat(value,"; out[j]=value.x+value.y; } }\n")))));
+  def mfc-rms(name) = mfc-rms-shaped(name,"(device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* out [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint i [[thread_position_in_grid]])","fpc_mul(fpc_mul(float2(x[j],0.0f),inverse),float2(g[j],0.0f))");
+  def mfc-rms-unweighted(name) = mfc-rms-shaped(name,"(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& eps [[buffer(3)]], uint i [[thread_position_in_grid]])","fpc_mul(float2(x[j],0.0f),inverse)");
+  def mfc-source(mx8,rms) = str_concat(mfc-helpers(),str_concat(mx8m-msl-helpers(),str_concat(mfc-mx8(mx8),mfc-rms(rms))));
+  def mfc-core-fragment() = str_concat(mfc-helpers(),str_concat(mfc-mx8("form_dsv4_mx8_precise"),mfc-rms("form_dsv4_rms_precise")));
+  def mfc-hc-fragment() = str_concat(mfc-helpers(),mfc-rms-unweighted("form_dsv4_hc_rms_precise"));
+ }
+ 0;
+}
