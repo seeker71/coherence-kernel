@@ -11921,7 +11921,7 @@ static void fk_live_bury(long long pid) {
 }
 static long long fk_live_read_words(const char *name, long long *out, long long count);
 /* Whether a page is an ended kernel's, so it may be buried. The host hands a pid out again within minutes
- * (every five on 2026-09-11), and a kernel that takes it reopens the page its pid left standing, so the
+ * (every five on 2026-09-11), and a kernel that takes it opens a fresh page under the same name, so the
  * page must name that pid and say it ended (alive 0) or have been opened before the pid was seen gone, and
  * the pid must still be gone once the page has been read: a kernel that took the pid meanwhile answers
  * kill. */
@@ -11976,6 +11976,10 @@ static void fk_live_open(void) {
     char name[32];
     long long pid = (long long)getpid();
     fk_live_pid_name(pid, name);
+    /* the page is born fresh, as the store columns and program surface are: a recycled pid can find its last
+     * kernel's page standing, and a shm object here takes its size once, so a smaller leftover kept would sit
+     * under this 128 MiB layout (a 4096-byte one stayed 16 KiB on 2026-09-11) */
+    shm_unlink(name);
     long long gh = fk_gift_open(name, FK_LIVE_PAGE_BYTES, 1);
     if (gh == fk_nothing) { return; }
     fk_live_page = (volatile long long *)fk_gift_base[gh >> 1];
