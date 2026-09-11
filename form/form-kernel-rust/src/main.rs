@@ -1381,6 +1381,10 @@ pub(crate) struct Kernel {
     // The satsang-load-bearing surface: every cell's state is traceable
     // back to the source line of the recipe that authored it.
     source_attr: HashMap<NodeID, (NameID, u32, u32)>,
+    // The nodes intern_node_at and fb_record recorded, in recording order.
+    // framebuffer-events walks these, as Go and TS walk framebufferRoots, so
+    // an observer reads the same events in the same order on every kernel.
+    framebuffer_roots: Vec<NodeID>,
     // Line map for the source currently being read: (file_name_id,
     // first_global_line) per concatenated part. When non-empty, read_sexp
     // attributes every parenthesized form it builds so fatal diagnostics
@@ -1793,6 +1797,7 @@ impl Kernel {
             by_shape: HashMap::new(),
             by_id: HashMap::new(),
             source_attr: HashMap::new(),
+            framebuffer_roots: Vec::new(),
             reading_files: Vec::new(),
             walk_cache: HashMap::new(),
             walk_cache_hits: 0,
@@ -2227,6 +2232,7 @@ impl Kernel {
             by_shape: self.by_shape.clone(),
             by_id: self.by_id.clone(),
             source_attr: self.source_attr.clone(),
+            framebuffer_roots: self.framebuffer_roots.clone(),
             reading_files: Vec::new(),
             walk_cache: HashMap::new(),
             walk_cache_hits: 0,
@@ -5737,6 +5743,7 @@ impl Kernel {
             let line = args[3].as_int() as u32;
             let col = args[4].as_int() as u32;
             k.source_attr.insert(nid, (file_id, line, col));
+            k.framebuffer_roots.push(nid);
             Value::Nid(nid)
         });
         // fb_record — native provenance primitive (tag 128). core.fk's Form
@@ -5752,6 +5759,7 @@ impl Kernel {
             let line = (packed >> 16) as u32;
             let col = (packed & 0xFFFF) as u32;
             k.source_attr.insert(nid, (file_id, line, col));
+            k.framebuffer_roots.push(nid);
             Value::Nid(nid)
         });
         // node_source — read back a Recipe's source attribution.
@@ -5773,16 +5781,20 @@ impl Kernel {
                 None => Value::List(vec![].into()),
             }
         });
-        // framebuffer-events — return all NodeIDs that have source
-        // attribution recorded. The substrate's source_attr side-map
-        // IS the framebuffer: every intern_node_at write becomes a
-        // discoverable trace event. Observer-side tracing: the
-        // EMITTER pays only the side-map write (~O(1)); the OBSERVER
-        // pays the cost of walking + filtering this list when it
-        // wants to analyze hot-spots or flow.
+        // framebuffer-events — the recorded roots, in recording order, that
+        // still carry source attribution. Every intern_node_at / fb_record
+        // write becomes a discoverable trace event. Observer-side tracing:
+        // the EMITTER pays one side-map write and one push; the OBSERVER
+        // pays the cost of walking + filtering this list when it wants to
+        // analyze hot-spots or flow.
         self.register_native("framebuffer-events", cat_witness(), |k, _, _| {
             Value::List(Arc::new(
-                k.source_attr.keys().copied().map(Value::Nid).collect(),
+                k.framebuffer_roots
+                    .iter()
+                    .filter(|nid| k.source_attr.contains_key(nid))
+                    .copied()
+                    .map(Value::Nid)
+                    .collect(),
             ))
         });
         // framebuffer-clear — reset the framebuffer. Useful for
@@ -5790,6 +5802,7 @@ impl Kernel {
         // analyze → clear → next window).
         self.register_native("framebuffer-clear", cat_witness(), |k, _, _| {
             k.source_attr.clear();
+            k.framebuffer_roots.clear();
             Value::Null
         });
         // serialize-recipe — walk a Recipe tree, emit a flat byte list
