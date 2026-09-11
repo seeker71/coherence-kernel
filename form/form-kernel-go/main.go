@@ -643,6 +643,10 @@ func NewKernel() *Kernel {
 	return k
 }
 
+// hostMonotonicStart anchors host_monotonic_ms: milliseconds on Go's monotonic clock since this
+// kernel started. Only differences between two readings mean anything.
+var hostMonotonicStart = time.Now()
+
 // resolveKernelHostPath answers where a host path names a file for a read-side door, the same way
 // on every kernel. A path that stands where the kernel runs names itself. Otherwise the walk tries
 // dir/p, dir/form/p and dir/form/form/p from the working directory upward and stops at the checkout
@@ -3223,11 +3227,13 @@ func (k *Kernel) registerNatives() {
 	}
 	k.registerNative("host_path_is_dir", catCall(), fsIsDirNative)
 	k.registerNative("fs_is_dir", catCall(), fsIsDirNative)
+	// One atomic mkdir, as fkwu's tag 56: 1 when this call created the directory, 0 when it
+	// already stood or could not be made — the answer a lock directory reads.
 	fsMkdirNative := func(_ *Kernel, args []Value) Value {
-		if err := os.MkdirAll(argStr(args, 0), 0755); err != nil {
-			return Value{Kind: VInt, Int: -1}
+		if err := os.Mkdir(argStr(args, 0), 0777); err != nil {
+			return Value{Kind: VInt, Int: 0}
 		}
-		return Value{Kind: VInt, Int: 0}
+		return Value{Kind: VInt, Int: 1}
 	}
 	k.registerNative("host_dir_mkdir", catCall(), fsMkdirNative)
 	k.registerNative("fs_mkdir", catCall(), fsMkdirNative)
@@ -4194,6 +4200,23 @@ func (k *Kernel) registerNatives() {
 	}
 	k.registerNative("host_temp_dir", catCall(), tempDirNative)
 	k.registerNative("temp_dir", catCall(), tempDirNative)
+	// host_pid, host_monotonic_ms, host_cwd — this process's id, a monotonic millisecond clock and
+	// its working directory: the doors fkwu carries as tags 160, 182 and 29. Parity holds on shape,
+	// not value: each leg is its own process, and only differences between two clock readings mean
+	// anything (fkwu counts from boot, the siblings from their own start).
+	k.registerNative("host_pid", catCall(), func(_ *Kernel, _ []Value) Value {
+		return Value{Kind: VInt, Int: int64(os.Getpid())}
+	})
+	k.registerNative("host_monotonic_ms", catCall(), func(_ *Kernel, _ []Value) Value {
+		return Value{Kind: VInt, Int: time.Since(hostMonotonicStart).Milliseconds()}
+	})
+	k.registerNative("host_cwd", catCall(), func(_ *Kernel, _ []Value) Value {
+		dir, err := os.Getwd()
+		if err != nil {
+			return Value{Kind: VNull}
+		}
+		return Value{Kind: VStr, Str: dir}
+	})
 }
 
 // Category constructors for native attribution live further down alongside

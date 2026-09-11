@@ -55,6 +55,7 @@ export interface KernelHost {
   readonly fileMtimeSeconds?: (path: string) => number;
   readonly pathExists?: (path: string) => boolean;
   readonly pathIsDirectory?: (path: string) => boolean;
+  // One directory level; throws when the path already stands or its parent is missing.
   readonly makeDirectory?: (path: string) => void;
   readonly removeDirectory?: (path: string) => void;
   readonly removePath?: (path: string) => void;
@@ -68,6 +69,11 @@ export interface KernelHost {
 
   readonly randomBytes?: (length: number) => Uint8Array;
   readonly tempDirectory?: () => string;
+  // This process's id, a monotonic millisecond reading and its working directory
+  // (host_pid, host_monotonic_ms, host_cwd); a host without them answers null.
+  readonly processId?: () => number;
+  readonly monotonicMs?: () => number;
+  readonly workingDirectory?: () => string;
   readonly httpGet?: (request: KernelHttpRequest) => KernelHttpResult;
   readonly socketCall?: (operation: KernelSocketOperation) => number | string;
 

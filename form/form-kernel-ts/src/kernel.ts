@@ -2639,14 +2639,16 @@ export class Kernel {
     };
     this.registerNative("host_path_is_dir", catCall(), fsIsDirNative);
     this.registerNative("fs_is_dir", catCall(), fsIsDirNative);
+    // One atomic mkdir, as fkwu's tag 56: 1 when this call created the directory, 0 when it
+    // already stood or could not be made — the answer a lock directory reads.
     const fsMkdirNative = (_k: Kernel, args: Value[]): Value => {
       try {
         const mkdir = this.host.makeDirectory;
-        if (mkdir === undefined) return { kind: "int", int: -1 };
+        if (mkdir === undefined) return { kind: "int", int: 0 };
         mkdir(argStr(args, 0));
-        return { kind: "int", int: 0 };
+        return { kind: "int", int: 1 };
       } catch {
-        return { kind: "int", int: -1 };
+        return { kind: "int", int: 0 };
       }
     };
     this.registerNative("host_dir_mkdir", catCall(), fsMkdirNative);
@@ -3387,6 +3389,22 @@ export class Kernel {
     });
     this.registerNative("host_temp_dir", catCall(), tempDirNative);
     this.registerNative("temp_dir", catCall(), tempDirNative);
+    // host_pid, host_monotonic_ms, host_cwd — this process's id, a monotonic millisecond clock and
+    // its working directory: the doors fkwu carries as tags 160, 182 and 29. Parity holds on shape,
+    // not value: each leg is its own process, and only differences between two clock readings mean
+    // anything (fkwu counts from boot, the siblings from their own start).
+    this.registerNative("host_pid", catCall(), (_k, _args) => {
+      const pid = this.host.processId?.();
+      return pid === undefined ? { kind: "null" } : { kind: "int", int: pid };
+    });
+    this.registerNative("host_monotonic_ms", catCall(), (_k, _args) => {
+      const ms = this.host.monotonicMs?.();
+      return ms === undefined ? { kind: "null" } : { kind: "int", int: Math.floor(ms) };
+    });
+    this.registerNative("host_cwd", catCall(), (_k, _args) => {
+      const dir = this.host.workingDirectory?.();
+      return dir === undefined ? { kind: "null" } : { kind: "str", str: dir };
+    });
 
     // `unix_ms_to_iso_utc` — render a millisecond instant as the
     // second-resolution ISO UTC string the Go carrier emits.
