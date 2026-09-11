@@ -513,12 +513,41 @@ fk_prelude_has_bml_dep() {
     grep -Eq '^(;|//)[[:space:]]*preludes:.*\.bml([[:space:]]|,|$)' "$1"
 }
 
+# Rewrites a header that names ".bml" dependencies down to exactly those. Every
+# ".fk" dependency it names is already its own prepared entry, and naming it
+# again by raw path is the side door fk_strip_prelude_header closes: a raw
+# section-bearing prelude (compiler.fk's "section [bmf.bmf]") reached the
+# siblings that way and stopped them. The ".bml" names stay for the kernels' own
+# directive walk to lower. Tokens split the way fk_declared_deps splits them.
+fk_keep_bml_prelude_deps() {
+    local src_file="$1" dest_file="$2"
+    awk '
+        match($0, /^(;+|\/\/)[[:space:]]*preludes:/) {
+            marker = substr($0, 1, RLENGTH)
+            n = split(substr($0, RLENGTH + 1), a, /[ \t,;]+/)
+            kept = ""
+            for (i = 1; i <= n; i++) {
+                tok = a[i]
+                gsub(/^[ \t,;"]+|[ \t,;"]+$/, "", tok)
+                if (tok ~ /\.bml$/) kept = kept " " tok
+            }
+            if (kept != "") print marker kept
+            next
+        }
+        /^[[:space:]]*import([[:space:]:]|")/ { next }
+        /^;[[:space:]]*import([[:space:]:]|")/ { next }
+        { print }
+    ' "$src_file" > "$dest_file"
+}
+
 prepare_sources() {
     prepared_args=()
     local src out safe driver key cached plain stripped
     for src in "$@"; do
         if grep -Eq '^[[:space:]]*section \[' "$src"; then
-            key="$(form_hash16 "$src")-$compiler_stamp"
+            # "-bmlhead": a lowered file keeps only its ".bml" header names
+            # (fk_keep_bml_prelude_deps); copies cached under the old rule kept all.
+            key="$(form_hash16 "$src")-$compiler_stamp-bmlhead"
             cached="$SOURCE_CACHE_DIR/$key.fk"
             if [[ ! -s "$cached" ]]; then
                 safe="${src//\//__}"
@@ -534,7 +563,9 @@ prepare_sources() {
                 printf '(do (form-source-compile-file "%s" "%s"))\n' "$src" "$out" > "$driver"
                 if "$GO_BIN" "${compiler_chain[@]}" "$driver" >/dev/null && [[ -s "$out" ]]; then
                     if fk_prelude_has_bml_dep "$out"; then
-                        mv -f "$out" "$cached"
+                        stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.bmlhead.XXXXXX")"
+                        fk_keep_bml_prelude_deps "$out" "$stripped"
+                        mv -f "$stripped" "$cached"
                     else
                         stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.stripped.XXXXXX")"
                         fk_strip_prelude_header "$out" "$stripped"
@@ -554,10 +585,18 @@ prepare_sources() {
                 exit 1
             fi
         elif fk_prelude_has_bml_dep "$src"; then
-            # Leave this file exactly as it is on disk: its header names a
-            # ".bml" dependency; explicit multi-file callers can leave that
-            # dependency to the kernels' own directive walk to find and lower.
-            prepared_args+=("$src")
+            # Its header names a ".bml" dependency, which explicit multi-file
+            # callers leave to the kernels' own directive walk to find and
+            # lower: a cached copy keeps exactly those names and drops the
+            # ".fk" ones, already their own prepared entries.
+            key="$(form_hash16 "$src")-bmlhead"
+            plain="$SOURCE_CACHE_DIR/$key.fk"
+            if [[ ! -s "$plain" ]]; then
+                stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.stripped.XXXXXX")"
+                fk_keep_bml_prelude_deps "$src" "$stripped"
+                mv -f "$stripped" "$plain"
+            fi
+            prepared_args+=("$plain")
         else
             key="$(form_hash16 "$src")-plain"
             plain="$SOURCE_CACHE_DIR/$key.fk"
