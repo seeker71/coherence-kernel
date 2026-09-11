@@ -186,6 +186,10 @@ Lower sentinel loss establishes that measured objective only; fewer rented
 calls and broader coding quality must be measured on real subsequent requests.
 The existing code and repair checks remain the decision at each such request.
 
+[Executable BML practice](native-bml-execution-learning.md) binds small native
+training targets to successful execution, freezes distinct transfer tests, and
+compares exact generated proposals before and after native session updates.
+
 Witnesses: `native-session-memory-band.fk`, `native-session-journal-band.fk`,
 `native-session-routing-band.fk`,
 `native-session-worker-band.fk` and `native-session-code-band.fk` under
