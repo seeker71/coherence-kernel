@@ -4949,7 +4949,18 @@ func (k *Kernel) readSexpr(toks []sexpToken, i int) (NodeID, int) {
 				i++
 				break
 			}
-			arg, ni := k.readSexpr(toks, i)
+			var arg NodeID
+			var ni int
+			if verb == "defn" && len(args) == 1 && toks[i].kind == "LPAREN" {
+				// A defn's parameter list holds names, not an expression.
+				// Read as an expression, its first name became the list's
+				// verb: `(params tok i)` built a two-name sequence, and every
+				// first parameter spelled like a verb (params, match, fail,
+				// list, ...) fell out of the arity. fkwu and TS read names.
+				arg, ni = k.readDefnParams(toks, i)
+			} else {
+				arg, ni = k.readSexpr(toks, i)
+			}
 			args = append(args, arg)
 			i = ni
 		}
@@ -4967,6 +4978,32 @@ func (k *Kernel) readSexpr(toks []sexpToken, i int) (NodeID, int) {
 		return node, i
 	}
 	panic(fmt.Sprintf("parse error at line %d col %d: unexpected token %s %q", t.line, t.col, t.kind, t.value))
+}
+
+// readDefnParams — read a defn's `(name name ...)` parameter list starting at
+// its LPAREN, as names only: each IDENT becomes the bare string trivial the
+// defn arm of buildVerb already carries, so the returned sequence is the very
+// params block that defn interns. Returns the node and the next position.
+func (k *Kernel) readDefnParams(toks []sexpToken, i int) (NodeID, int) {
+	openLine, openCol := toks[i].line, toks[i].col
+	i++
+	names := []NodeID{}
+	for {
+		if i >= len(toks) {
+			panic(fmt.Sprintf("parse error: unclosed defn parameter list opened at line %d col %d (reached end of input)",
+				openLine, openCol))
+		}
+		t := toks[i]
+		if t.kind == "RPAREN" {
+			return k.intern(catBlock(RBlockSequence), names), i + 1
+		}
+		if t.kind != "IDENT" {
+			panic(fmt.Sprintf("parse error at line %d col %d: defn parameter list opened at line %d col %d holds names only, got %s %q",
+				t.line, t.col, openLine, openCol, t.kind, t.value))
+		}
+		names = append(names, k.internString(t.value))
+		i++
+	}
 }
 
 // buildVerb — map an S-expression verb to its recipe category + children.

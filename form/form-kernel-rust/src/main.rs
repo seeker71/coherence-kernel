@@ -6851,7 +6851,16 @@ fn read_sexp(k: &mut Kernel, toks: &[SexpTok], i: usize) -> (NodeID, usize) {
                     j += 1;
                     break;
                 }
-                let (arg, nj) = read_sexp(k, toks, j);
+                // A defn's parameter list holds names, not an expression.
+                // Read as an expression, its first name became the list's
+                // verb: `(params tok i)` built a two-name sequence, and every
+                // first parameter spelled like a verb (params, match, fail,
+                // list, ...) fell out of the arity. fkwu and TS read names.
+                let (arg, nj) = if verb == "defn" && args.len() == 1 && toks[j].kind == "LPAREN" {
+                    read_defn_params(k, toks, j)
+                } else {
+                    read_sexp(k, toks, j)
+                };
                 args.push(arg);
                 j = nj;
             }
@@ -6873,6 +6882,36 @@ fn read_sexp(k: &mut Kernel, toks: &[SexpTok], i: usize) -> (NodeID, usize) {
             "parse error at line {} col {}: unexpected token {} {:?}",
             t.line, t.col, t.kind, t.value
         ),
+    }
+}
+
+// read_defn_params — read a defn's `(name name ...)` parameter list starting
+// at its LPAREN, as names only: each IDENT becomes the bare string trivial the
+// defn arm of build_verb already carries, so the returned sequence is the very
+// params block that defn interns. Returns the node and the next position.
+fn read_defn_params(k: &mut Kernel, toks: &[SexpTok], i: usize) -> (NodeID, usize) {
+    let (open_line, open_col) = (toks[i].line, toks[i].col);
+    let mut j = i + 1;
+    let mut names = Vec::new();
+    loop {
+        if j >= toks.len() {
+            panic!(
+                "parse error: unclosed defn parameter list opened at line {} col {} (reached end of input)",
+                open_line, open_col
+            );
+        }
+        let t = &toks[j];
+        if t.kind == "RPAREN" {
+            return (k.intern(cat_block(RBLK_SEQ), names), j + 1);
+        }
+        if t.kind != "IDENT" {
+            panic!(
+                "parse error at line {} col {}: defn parameter list opened at line {} col {} holds names only, got {} {:?}",
+                t.line, t.col, open_line, open_col, t.kind, t.value
+            );
+        }
+        names.push(k.intern_string(&t.value));
+        j += 1;
     }
 }
 
