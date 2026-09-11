@@ -19523,7 +19523,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     fk_fkb_out_n = 0;
     ok = ok && fk_fkb_out(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
-    ok = ok && fk_fkb_write_u32(fd, 5);
+    ok = ok && fk_fkb_write_u32(fd, 6);
     ok = ok && fk_fkb_write_cstr(fd, FK_FKB_BUILDER_ID);
     ok = ok && fk_fkb_write_cstr(fd, fk_path_canon_id(src_path, canon));
     ok = ok && fk_fkb_write_cstr(fd, source_hash);
@@ -19572,6 +19572,16 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
             long long target = (dep_fn >= 0 && dep_fn < fk_fn_count) ? fk_fn[dep_fn] : -1;
             ok = fk_fkb_write_signed(fd, dep_sym) && fk_fkb_write_signed(fd, target);
         }
+        i = i + 1;
+    }
+    /* v6: the top-level constant table. A unit's column-0 lets are const rows
+     * (name -> initializer node); the importer binds them from this table, so a
+     * band that imports the unit's image sees them as it would reading its text. */
+    ok = ok && fk_fkb_write_signed(fd, fk_const_top);
+    i = 0;
+    while (ok && i < fk_const_top) {
+        ok = fk_fkb_write_srctext_slice(fd, fk_const_s[i], fk_const_n[i]) &&
+             fk_fkb_write_signed(fd, fk_const_node[i]);
         i = i + 1;
     }
     ok = ok && fk_fkb_flush(fd);
@@ -19869,9 +19879,10 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         mi = mi + 1;
     }
     long long version = fk_fkb_read_u32();
-    if (version < 5) {
-        /* pre-v5 artifacts carry no builder identity, so there is no way to
-         * ask which pipeline wrote them -- superseded, not corrupt. */
+    if (version < 6) {
+        /* pre-v6 artifacts carry no constant table (and pre-v5 no builder
+         * identity), so a unit's top-level lets cannot be bound from them --
+         * superseded, not corrupt. */
         return 0;
     }
     /* Every identity read must execute unconditionally: these advance the
@@ -20008,6 +20019,23 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         }
         i = i + 1;
     }
+    /* v6: bind the unit's top-level lets, each initializer node shifted to where
+     * this image's nodes landed, as its fn symbols are above. */
+    long long const_count = fk_fkb_read_signed();
+    if (const_count < 0 || const_count > fk_fkb_len) {
+        return 0;
+    }
+    i = 0;
+    while (!fk_fkb_bad && i < const_count) {
+        long long cs = 0;
+        long long cn = 0;
+        if (!fk_fkb_read_symbol_to_srctext(&cs, &cn)) {
+            return 0;
+        }
+        long long cnode = fk_fkb_read_signed();
+        fk_const_set(cs, cn, cnode >= 0 ? cnode + node_base : cnode);
+        i = i + 1;
+    }
     if (fk_fkb_bad || fk_fkb_pos != fk_fkb_len) {
         fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
         return 0;
@@ -20081,6 +20109,19 @@ static int fk_fkb_restore_symbol_image(long long version) {
         }
         i = i + 1;
     }
+    /* v6's constant table: a whole program image already holds its lets as
+     * hold nodes, so its rows are consumed to attest the end, not rebound. */
+    long long const_count = fk_fkb_read_signed();
+    if (const_count < 0 || const_count > fk_fkb_len) {
+        fk_fkb_mark_bad("constant count exceeds artifact bounds");
+        return 0;
+    }
+    i = 0;
+    while (!fk_fkb_bad && i < const_count) {
+        fk_fkb_skip_string();
+        (void)fk_fkb_read_signed();
+        i = i + 1;
+    }
     return !fk_fkb_bad;
 }
 static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_src_path,
@@ -20113,14 +20154,14 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         mi = mi + 1;
     }
     long long version = fk_fkb_read_u32();
-    if (version >= 2 && version <= 4) {
-        /* pre-v5 lanes: v2/v3 are the old lane width, v4 carries no builder
-         * identity -- superseded, not corrupt. Invalidate so the caller
-         * recompiles from source and overwrites with a v5 artifact. */
-        fk_fkb_mark_bad("pre-v5 artifact lane; superseded");
+    if (version >= 2 && version <= 5) {
+        /* pre-v6 lanes: v2/v3 are the old lane width, v4 carries no builder
+         * identity, v5 no constant table -- superseded, not corrupt. Invalidate
+         * so the caller recompiles from source and overwrites with a v6 artifact. */
+        fk_fkb_mark_bad("pre-v6 artifact lane; superseded");
         return 0;
     }
-    if (version != 5) {
+    if (version != 6) {
         fk_fkb_mark_bad("unsupported version");
         return 0;
     }
@@ -20769,7 +20810,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                 return 0;
             }
             if (fk_path_mtime_raw(dep_fkb_path) < dep_mtime ||
-                fk_src_fkb_version_raw(dep_fkb_path) < 5) {
+                fk_src_fkb_version_raw(dep_fkb_path) < 6) {
                 if (!fk_src_compile_artifact_only(fk_src_dep_path[i])) {
                     fk_import_refusal = 3;
                     return 0;
