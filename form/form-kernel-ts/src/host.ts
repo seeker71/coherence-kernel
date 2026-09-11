@@ -38,6 +38,9 @@ export interface KernelHost {
   readonly writeStdout?: (text: string) => void;
   readonly writeStderr?: (text: string) => void;
 
+  // Where a relative path names a file for a read-side door (see node-host's resolveHostReadPath);
+  // a host without one leaves paths as given.
+  readonly resolveReadPath?: (path: string) => string;
   readonly readTextFile?: (path: string) => string;
   readonly readBinaryFile?: (path: string) => Uint8Array;
   readonly readBinarySlice?: (

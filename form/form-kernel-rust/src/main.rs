@@ -35,9 +35,14 @@ mod formats;
 mod inductive;
 mod quotient;
 
+/// Where a host path names a file for a read-side door, the same way on every kernel. A path that
+/// stands where the kernel runs names itself. Otherwise the walk tries dir/p, dir/form/p and
+/// dir/form/form/p from the working directory upward and stops at the checkout that holds it, the
+/// first directory with a .git entry, so one checkout never reads another's files. Doors that
+/// create or change a file never walk: they name the path as given.
 fn resolve_kernel_host_path(path: &str) -> PathBuf {
     let offered = PathBuf::from(path);
-    if path.is_empty() || offered.is_absolute() || offered.is_file() {
+    if path.is_empty() || offered.is_absolute() || offered.exists() {
         return offered;
     }
     if let Ok(mut directory) = env::current_dir() {
@@ -47,9 +52,12 @@ fn resolve_kernel_host_path(path: &str) -> PathBuf {
                 directory.join("form").join(path),
                 directory.join("form").join("form").join(path),
             ] {
-                if candidate.is_file() {
+                if candidate.exists() {
                     return candidate;
                 }
+            }
+            if directory.join(".git").exists() {
+                break;
             }
             let Some(parent) = directory.parent() else {
                 break;
@@ -3319,7 +3327,7 @@ impl Kernel {
             Value::Str(value_kind_name(&args[0]).to_string().into())
         });
         self.register_native("source_scan_file", cat_call(), |_, _, args| {
-            let body = fs::read_to_string(args[0].as_str())
+            let body = fs::read_to_string(resolve_kernel_host_path(args[0].as_str()))
                 .unwrap_or_else(|e| panic!("source_scan_file: {}", e));
             let lexicon = source_native_lexicon_from_value(&args[1]);
             source_native_scan_text(&body, &lexicon)
@@ -4616,7 +4624,7 @@ impl Kernel {
         // Form owns classification and aggregation; the kernel only exposes
         // filesystem walking and text line counts as primitive observation.
         self.register_native("source_inventory", cat_call(), |_, _, args| {
-            let root = std::path::PathBuf::from(args[0].as_str());
+            let root = resolve_kernel_host_path(args[0].as_str());
             let suffix = args[1].as_str().to_string();
             let skip = source_inventory_skip_set(&args[2]);
             let root_abs = if root.is_absolute() {
@@ -4913,7 +4921,7 @@ impl Kernel {
             }
         });
         self.register_native("read_form_binary", cat_call(), |k, _, args| match fs::read(
-            args[0].as_str(),
+            resolve_kernel_host_path(args[0].as_str()),
         ) {
             Ok(bytes) => match deserialize_artifact(k, &bytes) {
                 Ok(root) => Value::Nid(root),
@@ -4921,14 +4929,7 @@ impl Kernel {
             },
             Err(_) => Value::Null,
         });
-        self.register_native("write_form_binary", cat_call(), |k, _, args| {
-            let bytes = serialize_artifact(k, args[1].as_nid());
-            match fs::write(args[0].as_str(), &bytes) {
-                Ok(_) => Value::Int(bytes.len() as i64),
-                Err(_) => Value::Int(-1),
-            }
-        });
-        let file_size_native: NativeFn = |_, _, args| match fs::metadata(args[0].as_str()) {
+        let file_size_native: NativeFn = |_, _, args| match fs::metadata(resolve_kernel_host_path(args[0].as_str())) {
             Ok(meta) => Value::Int(meta.len() as i64),
             Err(_) => Value::Int(-1),
         };
@@ -4937,7 +4938,7 @@ impl Kernel {
         // file_mtime — modification time in unix seconds; -1 if missing.
         // Sibling parity with Go + TS file_mtime; powers Form-side cache
         // layers that regenerate .fkb projections when source files drift.
-        let file_mtime_native: NativeFn = |_, _, args| match fs::metadata(args[0].as_str()) {
+        let file_mtime_native: NativeFn = |_, _, args| match fs::metadata(resolve_kernel_host_path(args[0].as_str())) {
             Ok(meta) => match meta.modified() {
                 Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
                     Ok(d) => Value::Int(d.as_secs() as i64),
@@ -4954,7 +4955,7 @@ impl Kernel {
             if offset < 0 {
                 return Value::Int(-1);
             }
-            let mut file = match fs::File::open(args[0].as_str()) {
+            let mut file = match fs::File::open(resolve_kernel_host_path(args[0].as_str())) {
                 Ok(file) => file,
                 Err(_) => return Value::Int(-1),
             };
@@ -4973,7 +4974,7 @@ impl Kernel {
             if offset < 0 || length <= 0 {
                 return Value::Str(String::new().into());
             }
-            let mut file = match fs::File::open(args[0].as_str()) {
+            let mut file = match fs::File::open(resolve_kernel_host_path(args[0].as_str())) {
                 Ok(file) => file,
                 Err(_) => return Value::Str(String::new().into()),
             };
@@ -5006,7 +5007,7 @@ impl Kernel {
         // mutations return 0 on success, -1 on error; fs_list returns a
         // List of name-strings or Null on error.
         let fs_exists_native: NativeFn = |_, _, args| {
-            if fs::metadata(args[0].as_str()).is_ok() {
+            if fs::metadata(resolve_kernel_host_path(args[0].as_str())).is_ok() {
                 Value::Int(1)
             } else {
                 Value::Int(0)
@@ -5014,7 +5015,7 @@ impl Kernel {
         };
         self.register_native("host_path_exists", cat_call(), fs_exists_native);
         self.register_native("fs_exists", cat_call(), fs_exists_native);
-        let fs_is_dir_native: NativeFn = |_, _, args| match fs::metadata(args[0].as_str()) {
+        let fs_is_dir_native: NativeFn = |_, _, args| match fs::metadata(resolve_kernel_host_path(args[0].as_str())) {
             Ok(meta) if meta.is_dir() => Value::Int(1),
             _ => Value::Int(0),
         };
@@ -5052,7 +5053,7 @@ impl Kernel {
         self.register_native("host_path_rename", cat_call(), fs_rename_native);
         self.register_native("fs_rename", cat_call(), fs_rename_native);
         let fs_list_native: NativeFn = |_, _, args| {
-            match fs::read_dir(args[0].as_str()) {
+            match fs::read_dir(resolve_kernel_host_path(args[0].as_str())) {
                 Ok(rd) => {
                     // sort by name for cross-kernel parity (Go's os.ReadDir
                     // is name-sorted; Rust/Node are OS-arbitrary).

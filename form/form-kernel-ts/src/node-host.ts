@@ -36,6 +36,12 @@ const SOCKET_BYTES = 65_536;
 const HTTP_MAX_BODY_BYTES = 25 << 20;
 const HTTP_RESULT_BYTES = 64 << 20;
 
+// Where a host path names a file for a read-side door, the same way on every kernel. A path that
+// stands where the kernel runs names itself. Otherwise the walk tries dir/p, dir/form/p and
+// dir/form/form/p from the working directory upward and stops at the checkout that holds it, the
+// first directory with a .git entry, so one checkout never reads another's files. The kernel's
+// read-side doors ask for it through Host.resolveReadPath; doors that create or change a file
+// never walk, and the host primitives below name paths as given.
 function resolveHostReadPath(path: string): string {
   if (path.length === 0 || isAbsolute(path) || existsSync(path)) return path;
   let directory = process.cwd();
@@ -47,6 +53,7 @@ function resolveHostReadPath(path: string): string {
     ]) {
       if (existsSync(candidate)) return candidate;
     }
+    if (existsSync(join(directory, ".git"))) break;
     const parent = dirname(directory);
     if (parent === directory) break;
     directory = parent;
@@ -360,11 +367,11 @@ export function createNodeKernelHost(options: NodeKernelHostOptions = {}): Kerne
     // caller's existing catch turns the throw into that same Null. Valid UTF-8 is untouched.
     readTextFile: (path) =>
       new TextDecoder("utf-8", { fatal: true }).decode(
-        readFileSync(resolveHostReadPath(path)),
+        readFileSync(path),
       ),
-    readBinaryFile: (path) => readFileSync(resolveHostReadPath(path)),
+    readBinaryFile: (path) => readFileSync(path),
     readBinarySlice: (path, offset, length) => {
-      const descriptor = openSync(resolveHostReadPath(path), "r");
+      const descriptor = openSync(path, "r");
       try {
         const bytes = new Uint8Array(length);
         const count = readSync(descriptor, bytes, 0, length, offset);
@@ -390,6 +397,7 @@ export function createNodeKernelHost(options: NodeKernelHostOptions = {}): Kerne
     removePath: (path) => unlinkSync(path),
     renamePath: (from, to) => renameSync(from, to),
     listDirectory: (path) => readdirSync(path),
+    resolveReadPath: resolveHostReadPath,
     sourceInventory: inventory,
     randomBytes: (length) => Uint8Array.from(nodeRandomBytes(length)),
     tempDirectory:

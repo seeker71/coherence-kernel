@@ -5358,9 +5358,95 @@ static long long fk_keyeq(long long a, long long b) {
     }
     return 1;
 }
+/* fk_host_resolve — where a host path names a file for a read-side door, the same way on every
+ * kernel. A path that stands where the kernel runs names itself. Otherwise the walk tries dir/p,
+ * dir/form/p and dir/form/form/p from the working directory upward and stops at the checkout that
+ * holds it, the first directory with a .git entry, so one checkout never reads another's files.
+ * Doors that create or change a file never walk. Rewrites p (FK_PATH_CAP bytes) in place. */
+static int fk_host_exists(const char *p) {
+#ifdef FK_HAVE_STAT_HEADER
+    struct stat st;
+    return stat(p, &st) == 0;
+#else
+    char st[512];
+    return stat(p, st) == 0;
+#endif
+}
+static int fk_host_join(char *out, const char *dir, long long dn, const char *mid, const char *p) {
+    long long n = 0;
+    long long k = 0;
+    while (k < dn) {
+        if (n + 1 >= FK_PATH_CAP) { return 0; }
+        out[n] = dir[k];
+        n = n + 1;
+        k = k + 1;
+    }
+    if (n + 1 >= FK_PATH_CAP) { return 0; }
+    out[n] = '/';
+    n = n + 1;
+    k = 0;
+    while (mid[k] != 0) {
+        if (n + 1 >= FK_PATH_CAP) { return 0; }
+        out[n] = mid[k];
+        n = n + 1;
+        k = k + 1;
+    }
+    k = 0;
+    while (p[k] != 0) {
+        if (n + 1 >= FK_PATH_CAP) { return 0; }
+        out[n] = p[k];
+        n = n + 1;
+        k = k + 1;
+    }
+    out[n] = 0;
+    return 1;
+}
+static void fk_host_resolve(char *p) {
+    if (p[0] == 0 || p[0] == '/' || fk_host_exists(p)) {
+        return;
+    }
+    static char dir[FK_PATH_CAP];
+    static char cand[FK_PATH_CAP];
+    if (getcwd(dir, FK_PATH_CAP) == 0) {
+        return;
+    }
+    long long dn = 0;
+    while (dir[dn] != 0) {
+        dn = dn + 1;
+    }
+    while (dn > 0) {
+        int m = 0;
+        while (m < 3) {
+            const char *mid = m == 0 ? "" : (m == 1 ? "form/" : "form/form/");
+            if (fk_host_join(cand, dir, dn, mid, p) && fk_host_exists(cand)) {
+                long long k = 0;
+                while (cand[k] != 0) {
+                    p[k] = cand[k];
+                    k = k + 1;
+                }
+                p[k] = 0;
+                return;
+            }
+            m = m + 1;
+        }
+        if (fk_host_join(cand, dir, dn, "", ".git") && fk_host_exists(cand)) {
+            return;
+        }
+        if (dn == 1) {
+            return;
+        }
+        long long s = dn - 1;
+        while (s > 0 && dir[s] != '/') {
+            s = s - 1;
+        }
+        dn = s > 0 ? s : 1;
+        dir[dn] = 0;
+    }
+}
 static long long fk_file_mtime(long long pv) {
     static char p[FK_PATH_CAP];
     fk_cstr(pv, p, FK_PATH_CAP);
+    fk_host_resolve(p);
 #ifdef FK_HAVE_STAT_HEADER
     struct stat st;
     if (stat(p, &st) != 0) {
@@ -13959,6 +14045,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 57) {
         static char p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
+        fk_host_resolve(p);
         int fd = open(p, 0);
         if (fd < 0) {
             return 0;
@@ -14002,6 +14089,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 60) {
         static char p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
+        fk_host_resolve(p);
         int fd = open(p, 0);
         if (fd < 0) {
             return -2;
@@ -14567,6 +14655,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 62) {
         static char p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
+        fk_host_resolve(p);
         long long off = fk_walk(fk_node[i][2], fp) >> 1;
         long long len = fk_walk(fk_node[i][3], fp) >> 1;
         if (len <= 0) {
@@ -14598,6 +14687,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         static long long fk_nreads;
         long long pv63 = fk_walk(fk_node[i][1], fp);
         fk_cstr(pv63, p, FK_PATH_CAP);
+        fk_host_resolve(p);
         fk_nreads = fk_nreads + 1;
         int fd = open(p, O_RDBIN);
         if (fd < 0) {
@@ -14831,6 +14921,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         static char fkl_p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), fkl_p, FK_PATH_CAP);
+        fk_host_resolve(fkl_p);
         void *fkl_d = opendir(fkl_p);
         if (fkl_d == 0) {
             return 1;
@@ -14932,6 +15023,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 133) {
         static char p70[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p70, FK_PATH_CAP);
+        fk_host_resolve(p70);
         int fd70 = open(p70, 0);
         return ((long long)fd70) << 1;
     }
@@ -15176,12 +15268,14 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 200) {
         static char p200[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p200, FK_PATH_CAP);
+        fk_host_resolve(p200);
         return fk_path_is_dir(p200) ? 2 : 0;
     }
     if (t == 202) {
         static char r202[FK_PATH_CAP];
         static char s202[256];
         fk_cstr(fk_walk(fk_node[i][1], fp), r202, FK_PATH_CAP);
+        fk_host_resolve(r202);
         fk_cstr(fk_walk(fk_node[i][2], fp), s202, 256);
         fk_inv_reset();
         fk_inv_walk(r202, r202, s202, fk_walk(fk_node[i][3], fp));
