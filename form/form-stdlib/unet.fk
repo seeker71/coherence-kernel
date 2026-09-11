@@ -1,6 +1,6 @@
 ; unet.fk — the diffusion UNet building blocks (upsample / downsample / resblock) as Form recipes.
 ;
-; preludes: form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/conv-stem.fk form-stdlib/conv2d.fk form-stdlib/llama-numerics.fk
+; preludes: form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/conv-stem.fk form-stdlib/conv2d.fk form-stdlib/llama-numerics.fk form-stdlib/positional.fk
 ;
 ; conv2d.fk gave the diffusion/vision floor: Conv2d over a GRID of pixels (a list of ROWS, each row a
 ; list of PIXELS, each pixel a vector of in-channels) plus GroupNorm. A diffusion UNet stacks three
@@ -80,3 +80,69 @@
       (let ha (un-silu-grid hn))
       (let h2 (cv2d-conv w2 b2 ha 1 1 3 3))
       (un-add-grid h2 img)))
+
+; ======================================================================================================
+; THE WHOLE UNET AND A VAE DECODER — composition of the pieces above, plus the four a diffusion model
+; needs beyond a resblock. Nothing below is new
+; arithmetic, only new arrangement, and every piece it arranges already stands four-way.
+; ======================================================================================================
+
+; skip connection: pixel-wise channel concatenation of two grids of the same height and width
+(defn un-concat-row (a b)
+  (if (eq (len a) 0) (empty) (cons (cv-cat (head a) (head b)) (un-concat-row (tail a) (tail b)))))
+(defn un-concat-grid (a b)
+  (if (eq (len a) 0) (empty) (cons (un-concat-row (head a) (head b)) (un-concat-grid (tail a) (tail b)))))
+
+; spatial self-attention, the mid block of both: GroupNorm the grid, attend across EVERY PIXEL as a token
+; (H*W tokens of C channels) through tb-attn-sub's own projections, reshape, and add the input back
+(defn un-attn-grid (g groups eps wq bq wk bk wv bv wo bo scale)
+  (un-add-grid g (un-chunk-rows (tb-attn-sub (un-flatten-grid (un-gn-grid g groups eps)) wq bq wk bk wv bv wo bo scale)
+                                (len (head g)))))
+
+; the timestep embedding is the sinusoid positional.fk already computes, read at position t
+(defn un-time-embed (t ch) (nth (pe-matrix (add t 1) ch) t))
+
+; one vector added to every pixel of a grid
+(defn un-bcast-row (row v) (if (eq (len row) 0) (empty) (cons (tb-vec-add (head row) v) (un-bcast-row (tail row) v))))
+(defn un-bcast (g v) (if (eq (len g) 0) (empty) (cons (un-bcast-row (head g) v) (un-bcast (tail g) v))))
+
+; the time-conditioned resblock: SiLU of the embedding, projected to the channel width, added to every
+; pixel after the first conv — the one place a diffusion UNet learns WHEN in the noise it is
+(defn un-resblock-t (img temb wt bt w1 b1 w2 b2 groups eps)
+  (do (let h1 (un-bcast (cv2d-conv w1 b1 img 1 1 3 3) (tb-affine wt bt (un-silu-vec temb))))
+      (let h2 (cv2d-conv w2 b2 (un-silu-grid (un-gn-grid h1 groups eps)) 1 1 3 3))
+      (un-add-grid h2 img)))
+; and with a 1x1 skip conv, for when the channels change — as they do after a skip concatenation
+(defn un-resblock-t-skip (img temb wt bt w1 b1 w2 b2 ws bs groups eps)
+  (do (let h1 (un-bcast (cv2d-conv w1 b1 img 1 1 3 3) (tb-affine wt bt (un-silu-vec temb))))
+      (let h2 (cv2d-conv w2 b2 (un-silu-grid (un-gn-grid h1 groups eps)) 1 1 3 3))
+      (un-add-grid h2 (cv2d-conv ws bs img 0 1 1 1))))
+
+; parameters travel as lists: a resblock (w1 b1 w2 b2), a timed one (wt bt w1 b1 w2 b2 [ws bs]),
+; an attention (wq bq wk bk wv bv wo bo)
+(defn un-rb (img p groups eps) (un-resblock img (nth p 0) (nth p 1) (nth p 2) (nth p 3) groups eps))
+(defn un-rbt (img temb p groups eps)
+  (un-resblock-t img temb (nth p 0) (nth p 1) (nth p 2) (nth p 3) (nth p 4) (nth p 5) groups eps))
+(defn un-rbts (img temb p groups eps)
+  (un-resblock-t-skip img temb (nth p 0) (nth p 1) (nth p 2) (nth p 3) (nth p 4) (nth p 5) (nth p 6) (nth p 7) groups eps))
+(defn un-at (g p groups eps scale)
+  (un-attn-grid g groups eps (nth p 0) (nth p 1) (nth p 2) (nth p 3) (nth p 4) (nth p 5) (nth p 6) (nth p 7) scale))
+
+; a VAE decoder, Stable-Diffusion-shaped in miniature: conv_in, resblock, mid attention, resblock,
+; upsample 2x, resblock, then GroupNorm, SiLU and conv_out down to the image's channels
+(defn un-vae-decode (z cw cb rb1 at rb2 rb3 ow ob groups eps scale)
+  (do (let h1 (un-rb (cv2d-conv cw cb z 1 1 3 3) rb1 groups eps))
+      (let h2 (un-rb (un-at h1 at groups eps scale) rb2 groups eps))
+      (let h3 (un-rb (un-upsample2x h2) rb3 groups eps))
+      (cv2d-conv ow ob (un-silu-grid (un-gn-grid h3 groups eps)) 1 1 3 3)))
+
+; a whole UNet, one level deep: conv_in; DOWN — a timed resblock whose output is kept as the skip, then
+; downsample; MID — a timed resblock and attention; UP — upsample, concatenate the skip, a timed resblock
+; with a 1x1 skip conv since the concat doubled the channels; then GroupNorm, SiLU and conv_out. The
+; output has the input's shape: a denoiser predicts noise the size of what it was given.
+(defn un-unet (x temb cw cb rbd rbm at rbu ow ob groups eps scale)
+  (do (let h0 (cv2d-conv cw cb x 1 1 3 3))
+      (let hd (un-rbt h0 temb rbd groups eps))
+      (let hm (un-at (un-rbt (un-downsample2x hd) temb rbm groups eps) at groups eps scale))
+      (let hu (un-rbts (un-concat-grid (un-upsample2x hm) hd) temb rbu groups eps))
+      (cv2d-conv ow ob (un-silu-grid (un-gn-grid hu groups eps)) 1 1 3 3)))

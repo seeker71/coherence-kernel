@@ -35,6 +35,203 @@ void *dlsym(void *h, const char *n) {
 int dlclose(void *h) {
     return FreeLibrary(h) ? 0 : -1;
 }
+/* The lanes grown since the port last built under mingw gcc (2026-07-01) name size_t, timespec and
+ * its clocks, struct stat, errno and a few open/fcntl/errno constants that the other hosts take from
+ * the system headers this file never includes on _WIN32. Their Windows shapes, by hand like the rest:
+ * errno is msvcrt's per-thread cell, stat is _stat64 (a GGUF is larger than 2 GB), the clocks read
+ * the performance counter, the system file time and the process times, and close-on-exec has
+ * nothing to do on a host where no child is forked. */
+typedef unsigned long long size_t;
+extern int *_errno(void);
+#define errno (*_errno())
+#define ESRCH 3
+#define ESPIPE 29
+#define O_RDONLY 0
+#define F_SETFD 2
+#define FD_CLOEXEC 1
+struct timespec { long long tv_sec; long tv_nsec; };
+#define CLOCK_REALTIME 0
+#define CLOCK_MONOTONIC 1
+#define CLOCK_PROCESS_CPUTIME_ID 2
+extern int QueryPerformanceCounter(long long *);
+extern int QueryPerformanceFrequency(long long *);
+extern void GetSystemTimeAsFileTime(unsigned long long *);
+extern void *GetCurrentProcess(void);
+extern int GetProcessTimes(void *, unsigned long long *, unsigned long long *, unsigned long long *, unsigned long long *);
+extern void Sleep(unsigned int);
+static int fk_win_clock_gettime(int clk, void *out) {
+    struct timespec *ts = (struct timespec *)out;
+    if (clk == CLOCK_MONOTONIC) {
+        long long c = 0, f = 1;
+        QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f);
+        ts->tv_sec = c / f; ts->tv_nsec = (long)(((c % f) * 1000000000LL) / f);
+    } else if (clk == CLOCK_PROCESS_CPUTIME_ID) {
+        unsigned long long cr = 0, ex = 0, k = 0, u = 0;
+        GetProcessTimes(GetCurrentProcess(), &cr, &ex, &k, &u);
+        ts->tv_sec = (long long)((k + u) / 10000000ULL); ts->tv_nsec = (long)(((k + u) % 10000000ULL) * 100ULL);
+    } else {
+        unsigned long long ft = 0;
+        GetSystemTimeAsFileTime(&ft);
+        ft -= 116444736000000000ULL;
+        ts->tv_sec = (long long)(ft / 10000000ULL); ts->tv_nsec = (long)((ft % 10000000ULL) * 100ULL);
+    }
+    return 0;
+}
+#define clock_gettime fk_win_clock_gettime
+static int fk_win_fcntl(int fd, int cmd, ...) {
+    (void)fd; (void)cmd;
+    return 0;
+}
+#define fcntl fk_win_fcntl
+struct _stat64 { unsigned int st_dev; unsigned short st_ino; unsigned short st_mode; short st_nlink; short st_uid;
+                 short st_gid; unsigned int st_rdev; long long st_size; long long st_atime; long long st_mtime; long long st_ctime; };
+#define stat _stat64
+#define S_ISFIFO(m) (((m) & 0xF000) == 0x1000)
+/* the waits and the unmaps: Sleep and SwitchToThread are the scheduler's own doors; a view is
+ * released by UnmapViewOfFile; a named mapping leaves with its last handle, so there is nothing
+ * to unlink; msvcrt carries _exit, dup2 and execvp under their POSIX names, and _pipe needs its
+ * buffer size and binary mode said out loud */
+extern int SwitchToThread(void);
+extern int UnmapViewOfFile(const void *);
+extern int _pipe(int *, unsigned int, int);
+extern void _exit(int);
+extern int dup2(int, int);
+extern int execvp(const char *, char *const *);
+static int fk_win_nanosleep(const struct timespec *req, struct timespec *rem) {
+    (void)rem;
+    Sleep((unsigned int)(req->tv_sec * 1000 + req->tv_nsec / 1000000));
+    return 0;
+}
+#define nanosleep fk_win_nanosleep
+static int fk_win_sched_yield(void) {
+    SwitchToThread();
+    return 0;
+}
+#define sched_yield fk_win_sched_yield
+static int fk_win_munmap(void *a, size_t n) {
+    (void)n;
+    return UnmapViewOfFile(a) ? 0 : -1;
+}
+#define munmap fk_win_munmap
+static int fk_win_shm_unlink(const char *name) {
+    (void)name;
+    return 0;
+}
+#define shm_unlink fk_win_shm_unlink
+static int fk_win_pipe(int *fds) {
+    return _pipe(fds, 65536, 0x8000);
+}
+#define pipe fk_win_pipe
+/* processes. _spawnvp answers the child's process HANDLE; the body speaks pids, so each handle is
+ * kept beside its pid in a small table and found again for the wait, the alive question and the
+ * kill. A pid the table never held (another kernel's) is opened by id. The child takes its
+ * stdin/stdout/stderr from ours, so a redirect swaps our own descriptors around the spawn. */
+extern long long _spawnvp(int, const char *, const char *const *);
+extern int _dup(int);
+extern int close(int);
+extern unsigned int GetProcessId(void *);
+extern void *OpenProcess(unsigned int, int, unsigned int);
+extern int GetExitCodeProcess(void *, unsigned int *);
+extern int TerminateProcess(void *, unsigned int);
+extern int SetPriorityClass(void *, unsigned int);
+extern unsigned int WaitForSingleObject(void *, unsigned int);
+extern int CloseHandle(void *);
+extern int _vsnprintf(char *, size_t, const char *, __builtin_va_list);
+static void *fk_win_proc_h[64];
+static long long fk_win_proc_pid[64];
+static void fk_win_proc_keep(long long pid, void *h) {
+    int k;
+    for (k = 0; k < 64; k++) {
+        if (fk_win_proc_pid[k] == 0) { fk_win_proc_pid[k] = pid; fk_win_proc_h[k] = h; return; }
+    }
+    CloseHandle(fk_win_proc_h[0]);
+    fk_win_proc_pid[0] = pid; fk_win_proc_h[0] = h;
+}
+static void *fk_win_proc_find(long long pid, int take) {
+    int k;
+    for (k = 0; k < 64; k++) {
+        if (pid != 0 && fk_win_proc_pid[k] == pid) {
+            void *h = fk_win_proc_h[k];
+            if (take) { fk_win_proc_pid[k] = 0; fk_win_proc_h[k] = 0; }
+            return h;
+        }
+    }
+    return 0;
+}
+/* spawn av with fd 0/1/2 taken from in/out/err where those are >= 0; answers the pid, or -1 */
+static long long fk_win_spawn(char **av, int in_fd, int out_fd, int err_fd) {
+    int s0 = -1, s1 = -1, s2 = -1;
+    if (in_fd >= 0) { s0 = _dup(0); dup2(in_fd, 0); }
+    if (out_fd >= 0) { s1 = _dup(1); dup2(out_fd, 1); }
+    if (err_fd >= 0) { s2 = _dup(2); dup2(err_fd, 2); }
+    long long h = _spawnvp(1, av[0], (const char *const *)av);
+    if (s0 >= 0) { dup2(s0, 0); close(s0); }
+    if (s1 >= 0) { dup2(s1, 1); close(s1); }
+    if (s2 >= 0) { dup2(s2, 2); close(s2); }
+    if (h == -1 || h == 0) { return -1; }
+    long long pid = (long long)GetProcessId((void *)h);
+    fk_win_proc_keep(pid, (void *)h);
+    return pid;
+}
+/* the exit code in the place a POSIX status keeps it, so the door's decoding is one decoding */
+static int fk_win_waitpid(int pid, int *st, int opt) {
+    (void)opt;
+    void *h = fk_win_proc_find(pid, 1);
+    if (h == 0) { h = OpenProcess(0x00101000u, 0, (unsigned int)pid); }
+    if (h == 0) { return -1; }
+    WaitForSingleObject(h, 0xFFFFFFFFu);
+    unsigned int code = 0;
+    GetExitCodeProcess(h, &code);
+    CloseHandle(h);
+    if (st) { *st = (int)((code & 0xffu) << 8); }
+    return pid;
+}
+#define waitpid fk_win_waitpid
+static int fk_win_kill(int pid, int sig) {
+    void *h = fk_win_proc_find(pid, 0);
+    int opened = 0;
+    if (h == 0) { h = OpenProcess(0x00001001u, 0, (unsigned int)pid); opened = 1; }
+    if (h == 0) { errno = ESRCH; return -1; }
+    int rc = 0;
+    if (sig == 0) {
+        unsigned int code = 0;
+        if (!GetExitCodeProcess(h, &code) || code != 259u) { errno = ESRCH; rc = -1; }
+    } else if (!TerminateProcess(h, (unsigned int)(128 + sig))) {
+        rc = -1;
+    }
+    if (opened) { CloseHandle(h); }
+    return rc;
+}
+#define kill fk_win_kill
+static int fk_win_setpriority(int which, unsigned int who, int prio) {
+    (void)which; (void)who;
+    unsigned int cls = prio >= 15 ? 0x40u : prio > 0 ? 0x4000u : prio == 0 ? 0x20u : prio > -10 ? 0x8000u : 0x80u;
+    return SetPriorityClass(GetCurrentProcess(), cls) ? 0 : -1;
+}
+#define setpriority fk_win_setpriority
+/* released on this host: a fifo ring is a POSIX file the bells open by path, and Windows' named
+ * pipes live in \\.\pipe\, not beside the files; the door answers "not made" and the cell decides */
+static int fk_win_mkfifo(const char *path, unsigned int mode) {
+    (void)path; (void)mode;
+    errno = 40;
+    return -1;
+}
+#define mkfifo fk_win_mkfifo
+static int fk_win_vdprintf(int fd, const char *fmt, __builtin_va_list ap) {
+    char b[4096];
+    int n = _vsnprintf(b, sizeof(b) - 1, fmt, ap);
+    if (n < 0 || n > (int)sizeof(b) - 1) { n = (int)sizeof(b) - 1; }
+    return (int)fkwu_win_write(fd, b, (unsigned long)n);
+}
+#define vdprintf fk_win_vdprintf
+static int fk_win_dprintf(int fd, const char *fmt, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    int n = fk_win_vdprintf(fd, fmt, ap);
+    __builtin_va_end(ap);
+    return n;
+}
+#define dprintf fk_win_dprintf
 #endif
 extern int putchar(int);
 extern int fflush(void *);
@@ -128,10 +325,12 @@ static long long fk_host_disk_stat(long long *out);
 #ifdef __APPLE__
 extern int host_statistics64(unsigned int host, int flavor, int *info, unsigned int *count);
 extern int sysctlbyname(const char *name, void *oldp, unsigned long *oldlenp, void *newp, unsigned long newlen);
+extern int sysctl(int *name, unsigned int namelen, void *oldp, unsigned long *oldlenp, void *newp, unsigned long newlen);
 extern int getloadavg(double *loads, int n);
 extern int proc_listpids(unsigned int type, unsigned int typeinfo, void *buffer, int buffersize);
 extern int proc_pidinfo(int pid, int flavor, unsigned long long arg, void *buffer, int buffersize);
 extern int proc_name(int pid, void *buffer, unsigned int buffersize);
+extern int proc_pidpath(int pid, void *buffer, unsigned int buffersize);
 struct fk_mach_timebase { unsigned int numer; unsigned int denom; };
 extern int mach_timebase_info(struct fk_mach_timebase *info);
 #endif
@@ -4679,6 +4878,13 @@ static long long fk_native_call_arm64_u32_leaf(long long program, long long root
     (void)arg;
     return fk_nothing;
 }
+/* the in-RAM leaf is Darwin arm64's; every other host answers nothing, as the u32 leaf above does,
+ * so the walker's call to it links on Linux, Intel and Windows too */
+static long long fk_jit_leaf_inram(long long request_or_image, long long arg_value) {
+    (void)request_or_image;
+    (void)arg_value;
+    return fk_nothing;
+}
 #endif
 /* ── the value-node table grows; there is no node wall ─────────────────────
  * Handles are INDICES into the column arrays, so doubling the columns keeps
@@ -9050,6 +9256,17 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
         int fds155[2];
         fds155[0] = -1; fds155[1] = -1;
         if (t == 159 && pipe(fds155) != 0) { return fk_nothing; }
+#if defined(_WIN32)
+        /* no fork here: the child takes the pipe (capture) or NUL (quiet) as its stdout, swapped in
+         * around the spawn, and the spawn answers its pid */
+        int nul161 = t == 161 ? open("NUL", 1) : -1;
+        long long pid155 = fk_win_spawn(av155, -1, t == 159 ? fds155[1] : nul161, nul161);
+        if (nul161 >= 0) { close(nul161); }
+        if (pid155 < 0) {
+            if (t == 159) { close(fds155[0]); close(fds155[1]); }
+            return fk_nothing;
+        }
+#else
         long long pid155 = fork();
         if (pid155 < 0) { return fk_nothing; }
         if (pid155 == 0) {
@@ -9058,6 +9275,7 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
             execvp(av155[0], av155);
             _exit(127);
         }
+#endif
         if (t == 155 || t == 161) { return pid155 << 1; }
         close(fds155[1]);
         static char ob155[1048576];
@@ -9127,12 +9345,162 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
  *       ear's bells were found in exactly that state. This door REPORTS what is
  *       there and never removes a path on its own -- the Form cell decides.
  */
+/* kill(pid, 0) succeeds for a zombie too — a process that has ended and has not been reaped — so every
+ * liveness question here also asks whether the pid is one. On 2026-09-11 the ear's live lane ended at birth
+ * and stayed "alive" to host_alive and to the roster until its parent waited for it. */
+static int fk_pid_zombie(long long pid) {
+    if (pid <= 0) { return 0; }
+#if defined(__APPLE__)
+    /* proc_pidinfo answers ESRCH for a zombie, in both BSD flavors; sysctl KERN_PROC_PID still hands back its
+     * kinfo_proc (648 bytes), and p_stat, the byte at offset 36, is SZOMB (5) */
+    int mz[4] = {1, 14, 1, (int)pid};
+    unsigned char kz[648];
+    unsigned long lz = 648;
+    if (sysctl(mz, 4, kz, &lz, 0, 0) == 0 && lz >= 37 && kz[36] == 5) { return 1; }
+    return 0;
+#elif defined(__linux__)
+    char pth[40]; char dg[24]; long long n = 0; long long p = pid;
+    while (p > 0 && n < 22) { dg[n] = (char)('0' + (p % 10)); n = n + 1; p = p / 10; }
+    long long o = 0; const char *pre = "/proc/";
+    while (pre[o] != 0) { pth[o] = pre[o]; o = o + 1; }
+    while (n > 0) { n = n - 1; pth[o] = dg[n]; o = o + 1; }
+    pth[o] = '/'; pth[o + 1] = 's'; pth[o + 2] = 't'; pth[o + 3] = 'a'; pth[o + 4] = 't'; pth[o + 5] = 0;
+    int fz = open(pth, O_RDONLY);
+    if (fz < 0) { return 0; }
+    char bz[512];
+    long long got = read(fz, bz, 511);
+    close(fz);
+    if (got <= 0) { return 0; }
+    long long k = got - 1;
+    while (k > 0 && bz[k] != ')') { k = k - 1; }
+    return (k > 0 && k + 2 < got && bz[k + 2] == 'Z') ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+#if defined(__linux__)
+/* "/proc/<pid>/<leaf>" */
+static void fk_proc_file(long long pid, const char *leaf, char *out) {
+    char dg[24]; long long n = 0; long long p = pid; long long o = 0; long long k = 0;
+    const char *pre = "/proc/";
+    while (pre[o] != 0) { out[o] = pre[o]; o = o + 1; }
+    if (p <= 0) { dg[n] = '0'; n = n + 1; }
+    while (p > 0 && n < 22) { dg[n] = (char)('0' + (p % 10)); n = n + 1; p = p / 10; }
+    while (n > 0) { n = n - 1; out[o] = dg[n]; o = o + 1; }
+    out[o] = '/'; o = o + 1;
+    while (leaf[k] != 0) { out[o] = leaf[k]; o = o + 1; k = k + 1; }
+    out[o] = 0;
+}
+#endif
+/* host_process pid: what a process runs and where -- (pid ppid exe cwd argv), argv a list of strings; -1 when no
+ * process has that pid. A field the host will not tell (the cwd or argv of a process this user may not read, pid 1
+ * among them) is "" or an empty list, never guessed. On 2026-09-11 the census could count every kernel and still
+ * not say what one of them ran: the host's rows carried a pid, a size and a parent, and the glass learned a
+ * kernel's cell by running ps through a shell. macOS: the process table (KERN_PROC_PID) for the parent, proc_pidpath, the cwd from
+ * PROC_PIDVNODEPATHINFO (its path at byte 152 of 2352), argv from sysctl KERN_PROCARGS2 (argc, the exec path, its
+ * padding, then the words). Linux: /proc/<pid>/stat, exe, cwd and cmdline. */
+static long long fk_host_process(long long pid) {
+    if (pid <= 0) { return (0 - 1) * 2; }
+    if (kill((int)pid, 0) != 0 && errno == ESRCH) { return (0 - 1) * 2; }
+    long long ppid = 0;
+    long long exe = fk_sbuf("", 0);
+    long long cwd = fk_sbuf("", 0);
+    long long argv = 1;
+    long long starts[64];
+    long long lens[64];
+    int nw = 0;
+#if defined(__APPLE__)
+    /* the parent from the process table (kinfo_proc, e_ppid at byte 560 of 648): bsdinfo does not answer this
+     * user for a root process such as login, and a parent read as 0 walked a Terminal's glass to launchd */
+    int mk[4] = {1, 14, 1, (int)pid};
+    unsigned char kb[648];
+    unsigned long kl = 648;
+    if (sysctl(mk, 4, kb, &kl, 0, 0) == 0 && kl >= 564) { ppid = (long long)(*(int *)(kb + 560)); }
+    static char pth[4096];
+    int pl = proc_pidpath((int)pid, pth, 4096);
+    if (pl > 0) { exe = fk_sbuf(pth, pl); }
+    static unsigned char vpi[2352];
+    if (proc_pidinfo((int)pid, 9, 0, vpi, 2352) > 152) {
+        const char *cd = (const char *)(vpi + 152);
+        long long cl = 0;
+        while (cl < 1024 && cd[cl] != 0) { cl = cl + 1; }
+        cwd = fk_sbuf(cd, cl);
+    }
+    static char *pa = 0;
+    static long long pacap = 0;
+    if (pa == 0) {
+        long long am = fk_sysctl_ll("kern.argmax");
+        if (am <= 0 || am > (1LL << 24)) { am = 1LL << 20; }
+        pa = (char *)malloc((unsigned long)am);
+        pacap = pa != 0 ? am : 0;
+    }
+    int mib[3] = {1, 49, (int)pid};
+    unsigned long pal = (unsigned long)pacap;
+    if (pa != 0 && sysctl(mib, 3, pa, &pal, 0, 0) == 0 && pal > 4) {
+        int argc = *(int *)pa;
+        long long o = 4;
+        long long end = (long long)pal;
+        while (o < end && pa[o] != 0) { o = o + 1; }
+        while (o < end && pa[o] == 0) { o = o + 1; }
+        while (nw < argc && nw < 64 && o < end) {
+            long long s = o;
+            while (o < end && pa[o] != 0) { o = o + 1; }
+            starts[nw] = s; lens[nw] = o - s; nw = nw + 1; o = o + 1;
+        }
+        int k = nw - 1;
+        while (k >= 0) { argv = fk_cons_val(fk_sbuf(pa + starts[k], lens[k]), argv); k = k - 1; }
+    }
+#elif defined(__linux__)
+    extern long readlink(const char *path, char *buf, unsigned long bufsiz);
+    char pf[64];
+    static char lb[4096];
+    fk_proc_file(pid, "stat", pf);
+    int fs = open(pf, O_RDONLY);
+    if (fs >= 0) {
+        char sb[512];
+        long long got = read(fs, sb, 511);
+        close(fs);
+        long long k = got - 1;
+        while (k > 0 && sb[k] != ')') { k = k - 1; }
+        long long o = k + 4;
+        while (k > 0 && o < got && sb[o] >= '0' && sb[o] <= '9') { ppid = ppid * 10 + (sb[o] - '0'); o = o + 1; }
+    }
+    fk_proc_file(pid, "exe", pf);
+    long rl = readlink(pf, lb, 4095);
+    if (rl > 0) { exe = fk_sbuf(lb, rl); }
+    fk_proc_file(pid, "cwd", pf);
+    rl = readlink(pf, lb, 4095);
+    if (rl > 0) { cwd = fk_sbuf(lb, rl); }
+    fk_proc_file(pid, "cmdline", pf);
+    int fc = open(pf, O_RDONLY);
+    if (fc >= 0) {
+        static char cb[65536];
+        long long got = read(fc, cb, 65535);
+        close(fc);
+        long long o = 0;
+        while (got > 0 && o < got && nw < 64) {
+            long long s = o;
+            while (o < got && cb[o] != 0) { o = o + 1; }
+            starts[nw] = s; lens[nw] = o - s; nw = nw + 1; o = o + 1;
+        }
+        int k = nw - 1;
+        while (k >= 0) { argv = fk_cons_val(fk_sbuf(cb + starts[k], lens[k]), argv); k = k - 1; }
+    }
+#else
+    (void)starts; (void)lens; (void)nw;
+#endif
+    return fk_cons_val(pid << 1, fk_cons_val(ppid << 1, fk_cons_val(exe, fk_cons_val(cwd, fk_cons_val(argv, 1)))));
+}
+static long long fk_roster_adopt(long long pid);
+static long long fk_roster_forget(long long pid);
+static long long fk_page_bury(long long pid);
 static long long fk_host_door(long long mode, long long x) {
     if (mode == 18) {
         /* host_alive pid */
         if ((x & 1) != 0) { return (0 - 1) * 2; }
         long long pid18 = x >> 1;
         if (pid18 <= 0) { return (0 - 1) * 2; }
+        if (fk_pid_zombie(pid18)) { return 0; }
         if (kill((int)pid18, 0) == 0) { return 1 * 2; }
         if (errno == ESRCH) { return 0; }
         return 1 * 2;
@@ -9150,6 +9518,16 @@ static long long fk_host_door(long long mode, long long x) {
         }
         if (mkfifo(pf19, 0600) == 0) { return 1 * 2; }
         return (0 - 1) * 2;
+    }
+    if (mode == 20 || mode == 21 || mode == 22) {
+        /* kernel_roster_adopt pid / kernel_roster_forget pid / kernel_page_bury pid -- see fk_roster_adopt, fk_page_bury */
+        if ((x & 1) != 0) { return (0 - 1) * 2; }
+        return (mode == 20 ? fk_roster_adopt(x >> 1) : mode == 21 ? fk_roster_forget(x >> 1) : fk_page_bury(x >> 1)) * 2;
+    }
+    if (mode == 23) {
+        /* host_process pid -- see fk_host_process */
+        if ((x & 1) != 0) { return (0 - 1) * 2; }
+        return fk_host_process(x >> 1);
     }
     if (mode != 17) { return fk_nothing; }
     /* host_spawn_at (cons argv redirects) */
@@ -9219,6 +9597,17 @@ static long long fk_host_door(long long mode, long long x) {
         if (rfd17[2] >= 0 && rfd17[2] != rfd17[1]) { close(rfd17[2]); }
         return (0 - 3) * 2;
     }
+#if defined(_WIN32)
+    /* no fork: the redirects are swapped into our own 0/1/2 around the spawn, and a child that could
+     * not start is known at once, so the error pipe has nothing to carry */
+    close(ef17[0]); close(ef17[1]);
+    long long pidw17 = fk_win_spawn(av17, rfd17[0], rfd17[1], rfd17[2]);
+    if (rfd17[0] >= 0) { close(rfd17[0]); }
+    if (rfd17[1] >= 0) { close(rfd17[1]); }
+    if (rfd17[2] >= 0 && rfd17[2] != rfd17[1]) { close(rfd17[2]); }
+    if (pidw17 < 0) { return (0 - 4) * 2; }
+    return pidw17 * 2;
+#else
     fcntl(ef17[1], F_SETFD, FD_CLOEXEC);
 
     long long pid17 = fork();
@@ -9258,6 +9647,7 @@ static long long fk_host_door(long long mode, long long x) {
         return (0 - 4) * 2;
     }
     return pid17 * 2;
+#endif
 }
 /* ── crystallize-on-boxing: the f64 leaf ─────────────────────────────────────
  * The box ledger is the trigger. fk_fbox charges every float box to the defn
@@ -11508,20 +11898,72 @@ static void fk_live_note_defn(long long j) {
     volatile long long *w = fk_live_page + 2;
     if (fx + 1 > w[29]) { w[29] = fx + 1; }
 }
+/* The roster stays mapped for the kernel's whole life and the kernel remembers its slot, so a tick
+ * can ask in one read whether it is still there. A kernel that registers once and never looks again
+ * stays invisible for as long as it runs if anything erases its slot. Every 64th live-page tick, and
+ * every rest (host_sleep_ms), puts a missing kernel back. Exit gives the slot back at once, so a pid the
+ * host hands out again never inherits it, and buries the kernel's page, store and program surface with
+ * it: the dead-slot sweep only reaches a pid that still holds a slot. */
+static volatile long long *fk_roster_slots;
+static long long fk_roster_k = -1;
+static long long fk_roster_ticks;
+/* a kernel's shared objects once it has ended: its live page, its store columns, its program surface */
+static void fk_live_bury(long long pid) {
+    char dn[32]; fk_live_pid_name(pid, dn); shm_unlink(dn); fk_store_unlink_pid(pid); fk_prog_unlink_pid(pid);
+}
+/* a pid is gone when the host has no such process, or holds only its corpse */
+static int fk_pid_gone(long long pid) { return (kill((int)pid, 0) != 0 && errno == ESRCH) || fk_pid_zombie(pid); }
+static long long fk_live_read_words(const char *name, long long *out, long long count);
+/* Only an ended kernel's page is buried. The host hands a pid out again within minutes (every five on
+ * 2026-09-11), and a kernel that takes it reopens the page its pid left standing, so the page must name
+ * that pid and say it ended (alive 0) or have been opened before the pid was seen gone, and the pid must
+ * still be gone once the page has been read: a kernel that took the pid meanwhile answers kill. Answers
+ * 1 when the page is an ended kernel's; it is unlinked only when bury is set. */
+static long long fk_live_bury_ended(long long pid, int bury) {
+    long long seen = fk_live_now_ms();
+    if (pid <= 0 || !fk_pid_gone(pid)) { return 0; }
+    char dn[32];
+    long long w[FK_LIVE_WORDS];
+    fk_live_pid_name(pid, dn);
+    if (fk_live_read_words(dn, w, FK_LIVE_WORDS) != FK_LIVE_WORDS) { return 0; }
+    if (w[1] != pid || !(w[19] == 0 || w[2] < seen) || !fk_pid_gone(pid)) { return 0; }
+    if (bury) { fk_live_bury(pid); }
+    return 1;
+}
+static void fk_live_roster_leave(long long pid) {
+    if (fk_roster_slots != 0 && fk_roster_k >= 0) { __sync_bool_compare_and_swap(&fk_roster_slots[fk_roster_k], pid, 0); }
+    fk_roster_k = -1;
+}
 static void fk_live_roster_register(long long pid) {
-    long long gh = fk_gift_open("/fg-kernels", 4096, 1);
-    if (gh == fk_nothing) { return; }
-    volatile long long *slots = (volatile long long *)fk_gift_base[gh >> 1] + 2;
-    long long k = 0, free_slot = -1;
+    if (fk_roster_slots == 0) {
+        long long gh = fk_gift_open("/fg-kernels", 4096, 1);
+        if (gh == fk_nothing) { return; }
+        fk_roster_slots = (volatile long long *)fk_gift_base[gh >> 1] + 2;
+    }
+    volatile long long *slots = fk_roster_slots;
+    if (fk_roster_k >= 0 && slots[fk_roster_k] == pid) { return; }
+    fk_roster_k = -1;
+    long long k = 0;
+    int held = 0;
+    /* first pass: am I here already, and which slots belong to kernels that are gone. A gone
+     * kernel's slot is emptied by compare-and-swap, so only one sweeper unlinks its pages. */
     while (k < 256) {
         long long v = slots[k];
-        if (v == pid) { free_slot = -1; break; }
-        if (v > 0 && v != pid && kill((int)v, 0) != 0) { char dn[32]; fk_live_pid_name(v, dn); shm_unlink(dn); fk_store_unlink_pid(v); fk_prog_unlink_pid(v); slots[k] = 0; v = 0; }
-        if (free_slot < 0 && v == 0) { free_slot = k; }
+        if (v == pid) { held = 1; fk_roster_k = k; }
+        else if (v > 0 && (kill((int)v, 0) != 0 || fk_pid_zombie(v)) && __sync_bool_compare_and_swap(&slots[k], v, 0)) {
+            fk_live_bury_ended(v, 1);
+        }
         k = k + 1;
     }
-    if (free_slot >= 0) { slots[free_slot] = pid; }
-    fk_gift_close(gh >> 1);
+    /* the claim is a compare-and-swap too. Kernels a parent starts in the same instant all see the
+     * same first empty slot, and a plain store let the last of them erase the others: on 2026-09-11
+     * three living glass organs were absent from the roster, each started in the same second as a
+     * sibling that held the slot. */
+    k = 0;
+    while (held == 0 && k < 256) {
+        if (slots[k] == 0 && __sync_bool_compare_and_swap(&slots[k], 0, pid)) { held = 1; fk_roster_k = k; }
+        k = k + 1;
+    }
 }
 static void fk_live_note(int final);
 /* the page opens once: the counters the kernel increments repoint into it, what was counted so far carried over */
@@ -11579,8 +12021,18 @@ static void fk_live_open(void) {
 }
 /* the words the kernel does not increment on its hot path: noted at melt, at exit, and when it reads its own page */
 static void fk_live_note(int final) {
+    /* a kernel that never opened its page does not open one to end it */
+    if (final && fk_live_page == 0) { return; }
     if (fk_live_page == 0) { fk_live_open(); if (fk_live_page == 0) { return; } }
     volatile long long *w = fk_live_page + 2;
+    /* the roster answers for this kernel while it lives and forgets it when it ends; its shared objects go with it */
+    if (final) { fk_live_roster_leave(w[1]); fk_live_bury(w[1]); }
+    else {
+        fk_roster_ticks = fk_roster_ticks + 1;
+        if (!(fk_roster_slots != 0 && fk_roster_k >= 0 && fk_roster_slots[fk_roster_k] == w[1]) && (fk_roster_ticks & 63) == 0) {
+            fk_live_roster_register(w[1]);
+        }
+    }
     w[6] = fk_np; w[7] = fk_sp; w[8] = fk_hp; w[9] = fk_fntop; w[10] = fk_gift_active; w[11] = fk_gift_bytes; w[12] = fk_node_cap; w[13] = fk_cap; w[14] = fk_vsp; w[15] = fk_fp;
     w[18] = fk_live_cpu_us(); w[19] = final ? 0 : 1; w[21] = fk_melt_gen; w[22] = fk_field_on ? 2 : fk_store_shared; w[23] = fk_heap_gen; w[27] = fk_fntop;
     __atomic_store_n(&w[3], w[3] + 1, __ATOMIC_RELEASE);
@@ -11906,6 +12358,67 @@ static long long fk_hot_rows_by(long long *ledger, long long want) {
     return l;
 }
 /* another kernel's page: header words plus what the reader derives from the arms (dispatches, hottest, distinct) */
+/* kernel_roster_adopt pid: a pid the host runs, whose live page says it is a living kernel and which
+ * holds no roster slot, is given one. A binary that claims its slot with a plain store loses kernels
+ * started in the same instant as a sibling and has no tick that puts them back: they run, their pages
+ * are current, and no organ that asks the roster can see them. 1 adopted, 0 it already holds a slot,
+ * -1 the pid is gone or has no page that says alive, -2 the roster is full or cannot be opened.
+ * kernel_roster_forget pid empties every slot that holds pid: 1 one did, 0 none. */
+static long long fk_live_read_page(const char *name, long long *out);
+static volatile long long *fk_roster_map(void) {
+    if (fk_roster_slots == 0) {
+        long long gh = fk_gift_open("/fg-kernels", 4096, 1);
+        if (gh == fk_nothing) { return 0; }
+        fk_roster_slots = (volatile long long *)fk_gift_base[gh >> 1] + 2;
+    }
+    return fk_roster_slots;
+}
+static long long fk_roster_adopt(long long pid) {
+    if (pid <= 0 || kill((int)pid, 0) != 0 || fk_pid_zombie(pid)) { return -1; }
+    char nm[32];
+    long long w[FK_LIVE_WORDS];
+    fk_live_pid_name(pid, nm);
+    if (fk_live_read_page(nm, w) != FK_LIVE_WORDS || w[0] != FK_LIVE_MAGIC || w[19] != 1) { return -1; }
+    volatile long long *slots = fk_roster_map();
+    if (slots == 0) { return -2; }
+    long long k = 0;
+    while (k < 256) { if (slots[k] == pid) { return 0; } k = k + 1; }
+    if (pid == (long long)getpid()) { fk_live_roster_register(pid); return fk_roster_k >= 0 ? 1 : -2; }
+    k = 0;
+    while (k < 256) {
+        if (slots[k] == 0 && __sync_bool_compare_and_swap(&slots[k], 0, pid)) { return 1; }
+        k = k + 1;
+    }
+    return -2;
+}
+static long long fk_roster_forget(long long pid) {
+    if (pid <= 0) { return 0; }
+    volatile long long *slots = fk_roster_map();
+    if (slots == 0) { return 0; }
+    long long k = 0, was = 0;
+    while (k < 256) {
+        if (slots[k] == pid && __sync_bool_compare_and_swap(&slots[k], pid, 0)) { was = 1; }
+        k = k + 1;
+    }
+    if (pid == (long long)getpid()) { fk_roster_k = -1; }
+    return was;
+}
+/* kernel_page_bury pid: that pid's page, store and program surface are buried if its kernel has ended
+ * (fk_live_bury_ended), and a roster slot still holding the pid is emptied; answers 1 when it buried.
+ * kernel_page_bury -pid only asks: 1 when that pid's page could be buried, nothing unlinked. Urs asked on
+ * 2026-09-11 to be asked before a page another kernel left is unlinked, so such a page goes only by this
+ * call, one pid at a time; rce-ended (form/form-stdlib/roster-census.bml) reads them all and buries none. */
+static long long fk_page_bury(long long p) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    long long pid = p < 0 ? 0 - p : p;
+    if (!fk_live_bury_ended(pid, p > 0)) { return 0; }
+    if (p > 0) { fk_roster_forget(pid); }
+    return 1;
+#else
+    (void)p;
+    return 0;
+#endif
+}
 static long long fk_live_read_page(const char *name, long long *out) {
     long long gh = fk_gift_open(name, 0, 0);
     if (gh == fk_nothing) { return -1; }
@@ -13305,6 +13818,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* modes 17-19: the doors that END THE SHELL -- host_spawn_at, host_alive,
          * fs_mkfifo. The ear's lanes reached for `sh -c` only to place three file
          * descriptors and to ask whether a pid answers; see fk_host_door. */
+        /* modes 20-22: kernel_roster_adopt, kernel_roster_forget, kernel_page_bury -- see fk_roster_adopt;
+         * mode 23: host_process -- see fk_host_process. */
         if ((fm201 >> 1) >= 17) { return fk_host_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) >= 10) { return fk_spk_door(fm201 >> 1, fx201); }
         /* modes 4-8: the binary form (value_kind, recipe_to_bytes, bytes_to_recipe,
@@ -13551,7 +14066,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_cons_val(d153[0] << 1, fk_cons_val(d153[1] << 1, fk_cons_val(d153[2] << 1, fk_cons_val(d153[3] << 1, 1))));
     }
     if (t == 154) {
-        /* host_processes name: list of list(pid, rss_bytes, cpu_us, elapsed_seconds, nice) for every process whose name is the argument -- libproc, no ps, no pgrep */
+        /* host_processes name: list of list(pid, rss_bytes, cpu_us, elapsed_seconds, nice, ppid) for every process whose name is the argument -- libproc, no ps, no pgrep */
 #ifdef __APPLE__
         static char nm154[256];
         fk_cstr(fk_walk(fk_node[i][1], fp), nm154, 256);
@@ -13580,9 +14095,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             long long cpu154 = (long long)(((user154 + sys154) * (unsigned long long)tb154.numer / (unsigned long long)tb154.denom) / 1000ULL);
             long long start154 = 0;
             long long nice154 = 0;
-            if (proc_pidinfo(pid154, 3, 0, bi154, 160) >= 136) { start154 = *(long long *)(bi154 + 120); nice154 = (long long)(*(int *)(bi154 + 116)); }
+            long long ppid154 = 0;
+            if (proc_pidinfo(pid154, 3, 0, bi154, 160) >= 136) { start154 = *(long long *)(bi154 + 120); nice154 = (long long)(*(int *)(bi154 + 116)); ppid154 = (long long)(*(unsigned int *)(bi154 + 16)); }
             long long elapsed154 = (start154 > 0 && now154 >= start154) ? now154 - start154 : -1;
-            l154 = fk_cons_val(fk_cons_val((long long)pid154 << 1, fk_cons_val(rss154 << 1, fk_cons_val(cpu154 << 1, fk_cons_val(elapsed154 << 1, fk_cons_val(nice154 << 1, 1))))), l154);
+            l154 = fk_cons_val(fk_cons_val((long long)pid154 << 1, fk_cons_val(rss154 << 1, fk_cons_val(cpu154 << 1, fk_cons_val(elapsed154 << 1, fk_cons_val(nice154 << 1, fk_cons_val(ppid154 << 1, 1)))))), l154);
         }
         return l154;
 #else
@@ -13644,7 +14160,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long k162 = 255;
         while (k162 >= 0) {
             long long pid162 = slots162[k162];
-            if (pid162 > 0 && kill((int)pid162, 0) == 0) {
+            if (pid162 > 0 && kill((int)pid162, 0) == 0 && !fk_pid_zombie(pid162)) {
                 char nm162[32];
                 long long w162[FK_LIVE_WORDS];
                 fk_live_pid_name(pid162, nm162);
@@ -13778,7 +14294,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 183) {
         /* host_sleep_ms n: rest n ms landing within half a millisecond; host_sleep_ms (list n watch...): rest at most n ms,
-         * waking early when a watched gift frame's seq word moves -- the glass's wait door (see fk_rest_arm) */
+         * waking early when a watched gift frame's seq word moves -- the glass's wait door (see fk_rest_arm).
+         * A kernel that rests first looks at its roster slot, one read while it holds it: a binary that claims
+         * with a plain store can erase the slot, and a quiet kernel notes its page too seldom to put itself back. */
+        if (fk_live_page != 0) { fk_live_roster_register((long long)getpid()); }
         return fk_rest_arm(fk_walk(fk_node[i][1], fp));
     }
     /* THE GIFT FRAME (tags 184-189): a frame in process shared memory that one
@@ -18741,7 +19260,7 @@ static void fk_src_sweep_dead_temps(const char *fkb_path) {
         if (pid <= 0 || pid == self) {
             continue;
         }
-        if (kill((int)pid, 0) == 0 || errno != ESRCH) {
+        if ((kill((int)pid, 0) == 0 || errno != ESRCH) && !fk_pid_zombie(pid)) {
             continue;
         }
         char victim[4600];

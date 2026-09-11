@@ -1,0 +1,89 @@
+//////////////////////////////////////////////////////////////////////
+//
+// vk-door.bml — Form's hands on the Vulkan lane: mint a compute shader
+// from GLSL text, lay out a plan of buffers and dispatches, run it through
+// form/native/vulkan/run_vk.c, and read the answer back as floats.
+//
+// Words cross as unsigned decimals, so a float travels as its f32 bits
+// (md-f32-bits out, ln-f32-decode back) and nothing is rounded through
+// text. The judge is always the Form recipe a band names, never the
+// carrier: the carrier only moves words and dispatches.
+//
+// The carrier and the minted shaders live in .hearth/vk, which git
+// ignores. Build the carrier once per host:
+//   clang -O2 -ffp-contract=off -I <dir holding vulkan/ and vk_video/> \
+//       form/native/vulkan/run_vk.c -o .hearth/vk/run_vk
+// On this Mac the Android NDK sysroot's usr/include holds both header
+// directories, and the Vulkan implementation the carrier opens is the
+// libMoltenVK.dylib Docker ships. glslangValidator mints SPIR-V the way
+// nvrtc mints a cubin: authoring, not runtime.
+//
+// preludes: form/form-stdlib/core.fk form/form-stdlib/metal-door.fk form/form-stdlib/lora-adapter.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class VulkanDoor {
+        def vkd-home() = ".hearth/vk";
+        def vkd-runner() = str_concat(vkd-home(), "/run_vk");
+        def vkd-path(name, ext) = str_concat(vkd-home(), str_concat("/", str_concat(name, ext)));
+        def vkd-ready?() = fs_exists(vkd-runner());
+
+        // mint: "" when SPIR-V was written, otherwise the compiler's own words
+        def vkd-mint(name, glsl) {
+            let w = write_file_text(vkd-path(name, ".comp"), glsl);
+            let said = host-exec(str_concat("PATH=/opt/homebrew/bin:/usr/local/bin:$PATH glslangValidator -V ", str_concat(vkd-path(name, ".comp"), str_concat(" -o ", str_concat(vkd-path(name, ".spv"), " 2>&1")))), "");
+            if lt(w, 1) then "the shader text did not reach the disk" else if ge(str_find(said, "ERROR", 0), 0) then said else "";
+        }
+
+        // ---- the plan, one line per word run_vk.c reads ----
+        def vkd-words(ns) = if nil?(ns) then "" else str_concat(" ", str_concat(int_to_str(head(ns)), vkd-words(tail(ns))));
+        def vkd-bits(xs) = if nil?(xs) then list() else cons(md-f32-bits(head(xs)), vkd-bits(tail(xs)));
+        def vkd-f(x) = md-f32-bits(x);
+        def vkd-spv(name) = str_concat("spv ", str_concat(vkd-path(name, ".spv"), "\n"));
+        def vkd-buf(xs) = str_concat("buf ", str_concat(int_to_str(len(xs)), str_concat(vkd-words(vkd-bits(xs)), "\n")));
+        def vkd-bufu(ns) = str_concat("buf ", str_concat(int_to_str(len(ns)), str_concat(vkd-words(ns), "\n")));
+        def vkd-zero(n) = str_concat("zero ", str_concat(int_to_str(n), "\n"));
+        def vkd-run(k, binds, push, gx) = str_concat("run ", str_concat(int_to_str(k), str_concat(" ", str_concat(int_to_str(len(binds)), str_concat(vkd-words(binds), str_concat(" ", str_concat(int_to_str(len(push)), str_concat(vkd-words(push), str_concat(" ", str_concat(int_to_str(gx), " 1 1\n"))))))))));
+        def vkd-read(b) = str_concat("read ", str_concat(int_to_str(b), "\n"));
+        // a plan is its lines in order: spv lines, then buf/zero lines, then runs, then reads
+        def vkd-plan(parts) = if nil?(parts) then "" else str_concat(head(parts), vkd-plan(tail(parts)));
+        def vkd-groups(n) = add(div(sub(n, 1), 64), 1);
+
+        def vkd-exec(tag, plan) {
+            let w = write_file_text(vkd-path(str_concat("plan-", tag), ".txt"), plan);
+            host-exec(str_concat(vkd-runner(), str_concat(" ", str_concat(vkd-path(str_concat("plan-", tag), ".txt"), " 2>&1"))), "");
+        }
+
+        // ---- the answer: "buf <b> <n> <w0> ..." read back without leaving the string ----
+        def vkd-num(s, i) = if ge(i, str_len(s)) then list(0, i) else vkd-num-at(s, i);
+        def vkd-num-at(s, i) = if eq(str_byte_at(s, i), 32) then vkd-num(s, add(i, 1)) else vkd-num-go(s, i, 0);
+        def vkd-num-go(s, i, acc) = if ge(i, str_len(s)) then list(acc, i) else vkd-num-digit(s, i, acc, str_byte_at(s, i));
+        def vkd-num-digit(s, i, acc, c) = if and(ge(c, 48), le(c, 57)) then vkd-num-go(s, add(i, 1), add(mul(acc, 10), sub(c, 48))) else list(acc, i);
+        def vkd-nums(s, i, n, acc) = if le(n, 0) then reverse(acc) else vkd-nums-step(s, n, acc, vkd-num(s, i));
+        def vkd-nums-step(s, n, acc, r) = vkd-nums(s, nth(r, 1), sub(n, 1), cons(nth(r, 0), acc));
+        def vkd-words-count(out, r) = vkd-nums(out, nth(r, 1), nth(r, 0), list());
+        def vkd-words-of(out, b) {
+            let mark = str_concat("buf ", str_concat(int_to_str(b), " "));
+            let at = str_find(out, mark, 0);
+            if lt(at, 0) then list() else vkd-words-count(out, vkd-num(out, add(at, str_len(mark))));
+        }
+        def vkd-floats(ws) = if nil?(ws) then list() else cons(ln-f32-decode(head(ws)), vkd-floats(tail(ws)));
+        def vkd-read-floats(out, b) = vkd-floats(vkd-words-of(out, b));
+        def vkd-device(out) {
+            let at = str_find(out, "device=", 0);
+            if lt(at, 0) then "" else substring(out, add(at, 7), str_find(out, "\n", at));
+        }
+
+        // ---- judging against a recipe ----
+        def vkd-cat(a, b) = if nil?(a) then b else cons(head(a), vkd-cat(tail(a), b));
+        def vkd-flat(rows) = if nil?(rows) then list() else vkd-cat(head(rows), vkd-flat(tail(rows)));
+        def vkd-close?(a, b, tol) = lt(abs(sub(a, b)), tol);
+        def vkd-empty?(ys) = if nil?(ys) then 1 else 0;
+        def vkd-agree?(xs, ys, tol) = if nil?(xs) then vkd-empty?(ys) else if nil?(ys) then 0 else if vkd-close?(head(xs), head(ys), tol) then vkd-agree?(tail(xs), tail(ys), tol) else 0;
+        def vkd-moved?(xs, ys) = if or(nil?(xs), nil?(ys)) then 0 else if vkd-close?(head(xs), head(ys), 0.0000305) then vkd-moved?(tail(xs), tail(ys)) else 1;
+        def vkd-eps() = 0.0000305;
+        0;
+    }
+    0;
+}

@@ -9,7 +9,7 @@
  * Run:  matvec_vk.exe matvec.spv [rows cols]    (defaults 256 256)
  *
  * Carrier design (struct-by-struct init, two-wave proc-addr bootstrap, precise/NoContraction
- * bit-exactness) from the background design pass; sources cited in form/native/GPU_GAPS.md notes.
+ * bit-exactness) from the background design pass.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,15 +19,26 @@
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
+/* The host's Vulkan implementation, first that opens wins. Darwin carries no system Vulkan: a
+ * MoltenVK opened directly needs no loader and no portability-enumeration bit, and the copy Docker
+ * Desktop ships is the one this Mac had (2026-09-10, Apple M4 Max, bit-exact). The Khronos loader
+ * comes last, because through it MoltenVK devices stay hidden unless the instance asks for
+ * portability enumeration, and no loader stood on this host to witness that path. */
 #if defined(_WIN32)
   #include <windows.h>
-  #define VKLIB      "vulkan-1.dll"
+  static const char *const VKLIBS[] = { "vulkan-1.dll", 0 };
   #define DLOPEN(n)  ((void*)LoadLibraryA(n))
   #define DLSYM(h,n) ((void*)GetProcAddress((HMODULE)(h),(n)))
   #define DLCLOSE(h) FreeLibrary((HMODULE)(h))
 #else
   #include <dlfcn.h>
-  #define VKLIB      "libvulkan.so"
+  #if defined(__APPLE__)
+  static const char *const VKLIBS[] = { "/opt/homebrew/lib/libMoltenVK.dylib", "/usr/local/lib/libMoltenVK.dylib",
+      "/Applications/Docker.app/Contents/Resources/linuxkit/libMoltenVK.dylib", "libMoltenVK.dylib",
+      "libvulkan.1.dylib", 0 };
+  #else
+  static const char *const VKLIBS[] = { "libvulkan.so", "libvulkan.so.1", 0 };
+  #endif
   #define DLOPEN(n)  dlopen((n), RTLD_NOW|RTLD_LOCAL)
   #define DLSYM(h,n) dlsym((h),(n))
   #define DLCLOSE(h) dlclose(h)
@@ -119,7 +130,16 @@ int main(int argc, char **argv) {
     uint32_t rows = (argc > 2) ? (uint32_t)atoi(argv[2]) : 256;
     uint32_t cols = (argc > 3) ? (uint32_t)atoi(argv[3]) : 256;
 
-    void *lib = DLOPEN(VKLIB); if (!lib) DIE("cannot dlopen " VKLIB);
+#if defined(__APPLE__)
+    /* MoltenVK compiles its MSL with fast math unless told otherwise, and fast math may reassociate
+     * and approximate division: the bit-exact contract (precise -> NoContraction) needs it off.
+     * Measured 2026-09-10 on the FFN shader: precise alone 4/8 rows exact, fast math off alone 6/8,
+     * both 8/8. Set before MoltenVK loads, because it reads its configuration once. */
+    setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 1);
+#endif
+    const char *vklib = 0; void *lib = 0;
+    for (int k = 0; VKLIBS[k] && !lib; ++k) { lib = DLOPEN(VKLIBS[k]); if (lib) vklib = VKLIBS[k]; }
+    if (!lib) DIE("no Vulkan implementation opened on this host");
     vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)DLSYM(lib, "vkGetInstanceProcAddr");
     if (!vkGetInstanceProcAddr) DIE("no vkGetInstanceProcAddr");
     vkCreateInstance = (PFN_vkCreateInstance)vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance");
@@ -281,7 +301,7 @@ int main(int argc, char **argv) {
     printf("device=%s (Vulkan)\n", props.deviceName);
     printf("kernel=form_matvec module=%s (%zu bytes SPIR-V)\n", spv_path, spvBytes);
     printf("parity_bitexact_rows=%d/%u max_abs_diff=%g\n", exact, rows, (double)max_abs);
-    printf("runtime_deps=%s only (Form-minted SPIR-V; no nvcc/nvrtc/go/python/rust/shell/clang) -- same .spv runs on Adreno/Mali\n", VKLIB);
+    printf("runtime_deps=%s only (Form-minted SPIR-V; no nvcc/nvrtc/go/python/rust/shell/clang) -- same .spv runs on Adreno/Mali\n", vklib);
 
     free(spv);
     vkDestroyCommandPool(dev, cpool, NULL); vkDestroyPipeline(dev, pipe, NULL);

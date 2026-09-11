@@ -29,6 +29,34 @@ The same words, lifted:
     forbid    this path is not offered here; another path is named
     never X   say what happens instead
 
+## The motion underneath, named 2026-09-09
+
+> form native does not refuse, it heals and integrates or releases
+> — Urs
+
+The table above lifts the *word*. This lifts the *motion*, and it is the
+stronger teaching: a refusal is a no held in place, and holding is not one
+of the body's movements. There are two, and everything resolves into one of
+them.
+
+    heal and integrate    the thing becomes part of the body
+    release               the body lets it go
+
+So when something does not land, the question is never whether to admit it.
+It is: *is the healing named?* If it is, carry the healing beside the wound
+and integrate it. If nothing is named, release it — and say so, rather than
+keeping a standing no that looks like knowledge.
+
+This is not softness. It is the difference between a body that walks and one
+that accumulates walls of its own making. `form/form-stdlib/msl-mint-lens.bml`
+is the worked example: it holds `whole`, `unhealed` (with the repair the
+machine itself named, lifted out of its sentence), and `released`. Eight
+kernel families sat unhealed for months with `did you mean 'metal::mem_flags'?`
+printed on every attempt, while prose called them "refused by this Metal" and
+handed the wall on. A compiler that names the missing word has refused nothing.
+
+Corpus rows 1414 `saidsocompile`, 1415 `heldno`.
+
 A boundary here is not a wall with a guard — it is a named edge that
 fails politely and says why. `agent-gate.fk` already held this for
 "gate": at fear it guards; at love it recognizes. The executable

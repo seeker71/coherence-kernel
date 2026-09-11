@@ -1,0 +1,77 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/conv-stem.fk form-stdlib/conv2d.fk form-stdlib/metal-door.fk form-stdlib/diffusion-msl.bml
+; Expected: 31
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+;
+; conv2d-metal-live-band — the diffusion layers RUN on this Mac's GPU, and held to conv2d.fk.
+;
+; The recipe had stood four-way since it landed, and until 2026-09-10 no kernel carried it.
+; form/form-stdlib/diffusion-msl.bml emits two twins
+; that fold in the recipe's own order, and this band asks the silicon, twice for conv — two geometries, so a
+; kernel cannot pass by being right about one shape — and once for GroupNorm.
+;
+; Exactness is arranged: every input and weight is a small integer and GroupNorm runs at eps 0 over groups
+; whose variances are perfect squares (1 and 4), so every partial sum, mean, square root and reciprocal is
+; exact in float32 and the answer must match the recipe to the BYTE, fused multiply-add or not.
+;
+; Verdict 31:
+;    1  both kernels mint on this host
+;    2  conv2d, 2-channel 4x4 image, 2 output channels, 3x3 window, pad 1, stride 1: the GPU's bytes are
+;       the recipe's bytes — every padded tap included
+;    4  and at a second geometry, a 2x2 window, pad 0, stride 2, where no tap ever touches padding
+;    8  GroupNorm over four 2-vectors in two groups: the GPU's bytes are the recipe's bytes
+;   16  and they are the answer worked by hand — group one pools {1,3,1,3} (mean 2, variance 1), group two
+;       {0,4,4,0} (mean 2, variance 4, root 2) — a witness made of arithmetic on paper, not of the recipe
+(do
+    (defn cmb-f (v) (md-le32 (md-f32-bits v)))
+    (defn cmb-vec (v acc) (if (eq (len v) 0) acc (cmb-vec (tail v) (str_concat acc (cmb-f (head v))))))
+    (defn cmb-rows (rs acc) (if (eq (len rs) 0) acc (cmb-rows (tail rs) (cmb-vec (head rs) acc))))
+    (defn cmb-grid (g acc) (if (eq (len g) 0) acc (cmb-grid (tail g) (cmb-rows (head g) acc))))
+    (defn cmb-w (ws acc) (if (eq (len ws) 0) acc (cmb-w (tail ws) (cmb-grid (head ws) acc))))
+
+    ; a 2-channel image of small integers, and weights in {-1, 0, 1}
+    (defn cmb-pix (r c) (list (add (sub (mod (add (mul r 4) c) 5) 2) 0.0) (add (sub (mod (add r (mul 2 c)) 3) 1) 0.0)))
+    (defn cmb-row (r c w) (if (ge c w) (empty) (cons (cmb-pix r c) (cmb-row r (add c 1) w))))
+    (defn cmb-img (r h w) (if (ge r h) (empty) (cons (cmb-row r 0 w) (cmb-img (add r 1) h w))))
+    (defn cmb-tap (o i j cin k) (if (ge k cin) (empty) (cons (add (sub (mod (add o (add i (add j k))) 3) 1) 0.0) (cmb-tap o i j cin (add k 1)))))
+    (defn cmb-wrow (o i j kw cin) (if (ge j kw) (empty) (cons (cmb-tap o i j cin 0) (cmb-wrow o i (add j 1) kw cin))))
+    (defn cmb-wout (o i kh kw cin) (if (ge i kh) (empty) (cons (cmb-wrow o i 0 kw cin) (cmb-wout o (add i 1) kh kw cin))))
+    (defn cmb-ws (o cout kh kw cin) (if (ge o cout) (empty) (cons (cmb-wout o 0 kh kw cin) (cmb-ws (add o 1) cout kh kw cin))))
+
+    (defn cmb-conv-gpu (p img ws bias h w cin cout kh kw pad stride)
+        (do (let oh (add (div (sub (add h (mul 2 pad)) kh) stride) 1))
+            (let ow (add (div (sub (add w (mul 2 pad)) kw) stride) 1))
+            (let xh (metal_buf_alloc (mul 4 (mul h (mul w cin)))))
+            (let wh (metal_buf_alloc (mul 4 (mul cout (mul kh (mul kw cin))))))
+            (let bh (metal_buf_alloc (mul 4 cout)))
+            (let yh (metal_buf_alloc (mul 4 (mul oh (mul ow cout)))))
+            (let a1 (metal_buf_write xh 0 (cmb-grid img "")))
+            (let a2 (metal_buf_write wh 0 (cmb-w ws "")))
+            (let a3 (metal_buf_write bh 0 (cmb-vec bias "")))
+            (let e (metal_enqueue p (md-bind (list xh wh bh yh) (list h w cin cout kh kw pad stride oh ow)) (mul oh (mul ow cout))))
+            (let s (metal_sync))
+            (metal_buf_read yh 0 (mul 4 (mul oh (mul ow cout))))))
+    (defn cmb-gn-gpu (p xs n l g)
+        (do (let xh (metal_buf_alloc (mul 4 (mul n l))))
+            (let yh (metal_buf_alloc (mul 4 (mul n l))))
+            (let a (metal_buf_write xh 0 (cmb-rows xs "")))
+            (let e (metal_enqueue p (md-bind (list xh yh) (list n l g (md-f32-bits 0.0))) g))
+            (let s (metal_sync))
+            (metal_buf_read yh 0 (mul 4 (mul n l)))))
+
+    (let pc (metal_pipeline (dfm-conv2d) "diffusion_conv2d"))
+    (let pg (metal_pipeline (dfm-groupnorm) "diffusion_groupnorm"))
+    (let c0 (if (gt pc 0) (if (gt pg 0) 1 0) 0))
+
+    (let img (cmb-img 0 4 4))
+    (let wa (cmb-ws 0 2 3 3 2))
+    (let ba (list 1.0 -2.0))
+    (let c1 (if (str_eq (cmb-conv-gpu pc img wa ba 4 4 2 2 3 3 1 1) (cmb-grid (cv2d-conv wa ba img 1 1 3 3) "")) 2 0))
+    (let wb (cmb-ws 0 2 2 2 2))
+    (let bb (list 0.0 3.0))
+    (let c2 (if (str_eq (cmb-conv-gpu pc img wb bb 4 4 2 2 2 2 0 2) (cmb-grid (cv2d-conv wb bb img 0 2 2 2) "")) 4 0))
+
+    (let gxs (list (list 1.0 3.0) (list 1.0 3.0) (list 0.0 4.0) (list 4.0 0.0)))
+    (let ggpu (cmb-gn-gpu pg gxs 4 2 2))
+    (let c3 (if (str_eq ggpu (cmb-rows (cv2d-groupnorm gxs 2 0.0) "")) 8 0))
+    (let c4 (if (str_eq ggpu (cmb-rows (list (list -1.0 1.0) (list -1.0 1.0) (list -1.0 1.0) (list 1.0 -1.0)) "")) 16 0))
+    (add c0 (add c1 (add c2 (add c3 c4)))))

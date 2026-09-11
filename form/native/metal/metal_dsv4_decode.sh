@@ -64,7 +64,7 @@
 #   9  ONE HEADER, ONE SPINE   one metal_stdlib, zero using-namespace, one spine, 6 kernels
 #
 # Run:  form/native/metal/metal_dsv4_decode.sh
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every Metal row in GPU_GAPS.md.
+# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form

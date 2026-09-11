@@ -1,15 +1,36 @@
 ; Real Metal dispatch against independent per-token lane dispatches.
 ; Q4_K/Q6_K/Q8_0 committed byte fixtures; F32 deterministic weights.
 ; Nine distinct inputs cross the eight-token tile; output pitch exceeds rows.
-; All active floats must match byte-for-byte and padding must retain its sentinel.
+; Q4_K, Q6_K and F32 floats must match byte-for-byte; Q8_0 runs on the matrix unit and its floats must
+; sit within the lane's named bound of the per-token lane's; padding must retain its sentinel.
 ; Expected 31. Runs small fixture buffers only; no model admission or living state.
-; preludes: native/metal/qwen35-dense-token-handle.fk
+; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
 (do
  (defn qpqb-repeat (text n acc) (if (le n 0) acc (qpqb-repeat text (sub n 1) (str_concat acc text))))
  (defn qpqb-input (n i acc)
   (if (ge i n) acc
    (qpqb-input n (add i 1) (str_concat acc (md-le32 (md-f32-bits (div (mul 1.0 (sub (mod (mul i 17) 257) 128)) 128.0)))))))
- (defn qpqb-token (ps batch ref wh input rows cols pitch tokens t sentinel)
+ ; Q8_0 runs on the matrix unit, which chooses its own association, so its floats answer to the
+ ; lane's named bound rather than to the byte: each output within 2 * qmb-bound-coeff(cols) * 2^-24 *
+ ; sum|w x| of the per-token lane's (both sit within one bound of the exact sum). The others still
+ ; answer byte for byte.
+ (defn qpqb-x (i) (div (mul 1.0 (sub (mod (mul i 17) 257) 128)) 128.0))
+ (defn qpqb-s8 (v) (if (ge v 128) (sub v 256) v))
+ (defn qpqb-w8 (ws cols r j)
+  (do (let idx (add (mul r cols) j)) (let b (mul 34 (div idx 32)))
+      (mul (fd-f16 (add (str_byte_at ws b) (mul 256 (str_byte_at ws (add b 1)))))
+           (add (qpqb-s8 (str_byte_at ws (add b (add 2 (mod idx 32))))) 0.0))))
+ (defn qpqb-abs (v) (if (lt v 0.0) (sub 0.0 v) v))
+ (defn qpqb-absum (ws cols r t j acc)
+  (if (ge j cols) acc (qpqb-absum ws cols r t (add j 1) (add acc (qpqb-abs (mul (qpqb-w8 ws cols r j) (qpqb-x (add (mul t cols) j))))))))
+ (defn qpqb-f (s i) (ln-f32-decode (ln-u32-le s (mul 4 i))))
+ (defn qpqb-near (ws cols rows t e a r)
+  (if (ge r rows) 1
+   (if (le (qpqb-abs (sub (qpqb-f a r) (qpqb-f e r)))
+           (mul (mul 2.0 (mul (qmb-bound-coeff cols) 0.000000059604644775390625)) (add (qpqb-absum ws cols r t 0 0.0) 0.000000000001)))
+    (qpqb-near ws cols rows t e a (add r 1)) 0)))
+ (defn qpqb-agree (type ws cols rows t e a) (if (eq type 8) (qpqb-near ws cols rows t e a 0) (if (str_eq e a) 1 0)))
+ (defn qpqb-token (ps batch ref wh input rows cols pitch tokens t sentinel type ws)
   (if (ge t tokens) 1
    (do
     (let x (metal_buf_alloc (mul cols 4)))
@@ -20,8 +41,8 @@
     (let actual (substring batch (mul t (mul pitch 4)) (mul 4 (add (mul t pitch) rows))))
     (let padding (substring batch (mul 4 (add (mul t pitch) rows)) (mul 4 (mul (add t 1) pitch))))
     (let released (add (metal_buf_free x) (metal_buf_free y)))
-    (if (and (gt enqueued 0) (and (str_eq expected actual) (str_eq padding sentinel)))
-     (qpqb-token ps batch ref wh input rows cols pitch tokens (add t 1) sentinel) 0))))
+    (if (and (gt enqueued 0) (and (eq (qpqb-agree type ws cols rows t expected actual) 1) (str_eq padding sentinel)))
+     (qpqb-token ps batch ref wh input rows cols pitch tokens (add t 1) sentinel type ws) 0))))
  (defn qpqb-shape (ps msl type weights rows cols refname bit)
   (do
    (let tokens 9) (let pitch (add rows 3))
@@ -37,7 +58,7 @@
    (let dispatched (q38-mv-batch-y ps (list wh rows cols type) x y tokens pitch 1))
    (let batch (metal_buf_read y 0 (mul (mul tokens pitch) 4)))
    (let ref (metal_pipeline msl refname))
-   (let same (qpqb-token ps batch ref wh input rows cols pitch tokens 0 sentinel))
+   (let same (qpqb-token ps batch ref wh input rows cols pitch tokens 0 sentinel type weights))
    (let freed (sum (list (metal_buf_free wh) (metal_buf_free x) (metal_buf_free y))))
    (print (list "type" type "tokens" tokens "rows" rows "cols" cols "pitch" pitch "same-and-padding" same))
    (if (and (gt dispatched 0) same) bit 0)))

@@ -1,7 +1,7 @@
 // Form owns affine quantization and linear/LoRA arithmetic on shared Metal buffers.
 // The immutable checkpoint has U32 packed nibbles and per-group scales/biases.
 // No interpreter, subprocess, or host weight expansion participates.
-// preludes: form-stdlib/safetensors-index.bml form-stdlib/lora-adapter.bml form-stdlib/metal-carrier.bml
+// preludes: form-stdlib/safetensors-index.bml form-stdlib/lora-adapter.bml form-stdlib/backprop-msl.bml form-stdlib/metal-carrier.bml
 section [form.bml] {
  class NativeAffineMetal {
   def nam-msl() = str_concat("#include <metal_stdlib>\nusing namespace metal;\n", str_concat(nam-linear-msl(), nam-basic-msl()));
@@ -58,7 +58,10 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
    let ws = nth(w, 2); let ss = nth(s, 2); let bs = nth(b, 2);
    if not(and(str_eq(nth(w, 1), "U32"), and(eq(len(ws), 2), and(eq(len(ss), 2), and(eq(len(bs), 2), and(eq(head(ws), head(ss)), and(eq(head(ss), head(bs)), and(eq(nth(ss, 1), nth(bs, 1)), and(eq(mul(nth(ws, 1), 8), mul(nth(ss, 1), group)), str_eq(nth(s, 1), nth(b, 1))))))))))) then form_error("native affine shape/group mismatch") else list(head(sti-map-row(index, w)), head(sti-map-row(index, s)), head(sti-map-row(index, b)), head(ws), mul(nth(ws, 1), 8), group, nam-type(nth(s, 1)));
   }
-  def nam-linear(view, x, y, tokens, transpose) = nam-run("nam_affine", list(nth(view, 0), nth(view, 1), nth(view, 2), x, y), list(nth(view, 3), nth(view, 4), tokens, nth(view, 5), nth(view, 6), transpose), mul(tokens, if transpose then nth(view, 4) else nth(view, 3)), 1);
+  // The transposed product walks columns (form_affine4_t_f32, backprop-msl.bml): adjacent threads read
+  // adjacent nibbles of one row. nam-linear-lanes is the simdgroup-per-output walk, in both directions.
+  def nam-linear(view, x, y, tokens, transpose) = if transpose then bpm-affine4-t(view, x, y, tokens) else nam-linear-lanes(view, x, y, tokens, 0);
+  def nam-linear-lanes(view, x, y, tokens, transpose) = nam-run("nam_affine", list(nth(view, 0), nth(view, 1), nth(view, 2), x, y), list(nth(view, 3), nth(view, 4), tokens, nth(view, 5), nth(view, 6), transpose), mul(tokens, if transpose then nth(view, 4) else nth(view, 3)), 1);
   def nam-embed(view, ids, out, tokens) = nam-run("nam_embed", list(nth(view, 0), nth(view, 1), nth(view, 2), ids, out), list(nth(view, 4), tokens, nth(view, 5), nth(view, 6)), mul(tokens, nth(view, 4)), 0);
   def nam-mm(a, b, y, m, k, n, ta, tb, scale, accumulate) = nam-run("nam_matmul", list(a, b, y), list(m, k, n, ta, tb, md-f32-bits(scale), accumulate), mul(m, n), 1);
   def nam-add(a, b, y, n, scale) = nam-run("nam_add", list(a, b, y), list(n, md-f32-bits(scale)), n, 0);

@@ -1,0 +1,219 @@
+; preludes: form/form-stdlib/metal-door.fk form/form-stdlib/q4k-msl.fk form/form-stdlib/moe-gather-msl.bml
+; Expected: 1023
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+;
+; moe-gather-msl-band — the expert gather and the weighted expert sum, on this Mac's GPU, with nothing
+; about the routing crossing to the host.
+;
+; The open item asked for "an `ids` device parameter + `nb02` uniform ... so the tensor base is
+; computed on device instead of bound as a host constant", and said the decode arithmetic stays
+; untouched. moe-gather-msl.bml does that to any emitted kernel as a text lift; this band holds the lift
+; on three matvec families, the lifted sum on two, and the whole routed step against the host round trip
+; it replaces.
+;
+; Exactness is arranged: every f32 expert is small integers and the input is small integers, so every
+; matvec is exact, and the tie fixture makes every routing weight exactly 0.5. The real Q6_K and Q4_K
+; superblocks are not small integers; there the claim is the lift's own — the SAME kernel reading the
+; SAME bytes answers the same bytes, whether the base came from the device or from the host.
+;
+; Verdict 1023:
+;    1  both units mint: the header-free f32 unit (plain matvec, router, scale, axpy and the three lifts)
+;       and the lane unit (<metal_stdlib>, q6k and q4k spines, qml splits, plain and lifted lane kernels)
+;    2  THE BODY IS KEPT: each of the five lifted texts ends with its original's body, byte for byte
+;    4  the f32 gather, ids [5 2] on the device: slot 0 is expert 5's Form fold and slot 1 is expert 2's
+;    8  and each is the plain matvec run on a host-bound buffer holding only that expert — different
+;       buffer, base chosen by the other side of the bus, same bytes
+;   16  the Q6_K lane gather on two real superblocks (nb02 210, ids [1 0]): slot 0 answers what the plain
+;       lane kernel answers on superblock 1 alone, slot 1 what it answers on superblock 0 alone, and the
+;       two answers differ, so the selection is load-bearing
+;   32  the Q4_K lane gather, the same, nb02 144
+;   64  THE ROUTED STEP ON THE DEVICE: route -> two gathered matvecs reading the router's ids -> weighted
+;       sum reading the router's weights, is the host round trip (route, read ids and weights, bind the
+;       chosen experts' own buffers, weights as raw-bit constants) byte for byte, on a routing that
+;       really happened (the ids read back are Form's [2 6])
+;   128 the seams, counted by the door: the device step costs ONE sync, the host round trip costs TWO —
+;       the cut moe-msl.fk named, one per routed layer
+;   256 on the tie fixture the device step is Form exactly: weights 0.5 and 0.5, y = 0.5 E1 x + 0.5 E3 x
+;   512 a text the lift cannot read lifts to "", and nothing mints from it
+(do
+    ; ---- bytes and buffers
+    (defn mgxb-f32 (x) (md-le32 (md-f32-bits (add x 0.0))))
+    (defn mgxb-f32s (xs) (if (eq (len xs) 0) "" (str_concat (mgxb-f32 (head xs)) (mgxb-f32s (tail xs)))))
+    (defn mgxb-rep (s n) (if (le n 0) "" (str_concat s (mgxb-rep s (sub n 1)))))
+    (defn mgxb-buf (bytes) (do (let h (metal_buf_alloc (str_len bytes))) (let w (metal_buf_write h 0 bytes)) h))
+    (defn mgxb-sent () (sub 0.0 424242.0))
+    (defn mgxb-u32-at (s off)
+        (add (str_byte_at s off) (add (mul 256 (str_byte_at s (add off 1))) (add (mul 65536 (str_byte_at s (add off 2))) (mul 16777216 (str_byte_at s (add off 3)))))))
+    (defn mgxb-digits (s i acc)
+        (if (ge i (str_len s)) acc
+            (do (let b (str_byte_at s i))
+                (if (and (ge b 48) (le b 57)) (mgxb-digits s (add i 1) (add (mul acc 10) (sub b 48))) acc))))
+    (defn mgxb-syncs () (do (let st (metal_status)) (let k (str_find st "total_sync=" 0)) (if (lt k 0) (sub 0 1) (mgxb-digits st (add k 11) 0))))
+
+    ; ---- the f32 experts: ne of them, rows x cols each, stacked expert-major
+    (defn mgxb-w (e r c) (sub (mod (add (mul e 5) (add (mul r 3) (mul c 7))) 11) 5))
+    (defn mgxb-x (c) (sub (mod (mul c 3) 7) 3))
+    (defn mgxb-row (e r c cols acc) (if (ge c cols) acc (mgxb-row e r (add c 1) cols (str_concat acc (mgxb-f32 (mgxb-w e r c))))))
+    (defn mgxb-mat (e r rows cols acc) (if (ge r rows) acc (mgxb-mat e (add r 1) rows cols (str_concat acc (mgxb-row e r 0 cols "")))))
+    (defn mgxb-stack (e ne rows cols acc) (if (ge e ne) acc (mgxb-stack (add e 1) ne rows cols (str_concat acc (mgxb-mat e 0 rows cols "")))))
+    (defn mgxb-xs (c cols) (if (ge c cols) (list) (cons (add (mgxb-x c) 0.0) (mgxb-xs (add c 1) cols))))
+    (defn mgxb-dot (e r c cols acc) (if (ge c cols) acc (mgxb-dot e r (add c 1) cols (add acc (mul (add (mgxb-w e r c) 0.0) (add (mgxb-x c) 0.0))))))
+    (defn mgxb-fold (e r rows cols) (if (ge r rows) (list) (cons (mgxb-dot e r 0 cols 0.0) (mgxb-fold e (add r 1) rows cols))))
+    (defn mgxb-mix (a xs b ys) (if (eq (len xs) 0) (list) (cons (add (mul a (head xs)) (mul b (head ys))) (mgxb-mix a (tail xs) b (tail ys)))))
+
+    ; ---- the f32 gather and its host-bound twin
+    (defn mgxb-gather (p wh xh idh slot rows cols nb02)
+        (do (let yh (mgxb-buf (mgxb-rep (mgxb-f32 (mgxb-sent)) rows)))
+            (let e (metal_enqueue p (md-bind (list wh xh yh idh) (list rows cols nb02 slot)) rows))
+            (let s (metal_sync))
+            (metal_buf_read yh 0 (mul 4 rows))))
+    (defn mgxb-plain (p wbytes xh rows cols)
+        (do (let wh (mgxb-buf wbytes))
+            (let yh (mgxb-buf (mgxb-rep (mgxb-f32 (mgxb-sent)) rows)))
+            (let e (metal_enqueue p (md-bind (list wh xh yh) (list rows cols)) rows))
+            (let s (metal_sync))
+            (metal_buf_read yh 0 (mul 4 rows))))
+
+    ; ---- the lane kernels: one row, 256 columns, one SIMD group of 32 (mode 1: the count is groups)
+    (defn mgxb-lx (c cols) (if (ge c cols) (list) (cons (add (sub (mod (mul c 5) 9) 4) 0.0) (mgxb-lx (add c 1) cols))))
+    (defn mgxb-lane-id (p qh xh idh slot nb02)
+        (do (let yh (mgxb-buf (mgxb-f32 (mgxb-sent))))
+            (let e (metal_enqueue p (md-bind16 (list qh xh yh idh) (list 1 256 nb02 slot) 32 0 1 0) 1))
+            (let s (metal_sync))
+            (metal_buf_read yh 0 4)))
+    (defn mgxb-lane (p qbytes xh)
+        (do (let qh (mgxb-buf qbytes))
+            (let yh (mgxb-buf (mgxb-f32 (mgxb-sent))))
+            (let e (metal_enqueue p (md-bind16 (list qh xh yh) (list 1 256) 32 0 1 0) 1))
+            (let s (metal_sync))
+            (metal_buf_read yh 0 4)))
+    ; a two-superblock fixture as two experts: gathered slot 0/1 against the plain kernel on each half
+    (defn mgxb-quant (pid pplain path sb xh)
+        (do (let whole (read_file_slice path 0 (mul 2 sb)))
+            (let qh (mgxb-buf whole))
+            (let idh (mgxb-buf (str_concat (md-le32 1) (md-le32 0))))
+            (let a0 (mgxb-lane-id pid qh xh idh 0 sb))
+            (let a1 (mgxb-lane-id pid qh xh idh 1 sb))
+            (let b0 (mgxb-lane pplain (read_file_slice path 0 sb) xh))
+            (let b1 (mgxb-lane pplain (read_file_slice path sb sb) xh))
+            (if (eq (str_len whole) (mul 2 sb))
+                (if (str_eq a0 b1) (if (str_eq a1 b0) (if (str_eq b0 b1) 0 1) 0) 0) 0)))
+
+    ; ---- the routed step, all on the device: one command buffer; answers (y-bytes sync-delta)
+    (defn mgxb-device-step (pr pid psw paw wall xh logits ne rows cols nb02)
+        (do (let lh (mgxb-buf (mgxb-f32s logits)))
+            (let ih (mgxb-buf (mgxb-rep (md-le32 0) 2)))
+            (let wh (mgxb-buf (mgxb-rep (mgxb-f32 0.0) 2)))
+            (let h0 (mgxb-buf (mgxb-rep (mgxb-f32 (mgxb-sent)) rows)))
+            (let h1 (mgxb-buf (mgxb-rep (mgxb-f32 (mgxb-sent)) rows)))
+            (let yh (mgxb-buf (mgxb-rep (mgxb-f32 (mgxb-sent)) rows)))
+            (let s0 (mgxb-syncs))
+            (let e1 (metal_enqueue pr (md-bind (list lh ih wh) (list ne 2)) 1))
+            (let e2 (metal_enqueue pid (md-bind (list wall xh h0 ih) (list rows cols nb02 0)) rows))
+            (let e3 (metal_enqueue pid (md-bind (list wall xh h1 ih) (list rows cols nb02 1)) rows))
+            (let e4 (metal_enqueue psw (md-bind (list h0 yh wh) (list rows 0)) rows))
+            (let e5 (metal_enqueue paw (md-bind (list h1 yh wh) (list rows 1)) rows))
+            (let s (metal_sync))
+            (let s1 (mgxb-syncs))
+            (list (metal_buf_read yh 0 (mul 4 rows)) (sub s1 s0))))
+
+    ; ---- the host round trip it replaces; answers (y-bytes sync-delta (id0 id1))
+    (defn mgxb-host-step (pr pmv psc pax xh logits ne rows cols)
+        (do (let lh (mgxb-buf (mgxb-f32s logits)))
+            (let ih (mgxb-buf (mgxb-rep (md-le32 0) 2)))
+            (let wh (mgxb-buf (mgxb-rep (mgxb-f32 0.0) 2)))
+            (let s0 (mgxb-syncs))
+            (let e1 (metal_enqueue pr (md-bind (list lh ih wh) (list ne 2)) 1))
+            (let sa (metal_sync))
+            (let ib (metal_buf_read ih 0 8))
+            (let wb (metal_buf_read wh 0 8))
+            (let id0 (mgxb-u32-at ib 0))
+            (let id1 (mgxb-u32-at ib 4))
+            (let x0h (mgxb-buf (mgxb-mat id0 0 rows cols "")))
+            (let x1h (mgxb-buf (mgxb-mat id1 0 rows cols "")))
+            (let h0 (mgxb-buf (mgxb-rep (mgxb-f32 (mgxb-sent)) rows)))
+            (let h1 (mgxb-buf (mgxb-rep (mgxb-f32 (mgxb-sent)) rows)))
+            (let yh (mgxb-buf (mgxb-rep (mgxb-f32 (mgxb-sent)) rows)))
+            (let e2 (metal_enqueue pmv (md-bind (list x0h xh h0) (list rows cols)) rows))
+            (let e3 (metal_enqueue pmv (md-bind (list x1h xh h1) (list rows cols)) rows))
+            (let e4 (metal_enqueue psc (md-bind (list h0 yh) (list (mgxb-u32-at wb 0) rows)) rows))
+            (let e5 (metal_enqueue pax (md-bind (list h1 yh) (list (mgxb-u32-at wb 4) rows)) rows))
+            (let sb (metal_sync))
+            (let s1 (mgxb-syncs))
+            (list (metal_buf_read yh 0 (mul 4 rows)) (sub s1 s0) (list id0 id1))))
+
+    ; ================= the units =================
+    (let funit (str_concat (jte-llama-helpers-floor)
+               (str_concat (jte-matvec-msl "form_matvec_f32")
+               (str_concat (mm-route-msl "form_moe_route_f32")
+               (str_concat (mm-scale-msl "form_scale_f32")
+               (str_concat (mm-axpy-msl "form_axpy_f32")
+                           (mgx-msl-appendix)))))))
+    (let lunit (str_concat (qml-msl-header)
+               (str_concat (q6m-msl-helpers)
+               (str_concat (q4m-msl-helpers)
+               (str_concat (qml-msl-splits)
+               (str_concat (qml-lane-msl "form_q6k_matvec_lane_f32" "q6k" "210")
+               (str_concat (qml-lane-msl "form_q4k_matvec_lane_f32" "q4k" "144")
+                           (mgx-lane-appendix))))))))
+    (let p-mv    (metal_pipeline funit "form_matvec_f32"))
+    (let p-route (metal_pipeline funit "form_moe_route_f32"))
+    (let p-sc    (metal_pipeline funit "form_scale_f32"))
+    (let p-ax    (metal_pipeline funit "form_axpy_f32"))
+    (let p-mvid  (metal_pipeline funit "form_matvec_id_f32"))
+    (let p-scw   (metal_pipeline funit "form_moe_scale_w_f32"))
+    (let p-axw   (metal_pipeline funit "form_moe_axpy_w_f32"))
+    (let p-q6    (metal_pipeline lunit "form_q6k_matvec_lane_f32"))
+    (let p-q4    (metal_pipeline lunit "form_q4k_matvec_lane_f32"))
+    (let p-q6id  (metal_pipeline lunit "form_q6k_matvec_lane_id_f32"))
+    (let p-q4id  (metal_pipeline lunit "form_q4k_matvec_lane_id_f32"))
+    (let c0 (if (md-door-live?)
+            (if (and (gt p-mv 0) (and (gt p-route 0) (and (gt p-sc 0) (and (gt p-ax 0) (and (gt p-mvid 0)
+                (and (gt p-scw 0) (and (gt p-axw 0) (and (gt p-q6 0) (and (gt p-q4 0) (and (gt p-q6id 0) (gt p-q4id 0))))))))))) 1 0) 0))
+
+    ; ================= the body is kept =================
+    (let c1 (if (and (mgx-body-kept (jte-matvec-msl "form_matvec_f32") (mgx-matvec-id-msl "k1"))
+            (and (mgx-body-kept (qml-lane-msl "form_q6k_matvec_lane_f32" "q6k" "210") (mgx-q6k-lane-id-msl "k2"))
+            (and (mgx-body-kept (qml-lane-msl "form_q4k_matvec_lane_f32" "q4k" "144") (mgx-q4k-lane-id-msl "k3"))
+            (and (mgx-body-kept (mm-scale-msl "form_scale_f32") (mgx-scale-w-msl "k4"))
+                 (mgx-body-kept (mm-axpy-msl "form_axpy_f32") (mgx-axpy-w-msl "k5")))))) 2 0))
+
+    ; ================= the f32 gather =================
+    (let ne 8)
+    (let er 4)
+    (let ec 8)
+    (let nb02 (mul 4 (mul er ec)))
+    (let wall (mgxb-buf (mgxb-stack 0 ne er ec "")))
+    (let xh (mgxb-buf (mgxb-f32s (mgxb-xs 0 ec))))
+    (let idh (mgxb-buf (str_concat (md-le32 5) (md-le32 2))))
+    (let g0 (mgxb-gather p-mvid wall xh idh 0 er ec nb02))
+    (let g1 (mgxb-gather p-mvid wall xh idh 1 er ec nb02))
+    (let c2 (if (and (str_eq g0 (mgxb-f32s (mgxb-fold 5 0 er ec))) (str_eq g1 (mgxb-f32s (mgxb-fold 2 0 er ec)))) 4 0))
+    (let h0 (mgxb-plain p-mv (mgxb-mat 5 0 er ec "") xh er ec))
+    (let h1 (mgxb-plain p-mv (mgxb-mat 2 0 er ec "") xh er ec))
+    (let c3 (if (and (str_eq g0 h0) (str_eq g1 h1)) 8 0))
+
+    ; ================= the quantized lane gathers =================
+    (let lxh (mgxb-buf (mgxb-f32s (mgxb-lx 0 256))))
+    (let c4 (if (eq (mgxb-quant p-q6id p-q6 "form/form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 210 lxh) 1) 16 0))
+    (let c5 (if (eq (mgxb-quant p-q4id p-q4 "form/form-stdlib/tests/fixtures/q4k-two-superblocks.bin" 144 lxh) 1) 32 0))
+
+    ; ================= the routed step: device against host =================
+    (let m (sub 0.0 200.0))
+    (let L1 (list 0.75 (sub 0.0 0.5) 2.25 1.0 (sub 0.0 1.25) 0.5 1.75 (sub 0.0 2.0)))
+    (let L2 (list m 0.0 m 0.0 0.0 m 0.0 m))
+    (let dev (mgxb-device-step p-route p-mvid p-scw p-axw wall xh L1 ne er ec nb02))
+    (let hst (mgxb-host-step p-route p-mv p-sc p-ax xh L1 ne er ec))
+    (let ids-h (nth hst 2))
+    (let c6 (if (and (eq (nth ids-h 0) 2) (and (eq (nth ids-h 1) 6) (str_eq (nth dev 0) (nth hst 0)))) 64 0))
+    (let pr (print_str (str_concat "syncs: device step " (str_concat (int_to_str (nth dev 1)) (str_concat ", host round trip " (int_to_str (nth hst 1)))))))
+    (let c7 (if (and (eq (nth dev 1) 1) (eq (nth hst 1) 2)) 128 0))
+
+    (let dt (mgxb-device-step p-route p-mvid p-scw p-axw wall xh L2 ne er ec nb02))
+    (let c8 (if (str_eq (nth dt 0) (mgxb-f32s (mgxb-mix 0.5 (mgxb-fold 1 0 er ec) 0.5 (mgxb-fold 3 0 er ec)))) 256 0))
+
+    ; ================= what the lift cannot read =================
+    (let junk (mgx-id-lift "not a kernel" "form_junk_id_f32"))
+    (let c9 (if (and (eq (str_len junk) 0) (eq (metal_pipeline junk "form_junk_id_f32") 0)) 512 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8 c9))))))))))

@@ -1,0 +1,99 @@
+; preludes: form-stdlib/core.fk form/form-stdlib/roster-census.bml
+; Expected: 1023
+; PROOF LEVEL: FKWU-STAGED / FOURTH-ARM ONLY (host_spawn, host_kill, shm_offer, the live pages and kernel_page_bury)
+;
+; page-burial-band — a kernel's live page ends with the kernel, a page another kernel left is read and buried
+; only by an explicit call for its pid, and no page is buried unless its kernel has ended.
+;
+; Every kernel maps a 128 MiB live page, /fg-k<pid>, and buries its own page, store and program surface at
+; exit. A page a kernel left (killed after its roster slot was gone) is named by rce-ended, which reads and
+; never unlinks; kernel_page_bury pid buries that one pid. The host hands a pid out again within minutes, and
+; a kernel that takes it reopens the page its pid left standing, so a page is buried only when it names its
+; pid, says it ended or was opened before the pid was seen gone, and the pid is still gone once the page has
+; been read. The band buries only its own fixtures.
+;
+; Verdict 1023:
+;    1  a sleeper that ends on its own leaves no page behind
+;    2  a sleeper forgotten by the roster and then killed (no final note, no slot) leaves its page standing
+;    4  rce-ended names the killed sleeper and not the resting one, and the killed one's page still stands
+;       after the reading
+;    8  kernel_page_bury on the killed sleeper answers 1, and its page is gone
+;   16  this kernel's page and the resting sleeper's page stand after the burial
+;   32  the resting sleeper is still in the roster after the burial
+; pages written by hand for the pid of a kernel that ran to its end:
+;   64  a page naming another pid stands
+;  128  a page opened after the pid was seen gone, saying alive, stands (a kernel that took the pid)
+;  256  the same page saying it ended is buried
+;  512  a page opened before the pid was seen gone, saying alive, is buried (a killed kernel's)
+(do
+    (defn pbb-cmd () (list "./fkwu" "observe/tests/roster-sleeper.fk"))
+    ; a page by hand: word 0 the live-page magic (read off this kernel's own page), 1 the pid, 2 start-ms,
+    ; 19 alive, the other 30 words 0
+    (defn pbb-u64 (x k) (if (le k 0) "" (str_concat (byte_to_str (mod x 256)) (pbb-u64 (div x 256) (sub k 1)))))
+    (defn pbb-zeros (n) (if (le n 0) "" (str_concat (pbb-u64 0 8) (pbb-zeros (sub n 1)))))
+    (defn pbb-words (pidw start alive)
+        (str_concat (pbb-u64 (nth (kernel_live (host_pid)) 0) 8) (str_concat (pbb-u64 pidw 8) (str_concat (pbb-u64 start 8)
+            (str_concat (pbb-zeros 16) (str_concat (pbb-u64 alive 8) (pbb-zeros 14)))))))
+    (defn pbb-dec (n) (if (lt n 10) (byte_to_str (add 48 n)) (str_concat (pbb-dec (div n 10)) (byte_to_str (add 48 (mod n 10))))))
+    (defn pbb-page (name words)
+        (do
+            (let h (shm_offer name 4096))
+            (let wr (shm_write h words))
+            (let rl (shm_release h))
+            wr))
+    ; each case: what kernel_page_bury answered, then how many words the page still shows
+    (defn pbb-hand (d name)
+        (do
+            (let later (add (now_unix_ms) 60000))
+            (let f1 (pbb-page name (pbb-words (add d 1) 1000 1)))
+            (let b1 (kernel_page_bury d))
+            (let s1 (len (kernel_live d)))
+            (let f2 (pbb-page name (pbb-words d later 1)))
+            (let b2 (kernel_page_bury d))
+            (let s2 (len (kernel_live d)))
+            (let f3 (pbb-page name (pbb-words d later 0)))
+            (let b3 (kernel_page_bury d))
+            (let s3 (len (kernel_live d)))
+            (let f4 (pbb-page name (pbb-words d 1000 1)))
+            (let b4 (kernel_page_bury d))
+            (let s4 (len (kernel_live d)))
+            (list b1 s1 b2 s2 b3 s3 b4 s4)))
+    (let warm (host_wait (host_spawn_quiet (pbb-cmd))))
+    (let a (host_spawn_quiet (pbb-cmd)))
+    (let b (host_spawn_quiet (pbb-cmd)))
+    (let rest (host_sleep_ms 1200))
+    (let fb (kernel_roster_forget b))
+    (let kb (host_kill b))
+    (let wb (host_wait b))
+    (let pageB (kernel_live b))
+    (let wa (host_wait a))
+    (let pageA (kernel_live a))
+    (let c (host_spawn_quiet (pbb-cmd)))
+    (let settle (host_sleep_ms 1000))
+    ; the census reads; the killed sleeper's page is buried by a call for its pid alone
+    (let ended (rce-ended))
+    (let pageBpre (kernel_live b))
+    (let buried (kernel_page_bury b))
+    (let pageB2 (kernel_live b))
+    (let pageMe (kernel_live (host_pid)))
+    (let pageC (kernel_live c))
+    (let cIn (rce-in? c (kernel_live_pids)))
+    (let wc (host_wait c))
+    ; hand-written pages go only where no process and no page stand for the pid
+    (let d (host_spawn_quiet (list "./fkwu" "bootstrap/ground.fk")))
+    (let wd (host_wait d))
+    (let dFree (and (gt d 0) (and (eq (host_alive d) 0) (eq (len (kernel_live d)) 0))))
+    (let hand (if dFree (pbb-hand d (str_concat "/fg-k" (pbb-dec d))) (list -1 -1 -1 -1 -1 -1 -1 -1)))
+
+    (let told (print (list "a" a "b" b "c" c "pageA" (len pageA) "pageB" (len pageB) "ended" (len ended) "ended-b" (rce-in? b ended) "ended-c" (rce-in? c ended) "b-before" (len pageBpre) "buried" buried "pageB-after" (len pageB2) "me" (len pageMe) "c-page" (len pageC) "c-in-roster" cIn "d" d "hand" hand)))
+    (let c0 (if (eq (len pageA) 0) 1 0))
+    (let c1 (if (and (eq fb 1) (and (ge (len pageB) 20) (eq (nth pageB 19) 1))) 2 0))
+    (let c2 (if (and (eq (rce-in? b ended) 1) (and (eq (rce-in? c ended) 0) (ge (len pageBpre) 20))) 4 0))
+    (let c3 (if (and (eq buried 1) (eq (len pageB2) 0)) 8 0))
+    (let c4 (if (and (ge (len pageMe) 20) (and (ge (len pageC) 20) (eq (nth pageC 19) 1))) 16 0))
+    (let c5 (if (eq cIn 1) 32 0))
+    (let h0 (if (and (eq (nth hand 0) 0) (ge (nth hand 1) 20)) 64 0))
+    (let h1 (if (and (eq (nth hand 2) 0) (ge (nth hand 3) 20)) 128 0))
+    (let h2 (if (and (eq (nth hand 4) 1) (eq (nth hand 5) 0)) 256 0))
+    (let h3 (if (and (eq (nth hand 6) 1) (eq (nth hand 7) 0)) 512 0))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add h0 (add h1 (add h2 h3))))))))))

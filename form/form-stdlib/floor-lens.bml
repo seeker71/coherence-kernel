@@ -6,7 +6,7 @@
 // MUST touch (its weights, once) over that bandwidth; its distance is
 // the measured time over the floor. A lane at 1.0 has nothing left to
 // give without touching fewer bytes.
-// preludes: form/form-stdlib/metal-door.fk form/form-stdlib/model-registry.bml form/form-stdlib/format-arith.fk form/form-stdlib/term-graphics.bml
+// preludes: form/form-stdlib/metal-door.fk form/form-stdlib/model-registry.bml form/form-stdlib/format-arith.fk form/form-stdlib/term-graphics.bml form/form-stdlib/bml/number.bml
 //////////////////////////////////////////////////////////////////////
 section [form.bml] {
     class FormFloorLens {
@@ -24,7 +24,10 @@ section [form.bml] {
             let e = metal_enqueue(p, md-bind(bufs, list(n16, per)), threads);
             fl-pass(p, bufs, n16, per, threads, sub(k, 1));
         }
-        def fl-float(n) = str_to_float(int_to_str(n));
+        // to-float lives in number.bml now, said once for the whole body. This line was the
+        // first of ten copies of a decimal round-trip standing in for a promotion that was
+        // never missing: add(n, 0.0) has always been a float (corpus row 1419 ninenames).
+        def fl-float(n) = to-float(n);
         // (bytes-per-pass ms-for-five-passes gigabytes-per-second)
         def fl-measure-bw(path) {
             let size = file_size(path);
@@ -116,11 +119,42 @@ section [form.bml] {
             let w = if gt(gbs, prev) then write_file_text(fl-best-path(), float_to_str(gbs)) else 0;
             best;
         }
+        // ---- three reads, not one -------------------------------------------------
+        // Taken from ivanfioravanti/ds4-metal#5 (BERARD David, merged 2026-09-08), whose
+        // harness interleaves every A/B and reports BOTH repeats — "-0.01% / -0.82%" —
+        // so a reader can see when a result did not hold still. This lens reported one
+        // sample and a best-seen, which cannot tell a dip from a step change: on
+        // 2026-09-08 it read 6x low across every lane and the fall was written down as
+        // machine-wide with the cause unknown, and on 2026-09-09 it read a new best.
+        // Neither reading could say whether the machine had changed or the sample had.
+        // Three reads and their spread can (corpus row 1421 onesample).
+        def fl-bw-runs(path, r, acc) = if le(r, 0) then acc else fl-bw-runs(path, sub(r, 1), cons(fl-gbs(fl-measure-bw(path)), acc));
+        def fl-lo(xs, m) = if eq(len(xs), 0) then m else fl-lo(tail(xs), if lt(head(xs), m) then head(xs) else m);
+        def fl-hi(xs, m) = if eq(len(xs), 0) then m else fl-hi(tail(xs), if gt(head(xs), m) then head(xs) else m);
+        // the honest reading is the BEST of the reads: the machine's floor is what it can
+        // give, and a slower read is something else asking at the same time
+        def fl-reads(path, r) {
+            let xs = fl-bw-runs(path, r, list());
+            list(fl-hi(xs, 0.0), fl-lo(xs, 1000000.0), fl-hi(xs, 0.0), len(xs));
+        }
+        def fl-read-gbs(rd) = nth(rd, 0);
+        def fl-read-lo(rd) = nth(rd, 1);
+        def fl-read-hi(rd) = nth(rd, 2);
+        def fl-read-n(rd) = nth(rd, 3);
+        // a spread wider than a tenth means no single number from this run is worth quoting
+        def fl-held-still?(rd) = if le(fl-read-lo(rd), 0.0) then 0 else if lt(div(fl-read-hi(rd), fl-read-lo(rd)), 1.10) then 1 else 0;
+        def fl-spread-text(rd) {
+            if eq(fl-read-n(rd), 1) then "one read"
+            else str_concat(int_to_str(fl-read-n(rd)), str_concat(" reads ", str_concat(float_to_str(fl-2dp(fl-read-lo(rd))), str_concat("-", str_concat(float_to_str(fl-2dp(fl-read-hi(rd))), if eq(fl-held-still?(rd), 1) then "" else ", WIDE — no single number from this run is worth quoting")))));
+        }
+
         def fl-share(gbs, best) = if le(best, 0.0) then 100.0 else fl-2dp(mul(div(gbs, best), 100.0));
         def fl-weather(gbs, best) = if ge(fl-share(gbs, best), 90.0) then "a quiet machine" else str_concat("a busy machine: ", str_concat(float_to_str(fl-share(gbs, best)), "% of the best this door has seen, so every lane below is taxed"));
-        def fl-frame(gbs, rows) {
+        def fl-frame(gbs, rows) = fl-frame-rd(list(gbs, gbs, gbs, 1), rows);
+        def fl-frame-rd(rd, rows) {
+            let gbs = fl-read-gbs(rd);
             let best = fl-best-keep(gbs);
-            tg-frame(cons(tg-lane("FLOOR   ", fl-cat(list("this Mac gives ", float_to_str(fl-2dp(gbs)), " GB/s through the handle door against a best of ", float_to_str(fl-2dp(best)), "; ", fl-weather(gbs, best))), if ge(fl-share(gbs, best), 90.0) then "dim" else "warn", sub(0, 1)), fl-lanes(rows)));
+            tg-frame(cons(tg-lane("FLOOR   ", fl-cat(list("this Mac gives ", float_to_str(fl-2dp(gbs)), " GB/s through the handle door against a best of ", float_to_str(fl-2dp(best)), " (", fl-spread-text(rd), "); ", fl-weather(gbs, best))), if ge(fl-share(gbs, best), 90.0) then "dim" else "warn", sub(0, 1)), fl-lanes(rows)));
         }
     }
     0;

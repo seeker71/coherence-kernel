@@ -1,0 +1,78 @@
+//////////////////////////////////////////////////////////////////////
+//
+// affine4-t-run.bml — the transposed affine 4-bit product on the real
+// Llama 3.2 3B's own weights: nam_affine's transposed path beside
+// form_affine4_t_f32 (backprop-msl.bml), with the forward for scale.
+//
+//   ./fkwu observe/affine4-t-run.bml
+//
+// One line per projection shape of layer 20 (q, k, gate, down — v, o and
+// up repeat those shapes), then the per-layer sum over all seven. GPU
+// busy microseconds, one warm dispatch before each timed one. `gap` is
+// the largest difference between the two transposed answers, `scale`
+// the largest answer: their fold orders differ, so they agree to
+// rounding here, and byte for byte where exactness is arranged
+// (form/form-stdlib/tests/affine4-t-band.fk). Nothing is written.
+//
+// preludes: form-stdlib/backprop-msl.bml form-stdlib/native-llama-metal.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class Affine4TReach {
+        def a4r-chunk(n, seed, acc) = if le(n, 0) then acc else a4r-chunk(sub(n, 1), seed, str_concat(acc, md-le32(md-f32-bits(div(add(sub(mod(add(mul(n, 29), mul(seed, 17)), 61), 30), 0.0), 64.0)))));
+        // 1024 floats built once and laid down end to end, so a 2 MB vector never
+        // becomes a Form list or string (every length here is a multiple of 1024)
+        def a4r-fill(h, n, seed) = a4r-fill-go(h, 0, n, a4r-chunk(1024, seed, ""));
+        def a4r-fill-go(h, i, n, c) = if ge(i, n) then h else a4r-fill-step(h, i, n, c, metal_buf_write(h, mul(i, 4), c));
+        def a4r-fill-step(h, i, n, c, rc) = if lt(rc, str_len(c)) then form_error("affine4-t door: a fill write came up short") else a4r-fill-go(h, add(i, 1024), n, c);
+        def a4r-gpu() = nth(metal_live(), 11);
+        def a4r-maxabs(xs, m) = if nil?(xs) then m else a4r-maxabs(tail(xs), if gt(abs(head(xs)), m) then abs(head(xs)) else m);
+        def a4r-gap(xs, ys, m) = if or(nil?(xs), nil?(ys)) then m else a4r-gap(tail(xs), tail(ys), if gt(abs(sub(head(xs), head(ys))), m) then abs(sub(head(xs), head(ys))) else m);
+        def a4r-shape(index, prefix, group, t) {
+            let view = nam-view(index, prefix, group);
+            let rows = nth(view, 3);
+            let cols = nth(view, 4);
+            let x = a4r-fill(nam-alloc(mul(t, cols)), mul(t, cols), 3);
+            let dy = a4r-fill(nam-alloc(mul(t, rows)), mul(t, rows), 7);
+            let y = nam-alloc(mul(t, rows));
+            let dxn = nam-alloc(mul(t, cols));
+            let dxb = nam-alloc(mul(t, cols));
+            let p = bpm-pipe();
+            let w1 = bpm-affine4-t-with(p, view, dy, dxb, t);
+            let w2 = nam-linear-lanes(view, dy, dxn, t, 1);
+            let w3 = nam-linear(view, x, y, t, 0);
+            let ws = nam-sync();
+            let g0 = a4r-gpu();
+            let f = nam-linear(view, x, y, t, 0);
+            let s1 = nam-sync();
+            let g1 = a4r-gpu();
+            let n = nam-linear-lanes(view, dy, dxn, t, 1);
+            let s2 = nam-sync();
+            let g2 = a4r-gpu();
+            let b = bpm-affine4-t-with(p, view, dy, dxb, t);
+            let s3 = nam-sync();
+            let g3 = a4r-gpu();
+            let an = nam-read(dxn, mul(t, cols));
+            let ab = nam-read(dxb, mul(t, cols));
+            let shown = print(list(prefix, "rows", rows, "cols", cols, "ty", nth(view, 6), "tokens", t, "forward-us", sub(g1, g0), "nam-transpose-us", sub(g2, g1), "column-walk-us", sub(g3, g2), "gap", a4r-gap(an, ab, 0.0), "scale", a4r-maxabs(an, 0.0)));
+            let freed = nam-free(list(x, dy, y, dxn, dxb));
+            list(sub(g1, g0), sub(g2, g1), sub(g3, g2));
+        }
+        // v, o and up repeat the k, q and gate shapes: two of each, one down
+        def a4r-layer(q, k, g, d, i) = add(mul(2, nth(q, i)), add(mul(2, nth(k, i)), add(mul(2, nth(g, i)), nth(d, i))));
+        def a4r-report() {
+            let base = mr-path(mr-find("llama32-3b-mlx-4bit"));
+            let group = nll-get(json-object-get(nll-config(base), "quantization"), "group_size");
+            let index = sti-open(str_concat(base, "/model.safetensors"));
+            let t = 64;
+            let q = a4r-shape(index, "model.layers.20.self_attn.q_proj", group, t);
+            let k = a4r-shape(index, "model.layers.20.self_attn.k_proj", group, t);
+            let g = a4r-shape(index, "model.layers.20.mlp.gate_proj", group, t);
+            let d = a4r-shape(index, "model.layers.20.mlp.down_proj", group, t);
+            let layer = print(list("per-layer-us", "tokens", t, "forward", a4r-layer(q, k, g, d, 0), "nam-transpose", a4r-layer(q, k, g, d, 1), "column-walk", a4r-layer(q, k, g, d, 2)));
+            1;
+        }
+    }
+    a4r-report();
+}

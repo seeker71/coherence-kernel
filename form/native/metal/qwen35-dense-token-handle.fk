@@ -91,9 +91,8 @@
 
     ; ── attention over a span ──────────────────────────────────────────────
     ; ldm-attn-msl scores ONE query against the cached prefix with one thread per
-    ; query head — 24 threads, and GPU_GAPS.md line 82 has said so, unticked, the
-    ; whole time: "prefill, which Stone 4 runs as n decode steps rather than a
-    ; batched pass."
+    ; query head — 24 threads; dispatched once per token, it made prefill n
+    ; decode steps rather than a batched pass.
     ;
     ; This is that kernel with the token axis added. A thread per (token, head),
     ; so a 385-token span dispatches once with 9,240 threads instead of 385 times
@@ -162,11 +161,11 @@
     ; 48 x 2. Nothing about the recurrence is weakened; it is simply not asked
     ; 385 separate times whether it would like to advance one step.
     ;
-    ; They are emitted and given pipelines unconditionally, and REACHED only
-    ; through fold=1. The looped offset kernels stay the default: the folded
-    ; configuration reaches the dispatch floor with byte-identical output, but
-    ; this host's 19% run-to-run spread swallows the timing difference, so which
-    ; is faster is observed-as-unseparated, not decided (corpus row 1091).
+    ; They are emitted and given pipelines unconditionally, and they are the
+    ; default walk: the folded configuration reaches the dispatch floor with
+    ; byte-identical output, and on 2026-09-11 it was decided on host time, the
+    ; GPU time staying unseparated from the looped walk's (qwen38-dispatch-model.fk).
+    ; The looped offset kernels stay reachable through fold=0.
     (defn q38-conv-span-msl (fname)
         (str_concat "kernel void "
         (str_concat fname
@@ -523,11 +522,22 @@
     (defn q38-mv-batch-y (ps tv xh yh ntok ystride barrier)
         (if (lt (q38pq-index (kth-tv-ty tv)) 0)
             (form_error "qwen prefill: unsupported matrix quantization")
+        ; Q8_0 goes through the matrix unit (qmb-q80-mma): 32 x 32 tiles dispatched as threadgroups,
+        ; within the lane's named bound of the batched sum and a tenth to a twentieth of its time on
+        ; this model's FFN (observe/qwen38-span-matmul-probe.bml, 2026-09-11)
+        (if (eq (kth-tv-ty tv) 8)
+            (metal_enqueue (nth ps (q38pq-mma-index))
+                (md-bind16 (list (kth-tv-h tv) xh yh)
+                    (list (kth-tv-r tv) (kth-tv-c tv) ntok ystride)
+                    256 0 1 barrier)
+                (qmb-mma-groups (kth-tv-r tv) ntok))
         (metal_enqueue (nth ps (q38pq-index (kth-tv-ty tv)))
             (md-bind16 (list (kth-tv-h tv) xh yh)
                 (list (kth-tv-r tv) (kth-tv-c tv) ntok ystride)
                 256 0 0 barrier)
-            (mul (mul (kth-tv-r tv) (qmb-ntile ntok)) 32))))
+            ; rows rounded up to a group of eight: the Q8_0 twin gives each group eight rows, and the
+            ; batched kernels answer a row past the end by returning
+            (mul (mul (mul (div (add (kth-tv-r tv) 7) 8) 8) (qmb-ntile ntok)) 32)))))
 
     (defn q38-mv-batch (ps tv xh yh ntok barrier)
         (q38-mv-batch-y ps tv xh yh ntok (kth-tv-r tv) barrier))
@@ -723,12 +733,15 @@
                     (mul (nth geo 3) (nth geo 5)))
                 (q38-linear-delta-span ps bs geo st (add t 1) ntok))))
 
-        ; fold = 1 issues each recurrence once with its token loop inside. MEASURED
-    ; 2026-08-25 and NOT the default: it reaches the dispatch floor exactly
-    ; (75,769 against a predicted 75,673) and costs 31% more GPU and 10% more
-    ; wall, because one long low-occupancy kernel that nothing can overlap is
-    ; worse than N short ones inside a concurrent batch. Kept reachable so the
-    ; measurement stands and nobody pays for it twice.
+        ; fold = 1 issues each recurrence once with its token loop inside, and it
+    ; is the default: it reaches the dispatch floor (the model's count plus the
+    ; lane's five), answers the same token every pass, and — measured 2026-09-11
+    ; in one process, ten interleaved passes of a 577-token prefill — its GPU time
+    ; cannot be told apart from the looped walk's on this host, while the looped
+    ; walk spends at least 1,951 ms of host time per prefill encoding 57,719
+    ; dispatches against the fold's at most 111 (qwen38-dispatch-model.fk;
+    ; qwen38-dispatch-model-band bit 2048). fold = 0 keeps the looped walk
+    ; reachable, and observe/qwen38-fold-ab-run.bml asks the question again.
     (defn q38-linear-attn-span-f (ps bs geo lay st ntok fold)
         (do
             (let bs2-pitch (qlslc-bs2-output-pitch geo))
@@ -793,26 +806,33 @@
                 (q38-lm-linear ps bs geo lays sts l (add t 1) n))))
 
     (defn q38-linear-attn-span (ps bs geo lay st ntok)
-        (q38-linear-attn-span-f ps bs geo lay st ntok 0))
-    (defn q38-linear-attn-span-folded (ps bs geo lay st ntok)
         (q38-linear-attn-span-f ps bs geo lay st ntok 1))
+    (defn q38-linear-attn-span-looped (ps bs geo lay st ntok)
+        (q38-linear-attn-span-f ps bs geo lay st ntok 0))
 
-    (defn q38-lm-layers-span (ps bs geo lays sts l nL n pos0)
+    ; fold rides down to every linear layer's two recurrences, so one process
+    ; can walk the same span both ways against the same open weights
+    ; (observe/qwen38-fold-ab-run.bml). The default below is fold 1.
+    (defn q38-lm-layers-span-f (ps bs geo lays sts l nL n pos0 fold)
         (if (ge l nL) 1
             (do (if (kth-full? l (nth geo 22))
                     (q38-full-attn-span ps bs geo (nth lays l) (nth sts l) pos0 n)
-                    (q38-linear-attn-span ps bs geo (nth lays l) (nth sts l) n))
+                    (q38-linear-attn-span-f ps bs geo (nth lays l) (nth sts l) n fold))
                 (q38-ffn-span ps bs geo (nth lays l) n)
-                (q38-lm-layers-span ps bs geo lays sts (add l 1) nL n pos0))))
+                (q38-lm-layers-span-f ps bs geo lays sts (add l 1) nL n pos0 fold))))
+    (defn q38-lm-layers-span (ps bs geo lays sts l nL n pos0)
+        (q38-lm-layers-span-f ps bs geo lays sts l nL n pos0 1))
 
-    (defn q38-prefill-span-batched (ps bs geo lays sts embTv onormTv projTv ids pos)
+    (defn q38-prefill-span-batched-f (ps bs geo lays sts embTv onormTv projTv ids pos fold)
         (do
             (let n (len ids))
             (metal_batch_concurrent)
             (q38-lm-embed ps bs geo embTv ids 0)
-            (q38-lm-layers-span ps bs geo lays sts 0 (nth geo 21) n pos)
+            (q38-lm-layers-span-f ps bs geo lays sts 0 (nth geo 21) n pos fold)
             (q38-gather ps bs geo (sub n 1) 1)
             (list (q38-head-only ps bs geo onormTv projTv) (add pos n))))
+    (defn q38-prefill-span-batched (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (q38-prefill-span-batched-f ps bs geo lays sts embTv onormTv projTv ids pos 1))
 
     (defn q38-lm-embed (ps bs geo embTv ids t)
         (if (eq (len ids) 0) t

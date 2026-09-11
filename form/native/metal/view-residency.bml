@@ -1,0 +1,116 @@
+// view-residency.bml — a model larger than one MTLBuffer, resident as views: the device measures its
+// limit on ONE buffer, the body decides the views, and a plain file read judges every byte.
+//
+// The wall read "Model > one MTLBuffer". The device's limit is on one buffer; nothing in it limits
+// how many buffers a model may hold. This cell asks the device only what the device alone knows —
+// does one buffer over [0, len) of this file stand? — and bisects that answer in pages, so the
+// ceiling arrives as the device's own refusal rather than a typed number. The view set is
+// windowed-residency.fk's (adjacent views overlap by the largest tensor plus a page, so every tensor
+// lies wholly inside one), each tensor's view and inner offset come from the file's own table, and a
+// probe kernel emitted here reads through a view at the body's inner offset.
+//
+// THE JUDGE IS NOT METAL. Every GPU read through a view is held against read_file_slice at the
+// tensor's ABSOLUTE offset: a plain file read, no mapping, no Metal, no inner-offset arithmetic, so a
+// wrong inner reads another tensor and fails. The same read one page off the body's inner must NOT
+// match, so the gate bites. The destination starts as 0xA5 bytes, so an unrun dispatch cannot pass by
+// echoing zeros.
+//
+// Two bindings stand and the lanes use both: the dense lane binds every tensor as its OWN view
+// (dense-token-handle.fk's dth-tv: metal_buf_from_file at the tensor's offset and length), which no
+// buffer ceiling reaches while a tensor is smaller than a buffer; the windowed set serves a kernel
+// that wants one buffer and an inner offset across tensors.
+//
+// preludes: form-stdlib/core.fk form-stdlib/metal-door.fk form-stdlib/gguf-manifest.fk native/metal/windowed-residency.fk native/metal/windowed-residency-emit.fk
+//
+// Proven by: native/metal/tests/view-residency-band.fk
+section [form.bml] {
+ class ViewResidency {
+  // the probe: a byte copy from (view + base). base is a 64-bit inner offset carried as two 32-bit
+  // words, because a view reaches past 4 GiB and a bound constant is 32 bits wide.
+  def vres-probe-msl() = "kernel void form_vres_probe(device const uchar* src [[buffer(0)]], device uchar* dst [[buffer(1)]], constant uint& lo [[buffer(2)]], constant uint& hi [[buffer(3)]], constant uint& cnt [[buffer(4)]], uint gid [[thread_position_in_grid]]) { ulong base = ulong(lo) + ulong(hi) * 4294967296ul; if (gid < cnt) dst[gid] = src[base + ulong(gid)]; }";
+  def vres-pipe() = metal_pipeline(vres-probe-msl(), "form_vres_probe");
+  def vres-word() = 4294967296;
+  def vres-window() = 65536;
+  def vres-after(a, b) = b;
+  def vres-min(a, b) = if lt(a, b) then a else b;
+  def vres-join(xs) = if eq(len(xs), 0) then "" else str_concat(head(xs), vres-join(tail(xs)));
+  def vres-fill(s, n) = if ge(str_len(s), n) then substring(s, 0, n) else vres-fill(str_concat(s, s), n);
+  def vres-sentinel(n) = vres-fill(byte_to_str(165), n);
+
+  // n bytes of a view, as the GPU reads them at inner
+  def vres-gpu-read(pipe, view, inner, n) {
+   let dst = metal_buf_alloc(n);
+   metal_buf_write(dst, 0, vres-sentinel(n));
+   metal_enqueue(pipe, md-bind(list(view, dst), list(mod(inner, vres-word()), div(inner, vres-word()), n)), n);
+   metal_sync();
+   let got = metal_buf_read(dst, 0, n);
+   metal_buf_free(dst);
+   got;
+  }
+
+  // does ONE buffer over [0, len) of this file stand? The device answers; the handle is released.
+  def vres-keep?(h) = if gt(h, 0) then vres-after(metal_buf_free(h), 1) else 0;
+  def vres-admits?(path, len) = vres-keep?(metal_buf_from_file(path, 0, len));
+  // bisected in pages, lo admitted and hi refused. hi starts one page past the file, which nothing
+  // admits, so the answer is the device's ceiling whenever the file is larger than it, and the
+  // file's own page floor when it is not.
+  def vres-ceiling-go(path, p, lo, hi) = if le(sub(hi, lo), 1) then mul(lo, p) else vres-ceiling-mid(path, p, lo, hi, div(add(lo, hi), 2));
+  def vres-ceiling-mid(path, p, lo, hi, mid) = if eq(vres-admits?(path, mul(mid, p)), 1) then vres-ceiling-go(path, p, mid, hi) else vres-ceiling-go(path, p, lo, mid);
+  def vres-ceiling(path, p) = vres-ceiling-go(path, p, 1, add(div(file_size(path), p), 1));
+
+  // the views windowed-residency.fk decides, each clipped to the file
+  def vres-view-len(start, vl, filelen) = if gt(add(start, vl), filelen) then sub(filelen, start) else vl;
+  def vres-map(path, i, n, step, vl, filelen, acc) = if ge(i, n) then acc else vres-map(path, add(i, 1), n, step, vl, filelen, append(acc, list(metal_buf_from_file(path, mul(i, step), vres-view-len(mul(i, step), vl, filelen)))));
+  def vres-all-admitted?(vs) = if eq(len(vs), 0) then 1 else if gt(head(vs), 0) then vres-all-admitted?(tail(vs)) else 0;
+  def vres-release(vs) = if eq(len(vs), 0) then 0 else vres-after(vres-keep?(head(vs)), vres-release(tail(vs)));
+
+  // one walk over the file's own table: (tensors, tensors lying wholly inside their view, the first
+  // tensor at or past the ceiling as (abs bytes))
+  def vres-past(past, a, b, ceil) = if gt(len(past), 0) then past else if ge(a, ceil) then list(a, b) else past;
+  def vres-walk(src, off, k, base, filelen, ceil, maxtb, p, n, hold, past) = if eq(k, 0) then list(n, hold, past) else vres-row(src, off, k, base, filelen, ceil, maxtb, p, n, hold, past, add(base, egg-ti-dataoff(src, off)), gm-bytes(src, off));
+  def vres-row(src, off, k, base, filelen, ceil, maxtb, p, n, hold, past, a, b) = vres-walk(src, egg-ti-next(src, off), sub(k, 1), base, filelen, ceil, maxtb, p, add(n, 1), add(hold, wr-holds?(a, b, filelen, ceil, maxtb, p)), vres-past(past, a, b, ceil));
+
+  // a read through the view the body names for absolute offset a
+  def vres-through(pipe, views, step, a, n) = vres-gpu-read(pipe, nth(views, wr-view-of(a, step)), wr-inner(a, step), n);
+
+  // bits 16..256: every GPU read held against a plain file read at the absolute offset
+  def vres-reads(path, pipe, views, step, ceil, p, pa, pb) {
+   let n = vres-min(pb, vres-window());
+   let fileHead = read_file_slice(path, pa, n);
+   let tailAt = sub(add(pa, pb), n);
+   let cutAt = sub(ceil, div(vres-window(), 2));
+   let b16 = if str_eq(vres-through(pipe, views, step, pa, n), fileHead) then 16 else 0;
+   let b32 = if str_eq(vres-through(pipe, views, step, tailAt, n), read_file_slice(path, tailAt, n)) then 32 else 0;
+   let b64 = if str_eq(vres-through(pipe, views, step, cutAt, vres-window()), read_file_slice(path, cutAt, vres-window())) then 64 else 0;
+   let b128 = if str_eq(vres-gpu-read(pipe, nth(views, wr-view-of(pa, step)), add(wr-inner(pa, step), p), n), fileHead) then 0 else 128;
+   let own = metal_buf_from_file(path, pa, pb);
+   let b256 = if gt(own, 0) then if str_eq(vres-gpu-read(pipe, own, 0, n), fileHead) then 256 else 0 else 0;
+   vres-keep?(own);
+   add(b16, add(b32, add(b64, add(b128, b256))));
+  }
+
+  def vres-past-str(past) = if gt(len(past), 0) then int_to_str(nth(past, 0)) else "none";
+
+  // the witness over one file: one line of facts, and the bit fold (511 whole)
+  def vres-witness(path, p) {
+   let filelen = file_size(path);
+   let ceil = vres-ceiling(path, p);
+   let b1 = if eq(vres-admits?(path, filelen), 0) then 1 else 0;
+   let b2 = if eq(vres-admits?(path, ceil), 1) then if le(add(ceil, p), filelen) then if eq(vres-admits?(path, add(ceil, p)), 0) then 2 else 0 else 0 else 0;
+   let src = eqr-of-file(path, 0, gm-window());
+   let maxtb = wre-maxtb-loop(src, egg-tinfo-start(src), egg-tensor-count(src), 0);
+   let walk = vres-walk(src, egg-tinfo-start(src), egg-tensor-count(src), egg-data-base(src, gm-alignment()), filelen, ceil, maxtb, p, 0, 0, empty());
+   let step = wr-step(ceil, maxtb, p);
+   let nv = wr-nviews(filelen, ceil, maxtb, p);
+   let views = vres-map(path, 0, nv, step, wr-view-limit(ceil, p), filelen, empty());
+   let b4 = if ge(nv, 2) then if eq(vres-all-admitted?(views), 1) then 4 else 0 else 0;
+   let b8 = if gt(nth(walk, 0), 0) then if eq(nth(walk, 0), nth(walk, 1)) then 8 else 0 else 0;
+   let past = nth(walk, 2);
+   let rest = if eq(b4, 4) then if gt(len(past), 0) then vres-reads(path, vres-pipe(), views, step, ceil, p, nth(past, 0), nth(past, 1)) else 0 else 0;
+   print(vres-join(list("view-residency: file ", int_to_str(filelen), " B, one-buffer ceiling ", int_to_str(ceil), " B, largest tensor ", int_to_str(maxtb), " B, views ", int_to_str(nv), ", tensors ", int_to_str(nth(walk, 0)), " holding ", int_to_str(nth(walk, 1)), ", first past the ceiling at ", vres-past-str(past))));
+   vres-release(views);
+   add(b1, add(b2, add(b4, add(b8, rest))));
+  }
+ }
+ 0;
+}

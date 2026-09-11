@@ -1,0 +1,77 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/transformer-backprop.fk form/form-stdlib/form-glsl-layers.bml form/form-stdlib/vk-door.bml
+; Expected: 255
+; PROOF LEVEL: FKWU-STAGED / FOURTH-ARM ONLY (vulkan door: run_vk through host-exec)
+;
+; vk-train-live-band — two training steps as Vulkan compute on this host's GPU, each held to the fp64
+; recipe it twins: the affine SGD step tensor-ir emits (now also through its GLSL table, the same IR
+; that writes the MSL and CUDA steps), and the FFN step with its four phases — forward, output
+; gradient, hidden gradient through the OLD W2, then all four updates — ordered by barriers across a
+; workgroup of 64 invocations striding over the hidden units, so a W1 that matches the recipe is
+; evidence the read-then-write ordering held at width.
+;
+; Verdict 255 when the steps are taken:
+;    1  both shaders mint and the device names itself
+;    2  the affine step's per-row loss is the recipe's
+;    4  W after the affine step is tbp-step's
+;    8  b after the affine step is tbp-step's
+;   16  the FFN step's loss and output gradient gy are the recipe's
+;   32  b2 and W2 after the FFN step are tbp-mlp-step's
+;   64  b1 and W1 after the FFN step are tbp-mlp-step's — the update that read W2 before it changed
+;  128  THE STEPS MOVED: W and W1 are not where they started, so agreement is a walk, not two idles
+(do
+    (defn vtb-bit (ok w) (if (eq ok 1) w 0))
+    (defn vtb-sq (ds) (if (eq (len ds) 0) (empty) (cons (mul (head ds) (head ds)) (vtb-sq (tail ds)))))
+
+    ; --- affine: 3 rows, 4 columns ---
+    (let W (list (list 0.5 -0.25 0.125 0.375) (list -0.375 0.625 0.25 -0.125) (list 0.25 0.5 -0.5 0.75)))
+    (let B (list 0.0625 -0.1875 0.125))
+    (let X (list 1.5 -0.75 0.5 0.25))
+    (let T (list 0.25 -0.5 0.75))
+    (let LR 0.125)
+    (let step (tbp-step W B X T LR))
+    (let e-W (vkd-flat (tbp-W step)))
+    (let e-b (tbp-b step))
+    (let e-loss (vtb-sq (tbp-vsub (tb-affine W B X) T)))
+
+    ; --- FFN: indim 2, hid 3, outd 2 ---
+    (let W1 (list (list 0.5 -0.25) (list 0.125 0.75) (list -0.375 0.625)))
+    (let B1 (list 0.25 -0.5 0.125))
+    (let W2 (list (list 0.75 -0.125 0.5) (list -0.25 0.375 -0.625)))
+    (let B2 (list 0.0625 -0.1875))
+    (let MX (list 1.5 -0.75))
+    (let MT (list 0.25 -0.5))
+    (let mstep (tbp-mlp-step W1 B1 W2 B2 MX MT LR))
+    (let e-W1 (vkd-flat (tbp-mlp-W1 mstep)))
+    (let e-b1 (tbp-mlp-b1 mstep))
+    (let e-W2 (vkd-flat (tbp-mlp-W2 mstep)))
+    (let e-b2 (tbp-mlp-b2 mstep))
+    (let e-y (tb-affine W2 B2 (tb-gelu-map (tb-affine W1 B1 MX))))
+    (let e-gy (tn-scale (tbp-vsub e-y MT) 2.0))
+    (let e-mloss (vtb-sq (tbp-vsub e-y MT)))
+
+    (let mints (vkd-plan (list (vkd-mint "fgl-affine-train" (fgl-affine-train)) (vkd-mint "fgl-mlp-train" (fgl-mlp-train)))))
+    (let lr (vkd-f LR))
+    (let plan (vkd-plan (list
+        (vkd-spv "fgl-affine-train") (vkd-spv "fgl-mlp-train")
+        (vkd-buf (vkd-flat W)) (vkd-buf B) (vkd-buf X) (vkd-buf T) (vkd-zero 3)        ;  0  1  2  3  4
+        (vkd-buf (vkd-flat W1)) (vkd-buf B1) (vkd-buf (vkd-flat W2)) (vkd-buf B2)      ;  5  6  7  8
+        (vkd-buf MX) (vkd-buf MT) (vkd-zero 2) (vkd-zero 3) (vkd-zero 3) (vkd-zero 2) (vkd-zero 3)  ;  9 10 11 12 13 14 15
+        (vkd-run 0 (list 0 1 2 3 4) (list 3 4 lr) 1)
+        (vkd-run 1 (list 5 6 7 8 9 10 11 12 13 14 15) (list 2 3 2 lr) 1)
+        (vkd-read 0) (vkd-read 1) (vkd-read 4)
+        (vkd-read 5) (vkd-read 6) (vkd-read 7) (vkd-read 8) (vkd-read 11) (vkd-read 14))))
+    (let out (if (eq (vkd-ready?) 1) (vkd-exec "train" plan) ""))
+
+    (let c0 (if (and (str_eq mints "") (gt (str_len (vkd-device out)) 0)) 1 0))
+    (let c1 (vtb-bit (vkd-agree? (vkd-read-floats out 4) e-loss (vkd-eps)) 2))
+    (let c2 (vtb-bit (vkd-agree? (vkd-read-floats out 0) e-W (vkd-eps)) 4))
+    (let c3 (vtb-bit (vkd-agree? (vkd-read-floats out 1) e-b (vkd-eps)) 8))
+    (let c4 (vtb-bit (if (and (eq (vkd-agree? (vkd-read-floats out 11) e-mloss (vkd-eps)) 1)
+                              (eq (vkd-agree? (vkd-read-floats out 14) e-gy (vkd-eps)) 1)) 1 0) 16))
+    (let c5 (vtb-bit (if (and (eq (vkd-agree? (vkd-read-floats out 8) e-b2 (vkd-eps)) 1)
+                              (eq (vkd-agree? (vkd-read-floats out 7) e-W2 (vkd-eps)) 1)) 1 0) 32))
+    (let c6 (vtb-bit (if (and (eq (vkd-agree? (vkd-read-floats out 6) e-b1 (vkd-eps)) 1)
+                              (eq (vkd-agree? (vkd-read-floats out 5) e-W1 (vkd-eps)) 1)) 1 0) 64))
+    (let c7 (vtb-bit (if (and (eq (vkd-moved? (vkd-read-floats out 0) (vkd-flat W)) 1)
+                              (eq (vkd-moved? (vkd-read-floats out 5) (vkd-flat W1)) 1)) 1 0) 128))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))

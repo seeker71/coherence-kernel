@@ -51,7 +51,7 @@
 #                                              the .metallib is keyed by the source's own sha256
 #
 # Run:  form/native/metal/metal_mx_gpu.sh [iters]        (default 200)
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal row in GPU_GAPS.md.
+# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form

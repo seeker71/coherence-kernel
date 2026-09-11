@@ -37,7 +37,7 @@
 #   5  RESIDENCY IS REAL          ITERS dispatches, zero re-uploads, checksum stable
 #
 # Run:  form/native/metal/metal_iq2_gpu.sh [iters]      (default 100)
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal row in GPU_GAPS.md.
+# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form

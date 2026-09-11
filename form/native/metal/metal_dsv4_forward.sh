@@ -22,7 +22,7 @@
 # the six selected experts ARE the real layer-0 selection for this token.
 #
 # Run:  form/native/metal/metal_dsv4_forward.sh   (optional: FORM_DS4_PROMPT_TOKEN=<id>)
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every Metal row in GPU_GAPS.md.
+# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form

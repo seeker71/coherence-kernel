@@ -1,0 +1,69 @@
+//////////////////////////////////////////////////////////////////////
+//
+// qwen38-fold-ab-run.bml — the fold decision, measured where it can be.
+//
+// One process opens Qwen3.8-27B-Q8_0 once and prefills the same span two
+// ways: fold 0, each linear layer's conv and delta recurrences dispatched
+// once per token (the default), and fold 1, the token loop inside the
+// kernel. One warm pass of each, then A B B A A B B A, a fresh state per
+// pass, so both configurations share the open weights, the page cache and
+// whatever else this machine is doing at the time.
+//
+//   ./fkwu observe/qwen38-fold-ab-run.bml
+//
+// Each line: fold, the first token the span produces, GPU busy ms, wall
+// ms, dispatches. The tokens must agree pass for pass; the dispatch counts
+// are exact; the times carry this host's spread, read from the passes.
+//
+// Effectful: maps the 27 GB GGUF and drives the GPU. Do not preflight.
+// preludes: form/form-stdlib/form-cli-model-generate.fk form/form-stdlib/model-registry.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class Qwen38FoldAb {
+        def qfa-text(k, acc) = if le(k, 0) then acc else qfa-text(sub(k, 1), str_concat(acc, "The body keeps what it measures and lets go of what it only assumed. A floor is a number with its spread beside it, read again on a quiet machine. "));
+        def qfa-gpu() = mbw-status-int(metal_status(), "gpu_busy_us_total");
+        def qfa-disp() = mbw-status-int(metal_status(), "total_dispatch");
+        def qfa-pass(ctx, ids, fold, tag) {
+            let geo = nth(ctx, 2);
+            let sts = q38-new-state(geo);
+            let s0 = metal_sync();
+            let t0 = now_unix_ms();
+            let g0 = qfa-gpu();
+            let d0 = qfa-disp();
+            let r = q38-prefill-span-batched-f(nth(ctx, 0), nth(ctx, 1), geo, nth(ctx, 3), sts, nth(ctx, 4), nth(ctx, 5), nth(ctx, 6), ids, 0, fold);
+            let s1 = metal_sync();
+            let t1 = now_unix_ms();
+            let g1 = qfa-gpu();
+            let d1 = qfa-disp();
+            let freed = q38-free-state(sts);
+            let shown = print(list(tag, "fold", fold, "token", head(r), "gpu-ms", div(sub(g1, g0), 1000), "wall-ms", sub(t1, t0), "dispatches", sub(d1, d0)));
+            head(r);
+        }
+        def qfa-report() {
+            let path = mr-path(mr-find("qwen38-q8"));
+            let src = fcmg-src(path);
+            let ids = fcmg-chat-ids(src, qfa-text(6, ""));
+            let told = print(list("prompt-tokens", len(ids)));
+            // the batched walk holds every position of the span at once, so the
+            // scratch span is the whole prompt, never a guess at its length
+            let ctx = q38-open-span(path, add(len(ids), 64), add(len(ids), 64));
+            let opened = print(list("context-parts", len(ctx)));
+            let w0 = qfa-pass(ctx, ids, 0, "warm");
+            let w1 = qfa-pass(ctx, ids, 1, "warm");
+            let a1 = qfa-pass(ctx, ids, 0, "read");
+            let b1 = qfa-pass(ctx, ids, 1, "read");
+            let b2 = qfa-pass(ctx, ids, 1, "read");
+            let a2 = qfa-pass(ctx, ids, 0, "read");
+            let a3 = qfa-pass(ctx, ids, 0, "read");
+            let b3 = qfa-pass(ctx, ids, 1, "read");
+            let b4 = qfa-pass(ctx, ids, 1, "read");
+            let a4 = qfa-pass(ctx, ids, 0, "read");
+            let agree = and(eq(w0, w1), and(eq(a1, b1), and(eq(a2, b2), and(eq(a3, b3), eq(a4, b4)))));
+            let said = print(list("tokens-agree", agree));
+            1;
+        }
+    }
+    qfa-report();
+}

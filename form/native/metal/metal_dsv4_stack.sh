@@ -35,7 +35,7 @@
 # Run:  form/native/metal/metal_dsv4_stack.sh
 #   FORM_DS4_STACK_LAYERS=<n>     how many layers to stack (default: the file's block_count)
 #   FORM_DS4_PROMPT_TOKEN=<id>
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every Metal row in GPU_GAPS.md.
+# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form

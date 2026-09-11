@@ -46,6 +46,82 @@
 (defn jte-matvec-msl-fmt (fname fmt) (tir-matvec-msl-fmt fname fmt))
 (defn jte-matvec-msl (fname) (jte-matvec-msl-fmt fname "f32"))
 
+; ── TRANSPOSED matvec: y = W^T v, W row-major [rows x cols], v [rows], y [cols].
+;
+; A gaps table called this "the wall" and "nothing, for any quantisation or f32" — the thing
+; blocking dL/db for a writer-side adapter and dx through any frozen projection, so the whole
+; other half of a LoRA gradient. It was never attempted (corpus row 1422 walltest).
+;
+; It is not a hard kernel. It is the EASY direction on this hardware: one thread per output
+; column j, walking rows. Adjacent threads read w[i*cols + j] for adjacent j — consecutive
+; addresses in one row — so a threadgroup's loads coalesce, where the untransposed matvec has
+; each thread stride its own row alone. What made it look like a wall is that the layout reads
+; wrong to a person and right to the machine.
+;
+; The fold is ASCENDING (i = 0 upward, acc = acc + p), not the downward right-fold tb-dot and
+; jte-matvec carry. That is deliberate and it is why this has its own reference: a transposed
+; product has no shared history with the forward one, so it is exact against a Form fold written
+; in the same direction, and NOT bit-comparable to running the forward kernel on a transposed
+; copy. Naming the direction is the difference between an exact twin and a plausible one.
+(defn jte-matvec-t-sig (fname el ac)
+  (str_concat "kernel void "
+  (str_concat fname
+  (str_concat "(device const "
+  (str_concat el
+  (str_concat "* w [[buffer(0)]], device const "
+  (str_concat el
+  (str_concat "* v [[buffer(1)]], device "
+  (str_concat ac
+              "* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint j [[thread_position_in_grid]]) { ")))))))))
+
+(defn jte-matvec-t-body (el ac)
+  (str_concat "if (j >= cols) return; "
+  (str_concat ac
+  (str_concat " acc = 0.0f; uint i = 0; while (i < rows) { acc = acc + "
+  (str_concat ac
+  (str_concat "(w[i * cols + j]) * "
+  (str_concat ac
+              "(v[i]); i += 1; } y[j] = acc; }")))))))
+
+(defn jte-matvec-t-msl-spine (fname el ac) (str_concat (jte-matvec-t-sig fname el ac) (jte-matvec-t-body el ac)))
+(defn jte-matvec-t-msl-fmt (fname fmt) (jte-matvec-t-msl-spine fname (jte-msl-elem fmt) (jte-msl-acc fmt)))
+(defn jte-matvec-t-msl (fname) (jte-matvec-t-msl-fmt fname "f32"))
+
+; ── RANK-1 ACCUMULATE: M += alpha * (u x w), M row-major [rows x cols], u [rows], w [cols].
+;
+; The other brick that table marked absent — "outer product / rank-1 accumulate as a kernel:
+; exists as Form arithmetic; nothing on the device". With the transposed matvec beside it, a head
+; adapter's whole backward pass stands on this Mac's own metal: dL/ds from the loss, dL/da as
+; dL/ds . h, dL/db through W^T, and both updates as rank-1 accumulates into A and B.
+;
+; One thread per row, walking its columns, so no two threads ever touch one element of M — the
+; update is in place and needs no barrier and no second buffer. alpha arrives as a constant word:
+; md-bind writes consts as raw 32-bit, so the float's own bits pass through unharmed and the
+; kernel reads them back as a float. Nothing converts, so nothing rounds on the way in.
+(defn jte-outer-acc-sig (fname el ac)
+  (str_concat "kernel void "
+  (str_concat fname
+  (str_concat "(device "
+  (str_concat ac
+  (str_concat "* m [[buffer(0)]], device const "
+  (str_concat el
+  (str_concat "* u [[buffer(1)]], device const "
+  (str_concat el
+              "* w [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant float& alpha [[buffer(5)]], uint i [[thread_position_in_grid]]) { ")))))))))
+
+(defn jte-outer-acc-body (el ac)
+  (str_concat "if (i >= rows) return; "
+  (str_concat ac
+  (str_concat " ui = alpha * "
+  (str_concat ac
+  (str_concat "(u[i]); uint j = 0; while (j < cols) { m[i * cols + j] = m[i * cols + j] + ui * "
+  (str_concat ac
+              "(w[j]); j += 1; } }")))))))
+
+(defn jte-outer-acc-msl-spine (fname el ac) (str_concat (jte-outer-acc-sig fname el ac) (jte-outer-acc-body el ac)))
+(defn jte-outer-acc-msl-fmt (fname fmt) (jte-outer-acc-msl-spine fname (jte-msl-elem fmt) (jte-msl-acc fmt)))
+(defn jte-outer-acc-msl (fname) (jte-outer-acc-msl-fmt fname "f32"))
+
 ; --- affine-layer TRAINING-STEP kernel — RETIRED hand-spine; now the IR's tir-affine-train-msl-fmt ---
 ; One GPU thread per output row i of y = W·x + b: the forward dot (the IR's shared tir-dot-down), the
 ; SSE residual + per-row loss, the upstream grad g = 2(y_i - t_i), then the SGD update IN PLACE
@@ -82,8 +158,17 @@
 ;
 ; The transcendental is the recipe's OWN, not the hardware's: gelu/gelu' are composed here from fexp (the
 ; square-and-reduce 14-term Taylor of tn-exp) and ftanh ((e^2x-1)/(e^2x+1) of tn-tanh) — so the GPU walks
-; transformer-numerics.fk's approximation, not Metal's tanh(). Same algorithm as the fp32 CPU mirror, so the
-; parity gate is honest (metal_ffn_audit.sh): no hidden hardware intrinsic between the recipe and the silicon.
+; transformer-numerics.fk's approximation, not Metal's tanh(). Same algorithm as the fp32 CPU mirror: no hidden
+; hardware intrinsic sits between the recipe and the silicon.
+;
+; What the emitted text owes the compiler. A family here is a FRAGMENT that carries no header, on
+; purpose: the arithmetic is the body's and not the library's. So a metal-namespace name is written out
+; in full — threadgroup_barrier(metal::mem_flags::mem_device), which argument lookup then completes — and
+; `round` has exactly one home, jte-msl-round, prepended by jte-llama-helpers-floor; a second copy is a
+; repeated `static inline` that Metal rejects outright. Unqualified, eight families compiled nowhere while
+; every text band stayed green (corpus row 1414 saidsocompile). The gate is
+; form/form-stdlib/tests/msl-families-mint-band.fk; observe/msl-mint-run.fk shows each family whole,
+; unhealed with the compiler's own repair, or released.
 ;
 ; Threading without aliasing: each thread strides over hidden units (phases 1,3,5) or outputs (phases 2,4).
 ; The folds match the recipe — the two forward matvecs carry tb-dot's DOWNWARD right-fold; the dh1 column

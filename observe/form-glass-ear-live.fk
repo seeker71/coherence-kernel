@@ -70,7 +70,7 @@
 ; tail. Nothing in this loop forks now, on the give path or off it.
 ;
 ; preflight-exec: forbidden
-; preludes: form/form-stdlib/form-glass-sensor-rows.bml form/form-stdlib/ear-axes.bml form/form-stdlib/hearth.bml form/form-stdlib/spool-bell-transport.fk form/form-stdlib/line-grammar.fk form/form-stdlib/bml/ear-worker-life.bml
+; preludes: form/form-stdlib/form-glass-sensor-rows.bml form/form-stdlib/ear-axes.bml form/form-stdlib/hearth.bml form/form-stdlib/spool-bell-transport.fk form/form-stdlib/line-grammar.fk form/form-stdlib/bml/ear-worker-life.bml form/form-stdlib/born-under.bml
 
 (do
     (defn fge-spool () ".hearth/ear.spool")
@@ -116,7 +116,7 @@
     ; A refusal is not a pid. The door judges the argv and the three redirects before
     ; it forks, so a lane that cannot be born answers -1, -2, -3 or -4 and never looks
     ; alive for a patience. The number goes into the lane's own log, where ear.voice
-    ; reads it, and the sensor answers 0 so the next tick tries again.
+    ; reads it, and the sensor answers 0; the lanes stand again once fge-resting? lets them.
     (defn fge-say-refusal (pid log) (sbt-append log (ea-cat (list "refused at birth: " (int_to_str pid) (byte_to_str 10)))))
     (defn fge-born (pid log) (if (gt pid 0) pid (do (let s (fge-say-refusal pid log)) 0)))
     (defn fge-stand (pid cell log)
@@ -203,19 +203,33 @@
     ; a lane just stood: its clock starts now, and the standing is counted
     (defn fge-born-next (releasedLive born now) (if (le releasedLive 0) now born))
     (defn fge-stands-next (awake releasedLive stands) (if (and (eq awake 1) (le releasedLive 0)) (add stands 1) stands))
+    ; Lanes that ended without writing a frame are stood again once the birth patience has passed since
+    ; their standing, not at the next tick. A live lane whose Metal carrier cannot load ends at birth; while
+    ; host_alive took the unreaped pid for a living one, that death went unseen until the birth patience
+    ; ran out. Now that it is seen within a probe, standing at once would start a kernel every two seconds
+    ; to hear nothing. Lanes that spoke before they ended are stood again at once.
+    (defn fge-resting? (awake releasedLive stands born ft now)
+        (if (or (eq awake 0) (gt releasedLive 0)) 0
+            (if (or (eq stands 0) (gt ft born)) 0
+                (if (lt (sub now born) (fge-birth-patience)) 1 0))))
+    ; The carrier that started the ear is asked after at the watch's own cadence; once it is no longer the
+    ; ear's parent, the lanes go down and the ear ends (born-under.bml).
+    (defn fge-orphaned? (watch carrier)
+        (if (lt (sub (now_unix_ms) (fge-watch-at watch)) (fge-probe-ms)) 0 (if (eq (bun-held? carrier) 1) 0 1)))
 
-    (defn fge-step (mark live heard said ghost livePid tonguePid sense born stands watch owner transcripts)
-        (if (not (ewl-owned? owner)) (fge-lanes-down livePid tonguePid)
+    (defn fge-step (mark live heard said ghost livePid tonguePid sense born stands watch owner transcripts carrier)
+        (if (or (not (ewl-owned? owner)) (eq (fge-orphaned? watch carrier) 1)) (fge-lanes-down livePid tonguePid)
         (do (let awake (fge-awake?))
             (let now (now_unix_ms))
             (let w1 (fge-watch-next watch livePid tonguePid now))
             (let gone (fge-gone? awake livePid tonguePid live heard born now w1))
             (let closed (if (eq awake 1) (if (eq gone 1) (fge-close livePid) 0) (fge-close livePid)))
             (let released (fge-restand gone livePid tonguePid))
-            (let opened (if (eq awake 1) (fge-open (head released)) 0))
-            (let pids (fge-pids awake gone (head released) (nth released 1)))
-            (let born1 (fge-born-next (head released) born now))
-            (let stands1 (fge-stands-next awake (head released) stands))
+            (let resting (fge-resting? awake (head released) stands born (fge-frame-t live heard) now))
+            (let opened (if (and (eq awake 1) (eq resting 0)) (fge-open (head released)) 0))
+            (let pids (if (eq resting 1) released (fge-pids awake gone (head released) (nth released 1))))
+            (let born1 (if (eq resting 1) born (fge-born-next (head released) born now)))
+            (let stands1 (if (eq resting 1) stands (fge-stands-next awake (head released) stands)))
             (let lanes (ea-lanes (head pids) (nth pids 1) (sub now born1) stands1 (fge-watch-voice w1)))
             (let d (if (eq awake 1) (fge-drain mark live heard said ghost) (list mark live heard said ghost)))
             (let next (if (eq awake 1) (ea-sense-step sense (nth d 1) (nth d 2) (nth d 3) awake) sense))
@@ -223,9 +237,9 @@
             (let rows (if (eq awake 1) (append (fgo-observe-rows (ea-rows next (nth d 1) (nth d 2) (nth d 3) (fge-wanted-text) 1 now lanes (nth d 4)) now 0) (fgo-age-rows-at freshText now)) (fgo-observe-rows (ea-asleep-rows lanes) now 0)))
             (let given (fgsr-give "ear" now rows))
             (let rested (host_sleep_ms (if (eq awake 1) 100 500)))
-            (fge-step (head d) (nth d 1) (nth d 2) (nth d 3) (nth d 4) (head pids) (nth pids 1) next born1 stands1 w1 owner freshText))))
+            (fge-step (head d) (nth d 1) (nth d 2) (nth d 3) (nth d 4) (head pids) (nth pids 1) next born1 stands1 w1 owner freshText carrier))))
     ; the tables are walked once, here, before the first give
     (let owner (ewl-token (host_pid) (now_unix_ms)))
     (if (ewl-claim owner)
-        (fge-step 0 "" "" "" "" 0 0 (ea-sense-born) (now_unix_ms) 0 (fge-watch 0 "" "") owner (list))
+        (fge-step 0 "" "" "" "" 0 0 (ea-sense-born) (now_unix_ms) 0 (fge-watch 0 "" "") owner (list) (bun-parent))
         (print "ear owner lease could not be written")))

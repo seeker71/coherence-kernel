@@ -1,0 +1,54 @@
+//////////////////////////////////////////////////////////////////////
+//
+// qwen38-prefill-time-run.bml — one prefill, the lane's own default, timed.
+//
+// Opens Qwen3.8-27B-Q8_0 and prefills the same 577-token span the fold A/B
+// used (observe/qwen38-fold-ab-run.bml), through q38-prefill-span-batched —
+// whatever the lane's default is when this runs — once warm and three
+// times read, a fresh state each pass. Each line: the first token the span
+// produces, GPU busy ms, wall ms, dispatches.
+//
+//   ./fkwu observe/qwen38-prefill-time-run.bml
+//
+// Effectful: maps the 27 GB GGUF and drives the GPU. Do not preflight.
+// preludes: form/form-stdlib/form-cli-model-generate.fk form/form-stdlib/model-registry.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class Qwen38PrefillTime {
+        def qpt-text(k, acc) = if le(k, 0) then acc else qpt-text(sub(k, 1), str_concat(acc, "The body keeps what it measures and lets go of what it only assumed. A floor is a number with its spread beside it, read again on a quiet machine. "));
+        def qpt-gpu() = mbw-status-int(metal_status(), "gpu_busy_us_total");
+        def qpt-disp() = mbw-status-int(metal_status(), "total_dispatch");
+        def qpt-pass(ctx, ids, tag) {
+            let geo = nth(ctx, 2);
+            let sts = q38-new-state(geo);
+            let s0 = metal_sync();
+            let t0 = now_unix_ms();
+            let g0 = qpt-gpu();
+            let d0 = qpt-disp();
+            let r = q38-prefill-span-batched(nth(ctx, 0), nth(ctx, 1), geo, nth(ctx, 3), sts, nth(ctx, 4), nth(ctx, 5), nth(ctx, 6), ids, 0);
+            let s1 = metal_sync();
+            let t1 = now_unix_ms();
+            let g1 = qpt-gpu();
+            let d1 = qpt-disp();
+            let freed = q38-free-state(sts);
+            let shown = print(list(tag, "token", head(r), "gpu-ms", div(sub(g1, g0), 1000), "wall-ms", sub(t1, t0), "dispatches", sub(d1, d0)));
+            head(r);
+        }
+        def qpt-report() {
+            let path = mr-path(mr-find("qwen38-q8"));
+            let src = fcmg-src(path);
+            let ids = fcmg-chat-ids(src, qpt-text(6, ""));
+            let told = print(list("prompt-tokens", len(ids)));
+            let ctx = q38-open-span(path, add(len(ids), 64), add(len(ids), 64));
+            let w = qpt-pass(ctx, ids, "warm");
+            let a = qpt-pass(ctx, ids, "read");
+            let b = qpt-pass(ctx, ids, "read");
+            let c = qpt-pass(ctx, ids, "read");
+            let said = print(list("tokens-agree", and(eq(w, a), and(eq(a, b), eq(b, c)))));
+            1;
+        }
+    }
+    qpt-report();
+}

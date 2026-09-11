@@ -1,0 +1,115 @@
+//////////////////////////////////////////////////////////////////////
+//
+// qwen38-span-matmul-probe.bml — where a prefill's time goes: the batched
+// Q8_0 matmul, timed alone against the floor it could reach.
+//
+// Opens Qwen3.8-27B-Q8_0 and hands the lane's own batched matmul
+// (q38-mv-batch, the dispatch every span walker uses) one layer's three FFN
+// tensors at the length the fold A/B prefilled: one warm dispatch, three
+// timed, each its own command buffer, with the kernel's own answer checked
+// for having been written before any time is read.
+//
+//   ./fkwu observe/qwen38-span-matmul-probe.bml
+//
+// Each line: the tensor, its shape, GPU busy microseconds per dispatch,
+// the arithmetic rate it reached and the weight bytes it read per
+// microsecond — beside the 25.77 TFLOPS and 388.52 GB/s the floor lens read.
+//
+// Effectful: maps the 27 GB GGUF and drives the GPU. Do not preflight.
+// preludes: form/form-stdlib/form-cli-model-generate.fk form/form-stdlib/model-registry.bml form/form-stdlib/lora-adapter.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class Qwen38SpanMatmulProbe {
+        def qmp-gpu() = mbw-status-int(metal_status(), "gpu_busy_us_total");
+        def qmp-one(ps, tv, xh, yh, ntok) {
+            let s0 = metal_sync();
+            let g0 = qmp-gpu();
+            let e = q38-mv-batch(ps, tv, xh, yh, ntok, 0);
+            let s1 = metal_sync();
+            let d = sub(qmp-gpu(), g0);
+            if and(eq(e, 1), gt(s1, 0)) then d else 0;
+        }
+        // x is all ones, so every output is its row's weight sum: nonzero for a real tensor,
+        // and zero only if the kernel never ran
+        def qmp-ones(n, acc) = if le(n, 0) then acc else qmp-ones(sub(n, 1), str_concat(acc, md-le32(md-f32-bits(1.0))));
+        def qmp-fill(h, i, n, chunk) = if ge(i, n) then h else qmp-fill-step(h, i, n, chunk, metal_buf_write(h, mul(i, 4), chunk));
+        def qmp-fill-step(h, i, n, chunk, rc) = qmp-fill(h, add(i, 1024), n, chunk);
+        // the batched kernel the lane dispatched before the twin, by its own pipeline (31)
+        def qmp-old(ps, tv, xh, yh, ntok) {
+            let s0 = metal_sync();
+            let g0 = qmp-gpu();
+            let e = metal_enqueue(nth(ps, 31), md-bind16(list(kth-tv-h(tv), xh, yh), list(kth-tv-r(tv), kth-tv-c(tv), ntok, kth-tv-r(tv)), 256, 0, 0, 0), mul(mul(kth-tv-r(tv), qmb-ntile(ntok)), 32));
+            let s1 = metal_sync();
+            sub(qmp-gpu(), g0);
+        }
+        // x carries fractions of 13, so an order change would show in the bytes
+        def qmp-xs(n, i, acc) = if ge(i, n) then acc else qmp-xs(n, add(i, 1), str_concat(acc, md-le32(md-f32-bits(div(add(sub(mod(mul(i, 29), 97), 48), 0.0), 13.0)))));
+        def qmp-shape(ps, tv, name, ntok) {
+            let rows = kth-tv-r(tv);
+            let cols = kth-tv-c(tv);
+            let xh = qmp-fill(metal_buf_alloc(mul(4, mul(ntok, cols))), 0, mul(ntok, cols), qmp-xs(1024, 0, ""));
+            let yo = metal_buf_alloc(mul(4, mul(ntok, rows)));
+            let yn = metal_buf_alloc(mul(4, mul(ntok, rows)));
+            let o1 = qmp-old(ps, tv, xh, yo, ntok);
+            let w = qmp-one(ps, tv, xh, yn, ntok);
+            let same = if str_eq(metal_buf_read(yo, 0, mul(4, mul(ntok, rows))), metal_buf_read(yn, 0, mul(4, mul(ntok, rows)))) then 1 else 0;
+            let wrote = if str_eq(metal_buf_read(yn, 0, 4), md-le32(0)) then 0 else 1;
+            let o2 = qmp-old(ps, tv, xh, yo, ntok);
+            let t1 = qmp-one(ps, tv, xh, yn, ntok);
+            let o3 = qmp-old(ps, tv, xh, yo, ntok);
+            let t2 = qmp-one(ps, tv, xh, yn, ntok);
+            let us = div(add(t1, t2), 2);
+            let old = div(add(o2, o3), 2);
+            let flop = mul(2, mul(rows, mul(cols, ntok)));
+            let said = print(list(name, "rows", rows, "cols", cols, "tokens", ntok, "kernel-wrote", wrote, "bytes-same-as-batched", same, "batched-us", o2, o3, "twin-us", t1, t2, "twin-gflops", div(flop, add(mul(us, 1000), 1)), "batched-gflops", div(flop, add(mul(old, 1000), 1))));
+            us;
+        }
+        // the matrix-unit twin (qmb-q80-mma), minted on its own: it needs no helper but half
+        def qmp-mma-one(pm, tv, xh, yh, ntok) {
+            let s0 = metal_sync();
+            let g0 = qmp-gpu();
+            let e = metal_enqueue(pm, md-bind16(list(kth-tv-h(tv), xh, yh), list(kth-tv-r(tv), kth-tv-c(tv), ntok, kth-tv-r(tv)), 256, 0, 1, 0), qmb-mma-groups(kth-tv-r(tv), ntok));
+            let s1 = metal_sync();
+            if eq(e, 1) then sub(qmp-gpu(), g0) else 0;
+        }
+        def qmp-f(bytes, i) = ln-f32-decode(ln-u32-le(bytes, mul(4, i)));
+        def qmp-absf(v) = if lt(v, 0.0) then sub(0.0, v) else v;
+        // the largest difference between two outputs and the largest output, over the first n words
+        def qmp-gap(a, b, i, n, g, m) = if ge(i, n) then list(g, m) else qmp-gap(a, b, add(i, 1), n, if gt(qmp-absf(sub(qmp-f(a, i), qmp-f(b, i))), g) then qmp-absf(sub(qmp-f(a, i), qmp-f(b, i))) else g, if gt(qmp-absf(qmp-f(a, i)), m) then qmp-absf(qmp-f(a, i)) else m);
+        def qmp-mma(ps, pm, tv, name, ntok) {
+            let rows = kth-tv-r(tv);
+            let cols = kth-tv-c(tv);
+            let xh = qmp-fill(metal_buf_alloc(mul(4, mul(ntok, cols))), 0, mul(ntok, cols), qmp-xs(1024, 0, ""));
+            let yo = metal_buf_alloc(mul(4, mul(ntok, rows)));
+            let ym = metal_buf_alloc(mul(4, mul(ntok, rows)));
+            let o1 = qmp-old(ps, tv, xh, yo, ntok);
+            let w = qmp-mma-one(pm, tv, xh, ym, ntok);
+            let gap = qmp-gap(metal_buf_read(yo, 0, 400000), metal_buf_read(ym, 0, 400000), 0, 100000, 0.0, 0.0);
+            let m1 = qmp-mma-one(pm, tv, xh, ym, ntok);
+            let m2 = qmp-mma-one(pm, tv, xh, ym, ntok);
+            let o2 = qmp-old(ps, tv, xh, yo, ntok);
+            let us = div(add(m1, m2), 2);
+            let flop = mul(2, mul(rows, mul(cols, ntok)));
+            let said = print(list(name, "mma-us", m1, m2, "batched-us", o1, o2, "mma-gflops", div(flop, add(mul(us, 1000), 1)), "max-gap-first-100k", nth(gap, 0), "max-output", nth(gap, 1)));
+            us;
+        }
+        def qmp-report() {
+            let path = mr-path(mr-find("qwen38-q8"));
+            let ntok = 577;
+            let ctx = q38-open-span(path, add(ntok, 64), add(ntok, 64));
+            let ps = nth(ctx, 0);
+            let geo = nth(ctx, 2);
+            let lay = nth(nth(ctx, 3), 0);
+            let pm = metal_pipeline(str_concat("#include <metal_stdlib>\n", qmb-q80-mma()), "form_q8_0_matmul_mma_f32");
+            let g = qmp-mma(ps, pm, nth(lay, 2), "ffn_gate", ntok);
+            let u = qmp-mma(ps, pm, nth(lay, 3), "ffn_up", ntok);
+            let d = qmp-mma(ps, pm, nth(lay, 4), "ffn_down", ntok);
+            let layer = add(g, add(u, d));
+            let said = print(list("mma-ffn-per-layer-us", layer, "x-layers", nth(geo, 21), "mma-ffn-per-prefill-ms", div(mul(layer, nth(geo, 21)), 1000)));
+            1;
+        }
+    }
+    qmp-report();
+}

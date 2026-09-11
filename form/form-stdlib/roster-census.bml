@@ -1,0 +1,106 @@
+//////////////////////////////////////////////////////////////////////
+//
+// roster-census.bml — the body counts its own kernels the way the host
+// does, and names the ones its roster cannot see.
+//
+// Two counts that should be one. The host's: host_processes "fkwu", every
+// process named fkwu, read through libproc (no ps). The roster's:
+// kernel_live_pids, every kernel that holds a slot in /fg-kernels and whose
+// live page says alive. On 2026-09-11 Urs counted 14 fkwu processes while
+// the roster named 11 — three living glass organs had never landed in it.
+//
+//   untracked  host kernels the roster lacks: alive, and invisible to every
+//              organ that asks the roster
+//   stale      roster entries the host does not know as fkwu: a pid that
+//              still answers, but no longer belongs to a kernel
+//   orphans    kernels nobody waits for: parent pid 1, or a shell (form-run
+//              is /bin/sh) whose own parent is pid 1
+//   kernels    what each runs and for whom — (pid cell cwd exe owner
+//              owner-pid), read with host_process, no shell — and the
+//              cells more than one kernel runs
+//
+// The two reads are a moment apart, so a kernel that starts or ends between
+// them can show in one list and not the other; rce-settled takes the census
+// twice and keeps only what both reads agree on.
+//
+// preludes: form/form-stdlib/core.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class RosterCensus {
+        def rce-pids(rows) = if nil?(rows) then list() else cons(head(head(rows)), rce-pids(tail(rows)));
+        def rce-in?(x, xs) = if nil?(xs) then 0 else if eq(head(xs), x) then 1 else rce-in?(x, tail(xs));
+        def rce-minus(xs, ys) = if nil?(xs) then list() else if eq(rce-in?(head(xs), ys), 1) then rce-minus(tail(xs), ys) else cons(head(xs), rce-minus(tail(xs), ys));
+        def rce-both(xs, ys) = if nil?(xs) then list() else if eq(rce-in?(head(xs), ys), 1) then cons(head(xs), rce-both(tail(xs), ys)) else rce-both(tail(xs), ys);
+        def rce-host() = rce-pids(host_processes("fkwu"));
+        def rce-roster() = kernel_live_pids();
+        // a kernel whose parent is pid 1, or a shell whose own parent is pid 1, was left running by whoever
+        // started it: nobody waits for it and nobody will stop it. host_processes rows carry the parent pid sixth.
+        def rce-parent-in(pid, rows) = if nil?(rows) then 0 else if eq(head(head(rows)), pid) then nth(head(rows), 5) else rce-parent-in(pid, tail(rows));
+        def rce-unowned?(row, shells) = if eq(nth(row, 5), 1) then 1 else if eq(rce-parent-in(nth(row, 5), shells), 1) then 1 else 0;
+        def rce-orphans-with(rows, shells) = if nil?(rows) then list() else if eq(rce-unowned?(head(rows), shells), 1) then cons(head(head(rows)), rce-orphans-with(tail(rows), shells)) else rce-orphans-with(tail(rows), shells);
+        // the host names a shell by what runs, not by what was called: /bin/sh is bash on this Mac
+        // (/private/var/select/sh -> /bin/bash), so every name that link can point at is read
+        def rce-shells() = append(host_processes("sh"), append(host_processes("bash"), append(host_processes("zsh"), host_processes("dash"))));
+        def rce-orphans(rows) = rce-orphans-with(rows, rce-shells());
+        // what each kernel runs and for whom. host_process answers (pid ppid exe cwd argv), or -1 once the pid
+        // has ended. The cell is argv's last word (./fkwu CELL). The owner is the first ancestor that is neither
+        // a kernel, a shell nor login, named by its binary's last path segment; ("launchd" 1) when the chain
+        // ends at pid 1, ("gone" pid) when an ancestor ended while it was being read, ("unread" 0) when the host
+        // would not say an ancestor's parent — never read as pid 1.
+        def rce-slash-at(s, i, at) = if ge(i, str_len(s)) then at else if eq(str_byte_at(s, i), 47) then rce-slash-at(s, add(i, 1), i) else rce-slash-at(s, add(i, 1), at);
+        def rce-base(s) = substring(s, add(rce-slash-at(s, 0, sub(0, 1)), 1), str_len(s));
+        def rce-passes?(name) = if str_eq(name, "fkwu") then 1 else if str_eq(name, "sh") then 1 else if str_eq(name, "bash") then 1 else if str_eq(name, "zsh") then 1 else if str_eq(name, "dash") then 1 else if str_eq(name, "login") then 1 else 0;
+        def rce-owner-of(ppid, depth) = if eq(ppid, 1) then list("launchd", 1) else if le(ppid, 0) then list("unread", 0) else if le(depth, 0) then list("unwalked", ppid) else rce-owner-at(host_process(ppid), ppid, depth);
+        def rce-owner-at(row, ppid, depth) = if eq(row, sub(0, 1)) then list("gone", ppid) else if eq(rce-passes?(rce-base(nth(row, 2))), 1) then rce-owner-of(nth(row, 1), sub(depth, 1)) else list(rce-base(nth(row, 2)), ppid);
+        def rce-last(xs) = if nil?(tail(xs)) then head(xs) else rce-last(tail(xs));
+        def rce-cell(argv) = if lt(len(argv), 2) then "" else rce-last(argv);
+        // (pid cell cwd exe owner owner-pid), or an empty list when the pid has ended
+        def rce-kernel-of(row) = if eq(row, sub(0, 1)) then list() else rce-kernel-row(row, rce-owner-of(nth(row, 1), 8));
+        def rce-kernel-row(row, owner) = list(nth(row, 0), rce-cell(nth(row, 4)), nth(row, 3), nth(row, 2), nth(owner, 0), nth(owner, 1));
+        def rce-kernels-keep(k, rest) = if nil?(k) then rest else cons(k, rest);
+        def rce-kernels-of(pids) = if nil?(pids) then list() else rce-kernels-keep(rce-kernel-of(host_process(head(pids))), rce-kernels-of(tail(pids)));
+        def rce-kernels() = rce-kernels-of(rce-host());
+        // cells more than one kernel runs, as (cell n); a kernel whose words cannot be read has no cell and no twin
+        def rce-str-in?(s, xs) = if nil?(xs) then 0 else if str_eq(head(xs), s) then 1 else rce-str-in?(s, tail(xs));
+        def rce-cell-count(cell, ks) = if nil?(ks) then 0 else if str_eq(nth(head(ks), 1), cell) then add(1, rce-cell-count(cell, tail(ks))) else rce-cell-count(cell, tail(ks));
+        def rce-dups-walk(ks, all, seen) = if nil?(ks) then list() else rce-dups-step(nth(head(ks), 1), ks, all, seen);
+        def rce-dups-step(cell, ks, all, seen) = if eq(str_len(cell), 0) then rce-dups-walk(tail(ks), all, seen) else if eq(rce-str-in?(cell, seen), 1) then rce-dups-walk(tail(ks), all, seen) else if gt(rce-cell-count(cell, all), 1) then cons(list(cell, rce-cell-count(cell, all)), rce-dups-walk(tail(ks), all, cons(cell, seen))) else rce-dups-walk(tail(ks), all, cons(cell, seen));
+        def rce-duplicates(ks) = rce-dups-walk(ks, ks, list());
+        // untracked kernels whose page says alive are given a slot, so every organ that asks the roster
+        // sees them: the door's answers in order (1 adopted, 0 already held, -1 no page, -2 full)
+        def rce-adopt(pids) = if nil?(pids) then list() else cons(kernel_roster_adopt(head(pids)), rce-adopt(tail(pids)));
+        // a kernel's page ends with it. A page a kernel left standing (killed after its roster slot was gone,
+        // or ended by a binary from before exit buried its own) is read here and never unlinked: Urs asked to
+        // be asked first, so burial is an explicit kernel_page_bury pid, one pid at a time. kernel_page_bury
+        // with a negative pid only asks: 1 when that pid's kernel has ended and its page could be buried. Pids
+        // run below pid_max on Linux and below 100000 on macOS, walked in blocks of 100 so no walk recurses
+        // deeper than a block.
+        def rce-digits(s, i, n) = if ge(i, str_len(s)) then n else if lt(str_byte_at(s, i), 48) then n else if gt(str_byte_at(s, i), 57) then n else rce-digits(s, add(i, 1), add(mul(n, 10), sub(str_byte_at(s, i), 48)));
+        def rce-pid-bound-of(n) = if gt(n, 0) then n else 100000;
+        def rce-pid-bound-read(text) = if nothing?(text) then 100000 else rce-pid-bound-of(rce-digits(text, 0, 0));
+        def rce-pid-bound() = rce-pid-bound-read(read_file("/proc/sys/kernel/pid_max"));
+        def rce-keep-ended(pid, acc) = if eq(kernel_page_bury(sub(0, pid)), 1) then cons(pid, acc) else acc;
+        def rce-ended-span(pid, hi, acc) = if ge(pid, hi) then acc else rce-ended-span(add(pid, 1), hi, rce-keep-ended(pid, acc));
+        def rce-ended-from(lo, bound, acc) = if ge(lo, bound) then acc else rce-ended-from(add(lo, 100), bound, rce-ended-span(lo, add(lo, 100), acc));
+        // the pids whose kernel has ended with its page standing, read and never unlinked
+        def rce-ended() = rce-ended-from(1, rce-pid-bound(), list());
+        // (host-count roster-count untracked stale orphans), from one read of each
+        def rce-take() {
+            let rows = host_processes("fkwu");
+            let host = rce-pids(rows);
+            let roster = rce-roster();
+            list(len(host), len(roster), rce-minus(host, roster), rce-minus(roster, host), rce-orphans(rows));
+        }
+        // taken twice: only what is untracked, stale or orphaned in both reads is reported
+        def rce-settled(wait-ms) {
+            let a = rce-take();
+            let rest = host_sleep_ms(wait-ms);
+            let b = rce-take();
+            list(nth(b, 0), nth(b, 1), rce-both(nth(a, 2), nth(b, 2)), rce-both(nth(a, 3), nth(b, 3)), rce-both(nth(a, 4), nth(b, 4)));
+        }
+        0;
+    }
+    0;
+}

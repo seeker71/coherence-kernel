@@ -1,0 +1,67 @@
+//////////////////////////////////////////////////////////////////////
+// diffusion-msl.bml — conv2d and GroupNorm on this Mac's metal, as twins of conv2d.fk.
+//
+// The recipe stands four-way (conv2d-band 255). Before these twins no MSL this body emits
+// held a 2-D convolution — only the voice pass's 1-D conv.
+//
+// These are TWINS, not ports: every sum folds in the recipe's own order. The conv is three
+// nested right folds — in-channels (tb-dot), then the taps of one kernel row (cv-window-dot),
+// then the kernel rows (cv2d-window-dot) — each evaluated last-to-first as `acc = term + acc`,
+// with a padded tap entering as a real `w * 0.0` product, as the recipe's zero pixels do, and
+// the bias added after the patch. GroupNorm is a left-fold sum and a left-fold squared
+// deviation, both over a float count, then 1 / sqrt(var + eps) with tn-sqrt's own Newton —
+// fifty steps of g <- 0.5 * (g + q / g) from g = q — never Metal's own sqrt or rsqrt, whose
+// rounding the recipe cannot answer for.
+//
+// The carrier compiles with fp contraction on, so a multiply-add may fuse. The live band
+// feeds small integers, where every partial sum is exact and fusing changes nothing; on
+// general data the twins agree to float32 rounding, which is what fp contraction means.
+//
+// Fragments with no header, like every family jit-tensor-emit.fk writes: plain arithmetic
+// needs no metal:: name. vm-lines is voice-msl.bml's, used rather than copied.
+// preludes: form/form-stdlib/core.fk form/form-stdlib/voice-msl.bml
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormDiffusionMsl {
+        // one thread per output element (oh, ow, co), row-major like the recipe's grid
+        def dfm-conv2d() = vm-lines(list(
+            "kernel void diffusion_conv2d(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]], device const float* b [[buffer(2)]], device float* y [[buffer(3)]], constant uint& H [[buffer(4)]], constant uint& W [[buffer(5)]], constant uint& Cin [[buffer(6)]], constant uint& Cout [[buffer(7)]], constant uint& KH [[buffer(8)]], constant uint& KW [[buffer(9)]], constant uint& PAD [[buffer(10)]], constant uint& STRIDE [[buffer(11)]], constant uint& OH [[buffer(12)]], constant uint& OW [[buffer(13)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= OH * OW * Cout) return;",
+            "  uint co = gid % Cout; uint t = gid / Cout; uint ow = t % OW; uint oh = t / OW;",
+            "  float acc = 0.0f;",
+            "  for (int i = int(KH) - 1; i >= 0; i--) {",
+            "    float racc = 0.0f;",
+            "    for (int j = int(KW) - 1; j >= 0; j--) {",
+            "      int r = int(oh * STRIDE) + i - int(PAD); int c = int(ow * STRIDE) + j - int(PAD);",
+            "      bool inb = (r >= 0) && (r < int(H)) && (c >= 0) && (c < int(W));",
+            "      float pix = 0.0f;",
+            "      for (int k = int(Cin) - 1; k >= 0; k--) {",
+            "        float xv = 0.0f;",
+            "        if (inb) { xv = x[(uint(r) * W + uint(c)) * Cin + uint(k)]; }",
+            "        pix = w[((co * KH + uint(i)) * KW + uint(j)) * Cin + uint(k)] * xv + pix;",
+            "      }",
+            "      racc = pix + racc;",
+            "    }",
+            "    acc = racc + acc;",
+            "  }",
+            "  y[gid] = acc + b[co];",
+            "}"));
+        // one thread per group; a group is N/G consecutive vectors of length L, pooled
+        def dfm-groupnorm() = vm-lines(list(
+            "kernel void diffusion_groupnorm(device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant uint& N [[buffer(2)]], constant uint& L [[buffer(3)]], constant uint& G [[buffer(4)]], constant float& EPS [[buffer(5)]], uint g [[thread_position_in_grid]]) {",
+            "  if (g >= G) return;",
+            "  uint per = (N / G) * L; uint base = g * per; float n = float(per);",
+            "  float s = 0.0f; for (uint i = 0; i < per; i++) { s = s + x[base + i]; }",
+            "  float m = s / n;",
+            "  float v = 0.0f; for (uint i = 0; i < per; i++) { float d = x[base + i] - m; v = v + d * d; }",
+            "  v = v / n;",
+            "  float q = v + EPS; float r = 0.0f;",
+            "  if (q > 0.0f) { r = q; for (int it = 0; it < 50; it++) { r = 0.5f * (r + q / r); } }",
+            "  float inv = 1.0f / r;",
+            "  for (uint i = 0; i < per; i++) { y[base + i] = (x[base + i] - m) * inv; }",
+            "}"));
+        def dfm-names() = list("diffusion_conv2d", "diffusion_groupnorm");
+        0;
+    }
+    0;
+}
