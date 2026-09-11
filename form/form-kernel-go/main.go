@@ -643,6 +643,11 @@ func NewKernel() *Kernel {
 	return k
 }
 
+// resolveKernelHostPath answers where a host path names a file for a read-side door, the same way
+// on every kernel. A path that stands where the kernel runs names itself. Otherwise the walk tries
+// dir/p, dir/form/p and dir/form/form/p from the working directory upward and stops at the checkout
+// that holds it, the first directory with a .git entry, so one checkout never reads another's
+// files. Doors that create or change a file never walk: they name the path as given.
 func resolveKernelHostPath(path string) string {
 	if path == "" || filepath.IsAbs(path) {
 		return path
@@ -650,44 +655,29 @@ func resolveKernelHostPath(path string) string {
 	if _, err := os.Stat(path); err == nil {
 		return path
 	}
-	if directory, err := os.Getwd(); err == nil {
-		for {
-			for _, candidate := range []string{
-				filepath.Join(directory, path),
-				filepath.Join(directory, "form", path),
-				filepath.Join(directory, "form", "form", path),
-			} {
-				if _, statErr := os.Stat(candidate); statErr == nil {
-					return candidate
-				}
-			}
-			parent := filepath.Dir(directory)
-			if parent == directory {
-				break
-			}
-			directory = parent
-		}
+	directory, err := os.Getwd()
+	if err != nil {
+		return path
 	}
-	slashPath := filepath.ToSlash(path)
-	if slashPath == "form-stdlib" || strings.HasPrefix(slashPath, "form-stdlib/") {
-		// The working directory is the first authority: a caller standing
-		// inside the kernel tree already names the file correctly.
-		if _, err := os.Stat(filepath.FromSlash(slashPath)); err == nil {
+	for {
+		for _, candidate := range []string{
+			filepath.Join(directory, path),
+			filepath.Join(directory, "form", path),
+			filepath.Join(directory, "form", "form", path),
+		} {
+			if _, statErr := os.Stat(candidate); statErr == nil {
+				return candidate
+			}
+		}
+		if _, gitErr := os.Stat(filepath.Join(directory, ".git")); gitErr == nil {
 			return path
 		}
-		// From a host-repo root the kernel tree is nested (form/form/…);
-		// older flat checkouts and container images carry form/… directly.
-		root, err := findRepoRoot()
-		if err == nil {
-			for _, base := range []string{filepath.Join(root, "form", "form"), filepath.Join(root, "form")} {
-				candidate := filepath.Join(base, filepath.FromSlash(slashPath))
-				if _, statErr := os.Stat(candidate); statErr == nil {
-					return candidate
-				}
-			}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return path
 		}
+		directory = parent
 	}
-	return path
 }
 
 func sourceInventorySkipSet(v Value) map[string]bool {
@@ -2023,7 +2013,7 @@ func (k *Kernel) registerNatives() {
 		panic(argStr(args, 0))
 	})
 	k.registerNative("source_scan_file", catCall(), func(_ *Kernel, args []Value) Value {
-		body, err := os.ReadFile(argStr(args, 0))
+		body, err := os.ReadFile(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil {
 			panic(fmt.Sprintf("source_scan_file: %v", err))
 		}
@@ -3120,7 +3110,7 @@ func (k *Kernel) registerNatives() {
 	// serialize-recipe alone drops string indices, which break under
 	// fresh string tables on load. This format embeds the strings.
 	k.registerNative("write_form_binary", catCall(), func(k *Kernel, args []Value) Value {
-		path := resolveKernelHostPath(argStr(args, 0))
+		path := argStr(args, 0)
 		nid := args[1].AsNid()
 		bytes := serializeArtifact(k, nid)
 		if err := os.WriteFile(path, bytes, 0644); err != nil {
@@ -3217,7 +3207,7 @@ func (k *Kernel) registerNatives() {
 	// (fs_rename old new)     → 0 | -1
 	// (fs_list path)          → VList of entry-name strings | VNull
 	fsExistsNative := func(_ *Kernel, args []Value) Value {
-		if _, err := os.Stat(argStr(args, 0)); err != nil {
+		if _, err := os.Stat(resolveKernelHostPath(argStr(args, 0))); err != nil {
 			return Value{Kind: VInt, Int: 0}
 		}
 		return Value{Kind: VInt, Int: 1}
@@ -3225,7 +3215,7 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("host_path_exists", catCall(), fsExistsNative)
 	k.registerNative("fs_exists", catCall(), fsExistsNative)
 	fsIsDirNative := func(_ *Kernel, args []Value) Value {
-		info, err := os.Stat(argStr(args, 0))
+		info, err := os.Stat(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil || !info.IsDir() {
 			return Value{Kind: VInt, Int: 0}
 		}
@@ -3274,7 +3264,7 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("host_path_rename", catCall(), fsRenameNative)
 	k.registerNative("fs_rename", catCall(), fsRenameNative)
 	fsListNative := func(_ *Kernel, args []Value) Value {
-		entries, err := os.ReadDir(argStr(args, 0))
+		entries, err := os.ReadDir(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil {
 			return Value{Kind: VNull}
 		}

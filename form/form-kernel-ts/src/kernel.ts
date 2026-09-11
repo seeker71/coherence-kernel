@@ -1215,6 +1215,12 @@ export class Kernel {
   // identifier resolves to a NameID in the natives map.
   // -------------------------------------------------------------------------
 
+  // A read-side door's path, resolved the way every kernel resolves it (Host.resolveReadPath).
+  // Doors that create or change a file pass their path as given.
+  private hostReadPath(path: string): string {
+    return this.host.resolveReadPath?.(path) ?? path;
+  }
+
   private registerNative(name: string, category: NodeID, fn: NativeFn): void {
     const id = this.internName(name);
     this.natives.set(id, { name: id, category, fn });
@@ -1335,7 +1341,7 @@ export class Kernel {
       const read = this.host.readTextFile;
       if (read === undefined) throw new Error("source_scan_file: host carrier unavailable");
       return sourceNativeScanText(
-        read(argStr(args, 0)),
+        read(this.hostReadPath(argStr(args, 0))),
         sourceNativeLexiconFromValue(args[1]!),
       );
     });
@@ -2296,7 +2302,7 @@ export class Kernel {
       try {
         const read = this.host.readTextFile;
         if (read === undefined) return { kind: "null" };
-        return { kind: "str", str: read(argStr(args, 0)) };
+        return { kind: "str", str: read(this.hostReadPath(argStr(args, 0))) };
       } catch {
         return { kind: "null" };
       }
@@ -2308,7 +2314,7 @@ export class Kernel {
       try {
         const read = this.host.readBinaryFile;
         if (read === undefined) return { kind: "null" };
-        const buf = read(argStr(args, 0));
+        const buf = read(this.hostReadPath(argStr(args, 0)));
         const out: Value[] = new Array(buf.length);
         for (let i = 0; i < buf.length; i++) {
           out[i] = { kind: "int", int: buf[i]! };
@@ -2326,7 +2332,7 @@ export class Kernel {
       try {
         const inventory = this.host.sourceInventory;
         if (inventory === undefined) return { kind: "null" };
-        const root = argStr(args, 0);
+        const root = this.hostReadPath(argStr(args, 0));
         const suffix = argStr(args, 1);
         const skip = sourceInventorySkipSet(args[2] ?? { kind: "null" });
         const rows = inventory(root, suffix, skip).map((entry) =>
@@ -2520,7 +2526,7 @@ export class Kernel {
         if (read === undefined) return { kind: "null" };
         return {
           kind: "nodeid",
-          nodeid: deserializeRecipeArtifact(k, read(argStr(args, 0))),
+          nodeid: deserializeRecipeArtifact(k, read(this.hostReadPath(argStr(args, 0)))),
         };
       } catch {
         return { kind: "null" };
@@ -2540,7 +2546,7 @@ export class Kernel {
     const fileSizeNative = (_k: Kernel, args: Value[]): Value => {
       try {
         const fileSize = this.host.fileSize;
-        return { kind: "int", int: fileSize?.(argStr(args, 0)) ?? -1 };
+        return { kind: "int", int: fileSize?.(this.hostReadPath(argStr(args, 0))) ?? -1 };
       } catch {
         return { kind: "int", int: -1 };
       }
@@ -2553,7 +2559,7 @@ export class Kernel {
     const fileMtimeNative = (_k: Kernel, args: Value[]): Value => {
       try {
         const fileMtime = this.host.fileMtimeSeconds;
-        return { kind: "int", int: fileMtime?.(argStr(args, 0)) ?? -1 };
+        return { kind: "int", int: fileMtime?.(this.hostReadPath(argStr(args, 0))) ?? -1 };
       } catch {
         return { kind: "int", int: -1 };
       }
@@ -2566,7 +2572,7 @@ export class Kernel {
       try {
         const read = this.host.readBinarySlice;
         if (read === undefined) return { kind: "int", int: -1 };
-        const bytes = read(argStr(args, 0), offset, 1);
+        const bytes = read(this.hostReadPath(argStr(args, 0)), offset, 1);
         return { kind: "int", int: bytes.length === 1 ? bytes[0]! : -1 };
       } catch {
         return { kind: "int", int: -1 };
@@ -2580,7 +2586,7 @@ export class Kernel {
       try {
         const read = this.host.readBinarySlice;
         if (read === undefined) return { kind: "str", str: "" };
-        bytes = read(argStr(args, 0), offset, length);
+        bytes = read(this.hostReadPath(argStr(args, 0)), offset, length);
       } catch {
         return { kind: "str", str: "" };
       }
@@ -2613,7 +2619,7 @@ export class Kernel {
       try {
         return {
           kind: "int",
-          int: this.host.pathExists?.(argStr(args, 0)) === true ? 1 : 0,
+          int: this.host.pathExists?.(this.hostReadPath(argStr(args, 0))) === true ? 1 : 0,
         };
       } catch {
         return { kind: "int", int: 0 };
@@ -2625,7 +2631,7 @@ export class Kernel {
       try {
         return {
           kind: "int",
-          int: this.host.pathIsDirectory?.(argStr(args, 0)) === true ? 1 : 0,
+          int: this.host.pathIsDirectory?.(this.hostReadPath(argStr(args, 0))) === true ? 1 : 0,
         };
       } catch {
         return { kind: "int", int: 0 };
@@ -2693,7 +2699,7 @@ export class Kernel {
         // name-sorted; Rust/Node are OS-arbitrary).
         const list = this.host.listDirectory;
         if (list === undefined) return { kind: "null" };
-        const names = [...list(argStr(args, 0))].sort();
+        const names = [...list(this.hostReadPath(argStr(args, 0)))].sort();
         return { kind: "list", list: names.map((n) => ({ kind: "str", str: n }) as Value) };
       } catch {
         return { kind: "null" };
