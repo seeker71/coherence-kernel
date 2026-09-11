@@ -4,12 +4,13 @@
 section [form.bml] {
  class FormCliCodeLive {
   field CodeProgressQuantum = 4;
+  def fcac-retained(state) = if fcam-managed(state) then ";checkpoint-retained" else ";candidate-retained-in-result";
   def fcac-sample(s, session, started) = fcac-metric(s, "tools", fcap-calls(s), started);
   def fcac-metric(s, lane, value, started) = fgtm-sample(str_concat(str_concat("code.", int_to_str(host_pid())), str_concat(".", lane)), fgtm-absent(), "metric", "form", "qwen.coding", lane, fcap-stage(s), fgtm-absent(), fgtm-present(value), if fcap-done(s) then if str_eq(fcap-stage(s), "complete") then "ready" else "unknown" else "active", fgtm-present(started), fgtm-present(now_unix_ms()), fgtm-absent(), fgtm-absent(), "pinned", "physical-live", "form-cli-code", list("qwen", "coding", "native", fcap-stage(s)));
   def fcac-observe(s, session, started) {
    let publish = fgtm-publish-snapshot(hearth-telemetry-root(), str_concat("qwen.coding.", int_to_str(host_pid())), now_unix_ms(), list(fcac-sample(s, session, started), fcac-metric(s, "generated-ids", fcms-generated-ids(session), started), fcac-metric(s, "repairs", fcap-failures(s), started), fcac-metric(s, "checks", fcap-checks(s), started), fcac-metric(s, "lessons-recalled", fcam-hits(s), started)));
    let frame = fb_record(intern_trivial_int(fcap-turns(s)), "form-cli-code-live.bml", fcap-calls(s));
-   print_str(str_concat("form-code ", json-emit(json-node-object(list(json-node-pair("stage", json-node-string(fcap-stage(s))), json-node-pair("turns", json-node-int(fcap-turns(s))), json-node-pair("tool_calls", json-node-int(fcap-calls(s))), json-node-pair("repairs", json-node-int(fcap-failures(s))), json-node-pair("checks", json-node-int(fcap-checks(s))), json-node-pair("generated_ids", json-node-int(fcms-generated-ids(session))), json-node-pair("injected_ids", json-node-int(fcms-injected-ids(session))), json-node-pair("position", json-node-int(fcms-pos(session))), json-node-pair("elapsed_ms", json-node-int(sub(now_unix_ms(), started))))))));
+   print_str(str_concat("form-code ", json-emit(json-node-object(list(json-node-pair("mode", json-node-string(fcap-mode(s))), json-node-pair("stage", json-node-string(fcap-stage(s))), json-node-pair("turns", json-node-int(fcap-turns(s))), json-node-pair("tool_calls", json-node-int(fcap-calls(s))), json-node-pair("repairs", json-node-int(fcap-failures(s))), json-node-pair("checks", json-node-int(fcap-checks(s))), json-node-pair("generated_ids", json-node-int(fcms-generated-ids(session))), json-node-pair("injected_ids", json-node-int(fcms-injected-ids(session))), json-node-pair("position", json-node-int(fcms-pos(session))), json-node-pair("elapsed_ms", json-node-int(sub(now_unix_ms(), started))))))));
    print_str("\n");
   }
   def fcac-open(model, state, context) = fcms-open-with-profile(mr-path(mr-find(model)), fcap-bootstrap(state), context, "knowledge-query");
@@ -20,6 +21,9 @@ section [form.bml] {
   // checker = [native callback, caller contract]. The callback receives that
   // contract and candidate documents, returning [passed, actual observation].
   def fcac-run(model, goal, docs, writable, checker, context, turns) = if not(and(fat-docs-valid(docs, list()), and(gt(str_len(goal), 0), and(gt(context, 0), gt(turns, 0))))) then list(fcap-terminal(fcap-open(goal, docs, writable), "invalid-caller-contract"), 1, 0, 0, 0) else fcac-admit(model, fcap-open(goal, docs, writable), checker, context, turns);
+  // Fresh, unmanaged review: no recalled answers, checkpoint writes or LoRA.
+  // checker is [report callback, contract, optional source callback, contract].
+  def fcac-review(model, goal, docs, checker, context, turns) = if not(and(fat-docs-valid(docs, list()), and(gt(str_len(goal), 0), and(gt(context, 0), gt(turns, 0))))) then list(fcap-terminal(fcap-open-review(goal, docs), "invalid-caller-contract"), 1, 0, 0, 0) else fcac-admit(model, fcap-open-review(goal, docs), checker, context, turns);
   def fcac-admit(model, state, checker, context, turns) = if fcap-done(state) then list(state, 1, 0, 0, 0) else if not(fcac-model-ready(model)) then list(fcap-terminal(state, "native-qwen-artifact-seal-tokenizer-or-lane-unavailable"), 1, 0, 0, 0) else fcac-open-timed(model, state, checker, context, turns, now_unix_ms());
   def fcac-open-timed(model, state, checker, context, turns, started) = fcac-resident(fcac-open(model, state, context), state, checker, turns, started);
   def fcac-resident(session, state, checker, turns, started) {
@@ -36,7 +40,7 @@ section [form.bml] {
   def fcac-loop(session, state, checker, turns, started) {
    let saved = fcam-save(state);
    let observed = fcac-observe(state, session, started);
-   if not(saved) then fcac-finish(session, fcap-terminal(state, "checkpoint-write-refused;candidate-retained"), started) else if fcap-done(state) then list(session, state) else if not(fcms-live?(session)) then fcac-finish(session, fcap-terminal(state, fcms-reason(session)), started) else if ge(fcap-turns(state), turns) then fcac-finish(session, fcap-terminal(state, "caller-turn-budget-reached;checkpoint-retained"), started) else if ge(fcms-pos(session), sub(fcms-maxpos(session), 1)) then fcac-finish(session, fcap-terminal(state, "context-capacity;checkpoint-retained"), started) else fcac-generated(fcac-decode(session, state, started, fcacs-stops(session, qsx-load(fcms-path(session))), list()), state, checker, turns, started);
+   if not(saved) then fcac-finish(session, fcap-terminal(state, "checkpoint-write-refused;candidate-retained"), started) else if fcap-done(state) then list(session, state) else if not(fcms-live?(session)) then fcac-finish(session, fcap-terminal(state, fcms-reason(session)), started) else if ge(fcap-turns(state), turns) then fcac-finish(session, fcap-terminal(state, str_concat("caller-turn-budget-reached", fcac-retained(state))), started) else if ge(fcms-pos(session), sub(fcms-maxpos(session), 1)) then fcac-finish(session, fcap-terminal(state, str_concat("context-capacity", fcac-retained(state))), started) else fcac-generated(fcac-decode(session, state, started, fcacs-stops(session, qsx-load(fcms-path(session))), list()), state, checker, turns, started);
   }
   def fcac-finish(session, state, started) {
    let observed = fcac-observe(state, session, started);

@@ -1,7 +1,8 @@
 # Qwen coding inside Form
 
 `code` first offers an evaluated session LoRA a document proposal, unless the
-caller explicitly selects a model or sets `evaluation: 1`. The original caller
+caller explicitly selects a model, sets `evaluation: 1`, or requests
+`mode: "review"`. The original caller
 checks decide whether that proposal suffices. Otherwise it gives local Qwen one
 native session for prompt refinement, planning,
 ordered task splitting, implementation, review, and verification. Generated token
@@ -27,6 +28,29 @@ owns loading files, publication, stale-file checks, and repository landing. This
 first door therefore does not claim autonomous arbitrary-repository completion.
 Multiple supplied documents and multiple ordered tasks are supported. Only paths
 in `writable` can change, and only during implementation.
+
+### Read-only review
+
+Set `"mode":"review"`, keep `writable` empty, and supply both source `checks`
+and `report_checks`. The result carries a separate nonempty `report` string;
+every source document must remain byte-identical. A review never needs a dummy
+edit or writable report file. For example:
+
+```json
+{"mode":"review","evaluation":1,"goal":"Inspect config.json without changing it. Use verify once. Return a report string containing a JSON object with enabled, provider and remote copied accurately from the source.","documents":[{"id":"config","path":"config.json","text":"{\"enabled\":false,\"provider\":\"native-qwen\",\"remote\":true}\n"}],"writable":[],"checks":[{"tool":"jq","arguments":[".enabled","config.json"],"stdout":"false\n"},{"tool":"jq","arguments":[".remote","config.json"],"stdout":"true\n"}],"report_checks":[{"tool":"jq","arguments":[".enabled"],"stdout":"false\n"},{"tool":"jq","arguments":["-r",".provider"],"stdout":"native-qwen\n"},{"tool":"jq","arguments":[".remote"],"stdout":"true\n"}],"model":"qwen38-q8","context":8192,"turns":32}
+```
+
+`report_checks` use the existing read-only native tool assertions. Each receives
+the returned report as stdin with **no document access**; an `input` field is
+refused rather than silently replacing the report. Exit zero, empty diagnostics
+and exact stdout are required. These checks establish only their assertions;
+extracting configuration fields is not a benchmark of code-review quality.
+
+The final review-role reply is
+`{"verdict":"accept","report":"evidence-backed findings"}`. Here `accept`
+submits the report for checking; it does not declare that the audited source
+passed. Negative findings belong in the report. `reject` with a `reason` means
+continue inspection. Read-only restrictions apply in every role, including repair.
 
 `model` defaults to `qwen38-q8`, `context` to 8192 positions, and `turns` to 64
 model replies. Both Qwen registry rows require actual artifacts, seals, tokenizer
@@ -54,6 +78,7 @@ Other examples:
 ```json
 {"tool":"read","arguments":["config.json"]}
 {"tool":"jq","arguments":[".enabled","config.json"]}
+{"tool":"verify","arguments":[]}
 {"tool":"edit","arguments":["config.json","\"enabled\":false","\"enabled\":true"]}
 {"tool":"write","arguments":["notes.md"],"input":"New document bytes\n"}
 ```
@@ -63,6 +88,10 @@ The full existing native tool set is reused: `rg`, `jq`, `read`, `cat`, `head`,
 existing supported subsets and error behavior remain unchanged. An unavailable
 tool or invalid edit becomes a tool observation, not a shell fallback. Malformed
 model responses receive a correlated native revise action and a format reminder.
+The coding-loop `verify` tool invokes the caller's existing source checks in
+any role. It accepts an empty argument array and no input; the model cannot
+provide a program, command, path or replacement checker. Its actual outcome
+enters the same tool observation and repair loop. Report checks run on submission.
 
 Repair is an active role, not a stopped job. A native tool error, review finding,
 or failed check enters repair. Read-only inspection stays available; its output
@@ -102,7 +131,14 @@ JSON request also contributes to the private native session learner: verified
 documents teach the caller contract, and unsuccessful requests teach observed
 status only. `session_learning_example` and `session_learning_worker` identify
 that work; `session status` distinguishes queued, failed, learned and promoted.
-`evaluation: 1` excludes session weight training and learned-model admission.
+`evaluation: 1` starts a fresh run **before continuity lookup**: no recalled
+repair notes, checkpoint resume/write, session LoRA proposal or weight training.
+Combining it with a nonempty `resume` is refused. Assessment experience may still
+be retained privately, excluded from gradients. This does not make a previously
+seen task an unseen test or remove knowledge already present in the base model.
+Review reports, including ordinary non-evaluation reviews, are retained only as
+assessment experience, never as verified implementation targets. Ordinary review
+checkpoints retain their report and mode; resume reruns the report-aware checker.
 
 Three identical native tool/argument/result observations with unchanged
 documents select repair and require replanning. A single `rg` miss is still a
@@ -128,8 +164,10 @@ without admitting a model or publishing live telemetry.
 
 ## What a successful result proves
 
-Completion requires an actual document change and all caller-owned checks
-passing. The Qwen path also completes its task/review loop; the earlier session
+Coding completion requires an actual document change and all caller-owned checks
+passing. Read-only review completion instead requires unchanged documents and a
+nonempty report passing the caller's source and report checks.
+The Qwen path also completes its task/review loop; the earlier session
 LoRA proposal is checked directly. Checks require exit zero, empty diagnostic
 text, and exact stdout. The JSON door supports **read-only native tool assertions**
 and executable arithmetic checks through the existing native definition grammar.
@@ -167,6 +205,24 @@ The callback receives `(immutable-contract, candidate-documents)` and returns
 that callback or its contract. A caller claiming native-only behavior must keep
 its callback native too. No generic shell test runner is implicitly provided.
 
+An embedding cell can run a fresh read-only review with:
+
+```text
+fcac-review(model, goal, documents,
+            list(report-checker, report-contract, source-checker, source-contract),
+            context, turns)
+```
+
+`report-checker` receives `(report-contract, list(original-documents, report))`
+and returns `list(0-or-1, actual-observation-string)`. The optional last two
+checker elements bind `verify` to a native source-only callback, which receives
+`(source-contract, original-documents)`. Without them, `verify` reports its
+absence; submission still runs the report checker. This lower-level door does
+not recall lessons, write checkpoints or offer training examples. The JSON door
+provides ordinary continuity unless `evaluation` is 1. Neither door grants an
+arbitrary filesystem or compiler surface: richer native tests belong to the
+caller-bound callback.
+
 Review currently shares the same Qwen and context: **not independent-model
 validation**. Qwen weights remain unchanged; the shared native Llama adapter
 learns asynchronously from observed outcomes. The loop does not assert rented-model
@@ -178,17 +234,20 @@ Each movement publishes a fresh `qwen.coding.<pid>` Glass snapshot with the
 current role, actual native tool-call count, cumulative generated-ID count,
 repair attempts and caller-check runs. Check runs count whole callback calls,
 not individual assertions. A failed check remains counted after a later pass.
-Generation refreshes these counts every 32 IDs, preserving the pending ID
+Generation refreshes these counts every four IDs, preserving the pending ID
 exactly once and decoding the complete reply only after generation ends.
 Terminal metadata adds injected IDs, position and elapsed milliseconds.
 Prompt, response and source content stay out of the diagnostic framebuffer.
-The JSON result carries candidate document content back to its caller.
+The JSON result carries candidate document content and, for review, the report
+back to its caller. Rechecks on recall/resume count as actual checker calls.
 
 Regression doors (preflight each FK band first):
 
 ```text
 form/form-stdlib/tests/form-cli-code-policy-band.fk   -> 65535
 form/form-stdlib/tests/form-cli-code-request-band.fk  -> 255
+form/form-stdlib/tests/form-cli-code-memory-band.fk -> 65535
+form/form-stdlib/tests/native-session-code-band.fk -> 511
 form/form-stdlib/tests/form-cli-code-session-band.fk  -> 31
 form/form-stdlib/tests/form-cli-code-telemetry-band.fk -> 7
 form/form-stdlib/tests/form-cli-code-definition-band.fk -> 127
@@ -199,6 +258,11 @@ form/form-stdlib/tests/form-cli-agent-tool-wire-band.fk -> 131071
 form/form-stdlib/tests/form-cli-agent-tools-examples-band.fk -> 32767
 form/form-stdlib/tests/qwen38-sliced-head-band.fk -> 7
 ```
+
+The existing policy, request, memory and session-code bands also contain
+fail-fast review guards: immutable sources, report-aware checking, caller-bound
+verification, report checkpoint round trips, fresh evaluation before recall,
+and exclusion of review reports from supervised implementation examples.
 
 For an explicit real-model recovery exercise, run
 `form-run ./fkwu observe/form-cli-code-retry-witness.fk` and send `qwen38-q8`
@@ -237,6 +301,14 @@ Live local Qwen observations on 2026-09-09:
 
 Both runs recovered from a first reply that did not satisfy the refinement
 contract. These are observed small tasks, not a held-out coding benchmark.
+
+On 2026-09-11 the read-only JSON example above completed with real local Qwen:
+8 replies, 2 native calls (read and caller-bound verification), 2 check stages,
+249 generated IDs, 643 injected IDs, no repairs or recalled lessons, and verified
+model release. The source remained unchanged and all three returned report
+fields passed. Total admission-to-release time was 287,493 ms under other local
+workload. Its assessment record is excluded from training. This is a small
+functionality witness, not an unseen review benchmark or latency guarantee.
 
 ## What we learned from open-source agents
 
