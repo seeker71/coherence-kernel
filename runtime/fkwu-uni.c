@@ -16067,33 +16067,6 @@ static int fk_reserved_head(long long s, long long n) {
     }
     return 0;
 }
-/* The names where a PARAMETER of that spelling makes fkwu and form-kernel-go answer
- * the same source differently. This list is MEASURED, not reasoned: all 169 op-table
- * and rewrite-table names plus the four control forms were each put in a defn's
- * parameter list and run on both kernels (2026-07-22). 155 agreed — including `len`,
- * which core.fk's own fstr-to-int-loop has taken as a parameter since before this
- * check existed, and which is therefore NOT a defect. These 18 diverged: Go's reader
- * treats them structurally and drops them from the parameter list, so `(defn f (sub x)
- * ..)` is arity 2 here and arity 1 there. Reasoning from "it is in the op table" would
- * have condemned core.fk on the strength of an argument the oracle refutes. If an op
- * row is added, re-run the probe rather than guessing where it belongs.
- *
- * And it only diverges in the FIRST parameter position. Probed again after the first
- * narrowing, the check still condemned shell-exec.fk's `(defn sh-contains? (s sub) ..)`,
- * which bin-go runs correctly: Go's reader reads the parameter list's own head
- * structurally, so `(sub zz)` collapses and `(zz sub)` does not. All 18 names were
- * re-run in first and second position; every one diverges first and agrees second. So
- * the caller carries the position (`na == 0`). Twice now a reasoned generalization was
- * wider than the measured fact, and both times a real cell in this body was the one
- * that said so. */
-static int fk_divergent_param_name(long long s, long long n) {
-    return fk_sym_eq(s, n, "add") || fk_sym_eq(s, n, "sub") || fk_sym_eq(s, n, "mul") ||
-           fk_sym_eq(s, n, "div") || fk_sym_eq(s, n, "mod") || fk_sym_eq(s, n, "and") ||
-           fk_sym_eq(s, n, "or") || fk_sym_eq(s, n, "not") || fk_sym_eq(s, n, "eq") ||
-           fk_sym_eq(s, n, "lt") || fk_sym_eq(s, n, "le") || fk_sym_eq(s, n, "gt") ||
-           fk_sym_eq(s, n, "ge") || fk_sym_eq(s, n, "list") || fk_sym_eq(s, n, "defn") ||
-           fk_sym_eq(s, n, "do") || fk_sym_eq(s, n, "let") || fk_sym_eq(s, n, "if");
-}
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3) {
     long long k = fk_node_count;
     fk_node_count = fk_node_count + 1;
@@ -16509,15 +16482,6 @@ static long long fk_sparse(void) {
                 }
                 long long as2 = fk_spos;
                 fk_spos = fk_sym_end(fk_spos);
-                if (na == 0 && fk_spos > as2 && fk_divergent_param_name(as2, fk_spos - as2)) {
-                    fk_diag(FK_DIAG_ERR, as2,
-                            "[shadowed-primitive] parameter '%.*s' names a primitive/control form -- "
-                            "in call position the primitive still wins, so the parameter is reachable "
-                            "in value position only, and form-kernel-go drops it from the parameter "
-                            "list entirely (arity divergence). Rename the parameter",
-                            (int)(fk_spos - as2), fk_srctext + as2);
-                    fk_src_unrunnable = 1;
-                }
                 fk_bd_push(as2, fk_spos - as2, na);
                 if (na > fk_maxslot) {
                     fk_maxslot = na;
@@ -17328,16 +17292,6 @@ static long long fk_parse_do(void) {
                 }
                 long long das = fk_spos;
                 fk_spos = fk_sym_end(fk_spos);
-                if (dna == 0 && fk_spos > das && fk_divergent_param_name(das, fk_spos - das)) {
-                    fk_diag(FK_DIAG_ERR, das,
-                            "[shadowed-primitive] parameter '%.*s' names a primitive/control "
-                            "form -- in call position the primitive still wins, so the "
-                            "parameter is reachable in value position only, and "
-                            "form-kernel-go drops it from the parameter list entirely "
-                            "(arity divergence). Rename the parameter",
-                            (int)(fk_spos - das), fk_srctext + das);
-                    fk_src_unrunnable = 1;
-                }
                 fk_bd_push(das, fk_spos - das, dna);
                 if (dna > fk_maxslot) {
                     fk_maxslot = dna;
@@ -17803,15 +17757,6 @@ static void fk_parse_top(void) {
                 }
                 long long as = fk_spos;
                 fk_spos = fk_sym_end(fk_spos);
-                if (na == 0 && fk_spos > as && fk_divergent_param_name(as, fk_spos - as)) {
-                    fk_diag(FK_DIAG_ERR, as,
-                            "[shadowed-primitive] parameter '%.*s' names a primitive/control form "
-                            "-- in call position the primitive still wins, so the parameter is "
-                            "reachable in value position only, and form-kernel-go drops it from "
-                            "the parameter list entirely (arity divergence). Rename the parameter",
-                            (int)(fk_spos - as), fk_srctext + as);
-                    fk_src_unrunnable = 1;
-                }
                 fk_bd_push(as, fk_spos - as, na);
                 if (na > fk_maxslot) {
                     fk_maxslot = na;
@@ -20220,7 +20165,7 @@ static void fk_src_reset_compile_state(void) {
  * in this body is one `(do ...)` form, so a single missing character anywhere in a band file
  * yields a plausible verdict that reads green (Stone 41 watched one return 1023 that way, and
  * the FK_SOURCE_TEXT_CAP_INIT comment above records the same family biting once before as the
- * "N=100 cliff"). It needs no unusual naming -- unlike [unbound-name] or [shadowed-primitive]
+ * "N=100 cliff"). It needs no unusual naming -- unlike [unbound-name]
  * it is reachable by a typo.
  *
  * fk_src_truncated was declared for precisely this and was never set by anything: a gate that

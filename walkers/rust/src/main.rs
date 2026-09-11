@@ -671,7 +671,13 @@ fn read_sexp(toks: &[SexpTok], i: usize) -> (Rc<Node>, usize) {
                     j += 1;
                     break;
                 }
-                let (arg, nj) = read_sexp(toks, j);
+                // A defn's parameter list holds names, not an expression: read as one, its
+                // first name became the list's verb and `(params tok i)` lost a parameter.
+                let (arg, nj) = if verb == "defn" && args.len() == 1 && toks[j].kind == "LPAREN" {
+                    read_defn_params(toks, j)
+                } else {
+                    read_sexp(toks, j)
+                };
                 args.push(arg);
                 j = nj;
             }
@@ -681,6 +687,34 @@ fn read_sexp(toks: &[SexpTok], i: usize) -> (Rc<Node>, usize) {
             "parse error at line {} col {}: unexpected token {} {:?}",
             t.line, t.col, t.kind, t.value
         ),
+    }
+}
+
+// read_defn_params — a defn's `(name name ...)` parameter list, read as names only, into
+// the Block the defn arm takes; `()` reads as an empty Block.
+fn read_defn_params(toks: &[SexpTok], i: usize) -> (Rc<Node>, usize) {
+    let (open_line, open_col) = (toks[i].line, toks[i].col);
+    let mut j = i + 1;
+    let mut names = Vec::new();
+    loop {
+        if j >= toks.len() {
+            panic!(
+                "parse error: unclosed defn parameter list opened at line {} col {} (reached end of input)",
+                open_line, open_col
+            );
+        }
+        let t = &toks[j];
+        if t.kind == "RPAREN" {
+            return (Rc::new(Node::Block(names)), j + 1);
+        }
+        if t.kind != "IDENT" {
+            panic!(
+                "parse error at line {} col {}: defn parameter list opened at line {} col {} holds names only, got {} {:?}",
+                t.line, t.col, open_line, open_col, t.kind, t.value
+            );
+        }
+        names.push(Rc::new(Node::Ident(t.value.clone())));
+        j += 1;
     }
 }
 
@@ -721,22 +755,12 @@ fn build_verb(verb: &str, args: Vec<Rc<Node>>) -> Rc<Node> {
         "or" => Rc::new(Node::Logic(LOG_OR, args)),
         "not" => Rc::new(Node::Logic(LOG_NOT, args)),
         "defn" => {
-            // (defn <name> (<params>...) <body>). The params form `(a b c)` is
-            // itself a parenthesized s-expr, so the full kernel reads it through
-            // the same build_verb path: its head `a` is the "verb", b/c its
-            // "args". The full kernel's defn then takes `children(params)` as the
-            // param idents — i.e. head-name + arg-names. We reconstruct exactly
-            // that param list here. `()` (Null) → no params; `(params a b)` →
-            // Block. Faithful to the full kernel's repackaging.
+            // (defn <name> (<params>...) <body>). read_sexp hands the parameter list
+            // over as a Block of names (read_defn_params), the way the full kernels
+            // read it since 2026-09-11; a single bare name reads as an Ident.
             let name = ident_name(&args[0]);
             let params: Vec<String> = match &*args[1] {
-                Node::Null => Vec::new(),
                 Node::Block(ps) => ps.iter().map(|p| ident_name(p)).collect(),
-                Node::Fncall(head, rest) => {
-                    let mut ps = vec![head.clone()];
-                    ps.extend(rest.iter().map(|p| ident_name(p)));
-                    ps
-                }
                 Node::Ident(s) => vec![s.clone()],
                 _ => panic!("defn: malformed params for {}", name),
             };
