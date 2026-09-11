@@ -15,6 +15,13 @@ the omitted bare edge contracts; they do not erase differences between carriers.
 Historical measurements retain their source date and scope rather than becoming
 claims that the publisher just reran those experiments.
 
+Runtime ownership, seed inspection, independent numerical references, checked
+repair, organ care, immediate Glass interaction, contribution measurement and
+the language-to-artifact path are also included. These explain mechanisms and
+their remaining boundaries, not just vocabulary. Historical prototype READMEs
+are not automatically admitted: incompatible NodeID or payload-size claims
+need reconciliation before becoming learning targets.
+
 Each JSONL pair carries its source path, SHA-256, source unit and evidence kind.
 Documentation and registry declarations are attributed source claims, not a new
 execution proof. Historical rented teachings retain that attribution. Known
