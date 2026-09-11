@@ -1,0 +1,95 @@
+//////////////////////////////////////////////////////////////////////
+//
+// kernel-roster.bml — the roster speaks for the kernels it holds and the
+// ones it cannot see.
+//
+// The census (roster-census.bml) finds this host's kernels by the pages they
+// open — a living process whose page names it, says alive, and was opened as
+// or after the process started — reads the roster, every kernel holding a slot
+// in /fg-kernels whose page says alive, and the host's name read. It takes
+// them twice, half a second apart, and keeps what the two reads agree on. This
+// organ speaks what the census finds as organ-health-v1 readings (organ
+// kernel-roster, flow host):
+//
+//   untracked  kernels the roster lacks: alive, and unseen by every organ that
+//              asks the roster
+//   stale      roster pids that are no living kernel
+//   orphans    kernels whose owner walk ends at launchd: nobody waits for them
+//   errands    kernels whose row the host told short: no cell, no binary, or
+//              an owner walk that ends unread, gone or at an ancestor with no
+//              binary
+//   unpaged    processes named fkwu that are no living kernel
+//
+// None is expected; the count is observed; the pids are the need's detail and
+// the evidence, beside what each read saw (host, roster, kernels). Names, cells
+// and arguments stay in the census's own lines: the glass's ProcessPrivacyRule
+// (form-glass-observer.bml) keeps them out of readings.
+//
+// A reading stands on reads, and each read answers for itself. A page the host
+// would not let the census read, a process whose start it would not tell, a
+// row or an ancestor's binary it withheld, a process it would not name, a host
+// that would not list its processes, a roster that does not hold the census, a
+// walk that did not find the census's own page, and an owner walk that stopped
+// short each leave the readings standing on them with health and observation
+// null, and a need naming that read (page-read, host-process-read, roster-read,
+// owner-walk) with the pids it missed. untracked and stale stand on the pages
+// and the roster; orphans on the pages, the kernels' rows and every owner walk;
+// errands on the pages and the rows; unpaged on the name read and the pages.
+//
+// Adoption is care a caller chooses. krs-adopt takes the pids a caller names,
+// touches only those the untracked reading names, sends each through
+// kernel_roster_adopt (1 adopted, 0 already held, -1 no living kernel page, -2
+// no free slot), and the census observes again. An orphan's release is a stop,
+// and a stop is Urs's word: the orphans reading names its need and offers only
+// keep, and no provider here answers it. An unpaged process is offered
+// evidence and never a slot.
+//
+// preludes: form/form-stdlib/roster-census.bml form-stdlib/organ-care.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class KernelRoster {
+        // the census's own pid when a read did not see it
+        def krs-self-if(read) = if eq(read, 1) then list() else list(host_pid());
+        def krs-needs-of(resource, pids) = if nil?(pids) then list() else list(oh-need(resource, json-node-array(oh-ints(pids))));
+        // the reads of a settled census s that did not answer, as needs
+        def krs-name-needs(s) = krs-needs-of("host-process-read", rce-union(krs-self-if(rce-s-host-read(s)), rce-s-unread-names(s)));
+        def krs-row-needs(s) = krs-needs-of("host-process-read", rce-s-unread-rows(s));
+        def krs-roster-needs(s) = krs-needs-of("roster-read", krs-self-if(rce-s-roster-read(s)));
+        def krs-page-needs(s) = krs-needs-of("page-read", rce-union(krs-self-if(rce-s-page-read(s)), rce-s-unread-pages(s)));
+        def krs-walk-needs(s) = krs-needs-of("owner-walk", rce-s-short(s));
+        // what each read saw: the host's name read, the roster, and the living kernels
+        def krs-evidence(pids, s) = json-node-object(list(json-node-pair("pids", json-node-array(oh-ints(pids))), oh-n("host", len(rce-s-named(s))), oh-n("roster", len(rce-s-roster(s))), oh-n("kernels", len(rce-s-kernels(s)))));
+        // the reads each aspect stands on that did not answer, as needs
+        def krs-untracked-missing(s) = append(krs-page-needs(s), krs-roster-needs(s));
+        def krs-stale-missing(s) = append(krs-page-needs(s), krs-roster-needs(s));
+        def krs-orphans-missing(s) = append(krs-page-needs(s), append(krs-row-needs(s), krs-walk-needs(s)));
+        def krs-errands-missing(s) = append(krs-page-needs(s), krs-row-needs(s));
+        def krs-unpaged-missing(s) = append(krs-name-needs(s), krs-page-needs(s));
+        // a list the census found, or unseen when a read it stands on did not answer: the census's own line keeps
+        // the rule its readings keep
+        def krs-seen-or(missing, pids) = if nil?(missing) then pids else "unseen";
+        // missing: the needs of the reads this aspect stands on that did not answer
+        def krs-reading(missing, aspect, pids, resource, offers, s) = if nil?(missing) then krs-seen(aspect, pids, resource, offers, s) else krs-unseen(missing, aspect, s);
+        def krs-seen(aspect, pids, resource, offers, s) = oh-reading("kernel-roster", "host", aspect, json-node-int(0), json-node-int(len(pids)), json-node-int(if nil?(pids) then 1 else 0), krs-needs-of(resource, pids), if nil?(pids) then list() else offers, krs-evidence(pids, s));
+        // a null reading says why it is null: the names of the reads that did not answer, beside what each read saw
+        def krs-unanswered(missing) = if nil?(missing) then list() else cons(oh-get(head(missing), "resource"), krs-unanswered(tail(missing)));
+        def krs-unseen(missing, aspect, s) = oh-reading("kernel-roster", "host", aspect, json-node-int(0), json-node-null(), json-node-null(), missing, list("request-evidence", "defer"), oh-set(krs-evidence(list(), s), "unanswered", json-node-array(krs-unanswered(missing))));
+        // s: a settled census (roster-census.bml, rce-settled)
+        def krs-readings(s) = list(krs-reading(krs-untracked-missing(s), "untracked", rce-s-untracked(s), "roster-slot", list("adopt", "keep"), s), krs-reading(krs-stale-missing(s), "stale", rce-s-stale(s), "kernel-identity", list("request-evidence", "defer"), s), krs-reading(krs-orphans-missing(s), "orphans", rce-s-orphans(s), "waiting-owner", list("keep"), s), krs-reading(krs-errands-missing(s), "errands", rce-s-errands(s), "process-row", list("request-evidence", "defer"), s), krs-reading(krs-unpaged-missing(s), "unpaged", rce-s-unpaged(s), "kernel-page", list("request-evidence", "defer"), s));
+        def krs-observe() = krs-readings(rce-settled(500));
+        // care: the chosen pids the untracked reading names, each offered a slot, as (pid answer)
+        def krs-adopt-each(pids) = if nil?(pids) then list() else cons(json-node-array(list(json-node-int(head(pids)), json-node-int(kernel_roster_adopt(head(pids))))), krs-adopt-each(tail(pids)));
+        def krs-supply(chosen, reading, need) = json-node-object(list(json-node-pair("adopted", json-node-array(krs-adopt-each(rce-both(chosen, oh-int-values(json-array-elements(oh-get(need, "detail")))))))));
+        def krs-emit(chosen, stage, row) = oh-voice(row);
+        // the census taken again; its own half-second rest keeps the fresh reading's id apart from the first
+        def krs-observe-again(chosen, reading, delivery) = oh-set(oh-find(krs-observe(), reading), "care_of", json-node-string(oh-str(reading, "id")));
+        def krs-provider() = oc-provider("roster-adopt", list("roster-slot"), "adopt", krs-supply);
+        // care answers only a measured reading whose need names a chosen pid; the others stay as observed
+        def krs-care(chosen, reading) = if node_eq(oh-get(reading, "health"), json-node-null()) then oc-answer(reading, "unmeasured") else if not(oh-pain(reading)) then oc-answer(reading, "no-need") else if nil?(rce-both(chosen, oh-int-values(json-array-elements(oh-get(oc-first-need(reading), "detail"))))) then oc-answer(reading, "not-chosen") else oc-care(chosen, reading, oc-first-need(reading), list(krs-provider()), krs-emit, krs-observe-again);
+        // the explicit adoption: the readings speak, then care runs for the pids a caller chose
+        def krs-adopt(chosen) = oc-care-each(chosen, oh-voice-all(krs-observe()), krs-care);
+    }
+    0;
+}

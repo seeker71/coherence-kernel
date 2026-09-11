@@ -331,6 +331,7 @@ extern int proc_listpids(unsigned int type, unsigned int typeinfo, void *buffer,
 extern int proc_pidinfo(int pid, int flavor, unsigned long long arg, void *buffer, int buffersize);
 extern int proc_name(int pid, void *buffer, unsigned int buffersize);
 extern int proc_pidpath(int pid, void *buffer, unsigned int buffersize);
+extern unsigned int getuid(void);
 struct fk_mach_timebase { unsigned int numer; unsigned int denom; };
 extern int mach_timebase_info(struct fk_mach_timebase *info);
 #endif
@@ -9397,17 +9398,24 @@ static void fk_proc_file(long long pid, const char *leaf, char *out) {
     out[o] = 0;
 }
 #endif
-/* host_process pid: what a process runs and where -- (pid ppid exe cwd argv), argv a list of strings; -1 when no
- * process has that pid. A field the host will not tell (the cwd or argv of a process this user may not read, pid 1
- * among them) is "" or an empty list, never guessed. On 2026-09-11 the census could count every kernel and still
+/* host_process pid: what a process runs, where, and since when -- (pid ppid exe cwd argv start-ms withheld), argv a
+ * list of strings; -1 when no process has that pid. A field the host will not tell (the cwd or argv of a process
+ * this user may not read, pid 1 among them) is "" or an empty list, never guessed, and withheld says which fields the
+ * host kept from this kernel -- 1 exe, 2 cwd, 4 argv -- so a withheld field stays apart from an empty one: a binary removed
+ * after its process started answers "" with nothing withheld (ENOENT), a sandbox that denies other processes' info
+ * answers "" with 1 withheld (EPERM). start-ms is when the process started, in milliseconds since the epoch as a live
+ * page's opening is, 0 when the host will not tell. On 2026-09-11 the census could count every kernel and still
  * not say what one of them ran: the host's rows carried a pid, a size and a parent, and the glass learned a
- * kernel's cell by running ps through a shell. macOS: the process table (KERN_PROC_PID) for the parent, proc_pidpath, the cwd from
- * PROC_PIDVNODEPATHINFO (its path at byte 152 of 2352), argv from sysctl KERN_PROCARGS2 (argc, the exec path, its
- * padding, then the words). Linux: /proc/<pid>/stat, exe, cwd and cmdline. */
+ * kernel's cell by running ps through a shell. macOS: the process table (KERN_PROC_PID) for the parent and the start,
+ * proc_pidpath, the cwd from PROC_PIDVNODEPATHINFO (its path at byte 152 of 2352), argv from sysctl KERN_PROCARGS2
+ * (argc, the exec path, its padding, then the words). Linux: /proc/<pid>/stat, exe, cwd and cmdline; it does not
+ * read the start yet and answers 0. */
 static long long fk_host_process(long long pid) {
     if (pid <= 0) { return (0 - 1) * 2; }
     if (kill((int)pid, 0) != 0 && errno == ESRCH) { return (0 - 1) * 2; }
     long long ppid = 0;
+    long long start = 0;
+    long long withheld = 0;
     long long exe = fk_sbuf("", 0);
     long long cwd = fk_sbuf("", 0);
     long long argv = 1;
@@ -9420,17 +9428,24 @@ static long long fk_host_process(long long pid) {
     int mk[4] = {1, 14, 1, (int)pid};
     unsigned char kb[648];
     unsigned long kl = 648;
-    if (sysctl(mk, 4, kb, &kl, 0, 0) == 0 && kl >= 564) { ppid = (long long)(*(int *)(kb + 560)); }
+    /* the start is a timeval at byte 0 of the same row: seconds, then microseconds at byte 8 */
+    if (sysctl(mk, 4, kb, &kl, 0, 0) == 0 && kl >= 564) {
+        ppid = (long long)(*(int *)(kb + 560));
+        start = *(long long *)(kb + 0) * 1000 + (long long)(*(int *)(kb + 8)) / 1000;
+    }
     static char pth[4096];
+    errno = 0;
     int pl = proc_pidpath((int)pid, pth, 4096);
     if (pl > 0) { exe = fk_sbuf(pth, pl); }
+    else if (errno == EPERM || errno == EACCES) { withheld = withheld | 1; }
     static unsigned char vpi[2352];
+    errno = 0;
     if (proc_pidinfo((int)pid, 9, 0, vpi, 2352) > 152) {
         const char *cd = (const char *)(vpi + 152);
         long long cl = 0;
         while (cl < 1024 && cd[cl] != 0) { cl = cl + 1; }
         cwd = fk_sbuf(cd, cl);
-    }
+    } else if (errno == EPERM || errno == EACCES) { withheld = withheld | 2; }
     static char *pa = 0;
     static long long pacap = 0;
     if (pa == 0) {
@@ -9441,7 +9456,11 @@ static long long fk_host_process(long long pid) {
     }
     int mib[3] = {1, 49, (int)pid};
     unsigned long pal = (unsigned long)pacap;
-    if (pa != 0 && sysctl(mib, 3, pa, &pal, 0, 0) == 0 && pal > 4) {
+    errno = 0;
+    int ra = pa != 0 ? sysctl(mib, 3, pa, &pal, 0, 0) : -1;
+    /* the words of a process this user may not read answer EINVAL (pid 1 does), a sandbox that withholds them EPERM */
+    if (ra != 0 && (errno == EPERM || errno == EACCES || errno == EINVAL)) { withheld = withheld | 4; }
+    if (ra == 0 && pal > 4) {
         int argc = *(int *)pa;
         long long o = 4;
         long long end = (long long)pal;
@@ -9471,13 +9490,19 @@ static long long fk_host_process(long long pid) {
         while (k > 0 && o < got && sb[o] >= '0' && sb[o] <= '9') { ppid = ppid * 10 + (sb[o] - '0'); o = o + 1; }
     }
     fk_proc_file(pid, "exe", pf);
+    errno = 0;
     long rl = readlink(pf, lb, 4095);
     if (rl > 0) { exe = fk_sbuf(lb, rl); }
+    else if (errno == EPERM || errno == EACCES) { withheld = withheld | 1; }
     fk_proc_file(pid, "cwd", pf);
+    errno = 0;
     rl = readlink(pf, lb, 4095);
     if (rl > 0) { cwd = fk_sbuf(lb, rl); }
+    else if (errno == EPERM || errno == EACCES) { withheld = withheld | 2; }
     fk_proc_file(pid, "cmdline", pf);
+    errno = 0;
     int fc = open(pf, O_RDONLY);
+    if (fc < 0 && (errno == EPERM || errno == EACCES)) { withheld = withheld | 4; }
     if (fc >= 0) {
         static char cb[65536];
         long long got = read(fc, cb, 65535);
@@ -9494,12 +9519,13 @@ static long long fk_host_process(long long pid) {
 #else
     (void)starts; (void)lens; (void)nw;
 #endif
-    return fk_cons_val(pid << 1, fk_cons_val(ppid << 1, fk_cons_val(exe, fk_cons_val(cwd, fk_cons_val(argv, 1)))));
+    return fk_cons_val(pid << 1, fk_cons_val(ppid << 1, fk_cons_val(exe, fk_cons_val(cwd, fk_cons_val(argv, fk_cons_val(start << 1, fk_cons_val(withheld << 1, 1)))))));
 }
 static long long fk_roster_adopt(long long pid);
 static long long fk_roster_forget(long long pid);
 static long long fk_page_bury(long long pid);
 static int fk_live_ended(long long pid);
+static long long fk_live_page_state(long long pid);
 static long long fk_host_door(long long mode, long long x) {
     if (mode == 18) {
         /* host_alive pid */
@@ -9528,9 +9554,9 @@ static long long fk_host_door(long long mode, long long x) {
         return (mode == 20 ? fk_roster_adopt(x >> 1) : fk_roster_forget(x >> 1)) * 2;
     }
     if (mode == 22 || mode == 24) {
-        /* kernel_page_bury pid / kernel_page_ended pid -- see fk_page_bury */
+        /* kernel_page_bury pid / kernel_page_ended pid -- see fk_page_bury and fk_live_page_state */
         if ((x & 1) != 0) { return (0 - 1) * 2; }
-        return (mode == 22 ? fk_page_bury(x >> 1) : fk_live_ended(x >> 1)) * 2;
+        return (mode == 22 ? fk_page_bury(x >> 1) : fk_live_page_state(x >> 1)) * 2;
     }
     if (mode == 23) {
         /* host_process pid -- see fk_host_process */
@@ -11934,6 +11960,30 @@ static int fk_live_ended(long long pid) {
     if (fk_live_read_words(dn, w, FK_LIVE_WORDS) != FK_LIVE_WORDS) { return 0; }
     return w[1] == pid && (w[19] == 0 || w[2] < seen) && fk_pid_gone(pid);
 }
+/* kernel_page_ended pid, as the census walks the pages: 1 that pid's kernel has ended with its page standing (what
+ * kernel_page_bury would bury); 2 a page stands under the pid's name, this kernel read it, and it is not an ended
+ * kernel's (a living kernel's, or one on a pid another process holds now); 0 no page stands; -1 a page stands and the
+ * host will not let this kernel read it, so whether its kernel lives or has ended is not known here. A sandbox that
+ * denies other kernels' pages answers EPERM for a page that stands and ENOENT for one that does not, so an absent page
+ * and a withheld one stay apart. */
+static long long fk_live_page_state(long long pid) {
+    if (pid <= 0) { return 0; }
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    char dn[32];
+    fk_live_pid_name(pid, dn);
+    int fd = shm_open(dn, O_RDONLY, 0600);
+    if (fd < 0) { return errno == ENOENT ? 0 : -1; }
+    close(fd);
+    if (fk_live_ended(pid)) { return 1; }
+    long long w[FK_LIVE_WORDS];
+    if (fk_live_read_words(dn, w, FK_LIVE_WORDS) == FK_LIVE_WORDS) { return 2; }
+    fd = shm_open(dn, O_RDONLY, 0600);
+    if (fd >= 0) { close(fd); return -1; }
+    return errno == ENOENT ? 0 : -1;
+#else
+    return 0;
+#endif
+}
 static void fk_live_roster_leave(long long pid) {
     if (fk_roster_slots != 0 && fk_roster_k >= 0) { __sync_bool_compare_and_swap(&fk_roster_slots[fk_roster_k], pid, 0); }
     fk_roster_k = -1;
@@ -11950,11 +12000,13 @@ static void fk_live_roster_register(long long pid) {
     long long k = 0;
     int held = 0;
     /* first pass: am I here already, and which slots belong to kernels that are gone. A gone
-     * kernel's slot is emptied by compare-and-swap, so only one sweeper unlinks its pages. */
+     * kernel's slot is emptied by compare-and-swap, so only one sweeper unlinks its pages. Gone is
+     * ESRCH or a corpse: a kernel started under a sandbox that denies signals to others reads every
+     * living kernel as EPERM, and a sweep that took EPERM for gone emptied their slots. */
     while (k < 256) {
         long long v = slots[k];
         if (v == pid) { held = 1; fk_roster_k = k; }
-        else if (v > 0 && !fk_pid_ours(v) && __sync_bool_compare_and_swap(&slots[k], v, 0)) {
+        else if (v > 0 && fk_pid_gone(v) && __sync_bool_compare_and_swap(&slots[k], v, 0)) {
             if (fk_live_ended(v)) { fk_live_bury(v); }
         }
         k = k + 1;
@@ -12413,7 +12465,8 @@ static long long fk_roster_forget(long long pid) {
 }
 /* kernel_page_bury pid: that pid's page, store and program surface are buried if its kernel has ended
  * (fk_live_ended), and a roster slot still holding the pid is emptied; answers 1 when it buried.
- * kernel_page_ended pid asks the same question and unlinks nothing. Urs asked on 2026-09-11 to be asked
+ * kernel_page_ended pid asks the same question and unlinks nothing; its other answers say what else
+ * stands under the pid's name (fk_live_page_state). Urs asked on 2026-09-11 to be asked
  * before a page another kernel left is unlinked: such a page goes by this call, one pid at a time, or by
  * the roster's dead-slot sweep, which he kept. rce-ended (form/form-stdlib/roster-census.bml) reads them
  * all and buries none. */
@@ -14070,13 +14123,27 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_cons_val(d153[0] << 1, fk_cons_val(d153[1] << 1, fk_cons_val(d153[2] << 1, fk_cons_val(d153[3] << 1, 1))));
     }
     if (t == 154) {
-        /* host_processes name: list of list(pid, rss_bytes, cpu_us, elapsed_seconds, nice, ppid) for every process whose name is the argument -- libproc, no ps, no pgrep */
+        /* host_processes name: list of list(pid, rss_bytes, cpu_us, elapsed_seconds, nice, ppid) for every process whose name is the argument -- libproc, no ps, no pgrep.
+         * Without a '*' the name is exact, as the glass asks for fkwu and for Activity Monitor, and a process whose name or
+         * figures the host will not tell is not in the answer.
+         * A name ending in '*' is a prefix: "fkwu*" answers fkwu, fkwu-<stamp> (fourth-arm.sh names its kernels so), fkwu.new
+         * and any copy whose name begins with fkwu. A prefix read drops nothing the host withholds, because its reader counts
+         * what the read did not see: a process of this user whose name proc_name withholds is named by the process table
+         * (kinfo_proc's 16-byte command name, which a sandbox that denies other processes' info still answers); a named
+         * process whose figures are withheld answers -1 for resident bytes and CPU and takes its start, nice and parent from
+         * the process table; a process neither will name answers as (pid) alone; a host that will not list its processes
+         * answers -1. A bare "*" names no prefix and answers an empty list, so the door never hands out the host's whole
+         * table (ProcessPrivacyRule, form-glass-observer.bml). */
 #ifdef __APPLE__
         static char nm154[256];
         fk_cstr(fk_walk(fk_node[i][1], fp), nm154, 256);
+        long long nl154 = fk_cstrlen(nm154);
+        int pre154 = nl154 > 0 && nm154[nl154 - 1] == '*';
+        if (pre154) { nl154 = nl154 - 1; nm154[nl154] = 0; }
+        if (pre154 && nl154 == 0) { return 1; }
         static int pids154[8192];
         int got154 = proc_listpids(1, 0, pids154, (int)sizeof pids154);
-        if (got154 <= 0) { return 1; }
+        if (got154 <= 0) { return pre154 ? (0 - 1) * 2 : 1; }
         long long count154 = got154 / (long long)sizeof(int);
         struct fk_mach_timebase tb154; tb154.numer = 1; tb154.denom = 1;
         mach_timebase_info(&tb154);
@@ -14088,19 +14155,48 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             if (pid154 <= 0) { continue; }
             char pn154[256];
             pn154[0] = 0;
-            if (proc_name(pid154, pn154, 256) <= 0) { continue; }
-            if (!fk_cstr_eq(pn154, nm154)) { continue; }
+            /* the process table's row, kinfo_proc (648 bytes): start (a timeval) at byte 0, nice at 242, the command name
+             * at 243 (16 bytes and a nul), uid at 420, parent at 560 -- read only when a prefix read needs it */
+            unsigned char kb154[648];
+            unsigned long kl154 = 0;
+            if (proc_name(pid154, pn154, 256) <= 0) {
+                if (!pre154) { continue; }
+                int mk154[4] = {1, 14, 1, pid154};
+                kl154 = 648;
+                int rk154 = sysctl(mk154, 4, kb154, &kl154, 0, 0);
+                if (rk154 == 0 && kl154 == 0) { continue; }
+                if (rk154 != 0 || kl154 < 648) {
+                    if (rk154 != 0 && errno == ESRCH) { continue; }
+                    kl154 = 0;
+                    l154 = fk_cons_val(fk_cons_val((long long)pid154 << 1, 1), l154);
+                    continue;
+                }
+                if (*(unsigned int *)(kb154 + 420) != (unsigned int)getuid()) { continue; }
+                long long q154 = 0;
+                while (q154 < 16 && kb154[243 + q154] != 0) { pn154[q154] = (char)kb154[243 + q154]; q154 = q154 + 1; }
+                pn154[q154] = 0;
+            }
+            long long c154 = 0;
+            while (c154 < nl154 && pn154[c154] == nm154[c154]) { c154 = c154 + 1; }
+            if (pre154 ? c154 < nl154 : !fk_cstr_eq(pn154, nm154)) { continue; }
             unsigned char ti154[128];
             unsigned char bi154[160];
-            if (proc_pidinfo(pid154, 4, 0, ti154, 128) < 96) { continue; }
-            long long rss154 = *(long long *)(ti154 + 8);
-            unsigned long long user154 = *(unsigned long long *)(ti154 + 16);
-            unsigned long long sys154 = *(unsigned long long *)(ti154 + 24);
-            long long cpu154 = (long long)(((user154 + sys154) * (unsigned long long)tb154.numer / (unsigned long long)tb154.denom) / 1000ULL);
+            long long rss154 = -1;
+            long long cpu154 = -1;
+            if (proc_pidinfo(pid154, 4, 0, ti154, 128) >= 96) {
+                rss154 = *(long long *)(ti154 + 8);
+                unsigned long long user154 = *(unsigned long long *)(ti154 + 16);
+                unsigned long long sys154 = *(unsigned long long *)(ti154 + 24);
+                cpu154 = (long long)(((user154 + sys154) * (unsigned long long)tb154.numer / (unsigned long long)tb154.denom) / 1000ULL);
+            } else if (!pre154) { continue; }
             long long start154 = 0;
             long long nice154 = 0;
             long long ppid154 = 0;
             if (proc_pidinfo(pid154, 3, 0, bi154, 160) >= 136) { start154 = *(long long *)(bi154 + 120); nice154 = (long long)(*(int *)(bi154 + 116)); ppid154 = (long long)(*(unsigned int *)(bi154 + 16)); }
+            else if (pre154) {
+                if (kl154 < 648) { int mb154[4] = {1, 14, 1, pid154}; kl154 = 648; if (sysctl(mb154, 4, kb154, &kl154, 0, 0) != 0) { kl154 = 0; } }
+                if (kl154 >= 648) { start154 = *(long long *)(kb154 + 0); nice154 = (long long)(signed char)kb154[242]; ppid154 = (long long)(*(int *)(kb154 + 560)); }
+            }
             long long elapsed154 = (start154 > 0 && now154 >= start154) ? now154 - start154 : -1;
             l154 = fk_cons_val(fk_cons_val((long long)pid154 << 1, fk_cons_val(rss154 << 1, fk_cons_val(cpu154 << 1, fk_cons_val(elapsed154 << 1, fk_cons_val(nice154 << 1, fk_cons_val(ppid154 << 1, 1)))))), l154);
         }
@@ -14157,14 +14253,16 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_sbuf(cwd29, fk_cstrlen(cwd29));
     }
     if (t == 162) {
-        /* kernel_live_pids: every registered kernel whose page says alive and whose pid still answers */
+        /* kernel_live_pids: every registered kernel whose page says alive and whose pid still answers. A pid this kernel
+         * may not signal still answers: under a sandbox that denies signals to other processes every living kernel answers
+         * EPERM, and only a pid the host no longer runs (or holds as a corpse) has left. */
         long long slots162[256];
         if (fk_live_read_words("/fg-kernels", slots162, 256) < 0) { return 1; }
         long long l162 = 1;
         long long k162 = 255;
         while (k162 >= 0) {
             long long pid162 = slots162[k162];
-            if (pid162 > 0 && fk_pid_ours(pid162)) {
+            if (pid162 > 0 && !fk_pid_gone(pid162)) {
                 char nm162[32];
                 long long w162[FK_LIVE_WORDS];
                 fk_live_pid_name(pid162, nm162);
