@@ -5505,25 +5505,6 @@ static long long fk_scan_run(long long sv, long long fromv, long long clsv) {
     }
     return end << 1;
 }
-static void fk_unlink_segments(char *p) {
-    char q[FK_PATH_CAP];
-    long long pl = 0;
-    while (p[pl] != 0) {
-        pl = pl + 1;
-    }
-    /* same danger class as fk_path_join above: this path feeds unlink(), so a
-     * silently truncated "safe" sprintf could delete the wrong file. p's own
-     * bound isn't otherwise enforced by every caller, so check it here too. */
-    if (pl + 20 > FK_PATH_CAP) {
-        fk_die("fk_unlink_segments: path exceeds buffer capacity");
-    }
-    long long s = 0;
-    while (s < 2048) {
-        sprintf(q, "%s/seg-%06lld.log", p, s);
-        unlink(q);
-        s = s + 1;
-    }
-}
 static int fk_path_is_dir(const char *p) {
 #if defined(_WIN32)
     (void)p;
@@ -5769,27 +5750,46 @@ static void fk_path_join(char *out, long long outcap, const char *a, const char 
     }
     out[k + lb] = 0;
 }
+/* Removes a tree as Go's RemoveAll, Rust's remove_dir_all and Node's rmSync do: the walk
+ * never follows a symlink (a link is removed as itself), and a directory is read again when
+ * its first pass leaves entries a removal mid-readdir skipped. */
 static void fk_rmtree(char *p) {
-    if (fk_path_is_dir(p)) {
-        DIR *d = opendir(p);
-        if (d) {
-            struct dirent *e;
-            char child[FK_PATH_CAP];
-            while ((e = readdir(d)) != 0) {
-                if (e->d_name[0] == FK_CH_DOT &&
-                    (e->d_name[1] == 0 || (e->d_name[1] == FK_CH_DOT && e->d_name[2] == 0))) {
-                    continue;
+    struct stat st;
+    if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) {
+        int pass = 0;
+        while (pass < 4) {
+            DIR *d = opendir(p);
+            if (d) {
+                struct dirent *e;
+                char child[FK_PATH_CAP];
+                while ((e = readdir(d)) != 0) {
+                    if (e->d_name[0] == FK_CH_DOT &&
+                        (e->d_name[1] == 0 || (e->d_name[1] == FK_CH_DOT && e->d_name[2] == 0))) {
+                        continue;
+                    }
+                    fk_path_join(child, FK_PATH_CAP, p, e->d_name);
+                    fk_rmtree(child);
                 }
-                fk_path_join(child, FK_PATH_CAP, p, e->d_name);
-                fk_rmtree(child);
+                closedir(d);
             }
-            closedir(d);
+            if (rmdir(p) == 0) {
+                return;
+            }
+            pass = pass + 1;
         }
-        fk_unlink_segments(p);
-        rmdir(p);
         return;
     }
     unlink(p);
+}
+/* fs_rmdir / host_dir_rmdir: 0 when the directory and everything under it is gone, -1 when
+ * the path is not a directory or part of the tree stays. */
+static int fk_rmdir_tree(char *p) {
+    if (!fk_path_is_dir(p)) {
+        return -1;
+    }
+    fk_rmtree(p);
+    struct stat st;
+    return lstat(p, &st) == 0 ? -1 : 0;
 }
 static long long fk_inv_rows = 1;
 static void fk_inv_reset(void) {
@@ -5842,8 +5842,8 @@ static long long fk_fs_list_path(const char *p) {
     (void)p;
     return 1;
 }
-static void fk_rmtree(char *p) {
-    (void)p;
+static int fk_rmdir_tree(char *p) {
+    return rmdir(p);
 }
 static long long fk_inv_rows = 1;
 static void fk_inv_reset(void) {
@@ -14033,8 +14033,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 55) {
         static char p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
-        fk_unlink_segments(p);
-        return rmdir(p) << 1;
+        return fk_rmdir_tree(p) << 1;
     }
     if (t == 56) {
         static char p[FK_PATH_CAP];
