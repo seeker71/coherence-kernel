@@ -1,0 +1,63 @@
+//////////////////////////////////////////////////////////////////////
+//
+// kernel-pages.bml — the live pages speak for themselves.
+//
+// Every kernel maps a 128 MiB live page, /fg-k<pid>, opens it fresh even on a
+// recycled pid, and takes it with it when it ends. The census walks every
+// page, so it is the organ that reads what the host holds, as organ-health-v1
+// readings (organ kernel-pages, flow host):
+//
+//   exit-burial   pages of ended kernels that wrote their final note: a clean
+//                 exit takes its page, so one standing came from a binary
+//                 older than the exit burial, or from a wound
+//   killed-pages  pages of kernels that ended without one: they stand until
+//                 the roster's sweep reaches their slot, or a burial is chosen
+//   living-pages  roster kernels whose page does not name them, say alive and
+//                 carry its layout (a kernel that has called defns reads hot
+//                 rows; a page smaller than the layout reads none)
+//
+// A page another kernel left is buried only as care a caller chooses: Urs
+// asked on 2026-09-11 to be asked first. kpg-bury takes the pids a caller
+// names, touches only those the census reads as ended, sends each through
+// kernel_page_bury's guard (it declines a pid that answers again, or a page
+// opened after the pid was seen gone), and the census observes again.
+//
+// preludes: form/form-stdlib/roster-census.bml form-stdlib/organ-care.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class KernelPages {
+        def kpg-word(page, k) = if lt(len(page), add(k, 1)) then -1 else nth(page, k);
+        // ended pids whose page's alive word reads a: 0 wrote the final note, 1 did not
+        def kpg-alive-is(pids, a) = if nil?(pids) then list() else if eq(kpg-word(kernel_live(head(pids)), 19), a) then cons(head(pids), kpg-alive-is(tail(pids), a)) else kpg-alive-is(tail(pids), a);
+        // a page is whole when it names its kernel, says alive, and a kernel that has called defns (heat, word 5) reads hot rows
+        def kpg-whole-at(pid, page) = and(eq(kpg-word(page, 1), pid), and(eq(kpg-word(page, 19), 1), or(le(kpg-word(page, 5), 0), gt(len(kernel_page_hot(pid, 1)), 0))));
+        def kpg-broken(pids) = if nil?(pids) then list() else if kpg-whole-at(head(pids), kernel_live(head(pids))) then kpg-broken(tail(pids)) else cons(head(pids), kpg-broken(tail(pids)));
+        def kpg-ints(xs) = if nil?(xs) then list() else cons(json-node-int(head(xs)), kpg-ints(tail(xs)));
+        def kpg-values(nodes) = if nil?(nodes) then list() else cons(json-int-value(head(nodes)), kpg-values(tail(nodes)));
+        // one reading per aspect: none expected, how many observed; the pids are the evidence and the need's detail
+        def kpg-reading(aspect, pids, resource, offers) = oh-reading("kernel-pages", "host", aspect, json-node-int(0), json-node-int(len(pids)), json-node-int(if nil?(pids) then 1 else 0), if nil?(pids) then list() else list(oh-need(resource, json-node-array(kpg-ints(pids)))), if nil?(pids) then list() else offers, json-node-array(kpg-ints(pids)));
+        def kpg-readings(ended, roster) = list(kpg-reading("exit-burial", kpg-alive-is(ended, 0), "exit-burial", list("bury-ended", "keep")), kpg-reading("killed-pages", rce-minus(ended, kpg-alive-is(ended, 0)), "burial-word", list("bury-ended", "keep")), kpg-reading("living-pages", kpg-broken(roster), "fresh-page", list("request-evidence", "defer")));
+        def kpg-observe() = kpg-readings(rce-ended(), rce-roster());
+        def kpg-voice(rows) = if nil?(rows) then 0 else kpg-voice-rest(oh-voice(head(rows)), tail(rows));
+        def kpg-voice-rest(said, rows) = kpg-voice(rows);
+        // care: the chosen pids this reading names, each through the guard, as (pid buried) with 0 for a declined burial
+        def kpg-bury-each(pids) = if nil?(pids) then list() else cons(json-node-array(list(json-node-int(head(pids)), json-node-int(kernel_page_bury(head(pids))))), kpg-bury-each(tail(pids)));
+        def kpg-supply(chosen, reading, need) = json-node-object(list(json-node-pair("buried", json-node-array(kpg-bury-each(rce-both(chosen, kpg-values(json-array-elements(oh-get(need, "detail")))))))));
+        def kpg-emit(chosen, stage, row) = oh-voice(row);
+        def kpg-find(aspect, rows) = if nil?(rows) then json-node-null() else if str_eq(oh-str(head(rows), "aspect"), aspect) then head(rows) else kpg-find(aspect, tail(rows));
+        def kpg-observe-again(chosen, reading, delivery) = oh-set(kpg-find(oh-str(reading, "aspect"), kpg-observe()), "care_of", json-node-string(oh-str(reading, "id")));
+        def kpg-provider() = oc-provider("page-burial", list("exit-burial", "burial-word"), "bury-ended", kpg-supply);
+        def kpg-need(reading) = head(json-array-elements(oh-get(reading, "needs")));
+        def kpg-state(reading, state) = json-node-object(list(oh-s("aspect", oh-str(reading, "aspect")), oh-s("state", state)));
+        // care answers only a reading whose need names a chosen pid; the others stay as observed
+        def kpg-care(chosen, reading) = if not(oh-pain(reading)) then kpg-state(reading, "no-need") else if nil?(rce-both(chosen, kpg-values(json-array-elements(oh-get(kpg-need(reading), "detail"))))) then kpg-state(reading, "not-chosen") else oc-care(chosen, reading, kpg-need(reading), list(kpg-provider()), kpg-emit, kpg-observe-again);
+        def kpg-care-all(chosen, rows) = if nil?(rows) then list() else cons(kpg-care(chosen, head(rows)), kpg-care-all(chosen, tail(rows)));
+        // the explicit burial: the readings speak, then care runs for the pids a caller chose
+        def kpg-bury(chosen) = kpg-care-all(chosen, kpg-voiced(kpg-observe()));
+        def kpg-voiced(rows) = kpg-voiced-rest(kpg-voice(rows), rows);
+        def kpg-voiced-rest(said, rows) = rows;
+    }
+    0;
+}
