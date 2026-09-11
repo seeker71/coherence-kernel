@@ -11,6 +11,7 @@ import { mkdir, readFile, realpath, writeFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
+import { totalmem } from "node:os";
 import { isMainThread, Worker, workerData } from "node:worker_threads";
 import {
   deserializeRecipeArtifact,
@@ -592,6 +593,14 @@ function kernelStackMb(): number {
   return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 2048;
 }
 
+// V8 caps an isolate's heap near 4 GiB whatever the machine holds, while the Go
+// and Rust kernels grow until the host says no. TS's lists copy on tail as
+// Rust's do, so a band can hold more than V8's cap; the worker's heap may take
+// half of physical memory, and running out of it is still a loud rc=1.
+function kernelHeapMb(): number {
+  return Math.floor(totalmem() / 1048576 / 2);
+}
+
 function runOnDeepStack(): void {
   let online = false;
   const worker = new Worker(new URL(import.meta.url), {
@@ -599,7 +608,7 @@ function runOnDeepStack(): void {
       marker: KERNEL_WORKER_MARKER,
       argv: process.argv.slice(2),
     } satisfies KernelWorkerData,
-    resourceLimits: { stackSizeMb: kernelStackMb() },
+    resourceLimits: { stackSizeMb: kernelStackMb(), maxOldGenerationSizeMb: kernelHeapMb() },
     // Inherited --stack-size flags would re-lift the worker's V8 limit away
     // from its real stack and re-open the silent-SIGSEGV door; scrub them,
     // keep everything else (loader registrations ride execArgv).
