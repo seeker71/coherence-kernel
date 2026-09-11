@@ -178,7 +178,8 @@ func TestFkwuOffloadInput(t *testing.T) {
 
 	// fkcount: a program that reads the staged input (fk_src) via fk-buf and
 	// returns its byte count — the minimal input-dependent fourth-kernel program.
-	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit)+"\n(fkc-table-file (fkcount-fns))\n")
+	// fks: the walker reads a string pool after the rows; fkcount carries none.
+	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit)+"\n(fks-table-file (fkcount-fns) (list))\n")
 	if len(strings.TrimSpace(table)) < 20 {
 		t.Fatalf("fkcount flatten produced suspiciously small table (%d bytes)", len(table))
 	}
