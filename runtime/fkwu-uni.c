@@ -9378,6 +9378,11 @@ static int fk_pid_zombie(long long pid) {
     return 0;
 #endif
 }
+/* a pid is gone when the host has no such process, or holds only its corpse; one another user owns (kill
+ * answers EPERM) still stands */
+static int fk_pid_gone(long long pid) { return (kill((int)pid, 0) != 0 && errno == ESRCH) || fk_pid_zombie(pid); }
+/* a living process this user may signal: what a kernel of ours can be */
+static int fk_pid_ours(long long pid) { return kill((int)pid, 0) == 0 && !fk_pid_zombie(pid); }
 #if defined(__linux__)
 /* "/proc/<pid>/<leaf>" */
 static void fk_proc_file(long long pid, const char *leaf, char *out) {
@@ -9494,16 +9499,14 @@ static long long fk_host_process(long long pid) {
 static long long fk_roster_adopt(long long pid);
 static long long fk_roster_forget(long long pid);
 static long long fk_page_bury(long long pid);
+static int fk_live_ended(long long pid);
 static long long fk_host_door(long long mode, long long x) {
     if (mode == 18) {
         /* host_alive pid */
         if ((x & 1) != 0) { return (0 - 1) * 2; }
         long long pid18 = x >> 1;
         if (pid18 <= 0) { return (0 - 1) * 2; }
-        if (fk_pid_zombie(pid18)) { return 0; }
-        if (kill((int)pid18, 0) == 0) { return 1 * 2; }
-        if (errno == ESRCH) { return 0; }
-        return 1 * 2;
+        return fk_pid_gone(pid18) ? 0 : 1 * 2;
     }
     if (mode == 19) {
         /* fs_mkfifo path */
@@ -9519,10 +9522,15 @@ static long long fk_host_door(long long mode, long long x) {
         if (mkfifo(pf19, 0600) == 0) { return 1 * 2; }
         return (0 - 1) * 2;
     }
-    if (mode == 20 || mode == 21 || mode == 22) {
-        /* kernel_roster_adopt pid / kernel_roster_forget pid / kernel_page_bury pid -- see fk_roster_adopt, fk_page_bury */
+    if (mode == 20 || mode == 21) {
+        /* kernel_roster_adopt pid / kernel_roster_forget pid -- see fk_roster_adopt */
         if ((x & 1) != 0) { return (0 - 1) * 2; }
-        return (mode == 20 ? fk_roster_adopt(x >> 1) : mode == 21 ? fk_roster_forget(x >> 1) : fk_page_bury(x >> 1)) * 2;
+        return (mode == 20 ? fk_roster_adopt(x >> 1) : fk_roster_forget(x >> 1)) * 2;
+    }
+    if (mode == 22 || mode == 24) {
+        /* kernel_page_bury pid / kernel_page_ended pid -- see fk_page_bury */
+        if ((x & 1) != 0) { return (0 - 1) * 2; }
+        return (mode == 22 ? fk_page_bury(x >> 1) : fk_live_ended(x >> 1)) * 2;
     }
     if (mode == 23) {
         /* host_process pid -- see fk_host_process */
@@ -11911,24 +11919,20 @@ static long long fk_roster_ticks;
 static void fk_live_bury(long long pid) {
     char dn[32]; fk_live_pid_name(pid, dn); shm_unlink(dn); fk_store_unlink_pid(pid); fk_prog_unlink_pid(pid);
 }
-/* a pid is gone when the host has no such process, or holds only its corpse */
-static int fk_pid_gone(long long pid) { return (kill((int)pid, 0) != 0 && errno == ESRCH) || fk_pid_zombie(pid); }
 static long long fk_live_read_words(const char *name, long long *out, long long count);
-/* Only an ended kernel's page is buried. The host hands a pid out again within minutes (every five on
- * 2026-09-11), and a kernel that takes it reopens the page its pid left standing, so the page must name
- * that pid and say it ended (alive 0) or have been opened before the pid was seen gone, and the pid must
- * still be gone once the page has been read: a kernel that took the pid meanwhile answers kill. Answers
- * 1 when the page is an ended kernel's; it is unlinked only when bury is set. */
-static long long fk_live_bury_ended(long long pid, int bury) {
+/* Whether a page is an ended kernel's, so it may be buried. The host hands a pid out again within minutes
+ * (every five on 2026-09-11), and a kernel that takes it reopens the page its pid left standing, so the
+ * page must name that pid and say it ended (alive 0) or have been opened before the pid was seen gone, and
+ * the pid must still be gone once the page has been read: a kernel that took the pid meanwhile answers
+ * kill. */
+static int fk_live_ended(long long pid) {
     long long seen = fk_live_now_ms();
     if (pid <= 0 || !fk_pid_gone(pid)) { return 0; }
     char dn[32];
     long long w[FK_LIVE_WORDS];
     fk_live_pid_name(pid, dn);
     if (fk_live_read_words(dn, w, FK_LIVE_WORDS) != FK_LIVE_WORDS) { return 0; }
-    if (w[1] != pid || !(w[19] == 0 || w[2] < seen) || !fk_pid_gone(pid)) { return 0; }
-    if (bury) { fk_live_bury(pid); }
-    return 1;
+    return w[1] == pid && (w[19] == 0 || w[2] < seen) && fk_pid_gone(pid);
 }
 static void fk_live_roster_leave(long long pid) {
     if (fk_roster_slots != 0 && fk_roster_k >= 0) { __sync_bool_compare_and_swap(&fk_roster_slots[fk_roster_k], pid, 0); }
@@ -11950,8 +11954,8 @@ static void fk_live_roster_register(long long pid) {
     while (k < 256) {
         long long v = slots[k];
         if (v == pid) { held = 1; fk_roster_k = k; }
-        else if (v > 0 && (kill((int)v, 0) != 0 || fk_pid_zombie(v)) && __sync_bool_compare_and_swap(&slots[k], v, 0)) {
-            fk_live_bury_ended(v, 1);
+        else if (v > 0 && !fk_pid_ours(v) && __sync_bool_compare_and_swap(&slots[k], v, 0)) {
+            if (fk_live_ended(v)) { fk_live_bury(v); }
         }
         k = k + 1;
     }
@@ -12374,7 +12378,7 @@ static volatile long long *fk_roster_map(void) {
     return fk_roster_slots;
 }
 static long long fk_roster_adopt(long long pid) {
-    if (pid <= 0 || kill((int)pid, 0) != 0 || fk_pid_zombie(pid)) { return -1; }
+    if (pid <= 0 || !fk_pid_ours(pid)) { return -1; }
     char nm[32];
     long long w[FK_LIVE_WORDS];
     fk_live_pid_name(pid, nm);
@@ -12404,20 +12408,16 @@ static long long fk_roster_forget(long long pid) {
     return was;
 }
 /* kernel_page_bury pid: that pid's page, store and program surface are buried if its kernel has ended
- * (fk_live_bury_ended), and a roster slot still holding the pid is emptied; answers 1 when it buried.
- * kernel_page_bury -pid only asks: 1 when that pid's page could be buried, nothing unlinked. Urs asked on
- * 2026-09-11 to be asked before a page another kernel left is unlinked, so such a page goes only by this
- * call, one pid at a time; rce-ended (form/form-stdlib/roster-census.bml) reads them all and buries none. */
-static long long fk_page_bury(long long p) {
-#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
-    long long pid = p < 0 ? 0 - p : p;
-    if (!fk_live_bury_ended(pid, p > 0)) { return 0; }
-    if (p > 0) { fk_roster_forget(pid); }
+ * (fk_live_ended), and a roster slot still holding the pid is emptied; answers 1 when it buried.
+ * kernel_page_ended pid asks the same question and unlinks nothing. Urs asked on 2026-09-11 to be asked
+ * before a page another kernel left is unlinked: such a page goes by this call, one pid at a time, or by
+ * the roster's dead-slot sweep, which he kept. rce-ended (form/form-stdlib/roster-census.bml) reads them
+ * all and buries none. */
+static long long fk_page_bury(long long pid) {
+    if (!fk_live_ended(pid)) { return 0; }
+    fk_live_bury(pid);
+    fk_roster_forget(pid);
     return 1;
-#else
-    (void)p;
-    return 0;
-#endif
 }
 static long long fk_live_read_page(const char *name, long long *out) {
     long long gh = fk_gift_open(name, 0, 0);
@@ -13819,7 +13819,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * fs_mkfifo. The ear's lanes reached for `sh -c` only to place three file
          * descriptors and to ask whether a pid answers; see fk_host_door. */
         /* modes 20-22: kernel_roster_adopt, kernel_roster_forget, kernel_page_bury -- see fk_roster_adopt;
-         * mode 23: host_process -- see fk_host_process. */
+         * mode 23: host_process -- see fk_host_process; mode 24: kernel_page_ended -- see fk_page_bury. */
         if ((fm201 >> 1) >= 17) { return fk_host_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) >= 10) { return fk_spk_door(fm201 >> 1, fx201); }
         /* modes 4-8: the binary form (value_kind, recipe_to_bytes, bytes_to_recipe,
@@ -14160,7 +14160,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long k162 = 255;
         while (k162 >= 0) {
             long long pid162 = slots162[k162];
-            if (pid162 > 0 && kill((int)pid162, 0) == 0 && !fk_pid_zombie(pid162)) {
+            if (pid162 > 0 && fk_pid_ours(pid162)) {
                 char nm162[32];
                 long long w162[FK_LIVE_WORDS];
                 fk_live_pid_name(pid162, nm162);
@@ -19260,7 +19260,7 @@ static void fk_src_sweep_dead_temps(const char *fkb_path) {
         if (pid <= 0 || pid == self) {
             continue;
         }
-        if ((kill((int)pid, 0) == 0 || errno != ESRCH) && !fk_pid_zombie(pid)) {
+        if (!fk_pid_gone(pid)) {
             continue;
         }
         char victim[4600];
