@@ -8307,40 +8307,49 @@ static void fk_mc(long long c) {
     char b = c;
     write(2, &b, 1);
 }
+/* The melt's two walks go along a list's tail in a loop and into its head by recursion, as fk_smark does: a list
+ * of any length costs one frame per level of nesting, never one per cell. Walking the tail by recursion, a live
+ * list of a few million cells ran the evaluation thread off its stack in the middle of a melt. */
 static long long fk_mlive(long long b) {
-    if ((b & 1) == 0) {
-        return 0;
+    long long n = 0;
+    while ((b & 1) != 0) {
+        long long p = b >> 1;
+        if (p >= FK_PAIR_BASE || p < 1 || !FK_POK(p) || fk_fw[p] != 0) { return n; }
+        fk_fw[p] = 0 - 1;
+        n = n + 1 + fk_mlive(FK_HH(p));
+        b = FK_HT(p);
     }
-    long long p = b >> 1;
-    if (p >= FK_PAIR_BASE) { return 0; }
-    if (p < 1 || !FK_POK(p)) {
-        return 0;
-    }
-    if (fk_fw[p] != 0) {
-        return 0;
-    }
-    fk_fw[p] = 0 - 1;
-    return 1 + fk_mlive(FK_HT(p)) + fk_mlive(FK_HH(p));
+    return n;
 }
+/* each cell is placed, and its forward set, before its head is copied; its tail slot is filled once the next cell
+ * is placed, or with the word itself when the tail is not a pair still to copy */
 static long long fk_mcopy(long long b) {
     if ((b & 1) == 0) {
         return b;
     }
     long long p = b >> 1;
-    if (p >= FK_PAIR_BASE) { return b; }
-    if (p < 1 || !FK_POK(p)) {
+    if (p >= FK_PAIR_BASE || p < 1 || !FK_POK(p)) {
         return b;
     }
     if (fk_fw[p] > 0) {
         return (fk_fw[p] << 1) | 1;
     }
-    long long t2 = fk_mcopy(FK_HT(p));
-    long long h2 = fk_mcopy(FK_HH(p));
-    fk_nhp = fk_nhp + 1;
-    fk_nh[fk_nhp] = h2;
-    fk_nt[fk_nhp] = t2;
-    fk_fw[p] = fk_nhp;
-    return (fk_nhp << 1) | 1;
+    long long first = 0, prev = 0;
+    while (1) {
+        fk_nhp = fk_nhp + 1;
+        long long q = fk_nhp;
+        fk_fw[p] = q;
+        fk_nt[q] = 1;
+        if (prev != 0) { fk_nt[prev] = (q << 1) | 1; } else { first = q; }
+        fk_nh[q] = fk_mcopy(FK_HH(p));
+        long long t = FK_HT(p);
+        long long tp = t >> 1;
+        if ((t & 1) == 0 || tp >= FK_PAIR_BASE || tp < 1 || !FK_POK(tp)) { fk_nt[q] = t; break; }
+        if (fk_fw[tp] > 0) { fk_nt[q] = (fk_fw[tp] << 1) | 1; break; }
+        prev = q;
+        p = tp;
+    }
+    return (first << 1) | 1;
 }
 static long long fk_clo_mlive_roots(void) {
     long long nlive = 0;
