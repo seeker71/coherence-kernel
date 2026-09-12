@@ -14,10 +14,11 @@ surface; it only confirms a recipe computes the same value four ways on the
 
 ## The three
 
-- `go/main.go` (1,524 lines), `rust/src/main.rs` (1,331), `ts/main.ts` (1,678) —
-  counted 2026-09-04. Each keeps ONLY the independent parse + eval core.
+- `go/main.go` (1,498 lines), `rust/src/main.rs` (1,315), `ts/main.ts` (1,644) —
+  counted 2026-09-12. Each keeps ONLY the independent parse + eval core.
 
-Surface covered: integer + int64 + float + string + bool literals; `add sub mul
+Surface covered: integer + int64 + float + string literals, and true/false as the
+ints 1/0 (axiom-1); `add sub mul
 div mod`; `eq ne lt le gt ge`; `if let do seq`; `defn` + user calls (tail-call
 optimized); `and or not`; `head tail cons list nth empty len`; `str_concat
 str_eq str_len str_find substring char_at int_to_str`; `value_eq`; `match`
