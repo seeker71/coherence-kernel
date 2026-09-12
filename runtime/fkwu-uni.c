@@ -9970,6 +9970,7 @@ static int fk_f64_str_slot(int n);
 static int fk_f64_hidden_alloc(const int *types);
 static int fk_f64_is_param_ref(long long i, long long arity);
 static int fk_f64_narrow(int n, int to);
+static int fk_f64_word_resolve(int *n, int *tp, int other);
 static void fk_f64_len_zero(int *a, int *b);
 static int fk_f64_is_empty(int n);
 static int fk_f64_admit(long long i, long long arity, const int *types, int *out);
@@ -10172,8 +10173,8 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
             if (tb == 0) { return 0; }
             if (ct == 102 && (ta == 4 || ta == 5) && (tb == 4 || tb == 5) && (fk_f64_is_empty(ca) || fk_f64_is_empty(cb))) { ta = 1; tb = 1; } /* against the empty list: identity; two other lists read their content, the walker's */
             else {
-                if (ta == 5) { ca = fk_f64_narrow(ca, 1); if (ca < 0) { return 0; } ta = 1; }
-                if (tb == 5) { cb = fk_f64_narrow(cb, 1); if (cb < 0) { return 0; } tb = 1; }
+                if (!fk_f64_word_resolve(&ca, &ta, tb)) { return 0; } /* a head compared: a float where it meets a float, else an int */
+                if (!fk_f64_word_resolve(&cb, &tb, ta)) { return 0; }
                 fk_f64_len_zero(&ca, &cb);
             }
             if (ta == 3 || tb == 3 || ta == 4 || tb == 4) { fk_f64_refuse_tag = ct; return 0; }
@@ -10195,7 +10196,10 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         int tt = fk_f64_admit(thn, arity, types, &a);
         if (tt == 0) { return 0; }
         int te = fk_f64_admit(els, arity, types, &b);
-        if (te == 0 || te != tt) { return 0; }
+        if (te == 0) { return 0; }
+        if (!fk_f64_word_resolve(&a, &tt, te)) { return 0; } /* a head as one arm: a float where the other arm is a float, else an int */
+        if (!fk_f64_word_resolve(&b, &te, tt)) { return 0; }
+        if (te != tt) { return 0; }
         int rs = -1;
         if (tt == 3) {
             /* string arms: each must ride a slot, and the answer rides a hidden slot both arms move into */
@@ -10451,8 +10455,8 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         if (ta == 0) { return 0; }
         int tb = fk_f64_admit(fk_node[i][2], arity, types, &b);
         if (tb == 0) { return 0; }
-        if (ta == 5) { a = fk_f64_narrow(a, 1); if (a < 0) { return 0; } ta = 1; } /* a word a head handed up: taken for an int, or the walker answers */
-        if (tb == 5) { b = fk_f64_narrow(b, 1); if (b < 0) { return 0; } tb = 1; }
+        if (!fk_f64_word_resolve(&a, &ta, tb)) { return 0; } /* a word a head handed up: a float where it meets a float, else an int, or the walker answers */
+        if (!fk_f64_word_resolve(&b, &tb, ta)) { return 0; }
         if (ta == 3 || tb == 3 || ta == 4 || tb == 4) { fk_f64_refuse_tag = t; return 0; } /* arithmetic on a string pointer or a list word is no recipe's meaning */
         int op = t == 3 ? 0 : (t == 4 ? 1 : (t == 42 ? 2 : (t == 10 ? 3 : 4)));
         if (ta == 2 || tb == 2) {
@@ -10488,7 +10492,7 @@ static int fk_f64_prog_refs(int n, int k) {
     if (p->kind == 14) { return p->a == k || fk_f64_prog_refs(p->b, k); }
     if (p->kind == 20 || p->kind == 21) { return p->a == k || fk_f64_prog_refs(p->b, k) || fk_f64_prog_refs((int)p->ilit, k); }
     if (p->kind == 17) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k) || fk_f64_prog_refs((int)p->ilit, k); }
-    if (p->kind == 13 || p->kind == 24 || p->kind == 25 || p->kind == 26 || p->kind == 27 || p->kind == 28 || p->kind == 30) { return fk_f64_prog_refs(p->a, k); }
+    if (p->kind == 13 || p->kind == 24 || p->kind == 25 || p->kind == 26 || p->kind == 27 || p->kind == 28 || p->kind == 30 || p->kind == 34) { return fk_f64_prog_refs(p->a, k); }
     if (p->kind == 32) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
     if (p->kind == 33) { int j = 0; if (fk_f64_prog_refs(p->s, k)) { return 1; } while (j < p->b) { if (fk_f64_prog_refs(fk_f64_call_args[p->a][j], k)) { return 1; } j = j + 1; } return 0; }
     if (p->kind == 19) { int j = 0; while (j < p->b) { if (fk_f64_prog_refs(fk_f64_call_args[p->a][j], k)) { return 1; } j = j + 1; } return 0; }
@@ -10509,7 +10513,16 @@ static int fk_f64_str_answer(int n) { return fk_f64_str_slot(n) >= 0; }
  * any other word leaves for the overflow block, and the walker answers */
 static int fk_f64_narrow(int n, int to) {
     if (n < 0) { return -1; }
-    return fk_f64_push(to == 1 ? 28 : 30, n, 0, 0.0, 0);
+    return fk_f64_push(to == 1 ? 28 : (to == 2 ? 34 : 30), n, 0, 0.0, 0);
+}
+/* a word a head handed up, resolved against the other operand's type: to a float where it meets a float, else to an int */
+static int fk_f64_word_resolve(int *n, int *tp, int other) {
+    if (*tp != 5) { return 1; }
+    int to = (other == 2) ? 2 : 1;
+    int r = fk_f64_narrow(*n, to);
+    if (r < 0) { return 0; }
+    *n = r; *tp = to;
+    return 1;
 }
 /* the empty list as a literal: (empty), the word 1. eq against it is identity; eq over two other lists reads their content on
  * every kernel (2026-09-12), a walk this lane does not take, and eq over two words of unknown kind takes both for ints. */
@@ -10887,6 +10900,35 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         if (*ntemp >= 16) { return -1; }
         int rd = 16 + *ntemp; *ntemp = *ntemp + 1;
         if (!fk_f64_put(words, wn, 0x9E620000U | ((unsigned int)(ra - 100) << 5) | (unsigned int)rd)) { return -1; } /* SCVTF Dd, Xn */
+        return rd;
+    }
+    if (p->kind == 34) {
+        /* a word a head handed up, taken for a float: a LOCAL float box, the double loaded from the pool; any other word
+         * leaves for the overflow block and the walker answers. Two checks suffice: (1) v <= fk_fbase-3 (a float box at
+         * all -- and then fi = (fk_fbase-v-1)>>1 is at least 1); (2) fi <= fk_fp UNSIGNED, which a field float (fi >=
+         * FK_FLT_BASE, far above the local pool's top) fails too. fi is the decode fk_isf/fk_fidx use. */
+        int ri = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
+        if (ri < 100) { return -1; }
+        fk_f64_release(ri, ntemp, nitemp);
+        if (fk_f64_ovf_n + 2 > FK_F64_OVF_CAP || *ntemp >= 16) { return -1; }
+        unsigned int xi = (unsigned int)(ri - 100);
+        if (!fk_f64_mov64(words, wn, 9U, (unsigned long long)(fk_fbase - 3))) { return -1; }
+        if (!fk_f64_put(words, wn, 0xEB09001FU | (xi << 5))) { return -1; }                 /* CMP Xi, X9 */
+        fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
+        if (!fk_f64_put(words, wn, 0x5400000CU)) { return -1; }                              /* B.GT overflow: Xi > fk_fbase-3, not a float box */
+        if (!fk_f64_mov64(words, wn, 9U, (unsigned long long)fk_fbase)) { return -1; }
+        if (!fk_f64_put(words, wn, 0xCB000129U | (xi << 16))) { return -1; }                 /* SUB X9, X9, Xi */
+        if (!fk_f64_put(words, wn, 0xD1000529U)) { return -1; }                              /* SUB X9, X9, #1 */
+        if (!fk_f64_put(words, wn, 0xD341FD29U)) { return -1; }                              /* LSR X9, X9, #1: fi (>= 1) */
+        if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)&fk_fp)) { return -1; }
+        if (!fk_f64_put(words, wn, 0xF9400210U)) { return -1; }                              /* LDR X16, [X16]: fk_fp */
+        if (!fk_f64_put(words, wn, 0xEB10013FU)) { return -1; }                              /* CMP X9, X16 */
+        fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
+        if (!fk_f64_put(words, wn, 0x54000008U)) { return -1; }                              /* B.HI overflow: fi > fk_fp (unsigned) -- a field float fails here too */
+        if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)&fk_fv)) { return -1; }
+        if (!fk_f64_put(words, wn, 0xF9400210U)) { return -1; }                              /* LDR X16, [X16]: the float pool's base */
+        int rd = 16 + *ntemp; *ntemp = *ntemp + 1;
+        if (!fk_f64_put(words, wn, 0xFC697A00U | (unsigned int)rd)) { return -1; }           /* LDR Dd, [X16, X9, LSL #3] */
         return rd;
     }
     if (p->kind == 14) {
