@@ -3917,7 +3917,7 @@ impl Kernel {
             _ => Value::Str(args[0].as_int().to_string().into()),
         });
         self.register_native("str_to_int", cat_method(), |_, _, args| {
-            Value::Int(args[0].as_str().parse().unwrap_or(0))
+            Value::Int(leading_int(&args[0].as_str()))
         });
         // float_to_int — truncate a float toward zero, exactly Python's int() on a
         // float. The missing leaf between str_to_float and an integer: it lets a
@@ -4859,11 +4859,9 @@ impl Kernel {
         });
         // ---- bitwise primitives -----------------------------------
         // True kernel primitives — cannot be expressed in pure Form
-        // without exponential cost. Operate on 32-bit-unsigned semantics
-        // (high bits masked out) so SHA-256-style recipes can compose
-        // round functions over machine-word integers consistently.
-        // Sibling parity: same masking, same shift semantics, on all
-        // three kernels.
+        // without exponential cost. band/bor/bxor combine the whole i64
+        // word; the _u32 doors narrow to a 32-bit word so SHA-256-style
+        // recipes compose round functions over machine words.
         self.register_native("band", cat_method(), |_, _, args| {
             Value::Int(args[0].as_int() & args[1].as_int())
         });
@@ -7397,6 +7395,32 @@ fn fold_extremum(args: &[Value], name: &str, want_max: bool) -> i64 {
         }
     }
     best
+}
+
+// leading_int — str_to_int's reading, the one core.fk's str_to_int gives fkwu:
+// leading space, tab, LF and CR skipped, one leading "-" negates, and the digits
+// run to the first non-digit. Text with no digits reads 0; the fold wraps at 64
+// bits like every i64 fold.
+fn leading_int(s: &str) -> i64 {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    let neg = i < b.len() && b[i] == b'-';
+    if neg {
+        i += 1;
+    }
+    let mut n: i64 = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        n = n.wrapping_mul(10).wrapping_add((b[i] - b'0') as i64);
+        i += 1;
+    }
+    if neg {
+        n.wrapping_neg()
+    } else {
+        n
+    }
 }
 
 fn cat_method() -> NodeID {
