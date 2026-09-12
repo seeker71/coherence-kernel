@@ -15007,6 +15007,27 @@ static long long fk_value_str(long long v) {
     fk_valstr_word(v, 0);
     return fk_sbuf(fk_valstr_buf, fk_valstr_len);
 }
+/* substring as a standalone word->word primitive (mode 9): the byte-indexed cut of the string word `sword` from `a`
+ * to `b`, clamped to [0,len], "" when the range is empty/reversed or `sword` is not a string, then interned. THE ONE
+ * MEANING OF THE CUT lives here so the mode-9 walker arm and the JIT leaf's substring call share exactly one body.
+ * `a`/`b` are already untagged. FK_SBYTES(ss) is re-read each iteration because fk_store_grow moves fk_sb. */
+static long long fk_substring_word(long long sword, long long a, long long b) {
+    long long ss = fk_stri(sword);
+    if (ss < 0 || !FK_SOK(ss)) { return fk_strv(fk_sintern(fk_sbp, 0)); }
+    long long sl = FK_SLEN(ss);
+    if (a < 0) { a = 0; }
+    if (b > sl) { b = sl; }
+    if (b <= a) { return fk_strv(fk_sintern(fk_sbp, 0)); }
+    long long ln = b - a;
+    while (fk_sbp + ln > fk_scap_b) {
+        fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+        fk_scap_b = fk_scap_b * 2;
+        fk_sb_check();
+    }
+    long long j = 0;
+    while (j < ln) { fk_sb[fk_sbp + j] = FK_SBYTES(ss)[a + j]; j = j + 1; }
+    return fk_strv(fk_sintern(fk_sbp, ln));
+}
 static long long fk_fb_door(long long mode, long long x) {
     if (mode == 4) { return fk_value_kind(x); }
     if (mode == 5) {
@@ -15805,40 +15826,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 return fk_nothing;
             }
             long long ws201 = fk_walk(fk_node[i][2], fp);
-            fk_vp(ws201);
-            long long ss201 = fk_stri(ws201);
+            fk_vp(ws201); /* protect the string word across the range walks (which may allocate) */
             long long a201 = fk_walk(fk_node[rn201][1], fp) >> 1;
             long long b201 = fk_walk(fk_node[rn201][2], fp) >> 1;
             fk_vsp = fk_vsp - 1;
-            if (ss201 < 0 || !FK_SOK(ss201)) {
-                return fk_strv(fk_sintern(fk_sbp, 0));
-            }
-            long long sl201 = FK_SLEN(ss201);
-            if (a201 < 0) {
-                a201 = 0;
-            }
-            if (b201 > sl201) {
-                b201 = sl201;
-            }
-            if (b201 <= a201) {
-                return fk_strv(fk_sintern(fk_sbp, 0));
-            }
-            long long ln201 = b201 - a201;
-            while (fk_sbp + ln201 > fk_scap_b) {
-                fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
-                fk_scap_b = fk_scap_b * 2;
-                fk_sb_check();
-            }
-            /* FK_SBYTES is re-read AFTER the grow -- fk_store_grow moves fk_sb, and a
-             * pointer taken before it would copy from freed bytes. A plain byte loop,
-             * not memcpy: memcpy is declared only inside this file's __APPLE__ arm, and
-             * str_concat (tag 27) copies its bytes exactly this way on every host. */
-            long long j201 = 0;
-            while (j201 < ln201) {
-                fk_sb[fk_sbp + j201] = FK_SBYTES(ss201)[a201 + j201];
-                j201 = j201 + 1;
-            }
-            return fk_strv(fk_sintern(fk_sbp, ln201));
+            return fk_substring_word(ws201, a201, b201); /* the ONE meaning of the cut; the JIT leaf calls the same */
         }
         long long fx201 = fk_walk(fk_node[i][2], fp);
         /* modes 10-16: the SPEAKING family -- the mouth that answers the sense_mic_* ears.
