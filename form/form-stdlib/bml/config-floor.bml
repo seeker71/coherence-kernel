@@ -1,0 +1,71 @@
+// config-floor.bml — the kernel config's database URL in Form, for the kernels that carry no config native.
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/pg-floor.bml
+//
+// Go and Rust carry config_database_url as a native over the kernel config: api/config/api.json in the
+// nearest directory at or above the working one that holds it, with ~/.coherence-network/config.json
+// laid over it by a deep merge, then database.url, else database_url, trimmed. A present native answers
+// its name, so this definition stands in only where none does. It reads the same two layers through
+// json.fk, asks the shell for the home directory once per process, and answers "" with pg_last_error
+// set to "database.url is not configured" when neither key holds a URL, as the natives do.
+//
+// fkwu carries host_capture, the door this reading takes to the home directory; TS carries none, so the
+// reading does not run there. json.fk reads any text as JSON, so a malformed layer is read for what of
+// it parses where the natives refuse it.
+section [form.bml] {
+ let cfgf-state = record_new(0);
+ class ConfigFloor {
+  // ── text ─────────────────────────────────────────────────────────────────────
+  def cfgf-blank?(c) = or(eq(c, 32), or(eq(c, 9), or(eq(c, 10), eq(c, 13))));
+  def cfgf-trim-left(s, i) = if ge(i, str_len(s)) then i else if cfgf-blank?(str-byte-at(s, i)) then cfgf-trim-left(s, add(i, 1)) else i;
+  def cfgf-trim-right(s, j) = if le(j, 0) then 0 else if cfgf-blank?(str-byte-at(s, sub(j, 1))) then cfgf-trim-right(s, sub(j, 1)) else j;
+  def cfgf-trim(s) {
+   let a = cfgf-trim-left(s, 0);
+   let b = cfgf-trim-right(s, str_len(s));
+   if ge(a, b) then "" else substring(s, a, b);
+  }
+
+  // ── two layers of config text, merged the way the natives merge them ─────────
+  def cfgf-object?(node) = node_eq(node_category(node), JSON-OBJECT());
+  def cfgf-text(node) = if eq(node_type(node), 2) then cfgf-trim(node_value(node)) else "";
+  // database.url after a deep merge of overlay over base: an overlay database object without a url
+  // keeps the base's; any other overlay database replaces the base's whole
+  def cfgf-url-node(base, overlay) {
+   let db-base = json-object-get(base, "database");
+   let db-over = json-object-get(overlay, "database");
+   if not(json-object-has?(overlay, "database")) then json-object-get(db-base, "url")
+   else if and(cfgf-object?(db-over), and(cfgf-object?(db-base), not(json-object-has?(db-over, "url")))) then json-object-get(db-base, "url")
+   else json-object-get(db-over, "url");
+  }
+  def cfgf-flat(base, overlay) = if json-object-has?(overlay, "database_url") then cfgf-text(json-object-get(overlay, "database_url")) else cfgf-text(json-object-get(base, "database_url"));
+  // the database URL two layers of config text configure, or "" when neither does
+  def cfgf-database-url(base-text, overlay-text) {
+   let base = parse-json("api.json", base-text);
+   let overlay = parse-json("config.json", overlay-text);
+   let url = cfgf-text(cfgf-url-node(base, overlay));
+   if gt(str_len(url), 0) then url else cfgf-flat(base, overlay);
+  }
+
+  // ── where the layers stand ───────────────────────────────────────────────────
+  def cfgf-layer(path) = if ge(file_size(path), 0) then read_file(path) else "{}";
+  def cfgf-cut(dir, i) = if gt(i, 0) then substring(dir, 0, i) else if gt(str_len(dir), 1) then "/" else "";
+  def cfgf-parent-at(dir, i) = if lt(i, 0) then "" else if eq(str-byte-at(dir, i), 47) then cfgf-cut(dir, i) else cfgf-parent-at(dir, sub(i, 1));
+  // the nearest directory at or above dir holding api/config/api.json, or "" when none does
+  def cfgf-root(dir) = if eq(str_len(dir), 0) then "" else if ge(file_size(str_concat(dir, "/api/config/api.json")), 0) then dir else cfgf-root(cfgf-parent-at(dir, sub(str_len(dir), 1)));
+  // the home directory, asked of the shell once per process
+  def cfgf-home() = if record_has(cfgf-state, "home") then record_get(cfgf-state, "home") else cfgf-keep-home(host_capture(list("sh", "-c", "printf %s \"$HOME\"")));
+  def cfgf-keep-home(got) {
+   let home = if nothing?(got) then "" else got;
+   let kept = record_set(cfgf-state, "home", home);
+   home;
+  }
+  def config_database_url() {
+   let root = cfgf-root(host_cwd());
+   let base = if eq(str_len(root), 0) then "{}" else cfgf-layer(str_concat(root, "/api/config/api.json"));
+   let home = cfgf-home();
+   let overlay = if eq(str_len(home), 0) then "{}" else cfgf-layer(str_concat(home, "/.coherence-network/config.json"));
+   let url = cfgf-database-url(base, overlay);
+   if gt(str_len(url), 0) then pgf-ok(url) else pgf-fail("database.url is not configured", "");
+  }
+ }
+ 0;
+}
