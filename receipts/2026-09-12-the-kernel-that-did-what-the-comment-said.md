@@ -66,8 +66,8 @@ looser reading, and core.fk's own comment had already filed the split as a known
 receipt that is not there. The piece was about 2^53; it would have been easy to leave the spread where
 it was filed. What turned it was reading the reason written beside fkwu's loop: shell output ends in
 a newline, and a reader that takes only a bare integer turns the body's own `grep -c`, `"248\n"`,
-into 0. The loose reading was the one with a reason, and it now has one native in three kernels and a band that asks
-all four.
+into 0. The loose reading was the one with a reason, and it now has one native in three kernels and
+a band that asks all four.
 
 Frontier word, row 1478: **letterkept**, a sibling that keeps the letter of a shared comment while
 the others keep the code; it diverges by being faithful.
