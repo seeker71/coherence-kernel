@@ -357,7 +357,7 @@ static long long fk_host_spawn_arm(long long argv155, long long t);
 #define FK_STORE_STR_CELLS (1LL << 25)
 #define FK_STORE_FLOATS (1LL << 26)
 static void *fk_store_take(char letter, long long bytes);
-static void *fk_store_grow(char letter, void *p, long long old_bytes, long long new_bytes, long long reserved, int zero);
+static void *fk_store_grow(char letter, void **pp, long long old_bytes, long long new_bytes, long long reserved, int zero);
 static void fk_store_go_private(void);
 /* the program surface: the AST rows (A), the source text (S) and the defn table + header (D) of THIS kernel,
  * per-pid objects /fg-c<pid>-A|S|D, so another process reads a defn's body nodes and source span where they live */
@@ -785,7 +785,7 @@ static long long fk_fbox(double d) {
     }
     fk_fp = fk_fp + 1;
     if (fk_fp >= fk_fcap) {
-        fk_fv = (double *)fk_store_grow('F', fk_fv, fk_fcap * 8, fk_fcap * 16, FK_STORE_FLOATS * 8, 0);
+        fk_fv = (double *)fk_store_grow('F', (void **)&fk_fv, fk_fcap * 8, fk_fcap * 16, FK_STORE_FLOATS * 8, 0);
         fk_fcap = fk_fcap * 2;
         if (fk_fv == 0) {
             fk_die("fk_fbox: out of memory growing float pool");
@@ -1135,8 +1135,8 @@ static long long fk_sintern(long long off, long long len) {
     }
     long long i = fk_sp;
     if (i >= fk_scap_s) {
-        fk_so = (long long *)fk_store_grow('O', fk_so, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
-        fk_sl = (long long *)fk_store_grow('L', fk_sl, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
+        fk_so = (long long *)fk_store_grow('O', (void **)&fk_so, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
+        fk_sl = (long long *)fk_store_grow('L', (void **)&fk_sl, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
         fk_scap_s = fk_scap_s * 2;
         fk_snext = realloc(fk_snext, fk_scap_s * 8);
         fk_sdead = realloc(fk_sdead, (unsigned long)fk_scap_s);
@@ -1908,7 +1908,7 @@ static long long fk_sbuf(const char *buf, long long n) {
     }
     fk_sinit();
     while (fk_sbp + n > fk_scap_b) {
-        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+        fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
         fk_sb_check();
     }
@@ -2369,7 +2369,7 @@ static long long fk_metal_buf_read_native(long long h, long long off, long long 
     }
     fk_sinit();
     while (fk_sbp + len > fk_scap_b) {
-        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+        fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
         fk_sb_check();
     }
@@ -3498,7 +3498,7 @@ static long long fk_mic_stream_read(long long maxbytes, long long wait_ms) {
     fk_sinit();
     long long base = fk_sbp;
     while (base + have > fk_scap_b) {
-        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+        fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
         fk_sb_check();
     }
@@ -4933,16 +4933,16 @@ static void fk_nodes_grow(void) {
     long long oc = fk_node_cap;
     long long nc = oc * 2;
     if (fk_store_shared && nc > FK_STORE_NODE_CELLS) { fk_store_go_private(); }
-    fk_nkind = (long long *)fk_store_grow('k', fk_nkind, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
-    fk_ncat = (long long *)fk_store_grow('c', fk_ncat, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
-    fk_nkids = (long long *)fk_store_grow('i', fk_nkids, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
-    fk_nval = (long long *)fk_store_grow('v', fk_nval, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
-    fk_nid = (long long (*)[4])fk_store_grow('n', fk_nid, oc * 32, nc * 32, FK_STORE_NODE_CELLS * 32, 1);
+    fk_nkind = (long long *)fk_store_grow('k', (void **)&fk_nkind, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_ncat = (long long *)fk_store_grow('c', (void **)&fk_ncat, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nkids = (long long *)fk_store_grow('i', (void **)&fk_nkids, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nval = (long long *)fk_store_grow('v', (void **)&fk_nval, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nid = (long long (*)[4])fk_store_grow('n', (void **)&fk_nid, oc * 32, nc * 32, FK_STORE_NODE_CELLS * 32, 1);
     fk_nhash_memo = (long long *)fk_nodes_grow_col(fk_nhash_memo, oc, nc, 8);
-    fk_nsfile = (long long *)fk_store_grow('f', fk_nsfile, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
-    fk_nsline = (long long *)fk_store_grow('l', fk_nsline, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
-    fk_nscol = (long long *)fk_store_grow('o', fk_nscol, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
-    fk_nsattr = (long long *)fk_store_grow('a', fk_nsattr, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nsfile = (long long *)fk_store_grow('f', (void **)&fk_nsfile, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nsline = (long long *)fk_store_grow('l', (void **)&fk_nsline, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nscol = (long long *)fk_store_grow('o', (void **)&fk_nscol, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nsattr = (long long *)fk_store_grow('a', (void **)&fk_nsattr, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
     fk_fbroots = (long long *)fk_nodes_grow_col(fk_fbroots, oc, nc, 8);
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
     fk_inram_node_slot = (unsigned long long *)fk_nodes_grow_col(fk_inram_node_slot, oc, nc, sizeof(*fk_inram_node_slot));
@@ -8430,6 +8430,7 @@ static void fk_smelt(void) {
     k = 0;
     while (k < fk_node_count) {
         if (fk_node[k][0] == 24) { long long si = fk_node[k][1]; if (si >= 0 && si < fk_sp) { fk_smk[si] = 1; } }
+        if (fk_node[k][0] == FK_TAG_CONST_HOLD && fk_node[k][3] != 0) { fk_smark(fk_node[k][2]); }
         k = k + 1;
     }
     long long freed = 0;
@@ -8498,6 +8499,12 @@ static void fk_melt(void) {
         k = k + 1;
     }
     nlive = nlive + fk_clo_mlive_roots();
+    /* the once-holds: a top-level let's held value is a root, so the melt keeps it and no read builds it again */
+    k = 0;
+    while (k < fk_node_count) {
+        if (fk_node[k][0] == FK_TAG_CONST_HOLD && fk_node[k][3] != 0) { nlive = nlive + fk_mlive(fk_node[k][2]); }
+        k = k + 1;
+    }
     long long ncap = fk_cap;
     if (nlive * 2 > fk_cap) {
         ncap = fk_cap * 2;
@@ -8557,6 +8564,11 @@ static void fk_melt(void) {
         k = k + 1;
     }
     fk_clo_mcopy_roots();
+    k = 0;
+    while (k < fk_node_count) {
+        if (fk_node[k][0] == FK_TAG_CONST_HOLD && fk_node[k][3] != 0) { fk_node[k][2] = fk_mcopy(fk_node[k][2]); }
+        k = k + 1;
+    }
     if (fk_store_shared) { fk_heap_alt_h = fk_hh; fk_heap_alt_t = fk_ht; fk_heap_gen = 1 - fk_heap_gen; } else { free(fk_hh); free(fk_ht); }
     free(fk_fw);
     fk_hh = fk_nh;
@@ -9127,7 +9139,7 @@ static long long fk_walk_body(long long i, long long fp) {
                      * reserved before any pointer is taken so the pool cannot move under them; word 17 takes the answer's length */
                     fk_sinit();
                     while (fk_sbp + scr194 > fk_scap_b) {
-                        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+                        fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
                         fk_scap_b = fk_scap_b * 2;
                         fk_sb_check();
                     }
@@ -11726,15 +11738,17 @@ static long long fk_walk(long long i, long long fp) {
         return fk_vs[fp];
     }
     if (t == FK_TAG_CONST_HOLD) {
-        /* the once-hold: first read walks the initializer and holds the
-         * value in the node's own fields; later reads return it. The gen
-         * stamp is read AFTER the walk — the build itself may melt. */
-        if (fk_node[i][3] != 0 && (fk_node[i][3] >> 1) == fk_melt_gen) {
+        /* the once-hold: the first read walks the initializer and holds the
+         * value in the node's own fields (node[3] 1 once held); every later
+         * read returns it. The held value is a melt root -- fk_melt copies
+         * it, fk_smelt marks it -- so a let is built once, whatever melts
+         * between its reads, as the Go arm builds it. */
+        if (fk_node[i][3] != 0) {
             return fk_node[i][2];
         }
         long long v190 = fk_walk(fk_node[i][1], fp);
         fk_node[i][2] = v190;
-        fk_node[i][3] = (fk_melt_gen << 1) | 1;
+        fk_node[i][3] = 1;
         return v190;
     }
     if (t == 3) {
@@ -12813,13 +12827,15 @@ static void fk_store_go_private(void) {
     fk_store_unlink_pid((long long)getpid());
 }
 /* growth of one table: inside its reservation nothing moves; past it the whole store goes private, then realloc as before.
- * A caller moves its capacity only after this returns: fk_store_go_private copies every table by its capacity, so a
- * capacity moved first has the copy read past the end of that table's mapping. */
-static void *fk_store_grow(char letter, void *p, long long old_bytes, long long new_bytes, long long reserved, int zero) {
+ * Going private copies every table out of shared memory, this one with them, and unmaps what it left, so the table is
+ * read through its home (*pp) after that, never through the mapping it left. A caller moves its capacity only after
+ * this returns: fk_store_go_private copies every table by its capacity, so a capacity moved first has the copy read
+ * past the end of that table's mapping. */
+static void *fk_store_grow(char letter, void **pp, long long old_bytes, long long new_bytes, long long reserved, int zero) {
     (void)letter;
-    if (fk_store_shared && p != 0 && new_bytes <= reserved) { return p; }
+    if (fk_store_shared && *pp != 0 && new_bytes <= reserved) { return *pp; }
     if (fk_store_shared) { fk_store_go_private(); }
-    char *q = realloc(p, (unsigned long)new_bytes);
+    char *q = realloc(*pp, (unsigned long)new_bytes);
     if (q == 0) { fk_die("fk_store_grow: out of memory growing a value table"); }
     if (zero) { long long k = old_bytes; while (k < new_bytes) { q[k] = 0; k = k + 1; } }
     return q;
@@ -12920,7 +12936,7 @@ static long long *fk_src_dep_text_len;
 /* append n bytes to the string builder at fk_sbp, growing it as every arm does */
 static void fk_sappend(const char *bytes, long long n) {
     while (fk_sbp + n > fk_scap_b) {
-        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+        fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
         fk_sb_check();
     }
@@ -13200,7 +13216,7 @@ static long long fk_gift_take_str(long long gh) {
             }
             fk_sinit();
             while (fk_sbp + n > fk_scap_b) {
-                fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+                fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
                 fk_scap_b = fk_scap_b * 2;
                 fk_sb_check();
             }
@@ -14184,7 +14200,7 @@ static void fk_fb_collect(long long v) {
 }
 static void fk_fb_reserve(long long n) {
     while (fk_sbp + n > fk_scap_b) {
-        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+        fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
         fk_sb_check();
     }
@@ -14943,7 +14959,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         long long ln = FK_SLEN(sa) + FK_SLEN(sb);
         while (fk_sbp + ln > fk_scap_b) {
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+            fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
             fk_sb_check();
         }
@@ -15091,7 +15107,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return fk_strv(fk_sintern(fk_sbp, 0));
         }
         while (fk_sbp + 1 > fk_scap_b) {
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+            fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
             fk_sb_check();
         }
@@ -15399,7 +15415,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
             long long ln201 = b201 - a201;
             while (fk_sbp + ln201 > fk_scap_b) {
-                fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+                fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
                 fk_scap_b = fk_scap_b * 2;
                 fk_sb_check();
             }
@@ -16020,7 +16036,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 }
                 fk_sinit();
                 while (fk_sbp + n > fk_scap_b) {
-                    fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+                    fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
                     fk_scap_b = fk_scap_b * 2;
                     fk_sb_check();
                 }
@@ -16070,7 +16086,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         lseek(fd, off, 0);
         fk_sinit();
         while (fk_sbp + len > fk_scap_b) {
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+            fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
             fk_sb_check();
         }
@@ -16111,7 +16127,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         for (;;) {
             while (base + total + 65536 > fk_scap_b) {
                 void *sb0 = fk_sb;
-                fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+                fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
                 fk_scap_b = fk_scap_b * 2;
                 fk_sb_check();
                 if (fk_conf("FK_READ_WITNESS")) {
@@ -16436,7 +16452,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         fk_sinit();
         while (fk_sbp + max71 > fk_scap_b) {
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+            fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
             fk_sb_check();
         }
@@ -17244,7 +17260,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             rn = rn + 1;
         }
         while (fk_sbp + rn > fk_scap_b) {
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+            fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
             fk_sb_check();
         }
@@ -17326,7 +17342,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return fk_strv(fk_sintern(fk_sbp, 0));
         }
         while (fk_sbp + fk_gen_len > fk_scap_b) {
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+            fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
             fk_sb_check();
         }
@@ -17860,7 +17876,7 @@ static long long fk_smkstr(void) {
             }
         }
         while (fk_sbp + 1 > fk_scap_b) {
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+            fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
             fk_sb_check();
         }
@@ -18064,8 +18080,10 @@ static void fk_parse_top(void);
  * divergence cost 31.6M dispatches in one cold .bml compile. Every
  * reference to a top-level let now shares one hold node per const binding:
  * the first walk computes the value and holds it in the NODE'S OWN free
- * fields (node[2] value, node[3] the melt-gen stamp (gen<<1)|1, 0 = empty)
- * — the arm64-hint idiom, a melt un-vouches and the next read rebuilds.
+ * fields (node[2] value, node[3] 1 once held, 0 = empty). The held value
+ * is a melt root (fk_melt copies it, fk_smelt marks it), so it is built
+ * exactly once: a melt between two reads no longer runs the initializer
+ * again, its prints and clock reads with it.
  * fk_const_wrapp1[row] is the binding's hold node + 1 (0 = none yet), grown
  * with the const table below so a demand-doubled table never reads garbage;
  * a redefinition or reused row drops it. (FK_TAG_CONST_HOLD is #defined
@@ -18739,7 +18757,7 @@ static long long fk_sparse(void) {
             long long k = start;
             while (k < fk_spos) {
                 while (fk_sbp + 1 > fk_scap_b) {
-                    fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+                    fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
                     fk_scap_b = fk_scap_b * 2;
                     fk_sb_check();
                 }
@@ -21146,8 +21164,8 @@ static void fk_fkb_read_table_string(void) {
         return;
     }
     if (fk_sp >= fk_scap_s) {
-        fk_so = (long long *)fk_store_grow('O', fk_so, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
-        fk_sl = (long long *)fk_store_grow('L', fk_sl, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
+        fk_so = (long long *)fk_store_grow('O', (void **)&fk_so, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
+        fk_sl = (long long *)fk_store_grow('L', (void **)&fk_sl, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
         fk_scap_s = fk_scap_s * 2;
         fk_snext = realloc(fk_snext, fk_scap_s * 8);
         fk_sdead = realloc(fk_sdead, (unsigned long)fk_scap_s);
@@ -21158,7 +21176,7 @@ static void fk_fkb_read_table_string(void) {
         }
     }
     while (fk_sbp + n > fk_scap_b) {
-        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+        fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
         fk_sb_check();
     }
@@ -21252,7 +21270,7 @@ static long long fk_fkb_remap_field(long long tag, long long field, long long va
         return value + node_base;
     }
     if (tag == FK_TAG_CONST_HOLD && field >= 2) {
-        /* a hold node's memo (value + gen stamp) never travels: whatever a
+        /* a hold node's memo (value + held flag) never travels: whatever a
          * writer's process state left in these fields, a loaded image
          * starts with an empty hold and rebuilds on first read. */
         return 0;

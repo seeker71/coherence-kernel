@@ -12,21 +12,33 @@
 ; top-level const for the hold to apply and for `use` to see it (a defn
 ; frame cannot close over a do-local let).
 ;
+; The held value is a melt root: fk_melt copies it and fk_smelt marks it,
+; so a melt between two reads builds nothing again. The churn below keeps
+; its loop on the walker (a clock in its compare), whose conses melt: a lane
+; leaf grows the heap in place instead. The mark is named by the kernel's
+; pid, so a let read again after a melt would write to the same file.
+;
 ; bits:  1 the held value reads through three references (sum 21)
 ;        2 the initializer ran exactly ONCE (one line written)
 ;        4 the old call-by-name count (three) is absent
-; Verdict 7.
+;        8 after a walked churn of 20,000 conses, which melts the heap, a
+;          fourth read still finds one line
+; Verdict 15.
 ; PROOF LEVEL: FKWU + GO — go answers 7 too (witnessed 2026-09-03; host-exec pf-arm-mask 9). The once-hold is fkwu's const-hold; the sibling
 ; arms build top-level lets once already (witnessed by cost, 2026-09-02).
 ; preludes: form-stdlib/core.fk
 (defn ohb-build (m) (do (let e (host-exec (str_concat "echo built >> " m) "")) (list 7)))
-(let OHB-MARK (str_concat "/tmp/once-hold-band-" (int_to_str (now_unix_ms))))
+(let OHB-MARK (str_concat "/tmp/once-hold-band-" (host-exec "printf %s $PPID" "")))
 (let OHB-CLEAN (host-exec (str_concat "rm -f " OHB-MARK) ""))
 (let OHB-HELD (ohb-build OHB-MARK))
 (defn ohb-use () (head OHB-HELD))
 (let OHB-SUM (add (ohb-use) (add (ohb-use) (ohb-use))))
 (let OHB-COUNT (host-exec (str_concat "grep -c built " (str_concat OHB-MARK " | tr -d '\n'")) ""))
+(defn ohb-churn (n xs) (if (lt (host_monotonic_ms) 0) xs (if (le n 0) (len xs) (ohb-churn (sub n 1) (cons n xs)))))
+(let OHB-AFTER (add (ohb-churn 20000 (list)) (ohb-use)))
+(let OHB-COUNT2 (host-exec (str_concat "grep -c built " (str_concat OHB-MARK " | tr -d '\n'")) ""))
 (let OHB-SWEEP (host-exec (str_concat "rm -f " OHB-MARK) ""))
 (add (if (eq OHB-SUM 21) 1 0)
      (add (if (str_eq OHB-COUNT "1") 2 0)
-          (if (str_eq OHB-COUNT "3") 0 4)))
+          (add (if (str_eq OHB-COUNT "3") 0 4)
+               (if (if (eq OHB-AFTER 20007) (str_eq OHB-COUNT2 "1") false) 8 0))))
