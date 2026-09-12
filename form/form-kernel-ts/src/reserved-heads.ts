@@ -104,7 +104,6 @@ export const FKWU_RESERVED_HEADS: ReadonlySet<string> = new Set([
   "http_get",
   "if",
   "input_byte",
-  "int_to_str",
   "intern_node",
   "intern_trivial_bool",
   "intern_trivial_float",
