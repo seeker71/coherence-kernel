@@ -1,0 +1,90 @@
+; loop-lane-string-build-band.fk — the emit side of strings: a loop builds a string one byte at a time, and hands it back.
+;
+; The sixth rung of Urs's 2026-09-12 goal. Every rung before it built the load side (a byte, a length) and the call
+; side; int_to_str stayed a C mode of the leaf door, and the C twin of the recipe stood beside it. Now a loop's string
+; parameter can be its accumulator: (str_concat (byte_to_str e) acc) prepends a byte, (str_concat acc (byte_to_str e))
+; appends one -- a STRB into scratch the door reserves at the string pool's tail, the length moving at its frame word.
+; A loop or a leaf answers a string parameter or the accumulator: the door interns the pointer and length it hands
+; back. mod joins the int arms. When the scratch runs out the leaf says so and the walker answers that call, so a
+; bounded buffer stays exact. int_to_str is two such loops in core.fk; fkwu's mode 26 and the twin are gone.
+;
+; Verdict 255
+; PROOF LEVEL: FOURTH-ARM ONLY (the transparent lanes are fkwu's MAP_JIT arm64 door; a defn's native state is the 8th field of its hot row)
+; preludes: form-stdlib/core.fk
+;
+;   1   fstr-digits and fstr-neg-digits, driven hot, read native state 2; int_to_str agrees with the C writer's walker twin over 28 edge integers
+;   2   int_to_str of a float reads as value_str writes it, and of nothing reads "nothing"; the float test is arithmetic, exact at both tagged limits
+;   4   a prepend loop at state 2 builds 100 bytes; asked for 600 it leaves the scratch and the walker answers, byte-equal
+;   8   an append loop at state 2 agrees with its walker twin, inside the scratch and past it
+;   16  a byte outside 0..255 stores nothing, as byte_to_str answers "" -- the loop agrees with its twin
+;   32  mod in the lane: a loop over remainders of negative and positive words agrees with its twin at state 2
+;   64  a loop answering its string parameter unchanged reads state 2 and answers the same string
+;   128 the warm run of int_to_str is under the walker twin's run of the same work
+(do
+    (defn lsb-bit (ok bit) (if ok bit 0))
+    (defn lsb-state (name rows) (if (eq (len rows) 0) -99 (if (str_eq (nth (head rows) 1) name) (nth (head rows) 7) (lsb-state name (tail rows)))))
+    (defn lsb-native (name) (lsb-state name (kernel_page_hot (host_pid) 200)))
+    (defn lsb-lt? (a b) (lt a b))
+    ; the C digit writer's shape as a walker twin: quotient and remainder before negation; calls in the conditions keep it off the lanes
+    (defn lsb-pos (n) (if (lsb-lt? n 10) (byte_to_str (add 48 n)) (str_concat (lsb-pos (div n 10)) (byte_to_str (add 48 (mod n 10))))))
+    (defn lsb-walk (n) (if (eq n 0) "0" (if (lsb-lt? n 0) (str_concat "-" (if (lsb-lt? n -9) (str_concat (lsb-pos (sub 0 (div n 10))) (byte_to_str (sub 48 (mod n 10)))) (byte_to_str (sub 48 n)))) (lsb-pos n))))
+    ; 1: both loops hot, then the edges
+    (defn lsb-heat (n acc) (if (le n 0) acc (lsb-heat (sub n 1) (add acc (add (str_len (int_to_str (sub 123456 n))) (str_len (int_to_str (sub n 123456))))))))
+    (let heated (lsb-heat 3000 0))
+    (let pos-state (lsb-native "fstr-digits"))
+    (let neg-state (lsb-native "fstr-neg-digits"))
+    (let cases (list 0 1 7 9 10 11 42 99 100 101 999 1000 65535 123456789 4611686018427387903 -1 -7 -9 -10 -11 -42 -100 -101 -999 -123456789 -4611686018427387903 -4611686018427387904 5))
+    (defn lsb-miss (cs acc) (if (eq (len cs) 0) acc (lsb-miss (tail cs) (add acc (if (str_eq (int_to_str (head cs)) (lsb-walk (head cs))) 0 1)))))
+    (let misses (lsb-miss cases 0))
+    ; 2: a float as value_str writes it, nothing as "nothing"; the arithmetic float test at the tagged limits and on a whole float
+    (let others (if (str_eq (int_to_str 2500000.0) "2.5e+06") (if (str_eq (int_to_str 1.5) "1.5") (if (str_eq (int_to_str 2.0) "2") (if (str_eq (int_to_str (nothing)) "nothing") (if (eq (fstr-float? 4611686018427387903) 0) (if (eq (fstr-float? -4611686018427387904) 0) (eq (fstr-float? 4611686018427387903.0) 1) false) false) false) false) false) false))
+    ; 4: a prepend loop, inside the scratch and past it
+    (defn lsb-rep (n acc) (if (le n 0) acc (lsb-rep (sub n 1) (str_concat (byte_to_str 97) acc))))
+    (defn lsb-rep-heat (k acc) (if (le k 0) acc (lsb-rep-heat (sub k 1) (add acc (str_len (lsb-rep 5 ""))))))
+    (let rh (lsb-rep-heat 3000 0))
+    (let rep-state (lsb-native "lsb-rep"))
+    (let r100 (lsb-rep 100 ""))
+    (let r600 (lsb-rep 600 "x"))
+    (let rep-ok (if (eq (str_len r100) 100) (if (eq (str_byte_at r100 0) 97) (if (eq (str_byte_at r100 99) 97) (if (eq (str_len r600) 601) (if (eq (str_byte_at r600 0) 97) (eq (str_byte_at r600 600) 120) false) false) false) false) false))
+    ; 8: an append loop against its twin
+    (defn lsb-app (n acc) (if (le n 0) acc (lsb-app (sub n 1) (str_concat acc (byte_to_str (add 97 (mod n 26)))))))
+    (defn lsb-app-walk (n acc) (if (lsb-lt? 0 n) (lsb-app-walk (sub n 1) (str_concat acc (byte_to_str (add 97 (mod n 26))))) acc))
+    (defn lsb-app-heat (k acc) (if (le k 0) acc (lsb-app-heat (sub k 1) (add acc (str_len (lsb-app 7 "ab"))))))
+    (let ah (lsb-app-heat 3000 0))
+    (let app-state (lsb-native "lsb-app"))
+    (let app-ok (if (str_eq (lsb-app 40 "ab") (lsb-app-walk 40 "ab")) (str_eq (lsb-app 700 "") (lsb-app-walk 700 "")) false))
+    ; 16: a byte outside 0..255
+    (defn lsb-odd (n acc) (if (le n 0) acc (lsb-odd (sub n 1) (str_concat (byte_to_str (sub (mul n 100) 150)) acc))))
+    (defn lsb-odd-walk (n acc) (if (lsb-lt? 0 n) (lsb-odd-walk (sub n 1) (str_concat (byte_to_str (sub (mul n 100) 150)) acc)) acc))
+    (defn lsb-odd-heat (k acc) (if (le k 0) acc (lsb-odd-heat (sub k 1) (add acc (str_len (lsb-odd 6 ""))))))
+    (let oh (lsb-odd-heat 3000 0))
+    (let odd-state (lsb-native "lsb-odd"))
+    (let odd-ok (if (str_eq (lsb-odd 6 "") (lsb-odd-walk 6 "")) (eq (str_len (lsb-odd 6 "")) 3) false))
+    ; 32: mod in the lane
+    (defn lsb-mods (i n acc) (if (lt n i) acc (lsb-mods (add i 1) n (add acc (mul (mod i 7) (mod (sub 0 i) 5))))))
+    (defn lsb-mods-walk (i n acc) (if (lsb-lt? n i) acc (lsb-mods-walk (add i 1) n (add acc (mul (mod i 7) (mod (sub 0 i) 5))))))
+    (defn lsb-mods-heat (k acc) (if (le k 0) acc (lsb-mods-heat (sub k 1) (add acc (lsb-mods -3 3 0)))))
+    (let mh (lsb-mods-heat 3000 0))
+    (let mods-state (lsb-native "lsb-mods"))
+    (let mods-ok (eq (lsb-mods -50 50 0) (lsb-mods-walk -50 50 0)))
+    ; 64: a string parameter answered through a loop
+    (defn lsb-same (s n) (if (le n 0) s (lsb-same s (sub n 1))))
+    (defn lsb-same-heat (k acc) (if (le k 0) acc (lsb-same-heat (sub k 1) (add acc (str_len (lsb-same "abc" 3))))))
+    (let sh (lsb-same-heat 3000 0))
+    (let same-state (lsb-native "lsb-same"))
+    (let same-ok (if (str_eq (lsb-same "hello" 4) "hello") (str_eq (lsb-same "" 2) "") false))
+    ; 128: the warm run against the twin's
+    (defn lsb-rep-i2s (n acc) (if (le n 0) acc (lsb-rep-i2s (sub n 1) (add acc (str_len (int_to_str (sub 5000000 (mul n 7))))))))
+    (defn lsb-rep-walk (n acc) (if (le n 0) acc (lsb-rep-walk (sub n 1) (add acc (str_len (lsb-walk (sub 5000000 (mul n 7))))))))
+    (let w0 (host_monotonic_ms)) (let warm (lsb-rep-i2s 20000 0)) (let w1 (host_monotonic_ms))
+    (let k0 (host_monotonic_ms)) (let cold (lsb-rep-walk 20000 0)) (let k1 (host_monotonic_ms))
+    (let told (print (list "states" pos-state neg-state rep-state app-state odd-state mods-state same-state "misses" misses "others" others "rep" rep-ok "app" app-ok "odd" odd-ok "mods" mods-ok "same" same-ok "ms" (sub w1 w0) (sub k1 k0))))
+    (let b1 (lsb-bit (if (eq pos-state 2) (if (eq neg-state 2) (eq misses 0) false) false) 1))
+    (let b2 (lsb-bit others 2))
+    (let b3 (lsb-bit (if (eq rep-state 2) rep-ok false) 4))
+    (let b4 (lsb-bit (if (eq app-state 2) app-ok false) 8))
+    (let b5 (lsb-bit (if (eq odd-state 2) odd-ok false) 16))
+    (let b6 (lsb-bit (if (eq mods-state 2) mods-ok false) 32))
+    (let b7 (lsb-bit (if (eq same-state 2) same-ok false) 64))
+    (let b8 (lsb-bit (if (eq warm cold) (lt (sub w1 w0) (sub k1 k0)) false) 128))
+    (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 b8))))))))
