@@ -63,9 +63,9 @@ fkwu's gap. This closes it the other way, and says why.
 ## The field
 
 Today's sweeps pushed the shared field to its 2^26-cell ceiling, and the structural and
-kernel-conformance doors stopped (the drift door read 8095 of 8191). At Urs's word his glass (3596)
-was stopped and observe/field-reset-run.fk ran; the next kernel opened a fresh field. The glass stays
-stopped until he restarts it.
+kernel-conformance doors stopped (the drift door read 8095 of 8191). At Urs's word the glass (3596)
+was stopped for the reset, observe/field-reset-run.fk ran, and the next kernel opened a fresh field.
+The glass re-forms on its next start.
 
 ## Still open, measured
 
