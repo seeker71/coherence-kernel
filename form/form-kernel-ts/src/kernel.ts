@@ -5266,10 +5266,12 @@ function numericToBig(v: Value): bigint {
   throw new Error(`numericToBig: ${v.kind} is not numeric`);
 }
 
+// truthy — a branch reads a state (axiom-1): 0 and a float zero are 0,
+// nothing is neither 0 nor 1 and refuses, and every other value is 1.
 function truthy(v: Value): boolean {
   switch (v.kind) {
     case "null":
-      return false;
+      throw new Error("if: nothing is neither 0 nor 1 -- ask nothing? before branching");
     case "int":
     case "i8":
     case "i16":
@@ -5282,7 +5284,7 @@ function truthy(v: Value): boolean {
       return v.bigint !== 0n;
     case "f32":
     case "f64":
-      return v.float !== 0 && !isNaN(v.float);
+      return v.float !== 0;
     default:
       return true;
   }

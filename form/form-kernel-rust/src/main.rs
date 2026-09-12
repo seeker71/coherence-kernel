@@ -2639,11 +2639,13 @@ impl Value {
         }
     }
 
+    // as_bool — a branch reads a state (axiom-1): 0 and a float zero are 0,
+    // nothing is neither 0 nor 1 and refuses, and every other value is 1.
     fn as_bool(&self) -> bool {
         match self {
             Value::Int(n) => *n != 0,
             Value::Float(f) => *f != 0.0,
-            Value::Null => false,
+            Value::Null => panic!("if: nothing is neither 0 nor 1 -- ask nothing? before branching"),
             _ => true,
         }
     }

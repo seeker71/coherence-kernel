@@ -853,12 +853,16 @@ func (k *Kernel) walkMatchSwitch(node NodeID, kids []NodeID, env *Frame) Value {
 	panic(fmt.Sprintf("match: exhausted without a matching arm for %s", scrutinee.String()))
 }
 
+// truthy — a branch reads a state (axiom-1): 0 and a float zero are 0,
+// nothing is neither 0 nor 1 and refuses, and every other value is 1.
 func truthy(v Value) bool {
 	switch v.Kind {
 	case VInt:
 		return v.Int != 0
+	case VFloat:
+		return v.Float != 0
 	case VNull:
-		return false
+		panic("if: nothing is neither 0 nor 1 -- ask nothing? before branching")
 	}
 	return true
 }

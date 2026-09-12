@@ -10868,6 +10868,20 @@ static int fk_len_cmp(long long i, long long fp, int op, long long *out) {
     }
     return 0;
 }
+#define FK_ARITH_REFUSAL "fkwu: arith: only numbers add, subtract, multiply and divide -- ask value_kind first"
+#define FK_BRANCH_REFUSAL "fkwu: if: nothing is neither 0 nor 1 -- ask nothing? before branching"
+/* Only numbers take part in arithmetic: an odd word that is not a float refuses. */
+static void fk_arith_check(long long a, long long b) {
+    if (!((fk_isf(a) || (a & 1) == 0) && (fk_isf(b) || (b & 1) == 0))) { fk_die(FK_ARITH_REFUSAL); }
+}
+/* A branch reads a state (axiom-1): 0 and a float zero are 0; nothing is neither
+ * 0 nor 1 and refuses; every other word is 1. */
+static long long fk_truth(long long w) {
+    if (w == 0) { return 0; }
+    if (w == fk_nothing) { fk_die(FK_BRANCH_REFUSAL); }
+    if ((w & 1) && fk_isf(w) && fk_num(w) == 0.0) { return 0; }
+    return 1;
+}
 static long long fk_walk(long long i, long long fp) {
     char fk_sp_probe;
     if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
@@ -10902,7 +10916,7 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 3) {
         long long a3 = fk_walk(fk_node[i][1], fp);
         long long b3 = fk_walk(fk_node[i][2], fp);
-        if (fk_isf(a3) || fk_isf(b3)) {
+        if ((a3 | b3) & 1) { fk_arith_check(a3, b3);
             return fk_fbox(fk_num(a3) + fk_num(b3));
         }
         return a3 + b3;
@@ -10910,7 +10924,7 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 4) {
         long long a4 = fk_walk(fk_node[i][1], fp);
         long long b4 = fk_walk(fk_node[i][2], fp);
-        if (fk_isf(a4) || fk_isf(b4)) {
+        if ((a4 | b4) & 1) { fk_arith_check(a4, b4);
             return fk_fbox(fk_num(a4) - fk_num(b4));
         }
         return a4 - b4;
@@ -10932,7 +10946,7 @@ static long long fk_walk(long long i, long long fp) {
         return (a5 <= b5) ? 2 : 0;
     }
     if (t == 6) {
-        if (fk_walk(fk_node[i][1], fp) == 0) {
+        if (fk_truth(fk_walk(fk_node[i][1], fp)) == 0) {
             return fk_walk(fk_node[i][3], fp);
         }
         return fk_walk(fk_node[i][2], fp);
@@ -11265,7 +11279,7 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 42) {
         long long a42 = fk_walk(fk_node[i][1], fp);
         long long b42 = fk_walk(fk_node[i][2], fp);
-        if (fk_isf(a42) || fk_isf(b42)) {
+        if ((a42 | b42) & 1) { fk_arith_check(a42, b42);
             return fk_fbox(fk_num(a42) * fk_num(b42));
         }
         return ((a42 >> 1) * (b42 >> 1)) << 1;
@@ -11408,7 +11422,7 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 70) {
         long long a70 = fk_walk(fk_node[i][1], fp);
         long long b70 = fk_walk(fk_node[i][2], fp);
-        if (a70 != 0 && b70 != 0) {
+        if (fk_truth(a70) && fk_truth(b70)) {
             return 2;
         }
         return 0;
@@ -11416,13 +11430,13 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 71) {
         long long a71 = fk_walk(fk_node[i][1], fp);
         long long b71 = fk_walk(fk_node[i][2], fp);
-        if (a71 != 0 || b71 != 0) {
+        if (fk_truth(a71) || fk_truth(b71)) {
             return 2;
         }
         return 0;
     }
     if (t == 72) {
-        if (fk_walk(fk_node[i][1], fp) == 0) {
+        if (fk_truth(fk_walk(fk_node[i][1], fp)) == 0) {
             return 2;
         }
         return 0;
@@ -11446,7 +11460,7 @@ static long long fk_walk(long long i, long long fp) {
         return fk_walk(fk_node[i][1], fp);
     }
     if (t == 79) {
-        if (fk_walk(fk_node[i][1], fp) == 0) {
+        if (fk_truth(fk_walk(fk_node[i][1], fp)) == 0) {
             return fk_walk(fk_node[i][3], fp);
         }
         return fk_walk(fk_node[i][2], fp);
@@ -13640,7 +13654,7 @@ static long long fk_value_kind(long long v) {
 }
 /* value_str -- mode 25 of the leaf door: a word as text, the way the Go kernel's formValueString
  * writes it and every sibling's value_str answers. A string is its bytes, an int its decimal, a float
- * fk_fmt_float_js, a bool true or false, a list "[a, b]" with its items written likewise; nothing is
+ * fk_fmt_float_js, a list "[a, b]" with its items written likewise; nothing is
  * "" on its own and null as a list's item, as Go writes a null item. The kinds are read in
  * fk_value_kind's order. int_to_str (mode 26) and the pg floor's float cells write through it. */
 static char *fk_valstr_buf;
@@ -14027,7 +14041,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 10) {
         long long a10 = fk_walk(fk_node[i][1], fp);
         long long b10 = fk_walk(fk_node[i][2], fp);
-        if (fk_isf(a10) || fk_isf(b10)) {
+        if ((a10 | b10) & 1) { fk_arith_check(a10, b10);
             return fk_fbox(fk_num(a10) / fk_num(b10));
         }
         return ((a10 >> 1) / (b10 >> 1)) << 1;
@@ -14035,7 +14049,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 11) {
         long long a11 = fk_walk(fk_node[i][1], fp);
         long long b11 = fk_walk(fk_node[i][2], fp);
-        if (fk_isf(a11) || fk_isf(b11)) {
+        if ((a11 | b11) & 1) { fk_arith_check(a11, b11);
             double x11 = fk_num(a11);
             double y11 = fk_num(b11);
             return fk_fbox(x11 - y11 * (double)((long long)(x11 / y11)));
@@ -14336,7 +14350,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 112) {
         long long bv112 = fk_walk(fk_node[i][1], fp);
-        return fk_intern_bool_node(bv112);
+        return fk_intern_bool_node(fk_truth(bv112));
     }
     if (t == 113) {
         long long sa113 = fk_stri(fk_walk(fk_node[i][1], fp));
