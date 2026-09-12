@@ -418,11 +418,9 @@ static void fk_live_publish(int final);
 static void fk_f64_pulse(long long fx);
 static void fk_f64_loop_pulse(long long fx, long long fp, long long n);
 static void fk_f64_reset(void);
-static void fk_twin_pulse(long long fx);
-static long long fk_twin_calls_private;
+static long long fk_twin_calls_private; /* kernel_stat 52 once counted the recipe twins' calls; the twins left the seed 2026-09-12 (every recipe crystallizes in the lanes), and it reads 0 */
 static long long *fk_twin_calls_p = &fk_twin_calls_private;
 #define fk_twin_calls (*fk_twin_calls_p)
-static int fk_twin_call(long long fx, long long fp, long long *out);
 static long long fk_len_upto(long long v, long long cap);
 static long long (*fk_node)[4];
 static long long fk_node_count;
@@ -430,6 +428,8 @@ static void **fk_f64_mem; /* per-defn f64 leaf pages (this process) */
 static long long *fk_f64_sig; /* per-defn leaf signature: -1 the all-float expression leaf; else bit k = param k float, bit 8 = float result, bit 9 = loop,
                                * bit 16+k = param k string, bit 24 = string answer, bit 32+k / 40+k = param k the prepend / append accumulator */
 #define FK_F64_SCRATCH 512 /* the bytes the door reserves at the string pool's tail for a leaf that builds or answers a string */
+#define FK_F64_PAIRS 4096 /* the run of pairs the door reserves first for a leaf that conses; doubled on each retry up to FK_F64_PAIRS_MAX, then the walker answers */
+#define FK_F64_PAIRS_MAX (1LL << 22)
 static long long fk_f64_cap;
 static long long *fk_f64_loop_iters_p; /* iterations that ran inside a native loop (kernel_stat 50, live word 32); page-backed once the live page opens */
 #define fk_f64_loop_iters (*fk_f64_loop_iters_p)
@@ -9104,23 +9104,24 @@ static long long fk_walk_body(long long i, long long fp) {
             void *m194 = (c194 >= 0 && c194 < fk_f64_cap) ? fk_f64_mem[c194] : 0;
             long long n194 = fk_fnar[c194];
             long long sig194 = m194 != 0 ? fk_f64_sig[c194] : -1;
-            if (fk_fn_native != 0 && c194 < fk_fn_capacity && fk_fn_native[c194] == 3) {
-                long long r194;
-                if (fk_twin_call(c194, fp, &r194)) { fk_twin_calls = fk_twin_calls + 1; return r194; }
-                i = fk_node[i][2];
-                continue;
-            }
             if (m194 != 0 && sig194 >= 0 && n194 >= 1 && n194 <= 8) {
                 /* the loop leaf: each frame arg must wear the type the loop was emitted for (int = even word, float = pool box,
                  * string = a string word); ints untag once at the door (v >> 1), floats unbox once, a string's byte pointer
                  * goes in its word and its length at word 9 + k (the leaf's bounds check reads it there; word 8 is the
                  * iteration count), the result tags or boxes once on the way out. The pointer is safe for the leaf's
                  * whole run because a leaf never calls out, so nothing can intern a string and move the pool under it. */
-                long long f194[24];
+                long long f194[32];
                 long long k194 = 0, nf194 = 0;
                 int ok194 = 1;
                 long long scr194 = (sig194 >> 24) != 0 ? FK_F64_SCRATCH : 0;
-                f194[17] = 0; /* under 0 on return: the leaf left for its overflow block -- scratch run out, or a word not the kind it was taken for -- and the walker answers */
+                long long pairs194 = ((sig194 >> 29) & 1) ? FK_F64_PAIRS : 0;
+                f194[17] = 0; /* under 0 on return: the leaf left for its overflow block -- scratch run out (-1), a word not the kind it was taken for (-1), the pairs run out (-2) */
+                if (pairs194 > 0) {
+                    /* a leaf that conses: the heap melted first when it is near full (the arguments sit on the value stack, the
+                     * melt's roots, and are read after), then grown in place until the run fits -- growth moves no pair */
+                    if (fk_cap == 0) { fk_arena(); }
+                    if (fk_hp * 100 >= fk_cap * 90) { fk_melt(); }
+                }
                 if (scr194 > 0) {
                     /* a string answer, or an accumulator: scratch at the pool's tail, its base at word 18 and its limit at 19,
                      * reserved before any pointer is taken so the pool cannot move under them; word 17 takes the answer's length */
@@ -9147,7 +9148,7 @@ static long long fk_walk_body(long long i, long long fp) {
                             while (q194 < l194) { d194[q194] = p194[q194]; q194 = q194 + 1; }
                             p194 = d194;
                         }
-                        f194[k194] = (long long)p194; f194[9 + k194] = l194;
+                        f194[k194] = (long long)p194; f194[9 + k194] = l194; f194[24 + k194] = v194; /* the word too, for a cons to hold */
                     } else if ((sig194 >> k194) & 1) {
                         if (!fk_isf(v194)) { ok194 = 0; break; }
                         double d194 = FK_FV(fk_fidx(v194));
@@ -9165,32 +9166,42 @@ static long long fk_walk_body(long long i, long long fp) {
                     k194 = k194 + 1;
                 }
                 if (ok194) {
-                    f194[8] = 0;
-                    long long out194;
-                    if ((sig194 >> 24) & 1) {
-                        /* a string answer: the leaf's pointer, and the length it left at word 17, interned at the pool's
-                         * tail; a length under 0 says the scratch ran out, and the walker answers this call */
-                        long long (*loops194)(long long *) = (long long (*)(long long *))m194;
-                        long long p194 = loops194(f194);
-                        if (f194[17] < 0) { i = fk_node[i][2]; continue; }
-                        out194 = fk_sbuf((const char *)p194, f194[17]);
-                    } else if ((sig194 >> 8) & 1) {
-                        double (*loopf194)(long long *) = (double (*)(long long *))m194;
-                        double r194 = loopf194(f194);
-                        if (f194[17] < 0) { i = fk_node[i][2]; continue; } /* the leaf left for its overflow block: the walker answers */
-                        out194 = fk_fbox(r194);
-                    } else if (((sig194 >> 25) & 1) || ((sig194 >> 27) & 1)) {
-                        /* a list, or a word a head handed up: the raw word back */
-                        long long (*loopw194)(long long *) = (long long (*)(long long *))m194;
-                        long long r194 = loopw194(f194);
-                        if (f194[17] < 0) { i = fk_node[i][2]; continue; }
-                        out194 = r194;
-                    } else {
-                        long long (*loopi194)(long long *) = (long long (*)(long long *))m194;
-                        long long r194 = loopi194(f194);
-                        if (f194[17] < 0) { i = fk_node[i][2]; continue; }
-                        out194 = r194 << 1;
+                    long long out194 = 0, hp0 = fk_hp;
+                    int walk194 = 0, again194 = 1;
+                    while (again194) {
+                        /* a leaf that conses takes a run of pairs above the heap's top, its cursor at word 22 and its limit at 23;
+                         * a run spent (-2 at word 17) is tried again twice as long, up to FK_F64_PAIRS_MAX, the pairs of the
+                         * spent attempt let go; the leaf's last pair becomes the heap's top when it answers */
+                        again194 = 0;
+                        if (pairs194 > 0) { while (fk_hp + pairs194 + 1 >= fk_cap) { fk_heap_grow(); } }
+                        f194[22] = hp0; f194[23] = hp0 + pairs194; /* the run's cursor and limit (equal when the leaf does not cons: the heap's top, the bound a list word is checked against) */
+                        f194[30] = (long long)(fk_size_t)fk_hh; f194[31] = (long long)(fk_size_t)fk_ht; /* the pair arrays' bases, fixed for the leaf's run since nothing grows under it (words 24..29 hold string parameters' words) */
+                        f194[8] = 0; f194[17] = 0;
+                        if ((sig194 >> 24) & 1) {
+                            /* a string answer: the leaf's pointer, and the length it left at word 17, interned at the pool's
+                             * tail; a length under 0 says the leaf left for its overflow block, and the walker answers this call */
+                            long long (*loops194)(long long *) = (long long (*)(long long *))m194;
+                            long long p194 = loops194(f194);
+                            if (f194[17] >= 0) { out194 = fk_sbuf((const char *)p194, f194[17]); }
+                        } else if ((sig194 >> 8) & 1) {
+                            double (*loopf194)(long long *) = (double (*)(long long *))m194;
+                            double r194 = loopf194(f194);
+                            if (f194[17] >= 0) { out194 = fk_fbox(r194); }
+                        } else if (((sig194 >> 25) & 1) || ((sig194 >> 27) & 1)) {
+                            /* a list, or a word a head handed up: the raw word back */
+                            long long (*loopw194)(long long *) = (long long (*)(long long *))m194;
+                            long long r194 = loopw194(f194);
+                            if (f194[17] >= 0) { out194 = r194; }
+                        } else {
+                            long long (*loopi194)(long long *) = (long long (*)(long long *))m194;
+                            long long r194 = loopi194(f194);
+                            if (f194[17] >= 0) { out194 = r194 << 1; }
+                        }
+                        if (f194[17] == -2 && pairs194 > 0 && pairs194 < FK_F64_PAIRS_MAX) { pairs194 = pairs194 * 2; fk_hp = hp0; again194 = 1; }
+                        else if (f194[17] < 0) { fk_hp = hp0; walk194 = 1; }
+                        else if (pairs194 > 0) { fk_hp = f194[22]; }
                     }
+                    if (walk194) { i = fk_node[i][2]; continue; } /* the leaf left for its overflow block: the walker answers */
                     fk_inram_call_total = fk_inram_call_total + 1;
                     if (fk_fn_inram != 0 && c194 >= 0 && c194 < fk_fn_capacity) { fk_fn_inram[c194] = fk_fn_inram[c194] + 1; } /* this body FOLDED: its intermediates lived in registers, not one pool slot each */
                     fk_f64_loop_iters = fk_f64_loop_iters + f194[8];
@@ -9874,15 +9885,15 @@ static long long fk_host_door(long long mode, long long x) {
  * frame, blr through x16 to the callee's page; the caller spills every register the callee may touch and takes the
  * answer back from x0 or d0. A callee not yet crystallized leaves the caller cold, to be asked again at its next heat. */
 #define FK_F64_CALL_CAP 8
-#define FK_F64_CALL_FRAME 544 /* the callee's 24 words at 0..191 (17 answer length, 18 scratch base, 19 limit); then, in words: x0 at 24, x10..x17 at 25, x1..x7 at 33, d0..d7 at 40, d16..d31 at 48, the answer at 64, x8 at 65, x30 at 66 */
-#define FK_F64_CF_X0 24U
-#define FK_F64_CF_X10 25U
-#define FK_F64_CF_X1 33U
-#define FK_F64_CF_D0 40U
-#define FK_F64_CF_D16 48U
-#define FK_F64_CF_ANS 64U
-#define FK_F64_CF_X8 65U
-#define FK_F64_CF_X30 66U
+#define FK_F64_CALL_FRAME 608 /* the callee's 32 words at 0..255 (17 answer length, 18/19 scratch base and limit, 20/21 their copies, 22/23 the pair run's cursor and limit, 24..29 a string parameter's word at 24+k, 30/31 the pair arrays' bases); then, in words: x0 at 32, x10..x17 at 33, x1..x7 at 41, d0..d7 at 48, d16..d31 at 56, the answer at 72, x8 at 73, x30 at 74 */
+#define FK_F64_CF_X0 32U
+#define FK_F64_CF_X10 33U
+#define FK_F64_CF_X1 41U
+#define FK_F64_CF_D0 48U
+#define FK_F64_CF_D16 56U
+#define FK_F64_CF_ANS 72U
+#define FK_F64_CF_X8 73U
+#define FK_F64_CF_X30 74U
 static long long fk_f64_cur_fx; /* the defn being admitted: a call to it is the self call, the chain walker's, never the call arm's */
 static int fk_f64_call_args[FK_F64_CALL_CAP][8];   /* per call: the admitted argument nodes */
 static int fk_f64_call_strsrc[FK_F64_CALL_CAP][8]; /* per call: the caller's string parameter an argument is, or -1 */
@@ -9899,6 +9910,10 @@ static int fk_f64_lit_slot[8]; /* the literals a leaf loads in its prologue: slo
 static long long fk_f64_lit_off[8], fk_f64_lit_len[8];
 static int fk_f64_lit_n;
 static int fk_f64_need_scratch; /* the leaf calls a callee that builds or answers a string: the door reserves scratch for it (sig bit 26) */
+static int fk_f64_conses; /* the leaf conses, itself or through a callee: the door reserves a run of pairs for it (sig bit 29) */
+static int fk_f64_no_frame; /* the all-float leaf runs with its arguments in d0..d7 and no frame in x0: a call from it hands over no frame words and reads no overflow word, so it calls numeric callees only */
+static long long fk_f64_ovf2_at[FK_F64_OVF_CAP]; /* the B.cond sites that leave for the second overflow block: the pairs ran out, the door retries with more */
+static long long fk_f64_ovf2_n;
 static int fk_f64_call_rslot[FK_F64_CALL_CAP]; /* per call: the hidden slot a string answer lands in, or -1 */
 /* warming: a call to a callee still cold (state 0) records the callee and the types its arguments carry; the pulse
  * wrapper crystallizes those callees for those types (a pulse with fp < 0 reads fk_f64_forced_types instead of a frame)
@@ -10165,6 +10180,29 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         *out = fk_f64_push(7, 0, 0, 0.0, 1);
         return *out < 0 ? 0 : 4;
     }
+    if (t == 19) {
+        /* cons: a pair from the run the door reserved (its cursor at frame word 22, its limit at 23), the head stored as a
+         * word -- an int tagged, a list or a word as it is, a string parameter's word from frame word 24 + k, a literal's
+         * word a constant -- and the tail a list. The run exhausted leaves for the second overflow block, and the door
+         * asks again with a longer run. A float head, or a string built in this leaf, is the walker's for now. */
+        int h = 0, tl = 0;
+        int th = fk_f64_admit(fk_node[i][1], arity, types, &h);
+        if (th == 0) { return 0; }
+        if (th == 2) { fk_f64_refuse_tag = t; return 0; }
+        int hs = -1;
+        if (th == 3) {
+            hs = fk_f64_str_slot(h);
+            if (hs < 0 || (fk_f64_prog[h].kind != 8 && fk_f64_prog[h].kind != 22)) { fk_f64_refuse_tag = t; return 0; }
+        }
+        int tt = fk_f64_admit(fk_node[i][2], arity, types, &tl);
+        if (tt == 5) { tl = fk_f64_narrow(tl, 4); if (tl < 0) { return 0; } tt = 4; }
+        if (tt != 4) { if (tt != 0) { fk_f64_refuse_tag = t; } return 0; }
+        fk_f64_conses = 1;
+        *out = fk_f64_push(32, h, tl, 0.0, th);
+        if (*out < 0) { return 0; }
+        fk_f64_prog[*out].s = hs;
+        return 4;
+    }
     if (t == 20 || t == 21) {
         /* head / tail of a list: one load from the pair arrays, their base read when the leaf runs (the heap grows in place,
          * and a leaf never conses, so no melt moves a pair under it). head of the empty list is nothing -- the walker's answer,
@@ -10252,6 +10290,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         int cold = (callee >= fk_f64_cap || fk_f64_mem[callee] == 0 || fk_f64_sig[callee] < 0);
         if (cold && (fk_fn_native == 0 || callee >= fk_fn_capacity || fk_fn_native[callee] != 0)) { fk_f64_call_not_ready = 1; return 0; } /* cold for a reason already read: nothing to warm */
         if (!cold && (fk_f64_sig[callee] >> 24) != 0 && fk_f64_acc_slot >= 0) { fk_f64_refuse_tag = t; return 0; } /* a callee that builds or answers a string works in this leaf's scratch: one builder per scratch */
+        if (!cold && fk_f64_no_frame && (fk_f64_sig[callee] >> 24) != 0) { fk_f64_refuse_tag = t; return 0; } /* the all-float leaf has no frame to hand a callee that needs scratch, pairs or lists */
         long long csig = cold ? 0 : fk_f64_sig[callee];
         long long car = fk_fnar[callee];
         int slot = fk_f64_call_n;
@@ -10276,6 +10315,15 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
             k = k + 1;
         }
         if (t == 12) { if (car != 1) { return 0; } } else if (k != car || cell >= 0) { return 0; }
+        if (!cold && ((csig >> 29) & 1)) {
+            /* a callee that conses may hold a string argument's word in a pair: a caller parameter's or a literal's, which the
+             * call can hand over -- a string built in this leaf has no word yet */
+            long long q = 0;
+            while (q < car && q < 8) {
+                if (atv[q] == 3) { int ak2 = fk_f64_prog[fk_f64_call_args[slot][q]].kind; if (ak2 != 8 && ak2 != 22) { fk_f64_refuse_tag = t; return 0; } }
+                q = q + 1;
+            }
+        }
         if (cold) {
             /* a callee never yet hot: the types this call carries are the types it would meet -- warm it, then ask again
              * (a word of unknown kind carries no type to warm for) */
@@ -10297,6 +10345,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
             fk_f64_need_scratch = 1;
             if ((csig >> 24) & 1) { fk_f64_call_rslot[slot] = fk_f64_hidden_alloc(types); if (fk_f64_call_rslot[slot] < 0) { return 0; } }
         }
+        if ((csig >> 29) & 1) { fk_f64_conses = 1; } /* the callee conses from this leaf's run of pairs */
         *out = fk_f64_push(19, slot, (int)car, 0.0, callee);
         if (*out < 0) { return 0; }
         fk_f64_prog[*out].s = fk_f64_call_rslot[slot];
@@ -10346,6 +10395,7 @@ static int fk_f64_prog_refs(int n, int k) {
     if (p->kind == 20 || p->kind == 21) { return p->a == k || fk_f64_prog_refs(p->b, k) || fk_f64_prog_refs((int)p->ilit, k); }
     if (p->kind == 17) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k) || fk_f64_prog_refs((int)p->ilit, k); }
     if (p->kind == 13 || p->kind == 24 || p->kind == 25 || p->kind == 26 || p->kind == 27 || p->kind == 28 || p->kind == 30) { return fk_f64_prog_refs(p->a, k); }
+    if (p->kind == 32) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
     if (p->kind == 19) { int j = 0; while (j < p->b) { if (fk_f64_prog_refs(fk_f64_call_args[p->a][j], k)) { return 1; } j = j + 1; } return 0; }
     if (p->kind == 18 || (p->kind >= 3 && p->kind <= 6) || (p->kind >= 9 && p->kind <= 12) || p->kind == 15) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
     return 0;
@@ -10436,14 +10486,25 @@ static int fk_f64_str_out(unsigned int *words, long long *wn, int rr) {
 /* the overflow block, when a step could leave for it: the answer's length -1 tells the door the scratch ran out, then the
  * count and the return; each site's branch is patched to it */
 static int fk_f64_ovf_block(unsigned int *words, long long *wn) {
-    if (fk_f64_ovf_n == 0) { return 1; }
-    long long at = *wn;
-    if (!fk_f64_put(words, wn, 0x92800009U)) { return 0; }                /* MOVN X9, #0: -1 */
-    if (!fk_f64_put(words, wn, 0xF9000009U | (17U << 10))) { return 0; } /* STR X9, [X0, #8*17] */
-    if (!fk_f64_put(words, wn, 0xF9002008U)) { return 0; }                /* STR X8, [X0, #64] */
-    if (!fk_f64_put(words, wn, 0xD65F03C0U)) { return 0; }                /* RET */
-    long long j = 0;
-    while (j < fk_f64_ovf_n) { long long s = fk_f64_ovf_at[j]; words[s] = words[s] | ((unsigned int)((at - s) & 0x7FFFFLL) << 5); j = j + 1; }
+    if (fk_f64_ovf_n > 0) {
+        long long at = *wn;
+        if (!fk_f64_put(words, wn, 0x92800009U)) { return 0; }                /* MOVN X9, #0: -1 */
+        if (!fk_f64_put(words, wn, 0xF9000009U | (17U << 10))) { return 0; } /* STR X9, [X0, #8*17] */
+        if (!fk_f64_put(words, wn, 0xF9002008U)) { return 0; }                /* STR X8, [X0, #64] */
+        if (!fk_f64_put(words, wn, 0xD65F03C0U)) { return 0; }                /* RET */
+        long long j = 0;
+        while (j < fk_f64_ovf_n) { long long s = fk_f64_ovf_at[j]; words[s] = words[s] | ((unsigned int)((at - s) & 0x7FFFFLL) << 5); j = j + 1; }
+    }
+    if (fk_f64_ovf2_n > 0) {
+        /* the pairs ran out: -2 at word 17, and the door tries again with a longer run */
+        long long at = *wn;
+        if (!fk_f64_put(words, wn, 0x92800029U)) { return 0; }                /* MOVN X9, #1: -2 */
+        if (!fk_f64_put(words, wn, 0xF9000009U | (17U << 10))) { return 0; } /* STR X9, [X0, #8*17] */
+        if (!fk_f64_put(words, wn, 0xF9002008U)) { return 0; }                /* STR X8, [X0, #64] */
+        if (!fk_f64_put(words, wn, 0xD65F03C0U)) { return 0; }                /* RET */
+        long long j = 0;
+        while (j < fk_f64_ovf2_n) { long long s = fk_f64_ovf2_at[j]; words[s] = words[s] | ((unsigned int)((at - s) & 0x7FFFFLL) << 5); j = j + 1; }
+    }
     return 1;
 }
 /* MOVZ + 3 MOVK of a 64-bit pattern into x-register xd */
@@ -10480,11 +10541,10 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
             fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
             if (!fk_f64_put(words, wn, 0x5400000DU)) { return -1; }                                               /* B.LE overflow: a negative word is no list */
             if (!fk_f64_put(words, wn, 0xD341FC09U | (xi << 5))) { return -1; }                                   /* LSR X9, Xi, #1 */
-            if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)&fk_hp)) { return -1; }
-            if (!fk_f64_put(words, wn, 0xF9400210U)) { return -1; }                                               /* LDR X16, [X16] */
+            if (!fk_f64_put(words, wn, 0xF9400010U | (22U << 10))) { return -1; }                                 /* LDR X16, [X0, #8*22]: the run's cursor, the heap's top for this leaf */
             if (!fk_f64_put(words, wn, 0xEB10013FU)) { return -1; }                                               /* CMP X9, X16 */
             fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
-            if (!fk_f64_put(words, wn, 0x54000008U)) { return -1; }                                               /* B.HI overflow: past the heap's top */
+            if (!fk_f64_put(words, wn, 0x54000008U)) { return -1; }                                               /* B.HI overflow: past the top */
             return ri;
         }
         fk_f64_release(ri, ntemp, nitemp);
@@ -10504,29 +10564,61 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
             if (fk_f64_ovf_n >= FK_F64_OVF_CAP) { return -1; }
             fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
             if (!fk_f64_put(words, wn, 0xB4000009U)) { return -1; }                                               /* CBZ X9, overflow: the empty list's head is nothing */
-            if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)&fk_hh)) { return -1; }
-            if (!fk_f64_put(words, wn, 0xF9400210U)) { return -1; }                                               /* LDR X16, [X16] */
+            if (!fk_f64_put(words, wn, 0xF9400010U | (30U << 10))) { return -1; }                                 /* LDR X16, [X0, #8*30]: the heads' base */
             if (!fk_f64_put(words, wn, 0xF8697A00U | xd)) { return -1; }                                          /* LDR Xd, [X16, X9, LSL #3] */
             return 100 + rd;
         }
         if (p->kind == 25) {
             if (!fk_f64_put(words, wn, 0xB5000069U)) { return -1; }                                               /* CBNZ X9, +3 */
             if (!fk_f64_put(words, wn, 0xD2800020U | xd)) { return -1; }                                          /* MOV Xd, #1: the empty list */
-            if (!fk_f64_put(words, wn, 0x14000007U)) { return -1; }                                               /* B +7 */
-            if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)&fk_ht)) { return -1; }
-            if (!fk_f64_put(words, wn, 0xF9400210U)) { return -1; }                                               /* LDR X16, [X16] */
+            if (!fk_f64_put(words, wn, 0x14000003U)) { return -1; }                                               /* B +3 */
+            if (!fk_f64_put(words, wn, 0xF9400010U | (31U << 10))) { return -1; }                                 /* LDR X16, [X0, #8*31]: the tails' base */
             if (!fk_f64_put(words, wn, 0xF8697A00U | xd)) { return -1; }                                          /* LDR Xd, [X16, X9, LSL #3] */
             return 100 + rd;
         }
         /* kind 27: the length, a walk of the tails */
         if (!fk_f64_put(words, wn, 0xD2800000U | xd)) { return -1; }                                              /* MOV Xd, #0 */
-        if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)&fk_ht)) { return -1; }
-        if (!fk_f64_put(words, wn, 0xF9400210U)) { return -1; }                                                   /* LDR X16, [X16] */
+        if (!fk_f64_put(words, wn, 0xF9400010U | (31U << 10))) { return -1; }                                     /* LDR X16, [X0, #8*31]: the tails' base */
         if (!fk_f64_put(words, wn, 0xB40000A9U)) { return -1; }                                                   /* CBZ X9, +5: done */
         if (!fk_f64_put(words, wn, 0x91000400U | (xd << 5) | xd)) { return -1; }                                  /* ADD Xd, Xd, #1 */
         if (!fk_f64_put(words, wn, 0xF8697A09U)) { return -1; }                                                   /* LDR X9, [X16, X9, LSL #3] */
         if (!fk_f64_put(words, wn, 0xD341FD29U)) { return -1; }                                                   /* LSR X9, X9, #1 */
         if (!fk_f64_put(words, wn, 0x17FFFFFCU)) { return -1; }                                                   /* B -4 */
+        return 100 + rd;
+    }
+    if (p->kind == 32) {
+        /* cons: the head's word, the tail's word, then the next pair of the run -- exhausted, the second overflow block */
+        int rh = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
+        if (rh < 0) { return -1; }
+        int rt = fk_f64_emit(p->b, words, wn, ntemp, nitemp);
+        if (rt < 100) { return -1; }
+        fk_f64_release(rt, ntemp, nitemp);
+        fk_f64_release(rh, ntemp, nitemp);
+        if (*nitemp >= 6 || fk_f64_ovf2_n >= FK_F64_OVF_CAP) { return -1; }
+        int rd = 1 + *nitemp; *nitemp = *nitemp + 1;     /* the pair's word */
+        int rw = 2 + *nitemp; *nitemp = *nitemp + 1;     /* the head's word */
+        unsigned int xd = (unsigned int)rd, xw = (unsigned int)rw, xt = (unsigned int)(rt - 100);
+        int th = (int)p->ilit;
+        if (th == 1) { if (rh < 100) { return -1; } if (!fk_f64_put(words, wn, 0xD37FF800U | ((unsigned int)(rh - 100) << 5) | xw)) { return -1; } } /* LSL Xw, Xh, #1: an int tagged */
+        else if (th == 3) {
+            if (fk_f64_prog[p->a].kind == 22) { if (!fk_f64_mov64(words, wn, xw, (unsigned long long)fk_strv(fk_f64_prog[p->a].ilit))) { return -1; } } /* a literal's word */
+            else { if (!fk_f64_put(words, wn, 0xF9400000U | ((unsigned int)(24 + p->s) << 10) | xw)) { return -1; } }                              /* LDR Xw, [X0, #8*(24+k)]: the parameter's word */
+        }
+        else { if (rh < 100) { return -1; } if (!fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(rh - 100) << 16) | xw)) { return -1; } }            /* MOV Xw, Xh: a list or a word as it is */
+        if (!fk_f64_put(words, wn, 0xF9400009U | (22U << 10))) { return -1; }                                    /* LDR X9, [X0, #8*22]: the cursor */
+        if (!fk_f64_put(words, wn, 0xF9400010U | (23U << 10))) { return -1; }                                    /* LDR X16, [X0, #8*23]: the limit */
+        if (!fk_f64_put(words, wn, 0xEB10013FU)) { return -1; }                                                  /* CMP X9, X16 */
+        fk_f64_ovf2_at[fk_f64_ovf2_n] = *wn; fk_f64_ovf2_n = fk_f64_ovf2_n + 1;
+        if (!fk_f64_put(words, wn, 0x54000002U)) { return -1; }                                                  /* B.HS overflow-2: the run is spent */
+        if (!fk_f64_put(words, wn, 0x91000529U)) { return -1; }                                                  /* ADD X9, X9, #1 */
+        if (!fk_f64_put(words, wn, 0xF9000009U | (22U << 10))) { return -1; }                                    /* STR X9, [X0, #8*22] */
+        if (!fk_f64_put(words, wn, 0xF9400010U | (30U << 10))) { return -1; }                                    /* LDR X16, [X0, #8*30]: the heads' base */
+        if (!fk_f64_put(words, wn, 0xF8297A00U | xw)) { return -1; }                                             /* STR Xw, [X16, X9, LSL #3] */
+        if (!fk_f64_put(words, wn, 0xF9400010U | (31U << 10))) { return -1; }                                    /* LDR X16, [X0, #8*31]: the tails' base */
+        if (!fk_f64_put(words, wn, 0xF8297A00U | xt)) { return -1; }                                             /* STR Xt, [X16, X9, LSL #3] */
+        if (!fk_f64_put(words, wn, 0xD37FF800U | (9U << 5) | xd)) { return -1; }                                 /* LSL Xd, X9, #1 */
+        if (!fk_f64_put(words, wn, 0xB2400000U | (xd << 5) | xd)) { return -1; }                                 /* ORR Xd, Xd, #1: the pair's word */
+        *nitemp = *nitemp - 1;                                                                                    /* the head's word dies here */
         return 100 + rd;
     }
     if (p->kind == 26) {
@@ -10726,6 +10818,31 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         }
         if (!fk_f64_put(words, wn, 0xF9000000U | (8U << 10) | (31U << 5) | 31U)) { return -1; } /* STR XZR, [SP, #64] */
         if (!fk_f64_put(words, wn, 0xF9000000U | (17U << 10) | (31U << 5) | 31U)) { return -1; }    /* STR XZR, [SP, #8*17]: the callee's overflow word */
+        if (!fk_f64_no_frame) {
+            /* the pair run's cursor and limit, and the pair arrays' bases, to the callee */
+            unsigned int w19 = 22U;
+            while (w19 < 32U) {
+                if (w19 == 22U || w19 == 23U || w19 == 30U || w19 == 31U) {
+                    if (!fk_f64_put(words, wn, 0xF9400009U | (w19 << 10))) { return -1; }                            /* LDR X9, [X0, #8*w] */
+                    if (!fk_f64_put(words, wn, 0xF9000000U | (w19 << 10) | (31U << 5) | 9U)) { return -1; }          /* STR X9, [SP, #8*w] */
+                }
+                w19 = w19 + 1;
+            }
+        }
+        if ((csig >> 29) & 1) {
+            /* a consing callee may put a string argument's word in a pair: a caller parameter's word from this frame, a literal's a constant */
+            k = 0;
+            while (k < car) {
+                int src = fk_f64_call_strsrc[slot][k];
+                if (src >= 0) {
+                    int an2 = fk_f64_call_args[slot][k];
+                    if (fk_f64_prog[an2].kind == 22) { if (!fk_f64_mov64(words, wn, 9U, (unsigned long long)fk_strv(fk_f64_prog[an2].ilit))) { return -1; } }
+                    else { if (!fk_f64_put(words, wn, 0xF9400009U | ((unsigned int)(24 + src) << 10))) { return -1; } }          /* LDR X9, [X0, #8*(24+src)] */
+                    if (!fk_f64_put(words, wn, 0xF9000000U | ((unsigned int)(24 + k) << 10) | (31U << 5) | 9U)) { return -1; } /* STR X9, [SP, #8*(24+k)] */
+                }
+                k = k + 1;
+            }
+        }
         if ((csig >> 24) != 0) {
             /* the scratch words to the callee */
             if (!fk_f64_put(words, wn, 0xF9400009U | (18U << 10))) { return -1; }                              /* LDR X9, [X0, #8*18] */
@@ -10789,15 +10906,22 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         k = 0;
         while (k < car) { fk_f64_release(rargs[k], ntemp, nitemp); k = k + 1; }
         int rd = -1;
-        if (!sres) {
-            /* the callee's overflow word under 0: it left for its overflow block, and so does this leaf */
-            if (fk_f64_ovf_n >= FK_F64_OVF_CAP) { return -1; }
+        if (!fk_f64_no_frame) {
+            /* the callee's overflow word under 0: it left for an overflow block, and so does this leaf -- -2 (its pairs ran out)
+             * for the second block, so the door tries again with a longer run; anything else for the first. The all-float
+             * leaf calls numeric callees only, which never leave that way, and has no frame to write the word into. */
+            if (fk_f64_ovf_n >= FK_F64_OVF_CAP || fk_f64_ovf2_n >= FK_F64_OVF_CAP) { return -1; }
             if (!fk_f64_put(words, wn, 0xF9400000U | (17U << 10) | (31U << 5) | 9U)) { return -1; }           /* LDR X9, [SP, #8*17] */
             if (!fk_f64_put(words, wn, 0xF100013FU)) { return -1; }                                            /* CMP X9, #0 */
-            if (!fk_f64_put(words, wn, 0x5400006AU)) { return -1; }                                            /* B.GE +3 */
+            if (!fk_f64_put(words, wn, 0x540000AAU)) { return -1; }                                            /* B.GE +5: answered */
             if (!fk_f64_put(words, wn, 0x910003FFU | fr)) { return -1; }                                       /* ADD SP, SP, #frame */
+            if (!fk_f64_put(words, wn, 0xB100093FU)) { return -1; }                                            /* CMN X9, #2 */
+            fk_f64_ovf2_at[fk_f64_ovf2_n] = *wn; fk_f64_ovf2_n = fk_f64_ovf2_n + 1;
+            if (!fk_f64_put(words, wn, 0x54000000U)) { return -1; }                                            /* B.EQ overflow-2 -- patched */
             fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
             if (!fk_f64_put(words, wn, 0x5400000EU)) { return -1; }                                            /* B.AL overflow -- patched */
+            if (!fk_f64_put(words, wn, 0xF9400000U | (22U << 10) | (31U << 5) | 9U)) { return -1; }           /* LDR X9, [SP, #8*22]: the callee's cursor */
+            if (!fk_f64_put(words, wn, 0xF9000009U | (22U << 10))) { return -1; }                              /* STR X9, [X0, #8*22]: this leaf's cursor moves with it */
         }
         if (sres) {
             /* the string answer into its hidden slot: the pointer from the answer word, the length from the callee's word 17
@@ -10807,12 +10931,7 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
             if (rs < 0 || fk_f64_ovf_n >= FK_F64_OVF_CAP) { return -1; }
             unsigned int xr = 10U + (unsigned int)rs;
             if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_CF_ANS << 10) | (31U << 5) | xr)) { return -1; } /* LDR Xr, [SP, #answer] */
-            if (!fk_f64_put(words, wn, 0xF9400000U | (17U << 10) | (31U << 5) | 9U)) { return -1; }           /* LDR X9, [SP, #8*17]: the length */
-            if (!fk_f64_put(words, wn, 0xF100013FU)) { return -1; }                                            /* CMP X9, #0 */
-            if (!fk_f64_put(words, wn, 0x5400006AU)) { return -1; }                                            /* B.GE +3 */
-            if (!fk_f64_put(words, wn, 0x910003FFU | fr)) { return -1; }                                       /* ADD SP, SP, #frame */
-            fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
-            if (!fk_f64_put(words, wn, 0x5400000EU)) { return -1; }                                            /* B.AL overflow -- patched */
+            if (!fk_f64_put(words, wn, 0xF9400000U | (17U << 10) | (31U << 5) | 9U)) { return -1; }           /* LDR X9, [SP, #8*17]: the length (the overflow word was read above) */
             if (!fk_f64_put(words, wn, 0xF9000009U | ((9U + (unsigned int)rs) << 10))) { return -1; }         /* STR X9, [X0, #8*(9+rs)] */
             if (!fk_f64_put(words, wn, 0x8B090009U | (xr << 5))) { return -1; }                                /* ADD X9, Xr, X9: the end */
             if (!fk_f64_put(words, wn, 0xF90053E9U)) { return -1; }                                            /* STR X9, [SP, #8*20] */
@@ -10904,88 +11023,6 @@ static int fk_f64_install(long long fx, long long root, long long orig, unsigned
     return 0;
 #endif
 }
-/* ── recipe twins: the seed carries the body's own list and number recipes ──
- * append and reverse-onto are Form recipes in core.fk (and
- * their copies in line-grammar, sha256, fourth-shim, core-native, form-asm):
- * five dispatches per element, and the hottest names on every kernel's page.
- * When one of them crosses FK_F64_HEAT calls, the seed binds a twin: the
- * defn's body entry becomes a tag-194 node with native state 3 and the twin id
- * in fk_f64_sig, and the walker meets the twin where it already reads a tag.
- * A twin answers exactly what the recipe answers on the inputs it claims --
- * lists, the empty list, strings, ints, nothing -- and DECLINES anything else
- * (reverse-onto of a string), so the original body
- * walks and the recipe's own answer stands. Bound by name, arity AND the
- * defining unit, so a recipe of the same name in another unit is never taken. */
-static const char *fk_twin_units[6] = {"core.fk", "line-grammar.fk", "sha256.fk", "fourth-shim.fk", "core-native.fk", "form-asm.fk"};
-static int fk_twin_name_eq(const char *s, long long n, const char *name) {
-    long long k = 0;
-    while (k < n) { if (name[k] == 0 || s[k] != name[k]) { return 0; } k = k + 1; }
-    return name[n] == 0;
-}
-static int fk_twin_leaf_eq(const char *unit, const char *leaf) {
-    long long n = 0, m = 0;
-    while (unit[n] != 0) { n = n + 1; }
-    while (leaf[m] != 0) { m = m + 1; }
-    if (m > n) { return 0; }
-    if (n > m && unit[n - m - 1] != '/') { return 0; }
-    long long k = 0;
-    while (k < m) { if (unit[n - m + k] != leaf[k]) { return 0; } k = k + 1; }
-    return 1;
-}
-static long long fk_twin_id_of(long long fx) {
-    long long j = 0;
-    while (j < fk_fntop) {
-        if (fk_fnidx[j] == fx) {
-            long long so = fk_fnsym_s[j], sn = fk_fnsym_n[j];
-            long long id = 0;
-            if (sn == 6 && fk_twin_name_eq(fk_srctext + so, 6, "append") && fk_fnar[fx] == 2) { id = 2; }
-            else if (sn == 12 && fk_twin_name_eq(fk_srctext + so, 12, "reverse-onto") && fk_fnar[fx] == 2) { id = 4; }
-            if (id == 0) { return 0; }
-            const char *unit = fk_hot_unit_of(so);
-            long long u = 0;
-            while (u < 6) { if (fk_twin_leaf_eq(unit, fk_twin_units[u])) { return id; } u = u + 1; }
-            return 0;
-        }
-        j = j + 1;
-    }
-    return 0;
-}
-static void fk_twin_pulse(long long fx) {
-    if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
-    if (fk_fn_native[fx] != 0) { return; }
-    long long id = fk_twin_id_of(fx);
-    if (id == 0) { return; }
-    if (!fk_f64_reserve(fx)) { return; }
-    long long root = fk_fn[fx];
-    if (root < 0 || root >= fk_node_count) { return; }
-    if (fk_node[root][0] != 194) { fk_fn[fx] = fk_smknode(194, fx, root, 0); fk_prog_note_body(fx); }
-    fk_f64_sig[fx] = id;
-    fk_fn_native[fx] = 3;
-}
-static int fk_twin_call(long long fx, long long fp, long long *out) {
-    long long id = fk_f64_sig[fx];
-    if (id == 2) {
-        long long xs = fk_vs[fp], ys = fk_vs[fp + 1];
-        if (fk_is_str(xs)) { *out = FK_SLEN(fk_stri(xs)) > 0 ? fk_cons_val(1, ys) : ys; return 1; }
-        if ((xs & 1) == 0) { *out = ys; return 1; }
-        long long p = xs >> 1, n = 0;
-        while (p >= 1 && FK_POK(p)) { fk_vp(FK_HH(p)); n = n + 1; p = FK_HT(p) >> 1; }
-        long long acc = ys;
-        while (n > 0) { fk_vsp = fk_vsp - 1; acc = fk_cons_val(fk_vs[fk_vsp], acc); n = n - 1; }
-        *out = acc;
-        return 1;
-    }
-    if (id == 4) {
-        long long xs = fk_vs[fp], acc = fk_vs[fp + 1];
-        if (fk_is_str(xs)) { if (FK_SLEN(fk_stri(xs)) > 0) { return 0; } *out = acc; return 1; }
-        if ((xs & 1) == 0) { *out = acc; return 1; }
-        long long p = xs >> 1;
-        while (p >= 1 && FK_POK(p)) { acc = fk_cons_val(FK_HH(p), acc); p = FK_HT(p) >> 1; }
-        *out = acc;
-        return 1;
-    }
-    return 0;
-}
 static void fk_f64_pulse(long long fx) {
     if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
     if (fk_fn_native[fx] != 0) { return; }
@@ -11011,13 +11048,15 @@ static void fk_f64_pulse(long long fx) {
     int types[8] = {2, 2, 2, 2, 2, 2, 2, 2}; /* the expression leaf: every parameter a float, the door holds the rest to the walker */
     { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } } /* a let slot is unbound here: this leaf takes no let step */
     fk_f64_prog_n = 0;
-    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0;
+    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_ovf2_n = 0; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0;
+    fk_f64_no_frame = 1;
     int top = 0;
     if (fk_f64_admit(body, arity, types, &top) != 2) {
+        fk_f64_no_frame = 0;
         if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); }
         return;
     }
-    if (fk_f64_lit_n > 0 || fk_f64_need_scratch) { return; } /* this leaf has no prologue for literals and carries no scratch: the typed leaf's */
+    if (fk_f64_lit_n > 0 || fk_f64_need_scratch || fk_f64_conses) { fk_f64_no_frame = 0; return; } /* this leaf has no prologue for literals and carries no scratch or pairs: the typed leaf's */
     unsigned int words[FK_F64_WORD_CAP];
     long long wn = 0;
     int ntemp = 0, nitemp = 0;
@@ -11025,6 +11064,7 @@ static void fk_f64_pulse(long long fx) {
     if (rr < 0 || rr >= 100) { return; }
     if (rr != 0 && !fk_f64_put(words, &wn, 0x1E604000U | ((unsigned int)rr << 5))) { return; } /* FMOV D0, Dr */
     if (!fk_f64_put(words, &wn, 0xD65F03C0U)) { return; }
+    if (!fk_f64_ovf_block(words, &wn)) { return; } /* a call inside this leaf reads its callee's overflow word: the blocks its branches leave for */
     if (!fk_f64_install(fx, root, orig, words, wn, -1, 1)) { return; }
     fk_f64_count = fk_f64_count + 1;
 }
@@ -11184,7 +11224,7 @@ static int fk_f64_inline_try(long long i, long long t, long long callee, long lo
     if (t == 12) { if (car != 1) { return 0; } } else if (cell >= 0) { return 0; }
     /* a snapshot of the admit's state, restored when the body does not admit as an expression here */
     long long pn = fk_f64_prog_n, rt = fk_f64_refuse_tag;
-    int ln = fk_f64_lit_n, hm = fk_f64_hidden_mask, ns = fk_f64_need_scratch, acc = fk_f64_acc_slot, ad = fk_f64_acc_dir;
+    int ln = fk_f64_lit_n, hm = fk_f64_hidden_mask, ns = fk_f64_need_scratch, acc = fk_f64_acc_slot, ad = fk_f64_acc_dir, cs = fk_f64_conses;
     int cn = fk_f64_call_n, wnn = fk_f64_warm_n, cnr = fk_f64_call_not_ready;
     int d = fk_f64_env_depth;
     k = 0;
@@ -11195,7 +11235,7 @@ static int fk_f64_inline_try(long long i, long long t, long long callee, long lo
     fk_f64_env_depth = d;
     if (r == 0) {
         fk_f64_prog_n = pn; fk_f64_refuse_tag = rt; fk_f64_lit_n = ln; fk_f64_hidden_mask = hm; fk_f64_need_scratch = ns;
-        fk_f64_acc_slot = acc; fk_f64_acc_dir = ad; fk_f64_call_n = cn; fk_f64_warm_n = wnn; fk_f64_call_not_ready = cnr;
+        fk_f64_acc_slot = acc; fk_f64_acc_dir = ad; fk_f64_call_n = cn; fk_f64_warm_n = wnn; fk_f64_call_not_ready = cnr; fk_f64_conses = cs;
         return 0;
     }
     fk_f64_inline_type = r;
@@ -11209,7 +11249,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     if (n != arity) { return; }
     if (arity > 6) { fk_fn_native[fx] = -1; return; } /* the typed lanes ride x10..x15: x16 and x17 are their scratch */
     fk_f64_refuse_tag = -1; fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0;
-    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0;
+    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_ovf2_n = 0;
     fk_fn_native[fx] = -1;
     int types[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } }
@@ -11253,6 +11293,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     if (tex == 5) { sig = sig | (1LL << 27); } /* a word a head handed up: the raw word */
     if (fk_f64_acc_slot >= 0) { sig = sig | (1LL << ((fk_f64_acc_dir == 1 ? 32 : 40) + fk_f64_acc_slot)); }
     if (fk_f64_need_scratch) { sig = sig | (1LL << 26); } /* a callee builds or answers a string in this leaf's scratch */
+    if (fk_f64_conses) { sig = sig | (1LL << 29); } /* this leaf conses: the door reserves a run of pairs */
     unsigned int words[FK_F64_WORD_CAP];
     long long wn = 0;
     k = 0;
@@ -11321,7 +11362,7 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     }
 }
 static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
-    fk_twin_pulse(fx);
+    fk_f64_no_frame = 0; /* the typed leaves and loops carry a frame in x0; the all-float leaf sets this while it admits and emits */
     if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
     if (fk_fn_native[fx] != 0) { return; }
     long long root = 0, orig = 0, body = 0;
@@ -11407,7 +11448,7 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     int tex = 0, nex = 0;
     fk_f64_prog_n = 0;
     fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; /* a call inside the loop's steps may reach a crystallized leaf; a call to this defn is the self call */
-    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0;
+    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_ovf2_n = 0;
     long long j = 0;
     while (j < nsteps) {
         letn[j] = -1;
@@ -11482,6 +11523,7 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     if (tex == 5) { sig = sig | (1LL << 27); } /* a word a head handed up: the raw word */
     if (fk_f64_acc_slot >= 0) { sig = sig | (1LL << ((fk_f64_acc_dir == 1 ? 32 : 40) + fk_f64_acc_slot)); }
     if (fk_f64_need_scratch) { sig = sig | (1LL << 26); } /* a callee builds or answers a string in this leaf's scratch */
+    if (fk_f64_conses) { sig = sig | (1LL << 29); } /* this leaf conses: the door reserves a run of pairs */
     long long term = nsteps - 1; /* the terminal step: its self call falls through, inline */
     unsigned int words[FK_F64_WORD_CAP];
     long long wn = 0;
