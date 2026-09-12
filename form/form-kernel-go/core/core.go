@@ -209,8 +209,11 @@ func (v Value) AsInt() int64 {
 	panic(fmt.Sprintf("as_int: %v", v))
 }
 
-// FormatFloatJS — JS String(number) semantics: shortest round-trippable form,
-// NaN/Infinity spelled out.
+// FormatFloatJS — the one float rendering: strconv's shortest 'g', the fewest digits that
+// round-trip, with an exponent (signed, at least two digits) below 1e-4 and from 1e+06 and fixed
+// notation between, NaN and Infinity spelled out. fkwu's fk_fmt_float_js writes the same bytes, and
+// Rust's format_float and the TS kernel's formatFloat follow it. It is not JS's String(), which
+// moves to an exponent only from 1e21 and below 1e-6.
 func FormatFloatJS(f float64) string {
 	if math.IsNaN(f) {
 		return "NaN"

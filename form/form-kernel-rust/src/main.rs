@@ -2941,13 +2941,11 @@ fn source_native_scan_text(src: &str, lex: &SourceNativeLexicon) -> Value {
 // format_float — the canonical kernel float display, shared THREE-WAY. JS /
 // ECMAScript `String(number)` style: integer-valued floats render WITHOUT a
 // trailing ".0" (`1.0` → `"1"`), NaN → "NaN", ±Inf → "Infinity"/"-Infinity".
-// This matches Go's `core.FormatFloatJS` (strconv.FormatFloat 'g' -1 64), the
-// TS kernel's native `String()`, AND the Go API's JSON float output — so
-// Go=Rust=TS agree on every float at the parity boundary (whole-number floats
-// were the one latent divergence: Rust alone rendered Python-style "3.0").
-// One standard, chosen for the JS majority (2 of 3 kernels + the API already
-// did it), so Rust was the only kernel to move. Rust's `{}` is shortest
-// round-trip, matching strconv 'g' -1 / JS String() for every finite value.
+// The one float rendering, byte for byte fkwu's fk_fmt_float_js and Go's core.FormatFloatJS
+// (strconv.FormatFloat(f, 'g', -1, 64) with NaN and Infinity spelled out): the shortest digits that
+// round-trip, written with an exponent when the decimal exponent is below -4 or at least 6 (the
+// exponent signed and at least two digits), and in fixed notation otherwise; -0 keeps its sign.
+// Rust's `{:e}` yields those shortest digits; only the layout is written here.
 fn format_float(f: f64) -> String {
     if f.is_nan() {
         return "NaN".to_string();
@@ -2959,7 +2957,43 @@ fn format_float(f: f64) -> String {
             "-Infinity".to_string()
         };
     }
-    format!("{}", f)
+    let sci = format!("{:e}", f);
+    let (mantissa, exp_text) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+    let exp: i32 = exp_text.parse().unwrap_or(0);
+    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
+    let mut out = String::new();
+    if mantissa.starts_with('-') {
+        out.push('-');
+    }
+    if exp < -4 || exp >= 6 {
+        out.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if exp < 0 { '-' } else { '+' });
+        out.push_str(&format!("{:02}", exp.abs()));
+    } else if exp < 0 {
+        out.push_str("0.");
+        for _ in 0..(-exp - 1) {
+            out.push('0');
+        }
+        out.push_str(&digits);
+    } else {
+        let point = exp as usize + 1;
+        if digits.len() <= point {
+            out.push_str(&digits);
+            for _ in 0..(point - digits.len()) {
+                out.push('0');
+            }
+        } else {
+            out.push_str(&digits[..point]);
+            out.push('.');
+            out.push_str(&digits[point..]);
+        }
+    }
+    out
 }
 
 // round_ndigits_decimal — CPython `round(x, n)` for a finite double, n >= 0.
