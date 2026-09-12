@@ -38,6 +38,30 @@ function utf8Decode(bytes: Uint8Array): string {
   return UTF8_DECODER.decode(bytes);
 }
 
+// The one float rendering, byte for byte fkwu's fk_fmt_float_js and Go's core.FormatFloatJS
+// (strconv.FormatFloat(f, 'g', -1, 64) with NaN and Infinity spelled out): the shortest digits that
+// round-trip, written with an exponent when the decimal exponent is below -4 or at least 6 (the
+// exponent signed and at least two digits), and in fixed notation otherwise; -0 keeps its sign.
+// toExponential() without an argument yields those shortest digits; only the layout is written here.
+function formatFloat(f: number): string {
+  if (Number.isNaN(f)) return "NaN";
+  if (f === Infinity) return "Infinity";
+  if (f === -Infinity) return "-Infinity";
+  const sign = f < 0 || Object.is(f, -0) ? "-" : "";
+  const sci = Math.abs(f).toExponential();
+  const at = sci.indexOf("e");
+  const digits = sci.slice(0, at).replace(".", "");
+  const exp = Number(sci.slice(at + 1));
+  if (exp < -4 || exp >= 6) {
+    const rest = digits.length > 1 ? `.${digits.slice(1)}` : "";
+    return `${sign}${digits.charAt(0)}${rest}e${exp < 0 ? "-" : "+"}${String(Math.abs(exp)).padStart(2, "0")}`;
+  }
+  if (exp < 0) return `${sign}0.${"0".repeat(-exp - 1)}${digits}`;
+  const point = exp + 1;
+  if (digits.length <= point) return `${sign}${digits}${"0".repeat(point - digits.length)}`;
+  return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
+}
+
 function utf8DecodeStrict(bytes: Uint8Array): string {
   try {
     return UTF8_STRICT_DECODER.decode(bytes);
@@ -1189,7 +1213,7 @@ export class Kernel {
         return String(v.bigint);
       case "f32":
       case "f64":
-        return String(v.float);
+        return formatFloat(v.float);
       case "str":
         // Bare, not JSON-quoted — the Go (Value.String) and Rust
         // (Value::display) siblings render strings without quotes, and
@@ -1667,7 +1691,7 @@ export class Kernel {
       if (v.kind === "str") return { kind: "str", str: v.str ?? "" };
       if (v.kind === "bool") return { kind: "str", str: v.bool ? "true" : "false" };
       if (v.kind === "null") return { kind: "str", str: "null" };
-      if (v.kind === "f32" || v.kind === "f64") return { kind: "str", str: String(v.float) };
+      if (v.kind === "f32" || v.kind === "f64") return { kind: "str", str: formatFloat(v.float) };
       return { kind: "str", str: String(argInt(args, 0)) };
     });
     this.registerNative("str_to_int", catMethod(), (_k, args) => ({
@@ -3511,7 +3535,7 @@ export class Kernel {
         return String(v.bigint);
       case "f32":
       case "f64":
-        return String(v.float);
+        return formatFloat(v.float);
       case "str":
         return v.str;
       case "bool":
