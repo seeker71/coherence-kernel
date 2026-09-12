@@ -9,12 +9,12 @@ natives failing wherever a parameter travels: ERR, -1 and [], with pg_last_error
 - **Rust sends every SQL parameter as text** (ce3c7348c). Rust bound each parameter by a type it
   guessed: it read casts such as `$1::int4` off the SQL text and boxed a Rust value to match, falling
   back to the Form value's own kind. The guess missed `$1::int`, and where it hit, its int4 arm still
-  handed over an i64, which the postgres crate binds only to an int8 parameter. The server declares every
-  parameter's type once the statement is prepared. PgTextParam now sends each parameter in the text
-  format, as TS's carrier sends them and as Go's pgx sends what it holds no binary encoding for, and the
-  server reads it by the declared type. sql_param_cast and the three value_as_* readers that served the
-  guess are gone. bytes joins the kernel's dependencies for the buffer ToSql writes into; the lock
-  already held it through tokio-postgres.
+  handed over an i64, which the postgres crate binds only to an int8 parameter. The server declares
+  every parameter's type once the statement is prepared. PgTextParam now sends each parameter in the
+  text format, as TS's carrier sends them and as Go's pgx sends what it holds no binary encoding for,
+  and the server reads it by the declared type. sql_param_cast and the three value_as_* readers that
+  served the guess are gone. bytes joins the kernel's dependencies for the buffer ToSql writes into;
+  the lock already held it through tokio-postgres.
 - **Rust's typed rows read NULL as null** (ce3c7348c). pg_query_rows answered "" for a NULL text,
   numeric, json or timestamp cell, where Go's dbCellToForm and TS answer null. A NULL of any type now
   reads null before the per-type readers run.
