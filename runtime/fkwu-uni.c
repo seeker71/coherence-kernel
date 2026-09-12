@@ -9857,7 +9857,7 @@ static int fk_f64_call_not_ready;
  * fk_fn_native 2 = loop standing; kernel_stat 49 counts standing loops, 50 the
  * iterations that ran native; live page words 31/32 the same.
  */
-typedef struct { int kind; int a; int b; double lit; long long ilit; } fk_f64_node; /* kind: 1 flit 2 farg 3 fadd 4 fsub 5 fmul 6 fdiv 7 ilit 8 iarg 9 iadd 10 isub 11 imul 12 idiv 13 cvt int->float 14 a string parameter's byte (int) */
+typedef struct { int kind; int a; int b; double lit; long long ilit; } fk_f64_node; /* kind: 1 flit 2 farg 3 fadd 4 fsub 5 fmul 6 fdiv 7 ilit 8 iarg 9 iadd 10 isub 11 imul 12 idiv 13 cvt int->float 14 a string parameter's byte (int) 16 a string parameter's length (int) 17 an if over a compare 18 its compare 19 a call to a crystallized leaf */
 static void **fk_f64_mem;
 static long long *fk_f64_sig;
 static long long fk_f64_cap;
