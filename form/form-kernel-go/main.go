@@ -4522,7 +4522,9 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 			}
 			// A present native answers its name, as on fkwu and TS: a Form definition of the
 			// same name is a fallback for a kernel without the native, never an override of one.
-			if ne, ok := k.natives[name]; ok {
+			// A local binding of the name (a parameter, a let) is nearer than the native
+			// unless fkwu reserves the head: the one call-position reading every arm gives.
+			if ne, ok := k.natives[name]; ok && (fkwuReservedHeads[k.nameStr(rawName)] || !env.HasLocal(rawName)) {
 				args := make([]Value, len(kids)-1)
 				for i := 1; i < len(kids); i++ {
 					args[i-1] = k.walk(kids[i], env)
@@ -5084,8 +5086,6 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 	switch verb {
 	case "do":
 		return k.intern(catBlock(RBlockDo), args)
-	case "seq":
-		return k.intern(catBlock(RBlockSequence), args)
 	case "let":
 		// (let <ident> <value>) — repackage the identifier wrapper as the
 		// bare string trivial so the walker reads NameID directly from `inst`.
@@ -5125,14 +5125,6 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 		return k.intern(catLogic(RLogicOr), args)
 	case "not":
 		return k.intern(catLogic(RLogicNot), args)
-	case "match":
-		return k.intern(catMatch(RMatchSwitch), args)
-	case "choose":
-		return k.intern(catChoice(RChoiceChoose), args)
-	case "fail":
-		return k.intern(catChoice(RChoiceFail), args)
-	case "stop":
-		return k.intern(catChoice(RChoiceStop), args)
 	case "defn":
 		// (defn <name> (<params>...) <body>) — names and params get repackaged
 		// as bare string trivials so the walker reads NameID via `inst`.
@@ -5147,9 +5139,6 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 		}
 		paramsBlock := k.intern(catBlock(RBlockSequence), pnames)
 		return k.intern(catFnDef(), []NodeID{nameTrivial, paramsBlock, args[2]})
-	case "params":
-		// Special: a params-list literal, returns a SEQUENCE of idents
-		return k.intern(catBlock(RBlockSequence), args)
 	case "list":
 		// Canonical list literal. Keep the source recipe identical to the
 		// Rust/TypeScript readers instead of routing through a native FNCALL.

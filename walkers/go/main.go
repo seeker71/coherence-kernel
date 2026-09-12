@@ -18,14 +18,14 @@
 // recipe computes the same value.
 //
 // Pure-op surface covered: integer + int64 + float + string + bool literals;
-// add sub mul div mod; eq ne lt le gt ge; if let do seq; defn + user calls
+// add sub mul div mod; eq ne lt le gt ge; if let do; defn + user calls
 // (tail-call optimized, like the origin); and/or/not; head tail cons list nth
 // empty; str_concat str_eq str_len str_byte_at byte_to_str; value_eq;
 // make_nodeid (identity-by-content, the eq law of the fkwu tag-102 heal);
 // intern_node / intern_trivial_int / intern_trivial_string (the substrate
 // write doors over the verbatim intern tables — jit-once-born's interned
 // structural identity runs on these);
-// match (switch). The BMF s-expression parse (the lexer), the
+// The BMF s-expression parse (the lexer), the
 // content-addressed intern, and the blueprint/op dispatch.
 //
 // str_len/str_byte_at/byte_to_str/str_concat are the deliberately minimal
@@ -107,6 +107,28 @@ func (f *Frame) Bind(name NameID, v Value) {
 		}
 	}
 	f.Bindings = append(f.Bindings, binding{name, v})
+}
+
+// HasLocal — a binding of name in any frame but the root, whose bindings are
+// the globals: a parameter or a let the call head would read first.
+func (f *Frame) HasLocal(name NameID) bool {
+	for cur := f; cur != nil && cur.Parent != nil; cur = cur.Parent {
+		for i := range cur.Bindings {
+			if cur.Bindings[i].Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Root — the frame holding the globals.
+func (f *Frame) Root() *Frame {
+	cur := f
+	for cur.Parent != nil {
+		cur = cur.Parent
+	}
+	return cur
 }
 
 func (f *Frame) Lookup(name NameID) (Value, bool) {
@@ -663,16 +685,22 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 
 		case RBasicFnCall:
 			name := k.identID(kids[0])
-			// A present native answers its name, as on the full kernels: a binding
-			// of the same spelling (a parameter, a defn) never overrides one.
-			if ne, ok := k.natives[name]; ok {
+			// fkwu's reserved heads answer as the primitive, or as the global recipe
+			// where this walker has no native; any other head reads the nearest local
+			// binding first, then the native, then the global.
+			reserved := fkwuReservedHeads[k.nameStr(name)]
+			if ne, ok := k.natives[name]; ok && (reserved || !env.HasLocal(name)) {
 				args := make([]Value, len(kids)-1)
 				for i := 1; i < len(kids); i++ {
 					args[i-1] = k.walk(kids[i], env)
 				}
 				return ne.Fn(k, args)
 			}
-			v, ok := env.Lookup(name)
+			scope := env
+			if reserved {
+				scope = env.Root()
+			}
+			v, ok := scope.Lookup(name)
 			if !ok {
 				panic(fmt.Sprintf("walk: unbound function %q", k.nameStr(name)))
 			}
@@ -1127,8 +1155,6 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 	switch verb {
 	case "do":
 		return k.intern(catBlock(RBlockDo), args)
-	case "seq":
-		return k.intern(catBlock(RBlockSequence), args)
 	case "let":
 		nameID := k.identID(args[0])
 		nameTrivial := NodeID{Pkg: 1, Level: LevelTrivial, Type: TrivString, Inst: uint32(nameID)}
@@ -1166,14 +1192,6 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 		return k.intern(catLogic(RLogicOr), args)
 	case "not":
 		return k.intern(catLogic(RLogicNot), args)
-	case "match":
-		return k.intern(catMatch(RMatchSwitch), args)
-	case "choose":
-		return k.intern(catChoice(RChoiceChoose), args)
-	case "fail":
-		return k.intern(catChoice(RChoiceFail), args)
-	case "stop":
-		return k.intern(catChoice(RChoiceStop), args)
 	case "defn":
 		toTriv := func(id NameID) NodeID {
 			return NodeID{Pkg: 1, Level: LevelTrivial, Type: TrivString, Inst: uint32(id)}
@@ -1186,8 +1204,6 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 		}
 		paramsBlock := k.intern(catBlock(RBlockSequence), pnames)
 		return k.intern(catFnDef(), []NodeID{nameTrivial, paramsBlock, args[2]})
-	case "params":
-		return k.intern(catBlock(RBlockSequence), args)
 	default:
 		nameStr := k.internString(verb)
 		all := append([]NodeID{nameStr}, args...)

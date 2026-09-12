@@ -17,12 +17,18 @@ surface; it only confirms a recipe computes the same value four ways on the
 - `go/main.go` (1,498 lines), `rust/src/main.rs` (1,315), `ts/main.ts` (1,644) —
   counted 2026-09-12. Each keeps ONLY the independent parse + eval core.
 
+Call heads read as fkwu reads them: a head fkwu reserves (its op rows, rewrite
+rows and control forms; `gate/reserved-heads.bml` writes the list beside each
+walker) answers as the primitive, or as its shared-Form recipe here, under any
+local binding of its spelling; every other head reads the nearest local binding
+first.
+
 Surface covered: integer + int64 + float + string literals, and true/false as the
 ints 1/0 (axiom-1); `add sub mul
-div mod`; `eq ne lt le gt ge`; `if let do seq`; `defn` + user calls (tail-call
+div mod`; `eq ne lt le gt ge`; `if let do`; `defn` + user calls (tail-call
 optimized); `and or not`; `head tail cons list nth empty len`; `str_concat
-str_eq str_len str_find substring char_at int_to_str`; `value_eq`; `match`
-(switch); plus the BMF s-expression lexer and the content-addressed intern. The
+str_eq str_len str_find substring char_at int_to_str`; `value_eq`; plus the BMF
+s-expression lexer and the content-addressed intern. The
 string floor is the narrow waist (`str_len` / `str_byte_at` / `byte_to_str` /
 `str_concat`); everything above it is shared Form. `nothing` / `nothing?` are
 fkwu natives the walkers do not bind — a band that measures them is fkwu-witnessed.

@@ -31,6 +31,7 @@
 
 import { readFileSync, existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
+import { FKWU_RESERVED_HEADS } from "./reserved-heads.ts";
 
 // ===========================================================================
 // Substrate — NodeID + Recipe + intern table   (from kernel.ts)
@@ -613,6 +614,24 @@ export class Frame {
     this.vals.push(value);
   }
 
+  // hasLocal — a binding of name in any frame but the root, whose bindings are
+  // the globals: a parameter or a let the call head would read first.
+  hasLocal(name: NameID): boolean {
+    let frame: Frame | null = this;
+    while (frame !== null && frame.parent !== null) {
+      if (frame.keys.indexOf(name) >= 0) return true;
+      frame = frame.parent;
+    }
+    return false;
+  }
+
+  // root — the frame holding the globals.
+  root(): Frame {
+    let frame: Frame = this;
+    while (frame.parent !== null) frame = frame.parent;
+    return frame;
+  }
+
   lookup(name: NameID): Value | undefined {
     let frame: Frame | null = this;
     while (frame !== null) {
@@ -936,11 +955,6 @@ function buildVerb(k: Kernel, verb: string, args: NodeID[]): NodeID {
         { pkg: 1, level: Level.BASIC, type: RBasic.BLOCK, inst: RBlock.DO },
         args,
       );
-    case "seq":
-      return k.intern(
-        { pkg: 1, level: Level.BASIC, type: RBasic.BLOCK, inst: RBlock.SEQUENCE },
-        args,
-      );
     case "add":
     case "+":
       return k.intern(
@@ -1048,11 +1062,6 @@ function buildVerb(k: Kernel, verb: string, args: NodeID[]): NodeID {
     case "list":
       return k.intern(
         { pkg: 1, level: Level.BASIC, type: RBasic.LIST, inst: 1 },
-        args,
-      );
-    case "params":
-      return k.intern(
-        { pkg: 1, level: Level.BASIC, type: RBasic.BLOCK, inst: RBlock.SEQUENCE },
         args,
       );
     default: {
@@ -1499,9 +1508,12 @@ function walkFnCall(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
 
   if (calleeName !== null) {
     const rawName = calleeName;
-    // Native dispatch
+    // fkwu's reserved heads answer as the primitive, or as the global recipe
+    // where this walker has no native; any other head reads the nearest local
+    // binding first, then the native, then the global.
+    const reserved = FKWU_RESERVED_HEADS.has(k.nameStr(rawName));
     const ne = k.natives.get(rawName);
-    if (ne !== undefined) {
+    if (ne !== undefined && (reserved || !frame.hasLocal(rawName))) {
       const args: Value[] = [];
       for (let i = 1; i < kids.length; i++) {
         args.push(walk(k, kids[i]!, frame));
@@ -1509,7 +1521,7 @@ function walkFnCall(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
       return ne.fn(k, args);
     }
     // Closure via frame
-    const v = frame.lookup(rawName);
+    const v = (reserved ? frame.root() : frame).lookup(rawName);
     if (v === undefined) {
       throw new Error(`call: unbound ${k.nameStr(rawName)}`);
     }

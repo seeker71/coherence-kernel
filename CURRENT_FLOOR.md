@@ -1644,9 +1644,8 @@ What answered red or nothing in this pass, so no one leans on it:
   11111 reach their declared verdict on every arm; on fkwu `pg_*` and `kh-*`
   names sit unresolved in preludes the runs never reach (no postgres carrier
   stands in this seed, and no band reaches one).
-- BML `match` is not lowered on fkwu (`source-language-match-switch-band` 0;
-  R77) and `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111
-  with `Num` unresolved; R78).
+- BML `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111 with
+  `Num` unresolved; R78).
 - `form-source-sections` answers 64 errors: `fk-lit` is defined only in
   `hati-os-kernel.fk` and the `bml-source-*-rule-index` names resolve nowhere in
   its chain (`release-ledger.bml` R87). Of the `[form.action]` bands now

@@ -1884,6 +1884,52 @@
                     (str_concat "source-emit: leaf of unknown node_type "
                         (int_to_str kind))))))))
 
+    ;; A match recipe emits the if-chain every kernel reads. Each arm compares its
+    ;; pattern with the subject by value_eq, in source order; the `_` arm answers
+    ;; when none does, wherever it stands. A subject that is not a name or a leaf
+    ;; is bound once, so the chain never walks it twice. Every comparison of a
+    ;; chain is spent before one of its bodies runs, so a match nested in a body
+    ;; may rebind the same name without disturbing the chain around it.
+    (defn fsc-source-leaf? (recipe)
+        (and (fsc-empty? (node_children recipe)) (eq (node_level recipe) 1)))
+
+    (defn fsc-source-default-arm? (pattern)
+        (if (fsc-source-leaf? pattern) false
+            (if (node_eq (node_category pattern) fsc-rec-IDENT-CAT)
+                (str_eq (node_value (head (node_children pattern))) "_")
+                false)))
+
+    (defn fsc-source-match-chain (subject pairs dflt)
+        (if (fsc-empty? pairs) dflt
+            (do
+                (let pattern (head pairs))
+                (let rest (tail (tail pairs)))
+                (if (fsc-source-default-arm? pattern)
+                    (fsc-source-match-chain subject rest
+                        (if (str_eq dflt "") (fsc-source-emit-recipe (head (tail pairs))) dflt))
+                    (do
+                        (let later (fsc-source-match-chain subject rest dflt))
+                        (str_concat "(if (value_eq "
+                            (str_concat subject
+                                (str_concat " "
+                                    (str_concat (fsc-source-emit-recipe pattern)
+                                        (str_concat ") "
+                                            (str_concat (fsc-source-emit-recipe (head (tail pairs)))
+                                                (if (str_eq later "") ")"
+                                                    (str_concat " " (str_concat later ")"))))))))))))))
+
+    (defn fsc-source-emit-match (kids)
+        (do
+            (let subject (head kids))
+            (if (if (fsc-source-leaf? subject) true
+                    (node_eq (node_category subject) fsc-rec-IDENT-CAT))
+                (fsc-source-match-chain (fsc-source-emit-recipe subject) (tail kids) "")
+                (str_concat "(do (let fsc-match-subject "
+                    (str_concat (fsc-source-emit-recipe subject)
+                        (str_concat ") "
+                            (str_concat (fsc-source-match-chain "fsc-match-subject" (tail kids) "")
+                                ")")))))))
+
     (defn fsc-source-emit-recipe (recipe)
         (do
             (let kids (node_children recipe))
@@ -1921,7 +1967,7 @@
 	                    (if (node_eq cat fsc-rec-IF3-CAT)
 	                        (fsc-source-emit-call "if" kids)
 	                    (if (node_eq cat fsc-rec-MATCH-CAT)
-	                        (fsc-source-emit-call "match" kids)
+	                        (fsc-source-emit-match kids)
 	                    (do
 	                        (let prim-name (fsc-source-primitive-name cat))
 	                        (if (str_eq prim-name "")
