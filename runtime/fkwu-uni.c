@@ -9845,7 +9845,7 @@ static long long fk_host_door(long long mode, long long x) {
  * fk_fn_native 2 = loop standing; kernel_stat 49 counts standing loops, 50 the
  * iterations that ran native; live page words 31/32 the same.
  */
-typedef struct { int kind; int a; int b; double lit; long long ilit; } fk_f64_node; /* kind: 1 flit 2 farg 3 fadd 4 fsub 5 fmul 6 fdiv 7 ilit 8 iarg 9 iadd 10 isub 11 imul 12 idiv 13 cvt int->float */
+typedef struct { int kind; int a; int b; double lit; long long ilit; } fk_f64_node; /* kind: 1 flit 2 farg 3 fadd 4 fsub 5 fmul 6 fdiv 7 ilit 8 iarg 9 iadd 10 isub 11 imul 12 idiv 13 cvt int->float 14 a string parameter's byte (int) */
 static void **fk_f64_mem;
 static long long *fk_f64_sig;
 static long long fk_f64_cap;
@@ -9897,7 +9897,7 @@ static int fk_f64_push(int kind, int a, int b, double lit, long long ilit) {
     fk_f64_prog_n = fk_f64_prog_n + 1;
     return (int)(fk_f64_prog_n - 1);
 }
-static int fk_f64_type_of(int n) { int k = fk_f64_prog[n].kind; return (k >= 7 && k <= 12) ? 1 : 2; }
+static int fk_f64_type_of(int n) { int k = fk_f64_prog[n].kind; return ((k >= 7 && k <= 12) || k == 14) ? 1 : 2; }
 /* an int-typed node promoted to float (SCVTF) -- the walker's fk_num on the int side of a mixed op */
 static int fk_f64_cvt(int n) { return fk_f64_type_of(n) == 2 ? n : fk_f64_push(13, n, 0, 0.0, 0); }
 /* The tag this lane fell through on -- the operation it has no arm for. A
@@ -10248,12 +10248,22 @@ static void fk_f64_pulse(long long fx) {
 }
 /* one pass of the loop body: compare, exit branch (recorded for patching), the tail call as a parallel move into the
  * parameter registers, the iteration count. 0 on overflow. */
+/* a string parameter continues only as itself: the length the door placed at frame word 9 + k belongs to the string that
+ * entered at k, so a self call handing k another string would have the leaf read that string against the first one's length */
+static int fk_f64_strings_stay(const int *argn, const int *types, long long arity) {
+    long long k = 0;
+    while (k < arity) {
+        if (types[k] == 3 && (fk_f64_prog[argn[k]].kind != 8 || fk_f64_prog[argn[k]].a != k)) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
 /* a self tail call's arguments, one per parameter, each admitted at the type of the parameter it feeds: 1 admitted, 0 not */
 static int fk_f64_admit_call(long long fx, long long call, long long arity, const int *types, int *argn) {
     if (fk_node[call][0] == 12) {
         if (arity != 1) { return 0; }
         if (fk_f64_admit(fk_node[call][2], arity, types, &argn[0]) != types[0]) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } return 0; }
-        return 1;
+        return fk_f64_strings_stay(argn, types, arity);
     }
     long long cell = fk_node[call][2];
     long long k = 0;
@@ -10262,7 +10272,7 @@ static int fk_f64_admit_call(long long fx, long long call, long long arity, cons
         cell = fk_node[cell][2];
         k = k + 1;
     }
-    return k == arity && cell < 0;
+    return k == arity && cell < 0 && fk_f64_strings_stay(argn, types, arity);
 }
 /* a self tail call: its arguments into temporaries, the parallel move into the parameter registers, the iteration count */
 static int fk_f64_loop_move(unsigned int *words, long long *wn, const int *argn, const int *types, long long arity) {
