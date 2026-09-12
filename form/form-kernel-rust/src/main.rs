@@ -1068,6 +1068,10 @@ fn pg_cell_to_string(row: &postgres::Row, ci: usize) -> String {
 }
 
 fn pg_cell_to_value(row: &postgres::Row, ci: usize) -> Value {
+    // NULL of any type is null, as Go's dbCellToForm answers it
+    if matches!(row.try_get::<usize, Option<PgRawCell>>(ci), Ok(None)) {
+        return Value::Null;
+    }
     let ty = row.columns()[ci].type_().name().to_string();
     match ty.as_str() {
         "text" | "varchar" | "bpchar" | "name" => Value::Str(
@@ -1117,89 +1121,61 @@ fn pg_cell_to_value(row: &postgres::Row, ci: usize) -> Value {
     }
 }
 
-fn sql_param_cast(sql: &str, index: usize) -> Option<&'static str> {
-    let needle = format!("${index}::");
-    let pos = sql.find(&needle)?;
-    let rest = sql[pos + needle.len()..].trim_start();
-    if rest.starts_with("double precision") || rest.starts_with("float8") {
-        Some("float8")
-    } else if rest.starts_with("boolean") || rest.starts_with("bool") {
-        Some("bool")
-    } else if rest.starts_with("bigint") || rest.starts_with("int8") {
-        Some("int8")
-    } else if rest.starts_with("integer") || rest.starts_with("int4") {
-        Some("int4")
-    } else if rest.starts_with("text") || rest.starts_with("varchar") {
-        Some("text")
-    } else {
-        None
-    }
-}
+// PgTextParam — one SQL parameter as text, as the TS native sends every parameter and as Go's pgx sends
+// what it holds no binary encoding for. The server reads the text by the parameter's declared type, so
+// `$1::int`, numeric and json all take it; None sends NULL.
+#[derive(Debug)]
+struct PgTextParam(Option<String>);
 
-fn value_as_f64(value: &Value) -> f64 {
-    match value {
-        Value::Float(f) => *f,
-        Value::Int(n) => *n as f64,
-        Value::Bool(b) => {
-            if *b {
-                1.0
-            } else {
-                0.0
+impl postgres::types::ToSql for PgTextParam {
+    fn to_sql(
+        &self,
+        _ty: &postgres::types::Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        match &self.0 {
+            Some(text) => {
+                out.extend_from_slice(text.as_bytes());
+                Ok(postgres::types::IsNull::No)
             }
+            None => Ok(postgres::types::IsNull::Yes),
         }
-        _ => value.display().parse::<f64>().unwrap_or(0.0),
+    }
+
+    fn accepts(_ty: &postgres::types::Type) -> bool {
+        true
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &postgres::types::Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        self.to_sql(ty, out)
+    }
+
+    fn encode_format(&self, _ty: &postgres::types::Type) -> postgres::types::Format {
+        postgres::types::Format::Text
     }
 }
 
-fn value_as_bool(value: &Value) -> bool {
-    match value {
-        Value::Bool(b) => *b,
-        Value::Int(n) => *n != 0,
-        Value::Float(f) => *f != 0.0,
-        _ => {
-            let s = value.display();
-            s == "true" || s == "1"
-        }
-    }
-}
-
-fn value_as_i64(value: &Value) -> i64 {
-    match value {
-        Value::Int(n) => *n,
-        Value::Float(f) => *f as i64,
-        Value::Bool(b) => {
-            if *b {
-                1
-            } else {
-                0
-            }
-        }
-        _ => value.display().parse::<i64>().unwrap_or(0),
-    }
-}
-
-fn form_sql_args(sql: &str, value: Option<&Value>) -> Vec<Box<dyn postgres::types::ToSql + Sync>> {
+// form_sql_args — a Form list as SQL parameters: null as NULL, a bool as true or false, a float as
+// format_float writes it, and anything else as its display text.
+fn form_sql_args(value: Option<&Value>) -> Vec<PgTextParam> {
     let Some(Value::List(items)) = value else {
         return Vec::new();
     };
-    let mut out: Vec<Box<dyn postgres::types::ToSql + Sync>> = Vec::with_capacity(items.len());
-    for (idx, item) in items.iter().enumerate() {
-        match sql_param_cast(sql, idx + 1) {
-            Some("text") => out.push(Box::new(item.display())),
-            Some("float8") => out.push(Box::new(value_as_f64(item))),
-            Some("bool") => out.push(Box::new(value_as_bool(item))),
-            Some("int8") | Some("int4") => out.push(Box::new(value_as_i64(item))),
-            _ => match item {
-                Value::Int(n) => out.push(Box::new(*n)),
-                Value::Float(f) => out.push(Box::new(*f)),
-                Value::Bool(b) => out.push(Box::new(*b)),
-                Value::Str(s) => out.push(Box::new(s.to_string())),
-                Value::Null => out.push(Box::new(Option::<String>::None)),
-                _ => out.push(Box::new(item.display())),
-            },
-        }
-    }
-    out
+    items
+        .iter()
+        .map(|item| {
+            PgTextParam(match item {
+                Value::Null => None,
+                Value::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
+                Value::Float(f) => Some(format_float(*f)),
+                other => Some(other.display()),
+            })
+        })
+        .collect()
 }
 
 fn dict_value(pairs: Vec<(&str, Value)>) -> Value {
@@ -5542,10 +5518,10 @@ impl Kernel {
                     return Value::Int(-1);
                 }
             };
-            let params = form_sql_args(&sql, args.get(2));
+            let params = form_sql_args(args.get(2));
             let param_refs = params
                 .iter()
-                .map(|p| p.as_ref() as &(dyn postgres::types::ToSql + Sync))
+                .map(|p| p as &(dyn postgres::types::ToSql + Sync))
                 .collect::<Vec<_>>();
             let mut g = client.lock().unwrap();
             match g.execute(&sql, &param_refs) {
@@ -5569,10 +5545,10 @@ impl Kernel {
                     return Value::Str("ERR".to_string().into());
                 }
             };
-            let params = form_sql_args(&sql, args.get(2));
+            let params = form_sql_args(args.get(2));
             let param_refs = params
                 .iter()
-                .map(|p| p.as_ref() as &(dyn postgres::types::ToSql + Sync))
+                .map(|p| p as &(dyn postgres::types::ToSql + Sync))
                 .collect::<Vec<_>>();
             let mut g = client.lock().unwrap();
             let rows = match g.query(&sql, &param_refs) {
@@ -5610,10 +5586,10 @@ impl Kernel {
                     return Value::List(Vec::new().into());
                 }
             };
-            let params = form_sql_args(&sql, args.get(2));
+            let params = form_sql_args(args.get(2));
             let param_refs = params
                 .iter()
-                .map(|p| p.as_ref() as &(dyn postgres::types::ToSql + Sync))
+                .map(|p| p as &(dyn postgres::types::ToSql + Sync))
                 .collect::<Vec<_>>();
             let mut g = client.lock().unwrap();
             let rows = match g.query(&sql, &param_refs) {
