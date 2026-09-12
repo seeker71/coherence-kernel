@@ -1,0 +1,65 @@
+; loop-lane-template-band.fk — a recipe is a template: one defn, compiled once per parameter signature, all native.
+;
+; The goal names a "stdlib TEMPLATE library." A recipe used over ints and over floats is one defn with two shapes; until
+; now the lane compiled a defn for the first signature it met and every other signature fell to the walker. Now a defn
+; carries a second instance: the door picks the instance whose parameter-type bits match the live frame (an int foldl and
+; a float foldl, both native at once), and when a frame wears a signature no instance holds, the pulse compiles it into a
+; free slot -- reusing the whole pulse by compiling into instance a's slot and relocating the page to b. Two instances per
+; defn today; a third distinct signature still walks (named, not yet).
+;
+; Verdict 31
+; PROOF LEVEL: FOURTH-ARM ONLY (the transparent lanes are fkwu's MAP_JIT arm64 door; a defn's native state is the 8th field of its hot row)
+; preludes: form-stdlib/core.fk
+;
+;   1   a defn heated on ints reads state 2 and answers ints as its walker twin
+;   2   the SAME defn then heated on floats still answers ints right (instance a stands) and answers floats right (instance b built)
+;   4   the float run is native, not the walker: 5000 float sums run far under the walker twin's 5000
+;   8   a defn heated on floats first, then ints, is symmetric -- both signatures native, both answers right
+;   16  a list-vs-int template: a defn over a list parameter and one over an int answer each as the walker (two shapes, one name)
+(do
+    (defn ltb-bit (ok bit) (if ok bit 0))
+    (defn ltb-state (name rows) (if (eq (len rows) 0) -99 (if (str_eq (nth (head rows) 1) name) (nth (head rows) 7) (ltb-state name (tail rows)))))
+    (defn ltb-native (name) (ltb-state name (kernel_page_hot (host_pid) 300)))
+    (defn ltb-lt? (a b) (if (lt (host_monotonic_ms) 0) false (lt a b))) ; a host clock: a door the lanes decline by meaning, so the twins walk
+    (defn ltb-mki (n acc) (if (le n 0) acc (ltb-mki (sub n 1) (cons n acc))))
+    (defn ltb-mkf (n acc) (if (le n 0) acc (ltb-mkf (sub n 1) (cons (mul n 0.5) acc))))
+    (let is (ltb-mki 50 (list)))
+    (let fs (ltb-mkf 50 (list)))
+    ; a plain reduction used at two signatures
+    (defn ltb-sum (xs acc) (if (nil? xs) acc (ltb-sum (tail xs) (add acc (head xs)))))
+    (defn ltb-sum-walk (xs acc) (if (ltb-lt? 0 (len xs)) (ltb-sum-walk (tail xs) (add acc (head xs))) acc))
+    (defn ltb-hi (xs n acc) (if (ltb-lt? 0 n) (ltb-hi xs (sub n 1) (add acc (ltb-sum xs 0))) acc))
+    (defn ltb-hf (xs n acc) (if (ltb-lt? 0 n) (ltb-hf xs (sub n 1) (add acc (ltb-sum xs 0.0))) acc))
+    ; 1: int first
+    (let a1 (ltb-hi is 2200 0))
+    (let int-state (ltb-native "ltb-sum"))
+    (let int-ok (eq (ltb-sum is 0) (ltb-sum-walk is 0)))
+    ; 2: floats too, ints still right
+    (let a2 (ltb-hf fs 2200 0.0))
+    (let both-state (ltb-native "ltb-sum"))
+    (let both-ok (if (eq (ltb-sum is 0) (ltb-sum-walk is 0)) (eq (ltb-sum fs 0.0) (ltb-sum-walk fs 0.0)) false))
+    ; 4: the float run is native (far under the walker)
+    (defn ltb-rep (xs init n acc) (if (le n 0) acc (ltb-rep xs init (sub n 1) (add acc (ltb-sum xs init)))))
+    (defn ltb-rep-walk (xs init n acc) (if (ltb-lt? 0 n) (ltb-rep-walk xs init (sub n 1) (add acc (ltb-sum-walk xs init))) acc))
+    (let w0 (host_monotonic_ms)) (let warm (ltb-rep fs 0.0 5000 0.0)) (let w1 (host_monotonic_ms))
+    (let k0 (host_monotonic_ms)) (let cold (ltb-rep-walk fs 0.0 5000 0.0)) (let k1 (host_monotonic_ms))
+    (let float-native (if (eq warm cold) (lt (sub w1 w0) (sub k1 k0)) false))
+    ; 8: float first, then int (symmetry) -- a second defn so the order is genuinely reversed
+    (defn ltb-s2 (xs acc) (if (nil? xs) acc (ltb-s2 (tail xs) (add acc (head xs)))))
+    (defn ltb-hf2 (xs n acc) (if (ltb-lt? 0 n) (ltb-hf2 xs (sub n 1) (add acc (ltb-s2 xs 0.0))) acc))
+    (defn ltb-hi2 (xs n acc) (if (ltb-lt? 0 n) (ltb-hi2 xs (sub n 1) (add acc (ltb-s2 xs 0))) acc))
+    (let b1 (ltb-hf2 fs 2200 0.0)) (let b2 (ltb-hi2 is 2200 0))
+    (let s2-state (ltb-native "ltb-s2"))
+    (let sym-ok (if (eq (ltb-s2 is 0) (ltb-sum-walk is 0)) (eq (ltb-s2 fs 0.0) (ltb-sum-walk fs 0.0)) false))
+    ; 16: two shapes by parameter kind -- a length (list param) and an increment (int param), one over each
+    (defn ltb-len2 (xs acc) (if (nil? xs) acc (ltb-len2 (tail xs) (add acc 1))))
+    (defn ltb-hlen (xs n acc) (if (ltb-lt? 0 n) (ltb-hlen xs (sub n 1) (add acc (ltb-len2 xs 0))) acc))
+    (let c1 (ltb-hlen is 2200 0))
+    (let kind-ok (eq (ltb-len2 is 0) 50))
+    (let told (print (list "states" int-state both-state s2-state "int" int-ok "both" both-ok "float-native" float-native "sym" sym-ok "kind" kind-ok "ms" (sub w1 w0) (sub k1 k0))))
+    (let r1 (ltb-bit (if (eq int-state 2) int-ok false) 1))
+    (let r2 (ltb-bit (if (eq both-state 2) both-ok false) 2))
+    (let r3 (ltb-bit float-native 4))
+    (let r4 (ltb-bit (if (eq s2-state 2) sym-ok false) 8))
+    (let r5 (ltb-bit kind-ok 16))
+    (add r1 (add r2 (add r3 (add r4 r5)))))
