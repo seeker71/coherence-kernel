@@ -10080,6 +10080,7 @@ static long long fk_f64_frame_pbits(long long fp, long long n) {
     return b;
 }
 static int fk_f64_mov64(unsigned int *words, long long *wn, unsigned int xd, unsigned long long bits);
+static long long fk_substring_word(long long sword, long long a, long long b); /* the leaf calls this C native for substring (kind 38 emit); answers a raw interned word */
 static long long fk_f64_ovf_at[FK_F64_OVF_CAP]; /* the B.cond sites that leave for the overflow block: the scratch ran out, the walker answers */
 static long long fk_f64_ovf_n;
 /* ── the loop lane ────────────────────────────────────────────────────────────
@@ -11110,6 +11111,30 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         words[bdone] = words[bdone] | ((unsigned int)(((*wn) - bdone) & 0x7FFFFLL) << 5); /* B.EQ -> here (done) */
         return 100 + rd;
     }
+    if (p->kind == 38) {
+        /* substring(s, a, b) via the C primitive fk_substring_word, in the leaf's ANSWER position (the peephole in
+         * fk_f64_expr_pulse admits it only there): a TAIL C-call. Because nothing in the leaf is live after the answer,
+         * NO caller-saved register is spilled -- the args go straight to X0/X1/X2 and the interned answer rides X0 to
+         * the leaf's RET. That interned word is stable across a pool realloc (only a byte pointer would stale), so the
+         * answer is safe and this stays a handful of instructions rather than an 80-word spill. s's interned word is
+         * frame word 24+slot (X0 is the leaf frame here); a and b stage through a 16-byte scratch so the move into
+         * X0/X1/X2 cannot read a register it has already overwritten. */
+        int ra = fk_f64_emit(p->b, words, wn, ntemp, nitemp);          /* a: start */
+        if (ra < 100) { return -1; }
+        int rb = fk_f64_emit((int)p->ilit, words, wn, ntemp, nitemp);  /* b: end */
+        if (rb < 100) { return -1; }
+        if (!fk_f64_put(words, wn, 0xF9400010U | ((24U + (unsigned int)p->a) << 10))) { return -1; } /* LDR X16, [X0, #8*(24+slot)]: s's interned word */
+        if (!fk_f64_put(words, wn, 0xD10043FFU)) { return -1; }                                  /* SUB SP, SP, #16 (Rn=Rd=31=SP) */
+        if (!fk_f64_put(words, wn, 0xF90003E0U | (unsigned int)(ra - 100))) { return -1; }        /* STR a, [SP,#0] */
+        if (!fk_f64_put(words, wn, 0xF90007E0U | (unsigned int)(rb - 100))) { return -1; }        /* STR b, [SP,#8] */
+        if (!fk_f64_put(words, wn, 0xAA1003E0U)) { return -1; }                                   /* MOV X0, X16: sword (frame no longer needed) */
+        if (!fk_f64_put(words, wn, 0xF94003E1U)) { return -1; }                                   /* LDR X1, [SP,#0]: a */
+        if (!fk_f64_put(words, wn, 0xF94007E2U)) { return -1; }                                   /* LDR X2, [SP,#8]: b */
+        if (!fk_f64_put(words, wn, 0x910043FFU)) { return -1; }                                   /* ADD SP, SP, #16 */
+        if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)&fk_substring_word)) { return -1; }
+        if (!fk_f64_put(words, wn, 0xD61F0200U)) { return -1; }                                   /* BR X16 -- a TAIL call: X30 still holds the door's return, so fk_substring_word RETs straight to the door with the interned answer in X0. The leaf's own MOV X0,X0/RET that follow are unreachable. */
+        return 100; /* X0 holds the answer (the tail call returns for us; the trailing answer emit is dead code) */
+    }
     if (p->kind == 20 || p->kind == 21) {
         /* the accumulator: parameter a's pointer rides x(10+a), its length frame word 9 + a. Byte b is stored one before
          * the pointer (prepend, the pointer moving down) or at pointer + length (append), and the length moves by one. A
@@ -11681,6 +11706,31 @@ static int fk_f64_inline_try(long long i, long long t, long long callee, long lo
     fk_f64_inline_type = r;
     return 1;
 }
+/* substring as a leaf's TERMINAL answer: (float_leaf 9 s (range start end)), s a string parameter or literal (its
+ * interned word rides frame word 24+slot), start/end ints. Emitted (kind 38) as a C-call to fk_substring_word whose
+ * interned answer is returned as a raw word (type 5). Safe ONLY in answer position -- the pool may move under the call,
+ * but nothing reads a held byte pointer after it -- so the caller offers this node ONLY when it is the leaf's answer. */
+static int fk_f64_admit_substring(long long i, long long arity, const int *types, int *out) {
+    if (i < 0 || i >= fk_node_count || fk_node[i][0] != 201 || fk_f64_no_frame) { return 0; }
+    long long mn = fk_node[i][1];
+    if (mn < 0 || mn >= fk_node_count || fk_node[mn][0] != 1 || fk_node[mn][1] != 9) { return 0; }
+    long long rn = fk_node[i][3];
+    if (rn < 0 || rn >= fk_node_count || fk_node[rn][0] != 19) { return 0; }
+    int sp = 0;
+    int st = fk_f64_admit(fk_node[i][2], arity, types, &sp);
+    if (st != 3) { return 0; }
+    int slot = fk_f64_str_slot(sp);
+    if (slot < 0) { return 0; } /* the string must ride a slot whose word 24+slot is filled (a parameter or a literal) */
+    int ra = 0, rb = 0;
+    int ta = fk_f64_admit(fk_node[rn][1], arity, types, &ra);
+    if (ta == 5) { ra = fk_f64_narrow(ra, 1); if (ra < 0) { return 0; } ta = 1; }
+    if (ta != 1) { return 0; }
+    int tb = fk_f64_admit(fk_node[rn][2], arity, types, &rb);
+    if (tb == 5) { rb = fk_f64_narrow(rb, 1); if (rb < 0) { return 0; } tb = 1; }
+    if (tb != 1) { return 0; }
+    *out = fk_f64_push(38, slot, ra, 0.0, rb);
+    return *out < 0 ? 0 : 5; /* a raw interned word */
+}
 /* the typed expression leaf: a body with no self call -- lets, then one expression -- emitted for the types read off the
  * live frame, dispatched through the door's frame like a loop leaf (state 1, a signature without the loop bit). A body
  * whose parameters are all floats keeps the float class's own leaf. */
@@ -11725,7 +11775,8 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
         node = fk_node[node][3];
     }
     int top = 0;
-    int tex = fk_f64_admit(node, arity, types, &top);
+    int tex = fk_f64_admit_substring(node, arity, types, &top); /* the answer is a substring: a C-call answering a raw interned word */
+    if (tex == 0) { tex = fk_f64_admit(node, arity, types, &top); }
     if (tex == 0) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } return; }
     if (tex == 3 && !fk_f64_str_answer(top)) { fk_fn_native[fx] = 0 - (1000 + 27); return; } /* a string answer is a parameter or the accumulator: the door interns it */
     if (tex == 2) { sig = sig | (1LL << 8); }
