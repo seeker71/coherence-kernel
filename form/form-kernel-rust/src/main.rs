@@ -874,13 +874,149 @@ fn source_inventory_walk(
     Ok(())
 }
 
-// Render one column of a postgres row to a string, by its SQL type. Covers the
-// substrate's portable column set (text/varchar, the integer family, bool).
-// NULL → "". Unknown types → "?". try_get keeps a type mismatch from panicking.
+// A column's cell as the server sent it, whatever its type: the bytes pg_cell_to_string decodes for
+// the types the postgres crate reads only with features this kernel does not build (numeric,
+// timestamps, json).
+struct PgRawCell(Vec<u8>);
+
+impl<'a> postgres::types::FromSql<'a> for PgRawCell {
+    fn from_sql(
+        _ty: &postgres::types::Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(PgRawCell(raw.to_vec()))
+    }
+    fn accepts(_ty: &postgres::types::Type) -> bool {
+        true
+    }
+}
+
+// The binary cell of a numeric, json, jsonb, timestamp, timestamptz or date column, as text.
+fn pg_raw_cell_text(ty: &str, raw: &[u8]) -> String {
+    match ty {
+        "numeric" => pg_numeric_text(raw),
+        "json" => String::from_utf8_lossy(raw).to_string(),
+        "jsonb" => String::from_utf8_lossy(raw.get(1..).unwrap_or(&[])).to_string(),
+        "timestamptz" | "timestamp" => raw
+            .get(0..8)
+            .map(|b| pg_micros_rfc3339(i64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])))
+            .unwrap_or_default(),
+        "date" => raw
+            .get(0..4)
+            .map(|b| pg_date_rfc3339(i32::from_be_bytes([b[0], b[1], b[2], b[3]])))
+            .unwrap_or_default(),
+        _ => "?".to_string(),
+    }
+}
+
+// numeric's binary form: digit count, weight, sign, display scale, then base-10000 digits, the
+// first at the weight's position. Written as the server writes it: the integer groups, then as many
+// fraction digits as the display scale asks for.
+fn pg_numeric_text(raw: &[u8]) -> String {
+    if raw.len() < 8 {
+        return "?".to_string();
+    }
+    let be16 = |i: usize| -> u16 {
+        raw.get(i..i + 2)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+            .unwrap_or(0)
+    };
+    let ndigits = be16(0) as i64;
+    let weight = be16(2) as i16 as i64;
+    let sign = be16(4);
+    let dscale = be16(6) as usize;
+    match sign {
+        0xC000 => return "NaN".to_string(),
+        0xD000 => return "Infinity".to_string(),
+        0xF000 => return "-Infinity".to_string(),
+        _ => {}
+    }
+    let digit = |i: i64| -> u16 {
+        if i >= 0 && i < ndigits {
+            be16(8 + 2 * i as usize)
+        } else {
+            0
+        }
+    };
+    let mut out = String::new();
+    if sign == 0x4000 {
+        out.push('-');
+    }
+    if weight < 0 {
+        out.push('0');
+    } else {
+        for i in 0..=weight {
+            if i == 0 {
+                out.push_str(&digit(i).to_string());
+            } else {
+                out.push_str(&format!("{:04}", digit(i)));
+            }
+        }
+    }
+    if dscale > 0 {
+        let mut frac = String::new();
+        let mut i = weight + 1;
+        while frac.len() < dscale {
+            frac.push_str(&format!("{:04}", digit(i)));
+            i += 1;
+        }
+        frac.truncate(dscale);
+        out.push('.');
+        out.push_str(&frac);
+    }
+    out
+}
+
+// Microseconds since 2000-01-01 00:00:00 UTC, the binary timestamp, as RFC3339 in UTC with its
+// fraction trimmed of trailing zeros: the text Go's time.Time writes for the same instant.
+fn pg_micros_rfc3339(micros: i64) -> String {
+    if micros == i64::MAX {
+        return "infinity".to_string();
+    }
+    if micros == i64::MIN {
+        return "-infinity".to_string();
+    }
+    let unix_us = micros + 946_684_800_000_000;
+    let secs = unix_us.div_euclid(1_000_000);
+    let frac = unix_us.rem_euclid(1_000_000);
+    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+    let sod = secs.rem_euclid(86_400);
+    let mut out = format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}",
+        sod / 3600,
+        (sod % 3600) / 60,
+        sod % 60
+    );
+    if frac > 0 {
+        let digits = format!("{frac:06}");
+        out.push('.');
+        out.push_str(digits.trim_end_matches('0'));
+    }
+    out.push('Z');
+    out
+}
+
+// Days since 2000-01-01, the binary date, as the midnight Go's time.Time writes for it.
+fn pg_date_rfc3339(days: i32) -> String {
+    if days == i32::MAX {
+        return "infinity".to_string();
+    }
+    if days == i32::MIN {
+        return "-infinity".to_string();
+    }
+    let (year, month, day) = civil_from_days(days as i64 + 10_957);
+    format!("{year:04}-{month:02}-{day:02}T00:00:00Z")
+}
+
+// Render one column of a postgres row to a string the way the Go kernel renders it, so pg_query
+// answers the same text on both: bool as true or false, floats as format_float writes them, numeric
+// in its own digits, timestamps and dates as RFC3339 in UTC, json and jsonb as their text, the
+// integer family in decimal. NULL → "". A type outside that set → "?". try_get keeps a type
+// mismatch from panicking.
 fn pg_cell_to_string(row: &postgres::Row, ci: usize) -> String {
     let ty = row.columns()[ci].type_().name().to_string();
     match ty.as_str() {
-        "text" | "varchar" | "bpchar" | "name" | "json" | "jsonb" => row
+        "text" | "varchar" | "bpchar" | "name" => row
             .try_get::<usize, Option<String>>(ci)
             .ok()
             .flatten()
@@ -907,7 +1043,25 @@ fn pg_cell_to_string(row: &postgres::Row, ci: usize) -> String {
             .try_get::<usize, Option<bool>>(ci)
             .ok()
             .flatten()
-            .map(|v| if v { "t".to_string() } else { "f".to_string() })
+            .map(|v| if v { "true".to_string() } else { "false".to_string() })
+            .unwrap_or_default(),
+        "float8" => row
+            .try_get::<usize, Option<f64>>(ci)
+            .ok()
+            .flatten()
+            .map(format_float)
+            .unwrap_or_default(),
+        "float4" => row
+            .try_get::<usize, Option<f32>>(ci)
+            .ok()
+            .flatten()
+            .map(|v| format_float(v as f64))
+            .unwrap_or_default(),
+        "numeric" | "json" | "jsonb" | "timestamptz" | "timestamp" | "date" => row
+            .try_get::<usize, Option<PgRawCell>>(ci)
+            .ok()
+            .flatten()
+            .map(|cell| pg_raw_cell_text(&ty, &cell.0))
             .unwrap_or_default(),
         _ => "?".to_string(),
     }
@@ -916,7 +1070,7 @@ fn pg_cell_to_string(row: &postgres::Row, ci: usize) -> String {
 fn pg_cell_to_value(row: &postgres::Row, ci: usize) -> Value {
     let ty = row.columns()[ci].type_().name().to_string();
     match ty.as_str() {
-        "text" | "varchar" | "bpchar" | "name" | "json" | "jsonb" => Value::Str(
+        "text" | "varchar" | "bpchar" | "name" => Value::Str(
             row.try_get::<usize, Option<String>>(ci)
                 .ok()
                 .flatten()
