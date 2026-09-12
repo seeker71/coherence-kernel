@@ -59,8 +59,14 @@ claim presentation. Cadence work includes terminal output. This is a write
 acknowledgment, not display-photon time or upstream microphone/model latency.
 The pure presentation band returns 31.
 
-Run `./fkwu observe/form-glass-run.fk` in the viewing terminal. After a native
-binary repair, relaunch that carrier once to replace its already-running children.
+Run `./fkwu observe/form-glass-run.fk` in the viewing terminal. Its prelude-free
+native bootstrap checks kernel freshness with closed stdin before admitting BML.
+A failed check rebuilds the committed checkout seed into a temporary executable,
+publishes it after successful compilation, and rechecks freshness before starting
+`observe/form-glass-supervisor-run.fk`. Compiler diagnostics remain visible; a
+failed compile retains the existing binary. This early Form layer needs no core
+formatting primitives from the newer kernel it may be rebuilding. Relaunching the
+public door replaces already-running children after a native binary repair.
 Thereafter a dependency change renews the renderer and the three sensor processes;
 a renderer-only pool renewal keeps sensors and skips repeated admission output.
 
