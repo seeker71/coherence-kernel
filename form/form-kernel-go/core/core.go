@@ -22,7 +22,6 @@ const (
 	VNull ValueKind = iota
 	VInt
 	VStr
-	VBool
 	VList
 	VClosure
 	VNodeID
@@ -115,13 +114,12 @@ func (f *Frame) Lookup(name NameID) (Value, bool) {
 }
 
 // Value — runtime tagged union. List and Closure carry pointers; the rest are
-// inline. Flat struct so the hot path is allocation-free for ints and bools.
+// inline. Flat struct so the hot path is allocation-free for ints.
 type Value struct {
 	Kind  ValueKind
 	Int   int64
 	Float float64
 	Str   string
-	Bool  bool
 	List  []Value
 	Cl    *Closure
 	Nid   NodeID
@@ -138,11 +136,6 @@ func (v Value) String() string {
 		return FormatFloatJS(v.Float)
 	case VStr:
 		return v.Str
-	case VBool:
-		if v.Bool {
-			return "true"
-		}
-		return "false"
 	case VList:
 		parts := make([]string, len(v.List))
 		for i, x := range v.List {
@@ -170,11 +163,6 @@ func (v Value) AsFloat() float64 {
 		return v.Float
 	case VInt:
 		return float64(v.Int)
-	case VBool:
-		if v.Bool {
-			return 1.0
-		}
-		return 0.0
 	}
 	panic(fmt.Sprintf("AsFloat: %v", v))
 }
@@ -191,7 +179,7 @@ func (v Value) AsNid() NodeID {
 }
 
 // AsInt — the integer lane's coercion: ints pass through, floats truncate,
-// bools are the 0/1 states (axiom-1, core-axioms.form). Any other kind is a
+// truth arrives as the 0/1 ints (axiom-1, core-axioms.form). Any other kind is a
 // type-contract violation — str_eq, node_eq, and value_eq are the typed
 // doors for those kinds. Sibling to Rust's as_int and the TS compare lane.
 func (v Value) AsInt() int64 {
@@ -200,11 +188,6 @@ func (v Value) AsInt() int64 {
 		return v.Int
 	case VFloat:
 		return int64(v.Float)
-	case VBool:
-		if v.Bool {
-			return 1
-		}
-		return 0
 	}
 	panic(fmt.Sprintf("as_int: %v", v))
 }

@@ -341,7 +341,7 @@ export class Kernel {
         return { kind: "str", str: s };
       }
       case Triv.BOOL:
-        return { kind: "bool", bool: n.inst !== 0 };
+        return boolInt(n.inst !== 0);
       case Triv.NULL:
         return { kind: "null" };
       case Triv.INT64:
@@ -396,8 +396,6 @@ export class Kernel {
         // (Value::display) siblings render strings without quotes, and band
         // outputs are byte-compared across kernels.
         return v.str;
-      case "bool":
-        return v.bool ? "true" : "false";
       case "list":
         return "[" + v.list.map((x) => this.render(x)).join(", ") + "]";
       case "closure":
@@ -584,7 +582,6 @@ export type Value =
   | { kind: "f32"; float: number }
   | { kind: "f64"; float: number }
   | { kind: "str"; str: string }
-  | { kind: "bool"; bool: boolean }
   | { kind: "list"; list: Value[] }
   | { kind: "closure"; closure: Closure }
   | { kind: "nodeid"; nodeid: NodeID };
@@ -627,11 +624,10 @@ export class Frame {
   }
 }
 
-// arg helpers — faithful coercion at the native door (axiom-1: true IS 1).
+// arg helpers — faithful coercion at the native door.
 function argInt(args: Value[], i: number): number {
   const v = args[i];
   if (!v) throw new Error(`arg ${i}: missing`);
-  if (v.kind === "bool") return v.bool ? 1 : 0;
   if (v.kind === "int") return v.int;
   if (v.kind === "i64" || v.kind === "u64") return Number(v.bigint);
   throw new Error(`arg ${i}: expected int-like, got ${v.kind}`);
@@ -1127,14 +1123,12 @@ export function walk(k: Kernel, node: NodeID, frame: Frame): Value {
 }
 
 function expectInt(v: Value, op: string): number {
-  if (v.kind === "bool") return v.bool ? 1 : 0;
   if (v.kind === "i64" || v.kind === "u64") return Number(v.bigint);
   if (v.kind !== "int") throw new Error(`${op}: expected int-like, got ${v.kind}`);
   return v.int;
 }
 
 function expectFloat(v: Value, op: string): number {
-  if (v.kind === "bool") return v.bool ? 1 : 0;
   if (v.kind === "f32" || v.kind === "f64") return v.float;
   if (v.kind === "int") return v.int;
   if (v.kind === "i64" || v.kind === "u64") return Number(v.bigint);
@@ -1142,7 +1136,6 @@ function expectFloat(v: Value, op: string): number {
 }
 
 function expectBigInt(v: Value, op: string): bigint {
-  if (v.kind === "bool") return v.bool ? 1n : 0n;
   if (v.kind === "i64" || v.kind === "u64") return v.bigint;
   if (v.kind === "int") return BigInt(v.int);
   throw new Error(`${op}: expected integer-like, got ${v.kind}`);
@@ -1271,41 +1264,21 @@ function walkCompare(
   const av = walk(k, kids[0]!, frame);
   const bv = walk(k, kids[1]!, frame);
 
-  // `nothing` (axiom-1's third state) is a value, not a number. Equal to itself,
-  // never to 0. Ordering it against a number is declined rather than answered: fkwu
-  // currently leaks its own value encoding there (add (nothing) 1 ->
-  // -8999999999999999997), and a walker that copied that would agree by imitation
-  // instead of witnessing. Throwing is what lets this walker DISAGREE if a cell
-  // ever leans on it.
-  if (av.kind === "null" || bv.kind === "null") {
-    const both = av.kind === "null" && bv.kind === "null";
-    if (op === RCmp.EQ) return boolInt(both);
-    if (op === RCmp.NE) return boolInt(!both);
-    throw new Error("compare on nothing: ordering it against a number is not a number question");
-  }
-
-  // A NodeID is identity-by-content: eq of two NodeIDs answers 1 iff all four
-  // coordinates are equal — regardless of which mint built the value (the fkwu
-  // tag-102 heal, witnessed 2026-08-30). A NodeID never equals an int, a list,
-  // a string, or nothing. Ordering NodeIDs is declined, like ordering nothing:
-  // not a number question.
-  if (av.kind === "nodeid" || bv.kind === "nodeid") {
-    const same =
-      av.kind === "nodeid" &&
-      bv.kind === "nodeid" &&
-      av.nodeid.pkg === bv.nodeid.pkg &&
-      av.nodeid.level === bv.nodeid.level &&
-      av.nodeid.type === bv.nodeid.type &&
-      av.nodeid.inst === bv.nodeid.inst;
-    if (op === RCmp.EQ) return boolInt(same);
-    if (op === RCmp.NE) return boolInt(!same);
-    throw new Error("compare on nodeid: ordering it is not a number question");
+  // Where a non-number takes part, eq and ne answer content identity
+  // (valueEqual, axiom-3): `nothing` equals only nothing, never 0; a NodeID
+  // meets by its four coordinates; lists meet by their items. An ordering
+  // there has no answer to give and refuses by the one name the kernels use,
+  // so this walker disagrees if a cell ever leans on an encoding.
+  if (!(isNumericValue(av) && isNumericValue(bv))) {
+    if (op === RCmp.EQ) return boolInt(valueEqual(av, bv));
+    if (op === RCmp.NE) return boolInt(!valueEqual(av, bv));
+    throw new Error("order: only numbers have an order -- ask value_kind before lt/le/gt/ge");
   }
 
   let r: boolean;
   if (av.kind === "f32" || av.kind === "f64" || bv.kind === "f32" || bv.kind === "f64") {
-    const a = av.kind === "bool" ? (av.bool ? 1 : 0) : expectFloat(av, "compare");
-    const b = bv.kind === "bool" ? (bv.bool ? 1 : 0) : expectFloat(bv, "compare");
+    const a = expectFloat(av, "compare");
+    const b = expectFloat(bv, "compare");
     switch (op) {
       case RCmp.EQ: r = a === b; break;
       case RCmp.NE: r = a !== b; break;
@@ -1316,8 +1289,8 @@ function walkCompare(
       default: throw new Error(`compare: unknown op ${op}`);
     }
   } else if (av.kind === "i64" || av.kind === "u64" || bv.kind === "i64" || bv.kind === "u64") {
-    const a = av.kind === "bool" ? (av.bool ? 1n : 0n) : expectBigInt(av, "compare");
-    const b = bv.kind === "bool" ? (bv.bool ? 1n : 0n) : expectBigInt(bv, "compare");
+    const a = expectBigInt(av, "compare");
+    const b = expectBigInt(bv, "compare");
     switch (op) {
       case RCmp.EQ: r = a === b; break;
       case RCmp.NE: r = a !== b; break;
@@ -1328,8 +1301,8 @@ function walkCompare(
       default: throw new Error(`compare: unknown op ${op}`);
     }
   } else {
-    const a = av.kind === "bool" ? (av.bool ? 1 : 0) : expectInt(av, "compare");
-    const b = bv.kind === "bool" ? (bv.bool ? 1 : 0) : expectInt(bv, "compare");
+    const a = expectInt(av, "compare");
+    const b = expectInt(bv, "compare");
     switch (op) {
       case RCmp.EQ: r = a === b; break;
       case RCmp.NE: r = a !== b; break;
@@ -1343,14 +1316,18 @@ function walkCompare(
   return boolInt(r);
 }
 
+// valueEqual — content identity (axiom-3: same composition is the same cell),
+// as the kernels answer it: numbers keep their kind, so an integer never equals
+// a float and a NaN is the NaN it was built as; strings meet by text, NodeIDs by
+// coordinates, lists by their items however built; a closure is a place and
+// equals only itself.
 function valueEqual(a: Value, b: Value): boolean {
-  const aNum = isNumericValue(a);
-  const bNum = isNumericValue(b);
-  if (aNum && bNum) {
-    if (a.kind === "i64" || a.kind === "u64" || b.kind === "i64" || b.kind === "u64") {
-      return numericToBig(a) === numericToBig(b);
-    }
-    return numericToNum(a) === numericToNum(b);
+  if (isIntegerValue(a) && isIntegerValue(b)) {
+    if (a.kind === "int" && b.kind === "int") return a.int === b.int;
+    return integerToBig(a) === integerToBig(b);
+  }
+  if ((a.kind === "f32" || a.kind === "f64") && (b.kind === "f32" || b.kind === "f64")) {
+    return a.float === b.float || (Number.isNaN(a.float) && Number.isNaN(b.float));
   }
   if (a.kind !== b.kind) return false;
   switch (a.kind) {
@@ -1358,12 +1335,15 @@ function valueEqual(a: Value, b: Value): boolean {
       return true;
     case "str":
       return a.str === (b as { str: string }).str;
-    case "bool":
-      return a.bool === (b as { bool: boolean }).bool;
     case "list": {
       const bl = (b as { list: Value[] }).list;
-      return a.list.length === bl.length && a.list.every((item, idx) => valueEqual(item, bl[idx]!));
+      return (
+        a.list === bl ||
+        (a.list.length === bl.length && a.list.every((item, idx) => valueEqual(item, bl[idx]!)))
+      );
     }
+    case "closure":
+      return a.closure === (b as { closure: Closure }).closure;
     case "nodeid": {
       const bn = (b as { nodeid: NodeID }).nodeid;
       return (
@@ -1378,41 +1358,27 @@ function valueEqual(a: Value, b: Value): boolean {
   }
 }
 
-function isNumericValue(
-  v: Value,
-): v is
+type IntegerValue =
   | { kind: "int"; int: number }
   | { kind: "i64"; bigint: bigint }
-  | { kind: "u64"; bigint: bigint }
-  | { kind: "f32"; float: number }
-  | { kind: "f64"; float: number } {
-  return (
-    v.kind === "int" ||
-    v.kind === "i64" ||
-    v.kind === "u64" ||
-    v.kind === "f32" ||
-    v.kind === "f64"
-  );
+  | { kind: "u64"; bigint: bigint };
+
+// The walker's integers are the int kind and the i64/u64 tables; its numbers
+// are those and the two float widths.
+function isIntegerValue(v: Value): v is IntegerValue {
+  return v.kind === "int" || v.kind === "i64" || v.kind === "u64";
 }
 
-function numericToNum(v: Value): number {
-  if (v.kind === "f32" || v.kind === "f64") return v.float;
-  if (v.kind === "i64" || v.kind === "u64") return Number(v.bigint);
-  if (v.kind === "int") return v.int;
-  throw new Error(`numericToNum: ${v.kind} is not numeric`);
+function isNumericValue(v: Value): boolean {
+  return isIntegerValue(v) || v.kind === "f32" || v.kind === "f64";
 }
 
-function numericToBig(v: Value): bigint {
-  if (v.kind === "i64" || v.kind === "u64") return v.bigint;
-  if (v.kind === "f32" || v.kind === "f64") return BigInt(Math.trunc(v.float));
-  if (v.kind === "int") return BigInt(v.int);
-  throw new Error(`numericToBig: ${v.kind} is not numeric`);
+function integerToBig(v: IntegerValue): bigint {
+  return v.kind === "int" ? BigInt(v.int) : v.bigint;
 }
 
 function truthy(v: Value): boolean {
   switch (v.kind) {
-    case "bool":
-      return v.bool;
     case "null":
       // `nothing` is not a yes/no. Branching on it is declined rather than silently
       // read as false — see walkCompare for why this walker declines to imitate.

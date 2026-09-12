@@ -59,7 +59,6 @@ const (
 	VNull    = core.VNull
 	VInt     = core.VInt
 	VStr     = core.VStr
-	VBool    = core.VBool
 	VList    = core.VList
 	VClosure = core.VClosure
 	VNodeID  = core.VNodeID
@@ -1207,7 +1206,7 @@ func (k *Kernel) trivialValue(n NodeID) Value {
 	case TrivString:
 		return Value{Kind: VStr, Str: k.strs[n.Inst]}
 	case TrivBool:
-		return Value{Kind: VBool, Bool: n.Inst != 0}
+		return boolInt(n.Inst != 0)
 	case TrivNull:
 		return Value{Kind: VNull}
 	case TrivFloat32:
@@ -1407,8 +1406,6 @@ func valueKindName(v Value) string {
 		return "int"
 	case VStr:
 		return "string"
-	case VBool:
-		return "bool"
 	case VList:
 		return "list"
 	case VClosure:
@@ -1709,7 +1706,7 @@ func sourceNativeScanText(src string, lex sourceNativeLexicon) Value {
 }
 
 // asFloat — coerce a Value to float64 for IEEE 754 arithmetic. VFloat
-// passes through; VInt and VBool widen by Go's standard conversion. Other
+// passes through; VInt widens by Go's standard conversion. Other
 // kinds panic — float arithmetic on a string or list is a Form-author
 // bug, not a kernel fallback. Mirrors Rust's Value::as_float.
 
@@ -2103,7 +2100,7 @@ func (k *Kernel) registerNatives() {
 	// record_has — (record_has rec "field") → bool.
 	k.registerNative("record_has", catAccess(), func(k *Kernel, args []Value) Value {
 		_, ok := args[0].Rec.Get(k.internName(argStr(args, 1)))
-		return Value{Kind: VBool, Bool: ok}
+		return boolInt(ok)
 	})
 	// record_blueprint — (record_blueprint rec) → the blueprint NodeID, or 0
 	// for a record built without one.
@@ -2126,7 +2123,7 @@ func (k *Kernel) registerNatives() {
 	})
 	// record? — (record? v) → bool type predicate.
 	k.registerNative("record?", catAccess(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VBool, Bool: args[0].Kind == VRecord}
+		return boolInt(args[0].Kind == VRecord)
 	})
 	// --- methods on the blueprint (BML/NUMS reference, rung 2b) ----------
 	// Methods live on the blueprint/type, shared by all records of that type,
@@ -2146,16 +2143,16 @@ func (k *Kernel) registerNatives() {
 		switch args[0].Kind {
 		case VRecord:
 			if args[0].Rec.NoBlueprint {
-				return Value{Kind: VBool, Bool: false}
+				return boolInt(false)
 			}
 			bp = args[0].Rec.Blueprint
 		case VNodeID:
 			bp = args[0].Nid
 		default:
-			return Value{Kind: VBool, Bool: false}
+			return boolInt(false)
 		}
 		_, ok := k.methods[methodKey{bp, k.internName(argStr(args, 1))}]
-		return Value{Kind: VBool, Bool: ok}
+		return boolInt(ok)
 	})
 	// method_invoke — (method_invoke record "name" arg1 arg2 ...) → value.
 	// Dispatches by the record's blueprint; the method's FIRST param is the
@@ -2411,11 +2408,6 @@ func (k *Kernel) registerNatives() {
 		switch v.Kind {
 		case VStr:
 			return Value{Kind: VStr, Str: v.Str}
-		case VBool:
-			if v.Bool {
-				return Value{Kind: VStr, Str: "true"}
-			}
-			return Value{Kind: VStr, Str: "false"}
 		case VNull:
 			return Value{Kind: VStr, Str: "null"}
 		case VFloat:
@@ -2629,15 +2621,15 @@ func (k *Kernel) registerNatives() {
 	})
 	k.registerNative("_dict_has", catCompare(RCompareEq), func(_ *Kernel, args []Value) Value {
 		if !isDictValue(args[0]) {
-			return Value{Kind: VBool, Bool: false}
+			return boolInt(false)
 		}
 		xs := args[0].List
 		for i := 1; i+1 < len(xs); i += 2 {
 			if dictKeyEq(xs[i], args[1]) {
-				return Value{Kind: VBool, Bool: true}
+				return boolInt(true)
 			}
 		}
-		return Value{Kind: VBool, Bool: false}
+		return boolInt(false)
 	})
 	k.registerNative("_dict_keys", catAccess(), func(_ *Kernel, args []Value) Value {
 		if !isDictValue(args[0]) {
@@ -2732,23 +2724,23 @@ func (k *Kernel) registerNatives() {
 			xs := args[1].List
 			for i := 1; i+1 < len(xs); i += 2 {
 				if dictKeyEq(xs[i], args[0]) {
-					return Value{Kind: VBool, Bool: true}
+					return boolInt(true)
 				}
 			}
-			return Value{Kind: VBool, Bool: false}
+			return boolInt(false)
 		}
 		if args[1].Kind == VList {
 			for _, v := range args[1].List {
-				if dictKeyEq(v, args[0]) || (v.Kind == VBool && args[0].Kind == VBool && v.Bool == args[0].Bool) {
-					return Value{Kind: VBool, Bool: true}
+				if dictKeyEq(v, args[0]) {
+					return boolInt(true)
 				}
 			}
-			return Value{Kind: VBool, Bool: false}
+			return boolInt(false)
 		}
 		if args[1].Kind == VStr && args[0].Kind == VStr {
-			return Value{Kind: VBool, Bool: strings.Contains(args[1].Str, args[0].Str)}
+			return boolInt(strings.Contains(args[1].Str, args[0].Str))
 		}
-		return Value{Kind: VBool, Bool: false}
+		return boolInt(false)
 	})
 	// Common Python builtins. Sibling-parity with Rust + TS kernels, and
 	// variadic the way CPython is: one list argument folds over its
@@ -3891,7 +3883,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VNull}
 	})
 	k.registerNative("framebuffer-observe-active?", catCompare(RCompareEq), func(k *Kernel, _ []Value) Value {
-		return Value{Kind: VBool, Bool: k.observationActive()}
+		return boolInt(k.observationActive())
 	})
 	// framebuffer-clear — reset the framebuffer for bounded windows.
 	k.registerNative("framebuffer-clear", catWitness(), func(k *Kernel, _ []Value) Value {
@@ -4641,6 +4633,12 @@ func (k *Kernel) switchTableFor(node NodeID, kids []NodeID) *switchTable {
 			continue
 		}
 		if pattern.Level == LevelTrivial {
+			// Truth is the 0/1 integer states (axiom-1): a true or false
+			// pattern keys as the int it is, the int a comparison answers.
+			if pattern.Type == TrivBool {
+				table.cases[k.internTrivialInt(int64(pattern.Inst))] = body
+				continue
+			}
 			table.cases[pattern] = body
 			continue
 		}
@@ -4670,11 +4668,6 @@ func (k *Kernel) switchKeyFromValue(v Value) (NodeID, bool) {
 		return k.internTrivialFloat64(v.Float), true
 	case VStr:
 		return k.internString(v.Str), true
-	case VBool:
-		if v.Bool {
-			return NodeID{Pkg: 1, Level: LevelTrivial, Type: TrivBool, Inst: 1}, true
-		}
-		return NodeID{Pkg: 1, Level: LevelTrivial, Type: TrivBool, Inst: 0}, true
 	case VNodeID:
 		return v.Nid, true
 	default:
@@ -4684,19 +4677,12 @@ func (k *Kernel) switchKeyFromValue(v Value) (NodeID, bool) {
 
 // valueEqual — content identity (axiom-3: same composition is the same cell).
 // value_eq answers it, and eq/ne answer it wherever a non-number takes part.
-// Truth is its 0/1 state (axiom-1), so a bool meets the int it is. Numbers keep
-// their kind: an int never equals a float here, and a NaN is the NaN it was
-// built as. Strings meet by text, NodeIDs by coordinates, lists by their items,
-// however the lists were built. Records and closures are places (record_set
-// writes into one), so a place equals only itself. Siblings to Rust's
-// value_equal, TypeScript's valueEqual and fkwu's fk_veq.
+// Numbers keep their kind: an int never equals a float here, and a NaN is the
+// NaN it was built as. Strings meet by text, NodeIDs by coordinates, lists by
+// their items, however the lists were built. Records and closures are places
+// (record_set writes into one), so a place equals only itself. Siblings to
+// Rust's value_equal, TypeScript's valueEqual and fkwu's fk_veq.
 func valueEqual(a, b Value) bool {
-	if a.Kind == VBool {
-		a = boolInt(a.Bool)
-	}
-	if b.Kind == VBool {
-		b = boolInt(b.Bool)
-	}
 	if a.Kind != b.Kind {
 		return false
 	}
@@ -4732,11 +4718,11 @@ func valueEqual(a, b Value) bool {
 	return false
 }
 
-// cmpNumberKind — the kinds the compare lane coerces: ints, floats and the
-// 0/1 bool states. eq/ne over anything else is valueEqual; an ordering over
+// cmpNumberKind — the kinds the compare lane coerces: ints and floats (truth
+// is already their 0/1). eq/ne over anything else is valueEqual; an ordering over
 // anything else has no answer.
 func cmpNumberKind(v Value) bool {
-	return v.Kind == VInt || v.Kind == VFloat || v.Kind == VBool
+	return v.Kind == VInt || v.Kind == VFloat
 }
 
 func (k *Kernel) walkMatchSwitch(node NodeID, kids []NodeID, env *Frame) Value {
@@ -4782,8 +4768,6 @@ func (k *Kernel) walkMatchSwitch(node NodeID, kids []NodeID, env *Frame) Value {
 
 func truthy(v Value) bool {
 	switch v.Kind {
-	case VBool:
-		return v.Bool
 	case VInt:
 		return v.Int != 0
 	case VNull:

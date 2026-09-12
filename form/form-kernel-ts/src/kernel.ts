@@ -1143,7 +1143,7 @@ export class Kernel {
         return { kind: "str", str: s };
       }
       case Triv.BOOL:
-        return { kind: "bool", bool: n.inst !== 0 };
+        return boolInt(n.inst !== 0);
       case Triv.NULL:
         return { kind: "null" };
       case Triv.INT8: {
@@ -1223,8 +1223,6 @@ export class Kernel {
         // (Value::display) siblings render strings without quotes, and
         // band outputs are byte-compared across kernels.
         return v.str;
-      case "bool":
-        return v.bool ? "true" : "false";
       case "list":
         return "[" + v.list.map((x) => this.render(x)).join(", ") + "]";
       case "closure":
@@ -1427,9 +1425,9 @@ export class Kernel {
     // record_has — (record_has rec "field") → bool.
     this.registerNative("record_has", catAccess(), (k, args) => {
       const r = args[0]!;
-      if (r.kind !== "record") return { kind: "bool", bool: false };
+      if (r.kind !== "record") return boolInt(false);
       const v = recordGet(r.record, k.internName(argStr(args, 1)));
-      return { kind: "bool", bool: v !== undefined };
+      return boolInt(v !== undefined);
     });
     // record_blueprint — (record_blueprint rec) → the blueprint NodeID.
     this.registerNative("record_blueprint", catAccess(), (_k, args) => {
@@ -1439,10 +1437,7 @@ export class Kernel {
       return { kind: "nodeid", nodeid: r.record.blueprint };
     });
     // record? — (record? v) → bool type predicate.
-    this.registerNative("record?", catAccess(), (_k, args) => ({
-      kind: "bool",
-      bool: args[0]!.kind === "record",
-    }));
+    this.registerNative("record?", catAccess(), (_k, args) => boolInt(args[0]!.kind === "record"));
     // record_keys — (record_keys rec) → list of field-name strings, in
     // insertion order. Lets Form enumerate a record used as a hash map
     // (e.g. cell-log-store.fk's keydir for compaction).
@@ -1474,12 +1469,12 @@ export class Kernel {
       const a0 = args[0]!;
       let bp: NodeID;
       if (a0.kind === "record") {
-        if (a0.record.blueprint === null) return { kind: "bool", bool: false };
+        if (a0.record.blueprint === null) return boolInt(false);
         bp = a0.record.blueprint;
       } else if (a0.kind === "nodeid") bp = a0.nodeid;
-      else return { kind: "bool", bool: false };
+      else return boolInt(false);
       const key = `${nodeKey(bp)}:${k.internName(argStr(args, 1))}`;
-      return { kind: "bool", bool: k.methods.has(key) };
+      return boolInt(k.methods.has(key));
     });
     // method_invoke — (method_invoke record "name" arg1 ...) → value.
     // Dispatches by the record's blueprint; the method's FIRST param is the
@@ -1690,11 +1685,10 @@ export class Kernel {
     // any trivial value as text" so emit-engine.fk's leaf walker can
     // pass node_value of any leaf type through it. Multi-target emit
     // (universal codec lattice — emit.fk + emits/json.fk) depends on
-    // string + bool + null passthrough.
+    // string + null passthrough.
     this.registerNative("int_to_str", catMethod(), (_k, args) => {
       const v = args[0]!;
       if (v.kind === "str") return { kind: "str", str: v.str ?? "" };
-      if (v.kind === "bool") return { kind: "str", str: v.bool ? "true" : "false" };
       if (v.kind === "null") return { kind: "str", str: "null" };
       if (v.kind === "f32" || v.kind === "f64") return { kind: "str", str: formatFloat(v.float) };
       if (v.kind === "i64" || v.kind === "u64") return { kind: "str", str: String(v.bigint) };
@@ -1881,12 +1875,12 @@ export class Kernel {
     this.registerNative("_dict_has", catCompareEq(), (_k, args) => {
       const d = args[0]!;
       const key = args[1]!;
-      if (!isDictValue(d)) return { kind: "bool", bool: false };
+      if (!isDictValue(d)) return boolInt(false);
       const xs = dictList(d);
       for (let i = 1; i + 1 < xs.length; i += 2) {
-        if (dictKeyEq(xs[i]!, key)) return { kind: "bool", bool: true };
+        if (dictKeyEq(xs[i]!, key)) return boolInt(true);
       }
-      return { kind: "bool", bool: false };
+      return boolInt(false);
     });
     this.registerNative("_dict_keys", catAccess(), (_k, args) => {
       const d = args[0]!;
@@ -1970,26 +1964,25 @@ export class Kernel {
         const xs = dictList(hay);
         for (let i = 1; i + 1 < xs.length; i += 2) {
           if (dictKeyEq(xs[i]!, needle))
-            return { kind: "bool", bool: true };
+            return boolInt(true);
         }
-        return { kind: "bool", bool: false };
+        return boolInt(false);
       }
       if (hay.kind === "list") {
         for (const v of hay.list) {
           if (
             (needle.kind === "int" && v.kind === "int" && needle.int === v.int) ||
-            (needle.kind === "str" && v.kind === "str" && needle.str === v.str) ||
-            (needle.kind === "bool" && v.kind === "bool" && needle.bool === v.bool)
+            (needle.kind === "str" && v.kind === "str" && needle.str === v.str)
           ) {
-            return { kind: "bool", bool: true };
+            return boolInt(true);
           }
         }
-        return { kind: "bool", bool: false };
+        return boolInt(false);
       }
       if (needle.kind === "str" && hay.kind === "str") {
-        return { kind: "bool", bool: hay.str.includes(needle.str) };
+        return boolInt(hay.str.includes(needle.str));
       }
-      return { kind: "bool", bool: false };
+      return boolInt(false);
     });
     // --- Substrate read primitives — kernel reaches the REST surface ----
     // Sibling-parity with the Go/Rust http_get carrier. The walker remains
@@ -2055,7 +2048,7 @@ export class Kernel {
         ],
       };
     });
-    // _json_get(json_str, key) → str|int|float|bool|null. Parse a top-level
+    // _json_get(json_str, key) → str|int|float|null. Parse a top-level
     // JSON object and extract obj[key]. Returns null on miss / parse error.
     // Nested objects come back as JSON strings so Form code composes via
     // repeated _json_get (jq-pipeline shape).
@@ -2073,7 +2066,7 @@ export class Kernel {
       }
       const v = (parsed as globalThis.Record<string, unknown>)[key];
       if (v === undefined || v === null) return { kind: "null" };
-      if (typeof v === "boolean") return { kind: "bool", bool: v };
+      if (typeof v === "boolean") return boolInt(v);
       if (typeof v === "number") {
         return Number.isInteger(v)
           ? { kind: "int", int: v }
@@ -2102,7 +2095,7 @@ export class Kernel {
       for (const [k, v] of Object.entries(parsed)) {
         out.push({ kind: "str", str: k });
         if (v === null) out.push({ kind: "null" });
-        else if (typeof v === "boolean") out.push({ kind: "bool", bool: v });
+        else if (typeof v === "boolean") out.push(boolInt(v));
         else if (typeof v === "number") {
           out.push(
             Number.isInteger(v)
@@ -2115,7 +2108,7 @@ export class Kernel {
       return { kind: "list", list: out };
     });
     // Common Python builtins. Sibling-parity with Rust + Go: elements read
-    // through the same integer lane as Rust's as_int (ints and bools widen,
+    // through the same integer lane as Rust's as_int (ints widen,
     // floats truncate, i64/u64 pass through), so wide literals survive
     // aggregation — a raw `.int` read on an i64 element is undefined and
     // silently drops the value (the choice-receipt-band divergence).
@@ -2138,9 +2131,7 @@ export class Kernel {
         const anyFloat = v.list.some((e) => e.kind === "f32" || e.kind === "f64");
         if (anyFloat) {
           let total = 0;
-          for (const e of v.list) {
-            total += e.kind === "bool" ? (e.bool ? 1 : 0) : expectFloat(e, "sum");
-          }
+          for (const e of v.list) total += expectFloat(e, "sum");
           return { kind: "f64", float: total };
         }
         let total = 0n;
@@ -2881,8 +2872,6 @@ export class Kernel {
           return null;
         case "str":
           return v.str;
-        case "bool":
-          return v.bool ? "true" : "false";
         case "f32":
         case "f64":
           return formatFloat(v.float);
@@ -2912,7 +2901,7 @@ export class Kernel {
     });
     this.registerNative("pg_ping", catCall(), (_k, args) => {
       const answer = pgRun("pg_ping", args[0], "SELECT 1", undefined);
-      return pgAnswer(answer.error ?? "", { kind: "bool", bool: answer.error === undefined });
+      return pgAnswer(answer.error ?? "", boolInt(answer.error === undefined));
     });
     this.registerNative("pg_close", catCall(), (_k, args) => {
       const answer = pgCall({ op: "close", h: argInt(args, 0) });
@@ -3653,8 +3642,6 @@ export class Kernel {
         return formatFloat(v.float);
       case "str":
         return v.str;
-      case "bool":
-        return v.bool ? "true" : "false";
       case "list":
         return "[" + v.list.map((x) => this.renderForPrint(x)).join(", ") + "]";
       case "closure":
@@ -3680,8 +3667,6 @@ function volatileCoord(namespace: string, key: string): string {
 function argInt(args: Value[], i: number): number {
   const v = args[i];
   if (!v) throw new Error(`arg ${i}: missing`);
-  // bool→int is intrinsic at every numeric door (axiom-1: true IS 1).
-  if (v.kind === "bool") return v.bool ? 1 : 0;
   if (
     v.kind === "int" ||
     v.kind === "i8" ||
@@ -3697,8 +3682,6 @@ function argInt(args: Value[], i: number): number {
 function argFloat(args: Value[], i: number): number {
   const v = args[i];
   if (!v) throw new Error(`arg ${i}: missing`);
-  // bool→float is intrinsic at every numeric door (axiom-1: true IS 1).
-  if (v.kind === "bool") return v.bool ? 1 : 0;
   if (v.kind === "f32" || v.kind === "f64") return v.float;
   if (
     v.kind === "int" ||
@@ -3834,8 +3817,6 @@ function composeScaledDecimal(kept: string, n: number, neg: boolean): string {
 function argBigInt(args: Value[], i: number): bigint {
   const v = args[i];
   if (!v) throw new Error(`arg ${i}: missing`);
-  // bool→int is intrinsic at every numeric door (axiom-1: true IS 1).
-  if (v.kind === "bool") return v.bool ? 1n : 0n;
   if (v.kind === "i64" || v.kind === "u64") return v.bigint;
   if (
     v.kind === "int" ||
@@ -3875,11 +3856,10 @@ function argNodeID(args: Value[], i: number): NodeID {
 }
 
 // listElemInt — the integer lane's element read for aggregating natives
-// (min/max/sum): ints and bools widen, floats truncate, i64/u64 pass
+// (min/max/sum): ints widen, floats truncate, i64/u64 pass
 // through. Sibling to Go/Rust Value.AsInt, carried in bigint so values
 // wider than int32 (#2922 literals) survive aggregation exactly.
 function listElemInt(v: Value, op: string): bigint {
-  if (v.kind === "bool") return v.bool ? 1n : 0n;
   if (v.kind === "f32" || v.kind === "f64") return BigInt(Math.trunc(v.float));
   return expectBigInt(v, op);
 }
@@ -3994,14 +3974,14 @@ function pgUnescape(s: string): string {
   }
 }
 
-// pgCell — a cell as the Go native reads it (database/sql over pgx, dbCellToForm): NULL as null, bool,
-// the integer types as ints, float4 widened from its single-precision value, float8 as a float,
+// pgCell — a cell as the Go native reads it (database/sql over pgx, dbCellToForm): NULL as null,
+// bool and the integer types as ints, float4 widened from its single-precision value, float8 as a float,
 // timestamps and dates as RFC3339 in UTC, and every other type as the server's text, bytea as its hex.
 function pgCell(oid: number, text: string | null): Value {
   if (text === null) return { kind: "null" };
   switch (oid) {
     case 16:
-      return { kind: "bool", bool: text === "t" };
+      return boolInt(text === "t");
     case 20:
     case 21:
     case 23:
@@ -4030,8 +4010,6 @@ function pgRfc3339(text: string): string {
 // pgCellText — a read cell written as Go's formValueString writes it into pg_query's page
 function pgCellText(v: Value): string {
   switch (v.kind) {
-    case "bool":
-      return v.bool ? "true" : "false";
     case "f64":
       return formatFloat(v.float);
     case "i64":
@@ -4139,13 +4117,13 @@ function kernelConfigLookup(config: ConfigObject, path: string): unknown {
   return current;
 }
 
-// a config value as the Go native answers it — text, a bool, an integral number as an int and any other
+// a config value as the Go native answers it — text, a bool or an integral number as an int and any other
 // as a float — with a missing or null value answering the fallback, and an object or list its JSON text
 // as the Rust native writes it
 function kernelConfigValue(value: unknown, fallback: Value): Value {
   if (value === undefined || value === null) return fallback;
   if (typeof value === "string") return { kind: "str", str: value };
-  if (typeof value === "boolean") return { kind: "bool", bool: value };
+  if (typeof value === "boolean") return boolInt(value);
   if (typeof value === "number") {
     return Number.isSafeInteger(value) ? { kind: "int", int: value } : { kind: "f64", float: value };
   }
@@ -4170,8 +4148,6 @@ function valueKindName(v: Value): string {
       return "float";
     case "str":
       return "string";
-    case "bool":
-      return "bool";
     case "list":
       return "list";
     case "closure":
@@ -4204,7 +4180,6 @@ export type Value =
   | { kind: "f32"; float: number }
   | { kind: "f64"; float: number }
   | { kind: "str"; str: string }
-  | { kind: "bool"; bool: boolean }
   | { kind: "list"; list: Value[] }
   | { kind: "closure"; closure: Closure }
   | { kind: "nodeid"; nodeid: NodeID }
@@ -4772,7 +4747,9 @@ function switchTableFor(k: Kernel, node: NodeID, kids: readonly NodeID[]): Switc
     if (isSwitchDefaultPattern(k, pattern)) {
       table.defaultBody = body;
     } else if (pattern.level === Level.TRIVIAL) {
-      table.cases.set(nodeKey(pattern), body);
+      // a truth leaf walks to its 0/1 int, so it keys as that int
+      const key = pattern.type === Triv.BOOL ? k.internTrivialInt(pattern.inst) : pattern;
+      table.cases.set(nodeKey(key), body);
     } else {
       table.dynamicArms.push({ pattern, body });
     }
@@ -4807,8 +4784,6 @@ function switchKeyFromValue(k: Kernel, value: Value): NodeID | undefined {
       return k.internTrivialFloat64(value.float);
     case "str":
       return k.internString(value.str);
-    case "bool":
-      return k.internTrivialBool(value.bool);
     case "nodeid":
       return value.nodeid;
     default:
@@ -4851,7 +4826,6 @@ function walkMatchSwitch(
 }
 
 function expectInt(v: Value, op: string): number {
-  if (v.kind === "bool") return v.bool ? 1 : 0;
   // A bare integer literal wider than int32 walks in as an i64 (overflow
   // table). Read here it becomes a JS number, exact to 2^53 — the same
   // widening expectFloat performs; walkMath and walkCompare take i64
@@ -4870,7 +4844,6 @@ function expectInt(v: Value, op: string): number {
 }
 
 function expectFloat(v: Value, op: string): number {
-  if (v.kind === "bool") return v.bool ? 1 : 0;
   if (v.kind === "f32" || v.kind === "f64") return v.float;
   if (
     v.kind === "int" ||
@@ -4886,7 +4859,6 @@ function expectFloat(v: Value, op: string): number {
 }
 
 function expectBigInt(v: Value, op: string): bigint {
-  if (v.kind === "bool") return v.bool ? 1n : 0n;
   if (v.kind === "i64" || v.kind === "u64") return v.bigint;
   if (
     v.kind === "int" ||
@@ -5120,11 +5092,11 @@ function walkCompare(
   // A comparison acknowledges with the 0/1 integer states (axiom-1,
   // core-axioms.form) so its answer flows directly into arithmetic —
   // the shape the compiled lane's JS coercion already implied. Operands
-  // meet the same numeric coercion in every lane: bools are the 0/1
-  // states. Where a non-number takes part, eq and ne answer content
-  // identity (valueEqual, axiom-3) and an ordering has no answer to give:
-  // it refuses by name, as fkwu's tags 5 and 103 do. Sibling to the Go and
-  // Rust walkers; proven three-way by tests/eq-shape-band.fk.
+  // meet the same numeric coercion in every lane. Where a non-number takes
+  // part, eq and ne answer content identity (valueEqual, axiom-3) and an
+  // ordering has no answer to give: it refuses by name, as fkwu's tags 5
+  // and 103 do. Sibling to the Go and Rust walkers; proven three-way by
+  // tests/eq-shape-band.fk.
   //
   // Width-mixing: if either side is float, compare as float; if either
   // side is bigint, compare as bigint; else as int.
@@ -5137,8 +5109,8 @@ function walkCompare(
   }
   let r: boolean;
   if (av.kind === "f32" || av.kind === "f64" || bv.kind === "f32" || bv.kind === "f64") {
-    const a = av.kind === "bool" ? (av.bool ? 1 : 0) : expectFloat(av, "compare");
-    const b = bv.kind === "bool" ? (bv.bool ? 1 : 0) : expectFloat(bv, "compare");
+    const a = expectFloat(av, "compare");
+    const b = expectFloat(bv, "compare");
     switch (op) {
       case RCmp.EQ: r = a === b; break;
       case RCmp.NE: r = a !== b; break;
@@ -5149,8 +5121,8 @@ function walkCompare(
       default: throw new Error(`compare: unknown op ${op}`);
     }
   } else if (av.kind === "i64" || av.kind === "u64" || bv.kind === "i64" || bv.kind === "u64") {
-    const a = av.kind === "bool" ? (av.bool ? 1n : 0n) : expectBigInt(av, "compare");
-    const b = bv.kind === "bool" ? (bv.bool ? 1n : 0n) : expectBigInt(bv, "compare");
+    const a = expectBigInt(av, "compare");
+    const b = expectBigInt(bv, "compare");
     switch (op) {
       case RCmp.EQ: r = a === b; break;
       case RCmp.NE: r = a !== b; break;
@@ -5161,8 +5133,8 @@ function walkCompare(
       default: throw new Error(`compare: unknown op ${op}`);
     }
   } else {
-    const a = av.kind === "bool" ? (av.bool ? 1 : 0) : expectInt(av, "compare");
-    const b = bv.kind === "bool" ? (bv.bool ? 1 : 0) : expectInt(bv, "compare");
+    const a = expectInt(av, "compare");
+    const b = expectInt(bv, "compare");
     switch (op) {
       case RCmp.EQ: r = a === b; break;
       case RCmp.NE: r = a !== b; break;
@@ -5177,10 +5149,10 @@ function walkCompare(
 }
 
 // cmpNumberKind — the kinds the compare lane coerces: every int and float
-// width and the 0/1 bool states. eq/ne over anything else is valueEqual; an
-// ordering over anything else has no answer.
+// width. eq/ne over anything else is valueEqual; an ordering over anything
+// else has no answer.
 function cmpNumberKind(v: Value): boolean {
-  return v.kind === "bool" || isNumericValue(v);
+  return isNumericValue(v);
 }
 
 function isIntegerValue(v: Value): boolean {
@@ -5189,17 +5161,14 @@ function isIntegerValue(v: Value): boolean {
 
 // valueEqual — content identity (axiom-3: same composition is the same cell).
 // value_eq answers it, and eq/ne answer it wherever a non-number takes part.
-// Truth is its 0/1 state (axiom-1), so a bool meets the int it is. Integers
-// compare across their widths and floats across theirs, as the one Int kind and
-// the one Float kind of the Go and Rust kernels do; an integer never equals a
-// float, however alike they read, and a NaN is the NaN it was built as. Strings
-// meet by text, NodeIDs by coordinates, lists by their items, however the lists
-// were built. Records and closures are places (record_set writes into one), so
-// a place equals only itself. Siblings to Go's valueEqual, Rust's value_equal
-// and fkwu's fk_veq.
+// Integers compare across their widths and floats across theirs, as the one
+// Int kind and the one Float kind of the Go and Rust kernels do; an integer
+// never equals a float, however alike they read, and a NaN is the NaN it was
+// built as. Strings meet by text, NodeIDs by coordinates, lists by their items,
+// however the lists were built. Records and closures are places (record_set
+// writes into one), so a place equals only itself. Siblings to Go's valueEqual,
+// Rust's value_equal and fkwu's fk_veq.
 function valueEqual(a: Value, b: Value): boolean {
-  if (a.kind === "bool") a = boolInt(a.bool);
-  if (b.kind === "bool") b = boolInt(b.bool);
   if (isIntegerValue(a) && isIntegerValue(b)) {
     if (a.kind === "i64" || a.kind === "u64" || b.kind === "i64" || b.kind === "u64") {
       return numericToBig(a) === numericToBig(b);
@@ -5299,8 +5268,6 @@ function numericToBig(v: Value): bigint {
 
 function truthy(v: Value): boolean {
   switch (v.kind) {
-    case "bool":
-      return v.bool;
     case "null":
       return false;
     case "int":
