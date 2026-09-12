@@ -10083,6 +10083,8 @@ static int fk_f64_mov64(unsigned int *words, long long *wn, unsigned int xd, uns
 static long long fk_substring_word(long long sword, long long a, long long b); /* the leaf calls this C native for substring (kind 38 emit); answers a raw interned word */
 static long long fk_f64_ovf_at[FK_F64_OVF_CAP]; /* the B.cond sites that leave for the overflow block: the scratch ran out, the walker answers */
 static long long fk_f64_ovf_n;
+static long long fk_f64_self_at[FK_F64_OVF_CAP]; /* the mov64 sites of a non-tail SELF call: the page's own address is 0 until install patches it here (word offset of the 4-word MOVZ/MOVK) */
+static long long fk_f64_self_n;
 /* ── the loop lane ────────────────────────────────────────────────────────────
  * A defn whose body is `(if <compare> <exit> <self tail call>)` (either branch
  * order) is a loop: every iteration is one heat-lane dispatch. The heat ledger
@@ -10493,6 +10495,43 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         fk_f64_acc_slot = slot; fk_f64_acc_dir = dir;
         *out = fk_f64_push(19 + dir, slot, e, 0.0, acc);
         return *out < 0 ? 0 : 3;
+    }
+    if ((t == 241 || t == 12) && fk_node[i][1] == fk_f64_cur_fx && !fk_f64_no_frame) {
+        /* a NON-TAIL self-call (a tail self-call is the loop's step, handled in the pulse before this). The page does
+         * not exist while it is being compiled, so its address is a placeholder the install patches (fk_f64_self_at).
+         * The recipe's own signature is not final during its admission either, so this first cut takes a self-recipe
+         * that ANSWERS AN INT and whose self-call passes no string -- true of value_eq and fib -- and emits the call
+         * with csig 0 (int answer, no scratch, no cons). Arguments wear the self parameters' types (types[]); a word a
+         * head handed up narrows to an int or a list parameter. This turns tree/non-tail recursion into a real
+         * recursive call on the C stack (bounded by the data's nesting depth). */
+        long long callee = fk_node[i][1];
+        long long car = fk_fnar[callee];
+        if (fk_f64_call_n >= FK_F64_CALL_CAP) { return 0; }
+        int slot = fk_f64_call_n;
+        fk_f64_call_n = fk_f64_call_n + 1;
+        long long k = 0;
+        long long cell = t == 12 ? -1 : fk_node[i][2];
+        while (k < car && k < 8) {
+            long long argnode = t == 12 ? fk_node[i][2] : ((cell >= 0 && fk_node[cell][0] == 242) ? fk_node[cell][1] : -1);
+            if (argnode < 0) { return 0; }
+            int an = 0;
+            int at = fk_f64_admit(argnode, arity, types, &an);
+            if (at == 0) { return 0; }
+            int want = (int)types[k]; /* the self parameter's own type */
+            if (at == 5 && (want == 1 || want == 4)) { an = fk_f64_narrow(an, want); if (an < 0) { return 0; } at = want; }
+            if (at != want || at == 3) { fk_f64_refuse_tag = t; return 0; } /* a mismatched or string arg: not this first cut */
+            fk_f64_call_args[slot][k] = an;
+            fk_f64_call_strsrc[slot][k] = -1;
+            if (t != 12) { cell = fk_node[cell][2]; }
+            k = k + 1;
+        }
+        if (t == 12) { if (car != 1) { return 0; } } else if (k != car || cell >= 0) { return 0; }
+        fk_f64_call_callee[slot] = callee;
+        fk_f64_call_rslot[slot] = -1;
+        *out = fk_f64_push(19, slot, (int)car, 0.0, callee); /* the emit reads callee == fk_f64_cur_fx as the self-call */
+        if (*out < 0) { return 0; }
+        fk_f64_prog[*out].s = -1;
+        return 1; /* an int answer */
     }
     if ((t == 241 || t == 12) && fk_node[i][1] != fk_f64_cur_fx) {
         long long callee = fk_node[i][1];
@@ -11229,7 +11268,8 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
          * scratch ran out, closes the frame and leaves for the overflow block. */
         int slot = p->a;
         long long car = p->b, callee = p->ilit;
-        long long csig = fk_f64_sig[callee];
+        int is_self = (callee == fk_f64_cur_fx); /* a non-tail self-call: csig 0 (int answer), address patched at install */
+        long long csig = is_self ? 0 : fk_f64_sig[callee];
         unsigned int fr = (unsigned int)FK_F64_CALL_FRAME << 10;
         int rargs[8];
         long long k = 0;
@@ -11332,7 +11372,14 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
             }
         }
         if (!fk_f64_put(words, wn, 0x910003E0U)) { return -1; }                                    /* MOV X0, SP */
-        if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)fk_f64_mem[callee])) { return -1; }
+        if (is_self) {
+            /* the page's own address is unknown until install; record this mov64 site (4 words) and emit a 0 placeholder */
+            if (fk_f64_self_n >= FK_F64_OVF_CAP) { return -1; }
+            fk_f64_self_at[fk_f64_self_n] = *wn; fk_f64_self_n = fk_f64_self_n + 1;
+            if (!fk_f64_mov64(words, wn, 16U, 0ULL)) { return -1; }
+        } else {
+            if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)fk_f64_mem[callee])) { return -1; }
+        }
         if (!fk_f64_put(words, wn, 0xD63F0200U)) { return -1; }                                    /* BLR X16 */
         int fres = (int)((csig >> 8) & 1), sres = (int)((csig >> 24) & 1);
         if (!fk_f64_put(words, wn, (fres ? 0xFD000000U : 0xF9000000U) | (FK_F64_CF_ANS << 10) | (31U << 5) | 0U)) { return -1; } /* the answer: a word, a float, or a string's pointer */
@@ -11452,6 +11499,22 @@ static int fk_f64_install(long long fx, long long root, long long orig, unsigned
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
     void *mem = mmap(0, FK_F64_PAGE_BYTES, 0x7, 0x1802, -1, 0);
     if (mem == (void *)-1) { return 0; }
+    /* patch each non-tail self-call's placeholder address (a 4-word MOVZ/MOVK into X16) to this page's own address */
+    {
+        unsigned long long selfbits = (unsigned long long)(fk_size_t)mem;
+        long long si = 0;
+        while (si < fk_f64_self_n) {
+            long long at = fk_f64_self_at[si];
+            unsigned int hw = 0;
+            while (hw < 4) {
+                unsigned int imm = (unsigned int)((selfbits >> (16 * hw)) & 0xFFFFULL);
+                unsigned int op = hw == 0 ? 0xD2800000U : 0xF2800000U;
+                if (at + hw < wn) { words[at + hw] = op | (hw << 21) | (imm << 5) | 16U; }
+                hw = hw + 1;
+            }
+            si = si + 1;
+        }
+    }
     pthread_jit_write_protect_np(0);
     memcpy(mem, words, (size_t)(wn * 4));
     pthread_jit_write_protect_np(1);
@@ -11492,7 +11555,7 @@ static void fk_f64_pulse(long long fx) {
     int types[8] = {2, 2, 2, 2, 2, 2, 2, 2}; /* the expression leaf: every parameter a float, the door holds the rest to the walker */
     { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } } /* a let slot is unbound here: this leaf takes no let step */
     fk_f64_prog_n = 0;
-    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_ovf2_n = 0; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0;
+    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_ovf2_n = 0; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0;
     fk_f64_no_frame = 1;
     int top = 0;
     if (fk_f64_admit(body, arity, types, &top) != 2) {
@@ -11738,7 +11801,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     long long arity = fk_fnar[fx];
     if (n != arity) { return; }
     if (arity > 6) { fk_fn_native[fx] = -1; return; } /* the typed lanes ride x10..x15: x16 and x17 are their scratch */
-    fk_f64_refuse_tag = -1; fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0;
+    fk_f64_refuse_tag = -1; fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0;
     fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_ovf2_n = 0;
     fk_fn_native[fx] = -1;
     int types[8] = {1, 1, 1, 1, 1, 1, 1, 1};
@@ -11971,7 +12034,7 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     unsigned int ccs[FK_F64_CHAIN_CAP];
     int tex = 0, nex = 0;
     fk_f64_prog_n = 0;
-    fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; /* a call inside the loop's steps may reach a crystallized leaf; a call to this defn is the self call */
+    fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0; /* a call inside the loop's steps may reach a crystallized leaf; a call to this defn is the self call */
     fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_ovf2_n = 0;
     long long j = 0;
     while (j < nsteps) {
