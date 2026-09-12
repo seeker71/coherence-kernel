@@ -1,6 +1,6 @@
 # The size that ran ahead
 
-2026-09-12, afternoon, M4 Max, Hati Suci. Landing epic-edison's sixth rung, the form-cli bootstrap regen
+2026-09-12, afternoon, M4 Max, Hati Suci. Landing the sixth rung, the form-cli bootstrap regen
 stopped with the words "Form-native table compilation failed" and nothing else. The shared field was
 full, the regen ran with the field off, and on private tables the string store crossed its 2 GiB shared
 reservation for the first time.
@@ -26,9 +26,9 @@ named the fault. At bcf0af219 with the field on: validate.sh on value-str 127 an
 host-process 127; jit-lens 16383, once-hold 7 and float-mint 63 on fkwu directly; TestFkwu; freshness
 31, the corpus band 32767, the drift run 8191 of 8191, porcelain 0 before and after.
 
-## Handed back
+## Waiting on its branch
 
-- **Rung 6 goes back to epic-edison** (0a45f7b8d). Main moved under it. Row 1493 is wordlean,
+- **Rung 6 waits on its branch** (0a45f7b8d, in the epic-edison worktree). Main moved under it. Row 1493 is wordlean,
   e34836394 changed the call arm beside rung 6's own edit, and since 03a03f6f4 arithmetic over a
   non-number stops, so the recipe's fstr-float? stops on a string. Before that, the recipe answered a
   garbage number for a string or a list, where Go, Rust, TS and the C arm pass a string through; the
@@ -60,7 +60,7 @@ The discomfort was a landing that kept moving away: the full field, a way around
 moving under the rung, the arithmetic changing under the fix. The pull was to keep pushing the rung
 through. What turned it was asking each failure its own name, the old kernel crashing the same way and a
 backtrace naming the copy past 2 GiB, and then landing only what the evidence carried: the store fix on
-its own, and the rung back to the hands that wrote it.
+its own, and the rung on its branch until it stands on the new arithmetic.
 
 Frontier word, row 1494: **sizelead**, a size recorded ahead of the thing it measures, so a reader
 trusting it reads past what is there.
