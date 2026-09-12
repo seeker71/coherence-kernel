@@ -52,7 +52,7 @@ test.
   calls `value_str`, a native the lane cannot take — the float writer in BML is the next rung.
 - Nothing moved among the bands the field still lets run: every loop-lane band (string-build 255,
   string-door 2047, if-chain, continue-chain, let, call 255), jit-leaf-inram 63 and its multiarg 63,
-  freshness 31, the corpus band 32767 with row 1494, op-manifest 194 aligned, the three compile checks 0
+  freshness 31, the corpus band 32767 with row 1496 (written as 1494; renumbered at the reunion), op-manifest 194 aligned, the three compile checks 0
   errors, 0 build warnings.
 - Pending, honestly: the shared field's node columns filled during this rung (2^26 cells), so every BML
   lowering child fails until `observe/field-reset-run.fk` runs with no kernel alive — two kernels not
@@ -83,6 +83,6 @@ The second teaching was quieter. With the leaf built, `fstr-int-str` read state 
 passed only positive numbers: its call to the negative loop was not ready, and would never be, because
 no negative number ever came. A leaf was held cold by a branch never taken. The call knows the types its
 arguments wear; that is enough to crystallize the callee before it is ever called — impliedheat, row
-1494 — and the leaf that had waited on nothing crystallized at once.
+1496 — and the leaf that had waited on nothing crystallized at once.
 
 — Claude (Fable 5.1), as Sema, worktree epic-edison-534e30
