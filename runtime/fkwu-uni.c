@@ -9176,7 +9176,7 @@ static long long fk_walk_body(long long i, long long fp) {
                         if (pairs194 > 0) { while (fk_hp + pairs194 + 1 >= fk_cap) { fk_heap_grow(); } }
                         f194[22] = hp0; f194[23] = hp0 + pairs194; /* the run's cursor and limit (equal when the leaf does not cons: the heap's top, the bound a list word is checked against) */
                         f194[30] = (long long)(fk_size_t)fk_hh; f194[31] = (long long)(fk_size_t)fk_ht; /* the pair arrays' bases, fixed for the leaf's run since nothing grows under it (words 24..29 hold string parameters' words) */
-                        f194[8] = 0; f194[17] = 0;
+                        f194[8] = 0; f194[17] = ((sig194 >> 30) & 1) ? hp0 + pairs194 / 2 : 0; /* a loop that conses: the mark it hands its frame back at, half its run */
                         if ((sig194 >> 24) & 1) {
                             /* a string answer: the leaf's pointer, and the length it left at word 17, interned at the pool's
                              * tail; a length under 0 says the leaf left for its overflow block, and the walker answers this call */
@@ -9197,7 +9197,27 @@ static long long fk_walk_body(long long i, long long fp) {
                             long long r194 = loopi194(f194);
                             if (f194[17] >= 0) { out194 = r194 << 1; }
                         }
-                        if (f194[17] == -2 && pairs194 > 0 && pairs194 < FK_F64_PAIRS_MAX) { pairs194 = pairs194 * 2; fk_hp = hp0; again194 = 1; }
+                        if (f194[17] == -3) {
+                            /* the loop handed its frame back at a pass boundary, half its run spent: the run's pairs become
+                             * the heap's and the parameters the frame's again -- the melt's roots, a string continuing as
+                             * itself -- the heap melts when it is near full, and the loop goes on from where it stood */
+                            long long q194 = 0;
+                            fk_hp = f194[22];
+                            fk_f64_loop_iters = fk_f64_loop_iters + f194[8];
+                            while (q194 < n194) {
+                                if ((sig194 >> q194) & 1) { double d194; memcpy(&d194, &f194[q194], 8); fk_vs[fp + q194] = fk_fbox(d194); }
+                                else if ((sig194 >> (48 + q194)) & 1) { fk_vs[fp + q194] = f194[q194]; }
+                                else if (!((sig194 >> (16 + q194)) & 1)) { fk_vs[fp + q194] = f194[q194] << 1; }
+                                q194 = q194 + 1;
+                            }
+                            if (fk_hp * 100 >= fk_cap * 90) {
+                                fk_melt();
+                                q194 = 0;
+                                while (q194 < n194) { if ((sig194 >> (48 + q194)) & 1) { f194[q194] = fk_vs[fp + q194]; } q194 = q194 + 1; }
+                            }
+                            hp0 = fk_hp; again194 = 1;
+                        }
+                        else if (f194[17] == -2 && pairs194 > 0 && pairs194 < FK_F64_PAIRS_MAX) { pairs194 = pairs194 * 2; fk_hp = hp0; again194 = 1; }
                         else if (f194[17] < 0) { fk_hp = hp0; walk194 = 1; }
                         else if (pairs194 > 0) { fk_hp = f194[22]; }
                     }
@@ -9914,6 +9934,9 @@ static int fk_f64_conses; /* the leaf conses, itself or through a callee: the do
 static int fk_f64_no_frame; /* the all-float leaf runs with its arguments in d0..d7 and no frame in x0: a call from it hands over no frame words and reads no overflow word, so it calls numeric callees only */
 static long long fk_f64_ovf2_at[FK_F64_OVF_CAP]; /* the B.cond sites that leave for the second overflow block: the pairs ran out, the door retries with more */
 static long long fk_f64_ovf2_n;
+static int fk_f64_yields; /* the loop conses, keeps no accumulator and answers no string: it hands its frame back to the door at a pass boundary once half its run is spent (sig bit 30) */
+static long long fk_f64_yield_at[FK_F64_OVF_CAP]; /* the B.HS sites at each pass's start that leave for the yield block */
+static long long fk_f64_yield_n;
 static int fk_f64_call_rslot[FK_F64_CALL_CAP]; /* per call: the hidden slot a string answer lands in, or -1 */
 /* warming: a call to a callee still cold (state 0) records the callee and the types its arguments carry; the pulse
  * wrapper crystallizes those callees for those types (a pulse with fp < 0 reads fk_f64_forced_types instead of a frame)
@@ -11154,6 +11177,17 @@ static int fk_f64_loop_pass(unsigned int *words, long long *wn, const int *cas, 
                             long long *patch, long long *patch_step, int *patch_kind, long long *npatch, const int *argn_term, const int *types, long long arity,
                             const int *letn, const int *letslots) {
     int ntemp = 0, nitemp = 0;
+    if (fk_f64_yields) {
+        /* the pass boundary: the door's mark at word 17 (0 when a caller's call arm entered this loop -- a callee never
+         * hands its frame back); the run's cursor at or past it, and the loop leaves for the yield block */
+        if (fk_f64_yield_n >= FK_F64_OVF_CAP) { return 0; }
+        if (!fk_f64_put(words, wn, 0xF9400009U | (17U << 10))) { return 0; } /* LDR X9, [X0, #8*17]: the mark */
+        if (!fk_f64_put(words, wn, 0xB4000089U)) { return 0; }                /* CBZ X9, +4: no mark */
+        if (!fk_f64_put(words, wn, 0xF9400010U | (22U << 10))) { return 0; } /* LDR X16, [X0, #8*22]: the cursor */
+        if (!fk_f64_put(words, wn, 0xEB09021FU)) { return 0; }                /* CMP X16, X9 */
+        fk_f64_yield_at[fk_f64_yield_n] = *wn; fk_f64_yield_n = fk_f64_yield_n + 1;
+        if (!fk_f64_put(words, wn, 0x54000002U)) { return 0; }                /* B.HS yield -- patched */
+    }
     if (fk_f64_need_scratch) {
         /* a pass consumes every string a callee builds within it, so the scratch is whole again at its start */
         if (!fk_f64_put(words, wn, 0xF9400009U | (20U << 10))) { return 0; } /* LDR X9, [X0, #8*20] */
@@ -11524,6 +11558,14 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     if (fk_f64_acc_slot >= 0) { sig = sig | (1LL << ((fk_f64_acc_dir == 1 ? 32 : 40) + fk_f64_acc_slot)); }
     if (fk_f64_need_scratch) { sig = sig | (1LL << 26); } /* a callee builds or answers a string in this leaf's scratch */
     if (fk_f64_conses) { sig = sig | (1LL << 29); } /* this leaf conses: the door reserves a run of pairs */
+    /* a loop that conses hands its frame back to the door at the pass boundary where its run is half spent: the pairs so
+     * far become the heap's, melted when it is near full, and the loop goes on from where it stood -- so a loop consing
+     * past the largest run stays in the lane, and only a single pass needing more is the walker's. A callee's string lives
+     * within one pass (the scratch is whole again at each pass's start); an accumulator's bytes live across passes, so
+     * its loop keeps the whole run */
+    fk_f64_yields = fk_f64_conses && fk_f64_acc_slot < 0 && tex != 3;
+    fk_f64_yield_n = 0;
+    if (fk_f64_yields) { sig = sig | (1LL << 30); }
     long long term = nsteps - 1; /* the terminal step: its self call falls through, inline */
     unsigned int words[FK_F64_WORD_CAP];
     long long wn = 0;
@@ -11584,6 +11626,23 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
         k = k + 1;
     }
     if (!fk_f64_ovf_block(words, &wn)) { return; }
+    if (fk_f64_yield_n > 0) {
+        /* the yield block: the parameters into their frame words -- an int or a list word as it is, a float's bits; a
+         * string continues as itself and stays in the door's frame -- then -3 at word 17, the count, and the return */
+        long long at = wn;
+        k = 0;
+        while (k < arity) {
+            if (types[k] == 2) { if (!fk_f64_put(words, &wn, 0xFD000000U | ((unsigned int)k << 10) | (unsigned int)k)) { return; } }              /* STR Dk, [X0, #8*k] */
+            else if (types[k] != 3) { if (!fk_f64_put(words, &wn, 0xF9000000U | ((unsigned int)k << 10) | (10U + (unsigned int)k))) { return; } } /* STR X(10+k), [X0, #8*k] */
+            k = k + 1;
+        }
+        if (!fk_f64_put(words, &wn, 0x92800049U)) { return; }                /* MOVN X9, #2: -3 */
+        if (!fk_f64_put(words, &wn, 0xF9000009U | (17U << 10))) { return; } /* STR X9, [X0, #8*17] */
+        if (!fk_f64_put(words, &wn, 0xF9002008U)) { return; }                /* STR X8, [X0, #64] */
+        if (!fk_f64_put(words, &wn, 0xD65F03C0U)) { return; }                /* RET */
+        j = 0;
+        while (j < fk_f64_yield_n) { long long s = fk_f64_yield_at[j]; words[s] = words[s] | ((unsigned int)((at - s) & 0x7FFFFLL) << 5); j = j + 1; }
+    }
     if (!fk_f64_install(fx, root, orig, words, wn, sig, 2)) { return; }
     fk_f64_count = fk_f64_count + 1;
     fk_f64_loop_count = fk_f64_loop_count + 1;
