@@ -7,7 +7,7 @@
 //   tsx src/main.ts --bench
 //   tsx src/main.ts path/to/file.fk
 
-import { mkdir, readFile, realpath, writeFile, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
@@ -164,14 +164,14 @@ const FORM_BML_SOURCE_COMPILE_CHAIN = [
 // Lowers one whole ".bml" prelude file into plain Form text by running
 // form-source-compile-file (source-compiler.fk) in a fresh, throwaway
 // Kernel -- entirely separate from the kernel the CLI eventually builds to
-// run the caller's own program. Cached by content hash under
-// form-stdlib/.cache/kernel-bml-lowered/ (its own namespace: the key here
-// is a plain content hash, not validate.sh's compiler_stamp-qualified one,
-// so the two caches don't collide but also don't need to agree bit for
-// bit) so a repeated run doesn't re-pay the several-second compile.
+// run the caller's own program. The lowering is kept under
+// form-stdlib/.cache/kernel-bml-lowered/ with a key over everything that
+// decides it: the BML's path and bytes, every source in the compiler's
+// loaded closure, and this kernel's own entry script. Any change among them
+// is a miss. The directory keeps one lowering per path for this kernel, so a
+// new key replaces the old entry rather than settling beside it.
 async function lowerBmlSource(bmlAbsPath: string): Promise<string> {
   const body = await readFile(bmlAbsPath, "utf8");
-  const key = createHash("sha256").update(body).digest("hex").slice(0, 24);
 
   const chainPaths = FORM_BML_SOURCE_COMPILE_CHAIN.map((rel) => {
     try {
@@ -186,23 +186,37 @@ async function lowerBmlSource(bmlAbsPath: string): Promise<string> {
   if (compilerRoot === undefined) {
     throw new Error(`BML compiler chain is empty (needed to lower ${bmlAbsPath})`);
   }
+  const loaded = await loadFormSourceClosure(chainPaths);
+  const hasher = createHash("sha256");
+  const hashPart = (label: string, source: string): void => {
+    hasher.update(`${Buffer.byteLength(label)}:${label}${Buffer.byteLength(source)}:`);
+    hasher.update(source);
+  };
+  const kernelPath = process.argv[1];
+  if (kernelPath !== undefined) {
+    const kernelStat = await stat(kernelPath).catch(() => null);
+    if (kernelStat !== null) {
+      hashPart("kernel", `${kernelPath} ${kernelStat.size} ${kernelStat.mtimeMs}`);
+    }
+  }
+  hashPart(bmlAbsPath, body);
+  for (const part of loaded) hashPart(part.path, part.source);
+  const prefix = `ts-${createHash("sha256").update(bmlAbsPath).digest("hex").slice(0, 12)}-`;
+  const name = `${prefix}${hasher.digest("hex").slice(0, 32)}.fk`;
   const cacheDir = join(dirname(compilerRoot), ".cache", "kernel-bml-lowered");
-  const cachePath = join(cacheDir, `${key}.fk`);
+  const cachePath = join(cacheDir, name);
   try {
     const cached = await readFile(cachePath, "utf8");
     if (cached.length > 0) return cached;
   } catch {
-    // not cached yet
+    // not lowered under this key yet
   }
   await mkdir(cacheDir, { recursive: true });
 
-  const outPath = join(cacheDir, `.out-${key}-${process.pid}.fk`);
-  const driverPath = `${outPath}.driver.fk`;
+  const outPath = join(cacheDir, `.out-${name.slice(0, -3)}-${process.pid}.fk`);
   const driverSrc = `(do (form-source-compile-file ${JSON.stringify(bmlAbsPath)} ${JSON.stringify(outPath)}))\n`;
-  await writeFile(driverPath, driverSrc);
   try {
-    const loaded = await loadFormSourceClosure([...chainPaths, driverPath]);
-    const compilerSrc = loaded.map((part) => part.source).join("\n");
+    const compilerSrc = `${loaded.map((part) => part.source).join("\n")}\n${driverSrc}`;
     const lowerKernel = new Kernel(createNodeKernelHost());
     const lowerFrame = new Frame(null);
     const root = readAll(lowerKernel, compilerSrc);
@@ -212,10 +226,15 @@ async function lowerBmlSource(bmlAbsPath: string): Promise<string> {
     if (lowered.length === 0) {
       throw new Error(`form-source-compile-file produced no output for ${bmlAbsPath}`);
     }
-    await writeFile(cachePath, lowered).catch(() => {}); // best-effort cache
+    if (await rename(outPath, cachePath).then(() => true, () => false)) {
+      for (const entry of await readdir(cacheDir).catch(() => [] as string[])) {
+        if (entry !== name && entry.startsWith(prefix)) {
+          await rm(join(cacheDir, entry), { force: true });
+        }
+      }
+    }
     return lowered;
   } finally {
-    await rm(driverPath, { force: true });
     await rm(outPath, { force: true });
   }
 }
