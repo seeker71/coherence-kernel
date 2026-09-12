@@ -9913,6 +9913,7 @@ static int fk_f64_hidden_alloc(const int *types);
 static int fk_f64_is_param_ref(long long i, long long arity);
 static int fk_f64_narrow(int n, int to);
 static void fk_f64_len_zero(int *a, int *b);
+static int fk_f64_is_empty(int n);
 static int fk_f64_admit(long long i, long long arity, const int *types, int *out);
 static int fk_f64_inline_try(long long i, long long t, long long callee, long long arity, const int *types, int *out);
 /* inlining: a call to a defn whose body is one expression over its parameters -- no self call, no let -- is admitted as that
@@ -10108,7 +10109,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
             if (ta == 0) { return 0; }
             int tb = fk_f64_admit(fk_node[cond][2], arity, types, &cb);
             if (tb == 0) { return 0; }
-            if (ct == 102 && (ta == 4 || ta == 5) && (tb == 4 || tb == 5)) { ta = 1; tb = 1; } /* identity of two words */
+            if (ct == 102 && (ta == 4 || ta == 5) && (tb == 4 || tb == 5) && (fk_f64_is_empty(ca) || fk_f64_is_empty(cb))) { ta = 1; tb = 1; } /* against the empty list: identity; two other lists read their content, the walker's */
             else {
                 if (ta == 5) { ca = fk_f64_narrow(ca, 1); if (ca < 0) { return 0; } ta = 1; }
                 if (tb == 5) { cb = fk_f64_narrow(cb, 1); if (cb < 0) { return 0; } tb = 1; }
@@ -10199,7 +10200,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         int tb = fk_f64_admit(fk_node[i][2], arity, types, &b);
         if (tb == 0) { return 0; }
         unsigned int cc = 0U;
-        if (t == 102 && (ta == 4 || ta == 5) && (tb == 4 || tb == 5)) { cc = 0U; }
+        if (t == 102 && (ta == 4 || ta == 5) && (tb == 4 || tb == 5) && (fk_f64_is_empty(a) || fk_f64_is_empty(b))) { cc = 0U; } /* against the empty list: identity */
         else {
             if (ta == 5) { a = fk_f64_narrow(a, 1); if (a < 0) { return 0; } ta = 1; }
             if (tb == 5) { b = fk_f64_narrow(b, 1); if (b < 0) { return 0; } tb = 1; }
@@ -10365,6 +10366,9 @@ static int fk_f64_narrow(int n, int to) {
     if (n < 0) { return -1; }
     return fk_f64_push(to == 1 ? 28 : 30, n, 0, 0.0, 0);
 }
+/* the empty list as a literal: (empty), the word 1. eq against it is identity; eq over two other lists reads their content on
+ * every kernel (2026-09-12), a walk this lane does not take, and eq over two words of unknown kind takes both for ints. */
+static int fk_f64_is_empty(int n) { return n >= 0 && n < fk_f64_prog_n && fk_f64_prog[n].kind == 7 && fk_f64_prog[n].ilit == 1; }
 /* (eq (len L) 0), either way round, is L's word against 1: no walk of the pairs */
 static void fk_f64_len_zero(int *a, int *b) {
     if (*a >= 0 && *b >= 0 && fk_f64_prog[*a].kind == 27 && fk_f64_prog[*b].kind == 7 && fk_f64_prog[*b].ilit == 0) {
@@ -11434,7 +11438,7 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
             if (ta == 0) { return; }
             int tb = fk_f64_admit(fk_node[cond][2], arity, types, &cb);
             if (tb == 0) { return; }
-            if (ct == 102 && (ta == 4 || ta == 5) && (tb == 4 || tb == 5)) { ta = 1; tb = 1; } /* identity of two words */
+            if (ct == 102 && (ta == 4 || ta == 5) && (tb == 4 || tb == 5) && (fk_f64_is_empty(ca) || fk_f64_is_empty(cb))) { ta = 1; tb = 1; } /* against the empty list: identity; two other lists read their content, the walker's */
             else {
                 if (ta == 5) { ca = fk_f64_narrow(ca, 1); if (ca < 0) { return; } ta = 1; } /* a word a head handed up, taken for an int */
                 if (tb == 5) { cb = fk_f64_narrow(cb, 1); if (cb < 0) { return; } tb = 1; }

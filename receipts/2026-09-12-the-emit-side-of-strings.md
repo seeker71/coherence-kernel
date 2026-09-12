@@ -51,7 +51,8 @@ for an integer and halves exactly for a float) that sends a float to `value_str`
   fourth walker writes every number of its grounded answer through the recipe.
 - Nothing moved: value-str 127, every loop-lane band (string-door at its new 2047), jit-lens 16383,
   jit-leaf-inram 63 and its multiarg 63, str-to-int-reading 127, host-process 127, born-under 31,
-  twin-census 65535, kernel-census 2047, the corpus band 32767 with row 1493, freshness 31, op-manifest
+  twin-census 65535, kernel-census 2047, the corpus band 32767 with row 1495 (written as 1493; the reunion
+  with lucid-lehmann's 1493 wordlean and 1494 sizelead renumbered this line), freshness 31, op-manifest
   194 rows aligned, the three compile checks 0 errors, 0 build warnings.
 - **Quiet timing, at last** (load 3, no sweep running; 200k calls, six-digit words): `int_to_str` 35 ms
   as a recipe, where C's `value_str` reads 19 — and the loop alone reads 20. The crystallized BML loop

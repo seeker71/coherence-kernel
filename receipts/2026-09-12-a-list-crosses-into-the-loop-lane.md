@@ -38,14 +38,16 @@ In `runtime/fkwu-uni.c`:
   `nil?` itself at 1; core.fk's own `drop` at state 2 answering the empty list past the end; an nth at
   state 2 handing back an int, a string, a list, and nothing for the empty list; typefall on a float and
   on a string; `len` in a leaf and a find over `eq`; a twin whose compare holds a host clock staying the
-  walker's; identity over words in a list of lists; the warm sum under the twin's. Rowed FOURTH-ARM
-  ONLY.
+  walker's; `eq` over two lists reading their content — the day's reading on every kernel, landed while
+  this rung was built — so a find with a list needle declines the compare and walks, while `eq` against
+  `(empty)` stays the lane's; the warm sum under the twin's. Rowed FOURTH-ARM ONLY.
 - **Quiet timing** (load 3): 20,000 sums over a 200-element list — the leaf **5 ms**, the walker twin
   898: a hundred and eighty times, on the read side alone.
 - The field came back fresh mid-rung, so the whole sweep stands again: value-str 127, str-to-int 127,
   host-process 127, born-under 31, twin-census 65535, kernel-census 2047, jit-lens 16383, every
   loop-lane band whole (string-value and call 255 again), inram 63/63, freshness 31, the corpus band
-  32767 with row 1495, op-manifest 194 aligned, the three compile checks 0 errors, 0 build warnings.
+  32767 with row 1497 (written as 1495; renumbered at the reunion), op-manifest 194 aligned, the three
+  compile checks 0 errors, 0 build warnings.
 - The form-cli bootstrap regenerated from core.fk (stamp e4d634b1c6340d96, the voice canary answering
   pong) and `TestFkwuFormCliCanonicalCarrier` green — after the wound told below.
 
