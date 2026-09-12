@@ -1380,9 +1380,9 @@ function integerToBig(v: IntegerValue): bigint {
 function truthy(v: Value): boolean {
   switch (v.kind) {
     case "null":
-      // `nothing` is not a yes/no. Branching on it is declined rather than silently
-      // read as false — see walkCompare for why this walker declines to imitate.
-      throw new Error("truthy: nothing is not a yes/no question");
+      // `nothing` is neither 0 nor 1 (axiom-1): a branch on it refuses by the
+      // kernels' one name rather than reading it as false.
+      throw new Error("if: nothing is neither 0 nor 1 -- ask nothing? before branching");
     case "int":
       return v.int !== 0;
     case "i64":
@@ -1390,7 +1390,7 @@ function truthy(v: Value): boolean {
       return v.bigint !== 0n;
     case "f32":
     case "f64":
-      return v.float !== 0 && !isNaN(v.float);
+      return v.float !== 0;
     default:
       return true;
   }

@@ -232,10 +232,9 @@ impl Value {
         match self {
             Value::Int(n) => *n != 0,
             Value::Float(f) => *f != 0.0,
-            // `nothing` is not a yes/no. Branching on it is declined rather than
-            // silently read as false — see the Compare arm for why this walker
-            // declines instead of imitating.
-            Value::Null => panic!("as_bool: nothing is not a yes/no question"),
+            // `nothing` is neither 0 nor 1 (axiom-1): a branch on it refuses by
+            // the kernels' one name rather than reading it as false.
+            Value::Null => panic!("if: nothing is neither 0 nor 1 -- ask nothing? before branching"),
             _ => true,
         }
     }
