@@ -10292,8 +10292,8 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         unsigned int cc = 0U;
         if (t == 102 && (ta == 4 || ta == 5) && (tb == 4 || tb == 5) && (fk_f64_is_empty(a) || fk_f64_is_empty(b))) { cc = 0U; } /* against the empty list: identity */
         else {
-            if (ta == 5) { a = fk_f64_narrow(a, 1); if (a < 0) { return 0; } ta = 1; }
-            if (tb == 5) { b = fk_f64_narrow(b, 1); if (b < 0) { return 0; } tb = 1; }
+            if (!fk_f64_word_resolve(&a, &ta, tb)) { return 0; } /* a head compared: a float where it meets a float, else an int */
+            if (!fk_f64_word_resolve(&b, &tb, ta)) { return 0; }
             if (ta == 3 || tb == 3 || ta == 4 || tb == 4) { fk_f64_refuse_tag = t; return 0; }
             fk_f64_len_zero(&a, &b);
             int fcmp = (ta == 2 || tb == 2);
@@ -11759,8 +11759,8 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
             if (tb == 0) { return; }
             if (ct == 102 && (ta == 4 || ta == 5) && (tb == 4 || tb == 5) && (fk_f64_is_empty(ca) || fk_f64_is_empty(cb))) { ta = 1; tb = 1; } /* against the empty list: identity; two other lists read their content, the walker's */
             else {
-                if (ta == 5) { ca = fk_f64_narrow(ca, 1); if (ca < 0) { return; } ta = 1; } /* a word a head handed up, taken for an int */
-                if (tb == 5) { cb = fk_f64_narrow(cb, 1); if (cb < 0) { return; } tb = 1; }
+                if (!fk_f64_word_resolve(&ca, &ta, tb)) { return; } /* a head compared: a float where it meets a float, else an int */
+                if (!fk_f64_word_resolve(&cb, &tb, ta)) { return; }
                 fk_f64_len_zero(&ca, &cb);
             }
             if (ta == 3 || tb == 3 || ta == 4 || tb == 4) { fk_fn_native[fx] = 0 - (1000 + ct); return; } /* a compare over a string pointer or a list word: not this lane's */
