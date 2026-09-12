@@ -1375,12 +1375,13 @@ export class Kernel {
     this.registerNative("pow", catMethod(), (_k, args) => {
       // integer power; float args coerce to int (truncate) to match Go/Rust
       // AsInt() — pow is the integer power, math_pow the IEEE float power.
-      const base = Math.trunc(argFloat(args, 0));
-      const exp = Math.trunc(argFloat(args, 1));
-      if (exp < 0) return { kind: "int", int: 0 };
-      let result = 1;
-      for (let i = 0; i < exp; i++) result *= base;
-      return { kind: "int", int: result };
+      // The product wraps at 64 bits as Go's int64 loop does.
+      const base = listElemInt(args[0]!, "pow");
+      const exp = listElemInt(args[1]!, "pow");
+      if (exp < 0n) return { kind: "int", int: 0 };
+      let result = 1n;
+      for (let i = 0n; i < exp; i++) result = BigInt.asIntN(64, result * base);
+      return intOrWide(result);
     });
     // --- struct/object primitive (BML reference, rung 2) ----------------
     // A Record is the kernel's first MUTABLE value: a struct/object with
@@ -1692,12 +1693,10 @@ export class Kernel {
       if (v.kind === "bool") return { kind: "str", str: v.bool ? "true" : "false" };
       if (v.kind === "null") return { kind: "str", str: "null" };
       if (v.kind === "f32" || v.kind === "f64") return { kind: "str", str: formatFloat(v.float) };
+      if (v.kind === "i64" || v.kind === "u64") return { kind: "str", str: String(v.bigint) };
       return { kind: "str", str: String(argInt(args, 0)) };
     });
-    this.registerNative("str_to_int", catMethod(), (_k, args) => ({
-      kind: "int",
-      int: parseInt(argStr(args, 0), 10) || 0,
-    }));
+    this.registerNative("str_to_int", catMethod(), (_k, args) => leadingInt(argStr(args, 0)));
     // str_to_float — text-to-float leaf, total (unparseable -> 0.0). Number()
     // over parseFloat() for sibling parity: "3.5abc" is unparseable in the
     // Go/Rust kernels, so it must be 0.0 here too.
@@ -2148,6 +2147,9 @@ export class Kernel {
       if (v?.kind === "f64" || v?.kind === "f32") {
         return { kind: "f64", float: Math.abs(v.float) };
       }
+      if (v?.kind === "i64" || v?.kind === "u64") {
+        return intOrWide(BigInt.asIntN(64, v.bigint < 0n ? -v.bigint : v.bigint));
+      }
       const n = argInt(args, 0);
       return { kind: "int", int: n < 0 ? -n : n };
     });
@@ -2396,21 +2398,19 @@ export class Kernel {
     });
     // ---- bitwise primitives -----------------------------------
     // True kernel primitives — cannot be expressed in pure Form
-    // without exponential cost. Operate on 32-bit-unsigned semantics
-    // (>>> 0 to coerce back to unsigned) so SHA-256-style recipes
-    // compose round functions over machine-word integers consistently.
-    this.registerNative("band", catMethod(), (_k, args) => ({
-      kind: "int",
-      int: (argInt(args, 0) & argInt(args, 1)) >>> 0,
-    }));
-    this.registerNative("bor", catMethod(), (_k, args) => ({
-      kind: "int",
-      int: (argInt(args, 0) | argInt(args, 1)) >>> 0,
-    }));
-    this.registerNative("bxor", catMethod(), (_k, args) => ({
-      kind: "int",
-      int: (argInt(args, 0) ^ argInt(args, 1)) >>> 0,
-    }));
+    // without exponential cost. band/bor/bxor combine the whole int64
+    // word, as Go's and Rust's operators do (bitwiseInt); the _u32 doors
+    // narrow to a 32-bit word so SHA-256-style recipes compose round
+    // functions over machine words.
+    this.registerNative("band", catMethod(), (_k, args) =>
+      bitwiseInt(args, (a, b) => a & b, (a, b) => a & b),
+    );
+    this.registerNative("bor", catMethod(), (_k, args) =>
+      bitwiseInt(args, (a, b) => a | b, (a, b) => a | b),
+    );
+    this.registerNative("bxor", catMethod(), (_k, args) =>
+      bitwiseInt(args, (a, b) => a ^ b, (a, b) => a ^ b),
+    );
     this.registerNative("bnot_u32", catMethod(), (_k, args) => ({
       kind: "int",
       int: ~argInt(args, 0) >>> 0,
@@ -3541,7 +3541,7 @@ export class Kernel {
       case "bool":
         return v.bool ? "true" : "false";
       case "list":
-        return "[" + v.list.map((x) => this.renderForPrint(x)).join(" ") + "]";
+        return "[" + v.list.map((x) => this.renderForPrint(x)).join(", ") + "]";
       case "closure":
         return "<closure>";
       case "nodeid":
@@ -3797,6 +3797,50 @@ function intOrWide(total: bigint): Value {
   return Number.isSafeInteger(n)
     ? { kind: "int", int: n }
     : { kind: "i64", bigint: total };
+}
+
+// bitwiseInt — band/bor/bxor over the int64 word, as Go's and Rust's
+// operators combine it. A safe integer splits into a signed high half and an
+// unsigned low 32-bit half, each inside JS's 32-bit operators; an operand
+// past 2^53 takes BigInt.
+function bitwiseInt(
+  args: Value[],
+  word: (a: number, b: number) => number,
+  wide: (a: bigint, b: bigint) => bigint,
+): Value {
+  const x = args[0];
+  const y = args[1];
+  if (x?.kind !== "i64" && x?.kind !== "u64" && y?.kind !== "i64" && y?.kind !== "u64") {
+    const a = argInt(args, 0);
+    const b = argInt(args, 1);
+    if (Number.isSafeInteger(a) && Number.isSafeInteger(b)) {
+      const aHi = Math.floor(a / 0x100000000);
+      const bHi = Math.floor(b / 0x100000000);
+      const lo = word(a - aHi * 0x100000000, b - bHi * 0x100000000) >>> 0;
+      return { kind: "int", int: word(aHi, bHi) * 0x100000000 + lo };
+    }
+  }
+  return intOrWide(BigInt.asIntN(64, wide(expectBigInt(x!, "bitwise"), expectBigInt(y!, "bitwise"))));
+}
+
+// leadingInt — str_to_int's reading, the one core.fk's str_to_int gives fkwu:
+// leading space, tab, LF and CR skipped, one leading "-" negates, and the
+// digits run to the first non-digit. Text with no digits reads 0. Up to 15
+// digits a number holds the value exactly; a longer run is read in BigInt and
+// wraps at 64 bits like every int64 fold.
+function leadingInt(s: string): Value {
+  let i = 0;
+  while (i < s.length && (s[i] === " " || s[i] === "\t" || s[i] === "\n" || s[i] === "\r")) i++;
+  const neg = s[i] === "-";
+  if (neg) i++;
+  let j = i;
+  while (j < s.length && s[j]! >= "0" && s[j]! <= "9") j++;
+  if (j - i <= 15) {
+    const n = j === i ? 0 : Number(s.slice(i, j));
+    return { kind: "int", int: neg ? 0 - n : n };
+  }
+  const digits = BigInt(s.slice(i, j));
+  return intOrWide(BigInt.asIntN(64, neg ? -digits : digits));
 }
 
 function valueKindName(v: Value): string {
@@ -4500,9 +4544,9 @@ function walkMatchSwitch(
 function expectInt(v: Value, op: string): number {
   if (v.kind === "bool") return v.bool ? 1 : 0;
   // A bare integer literal wider than int32 walks in as an i64 (overflow
-  // table). The default integer math path holds it as a JS number, exact to
-  // 2^53 — the same widening expectFloat already performs. Beyond 2^53 the
-  // typed I64 width path (expectBigInt) carries full precision.
+  // table). Read here it becomes a JS number, exact to 2^53 — the same
+  // widening expectFloat performs; walkMath and walkCompare take i64
+  // operands through expectBigInt instead, exact across int64.
   if (v.kind === "i64" || v.kind === "u64") return Number(v.bigint);
   if (
     v.kind !== "int" &&
@@ -4646,16 +4690,12 @@ function walkMath(
   }
 
   // Default integer path — the bare-width op (`add`/`+`/`sub`/… with no
-  // width-encoded inst) is what Python's polymorphic `+` lowers to, so it
-  // carries Python's arbitrary-precision integer semantics, NOT int32 wrap.
-  // Go and Rust compute this fold in int64 (`a * b`, `a + b`); a JS number
-  // holds integers exactly to 2^53, so plain arithmetic matches them across
-  // that whole range — `(mul 100000 100000)` is 10000000000 on all three, not
-  // a Math.imul-wrapped 1410065408. (Beyond 2^53 the explicit typed I64 width
-  // path carries full precision via BigInt.) Float promotion: when any operand
-  // walks to a float at runtime, promote the whole fold to f64 — matching the
-  // Rust + Go MATH arms, which dispatch on the actual operand kind rather than
-  // the encoded width. Mirrors Python: int+float→float, float+float→float.
+  // width-encoded inst). Go and Rust fold it in int64 (`a * b`, `a + b`), so
+  // `(mul 100000 100000)` is 10000000000 on every kernel, not a Math.imul-
+  // wrapped 1410065408. Float promotion: when any operand walks to a float at
+  // runtime, the whole fold is f64 — matching the Rust + Go MATH arms, which
+  // dispatch on the actual operand kind rather than the encoded width
+  // (int+float→float, float+float→float).
   const vals = kids.map((kid) => walk(k, kid!, frame));
   if (vals.some((v) => v.kind === "f32" || v.kind === "f64")) {
     let facc = expectFloat(vals[0]!, "math.f64");
@@ -4683,6 +4723,10 @@ function walkMath(
     }
     return { kind: "f64", float: facc };
   }
+  // Integers fold in JS numbers while every step stays within ±(2^53−1),
+  // where a double is exact. An operand carried as a bigint, or a step that
+  // leaves that range, refolds the whole expression in int64 (foldInt64).
+  if (vals.some((v) => v.kind === "i64" || v.kind === "u64")) return foldInt64(op, vals);
   let acc = expectInt(vals[0]!, "math.int");
   for (let i = 1; i < vals.length; i++) {
     const x = expectInt(vals[i]!, "math.int");
@@ -4709,8 +4753,43 @@ function walkMath(
       default:
         throw new Error(`math.int: unknown op ${op}`);
     }
+    if (!Number.isSafeInteger(acc)) return foldInt64(op, vals);
   }
   return { kind: "int", int: acc };
+}
+
+// foldInt64 — the bare-width integer fold past 2^53: BigInt steps wrapped to
+// 64 bits, as Go's and Rust's int64 arithmetic wraps. BigInt `/` and `%`
+// truncate toward zero, as theirs do. The answer is a plain int again when a
+// number holds it exactly.
+function foldInt64(op: number, vals: readonly Value[]): Value {
+  let acc = expectBigInt(vals[0]!, "math.int");
+  for (let i = 1; i < vals.length; i++) {
+    const x = expectBigInt(vals[i]!, "math.int");
+    switch (op) {
+      case RMath.PLUS:
+        acc = acc + x;
+        break;
+      case RMath.MINUS:
+        acc = acc - x;
+        break;
+      case RMath.MUL:
+        acc = acc * x;
+        break;
+      case RMath.DIV:
+        if (x === 0n) throw new Error("division by zero");
+        acc = acc / x;
+        break;
+      case RMath.MOD:
+        if (x === 0n) throw new Error("modulo by zero");
+        acc = acc % x;
+        break;
+      default:
+        throw new Error(`math.int: unknown op ${op}`);
+    }
+    acc = BigInt.asIntN(64, acc);
+  }
+  return intOrWide(acc);
 }
 
 // boolInt — the truth family's acknowledgment shape: 0/1 integer states
@@ -4832,15 +4911,21 @@ function cmpWordEqual(a: Value, b: Value): boolean {
   }
 }
 
+function isIntegerValue(v: Value): boolean {
+  return isNumericValue(v) && v.kind !== "f32" && v.kind !== "f64";
+}
+
 function valueEqual(a: Value, b: Value): boolean {
-  // Cross-width numeric equality: compare numerically across widths.
-  const aNum = isNumericValue(a);
-  const bNum = isNumericValue(b);
-  if (aNum && bNum) {
+  // Integers compare across their widths and floats across theirs, as the one Int kind and the one
+  // Float kind of the Go and Rust kernels do; an integer never equals a float, however alike they read.
+  if (isIntegerValue(a) && isIntegerValue(b)) {
     if (a.kind === "i64" || a.kind === "u64" || b.kind === "i64" || b.kind === "u64") {
       return numericToBig(a) === numericToBig(b);
     }
     return numericToNum(a) === numericToNum(b);
+  }
+  if ((a.kind === "f32" || a.kind === "f64") && (b.kind === "f32" || b.kind === "f64")) {
+    return a.float === b.float;
   }
   if (a.kind !== b.kind) return false;
   switch (a.kind) {

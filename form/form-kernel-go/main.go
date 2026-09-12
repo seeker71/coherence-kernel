@@ -1342,6 +1342,29 @@ func foldExtremum(args []Value, name string, wantMax bool) int64 {
 	return best
 }
 
+// leadingInt — str_to_int's reading, the one core.fk's str_to_int gives fkwu:
+// leading space, tab, LF and CR skipped, one leading "-" negates, and the digits
+// run to the first non-digit. Text with no digits reads 0; the fold wraps at 64
+// bits like every int64 fold.
+func leadingInt(s string) int64 {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	neg := i < len(s) && s[i] == '-'
+	if neg {
+		i++
+	}
+	var n int64
+	for ; i < len(s) && s[i] >= '0' && s[i] <= '9'; i++ {
+		n = n*10 + int64(s[i]-'0')
+	}
+	if neg {
+		return -n
+	}
+	return n
+}
+
 func dictKeyEq(a, b Value) bool {
 	if a.Kind == VStr && b.Kind == VStr {
 		return a.Str == b.Str
@@ -2410,8 +2433,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VStr, Str: valueKindName(args[0])}
 	})
 	k.registerNative("str_to_int", catMethod(), func(_ *Kernel, args []Value) Value {
-		n, _ := strconv.ParseInt(argStr(args, 0), 10, 64)
-		return Value{Kind: VInt, Int: n}
+		return Value{Kind: VInt, Int: leadingInt(argStr(args, 0))}
 	})
 	k.registerNative("str_to_float", catMethod(), func(_ *Kernel, args []Value) Value {
 		f, _ := strconv.ParseFloat(argStr(args, 0), 64)
@@ -2975,8 +2997,9 @@ func (k *Kernel) registerNatives() {
 	})
 	// ---- bitwise primitives -----------------------------------
 	// True kernel primitives — cannot be expressed in pure Form
-	// without exponential cost. Operate on 32-bit-unsigned semantics
-	// so SHA-256-style recipes compose round functions consistently.
+	// without exponential cost. band/bor/bxor combine the whole int64
+	// word; the _u32 doors narrow to a 32-bit word so SHA-256-style
+	// recipes compose round functions over machine words.
 	k.registerNative("band", catMethod(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VInt, Int: args[0].AsInt() & args[1].AsInt()}
 	})
