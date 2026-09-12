@@ -1700,6 +1700,12 @@ export class Kernel {
       if (v.kind === "i64" || v.kind === "u64") return { kind: "str", str: String(v.bigint) };
       return { kind: "str", str: String(argInt(args, 0)) };
     });
+    // value_str — a value as text, as Go's formValueString writes it: null as "", anything else as
+    // print writes it.
+    this.registerNative("value_str", catMethod(), (_k, args) => {
+      const v = args[0];
+      return { kind: "str", str: v === undefined || v.kind === "null" ? "" : this.renderForPrint(v) };
+    });
     this.registerNative("str_to_int", catMethod(), (_k, args) => leadingInt(argStr(args, 0)));
     // str_to_float — text-to-float leaf, total (unparseable -> 0.0). Number()
     // over parseFloat() for sibling parity: "3.5abc" is unparseable in the

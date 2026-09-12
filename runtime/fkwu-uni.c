@@ -13169,6 +13169,86 @@ static long long fk_value_kind(long long v) {
     while (k[kn]) { kn = kn + 1; }
     return fk_sbuf(k, kn);
 }
+/* value_str -- mode 25 of the leaf door: a word as text, the way the Go kernel's formValueString
+ * writes it and every sibling's value_str answers. A string is its bytes, an int its decimal, a float
+ * fk_fmt_float_js, a bool true or false, a list "[a, b]" with its items written likewise; nothing is
+ * "" on its own and null as a list's item, as Go writes a null item. The kinds are read in
+ * fk_value_kind's order. core.fk's int_to_str and the pg floor's float cells write through it. */
+static char *fk_valstr_buf;
+static long long fk_valstr_len, fk_valstr_cap;
+static void fk_valstr_put(const char *b, long long n) {
+    if (fk_valstr_len + n > fk_valstr_cap) {
+        long long nc = fk_valstr_cap == 0 ? 256 : fk_valstr_cap;
+        while (fk_valstr_len + n > nc) { nc = nc * 2; }
+        fk_valstr_buf = (char *)realloc(fk_valstr_buf, (fk_size_t)nc);
+        if (fk_valstr_buf == 0) { fk_die("value_str: out of memory growing its buffer"); }
+        fk_valstr_cap = nc;
+    }
+    long long j = 0;
+    while (j < n) { fk_valstr_buf[fk_valstr_len + j] = b[j]; j = j + 1; }
+    fk_valstr_len = fk_valstr_len + n;
+}
+static void fk_valstr_dec(long long n) {
+    char d[24];
+    long long k = 24;
+    unsigned long long u = n < 0 ? (unsigned long long)0 - (unsigned long long)n : (unsigned long long)n;
+    do { k = k - 1; d[k] = (char)('0' + (int)(u % 10)); u = u / 10; } while (u != 0);
+    if (n < 0) { k = k - 1; d[k] = '-'; }
+    fk_valstr_put(d + k, 24 - k);
+}
+static void fk_valstr_word(long long v, int item) {
+    if (v == fk_nothing) { if (item) { fk_valstr_put("null", 4); } return; }
+    if (v == (0 - 9223372036854775807LL)) { fk_valstr_put("true", 4); return; }
+    if (v == (0 - 9223372036854775805LL)) { fk_valstr_put("false", 5); return; }
+    if (fk_isf(v)) {
+        char fb[64];
+        long long fn = 0;
+        fk_fmt_float_js(fk_num(v), fb);
+        while (fb[fn]) { fn = fn + 1; }
+        fk_valstr_put(fb, fn);
+        return;
+    }
+    if (fk_is_str(v)) {
+        long long s = fk_stri(v);
+        if (s >= 0 && FK_SOK(s)) { fk_valstr_put((const char *)FK_SBYTES(s), FK_SLEN(s)); }
+        return;
+    }
+    if (fk_is_fnval(v)) { fk_valstr_put("<closure>", 9); return; }
+    if (fk_isrec(v)) { fk_valstr_put("<record>", 8); return; }
+    if (v < 0 && (v & 1)) {
+        long long ni = fk_nidx(v);
+        if (ni >= 1 && ni <= fk_np) {
+            fk_valstr_put("@", 1);
+            fk_valstr_dec(fk_nid[ni][0]);
+            fk_valstr_put(".", 1);
+            fk_valstr_dec(fk_nid[ni][1]);
+            fk_valstr_put(".", 1);
+            fk_valstr_dec(fk_nid[ni][2]);
+            fk_valstr_put(".", 1);
+            fk_valstr_dec(fk_nid[ni][3]);
+            return;
+        }
+    }
+    if (v == 1 || ((v & 1) && v > 0 && FK_POK(v >> 1))) {
+        long long p = v >> 1;
+        int first = 1;
+        fk_valstr_put("[", 1);
+        while (p >= 1 && FK_POK(p)) {
+            if (!first) { fk_valstr_put(", ", 2); }
+            first = 0;
+            fk_valstr_word(FK_HH(p), 1);
+            p = FK_HT(p) >> 1;
+        }
+        fk_valstr_put("]", 1);
+        return;
+    }
+    fk_valstr_dec((v & 1) == 0 ? v >> 1 : v);
+}
+static long long fk_value_str(long long v) {
+    fk_valstr_len = 0;
+    fk_valstr_word(v, 0);
+    return fk_sbuf(fk_valstr_buf, fk_valstr_len);
+}
 static long long fk_fb_door(long long mode, long long x) {
     if (mode == 4) { return fk_value_kind(x); }
     if (mode == 5) {
@@ -14032,7 +14112,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * fs_mkfifo. The ear's lanes reached for `sh -c` only to place three file
          * descriptors and to ask whether a pid answers; see fk_host_door. */
         /* modes 20-22: kernel_roster_adopt, kernel_roster_forget, kernel_page_bury -- see fk_roster_adopt;
-         * mode 23: host_process -- see fk_host_process; mode 24: kernel_page_ended -- see fk_page_bury. */
+         * mode 23: host_process -- see fk_host_process; mode 24: kernel_page_ended -- see fk_page_bury;
+         * mode 25: value_str -- see fk_value_str. */
+        if ((fm201 >> 1) == 25) { return fk_value_str(fx201); }
         if ((fm201 >> 1) >= 17) { return fk_host_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) >= 10) { return fk_spk_door(fm201 >> 1, fx201); }
         /* modes 4-8: the binary form (value_kind, recipe_to_bytes, bytes_to_recipe,
