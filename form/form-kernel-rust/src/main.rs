@@ -430,13 +430,13 @@ fn socket_drop(h: i64) -> bool {
 
 // --- Postgres natives — the DB carrier of the storage port --------------
 // Form-rendered SQL executed against a real Postgres. Handles are monotone
-// i64s; the kernel never reveals the postgres::Client to Form, only the
+// i64s; the kernel never reveals the PgConn to Form, only the
 // handle. -1 = error. Effectful, per-kernel reference impl — the SQL strings
 // are already three-way verified by db-schema.fk + emits/sql.fk; only
 // execution lives here. See docs/coherence-substrate/cell-store-architecture.md
 // (the DB is the production carrier; the FS log store is dev/test).
 struct PgTable {
-    handles: HashMap<i64, Arc<Mutex<postgres::Client>>>,
+    handles: HashMap<i64, Arc<Mutex<PgConn>>>,
     next: i64,
 }
 
@@ -469,25 +469,7 @@ fn pg_set_error(error: Option<String>) {
     *slot = error.unwrap_or_default();
 }
 
-fn pg_error_text(error: &postgres::Error) -> String {
-    if let Some(db_error) = error.as_db_error() {
-        let mut parts = vec![db_error.message().to_string()];
-        if let Some(detail) = db_error.detail() {
-            if !detail.is_empty() {
-                parts.push(format!("detail: {detail}"));
-            }
-        }
-        if let Some(hint) = db_error.hint() {
-            if !hint.is_empty() {
-                parts.push(format!("hint: {hint}"));
-            }
-        }
-        return parts.join(" | ");
-    }
-    error.to_string()
-}
-
-fn pg_register(c: postgres::Client) -> i64 {
+fn pg_register(c: PgConn) -> i64 {
     let mut t = pg_table().lock().unwrap();
     t.next += 1;
     let h = t.next;
@@ -495,7 +477,7 @@ fn pg_register(c: postgres::Client) -> i64 {
     h
 }
 
-fn pg_lookup(h: i64) -> Option<Arc<Mutex<postgres::Client>>> {
+fn pg_lookup(h: i64) -> Option<Arc<Mutex<PgConn>>> {
     let t = pg_table().lock().unwrap();
     t.handles.get(&h).cloned()
 }
@@ -874,308 +856,378 @@ fn source_inventory_walk(
     Ok(())
 }
 
-// A column's cell as the server sent it, whatever its type: the bytes pg_cell_to_string decodes for
-// the types the postgres crate reads only with features this kernel does not build (numeric,
-// timestamps, json).
-struct PgRawCell(Vec<u8>);
-
-impl<'a> postgres::types::FromSql<'a> for PgRawCell {
-    fn from_sql(
-        _ty: &postgres::types::Type,
-        raw: &'a [u8],
-    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-        Ok(PgRawCell(raw.to_vec()))
-    }
-    fn accepts(_ty: &postgres::types::Type) -> bool {
-        true
-    }
+// PgConn — the kernel's own Postgres v3 client over a blocking TcpStream, speaking through
+// postgres-protocol's message codecs; sibling to TS's pg carrier. Every run asks for text results, so each
+// cell arrives as the server writes it and reads here as the Go native reads it (pg_cell).
+struct PgConn {
+    stream: TcpStream,
+    buf: bytes::BytesMut,
 }
 
-// The binary cell of a numeric, json, jsonb, timestamp, timestamptz or date column, as text.
-fn pg_raw_cell_text(ty: &str, raw: &[u8]) -> String {
-    match ty {
-        "numeric" => pg_numeric_text(raw),
-        "json" => String::from_utf8_lossy(raw).to_string(),
-        "jsonb" => String::from_utf8_lossy(raw.get(1..).unwrap_or(&[])).to_string(),
-        "timestamptz" | "timestamp" => raw
-            .get(0..8)
-            .map(|b| pg_micros_rfc3339(i64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])))
-            .unwrap_or_default(),
-        "date" => raw
-            .get(0..4)
-            .map(|b| pg_date_rfc3339(i32::from_be_bytes([b[0], b[1], b[2], b[3]])))
-            .unwrap_or_default(),
-        _ => "?".to_string(),
-    }
+// what one run read: the last result's fields as (name, type oid), every row's cells as the server's text
+// (None for NULL), and the last command tag
+struct PgRun {
+    fields: Vec<(String, u32)>,
+    rows: Vec<Vec<Option<String>>>,
+    tag: String,
 }
 
-// numeric's binary form: digit count, weight, sign, display scale, then base-10000 digits, the
-// first at the weight's position. Written as the server writes it: the integer groups, then as many
-// fraction digits as the display scale asks for.
-fn pg_numeric_text(raw: &[u8]) -> String {
-    if raw.len() < 8 {
-        return "?".to_string();
-    }
-    let be16 = |i: usize| -> u16 {
-        raw.get(i..i + 2)
-            .map(|b| u16::from_be_bytes([b[0], b[1]]))
-            .unwrap_or(0)
-    };
-    let ndigits = be16(0) as i64;
-    let weight = be16(2) as i16 as i64;
-    let sign = be16(4);
-    let dscale = be16(6) as usize;
-    match sign {
-        0xC000 => return "NaN".to_string(),
-        0xD000 => return "Infinity".to_string(),
-        0xF000 => return "-Infinity".to_string(),
-        _ => {}
-    }
-    let digit = |i: i64| -> u16 {
-        if i >= 0 && i < ndigits {
-            be16(8 + 2 * i as usize)
-        } else {
-            0
+fn pg_send(
+    conn: &mut PgConn,
+    write: impl FnOnce(&mut bytes::BytesMut) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let mut out = bytes::BytesMut::new();
+    write(&mut out).map_err(|e| e.to_string())?;
+    conn.stream.write_all(&out).map_err(|e| e.to_string())
+}
+
+// the next whole backend message, reading more of the stream until one parses
+fn pg_next(conn: &mut PgConn) -> Result<postgres_protocol::message::backend::Message, String> {
+    let ended = "the connection ended, or sent a frame this client cannot read";
+    loop {
+        match postgres_protocol::message::backend::Message::parse(&mut conn.buf) {
+            Ok(Some(message)) => return Ok(message),
+            Ok(None) => {}
+            Err(_) => return Err(ended.to_string()),
         }
-    };
-    let mut out = String::new();
-    if sign == 0x4000 {
-        out.push('-');
+        let mut chunk = [0u8; 65536];
+        let n = conn.stream.read(&mut chunk).map_err(|_| ended.to_string())?;
+        if n == 0 {
+            return Err(ended.to_string());
+        }
+        conn.buf.extend_from_slice(&chunk[..n]);
     }
-    if weight < 0 {
-        out.push('0');
+}
+
+// an ErrorResponse as the Go native words it: the message, then its detail and hint
+fn pg_error_text(body: &postgres_protocol::message::backend::ErrorResponseBody) -> String {
+    use fallible_iterator::FallibleIterator;
+    let (mut message, mut detail, mut hint) = (String::new(), String::new(), String::new());
+    let mut fields = body.fields();
+    while let Ok(Some(field)) = fields.next() {
+        match field.type_() {
+            b'M' => message = String::from_utf8_lossy(field.value_bytes()).into_owned(),
+            b'D' => detail = String::from_utf8_lossy(field.value_bytes()).into_owned(),
+            b'H' => hint = String::from_utf8_lossy(field.value_bytes()).into_owned(),
+            _ => {}
+        }
+    }
+    let mut parts = vec![if message.is_empty() {
+        "the server reported an error without a message".to_string()
     } else {
-        for i in 0..=weight {
-            if i == 0 {
-                out.push_str(&digit(i).to_string());
-            } else {
-                out.push_str(&format!("{:04}", digit(i)));
+        message
+    }];
+    if !detail.is_empty() {
+        parts.push(format!("detail: {detail}"));
+    }
+    if !hint.is_empty() {
+        parts.push(format!("hint: {hint}"));
+    }
+    parts.join(" | ")
+}
+
+// postgres://user[:password]@host[:port][/database][?options], read as the pg floor reads it: the last "@"
+// ends the user part, %XX escapes decode in user, password and database, the host is localhost and the
+// port 5432 when absent, and the database is the user's name when none is given.
+struct PgDsn {
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    database: String,
+}
+
+fn pg_unescape(s: &str) -> String {
+    let b = s.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(hi), Some(lo)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
             }
         }
+        out.push(b[i]);
+        i += 1;
     }
-    if dscale > 0 {
-        let mut frac = String::new();
-        let mut i = weight + 1;
-        while frac.len() < dscale {
-            frac.push_str(&format!("{:04}", digit(i)));
-            i += 1;
-        }
-        frac.truncate(dscale);
-        out.push('.');
-        out.push_str(&frac);
-    }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
-// Microseconds since 2000-01-01 00:00:00 UTC, the binary timestamp, as RFC3339 in UTC with its
-// fraction trimmed of trailing zeros: the text Go's time.Time writes for the same instant.
-fn pg_micros_rfc3339(micros: i64) -> String {
-    if micros == i64::MAX {
-        return "infinity".to_string();
-    }
-    if micros == i64::MIN {
-        return "-infinity".to_string();
-    }
-    let unix_us = micros + 946_684_800_000_000;
-    let secs = unix_us.div_euclid(1_000_000);
-    let frac = unix_us.rem_euclid(1_000_000);
-    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
-    let sod = secs.rem_euclid(86_400);
-    let mut out = format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}",
-        sod / 3600,
-        (sod % 3600) / 60,
-        sod % 60
-    );
-    if frac > 0 {
-        let digits = format!("{frac:06}");
-        out.push('.');
-        out.push_str(digits.trim_end_matches('0'));
-    }
-    out.push('Z');
-    out
-}
-
-// Days since 2000-01-01, the binary date, as the midnight Go's time.Time writes for it.
-fn pg_date_rfc3339(days: i32) -> String {
-    if days == i32::MAX {
-        return "infinity".to_string();
-    }
-    if days == i32::MIN {
-        return "-infinity".to_string();
-    }
-    let (year, month, day) = civil_from_days(days as i64 + 10_957);
-    format!("{year:04}-{month:02}-{day:02}T00:00:00Z")
-}
-
-// Render one column of a postgres row to a string the way the Go kernel renders it, so pg_query
-// answers the same text on both: bool as true or false, floats as format_float writes them, numeric
-// in its own digits, timestamps and dates as RFC3339 in UTC, json and jsonb as their text, the
-// integer family in decimal. NULL → "". A type outside that set → "?". try_get keeps a type
-// mismatch from panicking.
-fn pg_cell_to_string(row: &postgres::Row, ci: usize) -> String {
-    let ty = row.columns()[ci].type_().name().to_string();
-    match ty.as_str() {
-        "text" | "varchar" | "bpchar" | "name" => row
-            .try_get::<usize, Option<String>>(ci)
-            .ok()
-            .flatten()
-            .unwrap_or_default(),
-        "int8" => row
-            .try_get::<usize, Option<i64>>(ci)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        "int4" => row
-            .try_get::<usize, Option<i32>>(ci)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        "int2" => row
-            .try_get::<usize, Option<i16>>(ci)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        "bool" => row
-            .try_get::<usize, Option<bool>>(ci)
-            .ok()
-            .flatten()
-            .map(|v| if v { "true".to_string() } else { "false".to_string() })
-            .unwrap_or_default(),
-        "float8" => row
-            .try_get::<usize, Option<f64>>(ci)
-            .ok()
-            .flatten()
-            .map(format_float)
-            .unwrap_or_default(),
-        "float4" => row
-            .try_get::<usize, Option<f32>>(ci)
-            .ok()
-            .flatten()
-            .map(|v| format_float(v as f64))
-            .unwrap_or_default(),
-        "numeric" | "json" | "jsonb" | "timestamptz" | "timestamp" | "date" => row
-            .try_get::<usize, Option<PgRawCell>>(ci)
-            .ok()
-            .flatten()
-            .map(|cell| pg_raw_cell_text(&ty, &cell.0))
-            .unwrap_or_default(),
-        _ => "?".to_string(),
-    }
-}
-
-fn pg_cell_to_value(row: &postgres::Row, ci: usize) -> Value {
-    // NULL of any type is null, as Go's dbCellToForm answers it
-    if matches!(row.try_get::<usize, Option<PgRawCell>>(ci), Ok(None)) {
-        return Value::Null;
-    }
-    let ty = row.columns()[ci].type_().name().to_string();
-    match ty.as_str() {
-        "text" | "varchar" | "bpchar" | "name" => Value::Str(
-            row.try_get::<usize, Option<String>>(ci)
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-                .into(),
-        ),
-        "int8" => row
-            .try_get::<usize, Option<i64>>(ci)
-            .ok()
-            .flatten()
-            .map(Value::Int)
-            .unwrap_or(Value::Null),
-        "int4" => row
-            .try_get::<usize, Option<i32>>(ci)
-            .ok()
-            .flatten()
-            .map(|v| Value::Int(v as i64))
-            .unwrap_or(Value::Null),
-        "int2" => row
-            .try_get::<usize, Option<i16>>(ci)
-            .ok()
-            .flatten()
-            .map(|v| Value::Int(v as i64))
-            .unwrap_or(Value::Null),
-        "float8" => row
-            .try_get::<usize, Option<f64>>(ci)
-            .ok()
-            .flatten()
-            .map(Value::Float)
-            .unwrap_or(Value::Null),
-        "float4" => row
-            .try_get::<usize, Option<f32>>(ci)
-            .ok()
-            .flatten()
-            .map(|v| Value::Float(v as f64))
-            .unwrap_or(Value::Null),
-        "bool" => row
-            .try_get::<usize, Option<bool>>(ci)
-            .ok()
-            .flatten()
-            .map(Value::Bool)
-            .unwrap_or(Value::Null),
-        _ => Value::Str(pg_cell_to_string(row, ci).into()),
-    }
-}
-
-// PgTextParam — one SQL parameter as text, as the TS native sends every parameter and as Go's pgx sends
-// what it holds no binary encoding for. The server reads the text by the parameter's declared type, so
-// `$1::int`, numeric and json all take it; None sends NULL.
-#[derive(Debug)]
-struct PgTextParam(Option<String>);
-
-impl postgres::types::ToSql for PgTextParam {
-    fn to_sql(
-        &self,
-        _ty: &postgres::types::Type,
-        out: &mut bytes::BytesMut,
-    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        match &self.0 {
-            Some(text) => {
-                out.extend_from_slice(text.as_bytes());
-                Ok(postgres::types::IsNull::No)
-            }
-            None => Ok(postgres::types::IsNull::Yes),
-        }
-    }
-
-    fn accepts(_ty: &postgres::types::Type) -> bool {
-        true
-    }
-
-    fn to_sql_checked(
-        &self,
-        ty: &postgres::types::Type,
-        out: &mut bytes::BytesMut,
-    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        self.to_sql(ty, out)
-    }
-
-    fn encode_format(&self, _ty: &postgres::types::Type) -> postgres::types::Format {
-        postgres::types::Format::Text
-    }
-}
-
-// form_sql_args — a Form list as SQL parameters: null as NULL, a bool as true or false, a float as
-// format_float writes it, and anything else as its display text.
-fn form_sql_args(value: Option<&Value>) -> Vec<PgTextParam> {
-    let Some(Value::List(items)) = value else {
-        return Vec::new();
+fn pg_dsn(url: &str) -> PgDsn {
+    let rest = url
+        .strip_prefix("postgresql://")
+        .or_else(|| url.strip_prefix("postgres://"))
+        .unwrap_or(url);
+    let main = rest.split('?').next().unwrap_or("");
+    let (userinfo, place) = match main.rfind('@') {
+        Some(at) => (&main[..at], &main[at + 1..]),
+        None => ("", main),
     };
-    items
-        .iter()
-        .map(|item| {
-            PgTextParam(match item {
+    let (hostport, database) = match place.find('/') {
+        Some(slash) => (&place[..slash], pg_unescape(&place[slash + 1..])),
+        None => (place, String::new()),
+    };
+    let (user, password) = match userinfo.find(':') {
+        Some(colon) => (pg_unescape(&userinfo[..colon]), pg_unescape(&userinfo[colon + 1..])),
+        None => (pg_unescape(userinfo), String::new()),
+    };
+    let bracket = if hostport.starts_with('[') { hostport.find(']') } else { None };
+    let port_colon = match bracket {
+        Some(b) => hostport[b..].find(':').map(|c| c + b),
+        None => hostport.find(':'),
+    };
+    let host = match (bracket, port_colon) {
+        (Some(b), _) => hostport[1..b].to_string(),
+        (None, Some(c)) => hostport[..c].to_string(),
+        (None, None) => hostport.to_string(),
+    };
+    let port = match port_colon {
+        Some(c) => hostport[c + 1..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u16>()
+            .unwrap_or(0),
+        None => 5432,
+    };
+    PgDsn {
+        host: if host.is_empty() { "localhost".to_string() } else { host },
+        port,
+        database: if database.is_empty() { user.clone() } else { database },
+        user,
+        password,
+    }
+}
+
+fn pg_auth_uncarried(code: u32) -> String {
+    format!("pg_connect: authentication method {code} is not carried; trust, password, md5 and SCRAM-SHA-256 are")
+}
+
+// a connection through startup and authentication to its first ReadyForQuery: TimeZone UTC and UTF8
+// asked for, trust, cleartext, md5 and SCRAM-SHA-256 answered
+fn pg_connect_dsn(url: &str) -> Result<PgConn, String> {
+    use fallible_iterator::FallibleIterator;
+    use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
+    use postgres_protocol::message::{backend::Message, frontend};
+    let d = pg_dsn(url);
+    let stream = (d.host.as_str(), d.port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| {
+            addrs.find_map(|addr| TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)).ok())
+        })
+        .ok_or_else(|| format!("pg_connect: cannot reach {}:{}", d.host, d.port))?;
+    let mut conn = PgConn { stream, buf: bytes::BytesMut::new() };
+    let startup = [
+        ("user", d.user.as_str()),
+        ("database", d.database.as_str()),
+        ("TimeZone", "UTC"),
+        ("client_encoding", "UTF8"),
+    ];
+    pg_send(&mut conn, |out| frontend::startup_message(startup, out))?;
+    let mut scram: Option<ScramSha256> = None;
+    loop {
+        let message = pg_next(&mut conn).map_err(|_| {
+            "pg_connect: the connection ended during startup, or sent a frame this client cannot read".to_string()
+        })?;
+        match message {
+            Message::ReadyForQuery(_) => return Ok(conn),
+            Message::ErrorResponse(body) => return Err(pg_error_text(&body)),
+            Message::AuthenticationCleartextPassword => {
+                pg_send(&mut conn, |out| frontend::password_message(d.password.as_bytes(), out))?
+            }
+            Message::AuthenticationMd5Password(body) => {
+                let hash = postgres_protocol::authentication::md5_hash(
+                    d.user.as_bytes(),
+                    d.password.as_bytes(),
+                    body.salt(),
+                );
+                pg_send(&mut conn, |out| frontend::password_message(hash.as_bytes(), out))?
+            }
+            Message::AuthenticationSasl(body) => {
+                let mut mechanisms = body.mechanisms();
+                let mut carried = false;
+                while let Ok(Some(mechanism)) = mechanisms.next() {
+                    carried = carried || mechanism == "SCRAM-SHA-256";
+                }
+                if !carried {
+                    return Err(pg_auth_uncarried(10));
+                }
+                let first = ScramSha256::new(d.password.as_bytes(), ChannelBinding::unsupported());
+                pg_send(&mut conn, |out| frontend::sasl_initial_response("SCRAM-SHA-256", first.message(), out))?;
+                scram = Some(first);
+            }
+            Message::AuthenticationSaslContinue(body) => {
+                let s = scram
+                    .as_mut()
+                    .ok_or_else(|| "pg_connect: the server continued a SCRAM exchange never begun".to_string())?;
+                s.update(body.data())
+                    .map_err(|_| "pg_connect: the server's SCRAM nonce does not extend ours".to_string())?;
+                let reply = s.message().to_vec();
+                pg_send(&mut conn, |out| frontend::sasl_response(&reply, out))?;
+            }
+            Message::AuthenticationSaslFinal(body) => {
+                let s = scram
+                    .as_mut()
+                    .ok_or_else(|| "pg_connect: the server finished a SCRAM exchange never begun".to_string())?;
+                s.finish(body.data())
+                    .map_err(|_| "pg_connect: the server's SCRAM signature does not match".to_string())?;
+            }
+            Message::AuthenticationKerberosV5 => return Err(pg_auth_uncarried(2)),
+            Message::AuthenticationScmCredential => return Err(pg_auth_uncarried(6)),
+            Message::AuthenticationGss | Message::AuthenticationGssContinue(_) => return Err(pg_auth_uncarried(7)),
+            Message::AuthenticationSspi => return Err(pg_auth_uncarried(9)),
+            _ => {}
+        }
+    }
+}
+
+// one SQL run read to ReadyForQuery: a simple Query, or Parse/Bind/Describe/Execute/Sync when parameters
+// travel, each as text or NULL; the results come back as text either way
+fn pg_run(conn: &mut PgConn, sql: &str, params: Option<Vec<Option<String>>>) -> Result<PgRun, String> {
+    use fallible_iterator::FallibleIterator;
+    use postgres_protocol::message::{backend::Message, frontend};
+    match params {
+        None => pg_send(conn, |out| frontend::query(sql, out))?,
+        Some(values) => pg_send(conn, |out| {
+            frontend::parse("", sql, std::iter::empty::<u32>(), out)?;
+            frontend::bind(
+                "",
+                "",
+                std::iter::empty::<i16>(),
+                values,
+                |value: Option<String>,
+                 buf: &mut bytes::BytesMut|
+                 -> Result<postgres_protocol::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+                    Ok(match value {
+                        Some(text) => {
+                            buf.extend_from_slice(text.as_bytes());
+                            postgres_protocol::IsNull::No
+                        }
+                        None => postgres_protocol::IsNull::Yes,
+                    })
+                },
+                Some(0i16),
+                out,
+            )
+            .map_err(|e| match e {
+                frontend::BindError::Conversion(e) => std::io::Error::new(std::io::ErrorKind::InvalidInput, e),
+                frontend::BindError::Serialization(e) => e,
+            })?;
+            frontend::describe(b'P', "", out)?;
+            frontend::execute("", 0, out)?;
+            frontend::sync(out);
+            Ok(())
+        })?,
+    }
+    let mut run = PgRun { fields: Vec::new(), rows: Vec::new(), tag: String::new() };
+    let mut error = String::new();
+    loop {
+        match pg_next(conn)? {
+            Message::ReadyForQuery(_) => break,
+            Message::RowDescription(body) => {
+                run.fields.clear();
+                let mut fields = body.fields();
+                while let Ok(Some(field)) = fields.next() {
+                    run.fields.push((field.name().to_string(), field.type_oid()));
+                }
+            }
+            Message::DataRow(body) => {
+                let buffer = body.buffer();
+                let mut ranges = body.ranges();
+                let mut row = Vec::new();
+                while let Ok(Some(range)) = ranges.next() {
+                    row.push(range.map(|r| String::from_utf8_lossy(&buffer[r]).into_owned()));
+                }
+                run.rows.push(row);
+            }
+            Message::CommandComplete(body) => run.tag = body.tag().unwrap_or("").to_string(),
+            Message::ErrorResponse(body) => error = pg_error_text(&body),
+            _ => {}
+        }
+    }
+    if error.is_empty() {
+        Ok(run)
+    } else {
+        Err(error)
+    }
+}
+
+// one run on a registered connection; an unknown handle answers as the natives word it
+fn pg_run_on(op: &str, h: i64, sql: &str, params: Option<Vec<Option<String>>>) -> Result<PgRun, String> {
+    let conn = pg_lookup(h).ok_or_else(|| format!("{op}: unknown connection handle"))?;
+    let mut g = conn.lock().unwrap();
+    pg_run(&mut g, sql, params)
+}
+
+// pg_cell — a text cell as the Go native reads it (database/sql over pgx, dbCellToForm): NULL as null,
+// bool, the integer types as ints, float4 widened from its single-precision value, float8 as a float,
+// timestamps and dates as RFC3339 in UTC, and every other type as the server's text.
+fn pg_cell(oid: u32, text: Option<&str>) -> Value {
+    let Some(text) = text else {
+        return Value::Null;
+    };
+    let as_text = || Value::Str(text.to_string().into());
+    match oid {
+        16 => Value::Bool(text == "t"),
+        20 | 21 | 23 => text.parse::<i64>().map(Value::Int).unwrap_or_else(|_| as_text()),
+        700 => text.parse::<f32>().map(|f| Value::Float(f as f64)).unwrap_or_else(|_| as_text()),
+        701 => text.parse::<f64>().map(Value::Float).unwrap_or_else(|_| as_text()),
+        1082 => Value::Str(format!("{text}T00:00:00Z").into()),
+        1114 => Value::Str(pg_rfc3339(text).into()),
+        1184 => Value::Str(pg_rfc3339(text.strip_suffix("+00").unwrap_or(text)).into()),
+        _ => as_text(),
+    }
+}
+
+// the server's "2026-09-12 08:00:00.5" in UTC as RFC3339: "2026-09-12T08:00:00.5Z"
+fn pg_rfc3339(text: &str) -> String {
+    match text.find(' ') {
+        Some(at) => format!("{}T{}Z", &text[..at], &text[at + 1..]),
+        None => format!("{text}Z"),
+    }
+}
+
+// pg_cell_text — a read cell written as Go's formValueString writes it into pg_query's page
+fn pg_cell_text(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        Value::Float(f) => format_float(*f),
+        other => other.display(),
+    }
+}
+
+// a Form list as SQL parameters, each as text or NULL: null as NULL, a bool as true or false, a float as
+// format_float writes it, and anything else as its display text; no list means a simple Query
+fn pg_params(value: Option<&Value>) -> Option<Vec<Option<String>>> {
+    let Some(Value::List(items)) = value else {
+        return None;
+    };
+    Some(
+        items
+            .iter()
+            .map(|item| match item {
                 Value::Null => None,
                 Value::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
                 Value::Float(f) => Some(format_float(*f)),
                 other => Some(other.display()),
             })
-        })
-        .collect()
+            .collect(),
+    )
+}
+
+// the row count a command tag carries: its last word when that is a number, 0 otherwise
+fn pg_tag_count(tag: &str) -> i64 {
+    let word = tag.rsplit(' ').next().unwrap_or("");
+    if !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()) {
+        word.parse::<i64>().unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 fn dict_value(pairs: Vec<(&str, Value)>) -> Value {
@@ -5479,146 +5531,109 @@ impl Kernel {
                 ));
                 return Value::Int(-1);
             }
-            match postgres::Client::connect(&dsn, postgres::NoTls) {
-                Ok(c) => {
+            match pg_connect_dsn(&dsn) {
+                Ok(conn) => {
                     pg_set_error(None);
-                    Value::Int(pg_register(c))
+                    Value::Int(pg_register(conn))
                 }
                 Err(e) => {
-                    pg_set_error(Some(pg_error_text(&e)));
+                    pg_set_error(Some(e));
                     Value::Int(-1)
                 }
             }
         });
         self.register_native("pg_ping", cat_call(), |_, _, args| {
-            let h = args[0].as_int();
-            let client = match pg_lookup(h) {
-                Some(c) => c,
-                None => {
-                    pg_set_error(Some("pg_ping: unknown connection handle".to_string()));
-                    return Value::Bool(false);
-                }
-            };
-            let mut g = client.lock().unwrap();
-            match g.simple_query("SELECT 1") {
+            match pg_run_on("pg_ping", args[0].as_int(), "SELECT 1", None) {
                 Ok(_) => {
                     pg_set_error(None);
                     Value::Bool(true)
                 }
                 Err(e) => {
-                    pg_set_error(Some(pg_error_text(&e)));
+                    pg_set_error(Some(e));
                     Value::Bool(false)
                 }
             }
         });
         self.register_native("pg_exec", cat_call(), |_, _, args| {
-            let h = args[0].as_int();
             let sql = args[1].as_str().to_string();
-            let client = match pg_lookup(h) {
-                Some(c) => c,
-                None => {
-                    pg_set_error(Some("pg_exec: unknown connection handle".to_string()));
-                    return Value::Int(-1);
-                }
-            };
-            let params = form_sql_args(args.get(2));
-            let param_refs = params
-                .iter()
-                .map(|p| p as &(dyn postgres::types::ToSql + Sync))
-                .collect::<Vec<_>>();
-            let mut g = client.lock().unwrap();
-            match g.execute(&sql, &param_refs) {
-                Ok(n) => {
+            match pg_run_on("pg_exec", args[0].as_int(), &sql, pg_params(args.get(2))) {
+                Ok(run) => {
                     pg_set_error(None);
-                    Value::Int(n as i64)
+                    Value::Int(pg_tag_count(&run.tag))
                 }
                 Err(e) => {
-                    pg_set_error(Some(pg_error_text(&e)));
+                    pg_set_error(Some(e));
                     Value::Int(-1)
                 }
             }
         });
         self.register_native("pg_query", cat_call(), |_, _, args| {
-            let h = args[0].as_int();
             let sql = args[1].as_str().to_string();
-            let client = match pg_lookup(h) {
-                Some(c) => c,
-                None => {
-                    pg_set_error(Some("pg_query: unknown connection handle".to_string()));
-                    return Value::Str("ERR".to_string().into());
+            match pg_run_on("pg_query", args[0].as_int(), &sql, pg_params(args.get(2))) {
+                Ok(run) => {
+                    // rows joined by "\n", columns by "\t", each cell as Go's formValueString writes it
+                    let page = run
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .enumerate()
+                                .map(|(ci, cell)| {
+                                    let oid = run.fields.get(ci).map(|f| f.1).unwrap_or(25);
+                                    pg_cell_text(&pg_cell(oid, cell.as_deref()))
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\t")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    pg_set_error(None);
+                    Value::Str(page.into())
                 }
-            };
-            let params = form_sql_args(args.get(2));
-            let param_refs = params
-                .iter()
-                .map(|p| p as &(dyn postgres::types::ToSql + Sync))
-                .collect::<Vec<_>>();
-            let mut g = client.lock().unwrap();
-            let rows = match g.query(&sql, &param_refs) {
-                Ok(r) => r,
                 Err(e) => {
-                    pg_set_error(Some(pg_error_text(&e)));
-                    return Value::Str("ERR".to_string().into());
-                }
-            };
-            // Encode rows as tab-separated columns, newline-separated rows.
-            // Columns are rendered to text via their SQL type (text/int8/bool
-            // cover the substrate's portable column set). NULL → empty string.
-            let mut out = String::new();
-            for (ri, row) in rows.iter().enumerate() {
-                if ri > 0 {
-                    out.push('\n');
-                }
-                for ci in 0..row.len() {
-                    if ci > 0 {
-                        out.push('\t');
-                    }
-                    out.push_str(&pg_cell_to_string(row, ci));
+                    pg_set_error(Some(e));
+                    Value::Str("ERR".to_string().into())
                 }
             }
-            pg_set_error(None);
-            Value::Str(out.into())
         });
         self.register_native("pg_query_rows", cat_call(), |_, _, args| {
-            let h = args[0].as_int();
             let sql = args[1].as_str().to_string();
-            let client = match pg_lookup(h) {
-                Some(c) => c,
-                None => {
-                    pg_set_error(Some("pg_query_rows: unknown connection handle".to_string()));
-                    return Value::List(Vec::new().into());
+            match pg_run_on("pg_query_rows", args[0].as_int(), &sql, pg_params(args.get(2))) {
+                Ok(run) => {
+                    let rows = run
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            let mut pairs = Vec::with_capacity(row.len() * 2 + 1);
+                            pairs.push(Value::Str("__dict__".to_string().into()));
+                            for (ci, cell) in row.iter().enumerate() {
+                                let (name, oid) = run.fields.get(ci).cloned().unwrap_or((String::new(), 25));
+                                pairs.push(Value::Str(name.into()));
+                                pairs.push(pg_cell(oid, cell.as_deref()));
+                            }
+                            Value::List(pairs.into())
+                        })
+                        .collect::<Vec<_>>();
+                    pg_set_error(None);
+                    Value::List(rows.into())
                 }
-            };
-            let params = form_sql_args(args.get(2));
-            let param_refs = params
-                .iter()
-                .map(|p| p as &(dyn postgres::types::ToSql + Sync))
-                .collect::<Vec<_>>();
-            let mut g = client.lock().unwrap();
-            let rows = match g.query(&sql, &param_refs) {
-                Ok(r) => r,
                 Err(e) => {
-                    pg_set_error(Some(pg_error_text(&e)));
-                    return Value::List(Vec::new().into());
+                    pg_set_error(Some(e));
+                    Value::List(Vec::new().into())
                 }
-            };
-            let mut out = Vec::new();
-            for row in rows.iter() {
-                let mut pairs = Vec::with_capacity(row.len() * 2 + 1);
-                pairs.push(Value::Str("__dict__".to_string().into()));
-                for (ci, col) in row.columns().iter().enumerate() {
-                    pairs.push(Value::Str(col.name().to_string().into()));
-                    pairs.push(pg_cell_to_value(row, ci));
-                }
-                out.push(Value::List(pairs.into()));
             }
-            pg_set_error(None);
-            Value::List(out.into())
         });
         self.register_native("pg_close", cat_call(), |_, _, args| {
             let h = args[0].as_int();
             if h < 0 {
                 return Value::Int(-1);
+            }
+            if let Some(conn) = pg_lookup(h) {
+                let mut g = conn.lock().unwrap();
+                let _ = pg_send(&mut g, |out| {
+                    postgres_protocol::message::frontend::terminate(out);
+                    Ok(())
+                });
             }
             if pg_drop(h) {
                 pg_set_error(None);
