@@ -9109,14 +9109,21 @@ static long long fk_walk_body(long long i, long long fp) {
                 continue;
             }
             if (m194 != 0 && sig194 >= 0 && n194 >= 1 && n194 <= 8) {
-                /* the loop leaf: each frame arg must wear the type the loop was emitted for (int = even word, float = pool box);
-                 * ints untag once at the door (v >> 1), floats unbox once, the result tags or boxes once on the way out */
-                long long f194[9];
+                /* the loop leaf: each frame arg must wear the type the loop was emitted for (int = even word, float = pool box,
+                 * string = a string word); ints untag once at the door (v >> 1), floats unbox once, a string's byte pointer
+                 * goes in its word and its length at word 9 + k (the leaf's bounds check reads it there; word 8 is the
+                 * iteration count), the result tags or boxes once on the way out. The pointer is safe for the leaf's
+                 * whole run because a leaf never calls out, so nothing can intern a string and move the pool under it. */
+                long long f194[17];
                 long long k194 = 0, nf194 = 0;
                 int ok194 = 1;
                 while (k194 < n194) {
                     long long v194 = fk_vs[fp + k194];
-                    if ((sig194 >> k194) & 1) {
+                    if ((sig194 >> (16 + k194)) & 1) {
+                        const char *p194 = 0; long long l194 = 0;
+                        if (!fk_is_str(v194) || !fk_srange(v194, &p194, &l194)) { ok194 = 0; break; }
+                        f194[k194] = (long long)p194; f194[9 + k194] = l194;
+                    } else if ((sig194 >> k194) & 1) {
                         if (!fk_isf(v194)) { ok194 = 0; break; }
                         double d194 = FK_FV(fk_fidx(v194));
                         memcpy(&f194[k194], &d194, 8);
@@ -9925,12 +9932,34 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         *out = fk_f64_push(types[k] == 2 ? 2 : 8, (int)k, 0, 0.0, 0);
         return *out < 0 ? 0 : types[k];
     }
+    if (t == 28) {
+        /* str_byte_at s i, s a string parameter: the byte at i, or -1 past the string's end, as the walker's arm
+         * (t == 28 in fk_walk) answers. The door places the string's byte pointer in the parameter's frame word and
+         * its length at word 9 + k; the leaf reads the byte with one load after an unsigned compare against that
+         * length (a negative index reads as past the end too). The string class enters the loop lane here. */
+        long long sn = fk_node[i][1];
+        if (sn < 0 || sn >= fk_node_count) { return 0; }
+        long long st = fk_node[sn][0];
+        long long k = 0;
+        if (st == 110) {
+            long long li = fk_node[sn][1];
+            if (li < 0 || li >= fk_node_count || fk_node[li][0] != 1) { return 0; }
+            k = fk_node[li][1];
+        } else if (st != 2) { fk_f64_refuse_tag = t; return 0; }
+        if (k < 0 || k >= arity || types[k] != 3) { fk_f64_refuse_tag = t; return 0; }
+        int ix = 0;
+        int ti = fk_f64_admit(fk_node[i][2], arity, types, &ix);
+        if (ti != 1) { if (ti != 0) { fk_f64_refuse_tag = t; } return 0; }
+        *out = fk_f64_push(14, (int)k, ix, 0.0, 0);
+        return *out < 0 ? 0 : 1;
+    }
     if (t == 3 || t == 4 || t == 42 || t == 10) {
         int a = 0, b = 0;
         int ta = fk_f64_admit(fk_node[i][1], arity, types, &a);
         if (ta == 0) { return 0; }
         int tb = fk_f64_admit(fk_node[i][2], arity, types, &b);
         if (tb == 0) { return 0; }
+        if (ta == 3 || tb == 3) { fk_f64_refuse_tag = t; return 0; } /* arithmetic on a string pointer is no recipe's meaning */
         int op = t == 3 ? 0 : (t == 4 ? 1 : (t == 42 ? 2 : 3));
         if (ta == 2 || tb == 2) {
             a = fk_f64_cvt(a); b = fk_f64_cvt(b);
@@ -9994,6 +10023,23 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         int rd = 16 + *ntemp; *ntemp = *ntemp + 1;
         if (!fk_f64_put(words, wn, 0x9E620000U | ((unsigned int)(ra - 100) << 5) | (unsigned int)rd)) { return -1; } /* SCVTF Dd, Xn */
         return rd;
+    }
+    if (p->kind == 14) {
+        /* a byte of string parameter a at index b: the length the door placed at frame word 9 + a is loaded into x9
+         * (the literal scratch, dead between uses), the index compared unsigned, and the byte loaded or -1 answered */
+        int ri = fk_f64_emit(p->b, words, wn, ntemp, nitemp);
+        if (ri < 100) { return -1; }
+        fk_f64_release(ri, ntemp, nitemp);
+        if (*nitemp >= 7) { return -1; }
+        int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
+        unsigned int xi = (unsigned int)(ri - 100), xs = 10U + (unsigned int)p->a, xd = (unsigned int)rd;
+        if (!fk_f64_put(words, wn, 0xF9400009U | ((unsigned int)(9 + p->a) << 10))) { return -1; } /* LDR X9, [X0, #8*(9+a)] */
+        if (!fk_f64_put(words, wn, 0xEB09001FU | (xi << 5))) { return -1; }                       /* CMP Xi, X9 */
+        if (!fk_f64_put(words, wn, 0x54000062U)) { return -1; }                                    /* B.HS +3: past the end */
+        if (!fk_f64_put(words, wn, 0x38606800U | (xi << 16) | (xs << 5) | xd)) { return -1; }     /* LDRB Wd, [Xs, Xi] */
+        if (!fk_f64_put(words, wn, 0x14000002U)) { return -1; }                                    /* B +2 */
+        if (!fk_f64_put(words, wn, 0x92800000U | xd)) { return -1; }                               /* MOVN Xd, #0: -1 */
+        return 100 + rd;
     }
     int ra = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
     if (ra < 0) { return -1; }
@@ -10275,7 +10321,8 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     while (k < arity) {
         long long v = fk_vs[fp + k];
         if (fk_isf(v)) { types[k] = 2; sig = sig | (1LL << k); }
-        else if ((v & 1) != 0) { fk_fn_native[fx] = -2; return; } /* a frame slot is not a number: this lane carries numeric frames only, and THAT is the reason -- not where the walk stopped */
+        else if (fk_is_str(v)) { types[k] = 3; sig = sig | (1LL << (16 + k)); } /* a string parameter: its byte pointer rides the int register, only str_byte_at reads it */
+        else if ((v & 1) != 0) { fk_fn_native[fx] = -2; return; } /* a frame slot is not a number or a string: this lane carries those frames only, and THAT is the reason -- not where the walk stopped */
         k = k + 1;
     }
     /* the tail call's arguments, one per parameter, each the type of the parameter it feeds */
@@ -10299,11 +10346,12 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     if (ta == 0) { return; }
     int tb = fk_f64_admit(fk_node[cond][2], arity, types, &cb);
     if (tb == 0) { return; }
+    if (ta == 3 || tb == 3) { fk_fn_native[fx] = 0 - (1000 + ct); return; } /* a compare over a string pointer: not this lane's */
     int fcmp = (ta == 2 || tb == 2);
     if (fcmp) { ca = fk_f64_cvt(ca); cb = fk_f64_cvt(cb); if (ca < 0 || cb < 0) { return; } }
     int ex = 0;
     int tex = fk_f64_admit(exitn, arity, types, &ex);
-    if (tex == 0) { return; }
+    if (tex == 0 || tex == 3) { return; } /* an exit that answers a string pointer would hand the walker a bare address */
     if (tex == 2) { sig = sig | (1LL << 8); }
     /* the condition code that means "the compare is TRUE": eq EQ; lt LT / MI; le LE / LS. Exit is taken when the compare
      * selects the exit branch: true -> then-exit is cc itself, else-exit is its inverse (cc ^ 1). */
