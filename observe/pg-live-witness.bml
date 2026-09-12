@@ -1,19 +1,23 @@
 // pg-live-witness.bml — every kernel's pg doors against a live Postgres of the witness's own.
 // preludes: form-stdlib/core.fk
 //
-// Go and Rust answer pg_connect, pg_exec, pg_query and pg_last_error with their natives; fkwu and TS
-// answer them through form-stdlib/bml/pg-floor.bml. This cell makes two scratch clusters under
-// .hearth/ (initdb; one trusting 127.0.0.1, one asking SCRAM-SHA-256 for a password; ports taken from
-// its pid; no unix socket), writes two cells, runs each as a child on every kernel this checkout has
-// built, and stops the servers. Only the clusters' data is removed afterwards; each child's exit,
-// stdout and stderr stay beside the server logs as evidence. It needs initdb and pg_ctl on PATH.
+// Go and Rust answer pg_connect, pg_exec, pg_query, pg_last_error and config_database_url with their
+// natives; fkwu and TS answer them through form-stdlib/bml/pg-floor.bml and config-floor.bml. This cell
+// makes two scratch clusters under .hearth/ (initdb; one trusting 127.0.0.1, one asking SCRAM-SHA-256
+// for a password; ports taken from its pid; no unix socket), writes three cells, runs each as a child
+// on every kernel this checkout has built, and stops the servers. Only the clusters' data is removed
+// afterwards; each child's exit, stdout and stderr stay beside the server logs as evidence. It needs
+// initdb and pg_ctl on PATH.
 //
 // The contract cell reads back types, row counts, rows and errors; it passes when its page matches
-// Go's rendering line for line. The SCRAM cell connects with the password, reads current_user, and
-// then fails with a wrong password the way the server words it.
+// Go's rendering line for line. The SCRAM cell connects with the password, reads current_user, and then
+// fails with a wrong password the way the server words it. The config cell runs with HOME pointed at a
+// scratch ~/.coherence-network/config.json naming the trusting cluster; it reads config_database_url
+// and connects through the URL it answers.
 //
 // Verdict bits: 1 both clusters made, 2 both servers started; the contract page on fkwu 4, go 8,
-// rust 16, ts 32; the SCRAM page on fkwu 64, go 128, rust 256, ts 512; 1024 both servers stopped.
+// rust 16, ts 32; the SCRAM page on fkwu 64, go 128, rust 256, ts 512; 1024 both servers stopped; the
+// config page on fkwu 2048, go 4096, rust 8192, ts 16384.
 section [form.bml] {
  class PgLiveWitness {
   def plw-at(root, name) = str_concat(root, str_concat("/", name));
@@ -28,37 +32,40 @@ section [form.bml] {
    list(status, read_file(str_concat(base, ".out")));
   }
   def plw-ok(row) = eq(nth(row, 0), 0);
-  def plw-url(port, userinfo) = str_concat("\"postgresql://", str_concat(userinfo, str_concat("@127.0.0.1:", str_concat(int_to_str(port), "/postgres\""))));
-  def plw-head() = str_concat("; pre", "ludes: form-stdlib/core.fk form-stdlib/bml/pg-floor.bml\n(do\n");
+  def plw-url(port, userinfo) = str_concat("postgresql://", str_concat(userinfo, str_concat("@127.0.0.1:", str_concat(int_to_str(port), "/postgres"))));
+  def plw-quoted(s) = str_concat("\"", str_concat(s, "\""));
+  def plw-head(floor) = str_concat("; pre", str_concat("ludes: form-stdlib/core.fk form-stdlib/bml/", str_concat(floor, ".bml\n(do\n")));
   def plw-contract-cell(port) {
-   let open = str_concat("    (let h (pg_connect ", str_concat(plw-url(port, "form"), "))\n    (print (if (ge h 0) \"connected\" \"refused\"))\n"));
+   let open = str_concat("    (let h (pg_connect ", str_concat(plw-quoted(plw-url(port, "form")), "))\n    (print (if (ge h 0) \"connected\" \"refused\"))\n"));
    let typed = "    (print (pg_query h \"SELECT true, false, 42::int8, 7::int4, 'x'::text, NULL::text, 1.5::float8, 0.1::float8, 12.30::numeric, '2026-09-12 08:00:00+08'::timestamptz, '[1, 2]'::jsonb\"))\n";
    let counts = "    (print (pg_exec h \"CREATE TEMP TABLE t (k int)\"))\n    (print (pg_exec h \"INSERT INTO t VALUES (1), (2), (3)\"))\n    (print (pg_exec h \"UPDATE t SET k = k + 1 WHERE k > 1\"))\n";
    let rows = "    (print (pg_query h \"SELECT k FROM t ORDER BY k\"))\n    (print (pg_query h \"SELECT k FROM t WHERE k > 100\"))\n";
    let errors = "    (print (pg_exec h \"SELEC oops\"))\n    (print (pg_last_error))\n    (print (pg_query h \"SELECT oops_col FROM t\"))\n    (print (pg_last_error))\n    (pg_close h))\n";
-   str_concat(plw-head(), str_concat(open, str_concat(typed, str_concat(counts, str_concat(rows, errors)))));
+   str_concat(plw-head("pg-floor"), str_concat(open, str_concat(typed, str_concat(counts, str_concat(rows, errors)))));
   }
   def plw-contract-page() = "connected\ntrue\tfalse\t42\t7\tx\t\t1.5\t0.1\t12.30\t2026-09-12T00:00:00Z\t[1, 2]\n0\n3\n2\n1\n3\n4\n\n-1\nsyntax error at or near \"SELEC\"\nERR\ncolumn \"oops_col\" does not exist\n0\n";
   def plw-scram-cell(port) {
-   let open = str_concat("    (let h (pg_connect ", str_concat(plw-url(port, "form:s3cret"), "))\n    (print (if (ge h 0) \"connected\" \"refused\"))\n"));
+   let open = str_concat("    (let h (pg_connect ", str_concat(plw-quoted(plw-url(port, "form:s3cret")), "))\n    (print (if (ge h 0) \"connected\" \"refused\"))\n"));
    let read = "    (print (pg_query h \"SELECT 'scram:' || current_user\"))\n    (print (pg_close h))\n";
-   let wrong = str_concat("    (let bad (pg_connect ", str_concat(plw-url(port, "form:wrong"), "))\n    (print bad)\n    (print (pg_last_error))\n    0)\n"));
-   str_concat(plw-head(), str_concat(open, str_concat(read, wrong)));
+   let wrong = str_concat("    (let bad (pg_connect ", str_concat(plw-quoted(plw-url(port, "form:wrong")), "))\n    (print bad)\n    (print (pg_last_error))\n    0)\n"));
+   str_concat(plw-head("pg-floor"), str_concat(open, str_concat(read, wrong)));
   }
   def plw-scram-page() = "connected\nscram:form\n0\n-1\npassword authentication failed for user \"form\"\n0\n";
-  // one kernel reading one cell from its own directory; absent when this checkout has not built it
-  def plw-read(root, dir, name, binary, command, cell, page, bit) {
+  def plw-config-cell() = str_concat(plw-head("config-floor"), "    (print (config_database_url))\n    (let h (pg_connect (config_database_url)))\n    (print (pg_query h \"SELECT 'config:' || current_user\"))\n    (pg_close h))\n");
+  def plw-config-page(port) = str_concat(plw-url(port, "form"), "\nconfig:form\n0\n");
+  // one kernel reading one cell from its own directory under env; absent when this checkout has not built it
+  def plw-read(root, dir, env, name, binary, command, cell, page, bit) {
    let built = ge(file_size(plw-at(dir, binary)), 0);
-   let script = str_concat("cd ", str_concat(dir, str_concat(" && exec perl -e 'alarm 300; exec @ARGV' ", str_concat(command, str_concat(" ", cell)))));
+   let script = str_concat("cd ", str_concat(dir, str_concat(" && exec env ", str_concat(env, str_concat(" perl -e 'alarm 300; exec @ARGV' ", str_concat(command, str_concat(" ", cell)))))));
    let row = if built then plw-run(root, name, script) else list(-1, "absent\n");
    if and(plw-ok(row), str_eq(nth(row, 1), page)) then bit else 0;
   }
-  def plw-kernels(root, cwd, cell, page, tag, shift) {
+  def plw-kernels(root, cwd, env, cell, page, tag, shift) {
    let form = plw-at(cwd, "form");
-   let k1 = plw-read(root, cwd, str_concat("fkwu-", tag), "fkwu", "./fkwu", cell, page, shift);
-   let k2 = plw-read(root, form, str_concat("go-", tag), "form-kernel-go/bin-go", "form-kernel-go/bin-go", cell, page, mul(shift, 2));
-   let k3 = plw-read(root, form, str_concat("rust-", tag), "form-kernel-rust/target/release/form-kernel-rust", "form-kernel-rust/target/release/form-kernel-rust", cell, page, mul(shift, 4));
-   let k4 = plw-read(root, form, str_concat("ts-", tag), "form-kernel-ts/dist/main.mjs", "node form-kernel-ts/dist/main.mjs", cell, page, mul(shift, 8));
+   let k1 = plw-read(root, cwd, env, str_concat("fkwu-", tag), "fkwu", "./fkwu", cell, page, shift);
+   let k2 = plw-read(root, form, env, str_concat("go-", tag), "form-kernel-go/bin-go", "form-kernel-go/bin-go", cell, page, mul(shift, 2));
+   let k3 = plw-read(root, form, env, str_concat("rust-", tag), "form-kernel-rust/target/release/form-kernel-rust", "form-kernel-rust/target/release/form-kernel-rust", cell, page, mul(shift, 4));
+   let k4 = plw-read(root, form, env, str_concat("ts-", tag), "form-kernel-ts/dist/main.mjs", "node form-kernel-ts/dist/main.mjs", cell, page, mul(shift, 8));
    add(k1, add(k2, add(k3, k4)));
   }
   def plw-start-server(root, name, port) {
@@ -74,15 +81,23 @@ section [form.bml] {
   def plw-cases(root, cwd) {
    let port = add(50000, mul(mod(host_pid(), 5000), 2));
    let pw = write_file(plw-at(root, "pw"), "s3cret\n");
+   let home = plw-at(root, "home");
+   let home-made = host_dir_mkdir(home);
+   let dot-made = host_dir_mkdir(plw-at(home, ".coherence-network"));
+   let config = write_file(plw-at(home, ".coherence-network/config.json"), str_concat("{\"database\": {\"url\": ", str_concat(plw-quoted(plw-url(port, "form")), "}}\n")));
    let init-trust = plw-run(root, "initdb-trust", str_concat("exec initdb -D ", str_concat(plw-at(root, "trust"), " -A trust -U form")));
    let init-scram = plw-run(root, "initdb-scram", str_concat("exec initdb -D ", str_concat(plw-at(root, "scram"), str_concat(" -A scram-sha-256 -U form --pwfile=", plw-at(root, "pw")))));
    let start-trust = plw-start-server(root, "trust", port);
    let start-scram = plw-start-server(root, "scram", add(port, 1));
    let contract = plw-at(root, "contract.fk");
    let scram = plw-at(root, "scram.fk");
+   let configured = plw-at(root, "config.fk");
    let w1 = write_file(contract, plw-contract-cell(port));
    let w2 = write_file(scram, plw-scram-cell(add(port, 1)));
-   let pages = add(plw-kernels(root, cwd, contract, plw-contract-page(), "contract", 4), plw-kernels(root, cwd, scram, plw-scram-page(), "scram", 64));
+   let w3 = write_file(configured, plw-config-cell());
+   let p1 = plw-kernels(root, cwd, "", contract, plw-contract-page(), "contract", 4);
+   let p2 = plw-kernels(root, cwd, "", scram, plw-scram-page(), "scram", 64);
+   let p3 = plw-kernels(root, cwd, str_concat("HOME=", home), configured, plw-config-page(port), "config", 2048);
    let stop-trust = plw-run(root, "stop-trust", str_concat("exec pg_ctl -D ", str_concat(plw-at(root, "trust"), " -m fast -w stop")));
    let stop-scram = plw-run(root, "stop-scram", str_concat("exec pg_ctl -D ", str_concat(plw-at(root, "scram"), " -m fast -w stop")));
    let cleared = plw-run(root, "clear-data", str_concat("exec rm -rf ", str_concat(plw-at(root, "trust"), str_concat(" ", plw-at(root, "scram")))));
@@ -90,7 +105,7 @@ section [form.bml] {
    let b2 = if and(plw-ok(start-trust), plw-ok(start-scram)) then 2 else 0;
    let b11 = if and(plw-ok(stop-trust), plw-ok(stop-scram)) then 1024 else 0;
    print(str_concat("evidence=", root));
-   add(b1, add(b2, add(pages, b11)));
+   add(b1, add(b2, add(p1, add(p2, add(p3, b11)))));
   }
  }
  0;
