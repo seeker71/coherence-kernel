@@ -1,0 +1,65 @@
+; loop-lane-if-chain-band.fk — a loop with several exits crystallizes: the body as a chain of compares.
+;
+; The multi-exit rung of Urs's 2026-09-12 goal. The loop lane took one shape, (if <cmp> <exit> <self>),
+; and every real string loop has more than one exit: the end of the text, a byte under '0', a byte over
+; '9'. fk_f64_loop_pulse now walks the body as a chain — at each if the condition is a compare, one branch
+; an exit and the other the self call or the next if — and emits one exit block per step, each branch
+; patched to its own. core.fk's fstr-to-int-loop is written in that shape, so str_to_int crystallizes.
+;
+; Verdict 255
+; PROOF LEVEL: FOURTH-ARM ONLY (the transparent loop lane is fkwu's MAP_JIT arm64 door; kernel_stat 49 counts its loops)
+; preludes: form-stdlib/core.fk
+;
+;   1   a three-exit chain crystallizes: kernel_stat 49 rises across the hot run
+;   2   an input that leaves by the first exit (the end of the text) answers as the walker twin
+;   4   an input that leaves by the second exit (a byte under '0') answers as the walker twin
+;   8   an input that leaves by the third exit (a byte over '9') answers as the walker twin
+;   16  str_to_int, hot, agrees with a walker-shaped twin over twenty edge inputs
+;   32  the exits swapped — the self call on the then branch, the exit on else, at every step — crystallizes too
+;   64  a chain whose condition is a call, not a compare, stays the walker's and still answers right
+;   128 the warm run is under the walker twin's run of the same work
+(do
+    (defn lic-bit (ok bit) (if ok bit 0))
+    ; the digit loop in the lane's shape: three exits, one continuation (core.fk's fstr-to-int-loop is this shape)
+    (defn lic-digits (s i len acc) (if (le len i) acc (if (lt (str_byte_at s i) 48) acc (if (lt 57 (str_byte_at s i)) acc (lic-digits s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48)))))))
+    ; the walker twin: a call in the condition, which the lane declines
+    (defn lic-digit? (b) (if (ge b 48) (le b 57) false))
+    (defn lic-walk (s i len acc) (if (ge i len) acc (if (lic-digit? (str_byte_at s i)) (lic-walk s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48))) acc)))
+    ; the same chain with every step's branches swapped: self on then, exit on else
+    (defn lic-swapped (s i len acc) (if (lt i len) (if (le 48 (str_byte_at s i)) (if (le (str_byte_at s i) 57) (lic-swapped s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48))) acc) acc) acc))
+    ; str_to_int's walker twin, over the same reading rules
+    (defn lic-s2i-walk (s) (do (let flen (str_len s)) (let fi (fstr-skip-ws s 0 flen)) (if (if (lt fi flen) (eq (str_byte_at s fi) 45) false) (sub 0 (lic-walk s (add fi 1) flen 0)) (lic-walk s fi flen 0))))
+    (defn lic-rep (s n acc) (if (le n 0) acc (lic-rep s (sub n 1) (add acc (lic-digits s 0 (str_len s) 0)))))
+    (defn lic-rep-walk (s n acc) (if (le n 0) acc (lic-rep-walk s (sub n 1) (add acc (lic-walk s 0 (str_len s) 0)))))
+    (defn lic-rep-swapped (s n acc) (if (le n 0) acc (lic-rep-swapped s (sub n 1) (add acc (lic-swapped s 0 (str_len s) 0)))))
+    (let long "123456789012345678")
+    (let before (kernel_stat 49))
+    (let w0 (host_monotonic_ms)) (let hot (lic-rep long 4000 0)) (let w1 (host_monotonic_ms))
+    (let after (kernel_stat 49))
+    (let k0 (host_monotonic_ms)) (let walk (lic-rep-walk long 4000 0)) (let k1 (host_monotonic_ms))
+    ; each exit, hot: the end of the text; a byte under '0' (a space); a byte over '9' (a letter)
+    (let e1 (lic-digits "4200" 0 4 0)) (let e1w (lic-walk "4200" 0 4 0))
+    (let e2 (lic-digits "42 7" 0 4 0)) (let e2w (lic-walk "42 7" 0 4 0))
+    (let e3 (lic-digits "42x7" 0 4 0)) (let e3w (lic-walk "42x7" 0 4 0))
+    ; str_to_int over the edge inputs, hot against the twin
+    (let cases (list "" "0" "7" "42" "-42" "  42" "\t-7x" "123abc" "abc" "-" "--5" "+5" "00012" "9223372036854775807" "-9223372036854775808" "12 34" "\n99\n" "0x10" "1e3" "4.5"))
+    (defn lic-miss (cs acc) (if (eq (len cs) 0) acc (lic-miss (tail cs) (add acc (if (eq (str_to_int (head cs)) (lic-s2i-walk (head cs))) 0 1)))))
+    (let misses (lic-miss cases 0))
+    ; the swapped chain, hot
+    (let sb (kernel_stat 49))
+    (let swapped (lic-rep-swapped long 4000 0))
+    (let sa (kernel_stat 49))
+    ; the call-conditioned twin stays the walker's: no loop counted across its own hot run, and the answer right
+    (let cb (kernel_stat 49))
+    (let walk2 (lic-rep-walk long 2000 0))
+    (let ca (kernel_stat 49))
+    (let told (print (list "hot-ms" (sub w1 w0) "walk-ms" (sub k1 k0) "loops" before after sb sa cb ca "sum" hot walk "exits" e1 e1w e2 e2w e3 e3w "misses" misses "swapped" swapped)))
+    (let b1 (lic-bit (eq after (add before 1)) 1))
+    (let b2 (lic-bit (eq e1 e1w) 2))
+    (let b3 (lic-bit (eq e2 e2w) 4))
+    (let b4 (lic-bit (eq e3 e3w) 8))
+    (let b5 (lic-bit (eq misses 0) 16))
+    (let b6 (lic-bit (if (eq sa (add sb 1)) (eq swapped hot) false) 32))
+    (let b7 (lic-bit (if (eq ca cb) (eq walk2 (mul 2000 (lic-walk long 0 (str_len long) 0))) false) 64))
+    (let b8 (lic-bit (lt (sub w1 w0) (sub k1 k0)) 128))
+    (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 b8))))))))

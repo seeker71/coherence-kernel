@@ -9821,6 +9821,8 @@ static long long fk_host_door(long long mode, long long x) {
 #define FK_F64_HEAT 1024
 #define FK_F64_NODE_CAP 128
 #define FK_F64_WORD_CAP 1000
+#define FK_F64_CHAIN_CAP 4 /* a loop body's compare-and-exit steps before the self tail call: (if c1 e1 (if c2 e2 ... self)) */
+#define FK_F64_PATCH_CAP 8 /* exit branches to patch: two unrolled passes of up to FK_F64_CHAIN_CAP steps */
 /* ── the loop lane ────────────────────────────────────────────────────────────
  * A defn whose body is `(if <compare> <exit> <self tail call>)` (either branch
  * order) is a loop: every iteration is one heat-lane dispatch. The heat ledger
@@ -10245,21 +10247,28 @@ static void fk_f64_pulse(long long fx) {
 }
 /* one pass of the loop body: compare, exit branch (recorded for patching), the tail call as a parallel move into the
  * parameter registers, the iteration count. 0 on overflow. */
-static int fk_f64_loop_pass(unsigned int *words, long long *wn, int ca, int cb, unsigned int exitcc, long long *patch, long long *npatch,
-                            const int *argn, const int *types, long long arity) {
+/* one pass of the loop body: each step's compare and its branch to that step's exit block (offset patched by the caller),
+ * then the self tail call's parallel move into the parameter registers, then the iteration count */
+static int fk_f64_loop_pass(unsigned int *words, long long *wn, const int *cas, const int *cbs, const unsigned int *exitccs, long long nsteps,
+                            long long *patch, long long *patch_step, long long *npatch, const int *argn, const int *types, long long arity) {
     int ntemp = 0, nitemp = 0;
-    int ra = fk_f64_emit(ca, words, wn, &ntemp, &nitemp);
-    if (ra < 0) { return 0; }
-    int rb = fk_f64_emit(cb, words, wn, &ntemp, &nitemp);
-    if (rb < 0) { return 0; }
-    if (ra >= 100) {
-        if (!fk_f64_put(words, wn, 0xEB00001FU | ((unsigned int)(rb - 100) << 16) | ((unsigned int)(ra - 100) << 5))) { return 0; } /* CMP Xa, Xb */
-    } else {
-        if (!fk_f64_put(words, wn, 0x1E602000U | ((unsigned int)rb << 16) | ((unsigned int)ra << 5))) { return 0; } /* FCMP Da, Db */
+    long long j = 0;
+    while (j < nsteps) {
+        ntemp = 0; nitemp = 0; /* a compare's temporaries die at its branch */
+        int ra = fk_f64_emit(cas[j], words, wn, &ntemp, &nitemp);
+        if (ra < 0) { return 0; }
+        int rb = fk_f64_emit(cbs[j], words, wn, &ntemp, &nitemp);
+        if (rb < 0) { return 0; }
+        if (ra >= 100) {
+            if (!fk_f64_put(words, wn, 0xEB00001FU | ((unsigned int)(rb - 100) << 16) | ((unsigned int)(ra - 100) << 5))) { return 0; } /* CMP Xa, Xb */
+        } else {
+            if (!fk_f64_put(words, wn, 0x1E602000U | ((unsigned int)rb << 16) | ((unsigned int)ra << 5))) { return 0; } /* FCMP Da, Db */
+        }
+        if (*npatch >= FK_F64_PATCH_CAP) { return 0; }
+        patch[*npatch] = *wn; patch_step[*npatch] = j; *npatch = *npatch + 1;
+        if (!fk_f64_put(words, wn, 0x54000000U | exitccs[j])) { return 0; } /* B.cond exit j -- offset patched below */
+        j = j + 1;
     }
-    if (*npatch >= 8) { return 0; }
-    patch[*npatch] = *wn; *npatch = *npatch + 1;
-    if (!fk_f64_put(words, wn, 0x54000000U | exitcc)) { return 0; } /* B.cond exit -- offset patched below */
     ntemp = 0; nitemp = 0;
     int held[8];
     long long k = 0;
@@ -10304,16 +10313,33 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     if (n != arity) { return; } /* a partial frame carries stale slots: no signature to read this time */
     fk_f64_refuse_tag = -1;
     fk_fn_native[fx] = -1;
-    long long cond = fk_node[body][1], thn = fk_node[body][2], els = fk_node[body][3];
-    if (cond < 0 || cond >= fk_node_count || thn < 0 || thn >= fk_node_count || els < 0 || els >= fk_node_count) { return; }
-    long long ct = fk_node[cond][0];
-    if (ct != 5 && ct != 102 && ct != 103) { fk_fn_native[fx] = 0 - (1000 + ct); return; } /* the comparison this lane has no arm for: a fact about the recipe */
-    /* which branch is the self tail call: tag 241 on this fn index, or tag 12 (one arg) on it */
-    int self_then = (fk_node[thn][0] == 241 || fk_node[thn][0] == 12) && fk_node[thn][1] == fx;
-    int self_else = (fk_node[els][0] == 241 || fk_node[els][0] == 12) && fk_node[els][1] == fx;
-    if (self_then == self_else) { return; }
-    long long call = self_then ? thn : els;
-    long long exitn = self_then ? els : thn;
+    /* the body as a chain of compare-and-exit steps ending in the self tail call: at each if, the condition is a compare,
+     * one branch is an exit expression, and the other is the self call (tag 241 on this fn index, or tag 12 with one arg)
+     * or the next if of the chain. (if c1 e1 self), (if c1 e1 (if c2 e2 self)), and the branches swapped at any step. */
+    long long conds[FK_F64_CHAIN_CAP], exits[FK_F64_CHAIN_CAP];
+    int exit_on_true[FK_F64_CHAIN_CAP];
+    long long nsteps = 0;
+    long long call = -1;
+    long long node = body;
+    while (call < 0) {
+        if (nsteps >= FK_F64_CHAIN_CAP) { return; }
+        if (node < 0 || node >= fk_node_count || fk_node[node][0] != 6) { return; }
+        long long cond = fk_node[node][1], thn = fk_node[node][2], els = fk_node[node][3];
+        if (cond < 0 || cond >= fk_node_count || thn < 0 || thn >= fk_node_count || els < 0 || els >= fk_node_count) { return; }
+        long long ct = fk_node[cond][0];
+        if (ct != 5 && ct != 102 && ct != 103) { fk_fn_native[fx] = 0 - (1000 + ct); return; } /* the comparison this lane has no arm for: a fact about the recipe */
+        int self_then = (fk_node[thn][0] == 241 || fk_node[thn][0] == 12) && fk_node[thn][1] == fx;
+        int self_else = (fk_node[els][0] == 241 || fk_node[els][0] == 12) && fk_node[els][1] == fx;
+        int if_then = fk_node[thn][0] == 6, if_else = fk_node[els][0] == 6;
+        conds[nsteps] = cond;
+        if (self_then && !self_else) { exits[nsteps] = els; exit_on_true[nsteps] = 0; call = thn; }
+        else if (self_else && !self_then) { exits[nsteps] = thn; exit_on_true[nsteps] = 1; call = els; }
+        else if (self_then) { return; } /* the self call on both branches: no exit */
+        else if (if_else && !if_then) { exits[nsteps] = thn; exit_on_true[nsteps] = 1; node = els; }
+        else if (if_then && !if_else) { exits[nsteps] = els; exit_on_true[nsteps] = 0; node = thn; }
+        else { return; } /* no self call and no single continuation: not a loop */
+        nsteps = nsteps + 1;
+    }
     /* the signature, read off the live frame */
     int types[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     long long sig = 1LL << 9;
@@ -10341,22 +10367,34 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
         }
         if (k != arity || cell >= 0) { return; }
     }
-    int ca = 0, cb = 0;
-    int ta = fk_f64_admit(fk_node[cond][1], arity, types, &ca);
-    if (ta == 0) { return; }
-    int tb = fk_f64_admit(fk_node[cond][2], arity, types, &cb);
-    if (tb == 0) { return; }
-    if (ta == 3 || tb == 3) { fk_fn_native[fx] = 0 - (1000 + ct); return; } /* a compare over a string pointer: not this lane's */
-    int fcmp = (ta == 2 || tb == 2);
-    if (fcmp) { ca = fk_f64_cvt(ca); cb = fk_f64_cvt(cb); if (ca < 0 || cb < 0) { return; } }
-    int ex = 0;
-    int tex = fk_f64_admit(exitn, arity, types, &ex);
-    if (tex == 0 || tex == 3) { return; } /* an exit that answers a string pointer would hand the walker a bare address */
+    /* each step's compare, and its exit; every exit answers the one return type */
+    int cas[FK_F64_CHAIN_CAP], cbs[FK_F64_CHAIN_CAP], exs[FK_F64_CHAIN_CAP];
+    unsigned int exitccs[FK_F64_CHAIN_CAP];
+    int tex = 0;
+    long long j = 0;
+    while (j < nsteps) {
+        long long cond = conds[j];
+        long long ct = fk_node[cond][0];
+        int ca = 0, cb = 0;
+        int ta = fk_f64_admit(fk_node[cond][1], arity, types, &ca);
+        if (ta == 0) { return; }
+        int tb = fk_f64_admit(fk_node[cond][2], arity, types, &cb);
+        if (tb == 0) { return; }
+        if (ta == 3 || tb == 3) { fk_fn_native[fx] = 0 - (1000 + ct); return; } /* a compare over a string pointer: not this lane's */
+        int fcmp = (ta == 2 || tb == 2);
+        if (fcmp) { ca = fk_f64_cvt(ca); cb = fk_f64_cvt(cb); if (ca < 0 || cb < 0) { return; } }
+        int ex = 0;
+        int t = fk_f64_admit(exits[j], arity, types, &ex);
+        if (t == 0 || t == 3) { return; } /* an exit that answers a string pointer would hand the walker a bare address */
+        if (j == 0) { tex = t; } else if (t != tex) { return; } /* one return type for every exit */
+        /* the condition code that means "the compare is TRUE": eq EQ; lt LT / MI; le LE / LS. Exit is taken when the compare
+         * selects the exit branch: true -> the exit is cc itself, false -> its inverse (cc ^ 1). */
+        unsigned int cc = ct == 102 ? 0U : (ct == 103 ? (fcmp ? 4U : 11U) : (fcmp ? 9U : 13U));
+        cas[j] = ca; cbs[j] = cb; exs[j] = ex;
+        exitccs[j] = exit_on_true[j] ? cc : (cc ^ 1U);
+        j = j + 1;
+    }
     if (tex == 2) { sig = sig | (1LL << 8); }
-    /* the condition code that means "the compare is TRUE": eq EQ; lt LT / MI; le LE / LS. Exit is taken when the compare
-     * selects the exit branch: true -> then-exit is cc itself, else-exit is its inverse (cc ^ 1). */
-    unsigned int cc = ct == 102 ? 0U : (ct == 103 ? (fcmp ? 4U : 11U) : (fcmp ? 9U : 13U));
-    unsigned int exitcc = self_then ? (cc ^ 1U) : cc;
     unsigned int words[FK_F64_WORD_CAP];
     long long wn = 0;
     k = 0;
@@ -10367,26 +10405,32 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     }
     if (!fk_f64_put(words, &wn, 0xAA1F03E8U)) { return; } /* MOV X8, XZR */
     long long head = wn;
-    long long patch[8];
+    long long patch[FK_F64_PATCH_CAP], patch_step[FK_F64_PATCH_CAP];
     long long npatch = 0;
-    if (!fk_f64_loop_pass(words, &wn, ca, cb, exitcc, patch, &npatch, argn, types, arity)) { return; }
-    if (!fk_f64_loop_pass(words, &wn, ca, cb, exitcc, patch, &npatch, argn, types, arity)) { return; } /* unrolled by two */
+    if (!fk_f64_loop_pass(words, &wn, cas, cbs, exitccs, nsteps, patch, patch_step, &npatch, argn, types, arity)) { return; }
+    if (!fk_f64_loop_pass(words, &wn, cas, cbs, exitccs, nsteps, patch, patch_step, &npatch, argn, types, arity)) { return; } /* unrolled by two */
     if (!fk_f64_put(words, &wn, 0x14000000U | ((unsigned int)((head - wn) & 0x3FFFFFFLL)))) { return; } /* B head */
-    long long exit_at = wn;
-    k = 0;
-    while (k < npatch) { words[patch[k]] = words[patch[k]] | ((unsigned int)((exit_at - patch[k]) & 0x7FFFFLL) << 5); k = k + 1; }
-    int ntemp = 0, nitemp = 0;
-    int rr = fk_f64_emit(ex, words, &wn, &ntemp, &nitemp);
-    if (rr < 0) { return; }
-    if (!fk_f64_put(words, &wn, 0xF9002008U)) { return; } /* STR X8, [X0, #64]: the iteration count into the ninth frame word */
-    if (tex == 2) {
-        if (rr >= 100) { return; }
-        if (rr != 0 && !fk_f64_put(words, &wn, 0x1E604000U | ((unsigned int)rr << 5))) { return; } /* FMOV D0, Dr */
-    } else {
-        if (rr < 100) { return; }
-        if (!fk_f64_put(words, &wn, 0xAA0003E0U | ((unsigned int)(rr - 100) << 16))) { return; } /* MOV X0, Xr */
+    /* one exit block per step: its expression, the iteration count into the ninth frame word, the answer into x0 or d0 */
+    long long exit_at[FK_F64_CHAIN_CAP];
+    j = 0;
+    while (j < nsteps) {
+        exit_at[j] = wn;
+        int ntemp = 0, nitemp = 0;
+        int rr = fk_f64_emit(exs[j], words, &wn, &ntemp, &nitemp);
+        if (rr < 0) { return; }
+        if (!fk_f64_put(words, &wn, 0xF9002008U)) { return; } /* STR X8, [X0, #64] */
+        if (tex == 2) {
+            if (rr >= 100) { return; }
+            if (rr != 0 && !fk_f64_put(words, &wn, 0x1E604000U | ((unsigned int)rr << 5))) { return; } /* FMOV D0, Dr */
+        } else {
+            if (rr < 100) { return; }
+            if (!fk_f64_put(words, &wn, 0xAA0003E0U | ((unsigned int)(rr - 100) << 16))) { return; } /* MOV X0, Xr */
+        }
+        if (!fk_f64_put(words, &wn, 0xD65F03C0U)) { return; } /* RET */
+        j = j + 1;
     }
-    if (!fk_f64_put(words, &wn, 0xD65F03C0U)) { return; }
+    k = 0;
+    while (k < npatch) { long long at = exit_at[patch_step[k]]; words[patch[k]] = words[patch[k]] | ((unsigned int)((at - patch[k]) & 0x7FFFFLL) << 5); k = k + 1; }
     if (!fk_f64_install(fx, root, orig, words, wn, sig, 2)) { return; }
     fk_f64_count = fk_f64_count + 1;
     fk_f64_loop_count = fk_f64_loop_count + 1;
