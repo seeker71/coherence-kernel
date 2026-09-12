@@ -9930,7 +9930,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
             if (li < 0 || li >= fk_node_count || fk_node[li][0] != 1) { return 0; }
             k = fk_node[li][1];
         }
-        if (k < 0 || k >= arity) { return 0; }
+        if (k < 0 || k >= 8 || types[k] == 0) { return 0; } /* a parameter, or a let slot already bound by its step (types 0 = unbound) */
         *out = fk_f64_push(types[k] == 2 ? 2 : 8, (int)k, 0, 0.0, 0);
         return *out < 0 ? 0 : types[k];
     }
@@ -10075,7 +10075,7 @@ static int fk_f64_body_of(long long fx, long long *root_out, long long *orig_out
     if (body >= 0 && body < fk_node_count && fk_node[body][0] == 111) {
         long long li = fk_node[body][1];
         long long slots = (li >= 0 && li < fk_node_count && fk_node[li][0] == 1) ? fk_node[li][1] : -1;
-        if (slots < 0 || slots + 1 > arity) { return 0; } /* a let slot beyond the parameters: not this leaf's shape */
+        if (slots < 0 || slots + 1 > 8) { return 0; } /* the frame's slots, parameters and lets, must fit the eight parameter registers */
         body = fk_node[body][2];
     }
     if (body < 0 || body >= fk_node_count) { return 0; }
@@ -10229,6 +10229,7 @@ static void fk_f64_pulse(long long fx) {
     fk_fn_native[fx] = -3;
     long long arity = fk_fnar[fx];
     int types[8] = {2, 2, 2, 2, 2, 2, 2, 2}; /* the expression leaf: every parameter a float, the door holds the rest to the walker */
+    { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } } /* a let slot is unbound here: this leaf takes no let step */
     fk_f64_prog_n = 0;
     int top = 0;
     if (fk_f64_admit(body, arity, types, &top) != 2) {
@@ -10302,11 +10303,28 @@ static int fk_f64_loop_move(unsigned int *words, long long *wn, const int *argn,
  * continuation block (offsets patched by the caller, patch_kind 0 exit / 1 continuation) -- then the terminal self tail
  * call's move, inline */
 static int fk_f64_loop_pass(unsigned int *words, long long *wn, const int *cas, const int *cbs, const unsigned int *ccs, const int *kinds, long long nsteps,
-                            long long *patch, long long *patch_step, int *patch_kind, long long *npatch, const int *argn_term, const int *types, long long arity) {
+                            long long *patch, long long *patch_step, int *patch_kind, long long *npatch, const int *argn_term, const int *types, long long arity,
+                            const int *letn, const int *letslots) {
     int ntemp = 0, nitemp = 0;
     long long j = 0;
     while (j < nsteps) {
-        ntemp = 0; nitemp = 0; /* a compare's temporaries die at its branch */
+        ntemp = 0; nitemp = 0; /* a compare's or a let's temporaries die at its end */
+        if (kinds[j] == 3) {
+            /* a let step: its value into the slot's pinned register */
+            int r = fk_f64_emit(letn[j], words, wn, &ntemp, &nitemp);
+            if (r < 0) { return 0; }
+            unsigned int slot = (unsigned int)letslots[j];
+            if (types[letslots[j]] == 2) {
+                if (r >= 100) { return 0; }
+                if ((unsigned int)r != slot && !fk_f64_put(words, wn, 0x1E604000U | ((unsigned int)r << 5) | slot)) { return 0; } /* FMOV Dslot, Dr */
+            } else {
+                if (r < 100) { return 0; }
+                if ((unsigned int)(r - 100) != 10U + slot && !fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(r - 100) << 16) | (10U + slot))) { return 0; } /* MOV X(10+slot), Xr */
+            }
+            j = j + 1;
+            continue;
+        }
+        if (kinds[j] == 4) { j = j + 1; continue; } /* the bare terminal self call: no compare, the move follows */
         int ra = fk_f64_emit(cas[j], words, wn, &ntemp, &nitemp);
         if (ra < 0) { return 0; }
         int rb = fk_f64_emit(cbs[j], words, wn, &ntemp, &nitemp);
@@ -10339,21 +10357,44 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
      * through to the self call); an exit and the next if (an exit step, kind 0: branch to the exit, lead on); the self
      * call and the next if (a self step, kind 1: branch to that call's own continuation, lead on). Every string loop
      * has more than one way out, and a loop that skips several kinds of byte has more than one way on. */
-    long long conds[FK_F64_CHAIN_CAP], exits[FK_F64_CHAIN_CAP], selfs[FK_F64_CHAIN_CAP];
-    int kinds[FK_F64_CHAIN_CAP], on_true[FK_F64_CHAIN_CAP]; /* on_true: the branch (exit or self) is taken when the compare is true */
+    long long conds[FK_F64_CHAIN_CAP], exits[FK_F64_CHAIN_CAP], selfs[FK_F64_CHAIN_CAP], letvals[FK_F64_CHAIN_CAP];
+    int kinds[FK_F64_CHAIN_CAP], on_true[FK_F64_CHAIN_CAP], letslots[FK_F64_CHAIN_CAP]; /* on_true: the branch (exit or self) is taken when the compare is true */
     long long nsteps = 0;
     long long node = body;
     int done = 0;
     while (!done) {
         if (nsteps >= FK_F64_CHAIN_CAP) { return; }
-        if (node < 0 || node >= fk_node_count || fk_node[node][0] != 6) { return; }
+        if (node < 0 || node >= fk_node_count) { return; }
+        if (fk_node[node][0] == 109) {
+            /* a let step (kind 3): its value into the frame slot's own register, x(10+slot) or d(slot), pinned for the
+             * rest of the pass -- the slots beyond the parameters are the lets', never loaded at the door, never moved */
+            long long li = fk_node[node][1];
+            if (li < 0 || li >= fk_node_count || fk_node[li][0] != 1) { return; }
+            long long slot = fk_node[li][1];
+            if (slot < arity || slot >= 8) { return; }
+            conds[nsteps] = -1; exits[nsteps] = -1; selfs[nsteps] = -1; on_true[nsteps] = 0;
+            kinds[nsteps] = 3; letvals[nsteps] = fk_node[node][2]; letslots[nsteps] = (int)slot;
+            node = fk_node[node][3];
+            nsteps = nsteps + 1;
+            continue;
+        }
+        letvals[nsteps] = -1; letslots[nsteps] = -1;
+        if ((fk_node[node][0] == 241 || fk_node[node][0] == 12) && fk_node[node][1] == fx) {
+            /* the self call itself, after the lets (kind 4): the terminal with no compare -- the loop leaves only by an
+             * earlier step, and a body with no exit at all is declined below */
+            conds[nsteps] = -1; exits[nsteps] = -1; selfs[nsteps] = node; on_true[nsteps] = 0; kinds[nsteps] = 4;
+            nsteps = nsteps + 1;
+            done = 1;
+            continue;
+        }
+        if (fk_node[node][0] != 6) { return; }
         long long cond = fk_node[node][1], thn = fk_node[node][2], els = fk_node[node][3];
         if (cond < 0 || cond >= fk_node_count || thn < 0 || thn >= fk_node_count || els < 0 || els >= fk_node_count) { return; }
         long long ct = fk_node[cond][0];
         if (ct != 5 && ct != 102 && ct != 103) { fk_fn_native[fx] = 0 - (1000 + ct); return; } /* the comparison this lane has no arm for: a fact about the recipe */
         int st = (fk_node[thn][0] == 241 || fk_node[thn][0] == 12) && fk_node[thn][1] == fx;
         int se = (fk_node[els][0] == 241 || fk_node[els][0] == 12) && fk_node[els][1] == fx;
-        int it = fk_node[thn][0] == 6, ie = fk_node[els][0] == 6;
+        int it = fk_node[thn][0] == 6 || fk_node[thn][0] == 109, ie = fk_node[els][0] == 6 || fk_node[els][0] == 109; /* a branch leads on into the next if, or into a let */
         conds[nsteps] = cond; exits[nsteps] = -1; selfs[nsteps] = -1;
         if (st && se) { return; } /* the self call on both branches: no way out */
         else if (st && !ie) { kinds[nsteps] = 2; exits[nsteps] = els; selfs[nsteps] = thn; on_true[nsteps] = 0; done = 1; }
@@ -10367,6 +10408,7 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     }
     /* the signature, read off the live frame */
     int types[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } } /* the slots beyond the parameters are lets, unbound until their step */
     long long sig = 1LL << 9;
     long long k = 0;
     while (k < arity) {
@@ -10378,12 +10420,31 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     }
     /* every self call's arguments, each step's compare, and each exit; every exit answers the one return type */
     int argn[FK_F64_CHAIN_CAP][8];
-    int cas[FK_F64_CHAIN_CAP], cbs[FK_F64_CHAIN_CAP], exs[FK_F64_CHAIN_CAP];
+    int cas[FK_F64_CHAIN_CAP], cbs[FK_F64_CHAIN_CAP], exs[FK_F64_CHAIN_CAP], letn[FK_F64_CHAIN_CAP];
     unsigned int ccs[FK_F64_CHAIN_CAP];
     int tex = 0, nex = 0;
     fk_f64_prog_n = 0;
     long long j = 0;
     while (j < nsteps) {
+        letn[j] = -1;
+        if (kinds[j] == 3) {
+            /* the let's value, admitted before the steps that read it; its slot bound at the value's type */
+            int lv = 0;
+            int lt = fk_f64_admit(letvals[j], arity, types, &lv);
+            if (lt == 0 || lt == 3) { return; } /* a string let would need a length beside its pointer: not yet */
+            types[letslots[j]] = lt;
+            letn[j] = lv;
+            cas[j] = -1; cbs[j] = -1; exs[j] = -1; ccs[j] = 0;
+            j = j + 1;
+            continue;
+        }
+        if (kinds[j] == 4) {
+            /* the bare terminal self call: its arguments alone */
+            if (!fk_f64_admit_call(fx, selfs[j], arity, types, argn[j])) { return; }
+            cas[j] = -1; cbs[j] = -1; exs[j] = -1; ccs[j] = 0;
+            j = j + 1;
+            continue;
+        }
         long long cond = conds[j];
         long long ct = fk_node[cond][0];
         int ca = 0, cb = 0;
@@ -10427,8 +10488,8 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     long long patch[FK_F64_PATCH_CAP], patch_step[FK_F64_PATCH_CAP];
     int patch_kind[FK_F64_PATCH_CAP];
     long long npatch = 0;
-    if (!fk_f64_loop_pass(words, &wn, cas, cbs, ccs, kinds, nsteps, patch, patch_step, patch_kind, &npatch, argn[term], types, arity)) { return; }
-    if (!fk_f64_loop_pass(words, &wn, cas, cbs, ccs, kinds, nsteps, patch, patch_step, patch_kind, &npatch, argn[term], types, arity)) { return; } /* unrolled by two */
+    if (!fk_f64_loop_pass(words, &wn, cas, cbs, ccs, kinds, nsteps, patch, patch_step, patch_kind, &npatch, argn[term], types, arity, letn, letslots)) { return; }
+    if (!fk_f64_loop_pass(words, &wn, cas, cbs, ccs, kinds, nsteps, patch, patch_step, patch_kind, &npatch, argn[term], types, arity, letn, letslots)) { return; } /* unrolled by two */
     if (!fk_f64_put(words, &wn, 0x14000000U | ((unsigned int)((head - wn) & 0x3FFFFFFLL)))) { return; } /* B head */
     /* one exit block per exit step: its expression, the iteration count into the ninth frame word, the answer into x0 or d0 */
     long long exit_at[FK_F64_CHAIN_CAP], cont_at[FK_F64_CHAIN_CAP];
