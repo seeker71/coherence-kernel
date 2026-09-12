@@ -48,7 +48,8 @@ The share meter separately failed with `str_len: nothing has no length`; no
 contribution percentage is claimed. The verified bootstrap teaching was returned
 through the session-learning door under session `codex-glass-compile-2026-09-12`,
 event `native-bootstrap-and-visible-refresh-v1`. Submission and completed learning
-remain separate observations.
+remain separate observations. The later completion reported one native update,
+candidate step 19, worker completed and zero pending rows; serving stayed at step 4.
 
 Retained experiment evidence is under `/tmp/form-glass-bootstrap-case-20260912`,
 `/tmp/form-glass-bootstrap-failed-20260912`,
