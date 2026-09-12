@@ -10015,6 +10015,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         long long csig = fk_f64_sig[callee];
         long long car = fk_fnar[callee];
         int slot = fk_f64_call_n;
+        fk_f64_call_n = fk_f64_call_n + 1; /* reserved before the arguments: a call among them takes the next slot */
         long long k = 0;
         long long cell = t == 12 ? -1 : fk_node[i][2];
         while (k < car && k < 8) {
@@ -10033,7 +10034,6 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         }
         if (t == 12) { if (car != 1) { return 0; } } else if (k != car || cell >= 0) { return 0; }
         fk_f64_call_callee[slot] = callee;
-        fk_f64_call_n = fk_f64_call_n + 1;
         *out = fk_f64_push(19, slot, (int)car, 0.0, callee);
         return *out < 0 ? 0 : (((csig >> 8) & 1) ? 2 : 1);
     }
