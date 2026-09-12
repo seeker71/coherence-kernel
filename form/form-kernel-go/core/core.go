@@ -102,6 +102,19 @@ func (f *Frame) Bind(name NameID, v Value) {
 	f.Bindings = append(f.Bindings, binding{name, v})
 }
 
+// HasLocal — a binding of name in any frame but the root, whose bindings are
+// the globals: a parameter or a let the call head would read first.
+func (f *Frame) HasLocal(name NameID) bool {
+	for cur := f; cur != nil && cur.Parent != nil; cur = cur.Parent {
+		for i := range cur.Bindings {
+			if cur.Bindings[i].Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (f *Frame) Lookup(name NameID) (Value, bool) {
 	for cur := f; cur != nil; cur = cur.Parent {
 		for i := range cur.Bindings {

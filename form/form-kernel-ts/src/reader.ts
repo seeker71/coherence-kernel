@@ -501,11 +501,6 @@ function buildVerb(k: Kernel, verb: string, args: NodeID[]): NodeID {
         { pkg: 1, level: Level.BASIC, type: RBasic.BLOCK, inst: RBlock.DO },
         args,
       );
-    case "seq":
-      return k.intern(
-        { pkg: 1, level: Level.BASIC, type: RBasic.BLOCK, inst: RBlock.SEQUENCE },
-        args,
-      );
     // Math
     case "add":
     case "+":
@@ -630,19 +625,9 @@ function buildVerb(k: Kernel, verb: string, args: NodeID[]): NodeID {
         { pkg: 1, level: Level.BASIC, type: RBasic.LOGIC, inst: RLogic.NOT },
         args,
       );
-    case "match":
-      return k.intern(
-        { pkg: 1, level: Level.BASIC, type: RBasic.MATCH, inst: RMatch.SWITCH },
-        args,
-      );
     case "list":
       return k.intern(
         { pkg: 1, level: Level.BASIC, type: RBasic.LIST, inst: 1 },
-        args,
-      );
-    case "params":
-      return k.intern(
-        { pkg: 1, level: Level.BASIC, type: RBasic.BLOCK, inst: RBlock.SEQUENCE },
         args,
       );
     default: {

@@ -15,6 +15,7 @@
 // agreement is the conformance contract.
 
 import { BP_TABLE } from "./bp_table.ts";
+import { FKWU_RESERVED_HEADS } from "./reserved-heads.ts";
 import CATEGORY_CONTRACT from "../../category-contract.json" with { type: "json" };
 import {
   EMPTY_KERNEL_HOST,
@@ -4500,6 +4501,17 @@ export class Frame {
     }
     return undefined;
   }
+
+  // hasLocal — a binding of name in any frame but the root, whose bindings are
+  // the globals: a parameter or a let the call head would read first.
+  hasLocal(name: NameID): boolean {
+    let frame: Frame | null = this;
+    while (frame !== null && frame.parent !== null) {
+      if (frame.keys.indexOf(name) >= 0) return true;
+      frame = frame.parent;
+    }
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -5438,9 +5450,11 @@ function walkFnCall(
       k.formStack.pop();
       return envOut;
     }
-    // Native dispatch
+    // Native dispatch. A local binding of the name (a parameter, a let) is
+    // nearer than the native unless fkwu reserves the head: the one
+    // call-position reading every arm gives.
     const ne = k.natives.get(dispatchName);
-    if (ne !== undefined) {
+    if (ne !== undefined && (FKWU_RESERVED_HEADS.has(k.nameStr(rawName)) || !frame.hasLocal(rawName))) {
       const args: Value[] = [];
       for (let i = 1; i < kids.length; i++) {
         args.push(walk(k, kids[i]!, frame));

@@ -34,6 +34,7 @@ mod bp_table;
 mod formats;
 mod inductive;
 mod quotient;
+mod reserved_heads;
 
 /// The instant host_monotonic_ms counts from: this kernel's start, touched when the doors register.
 /// Only differences between two readings mean anything.
@@ -1968,6 +1969,23 @@ impl Arena {
             }
         }
         f.bindings.push((name, v));
+    }
+
+    // has_local -- a binding of name in any frame but the root, whose bindings
+    // are the globals: a parameter or a let the call head would read first.
+    pub(crate) fn has_local(&self, fid: FrameId, name: NameID) -> bool {
+        let mut cur = Some(fid);
+        while let Some(id) = cur {
+            let f = &self.frames[id as usize];
+            if f.parent.is_none() {
+                return false;
+            }
+            if f.bindings.iter().any(|slot| slot.0 == name) {
+                return true;
+            }
+            cur = f.parent;
+        }
+        false
     }
 
     pub(crate) fn lookup(&self, fid: FrameId, name: NameID) -> Option<Value> {
@@ -6638,9 +6656,13 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                 }
                 // A present native answers its name, as on fkwu and TS: a Form
                 // definition of the same name is a fallback for a kernel without
-                // the native, never an override of one. Copy the entry out so the
-                // natives-map borrow releases before we call &mut k.
-                let ne_opt = k.natives.get(&name).copied();
+                // the native, never an override of one. A local binding of the name
+                // (a parameter, a let) is nearer than the native unless fkwu reserves
+                // the head: the one call-position reading every arm gives. Copy the
+                // entry out so the natives-map borrow releases before we call &mut k.
+                let ne_opt = k.natives.get(&name).copied().filter(|_| {
+                    reserved_heads::fkwu_reserved(k.name_str(raw_name)) || !a.has_local(env, raw_name)
+                });
                 if let Some(ne) = ne_opt {
                     let mut args = Vec::with_capacity(kids.len() - 1);
                     for arg in &kids[1..] {
@@ -7143,14 +7165,13 @@ fn read_defn_params(k: &mut Kernel, toks: &[SexpTok], i: usize) -> (NodeID, usiz
 // truth: build_verb's match must handle exactly these (the
 // build_verbs_are_typed_not_fncall test drift-guards it).
 const BUILD_VERBS: &[&str] = &[
-    "do", "seq", "let", "if", "defn", "params", "add", "sub", "mul", "div", "mod", "eq", "ne",
+    "do", "let", "if", "defn", "add", "sub", "mul", "div", "mod", "eq", "ne",
     "lt", "le", "gt", "ge", "and", "or", "not",
 ];
 
 fn build_verb(k: &mut Kernel, verb: &str, args: Vec<NodeID>) -> NodeID {
     match verb {
         "do" => k.intern(cat_block(RBLK_DO), args),
-        "seq" => k.intern(cat_block(RBLK_SEQ), args),
         "let" => {
             // (let <ident> <value>) — args[0] is an Identifier recipe wrapping
             // a string trivial. Repackage as the bare string trivial.
@@ -7184,7 +7205,6 @@ fn build_verb(k: &mut Kernel, verb: &str, args: Vec<NodeID>) -> NodeID {
         "and" => k.intern(cat_logic(RLOG_AND), args),
         "or" => k.intern(cat_logic(RLOG_OR), args),
         "not" => k.intern(cat_logic(RLOG_NOT), args),
-        "match" => k.intern(cat_match(RMATCH_SWITCH), args),
         "defn" => {
             // (defn <name> (<params>...) <body>) — repackage name + params
             // as bare string trivials so the walker reads `inst` as NameID.
@@ -7209,7 +7229,6 @@ fn build_verb(k: &mut Kernel, verb: &str, args: Vec<NodeID>) -> NodeID {
             let params_block = k.intern(cat_block(RBLK_SEQ), param_trivials);
             k.intern(cat_fndef(), vec![name_trivial, params_block, args[2]])
         }
-        "params" => k.intern(cat_block(RBLK_SEQ), args),
         // Canonical list literal. Keep the source recipe identical to the
         // Go/TypeScript readers instead of routing through a native FNCALL.
         "list" => k.intern(cat_list_nat(), args),
@@ -7259,14 +7278,6 @@ fn cat_block(inst: u32) -> NodeID {
         pkg: 1,
         level: LEVEL_BASIC,
         ty: RB_BLOCK,
-        inst,
-    }
-}
-fn cat_match(inst: u32) -> NodeID {
-    NodeID {
-        pkg: 1,
-        level: LEVEL_BASIC,
-        ty: RB_MATCH,
         inst,
     }
 }
@@ -9999,7 +10010,7 @@ mod gate_known_set_tests {
         // operators + block-verbs take uniform args; `not` is unary.
         let uniform = [
             "add", "sub", "mul", "div", "mod", "eq", "ne", "lt", "le", "gt", "ge", "and", "or",
-            "do", "seq", "params",
+            "do",
         ];
         for v in uniform {
             let node = build_verb(&mut k, v, vec![a, b]);

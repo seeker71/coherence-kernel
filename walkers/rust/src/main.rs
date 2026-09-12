@@ -16,7 +16,7 @@
 //
 // Pure-op surface covered (and nothing more):
 //   literals: integer, float (incl. scientific notation), string, true/false, ()
-//   build-verbs: do seq let if defn params  add sub mul div mod
+//   build-verbs: do let if defn  add sub mul div mod
 //                eq ne lt le gt ge  and or not
 //   natives:    head tail cons empty list nth len  str_concat str_eq value_eq
 //               str_len str_byte_at byte_to_str  make_nodeid (identity-by-
@@ -43,6 +43,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+mod reserved_heads;
 
 // ---------------------------------------------------------------------------
 // Value — the runtime value the evaluator produces. The pure-compute subset of
@@ -700,7 +702,7 @@ fn read_defn_params(toks: &[SexpTok], i: usize) -> (Rc<Node>, usize) {
 // the FNCALL fallback, exactly as the full kernel's BUILD_VERBS set does.
 fn build_verb(verb: &str, args: Vec<Rc<Node>>) -> Rc<Node> {
     match verb {
-        "do" | "seq" => Rc::new(Node::Block(args)),
+        "do" => Rc::new(Node::Block(args)),
         "let" => {
             // (let <ident> <value>) — args[0] is an Ident node; take its name.
             let name = ident_name(&args[0]);
@@ -743,7 +745,6 @@ fn build_verb(verb: &str, args: Vec<Rc<Node>>) -> Rc<Node> {
             };
             Rc::new(Node::Fndef(name, params, args[2].clone()))
         }
-        "params" => Rc::new(Node::Block(args)),
         _ => Rc::new(Node::Fncall(verb.to_string(), args)),
     }
 }
@@ -785,6 +786,25 @@ fn env_lookup(env: &Env, name: &str) -> Option<Value> {
     match &f.parent {
         Some(p) => env_lookup(p, name),
         None => None,
+    }
+}
+
+// env_has_local -- a binding of name in any frame but the root, whose bindings
+// are the globals: a parameter or a let the call head would read first.
+fn env_has_local(env: &Env, name: &str) -> bool {
+    let f = env.borrow();
+    match &f.parent {
+        None => false,
+        Some(p) => f.vars.contains_key(name) || env_has_local(p, name),
+    }
+}
+
+// env_root -- the frame holding the globals.
+fn env_root(env: &Env) -> Env {
+    let parent = env.borrow().parent.clone();
+    match parent {
+        None => env.clone(),
+        Some(p) => env_root(&p),
     }
 }
 
@@ -934,15 +954,20 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
             Value::Closure(cl)
         }
         Node::Fncall(name, args) => {
-            // A present native answers its name, as on the full kernels: a binding of
-            // the same spelling (a parameter, a defn) never overrides one. Args are
-            // evaluated once, in the CALLER's env, for whichever path answers.
+            // fkwu's reserved heads answer as the primitive, or as the global recipe
+            // where this walker has no native; any other head reads the nearest local
+            // binding first, then the native, then the global. Args are evaluated
+            // once, in the CALLER's env, for whichever path answers.
             let vals: Vec<Value> = args.iter().map(|a| walk(a, env)).collect();
-            if let Some(v) = call_native(name, &vals) {
-                return v;
+            let reserved = reserved_heads::fkwu_reserved(name);
+            if reserved || !env_has_local(env, name) {
+                if let Some(v) = call_native(name, &vals) {
+                    return v;
+                }
             }
+            let scope = if reserved { env_root(env) } else { env.clone() };
             let callee =
-                env_lookup(env, name).unwrap_or_else(|| panic!("unbound function: {}", name));
+                env_lookup(&scope, name).unwrap_or_else(|| panic!("unbound function: {}", name));
             let cl = match callee {
                 Value::Closure(c) => c,
                 _ => panic!("not callable: {}", name),
