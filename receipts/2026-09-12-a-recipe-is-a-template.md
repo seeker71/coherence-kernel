@@ -38,12 +38,24 @@ values in hand — the template made without touching the mint.
   kernel-census 2047, value-str 255, every loop-lane band, freshness 31 (a seed change, so the form-cli
   table is untouched — the carrier test does not apply), corpus 32767 with row 1504.
 
+## N, not two (follow-on)
+
+The two-slot scheme generalized the same evening to a small fixed set of extra instances per defn
+(`FK_F64_XINST` = 3, so four instances in all: the primary plus three), held in flat per-defn slots
+(`fk_f64_xmem`/`fk_f64_xsig`, each slot -1 free / -2 declined / >= 0 a compiled signature). The door
+scans the slots for the one whose parameter bits match the frame; the pulse fills a free slot by the same
+compile-then-relocate, marking a signature that will not crystallize -2 so it is not tried again.
+Witnessed: `loop-lane-template-band` 63 — one defn `g` returning its first parameter after walking a list,
+its first parameter an int, a float, and a defn value in turn: **three** instances, all native at once
+(g(int) and g(float) 3 ms per 20,000 against the walker's 75), each answering its own kind. So a recipe
+is a template with as many instantiations as the values ask for, up to four.
+
 ## What the organ asks — the next rung
 
-N instances, not two (a chain or small table per defn, so a recipe used at three or more signatures is
-a full template); per-signature dispatch for the direct call arm (kind 19), which still reads instance a
-only; `value_str`'s float path; `eq`/`value_eq` structural; float-head-consed; and the second and third
-backends (x86-64, Metal), generated once per platform — provable only on that hardware.
+Per-signature dispatch for the direct call arm (kind 19), which still reads instance a only; more than
+four instances if a recipe ever needs them; `value_str`'s float path; `eq`/`value_eq` structural;
+float-head-consed; and the second and third backends (x86-64, Metal), generated once per platform —
+provable only on that hardware.
 
 ## Surprise, and where the discomfort went
 
