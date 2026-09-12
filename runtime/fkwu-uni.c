@@ -13173,7 +13173,7 @@ static long long fk_value_kind(long long v) {
  * writes it and every sibling's value_str answers. A string is its bytes, an int its decimal, a float
  * fk_fmt_float_js, a bool true or false, a list "[a, b]" with its items written likewise; nothing is
  * "" on its own and null as a list's item, as Go writes a null item. The kinds are read in
- * fk_value_kind's order. core.fk's int_to_str and the pg floor's float cells write through it. */
+ * fk_value_kind's order. int_to_str (mode 26) and the pg floor's float cells write through it. */
 static char *fk_valstr_buf;
 static long long fk_valstr_len, fk_valstr_cap;
 static void fk_valstr_put(const char *b, long long n) {
@@ -13248,6 +13248,13 @@ static long long fk_value_str(long long v) {
     fk_valstr_len = 0;
     fk_valstr_word(v, 0);
     return fk_sbuf(fk_valstr_buf, fk_valstr_len);
+}
+/* int_to_str -- mode 26 of the leaf door: nothing as "nothing" and any other word as value_str writes
+ * it. core.fk's digit loop states the same text for an integer and answers on a walker that carries no
+ * native, the form-cli table's among them. */
+static long long fk_int_to_str(long long v) {
+    if (v == fk_nothing) { return fk_sbuf("nothing", 7); }
+    return fk_value_str(v);
 }
 static long long fk_fb_door(long long mode, long long x) {
     if (mode == 4) { return fk_value_kind(x); }
@@ -14113,8 +14120,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * descriptors and to ask whether a pid answers; see fk_host_door. */
         /* modes 20-22: kernel_roster_adopt, kernel_roster_forget, kernel_page_bury -- see fk_roster_adopt;
          * mode 23: host_process -- see fk_host_process; mode 24: kernel_page_ended -- see fk_page_bury;
-         * mode 25: value_str -- see fk_value_str. */
+         * mode 25: value_str -- see fk_value_str; mode 26: int_to_str -- see fk_int_to_str. */
         if ((fm201 >> 1) == 25) { return fk_value_str(fx201); }
+        if ((fm201 >> 1) == 26) { return fk_int_to_str(fx201); }
         if ((fm201 >> 1) >= 17) { return fk_host_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) >= 10) { return fk_spk_door(fm201 >> 1, fx201); }
         /* modes 4-8: the binary form (value_kind, recipe_to_bytes, bytes_to_recipe,
