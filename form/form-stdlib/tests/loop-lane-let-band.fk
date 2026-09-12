@@ -1,0 +1,81 @@
+; loop-lane-let-band.fk — a let in a loop body rides its own register.
+;
+; The let rung of Urs's 2026-09-12 goal. The digit loop read the same byte three times an iteration and
+; the skip loop four, because a loop with a let could not crystallize: the lane's body reader declined any
+; frame slot beyond the parameters. The parameters ride x10+k and d(k) for k under the arity, so a let in
+; frame slot k rides x(10+k) or d(k) too — a pinned register the temporary allocator never releases,
+; computed at its step each pass, never loaded at the door, never moved by the tail call. A let is a
+; chain step with no branch. core.fk's fstr-to-int-loop and fstr-skip-ws bind their byte once now.
+;
+; Verdict 255
+; PROOF LEVEL: FOURTH-ARM ONLY (the transparent loop lane is fkwu's MAP_JIT arm64 door; kernel_stat 49 counts its loops)
+; preludes: form-stdlib/core.fk
+;
+;   1   a loop whose body binds a let crystallizes: kernel_stat 49 rises across the hot run
+;   2   its answer, hot, equals a walker twin's (a call in the twin's condition, which the lane declines)
+;   4   a let read in an exit expression carries the value of the pass that left
+;   8   a float let in a float loop crystallizes and answers as the walker's
+;   16  two lets in one body, the second reading the first, answer as the twin
+;   32  str_to_int, whose loops bind their byte once, agrees with a walker twin over the edge inputs, hot
+;   64  the call-conditioned twin stays the walker's across its own hot run, and still answers right
+;   128 the warm run is under the walker twin's run of the same work
+(do
+    (defn llb-bit (ok bit) (if ok bit 0))
+    ; the byte bound once: the sum of (byte * 3 + 1) over a string, three reads of b per iteration
+    (defn llb-sum (s i len acc) (if (le len i) acc (do (let b (str_byte_at s i)) (llb-sum s (add i 1) len (add acc (add (mul b 3) 1))))))
+    (defn llb-lt? (a b) (lt a b))
+    (defn llb-walk (s i len acc) (if (llb-lt? i len) (llb-walk s (add i 1) len (add acc (add (mul (str_byte_at s i) 3) 1))) acc))
+    ; the let read in the exit: the loop leaves with the byte it stopped on
+    (defn llb-stop (s i len) (if (le len i) 0 (do (let b (str_byte_at s i)) (if (lt b 48) b (llb-stop s (add i 1) len)))))
+    (defn llb-stop-walk (s i len) (if (llb-lt? i len) (if (lt (str_byte_at s i) 48) (str_byte_at s i) (llb-stop-walk s (add i 1) len)) 0))
+    ; a float let: the running product's half, summed
+    (defn llb-fl (x n acc) (if (le n 0) acc (do (let h (mul x 0.5)) (llb-fl x (sub n 1) (add acc h)))))
+    (defn llb-fl-walk (x n acc) (if (llb-lt? 0 n) (llb-fl-walk x (sub n 1) (add acc (mul x 0.5))) acc))
+    ; two lets, the second over the first
+    (defn llb-two (s i len acc) (if (le len i) acc (do (let b (str_byte_at s i)) (let c (add b b)) (llb-two s (add i 1) len (add acc (sub c b))))))
+    (defn llb-two-walk (s i len acc) (if (llb-lt? i len) (llb-two-walk s (add i 1) len (add acc (sub (add (str_byte_at s i) (str_byte_at s i)) (str_byte_at s i)))) acc))
+    ; str_to_int's walker twin
+    (defn llb-digit? (b) (if (ge b 48) (le b 57) false))
+    (defn llb-space? (b) (if (eq b 32) true (if (eq b 9) true (if (eq b 10) true (eq b 13)))))
+    (defn llb-ws (s i len) (if (ge i len) i (if (llb-space? (str_byte_at s i)) (llb-ws s (add i 1) len) i)))
+    (defn llb-digits (s i len acc) (if (ge i len) acc (if (llb-digit? (str_byte_at s i)) (llb-digits s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48))) acc)))
+    (defn llb-s2i-walk (s) (do (let flen (str_len s)) (let fi (llb-ws s 0 flen)) (if (if (lt fi flen) (eq (str_byte_at s fi) 45) false) (sub 0 (llb-digits s (add fi 1) flen 0)) (llb-digits s fi flen 0))))
+    (defn llb-rep (s n acc) (if (le n 0) acc (llb-rep s (sub n 1) (add acc (llb-sum s 0 (str_len s) 0)))))
+    (defn llb-rep-walk (s n acc) (if (le n 0) acc (llb-rep-walk s (sub n 1) (add acc (llb-walk s 0 (str_len s) 0)))))
+    (defn llb-mk (n acc) (if (le n 0) acc (llb-mk (sub n 1) (str_concat acc "the quick brown fox jumps over the lazy dog 0123456789 "))))
+    (let s (llb-mk 4 ""))
+    (let len (str_len s))
+    (let before (kernel_stat 49))
+    (let w0 (host_monotonic_ms)) (let hot (llb-rep s 4000 0)) (let w1 (host_monotonic_ms))
+    (let after (kernel_stat 49))
+    (let k0 (host_monotonic_ms)) (let walk (llb-rep-walk s 4000 0)) (let k1 (host_monotonic_ms))
+    ; the exit let, driven hot then read on inputs that stop at a space and at the end
+    (defn llb-rep-stop (s n acc) (if (le n 0) acc (llb-rep-stop s (sub n 1) (add acc (llb-stop s 0 (str_len s))))))
+    (let sb (kernel_stat 49)) (let stops (llb-rep-stop s 3000 0)) (let sa (kernel_stat 49))
+    (let stop-a (llb-stop "abc def" 0 7)) (let stop-aw (llb-stop-walk "abc def" 0 7))
+    (let stop-b (llb-stop "abcdef" 0 6)) (let stop-bw (llb-stop-walk "abcdef" 0 6))
+    ; the float let
+    (let fb (kernel_stat 49)) (let fl (llb-fl 3.0 200000 0.0)) (let fa (kernel_stat 49))
+    (let flw (llb-fl-walk 3.0 200000 0.0))
+    ; two lets
+    (defn llb-rep-two (s n acc) (if (le n 0) acc (llb-rep-two s (sub n 1) (add acc (llb-two s 0 (str_len s) 0)))))
+    (let tb (kernel_stat 49)) (let two (llb-two s 0 len 0)) (let two-hot (llb-rep-two s 3000 0)) (let ta (kernel_stat 49))
+    (let two-w (llb-two-walk s 0 len 0))
+    ; str_to_int over the edge inputs, hot
+    (defn llb-heat (n acc) (if (le n 0) acc (llb-heat (sub n 1) (add acc (str_to_int "  1234567890123456789")))))
+    (let heated (llb-heat 3000 0))
+    (let cases (list "" "0" "7" "42" "-42" "  42" "\t-7x" "123abc" "abc" "-" "--5" "+5" "00012" "9223372036854775807" "-9223372036854775808" "12 34" "\n99\n" "0x10" "1e3" "4.5" " \t\n\r 77"))
+    (defn llb-miss (cs acc) (if (eq (len cs) 0) acc (llb-miss (tail cs) (add acc (if (eq (str_to_int (head cs)) (llb-s2i-walk (head cs))) 0 1)))))
+    (let misses (llb-miss cases 0))
+    ; the call-conditioned twin stays cold
+    (let cb (kernel_stat 49)) (let walk2 (llb-rep-walk s 2000 0)) (let ca (kernel_stat 49))
+    (let told (print (list "hot-ms" (sub w1 w0) "walk-ms" (sub k1 k0) "loops" before after sb sa fb fa tb ta cb ca "sum" hot walk "stop" stop-a stop-aw stop-b stop-bw "fl" fl flw "two" two two-w "misses" misses)))
+    (let b1 (llb-bit (eq after (add before 1)) 1))
+    (let b2 (llb-bit (eq hot walk) 2))
+    (let b3 (llb-bit (if (eq sa (add sb 1)) (if (eq stop-a stop-aw) (eq stop-b stop-bw) false) false) 4))
+    (let b4 (llb-bit (if (eq fa (add fb 1)) (eq fl flw) false) 8))
+    (let b5 (llb-bit (if (eq ta (add tb 1)) (eq two two-w) false) 16))
+    (let b6 (llb-bit (eq misses 0) 32))
+    (let b7 (llb-bit (if (eq ca cb) (eq walk2 (mul 2000 (llb-walk s 0 len 0))) false) 64))
+    (let b8 (llb-bit (lt (sub w1 w0) (sub k1 k0)) 128))
+    (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 b8))))))))
