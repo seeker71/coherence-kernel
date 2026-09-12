@@ -16,8 +16,9 @@ feedback loop, the safety net. It runs the structural gate first, walks
 
 Each sibling resolves a band's `; preludes:` directives itself — recursive,
 deduplicated, honoring the `none` sentinel — and lowers a `.bml` prelude in-process
-through `source-compiler.fk`'s compiler chain, cached by content hash. So
-`./validate.sh band.fk` is the whole invocation; no hand-typed closure. A
+through `source-compiler.fk`'s compiler chain, keeping each lowering under a key over
+the BML's path and bytes, the compiler's loaded closure and the sibling's own
+executable. So `./validate.sh band.fk` is the whole invocation; no hand-typed closure. A
 section-bearing `.fk` is lowered by `validate.sh`'s source lens before any arm
 reads it; that lowering is the seam a `.fk` carrying `section [form.bml]` still
 needs on the sibling lane, and fkwu reads such a file raw.

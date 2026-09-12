@@ -21,11 +21,12 @@ Missing dependencies and failed writes remain refusals. The Go proof carrier's
 BML prelude syntax cannot represent whitespace in a path; that case is refused.
 The native execution interface remains `./fkwu source.bml`.
 
-The Go proof sibling formerly reused BML lowering by source bytes alone. That
-cache read/write is removed: each BML proof dependency is lowered through its
-current Form compiler closure. Old `.cache/kernel-bml-lowered/*.fk` entries are
-ignored. This trades proof-side cache reuse for current compiler meaning; it
-does not remove the native body's image cache. No manual cache purge is needed.
+The Go, Rust and TypeScript proof siblings keep each BML lowering under
+`.cache/kernel-bml-lowered/<kernel>-<path>-<key>.fk`. The key covers the BML's
+path and bytes, every source in the loaded compiler closure, and the sibling's
+own executable, so a change to any of them lowers again through the current
+Form compiler. Each sibling keeps one lowering per path: the new entry replaces
+the old one. An entry named by source bytes alone is never read.
 
 Survey workers select the content-qualified table carrier through `build_fourth`.
 They no longer choose an arbitrary cached executable. The committed table seed

@@ -5549,18 +5549,17 @@ var formBmlSourceCompileChain = []string{
 	"form-stdlib/source-compiler-text-lens.fk",
 }
 
-// lowerBmlSource runs the current Form compiler in a separate proof kernel.
-// Source bytes alone cannot identify a lowering: compiler dependencies also
-// determine it. Each proof run reads those dependencies afresh; the directory
-// below holds temporary transport files only, removed before this call returns.
+// lowerBmlSource runs the current Form compiler in a separate proof kernel and
+// keeps the lowering under a key over everything that decides it: the BML's
+// path and bytes, every source in the compiler's loaded closure, and this
+// kernel's own executable. Any change among them is a miss. The directory keeps
+// one lowering per path for this kernel, so a new key replaces the old entry
+// rather than settling beside it.
 func lowerBmlSource(bmlAbsPath string) (string, error) {
 	body, err := os.ReadFile(bmlAbsPath)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", bmlAbsPath, err)
 	}
-	sum := sha256.Sum256(body)
-	key := hex.EncodeToString(sum[:])[:24]
-
 	chainPaths := make([]string, len(formBmlSourceCompileChain))
 	for i, rel := range formBmlSourceCompileChain {
 		resolved, err := resolveFormImport(bmlAbsPath, rel)
@@ -5569,28 +5568,43 @@ func lowerBmlSource(bmlAbsPath string) (string, error) {
 		}
 		chainPaths[i] = resolved
 	}
+	loaded, err := loadFormSourceClosure(chainPaths)
+	if err != nil {
+		return "", fmt.Errorf("load BML source-compiler chain for %s: %w", bmlAbsPath, err)
+	}
+	hasher := sha256.New()
+	writeHashPart := func(label, source string) {
+		_, _ = fmt.Fprintf(hasher, "%d:%s%d:", len(label), label, len(source))
+		_, _ = hasher.Write([]byte(source))
+	}
+	if exe, err := os.Executable(); err == nil {
+		if st, err := os.Stat(exe); err == nil {
+			writeHashPart("kernel", fmt.Sprintf("%s %d %d", exe, st.Size(), st.ModTime().UnixNano()))
+		}
+	}
+	writeHashPart(bmlAbsPath, string(body))
+	for _, part := range loaded {
+		writeHashPart(part.path, part.source)
+	}
+	pathSum := sha256.Sum256([]byte(bmlAbsPath))
+	prefix := "go-" + hex.EncodeToString(pathSum[:])[:12] + "-"
+	name := prefix + hex.EncodeToString(hasher.Sum(nil))[:32] + ".fk"
 	cacheDir := filepath.Join(filepath.Dir(chainPaths[0]), ".cache", "kernel-bml-lowered")
+	cachePath := filepath.Join(cacheDir, name)
+	if cached, err := os.ReadFile(cachePath); err == nil && len(cached) > 0 {
+		return string(cached), nil
+	}
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return "", fmt.Errorf("create BML lowering cache dir: %w", err)
 	}
 
-	outPath := filepath.Join(cacheDir, fmt.Sprintf(".out-%s-%d.fk", key, os.Getpid()))
-	driverPath := outPath + ".driver.fk"
-	driverSrc := fmt.Sprintf("(do (form-source-compile-file %q %q))\n", bmlAbsPath, outPath)
-	if err := os.WriteFile(driverPath, []byte(driverSrc), 0644); err != nil {
-		return "", fmt.Errorf("write BML lowering driver: %w", err)
-	}
-	defer os.Remove(driverPath)
+	outPath := filepath.Join(cacheDir, fmt.Sprintf(".out-%s-%d.fk", strings.TrimSuffix(name, ".fk"), os.Getpid()))
 	defer os.Remove(outPath)
-
-	loaded, err := loadFormSourceClosure(append(append([]string{}, chainPaths...), driverPath))
-	if err != nil {
-		return "", fmt.Errorf("load BML source-compiler chain for %s: %w", bmlAbsPath, err)
-	}
-	compilerParts := make([]string, 0, len(loaded))
+	compilerParts := make([]string, 0, len(loaded)+1)
 	for _, part := range loaded {
 		compilerParts = append(compilerParts, part.source)
 	}
+	compilerParts = append(compilerParts, fmt.Sprintf("(do (form-source-compile-file %q %q))\n", bmlAbsPath, outPath))
 	lowerKernel := NewKernel()
 	root := readRootFromSource(lowerKernel, strings.Join(compilerParts, "\n"))
 	lowerKernel.activeRoots = []NodeID{root}
@@ -5599,6 +5613,15 @@ func lowerBmlSource(bmlAbsPath string) (string, error) {
 	lowered, err := os.ReadFile(outPath)
 	if err != nil || len(lowered) == 0 {
 		return "", fmt.Errorf("form-source-compile-file produced no output for %s", bmlAbsPath)
+	}
+	if os.Rename(outPath, cachePath) == nil {
+		if entries, err := os.ReadDir(cacheDir); err == nil {
+			for _, entry := range entries {
+				if entry.Name() != name && strings.HasPrefix(entry.Name(), prefix) {
+					_ = os.Remove(filepath.Join(cacheDir, entry.Name()))
+				}
+			}
+		}
 	}
 	return string(lowered), nil
 }

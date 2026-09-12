@@ -14195,15 +14195,15 @@ fn content_hash_hex(bytes: &[u8]) -> String {
 // Lowers one whole ".bml" prelude file into plain Form text by running
 // form-source-compile-file (source-compiler.fk) in a fresh, throwaway
 // Kernel -- entirely separate from the kernel the CLI eventually builds to
-// run the caller's own program. Cached by content hash under
-// form-stdlib/.cache/kernel-bml-lowered/ (its own namespace: the key here
-// is a plain content hash, not validate.sh's compiler_stamp-qualified one,
-// so the two caches don't collide but also don't need to agree bit for bit)
-// so a repeated run doesn't re-pay the several-second compile.
+// run the caller's own program. The lowering is kept under
+// form-stdlib/.cache/kernel-bml-lowered/ with a key over everything that
+// decides it: the BML's path and bytes, every source in the compiler's loaded
+// closure, and this kernel's own executable. Any change among them is a miss.
+// The directory keeps one lowering per path for this kernel, so a new key
+// replaces the old entry rather than settling beside it.
 fn lower_bml_source(bml_abs_path: &Path) -> Result<String, String> {
     let body = fs::read(bml_abs_path)
         .map_err(|error| format!("read {}: {}", bml_abs_path.display(), error))?;
-    let key = content_hash_hex(&body);
 
     let mut chain_paths = Vec::with_capacity(FORM_BML_SOURCE_COMPILE_CHAIN.len());
     for rel in FORM_BML_SOURCE_COMPILE_CHAIN {
@@ -14217,12 +14217,46 @@ fn lower_bml_source(bml_abs_path: &Path) -> Result<String, String> {
         })?;
         chain_paths.push(resolved);
     }
+    let chain_args: Vec<String> = chain_paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    let loaded = load_form_source_closure(&chain_args).map_err(|error| {
+        format!(
+            "load BML source-compiler chain for {}: {}",
+            bml_abs_path.display(),
+            error
+        )
+    })?;
+    let mut keyed: Vec<u8> = Vec::new();
+    let mut hash_part = |label: &str, source: &[u8]| {
+        keyed.extend_from_slice(format!("{}:{}{}:", label.len(), label, source.len()).as_bytes());
+        keyed.extend_from_slice(source);
+    };
+    if let Ok(exe) = env::current_exe() {
+        if let Ok(meta) = fs::metadata(&exe) {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_nanos())
+                .unwrap_or(0);
+            hash_part("kernel", format!("{} {} {}", exe.display(), meta.len(), modified).as_bytes());
+        }
+    }
+    let bml_label = bml_abs_path.display().to_string();
+    hash_part(&bml_label, &body);
+    for (label, source) in &loaded {
+        hash_part(label, source.as_bytes());
+    }
+    let prefix = format!("rust-{}-", &content_hash_hex(bml_label.as_bytes())[..12]);
+    let name = format!("{}{}.fk", prefix, content_hash_hex(&keyed));
     let cache_dir = chain_paths[0]
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(".cache")
         .join("kernel-bml-lowered");
-    let cache_path = cache_dir.join(format!("{}.fk", key));
+    let cache_path = cache_dir.join(&name);
     if let Ok(cached) = fs::read_to_string(&cache_path) {
         if !cached.is_empty() {
             return Ok(cached);
@@ -14231,34 +14265,26 @@ fn lower_bml_source(bml_abs_path: &Path) -> Result<String, String> {
     fs::create_dir_all(&cache_dir)
         .map_err(|error| format!("create BML lowering cache dir: {}", error))?;
 
-    let out_path = cache_dir.join(format!(".out-{}-{}.fk", key, std::process::id()));
-    let driver_path = cache_dir.join(format!(".out-{}-{}.fk.driver.fk", key, std::process::id()));
+    let out_path = cache_dir.join(format!(
+        ".out-{}-{}.fk",
+        name.trim_end_matches(".fk"),
+        std::process::id()
+    ));
+    let _cleanup = ScopeCleanup {
+        out_path: out_path.clone(),
+    };
     let driver_src = format!(
         "(do (form-source-compile-file {:?} {:?}))\n",
         bml_abs_path.display().to_string(),
         out_path.display().to_string()
     );
-    fs::write(&driver_path, driver_src)
-        .map_err(|error| format!("write BML lowering driver: {}", error))?;
-    let _cleanup = scopeguard(&driver_path, &out_path);
-
-    let mut lower_args: Vec<String> = chain_paths
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
-    lower_args.push(driver_path.display().to_string());
-    let loaded = load_form_source_closure(&lower_args).map_err(|error| {
-        format!(
-            "load BML source-compiler chain for {}: {}",
-            bml_abs_path.display(),
-            error
-        )
-    })?;
-    let compiler_src: String = loaded
+    let mut compiler_src: String = loaded
         .into_iter()
         .map(|(_, source)| source)
         .collect::<Vec<_>>()
         .join("\n");
+    compiler_src.push('\n');
+    compiler_src.push_str(&driver_src);
     run_source(&compiler_src);
 
     let lowered = fs::read_to_string(&out_path).unwrap_or_default();
@@ -14268,26 +14294,28 @@ fn lower_bml_source(bml_abs_path: &Path) -> Result<String, String> {
             bml_abs_path.display()
         ));
     }
-    let _ = fs::write(&cache_path, &lowered); // best-effort cache; a miss just re-lowers next time
+    if fs::rename(&out_path, &cache_path).is_ok() {
+        if let Ok(entries) = fs::read_dir(&cache_dir) {
+            for entry in entries.flatten() {
+                let entry_name = entry.file_name().to_string_lossy().to_string();
+                if entry_name != name && entry_name.starts_with(&prefix) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
     Ok(lowered)
 }
 
-// Removes the two throwaway driver/output files when dropped, on every
-// return path (success or the `?` early-outs above).
+// Removes the throwaway output file when dropped, on every return path
+// (success or the `?` early-outs above); once renamed into place it names
+// nothing.
 struct ScopeCleanup {
-    driver_path: PathBuf,
     out_path: PathBuf,
 }
 impl Drop for ScopeCleanup {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.driver_path);
         let _ = fs::remove_file(&self.out_path);
-    }
-}
-fn scopeguard(driver_path: &Path, out_path: &Path) -> ScopeCleanup {
-    ScopeCleanup {
-        driver_path: driver_path.to_path_buf(),
-        out_path: out_path.to_path_buf(),
     }
 }
 
