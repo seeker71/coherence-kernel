@@ -4345,10 +4345,15 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 			// core-axioms.form) so its answer flows directly into arithmetic —
 			// the same shape every JIT lane already lands at the i64 ABI.
 			// Proven three-way by tests/eq-shape-band.fk.
-			// eq and ne where a non-number arrives ask fkwu's question — are
-			// these the same word (cmpWordEqual) — rather than dying in AsInt.
-			if (cat.Inst == RCompareEq || cat.Inst == RCompareNe) && !(cmpNumberKind(lv) && cmpNumberKind(rv)) {
-				return boolInt(cmpWordEqual(lv, rv) == (cat.Inst == RCompareEq))
+			// Where a non-number takes part, eq and ne answer content identity
+			// (valueEqual, axiom-3) and an ordering has no answer to give: it
+			// refuses by name, as fkwu's tags 5 and 103 do, rather than reading
+			// the operand as an int.
+			if !(cmpNumberKind(lv) && cmpNumberKind(rv)) {
+				if cat.Inst == RCompareEq || cat.Inst == RCompareNe {
+					return boolInt(valueEqual(lv, rv) == (cat.Inst == RCompareEq))
+				}
+				panic("order: only numbers have an order -- ask value_kind before lt/le/gt/ge")
 			}
 			if lv.Kind == VFloat || rv.Kind == VFloat {
 				l := lv.AsFloat()
@@ -4677,7 +4682,21 @@ func (k *Kernel) switchKeyFromValue(v Value) (NodeID, bool) {
 	}
 }
 
+// valueEqual — content identity (axiom-3: same composition is the same cell).
+// value_eq answers it, and eq/ne answer it wherever a non-number takes part.
+// Truth is its 0/1 state (axiom-1), so a bool meets the int it is. Numbers keep
+// their kind: an int never equals a float here, and a NaN is the NaN it was
+// built as. Strings meet by text, NodeIDs by coordinates, lists by their items,
+// however the lists were built. Records and closures are places (record_set
+// writes into one), so a place equals only itself. Siblings to Rust's
+// value_equal, TypeScript's valueEqual and fkwu's fk_veq.
 func valueEqual(a, b Value) bool {
+	if a.Kind == VBool {
+		a = boolInt(a.Bool)
+	}
+	if b.Kind == VBool {
+		b = boolInt(b.Bool)
+	}
 	if a.Kind != b.Kind {
 		return false
 	}
@@ -4687,16 +4706,17 @@ func valueEqual(a, b Value) bool {
 	case VInt:
 		return a.Int == b.Int
 	case VFloat:
-		return a.Float == b.Float
+		return a.Float == b.Float || (a.Float != a.Float && b.Float != b.Float)
 	case VStr:
 		return a.Str == b.Str
-	case VBool:
-		return a.Bool == b.Bool
 	case VNodeID:
 		return a.Nid == b.Nid
 	case VList:
 		if len(a.List) != len(b.List) {
 			return false
+		}
+		if len(a.List) == 0 || &a.List[0] == &b.List[0] {
+			return true
 		}
 		for i := range a.List {
 			if !valueEqual(a.List[i], b.List[i]) {
@@ -4704,45 +4724,19 @@ func valueEqual(a, b Value) bool {
 			}
 		}
 		return true
-	default:
-		return false
-	}
-}
-
-// cmpNumberKind — the kinds the compare lane coerces: ints, floats and the
-// 0/1 bool states. Anything else reaching eq/ne meets cmpWordEqual.
-func cmpNumberKind(v Value) bool {
-	return v.Kind == VInt || v.Kind == VFloat || v.Kind == VBool
-}
-
-// cmpWordEqual — fkwu's eq where a non-number takes part (runtime/fkwu-uni.c,
-// tag 102): every value is one word, and eq asks whether the two words are the
-// same. So kinds never meet across — a list, a string, a record or null is not
-// 0, and null is not the empty list. Strings are one word per content (fkwu
-// interns them), so equal text is equal. A list is its first cons pair: every
-// empty list is the one nil word, and a non-empty list equals only itself,
-// never a separately built list of the same items. NodeIDs meet by their four
-// coordinates; records and closures by identity. Siblings to Rust's
-// cmp_word_equal and TypeScript's cmpWordEqual.
-func cmpWordEqual(a, b Value) bool {
-	if a.Kind != b.Kind {
-		return false
-	}
-	switch a.Kind {
-	case VNull:
-		return true
-	case VStr:
-		return a.Str == b.Str
-	case VList:
-		return len(a.List) == len(b.List) && (len(a.List) == 0 || &a.List[0] == &b.List[0])
-	case VNodeID:
-		return a.Nid == b.Nid
 	case VRecord:
 		return a.Rec == b.Rec
 	case VClosure:
 		return a.Cl == b.Cl
 	}
 	return false
+}
+
+// cmpNumberKind — the kinds the compare lane coerces: ints, floats and the
+// 0/1 bool states. eq/ne over anything else is valueEqual; an ordering over
+// anything else has no answer.
+func cmpNumberKind(v Value) bool {
+	return v.Kind == VInt || v.Kind == VFloat || v.Kind == VBool
 }
 
 func (k *Kernel) walkMatchSwitch(node NodeID, kids []NodeID, env *Frame) Value {
