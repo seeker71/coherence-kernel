@@ -726,7 +726,7 @@ fn lookup_config_path<'a>(
 fn json_to_form_value(value: &serde_json::Value, default: &Value) -> Value {
     match value {
         serde_json::Value::String(s) => Value::Str(s.clone().into()),
-        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Bool(b) => bool_int(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Value::Int(i)
@@ -747,7 +747,6 @@ fn value_kind_name(value: &Value) -> &'static str {
         Value::Int(_) => "int",
         Value::Float(_) => "float",
         Value::Str(_) => "string",
-        Value::Bool(_) => "bool",
         Value::List(_) => "list",
         Value::Closure(_) => "closure",
         Value::Nid(_) => "node_id",
@@ -1164,7 +1163,7 @@ fn pg_run_on(op: &str, h: i64, sql: &str, params: Option<Vec<Option<String>>>) -
 }
 
 // pg_cell — a text cell as the Go native reads it (database/sql over pgx, dbCellToForm): NULL as null,
-// bool, the integer types as ints, float4 widened from its single-precision value, float8 as a float,
+// bool and the integer types as ints, float4 widened from its single-precision value, float8 as a float,
 // timestamps and dates as RFC3339 in UTC, and every other type as the server's text.
 fn pg_cell(oid: u32, text: Option<&str>) -> Value {
     let Some(text) = text else {
@@ -1172,7 +1171,7 @@ fn pg_cell(oid: u32, text: Option<&str>) -> Value {
     };
     let as_text = || Value::Str(text.to_string().into());
     match oid {
-        16 => Value::Bool(text == "t"),
+        16 => bool_int(text == "t"),
         20 | 21 | 23 => text.parse::<i64>().map(Value::Int).unwrap_or_else(|_| as_text()),
         700 => text.parse::<f32>().map(|f| Value::Float(f as f64)).unwrap_or_else(|_| as_text()),
         701 => text.parse::<f64>().map(Value::Float).unwrap_or_else(|_| as_text()),
@@ -1195,7 +1194,6 @@ fn pg_rfc3339(text: &str) -> String {
 fn pg_cell_text(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
-        Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         Value::Float(f) => format_float(*f),
         other => other.display(),
     }
@@ -1212,7 +1210,6 @@ fn pg_params(value: Option<&Value>) -> Option<Vec<Option<String>>> {
             .iter()
             .map(|item| match item {
                 Value::Null => None,
-                Value::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
                 Value::Float(f) => Some(format_float(*f)),
                 other => Some(other.display()),
             })
@@ -2480,7 +2477,7 @@ impl Kernel {
             TRIV_INT => Value::Int((n.inst as i32) as i64),
             TRIV_INT64 => Value::Int(self.decode_int64(n.inst)),
             TRIV_STRING => Value::Str(self.strs[n.inst as usize].clone().into()),
-            TRIV_BOOL => Value::Bool(n.inst != 0),
+            TRIV_BOOL => bool_int(n.inst != 0),
             TRIV_NULL => Value::Null,
             TRIV_FLOAT32 => Value::Float(self.decode_float32(n.inst) as f64),
             TRIV_FLOAT64 => Value::Float(self.decode_float64(n.inst)),
@@ -2541,7 +2538,6 @@ pub(crate) enum Value {
     Int(i64),
     Float(f64),
     Str(Arc<str>),
-    Bool(bool),
     List(Arc<Vec<Value>>),
     Closure(Arc<Closure>),
     Nid(NodeID),
@@ -2597,13 +2593,6 @@ impl Value {
             Value::Int(n) => n.to_string(),
             Value::Float(f) => format_float(*f),
             Value::Str(s) => s.to_string(),
-            Value::Bool(b) => {
-                if *b {
-                    "true".to_string()
-                } else {
-                    "false".to_string()
-                }
-            }
             Value::List(xs) => {
                 let parts: Vec<String> = xs.iter().map(|x| x.display()).collect();
                 format!("[{}]", parts.join(", "))
@@ -2638,13 +2627,6 @@ impl Value {
         match self {
             Value::Int(n) => *n,
             Value::Float(f) => *f as i64,
-            Value::Bool(b) => {
-                if *b {
-                    1
-                } else {
-                    0
-                }
-            }
             _ => panic!("as_int: {:?}", self),
         }
     }
@@ -2653,20 +2635,12 @@ impl Value {
         match self {
             Value::Float(f) => *f,
             Value::Int(n) => *n as f64,
-            Value::Bool(b) => {
-                if *b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
             _ => panic!("as_float: {:?}", self),
         }
     }
 
     fn as_bool(&self) -> bool {
         match self {
-            Value::Bool(b) => *b,
             Value::Int(n) => *n != 0,
             Value::Float(f) => *f != 0.0,
             Value::Null => false,
@@ -3619,12 +3593,12 @@ impl Kernel {
                 _ => panic!("record_set: not a record: {:?}", args[0]),
             }
         });
-        // record_has — (record_has rec "field") → bool.
+        // record_has — (record_has rec "field") → 0/1.
         self.register_native("record_has", cat_access(), |k, _, args| {
             let name = k.intern_string(args[1].as_str()).inst;
             match &args[0] {
-                Value::Record(r) => Value::Bool(r.lock().unwrap().get(name).is_some()),
-                _ => Value::Bool(false),
+                Value::Record(r) => bool_int(r.lock().unwrap().get(name).is_some()),
+                _ => bool_int(false),
             }
         });
         // record_blueprint — (record_blueprint rec) → the blueprint NodeID
@@ -3638,9 +3612,9 @@ impl Kernel {
                 _ => panic!("record_blueprint: not a record: {:?}", args[0]),
             }
         });
-        // record? — (record? v) → bool. Type predicate so Form code can branch.
+        // record? — (record? v) → 0/1. Type predicate so Form code can branch.
         self.register_native("record?", cat_access(), |_, _, args| {
-            Value::Bool(matches!(&args[0], Value::Record(_)))
+            bool_int(matches!(&args[0], Value::Record(_)))
         });
         // record_keys — (record_keys rec) → list of field-name strings, in
         // insertion order. Lets Form enumerate a record used as a hash map
@@ -3674,19 +3648,19 @@ impl Kernel {
             k.methods.insert((blueprint, name), cl);
             args[0].clone()
         });
-        // method_has — (method_has record-or-blueprint "name") → bool. Accepts
+        // method_has — (method_has record-or-blueprint "name") → 0/1. Accepts
         // either a record (uses its blueprint) or a blueprint NodeID directly.
         self.register_native("method_has", cat_access(), |k, _, args| {
             let blueprint = match &args[0] {
                 Value::Record(r) => match r.lock().unwrap().blueprint {
                     Some(bp) => bp,
-                    None => return Value::Bool(false),
+                    None => return bool_int(false),
                 },
                 Value::Nid(n) => *n,
-                _ => return Value::Bool(false),
+                _ => return bool_int(false),
             };
             let name = k.intern_string(args[1].as_str()).inst;
-            Value::Bool(k.methods.contains_key(&(blueprint, name)))
+            bool_int(k.methods.contains_key(&(blueprint, name)))
         });
         // method_invoke — (method_invoke record "name" arg1 arg2 ...) → value.
         // Dispatches by the record's blueprint, binds `self` = record (the
@@ -3935,14 +3909,9 @@ impl Kernel {
         // any trivial value as text" so emit-engine.fk's leaf walker can
         // pass node_value of any leaf type through it. Multi-target emit
         // (universal codec lattice — emit.fk + emits/json.fk) depends on
-        // string + bool + null passthrough.
+        // string + null passthrough.
         self.register_native("int_to_str", cat_method(), |_, _, args| match &args[0] {
             Value::Str(s) => Value::Str(s.clone()),
-            Value::Bool(b) => Value::Str(if *b {
-                "true".to_string().into()
-            } else {
-                "false".to_string().into()
-            }),
             Value::Null => Value::Str("null".to_string().into()),
             Value::Float(f) => Value::Str(format_float(*f).into()),
             _ => Value::Str(args[0].as_int().to_string().into()),
@@ -4314,14 +4283,14 @@ impl Kernel {
                         let mut i = 1;
                         while i + 1 < xs.len() {
                             if dict_key_eq(&xs[i], &args[1]) {
-                                return Value::Bool(true);
+                                return bool_int(true);
                             }
                             i += 2;
                         }
                     }
                 }
             }
-            Value::Bool(false)
+            bool_int(false)
         });
         self.register_native("_dict_keys", cat_access(), |_, _, args| {
             if let Value::List(xs) = &args[0] {
@@ -4397,29 +4366,28 @@ impl Kernel {
                     let mut i = 1;
                     while i + 1 < xs.len() {
                         if dict_key_eq(&xs[i], &args[0]) {
-                            return Value::Bool(true);
+                            return bool_int(true);
                         }
                         i += 2;
                     }
-                    return Value::Bool(false);
+                    return bool_int(false);
                 }
             }
             if let Value::List(xs) = &args[1] {
                 for v in xs.iter() {
                     match (&args[0], v) {
-                        (Value::Int(a), Value::Int(b)) if *a == *b => return Value::Bool(true),
-                        (Value::Str(a), Value::Str(b)) if *a == *b => return Value::Bool(true),
-                        (Value::Float(a), Value::Float(b)) if *a == *b => return Value::Bool(true),
-                        (Value::Bool(a), Value::Bool(b)) if *a == *b => return Value::Bool(true),
+                        (Value::Int(a), Value::Int(b)) if *a == *b => return bool_int(true),
+                        (Value::Str(a), Value::Str(b)) if *a == *b => return bool_int(true),
+                        (Value::Float(a), Value::Float(b)) if *a == *b => return bool_int(true),
                         _ => {}
                     }
                 }
-                return Value::Bool(false);
+                return bool_int(false);
             }
             if let (Value::Str(needle), Value::Str(hay)) = (&args[0], &args[1]) {
-                return Value::Bool(hay.contains(&needle[..]));
+                return bool_int(hay.contains(&needle[..]));
             }
-            Value::Bool(false)
+            bool_int(false)
         });
         // _dispatch_super — super().<m>(args) entry. Adapter lowers
         // `super().m(args…)` inside a method of class C to
@@ -4575,7 +4543,7 @@ impl Kernel {
             };
             match val {
                 serde_json::Value::Null => Value::Null,
-                serde_json::Value::Bool(b) => Value::Bool(*b),
+                serde_json::Value::Bool(b) => bool_int(*b),
                 serde_json::Value::Number(n) => {
                     if let Some(i) = n.as_i64() {
                         Value::Int(i)
@@ -4616,7 +4584,7 @@ impl Kernel {
                 out.push(Value::Str(k.clone().into()));
                 out.push(match v {
                     serde_json::Value::Null => Value::Null,
-                    serde_json::Value::Bool(b) => Value::Bool(*b),
+                    serde_json::Value::Bool(b) => bool_int(*b),
                     serde_json::Value::Number(n) => {
                         if let Some(i) = n.as_i64() {
                             Value::Int(i)
@@ -5546,11 +5514,11 @@ impl Kernel {
             match pg_run_on("pg_ping", args[0].as_int(), "SELECT 1", None) {
                 Ok(_) => {
                     pg_set_error(None);
-                    Value::Bool(true)
+                    bool_int(true)
                 }
                 Err(e) => {
                     pg_set_error(Some(e));
-                    Value::Bool(false)
+                    bool_int(false)
                 }
             }
         });
@@ -6325,7 +6293,13 @@ fn switch_table_for(k: &mut Kernel, node: NodeID, kids: &[NodeID]) -> SwitchTabl
         if is_switch_default_pattern(k, pattern) {
             table.default_body = Some(body);
         } else if pattern.level == LEVEL_TRIVIAL {
-            table.cases.insert(pattern, body);
+            // A truth pattern keys as the int state it is (axiom-1).
+            let key = if pattern.ty == TRIV_BOOL {
+                k.intern_trivial_int(pattern.inst as i64)
+            } else {
+                pattern
+            };
+            table.cases.insert(key, body);
         } else {
             table.dynamic_arms.push(SwitchArm { pattern, body });
         }
@@ -6345,12 +6319,6 @@ fn switch_key_from_value(k: &mut Kernel, v: &Value) -> Option<NodeID> {
         Value::Int(n) => Some(k.intern_trivial_int(*n)),
         Value::Float(f) => Some(k.intern_trivial_float64(*f)),
         Value::Str(s) => Some(k.intern_string(s)),
-        Value::Bool(b) => Some(NodeID {
-            pkg: 1,
-            level: LEVEL_TRIVIAL,
-            ty: TRIV_BOOL,
-            inst: if *b { 1 } else { 0 },
-        }),
         Value::Nid(nid) => Some(*nid),
         _ => None,
     }
@@ -6364,16 +6332,13 @@ fn bool_int(b: bool) -> Value {
 
 // value_equal — content identity (axiom-3: same composition is the same cell).
 // value_eq answers it, and eq/ne answer it wherever a non-number takes part.
-// Truth is its 0/1 state (axiom-1), so a bool meets the int it is. Numbers keep
-// their kind: an int never equals a float here, and a NaN is the NaN it was
-// built as. Strings meet by text, NodeIDs by coordinates, lists by their items,
-// however the lists were built. Records and closures are places (record_set
-// writes into one), so a place equals only itself. Siblings to Go's
+// Numbers keep their kind: an int never equals a float here, and a NaN is the
+// NaN it was built as. Strings meet by text, NodeIDs by coordinates, lists by
+// their items, however the lists were built. Records and closures are places
+// (record_set writes into one), so a place equals only itself. Siblings to Go's
 // valueEqual, TypeScript's valueEqual and fkwu's fk_veq.
 fn value_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Bool(x), _) => value_equal(&bool_int(*x), b),
-        (_, Value::Bool(y)) => value_equal(a, &bool_int(*y)),
         (Value::Null, Value::Null) => true,
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => x == y || (x.is_nan() && y.is_nan()),
@@ -6389,11 +6354,11 @@ fn value_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
-// cmp_number_kind — the kinds the compare lane coerces: ints, floats and the
-// 0/1 bool states. eq/ne over anything else is value_equal; an ordering over
-// anything else has no answer.
+// cmp_number_kind — the kinds the compare lane coerces: ints (truth among them
+// as the 0/1 states, axiom-1) and floats. eq/ne over anything else is
+// value_equal; an ordering over anything else has no answer.
 fn cmp_number_kind(v: &Value) -> bool {
-    matches!(v, Value::Int(_) | Value::Float(_) | Value::Bool(_))
+    matches!(v, Value::Int(_) | Value::Float(_))
 }
 
 fn walk_match_switch(
@@ -11384,8 +11349,8 @@ fn router_route_decision_signature_value(decision: &RouteDecisionValue) -> Value
             )),
             Value::Int(route_pressure_bucket(decision.candidate.pressure)),
             Value::Int(route_score_bucket(decision.candidate.score)),
-            Value::Bool(decision.eligible),
-            Value::Bool(decision.selected),
+            bool_int(decision.eligible),
+            bool_int(decision.selected),
         ]
         .into(),
     )
@@ -11428,8 +11393,8 @@ fn router_route_decision_value(decision: &RouteDecisionValue) -> Value {
         vec![
             Value::Int(KH_TAG_ROUTE_DECISION),
             router_route_candidate_value(&decision.candidate),
-            Value::Bool(decision.eligible),
-            Value::Bool(decision.selected),
+            bool_int(decision.eligible),
+            bool_int(decision.selected),
         ]
         .into(),
     )
@@ -12032,16 +11997,16 @@ mod router_context_tests {
             Value::List(xs)
                 if matches!(&xs[4], Value::Int(3))
                     && matches!(&xs[5], Value::Int(5))
-                    && matches!(&xs[6], Value::Bool(false))
-                    && matches!(&xs[7], Value::Bool(false))
+                    && matches!(&xs[6], Value::Int(0))
+                    && matches!(&xs[7], Value::Int(0))
         ));
         assert!(matches!(
             &signature_rows[1],
             Value::List(xs)
                 if matches!(&xs[4], Value::Int(0))
                     && matches!(&xs[5], Value::Int(4))
-                    && matches!(&xs[6], Value::Bool(true))
-                    && matches!(&xs[7], Value::Bool(true))
+                    && matches!(&xs[6], Value::Int(1))
+                    && matches!(&xs[7], Value::Int(1))
         ));
         let decision_rows = match decisions_value {
             Value::List(xs) => xs,
@@ -12051,14 +12016,14 @@ mod router_context_tests {
         assert!(matches!(
             &decision_rows[0],
             Value::List(xs)
-                if matches!(&xs[2], Value::Bool(false))
-                    && matches!(&xs[3], Value::Bool(false))
+                if matches!(&xs[2], Value::Int(0))
+                    && matches!(&xs[3], Value::Int(0))
         ));
         assert!(matches!(
             &decision_rows[1],
             Value::List(xs)
-                if matches!(&xs[2], Value::Bool(true))
-                    && matches!(&xs[3], Value::Bool(true))
+                if matches!(&xs[2], Value::Int(1))
+                    && matches!(&xs[3], Value::Int(1))
         ));
         let request_value = value_for(&pairs, "__kernel_request__");
         assert_eq!(list_tag(request_value), KH_TAG_REQUEST);

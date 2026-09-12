@@ -301,8 +301,6 @@ function renderForPrint(k: Kernel, v: Value): string {
       return String(v.int);
     case "str":
       return v.str;
-    case "bool":
-      return v.bool ? "true" : "false";
     case "list":
       return "[" + v.list.map((x) => renderForPrint(k, x)).join(" ") + "]";
     case "closure":

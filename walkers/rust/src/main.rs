@@ -182,7 +182,6 @@ enum Value {
     Int(i64),
     Float(f64),
     Str(Rc<str>),
-    Bool(bool),
     List(Rc<Vec<Value>>),
     Closure(Rc<Closure>),
     Nid(NodeID),
@@ -204,13 +203,6 @@ impl Value {
             Value::Int(n) => n.to_string(),
             Value::Float(f) => format_float(*f),
             Value::Str(s) => s.to_string(),
-            Value::Bool(b) => {
-                if *b {
-                    "true".to_string()
-                } else {
-                    "false".to_string()
-                }
-            }
             Value::List(xs) => {
                 let parts: Vec<String> = xs.iter().map(|x| x.display()).collect();
                 format!("[{}]", parts.join(", "))
@@ -224,13 +216,6 @@ impl Value {
         match self {
             Value::Int(n) => *n,
             Value::Float(f) => *f as i64,
-            Value::Bool(b) => {
-                if *b {
-                    1
-                } else {
-                    0
-                }
-            }
             _ => panic!("as_int: not a number"),
         }
     }
@@ -239,20 +224,12 @@ impl Value {
         match self {
             Value::Float(f) => *f,
             Value::Int(n) => *n as f64,
-            Value::Bool(b) => {
-                if *b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
             _ => panic!("as_float: not a number"),
         }
     }
 
     fn as_bool(&self) -> bool {
         match self {
-            Value::Bool(b) => *b,
             Value::Int(n) => *n != 0,
             Value::Float(f) => *f != 0.0,
             // `nothing` is not a yes/no. Branching on it is declined rather than
@@ -287,24 +264,25 @@ fn bool_int(b: bool) -> Value {
     Value::Int(b as i64)
 }
 
-// value_equal — the shared structural equality relation.  `eq` remains the
-// numeric comparison family; this relation is for Form cells whose values may
-// be null, strings, or nested lists.  Its shape is copied from the full Rust
-// kernel and from the Go/TypeScript proof arms: same kind, recursively equal;
-// distinct kinds are never equal.
+// value_equal — content identity (axiom-3: same composition is the same cell),
+// as the kernels answer it: value_eq reads it, and eq/ne read it wherever a
+// non-number takes part. Numbers keep their kind and a NaN is the NaN it was
+// built as; strings meet by text, NodeIDs by their four coordinates whichever
+// mint built them, lists by their items however built; a closure is a place
+// and equals only itself.
 fn value_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Null, Value::Null) => true,
         (Value::Int(x), Value::Int(y)) => x == y,
-        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x == y || (x.is_nan() && y.is_nan()),
         (Value::Str(x), Value::Str(y)) => x == y,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::List(xs), Value::List(ys)) => {
-            xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| value_equal(x, y))
+            Rc::ptr_eq(xs, ys)
+                || (xs.len() == ys.len()
+                    && xs.iter().zip(ys.iter()).all(|(x, y)| value_equal(x, y)))
         }
-        // A NodeID is identity-by-content: all four coordinates equal,
-        // whichever mint built the value node (the fkwu tag-102 heal).
         (Value::Nid(x), Value::Nid(y)) => x == y,
+        (Value::Closure(x), Value::Closure(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
 }
@@ -827,7 +805,7 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
         Node::Int(v) => Value::Int(*v),
         Node::Float(v) => Value::Float(*v),
         Node::Str(s) => Value::Str(Rc::from(s.as_str())),
-        Node::Bool(b) => Value::Bool(*b),
+        Node::Bool(b) => bool_int(*b),
         Node::Null => Value::Null,
         Node::Ident(name) => env_lookup(env, name).unwrap_or_else(|| panic!("unbound: {}", name)),
         Node::Math(op, a, b) => {
@@ -862,37 +840,19 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
         Node::Compare(op, a, b) => {
             let lv = walk(a, env);
             let rv = walk(b, env);
-            // `nothing` (axiom-1's third state) is a value, not a number. Equal to
-            // itself, never to 0. Ordering it against a number is declined rather than
-            // answered: fkwu currently leaks its own value encoding there
-            // (add (nothing) 1 -> -8999999999999999997), and a walker that copied that
-            // would agree by imitation instead of witnessing. Erroring is what lets
-            // this walker DISAGREE if a cell ever leans on it.
-            if matches!(lv, Value::Null) || matches!(rv, Value::Null) {
-                let both = matches!(lv, Value::Null) && matches!(rv, Value::Null);
+            // Where a non-number takes part, eq and ne answer content identity
+            // (value_equal, axiom-3): `nothing` equals only nothing, never 0; a
+            // NodeID meets by its four coordinates; lists meet by their items.
+            // An ordering there has no answer to give and refuses by the one
+            // name the kernels use, so this walker disagrees if a cell ever
+            // leans on an encoding.
+            let number = |v: &Value| matches!(v, Value::Int(_) | Value::Float(_));
+            if !(number(&lv) && number(&rv)) {
                 return match *op {
-                    CMP_EQ => bool_int(both),
-                    CMP_NE => bool_int(!both),
+                    CMP_EQ => bool_int(value_equal(&lv, &rv)),
+                    CMP_NE => bool_int(!value_equal(&lv, &rv)),
                     _ => panic!(
-                        "compare on nothing: ordering it against a number is not a number question"
-                    ),
-                };
-            }
-            // A NodeID is identity-by-content: eq of two NodeIDs answers 1 iff
-            // all four coordinates are equal — regardless of which mint built
-            // the value (the fkwu tag-102 heal, witnessed 2026-08-30). A NodeID
-            // never equals an int, a list, a string, or nothing. Ordering
-            // NodeIDs is declined, like ordering nothing: not a number question.
-            if matches!(lv, Value::Nid(_)) || matches!(rv, Value::Nid(_)) {
-                let same = match (&lv, &rv) {
-                    (Value::Nid(x), Value::Nid(y)) => x == y,
-                    _ => false,
-                };
-                return match *op {
-                    CMP_EQ => bool_int(same),
-                    CMP_NE => bool_int(!same),
-                    _ => panic!(
-                        "compare on nodeid: ordering it is not a number question"
+                        "order: only numbers have an order -- ask value_kind before lt/le/gt/ge"
                     ),
                 };
             }

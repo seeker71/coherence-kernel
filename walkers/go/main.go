@@ -67,7 +67,6 @@ const (
 	VNull ValueKind = iota
 	VInt
 	VStr
-	VBool
 	VList
 	VClosure
 	VNodeID
@@ -127,7 +126,6 @@ type Value struct {
 	Int   int64
 	Float float64
 	Str   string
-	Bool  bool
 	List  []Value
 	Cl    *Closure
 	Nid   NodeID
@@ -143,11 +141,6 @@ func (v Value) String() string {
 		return FormatFloatJS(v.Float)
 	case VStr:
 		return v.Str
-	case VBool:
-		if v.Bool {
-			return "true"
-		}
-		return "false"
 	case VList:
 		parts := make([]string, len(v.List))
 		for i, x := range v.List {
@@ -168,11 +161,6 @@ func (v Value) AsFloat() float64 {
 		return v.Float
 	case VInt:
 		return float64(v.Int)
-	case VBool:
-		if v.Bool {
-			return 1.0
-		}
-		return 0.0
 	}
 	panic(fmt.Sprintf("AsFloat: %v", v))
 }
@@ -183,11 +171,6 @@ func (v Value) AsInt() int64 {
 		return v.Int
 	case VFloat:
 		return int64(v.Float)
-	case VBool:
-		if v.Bool {
-			return 1
-		}
-		return 0
 	}
 	panic(fmt.Sprintf("as_int: %v", v))
 }
@@ -464,7 +447,7 @@ func (k *Kernel) trivialValue(n NodeID) Value {
 	case TrivString:
 		return Value{Kind: VStr, Str: k.strs[n.Inst]}
 	case TrivBool:
-		return Value{Kind: VBool, Bool: n.Inst != 0}
+		return boolInt(n.Inst != 0)
 	case TrivNull:
 		return Value{Kind: VNull}
 	case TrivFloat32:
@@ -543,35 +526,20 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 		case RBasicCompare:
 			lv := k.walk(kids[0], env)
 			rv := k.walk(kids[1], env)
-			// `nothing` (axiom-1's third state) is a value, not a number. It is equal
-			// to itself and to nothing else — never to 0. Ordering it against a number
-			// is declined rather than answered: fkwu currently leaks its own value
-			// encoding there (add (nothing) 1 -> -8999999999999999997), and a walker
-			// that copied that would be agreeing by imitation instead of witnessing.
-			// Throwing here is what lets this walker DISAGREE if a cell ever leans on it.
-			if lv.Kind == VNull || rv.Kind == VNull {
+			// Where a non-number takes part, eq and ne answer content identity
+			// (valueEqual, axiom-3): `nothing` equals only nothing, never 0; a
+			// NodeID meets by its four coordinates; lists meet by their items.
+			// An ordering there has no answer to give and refuses by the one name
+			// the kernels use, so this walker disagrees if a cell ever leans on
+			// an encoding.
+			if !(lv.Kind == VInt || lv.Kind == VFloat) || !(rv.Kind == VInt || rv.Kind == VFloat) {
 				switch cat.Inst {
 				case RCompareEq:
-					return boolInt(lv.Kind == VNull && rv.Kind == VNull)
+					return boolInt(valueEqual(lv, rv))
 				case RCompareNe:
-					return boolInt(!(lv.Kind == VNull && rv.Kind == VNull))
+					return boolInt(!valueEqual(lv, rv))
 				}
-				panic(fmt.Sprintf("compare on nothing: ordering %v against %v is not a number question", lv, rv))
-			}
-			// A NodeID is identity-by-content: eq of two NodeIDs answers 1 iff all
-			// four coordinates are equal — regardless of which mint built the value
-			// (the fkwu tag-102 heal, witnessed 2026-08-30). A NodeID never equals
-			// an int, a list, a string, or nothing. Ordering NodeIDs is declined,
-			// like ordering nothing: not a number question.
-			if lv.Kind == VNodeID || rv.Kind == VNodeID {
-				same := lv.Kind == VNodeID && rv.Kind == VNodeID && lv.Nid == rv.Nid
-				switch cat.Inst {
-				case RCompareEq:
-					return boolInt(same)
-				case RCompareNe:
-					return boolInt(!same)
-				}
-				panic(fmt.Sprintf("compare on nodeid: ordering %v against %v is not a number question", lv, rv))
+				panic("order: only numbers have an order -- ask value_kind before lt/le/gt/ge")
 			}
 			if lv.Kind == VFloat || rv.Kind == VFloat {
 				l := lv.AsFloat()
@@ -782,6 +750,12 @@ func (k *Kernel) switchTableFor(node NodeID, kids []NodeID) *switchTable {
 			continue
 		}
 		if pattern.Level == LevelTrivial {
+			// Truth is the 0/1 integer states (axiom-1): a true or false
+			// pattern keys as the int it is, the int a comparison answers.
+			if pattern.Type == TrivBool {
+				table.cases[k.internTrivialInt(int64(pattern.Inst))] = body
+				continue
+			}
 			table.cases[pattern] = body
 			continue
 		}
@@ -811,11 +785,6 @@ func (k *Kernel) switchKeyFromValue(v Value) (NodeID, bool) {
 		return k.internTrivialFloat64(v.Float), true
 	case VStr:
 		return k.internString(v.Str), true
-	case VBool:
-		if v.Bool {
-			return NodeID{Pkg: 1, Level: LevelTrivial, Type: TrivBool, Inst: 1}, true
-		}
-		return NodeID{Pkg: 1, Level: LevelTrivial, Type: TrivBool, Inst: 0}, true
 	case VNodeID:
 		return v.Nid, true
 	default:
@@ -823,6 +792,10 @@ func (k *Kernel) switchKeyFromValue(v Value) (NodeID, bool) {
 	}
 }
 
+// valueEqual — content identity (axiom-3: same composition is the same cell),
+// as the kernels answer it: numbers keep their kind and a NaN is the NaN it was
+// built as; strings meet by text, NodeIDs by coordinates, lists by their items;
+// a closure is a place and equals only itself.
 func valueEqual(a, b Value) bool {
 	if a.Kind != b.Kind {
 		return false
@@ -833,16 +806,17 @@ func valueEqual(a, b Value) bool {
 	case VInt:
 		return a.Int == b.Int
 	case VFloat:
-		return a.Float == b.Float
+		return a.Float == b.Float || (a.Float != a.Float && b.Float != b.Float)
 	case VStr:
 		return a.Str == b.Str
-	case VBool:
-		return a.Bool == b.Bool
 	case VNodeID:
 		return a.Nid == b.Nid
 	case VList:
 		if len(a.List) != len(b.List) {
 			return false
+		}
+		if len(a.List) == 0 || &a.List[0] == &b.List[0] {
+			return true
 		}
 		for i := range a.List {
 			if !valueEqual(a.List[i], b.List[i]) {
@@ -850,6 +824,8 @@ func valueEqual(a, b Value) bool {
 			}
 		}
 		return true
+	case VClosure:
+		return a.Cl == b.Cl
 	default:
 		return false
 	}
@@ -879,8 +855,6 @@ func (k *Kernel) walkMatchSwitch(node NodeID, kids []NodeID, env *Frame) Value {
 
 func truthy(v Value) bool {
 	switch v.Kind {
-	case VBool:
-		return v.Bool
 	case VInt:
 		return v.Int != 0
 	case VNull:

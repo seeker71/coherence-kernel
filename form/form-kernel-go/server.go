@@ -268,7 +268,7 @@ func (k *Kernel) registerHostIONatives() {
 		case string:
 			return Value{Kind: VStr, Str: v}
 		case bool:
-			return Value{Kind: VBool, Bool: v}
+			return boolInt(v)
 		case float64:
 			if v == float64(int64(v)) {
 				return Value{Kind: VInt, Int: int64(v)}
@@ -336,16 +336,16 @@ func (k *Kernel) registerHostIONatives() {
 		db, ok := goPgHandles.lookup(args[0].Int)
 		if !ok {
 			goPgHandles.setErr(errors.New("pg_ping: unknown connection handle"))
-			return Value{Kind: VBool, Bool: false}
+			return boolInt(false)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := db.PingContext(ctx); err != nil {
 			goPgHandles.setErr(err)
-			return Value{Kind: VBool, Bool: false}
+			return boolInt(false)
 		}
 		goPgHandles.setErr(nil)
-		return Value{Kind: VBool, Bool: true}
+		return boolInt(true)
 	})
 	k.registerNative("pg_close", catCall(), func(_ *Kernel, args []Value) Value {
 		if goPgHandles.close(args[0].Int) {
@@ -475,8 +475,6 @@ func formSQLArgs(args []Value, idx int) []any {
 			out = append(out, v.Int)
 		case VFloat:
 			out = append(out, v.Float)
-		case VBool:
-			out = append(out, v.Bool)
 		case VStr:
 			out = append(out, v.Str)
 		case VNull:
@@ -635,7 +633,7 @@ func dbCellToForm(v any) Value {
 	case float32:
 		return Value{Kind: VFloat, Float: float64(x)}
 	case bool:
-		return Value{Kind: VBool, Bool: x}
+		return boolInt(x)
 	case string:
 		return Value{Kind: VStr, Str: x}
 	case []byte:
@@ -655,11 +653,6 @@ func formValueString(v Value) string {
 		return strconv.FormatInt(v.Int, 10)
 	case VFloat:
 		return formatFloatJS(v.Float)
-	case VBool:
-		if v.Bool {
-			return "true"
-		}
-		return "false"
 	case VNull:
 		return ""
 	default:

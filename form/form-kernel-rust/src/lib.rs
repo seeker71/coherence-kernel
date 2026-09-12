@@ -6,15 +6,15 @@
 // a Python C call straight into Rust, no process spawn.
 //
 // What this exposes:
-//   compile_and_run(src: str) -> int|float|str|bool|list|None
-//   run_fk(path: str)         -> int|float|str|bool|list|None
+//   compile_and_run(src: str) -> int|float|str|list|None
+//   run_fk(path: str)         -> int|float|str|list|None
 //   Preloader                 — a warm Kernel+Arena that parses each route
 //                               recipe ONCE and runs (handle, bindings) per
 //                               request with no re-parse (the route-preload
 //                               pair below).
 //
 // Both run the same `run_source` the CLI binary runs. The Value → PyAny
-// conversion mirrors the kernel's display(): Int, Float, Bool, Str, List
+// conversion mirrors the kernel's display(): Int, Float, Str, List
 // land as native Python types; Closure renders as "<closure #N>"; Nid
 // renders as "@p.l.t.i"; Null becomes None.
 //
@@ -161,7 +161,6 @@ fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<PyObject> {
         Value::Int(n) => n.into_py(py),
         Value::Float(f) => f.into_py(py),
         Value::Str(s) => s.into_py(py),
-        Value::Bool(b) => b.into_py(py),
         Value::List(xs) => {
             let list = PyList::empty_bound(py);
             // Value::List now wraps Arc<Vec<Value>> — iterate through the Arc.
@@ -200,8 +199,8 @@ const STRUCTURED_INPUT_BLUEPRINT: NodeID = NodeID {
 
 /// Convert a Python object into a kernel Value — the inverse of value_to_py,
 /// restricted to the value model the kernel carries (the same surface
-/// _fk_literal renders on the Python side). bool before int (Python bool is an
-/// int subclass); lists recurse; a dict marshals to a kernel Record so a
+/// _fk_literal renders on the Python side). A Python bool lands as its 0/1 int
+/// state (axiom-1); lists recurse; a dict marshals to a kernel Record so a
 /// transmuted recipe can read named fields via `record_get` (the structure-
 /// access capability). Anything else is a ValueError so the caller's fallback
 /// can take over rather than the kernel walking a fabricated value.
@@ -211,7 +210,7 @@ const STRUCTURED_INPUT_BLUEPRINT: NodeID = NodeID {
 #[cfg(feature = "pyo3")]
 fn py_to_value(kernel: &mut Kernel, obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     if let Ok(b) = obj.downcast::<pyo3::types::PyBool>() {
-        return Ok(Value::Bool(b.is_true()));
+        return Ok(Value::Int(b.is_true() as i64));
     }
     if let Ok(n) = obj.extract::<i64>() {
         return Ok(Value::Int(n));
