@@ -2967,7 +2967,13 @@ fn source_native_scan_text(src: &str, lex: &SourceNativeLexicon) -> Value {
 // (strconv.FormatFloat(f, 'g', -1, 64) with NaN and Infinity spelled out): the shortest digits that
 // round-trip, written with an exponent when the decimal exponent is below -4 or at least 6 (the
 // exponent signed and at least two digits), and in fixed notation otherwise; -0 keeps its sign.
-// Rust's `{:e}` yields those shortest digits; only the layout is written here.
+// The digits are the shortest that read back, and of those the nearest, an exact tie broken to even, as Go's
+// strconv and JS's toString choose them. Rust's `{:e}` gives the shortest length, and it gives the nearest
+// digits except at an exact tie: 147142857142857.125 lies halfway between two 17-digit decimals, and `{:e}`
+// reads it 1.4714285714285713e+14 where Go and JS read ...712 (epic-edison's four-way sweep found it). So
+// the correctly rounded digits at that length are taken when they read back. At a power of two the gap below
+// is half the gap above, and there the correctly rounded digits can miss while `{:e}`'s shortest reads back:
+// `{:e}` answers then.
 fn format_float(f: f64) -> String {
     if f.is_nan() {
         return "NaN".to_string();
@@ -2979,7 +2985,10 @@ fn format_float(f: f64) -> String {
             "-Infinity".to_string()
         };
     }
-    let sci = format!("{:e}", f);
+    let shortest = format!("{:e}", f);
+    let length = shortest.split('e').next().unwrap_or("").chars().filter(|c| c.is_ascii_digit()).count();
+    let rounded = format!("{:.*e}", length.saturating_sub(1), f);
+    let sci = if rounded.parse::<f64>() == Ok(f) { rounded } else { shortest };
     let (mantissa, exp_text) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
     let exp: i32 = exp_text.parse().unwrap_or(0);
     let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();

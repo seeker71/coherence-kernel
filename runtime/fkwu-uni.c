@@ -866,6 +866,25 @@ extern double strtod(const char *, char **);
  *
  * No libm: NaN is (f != f) and infinity is a comparison against DBL_MAX, so the
  * one-cc seed keeps building with no -lm. */
+/* one unit up (dir 1) or down (dir -1) in the last digit of a "%.*e" string, into dst: 0 when that carries out
+ * of the first digit or borrows it to zero -- such a value has fewer digits, and a shorter length already asked it */
+static int fk_float_neighbour(const char *src, char *dst, int dir) {
+    long long n = 0;
+    while (src[n] != 0) { dst[n] = src[n]; n = n + 1; }
+    dst[n] = 0;
+    long long first = dst[0] == FK_CH_DASH ? 1 : 0;
+    long long k = first;
+    while (dst[k] != 0 && dst[k] != FK_CH_LOWER_E) { k = k + 1; }
+    k = k - 1;
+    while (k >= first) {
+        if (dst[k] == FK_CH_DOT) { k = k - 1; continue; }
+        if (dir > 0 && dst[k] == FK_CH_DIGIT9) { dst[k] = FK_CH_DIGIT0; k = k - 1; continue; }
+        if (dir < 0 && dst[k] == FK_CH_DIGIT0) { dst[k] = FK_CH_DIGIT9; k = k - 1; continue; }
+        dst[k] = (char)(dst[k] + dir);
+        return !(k == first && dst[k] == FK_CH_DIGIT0);
+    }
+    return 0;
+}
 static void fk_fmt_float_js(double f, char *out) {
     if (f != f) {
         out[0] = 'N'; out[1] = 'a'; out[2] = 'N'; out[3] = 0;
@@ -879,50 +898,88 @@ static void fk_fmt_float_js(double f, char *out) {
         sprintf(out, "-Infinity");
         return;
     }
+    /* the shortest digits that read back, and of those the nearest, an exact tie broken to even, as Go's strconv
+     * and JS's toString choose them: each length in turn, correctly rounded. At a power of two the gap below is
+     * half the gap above, and there the rounded digits can miss while a neighbour one unit away in the last digit
+     * reads back: 2^-1017 is 7.120236347223045e-307, where the rounded 7.120236347223044e-307 reads elsewhere */
+    unsigned long long fbits = 0;
+    memcpy(&fbits, &f, 8);
+    int pow2 = (fbits & 0xFFFFFFFFFFFFFULL) == 0;
     char ebuf[64];
+    char nbuf[64];
+    const char *pick = ebuf;
     long long p = 0;
-    while (p <= 17) {
+    while (p < 16) {
         sprintf(ebuf, "%.*e", (int)p, f);
         if (strtod(ebuf, (char **)0) == f) {
             break;
         }
+        if (pow2 && ((fk_float_neighbour(ebuf, nbuf, 1) && strtod(nbuf, (char **)0) == f) ||
+                     (fk_float_neighbour(ebuf, nbuf, -1) && strtod(nbuf, (char **)0) == f))) {
+            pick = nbuf;
+            break;
+        }
         p = p + 1;
     }
-    if (p > 17) {
-        p = 17;
+    if (p == 16) {
+        sprintf(ebuf, "%.*e", 16, f); /* seventeen digits always read back */
     }
-    long long nd = p + 1;
-    /* the exponent printf just wrote IS dp-1; read it back rather than re-deriving */
+    /* the chosen digits and exponent, written as JS writes them: an exponent below -4 or at least 6 */
+    char dg[24];
+    long long nd = 0;
     long long k = 0;
-    while (ebuf[k] != 0 && ebuf[k] != FK_CH_LOWER_E) {
+    int neg = pick[0] == FK_CH_DASH;
+    while (pick[k] != 0 && pick[k] != FK_CH_LOWER_E) {
+        if (pick[k] >= FK_CH_DIGIT0 && pick[k] <= FK_CH_DIGIT9 && nd < 23) {
+            dg[nd] = pick[k];
+            nd = nd + 1;
+        }
         k = k + 1;
     }
     long long exp10 = 0;
     long long esign = 1;
-    if (ebuf[k] == FK_CH_LOWER_E) {
+    if (pick[k] == FK_CH_LOWER_E) {
         k = k + 1;
-        if (ebuf[k] == FK_CH_DASH) {
+        if (pick[k] == FK_CH_DASH) {
             esign = 0 - 1;
             k = k + 1;
-        } else if (ebuf[k] == FK_CH_PLUS) {
+        } else if (pick[k] == FK_CH_PLUS) {
             k = k + 1;
         }
-        while (ebuf[k] >= FK_CH_DIGIT0 && ebuf[k] <= FK_CH_DIGIT9) {
-            exp10 = exp10 * 10 + (ebuf[k] - FK_CH_DIGIT0);
+        while (pick[k] >= FK_CH_DIGIT0 && pick[k] <= FK_CH_DIGIT9) {
+            exp10 = exp10 * 10 + (pick[k] - FK_CH_DIGIT0);
             k = k + 1;
         }
         exp10 = exp10 * esign;
     }
+    long long o = 0;
+    long long j = 0;
+    if (neg) { out[o] = FK_CH_DASH; o = o + 1; }
     if (exp10 < 0 - 4 || exp10 >= 6) {
-        sprintf(out, "%.*e", (int)(nd - 1), f);
+        out[o] = dg[0]; o = o + 1;
+        if (nd > 1) {
+            out[o] = FK_CH_DOT; o = o + 1;
+            j = 1;
+            while (j < nd) { out[o] = dg[j]; o = o + 1; j = j + 1; }
+        }
+        sprintf(out + o, "%c%c%02lld", FK_CH_LOWER_E, exp10 < 0 ? FK_CH_DASH : FK_CH_PLUS, exp10 < 0 ? 0 - exp10 : exp10);
         return;
     }
     long long dp = exp10 + 1;
-    long long prec = nd - dp;
-    if (prec < 0) {
-        prec = 0;
+    if (dp <= 0) {
+        out[o] = FK_CH_DIGIT0; o = o + 1;
+        out[o] = FK_CH_DOT; o = o + 1;
+        while (j < 0 - dp) { out[o] = FK_CH_DIGIT0; o = o + 1; j = j + 1; }
+        j = 0;
+        while (j < nd) { out[o] = dg[j]; o = o + 1; j = j + 1; }
+    } else {
+        while (j < nd || j < dp) {
+            if (j == dp) { out[o] = FK_CH_DOT; o = o + 1; }
+            out[o] = j < nd ? dg[j] : FK_CH_DIGIT0; o = o + 1;
+            j = j + 1;
+        }
     }
-    sprintf(out, "%.*f", (int)prec, f);
+    out[o] = 0;
 }
 static long long fk_is_str(long long v);
 /* writes a string value's bytes to stdout, no newline (defined with the string pool
