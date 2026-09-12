@@ -425,6 +425,12 @@ static long long fk_len_upto(long long v, long long cap);
 static long long (*fk_node)[4];
 static long long fk_node_count;
 static void **fk_f64_mem; /* per-defn f64 leaf pages (this process) */
+static void **fk_f64_mem_b; /* the SECOND per-defn instance: a recipe is a template, compiled once per parameter signature. Instance b holds a second signature's page */
+static long long *fk_f64_sig_b; /* instance b's signature: -1 untried, -2 tried-and-declined, >= 0 the compiled signature */
+/* the parameter-type bits of a signature: which params are float / string / list / defn (an int has none). Two instances of one
+ * defn differ here; the door picks the instance whose param bits match the live frame. */
+#define FK_F64_PARAM_MASK (0xFFULL | (0xFFULL << 16) | (0xFFULL << 48) | (0xFFULL << 56))
+static long long fk_f64_frame_pbits(long long fp, long long n);
 static long long *fk_f64_sig; /* per-defn leaf signature: -1 the all-float expression leaf; else bit k = param k float, bit 8 = float result, bit 9 = loop,
                                * bit 16+k = param k string, bit 24 = string answer, bit 32+k / 40+k = param k the prepend / append accumulator */
 static long long *fk_f64_run; /* per-defn: the run of pairs that last sufficed for a consing leaf, so the door lends that much first and a long loop does not begin again at 4096 */
@@ -9126,6 +9132,15 @@ static long long fk_walk_body(long long i, long long fp) {
             void *m194 = (c194 >= 0 && c194 < fk_f64_cap) ? fk_f64_mem[c194] : 0;
             long long n194 = fk_fnar[c194];
             long long sig194 = m194 != 0 ? fk_f64_sig[c194] : -1;
+            if (c194 >= 0 && c194 < fk_f64_cap && n194 >= 1 && n194 <= 8) {
+                /* the recipe is a template: pick the instance whose parameter signature matches this frame. Instance a is the
+                 * one it was first compiled for; instance b a second signature (an int foldl AND a float foldl, both native). */
+                long long pb194 = fk_f64_frame_pbits(fp, n194);
+                if (pb194 >= 0 && !(m194 != 0 && (sig194 & FK_F64_PARAM_MASK) == pb194)
+                    && fk_f64_mem_b[c194] != 0 && (fk_f64_sig_b[c194] & FK_F64_PARAM_MASK) == pb194) {
+                    m194 = fk_f64_mem_b[c194]; sig194 = fk_f64_sig_b[c194];
+                }
+            }
             if (m194 != 0 && sig194 >= 0 && n194 >= 1 && n194 <= 8) {
                 /* the loop leaf: each frame arg must wear the type the loop was emitted for (int = even word, float = pool box,
                  * string = a string word); ints untag once at the door (v >> 1), floats unbox once, a string's byte pointer
@@ -10000,6 +10015,21 @@ static int fk_f64_word_type(long long v) {
     if (fk_is_fnval(v) && !fk_fnval_is_closure(v)) { return 6; } /* a defn as a value (no captures): a call through it is checked when the leaf runs */
     return 0;
 }
+/* the parameter-type bits a live frame carries -- which of the n params are float / string / list / defn (an int contributes
+ * none) -- the identity the door matches an instance against; -1 if a param is a kind no leaf takes (nothing, a closure) */
+static long long fk_f64_frame_pbits(long long fp, long long n) {
+    long long b = 0, k = 0;
+    while (k < n && k < 8) {
+        int t = fk_f64_word_type(fk_vs[fp + k]);
+        if (t == 2) { b = b | (1LL << k); }
+        else if (t == 3) { b = b | (1LL << (16 + k)); }
+        else if (t == 4) { b = b | (1LL << (48 + k)); }
+        else if (t == 6) { b = b | (1LL << (56 + k)); }
+        else if (t != 1) { return -1; }
+        k = k + 1;
+    }
+    return b;
+}
 static int fk_f64_mov64(unsigned int *words, long long *wn, unsigned int xd, unsigned long long bits);
 static long long fk_f64_ovf_at[FK_F64_OVF_CAP]; /* the B.cond sites that leave for the overflow block: the scratch ran out, the walker answers */
 static long long fk_f64_ovf_n;
@@ -10047,7 +10077,9 @@ static void fk_f64_reset(void) {
     long long k = 0;
     while (k < fk_f64_cap) {
         if (fk_f64_mem[k] != 0) { munmap(fk_f64_mem[k], 4096); fk_f64_mem[k] = 0; }
+        if (fk_f64_mem_b[k] != 0) { munmap(fk_f64_mem_b[k], 4096); fk_f64_mem_b[k] = 0; }
         fk_f64_sig[k] = -1;
+        fk_f64_sig_b[k] = -1;
         fk_f64_run[k] = 0;
         k = k + 1;
     }
@@ -10064,11 +10096,17 @@ static int fk_f64_reserve(long long fx) {
     void **grown = (void **)malloc((size_t)next * sizeof(void *));
     long long *gsig = (long long *)malloc((size_t)next * sizeof(long long));
     long long *grun = (long long *)malloc((size_t)next * sizeof(long long));
-    if (grown == 0 || gsig == 0 || grun == 0) { free(grown); free(gsig); free(grun); return 0; }
+    void **grownb = (void **)malloc((size_t)next * sizeof(void *));
+    long long *gsigb = (long long *)malloc((size_t)next * sizeof(long long));
+    if (grown == 0 || gsig == 0 || grun == 0 || grownb == 0 || gsigb == 0) { free(grown); free(gsig); free(grun); free(grownb); free(gsigb); return 0; }
     long long k = 0;
-    while (k < next) { grown[k] = k < fk_f64_cap ? fk_f64_mem[k] : 0; gsig[k] = k < fk_f64_cap ? fk_f64_sig[k] : -1; grun[k] = k < fk_f64_cap ? fk_f64_run[k] : 0; k = k + 1; }
-    free(fk_f64_mem); free(fk_f64_sig); free(fk_f64_run);
-    fk_f64_mem = grown; fk_f64_sig = gsig; fk_f64_run = grun;
+    while (k < next) {
+        grown[k] = k < fk_f64_cap ? fk_f64_mem[k] : 0; gsig[k] = k < fk_f64_cap ? fk_f64_sig[k] : -1; grun[k] = k < fk_f64_cap ? fk_f64_run[k] : 0;
+        grownb[k] = k < fk_f64_cap ? fk_f64_mem_b[k] : 0; gsigb[k] = k < fk_f64_cap ? fk_f64_sig_b[k] : -1;
+        k = k + 1;
+    }
+    free(fk_f64_mem); free(fk_f64_sig); free(fk_f64_run); free(fk_f64_mem_b); free(fk_f64_sig_b);
+    fk_f64_mem = grown; fk_f64_sig = gsig; fk_f64_run = grun; fk_f64_mem_b = grownb; fk_f64_sig_b = gsigb;
     fk_f64_cap = next;
     return 1;
 }
@@ -11620,6 +11658,26 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n);
 /* a pulse whose admit met a callee not yet crystallized leaves the defn cold, to be asked again at its next heat */
 static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     fk_f64_call_not_ready = 0; fk_f64_warm_n = 0;
+    /* a second signature: instance a already stands for another parameter shape, and this frame wears one it was not
+     * compiled for. Compile it into a's slot (reusing the whole pulse untouched), then relocate the page to instance b and
+     * restore a. sig_b -1 untried, -2 tried-and-declined; on a not-ready callee leave it untried so a later heat retries. */
+    if (fp >= 0 && fx > 0 && fx < fk_f64_cap && fk_fn_native != 0 && fx < fk_fn_capacity
+        && fk_fn_native[fx] == 2 && fk_f64_mem[fx] != 0 && fk_f64_mem_b[fx] == 0 && fk_f64_sig_b[fx] == -1) {
+        long long n194 = fk_fnar[fx];
+        long long pb = (n194 >= 1 && n194 <= 8) ? fk_f64_frame_pbits(fp, n194) : -1;
+        if (pb >= 0 && (fk_f64_sig[fx] & FK_F64_PARAM_MASK) != pb) {
+            void *m0 = fk_f64_mem[fx]; long long s0 = fk_f64_sig[fx], nat0 = fk_fn_native[fx], r0 = fk_f64_run[fx];
+            fk_f64_mem[fx] = 0; fk_f64_sig[fx] = -1; fk_fn_native[fx] = 0; fk_f64_run[fx] = 0;
+            fk_f64_call_not_ready = 0; fk_f64_warm_n = 0;
+            fk_f64_loop_pulse_in(fx, fp, n);
+            if (fk_fn_native[fx] == 2 && fk_f64_mem[fx] != 0) { fk_f64_mem_b[fx] = fk_f64_mem[fx]; fk_f64_sig_b[fx] = fk_f64_sig[fx]; }
+            else if (fk_f64_call_not_ready) { fk_f64_sig_b[fx] = -1; } /* a callee not yet hot: leave untried, a later heat may find it */
+            else { fk_f64_sig_b[fx] = -2; } /* this signature does not crystallize: do not try it again */
+            fk_f64_mem[fx] = m0; fk_f64_sig[fx] = s0; fk_fn_native[fx] = nat0; fk_f64_run[fx] = r0;
+            fk_f64_call_not_ready = 0; fk_f64_warm_n = 0;
+            return;
+        }
+    }
     fk_f64_loop_pulse_in(fx, fp, n);
     if (fk_f64_call_not_ready && fx > 0 && fx < fk_fn_capacity && fk_fn_native != 0 && fk_fn_native[fx] < 0 && fk_fn_native[fx] != -2) {
         fk_fn_native[fx] = 0;
