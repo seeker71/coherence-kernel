@@ -20,6 +20,8 @@ import {
   EMPTY_KERNEL_HOST,
   type KernelHost,
   type KernelHttpResult,
+  type KernelPgAnswer,
+  type KernelPgOperation,
   type KernelSocketOperation,
 } from "./host.ts";
 
@@ -717,6 +719,8 @@ export class Kernel {
   ctorCounts?: Map<string, number>;
 
   readonly host: KernelHost;
+  // the last failure of the pg_* and config_* doors, as pg_last_error reads it
+  private pgLastError = "";
 
   constructor(host: KernelHost = EMPTY_KERNEL_HOST) {
     this.host = host;
@@ -2851,6 +2855,111 @@ export class Kernel {
       return { kind: "int", int: socketNumber(this.host, { op: "close", h }) };
     });
 
+    // ---- the storage port: pg_* and config_* ---------------------------
+    // Siblings to the Go (pgx) and Rust (postgres) natives. The host's pg carrier speaks the wire
+    // protocol; a cell reads as Go reads it (pgCell) and pg_query writes it as Go's formValueString
+    // does. pg_last_error names the last failure of these doors, "" after a success.
+    const pgAnswer = (error: string, value: Value): Value => {
+      this.pgLastError = error;
+      return value;
+    };
+    const pgCall = (operation: KernelPgOperation): KernelPgAnswer => {
+      const call = this.host.pgCall;
+      if (call === undefined) throw new Error("pg: host carrier unavailable");
+      return call(operation);
+    };
+    // a parameter travels as text, as the Go native hands pgx its value
+    const pgParam = (v: Value): string | null => {
+      switch (v.kind) {
+        case "null":
+          return null;
+        case "str":
+          return v.str;
+        case "bool":
+          return v.bool ? "true" : "false";
+        case "f32":
+        case "f64":
+          return formatFloat(v.float);
+        default:
+          return this.renderForPrint(v);
+      }
+    };
+    // one SQL run on a handle; params, when a list, travel by Parse/Bind/Execute
+    const pgRun = (op: string, handle: Value | undefined, sql: string, params: Value | undefined): KernelPgAnswer => {
+      const answer = pgCall({
+        op: "run",
+        h: handle === undefined ? -1 : argInt([handle], 0),
+        sql,
+        params: params?.kind === "list" ? params.list.map(pgParam) : null,
+      });
+      return answer.error === "unknown connection handle" ? { error: `${op}: unknown connection handle` } : answer;
+    };
+    this.registerNative("pg_last_error", catCall(), () => ({ kind: "str", str: this.pgLastError }));
+    this.registerNative("pg_connect", catCall(), (_k, args) => {
+      const url = argStr(args, 0).trim();
+      if (!url.startsWith("postgres://") && !url.startsWith("postgresql://")) {
+        return pgAnswer("pg_connect: database.url is not a PostgreSQL URL", { kind: "int", int: -1 });
+      }
+      const answer = pgCall({ op: "connect", ...pgDsn(url) });
+      if (answer.error !== undefined) return pgAnswer(answer.error, { kind: "int", int: -1 });
+      return pgAnswer("", { kind: "int", int: answer.handle ?? -1 });
+    });
+    this.registerNative("pg_ping", catCall(), (_k, args) => {
+      const answer = pgRun("pg_ping", args[0], "SELECT 1", undefined);
+      return pgAnswer(answer.error ?? "", { kind: "bool", bool: answer.error === undefined });
+    });
+    this.registerNative("pg_close", catCall(), (_k, args) => {
+      const answer = pgCall({ op: "close", h: argInt(args, 0) });
+      return { kind: "int", int: answer.error === undefined ? 0 : -1 };
+    });
+    this.registerNative("pg_exec", catCall(), (_k, args) => {
+      const answer = pgRun("pg_exec", args[0], argStr(args, 1), args[2]);
+      if (answer.error !== undefined) return pgAnswer(answer.error, { kind: "int", int: -1 });
+      return pgAnswer("", intOrWide(pgTagCount(answer.tag ?? "")));
+    });
+    this.registerNative("pg_query", catCall(), (_k, args) => {
+      const answer = pgRun("pg_query", args[0], argStr(args, 1), args[2]);
+      if (answer.error !== undefined) return pgAnswer(answer.error, { kind: "str", str: "ERR" });
+      const fields = answer.fields ?? [];
+      const text = (answer.rows ?? [])
+        .map((row) => row.map((cell, i) => pgCellText(pgCell(fields[i]?.oid ?? 25, cell))).join("\t"))
+        .join("\n");
+      return pgAnswer("", { kind: "str", str: text });
+    });
+    this.registerNative("pg_query_rows", catCall(), (_k, args) => {
+      const answer = pgRun("pg_query_rows", args[0], argStr(args, 1), args[2]);
+      if (answer.error !== undefined) return pgAnswer(answer.error, { kind: "list", list: [] });
+      const fields = answer.fields ?? [];
+      const rows = (answer.rows ?? []).map((row): Value => ({
+        kind: "list",
+        list: [
+          { kind: "str", str: "__dict__" },
+          ...row.flatMap((cell, i): Value[] => [
+            { kind: "str", str: fields[i]?.name ?? "" },
+            pgCell(fields[i]?.oid ?? 25, cell),
+          ]),
+        ],
+      }));
+      return pgAnswer("", { kind: "list", list: rows });
+    });
+    this.registerNative("config_database_url", catCall(), () => {
+      try {
+        const url = kernelConfigDatabaseUrl(kernelConfigLoad(this.host));
+        if (url.length > 0) return pgAnswer("", { kind: "str", str: url });
+        return pgAnswer("database.url is not configured", { kind: "str", str: "" });
+      } catch (error) {
+        return pgAnswer(error instanceof Error ? error.message : String(error), { kind: "str", str: "" });
+      }
+    });
+    this.registerNative("config_value_or", catCall(), (_k, args) => {
+      const fallback = args[1] ?? { kind: "null" };
+      try {
+        return kernelConfigValue(kernelConfigLookup(kernelConfigLoad(this.host), argStr(args, 0)), fallback);
+      } catch (error) {
+        return pgAnswer(error instanceof Error ? error.message : String(error), fallback);
+      }
+    });
+
     // Substrate write surface — all attributed as WITNESS.
     this.registerNative("make_nodeid", catWitness(), (_k, args) => ({
       kind: "nodeid",
@@ -3841,6 +3950,200 @@ function leadingInt(s: string): Value {
   }
   const digits = BigInt(s.slice(i, j));
   return intOrWide(BigInt.asIntN(64, neg ? -digits : digits));
+}
+
+// pgDsn — postgres://user[:password]@host[:port][/database][?options], read as the pg floor reads it:
+// the last "@" ends the user part, %XX escapes decode in user, password and database, the host is
+// localhost and the port 5432 when absent, and the database is the user's name when none is given.
+function pgDsn(url: string): { host: string; port: number; user: string; password: string; database: string } {
+  const rest = url.slice(url.startsWith("postgresql://") ? 13 : 11);
+  const q = rest.indexOf("?");
+  const main = q < 0 ? rest : rest.slice(0, q);
+  const at = main.lastIndexOf("@");
+  const userinfo = at < 0 ? "" : main.slice(0, at);
+  const place = main.slice(at + 1);
+  const slash = place.indexOf("/");
+  const hostport = slash < 0 ? place : place.slice(0, slash);
+  const database = slash < 0 ? "" : pgUnescape(place.slice(slash + 1));
+  const colon = userinfo.indexOf(":");
+  const user = pgUnescape(colon < 0 ? userinfo : userinfo.slice(0, colon));
+  const password = colon < 0 ? "" : pgUnescape(userinfo.slice(colon + 1));
+  const bracket = hostport.startsWith("[") ? hostport.indexOf("]") : -1;
+  const portColon = bracket >= 0 ? hostport.indexOf(":", bracket) : hostport.indexOf(":");
+  const host = bracket >= 0 ? hostport.slice(1, bracket) : portColon < 0 ? hostport : hostport.slice(0, portColon);
+  return {
+    host: host.length === 0 ? "localhost" : host,
+    port: portColon < 0 ? 5432 : Number.parseInt(hostport.slice(portColon + 1), 10) || 0,
+    user,
+    password,
+    database: database.length === 0 ? user : database,
+  };
+}
+
+function pgUnescape(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+// pgCell — a cell as the Go native reads it (database/sql over pgx, dbCellToForm): NULL as null, bool,
+// the integer types as ints, float4 widened from its single-precision value, float8 as a float,
+// timestamps and dates as RFC3339 in UTC, and every other type as the server's text, bytea as its hex.
+function pgCell(oid: number, text: string | null): Value {
+  if (text === null) return { kind: "null" };
+  switch (oid) {
+    case 16:
+      return { kind: "bool", bool: text === "t" };
+    case 20:
+    case 21:
+    case 23:
+      return intOrWide(BigInt(text));
+    case 700:
+      return { kind: "f64", float: Math.fround(Number(text)) };
+    case 701:
+      return { kind: "f64", float: Number(text) };
+    case 1082:
+      return { kind: "str", str: `${text}T00:00:00Z` };
+    case 1114:
+      return { kind: "str", str: pgRfc3339(text) };
+    case 1184:
+      return { kind: "str", str: pgRfc3339(text.endsWith("+00") ? text.slice(0, -3) : text) };
+    default:
+      return { kind: "str", str: text };
+  }
+}
+
+// the server's "2026-09-12 08:00:00.5" in UTC as RFC3339: "2026-09-12T08:00:00.5Z"
+function pgRfc3339(text: string): string {
+  const at = text.indexOf(" ");
+  return `${at < 0 ? text : `${text.slice(0, at)}T${text.slice(at + 1)}`}Z`;
+}
+
+// pgCellText — a read cell written as Go's formValueString writes it into pg_query's page
+function pgCellText(v: Value): string {
+  switch (v.kind) {
+    case "bool":
+      return v.bool ? "true" : "false";
+    case "f64":
+      return formatFloat(v.float);
+    case "i64":
+      return String(v.bigint);
+    case "int":
+      return String(v.int);
+    case "str":
+      return v.str;
+    default:
+      return "";
+  }
+}
+
+// the row count a command tag carries: its last word when that is a number, 0 otherwise
+function pgTagCount(tag: string): bigint {
+  const word = tag.slice(tag.lastIndexOf(" ") + 1);
+  return /^[0-9]+$/.test(word) ? BigInt(word) : 0n;
+}
+
+// a JSON object read from a config layer
+type ConfigObject = { [key: string]: unknown };
+
+// kernelConfigLoad — the kernel config as the Go and Rust natives merge it: api/config/api.json in the
+// nearest directory at or above the working one that holds it, then ~/.coherence-network/config.json
+// laid over it by a deep merge, with ~/.coherence-network/keys.json kept under "keys". A missing layer
+// is skipped; a present layer that does not read as a JSON object is an error.
+function kernelConfigLoad(host: KernelHost): ConfigObject {
+  const merged: ConfigObject = {};
+  const root = kernelConfigRoot(host, host.workingDirectory?.() ?? "");
+  if (root.length > 0) kernelConfigLayer(host, merged, `${root}/api/config/api.json`);
+  const home = host.homeDirectory?.() ?? "";
+  if (home.length > 0) {
+    kernelConfigLayer(host, merged, `${home}/.coherence-network/config.json`);
+    kernelConfigKeys(host, merged, `${home}/.coherence-network/keys.json`);
+  }
+  return merged;
+}
+
+function kernelConfigRoot(host: KernelHost, dir: string): string {
+  for (let at = dir; at.length > 0; ) {
+    if (host.pathExists?.(`${at}/api/config/api.json`) === true) return at;
+    const cut = at.lastIndexOf("/");
+    at = cut > 0 ? at.slice(0, cut) : at.length > 1 ? "/" : "";
+  }
+  return "";
+}
+
+function isConfigObject(v: unknown): v is ConfigObject {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function kernelConfigLayer(host: KernelHost, merged: ConfigObject, path: string): void {
+  if (host.pathExists?.(path) !== true || host.readTextFile === undefined) return;
+  const layer: unknown = JSON.parse(host.readTextFile(path));
+  if (!isConfigObject(layer)) throw new Error(`${path} must contain a JSON object`);
+  kernelConfigMerge(merged, layer);
+}
+
+// an object laid over an object merges key by key; any other value replaces what stood
+function kernelConfigMerge(dst: ConfigObject, src: ConfigObject): void {
+  for (const [key, value] of Object.entries(src)) {
+    const current = dst[key];
+    if (isConfigObject(value) && isConfigObject(current)) kernelConfigMerge(current, value);
+    else dst[key] = value;
+  }
+}
+
+// keys.json stands under "keys", and its GitHub token fills github_token where none is configured
+function kernelConfigKeys(host: KernelHost, merged: ConfigObject, path: string): void {
+  let keys: unknown;
+  try {
+    keys = JSON.parse(host.readTextFile?.(path) ?? "");
+  } catch {
+    return;
+  }
+  if (!isConfigObject(keys)) return;
+  merged.keys = keys;
+  const github = keys.github;
+  const candidates = [
+    isConfigObject(github) ? github.token : undefined,
+    isConfigObject(github) ? github.api_token : undefined,
+    keys.github_token,
+  ];
+  const token = candidates.find((c): c is string => typeof c === "string" && c.trim().length > 0)?.trim();
+  const current = merged.github_token;
+  if (token !== undefined && (typeof current !== "string" || current.trim().length === 0)) merged.github_token = token;
+}
+
+function kernelConfigDatabaseUrl(config: ConfigObject): string {
+  const database = config.database;
+  const url = isConfigObject(database) && typeof database.url === "string" ? database.url.trim() : "";
+  if (url.length > 0) return url;
+  return typeof config.database_url === "string" ? config.database_url.trim() : "";
+}
+
+// a dotted path through the config's objects; undefined where a part is empty or missing
+function kernelConfigLookup(config: ConfigObject, path: string): unknown {
+  let current: unknown = config;
+  for (const part of path.split(".")) {
+    if (part.length === 0 || !isConfigObject(current) || !Object.prototype.hasOwnProperty.call(current, part)) {
+      return undefined;
+    }
+    current = current[part];
+  }
+  return current;
+}
+
+// a config value as the Go native answers it — text, a bool, an integral number as an int and any other
+// as a float — with a missing or null value answering the fallback, and an object or list its JSON text
+// as the Rust native writes it
+function kernelConfigValue(value: unknown, fallback: Value): Value {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "string") return { kind: "str", str: value };
+  if (typeof value === "boolean") return { kind: "bool", bool: value };
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) ? { kind: "int", int: value } : { kind: "f64", float: value };
+  }
+  return { kind: "str", str: JSON.stringify(value) };
 }
 
 function valueKindName(v: Value): string {

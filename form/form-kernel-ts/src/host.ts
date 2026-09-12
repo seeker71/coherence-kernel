@@ -34,6 +34,36 @@ export type KernelSocketOperation =
   | { readonly op: "recv"; readonly h: number; readonly max: number }
   | { readonly op: "close"; readonly h: number };
 
+// The storage port's operations, as the host's pg carrier takes them: a connection by its parts, one SQL
+// run on a connection (params: one text or null per $n, or null for a simple Query), and a close.
+export type KernelPgOperation =
+  | {
+      readonly op: "connect";
+      readonly host: string;
+      readonly port: number;
+      readonly user: string;
+      readonly password: string;
+      readonly database: string;
+    }
+  | {
+      readonly op: "run";
+      readonly h: number;
+      readonly sql: string;
+      readonly params: readonly (string | null)[] | null;
+    }
+  | { readonly op: "close"; readonly h: number };
+
+// A pg carrier's answer: error when the server or the connection failed; otherwise the handle of a
+// connect, or a run's last field list, every row's cells as the server's text (null for NULL) and the
+// last command tag.
+export interface KernelPgAnswer {
+  readonly error?: string;
+  readonly handle?: number;
+  readonly fields?: readonly { readonly name: string; readonly oid: number }[];
+  readonly rows?: readonly (readonly (string | null)[])[];
+  readonly tag?: string;
+}
+
 export interface KernelHost {
   readonly writeStdout?: (text: string) => void;
   readonly writeStderr?: (text: string) => void;
@@ -74,8 +104,11 @@ export interface KernelHost {
   readonly processId?: () => number;
   readonly monotonicMs?: () => number;
   readonly workingDirectory?: () => string;
+  // The home directory ($HOME), where the kernel config's own layer stands; "" when unset.
+  readonly homeDirectory?: () => string;
   readonly httpGet?: (request: KernelHttpRequest) => KernelHttpResult;
   readonly socketCall?: (operation: KernelSocketOperation) => number | string;
+  readonly pgCall?: (operation: KernelPgOperation) => KernelPgAnswer;
 
   readonly shutdown?: () => void;
 }
