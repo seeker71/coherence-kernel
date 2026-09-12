@@ -5121,18 +5121,19 @@ function walkCompare(
   // core-axioms.form) so its answer flows directly into arithmetic —
   // the shape the compiled lane's JS coercion already implied. Operands
   // meet the same numeric coercion in every lane: bools are the 0/1
-  // states, and non-numeric kinds are a type-contract violation —
-  // str_eq, node_eq, and value_eq are the typed doors for those kinds.
-  // Sibling to the Go and Rust walkers; proven three-way by
-  // tests/eq-shape-band.fk.
+  // states. Where a non-number takes part, eq and ne answer content
+  // identity (valueEqual, axiom-3) and an ordering has no answer to give:
+  // it refuses by name, as fkwu's tags 5 and 103 do. Sibling to the Go and
+  // Rust walkers; proven three-way by tests/eq-shape-band.fk.
   //
   // Width-mixing: if either side is float, compare as float; if either
   // side is bigint, compare as bigint; else as int.
-  // eq and ne where a non-number arrives ask fkwu's question — are these the
-  // same word (cmpWordEqual) — rather than dying in expectInt.
-  if ((op === RCmp.EQ || op === RCmp.NE) && !(cmpNumberKind(av) && cmpNumberKind(bv))) {
-    const same = cmpWordEqual(av, bv);
-    return boolInt(op === RCmp.EQ ? same : !same);
+  if (!(cmpNumberKind(av) && cmpNumberKind(bv))) {
+    if (op === RCmp.EQ || op === RCmp.NE) {
+      const same = valueEqual(av, bv);
+      return boolInt(op === RCmp.EQ ? same : !same);
+    }
+    throw new Error("order: only numbers have an order -- ask value_kind before lt/le/gt/ge");
   }
   let r: boolean;
   if (av.kind === "f32" || av.kind === "f64" || bv.kind === "f32" || bv.kind === "f64") {
@@ -5176,57 +5177,29 @@ function walkCompare(
 }
 
 // cmpNumberKind — the kinds the compare lane coerces: every int and float
-// width and the 0/1 bool states. Anything else reaching eq/ne meets
-// cmpWordEqual.
+// width and the 0/1 bool states. eq/ne over anything else is valueEqual; an
+// ordering over anything else has no answer.
 function cmpNumberKind(v: Value): boolean {
   return v.kind === "bool" || isNumericValue(v);
-}
-
-// cmpWordEqual — fkwu's eq where a non-number takes part (runtime/fkwu-uni.c,
-// tag 102): every value is one word, and eq asks whether the two words are the
-// same. So kinds never meet across — a list, a string, a record or null is not
-// 0, and null is not the empty list. Strings are one word per content (fkwu
-// interns them), so equal text is equal. A list is its first cons pair: every
-// empty list is the one nil word, and a non-empty list equals only itself,
-// never a separately built list of the same items. NodeIDs meet by their four
-// coordinates; records and closures by identity. Siblings to Go's cmpWordEqual
-// and Rust's cmp_word_equal.
-function cmpWordEqual(a: Value, b: Value): boolean {
-  if (a.kind !== b.kind) return false;
-  switch (a.kind) {
-    case "null":
-      return true;
-    case "str":
-      return a.str === (b as { str: string }).str;
-    case "list": {
-      const bl = (b as { list: Value[] }).list;
-      return a.list === bl || (a.list.length === 0 && bl.length === 0);
-    }
-    case "nodeid": {
-      const bn = (b as { nodeid: NodeID }).nodeid;
-      return (
-        a.nodeid.pkg === bn.pkg &&
-        a.nodeid.level === bn.level &&
-        a.nodeid.type === bn.type &&
-        a.nodeid.inst === bn.inst
-      );
-    }
-    case "record":
-      return a.record === (b as { record: Record }).record;
-    case "closure":
-      return a.closure === (b as { closure: Closure }).closure;
-    default:
-      return a === b;
-  }
 }
 
 function isIntegerValue(v: Value): boolean {
   return isNumericValue(v) && v.kind !== "f32" && v.kind !== "f64";
 }
 
+// valueEqual — content identity (axiom-3: same composition is the same cell).
+// value_eq answers it, and eq/ne answer it wherever a non-number takes part.
+// Truth is its 0/1 state (axiom-1), so a bool meets the int it is. Integers
+// compare across their widths and floats across theirs, as the one Int kind and
+// the one Float kind of the Go and Rust kernels do; an integer never equals a
+// float, however alike they read, and a NaN is the NaN it was built as. Strings
+// meet by text, NodeIDs by coordinates, lists by their items, however the lists
+// were built. Records and closures are places (record_set writes into one), so
+// a place equals only itself. Siblings to Go's valueEqual, Rust's value_equal
+// and fkwu's fk_veq.
 function valueEqual(a: Value, b: Value): boolean {
-  // Integers compare across their widths and floats across theirs, as the one Int kind and the one
-  // Float kind of the Go and Rust kernels do; an integer never equals a float, however alike they read.
+  if (a.kind === "bool") a = boolInt(a.bool);
+  if (b.kind === "bool") b = boolInt(b.bool);
   if (isIntegerValue(a) && isIntegerValue(b)) {
     if (a.kind === "i64" || a.kind === "u64" || b.kind === "i64" || b.kind === "u64") {
       return numericToBig(a) === numericToBig(b);
@@ -5234,7 +5207,7 @@ function valueEqual(a: Value, b: Value): boolean {
     return numericToNum(a) === numericToNum(b);
   }
   if ((a.kind === "f32" || a.kind === "f64") && (b.kind === "f32" || b.kind === "f64")) {
-    return a.float === b.float;
+    return a.float === b.float || (Number.isNaN(a.float) && Number.isNaN(b.float));
   }
   if (a.kind !== b.kind) return false;
   switch (a.kind) {
@@ -5242,12 +5215,17 @@ function valueEqual(a: Value, b: Value): boolean {
       return true;
     case "str":
       return a.str === (b as { str: string }).str;
-    case "bool":
-      return a.bool === (b as { bool: boolean }).bool;
     case "list": {
       const bl = (b as { list: Value[] }).list;
-      return a.list.length === bl.length && a.list.every((item, idx) => valueEqual(item, bl[idx]!));
+      return (
+        a.list === bl ||
+        (a.list.length === bl.length && a.list.every((item, idx) => valueEqual(item, bl[idx]!)))
+      );
     }
+    case "record":
+      return a.record === (b as { record: Record }).record;
+    case "closure":
+      return a.closure === (b as { closure: Closure }).closure;
     case "nodeid": {
       const bn = (b as { nodeid: NodeID }).nodeid;
       return (

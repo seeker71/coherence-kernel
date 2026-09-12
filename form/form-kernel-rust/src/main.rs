@@ -6362,46 +6362,38 @@ fn bool_int(b: bool) -> Value {
     Value::Int(b as i64)
 }
 
+// value_equal — content identity (axiom-3: same composition is the same cell).
+// value_eq answers it, and eq/ne answer it wherever a non-number takes part.
+// Truth is its 0/1 state (axiom-1), so a bool meets the int it is. Numbers keep
+// their kind: an int never equals a float here, and a NaN is the NaN it was
+// built as. Strings meet by text, NodeIDs by coordinates, lists by their items,
+// however the lists were built. Records and closures are places (record_set
+// writes into one), so a place equals only itself. Siblings to Go's
+// valueEqual, TypeScript's valueEqual and fkwu's fk_veq.
 fn value_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
+        (Value::Bool(x), _) => value_equal(&bool_int(*x), b),
+        (_, Value::Bool(y)) => value_equal(a, &bool_int(*y)),
         (Value::Null, Value::Null) => true,
         (Value::Int(x), Value::Int(y)) => x == y,
-        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x == y || (x.is_nan() && y.is_nan()),
         (Value::Str(x), Value::Str(y)) => x == y,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Nid(x), Value::Nid(y)) => x == y,
         (Value::List(xs), Value::List(ys)) => {
-            xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| value_equal(x, y))
+            Arc::ptr_eq(xs, ys)
+                || (xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| value_equal(x, y)))
         }
+        (Value::Record(x), Value::Record(y)) => Arc::ptr_eq(x, y),
+        (Value::Closure(x), Value::Closure(y)) => Arc::ptr_eq(x, y),
         _ => false,
     }
 }
 
 // cmp_number_kind — the kinds the compare lane coerces: ints, floats and the
-// 0/1 bool states. Anything else reaching eq/ne meets cmp_word_equal.
+// 0/1 bool states. eq/ne over anything else is value_equal; an ordering over
+// anything else has no answer.
 fn cmp_number_kind(v: &Value) -> bool {
     matches!(v, Value::Int(_) | Value::Float(_) | Value::Bool(_))
-}
-
-// cmp_word_equal — fkwu's eq where a non-number takes part (runtime/fkwu-uni.c,
-// tag 102): every value is one word, and eq asks whether the two words are the
-// same. So kinds never meet across — a list, a string, a record or null is not
-// 0, and null is not the empty list. Strings are one word per content (fkwu
-// interns them), so equal text is equal. A list is its first cons pair: every
-// empty list is the one nil word, and a non-empty list equals only itself,
-// never a separately built list of the same items. NodeIDs meet by their four
-// coordinates; records and closures by identity. Siblings to Go's cmpWordEqual
-// and TypeScript's cmpWordEqual.
-fn cmp_word_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Null, Value::Null) => true,
-        (Value::Str(x), Value::Str(y)) => x == y,
-        (Value::List(xs), Value::List(ys)) => (xs.is_empty() && ys.is_empty()) || Arc::ptr_eq(xs, ys),
-        (Value::Nid(x), Value::Nid(y)) => x == y,
-        (Value::Record(x), Value::Record(y)) => Arc::ptr_eq(x, y),
-        (Value::Closure(x), Value::Closure(y)) => Arc::ptr_eq(x, y),
-        _ => false,
-    }
 }
 
 fn walk_match_switch(
@@ -6536,13 +6528,16 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                 // (axiom-1, core-axioms.form) so its answer flows directly
                 // into arithmetic — the same shape the JIT's i64 ABI already
                 // lands. Proven three-way by tests/eq-shape-band.fk.
-                // eq and ne where a non-number arrives ask fkwu's question —
-                // are these the same word (cmp_word_equal) — rather than
-                // dying in as_int.
-                if (cat.inst == RCMP_EQ || cat.inst == RCMP_NE)
-                    && !(cmp_number_kind(&lv) && cmp_number_kind(&rv))
-                {
-                    bool_int(cmp_word_equal(&lv, &rv) == (cat.inst == RCMP_EQ))
+                // Where a non-number takes part, eq and ne answer content
+                // identity (value_equal, axiom-3) and an ordering has no
+                // answer to give: it refuses by name, as fkwu's tags 5 and
+                // 103 do, rather than reading the operand as an int.
+                if !(cmp_number_kind(&lv) && cmp_number_kind(&rv)) {
+                    if cat.inst == RCMP_EQ || cat.inst == RCMP_NE {
+                        bool_int(value_equal(&lv, &rv) == (cat.inst == RCMP_EQ))
+                    } else {
+                        panic!("order: only numbers have an order -- ask value_kind before lt/le/gt/ge")
+                    }
                 } else if matches!(lv, Value::Float(_)) || matches!(rv, Value::Float(_)) {
                     let l = lv.as_float();
                     let r = rv.as_float();

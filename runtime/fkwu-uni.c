@@ -10915,21 +10915,18 @@ static long long fk_walk(long long i, long long fp) {
         }
         return a4 - b4;
     }
+#define FK_ORDER_REFUSAL "fkwu: order: only numbers have an order -- ask value_kind before lt/le/gt/ge"
     if (t == 5) {
         { long long r5; if (fk_len_cmp(i, fp, 2, &r5)) { return r5; } }
         long long a5 = fk_walk(fk_node[i][1], fp);
         long long b5 = fk_walk(fk_node[i][2], fp);
-        /* Same width-promotion rule as math (tags 3/4/42): float on either side
-         * forces an IEEE comparison; pure int/int compares the tagged words
-         * directly (<<1 tagging is order-preserving, so word order IS int order).
-         * fk_num rounds through a double, whose 53-bit mantissa blurs distinct
-         * 63-bit ints into equality — (eq (sub -2^62 0) (sub -2^62 1)) answered
-         * true while sub of the same pair answered -1. Mirrors the Go/Rust
-         * kernels' compare law and the JIT's exact int fast path (le/eq inline
-         * cmp), which this walker previously DISAGREED with at the boundary.
-         * Applies to the whole family: le here, eq/lt on tags 102/103, and the
-         * JIT carrier fk_jprim2 — gt/ge/abs lower onto these via fk_rwtab. */
-        if (fk_isf(a5) || fk_isf(b5)) {
+        /* The compare law, for le here and eq/lt on tags 102/103 (gt/ge/abs
+         * lower onto these via fk_rwtab): int/int compares the tagged words
+         * exactly (<<1 tagging keeps order), a float on either side forces an
+         * IEEE comparison, and only numbers have an order -- an odd word that
+         * is not a float refuses by name, as the Go/Rust/TS lanes do. */
+        if ((a5 | b5) & 1) {
+            if (!((fk_isf(a5) || (a5 & 1) == 0) && (fk_isf(b5) || (b5 & 1) == 0))) { fk_die(FK_ORDER_REFUSAL); }
             return (fk_num(a5) <= fk_num(b5)) ? 2 : 0;
         }
         return (a5 <= b5) ? 2 : 0;
@@ -11483,40 +11480,28 @@ static long long fk_walk(long long i, long long fp) {
         if (fk_isf(ae) || fk_isf(be)) {   /* a float meets numbers only: fk_num would read nil's word 1 as 0.0 */
             return (((ae & 1) == 0 || fk_isf(ae)) && ((be & 1) == 0 || fk_isf(be)) && fk_num(ae) == fk_num(be)) ? 2 : 0;
         }
-        /* Both words must actually BE node boxes. A node box is
-         * 0 - ((i << 1) | 1), so its word is negative and ODD; an integer is
-         * v << 1, so its word is EVEN -- the invariant fk_isf's own comment
-         * states. This case tested only `< 0`, so a negative INTEGER was read
-         * as a node index: -2 is the word -4 and fk_nidx(-4) is 1, -3 is -6 and
-         * maps to 2, and where those nodes were both kind 3 the arm compared
-         * their coordinates and answered EQUAL. Witnessed 2026-09-10:
-         * eq(-3, -2) answered 1, and so did eq(-2, -4) and eq(-3, -4), while
-         * eq(-1, -2) answered 0 -- because -1 is the word -2, which maps to
-         * index 0 and fell out at `>= 1`. So every sentinel of -1 in this body
-         * was safe and every distinct sentinel below it silently collided.
-         * lt, le, add and sub were never affected; only this arm. */
+        /* Two node boxes (0 - ((i << 1) | 1): negative and ODD, where an int
+         * word is EVEN) that are both NodeIDs meet by their four coordinates:
+         * a NodeID is identity-by-content, whichever mint built the value node. */
         if (ae < 0 && be < 0 && (ae & 1) != 0 && (be & 1) != 0) {
             long long ia102 = fk_nidx(ae);
             long long ib102 = fk_nidx(be);
             if (ia102 >= 1 && ia102 <= fk_np && ib102 >= 1 && ib102 <= fk_np &&
                 fk_nkind[ia102] == 3 && fk_nkind[ib102] == 3) {
-                /* A NodeID is identity-by-content: equal coordinates ARE the
-                 * same identity regardless of which mint built the value node.
-                 * Before this case, two (make_nodeid p l t i) of the same
-                 * coordinates compared by handle and answered 0 (witnessed
-                 * 2026-08-30); fk_neq already knew the kind-3 law — eq just
-                 * never asked it. Only the nodeid/nodeid pair routes here. */
                 return (fk_nid[ia102][0] == fk_nid[ib102][0] &&
                         fk_nid[ia102][1] == fk_nid[ib102][1] &&
                         fk_nid[ia102][2] == fk_nid[ib102][2] &&
                         fk_nid[ia102][3] == fk_nid[ib102][3]) ? 2 : 0;
             }
         }
-        return (ae == be) ? 2 : 0;
+        /* Two cons pairs (odd words above nil's 1) meet by their items, as
+         * value_eq does: a list's identity is its composition (axiom-3), never
+         * the pair a build happened to share. Every other word meets itself. */
+        return (ae == be || ((ae & be & 1) && ae > 1 && be > 1 && fk_veq(ae, be))) ? 2 : 0;
     }
     if (t == 103) {
         { long long r103; if (fk_len_cmp(i, fp, 1, &r103)) { return r103; } }
-        /* int/int exact, float promotes — the tag-5 compare law.
+        /* The tag-5 compare law, refusal included.
          * Same rooting as t == 102, same reason, same cost on the int path. */
         long long al = fk_walk(fk_node[i][1], fp);
         long long bl;
@@ -11528,7 +11513,8 @@ static long long fk_walk(long long i, long long fp) {
         } else {
             bl = fk_walk(fk_node[i][2], fp);
         }
-        if (fk_isf(al) || fk_isf(bl)) {
+        if ((al | bl) & 1) {
+            if (!((fk_isf(al) || (al & 1) == 0) && (fk_isf(bl) || (bl & 1) == 0))) { fk_die(FK_ORDER_REFUSAL); }
             return (fk_num(al) < fk_num(bl)) ? 2 : 0;
         }
         return (al < bl) ? 2 : 0;
