@@ -1,0 +1,101 @@
+; loop-lane-string-value-band.fk — a string is a value in a leaf: literals, answers of calls and ifs, and the cold callee warmed.
+;
+; The seventh rung of Urs's 2026-09-12 goal. After the emit side of strings, a leaf still could not hold a string
+; literal, answer a string an if chose, or call a leaf that builds one; and a leaf whose callee sat on a branch never
+; taken stayed cold forever. Now every string value in a leaf rides a slot -- pointer in a register, length at the
+; slot's frame word: a parameter's the door fills, a literal's the leaf's own prologue fills (the pool's base read when
+; the leaf runs, plus the offset a live string keeps), a call's or an if's answer a hidden slot the leaf moves into.
+; A callee that builds a string works in its caller's scratch: the caller copies a seeded accumulator's bytes in, takes
+; the answer back with its length, narrows the scratch past it, and a loop renews its scratch each pass. nothing? of a
+; parameter folds away at the door, which admits numbers and strings only. And a call to a callee still cold records
+; the types the call carries; the pulse crystallizes the callee for them and asks the caller again at once.
+;
+; Verdict 255
+; PROOF LEVEL: FOURTH-ARM ONLY (the transparent lanes are fkwu's MAP_JIT arm64 door; a defn's native state is the 8th field of its hot row)
+; preludes: form-stdlib/core.fk
+;
+;   1   a leaf answers a literal, and an if between a literal and a string parameter, at state 1, as its twin does
+;   2   a leaf that asks nothing? of its parameter first crystallizes (state 1) and answers; nothing still reads the walker's answer
+;   4   fstr-int-str, one leaf calling two builders with literal seeds, reads state 1 and agrees with the C writer's walker twin over 28 edges
+;   8   a builder called with a seed copies it in; a seed longer than the scratch is answered through the walker, byte-equal
+;   16  a loop calling a builder every pass reads state 2 and agrees with its twin over 50,000 passes
+;   32  str_len of a literal and of a builder's answer, inside a leaf at state 1
+;   64  a leaf whose callee is on a branch never taken crystallizes (state 1): the callee was warmed for the call's types
+;   128 the warm run of fstr-int-str is under the walker twin's run of the same work
+(do
+    (defn lsv-bit (ok bit) (if ok bit 0))
+    (defn lsv-state (name rows) (if (eq (len rows) 0) -99 (if (str_eq (nth (head rows) 1) name) (nth (head rows) 7) (lsv-state name (tail rows)))))
+    (defn lsv-native (name) (lsv-state name (kernel_page_hot (host_pid) 240)))
+    (defn lsv-lt? (a b) (lt a b))
+    ; 1: literals and a string if
+    (defn lsv-sign (n) (if (lt n 0) "neg" "pos"))
+    (defn lsv-or (s n) (if (lt n 0) "neg" s))
+    (defn lsv-sign-walk (n) (if (lsv-lt? n 0) "neg" "pos"))
+    (defn lsv-or-walk (s n) (if (lsv-lt? n 0) "neg" s))
+    (defn lsv-h1 (n acc) (if (le n 0) acc (lsv-h1 (sub n 1) (add acc (add (str_len (lsv-sign (sub 5 n))) (str_len (lsv-or "abcd" (sub n 5))))))))
+    (let h1 (lsv-h1 3000 0))
+    (let lit-ok (if (str_eq (lsv-sign -3) (lsv-sign-walk -3)) (if (str_eq (lsv-sign 3) (lsv-sign-walk 3)) (if (str_eq (lsv-or "xyz" -1) (lsv-or-walk "xyz" -1)) (if (str_eq (lsv-or "xyz" 1) "xyz") (str_eq (lsv-or "" 1) "") false) false) false) false))
+    (let sign-state (lsv-native "lsv-sign"))
+    (let or-state (lsv-native "lsv-or"))
+    ; 2: nothing? folded at the door
+    (defn lsv-nf (n) (if (nothing? n) 0 (add n 1)))
+    (defn lsv-h2 (n acc) (if (le n 0) acc (lsv-h2 (sub n 1) (add acc (lsv-nf n)))))
+    (let h2 (lsv-h2 3000 0))
+    (let nf-state (lsv-native "lsv-nf"))
+    (let nf-ok (if (eq (lsv-nf 41) 42) (eq (lsv-nf (nothing)) 0) false))
+    ; 4: fstr-int-str as one leaf
+    (defn lsv-pos (n) (if (lsv-lt? n 10) (byte_to_str (add 48 n)) (str_concat (lsv-pos (div n 10)) (byte_to_str (add 48 (mod n 10))))))
+    (defn lsv-walk (n) (if (eq n 0) "0" (if (lsv-lt? n 0) (str_concat "-" (if (lsv-lt? n -9) (str_concat (lsv-pos (sub 0 (div n 10))) (byte_to_str (sub 48 (mod n 10)))) (byte_to_str (sub 48 n)))) (lsv-pos n))))
+    (defn lsv-h4 (n acc) (if (le n 0) acc (lsv-h4 (sub n 1) (add acc (add (str_len (fstr-int-str (sub 123456 n))) (str_len (fstr-int-str (sub n 123456))))))))
+    (let h4 (lsv-h4 3000 0))
+    (let i2s-state (lsv-native "fstr-int-str"))
+    (let cases (list 0 1 7 9 10 11 42 99 100 101 999 1000 65535 123456789 4611686018427387903 -1 -7 -9 -10 -11 -42 -100 -101 -999 -123456789 -4611686018427387903 -4611686018427387904 5))
+    (defn lsv-miss (cs acc) (if (eq (len cs) 0) acc (lsv-miss (tail cs) (add acc (if (str_eq (fstr-int-str (head cs)) (lsv-walk (head cs))) 0 1)))))
+    (let misses (lsv-miss cases 0))
+    ; 8: a seeded builder, and a seed past the scratch
+    (defn lsv-seeded (n s) (fstr-digits n s))
+    (defn lsv-mk (n acc) (if (le n 0) acc (lsv-mk (sub n 1) (str_concat acc "0123456789"))))
+    (let big (lsv-mk 60 ""))
+    (defn lsv-h8 (n acc) (if (le n 0) acc (lsv-h8 (sub n 1) (add acc (str_len (lsv-seeded n "<-"))))))
+    (let h8 (lsv-h8 3000 0))
+    (let seeded-state (lsv-native "lsv-seeded"))
+    (let r8 (lsv-seeded 42 big))
+    (let seeded-ok (if (str_eq (lsv-seeded 7 "<-") "7<-") (if (str_eq (lsv-seeded 12345 "") "12345") (if (eq (str_len r8) 602) (if (eq (str_byte_at r8 0) 52) (if (eq (str_byte_at r8 2) 48) (eq (str_byte_at r8 601) 57) false) false) false) false) false))
+    ; 16: a loop calling a builder every pass
+    (defn lsv-sumlen (n acc) (if (le n 0) acc (lsv-sumlen (sub n 1) (add acc (str_len (fstr-digits n ""))))))
+    (defn lsv-sumlen-walk (n acc) (if (lsv-lt? 0 n) (lsv-sumlen-walk (sub n 1) (add acc (str_len (fstr-digits n "")))) acc))
+    (let s16 (lsv-sumlen 3000 0))
+    (let sumlen-state (lsv-native "lsv-sumlen"))
+    (let sumlen-ok (eq (lsv-sumlen 50000 0) (lsv-sumlen-walk 50000 0)))
+    ; 32: str_len of a literal and of an answer
+    (defn lsv-l5 (n) (add n (str_len "hello")))
+    (defn lsv-dl (n) (str_len (fstr-digits n "")))
+    (defn lsv-h32 (n acc) (if (le n 0) acc (lsv-h32 (sub n 1) (add acc (add (lsv-l5 n) (lsv-dl (mul n 7)))))))
+    (let h32 (lsv-h32 3000 0))
+    (let l5-state (lsv-native "lsv-l5"))
+    (let dl-state (lsv-native "lsv-dl"))
+    (let len-ok (if (eq (lsv-l5 10) 15) (if (eq (lsv-dl 0) 1) (if (eq (lsv-dl 10) 2) (eq (lsv-dl 123456789) 9) false) false) false))
+    ; 64: a callee on a branch never taken, warmed
+    (defn lsv-neg-never (n acc) (if (lt -10 n) (str_concat (byte_to_str 45) (str_concat (byte_to_str (sub 48 n)) acc)) (lsv-neg-never (div n 10) (str_concat (byte_to_str (sub 48 (mod n 10))) acc))))
+    (defn lsv-pos-only (n acc) (if (lt n 10) (str_concat (byte_to_str (add 48 n)) acc) (lsv-pos-only (div n 10) (str_concat (byte_to_str (add 48 (mod n 10))) acc))))
+    (defn lsv-either (n) (if (lt n 0) (lsv-neg-never n "") (lsv-pos-only n "")))
+    (defn lsv-h64 (n acc) (if (le n 0) acc (lsv-h64 (sub n 1) (cons (str_len (lsv-either n)) acc))))
+    (let h64 (lsv-h64 2200 (list)))
+    (let either-state (lsv-native "lsv-either"))
+    (let never-called (lsv-native "lsv-neg-never"))
+    (let either-ok (if (str_eq (lsv-either 907) "907") (str_eq (lsv-either -907) "-907") false))
+    ; 128: the warm run against the twin's
+    (defn lsv-rep (n acc) (if (le n 0) acc (lsv-rep (sub n 1) (add acc (str_len (fstr-int-str (sub 5000000 (mul n 7))))))))
+    (defn lsv-rep-walk (n acc) (if (le n 0) acc (lsv-rep-walk (sub n 1) (add acc (str_len (lsv-walk (sub 5000000 (mul n 7))))))))
+    (let w0 (host_monotonic_ms)) (let warm (lsv-rep 20000 0)) (let w1 (host_monotonic_ms))
+    (let k0 (host_monotonic_ms)) (let cold (lsv-rep-walk 20000 0)) (let k1 (host_monotonic_ms))
+    (let told (print (list "states" sign-state or-state nf-state i2s-state seeded-state sumlen-state l5-state dl-state either-state "never-called" never-called "misses" misses "lit" lit-ok "nf" nf-ok "seeded" seeded-ok "sumlen" sumlen-ok "len" len-ok "either" either-ok "ms" (sub w1 w0) (sub k1 k0))))
+    (let b1 (lsv-bit (if (eq sign-state 1) (if (eq or-state 1) lit-ok false) false) 1))
+    (let b2 (lsv-bit (if (eq nf-state 1) nf-ok false) 2))
+    (let b3 (lsv-bit (if (eq i2s-state 1) (eq misses 0) false) 4))
+    (let b4 (lsv-bit (if (eq seeded-state 1) seeded-ok false) 8))
+    (let b5 (lsv-bit (if (eq sumlen-state 2) sumlen-ok false) 16))
+    (let b6 (lsv-bit (if (eq l5-state 1) (if (eq dl-state 1) len-ok false) false) 32))
+    (let b7 (lsv-bit (if (eq either-state 1) (if (eq never-called -99) either-ok false) false) 64))
+    (let b8 (lsv-bit (if (eq warm cold) (lt (sub w1 w0) (sub k1 k0)) false) 128))
+    (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 b8))))))))
