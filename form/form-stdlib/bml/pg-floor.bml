@@ -1,0 +1,263 @@
+// pg-floor.bml — the pg_* doors in Form, for the kernels that carry no pg native.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hmac-sha256.fk form-stdlib/pbkdf2-sha256.fk form-stdlib/base64.fk
+//
+// Go (pgx) and Rust (the postgres crate) carry pg_connect, pg_exec, pg_query, pg_ping, pg_close and
+// pg_last_error as natives, and a present native answers its name on every kernel. fkwu and TS carry
+// none, so these definitions stand in for them there. They speak the Postgres v3 wire protocol over
+// the socket doors every kernel carries: a StartupMessage asking for TimeZone UTC and UTF8, trust,
+// cleartext or SCRAM-SHA-256 authentication, and the simple Query protocol.
+//
+// pg_exec answers the row count of the last command tag. pg_query answers the rows joined by "\n",
+// their columns joined by "\t", each cell as Go renders it: bool as true or false, NULL as "",
+// timestamps and dates as RFC3339 in UTC, every other type as the server's text. A failure answers -1
+// or "ERR", and pg_last_error names it. The carriers build their SQL themselves, so no parameters are
+// carried. A handle is the socket itself.
+//
+// Bytes cross as strings, which fkwu carries faithfully. TS decodes the bytes it receives as UTF-8,
+// so it cannot read these frames until its socket doors hand bytes over as bytes.
+section [form.bml] {
+ let pgf-state = record_new(0);
+ class PgFloor {
+  // ── the last error, as pg_last_error reads it ────────────────────────────────
+  def pgf-fail(message, answer) {
+   let kept = record_set(pgf-state, "err", message);
+   answer;
+  }
+  def pgf-ok(answer) {
+   let kept = record_set(pgf-state, "err", "");
+   answer;
+  }
+  def pgf-last() = if record_has(pgf-state, "err") then record_get(pgf-state, "err") else "";
+  def pg_last_error() = pgf-last();
+
+  // ── bytes, as strings ────────────────────────────────────────────────────────
+  def pgf-b(n) = byte_to_str(n);
+  def pgf-be16(n) = str_concat(pgf-b(mod(div(n, 256), 256)), pgf-b(mod(n, 256)));
+  def pgf-be32(n) = str_concat(pgf-be16(mod(div(n, 65536), 65536)), pgf-be16(mod(n, 65536)));
+  def pgf-cstr(s) = str_concat(s, pgf-b(0));
+  def pgf-frame(tag, body) = str_concat(tag, str_concat(pgf-be32(add(str_len(body), 4)), body));
+  def pgf-xor(a, b) = if eq(len(a), 0) then list() else cons(bxor(head(a), head(b)), pgf-xor(tail(a), tail(b)));
+  def pgf-reverse(xs, acc) = if eq(len(xs), 0) then acc else pgf-reverse(tail(xs), cons(head(xs), acc));
+  def pgf-join(xs, sep) = if eq(len(xs), 0) then "" else pgf-join-from(tail(xs), sep, head(xs));
+  def pgf-join-from(xs, sep, acc) = if eq(len(xs), 0) then acc else pgf-join-from(tail(xs), sep, str_concat(acc, str_concat(sep, head(xs))));
+  def pgf-starts?(s, p) = if lt(str_len(s), str_len(p)) then 0 else str_eq(substring(s, 0, str_len(p)), p);
+  def pgf-ends?(s, x) = if lt(str_len(s), str_len(x)) then 0 else str_eq(substring(s, sub(str_len(s), str_len(x)), str_len(s)), x);
+  def pgf-zero-at(s, i) = if ge(i, str_len(s)) then i else if eq(str-byte-at(s, i), 0) then i else pgf-zero-at(s, add(i, 1));
+
+  // ── the messages this client sends ───────────────────────────────────────────
+  def pgf-startup(user, db) {
+   let params = str_concat(pgf-cstr("user"), str_concat(pgf-cstr(user), str_concat(pgf-cstr("database"), str_concat(pgf-cstr(db), str_concat(pgf-cstr("TimeZone"), str_concat(pgf-cstr("UTC"), str_concat(pgf-cstr("client_encoding"), str_concat(pgf-cstr("UTF8"), pgf-b(0)))))))));
+   let body = str_concat(pgf-be32(196608), params);
+   str_concat(pgf-be32(add(str_len(body), 4)), body);
+  }
+  def pgf-query(sql) = pgf-frame("Q", pgf-cstr(sql));
+
+  // ── frames off the wire ──────────────────────────────────────────────────────
+  // socket_recv answers "" once the peer has closed, so a short buffer then stays short.
+  def pgf-none?(got) = if nothing?(got) then 1 else eq(str_len(got), 0);
+  def pgf-fill(conn, buf, need) = if ge(str_len(buf), need) then buf else pgf-fill-more(conn, buf, need, socket_recv(conn, 65536));
+  def pgf-fill-more(conn, buf, need, got) = if pgf-none?(got) then buf else pgf-fill(conn, str_concat(buf, got), need);
+  // the next frame as list(type, body, rest); type -1 when the stream ends before a whole frame, or a
+  // frame declares a length no frame can have
+  def pgf-next(conn, buf) {
+   let head5 = pgf-fill(conn, buf, 5);
+   let size = if lt(str_len(head5), 5) then 0 else str-be32(head5, 1);
+   if lt(size, 4) then list(-1, "", "") else pgf-next-body(conn, head5, add(1, size));
+  }
+  def pgf-next-body(conn, buf, total) {
+   let whole = pgf-fill(conn, buf, total);
+   if lt(str_len(whole), total) then list(-1, "", "") else list(str-byte-at(whole, 0), substring(whole, 5, total), substring(whole, total, str_len(whole)));
+  }
+
+  // ── what the server answers ──────────────────────────────────────────────────
+  // ErrorResponse: fields of (code byte, C string) ended by a zero byte; M carries the message
+  def pgf-error-message(body, i) {
+   let code = if ge(i, str_len(body)) then 0 else str-byte-at(body, i);
+   let end = pgf-zero-at(body, add(i, 1));
+   if eq(code, 0) then "the server reported an error without a message" else if eq(code, 77) then substring(body, add(i, 1), end) else pgf-error-message(body, add(end, 1));
+  }
+  // RowDescription: a count, then per field a name, table oid, column, type oid, size, modifier, format
+  def pgf-types(body) = pgf-types-at(body, 2, str-be16(body, 0));
+  def pgf-types-at(body, i, n) = if eq(n, 0) then list() else pgf-types-field(body, pgf-zero-at(body, i), n);
+  def pgf-types-field(body, end, n) = cons(str-be32(body, add(end, 7)), pgf-types-at(body, add(end, 19), sub(n, 1)));
+  // DataRow: a count, then per column a length (-1 for NULL) and that many bytes
+  def pgf-row(body, types) = pgf-join(pgf-cells(body, 2, types), "\t");
+  def pgf-cells(body, i, types) = if eq(len(types), 0) then list() else pgf-cell(body, i, types, str-be32(body, i));
+  def pgf-cell(body, i, types, n) = if ge(n, 2147483648) then cons("", pgf-cells(body, add(i, 4), tail(types))) else cons(pgf-render(head(types), substring(body, add(i, 4), add(add(i, 4), n))), pgf-cells(body, add(add(i, 4), n), tail(types)));
+  // a cell as Go renders it: bool as true or false, timestamps and dates as RFC3339 in UTC
+  def pgf-render(oid, text) = if eq(oid, 16) then pgf-bool-text(text) else if eq(oid, 1184) then pgf-rfc3339(pgf-drop-utc(text)) else if eq(oid, 1114) then pgf-rfc3339(text) else if eq(oid, 1082) then str_concat(text, "T00:00:00Z") else text;
+  def pgf-bool-text(text) = if str_eq(text, "t") then "true" else "false";
+  def pgf-drop-utc(text) = if pgf-ends?(text, "+00") then substring(text, 0, sub(str_len(text), 3)) else text;
+  def pgf-rfc3339(text) {
+   let at = str_find(text, " ", 0);
+   let joined = if lt(at, 0) then text else str_concat(substring(text, 0, at), str_concat("T", substring(text, add(at, 1), str_len(text))));
+   str_concat(joined, "Z");
+  }
+  // the row count a command tag carries: its last word when that is a number, 0 otherwise
+  def pgf-last-space(s, i) = if lt(i, 0) then -1 else if eq(str-byte-at(s, i), 32) then i else pgf-last-space(s, sub(i, 1));
+  def pgf-digits?(s, i) = if ge(i, str_len(s)) then gt(str_len(s), 0) else if and(ge(str-byte-at(s, i), 48), le(str-byte-at(s, i), 57)) then pgf-digits?(s, add(i, 1)) else 0;
+  def pgf-tag-count(tag) {
+   let word = substring(tag, add(pgf-last-space(tag, sub(str_len(tag), 1)), 1), str_len(tag));
+   if pgf-digits?(word, 0) then str_to_int(word) else 0;
+  }
+
+  // ── one simple Query, read to ReadyForQuery ──────────────────────────────────
+  // answers list(error, tag, rows); error is "" when the server answered without one
+  def pgf-run(conn, sql) {
+   let sent = socket_send(conn, pgf-query(sql));
+   pgf-read(conn, "", list(), list(), "", "");
+  }
+  def pgf-read(conn, buf, types, rows, tag, err) {
+   let f = pgf-next(conn, buf);
+   let ty = nth(f, 0);
+   let body = nth(f, 1);
+   let rest = nth(f, 2);
+   if eq(ty, -1) then list("the connection ended, or sent a frame this client cannot read", tag, pgf-reverse(rows, list()))
+   else if eq(ty, 90) then list(err, tag, pgf-reverse(rows, list()))
+   else if eq(ty, 84) then pgf-read(conn, rest, pgf-types(body), rows, tag, err)
+   else if eq(ty, 68) then pgf-read(conn, rest, types, cons(pgf-row(body, types), rows), tag, err)
+   else if eq(ty, 67) then pgf-read(conn, rest, types, rows, substring(body, 0, pgf-zero-at(body, 0)), err)
+   else if eq(ty, 69) then pgf-read(conn, rest, types, rows, tag, pgf-error-message(body, 0))
+   else pgf-read(conn, rest, types, rows, tag, err);
+  }
+  def pg_exec(conn, sql) {
+   let r = pgf-run(conn, sql);
+   if gt(str_len(nth(r, 0)), 0) then pgf-fail(nth(r, 0), -1) else pgf-ok(pgf-tag-count(nth(r, 1)));
+  }
+  def pg_query(conn, sql) {
+   let r = pgf-run(conn, sql);
+   if gt(str_len(nth(r, 0)), 0) then pgf-fail(nth(r, 0), "ERR") else pgf-ok(pgf-join(nth(r, 2), "\n"));
+  }
+  def pg_ping(conn) {
+   let r = pgf-run(conn, "SELECT 1");
+   if gt(str_len(nth(r, 0)), 0) then pgf-fail(nth(r, 0), 0) else pgf-ok(1);
+  }
+  def pg_close(conn) {
+   let bye = socket_send(conn, pgf-frame("X", ""));
+   let closed = socket_close(conn);
+   0;
+  }
+
+  // ── the connection string ────────────────────────────────────────────────────
+  // postgres://user[:password]@host[:port][/database][?options] -> list(user, password, host, port, database)
+  def pgf-hex(c) = if and(ge(c, 48), le(c, 57)) then sub(c, 48) else if and(ge(c, 97), le(c, 102)) then sub(c, 87) else if and(ge(c, 65), le(c, 70)) then sub(c, 55) else -1;
+  def pgf-byte-or(s, i, none) = if ge(i, str_len(s)) then none else str-byte-at(s, i);
+  def pgf-unescape(s) = pgf-unescape-at(s, 0, "");
+  def pgf-unescape-at(s, i, acc) {
+   let c = pgf-byte-or(s, i, -1);
+   let hi = if eq(c, 37) then pgf-hex(pgf-byte-or(s, add(i, 1), 0)) else -1;
+   let lo = if eq(c, 37) then pgf-hex(pgf-byte-or(s, add(i, 2), 0)) else -1;
+   if lt(c, 0) then acc else if and(ge(hi, 0), ge(lo, 0)) then pgf-unescape-at(s, add(i, 3), str_concat(acc, pgf-b(add(mul(hi, 16), lo)))) else pgf-unescape-at(s, add(i, 1), str_concat(acc, substring(s, i, add(i, 1))));
+  }
+  def pgf-last-byte(s, i, b) = if lt(i, 0) then -1 else if eq(str-byte-at(s, i), b) then i else pgf-last-byte(s, sub(i, 1), b);
+  def pgf-dsn(url) {
+   let rest = if pgf-starts?(url, "postgresql://") then substring(url, 13, str_len(url)) else substring(url, 11, str_len(url));
+   let q = str_find(rest, "?", 0);
+   let main = if lt(q, 0) then rest else substring(rest, 0, q);
+   let at = pgf-last-byte(main, sub(str_len(main), 1), 64);
+   let userinfo = if lt(at, 0) then "" else substring(main, 0, at);
+   let place = substring(main, add(at, 1), str_len(main));
+   let slash = str_find(place, "/", 0);
+   let hostport = if lt(slash, 0) then place else substring(place, 0, slash);
+   let db = if lt(slash, 0) then "" else pgf-unescape(substring(place, add(slash, 1), str_len(place)));
+   let colon = str_find(userinfo, ":", 0);
+   let user = pgf-unescape(if lt(colon, 0) then userinfo else substring(userinfo, 0, colon));
+   let password = if lt(colon, 0) then "" else pgf-unescape(substring(userinfo, add(colon, 1), str_len(userinfo)));
+   let hp = pgf-hostport(hostport);
+   list(user, password, nth(hp, 0), nth(hp, 1), if eq(str_len(db), 0) then user else db);
+  }
+  // host[:port] or [v6]:port; the host is localhost and the port 5432 when absent
+  def pgf-hostport(hp) {
+   let close = if pgf-starts?(hp, "[") then str_find(hp, "]", 0) else -1;
+   let colon = if ge(close, 0) then str_find(hp, ":", close) else str_find(hp, ":", 0);
+   let host = if ge(close, 0) then substring(hp, 1, close) else if lt(colon, 0) then hp else substring(hp, 0, colon);
+   let port = if lt(colon, 0) then 5432 else str_to_int(substring(hp, add(colon, 1), str_len(hp)));
+   list(if eq(str_len(host), 0) then "localhost" else host, port);
+  }
+
+  // ── connecting ───────────────────────────────────────────────────────────────
+  def pg_connect(url) = if or(pgf-starts?(url, "postgres://"), pgf-starts?(url, "postgresql://")) then pgf-connect-to(pgf-dsn(url)) else pgf-fail("pg_connect: database.url is not a PostgreSQL URL", -1);
+  def pgf-connect-to(d) {
+   let conn = socket_connect(nth(d, 2), nth(d, 3));
+   if lt(conn, 0) then pgf-fail(str_concat("pg_connect: cannot reach ", str_concat(nth(d, 2), str_concat(":", int_to_str(nth(d, 3))))), -1) else pgf-handshake(conn, d);
+  }
+  def pgf-handshake(conn, d) {
+   let sent = socket_send(conn, pgf-startup(nth(d, 0), nth(d, 4)));
+   let err = pgf-auth(conn, "", d);
+   if gt(str_len(err), 0) then pgf-fail(err, pgf-closed(conn, -1)) else pgf-ok(conn);
+  }
+  def pgf-closed(conn, answer) {
+   let closed = socket_close(conn);
+   answer;
+  }
+  // reads the startup answers until ReadyForQuery; answers "" or the reason the server gave
+  def pgf-auth(conn, buf, d) {
+   let f = pgf-next(conn, buf);
+   let ty = nth(f, 0);
+   let body = nth(f, 1);
+   let rest = nth(f, 2);
+   if eq(ty, -1) then "pg_connect: the connection ended during startup, or sent a frame this client cannot read"
+   else if eq(ty, 90) then ""
+   else if eq(ty, 69) then pgf-error-message(body, 0)
+   else if eq(ty, 82) then pgf-auth-step(conn, rest, d, str-be32(body, 0), body)
+   else pgf-auth(conn, rest, d);
+  }
+  def pgf-auth-step(conn, buf, d, code, body) {
+   if eq(code, 0) then pgf-auth(conn, buf, d)
+   else if eq(code, 3) then pgf-auth-sent(conn, buf, d, socket_send(conn, pgf-frame("p", pgf-cstr(nth(d, 1)))))
+   else if and(eq(code, 10), ge(str_find(body, pgf-cstr("SCRAM-SHA-256"), 4), 0)) then pgf-scram(conn, buf, d)
+   else str_concat("pg_connect: authentication method ", str_concat(int_to_str(code), " is not carried; trust, password and SCRAM-SHA-256 are"));
+  }
+  def pgf-auth-sent(conn, buf, d, sent) = pgf-auth(conn, buf, d);
+
+  // ── SCRAM-SHA-256 (RFC 5802, RFC 7677) ───────────────────────────────────────
+  // Postgres takes the user from the startup message, so the SCRAM user is empty.
+  def pgf-attr(msg, key) {
+   let hit = str_find(msg, str_concat(",", key), 0);
+   let at = if pgf-starts?(msg, key) then 0 else if lt(hit, 0) then -1 else add(hit, 1);
+   let from = if lt(at, 0) then str_len(msg) else add(at, str_len(key));
+   let end = str_find(msg, ",", from);
+   substring(msg, from, if lt(end, 0) then str_len(msg) else end);
+  }
+  // the client's final message and the signature the server must answer with
+  def pgf-scram-proof(password, first-bare, server-first) {
+   let without-proof = str_concat("c=biws,r=", pgf-attr(server-first, "r="));
+   let auth = str-byte-list(str_concat(first-bare, str_concat(",", str_concat(server-first, str_concat(",", without-proof)))));
+   let salted = pbkdf2-sha256-32(str-byte-list(password), base64-decode(pgf-attr(server-first, "s=")), str_to_int(pgf-attr(server-first, "i=")));
+   let client-key = hmac-sha256(salted, str-byte-list("Client Key"));
+   let proof = pgf-xor(client-key, hmac-sha256(sha256(client-key), auth));
+   let server-signature = base64-encode(hmac-sha256(hmac-sha256(salted, str-byte-list("Server Key")), auth));
+   list(str_concat(without-proof, str_concat(",p=", base64-encode(proof))), server-signature);
+  }
+  def pgf-scram(conn, buf, d) {
+   let nonce = base64-encode(random_bytes(18));
+   let first-bare = str_concat("n=,r=", nonce);
+   let first = str_concat("n,,", first-bare);
+   let sent = socket_send(conn, pgf-frame("p", str_concat(pgf-cstr("SCRAM-SHA-256"), str_concat(pgf-be32(str_len(first)), first))));
+   pgf-scram-continue(conn, pgf-next(conn, buf), d, nonce, first-bare);
+  }
+  def pgf-scram-continue(conn, f, d, nonce, first-bare) {
+   let body = nth(f, 1);
+   let server-first = substring(body, 4, str_len(body));
+   if eq(nth(f, 0), 69) then pgf-error-message(body, 0)
+   else if not(and(eq(nth(f, 0), 82), eq(str-be32(body, 0), 11))) then "pg_connect: the server did not continue SCRAM"
+   else if not(pgf-starts?(pgf-attr(server-first, "r="), nonce)) then "pg_connect: the server's SCRAM nonce does not extend ours"
+   else pgf-scram-send(conn, nth(f, 2), d, pgf-scram-proof(nth(d, 1), first-bare, server-first));
+  }
+  def pgf-scram-send(conn, buf, d, proof) {
+   let sent = socket_send(conn, pgf-frame("p", nth(proof, 0)));
+   pgf-scram-verify(conn, pgf-next(conn, buf), d, nth(proof, 1));
+  }
+  def pgf-scram-verify(conn, f, d, server-signature) {
+   let body = nth(f, 1);
+   if eq(nth(f, 0), 69) then pgf-error-message(body, 0)
+   else if not(and(eq(nth(f, 0), 82), eq(str-be32(body, 0), 12))) then "pg_connect: the server did not finish SCRAM"
+   else if not(str_eq(pgf-attr(substring(body, 4, str_len(body)), "v="), server-signature)) then "pg_connect: the server's SCRAM signature does not match"
+   else pgf-auth(conn, nth(f, 2), d);
+  }
+
+  // the stand-in for random_bytes where no kernel native carries it: the host's own randomness
+  def random_bytes(n) = str-byte-list(host_file_read_slice("/dev/urandom", 0, n));
+ }
+ 0;
+}
