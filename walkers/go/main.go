@@ -695,15 +695,14 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 
 		case RBasicFnCall:
 			name := k.identID(kids[0])
-			// Native takes priority unless user shadowed with a closure.
+			// A present native answers its name, as on the full kernels: a binding
+			// of the same spelling (a parameter, a defn) never overrides one.
 			if ne, ok := k.natives[name]; ok {
-				if _, hasUserBinding := env.Lookup(name); !hasUserBinding {
-					args := make([]Value, len(kids)-1)
-					for i := 1; i < len(kids); i++ {
-						args[i-1] = k.walk(kids[i], env)
-					}
-					return ne.Fn(k, args)
+				args := make([]Value, len(kids)-1)
+				for i := 1; i < len(kids); i++ {
+					args[i-1] = k.walk(kids[i], env)
 				}
+				return ne.Fn(k, args)
 			}
 			v, ok := env.Lookup(name)
 			if !ok {
@@ -1103,7 +1102,16 @@ func (k *Kernel) readSexpr(toks []sexpToken, i int) (NodeID, int) {
 				i++
 				break
 			}
-			arg, ni := k.readSexpr(toks, i)
+			var arg NodeID
+			var ni int
+			if verb == "defn" && len(args) == 1 && toks[i].kind == "LPAREN" {
+				// A defn's parameter list holds names, not an expression, as on the
+				// full kernels: read as one, its first name became the list's verb
+				// and fell out of the arity.
+				arg, ni = k.readDefnParams(toks, i)
+			} else {
+				arg, ni = k.readSexpr(toks, i)
+			}
 			args = append(args, arg)
 			i = ni
 		}
@@ -1111,6 +1119,30 @@ func (k *Kernel) readSexpr(toks []sexpToken, i int) (NodeID, int) {
 		return node, i
 	}
 	panic(fmt.Sprintf("parse error at line %d col %d: unexpected token %s %q", t.line, t.col, t.kind, t.value))
+}
+
+// readDefnParams — a defn's `(name name ...)` parameter list from its LPAREN, read as
+// names only into the params block the defn arm of buildVerb reads.
+func (k *Kernel) readDefnParams(toks []sexpToken, i int) (NodeID, int) {
+	openLine, openCol := toks[i].line, toks[i].col
+	i++
+	names := []NodeID{}
+	for {
+		if i >= len(toks) {
+			panic(fmt.Sprintf("parse error: unclosed defn parameter list opened at line %d col %d (reached end of input)",
+				openLine, openCol))
+		}
+		t := toks[i]
+		if t.kind == "RPAREN" {
+			return k.intern(catBlock(RBlockSequence), names), i + 1
+		}
+		if t.kind != "IDENT" {
+			panic(fmt.Sprintf("parse error at line %d col %d: defn parameter list opened at line %d col %d holds names only, got %s %q",
+				t.line, t.col, openLine, openCol, t.kind, t.value))
+		}
+		names = append(names, k.internString(t.value))
+		i++
+	}
 }
 
 func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {

@@ -16446,16 +16446,12 @@ static long long fk_rwtab_find(long long s, long long n) {
     }
     return -1;
 }
-/* A RESERVED HEAD: a name that this parser answers itself in call position —
- * the four control forms, any rewrite row, any op row. Binding one as a defn
- * PARAMETER is a silent cross-kernel divergence, not a preference: form-kernel-go's
- * reader drops such a name from the parameter list, so `(defn f (sub x) ..)` is
- * arity 2 here and arity 1 there, and the two kernels then answer the same source
- * differently with neither one saying so (MEASURED 2026-07-22: fkwu 7, bin-go
- * `walk: "f" wants 1 args, got 2`). fkwu binds it AND then lets the op win in call
- * position, so the parameter is reachable in value position only — exactly the trap
- * that returned a full-pass 255 on a deliberately broken band
- * (receipts/2026-07-22-ship-the-slot-map.md, defect 1). */
+/* A RESERVED HEAD: a name this parser answers itself in call position — the four
+ * control forms, any rewrite row, any op row. A binding of that spelling (a defn
+ * parameter, a let) is reachable in value position only; in call position the
+ * primitive wins, on Go, Rust and TS as here. That trap returned a full-pass 255 on
+ * a deliberately broken band (receipts/2026-07-22-ship-the-slot-map.md, defect 1),
+ * so [shadowed-call] below says it out loud. */
 static int fk_reserved_head(long long s, long long n) {
     if (fk_sym_eq(s, n, "defn") || fk_sym_eq(s, n, "do") || fk_sym_eq(s, n, "let") ||
         fk_sym_eq(s, n, "if")) {
@@ -17009,11 +17005,10 @@ static long long fk_sparse(void) {
 
         /* A LIVE BINDING THIS CALL WILL NOT REACH. `(sub x 128)` where `sub` is a name in
          * scope reads as subtraction, not as the binding — the op/rewrite tables are
-         * consulted before the local frame, and form-kernel-go answers the same way, so
+         * consulted before the local frame, and Go, Rust and TS answer the same way, so
          * this is not a divergence and fkwu does not refuse it. It is still the trap that
          * cost Stone 13 hours (receipts/2026-07-22-ship-the-slot-map.md), so it is said
-         * out loud: a WARNING, counted and printed, where a defn parameter of the same
-         * spelling is the harder ERROR above. */
+         * out loud: a WARNING, counted and printed. */
         if (fk_bd_lookup(s, hn) >= 0 && fk_reserved_head(s, hn)) {
             fk_diag(FK_DIAG_WARN, s,
                     "[shadowed-call] '%.*s' is bound in this scope but in call position the "

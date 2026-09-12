@@ -975,12 +975,12 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
             Value::Closure(cl)
         }
         Node::Fncall(name, args) => {
-            // Native takes priority unless the user shadowed it with a binding —
-            // faithful to the full kernel's dispatch order.
-            if env_lookup(env, name).is_none() {
-                if let Some(v) = call_native(name, args, env) {
-                    return v;
-                }
+            // A present native answers its name, as on the full kernels: a binding of
+            // the same spelling (a parameter, a defn) never overrides one. Args are
+            // evaluated once, in the CALLER's env, for whichever path answers.
+            let vals: Vec<Value> = args.iter().map(|a| walk(a, env)).collect();
+            if let Some(v) = call_native(name, &vals) {
+                return v;
             }
             let callee =
                 env_lookup(env, name).unwrap_or_else(|| panic!("unbound function: {}", name));
@@ -988,35 +988,31 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
                 Value::Closure(c) => c,
                 _ => panic!("not callable: {}", name),
             };
-            if args.len() != cl.params.len() {
+            if vals.len() != cl.params.len() {
                 panic!(
                     "{} wants {} args, got {}",
                     name,
                     cl.params.len(),
-                    args.len()
+                    vals.len()
                 );
             }
-            // Evaluate args in CALLER's env, bind in a fresh call frame chained
-            // to the closure's definition env.
+            // Bind in a fresh call frame chained to the closure's definition env.
             let call_frame = new_frame(Some(cl.env.clone()));
-            for (i, p) in cl.params.iter().enumerate() {
-                let arg = walk(&args[i], env);
-                env_bind(&call_frame, p.clone(), arg);
+            for (p, v) in cl.params.iter().zip(vals) {
+                env_bind(&call_frame, p.clone(), v);
             }
             walk(&cl.body, &call_frame)
         }
     }
 }
 
-// call_native — the pure-op native surface: list ops + string ops. Returns
-// None when the name is not a native (so the closure path takes over). Each
-// handler is faithful to the full kernel's register_native body.
-fn call_native(name: &str, arg_nodes: &[Rc<Node>], env: &Env) -> Option<Value> {
-    // Arity is checked inside each handler the same way the full kernel's
-    // natives index args[..]; evaluate eagerly in caller env first.
-    let args: Vec<Value> = arg_nodes.iter().map(|a| walk(a, env)).collect();
+// call_native — the pure-op native surface: list ops + string ops, over args the
+// caller already evaluated. Returns None when the name is not a native (so the
+// closure path takes over). Each handler is faithful to the full kernel's
+// register_native body; arity is checked inside each the way those index args[..].
+fn call_native(name: &str, args: &[Value]) -> Option<Value> {
     match name {
-        "list" => Some(Value::List(Rc::new(args))),
+        "list" => Some(Value::List(Rc::new(args.to_vec()))),
         "empty" => Some(Value::List(Rc::new(vec![]))),
         // axiom-1's third state, first-class: the ground, not a missing 0.
         "nothing" => Some(Value::Null),
