@@ -3488,8 +3488,11 @@ impl Kernel {
         // float-correct leaf a JSON-emitting native handler concatenates into the
         // response body (e.g. production-routes.fk's /api/utils handlers). One
         // native, all leaf types — core-abstraction-first.
-        self.register_native("value_str", cat_method(), |_, _, args| {
-            Value::Str(args[0].display().into())
+        // value_str — a value as text, as Go's formValueString writes it: null as "", anything else as
+        // print writes it.
+        self.register_native("value_str", cat_method(), |_, _, args| match &args[0] {
+            Value::Null => Value::Str(String::new().into()),
+            v => Value::Str(v.display().into()),
         });
         self.register_native("value_kind", cat_witness(), |_, _, args| {
             Value::Str(value_kind_name(&args[0]).to_string().into())
