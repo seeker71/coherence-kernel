@@ -1,0 +1,76 @@
+; pg-floor-band.bml — the pure half of the pg floor held to fixtures, four-way.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bml/pg-floor.bml
+;
+; Every fixture is a literal string or bytes below 128, so the four kernels read the same bytes: a
+; byte of 128 or more is one byte on fkwu and a two-byte character on Go, Rust and TS. Nothing here
+; touches a socket; the live half is observe/pg-live-witness-run.fk. The last error is read through
+; pgf-last, because pg_last_error is a native on Go and Rust and answers there instead.
+;
+; Verdict 4095 when every claim lands:
+;   1     a full URL parses into user, password, host, port and database
+;   2     a URL with no port or database takes 5432 and the user's name for the database
+;   4     percent-escapes in the password decode
+;   8     a bracketed v6 host keeps its port
+;   16    the startup message counts its own length and asks for protocol 3.0, the database and UTC
+;   32    a query frame is Q, the length of what follows, and the SQL with its zero byte
+;   64    a RowDescription yields each field's type
+;   128   a DataRow renders bool, text, date and timestamp as Go renders them, and timestamptz in UTC
+;   256   a NULL cell renders empty and the cell after it still reads
+;   512   command tags answer their row counts, and a tag without one answers 0
+;   1024  an ErrorResponse yields its message field
+;   2048  the floor keeps the last failure's message, and "" after a success
+section [form.bml] {
+    class PgFloorBand {
+        def pfgb-bit(ok, bit) = if ok then bit else 0;
+        def pfgb-bytes(xs) = if eq(len(xs), 0) then "" else str_concat(byte_to_str(head(xs)), pfgb-bytes(tail(xs)));
+        def pfgb-z() = byte_to_str(0);
+
+        // a RowDescription field: name, zero, table oid and column (6), type oid (4), size, modifier, format (8)
+        def pfgb-field(name, oid) = str_concat(name, str_concat(pfgb-z(), str_concat(pfgb-bytes(list(0, 0, 0, 0, 0, 1)), str_concat(pfgb-bytes(oid), pfgb-bytes(list(0, 4, 0, 0, 0, 0, 0, 0))))));
+        // bool 16, text 25, date 1082 = 4*256+58, timestamp 1114 = 4*256+90
+        def pfgb-rowdesc() = str_concat(pfgb-bytes(list(0, 4)), str_concat(pfgb-field("flag", list(0, 0, 0, 16)), str_concat(pfgb-field("note", list(0, 0, 0, 25)), str_concat(pfgb-field("day", list(0, 0, 4, 58)), pfgb-field("at", list(0, 0, 4, 90))))));
+        def pfgb-cell(text) = str_concat(pfgb-bytes(list(0, 0, 0, str_len(text))), text);
+        def pfgb-datarow() = str_concat(pfgb-bytes(list(0, 4)), str_concat(pfgb-cell("t"), str_concat(pfgb-cell("a b"), str_concat(pfgb-cell("2026-09-12"), pfgb-cell("2026-09-12 08:00:00.5")))));
+        def pfgb-error() = str_concat("SERROR", str_concat(pfgb-z(), str_concat("C42601", str_concat(pfgb-z(), str_concat("Msyntax error at or near \"SELEC\"", str_concat(pfgb-z(), pfgb-z()))))));
+
+        def pfgb-dsn-full() {
+            let d = pgf-dsn("postgresql://form:s3cret@db.example:6543/app?sslmode=disable");
+            and(str_eq(nth(d, 0), "form"), and(str_eq(nth(d, 1), "s3cret"), and(str_eq(nth(d, 2), "db.example"), and(eq(nth(d, 3), 6543), str_eq(nth(d, 4), "app")))));
+        }
+        def pfgb-dsn-bare() {
+            let d = pgf-dsn("postgres://someone@localhost");
+            and(str_eq(nth(d, 0), "someone"), and(str_eq(nth(d, 1), ""), and(str_eq(nth(d, 2), "localhost"), and(eq(nth(d, 3), 5432), str_eq(nth(d, 4), "someone")))));
+        }
+        def pfgb-dsn-escaped() = str_eq(nth(pgf-dsn("postgres://u:p%40ss%2Fw@h/d"), 1), "p@ss/w");
+        def pfgb-dsn-v6() {
+            let d = pgf-dsn("postgres://u@[::1]:5433/d");
+            and(str_eq(nth(d, 2), "::1"), eq(nth(d, 3), 5433));
+        }
+        def pfgb-startup() {
+            let s = pgf-startup("form", "postgres");
+            and(eq(str-be32(s, 0), str_len(s)), and(eq(str-be32(s, 4), 196608), and(ge(str_find(s, "postgres", 0), 0), and(ge(str_find(s, "TimeZone", 0), 0), eq(str-byte-at(s, sub(str_len(s), 1)), 0)))));
+        }
+        def pfgb-query() {
+            let f = pgf-query("SELECT 1");
+            and(eq(str-byte-at(f, 0), 81), and(eq(str-be32(f, 1), 13), and(eq(str_len(f), 14), eq(str-byte-at(f, 13), 0))));
+        }
+        def pfgb-types() {
+            let ts = pgf-types(pfgb-rowdesc());
+            and(eq(len(ts), 4), and(eq(nth(ts, 0), 16), and(eq(nth(ts, 1), 25), and(eq(nth(ts, 2), 1082), eq(nth(ts, 3), 1114)))));
+        }
+        def pfgb-row() = and(str_eq(pgf-row(pfgb-datarow(), list(16, 25, 1082, 1114)), "true\ta b\t2026-09-12T00:00:00Z\t2026-09-12T08:00:00.5Z"), str_eq(pgf-render(1184, "2026-09-12 00:00:00+00"), "2026-09-12T00:00:00Z"));
+        def pfgb-null() = str_eq(pgf-join(pgf-cell(str_concat(pfgb-bytes(list(0, 0, 0, 0)), pfgb-cell("ok")), 0, list(25, 25), 4294967295), "\t"), "\tok");
+        def pfgb-tags() = and(eq(pgf-tag-count("INSERT 0 3"), 3), and(eq(pgf-tag-count("UPDATE 2"), 2), and(eq(pgf-tag-count("SELECT 12"), 12), and(eq(pgf-tag-count("CREATE TABLE"), 0), eq(pgf-tag-count("BEGIN"), 0)))));
+        def pfgb-error-message() = str_eq(pgf-error-message(pfgb-error(), 0), "syntax error at or near \"SELEC\"");
+        def pfgb-last() {
+            let failed = pgf-fail("boom", -1);
+            let first = pgf-last();
+            let passed = pgf-ok(5);
+            and(eq(failed, -1), and(str_eq(first, "boom"), and(eq(passed, 5), str_eq(pgf-last(), ""))));
+        }
+
+        def pfgb-score() = add(pfgb-bit(pfgb-dsn-full(), 1), add(pfgb-bit(pfgb-dsn-bare(), 2), add(pfgb-bit(pfgb-dsn-escaped(), 4), add(pfgb-bit(pfgb-dsn-v6(), 8), add(pfgb-bit(pfgb-startup(), 16), add(pfgb-bit(pfgb-query(), 32), add(pfgb-bit(pfgb-types(), 64), add(pfgb-bit(pfgb-row(), 128), add(pfgb-bit(pfgb-null(), 256), add(pfgb-bit(pfgb-tags(), 512), add(pfgb-bit(pfgb-error-message(), 1024), pfgb-bit(pfgb-last(), 2048))))))))))));
+    }
+    pfgb-score();
+}
