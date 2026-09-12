@@ -1,0 +1,48 @@
+; The checkout bootstrap must run before core/BML admission. Only native ops
+; available to the older seed enter this unit; the supervisor owns Glass.
+; preludes: NONE
+(do
+    ; An opaque process-local suffix without the formatting layer being healed.
+    (defn fgb-suffix (n)
+        (if (lt n 16) (byte_to_str (add 97 n))
+            (str_concat (fgb-suffix (div n 16)) (byte_to_str (add 97 (mod n 16))))))
+    (defn fgb-run (argv streams)
+        (do (let pid (host_spawn_at argv streams))
+            (if (gt pid 0) (host_wait pid) pid)))
+    (defn fgb-job ()
+        (do (let path (str_concat (host_temp_dir) (str_concat "/glass-bootstrap-" (str_concat (fgb-suffix (host_pid)) (str_concat "-" (fgb-suffix (host_monotonic_ms)))))))
+            (if (eq (fs_mkdir path) 1) path (form_error "Glass bootstrap evidence directory unavailable"))))
+    (defn fgb-fresh (binary job phase)
+        (do
+            (let out (str_concat job (str_concat "/" phase)))
+            (let status (fgb-run (list binary "form/form-stdlib/tests/binary-freshness-band.fk") (list "/dev/null" out "")))
+            (let observed (read_file out))
+            (let ready (and (eq status 0) (str_eq observed "31\n")))
+            (print (list "glass-bootstrap" phase "exit" status "fresh" ready "evidence" out))
+            ready))
+    (defn fgb-rebuild (job)
+        (do
+            (let staged (str_concat "./fkwu.glass-" (fgb-suffix (host_pid))))
+            (let started (host_monotonic_ms))
+            (print (list "glass-bootstrap" "selected" "rebuild-checkout-seed" "source" "runtime/fkwu-uni.c"))
+            (let status (fgb-run (list "cc" "-O2" "-o" staged "runtime/fkwu-uni.c") (list "/dev/null" "" "")))
+            (print (list "glass-bootstrap" "compile-exit" status "elapsed-ms" (sub (host_monotonic_ms) started)))
+            (if (not (eq status 0))
+                (do (fs_remove staged) (form_error "Glass bootstrap compilation failed; existing kernel retained"))
+                (if (not (eq (fs_rename staged "./fkwu") 0))
+                    (form_error "Glass bootstrap kernel publication failed; compiled candidate retained")
+                    (if (fgb-fresh "./fkwu" job "reobserved") 1
+                        (form_error "Glass bootstrap rebuilt kernel did not pass freshness"))))))
+    (defn fgb-ensure ()
+        (do (let job (fgb-job))
+            (if (le (file_size "runtime/fkwu-uni.c") 0)
+                (form_error "Glass bootstrap requires the checkout runtime source")
+                (if (fgb-fresh "./fkwu" job "observed") 1 (fgb-rebuild job)))))
+    (defn fgb-launch ()
+        (do
+            (let ready (fgb-ensure))
+            (let status (if ready (fgb-run (list "./fkwu" "observe/form-glass-supervisor-run.fk") (list "" "" "")) -1))
+            (if (eq status 0) 0
+                (do (print (list "glass-bootstrap" "supervisor-exit" status))
+                    (form_error "Glass supervisor ended with an error")))))
+    0)
