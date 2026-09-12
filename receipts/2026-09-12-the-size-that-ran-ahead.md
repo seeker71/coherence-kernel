@@ -43,9 +43,10 @@ host-process 127; jit-lens 16383, once-hold 7 and float-mint 63 on fkwu directly
   run by hand minutes later, answered 3391925 bytes. The cause was not found.
 - **validate.sh's first check names the wrong cause when fkwu itself fails.** For the full field it
   blamed an unclassified .sh or .py file.
-- **The shared field reached 2^26 node cells in about a day.** From about 14:20 kernels opened it and
-  interned fresh nodes again, the drift run above among them. Who emptied it, and what fills it that
-  fast, is not measured.
+- **The shared field reached 2^26 node cells in about a day.** At Urs's word the glass was stopped and
+  observe/field-reset-run.fk ran in the upbeat-mclean worktree between 14:11:59 and 14:17:37,
+  answering [field-reset, 1, the next kernel opens a fresh field]; from about 14:20 kernels interned
+  fresh nodes again, the drift run above among them. What fills the field that fast is not measured.
 - **value_str is still leaf mode 25 in C**, and int_to_str mode 26 until rung 6 lands.
 - The open items of receipts 12 to 43 stand where they are not named here.
 
