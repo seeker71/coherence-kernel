@@ -11988,7 +11988,9 @@ static void fk_store_go_private(void) {
     if (fk_fcap > 0 && fk_fv != 0) { fk_fv = fk_store_copy_out(fk_fv, fk_fcap * 8); }
     fk_store_unlink_pid((long long)getpid());
 }
-/* growth of one table: inside its reservation nothing moves; past it the whole store goes private, then realloc as before */
+/* growth of one table: inside its reservation nothing moves; past it the whole store goes private, then realloc as before.
+ * A caller moves its capacity only after this returns: fk_store_go_private copies every table by its capacity, so a
+ * capacity moved first has the copy read past the end of that table's mapping. */
 static void *fk_store_grow(char letter, void *p, long long old_bytes, long long new_bytes, long long reserved, int zero) {
     (void)letter;
     if (fk_store_shared && p != 0 && new_bytes <= reserved) { return p; }
@@ -14123,8 +14125,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         long long ln = FK_SLEN(sa) + FK_SLEN(sb);
         while (fk_sbp + ln > fk_scap_b) {
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         long long j = 0;
@@ -14271,8 +14273,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return fk_strv(fk_sintern(fk_sbp, 0));
         }
         while (fk_sbp + 1 > fk_scap_b) {
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         fk_sb[fk_sbp] = (char)b;
@@ -14579,8 +14581,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
             long long ln201 = b201 - a201;
             while (fk_sbp + ln201 > fk_scap_b) {
+                fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
                 fk_scap_b = fk_scap_b * 2;
-                fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
                 fk_sb_check();
             }
             /* FK_SBYTES is re-read AFTER the grow -- fk_store_grow moves fk_sb, and a
@@ -15201,8 +15203,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 }
                 fk_sinit();
                 while (fk_sbp + n > fk_scap_b) {
+                    fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
                     fk_scap_b = fk_scap_b * 2;
-                    fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
                     fk_sb_check();
                 }
                 { long long k = 0; while (k < n) { fk_sb[fk_sbp + k] = gpay[k]; k = k + 1; } }
@@ -15251,8 +15253,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         lseek(fd, off, 0);
         fk_sinit();
         while (fk_sbp + len > fk_scap_b) {
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         long long got = read(fd, fk_sb + fk_sbp, len);
@@ -15291,9 +15293,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long rerr63 = 0;
         for (;;) {
             while (base + total + 65536 > fk_scap_b) {
-                fk_scap_b = fk_scap_b * 2;
                 void *sb0 = fk_sb;
-                fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
+                fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+                fk_scap_b = fk_scap_b * 2;
                 fk_sb_check();
                 if (fk_conf("FK_READ_WITNESS")) {
                     dprintf(2, "[read_file] pool grow -> %lld bytes, %p -> %p (sbp=%lld sp=%lld)\n", fk_scap_b, sb0, (void *)fk_sb, fk_sbp, fk_sp);
@@ -15617,8 +15619,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         fk_sinit();
         while (fk_sbp + max71 > fk_scap_b) {
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         long long got71 = read((int)fd71, fk_sb + fk_sbp, max71);
@@ -16425,8 +16427,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             rn = rn + 1;
         }
         while (fk_sbp + rn > fk_scap_b) {
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         long long rj = 0;
@@ -16507,8 +16509,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return fk_strv(fk_sintern(fk_sbp, 0));
         }
         while (fk_sbp + fk_gen_len > fk_scap_b) {
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         long long gj = 0;
@@ -17041,8 +17043,8 @@ static long long fk_smkstr(void) {
             }
         }
         while (fk_sbp + 1 > fk_scap_b) {
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         fk_sb[fk_sbp] = ch;
@@ -17920,8 +17922,8 @@ static long long fk_sparse(void) {
             long long k = start;
             while (k < fk_spos) {
                 while (fk_sbp + 1 > fk_scap_b) {
+                    fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
                     fk_scap_b = fk_scap_b * 2;
-                    fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
                     fk_sb_check();
                 }
                 fk_sb[fk_sbp] = fk_srctext[k];
