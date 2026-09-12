@@ -1,0 +1,106 @@
+; loop-lane-call-band.fk — a leaf calls a leaf: the typed expression leaf, and the call arm.
+;
+; The call rung of Urs's 2026-09-12 goal. After the loops went hot, str_to_int's remaining cost was five
+; or six walker dispatches between its own parts -- its body a do of lets and an if, calling two loops --
+; and the door entry itself cost no more than a bare walker call. So the whole body becomes one leaf: a
+; typed expression leaf (the signature read off the live frame, let steps, an if over a compare as an
+; expression, str_len of a string parameter as a load from the length the door placed), and a call arm:
+; the callee is one already crystallized; the caller spills every register the callee may touch, builds
+; the callee's 17-word frame on its stack, branches through x16, and takes the answer back. A caller whose
+; callee is not yet hot stays cold and is asked again at its next heat.
+;
+; Verdict 255
+; PROOF LEVEL: FOURTH-ARM ONLY (the transparent lanes are fkwu's MAP_JIT arm64 door; a defn's native state is the 8th field of its hot row)
+; preludes: form-stdlib/core.fk
+;
+;   1   str_to_int, driven hot, reads native state 1 (a leaf) with fstr-skip-ws and fstr-to-int-loop at 2 (loops)
+;   2   str_to_int, hot, agrees with a walker-shaped twin over the edge inputs
+;   4   a leaf with two lets, an if over a compare, and str_len crystallizes (state 1) and answers as its twin
+;   8   a string's length crosses a call: a callee's str_byte_at past the end answers -1 through the call frame
+;   16  a leaf calling a leaf calling a loop answers as the walker
+;   32  a caller whose callee is cold stays cold (state under 1); once the callee is hot the caller crystallizes
+;   64  a call with a float answer: a leaf calling a float loop answers as the walker
+;   128 the warm run of the nested call is under the walker twin's run of the same work
+(do
+    (defn lcb-bit (ok bit) (if ok bit 0))
+    ; a defn's native state in its hot row: 2 a loop, 1 a leaf, under 1 the walker's
+    (defn lcb-state (name rows) (if (eq (len rows) 0) -99 (if (str_eq (nth (head rows) 1) name) (nth (head rows) 7) (lcb-state name (tail rows)))))
+    (defn lcb-native (name) (lcb-state name (kernel_page_hot (host_pid) 160)))
+    ; str_to_int's walker twin (calls in the conditions, which the lanes decline)
+    (defn lcb-digit? (b) (if (ge b 48) (le b 57) false))
+    (defn lcb-space? (b) (if (eq b 32) true (if (eq b 9) true (if (eq b 10) true (eq b 13)))))
+    (defn lcb-ws (s i len) (if (ge i len) i (if (lcb-space? (str_byte_at s i)) (lcb-ws s (add i 1) len) i)))
+    (defn lcb-digits (s i len acc) (if (ge i len) acc (if (lcb-digit? (str_byte_at s i)) (lcb-digits s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48))) acc)))
+    (defn lcb-s2i-walk (s) (do (let flen (str_len s)) (let fi (lcb-ws s 0 flen)) (if (if (lt fi flen) (eq (str_byte_at s fi) 45) false) (sub 0 (lcb-digits s (add fi 1) flen 0)) (lcb-digits s fi flen 0))))
+    ; 1, 2: str_to_int hot
+    (defn lcb-heat (n acc) (if (le n 0) acc (lcb-heat (sub n 1) (add acc (str_to_int " -1234567890123456789")))))
+    (let heated (lcb-heat 3000 0))
+    (let s2i-state (lcb-native "str_to_int"))
+    (let ws-state (lcb-native "fstr-skip-ws"))
+    (let dl-state (lcb-native "fstr-to-int-loop"))
+    (let cases (list "" "0" "7" "42" "-42" "  42" "\t-7x" "123abc" "abc" "-" "--5" "+5" "00012" "9223372036854775807" "-9223372036854775808" "12 34" "\n99\n" "0x10" "1e3" "4.5" " \t\n\r 77" "   " " -"))
+    (defn lcb-miss (cs acc) (if (eq (len cs) 0) acc (lcb-miss (tail cs) (add acc (if (eq (str_to_int (head cs)) (lcb-s2i-walk (head cs))) 0 1)))))
+    (let misses (lcb-miss cases 0))
+    ; 4: a leaf with lets, an if over a compare, and str_len: the middle byte, or -1 for an empty string
+    (defn lcb-mid (s) (do (let n (str_len s)) (let h (div n 2)) (if (lt 0 n) (str_byte_at s h) (sub 0 1))))
+    (defn lcb-lt? (a b) (lt a b))
+    (defn lcb-mid-walk (s) (do (let n (str_len s)) (let h (div n 2)) (if (lcb-lt? 0 n) (str_byte_at s h) (sub 0 1))))
+    (defn lcb-rep-mid (n acc) (if (le n 0) acc (lcb-rep-mid (sub n 1) (add acc (lcb-mid "abcdefghij")))))
+    (let mids (lcb-rep-mid 3000 0))
+    (let mid-state (lcb-native "lcb-mid"))
+    (let mid-agree (if (eq (lcb-mid "abcdefghij") (lcb-mid-walk "abcdefghij")) (if (eq (lcb-mid "") (lcb-mid-walk "")) (eq (lcb-mid "q") (lcb-mid-walk "q")) false) false))
+    ; 8: the length crosses a call: lcb-one reads a byte; lcb-via calls it; past the end answers -1 through the frame
+    (defn lcb-one (s i) (str_byte_at s i))
+    (defn lcb-via (s i) (lcb-one s i))
+    (defn lcb-rep-one (n acc) (if (le n 0) acc (lcb-rep-one (sub n 1) (add acc (lcb-one "abc" 1)))))
+    (let ones (lcb-rep-one 3000 0))
+    (defn lcb-rep-via (n acc) (if (le n 0) acc (lcb-rep-via (sub n 1) (add acc (lcb-via "abc" 1)))))
+    (let vias (lcb-rep-via 3000 0))
+    (let via-state (lcb-native "lcb-via"))
+    (let past (lcb-via "abc" 7))
+    (let neg (lcb-via "abc" (sub 0 3)))
+    (let inside (lcb-via "abc" 2))
+    ; 16, 128: a leaf calling a leaf calling a loop: the byte sum of a string through two calls
+    (defn lcb-sum (s i len acc) (if (lt i len) (lcb-sum s (add i 1) len (add acc (str_byte_at s i))) acc))
+    (defn lcb-sum-of (s) (lcb-sum s 0 (str_len s) 0))
+    (defn lcb-twice (s) (add (lcb-sum-of s) (lcb-sum-of s)))
+    (defn lcb-sum-walk (s i len acc) (if (lcb-lt? i len) (lcb-sum-walk s (add i 1) len (add acc (str_byte_at s i))) acc))
+    (defn lcb-twice-walk (s) (add (lcb-sum-walk s 0 (str_len s) 0) (lcb-sum-walk s 0 (str_len s) 0)))
+    (defn lcb-mk (n acc) (if (le n 0) acc (lcb-mk (sub n 1) (str_concat acc "the quick brown fox jumps over the lazy dog 0123456789 "))))
+    (let text (lcb-mk 4 ""))
+    (defn lcb-rep-sum (s n acc) (if (le n 0) acc (lcb-rep-sum s (sub n 1) (add acc (lcb-sum s 0 (str_len s) 0)))))
+    (let warm-sum (lcb-rep-sum text 2000 0))
+    (defn lcb-rep-twice (s n acc) (if (le n 0) acc (lcb-rep-twice s (sub n 1) (add acc (lcb-twice s)))))
+    (defn lcb-rep-twice-walk (s n acc) (if (le n 0) acc (lcb-rep-twice-walk s (sub n 1) (add acc (lcb-twice-walk s)))))
+    (let w0 (host_monotonic_ms)) (let twice (lcb-rep-twice text 3000 0)) (let w1 (host_monotonic_ms))
+    (let k0 (host_monotonic_ms)) (let twice-w (lcb-rep-twice-walk text 3000 0)) (let k1 (host_monotonic_ms))
+    (let twice-state (lcb-native "lcb-twice"))
+    ; 32: a caller ahead of its callee: lcb-early calls lcb-late; lcb-early is driven hot while lcb-late is cold
+    (defn lcb-late (a b) (add (mul a 3) b))
+    (defn lcb-early (a b) (sub (lcb-late a b) 1))
+    (defn lcb-rep-early (n acc) (if (le n 0) acc (lcb-rep-early (sub n 1) (add acc (lcb-early 7 n)))))
+    (defn lcb-rep-late (n acc) (if (le n 0) acc (lcb-rep-late (sub n 1) (add acc (lcb-late 7 n)))))
+    (let e1 (lcb-rep-early 1100 0))
+    (let early-cold (lcb-native "lcb-early"))
+    (let l1 (lcb-rep-late 2200 0))
+    (let e2 (lcb-rep-early 2200 0))
+    (let early-hot (lcb-native "lcb-early"))
+    (let early-agree (eq (lcb-early 7 5) (sub (add 21 5) 1)))
+    ; 64: a float answer through a call: a leaf calling a float loop
+    (defn lcb-fl (x n acc) (if (le n 0) acc (lcb-fl x (sub n 1) (add acc (mul x 0.5)))))
+    (defn lcb-half-sum (x) (lcb-fl x 100 0.0))
+    (defn lcb-fl-walk (x n acc) (if (lcb-lt? 0 n) (lcb-fl-walk x (sub n 1) (add acc (mul x 0.5))) acc))
+    (defn lcb-rep-half (n acc) (if (le n 0) acc (lcb-rep-half (sub n 1) (add acc (lcb-half-sum 3.0)))))
+    (let halves (lcb-rep-half 2000 0.0))
+    (let half-state (lcb-native "lcb-half-sum"))
+    (let half-agree (eq (lcb-half-sum 3.0) (lcb-fl-walk 3.0 100 0.0)))
+    (let told (print (list "states" s2i-state ws-state dl-state mid-state via-state twice-state early-cold early-hot half-state "misses" misses "mid" mid-agree "via" past neg inside "twice" twice twice-w "ms" (sub w1 w0) (sub k1 k0))))
+    (let b1 (lcb-bit (if (eq s2i-state 1) (if (eq ws-state 2) (eq dl-state 2) false) false) 1))
+    (let b2 (lcb-bit (eq misses 0) 2))
+    (let b3 (lcb-bit (if (eq mid-state 1) mid-agree false) 4))
+    (let b4 (lcb-bit (if (eq via-state 1) (if (eq past (sub 0 1)) (if (eq neg (sub 0 1)) (eq inside 99) false) false) false) 8))
+    (let b5 (lcb-bit (if (eq twice-state 1) (eq twice twice-w) false) 16))
+    (let b6 (lcb-bit (if (lt early-cold 1) (if (eq early-hot 1) early-agree false) false) 32))
+    (let b7 (lcb-bit (if (eq half-state 1) half-agree false) 64))
+    (let b8 (lcb-bit (lt (sub w1 w0) (sub k1 k0)) 128))
+    (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 b8))))))))

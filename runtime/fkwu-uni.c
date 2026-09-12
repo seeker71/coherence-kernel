@@ -9823,6 +9823,18 @@ static long long fk_host_door(long long mode, long long x) {
 #define FK_F64_WORD_CAP 1000
 #define FK_F64_CHAIN_CAP 8 /* a loop body's steps before the terminal self call: at each if, one branch exits or continues the loop, the other leads on */
 #define FK_F64_PATCH_CAP 16 /* branches to patch: two unrolled passes of up to FK_F64_CHAIN_CAP steps, each to its exit or continuation block */
+/* a leaf calling a crystallized leaf: the call arm (kind 19). The callee runs through the door's own frame -- 17 words the
+ * caller builds on its stack (args untagged, a string's pointer in its word and its length at 9 + k, word 8 zero), x0 the
+ * frame, blr through x16 to the callee's page; the caller spills every register the callee may touch and takes the
+ * answer back from x0 or d0. A callee not yet crystallized leaves the caller cold, to be asked again at its next heat. */
+#define FK_F64_CALL_CAP 8
+#define FK_F64_CALL_FRAME 480 /* the callee's 17 words at 0..135; x0 at 136; x10..x17 at 144; x1..x7 at 208; d0..d7 at 264; d16..d31 at 328; the answer at 456; x8 at 464 */
+static long long fk_f64_cur_fx; /* the defn being admitted: a call to it is the self call, the chain walker's, never the call arm's */
+static int fk_f64_call_args[FK_F64_CALL_CAP][8];   /* per call: the admitted argument nodes */
+static int fk_f64_call_strsrc[FK_F64_CALL_CAP][8]; /* per call: the caller's string parameter an argument is, or -1 */
+static long long fk_f64_call_callee[FK_F64_CALL_CAP];
+static int fk_f64_call_n;
+static int fk_f64_call_not_ready;
 /* ── the loop lane ────────────────────────────────────────────────────────────
  * A defn whose body is `(if <compare> <exit> <self tail call>)` (either branch
  * order) is a loop: every iteration is one heat-lane dispatch. The heat ledger
@@ -9955,6 +9967,76 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         *out = fk_f64_push(14, (int)k, ix, 0.0, 0);
         return *out < 0 ? 0 : 1;
     }
+    if (t == 25) {
+        /* str_len s, s a string parameter: the length the door placed at frame word 9 + k, one load */
+        long long sn = fk_node[i][1];
+        if (sn < 0 || sn >= fk_node_count) { return 0; }
+        long long st = fk_node[sn][0];
+        long long k = 0;
+        if (st == 110) {
+            long long li = fk_node[sn][1];
+            if (li < 0 || li >= fk_node_count || fk_node[li][0] != 1) { return 0; }
+            k = fk_node[li][1];
+        } else if (st != 2) { fk_f64_refuse_tag = t; return 0; }
+        if (k < 0 || k >= arity || types[k] != 3) { fk_f64_refuse_tag = t; return 0; }
+        *out = fk_f64_push(16, (int)k, 0, 0.0, 0);
+        return *out < 0 ? 0 : 1;
+    }
+    if (t == 6) {
+        /* (if <compare> a b) as an expression: the compare over admitted operands (kind 18), both arms one type (kind 17) */
+        long long cond = fk_node[i][1], thn = fk_node[i][2], els = fk_node[i][3];
+        if (cond < 0 || cond >= fk_node_count || thn < 0 || thn >= fk_node_count || els < 0 || els >= fk_node_count) { return 0; }
+        long long ct = fk_node[cond][0];
+        if (ct != 5 && ct != 102 && ct != 103) { fk_f64_refuse_tag = ct; return 0; }
+        int ca = 0, cb = 0;
+        int ta = fk_f64_admit(fk_node[cond][1], arity, types, &ca);
+        if (ta == 0) { return 0; }
+        int tb = fk_f64_admit(fk_node[cond][2], arity, types, &cb);
+        if (tb == 0) { return 0; }
+        if (ta == 3 || tb == 3) { fk_f64_refuse_tag = ct; return 0; }
+        int fcmp = (ta == 2 || tb == 2);
+        if (fcmp) { ca = fk_f64_cvt(ca); cb = fk_f64_cvt(cb); if (ca < 0 || cb < 0) { return 0; } }
+        unsigned int cc = ct == 102 ? 0U : (ct == 103 ? (fcmp ? 4U : 11U) : (fcmp ? 9U : 13U));
+        int cmpn = fk_f64_push(18, ca, cb, 0.0, (long long)cc);
+        if (cmpn < 0) { return 0; }
+        int a = 0, b = 0;
+        int tt = fk_f64_admit(thn, arity, types, &a);
+        if (tt == 0 || tt == 3) { return 0; }
+        int te = fk_f64_admit(els, arity, types, &b);
+        if (te == 0 || te != tt) { return 0; }
+        *out = fk_f64_push(17, cmpn, a, (double)tt, (long long)b);
+        return *out < 0 ? 0 : tt;
+    }
+    if ((t == 241 || t == 12) && fk_node[i][1] != fk_f64_cur_fx) {
+        long long callee = fk_node[i][1];
+        if (callee < 0 || callee >= fk_fn_count) { return 0; }
+        if (fk_f64_call_n >= FK_F64_CALL_CAP) { return 0; }
+        if (callee >= fk_f64_cap || fk_f64_mem[callee] == 0 || fk_f64_sig[callee] < 0) { fk_f64_call_not_ready = 1; return 0; }
+        long long csig = fk_f64_sig[callee];
+        long long car = fk_fnar[callee];
+        int slot = fk_f64_call_n;
+        long long k = 0;
+        long long cell = t == 12 ? -1 : fk_node[i][2];
+        while (k < car && k < 8) {
+            long long argnode = t == 12 ? fk_node[i][2] : ((cell >= 0 && fk_node[cell][0] == 242) ? fk_node[cell][1] : -1);
+            if (argnode < 0) { return 0; }
+            int an = 0;
+            int at = fk_f64_admit(argnode, arity, types, &an);
+            if (at == 0) { return 0; }
+            int want = ((csig >> (16 + k)) & 1) ? 3 : (((csig >> k) & 1) ? 2 : 1);
+            if (at != want) { fk_f64_refuse_tag = t; return 0; } /* the argument must wear the type the callee was emitted for */
+            fk_f64_call_args[slot][k] = an;
+            fk_f64_call_strsrc[slot][k] = (at == 3 && fk_f64_prog[an].kind == 8) ? fk_f64_prog[an].a : -1;
+            if (at == 3 && fk_f64_call_strsrc[slot][k] < 0) { return 0; } /* a string argument is one of the caller's string parameters: its length is at hand */
+            if (t != 12) { cell = fk_node[cell][2]; }
+            k = k + 1;
+        }
+        if (t == 12) { if (car != 1) { return 0; } } else if (k != car || cell >= 0) { return 0; }
+        fk_f64_call_callee[slot] = callee;
+        fk_f64_call_n = fk_f64_call_n + 1;
+        *out = fk_f64_push(19, slot, (int)car, 0.0, callee);
+        return *out < 0 ? 0 : (((csig >> 8) & 1) ? 2 : 1);
+    }
     if (t == 3 || t == 4 || t == 42 || t == 10) {
         int a = 0, b = 0;
         int ta = fk_f64_admit(fk_node[i][1], arity, types, &a);
@@ -10042,6 +10124,111 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         if (!fk_f64_put(words, wn, 0x14000002U)) { return -1; }                                    /* B +2 */
         if (!fk_f64_put(words, wn, 0x92800000U | xd)) { return -1; }                               /* MOVN Xd, #0: -1 */
         return 100 + rd;
+    }
+    if (p->kind == 16) {
+        /* str_len of string parameter a: the length at frame word 9 + a */
+        if (*nitemp >= 7) { return -1; }
+        int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
+        if (!fk_f64_put(words, wn, 0xF9400000U | ((unsigned int)(9 + p->a) << 10) | (unsigned int)rd)) { return -1; } /* LDR Xd, [X0, #8*(9+a)] */
+        return 100 + rd;
+    }
+    if (p->kind == 17) {
+        /* (if <compare> a b): the result register is taken first so both arms write it; each arm's temporaries die at its end */
+        fk_f64_node *c = &fk_f64_prog[p->a];
+        int ra = fk_f64_emit(c->a, words, wn, ntemp, nitemp);
+        if (ra < 0) { return -1; }
+        int rb = fk_f64_emit(c->b, words, wn, ntemp, nitemp);
+        if (rb < 0) { return -1; }
+        if (ra >= 100) {
+            if (rb < 100) { return -1; }
+            if (!fk_f64_put(words, wn, 0xEB00001FU | ((unsigned int)(rb - 100) << 16) | ((unsigned int)(ra - 100) << 5))) { return -1; } /* CMP Xa, Xb */
+        } else {
+            if (rb >= 100) { return -1; }
+            if (!fk_f64_put(words, wn, 0x1E602000U | ((unsigned int)rb << 16) | ((unsigned int)ra << 5))) { return -1; } /* FCMP Da, Db */
+        }
+        fk_f64_release(rb, ntemp, nitemp);
+        fk_f64_release(ra, ntemp, nitemp);
+        int tt = (int)p->lit;
+        int rres;
+        if (tt == 2) { if (*ntemp >= 16) { return -1; } rres = 16 + *ntemp; *ntemp = *ntemp + 1; }
+        else { if (*nitemp >= 7) { return -1; } rres = 1 + *nitemp; *nitemp = *nitemp + 1; }
+        int nt0 = *ntemp, ni0 = *nitemp;
+        unsigned int cc = (unsigned int)c->ilit;
+        long long bthen = *wn;
+        if (!fk_f64_put(words, wn, 0x54000000U | (cc ^ 1U))) { return -1; } /* B.!cond -> the else arm, patched below */
+        int rt = fk_f64_emit(p->b, words, wn, ntemp, nitemp);
+        if (rt < 0) { return -1; }
+        if (tt == 2) { if (rt >= 100) { return -1; } if (rt != rres && !fk_f64_put(words, wn, 0x1E604000U | ((unsigned int)rt << 5) | (unsigned int)rres)) { return -1; } }
+        else { if (rt < 100) { return -1; } if (rt - 100 != rres && !fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(rt - 100) << 16) | (unsigned int)rres)) { return -1; } }
+        *ntemp = nt0; *nitemp = ni0;
+        long long bend = *wn;
+        if (!fk_f64_put(words, wn, 0x14000000U)) { return -1; } /* B end, patched below */
+        long long els_at = *wn;
+        words[bthen] = words[bthen] | ((unsigned int)((els_at - bthen) & 0x7FFFFLL) << 5);
+        int re = fk_f64_emit((int)p->ilit, words, wn, ntemp, nitemp);
+        if (re < 0) { return -1; }
+        if (tt == 2) { if (re >= 100) { return -1; } if (re != rres && !fk_f64_put(words, wn, 0x1E604000U | ((unsigned int)re << 5) | (unsigned int)rres)) { return -1; } }
+        else { if (re < 100) { return -1; } if (re - 100 != rres && !fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(re - 100) << 16) | (unsigned int)rres)) { return -1; } }
+        *ntemp = nt0; *nitemp = ni0;
+        long long end_at = *wn;
+        words[bend] = words[bend] | (unsigned int)((end_at - bend) & 0x3FFFFFFLL);
+        return tt == 2 ? rres : 100 + rres;
+    }
+    if (p->kind == 19) {
+        /* a call: the arguments first, then the frame, the spills, the callee's words, the call, the answer, everything back */
+        int slot = p->a;
+        long long car = p->b, callee = p->ilit;
+        int rargs[8];
+        long long k = 0;
+        while (k < car) { rargs[k] = fk_f64_emit(fk_f64_call_args[slot][k], words, wn, ntemp, nitemp); if (rargs[k] < 0) { return -1; } k = k + 1; }
+        if (!fk_f64_put(words, wn, 0xD10003FFU | ((unsigned int)FK_F64_CALL_FRAME << 10))) { return -1; } /* SUB SP, SP, #frame */
+        if (!fk_f64_put(words, wn, 0xF9000000U | (17U << 10) | (31U << 5) | 0U)) { return -1; }  /* STR X0, [SP, #136] */
+        if (!fk_f64_put(words, wn, 0xF9000000U | (58U << 10) | (31U << 5) | 8U)) { return -1; }  /* STR X8, [SP, #464] */
+        if (!fk_f64_put(words, wn, 0xF9000000U | (59U << 10) | (31U << 5) | 30U)) { return -1; }  /* STR X30, [SP, #472]: the link register, or the return after the call is into this page */
+        unsigned int j = 0;
+        while (j < 8) { if (!fk_f64_put(words, wn, 0xF9000000U | ((18U + j) << 10) | (31U << 5) | (10U + j))) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < 7) { if (!fk_f64_put(words, wn, 0xF9000000U | ((26U + j) << 10) | (31U << 5) | (1U + j))) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < 8) { if (!fk_f64_put(words, wn, 0xFD000000U | ((33U + j) << 10) | (31U << 5) | j)) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < 16) { if (!fk_f64_put(words, wn, 0xFD000000U | ((41U + j) << 10) | (31U << 5) | (16U + j))) { return -1; } j = j + 1; }
+        k = 0;
+        while (k < car) {
+            int r = rargs[k];
+            if (r >= 100) { if (!fk_f64_put(words, wn, 0xF9000000U | ((unsigned int)k << 10) | (31U << 5) | (unsigned int)(r - 100))) { return -1; } }
+            else { if (!fk_f64_put(words, wn, 0xFD000000U | ((unsigned int)k << 10) | (31U << 5) | (unsigned int)r)) { return -1; } }
+            int src = fk_f64_call_strsrc[slot][k];
+            if (src >= 0) {
+                if (!fk_f64_put(words, wn, 0xF9400009U | ((unsigned int)(9 + src) << 10))) { return -1; }                  /* LDR X9, [X0, #8*(9+src)]: the string's length */
+                if (!fk_f64_put(words, wn, 0xF9000000U | ((unsigned int)(9 + k) << 10) | (31U << 5) | 9U)) { return -1; } /* STR X9, [SP, #8*(9+k)] */
+            }
+            k = k + 1;
+        }
+        if (!fk_f64_put(words, wn, 0xF9000000U | (8U << 10) | (31U << 5) | 31U)) { return -1; } /* STR XZR, [SP, #64] */
+        if (!fk_f64_put(words, wn, 0x910003E0U)) { return -1; }                                    /* MOV X0, SP */
+        if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)fk_f64_mem[callee])) { return -1; }
+        if (!fk_f64_put(words, wn, 0xD63F0200U)) { return -1; }                                    /* BLR X16 */
+        int fres = (int)((fk_f64_sig[callee] >> 8) & 1);
+        if (!fk_f64_put(words, wn, (fres ? 0xFD000000U : 0xF9000000U) | (57U << 10) | (31U << 5) | 0U)) { return -1; } /* the answer at [SP, #456] */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (17U << 10) | (31U << 5) | 0U)) { return -1; }  /* LDR X0 */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (58U << 10) | (31U << 5) | 8U)) { return -1; }  /* LDR X8 */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (59U << 10) | (31U << 5) | 30U)) { return -1; }  /* LDR X30 */
+        j = 0;
+        while (j < 8) { if (!fk_f64_put(words, wn, 0xF9400000U | ((18U + j) << 10) | (31U << 5) | (10U + j))) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < 7) { if (!fk_f64_put(words, wn, 0xF9400000U | ((26U + j) << 10) | (31U << 5) | (1U + j))) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < 8) { if (!fk_f64_put(words, wn, 0xFD400000U | ((33U + j) << 10) | (31U << 5) | j)) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < 16) { if (!fk_f64_put(words, wn, 0xFD400000U | ((41U + j) << 10) | (31U << 5) | (16U + j))) { return -1; } j = j + 1; }
+        k = 0;
+        while (k < car) { fk_f64_release(rargs[k], ntemp, nitemp); k = k + 1; }
+        int rd;
+        if (fres) { if (*ntemp >= 16) { return -1; } rd = 16 + *ntemp; *ntemp = *ntemp + 1; if (!fk_f64_put(words, wn, 0xFD400000U | (57U << 10) | (31U << 5) | (unsigned int)rd)) { return -1; } }
+        else { if (*nitemp >= 7) { return -1; } rd = 1 + *nitemp; *nitemp = *nitemp + 1; if (!fk_f64_put(words, wn, 0xF9400000U | (57U << 10) | (31U << 5) | (unsigned int)rd)) { return -1; } }
+        if (!fk_f64_put(words, wn, 0x910003FFU | ((unsigned int)FK_F64_CALL_FRAME << 10))) { return -1; } /* ADD SP, SP, #frame */
+        return fres ? rd : 100 + rd;
     }
     int ra = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
     if (ra < 0) { return -1; }
@@ -10351,13 +10538,104 @@ static int fk_f64_loop_pass(unsigned int *words, long long *wn, const int *cas, 
     }
     return fk_f64_loop_move(words, wn, argn_term, types, arity);
 }
+/* whether a body reaches a self call along its ifs and lets: a loop's shape, the chain walker's; otherwise an expression */
+static int fk_f64_body_has_self(long long i, long long fx, int depth) {
+    if (i < 0 || i >= fk_node_count || depth > 64) { return 0; }
+    long long t = fk_node[i][0];
+    if ((t == 241 || t == 12) && fk_node[i][1] == fx) { return 1; }
+    if (t == 6) { return fk_f64_body_has_self(fk_node[i][2], fx, depth + 1) || fk_f64_body_has_self(fk_node[i][3], fx, depth + 1); }
+    if (t == 109) { return fk_f64_body_has_self(fk_node[i][3], fx, depth + 1); }
+    return 0;
+}
+/* the typed expression leaf: a body with no self call -- lets, then one expression -- emitted for the types read off the
+ * live frame, dispatched through the door's frame like a loop leaf (state 1, a signature without the loop bit). A body
+ * whose parameters are all floats keeps the float class's own leaf. */
+static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long root, long long orig, long long body) {
+    long long arity = fk_fnar[fx];
+    if (n != arity) { return; }
+    fk_f64_refuse_tag = -1; fk_f64_call_n = 0; fk_f64_cur_fx = fx;
+    fk_fn_native[fx] = -1;
+    int types[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } }
+    long long sig = 0;
+    long long k = 0;
+    int allf = 1;
+    while (k < arity) {
+        long long v = fk_vs[fp + k];
+        if (fk_isf(v)) { types[k] = 2; sig = sig | (1LL << k); }
+        else if (fk_is_str(v)) { types[k] = 3; sig = sig | (1LL << (16 + k)); allf = 0; }
+        else if ((v & 1) != 0) { fk_fn_native[fx] = -2; return; }
+        else { allf = 0; }
+        k = k + 1;
+    }
+    if (allf) { fk_fn_native[fx] = 0; fk_f64_pulse(fx); return; }
+    int letn[FK_F64_CHAIN_CAP], letslots[FK_F64_CHAIN_CAP];
+    long long nlets = 0;
+    long long node = body;
+    fk_f64_prog_n = 0;
+    while (node >= 0 && node < fk_node_count && fk_node[node][0] == 109) {
+        if (nlets >= FK_F64_CHAIN_CAP) { return; }
+        long long li = fk_node[node][1];
+        if (li < 0 || li >= fk_node_count || fk_node[li][0] != 1) { return; }
+        long long slot = fk_node[li][1];
+        if (slot < arity || slot >= 8) { return; }
+        int lv = 0;
+        int lt = fk_f64_admit(fk_node[node][2], arity, types, &lv);
+        if (lt == 0 || lt == 3) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } return; }
+        types[slot] = lt; letn[nlets] = lv; letslots[nlets] = (int)slot; nlets = nlets + 1;
+        node = fk_node[node][3];
+    }
+    int top = 0;
+    int tex = fk_f64_admit(node, arity, types, &top);
+    if (tex == 0 || tex == 3) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } return; }
+    if (tex == 2) { sig = sig | (1LL << 8); }
+    unsigned int words[FK_F64_WORD_CAP];
+    long long wn = 0;
+    k = 0;
+    while (k < arity) {
+        unsigned int ld = types[k] == 2 ? (0xFD400000U | ((unsigned int)k << 10) | (unsigned int)k) : (0xF9400000U | ((unsigned int)k << 10) | (10U + (unsigned int)k));
+        if (!fk_f64_put(words, &wn, ld)) { return; }
+        k = k + 1;
+    }
+    int ntemp = 0, nitemp = 0;
+    long long j = 0;
+    while (j < nlets) {
+        ntemp = 0; nitemp = 0;
+        int r = fk_f64_emit(letn[j], words, &wn, &ntemp, &nitemp);
+        if (r < 0) { return; }
+        unsigned int slot = (unsigned int)letslots[j];
+        if (types[letslots[j]] == 2) {
+            if (r >= 100) { return; }
+            if ((unsigned int)r != slot && !fk_f64_put(words, &wn, 0x1E604000U | ((unsigned int)r << 5) | slot)) { return; }
+        } else {
+            if (r < 100) { return; }
+            if ((unsigned int)(r - 100) != 10U + slot && !fk_f64_put(words, &wn, 0xAA0003E0U | ((unsigned int)(r - 100) << 16) | (10U + slot))) { return; }
+        }
+        j = j + 1;
+    }
+    ntemp = 0; nitemp = 0;
+    int rr = fk_f64_emit(top, words, &wn, &ntemp, &nitemp);
+    if (rr < 0) { return; }
+    if (tex == 2) { if (rr >= 100) { return; } if (rr != 0 && !fk_f64_put(words, &wn, 0x1E604000U | ((unsigned int)rr << 5))) { return; } }
+    else { if (rr < 100) { return; } if (!fk_f64_put(words, &wn, 0xAA0003E0U | ((unsigned int)(rr - 100) << 16))) { return; } }
+    if (!fk_f64_put(words, &wn, 0xD65F03C0U)) { return; }
+    if (!fk_f64_install(fx, root, orig, words, wn, sig, 1)) { return; }
+    fk_f64_count = fk_f64_count + 1;
+}
+static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n);
+/* a pulse whose admit met a callee not yet crystallized leaves the defn cold, to be asked again at its next heat */
 static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
+    fk_f64_call_not_ready = 0;
+    fk_f64_loop_pulse_in(fx, fp, n);
+    if (fk_f64_call_not_ready && fx > 0 && fx < fk_fn_capacity && fk_fn_native != 0 && fk_fn_native[fx] < 0 && fk_fn_native[fx] != -2) { fk_fn_native[fx] = 0; }
+}
+static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     fk_twin_pulse(fx);
     if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
     if (fk_fn_native[fx] != 0) { return; }
     long long root = 0, orig = 0, body = 0;
     if (!fk_f64_body_of(fx, &root, &orig, &body)) { fk_fn_native[fx] = -1; return; }
-    if (fk_node[body][0] != 6) { fk_f64_pulse(fx); return; } /* not a loop: the expression leaf is asked instead */
+    if (!fk_f64_body_has_self(body, fx, 0)) { fk_f64_expr_pulse(fx, fp, n, root, orig, body); return; } /* no self call: an expression, the typed leaf's */
     long long arity = fk_fnar[fx];
     if (n != arity) { return; } /* a partial frame carries stale slots: no signature to read this time */
     fk_f64_refuse_tag = -1;
@@ -10434,6 +10712,7 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     unsigned int ccs[FK_F64_CHAIN_CAP];
     int tex = 0, nex = 0;
     fk_f64_prog_n = 0;
+    fk_f64_call_n = 0; fk_f64_cur_fx = fx; /* a call inside the loop's steps may reach a crystallized leaf; a call to this defn is the self call */
     long long j = 0;
     while (j < nsteps) {
         letn[j] = -1;
