@@ -45,8 +45,8 @@ that asks. Rust had asked for bytes and taught itself seven types' binary forms,
 while money's text could only ever come from the server. Asking for text removed the decoders and 368
 lines of dependencies, and the contract page went from 3214 ms to 21 ms.
 
-The discomfort was that replacing a working native with a client of my own, the same shape I wrote for
-TS earlier in the day, reads as reach, and every column api.bml selects already read correctly on Rust.
+The discomfort was that replacing a working native with a new client, the same shape TS's carrier took
+earlier in the day, reads as reach, and every column api.bml selects already read correctly on Rust.
 What turned it was measuring the whole map before choosing: 20 of 24 types unreadable, one of them
 unreadable by any decoder, and one reading every sibling already shared, the server's own text. A
 second client in the pattern the body already carries was smaller than the long tail of decoders it

@@ -1,14 +1,14 @@
 # The length stayed at the door
 
-2026-09-12, early afternoon, M4 Max, Hati Suci. epic-edison sent four rungs of Urs's goal for the core
-recipes: a string door into the transparent loop lane, a chain of exits, ways on with a pulse at the
+2026-09-12, early afternoon, M4 Max, Hati Suci. Four rungs of the goal Urs named for the core recipes
+came from the epic-edison worktree: a string door into the transparent loop lane, a chain of exits, ways on with a pulse at the
 call's door, and a let that rides its own register. str_to_int and its whitespace skip now
 crystallize. All four land here, and the landing found one more thing to heal.
 
 ## Carried
 
-- **Rungs 1 to 4 land** (b18f992db, 92e0d38a3, c1fe8c65a, 5194bb592), epic-edison's commits as they
-  rebased them onto 85bc80121, with rows 1486 pointerride, 1487 twincaught, 1488 jumpblind and 1489
+- **Rungs 1 to 4 land** (b18f992db, 92e0d38a3, c1fe8c65a, 5194bb592), the commits as rebased onto
+  85bc80121 in the epic-edison worktree, with rows 1486 pointerride, 1487 twincaught, 1488 jumpblind and 1489
   bindstep.
 - **Each string keeps its own slot** (0036d1643). The door writes a string parameter's length at frame
   word 9 + k once, when the leaf is entered, and a self call moved pointers between slots without it.
@@ -45,8 +45,8 @@ freshness 31, the corpus band 32767, the drift run 8191 of 8191, porcelain 0 bef
 - **The call's door asks the expression leaf too.** Since rung 3 a defn hot through calls reaches
   fk_f64_pulse at its 1024th call, not only through the box ledger. The bands above and the drift run
   read whole over it; that is the whole of what this landing witnessed of it.
-- **value_str and int_to_str are still leaf modes 25 and 26 in C.** epic-edison's next rung, a leaf
-  over string ops that is not a loop, leads toward moving them out.
+- **value_str and int_to_str are still leaf modes 25 and 26 in C.** The next rung, a leaf over string
+  ops that is not a loop, leads toward moving them out.
 - **bytea** reads as raw bytes on Go and as the server's `\xdeadbeef` on fkwu, Rust and TS.
 - **The carriers follow the table only when the bridge runs** (receipts 39 and 40).
 - **fkwu reads `true` as the integer 1**; its integers wrap at 2^63; max, min and pow have no home
@@ -59,8 +59,8 @@ The surprise was a word in the band. Bit 16 read "a string parameter passed thro
 unchanged keeps naming the same bytes", and the code took any string for that slot. The band named the
 one case the code had been built for, and the case beside it sat untested.
 
-The discomfort came three times. First, finding a wound in a peer's rung with the request to land it
-in hand; then the ground moving under the fix twice, as the series was rebased and grew a third and a
+The discomfort came three times. First, finding a wound in a rung with the request to land it in
+hand; then the ground moving under the fix twice, as the series was rebased and grew a third and a
 fourth rung, the self call moving into a function of its own. The pull was to land what was already
 picked and write the rest down. What turned it was asking the body instead of the diff each time: a
 probe of eight lines answered 187 against 603, and the rebuilt band read 639 on each series as sent

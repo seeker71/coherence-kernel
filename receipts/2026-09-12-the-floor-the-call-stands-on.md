@@ -1,14 +1,14 @@
 # The floor the call stands on
 
-2026-09-12, early afternoon, M4 Max, Hati Suci. epic-edison's fifth rung lets a leaf call a leaf. A body
+2026-09-12, early afternoon, M4 Max, Hati Suci. The fifth rung lets a leaf call a leaf. A body
 with no self call along its ifs and lets becomes a typed expression leaf, and a call to a leaf already
 crystallized builds the callee's frame on the stack and branches to it. str_to_int is now one leaf
 calling two. It lands here, on top of receipt 42's rules.
 
 ## Carried
 
-- **Rung 5 lands** (6d13228a6), epic-edison's commit with its row renumbered past slotbound: callwrit
-  is 1491. Where it met receipt 42, loop-lane-string-door-band reads each defn's native state from its
+- **Rung 5 lands** (6d13228a6), the commit from the epic-edison worktree, its row renumbered past slotbound:
+  callwrit is 1491. Where it met receipt 42, loop-lane-string-door-band reads each defn's native state from its
   own hot row, as rung 5 taught the other loop-lane bands, bit 256 included, and keeps bits 128 to 1024.
 - **The node kinds say what they are** (9db531b6b). The f64 node comment lists kinds 14 to 19: the
   byte, the length, the if, its compare and the call. core.fk's reading comment says what the recipe
@@ -36,8 +36,8 @@ read on fkwu directly; TestFkwu; freshness 31, the corpus band 32767, the drift 
 - **Three string shapes walk**: a string slot handed another string, a string let, and a string
   argument to a call that is not a parameter. Carrying each length in a register beside its pointer
   would open all three.
-- **value_str and int_to_str are still leaf modes 25 and 26 in C.** epic-edison's next rung, a leaf
-  that stores bytes into a string it hands back, is the one that lets them leave.
+- **value_str and int_to_str are still leaf modes 25 and 26 in C.** The next rung, a leaf that stores
+  bytes into a string it hands back, is the one that lets them leave.
 - **Quiet timings for rungs 4 and 5 are owed.** The machine read load 6 to 36 while they were measured,
   so only the ratios inside each band stand.
 - The open items of receipts 12 to 42 stand where they are not named here.
