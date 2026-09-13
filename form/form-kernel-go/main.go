@@ -2773,34 +2773,6 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VInt, Int: n}
 	})
-	// float→int conversions: bridge float compute to integer band verdicts /
-	// quantization codes. floor/ceil/trunc are IEEE-unambiguous; round is
-	// half-away-from-zero (math.Round) to match Rust f64::round and the TS
-	// sign*round(abs) impl. An int argument passes through unchanged.
-	k.registerNative("floor", catMethod(), func(_ *Kernel, args []Value) Value {
-		if args[0].Kind == VFloat {
-			return Value{Kind: VInt, Int: int64(math.Floor(args[0].AsFloat()))}
-		}
-		return Value{Kind: VInt, Int: args[0].AsInt()}
-	})
-	k.registerNative("ceil", catMethod(), func(_ *Kernel, args []Value) Value {
-		if args[0].Kind == VFloat {
-			return Value{Kind: VInt, Int: int64(math.Ceil(args[0].AsFloat()))}
-		}
-		return Value{Kind: VInt, Int: args[0].AsInt()}
-	})
-	k.registerNative("trunc", catMethod(), func(_ *Kernel, args []Value) Value {
-		if args[0].Kind == VFloat {
-			return Value{Kind: VInt, Int: int64(math.Trunc(args[0].AsFloat()))}
-		}
-		return Value{Kind: VInt, Int: args[0].AsInt()}
-	})
-	k.registerNative("round", catMethod(), func(_ *Kernel, args []Value) Value {
-		if args[0].Kind == VFloat {
-			return Value{Kind: VInt, Int: int64(math.Round(args[0].AsFloat()))}
-		}
-		return Value{Kind: VInt, Int: args[0].AsInt()}
-	})
 	// Polymorphic `+` for Python: int+int=add, str+str=concat,
 	// list+list=concat, with float promotion on numeric mixes.
 	// Sibling-parity with Rust + TS kernels.
@@ -2859,12 +2831,6 @@ func (k *Kernel) registerNatives() {
 	})
 	k.registerNative("math_pi", catMethod(), func(_ *Kernel, _ []Value) Value {
 		return Value{Kind: VFloat, Float: math.Pi}
-	})
-	k.registerNative("math_floor", catMethod(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VInt, Int: int64(math.Floor(args[0].AsFloat()))}
-	})
-	k.registerNative("math_ceil", catMethod(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VInt, Int: int64(math.Ceil(args[0].AsFloat()))}
 	})
 	k.registerNative("math_pow", catMethod(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VFloat, Float: math.Pow(args[0].AsFloat(), args[1].AsFloat())}
@@ -5709,8 +5675,113 @@ func loadFormSourceText(displayPath, absolute, text string, seen map[string]bool
 		}
 		source = append(source, line)
 	}
+	for _, tok := range homeLinks(text, homeIndexFor(absolute)) {
+		dependency, err := resolveFormImport(absolute, tok)
+		if err != nil {
+			return err
+		}
+		if strings.HasSuffix(tok, ".bml") {
+			err = loadFormSourceBmlPrelude(dependency, seen, parts)
+		} else {
+			err = loadFormSourceFile(dependency, seen, parts)
+		}
+		if err != nil {
+			return err
+		}
+	}
 	*parts = append(*parts, formSourcePart{path: displayPath, source: strings.Join(source, "\n")})
 	return nil
+}
+
+// Link by name, the rule every kernel reads from form-stdlib/home-index.txt: a source that
+// calls a name the index lists, and defines no such name itself, loads the name's home unit
+// as if it had preluded it. Comments and string literals are skipped, so a word in prose
+// links nothing.
+var homeIndexCache = map[string][][2]string{}
+
+func homeIndexFor(owner string) [][2]string {
+	path, err := resolveFormImport(owner, "form-stdlib/home-index.txt")
+	if err != nil {
+		return nil
+	}
+	if rows, ok := homeIndexCache[path]; ok {
+		return rows
+	}
+	var rows [][2]string
+	if body, err := os.ReadFile(path); err == nil {
+		for _, line := range strings.Split(string(body), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 || strings.HasPrefix(fields[0], "#") {
+				continue
+			}
+			rows = append(rows, [2]string{fields[0], fields[1]})
+		}
+	}
+	homeIndexCache[path] = rows
+	return rows
+}
+
+func homeSymByte(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '(', ')', '"', ';', ',', '[', ']', '{', '}', '\'', '`', '=', ':':
+		return false
+	}
+	return true
+}
+
+func homeLinks(text string, rows [][2]string) []string {
+	if len(rows) == 0 {
+		return nil
+	}
+	used := make([]bool, len(rows))
+	defined := make([]bool, len(rows))
+	prev := ""
+	for i := 0; i < len(text); {
+		c := text[i]
+		if c == ';' || (c == '/' && i+1 < len(text) && text[i+1] == '/') {
+			for i < len(text) && text[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c == '"' {
+			i++
+			for i < len(text) && text[i] != '"' {
+				if text[i] == '\\' {
+					i++
+				}
+				i++
+			}
+			i++
+			continue
+		}
+		if !homeSymByte(c) {
+			i++
+			continue
+		}
+		s := i
+		for i < len(text) && homeSymByte(text[i]) {
+			i++
+		}
+		tok := text[s:i]
+		for h, row := range rows {
+			if row[0] == tok {
+				if prev == "defn" || prev == "def" {
+					defined[h] = true
+				} else {
+					used[h] = true
+				}
+			}
+		}
+		prev = tok
+	}
+	var units []string
+	for h, row := range rows {
+		if used[h] && !defined[h] {
+			units = append(units, row[1])
+		}
+	}
+	return units
 }
 
 func loadFormSourceClosure(paths []string) ([]formSourcePart, error) {

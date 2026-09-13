@@ -2155,28 +2155,6 @@ export class Kernel {
       const n = argInt(args, 0);
       return { kind: "int", int: n < 0 ? -n : n };
     });
-    // float→int conversions (bare names, sibling-parity with Go/Rust): bridge
-    // float compute to integer band verdicts / quantization codes. floor/ceil/
-    // trunc are IEEE-unambiguous; round is half-AWAY-from-zero — JS Math.round
-    // rounds half toward +Inf, which would diverge from Rust/Go on negatives,
-    // so we use sign*round(abs). argFloat widens an int arg, so a whole value
-    // passes through. (math_floor/math_ceil stay for Python math.* compat.)
-    this.registerNative("floor", catMethod(), (_k, args) => ({
-      kind: "int",
-      int: Math.floor(argFloat(args, 0)),
-    }));
-    this.registerNative("ceil", catMethod(), (_k, args) => ({
-      kind: "int",
-      int: Math.ceil(argFloat(args, 0)),
-    }));
-    this.registerNative("trunc", catMethod(), (_k, args) => ({
-      kind: "int",
-      int: Math.trunc(argFloat(args, 0)),
-    }));
-    this.registerNative("round", catMethod(), (_k, args) => {
-      const x = argFloat(args, 0);
-      return { kind: "int", int: Math.sign(x) * Math.round(Math.abs(x)) };
-    });
     // Polymorphic `+` for Python: int+int=add, str+str=concat,
     // str+int / int+str = concat-via-stringify, list+list=concat.
     this.registerNative("_plus", catMethod(), (_k, args) => {
@@ -2239,15 +2217,6 @@ export class Kernel {
       kind: "f64",
       float: Math.PI,
     }));
-    // math.floor — CPython 3 returns an `int`. We follow suit so
-    // parity-suite string comparisons match. Math.floor in JS returns
-    // a number; we coerce to int explicitly.
-    this.registerNative("math_floor", catMethod(), (_k, args) => {
-      return { kind: "int", int: Math.floor(argFloat(args, 0)) };
-    });
-    this.registerNative("math_ceil", catMethod(), (_k, args) => {
-      return { kind: "int", int: Math.ceil(argFloat(args, 0)) };
-    });
     // math.pow — always returns float, matching CPython's behaviour.
     // (CPython's `math.pow(2, 3)` returns `8.0`, not `8`. The built-in
     // `pow()` would return int for int arguments; we don't expose that.)
