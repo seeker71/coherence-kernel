@@ -10044,6 +10044,7 @@ static long long fk_f64_lit_off[8], fk_f64_lit_len[8];
 static int fk_f64_lit_n;
 static int fk_f64_need_scratch; /* the leaf calls a callee that builds or answers a string: the door reserves scratch for it (sig bit 26) */
 static int fk_f64_conses; /* the leaf conses, itself or through a callee: the door reserves a run of pairs for it (sig bit 29) */
+static int fk_f64_reads_strword; /* the leaf reads its string params' words at frame 24+k (kind 35 str_eq): the call arm must copy those words for it, like a conser (sig bit 31) */
 static int fk_f64_no_frame; /* the all-float leaf runs with its arguments in d0..d7 and no frame in x0: a call from it hands over no frame words and reads no overflow word, so it calls numeric callees only */
 static long long fk_f64_ovf2_at[FK_F64_OVF_CAP]; /* the B.cond sites that leave for the second overflow block: the pairs ran out, the door retries with more */
 static long long fk_f64_ovf2_n;
@@ -10467,6 +10468,23 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         fk_f64_prog[*out].s = fn; /* the node holding the defn's word */
         return 5;
     }
+    if (t == 26) {
+        /* str_eq: strings are interned in this seed (equal content -> the identical word, however built), so equality of
+         * two LOCAL strings is a compare of the two operands' frame words (word 24 + slot), no byte walk. A FIELD string,
+         * though, is not interned against a local copy of the same bytes, so kind 35 leaves for the walker when the words
+         * differ and either is a field string (the emit's guard, w <= T). First cut: string PARAMETERS only (kind 8),
+         * whose word the pulse writes to frame word 24 + slot; a literal operand keeps walking (its slot word is unfilled). */
+        int a = 0, b = 0;
+        int ta = fk_f64_admit(fk_node[i][1], arity, types, &a);
+        if (ta != 3) { if (ta != 0) { fk_f64_refuse_tag = t; } return 0; }
+        int tb = fk_f64_admit(fk_node[i][2], arity, types, &b);
+        if (tb != 3) { if (tb != 0) { fk_f64_refuse_tag = t; } return 0; }
+        if (fk_f64_prog[a].kind != 8 || fk_f64_prog[b].kind != 8) { fk_f64_refuse_tag = t; return 0; }
+        if (fk_f64_str_slot(a) < 0 || fk_f64_str_slot(b) < 0) { fk_f64_refuse_tag = t; return 0; }
+        fk_f64_reads_strword = 1; /* this leaf reads its string params' words (frame 24+k); a caller leaf must copy them here (sig bit 31) */
+        *out = fk_f64_push(35, fk_f64_str_slot(a), fk_f64_str_slot(b), 0.0, 0);
+        return *out < 0 ? 0 : 1;
+    }
     if (t == 27) {
         /* str_concat with a one-byte string on one side of a string parameter: the accumulator. (str_concat (byte_to_str e)
          * acc) prepends the byte, (str_concat acc (byte_to_str e)) appends it -- one STRB into the scratch the door reserves
@@ -10529,9 +10547,10 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
             k = k + 1;
         }
         if (t == 12) { if (car != 1) { return 0; } } else if (k != car || cell >= 0) { return 0; }
-        if (!cold && ((csig >> 29) & 1)) {
-            /* a callee that conses may hold a string argument's word in a pair: a caller parameter's or a literal's, which the
-             * call can hand over -- a string built in this leaf has no word yet */
+        if (!cold && (((csig >> 29) & 1) || ((csig >> 31) & 1))) {
+            /* a callee that conses may hold a string argument's word in a pair, and a callee that reads its string params'
+             * words (bit 31, str_eq) needs those words handed over: either way a string argument must be a caller parameter's
+             * or a literal's word, which the call can hand over -- a string built in this leaf has no word yet */
             long long q = 0;
             while (q < car && q < 8) {
                 if (atv[q] == 3) { int ak2 = fk_f64_prog[fk_f64_call_args[slot][q]].kind; if (ak2 != 8 && ak2 != 22) { fk_f64_refuse_tag = t; return 0; } }
@@ -11085,6 +11104,33 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         if (!fk_f64_put(words, wn, 0xF9400000U | ((unsigned int)(9 + p->a) << 10) | (unsigned int)rd)) { return -1; } /* LDR Xd, [X0, #8*(9+a)] */
         return 100 + rd;
     }
+    if (p->kind == 35) {
+        /* str_eq of two interned string params: word a (frame 24+slot a) vs word b (frame 24+slot b). Interning makes
+         * two LOCAL strings' content equality a plain word compare. FIELD-STRING GUARD: a field string is not interned
+         * against a local copy of the same bytes, so when the words DIFFER and either is a field string, leave for the
+         * overflow block (the walker does the byte walk). A field word w = fk_sbase - (si<<1) - 1 with si >= FK_STR_BASE,
+         * i.e. w <= T = fk_sbase - (FK_STR_BASE<<1) - 1; a local word is > T. Only two differing LOCAL words answer 0. */
+        if (*nitemp >= 7) { return -1; }
+        if (fk_f64_ovf_n + 2 > FK_F64_OVF_CAP) { return -1; }
+        unsigned int ka = (unsigned int)p->a, kb = (unsigned int)p->b;
+        if (!fk_f64_put(words, wn, 0xF9400010U | ((24U + ka) << 10))) { return -1; }   /* LDR X16, [X0, #8*(24+ka)] : word a */
+        if (!fk_f64_put(words, wn, 0xF9400011U | ((24U + kb) << 10))) { return -1; }   /* LDR X17, [X0, #8*(24+kb)] : word b */
+        int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
+        unsigned int xd = (unsigned int)rd;
+        if (!fk_f64_put(words, wn, 0xEB11021FU)) { return -1; }                          /* CMP X16, X17 */
+        if (!fk_f64_put(words, wn, 0x9A9F17E0U | xd)) { return -1; }                     /* CSET Xd, EQ */
+        long long bdone = *wn;
+        if (!fk_f64_put(words, wn, 0x54000000U)) { return -1; }                          /* B.EQ done: equal words -> 1 */
+        if (!fk_f64_mov64(words, wn, 9U, (unsigned long long)(fk_sbase - (FK_STR_BASE << 1) - 1))) { return -1; } /* X9 = T */
+        if (!fk_f64_put(words, wn, 0xEB09021FU)) { return -1; }                          /* CMP X16, X9 */
+        fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
+        if (!fk_f64_put(words, wn, 0x5400000DU)) { return -1; }                          /* B.LE overflow: word a is a field string */
+        if (!fk_f64_put(words, wn, 0xEB09023FU)) { return -1; }                          /* CMP X17, X9 */
+        fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
+        if (!fk_f64_put(words, wn, 0x5400000DU)) { return -1; }                          /* B.LE overflow: word b is a field string */
+        words[bdone] = words[bdone] | ((unsigned int)(((*wn) - bdone) & 0x7FFFFLL) << 5); /* B.EQ -> here (done) */
+        return 100 + rd;
+    }
     if (p->kind == 20 || p->kind == 21) {
         /* the accumulator: parameter a's pointer rides x(10+a), its length frame word 9 + a. Byte b is stored one before
          * the pointer (prepend, the pointer moving down) or at pointer + length (append), and the length moves by one. A
@@ -11221,8 +11267,10 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
                 w19 = w19 + 1;
             }
         }
-        if ((csig >> 29) & 1) {
-            /* a consing callee may put a string argument's word in a pair: a caller parameter's word from this frame, a literal's a constant */
+        if (((csig >> 29) & 1) || ((csig >> 31) & 1)) {
+            /* a consing callee may put a string argument's word in a pair, and a str_eq callee (bit 31) reads its string
+             * params' words at frame 24+k: either way the call copies each string argument's word here -- a caller
+             * parameter's word from this frame, a literal's a constant */
             k = 0;
             while (k < car) {
                 int src = fk_f64_call_strsrc[slot][k];
@@ -11440,7 +11488,7 @@ static void fk_f64_pulse(long long fx) {
     int types[8] = {2, 2, 2, 2, 2, 2, 2, 2}; /* the expression leaf: every parameter a float, the door holds the rest to the walker */
     { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } } /* a let slot is unbound here: this leaf takes no let step */
     fk_f64_prog_n = 0;
-    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_ovf2_n = 0; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0;
+    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_ovf2_n = 0; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0;
     fk_f64_no_frame = 1;
     int top = 0;
     if (fk_f64_admit(body, arity, types, &top) != 2) {
@@ -11628,7 +11676,7 @@ static int fk_f64_inline_try(long long i, long long t, long long callee, long lo
     if (t == 12) { if (car != 1) { return 0; } } else if (cell >= 0) { return 0; }
     /* a snapshot of the admit's state, restored when the body does not admit as an expression here */
     long long pn = fk_f64_prog_n, rt = fk_f64_refuse_tag;
-    int ln = fk_f64_lit_n, hm = fk_f64_hidden_mask, ns = fk_f64_need_scratch, acc = fk_f64_acc_slot, ad = fk_f64_acc_dir, cs = fk_f64_conses;
+    int ln = fk_f64_lit_n, hm = fk_f64_hidden_mask, ns = fk_f64_need_scratch, acc = fk_f64_acc_slot, ad = fk_f64_acc_dir, cs = fk_f64_conses, rsw = fk_f64_reads_strword;
     int cn = fk_f64_call_n, wnn = fk_f64_warm_n, cnr = fk_f64_call_not_ready;
     int d = fk_f64_env_depth;
     k = 0;
@@ -11639,7 +11687,7 @@ static int fk_f64_inline_try(long long i, long long t, long long callee, long lo
     fk_f64_env_depth = d;
     if (r == 0) {
         fk_f64_prog_n = pn; fk_f64_refuse_tag = rt; fk_f64_lit_n = ln; fk_f64_hidden_mask = hm; fk_f64_need_scratch = ns;
-        fk_f64_acc_slot = acc; fk_f64_acc_dir = ad; fk_f64_call_n = cn; fk_f64_warm_n = wnn; fk_f64_call_not_ready = cnr; fk_f64_conses = cs;
+        fk_f64_acc_slot = acc; fk_f64_acc_dir = ad; fk_f64_call_n = cn; fk_f64_warm_n = wnn; fk_f64_call_not_ready = cnr; fk_f64_conses = cs; fk_f64_reads_strword = rsw;
         return 0;
     }
     fk_f64_inline_type = r;
@@ -11653,7 +11701,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     if (n != arity) { return; }
     if (arity > 6) { fk_fn_native[fx] = -1; return; } /* the typed lanes ride x10..x15: x16 and x17 are their scratch */
     fk_f64_refuse_tag = -1; fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0;
-    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_ovf2_n = 0;
+    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_ovf2_n = 0;
     fk_fn_native[fx] = -1;
     int types[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } }
@@ -11699,6 +11747,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     if (fk_f64_acc_slot >= 0) { sig = sig | (1LL << ((fk_f64_acc_dir == 1 ? 32 : 40) + fk_f64_acc_slot)); }
     if (fk_f64_need_scratch) { sig = sig | (1LL << 26); } /* a callee builds or answers a string in this leaf's scratch */
     if (fk_f64_conses) { sig = sig | (1LL << 29); } /* this leaf conses: the door reserves a run of pairs */
+    if (fk_f64_reads_strword) { sig = sig | (1LL << 31); } /* this leaf reads its string params' words: a caller leaf copies them to frame 24+k */
     unsigned int words[FK_F64_WORD_CAP];
     fk_f64_live_of(types);
     long long wn = 0;
@@ -11884,7 +11933,7 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     int tex = 0, nex = 0;
     fk_f64_prog_n = 0;
     fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; /* a call inside the loop's steps may reach a crystallized leaf; a call to this defn is the self call */
-    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_ovf2_n = 0;
+    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_ovf2_n = 0;
     long long j = 0;
     while (j < nsteps) {
         letn[j] = -1;
@@ -11960,6 +12009,7 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     if (fk_f64_acc_slot >= 0) { sig = sig | (1LL << ((fk_f64_acc_dir == 1 ? 32 : 40) + fk_f64_acc_slot)); }
     if (fk_f64_need_scratch) { sig = sig | (1LL << 26); } /* a callee builds or answers a string in this leaf's scratch */
     if (fk_f64_conses) { sig = sig | (1LL << 29); } /* this leaf conses: the door reserves a run of pairs */
+    if (fk_f64_reads_strword) { sig = sig | (1LL << 31); } /* this leaf reads its string params' words: a caller leaf copies them to frame 24+k */
     /* a loop that conses hands its frame back to the door at the pass boundary where its run is half spent: the pairs so
      * far become the heap's, melted when it is near full, and the loop goes on from where it stood -- so a loop consing
      * past the largest run stays in the lane, and only a single pass needing more is the walker's. A callee's string lives
