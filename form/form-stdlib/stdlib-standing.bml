@@ -1,20 +1,22 @@
 //////////////////////////////////////////////////////////////////////
 //
-// stdlib-standing.bml — the stdlib's standing, read while it runs.
+// stdlib-standing.bml — the stdlib's standing, measured beside the host's C++.
 //
-// C++ settles its library before the program starts: a template becomes an
-// instance at compile time, so its first call is already warm. This body
-// settles its library while it runs: a recipe starts walked, meets the heat
-// door after FK_F64_HEAT calls, and crystallizes a native instance for each
-// signature it meets, or declines, and the hot rows name the door it met.
-// So the standing of a family is what its recipe does cold, what it becomes
-// warm, and which of its defns carry the work natively, asked afresh each
-// time. The authoring altitude is observe/authoring-altitude-run.fk's to say.
+// C++ settles its library before the program starts; this body settles it while
+// it runs: a recipe starts walked, meets the heat door after FK_F64_HEAT calls,
+// and crystallizes a native instance per signature it meets, or declines, and
+// the hot rows name the door it met. Each family's core.fk stand-in and the
+// host's C++ standard library (tests/oracles/stdlib-standing-oracle.cpp) do the
+// same work and are measured the same way: process CPU time at the host clock's
+// resolution, the first 32 calls from a cold start, then the median of five
+// 512-call batches past warm-up. The body is measured first and the reference
+// after it, never together. The authoring altitude is
+// observe/authoring-altitude-run.fk's to say.
 //
-// preludes: form-stdlib/core.fk
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
 //
-// The observe/stdlib-standing-run.fk door only asks this class. It answers
-// the count of families whose named defns all read a native state.
+// The observe/stdlib-standing-run.fk door only asks this class. It answers the
+// count of families whose named defns all read a native state.
 //
 section [form.bml] {
     class StdlibStanding {
@@ -22,6 +24,7 @@ section [form.bml] {
         def sst-dbl(x) = mul(x, 2);
         def sst-even?(x) = eq(mod(x, 2), 0);
         def sst-cat(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), sst-cat(tail(parts)));
+        def sst-nl() = byte_to_str(10);
 
         // ---- one driver per family: n calls of its stand-in, folded to an int ----
         def sst-d-accumulate(n, xs, t) = if le(n, 0) then t else sst-d-accumulate(sub(n, 1), xs, add(t, foldl(sst-add, 0, xs)));
@@ -36,31 +39,74 @@ section [form.bml] {
         // ---- the families: the C++ name, its driver, the defns that carry it ----
         def sst-families() = list(list("accumulate", sst-d-accumulate, list("foldl")), list("transform", sst-d-transform, list("map-onto", "reverse-onto")), list("copy_if", sst-d-copy-if, list("filter-onto")), list("iota+take", sst-d-iota-take, list("range-down", "take-onto")), list("reduce", sst-d-reduce, list("sum-onto", "maximum-onto")), list("to_string", sst-d-to-string, list("int_to_str", "fstr-int-str", "fstr-digits")), list("stoi", sst-d-stoi, list("str_to_int", "fstr-to-int-loop")), list("to_chars", sst-d-to-chars, list("float-repr", "fr-digits", "fr-me", "d4w", "d4w-run", "d4w-scale")));
 
-        // ---- reading ----
+        // ---- measuring the body ----
         def sst-cpu(d, n, xs) {
             let t0 = host_cpu_us();
             let r = d(n, xs, 0);
             if lt(r, 0) then -1 else sub(host_cpu_us(), t0);
         }
+        def sst-ns(us, calls) = div(mul(us, 1000), calls);
+        def sst-ins(x, s) = if eq(len(s), 0) then list(x) else if le(x, head(s)) then cons(x, s) else cons(head(s), sst-ins(x, tail(s)));
+        def sst-sort(xs, acc) = if eq(len(xs), 0) then acc else sst-sort(tail(xs), sst-ins(head(xs), acc));
+        def sst-median(xs) = nth(sst-sort(xs, list()), div(len(xs), 2));
+        def sst-batch(d, xs) = sst-ns(sst-cpu(d, 512, xs), 512);
+        def sst-warm5(d, xs) = sst-median(list(sst-batch(d, xs), sst-batch(d, xs), sst-batch(d, xs), sst-batch(d, xs), sst-batch(d, xs)));
         def sst-state(name, rows) = if eq(len(rows), 0) then -99 else if str_eq(nth(head(rows), 1), name) then nth(head(rows), 7) else sst-state(name, tail(rows));
         def sst-states(names, rows) = if eq(len(names), 0) then "" else sst-cat(list(" ", head(names), "=", int_to_str(sst-state(head(names), rows)), sst-states(tail(names), rows)));
         def sst-warm?(names, rows) = if eq(len(names), 0) then 1 else if lt(sst-state(head(names), rows), 1) then 0 else sst-warm?(tail(names), rows);
-        // cold: 32 calls, whose inner loops stay under the heat door; warm: 512 calls past it
-        def sst-ns(us, calls) = div(mul(us, 1000), calls);
-        def sst-family(fam, xs) {
+        // a family's body reading: name, cold ns, warm ns, its defns' states, fully warm
+        def sst-measure(fam, xs) {
             let cold = sst-ns(sst-cpu(nth(fam, 1), 32, xs), 32);
             let heat = sst-cpu(nth(fam, 1), 2048, xs);
-            let warm = sst-ns(sst-cpu(nth(fam, 1), 512, xs), 512);
+            let warm = sst-warm5(nth(fam, 1), xs);
             let rows = kernel_page_hot(host_pid(), 600);
-            print(sst-cat(list(nth(fam, 0), "  cold ", int_to_str(cold), " ns  warm ", int_to_str(warm), " ns a call  x", int_to_str(div(cold, if lt(warm, 1) then 1 else warm)), " ", sst-states(nth(fam, 2), rows))));
-            sst-warm?(nth(fam, 2), rows);
+            list(nth(fam, 0), cold, warm, sst-states(nth(fam, 2), rows), sst-warm?(nth(fam, 2), rows));
         }
-        def sst-each(fams, xs, acc) = if eq(len(fams), 0) then acc else sst-each(tail(fams), xs, add(acc, sst-family(head(fams), xs)));
+        def sst-measure-all(fams, xs) = if eq(len(fams), 0) then list() else cons(sst-measure(head(fams), xs), sst-measure-all(tail(fams), xs));
+
+        // ---- measuring the host's C++, after the body ----
+        def sst-host(cmd) {
+            let v = host-exec(cmd, "");
+            if nothing?(v) then "" else v;
+        }
+        def sst-chomp(s) = if lt(str_len(s), 1) then s else if eq(str_byte_at(s, sub(str_len(s), 1)), 10) then substring(s, 0, sub(str_len(s), 1)) else s;
+        def sst-oracle-cpp() = "form/form-stdlib/tests/oracles/stdlib-standing-oracle.cpp";
+        def sst-oracle-cmd() = sst-cat(list("d=`mktemp -d` && c++ -std=c++20 -O2 ", sst-oracle-cpp(), " -o $d/oracle && $d/oracle && rm -rf $d"));
+        def sst-oracle-line(f, acc) = if lt(len(f), 3) then acc else cons(list(nth(f, 0), str_to_int(nth(f, 1)), str_to_int(nth(f, 2))), acc);
+        def sst-oracle-keep(lines, acc) = if eq(len(lines), 0) then acc else sst-oracle-keep(tail(lines), sst-oracle-line(split-on(head(lines), " "), acc));
+        def sst-oracle-rows(text) = sst-oracle-keep(split-on(text, sst-nl()), list());
+        def sst-oracle-row(name, rows) = if eq(len(rows), 0) then list() else if str_eq(nth(head(rows), 0), name) then head(rows) else sst-oracle-row(name, tail(rows));
+
+        // ---- the reading ----
+        // the clock's floor: a batch reading at or under res/calls is under the clock, and says so
+        def sst-res(refs) {
+            let r = sst-oracle-row("clock-res-ns", refs);
+            if eq(len(r), 0) then 1000 else nth(r, 1);
+        }
+        def sst-q(v, floor) = if le(v, floor) then sst-cat(list("under ", int_to_str(add(floor, 1)))) else int_to_str(v);
+        // a ratio to one decimal, from integer tenths
+        def sst-x(a, b) {
+            let t = div(mul(a, 10), if lt(b, 1) then 1 else b);
+            sst-cat(list(int_to_str(div(t, 10)), ".", int_to_str(mod(t, 10))));
+        }
+        def sst-cmp(bw, cw, wf) = if le(cw, wf) then sst-cat(list("body at least x", sst-x(bw, add(wf, 1)), " the reference")) else if ge(bw, cw) then sst-cat(list("body x", sst-x(bw, cw), " the reference")) else sst-cat(list("reference x", sst-x(cw, bw), " the body"));
+        def sst-ref-text(r, cf, wf) = if eq(len(r), 0) then "reference no reading" else sst-cat(list("c++ cold ", sst-q(nth(r, 1), cf), " warm ", sst-q(nth(r, 2), wf), " ns"));
+        def sst-say(b, refs) {
+            let r = sst-oracle-row(nth(b, 0), refs);
+            let cf = div(sst-res(refs), 32);
+            let wf = div(sst-res(refs), 512);
+            print(sst-cat(list(nth(b, 0), "  body cold ", sst-q(nth(b, 1), cf), " warm ", sst-q(nth(b, 2), wf), " ns  ", sst-ref-text(r, cf, wf), "  warm: ", if eq(len(r), 0) then "unmeasured" else sst-cmp(nth(b, 2), nth(r, 2), wf), " ", nth(b, 3))));
+            nth(b, 4);
+        }
+        def sst-say-all(bs, refs, acc) = if eq(len(bs), 0) then acc else sst-say-all(tail(bs), refs, add(acc, sst-say(head(bs), refs)));
         def sst-run() {
-            print("stdlib standing, read while it runs: cold is walked, warm is past the heat door");
+            print(sst-cat(list("stdlib standing, measured: host load ", sst-chomp(sst-host("sysctl -n vm.loadavg")), "  reference ", sst-chomp(sst-host("c++ --version | head -1")))));
+            print("both sides: process CPU time, cold = the first 32 calls, warm = median of five 512-call batches past warm-up");
             print("states: 2 native loop, 1 native leaf, -1 declined, -1xxx refused op tag xxx, -99 not hot");
-            let warm = sst-each(sst-families(), range(1, 20), 0);
-            print(sst-cat(list("families warm: ", int_to_str(warm), " of ", int_to_str(len(sst-families())))));
+            let body = sst-measure-all(sst-families(), range(1, 20));
+            let refs = sst-oracle-rows(sst-host(sst-oracle-cmd()));
+            let warm = sst-say-all(body, refs, 0);
+            print(sst-cat(list("families fully warm: ", int_to_str(warm), " of ", int_to_str(len(sst-families())), "  reference rows: ", int_to_str(len(refs)))));
             warm;
         }
     }
