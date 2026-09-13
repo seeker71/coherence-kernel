@@ -11789,6 +11789,11 @@ static int fk_f64_loop_pass(unsigned int *words, long long *wn, const int *cas, 
             if (types[letslots[j]] == 2) {
                 if (r >= 100) { return 0; }
                 if ((unsigned int)r != slot && !fk_f64_put(words, wn, 0x1E604000U | ((unsigned int)r << 5) | slot)) { return 0; } /* FMOV Dslot, Dr */
+            } else if (types[letslots[j]] == 3) {
+                /* a string rides a slot (emit answers 110 + slot), so BOTH its pointer and its length at frame word
+                 * 9 + slot must move; a plain MOV would leave the length at the source's word */
+                if (r < 110) { return 0; }
+                if (!fk_f64_slot_move(words, wn, r - 110, (int)slot)) { return 0; }
             } else {
                 if (r < 100) { return 0; }
                 if ((unsigned int)(r - 100) != 10U + slot && !fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(r - 100) << 16) | (10U + slot))) { return 0; } /* MOV X(10+slot), Xr */
@@ -11932,7 +11937,14 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
         if (slot < arity || slot >= 6) { return; }
         int lv = 0;
         int lt = fk_f64_admit(fk_node[node][2], arity, types, &lv);
-        if (lt == 0 || lt == 3) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } return; }
+        if (lt == 0) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } return; }
+        if (lt == 3) {
+            /* a STRING let -- see the loop pass's twin: its value must already ride a slot so the pointer and the length
+             * at frame word 9 + s move together; an accumulator (20/21) is mutated in place and is not a let's to bind */
+            int lk = fk_f64_prog[lv].kind;
+            if (fk_f64_str_slot(lv) < 0) { return; }
+            if (lk != 8 && lk != 22 && lk != 17 && lk != 19) { return; }
+        }
         types[slot] = lt; letn[nlets] = lv; letslots[nlets] = (int)slot; nlets = nlets + 1;
         node = fk_node[node][3];
     }
@@ -11970,6 +11982,10 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
         if (types[letslots[j]] == 2) {
             if (r >= 100) { return; }
             if ((unsigned int)r != slot && !fk_f64_put(words, &wn, 0x1E604000U | ((unsigned int)r << 5) | slot)) { return; }
+        } else if (types[letslots[j]] == 3) {
+            /* a string let: pointer AND length (frame word 9 + slot) together -- see the loop pass's twin */
+            if (r < 110) { return; }
+            if (!fk_f64_slot_move(words, &wn, r - 110, (int)slot)) { return; }
         } else {
             if (r < 100) { return; }
             if ((unsigned int)(r - 100) != 10U + slot && !fk_f64_put(words, &wn, 0xAA0003E0U | ((unsigned int)(r - 100) << 16) | (10U + slot))) { return; }
@@ -12143,7 +12159,17 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
             /* the let's value, admitted before the steps that read it; its slot bound at the value's type */
             int lv = 0;
             int lt = fk_f64_admit(letvals[j], arity, types, &lv);
-            if (lt == 0 || lt == 3) { return; } /* a string let would need a length beside its pointer: not yet */
+            if (lt == 0) { return; }
+            if (lt == 3) {
+                /* a STRING let: its value must already ride a slot, so its pointer (x(10+s)) and its length (frame word
+                 * 9 + s) move together through fk_f64_slot_move -- a plain MOV would carry the pointer and leave the
+                 * length behind at the source's word. A parameter (8), a literal (22), an if's answer (17) and a call's
+                 * answer (19) all keep that pair; an ACCUMULATOR (20/21) is mutated in place through the pass, so a let
+                 * binding it would alias a value that moves under the binding. */
+                int lk = fk_f64_prog[lv].kind;
+                if (fk_f64_str_slot(lv) < 0) { return; }
+                if (lk != 8 && lk != 22 && lk != 17 && lk != 19) { return; }
+            }
             types[letslots[j]] = lt;
             letn[j] = lv;
             cas[j] = -1; cbs[j] = -1; exs[j] = -1; ccs[j] = 0;

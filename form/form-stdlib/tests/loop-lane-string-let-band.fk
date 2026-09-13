@@ -1,0 +1,46 @@
+; loop-lane-string-let-band.fk -- a STRING let crystallizes: its pointer and its length move together.
+;
+; A let bound to an int or a float rode one register and crystallized; a let bound to a STRING declined the whole
+; leaf (a bare -1), because a string is a PAIR -- a pointer in x(10+slot) and a length in frame word 9 + slot --
+; and the let step emitted a plain MOV, which would carry the pointer and leave the length behind at the source's
+; word. The repair is fk_f64_slot_move, the same helper an if's string answer already uses: it moves both halves.
+;
+; The value must already RIDE a slot, so its length is at hand: a string parameter (kind 8), a literal (22), an
+; if's string answer (17) or a call's string answer (19). An ACCUMULATOR (20/21) is excluded deliberately -- it is
+; mutated in place across the pass, so a let binding it would alias a value that moves under the binding.
+;
+; Verdict 7
+; PROOF LEVEL: FOURTH-ARM ONLY (crystallization is fkwu's MAP_JIT lane; native state is the 8th hot-row field)
+; preludes: form-stdlib/core.fk
+;
+;   1  a loop whose body binds a string let (from a parameter) crystallizes (state 2)
+;   2  a let from a parameter, from a LITERAL and from an IF's string answer all answer as the walker --
+;      the length travelling with the pointer is exactly what str_len reads back
+;   4  the GUARD holds: a string let whose value does not ride a slot does not crystallize
+(do
+    (defn sll-bit (ok b) (if ok b 0))
+    (defn sll-state (nm rows) (if (eq (len rows) 0) -99 (if (str_eq (nth (head rows) 1) nm) (nth (head rows) 7) (sll-state nm (tail rows)))))
+    ; a let bound to a string PARAMETER (kind 8)
+    (defn sll-p (s n acc) (if (le n 0) acc (do (let t s) (sll-p s (sub n 1) (add acc (str_len t))))))
+    (defn sll-pw (s n acc) (if (lt (host_monotonic_ms) 0) acc (if (le n 0) acc (do (let t s) (sll-pw s (sub n 1) (add acc (str_len t)))))))
+    ; a let bound to a LITERAL (kind 22)
+    (defn sll-l (s n acc) (if (le n 0) acc (do (let t "abcde") (sll-l s (sub n 1) (add acc (str_len t))))))
+    (defn sll-lw (s n acc) (if (lt (host_monotonic_ms) 0) acc (if (le n 0) acc (do (let t "abcde") (sll-lw s (sub n 1) (add acc (str_len t)))))))
+    ; a let bound to an IF's string answer (kind 17)
+    (defn sll-i (s n acc) (if (le n 0) acc (do (let t (if (lt n 5) "xy" s)) (sll-i s (sub n 1) (add acc (str_len t))))))
+    (defn sll-iw (s n acc) (if (lt (host_monotonic_ms) 0) acc (if (le n 0) acc (do (let t (if (lt n 5) "xy" s)) (sll-iw s (sub n 1) (add acc (str_len t)))))))
+    ; the GUARD: a string let whose value does NOT ride a slot (a general str_concat) must not crystallize
+    (defn sll-c (s n acc) (if (le n 0) acc (do (let t (str_concat s "z")) (sll-c s (sub n 1) (add acc (str_len t))))))
+    (let hp (sll-p "abc" 40000 0))
+    (let hl (sll-l "abc" 40000 0))
+    (let hi (sll-i "abc" 40000 0))
+    (let hc (sll-c "abc" 40000 0))
+    (let rows (kernel_page_hot (host_pid) 900))
+    (let cryst-ok (eq (sll-state "sll-p" rows) 2))
+    (let ans-ok (if (eq (sll-p "abc" 7 0) (sll-pw "abc" 7 0))
+                (if (eq (sll-l "abc" 7 0) (sll-lw "abc" 7 0))
+                    (eq (sll-i "abc" 7 0) (sll-iw "abc" 7 0)) false) false))
+    (let guard-ok (if (eq (sll-state "sll-c" rows) 2) false true))
+    (let told (print (list "p" (sll-state "sll-p" rows) "l" (sll-state "sll-l" rows) "i" (sll-state "sll-i" rows) "c" (sll-state "sll-c" rows))))
+    (add (sll-bit cryst-ok 1) (add (sll-bit (if cryst-ok ans-ok false) 2) (sll-bit guard-ok 4)))
+)
