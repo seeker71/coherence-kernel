@@ -6,14 +6,17 @@
 ; answer, the door emits a C-call whose interned-string result rides back as a raw word. That is safe exactly there
 ; -- the interned word is stable across a pool realloc (only a byte pointer would stale), and nothing reads a held
 ; pointer after the answer. So a one-expression string-cut recipe (char_at, and any (substring s a b) body) is warm.
+; A caller leaf would hold byte pointers across that realloc, so such a leaf carries sig bit 28 and the call arm
+; declines it: a caller that cuts through char_at walks.
 ;
-; Verdict 7
+; Verdict 15
 ; PROOF LEVEL: FOURTH-ARM ONLY (crystallization is fkwu's MAP_JIT lane; a defn's native state is the 8th hot-row field)
 ; preludes: form-stdlib/core.fk
 ;
 ;   1   a one-expression char_at recipe (substring in answer position) reads state 1 (crystallized leaf)
 ;   2   it agrees with the walker's substring across indices, both edges, an out-of-range index, and a multi-byte cut
 ;   4   the warm run is under a walker twin's run of the same work
+;   8   a leaf calling char_at through the call arm is declined (-1241, sig bit 28) and answers as the walker
 (do
     (defn ca-bit (ok bit) (if ok bit 0))
     (defn ca-state (name rows) (if (eq (len rows) 0) -99 (if (str_eq (nth (head rows) 1) name) (nth (head rows) 7) (ca-state name (tail rows)))))
@@ -33,5 +36,13 @@
     (let w0 (host_monotonic_ms)) (let warm (hot S 40000 0)) (let w1 (host_monotonic_ms))
     (let k0 (host_monotonic_ms)) (let cold (hotw S 40000 0)) (let k1 (host_monotonic_ms))
     (let fast-ok (if (eq warm cold) (lt (sub w1 w0) (sub k1 k0)) false))
-    (let told (print (list "state" st "cryst" cryst-ok "ans" ans-ok "fast" fast-ok "ms" (sub w1 w0) (sub k1 k0))))
-    (add (ca-bit cryst-ok 1) (add (ca-bit (if cryst-ok ans-ok false) 2) (ca-bit fast-ok 4))))
+    ; 8: a leaf that cuts through char_at: the cut may move the string pool under the caller's byte pointers, so the
+    ; call arm declines the callee and the caller walks, answering as substring does
+    (defn ca-via (s i) (myca s i))
+    (defn ca-lt? (a b) (if (lt (host_monotonic_ms) 0) false (lt a b)))
+    (defn ca-hot (s n acc) (if (ca-lt? 0 n) (ca-hot s (sub n 1) (add acc (str_len (ca-via s 3)))) acc))
+    (let via-heat (ca-hot S 3000 0))
+    (let via-st (ca-state "ca-via" (kernel_page_hot (host_pid) 300)))
+    (let via-ok (if (eq via-st -1241) (if (str_eq (ca-via S 4) "o") (str_eq (ca-via U 1) (substring U 1 2)) false) false))
+    (let told (print (list "state" st "cryst" cryst-ok "ans" ans-ok "fast" fast-ok "via" via-st "ms" (sub w1 w0) (sub k1 k0))))
+    (add (ca-bit cryst-ok 1) (add (ca-bit (if cryst-ok ans-ok false) 2) (add (ca-bit fast-ok 4) (ca-bit via-ok 8)))))
