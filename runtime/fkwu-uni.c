@@ -11678,13 +11678,22 @@ static int fk_f64_inline_try(long long i, long long t, long long callee, long lo
     long long pn = fk_f64_prog_n, rt = fk_f64_refuse_tag;
     int ln = fk_f64_lit_n, hm = fk_f64_hidden_mask, ns = fk_f64_need_scratch, acc = fk_f64_acc_slot, ad = fk_f64_acc_dir, cs = fk_f64_conses, rsw = fk_f64_reads_strword;
     int cn = fk_f64_call_n, wnn = fk_f64_warm_n, cnr = fk_f64_call_not_ready;
+    /* the environment slot this inline borrows goes back as it was found: the param arm admits a caller's argument one
+     * level down, and an inline inside that argument borrows the same slot the body being inlined still reads from */
     int d = fk_f64_env_depth;
+    long long saved[8];
+    int saved_arity = fk_f64_env_arity[d];
+    k = 0;
+    while (k < 8) { saved[k] = fk_f64_env_args[d][k]; k = k + 1; }
     k = 0;
     while (k < car) { fk_f64_env_args[d][k] = args[k]; k = k + 1; }
     fk_f64_env_arity[d] = (int)car;
     fk_f64_env_depth = d + 1;
     int r = fk_f64_admit(body, arity, types, out);
     fk_f64_env_depth = d;
+    k = 0;
+    while (k < 8) { fk_f64_env_args[d][k] = saved[k]; k = k + 1; }
+    fk_f64_env_arity[d] = saved_arity;
     if (r == 0) {
         fk_f64_prog_n = pn; fk_f64_refuse_tag = rt; fk_f64_lit_n = ln; fk_f64_hidden_mask = hm; fk_f64_need_scratch = ns;
         fk_f64_acc_slot = acc; fk_f64_acc_dir = ad; fk_f64_call_n = cn; fk_f64_warm_n = wnn; fk_f64_call_not_ready = cnr; fk_f64_conses = cs; fk_f64_reads_strword = rsw;
