@@ -42,8 +42,9 @@ Witnessed:
   - One band met the case: str-eq-absence, four times, each time with nothing.
   - Nine bands read other than their registered verdict with no trace line: the Vulkan and matrix-unit GPU lanes,
     host-process (125) and teach-sema-pattern. They read the host, not these ops.
-  - form-cli-heal-dynamic, run through its observe/ runner, stops on both kernels at str_len of nothing, a stop
-    older than this change. It is red on main as it stands.
+  - form-cli-heal-dynamic has no band file under its stem. It is a service: observe/form-cli-heal-dynamic-run.fk
+    reads one observation from stdin and answers it. Handed three observations, it answers each the same on the
+    old kernel and this one, with no trace line and exit 0.
 - **All four kernels now stop on all six ops, and on `(str_eq 5 6)`.** `(str_len "abc")` answers 3 on all four.
 - **The six children** exit 0 with the old answers on 53a58d319's kernel, and exit 1 now.
 - **Bands:**
