@@ -10024,6 +10024,7 @@ static int fk_f64_lit_n;
 static int fk_f64_need_scratch; /* the leaf calls a callee that builds or answers a string: the door reserves scratch for it (sig bit 26) */
 static int fk_f64_conses; /* the leaf conses, itself or through a callee: the door reserves a run of pairs for it (sig bit 29) */
 static int fk_f64_calls_c; /* the leaf answers through a C call that may move the string pool (kind 38): a caller leaf's held byte pointers would stale under it, so the call arm declines such a callee (sig bit 28) */
+static int fk_f64_kind_ok; /* the next admit may take (value_kind x) as a kind known at compile time: set by str_eq's fold for its operand, passed through a parameter's substitution, spent by any other admit */
 static char *fk_stack_base;     /* the run thread's stack top and the walker's depth wall, defined with the walker below: a */
 static long long fk_stack_wall; /* non-tail self call in a leaf checks the same wall before it recurses */
 static void fk_depth_wall(long long used); /* the wall's one meaning, for the walker and for a leaf: report and stop */
@@ -10189,9 +10190,49 @@ static int fk_f64_cvt(int n) { return fk_f64_type_of(n) == 2 ? n : fk_f64_push(1
  * the operation a lane would have to learn to absorb that recipe's dispatches,
  * so a histogram over it reads as work to do rather than a count to regret. */
 static long long fk_f64_refuse_tag = -1;
-/* admit a body node under a per-parameter type signature (types[k]: 1 int, 2 float): returns 0 declined, 1 int-typed,
- * 2 float-typed; appends to fk_f64_prog, *out = its index */
+/* n bytes at b spell the C string w */
+static int fk_f64_bytes_are(const char *b, long long n, const char *w) {
+    long long q = 0;
+    while (q < n && w[q] != 0 && b[q] == w[q]) { q = q + 1; }
+    return q == n && w[q] == 0;
+}
+/* (str_eq (value_kind x) "kind"), either way round, for an x whose kind the leaf knows at compile time: the answer is a
+ * constant the leaf carries, and value_kind is never asked. Any other shape admits as before (0 here). */
+static int fk_f64_kind_fold(long long i, long long arity, const int *types, int *out) {
+    long long l = fk_node[i][1], r = fk_node[i][2], lit = -1, other = -1;
+    if (r >= 0 && r < fk_node_count && fk_node[r][0] == 24) { lit = r; other = l; }
+    else if (l >= 0 && l < fk_node_count && fk_node[l][0] == 24) { lit = l; other = r; }
+    if (lit < 0 || other < 0 || other >= fk_node_count) { return 0; }
+    long long si = fk_node[lit][1];
+    if (si < 0 || si >= fk_sp || si >= FK_STR_BASE) { return 0; }
+    /* the operand is admitted only to read its kind: every trace it leaves goes back, whichever way it answers */
+    long long pn = fk_f64_prog_n, rt = fk_f64_refuse_tag;
+    int ln = fk_f64_lit_n, hm = fk_f64_hidden_mask, ns = fk_f64_need_scratch, acc = fk_f64_acc_slot, ad = fk_f64_acc_dir, cs = fk_f64_conses, rsw = fk_f64_reads_strword, ccl = fk_f64_calls_c;
+    int cn = fk_f64_call_n, wnn = fk_f64_warm_n, cnr = fk_f64_call_not_ready;
+    int kn = 0;
+    fk_f64_kind_ok = 1;
+    int tk = fk_f64_admit(other, arity, types, &kn);
+    long long code = tk == 7 ? fk_f64_prog[kn].ilit : 0;
+    fk_f64_kind_ok = 0;
+    fk_f64_prog_n = pn; fk_f64_refuse_tag = rt; fk_f64_lit_n = ln; fk_f64_hidden_mask = hm; fk_f64_need_scratch = ns;
+    fk_f64_acc_slot = acc; fk_f64_acc_dir = ad; fk_f64_call_n = cn; fk_f64_warm_n = wnn; fk_f64_call_not_ready = cnr;
+    fk_f64_conses = cs; fk_f64_reads_strword = rsw; fk_f64_calls_c = ccl;
+    if (code < 1 || code > 5) { return 0; }
+    static const char *const kinds[6] = {"", "int", "float", "string", "list", "closure"}; /* fk_value_kind's names */
+    const char *lb = FK_SBYTES(si);
+    long long lnb = FK_SLEN(si);
+    /* record r and the integer -r are one word, and fk_value_kind answers "record" for it while r <= fk_rp (kindshadow,
+     * row 1525): against "int" or "record" an int's answer depends on the run, so only the other names fold */
+    if (code == 1 && (fk_f64_bytes_are(lb, lnb, "int") || fk_f64_bytes_are(lb, lnb, "record"))) { return 0; }
+    *out = fk_f64_push(7, 0, 0, 0.0, fk_f64_bytes_are(lb, lnb, kinds[code]) ? 1 : 0);
+    return *out < 0 ? 0 : 1;
+}
+/* admit a body node under a per-parameter type signature (types[k]): returns 0 declined, else the node's type -- 1 int,
+ * 2 float, 3 string, 4 list, 5 a word of unknown kind, 6 a defn value, 7 a kind code only str_eq's fold takes; appends
+ * to fk_f64_prog, *out = its index */
 static int fk_f64_admit(long long i, long long arity, const int *types, int *out) {
+    int kind_ok = fk_f64_kind_ok; /* this admit alone may take value_kind (the fold's operand, or a parameter standing for it) */
+    fk_f64_kind_ok = 0;
     if (i < 0 || i >= fk_node_count || fk_f64_prog_n >= FK_F64_NODE_CAP) { return 0; }
     long long t = fk_node[i][0];
     if (t == 1) {
@@ -10218,6 +10259,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
             int d = fk_f64_env_depth - 1;
             if (k < 0 || k >= fk_f64_env_arity[d]) { return 0; }
             fk_f64_env_depth = d;
+            fk_f64_kind_ok = kind_ok; /* the argument stands where the parameter stood */
             int r = fk_f64_admit(fk_f64_env_args[d][k], arity, types, out);
             fk_f64_env_depth = d + 1;
             return r;
@@ -10261,6 +10303,20 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         *out = fk_f64_push(16, k, fk_f64_prog[child].kind == 8 ? -1 : child, 0.0, 0);
         return *out < 0 ? 0 : 1;
     }
+    if (t == 201 && kind_ok) {
+        /* (value_kind x) as str_eq's operand: x's kind as the leaf types it -- an int, a float, a string, a list, a defn
+         * (whose kind reads "closure") -- is a constant the fold compares (type 7, only the fold takes it); a word of
+         * unknown kind keeps the walker's value_kind */
+        long long mn = fk_node[i][1];
+        if (mn >= 0 && mn < fk_node_count && fk_node[mn][0] == 1 && fk_node[mn][1] == 4) {
+            int xv = 0;
+            int tx = fk_f64_admit(fk_node[i][2], arity, types, &xv);
+            long long code = tx == 1 ? 1 : (tx == 2 ? 2 : (tx == 3 ? 3 : (tx == 4 ? 4 : (tx == 6 ? 5 : 0))));
+            if (code == 0) { return 0; }
+            *out = fk_f64_push(7, 0, 0, 0.0, code);
+            return *out < 0 ? 0 : 7;
+        }
+    }
     if (t == 6) {
         /* (if <compare> a b) as an expression: the compare over admitted operands (kind 18), both arms one type (kind 17) */
         long long cond = fk_node[i][1], thn = fk_node[i][2], els = fk_node[i][3];
@@ -10274,6 +10330,12 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
             if (ta == 0) { return 0; }
             int tb = fk_f64_admit(fk_node[cond][2], arity, types, &cb);
             if (tb == 0) { return 0; }
+            if (ta == 1 && tb == 1 && fk_f64_prog[ca].kind == 7 && fk_f64_prog[cb].kind == 7) {
+                /* a compare of two constants: only its arm is the expression */
+                long long x = fk_f64_prog[ca].ilit, y = fk_f64_prog[cb].ilit;
+                int holds = ct == 102 ? x == y : (ct == 103 ? x < y : x <= y);
+                return fk_f64_admit(holds ? thn : els, arity, types, out);
+            }
             if (ct == 102 && (ta == 4 || ta == 5) && (tb == 4 || tb == 5) && (fk_f64_is_empty(ca) || fk_f64_is_empty(cb))) { ta = 1; tb = 1; } /* against the empty list: identity; two other lists read their content, the walker's */
             else {
                 if (!fk_f64_word_resolve(&ca, &ta, tb)) { return 0; } /* a head compared: a float where it meets a float, else an int */
@@ -10291,6 +10353,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
             int tr = fk_f64_admit(cond, arity, types, &r);
             if (tr == 5) { r = fk_f64_narrow(r, 1); if (r < 0) { return 0; } tr = 1; }
             if (tr != 1) { if (tr != 0) { fk_f64_refuse_tag = ct; } return 0; }
+            if (fk_f64_prog[r].kind == 7) { return fk_f64_admit(fk_f64_prog[r].ilit != 0 ? thn : els, arity, types, out); } /* a constant condition: only its arm is the expression */
             if (fk_f64_prog[r].kind == 26) { cmpn = fk_f64_prog[r].a; }
             else { int z = fk_f64_push(7, 0, 0, 0.0, 0); if (z < 0) { return 0; } cmpn = fk_f64_push(18, r, z, 0.0, 1); }
         }
@@ -10392,6 +10455,12 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         if (ta == 0) { return 0; }
         int tb = fk_f64_admit(fk_node[i][2], arity, types, &b);
         if (tb == 0) { return 0; }
+        if (ta == 1 && tb == 1 && fk_f64_prog[a].kind == 7 && fk_f64_prog[b].kind == 7) {
+            /* a compare of two constants is a constant */
+            long long x = fk_f64_prog[a].ilit, y = fk_f64_prog[b].ilit;
+            *out = fk_f64_push(7, 0, 0, 0.0, (t == 102 ? x == y : (t == 103 ? x < y : x <= y)) ? 1 : 0);
+            return *out < 0 ? 0 : 1;
+        }
         unsigned int cc = 0U;
         if (t == 102 && (ta == 4 || ta == 5) && (tb == 4 || tb == 5) && (fk_f64_is_empty(a) || fk_f64_is_empty(b))) { cc = 0U; } /* against the empty list: identity */
         else {
@@ -10460,6 +10529,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
          * though, is not interned against a local copy of the same bytes, so kind 35 leaves for the walker when the words
          * differ and either is a field string (the emit's guard, w <= T). First cut: string PARAMETERS only (kind 8),
          * whose word the pulse writes to frame word 24 + slot; a literal operand keeps walking (its slot word is unfilled). */
+        { int kf = fk_f64_kind_fold(i, arity, types, out); if (kf != 0) { return kf; } } /* a kind test the leaf can answer now */
         int a = 0, b = 0;
         int ta = fk_f64_admit(fk_node[i][1], arity, types, &a);
         if (ta != 3) { if (ta != 0) { fk_f64_refuse_tag = t; } return 0; }
