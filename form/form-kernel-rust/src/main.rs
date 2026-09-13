@@ -4675,27 +4675,6 @@ impl Kernel {
                 Value::Int(if n < 0 { -n } else { n })
             }
         });
-        // float→int conversions: the bridge between float compute and integer
-        // band verdicts / quantization codes. floor/ceil/trunc are IEEE-unambiguous
-        // (agree three-way); round is half-AWAY-from-zero (matches Go math.Round;
-        // TS uses sign*round(abs) because JS Math.round rounds half toward +Inf).
-        // An int argument passes through unchanged.
-        self.register_native("floor", cat_method(), |_, _, args| match &args[0] {
-            Value::Float(f) => Value::Int(f.floor() as i64),
-            _ => Value::Int(args[0].as_int()),
-        });
-        self.register_native("ceil", cat_method(), |_, _, args| match &args[0] {
-            Value::Float(f) => Value::Int(f.ceil() as i64),
-            _ => Value::Int(args[0].as_int()),
-        });
-        self.register_native("trunc", cat_method(), |_, _, args| match &args[0] {
-            Value::Float(f) => Value::Int(f.trunc() as i64),
-            _ => Value::Int(args[0].as_int()),
-        });
-        self.register_native("round", cat_method(), |_, _, args| match &args[0] {
-            Value::Float(f) => Value::Int(f.round() as i64),
-            _ => Value::Int(args[0].as_int()),
-        });
         // Polymorphic `+` for Python compilation: int+int→add,
         // str+str→concat, list+list→concat. The compile-time emitter
         // can't always determine operand types (variables, function
@@ -4791,12 +4770,6 @@ impl Kernel {
         });
         self.register_native("math_pi", cat_method(), |_, _, _args| {
             Value::Float(std::f64::consts::PI)
-        });
-        self.register_native("math_floor", cat_method(), |_, _, args| {
-            Value::Int(args[0].as_float().floor() as i64)
-        });
-        self.register_native("math_ceil", cat_method(), |_, _, args| {
-            Value::Int(args[0].as_float().ceil() as i64)
         });
         self.register_native("math_pow", cat_method(), |_, _, args| {
             Value::Float(args[0].as_float().powf(args[1].as_float()))
@@ -14576,8 +14549,109 @@ fn load_form_source_text(
         }
         body.push(line);
     }
+    for tok in home_links(source, &home_index_for(canonical)) {
+        let dependency = resolve_form_import(canonical, &tok)?;
+        let dependency_display = dependency.display().to_string();
+        if tok.ends_with(".bml") {
+            load_form_source_bml_prelude(&dependency, &dependency_display, seen, parts)?;
+        } else {
+            load_form_source_file(&dependency, &dependency_display, seen, parts)?;
+        }
+    }
     parts.push((display_path.to_string(), body.join("\n")));
     Ok(())
+}
+
+// Link by name, the rule every kernel reads from form-stdlib/home-index.txt: a source that
+// calls a name the index lists, and defines no such name itself, loads the name's home unit
+// as if it had preluded it. Comments and string literals are skipped, so a word in prose
+// links nothing.
+fn home_index_for(owner: &Path) -> Vec<(String, String)> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Vec<(String, String)>>>> =
+        std::sync::OnceLock::new();
+    let Ok(path) = resolve_form_import(owner, "form-stdlib/home-index.txt") else {
+        return Vec::new();
+    };
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap();
+    if let Some(rows) = guard.get(&path) {
+        return rows.clone();
+    }
+    let mut rows = Vec::new();
+    if let Ok(body) = fs::read_to_string(&path) {
+        for line in body.split('\n') {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 2 || fields[0].starts_with('#') {
+                continue;
+            }
+            rows.push((fields[0].to_string(), fields[1].to_string()));
+        }
+    }
+    guard.insert(path, rows.clone());
+    rows
+}
+
+fn home_sym_byte(c: u8) -> bool {
+    !matches!(
+        c,
+        b' ' | b'\t' | b'\n' | b'\r' | b'(' | b')' | b'"' | b';' | b',' | b'[' | b']' | b'{'
+            | b'}' | b'\'' | b'`' | b'=' | b':'
+    )
+}
+
+fn home_links(text: &str, rows: &[(String, String)]) -> Vec<String> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let b = text.as_bytes();
+    let mut used = vec![false; rows.len()];
+    let mut defined = vec![false; rows.len()];
+    let mut prev: &[u8] = &[];
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if c == b';' || (c == b'/' && i + 1 < b.len() && b[i + 1] == b'/') {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'"' {
+            i += 1;
+            while i < b.len() && b[i] != b'"' {
+                if b[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if !home_sym_byte(c) {
+            i += 1;
+            continue;
+        }
+        let s = i;
+        while i < b.len() && home_sym_byte(b[i]) {
+            i += 1;
+        }
+        let tok = &b[s..i];
+        for (h, row) in rows.iter().enumerate() {
+            if row.0.as_bytes() == tok {
+                if prev == b"defn" || prev == b"def" {
+                    defined[h] = true;
+                } else {
+                    used[h] = true;
+                }
+            }
+        }
+        prev = tok;
+    }
+    rows.iter()
+        .enumerate()
+        .filter(|(h, _)| used[*h] && !defined[*h])
+        .map(|(_, row)| row.1.clone())
+        .collect()
 }
 
 fn load_form_source_closure(paths: &[String]) -> Result<Vec<(String, String)>, String> {

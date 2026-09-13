@@ -10184,7 +10184,7 @@ static int fk_f64_push(int kind, int a, int b, double lit, long long ilit) {
 /* the type an admitted node answers: 1 int, 2 float -- every int kind, an if-expression's own type, a call's from its callee's signature */
 static int fk_f64_type_of(int n) {
     int k = fk_f64_prog[n].kind;
-    if ((k >= 7 && k <= 12) || k == 14 || k == 15 || k == 16 || k == 26 || k == 27 || k == 28) { return 1; }
+    if ((k >= 7 && k <= 12) || k == 14 || k == 15 || k == 16 || k == 26 || k == 27 || k == 28 || k == 36) { return 1; }
     if (k == 17) { return (int)fk_f64_prog[n].lit; }
     if (k == 19) { return ((fk_f64_sig[fk_f64_prog[n].ilit] >> 8) & 1) ? 2 : 1; }
     return 2;
@@ -10318,6 +10318,18 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
             *out = fk_f64_push(7, 0, 0, 0.0, code);
             return *out < 0 ? 0 : 7;
         }
+    }
+    if (t == 54) {
+        /* float_to_int: the walker's (long long)fk_num(v) << 1 -- one FCVTZS over the operand as a double (an int operand
+         * through SCVTF first, as fk_num reads it), then the tagged word's own 63-bit wrap, so a whole part past 2^62
+         * answers as the walker's int does (kind 36) */
+        int a = 0;
+        int ta = fk_f64_admit(fk_node[i][1], arity, types, &a);
+        if (ta == 5 && !fk_f64_word_resolve(&a, &ta, 2)) { return 0; }
+        if (ta != 1 && ta != 2) { if (ta != 0) { fk_f64_refuse_tag = t; } return 0; }
+        if (ta == 1) { a = fk_f64_cvt(a); if (a < 0) { return 0; } }
+        *out = fk_f64_push(36, a, 0, 0.0, 0);
+        return *out < 0 ? 0 : 1;
     }
     if (t == 6) {
         /* (if <compare> a b) as an expression: the compare over admitted operands (kind 18), both arms one type (kind 17) */
@@ -10737,7 +10749,7 @@ static int fk_f64_prog_refs(int n, int k) {
     if (p->kind == 14) { return p->a == k || fk_f64_prog_refs(p->b, k); }
     if (p->kind == 20 || p->kind == 21) { return p->a == k || fk_f64_prog_refs(p->b, k) || fk_f64_prog_refs((int)p->ilit, k); }
     if (p->kind == 17) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k) || fk_f64_prog_refs((int)p->ilit, k); }
-    if (p->kind == 13 || p->kind == 24 || p->kind == 25 || p->kind == 26 || p->kind == 27 || p->kind == 28 || p->kind == 30 || p->kind == 34) { return fk_f64_prog_refs(p->a, k); }
+    if (p->kind == 13 || p->kind == 24 || p->kind == 25 || p->kind == 26 || p->kind == 27 || p->kind == 28 || p->kind == 30 || p->kind == 34 || p->kind == 36) { return fk_f64_prog_refs(p->a, k); }
     if (p->kind == 32) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
     if (p->kind == 33) { int j = 0; if (fk_f64_prog_refs(p->s, k)) { return 1; } while (j < p->b) { if (fk_f64_prog_refs(fk_f64_call_args[p->a][j], k)) { return 1; } j = j + 1; } return 0; }
     if (p->kind == 19) { int j = 0; while (j < p->b) { if (fk_f64_prog_refs(fk_f64_call_args[p->a][j], k)) { return 1; } j = j + 1; } return 0; }
@@ -11148,6 +11160,19 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         int rd = 16 + *ntemp; *ntemp = *ntemp + 1;
         if (!fk_f64_put(words, wn, 0x9E620000U | ((unsigned int)(ra - 100) << 5) | (unsigned int)rd)) { return -1; } /* SCVTF Dd, Xn */
         return rd;
+    }
+    if (p->kind == 36) {
+        /* float_to_int: FCVTZS, then the 63-bit wrap of the walker's tagged word (LSL #1; ASR #1) */
+        int ra = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
+        if (ra < 0 || ra >= 100) { return -1; }
+        fk_f64_release(ra, ntemp, nitemp);
+        if (*nitemp >= 7) { return -1; }
+        int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
+        unsigned int xd = (unsigned int)rd;
+        if (!fk_f64_put(words, wn, 0x9E780000U | ((unsigned int)ra << 5) | xd)) { return -1; } /* FCVTZS Xd, Dn */
+        if (!fk_f64_put(words, wn, 0xD37FF800U | (xd << 5) | xd)) { return -1; }            /* LSL Xd, Xd, #1 */
+        if (!fk_f64_put(words, wn, 0x9341FC00U | (xd << 5) | xd)) { return -1; }            /* ASR Xd, Xd, #1 */
+        return 100 + rd;
     }
     if (p->kind == 34) {
         /* a word a head handed up, taken for a float: a LOCAL float box, the double loaded from the pool; any other word
@@ -11628,9 +11653,7 @@ static int fk_f64_install(long long fx, long long root, long long orig, unsigned
     return 0;
 #endif
 }
-static void fk_f64_pulse(long long fx) {
-    if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
-    if (fk_fn_native[fx] != 0) { return; }
+static void fk_f64_pulse_float(long long fx) {
     long long root = 0, orig = 0, body = 0;
     if (!fk_f64_body_of(fx, &root, &orig, &body)) { fk_fn_native[fx] = -1; return; }
     if (fk_node[body][0] == 6) { return; } /* loop-shaped: the heat pulse reads the signature off a whole frame; stay cold until then */
@@ -11673,6 +11696,15 @@ static void fk_f64_pulse(long long fx) {
     if (!fk_f64_ovf_block(words, &wn)) { return; } /* a call inside this leaf reads its callee's overflow word: the blocks its branches leave for */
     if (!fk_f64_install(fx, root, orig, words, wn, -1, 1)) { return; }
     fk_f64_count = fk_f64_count + 1;
+}
+/* The all-float leaf answers only for itself. A body it has no arm for -- a let step, an if at the top, a conversion, a
+ * literal it has no prologue for -- stays untried, so the next heat pulse, which carries the frame, asks the typed leaf;
+ * a decline there names the tag. Only a body with nothing readable stays marked. */
+static void fk_f64_pulse(long long fx) {
+    if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
+    if (fk_fn_native[fx] != 0) { return; }
+    fk_f64_pulse_float(fx);
+    if (fk_fn_native[fx] != 1 && fk_fn_native[fx] != -1) { fk_fn_native[fx] = 0; }
 }
 /* one pass of the loop body: compare, exit branch (recorded for patching), the tail call as a parallel move into the
  * parameter registers, the iteration count. 0 on overflow. */
@@ -11924,7 +11956,16 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
         else { allf = 0; }
         k = k + 1;
     }
-    if (allf) { fk_fn_native[fx] = 0; fk_f64_pulse(fx); return; }
+    if (allf) {
+        fk_fn_native[fx] = 0;
+        fk_f64_pulse(fx);
+        if (fk_fn_native[fx] == 1) { return; }
+        /* the float leaf takes no let step, no if at the top and no conversion: the typed leaf takes floats as well */
+        fk_f64_no_frame = 0;
+        fk_f64_refuse_tag = -1; fk_f64_call_n = 0; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0;
+        fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_ovf2_n = 0;
+        fk_fn_native[fx] = -1;
+    }
     int letn[FK_F64_CHAIN_CAP], letslots[FK_F64_CHAIN_CAP];
     long long nlets = 0;
     long long node = body;
@@ -15931,14 +15972,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         tmp[n] = 0;
         return fk_fbox(strtod(tmp, 0));
     }
-    if (t == 51) {
-        double d = fk_num(fk_walk(fk_node[i][1], fp));
-        long long q = (long long)d;
-        if (d < (double)q) {
-            q = q - 1;
-        }
-        return q << 1;
-    }
     if (t == 52) {
         double x = fk_num(fk_walk(fk_node[i][1], fp));
         long long nd = fk_walk(fk_node[i][2], fp) >> 1;
@@ -15982,26 +16015,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 81) {
         return fk_fbox(fk_sqrt_d(fk_num(fk_walk(fk_node[i][1], fp))));
-    }
-    if (t == 82) {
-        return ((long long)fk_num(fk_walk(fk_node[i][1], fp))) << 1;
-    }
-    if (t == 87) {
-        double d87 = fk_num(fk_walk(fk_node[i][1], fp));
-        double a87 = d87 < 0.0 ? 0.0 - d87 : d87;
-        long long q87 = (long long)(a87 + 0.5);
-        if (d87 < 0.0) {
-            q87 = 0 - q87;
-        }
-        return q87 << 1;
-    }
-    if (t == 88) {
-        double d88 = fk_num(fk_walk(fk_node[i][1], fp));
-        long long q88 = (long long)d88;
-        if (d88 > (double)q88) {
-            q88 = q88 + 1;
-        }
-        return q88 << 1;
     }
     if (t == 89) {
         return fk_fbox(fk_exp_d(fk_num(fk_walk(fk_node[i][1], fp))));
@@ -20931,6 +20944,191 @@ static int fk_src_line_is_bare_import_fk(const char *text, long long line_start,
     start = fk_src_trim_import_token(text, start, &n);
     return fk_src_prelude_fk_token(text, start, n);
 }
+/* One dependency token collected for owner_path: a .bml lowers, any other unit is read as it
+ * stands. The prelude directive and the home linker both come through here. A lowered .bml is
+ * marked at the index it is registered under, taken before the call: fk_src_collect_bytes
+ * registers the unit at the count it is handed and then collects the unit's own preludes
+ * behind it, so the last index after the call is that chain's last dependency, and an
+ * unmarked .bml would send the import lane to image its raw high-grammar bytes. */
+static int fk_src_collect_dep(const char *owner_path, long long owner_idx, const char *tok,
+                              long long tn) {
+    char dep_path[FK_PATH_CAP];
+    if (!fk_path_resolve_fk_dep(owner_path, tok, tn, dep_path, FK_PATH_CAP)) {
+        fk_diag_path("error", owner_path, "prelude path exceeds buffer");
+        return 0;
+    }
+    if (fk_unit_lowers(dep_path)) {
+        if (fk_src_dep_index(dep_path) < 0) {
+            long long bml_mtime = fk_path_mtime_raw(dep_path);
+            if (bml_mtime <= 0) {
+                fk_diag_path("error", dep_path,
+                        "prelude is missing or not stat-readable");
+                return 0;
+            }
+            long long low_len = 0;
+            char *low = fk_bml_lower_to_mem(dep_path, &low_len);
+            if (low == 0) {
+                return 0;
+            }
+            long long bml_idx = fk_src_dep_count;
+            if (!fk_src_collect_bytes(dep_path, low, low_len,
+                    bml_mtime, low_len, owner_idx)) {
+                return 0;
+            }
+            fk_src_dep_lowered[bml_idx] = 1;
+        }
+    } else if (!fk_src_collect_file(dep_path, owner_idx)) {
+        return 0;
+    }
+    return 1;
+}
+/* LINK BY NAME. A unit that calls a name form-stdlib/home-index.txt lists, and defines no such
+ * name itself, collects the name's home unit as if it had preluded it -- the way a linker pulls
+ * the archive member that defines an undefined symbol. The index is read once per process,
+ * resolved like a prelude token from the first unit that asks. Comments and string literals
+ * are skipped, so a word in prose links nothing. */
+static char *fk_read_whole_file(const char *path, long long *out_len);
+#define FK_HOME_CAP 4096
+static int fk_home_loaded;
+static long long fk_home_n;
+static const char *fk_home_name[FK_HOME_CAP];
+static long long fk_home_name_n[FK_HOME_CAP];
+static const char *fk_home_unit[FK_HOME_CAP];
+static long long fk_home_unit_n[FK_HOME_CAP];
+static void fk_home_load(const char *owner_path) {
+    const char *tok = "form-stdlib/home-index.txt";
+    long long tn = 0;
+    char path[FK_PATH_CAP];
+    long long n = 0;
+    char *t;
+    long long i = 0;
+    fk_home_loaded = 1;
+    while (tok[tn] != 0) {
+        tn = tn + 1;
+    }
+    if (!fk_path_resolve_fk_dep(owner_path, tok, tn, path, FK_PATH_CAP)) {
+        return;
+    }
+    t = fk_read_whole_file(path, &n);
+    if (t == 0) {
+        return;
+    }
+    while (i < n && fk_home_n < FK_HOME_CAP) {
+        long long p = i;
+        long long le = i;
+        long long ns, nn, us, un;
+        while (le < n && t[le] != FK_CH_LF) {
+            le = le + 1;
+        }
+        i = le + 1;
+        while (p < le && (t[p] == FK_CH_SPACE || t[p] == FK_CH_TAB)) {
+            p = p + 1;
+        }
+        if (p >= le || t[p] == '#') {
+            continue;
+        }
+        ns = p;
+        while (p < le && t[p] != FK_CH_SPACE && t[p] != FK_CH_TAB) {
+            p = p + 1;
+        }
+        nn = p - ns;
+        while (p < le && (t[p] == FK_CH_SPACE || t[p] == FK_CH_TAB)) {
+            p = p + 1;
+        }
+        us = p;
+        while (p < le && t[p] != FK_CH_SPACE && t[p] != FK_CH_TAB && t[p] != FK_CH_CR) {
+            p = p + 1;
+        }
+        un = p - us;
+        if (nn > 0 && un > 0) {
+            fk_home_name[fk_home_n] = t + ns;
+            fk_home_name_n[fk_home_n] = nn;
+            fk_home_unit[fk_home_n] = t + us;
+            fk_home_unit_n[fk_home_n] = un;
+            fk_home_n = fk_home_n + 1;
+        }
+    }
+}
+static int fk_home_sym_byte(char c) {
+    return !(c == FK_CH_SPACE || c == FK_CH_TAB || c == FK_CH_LF || c == FK_CH_CR ||
+             c == FK_CH_LPAREN || c == FK_CH_RPAREN || c == FK_CH_DQUOTE || c == FK_CH_SEMI ||
+             c == FK_CH_COMMA || c == '[' || c == ']' || c == '{' || c == '}' || c == '\'' ||
+             c == '`' || c == '=' || c == ':');
+}
+static int fk_src_link_homes(const char *owner_path, const char *text, long long n,
+                             long long owner_idx) {
+    char used[FK_HOME_CAP];
+    char defined[FK_HOME_CAP];
+    long long prev_s = -1;
+    long long prev_n = 0;
+    long long i = 0;
+    long long h = 0;
+    if (!fk_home_loaded) {
+        fk_home_load(owner_path);
+    }
+    if (fk_home_n == 0) {
+        return 1;
+    }
+    while (h < fk_home_n) {
+        used[h] = 0;
+        defined[h] = 0;
+        h = h + 1;
+    }
+    while (i < n) {
+        char c = text[i];
+        long long s;
+        long long tn;
+        if (c == FK_CH_SEMI || (c == FK_CH_SLASH && i + 1 < n && text[i + 1] == FK_CH_SLASH)) {
+            while (i < n && text[i] != FK_CH_LF) {
+                i = i + 1;
+            }
+            continue;
+        }
+        if (c == FK_CH_DQUOTE) {
+            i = i + 1;
+            while (i < n && text[i] != FK_CH_DQUOTE) {
+                if (text[i] == '\\') {
+                    i = i + 1;
+                }
+                i = i + 1;
+            }
+            i = i + 1;
+            continue;
+        }
+        if (!fk_home_sym_byte(c)) {
+            i = i + 1;
+            continue;
+        }
+        s = i;
+        while (i < n && fk_home_sym_byte(text[i])) {
+            i = i + 1;
+        }
+        tn = i - s;
+        h = 0;
+        while (h < fk_home_n) {
+            if (fk_home_name_n[h] == tn && memcmp(fk_home_name[h], text + s, (unsigned long)tn) == 0) {
+                if (prev_s >= 0 && ((prev_n == 4 && memcmp(text + prev_s, "defn", 4) == 0) ||
+                                    (prev_n == 3 && memcmp(text + prev_s, "def", 3) == 0))) {
+                    defined[h] = 1;
+                } else {
+                    used[h] = 1;
+                }
+            }
+            h = h + 1;
+        }
+        prev_s = s;
+        prev_n = tn;
+    }
+    h = 0;
+    while (h < fk_home_n) {
+        if (used[h] && !defined[h] &&
+            !fk_src_collect_dep(owner_path, owner_idx, fk_home_unit[h], fk_home_unit_n[h])) {
+            return 0;
+        }
+        h = h + 1;
+    }
+    return 1;
+}
 static int fk_src_collect_preludes(const char *owner_path, const char *text, long long n,
                                    long long owner_idx) {
     const char *needle = "preludes:";
@@ -21012,56 +21210,7 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
                             !fk_src_prelude_bml_token(text, start, tn)) {
                             break;
                         }
-                        char dep_path[FK_PATH_CAP];
-                        if (!fk_path_resolve_fk_dep(owner_path, text + start, tn, dep_path, FK_PATH_CAP)) {
-                            fk_diag_path("error", owner_path, "prelude path exceeds buffer");
-                            return 0;
-                        }
-                        if (fk_unit_lowers(dep_path)) {
-                            if (fk_src_dep_index(dep_path) < 0) {
-                                long long bml_mtime = fk_path_mtime_raw(dep_path);
-                                if (bml_mtime <= 0) {
-                                    fk_diag_path("error", dep_path,
-                                            "prelude is missing or not stat-readable");
-                                    return 0;
-                                }
-                                long long low_len = 0;
-                                char *low = fk_bml_lower_to_mem(dep_path, &low_len);
-                                if (low == 0) {
-                                    return 0;
-                                }
-                                /* THE FLAG THAT LANDED ON THE WRONG UNIT.
-                                 * This used to mark fk_src_dep_count - 1 AFTER
-                                 * the call, on the belief that the unit just
-                                 * collected is the last one. It is only the
-                                 * last one when the lowered .bml has no
-                                 * preludes of its own: fk_src_collect_bytes
-                                 * registers the .bml at the count it was
-                                 * handed and THEN collects the .bml's own
-                                 * prelude chain behind it, so for any .bml
-                                 * that preludes anything the flag came to rest
-                                 * on that chain's last transitive dependency —
-                                 * a plain .fk — and the .bml itself stayed
-                                 * unmarked. Both halves of that then went
-                                 * wrong at once: the import lane saw an
-                                 * unmarked .bml among the root's direct
-                                 * dependencies, tried to build a standalone
-                                 * image from its RAW high-grammar bytes (no
-                                 * lowering happens on that path), counted the
-                                 * thousand-odd unresolved calls that must
-                                 * follow, refused the image and fell the whole
-                                 * program back to the flat compile — while a
-                                 * .fk that could have been imaged was carried
-                                 * as text instead. The .bml's index is known
-                                 * before the call; take it there. */
-                                long long bml_idx = fk_src_dep_count;
-                                if (!fk_src_collect_bytes(dep_path, low, low_len,
-                                        bml_mtime, low_len, owner_idx)) {
-                                    return 0;
-                                }
-                                fk_src_dep_lowered[bml_idx] = 1;
-                            }
-                        } else if (!fk_src_collect_file(dep_path, owner_idx)) {
+                        if (!fk_src_collect_dep(owner_path, owner_idx, text + start, tn)) {
                             return 0;
                         }
                     }
@@ -21081,7 +21230,7 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
             i = i + 1;
         }
     }
-    return 1;
+    return fk_src_link_homes(owner_path, text, n, owner_idx);
 }
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
                                 long long mtime, long long size, long long parent_idx);
@@ -23596,13 +23745,25 @@ static unsigned long long fk_bml_floor_fold(const char *path, unsigned long long
     free(text);
     return h;
 }
+/* The floor compiler, found from the repo root or from form/ -- the two places the body runs
+ * from. The digest and the lowering child read the same file, so a memo written from either
+ * place answers the other. */
+static const char *fk_bml_floor_path(void) {
+    if (fk_path_size_raw("form/form-stdlib/bml-floor-compile.fk") >= 0) {
+        return "form/form-stdlib/bml-floor-compile.fk";
+    }
+    if (fk_path_size_raw("form-stdlib/bml-floor-compile.fk") >= 0) {
+        return "form-stdlib/bml-floor-compile.fk";
+    }
+    return "form/form-stdlib/bml-floor-compile.fk";
+}
 static unsigned long long fk_bml_floor_digest(void) {
     if (fk_bml_floor_digest_have) {
         return fk_bml_floor_digest_memo;
     }
     fk_floor_seen_n = 0;
     fk_bml_floor_digest_memo =
-        fk_bml_floor_fold("form/form-stdlib/bml-floor-compile.fk",
+        fk_bml_floor_fold(fk_bml_floor_path(),
                           14695981039346656037ULL);
     fk_bml_floor_digest_have = 1;
     return fk_bml_floor_digest_memo;
@@ -23713,7 +23874,7 @@ static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len) {
         close(out_fds[1]);
         char *child_argv[3];
         child_argv[0] = (char *)fk_self_path;
-        child_argv[1] = (char *)"form/form-stdlib/bml-floor-compile.fk";
+        child_argv[1] = (char *)fk_bml_floor_path();
         child_argv[2] = 0;
         execvp(fk_self_path, child_argv);
         _exit(127);

@@ -1,0 +1,38 @@
+; rounding-jit-band — floor, ceil and round run as arm64 once hot, compiled from their BML bodies.
+; PROOF LEVEL: FOURTH-ARM ONLY -- the loop lane and its native states are fkwu's own.
+;
+; The rounding family has no C arm: form-stdlib/bml/rounding-ops.bml is its only definition.
+; fkwu walks those bodies cold; past the heat threshold the loop lane compiles each one -- its
+; lets, its if over a float compare, and float_to_int as FCVTZS with the tagged word's 63-bit
+; wrap -- into a typed leaf. A twin of each body under another name, called too few times to
+; heat, keeps walking and answers beside it.
+;
+; Verdict 31 when every claim lands:
+;   1   floor reads native state 1 after 4000 hot calls (kernel_page_hot, field 8)
+;   2   ceil reads native state 1
+;   4   round reads native state 1
+;   8   each hot answer equals its walked twin over halves, zeros, whole floats and values past 2^62
+;   16  the hot driver's sum is 4000 x (2 - 2 + 3)
+;
+; Verdict 31
+(defn rj-floor-walk (x) (do (let d (add x 0.0)) (let q (float_to_int d)) (if (lt d (add q 0.0)) (sub q 1) q)))
+(defn rj-ceil-walk (x) (do (let d (add x 0.0)) (let q (float_to_int d)) (if (lt (add q 0.0) d) (add q 1) q)))
+(defn rj-round-walk (x) (do (let d (add x 0.0)) (let a (if (lt d 0.0) (sub 0.0 d) d)) (let q (float_to_int (add a 0.5))) (if (lt d 0.0) (sub 0 q) q)))
+(defn rj-hot (n acc) (if (lt (host_monotonic_ms) 0) acc (if (eq n 0) acc (rj-hot (sub n 1) (add acc (add (floor 2.5) (add (ceil -2.5) (round 2.5))))))))
+(defn rj-state (rows name) (if (eq (len rows) 0) 0 (if (str_eq (nth (head rows) 1) name) (nth (head rows) 7) (rj-state (tail rows) name))))
+(defn rj-same (xs)
+    (if (eq (len xs) 0) 1
+        (if (and (eq (floor (head xs)) (rj-floor-walk (head xs)))
+                 (and (eq (ceil (head xs)) (rj-ceil-walk (head xs)))
+                      (eq (round (head xs)) (rj-round-walk (head xs)))))
+            (rj-same (tail xs))
+            0)))
+(let hot-sum (rj-hot 4000 0))
+(let rows (kernel_page_hot (host_pid) 32))
+(do
+    (let c0 (if (eq (rj-state rows "floor") 1) 1 0))
+    (let c1 (if (eq (rj-state rows "ceil") 1) 2 0))
+    (let c2 (if (eq (rj-state rows "round") 1) 4 0))
+    (let c3 (if (eq (rj-same (list 2.7 -2.5 -0.5 0.5 1.5 7 -7 0.0 -0.0 0.49999999999999994 4503599627370497.0 -1000000000000000.5 10000000000000000000.0 -10000000000000000000.0 5000000000000000000.0 -5000000000000000000.0)) 1) 8 0))
+    (let c4 (if (eq hot-sum (mul 4000 (add 2 (add -2 3)))) 16 0))
+    (add c0 (add c1 (add c2 (add c3 c4)))))

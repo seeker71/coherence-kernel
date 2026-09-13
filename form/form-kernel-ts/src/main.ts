@@ -8,7 +8,7 @@
 //   tsx src/main.ts path/to/file.fk
 
 import { mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { totalmem } from "node:os";
@@ -342,7 +342,87 @@ async function loadFormSourceText(
     }
     body.push(line);
   }
+  for (const tok of homeLinks(source, homeIndexFor(canonical))) {
+    const dependency = resolveFormImport(canonical, tok);
+    if (tok.endsWith(".bml")) {
+      await loadFormSourceBmlPrelude(dependency, dependency, seen, parts);
+    } else {
+      await loadFormSourceFile(dependency, dependency, seen, parts);
+    }
+  }
   parts.push({ path: displayPath, source: body.join("\n") });
+}
+
+// Link by name, the rule every kernel reads from form-stdlib/home-index.txt: a source that
+// calls a name the index lists, and defines no such name itself, loads the name's home unit
+// as if it had preluded it. Comments and string literals are skipped, so a word in prose
+// links nothing.
+const homeIndexCache = new Map<string, Array<[string, string]>>();
+
+function homeIndexFor(owner: string): Array<[string, string]> {
+  let path: string;
+  try {
+    path = resolveFormImport(owner, "form-stdlib/home-index.txt");
+  } catch {
+    return [];
+  }
+  const cached = homeIndexCache.get(path);
+  if (cached !== undefined) return cached;
+  const rows: Array<[string, string]> = [];
+  try {
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      const [name, unit] = line.trim().split(/\s+/);
+      if (name === undefined || unit === undefined || name.startsWith("#")) continue;
+      rows.push([name, unit]);
+    }
+  } catch {
+    // an index that does not read links nothing
+  }
+  homeIndexCache.set(path, rows);
+  return rows;
+}
+
+function homeSymByte(c: string): boolean {
+  return !" \t\n\r()\";,[]{}'`=:".includes(c);
+}
+
+function homeLinks(text: string, rows: Array<[string, string]>): string[] {
+  if (rows.length === 0) return [];
+  const used = rows.map(() => false);
+  const defined = rows.map(() => false);
+  let prev = "";
+  let i = 0;
+  while (i < text.length) {
+    const c = text.charAt(i);
+    if (c === ";" || (c === "/" && text.charAt(i + 1) === "/")) {
+      while (i < text.length && text[i] !== "\n") i++;
+      continue;
+    }
+    if (c === '"') {
+      i++;
+      while (i < text.length && text[i] !== '"') {
+        if (text[i] === "\\") i++;
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (!homeSymByte(c)) {
+      i++;
+      continue;
+    }
+    const s = i;
+    while (i < text.length && homeSymByte(text.charAt(i))) i++;
+    const tok = text.slice(s, i);
+    rows.forEach((row, h) => {
+      if (row[0] === tok) {
+        if (prev === "defn" || prev === "def") defined[h] = true;
+        else used[h] = true;
+      }
+    });
+    prev = tok;
+  }
+  return rows.filter((_, h) => used[h] && !defined[h]).map((row) => row[1]);
 }
 
 async function loadFormSourceClosure(paths: string[]): Promise<FormSourcePart[]> {
