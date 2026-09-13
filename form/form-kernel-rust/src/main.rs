@@ -5082,52 +5082,6 @@ impl Kernel {
             }
             _ => Value::Int(0),
         });
-        // ── ML vector organ — sibling parity with the go carrier's trio.
-        // IEEE 754 binary64 end to end, so the same vectors yield the
-        // same bits on every kernel.
-        self.register_native("dot_product", cat_method(), |_, _, args| {
-            match (&args[0], &args[1]) {
-                (Value::List(a), Value::List(b)) if a.len() == b.len() => {
-                    let mut sum = 0.0f64;
-                    for i in 0..a.len() {
-                        sum += a[i].as_float() * b[i].as_float();
-                    }
-                    Value::Float(sum)
-                }
-                _ => panic!("dot_product requires equal length vectors"),
-            }
-        });
-        self.register_native("magnitude", cat_method(), |_, _, args| match &args[0] {
-            Value::List(v) => {
-                let mut sum = 0.0f64;
-                for x in v.iter() {
-                    let f = x.as_float();
-                    sum += f * f;
-                }
-                Value::Float(sum.sqrt())
-            }
-            _ => panic!("magnitude expects a vector"),
-        });
-        self.register_native("vector_cosine", cat_method(), |_, _, args| {
-            match (&args[0], &args[1]) {
-                (Value::List(a), Value::List(b)) if a.len() == b.len() => {
-                    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
-                    for i in 0..a.len() {
-                        let fa = a[i].as_float();
-                        let fb = b[i].as_float();
-                        dot += fa * fb;
-                        na += fa * fa;
-                        nb += fb * fb;
-                    }
-                    if na == 0.0 || nb == 0.0 {
-                        Value::Float(0.0)
-                    } else {
-                        Value::Float(dot / (na.sqrt() * nb.sqrt()))
-                    }
-                }
-                _ => panic!("vector_cosine requires equal length vectors"),
-            }
-        });
         // write_form_binary — emit a Recipe to .fkb in the full artifact
         // format (string table + tree). Sibling to read_form_binary.
         // Use when source-compile output crosses kernel invocations:

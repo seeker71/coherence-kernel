@@ -8310,27 +8310,6 @@ static double fk_round_ndigits_decimal(double x, long long nd) {
     }
     return out;
 }
-static double fk_dot_list(long long av, long long bv) {
-    long long pa = av >> 1;
-    long long pb = bv >> 1;
-    double acc = 0.0;
-    while (pa >= 1 && FK_POK(pa) && pb >= 1 && FK_POK(pb)) {
-        acc = acc + fk_num(FK_HH(pa)) * fk_num(FK_HH(pb));
-        pa = FK_HT(pa) >> 1;
-        pb = FK_HT(pb) >> 1;
-    }
-    return acc;
-}
-static double fk_mag_list(long long av) {
-    long long pa = av >> 1;
-    double acc = 0.0;
-    while (pa >= 1 && FK_POK(pa)) {
-        double x = fk_num(FK_HH(pa));
-        acc = acc + x * x;
-        pa = FK_HT(pa) >> 1;
-    }
-    return fk_sqrt_d(acc);
-}
 #define FK_HASHCONS_INIT_CAP 4096 /* fk_hh/fk_ht: the hash-cons cell-pair store, initial size (fk_melt grows it) */
 static void fk_arena(void) {
     fk_cap = FK_HASHCONS_INIT_CAP;
@@ -15739,28 +15718,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 82) {
         return ((long long)fk_num(fk_walk(fk_node[i][1], fp))) << 1;
-    }
-    if (t == 84) {
-        long long a84 = fk_walk(fk_node[i][1], fp);
-        fk_vp(a84);
-        long long b84 = fk_walk(fk_node[i][2], fp);
-        fk_vsp = fk_vsp - 1;
-        return fk_fbox(fk_dot_list(fk_vs[fk_vsp], b84));
-    }
-    if (t == 85) {
-        return fk_fbox(fk_mag_list(fk_walk(fk_node[i][1], fp)));
-    }
-    if (t == 86) {
-        long long a86 = fk_walk(fk_node[i][1], fp);
-        fk_vp(a86);
-        long long b86 = fk_walk(fk_node[i][2], fp);
-        fk_vsp = fk_vsp - 1;
-        double ma86 = fk_mag_list(fk_vs[fk_vsp]);
-        double mb86 = fk_mag_list(b86);
-        if (ma86 == 0.0 || mb86 == 0.0) {
-            return fk_fbox(0.0);
-        }
-        return fk_fbox(fk_dot_list(fk_vs[fk_vsp], b86) / (ma86 * mb86));
     }
     if (t == 87) {
         double d87 = fk_num(fk_walk(fk_node[i][1], fp));

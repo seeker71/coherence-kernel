@@ -3512,60 +3512,19 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VNull}
 	})
 
-	// dot_product and magnitude — the minimal vector primitives that make
-	// the geometry projection (cosine + angle via math_acos) runnable on
-	// live 8-band efficacy-probe vectors inside the kernel driver.
-	// Follows the exact same registerNative + catMethod() pattern as
-	// math_acos / print_float / float_value. Sibling parity target: Rust + TS kernels.
-	// These close the "higher-order vector math (dot, mag, angle on lists) still tight"
-	// item in the trace-symbol-spaces.form Part 6 tightness witness.
-	k.registerNative("dot_product", catMethod(), func(_ *Kernel, args []Value) Value {
+	// pair_angle — the angle between two vectors from their cosine, clamped for
+	// math_acos. dot_product, magnitude and vector_cosine live in Form
+	// (form-stdlib/bml/vector-ops.bml); this native keeps its own cosine.
+	k.registerNative("pair_angle", catMethod(), func(_ *Kernel, args []Value) Value {
 		if len(args) != 2 {
-			panic("dot_product expects 2 arguments")
+			panic("pair_angle expects 2 arguments")
 		}
 		a := args[0].List
 		b := args[1].List
 		if len(a) != len(b) {
-			panic("dot_product requires equal length vectors")
+			panic("pair_angle requires equal length vectors")
 		}
-		var sum float64
-		for i := range a {
-			sum += a[i].AsFloat() * b[i].AsFloat()
-		}
-		return Value{Kind: VFloat, Float: sum}
-	})
-
-	k.registerNative("magnitude", catMethod(), func(_ *Kernel, args []Value) Value {
-		if len(args) != 1 {
-			panic("magnitude expects 1 argument")
-		}
-		v := args[0].List
-		var sum float64
-		for i := range v {
-			f := v[i].AsFloat()
-			sum += f * f
-		}
-		return Value{Kind: VFloat, Float: math.Sqrt(sum)}
-	})
-
-	// vector_cosine and pair_angle — composite helpers that combine the
-	// newly added dot_product + magnitude with math_acos for direct
-	// geometry projection on live 8-band vectors in a single --expr call.
-	// This is the kernel-native counterpart to the pair_cosine / pair_angle
-	// recipes being added on the recipelib track. Placed immediately after
-	// the vector primitives for locality.
-	k.registerNative("vector_cosine", catMethod(), func(_ *Kernel, args []Value) Value {
-		if len(args) != 2 {
-			panic("vector_cosine expects 2 arguments")
-		}
-		a := args[0].List
-		b := args[1].List
-		if len(a) != len(b) {
-			panic("vector_cosine requires equal length vectors")
-		}
-		var dot float64
-		var na float64
-		var nb float64
+		var dot, na, nb float64
 		for i := range a {
 			fa := a[i].AsFloat()
 			fb := b[i].AsFloat()
@@ -3573,15 +3532,10 @@ func (k *Kernel) registerNatives() {
 			na += fa * fa
 			nb += fb * fb
 		}
-		if na == 0 || nb == 0 {
-			return Value{Kind: VFloat, Float: 0}
+		c := 0.0
+		if na != 0 && nb != 0 {
+			c = dot / (math.Sqrt(na) * math.Sqrt(nb))
 		}
-		return Value{Kind: VFloat, Float: dot / (math.Sqrt(na) * math.Sqrt(nb))}
-	})
-
-	k.registerNative("pair_angle", catMethod(), func(k *Kernel, args []Value) Value {
-		cosV := k.natives[k.internName("vector_cosine")].Fn(k, args)
-		c := cosV.Float
 		if c > 1.0 {
 			c = 1.0
 		}
