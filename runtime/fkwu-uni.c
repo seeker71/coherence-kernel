@@ -10020,6 +10020,7 @@ static int fk_f64_live_x; /* the slots this leaf holds a value in through x(10+k
 static int fk_f64_live_d; /* the slots it holds a float in through d(k), which a call arm keeps */
 static int fk_f64_lit_slot[8]; /* the literals a leaf loads in its prologue: slot, pool offset, length */
 static long long fk_f64_lit_off[8], fk_f64_lit_len[8];
+static long long fk_f64_lit_word[8]; /* and its interned WORD, written to frame word 24 + slot so a literal reads like a string parameter (kind 35 str_eq) */
 static int fk_f64_lit_n;
 static int fk_f64_need_scratch; /* the leaf calls a callee that builds or answers a string: the door reserves scratch for it (sig bit 26) */
 static int fk_f64_conses; /* the leaf conses, itself or through a callee: the door reserves a run of pairs for it (sig bit 29) */
@@ -10387,6 +10388,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         int s = fk_f64_hidden_alloc(types);
         if (s < 0) { return 0; }
         fk_f64_lit_slot[fk_f64_lit_n] = s; fk_f64_lit_off[fk_f64_lit_n] = fk_so[si]; fk_f64_lit_len[fk_f64_lit_n] = fk_sl[si];
+        fk_f64_lit_word[fk_f64_lit_n] = fk_strv(si); /* si < FK_STR_BASE is checked above, so this word is always LOCAL (> T): never a field string */
         fk_f64_lit_n = fk_f64_lit_n + 1;
         *out = fk_f64_push(22, s, 0, 0.0, si);
         return *out < 0 ? 0 : 3;
@@ -10527,15 +10529,17 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         /* str_eq: strings are interned in this seed (equal content -> the identical word, however built), so equality of
          * two LOCAL strings is a compare of the two operands' frame words (word 24 + slot), no byte walk. A FIELD string,
          * though, is not interned against a local copy of the same bytes, so kind 35 leaves for the walker when the words
-         * differ and either is a field string (the emit's guard, w <= T). First cut: string PARAMETERS only (kind 8),
-         * whose word the pulse writes to frame word 24 + slot; a literal operand keeps walking (its slot word is unfilled). */
+         * differ and either is a field string (the emit's guard, w <= T). Operands are string PARAMETERS (kind 8), whose
+         * word the pulse writes to frame word 24 + slot, or string LITERALS (kind 22), whose word the leaf's own prologue
+         * writes to the same place -- so the emit reads both the same way. A literal's si is below FK_STR_BASE, so its
+         * word is always local and the field-string guard simply passes for it. */
         { int kf = fk_f64_kind_fold(i, arity, types, out); if (kf != 0) { return kf; } } /* a kind test the leaf can answer now */
         int a = 0, b = 0;
         int ta = fk_f64_admit(fk_node[i][1], arity, types, &a);
         if (ta != 3) { if (ta != 0) { fk_f64_refuse_tag = t; } return 0; }
         int tb = fk_f64_admit(fk_node[i][2], arity, types, &b);
         if (tb != 3) { if (tb != 0) { fk_f64_refuse_tag = t; } return 0; }
-        if (fk_f64_prog[a].kind != 8 || fk_f64_prog[b].kind != 8) { fk_f64_refuse_tag = t; return 0; }
+        if ((fk_f64_prog[a].kind != 8 && fk_f64_prog[a].kind != 22) || (fk_f64_prog[b].kind != 8 && fk_f64_prog[b].kind != 22)) { fk_f64_refuse_tag = t; return 0; }
         if (fk_f64_str_slot(a) < 0 || fk_f64_str_slot(b) < 0) { fk_f64_refuse_tag = t; return 0; }
         fk_f64_reads_strword = 1; /* this leaf reads its string params' words (frame 24+k); a caller leaf must copy them here (sig bit 31) */
         *out = fk_f64_push(35, fk_f64_str_slot(a), fk_f64_str_slot(b), 0.0, 0);
@@ -10820,6 +10824,8 @@ static int fk_f64_lit_prologue(unsigned int *words, long long *wn) {
         if (!fk_f64_put(words, wn, 0x8B100120U | xs)) { return 0; }                                     /* ADD Xs, X9, X16 */
         if (!fk_f64_mov64(words, wn, 9U, (unsigned long long)fk_f64_lit_len[j])) { return 0; }
         if (!fk_f64_put(words, wn, 0xF9000009U | ((9U + (unsigned int)fk_f64_lit_slot[j]) << 10))) { return 0; } /* STR X9, [X0, #8*(9+s)] */
+        if (!fk_f64_mov64(words, wn, 9U, (unsigned long long)fk_f64_lit_word[j])) { return 0; }
+        if (!fk_f64_put(words, wn, 0xF9000009U | ((24U + (unsigned int)fk_f64_lit_slot[j]) << 10))) { return 0; } /* STR X9, [X0, #8*(24+s)]: the literal's interned WORD, so it compares like a string parameter. A hidden slot is only taken where types[s] == 0, so 24+s can never be a live parameter's word. */
         j = j + 1;
     }
     return 1;
