@@ -10007,14 +10007,15 @@ static long long fk_host_door(long long mode, long long x) {
  */
 #define FK_F64_HEAT 1024
 #define FK_F64_NODE_CAP 128
-#define FK_F64_WORD_CAP 1000
+#define FK_F64_WORD_CAP 4096 /* a leaf's words: one 16 KB page, the page Apple Silicon maps for any shorter length too */
+#define FK_F64_PAGE_BYTES (FK_F64_WORD_CAP * 4) /* a leaf's MAP_JIT page is mapped and unmapped at the size its words may reach */
 #define FK_F64_CHAIN_CAP 8 /* a loop body's steps before the terminal self call: at each if, one branch exits or continues the loop, the other leads on */
 #define FK_F64_PATCH_CAP 16 /* branches to patch: two unrolled passes of up to FK_F64_CHAIN_CAP steps, each to its exit or continuation block */
 /* a leaf calling a crystallized leaf: the call arm (kind 19). The callee runs through the door's own frame -- 17 words the
  * caller builds on its stack (args untagged, a string's pointer in its word and its length at 9 + k, word 8 zero), x0 the
  * frame, blr through x16 to the callee's page; the caller spills every register the callee may touch and takes the
  * answer back from x0 or d0. A callee not yet crystallized leaves the caller cold, to be asked again at its next heat. */
-#define FK_F64_CALL_CAP 8
+#define FK_F64_CALL_CAP (FK_F64_WORD_CAP / 128) /* a call arm writes about 120 words (42 spills, 42 reloads, the frame, the overflow check): the page bounds a leaf's calls, not this table */
 #define FK_F64_CALL_FRAME 608 /* the callee's 32 words at 0..255 (17 answer length, 18/19 scratch base and limit, 20/21 their copies, 22/23 the pair run's cursor and limit, 24..29 a string parameter's word at 24+k, 30/31 the pair arrays' bases); then, in words: x0 at 32, x10..x17 at 33, x1..x7 at 41, d0..d7 at 48, d16..d31 at 56, the answer at 72, x8 at 73, x30 at 74 */
 #define FK_F64_CF_X0 32U
 #define FK_F64_CF_X10 33U
@@ -10030,7 +10031,7 @@ static int fk_f64_call_strsrc[FK_F64_CALL_CAP][8]; /* per call: the caller's str
 static long long fk_f64_call_callee[FK_F64_CALL_CAP];
 static int fk_f64_call_n;
 static int fk_f64_call_not_ready;
-#define FK_F64_OVF_CAP 16
+#define FK_F64_OVF_CAP (2 * FK_F64_CALL_CAP) /* a framed call arm takes one site; the leaf's own exits share the rest */
 static int fk_f64_acc_slot = -1; /* the accumulator: the one string parameter a step prepends a byte to (dir 1) or appends one to (dir 2) in that scratch */
 static int fk_f64_acc_dir;
 /* hidden slots: a string literal, a call's string answer and an if's string answer each ride a frame slot no parameter or
@@ -10142,8 +10143,8 @@ static long long fk_f64_prog_n;
 static void fk_f64_reset(void) {
     long long k = 0;
     while (k < fk_f64_cap) {
-        if (fk_f64_mem[k] != 0) { munmap(fk_f64_mem[k], 4096); fk_f64_mem[k] = 0; }
-        { long long e = 0; while (e < FK_F64_XINST) { if (fk_f64_xmem[k * FK_F64_XINST + e] != 0) { munmap(fk_f64_xmem[k * FK_F64_XINST + e], 4096); fk_f64_xmem[k * FK_F64_XINST + e] = 0; } fk_f64_xsig[k * FK_F64_XINST + e] = -1; e = e + 1; } }
+        if (fk_f64_mem[k] != 0) { munmap(fk_f64_mem[k], FK_F64_PAGE_BYTES); fk_f64_mem[k] = 0; }
+        { long long e = 0; while (e < FK_F64_XINST) { if (fk_f64_xmem[k * FK_F64_XINST + e] != 0) { munmap(fk_f64_xmem[k * FK_F64_XINST + e], FK_F64_PAGE_BYTES); fk_f64_xmem[k * FK_F64_XINST + e] = 0; } fk_f64_xsig[k * FK_F64_XINST + e] = -1; e = e + 1; } }
         fk_f64_sig[k] = -1;
         fk_f64_run[k] = 0;
         k = k + 1;
@@ -11384,13 +11385,13 @@ static int fk_f64_body_of(long long fx, long long *root_out, long long *orig_out
 /* the words land on a MAP_JIT page and the defn's entry becomes the tag-194 door */
 static int fk_f64_install(long long fx, long long root, long long orig, unsigned int *words, long long wn, long long sig, long long state) {
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
-    void *mem = mmap(0, 4096, 0x7, 0x1802, -1, 0);
+    void *mem = mmap(0, FK_F64_PAGE_BYTES, 0x7, 0x1802, -1, 0);
     if (mem == (void *)-1) { return 0; }
     pthread_jit_write_protect_np(0);
     memcpy(mem, words, (size_t)(wn * 4));
     pthread_jit_write_protect_np(1);
     __builtin___clear_cache((char *)mem, (char *)mem + wn * 4);
-    if (!fk_f64_reserve(fx)) { munmap(mem, 4096); return 0; }
+    if (!fk_f64_reserve(fx)) { munmap(mem, FK_F64_PAGE_BYTES); return 0; }
     fk_f64_mem[fx] = mem;
     fk_f64_sig[fx] = sig;
     if (fk_node[root][0] != 194) { fk_fn[fx] = fk_smknode(194, fx, orig, 0); fk_prog_note_body(fx); }
