@@ -598,7 +598,7 @@ static const long long fk_fbase = -9000000000000000000LL;
  * A single reserved sentinel, odd and one above fk_fbase, so it is DISTINCT from every value: not
  * an int (ints are v<<1, even), not 0, not the nil/empty value 1, not a boxed float (fk_isf needs
  * v<=fk_fbase-3; this is fk_fbase+1, so isf is false), not a node (fk_nidx maps it to ~4.5e18, far
- * past fk_np), not a record ((0-v) is even for records; here it is odd), not a string/list (those
+ * past fk_np), not a record (records are an odd band just below fk_rbase = -7e18), not a string/list (those
  * are positive). The reducer RETURNS this from (nothing); recipes OBSERVE it via nothing? —
  * no-value is no longer conflated with 0 or host-null. */
 static const long long fk_nothing = -8999999999999999999LL;
@@ -608,11 +608,11 @@ static long long fk_is_nothing(long long v) {
 /* stone 2c: a FUNCTION VALUE — a fn used as a value (a bare fn-name in value position, a fn stored
  * in a var, a fn returned from a fn). Minted exactly like 2a's nothing: a reserved odd-NEGATIVE
  * band sentinel, collision-proof by arithmetic. fk_fnbase = -8e18 sits ABOVE nothing (-8.999e18)
- * and the float base (fk_fbase = -9e18, floats live at-or-below it), and BELOW every
- * node/record/cons/int (which are tiny-magnitude or positive). fk_fnval(f) = fk_fnbase - (f<<1) - 1
+ * and the float base (fk_fbase = -9e18, floats live at-or-below it), and BELOW the record band
+ * (just below fk_rbase = -7e18) and every node/cons/int (tiny-magnitude or positive). fk_fnval(f) = fk_fnbase - (f<<1) - 1
  * is therefore odd-negative in a narrow band (fn-indices are < 4096): not an int (ints v<<1, even),
  * not 0/1, not a float (fk_isf needs v<=fk_fbase-3 ~ -9e18; these are ~-8e18, ABOVE it), not a node
- * (fk_nidx maps ~8e18 far past fk_np), not a record ((0-v) is odd here, records even), not nothing
+ * (fk_nidx maps ~8e18 far past fk_np), not a record (that band lies above fk_fnbase), not nothing
  * (distinct constant). A bare fn-name in value position evaluates to this (tag 243); an indirect
  * call offers the fn it names (tag 244).
  *
@@ -1247,7 +1247,7 @@ static long long fk_sintern(long long off, long long len) {
  * fk_strv(si) = fk_sbase - (si<<1) - 1 is: not an int (ints even), not a float
  * (fk_isf needs v <= fk_fbase-3 ~ -9e18; these are ~-8.5e18, above it), not a
  * fn-value (fk_is_fnval excludes v <= fk_fnbase - 16384), not nothing (distinct
- * constant), not a record ((0-v) is odd here, records even), not a cons cell or nil
+ * constant), not a record (that band lies above the fn values), not a cons cell or nil
  * (positive), not a node (fk_nidx maps ~8.5e18 far past fk_np). Room for ~2.5e17
  * strings before the band meets nothing.
  *
@@ -1856,14 +1856,20 @@ static void fk_record_keys_reserve(long long r, long long need) {
     }
     fk_rkcap[r] = nc;
 }
+/* A record is its own odd-negative band, as a fn value and a string are: fk_rbox(r) = fk_rbase - (r<<1) - 1 lies
+ * between the fn values (at or below fk_fnbase = -8e18) and every node box (tiny magnitude). So it is not an int (ints
+ * are v<<1, even), a float, a string, a fn value or nothing, and not a node (fk_nidx maps it to ~3.5e18, far past
+ * fk_np). No integer wears a record's word, so value_kind and record? read a kind from the word alone (row 1525,
+ * kindshadow, is what sharing one cost). Room for ~5e17 records before the band meets the fn values. */
+static const long long fk_rbase = -7000000000000000000LL;
 static long long fk_rbox(long long r) {
-    return 0 - (r << 1);
+    return fk_rbase - (r << 1) - 1;
 }
 static long long fk_ridx(long long v) {
-    if (v >= 0 || ((0 - v) & 1) != 0) {
+    if (v > fk_rbase - 3 || v <= fk_fnbase || (v & 1) == 0) {
         return 0;
     }
-    return (0 - v) >> 1;
+    return ((fk_rbase - 1) - v) >> 1;
 }
 static long long fk_isrec(long long v) {
     long long r = fk_ridx(v);
@@ -10220,12 +10226,7 @@ static int fk_f64_kind_fold(long long i, long long arity, const int *types, int 
     fk_f64_conses = cs; fk_f64_reads_strword = rsw; fk_f64_calls_c = ccl;
     if (code < 1 || code > 5) { return 0; }
     static const char *const kinds[6] = {"", "int", "float", "string", "list", "closure"}; /* fk_value_kind's names */
-    const char *lb = FK_SBYTES(si);
-    long long lnb = FK_SLEN(si);
-    /* record r and the integer -r are one word, and fk_value_kind answers "record" for it while r <= fk_rp (kindshadow,
-     * row 1525): against "int" or "record" an int's answer depends on the run, so only the other names fold */
-    if (code == 1 && (fk_f64_bytes_are(lb, lnb, "int") || fk_f64_bytes_are(lb, lnb, "record"))) { return 0; }
-    *out = fk_f64_push(7, 0, 0, 0.0, fk_f64_bytes_are(lb, lnb, kinds[code]) ? 1 : 0);
+    *out = fk_f64_push(7, 0, 0, 0.0, fk_f64_bytes_are(FK_SBYTES(si), FK_SLEN(si), kinds[code]) ? 1 : 0);
     return *out < 0 ? 0 : 1;
 }
 /* admit a body node under a per-parameter type signature (types[k]): returns 0 declined, else the node's type -- 1 int,
