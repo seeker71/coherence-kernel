@@ -10023,6 +10023,10 @@ static long long fk_f64_lit_off[8], fk_f64_lit_len[8];
 static int fk_f64_lit_n;
 static int fk_f64_need_scratch; /* the leaf calls a callee that builds or answers a string: the door reserves scratch for it (sig bit 26) */
 static int fk_f64_conses; /* the leaf conses, itself or through a callee: the door reserves a run of pairs for it (sig bit 29) */
+static int fk_f64_calls_c; /* the leaf answers through a C call that may move the string pool (kind 38): a caller leaf's held byte pointers would stale under it, so the call arm declines such a callee (sig bit 28) */
+static char *fk_stack_base;     /* the run thread's stack top and the walker's depth wall, defined with the walker below: a */
+static long long fk_stack_wall; /* non-tail self call in a leaf checks the same wall before it recurses */
+static void fk_depth_wall(long long used); /* the wall's one meaning, for the walker and for a leaf: report and stop */
 static int fk_f64_reads_strword; /* the leaf reads its string params' words at frame 24+k (kind 35 str_eq): the call arm must copy those words for it, like a conser (sig bit 31) */
 static int fk_f64_no_frame; /* the all-float leaf runs with its arguments in d0..d7 and no frame in x0: a call from it hands over no frame words and reads no overflow word, so it calls numeric callees only */
 static long long fk_f64_ovf2_at[FK_F64_OVF_CAP]; /* the B.cond sites that leave for the second overflow block: the pairs ran out, the door retries with more */
@@ -10540,6 +10544,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         if (fk_f64_call_n >= FK_F64_CALL_CAP) { return 0; }
         int cold = (callee >= fk_f64_cap || fk_f64_mem[callee] == 0 || fk_f64_sig[callee] < 0);
         if (cold && (fk_fn_native == 0 || callee >= fk_fn_capacity || fk_fn_native[callee] != 0)) { fk_f64_call_not_ready = 1; return 0; } /* cold for a reason already read: nothing to warm */
+        if (!cold && ((fk_f64_sig[callee] >> 28) & 1)) { fk_f64_refuse_tag = t; return 0; } /* the callee answers through a C call that may move the string pool under this leaf's byte pointers: the walker makes that call */
         if (!cold && (fk_f64_sig[callee] >> 24) != 0 && fk_f64_acc_slot >= 0) { fk_f64_refuse_tag = t; return 0; } /* a callee that builds or answers a string works in this leaf's scratch: one builder per scratch */
         if (!cold && fk_f64_no_frame && (fk_f64_sig[callee] >> 24) != 0) { fk_f64_refuse_tag = t; return 0; } /* the all-float leaf has no frame to hand a callee that needs scratch, pairs or lists */
         long long csig = cold ? 0 : fk_f64_sig[callee];
@@ -10964,7 +10969,7 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
             /* (sig ^ expect) & mask == 0: float params, float answer, string params and answer, scratch, list and defn params
              * exactly where the arguments are; a consing callee (bit 29) draws on this leaf's run. A signature of -1 (the
              * all-float leaf) fails the float-parameter bits. */
-            unsigned long long mask = 0xFFULL | (1ULL << 8) | (0xFFULL << 16) | (1ULL << 24) | (1ULL << 26) | (0xFFFFULL << 32) | (0xFFULL << 48) | (0xFFULL << 56);
+            unsigned long long mask = 0xFFULL | (1ULL << 8) | (0xFFULL << 16) | (1ULL << 24) | (1ULL << 26) | (1ULL << 28) | (0xFFFFULL << 32) | (0xFFULL << 48) | (0xFFULL << 56);
             if (!fk_f64_mov64(words, wn, 1U, (unsigned long long)expect)) { return -1; }
             if (!fk_f64_put(words, wn, 0xCA010231U)) { return -1; }                                          /* EOR X17, X17, X1 */
             if (!fk_f64_mov64(words, wn, 1U, mask)) { return -1; }
@@ -11274,6 +11279,22 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         int rargs[8];
         long long k = 0;
         while (k < car) { rargs[k] = fk_f64_emit(fk_f64_call_args[slot][k], words, wn, ntemp, nitemp); if (rargs[k] < 0) { return -1; } k = k + 1; }
+        if (is_self && fk_stack_base != 0) {
+            /* the depth wall: a non-tail self call recurses on the C stack, so past the walker's own wall (fk_stack_base less
+             * fk_stack_wall) the leaf stops the run exactly as the walker does there -- the same report, the same stop.
+             * Leaving for the walker instead would have it walk back down into this leaf at every level. */
+            if (!fk_f64_put(words, wn, 0x910003E9U)) { return -1; }                                 /* MOV X9, SP */
+            if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)(fk_stack_base - fk_stack_wall))) { return -1; } /* X16 = the wall */
+            if (!fk_f64_put(words, wn, 0xEB10013FU)) { return -1; }                                 /* CMP X9, X16 */
+            long long bok = *wn;
+            if (!fk_f64_put(words, wn, 0x54000002U)) { return -1; }                                 /* B.HS past the stop: above the wall */
+            if (!fk_f64_put(words, wn, 0x910003E0U)) { return -1; }                                 /* MOV X0, SP */
+            if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)fk_stack_base)) { return -1; }
+            if (!fk_f64_put(words, wn, 0xCB000200U)) { return -1; }                                 /* SUB X0, X16, X0: the bytes used */
+            if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)&fk_depth_wall)) { return -1; }
+            if (!fk_f64_put(words, wn, 0xD63F0200U)) { return -1; }                                 /* BLR X16: reports and stops, never returns */
+            words[bok] = words[bok] | ((unsigned int)(((*wn) - bok) & 0x7FFFFLL) << 5);           /* B.HS -> here */
+        }
         if (!fk_f64_put(words, wn, 0xD10003FFU | fr)) { return -1; }                                            /* SUB SP, SP, #frame */
         if (!fk_f64_put(words, wn, 0xF9000000U | (FK_F64_CF_X0 << 10) | (31U << 5) | 0U)) { return -1; }    /* STR X0 */
         if (!fk_f64_put(words, wn, 0xF9000000U | (FK_F64_CF_X8 << 10) | (31U << 5) | 8U)) { return -1; }    /* STR X8 */
@@ -11555,7 +11576,7 @@ static void fk_f64_pulse(long long fx) {
     int types[8] = {2, 2, 2, 2, 2, 2, 2, 2}; /* the expression leaf: every parameter a float, the door holds the rest to the walker */
     { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } } /* a let slot is unbound here: this leaf takes no let step */
     fk_f64_prog_n = 0;
-    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_ovf2_n = 0; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0;
+    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_calls_c = 0; fk_f64_ovf2_n = 0; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0;
     fk_f64_no_frame = 1;
     int top = 0;
     if (fk_f64_admit(body, arity, types, &top) != 2) {
@@ -11791,6 +11812,7 @@ static int fk_f64_admit_substring(long long i, long long arity, const int *types
     int tb = fk_f64_admit(fk_node[rn][2], arity, types, &rb);
     if (tb == 5) { rb = fk_f64_narrow(rb, 1); if (rb < 0) { return 0; } tb = 1; }
     if (tb != 1) { return 0; }
+    fk_f64_calls_c = 1; /* this leaf answers through a C call that may move the pool: no caller leaf calls it (sig bit 28) */
     *out = fk_f64_push(38, slot, ra, 0.0, rb);
     return *out < 0 ? 0 : 5; /* a raw interned word */
 }
@@ -11802,7 +11824,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     if (n != arity) { return; }
     if (arity > 6) { fk_fn_native[fx] = -1; return; } /* the typed lanes ride x10..x15: x16 and x17 are their scratch */
     fk_f64_refuse_tag = -1; fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0;
-    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_ovf2_n = 0;
+    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_calls_c = 0; fk_f64_ovf2_n = 0;
     fk_fn_native[fx] = -1;
     int types[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } }
@@ -11850,6 +11872,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     if (fk_f64_need_scratch) { sig = sig | (1LL << 26); } /* a callee builds or answers a string in this leaf's scratch */
     if (fk_f64_conses) { sig = sig | (1LL << 29); } /* this leaf conses: the door reserves a run of pairs */
     if (fk_f64_reads_strword) { sig = sig | (1LL << 31); } /* this leaf reads its string params' words: a caller leaf copies them to frame 24+k */
+    if (fk_f64_calls_c) { sig = sig | (1LL << 28); } /* this leaf answers through a C call that may move the string pool: no caller leaf calls it */
     unsigned int words[FK_F64_WORD_CAP];
     fk_f64_live_of(types);
     long long wn = 0;
@@ -12035,7 +12058,7 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     int tex = 0, nex = 0;
     fk_f64_prog_n = 0;
     fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0; /* a call inside the loop's steps may reach a crystallized leaf; a call to this defn is the self call */
-    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_ovf2_n = 0;
+    fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_calls_c = 0; fk_f64_ovf2_n = 0;
     long long j = 0;
     while (j < nsteps) {
         letn[j] = -1;
@@ -12112,6 +12135,7 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     if (fk_f64_need_scratch) { sig = sig | (1LL << 26); } /* a callee builds or answers a string in this leaf's scratch */
     if (fk_f64_conses) { sig = sig | (1LL << 29); } /* this leaf conses: the door reserves a run of pairs */
     if (fk_f64_reads_strword) { sig = sig | (1LL << 31); } /* this leaf reads its string params' words: a caller leaf copies them to frame 24+k */
+    if (fk_f64_calls_c) { sig = sig | (1LL << 28); } /* this leaf answers through a C call that may move the string pool: no caller leaf calls it */
     /* a loop that conses hands its frame back to the door at the pass boundary where its run is half spent: the pairs so
      * far become the heap's, melted when it is near full, and the loop goes on from where it stood -- so a loop consing
      * past the largest run stays in the lane, and only a single pass needing more is the walker's. A callee's string lives
@@ -12261,13 +12285,18 @@ static long long fk_truth(long long w) {
     if ((w & 1) && fk_isf(w) && fk_num(w) == 0.0) { return 0; }
     return 1;
 }
+/* the eval-depth wall: the walker meets it at every step, a leaf's non-tail self call before it recurses -- the same
+ * report and the same stop, so a crystallized recursion ends where the walker would, honestly, never in a crash */
+static void fk_depth_wall(long long used) {
+    printf("fkwu: eval too deep — %lld bytes of walker stack (wall %lld). The recursion "
+           "needs to be tail or balanced; the wall is honest, the silent crash was not.\n",
+           used, fk_stack_wall);
+    fk_die("eval-depth wall");
+}
 static long long fk_walk(long long i, long long fp) {
     char fk_sp_probe;
     if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
-        printf("fkwu: eval too deep — %lld bytes of walker stack (wall %lld). The recursion "
-               "needs to be tail or balanced; the wall is honest, the silent crash was not.\n",
-               (long long)(fk_stack_base - &fk_sp_probe), fk_stack_wall);
-        fk_die("eval-depth wall");
+        fk_depth_wall((long long)(fk_stack_base - &fk_sp_probe));
     }
     long long t = fk_node[i][0];
     if (t < 0 || t >= FK_OPCODE_ARM_CAP) {
