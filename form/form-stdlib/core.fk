@@ -736,12 +736,10 @@
     (defn d4-run (dr S mp mm ev acc) (if (d4-stops? dr S mp mm ev) (d4-end dr S mp mm ev acc) (d4-run (d4-dig (bn-mul (head (tail dr)) 10) S 0) S (bn-mul mp 10) (bn-mul mm 10) ev (cons (head dr) acc))))
     (defn d4-carry (ds c) (if (nil? ds) (if (eq c 0) (list) (list c)) (do (let v (add (head ds) c)) (if (ge v 10) (cons (sub v 10) (d4-carry (tail ds) 1)) (cons v (d4-carry (tail ds) 0))))))
     (defn d4-digits (ds acc) (if (nil? ds) acc (d4-digits (tail ds) (str_concat acc (byte_to_str (add 48 (head ds)))))))
-    ; d4 x -> (digit-string, exp10) for a POSITIVE finite non-zero x; exp10 is the power of the first digit
-    (defn d4 (x)
-        (do (let me0 (d4-mant x 0)) (let me (d4-sub (head me0) (head (tail me0))))
-            (let m (head me)) (let e (head (tail me))) (let ev (if (eq (mod m 2) 0) 1 0))
-            (let bdy (if (eq m 4503599627370496) (if (gt e -1074) 1 0) 0))
-            (let RR (if (ge e 0) (bn-pow2-mul (bn-of-int m) (if (eq bdy 1) (add e 2) (add e 1))) (bn-mul (bn-of-int m) (if (eq bdy 1) 4 2))))
+    ; d4-from m e ev bdy -> (digit-string, exp10) for the positive double m*2^e, in bignums; ev: m is even (the rounding
+    ; interval is closed), bdy: m sits at its binade's lower boundary (M+ is twice M-); exp10 is the power of the first digit
+    (defn d4-from (m e ev bdy)
+        (do (let RR (if (ge e 0) (bn-pow2-mul (bn-of-int m) (if (eq bdy 1) (add e 2) (add e 1))) (bn-mul (bn-of-int m) (if (eq bdy 1) 4 2))))
             (let S (if (ge e 0) (bn-of-int (if (eq bdy 1) 4 2)) (bn-pow2 (if (eq bdy 1) (sub 2 e) (sub 1 e)))))
             (let mp (if (ge e 0) (bn-pow2 (if (eq bdy 1) (add e 1) e)) (if (eq bdy 1) (list 2) (list 1))))
             (let mm (if (ge e 0) (bn-pow2 e) (list 1)))
@@ -759,7 +757,43 @@
     (defn fr-pair (s n z) (list (substring s 0 (sub n z)) (sub n 1)))
     (defn fr-cut (s) (fr-pair s (str_len s) (fr-tz s (sub (str_len s) 1) 0)))
     (defn fr-whole? (af) (if (lt af 9007199254740992.0) (eq (mul (float_to_int af) 1.0) af) false))
-    (defn fr-digits (af) (if (fr-whole? af) (fr-cut (int_to_str (float_to_int af))) (d4 af)))
+    ; Dragon4 in machine words: while R, S and the margins stay under 2^59, every product of ten and every sum stays
+    ; under 2^63, so the same digits come from plain integers. fl packs the two flags (bit 0: m is even; bit 1: m sits
+    ; at its binade's boundary, M+ = 2 M-). A scaling that would pass the bound answers the empty list, and the value
+    ; goes to the bignums. The digits gather in acc as one integer, so the last digit's carry is plain addition.
+    (defn d4w-fits (v) (lt v 576460752303423488))
+    (defn d4w-mp (mm fl) (if (ge fl 2) (mul mm 2) mm))
+    (defn d4w-low? (r mm fl) (if (eq (mod fl 2) 1) (le r mm) (lt r mm)))
+    (defn d4w-high? (r mm fl S) (if (eq (mod fl 2) 1) (ge (add r (d4w-mp mm fl)) S) (gt (add r (d4w-mp mm fl)) S)))
+    (defn d4w-stops? (r S mm fl) (if (d4w-low? r mm fl) 1 (d4w-high? r mm fl S)))
+    (defn d4w-tie (d r S) (if (lt (mul r 2) S) d (if (gt (mul r 2) S) (add d 1) (if (eq (mod d 2) 0) d (add d 1)))))
+    (defn d4w-last (d r S low high) (if (if high (if low 1 0) 0) (d4w-tie d r S) (if high (add d 1) d)))
+    ; the digit loop: r is the remainder before the next digit, mm the lower margin at its scale, n the digits so far
+    (defn d4w-end (r S mm fl n acc) (list (add (mul acc 10) (d4w-last (div (mul r 10) S) (mod (mul r 10) S) S (d4w-low? (mod (mul r 10) S) (mul mm 10) fl) (d4w-high? (mod (mul r 10) S) (mul mm 10) fl S))) (add n 1)))
+    (defn d4w-run (r S mm fl n acc) (if (d4w-stops? (mod (mul r 10) S) S (mul mm 10) fl) (d4w-end r S mm fl n acc) (d4w-run (mod (mul r 10) S) S (mul mm 10) fl (add n 1) (add (mul acc 10) (div (mul r 10) S)))))
+    (defn d4w-up? (R S mp) (if (gt (add R mp) S) (d4w-fits (mul S 10)) false))
+    (defn d4w-down? (R S mp) (le (mul (add R mp) 10) S))
+    (defn d4w-scaled (R S mm fl k) (if (gt (add R (d4w-mp mm fl)) S) (list) (list R S mm fl k)))
+    (defn d4w-scale (R S mm fl k) (if (d4w-up? R S (d4w-mp mm fl)) (d4w-scale R (mul S 10) mm fl (add k 1)) (if (d4w-down? R S (d4w-mp mm fl)) (d4w-scale (mul R 10) S (mul mm 10) fl (sub k 1)) (d4w-scaled R S mm fl k))))
+    ; the words start under the bound: S = 2^(1+bdy-e) when e < 0, R = m 2^(e+1+bdy) when e >= 0
+    (defn d4w-range? (e bdy) (if (ge e 0) (le e 3) (le (sub (add bdy 1) e) 58)))
+    (defn d4w-out2 (s n k) (list (substring s 0 (sub (str_len s) (fr-tz s (sub (str_len s) 1) 0))) (add (sub k 1) (sub (str_len s) n))))
+    (defn d4w-out (res k) (d4w-out2 (int_to_str (head res)) (head (tail res)) k))
+    (defn d4w (m e ev bdy)
+        (do (let fl (add ev (mul bdy 2)))
+            (let R (if (ge e 0) (mul m (bn-two-to (add e (add bdy 1)) 1)) (mul m (add (mul bdy 2) 2))))
+            (let S (if (ge e 0) (add (mul bdy 2) 2) (bn-two-to (sub (add bdy 1) e) 1)))
+            (let mm (if (ge e 0) (bn-two-to e 1) 1))
+            (let sc (d4w-scale R S mm fl 0))
+            (if (nil? sc) (list) (d4w-out (d4w-run (head sc) (nth sc 1) (nth sc 2) fl 0 0) (nth sc 4)))))
+    ; the digits: a whole double from its own digits; the rest from the exact m*2^e, in machine words while they fit,
+    ; else in bignums
+    (defn fr-or (res m e ev bdy) (if (nil? res) (d4-from m e ev bdy) res))
+    (defn fr-route2 (m e ev bdy) (if (d4w-range? e bdy) (fr-or (d4w m e ev bdy) m e ev bdy) (d4-from m e ev bdy)))
+    (defn fr-route (m e) (fr-route2 m e (if (eq (mod m 2) 0) 1 0) (if (eq m 4503599627370496) (if (gt e -1074) 1 0) 0)))
+    (defn fr-me (af) (do (let me0 (d4-mant af 0)) (d4-sub (head me0) (head (tail me0)))))
+    (defn fr-from-me (me) (fr-route (head me) (head (tail me))))
+    (defn fr-digits (af) (if (fr-whole? af) (fr-cut (int_to_str (float_to_int af))) (fr-from-me (fr-me af))))
     (defn float-repr (f) (do (let neg (lt (div 1.0 f) 0.0)) (let af (if neg (sub 0.0 f) f)) (let sign (if neg "-" "")) (if (eq af 0.0) (str_concat sign "0") (do (let de (fr-digits af)) (let digits (head de)) (let exp10 (head (tail de))) (let nd (str_len digits)) (if (if (lt exp10 -4) 1 (if (ge exp10 6) 1 0)) (fr-sci sign digits exp10) (fr-fixed sign digits nd (add exp10 1)))))))
 
     0)
