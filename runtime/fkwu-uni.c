@@ -15664,7 +15664,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         long long sa = fk_stri(sv25);
         if (sa < 0 || !FK_SOK(sa)) {
-            return 0;
+            fk_die("fkwu: str_len: only a string has a length -- ask value_kind first");
         }
         return FK_SLEN(sa) << 1;
     }
@@ -15685,7 +15685,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 26) {
         long long wa26 = fk_walk(fk_node[i][1], fp); fk_vp(wa26); long long sa26 = fk_stri(wa26);
-        long long sb26 = fk_stri(fk_walk(fk_node[i][2], fp)); fk_vsp = fk_vsp - 1;
+        long long wb26 = fk_walk(fk_node[i][2], fp); long long sb26 = fk_stri(wb26); fk_vsp = fk_vsp - 1;
+        /* the axiom-1 absence is a value str_eq may ask about -- it equals only an absence (str-eq-absence-band,
+         * four-way); any other non-string stops, as on the sibling kernels */
+        if ((wa26 != fk_nothing && (sa26 < 0 || !FK_SOK(sa26))) || (wb26 != fk_nothing && (sb26 < 0 || !FK_SOK(sb26)))) {
+            fk_die("fkwu: str_eq: only strings and nothing compare as strings -- ask value_kind first, or use value_eq");
+        }
         if (fk_keyeq(sa26, sb26)) {
             return 2;
         }
@@ -15695,7 +15700,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long wa27 = fk_walk(fk_node[i][1], fp); fk_vp(wa27); long long sa = fk_stri(wa27);
         long long sb = fk_stri(fk_walk(fk_node[i][2], fp)); fk_vsp = fk_vsp - 1;
         if (sa < 0 || !FK_SOK(sa) || sb < 0 || !FK_SOK(sb)) {
-            return 0 - 2;
+            fk_die("fkwu: str_concat: only strings join -- ask value_kind first");
         }
         long long ln = FK_SLEN(sa) + FK_SLEN(sb);
         while (fk_sbp + ln > fk_scap_b) {
@@ -15718,7 +15723,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 28) {
         long long wa28 = fk_walk(fk_node[i][1], fp); fk_vp(wa28); long long sa = fk_stri(wa28);
         long long k = fk_walk(fk_node[i][2], fp) >> 1; fk_vsp = fk_vsp - 1;
-        if (sa < 0 || !FK_SOK(sa) || k < 0 || k >= FK_SLEN(sa)) {
+        if (sa < 0 || !FK_SOK(sa)) {
+            fk_die("fkwu: str_byte_at: only a string has bytes -- ask value_kind first");
+        }
+        if (k < 0 || k >= FK_SLEN(sa)) {
             return 0 - 2;
         }
         return ((long long)(unsigned char)FK_SBYTES(sa)[k]) << 1;
@@ -15842,7 +15850,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return (sign * v) << 1;
     }
     if (t == 33) {
-        long long b = fk_walk(fk_node[i][1], fp) >> 1;
+        long long w33 = fk_walk(fk_node[i][1], fp);
+        if ((w33 & 1) != 0) {
+            fk_die("fkwu: byte_to_str: only an int is a byte -- ask value_kind first");
+        }
+        long long b = w33 >> 1;
         if (b < 0 || b > 255) {
             return fk_strv(fk_sintern(fk_sbp, 0));
         }
@@ -15988,10 +16000,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return fk_flit_memo[i];
         }
         long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
-        long long fbv53;
         if (sa < 0 || !FK_SOK(sa)) {
-            fbv53 = fk_fbox(0.0);
-        } else {
+            fk_die("fkwu: str_to_float: only a string reads as a float -- ask value_kind first");
+        }
+        long long fbv53;
+        {
             char tmp[128];
             long long n = FK_SLEN(sa);
             if (n > 126) {
