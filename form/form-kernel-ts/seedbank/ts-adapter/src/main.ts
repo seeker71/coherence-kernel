@@ -3,14 +3,14 @@
 // Four subcommands form the three-way parity gate alongside tsc + node:
 //
 //   ts-compile <file.ts> [out.fk|-]  — parse TS, emit .fk source
-//   ts-run     <file.ts>             — compile + execute via Rust binary
+//   ts-run     <file.ts>             — compile + execute on fkwu
 //   ts-eval    <file.ts>             — parse + walk via TS evalTypeScript
 //   ts-trace   <file.ts>             — emit JSON dispatch report
 //
 // Three runtimes for parity:
 //   1. tsc transpile → node runs the JS, captures stdout of final expr
 //   2. ts-eval — lang-typescript.ts walker (no kernel binary, no .fk)
-//   3. ts-run  — emit .fk + run via form-kernel-rust binary
+//   3. ts-run  — emit .fk + run on fkwu, the canonical kernel
 // All three must agree on the printed value of the final expression.
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -95,10 +95,7 @@ async function runTsRun(args: string[]): Promise<void> {
     : inPath + ".fk";
   await writeFile(fkPath, fk + "\n", "utf8");
 
-  const kernelPath = pathResolve(
-    __dirname,
-    "../../../../form-kernel-rust/target/release/form-kernel-rust",
-  );
+  const kernelPath = pathResolve(__dirname, "../../../../../fkwu");
 
   const child = spawn(kernelPath, [fkPath], {
     stdio: ["ignore", "inherit", "inherit"],
@@ -108,7 +105,7 @@ async function runTsRun(args: string[]): Promise<void> {
     child.on("error", (err) => {
       console.error(`ts-run: failed to spawn ${kernelPath}: ${err.message}`);
       console.error(
-        "build the kernel first: cd ../../../form-kernel-rust && cargo build --release",
+        "build fkwu first, from the checkout root: cc -O2 -o fkwu runtime/fkwu-uni.c",
       );
       resolveCode(127);
     });

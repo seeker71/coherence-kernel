@@ -17,14 +17,15 @@
 # three value witnesses without reopening that deleted seam:
 #
 #   1. CPython evaluates the source file's final expression.
-#   2. kernel-bmf-compile emits .fk through Form-native grammar rules, then
-#      form-kernel-rust executes the compiled recipe.
+#   2. fkwu compiles the .py to .fk through its own Python compiler
+#      (observe/python-specimen-compile-run.bml), then fkwu executes that .fk.
 #   3. kernel-bmf-run reads the .py through the Form-native walker end to end.
 #
+# A leg that exits nonzero fails its row, and every row reports.
 # Add new files to PARITY_FILES below as they're ripened.
 # Optional args narrow the run to specific files, which keeps repair loops
 # tight after a focused example change without weakening the full release gate.
-# Run from form/form-kernel-ts/.
+# Runs from any working directory.
 
 set -euo pipefail
 
@@ -200,35 +201,30 @@ if (($# > 0)); then
     PARITY_FILES=("$@")
 fi
 
-# Locate the native binary. The script lives at
+# Locate the kernel. The script lives at
 #   form/form-kernel-ts/seedbank/python-adapter/scripts/parity_suite.sh
-# the rust kernel at
-#   form/form-kernel-rust/target/release/form-kernel-rust
-# → four levels up from `scripts/` (scripts → python-adapter → seedbank
-# → form-kernel-ts → form/), then down into form-kernel-rust.
+# and fkwu at the checkout root, four levels above the adapter directory
+# (python-adapter → seedbank → form-kernel-ts → form → root).
 ADAPTER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-RUST_BIN="$ADAPTER_DIR/../../../form-kernel-rust/target/release/form-kernel-rust"
-if [[ ! -x "$RUST_BIN" ]]; then
-    echo "error: form-kernel-rust binary not found at $RUST_BIN" >&2
-    echo "build it first: cd $ADAPTER_DIR/../../../form-kernel-rust && cargo build --release" >&2
+SCRIPT_DIR="$ADAPTER_DIR/scripts"
+ROOT="$(cd "$ADAPTER_DIR/../../../.." && pwd)"
+FKWU="$ROOT/fkwu"
+if [[ ! -x "$FKWU" ]]; then
+    echo "error: fkwu not found at $FKWU" >&2
+    echo "build it first, from $ROOT: cc -O2 -o fkwu runtime/fkwu-uni.c" >&2
     exit 1
 fi
 # Always run subcommands from the adapter directory so example paths stay
-# stable for kernel-bmf-compile and kernel-bmf-run.
+# stable for kernel-bmf-run.
 cd "$ADAPTER_DIR"
-TMP_FK_FILES=()
-cleanup() {
-    if ((${#TMP_FK_FILES[@]} > 0)); then
-        rm -f "${TMP_FK_FILES[@]}"
-    fi
-}
+# Compiled .fk, the .fkb images fkwu keeps beside them, and the compiler's
+# evidence directories all live here and leave with it.
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/parity_suite.XXXXXX")"
+cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
 # Put this script's own directory on PATH so `command -v kernel-bmf-run`
-# finds the sibling binary without operator-side installation. The
-# kernel-bmf-run script lives next to this one when G6 of
-# kernels/PYTHON_BMF_CONTRACT.md is closed.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# finds the sibling binary without operator-side installation.
 PATH="$SCRIPT_DIR:$PATH"
 
 if ! command -v kernel-bmf-run >/dev/null 2>&1; then
@@ -249,6 +245,7 @@ echo ""
 
 PASS=0
 FAIL=0
+FKWU_AGREE=0
 
 canon_result() {
     python3 - "$1" <<'PY'
@@ -317,33 +314,45 @@ if tree.body and isinstance(tree.body[-1], ast.Expr):
     print(eval(compile(ast.Expression(body=last.value), '$f', 'eval'), namespace))
 else:
     exec(open('$f').read())
-" 2>&1 | tail -1)
+" 2>&1 | tail -1) || true
 
-    # Compile to .fk and run via native binary.
-    fk_path="$(mktemp -t parity_suite.XXXXXX.fk)"
-    TMP_FK_FILES+=("$fk_path")
-    kernel-bmf-compile "$f" "$fk_path" >/dev/null 2>&1
-    rust_result=$("$RUST_BIN" "$fk_path" 2>&1 | tail -1)
+    # fkwu compiles the .py in its own process, then runs the emitted .fk.
+    # A refused compilation writes no output; its exit code fails the row.
+    fk_path="$WORK_DIR/$(basename "${f%.py}").fk"
+    compile_rc=0
+    printf '{"source":"%s","output":"%s"}\n' "$ADAPTER_DIR/$f" "$fk_path" \
+        | (cd "$ROOT" && TMPDIR="$WORK_DIR" "$FKWU" observe/python-specimen-compile-run.bml) >/dev/null 2>&1 \
+        || compile_rc=$?
+    fkwu_rc=$compile_rc
+    if [[ "$compile_rc" -eq 0 ]]; then
+        fkwu_result=$("$FKWU" "$fk_path" </dev/null 2>&1 | tail -1) || fkwu_rc=$?
+    else
+        fkwu_result="(compile refused)"
+    fi
 
     # Third value witness: Form-native walker, directly from .py source.
-    third_result=$(kernel-bmf-run "$f" 2>&1 | tail -1)
+    third_rc=0
+    third_result=$(kernel-bmf-run "$f" 2>&1 | tail -1) || third_rc=$?
 
     py_canon=$(canon_result "$py_result")
-    rust_canon=$(canon_result "$rust_result")
+    fkwu_canon=$(canon_result "$fkwu_result")
     third_canon=$(canon_result "$third_result")
 
-    if [[ "$py_canon" == "$rust_canon" && "$py_canon" == "$third_canon" ]]; then
+    if [[ "$fkwu_rc" -eq 0 && "$py_canon" == "$fkwu_canon" ]]; then
+        FKWU_AGREE=$((FKWU_AGREE + 1))
+    fi
+    if [[ "$fkwu_rc" -eq 0 && "$third_rc" -eq 0 && "$py_canon" == "$fkwu_canon" && "$py_canon" == "$third_canon" ]]; then
         echo "  ✓ $f  → $py_result"
         PASS=$((PASS + 1))
     else
         echo "  ✗ $f"
         echo "      cpython:                       $py_result"
-        echo "      rust:                          $rust_result"
-        echo "      kernel-bmf:                    $third_result"
+        echo "      fkwu:                          $fkwu_result (rc=$fkwu_rc)"
+        echo "      kernel-bmf:                    $third_result (rc=$third_rc)"
         FAIL=$((FAIL + 1))
     fi
 done
 
 echo ""
-echo "parity_suite: $PASS passing, $FAIL failing (third runtime: kernel-bmf)"
+echo "parity_suite: $PASS passing, $FAIL failing (third runtime: kernel-bmf; fkwu agrees with cpython on $FKWU_AGREE)"
 exit $FAIL

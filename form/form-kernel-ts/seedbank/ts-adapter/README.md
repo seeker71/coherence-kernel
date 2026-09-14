@@ -7,14 +7,14 @@ Form pipeline:
 TypeScript source (.ts)
   → parseTypeScript  (lang-ts.ts)            — TS subset → Form tree
   → emitFk           (lang-ts-fk.ts)         — Form tree → .fk S-expression
-  → form-kernel-rust (native binary)         — walks the .fk, no host runtime
+  → fkwu             (canonical kernel)      — walks the .fk, no host runtime
 ```
 
 Three-way parity gate (`scripts/parity_suite.sh`):
 
 1. **node**       — the canonical TypeScript runtime, after tsc strips types
 2. **ts-eval**    — our captured-recipe walker (no .fk, no kernel)
-3. **ts-run**     — emit .fk + execute via `form-kernel-rust`
+3. **ts-run**     — emit .fk + execute on `fkwu`
 
 All three converge on the printed value of the file's final bare expression.
 
@@ -70,7 +70,7 @@ From `form/form-kernel-ts/`:
 npx tsx seedbank/ts-adapter/src/main.ts ts-compile foo.ts
 npx tsx seedbank/ts-adapter/src/main.ts ts-compile foo.ts -      # → stdout
 
-# Parse + execute via the native form-kernel-rust binary
+# Parse + execute on fkwu, the canonical kernel
 npx tsx seedbank/ts-adapter/src/main.ts ts-run foo.ts
 
 # Parse + walk via the TS captured-recipe evaluator (no .fk round-trip)
@@ -87,13 +87,14 @@ cd form/form-kernel-ts
 ./seedbank/ts-adapter/scripts/parity_suite.sh
 ```
 
-When `form-kernel-rust` is not built locally, the suite reports two-way
+When `fkwu` is not built at the checkout root, the suite reports two-way
 parity (node + ts-eval) and notes the third runtime is skipped. Build
-the kernel for the full three-way check:
+the kernel for the full three-way check, from the checkout root:
 
 ```bash
-cd form/form-kernel-rust && cargo build --release
+cc -O2 -o fkwu runtime/fkwu-uni.c
 ```
 
-The suite emits `examples/*.fk` as generated Rust-leg input. Those files are
-ignored and regenerated from the tracked `.ts` sources on each run.
+The suite emits `examples/*.fk` as generated fkwu-leg input. Those files (and
+the `.fkb` images fkwu keeps beside them) are ignored and regenerated from the
+tracked `.ts` sources on each run. A nonzero fkwu exit fails the row.

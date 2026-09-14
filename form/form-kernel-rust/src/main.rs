@@ -7579,15 +7579,13 @@ fn run_source_traced(src: &str) -> (Value, Trace) {
 }
 
 // ---------------------------------------------------------------------------
-// CLI subcommands — list / execute / query / trace / fetch
+// CLI subcommands — query / trace / fetch
 // ---------------------------------------------------------------------------
 //
 // Parallels scripts/form_cli.py at the native binary altitude. The point
 // per lc-native-kernel-binary: end-to-end host-native kernel binaries that
 // can access I/O, binary form objects, substrate API, and network resources
 // — functionally equivalent to the Python runtime.
-
-const RECIPES_DIR: &str = "recipes";
 
 fn cli_help() {
     println!(
@@ -7596,8 +7594,6 @@ fn cli_help() {
 Subcommands:
   --binary <file.fkb>                 execute a Form binary artifact
   --emit-binary <out.fkb> <file.fk...> write a Form binary artifact
-  list <library.json>                  print library meta + recipes
-  execute <library.json> <recipe> [args...]   run a recipe natively
   query <path>                         parse any file as a Form object tree
   trace [--expr \"...\" | <file.fk>]     run with arm-dispatch tracing
   fetch <url>                          GET a URL (network resource)
@@ -13643,175 +13639,6 @@ fn parse_http_upstream(upstream: &str) -> Result<(String, u16, String), String> 
     Ok((host, port, path))
 }
 
-fn cli_list(args: &[String]) -> i32 {
-    if args.is_empty() {
-        eprintln!("usage: form-kernel-rust list <library.json>");
-        return 2;
-    }
-    let path = &args[0];
-    let bytes = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("read {}: {}", path, e);
-            return 1;
-        }
-    };
-    let lib: serde_json::Value = match serde_json::from_str(&bytes) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("parse {}: {}", path, e);
-            return 1;
-        }
-    };
-    let meta = &lib["library_meta"];
-    println!(
-        "library: {}  v{}",
-        meta["name"].as_str().unwrap_or("?"),
-        meta["version"].as_str().unwrap_or("?")
-    );
-    println!("  path: {}", path);
-    if let Some(langs) = lib["language_cells"].as_array() {
-        let names: Vec<String> = langs
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-        println!("  language_cells: {}", names.join(", "));
-    }
-    let recipes = lib["recipes"].as_array().cloned().unwrap_or_default();
-    println!("  recipes ({}):", recipes.len());
-    for r in &recipes {
-        let name = r["name"].as_str().unwrap_or("?");
-        let bp = &r["blueprint"];
-        let in_types: Vec<String> = bp["input_types"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let out_type = bp["output_type"].as_str().unwrap_or("?");
-        let hint = r["node_id_hint"].as_str().unwrap_or("?");
-        // Check if a .fk variant exists in the recipes/ directory
-        let fk_path = format!("{}/{}.fk", RECIPES_DIR, name);
-        let runnable = std::path::Path::new(&fk_path).exists();
-        let marker = if runnable { "▶" } else { "·" };
-        println!(
-            "    {} {:<18} ({}) → {}  @recipe({})",
-            marker,
-            name,
-            in_types.join(", "),
-            out_type,
-            hint
-        );
-    }
-    0
-}
-
-fn cli_execute(args: &[String]) -> i32 {
-    if args.len() < 2 {
-        eprintln!("usage: form-kernel-rust execute <library.json> <recipe> [arg-json ...]");
-        return 2;
-    }
-    let library_path = &args[0];
-    let recipe_name = &args[1];
-    let call_args = &args[2..];
-
-    // Verify the recipe exists in the library (for the @recipe() hint)
-    let lib_bytes = match fs::read_to_string(library_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("read {}: {}", library_path, e);
-            return 1;
-        }
-    };
-    let lib: serde_json::Value = match serde_json::from_str(&lib_bytes) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("parse {}: {}", library_path, e);
-            return 1;
-        }
-    };
-    let found = lib["recipes"]
-        .as_array()
-        .map(|rs| {
-            rs.iter()
-                .any(|r| r["name"].as_str() == Some(recipe_name.as_str()))
-        })
-        .unwrap_or(false);
-    if !found {
-        eprintln!("recipe '{}' not in library {}", recipe_name, library_path);
-        return 2;
-    }
-
-    // Load the .fk implementation. Today recipes live in
-    // form/form-kernel-rust/recipes/<name>.fk — hand-authored
-    // until the Form→fk auto-generator lands. Honest GAP-NK1.
-    let fk_path = format!("{}/{}.fk", RECIPES_DIR, recipe_name);
-    let fk_src = match fs::read_to_string(&fk_path) {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!(
-                "form-kernel-rust: no .fk implementation for '{}'.
-
-The library declares the recipe; the Rust kernel needs an .fk source.
-Expected at: {}
-Today these are hand-authored. The Form→fk auto-generator (consuming
-tongue_caches.form from the library and emitting S-expression source)
-is named in lc-native-kernel-binary as the next breath.",
-                recipe_name, fk_path
-            );
-            return 2;
-        }
-    };
-
-    // Build a call expression that wraps the recipe definition + invocation.
-    // Convention: the .fk file defines the recipe with `(defn recipe_name ...)`;
-    // we append a call form using the JSON-parsed args.
-    let mut argv_form = String::new();
-    for a in call_args {
-        // Each arg is JSON; convert to .fk syntax.
-        let v: serde_json::Value = match serde_json::from_str(a) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("parse arg {:?}: {}", a, e);
-                return 2;
-            }
-        };
-        argv_form.push(' ');
-        argv_form.push_str(&json_to_fk(&v));
-    }
-    let full_src = format!("{}\n({}{})", fk_src, recipe_name, argv_form);
-
-    let value = run_source(&full_src);
-    println!("{}", value.display());
-    0
-}
-
-fn json_to_fk(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(b) => {
-            if *b {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            }
-        }
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => format!("{:?}", s),
-        serde_json::Value::Array(xs) => {
-            let parts: Vec<String> = xs.iter().map(json_to_fk).collect();
-            format!("(list {})", parts.join(" "))
-        }
-        serde_json::Value::Object(_) => {
-            // Object → list-of-pairs would need a per-recipe convention;
-            // honest about the gap for now.
-            "null".to_string()
-        }
-    }
-}
-
 fn cli_query(args: &[String]) -> i32 {
     if args.is_empty() {
         eprintln!("usage: form-kernel-rust query <path>");
@@ -13826,7 +13653,7 @@ fn cli_query(args: &[String]) -> i32 {
         }
     };
 
-    let lang = if path.ends_with(".json") || path.ends_with(".recipelib.json") {
+    let lang = if path.ends_with(".json") {
         "json"
     } else if path.ends_with(".fk") {
         "fk"
@@ -14685,8 +14512,6 @@ fn main_with_args(args: Vec<String>) -> i32 {
         }
         "--binary" => cli_binary(&args[1..]),
         "--emit-binary" => cli_emit_binary(&args[1..]),
-        "list" => cli_list(&args[1..]),
-        "execute" => cli_execute(&args[1..]),
         "query" => cli_query(&args[1..]),
         "trace" => cli_trace(&args[1..]),
         "fetch" => cli_fetch(&args[1..]),
