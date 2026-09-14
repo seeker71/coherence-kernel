@@ -22,13 +22,13 @@ The remaining TS adapter ships:
 - `src/lang-<lang>.ts` — hand-written parser knowing the host language's syntax
 - `src/lang-<lang>-fk.ts` — hand-written emitter to `.fk`
 - `src/main.ts` — CLI (`<lang>-compile`, `<lang>-run`, `<lang>-eval`, `<lang>-trace`)
-- `scripts/parity_suite.sh` — three-way gate (node/tsc + ts-eval + form-kernel-rust)
+- `scripts/parity_suite.sh` — three-way gate (node/tsc + ts-eval + fkwu)
 - `examples/` — demos that exercise the parser+emitter end-to-end
 
 The Python adapter's TS parser/emitter/CLI composted on 2026-06-07. Its parity
-and perf scripts remain as gates around the Form-native path: `kernel-bmf-compile`
-emits `.fk`, `form-kernel-rust` executes that recipe, and `kernel-bmf-run` walks
-the `.py` source end to end.
+script remains as a gate around the Form-native path: fkwu compiles `.py` to
+`.fk` through `observe/python-specimen-compile-run.bml` and executes that `.fk`,
+and `kernel-bmf-run` walks the `.py` source end to end.
 
 These files **work**. The three-way parity gate is real. But every Python or TS feature you add (typeann, classes, dicts, inheritance, …) thickens the parser TypeScript by hand, exactly the calcification Form is meant to dissolve. The N×M trap: every (host language) × (source language) pair needs its own hand-maintained parser.
 
@@ -37,7 +37,7 @@ These files **work**. The three-way parity gate is real. But every Python or TS 
 - **Grammars exist** as `.fk` files: `form/form-stdlib/grammars/python-bmf.fk` (3000 lines), `typescript-bmf.fk`, `rust-bmf.fk`, `go-bmf.fk`, etc.
 - **First Form-native parse landed** ([#2071](https://github.com/seeker71/Coherence-Network/pull/2071)) — four Python arithmetic shapes parse through `python-bmf.fk` driven by the kernel; same recipe NodeID across Rust, TS, Go sibling kernels.
 - **The remaining gap** is named in `kernels/PYTHON_BMF_CONTRACT.md` — five primitives (G1–G5) the kernel needs before `python-bmf.fk` can drive every Python feature this directory's adapter currently covers.
-- **The Python parity gate is now Form-native only** (`python-adapter/scripts/parity_suite.sh`) — CPython reference, `kernel-bmf-compile` + Rust execution, and `kernel-bmf-run` all compare the same final value.
+- **The Python parity gate is now Form-native only** (`python-adapter/scripts/parity_suite.sh`) — CPython reference, fkwu's own compiler + fkwu execution, and `kernel-bmf-run` all compare the same final value.
 
 ## When this directory composts
 

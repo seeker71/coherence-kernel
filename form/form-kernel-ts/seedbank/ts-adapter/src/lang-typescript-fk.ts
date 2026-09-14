@@ -3,7 +3,7 @@
 //   TypeScript source bytes
 //     → parseTypeScript (lang-typescript.ts)  — grammar capture tree
 //     → emitTypeScriptFk (this file)          — .fk S-expressions
-//     → form-kernel-rust binary               — native execution
+//     → fkwu                                  — native execution
 //
 // Vocabulary mirrors lang-ts-fk.ts so parity_suite ts-run agrees with
 // node and ts-eval. Arrow functions lift to module-level defns.

@@ -4,7 +4,7 @@
 # Every shipped demo runs through:
 #   1. tsc transpile + node — the canonical TypeScript runtime
 #   2. ts-eval — our captured-recipe TS walker (no .fk, no kernel binary)
-#   3. ts-run  — emit .fk, execute via form-kernel-rust native binary
+#   3. ts-run  — emit .fk, execute on fkwu, the canonical kernel
 # All three must agree on the printed value of the final bare expression.
 #
 # Add new files to PARITY_FILES as they're ripened. Run from
@@ -20,14 +20,15 @@ PARITY_FILES=(
     "seedbank/ts-adapter/examples/ts_composition_demo.ts"
 )
 
-RUST_BIN="$(cd "$(dirname "$0")/.." && pwd)/../../../form-kernel-rust/target/release/form-kernel-rust"
-HAS_RUST_BIN=0
-if [[ -x "$RUST_BIN" ]]; then
-    HAS_RUST_BIN=1
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+FKWU="$ROOT/fkwu"
+HAS_FKWU=0
+if [[ -x "$FKWU" ]]; then
+    HAS_FKWU=1
 else
-    echo "note: form-kernel-rust not built at $RUST_BIN" >&2
-    echo "      ts-run column will be skipped. Build with:" >&2
-    echo "      cd ../../../form-kernel-rust && cargo build --release" >&2
+    echo "note: fkwu not built at $FKWU" >&2
+    echo "      ts-run column will be skipped. Build it from the checkout root:" >&2
+    echo "      cc -O2 -o fkwu runtime/fkwu-uni.c" >&2
     echo ""
 fi
 
@@ -70,23 +71,26 @@ for f in "${PARITY_FILES[@]}"; do
 
     ts_result=$(npx tsx seedbank/ts-adapter/src/main.ts ts-eval "$f" 2>&1 | tail -1)
 
-    if [[ "$HAS_RUST_BIN" -eq 1 ]]; then
+    if [[ "$HAS_FKWU" -eq 1 ]]; then
         fk_path="${f%.ts}.fk"
         npx tsx seedbank/ts-adapter/src/main.ts ts-compile "$f" "$fk_path" >/dev/null 2>&1
-        rust_result=$("$RUST_BIN" "$fk_path" 2>&1 | tail -1)
-        if [[ "$node_result" == "$ts_result" && "$node_result" == "$rust_result" ]]; then
+        # fkwu exits nonzero when the compile carried errors; the printed
+        # value is then a fold over nothing, so the exit code joins the gate.
+        fkwu_rc=0
+        fkwu_result=$("$FKWU" "$fk_path" </dev/null 2>&1 | tail -1) || fkwu_rc=$?
+        if [[ "$fkwu_rc" -eq 0 && "$node_result" == "$ts_result" && "$node_result" == "$fkwu_result" ]]; then
             echo "  OK   $f  → $node_result"
             PASS=$((PASS + 1))
         else
             echo "  FAIL $f"
             echo "       node: $node_result"
             echo "       ts:   $ts_result"
-            echo "       rust: $rust_result"
+            echo "       fkwu: $fkwu_result (rc=$fkwu_rc)"
             FAIL=$((FAIL + 1))
         fi
     else
         if [[ "$node_result" == "$ts_result" ]]; then
-            echo "  OK   $f  → $node_result  (2-way, rust skipped)"
+            echo "  OK   $f  → $node_result  (2-way, fkwu skipped)"
             PASS=$((PASS + 1))
         else
             echo "  FAIL $f"
