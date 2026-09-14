@@ -1462,6 +1462,16 @@ static long long fk_deep_hash_node(long long idx) {
     fk_nhash_memo[idx] = out;
     return out;
 }
+/* a NodeID's intern key: the hash fk_deep_hash_node gives its cell, so interning a NodeID moves no hash value */
+static long long fk_nodeid_key(long long p, long long l, long long t, long long in) {
+    unsigned long long h = fk_mix64(7, 3ULL);
+    h = fk_mix64(h, (unsigned long long)p);
+    h = fk_mix64(h, (unsigned long long)l);
+    h = fk_mix64(h, (unsigned long long)t);
+    h = fk_mix64(h, (unsigned long long)in);
+    long long out = (long long)(h >> 1);
+    return out == 0 ? 1 : out;
+}
 static long long fk_deep_hash(long long v) {
     if (v >= 0) {
         if ((v & 1) == 0) {
@@ -13362,7 +13372,6 @@ static long long fk_field_fill(long long kind, long long sub, long long a, long 
 }
 /* one intern door for every kind: find the cell in the shared hash or claim a slot, fill, publish */
 static long long fk_field_intern_node(long long kind, long long sub, long long a, long long b, long long *nid4, long long h) {
-    if (kind == 3) { return fk_nbox(fk_field_fill(3, 0, 0, 0, nid4, 0)); }
     long long mask = FK_FIELD_HASH - 1;
     long long slot = h & mask;
     long long probes = 0;
@@ -13843,9 +13852,20 @@ static long long fk_intern_composite(long long cat47, long long kids47) {
         return fk_nbox(fk_np);
 }
 static long long fk_make_nodeid(long long p91, long long l91, long long ty91, long long in91) {
-        if (fk_field_on) { long long nid91[4]; nid91[0] = p91; nid91[1] = l91; nid91[2] = ty91; nid91[3] = in91; return fk_field_intern_node(3, 0, 0, 0, nid91, 0); }
+        /* a NodeID is identity by content (eq compares the four coordinates), so the same coordinates answer the same
+         * cell. Minting afresh on every call grew the host field by one NodeID thousands of times a second. */
+        long long h91 = fk_nodeid_key(p91, l91, ty91, in91);
+        if (fk_field_on) { long long nid91[4]; nid91[0] = p91; nid91[1] = l91; nid91[2] = ty91; nid91[3] = in91; return fk_field_intern_node(3, 0, 0, 0, nid91, h91); }
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
+        }
+        long long slot91 = h91 & (fk_intern_hash_cap - 1);
+        while (fk_intern_tab[slot91]) {
+            long long ix91 = fk_intern_tab[slot91];
+            if (fk_nkind[ix91] == 3 && fk_nid[ix91][0] == p91 && fk_nid[ix91][1] == l91 && fk_nid[ix91][2] == ty91 && fk_nid[ix91][3] == in91) {
+                return fk_nbox(ix91);
+            }
+            slot91 = (slot91 + 1) & (fk_intern_hash_cap - 1);
         }
         fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1; if (fk_fn_mint != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_mint[fk_cur_fn] = fk_fn_mint[fk_cur_fn] + 1; }
         fk_nkind[fk_np] = 3;
@@ -13856,6 +13876,8 @@ static long long fk_make_nodeid(long long p91, long long l91, long long ty91, lo
         fk_nid[fk_np][1] = l91;
         fk_nid[fk_np][2] = ty91;
         fk_nid[fk_np][3] = in91;
+        fk_intern_tab[slot91] = fk_np;
+        fk_nhash_memo[fk_np] = h91;
         return fk_nbox(fk_np);
 }
 /* give n bytes into gift frame gh under the seqlock; answers the even sequence
