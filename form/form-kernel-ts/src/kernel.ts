@@ -1248,7 +1248,7 @@ export class Kernel {
       case "ctor":
         return `${v.ctor_name}(${v.args.map((a) => this.render(a)).join(", ")})`;
       case "record":
-        return `<record @${v.record.blueprint === null ? "0" : nodeKey(v.record.blueprint)} #${v.record.fields.length}fields>`;
+        return `<record @${v.record.blueprintRecord !== undefined ? "record" : v.record.blueprint === null ? "0" : nodeKey(v.record.blueprint)} #${v.record.fields.length}fields>`;
     }
   }
 
@@ -1413,8 +1413,11 @@ export class Kernel {
     // the body's most common record shape (a plain field map).
     this.registerNative("record_new", catMethod(), (k, args) => {
       const a0 = args[0];
-      const bp = a0?.kind === "int" && a0.int === 0 ? null : argNodeID(args, 0);
+      const owner = a0?.kind === "record" ? a0.record : undefined;
+      const bp =
+        owner !== undefined || (a0?.kind === "int" && a0.int === 0) ? null : argNodeID(args, 0);
       const rec: Record = { blueprint: bp, fields: [] };
+      if (owner !== undefined) rec.blueprintRecord = owner;
       let i = 1;
       while (i + 1 < args.length) {
         recordSet(rec, k.internName(argStr(args, i)), args[i + 1]!);
@@ -1449,6 +1452,9 @@ export class Kernel {
     this.registerNative("record_blueprint", catAccess(), (_k, args) => {
       const r = args[0]!;
       if (r.kind !== "record") throw new Error("record_blueprint: not a record");
+      if (r.record.blueprintRecord !== undefined) {
+        return { kind: "record", record: r.record.blueprintRecord };
+      }
       if (r.record.blueprint === null) return { kind: "int", int: 0 };
       return { kind: "nodeid", nodeid: r.record.blueprint };
     });
@@ -3592,7 +3598,7 @@ export class Kernel {
       case "ctor":
         return `${v.ctor_name}(${v.args.map((a) => this.render(a)).join(", ")})`;
       case "record":
-        return `<record @${v.record.blueprint === null ? "0" : nodeKey(v.record.blueprint)} #${v.record.fields.length}fields>`;
+        return `<record @${v.record.blueprintRecord !== undefined ? "record" : v.record.blueprint === null ? "0" : nodeKey(v.record.blueprint)} #${v.record.fields.length}fields>`;
     }
   }
 }
@@ -4143,6 +4149,9 @@ export interface Record {
   // null for a record built as (record_new 0 ...): fields, but no type and no
   // method table; record_blueprint reads back 0 (fkwu keeps the operand verbatim).
   blueprint: NodeID | null;
+  // a record given as the blueprint, kept verbatim as fkwu keeps the operand
+  // (native-recipe-record.bml's owner); no method table.
+  blueprintRecord?: Record;
   fields: { name: NameID; val: Value }[];
 }
 

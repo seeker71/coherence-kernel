@@ -43,7 +43,10 @@ type recField struct {
 type Record struct {
 	Blueprint   NodeID
 	NoBlueprint bool
-	Fields      []recField
+	// BlueprintRec — a record given as the blueprint, kept verbatim as fkwu
+	// keeps the operand (native-recipe-record.bml's owner); no method table.
+	BlueprintRec *Record
+	Fields       []recField
 }
 
 func (r *Record) Get(name NameID) (Value, bool) {
@@ -160,6 +163,9 @@ func (v Value) String() string {
 	case VNodeID:
 		return fmt.Sprintf("@%d.%d.%d.%d", v.Nid.Pkg, v.Nid.Level, v.Nid.Type, v.Nid.Inst)
 	case VRecord:
+		if v.Rec.BlueprintRec != nil {
+			return fmt.Sprintf("<record @record #%dfields>", len(v.Rec.Fields))
+		}
 		if v.Rec.NoBlueprint {
 			return fmt.Sprintf("<record @0 #%dfields>", len(v.Rec.Fields))
 		}
