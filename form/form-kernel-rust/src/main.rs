@@ -3892,6 +3892,9 @@ impl Kernel {
                 Value::Str((b as u8 as char).to_string().into())
             }
         });
+        // input_byte — byte i of the staged input, 0 outside it, as fkwu reads
+        // its staged buffer. This kernel stages no input, so every byte is 0.
+        self.register_native("input_byte", cat_access(), |_, _, _args| Value::Int(0));
         self.register_native("list", cat_list_nat(), |_, _, args| {
             Value::List(args.to_vec().into())
         });
@@ -7422,8 +7425,51 @@ pub(crate) fn run_source_mapped(src: &str, line_map: &[(String, u32)]) -> Value 
     execute_root(&mut k, root)
 }
 
+// stop_at_stray_paren — a `)` with no `(` open ends the reading, as fkwu's
+// whole-source balance does: wrapped in the implicit do it would close that do
+// early and every form after it would silently fall away, so nothing runs. The
+// stop names the file, line and column, and voices one organ-health reading.
+fn stop_at_stray_paren(k: &Kernel, toks: &[SexpTok]) {
+    let mut depth = 0usize;
+    for t in toks {
+        match t.kind {
+            "LPAREN" => depth += 1,
+            "RPAREN" if depth > 0 => depth -= 1,
+            "RPAREN" => {
+                let (path, line) = match k.resolve_reading_line(t.line) {
+                    Some((file_id, local)) => (k.name_str(file_id).to_string(), local),
+                    None => (String::new(), t.line),
+                };
+                let place = if path.is_empty() {
+                    format!("line {} col {}", t.line, t.col)
+                } else {
+                    format!("{}:{}:{}", path, line, t.col)
+                };
+                let detail = "[unbalanced-source] stray ')' closes a form that was never opened -- refusing to run";
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let row = serde_json::json!({
+                    "schema": "organ-health-v1", "id": format!("form-kernel-rust-{}:reader:unbalanced-source", now),
+                    "organ": "form-kernel-rust", "flow": "reader", "aspect": "unbalanced-source", "stage": "observe",
+                    "expected": "balanced", "observed": "compile-error", "health": 0, "surprise": 1,
+                    "needs": [{"resource": "source-diagnostics", "detail": detail}],
+                    "offers": ["revise"], "selected": "",
+                    "evidence": {"kernel": "rust", "path": path, "line": line, "col": t.col},
+                    "observed_at_ms": now, "at_ms": now,
+                });
+                eprintln!("form-organ health {}", row);
+                panic!("parse error at {}: {}", place, detail);
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn read_root_from_source(k: &mut Kernel, src: &str) -> NodeID {
     let toks = tokenize_sexp(src);
+    stop_at_stray_paren(k, &toks);
     let wrapped: String;
     let single = count_top_level(&toks) == 1;
     let toks = if single {

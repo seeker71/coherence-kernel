@@ -800,6 +800,8 @@ export class Kernel {
     observed: string,
     resource: string,
     detail: string,
+    offers: string[] = ["continue"],
+    evidence: { [key: string]: string | number } = { kernel: "ts" },
   ): void {
     const key = `${flow} ${aspect} ${observed}`;
     if (this.voiced.has(key)) return;
@@ -817,9 +819,9 @@ export class Kernel {
       health: 0,
       surprise: 1,
       needs: [{ resource, detail }],
-      offers: ["continue"],
+      offers,
       selected: "",
-      evidence: { kernel: "ts" },
+      evidence,
       observed_at_ms: now,
       at_ms: now,
     };
@@ -1827,6 +1829,9 @@ export class Kernel {
       const b = argInt(args, 0);
       return { kind: "str", str: b >= 0 && b <= 255 ? String.fromCharCode(b) : "" };
     });
+    // input_byte — byte i of the staged input, 0 outside it, as fkwu reads
+    // its staged buffer. This kernel stages no input, so every byte is 0.
+    this.registerNative("input_byte", catAccess(), () => ({ kind: "int", int: 0 }));
     // List ops
     this.registerNative("list", catListNat(), (_k, args) => ({
       kind: "list",

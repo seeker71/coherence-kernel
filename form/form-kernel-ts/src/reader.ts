@@ -137,8 +137,41 @@ export function readForm(k: Kernel, src: string): NodeID {
   return node;
 }
 
+// stopAtStrayParen — a `)` with no `(` open ends the reading before anything
+// runs, as fkwu's whole-source balance does. The stop names the file, line and
+// column, and voices one organ-health reading.
+function stopAtStrayParen(k: Kernel, src: string, toks: Token[]): void {
+  let depth = 0;
+  for (const t of toks) {
+    if (t.kind === "lparen") depth++;
+    else if (t.kind === "rparen" && depth > 0) depth--;
+    else if (t.kind === "rparen") {
+      let line = 1;
+      let lineStart = 0;
+      for (let i = 0; i < t.pos; i++) {
+        if (src[i] === "\n") {
+          line++;
+          lineStart = i + 1;
+        }
+      }
+      const col = t.pos - lineStart + 1;
+      const owner = k.resolveReadingLine(line);
+      const place = owner === null ? `line ${line} col ${col}` : `${owner.file}:${owner.line}:${col}`;
+      const detail = "[unbalanced-source] stray ')' closes a form that was never opened -- refusing to run";
+      k.voiceOrgan("reader", "unbalanced-source", "balanced", "compile-error", "source-diagnostics", detail, ["revise"], {
+        kernel: "ts",
+        path: owner?.file ?? "",
+        line: owner?.line ?? line,
+        col,
+      });
+      throw new Error(`parse error at ${place}: ${detail}`);
+    }
+  }
+}
+
 export function readAll(k: Kernel, src: string): NodeID {
   const s: ParseState = { toks: tokenize(src), i: 0, attribute: makeAttributor(k, src) };
+  stopAtStrayParen(k, src, s.toks);
   const forms: NodeID[] = [];
   while (s.i < s.toks.length) {
     forms.push(readOne(k, s));

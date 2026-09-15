@@ -2161,6 +2161,11 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VStr, Str: string(byte(args[0].AsInt()))}
 	})
+	// input_byte — byte i of the staged input, 0 outside it, as fkwu reads
+	// its staged buffer. This kernel stages no input, so every byte is 0.
+	k.registerNative("input_byte", catAccess(), func(_ *Kernel, args []Value) Value {
+		return Value{Kind: VInt, Int: 0}
+	})
 	// List ops
 	k.registerNative("list", catListNat(), func(_ *Kernel, args []Value) Value {
 		out := make([]Value, len(args))
@@ -4816,8 +4821,49 @@ func catUndefined() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBas
 // Main — entry point
 // ---------------------------------------------------------------------------
 
+// stopAtStrayParen — a `)` with no `(` open ends the reading, as fkwu's
+// whole-source balance does: wrapped in the implicit do it would close that do
+// early and every form after it would silently fall away, so nothing runs. The
+// stop names the file, line and column, and voices one organ-health reading.
+func (k *Kernel) stopAtStrayParen(toks []sexpToken) {
+	depth := 0
+	for _, t := range toks {
+		if t.kind == "LPAREN" {
+			depth++
+			continue
+		}
+		if t.kind != "RPAREN" {
+			continue
+		}
+		if depth > 0 {
+			depth--
+			continue
+		}
+		path, line := "", uint32(t.line)
+		where := fmt.Sprintf("line %d col %d", t.line, t.col)
+		if fileID, local, ok := k.resolveReadingLine(uint32(t.line)); ok {
+			path, line = k.nameStr(fileID), local
+			where = fmt.Sprintf("%s:%d:%d", path, local, t.col)
+		}
+		detail := "[unbalanced-source] stray ')' closes a form that was never opened -- refusing to run"
+		now := time.Now().UnixMilli()
+		row, _ := json.Marshal(map[string]interface{}{
+			"schema": "organ-health-v1", "id": fmt.Sprintf("form-kernel-go-%d:reader:unbalanced-source", now),
+			"organ": "form-kernel-go", "flow": "reader", "aspect": "unbalanced-source", "stage": "observe",
+			"expected": "balanced", "observed": "compile-error", "health": 0, "surprise": 1,
+			"needs":    []map[string]string{{"resource": "source-diagnostics", "detail": detail}},
+			"offers":   []string{"revise"}, "selected": "",
+			"evidence": map[string]interface{}{"kernel": "go", "path": path, "line": line, "col": t.col},
+			"observed_at_ms": now, "at_ms": now,
+		})
+		fmt.Fprintf(os.Stderr, "form-organ health %s\n", row)
+		panic(fmt.Sprintf("parse error at %s: %s", where, detail))
+	}
+}
+
 func readRootFromSource(k *Kernel, src string) NodeID {
 	toks := tokenizeSexp(src)
+	k.stopAtStrayParen(toks)
 	// Wrap multiple top-level forms in an implicit do-block. Counts
 	// top-level expressions by paren depth — single expr passes through,
 	// multiple get wrapped.
