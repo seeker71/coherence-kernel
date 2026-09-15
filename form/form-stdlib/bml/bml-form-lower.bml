@@ -508,17 +508,53 @@ section [form.bml] {
   // ── the run: fkwu itself compiles and runs the program ──────────────────
   def bfk-dir(d) = if eq(str_len(d), 0) then "/tmp/" else if eq(str_byte_at(d, sub(str_len(d), 1)), 47) then d else str_concat(d, "/");
   def bfk-scratch(ext) = str_concat(bfk-dir(host_temp_dir()), str_concat("bfk-run-", str_concat(int_to_str(host_pid()), ext)));
-  def bfk-run-text(text) {
+  def bfk-run-text(text, where) {
    let src = bfk-scratch(".fk");
    let out = bfk-scratch(".out");
    let err = bfk-scratch(".err");
    write_file_text(src, text);
    let pid = host_spawn_at(list("./fkwu", src), list("/dev/null", out, err));
+   let budget = bfk-budget(where);
+   let ended = bfk-watch(pid, host_monotonic_ms(), 1, where, budget, if lt(budget, bfk-long-ms()) then budget else bfk-long-ms());
    host_wait(pid);
    let said = read_file(out);
    let heard = read_file(err);
    bfk-clear(list(src, out, err, bfk-scratch(".fkb"), bfk-scratch(".sym")));
-   bfk-decode(said, heard);
+   if str_eq(ended, "stop") then list(str_concat(bml-hati-refusal-prefix(0), "run/budget"), false) else bfk-decode(said, heard);
+  }
+  // ── a run that goes on ──────────────────────────────────────────────────
+  // The run is read from outside while it runs, through fkwu's own
+  // diagnostics. A run that ends within its time says nothing. One that goes
+  // past it raises a reading naming the unit, how long it has run and its
+  // hottest defns (a loop is one, by name), offering more time or a stop.
+  // The budget is that care offer, not a wall: a source that declares
+  // "Budget: N" (ms) in its head is given more time while N holds, and the
+  // organ stops a run only when no more time is on offer. A stopped run
+  // answers run/budget.
+  def bfk-long-ms() = 2000;
+  def bfk-budget(where) = if bfk-source?(where) then bfk-budget-at(read_file(where), str_find(read_file(where), "Budget: ", 0)) else bfk-long-ms();
+  def bfk-source?(where) = if lt(str_len(where), 5) then false else if str_eq(substring(where, sub(str_len(where), 4), str_len(where)), ".bml") then eq(fs_exists(where), 1) else false;
+  def bfk-budget-at(text, at) = if lt(at, 0) then bfk-long-ms() else bfk-budget-digits(text, add(at, 8), 0, 0);
+  def bfk-budget-digits(s, i, acc, seen) = if ge(i, str_len(s)) then bfk-budget-read(acc, seen) else if bfk-digit?(str_byte_at(s, i)) then bfk-budget-digits(s, add(i, 1), add(mul(acc, 10), sub(str_byte_at(s, i), 48)), add(seen, 1)) else bfk-budget-read(acc, seen);
+  def bfk-digit?(c) = if lt(c, 48) then false else le(c, 57);
+  def bfk-budget-read(acc, seen) = if gt(seen, 0) then acc else bfk-long-ms();
+
+  // "ran" when the child ended by itself, "stop" when the organ stopped it
+  def bfk-watch(pid, t0, step, where, budget, next) = if eq(host_alive(pid), 1) then bfk-watch-at(pid, t0, step, where, budget, next, sub(host_monotonic_ms(), t0)) else "ran";
+  def bfk-watch-at(pid, t0, step, where, budget, next, ms) = if lt(ms, next) then bfk-watch-on(pid, t0, step, where, budget, next, host_sleep_ms(step)) else bfk-watch-care(pid, t0, where, budget, ms, bfk-run-care(bfk-run-reading(where, ms, budget, value_str(kernel_page_hot(pid, 3))), if lt(ms, budget) then "extend" else "stop", pid, budget));
+  def bfk-watch-on(pid, t0, step, where, budget, next, _slept) = bfk-watch(pid, t0, if lt(step, 50) then add(step, step) else 50, where, budget, next);
+  def bfk-watch-care(pid, t0, where, budget, ms, chosen) = if str_eq(chosen, "stop") then "stop" else bfk-watch(pid, t0, 1, where, budget, budget);
+  def bfk-run-reading(where, ms, budget, hot) = bch-reading("run", str_concat("an answer within ", str_concat(int_to_str(budget), " ms")), str_concat("running ", str_concat(int_to_str(ms), str_concat(" ms, hot: ", hot))), list(oh-need("time", json-node-object(list(oh-s("unit", where), oh-n("ran_ms", ms), oh-n("budget_ms", budget), oh-s("hot", hot))))), list("extend", "stop"), where);
+  // the organ answers its own reading: more time while the budget holds,
+  // else a stop; the care it applied is voiced with its result
+  def bfk-run-care(reading, selected, pid, budget) {
+   let response = oh-response(reading, selected);
+   let chosen = oh-select(reading, response, "stop");
+   let done = if str_eq(chosen, "stop") then host_kill(pid) else 0;
+   oh-voice(reading);
+   oh-voice(response);
+   oh-voice(oh-applied(reading, chosen, json-node-object(list(oh-s("run", if str_eq(chosen, "stop") then "stopped" else "extended"), oh-n("budget_ms", budget)))));
+   chosen;
   }
   def bfk-clear(paths) = if nil?(paths) then 0 else bfk-clear-then(fs_remove(head(paths)), tail(paths));
   def bfk-clear-then(_gone, rest) = bfk-clear(rest);
@@ -546,9 +582,9 @@ section [form.bml] {
    str_concat("BML-FORM-DIED ", said);
   }
 
-  def bfk-run-linked-at(where, node, units) = bml-run-heard(where, "form", bfk-outcome(bfk-compile-linked(node, units)));
-  def bfk-outcome(image) = bfk-outcome-with(nth(image, 0), bch-admit("form-image", nth(image, 1)));
-  def bfk-outcome-with(text, reasons) = if nil?(reasons) then bfk-run-text(text) else list(str_concat(bml-hati-refusal-prefix(0), bml-hati-unsupported-reasons-text(reasons)), false);
+  def bfk-run-linked-at(where, node, units) = bml-run-heard(where, "form", bfk-outcome(bfk-compile-linked(node, units), where));
+  def bfk-outcome(image, where) = bfk-outcome-with(nth(image, 0), bch-admit("form-image", nth(image, 1)), where);
+  def bfk-outcome-with(text, reasons, where) = if nil?(reasons) then bfk-run-text(text, where) else list(str_concat(bml-hati-refusal-prefix(0), bml-hati-unsupported-reasons-text(reasons)), false);
 
   // One source on the native path. Its imports and Units: are cared for
   // once, the linked units run on fkwu itself, and an answer the lowering
