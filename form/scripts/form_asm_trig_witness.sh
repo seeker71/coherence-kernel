@@ -9,41 +9,22 @@
 #
 # Probes: the named accuracy-bar points (0, pi/6, pi/4, pi/2, pi, 3pi/2, 2pi) printed individually,
 # then RoPE's real domain (position 0..8192, inv_freq = 1/base^(2i/d), d=128, base=500000 — the
-# llama3 RoPE convention) swept in batch and summarized as a max error over N points.
+# llama3 RoPE convention) swept in batch and summarized as a max error over N points. The body
+# makes the objects and both point sets (form/scripts/form-asm-trig-witness.bml); this carrier
+# links, loads and compares.
 set -euo pipefail
 cd "$(dirname "$0")/.."   # form/
 
-GO_BIN="form-kernel-go/bin-go"
-if [[ ! -x "$GO_BIN" ]] || find form-kernel-go -name '*.go' -newer "$GO_BIN" -print -quit | grep -q .; then
-    echo "  building go kernel..." >&2
-    (cd form-kernel-go && go build -o bin-go .)
-fi
+[[ -x ../fkwu ]] || { echo "the body's kernel is missing: ../fkwu (cc -O2 -o fkwu runtime/fkwu-uni.c)" >&2; exit 1; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/form-asm-trig-witness.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-# ── 1. emit the .o byte images for _fam_sin / _fam_cos (form-macho wraps fam-sin/fam-cos's own
-# bytes — the SAME bytes tests/form-asm-trig-band.fk already proved four-way byte-identical) ──
-cat > "$WORK/emit.fk" <<'FK'
-(do
-    (list
-        (mo-object-sym (fam-sin) (list 95 102 97 109 95 115 105 110))
-        (mo-object-sym (fam-cos) (list 95 102 97 109 95 99 111 115))))
-FK
-
-"$GO_BIN" \
-    form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f64-bytes.fk \
-    form-stdlib/form-asm.fk form-stdlib/form-asm-matvec.fk form-stdlib/form-macho.fk \
-    form-stdlib/form-asm-trig.fk "$WORK/emit.fk" > "$WORK/objs.txt"
-
-python3 - "$WORK/objs.txt" "$WORK/fam_sin.o" "$WORK/fam_cos.o" <<'PY'
-import ast, sys
-objs_path, sin_path, cos_path = sys.argv[1:4]
-sin_o, cos_o = ast.literal_eval(open(objs_path).read().strip())
-open(sin_path, "wb").write(bytes(sin_o))
-open(cos_path, "wb").write(bytes(cos_o))
-print(f"emitted _fam_sin.o ({len(sin_o)} bytes), _fam_cos.o ({len(cos_o)} bytes)")
-PY
+# ── 1. the body writes the .o byte images for _fam_sin / _fam_cos (form-macho wraps fam-sin/fam-cos's
+# own bytes — the SAME bytes tests/form-asm-trig-band.fk already proved four-way byte-identical), the
+# named points and the RoPE domain ──
+printf '%s\n' "$WORK" > "$WORK/in"
+(cd .. && ./fkwu form/scripts/form-asm-trig-witness.bml < "$WORK/in" 2>/dev/null)
 
 # ── 2. link into durable recipe dylibs (ld -dylib, ad-hoc signed — the recipe-dylib carrier
 # form-macho.fk's own header names; NO clang in the compute, only the system linker) ──
@@ -104,23 +85,11 @@ cc -O2 -o "$WORK/loader" "$WORK/loader.c"
 
 # ── 4. run the named accuracy-bar points individually ──
 echo "── named points (0, pi/6, pi/4, pi/2, pi, 3pi/2, 2pi) ──"
-NAMED_PTS=$(python3 -c "
-import math
-pts = [0, math.pi/6, math.pi/4, math.pi/2, math.pi, 3*math.pi/2, 2*math.pi]
-print(' '.join(repr(p) for p in pts))
-")
+NAMED_PTS=$(cat "$WORK/named_pts.txt")
 "$WORK/loader" "$WORK/libfam_sin.dylib" "$WORK/libfam_cos.dylib" $NAMED_PTS
 
 # ── 5. sweep RoPE's real domain in batch (position 0..8192, inv_freq = 1/base^(2i/d), d=128,
 # base=500000) — the actual angles a RoPE rotation would feed this lane ──
 echo
 echo "── RoPE domain sweep (position 0..8192 step 7, d=128, base=500000) ──"
-python3 -c "
-base = 500000.0
-d = 128
-for pos in range(0, 8193, 7):
-    for i in range(0, d // 2):
-        inv_freq = 1.0 / (base ** (2 * i / d))
-        print(pos * inv_freq)
-" > "$WORK/rope_domain.txt"
 "$WORK/loader" "$WORK/libfam_sin.dylib" "$WORK/libfam_cos.dylib" < "$WORK/rope_domain.txt" | tail -1
