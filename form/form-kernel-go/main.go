@@ -3804,21 +3804,6 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("walk_parallel_cached", catWitness(), walkParallelCached)
 	k.registerNative("walk-parallel-cached", catWitness(), walkParallelCached)
 
-	// native_blueprint — read a native's Form category from inside Form.
-	// Returns the category NodeID (level=2, ty=RBasic, inst=instance) or
-	// VNull if the name isn't bound to a native.
-	k.registerNative("native_blueprint", catWitness(), func(k *Kernel, args []Value) Value {
-		idx, ok := k.strIdx[argStr(args, 0)]
-		if !ok {
-			return Value{Kind: VNull}
-		}
-		ne, ok := k.natives[idx]
-		if !ok {
-			return Value{Kind: VNull}
-		}
-		return Value{Kind: VNodeID, Nid: ne.Category}
-	})
-
 	k.registerHostIONatives()
 
 	// --- Debug / inspection -----------------------------------------------

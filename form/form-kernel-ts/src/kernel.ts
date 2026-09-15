@@ -3411,16 +3411,6 @@ export class Kernel {
       ],
     }));
 
-    // native_blueprint — introspection: return a native's Form category.
-    this.registerNative("native_blueprint", catWitness(), (k, args) => {
-      const name = argStr(args, 0);
-      const id = k.lookupName(name);
-      if (id === undefined) return { kind: "null" };
-      const ne = k.natives.get(id);
-      if (ne === undefined) return { kind: "null" };
-      return { kind: "nodeid", nodeid: ne.category };
-    });
-
     // Typed-numeric construction and decoding — attributed as WITNESS
     // (substrate-write for typed trivials) and METHOD (value conversion).
     this.registerNative("make_int8", catWitness(), (k, args) => k.boxValue(k.internTrivialInt8(argInt(args, 0))));
@@ -3564,11 +3554,6 @@ export class Kernel {
     });
   }
 
-  // lookupName — internal-only name → NameID lookup, used by
-  // native_blueprint. Returns undefined for unbound names.
-  lookupName(s: string): NameID | undefined {
-    return this.strIdx.get(s);
-  }
 
   private renderForPrint(v: Value): string {
     switch (v.kind) {
