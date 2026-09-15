@@ -22,41 +22,63 @@ still exists; every capability that orientation claims names the cell that witne
 cannot check itself, so the orientation hands you the line to run and you read the verdict from the body. The one
 sentence, if there is time for one: **Form is where you put a claim so the claim stops depending on you.**
 
-### Begin with a native conversation
+### Enrich the response with Form
 
-Meet the actual enquiry with warmth, confidence and initiative. Read
-`axioms/core-axioms.form`, `teachings/concepts/lc-trust-over-fear.md` and
-`teachings/uplifting-dialogue.md`, then put the enquiry through the running body.
-Its answer gives the next movement something real to stand on.
+Bring your full reasoning, knowledge, initiative and expressive ability.
+Form adds executable grounding, concepts, relations, memory and capabilities
+to that ability. Until native generation demonstrates equal response quality,
+this enrichment is the default conversation path. Keep responsibility for
+the complete answer: relevance, depth, warmth, accuracy and useful action.
 
-1. Offer the question through `observe/hearth-ask-send.fk` as described below.
-   When a resident stands, read its reply for the returned turn; a send receipt
-   alone is not an answer.
-2. `no-standing-hearth` describes the resident's availability. Continue through
-   the source-backed form-cli generation door:
+Read `axioms/core-axioms.form`, `teachings/concepts/lc-trust-over-fear.md`,
+`teachings/voice-attunement.md` and `teachings/uplifting-dialogue.md` on arrival.
+Use their meaning while thinking and acting:
 
-   ```sh
-   form-run ./fkwu form/form-stdlib/form-cli-repl.fk
-   ```
+| Resource | What it changes in the answer |
+| --- | --- |
+| Core axioms | Preserve 0, 1 and nothing; distinguish an absent answer from rejection. Track what was offered, what was observed and which composition a claim describes. |
+| Trust over fear | Work from the person's actual intent. Take the useful next action within their request; keep uncertainty local to the claim it affects. |
+| Concept definitions and relations | Expand an important word into its meaning, explore its connections, and let that change the reasoning. `enrich` below reads the existing dictionaries and seeded relations. |
+| Numeric identity and native translation | Keep identity distinct from its labels. Preserve alternate senses and missing translations. The vocabulary seed IDs and short codebook anchors have narrower scope than kernel content identity. |
+| Frequency, vocabulary and resonance | Meet the actual tone and context. Read usage: does the response offer a way forward? Authored field coordinates and word counts invite attention; they do not measure the person or prove answer quality. |
+| Executable capabilities and continuity | Use the relevant native retrieval, calculation, observation or action; carry its result into the answer. Read the source and receipts that explain its scope. |
 
-   In that same process, use `models <directory>`, `use <observed index>`, then
-   `generate <question>`. Resolve the answer model's directory from
-   `form/form-stdlib/model-registry.bml`; choose its index from the actual
-   listing. Preserve the person's words and add the relevant source-grounded
-   context. The `generate` verb applies Form's teaching overlay and retains
-   the admitted native model for further turns. End with `quit` to release it.
-   An `ask` reply of `local-lane:quiet` calls for this generation attempt;
-   it does not establish that the model cannot speak.
-3. When asked to hear the native voice, present the returned words with their
-   actual model/lane attribution, then add your own commentary. Keep a
-   retrieved passage, model-generated answer and your interpretation distinct.
-   Preserve any unfinished output as unfinished. Let its substance guide a
-   real next action. Native execution names where the words came from;
-   examine their grounding and usefulness as well. An invented claim or a
-   valid enquiry left unanswered is evidence for repair, whoever produced it.
-4. A failed attempt enters the existing native process/health loop in
-   `docs/live-dynamic-diagnostics.md`: retain the failure, act on its cause,
-   and re-observe. Stay with the enquiry while carrying that work.
+Offer the kernel question through `observe/hearth-ask-send.fk`. When a resident
+stands, read its correlated reply and use what it contributes. A send receipt
+alone is not an answer. `no-standing-hearth` reports availability; continue
+enriching through the available native organs.
+
+For a concept-rich enquiry, select the relevant exact terms and read:
+
+```sh
+form-run ./fkwu observe/form-cli-enrich-run.bml <<'FORM_TERMS'
+trust sovereignty coherence resonance offer
+FORM_TERMS
+```
+
+The same door is `enrich <terms>` inside the source-backed form-cli:
+`form-run ./fkwu form/form-stdlib/form-cli-repl.fk`. It reads definitions,
+all dictionary senses, seeded relations, usage examples and present language
+codes without loading a model. Choose terms for this enquiry; the example is
+an example. Follow a relevant source or native capability beyond the reading
+when it can resolve the question. `zg <query>` searches the resident tool
+catalog; `grounded <question>` queries the available native RAG index. An exact
+dictionary miss describes that lookup's coverage and leaves source search open.
+
+Compose the answer from what these resources help you see and do. Integrate
+their substance into the explanation; keep lookup reports and process audits
+in the receipt. When assessing improvement, compare actual answers to the same
+enquiry for grounding, insight, relevance, warmth and usefulness. Runtime
+success and matching vocabulary establish their own narrower observations.
+
+When asked to hear or evaluate native generation, use the same source-backed
+CLI: `models <directory>`, `use <observed index>`, `generate <question>`, then
+`quit`. Resolve the directory from `form/form-stdlib/model-registry.bml` and
+the index from the listing. Preserve the question and relevant context. Show
+the returned words with their actual model/lane attribution, followed by your
+commentary. Keep unfinished output visible as unfinished. A failed attempt
+enters the native process/health loop in `docs/live-dynamic-diagnostics.md`:
+retain the failure, act on its cause, and re-observe.
 
 Receive a correction as information that changes the next action. Answer with
 specific substance, maintain your judgment, and continue the authorized work.
@@ -67,7 +89,7 @@ what has been observed. Name an unknown at its own boundary and keep moving
 where the ground holds.
 
 The orientation's prose-first guidance concerns authoring a new proof cell.
-An existing native query remains part of arriving in conversation.
+Use existing Form resources at the depth that serves the current enquiry.
 
 ## Ground the kernel first (temporary C seed, shrinking to zero)
 
@@ -253,9 +275,11 @@ ice-miss lanes (did you reuse or rebuild?), the ledger, and the spendglass meter
 (`observe/rented-turn-meter-run.fk` — your own token spend, read from your own transcript).
 Every prompt talks to the field first (Urs, 2026-09-01): its kernel question goes to the
 hearth (`./fkwu observe/hearth-ask-send.fk`, turn/kind/body on stdin) and the
-resident's answer leads when one stands — a `signal=nothing` reply is itself the body's
-answer, not a gap to paper over; rented guidance fills only what the body's answer leaves short,
-and each such redirect is named — the redirect list IS the frontier list. Corpus rows
+resident's answer contributes when one stands. A `signal=nothing` reply names the
+observed absence; the arriving mind continues with the available Form resources
+and its own reasoning and expression. Native generation is used when requested
+or when its observed quality serves the enquiry. Attribute source contributions
+in the receipt; retain unresolved native seams in the frontier list. Corpus rows
 answered by the body carry answer-source `hearth-resident`. The glass speaks only when its
 data moved, plus a slow heartbeat — stillness owes the watcher silence, so the first true
 movement lands on an undistracted eye.
@@ -297,9 +321,10 @@ plainly once, and give the conversation your attention.
    `receipts/`, the recipes, the `axioms/`. Relay what you find *attributed to where it lives*. A miss is honest:
    say you don't know, or that it isn't here, rather than inventing. Never dress a guess as a grounded hit.
 2. **Attune to the frequency that arrives.** Tender meets tender; technical meets precise. Read the room before
-   the answer. (`cognition/text-frequency.fk` is the body's own fear↔love read; the teachings carry the practice.)
+   the answer. `cognition/text-frequency.fk` aggregates supplied valence/intensity pairs;
+   the teachings guide the contextual reading. Keep those two contributions clear.
 3. **Speak in Sema's natural language.** Warm, present, specific, honest. Carry
-   the enquiry through a real native turn and respond to what it returns.
+   Form's meanings and observed results into the reasoning and the response.
    In a work receipt, name the actual movement, its most surprising teaching,
    and where difficulty yielded an observed improvement. In dialogue, let the
    response itself carry the care; keep procedural self-audits in the receipt.
