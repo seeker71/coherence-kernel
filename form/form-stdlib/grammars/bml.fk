@@ -11844,6 +11844,10 @@
             "__hati_invoke"
             (cons receiver (cons (bml-ast-string member) args))))
 
+    ;; value.field after a value no qualified name can spell
+    (defn bml-ast-member-get (receiver field)
+        (bml-hati-marker "__hati_get" (list receiver (bml-ast-string field))))
+
     (defn bml-ast-self-ctor (args) (bml-hati-marker "__hati_self_ctor" args))
 
     (defn bml-ast-super-ctor (args) (bml-hati-marker "__hati_super_ctor" args))
@@ -11863,7 +11867,7 @@
               "__hati_field" "__hati_member" "__hati_new" "__hati_invoke"
               "__hati_self_ctor" "__hati_super_ctor" "__hati_abstract"
               "__hati_unparsed" "__hati_field_get" "__hati_field_set"
-              "__hati_unread"))
+              "__hati_unread" "__hati_get"))
 
     (defn bml-hati-class-call? (node)
         (if (node_eq (node_category node) BML-AST-CALL)
@@ -11959,6 +11963,18 @@
     (defn bml-hati-field-entry-type (entry) (nth entry 1))
     (defn bml-hati-field-entry-init (entry) (nth entry 2))
     (defn bml-hati-field-entry-has-init? (entry) (nth entry 3))
+
+    ;; set by its class's init member, not in the record new builds
+    (defn bml-hati-field-entry-by-member? (entry)
+        (if (gt (len entry) 4) (nth entry 4) false))
+
+    ;; the record key the field lives at (see bml-hati-keyed-layout-classes)
+    (defn bml-hati-field-entry-key (entry)
+        (if (gt (len entry) 5) (nth entry 5) (nth entry 0)))
+
+    (defn bml-hati-field-keyed (entry key)
+        (list (nth entry 0) (nth entry 1) (nth entry 2) (nth entry 3)
+              (bml-hati-field-entry-by-member? entry) key))
 
     (defn bml-hati-member (name param-types type-params fn kind owner node)
         (list "bml-hati-member" name param-types type-params fn kind owner node))
@@ -12144,6 +12160,11 @@
                     (bml-hati-env-layout env)
                     (bml-hati-name-type "this" env)
                     (node_value (bml-node-child (head (bml-call-args node)) 0)))
+            (if (str_eq name "__hati_get")
+                (bml-hati-class-field-type
+                    (bml-hati-env-layout env)
+                    (bml-hati-static-type (bml-hati-marker-arg node 0) env)
+                    (bml-hati-marker-str node 1))
             (if (str_eq name "__hati_invoke")
                 (bml-hati-invoke-type
                     (bml-hati-marker-arg node 0)
@@ -12158,7 +12179,7 @@
                     (bml-hati-invoke-type (bml-ast-name (head split)) (nth split 1) (bml-call-args node) env))
             (if (bml-hati-member-call? name env)
                 (bml-hati-invoke-type (bml-ast-name "this") name (bml-call-args node) env)
-                (bml-hati-free-call-type node env)))))))))
+                (bml-hati-free-call-type node env))))))))))
 
     (defn bml-hati-member-return (member)
         (do
@@ -12427,11 +12448,117 @@
                 (head fields)
                 (bml-hati-find-field (tail fields) name))))
 
+    ;; A field's record key is its name, unless another class that can share
+    ;; an object with its class (one depth-first chain holds both) declares
+    ;; the same name: then each keeps its own slot, Class.name. A class's own
+    ;; code reads its own; a read from outside reaches the first class of the
+    ;; receiver's chain that declares the name, the order a method resolves in.
+    (defn bml-hati-keyed-layout-classes (layout)
+        (bml-hati-keyed-classes
+            (bml-hati-layout-classes layout)
+            (bml-hati-chains-of layout (bml-hati-layout-classes layout))))
+
+    (defn bml-hati-chains-of (layout classes)
+        (if (nil? classes)
+            (empty)
+            (cons
+                (bml-hati-class-chain layout (bml-hati-class-name (head classes)))
+                (bml-hati-chains-of layout (tail classes)))))
+
+    (defn bml-hati-keyed-classes (entries chains)
+        (if (nil? entries)
+            (empty)
+            (cons
+                (bml-hati-class-entry
+                    (bml-hati-class-name (head entries))
+                    (bml-hati-class-base (head entries))
+                    (bml-hati-class-ifaces (head entries))
+                    (bml-hati-keyed-fields
+                        (bml-hati-class-name (head entries))
+                        (bml-hati-class-fields (head entries))
+                        chains)
+                    (bml-hati-class-members (head entries))
+                    (bml-hati-class-id (head entries))
+                    (bml-hati-class-node (head entries))
+                    (bml-hati-class-delegates (head entries)))
+                (bml-hati-keyed-classes (tail entries) chains))))
+
+    (defn bml-hati-keyed-fields (class-name fields chains)
+        (if (nil? fields)
+            (empty)
+            (cons
+                (bml-hati-field-keyed
+                    (head fields)
+                    (if (bml-hati-slot-shared? chains class-name (bml-hati-field-entry-name (head fields)))
+                        (str_concat class-name (str_concat "." (bml-hati-field-entry-name (head fields))))
+                        (bml-hati-field-entry-name (head fields))))
+                (bml-hati-keyed-fields class-name (tail fields) chains))))
+
+    (defn bml-hati-slot-shared? (chains class-name field)
+        (if (nil? chains)
+            false
+            (if (if (bml-hati-entries-named? (head chains) class-name)
+                    (bml-hati-other-declares? (head chains) class-name field)
+                    false)
+                true
+                (bml-hati-slot-shared? (tail chains) class-name field))))
+
+    (defn bml-hati-other-declares? (chain class-name field)
+        (if (nil? chain)
+            false
+            (if (if (str_eq (bml-hati-class-name (head chain)) class-name)
+                    false
+                    (not (nil? (bml-hati-find-field (bml-hati-class-fields (head chain)) field))))
+                true
+                (bml-hati-other-declares? (tail chain) class-name field))))
+
+    ;; the class of type-name's chain whose field a read of field reaches
+    (defn bml-hati-field-declarer (layout type-name field)
+        (bml-hati-chain-declarer (bml-hati-class-chain layout type-name) field))
+
+    (defn bml-hati-chain-declarer (chain field)
+        (if (nil? chain)
+            (empty)
+            (if (nil? (bml-hati-find-field (bml-hati-class-fields (head chain)) field))
+                (bml-hati-chain-declarer (tail chain) field)
+                (head chain))))
+
+    ;; the record key recv.field reads and sets: the declaring class's slot,
+    ;; or the name itself on an owner the layout cannot see
+    (defn bml-hati-field-key (layout type-name field)
+        (do
+            (let declarer (bml-hati-field-declarer layout type-name field))
+            (if (nil? declarer)
+                field
+                (bml-hati-field-entry-key
+                    (bml-hati-find-field (bml-hati-class-fields declarer) field)))))
+
+    (defn bml-hati-recv-field-key (env recv-node field)
+        (bml-hati-field-key (bml-hati-env-layout env) (bml-hati-static-type recv-node env) field))
+
+    ;; the init members new runs over a fresh record, base first
+    (defn bml-hati-init-fns (layout class-name)
+        (bml-hati-init-fns-of (reverse-list (bml-hati-class-chain layout class-name))))
+
+    (defn bml-hati-init-fns-of (chain)
+        (if (nil? chain)
+            (empty)
+            (append
+                (bml-hati-member-fns (bml-hati-members-of-kind (bml-hati-class-members (head chain)) "init"))
+                (bml-hati-init-fns-of (tail chain)))))
+
+    (defn bml-hati-member-fns (members)
+        (if (nil? members)
+            (empty)
+            (cons (bml-hati-member-fn (head members)) (bml-hati-member-fns (tail members)))))
+
     (defn bml-hati-class-field-type (layout class-name field-name)
         (do
-            (let field
-                (bml-hati-find-field (bml-hati-class-fields-all layout class-name) field-name))
-            (if (nil? field) "" (bml-hati-field-entry-type field))))
+            (let declarer (bml-hati-field-declarer layout class-name field-name))
+            (if (nil? declarer)
+                ""
+                (bml-hati-field-entry-type
+                    (bml-hati-find-field (bml-hati-class-fields declarer) field-name)))))
 
     (defn bml-hati-iface-family-loop (layout name depth)
         (if (gt depth (len (bml-hati-layout-ifaces layout)))
@@ -12489,6 +12616,10 @@
                 (bml-hati-member-param-types b))
             false))
 
+    ;; a constructor and an init member answer no message by name
+    (defn bml-hati-hidden-kind? (kind)
+        (if (str_eq kind "ctor") true (str_eq kind "init")))
+
     (defn bml-hati-members-of-kind (members kind)
         (if (nil? members)
             (empty)
@@ -12500,7 +12631,7 @@
         (if (nil? members)
             (empty)
             (if (str_eq (bml-hati-member-name (head members)) name)
-                (if (str_eq (bml-hati-member-kind (head members)) "ctor")
+                (if (bml-hati-hidden-kind? (bml-hati-member-kind (head members)))
                     (bml-hati-members-named (tail members) name)
                     (cons (head members) (bml-hati-members-named (tail members) name)))
                 (bml-hati-members-named (tail members) name))))
@@ -12792,7 +12923,7 @@
             acc
             (bml-hati-member-names-of
                 (tail members)
-                (if (str_eq (bml-hati-member-kind (head members)) "ctor")
+                (if (bml-hati-hidden-kind? (bml-hati-member-kind (head members)))
                     acc
                     (if (fsc-string-list-contains? acc (bml-hati-member-name (head members)))
                         acc
@@ -12934,7 +13065,7 @@
             (bml-hati-lower-refusal "field/not-found" pool)
             (do
                 (let recv (bml-hati-lower-node-in-env recv-node pool env))
-                (let key (bml-hati-lower-string-in field (bml-hati-lower-pool recv)))
+                (let key (bml-hati-lower-string-in (bml-hati-recv-field-key env recv-node field) (bml-hati-lower-pool recv)))
                 (bml-hati-lower-result
                     (fk-rget (bml-hati-lower-expr recv) (bml-hati-lower-expr key))
                     (bml-hati-lower-pool key)))))
@@ -12947,7 +13078,7 @@
             (bml-hati-lower-refusal "field/not-found" pool)
             (do
                 (let recv (bml-hati-lower-node-in-env recv-node pool env))
-                (let key (bml-hati-lower-string-in field (bml-hati-lower-pool recv)))
+                (let key (bml-hati-lower-string-in (bml-hati-recv-field-key env recv-node field) (bml-hati-lower-pool recv)))
                 (let value
                     (bml-hati-lower-node-in-env value-node (bml-hati-lower-pool key) env))
                 (bml-hati-lower-result
@@ -13055,13 +13186,17 @@
                     (bml-hati-fields-init-ok? (tail fields)))
                 (bml-hati-fields-init-ok? (tail fields)))))
 
+    ;; (key value) per field: its slot key and its initializer, or 0 for one
+    ;; no initializer sets here (its class's init member sets it)
     (defn bml-hati-field-rows (fields)
         (if (nil? fields)
             (empty)
             (cons
                 (list
-                    (bml-hati-field-entry-name (head fields))
-                    (if (bml-hati-field-entry-has-init? (head fields))
+                    (bml-hati-field-entry-key (head fields))
+                    (if (if (bml-hati-field-entry-has-init? (head fields))
+                            (not (bml-hati-field-entry-by-member? (head fields)))
+                            false)
                         (bml-hati-field-entry-init (head fields))
                         (bml-ast-int 0)))
                 (bml-hati-field-rows (tail fields)))))
@@ -13086,8 +13221,9 @@
                     (bml-hati-lower-pool rest)))))
 
     ;; One recipe record (tag 64) whose packet names the class, its id in
-    ;; this layout's method tables, and every structural field, each set to
-    ;; its initializer lowered in env (where the class lives).
+    ;; this layout's method tables, and every structural field at its key,
+    ;; each set to its literal initializer lowered in env (where the class
+    ;; lives) or to 0 for one its class's init member sets.
     (defn bml-hati-lower-instance (layout entry pool env)
         (do
             (let packet
@@ -13103,6 +13239,16 @@
             (bml-hati-lower-result
                 (fk-node 64 (bml-hati-lower-expr packet))
                 (bml-hati-lower-pool packet))))
+
+    ;; each init member over the record, base first: (initN ... (init1 (rec)))
+    (defn bml-hati-init-over (fns result)
+        (if (nil? fns)
+            result
+            (bml-hati-init-over
+                (tail fns)
+                (bml-hati-lower-result
+                    (fk-call (head fns) (fk-cons (bml-hati-lower-expr result) (fk-empty)))
+                    (bml-hati-lower-pool result)))))
 
     (defn bml-hati-class-homes-key () "__hati_class_homes")
 
@@ -13151,11 +13297,13 @@
                             pool)
                         (do
                             (let record
-                                (bml-hati-lower-instance
-                                    layout
-                                    entry
-                                    pool
-                                    (bml-hati-class-init-env env class-type)))
+                                (bml-hati-init-over
+                                    (bml-hati-init-fns layout class-type)
+                                    (bml-hati-lower-instance
+                                        layout
+                                        entry
+                                        pool
+                                        (bml-hati-class-init-env env class-type))))
                             (if (lt (bml-hati-choice-value choice) 0)
                                 record
                                 (do
@@ -13233,6 +13381,12 @@
                 (tail (bml-call-args node))
                 pool
                 env)
+        (if (str_eq name "__hati_get")
+            (bml-hati-lower-field-read
+                (bml-hati-marker-arg node 0)
+                (bml-hati-marker-str node 1)
+                pool
+                env)
         (if (str_eq name "__hati_invoke")
             (bml-hati-lower-invoke
                 (bml-hati-marker-arg node 0)
@@ -13256,7 +13410,7 @@
                         (bml-unread-reading (bml-hati-marker-str node 0))
                         "source/unread")
                     "method/body-unparsed")
-                pool)))))))))))))))
+                pool))))))))))))))))
 
     (defn bml-hati-lower-class-call-in (node pool env)
         (do
@@ -13315,7 +13469,9 @@
                 (bml-hati-unsupported-call-args-in args env)
             (if (str_eq name "__hati_field_set")
                 (bml-hati-unsupported-node-in (nth args 1) env)
-                (empty))))))))
+            (if (str_eq name "__hati_get")
+                (bml-hati-unsupported-node-in (head args) env)
+                (empty)))))))))
 
     (defn bml-hati-unsupported-class-call-in (node env)
         (do
@@ -13396,7 +13552,8 @@
                         (list false (empty) objects))))
                 (list false (empty) objects))))
 
-    ;; value.member(args) after a value no qualified name can spell.
+    ;; value.member(args), value.member() and value.field after a value no
+    ;; qualified name can spell, each step on what the one before answers.
     (defn bml-source-parse-member-tail (node objects)
         (if (bml-source-token-value? (head objects) ".")
             (if (bml-source-name-kind-token? (nth objects 1))
@@ -13406,7 +13563,11 @@
                         (bml-source-parse-member-tail
                             (bml-ast-invoke node (bmf-object-value (nth objects 1)) (nth args 1))
                             (nth args 2))
-                        (bml-expr-result true node objects)))
+                    (if (bml-source-token-value? (nth objects 2) "(")
+                        (bml-expr-result true node objects)
+                        (bml-source-parse-member-tail
+                            (bml-ast-member-get node (bmf-object-value (nth objects 1)))
+                            (drop 2 objects)))))
                 (bml-expr-result true node objects))
             (bml-expr-result true node objects)))
 
@@ -14316,7 +14477,7 @@
     ;; (members fields next-index): a signature-only method takes no index.
     (defn bml-hati-members-from (nodes owner ctor-name index members fields)
         (if (nil? nodes)
-            (list (reverse-list members) (reverse-list fields) index)
+            (bml-hati-members-close owner ctor-name index (reverse-list members) (reverse-list fields))
             (do
                 (let node (head nodes))
                 (if (node_eq (node_category node) BML-AST-FIELD)
@@ -14349,6 +14510,73 @@
                                     node)
                                 members)
                             fields))))))
+
+    ;; A class whose field initializers are not all literals gets one more
+    ;; member, its init: a body that sets each initialized field in
+    ;; declaration order with this bound and answers this, so an initializer
+    ;; reads this and the fields before it. new runs each class's init over
+    ;; the fresh record, base first, before the constructor. A class whose
+    ;; initializers are all literals keeps them in the record new builds.
+    (defn bml-hati-init-name () "<init>")
+
+    (defn bml-hati-members-close (owner ctor-name index members fields)
+        (if (bml-hati-needs-init-member? ctor-name fields)
+            (list
+                (append
+                    members
+                    (list
+                        (bml-hati-member
+                            (bml-hati-init-name)
+                            (empty)
+                            (empty)
+                            index
+                            "init"
+                            owner
+                            (bml-ast-method
+                                (bml-hati-init-name)
+                                (bml-ast-block (bml-hati-init-stmts owner fields))))))
+                (bml-hati-fields-by-member fields)
+                (add index 1))
+            (list members fields index)))
+
+    (defn bml-hati-needs-init-member? (ctor-name fields)
+        (if (str_eq ctor-name "")
+            false
+            (if (bml-hati-fields-init-ok? fields)
+                (bml-hati-any-computed-init? fields)
+                false)))
+
+    (defn bml-hati-any-computed-init? (fields)
+        (if (nil? fields)
+            false
+            (if (if (bml-hati-field-entry-has-init? (head fields))
+                    (not (bml-hati-literal-node? (bml-hati-field-entry-init (head fields))))
+                    false)
+                true
+                (bml-hati-any-computed-init? (tail fields)))))
+
+    (defn bml-hati-init-stmts (owner fields)
+        (if (nil? fields)
+            (list (bml-ast-return (bml-hati-self-marker owner)))
+            (if (bml-hati-field-entry-has-init? (head fields))
+                (cons
+                    (bml-ast-this-field-set
+                        (bml-hati-field-entry-name (head fields))
+                        (bml-hati-field-entry-init (head fields)))
+                    (bml-hati-init-stmts owner (tail fields)))
+                (bml-hati-init-stmts owner (tail fields)))))
+
+    (defn bml-hati-fields-by-member (fields)
+        (if (nil? fields)
+            (empty)
+            (cons
+                (list
+                    (bml-hati-field-entry-name (head fields))
+                    (bml-hati-field-entry-type (head fields))
+                    (bml-hati-field-entry-init (head fields))
+                    (bml-hati-field-entry-has-init? (head fields))
+                    true)
+                (bml-hati-fields-by-member (tail fields)))))
 
     (defn bml-hati-class-node-supers (node)
         (if (gt (len (node_children node)) 3)
@@ -14514,7 +14742,7 @@
             (reverse-list kept)
             (bml-hati-dedupe-shapes
                 (tail members)
-                (if (str_eq (bml-hati-member-kind (head members)) "ctor")
+                (if (bml-hati-hidden-kind? (bml-hati-member-kind (head members)))
                     kept
                     (if (nil? (bml-hati-first-shape kept (head members)))
                         (cons (head members) kept)
@@ -14609,7 +14837,7 @@
             (let stubs-built
                 (bml-hati-stubs-from plain (bml-hati-all-sigs plain) (nth ifaces-built 1) (empty)))
             (bml-hati-layout
-                (bml-hati-layout-classes plain)
+                (bml-hati-keyed-layout-classes plain)
                 ifaces
                 (nth stubs-built 0)
                 (if (bml-hati-stubs-need-trap? (nth stubs-built 0)) (nth stubs-built 1) -1)

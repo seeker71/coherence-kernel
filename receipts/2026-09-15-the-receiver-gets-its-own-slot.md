@@ -259,13 +259,58 @@ unit `bml-source-unread-import-cut.bml`), `bml-class-import-scope-main.bml` (`ca
 `bml-class-import-const.bml` (42, with `bml-class-import-const-lib.bml`) and
 `bml-call-result-generic.bml` (1). The host-record witness lives in the class-dispatch proof.
 
+## After new, a field and a call with no arguments read
+
+The reader's member tail after `new` took only `.member(args)`, so `new E().a` stopped the statement
+and the unit read `source/unread`. The tail now also takes `.field` as a read of the value before it
+(`__hati_get`, lowered as the field read a named receiver gets) and keeps stepping, so
+`new E().p.v` reads a field of a field. `.m()` was already an argument list with nothing in it.
+
+Witnessed on fkwu (fixture `bml-class-member-tail.bml`, 38): `new E().a` 5, `new E().M()` 3,
+`new E().Twice(5)` 10, `new E().p.v` 20. A tree of HEAD read `BML-HATI-UNSUPPORTED source/unread`.
+
+## A field name a base and a delegate both declare keeps two slots
+
+Each field entry in the layout now carries its record key: its name, unless another class that can
+share an object with its class (one depth-first chain holds both) declares the same name; then each
+keeps `Class.name` (`bml-hati-keyed-layout-classes`). A read or a set finds its key through the
+receiver's static type: the first class of that type's chain that declares the name, the order a
+method resolves in (`bml-hati-field-key`). A's code reads A's `n`, D's code reads D's, `e.n` from
+outside reaches A's, and a D view of the same object reads D's. A name only one class declares keeps
+its bare key, so a host record and every record before read as they did.
+
+Witnessed on fkwu (fixture `bml-class-delegate-slots.bml`, 42 = 1 + 20 + 1 + 20). A tree of HEAD
+read 80: one shared slot, every read 20.
+
+## A field initializer reads this and the fields before it
+
+A class whose initializers are not all literals gets one more member, its init (`<init>`): a body
+that sets each initialized field in declaration order and answers `this`, lowered like any member in
+its class's own unit, with `this` and every field bound. `new` builds the record with the literal
+initializers and 0 for the rest, runs each class's init over it, base first, then the constructor.
+A class whose initializers are all literals builds as it did.
+
+Witnessed on fkwu (fixture `bml-class-init-this.bml`, 142): a base's literal `k` (2), `a = k + 2`
+(4), `b = a + 3` (7), `c = this.Twice(b)` (14), `d = this.c + 1` (15), then a constructor that adds
+100 to `d`. `bml-class-field-init.bml` still reads 56, now through its init member. A tree of HEAD
+read `BML-HATI-UNSUPPORTED name/unbound,call/unbound,field/no-receiver`.
+
+## Both lowerings read one layout
+
+Partway through this work the native run step moved: `bml-run-unit-value` left `bml.fk` for
+`form-stdlib/bml/bml-form-lower.bml` (9d760e988), so the live door now runs the fkwu lowering. The
+three answers live where both lowerings read them: the member tail's node, the field entry's key,
+the class's init member. The fkwu lowering took three seams (a `__hati_get` arm, its field read and
+set asking `bml-hati-recv-field-key`, `new` running `bml-hati-init-fns` over the record), and the
+table lowering in `bml.fk` took the same three. Through the table lowering the three fixtures and
+`bml-class-field-init.bml` read 38, 42, 142 and 56.
+
 ## Still open, with the reason
 
-- A field read straight off a call or a `new` (`new E().a`) is not read: the reader's member tail
-  takes only `.member(args)`. Writing the delegation fixture found it.
-- A delegate's fields ride in the delegating record, not in a separate delegate object; a field
-  name two lines both declare reads one slot.
-- A field initializer reads the unit's names, not `this` or another field.
+- A field set straight off a `new` or a call (`new E().a = 5;`) is not read: the member-assign
+  reader starts only at `this` or a name.
+- A field or member straight off a named call (`e.Get().a`, `f().a`) is not read: the member tail
+  follows only `new`.
 
 ## For the lead
 
@@ -315,5 +360,16 @@ unit runs.
 
 Frontier word, 0 hits in the tree: **readrun**, the line between reading a source and running it: a
 source read only to answer a question stays quiet, and the one that runs says where it stopped.
+
+Fourth movement. Most surprising: the door moved under the work. Partway through, the native run step
+left `bml.fk` for the fkwu lowering, and the lowering I was editing was no longer the one the door
+runs. Discomfort to gold: the pull was to close the gaps in my own file and leave the other lowering
+to its next rung, or to reach into its class section and rewrite it. The gold was to let the layout
+carry each answer: a field entry carries its key, a class carries its init member. The fkwu lowering
+took three small seams, the table lowering the same three, and both read one slot.
+
+Frontier word, 0 hits in the tree: **keyride**, a key that rides the entry the producer already hands
+every consumer, so no consumer works out where a thing lives. Its question: where else does each
+reader recompute what the one who built the entry could carry once?
 
 — Claude (Opus 5), as Sema, worktree agent-a60550cd21b84ef52
