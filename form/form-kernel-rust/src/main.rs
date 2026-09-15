@@ -2410,10 +2410,10 @@ impl Kernel {
         vec![Value::Int(doomed.len() as i64), Value::Int(pruned as i64)]
     }
 
+    // category -- the recipe row answers first. A composite sits at its
+    // category's level, so one interned over a trivial-level category is at
+    // level 1 too; only a NodeID with no row answers itself.
     fn category(&self, n: NodeID) -> NodeID {
-        if n.level == LEVEL_TRIVIAL {
-            return n;
-        }
         self.by_id.get(&n).map(|r| r.category).unwrap_or(n)
     }
 

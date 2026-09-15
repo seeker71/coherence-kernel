@@ -1123,8 +1123,10 @@ export class Kernel {
     ];
   }
 
+  // category — the recipe row answers first. A composite sits at its
+  // category's level, so one interned over a trivial-level category is at
+  // level 1 too; only a NodeID with no row answers itself.
   category(n: NodeID): NodeID {
-    if (n.level === Level.TRIVIAL) return n;
     const r = this.byID.get(nodeKey(n));
     return r ? r.category : n;
   }
@@ -5297,11 +5299,12 @@ function walkBlock(
   // of this do only. The scope opens at the first binding form, so a do that
   // binds nothing costs no frame. A unit's top-level do reads flat (walkUnit).
   const last = kids.length - 1;
+  const kinds = doKinds(k, kids);
   let scope = frame;
   let result: Value = { kind: "null" };
   for (let i = 0; i <= last; i++) {
     const c = kids[i]!;
-    const kind = blockKind(k, c);
+    const kind = kinds[i]!;
     if (kind === BLOCK_KIND_LET && i < last) {
       if (scope === frame) scope = new Frame(frame);
       result = bindLet(k, c, scope);
@@ -5326,6 +5329,20 @@ function blockKind(k: Kernel, n: NodeID): number {
     return cat.inst === RBlock.LET ? BLOCK_KIND_LET : BLOCK_KIND_DO;
   }
   return cat.type === RBasic.FNDEF ? BLOCK_KIND_DEFN : 0;
+}
+
+// doKinds — the binding kind of each form of a do, read once per do recipe:
+// the children array a recipe row holds is the same array on every walk.
+const DO_KINDS = new WeakMap<readonly NodeID[], Uint8Array>();
+
+function doKinds(k: Kernel, kids: readonly NodeID[]): Uint8Array {
+  let kinds = DO_KINDS.get(kids);
+  if (kinds === undefined) {
+    kinds = new Uint8Array(kids.length);
+    for (let i = 0; i < kids.length; i++) kinds[i] = blockKind(k, kids[i]!);
+    DO_KINDS.set(kids, kinds);
+  }
+  return kinds;
 }
 
 function letValue(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
