@@ -30,8 +30,7 @@ kernels carry the load-bearing ones):
   `str_concat`, `str_eq`, `int_to_str`, `str_to_int`, `ord`, `list`,
   `cons`, `head`, `tail`, `len`, `nth`, `empty`, `read_file`, substrate-
   write surface (`make_nodeid`, `intern_trivial_int`, `intern_trivial_string`,
-  `intern_node`, `node_category`, `node_children`, `node_value`,
-  `walk_recipe`), `trace`
+  `intern_node`, `node_category`, `node_children`, `node_value`), `trace`
 
 Native compilation runs through `./fkwu path.fk` or `./fkwu path.bml` from the
 repository root. See [native JIT routing](../../docs/native-jit-routing.md).

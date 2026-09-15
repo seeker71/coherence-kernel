@@ -31,7 +31,7 @@ The full present map is
 
 ```sh
 cd form
-./validate.sh form-stdlib/tests/form-action-bmf-rulebook.fk            # three-way agreed, 2026-09-04
+../fkwu form-stdlib/tests/form-action-bmf-rulebook.fk                  # fkwu, Go, Rust, TS agree, 2026-09-15
 ./validate.sh form-stdlib/tests/source-compiler-grammar-bridge-band.fk  # three-way agreed, 2026-09-04
 ```
 
@@ -39,8 +39,10 @@ A band is named alone: every kernel walks its `; preludes:` closure itself, so a
 hand-typed file list is not only unnecessary but wrong when it omits a prelude
 (the rulebook band's closure includes `json.fk`, `cache.fk`, and
 `form-ontology-bp.fk`; without them every arm dies on `FORM-CATEGORY-TABLE`).
-Neither band is registered in `fourth-arm-bands.txt`, so these runs speak for
-three kernels. The `--binary` lane refuses the rulebook workload today — all three
+Neither band is registered in `fourth-arm-bands.txt`: the rulebook's fkwu reading
+matches Go, Rust, and TS run directly, and the bridge run speaks for three
+kernels. The rulebook checks the Form text its rewritten program emits through
+`fsc-source-emit-module`, the text fkwu compiles. The `--binary` lane refuses the rulebook workload today — all three
 kernels answer `form binary: maximum node depth exceeded` — so that artifact
 proof is owed, not claimed.
 

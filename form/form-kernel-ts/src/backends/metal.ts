@@ -28,7 +28,7 @@
 //   }
 //
 // What the backend does NOT do yet:
-//   - Reflection over substrate (intern_node, walk_recipe, ...) — those are
+//   - Reflection over substrate (intern_node, node_children, ...) — those are
 //     host-side concepts; MSL is a static-shader language.
 //   - General FNCALL into native primitives — only inlinable arithmetic gets
 //     a direct MSL emission. Anything else surfaces as a `/* unsupported */`

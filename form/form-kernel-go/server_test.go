@@ -384,7 +384,7 @@ func TestSubstrateFormCompilerRouteRunsBML(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"http://native.example.test/api/substrate/form",
-		strings.NewReader(`{"expression":"add(20, 22);","mode":"run","grammar":"form.bml"}`),
+		strings.NewReader(`{"expression":"add(20, 22);","mode":"source","grammar":"form.bml"}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -402,7 +402,7 @@ func TestSubstrateFormCompilerRouteRunsBML(t *testing.T) {
 	if got := noHeaderRes.Header.Get("X-Form-Router"); got != "native-kernel-go" {
 		t.Fatalf("ordinary substrate form router = %q, want native-kernel-go", got)
 	}
-	for _, want := range []string{`"kind":"value"`, `"value_kind":"int"`, `"value":42`, `"handler":"api_substrate_form"`} {
+	for _, want := range []string{`"kind":"source"`, `"source":"(add 20 22)`, `"handler":"api_substrate_form"`} {
 		if !strings.Contains(string(noHeaderBody), want) {
 			t.Fatalf("ordinary substrate form body missing %s: %s", want, string(noHeaderBody))
 		}
@@ -411,7 +411,7 @@ func TestSubstrateFormCompilerRouteRunsBML(t *testing.T) {
 	req = httptest.NewRequest(
 		http.MethodPost,
 		"http://native.example.test/api/substrate/form",
-		strings.NewReader(`{"expression":"add(20, 22);","mode":"run","grammar":"form.bml"}`),
+		strings.NewReader(`{"expression":"add(20, 22);","mode":"source","grammar":"form.bml"}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -430,7 +430,7 @@ func TestSubstrateFormCompilerRouteRunsBML(t *testing.T) {
 	if got := res.Header.Get("X-Form-Router"); got != "native-kernel-go" {
 		t.Fatalf("compiler route router = %q, want native-kernel-go", got)
 	}
-	for _, want := range []string{`"kind":"value"`, `"value_kind":"int"`, `"value":42`, `"handler":"api_substrate_form"`} {
+	for _, want := range []string{`"kind":"source"`, `"source":"(add 20 22)`, `"handler":"api_substrate_form"`} {
 		if !strings.Contains(string(gotBody), want) {
 			t.Fatalf("compiler route body missing %s: %s", want, string(gotBody))
 		}
@@ -439,7 +439,7 @@ func TestSubstrateFormCompilerRouteRunsBML(t *testing.T) {
 	unsupportedReq := httptest.NewRequest(
 		http.MethodPost,
 		"http://native.example.test/api/substrate/form",
-		strings.NewReader(`{"expression":"add(20, 22);","mode":"run","compiler":"python"}`),
+		strings.NewReader(`{"expression":"add(20, 22);","mode":"source","compiler":"python"}`),
 	)
 	unsupportedReq.Header.Set("Content-Type", "application/json")
 	unsupportedReq.Header.Set("Accept", "application/json")

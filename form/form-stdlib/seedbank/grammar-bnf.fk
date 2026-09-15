@@ -52,13 +52,13 @@
 ; to `bnf/...` in a follow-on breath once engine.fk migrates in lockstep).
 ;
 ; Output (engine.fk-compatible):
-;   token-config — same shape engine.fk's tokenize-with-config consumes
+;   token-config — the shape tokenize-with-config (Part 10a) consumes
 ;   parse-rules — list of (rule-name pattern action-fn) tuples; the
 ;     action-fn is looked up by name in an emitter registry the caller
 ;     supplies, so the grammar file stays pure data while the emit
 ;     side stays substrate-resident behavior.
 ;
-; Load order: core.fk → engine.fk → grammar-bnf.fk
+; preludes: form-stdlib/engine.fk form-stdlib/seedbank/blueprint-symbol-sections.fk
 ;
 ; Naming discipline: all line/string helpers carry a `bnf-` prefix to
 ; avoid colliding with line-grammar.fk's exports (which differ in arity
@@ -674,8 +674,8 @@
     ;; rule references *inside* patterns (JSON's `value` references
     ;; `object` references `pair` references `value` again). This engine
     ;; threads the rules table through match so the "rule" pattern arm
-    ;; can recurse. Re-uses engine.fk's cap-* / mk-match / mk-fail /
-    ;; match-literal / capture-value / tokenize-with-config / wrap-program.
+    ;; can recurse. Re-uses engine.fk's cap-* / mk-match / mk-fail; the
+    ;; token stream and the literal match it feeds live in Part 10a.
 
     (defn bnf-find-rule (rules name)
         (if (nil? rules) (empty)
@@ -887,6 +887,151 @@
                             (let recipe (action (match-caps m)))
                             (mk-match (cap-set (cap-empty 0) "_result" recipe)
                                       (match-rest m))))))))
+
+    ;; ──────────────────────────────────────────────────────────────────
+    ;; Part 10a — token stream + literal match
+    ;; ──────────────────────────────────────────────────────────────────
+    ;; text + token-config → a list of (kind value) tokens ending with
+    ;; (EOF ""). bnf-finalize-token-config writes every key below; a
+    ;; hand-written config may carry any subset:
+    ;;   whitespace     codepoints skipped between tokens (32 9 10 13)
+    ;;   line-comment   prefix that skips to end of line   ("" = none)
+    ;;   string-quotes  quote codepoints; a string runs to the same
+    ;;                  quote, and `\` keeps the next char raw
+    ;;   digit-kind     kind of a digit run                (INT)
+    ;;   ident-kind     kind of [A-Za-z_][A-Za-z0-9_]*     (IDENT)
+    ;;   string-kind    kind of a quoted string            (STRING)
+    ;;   keywords       (text kind) pairs: a word with that text takes
+    ;;                  that kind
+    ;;   operators      (text kind) pairs, first match wins; every
+    ;;                  grammar here lists `==` before `=`
+    ;; A character no entry claims becomes (ERROR <char>), so a grammar
+    ;; fails on it by name.
+
+    (defn bnf-cfg (cfg key missing)
+        (if (cap-has? cfg key) (cap-get cfg key) missing))
+
+    (defn bnf-cp-in? (cp cps)
+        (if (nil? cps) false
+            (if (eq cp (head cps)) true
+                (bnf-cp-in? cp (tail cps)))))
+
+    (defn bnf-at? (s i text)
+        (if (gt (add i (str_len text)) (str_len s)) false
+            (str_eq (bnf-substr s i (add i (str_len text))) text)))
+
+    (defn bnf-scan-digits (s i n)
+        (if (ge i n) i
+            (if (bnf-is-digit-cp (ord (char_at s i)))
+                (bnf-scan-digits s (add i 1) n)
+                i)))
+
+    (defn bnf-scan-word (s i n)
+        (if (ge i n) i
+            (do
+                (let cp (ord (char_at s i)))
+                (if (or (bnf-is-alpha-cp cp) (bnf-is-digit-cp cp))
+                    (bnf-scan-word s (add i 1) n)
+                    i))))
+
+    ;; i is just past the opening quote q; returns the closing quote's
+    ;; index (or n when the string runs off the end).
+    (defn bnf-scan-quoted (s i n q)
+        (if (ge i n) n
+            (do
+                (let cp (ord (char_at s i)))
+                (if (eq cp q) i
+                    (if (eq cp 92)
+                        (bnf-scan-quoted s (add i 2) n q)
+                        (bnf-scan-quoted s (add i 1) n q))))))
+
+    (defn bnf-skip-line (s i n)
+        (if (ge i n) n
+            (if (eq (ord (char_at s i)) 10) i
+                (bnf-skip-line s (add i 1) n))))
+
+    (defn bnf-pair-find (pairs text)
+        (if (nil? pairs) (empty)
+            (if (str_eq (head (head pairs)) text) (head pairs)
+                (bnf-pair-find (tail pairs) text))))
+
+    (defn bnf-op-at (s i ops)
+        (if (nil? ops) (empty)
+            (if (bnf-at? s i (head (head ops))) (head ops)
+                (bnf-op-at s i (tail ops)))))
+
+    (defn bnf-word-kind (word cfg)
+        (do
+            (let kw (bnf-pair-find (bnf-cfg cfg "keywords" (empty)) word))
+            (if (nil? kw) (bnf-cfg cfg "ident-kind" "IDENT") (head (tail kw)))))
+
+    (defn bnf-tok-loop (s i n cfg acc)
+        (if (ge i n)
+            (bnf-reverse (cons (list "EOF" "") acc))
+            (do
+                (let c (char_at s i))
+                (let cp (ord c))
+                (let lc (bnf-cfg cfg "line-comment" ""))
+                (if (bnf-cp-in? cp (bnf-cfg cfg "whitespace" (list 32 9 10 13)))
+                    (bnf-tok-loop s (add i 1) n cfg acc)
+                (if (if (gt (str_len lc) 0) (bnf-at? s i lc) false)
+                    (bnf-tok-loop s (bnf-skip-line s i n) n cfg acc)
+                (if (bnf-cp-in? cp (bnf-cfg cfg "string-quotes" (empty)))
+                    (do
+                        (let close (bnf-scan-quoted s (add i 1) n cp))
+                        (bnf-tok-loop s (add close 1) n cfg
+                                      (cons (list (bnf-cfg cfg "string-kind" "STRING")
+                                                  (bnf-substr s (add i 1) close))
+                                            acc)))
+                (if (bnf-is-digit-cp cp)
+                    (do
+                        (let end (bnf-scan-digits s i n))
+                        (bnf-tok-loop s end n cfg
+                                      (cons (list (bnf-cfg cfg "digit-kind" "INT")
+                                                  (bnf-substr s i end))
+                                            acc)))
+                (if (bnf-is-alpha-cp cp)
+                    (do
+                        (let end (bnf-scan-word s i n))
+                        (let word (bnf-substr s i end))
+                        (bnf-tok-loop s end n cfg
+                                      (cons (list (bnf-word-kind word cfg) word) acc)))
+                    (do
+                        (let op (bnf-op-at s i (bnf-cfg cfg "operators" (empty))))
+                        (if (nil? op)
+                            (bnf-tok-loop s (add i 1) n cfg
+                                          (cons (list "ERROR" c) acc))
+                            (bnf-tok-loop s (add i (str_len (head op))) n cfg
+                                          (cons (list (head (tail op)) (head op)) acc))))))))))))
+
+    (defn tokenize-with-config (text cfg)
+        (bnf-tok-loop text 0 (str_len text) cfg (empty)))
+
+    ;; (literal KIND VALUE) consumes one token of KIND, and of VALUE
+    ;; when VALUE is not "".
+    (defn match-literal (p stream)
+        (if (nil? stream) (mk-fail "no token left")
+            (do
+                (let t (head stream))
+                (let kind (head (tail p)))
+                (let want (head (tail (tail p))))
+                (if (str_eq (head t) kind)
+                    (if (if (str_eq want "") true (str_eq (head (tail t)) want))
+                        (mk-match (cap-empty 0) (tail stream))
+                        (mk-fail (str_concat "expected " want)))
+                    (mk-fail (str_concat "expected " (str_concat kind (str_concat ", read " (head t)))))))))
+
+    ;; The text a capture binds: the value of the token the match began
+    ;; on. Every capture this reader builds wraps one token literal.
+    (defn capture-value (_m stream)
+        (if (nil? stream) "" (head (tail (head stream)))))
+
+    (defn grammar-tokens (grammar) (cap-get grammar "tokens"))
+    (defn grammar-rules (grammar) (cap-get grammar "rules"))
+
+    ;; The recipe a parse returns when no rule matched: the sequence
+    ;; Blueprint over no statements.
+    (defn wrap-program (stmts) (intern_node BLOCK-SEQ stmts))
 
     ;; bnf-parse: text + grammar → root Recipe.
     ;; Convention: the entry rule is the first rule in the rules list.
