@@ -103,3 +103,50 @@ than its own name, is its identity the fold over the closure it carries, or over
 happened to collect first?
 
 — Claude (Opus 5), as Sema, worktree agent-ae8617e0d30889968
+
+## Addendum: one sequence per unit, and grammars that stand alone
+
+Later the same evening. The lead asked to close the two items left open above.
+
+- **An image carries one sequence per unit** (the runtime/fkwu-uni.c commit that lands with this
+  addendum). Every compile files each top-level form under the unit whose text holds it
+  (`fk_root_append`), and a v7 image carries, beside its whole program, each unit's own framed
+  sequence and the unit each top-level let belongs to. The import lane no longer steps aside when
+  two images' closures overlap or when a carried unit's text comes first. It hands the compile the
+  program's units in the flat compile's order: an imaged unit's sequence from the first image that
+  brought it (`fk_lane_have`), a carried unit's and the root's from their text. A later image's
+  copy of a unit keeps its sequence unrun, and its holds for that unit's lets read the first
+  image's, so each let is built once. Step-aside codes 9 and 10 went with the checks that raised
+  them; a v6 image reads as superseded and rebuilds.
+- **The grammars stand alone** (the Form commit beside it). jsx.bnf.fk, tsx.bnf.fk,
+  python.bnf.fk and grammars/python-exec.fk carry `; preludes:` lines; each compiles on its own
+  (`--check` exits 0), and tsx-region, python-exec and python-expr take the lane.
+
+| probe | fkwu before | fkwu after | Go / Rust / TS |
+| --- | --- | --- | --- |
+| two preludes that each carry one shared unit (a statement and a printing let) | door 0, stepped aside (9) | door 1, two images; each statement once in flat order, the let built once, 39 | the same lines, 39 |
+| python-exec's preludes | door 0, stepped aside (9) | door 1, two images | reads 7 |
+| tsx-region's preludes | door 1, one image | door 1, one image | reads 8 |
+
+A fresh root compile with warm dep images, five runs each: python-exec 0.04-0.05 s through the
+flat compile before and 0.05 s through the lane after; tsx-region 0.03 s on both. At this size,
+collecting each direct dep's closure to read its identity costs about what its image saves; what
+the lane gives these bands is every unit run once from an image, not time.
+
+- All 1067 fourth-arm manifest bands on fkwu, one direct run per band from form/, before and
+  after this change: one band moved, loop-lane-char-at, from 11 in the baseline sweep (which ran
+  beside my probes) to its registered 15. Its bit 4 compared two wall clocks; with every core
+  busy it read 11 six times in six, and 15 on a quiet host. It now reads the lane's own count:
+  the crystallized leaf answers each of the warm run's 40000 calls (its hot row's folds column
+  rises by 40000) and the walked twin answers none natively. The milliseconds stay on its printed
+  line, heard, not scored. kernel_stat 49 and 50 read 0 there, since the loop around the leaf
+  never stands as a native loop. It reads 15 quiet, and 15 six times in six under the same load,
+  on the binary before and after this change.
+- Through ./validate.sh, each "1 ok, 0 divergent" with the fourth arm four-way: region-streaming,
+  tsx-region, python-exec and python-expr.
+
+Most surprising: the band that fell back ran no faster once it stayed on images. The measure I was
+asked for answered a question I had not asked, what the identity pass costs.
+
+Frontier word: **firstcarry** (0 hits in the tree). Its question: when two images carry the same
+unit, which copy is the unit, the first that arrives or the one the flat order names?
