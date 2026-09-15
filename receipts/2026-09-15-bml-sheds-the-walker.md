@@ -185,6 +185,47 @@ answers 112. A cut that committed nothing would read 15, and a commit that
 leaked past its choose would stop the program at its standing value. The
 door reads 120 ok of 120.
 
+## Addendum: the lane's breadth
+
+Each reading is the lane's own counters (`kernel_stat` 49 standing loops, 50
+native passes), read in the child, before and after, with a fixture the door
+reads ok:
+
+| gap | fixture | before | after |
+|---|---|---|---|
+| a call in a loop | `bml-loop-quiet-call.bml` | 0 loops, 0 native | 1 loop, 1,977 native |
+| nested loops, nothing crossing | `bml-loop-nested.bml` | inner compiled, outer read the mode each pass | inner compiled (1 loop, 88,980 native), outer mode-free |
+| two names carried out | `bml-loop-two-carried.bml` | (never witnessed) | 1 loop, 3,977 native |
+| a loop in a standing body | `bml-loop-standing.bml` | 0 loops (8 slots, over the lane's 6) | 1 loop, 3,977 native (6 slots) |
+| a return or throw leaving a loop | `bml-loop-crossing.bml` | 0 loops, 0 native | 2 loops, 12,963 native |
+
+- **Quiet callees.** A method is quiet when it holds no throw and no fail,
+  and every call it makes reaches only quiet methods; a return never leaves
+  its callee. A loop whose calls are all quiet is mode-free, and the lane
+  takes it through its call arm.
+- **Standing bodies.** A standing body asks FAILED only after a statement
+  that can fail. A statement that cannot fail stands on its own value, with
+  no copy let. `bml-choose-state.bml` lowers with 34 FAILED reads, against
+  45 before.
+- **Crossings.** A return or throw rides out of its loop in the loop's
+  answer, `(status value carried...)`. The mode is set once, after the loop.
+- **Two names carried out.** This needed no change to the runtime. The lane
+  already takes a list answer through the leaves that cons. I had written
+  that it wants one scalar, having read "every exit answers the one return
+  type" without running it. The run corrected that.
+- **The heat trigger stays at 1024.** Offering a loop on first entry compiled
+  `bml-control-flow.bml`'s two short loops for 14 native passes, and the best
+  run went from 6.61 to 7.44 ms. For 3,000 and a million passes it moved
+  0.03 and 0.09 ms.
+
+Still open:
+- A labeled break or continue from an inner loop to an outer one (Grid).
+- A switch, try or choose inside a loop body.
+- A class call inside a loop, which is not read for quietness yet.
+- The lane's own limits in runtime/fkwu-uni.c: at most 6 slots, no if
+  whose branches both lead into further ifs, and no record-typed frames.
+  The standing loop showed the slot limit declining a loop at 8 slots.
+
 ## Frontier word for the addendum
 
 **modefree** (0 hits in the tree before this addendum).
