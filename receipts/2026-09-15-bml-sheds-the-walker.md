@@ -155,6 +155,36 @@ The first two readings above are witnessed by run; the lane limits are read
 from fkwu's code; the rest are the lowering's own conditions, read in its
 code.
 
+## Addendum: cut on the fkwu path
+
+The thesis document itself is not in this tree, and no VM here runs BMA's
+`cut` op (bml.fk lowers `cut` to one; nothing executes it). The cut that does
+run is the grammar engine's (form/form-stdlib/engine.fk:2136-2187). It
+succeeds without consuming anything. A fail after it in the same sequence
+becomes fail-cut, and the enclosing choice stops trying further
+alternatives. The choice turns that back into a plain fail, so the cut's
+scope is its own choice. A fail before it still falls through.
+
+The fkwu lowering gives BML's `cut` that meaning:
+- A cut in a choose branch sets the run's commit cell.
+- A branch that fails with the cell set fails the whole choose: the journal
+  is undone and the entry names are kept, and the branches after it are
+  discarded.
+- Each choose saves the cell at entry, clears it for each branch, and
+  restores it when it answers, so a callee's own choose never commits its
+  caller.
+- A cut outside any choose commits nothing, and like the marks it answers
+  the value its body stands on.
+- bml.fk's refusal pass names `cut` as a need; this lowering meets it, so it
+  drops that one reason.
+
+`bml-choose-cut.bml` witnesses all four readings: a fail before the cut falls
+through (2), success past the cut (10), and a fail past the cut failing its
+choose without trying `x = 3`, caught by the caller's own choose (100). It
+answers 112. A cut that committed nothing would read 15, and a commit that
+leaked past its choose would stop the program at its standing value. The
+door reads 120 ok of 120.
+
 ## Frontier word for the addendum
 
 **modefree** (0 hits in the tree before this addendum).
