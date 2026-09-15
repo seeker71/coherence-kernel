@@ -132,13 +132,13 @@ form_hash16() {
 build_go() {
     if [[ ! -x "$GO_BIN" ]] || find "$GO_DIR" -name '*.go' -newer "$GO_BIN" -print -quit | grep -q .; then
         echo "  building go kernel..." >&2
-        (cd "$GO_DIR" && go build -o bin-go .)
+        (cd "$GO_DIR" && GOPROXY=off go build -o bin-go .)
     fi
 }
 build_rs() {
     if [[ ! -x "$RS_BIN" || "$RS_DIR/src/main.rs" -nt "$RS_BIN" || "$RS_DIR/src/bp_table.rs" -nt "$RS_BIN" ]]; then
         echo "  building rust kernel..." >&2
-        (cd "$RS_DIR" && cargo build --release --quiet)
+        (cd "$RS_DIR" && cargo build --release --offline --quiet)
     fi
 }
 

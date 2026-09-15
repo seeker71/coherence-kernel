@@ -27,7 +27,7 @@ GO_DIR="form-kernel-go"
 GO_BIN="$GO_DIR/bin-go"
 if [[ ! -x "$GO_BIN" ]]; then
     echo "  building Go emitter (bin-go)..." >&2
-    (cd "$GO_DIR" && go build -o bin-go .)
+    (cd "$GO_DIR" && GOPROXY=off go build -o bin-go .)
 fi
 
 # build_fourth + fourth_flatten_expr live in the validate.sh fourth leg.

@@ -9,7 +9,7 @@ GO_KERNEL="$FORM/form-kernel-go/bin-go"
 
 # Rebuild the proof sibling so ignored local binaries never author a fresh
 # table from stale source.
-(cd "$FORM/form-kernel-go" && go build -o bin-go .)
+(cd "$FORM/form-kernel-go" && GOPROXY=off go build -o bin-go .)
 
 cd "$FORM"
 # shellcheck source=scripts/fourth-arm.sh

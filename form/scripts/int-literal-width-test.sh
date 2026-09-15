@@ -31,8 +31,8 @@ GO_BIN="form-kernel-go/bin-go"
 RS_BIN="form-kernel-rust/target/release/form-kernel-rust"
 TS_MAIN="form-kernel-ts/src/main.ts"
 
-if [[ ! -x "$GO_BIN" ]]; then (cd form-kernel-go && go build -o bin-go .); fi
-if [[ ! -x "$RS_BIN" ]]; then (cd form-kernel-rust && cargo build --release --quiet); fi
+if [[ ! -x "$GO_BIN" ]]; then (cd form-kernel-go && GOPROXY=off go build -o bin-go .); fi
+if [[ ! -x "$RS_BIN" ]]; then (cd form-kernel-rust && cargo build --release --offline --quiet); fi
 
 run_ts() {
   local loader="$FORMDIR/form-kernel-ts/node_modules/tsx/dist/loader.mjs"
