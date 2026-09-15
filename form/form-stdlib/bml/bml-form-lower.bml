@@ -173,12 +173,147 @@ section [form.bml] {
   def bfk-call-args(cx, node, env, vm, arity) = if eq(arity, 0) then empty else if eq(arity, 1) then list(bfk-expr(cx, head(bml-call-args(node)), env, vm)) else bfk-exprs(cx, bml-call-args(node), env, vm);
   def bfk-fn-name(index) = str_concat("m", int_to_str(index));
 
+  // ── control ─────────────────────────────────────────────────────────────
+  // grammars/bml.fk's control lowering, over value names: a transfer sets
+  // the mode, the statements after one that may change it run while it is
+  // 0, a loop is one tail-recursive defn over the names in scope, and the
+  // epilogue turns RETURN into the function's value and hands THROW outward.
+  def bfk-mode-in(modes) = if nil?(modes) then "0" else bfk-if(bfk-mode-is(head(modes)), "1", bfk-mode-in(tail(modes)));
+  def bfk-mode-zero() = bfk-f2("eq", bfk-cell("m"), "0");
+
+  // a body that keeps the value it stands on writes it at each plain
+  // statement, and a failure that stopped the body answers it
+  def bfk-ctl-function(cx, nodes, env, vm, outk) {
+   let standing = bml-bnml-keeps-standing?(nodes, env);
+   let keys = if standing then bfk-with-key(outk, "__top") else outk;
+   let r = bfk-untuple(cx, bfk-ctl-stmts(cx, nodes, bml-ctl-env-standing(bml-ctl-env-active(env), standing), vm, keys, bml-ctl-ctx(empty), "0"), keys, vm);
+   let e = bfk-fresh(cx, "v");
+   bfk-do(append(bfk-r-items(r), list(bfk-let(e, bfk-epilogue(standing, bfk-r-vm(r))))), bfk-tuple(e, bfk-r-vm(r), outk));
+  }
+  def bfk-with-key(keys, key) = if fsc-string-list-contains?(keys, key) then keys else append(keys, list(key));
+  def bfk-epilogue(standing, vm) = if standing then bfk-if(bfk-unfailed(), bfk-epi(), bfk-do(list(bfk-set-mode(0)), bfk-top(vm))) else bfk-epi();
+  def bfk-epi() = bfk-if(bfk-mode-is(bml-ctl-return-mode(0)), bfk-do(list(bfk-set-mode(0)), bfk-cell("v")), bfk-if(bfk-mode-is(bml-ctl-throw-mode(0)), bfk-cell("t"), "0"));
+
+  // a statement that cannot change the mode needs no guard after it: it holds
+  // no transfer, no call that can carry one back, and no fail
+  def bfk-quiet?(node) = if bml-bnml-holds-user-call?(node) then false else if bml-bnml-fails-inside?(node) then false else not(bfk-holds-transfer?(node));
+  def bfk-holds-transfer?(node) = if eq(len(node_children(node)), 0) then false else if bml-ctl-effect-node?(node) then true else if node_eq(node_category(node), BML-AST-METHOD) then false else bfk-any-transfer?(node_children(node));
+  def bfk-any-transfer?(nodes) = if nil?(nodes) then false else if bfk-holds-transfer?(head(nodes)) then true else bfk-any-transfer?(tail(nodes));
+
+  // statements of a control body; a guarded-out rest answers 0
+  def bfk-ctl-stmts(cx, nodes, env, vm, outk, ctx, val) = if nil?(nodes) then bfk-tuple(val, vm, outk) else bfk-ctl-then(cx, nodes, env, outk, ctx, bfk-ctl-stmt(cx, head(nodes), env, vm, ctx));
+  def bfk-ctl-then(cx, nodes, env, outk, ctx, r) {
+   let rest = bfk-ctl-stmts(cx, tail(nodes), bml-ctl-env-after(head(nodes), env), bfk-r-vm(r), outk, ctx, bfk-r-val(r));
+   let stop = bfk-tuple("0", bfk-r-vm(r), outk);
+   let stops = bml-bnml-may-stop?(head(nodes), env);
+   let held = if stops then bfk-if(bfk-unfailed(), rest, stop) else rest;
+   bfk-do(bfk-r-items(r), if nil?(tail(nodes)) then rest else if and(bfk-quiet?(head(nodes)), not(stops)) then rest else bfk-if(bfk-mode-ok(), held, stop));
+  }
+  def bfk-ctl-block(cx, node, env, vm, outk, ctx) = bfk-ctl-stmts(cx, if node_eq(node_category(node), BML-AST-BLOCK) then node_children(node) else list(node), env, vm, outk, ctx, "0");
+
+  // a parameter the statement assigns becomes a frame local just before it
+  def bfk-ctl-stmt(cx, node, env, vm, ctx) = bfk-ctl-promote(cx, bml-ctl-promoted(node, env), node, env, vm, ctx, empty);
+  def bfk-ctl-promote(cx, promos, node, env, vm, ctx, items) = if nil?(promos) then bfk-r-prefix(items, bfk-ctl-stmt-in(cx, node, env, vm, ctx)) else bfk-ctl-promote-one(cx, promos, node, env, ctx, items, bfk-ctl-stmt-in(cx, head(promos), env, vm, ctx));
+  def bfk-ctl-promote-one(cx, promos, node, env, ctx, items, r) = bfk-ctl-promote(cx, tail(promos), node, bml-ctl-env-after(head(promos), env), bfk-r-vm(r), ctx, append(items, bfk-r-items(r)));
+  def bfk-r-prefix(items, r) = bfk-r(append(items, bfk-r-items(r)), bfk-r-vm(r), bfk-r-val(r));
+
+  def bfk-ctl-stmt-in(cx, node, env, vm, ctx) = if nil?(node_children(node)) then bfk-ctl-standing(cx, node, env, vm) else bfk-ctl-shape(cx, node, env, vm, ctx, bfk-edge(node, env));
+  def bfk-edge(node, env) = if bml-ctl-statement-node?(node) then bml-bnml-edge-check("control", node, env) else 0;
+  def bfk-ctl-shape(cx, node, env, vm, ctx, _heard) {
+   let cat = node_category(node);
+   if node_eq(cat, BML-AST-BLOCK) then bfk-ctl-compound(cx, node, env, vm, ctx) else if node_eq(cat, BML-AST-IF) then bfk-ctl-if(cx, node, env, vm, ctx) else if bml-ctl-while-node?(node) then bfk-ctl-loop(cx, node, bml-ctl-while-parts(node), env, vm, ctx) else if node_eq(cat, BML-AST-FOR) then bfk-ctl-loop(cx, node, bml-ctl-for-parts(node), env, vm, ctx) else if bml-ctl-switch-node?(node) then bfk-ctl-switch(cx, node, env, vm, ctx) else if bml-ctl-effect-node?(node) then bfk-ctl-effect(cx, bml-ctl-node-effect(node), env, vm, ctx) else if node_eq(cat, BML-AST-TRY) then bfk-ctl-try(cx, node, env, vm, ctx) else if node_eq(cat, BML-AST-WITH) then bfk-ctl-compound(cx, node, env, vm, ctx) else if node_eq(cat, BML-AST-METHOD) then bfk-value-stmt(cx, bfk-need(cx, "control/nested-method"), vm) else bfk-ctl-standing(cx, node, env, vm);
+  }
+  def bfk-ctl-standing(cx, node, env, vm) = bfk-stmt(cx, if bml-ctl-standing?(env) then bml-bnml-top-rewrite(node) else node, env, vm);
+
+  // a block (or a with) runs its statements; what it assigns rides out
+  def bfk-ctl-compound(cx, node, env, vm, ctx) {
+   let outk = bfk-out-keys(bml-ctl-env-after(node, env), vm);
+   bfk-untuple(cx, bfk-ctl-stmts(cx, node_children(node), env, vm, outk, ctx, "0"), outk, vm);
+  }
+
+  // BML's truth: a condition holds when its value is not 0
+  def bfk-cond(cx, node, env, vm) = if bfk-compare?(node) then bfk-reserved(cx, node, env, vm) else bfk-f2("ne", bfk-expr(cx, node, env, vm), "0");
+  def bfk-compare?(node) = if bml-ctl-op-node?(node) then fsc-string-list-contains?(list("op-lt", "op-le", "op-gt", "op-ge"), bml-ctl-op-rule-of(node)) else false;
+
+  def bfk-ctl-if(cx, node, env, vm, ctx) {
+   let outk = bfk-out-keys(bml-ctl-env-after(node, env), vm);
+   let test = bfk-cond(cx, bml-node-child(node, 0), env, vm);
+   let yes = bfk-ctl-block(cx, bml-node-child(node, 1), env, vm, outk, ctx);
+   let no = bfk-ctl-block(cx, bml-ctl-child-or-block(node, 2), env, vm, outk, ctx);
+   let hold = not(bfk-quiet?(bml-node-child(node, 0)));
+   bfk-untuple(cx, bfk-if(test, bfk-ctl-guard(hold, yes, vm, outk), bfk-ctl-guard(hold, no, vm, outk)), outk, vm);
+  }
+  def bfk-ctl-guard(hold, text, vm, outk) = if hold then bfk-if(bfk-mode-ok(), text, bfk-tuple("0", vm, outk)) else text;
+
+  // init; one defn over every name in scope: while the test holds, the body,
+  // then the step on the modes a loop takes its next pass after; exit
+  // consumes this target's own break
+  def bfk-local-keys(keys) = if nil?(keys) then empty else if eq(str_find(head(keys), "@", 0), 0) then bfk-local-keys(tail(keys)) else cons(head(keys), bfk-local-keys(tail(keys)));
+  def bfk-fresh-names(cx, keys) = if nil?(keys) then empty else cons(bfk-fresh(cx, "p"), bfk-fresh-names(cx, tail(keys)));
+  def bfk-vm-bind(vm, keys, names) = if nil?(keys) then vm else bfk-vm-bind(bfk-vm-put(vm, head(keys), head(names)), tail(keys), tail(names));
+  def bfk-ctl-loop(cx, node, parts, env, vm, ctx) {
+   let id = bml-ctl-next-id(ctx);
+   let init = bfk-ctl-stmt(cx, bml-ctl-loop-init(parts), env, vm, ctx);
+   let inner-env = bml-ctl-env-after(bml-ctl-loop-init(parts), env);
+   let inner-ctx = bml-ctl-ctx-push(ctx, "loop", bml-ctl-loop-label(parts), id);
+   let keys = bfk-vm-keys(bfk-r-vm(init), empty);
+   let names = bfk-fresh-names(cx, keys);
+   let w = bfk-fresh(cx, "w");
+   let vm-in = bfk-vm-bind(bfk-r-vm(init), keys, names);
+   let stops = bml-bnml-may-stop?(bml-ctl-loop-body(parts), env);
+   let test = bfk-cond(cx, bml-ctl-loop-test(parts), inner-env, vm-in);
+   let body = bfk-untuple(cx, bfk-ctl-block(cx, bml-ctl-loop-body(parts), inner-env, vm-in, bfk-local-keys(keys), inner-ctx), bfk-local-keys(keys), vm-in);
+   let step = bfk-ctl-stmt(cx, bml-ctl-loop-update(parts), inner-env, bfk-r-vm(body), inner-ctx);
+   let exit = bfk-form(cons("list", cons("0", names)));
+   let again = bfk-form(cons(w, bfk-vm-vars(bfk-r-vm(step), keys)));
+   let cond = bfk-unfailed-guard(stops, bfk-if(bfk-mode-zero(), bfk-if(test, bfk-mode-zero(), "0"), "0"));
+   let next = bfk-unfailed-guard(stops, bfk-mode-in(bml-ctl-running-modes(id)));
+   let pass = bfk-do(bfk-r-items(body), bfk-if(next, bfk-do(cons(bfk-set-mode(0), bfk-r-items(step)), again), bfk-form(cons("list", cons("0", bfk-vm-vars(bfk-r-vm(body), keys))))));
+   bfk-add-def(cx, bfk-form(list("defn", w, bfk-form(names), bfk-if(cond, pass, exit))));
+   let after = bfk-untuple(cx, bfk-form(cons(w, bfk-vm-vars(bfk-r-vm(init), keys))), keys, bfk-r-vm(init));
+   bfk-r(append(bfk-r-items(init), append(bfk-r-items(after), list(bfk-ctl-exit(id)))), bfk-r-vm(after), "0");
+  }
+  def bfk-unfailed-guard(stops, text) = if stops then bfk-if(bfk-unfailed(), text, "0") else text;
+  def bfk-ctl-exit(id) = if nil?(bml-ctl-stopping-modes(id)) then "0" else bfk-if(bfk-mode-in(bml-ctl-stopping-modes(id)), bfk-set-mode(0), "0");
+
+  // switch and select read as statements over the two locals the node
+  // declares; a break ends them
+  def bfk-ctl-switch(cx, node, env, vm, ctx) {
+   let id = bml-ctl-next-id(ctx);
+   let outk = bfk-out-keys(bml-ctl-env-after(node, env), vm);
+   let r = bfk-untuple(cx, bfk-ctl-stmts(cx, bml-ctl-switch-statements(node), env, vm, outk, bml-ctl-ctx-push(ctx, "switch", bml-ctl-switch-label(node), id), "0"), outk, vm);
+   bfk-r(append(bfk-r-items(r), list(bfk-ctl-exit(id))), bfk-r-vm(r), "0");
+  }
+
+  // break and continue set the mode their target reads; throw and return
+  // hold their value and set the mode when none is set
+  def bfk-ctl-effect(cx, effect, env, vm, ctx) = if bml-ctl-targeted-kind?(bnsc-effect-kind(effect)) then bfk-ctl-jump(cx, effect, bml-ctl-effect-target(effect, ctx), vm) else bfk-ctl-transfer(cx, effect, env, vm);
+  def bfk-ctl-jump(cx, effect, target, vm) = if lt(target, 0) then bfk-value-stmt(cx, bfk-need(cx, bml-ctl-jump-reason(effect)), vm) else bfk-r(list(bfk-set-mode(bml-ctl-effect-mode(effect, target))), vm, "0");
+  def bfk-ctl-transfer(cx, effect, env, vm) {
+   let v = bfk-fresh(cx, "v");
+   let cell = if str_eq(bnsc-effect-kind(effect), "throw") then "t" else "v";
+   bfk-r(list(bfk-let(v, bfk-expr(cx, bnsc-effect-value(effect), env, vm)), bfk-cell-set(cell, v), bfk-if(bfk-mode-zero(), bfk-set-mode(bml-ctl-effect-mode(effect, 0)), "0")), vm, v);
+  }
+
+  // try: the body, then, on the mode a catch takes, the catch's local from
+  // the thrown value and the handler
+  def bfk-ctl-try(cx, node, env, vm, ctx) {
+   let outk = bfk-out-keys(bml-ctl-env-after(node, env), vm);
+   let body = bfk-ctl-stmt(cx, bml-node-child(node, 0), env, vm, ctx);
+   let decl = bfk-ctl-stmt(cx, bml-ctl-try-decl(node), env, bfk-r-vm(body), ctx);
+   let handler = bfk-ctl-stmt(cx, bml-node-child(node, 1), bml-local-env-after-node(bml-ctl-try-decl(node), env), bfk-r-vm(decl), ctx);
+   let caught = bfk-do(cons(bfk-set-mode(0), append(bfk-r-items(decl), bfk-r-items(handler))), bfk-tuple(bfk-r-val(handler), bfk-r-vm(handler), outk));
+   bfk-untuple(cx, bfk-do(bfk-r-items(body), bfk-if(bfk-mode-is(bml-ctl-catch-mode(0)), caught, bfk-tuple("0", bfk-r-vm(body), outk))), outk, vm);
+  }
+
+  // with( e ): .self is the base the node declares
+  def bfk-with-access(cx, node, env, vm) = if not(bml-ctl-with-bound?(env)) then bfk-need(cx, "with/no-base") else if bml-ctl-with-self-node?(node) then bfk-expr(cx, bml-ctl-with-base-node(0), env, vm) else bfk-class-with(cx, node, env, vm);
+
   // ── what later rungs carry ──────────────────────────────────────────────
   def bfk-class-shaped?(node, env) = if bml-hati-class-call?(node) then true else if bml-hati-field-assign?(node, env) then true else if bml-hati-dotted-assign?(node, env) then true else if bml-hati-receiver-name?(bml-call-name(node), env) then true else bml-hati-member-call?(bml-call-name(node), env);
-  def bfk-class-call(cx, node, env, vm) = bfk-need(cx, "form/class");
+  def bfk-class-call(cx, node, env, vm) = if bml-call-named?(node, "__hati_unread") then bfk-need-add(cx, bml-voice-then(bml-unread-reading(bml-hati-marker-str(node, 0)), "source/unread")) else bfk-need(cx, "form/class");
   def bfk-class-name(cx, node, env, vm) = bfk-need(cx, "form/class");
-  def bfk-with-access(cx, node, env, vm) = bfk-need(cx, "form/with");
-  def bfk-ctl-function(cx, nodes, env, vm, outk) = str_concat(bfk-need(cx, "form/control"), "");
+  def bfk-class-with(cx, node, env, vm) = bfk-need(cx, "form/class");
   def bfk-choose-track(cx, node, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/choose"), vm);
   def bfk-fail-stmt(cx, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/fail"), vm);
   def bfk-save-stmt(cx, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/save"), vm);
