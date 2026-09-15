@@ -235,6 +235,12 @@ fk_band_declared_verdict() {
 fk_diag_count() {
     grep -c 'unresolved-call\|error:\|compiled with errors' "$1" 2>/dev/null || true
 }
+# A voiced organ-health row carries its speaker's identity: its id, its flow (the pid),
+# its clock stamps and any pid in its evidence. The kernels agree on what an organ said,
+# never on which process said it, so the legs compare the reading and not the speaker.
+organ_steady() {
+    sed -E '/^form-organ health \{/{s/"id":"[^"]*",//;s/"flow":"[^"]*",//;s/,"observed_at_ms":[0-9]+//;s/,"at_ms":[0-9]+//;s/"pid":[0-9]+,?//g;}' "$1" 2>/dev/null || true
+}
 
 # The fourth sibling is the repo-root fkwu source/JIT door. It resolves the
 # band's Form dependency graph and executes source directly; hot CPU/Metal/MLX
@@ -700,10 +706,10 @@ run_siblings() {
         ) &
     fi
     wait
-    go_out=$(cat "$legs/go"); rs_out=$(cat "$legs/rs"); ts_out=$(cat "$legs/ts")
+    go_out=$(organ_steady "$legs/go"); rs_out=$(organ_steady "$legs/rs"); ts_out=$(organ_steady "$legs/ts")
     go_rc=$(cat "$legs/go.rc"); rs_rc=$(cat "$legs/rs.rc"); ts_rc=$(cat "$legs/ts.rc")
     if [[ -n "$fourth_stem" ]]; then
-        fk_out=$(cat "$legs/fk" 2>/dev/null || true)
+        fk_out=$(organ_steady "$legs/fk")
         fk_rc=$(cat "$legs/fk.rc" 2>/dev/null || echo 1)
         fk_diags=$(fk_diag_count "$legs/fk.err")
     fi
@@ -768,7 +774,7 @@ run_siblings_binary() {
     ( set +e; "$RS_BIN" --binary "$artifact" > "$legs/rs" 2> "$legs/rs.err"; printf '%s\n' "$?" > "$legs/rs.rc" ) &
     ( set +e; run_ts --binary "$artifact" > "$legs/ts" 2> "$legs/ts.err"; printf '%s\n' "$?" > "$legs/ts.rc" ) &
     wait
-    go_out=$(cat "$legs/go"); rs_out=$(cat "$legs/rs"); ts_out=$(cat "$legs/ts")
+    go_out=$(organ_steady "$legs/go"); rs_out=$(organ_steady "$legs/rs"); ts_out=$(organ_steady "$legs/ts")
     go_rc=$(cat "$legs/go.rc"); rs_rc=$(cat "$legs/rs.rc"); ts_rc=$(cat "$legs/ts.rc")
     printf '  evidence=%s exits go=%s rust=%s typescript=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc"
     if [[ "$go_rc" == 0 && "$rs_rc" == 0 && "$ts_rc" == 0 && "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]]; then
