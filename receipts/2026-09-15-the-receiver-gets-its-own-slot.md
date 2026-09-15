@@ -331,10 +331,60 @@ set: 7 through `new E(q).p.v`, 12 through `Wrap(q).Get().v`, 42 through `e.Get()
 `BML-HATI-UNSUPPORTED source/unread`. Before the band move (77c0edd87) released the table walk's run
 entries, the two fixtures read 42 and 60 through the table lowering too.
 
+## Final, abstract and class constants lower
+
+The class reader kept a class's properties in its component, and the bridge let them go. So a final
+class took a subclass, a final method took an override, and a class declared abstract made a record,
+each answering a value. A class node now carries its flags (final, abstract, final:Name per final
+method), and the layout reads them the way the thesis's class model does (`bml-class-can-extend?`,
+`bml-class-method-override-allowed?`, `bml-class-concrete?`):
+- a class that names a final class among its supers reads `class/extends-final`;
+- a method whose name the first other class of its chain declares final reads
+  `method/final-override`;
+- `new` on a class declared abstract reads `new/abstract-class`.
+
+Each reason is voiced at admission, and nothing runs. A class declared abstract may leave an
+interface's method to a subclass.
+
+The bridge let class constants go too. A class constant now reads, the way the thesis's structural
+const lookup reads it:
+- by name in its own class's code and in a subclass's;
+- a private one only in its own class;
+- a protected one in a subclass, by Name, Base.Name or Child.Name;
+- from outside, as Class.Name, a public one the class sees.
+
+A private or protected one read from outside lowers to `__hati_denied`, whose reason names its
+access. The constant reader keeps the value's tokens, so a value is any expression.
+
+Witnessed on fkwu, each fixture against a tree of HEAD:
+
+| fixture | now | a tree of HEAD |
+|---|---|---|
+| `bml-class-final-base.bml` | `BML-HATI-UNSUPPORTED class/extends-final` | 1 |
+| `bml-class-final-override.bml` | `BML-HATI-UNSUPPORTED method/final-override` | 2 |
+| `bml-class-abstract-new.bml` | `BML-HATI-UNSUPPORTED new/abstract-class` | 1 |
+| `bml-class-flags-kept.bml` | 14 | 14: flags that hold refuse nothing |
+| `bml-class-const.bml` | 416 | `BML-HATI-UNSUPPORTED name/unbound,name/unbound` |
+| `bml-class-const-private.bml` | `BML-HATI-UNSUPPORTED access/private` | `BML-HATI-UNSUPPORTED name/unbound` |
+
+Both lowerings read these through the layout and the env. The fkwu lowering needed one more line,
+the reason for `__hati_denied`.
+
 ## Still open, with the reason
 
 - A member straight off a parenthesized value (`(p).v`) is not read: the member tail follows only
   `new` and a named call. A probe read `source/unread`.
+- `bml-full-class-model-proof` and `bml-class-inheritance-proof` stay, because the rest of what they
+  check does not run natively yet:
+  - a `[class]` field, which the bridge still drops;
+  - the field flags (delegate, shared, get, put, strict, relaxed);
+  - deferred methods and class methods;
+  - inner classes;
+  - template kinds;
+  - `Application.Main` as the entry;
+  - section properties on methods;
+  - the thesis's structural field lookup, where a delegate's own field is not a field of the
+    object. On the native path it is one: the delegating record carries it.
 
 ## For the lead
 
@@ -405,5 +455,16 @@ put it last, after every step declines, so it adds readings and changes none.
 Frontier word, 0 hits in the tree: **falllast**, a rule placed after every other one declines, so
 it can only add a reading, never change one that stood. Its question: where else would a new rule
 be safer as the last one asked than as the first?
+
+Sixth movement. Most surprising: the flags were read and then dropped. The reader kept `[final]` and
+`[abstract]` in the class component, and the thesis's model has had can-extend and concrete all
+along. The bridge carried each class's shape into the native node and left its flags behind, so the
+lowering never saw what a class allows. Discomfort to gold: from outside, `Base.Secret` already read
+`name/unbound`, which is a refusal, and the pull was to call that done. The gold was a refusal that
+says why, `access/private`, voiced where it lowers.
+
+Frontier word, 0 hits in the tree: **flagdrop**, a bridge that carries a node's shape and leaves
+behind the flags that say what the node allows. Its question: where else does a translation keep
+the structure and lose the permissions?
 
 — Claude (Opus 5), as Sema, worktree agent-a60550cd21b84ef52
