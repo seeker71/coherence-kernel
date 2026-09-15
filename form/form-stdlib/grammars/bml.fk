@@ -764,6 +764,12 @@
             (nth (comp-bml-fields field-component) 3)
             (empty)))
 
+    ;; the initializer's token objects, when the reader kept them whole
+    (defn bml-field-init-objects (field-component)
+        (if (gt (len (comp-bml-fields field-component)) 4)
+            (nth (comp-bml-fields field-component) 4)
+            (empty)))
+
     (defn bml-const-type (const-component)
         (nth (comp-bml-fields const-component) 0))
 
@@ -4605,7 +4611,8 @@
                                 field-type
                                 field-name
                                 properties
-                                (bml-source-token-values (nth init-parse 0))))
+                                (bml-source-token-values (nth init-parse 0))
+                                (nth init-parse 0)))
                         (nth init-parse 1)))
             (if (bml-source-token-value? (head after-properties) ";")
                 (bml-source-parse-step
@@ -10358,10 +10365,23 @@
                 (bml-hati-unit-layout
                     (bml-scope-layout-nodes link)
                     (add 1 (add (len methods) (bml-scope-units-method-count others)))))
-            (let method-env
+            (let homes
+                (bml-scope-type-homes
+                    link
+                    others
+                    symbols
+                    layout
+                    (bml-hati-type-decls (bml-scope-unit-all-nodes main))))
+            (let unit-env
                 (bml-hati-env-with-layout
                     (bml-scope-unit-env-with link main symbols "hati")
                     layout))
+            ;; a field initializer lowers where its class lives: this unit,
+            ;; or the linked unit that declares the class
+            (let method-env
+                (cons
+                    (bml-local-binding (bml-hati-class-homes-key) (list unit-env homes) unit-env)
+                    unit-env))
             (let unsupported
                 (append
                     (bml-scope-link-reasons link)
@@ -10393,12 +10413,7 @@
                 (bml-hati-lower-decls-homed
                     layout
                     method-env
-                    (bml-scope-type-homes
-                        link
-                        others
-                        symbols
-                        layout
-                        (bml-hati-type-decls (bml-scope-unit-all-nodes main)))
+                    homes
                     (bml-hati-fns-result-pool others-lowered)))
             (bml-hati-admitted
                 "hati-image"
@@ -13025,13 +13040,15 @@
                 true
                 (node_eq cat BML-AST-CHAR))))))
 
+    ;; every initializer the reader took whole lowers; one left unparsed
+    ;; names field/init
     (defn bml-hati-fields-init-ok? (fields)
         (if (nil? fields)
             true
             (if (bml-hati-field-entry-has-init? (head fields))
-                (if (bml-hati-literal-node? (bml-hati-field-entry-init (head fields)))
-                    (bml-hati-fields-init-ok? (tail fields))
-                    false)
+                (if (bml-call-named? (bml-hati-field-entry-init (head fields)) "__hati_unparsed")
+                    false
+                    (bml-hati-fields-init-ok? (tail fields)))
                 (bml-hati-fields-init-ok? (tail fields)))))
 
     (defn bml-hati-field-rows (fields)
@@ -13045,7 +13062,7 @@
                         (bml-ast-int 0)))
                 (bml-hati-field-rows (tail fields)))))
 
-    (defn bml-hati-lower-packet (rows pool)
+    (defn bml-hati-lower-packet (rows pool env)
         (if (nil? rows)
             (bml-hati-lower-result (fk-empty) pool)
             (do
@@ -13054,8 +13071,8 @@
                     (bml-hati-lower-node-in-env
                         (nth (head rows) 1)
                         (bml-hati-lower-pool key)
-                        (empty)))
-                (let rest (bml-hati-lower-packet (tail rows) (bml-hati-lower-pool value)))
+                        env))
+                (let rest (bml-hati-lower-packet (tail rows) (bml-hati-lower-pool value) env))
                 (bml-hati-lower-result
                     (fk-cons
                         (fk-cons
@@ -13065,8 +13082,9 @@
                     (bml-hati-lower-pool rest)))))
 
     ;; One recipe record (tag 64) whose packet names the class, its id in
-    ;; this layout's method tables, and every structural field.
-    (defn bml-hati-lower-instance (layout entry pool)
+    ;; this layout's method tables, and every structural field, each set to
+    ;; its initializer lowered in env (where the class lives).
+    (defn bml-hati-lower-instance (layout entry pool env)
         (do
             (let packet
                 (bml-hati-lower-packet
@@ -13076,10 +13094,26 @@
                             (list "bmlClassId" (bml-ast-int (bml-hati-class-id entry))))
                         (bml-hati-field-rows
                             (bml-hati-class-fields-all layout (bml-hati-class-name entry))))
-                    pool))
+                    pool
+                    env))
             (bml-hati-lower-result
                 (fk-node 64 (bml-hati-lower-expr packet))
                 (bml-hati-lower-pool packet))))
+
+    (defn bml-hati-class-homes-key () "__hati_class_homes")
+
+    ;; The env a class's field initializers lower in: the unit that declares
+    ;; the class, over the layout. A linked image binds its unit env and the
+    ;; homes of the types its links declare; without one, the site's env.
+    (defn bml-hati-class-init-env (env class-name)
+        (do
+            (let held (bml-local-lookup-direct env (bml-hati-class-homes-key)))
+            (if (nil? held)
+                env
+                (bml-hati-owner-env
+                    (nth (bml-local-binding-value held) 1)
+                    class-name
+                    (head (bml-local-binding-value held))))))
 
     (defn bml-hati-template-named? (layout name)
         (fsc-string-list-contains? (bml-hati-layout-templates layout) name))
@@ -13112,7 +13146,12 @@
                             (bml-hati-voice-refusal "construction" (bml-hati-choice-value choice) class-type)
                             pool)
                         (do
-                            (let record (bml-hati-lower-instance layout entry pool))
+                            (let record
+                                (bml-hati-lower-instance
+                                    layout
+                                    entry
+                                    pool
+                                    (bml-hati-class-init-env env class-type)))
                             (if (lt (bml-hati-choice-value choice) 0)
                                 record
                                 (do
@@ -13704,9 +13743,22 @@
                     (list
                         (intern_trivial_string (bml-field-type member))
                         (intern_trivial_string (bml-field-name member))
-                        (if (if (eq (len init) 1) (bml-hati-digits? (head init)) false)
-                            (bml-ast-int (str_to_int (head init)))
-                            (bml-ast-unparsed-body (bml-field-name member))))))))
+                        (bml-hati-field-init-node member init))))))
+
+    ;; An initializer is any expression the reader takes whole; one it
+    ;; cannot take stays unparsed, which construction names field/init.
+    (defn bml-hati-field-init-node (member init)
+        (do
+            (let objects (bml-field-init-objects member))
+            (if (nil? objects)
+                (if (if (eq (len init) 1) (bml-hati-digits? (head init)) false)
+                    (bml-ast-int (str_to_int (head init)))
+                    (bml-ast-unparsed-body (bml-field-name member)))
+                (do
+                    (let parsed (bml-source-parse-expr objects))
+                    (if (if (bml-expr-ok? parsed) (nil? (bml-expr-rest parsed)) false)
+                        (bml-expr-node parsed)
+                        (bml-ast-unparsed-body (bml-field-name member)))))))
 
     (defn bml-hati-bridge-method (member)
         (do
