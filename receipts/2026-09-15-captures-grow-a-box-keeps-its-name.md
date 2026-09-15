@@ -84,8 +84,25 @@
 
 ## Still open, with the reason
 
-- **The vk-*-live rows are not witnessed here.** Validate holds every FKWU-STAGED band as
-  pending, and this checkout has no Vulkan carrier standing.
+Nothing from this list stays open; the addenda below close the last two.
+
+## Addendum: the Vulkan rows read on this Mac
+
+Every piece the Vulkan door (`form/form-stdlib/vk-door.bml`) needs already stood here, and none
+of it was downloaded: `libMoltenVK.dylib` inside Docker.app (loaded as a file, so Docker itself
+never started; `docker info` answered rc 1 before and after), the Android NDK r27c sysroot's
+`vulkan/` and `vk_video/` headers, `glslangValidator` from Homebrew, and `clang`. With the two
+header directories linked into a scratch include directory,
+`clang -O2 -ffp-contract=off -I <dir> form/native/vulkan/run_vk.c -o .hearth/vk/run_vk` built
+the carrier (`.hearth/` is ignored by git).
+
+Validate's FKWU-STAGED lane had no way to run anything: it reported every such band pending. A
+band that names its carrier now (`; STAGED CARRIER: .hearth/vk/run_vk`, carried by the five
+rows) runs on the fkwu-only lane whenever that path stands, verdict and zero diagnostics held
+as on that lane, and stays pending when it does not. Through `./validate.sh`, one at a time,
+each `1 ok, 0 failed`: vk-layers-live 1023, vk-train-live 255, vk-blocks-live 31,
+vk-diffusion-moe-live 63, vk-q80-live 7. With `run_vk` set aside, vk-q80-live read
+`staged lanes pending: 1 band(s) need an absent host carrier` again.
 
 ## Addendum: fkwu names the file
 
