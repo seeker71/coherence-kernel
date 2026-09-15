@@ -1,5 +1,5 @@
 ; grammars/bml.fk - BML object compiler and runtime support
-; preludes: form-stdlib/dialect-categories.fk form-stdlib/source-compiler.fk form-stdlib/compiler.fk form-stdlib/bml/source-scan.bml form-stdlib/hati-os-kernel.fk form-stdlib/fkc-table-serialize.fk form-stdlib/bml-native-interface-package-import.fk form-stdlib/bml-native-source-control.fk form-stdlib/form-control-backtracking-ml.fk
+; preludes: form-stdlib/dialect-categories.fk form-stdlib/source-compiler.fk form-stdlib/compiler.fk form-stdlib/bml/source-scan.bml form-stdlib/hati-os-kernel.fk form-stdlib/fkc-table-serialize.fk form-stdlib/bml-native-interface-package-import.fk form-stdlib/bml-native-source-control.fk form-stdlib/form-control-backtracking-ml.fk form-stdlib/bml/bml-compiler-health.bml
 ;
 ; Reference shape: the 2000 BML/JBML compiler lowers BMF matches into
 ; component objects, then into an instruction stream for a backtracking VM.
@@ -6850,7 +6850,31 @@
             (append (bml-compile-node-in node env) (list (bma-drop 0)))
         (if (node_eq (node_category node) BML-AST-BLOCK)
             (bml-compile-callee-block-in (node_children node) env)
-            (bml-compile-child-in node env))))))
+        (if (node_eq (node_category node) BML-AST-CHOOSE)
+            (bml-compile-callee-choose-in node env)
+            (bml-compile-child-in node env)))))))
+
+    ;; A choose statement inside an inlined callee leaves nothing under the
+    ;; call's result either: its promotions drop, and every branch keeps the
+    ;; callee's statement rule. Without it a chosen branch's values stayed
+    ;; between two operands (Stop() + Nested() read 14 on BMA, 9 on Hati).
+    (defn bml-compile-callee-choose-in (node env)
+        (do
+            (let promos (bml-bnml-choose-promotions node env))
+            (append
+                (bml-compile-promotions-in promos env)
+                (list
+                    (bma-choose
+                        (bml-compile-callee-branches-in
+                            (node_children node)
+                            (bml-bnml-fold-env promos env)))))))
+
+    (defn bml-compile-callee-branches-in (branches env)
+        (if (nil? branches)
+            (empty)
+            (cons
+                (bml-compile-callee-statement-in (head branches) env)
+                (bml-compile-callee-branches-in (tail branches) env))))
 
     (defn bml-compile-callee-block-in (children env)
         (if (nil? children)
@@ -7287,7 +7311,7 @@
     ;; The image reads refusals out of its own pool too, so a lowering that
     ;; named a refusal keeps the image unsupported even if no pass listed it.
     (defn bml-hati-image (fns pool source-node unsupported)
-        (list "bml-hati-image" (bml-hati-link-list-set fns) pool source-node
+        (list "bml-hati-image" (bml-hati-link-undo (bml-hati-link-list-set fns)) pool source-node
               (bml-hati-reasons-merge unsupported (bml-hati-pool-refusals pool))))
 
     (defn bml-hati-image-fns (image) (nth image 1))
@@ -7439,7 +7463,8 @@
     ;; and the frame keeps a stack of snapshots under __marks: save pushes
     ;; the live slots and __top, restore writes them back and pops, discard
     ;; pops. BMA's stack snapshot holds the same state: its locals ride the
-    ;; floor of the stack it snapshots.
+    ;; floor of the stack it snapshots. A field set between save and restore
+    ;; is undone too: an open snapshot journals it (see choose below).
 
     (defn bml-bnml-top-key () "__top")
     (defn bml-bnml-marks-key () "__marks")
@@ -7492,12 +7517,12 @@
     ;; a body that carries control keeps its statements as they are: the
     ;; control lowering reads each statement's own shape
     (defn bml-bnml-top-body (nodes)
-        (if (bml-bnml-any-marks? nodes)
+        (if (bml-bnml-any-snapshots? nodes)
             (if (bml-ctl-any-bearing? nodes) nodes (bml-bnml-top-rewrite-list nodes))
             nodes))
 
     (defn bml-bnml-top-body-node (node)
-        (if (bml-bnml-has-marks? node)
+        (if (bml-bnml-takes-snapshots? node)
             (if (bml-ctl-bearing? node) node (bml-bnml-top-rewrite node))
             node))
 
@@ -7574,13 +7599,15 @@
                     value-expr)
                 (bml-hati-pool-entry-pool slot))))
 
-    ;; the snapshot: each slot's value, then __top last
+    ;; the snapshot: each slot's value, then __top, then the journal count
     (defn bml-hati-snapshot-expr (keys pool)
         (if (nil? keys)
             (do
                 (let top (bml-hati-bnml-get (bml-bnml-top-key) pool))
                 (bml-hati-lower-result
-                    (fk-cons (bml-hati-lower-expr top) (fk-empty))
+                    (fk-cons
+                        (bml-hati-lower-expr top)
+                        (fk-cons (bml-ctl-get-cell (bml-bnml-count-cell 0)) (fk-empty)))
                     (bml-hati-lower-pool top)))
             (do
                 (let first (bml-hati-bnml-get (head keys) pool))
@@ -7609,11 +7636,15 @@
         (do
             (let snap (bml-hati-snapshot-expr (bml-bnml-snapshot-keys env (empty)) pool))
             (let marks (bml-hati-bnml-get (bml-bnml-marks-key) (bml-hati-lower-pool snap)))
-            (bml-hati-then-top
+            (let push
                 (bml-hati-bnml-set
                     (bml-bnml-marks-key)
                     (fk-cons (bml-hati-lower-expr snap) (bml-hati-lower-expr marks))
-                    (bml-hati-lower-pool marks)))))
+                    (bml-hati-lower-pool marks)))
+            (bml-hati-then-top
+                (bml-hati-lower-result
+                    (fk-sequence (bml-hati-lower-expr push) (bml-hati-journal-open 0))
+                    (bml-hati-lower-pool push)))))
 
     (defn bml-hati-restore-sets (keys at snap pool)
         (if (nil? keys)
@@ -7649,30 +7680,198 @@
                             (bml-hati-lower-pool sets)))
                     (bml-hati-then-top
                         (bml-hati-lower-result
-                            (fk-sequence (bml-hati-lower-expr sets) (bml-hati-lower-expr pop))
+                            (fk-sequence
+                                (bml-hati-lower-expr sets)
+                                (fk-sequence
+                                    (bml-hati-journal-undo
+                                        (fk-nth
+                                            (fk-head (bml-hati-lower-expr marks))
+                                            (fk-lit (len keys))))
+                                    (fk-sequence
+                                        (bml-hati-lower-expr pop)
+                                        (bml-hati-journal-close 0))))
                             (bml-hati-lower-pool pop)))))))
 
     (defn bml-hati-lower-discard-in (pool env)
         (do
             (let marks (bml-hati-bnml-get (bml-bnml-marks-key) pool))
-            (bml-hati-then-top
+            (let pop
                 (bml-hati-bnml-set
                     (bml-bnml-marks-key)
                     (fk-tail (bml-hati-lower-expr marks))
-                    (bml-hati-lower-pool marks)))))
+                    (bml-hati-lower-pool marks)))
+            (bml-hati-then-top
+                (bml-hati-lower-result
+                    (fk-sequence (bml-hati-lower-expr pop) (bml-hati-journal-close 0))
+                    (bml-hati-lower-pool pop)))))
 
     ;; --- choose over the same snapshot: backtracking --------------------
     ;; A choose whose branches assign or fail partway takes the snapshot
-    ;; save takes, with the frame's __failed flag in it. Each branch starts
-    ;; with __failed clear and `fail;` sets it. A branch that failed returns
-    ;; every slot to the snapshot, which stays for the next branch; the
-    ;; branch that succeeds hands back the incoming flag, drops the snapshot
-    ;; and answers its value. If every branch fails, the choose fails. BMA's
-    ;; choose runs each branch from the one state it was entered with, its
-    ;; locals included, so both lanes read the same slots after.
+    ;; save takes, with the run's FAILED cell and journal count in it. Each
+    ;; branch starts with FAILED clear; `fail;` sets it and the statements
+    ;; after it in the branch stand down, as they do after a callee whose
+    ;; own choose failed (the cell is the run's). A branch that failed
+    ;; returns every slot to the snapshot and undoes the field sets the
+    ;; journal kept since, and the next branch runs; the branch that
+    ;; succeeds hands back the incoming flag, drops the snapshot and answers
+    ;; its value. If every branch fails, the choose fails: FAILED stays set
+    ;; and the body stops at the value it stood on. BMA's choose runs each
+    ;; branch from the one state it was entered with, its locals included,
+    ;; and its fail mode stops every op after it, so both lanes read the
+    ;; same value.
+    ;;
+    ;; A field lives in its record, outside every frame. While a snapshot
+    ;; is open (DEPTH above 0) a field set first journals the record, the
+    ;; key and the value it replaces; a rollback undoes the journal, newest
+    ;; first, back to the count its snapshot took.
 
-    (defn bml-bnml-failed-key () "__failed")
+    (defn bml-bnml-failed-cell (_x) 4005)
+    (defn bml-bnml-journal-cell (_x) 4006)
+    (defn bml-bnml-count-cell (_x) 4007)
+    (defn bml-bnml-depth-cell (_x) 4008)
     (defn bml-bnml-chosen-key () "__chosen")
+
+    ;; FAILED clear: the run goes on
+    (defn bml-hati-unfailed (_x)
+        (fk-le (bml-ctl-get-cell (bml-bnml-failed-cell 0)) (fk-lit 0)))
+
+    (defn bml-hati-unfailed-guard (stops expr)
+        (if stops (fk-if (bml-hati-unfailed 0) expr (fk-lit 0)) expr))
+
+    ;; a snapshot opens: field sets journal while any is open
+    (defn bml-hati-journal-open (_x)
+        (bml-ctl-set-cell
+            (bml-bnml-depth-cell 0)
+            (fk-add (bml-ctl-get-cell (bml-bnml-depth-cell 0)) (fk-lit 1))))
+
+    ;; a snapshot closes; with none left open the journal empties
+    (defn bml-hati-journal-close (_x)
+        (fk-sequence
+            (bml-ctl-set-cell
+                (bml-bnml-depth-cell 0)
+                (fk-sub (bml-ctl-get-cell (bml-bnml-depth-cell 0)) (fk-lit 1)))
+            (fk-if (fk-le (bml-ctl-get-cell (bml-bnml-depth-cell 0)) (fk-lit 0))
+                   (fk-sequence
+                       (bml-ctl-set-cell (bml-bnml-journal-cell 0) (fk-empty))
+                       (bml-ctl-set-cell (bml-bnml-count-cell 0) (fk-lit 0)))
+                   (fk-lit 0))))
+
+    ;; a field set under an open snapshot journals the value it replaces
+    (defn bml-hati-journal-entry (recv key)
+        (fk-if (fk-le (bml-ctl-get-cell (bml-bnml-depth-cell 0)) (fk-lit 0))
+               (fk-lit 0)
+               (fk-sequence
+                   (bml-ctl-set-cell
+                       (bml-bnml-journal-cell 0)
+                       (fk-cons
+                           (fk-cons recv (fk-cons key (fk-cons (fk-rget recv key) (fk-empty))))
+                           (bml-ctl-get-cell (bml-bnml-journal-cell 0))))
+                   (bml-ctl-set-cell
+                       (bml-bnml-count-cell 0)
+                       (fk-add (bml-ctl-get-cell (bml-bnml-count-cell 0)) (fk-lit 1))))))
+
+    ;; undo the journal back to the count a snapshot took
+    (defn bml-hati-journal-undo (saved)
+        (fk-icall
+            (fk-cons (bml-hati-undo-slot) (fk-cons (fk-lit 1) (fk-empty)))
+            (fk-cons
+                (fk-sub (bml-ctl-get-cell (bml-bnml-count-cell 0)) saved)
+                (fk-empty))))
+
+    ;; a statement that can fail stops the ones after it: inside a branch
+    ;; every statement can (a callee's failure reads the same cell), outside
+    ;; one a statement that holds a choose that tracks
+    (defn bml-bnml-may-stop? (node env)
+        (if (bml-bnml-choosing? env)
+            true
+            (bml-bnml-holds-tracking-choose? node)))
+
+    (defn bml-bnml-holds-tracking-choose? (node)
+        (if (eq (len (node_children node)) 0)
+            false
+        (if (bml-bnml-choose-tracks? node)
+            true
+        (if (node_eq (node_category node) BML-AST-METHOD)
+            false
+            (bml-bnml-any-holds-tracking-choose? (node_children node))))))
+
+    (defn bml-bnml-any-holds-tracking-choose? (nodes)
+        (if (nil? nodes)
+            false
+            (if (bml-bnml-holds-tracking-choose? (head nodes))
+                true
+                (bml-bnml-any-holds-tracking-choose? (tail nodes)))))
+
+    ;; --- the compiler's voice at the snapshot ------------------------
+    ;; A restore or discard with no open snapshot withholds its table in
+    ;; the open (bch-admit in the refusal pass). A choose whose every branch
+    ;; is a bare fail can only fail: the compiler lowers it the way BMA runs
+    ;; it (FAILED set, the body stopped at the value it stood on) and says
+    ;; so, remedy applied. An assignment made inside a branch is carried
+    ;; out of it: after a branch-bearing statement's promotions no outer
+    ;; name it assigns may still read from the argument, or that assignment
+    ;; is lost at the edge and the organ says which.
+
+    (defn bml-bch-heal (reading remedy result)
+        (do
+            (let response (oh-response reading remedy))
+            (let selected (oh-select reading response "request-evidence"))
+            (oh-voice reading)
+            (oh-voice response)
+            (oh-voice (oh-applied reading selected result))
+            0))
+
+    (defn bml-bch-all-fail (branches)
+        (if (bml-bnml-all-branches-fail? branches)
+            (bml-bch-heal
+                (bch-reading
+                    "choose"
+                    "a branch that can succeed"
+                    "every branch fails"
+                    (bch-needs "choice" (list "choose/every-branch-fails"))
+                    (list "fail-through" "revise")
+                    "choose")
+                "fail-through"
+                (json-node-object
+                    (list
+                        (oh-s "choose" "fails")
+                        (oh-s "body" "stops at the value it stood on"))))
+            0))
+
+    (defn bml-bnml-edge-lost (names env)
+        (if (nil? names)
+            (empty)
+            (if (bml-ctl-param-binding? (bml-local-lookup env (head names)))
+                (cons (head names) (bml-bnml-edge-lost (tail names) env))
+                (bml-bnml-edge-lost (tail names) env))))
+
+    (defn bml-bnml-edge-check (where node env)
+        (bml-bch-edge where (bml-bnml-edge-lost (bml-ctl-assigned-names node) env)))
+
+    (defn bml-bch-edge (where lost)
+        (if (nil? lost)
+            0
+            (oh-voice
+                (bch-reading
+                    "branch-edge"
+                    "every assignment carried out of its branch"
+                    (str_concat "lost:" (bch-join lost))
+                    (bch-needs "frame-slot" lost)
+                    (list "revise" "request-evidence")
+                    where))))
+
+    ;; the statements after one that may fail run while FAILED is clear; a
+    ;; failed body answers the value it stood on
+    (defn bml-hati-fail-guarded (first rest)
+        (do
+            (let top (bml-hati-bnml-get (bml-bnml-top-key) (bml-hati-lower-pool rest)))
+            (bml-hati-lower-result
+                (fk-sequence
+                    (bml-hati-lower-expr first)
+                    (fk-if (bml-hati-unfailed 0)
+                           (bml-hati-lower-expr rest)
+                           (bml-hati-lower-expr top)))
+                (bml-hati-lower-pool top))))
 
     (defn bml-bnml-fails-inside? (node)
         (if (node_eq node (bml-ast-fail 0))
@@ -7704,10 +7903,24 @@
                 true
                 (bml-bnml-any-branch-tracks? (tail branches)))))
 
+    ;; a choose tracks when a branch assigns or fails partway, and when
+    ;; every branch is a bare fail: that choose fails, and its body stops
+    ;; at the value it stood on, as BMA's does
     (defn bml-bnml-choose-tracks? (node)
         (if (node_eq (node_category node) BML-AST-CHOOSE)
-            (bml-bnml-any-branch-tracks? (node_children node))
+            (if (eq (len (node_children node)) 0)
+                false
+                (if (bml-bnml-any-branch-tracks? (node_children node))
+                    true
+                    (bml-bnml-all-branches-fail? (node_children node))))
             false))
+
+    (defn bml-bnml-all-branches-fail? (branches)
+        (if (nil? branches)
+            true
+            (if (bml-hati-node-fail? (head branches))
+                (bml-bnml-all-branches-fail? (tail branches))
+                false)))
 
     (defn bml-bnml-takes-snapshots? (node)
         (if (bml-bnml-mark-node? node)
@@ -7748,9 +7961,11 @@
         (if (bml-bnml-choosing? env) (empty) (list "fail")))
 
     (defn bml-hati-lower-fail-in (pool env)
-        (if (bml-bnml-choosing? env)
-            (bml-hati-bnml-set (bml-bnml-failed-key) (fk-lit 1) pool)
-            (bml-hati-lower-result (fk-lit 0) pool)))
+        (bml-hati-lower-result
+            (if (bml-bnml-choosing? env)
+                (bml-ctl-set-cell (bml-bnml-failed-cell 0) (fk-lit 1))
+                (fk-lit 0))
+            pool))
 
     (defn bml-hati-unsupported-choose-node-in (node env)
         (if (bml-bnml-choose-tracks? node)
@@ -7770,13 +7985,13 @@
                 (bml-hati-unsupported-node-in (head branches) env)
                 (bml-hati-unsupported-branches-in (tail branches) env))))
 
-    ;; each key's value in the frame, in key order
-    (defn bml-hati-snapshot-of (keys pool)
+    ;; each key's value in the frame, in key order, onto what follows
+    (defn bml-hati-snapshot-onto (keys after pool)
         (if (nil? keys)
-            (bml-hati-lower-result (fk-empty) pool)
+            (bml-hati-lower-result after pool)
             (do
                 (let first (bml-hati-bnml-get (head keys) pool))
-                (let rest (bml-hati-snapshot-of (tail keys) (bml-hati-lower-pool first)))
+                (let rest (bml-hati-snapshot-onto (tail keys) after (bml-hati-lower-pool first)))
                 (bml-hati-lower-result
                     (fk-cons (bml-hati-lower-expr first) (bml-hati-lower-expr rest))
                     (bml-hati-lower-pool rest)))))
@@ -7790,12 +8005,20 @@
         (do
             (let promos (bml-bnml-choose-promotions node env))
             (let inner-env (bml-bnml-fold-env promos env))
+            (bml-bnml-edge-check "choose" node inner-env)
+            (bml-bch-all-fail (node_children node))
             (let promo-r (bml-hati-lower-nodes-in-env promos pool env))
             (let keys
                 (append
                     (bml-bnml-snapshot-keys inner-env (empty))
-                    (list (bml-bnml-top-key) (bml-bnml-failed-key))))
-            (let snap (bml-hati-snapshot-of keys (bml-hati-lower-pool promo-r)))
+                    (list (bml-bnml-top-key))))
+            (let snap
+                (bml-hati-snapshot-onto
+                    keys
+                    (fk-cons
+                        (bml-ctl-get-cell (bml-bnml-failed-cell 0))
+                        (fk-cons (bml-ctl-get-cell (bml-bnml-count-cell 0)) (fk-empty)))
+                    (bml-hati-lower-pool promo-r)))
             (let marks (bml-hati-bnml-get (bml-bnml-marks-key) (bml-hati-lower-pool snap)))
             (let push
                 (bml-hati-bnml-set
@@ -7811,9 +8034,13 @@
             (bml-hati-lower-result
                 (fk-sequence
                     (bml-hati-lower-expr promo-r)
-                    (fk-sequence (bml-hati-lower-expr push) (bml-hati-lower-expr body)))
+                    (fk-sequence
+                        (bml-hati-lower-expr push)
+                        (fk-sequence (bml-hati-journal-open 0) (bml-hati-lower-expr body))))
                 (bml-hati-lower-pool body))))
 
+    ;; The snapshot a choose pushed reads (slots... __top FAILED COUNT):
+    ;; the incoming flag sits at (len keys), the journal count after it.
     (defn bml-hati-lower-choose-branches (branches keys pool env)
         (if (nil? branches)
             (do
@@ -7823,42 +8050,32 @@
                         (bml-bnml-marks-key)
                         (fk-tail (bml-hati-lower-expr marks))
                         (bml-hati-lower-pool marks)))
-                (let flag (bml-hati-bnml-set (bml-bnml-failed-key) (fk-lit 1) (bml-hati-lower-pool pop)))
+                (let top (bml-hati-bnml-get (bml-bnml-top-key) (bml-hati-lower-pool pop)))
                 (bml-hati-lower-result
                     (fk-sequence
                         (bml-hati-lower-expr pop)
-                        (fk-sequence (bml-hati-lower-expr flag) (fk-lit 0)))
-                    (bml-hati-lower-pool flag)))
+                        (fk-sequence
+                            (bml-ctl-set-cell (bml-bnml-failed-cell 0) (fk-lit 1))
+                            (fk-sequence
+                                (bml-hati-journal-close 0)
+                                (bml-hati-lower-expr top))))
+                    (bml-hati-lower-pool top)))
             (do
-                (let clear (bml-hati-bnml-set (bml-bnml-failed-key) (fk-lit 0) pool))
-                (let branch
-                    (bml-hati-lower-node-in-env (head branches) (bml-hati-lower-pool clear) env))
+                (let branch (bml-hati-lower-node-in-env (head branches) pool env))
                 (let keep
                     (bml-hati-bnml-set
                         (bml-bnml-chosen-key)
                         (bml-hati-lower-expr branch)
                         (bml-hati-lower-pool branch)))
-                (let failed (bml-hati-bnml-get (bml-bnml-failed-key) (bml-hati-lower-pool keep)))
-                (let marks (bml-hati-bnml-get (bml-bnml-marks-key) (bml-hati-lower-pool failed)))
-                (let back
-                    (bml-hati-bnml-set
-                        (bml-bnml-failed-key)
-                        (fk-nth
-                            (fk-head (bml-hati-lower-expr marks))
-                            (fk-lit (sub (len keys) 1)))
-                        (bml-hati-lower-pool marks)))
+                (let marks (bml-hati-bnml-get (bml-bnml-marks-key) (bml-hati-lower-pool keep)))
+                (let snap (fk-head (bml-hati-lower-expr marks)))
                 (let pop
                     (bml-hati-bnml-set
                         (bml-bnml-marks-key)
                         (fk-tail (bml-hati-lower-expr marks))
-                        (bml-hati-lower-pool back)))
+                        (bml-hati-lower-pool marks)))
                 (let chosen (bml-hati-bnml-get (bml-bnml-chosen-key) (bml-hati-lower-pool pop)))
-                (let roll
-                    (bml-hati-restore-sets
-                        keys
-                        0
-                        (fk-head (bml-hati-lower-expr marks))
-                        (bml-hati-lower-pool chosen)))
+                (let roll (bml-hati-restore-sets keys 0 snap (bml-hati-lower-pool chosen)))
                 (let rest
                     (bml-hati-lower-choose-branches
                         (tail branches)
@@ -7867,19 +8084,26 @@
                         env))
                 (bml-hati-lower-result
                     (fk-sequence
-                        (bml-hati-lower-expr clear)
+                        (bml-ctl-set-cell (bml-bnml-failed-cell 0) (fk-lit 0))
                         (fk-sequence
                             (bml-hati-lower-expr keep)
                             (fk-if
-                                (fk-node 102 (ms-intern (bml-hati-lower-expr failed) (fk-lit 0)))
+                                (bml-hati-unfailed 0)
                                 (fk-sequence
-                                    (bml-hati-lower-expr back)
+                                    (bml-ctl-set-cell
+                                        (bml-bnml-failed-cell 0)
+                                        (fk-nth snap (fk-lit (len keys))))
                                     (fk-sequence
                                         (bml-hati-lower-expr pop)
-                                        (bml-hati-lower-expr chosen)))
+                                        (fk-sequence
+                                            (bml-hati-journal-close 0)
+                                            (bml-hati-lower-expr chosen))))
                                 (fk-sequence
                                     (bml-hati-lower-expr roll)
-                                    (bml-hati-lower-expr rest)))))
+                                    (fk-sequence
+                                        (bml-hati-journal-undo
+                                            (fk-nth snap (fk-lit (add (len keys) 1))))
+                                        (bml-hati-lower-expr rest))))))
                     (bml-hati-lower-pool rest)))))
 
     ;; BMA: the promoted parameters, then the choose over their slots
@@ -8050,6 +8274,43 @@
                     (bml-hati-list-set-slot)
                     (fk-lit (len fns)))
                 (list (bml-hati-list-set-fn (len fns))))
+            fns))
+
+    ;; A rollback calls one shared undo function the same way: the table
+    ;; that journals carries it last.
+    (defn bml-hati-undo-slot ()
+        (fk-node 24 (ms-intern (ms-cell 0) (intern_trivial_string "__bml_undo_fn"))))
+
+    ;; undo n journal entries, newest first: each writes its record's key
+    ;; back to the value it held
+    (defn bml-hati-undo-fn (self-index)
+        (do
+            (let entry (fk-head (bml-ctl-get-cell (bml-bnml-journal-cell 0))))
+            (fk-if
+                (fk-le (fk-arg) (fk-lit 0))
+                (fk-lit 0)
+                (fk-sequence
+                    (fk-rset
+                        (fk-nth entry (fk-lit 0))
+                        (fk-nth entry (fk-lit 1))
+                        (fk-nth entry (fk-lit 2)))
+                    (fk-sequence
+                        (bml-ctl-set-cell
+                            (bml-bnml-journal-cell 0)
+                            (fk-tail (bml-ctl-get-cell (bml-bnml-journal-cell 0))))
+                        (fk-sequence
+                            (bml-ctl-set-cell
+                                (bml-bnml-count-cell 0)
+                                (fk-sub (bml-ctl-get-cell (bml-bnml-count-cell 0)) (fk-lit 1)))
+                            (fk-icall
+                                (fk-cons (fk-lit self-index) (fk-cons (fk-lit 1) (fk-empty)))
+                                (fk-cons (fk-sub (fk-arg) (fk-lit 1)) (fk-empty)))))))))
+
+    (defn bml-hati-link-undo (fns)
+        (if (bml-hati-any-mentions? fns (bml-hati-undo-slot))
+            (append
+                (bml-hati-relink-all fns (bml-hati-undo-slot) (fk-lit (len fns)))
+                (list (bml-hati-undo-fn (len fns))))
             fns))
 
     (defn bml-hati-unsupported-name-node-in (node env)
@@ -8458,9 +8719,9 @@
             (if (node_eq cat BML-AST-SAVE)
                 (empty)
             (if (node_eq cat BML-AST-RESTORE)
-                (bml-bnml-mark-need env "restore/no-mark")
+                (bch-admit "restore" (bml-bnml-mark-need env "restore/no-mark"))
             (if (node_eq cat BML-AST-DISCARD)
-                (bml-bnml-mark-need env "discard/no-mark")
+                (bch-admit "discard" (bml-bnml-mark-need env "discard/no-mark"))
                 (list "unknown"))))))))))))))))))))))))))))
 
     (defn bml-hati-unsupported-section-in (node env)
@@ -8515,11 +8776,13 @@
                         (tail nodes)
                         (bml-hati-lower-pool first)
                         (bml-local-env-after-node (head nodes) env)))
-                (bml-hati-lower-result
-                    (fk-sequence
-                        (bml-hati-lower-expr first)
-                        (bml-hati-lower-expr rest))
-                    (bml-hati-lower-pool rest))))))
+                (if (bml-bnml-may-stop? (head nodes) env)
+                    (bml-hati-fail-guarded first rest)
+                    (bml-hati-lower-result
+                        (fk-sequence
+                            (bml-hati-lower-expr first)
+                            (bml-hati-lower-expr rest))
+                        (bml-hati-lower-pool rest)))))))
 
     (defn bml-hati-lower-choose-in (branches pool)
         (bml-hati-lower-choose-in-env branches pool (empty)))
@@ -9895,6 +10158,17 @@
                 (bml-bma-ops-refusals (head branches))
                 (bml-bma-branch-refusals (tail branches)))))
 
+    ;; One source on both lanes. A lane whose answer is a refusal says so
+    ;; where it ran; two answers that differ are a split, voiced with both.
+    ;; Hati's answer comes back.
+    (defn bml-run-lanes-unit-value (node units)
+        (do
+            (let bma (bch-ran "bma" (bml-bma-run-unit-value node units)))
+            (let hati (bch-ran "hati" (bml-hati-run-unit-value node units)))
+            (if (eq (bch-refused? (value_str bma)) 1)
+                hati
+                (bch-lanes "lanes" bma hati))))
+
     (defn bml-bma-run-unit-value (node units)
         (do
             (let program (bml-compile-unit-program node units))
@@ -10281,20 +10555,23 @@
                 (bml-ctl-lower-stmt (head nodes) st env ctx)
                 (tail nodes)
                 (bml-ctl-env-after (head nodes) env)
-                ctx)))
+                ctx
+                (bml-bnml-holds-tracking-choose? (head nodes)))))
 
-    (defn bml-ctl-lower-stmts-after (first-r nodes env ctx)
+    ; a statement whose choose can fail also stops the ones after it
+    (defn bml-ctl-lower-stmts-after (first-r nodes env ctx stops)
         (if (nil? nodes)
             first-r
             (bml-ctl-lower-stmts-join
                 first-r
-                (bml-ctl-lower-stmts nodes (bml-ctl-r-st first-r) env ctx))))
+                (bml-ctl-lower-stmts nodes (bml-ctl-r-st first-r) env ctx)
+                stops)))
 
-    (defn bml-ctl-lower-stmts-join (first-r rest-r)
+    (defn bml-ctl-lower-stmts-join (first-r rest-r stops)
         (bml-ctl-r
             (fk-sequence
                 (bml-ctl-r-expr first-r)
-                (bml-ctl-guard (bml-ctl-r-expr rest-r)))
+                (bml-ctl-guard (bml-hati-unfailed-guard stops (bml-ctl-r-expr rest-r))))
             (bml-ctl-r-st rest-r)))
 
     (defn bml-ctl-lower-stmt (node st env ctx)
@@ -10358,6 +10635,7 @@
     (defn bml-ctl-lower-stmt-in (node st env ctx)
         (do
             (let cat (node_category node))
+            (if (bml-ctl-statement-node? node) (bml-bnml-edge-check "control" node env) 0)
             (if (node_eq cat BML-AST-BLOCK)
                 (bml-ctl-lower-stmts (node_children node) st env ctx)
             (if (node_eq cat BML-AST-IF)
@@ -10509,9 +10787,12 @@
                                        (bml-ctl-r-expr body-r)
                                        (bml-ctl-loop-react
                                            id
-                                           (fk-sequence
-                                               (bml-ctl-r-expr update-r)
-                                               (bml-ctl-guard reenter)))))
+                                           (bml-hati-unfailed-guard
+                                               (bml-bnml-holds-tracking-choose?
+                                                   (bml-ctl-loop-body parts))
+                                               (fk-sequence
+                                                   (bml-ctl-r-expr update-r)
+                                                   (bml-ctl-guard reenter))))))
                                (fk-lit 0)))))))
 
     (defn bml-ctl-switch-scrutinee (node) (head (bml-call-args node)))
@@ -11883,10 +12164,12 @@
                 (let value
                     (bml-hati-lower-node-in-env value-node (bml-hati-lower-pool key) env))
                 (bml-hati-lower-result
-                    (fk-rset
-                        (bml-hati-lower-expr recv)
-                        (bml-hati-lower-expr key)
-                        (bml-hati-lower-expr value))
+                    (fk-sequence
+                        (bml-hati-journal-entry (bml-hati-lower-expr recv) (bml-hati-lower-expr key))
+                        (fk-rset
+                            (bml-hati-lower-expr recv)
+                            (bml-hati-lower-expr key)
+                            (bml-hati-lower-expr value)))
                     (bml-hati-lower-pool value)))))
 
     (defn bml-hati-this-field-read (field pool env)
