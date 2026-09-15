@@ -391,11 +391,32 @@ Witnessed on fkwu, each fixture against a tree of HEAD:
 | `bml-class-delegate-field-hidden.bml` | `BML-HATI-UNSUPPORTED field/not-found` | 0 |
 | `bml-class-paren-member.bml` | 26 | `BML-HATI-UNSUPPORTED source/unread` |
 
+## A class field is one slot for its class
+
+The bridge dropped a `[class]` field without a word. It now carries it into the class node
+(`__hati_class_field`: type, name, initializer, access), and a field in a `[class]` section is a
+class field too. A class field reads the way a class constant does: by name in its class's code
+and in a subclass's, and as `Class.name` from outside when it is public. A private one read from
+outside gives `access/private`. It is one slot in the program's state: its initializer runs at the
+first read, and `name = e;` or `Class.name = e;` sets it. A name the body declares keeps its local
+reading.
+
+The fkwu lowering keeps the slot in its state record, with two arms (`bfk-static-get`,
+`bfk-static-set`). The table lowering has no program-wide state, so a class field there gives
+`class-field/table-lane`, voiced.
+
+The bridge no longer drops a member it cannot carry either. It leaves `__hati_unbridged` in the class
+node, and the layout names it as `class/member-unbridged`, voiced at admission. No fixture reaches
+that branch yet: a class declared inside a class body stops at the reader, which gives
+`source/unread` before the bridge sees it.
+
+Witnessed on fkwu (fixture `bml-class-static-field.bml`, 249: ids 11, 12 and 113, then
+`Counter.count` 113). A tree of HEAD read `BML-HATI-UNSUPPORTED assign/unbound,name/unbound`.
+
 ## Still open, with the reason
 
 - `bml-full-class-model-proof` and `bml-class-inheritance-proof` stay, because the rest of what they
   check does not run natively yet:
-  - a `[class]` field, which the bridge still drops;
   - the field flags (delegate, shared, get, put, strict, relaxed);
   - deferred methods and class methods;
   - inner classes;
@@ -493,5 +514,14 @@ gold was to move the set into D's own method, where the thesis puts it.
 Frontier word, 0 hits in the tree: **lendline**, the line between what delegation lends (methods,
 subtype) and what it keeps (fields). Its question: where else does lending a behavior quietly lend
 the state behind it?
+
+Eighth movement. Most surprising: a record key that was never set does not read as nothing. It reads
+as an int, so a class field's slot cannot tell unset from 0, and it keeps its own set mark. Discomfort
+to gold: the pull was to run every class field's initializer at program start, inside the other
+lowering's main. The gold was to let the first read set the slot. The fkwu lowering took two arms,
+and the shape of its program stayed as it was.
+
+Frontier word, 0 hits in the tree: **readborn**, a slot that becomes itself at its first read. Its
+question: where else can a start-up step wait until something first asks for it?
 
 — Claude (Opus 5), as Sema, worktree agent-a60550cd21b84ef52

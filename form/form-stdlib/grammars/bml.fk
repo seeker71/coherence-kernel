@@ -6875,7 +6875,9 @@
                 "bnml-declare"
                 (bml-bnml-new-key (bml-bnml-target-name node) env))
         (if (bml-bnml-assign-node? node)
-            (if (if (bml-hati-field-assign? node env) true (bml-hati-dotted-assign? node env))
+            (if (if (bml-hati-field-assign? node env)
+                    true
+                    (if (bml-hati-dotted-assign? node env) true (bml-hati-class-set-target? node env (empty))))
                 env
                 (bml-bnml-bind-node
                     env
@@ -7731,6 +7733,9 @@
         (bml-bnml-top-body-in nodes (empty)))
 
     (defn bml-bnml-top-body-in (nodes env)
+        (bml-bnml-top-body-list-kept (bml-hati-rewrite-class-sets-list nodes env) env))
+
+    (defn bml-bnml-top-body-list-kept (nodes env)
         (if (bml-bnml-keeps-standing? nodes env)
             (if (bml-ctl-any-bearing? nodes) nodes (bml-bnml-top-rewrite-list nodes))
             nodes))
@@ -7739,9 +7744,81 @@
         (bml-bnml-top-body-node-in node (empty)))
 
     (defn bml-bnml-top-body-node-in (node env)
+        (bml-bnml-top-body-kept (bml-hati-rewrite-class-sets node env) env))
+
+    (defn bml-bnml-top-body-kept (node env)
         (if (bml-bnml-keeps-standing? (list node) env)
             (if (bml-ctl-bearing? node) node (bml-bnml-top-rewrite node))
             node))
+
+    ;; x = e; and Class.x = e; where the env binds x to a class field: a set of
+    ;; that class's one slot. A name the body declares keeps its local reading.
+    (defn bml-hati-rewrite-class-sets (node env)
+        (if (bml-hati-layout-has-class-fields? (bml-hati-env-layout env))
+            (bml-hati-rewrite-sets-in node env (bml-hati-declared-names node (empty)))
+            node))
+
+    (defn bml-hati-rewrite-class-sets-list (nodes env)
+        (if (bml-hati-layout-has-class-fields? (bml-hati-env-layout env))
+            (bml-hati-rewrite-sets-list nodes env (bml-hati-declared-names-list nodes (empty)))
+            nodes))
+
+    (defn bml-hati-layout-has-class-fields? (layout)
+        (bml-hati-classes-have-kind? (bml-hati-layout-classes layout) "class-field"))
+
+    (defn bml-hati-classes-have-kind? (classes kind)
+        (if (nil? classes)
+            false
+            (if (nil? (bml-hati-members-of-kind (bml-hati-class-members (head classes)) kind))
+                (bml-hati-classes-have-kind? (tail classes) kind)
+                true)))
+
+    (defn bml-hati-rewrite-sets-in (node env declared)
+        (if (eq (len (node_children node)) 0)
+            node
+            (if (bml-hati-class-set-target? node env declared)
+                (bml-hati-class-set-of node env declared)
+                (if (node_eq (node_category node) BML-AST-METHOD)
+                    node
+                    (intern_node
+                        (node_category node)
+                        (bml-hati-rewrite-sets-list (node_children node) env declared))))))
+
+    (defn bml-hati-rewrite-sets-list (nodes env declared)
+        (if (nil? nodes)
+            (empty)
+            (cons
+                (bml-hati-rewrite-sets-in (head nodes) env declared)
+                (bml-hati-rewrite-sets-list (tail nodes) env declared))))
+
+    (defn bml-hati-class-set-target? (node env declared)
+        (if (bml-bnml-assign-node? node)
+            (if (fsc-string-list-contains? declared (bml-bnml-target-name node))
+                false
+                (bml-hati-marker-binding? (bml-local-lookup env (bml-bnml-target-name node)) "__hati_class_get"))
+            false))
+
+    (defn bml-hati-class-set-of (node env declared)
+        (do
+            (let get (bml-local-binding-value (bml-local-lookup env (bml-bnml-target-name node))))
+            (bml-hati-marker
+                "__hati_class_set"
+                (list
+                    (bml-hati-marker-arg get 0)
+                    (bml-hati-marker-arg get 1)
+                    (bml-hati-rewrite-sets-in (bml-bnml-value node) env declared)))))
+
+    (defn bml-hati-declared-names (node acc)
+        (if (eq (len (node_children node)) 0)
+            acc
+            (if (bml-bnml-declare-node? node)
+                (cons (bml-bnml-target-name node) acc)
+                (bml-hati-declared-names-list (node_children node) acc))))
+
+    (defn bml-hati-declared-names-list (nodes acc)
+        (if (nil? nodes)
+            acc
+            (bml-hati-declared-names-list (tail nodes) (bml-hati-declared-names (head nodes) acc))))
 
     ;; --- a failure travels to the top ---------------------------------
     ;; A fail no choose catches ends the program:
@@ -11845,7 +11922,8 @@
               "__hati_field" "__hati_member" "__hati_new" "__hati_invoke"
               "__hati_self_ctor" "__hati_super_ctor" "__hati_abstract"
               "__hati_unparsed" "__hati_field_get" "__hati_field_set"
-              "__hati_unread" "__hati_get" "__hati_set" "__hati_denied"))
+              "__hati_unread" "__hati_get" "__hati_set" "__hati_denied"
+              "__hati_class_field" "__hati_class_get" "__hati_class_set" "__hati_unbridged"))
 
     (defn bml-hati-class-call? (node)
         (if (node_eq (node_category node) BML-AST-CALL)
@@ -12079,7 +12157,9 @@
                 (bml-hati-marker-str value 1)
             (if (str_eq name "__hati_field")
                 (bml-hati-marker-str value 1)
-                ""))))))))
+            (if (str_eq name "__hati_class_get")
+                (bml-hati-marker-str value 2)
+                "")))))))))
 
     (defn bml-hati-binding-type (binding)
         (do
@@ -12089,7 +12169,7 @@
                     ""
                 (if (fsc-string-list-contains?
                         (list "__hati_arg" "__hati_arg_at" "__hati_self" "__hati_super"
-                              "__hati_param" "__hati_field")
+                              "__hati_param" "__hati_field" "__hati_class_get")
                         (bml-call-name value))
                     (bml-hati-marker-type-of value)
                     (bml-hati-static-type value (bml-local-binding-env binding))))
@@ -12612,7 +12692,7 @@
 
     ;; a constructor, an init member and a constant answer no message by name
     (defn bml-hati-hidden-kind? (kind)
-        (if (str_eq kind "ctor") true (if (str_eq kind "init") true (str_eq kind "const"))))
+        (if (str_eq kind "ctor") true (if (str_eq kind "init") true (if (str_eq kind "const") true (str_eq kind "class-field")))))
 
     (defn bml-hati-members-of-kind (members kind)
         (if (nil? members)
@@ -13406,6 +13486,10 @@
                 env)
         (if (str_eq name "__hati_denied")
             (bml-hati-lower-refusal (bml-hati-denied-reason node) pool)
+        (if (if (str_eq name "__hati_class_get") true (str_eq name "__hati_class_set"))
+            (bml-hati-lower-refusal
+                (bml-hati-voice-refusal "class-field" "class-field/table-lane" (bml-hati-marker-str node 1))
+                pool)
         (if (str_eq name "__hati_invoke")
             (bml-hati-lower-invoke
                 (bml-hati-marker-arg node 0)
@@ -13429,7 +13513,7 @@
                         (bml-unread-reading (bml-hati-marker-str node 0))
                         "source/unread")
                     "method/body-unparsed")
-                pool))))))))))))))))))
+                pool)))))))))))))))))))
 
     (defn bml-hati-lower-class-call-in (node pool env)
         (do
@@ -13501,7 +13585,9 @@
             (let name (bml-call-name node))
             (if (bml-hati-class-call? node)
                 (bml-hati-unsupported-class-marker node name env)
-            (if (if (bml-hati-field-assign? node env) true (bml-hati-dotted-assign? node env))
+            (if (if (bml-hati-field-assign? node env)
+                    true
+                    (if (bml-hati-dotted-assign? node env) true (bml-hati-class-set-target? node env (empty))))
                 (bml-hati-unsupported-node-in (bml-bnml-value node) env)
             (if (bml-hati-receiver-name? name env)
                 (bml-hati-unsupported-call-args-in (bml-call-args node) env)
@@ -13614,22 +13700,70 @@
                     (bml-hati-decl-consts-loop (node_children (bml-node-child (head nodes) 1)))
                     (if (node_eq (node_category (head nodes)) BML-AST-CONST)
                         (list (head nodes))
-                        (empty)))
+                        (if (bml-hati-class-field-node? (head nodes))
+                            (list (head nodes))
+                            (empty))))
                 (bml-hati-decl-consts-loop (tail nodes)))))
 
     (defn bml-hati-const-members (nodes owner)
         (if (nil? nodes)
             (empty)
             (cons
-                (bml-hati-member (bml-local-const-name (head nodes)) (empty) (empty) -1 "const" owner (head nodes))
+                (if (bml-hati-class-field-node? (head nodes))
+                    (bml-hati-member (bml-hati-marker-str (head nodes) 1) (empty) (empty) -1 "class-field" owner (head nodes))
+                    (bml-hati-member (bml-local-const-name (head nodes)) (empty) (empty) -1 "const" owner (head nodes)))
                 (bml-hati-const-members (tail nodes) owner))))
+
+    (defn bml-hati-class-field-node? (node)
+        (bml-call-named? node "__hati_class_field"))
 
     (defn bml-hati-const-access (member)
         (do
             (let node (bml-hati-member-node member))
-            (if (gt (len (node_children node)) 3)
-                (node_value (bml-node-child (bml-node-child node 3) 0))
-                "public")))
+            (if (bml-hati-class-field-node? node)
+                (bml-hati-marker-str node 3)
+                (if (gt (len (node_children node)) 3)
+                    (node_value (bml-node-child (bml-node-child node 3) 0))
+                    "public"))))
+
+    ;; what a class constant or a class field reads as: the constant's value,
+    ;; or the class field's one slot
+    (defn bml-hati-static-member-value (member)
+        (do
+            (let node (bml-hati-member-node member))
+            (if (bml-hati-class-field-node? node)
+                (bml-hati-marker
+                    "__hati_class_get"
+                    (list
+                        (bml-ast-string (bml-hati-member-owner member))
+                        (bml-ast-string (bml-hati-member-name member))
+                        (bml-hati-marker-arg node 0)
+                        (bml-hati-marker-arg node 2)))
+                (bml-local-const-value node))))
+
+    (defn bml-hati-static-members (members)
+        (append (bml-hati-members-of-kind members "const") (bml-hati-members-of-kind members "class-field")))
+
+    ;; a member the bridge could not carry into the native node, named
+    (defn bml-hati-unbridged-reasons (classes)
+        (if (nil? classes)
+            (empty)
+            (append
+                (if (bml-hati-any-unbridged? (node_children (bml-node-child (bml-hati-class-node (head classes)) 2)))
+                    (list "class/member-unbridged")
+                    (empty))
+                (bml-hati-unbridged-reasons (tail classes)))))
+
+    (defn bml-hati-any-unbridged? (nodes)
+        (if (nil? nodes)
+            false
+            (if (node_eq (node_category (head nodes)) BML-AST-SECTION)
+                (if (bml-hati-any-unbridged? (node_children (bml-node-child (head nodes) 1)))
+                    true
+                    (bml-hati-any-unbridged? (tail nodes)))
+                (if (bml-call-named? (head nodes) "__hati_unbridged")
+                    true
+                    (bml-hati-any-unbridged? (tail nodes))))))
 
     ;; the constants a class's code reads: its own, then each one a structural
     ;; base declares that is not private, nearest first
@@ -13643,7 +13777,7 @@
                 (empty)
                 (append
                     (bml-hati-consts-seen-from
-                        (bml-hati-members-of-kind (bml-hati-class-members entry) "const")
+                        (bml-hati-static-members (bml-hati-class-members entry))
                         class-name
                         owner-name)
                     (bml-hati-structural-consts layout (bml-hati-class-base entry) owner-name (add depth 1))))))
@@ -13670,7 +13804,7 @@
     (defn bml-hati-bind-const (env member owner-name)
         (do
             (let name (bml-hati-member-name member))
-            (let value (bml-local-const-value (bml-hati-member-node member)))
+            (let value (bml-hati-static-member-value member))
             (cons
                 (bml-local-binding name value env)
                 (cons
@@ -13700,7 +13834,7 @@
                     (bml-local-binding
                         (str_concat class-name (str_concat "." (bml-hati-member-name (head consts))))
                         (if (str_eq (bml-hati-const-access (head consts)) "public")
-                            (bml-local-const-value (bml-hati-member-node (head consts)))
+                            (bml-hati-static-member-value (head consts))
                             (bml-hati-denied-marker
                                 (str_concat "access/" (bml-hati-const-access (head consts)))
                                 (str_concat class-name (str_concat "." (bml-hati-member-name (head consts))))))
@@ -14205,8 +14339,10 @@
                             (bml-section-properties member))
                         rest)
                 (if (bml-component-kind? member "Field")
-                    (if (bml-properties-has? (bml-field-properties member) "class")
-                        rest
+                    (if (if (bml-properties-has? (bml-field-properties member) "class")
+                            true
+                            (bml-properties-has? props "class"))
+                        (cons (bml-hati-bridge-class-field member props) rest)
                         (cons (bml-hati-bridge-field member) rest))
                 (if (bml-component-kind? member "Method")
                     (cons (bml-hati-bridge-method member) rest)
@@ -14214,7 +14350,27 @@
                     (cons (bml-hati-bridge-constructor member ctor-name) rest)
                 (if (bml-component-kind? member "Const")
                     (cons (bml-hati-bridge-const member props) rest)
-                    rest))))))))
+                (if (bml-component-kind? member "InterfaceRef")
+                    rest
+                    (cons (bml-hati-unbridged-marker member) rest))))))))))
+
+    ;; A class field: one slot for its class, not one per record. It rides the
+    ;; member block as __hati_class_field (type name init access).
+    (defn bml-hati-bridge-class-field (member props)
+        (bml-hati-marker
+            "__hati_class_field"
+            (list
+                (bml-ast-string (bml-field-type member))
+                (bml-ast-string (bml-field-name member))
+                (if (nil? (bml-field-init member))
+                    (bml-ast-int 0)
+                    (bml-hati-field-init-node member (bml-field-init member)))
+                (bml-ast-string (bml-hati-member-access (bml-field-properties member) props)))))
+
+    ;; a member the bridge cannot carry: named in the class node so the layout
+    ;; voices it, never dropped without a word
+    (defn bml-hati-unbridged-marker (member)
+        (bml-hati-marker "__hati_unbridged" (list (bml-ast-string (bml-member-name member)))))
 
     (defn bml-hati-member-access (own section)
         (if (if (bml-properties-has? own "private")
@@ -15149,7 +15305,7 @@
                         (bml-hati-raw-class-reasons raw-classes class-names iface-names)
                         (append
                             (bml-hati-iface-parent-reasons ifaces iface-names)
-                            (append (bml-hati-iface-reasons plain (bml-hati-layout-classes plain)) (bml-hati-final-reasons plain (bml-hati-layout-classes plain))))))
+                            (append (bml-hati-iface-reasons plain (bml-hati-layout-classes plain)) (append (bml-hati-final-reasons plain (bml-hati-layout-classes plain)) (bml-hati-unbridged-reasons (bml-hati-layout-classes plain)))))))
                 templates)))
 
     ;; --- lowering the layout: members, method tables, trap ---------------
