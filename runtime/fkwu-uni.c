@@ -2413,9 +2413,53 @@ static long long fk_metal_buf_from_file_native(long long pathv, long long off, l
     }
     return h;
 }
+/* A list crosses the membrane as its numbers: each float a binary32, each int a binary32 word
+ * (its low 32 bits), little-endian, four bytes an element. Packing a million floats through
+ * Form's own bit builder cost 3.6 s; the door converts once, here, where the bytes are made. A
+ * list holding anything but numbers writes nothing and answers 0. */
+static long long fk_metal_buf_write_list(long long h, long long off, long long lv) {
+    long long head = lv, p, n = 0, k = 0, r;
+    unsigned char *bytes;
+    while (lv != 1) {
+        p = lv >> 1;
+        if (!((lv & 1) && lv > 0 && FK_POK(p))) { return 0; }
+        long long e = FK_HH(p);
+        if (!(fk_isf(e) || (e & 1) == 0)) { return 0; }
+        n = n + 1;
+        lv = FK_HT(p);
+    }
+    if (n == 0) { return 0; }
+    bytes = (unsigned char *)malloc((size_t)(n * 4));
+    if (bytes == 0) { return 0; }
+    lv = head;
+    while (lv != 1) {
+        p = lv >> 1;
+        long long e = FK_HH(p);
+        unsigned int w;
+        if (fk_isf(e)) {
+            float f = (float)fk_num(e);
+            memcpy(&w, &f, 4);
+        } else {
+            w = (unsigned int)(e >> 1);
+        }
+        bytes[k * 4] = (unsigned char)(w & 0xFF);
+        bytes[k * 4 + 1] = (unsigned char)((w >> 8) & 0xFF);
+        bytes[k * 4 + 2] = (unsigned char)((w >> 16) & 0xFF);
+        bytes[k * 4 + 3] = (unsigned char)((w >> 24) & 0xFF);
+        k = k + 1;
+        lv = FK_HT(p);
+    }
+    r = fk_metal_buf_write_external(h, off, (const char *)bytes, n * 4);
+    free(bytes);
+    if (r == FK_METAL_HANDLE_UNLOADED || r < 0) { return 0; }
+    return r;
+}
 static long long fk_metal_buf_write_native(long long h, long long off, long long bytesv) {
     const char *b;
     long long bl;
+    if (bytesv == 1 || ((bytesv & 1) && bytesv > 0 && FK_POK(bytesv >> 1))) {
+        return fk_metal_buf_write_list(h, off, bytesv);
+    }
     if (fk_srange(bytesv, &b, &bl) == 0) {
         return 0;
     }
