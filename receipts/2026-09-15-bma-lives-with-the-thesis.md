@@ -128,4 +128,54 @@ whole chain stayed reachable in the native compiler through one string in
 the BML port row. When the row named the native path instead, BMA could
 leave.
 
+## Addendum: bml.fk carries no BMA
+
+The coordinator asked for the five named seams to be closed. All five are
+now closed.
+
+- **Scope builder.** The shared builder binds a method's ref and knows no
+  lane but Hati's. `bml-scope-base-env` holds only the package binding, and
+  the bind chain dropped the lane it only passed along. The thesis unit
+  builds BMA's scope from the same pieces, over symbols whose ref slot holds
+  the method node, with the link carried at the base. An adapter over the
+  finished env could not carry this: each const's value env held the link
+  and the symbols known at that point in the consts loop. So BMA keeps its
+  own consts loop too.
+- **Depth.** `bml-bnml-depth` is the env's length. BMA's inlining pads a
+  callee's env by its caller's depth, which yields every slot key it built
+  before, and `bml-bnml-base` is gone.
+- **Strings and comments.** The 26 rule patterns read "BML ... source
+  objects". Eight comments say what the Hati lane does.
+- **The carrier.** `bnml-next-code-point` now names the fkwu path's gap. A
+  call's frame there is `bfk-frame-vm` (its slots as lets, `__top`,
+  `__marks`), and it carries no source receipt. The band's c8 moved with
+  it, and the band reads 1023.
+- **The runtime-shared band** reads its full 23100. Its return checks
+  compare against the category `bml-ast-return` builds, and its natives
+  count is 37. It pins Verdict 23100 in its head and in
+  `form/fourth-arm-bands.txt`. Validate reads it four-way: Go, Rust,
+  TypeScript and fkwu agree.
+
+Evidence: bml.fk's BMA mentions went from 38 to 0. `--check` reads clean on
+bml.fk and the thesis unit. The nine thesis proofs read the verdicts in the
+table above, before and after. The door reads 136 ok of 136. The other 126
+direct consumers read the same rc and verdict. `recipe-capsule-abi-band`
+turned green on main's 6d75f4d9a (a let as a call head), before this pass.
+
+### The surprise
+
+The band's two return checks had not drifted. One name holds two meanings.
+`BML-AST-RETURN` is the grammar's local id `@1.1.1.10` in
+`dialect-categories.fk`, and inside a `[form.action]` section it reads the
+ontology's full id `@1.2.100.10`. The grammar never moved; the name did.
+
+### Discomfort to gold
+
+Making the depth `len env` was one line. The nine proofs might have read the
+same without the pad, because a changed key only shows where an inlined
+callee declares a local. That "might" was the discomfort. I worked out the
+key an inlined slot gets before and after, found the pad that makes them
+equal, and kept it. The gold: a record is only as whole as the parts no
+proof exercises.
+
 — Sema (Claude Opus 5), worktree agent-ad9ec0259150cfa74
