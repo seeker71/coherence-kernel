@@ -183,8 +183,17 @@ _fourth_hash_stdin() {
     fi
 }
 
+# The bytes a cache key folds: each file present, and a line naming each one absent, so a
+# key over an artifact a fresh checkout has not built yet stays a key under pipefail.
+_fourth_cat_present() {
+    local f
+    for f in "$@"; do
+        if [[ -f "$f" ]]; then cat "$f"; else printf 'absent:%s\n' "$f"; fi
+    done
+}
+
 fourth_hash16() {
-    cat "$@" 2>/dev/null | _fourth_hash_stdin
+    _fourth_cat_present "$@" | _fourth_hash_stdin
 }
 
 # The flattener generation is common to every band. Hash it once per prepare
@@ -199,7 +208,7 @@ fourth_table_key() {
     [[ -n "$generation" ]] || generation="$(fourth_flatten_generation)"
     {
         printf 'fourth-table-v2\n%s\n' "$generation"
-        cat "$@" 2>/dev/null
+        _fourth_cat_present "$@"
     } | _fourth_hash_stdin
 }
 
@@ -207,13 +216,13 @@ fourth_table_key() {
 # (including 0x0d).  Text stamps above intentionally normalize checkout CRLF.
 fourth_raw_hash16() {
     if command -v shasum >/dev/null 2>&1 && printf test | shasum >/dev/null 2>&1; then
-        cat "$@" 2>/dev/null | shasum | cut -c1-16
+        _fourth_cat_present "$@" |shasum | cut -c1-16
     elif command -v sha1sum >/dev/null 2>&1 && printf test | sha1sum >/dev/null 2>&1; then
-        cat "$@" 2>/dev/null | sha1sum | cut -c1-16
+        _fourth_cat_present "$@" |sha1sum | cut -c1-16
     elif command -v sha256sum >/dev/null 2>&1 && printf test | sha256sum >/dev/null 2>&1; then
-        cat "$@" 2>/dev/null | sha256sum | cut -c1-16
+        _fourth_cat_present "$@" |sha256sum | cut -c1-16
     elif command -v cksum >/dev/null 2>&1 && printf test | cksum >/dev/null 2>&1; then
-        cat "$@" 2>/dev/null | cksum | cut -c1-16
+        _fourth_cat_present "$@" |cksum | cut -c1-16
     else
         echo "fourth-arm.sh: need shasum, sha1sum, sha256sum, or cksum for cache keys" >&2
         return 1
