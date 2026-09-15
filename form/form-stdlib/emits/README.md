@@ -53,8 +53,13 @@ cd form && ./validate.sh form-stdlib/core.fk \
                          form-stdlib/emits/python-native.fk \
                          form-stdlib/emits/python-native-driver.fk
 
-# Verify the output compiles.
-python3 -m py_compile form/.cache/emit_native_python/python_bmf/objects.py
+# The body's own Python grammar reads the page; a shape it does not carry
+# refuses by name.
+echo form/.cache/emit_native_python/python_bmf/objects.py | ./fkwu form/scripts/python-page-read.bml
+
+# The round trip, whole on fkwu: emit Python from a recipe, run it with the
+# body's own Python model, and compare with fkwu running the same recipe.
+./fkwu form/scripts/emit-native-python-roundtrip.bml
 ```
 
 ## Kernel quirks the emitter respects

@@ -65,13 +65,32 @@
     ;; separated by "," until the matching close ")". Returns
     ;; (args-list . rest-after-close).
 
+    ;; A keyword argument `name=expr` lifts to PY-BMF-KWARG (key-leaf,
+    ;; value-recipe), the shape grammars/python-bmf.fk builds for it. The
+    ;; evaluator carries no KWARG arm yet, so running such a call refuses by
+    ;; name; reading the page does not.
+    (defn lift-kwarg? (tokens)
+        (if (and (not (nil? tokens)) (not (nil? (tail tokens))))
+            (if (tok-name? (head tokens)) (tok-op? (head (tail tokens)) "=") false)
+            false))
+    (defn lift-arg (tokens)
+        (if (lift-kwarg? tokens)
+            (do
+                (let value-result (lift-expr (tail (tail tokens))))
+                (lift-result
+                    (intern_node PY-BMF-KWARG
+                        (list (intern_trivial_string (tok-value (head tokens)))
+                              (lift-recipe value-result)))
+                    (lift-rest value-result)))
+            (lift-expr tokens)))
+
     (defn lift-args-loop (tokens acc)
         (if (nil? tokens)
             (pch-refuse "lift-args: closing parenthesis required")
             (if (tok-op? (head tokens) ")")
                 (lift-result (reverse acc) (tail tokens))
                 (do
-                    (let arg-result (lift-expr tokens))
+                    (let arg-result (lift-arg tokens))
                     (let next (lift-rest arg-result))
                     (let acc2 (cons (lift-recipe arg-result) acc))
                     (if (and (not (nil? next))
@@ -199,19 +218,46 @@
     ;; Chains left-to-right (a.b.c, xs[i].m(), obj.field[k]). The `.`
     ;; trailer peeks one token past the name: `(` means a method call, else a
     ;; plain attribute read.
+    ;; A slice is PY-BMF-SUBSCRIPT with three children: object, start, stop.
+    ;; An absent bound is PY-BMF-PASS — nothing stands there, and the evaluator
+    ;; reads it as the sequence's own edge (l[1:] is l[1:len(l)]). A step
+    ;; (l[a:b:c]) refuses by name.
+    (defn lift-slice-open () (intern_node PY-BMF-PASS (empty)))
+    (defn lift-slice-stop (base start tokens)
+        (if (and (not (nil? tokens)) (tok-op? (head tokens) "]"))
+            (lift-subscript-tail
+                (intern_node PY-BMF-SUBSCRIPT (list base start (lift-slice-open)))
+                (tail tokens))
+            (do
+                (let stop-result (lift-expr tokens))
+                (let after (lift-rest stop-result))
+                (if (and (not (nil? after)) (tok-op? (head after) "]"))
+                    (lift-subscript-tail
+                        (intern_node PY-BMF-SUBSCRIPT (list base start (lift-recipe stop-result)))
+                        (tail after))
+                    (pch-refuse "lift-subscript: a slice step or an unclosed slice")))))
+
     (defn lift-subscript-tail (base tokens)
         (if (and (not (nil? tokens))
                  (tok-op? (head tokens) "["))
-            (do
-                (let idx-result (lift-expr (tail tokens)))
-                (let after (lift-rest idx-result))
-                (if (and (not (nil? after))
-                         (tok-op? (head after) "]"))
-                    (lift-subscript-tail
-                        (intern_node PY-BMF-SUBSCRIPT
-                            (list base (lift-recipe idx-result)))
-                        (tail after))
-                    (lift-result base after)))
+            (if (and (not (nil? (tail tokens)))
+                     (tok-op? (head (tail tokens)) ":"))
+                ;; [:stop] and [:] — the start is open
+                (lift-slice-stop base (lift-slice-open) (tail (tail tokens)))
+                (do
+                    (let idx-result (lift-expr (tail tokens)))
+                    (let after (lift-rest idx-result))
+                    (if (and (not (nil? after))
+                             (tok-op? (head after) "]"))
+                        (lift-subscript-tail
+                            (intern_node PY-BMF-SUBSCRIPT
+                                (list base (lift-recipe idx-result)))
+                            (tail after))
+                    (if (and (not (nil? after))
+                             (tok-op? (head after) ":"))
+                        ;; [start:stop] and [start:]
+                        (lift-slice-stop base (lift-recipe idx-result) (tail after))
+                        (lift-result base after)))))
         (if (and (not (nil? tokens))
                  (tok-op? (head tokens) "."))
             (do
@@ -693,12 +739,37 @@
             (if (tok-op? (head tokens) ",") (lift-def-params-loop (tail tokens) acc)
                 (if (tok-op? (head tokens) ")") (lift-def-header-end (tail tokens) acc)
                     (pch-refuse "lift-def: unsupported parameter shape")))))
+    ;; A def header ends at its own ":"; whatever follows on the same line is a
+    ;; one-line body (`def f(x): return x`), lifted by lift-def-inline-body.
     (defn lift-def-header-end (tokens acc)
-        (if (and (eq (len tokens) 1) (tok-op? (head tokens) ":")) (reverse acc)
+        (if (and (not (nil? tokens)) (tok-op? (head tokens) ":")) (reverse acc)
             (if (and (not (nil? tokens)) (tok-op? (head tokens) "->"))
-                (if (and (gt (len tokens) 2) (tok-op? (nth tokens (sub (len tokens) 1)) ":"))
+                (if (eq (lift-def-has-colon (tail tokens)) 1)
                     (reverse acc) (pch-refuse "lift-def: return annotation header refused"))
                 (pch-refuse "lift-def: unsupported header tail"))))
+    (defn lift-def-has-colon (tokens)
+        (if (nil? tokens) 0 (if (tok-op? (head tokens) ":") 1 (lift-def-has-colon (tail tokens)))))
+
+    ;; the tokens after a header's own ":", found by walking the parameter parens
+    (defn lift-def-inline (tokens depth)
+        (if (nil? tokens) (empty)
+            (if (tok-op? (head tokens) "(") (lift-def-inline (tail tokens) (add depth 1))
+            (if (tok-op? (head tokens) ")") (lift-def-inline (tail tokens) (sub depth 1))
+            (if (and (eq depth 0) (tok-op? (head tokens) ":")) (tail tokens)
+                (lift-def-inline (tail tokens) depth))))))
+
+    (defn lift-def-inline-body (tokens)
+        (if (nil? tokens) (pch-refuse "lift-def: a def with no body")
+            (intern_node PY-BMF-MODULE
+                (list
+                    (if (str_eq (tok-value (head tokens)) "return")
+                        (intern_node PY-BMF-RETURN
+                            (list (if (nil? (tail tokens))
+                                      (intern_node PY-BMF-INT (list (intern_trivial_int 0)))
+                                      (lift-complete-expr (tail tokens)))))
+                    (if (str_eq (tok-value (head tokens)) "pass")
+                        (intern_node PY-BMF-PASS (empty))
+                        (lift-complete-expr tokens)))))))
 
     (defn lift-def (statement-tree)
         (do
@@ -707,7 +778,9 @@
             ;; tokens[0]=def, tokens[1]=name, tokens[2]="("
             (let name (tok-value (nth tokens 1)))
             (let param-leaves (lift-def-params-loop (drop 3 tokens) (empty)))
-            (let body (lift-def-body children))
+            (let body (if (nil? children)
+                          (lift-def-inline-body (lift-def-inline (drop 2 tokens) 0))
+                          (lift-def-body children)))
             (intern_node PY-BMF-DEF
                 (append
                     (cons (intern_trivial_string name) param-leaves)
@@ -1110,7 +1183,12 @@
             (if (eq (stmt-subscript-assign? statement-tree) 1) (lift-subscript-assign statement-tree)
             (if (eq (stmt-annotated-assign? statement-tree) 1) (lift-annotated-assign statement-tree)
             (if (str_eq kind "expr")             (lift-expr-stmt statement-tree)
-                (pch-refuse (str_concat "lift-statement: unsupported kind/rule " (str_concat kind (str_concat "/" rule))))))))))))))))))))))
+            ;; `@expr` stands alone before the def or class it decorates. It is
+            ;; read as the expression after `@`; running it looks the name up,
+            ;; so an undefined decorator refuses by name instead of leaving a
+            ;; class silently undecorated.
+            (if (str_eq kind "decorator")        (lift-complete-expr (tail (python-statement-tree-tokens statement-tree)))
+                (pch-refuse (str_concat "lift-statement: unsupported kind/rule " (str_concat kind (str_concat "/" rule)))))))))))))))))))))))
 
     ;; ---- module lifter (the public surface) ------------------------
     ;;

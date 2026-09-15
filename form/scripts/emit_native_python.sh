@@ -63,6 +63,6 @@ echo "" >&2
 echo "Emitted:" >&2
 ls -la "$PYTHON_BMF_OUT/objects.py" 2>&1 | tail -1
 echo "" >&2
-echo "Step 3: py_compile sanity check..." >&2
-python3 -m py_compile "$PYTHON_BMF_OUT/objects.py"
-echo "  ok — objects.py compiles" >&2
+echo "Step 3: the body's own Python grammar reads the page..." >&2
+printf '%s\n' "$PYTHON_BMF_OUT/objects.py" > "$WORK_DIR/objects-path"
+./fkwu form/scripts/python-page-read.bml < "$WORK_DIR/objects-path"
