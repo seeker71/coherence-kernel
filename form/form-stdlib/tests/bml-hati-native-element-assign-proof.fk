@@ -1,0 +1,94 @@
+; tests/bml-hati-native-element-assign-proof.fk
+;
+; preludes: form-stdlib/core.fk form-stdlib/minimal-surface.fk form-stdlib/json.fk form-stdlib/cache.fk form-stdlib/form-ontology-bp.fk form-stdlib/engine.fk form-stdlib/compiler.fk form-stdlib/source-compiler.fk form-stdlib/hati-os-kernel.fk form-stdlib/hati-os-kernel-emit.fk form-stdlib/grammars/bml.fk
+;
+; Element assignment. `a[i] = v;` (and `a[i][j] = v;`) reads as the whole
+; array assignment `a = set(a, i, v)`, so declare, assign and the bnml frame
+; keep one home. The Hati lane lowers set to an indirect call (tag 44) into
+; one list-set function the table carries last; that function walks the cons
+; list with if (tag 6), head/tail and nth. The BMA reference lane sets the
+; element with its list-set op. An index the compiler already sees past the
+; end, a const target and a scalar target are named before any table exists.
+
+(do
+    (defn score-bool (actual)
+        (if actual 1 0))
+
+    (defn score-int (actual expected)
+        (if (eq actual expected) 1 0))
+
+    (defn score-str (actual expected)
+        (if (nil? actual)
+            0
+            (if (str_eq actual expected) 1 0)))
+
+    (defn str-contains? (haystack needle)
+        (ge (str_find haystack needle 0) 0))
+
+    (defn parse (source)
+        (bml-source-parse-executable-stream (bml-source-scan-text source)))
+
+    (defn node-of (source)
+        (bml-source-exec-parse-node (parse source)))
+
+    (let assign-parsed (parse "int[] a = #(1, 2, 3);\na[1] = 9;\nreturn a[1] + a[0];\n"))
+    (let assign-node (bml-source-exec-parse-node assign-parsed))
+    (let assign-image (bml-hati-compile-image assign-node))
+    (let assign-fns (bml-hati-image-fns assign-image))
+    (let assign-table (bml-hati-table-file assign-image))
+
+    ;; the whole array after one element changes
+    (let whole-node (node-of "int[] a = #(1, 2, 3);\na[2] = 7;\nreturn a;\n"))
+    (let whole-hati (bml-hati-run-value whole-node))
+    (let whole-bma (bma-run-value (bml-compile-program whole-node)))
+
+    ;; an index chain sets its innermost element
+    (let nested-node
+        (node-of "int[] m = #(#(1, 2), #(3, 4));\nm[1][0] = 8;\nreturn m[1][0] + m[0][1];\n"))
+
+    ;; set inside a nested block, read after it
+    (let block-node (node-of "int[] a = #(5, 6);\n{\n    a[0] = a[1] + 1;\n}\nreturn a[0];\n"))
+
+    ;; a mutable index walks the list at run time
+    (let dynamic-node (node-of "int[] a = #(1, 2, 3, 4);\nint i = 3;\na[i] = 0;\nreturn a[3] + a[2];\n"))
+
+    ;; inside a called method: the table carries main, the method, list-set
+    (let call-node
+        (node-of "int Poke(int n) {\n    int[] a = #(n, n);\n    a[1] = n + 1;\n    return a[0] + a[1];\n}\nreturn Poke(4);\n"))
+    (let call-image (bml-hati-compile-image call-node))
+
+    (let oob-image (bml-hati-compile-image (node-of "int[] a = #(1, 2);\na[2] = 5;\nreturn a[0];\n")))
+    (let const-image (bml-hati-compile-image (node-of "const int[] a = #(1, 2);\na[0] = 5;\nreturn a[0];\n")))
+    (let scalar-image (bml-hati-compile-image (node-of "int x = 3;\nx[0] = 1;\nreturn x;\n")))
+
+    (sum
+        (list
+            (score-bool (bml-source-exec-parse-ok? assign-parsed))
+            (score-int (len (bml-source-exec-parse-rest assign-parsed)) 0)
+            (score-str (nth (bml-source-exec-parse-rules assign-parsed) 1) "index-assign")
+            (score-int (bma-run-value (bml-compile-program assign-node)) 10)
+            (score-bool (bml-hati-image-supported? assign-image))
+            (score-int (len assign-fns) 2)
+            (score-int (fk-tag (nth assign-fns 1)) 6)
+            (score-bool (not (str-contains? assign-table "BML-HATI-UNSUPPORTED")))
+            (score-bool (not (str-contains? assign-table "__bml_list_set_fn")))
+            (score-int (bml-hati-run-value assign-node) 10)
+            (score-int (len whole-hati) 3)
+            (score-int (nth whole-hati 0) 1)
+            (score-int (nth whole-hati 2) 7)
+            (score-int (len whole-bma) 3)
+            (score-int (nth whole-bma 2) 7)
+            (score-int (bma-run-value (bml-compile-program nested-node)) 10)
+            (score-int (bml-hati-run-value nested-node) 10)
+            (score-int (bma-run-value (bml-compile-program block-node)) 7)
+            (score-int (bml-hati-run-value block-node) 7)
+            (score-int (bma-run-value (bml-compile-program dynamic-node)) 3)
+            (score-int (bml-hati-run-value dynamic-node) 3)
+            (score-int (bma-run-value (bml-compile-program call-node)) 9)
+            (score-bool (bml-hati-image-supported? call-image))
+            (score-int (len (bml-hati-image-fns call-image)) 3)
+            (score-int (bml-hati-run-value call-node) 9)
+            (score-str (head (bml-hati-image-unsupported oob-image)) "index/out-of-range")
+            (score-bool (str-contains? (bml-hati-table-file oob-image) "BML-HATI-UNSUPPORTED index/out-of-range"))
+            (score-str (head (bml-hati-image-unsupported const-image)) "assign/const")
+            (score-str (head (bml-hati-image-unsupported scalar-image)) "index/not-array"))))

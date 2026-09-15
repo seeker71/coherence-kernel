@@ -5049,6 +5049,32 @@
     (defn bml-index-at (node)
         (nth (bml-call-args node) 1))
 
+    (defn bml-ast-list-set (target at value)
+        (bml-ast-call-args "__bml_list_set" (list target at value)))
+
+    (defn bml-list-set-node? (node)
+        (bml-call-named? node "__bml_list_set"))
+
+    (defn bml-list-set-value (node)
+        (nth (bml-call-args node) 2))
+
+    (defn bml-index-base (node)
+        (if (bml-index-node? node)
+            (bml-index-base (bml-index-target node))
+            node))
+
+    ;; The whole array an index chain's assignment leaves: set(a, i, v)
+    ;; for a[i] = v, set(a, i, set(a[i], j, v)) for a[i][j] = v.
+    (defn bml-index-set-value (target value)
+        (if (bml-index-node? target)
+            (bml-index-set-value
+                (bml-index-target target)
+                (bml-ast-list-set
+                    (bml-index-target target)
+                    (bml-index-at target)
+                    value))
+            value))
+
     (defn bml-expr-result (ok node rest)
         (list "bml-expr-result" ok node rest))
 
@@ -5301,7 +5327,7 @@
                 (bml-source-parse-no-step objects))))
 
     (defn bml-source-parse-name-led-step (objects)
-        (if (bml-source-token-at? objects 1 "=")
+        (if (bml-source-assign-head? objects)
             (bml-source-parse-assign-step objects)
             (do
                 (let type-parse (bml-source-parse-type objects))
@@ -5315,17 +5341,61 @@
                     (bml-source-parse-method-body-step after-type objects)
                     (bml-source-parse-no-step objects))))))
 
+    ;; NAME "=", or NAME "[" that opens no array type (int[] x), heads an
+    ;; assignment.
+    (defn bml-source-assign-head? (objects)
+        (if (bml-source-token-at? objects 1 "=")
+            true
+            (if (bml-source-token-at? objects 1 "[")
+                (not (bml-source-token-at? objects 2 "]"))
+                false)))
+
     (defn bml-source-parse-assign-step (objects)
+        (if (bml-source-token-at? objects 1 "[")
+            (bml-source-parse-index-assign-step objects)
+            (do
+                (let value (bml-source-parse-expr-semicolon (drop 2 objects)))
+                (if (bml-expr-ok? value)
+                    (bml-source-parse-step
+                        true
+                        "assign"
+                        (bml-ast-assign
+                            (bmf-object-value (head objects))
+                            (bml-expr-node value))
+                        (bml-expr-rest value))
+                    (bml-source-parse-no-step objects)))))
+
+    (defn bml-source-index-assign-head? (target)
+        (if (bml-expr-ok? target)
+            (if (bml-index-node? (bml-expr-node target))
+                (if (node_eq
+                        (node_category (bml-index-base (bml-expr-node target)))
+                        BML-AST-NAME)
+                    (bml-source-token-value? (head (bml-expr-rest target)) "=")
+                    false)
+                false)
+            false))
+
+    ;; a[i] = v; reads as a = a with element i set, so declare, assign and
+    ;; the frame keep one home; an index chain sets its innermost element.
+    (defn bml-source-parse-index-assign-step (objects)
         (do
-            (let value (bml-source-parse-expr-semicolon (drop 2 objects)))
-            (if (bml-expr-ok? value)
-                (bml-source-parse-step
-                    true
-                    "assign"
-                    (bml-ast-assign
-                        (bmf-object-value (head objects))
-                        (bml-expr-node value))
-                    (bml-expr-rest value))
+            (let target (bml-source-parse-postfix objects))
+            (if (bml-source-index-assign-head? target)
+                (do
+                    (let value
+                        (bml-source-parse-expr-semicolon (tail (bml-expr-rest target))))
+                    (if (bml-expr-ok? value)
+                        (bml-source-parse-step
+                            true
+                            "index-assign"
+                            (bml-ast-assign
+                                (bml-local-name (bml-index-base (bml-expr-node target)))
+                                (bml-index-set-value
+                                    (bml-expr-node target)
+                                    (bml-expr-node value)))
+                            (bml-expr-rest value))
+                        (bml-source-parse-no-step objects)))
                 (bml-source-parse-no-step objects))))
 
     (defn bml-source-parse-local-step (local-type after-type objects)
@@ -6160,14 +6230,44 @@
                 (append
                     (bml-compile-node-in (bml-index-at node) env)
                     (list (bma-index 0))))
-            (bml-compile-call-in node env)))))
+        (if (bml-list-set-node? node)
+            (append
+                (bml-compile-value-in (bml-index-target node) env)
+                (append
+                    (bml-compile-node-in (bml-index-at node) env)
+                    (append
+                        (bml-compile-value-in (bml-list-set-value node) env)
+                        (list (bma-list-set 0)))))
+            (bml-compile-call-in node env))))))
+
+    (defn bma-list-set (_x) (bma-op "list-set" 0))
 
     (defn bma-exec-array-op (op state)
         (if (str_eq (comp-op-name op) "array")
             (bma-exec-make-array (comp-op-value op) state (empty))
         (if (str_eq (comp-op-name op) "index")
             (bma-exec-index state)
-            state)))
+        (if (str_eq (comp-op-name op) "list-set")
+            (bma-exec-list-set state)
+            state))))
+
+    ;; Past the end the write is dropped; the Hati list-set function agrees.
+    (defn bml-list-set-at (items at value)
+        (if (nil? items)
+            items
+            (if (eq at 0)
+                (cons value (tail items))
+                (cons (head items) (bml-list-set-at (tail items) (sub at 1) value)))))
+
+    (defn bma-exec-list-set (s)
+        (do
+            (let value (comp-vm-pop-value s))
+            (let s1 (comp-vm-pop-state s))
+            (let at (comp-vm-pop-value s1))
+            (let s2 (comp-vm-pop-state s1))
+            (let items (comp-vm-pop-value s2))
+            (let s3 (comp-vm-pop-state s2))
+            (comp-vm-push s3 (bml-list-set-at items at value))))
 
     (defn bma-exec-make-array (n state items)
         (if (le n 0)
@@ -6221,7 +6321,7 @@
     ;; The image reads refusals out of its own pool too, so a lowering that
     ;; named a refusal keeps the image unsupported even if no pass listed it.
     (defn bml-hati-image (fns pool source-node unsupported)
-        (list "bml-hati-image" fns pool source-node
+        (list "bml-hati-image" (bml-hati-link-list-set fns) pool source-node
               (bml-hati-reasons-merge unsupported (bml-hati-pool-refusals pool))))
 
     (defn bml-hati-image-fns (image) (nth image 1))
@@ -6389,7 +6489,99 @@
                 (bml-hati-lower-result
                     (fk-nth (bml-hati-lower-expr target) (bml-hati-lower-expr at))
                     (bml-hati-lower-pool at)))
-            (bml-hati-lower-call-in node pool env)))))
+        (if (bml-list-set-node? node)
+            (bml-hati-lower-list-set node pool env)
+            (bml-hati-lower-call-in node pool env))))))
+
+    (defn bml-hati-lower-list-set (node pool env)
+        (do
+            (let target
+                (bml-hati-lower-node-in-env (bml-index-target node) pool env))
+            (let at
+                (bml-hati-lower-node-in-env
+                    (bml-index-at node)
+                    (bml-hati-lower-pool target)
+                    env))
+            (let value
+                (bml-hati-lower-node-in-env
+                    (bml-list-set-value node)
+                    (bml-hati-lower-pool at)
+                    env))
+            (bml-hati-lower-result
+                (fk-icall
+                    (fk-cons (bml-hati-list-set-slot) (fk-cons (fk-lit 3) (fk-empty)))
+                    (fk-cons
+                        (bml-hati-lower-expr target)
+                        (fk-cons
+                            (bml-hati-lower-expr at)
+                            (fk-cons (bml-hati-lower-expr value) (fk-empty)))))
+                (bml-hati-lower-pool value))))
+
+    ;; An element assignment calls one shared list-set function. A table
+    ;; that needs it carries it last, and every call site reads that index.
+    (defn bml-hati-list-set-slot ()
+        (fk-node 24 (ms-intern (ms-cell 0) (intern_trivial_string "__bml_list_set_fn"))))
+
+    (defn bml-hati-list-set-fn (self-index)
+        (do
+            (let xs (fk-nth (fk-arg) (fk-lit 0)))
+            (let at (fk-nth (fk-arg) (fk-lit 1)))
+            (let value (fk-nth (fk-arg) (fk-lit 2)))
+            (fk-if
+                (fk-node 102 (ms-intern (fk-len xs) (fk-lit 0)))
+                xs
+                (fk-if
+                    (fk-node 102 (ms-intern at (fk-lit 0)))
+                    (fk-cons value (fk-tail xs))
+                    (fk-cons
+                        (fk-head xs)
+                        (fk-icall
+                            (fk-cons
+                                (fk-lit self-index)
+                                (fk-cons (fk-lit 3) (fk-empty)))
+                            (fk-cons
+                                (fk-tail xs)
+                                (fk-cons
+                                    (fk-sub at (fk-lit 1))
+                                    (fk-cons value (fk-empty))))))))))
+
+    (defn bml-hati-mentions? (node needle)
+        (if (node_eq node needle)
+            true
+            (bml-hati-any-mentions? (node_children node) needle)))
+
+    (defn bml-hati-any-mentions? (nodes needle)
+        (if (nil? nodes)
+            false
+            (if (bml-hati-mentions? (head nodes) needle)
+                true
+                (bml-hati-any-mentions? (tail nodes) needle))))
+
+    (defn bml-hati-relink (node needle replacement)
+        (if (node_eq node needle)
+            replacement
+            (if (eq (len (node_children node)) 0)
+                node
+                (intern_node
+                    (node_category node)
+                    (bml-hati-relink-all (node_children node) needle replacement)))))
+
+    (defn bml-hati-relink-all (nodes needle replacement)
+        (if (nil? nodes)
+            (empty)
+            (cons
+                (bml-hati-relink (head nodes) needle replacement)
+                (bml-hati-relink-all (tail nodes) needle replacement))))
+
+    (defn bml-hati-link-list-set (fns)
+        (if (bml-hati-any-mentions? fns (bml-hati-list-set-slot))
+            (append
+                (bml-hati-relink-all
+                    fns
+                    (bml-hati-list-set-slot)
+                    (fk-lit (len fns)))
+                (list (bml-hati-list-set-fn (len fns))))
+            fns))
 
     (defn bml-hati-unsupported-name-node-in (node env)
         (if (bml-bnml-binding? (bml-local-lookup env (bml-local-name node)))
@@ -6403,11 +6595,9 @@
             (append
                 (bml-hati-unsupported-assign-target (bml-bnml-target-name node) env)
                 (bml-hati-unsupported-node-in (bml-bnml-value node) env))
-        (if (bml-index-node? node)
+        (if (if (bml-index-node? node) true (bml-list-set-node? node))
             (append
-                (append
-                    (bml-hati-unsupported-node-in (bml-index-target node) env)
-                    (bml-hati-unsupported-node-in (bml-index-at node) env))
+                (bml-hati-unsupported-call-args-in (bml-call-args node) env)
                 (bml-hati-unsupported-index-shape node env))
             (bml-hati-unsupported-call-in node env)))))
 
@@ -6427,8 +6617,9 @@
                 (list "assign/const"))))))))
 
     ;; What the compiler already sees of a value: an array literal and its
-    ;; length, an int literal, another scalar, or nothing known (a mutable
-    ;; local, a parameter, a call).
+    ;; length, an int literal, another scalar, or nothing known (a
+    ;; parameter, a call). A local reads as the binding its path holds; an
+    ;; element set keeps its array's length.
     (defn bml-hati-static-value (node env)
         (do
             (let cat (node_category node))
@@ -6436,8 +6627,6 @@
                 (do
                     (let binding (bml-local-lookup env (bml-local-name node)))
                     (if (nil? binding)
-                        (list "unknown")
-                    (if (bml-bnml-binding? binding)
                         (list "unknown")
                     (if (bml-hati-arg-node? (bml-local-binding-value binding))
                         (list "unknown")
@@ -6447,7 +6636,9 @@
                         (list "unknown")
                         (bml-hati-static-value
                             (bml-local-binding-value binding)
-                            (bml-local-binding-env binding))))))))
+                            (bml-local-binding-env binding)))))))
+            (if (bml-list-set-node? node)
+                (bml-hati-static-value (bml-index-target node) env)
             (if (node_eq cat BML-AST-ARRAY)
                 (list "array" (len (node_children node)))
             (if (node_eq cat BML-AST-INT)
@@ -6458,7 +6649,7 @@
                 (list "scalar")
             (if (node_eq cat BML-AST-CHAR)
                 (list "scalar")
-                (list "unknown")))))))))
+                (list "unknown"))))))))))
 
     (defn bml-hati-unsupported-index-shape (node env)
         (do
