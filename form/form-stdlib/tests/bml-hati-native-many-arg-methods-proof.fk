@@ -1,0 +1,85 @@
+; tests/bml-hati-native-many-arg-methods-proof.fk
+;
+; preludes: form-stdlib/core.fk form-stdlib/minimal-surface.fk form-stdlib/json.fk form-stdlib/cache.fk form-stdlib/form-ontology-bp.fk form-stdlib/engine.fk form-stdlib/compiler.fk form-stdlib/source-compiler.fk form-stdlib/hati-os-kernel.fk form-stdlib/hati-os-kernel-emit.fk form-stdlib/grammars/bml.fk
+;
+; Closes broader-multi-argument-methods. A source method takes any number of
+; parameters through the shared parameter parser; each parameter binds to its
+; own slot of the packed argument list, calls pack three or more arguments
+; through Hati's indirect call, and arity still selects among overloads. A
+; parameter list that does not close cleanly does not parse, and a short call
+; is named before a table is emitted.
+
+(do
+    (defn score-bool (actual)
+        (if actual 1 0))
+
+    (defn score-int (actual expected)
+        (if (eq actual expected) 1 0))
+
+    (defn score-str (actual expected)
+        (if (nil? actual)
+            0
+            (if (str_eq actual expected) 1 0)))
+
+    (defn str-contains? (haystack needle)
+        (ge (str_find haystack needle 0) 0))
+
+    (defn ma-parse (text)
+        (bml-source-parse-executable-stream (bml-source-scan-text text)))
+
+    (defn ma-node (text)
+        (bml-source-exec-parse-node (ma-parse text)))
+
+    (defn ma-both (node)
+        (if (eq (bma-run-value (bml-compile-unit-program node (empty))) 42)
+            (if (eq (bml-hati-run-value node) 42) 1 0)
+            0))
+
+    (let source
+        "int Sum3(int a, int b, int c) { return a + b + c; }\nreturn Sum3(10, 12, 20);\n")
+    (let parsed (ma-parse source))
+    (let source-node (bml-source-exec-parse-node parsed))
+    (let source-image (bml-hati-compile-image source-node))
+    (let source-table (bml-hati-table-file source-image))
+    (let method-node (head (bml-source-exec-parse-nodes parsed)))
+    (let call-node (nth (bml-source-exec-parse-nodes parsed) 1))
+    (let method-image (bml-hati-compile-image method-node))
+
+    (let five-node
+        (ma-node "int Sum5(int a, int b, int c, int d, int e) { return a + b + c + d + e; }\nreturn Sum5(2, 4, 8, 12, 16);\n"))
+    (let pick-node
+        (ma-node "int Pick3(int a, int b, int c) { return c; }\nreturn Pick3(1, 2, 42);\n"))
+    (let nested-node
+        (ma-node "int Inc(int n) { return n + 1; }\nint Sum3(int a, int b, int c) { return a + b + c; }\nreturn Sum3(Inc(9), 12, Sum3(5, 5, 10));\n"))
+    (let overload-node
+        (ma-node "int F(int a, int b) { return a + b; }\nint F(int a, int b, int c) { return a + b + c; }\nreturn F(1, 2) + F(13, 13, 13);\n"))
+    (let short-image
+        (bml-hati-compile-image
+            (ma-node "int Sum3(int a, int b, int c) { return a + b + c; }\nreturn Sum3(1, 2);\n")))
+    (let broken-parsed (ma-parse "int Bad(int a, int) { return a; }\n"))
+
+    (sum
+        (list
+            (score-bool (bml-source-exec-parse-ok? parsed))
+            (score-int (len (bml-source-exec-parse-rest parsed)) 0)
+            (score-str (nth (bml-source-exec-parse-rules parsed) 0) "method-body")
+            (score-str (nth (bml-source-exec-parse-rules parsed) 1) "return-expr")
+            (score-int (len (bml-method-node-parameters method-node)) 3)
+            (score-str (bml-parameter-name (nth (bml-method-node-parameters method-node) 2)) "c")
+            (score-int (len (bml-call-args (bml-node-child call-node 0))) 3)
+            (score-int (bma-run-value (bml-compile-unit-program source-node (empty))) 42)
+            (score-bool (bml-hati-image-supported? source-image))
+            (score-int (len (bml-hati-image-fns source-image)) 2)
+            (score-int (bml-hati-run-value source-node) 42)
+            (score-bool (str-contains? source-table "44"))
+            (score-bool (not (str-contains? source-table "BML-HATI-UNSUPPORTED")))
+            (score-int (bml-hati-run-value-with-arg method-node (list 10 12 20)) 42)
+            (score-int (len (bml-hati-image-fns method-image)) 1)
+            (ma-both five-node)
+            (ma-both pick-node)
+            (ma-both nested-node)
+            (score-int (bml-hati-run-value overload-node) 42)
+            (score-bool (not (bml-hati-image-supported? short-image)))
+            (score-str (head (bml-hati-image-unsupported short-image)) "call/arity")
+            (score-bool (not (bml-source-exec-parse-ok? broken-parsed)))
+            (score-int (len (bml-source-exec-parse-nodes broken-parsed)) 0))))

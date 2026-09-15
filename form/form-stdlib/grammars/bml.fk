@@ -1,5 +1,5 @@
 ; grammars/bml.fk - BML object compiler and runtime support
-; preludes: form-stdlib/dialect-categories.fk form-stdlib/source-compiler.fk form-stdlib/compiler.fk form-stdlib/bml/source-scan.bml form-stdlib/hati-os-kernel.fk form-stdlib/fkc-table-serialize.fk
+; preludes: form-stdlib/dialect-categories.fk form-stdlib/source-compiler.fk form-stdlib/compiler.fk form-stdlib/bml/source-scan.bml form-stdlib/hati-os-kernel.fk form-stdlib/fkc-table-serialize.fk form-stdlib/bml-native-interface-package-import.fk
 ;
 ; Reference shape: the 2000 BML/JBML compiler lowers BMF matches into
 ; component objects, then into an instruction stream for a backtracking VM.
@@ -5082,7 +5082,7 @@
                 (if (str_eq kind "bml-char")
                     (bml-expr-result true (bml-ast-char value) (tail objects))
                 (if (str_eq kind "bml-name")
-                    (bml-expr-result true (bml-ast-name value) (tail objects))
+                    (bml-source-parse-name-primary objects)
                 (if (str_eq value "#(")
                     (bml-source-parse-array-literal (tail objects))
                 (if (str_eq value "(")
@@ -5116,6 +5116,49 @@
                     (bml-expr-result true (bml-expr-node inner) (tail (bml-expr-rest inner)))
                     (bml-expr-fail objects))
                 (bml-expr-fail objects))))
+
+    ;; A name may be qualified (A.B.c, resolved through package and import
+    ;; scope) and may call; each argument is an expression.
+    (defn bml-source-parse-name-primary (objects)
+        (do
+            (let name-parse (bml-source-parse-qualified-name objects))
+            (let name (nth name-parse 0))
+            (let rest (nth name-parse 1))
+            (if (bml-source-token-value? (head rest) "(")
+                (if (bml-source-token-value? (nth rest 1) ")")
+                    (bml-expr-result
+                        true
+                        (bml-source-call-node name (empty))
+                        (drop 2 rest))
+                    (bml-source-parse-call-args name (tail rest) (empty)))
+                (bml-expr-result true (bml-ast-name name) rest))))
+
+    (defn bml-source-parse-call-args (name objects args)
+        (do
+            (let arg (bml-source-parse-expr objects))
+            (if (bml-expr-ok? arg)
+                (do
+                    (let after (bml-expr-rest arg))
+                    (let acc (cons (bml-expr-node arg) args))
+                    (if (bml-source-token-value? (head after) ",")
+                        (bml-source-parse-call-args name (tail after) acc)
+                    (if (bml-source-token-value? (head after) ")")
+                        (bml-expr-result
+                            true
+                            (bml-source-call-node name (reverse-list acc))
+                            (tail after))
+                        (bml-expr-fail objects))))
+                (bml-expr-fail objects))))
+
+    ;; One non-array argument keeps the single-argument call shape; zero,
+    ;; several, or one array argument travel inside an argument array,
+    ;; which bml-call-args unpacks.
+    (defn bml-source-call-node (name args)
+        (if (eq (len args) 1)
+            (if (node_eq (node_category (head args)) BML-AST-ARRAY)
+                (bml-ast-call-args name args)
+                (bml-ast-call name (head args)))
+            (bml-ast-call-args name args)))
 
     (defn bml-source-parse-postfix (objects)
         (do
@@ -5183,9 +5226,13 @@
             (bml-source-parse-return-expr-step objects)
         (if (bml-source-token-value? (head objects) "const")
             (bml-source-parse-const-expr-step objects)
+        (if (bml-source-token-value? (head objects) "package")
+            (bml-source-scoped-package objects)
+        (if (bml-source-token-value? (head objects) "import")
+            (bml-source-scoped-import objects)
         (if (bml-source-name-kind-token? (head objects))
             (bml-source-parse-name-led-step objects)
-            (bml-source-parse-no-step objects)))))))
+            (bml-source-parse-no-step objects)))))))))
 
     (defn bml-source-parse-statements-until-close (objects nodes)
         (if (nil? objects)
@@ -5304,13 +5351,19 @@
                     (tail objects)
                     (cons (head objects) acc)))))
 
+    ;; any parameter count, through the shared parameter parser; a list
+    ;; whose parameters do not all parse does not make a method.
     (defn bml-source-parse-method-body-step (after-type objects)
         (do
             (let split
                 (bml-source-split-at-close-paren (drop 2 after-type) (empty)))
             (let after-params (nth split 2))
+            (let parameters (bml-source-parse-parameters (nth split 1)))
             (if (if (head split)
-                    (bml-source-token-value? (head after-params) "{")
+                    (if (bml-source-token-value? (head after-params) "{")
+                        (eq (len parameters)
+                            (bml-source-scoped-parameter-count (nth split 1)))
+                        false)
                     false)
                 (do
                     (let body
@@ -5324,7 +5377,7 @@
                             (bml-ast-method-with-parameters
                                 (bmf-object-value (head after-type))
                                 (bml-ast-block (nth body 1))
-                                (bml-source-parse-parameters (nth split 1)))
+                                parameters)
                             (nth body 2))
                         (bml-source-parse-no-step objects)))
                 (bml-source-parse-no-step objects))))
@@ -5422,13 +5475,12 @@
         (bml-source-parse-declaration-stream (bml-source-scan-file path)))
 
     (defn bml-source-declaration-model (result)
-        (bml-model
-            (bml-components-of-kind
-                (bml-source-exec-parse-nodes result)
-                "Class")
-            (bml-components-of-kind
-                (bml-source-exec-parse-nodes result)
-                "Interface")))
+        (do
+            (let nodes (bml-source-exec-parse-nodes result))
+            (bml-model-with-scope
+                (bml-components-of-kind nodes "Class")
+                (bml-components-of-kind nodes "Interface")
+                (bml-source-declaration-scope nodes))))
 
     (defn bml-thesis-bmf-primitive-rule-count-loop (rule-names)
         (if (nil? rule-names) 0
@@ -5615,11 +5667,18 @@
             (list (bml-call-arg node))))
 
     (defn bml-local-lookup (env name)
+        (do
+            (let direct (bml-local-lookup-direct env name))
+            (if (nil? direct)
+                (bml-scope-lookup-qualified env name)
+                direct)))
+
+    (defn bml-local-lookup-direct (env name)
         (if (nil? env)
             (empty)
             (if (str_eq (bml-local-binding-name (head env)) name)
                 (head env)
-                (bml-local-lookup (tail env) name))))
+                (bml-local-lookup-direct (tail env) name))))
 
     (defn bml-local-bind-const (env node)
         (cons
@@ -5821,9 +5880,29 @@
                 (empty)
                 (do
                     (let method-node (bml-local-binding-value binding))
-                    (bml-compile-node-in
+                    (bml-compile-callee-body-in
                         (bml-method-node-body method-node)
                         (bml-call-bind-args method-node node env)))))))
+
+    ;; A callee's final return is the call's value: inlined BMA keeps the
+    ;; caller's stream running instead of ending it at the callee's return.
+    (defn bml-compile-callee-body-in (body env)
+        (if (node_eq (node_category body) BML-AST-RETURN)
+            (bml-compile-node-in (bml-node-child body 0) env)
+        (if (node_eq (node_category body) BML-AST-BLOCK)
+            (bml-compile-callee-children-in (node_children body) env)
+            (bml-compile-node-in body env))))
+
+    (defn bml-compile-callee-children-in (children env)
+        (if (nil? children)
+            (empty)
+            (if (nil? (tail children))
+                (bml-compile-callee-body-in (head children) env)
+                (append
+                    (bml-compile-child-in (head children) env)
+                    (bml-compile-callee-children-in
+                        (tail children)
+                        (bml-local-env-after-node (head children) env))))))
 
     (defn bml-compile-node-in (node env)
         (do
@@ -6122,10 +6201,10 @@
         "original BML/BMF/Form compiler sources compile themselves into versioned .fkb images and Hati fourth-kernel native binaries with full class, template, generic, method, state, exception, and physical-lane support")
 
     (defn bml-hati-native-floor ()
-        "supported native subsets include lexical const/name binding, one- and two-argument method parameter binding, known method calls, method-scope class field read/write through record-backed self, named class method dispatch, class construction defaults, arity-aware overload dispatch, arity-selected compiled overload calls, template/generic metadata, mutable locals rebound through a per-call bnml frame (nested-block rebinding included), array literals and a[i] indexing, clang oracle assembly receipts, and Form-native JIT runtime model rows for macos-arm64 and android-arm64; they must produce loadable Hati tables with parity proof; unsupported BML shapes, including unresolved names, unbound calls, unbound or const assignment targets, indexes already seen out of range or into a non-array, arity mismatch, missing class methods, full class construction syntax, type/generic overload resolution, and template/generic specialization, must be named before table emission and never silently become a valid zero result")
+        "supported native subsets include lexical const/name binding, package-qualified names, import-resolved symbols linked across source units into one table, one- and two-argument method parameter binding, methods of any parameter count, known method calls, general calls with nested, bound-name, sum and package-receiver arguments, method-scope class field read/write through record-backed self, named class method dispatch, class construction defaults, arity-aware overload dispatch, arity-selected compiled overload calls, template/generic metadata, mutable locals rebound through a per-call bnml frame (nested-block rebinding included), array literals and a[i] indexing, clang oracle assembly receipts, and Form-native JIT runtime model rows for macos-arm64 and android-arm64; they must produce loadable Hati tables with parity proof; unsupported BML shapes, including unresolved names, unbound calls, unresolved imports, value-receiver dispatch, unbound or const assignment targets, indexes already seen out of range or into a non-array, arity mismatch, missing class methods, full class construction syntax, type/generic overload resolution, and template/generic specialization, must be named before table emission, and a name the lowering cannot resolve lowers to a named refusal literal, never to a valid zero result")
 
     (defn bml-hati-native-next-step ()
-        "lift full class construction syntax, template/generic specialization, type/generic overload resolution, and broader multi-argument call families on the method parameter/call binding floor")
+        "lift full class construction syntax, template/generic specialization, type/generic overload resolution, value-receiver and interface dispatch on the scoped call floor")
 
     (defn bml-hati-lower-result (expr pool)
         (list "bml-hati-lower-result" expr pool))
@@ -6139,8 +6218,11 @@
     (defn bml-hati-fns-result-fns (result) (nth result 1))
     (defn bml-hati-fns-result-pool (result) (nth result 2))
 
+    ;; The image reads refusals out of its own pool too, so a lowering that
+    ;; named a refusal keeps the image unsupported even if no pass listed it.
     (defn bml-hati-image (fns pool source-node unsupported)
-        (list "bml-hati-image" fns pool source-node unsupported))
+        (list "bml-hati-image" fns pool source-node
+              (bml-hati-reasons-merge unsupported (bml-hati-pool-refusals pool))))
 
     (defn bml-hati-image-fns (image) (nth image 1))
     (defn bml-hati-image-pool (image) (nth image 2))
@@ -6512,6 +6594,12 @@
                 1)))
 
     (defn bml-hati-method-binding-for-arity (env name arity)
+        (bml-hati-method-binding-for-arity-in
+            env
+            (bml-scope-resolve-name env name)
+            arity))
+
+    (defn bml-hati-method-binding-for-arity-in (env name arity)
         (if (nil? env)
             (empty)
             (do
@@ -6521,15 +6609,15 @@
                     (if (bml-hati-method-ref? value)
                         (if (eq (bml-hati-method-ref-arity value) arity)
                             binding
-                            (bml-hati-method-binding-for-arity
+                            (bml-hati-method-binding-for-arity-in
                                 (tail env)
                                 name
                                 arity))
-                        (bml-hati-method-binding-for-arity
+                        (bml-hati-method-binding-for-arity-in
                             (tail env)
                             name
                             arity))
-                    (bml-hati-method-binding-for-arity
+                    (bml-hati-method-binding-for-arity-in
                         (tail env)
                         name
                         arity)))))
@@ -6645,7 +6733,7 @@
             (do
                 (let binding (bml-local-lookup env (bml-call-name node)))
                 (if (nil? binding)
-                    (list "call/unbound")
+                    (list (bml-scope-unbound-call-reason env (bml-call-name node)))
                 (if (bml-hati-method-ref? (bml-local-binding-value binding))
                     (if (nil?
                             (bml-hati-method-binding-for-arity
@@ -6697,9 +6785,9 @@
             (if (node_eq cat BML-AST-CHOOSE)
                 (bml-hati-unsupported-choose-in-env (node_children node) env)
             (if (node_eq cat BML-AST-PACKAGE)
-                (list "package")
+                (list "package/outside-unit")
             (if (node_eq cat BML-AST-IMPORT)
-                (list "import")
+                (list "import/outside-unit")
             (if (node_eq cat BML-AST-INTERFACE)
                 (list "interface")
             (if (node_eq cat BML-AST-CLASS)
@@ -6834,11 +6922,11 @@
         (do
             (let binding (bml-local-lookup env (bml-local-name node)))
             (if (nil? binding)
-                (bml-hati-lower-result (fk-lit 0) pool)
+                (bml-hati-lower-refusal "name/unbound" pool)
             (if (bml-hati-arg-node? (bml-local-binding-value binding))
                 (bml-hati-lower-result (fk-arg) pool)
             (if (bml-hati-method-ref? (bml-local-binding-value binding))
-                (bml-hati-lower-result (fk-lit 0) pool)
+                (bml-hati-lower-refusal "name/method" pool)
                 (bml-hati-lower-node-in-env
                     (bml-local-binding-value binding)
                     pool
@@ -6848,7 +6936,9 @@
         (do
             (let arg
                 (bml-hati-lower-node-in-env
-                    (bml-call-arg node)
+                    (if (eq (bml-hati-method-ref-arity method-ref) 1)
+                        (head (bml-call-args node))
+                        (bml-call-arg node))
                     pool
                     env))
             (bml-hati-lower-result
@@ -6898,7 +6988,9 @@
             (do
                 (let binding (bml-local-lookup env (bml-call-name node)))
                 (if (nil? binding)
-                    (bml-hati-lower-result (fk-lit 0) pool)
+                    (bml-hati-lower-refusal
+                        (bml-scope-unbound-call-reason env (bml-call-name node))
+                        pool)
                 (if (bml-hati-method-ref? (bml-local-binding-value binding))
                     (do
                         (let method-binding
@@ -6907,13 +6999,13 @@
                                 (bml-call-name node)
                                 (len (bml-call-args node))))
                         (if (nil? method-binding)
-                            (bml-hati-lower-result (fk-lit 0) pool)
+                            (bml-hati-lower-refusal "call/arity" pool)
                             (bml-hati-lower-method-ref-call
                                 node
                                 (bml-local-binding-value method-binding)
                                 pool
                                 env)))
-                    (bml-hati-lower-result (fk-lit 0) pool)))))))))
+                    (bml-hati-lower-refusal "call/not-method" pool)))))))))
 
     (defn bml-hati-lower-array-in (nodes pool env)
         (if (nil? nodes)
@@ -7093,31 +7185,7 @@
                     (bml-hati-fns-result-pool rest)))))
 
     (defn bml-hati-compile-block-image (node)
-        (do
-            (let nodes (node_children node))
-            (let methods (bml-hati-method-nodes nodes))
-            (let main-nodes (bml-hati-main-nodes nodes))
-            (let method-env (bml-hati-bind-methods methods (empty) 1))
-            (let unsupported
-                (append
-                    (bml-hati-unsupported-nodes-in-env main-nodes method-env)
-                    (bml-hati-unsupported-methods-in methods method-env)))
-            (let main-lowered
-                (bml-hati-bnml-body-in
-                    main-nodes
-                    (bml-hati-lower-nodes-in-env main-nodes (empty) method-env)))
-            (let methods-lowered
-                (bml-hati-lower-methods-in
-                    methods
-                    (bml-hati-lower-pool main-lowered)
-                    method-env))
-            (bml-hati-image
-                (cons
-                    (bml-hati-lower-expr main-lowered)
-                    (bml-hati-fns-result-fns methods-lowered))
-                (bml-hati-fns-result-pool methods-lowered)
-                node
-                unsupported)))
+        (bml-scope-compile-block-image node (empty)))
 
     (defn bml-hati-compile-image (node)
         (do
@@ -7167,6 +7235,700 @@
 
     (defn bml-hati-table-file-from-node (node)
         (bml-hati-table-file (bml-hati-compile-image node)))
+
+    ;; --- package/import scope, general calls, many-argument methods ---
+    ;; A source unit is a parsed block. Its package and import declarations
+    ;; become bnii rows (bml-native-interface-package-import.fk) and those
+    ;; rows decide which names each unit sees. Units reachable through
+    ;; imports link into one Hati table: the importing unit's main is
+    ;; function 0, its own methods follow, then each linked unit's methods
+    ;; in link order. A name nothing in scope resolves lowers to a named
+    ;; refusal literal, never to a zero.
+
+    ;; source: package and import declarations, read from
+    ;; bml-source-parse-general-step; the parameter count a method's
+    ;; tokens promise, checked by bml-source-parse-method-body-step.
+
+    (defn bml-source-scoped-fail (objects)
+        (bml-source-parse-step false "" (empty) objects))
+
+    (defn bml-source-scoped-package (objects)
+        (do
+            (let name-parse (bml-source-parse-qualified-name (tail objects)))
+            (let name (nth name-parse 0))
+            (let rest (nth name-parse 1))
+            (if (str_eq name "")
+                (bml-source-scoped-fail objects)
+                (if (bml-source-token-value? (head rest) ";")
+                    (bml-source-parse-step
+                        true
+                        "package-scope"
+                        (bml-ast-package name)
+                        (tail rest))
+                    (bml-source-scoped-fail objects)))))
+
+    (defn bml-source-scoped-import (objects)
+        (do
+            (let name-parse (bml-source-parse-qualified-name (tail objects)))
+            (let name (nth name-parse 0))
+            (let rest (nth name-parse 1))
+            (if (str_eq name "")
+                (bml-source-scoped-fail objects)
+            (if (bml-source-token-value? (head rest) ";")
+                (bml-source-parse-step
+                    true
+                    "import-scope"
+                    (bml-ast-import name "")
+                    (tail rest))
+            (if (bml-source-token-value? (head rest) ".*")
+                (if (bml-source-token-value? (nth rest 1) ";")
+                    (bml-source-parse-step
+                        true
+                        "import-star-scope"
+                        (bml-ast-import name ".*")
+                        (drop 2 rest))
+                    (bml-source-scoped-fail objects))
+                (bml-source-scoped-fail objects))))))
+
+    (defn bml-source-scoped-comma-count (objects depth count)
+        (if (nil? objects)
+            count
+            (do
+                (let value (bmf-object-value (head objects)))
+                (if (str_eq value "<")
+                    (bml-source-scoped-comma-count (tail objects) (add depth 1) count)
+                (if (str_eq value ">")
+                    (bml-source-scoped-comma-count (tail objects) (sub depth 1) count)
+                (if (str_eq value ",")
+                    (bml-source-scoped-comma-count
+                        (tail objects)
+                        depth
+                        (if (eq depth 0) (add count 1) count))
+                    (bml-source-scoped-comma-count (tail objects) depth count)))))))
+
+    ;; the parameter count the tokens promise: one more than the top-level
+    ;; commas, zero for an empty list.
+    (defn bml-source-scoped-parameter-count (objects)
+        (if (nil? objects)
+            0
+            (add (bml-source-scoped-comma-count objects 0 0) 1)))
+
+    ;; declaration stream: Package/Import/Interface components as bnii rows.
+
+    (defn bml-model-with-scope (classes interfaces scope)
+        (list "bml-model" classes interfaces scope))
+
+    (defn bml-model-scope (model) (nth model 3))
+
+    (defn bml-scope-suffix? (text suffix)
+        (if (lt (str_len text) (str_len suffix))
+            false
+            (str_eq
+                (substring text (sub (str_len text) (str_len suffix)) (str_len text))
+                suffix)))
+
+    (defn bml-source-declaration-import-module (name selector)
+        (if (str_eq selector ".*")
+            (if (bml-scope-suffix? name ".*")
+                (substring name 0 (sub (str_len name) 2))
+                name)
+            name))
+
+    (defn bml-source-declaration-import-rows (imports source)
+        (if (nil? imports)
+            (empty)
+            (do
+                (let fields (comp-bml-fields (head imports)))
+                (cons
+                    (bnii-import
+                        (bml-source-declaration-import-module (nth fields 0) (nth fields 1))
+                        (nth fields 1)
+                        source)
+                    (bml-source-declaration-import-rows (tail imports) source)))))
+
+    (defn bml-source-declaration-member-names (members)
+        (if (nil? members)
+            (empty)
+            (do
+                (let member (head members))
+                (let rest (bml-source-declaration-member-names (tail members)))
+                (if (bml-component-kind? member "Method")
+                    (cons (nth (comp-bml-fields member) 1) rest)
+                (if (bml-component-kind? member "Section")
+                    (append
+                        (bml-source-declaration-member-names
+                            (nth (comp-bml-fields member) 2))
+                        rest)
+                    rest)))))
+
+    (defn bml-source-declaration-interface-rows (interfaces source)
+        (if (nil? interfaces)
+            (empty)
+            (do
+                (let fields (comp-bml-fields (head interfaces)))
+                (cons
+                    (bnii-interface
+                        (nth fields 0)
+                        (nth fields 2)
+                        (bml-source-declaration-member-names (nth fields 3))
+                        (empty)
+                        source)
+                    (bml-source-declaration-interface-rows (tail interfaces) source)))))
+
+    (defn bml-source-declaration-scope (nodes)
+        (do
+            (let packages (bml-components-of-kind nodes "Package"))
+            (let source (bnii-source "bml" "" 0))
+            (bnii-unit
+                (bnii-package
+                    (if (nil? packages) "" (head (comp-bml-fields (head packages))))
+                    source)
+                (bml-source-declaration-import-rows
+                    (bml-components-of-kind nodes "Import")
+                    source)
+                (bml-source-declaration-interface-rows
+                    (bml-components-of-kind nodes "Interface")
+                    source))))
+
+    ;; executable units: package/import nodes as bnii rows.
+
+    (defn bml-scope-declaration? (node)
+        (if (node_eq (node_category node) BML-AST-PACKAGE)
+            true
+            (node_eq (node_category node) BML-AST-IMPORT)))
+
+    (defn bml-scope-unit-nodes (node)
+        (if (node_eq (node_category node) BML-AST-BLOCK)
+            (node_children node)
+            (list node)))
+
+    (defn bml-scope-nodes-of (nodes cat)
+        (if (nil? nodes)
+            (empty)
+            (if (node_eq (node_category (head nodes)) cat)
+                (cons (head nodes) (bml-scope-nodes-of (tail nodes) cat))
+                (bml-scope-nodes-of (tail nodes) cat))))
+
+    (defn bml-scope-main-nodes (nodes)
+        (if (nil? nodes)
+            (empty)
+            (if (bml-node-method? (head nodes))
+                (bml-scope-main-nodes (tail nodes))
+            (if (bml-scope-declaration? (head nodes))
+                (bml-scope-main-nodes (tail nodes))
+                (cons (head nodes) (bml-scope-main-nodes (tail nodes)))))))
+
+    (defn bml-scope-package-name (nodes)
+        (do
+            (let packages (bml-scope-nodes-of nodes BML-AST-PACKAGE))
+            (if (nil? packages)
+                ""
+                (node_value (bml-node-child (head packages) 0)))))
+
+    (defn bml-scope-import-rows (imports source)
+        (if (nil? imports)
+            (empty)
+            (cons
+                (bnii-import
+                    (node_value (bml-node-child (head imports) 0))
+                    (node_value (bml-node-child (head imports) 1))
+                    source)
+                (bml-scope-import-rows (tail imports) source))))
+
+    (defn bml-scope-unit-rows-at (node path)
+        (do
+            (let nodes (bml-scope-unit-nodes node))
+            (let source (bnii-source "bml" path 0))
+            (bnii-unit
+                (bnii-package (bml-scope-package-name nodes) source)
+                (bml-scope-import-rows
+                    (bml-scope-nodes-of nodes BML-AST-IMPORT)
+                    source)
+                (empty))))
+
+    (defn bml-scope-unit-rows (node)
+        (bml-scope-unit-rows-at node ""))
+
+    (defn bml-scope-unit (pos node)
+        (do
+            (let nodes (bml-scope-unit-nodes node))
+            (list "bml-scope-unit"
+                  pos
+                  (bml-scope-unit-rows node)
+                  (bml-hati-method-nodes nodes)
+                  (bml-scope-main-nodes nodes)
+                  nodes)))
+
+    (defn bml-scope-unit-pos (unit) (nth unit 1))
+    (defn bml-scope-unit-rows-of (unit) (nth unit 2))
+    (defn bml-scope-unit-methods (unit) (nth unit 3))
+    (defn bml-scope-unit-mains (unit) (nth unit 4))
+    (defn bml-scope-unit-all-nodes (unit) (nth unit 5))
+
+    (defn bml-scope-unit-package (unit)
+        (bnii-unit-package-name (bml-scope-unit-rows-of unit)))
+
+    (defn bml-scope-unit-imports (unit)
+        (bnii-unit-imports (bml-scope-unit-rows-of unit)))
+
+    (defn bml-scope-units-from (units pos)
+        (if (nil? units)
+            (empty)
+            (cons
+                (bml-scope-unit pos (head units))
+                (bml-scope-units-from (tail units) (add pos 1)))))
+
+    ;; names: A.B.c has qualifier A.B and leaf c.
+
+    (defn bml-scope-last-dot-from (name from found)
+        (do
+            (let at (str_find name "." from))
+            (if (lt at 0)
+                found
+                (bml-scope-last-dot-from name (add at 1) at))))
+
+    (defn bml-scope-qualifier (name)
+        (do
+            (let at (bml-scope-last-dot-from name 0 -1))
+            (if (lt at 0) "" (substring name 0 at))))
+
+    (defn bml-scope-leaf (name)
+        (do
+            (let at (bml-scope-last-dot-from name 0 -1))
+            (if (lt at 0) name (substring name (add at 1) (str_len name)))))
+
+    (defn bml-scope-qualify (package name)
+        (if (str_eq package "")
+            name
+            (str_concat (str_concat package ".") name)))
+
+    (defn bml-scope-prefix? (text prefix)
+        (eq (str_find text prefix 0) 0))
+
+    ;; imports: `import P.*;` sees every symbol of package P by leaf and by
+    ;; qualified name; `import P;` sees them qualified only; `import P.s;`
+    ;; (or `import s;` for the default package) sees one symbol.
+
+    (defn bml-scope-units-in (units package)
+        (if (nil? units)
+            (empty)
+            (if (str_eq (bml-scope-unit-package (head units)) package)
+                (cons (head units) (bml-scope-units-in (tail units) package))
+                (bml-scope-units-in (tail units) package))))
+
+    (defn bml-scope-methods-define? (methods name)
+        (if (nil? methods)
+            false
+            (if (str_eq (bml-method-node-name (head methods)) name)
+                true
+                (bml-scope-methods-define? (tail methods) name))))
+
+    (defn bml-scope-units-defining (units name)
+        (if (nil? units)
+            (empty)
+            (if (bml-scope-methods-define? (bml-scope-unit-methods (head units)) name)
+                (cons (head units) (bml-scope-units-defining (tail units) name))
+                (bml-scope-units-defining (tail units) name))))
+
+    (defn bml-scope-import-target (mode package symbol units)
+        (list "bml-scope-import-target" mode package symbol units))
+
+    (defn bml-scope-target-mode (target) (nth target 1))
+    (defn bml-scope-target-package (target) (nth target 2))
+    (defn bml-scope-target-symbol (target) (nth target 3))
+    (defn bml-scope-target-units (target) (nth target 4))
+
+    (defn bml-scope-resolve-import (all-units row)
+        (do
+            (let module (bnii-import-module row))
+            (let package-units (bml-scope-units-in all-units module))
+            (if (eq (bnii-import-star? row) 1)
+                (bml-scope-import-target "star" module "" package-units)
+            (if (not (nil? package-units))
+                (bml-scope-import-target "package" module "" package-units)
+                (bml-scope-import-target
+                    "symbol"
+                    (bml-scope-qualifier module)
+                    (bml-scope-leaf module)
+                    (bml-scope-units-defining
+                        (bml-scope-units-in all-units (bml-scope-qualifier module))
+                        (bml-scope-leaf module)))))))
+
+    (defn bml-scope-import-units (all-units rows)
+        (if (nil? rows)
+            (empty)
+            (append
+                (bml-scope-target-units (bml-scope-resolve-import all-units (head rows)))
+                (bml-scope-import-units all-units (tail rows)))))
+
+    (defn bml-scope-unit-linked? (linked unit)
+        (if (nil? linked)
+            false
+            (if (eq (bml-scope-unit-pos (head linked)) (bml-scope-unit-pos unit))
+                true
+                (bml-scope-unit-linked? (tail linked) unit))))
+
+    ;; breadth-first over imports from the main unit, each unit once.
+    (defn bml-scope-link-order (all-units pending linked)
+        (if (nil? pending)
+            (reverse-list linked)
+            (do
+                (let unit (head pending))
+                (if (bml-scope-unit-linked? linked unit)
+                    (bml-scope-link-order all-units (tail pending) linked)
+                    (bml-scope-link-order
+                        all-units
+                        (append
+                            (tail pending)
+                            (bml-scope-import-units all-units (bml-scope-unit-imports unit)))
+                        (cons unit linked))))))
+
+    (defn bml-scope-symbol (package name ref node pos)
+        (list "bml-scope-symbol" package name ref node pos))
+
+    (defn bml-scope-symbol-package (symbol) (nth symbol 1))
+    (defn bml-scope-symbol-name (symbol) (nth symbol 2))
+    (defn bml-scope-symbol-ref (symbol) (nth symbol 3))
+    (defn bml-scope-symbol-node (symbol) (nth symbol 4))
+    (defn bml-scope-symbol-pos (symbol) (nth symbol 5))
+
+    (defn bml-scope-method-symbols (unit methods index)
+        (if (nil? methods)
+            (empty)
+            (cons
+                (bml-scope-symbol
+                    (bml-scope-unit-package unit)
+                    (bml-method-node-name (head methods))
+                    (bml-hati-method-ref
+                        index
+                        (len (bml-method-node-parameters (head methods))))
+                    (head methods)
+                    (bml-scope-unit-pos unit))
+                (bml-scope-method-symbols unit (tail methods) (add index 1)))))
+
+    (defn bml-scope-symbols-from (linked index)
+        (if (nil? linked)
+            (empty)
+            (append
+                (bml-scope-method-symbols
+                    (head linked)
+                    (bml-scope-unit-methods (head linked))
+                    index)
+                (bml-scope-symbols-from
+                    (tail linked)
+                    (add index (len (bml-scope-unit-methods (head linked))))))))
+
+    (defn bml-scope-link (node units)
+        (do
+            (let main (bml-scope-unit 0 node))
+            (let all-units (cons main (bml-scope-units-from units 1)))
+            (let linked (bml-scope-link-order all-units (list main) (empty)))
+            (list "bml-scope-link"
+                  main
+                  all-units
+                  linked
+                  (bml-scope-symbols-from linked 1))))
+
+    (defn bml-scope-link-main (link) (nth link 1))
+    (defn bml-scope-link-all (link) (nth link 2))
+    (defn bml-scope-link-linked (link) (nth link 3))
+    (defn bml-scope-link-symbols (link) (nth link 4))
+
+    ;; environments: the package binding at the base, imported symbols over
+    ;; it, the unit's own methods on top (so a local method shadows an
+    ;; on-demand import). Hati binds method refs, BMA binds method nodes.
+
+    (defn bml-scope-package-key (_x) "__bml_package")
+
+    (defn bml-scope-base-env (unit)
+        (if (str_eq (bml-scope-unit-package unit) "")
+            (empty)
+            (list
+                (bml-local-binding
+                    (bml-scope-package-key 0)
+                    (bml-ast-package (bml-scope-unit-package unit))
+                    (empty)))))
+
+    (defn bml-scope-symbol-value (symbol lane)
+        (if (str_eq lane "bma")
+            (bml-scope-symbol-node symbol)
+            (bml-scope-symbol-ref symbol)))
+
+    (defn bml-scope-bind (env name symbol lane)
+        (cons
+            (bml-local-binding name (bml-scope-symbol-value symbol lane) env)
+            env))
+
+    (defn bml-scope-bind-target-symbol (env target symbol lane)
+        (do
+            (let mode (bml-scope-target-mode target))
+            (let package (bml-scope-symbol-package symbol))
+            (let name (bml-scope-symbol-name symbol))
+            (if (not (str_eq package (bml-scope-target-package target)))
+                env
+            (if (str_eq mode "package")
+                (bml-scope-bind env (bml-scope-qualify package name) symbol lane)
+            (if (str_eq mode "star")
+                (bml-scope-bind
+                    (bml-scope-bind env (bml-scope-qualify package name) symbol lane)
+                    name
+                    symbol
+                    lane)
+            (if (str_eq name (bml-scope-target-symbol target))
+                (bml-scope-bind
+                    (if (str_eq package "")
+                        env
+                        (bml-scope-bind env (bml-scope-qualify package name) symbol lane))
+                    name
+                    symbol
+                    lane)
+                env))))))
+
+    (defn bml-scope-bind-target (env target symbols lane)
+        (if (nil? symbols)
+            env
+            (bml-scope-bind-target
+                (bml-scope-bind-target-symbol env target (head symbols) lane)
+                target
+                (tail symbols)
+                lane)))
+
+    (defn bml-scope-import-env (all-units rows symbols env lane)
+        (if (nil? rows)
+            env
+            (bml-scope-import-env
+                all-units
+                (tail rows)
+                symbols
+                (bml-scope-bind-target
+                    env
+                    (bml-scope-resolve-import all-units (head rows))
+                    symbols
+                    lane)
+                lane)))
+
+    (defn bml-scope-own-env (symbols pos env lane)
+        (if (nil? symbols)
+            env
+            (bml-scope-own-env
+                (tail symbols)
+                pos
+                (if (eq (bml-scope-symbol-pos (head symbols)) pos)
+                    (bml-scope-bind
+                        env
+                        (bml-scope-symbol-name (head symbols))
+                        (head symbols)
+                        lane)
+                    env)
+                lane)))
+
+    (defn bml-scope-unit-env (link unit lane)
+        (bml-scope-own-env
+            (bml-scope-link-symbols link)
+            (bml-scope-unit-pos unit)
+            (bml-scope-import-env
+                (bml-scope-link-all link)
+                (bml-scope-unit-imports unit)
+                (bml-scope-link-symbols link)
+                (bml-scope-base-env unit)
+                lane)
+            lane))
+
+    ;; lookup: a name qualified by the unit's own package names its member.
+
+    (defn bml-scope-own-name (env name)
+        (if (lt (str_find name "." 0) 0)
+            name
+            (do
+                (let binding (bml-local-lookup-direct env (bml-scope-package-key 0)))
+                (if (nil? binding)
+                    name
+                    (do
+                        (let prefix
+                            (str_concat
+                                (node_value
+                                    (bml-node-child (bml-local-binding-value binding) 0))
+                                "."))
+                        (if (bml-scope-prefix? name prefix)
+                            (substring name (str_len prefix) (str_len name))
+                            name))))))
+
+    (defn bml-scope-lookup-qualified (env name)
+        (do
+            (let own-name (bml-scope-own-name env name))
+            (if (str_eq own-name name)
+                (empty)
+                (bml-local-lookup-direct env own-name))))
+
+    (defn bml-scope-resolve-name (env name)
+        (if (nil? (bml-local-lookup-direct env name))
+            (bml-scope-own-name env name)
+            name))
+
+    ;; a receiver that is a bound value asks for class dispatch, a later
+    ;; wave; a receiver nothing binds is an unbound call.
+    (defn bml-scope-unbound-call-reason (env name)
+        (do
+            (let at (str_find name "." 0))
+            (if (lt at 0)
+                "call/unbound"
+                (if (nil? (bml-local-lookup env (substring name 0 at)))
+                    "call/unbound"
+                    "call/receiver-dispatch"))))
+
+    ;; refusals: the lowering names what it cannot resolve.
+
+    (defn bml-hati-refusal-prefix (_x) "BML-HATI-UNSUPPORTED ")
+
+    (defn bml-hati-lower-refusal (reason pool)
+        (bml-hati-lower-string-in
+            (str_concat (bml-hati-refusal-prefix 0) reason)
+            pool))
+
+    (defn bml-hati-pool-refusals (pool)
+        (if (nil? pool)
+            (empty)
+            (do
+                (let rest (bml-hati-pool-refusals (tail pool)))
+                (if (bml-scope-prefix? (head pool) (bml-hati-refusal-prefix 0))
+                    (cons
+                        (substring
+                            (head pool)
+                            (str_len (bml-hati-refusal-prefix 0))
+                            (str_len (head pool)))
+                        rest)
+                    rest))))
+
+    (defn bml-hati-reasons-merge (reasons extra)
+        (if (nil? extra)
+            reasons
+            (bml-hati-reasons-merge
+                (if (fsc-string-list-contains? reasons (head extra))
+                    reasons
+                    (append reasons (list (head extra))))
+                (tail extra))))
+
+    ;; link reasons: a second package declaration, an import no unit meets.
+
+    (defn bml-scope-import-reasons (all-units rows)
+        (if (nil? rows)
+            (empty)
+            (append
+                (if (nil? (bml-scope-target-units (bml-scope-resolve-import all-units (head rows))))
+                    (list "import/unresolved")
+                    (empty))
+                (bml-scope-import-reasons all-units (tail rows)))))
+
+    (defn bml-scope-unit-reasons (all-units unit)
+        (append
+            (if (gt (len (bml-scope-nodes-of (bml-scope-unit-all-nodes unit) BML-AST-PACKAGE)) 1)
+                (list "package/duplicate")
+                (empty))
+            (bml-scope-import-reasons all-units (bml-scope-unit-imports unit))))
+
+    (defn bml-scope-link-reasons-loop (all-units linked)
+        (if (nil? linked)
+            (empty)
+            (append
+                (bml-scope-unit-reasons all-units (head linked))
+                (bml-scope-link-reasons-loop all-units (tail linked)))))
+
+    (defn bml-scope-link-reasons (link)
+        (bml-scope-link-reasons-loop
+            (bml-scope-link-all link)
+            (bml-scope-link-linked link)))
+
+    ;; compile: the main unit plus every unit its imports reach.
+
+    (defn bml-scope-linked-unsupported (link units)
+        (if (nil? units)
+            (empty)
+            (append
+                (bml-hati-unsupported-methods-in
+                    (bml-scope-unit-methods (head units))
+                    (bml-scope-unit-env link (head units) "hati"))
+                (bml-scope-linked-unsupported link (tail units)))))
+
+    (defn bml-scope-lower-linked (link units pool)
+        (if (nil? units)
+            (bml-hati-fns-result (empty) pool)
+            (do
+                (let first
+                    (bml-hati-lower-methods-in
+                        (bml-scope-unit-methods (head units))
+                        pool
+                        (bml-scope-unit-env link (head units) "hati")))
+                (let rest
+                    (bml-scope-lower-linked
+                        link
+                        (tail units)
+                        (bml-hati-fns-result-pool first)))
+                (bml-hati-fns-result
+                    (append
+                        (bml-hati-fns-result-fns first)
+                        (bml-hati-fns-result-fns rest))
+                    (bml-hati-fns-result-pool rest)))))
+
+    (defn bml-scope-compile-block-image (node units)
+        (do
+            (let link (bml-scope-link node units))
+            (let main (bml-scope-link-main link))
+            (let methods (bml-scope-unit-methods main))
+            (let main-nodes (bml-scope-unit-mains main))
+            (let method-env (bml-scope-unit-env link main "hati"))
+            (let others (tail (bml-scope-link-linked link)))
+            (let unsupported
+                (append
+                    (bml-scope-link-reasons link)
+                    (append
+                        (bml-hati-unsupported-nodes-in-env main-nodes method-env)
+                        (append
+                            (bml-hati-unsupported-methods-in methods method-env)
+                            (bml-scope-linked-unsupported link others)))))
+            (let main-lowered
+                (bml-hati-bnml-body-in
+                    main-nodes
+                    (bml-hati-lower-nodes-in-env main-nodes (empty) method-env)))
+            (let methods-lowered
+                (bml-hati-lower-methods-in
+                    methods
+                    (bml-hati-lower-pool main-lowered)
+                    method-env))
+            (let others-lowered
+                (bml-scope-lower-linked
+                    link
+                    others
+                    (bml-hati-fns-result-pool methods-lowered)))
+            (bml-hati-image
+                (cons
+                    (bml-hati-lower-expr main-lowered)
+                    (append
+                        (bml-hati-fns-result-fns methods-lowered)
+                        (bml-hati-fns-result-fns others-lowered)))
+                (bml-hati-fns-result-pool others-lowered)
+                node
+                unsupported)))
+
+    (defn bml-hati-compile-unit-image (node units)
+        (if (node_eq (node_category node) BML-AST-BLOCK)
+            (bml-scope-compile-block-image node units)
+            (bml-hati-compile-image node)))
+
+    (defn bml-hati-run-unit-value (node units)
+        (do
+            (let image (bml-hati-compile-unit-image node units))
+            (if (bml-hati-image-supported? image)
+                (fkm-run (bml-hati-image-fns image) 0)
+                (bml-hati-unsupported-table-file image))))
+
+    (defn bml-compile-unit-program (node units)
+        (do
+            (let link (bml-scope-link node units))
+            (comp-program
+                "bma"
+                (bml-compile-node-in
+                    node
+                    (bml-scope-unit-env link (bml-scope-link-main link) "bma")))))
 
     (defn bma-trace-count-mode (trace mode)
         (if (nil? trace) 0
