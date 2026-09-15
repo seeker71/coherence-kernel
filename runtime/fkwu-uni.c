@@ -18786,6 +18786,11 @@ static void fk_parse_top(void);
  * up by fk_arms, where the walker arm can reach it.) */
 static long long *fk_const_s, *fk_const_n, *fk_const_node, *fk_const_wrapp1, fk_const_top;
 static long long fk_const_cap;
+/* A FORWARD row: a defn read the name before the unit's let arrived. Its node is this
+ * sentinel until the let fills the shared hold; fk_const_fwd[row] keeps the first read's
+ * source position for the [unbound-name] said at the end when no let ever comes. */
+#define FK_CONST_FORWARD (-7)
+static long long *fk_const_fwd;
 /* Most-recent-first, mirroring fk_bd_lookup: a nested defn now shares this table
  * with every top-level one (fk_parse_do's own "defn" branch), so the same name at
  * two scopes must resolve to the INNER, currently-live registration while both are
@@ -18817,6 +18822,14 @@ static void fk_const_set(long long s, long long n, long long node) {
     long long i = 0;
     while (i < fk_const_top) {
         if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i])) {
+            if (fk_const_node[i] == FK_CONST_FORWARD && fk_const_wrapp1[i] != 0 && node != FK_CONST_FORWARD) {
+                /* the let a forward read waited for: the hold every earlier read
+                 * shares learns its initializer, so they all read this binding. */
+                fk_node[fk_const_wrapp1[i] - 1][1] = node;
+                fk_const_node[i] = node;
+                fk_const_fwd[i] = -1;
+                return;
+            }
             fk_const_node[i] = node;
             /* a redefinition drops the old hold node; old references keep
              * their already-spliced meaning, new references bind fresh. */
@@ -18831,8 +18844,9 @@ static void fk_const_set(long long s, long long n, long long node) {
         fk_const_n = (long long *)realloc(fk_const_n, (unsigned long)(nc * 8));
         fk_const_node = (long long *)realloc(fk_const_node, (unsigned long)(nc * 8));
         fk_const_wrapp1 = (long long *)realloc(fk_const_wrapp1, (unsigned long)(nc * 8));
+        fk_const_fwd = (long long *)realloc(fk_const_fwd, (unsigned long)(nc * 8));
         if (fk_const_s == 0 || fk_const_n == 0 || fk_const_node == 0 ||
-            fk_const_wrapp1 == 0) {
+            fk_const_wrapp1 == 0 || fk_const_fwd == 0) {
             fk_die("fk_const_set: out of memory growing the top-level constant table");
         }
         fk_const_cap = nc;
@@ -18843,7 +18857,42 @@ static void fk_const_set(long long s, long long n, long long node) {
     /* rows are reused after the loaders reset fk_const_top; a fresh binding
      * must never inherit the previous tenant's hold node. */
     fk_const_wrapp1[fk_const_top] = 0;
+    fk_const_fwd[fk_const_top] = -1;
     fk_const_top = fk_const_top + 1;
+}
+/* A value-position name inside a defn body that nothing binds yet may still be bound by a
+ * let later in the unit -- a unit's defns see all of its lets, in any order. Hold it open:
+ * a FORWARD row with one shared hold node that the let fills (fk_const_set above). */
+static long long fk_const_forward_hold(long long s, long long n) {
+    fk_const_set(s, n, FK_CONST_FORWARD);
+    long long row = fk_const_lookup(s, n);
+    fk_const_fwd[row] = s;
+    fk_const_wrapp1[row] = fk_smknode(FK_TAG_CONST_HOLD, FK_CONST_FORWARD, 0, 0) + 1;
+    return fk_const_wrapp1[row] - 1;
+}
+/* After the unit: a forward read no let answered is the same [unbound-name] the read would
+ * have raised in place, at the first read's position; its hold reads 0, as the inline
+ * recovery did, and the unit latches unrunnable. */
+static void fk_const_forward_finalize(void) {
+    long long i = 0;
+    while (i < fk_const_top) {
+        if (fk_const_node[i] == FK_CONST_FORWARD) {
+            long long at = fk_const_fwd[i] >= 0 ? fk_const_fwd[i] : fk_const_s[i];
+            fk_diag(FK_DIAG_ERR, at,
+                    "[unbound-name] '%.*s' in value position matched no binding/const/fn -- typo, "
+                    "missing prelude, or a name from an enclosing scope a defn frame cannot see? "
+                    "Read recovered to 0",
+                    (int)fk_const_n[i], fk_srctext + fk_const_s[i]);
+            fk_src_unrunnable = 1;
+            long long zero = fk_smklit(0);
+            fk_const_node[i] = zero;
+            if (fk_const_wrapp1[i] != 0) {
+                fk_node[fk_const_wrapp1[i] - 1][1] = zero;
+            }
+            fk_const_fwd[i] = -1;
+        }
+        i = i + 1;
+    }
 }
 static long long fk_parse_variadic(long long tag);
 static long long fk_parse_fixed_list(long long n);
@@ -19579,7 +19628,12 @@ static long long fk_sparse(void) {
      *     minutes with no output at all, where bin-go answered in 40 ms.
      * So: diagnose, on every occurrence, unconditionally — and still RECOVER to 0, so
      * the rest of the source is parsed and every other offender is reported in the same
-     * run. The nonzero exit comes from the error count, exactly like unresolved-call. */
+     * run. The nonzero exit comes from the error count, exactly like unresolved-call.
+     * Inside a defn body the unit's later let may still bind the name, so the read holds
+     * open instead; fk_const_forward_finalize says this same thing when no let arrives. */
+    if (fk_cur_defn_idx >= 0) {
+        return fk_const_forward_hold(s, fk_spos - s);
+    }
     fk_diag(FK_DIAG_ERR, s,
             "[unbound-name] '%.*s' in value position matched no binding/const/fn -- typo, "
             "missing prelude, or a name from an enclosing scope a defn frame cannot see? "
@@ -19784,22 +19838,38 @@ static long long fk_parse_top_do_value(void) {
             return fk_parse_top_do_value();
         }
         if (fk_sym_eq(p, he - p, "let")) {
+            /* A let in the unit's top-level do is a UNIT CONSTANT, the same as a column-0
+             * let: every defn of the unit reads it, in any order, and units that prelude
+             * this one bind it from the image's const table. Its initializer gets its own
+             * frame; the binding joins the sequence through its one hold node, built once
+             * here. A let in any other do stays lexical, binding the rest of that do. */
             fk_spos = he;
             fk_sskip();
             long long ns = fk_spos;
             fk_spos = fk_sym_end(fk_spos);
             long long nlen = fk_spos - ns;
+            long long save_bd_top = fk_bd_top;
+            long long save_maxslot = fk_maxslot;
+            fk_bd_top = 0;
+            fk_maxslot = 0;
             long long val = fk_sparse();
+            if (fk_maxslot > 0) {
+                val = fk_smknode(111, fk_smklit(fk_maxslot), val, 0);
+            }
+            fk_bd_top = save_bd_top;
+            fk_maxslot = save_maxslot;
             fk_sskip();
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
-            long long slot = fk_maxslot + 1;
-            fk_maxslot = slot;
-            fk_bd_push(ns, nlen, slot);
+            fk_const_set(ns, nlen, val);
+            long long crow = fk_const_lookup(ns, nlen);
+            if (fk_const_wrapp1[crow] == 0) {
+                fk_const_wrapp1[crow] = fk_smknode(FK_TAG_CONST_HOLD, fk_const_node[crow], 0, 0) + 1;
+            }
+            long long held = fk_const_wrapp1[crow] - 1;
             long long rest = fk_parse_top_do_value();
-            fk_bd_pop();
-            return fk_smknode(109, fk_smklit(slot), val, rest);
+            return fk_smknode(69, held, rest, 0);
         }
     }
     long long node = fk_sparse();
@@ -22861,6 +22931,7 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
         }
         fk_parse_top();
     }
+    fk_const_forward_finalize();
     if (fk_root >= 0) {
         fk_fn[0] = fk_root;
     } else if (fk_defn_next > 1) {
@@ -23525,6 +23596,7 @@ static int fk_run_feval(const char *path) {
         }
         fk_parse_top();
     }
+    fk_const_forward_finalize();
     if (fk_root >= 0) {
         fk_fn[0] = fk_root;
     } else if (fk_defn_next > 1) {

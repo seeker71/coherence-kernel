@@ -1,0 +1,99 @@
+//////////////////////////////////////////////////////////////////////
+//
+// source-scan.bml — one byte scanner for any tongue, named by a lexicon.
+//
+// A lexicon is (source-lexicon keywords properties keyword-kind
+// property-kind name-kind int-kind float-kind string-kind char-kind
+// op-kind ops line-comment block-open block-close). source-scan-file reads
+// a file and answers its token cells in order. Whitespace and comments
+// pass. "..." and '...' decode \\ \' \" \n \t \r \0 and keep every other
+// escaped byte. Digits read 0x hex, 0b binary, decimal, and a float with an
+// optional exponent. A name takes the keyword, property or name kind. Any
+// other byte starts the first op the lexicon lists there, or stands alone.
+//
+// preludes: form-stdlib/engine.fk
+//
+section [form.bml] {
+    class SourceScan {
+        def ssc-byte(s, i, n) = if lt(i, n) then str_byte_at(s, i) else -1;
+        def ssc-has?(xs, v) = if nil?(xs) then 0 else if str_eq(head(xs), v) then 1 else ssc-has?(tail(xs), v);
+        def ssc-at?(s, i, n, part) = if eq(str_len(part), 0) then 0 else if gt(add(i, str_len(part)), n) then 0 else if str_eq(substring(s, i, add(i, str_len(part))), part) then 1 else 0;
+        def ssc-space?(c) = or(eq(c, 32), or(eq(c, 9), or(eq(c, 10), eq(c, 13))));
+        def ssc-digit?(c) = and(ge(c, 48), le(c, 57));
+        def ssc-hex?(c) = or(ssc-digit?(c), or(and(ge(c, 97), le(c, 102)), and(ge(c, 65), le(c, 70))));
+        def ssc-bin?(c) = or(eq(c, 48), eq(c, 49));
+        def ssc-name-start?(c) = or(and(ge(c, 97), le(c, 122)), or(and(ge(c, 65), le(c, 90)), eq(c, 95)));
+        def ssc-name-char?(c) = or(ssc-name-start?(c), ssc-digit?(c));
+
+        def ssc-line-end(s, i, n) = if ge(i, n) then n else if eq(str_byte_at(s, i), 10) then i else ssc-line-end(s, add(i, 1), n);
+        def ssc-skip-block(s, close, n, lex) = if lt(close, 0) then n else ssc-skip(s, add(close, str_len(nth(lex, 14))), n, lex);
+        def ssc-skip(s, i, n, lex) {
+            let c = ssc-byte(s, i, n);
+            if ge(i, n) then n
+            else if ssc-space?(c) then ssc-skip(s, add(i, 1), n, lex)
+            else if eq(ssc-at?(s, i, n, nth(lex, 12)), 1) then ssc-skip(s, ssc-line-end(s, add(i, str_len(nth(lex, 12))), n), n, lex)
+            else if and(gt(str_len(nth(lex, 14)), 0), eq(ssc-at?(s, i, n, nth(lex, 13)), 1)) then ssc-skip-block(s, str_find(s, nth(lex, 14), add(i, str_len(nth(lex, 13)))), n, lex)
+            else i;
+        }
+
+        def ssc-escape(b) = if eq(b, 110) then byte_to_str(10) else if eq(b, 116) then byte_to_str(9) else if eq(b, 114) then byte_to_str(13) else if eq(b, 48) then byte_to_str(0) else byte_to_str(b);
+        def ssc-quoted(s, j, n, q, acc) {
+            let c = ssc-byte(s, j, n);
+            if ge(j, n) then list(acc, j)
+            else if and(eq(c, 92), lt(add(j, 1), n)) then ssc-quoted(s, add(j, 2), n, q, str_concat(acc, ssc-escape(str_byte_at(s, add(j, 1)))))
+            else if eq(c, q) then list(acc, add(j, 1))
+            else ssc-quoted(s, add(j, 1), n, q, str_concat(acc, substring(s, j, add(j, 1))));
+        }
+
+        def ssc-run-digits(s, j, n) = if ssc-digit?(ssc-byte(s, j, n)) then ssc-run-digits(s, add(j, 1), n) else j;
+        def ssc-run-hex(s, j, n) = if ssc-hex?(ssc-byte(s, j, n)) then ssc-run-hex(s, add(j, 1), n) else j;
+        def ssc-run-bin(s, j, n) = if ssc-bin?(ssc-byte(s, j, n)) then ssc-run-bin(s, add(j, 1), n) else j;
+        def ssc-exponent(s, j, n) {
+            let e = ssc-byte(s, j, n);
+            let sign = ssc-byte(s, add(j, 1), n);
+            let k = if or(eq(sign, 43), eq(sign, 45)) then add(j, 2) else add(j, 1);
+            if not(or(eq(e, 101), eq(e, 69))) then j
+            else if ssc-digit?(ssc-byte(s, k, n)) then ssc-run-digits(s, add(k, 1), n)
+            else j;
+        }
+        def ssc-number(s, i, n, lex) {
+            let c = ssc-byte(s, i, n);
+            let nb = ssc-byte(s, add(i, 1), n);
+            let d = ssc-run-digits(s, add(i, 1), n);
+            if and(eq(c, 48), or(eq(nb, 120), eq(nb, 88))) then list(nth(lex, 6), ssc-run-hex(s, add(i, 2), n))
+            else if and(eq(c, 48), or(eq(nb, 98), eq(nb, 66))) then list(nth(lex, 6), ssc-run-bin(s, add(i, 2), n))
+            else if and(eq(ssc-byte(s, d, n), 46), ssc-digit?(ssc-byte(s, add(d, 1), n))) then list(nth(lex, 7), ssc-exponent(s, ssc-run-digits(s, add(d, 1), n), n))
+            else list(nth(lex, 6), d);
+        }
+
+        def ssc-run-name(s, j, n) = if ssc-name-char?(ssc-byte(s, j, n)) then ssc-run-name(s, add(j, 1), n) else j;
+        def ssc-name-kind(lex, v) = if eq(ssc-has?(nth(lex, 1), v), 1) then nth(lex, 3) else if eq(ssc-has?(nth(lex, 2), v), 1) then nth(lex, 4) else nth(lex, 5);
+        def ssc-op(s, i, n, ops) = if nil?(ops) then substring(s, i, add(i, 1)) else if eq(ssc-at?(s, i, n, head(ops)), 1) then head(ops) else ssc-op(s, i, n, tail(ops));
+
+        def ssc-quote-token(s, i, n, lex, acc, q, kind) {
+            let r = ssc-quoted(s, add(i, 1), n, q, "");
+            ssc-loop(s, nth(r, 1), n, lex, cons(bmf-atom(kind, nth(r, 0)), acc));
+        }
+        def ssc-number-token(s, i, n, lex, acc, r) = ssc-loop(s, nth(r, 1), n, lex, cons(bmf-atom(nth(r, 0), substring(s, i, nth(r, 1))), acc));
+        def ssc-name-token(s, i, n, lex, acc, e) = ssc-loop(s, e, n, lex, cons(bmf-atom(ssc-name-kind(lex, substring(s, i, e)), substring(s, i, e)), acc));
+        def ssc-op-token(s, i, n, lex, acc, op) = ssc-loop(s, add(i, str_len(op)), n, lex, cons(bmf-atom(nth(lex, 10), op), acc));
+        def ssc-token(s, i, n, lex, acc) {
+            let c = str_byte_at(s, i);
+            if eq(c, 34) then ssc-quote-token(s, i, n, lex, acc, 34, nth(lex, 8))
+            else if eq(c, 39) then ssc-quote-token(s, i, n, lex, acc, 39, nth(lex, 9))
+            else if ssc-digit?(c) then ssc-number-token(s, i, n, lex, acc, ssc-number(s, i, n, lex))
+            else if ssc-name-start?(c) then ssc-name-token(s, i, n, lex, acc, ssc-run-name(s, add(i, 1), n))
+            else ssc-op-token(s, i, n, lex, acc, ssc-op(s, i, n, nth(lex, 11)));
+        }
+        def ssc-loop(s, i, n, lex, acc) {
+            let at = ssc-skip(s, i, n, lex);
+            if ge(at, n) then reverse-list(acc) else ssc-token(s, at, n, lex, acc);
+        }
+
+        def source-scan-text(s, lex) = if str_eq(nth(lex, 0), "source-lexicon") then ssc-loop(s, 0, str_len(s), lex, empty()) else form_error("source-scan: the lexicon is not a (source-lexicon ...)");
+        def source-scan-file(path, lex) {
+            let text = read_file(path);
+            if nothing?(text) then form_error(str_concat("source-scan: cannot read ", path)) else source-scan-text(text, lex);
+        }
+    }
+}
