@@ -512,12 +512,17 @@
     (defn bml-ast-method-parameter-name (parameters)
         (if (nil? parameters) "" (bml-parameter-name (head parameters))))
 
-    (defn bml-ast-method-parameter-name-nodes (parameters)
+    ;; A parameter keeps its declared type: it rides the method node as a
+    ;; BML-AST-FIELD (type, name), the shape a typed slot already has, so
+    ;; overload resolution can read what the source declared.
+    (defn bml-ast-method-parameter-nodes (parameters)
         (if (nil? parameters)
             (empty)
             (cons
-                (intern_trivial_string (bml-parameter-name (head parameters)))
-                (bml-ast-method-parameter-name-nodes (tail parameters)))))
+                (bml-ast-field
+                    (bml-parameter-type (head parameters))
+                    (bml-parameter-name (head parameters)))
+                (bml-ast-method-parameter-nodes (tail parameters)))))
 
     (defn bml-ast-method-with-parameters (name body parameters)
         (intern_node BML-AST-METHOD
@@ -525,7 +530,24 @@
                         (list
                             (intern_trivial_string name)
                             body)
-                        (bml-ast-method-parameter-name-nodes parameters))))
+                        (bml-ast-method-parameter-nodes parameters))))
+
+    ;; A generic method carries its type parameters as one BML-AST-TEMPLATE
+    ;; child holding their names, between the body and the parameters.
+    (defn bml-ast-generic-method (name body type-params parameters)
+        (intern_node BML-AST-METHOD
+                     (append
+                        (list
+                            (intern_trivial_string name)
+                            body
+                            (intern_node BML-AST-TEMPLATE
+                                         (bml-ast-name-nodes type-params)))
+                        (bml-ast-method-parameter-nodes parameters))))
+
+    (defn bml-ast-name-nodes (names)
+        (if (nil? names)
+            (empty)
+            (cons (bml-ast-name (head names)) (bml-ast-name-nodes (tail names)))))
 
     (defn bml-ast-class (name base sections)
         (intern_node BML-AST-CLASS
@@ -806,6 +828,13 @@
 
     (defn bml-body-source-values (body-component)
         (head (comp-bml-fields body-component)))
+
+    ;; The scanned objects of a body, when the parser kept them: what the
+    ;; statement grammar re-reads when a parsed class reaches Hati.
+    (defn bml-body-source-objects (body-component)
+        (if (gt (len (comp-bml-fields body-component)) 2)
+            (nth (comp-bml-fields body-component) 2)
+            (empty)))
 
     (defn bml-body-source-span (body-component)
         (if (gt (len (comp-bml-fields body-component)) 1)
@@ -4480,12 +4509,15 @@
             (let values
                 (bml-source-token-values
                     (bml-token-cursor-rest cursor)))
-            (bml-body-source-with-span
-                values
-                (bml-token-span
-                    (bml-token-cursor-index cursor)
-                    (len values)
-                    values))))
+            (comp-bml-component
+                "BodySource"
+                (list
+                    values
+                    (bml-token-span
+                        (bml-token-cursor-index cursor)
+                        (len values)
+                        values)
+                    tokens))))
 
     (defn bml-source-class-supers-loop (objects acc)
         (if (nil? objects)
@@ -4674,7 +4706,8 @@
                             member-type
                             member-name
                             after-name)
-                        (bml-source-parse-field-after-name
+                        (bml-source-parse-member-after-name-rest
+                            class-name
                             member-type
                             member-name
                             after-name)))
@@ -5187,7 +5220,7 @@
                 (if (str_eq kind "bml-char")
                     (bml-expr-result true (bml-ast-char value) (tail objects))
                 (if (or (str_eq kind "bml-name") (str_eq kind "bml-property"))
-                    (bml-source-parse-name-primary objects)
+                    (bml-source-parse-name-or-new objects)
                 (if (str_eq value "#(")
                     (bml-source-parse-array-literal (tail objects))
                 (if (str_eq value "(")
@@ -5324,8 +5357,8 @@
         (if (bml-source-token-value? (head objects) "import")
             (bml-source-scoped-import objects)
         (if (bml-source-name-kind-token? (head objects))
-            (bml-source-parse-name-led-step objects)
-            (bml-source-parse-no-step objects))))))))))
+            (bml-source-parse-class-led-step objects)
+            (bml-source-parse-type-decl-step objects))))))))))
 
     (defn bml-source-parse-statements-until-close (objects nodes)
         (if (nil? objects)
@@ -6441,9 +6474,33 @@
     (defn bml-method-node-parameters-from (node index)
         (if (ge index (len (node_children node)))
             (empty)
-            (cons
-                (bml-parameter-component "" (node_value (bml-node-child node index)))
-                (bml-method-node-parameters-from node (add index 1)))))
+            (do
+                (let child (bml-node-child node index))
+                (let rest (bml-method-node-parameters-from node (add index 1)))
+                (if (node_eq (node_category child) BML-AST-FIELD)
+                    (cons
+                        (bml-parameter-component
+                            (bml-field-node-type child)
+                            (bml-field-node-name child))
+                        rest)
+                (if (node_eq (node_category child) BML-AST-TEMPLATE)
+                    rest
+                    (cons (bml-parameter-component "" (node_value child)) rest))))))
+
+    (defn bml-method-node-type-parameters-from (node index)
+        (if (ge index (len (node_children node)))
+            (empty)
+            (if (node_eq (node_category (bml-node-child node index)) BML-AST-TEMPLATE)
+                (bml-name-node-values (node_children (bml-node-child node index)))
+                (bml-method-node-type-parameters-from node (add index 1)))))
+
+    (defn bml-method-node-type-parameters (node)
+        (bml-method-node-type-parameters-from node 2))
+
+    (defn bml-name-node-values (nodes)
+        (if (nil? nodes)
+            (empty)
+            (cons (bml-local-name (head nodes)) (bml-name-node-values (tail nodes)))))
 
     (defn bml-method-node-first-parameter-name (node)
         (do
@@ -6573,9 +6630,11 @@
     ;; node_category with itself: the leaf 13 reads as NAME, 35 as CALL. A
     ;; name node is the one that also carries its one name child.
     (defn bml-bnml-reads-mutable? (node env)
+        (if (bml-hati-reads-class-state? node env)
+            true
         (if (bml-name-node? node)
             (bml-bnml-binding? (bml-local-lookup env (bml-local-name node)))
-            (bml-bnml-any-reads-mutable? (node_children node) env)))
+            (bml-bnml-any-reads-mutable? (node_children node) env))))
 
     (defn bml-name-node? (node)
         (if (node_eq (node_category node) BML-AST-NAME)
@@ -6616,11 +6675,13 @@
                 "bnml-declare"
                 (bml-bnml-new-key (bml-bnml-target-name node) env))
         (if (bml-bnml-assign-node? node)
-            (bml-bnml-bind-node
+            (if (bml-hati-field-assign? node env)
                 env
-                node
-                "bnml-assign"
-                (bml-bnml-assign-key node env))
+                (bml-bnml-bind-node
+                    env
+                    node
+                    "bnml-assign"
+                    (bml-bnml-assign-key node env)))
             env))))
 
     (defn bml-bnml-fold-env (nodes env)
@@ -8138,16 +8199,10 @@
     (defn bml-hati-unsupported-node (node)
         (bml-hati-unsupported-node-in node (empty)))
 
-    (defn bml-hati-arg-node ()
-        (bml-ast-call "__hati_arg" (bml-ast-int 0)))
-
     (defn bml-hati-arg-node? (node)
         (if (node_eq (node_category node) BML-AST-CALL)
             (str_eq (bml-call-name node) "__hati_arg")
             false))
-
-    (defn bml-hati-arg-at-node (index)
-        (bml-ast-call "__hati_arg_at" (bml-ast-int index)))
 
     (defn bml-hati-arg-at-node? (node)
         (if (node_eq (node_category node) BML-AST-CALL)
@@ -8156,21 +8211,6 @@
 
     (defn bml-hati-arg-at-index (node)
         (node_value (bml-node-child (bml-call-arg node) 0)))
-
-    (defn bml-hati-field-get-node? (node)
-        (if (node_eq (node_category node) BML-AST-CALL)
-            (str_eq (bml-call-name node) "__hati_field_get")
-            false))
-
-    (defn bml-hati-field-set-node? (node)
-        (if (node_eq (node_category node) BML-AST-CALL)
-            (str_eq (bml-call-name node) "__hati_field_set")
-            false))
-
-    (defn bml-hati-method-ref (index arity)
-        (bml-ast-call-args
-            "__hati_method"
-            (list (bml-ast-int index) (bml-ast-int arity))))
 
     (defn bml-hati-method-ref? (node)
         (if (node_eq (node_category node) BML-AST-CALL)
@@ -8228,9 +8268,7 @@
                 (cons
                     (bml-local-binding
                         (bml-method-node-name (head methods))
-                        (bml-hati-method-ref
-                            index
-                            (len (bml-method-node-parameters (head methods))))
+                        (bml-hati-method-ref-of index (head methods))
                         env)
                     env)
                 (add index 1))))
@@ -8252,7 +8290,7 @@
                         (cons
                             (bml-local-binding
                                 param-name
-                                (bml-hati-arg-node)
+                                (bml-hati-arg-node-typed (bml-parameter-type (head params)))
                                 env)
                             env)))
                 (bml-hati-method-param-env-many (list params 0) env))))
@@ -8268,7 +8306,7 @@
                     (cons
                         (bml-local-binding
                             (bml-parameter-name (head params))
-                            (bml-hati-arg-at-node index)
+                            (bml-hati-arg-at-node-typed index (bml-parameter-type (head params)))
                             env)
                         env)))))
 
@@ -8326,29 +8364,23 @@
             (empty)
         (if (bml-hati-arg-at-node? node)
             (empty)
-        (if (bml-hati-field-get-node? node)
-            (if (eq (len (bml-call-args node)) 1)
-                (bml-hati-unsupported-call-args-in (bml-call-args node) env)
-                (list "field/get-arity"))
-        (if (bml-hati-field-set-node? node)
-            (if (eq (len (bml-call-args node)) 2)
-                (bml-hati-unsupported-call-args-in (bml-call-args node) env)
-                (list "field/set-arity"))
             (do
                 (let binding (bml-local-lookup env (bml-call-name node)))
                 (if (nil? binding)
                     (list (bml-scope-unbound-call-reason env (bml-call-name node)))
                 (if (bml-hati-method-ref? (bml-local-binding-value binding))
-                    (if (nil?
-                            (bml-hati-method-binding-for-arity
+                    (do
+                        (let choice
+                            (bml-hati-free-call-choice
                                 env
                                 (bml-call-name node)
-                                (len (bml-call-args node))))
-                        (list "call/arity")
-                        (bml-hati-unsupported-call-args-in
-                            (bml-call-args node)
-                            env))
-                    (list "call/not-method")))))))))
+                                (bml-call-args node)))
+                        (if (bml-hati-choice-ok? choice)
+                            (bml-hati-unsupported-call-args-in
+                                (bml-call-args node)
+                                env)
+                            (list (bml-hati-choice-value choice))))
+                    (list "call/not-method")))))))
 
     (defn bml-hati-unsupported-call-args-in (args env)
         (if (nil? args)
@@ -8384,9 +8416,9 @@
             (if (node_eq cat BML-AST-CONST)
                 (bml-hati-unsupported-node-in (bml-local-const-value node) env)
             (if (node_eq cat BML-AST-NAME)
-                (bml-hati-unsupported-name-node-in node env)
+                (bml-hati-unsupported-class-name-in node env)
             (if (node_eq cat BML-AST-CALL)
-                (bml-hati-unsupported-call-node-in node env)
+                (bml-hati-unsupported-class-call-in node env)
             (if (node_eq cat BML-AST-RETURN)
                 (bml-hati-unsupported-node-in (bml-node-child node 0) env)
             (if (node_eq cat BML-AST-METHOD)
@@ -8402,9 +8434,9 @@
             (if (node_eq cat BML-AST-IMPORT)
                 (list "import/outside-unit")
             (if (node_eq cat BML-AST-INTERFACE)
-                (list "interface")
-            (if (node_eq cat BML-AST-CLASS)
-                (bml-hati-unsupported-class-in node env)
+                (list "interface/nested")
+            (if (bml-hati-type-decl? node)
+                (list (bml-hati-nested-decl-reason node))
             (if (node_eq cat BML-AST-SECTION)
                 (bml-hati-unsupported-section-in node env)
             (if (node_eq cat BML-AST-FIELD)
@@ -8429,18 +8461,6 @@
         (bml-hati-unsupported-nodes-in-env
             (node_children (bml-node-child node 1))
             env))
-
-    (defn bml-hati-class-method-nodes-loop (sections)
-        (if (nil? sections)
-            (empty)
-            (append
-                (bml-hati-method-nodes
-                    (node_children (bml-node-child (head sections) 1)))
-                (bml-hati-class-method-nodes-loop (tail sections)))))
-
-    (defn bml-hati-class-method-nodes (node)
-        (bml-hati-class-method-nodes-loop
-            (node_children (bml-node-child node 2))))
 
     (defn bml-hati-class-field-nodes-loop (sections)
         (if (nil? sections)
@@ -8468,12 +8488,6 @@
                 (make_nodeid 1 9 2026 617)
                 "bmlClass"
                 (bml-class-node-name node))))
-
-    (defn bml-hati-unsupported-class-in (node env)
-        (do
-            (let methods (bml-hati-class-method-nodes node))
-            (let method-env (bml-hati-bind-methods methods env 0))
-            (bml-hati-unsupported-methods-in methods method-env)))
 
     (defn bml-hati-lower-nodes-in (nodes pool)
         (bml-hati-lower-nodes-in-env nodes pool (empty)))
@@ -8574,27 +8588,6 @@
                     (fk-arg)
                     (fk-lit (bml-hati-arg-at-index node)))
                 pool)
-        (if (bml-hati-field-get-node? node)
-            (do
-                (let key (bml-hati-lower-node-in-env (bml-call-arg node) pool env))
-                (bml-hati-lower-result
-                    (fk-rget (fk-arg) (bml-hati-lower-expr key))
-                    (bml-hati-lower-pool key)))
-        (if (bml-hati-field-set-node? node)
-            (do
-                (let args (bml-call-args node))
-                (let key (bml-hati-lower-node-in-env (head args) pool env))
-                (let value
-                    (bml-hati-lower-node-in-env
-                        (head (tail args))
-                        (bml-hati-lower-pool key)
-                        env))
-                (bml-hati-lower-result
-                    (fk-rset
-                        (fk-arg)
-                        (bml-hati-lower-expr key)
-                        (bml-hati-lower-expr value))
-                    (bml-hati-lower-pool value)))
             (do
                 (let binding (bml-local-lookup env (bml-call-name node)))
                 (if (nil? binding)
@@ -8603,19 +8596,19 @@
                         pool)
                 (if (bml-hati-method-ref? (bml-local-binding-value binding))
                     (do
-                        (let method-binding
-                            (bml-hati-method-binding-for-arity
+                        (let choice
+                            (bml-hati-free-call-choice
                                 env
                                 (bml-call-name node)
-                                (len (bml-call-args node))))
-                        (if (nil? method-binding)
-                            (bml-hati-lower-refusal "call/arity" pool)
+                                (bml-call-args node)))
+                        (if (bml-hati-choice-ok? choice)
                             (bml-hati-lower-method-ref-call
                                 node
-                                (bml-local-binding-value method-binding)
+                                (bml-local-binding-value (bml-hati-choice-value choice))
                                 pool
-                                env)))
-                    (bml-hati-lower-refusal "call/not-method" pool)))))))))
+                                env)
+                            (bml-hati-lower-refusal (bml-hati-choice-value choice) pool)))
+                    (bml-hati-lower-refusal "call/not-method" pool)))))))
 
     (defn bml-hati-lower-array-in (nodes pool env)
         (if (nil? nodes)
@@ -8677,9 +8670,9 @@
             (if (node_eq cat BML-AST-CONST)
                 (bml-hati-lower-const-node-in node pool env)
             (if (node_eq cat BML-AST-NAME)
-                (bml-hati-lower-name-node-in node pool env)
+                (bml-hati-lower-class-name-in node pool env)
             (if (node_eq cat BML-AST-CALL)
-                (bml-hati-lower-call-node-in node pool env)
+                (bml-hati-lower-class-call-in node pool env)
             (if (node_eq cat BML-AST-RETURN)
                 (bml-hati-lower-node-in-env (bml-node-child node 0) pool env)
             (if (node_eq cat BML-AST-METHOD)
@@ -8701,86 +8694,6 @@
             (if (node_eq cat BML-AST-DISCARD)
                 (bml-hati-lower-discard-in pool env)
                 (bml-hati-lower-result (fk-lit 0) pool))))))))))))))))))))))
-
-    (defn bml-hati-compile-class-image (node)
-        (do
-            (let methods (bml-hati-class-method-nodes node))
-            (let method-env (bml-hati-bind-methods methods (empty) 0))
-            (let unsupported (bml-hati-unsupported-methods-in methods method-env))
-            (let methods-lowered
-                (bml-hati-lower-methods-in methods (empty) method-env))
-            (bml-hati-image
-                (bml-hati-fns-result-fns methods-lowered)
-                (bml-hati-fns-result-pool methods-lowered)
-                node
-                unsupported)))
-
-    (defn bml-hati-class-method-index-loop (methods name index)
-        (if (nil? methods)
-            -1
-            (if (str_eq (bml-method-node-name (head methods)) name)
-                index
-                (bml-hati-class-method-index-loop
-                    (tail methods)
-                    name
-                    (add index 1)))))
-
-    (defn bml-hati-class-method-index (node name)
-        (bml-hati-class-method-index-loop
-            (bml-hati-class-method-nodes node)
-            name
-            0))
-
-    (defn bml-hati-class-method-index-arity-loop (methods name arity index)
-        (if (nil? methods)
-            -1
-            (if (str_eq (bml-method-node-name (head methods)) name)
-                (if (eq (len (bml-method-node-parameters (head methods))) arity)
-                    index
-                    (bml-hati-class-method-index-arity-loop
-                        (tail methods)
-                        name
-                        arity
-                        (add index 1)))
-                (bml-hati-class-method-index-arity-loop
-                    (tail methods)
-                    name
-                    arity
-                    (add index 1)))))
-
-    (defn bml-hati-class-method-index-arity (node name arity)
-        (bml-hati-class-method-index-arity-loop
-            (bml-hati-class-method-nodes node)
-            name
-            arity
-            0))
-
-    (defn bml-hati-run-class-method-with-arg (node method-name arg)
-        (do
-            (let image (bml-hati-compile-class-image node))
-            (let method-index (bml-hati-class-method-index node method-name))
-            (if (not (bml-hati-image-supported? image))
-                (bml-hati-unsupported-table-file image)
-            (if (eq method-index -1)
-                "BML-HATI-UNSUPPORTED method/not-found"
-                (fkm-walk
-                    (bml-hati-image-fns image)
-                    (nth (bml-hati-image-fns image) method-index)
-                    arg)))))
-
-    (defn bml-hati-run-class-method-with-arg-arity (node method-name arity arg)
-        (do
-            (let image (bml-hati-compile-class-image node))
-            (let method-index
-                (bml-hati-class-method-index-arity node method-name arity))
-            (if (not (bml-hati-image-supported? image))
-                (bml-hati-unsupported-table-file image)
-            (if (eq method-index -1)
-                "BML-HATI-UNSUPPORTED method/arity-not-found"
-                (fkm-walk
-                    (bml-hati-image-fns image)
-                    (nth (bml-hati-image-fns image) method-index)
-                    arg)))))
 
     (defn bml-hati-lower-methods-in (methods pool env)
         (if (nil? methods)
@@ -9038,7 +8951,7 @@
             (empty)
             (if (bml-node-method? (head nodes))
                 (bml-scope-main-nodes (tail nodes))
-            (if (bml-scope-declaration? (head nodes))
+            (if (if (bml-scope-declaration? (head nodes)) true (bml-hati-type-decl? (head nodes)))
                 (bml-scope-main-nodes (tail nodes))
                 (cons (head nodes) (bml-scope-main-nodes (tail nodes)))))))
 
@@ -9237,9 +9150,7 @@
                 (bml-scope-symbol
                     (bml-scope-unit-package unit)
                     (bml-method-node-name (head methods))
-                    (bml-hati-method-ref
-                        index
-                        (len (bml-method-node-parameters (head methods))))
+                    (bml-hati-method-ref-of index (head methods))
                     (head methods)
                     (bml-scope-unit-pos unit))
                 (bml-scope-method-symbols unit (tail methods) (add index 1)))))
@@ -9761,8 +9672,15 @@
             (let methods (bml-scope-unit-methods main))
             (let main-nodes (bml-scope-unit-mains main))
             (let symbols (bml-scope-lane-symbols link "hati"))
-            (let method-env (bml-scope-unit-env-with link main symbols "hati"))
             (let others (tail (bml-scope-link-linked link)))
+            (let layout
+                (bml-hati-unit-layout
+                    (bml-scope-unit-all-nodes main)
+                    (add 1 (add (len methods) (bml-scope-units-method-count others)))))
+            (let method-env
+                (bml-hati-env-with-layout
+                    (bml-scope-unit-env-with link main symbols "hati")
+                    layout))
             (let unsupported
                 (append
                     (bml-scope-link-reasons link)
@@ -9786,15 +9704,24 @@
                     others
                     symbols
                     (bml-hati-fns-result-pool methods-lowered)))
+            (let decls-lowered
+                (bml-hati-lower-decls
+                    layout
+                    method-env
+                    (bml-hati-fns-result-pool others-lowered)))
             (bml-hati-image
                 (cons
                     (bml-hati-lower-expr main-lowered)
                     (append
                         (bml-hati-fns-result-fns methods-lowered)
-                        (bml-hati-fns-result-fns others-lowered)))
-                (bml-hati-fns-result-pool others-lowered)
+                        (append
+                            (bml-hati-fns-result-fns others-lowered)
+                            (nth decls-lowered 0))))
+                (nth decls-lowered 1)
                 node
-                unsupported)))
+                (append
+                    unsupported
+                    (append (bml-hati-layout-reasons layout) (nth decls-lowered 2))))))
 
     (defn bml-hati-compile-unit-image (node units)
         (if (node_eq (node_category node) BML-AST-BLOCK)
@@ -10393,7 +10320,9 @@
                 false
                 (if (bml-hati-arg-node? (bml-local-binding-value binding))
                     true
-                    (bml-hati-arg-at-node? (bml-local-binding-value binding))))))
+                (if (bml-hati-arg-at-node? (bml-local-binding-value binding))
+                    true
+                    (bml-call-named? (bml-local-binding-value binding) "__hati_param"))))))
 
     (defn bml-ctl-promotions (names env seen)
         (if (nil? names)
@@ -10893,6 +10822,2701 @@
                     (bml-node-child node 1)
                     (bml-local-env-after-node (bml-ctl-try-decl node) env)
                     ctx))))
+
+    ;; --- classes on the native lane: receiver slot and typed calls ----
+    ;; A class member takes one argument list whose head is its receiver:
+    ;; (self p0 p1 ...). this and self read the head, parameter i reads
+    ;; element i+1, so a member takes parameters and reads its own fields
+    ;; in the same call. Free methods keep their own convention. Class
+    ;; meaning rides BML-AST-CALL under reserved names, the home
+    ;; __hati_field_get already has, so no category coordinate is minted.
+
+    (defn bml-hati-marker (name payload)
+        (bml-ast-call-args name payload))
+
+    (defn bml-hati-marker-arg (node index)
+        (nth (bml-call-args node) index))
+
+    (defn bml-hati-marker-str (node index)
+        (node_value (bml-node-child (bml-hati-marker-arg node index) 0)))
+
+    (defn bml-hati-self-marker (class-name)
+        (bml-hati-marker "__hati_self" (list (bml-ast-string class-name))))
+
+    (defn bml-hati-super-marker (class-name)
+        (bml-hati-marker "__hati_super" (list (bml-ast-string class-name))))
+
+    (defn bml-hati-ctor-marker (class-name)
+        (bml-hati-marker "__hati_ctor" (list (bml-ast-string class-name))))
+
+    (defn bml-hati-param-marker (index param-type)
+        (bml-hati-marker
+            "__hati_param"
+            (list (bml-ast-int index) (bml-ast-string param-type))))
+
+    (defn bml-hati-field-marker (field-name field-type)
+        (bml-hati-marker
+            "__hati_field"
+            (list (bml-ast-string field-name) (bml-ast-string field-type))))
+
+    (defn bml-hati-member-marker (member-name)
+        (bml-hati-marker "__hati_member" (list (bml-ast-string member-name))))
+
+    (defn bml-ast-new (class-type args)
+        (bml-hati-marker "__hati_new" (cons (bml-ast-string class-type) args)))
+
+    (defn bml-ast-invoke (receiver member args)
+        (bml-hati-marker
+            "__hati_invoke"
+            (cons receiver (cons (bml-ast-string member) args))))
+
+    (defn bml-ast-self-ctor (args) (bml-hati-marker "__hati_self_ctor" args))
+
+    (defn bml-ast-super-ctor (args) (bml-hati-marker "__hati_super_ctor" args))
+
+    (defn bml-ast-abstract-body (name)
+        (bml-hati-marker "__hati_abstract" (list (bml-ast-string name))))
+
+    (defn bml-ast-unparsed-body (name)
+        (bml-hati-marker "__hati_unparsed" (list (bml-ast-string name))))
+
+    (defn bml-hati-class-call-names ()
+        (list "__hati_self" "__hati_super" "__hati_ctor" "__hati_param"
+              "__hati_field" "__hati_member" "__hati_new" "__hati_invoke"
+              "__hati_self_ctor" "__hati_super_ctor" "__hati_abstract"
+              "__hati_unparsed" "__hati_field_get" "__hati_field_set"))
+
+    (defn bml-hati-class-call? (node)
+        (if (node_eq (node_category node) BML-AST-CALL)
+            (fsc-string-list-contains? (bml-hati-class-call-names) (bml-call-name node))
+            false))
+
+    ;; A free parameter's marker carries its declared type as a third
+    ;; child; readers of the index and the name see what they saw before.
+    (defn bml-hati-arg-node-typed (param-type)
+        (intern_node BML-AST-CALL
+            (list (intern_trivial_string "__hati_arg")
+                  (bml-ast-int 0)
+                  (bml-ast-string param-type))))
+
+    (defn bml-hati-arg-at-node-typed (index param-type)
+        (intern_node BML-AST-CALL
+            (list (intern_trivial_string "__hati_arg_at")
+                  (bml-ast-int index)
+                  (bml-ast-string param-type))))
+
+    (defn bml-hati-arg-marker-type (node)
+        (if (gt (len (node_children node)) 2)
+            (node_value (bml-node-child (bml-node-child node 2) 0))
+            ""))
+
+    ;; A method ref carries its method node, so a call can read the
+    ;; parameter types and type parameters the method declared.
+    (defn bml-hati-method-ref-of (index method-node)
+        (intern_node BML-AST-CALL
+            (list (intern_trivial_string "__hati_method")
+                  (bml-ast-array
+                      (list
+                          (bml-ast-int index)
+                          (bml-ast-int (len (bml-method-node-parameters method-node)))))
+                  method-node)))
+
+    (defn bml-hati-method-ref-has-node? (ref)
+        (gt (len (node_children ref)) 2))
+
+    ;; --- layout: classes, interfaces, member functions, method tables ----
+
+    (defn bml-hati-layout-key () "__hati_layout")
+
+    (defn bml-hati-layout (classes ifaces stubs trap reasons templates)
+        (list "bml-hati-layout" classes ifaces stubs trap reasons templates))
+
+    (defn bml-hati-layout-empty ()
+        (bml-hati-layout (empty) (empty) (empty) -1 (empty) (empty)))
+
+    (defn bml-hati-layout-classes (layout) (nth layout 1))
+    (defn bml-hati-layout-ifaces (layout) (nth layout 2))
+    (defn bml-hati-layout-stubs (layout) (nth layout 3))
+    (defn bml-hati-layout-trap (layout) (nth layout 4))
+    (defn bml-hati-layout-reasons (layout) (nth layout 5))
+    (defn bml-hati-layout-templates (layout) (nth layout 6))
+
+    (defn bml-hati-env-with-layout (env layout)
+        (cons (bml-local-binding (bml-hati-layout-key) layout env) env))
+
+    (defn bml-hati-env-layout (env)
+        (do
+            (let binding (bml-local-lookup-direct env (bml-hati-layout-key)))
+            (if (nil? binding)
+                (bml-hati-layout-empty)
+                (bml-local-binding-value binding))))
+
+    (defn bml-hati-class-entry (name base ifaces fields members id node)
+        (list "bml-hati-class" name base ifaces fields members id node))
+
+    (defn bml-hati-class-name (entry) (nth entry 1))
+    (defn bml-hati-class-base (entry) (nth entry 2))
+    (defn bml-hati-class-ifaces (entry) (nth entry 3))
+    (defn bml-hati-class-fields (entry) (nth entry 4))
+    (defn bml-hati-class-members (entry) (nth entry 5))
+    (defn bml-hati-class-id (entry) (nth entry 6))
+    (defn bml-hati-class-node (entry) (nth entry 7))
+
+    (defn bml-hati-iface-entry (name parent members node)
+        (list "bml-hati-iface" name parent members node))
+
+    (defn bml-hati-iface-name (entry) (nth entry 1))
+    (defn bml-hati-iface-parent (entry) (nth entry 2))
+    (defn bml-hati-iface-members (entry) (nth entry 3))
+
+    (defn bml-hati-field-entry (name field-type init has-init)
+        (list name field-type init has-init))
+
+    (defn bml-hati-field-entry-name (entry) (nth entry 0))
+    (defn bml-hati-field-entry-type (entry) (nth entry 1))
+    (defn bml-hati-field-entry-init (entry) (nth entry 2))
+    (defn bml-hati-field-entry-has-init? (entry) (nth entry 3))
+
+    (defn bml-hati-member (name param-types type-params fn kind owner node)
+        (list "bml-hati-member" name param-types type-params fn kind owner node))
+
+    (defn bml-hati-member-name (member) (nth member 1))
+    (defn bml-hati-member-param-types (member) (nth member 2))
+    (defn bml-hati-member-type-params (member) (nth member 3))
+    (defn bml-hati-member-fn (member) (nth member 4))
+    (defn bml-hati-member-kind (member) (nth member 5))
+    (defn bml-hati-member-owner (member) (nth member 6))
+    (defn bml-hati-member-node (member) (nth member 7))
+    (defn bml-hati-member-arity (member) (len (bml-hati-member-param-types member)))
+
+    (defn bml-hati-find-named (entries name)
+        (if (nil? entries)
+            (empty)
+            (if (str_eq (nth (head entries) 1) name)
+                (head entries)
+                (bml-hati-find-named (tail entries) name))))
+
+    (defn bml-hati-layout-class (layout name)
+        (bml-hati-find-named (bml-hati-layout-classes layout) name))
+
+    (defn bml-hati-layout-iface (layout name)
+        (bml-hati-find-named (bml-hati-layout-ifaces layout) name))
+
+    (defn bml-hati-type-base (name)
+        (do
+            (let at (str_find name "<" 0))
+            (if (lt at 0) name (substring name 0 at))))
+
+    (defn bml-hati-root-type? (name)
+        (if (str_eq name "") true (str_eq name "Object")))
+
+    (defn bml-hati-primitive-types ()
+        (list "int" "float" "double" "long" "short" "byte" "bool" "boolean" "char" "String"))
+
+    (defn bml-hati-array-type? (name)
+        (bml-scope-suffix? name "[]"))
+
+    (defn bml-hati-array-element (name)
+        (substring name 0 (sub (str_len name) 2)))
+
+    (defn bml-hati-known-type? (layout name)
+        (if (str_eq name "")
+            false
+        (if (fsc-string-list-contains? (bml-hati-primitive-types) name)
+            true
+        (if (bml-hati-array-type? name)
+            (bml-hati-known-type? layout (bml-hati-array-element name))
+        (if (nil? (bml-hati-layout-class layout name))
+            (not (nil? (bml-hati-layout-iface layout name)))
+            true)))))
+
+    (defn bml-hati-str-lists-eq? (a b)
+        (if (nil? a)
+            (nil? b)
+            (if (nil? b)
+                false
+                (if (str_eq (head a) (head b))
+                    (bml-hati-str-lists-eq? (tail a) (tail b))
+                    false))))
+
+    ;; --- static types: what the compiler already sees of a value's type ---
+
+    (defn bml-hati-numeric? (name)
+        (fsc-string-list-contains? (list "int" "float" "double" "long") name))
+
+    (defn bml-hati-add-type (a b)
+        (if (str_eq a "String")
+            "String"
+        (if (str_eq b "String")
+            "String"
+        (if (str_eq a "int")
+            (if (str_eq b "int") "int" (if (bml-hati-numeric? b) "float" ""))
+            (if (bml-hati-numeric? a)
+                (if (bml-hati-numeric? b) "float" "")
+                "")))))
+
+    (defn bml-hati-static-type (node env)
+        (do
+            (let cat (node_category node))
+            (if (node_eq cat BML-AST-INT)
+                "int"
+            (if (node_eq cat BML-AST-FLOAT)
+                "float"
+            (if (node_eq cat BML-AST-STRING)
+                "String"
+            (if (node_eq cat BML-AST-CHAR)
+                "char"
+            (if (node_eq cat BML-AST-ADD)
+                (bml-hati-add-type
+                    (bml-hati-static-type (bml-node-child node 0) env)
+                    (bml-hati-static-type (bml-node-child node 1) env))
+            (if (node_eq cat BML-AST-NAME)
+                (bml-hati-name-type (bml-local-name node) env)
+            (if (node_eq cat BML-AST-CALL)
+                (bml-hati-call-type node env)
+                "")))))))))
+
+    (defn bml-hati-static-types (nodes env)
+        (if (nil? nodes)
+            (empty)
+            (cons
+                (bml-hati-static-type (head nodes) env)
+                (bml-hati-static-types (tail nodes) env))))
+
+    (defn bml-hati-marker-type-of (value)
+        (do
+            (let name (bml-call-name value))
+            (if (str_eq name "__hati_arg")
+                (bml-hati-arg-marker-type value)
+            (if (str_eq name "__hati_arg_at")
+                (bml-hati-arg-marker-type value)
+            (if (str_eq name "__hati_self")
+                (bml-hati-marker-str value 0)
+            (if (str_eq name "__hati_super")
+                (bml-hati-marker-str value 0)
+            (if (str_eq name "__hati_param")
+                (bml-hati-marker-str value 1)
+            (if (str_eq name "__hati_field")
+                (bml-hati-marker-str value 1)
+                ""))))))))
+
+    (defn bml-hati-binding-type (binding)
+        (do
+            (let value (bml-local-binding-value binding))
+            (if (node_eq (node_category value) BML-AST-CALL)
+                (if (bml-hati-method-ref? value)
+                    ""
+                (if (fsc-string-list-contains?
+                        (list "__hati_arg" "__hati_arg_at" "__hati_self" "__hati_super"
+                              "__hati_param" "__hati_field")
+                        (bml-call-name value))
+                    (bml-hati-marker-type-of value)
+                    (bml-hati-static-type value (bml-local-binding-env binding))))
+                (bml-hati-static-type value (bml-local-binding-env binding)))))
+
+    (defn bml-hati-name-type (name env)
+        (do
+            (let binding (bml-local-lookup env name))
+            (if (nil? binding)
+                (bml-hati-dotted-type name env)
+                (bml-hati-binding-type binding))))
+
+    ;; a.b.c: the first segment is a bound value, each later one a field.
+    (defn bml-hati-dotted-type (name env)
+        (do
+            (let at (str_find name "." 0))
+            (if (lt at 0)
+                ""
+                (do
+                    (let first (substring name 0 at))
+                    (let binding (bml-local-lookup env first))
+                    (if (bml-hati-value-binding? binding)
+                        (bml-hati-field-path-type
+                            (bml-hati-env-layout env)
+                            (bml-hati-binding-type binding)
+                            (substring name (add at 1) (str_len name)))
+                        "")))))
+
+    (defn bml-hati-field-path-type (layout owner-type path)
+        (do
+            (let at (str_find path "." 0))
+            (if (lt at 0)
+                (bml-hati-class-field-type layout owner-type path)
+                (bml-hati-field-path-type
+                    layout
+                    (bml-hati-class-field-type layout owner-type (substring path 0 at))
+                    (substring path (add at 1) (str_len path))))))
+
+    (defn bml-hati-call-type (node env)
+        (do
+            (let name (bml-call-name node))
+            (if (str_eq name "__hati_new")
+                (bml-hati-marker-str node 0)
+            (if (str_eq name "__hati_field_get")
+                (bml-hati-class-field-type
+                    (bml-hati-env-layout env)
+                    (bml-hati-name-type "this" env)
+                    (node_value (bml-node-child (head (bml-call-args node)) 0)))
+                ""))))
+
+    ;; A binding a receiver can be: anything bound except a method.
+    (defn bml-hati-value-binding? (binding)
+        (if (nil? binding)
+            false
+            (do
+                (let value (bml-local-binding-value binding))
+                (if (str_eq (bml-local-binding-name binding) (bml-hati-layout-key))
+                    false
+                (if (node_eq (node_category value) BML-AST-CALL)
+                    (if (bml-hati-method-ref? value)
+                        false
+                        (not (bml-call-named? value "__hati_member")))
+                    (not (node_eq (node_category value) BML-AST-METHOD)))))))
+
+    ;; --- overload resolution: arity, then declared types -------------------
+    ;; Each argument scores against its parameter: the same type 3, a
+    ;; subtype, an unknown or untyped side 2, a type parameter 1, a known
+    ;; type against a different known type refuses. The best sum wins; two
+    ;; distinct signatures tied at the best are named ambiguous.
+
+    (defn bml-hati-type-score (layout param-type arg-type type-params)
+        (if (str_eq param-type arg-type)
+            3
+        (if (fsc-string-list-contains? type-params param-type)
+            1
+        (if (str_eq param-type "")
+            2
+        (if (str_eq arg-type "")
+            2
+        (if (str_eq arg-type "null")
+            2
+        (if (bml-hati-subtype? layout arg-type param-type)
+            2
+        (if (bml-hati-known-type? layout arg-type)
+            (if (bml-hati-known-type? layout param-type) 0 1)
+            1))))))))
+
+    (defn bml-hati-types-score (layout params args type-params)
+        (if (nil? params)
+            0
+            (do
+                (let score (bml-hati-type-score layout (head params) (head args) type-params))
+                (if (eq score 0)
+                    -1
+                    (do
+                        (let rest (bml-hati-types-score layout (tail params) (tail args) type-params))
+                        (if (lt rest 0) -1 (add score rest)))))))
+
+    (defn bml-hati-candidate (param-types type-params payload)
+        (list param-types type-params payload))
+
+    (defn bml-hati-candidate-arity (candidate) (len (head candidate)))
+
+    (defn bml-hati-candidates-of-arity (candidates arity)
+        (if (nil? candidates)
+            (empty)
+            (if (eq (bml-hati-candidate-arity (head candidates)) arity)
+                (cons (head candidates) (bml-hati-candidates-of-arity (tail candidates) arity))
+                (bml-hati-candidates-of-arity (tail candidates) arity))))
+
+    (defn bml-hati-candidates-have-shape? (candidates param-types)
+        (if (nil? candidates)
+            false
+            (if (bml-hati-str-lists-eq? (head (head candidates)) param-types)
+                true
+                (bml-hati-candidates-have-shape? (tail candidates) param-types))))
+
+    ;; the nearest declaration of a shape answers; a farther one of the
+    ;; same shape is shadowed, not a rival.
+    (defn bml-hati-dedupe-candidates (candidates kept)
+        (if (nil? candidates)
+            (reverse-list kept)
+            (bml-hati-dedupe-candidates
+                (tail candidates)
+                (if (bml-hati-candidates-have-shape? kept (head (head candidates)))
+                    kept
+                    (cons (head candidates) kept)))))
+
+    (defn bml-hati-score-candidates (layout candidates arg-types)
+        (if (nil? candidates)
+            (empty)
+            (do
+                (let score
+                    (bml-hati-types-score
+                        layout
+                        (head (head candidates))
+                        arg-types
+                        (nth (head candidates) 1)))
+                (let rest (bml-hati-score-candidates layout (tail candidates) arg-types))
+                (if (lt score 0)
+                    rest
+                    (cons (list score (head candidates)) rest)))))
+
+    (defn bml-hati-best-score (scored best)
+        (if (nil? scored)
+            best
+            (bml-hati-best-score
+                (tail scored)
+                (if (gt (head (head scored)) best) (head (head scored)) best))))
+
+    (defn bml-hati-scored-at (scored score)
+        (if (nil? scored)
+            (empty)
+            (if (eq (head (head scored)) score)
+                (cons (nth (head scored) 1) (bml-hati-scored-at (tail scored) score))
+                (bml-hati-scored-at (tail scored) score))))
+
+    ;; (ok payload) or (refuse reason); reasons read prefix/arity,
+    ;; prefix/type, prefix/ambiguous.
+    (defn bml-hati-resolve (layout candidates arg-types prefix)
+        (do
+            (let fitting
+                (bml-hati-candidates-of-arity
+                    (bml-hati-dedupe-candidates candidates (empty))
+                    (len arg-types)))
+            (if (nil? fitting)
+                (list "refuse" (str_concat prefix "/arity"))
+                (do
+                    (let scored (bml-hati-score-candidates layout fitting arg-types))
+                    (if (nil? scored)
+                        (list "refuse" (str_concat prefix "/type"))
+                        (do
+                            (let winners
+                                (bml-hati-scored-at scored (bml-hati-best-score scored -1)))
+                            (if (gt (len winners) 1)
+                                (list "refuse" (str_concat prefix "/ambiguous"))
+                                (list "ok" (nth (head winners) 2)))))))))
+
+    (defn bml-hati-choice-ok? (choice) (str_eq (head choice) "ok"))
+    (defn bml-hati-choice-value (choice) (nth choice 1))
+
+    ;; free calls: every method ref the name reaches is a candidate.
+    (defn bml-hati-ref-candidate (binding)
+        (do
+            (let ref (bml-local-binding-value binding))
+            (if (bml-hati-method-ref-has-node? ref)
+                (bml-hati-candidate
+                    (bml-hati-param-types (bml-node-child ref 2))
+                    (bml-method-node-type-parameters (bml-node-child ref 2))
+                    binding)
+                (bml-hati-candidate
+                    (bml-hati-untyped (bml-hati-method-ref-arity ref))
+                    (empty)
+                    binding))))
+
+    (defn bml-hati-untyped (arity)
+        (if (le arity 0) (empty) (cons "" (bml-hati-untyped (sub arity 1)))))
+
+    (defn bml-hati-param-types-of (params)
+        (if (nil? params)
+            (empty)
+            (cons
+                (bml-parameter-type (head params))
+                (bml-hati-param-types-of (tail params)))))
+
+    (defn bml-hati-param-types (method-node)
+        (bml-hati-param-types-of (bml-method-node-parameters method-node)))
+
+    (defn bml-hati-free-candidates (env name)
+        (if (nil? env)
+            (empty)
+            (do
+                (let binding (head env))
+                (let rest (bml-hati-free-candidates (tail env) name))
+                (if (str_eq (bml-local-binding-name binding) name)
+                    (if (bml-hati-method-ref? (bml-local-binding-value binding))
+                        (cons (bml-hati-ref-candidate binding) rest)
+                        rest)
+                    rest))))
+
+    (defn bml-hati-free-call-choice (env name args)
+        (bml-hati-resolve
+            (bml-hati-env-layout env)
+            (bml-hati-free-candidates env (bml-scope-resolve-name env name))
+            (bml-hati-static-types args env)
+            "call"))
+
+    ;; --- class queries: chains, fields, interfaces, implementations ------
+
+    (defn bml-hati-class-chain-loop (layout name depth)
+        (if (gt depth (len (bml-hati-layout-classes layout)))
+            (empty)
+            (do
+                (let entry (bml-hati-layout-class layout name))
+                (if (nil? entry)
+                    (empty)
+                    (cons
+                        entry
+                        (bml-hati-class-chain-loop
+                            layout
+                            (bml-hati-class-base entry)
+                            (add depth 1)))))))
+
+    (defn bml-hati-class-chain (layout name)
+        (bml-hati-class-chain-loop layout name 0))
+
+    (defn bml-hati-fields-of-chain (chain)
+        (if (nil? chain)
+            (empty)
+            (append
+                (bml-hati-class-fields (head chain))
+                (bml-hati-fields-of-chain (tail chain)))))
+
+    ;; structural fields, base first: the record a class instance holds.
+    (defn bml-hati-class-fields-all (layout name)
+        (bml-hati-fields-of-chain (reverse-list (bml-hati-class-chain layout name))))
+
+    (defn bml-hati-find-field (fields name)
+        (if (nil? fields)
+            (empty)
+            (if (str_eq (bml-hati-field-entry-name (head fields)) name)
+                (head fields)
+                (bml-hati-find-field (tail fields) name))))
+
+    (defn bml-hati-class-field-type (layout class-name field-name)
+        (do
+            (let field
+                (bml-hati-find-field (bml-hati-class-fields-all layout class-name) field-name))
+            (if (nil? field) "" (bml-hati-field-entry-type field))))
+
+    (defn bml-hati-iface-family-loop (layout name depth)
+        (if (gt depth (len (bml-hati-layout-ifaces layout)))
+            (empty)
+            (do
+                (let entry (bml-hati-layout-iface layout name))
+                (if (nil? entry)
+                    (empty)
+                    (cons
+                        entry
+                        (bml-hati-iface-family-loop
+                            layout
+                            (bml-hati-iface-parent entry)
+                            (add depth 1)))))))
+
+    (defn bml-hati-iface-family (layout name)
+        (bml-hati-iface-family-loop layout name 0))
+
+    (defn bml-hati-chain-iface-names (chain)
+        (if (nil? chain)
+            (empty)
+            (append
+                (bml-hati-class-ifaces (head chain))
+                (bml-hati-chain-iface-names (tail chain)))))
+
+    (defn bml-hati-iface-families (layout names)
+        (if (nil? names)
+            (empty)
+            (append
+                (bml-hati-iface-family layout (head names))
+                (bml-hati-iface-families layout (tail names)))))
+
+    ;; every interface a class supports: its chain's, with their parents.
+    (defn bml-hati-class-iface-entries (layout name)
+        (bml-hati-iface-families
+            layout
+            (bml-hati-chain-iface-names (bml-hati-class-chain layout name))))
+
+    (defn bml-hati-entries-named? (entries name)
+        (not (nil? (bml-hati-find-named entries name))))
+
+    (defn bml-hati-subtype? (layout sub super)
+        (if (str_eq sub super)
+            true
+        (if (bml-hati-entries-named? (bml-hati-class-chain layout sub) super)
+            true
+        (if (bml-hati-entries-named? (bml-hati-class-iface-entries layout sub) super)
+            true
+            (bml-hati-entries-named? (bml-hati-iface-family layout sub) super)))))
+
+    (defn bml-hati-member-shape? (a b)
+        (if (str_eq (bml-hati-member-name a) (bml-hati-member-name b))
+            (bml-hati-str-lists-eq?
+                (bml-hati-member-param-types a)
+                (bml-hati-member-param-types b))
+            false))
+
+    (defn bml-hati-members-of-kind (members kind)
+        (if (nil? members)
+            (empty)
+            (if (str_eq (bml-hati-member-kind (head members)) kind)
+                (cons (head members) (bml-hati-members-of-kind (tail members) kind))
+                (bml-hati-members-of-kind (tail members) kind))))
+
+    (defn bml-hati-members-named (members name)
+        (if (nil? members)
+            (empty)
+            (if (str_eq (bml-hati-member-name (head members)) name)
+                (if (str_eq (bml-hati-member-kind (head members)) "ctor")
+                    (bml-hati-members-named (tail members) name)
+                    (cons (head members) (bml-hati-members-named (tail members) name)))
+                (bml-hati-members-named (tail members) name))))
+
+    (defn bml-hati-chain-members-named (chain name)
+        (if (nil? chain)
+            (empty)
+            (append
+                (bml-hati-members-named (bml-hati-class-members (head chain)) name)
+                (bml-hati-chain-members-named (tail chain) name))))
+
+    (defn bml-hati-iface-members-named (ifaces name)
+        (if (nil? ifaces)
+            (empty)
+            (append
+                (bml-hati-members-named (bml-hati-iface-members (head ifaces)) name)
+                (bml-hati-iface-members-named (tail ifaces) name))))
+
+    ;; the signatures a receiver of a class answers to under a name.
+    (defn bml-hati-class-sigs-named (layout class-name name)
+        (append
+            (bml-hati-chain-members-named (bml-hati-class-chain layout class-name) name)
+            (bml-hati-iface-members-named
+                (bml-hati-class-iface-entries layout class-name)
+                name)))
+
+    (defn bml-hati-all-sigs-named (layout name)
+        (append
+            (bml-hati-chain-members-named (bml-hati-layout-classes layout) name)
+            (bml-hati-iface-members-named (bml-hati-layout-ifaces layout) name)))
+
+    (defn bml-hati-concrete? (member)
+        (not (str_eq (bml-hati-member-kind member) "abstract")))
+
+    (defn bml-hati-first-shape (members sig)
+        (if (nil? members)
+            (empty)
+            (if (bml-hati-member-shape? (head members) sig)
+                (head members)
+                (bml-hati-first-shape (tail members) sig))))
+
+    ;; the most derived declaration of the shape answers; an abstract one
+    ;; answers with no implementation.
+    (defn bml-hati-chain-impl (chain sig)
+        (if (nil? chain)
+            (empty)
+            (do
+                (let own (bml-hati-first-shape (bml-hati-class-members (head chain)) sig))
+                (if (nil? own)
+                    (bml-hati-chain-impl (tail chain) sig)
+                    (if (bml-hati-concrete? own) own (empty))))))
+
+    (defn bml-hati-default-impl (ifaces sig)
+        (if (nil? ifaces)
+            (empty)
+            (do
+                (let own (bml-hati-first-shape (bml-hati-iface-members (head ifaces)) sig))
+                (if (if (nil? own) false (bml-hati-concrete? own))
+                    own
+                    (bml-hati-default-impl (tail ifaces) sig)))))
+
+    ;; behavioral lookup from the object's own class: its chain, then the
+    ;; default methods of the interfaces it supports.
+    (defn bml-hati-impl (layout class-name sig)
+        (do
+            (let found (bml-hati-chain-impl (bml-hati-class-chain layout class-name) sig))
+            (if (nil? found)
+                (bml-hati-default-impl (bml-hati-class-iface-entries layout class-name) sig)
+                found)))
+
+    (defn bml-hati-int-list-contains? (items value)
+        (if (nil? items)
+            false
+            (if (eq (head items) value)
+                true
+                (bml-hati-int-list-contains? (tail items) value))))
+
+    (defn bml-hati-classes-under (layout classes static-type)
+        (if (nil? classes)
+            (empty)
+            (if (if (str_eq static-type "")
+                    true
+                    (bml-hati-subtype? layout (bml-hati-class-name (head classes)) static-type))
+                (cons (head classes) (bml-hati-classes-under layout (tail classes) static-type))
+                (bml-hati-classes-under layout (tail classes) static-type))))
+
+    (defn bml-hati-impl-fns (layout classes sig acc)
+        (if (nil? classes)
+            acc
+            (do
+                (let impl (bml-hati-impl layout (bml-hati-class-name (head classes)) sig))
+                (bml-hati-impl-fns
+                    layout
+                    (tail classes)
+                    sig
+                    (if (nil? impl)
+                        acc
+                        (if (bml-hati-int-list-contains? acc (bml-hati-member-fn impl))
+                            acc
+                            (cons (bml-hati-member-fn impl) acc)))))))
+
+    (defn bml-hati-layout-stub-fn-loop (stubs sig)
+        (if (nil? stubs)
+            -1
+            (if (bml-hati-member-shape? (head (head stubs)) sig)
+                (nth (head stubs) 1)
+                (bml-hati-layout-stub-fn-loop (tail stubs) sig))))
+
+    (defn bml-hati-layout-stub-fn (layout sig)
+        (bml-hati-layout-stub-fn-loop (bml-hati-layout-stubs layout) sig))
+
+    (defn bml-hati-member-candidates (members)
+        (if (nil? members)
+            (empty)
+            (cons
+                (bml-hati-candidate
+                    (bml-hati-member-param-types (head members))
+                    (bml-hati-member-type-params (head members))
+                    (head members))
+                (bml-hati-member-candidates (tail members)))))
+
+    ;; One implementation among the classes a receiver can hold is a
+    ;; direct call; several go through the signature's method table.
+    (defn bml-hati-dispatch-for (layout sig recv-type)
+        (do
+            (let fns
+                (bml-hati-impl-fns
+                    layout
+                    (bml-hati-classes-under layout (bml-hati-layout-classes layout) recv-type)
+                    sig
+                    (empty)))
+            (if (nil? fns)
+                (list "refuse" "method/abstract")
+            (if (nil? (tail fns))
+                (list "ok" (head fns))
+                (do
+                    (let stub (bml-hati-layout-stub-fn layout sig))
+                    (if (lt stub 0)
+                        (list "refuse" "dispatch/no-table")
+                        (list "ok" stub)))))))
+
+    ;; (ok fn) or (refuse reason) for recv.member(args).
+    (defn bml-hati-invoke-choice (layout recv-type member-name arg-types)
+        (do
+            (let class-type? (not (nil? (bml-hati-layout-class layout recv-type))))
+            (let iface-type? (not (nil? (bml-hati-layout-iface layout recv-type))))
+            (let unknown? (str_eq recv-type ""))
+            (if (nil? (bml-hati-layout-classes layout))
+                (list "refuse" "call/receiver-dispatch")
+            (if (if class-type? false (if iface-type? false (not unknown?)))
+                (list "refuse" "call/receiver-dispatch")
+                (do
+                    (let sigs
+                        (if class-type?
+                            (bml-hati-class-sigs-named layout recv-type member-name)
+                        (if iface-type?
+                            (bml-hati-iface-members-named
+                                (bml-hati-iface-family layout recv-type)
+                                member-name)
+                            (bml-hati-all-sigs-named layout member-name))))
+                    (if (nil? sigs)
+                        (list "refuse" (if unknown? "call/receiver-dispatch" "method/not-found"))
+                        (do
+                            (let resolved
+                                (bml-hati-resolve
+                                    layout
+                                    (bml-hati-member-candidates sigs)
+                                    arg-types
+                                    "method"))
+                            (if (bml-hati-choice-ok? resolved)
+                                (bml-hati-dispatch-for
+                                    layout
+                                    (bml-hati-choice-value resolved)
+                                    recv-type)
+                                resolved))))))))
+
+    (defn bml-hati-class-base-name (layout class-name)
+        (do
+            (let entry (bml-hati-layout-class layout class-name))
+            (if (nil? entry) "" (bml-hati-class-base entry))))
+
+    ;; super.member(args): the lookup starts at the implementing class's
+    ;; base and the call is direct.
+    (defn bml-hati-super-choice (layout class-name member-name arg-types)
+        (do
+            (let base (bml-hati-class-base-name layout class-name))
+            (if (nil? (bml-hati-layout-class layout base))
+                (list "refuse" "super/no-base")
+                (do
+                    (let sigs (bml-hati-class-sigs-named layout base member-name))
+                    (if (nil? sigs)
+                        (list "refuse" "method/not-found")
+                        (do
+                            (let resolved
+                                (bml-hati-resolve
+                                    layout
+                                    (bml-hati-member-candidates sigs)
+                                    arg-types
+                                    "method"))
+                            (if (bml-hati-choice-ok? resolved)
+                                (do
+                                    (let impl
+                                        (bml-hati-impl layout base (bml-hati-choice-value resolved)))
+                                    (if (nil? impl)
+                                        (list "refuse" "method/abstract")
+                                        (list "ok" (bml-hati-member-fn impl))))
+                                resolved)))))))
+
+    (defn bml-hati-class-ctors (entry)
+        (bml-hati-members-of-kind (bml-hati-class-members entry) "ctor"))
+
+    ;; (ok fn), (ok -1) for a class with no constructor and no arguments,
+    ;; or (refuse reason).
+    (defn bml-hati-ctor-choice (layout class-name arg-types)
+        (do
+            (let ctors (bml-hati-class-ctors (bml-hati-layout-class layout class-name)))
+            (if (nil? ctors)
+                (if (nil? arg-types)
+                    (list "ok" -1)
+                    (list "refuse" "new/no-constructor"))
+                (do
+                    (let resolved
+                        (bml-hati-resolve
+                            layout
+                            (bml-hati-member-candidates ctors)
+                            arg-types
+                            "new"))
+                    (if (bml-hati-choice-ok? resolved)
+                        (list "ok" (bml-hati-member-fn (bml-hati-choice-value resolved)))
+                        resolved)))))
+
+    (defn bml-hati-chain-abstract-members (chain)
+        (if (nil? chain)
+            (empty)
+            (append
+                (bml-hati-members-of-kind (bml-hati-class-members (head chain)) "abstract")
+                (bml-hati-chain-abstract-members (tail chain)))))
+
+    (defn bml-hati-iface-abstract-members (ifaces)
+        (if (nil? ifaces)
+            (empty)
+            (append
+                (bml-hati-members-of-kind (bml-hati-iface-members (head ifaces)) "abstract")
+                (bml-hati-iface-abstract-members (tail ifaces)))))
+
+    (defn bml-hati-unimplemented (layout class-name members)
+        (if (nil? members)
+            (empty)
+            (if (nil? (bml-hati-impl layout class-name (head members)))
+                (cons (head members) (bml-hati-unimplemented layout class-name (tail members)))
+                (bml-hati-unimplemented layout class-name (tail members)))))
+
+    ;; --- member environment: receiver, fields, member names, parameters --
+
+    (defn bml-hati-marker-binding? (binding name)
+        (if (nil? binding)
+            false
+            (if (str_eq (bml-local-binding-name binding) (bml-hati-layout-key))
+                false
+                (bml-call-named? (bml-local-binding-value binding) name))))
+
+    (defn bml-hati-has-receiver? (env)
+        (bml-hati-marker-binding? (bml-local-lookup env "this") "__hati_self"))
+
+    (defn bml-hati-bind-names-to (env names make)
+        (if (nil? names)
+            env
+            (bml-hati-bind-names-to
+                (cons (bml-local-binding (head names) (make (head names)) env) env)
+                (tail names)
+                make)))
+
+    (defn bml-hati-member-names-of (members acc)
+        (if (nil? members)
+            acc
+            (bml-hati-member-names-of
+                (tail members)
+                (if (str_eq (bml-hati-member-kind (head members)) "ctor")
+                    acc
+                    (if (fsc-string-list-contains? acc (bml-hati-member-name (head members)))
+                        acc
+                        (cons (bml-hati-member-name (head members)) acc))))))
+
+    (defn bml-hati-chain-member-list (chain)
+        (if (nil? chain)
+            (empty)
+            (append
+                (bml-hati-class-members (head chain))
+                (bml-hati-chain-member-list (tail chain)))))
+
+    (defn bml-hati-iface-member-list (ifaces)
+        (if (nil? ifaces)
+            (empty)
+            (append
+                (bml-hati-iface-members (head ifaces))
+                (bml-hati-iface-member-list (tail ifaces)))))
+
+    (defn bml-hati-visible-member-names (layout owner-name)
+        (bml-hati-member-names-of
+            (if (nil? (bml-hati-layout-class layout owner-name))
+                (bml-hati-iface-member-list (bml-hati-iface-family layout owner-name))
+                (append
+                    (bml-hati-chain-member-list (bml-hati-class-chain layout owner-name))
+                    (bml-hati-iface-member-list
+                        (bml-hati-class-iface-entries layout owner-name))))
+            (empty)))
+
+    (defn bml-hati-bind-fields (env fields)
+        (if (nil? fields)
+            env
+            (bml-hati-bind-fields
+                (cons
+                    (bml-local-binding
+                        (bml-hati-field-entry-name (head fields))
+                        (bml-hati-field-marker
+                            (bml-hati-field-entry-name (head fields))
+                            (bml-hati-field-entry-type (head fields)))
+                        env)
+                    env)
+                (tail fields))))
+
+    (defn bml-hati-bind-member-params (env params index)
+        (if (nil? params)
+            env
+            (bml-hati-bind-member-params
+                (cons
+                    (bml-local-binding
+                        (bml-parameter-name (head params))
+                        (bml-hati-param-marker index (bml-parameter-type (head params)))
+                        env)
+                    env)
+                (tail params)
+                (add index 1))))
+
+    ;; Innermost first: parameters, then this/self/super, then the fields
+    ;; of this, then member names (an unqualified call to one dispatches on
+    ;; this), then the layout, then the unit's own names.
+    (defn bml-hati-member-env (layout owner-name member base-env)
+        (do
+            (let env0 (bml-hati-env-with-layout base-env layout))
+            (let env1
+                (bml-hati-bind-names-to
+                    env0
+                    (bml-hati-visible-member-names layout owner-name)
+                    bml-hati-member-marker))
+            (let env2 (bml-hati-bind-fields env1 (bml-hati-class-fields-all layout owner-name)))
+            (let env3
+                (cons (bml-local-binding "super" (bml-hati-super-marker owner-name) env2)
+                    (cons (bml-local-binding "self" (bml-hati-self-marker owner-name) env2)
+                        (cons (bml-local-binding "this" (bml-hati-self-marker owner-name) env2)
+                            env2))))
+            (let env4
+                (if (str_eq (bml-hati-member-kind member) "ctor")
+                    (cons (bml-local-binding "__hati_ctor" (bml-hati-ctor-marker owner-name) env3) env3)
+                    env3))
+            (let env5
+                (bml-hati-bind-member-params
+                    env4
+                    (bml-method-node-parameters (bml-hati-member-node member))
+                    0))
+            ;; a loop in the member re-enters the member's own function
+            (cons
+                (bml-local-binding
+                    "__bml_fn_index"
+                    (bml-ast-int (bml-hati-member-fn member))
+                    env5)
+                env5)))
+
+    ;; --- lowering: names and calls a class gives meaning to -------------
+
+    (defn bml-hati-dotted-split (name)
+        (do
+            (let at (bml-scope-last-dot-from name 0 -1))
+            (list (substring name 0 at) (substring name (add at 1) (str_len name)))))
+
+    ;; a.b where nothing binds the whole name and a is a bound value: a
+    ;; field of a (or, called, a member of a).
+    (defn bml-hati-receiver-name? (name env)
+        (do
+            (let at (str_find name "." 0))
+            (if (lt at 0)
+                false
+                (if (nil? (bml-local-lookup env name))
+                    (bml-hati-value-binding? (bml-local-lookup env (substring name 0 at)))
+                    false))))
+
+    (defn bml-hati-member-call? (name env)
+        (bml-hati-marker-binding? (bml-local-lookup env name) "__hati_member"))
+
+    (defn bml-hati-field-assign? (node env)
+        (if (bml-bnml-assign-node? node)
+            (bml-hati-marker-binding?
+                (bml-local-lookup env (bml-bnml-target-name node))
+                "__hati_field")
+            false))
+
+    (defn bml-hati-field-known? (layout owner-type field)
+        (if (nil? (bml-hati-layout-class layout owner-type))
+            true
+            (not (nil? (bml-hati-find-field (bml-hati-class-fields-all layout owner-type) field)))))
+
+    (defn bml-hati-lower-field-read (recv-node field pool env)
+        (if (not (bml-hati-field-known?
+                    (bml-hati-env-layout env)
+                    (bml-hati-static-type recv-node env)
+                    field))
+            (bml-hati-lower-refusal "field/not-found" pool)
+            (do
+                (let recv (bml-hati-lower-node-in-env recv-node pool env))
+                (let key (bml-hati-lower-string-in field (bml-hati-lower-pool recv)))
+                (bml-hati-lower-result
+                    (fk-rget (bml-hati-lower-expr recv) (bml-hati-lower-expr key))
+                    (bml-hati-lower-pool key)))))
+
+    (defn bml-hati-lower-field-store (recv-node field value-node pool env)
+        (if (not (bml-hati-field-known?
+                    (bml-hati-env-layout env)
+                    (bml-hati-static-type recv-node env)
+                    field))
+            (bml-hati-lower-refusal "field/not-found" pool)
+            (do
+                (let recv (bml-hati-lower-node-in-env recv-node pool env))
+                (let key (bml-hati-lower-string-in field (bml-hati-lower-pool recv)))
+                (let value
+                    (bml-hati-lower-node-in-env value-node (bml-hati-lower-pool key) env))
+                (bml-hati-lower-result
+                    (fk-rset
+                        (bml-hati-lower-expr recv)
+                        (bml-hati-lower-expr key)
+                        (bml-hati-lower-expr value))
+                    (bml-hati-lower-pool value)))))
+
+    (defn bml-hati-this-field-read (field pool env)
+        (if (bml-hati-has-receiver? env)
+            (bml-hati-lower-field-read (bml-ast-name "this") field pool env)
+            (bml-hati-lower-refusal "field/no-receiver" pool)))
+
+    (defn bml-hati-this-field-store (field value-node pool env)
+        (if (bml-hati-has-receiver? env)
+            (bml-hati-lower-field-store (bml-ast-name "this") field value-node pool env)
+            (bml-hati-lower-refusal "field/no-receiver" pool)))
+
+    ;; A member call packs its receiver at the head: (recv a0 a1 ...).
+    (defn bml-hati-lower-member-call (fn recv-node args pool env)
+        (do
+            (let packed (bml-hati-lower-array-in (cons recv-node args) pool env))
+            (bml-hati-lower-result
+                (fk-call fn (bml-hati-lower-expr packed))
+                (bml-hati-lower-pool packed))))
+
+    (defn bml-hati-super-receiver? (recv-node env)
+        (if (node_eq (node_category recv-node) BML-AST-NAME)
+            (bml-hati-marker-binding?
+                (bml-local-lookup env (bml-local-name recv-node))
+                "__hati_super")
+            false))
+
+    (defn bml-hati-lower-invoke (recv-node member args pool env)
+        (do
+            (let layout (bml-hati-env-layout env))
+            (let arg-types (bml-hati-static-types args env))
+            (let choice
+                (if (bml-hati-super-receiver? recv-node env)
+                    (bml-hati-super-choice
+                        layout
+                        (bml-hati-name-type (bml-local-name recv-node) env)
+                        member
+                        arg-types)
+                    (bml-hati-invoke-choice
+                        layout
+                        (bml-hati-static-type recv-node env)
+                        member
+                        arg-types)))
+            (if (bml-hati-choice-ok? choice)
+                (bml-hati-lower-member-call (bml-hati-choice-value choice) recv-node args pool env)
+                (bml-hati-refuse-after (bml-hati-choice-value choice) (cons recv-node args) pool env))))
+
+    ;; A refused call still lowers what it carries, so a refusal nested in
+    ;; its receiver or arguments is named beside its own.
+    (defn bml-hati-refuse-after (reason nodes pool env)
+        (bml-hati-lower-refusal
+            reason
+            (bml-hati-lower-pool (bml-hati-lower-array-in nodes pool env))))
+
+    (defn bml-hati-literal-node? (node)
+        (do
+            (let cat (node_category node))
+            (if (node_eq cat BML-AST-INT)
+                true
+            (if (node_eq cat BML-AST-FLOAT)
+                true
+            (if (node_eq cat BML-AST-STRING)
+                true
+                (node_eq cat BML-AST-CHAR))))))
+
+    (defn bml-hati-fields-init-ok? (fields)
+        (if (nil? fields)
+            true
+            (if (bml-hati-field-entry-has-init? (head fields))
+                (if (bml-hati-literal-node? (bml-hati-field-entry-init (head fields)))
+                    (bml-hati-fields-init-ok? (tail fields))
+                    false)
+                (bml-hati-fields-init-ok? (tail fields)))))
+
+    (defn bml-hati-field-rows (fields)
+        (if (nil? fields)
+            (empty)
+            (cons
+                (list
+                    (bml-hati-field-entry-name (head fields))
+                    (if (bml-hati-field-entry-has-init? (head fields))
+                        (bml-hati-field-entry-init (head fields))
+                        (bml-ast-int 0)))
+                (bml-hati-field-rows (tail fields)))))
+
+    (defn bml-hati-lower-packet (rows pool)
+        (if (nil? rows)
+            (bml-hati-lower-result (fk-empty) pool)
+            (do
+                (let key (bml-hati-lower-string-in (head (head rows)) pool))
+                (let value
+                    (bml-hati-lower-node-in-env
+                        (nth (head rows) 1)
+                        (bml-hati-lower-pool key)
+                        (empty)))
+                (let rest (bml-hati-lower-packet (tail rows) (bml-hati-lower-pool value)))
+                (bml-hati-lower-result
+                    (fk-cons
+                        (fk-cons
+                            (bml-hati-lower-expr key)
+                            (fk-cons (bml-hati-lower-expr value) (fk-empty)))
+                        (bml-hati-lower-expr rest))
+                    (bml-hati-lower-pool rest)))))
+
+    ;; One recipe record (tag 64) whose packet names the class, its id in
+    ;; this layout's method tables, and every structural field.
+    (defn bml-hati-lower-instance (layout entry pool)
+        (do
+            (let packet
+                (bml-hati-lower-packet
+                    (append
+                        (list
+                            (list "bmlClass" (bml-ast-string (bml-hati-class-name entry)))
+                            (list "bmlClassId" (bml-ast-int (bml-hati-class-id entry))))
+                        (bml-hati-field-rows
+                            (bml-hati-class-fields-all layout (bml-hati-class-name entry))))
+                    pool))
+            (bml-hati-lower-result
+                (fk-node 64 (bml-hati-lower-expr packet))
+                (bml-hati-lower-pool packet))))
+
+    (defn bml-hati-template-named? (layout name)
+        (fsc-string-list-contains? (bml-hati-layout-templates layout) name))
+
+    (defn bml-hati-lower-new (class-type args pool env)
+        (do
+            (let layout (bml-hati-env-layout env))
+            (let entry (bml-hati-layout-class layout class-type))
+            (if (nil? entry)
+                (bml-hati-refuse-after
+                    (if (bml-hati-template-named? layout (bml-hati-type-base class-type))
+                        "template/unspecialized"
+                        "new/unknown-class")
+                    args
+                    pool
+                    env)
+            (if (bml-hati-class-abstract? layout class-type)
+                (bml-hati-lower-refusal "new/abstract-class" pool)
+            (if (not (bml-hati-fields-init-ok? (bml-hati-class-fields-all layout class-type)))
+                (bml-hati-lower-refusal "field/init" pool)
+                (do
+                    (let choice
+                        (bml-hati-ctor-choice layout class-type (bml-hati-static-types args env)))
+                    (if (not (bml-hati-choice-ok? choice))
+                        (bml-hati-lower-refusal (bml-hati-choice-value choice) pool)
+                        (do
+                            (let record (bml-hati-lower-instance layout entry pool))
+                            (if (lt (bml-hati-choice-value choice) 0)
+                                record
+                                (do
+                                    (let packed
+                                        (bml-hati-lower-array-in
+                                            args
+                                            (bml-hati-lower-pool record)
+                                            env))
+                                    (bml-hati-lower-result
+                                        (fk-call
+                                            (bml-hati-choice-value choice)
+                                            (fk-cons
+                                                (bml-hati-lower-expr record)
+                                                (bml-hati-lower-expr packed)))
+                                        (bml-hati-lower-pool packed))))))))))))
+
+    ;; self(args) runs another constructor of this class on the same
+    ;; record; super(args) runs one of the base class's.
+    (defn bml-hati-lower-ctor-chain (which args pool env)
+        (do
+            (let binding (bml-local-lookup-direct env "__hati_ctor"))
+            (if (nil? binding)
+                (bml-hati-lower-refusal "ctor/outside-constructor" pool)
+                (do
+                    (let layout (bml-hati-env-layout env))
+                    (let class-name (bml-hati-marker-str (bml-local-binding-value binding) 0))
+                    (let target
+                        (if (str_eq which "self")
+                            class-name
+                            (bml-hati-class-base-name layout class-name)))
+                    (if (nil? (bml-hati-layout-class layout target))
+                        (bml-hati-lower-refusal "super/no-base" pool)
+                        (do
+                            (let choice
+                                (bml-hati-ctor-choice layout target (bml-hati-static-types args env)))
+                            (if (not (bml-hati-choice-ok? choice))
+                                (bml-hati-lower-refusal (bml-hati-choice-value choice) pool)
+                            (if (lt (bml-hati-choice-value choice) 0)
+                                (bml-hati-lower-result (fk-head (fk-arg)) pool)
+                                (bml-hati-lower-member-call
+                                    (bml-hati-choice-value choice)
+                                    (bml-ast-name "this")
+                                    args
+                                    pool
+                                    env)))))))))
+
+    (defn bml-hati-marker-int (node index)
+        (node_value (bml-node-child (bml-hati-marker-arg node index) 0)))
+
+    (defn bml-hati-lower-class-marker (node name pool env)
+        (if (str_eq name "__hati_self")
+            (bml-hati-lower-result (fk-head (fk-arg)) pool)
+        (if (str_eq name "__hati_super")
+            (bml-hati-lower-result (fk-head (fk-arg)) pool)
+        (if (str_eq name "__hati_param")
+            (bml-hati-lower-result
+                (fk-nth (fk-arg) (fk-lit (add (bml-hati-marker-int node 0) 1)))
+                pool)
+        (if (str_eq name "__hati_field")
+            (bml-hati-this-field-read (bml-hati-marker-str node 0) pool env)
+        (if (str_eq name "__hati_field_get")
+            (bml-hati-this-field-read
+                (node_value (bml-node-child (head (bml-call-args node)) 0))
+                pool
+                env)
+        (if (str_eq name "__hati_field_set")
+            (bml-hati-this-field-store
+                (node_value (bml-node-child (head (bml-call-args node)) 0))
+                (nth (bml-call-args node) 1)
+                pool
+                env)
+        (if (str_eq name "__hati_new")
+            (bml-hati-lower-new
+                (bml-hati-marker-str node 0)
+                (tail (bml-call-args node))
+                pool
+                env)
+        (if (str_eq name "__hati_invoke")
+            (bml-hati-lower-invoke
+                (bml-hati-marker-arg node 0)
+                (bml-hati-marker-str node 1)
+                (drop 2 (bml-call-args node))
+                pool
+                env)
+        (if (str_eq name "__hati_self_ctor")
+            (bml-hati-lower-ctor-chain "self" (bml-call-args node) pool env)
+        (if (str_eq name "__hati_super_ctor")
+            (bml-hati-lower-ctor-chain "super" (bml-call-args node) pool env)
+        (if (str_eq name "__hati_member")
+            (bml-hati-lower-refusal "name/method" pool)
+        (if (str_eq name "__hati_ctor")
+            (bml-hati-lower-refusal "name/constructor" pool)
+        (if (str_eq name "__hati_abstract")
+            (bml-hati-lower-refusal "method/abstract" pool)
+            (bml-hati-lower-refusal "method/body-unparsed" pool)))))))))))))))
+
+    (defn bml-hati-lower-class-call-in (node pool env)
+        (do
+            (let name (bml-call-name node))
+            (if (bml-hati-class-call? node)
+                (bml-hati-lower-class-marker node name pool env)
+            (if (bml-hati-field-assign? node env)
+                (bml-hati-this-field-store
+                    (bml-bnml-target-name node)
+                    (bml-bnml-value node)
+                    pool
+                    env)
+            (if (bml-hati-receiver-name? name env)
+                (do
+                    (let split (bml-hati-dotted-split name))
+                    (bml-hati-lower-invoke
+                        (bml-ast-name (head split))
+                        (nth split 1)
+                        (bml-call-args node)
+                        pool
+                        env))
+            (if (bml-hati-member-call? name env)
+                (bml-hati-lower-invoke (bml-ast-name "this") name (bml-call-args node) pool env)
+                (bml-hati-lower-call-node-in node pool env)))))))
+
+    (defn bml-hati-lower-class-name-in (node pool env)
+        (if (bml-hati-receiver-name? (bml-local-name node) env)
+            (do
+                (let split (bml-hati-dotted-split (bml-local-name node)))
+                (bml-hati-lower-field-read (bml-ast-name (head split)) (nth split 1) pool env))
+            (bml-hati-lower-name-node-in node pool env)))
+
+    ;; The refusal pass walks what a class call carries; a class meaning
+    ;; the compiler cannot give names itself in the lowered table's pool.
+    (defn bml-hati-unsupported-class-marker (node name env)
+        (do
+            (let args (bml-call-args node))
+            (if (str_eq name "__hati_new")
+                (bml-hati-unsupported-call-args-in (tail args) env)
+            (if (str_eq name "__hati_invoke")
+                (append
+                    (bml-hati-unsupported-node-in (head args) env)
+                    (bml-hati-unsupported-call-args-in (drop 2 args) env))
+            (if (str_eq name "__hati_self_ctor")
+                (bml-hati-unsupported-call-args-in args env)
+            (if (str_eq name "__hati_super_ctor")
+                (bml-hati-unsupported-call-args-in args env)
+            (if (str_eq name "__hati_field_set")
+                (bml-hati-unsupported-node-in (nth args 1) env)
+                (empty))))))))
+
+    (defn bml-hati-unsupported-class-call-in (node env)
+        (do
+            (let name (bml-call-name node))
+            (if (bml-hati-class-call? node)
+                (bml-hati-unsupported-class-marker node name env)
+            (if (bml-hati-field-assign? node env)
+                (bml-hati-unsupported-node-in (bml-bnml-value node) env)
+            (if (bml-hati-receiver-name? name env)
+                (bml-hati-unsupported-call-args-in (bml-call-args node) env)
+            (if (bml-hati-member-call? name env)
+                (bml-hati-unsupported-call-args-in (bml-call-args node) env)
+                (bml-hati-unsupported-call-node-in node env)))))))
+
+    (defn bml-hati-unsupported-class-name-in (node env)
+        (if (bml-hati-receiver-name? (bml-local-name node) env)
+            (empty)
+            (bml-hati-unsupported-name-node-in node env)))
+
+    ;; Reads that see changing class state: a field of this, a member of
+    ;; a value, a new record. A const over one of them keeps a frame slot.
+    ;; A literal leaf answers node_category with itself (13 reads as NAME,
+    ;; 35 as CALL), so a name is a NAME with its one child and a call a
+    ;; CALL with at least its name and argument.
+    (defn bml-hati-call-node? (node)
+        (if (node_eq (node_category node) BML-AST-CALL)
+            (ge (len (node_children node)) 2)
+            false))
+
+    (defn bml-hati-reads-class-state? (node env)
+        (if (bml-name-node? node)
+            (if (bml-hati-marker-binding? (bml-local-lookup env (bml-local-name node)) "__hati_field")
+                true
+                (bml-hati-receiver-name? (bml-local-name node) env))
+        (if (bml-hati-call-node? node)
+            (if (bml-hati-class-call? node)
+                true
+            (if (bml-hati-receiver-name? (bml-call-name node) env)
+                true
+                (bml-hati-member-call? (bml-call-name node) env)))
+            false)))
+
+    ;; a class some declared signature has no implementation for.
+    (defn bml-hati-class-abstract? (layout class-name)
+        (not
+            (nil?
+                (bml-hati-unimplemented
+                    layout
+                    class-name
+                    (append
+                        (bml-hati-chain-abstract-members (bml-hati-class-chain layout class-name))
+                        (bml-hati-iface-abstract-members
+                            (bml-hati-class-iface-entries layout class-name)))))))
+
+    ;; --- source: new, receivers, constructor chaining, declarations -----
+    ;; These readers answer after the fixed rulebook and the general
+    ;; statement driver decline, so every existing rule name stands.
+
+    ;; (ok args rest) for "( a, b )", objects at "(".
+    (defn bml-source-parse-arg-list (objects)
+        (if (bml-source-token-value? (head objects) "(")
+            (if (bml-source-token-value? (nth objects 1) ")")
+                (list true (empty) (drop 2 objects))
+                (bml-source-parse-arg-items (tail objects) (empty)))
+            (list false (empty) objects)))
+
+    (defn bml-source-parse-arg-items (objects acc)
+        (do
+            (let arg (bml-source-parse-expr objects))
+            (if (bml-expr-ok? arg)
+                (do
+                    (let after (bml-expr-rest arg))
+                    (let items (cons (bml-expr-node arg) acc))
+                    (if (bml-source-token-value? (head after) ",")
+                        (bml-source-parse-arg-items (tail after) items)
+                    (if (bml-source-token-value? (head after) ")")
+                        (list true (reverse-list items) (tail after))
+                        (list false (empty) objects))))
+                (list false (empty) objects))))
+
+    ;; value.member(args) after a value no qualified name can spell.
+    (defn bml-source-parse-member-tail (node objects)
+        (if (bml-source-token-value? (head objects) ".")
+            (if (bml-source-name-kind-token? (nth objects 1))
+                (do
+                    (let args (bml-source-parse-arg-list (drop 2 objects)))
+                    (if (head args)
+                        (bml-source-parse-member-tail
+                            (bml-ast-invoke node (bmf-object-value (nth objects 1)) (nth args 1))
+                            (nth args 2))
+                        (bml-expr-result true node objects)))
+                (bml-expr-result true node objects))
+            (bml-expr-result true node objects)))
+
+    (defn bml-source-parse-new-expr (objects)
+        (do
+            (let type-parse (bml-source-parse-type objects))
+            (let args (bml-source-parse-arg-list (nth type-parse 1)))
+            (if (head args)
+                (bml-source-parse-member-tail
+                    (bml-ast-new (nth type-parse 0) (nth args 1))
+                    (nth args 2))
+                (bml-expr-fail objects))))
+
+    ;; Array<T>(0) is the empty array; a sized one is not read here.
+    (defn bml-source-parse-empty-array (objects)
+        (do
+            (let type-parse (bml-source-parse-type objects))
+            (let args (bml-source-parse-arg-list (nth type-parse 1)))
+            (if (head args)
+                (if (eq (len (nth args 1)) 1)
+                    (if (node_eq (node_category (head (nth args 1))) BML-AST-INT)
+                        (if (eq (node_value (bml-node-child (head (nth args 1)) 0)) 0)
+                            (bml-expr-result true (bml-ast-array (empty)) (nth args 2))
+                            (bml-expr-fail objects))
+                        (bml-expr-fail objects))
+                    (bml-expr-fail objects))
+                (bml-expr-fail objects))))
+
+    (defn bml-source-parse-name-or-new (objects)
+        (if (bml-source-token-value? (head objects) "new")
+            (if (bml-source-name-kind-token? (nth objects 1))
+                (bml-source-parse-new-expr (tail objects))
+                (bml-source-parse-name-primary objects))
+        (if (bml-source-token-value? (head objects) "null")
+            (bml-expr-result true (bml-ast-array (empty)) (tail objects))
+        (if (if (bml-source-token-value? (head objects) "Array")
+                (bml-source-token-at? objects 1 "<")
+                false)
+            (bml-source-parse-empty-array objects)
+            (bml-source-parse-name-primary objects)))))
+
+    (defn bml-source-ctor-chain-head? (objects)
+        (if (bml-source-token-at? objects 1 "(")
+            (if (bml-source-token-value? (head objects) "self")
+                true
+                (bml-source-token-value? (head objects) "super"))
+            false))
+
+    (defn bml-source-parse-ctor-chain-step (objects)
+        (do
+            (let args (bml-source-parse-arg-list (tail objects)))
+            (if (if (head args) (bml-source-token-value? (head (nth args 2)) ";") false)
+                (bml-source-parse-step
+                    true
+                    "ctor-chain"
+                    (if (bml-source-token-value? (head objects) "self")
+                        (bml-ast-self-ctor (nth args 1))
+                        (bml-ast-super-ctor (nth args 1)))
+                    (tail (nth args 2)))
+                (bml-source-parse-no-step objects))))
+
+    (defn bml-source-member-assign-head? (objects)
+        (if (bml-source-token-at? objects 1 ".")
+            (if (bml-source-token-at? objects 3 "=")
+                (if (bml-source-token-value? (head objects) "this")
+                    true
+                    (bml-source-token-value? (head objects) "self"))
+                false)
+            false))
+
+    (defn bml-source-parse-member-assign-step (objects)
+        (do
+            (let value (bml-source-parse-expr-semicolon (drop 4 objects)))
+            (if (bml-expr-ok? value)
+                (bml-source-parse-step
+                    true
+                    "member-assign"
+                    (bml-ast-this-field-set
+                        (bmf-object-value (nth objects 2))
+                        (bml-expr-node value))
+                    (bml-expr-rest value))
+                (bml-source-parse-no-step objects))))
+
+    (defn bml-source-generic-method-head? (objects)
+        (do
+            (let after-type (nth (bml-source-parse-type objects) 1))
+            (if (bml-source-name-kind-token? (head after-type))
+                (bml-source-token-at? after-type 1 "<")
+                false)))
+
+    ;; T name<T, ...>(params) { ... }: the method step reads the rest, the
+    ;; type parameters ride the method node.
+    (defn bml-source-parse-generic-method-step (objects)
+        (do
+            (let after-type (nth (bml-source-parse-type objects) 1))
+            (let angle (bml-source-collect-angle-loop (drop 2 after-type) 1 (empty)))
+            (let step
+                (bml-source-parse-method-body-step
+                    (cons (head after-type) (nth angle 1))
+                    objects))
+            (if (bml-source-parse-step-ok? step)
+                (do
+                    (let method (bml-source-parse-step-node step))
+                    (bml-source-parse-step
+                        true
+                        "generic-method"
+                        (bml-ast-generic-method
+                            (bml-method-node-name method)
+                            (bml-method-node-body method)
+                            (bml-source-template-parameter-names (nth angle 0))
+                            (bml-method-node-parameters method))
+                        (bml-source-parse-step-rest step)))
+                (bml-source-parse-no-step objects))))
+
+    (defn bml-source-parse-expr-statement-step (objects)
+        (do
+            (let value (bml-source-parse-expr-semicolon objects))
+            (if (if (bml-expr-ok? value)
+                    (node_eq (node_category (bml-expr-node value)) BML-AST-CALL)
+                    false)
+                (bml-source-parse-step
+                    true
+                    "expr-statement"
+                    (bml-expr-node value)
+                    (bml-expr-rest value))
+                (bml-source-parse-no-step objects))))
+
+    (defn bml-source-parse-class-led-step (objects)
+        (if (bml-source-ctor-chain-head? objects)
+            (bml-source-parse-ctor-chain-step objects)
+        (if (bml-source-member-assign-head? objects)
+            (bml-source-parse-member-assign-step objects)
+        (if (bml-source-generic-method-head? objects)
+            (bml-source-parse-generic-method-step objects)
+            (do
+                (let step (bml-source-parse-name-led-step objects))
+                (if (bml-source-parse-step-ok? step)
+                    step
+                    (bml-source-parse-expr-statement-step objects)))))))
+
+    ;; A generic member name<T>(...) in the component parser: its type
+    ;; parameters become the Method component's sixth field.
+    (defn bml-source-parse-member-after-name-rest (class-name member-type member-name after-name)
+        (if (bml-source-token-value? (head after-name) "<")
+            (do
+                (let angle (bml-source-collect-angle-loop (tail after-name) 1 (empty)))
+                (let step
+                    (bml-source-parse-method-after-name
+                        class-name
+                        member-type
+                        member-name
+                        (nth angle 1)))
+                (if (bml-source-parse-step-ok? step)
+                    (bml-source-parse-step
+                        true
+                        (bml-source-parse-step-rule step)
+                        (comp-bml-component
+                            "Method"
+                            (append
+                                (comp-bml-fields (bml-source-parse-step-node step))
+                                (list (bml-source-template-parameter-names (nth angle 0)))))
+                        (bml-source-parse-step-rest step))
+                    step))
+            (bml-source-parse-field-after-name member-type member-name after-name)))
+
+    ;; class Name [<T,..>] [props] [: Base, Iface..] { members }: the
+    ;; component parser reads every member; (ok component type-params rest).
+    (defn bml-source-parse-class-open (objects)
+        (if (bml-source-name-token? (nth objects 1))
+            (do
+                (let class-name (bmf-object-value (nth objects 1)))
+                (let after-name (drop 2 objects))
+                (let angle
+                    (if (bml-source-token-value? (head after-name) "<")
+                        (bml-source-collect-angle-loop (tail after-name) 1 (empty))
+                        (list (empty) after-name)))
+                (let property-parse (bml-source-class-property-parse (nth angle 1)))
+                (let super-parse (bml-source-class-supers-parse (nth property-parse 1)))
+                (let body-start (nth super-parse 1))
+                (if (bml-source-token-value? (head body-start) "{")
+                    (do
+                        (let step
+                            (bml-source-parse-class-body-component
+                                class-name
+                                (nth property-parse 0)
+                                (nth super-parse 0)
+                                body-start))
+                        (list
+                            true
+                            (bml-source-parse-step-node step)
+                            (bml-source-template-parameter-names (nth angle 0))
+                            (bml-source-parse-step-rest step)))
+                    (list false (empty) (empty) objects)))
+            (list false (empty) (empty) objects)))
+
+    (defn bml-source-parse-interface-open (objects)
+        (if (bml-source-name-token? (nth objects 1))
+            (do
+                (let name (bmf-object-value (nth objects 1)))
+                (let after-name (drop 2 objects))
+                (let angle
+                    (if (bml-source-token-value? (head after-name) "<")
+                        (bml-source-collect-angle-loop (tail after-name) 1 (empty))
+                        (list (empty) after-name)))
+                (let property-parse (bml-source-class-property-parse (nth angle 1)))
+                (let parent-parse (bml-source-interface-parent-parse (nth property-parse 1)))
+                (let body-start (nth parent-parse 1))
+                (if (bml-source-token-value? (head body-start) "{")
+                    (do
+                        (let members
+                            (bml-source-parse-class-members-until-close name (tail body-start)))
+                        (list
+                            true
+                            (comp-bml-component
+                                "Interface"
+                                (list name (nth property-parse 0) (nth parent-parse 0) (nth members 0)))
+                            (bml-source-template-parameter-names (nth angle 0))
+                            (nth members 1)))
+                    (list false (empty) (empty) objects)))
+            (list false (empty) (empty) objects)))
+
+    (defn bml-ast-template (type-params decl)
+        (intern_node BML-AST-TEMPLATE
+            (list (bml-ast-block (bml-ast-name-nodes type-params)) decl)))
+
+    (defn bml-hati-bridge-templated (type-params decl)
+        (if (nil? type-params) decl (bml-ast-template type-params decl)))
+
+    (defn bml-source-decl-open (objects)
+        (if (bml-source-token-value? (head objects) "class")
+            (bml-source-parse-class-open objects)
+        (if (bml-source-token-value? (head objects) "interface")
+            (bml-source-parse-interface-open objects)
+            (list false (empty) (empty) objects))))
+
+    (defn bml-source-decl-step-of (open extra-params objects)
+        (if (head open)
+            (bml-source-parse-step
+                true
+                "type-decl"
+                (bml-hati-bridge-templated
+                    (append extra-params (nth open 2))
+                    (bml-hati-bridge-decl (nth open 1)))
+                (nth open 3))
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-source-parse-type-decl-step (objects)
+        (if (bml-source-token-value? (head objects) "template")
+            (do
+                (let params-parse (bml-source-template-parameters-parse objects))
+                (bml-source-decl-step-of
+                    (bml-source-decl-open (nth params-parse 1))
+                    (nth params-parse 0)
+                    objects))
+            (bml-source-decl-step-of (bml-source-decl-open objects) (empty) objects)))
+
+    ;; --- bridge: a parsed class component becomes BML-AST-CLASS ---------
+    ;; Fields keep their types (a [class] field is static and stays out of
+    ;; the instance record), methods and constructors keep typed
+    ;; parameters, and each body's kept token objects are re-read by the
+    ;; statement grammar. A body that grammar cannot read becomes a named
+    ;; refusal, a signature without a body an abstract member.
+
+    (defn bml-hati-digits-loop (text index)
+        (if (ge index (str_len text))
+            true
+            (do
+                (let code (ord (char_at text index)))
+                (if (if (ge code 48) (le code 57) false)
+                    (bml-hati-digits-loop text (add index 1))
+                    false))))
+
+    (defn bml-hati-digits? (text)
+        (if (eq (str_len text) 0) false (bml-hati-digits-loop text 0)))
+
+    (defn bml-hati-bridge-statements (objects name)
+        (do
+            (let parsed
+                (bml-source-parse-statements-until-close
+                    (append objects (list (bml-src-op "}")))
+                    (empty)))
+            (if (head parsed)
+                (if (nil? (nth parsed 2))
+                    (bml-ast-block (nth parsed 1))
+                    (bml-ast-unparsed-body name))
+                (bml-ast-unparsed-body name))))
+
+    (defn bml-hati-bridge-body (body name)
+        (if (gt (len (comp-bml-fields body)) 2)
+            (bml-hati-bridge-statements (bml-body-source-objects body) name)
+            (bml-ast-abstract-body name)))
+
+    (defn bml-hati-bridge-field (member)
+        (do
+            (let init (bml-field-init member))
+            (if (nil? init)
+                (bml-ast-field (bml-field-type member) (bml-field-name member))
+                (intern_node BML-AST-FIELD
+                    (list
+                        (intern_trivial_string (bml-field-type member))
+                        (intern_trivial_string (bml-field-name member))
+                        (if (if (eq (len init) 1) (bml-hati-digits? (head init)) false)
+                            (bml-ast-int (str_to_int (head init)))
+                            (bml-ast-unparsed-body (bml-field-name member))))))))
+
+    (defn bml-hati-bridge-method (member)
+        (do
+            (let fields (comp-bml-fields member))
+            (let body (bml-hati-bridge-body (bml-method-body member) (bml-method-name member)))
+            (if (gt (len fields) 5)
+                (bml-ast-generic-method
+                    (bml-method-name member)
+                    body
+                    (nth fields 5)
+                    (bml-method-parameters member))
+                (bml-ast-method-with-parameters
+                    (bml-method-name member)
+                    body
+                    (bml-method-parameters member)))))
+
+    (defn bml-hati-bridge-constructor (member ctor-name)
+        (bml-ast-method-with-parameters
+            ctor-name
+            (bml-hati-bridge-body (bml-constructor-body member) ctor-name)
+            (bml-constructor-parameters member)))
+
+    (defn bml-hati-bridge-members (members ctor-name)
+        (if (nil? members)
+            (empty)
+            (do
+                (let member (head members))
+                (let rest (bml-hati-bridge-members (tail members) ctor-name))
+                (if (bml-component-kind? member "Section")
+                    (append (bml-hati-bridge-members (bml-section-body member) ctor-name) rest)
+                (if (bml-component-kind? member "Field")
+                    (if (bml-properties-has? (bml-field-properties member) "class")
+                        rest
+                        (cons (bml-hati-bridge-field member) rest))
+                (if (bml-component-kind? member "Method")
+                    (cons (bml-hati-bridge-method member) rest)
+                (if (bml-component-kind? member "Constructor")
+                    (cons (bml-hati-bridge-constructor member ctor-name) rest)
+                    rest)))))))
+
+    (defn bml-hati-bridge-iface-refs (members)
+        (if (nil? members)
+            (empty)
+            (do
+                (let member (head members))
+                (let rest (bml-hati-bridge-iface-refs (tail members)))
+                (if (bml-component-kind? member "InterfaceRef")
+                    (cons (bml-interface-ref-name member) rest)
+                (if (bml-component-kind? member "Section")
+                    (append (bml-hati-bridge-iface-refs (bml-section-body member)) rest)
+                    rest)))))
+
+    (defn bml-hati-bridge-sections (members)
+        (bml-ast-block
+            (list (bml-ast-section (bml-ast-name "public") (bml-ast-block members)))))
+
+    (defn bml-hati-bridge-class (component)
+        (do
+            (let name (bml-class-name component))
+            (let supers (bml-class-supers component))
+            (let members (bml-class-body component))
+            (intern_node BML-AST-CLASS
+                (list
+                    (intern_trivial_string name)
+                    (intern_trivial_string (if (nil? supers) "Object" (head supers)))
+                    (bml-hati-bridge-sections
+                        (bml-hati-bridge-members members (bml-hati-type-base name)))
+                    (bml-ast-block
+                        (bml-ast-name-nodes
+                            (append
+                                (if (nil? supers) (empty) (tail supers))
+                                (bml-hati-bridge-iface-refs members))))))))
+
+    (defn bml-hati-bridge-interface (component)
+        (do
+            (let fields (comp-bml-fields component))
+            (bml-ast-interface
+                (nth fields 0)
+                (nth fields 2)
+                (bml-hati-bridge-sections (bml-hati-bridge-members (nth fields 3) "")))))
+
+    (defn bml-hati-bridge-decl (component)
+        (if (bml-component-kind? component "Class")
+            (bml-hati-bridge-class component)
+        (if (bml-component-kind? component "Interface")
+            (bml-hati-bridge-interface component)
+            (bml-ast-template
+                (bml-template-parameters component)
+                (bml-hati-bridge-decl (head (bml-template-body component)))))))
+
+    ;; --- units: which top-level nodes declare types ----------------------
+
+    (defn bml-hati-type-decl? (node)
+        (do
+            (let cat (node_category node))
+            (if (node_eq cat BML-AST-CLASS)
+                true
+            (if (node_eq cat BML-AST-INTERFACE)
+                true
+                (node_eq cat BML-AST-TEMPLATE)))))
+
+    (defn bml-hati-nested-decl-reason (node)
+        (if (node_eq (node_category node) BML-AST-TEMPLATE)
+            "template/nested"
+            "class/nested"))
+
+    (defn bml-hati-type-decls (nodes)
+        (if (nil? nodes)
+            (empty)
+            (if (bml-hati-type-decl? (head nodes))
+                (cons (head nodes) (bml-hati-type-decls (tail nodes)))
+                (bml-hati-type-decls (tail nodes)))))
+
+    (defn bml-scope-units-method-count (units)
+        (if (nil? units)
+            0
+            (add
+                (len (bml-scope-unit-methods (head units)))
+                (bml-scope-units-method-count (tail units)))))
+
+    ;; --- templates: one class or interface per type arguments ------------
+    ;; A template is BML-AST-TEMPLATE (parameter names, class or interface).
+    ;; Every Name<args> a unit names instantiates it: type positions (field,
+    ;; parameter, const, local, new, base, super) are substituted, a generic
+    ;; method's own type parameters shadow the template's, and the instance
+    ;; enters the layout as a class named by the whole type.
+
+    (defn bml-hati-type-ident-char? (ch)
+        (do
+            (let code (ord ch))
+            (if (if (ge code 48) (le code 57) false)
+                true
+            (if (if (ge code 65) (le code 90) false)
+                true
+            (if (if (ge code 97) (le code 122) false)
+                true
+                (if (str_eq ch "_") true (str_eq ch ".")))))))
+
+    (defn bml-hati-type-subst-word (word params args)
+        (if (nil? params)
+            word
+            (if (str_eq word (head params))
+                (head args)
+                (bml-hati-type-subst-word word (tail params) (tail args)))))
+
+    (defn bml-hati-type-subst-loop (text index word acc params args)
+        (if (ge index (str_len text))
+            (str_concat acc (bml-hati-type-subst-word word params args))
+            (do
+                (let ch (char_at text index))
+                (if (bml-hati-type-ident-char? ch)
+                    (bml-hati-type-subst-loop text (add index 1) (str_concat word ch) acc params args)
+                    (bml-hati-type-subst-loop
+                        text
+                        (add index 1)
+                        ""
+                        (str_concat (str_concat acc (bml-hati-type-subst-word word params args)) ch)
+                        params
+                        args)))))
+
+    (defn bml-hati-type-subst (text params args)
+        (bml-hati-type-subst-loop text 0 "" "" params args))
+
+    (defn bml-hati-type-args-loop (text index depth current acc)
+        (if (ge index (str_len text))
+            (reverse-list (if (str_eq current "") acc (cons current acc)))
+            (do
+                (let ch (char_at text index))
+                (if (if (str_eq ch ",") (eq depth 0) false)
+                    (bml-hati-type-args-loop text (add index 1) depth "" (cons current acc))
+                    (bml-hati-type-args-loop
+                        text
+                        (add index 1)
+                        (if (str_eq ch "<") (add depth 1) (if (str_eq ch ">") (sub depth 1) depth))
+                        (str_concat current ch)
+                        acc)))))
+
+    ;; "Name<A,B<C>>" -> ("A" "B<C>")
+    (defn bml-hati-type-args (text)
+        (do
+            (let open (str_find text "<" 0))
+            (if (lt open 0)
+                (empty)
+                (bml-hati-type-args-loop
+                    (substring text (add open 1) (sub (str_len text) 1))
+                    0
+                    0
+                    ""
+                    (empty)))))
+
+    (defn bml-hati-subst-nodes (nodes params args)
+        (if (nil? nodes)
+            (empty)
+            (cons
+                (bml-hati-subst-node (head nodes) params args)
+                (bml-hati-subst-nodes (tail nodes) params args))))
+
+    (defn bml-hati-subst-str-node (node params args)
+        (bml-ast-string (bml-hati-type-subst (node_value (bml-node-child node 0)) params args)))
+
+    (defn bml-hati-unshadowed (params args own)
+        (if (nil? params)
+            (list (empty) (empty))
+            (do
+                (let rest (bml-hati-unshadowed (tail params) (tail args) own))
+                (if (fsc-string-list-contains? own (head params))
+                    rest
+                    (list (cons (head params) (head rest)) (cons (head args) (nth rest 1)))))))
+
+    (defn bml-hati-subst-marker-type (node params args)
+        (bml-hati-marker
+            (bml-call-name node)
+            (cons
+                (bml-hati-subst-str-node (head (bml-call-args node)) params args)
+                (bml-hati-subst-nodes (tail (bml-call-args node)) params args))))
+
+    (defn bml-hati-subst-node (node params args)
+        (do
+            (let cat (node_category node))
+            (let kids (node_children node))
+            (if (nil? kids)
+                node
+            (if (node_eq cat BML-AST-FIELD)
+                (intern_node BML-AST-FIELD
+                    (cons
+                        (intern_trivial_string (bml-hati-type-subst (bml-field-node-type node) params args))
+                        (bml-hati-subst-nodes (tail kids) params args)))
+            (if (node_eq cat BML-AST-CONST)
+                (intern_node BML-AST-CONST
+                    (cons
+                        (intern_trivial_string (bml-hati-type-subst (node_value (head kids)) params args))
+                        (bml-hati-subst-nodes (tail kids) params args)))
+            (if (node_eq cat BML-AST-METHOD)
+                (do
+                    (let kept
+                        (bml-hati-unshadowed params args (bml-method-node-type-parameters node)))
+                    (intern_node BML-AST-METHOD
+                        (bml-hati-subst-nodes kids (head kept) (nth kept 1))))
+            (if (bml-call-named? node "__hati_new")
+                (bml-hati-subst-marker-type node params args)
+            (if (bml-call-named? node "__bnml_declare")
+                (bml-hati-subst-marker-type node params args)
+                (intern_node cat (bml-hati-subst-nodes kids params args))))))))))
+
+    (defn bml-hati-subst-names (names params args)
+        (if (nil? names)
+            (empty)
+            (cons
+                (bml-hati-type-subst (head names) params args)
+                (bml-hati-subst-names (tail names) params args))))
+
+    (defn bml-hati-specialize-decl (decl instance params args)
+        (if (node_eq (node_category decl) BML-AST-CLASS)
+            (intern_node BML-AST-CLASS
+                (append
+                    (list
+                        (intern_trivial_string instance)
+                        (intern_trivial_string
+                            (bml-hati-type-subst (node_value (bml-node-child decl 1)) params args))
+                        (bml-hati-subst-node (bml-node-child decl 2) params args))
+                    (list
+                        (bml-ast-block
+                            (bml-ast-name-nodes
+                                (bml-hati-subst-names (bml-hati-class-node-supers decl) params args))))))
+            (intern_node BML-AST-INTERFACE
+                (list
+                    (intern_trivial_string instance)
+                    (intern_trivial_string
+                        (bml-hati-type-subst (node_value (bml-node-child decl 1)) params args))
+                    (bml-hati-subst-node (bml-node-child decl 2) params args)))))
+
+    (defn bml-hati-type-refs-list (nodes acc)
+        (if (nil? nodes)
+            acc
+            (bml-hati-type-refs-list (tail nodes) (bml-hati-type-refs (head nodes) acc))))
+
+    ;; every type a node names in a type position.
+    (defn bml-hati-type-refs (node acc)
+        (do
+            (let cat (node_category node))
+            (let kids (node_children node))
+            (if (nil? kids)
+                acc
+                (bml-hati-type-refs-list
+                    kids
+                    (if (node_eq cat BML-AST-FIELD)
+                        (cons (bml-field-node-type node) acc)
+                    (if (node_eq cat BML-AST-CONST)
+                        (cons (node_value (head kids)) acc)
+                    (if (bml-call-named? node "__hati_new")
+                        (cons (bml-hati-marker-str node 0) acc)
+                    (if (bml-call-named? node "__bnml_declare")
+                        (cons (bml-hati-marker-str node 0) acc)
+                    (if (node_eq cat BML-AST-CLASS)
+                        (cons
+                            (node_value (bml-node-child node 1))
+                            (append (bml-hati-class-node-supers node) acc))
+                    (if (node_eq cat BML-AST-INTERFACE)
+                        (cons (node_value (bml-node-child node 1)) acc)
+                        acc))))))))))
+
+    ;; (list template) or nothing: a node is never asked nil?.
+    (defn bml-hati-template-find (templates name)
+        (if (nil? templates)
+            (empty)
+            (if (str_eq
+                    (bml-hati-type-base (bml-class-node-name (bml-node-child (head templates) 1)))
+                    name)
+                (list (head templates))
+                (bml-hati-template-find (tail templates) name))))
+
+    (defn bml-hati-ref-element (ref)
+        (if (bml-hati-array-type? ref)
+            (bml-hati-ref-element (bml-hati-array-element ref))
+            ref))
+
+    ;; state: (instances instantiated-names reasons)
+    (defn bml-hati-instantiate (templates refs state budget)
+        (if (nil? refs)
+            state
+            (do
+                (let ref (bml-hati-ref-element (head refs)))
+                (let found
+                    (if (lt (str_find ref "<" 0) 0)
+                        (empty)
+                        (bml-hati-template-find templates (bml-hati-type-base ref))))
+                (if (nil? found)
+                    (bml-hati-instantiate templates (tail refs) state budget)
+                (if (fsc-string-list-contains? (nth state 1) ref)
+                    (bml-hati-instantiate templates (tail refs) state budget)
+                (if (le budget 0)
+                    (bml-hati-instantiate
+                        templates
+                        (tail refs)
+                        (list (nth state 0) (cons ref (nth state 1)) (cons "template/depth" (nth state 2)))
+                        budget)
+                    (do
+                        (let template (head found))
+                        (let params (bml-name-node-values (node_children (bml-node-child template 0))))
+                        (let args (bml-hati-type-args ref))
+                        (if (eq (len params) (len args))
+                            (do
+                                (let instance
+                                    (bml-hati-specialize-decl (bml-node-child template 1) ref params args))
+                                (bml-hati-instantiate
+                                    templates
+                                    (append (tail refs) (bml-hati-type-refs instance (empty)))
+                                    (list
+                                        (cons instance (nth state 0))
+                                        (cons ref (nth state 1))
+                                        (nth state 2))
+                                    (sub budget 1)))
+                            (bml-hati-instantiate
+                                templates
+                                (tail refs)
+                                (list
+                                    (nth state 0)
+                                    (cons ref (nth state 1))
+                                    (cons "template/arity" (nth state 2)))
+                                budget)))))))))
+
+    (defn bml-hati-non-templates (nodes)
+        (if (nil? nodes)
+            (empty)
+            (if (node_eq (node_category (head nodes)) BML-AST-TEMPLATE)
+                (bml-hati-non-templates (tail nodes))
+                (cons (head nodes) (bml-hati-non-templates (tail nodes))))))
+
+    ;; a unit's layout: its classes and interfaces, plus every template
+    ;; instance its nodes name, from base-index on.
+    (defn bml-hati-unit-layout (nodes base-index)
+        (do
+            (let templates (bml-scope-nodes-of nodes BML-AST-TEMPLATE))
+            (let plain (bml-hati-non-templates nodes))
+            (let spec
+                (if (nil? templates)
+                    (list (empty) (empty) (empty))
+                    (bml-hati-instantiate
+                        templates
+                        (bml-hati-type-refs-list plain (empty))
+                        (list (empty) (empty) (empty))
+                        32)))
+            (let layout
+                (bml-hati-build-layout
+                    (append
+                        (bml-hati-type-decls plain)
+                        (append (reverse-list (nth spec 0)) templates))
+                    base-index))
+            (bml-hati-layout
+                (bml-hati-layout-classes layout)
+                (bml-hati-layout-ifaces layout)
+                (bml-hati-layout-stubs layout)
+                (bml-hati-layout-trap layout)
+                (append (bml-hati-layout-reasons layout) (nth spec 2))
+                (bml-hati-layout-templates layout))))
+
+    ;; --- layout build: class ids, member functions, method tables -------
+
+    (defn bml-hati-decl-members-loop (nodes)
+        (if (nil? nodes)
+            (empty)
+            (do
+                (let node (head nodes))
+                (let rest (bml-hati-decl-members-loop (tail nodes)))
+                (if (node_eq (node_category node) BML-AST-SECTION)
+                    (append
+                        (bml-hati-decl-members-loop (node_children (bml-node-child node 1)))
+                        rest)
+                (if (node_eq (node_category node) BML-AST-METHOD)
+                    (cons node rest)
+                (if (node_eq (node_category node) BML-AST-FIELD)
+                    (cons node rest)
+                    rest))))))
+
+    ;; a class or interface keeps its members in child 2, in sections.
+    (defn bml-hati-decl-members (decl)
+        (bml-hati-decl-members-loop (node_children (bml-node-child decl 2))))
+
+    (defn bml-hati-field-entry-of (node)
+        (if (gt (len (node_children node)) 2)
+            (bml-hati-field-entry
+                (bml-field-node-name node)
+                (bml-field-node-type node)
+                (bml-node-child node 2)
+                true)
+            (bml-hati-field-entry
+                (bml-field-node-name node)
+                (bml-field-node-type node)
+                (bml-ast-int 0)
+                false)))
+
+    ;; (members fields next-index): a signature-only method takes no index.
+    (defn bml-hati-members-from (nodes owner ctor-name index members fields)
+        (if (nil? nodes)
+            (list (reverse-list members) (reverse-list fields) index)
+            (do
+                (let node (head nodes))
+                (if (node_eq (node_category node) BML-AST-FIELD)
+                    (bml-hati-members-from
+                        (tail nodes)
+                        owner
+                        ctor-name
+                        index
+                        members
+                        (cons (bml-hati-field-entry-of node) fields))
+                    (do
+                        (let abstract (bml-call-named? (bml-method-node-body node) "__hati_abstract"))
+                        (let kind
+                            (if abstract
+                                "abstract"
+                                (if (str_eq (bml-method-node-name node) ctor-name) "ctor" "method")))
+                        (bml-hati-members-from
+                            (tail nodes)
+                            owner
+                            ctor-name
+                            (if abstract index (add index 1))
+                            (cons
+                                (bml-hati-member
+                                    (bml-method-node-name node)
+                                    (bml-hati-param-types node)
+                                    (bml-method-node-type-parameters node)
+                                    (if abstract -1 index)
+                                    kind
+                                    owner
+                                    node)
+                                members)
+                            fields))))))
+
+    (defn bml-hati-class-node-supers (node)
+        (if (gt (len (node_children node)) 3)
+            (bml-name-node-values (node_children (bml-node-child node 3)))
+            (empty)))
+
+    (defn bml-hati-class-entries-from (nodes id index acc)
+        (if (nil? nodes)
+            (list (reverse-list acc) index)
+            (do
+                (let node (head nodes))
+                (let name (bml-class-node-name node))
+                (let built
+                    (bml-hati-members-from
+                        (bml-hati-decl-members node)
+                        name
+                        (bml-hati-type-base name)
+                        index
+                        (empty)
+                        (empty)))
+                (bml-hati-class-entries-from
+                    (tail nodes)
+                    (add id 1)
+                    (nth built 2)
+                    (cons
+                        (bml-hati-class-entry
+                            name
+                            (node_value (bml-node-child node 1))
+                            (bml-hati-class-node-supers node)
+                            (nth built 1)
+                            (nth built 0)
+                            id
+                            node)
+                        acc)))))
+
+    (defn bml-hati-iface-entries-from (nodes index acc)
+        (if (nil? nodes)
+            (list (reverse-list acc) index)
+            (do
+                (let node (head nodes))
+                (let name (node_value (bml-node-child node 0)))
+                (let built
+                    (bml-hati-members-from (bml-hati-decl-members node) name "" index (empty) (empty)))
+                (bml-hati-iface-entries-from
+                    (tail nodes)
+                    (nth built 2)
+                    (cons
+                        (bml-hati-iface-entry
+                            name
+                            (node_value (bml-node-child node 1))
+                            (nth built 0)
+                            node)
+                        acc)))))
+
+    (defn bml-hati-entry-names (entries)
+        (if (nil? entries)
+            (empty)
+            (cons (nth (head entries) 1) (bml-hati-entry-names (tail entries)))))
+
+    (defn bml-hati-names-in (names allowed)
+        (if (nil? names)
+            (empty)
+            (if (fsc-string-list-contains? allowed (head names))
+                (cons (head names) (bml-hati-names-in (tail names) allowed))
+                (bml-hati-names-in (tail names) allowed))))
+
+    ;; The first super is the structural base unless it names an interface;
+    ;; the others are the interfaces the class declares.
+    (defn bml-hati-normalize-classes (entries iface-names)
+        (if (nil? entries)
+            (empty)
+            (do
+                (let entry (head entries))
+                (let base (bml-hati-class-base entry))
+                (let base-iface (fsc-string-list-contains? iface-names base))
+                (cons
+                    (bml-hati-class-entry
+                        (bml-hati-class-name entry)
+                        (if base-iface "" base)
+                        (bml-hati-names-in
+                            (if base-iface
+                                (cons base (bml-hati-class-ifaces entry))
+                                (bml-hati-class-ifaces entry))
+                            iface-names)
+                        (bml-hati-class-fields entry)
+                        (bml-hati-class-members entry)
+                        (bml-hati-class-id entry)
+                        (bml-hati-class-node entry))
+                    (bml-hati-normalize-classes (tail entries) iface-names)))))
+
+    (defn bml-hati-super-reasons (supers class-names iface-names)
+        (if (nil? supers)
+            (empty)
+            (append
+                (if (fsc-string-list-contains? iface-names (head supers))
+                    (empty)
+                (if (fsc-string-list-contains? class-names (head supers))
+                    (list "class/delegated-base")
+                    (list "class/unknown-super")))
+                (bml-hati-super-reasons (tail supers) class-names iface-names))))
+
+    (defn bml-hati-raw-class-reasons (raw class-names iface-names)
+        (if (nil? raw)
+            (empty)
+            (do
+                (let base (bml-hati-class-base (head raw)))
+                (append
+                    (if (bml-hati-root-type? base)
+                        (empty)
+                    (if (fsc-string-list-contains? class-names base)
+                        (empty)
+                    (if (fsc-string-list-contains? iface-names base)
+                        (empty)
+                        (list "class/unknown-base"))))
+                    (append
+                        (bml-hati-super-reasons (bml-hati-class-ifaces (head raw)) class-names iface-names)
+                        (bml-hati-raw-class-reasons (tail raw) class-names iface-names))))))
+
+    (defn bml-hati-duplicate-reasons (names seen)
+        (if (nil? names)
+            (empty)
+            (if (fsc-string-list-contains? seen (head names))
+                (cons "class/duplicate" (bml-hati-duplicate-reasons (tail names) seen))
+                (bml-hati-duplicate-reasons (tail names) (cons (head names) seen)))))
+
+    ;; a class that declares no abstract member of its own and leaves a
+    ;; signature of an interface it supports without an implementation.
+    (defn bml-hati-iface-reasons (layout classes)
+        (if (nil? classes)
+            (empty)
+            (do
+                (let name (bml-hati-class-name (head classes)))
+                (append
+                    (if (nil? (bml-hati-members-of-kind (bml-hati-class-members (head classes)) "abstract"))
+                        (if (nil?
+                                (bml-hati-unimplemented
+                                    layout
+                                    name
+                                    (bml-hati-iface-abstract-members
+                                        (bml-hati-class-iface-entries layout name))))
+                            (empty)
+                            (list "interface/unimplemented"))
+                        (empty))
+                    (bml-hati-iface-reasons layout (tail classes))))))
+
+    (defn bml-hati-iface-parent-reasons (ifaces iface-names)
+        (if (nil? ifaces)
+            (empty)
+            (append
+                (if (str_eq (bml-hati-iface-parent (head ifaces)) "")
+                    (empty)
+                    (if (fsc-string-list-contains? iface-names (bml-hati-iface-parent (head ifaces)))
+                        (empty)
+                        (list "interface/unknown-parent")))
+                (bml-hati-iface-parent-reasons (tail ifaces) iface-names))))
+
+    (defn bml-hati-dedupe-shapes (members kept)
+        (if (nil? members)
+            (reverse-list kept)
+            (bml-hati-dedupe-shapes
+                (tail members)
+                (if (str_eq (bml-hati-member-kind (head members)) "ctor")
+                    kept
+                    (if (nil? (bml-hati-first-shape kept (head members)))
+                        (cons (head members) kept)
+                        kept)))))
+
+    (defn bml-hati-all-sigs (layout)
+        (bml-hati-dedupe-shapes
+            (append
+                (bml-hati-chain-member-list (bml-hati-layout-classes layout))
+                (bml-hati-iface-member-list (bml-hati-layout-ifaces layout)))
+            (empty)))
+
+    ;; one row per class id: the function answering sig there, or -1.
+    (defn bml-hati-sig-table (layout classes sig)
+        (if (nil? classes)
+            (empty)
+            (do
+                (let impl (bml-hati-impl layout (bml-hati-class-name (head classes)) sig))
+                (cons
+                    (if (nil? impl) -1 (bml-hati-member-fn impl))
+                    (bml-hati-sig-table layout (tail classes) sig)))))
+
+    (defn bml-hati-distinct-fns (table acc)
+        (if (nil? table)
+            acc
+            (bml-hati-distinct-fns
+                (tail table)
+                (if (lt (head table) 0)
+                    acc
+                    (if (bml-hati-int-list-contains? acc (head table))
+                        acc
+                        (cons (head table) acc))))))
+
+    ;; a signature two classes answer differently gets a method table and
+    ;; a function that dispatches through it: (stubs next-index).
+    (defn bml-hati-stubs-from (layout sigs index acc)
+        (if (nil? sigs)
+            (list (reverse-list acc) index)
+            (do
+                (let table (bml-hati-sig-table layout (bml-hati-layout-classes layout) (head sigs)))
+                (if (gt (len (bml-hati-distinct-fns table (empty))) 1)
+                    (bml-hati-stubs-from
+                        layout
+                        (tail sigs)
+                        (add index 1)
+                        (cons (list (head sigs) index table) acc))
+                    (bml-hati-stubs-from layout (tail sigs) index acc)))))
+
+    (defn bml-hati-stubs-need-trap? (stubs)
+        (if (nil? stubs)
+            false
+            (if (bml-hati-int-list-contains? (nth (head stubs) 2) -1)
+                true
+                (bml-hati-stubs-need-trap? (tail stubs)))))
+
+    (defn bml-hati-template-names (templates)
+        (if (nil? templates)
+            (empty)
+            (cons
+                (bml-hati-type-base (bml-class-node-name (bml-node-child (head templates) 1)))
+                (bml-hati-template-names (tail templates)))))
+
+    ;; decls: class and interface nodes (templates already specialized)
+    ;; plus the template nodes; function indices start at base-index.
+    (defn bml-hati-build-layout (decls base-index)
+        (do
+            (let classes-built
+                (bml-hati-class-entries-from
+                    (bml-scope-nodes-of decls BML-AST-CLASS)
+                    0
+                    base-index
+                    (empty)))
+            (let ifaces-built
+                (bml-hati-iface-entries-from
+                    (bml-scope-nodes-of decls BML-AST-INTERFACE)
+                    (nth classes-built 1)
+                    (empty)))
+            (let ifaces (nth ifaces-built 0))
+            (let iface-names (bml-hati-entry-names ifaces))
+            (let raw-classes (nth classes-built 0))
+            (let class-names (bml-hati-entry-names raw-classes))
+            (let templates
+                (bml-hati-template-names (bml-scope-nodes-of decls BML-AST-TEMPLATE)))
+            (let plain
+                (bml-hati-layout
+                    (bml-hati-normalize-classes raw-classes iface-names)
+                    ifaces
+                    (empty)
+                    -1
+                    (empty)
+                    templates))
+            (let stubs-built
+                (bml-hati-stubs-from plain (bml-hati-all-sigs plain) (nth ifaces-built 1) (empty)))
+            (bml-hati-layout
+                (bml-hati-layout-classes plain)
+                ifaces
+                (nth stubs-built 0)
+                (if (bml-hati-stubs-need-trap? (nth stubs-built 0)) (nth stubs-built 1) -1)
+                (append
+                    (bml-hati-duplicate-reasons class-names (empty))
+                    (append
+                        (bml-hati-raw-class-reasons raw-classes class-names iface-names)
+                        (append
+                            (bml-hati-iface-parent-reasons ifaces iface-names)
+                            (bml-hati-iface-reasons plain (bml-hati-layout-classes plain)))))
+                templates)))
+
+    ;; --- lowering the layout: members, method tables, trap ---------------
+
+    (defn bml-hati-lower-members (layout owner members base-env pool fns reasons)
+        (if (nil? members)
+            (list (reverse-list fns) pool reasons)
+            (do
+                (let member (head members))
+                (if (lt (bml-hati-member-fn member) 0)
+                    (bml-hati-lower-members layout owner (tail members) base-env pool fns reasons)
+                    (do
+                        (let env (bml-hati-member-env layout owner member base-env))
+                        (let body (bml-method-node-body (bml-hati-member-node member)))
+                        (let lowered
+                            (bml-hati-bnml-body-in
+                                (list body)
+                                (bml-hati-lower-node-in-env body pool env)))
+                        (bml-hati-lower-members
+                            layout
+                            owner
+                            (tail members)
+                            base-env
+                            (bml-hati-lower-pool lowered)
+                            (cons
+                                (if (str_eq (bml-hati-member-kind member) "ctor")
+                                    (fk-sequence (bml-hati-lower-expr lowered) (fk-head (fk-arg)))
+                                    (bml-hati-lower-expr lowered))
+                                fns)
+                            (append reasons (bml-hati-unsupported-node-in body env))))))))
+
+    (defn bml-hati-lower-owners (layout owners base-env pool)
+        (if (nil? owners)
+            (list (empty) pool (empty))
+            (do
+                (let first
+                    (bml-hati-lower-members
+                        layout
+                        (nth (head owners) 1)
+                        (nth (head owners) (if (str_eq (head (head owners)) "bml-hati-class") 5 3))
+                        base-env
+                        pool
+                        (empty)
+                        (empty)))
+                (let rest (bml-hati-lower-owners layout (tail owners) base-env (nth first 1)))
+                (list
+                    (append (nth first 0) (nth rest 0))
+                    (nth rest 1)
+                    (append (nth first 2) (nth rest 2))))))
+
+    (defn bml-hati-table-expr (table trap)
+        (if (nil? table)
+            (fk-empty)
+            (fk-cons
+                (fk-lit (if (lt (head table) 0) trap (head table)))
+                (bml-hati-table-expr (tail table) trap))))
+
+    ;; A method-table function receives the packed (self ...) list, reads
+    ;; self's class id and hands the same list to the answering function.
+    (defn bml-hati-lower-stubs (layout stubs pool)
+        (if (nil? stubs)
+            (list (empty) pool)
+            (do
+                (let key (bml-hati-lower-string-in "bmlClassId" pool))
+                (let rest (bml-hati-lower-stubs layout (tail stubs) (bml-hati-lower-pool key)))
+                (list
+                    (cons
+                        (fk-icall
+                            (fk-cons
+                                (fk-nth
+                                    (bml-hati-table-expr
+                                        (nth (head stubs) 2)
+                                        (bml-hati-layout-trap layout))
+                                    (fk-rget (fk-head (fk-arg)) (bml-hati-lower-expr key)))
+                                (fk-cons (fk-lit 1) (fk-empty)))
+                            (fk-cons (fk-arg) (fk-empty)))
+                        (nth rest 0))
+                    (nth rest 1)))))
+
+    (defn bml-hati-trap-text () "BML-HATI-TRAP method/not-understood")
+
+    (defn bml-hati-lower-trap (layout pool)
+        (if (lt (bml-hati-layout-trap layout) 0)
+            (list (empty) pool)
+            (do
+                (let text (bml-hati-lower-string-in (bml-hati-trap-text) pool))
+                (list (list (bml-hati-lower-expr text)) (bml-hati-lower-pool text)))))
+
+    ;; (fns pool reasons): members of every class, then interface default
+    ;; members, then method tables, then the trap, in index order.
+    (defn bml-hati-lower-decls (layout base-env pool)
+        (do
+            (let owners
+                (bml-hati-lower-owners
+                    layout
+                    (append (bml-hati-layout-classes layout) (bml-hati-layout-ifaces layout))
+                    base-env
+                    pool))
+            (let stubs (bml-hati-lower-stubs layout (bml-hati-layout-stubs layout) (nth owners 1)))
+            (let trap (bml-hati-lower-trap layout (nth stubs 1)))
+            (list
+                (append (nth owners 0) (append (nth stubs 0) (nth trap 0)))
+                (nth trap 1)
+                (nth owners 2))))
+
+    (defn bml-hati-compile-class-image (node)
+        (do
+            (let layout (bml-hati-build-layout (list node) 0))
+            (let decl (bml-hati-lower-decls layout (empty) (empty)))
+            (bml-hati-image
+                (nth decl 0)
+                (nth decl 1)
+                node
+                (append (bml-hati-layout-reasons layout) (nth decl 2)))))
+
+    (defn bml-hati-layout-member-named (members name arity)
+        (if (nil? members)
+            (empty)
+            (if (str_eq (bml-hati-member-name (head members)) name)
+                (if (if (lt arity 0) true (eq (bml-hati-member-arity (head members)) arity))
+                    (head members)
+                    (bml-hati-layout-member-named (tail members) name arity))
+                (bml-hati-layout-member-named (tail members) name arity))))
+
+    (defn bml-hati-class-member-fn (node name arity)
+        (do
+            (let layout (bml-hati-build-layout (list node) 0))
+            (let member
+                (bml-hati-layout-member-named
+                    (bml-hati-class-members (head (bml-hati-layout-classes layout)))
+                    name
+                    arity))
+            (if (nil? member) -1 (bml-hati-member-fn member))))
+
+    (defn bml-hati-class-method-index (node name)
+        (bml-hati-class-member-fn node name -1))
+
+    (defn bml-hati-class-method-index-arity (node name arity)
+        (bml-hati-class-member-fn node name arity))
+
+    ;; Host entry: a class member runs with receiver self and arguments
+    ;; args, packed as a compiled call packs them: (self a0 a1 ...).
+    (defn bml-hati-run-class-method (node name self args)
+        (do
+            (let image (bml-hati-compile-class-image node))
+            (let fn (bml-hati-class-method-index-arity node name (len args)))
+            (if (not (bml-hati-image-supported? image))
+                (bml-hati-unsupported-table-file image)
+            (if (lt (bml-hati-class-method-index node name) 0)
+                "BML-HATI-UNSUPPORTED method/not-found"
+            (if (lt fn 0)
+                "BML-HATI-UNSUPPORTED method/arity-not-found"
+                (fkm-walk
+                    (bml-hati-image-fns image)
+                    (nth (bml-hati-image-fns image) fn)
+                    (cons self args)))))))
+
+    ;; The constructor family of a class: its fields and constructors.
+    (defn bml-hati-construction-members (nodes ctor-name)
+        (if (nil? nodes)
+            (empty)
+            (if (if (node_eq (node_category (head nodes)) BML-AST-FIELD)
+                    true
+                    (if (node_eq (node_category (head nodes)) BML-AST-METHOD)
+                        (str_eq (bml-method-node-name (head nodes)) ctor-name)
+                        false))
+                (cons (head nodes) (bml-hati-construction-members (tail nodes) ctor-name))
+                (bml-hati-construction-members (tail nodes) ctor-name))))
+
+    (defn bml-hati-construction-view (class-node)
+        (intern_node BML-AST-CLASS
+            (append
+                (list
+                    (bml-node-child class-node 0)
+                    (bml-node-child class-node 1)
+                    (bml-hati-bridge-sections
+                        (bml-hati-construction-members
+                            (bml-hati-decl-members class-node)
+                            (bml-hati-type-base (bml-class-node-name class-node)))))
+                (if (gt (len (node_children class-node)) 3)
+                    (list (bml-node-child class-node 3))
+                    (empty)))))
+
+    (defn bml-hati-construct-params (types index)
+        (if (nil? types)
+            (empty)
+            (cons
+                (bml-parameter-component (head types) (str_concat "__p" (int_to_str index)))
+                (bml-hati-construct-params (tail types) (add index 1)))))
+
+    (defn bml-hati-construct-args (types index)
+        (if (nil? types)
+            (empty)
+            (cons
+                (bml-ast-name (str_concat "__p" (int_to_str index)))
+                (bml-hati-construct-args (tail types) (add index 1)))))
+
+    ;; Host entry: construct a class natively from host arguments whose
+    ;; static types the host declares; answers the new record.
+    (defn bml-hati-run-new (class-node arg-types args)
+        (do
+            (let unit
+                (bml-ast-block
+                    (list
+                        class-node
+                        (bml-ast-method-with-parameters
+                            "__construct"
+                            (bml-ast-return
+                                (bml-ast-new
+                                    (bml-class-node-name class-node)
+                                    (bml-hati-construct-args arg-types 0)))
+                            (bml-hati-construct-params arg-types 0)))))
+            (let image (bml-hati-compile-image unit))
+            (if (not (bml-hati-image-supported? image))
+                (bml-hati-unsupported-table-file image)
+                (fkm-walk
+                    (bml-hati-image-fns image)
+                    (nth (bml-hati-image-fns image) 1)
+                    (if (eq (len args) 1) (head args) args)))))
 
     (defn bma-trace-count-mode (trace mode)
         (if (nil? trace) 0
