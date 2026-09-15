@@ -1,20 +1,15 @@
 #!/usr/bin/env bash
-# Run the Form-native emitter to produce a cached native-Python module.
+# Emit the cached native-Python objects module on fkwu, and let the body's own
+# Python grammar read it.
 #
-# Source-emission pipeline (docs/native-form-artifacts.md):
+#   form-stdlib/form-ontology.json             the python.bmf categories
+#     └─ form-stdlib/bml/ontology-emit.bml     read as (name, inst) pairs
+#        └─ emits/python-native.fk             pn-emit-objects-module
+#           └─ form/.cache/emit_native_python/python_bmf/objects.py
+#              └─ form/scripts/python-page-read.bml   the body reads it as Python
 #
-#   form-ontology.json
-#     └─ build_form_compiler_artifact.sh --categories
-#        └─ python-bmf-categories.fk  (generated)
-#           └─ form-kernel-go --emit-binary
-#              └─ python-bmf-categories.fkb  (the substrate ice)
-#                 └─ read_form_binary inside python-native.fk
-#                    └─ pn-cat-table-from-artifact (lens)
-#                       └─ pn-emit-objects-module (emitter)
-#                          └─ write_file_text → form/.cache/emit_native_python/python_bmf/objects.py
-#
-# No Form literal of the category table lives in the emitter — the
-# lattice IS the source of truth, the .fkb is its serialized projection.
+# No Form literal of the category table lives in the emitter: the ontology is
+# the source of truth, read where it stands. Every step runs on fkwu.
 #
 # Usage:
 #   form/scripts/emit_native_python.sh
@@ -23,46 +18,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
+[[ -x ./fkwu ]] || { echo "the body's kernel is missing: ./fkwu (cc -O2 -o fkwu runtime/fkwu-uni.c)" >&2; exit 1; }
 
-GO_BIN="$REPO_ROOT/form/form-kernel-go/bin-go"
-if [[ ! -x "$GO_BIN" ]]; then
-    echo "Building form-kernel-go..." >&2
-    (cd "$REPO_ROOT/form/form-kernel-go" && go build -o bin-go .)
-fi
+echo "Step 1: the Form-native emitter writes the module..." >&2
+./fkwu form/scripts/emit-native-python-objects.bml
 
-WORK_DIR="$REPO_ROOT/form/.cache/emit_native_python"
-PYTHON_BMF_OUT="$WORK_DIR/python_bmf"
-mkdir -p "$PYTHON_BMF_OUT"
-
-# Step 0: source-compile core.fk (same shape validate.sh uses) so
-# the emitter has nil?/map/foldl/etc. available at walk time.
-CORE_COMPILED="$WORK_DIR/core.compiled.fk"
-CORE_DRIVER="$WORK_DIR/core-driver.fk"
-printf '(do (form-source-compile-file "%s" "%s"))\n' \
-    "$REPO_ROOT/form/form-stdlib/core.fk" "$CORE_COMPILED" > "$CORE_DRIVER"
-(cd "$REPO_ROOT/form" && "$GO_BIN" \
-    "form-stdlib/json.fk" \
-    "form-stdlib/cache.fk" \
-    "form-stdlib/form-ontology-loader.fk" \
-    "form-stdlib/source-compiler.fk" \
-    "$CORE_DRIVER" >/dev/null)
-
-# Step 1: build the .fkb that carries python.bmf categories.
-CATS_FKB="$WORK_DIR/python-bmf-categories.fkb"
-echo "Step 1: building $CATS_FKB from form-ontology.json..." >&2
-"$REPO_ROOT/form/scripts/build_form_compiler_artifact.sh" --categories "$CATS_FKB" >&2
-
-# Step 2: run the Form emitter against the .fkb.
-EMITTER="$REPO_ROOT/form/form-stdlib/emits/python-native.fk"
-DRIVER="$REPO_ROOT/form/form-stdlib/emits/python-native-driver.fk"
-
-echo "Step 2: running Form-native emitter (kernel: form-kernel-go)..." >&2
-(cd "$REPO_ROOT" && "$GO_BIN" "$CORE_COMPILED" "$EMITTER" "$DRIVER")
-
-echo "" >&2
-echo "Emitted:" >&2
-ls -la "$PYTHON_BMF_OUT/objects.py" 2>&1 | tail -1
-echo "" >&2
-echo "Step 3: the body's own Python grammar reads the page..." >&2
-printf '%s\n' "$PYTHON_BMF_OUT/objects.py" > "$WORK_DIR/objects-path"
-./fkwu form/scripts/python-page-read.bml < "$WORK_DIR/objects-path"
+echo "Step 2: the body's own Python grammar reads the page..." >&2
+printf '%s\n' form/.cache/emit_native_python/python_bmf/objects.py > form/.cache/emit_native_python/objects-path
+./fkwu form/scripts/python-page-read.bml < form/.cache/emit_native_python/objects-path
