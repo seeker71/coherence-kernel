@@ -36,6 +36,14 @@ admission predicate and generated constructor/readers. The seed carries one
 serialization. The current implementation still compiles that generated
 header into the bootstrap; live Form-native replacement is its destination.
 
+The [Form-native accessor](native-node-accessor.md) now provides an independent
+raw-u64 call boundary and leased blueprint storage without changing this seed.
+Primary field migration still crosses `fk_field_fill`/`fk_field_intern_node`,
+the direct column readers, the collector's mark/relocation passes and native
+admission side tables. A raw semantic ID is not a tagged handle or a reusable
+physical slot. Moving reference-bearing columns without a root bridge would
+hide live values from the collector.
+
 The current [per-symbol audit](evidence/fkwu/c-bootstrap-audit.json) carries positions, signatures, declarations, call-shaped tokens, references matching global names, numeric tokens and ownership/migration information. Matched names may be shadowed; call-shaped tokens may be macros or indirect calls. Missing or reordered region anchors prevent publication.
 
 ## Executable inspection

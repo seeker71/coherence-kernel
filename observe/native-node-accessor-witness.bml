@@ -1,0 +1,93 @@
+// Real nested native calls: raw u64 results never use tagged return values.
+// preludes: form-stdlib/bml/native-node-accessor.bml
+section [form.bml] {
+ def nrat-need(ok,why) = if ok then 1 else form_error(str_concat("native accessor witness: ",why));
+ def nrat-repeat(byte,count) = if eq(count,0) then "" else str_concat(byte_to_str(byte),nrat-repeat(byte,sub(count,1)));
+ def nrat-word(width,row,field,byte,out) = if eq(byte,8) then out else {
+  let left = sub(width,mul(byte,8)); let value = mod(add(173,add(mul(row,37),add(mul(field,53),mul(byte,19)))),256);
+  nrat-word(width,row,field,add(byte,1),str_concat(out,byte_to_str(if le(left,0) then 0 else if ge(left,8) then value else mod(value,nnw-power(left)))));
+ };
+ def nrat-row(widths,row,field,out) = if nil?(widths) then out else nrat-row(tail(widths),row,add(field,1),str_concat(out,nrat-word(head(widths),row,field,0,"")));
+ def nrat-raw(widths,row,count,out) = if eq(row,count) then out else nrat-raw(widths,add(row,1),count,str_concat(out,nrat-row(widths,row,0,"")));
+ def nrat-fields(widths,field) = if nil?(widths) then list() else cons(list(str_concat("field-",int_to_str(field)),head(widths),"raw"),nrat-fields(tail(widths),add(field,1)));
+ def nrat-pair(row,field) = str_concat(nfm-low(row,8),nfm-low(field,8));
+ def nrat-queries(row,count,field,fields,out) = if eq(row,count) then out else if eq(field,fields) then nrat-queries(add(row,1),count,0,fields,out) else nrat-queries(row,count,add(field,1),fields,str_concat(out,nrat-pair(row,field)));
+ def nrat-bytes(region,at,bytes) = nfm-bytes-list(npd-bytes(region,at,bytes),"");
+ def nrat-layout(accessor,widths,count,raw,detail) {
+  let owner = nbl-open(nbl-layout(nrat-fields(widths,0))); let run = nbl-pack(owner,raw); nrat-need(nbl-run?(run),"packed run admitted");
+  let view = nra-acquire(accessor,run); nrat-need(nra-view?(view),"native reader acquired");
+  let entry = nra-entry(view); let descriptor = nra-view-pointer(view); nrat-need(eq(entry,record_get(accessor,"entry")),"same native getter for every layout");
+  let queries = nrat-queries(0,count,0,len(widths),""); let bytes = str_len(raw); let output = npd-region(record_get(accessor,"memory"),add(bytes,16));
+  let guards = nrat-repeat(165,add(bytes,16)); nrat-need(eq(nra-call(accessor,list(1,guards,npd-span(output,0,add(bytes,16)))),add(bytes,16)),"fill complete guarded output");
+  let calls = record_get(accessor,"calls"); nrat-need(eq(nra-project(view,queries,output,8),mul(count,len(widths))),"native batch completed all fields");
+  nrat-need(eq(record_get(accessor,"calls"),add(calls,1)),"one membrane entry for complete native batch");
+  nrat-need(str_eq(nrat-bytes(output,8,bytes),raw),"all raw u64 field bits exact");
+  nrat-need(and(str_eq(nrat-bytes(output,0,8),nrat-repeat(165,8)),str_eq(nrat-bytes(output,add(bytes,8),8),nrat-repeat(165,8))),"both output guards unchanged");
+  if detail then nrat-lifetime(accessor,owner,run,view,output,queries,raw,entry,descriptor) else {
+   nrat-need(eq(nbl-run-close(run),0),"run retired while reader held"); nrat-need(nbl-held?(run),"retired mapping retained");
+   nrat-need(eq(nra-project(view,queries,output,8),mul(count,len(widths))),"retired run remains readable through lease");
+   nrat-need(str_eq(nrat-bytes(output,8,bytes),raw),"retired raw bytes exact");
+   nrat-need(eq(nra-release(view),0),"reader released"); nrat-need(eq(record_get(record_get(run,"region"),"active"),0),"last reader unmaps retired data");
+  };
+  nrat-need(eq(npd-region-close(output),0),"output unmapped"); nrat-need(eq(nbl-close(owner),1),"layout owner and code released"); 1;
+ }
+ def nrat-lifetime(accessor,owner,run,view,output,queries,raw,entry,descriptor) {
+  let second = nra-acquire(accessor,run); nrat-need(eq(record_get(run,"readers"),2),"two independent reader leases");
+  nrat-need(nothing?(nra-close(accessor)),"accessor code retained while views live");
+  let reading = record_get(accessor,"last-reading"); let response = oh-response(reading,"retain-reader");
+  nrat-need(str_eq(oh-select(reading,response,""),"retain-reader"),"inbound care matches actual retirement observation"); oh-voice(response);
+  nrat-need(eq(nbl-run-close(run),0),"retirement published"); nrat-need(nbl-held?(run),"pinned data remains mapped");
+  nrat-need(nothing?(nra-acquire(accessor,run)),"no new reader after retirement"); nrat-need(nothing?(nbl-acquire(run)),"layout rejects new reader after retirement");
+  nrat-need(nothing?(nbl-close(owner)),"layout owner cannot release pinned storage");
+  nrat-need(eq(nra-project(view,queries,output,8),div(str_len(raw),8)),"first reader survives retirement");
+  nrat-need(eq(nra-project(second,queries,output,8),div(str_len(raw),8)),"second reader survives retirement");
+  oh-voice(oh-applied(reading,"retain-reader",nra-state(accessor)));
+  oh-voice(oh-set(oh-reading("native-node-accessor",oh-str(reading,"flow"),"retained-read",json-node-int(2),json-node-int(record_get(run,"readers")),json-node-null(),list(),list("release-view"),nra-state(accessor)),"care_of",oh-get(reading,"id")));
+  nrat-need(nothing?(nra-project(view,queries,record_get(view,"descriptor"),0)),"immutable descriptor refuses output alias");
+  nrat-need(nothing?(nra-project(view,queries,record_get(accessor,"control"),0)),"export slot refuses output alias");
+  nrat-need(nothing?(nra-project(view,queries,record_get(run,"region"),0)),"packed run refuses output alias");
+  nrat-need(nothing?(nra-project(view,queries,output,17)),"output overrun refused");
+  nrat-need(nothing?(nra-project(view,"x",output,0)),"incomplete query pair refused");
+  nrat-need(eq(nra-project(view,"",output,record_get(output,"bytes")),0),"empty query has no load or store");
+  let sentinel = nrat-repeat(90,record_get(output,"bytes")); nrat-need(eq(nra-call(accessor,list(1,sentinel,npd-span(output,0,str_len(sentinel)))),str_len(sentinel)),"fill invalid-query sentinel");
+  let invalid = str_concat(nrat-pair(0,0),str_concat(nrat-pair(record_get(run,"count"),0),nrat-pair(0,0)));
+  nrat-need(eq(nra-project(view,invalid,output,8),1),"out-of-range row stops at completed prefix");
+  nrat-need(str_eq(nrat-bytes(output,8,8),substring(raw,0,8)),"valid prefix exact before refused row");
+  nrat-need(str_eq(nrat-bytes(output,16,sub(record_get(output,"bytes"),16)),substring(sentinel,16,str_len(sentinel))),"refused row and following queries never write");
+  nrat-need(eq(nra-project(view,nrat-pair(0,nbl-count(record_get(owner,"layout"))),output,8),0),"field extent checked");
+  nrat-need(eq(nra-project(view,str_concat(nrat-repeat(255,8),nfm-low(0,8)),output,8),0),"raw unsigned row bounds checked");
+  nrat-need(eq(nra-project(view,str_concat(nfm-low(0,8),nrat-repeat(255,8)),output,8),0),"raw unsigned field bounds checked");
+  nrat-need(eq(nra-release(view),0),"first reader released"); nrat-need(nbl-held?(run),"second lease retains mapping");
+  nrat-need(eq(nra-call(accessor,list(2,entry,descriptor,nrat-pair(0,0),npd-span(output,8,8))),0),"released descriptor refuses direct native call");
+  nrat-need(nothing?(nra-project(view,queries,output,8)),"released view refuses Form admission"); nrat-need(eq(nra-release(view),0),"duplicate release does not decrement twice");
+  nrat-need(eq(record_get(run,"readers"),1),"one reader remains"); nrat-need(eq(nra-project(second,queries,output,8),div(str_len(raw),8)),"remaining reader still exact");
+  nrat-need(str_eq(nrat-bytes(output,8,str_len(raw)),raw),"remaining reader complete raw bytes");
+  nrat-need(eq(nra-release(second),0),"last reader released"); nrat-need(eq(record_get(record_get(run,"region"),"active"),0),"retired data unmapped on final release");
+  nrat-need(eq(nra-call(accessor,list(2,entry,descriptor,nrat-pair(0,0),npd-span(output,8,8))),0),"descriptor refusal precedes access to unmapped data");
+  nrat-need(nothing?(nra-close(accessor)),"open output refuses close without unmapping descriptors");
+  nrat-need(eq(nra-call(accessor,list(2,entry,descriptor,nrat-pair(0,0),npd-span(output,8,8))),0),"released descriptor survives refused owner close");
+  nrat-need(str_eq(nrat-bytes(output,8,str_len(raw)),raw),"refused owner close and stale query leave output unchanged"); 1;
+ }
+ def nrat-widths(accessor,width) = if gt(width,64) then 64 else {
+  let widths = list(3,width); nrat-layout(accessor,widths,9,nrat-raw(widths,0,9,""),0); nrat-widths(accessor,add(width,1));
+ };
+ def nrat-empty(accessor) {
+  let owner = nbl-open(nbl-layout(list(list("word",64,"raw")))); let run = nbl-pack(owner,""); let view = nra-acquire(accessor,run); let output = npd-region(record_get(accessor,"memory"),8);
+  nrat-need(eq(nra-project(view,nrat-pair(0,0),output,0),0),"empty run rejects every row"); nrat-need(eq(nra-project(view,"",output,8),0),"empty run accepts empty batch");
+  nbl-run-close(run); nra-release(view); nrat-need(eq(npd-region-close(output),0),"empty output released"); nrat-need(eq(nbl-close(owner),1),"empty layout released"); 1;
+ }
+ def nrat-run() {
+  let accessor = nra-open(); nrat-need(nra-active(accessor),"RAM getter and consumer admitted"); let entry = record_get(accessor,"entry"); let image = record_get(accessor,"image");
+  let widths = nrat-widths(accessor,1);
+  let complex = list(7,13,4,8,16,64,29); nrat-layout(accessor,complex,19,nrat-raw(complex,0,19,""),1);
+  let primitive = str-join-with(list(nrat-repeat(0,8),nrat-repeat(255,8),str_concat(nrat-repeat(0,7),byte_to_str(128)),str_concat(nrat-repeat(255,7),byte_to_str(127))),"");
+  nrat-layout(accessor,list(64),4,primitive,0); nrat-empty(accessor);
+  nrat-need(and(eq(entry,record_get(accessor,"entry")),value_eq(image,record_get(accessor,"image"))),"one unchanged image and entry across every layout");
+  nrat-need(nra-views-released(record_get(accessor,"views")),"all native views released");
+  let count = record_get(accessor,"generation"); let calls = record_get(accessor,"calls"); let bytes = len(image);
+  nrat-need(eq(nra-close(accessor),1),"all descriptor maps, entry slot and native code released"); nrat-need(npd-regions-closed(record_get(record_get(accessor,"memory"),"regions")),"all owned mappings inactive");
+  nrat-need(eq(nra-close(accessor),0),"duplicate close inert");
+  print(list("native-node-accessor","widths",widths,"layouts",67,"views",count,"image-bytes",bytes,"calls",calls,"native-u64",1,"retired-readers",1,"released",1)); 1;
+ }
+ if str_eq(read_line(),"run") then nrat-run() else 0;
+}

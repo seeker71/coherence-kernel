@@ -32,6 +32,15 @@ The adaptive word owner independently widens or shrinks immutable generations
 while retaining pinned readers. These local owners are separate from the
 primary shared field.
 
+The [native accessor](native-node-accessor.md) carries full raw-u64 fields
+between native functions without tagged returns. One 424-byte RAM image serves
+67 observed layouts and all 64 field widths. Immutable descriptors pin packed
+runs; retirement blocks new readers and final release unmaps the data. Owner
+close waits for native views and outputs, with released descriptors retained
+until that close. Unease reports current ownership and byte counts. These
+process-local leases do not establish atomic cross-process publication or
+collection of tagged references stored in raw memory.
+
 The shared field reuses identical NodeID coordinates; the allocation witness
 returns `7`. Its node columns still have a fixed 2^26-cell capacity and no live
 reclamation. Reset requires every other kernel to settle. The
@@ -243,7 +252,13 @@ Resource ownership includes names, metadata and event delivery: a native handle 
 1. Give changing observations an owned, reclaimable lifetime and decouple field
    allocation from its current fixed capacity. The native identity already
    occupies one word; its encoding width does not require preallocating its
-   identity space. Measure allocations
+   identity space. The raw-u64 accessor and leased blueprint runs are executable.
+   Next, give the identity column a Form-owned directory and route its native
+   readers through that directory while preserving tagged handles. Admit the
+   native implementation before changing allocation so admission cannot call
+   the allocator it replaces. Reference-bearing columns require a collector
+   root/relocation bridge; slot reuse requires handle generations and side-table
+   ownership. Measure allocations
    at actual organ boundaries, preserve the care path under pressure, and prove
    another live owner keeps its values during reclamation. The direct care
    projection is the executing first reduction in this path. The remaining
