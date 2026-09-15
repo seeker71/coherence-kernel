@@ -1,5 +1,5 @@
 ; grammars/bml.fk - BML object compiler and runtime support
-; preludes: form-stdlib/dialect-categories.fk form-stdlib/source-compiler.fk form-stdlib/compiler.fk form-stdlib/bml/source-scan.bml form-stdlib/hati-os-kernel.fk form-stdlib/fkc-table-serialize.fk form-stdlib/bml-native-interface-package-import.fk
+; preludes: form-stdlib/dialect-categories.fk form-stdlib/source-compiler.fk form-stdlib/compiler.fk form-stdlib/bml/source-scan.bml form-stdlib/hati-os-kernel.fk form-stdlib/fkc-table-serialize.fk form-stdlib/bml-native-interface-package-import.fk form-stdlib/bml-native-source-control.fk form-stdlib/form-control-backtracking-ml.fk
 ;
 ; Reference shape: the 2000 BML/JBML compiler lowers BMF matches into
 ; component objects, then into an instruction stream for a backtracking VM.
@@ -4009,6 +4009,8 @@
         (list "if-fail-fail-return-int"
               "while-success-fail-return-int"
               "try-throw-return"
+              "break-simple"
+              "continue-simple"
               "choice-fail-int"
               "choose-fail-int"
               "state-int"
@@ -5047,7 +5049,7 @@
                     bml-source-executable-rule-index))
             (if (bml-source-parse-step-ok? step)
                 step
-                (bml-source-parse-general-step objects))))
+                (bml-ctl-parse-general objects))))
 
     ;; --- general executable statements -------------------------------
     ;; A fixed rulebook shape answers first and keeps its rule name. A
@@ -5215,7 +5217,7 @@
                         (bml-source-call-node name (empty))
                         (drop 2 rest))
                     (bml-source-parse-call-args name (tail rest) (empty)))
-                (bml-expr-result true (bml-ast-name name) rest))))
+                (bml-expr-result true (bml-ctl-name-node name) rest))))
 
     (defn bml-source-parse-call-args (name objects args)
         (do
@@ -5266,25 +5268,11 @@
                     (bml-expr-fail objects)))
             (bml-expr-result true node objects)))
 
+    ; one expression grammar: unary ! and -, then BML's operator rules by
+    ; precedence (op-or, op-and, op-eq/op-ne, op-lt/le/gt/ge, op-add/op-sub,
+    ; op-mul), each left-associative, over postfix operands
     (defn bml-source-parse-expr (objects)
-        (do
-            (let left (bml-source-parse-postfix objects))
-            (if (bml-expr-ok? left)
-                (bml-source-parse-add-tail
-                    (bml-expr-node left)
-                    (bml-expr-rest left))
-                left)))
-
-    (defn bml-source-parse-add-tail (node objects)
-        (if (bml-source-token-value? (head objects) "+")
-            (do
-                (let right (bml-source-parse-postfix (tail objects)))
-                (if (bml-expr-ok? right)
-                    (bml-source-parse-add-tail
-                        (bml-ast-add node (bml-expr-node right))
-                        (bml-expr-rest right))
-                    (bml-expr-fail objects)))
-            (bml-expr-result true node objects)))
+        (bml-ctl-parse-binary objects 1))
 
     (defn bml-source-parse-expr-semicolon (objects)
         (do
@@ -5553,6 +5541,631 @@
         (bml-compile-program
             (bml-source-exec-parse-node
                 (bml-source-file-parse-executable path))))
+
+    ;; --- source control statements ----------------------------------
+    ;; The general driver reads blocks, locals, assignment, const, return
+    ;; and methods. Control reads here first: if/else, while, for, loop,
+    ;; switch, labeled loops, break/continue, throw and try/catch; after
+    ;; the driver declines, the forms it leaves (this.f = e, x++ and x op= e,
+    ;; a call as a statement) read here too. The one expression grammar
+    ;; climbs BML's own operator rules (op-or .. op-mul); each operator but
+    ;; op-add is a reserved __bml_op-* method call, the __hati_* idiom, so
+    ;; no category is minted.
+
+    (defn bml-ast-if (test-node then-node else-node)
+        (intern_node BML-AST-IF (list test-node then-node else-node)))
+
+    (defn bml-ast-while (test-node body label)
+        (intern_node BML-AST-WHILE
+                     (list test-node body (intern_trivial_string label))))
+
+    (defn bml-ast-for (label init test-node update body)
+        (intern_node BML-AST-FOR
+                     (list (intern_trivial_string label) init test-node update body)))
+
+    (defn bml-ast-loop (label body)
+        (bml-ast-for label (bml-ast-block (empty)) (bml-ast-int 1)
+                     (bml-ast-block (empty)) body))
+
+    ; a catch parameter is a bnml local declared from the thrown value
+    (defn bml-ast-try-catch (body handler catch-decl)
+        (intern_node BML-AST-TRY (list body handler catch-decl)))
+
+    (defn bml-ast-thrown (_x)
+        (bml-ast-call "__bml_thrown" (bml-ast-int 0)))
+
+    (defn bml-ast-switch (label scrutinee clauses)
+        (bml-ast-call-args
+            "__bml_switch"
+            (list scrutinee (bml-ast-array clauses) (bml-ast-string label))))
+
+    (defn bml-ast-switch-clause (value default-clause stmts)
+        (if default-clause
+            (bml-ast-call "__bml_default" (bml-ast-block stmts))
+            (bml-ast-call-args "__bml_case" (list value (bml-ast-block stmts)))))
+
+    (defn bml-ctl-step (rule node rest)
+        (bml-source-parse-step true rule node rest))
+
+    (defn bml-ctl-token-is? (object kind value)
+        (if (nil? object)
+            false
+            (if (str_eq (bmf-object-kind object) kind)
+                (str_eq (bmf-object-value object) value)
+                false)))
+
+    (defn bml-ctl-op? (object value)
+        (bml-ctl-token-is? object "bml-op" value))
+
+    (defn bml-ctl-keyword? (object value)
+        (bml-ctl-token-is? object "bml-keyword" value))
+
+    (defn bml-ctl-plain-name? (object)
+        (if (nil? object)
+            false
+            (str_eq (bmf-object-kind object) "bml-name")))
+
+    ; a label is a name in its own namespace; BML's lexicon also lists
+    ; words such as `outer` as properties, and those read as labels too
+    (defn bml-ctl-label-token? (object)
+        (if (bml-ctl-plain-name? object)
+            true
+            (bml-source-property-token? object)))
+
+    (defn bml-ctl-second (objects)
+        (if (nil? objects)
+            (empty)
+            (if (nil? (tail objects)) (empty) (head (tail objects)))))
+
+    (defn bml-ctl-third (objects)
+        (if (nil? objects) (empty) (bml-ctl-second (tail objects))))
+
+    (defn bml-ctl-op-rule (value)
+        (if (str_eq value "||") "op-or"
+        (if (str_eq value "&&") "op-and"
+        (if (str_eq value "==") "op-eq"
+        (if (str_eq value "!=") "op-ne"
+        (if (str_eq value "<") "op-lt"
+        (if (str_eq value "<=") "op-le"
+        (if (str_eq value ">") "op-gt"
+        (if (str_eq value ">=") "op-ge"
+        (if (str_eq value "+") "op-add"
+        (if (str_eq value "-") "op-sub"
+        (if (str_eq value "*") "op-mul"
+            ""))))))))))))
+
+    (defn bml-ctl-op-prec (rule)
+        (if (str_eq rule "op-or") 1
+        (if (str_eq rule "op-and") 2
+        (if (str_eq rule "op-eq") 3
+        (if (str_eq rule "op-ne") 3
+        (if (str_eq rule "op-lt") 4
+        (if (str_eq rule "op-le") 4
+        (if (str_eq rule "op-gt") 4
+        (if (str_eq rule "op-ge") 4
+        (if (str_eq rule "op-add") 5
+        (if (str_eq rule "op-sub") 5
+        (if (str_eq rule "op-mul") 6
+            0))))))))))))
+
+    (defn bml-ctl-head-op-rule (objects)
+        (if (nil? objects)
+            ""
+            (if (str_eq (bmf-object-kind (head objects)) "bml-op")
+                (bml-ctl-op-rule (bmf-object-value (head objects)))
+                "")))
+
+    (defn bml-ctl-op-call-name (rule)
+        (str_concat "__bml_" rule))
+
+    (defn bml-ast-op (rule args)
+        (if (str_eq rule "op-add")
+            (bml-ast-add (head args) (head (tail args)))
+            (bml-ast-call-args (bml-ctl-op-call-name rule) args)))
+
+    (defn bml-ctl-parse-binary (objects min-prec)
+        (do
+            (let left (bml-ctl-parse-unary objects))
+            (if (bml-expr-ok? left)
+                (bml-ctl-parse-binary-loop
+                    (bml-expr-node left)
+                    (bml-expr-rest left)
+                    min-prec)
+                left)))
+
+    (defn bml-ctl-parse-binary-loop (left objects min-prec)
+        (do
+            (let rule (bml-ctl-head-op-rule objects))
+            (let prec (bml-ctl-op-prec rule))
+            (if (eq prec 0)
+                (bml-expr-result true left objects)
+            (if (lt prec min-prec)
+                (bml-expr-result true left objects)
+                (bml-ctl-parse-binary-right
+                    rule
+                    left
+                    (bml-ctl-parse-binary (tail objects) (add prec 1))
+                    min-prec)))))
+
+    (defn bml-ctl-parse-binary-right (rule left right min-prec)
+        (if (bml-expr-ok? right)
+            (bml-ctl-parse-binary-loop
+                (bml-ast-op rule (list left (bml-expr-node right)))
+                (bml-expr-rest right)
+                min-prec)
+            right))
+
+    (defn bml-ctl-parse-unary (objects)
+        (if (bml-ctl-op? (head objects) "!")
+            (bml-ctl-expr-unary "op-not" (bml-ctl-parse-unary (tail objects)))
+        (if (bml-ctl-op? (head objects) "-")
+            (bml-ctl-expr-unary "op-neg" (bml-ctl-parse-unary (tail objects)))
+            (bml-source-parse-postfix objects))))
+
+    (defn bml-ctl-expr-unary (rule result)
+        (if (bml-expr-ok? result)
+            (bml-expr-result
+                true
+                (bml-ast-op rule (list (bml-expr-node result)))
+                (bml-expr-rest result))
+            result))
+
+    (defn bml-ctl-expr-before (result value)
+        (if (bml-expr-ok? result)
+            (if (bml-ctl-op? (head (bml-expr-rest result)) value)
+                (bml-expr-result true (bml-expr-node result) (tail (bml-expr-rest result)))
+                (bml-expr-fail (bml-expr-rest result)))
+            result))
+
+    ; this.f in an expression reads record-backed self
+    (defn bml-ctl-name-node (name)
+        (if (bml-ctl-str-prefix? name "this.")
+            (bml-ast-this-field (substring name 5 (str_len name)))
+            (bml-ast-name name)))
+
+    (defn bml-ctl-control-keyword? (object)
+        (if (bml-ctl-keyword? object "if") true
+        (if (bml-ctl-keyword? object "while") true
+        (if (bml-ctl-keyword? object "for") true
+        (if (bml-ctl-keyword? object "loop") true
+        (if (bml-ctl-keyword? object "switch") true
+        (if (bml-ctl-keyword? object "break") true
+        (if (bml-ctl-keyword? object "continue") true
+        (if (bml-ctl-keyword? object "throw") true
+            (bml-ctl-keyword? object "try"))))))))))
+
+    (defn bml-ctl-statement-head? (objects)
+        (if (bml-ctl-control-keyword? (head objects))
+            true
+            (bml-ctl-labeled? objects)))
+
+    (defn bml-ctl-parse-general (objects)
+        (if (bml-ctl-statement-head? objects)
+            (bml-ctl-parse-statement objects)
+            (bml-ctl-parse-after-general (bml-source-parse-general-step objects) objects)))
+
+    (defn bml-ctl-parse-after-general (step objects)
+        (if (bml-source-parse-step-ok? step)
+            step
+            (bml-ctl-parse-simple objects)))
+
+    (defn bml-ctl-parse-statement (objects)
+        (do
+            (let object (head objects))
+            (if (bml-ctl-keyword? object "if")
+                (bml-ctl-parse-if (tail objects))
+            (if (bml-ctl-keyword? object "while")
+                (bml-ctl-parse-while "" (tail objects))
+            (if (bml-ctl-keyword? object "for")
+                (bml-ctl-parse-for "" (tail objects))
+            (if (bml-ctl-keyword? object "loop")
+                (bml-ctl-parse-loop "" (tail objects))
+            (if (bml-ctl-keyword? object "switch")
+                (bml-ctl-parse-switch "" (tail objects))
+            (if (bml-ctl-keyword? object "break")
+                (bml-ctl-parse-jump "break" (tail objects))
+            (if (bml-ctl-keyword? object "continue")
+                (bml-ctl-parse-jump "continue" (tail objects))
+            (if (bml-ctl-keyword? object "throw")
+                (bml-ctl-parse-throw (tail objects))
+            (if (bml-ctl-keyword? object "try")
+                (bml-ctl-parse-try (tail objects))
+                (bml-ctl-parse-labeled objects))))))))))))
+
+    (defn bml-ctl-parse-condition (objects)
+        (if (bml-ctl-op? (head objects) "(")
+            (bml-ctl-expr-before (bml-source-parse-expr (tail objects)) ")")
+            (bml-expr-fail objects)))
+
+    (defn bml-ctl-parse-if (objects)
+        (bml-ctl-parse-if-test (bml-ctl-parse-condition objects) objects))
+
+    (defn bml-ctl-parse-if-test (test objects)
+        (if (bml-expr-ok? test)
+            (bml-ctl-parse-if-then
+                (bml-expr-node test)
+                (bml-source-parse-executable-step (bml-expr-rest test))
+                objects)
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-parse-if-then (test-node then-step objects)
+        (if (bml-source-parse-step-ok? then-step)
+            (bml-ctl-parse-if-else
+                test-node
+                (bml-source-parse-step-node then-step)
+                (bml-source-parse-step-rest then-step)
+                objects)
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-parse-if-else (test-node then-node after-then objects)
+        (if (bml-ctl-keyword? (head after-then) "else")
+            (bml-ctl-finish-if
+                test-node
+                then-node
+                (bml-source-parse-executable-step (tail after-then))
+                objects)
+            (bml-ctl-step
+                "control-if"
+                (bml-ast-if test-node then-node (bml-ast-block (empty)))
+                after-then)))
+
+    (defn bml-ctl-finish-if (test-node then-node else-step objects)
+        (if (bml-source-parse-step-ok? else-step)
+            (bml-ctl-step
+                "control-if"
+                (bml-ast-if test-node then-node (bml-source-parse-step-node else-step))
+                (bml-source-parse-step-rest else-step))
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-parse-while (label objects)
+        (bml-ctl-parse-while-test label (bml-ctl-parse-condition objects) objects))
+
+    (defn bml-ctl-parse-while-test (label test objects)
+        (if (bml-expr-ok? test)
+            (bml-ctl-finish-while
+                label
+                (bml-expr-node test)
+                (bml-source-parse-executable-step (bml-expr-rest test))
+                objects)
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-finish-while (label test-node body-step objects)
+        (if (bml-source-parse-step-ok? body-step)
+            (bml-ctl-step
+                "control-while"
+                (bml-ast-while test-node (bml-source-parse-step-node body-step) label)
+                (bml-source-parse-step-rest body-step))
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-parse-loop (label objects)
+        (bml-ctl-finish-loop label (bml-source-parse-executable-step objects) objects))
+
+    (defn bml-ctl-finish-loop (label body-step objects)
+        (if (bml-source-parse-step-ok? body-step)
+            (bml-ctl-step
+                "control-loop"
+                (bml-ast-loop label (bml-source-parse-step-node body-step))
+                (bml-source-parse-step-rest body-step))
+            (bml-source-parse-no-step objects)))
+
+    ; a for init is the driver's local declaration or assignment (its ";"
+    ; included); the test ends at ";", the update at ")"
+    (defn bml-ctl-parse-for-init (objects)
+        (if (bml-ctl-op? (head objects) ";")
+            (bml-ctl-step "for-init" (bml-ast-block (empty)) (tail objects))
+            (if (bml-source-name-kind-token? (head objects))
+                (bml-source-parse-name-led-step objects)
+                (bml-source-parse-no-step objects))))
+
+    (defn bml-ctl-parse-for-test (objects)
+        (if (bml-ctl-op? (head objects) ";")
+            (bml-expr-result true (bml-ast-int 1) (tail objects))
+            (bml-ctl-expr-before (bml-source-parse-expr objects) ";")))
+
+    (defn bml-ctl-parse-for-update (objects)
+        (if (bml-ctl-op? (head objects) ")")
+            (bml-expr-result true (bml-ast-block (empty)) (tail objects))
+            (bml-ctl-expr-before (bml-ctl-parse-update objects) ")")))
+
+    (defn bml-ctl-parse-for (label objects)
+        (if (bml-ctl-op? (head objects) "(")
+            (bml-ctl-parse-for-after-init
+                label
+                (bml-ctl-parse-for-init (tail objects))
+                objects)
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-parse-for-after-init (label init-step objects)
+        (if (bml-source-parse-step-ok? init-step)
+            (bml-ctl-parse-for-after-test
+                label
+                (bml-source-parse-step-node init-step)
+                (bml-ctl-parse-for-test (bml-source-parse-step-rest init-step))
+                objects)
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-parse-for-after-test (label init test objects)
+        (if (bml-expr-ok? test)
+            (bml-ctl-parse-for-after-update
+                label
+                init
+                (bml-expr-node test)
+                (bml-ctl-parse-for-update (bml-expr-rest test))
+                objects)
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-parse-for-after-update (label init test-node update objects)
+        (if (bml-expr-ok? update)
+            (bml-ctl-finish-for
+                label
+                init
+                test-node
+                (bml-expr-node update)
+                (bml-source-parse-executable-step (bml-expr-rest update))
+                objects)
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-finish-for (label init test-node update-node body-step objects)
+        (if (bml-source-parse-step-ok? body-step)
+            (bml-ctl-step
+                "control-for"
+                (bml-ast-for label init test-node update-node
+                             (bml-source-parse-step-node body-step))
+                (bml-source-parse-step-rest body-step))
+            (bml-source-parse-no-step objects)))
+
+    ; x = e, x += e, x -= e, x *= e, x++, x-- as the driver's bnml assignment
+    (defn bml-ctl-parse-update (objects)
+        (if (bml-ctl-plain-name? (head objects))
+            (bml-ctl-parse-update-op
+                (bmf-object-value (head objects))
+                (bml-ctl-second objects)
+                (tail (tail objects))
+                objects)
+            (bml-expr-fail objects)))
+
+    (defn bml-ctl-parse-update-op (name op-object after-op objects)
+        (if (bml-ctl-op? op-object "=")
+            (bml-ctl-expr-assign name "" (bml-source-parse-expr after-op))
+        (if (bml-ctl-op? op-object "+=")
+            (bml-ctl-expr-assign name "op-add" (bml-source-parse-expr after-op))
+        (if (bml-ctl-op? op-object "-=")
+            (bml-ctl-expr-assign name "op-sub" (bml-source-parse-expr after-op))
+        (if (bml-ctl-op? op-object "*=")
+            (bml-ctl-expr-assign name "op-mul" (bml-source-parse-expr after-op))
+        (if (bml-ctl-op? op-object "++")
+            (bml-ctl-expr-assign name "op-add" (bml-expr-result true (bml-ast-int 1) after-op))
+        (if (bml-ctl-op? op-object "--")
+            (bml-ctl-expr-assign name "op-sub" (bml-expr-result true (bml-ast-int 1) after-op))
+            (bml-expr-fail objects))))))))
+
+    (defn bml-ctl-expr-assign (name rule value)
+        (if (bml-expr-ok? value)
+            (bml-expr-result
+                true
+                (bml-ast-assign
+                    name
+                    (if (str_eq rule "")
+                        (bml-expr-node value)
+                        (bml-ast-op rule (list (bml-ast-name name) (bml-expr-node value)))))
+                (bml-expr-rest value))
+            value))
+
+    (defn bml-ctl-parse-switch (label objects)
+        (bml-ctl-parse-switch-open label (bml-ctl-parse-condition objects) objects))
+
+    (defn bml-ctl-parse-switch-open (label scrutinee objects)
+        (if (bml-expr-ok? scrutinee)
+            (if (bml-ctl-op? (head (bml-expr-rest scrutinee)) "{")
+                (bml-ctl-parse-switch-clauses
+                    label
+                    (bml-expr-node scrutinee)
+                    (tail (bml-expr-rest scrutinee))
+                    (empty))
+                (bml-source-parse-no-step objects))
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-parse-switch-clauses (label scrutinee objects clauses)
+        (if (bml-ctl-op? (head objects) "}")
+            (bml-ctl-step
+                "control-switch"
+                (bml-ast-switch label scrutinee (reverse-list clauses))
+                (tail objects))
+        (if (bml-ctl-keyword? (head objects) "case")
+            (bml-ctl-parse-case-head
+                label
+                scrutinee
+                (bml-ctl-expr-before (bml-source-parse-expr (tail objects)) ":")
+                clauses)
+        (if (bml-ctl-keyword? (head objects) "default")
+            (if (bml-ctl-op? (bml-ctl-second objects) ":")
+                (bml-ctl-parse-clause-body
+                    label scrutinee (empty) true (tail (tail objects)) (empty) clauses)
+                (bml-source-parse-no-step objects))
+            (bml-source-parse-no-step objects)))))
+
+    (defn bml-ctl-parse-case-head (label scrutinee value clauses)
+        (if (bml-expr-ok? value)
+            (bml-ctl-parse-clause-body
+                label scrutinee (bml-expr-node value) false
+                (bml-expr-rest value) (empty) clauses)
+            (bml-source-parse-no-step (bml-expr-rest value))))
+
+    (defn bml-ctl-clause-end? (objects)
+        (if (nil? objects)
+            true
+        (if (bml-ctl-op? (head objects) "}")
+            true
+        (if (bml-ctl-keyword? (head objects) "case")
+            true
+            (bml-ctl-keyword? (head objects) "default")))))
+
+    (defn bml-ctl-parse-clause-body (label scrutinee value default-clause objects stmts clauses)
+        (if (bml-ctl-clause-end? objects)
+            (bml-ctl-parse-switch-clauses
+                label
+                scrutinee
+                objects
+                (cons (bml-ast-switch-clause value default-clause (reverse-list stmts))
+                      clauses))
+            (bml-ctl-parse-clause-statement
+                label scrutinee value default-clause
+                (bml-source-parse-executable-step objects)
+                stmts clauses)))
+
+    (defn bml-ctl-parse-clause-statement (label scrutinee value default-clause step stmts clauses)
+        (if (bml-source-parse-step-ok? step)
+            (bml-ctl-parse-clause-body
+                label scrutinee value default-clause
+                (bml-source-parse-step-rest step)
+                (cons (bml-source-parse-step-node step) stmts)
+                clauses)
+            (bml-source-parse-no-step (bml-source-parse-step-rest step))))
+
+    (defn bml-ctl-parse-jump (kind objects)
+        (if (bml-ctl-op? (head objects) ";")
+            (bml-ctl-step (str_concat "control-" kind) (bml-ctl-jump-node kind "") (tail objects))
+        (if (bml-ctl-label-token? (head objects))
+            (if (bml-ctl-op? (bml-ctl-second objects) ";")
+                (bml-ctl-step
+                    (str_concat "control-" kind)
+                    (bml-ctl-jump-node kind (bmf-object-value (head objects)))
+                    (tail (tail objects)))
+                (bml-source-parse-no-step objects))
+            (bml-source-parse-no-step objects))))
+
+    (defn bml-ctl-jump-node (kind label)
+        (if (str_eq kind "break")
+            (bml-ast-break label)
+            (bml-ast-continue label)))
+
+    (defn bml-ctl-parse-throw (objects)
+        (bml-ctl-finish-throw
+            (bml-ctl-expr-before (bml-source-parse-expr objects) ";")
+            objects))
+
+    (defn bml-ctl-finish-throw (value objects)
+        (if (bml-expr-ok? value)
+            (bml-ctl-step "control-throw" (bml-ast-throw (bml-expr-node value)) (bml-expr-rest value))
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-parse-try (objects)
+        (bml-ctl-parse-try-body (bml-source-parse-executable-step objects) objects))
+
+    (defn bml-ctl-parse-try-body (body-step objects)
+        (if (bml-source-parse-step-ok? body-step)
+            (if (bml-ctl-keyword? (head (bml-source-parse-step-rest body-step)) "catch")
+                (bml-ctl-parse-catch
+                    (bml-source-parse-step-node body-step)
+                    (tail (bml-source-parse-step-rest body-step)))
+                (bml-source-parse-no-step objects))
+            (bml-source-parse-no-step objects)))
+
+    (defn bml-ctl-parse-catch (body objects)
+        (if (bml-ctl-op? (head objects) "(")
+            (bml-ctl-parse-catch-param body (bml-source-collect-balanced-paren objects))
+            (bml-ctl-finish-try
+                body
+                (bml-ast-block (empty))
+                (bml-source-parse-executable-step objects))))
+
+    (defn bml-ctl-parse-catch-param (body collected)
+        (bml-ctl-finish-try
+            body
+            (bml-ctl-catch-decl (nth collected 0))
+            (bml-source-parse-executable-step (nth collected 1))))
+
+    (defn bml-ctl-catch-decl (tokens)
+        (if (nil? tokens)
+            (bml-ast-block (empty))
+            (bml-ast-local
+                (if (nil? (tail tokens)) "" (bmf-object-value (head tokens)))
+                (bml-ctl-last-name tokens)
+                (bml-ast-thrown 0))))
+
+    (defn bml-ctl-last-name (tokens)
+        (if (nil? tokens)
+            ""
+            (if (nil? (tail tokens))
+                (if (bml-ctl-plain-name? (head tokens)) (bmf-object-value (head tokens)) "")
+                (bml-ctl-last-name (tail tokens)))))
+
+    (defn bml-ctl-finish-try (body catch-decl handler-step)
+        (if (bml-source-parse-step-ok? handler-step)
+            (bml-ctl-step
+                "control-try"
+                (bml-ast-try-catch body (bml-source-parse-step-node handler-step) catch-decl)
+                (bml-source-parse-step-rest handler-step))
+            (bml-source-parse-no-step (bml-source-parse-step-rest handler-step))))
+
+    (defn bml-ctl-label-target? (object)
+        (if (bml-ctl-keyword? object "for")
+            true
+        (if (bml-ctl-keyword? object "while")
+            true
+        (if (bml-ctl-keyword? object "loop")
+            true
+            (bml-ctl-keyword? object "switch")))))
+
+    (defn bml-ctl-labeled? (objects)
+        (if (bml-ctl-label-token? (head objects))
+            (if (bml-ctl-op? (bml-ctl-second objects) ":")
+                (bml-ctl-label-target? (bml-ctl-third objects))
+                false)
+            false))
+
+    (defn bml-ctl-parse-labeled (objects)
+        (bml-ctl-parse-labeled-keyword
+            (bmf-object-value (head objects))
+            (bml-ctl-third objects)
+            (tail (tail (tail objects)))))
+
+    (defn bml-ctl-parse-labeled-keyword (label keyword-object after-keyword)
+        (if (bml-ctl-keyword? keyword-object "for")
+            (bml-ctl-parse-for label after-keyword)
+        (if (bml-ctl-keyword? keyword-object "while")
+            (bml-ctl-parse-while label after-keyword)
+        (if (bml-ctl-keyword? keyword-object "loop")
+            (bml-ctl-parse-loop label after-keyword)
+            (bml-ctl-parse-switch label after-keyword)))))
+
+    (defn bml-ctl-field-assignment? (objects)
+        (if (bml-ctl-token-is? (head objects) "bml-name" "this")
+            (if (bml-ctl-op? (bml-ctl-second objects) ".")
+                (bml-ctl-op? (bml-ctl-second (tail (tail objects))) "=")
+                false)
+            false))
+
+    (defn bml-ctl-parse-simple (objects)
+        (if (bml-ctl-field-assignment? objects)
+            (bml-ctl-finish-simple
+                "control-field-assign"
+                (bml-ctl-expr-field-set
+                    (bmf-object-value (bml-ctl-third objects))
+                    (bml-source-parse-expr (drop 4 objects)))
+                objects)
+            (bml-ctl-parse-simple-update (bml-ctl-parse-update objects) objects)))
+
+    (defn bml-ctl-parse-simple-update (update objects)
+        (if (bml-expr-ok? update)
+            (bml-ctl-finish-simple "control-update" update objects)
+            (bml-ctl-finish-simple "control-expression" (bml-source-parse-expr objects) objects)))
+
+    (defn bml-ctl-expr-field-set (field value)
+        (if (bml-expr-ok? value)
+            (bml-expr-result
+                true
+                (bml-ast-this-field-set field (bml-expr-node value))
+                (bml-expr-rest value))
+            value))
+
+    (defn bml-ctl-finish-simple (rule result objects)
+        (bml-ctl-finish-simple-result rule (bml-ctl-expr-before result ";") objects))
+
+    (defn bml-ctl-finish-simple-result (rule finished objects)
+        (if (bml-expr-ok? finished)
+            (bml-ctl-step rule (bml-expr-node finished) (bml-expr-rest finished))
+            (bml-source-parse-no-step objects)))
 
     (defn bml-source-parse-declaration-step (objects)
         (if (bml-source-token-value? (head objects) "template")
@@ -6399,7 +7012,7 @@
         "original BML/BMF/Form compiler sources compile themselves into versioned .fkb images and Hati fourth-kernel native binaries with full class, template, generic, method, state, exception, and physical-lane support")
 
     (defn bml-hati-native-floor ()
-        "supported native subsets include lexical const/name binding, package-qualified names, import-resolved symbols linked across source units into one table, one- and two-argument method parameter binding, methods of any parameter count, known method calls, general calls with nested, bound-name, sum and package-receiver arguments, method-scope class field read/write through record-backed self, named class method dispatch, class construction defaults, arity-aware overload dispatch, arity-selected compiled overload calls, template/generic metadata, mutable locals rebound through a per-call bnml frame (nested-block rebinding included), array literals and a[i] indexing, clang oracle assembly receipts, and Form-native JIT runtime model rows for macos-arm64 and android-arm64; they must produce loadable Hati tables with parity proof; unsupported BML shapes, including unresolved names, unbound calls, unresolved imports, value-receiver dispatch, unbound or const assignment targets, indexes already seen out of range or into a non-array, arity mismatch, missing class methods, full class construction syntax, type/generic overload resolution, and template/generic specialization, must be named before table emission, and a name the lowering cannot resolve lowers to a named refusal literal, never to a valid zero result")
+        "supported native subsets include lexical const/name binding, package-qualified names, import-resolved symbols linked across source units into one table, one- and two-argument method parameter binding, methods of any parameter count, known method calls, general calls with nested, bound-name, sum and package-receiver arguments, method-scope class field read/write through record-backed self, named class method dispatch, class construction defaults, arity-aware overload dispatch, arity-selected compiled overload calls, template/generic metadata, mutable locals rebound through a per-call bnml frame (nested-block rebinding included), array literals and a[i] indexing, source-level if/else, while, for, loop, switch, labeled break/continue, return, and try/throw/catch through a Form-native mode/value/dispatch protocol whose transfers are bml-native-source-control effect rows, clang oracle assembly receipts, and Form-native JIT runtime model rows for macos-arm64 and android-arm64; they must produce loadable Hati tables with parity proof; unsupported BML shapes, including unresolved names, unbound calls, unresolved imports, value-receiver dispatch, unbound or const assignment targets, indexes already seen out of range or into a non-array, break/continue without a target, with, control nested inside a non-control container, arity mismatch, missing class methods, full class construction syntax, type/generic overload resolution, and template/generic specialization, must be named before table emission, and a name the lowering cannot resolve lowers to a named refusal literal, never to a valid zero result")
 
     (defn bml-hati-native-next-step ()
         "lift full class construction syntax, template/generic specialization, type/generic overload resolution, value-receiver and interface dispatch on the scoped call floor")
@@ -6806,6 +7419,11 @@
         (bml-hati-unsupported-nodes-in-env nodes (empty)))
 
     (defn bml-hati-unsupported-nodes-in-env (nodes env)
+        (if (bml-ctl-function-entry? nodes env)
+            (bml-ctl-unsupported-function nodes env)
+            (bml-hati-unsupported-nodes-in-env-core nodes env)))
+
+    (defn bml-hati-unsupported-nodes-in-env-core (nodes env)
         (if (nil? nodes)
             (empty)
             (append
@@ -6927,6 +7545,12 @@
                 (add index 1))))
 
     (defn bml-hati-method-param-env (method-node env)
+        (bml-ctl-bind-fn-index
+            method-node
+            env
+            (bml-hati-method-param-env-bind method-node env)))
+
+    (defn bml-hati-method-param-env-bind (method-node env)
         (do
             (let params (bml-method-node-parameters method-node))
             (if (le (len params) 1)
@@ -7043,6 +7667,15 @@
                 (bml-hati-unsupported-call-args-in (tail args) env))))
 
     (defn bml-hati-unsupported-node-in (node env)
+        (if (bml-ctl-expr-node? node)
+            (bml-ctl-unsupported-reserved node env)
+        (if (bml-ctl-statement-node? node)
+            (if (bml-ctl-env-active? env)
+                (list "control/nested")
+                (bml-ctl-unsupported-function (list node) env))
+            (bml-hati-unsupported-node-in-core node env))))
+
+    (defn bml-hati-unsupported-node-in-core (node env)
         (do
             (let cat (node_category node))
             (if (node_eq cat BML-AST-INT)
@@ -7087,14 +7720,6 @@
                 (empty)
             (if (node_eq cat BML-AST-ARRAY)
                 (bml-hati-unsupported-call-args-in (node_children node) env)
-            (if (node_eq cat BML-AST-BREAK)
-                (list "break")
-            (if (node_eq cat BML-AST-CONTINUE)
-                (list "continue")
-            (if (node_eq cat BML-AST-THROW)
-                (list "throw")
-            (if (node_eq cat BML-AST-TRY)
-                (list "try")
             (if (node_eq cat BML-AST-WHILE)
                 (list "while")
             (if (node_eq cat BML-AST-FAIL)
@@ -7107,7 +7732,7 @@
                 (list "restore")
             (if (node_eq cat BML-AST-DISCARD)
                 (list "discard")
-                (list "unknown"))))))))))))))))))))))))))))))))
+                (list "unknown"))))))))))))))))))))))))))))
 
     (defn bml-hati-unsupported-section-in (node env)
         (bml-hati-unsupported-nodes-in-env
@@ -7163,6 +7788,11 @@
         (bml-hati-lower-nodes-in-env nodes pool (empty)))
 
     (defn bml-hati-lower-nodes-in-env (nodes pool env)
+        (if (bml-ctl-function-entry? nodes env)
+            (bml-ctl-lower-function nodes pool env)
+            (bml-hati-lower-nodes-in-env-core nodes pool env)))
+
+    (defn bml-hati-lower-nodes-in-env-core (nodes pool env)
         (if (nil? nodes)
             (bml-hati-lower-result (fk-lit 0) pool)
         (if (nil? (tail nodes))
@@ -7313,6 +7943,15 @@
                     (bml-hati-lower-pool rest)))))
 
     (defn bml-hati-lower-node-in-env (node pool env)
+        (if (bml-ctl-expr-node? node)
+            (bml-ctl-lower-reserved node pool env)
+        (if (bml-ctl-statement-node? node)
+            (if (bml-ctl-env-active? env)
+                (bml-hati-lower-refusal "control/nested" pool)
+                (bml-ctl-lower-function (list node) pool env))
+            (bml-hati-lower-node-in-env-core node pool env))))
+
+    (defn bml-hati-lower-node-in-env-core (node pool env)
         (do
             (let cat (node_category node))
             (if (node_eq cat BML-AST-INT)
@@ -7358,10 +7997,6 @@
                 (bml-hati-lower-nodes-in-env (node_children node) pool env)
             (if (node_eq cat BML-AST-CHOOSE)
                 (bml-hati-lower-choose-in-env (node_children node) pool env)
-            (if (node_eq cat BML-AST-TRY)
-                (bml-hati-lower-node-in-env (bml-node-child node 1) pool env)
-            (if (node_eq cat BML-AST-THROW)
-                (bml-hati-lower-node-in-env (bml-node-child node 0) pool env)
             (if (node_eq cat BML-AST-WHILE)
                 (bml-hati-lower-result (fk-lit 0) pool)
             (if (node_eq cat BML-AST-FAIL)
@@ -7374,7 +8009,7 @@
                 (bml-hati-lower-result (fk-lit 0) pool)
             (if (node_eq cat BML-AST-DISCARD)
                 (bml-hati-lower-result (fk-lit 0) pool)
-                (bml-hati-lower-result (fk-lit 0) pool))))))))))))))))))))))))
+                (bml-hati-lower-result (fk-lit 0) pool))))))))))))))))))))))
 
     (defn bml-hati-compile-class-image (node)
         (do
@@ -8468,6 +9103,927 @@
                 (str_concat
                     (bml-hati-refusal-prefix 0)
                     (bml-hati-unsupported-reasons-text reasons)))))
+
+    ;; --- BML source control -> Hati native table ---------------------
+    ;; A function body carrying source control lowers through one
+    ;; Form-native protocol held in the run's memory cells: MODE (0 runs),
+    ;; VALUE (a return's value), THROWN (a throw's value), DISPATCH (loop
+    ;; re-entry) and FRAME (the bnml frame a re-entry carries). Every
+    ;; transfer is a bml-native-source-control effect row (break -> stop,
+    ;; continue -> choice, throw -> fail, return -> return): its mode is
+    ;; the primitive's place in bnsc-required-primitives (a break/continue
+    ;; also carries its target), a loop answers each effect as
+    ;; bnsc-loop-step reads it, and a catch receives the effect
+    ;; bnsc-try-catch turns into a value. A loop re-enters its own function
+    ;; through DISPATCH (Form recursion) and binds frame slot 1 to the frame
+    ;; it left; statements after a transfer are guarded by MODE; the
+    ;; epilogue turns RETURN into the function's value and hands THROW
+    ;; outward.
+
+    (defn bml-ctl-mode-cell (_x) 4000)
+    (defn bml-ctl-value-cell (_x) 4001)
+    (defn bml-ctl-thrown-cell (_x) 4002)
+    (defn bml-ctl-dispatch-cell (_x) 4003)
+    (defn bml-ctl-frame-cell (_x) 4004)
+
+    ; switch cells: a block of 1024 per function index
+    (defn bml-ctl-var-cell (fn-index id)
+        (add 4096 (add (mul fn-index 1024) id)))
+
+    (defn bml-ctl-source (_x)
+        (bnsc-source "bml" "form/form-stdlib/grammars/bml.fk" 0))
+
+    (defn bml-ctl-index-of (value values index)
+        (if (nil? values)
+            -1
+            (if (str_eq (head values) value)
+                index
+                (bml-ctl-index-of value (tail values) (add index 1)))))
+
+    (defn bml-ctl-primitive-mode (primitive)
+        (add 1 (bml-ctl-index-of primitive (bnsc-required-primitives 0) 0)))
+
+    (defn bml-ctl-targeted-kind? (kind)
+        (if (str_eq kind "break") true (str_eq kind "continue")))
+
+    (defn bml-ctl-effect-mode (effect target-id)
+        (if (bml-ctl-targeted-kind? (bnsc-effect-kind effect))
+            (add (bml-ctl-primitive-mode (bnsc-effect-primitive effect))
+                 (mul 8 target-id))
+            (bml-ctl-primitive-mode (bnsc-effect-primitive effect))))
+
+    (defn bml-ctl-break-mode (id)
+        (bml-ctl-effect-mode (bnsc-break "" (bml-ctl-source 0)) id))
+
+    (defn bml-ctl-continue-mode (id)
+        (bml-ctl-effect-mode (bnsc-continue "" (bml-ctl-source 0)) id))
+
+    (defn bml-ctl-throw-mode (_x)
+        (bml-ctl-effect-mode (bnsc-throw 0 (bml-ctl-source 0)) 0))
+
+    (defn bml-ctl-return-mode (_x)
+        (bml-ctl-effect-mode (bnsc-value 0 (bml-ctl-source 0)) 0))
+
+    (defn bml-ctl-catch-mode (_x)
+        (if (str_eq
+                (bnsc-effect-kind
+                    (bnsc-try-catch
+                        (bnsc-throw 0 (bml-ctl-source 0))
+                        0
+                        (bml-ctl-source 0)))
+                "value")
+            (bml-ctl-throw-mode 0)
+            -1))
+
+    (defn bml-ctl-loop-reaction (effect)
+        (bnsc-loop-mode
+            (bnsc-loop-step
+                (bnsc-loop-state "running" "" 0 0 (bml-ctl-source 0))
+                effect)))
+
+    (defn bml-ctl-form-native-primitives (_x)
+        (list "if" "recursion" "stop" "choice" "fail"))
+
+    (defn bml-ctl-all-member? (values pool)
+        (if (nil? values)
+            true
+            (if (lt (bml-ctl-index-of (head values) pool 0) 0)
+                false
+                (bml-ctl-all-member? (tail values) pool))))
+
+    (defn bml-ctl-form-native-covered? (_x)
+        (bml-ctl-all-member?
+            (bml-ctl-form-native-primitives 0)
+            (append (fcml-required-control-primitives)
+                    (fcml-required-backtracking-primitives))))
+
+    (defn bml-ctl-fk-eq (a b)
+        (fk-node 80 (ms-intern a b)))
+
+    (defn bml-ctl-get-cell (cell)
+        (fk-get (fk-lit cell)))
+
+    (defn bml-ctl-set-cell (cell value)
+        (fk-set (fk-lit cell) value))
+
+    (defn bml-ctl-mode-is (mode)
+        (bml-ctl-fk-eq (bml-ctl-get-cell (bml-ctl-mode-cell 0)) (fk-lit mode)))
+
+    (defn bml-ctl-set-mode (mode)
+        (bml-ctl-set-cell (bml-ctl-mode-cell 0) (fk-lit mode)))
+
+    (defn bml-ctl-guard (expr)
+        (fk-if (fk-le (bml-ctl-get-cell (bml-ctl-mode-cell 0)) (fk-lit 0))
+               expr
+               (fk-lit 0)))
+
+    (defn bml-ctl-st (pool helpers next-id)
+        (list "bml-ctl-st" pool helpers next-id))
+    (defn bml-ctl-st-pool (st) (nth st 1))
+    (defn bml-ctl-st-helpers (st) (nth st 2))
+    (defn bml-ctl-st-next (st) (nth st 3))
+    (defn bml-ctl-st-with-pool (st pool)
+        (bml-ctl-st pool (bml-ctl-st-helpers st) (bml-ctl-st-next st)))
+    (defn bml-ctl-st-take-id (st)
+        (bml-ctl-st
+            (bml-ctl-st-pool st)
+            (bml-ctl-st-helpers st)
+            (add (bml-ctl-st-next st) 1)))
+    (defn bml-ctl-st-add-helper (st id expr)
+        (bml-ctl-st
+            (bml-ctl-st-pool st)
+            (cons (list id expr) (bml-ctl-st-helpers st))
+            (bml-ctl-st-next st)))
+
+    (defn bml-ctl-r (expr st) (list "bml-ctl-r" expr st))
+    (defn bml-ctl-r-expr (r) (nth r 1))
+    (defn bml-ctl-r-st (r) (nth r 2))
+
+    (defn bml-ctl-refuse (reason st)
+        (do
+            (let refused (bml-hati-lower-refusal reason (bml-ctl-st-pool st)))
+            (bml-ctl-r
+                (bml-hati-lower-expr refused)
+                (bml-ctl-st-with-pool st (bml-hati-lower-pool refused)))))
+
+    (defn bml-ctl-ctx (fn-index targets frame)
+        (list "bml-ctl-ctx" fn-index targets frame))
+    (defn bml-ctl-ctx-fn (ctx) (nth ctx 1))
+    (defn bml-ctl-ctx-targets (ctx) (nth ctx 2))
+    (defn bml-ctl-ctx-frame? (ctx) (nth ctx 3))
+    (defn bml-ctl-ctx-push (ctx kind label id)
+        (bml-ctl-ctx
+            (bml-ctl-ctx-fn ctx)
+            (cons (list kind label id) (bml-ctl-ctx-targets ctx))
+            (bml-ctl-ctx-frame? ctx)))
+
+    (defn bml-ctl-target-accepts? (target kind label)
+        (if (str_eq kind "continue")
+            (if (str_eq (nth target 0) "loop")
+                (if (str_eq label "") true (str_eq (nth target 1) label))
+                false)
+            (if (str_eq label "") true (str_eq (nth target 1) label))))
+
+    (defn bml-ctl-target-id (targets kind label)
+        (if (nil? targets)
+            -1
+            (if (bml-ctl-target-accepts? (head targets) kind label)
+                (nth (head targets) 2)
+                (bml-ctl-target-id (tail targets) kind label))))
+
+    (defn bml-ctl-env-active (env)
+        (cons (bml-local-binding "__bml_ctl_active" (bml-ast-int 1) env) env))
+
+    (defn bml-ctl-env-active? (env)
+        (not (nil? (bml-local-lookup env "__bml_ctl_active"))))
+
+    (defn bml-ctl-env-fn-index (env)
+        (do
+            (let binding (bml-local-lookup env "__bml_fn_index"))
+            (if (nil? binding)
+                0
+                (node_value (bml-node-child (bml-local-binding-value binding) 0)))))
+
+    ; a method body learns its own table index from the method env; a bare
+    ; method image has no env and is function 0; a method the env does not
+    ; name reads -1, and its loops are refused rather than re-entering main
+    (defn bml-ctl-bind-fn-index (method-node method-env param-env)
+        (if (nil? method-env)
+            param-env
+            (cons
+                (bml-local-binding
+                    "__bml_fn_index"
+                    (bml-ast-int (bml-ctl-method-index method-node method-env))
+                    param-env)
+                param-env)))
+
+    (defn bml-ctl-method-index (method-node method-env)
+        (do
+            (let binding
+                (bml-hati-method-binding-for-arity
+                    method-env
+                    (bml-method-node-name method-node)
+                    (len (bml-method-node-parameters method-node))))
+            (if (nil? binding)
+                -1
+                (bml-hati-method-ref-index (bml-local-binding-value binding)))))
+
+    (defn bml-ctl-frame-rebind (expr)
+        (fk-node 109
+            (ms-intern
+                (fk-lit (bml-hati-frame-slot))
+                (ms-intern (bml-ctl-get-cell (bml-ctl-frame-cell 0)) expr))))
+
+    (defn bml-ctl-with-frame (ctx expr)
+        (if (bml-ctl-ctx-frame? ctx)
+            (bml-ctl-frame-rebind expr)
+            expr))
+
+    (defn bml-ctl-reenter-call (fn-index id)
+        (fk-sequence
+            (bml-ctl-set-cell (bml-ctl-dispatch-cell 0) (fk-lit id))
+            (fk-call fn-index (fk-arg))))
+
+    (defn bml-ctl-reenter (ctx id)
+        (if (bml-ctl-ctx-frame? ctx)
+            (fk-sequence
+                (bml-ctl-set-cell (bml-ctl-frame-cell 0) (bml-hati-bnml-frame-expr))
+                (bml-ctl-reenter-call (bml-ctl-ctx-fn ctx) id))
+            (bml-ctl-reenter-call (bml-ctl-ctx-fn ctx) id)))
+
+    (defn bml-ctl-str-prefix? (value prefix)
+        (if (lt (str_len value) (str_len prefix))
+            false
+            (str_eq (substring value 0 (str_len prefix)) prefix)))
+
+    (defn bml-ctl-op-node? (node)
+        (if (node_eq (node_category node) BML-AST-CALL)
+            (bml-ctl-str-prefix? (bml-call-name node) "__bml_op-")
+            false))
+
+    (defn bml-ctl-thrown-node? (node) (bml-call-named? node "__bml_thrown"))
+    (defn bml-ctl-switch-node? (node) (bml-call-named? node "__bml_switch"))
+
+    (defn bml-ctl-expr-node? (node)
+        (if (bml-ctl-op-node? node) true (bml-ctl-thrown-node? node)))
+
+    (defn bml-ctl-while-node? (node)
+        (if (node_eq (node_category node) BML-AST-WHILE)
+            (eq (len (node_children node)) 3)
+            false))
+
+    ; a trivial leaf answers node_category with its own value (leaf 22
+    ; reads as IF), so only a node that carries children is a statement
+    (defn bml-ctl-statement-node? (node)
+        (if (nil? (node_children node))
+            false
+            (bml-ctl-statement-node-in? node)))
+
+    (defn bml-ctl-statement-node-in? (node)
+        (do
+            (let cat (node_category node))
+            (if (node_eq cat BML-AST-IF)
+                true
+            (if (node_eq cat BML-AST-FOR)
+                true
+            (if (node_eq cat BML-AST-WITH)
+                true
+            (if (node_eq cat BML-AST-TRY)
+                true
+            (if (node_eq cat BML-AST-THROW)
+                true
+            (if (node_eq cat BML-AST-BREAK)
+                true
+            (if (node_eq cat BML-AST-CONTINUE)
+                true
+            (if (bml-ctl-while-node? node)
+                true
+                (bml-ctl-switch-node? node)))))))))))
+
+    (defn bml-ctl-bearing? (node)
+        (if (bml-ctl-statement-node? node)
+            true
+            (do
+                (let cat (node_category node))
+                (if (node_eq cat BML-AST-BLOCK)
+                    (bml-ctl-any-bearing? (node_children node))
+                (if (node_eq cat BML-AST-CHOOSE)
+                    (bml-ctl-any-bearing? (node_children node))
+                    false)))))
+
+    (defn bml-ctl-any-bearing? (nodes)
+        (if (nil? nodes)
+            false
+            (if (bml-ctl-bearing? (head nodes))
+                true
+                (bml-ctl-any-bearing? (tail nodes)))))
+
+    (defn bml-ctl-function-entry? (nodes env)
+        (if (bml-ctl-env-active? env)
+            false
+            (bml-ctl-any-bearing? nodes)))
+
+    (defn bml-ctl-effect-node? (node)
+        (do
+            (let cat (node_category node))
+            (if (node_eq cat BML-AST-BREAK)
+                true
+            (if (node_eq cat BML-AST-CONTINUE)
+                true
+            (if (node_eq cat BML-AST-THROW)
+                true
+                (node_eq cat BML-AST-RETURN))))))
+
+    (defn bml-ctl-node-effect (node)
+        (do
+            (let cat (node_category node))
+            (if (node_eq cat BML-AST-BREAK)
+                (bnsc-break (bml-local-name node) (bml-ctl-source 0))
+            (if (node_eq cat BML-AST-CONTINUE)
+                (bnsc-continue (bml-local-name node) (bml-ctl-source 0))
+            (if (node_eq cat BML-AST-THROW)
+                (bnsc-throw (bml-node-child node 0) (bml-ctl-source 0))
+                (bnsc-value (bml-node-child node 0) (bml-ctl-source 0)))))))
+
+    (defn bml-ctl-lower-function (nodes pool env)
+        (do
+            (let fn-index (bml-ctl-env-fn-index env))
+            (let body-r
+                (bml-ctl-lower-stmts
+                    nodes
+                    (bml-ctl-st pool (empty) 1)
+                    (bml-ctl-env-active env)
+                    (bml-ctl-ctx fn-index (empty) (bml-bnml-any-needs-frame? nodes))))
+            (bml-hati-lower-result
+                (bml-ctl-dispatch
+                    (bml-ctl-st-helpers (bml-ctl-r-st body-r))
+                    (fk-sequence (bml-ctl-r-expr body-r) (bml-ctl-epilogue 0)))
+                (bml-ctl-st-pool (bml-ctl-r-st body-r)))))
+
+    (defn bml-ctl-epilogue (_x)
+        (fk-if (bml-ctl-mode-is (bml-ctl-return-mode 0))
+               (fk-sequence
+                   (bml-ctl-set-mode 0)
+                   (bml-ctl-get-cell (bml-ctl-value-cell 0)))
+               (fk-if (bml-ctl-mode-is (bml-ctl-throw-mode 0))
+                      (bml-ctl-get-cell (bml-ctl-thrown-cell 0))
+                      (fk-lit 0))))
+
+    (defn bml-ctl-dispatch (helpers main-expr)
+        (if (nil? helpers)
+            main-expr
+            (fk-if
+                (bml-ctl-fk-eq
+                    (bml-ctl-get-cell (bml-ctl-dispatch-cell 0))
+                    (fk-lit (head (head helpers))))
+                (fk-sequence
+                    (bml-ctl-set-cell (bml-ctl-dispatch-cell 0) (fk-lit 0))
+                    (head (tail (head helpers))))
+                (bml-ctl-dispatch (tail helpers) main-expr))))
+
+    (defn bml-ctl-lower-expr (node st env)
+        (do
+            (let lowered (bml-hati-lower-node-in-env node (bml-ctl-st-pool st) env))
+            (bml-ctl-r
+                (bml-hati-lower-expr lowered)
+                (bml-ctl-st-with-pool st (bml-hati-lower-pool lowered)))))
+
+    (defn bml-ctl-lower-stmts (nodes st env ctx)
+        (if (nil? nodes)
+            (bml-ctl-r (fk-lit 0) st)
+            (bml-ctl-lower-stmts-after
+                (bml-ctl-lower-stmt (head nodes) st env ctx)
+                (tail nodes)
+                (bml-ctl-env-after (head nodes) env)
+                ctx)))
+
+    (defn bml-ctl-lower-stmts-after (first-r nodes env ctx)
+        (if (nil? nodes)
+            first-r
+            (bml-ctl-lower-stmts-join
+                first-r
+                (bml-ctl-lower-stmts nodes (bml-ctl-r-st first-r) env ctx))))
+
+    (defn bml-ctl-lower-stmts-join (first-r rest-r)
+        (bml-ctl-r
+            (fk-sequence
+                (bml-ctl-r-expr first-r)
+                (bml-ctl-guard (bml-ctl-r-expr rest-r)))
+            (bml-ctl-r-st rest-r)))
+
+    (defn bml-ctl-lower-stmt (node st env ctx)
+        (if (nil? (bml-ctl-promoted node env))
+            (bml-ctl-lower-stmt-in node st env ctx)
+            (bml-ctl-lower-stmts
+                (append (bml-ctl-promoted node env) (list node))
+                st
+                env
+                ctx)))
+
+    ; a parameter a control statement assigns becomes a frame local just
+    ; before it, declared from the parameter's value, so a loop's back-edge
+    ; and a branch's join both read the assignment
+    (defn bml-ctl-assigned-names (node)
+        (if (bml-bnml-assign-node? node)
+            (cons (bml-bnml-target-name node) (bml-ctl-assigned-names-in (node_children node)))
+            (if (node_eq (node_category node) BML-AST-METHOD)
+                (empty)
+                (bml-ctl-assigned-names-in (node_children node)))))
+
+    (defn bml-ctl-assigned-names-in (nodes)
+        (if (nil? nodes)
+            (empty)
+            (append
+                (bml-ctl-assigned-names (head nodes))
+                (bml-ctl-assigned-names-in (tail nodes)))))
+
+    (defn bml-ctl-param-binding? (binding)
+        (if (nil? binding)
+            false
+            (if (bml-bnml-binding? binding)
+                false
+                (if (bml-hati-arg-node? (bml-local-binding-value binding))
+                    true
+                    (bml-hati-arg-at-node? (bml-local-binding-value binding))))))
+
+    (defn bml-ctl-promotions (names env seen)
+        (if (nil? names)
+            (empty)
+            (if (fsc-string-list-contains? seen (head names))
+                (bml-ctl-promotions (tail names) env seen)
+                (if (bml-ctl-param-binding? (bml-local-lookup env (head names)))
+                    (cons
+                        (bml-ast-local "" (head names) (bml-ast-name (head names)))
+                        (bml-ctl-promotions (tail names) env (cons (head names) seen)))
+                    (bml-ctl-promotions (tail names) env (cons (head names) seen))))))
+
+    (defn bml-ctl-promoted (node env)
+        (if (bml-ctl-statement-node? node)
+            (bml-ctl-promotions (bml-ctl-assigned-names node) env (empty))
+            (empty)))
+
+    (defn bml-ctl-env-after (node env)
+        (bml-local-env-after-node
+            node
+            (bml-bnml-fold-env (bml-ctl-promoted node env) env)))
+
+    (defn bml-ctl-lower-stmt-in (node st env ctx)
+        (do
+            (let cat (node_category node))
+            (if (node_eq cat BML-AST-BLOCK)
+                (bml-ctl-lower-stmts (node_children node) st env ctx)
+            (if (node_eq cat BML-AST-IF)
+                (bml-ctl-lower-if node st env ctx)
+            (if (bml-ctl-while-node? node)
+                (bml-ctl-lower-loop (bml-ctl-while-parts node) st env ctx)
+            (if (node_eq cat BML-AST-FOR)
+                (bml-ctl-lower-loop (bml-ctl-for-parts node) st env ctx)
+            (if (bml-ctl-switch-node? node)
+                (bml-ctl-lower-switch node st env ctx)
+            (if (bml-ctl-effect-node? node)
+                (bml-ctl-lower-effect (bml-ctl-node-effect node) st env ctx)
+            (if (node_eq cat BML-AST-TRY)
+                (bml-ctl-lower-try node st env ctx)
+            (if (node_eq cat BML-AST-WITH)
+                (bml-ctl-refuse "with" st)
+            (if (node_eq cat BML-AST-METHOD)
+                (bml-ctl-refuse "control/nested-method" st)
+                (bml-ctl-lower-expr node st env))))))))))))
+
+    (defn bml-ctl-lower-effect (effect st env ctx)
+        (if (bml-ctl-targeted-kind? (bnsc-effect-kind effect))
+            (bml-ctl-lower-jump effect (bml-ctl-effect-target effect ctx) st)
+            (bml-ctl-lower-transfer effect st env)))
+
+    (defn bml-ctl-effect-target (effect ctx)
+        (bml-ctl-target-id
+            (bml-ctl-ctx-targets ctx)
+            (bnsc-effect-kind effect)
+            (bnsc-effect-label effect)))
+
+    (defn bml-ctl-jump-reason (effect)
+        (str_concat
+            (bnsc-effect-kind effect)
+            (if (str_eq (bnsc-effect-label effect) "") "/outside-loop" "/label")))
+
+    (defn bml-ctl-lower-jump (effect target st)
+        (if (lt target 0)
+            (bml-ctl-refuse (bml-ctl-jump-reason effect) st)
+            (bml-ctl-r (bml-ctl-set-mode (bml-ctl-effect-mode effect target)) st)))
+
+    (defn bml-ctl-transfer-cell (effect)
+        (if (str_eq (bnsc-effect-kind effect) "throw")
+            (bml-ctl-thrown-cell 0)
+            (bml-ctl-value-cell 0)))
+
+    (defn bml-ctl-lower-transfer (effect st env)
+        (do
+            (let value-r (bml-ctl-lower-expr (bnsc-effect-value effect) st env))
+            (bml-ctl-r
+                (fk-sequence
+                    (bml-ctl-set-cell (bml-ctl-transfer-cell effect) (bml-ctl-r-expr value-r))
+                    (fk-if (bml-ctl-mode-is 0)
+                           (bml-ctl-set-mode (bml-ctl-effect-mode effect 0))
+                           (fk-lit 0)))
+                (bml-ctl-r-st value-r))))
+
+    (defn bml-ctl-lower-if (node st env ctx)
+        (do
+            (let test-r (bml-ctl-lower-expr (bml-node-child node 0) st env))
+            (let then-r (bml-ctl-lower-stmt (bml-node-child node 1) (bml-ctl-r-st test-r) env ctx))
+            (let else-r (bml-ctl-lower-stmt (bml-node-child node 2) (bml-ctl-r-st then-r) env ctx))
+            (bml-ctl-r
+                (fk-if (bml-ctl-r-expr test-r)
+                       (bml-ctl-guard (bml-ctl-r-expr then-r))
+                       (bml-ctl-guard (bml-ctl-r-expr else-r)))
+                (bml-ctl-r-st else-r))))
+
+    (defn bml-ctl-loop-parts (label init test-node update body)
+        (list "bml-ctl-loop" label init test-node update body))
+    (defn bml-ctl-loop-label (parts) (nth parts 1))
+    (defn bml-ctl-loop-init (parts) (nth parts 2))
+    (defn bml-ctl-loop-test (parts) (nth parts 3))
+    (defn bml-ctl-loop-update (parts) (nth parts 4))
+    (defn bml-ctl-loop-body (parts) (nth parts 5))
+
+    (defn bml-ctl-while-parts (node)
+        (bml-ctl-loop-parts
+            (node_value (bml-node-child node 2))
+            (bml-ast-block (empty))
+            (bml-node-child node 0)
+            (bml-ast-block (empty))
+            (bml-node-child node 1)))
+
+    (defn bml-ctl-for-parts (node)
+        (bml-ctl-loop-parts
+            (node_value (bml-node-child node 0))
+            (bml-node-child node 1)
+            (bml-node-child node 2)
+            (bml-node-child node 3)
+            (bml-node-child node 4)))
+
+    (defn bml-ctl-reaction-code (reaction next)
+        (if (str_eq reaction "stopped")
+            (bml-ctl-set-mode 0)
+            (if (str_eq reaction "running")
+                (fk-sequence (bml-ctl-set-mode 0) next)
+                (fk-lit 0))))
+
+    ; mode 0 is a body that finished as a value; any mode the loop does not
+    ; own (a throw, a return, an outer target) passes outward as bnsc reads
+    ; a throw: failed.
+    (defn bml-ctl-loop-react (id next)
+        (fk-if (bml-ctl-mode-is 0)
+               (bml-ctl-reaction-code
+                   (bml-ctl-loop-reaction (bnsc-value 0 (bml-ctl-source 0)))
+                   next)
+        (fk-if (bml-ctl-mode-is (bml-ctl-continue-mode id))
+               (bml-ctl-reaction-code
+                   (bml-ctl-loop-reaction (bnsc-continue "" (bml-ctl-source 0)))
+                   next)
+        (fk-if (bml-ctl-mode-is (bml-ctl-break-mode id))
+               (bml-ctl-reaction-code
+                   (bml-ctl-loop-reaction (bnsc-break "" (bml-ctl-source 0)))
+                   next)
+               (bml-ctl-reaction-code
+                   (bml-ctl-loop-reaction (bnsc-throw 0 (bml-ctl-source 0)))
+                   next)))))
+
+    (defn bml-ctl-lower-loop (parts st env ctx)
+        (if (lt (bml-ctl-ctx-fn ctx) 0)
+            (bml-ctl-refuse "loop/function-index" st)
+            (bml-ctl-lower-loop-in parts st env ctx)))
+
+    (defn bml-ctl-lower-loop-in (parts st env ctx)
+        (do
+            (let id (bml-ctl-st-next st))
+            (let init-r
+                (bml-ctl-lower-stmt (bml-ctl-loop-init parts) (bml-ctl-st-take-id st) env ctx))
+            (let inner-env (bml-local-env-after-node (bml-ctl-loop-init parts) env))
+            (let inner-ctx (bml-ctl-ctx-push ctx "loop" (bml-ctl-loop-label parts) id))
+            (let test-r
+                (bml-ctl-lower-expr (bml-ctl-loop-test parts) (bml-ctl-r-st init-r) inner-env))
+            (let body-r
+                (bml-ctl-lower-stmt (bml-ctl-loop-body parts) (bml-ctl-r-st test-r) inner-env inner-ctx))
+            (let update-r
+                (bml-ctl-lower-stmt (bml-ctl-loop-update parts) (bml-ctl-r-st body-r) inner-env inner-ctx))
+            (let reenter (bml-ctl-reenter ctx id))
+            (bml-ctl-r
+                (fk-sequence (bml-ctl-r-expr init-r) (bml-ctl-guard reenter))
+                (bml-ctl-st-add-helper
+                    (bml-ctl-r-st update-r)
+                    id
+                    (bml-ctl-with-frame
+                        ctx
+                        (fk-if (bml-ctl-r-expr test-r)
+                               (bml-ctl-guard
+                                   (fk-sequence
+                                       (bml-ctl-r-expr body-r)
+                                       (bml-ctl-loop-react
+                                           id
+                                           (fk-sequence
+                                               (bml-ctl-r-expr update-r)
+                                               (bml-ctl-guard reenter)))))
+                               (fk-lit 0)))))))
+
+    (defn bml-ctl-switch-scrutinee (node) (head (bml-call-args node)))
+    (defn bml-ctl-switch-clauses (node) (node_children (head (tail (bml-call-args node)))))
+    (defn bml-ctl-switch-label (node)
+        (node_value (bml-node-child (head (tail (tail (bml-call-args node)))) 0)))
+    (defn bml-ctl-default-clause? (clause) (bml-call-named? clause "__bml_default"))
+    (defn bml-ctl-case-clause? (clause) (bml-call-named? clause "__bml_case"))
+    (defn bml-ctl-case-value (clause) (head (bml-call-args clause)))
+    (defn bml-ctl-clause-body (clause)
+        (if (bml-ctl-default-clause? clause)
+            (bml-call-arg clause)
+            (head (tail (bml-call-args clause)))))
+
+    (defn bml-ctl-lower-switch (node st env ctx)
+        (do
+            (let id (bml-ctl-st-next st))
+            (let fn-index (bml-ctl-ctx-fn ctx))
+            (let value-cell (bml-ctl-var-cell fn-index id))
+            (let hit-cell (bml-ctl-var-cell fn-index (add id 1)))
+            (let scrutinee-r
+                (bml-ctl-lower-expr
+                    (bml-ctl-switch-scrutinee node)
+                    (bml-ctl-st-take-id (bml-ctl-st-take-id st))
+                    env))
+            (let any-r
+                (bml-ctl-lower-any-case
+                    (bml-ctl-switch-clauses node)
+                    value-cell
+                    (bml-ctl-r-st scrutinee-r)
+                    env))
+            (let clauses-r
+                (bml-ctl-lower-clauses
+                    (bml-ctl-switch-clauses node)
+                    value-cell
+                    hit-cell
+                    (bml-ctl-r-expr any-r)
+                    (bml-ctl-r-st any-r)
+                    env
+                    (bml-ctl-ctx-push ctx "switch" (bml-ctl-switch-label node) id)))
+            (bml-ctl-r
+                (fk-sequence
+                    (bml-ctl-set-cell value-cell (bml-ctl-r-expr scrutinee-r))
+                    (fk-sequence
+                        (bml-ctl-set-cell hit-cell (fk-lit 0))
+                        (fk-sequence
+                            (bml-ctl-r-expr clauses-r)
+                            (fk-if (bml-ctl-mode-is (bml-ctl-break-mode id))
+                                   (bml-ctl-reaction-code
+                                       (bml-ctl-loop-reaction
+                                           (bnsc-break "" (bml-ctl-source 0)))
+                                       (fk-lit 0))
+                                   (fk-lit 0)))))
+                (bml-ctl-r-st clauses-r))))
+
+    (defn bml-ctl-lower-case-match (clause value-cell st env)
+        (do
+            (let value-r (bml-ctl-lower-expr (bml-ctl-case-value clause) st env))
+            (bml-ctl-r
+                (bml-ctl-fk-eq (bml-ctl-get-cell value-cell) (bml-ctl-r-expr value-r))
+                (bml-ctl-r-st value-r))))
+
+    (defn bml-ctl-lower-any-case (clauses value-cell st env)
+        (if (nil? clauses)
+            (bml-ctl-r (fk-lit 0) st)
+            (if (bml-ctl-case-clause? (head clauses))
+                (bml-ctl-lower-any-case-join
+                    (bml-ctl-lower-case-match (head clauses) value-cell st env)
+                    (tail clauses)
+                    value-cell
+                    env)
+                (bml-ctl-lower-any-case (tail clauses) value-cell st env))))
+
+    (defn bml-ctl-lower-any-case-join (match-r clauses value-cell env)
+        (do
+            (let rest-r
+                (bml-ctl-lower-any-case clauses value-cell (bml-ctl-r-st match-r) env))
+            (bml-ctl-r
+                (fk-if (bml-ctl-r-expr match-r) (fk-lit 1) (bml-ctl-r-expr rest-r))
+                (bml-ctl-r-st rest-r))))
+
+    (defn bml-ctl-lower-clauses (clauses value-cell hit-cell any-expr st env ctx)
+        (if (nil? clauses)
+            (bml-ctl-r (fk-lit 0) st)
+            (bml-ctl-lower-clause
+                (head clauses)
+                (tail clauses)
+                value-cell
+                hit-cell
+                any-expr
+                (if (bml-ctl-default-clause? (head clauses))
+                    (bml-ctl-r (fk-if any-expr (fk-lit 0) (fk-lit 1)) st)
+                    (bml-ctl-lower-case-match (head clauses) value-cell st env))
+                env
+                ctx)))
+
+    (defn bml-ctl-lower-clause (clause clauses value-cell hit-cell any-expr match-r env ctx)
+        (do
+            (let body-r
+                (bml-ctl-lower-stmt (bml-ctl-clause-body clause) (bml-ctl-r-st match-r) env ctx))
+            (let rest-r
+                (bml-ctl-lower-clauses
+                    clauses value-cell hit-cell any-expr (bml-ctl-r-st body-r) env ctx))
+            (let hit-zero (fk-le (bml-ctl-get-cell hit-cell) (fk-lit 0)))
+            (bml-ctl-r
+                (fk-sequence
+                    (bml-ctl-guard
+                        (fk-sequence
+                            (fk-if hit-zero
+                                   (bml-ctl-set-cell hit-cell (bml-ctl-r-expr match-r))
+                                   (fk-lit 0))
+                            (fk-if hit-zero (fk-lit 0) (bml-ctl-r-expr body-r))))
+                    (bml-ctl-r-expr rest-r))
+                (bml-ctl-r-st rest-r))))
+
+    (defn bml-ctl-try-decl (node)
+        (if (gt (len (node_children node)) 2)
+            (bml-node-child node 2)
+            (bml-ast-block (empty))))
+
+    (defn bml-ctl-lower-try (node st env ctx)
+        (do
+            (let body-r (bml-ctl-lower-stmt (bml-node-child node 0) st env ctx))
+            (let decl-r
+                (bml-ctl-lower-stmt (bml-ctl-try-decl node) (bml-ctl-r-st body-r) env ctx))
+            (let handler-r
+                (bml-ctl-lower-stmt
+                    (bml-node-child node 1)
+                    (bml-ctl-r-st decl-r)
+                    (bml-local-env-after-node (bml-ctl-try-decl node) env)
+                    ctx))
+            (bml-ctl-r
+                (fk-sequence
+                    (bml-ctl-r-expr body-r)
+                    (fk-if (bml-ctl-mode-is (bml-ctl-catch-mode 0))
+                           (fk-sequence
+                               (bml-ctl-set-mode 0)
+                               (fk-sequence (bml-ctl-r-expr decl-r) (bml-ctl-r-expr handler-r)))
+                           (fk-lit 0)))
+                (bml-ctl-r-st handler-r))))
+
+    (defn bml-ctl-op-rule-of (node)
+        (substring (bml-call-name node) 6 (str_len (bml-call-name node))))
+
+    (defn bml-ctl-known-op-rules (_x)
+        (list "op-lt" "op-le" "op-gt" "op-ge" "op-eq" "op-ne" "op-and" "op-or"
+              "op-sub" "op-mul" "op-not" "op-neg"))
+
+    (defn bml-ctl-known-op? (node)
+        (ge (bml-ctl-index-of (bml-ctl-op-rule-of node) (bml-ctl-known-op-rules 0) 0) 0))
+
+    (defn bml-ctl-binary-op (rule a b)
+        (if (str_eq rule "op-lt")
+            (fk-if (fk-le (fk-lit 0) (fk-sub a b)) (fk-lit 0) (fk-lit 1))
+        (if (str_eq rule "op-le")
+            (fk-le a b)
+        (if (str_eq rule "op-gt")
+            (fk-if (fk-le (fk-sub a b) (fk-lit 0)) (fk-lit 0) (fk-lit 1))
+        (if (str_eq rule "op-ge")
+            (fk-le (fk-lit 0) (fk-sub a b))
+        (if (str_eq rule "op-eq")
+            (bml-ctl-fk-eq a b)
+        (if (str_eq rule "op-ne")
+            (fk-if (bml-ctl-fk-eq a b) (fk-lit 0) (fk-lit 1))
+        (if (str_eq rule "op-and")
+            (fk-if a (fk-if b (fk-lit 1) (fk-lit 0)) (fk-lit 0))
+        (if (str_eq rule "op-or")
+            (fk-if a (fk-lit 1) (fk-if b (fk-lit 1) (fk-lit 0)))
+        (if (str_eq rule "op-sub")
+            (fk-sub a b)
+            (fk-mul a b)))))))))))
+
+    (defn bml-ctl-unary-op (rule a)
+        (if (str_eq rule "op-not")
+            (fk-if a (fk-lit 0) (fk-lit 1))
+            (fk-sub (fk-lit 0) a)))
+
+    (defn bml-ctl-lower-reserved (node pool env)
+        (if (bml-ctl-thrown-node? node)
+            (bml-hati-lower-result (bml-ctl-get-cell (bml-ctl-thrown-cell 0)) pool)
+            (if (bml-ctl-known-op? node)
+                (bml-ctl-lower-op node pool env)
+                (bml-hati-lower-refusal "op/unknown" pool))))
+
+    (defn bml-ctl-lower-op (node pool env)
+        (do
+            (let args (bml-call-args node))
+            (let left (bml-hati-lower-node-in-env (head args) pool env))
+            (if (nil? (tail args))
+                (bml-hati-lower-result
+                    (bml-ctl-unary-op (bml-ctl-op-rule-of node) (bml-hati-lower-expr left))
+                    (bml-hati-lower-pool left))
+                (bml-ctl-lower-op-right
+                    (bml-ctl-op-rule-of node)
+                    left
+                    (bml-hati-lower-node-in-env
+                        (head (tail args))
+                        (bml-hati-lower-pool left)
+                        env)))))
+
+    (defn bml-ctl-lower-op-right (rule left right)
+        (bml-hati-lower-result
+            (bml-ctl-binary-op rule (bml-hati-lower-expr left) (bml-hati-lower-expr right))
+            (bml-hati-lower-pool right)))
+
+    (defn bml-ctl-unsupported-reserved (node env)
+        (if (bml-ctl-thrown-node? node)
+            (empty)
+            (if (bml-ctl-known-op? node)
+                (bml-ctl-unsupported-exprs (bml-call-args node) env)
+                (list "op/unknown"))))
+
+    (defn bml-ctl-unsupported-exprs (nodes env)
+        (if (nil? nodes)
+            (empty)
+            (append
+                (bml-hati-unsupported-node-in (head nodes) env)
+                (bml-ctl-unsupported-exprs (tail nodes) env))))
+
+    (defn bml-ctl-unsupported-function (nodes env)
+        (bml-ctl-unsupported-stmts
+            nodes
+            (bml-ctl-env-active env)
+            (bml-ctl-ctx (bml-ctl-env-fn-index env) (empty) false)))
+
+    (defn bml-ctl-unsupported-stmts (nodes env ctx)
+        (if (nil? nodes)
+            (empty)
+            (append
+                (bml-ctl-unsupported-stmt (head nodes) env ctx)
+                (bml-ctl-unsupported-stmts
+                    (tail nodes)
+                    (bml-ctl-env-after (head nodes) env)
+                    ctx))))
+
+    (defn bml-ctl-unsupported-stmt (node env ctx)
+        (do
+            (let cat (node_category node))
+            (if (node_eq cat BML-AST-BLOCK)
+                (bml-ctl-unsupported-stmts (node_children node) env ctx)
+            (if (node_eq cat BML-AST-IF)
+                (append
+                    (bml-hati-unsupported-node-in (bml-node-child node 0) env)
+                    (append
+                        (bml-ctl-unsupported-stmt (bml-node-child node 1) env ctx)
+                        (bml-ctl-unsupported-stmt (bml-node-child node 2) env ctx)))
+            (if (bml-ctl-while-node? node)
+                (bml-ctl-unsupported-loop (bml-ctl-while-parts node) env ctx)
+            (if (node_eq cat BML-AST-FOR)
+                (bml-ctl-unsupported-loop (bml-ctl-for-parts node) env ctx)
+            (if (bml-ctl-switch-node? node)
+                (bml-ctl-unsupported-switch node env ctx)
+            (if (node_eq cat BML-AST-BREAK)
+                (bml-ctl-unsupported-jump node ctx)
+            (if (node_eq cat BML-AST-CONTINUE)
+                (bml-ctl-unsupported-jump node ctx)
+            (if (node_eq cat BML-AST-THROW)
+                (bml-hati-unsupported-node-in (bml-node-child node 0) env)
+            (if (node_eq cat BML-AST-TRY)
+                (bml-ctl-unsupported-try node env ctx)
+            (if (node_eq cat BML-AST-WITH)
+                (list "with")
+            (if (node_eq cat BML-AST-METHOD)
+                (list "control/nested-method")
+                (bml-hati-unsupported-node-in node env))))))))))))))
+
+    (defn bml-ctl-unsupported-loop (parts env ctx)
+        (do
+            (let inner-env (bml-local-env-after-node (bml-ctl-loop-init parts) env))
+            (let inner-ctx (bml-ctl-ctx-push ctx "loop" (bml-ctl-loop-label parts) 0))
+            (append
+                (if (lt (bml-ctl-ctx-fn ctx) 0) (list "loop/function-index") (empty))
+                (append
+                    (bml-ctl-unsupported-stmt (bml-ctl-loop-init parts) env ctx)
+                    (append
+                        (bml-hati-unsupported-node-in (bml-ctl-loop-test parts) inner-env)
+                        (append
+                            (bml-ctl-unsupported-stmt (bml-ctl-loop-body parts) inner-env inner-ctx)
+                            (bml-ctl-unsupported-stmt (bml-ctl-loop-update parts) inner-env inner-ctx)))))))
+
+    (defn bml-ctl-unsupported-jump (node ctx)
+        (do
+            (let effect (bml-ctl-node-effect node))
+            (if (lt (bml-ctl-effect-target effect ctx) 0)
+                (list (bml-ctl-jump-reason effect))
+                (empty))))
+
+    (defn bml-ctl-unsupported-switch (node env ctx)
+        (append
+            (bml-hati-unsupported-node-in (bml-ctl-switch-scrutinee node) env)
+            (bml-ctl-unsupported-clauses
+                (bml-ctl-switch-clauses node)
+                env
+                (bml-ctl-ctx-push ctx "switch" (bml-ctl-switch-label node) 0))))
+
+    (defn bml-ctl-unsupported-clauses (clauses env ctx)
+        (if (nil? clauses)
+            (empty)
+            (append
+                (bml-ctl-unsupported-clause (head clauses) env ctx)
+                (bml-ctl-unsupported-clauses (tail clauses) env ctx))))
+
+    (defn bml-ctl-unsupported-clause (clause env ctx)
+        (if (bml-ctl-default-clause? clause)
+            (bml-ctl-unsupported-stmt (bml-ctl-clause-body clause) env ctx)
+        (if (bml-ctl-case-clause? clause)
+            (append
+                (bml-hati-unsupported-node-in (bml-ctl-case-value clause) env)
+                (bml-ctl-unsupported-stmt (bml-ctl-clause-body clause) env ctx))
+            (list "switch/clause"))))
+
+    (defn bml-ctl-unsupported-try (node env ctx)
+        (append
+            (bml-ctl-unsupported-stmt (bml-node-child node 0) env ctx)
+            (append
+                (bml-ctl-unsupported-stmt (bml-ctl-try-decl node) env ctx)
+                (bml-ctl-unsupported-stmt
+                    (bml-node-child node 1)
+                    (bml-local-env-after-node (bml-ctl-try-decl node) env)
+                    ctx))))
 
     (defn bma-trace-count-mode (trace mode)
         (if (nil? trace) 0

@@ -1,0 +1,91 @@
+; tests/bml-hati-native-for-proof.fk
+;
+; preludes: form-stdlib/core.fk form-stdlib/minimal-surface.fk form-stdlib/json.fk form-stdlib/cache.fk form-stdlib/form-ontology-bp.fk form-stdlib/engine.fk form-stdlib/compiler.fk form-stdlib/source-compiler.fk form-stdlib/hati-os-kernel.fk form-stdlib/hati-os-kernel-emit.fk form-stdlib/grammars/bml.fk
+;
+; Closes the general-for family on the Hati table lane: `for (init; c; u) s`
+; with a for-owned variable in a memory cell, update forms (=, ++, -=),
+; empty clauses, early return, nested loops with a labeled continue, a for
+; inside a method reached by known calls (the loop re-enters its own
+; function index), and a sum through record-backed self. The for variable
+; is scoped to its statement, and assignment reaches only control-owned
+; variables: both boundaries are named before table emission.
+
+(do
+    (defn score-bool (actual)
+        (if actual 1 0))
+
+    (defn score-int (actual expected)
+        (if (eq actual expected) 1 0))
+
+    (defn score-str (actual expected)
+        (if (nil? actual)
+            0
+            (if (str_eq actual expected) 1 0)))
+
+    (defn str-contains? (haystack needle)
+        (ge (str_find haystack needle 0) 0))
+
+    (defn parse-source (source)
+        (bml-source-parse-executable-stream (bml-source-scan-text source)))
+
+    (defn image-of (source)
+        (bml-hati-compile-image (bml-source-exec-parse-node (parse-source source))))
+
+    (defn run-source (source)
+        (bml-hati-run-value (bml-source-exec-parse-node (parse-source source))))
+
+    (let search-parsed
+        (parse-source
+            "for (int i = 0; i < 10; i = i + 1) { if (i * i > 50) return i; } return -1;\n"))
+    (let search-node (bml-source-exec-parse-node search-parsed))
+    (let search-image (bml-hati-compile-image search-node))
+    (let search-table (bml-hati-table-file search-image))
+
+    (let root-parsed
+        (parse-source
+            "int Root(int k) { for (int i = 0; i < 100; i++) { if (i * i >= k) return i; } return -1; }\nreturn Root(50) + Root(9);\n"))
+    (let root-image (bml-hati-compile-image (bml-source-exec-parse-node root-parsed)))
+
+    (let sum-node
+        (head
+            (bml-source-exec-parse-nodes
+                (parse-source
+                    "int Sum() { for (int i = 1; i <= 10; i++) { this.total = this.total + i; } return this.total; }\n"))))
+
+    (let scope-image (image-of "for (int i = 0; i < 1; i++) { } return i;\n"))
+    (let assign-image (image-of "const int c = 1;\nfor (int i = 0; i < 2; i++) { c = 5; }\nreturn 0;\n"))
+
+    (sum
+        (list
+            (score-bool (bml-source-exec-parse-ok? search-parsed))
+            (score-int (len (bml-source-exec-parse-rest search-parsed)) 0)
+            (score-str (head (bml-source-exec-parse-rules search-parsed)) "control-for")
+            (score-bool (node_eq (node_category (head (node_children search-node))) BML-AST-FOR))
+            (score-bool (bml-hati-image-supported? search-image))
+            (score-bool (not (str-contains? search-table "BML-HATI-UNSUPPORTED")))
+            (score-bool (str-contains? search-table "1 4004 0 0"))
+            (score-int (bml-hati-run-value search-node) 8)
+            (score-bool (bml-source-exec-parse-ok? root-parsed))
+            (score-str (head (bml-source-exec-parse-rules root-parsed)) "method-body")
+            (score-int (len (bml-hati-image-fns root-image)) 2)
+            (score-int (fkm-run (bml-hati-image-fns root-image) 0) 11)
+            (score-int
+                (run-source
+                    "outer: for (int i = 0; i < 5; i++) { for (int j = 0; j < 5; j++) { if (j > i) continue outer; if (i + j == 7) return i * 10 + j; } } return -1;\n")
+                43)
+            (score-int
+                (bml-hati-run-value-with-arg
+                    sum-node
+                    (record_new (make_nodeid 1 9 2026 613) "total" 0))
+                55)
+            (score-int (run-source "for (;;) { return 7; }\n") 7)
+            (score-int (run-source "int s = 0; for (int i = 1; i <= 10; i++) { s = s + i; } return s;\n") 55)
+            (score-int
+                (run-source
+                    "int total = 0; for (int i = 0; i < 4; i++) { for (int j = 0; j < 3; j++) { total += i * j; } } return total;\n")
+                18)
+            (score-int (run-source "for (int i = 10; i > 0; i -= 3) { if (i < 3) return i; } return 0;\n") 1)
+            (score-bool (not (bml-hati-image-supported? scope-image)))
+            (score-str (head (bml-hati-image-unsupported scope-image)) "name/unbound")
+            (score-bool (not (bml-hati-image-supported? assign-image)))
+            (score-str (head (bml-hati-image-unsupported assign-image)) "assign/const"))))
