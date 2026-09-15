@@ -1,0 +1,61 @@
+//////////////////////////////////////////////////////////////////////
+//
+// ollama-oracle-stats.bml — the arithmetic of ollama_oracle.sh, in the body.
+//
+// The oracle measures the external denominator; the shell carries the host
+// (uptime, sysctl, ollama). The two numbers it has to compute come here:
+//
+//   busy   load1, then cores                -> 1 when load1 > cores * 0.35
+//   stats  decode rates, prefill rates, prefill token counts (each one
+//          space-separated line)            -> "DMED DMIN DMAX PMED PMIN PMAX PTOK SAMPLE"
+//
+// A median of an even count is the mean of the middle two. An empty prefill
+// line reads as one 0.0. Rates print to two decimals, rounded half up at the
+// cent; the token median is truncated to an integer.
+//
+//   ./fkwu form/native/metal/ollama-oracle-stats.bml < lines
+//
+// preludes: form-stdlib/core.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class OllamaOracleStats {
+        def oos-chomp(s) = if eq(str_len(s), 0) then s else if or(eq(str_byte_at(s, sub(str_len(s), 1)), 10), eq(str_byte_at(s, sub(str_len(s), 1)), 13)) then oos-chomp(substring(s, 0, sub(str_len(s), 1))) else s;
+        def oos-line() {
+            let raw = read_line();
+            if nothing?(raw) then "" else oos-chomp(raw);
+        }
+        // the words of a line: spaces and tabs part them, and none is empty
+        def oos-words(s, at, start, acc) = if ge(at, str_len(s)) then reverse(oos-keep(s, start, at, acc)) else if or(eq(str_byte_at(s, at), 32), eq(str_byte_at(s, at), 9)) then oos-words(s, add(at, 1), add(at, 1), oos-keep(s, start, at, acc)) else oos-words(s, add(at, 1), start, acc);
+        def oos-keep(s, start, at, acc) = if gt(at, start) then cons(substring(s, start, at), acc) else acc;
+        def oos-floats(words) = if nil?(words) then list() else cons(str_to_float(head(words)), oos-floats(tail(words)));
+        def oos-values(s) {
+            let xs = oos-floats(oos-words(s, 0, 0, list()));
+            if nil?(xs) then list(0.0) else xs;
+        }
+        def oos-insert(x, xs) = if nil?(xs) then list(x) else if le(x, head(xs)) then cons(x, xs) else cons(head(xs), oos-insert(x, tail(xs)));
+        def oos-sort(xs) = if nil?(xs) then list() else oos-insert(head(xs), oos-sort(tail(xs)));
+        def oos-median(xs) {
+            let s = oos-sort(xs);
+            let n = len(s);
+            if eq(mod(n, 2), 1) then nth(s, div(n, 2)) else div(add(nth(s, sub(div(n, 2), 1)), nth(s, div(n, 2))), 2.0);
+        }
+        def oos-min(xs) = head(oos-sort(xs));
+        def oos-max(xs) = nth(oos-sort(xs), sub(len(xs), 1));
+        def oos-pad2(c) = if lt(c, 10) then str_concat("0", int_to_str(c)) else int_to_str(c);
+        def oos-cents(x) = float_to_int(add(0.5, mul(x, 100.0)));
+        def oos-fixed2(x) = str_concat(int_to_str(div(oos-cents(x), 100)), str_concat(".", oos-pad2(mod(oos-cents(x), 100))));
+        def oos-cat(parts) = if nil?(parts) then "" else if nil?(tail(parts)) then head(parts) else str_concat(head(parts), str_concat(" ", oos-cat(tail(parts))));
+        def oos-stats(d, p, pc) = oos-cat(list(oos-fixed2(oos-median(d)), oos-fixed2(oos-min(d)), oos-fixed2(oos-max(d)), oos-fixed2(oos-median(p)), oos-fixed2(oos-min(p)), oos-fixed2(oos-max(p)), int_to_str(float_to_int(oos-median(pc))), int_to_str(len(d))));
+        def oos-busy(load1, cores) = if gt(str_to_float(load1), mul(str_to_float(cores), 0.35)) then "1" else "0";
+        def oos-run() {
+            let mode = oos-line();
+            let a = oos-line();
+            let b = oos-line();
+            let c = if str_eq(mode, "stats") then oos-line() else "";
+            if str_eq(mode, "busy") then oos-busy(a, b) else if str_eq(mode, "stats") then oos-stats(oos-values(a), oos-values(b), oos-values(c)) else form_error("ollama oracle stats: first line names busy or stats");
+        }
+    }
+    oos-run();
+}

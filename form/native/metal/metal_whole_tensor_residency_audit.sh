@@ -134,14 +134,17 @@ if [[ -f "$LIB" ]]; then
     echo "PASS  gate 8 metallib cache HIT: $LIB (emitted source unchanged; no compile this run)"
     lib_state=hit
 else
-    t0=$(python3 -c 'import time;print(time.time())')
+    # the body's clock, read before and after; the shell carries the integer difference
+    clock_ms() { (cd "$ROOT/.." && ./fkwu observe/clock-ms-run.bml); }
+    t0=$(clock_ms)
     xcrun -sdk macosx metal -O2 -std=metal3.0 -ffp-contract=off -fno-fast-math \
           -c "$work/q6k.metal" -o "$work/q6k.air" 2>"$work/metal.err" \
       && xcrun -sdk macosx metallib "$work/q6k.air" -o "$LIB" 2>>"$work/metal.err" || {
         echo "FAIL  offline metal compile failed"; cat "$work/metal.err"; exit 1; }
-    t1=$(python3 -c 'import time;print(time.time())')
-    printf 'PASS  gate 8 metallib cache MISS -> compiled in %.2f s and cached: %s\n' \
-        "$(python3 -c "print($t1-$t0)")" "$LIB"
+    t1=$(clock_ms)
+    cs=$(( (t1 - t0 + 5) / 10 ))
+    printf 'PASS  gate 8 metallib cache MISS -> compiled in %d.%02d s and cached: %s\n' \
+        "$((cs / 100))" "$((cs % 100))" "$LIB"
     lib_state=miss
 fi
 
