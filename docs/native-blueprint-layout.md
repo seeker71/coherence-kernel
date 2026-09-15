@@ -24,8 +24,10 @@ loads touch. A word-aligned 64-bit primitive needs no trailing allocation.
 There is one tail allowance per run, never one per cell. An empty run has no
 payload and owns a one-byte mapping request for its lifetime. Host page
 rounding, physical residency, executable pages and Form metadata are separate
-costs; these payload figures are not RSS measurements. Closing confirms release
-of mappings and native code. The seed's record arena retains owner metadata.
+costs; these payload figures are not RSS measurements. Retiring a run closes
+new reader admission; its existing leases retain the mapping until the last
+reader releases. Closing confirms release of mappings and native code. The
+seed's record arena retains owner metadata.
 
 Raw projection preserves every bit, including all unsigned 64-bit IDs and NaN
 payloads. Optional numeric projection supports f16, bf16, E2M1, E4M3 and E5M2.
@@ -42,6 +44,12 @@ builds an immutable generation, publishes it to a stable local slot and retains
 older mappings while readers hold them. Full-width or small blocks can cost
 more than raw words. Publication is serialized within one Form process;
 cross-process atomic publication and reclaimable record metadata remain open.
+
+The [native accessor](native-node-accessor.md) exposes a full raw-u64 getter
+over these runs. One reusable native entry consumes different immutable layout
+descriptors. A native batch consumer calls it without per-field Form crossings;
+only completed counts return through the tagged JIT surface. Leased descriptors
+preserve retired runs and refuse reads after view release.
 
 The [layout witness](../observe/native-blueprint-layout-witness.bml) compares
 all field widths against an independent bit oracle, executes actual CPU and
@@ -62,8 +70,10 @@ Smaller storage does not imply faster computation on every workload.
 
 These are Form-owned packed runs, not the primary shared node columns. The
 shared field still uses 8-byte identity entries, 80 logical bytes per node and
-a fixed 2^26-cell capacity. Replacing it needs a raw-u64 native accessor ABI,
-shared publication and owner-aware reclamation. Current Metal dispatch uses
+a fixed 2^26-cell capacity. Replacing it needs the native accessor connected to
+a Form-owned primary directory, shared publication and owner-aware reclamation.
+Moving tagged references requires the collector to retain and relocate them.
+Current Metal dispatch uses
 32-bit row indices; a larger run needs explicit range submissions. The
 [north star](fkwu-form-native-north-star.md) makes those ownership and resource
 boundaries part of the runtime itself.

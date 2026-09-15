@@ -90,10 +90,19 @@ section [form.bml] {
   def nbl-pack-region(owner,raw,count,payload,allocated,region) {
    let result = if eq(count,0) then 0 else nbl-call(owner,list(0,raw,npd-span(region,0,allocated),count));
    if not(eq(result,count)) then { npd-region-close(region); nbl-unease(owner,"field-width","bits-representable-by-blueprint"); } else {
-    record_set(region,"node-storage-generation",1); record_new(0,"kind","native-blueprint-run","owner",owner,"region",region,"count",count,"payload-bytes",payload,"allocated-bytes",allocated);
+    record_set(region,"node-storage-generation",1); record_new(0,"kind","native-blueprint-run","owner",owner,"region",region,"count",count,"payload-bytes",payload,"allocated-bytes",allocated,"readers",0,"retired",0);
    };
   }
-  def nbl-run?(run) = if not(record?(run)) then 0 else if not(str_eq(record_get(run,"kind"),"native-blueprint-run")) then 0 else and(nbl-active(record_get(run,"owner")),eq(record_get(record_get(run,"region"),"active"),1));
+  def nbl-held?(run) = if not(record?(run)) then 0 else if not(str_eq(record_get(run,"kind"),"native-blueprint-run")) then 0 else and(nbl-active(record_get(run,"owner")),eq(record_get(record_get(run,"region"),"active"),1));
+  def nbl-run?(run) = if not(nbl-held?(run)) then 0 else eq(record_get(run,"retired"),0);
+  def nbl-acquire(run) = if not(nbl-run?(run)) then nothing() else {
+   record_set(run,"readers",add(record_get(run,"readers"),1)); record_new(0,"kind","native-blueprint-reader","run",run,"active",1);
+  };
+  def nbl-reader?(reader) = if not(record?(reader)) then 0 else if not(str_eq(record_get(reader,"kind"),"native-blueprint-reader")) then 0 else and(eq(record_get(reader,"active"),1),nbl-held?(record_get(reader,"run")));
+  def nbl-collect(run) = if and(eq(record_get(run,"retired"),1),eq(record_get(run,"readers"),0)) then npd-region-close(record_get(run,"region")) else 0;
+  def nbl-release(reader) = if not(nbl-reader?(reader)) then 0 else {
+   let run = record_get(reader,"run"); record_set(reader,"active",0); record_set(run,"readers",sub(record_get(run,"readers"),1)); nbl-collect(run);
+  };
   def nbl-project(run,first,count,output,offset) = nbl-project-mode(run,first,count,output,offset,1);
   // Numeric projection writes fp64 bits for floats; raw fields stay u64.
   def nbl-project-numeric(run,first,count,output,offset) = nbl-project-mode(run,first,count,output,offset,2);
@@ -102,7 +111,7 @@ section [form.bml] {
    if not(valid) then nbl-unease(owner,"read-range","existing-blueprint-rows") else if and(record?(output),record_has(output,"node-storage-generation")) then nbl-unease(owner,"immutable-output","separate-writable-output") else nbl-project-span(run,first,count,npd-owned-span(record_get(owner,"memory"),output,offset,mul(mul(count,nbl-count(record_get(owner,"layout"))),8)),mode);
   };
   def nbl-project-span(run,first,count,pointer,mode) = if nothing?(pointer) then nbl-unease(record_get(run,"owner"),"output","owned-u64-field-span") else if eq(count,0) then 0 else nbl-call(record_get(run,"owner"),list(mode,npd-span(record_get(run,"region"),0,record_get(run,"allocated-bytes")),first,count,pointer));
-  def nbl-run-close(run) = if not(nbl-run?(run)) then 0 else npd-region-close(record_get(run,"region"));
+  def nbl-run-close(run) = if not(nbl-held?(run)) then 0 else { record_set(run,"retired",1); nbl-collect(run); };
   def nbl-close(owner) = if not(nbl-active(owner)) then 0 else if not(npd-regions-closed(record_get(record_get(owner,"memory"),"regions"))) then nbl-unease(owner,"retirement","released-runs-and-output") else {
    let released = if eq(record_get(owner,"code-live"),1) then jit_leaf_inram(list(1,record_get(owner,"identity"),list()),0) else 1;
    if not(eq(released,1)) then nbl-unease(owner,"code-retirement","native-code-release") else { record_set(owner,"code-live",0); let closed = npd-close(record_get(owner,"memory")); if eq(closed,1) then record_set(owner,"active",0) else 0; closed; };

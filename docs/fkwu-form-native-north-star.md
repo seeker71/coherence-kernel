@@ -154,6 +154,17 @@ CPU JIT and device expressions consume the same offsets, widths, numeric
 interpretations and scale relationships. Layout changes create an identified
 generation; existing readers and submitted work retain their original meaning.
 
+Native access carries full words directly between native functions and owned
+RAM; tagged host values do not constrain the payload. A stable entry consumes
+identified layout descriptors, with specialized entries admitted when measured
+work benefits. A descriptor owns its data lease. Retirement closes admission,
+submitted work completes, then the final lease releases storage and code.
+Semantic identities, runtime handles and physical slots remain distinct, so
+layout changes and slot reuse cannot silently change what an existing handle
+means. Reference-bearing storage participates in root retention and relocation.
+The [current raw accessor](native-node-accessor.md) establishes the local
+native call and lease boundary; the primary shared directory remains to move.
+
 Compact storage is a measured choice. Aligned fields lower directly to native
 word operations; other fields lower to the required bit extraction. A format
 names its signed zero, subnormal, infinity, NaN and rounding behavior. ML block

@@ -1,0 +1,132 @@
+// A leased raw-u64 native boundary over immutable Form blueprint runs.
+// No tagged Form references enter these descriptors or payloads. Ownership is
+// cooperative and serialized in one process; callers cannot outlive the owner.
+// preludes: form-stdlib/bml/native-blueprint-layout.bml
+section [form.bml] {
+ class NativeNodeAccessor {
+  def nra-address(rd,label) = list("address",rd,label);
+  def nra-adr(rd,words) = if or(lt(words,-262144),gt(words,262143)) then form_error("native accessor ADR range") else fa-asm(268435456,list(1,32),list(rd,fa-smask(words,524288)));
+  def nra-blr(rn) = fa-asm(3594452992,list(32),list(rn));
+  def nra-emit(rows,labels,pc) = if nil?(rows) then list() else if npd-kind(head(rows),"label") then nra-emit(tail(rows),labels,pc) else {
+   let row = head(rows);
+   cons(if npd-kind(row,"address") then nra-adr(nth(row,1),sub(npd-find(labels,nth(row,2)),pc)) else if npd-kind(row,"branch") then fa-bcond(nth(row,1),sub(npd-find(labels,nth(row,2)),pc)) else row,nra-emit(tail(rows),labels,add(pc,1)));
+  };
+  // x0 descriptor, x1 row, x2 field -> x0 raw u64, x1 success (0 or 1).
+  // Only x0..x17 and flags are scratch. No interpreter callbacks or allocation.
+  def nra-getter() = npd-cat(list(list(npd-label("get"),
+   fa-ldr(3,0,0),fa-cmp-x(3,1),npd-branch(1,"missing"),
+   fa-ldr(3,0,1),nbl-cmp-x(1,3),npd-branch(2,"missing"),
+   fa-ldr(3,0,3),nbl-cmp-x(2,3),npd-branch(2,"missing"),
+   fa-ldr(3,0,2),nns-mul(6,1,3),fa-ldr(4,0,6),fa-lsl-x-imm(2,2,4),fa-add-x-r(4,4,2),
+   fa-ldr(3,4,0),fa-ldr(5,4,1),fa-add-x-r(6,6,3),fa-ldr(1,0,4)),nns-address(),
+   list(fa-ldr(11,10,0),nns-lsr(7,11,9),fa-add-x-r(13,9,5),fa-cmp-x(13,64),npd-branch(9,"mask"),
+   fa-movz-x(13,64),nns-reg(3405774848,13,13,9),fa-ldr(12,10,1),nns-lsl(12,12,13),nns-or(7,7,12),
+   npd-label("mask"),fa-cmp-x(5,64),npd-branch(0,"value"),fa-movz-x(13,64),nns-reg(3405774848,13,13,5),nns-lsl(7,7,13),nns-lsr(7,7,13),
+   npd-label("value"),fa-add-x-imm(0,7,0),fa-movz-x(1,1),fa-ret(),
+   npd-label("missing"),fa-movz-x(0,0),fa-movz-x(1,0),fa-ret())));
+  // One membrane entry. Every queried field crosses a native BLR only.
+  // x1 getter, x2 descriptor, x3 query bytes, x4 byte extent, x5 output.
+  // The 64-byte frame owns cursors and LR across calls; x19..x28 are untouched.
+  def nra-consumer() = list(npd-label("batch"),fa-sub-x-imm(31,31,64),
+   nns-str(1,31,0),nns-str(2,31,1),nns-str(3,31,2),nns-str(4,31,3),nns-str(5,31,4),nns-str(31,31,5),nns-str(29,31,6),nns-str(30,31,7),fa-add-x-imm(29,31,48),
+   npd-label("query"),fa-ldr(3,31,3),fa-cmp-x(3,0),npd-branch(0,"batch-done"),
+   fa-ldr(0,31,1),fa-ldr(3,31,2),fa-ldr(1,3,0),fa-ldr(2,3,1),fa-ldr(16,31,0),nra-blr(16),
+   fa-cmp-x(1,1),npd-branch(1,"batch-done"),fa-ldr(3,31,4),nns-str(0,3,0),fa-add-x-imm(3,3,8),nns-str(3,31,4),
+   fa-ldr(3,31,2),fa-add-x-imm(3,3,16),nns-str(3,31,2),fa-ldr(3,31,3),fa-sub-x-imm(3,3,16),nns-str(3,31,3),
+   fa-ldr(3,31,5),fa-add-x-imm(3,3,1),nns-str(3,31,5),npd-branch(14,"query"),
+   npd-label("batch-done"),fa-ldr(0,31,5),fa-ldr(29,31,6),fa-ldr(30,31,7),fa-add-x-imm(31,31,64),fa-ret());
+  def nra-image() {
+   let rows = npd-cat(list(npd-route(0,"export"),npd-route(1,"copy"),npd-route(2,"batch"),list(fa-movz-x(0,0),fa-ret(),
+    npd-label("export"),nra-address(8,"get"),nns-str(8,1,0),fa-movz-x(0,1),fa-ret(),
+    // x1 borrowed bytes, x2 extent, x3 owned destination; no retained borrow.
+    npd-label("copy"),fa-add-x-imm(0,2,0),fa-cmp-x(2,0),npd-branch(0,"copied"),npd-label("copy-byte"),
+    fa-ldrb(8,1,0),fa-strb(8,3,0),fa-add-x-imm(1,1,1),fa-add-x-imm(3,3,1),fa-sub-x-imm(2,2,1),fa-cmp-x(2,0),npd-branch(1,"copy-byte"),npd-label("copied"),fa-ret()),nra-consumer(),nra-getter()));
+   fa-image(nra-emit(rows,npd-labels(rows,0,list()),0));
+  }
+  def nra-active(owner) = if not(record?(owner)) then 0 else and(str_eq(record_get(owner,"kind"),"native-node-accessor"),and(eq(record_get(owner,"pid"),host_pid()),eq(record_get(owner,"active"),1)));
+  def nra-live-views(views) = if nil?(views) then 0 else add(if eq(record_get(head(views),"active"),1) then 1 else 0,nra-live-views(tail(views)));
+  def nra-mapped-bytes(regions,private) = if nil?(regions) then 0 else {
+   let region = head(regions); add(if and(eq(record_get(region,"active"),1),eq(record_has(region,"native-accessor-private"),private)) then record_get(region,"bytes") else 0,nra-mapped-bytes(tail(regions),private));
+  };
+  def nra-state(owner) {
+   let regions = record_get(record_get(owner,"memory"),"regions");
+   json-node-object(list(oh-n("state",record_get(owner,"active")),oh-n("views",nra-live-views(record_get(owner,"views"))),oh-n("descriptor_requested_bytes",nra-mapped-bytes(regions,1)),oh-n("output_requested_bytes",nra-mapped-bytes(regions,0)),oh-n("native_calls",record_get(owner,"calls")),oh-n("code_live",record_get(owner,"code-live"))));
+  }
+  def nra-unease(owner,aspect,need) {
+   let row = oh-reading("native-node-accessor",record_get(owner,"flow"),aspect,json-node-string(need),nra-state(owner),json-node-null(),list(oh-need(need,json-node-null())),list("retain-reader","release-view","revise-query"),json-node-null()); record_set(owner,"last-reading",row); oh-voice(row); nothing();
+  }
+  def nra-call(owner,args) = if not(nra-active(owner)) then nothing() else {
+   let result = jit_leaf_inram(record_get(owner,"request"),args); if not(nothing?(result)) then record_set(owner,"code-live",1) else 0; record_set(owner,"calls",add(record_get(owner,"calls"),1)); result;
+  };
+  def nra-open() {
+   let image = nra-image(); let owner = record_new(0,"kind","native-node-accessor","pid",host_pid(),"active",1,"memory",npd-open(),"views",list(),"generation",0,"calls",0,"code-live",0,"flow",noc-open());
+   let identity = intern_node(make_nodeid(31,2,0,205),list(intern_trivial_string("native-node-accessor-v1"),intern_trivial_int(owner),intern_trivial_string(nfm-bytes-list(image,""))));
+   record_set(owner,"identity",identity); record_set(owner,"image",image); record_set(owner,"request",list(0,identity,image));
+   let control = npd-region(record_get(owner,"memory"),8); record_set(owner,"control",control);
+   if nothing?(control) then { nra-close(owner); nra-unease(owner,"export-allocation","owned-entry-slot"); } else {
+    record_set(control,"native-accessor-private",1); let exported = nra-call(owner,list(0,npd-span(control,0,8)));
+    if not(and(eq(exported,1),eq(npd-peek(control,7,1),0))) then { nra-close(owner); nra-unease(owner,"entry","representable-native-entry"); } else {
+     let entry = npd-peek(control,0,7); record_set(owner,"entry",entry); if gt(entry,0) then owner else { nra-close(owner); nra-unease(owner,"entry","live-native-entry"); };
+    };
+   };
+  }
+  def nra-table(fields) = if nil?(fields) then "" else str_concat(str_concat(nfm-low(nth(head(fields),1),8),nfm-low(nth(head(fields),2),8)),nra-table(tail(fields)));
+  def nra-descriptor(run,region,generation) {
+   let layout = record_get(record_get(run,"owner"),"layout");
+   str-join-with(list(nfm-low(1,8),nfm-low(record_get(run,"count"),8),nfm-low(nbl-bits(layout),8),nfm-low(nbl-count(layout),8),
+    nfm-low(npd-span(record_get(run,"region"),0,record_get(run,"allocated-bytes")),8),nfm-low(record_get(run,"allocated-bytes"),8),nfm-low(npd-span(region,64,mul(nbl-count(layout),16)),8),nfm-low(generation,8),nra-table(nbl-fields(layout))),"");
+  }
+  def nra-acquire(owner,run) = if not(nra-active(owner)) then nothing() else if not(nbl-run?(run)) then nothing() else {
+   let layout = record_get(record_get(run,"owner"),"layout");
+   if gt(nbl-count(layout),div(4611686018427387839,16)) then nra-unease(owner,"descriptor-extent","representable-field-table") else nra-acquired(owner,run,nbl-acquire(run),add(64,mul(nbl-count(layout),16)));
+  };
+  def nra-acquired(owner,run,reader,bytes) {
+   let region = npd-region(record_get(owner,"memory"),bytes);
+   if nothing?(region) then { nbl-release(reader); nra-unease(owner,"descriptor-allocation","owned-layout-descriptor"); } else {
+    let generation = add(record_get(owner,"generation"),1); let raw = nra-descriptor(run,region,generation);
+    if not(eq(nra-call(owner,list(1,raw,npd-span(region,0,bytes))),bytes)) then { npd-region-close(region); nbl-release(reader); nra-unease(owner,"descriptor-copy","complete-owned-descriptor"); } else {
+     record_set(region,"native-accessor-private",1); record_set(owner,"generation",generation);
+     let view = record_new(0,"kind","native-node-view","owner",owner,"reader",reader,"descriptor",region,"active",1,"generation",generation);
+     record_set(owner,"views",cons(view,record_get(owner,"views"))); view;
+    };
+   };
+  }
+  def nra-view?(view) = if not(record?(view)) then 0 else if not(str_eq(record_get(view,"kind"),"native-node-view")) then 0 else and(eq(record_get(view,"active"),1),and(nra-active(record_get(view,"owner")),nbl-reader?(record_get(view,"reader"))));
+  def nra-entry(view) = if nra-view?(view) then record_get(record_get(view,"owner"),"entry") else nothing();
+  def nra-view-pointer(view) = if nra-view?(view) then npd-span(record_get(view,"descriptor"),0,64) else nothing();
+  // Query input contains raw (row u64, field u64) pairs. Return the completed
+  // prefix count. An unavailable row/field stops before writing that result.
+  def nra-project(view,queries,output,offset) = if not(nra-view?(view)) then nothing() else {
+   let owner = record_get(view,"owner");
+   if not(str_eq(value_kind(queries),"string")) then nra-unease(owner,"queries","raw-row-field-pairs") else if not(eq(mod(str_len(queries),16),0)) then nra-unease(owner,"query-extent","complete-row-field-pairs") else if and(record?(output),or(record_has(output,"native-accessor-private"),record_has(output,"node-storage-generation"))) then nra-unease(owner,"immutable-output","separate-writable-output") else {
+    let pointer = npd-owned-span(record_get(owner,"memory"),output,offset,div(str_len(queries),2));
+    if nothing?(pointer) then nra-unease(owner,"output","owned-u64-results") else nra-call(owner,list(2,nra-entry(view),nra-view-pointer(view),queries,pointer));
+   };
+  };
+  def nra-release(view) = if not(nra-view?(view)) then 0 else {
+   let owner = record_get(view,"owner"); let region = record_get(view,"descriptor");
+   if not(eq(nra-call(owner,list(1,nfm-low(0,8),npd-span(region,0,8))),8)) then nra-unease(owner,"invalidation","unpublished-descriptor") else {
+    record_set(view,"active",0); nbl-release(record_get(view,"reader"));
+   };
+  };
+  def nra-views-released(views) = if nil?(views) then 1 else and(eq(record_get(head(views),"active"),0),nra-views-released(tail(views)));
+  def nra-close-private(regions) = if nil?(regions) then 1 else {
+   let region = head(regions); if record_has(region,"native-accessor-private") then npd-region-close(region) else 0; nra-close-private(tail(regions));
+  };
+  def nra-outputs-closed(regions) = if nil?(regions) then 1 else {
+   let region = head(regions); and(or(record_has(region,"native-accessor-private"),eq(record_get(region,"active"),0)),nra-outputs-closed(tail(regions)));
+  };
+  def nra-owned(owner) = if not(record?(owner)) then 0 else and(str_eq(record_get(owner,"kind"),"native-node-accessor"),and(eq(record_get(owner,"pid"),host_pid()),or(eq(record_get(owner,"active"),1),eq(record_get(owner,"active"),2))));
+  def nra-close(owner) = if not(nra-owned(owner)) then 0 else if not(nra-views-released(record_get(owner,"views"))) then nra-unease(owner,"retirement","released-native-views") else {
+   let memory = record_get(owner,"memory");
+   if not(nra-outputs-closed(record_get(memory,"regions"))) then nra-unease(owner,"retirement","released-output-regions") else {
+    // Commit retirement only after all callers and ordinary outputs release.
+    // Closing blocks new calls. A failed release retains its resource for retry.
+    record_set(owner,"active",2);
+    let released = if eq(record_get(owner,"code-live"),1) then jit_leaf_inram(list(1,record_get(owner,"identity"),list()),0) else 1;
+    if not(eq(released,1)) then nra-unease(owner,"code-retirement","native-code-release") else { record_set(owner,"code-live",0); nra-close-private(record_get(memory,"regions")); let closed = npd-close(memory); if eq(closed,1) then record_set(owner,"active",0) else 0; closed; };
+   };
+  };
+ }
+ 0;
+}
