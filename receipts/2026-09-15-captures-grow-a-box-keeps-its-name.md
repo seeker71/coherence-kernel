@@ -104,6 +104,25 @@ each `1 ok, 0 failed`: vk-layers-live 1023, vk-train-live 255, vk-blocks-live 31
 vk-diffusion-moe-live 63, vk-q80-live 7. With `run_vk` set aside, vk-q80-live read
 `staged lanes pending: 1 band(s) need an absent host carrier` again.
 
+The build is the body's own now. `./fkwu observe/vk-carrier-build.bml` (the finding and the
+build live in `form/form-stdlib/vk-carrier.bml`) finds MoltenVK in Homebrew's lib or inside a
+Docker.app, the headers under any NDK in `~/Library/Android/ndk`, and `glslangValidator` and
+`clang` on the PATH vk-door.bml uses; it links the headers into `.hearth/vk/include`, bakes the
+found MoltenVK into the carrier (`-DFORM_VK_LIB`, which `run_vk.c` tries first), and answers
+`vk-carrier built` or `vk-carrier standing`. Under a home with no NDK it answers `vk-carrier
+missing vulkan-headers: looked in /nonexistent-home/Library/Android/ndk/...` and voices an
+organ-health reading (organ `vk-carrier`, aspect `vulkan-headers`, health 0). The five bands
+name the door (`; STAGED CARRIER DOOR:`), and validate's pending line reads `carrier absent in
+this checkout (./fkwu observe/vk-carrier-build.bml builds it)`.
+
+In a fresh worktree at 6641bb2ee, with no `.hearth/` at all: freshness 31, the door built the
+carrier in 1.8 s (MoltenVK from Docker.app, headers from android-ndk-r27c, glslangValidator from
+Homebrew), and each of the five rows read `1 ok, 0 failed` through `./validate.sh`, rc 0. The
+first try there ended validate with rc 1 and no word: `form_hash16` and the fourth-arm hashers
+read their files with `cat` under `set -euo pipefail`, and a fresh checkout where no kernel
+source moved never builds `bin-go`, so the compiler stamp's pipeline failed. Each cache key now
+folds the files present and a line naming each one absent.
+
 ## Addendum: fkwu names the file
 
 fkwu counted a diagnostic's line in the assembled unit, preludes expanded, a text no file on
