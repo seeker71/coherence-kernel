@@ -1,16 +1,33 @@
 // A single owned OS inventory exposes traversal errors and exact NUL-separated
 // paths. Form owns root admission, classification and the resulting audit.
 // fs_list's empty result cannot distinguish a denied directory from an empty one.
+// Git's own reading of what the checkout ignores sets aside every shell or
+// Python path under an ignored directory or named as an ignored file, so a
+// cache such as form/.cache never reaches the audit. A root git cannot read
+// sets nothing aside: nothing git does not ignore is ever skipped.
 // preludes: form-stdlib/bml/native-source-inventory.bml
 section [form.bml] {
  class StructuralSourceReader {
   def sga-root(path) = if eq(str_len(path),0) then form_error("structural audit root is empty") else if or(str_eq(path,"."),or(str_eq(substring(path,0,1),"/"),str_eq(substring(path,0,2),"./"))) then path else str_concat("./",path);
   def sga-capture(root,skipA,skipB) = nsi-capture(list("find","-L",sga-root(root),"(","-name",skipA,"-o","-name",skipB,")","-prune","-o","!","-type","d","-print0"));
+  def sga-ignored(root) {
+   let captured = nsi-capture(list("git","-C",sga-root(root),"ls-files","-z","--others","--ignored","--exclude-standard","--directory"));
+   if nsi-admitted?(captured) then sga-ignored-entries(split-on(nsi-text(captured),byte_to_str(0)),list()) else list();
+  }
+  def sga-ends?(s,suffix) = and(ge(str_len(s),str_len(suffix)),str_eq(substring(s,sub(str_len(s),str_len(suffix)),str_len(s)),suffix));
+  def sga-script?(path) = or(sga-ends?(path,".sh"),sga-ends?(path,".py"));
+  def sga-ignored-entry?(entry) = and(gt(str_len(entry),0),or(sga-ends?(entry,"/"),sga-script?(entry)));
+  def sga-ignored-entries(entries,acc) = if nil?(entries) then acc else if sga-ignored-entry?(head(entries)) then sga-ignored-entries(tail(entries),cons(head(entries),acc)) else sga-ignored-entries(tail(entries),acc);
+  // find prints each path with the root in front; git answers relative to the root
+  def sga-relative(root,path) = if and(gt(str_len(path),add(str_len(root),1)),str_eq(substring(path,0,add(str_len(root),1)),str_concat(root,"/"))) then substring(path,add(str_len(root),1),str_len(path)) else path;
+  def sga-under?(rel,entry) = if sga-ends?(entry,"/") then and(ge(str_len(rel),str_len(entry)),str_eq(substring(rel,0,str_len(entry)),entry)) else str_eq(rel,entry);
+  def sga-set-aside?(rel,ignored) = if nil?(ignored) then 0 else if sga-under?(rel,head(ignored)) then 1 else sga-set-aside?(rel,tail(ignored));
+  def sga-keep(paths,root,ignored,acc) = if nil?(paths) then reverse(acc) else if and(sga-script?(head(paths)),sga-set-aside?(sga-relative(root,head(paths)),ignored)) then sga-keep(tail(paths),root,ignored,acc) else sga-keep(tail(paths),root,ignored,cons(head(paths),acc));
   def sga-read(root,skipA,skipB) {
    let captured = sga-capture(root,skipA,skipB);
-   if not(eq(fs_is_dir(root),1)) then nsi-refuse(captured,"directory-root") else sga-read-complete(nsi-require-nuls(captured));
+   if not(eq(fs_is_dir(root),1)) then nsi-refuse(captured,"directory-root") else sga-read-complete(nsi-require-nuls(captured),sga-root(root));
   }
-  def sga-read-complete(captured) = split-on(nsi-text(captured),byte_to_str(0));
+  def sga-read-complete(captured,root) = sga-keep(split-on(nsi-text(captured),byte_to_str(0)),root,sga-ignored(root),list());
  }
  0;
 }
