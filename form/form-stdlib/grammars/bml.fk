@@ -12284,20 +12284,86 @@
 
     ;; private: only the declaring class's methods (lines 685, 729-730);
     ;; protected: the declaring class and those derived from it (lines 684,
-    ;; 728); public, and package access, anywhere (lines 683, 726-727, 731)
-    (defn bml-hati-access-ok? (layout declarer level caller)
+    ;; 728); public: anywhere (lines 683, 726-727); package, a member with no
+    ;; access attribute: code of the same package and its sub-packages (line
+    ;; 731)
+    (defn bml-hati-access-ok? (layout declarer level caller env)
         (if (str_eq level "private")
             (str_eq caller declarer)
             (if (str_eq level "protected")
                 (bml-hati-entries-named? (bml-hati-structural-chain layout caller) declarer)
-                true)))
+                (if (str_eq level "package")
+                    (bml-hati-package-sees? (bml-hati-env-package env) (bml-hati-class-package env declarer))
+                    true))))
+
+    ;; the package the code lowered in env belongs to: its unit's package
+    ;; declaration, or "" for a unit that declares none
+    (defn bml-hati-env-package (env)
+        (do
+            (let binding (bml-local-lookup-direct env (bml-scope-package-key 0)))
+            (if (nil? binding)
+                ""
+                (node_value (bml-node-child (bml-local-binding-value binding) 0)))))
+
+    ;; the package of the unit that declares class-name: the home env its
+    ;; linked unit gives it, else the env's own
+    (defn bml-hati-class-package (env class-name)
+        (do
+            (let held (bml-local-lookup-direct env (bml-hati-class-homes-key)))
+            (if (nil? held)
+                (bml-hati-env-package env)
+                (bml-hati-env-package
+                    (bml-hati-owner-env
+                        (nth (bml-local-binding-value held) 1)
+                        class-name
+                        (head (bml-local-binding-value held)))))))
+
+    ;; "all methods defined in the same package and sub-packages" (line 731)
+    (defn bml-hati-package-sees? (caller-package declarer-package)
+        (if (str_eq caller-package declarer-package)
+            true
+            (if (gt (str_len declarer-package) 0)
+                (eq (str_find caller-package (str_concat declarer-package ".") 0) 0)
+                false)))
+
+    ;; from outside, Class.Name reads a constant or class field when it is
+    ;; public, or package access and the reading code shares its package
+    (defn bml-hati-static-open? (env member)
+        (do
+            (let level (bml-hati-const-access member))
+            (if (str_eq level "public")
+                true
+                (if (str_eq level "package")
+                    (bml-hati-package-sees?
+                        (bml-hati-env-package env)
+                        (bml-hati-class-package env (bml-hati-member-owner member)))
+                    false))))
+
+    ;; the class id a strict field's store is checked against when it runs
+    ;; (line 666): a declared type does not tell whether the object is of that
+    ;; class or a derived one. -1 when the field is not strict.
+    (defn bml-hati-strict-runtime-id (env recv-node field value-node)
+        (do
+            (let layout (bml-hati-env-layout env))
+            (let type-name (bml-hati-static-type recv-node env))
+            (let declarer (bml-hati-field-declarer layout type-name field))
+            (if (nil? declarer)
+                -1
+                (if (bml-hati-class-flagged? layout (bml-hati-class-name declarer) (str_concat "strict:" field))
+                    (do
+                        (let field-class
+                            (bml-hati-layout-class layout (bml-hati-class-field-type layout type-name field)))
+                        (if (nil? field-class) -1 (bml-hati-class-id field-class)))
+                    -1))))
 
     (defn bml-hati-field-level (layout owner field)
         (if (bml-hati-class-flagged? layout owner (str_concat "private:" field))
             "private"
             (if (bml-hati-class-flagged? layout owner (str_concat "protected:" field))
                 "protected"
-                "public")))
+                (if (bml-hati-class-flagged? layout owner (str_concat "package:" field))
+                    "package"
+                    "public"))))
 
     ;; a field the caller may reach, or reach through the read (get, line 659)
     ;; or write (put, line 660) method its attribute creates
@@ -12308,7 +12374,7 @@
                 true
                 (do
                     (let owner (bml-hati-class-name declarer))
-                    (if (bml-hati-access-ok? layout owner (bml-hati-field-level layout owner field) (bml-hati-caller-class env))
+                    (if (bml-hati-access-ok? layout owner (bml-hati-field-level layout owner field) (bml-hati-caller-class env) env)
                         true
                         (bml-hati-class-flagged? layout owner (str_concat via (str_concat ":" field))))))))
 
@@ -12467,6 +12533,18 @@
     (defn bml-hati-lower-field-store (recv-node field value-node pool env)
         (if (not (bml-hati-field-writable? env recv-node field value-node))
             (bml-hati-lower-refusal (bml-hati-store-miss env recv-node field value-node) pool)
+            (if (ge (bml-hati-strict-runtime-id env recv-node field value-node) 0)
+                (bml-hati-lower-refusal
+                    (bml-hati-voice-refusal
+                        "field"
+                        "field/strict-table-lane"
+                        (str_concat (bml-hati-static-type recv-node env) (str_concat "." field)))
+                    pool)
+                (bml-hati-lower-field-put recv-node field value-node pool env))))
+
+    ;; the record set itself, once the set is allowed; the table lane has no
+    ;; run-time trap, so a strict field's store is refused there above
+    (defn bml-hati-lower-field-put (recv-node field value-node pool env)
             (do
                 (let recv (bml-hati-lower-node-in-env recv-node pool env))
                 (let key (bml-hati-lower-string-in (bml-hati-recv-field-key env recv-node field) (bml-hati-lower-pool recv)))
@@ -12479,7 +12557,7 @@
                             (bml-hati-lower-expr recv)
                             (bml-hati-lower-expr key)
                             (bml-hati-lower-expr value)))
-                    (bml-hati-lower-pool value)))))
+                    (bml-hati-lower-pool value))))
 
     (defn bml-hati-this-field-read (field pool env)
         (if (bml-hati-has-receiver? env)
@@ -13171,7 +13249,7 @@
                 (cons
                     (bml-local-binding
                         (str_concat class-name (str_concat "." (bml-hati-member-name (head consts))))
-                        (if (str_eq (bml-hati-const-access (head consts)) "public")
+                        (if (bml-hati-static-open? env (head consts))
                             (bml-hati-static-member-value (head consts))
                             (bml-hati-denied-marker
                                 (str_concat "access/" (bml-hati-const-access (head consts)))
@@ -13712,14 +13790,23 @@
     (defn bml-hati-unbridged-marker (member)
         (bml-hati-marker "__hati_unbridged" (list (bml-ast-string (bml-member-name member)))))
 
+    ;; a member's access: its own attribute, else its section's, else the
+    ;; package access the thesis gives a member with none (line 731)
     (defn bml-hati-member-access (own section)
-        (if (if (bml-properties-has? own "private")
-                true
-                (if (bml-properties-has? own "protected")
-                    true
-                    (bml-properties-has? own "public")))
+        (if (bml-hati-names-access? own)
             (bml-access-level own)
-            (bml-access-level section)))
+            (if (bml-hati-names-access? section)
+                (bml-access-level section)
+                "package")))
+
+    (defn bml-hati-names-access? (props)
+        (if (bml-properties-has? props "private")
+            true
+            (if (bml-properties-has? props "protected")
+                true
+                (if (bml-properties-has? props "public")
+                    true
+                    (not (str_eq (bml-properties-value props "access" "") ""))))))
 
     (defn bml-hati-expr-of-objects (objects name)
         (do
@@ -13792,7 +13879,7 @@
     (defn bml-hati-access-flag (own section)
         (do
             (let level (bml-hati-member-access own section))
-            (if (if (str_eq level "private") true (str_eq level "protected"))
+            (if (if (str_eq level "private") true (if (str_eq level "protected") true (str_eq level "package")))
                 (list level)
                 (empty))))
 
@@ -14744,11 +14831,21 @@
     ;; a class or interface another linked unit declares lowers its bodies
     ;; in that unit's env (its package, its imports), over the same layout
     (defn bml-hati-owner-env (homes owner-name base-env)
-        (if (nil? homes)
+        (bml-hati-owner-env-in homes owner-name base-env))
+
+    (defn bml-hati-owner-env-in (rows owner-name base-env)
+        (if (nil? rows)
             base-env
-            (if (str_eq (head (head homes)) (bml-hati-type-base owner-name))
-                (nth (head homes) 1)
-                (bml-hati-owner-env (tail homes) owner-name base-env))))
+            (if (str_eq (head (head rows)) (bml-hati-type-base owner-name))
+                (bml-hati-with-homes (nth (head rows) 1) base-env)
+                (bml-hati-owner-env-in (tail rows) owner-name base-env))))
+
+    ;; a home env keeps the homes the base env holds, so code lowered there
+    ;; can still find where each class lives (and its package)
+    (defn bml-hati-with-homes (env base-env)
+        (do
+            (let held (bml-local-lookup-direct base-env (bml-hati-class-homes-key)))
+            (if (nil? held) env (cons held env))))
 
     (defn bml-hati-table-expr (table trap)
         (if (nil? table)

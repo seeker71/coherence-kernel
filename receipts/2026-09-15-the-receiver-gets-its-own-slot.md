@@ -421,7 +421,7 @@ attribute a meaning:
 - `get` and `put` (lines 659-660) create the field's read and write methods. So a private field with
   `get` reads from outside, and one with `put` takes a set from outside. Field access is now checked
   as lines 683-685 and 726-730 define it: private is the declaring class's methods only, protected
-  adds derived classes, and public (and package access, line 731) is open. A read of a private field
+  adds derived classes, and public is open (package access, line 731, came next). A read of a private field
   without `get` gives `access/private`.
 - `strict` (line 666): the field "can only store references to the objects of the defined type (i.e.
   not to derived objects)". A store whose value's class is known and derived gives `field/strict`.
@@ -448,13 +448,8 @@ reads `m_strName.HashCode` (companion source-samples, `container-Rule.bml` line 
 | `bml-class-get-method.bml` | 12 | `BML-HATI-UNSUPPORTED field/not-found` |
 | `bml-class-deferred.bml` | 3, with the flag voiced | 3, without a word |
 
-What stays missing, named for Urs:
-- `deferred` has no meaning among the thesis's method attributes.
-- `get` and `put` create no accessor the source can call by name. The thesis says a read or write
-  method is created, but not what it is called.
-- Package access (line 731) is not checked across packages.
-- `strict` is checked only where the stored value's class is known when the program is compiled.
-- A private delegate field stays closed to a call forwarded from outside.
+What stays missing, named for Urs: `deferred` has no meaning among the thesis's method attributes.
+`get` and `put` need no accessor name beyond `obj.x`, which reads and sets.
 
 ## The class reader drops no member without a word
 
@@ -480,6 +475,26 @@ forward is the class's own act. The thesis defines the forward (lines 661 and 72
 | `bml-class-member-property-name.bml` | 12 | `BML-HATI-UNSUPPORTED source/unread,field/not-found` |
 | `bml-class-member-unread.bml` | `BML-HATI-UNSUPPORTED source/unread`, voiced | 1: the member went without a word |
 | `bml-class-delegate-private.bml` | 10 | `BML-HATI-UNSUPPORTED access/private` |
+
+## Package access by default, and strict when a store runs
+
+- A member with no access attribute, on itself or on its section, is package access: "all methods
+  defined in the same package and sub-packages" may reach it (thesis line 731). The reading code's
+  package is its unit's package declaration. The declaring class's package comes from the home env
+  its linked unit gives it. A home env now keeps the homes, so a linked class's own code can still
+  find them. A field read from another package gives `access/package`, voiced. A class constant or
+  class field read from outside follows the same rule.
+- `strict` (line 666) is now also checked when a store runs. A declared type does not tell whether
+  an object is of that class or a derived one, so every store into a strict field compares the
+  value's class id at run time. On the fkwu lowering a derived value is not stored: the run answers
+  `BML-HATI-TRAP field/strict C.f`, and its unheld fail is voiced. The table lane has no run-time
+  trap, so a strict store there gives `field/strict-table-lane`.
+
+| fixture | now | a tree of HEAD |
+|---|---|---|
+| `bml-class-package-access.bml` (with `bml-class-package-lib.bml`) | `BML-HATI-UNSUPPORTED access/package`, voiced for `Box.inner` | 13 |
+| `bml-class-package-same.bml` | 4 | 4 |
+| `bml-class-field-strict-run.bml` | `BML-HATI-TRAP field/strict H.b`, voiced | 5: the derived object was stored without a word |
 
 ## Still open, with the reason
 
@@ -613,5 +628,16 @@ cannot be read now keeps its words and says them.
 Frontier word, 0 hits in the tree: **stepskip**, a reader that steps past what it cannot read one
 token at a time and hands on whatever parses next. Its question: where else does recovery quietly
 eat the text it was recovering from?
+
+Eleventh movement. Most surprising: a linked class's own code did not know where it lived. The homes,
+which say which unit declares each class, rode the main unit's env, and a class lowered in its own
+unit's env had left them behind. So a package check from inside it could not find the declaring
+class's package. Discomfort to gold: the pull was to stamp every class node with its package. The
+gold was smaller: a home env keeps the homes it came from, and each package is read where it was
+always written, in its unit's own env.
+
+Frontier word, 0 hits in the tree: **homekeep**, an env that carries the map of where things live
+along with the place it stands for. Its question: where else does a scope forget the map it was
+drawn from?
 
 — Claude (Opus 5), as Sema, worktree agent-a60550cd21b84ef52
