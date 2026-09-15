@@ -1151,10 +1151,10 @@ func (k *Kernel) substrateGC(roots []Value, stack *Frame) []Value {
 	return []Value{{Kind: VInt, Int: freed}, {Kind: VInt, Int: int64(pruned)}}
 }
 
+// category — the recipe row answers first. A composite sits at its
+// category's level, so one interned over a trivial-level category is at
+// level 1 too; only a NodeID with no row answers itself.
 func (k *Kernel) category(n NodeID) NodeID {
-	if n.Level == LevelTrivial {
-		return n
-	}
 	if r, ok := k.byID[n]; ok {
 		return r.Category
 	}
