@@ -8,8 +8,8 @@
 ; The GPU folds in float32 and in another order than the walker, so the answers are held to a
 ; relative tolerance, never to equality.
 ;
-; Verdict 127 when every claim lands:
-;   1   the lowering answers a kernel over two buffers whose element is (p0[i] + 0.0f) * (p1[i] + 0.0f)
+; Verdict 1048575 when every claim lands:
+;   1   the lowering answers a reduce kernel over two buffers, vo-f as a device function over each head
 ;   2   the program admits with a handle, and a second lowering of the same body has the same identity
 ;   4   1k floats: the GPU's dot equals the CPU lane's within one part in ten thousand
 ;   8   100k floats: the same
@@ -18,15 +18,35 @@
 ;   64  the source turns fma contraction off, so mul and add stay the walker's two operations
 ;   128 the write door packs a list once in C: floats as binary32, ints as 32-bit words, four bytes
 ;       each, and a list holding a string writes nothing
-;   256 vo-scale-onto lowers as a map: out[i] = ((p0[i] + 0.0f) * c1), the scalar k riding as a constant
+;   256 vo-scale-onto lowers as a map: out[i] = (vo-f(p0[i]) * c1), the scalar k riding as a constant
 ;   512 the mapped 1k buffer's first eight floats equal the CPU vector_scale's within the tolerance
 ;   1024 a 100k map stays resident and a reduce over it (dot with ones) equals the CPU sum within the tolerance
+;   2048 core's maximum-onto: max2 becomes a device function, the fold is told apart as max, the GPU's max is the CPU's
+;   4096 core's filter-onto bound to a predicate: the count and the first eight kept values are the CPU's
+;   8192 core's any? and all? bound to the same predicate answer as the CPU does
+;   16384 a fold that does not join (sub) runs as the walk on one thread and answers as the CPU's
+;   32768 the recursion that is not a tail call, (add (head xs) (self (tail xs))), is a reduce from its base
+;   65536 a let after the exit rides the kernel loop
+;   131072 core's foldl through its f: the bound callee is evaluated to tell the fold apart
+;   262144 floor from its BML home as a callee: lets and an if become a device function
+;   524288 a callee with its own tail loop becomes a while, and math_sqrt a float head
 ;
-; Verdict 2047
+; Verdict 1048575
 (do
     (defn glb-fill (n acc) (if (eq n 0) acc (glb-fill (sub n 1) (cons (add 0.5 (div (add (mod n 97) 0.0) 97.0)) acc))))
     (defn glb-near? (a b) (do (let d (if (lt (sub a b) 0.0) (sub b a) (sub a b))) (let m (if (lt a 0.0) (sub 0.0 a) a)) (le d (mul m 0.0001))))
     (defn glb-fill-ones (n acc) (if (eq n 0) acc (glb-fill-ones (sub n 1) (cons 1.0 acc))))
+    (defn glb-big? (x) (gt x 1.0))
+    (defn glb-plus (a b) (add a b))
+    (defn glb-alt-onto (xs acc) (if (nil? xs) acc (glb-alt-onto (tail xs) (sub (head xs) acc))))
+    (defn glb-sum-rec (xs) (if (nil? xs) 0 (add (head xs) (glb-sum-rec (tail xs)))))
+    (defn glb-sq-onto (xs acc) (if (nil? xs) acc (do (let h (head xs)) (glb-sq-onto (tail xs) (add acc (mul h h))))))
+    (defn glb-floor-onto (xs acc) (if (nil? xs) acc (glb-floor-onto (tail xs) (add acc (floor (mul (head xs) 3.0))))))
+    (defn glb-double-times (x k) (if (le k 0) x (glb-double-times (mul x 2.0) (sub k 1))))
+    (defn glb-loop-onto (xs acc) (if (nil? xs) acc (glb-loop-onto (tail xs) (add acc (glb-double-times (math_sqrt (head xs)) 3)))))
+    (defn glb-gpu-of (name bindings bufs n init) (do (let p (gl-program-bound name bindings)) (if (gl-ok? p) (gl-read (gl-run p bufs n init (list))) (do (print (str_concat name (str_concat ": " (nth p 1)))) -999999.0))))
+    (defn glb-gpu-list-of (name bindings bufs n) (do (let p (gl-program-bound name bindings)) (if (gl-ok? p) (gl-read-filter (gl-run p bufs n 0.0 (list))) (nth p 1))))
+    (defn glb-kind-of (name bindings) (do (let low (gl-lower-bound name bindings)) (if (gl-ok? low) (gl-kind low) (nth low 1))))
     (defn glb-all-near? (xs ys) (if (nil? xs) 1 (if (glb-near? (head xs) (head ys)) (glb-all-near? (tail xs) (tail ys)) 0)))
     (let low (gl-lower "vo-dot-onto"))
     (let prog (gl-program "vo-dot-onto"))
@@ -63,7 +83,7 @@
     (print (list "gpu" g1 "cpu" c1 "gpu" g2 "cpu" c2 "dispatch" (sub d1 d0) "pending" pend))
     (print (if (gl-ok? low) "lowered" (nth low 1)))
     (print (if (gl-ok? mag) "magnitude lowered" (nth mag 1)))
-    (let v0 (if (and (gl-ok? low) (and (ge (str_find src "kernel void form_reduce(" 0) 0) (ge (str_find src "((p0[i] + 0.0f) * (p1[i] + 0.0f))" 0) 0))) 1 0))
+    (let v0 (if (and (gl-ok? low) (and (ge (str_find src "kernel void form_reduce(" 0) 0) (and (ge (str_find src "(p0[i])" 0) 0) (and (ge (str_find src "(p1[i])" 0) 0) (ge (str_find src "acc = (acc + " 0) 0))))) 1 0))
     (let v1 (if (and (gl-ok? prog) (and (gt (mj-handle (nth prog 1)) 0) (str_eq (gl-identity prog) (gl-identity again)))) 2 0))
     (let v2 (if (glb-near? g1 c1) 4 0))
     (let v3 (if (glb-near? g2 c2) 8 0))
@@ -77,9 +97,32 @@
     (let v7 (if (and (eq wrote 12) (and (eq refused 0) (str_eq back (str_concat (md-le32 1069547520) (str_concat (md-le32 4294967294) (md-le32 7)))))) 128 0))
     (print (list "map-first" m1-first "cpu" s1-first "map-sum" m2-sum "cpu" s2-sum))
     (print (if (gl-ok? mlow) (str_concat "map " (gl-kind mlow)) (nth mlow 1)))
-    (let v8 (if (and (gl-ok? mlow) (and (str_eq (gl-kind mlow) "map") (ge (str_find msrc "out[i] = ((p0[i] + 0.0f) * c1)" 0) 0))) 256 0))
+    (let v8 (if (and (gl-ok? mlow) (and (str_eq (gl-kind mlow) "map") (and (ge (str_find msrc "out[i] = (f" 0) 0) (ge (str_find msrc "(p0[i]) * c1)" 0) 0)))) 256 0))
     (let v9 (if (and (gl-ok? mprog) (eq (glb-all-near? m1-first s1-first) 1)) 512 0))
     (let v10 (if (glb-near? m2-sum s2-sum) 1024 0))
+    (let pred (list (list 0 "glb-big?")))
+    (let g-max (glb-gpu-of "maximum-onto" (list) (list ha2) 100000 -1000000.0))
+    (let g-filter (glb-gpu-list-of "filter-onto" pred (list ha1) 1000))
+    (let c-filter (filter glb-big? a1))
+    (let g-any (glb-gpu-of "any?" pred (list ha1) 1000 0.0))
+    (let g-all (glb-gpu-of "all?" pred (list ha1) 1000 0.0))
+    (let g-alt (glb-gpu-of "glb-alt-onto" (list) (list ha1) 1000 0.0))
+    (let g-rec (glb-gpu-of "glb-sum-rec" (list) (list ha2) 100000 0.0))
+    (let g-sq (glb-gpu-of "glb-sq-onto" (list) (list ha2) 100000 0.0))
+    (let g-foldl (glb-gpu-of "foldl" (list (list 0 "glb-plus")) (list ha2) 100000 0.0))
+    (let g-floor (glb-gpu-of "glb-floor-onto" (list) (list ha2) 100000 0.0))
+    (let g-loop (glb-gpu-of "glb-loop-onto" (list) (list ha2) 100000 0.0))
+    (print (list "kinds" (glb-kind-of "maximum-onto" (list)) (glb-kind-of "filter-onto" pred) (glb-kind-of "any?" pred) (glb-kind-of "all?" pred) (glb-kind-of "glb-alt-onto" (list)) (glb-kind-of "glb-sum-rec" (list)) (glb-kind-of "glb-sq-onto" (list)) (glb-kind-of "foldl" (list (list 0 "glb-plus"))) (glb-kind-of "glb-floor-onto" (list)) (glb-kind-of "glb-loop-onto" (list))))
+    (print (list "max" g-max (maximum a2) "filter" (len g-filter) (len c-filter) "any" g-any (any? glb-big? a1) "all" g-all (all? glb-big? a1) "alt" g-alt (glb-alt-onto a1 0.0) "rec" g-rec (glb-sum-rec a2) "sq" g-sq (glb-sq-onto a2 0.0) "foldl" g-foldl (foldl glb-plus 0.0 a2) "floor" g-floor (glb-floor-onto a2 0.0) "loop" g-loop (glb-loop-onto a2 0.0)))
+    (let v11 (if (and (str_eq (glb-kind-of "maximum-onto" (list)) "reduce") (glb-near? g-max (maximum a2))) 2048 0))
+    (let v12 (if (and (str_eq (glb-kind-of "filter-onto" pred) "filter") (and (eq (len g-filter) (len c-filter)) (eq (glb-all-near? (take 8 g-filter) (take 8 c-filter)) 1))) 4096 0))
+    (let v13 (if (and (str_eq (glb-kind-of "any?" pred) "any") (and (eq (float_to_int g-any) (any? glb-big? a1)) (eq (float_to_int g-all) (all? glb-big? a1)))) 8192 0))
+    (let v14 (if (and (str_eq (glb-kind-of "glb-alt-onto" (list)) "seq") (glb-near? g-alt (glb-alt-onto a1 0.0))) 16384 0))
+    (let v15 (if (and (str_eq (glb-kind-of "glb-sum-rec" (list)) "reduce") (glb-near? g-rec (glb-sum-rec a2))) 32768 0))
+    (let v16 (if (and (str_eq (glb-kind-of "glb-sq-onto" (list)) "reduce") (glb-near? g-sq (glb-sq-onto a2 0.0))) 65536 0))
+    (let v17 (if (and (str_eq (glb-kind-of "foldl" (list (list 0 "glb-plus"))) "reduce") (glb-near? g-foldl (foldl glb-plus 0.0 a2))) 131072 0))
+    (let v18 (if (and (str_eq (glb-kind-of "glb-floor-onto" (list)) "reduce") (glb-near? g-floor (glb-floor-onto a2 0.0))) 262144 0))
+    (let v19 (if (and (str_eq (glb-kind-of "glb-loop-onto" (list)) "reduce") (glb-near? g-loop (glb-loop-onto a2 0.0))) 524288 0))
     (metal_buf_free hm)
     (metal_buf_free ha1)
     (metal_buf_free hb1)
@@ -88,4 +131,4 @@
     (metal_buf_free m1)
     (metal_buf_free m2)
     (metal_buf_free ones)
-    (add v0 (add v1 (add v2 (add v3 (add v4 (add v5 (add v6 (add v7 (add v8 (add v9 v10)))))))))))
+    (add v0 (add v1 (add v2 (add v3 (add v4 (add v5 (add v6 (add v7 (add v8 (add v9 (add v10 (add v11 (add v12 (add v13 (add v14 (add v15 (add v16 (add v17 (add v18 v19))))))))))))))))))))
