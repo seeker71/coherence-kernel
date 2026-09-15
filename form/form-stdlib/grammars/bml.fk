@@ -7671,7 +7671,7 @@
             node))
 
     ;; --- a failure travels to the top ---------------------------------
-    ;; A fail no choose catches ends the program, as BMA's fail mode does:
+    ;; A fail no choose catches ends the program:
     ;; FAILED stays set, every body up the call chain stops after the
     ;; statement that failed, and the program answers the value it stood
     ;; on. In a unit that holds a fail anywhere (a failure can travel) a
@@ -8198,14 +8198,25 @@
                 true
                 (bml-bnml-choosing? (tail env)))))
 
-    ;; a fail answers the choose around it; with none left to catch it, it
-    ;; ends the program at the value it stood on, as BMA's fail mode does
+    ;; A fail answers the choose around it. With none left to catch it, it
+    ;; ends the program, and the program answers the value of its last
+    ;; completed statement, the value it stood on, even when the fail lands
+    ;; in the middle of an expression. A fail statement answers its body's
+    ;; standing value (0 with no body frame to hold one).
     (defn bml-bnml-fail-need (env) (empty))
 
     (defn bml-hati-lower-fail-in (pool env)
-        (bml-hati-lower-result
-            (bml-ctl-set-cell (bml-bnml-failed-cell 0) (fk-lit 1))
-            pool))
+        (if (if (bml-bnml-choosing? env) true (bml-bnml-env-fallible? env))
+            (do
+                (let top (bml-hati-bnml-get (bml-bnml-top-key) pool))
+                (bml-hati-lower-result
+                    (fk-sequence
+                        (bml-ctl-set-cell (bml-bnml-failed-cell 0) (fk-lit 1))
+                        (bml-hati-lower-expr top))
+                    (bml-hati-lower-pool top)))
+            (bml-hati-lower-result
+                (fk-sequence (bml-ctl-set-cell (bml-bnml-failed-cell 0) (fk-lit 1)) (fk-lit 0))
+                pool)))
 
     (defn bml-hati-unsupported-choose-node-in (node env)
         (if (bml-bnml-choose-tracks? node)
@@ -10353,11 +10364,48 @@
 
     ;; the Hati answer for units already linked: no import care here
     (defn bml-hati-run-linked (node units)
+        (bml-hati-run-linked-at "unit" node units))
+
+    ;; where names the unit, for a door that knows its source
+    (defn bml-hati-run-unit-value-at (where node units)
+        (bml-hati-run-linked-at where node (bml-scope-care-imports node units)))
+
+    (defn bml-hati-run-linked-at (where node units)
+        (bml-run-heard where "hati" (bml-hati-run-linked-outcome node units)))
+
+    ;; (value unheld?): the run keeps its own memory so the FAILED cell can
+    ;; be read after it ends; a failure no choose held leaves it set
+    (defn bml-hati-run-linked-outcome (node units)
         (do
             (let image (bml-hati-compile-linked-image node units))
             (if (bml-hati-image-supported? image)
-                (fkm-run (bml-hati-image-fns image) 0)
-                (bml-hati-unsupported-table-file image))))
+                (do
+                    (let fns (bml-hati-image-fns image))
+                    (let memory (fkm-memory-new))
+                    (let value (fkm-call-eval fns (nth fns 0) 0 memory))
+                    (list value (gt (fkm-memory-get memory (bml-bnml-failed-cell 0)) 0)))
+                (list (bml-hati-unsupported-table-file image) false))))
+
+    ;; A run that ended on a failure no choose held says so once: the unit,
+    ;; the lane and the value it stood on. A run whose every fail was held
+    ;; is silent.
+    (defn bml-run-heard (where lane outcome)
+        (do
+            (if (nth outcome 1) (bml-bch-unheld where lane (value_str (nth outcome 0))) 0)
+            (nth outcome 0)))
+
+    (defn bml-bch-unheld (where lane standing)
+        (oh-voice
+            (bch-reading
+                "run"
+                "every fail held by a choose"
+                (str_concat "a fail no choose held ended the run, standing on " standing)
+                (list
+                    (oh-need
+                        "choice"
+                        (json-node-object (list (oh-s "lane" lane) (oh-s "standing" standing)))))
+                (list "request-evidence" "revise")
+                where)))
 
     (defn bml-compile-unit-program (node units)
         (bml-compile-linked-program node (bml-scope-care-imports node units)))
@@ -11076,7 +11124,11 @@
     ;; once, the linked units run, and an answer the lowering could not give
     ;; says so where it ran.
     (defn bml-run-unit-value (node units)
-        (bch-ran "hati" (bml-hati-run-linked node (bml-scope-care-imports node units))))
+        (bml-run-unit-value-at "unit" node units))
+
+    ;; where names the unit a run's readings carry: a door passes its path
+    (defn bml-run-unit-value-at (where node units)
+        (bch-ran "hati" (bml-hati-run-linked-at where node (bml-scope-care-imports node units))))
 
     (defn bml-bma-run-unit-value (node units)
         (bml-bma-run-linked node (bml-scope-care-imports node units)))
@@ -11609,7 +11661,7 @@
                         (if standing
                             (fk-if (bml-hati-unfailed 0)
                                    (bml-ctl-epilogue 0)
-                                   (bml-hati-lower-expr top))
+                                   (fk-sequence (bml-ctl-set-mode 0) (bml-hati-lower-expr top)))
                             (bml-ctl-epilogue 0))))
                 (bml-hati-lower-pool top))))
 
