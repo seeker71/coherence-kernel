@@ -1,0 +1,53 @@
+// gpu-dispatch.bml — a recipe takes the GPU lane by the shape of its data, and callers never name it.
+// A tensor is the tensor organ's value, list(handle, shape, type). A recipe's home asks gd-tensor? of
+// its argument: a tensor runs the recipe's own nodes as a Metal kernel, compiled once per process
+// through gpu-lower and kept in this unit's record; a list walks the CPU lane as before. A reduce
+// answers its float, which is the one wait; a map or a filter answers a resident tensor, so a chain
+// of them crosses the membrane once per call and waits only when a number is read.
+// The chooser's belief sits here too: representation decides. Resident data takes the GPU; a list
+// stays on the CPU lane, because packing a list costs more than the lane's own fold at every size
+// measured (a million floats: 10 ms to pack, 2.5 ms to fold). The column behind it, read 15 Sep
+// 2026 under host load 6: at 100,000 resident the GPU wins accumulate 1.8x and transform 4.8x and
+// sits near parity on reduce and filter; at 19 the CPU wins by three orders.
+// preludes: form-stdlib/core.fk form-stdlib/bml/gpu-lower.bml observe/belief-freshness.fk
+section [form.bml] {
+    class GpuDispatch {
+        def gd-tensor?(v) = if not(str_eq(value_kind(v), "list")) then 0 else if not(eq(len(v), 3)) then 0 else if not(str_eq(value_kind(nth(v, 0)), "int")) then 0 else if not(str_eq(value_kind(nth(v, 1)), "list")) then 0 else if str_eq(value_kind(nth(v, 2)), "string") then 1 else 0;
+        def gd-h(t) = nth(t, 0);
+        def gd-shape(t) = nth(t, 1);
+        def gd-product(xs) = if nil?(xs) then 1 else mul(head(xs), gd-product(tail(xs)));
+        def gd-n(t) = gd-product(gd-shape(t));
+        def gd-handles(ts) = if nil?(ts) then list() else cons(gd-h(head(ts)), gd-handles(tail(ts)));
+
+        // ---- one compile per (defn, bindings) per process ----
+        def gd-bind-key(bs) = if nil?(bs) then "" else str_concat("|", str_concat(int_to_str(nth(head(bs), 0)), str_concat("=", str_concat(nth(head(bs), 1), gd-bind-key(tail(bs))))));
+        def gd-key(name, bindings) = str_concat(name, gd-bind-key(bindings));
+        def gd-program(name, bindings) {
+            let key = gd-key(name, bindings);
+            if record_has(gd-cache, key) then record_get(gd-cache, key) else gd-compile(name, bindings, key);
+        }
+        def gd-compile(name, bindings, key) {
+            let prog = gl-program-bound(name, bindings);
+            let kept = if gl-ok?(prog) then record_set(gd-cache, key, prog) else 0;
+            prog;
+        }
+
+        // ---- a call over tensors ----
+        def gd-call(name, bindings, tensors, init, scalars) {
+            let prog = gd-program(name, bindings);
+            let n = gd-n(head(tensors));
+            let out = if gl-ok?(prog) then gl-run(prog, gd-handles(tensors), n, init, scalars) else 0;
+            if not(gl-ok?(prog)) then prog else if str_eq(nth(prog, 4), "map") then list(out, list(n), "f32") else if str_eq(nth(prog, 4), "filter") then list(out, list(add(n, 1)), "f32-counted") else gl-read(out);
+        }
+
+        // ---- the chooser's belief ----
+        def gd-belief() = bf-belief("gpu-lane-by-representation", 1, 20260915);
+        def gd-choose(v) = if gd-tensor?(v) then "gpu" else "cpu";
+
+        // ---- tensors from and to lists: the door packs once; a read-back decodes a small count ----
+        def gd-tensor(xs) = list(gl-f32-buf(xs), list(len(xs)), "f32");
+        def gd-read(t, n) = gl-read-n(gd-h(t), n);
+        def gd-free(t) = metal_buf_free(gd-h(t));
+    }
+    let gd-cache = record_new(0);
+}
