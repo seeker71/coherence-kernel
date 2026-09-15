@@ -6779,7 +6779,11 @@
     ;; own unit env with its parameters bound to arguments read in the
     ;; caller's env. What cannot resolve compiles to its named refusal.
     ;; Reserved __ names (field access, arg slots) keep their own lanes.
+    ;; A class shape (a record, a receiver, a constructor) has no BMA
+    ;; reading yet; it answers its name instead of lowering to nothing.
     (defn bml-compile-call-in (node env)
+        (if (bml-hati-class-call? node)
+            (bml-bma-refusal "bma/class-lane")
         (if (bml-scope-prefix? (bml-call-name node) "__")
             (empty)
             (do
@@ -6791,22 +6795,24 @@
                 (if (not (bml-bma-method-value? (bml-local-binding-value binding)))
                     (bml-bma-refusal "call/not-method")
                     (do
-                        (let method-binding
-                            (bml-bma-method-binding-for-arity
-                                env
-                                name
-                                (len (bml-call-args node))))
-                        (if (nil? method-binding)
-                            (bml-bma-refusal "call/arity")
+                        (let choice
+                            (bml-hati-resolve
+                                (bml-hati-env-layout env)
+                                (bml-bma-call-candidates env name)
+                                (bml-hati-static-types (bml-call-args node) env)
+                                "call"))
+                        (if (not (bml-hati-choice-ok? choice))
+                            (bml-bma-refusal (bml-hati-choice-value choice))
                             (do
-                                (let method-node (bml-local-binding-value method-binding))
+                                (let method-node
+                                    (bml-local-binding-value (bml-hati-choice-value choice)))
                                 (bml-compile-callee-body-in
                                     (bml-method-node-body method-node)
                                     (bml-bma-bind-params
                                         (bml-method-node-parameters method-node)
                                         (bml-call-args node)
                                         env
-                                        (bml-bnml-with-base (bml-bma-home-env method-node env) env)))))))))))
+                                        (bml-bnml-with-base (bml-bma-home-env method-node env) env))))))))))))
 
     ;; A callee's final return is the call's value: inlined BMA keeps the
     ;; caller's stream running instead of ending it at the callee's return.
@@ -9785,20 +9791,24 @@
                     (bml-local-binding-value binding)
                     (bml-local-binding-env binding)))))))
 
-    (defn bml-bma-method-binding-for-arity (env name arity)
+    ;; every method the name reaches, as a typed candidate: BMA picks an
+    ;; overload the way Hati does, by arity and then by declared types
+    (defn bml-bma-call-candidates (env name)
         (if (nil? env)
             (empty)
             (do
                 (let binding (head env))
+                (let rest (bml-bma-call-candidates (tail env) name))
                 (if (str_eq (bml-local-binding-name binding) name)
                     (if (bml-bma-method-value? (bml-local-binding-value binding))
-                        (if (eq (len (bml-method-node-parameters
-                                        (bml-local-binding-value binding)))
-                                arity)
-                            binding
-                            (bml-bma-method-binding-for-arity (tail env) name arity))
-                        (bml-bma-method-binding-for-arity (tail env) name arity))
-                    (bml-bma-method-binding-for-arity (tail env) name arity)))))
+                        (cons
+                            (bml-hati-candidate
+                                (bml-hati-param-types (bml-local-binding-value binding))
+                                (bml-method-node-type-parameters (bml-local-binding-value binding))
+                                binding)
+                            rest)
+                        rest)
+                    rest))))
 
     ;; parameters bind to argument nodes read in the caller's env, over the
     ;; callee's own env
