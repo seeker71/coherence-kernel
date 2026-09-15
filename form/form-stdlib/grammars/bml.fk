@@ -1,5 +1,5 @@
 ; grammars/bml.fk - BML object compiler and runtime support
-; preludes: form-stdlib/dialect-categories.fk form-stdlib/source-compiler.fk form-stdlib/compiler.fk form-stdlib/bml/source-scan.bml form-stdlib/hati-os-kernel.fk form-stdlib/fkc-table-serialize.fk form-stdlib/bml-native-interface-package-import.fk form-stdlib/bml-native-source-control.fk form-stdlib/form-control-backtracking-ml.fk form-stdlib/bml/bml-compiler-health.bml
+; preludes: form-stdlib/dialect-categories.fk form-stdlib/source-compiler.fk form-stdlib/compiler.fk form-stdlib/bml/source-scan.bml form-stdlib/hati-os-kernel.fk form-stdlib/fkc-table-serialize.fk form-stdlib/bml-native-interface-package-import.fk form-stdlib/bml-native-source-control.fk form-stdlib/form-control-backtracking-ml.fk form-stdlib/bml/bml-compiler-health.bml form-stdlib/organ-care.bml
 ;
 ; Reference shape: the 2000 BML/JBML compiler lowers BMF matches into
 ; component objects, then into an instruction stream for a backtracking VM.
@@ -6790,8 +6790,9 @@
                 (let name (bml-scope-resolve-name env (bml-call-name node)))
                 (let binding (bml-local-lookup-direct env name))
                 (if (nil? binding)
-                    (bml-bma-refusal
-                        (bml-scope-unbound-call-reason env (bml-call-name node)))
+                    (bml-bma-name-refusal
+                        (bml-scope-unbound-call-reason env (bml-call-name node))
+                        (bml-call-name node))
                 (if (not (bml-bma-method-value? (bml-local-binding-value binding)))
                     (bml-bma-refusal "call/not-method")
                     (do
@@ -7112,7 +7113,7 @@
             (do
                 (let binding (bml-local-lookup env (bml-local-name node)))
                 (if (nil? binding)
-                    (bml-bma-refusal "name/unbound")
+                    (bml-bma-name-refusal "name/unbound" (bml-local-name node))
                 (if (bml-bma-method-value? (bml-local-binding-value binding))
                     (bml-bma-refusal "name/method")
                 (if (bml-bnml-binding? binding)
@@ -8924,7 +8925,7 @@
         (do
             (let binding (bml-local-lookup env (bml-local-name node)))
             (if (nil? binding)
-                (bml-hati-lower-refusal "name/unbound" pool)
+                (bml-hati-lower-name-refusal "name/unbound" (bml-local-name node) pool)
             (if (bml-hati-arg-node? (bml-local-binding-value binding))
                 (bml-hati-lower-result (fk-arg) pool)
             (if (bml-hati-method-ref? (bml-local-binding-value binding))
@@ -8969,8 +8970,9 @@
             (do
                 (let binding (bml-local-lookup env (bml-call-name node)))
                 (if (nil? binding)
-                    (bml-hati-lower-refusal
+                    (bml-hati-lower-name-refusal
                         (bml-scope-unbound-call-reason env (bml-call-name node))
+                        (bml-call-name node)
                         pool)
                 (if (bml-hati-method-ref? (bml-local-binding-value binding))
                     (do
@@ -9803,10 +9805,23 @@
 
     (defn bml-hati-refusal-prefix (_x) "BML-HATI-UNSUPPORTED ")
 
+    ;; Each refusal the lowering writes is also voiced through the compiler's
+    ;; organ; the literal it lowers to is unchanged.
     (defn bml-hati-lower-refusal (reason pool)
-        (bml-hati-lower-string-in
-            (str_concat (bml-hati-refusal-prefix 0) reason)
-            pool))
+        (bml-voice-then
+            (bml-refusal-reading "hati-lowering" reason)
+            (bml-hati-lower-string-in
+                (str_concat (bml-hati-refusal-prefix 0) reason)
+                pool)))
+
+    ;; a name refused on the Hati lane: the reading names where the name is
+    ;; defined in the tree, offering revise, and loads nothing for it
+    (defn bml-hati-lower-name-refusal (reason name pool)
+        (bml-voice-then
+            (bml-name-reading "hati-lowering" reason name)
+            (bml-hati-lower-string-in
+                (str_concat (bml-hati-refusal-prefix 0) reason)
+                pool)))
 
     (defn bml-hati-pool-refusals (pool)
         (if (nil? pool)
@@ -9954,7 +9969,7 @@
     (defn bml-scope-import-home-package (all-units row)
         (do
             (let module (bnii-import-module row))
-            (if (nil? (bml-scope-package-homes module))
+            (if (nil? (bml-scope-package-homes-held module))
                 (bml-scope-qualifier module)
                 module)))
 
@@ -9991,7 +10006,7 @@
         (if (nil? modules)
             (empty)
             (append
-                (bml-scope-package-homes (head modules))
+                (bml-scope-package-homes-held (head modules))
                 (bml-scope-homes-of (tail modules)))))
 
     ;; Heal an import that resolves nowhere: load each unit that declares the
@@ -10050,6 +10065,10 @@
                     (bml-hati-fns-result-pool rest)))))
 
     (defn bml-scope-compile-block-image (node units)
+        (bml-scope-compile-linked-image node (bml-scope-care-imports node units)))
+
+    ;; the Hati image for units already linked: no import care here
+    (defn bml-scope-compile-linked-image (node units)
         (do
             (let link (bml-scope-link node units))
             (let main (bml-scope-link-main link))
@@ -10116,14 +10135,27 @@
             (bml-scope-compile-block-image node units)
             (bml-hati-compile-image node)))
 
+    (defn bml-hati-compile-linked-image (node units)
+        (if (node_eq (node_category node) BML-AST-BLOCK)
+            (bml-scope-compile-linked-image node units)
+            (bml-hati-compile-image node)))
+
     (defn bml-hati-run-unit-value (node units)
+        (bml-hati-run-linked node (bml-scope-care-imports node units)))
+
+    ;; the Hati answer for units already linked: no import care here
+    (defn bml-hati-run-linked (node units)
         (do
-            (let image (bml-hati-compile-unit-image node units))
+            (let image (bml-hati-compile-linked-image node units))
             (if (bml-hati-image-supported? image)
                 (fkm-run (bml-hati-image-fns image) 0)
                 (bml-hati-unsupported-table-file image))))
 
     (defn bml-compile-unit-program (node units)
+        (bml-compile-linked-program node (bml-scope-care-imports node units)))
+
+    ;; the BMA program for units already linked: no import care here
+    (defn bml-compile-linked-program (node units)
         (do
             (let link (bml-scope-link node units))
             (comp-program
@@ -10153,7 +10185,15 @@
     ;; --- BMA: the same scope rule, inlined ---------------------------
 
     (defn bml-bma-refusal (reason)
-        (list (bma-push-lit (str_concat (bml-hati-refusal-prefix 0) reason))))
+        (bml-voice-then
+            (bml-refusal-reading "bma-compile" reason)
+            (list (bma-push-lit (str_concat (bml-hati-refusal-prefix 0) reason)))))
+
+    ;; a name refused on the BMA lane, read the way the Hati lane reads it
+    (defn bml-bma-name-refusal (reason name)
+        (bml-voice-then
+            (bml-name-reading "bma-compile" reason name)
+            (list (bma-push-lit (str_concat (bml-hati-refusal-prefix 0) reason)))))
 
     (defn bml-bma-method-value? (value)
         (node_eq (node_category value) BML-AST-METHOD))
@@ -10164,7 +10204,7 @@
         (do
             (let binding (bml-local-lookup env (bml-local-name node)))
             (if (nil? binding)
-                (bml-bma-refusal "name/unbound")
+                (bml-bma-name-refusal "name/unbound" (bml-local-name node))
             (if (bml-bma-method-value? (bml-local-binding-value binding))
                 (bml-bma-refusal "name/method")
             (if (bml-bnml-binding? binding)
@@ -10277,20 +10317,26 @@
                 (bml-bma-ops-refusals (head branches))
                 (bml-bma-branch-refusals (tail branches)))))
 
-    ;; One source on both lanes. A lane whose answer is a refusal says so
-    ;; where it ran; two answers that differ are a split, voiced with both.
-    ;; Hati's answer comes back.
+    ;; One source on both lanes. Its imports are cared for once and the same
+    ;; linked units run on BMA and on Hati. A lane whose answer is unsupported
+    ;; says so where it ran; two answers that differ are a split, voiced with
+    ;; both. Hati's answer comes back.
     (defn bml-run-lanes-unit-value (node units)
         (do
-            (let bma (bch-ran "bma" (bml-bma-run-unit-value node units)))
-            (let hati (bch-ran "hati" (bml-hati-run-unit-value node units)))
+            (let linked (bml-scope-care-imports node units))
+            (let bma (bch-ran "bma" (bml-bma-run-linked node linked)))
+            (let hati (bch-ran "hati" (bml-hati-run-linked node linked)))
             (if (eq (bch-refused? (value_str bma)) 1)
                 hati
                 (bch-lanes "lanes" bma hati))))
 
     (defn bml-bma-run-unit-value (node units)
+        (bml-bma-run-linked node (bml-scope-care-imports node units)))
+
+    ;; the BMA answer for units already linked: no import care here
+    (defn bml-bma-run-linked (node units)
         (do
-            (let program (bml-compile-unit-program node units))
+            (let program (bml-compile-linked-program node units))
             (let reasons
                 (bml-hati-reasons-merge
                     (bml-hati-reasons-merge
@@ -10302,6 +10348,168 @@
                 (str_concat
                     (bml-hati-refusal-prefix 0)
                     (bml-hati-unsupported-reasons-text reasons)))))
+
+    ;; --- the compiler's voice where names fail -----------------------
+    ;; Readings go through bml-compiler-health.bml. Each helper hands its
+    ;; data back unchanged, and a healthy compile voices nothing.
+
+    (defn bml-voice-then (reading value)
+        (bml-voice-value (oh-voice reading) value))
+
+    (defn bml-voice-value (_said value) value)
+
+    (defn bml-refusal-reading (where reason)
+        (bch-reading
+            "refusal"
+            "resolved"
+            reason
+            (list (oh-need "lowering" (json-node-string reason)))
+            (list "revise" "request-evidence")
+            where))
+
+    ;; A bare name no import covers: the units that define it ride as
+    ;; evidence, revise asks the source for the import, and nothing is
+    ;; loaded on the name's behalf.
+    (defn bml-name-reading (where reason name)
+        (do
+            (let candidates (json-node-array (oh-strings (bml-scope-name-homes-held name))))
+            (oh-set
+                (bch-reading
+                    "name"
+                    "resolved"
+                    (str_concat reason (str_concat ":" name))
+                    (list
+                        (oh-need
+                            "import"
+                            (json-node-object
+                                (list (oh-s "name" name)
+                                      (json-node-pair "candidates" candidates)))))
+                    (list "revise" "request-evidence")
+                    where)
+                "evidence"
+                (json-node-object
+                    (list (oh-s "where" where)
+                          (oh-s "name" name)
+                          (json-node-pair "candidates" candidates))))))
+
+    ;; Homes read once per window: one compile asks for the same name on
+    ;; both lanes and in several passes, and the tree walk is the slow part.
+    ;; A process that lives on reads the tree again once the window closes.
+    (let bml-scope-homes-held (record_new 0))
+
+    (defn bml-scope-homes-window-ms (_x) 30000)
+
+    (defn bml-scope-held-fresh? (key)
+        (if (record_has bml-scope-homes-held key)
+            (lt (sub (now_unix_ms) (head (record_get bml-scope-homes-held key)))
+                (bml-scope-homes-window-ms 0))
+            false))
+
+    (defn bml-scope-hold (key value)
+        (bml-voice-value
+            (record_set bml-scope-homes-held key (list (now_unix_ms) value))
+            value))
+
+    (defn bml-scope-name-homes-held (name)
+        (do
+            (let key (str_concat "name:" name))
+            (if (bml-scope-held-fresh? key)
+                (nth (record_get bml-scope-homes-held key) 1)
+                (bml-scope-hold key (bml-scope-name-homes name)))))
+
+    (defn bml-scope-package-homes-held (package)
+        (do
+            (let key (str_concat "unit:" package))
+            (if (bml-scope-held-fresh? key)
+                (nth (record_get bml-scope-homes-held key) 1)
+                (bml-scope-hold key (bml-scope-package-homes package)))))
+
+    ;; --- import care: a missing package is a need for its unit ---------
+    ;; The import names an explicit dependency, so the unit declaring its
+    ;; package is loaded into the link: care finds it in the tree
+    ;; (bml-scope-heal-imports), bml-scope-link takes it in and re-resolves,
+    ;; and a fresh reading follows as care of the first. Answers the units
+    ;; a compile should link.
+
+    (defn bml-unit-needs (missing)
+        (if (nil? missing)
+            (empty)
+            (cons
+                (oh-need (str_concat "unit:" (head missing)) (json-node-string (head missing)))
+                (bml-unit-needs (tail missing)))))
+
+    (defn bml-unit-need-resources (missing)
+        (if (nil? missing)
+            (empty)
+            (cons
+                (str_concat "unit:" (head missing))
+                (bml-unit-need-resources (tail missing)))))
+
+    (defn bml-import-reading (missing)
+        (oh-reading
+            (bch-organ)
+            (bch-flow)
+            "import"
+            (json-node-string "resolved")
+            (json-node-string
+                (if (nil? missing) "resolved" (str_concat "unresolved:" (bch-join missing))))
+            (json-node-int (if (nil? missing) 1 0))
+            (bml-unit-needs missing)
+            (if (nil? missing) (list "continue") (list "load-unit" "request-evidence"))
+            (json-node-object (list (oh-s "where" "bml-scope-link")))))
+
+    (defn bml-scope-care-imports (node units)
+        (do
+            (let missing (bml-scope-link-unresolved-modules (bml-scope-link node units)))
+            (if (nil? missing)
+                units
+                (bml-scope-care-missing node units missing))))
+
+    (defn bml-scope-care-missing (node units missing)
+        (do
+            (let context (record_new 0))
+            (record_set context "node" node)
+            (record_set context "units" units)
+            (let reading (bml-import-reading missing))
+            (let voiced (oh-voice reading))
+            (let heard
+                (oc-hear
+                    context
+                    reading
+                    (list
+                        (oc-provider
+                            "bml-unit-home"
+                            (bml-unit-need-resources missing)
+                            "load-unit"
+                            bml-scope-care-supply))
+                    bml-scope-care-emit
+                    bml-scope-care-observe))
+            (record_get context "units")))
+
+    (defn bml-scope-care-supply (context reading need)
+        (do
+            (let healed
+                (bml-scope-heal-imports
+                    (record_get context "node")
+                    (record_get context "units")
+                    (empty)))
+            (record_set context "units" (head healed))
+            (json-node-object
+                (list (oh-s "resource" (oh-str need "resource"))
+                      (oh-s "state" (if (nil? (nth healed 1)) "unavailable" "delivered"))
+                      (json-node-pair "loaded" (json-node-array (oh-strings (nth healed 1))))
+                      (json-node-pair "missing" (json-node-array (oh-strings (nth healed 2))))))))
+
+    (defn bml-scope-care-observe (context reading delivery)
+        (oh-set
+            (bml-import-reading
+                (bml-scope-link-unresolved-modules
+                    (bml-scope-link (record_get context "node") (record_get context "units"))))
+            "care_of"
+            (oh-get reading "id")))
+
+    (defn bml-scope-care-emit (context stage row)
+        (oh-voice row))
 
     ;; --- BML source control -> Hati native table ---------------------
     ;; A function body carrying source control lowers through one
