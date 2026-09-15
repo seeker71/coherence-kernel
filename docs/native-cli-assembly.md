@@ -29,10 +29,15 @@ Relocated default execution and restored companions pass; missing or malformed
 companions refuse as recorded. A different compatible recipe runs with the same
 binary and refuses the original installation attestation. The
 [installed resident care execution](evidence/fkwu/native-startup-care.json) uses
-that exact executable and companion set. The source stamp is `d13eaeb22515beec`.
+that exact executable and companion set. The source stamp is `b1c1e09caa0e65d1`,
+with 337 original source files held in the accepted generation.
 
-The identity roots include the program, its compiler, the source runtime and
-opcode header, and the host build carriers. `native-table-sources.bml` follows
+The identity roots include the program, its compiler, the source runtime,
+opcode and generated node-word headers, the Form node-word authority and its
+verification door, and the host build carriers. Both generated and ordinary
+copy installation run the repository runtime's node-word verification first;
+that door must remain reachable. The sealed copy includes the checked header.
+`native-table-sources.bml` follows
 the actual source declarations and holds the complete bytes of every row.
 `form-cli-source-closure.bml` computes the portable dependency manifest and its
 digest from those held bytes. Each digest row has the existing byte framing:
@@ -86,8 +91,9 @@ source and compiler changes invalidate the generation. Historical table/C
 artifacts and the `NTC2` compiler route remain independent proof
 surfaces, outside the active CLI runtime.
 
-The recorded canonical generation takes 1,297,196 ms, platform generation
-529,179 ms and ordinary cached installation 8,948 ms on this host. These are
+The recorded canonical generation takes 1,174,861 ms, platform generation
+339,722 ms, ordinary cached installation 9,512 ms and the existing behavior
+proof 7,687 ms on this host. These are
 individual wall-time observations, including their actual cache state and
 retained warnings; they establish neither peak memory nor general throughput.
 This is a whole-program bootstrap path. The runtime north star remains native

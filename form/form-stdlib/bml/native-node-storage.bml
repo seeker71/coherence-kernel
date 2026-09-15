@@ -1,0 +1,130 @@
+// Adaptive u64 storage. Form owns width, immutable generations and reader leases.
+// Native leaves consume and produce raw 64-bit words in RAM; only counts cross back.
+// This owner serializes publication in one Form process. It is not a shared atomic directory.
+// preludes: form-stdlib/bml/native-fp64-matrix.bml
+section [form.bml] {
+ class NativeNodeStorage {
+  def nns-reg(base,rd,rn,rm) = fa-asm(base,list(1,32,65536),list(rd,rn,rm));
+  def nns-xor(rd,rn,rm) = nns-reg(3388997632,rd,rn,rm);
+  def nns-or(rd,rn,rm) = nns-reg(2852126720,rd,rn,rm);
+  def nns-mul(rd,rn,rm) = nns-reg(2600500224,rd,rn,rm);
+  def nns-lsl(rd,rn,rm) = nns-reg(2596282368,rd,rn,rm);
+  def nns-lsr(rd,rn,rm) = nns-reg(2596283392,rd,rn,rm);
+  def nns-str(rt,rn,scaled) = fa-asm(4177526784,list(1,32,1024),list(rt,rn,scaled));
+  def nns-image(rows) = fa-image(npd-emit(rows,npd-labels(rows,0,list()),0));
+  def nns-probe-image() = nns-image(list(
+   fa-ldr(2,0,0),fa-movz-x(3,0),npd-label("word"),fa-ldr(4,0,0),nns-xor(4,4,2),nns-or(3,3,4),fa-add-x-imm(0,0,8),fa-sub-x-imm(1,1,8),fa-cmp-x(1,0),npd-branch(1,"word"),
+   fa-movz-x(0,0),npd-label("bit"),fa-cmp-x(3,0),npd-branch(0,"done"),nfm-ubfx(3,3,1,63),fa-add-x-imm(0,0,1),npd-branch(14,"bit"),npd-label("done"),fa-ret()));
+  def nns-address() = list(nfm-ubfx(8,6,3,63),nfm-ubfx(9,6,0,2),fa-add-x-r(10,1,8));
+  def nns-cross(width,label,encode) = if le(width,57) then list() else append(list(fa-add-x-imm(13,9,width),fa-cmp-x(13,64),npd-branch(9,label),fa-movz-x(13,64),nns-reg(3405774848,13,13,9)),
+   append(if encode then list(nns-lsr(12,7,13),fa-ldr(11,10,1),nns-or(11,11,12),nns-str(11,10,1)) else list(fa-ldr(12,10,1),nns-lsl(12,12,13),nns-or(7,7,12)),list(npd-label(label))));
+  def nns-codec-image(width) {
+   let encode = if eq(width,0) then list() else npd-cat(list(nns-address(),list(fa-ldr(11,10,0),nns-lsl(12,7,9),nns-or(11,11,12),nns-str(11,10,0)),nns-cross(width,"encoded",1)));
+   let decode = if eq(width,0) then list(fa-movz-x(7,0)) else npd-cat(list(nns-address(),list(fa-ldr(11,10,0),nns-lsr(7,11,9)),nns-cross(width,"decoded",0),if eq(width,64) then list() else list(nfm-ubfx(7,7,0,sub(width,1)))));
+   let rows = npd-cat(list(
+    npd-route(1,"decode"),
+    // Encode: x1 input words, x2 input byte extent, x3 zeroed output region.
+    list(fa-add-x-imm(16,1,0),fa-ldr(5,16,0),nns-str(5,3,0),fa-add-x-imm(1,3,8),nfm-ubfx(15,2,3,63),fa-movz-x(6,0),
+     npd-label("encode-word"),fa-ldr(7,16,0),nns-xor(7,7,5)),encode,
+    list(fa-add-x-imm(16,16,8),fa-add-x-imm(6,6,width),fa-sub-x-imm(2,2,8),fa-cmp-x(2,0),npd-branch(1,"encode-word"),fa-add-x-imm(0,15,0),fa-ret(),
+     // Decode: x1 block, x2 first index, x3 count, x4 output word region.
+     npd-label("decode"),fa-ldr(5,1,0),fa-add-x-imm(1,1,8),fa-movz-x(7,width),nns-mul(6,2,7),fa-add-x-imm(15,3,0),npd-label("decode-word")),decode,
+    list(nns-xor(7,7,5),nns-str(7,4,0),fa-add-x-imm(4,4,8),fa-add-x-imm(6,6,width),fa-sub-x-imm(3,3,1),fa-cmp-x(3,0),npd-branch(1,"decode-word"),fa-add-x-imm(0,15,0),fa-ret())));
+   nns-image(rows);
+  }
+  def nns-active(owner) = if not(record?(owner)) then 0 else and(str_eq(record_get(owner,"kind"),"native-node-storage"),and(eq(record_get(owner,"pid"),host_pid()),eq(record_get(owner,"active"),1)));
+  def nns-open() = record_new(0,"kind","native-node-storage","pid",host_pid(),"active",1,"memory",npd-open(),"codes",list(),"blocks",list(),"slots",list(),"generation",0,"calls",0);
+  def nns-find(codes,width) = if nil?(codes) then nothing() else if eq(record_get(head(codes),"width"),width) then head(codes) else nns-find(tail(codes),width);
+  def nns-code(owner,width) {
+   let held = nns-find(record_get(owner,"codes"),width);
+   if not(nothing?(held)) then held else nns-code-new(owner,width);
+  }
+  def nns-code-new(owner,width) {
+   let image = if eq(width,-1) then nns-probe-image() else nns-codec-image(width);
+   let identity = intern_node(make_nodeid(31,2,0,203),list(intern_trivial_string("native-node-residual-v1"),intern_trivial_int(owner),intern_trivial_int(width),intern_trivial_string(nfm-bytes-list(image,""))));
+   let code = record_new(0,"width",width,"identity",identity,"request",list(0,identity,image),"live",0);
+   record_set(owner,"codes",cons(code,record_get(owner,"codes"))); code;
+  }
+  def nns-call(owner,width,args) {
+   let code = nns-code(owner,width); let result = jit_leaf_inram(record_get(code,"request"),args);
+   if not(nothing?(result)) then record_set(code,"live",1) else 0;
+   record_set(owner,"calls",add(record_get(owner,"calls"),1)); result;
+  }
+  def nns-unease(owner,aspect,need) {
+   let flow = str_concat(int_to_str(host_pid()),str_concat(":",int_to_str(record_get(owner,"generation"))));
+   let row = oh-reading("native-node-storage",flow,aspect,json-node-int(1),json-node-int(0),json-node-null(),list(oh-need(need,json-node-null())),list("retain-current-generation","release-readers"),json-node-null());
+   oh-voice(row); nothing();
+  }
+  def nns-bytes?(raw) = if not(str_eq(value_kind(raw),"string")) then 0 else eq(mod(str_len(raw),8),0);
+  def nns-payload(count,width) = add(div(mul(count,width),8),if eq(mod(mul(count,width),8),0) then 0 else 1);
+  def nns-build(owner,raw) {
+   if not(nns-active(owner)) then nothing() else if not(nns-bytes?(raw)) then nns-unease(owner,"word-input","complete-u64-words") else nns-build-admitted(owner,raw,div(str_len(raw),8));
+  }
+  def nns-build-admitted(owner,raw,count) {
+   let width = if eq(count,0) then 0 else nns-call(owner,-1,list(raw));
+   if not(and(str_eq(value_kind(width),"int"),and(ge(width,0),le(width,64)))) then nns-unease(owner,"width-observation","native-width-evidence") else nns-build-width(owner,raw,count,width);
+  }
+  def nns-build-width(owner,raw,count,width) {
+   if and(gt(width,0),gt(count,div(4611686018427387903,width))) then nns-unease(owner,"bit-extent","representable-native-span") else nns-build-extent(owner,raw,count,width);
+  }
+  def nns-build-extent(owner,raw,count,width) {
+   // Eight base bytes and eight allocated padding bytes bound unaligned native reads.
+   let bytes = add(16,nns-payload(count,width));
+   let region = npd-region(record_get(owner,"memory"),bytes);
+   if nothing?(region) then nns-unease(owner,"allocation","native-memory") else nns-build-region(owner,raw,count,width,region,bytes);
+  }
+  def nns-build-region(owner,raw,count,width,region,bytes) {
+   let written = if eq(count,0) then 0 else nns-call(owner,width,list(0,raw,npd-span(region,0,bytes)));
+   if not(eq(written,count)) then nns-build-refused(owner,region) else nns-build-ready(owner,count,width,region,bytes);
+  }
+  def nns-build-refused(owner,region) { let closed = npd-region-close(region); nns-unease(owner,"encode","complete-native-generation"); }
+  def nns-build-ready(owner,count,width,region,bytes) {
+   record_set(region,"node-storage-generation",1);
+   let generation = add(record_get(owner,"generation"),1); record_set(owner,"generation",generation);
+   let block = record_new(0,"owner",owner,"region",region,"count",count,"width",width,"bytes",bytes,"generation",generation,"readers",0,"retired",0);
+   record_set(owner,"blocks",cons(block,record_get(owner,"blocks"))); block;
+  }
+  def nns-create(owner,raw) {
+   let block = nns-build(owner,raw);
+   if nothing?(block) then nothing() else nns-created(owner,block);
+  }
+  def nns-created(owner,block) {
+   let slot = record_new(0,"kind","native-node-slot","owner",owner,"current",block,"active",1);
+   record_set(owner,"slots",cons(slot,record_get(owner,"slots"))); slot;
+  }
+  def nns-slot?(slot) = if not(record?(slot)) then 0 else and(str_eq(record_get(slot,"kind"),"native-node-slot"),and(eq(record_get(slot,"active"),1),nns-active(record_get(slot,"owner"))));
+  def nns-acquire(slot) = if not(nns-slot?(slot)) then nothing() else nns-acquired(slot,record_get(slot,"current"));
+  def nns-acquired(slot,block) {
+   record_set(block,"readers",add(record_get(block,"readers"),1)); record_new(0,"kind","native-node-reader","slot",slot,"block",block,"active",1);
+  }
+  def nns-reader?(reader) = if not(record?(reader)) then 0 else if not(str_eq(record_get(reader,"kind"),"native-node-reader")) then 0 else and(eq(record_get(reader,"active"),1),nns-active(record_get(record_get(reader,"block"),"owner")));
+  def nns-read-into(reader,index,count,output,offset) = if not(nns-reader?(reader)) then nothing() else nns-read-block(record_get(reader,"block"),index,count,output,offset);
+  def nns-read-block(block,index,count,output,offset) {
+   let owner = record_get(block,"owner"); let available = record_get(block,"count");
+   let valid = if not(and(str_eq(value_kind(index),"int"),str_eq(value_kind(count),"int"))) then 0 else and(ge(index,0),and(ge(count,0),le(count,sub(available,index))));
+   if not(valid) then nns-unease(owner,"read-range","valid-node-range") else if and(record?(output),record_has(output,"node-storage-generation")) then nns-unease(owner,"immutable-output","separate-writable-output") else nns-read-span(owner,block,index,count,npd-owned-span(record_get(owner,"memory"),output,offset,mul(count,8)));
+  }
+  def nns-read-span(owner,block,index,count,pointer) {
+   if nothing?(pointer) then nns-unease(owner,"read-output","owned-u64-output") else if eq(count,0) then 0 else nns-call(owner,record_get(block,"width"),list(1,npd-span(record_get(block,"region"),0,record_get(block,"bytes")),index,count,pointer));
+  }
+  def nns-retire(block) { record_set(block,"retired",1); nns-collect(block); }
+  def nns-collect(block) = if and(eq(record_get(block,"retired"),1),eq(record_get(block,"readers"),0)) then npd-region-close(record_get(block,"region")) else 0;
+  def nns-release(reader) = if not(nns-reader?(reader)) then 0 else nns-released(reader,record_get(reader,"block"));
+  def nns-released(reader,block) {
+   record_set(reader,"active",0); record_set(block,"readers",sub(record_get(block,"readers"),1)); nns-collect(block);
+  }
+  def nns-replace(slot,raw) = if not(nns-slot?(slot)) then nothing() else nns-replace-built(slot,nns-build(record_get(slot,"owner"),raw));
+  def nns-replace-built(slot,next) {
+   if nothing?(next) then nothing() else { let previous = record_get(slot,"current"); record_set(slot,"current",next); nns-retire(previous); record_get(next,"generation"); };
+  }
+  def nns-slot-close(slot) = if not(nns-slot?(slot)) then 0 else { record_set(slot,"active",0); nns-retire(record_get(slot,"current")); };
+  def nns-close-slots(slots) = if nil?(slots) then 1 else { nns-slot-close(head(slots)); nns-close-slots(tail(slots)); };
+  def nns-close-code(codes) {
+   if nil?(codes) then 1 else { let code = head(codes); let result = if eq(record_get(code,"live"),1) then jit_leaf_inram(list(1,record_get(code,"identity"),list()),0) else 1; if eq(result,1) then { record_set(code,"live",0); nns-close-code(tail(codes)); } else 0; };
+  }
+  def nns-close(owner) {
+   if not(nns-active(owner)) then 0 else { nns-close-slots(record_get(owner,"slots")); if not(npd-regions-closed(record_get(record_get(owner,"memory"),"regions"))) then nns-unease(owner,"retirement","released-readers-and-output-regions") else if not(nns-close-code(record_get(owner,"codes"))) then nns-unease(owner,"code-retirement","native-code-release") else if eq(npd-close(record_get(owner,"memory")),1) then { record_set(owner,"active",0); 1; } else nothing(); };
+  }
+ }
+ 0;
+}

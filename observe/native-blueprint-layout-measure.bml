@@ -1,0 +1,56 @@
+// Compare the same raw fields through compact and u64-per-field layouts.
+// Timings describe this batch and host; correctness and actual bytes gate the row.
+// preludes: form-stdlib/bml/native-blueprint-layout.bml
+section [form.bml] {
+ def nblm-need(ok,why) = if ok then 1 else form_error(str_concat("blueprint measure: ",why));
+ def nblm-repeat(text,count) = if eq(count,0) then "" else if eq(count,1) then text else {
+  let halfText = nblm-repeat(text,div(count,2)); let doubled = str_concat(halfText,halfText);
+  if eq(mod(count,2),0) then doubled else str_concat(doubled,text);
+ };
+ def nblm-fields(widths,index) = if nil?(widths) then list() else cons(list(str_concat("field-",int_to_str(index)),head(widths),"raw"),nblm-fields(tail(widths),add(index,1)));
+  def nblm-raw(values) = if nil?(values) then "" else str_concat(nfm-low(head(values),8),nblm-raw(tail(values)));
+ def nblm-held-bytes(region,at,left,bins) = if eq(left,0) then fbc-finish(bins,"") else {
+  let take = if lt(left,7) then left else 7;
+  nblm-held-bytes(region,add(at,take),sub(left,take),fbc-put(bins,nfm-low(npd-peek(region,at,take),take)));
+ };
+ def nblm-compare(raw,region) {
+  let image = nns-image(list(fa-add-x-imm(3,1,0),npd-label("word"),fa-ldr(4,0,0),fa-ldr(5,2,0),nbl-cmp-x(4,5),npd-branch(1,"different"),fa-add-x-imm(0,0,8),fa-add-x-imm(2,2,8),fa-sub-x-imm(1,1,8),fa-cmp-x(1,0),npd-branch(1,"word"),fa-movz-x(0,1),fa-ret(),npd-label("different"),fa-movz-x(0,0),fa-ret()));
+  let admission = record_new(0,"region",region);
+  let identity = intern_node(make_nodeid(31,2,0,208),list(intern_trivial_int(admission),intern_trivial_string(nfm-bytes-list(image,""))));
+  let exact = jit_leaf_inram(list(0,identity,image),list(raw,npd-span(region,0,str_len(raw))));
+  let released = jit_leaf_inram(list(1,identity,list()),0); nblm-need(and(eq(exact,1),eq(released,1)),"complete native byte comparison and release"); 1;
+ }
+ def nblm-cpu(run,output,rows,remaining) = if eq(remaining,0) then 1 else {
+  nblm-need(eq(nbl-project(run,0,rows,output,0),rows),"batch projection count"); nblm-cpu(run,output,rows,sub(remaining,1));
+ };
+ def nblm-gpu(version,bindings,rows,remaining) = if eq(remaining,0) then 1 else {
+  nblm-need(eq(mj-enqueue(version,bindings,rows),1),"GPU batch admission"); nblm-gpu(version,bindings,rows,sub(remaining,1));
+ };
+ def nblm-one(widths,raw,rows,repeats) {
+  let layout = nbl-layout(nblm-fields(widths,0)); let emissionStart = host_monotonic_ms(); let owner = nbl-open(layout); let emission = sub(host_monotonic_ms(),emissionStart);
+  let packStart = host_monotonic_ms(); let run = nbl-pack(owner,raw); let packTime = sub(host_monotonic_ms(),packStart);
+  nblm-need(not(nothing?(run)),"packed run ready");
+  let output = npd-region(record_get(owner,"memory"),str_len(raw)); nblm-cpu(run,output,rows,1); nblm-compare(raw,output);
+  let start = host_monotonic_ms(); nblm-cpu(run,output,rows,repeats); let cpuTime = sub(host_monotonic_ms(),start); nblm-compare(raw,output);
+  let packed = nblm-held-bytes(record_get(run,"region"),0,record_get(run,"payload-bytes"),list());
+  let gpuAdmission = host_monotonic_ms(); let version = mj-memory(nbl-msl(layout),"nbl_project"); let gpuCompile = sub(host_monotonic_ms(),gpuAdmission);
+  nblm-need(gt(mj-handle(version),0),"RAM Metal admission");
+  let input = metal_buf_alloc(str_len(packed)); let target = metal_buf_alloc(str_len(raw)); nblm-need(and(gt(input,0),gt(target,0)),"GPU allocation");
+  nblm-need(eq(metal_buf_write(input,0,packed),str_len(packed)),"one packed upload"); let bindings = md-bind(list(input,target),list());
+  nblm-gpu(version,bindings,rows,1); nblm-need(eq(metal_sync(),1),"GPU warm completion"); nblm-need(str_eq(metal_buf_read(target,0,str_len(raw)),raw),"GPU complete warm bytes");
+  let gpuStart = host_monotonic_ms(); nblm-gpu(version,bindings,rows,repeats); let fence = metal_submit(); nblm-need(and(gt(fence,0),eq(metal_fence_wait(fence),repeats)),"GPU completion accounts for every measured dispatch"); let gpuTime = sub(host_monotonic_ms(),gpuStart);
+  nblm-need(str_eq(metal_buf_read(target,0,str_len(raw)),raw),"GPU complete measured bytes");
+  // Requested mapping bytes are separate from page rounding, physical residency
+  // and retained Form metadata. No residency estimate is inferred here.
+  let row = list("blueprint-measure","widths",widths,"rows",rows,"repeats",repeats,"raw_field_bytes",str_len(raw),"payload_bytes",record_get(run,"payload-bytes"),"mapping_requested_bytes",record_get(run,"allocated-bytes"),"native_code_bytes",len(record_get(owner,"image")),"emit_ms",emission,"pack_and_first_admission_ms",packTime,"cpu_batch_ms",cpuTime,"metal_admission_ms",gpuCompile,"metal_batch_ms",gpuTime,"cpu_calls_per_batch",repeats,"metal_enqueues_per_batch",repeats,"metal_fences_per_batch",1,"bytes_exact",1);
+  nblm-need(eq(add(metal_buf_free(input),metal_buf_free(target)),2),"GPU buffer retirement"); nblm-need(eq(mj-release(version),1),"GPU pipeline retirement");
+  nblm-need(eq(npd-region-close(output),0),"native output retirement"); nblm-need(eq(nbl-run-close(run),0),"packed run retirement"); nblm-need(eq(nbl-close(owner),1),"native code retirement");
+  print(row); row;
+ }
+ def nblm-run() {
+  let rows = 16384; let repeats = 1024; let raw = nblm-repeat(nblm-raw(list(99,7801,7,159,32001,123456789)),rows);
+  nblm-one(list(7,13,4,8,16,29),raw,rows,repeats); nblm-one(list(64,64,64,64,64,64),raw,rows,repeats);
+  print(list("blueprint-measure","scope","repeated six-field rows; warm bulk projection; host-load-dependent wall time; no per-field crossings","exact",1)); 1;
+ }
+ if str_eq(read_line(),"run") then nblm-run() else 0;
+}

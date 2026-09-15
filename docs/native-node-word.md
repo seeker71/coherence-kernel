@@ -58,6 +58,12 @@ reclamation. At that capacity the identity column spans 512 MiB, and the ten
 logical node columns span 5 GiB. These are capacity extents, not measured RAM
 usage. Identity space and allocated population are independent.
 
+Form also owns [adaptive word storage and dense blueprint runs](native-blueprint-layout.md)
+in independent RAM regions. Execution IDs remain 64-bit; stored widths and
+blueprint field offsets can vary by individual bits. These owners execute
+native CPU code and generated Metal programs. They do not yet replace the
+shared field's primary columns or its allocation policy.
+
 ## Executable observation and direction
 
 The [source-bound executions](evidence/fkwu/native-node-word.json) retain real

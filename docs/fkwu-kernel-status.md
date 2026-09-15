@@ -23,6 +23,15 @@ readers use layout version 2. The [execution evidence](evidence/fkwu/native-node
 includes exact boundaries, ordinary refusal, per-process storage and current
 operator, lexicon, interning, serialization and Glass consumers.
 
+[Native blueprint layout](native-blueprint-layout.md) gives Form-owned RAM runs
+shared field descriptors, arbitrary bit offsets, exact 64-bit raw projections
+and optional ML float interpretations. Form emits CPU pack/projection code and
+Metal projections from that same layout. A word-aligned primitive requests
+8 payload bytes; complex rows share metadata and need no per-row alignment.
+The adaptive word owner independently widens or shrinks immutable generations
+while retaining pinned readers. These local owners are separate from the
+primary shared field.
+
 The shared field reuses identical NodeID coordinates; the allocation witness
 returns `7`. Its node columns still have a fixed 2^26-cell capacity and no live
 reclamation. Reset requires every other kernel to settle. The
@@ -139,7 +148,7 @@ child runs, and session memory supplies verified learning evidence. The core
 including uncertainty and observation age. Applied attention does not invent recovery.
 Eight alternating-order pairs over one retained failed-child exchange preserve
 the complete care result except timing fields. Direct care projection mints
-252 nodes versus 305 through the intermediate health view. Both retained
+269 nodes versus 317 through the intermediate health view. Both retained
 readers consume zero repeated event bytes. These are warm workload observations;
 the reader still allocates changing observations, and no memory bound is claimed.
 Discovery uses the existing bounded shared-memory roster and reports only its
