@@ -1,0 +1,90 @@
+; tests/bml-hati-native-control-block-proof.fk
+;
+; preludes: form-stdlib/core.fk form-stdlib/minimal-surface.fk form-stdlib/json.fk form-stdlib/cache.fk form-stdlib/form-ontology-bp.fk form-stdlib/engine.fk form-stdlib/compiler.fk form-stdlib/source-compiler.fk form-stdlib/hati-os-kernel.fk form-stdlib/hati-os-kernel-emit.fk form-stdlib/grammars/bml.fk
+;
+; Closes the general-control-block-lowering family on the Hati table lane:
+; statement if/else (with and without else, nested, braced and bare), loop
+; with break and a labeled outer break, and the condition operators BML
+; reads as its own op-* method rules, all from source text. `with` has no
+; production in the tree, so a WITH node is named before table emission;
+; control reached through a non-control container is named as well.
+
+(do
+    (defn score-bool (actual)
+        (if actual 1 0))
+
+    (defn score-int (actual expected)
+        (if (eq actual expected) 1 0))
+
+    (defn score-str (actual expected)
+        (if (nil? actual)
+            0
+            (if (str_eq actual expected) 1 0)))
+
+    (defn str-contains? (haystack needle)
+        (ge (str_find haystack needle 0) 0))
+
+    (defn parse-source (source)
+        (bml-source-parse-executable-stream (bml-source-scan-text source)))
+
+    (defn run-source (source)
+        (bml-hati-run-value (bml-source-exec-parse-node (parse-source source))))
+
+    (let if-parsed (parse-source "if (2 < 3) return 10; else return 20;\n"))
+    (let if-node (bml-source-exec-parse-node if-parsed))
+    (let if-image (bml-hati-compile-image if-node))
+    (let if-table (bml-hati-table-file if-image))
+
+    (let loop-parsed (parse-source "loop { break; } return 4;\n"))
+
+    (let clamp-node
+        (head
+            (bml-source-exec-parse-nodes
+                (parse-source "int Clamp(int v) { if (v > 9) { v = 9; } return v; }\n"))))
+
+    (let with-node
+        (intern_node BML-AST-WITH
+                     (list (bml-ast-int 1) (bml-ast-return (bml-ast-int 2)))))
+    (let with-image (bml-hati-compile-image with-node))
+
+    (let nested-node
+        (bml-ast-block
+            (list
+                (bml-ast-choose
+                    (list
+                        (bml-ast-fail 0)
+                        (bml-ast-block
+                            (list
+                                (bml-ast-if
+                                    (bml-ast-int 1)
+                                    (bml-ast-return (bml-ast-int 2))
+                                    (bml-ast-block (empty)))))))
+                (bml-ast-return (bml-ast-int 3)))))
+    (let nested-image (bml-hati-compile-image nested-node))
+
+    (sum
+        (list
+            (score-bool (bml-source-exec-parse-ok? if-parsed))
+            (score-int (len (bml-source-exec-parse-rest if-parsed)) 0)
+            (score-str (head (bml-source-exec-parse-rules if-parsed)) "control-if")
+            (score-bool (node_eq (node_category (head (node_children if-node))) BML-AST-IF))
+            (score-bool (bml-hati-image-supported? if-image))
+            (score-bool (not (str-contains? if-table "BML-HATI-UNSUPPORTED")))
+            (score-bool (str-contains? if-table "1 4000 0 0"))
+            (score-int (bml-hati-run-value if-node) 10)
+            (score-int (run-source "if (3 < 2) { return 10; } else { return 20; }\n") 20)
+            (score-int (run-source "if (1 == 1) { if (2 != 2) return 5; } return 6;\n") 6)
+            (score-int (run-source "if (1 < 2 && !(3 < 2) || 0) return 1; return 0;\n") 1)
+            (score-int (run-source "if (0 || 2 < 1) return 1; return 7;\n") 7)
+            (score-int (run-source "if (4 >= 4 && 5 > 4 && 3 <= 3 && 9 - 2 * 3 == 3) return 70; return 71;\n") 70)
+            (score-bool (bml-source-exec-parse-ok? loop-parsed))
+            (score-str (head (bml-source-exec-parse-rules loop-parsed)) "control-loop")
+            (score-int (bml-hati-run-value (bml-source-exec-parse-node loop-parsed)) 4)
+            (score-int (run-source "outer: loop { loop { break outer; } } return 9;\n") 9)
+            (score-int (bml-hati-run-value-with-arg clamp-node 12) 9)
+            (score-int (bml-hati-run-value-with-arg clamp-node 4) 4)
+            (score-bool (not (bml-hati-image-supported? with-image)))
+            (score-str (head (bml-hati-image-unsupported with-image)) "with")
+            (score-bool (str-contains? (bml-hati-table-file with-image) "BML-HATI-UNSUPPORTED with"))
+            (score-bool (not (bml-hati-image-supported? nested-image)))
+            (score-str (head (bml-hati-image-unsupported nested-image)) "control/nested"))))
