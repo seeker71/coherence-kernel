@@ -32,11 +32,16 @@ file reading, not an atomic snapshot of a changing repository.
 `observe/native-authoring-guide-run.fk` retains the Python implementation and
 invocation-candidate reading at `.hearth/native-authoring-current.json`. Report
 publication verifies the written bytes before atomic rename. The public reading
-shows unread paths explicitly. The current guide identifies one Python
-implementation: the POSIX/Linux terminal acceptance test. Form owns the
-[large-model MLA numerical oracle](native-dsv4-oracle.md) and the observed
-[Darwin ARM64 terminal acceptance](glass-keyboard.md). Native Linux admission
-and its full terminal behavior remain to be observed before that owner is removed.
+shows unread paths explicitly. A Python word is read where it stands. In a
+program source it is a launch only where it stands as a command: a program
+path, an interpreter literal or a bare name with an argument literal beside
+it, a line that carries a launch door in code, or a command position followed
+by a command's shape. The language's own name, an identifier and prose are
+name references. Shell, config and extensionless files stay command languages.
+A file holding a NUL byte is a compiled artifact whose text copies sources read
+at their own paths; a file that declares the guide's reference role in its
+head carries the guide's own specimens. The reading prints every count, and
+`form/form-stdlib/tests/native-authoring-guide-band.fk` witnesses each rule.
 
 The structural gate rejects an absent, non-directory or unreadable root. It
 preserves names through NUL-delimited traversal and prunes `.git` and `.claude`.
