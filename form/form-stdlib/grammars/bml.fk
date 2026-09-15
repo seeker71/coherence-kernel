@@ -7501,10 +7501,13 @@
     (defn bml-hati-fns-result-pool (result) (nth result 2))
 
     ;; The image reads refusals out of its own pool too, so a lowering that
-    ;; named a refusal keeps the image unsupported even if no pass listed it.
+    ;; named a refusal keeps the image unsupported even if no pass listed it;
+    ;; the compiler organ says when a pass missed one (bch-pool).
     (defn bml-hati-image (fns pool source-node unsupported)
-        (list "bml-hati-image" (bml-hati-link-undo (bml-hati-link-list-set fns)) pool source-node
-              (bml-hati-reasons-merge unsupported (bml-hati-pool-refusals pool))))
+        (do
+            (let pooled (bml-hati-pool-refusals pool))
+            (list "bml-hati-image" (bml-hati-link-undo (bml-hati-link-list-set fns)) pool source-node
+                  (bml-hati-reasons-merge (bch-pool "image" unsupported pooled) pooled))))
 
     (defn bml-hati-image-fns (image) (nth image 1))
     (defn bml-hati-image-pool (image) (nth image 2))
@@ -8036,11 +8039,19 @@
     (defn bml-hati-unfailed-guard (stops expr)
         (if stops (fk-if (bml-hati-unfailed 0) expr (fk-lit 0)) expr))
 
-    ;; a snapshot opens: field sets journal while any is open
+    ;; a snapshot opens: field sets journal while any is open. The first to
+    ;; open starts an empty journal, as the last to close leaves one: a cell
+    ;; never set reads 0, and an entry consed onto 0 is no list.
     (defn bml-hati-journal-open (_x)
-        (bml-ctl-set-cell
-            (bml-bnml-depth-cell 0)
-            (fk-add (bml-ctl-get-cell (bml-bnml-depth-cell 0)) (fk-lit 1))))
+        (fk-sequence
+            (fk-if (fk-le (bml-ctl-get-cell (bml-bnml-depth-cell 0)) (fk-lit 0))
+                   (fk-sequence
+                       (bml-ctl-set-cell (bml-bnml-journal-cell 0) (fk-empty))
+                       (bml-ctl-set-cell (bml-bnml-count-cell 0) (fk-lit 0)))
+                   (fk-lit 0))
+            (bml-ctl-set-cell
+                (bml-bnml-depth-cell 0)
+                (fk-add (bml-ctl-get-cell (bml-bnml-depth-cell 0)) (fk-lit 1)))))
 
     ;; a snapshot closes; with none left open the journal empties
     (defn bml-hati-journal-close (_x)
@@ -9316,20 +9327,6 @@
                 (bml-hati-image-fns image)
                 (bml-hati-unsupported-table-file image))))
 
-    (defn bml-hati-run-value (node)
-        (do
-            (let image (bml-hati-compile-image node))
-            (if (bml-hati-image-supported? image)
-                (fkm-run (bml-hati-image-fns image) 0)
-                (bml-hati-unsupported-table-file image))))
-
-    (defn bml-hati-run-value-with-arg (node arg)
-        (do
-            (let image (bml-hati-compile-image node))
-            (if (bml-hati-image-supported? image)
-                (fkm-run (bml-hati-image-fns image) arg)
-                (bml-hati-unsupported-table-file image))))
-
     (defn bml-hati-table-file (image)
         (if (bml-hati-image-supported? image)
             (fks-table-file
@@ -10435,38 +10432,6 @@
         (if (node_eq (node_category node) BML-AST-BLOCK)
             (bml-scope-compile-block-image node units)
             (bml-hati-compile-image node)))
-
-    (defn bml-hati-compile-linked-image (node units)
-        (if (node_eq (node_category node) BML-AST-BLOCK)
-            (bml-scope-compile-linked-image node units)
-            (bml-hati-compile-image node)))
-
-    (defn bml-hati-run-unit-value (node units)
-        (bml-hati-run-linked node (bml-scope-care-imports node units)))
-
-    ;; the Hati answer for units already linked: no import care here
-    (defn bml-hati-run-linked (node units)
-        (bml-hati-run-linked-at "unit" node units))
-
-    ;; where names the unit, for a door that knows its source
-    (defn bml-hati-run-unit-value-at (where node units)
-        (bml-hati-run-linked-at where node (bml-scope-care-imports node units)))
-
-    (defn bml-hati-run-linked-at (where node units)
-        (bml-run-heard where "hati" (bml-hati-run-linked-outcome node units)))
-
-    ;; (value unheld?): the run keeps its own memory so the FAILED cell can
-    ;; be read after it ends; a failure no choose held leaves it set
-    (defn bml-hati-run-linked-outcome (node units)
-        (do
-            (let image (bml-hati-compile-linked-image node units))
-            (if (bml-hati-image-supported? image)
-                (do
-                    (let fns (bml-hati-image-fns image))
-                    (let memory (fkm-memory-new))
-                    (let value (fkm-call-eval fns (nth fns 0) 0 memory))
-                    (list value (gt (fkm-memory-get memory (bml-bnml-failed-cell 0)) 0)))
-                (list (bml-hati-unsupported-table-file image) false))))
 
     ;; A run that ended on a failure no choose held says so once: the unit,
     ;; the lane and the value it stood on. A run whose every fail was held
@@ -15084,45 +15049,6 @@
                 (if (gt (len (node_children class-node)) 3)
                     (list (bml-node-child class-node 3))
                     (empty)))))
-
-    (defn bml-hati-construct-params (types index)
-        (if (nil? types)
-            (empty)
-            (cons
-                (bml-parameter-component (head types) (str_concat "__p" (int_to_str index)))
-                (bml-hati-construct-params (tail types) (add index 1)))))
-
-    (defn bml-hati-construct-args (types index)
-        (if (nil? types)
-            (empty)
-            (cons
-                (bml-ast-name (str_concat "__p" (int_to_str index)))
-                (bml-hati-construct-args (tail types) (add index 1)))))
-
-    ;; Host entry: construct a class natively from host arguments whose
-    ;; static types the host declares; answers the new record.
-    (defn bml-hati-run-new (class-node arg-types args)
-        (do
-            (let unit
-                (bml-ast-block
-                    (list
-                        class-node
-                        (bml-ast-method-with-parameters
-                            "__construct"
-                            (bml-ast-return
-                                (bml-ast-new
-                                    (bml-class-node-name class-node)
-                                    (bml-hati-construct-args arg-types 0)))
-                            (bml-hati-construct-params arg-types 0)))))
-            (let image (bml-hati-compile-image unit))
-            (bch-ran
-                "hati-new"
-                (if (not (bml-hati-image-supported? image))
-                    (bml-hati-unsupported-table-file image)
-                    (fkm-walk
-                        (bml-hati-image-fns image)
-                        (nth (bml-hati-image-fns image) 1)
-                        (if (eq (len args) 1) (head args) args))))))
 
     (defn bma-trace-count-mode (trace mode)
         (if (nil? trace) 0
