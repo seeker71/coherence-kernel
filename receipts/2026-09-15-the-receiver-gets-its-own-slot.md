@@ -168,6 +168,21 @@ Witnessed on fkwu: `c.v.w = 4;` in the running unit answers `BML-HATI-UNSUPPORTE
 and voices `unread:c . v . w = 4 ;`; an imported unit cut short answers
 `source/unread,call/unbound`; sources read whole answer as before (2, 4, 3).
 
+## `a.b.c = e;` reads
+
+The member-assign step walks `name (. name)+ =`: `this.f = e;` keeps its field set, and any longer
+path, `a.b.c = e;` or `this.p.v = e;`, becomes one dotted assignment that the lowering stores into
+the last field of what the path before it reads. Two reads went with it. `bml-ctl-name-node` read
+`this.p.v` as one field named `p.v`; a longer path now stays a dotted name, read link by link. A
+path into a primitive, `c.v.w = 4;` where `c.v` is an int, stored into an int without a word; a
+primitive value has no fields now, so that answers `field/not-found`. With that statement read, the
+reader's unread example becomes an expression it cannot take: `int y = 1 + ;` answers
+`source/unread` and voices `unread:int y = 1 + ; return x`.
+
+Witnessed on fkwu: `q.p.v = 5;` then `q.p.v` 5; `this.p.v = a` in a member 7; through a parameter
+9; through a local 8; a bare `p.v = a` in a member 9; a member reading `this.p.v` 0; one-step
+`c.v = 4` 4 and `this.v = a` 6. The live door reads 68 ok of 68, with no reading voiced.
+
 ## Still open, with the reason
 
 - A call's result has no static type (method nodes carry no return type), so overloads over call
@@ -178,7 +193,6 @@ and voices `unread:c . v . w = 4 ;`; an imported unit cut short answers
 - A type reached through an import lowers its member bodies in the importing unit's scope. The
   interface this order names has no bodies; a class from another unit whose bodies call that
   unit's own names would read them unbound.
-- `a.b.c = e;` is not read yet.
 - The witness probes stay outside the tree and ran on fkwu only.
 
 ## For the lead
@@ -219,5 +233,15 @@ line into a quiet wrong answer.
 Frontier word, 0 hits in the tree: **quietstop**, a reader that ends at a line it cannot read and
 hands on what it has, as if the source ended there. Its question: where else does a partial
 reading pass for a whole one?
+
+Third movement. Most surprising: a reader that learned one more statement changed what the unread
+witness could be. `c.v.w = 4;` was the example of a line the reader drops; one step later it read,
+and wrote into an int without a word. Discomfort to gold: the pull was to keep the old example; the
+gold was the primitive guard it exposed. The first cut of the unread voice also spoke seven times on
+a clean door run, from organ sources the home walk parses and never runs; the voice belongs where a
+unit runs.
+
+Frontier word, 0 hits in the tree: **readrun**, the line between reading a source and running it: a
+source read only to answer a question stays quiet, and the one that runs says where it stopped.
 
 — Claude (Opus 5), as Sema, worktree agent-a60550cd21b84ef52

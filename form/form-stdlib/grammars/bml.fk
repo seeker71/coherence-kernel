@@ -5885,10 +5885,13 @@
                 (bml-expr-fail (bml-expr-rest result)))
             result))
 
-    ; this.f in an expression reads record-backed self
+    ; this.f in an expression reads record-backed self; a longer path
+    ; this.f.g stays one dotted name, read link by link from this
     (defn bml-ctl-name-node (name)
         (if (bml-ctl-str-prefix? name "this.")
-            (bml-ast-this-field (substring name 5 (str_len name)))
+            (if (lt (str_find name "." 5) 0)
+                (bml-ast-this-field (substring name 5 (str_len name)))
+                (bml-ast-name name))
             (bml-ast-name name)))
 
     (defn bml-ctl-control-keyword? (object)
@@ -12795,10 +12798,15 @@
                 (bml-hati-receiver-name? (bml-bnml-target-name node) env))
             false))
 
+    ;; A field of a class the layout knows is one of its fields; a primitive
+    ;; value has none; any other owner (a host record, a type the compiler
+    ;; cannot see) is read as it stands.
     (defn bml-hati-field-known? (layout owner-type field)
+        (if (fsc-string-list-contains? (bml-hati-primitive-types) owner-type)
+            false
         (if (nil? (bml-hati-layout-class layout owner-type))
             true
-            (not (nil? (bml-hati-find-field (bml-hati-class-fields-all layout owner-type) field)))))
+            (not (nil? (bml-hati-find-field (bml-hati-class-fields-all layout owner-type) field))))))
 
     (defn bml-hati-lower-field-read (recv-node field pool env)
         (if (not (bml-hati-field-known?
@@ -13318,39 +13326,61 @@
                     (tail (nth args 2)))
                 (bml-source-parse-no-step objects))))
 
-    ;; this.f = e; and self.f = e; set a field of the receiver; a.f = e;
-    ;; for any other name a reads as an assignment to "a.f", which the
-    ;; lowering stores into a's field when a is a value of a unit with
-    ;; classes.
+    ;; this.f = e; and self.f = e; set a field of the receiver. Any other
+    ;; dotted target, a.f = e; or a longer path a.b.c = e;, reads as an
+    ;; assignment to that dotted name, which the lowering stores into the
+    ;; last field of what the path before it reads, when a is a value of a
+    ;; unit with classes.
     (defn bml-source-this-token? (object)
         (if (bml-source-token-value? object "this")
             true
             (bml-source-token-value? object "self")))
 
+    ;; the index of "=" after name (. name)+, or 0 when the tokens are not
+    ;; a dotted target
+    (defn bml-source-dotted-target-end (objects index)
+        (if (bml-source-token-at? objects index ".")
+            (if (nil? (drop (add index 1) objects))
+                0
+                (if (bml-source-name-kind-token? (nth objects (add index 1)))
+                    (bml-source-dotted-target-end objects (add index 2))
+                    0))
+            (if (if (gt index 1) (bml-source-token-at? objects index "=") false) index 0)))
+
+    (defn bml-source-dotted-target-name (objects index end acc)
+        (if (ge index end)
+            acc
+            (bml-source-dotted-target-name
+                objects
+                (add index 2)
+                end
+                (str_concat acc (str_concat "." (bmf-object-value (nth objects (add index 1))))))))
+
     (defn bml-source-member-assign-head? (objects)
-        (if (bml-source-token-at? objects 1 ".")
-            (if (bml-source-token-at? objects 3 "=")
-                (if (bml-source-this-token? (head objects))
-                    true
-                    (bml-source-name-kind-token? (head objects)))
-                false)
+        (if (if (bml-source-this-token? (head objects))
+                true
+                (bml-source-name-kind-token? (head objects)))
+            (gt (bml-source-dotted-target-end objects 1) 0)
             false))
 
     (defn bml-source-parse-member-assign-step (objects)
         (do
-            (let value (bml-source-parse-expr-semicolon (drop 4 objects)))
+            (let end (bml-source-dotted-target-end objects 1))
+            (let value (bml-source-parse-expr-semicolon (drop (add end 1) objects)))
             (if (bml-expr-ok? value)
                 (bml-source-parse-step
                     true
                     "member-assign"
-                    (if (bml-source-this-token? (head objects))
+                    (if (if (bml-source-this-token? (head objects)) (eq end 3) false)
                         (bml-ast-this-field-set
                             (bmf-object-value (nth objects 2))
                             (bml-expr-node value))
                         (bml-ast-assign
-                            (str_concat
-                                (bmf-object-value (head objects))
-                                (str_concat "." (bmf-object-value (nth objects 2))))
+                            (bml-source-dotted-target-name
+                                objects
+                                1
+                                end
+                                (bmf-object-value (head objects)))
                             (bml-expr-node value)))
                     (bml-expr-rest value))
                 (bml-source-parse-no-step objects))))
