@@ -6779,22 +6779,11 @@
     ;; own unit env with its parameters bound to arguments read in the
     ;; caller's env. What cannot resolve compiles to its named refusal.
     ;; Reserved __ names (field access, arg slots) keep their own lanes.
-    ;; A class shape (a record, a receiver, a constructor, a member call)
-    ;; reads over the unit's class layout, as on Hati.
+    ;; A class shape (a record, a receiver, a constructor) has no BMA
+    ;; reading yet; it answers its name instead of lowering to nothing.
     (defn bml-compile-call-in (node env)
         (if (bml-hati-class-call? node)
-            (bml-bma-class-marker-in node (bml-call-name node) env)
-        (if (bml-bma-receiver-call? node env)
-            (do
-                (let split (bml-hati-dotted-split (bml-call-name node)))
-                (bml-bma-invoke
-                    node
-                    (bml-ast-name (head split))
-                    (nth split 1)
-                    (bml-call-args node)
-                    env))
-        (if (bml-hati-member-call? (bml-call-name node) env)
-            (bml-bma-invoke node (bml-ast-name "this") (bml-call-name node) (bml-call-args node) env)
+            (bml-bma-refusal "bma/class-lane")
         (if (bml-scope-prefix? (bml-call-name node) "__")
             (empty)
             (do
@@ -6818,15 +6807,13 @@
                             (do
                                 (let method-node
                                     (bml-local-binding-value (bml-hati-choice-value choice)))
-                                (if (bml-bma-classes? env)
-                                    (bml-bma-class-unit-call node method-node env)
-                                    (bml-compile-callee-body-in
-                                        (bml-method-node-body method-node)
-                                        (bml-bma-bind-params
-                                            (bml-method-node-parameters method-node)
-                                            (bml-call-args node)
-                                            env
-                                            (bml-bnml-with-base (bml-bma-home-env method-node env) env)))))))))))))))
+                                (bml-compile-callee-body-in
+                                    (bml-method-node-body method-node)
+                                    (bml-bma-bind-params
+                                        (bml-method-node-parameters method-node)
+                                        (bml-call-args node)
+                                        env
+                                        (bml-bnml-with-base (bml-bma-home-env method-node env) env))))))))))))
 
     ;; A callee's final return is the call's value: inlined BMA keeps the
     ;; caller's stream running instead of ending it at the callee's return.
@@ -7126,7 +7113,7 @@
             (do
                 (let binding (bml-local-lookup env (bml-local-name node)))
                 (if (nil? binding)
-                    (bml-bma-unbound-name-in (bml-local-name node) env)
+                    (bml-bma-name-refusal "name/unbound" (bml-local-name node))
                 (if (bml-bma-method-value? (bml-local-binding-value binding))
                     (bml-bma-refusal "name/method")
                 (if (bml-bnml-binding? binding)
@@ -7170,16 +7157,6 @@
                 (bml-compile-values-in (tail nodes) env))))
 
     (defn bml-compile-call-node-in (node env)
-        (if (bml-hati-field-assign? node env)
-            (bml-bma-this-field-store (bml-bnml-target-name node) (bml-bnml-value node) env)
-        (if (bml-hati-dotted-assign? node env)
-            (do
-                (let split (bml-hati-dotted-split (bml-bnml-target-name node)))
-                (bml-bma-field-store
-                    (bml-ast-name (head split))
-                    (nth split 1)
-                    (bml-bnml-value node)
-                    env))
         (if (bml-bnml-declare-node? node)
             (append
                 (bml-compile-value-in (bml-bnml-value node) env)
@@ -7202,7 +7179,7 @@
                     (append
                         (bml-compile-value-in (bml-list-set-value node) env)
                         (list (bma-list-set 0)))))
-            (bml-compile-call-in node env))))))))
+            (bml-compile-call-in node env))))))
 
     (defn bma-list-set (_x) (bma-op "list-set" 0))
 
@@ -7221,7 +7198,7 @@
             (bma-exec-lget (comp-op-value op) state)
         (if (str_eq (comp-op-name op) "drop")
             (comp-vm-pop-state state)
-            (bma-exec-class-op op state)))))))))
+            state))))))))
 
     ;; The mutable-local frame rides the floor of the value stack, so every
     ;; stack snapshot (save, a choose branch, a try) carries the locals too.
@@ -7229,113 +7206,6 @@
     (defn bma-lset (key) (bma-op "lset" key))
     (defn bma-lget (key) (bma-op "lget" key))
     (defn bma-drop (_x) (bma-op "drop" 0))
-
-    ;; --- BMA class records: the packet Hati's tag 64 builds -------------
-    ;; An object lives in the floor frame beside the mutable locals: a
-    ;; handle ("__bma_obj:N") names one row whose packet names its class,
-    ;; the class id in the layout, and every structural field, base first.
-    ;; Every copy of the handle reaches the same row, and every stack
-    ;; snapshot (a choose branch, save, try) carries the rows, so a field
-    ;; set in a failed branch or before a restore rolls back with it, as
-    ;; Hati's field journal rolls it back. rec-new takes the field values
-    ;; as one array; rec-set leaves its value, as lset does, so a statement
-    ;; drops exactly one value; class-in admits an object of one of the
-    ;; named classes and fails any other.
-    (defn bma-rec-new (class-name class-id field-names)
-        (bma-op "rec-new" (list class-name class-id field-names)))
-    (defn bma-rec-get (key) (bma-op "rec-get" key))
-    (defn bma-rec-set (key) (bma-op "rec-set" key))
-    (defn bma-class-in (names) (bma-op "class-in" names))
-
-    (defn bma-exec-class-op (op state)
-        (do
-            (let name (comp-op-name op))
-            (if (str_eq name "rec-new") (bma-exec-rec-new (comp-op-value op) state)
-            (if (str_eq name "rec-get") (bma-exec-rec-get (comp-op-value op) state)
-            (if (str_eq name "rec-set") (bma-exec-rec-set (comp-op-value op) state)
-            (if (str_eq name "class-in") (bma-exec-class-in (comp-op-value op) state)
-                state))))))
-
-    (defn bma-rec-rows (names values)
-        (if (nil? names)
-            (empty)
-            (cons
-                (list (head names) (head values))
-                (bma-rec-rows (tail names) (tail values)))))
-
-    (defn bma-object? (value)
-        (if (str_eq (value_kind value) "string")
-            (bml-scope-prefix? value "__bma_obj:")
-            false))
-
-    (defn bma-object-rows (s handle)
-        (bma-frame-rows-get (bma-stack-floor (comp-vm-stack s)) handle))
-
-    (defn bma-exec-rec-new (spec s)
-        (do
-            (let values (comp-vm-pop-value s))
-            (let s1 (comp-vm-pop-state s))
-            (let stack (comp-vm-stack s1))
-            (let floor (bma-stack-floor stack))
-            (let n (add 1 (bma-frame-rows-get floor "__bma_objects")))
-            (let handle (str_concat "__bma_obj:" (int_to_str n)))
-            (comp-vm-push
-                (comp-vm-with-stack
-                    s1
-                    (bma-stack-with-floor
-                        stack
-                        (bma-frame-rows-set
-                            (bma-frame-rows-set floor "__bma_objects" n)
-                            handle
-                            (cons
-                                (list "bmlClass" (nth spec 0))
-                                (cons
-                                    (list "bmlClassId" (nth spec 1))
-                                    (bma-rec-rows (nth spec 2) values))))))
-                handle)))
-
-    ;; a read or write through something that is no object fails the run
-    (defn bma-exec-rec-get (key s)
-        (do
-            (let handle (comp-vm-pop-value s))
-            (let s1 (comp-vm-pop-state s))
-            (if (bma-object? handle)
-                (comp-vm-push s1 (bma-frame-rows-get (bma-object-rows s1 handle) key))
-                (comp-vm-with-mode s "fail"))))
-
-    (defn bma-exec-rec-set (key s)
-        (do
-            (let value (comp-vm-pop-value s))
-            (let s1 (comp-vm-pop-state s))
-            (let handle (comp-vm-pop-value s1))
-            (let s2 (comp-vm-pop-state s1))
-            (if (bma-object? handle)
-                (do
-                    (let stack (comp-vm-stack s2))
-                    (let floor (bma-stack-floor stack))
-                    (comp-vm-push
-                        (comp-vm-with-stack
-                            s2
-                            (bma-stack-with-floor
-                                stack
-                                (bma-frame-rows-set
-                                    floor
-                                    handle
-                                    (bma-frame-rows-set (bma-frame-rows-get floor handle) key value))))
-                        value))
-                (comp-vm-with-mode s "fail"))))
-
-    (defn bma-exec-class-in (names s)
-        (do
-            (let handle (comp-vm-pop-value s))
-            (let s1 (comp-vm-pop-state s))
-            (if (if (bma-object? handle)
-                    (fsc-string-list-contains?
-                        names
-                        (bma-frame-rows-get (bma-object-rows s1 handle) "bmlClass"))
-                    false)
-                s1
-                (comp-vm-with-mode s1 "fail"))))
 
     (defn bma-frame-rows-get (rows key)
         (if (nil? rows)
@@ -10410,28 +10280,17 @@
     (defn bml-compile-unit-program (node units)
         (bml-compile-linked-program node (bml-scope-care-imports node units)))
 
-    ;; the BMA program for units already linked: no import care here. A
-    ;; unit that declares classes compiles over the layout Hati builds for
-    ;; it, opens the floor frame for its receiver and argument slots, and
-    ;; carries the layout's reasons as its own.
+    ;; the BMA program for units already linked: no import care here
     (defn bml-compile-linked-program (node units)
         (do
             (let link (bml-scope-link node units))
-            (let env (bml-scope-unit-env link (bml-scope-link-main link) "bma"))
-            (let layout (bml-hati-unit-layout (bml-scope-layout-nodes link) 0))
-            (let classes?
-                (if (bml-bma-layout-has-types? layout)
-                    true
-                    (not (nil? (bml-hati-layout-reasons layout)))))
             (comp-program
                 "bma"
                 (bml-bma-with-frame
-                    (if classes? true (bml-bma-link-uses-locals? node link))
-                    (if classes?
-                        (append
-                            (bml-bma-layout-refusals (bml-hati-layout-reasons layout))
-                            (bml-compile-node-in node (bml-bma-env-with-classes env layout)))
-                        (bml-compile-node-in node env))))))
+                    (bml-bma-link-uses-locals? node link)
+                    (bml-compile-node-in
+                        node
+                        (bml-scope-unit-env link (bml-scope-link-main link) "bma"))))))
 
     ;; A program whose units declare or assign opens the floor frame first.
     (defn bml-bma-with-frame (uses ops)
@@ -10471,7 +10330,7 @@
         (do
             (let binding (bml-local-lookup env (bml-local-name node)))
             (if (nil? binding)
-                (bml-bma-unbound-name-in (bml-local-name node) env)
+                (bml-bma-name-refusal "name/unbound" (bml-local-name node))
             (if (bml-bma-method-value? (bml-local-binding-value binding))
                 (bml-bma-refusal "name/method")
             (if (bml-bnml-binding? binding)
@@ -10500,7 +10359,7 @@
                     rest))))
 
     ;; parameters bind to argument nodes read in the caller's env, over the
-    ;; callee's own env; each binding carries the parameter's declared type
+    ;; callee's own env
     (defn bml-bma-bind-params (params args arg-env body-env)
         (if (or (nil? params) (nil? args))
             body-env
@@ -10509,547 +10368,11 @@
                 (tail args)
                 arg-env
                 (cons
-                    (bml-bma-typed-binding
+                    (bml-local-binding
                         (bml-parameter-name (head params))
                         (head args)
-                        arg-env
-                        ""
-                        ""
-                        (bml-parameter-type (head params)))
+                        arg-env)
                     body-env))))
-
-    ;; name, value, env, kind, key, declared type: kind "" reads the value
-    ;; by substitution, a bnml kind reads the frame slot at key.
-    (defn bml-bma-typed-binding (name value bind-env kind key param-type)
-        (list "bml-local-binding" name value bind-env kind key param-type))
-
-    ;; --- BMA: class shapes, from the layout Hati builds -----------------
-    ;; A unit that declares classes or interfaces compiles over the layout
-    ;; the Hati image takes (bml-hati-unit-layout): class ids, members,
-    ;; interface families, template instances, one resolver. BMA has no
-    ;; calls, so a member inlines: the receiver is read once into a frame
-    ;; slot, each argument into its own, and the body runs over them. A
-    ;; slot's key is the call site's node identity and the inline depth,
-    ;; so nested and sibling sites never share one. One implementation
-    ;; among the classes the receiver can hold inlines directly; several
-    ;; become one choice whose branches each admit only their classes.
-
-    (defn bml-bma-class-home-key () "__bma_class_home")
-    (defn bml-bma-inline-key () "__bma_inline")
-    (defn bml-bma-inline-limit (_x) 32)
-
-    (defn bml-bma-layout-has-types? (layout)
-        (if (nil? (bml-hati-layout-classes layout))
-            (not (nil? (bml-hati-layout-ifaces layout)))
-            true))
-
-    (defn bml-bma-layout-refusals (reasons)
-        (if (nil? reasons)
-            (empty)
-            (append
-                (bml-bma-refusal (head reasons))
-                (bml-bma-layout-refusals (tail reasons)))))
-
-    ;; the unit env a class member reads, held under its own key so every
-    ;; inlined body (a member's or a free callee's) reaches it again
-    (defn bml-bma-env-with-classes (env layout)
-        (do
-            (let home (bml-hati-env-with-layout env layout))
-            (cons (bml-local-binding (bml-bma-class-home-key) home home) home)))
-
-    (defn bml-bma-classes? (env)
-        (not (nil? (bml-local-lookup-direct env (bml-bma-class-home-key)))))
-
-    (defn bml-bma-class-home (env)
-        (bml-local-binding-value (bml-local-lookup-direct env (bml-bma-class-home-key))))
-
-    (defn bml-bma-carry-classes (callee-env caller-env)
-        (cons
-            (bml-local-lookup-direct caller-env (bml-bma-class-home-key))
-            (bml-hati-env-with-layout callee-env (bml-hati-env-layout caller-env))))
-
-    (defn bml-bma-inline-depth (env)
-        (do
-            (let held (bml-local-lookup-direct env (bml-bma-inline-key)))
-            (if (nil? held)
-                0
-                (node_value (bml-node-child (bml-local-binding-value held) 0)))))
-
-    (defn bml-bma-with-inline (env caller-env)
-        (cons
-            (bml-local-binding
-                (bml-bma-inline-key)
-                (bml-ast-int (add 1 (bml-bma-inline-depth caller-env)))
-                env)
-            env))
-
-    ;; an inline this deep is a recursion BMA cannot unroll
-    (defn bml-bma-too-deep? (env)
-        (ge (bml-bma-inline-depth env) (bml-bma-inline-limit 0)))
-
-    (defn bml-bma-site-key (node env)
-        (str_concat
-            (int_to_str (node_inst node))
-            (str_concat "@" (int_to_str (bml-bnml-depth env)))))
-
-    (defn bml-bma-recv-key (site) (str_concat "__bma_recv:" site))
-
-    (defn bml-bma-arg-key (site index)
-        (str_concat "__bma_arg" (str_concat (int_to_str index) (str_concat ":" site))))
-
-    (defn bml-bma-store-slot (node key env)
-        (append (bml-compile-value-in node env) (list (bma-lset key) (bma-drop 0))))
-
-    ;; each argument is read once, in the caller's env, into its own slot
-    (defn bml-bma-store-args (args env site index)
-        (if (nil? args)
-            (empty)
-            (append
-                (bml-bma-store-slot (head args) (bml-bma-arg-key site index) env)
-                (bml-bma-store-args (tail args) env site (add index 1)))))
-
-    (defn bml-bma-bind-arg-slots (params args arg-env site index body-env)
-        (if (or (nil? params) (nil? args))
-            body-env
-            (bml-bma-bind-arg-slots
-                (tail params)
-                (tail args)
-                arg-env
-                site
-                (add index 1)
-                (cons
-                    (bml-bma-typed-binding
-                        (bml-parameter-name (head params))
-                        (head args)
-                        arg-env
-                        "bnml-param"
-                        (bml-bma-arg-key site index)
-                        (bml-parameter-type (head params)))
-                    body-env))))
-
-    ;; a refused class call still compiles what it carries, so a refusal
-    ;; nested in its receiver or arguments is named beside its own
-    (defn bml-bma-refuse-after (reason nodes env)
-        (append (bml-compile-values-in nodes env) (bml-bma-refusal reason)))
-
-    ;; Innermost first: parameters, the constructor mark, the fields (read
-    ;; through this), this/self/super on the receiver slot, member names
-    ;; (an unqualified call dispatches on this), the classes, the unit.
-    (defn bml-bma-member-env (member recv-key site args caller-env)
-        (do
-            (let layout (bml-hati-env-layout caller-env))
-            (let owner (bml-hati-member-owner member))
-            (let home (bml-bma-class-home caller-env))
-            (let env0 (cons (bml-local-binding (bml-bma-class-home-key) home home) home))
-            (let env1
-                (bml-hati-bind-names-to
-                    env0
-                    (bml-hati-visible-member-names layout owner)
-                    bml-hati-member-marker))
-            (let env2
-                (cons (bml-bnml-binding "super" (bml-hati-super-marker owner) env1 "bnml-recv" recv-key)
-                    (cons (bml-bnml-binding "self" (bml-hati-self-marker owner) env1 "bnml-recv" recv-key)
-                        (cons (bml-bnml-binding "this" (bml-hati-self-marker owner) env1 "bnml-recv" recv-key)
-                            env1))))
-            (let env3 (bml-hati-bind-fields env2 (bml-hati-class-fields-all layout owner)))
-            (let env4
-                (if (str_eq (bml-hati-member-kind member) "ctor")
-                    (cons (bml-local-binding "__hati_ctor" (bml-hati-ctor-marker owner) env3) env3)
-                    env3))
-            (let env5
-                (bml-bma-bind-arg-slots
-                    (bml-method-node-parameters (bml-hati-member-node member))
-                    args
-                    caller-env
-                    site
-                    0
-                    env4))
-            (bml-bma-with-inline (bml-bnml-with-base env5 caller-env) caller-env)))
-
-    ;; A member's final statement (or its return) is the call's value;
-    ;; every statement before it leaves nothing on the stack.
-    (defn bml-bma-member-body-in (body env)
-        (if (node_eq (node_category body) BML-AST-RETURN)
-            (bml-compile-node-in (bml-node-child body 0) env)
-        (if (node_eq (node_category body) BML-AST-BLOCK)
-            (bml-bma-member-children-in (node_children body) env)
-        (if (node_eq (node_category body) BML-AST-CHOOSE)
-            (bml-bma-choose-in body env bml-bma-member-body-in)
-            (bml-compile-node-in body env)))))
-
-    ;; a choose inside a member: each branch reads as the choose's place
-    ;; reads (a statement leaves nothing, the final one leaves the value);
-    ;; what a branch assigns outside it is declared first, as on Hati
-    (defn bml-bma-choose-in (node env branch-in)
-        (do
-            (let promos (bml-bnml-choose-promotions node env))
-            (append
-                (bml-compile-promotions-in promos env)
-                (list
-                    (bma-choose
-                        (bml-bma-choose-branches-in
-                            (node_children node)
-                            (bml-bnml-fold-env promos env)
-                            branch-in))))))
-
-    (defn bml-bma-choose-branches-in (branches env branch-in)
-        (if (nil? branches)
-            (empty)
-            (cons
-                (branch-in (head branches) env)
-                (bml-bma-choose-branches-in (tail branches) env branch-in))))
-
-    (defn bml-bma-member-children-in (children env)
-        (if (nil? children)
-            (empty)
-            (if (nil? (tail children))
-                (bml-bma-member-body-in (head children) env)
-                (append
-                    (bml-bma-statement-in (head children) env)
-                    (bml-bma-member-children-in
-                        (tail children)
-                        (bml-local-env-after-node (head children) env))))))
-
-    ;; a binding stores and drops as a callee's does; a call's value drops
-    (defn bml-bma-statement-in (node env)
-        (if (node_eq (node_category node) BML-AST-BLOCK)
-            (bml-bma-statements-in (node_children node) env)
-        (if (node_eq (node_category node) BML-AST-CHOOSE)
-            (bml-bma-choose-in node env bml-bma-statement-in)
-        (if (bml-bma-value-statement? node)
-            (bml-bma-dropped (bml-compile-node-in node env))
-            (bml-compile-callee-statement-in node env)))))
-
-    (defn bml-bma-statements-in (children env)
-        (if (nil? children)
-            (empty)
-            (append
-                (bml-bma-statement-in (head children) env)
-                (bml-bma-statements-in
-                    (tail children)
-                    (bml-local-env-after-node (head children) env)))))
-
-    (defn bml-bma-value-statement? (node)
-        (if (bml-hati-call-node? node)
-            (if (bml-bnml-declare-node? node)
-                false
-                (not (bml-bnml-assign-node? node)))
-            false))
-
-    (defn bml-bma-dropped (ops)
-        (if (nil? ops) ops (append ops (list (bma-drop 0)))))
-
-    (defn bml-bma-inline-member (member recv-key site args env)
-        (if (bml-bma-too-deep? env)
-            (bml-bma-refusal "bma/recursion")
-            (bml-bma-member-body-in
-                (bml-method-node-body (bml-hati-member-node member))
-                (bml-bma-member-env member recv-key site args env))))
-
-    ;; a constructor runs as statements over the record in its slot
-    (defn bml-bma-inline-ctor (member recv-key site args env)
-        (if (bml-bma-too-deep? env)
-            (bml-bma-refusal "bma/recursion")
-            (bml-bma-statement-in
-                (bml-method-node-body (bml-hati-member-node member))
-                (bml-bma-member-env member recv-key site args env))))
-
-    ;; --- dispatch: one implementation direct, several one choice --------
-
-    (defn bml-bma-group-add (groups impl name)
-        (if (nil? groups)
-            (list (list impl (list name)))
-            (if (eq (bml-hati-member-fn (head (head groups))) (bml-hati-member-fn impl))
-                (cons (list impl (cons name (nth (head groups) 1))) (tail groups))
-                (cons (head groups) (bml-bma-group-add (tail groups) impl name)))))
-
-    ;; (impl class-names) for each implementation the classes answer with
-    (defn bml-bma-impl-groups (layout classes sig groups)
-        (if (nil? classes)
-            groups
-            (do
-                (let impl (bml-hati-impl layout (bml-hati-class-name (head classes)) sig))
-                (bml-bma-impl-groups
-                    layout
-                    (tail classes)
-                    sig
-                    (if (nil? impl)
-                        groups
-                        (bml-bma-group-add groups impl (bml-hati-class-name (head classes))))))))
-
-    (defn bml-bma-dispatch-branches (groups recv-key site args env)
-        (if (nil? groups)
-            (empty)
-            (cons
-                (append
-                    (list (bma-lget recv-key) (bma-class-in (nth (head groups) 1)))
-                    (bml-bma-inline-member (head (head groups)) recv-key site args env))
-                (bml-bma-dispatch-branches (tail groups) recv-key site args env))))
-
-    (defn bml-bma-dispatch (site-node recv-node sig recv-type args env)
-        (do
-            (let layout (bml-hati-env-layout env))
-            (let groups
-                (bml-bma-impl-groups
-                    layout
-                    (bml-hati-classes-under layout (bml-hati-layout-classes layout) recv-type)
-                    sig
-                    (empty)))
-            (if (nil? groups)
-                (bml-bma-refuse-after "method/abstract" (cons recv-node args) env)
-                (do
-                    (let site (bml-bma-site-key site-node env))
-                    (let recv-key (bml-bma-recv-key site))
-                    (append
-                        (bml-bma-store-slot recv-node recv-key env)
-                        (append
-                            (bml-bma-store-args args env site 0)
-                            (if (nil? (tail groups))
-                                (bml-bma-inline-member (head (head groups)) recv-key site args env)
-                                (list
-                                    (bma-choose
-                                        (bml-bma-dispatch-branches groups recv-key site args env))))))))))
-
-    ;; recv.member(args): super starts at the implementing class's base and
-    ;; inlines directly; any other receiver dispatches on its record.
-    (defn bml-bma-invoke (site-node recv-node member args env)
-        (do
-            (let layout (bml-hati-env-layout env))
-            (let arg-types (bml-hati-static-types args env))
-            (if (bml-hati-super-receiver? recv-node env)
-                (do
-                    (let impl
-                        (bml-hati-super-impl
-                            layout
-                            (bml-hati-name-type (bml-local-name recv-node) env)
-                            member
-                            arg-types))
-                    (if (bml-hati-choice-ok? impl)
-                        (do
-                            (let site (bml-bma-site-key site-node env))
-                            (let recv-key (bml-bma-recv-key site))
-                            (append
-                                (bml-bma-store-slot recv-node recv-key env)
-                                (append
-                                    (bml-bma-store-args args env site 0)
-                                    (bml-bma-inline-member
-                                        (bml-hati-choice-value impl)
-                                        recv-key
-                                        site
-                                        args
-                                        env))))
-                        (bml-bma-refuse-after (bml-hati-choice-value impl) (cons recv-node args) env)))
-                (do
-                    (let recv-type (bml-hati-static-type recv-node env))
-                    (let sig (bml-hati-invoke-sig layout recv-type member arg-types))
-                    (if (bml-hati-choice-ok? sig)
-                        (bml-bma-dispatch site-node recv-node (bml-hati-choice-value sig) recv-type args env)
-                        (bml-bma-refuse-after (bml-hati-choice-value sig) (cons recv-node args) env))))))
-
-    ;; --- fields and records -------------------------------------------
-
-    (defn bml-bma-field-read (recv-node field env)
-        (if (bml-hati-field-known?
-                (bml-hati-env-layout env)
-                (bml-hati-static-type recv-node env)
-                field)
-            (append (bml-compile-value-in recv-node env) (list (bma-rec-get field)))
-            (bml-bma-refusal "field/not-found")))
-
-    (defn bml-bma-field-store (recv-node field value-node env)
-        (if (bml-hati-field-known?
-                (bml-hati-env-layout env)
-                (bml-hati-static-type recv-node env)
-                field)
-            (append
-                (bml-compile-value-in recv-node env)
-                (append (bml-compile-value-in value-node env) (list (bma-rec-set field))))
-            (bml-bma-refusal "field/not-found")))
-
-    (defn bml-bma-this-field-read (field env)
-        (if (bml-hati-has-receiver? env)
-            (bml-bma-field-read (bml-ast-name "this") field env)
-            (bml-bma-refusal "field/no-receiver")))
-
-    (defn bml-bma-this-field-store (field value-node env)
-        (if (bml-hati-has-receiver? env)
-            (bml-bma-field-store (bml-ast-name "this") field value-node env)
-            (bml-bma-refusal "field/no-receiver")))
-
-    ;; a.b where nothing binds the whole name and a is a bound value
-    (defn bml-bma-unbound-name-in (name env)
-        (if (if (bml-bma-classes? env) (bml-hati-receiver-name? name env) false)
-            (do
-                (let split (bml-hati-dotted-split name))
-                (bml-bma-field-read (bml-ast-name (head split)) (nth split 1) env))
-            (bml-bma-name-refusal "name/unbound" name)))
-
-    (defn bml-bma-receiver-call? (node env)
-        (if (bml-bma-classes? env)
-            (bml-hati-receiver-name? (bml-call-name node) env)
-            false))
-
-    (defn bml-bma-field-init-ops (fields)
-        (if (nil? fields)
-            (empty)
-            (append
-                (bml-compile-node-in
-                    (if (bml-hati-field-entry-has-init? (head fields))
-                        (bml-hati-field-entry-init (head fields))
-                        (bml-ast-int 0))
-                    (empty))
-                (bml-bma-field-init-ops (tail fields)))))
-
-    (defn bml-bma-field-names (fields)
-        (if (nil? fields)
-            (empty)
-            (cons
-                (bml-hati-field-entry-name (head fields))
-                (bml-bma-field-names (tail fields)))))
-
-    ;; the record new C(..) starts from: the packet Hati's instance names
-    (defn bml-bma-record-ops (layout entry)
-        (do
-            (let fields (bml-hati-class-fields-all layout (bml-hati-class-name entry)))
-            (append
-                (bml-bma-field-init-ops fields)
-                (list
-                    (bma-array (len fields))
-                    (bma-rec-new
-                        (bml-hati-class-name entry)
-                        (bml-hati-class-id entry)
-                        (bml-bma-field-names fields))))))
-
-    (defn bml-bma-new (site-node class-type args env)
-        (do
-            (let layout (bml-hati-env-layout env))
-            (let entry (bml-hati-layout-class layout class-type))
-            (if (nil? entry)
-                (bml-bma-refuse-after
-                    (if (bml-hati-template-named? layout (bml-hati-type-base class-type))
-                        "template/unspecialized"
-                        "new/unknown-class")
-                    args
-                    env)
-            (if (bml-hati-class-abstract? layout class-type)
-                (bml-bma-refusal "new/abstract-class")
-            (if (not (bml-hati-fields-init-ok? (bml-hati-class-fields-all layout class-type)))
-                (bml-bma-refusal "field/init")
-                (do
-                    (let pick (bml-hati-ctor-pick layout class-type (bml-hati-static-types args env)))
-                    (if (not (bml-hati-choice-ok? pick))
-                        (bml-bma-refusal (bml-hati-choice-value pick))
-                    (if (nil? (bml-hati-choice-value pick))
-                        (bml-bma-record-ops layout entry)
-                        (do
-                            (let site (bml-bma-site-key site-node env))
-                            (let recv-key (bml-bma-recv-key site))
-                            (append
-                                (bml-bma-record-ops layout entry)
-                                (append
-                                    (list (bma-lset recv-key) (bma-drop 0))
-                                    (append
-                                        (bml-bma-store-args args env site 0)
-                                        (append
-                                            (bml-bma-inline-ctor
-                                                (bml-hati-choice-value pick)
-                                                recv-key
-                                                site
-                                                args
-                                                env)
-                                            (list (bma-lget recv-key)))))))))))))))
-
-    ;; self(..) runs another constructor of this class on the same record,
-    ;; super(..) one of the base class's.
-    (defn bml-bma-ctor-chain (site-node which args env)
-        (do
-            (let binding (bml-local-lookup-direct env "__hati_ctor"))
-            (if (nil? binding)
-                (bml-bma-refusal "ctor/outside-constructor")
-                (do
-                    (let layout (bml-hati-env-layout env))
-                    (let class-name (bml-hati-marker-str (bml-local-binding-value binding) 0))
-                    (let target
-                        (if (str_eq which "self")
-                            class-name
-                            (bml-hati-class-base-name layout class-name)))
-                    (let recv-key (bml-local-binding-key (bml-local-lookup env "this")))
-                    (if (nil? (bml-hati-layout-class layout target))
-                        (bml-bma-refusal "super/no-base")
-                        (do
-                            (let pick
-                                (bml-hati-ctor-pick layout target (bml-hati-static-types args env)))
-                            (if (not (bml-hati-choice-ok? pick))
-                                (bml-bma-refusal (bml-hati-choice-value pick))
-                            (if (nil? (bml-hati-choice-value pick))
-                                (list (bma-lget recv-key))
-                                (do
-                                    (let site (bml-bma-site-key site-node env))
-                                    (append
-                                        (bml-bma-store-args args env site 0)
-                                        (append
-                                            (bml-bma-inline-ctor
-                                                (bml-hati-choice-value pick)
-                                                recv-key
-                                                site
-                                                args
-                                                env)
-                                            (list (bma-lget recv-key)))))))))))))
-
-    ;; class meaning rides reserved call names; each reads here as Hati's
-    ;; lowering reads it
-    (defn bml-bma-class-marker-in (node name env)
-        (do
-            (let args (bml-call-args node))
-            (if (str_eq name "__hati_field")
-                (bml-bma-this-field-read (bml-hati-marker-str node 0) env)
-            (if (str_eq name "__hati_field_get")
-                (bml-bma-this-field-read (node_value (bml-node-child (head args) 0)) env)
-            (if (str_eq name "__hati_field_set")
-                (bml-bma-this-field-store
-                    (node_value (bml-node-child (head args) 0))
-                    (nth args 1)
-                    env)
-            (if (str_eq name "__hati_new")
-                (bml-bma-new node (bml-hati-marker-str node 0) (tail args) env)
-            (if (str_eq name "__hati_invoke")
-                (bml-bma-invoke node (head args) (bml-hati-marker-str node 1) (drop 2 args) env)
-            (if (str_eq name "__hati_self_ctor")
-                (bml-bma-ctor-chain node "self" args env)
-            (if (str_eq name "__hati_super_ctor")
-                (bml-bma-ctor-chain node "super" args env)
-            (if (str_eq name "__hati_member")
-                (bml-bma-refusal "name/method")
-            (if (str_eq name "__hati_ctor")
-                (bml-bma-refusal "name/constructor")
-            (if (str_eq name "__hati_abstract")
-                (bml-bma-refusal "method/abstract")
-            (if (str_eq name "__hati_unparsed")
-                (bml-bma-refusal "method/body-unparsed")
-                (bml-bma-refusal "bma/class-lane"))))))))))))))
-
-    ;; A free callee in a unit with classes carries the classes, reads each
-    ;; argument once into its own slot, and counts toward the inline limit.
-    (defn bml-bma-class-unit-call (node method-node env)
-        (if (bml-bma-too-deep? env)
-            (bml-bma-refusal "bma/recursion")
-            (do
-                (let site (bml-bma-site-key node env))
-                (append
-                    (bml-bma-store-args (bml-call-args node) env site 0)
-                    (bml-bma-member-body-in
-                        (bml-method-node-body method-node)
-                        (bml-bma-with-inline
-                            (bml-bnml-with-base
-                                (bml-bma-bind-arg-slots
-                                    (bml-method-node-parameters method-node)
-                                    (bml-call-args node)
-                                    env
-                                    site
-                                    0
-                                    (bml-bma-carry-classes (bml-bma-home-env method-node env) env))
-                                env)
-                            env))))))
 
     (defn bml-scope-nodes-hold? (nodes node)
         (if (nil? nodes)
@@ -12546,15 +11869,7 @@
                 (bml-hati-marker-str value 1)
                 ""))))))))
 
-    ;; A parameter binding carries its declared type as a seventh field
-    ;; (bml-bma-typed-binding): a callee reads its parameter as declared,
-    ;; on both lanes, whatever the argument's own type.
     (defn bml-hati-binding-type (binding)
-        (if (gt (len binding) 6)
-            (nth binding 6)
-            (bml-hati-binding-value-type binding)))
-
-    (defn bml-hati-binding-value-type (binding)
         (do
             (let value (bml-local-binding-value binding))
             (if (node_eq (node_category value) BML-AST-CALL)
@@ -13043,7 +12358,7 @@
                         (list "ok" stub)))))))
 
     ;; (ok sig) or (refuse reason): the signature recv.member(args) names,
-    ;; before any dispatch. Both lanes pick through it.
+    ;; before any dispatch.
     (defn bml-hati-invoke-sig (layout recv-type member-name arg-types)
         (do
             (let class-type? (not (nil? (bml-hati-layout-class layout recv-type))))
@@ -13084,8 +12399,7 @@
             (if (nil? entry) "" (bml-hati-class-base entry))))
 
     ;; super.member(args): the lookup starts at the implementing class's
-    ;; base and the call is direct. (ok member) or (refuse reason); both
-    ;; lanes pick through it.
+    ;; base and the call is direct. (ok member) or (refuse reason).
     (defn bml-hati-super-impl (layout class-name member-name arg-types)
         (do
             (let base (bml-hati-class-base-name layout class-name))
@@ -13122,7 +12436,7 @@
         (bml-hati-members-of-kind (bml-hati-class-members entry) "ctor"))
 
     ;; (ok member), (ok empty) for a class with no constructor and no
-    ;; arguments, or (refuse reason); both lanes pick through it.
+    ;; arguments, or (refuse reason).
     (defn bml-hati-ctor-pick (layout class-name arg-types)
         (do
             (let ctors (bml-hati-class-ctors (bml-hati-layout-class layout class-name)))
@@ -13316,8 +12630,8 @@
             false))
 
     ;; a.f = e, where a is a bound value of a unit with classes: a store
-    ;; into a's field on both lanes, never a local named "a.f". A unit
-    ;; with no class keeps its own reading.
+    ;; into a's field, never a local named "a.f". A unit with no class
+    ;; keeps its own reading.
     (defn bml-hati-dotted-assign? (node env)
         (if (bml-bnml-assign-node? node)
             (if (nil? (bml-hati-layout-classes (bml-hati-env-layout env)))
@@ -13843,8 +13157,9 @@
                 (bml-source-parse-no-step objects))))
 
     ;; this.f = e; and self.f = e; set a field of the receiver; a.f = e;
-    ;; for any other name a reads as an assignment to "a.f", which both
-    ;; lanes store into a's field when a is a value of a unit with classes.
+    ;; for any other name a reads as an assignment to "a.f", which the
+    ;; lowering stores into a's field when a is a value of a unit with
+    ;; classes.
     (defn bml-source-this-token? (object)
         (if (bml-source-token-value? object "this")
             true
@@ -14523,7 +13838,7 @@
                                 (sub budget 1)))))))))
 
     ;; the nodes a unit's layout reads: its own, then each type it reaches
-    ;; in the units it links. Both lanes build their layout from these.
+    ;; in the units it links
     (defn bml-scope-layout-nodes (link)
         (do
             (let own (bml-scope-unit-all-nodes (bml-scope-link-main link)))

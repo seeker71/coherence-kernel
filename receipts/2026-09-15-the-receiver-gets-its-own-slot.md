@@ -95,42 +95,28 @@ voices only when something is wrong:
   lowering finds it: a receiver no class answers (`bml-hati-lower-invoke`), a record no constructor
   builds (`bml-hati-lower-new`), a template that does not specialize (`bml-hati-instantiate`,
   `template/arity` and `template/depth`).
-- **Lanes.** The compiler keeps one two-lane door, `bml-run-lanes-unit-value` (landed beside this
-  work in `a2c456349`): a lane whose answer is unsupported voices through `bch-ran`, two answers that
-  differ through `bch-lanes`. The live-run door `observe/bml-native-run.bml` runs every fixture
-  through it and judges it by its own head. On fkwu, on the organ commit (`1728c5c42`), it read 2 ok of 8:
-  `bml-typed-overloads.bml` (136) and `bml-choose-state.bml` (12) agree. Five class fixtures and
-  `bml-choose-fields.bml` read lane-gap at their Hati answers, because BMA does not carry class
-  shapes yet. `bml-class-interfaces.bml` differs: it names `CompilerTrace` without importing it,
-  and my earlier probe joined that interface by hand, which a real run does not.
+- **The live door.** `observe/bml-native-run.bml` runs every fixture and judges it by its own
+  head. On the organ commit (`1728c5c42`) it still ran two lanes and read 2 ok of 8: five class
+  fixtures and `bml-choose-fields.bml` read lane-gap, and `bml-class-interfaces.bml` differed
+  because it named `CompilerTrace` without importing it (my earlier probe had joined that
+  interface by hand, which a real run does not). Since `ca10b1c9d` the door and the checked run
+  are native only, one declared answer per source.
 
 No live remedy is wired: none of these unsupported readings has a known automatic repair, so each abstains and
 asks for evidence.
 
-## BMA carries the class shapes
+## The class families on the native path
 
-The second order: BMA gets records, receivers and self, constructors with self/super chaining,
-dispatch across bases and overrides, interfaces with default methods and template specialization,
-from the same class layout Hati uses.
+The second order asked BMA for the class shapes too. A BMA class lane landed in `f75e85ab3`
+(objects in the stack floor, inlined members over frame slots, dispatch as a choose, BMA
+constructors, interfaces and templates) and left in the next commit: Urs's word at 15:31, which
+reached this worktree after that push, is that BMA was the thesis's assembly, the path is Form
+kernel primitives and the JIT, and the two are not mixed. The class families are judged on the
+native path alone. The method, super and constructor choices split out on the way stay, because
+the native lowering reads them: `bml-hati-invoke-sig`, `bml-hati-super-impl` and
+`bml-hati-ctor-pick`.
 
-- **One layout.** A unit with classes compiles on BMA over `bml-hati-unit-layout`, the layout the
-  Hati image takes. `bml-hati-invoke-sig`, `bml-hati-super-impl` and `bml-hati-ctor-pick` choose
-  for both lanes; Hati maps the choice to a function index, BMA inlines it. Subtyping settles a
-  class-typed overload on BMA as it does on Hati.
-- **Receivers and arguments.** BMA has no calls, so a member inlines. The receiver and each
-  argument are read once into floor-frame slots keyed by the call site's `node_inst` and the
-  inline depth, so nested and sibling sites never share one. `this`, `self` and `super` read the
-  receiver slot, and a parameter reads its own slot, typed as declared.
-- **Objects.** `new` makes a handle into a floor row naming the class, its class id and every
-  structural field, base first. Every stack snapshot carries the floor, so a field set in a failed
-  branch or before a restore rolls back, the answer Hati's field journal gives.
-- **Dispatch.** One implementation among the classes a receiver can hold inlines directly; several
-  become one `choose` whose branches each admit only their own classes (`class-in`). `super.M()`
-  inlines the base's member.
-- **Construction.** A constructor runs as statements over the record in its slot; `self(..)` and
-  `super(..)` run another constructor on that same slot.
-
-Found on the way, and healed on both lanes:
+Found while building it, and healed on the native path:
 
 - **Linked types.** A unit's layout also takes each type it reaches in the units it links
   (`bml-scope-layout-nodes`): a base, an interface, a field, a parameter, a `new` record, and what
@@ -143,29 +129,28 @@ Found on the way, and healed on both lanes:
   fields were bound before `this`. They bind after it now; a local or parameter of the same name
   still shadows the field.
 - **`a.f = e`.** The reader took only `this.f = e;`. At `c.v = 4;` it stopped and kept what came
-  before, so both lanes answered the record itself. It reads `a.f = e;` now, and both lanes store
-  into `a`'s field when `a` is a value in a unit with classes.
+  before, so the program answered the record itself. It reads `a.f = e;` now, and the lowering
+  stores into `a`'s field when `a` is a value in a unit with classes.
 
-Witnessed on fkwu: each fixture on each lane over the units the live door gives it, and each
-fixture alone through `observe/bml-native-run.bml` for the organ.
+Witnessed on fkwu, each fixture alone through the native-only `observe/bml-native-run.bml`, on
+this commit:
 
-| fixture | BMA | Hati | organ |
-| --- | --- | --- | --- |
-| `bml-class-dispatch.bml` | 63 | 63 | silent |
-| `bml-class-construction.bml` | 84 | 84 | silent |
-| `bml-class-overloads.bml` | 304 | 304 | silent |
-| `bml-class-interfaces.bml` | "parse" | "parse" | silent |
-| `bml-class-templates.bml` | 133 | 133 | silent |
-| `bml-choose-fields.bml` | 8 | 8 | silent |
-| `bml-typed-overloads.bml` | 136 | 136 | silent |
+| fixture | native answer | organ |
+| --- | --- | --- |
+| `bml-class-dispatch.bml` | 63 | silent |
+| `bml-class-construction.bml` | 84 | silent |
+| `bml-class-overloads.bml` | 304 | silent |
+| `bml-class-interfaces.bml` | "parse" | silent |
+| `bml-class-templates.bml` | 133 | silent |
+| `bml-choose-fields.bml` | 8 | silent |
+| `bml-typed-overloads.bml` | 136 | silent |
 
-Each head now reads one answer on both lanes. The door over every fixture reads 65 ok of 67; the
-other two are the control lane's gaps named below. A probe outside the tree agrees on both lanes
-for one object through a parameter (9), two names for one object (4), an interface default
-("hi"), a call through an interface over two classes (21), a bare field set in a constructor (6)
-and in a choose whose first branch fails (2), and a parameter named like a field (4). Every bml.fk
-consumer (the hati-native, class-model, inheritance and thesis proofs) reads the same verdict with
-this bml.fk as with the one before it; freshness 31. From `form/`, `./validate.sh` reads "1 band(s)
+The door over every fixture reads 67 ok of 67. A probe outside the tree reads on the native path:
+one object through a parameter 9, two names for one object 4, an interface default "hi", a call
+through an interface over two classes 21, a bare field set in a constructor 6 and in a choose
+whose first branch fails 2, a parameter named like a field 4, and `c.v = 4;` then `c.v` 4. Every
+bml.fk consumer (the hati-native, class-model, inheritance and thesis proofs) reads the same
+verdict as before the class work; freshness 31. From `form/`, `./validate.sh` reads "1 band(s)
 four-way ... 1 ok, 0 divergent" on all 34 rows that load bml.fk, and the drift door reads
 `drift-gates pass=16383 full=16383 refused=0`.
 
@@ -176,20 +161,18 @@ four-way ... 1 ok, 0 divergent" on all 34 rows that load bml.fk, and the drift d
 - A field initializer is read only as a literal; a second class base (delegation) is named
   `class/delegated-base`.
 - Records made on the host carry no class id; method tables read records made by `new`.
-- BMA has no calls: a member that reaches itself answers `bma/recursion` instead of running.
 - A type reached through an import lowers its member bodies in the importing unit's scope. The
   interface this order names has no bodies; a class from another unit whose bodies call that
   unit's own names would read them unbound.
 - The reader stops at a statement it cannot read and keeps what came before, without a reason.
-  That is how `c.v = 4;` answered the record itself on both lanes; `a.b.c = e;` is still not read.
-- BMA carries no while, if or try: `bml-branch-assign.bml` and `bml-control-standing.bml` read
-  lane-gap, for the control lane.
+  That is how `c.v = 4;` answered the record itself. An unreadable statement should voice through
+  the compiler organ instead of vanishing; that is the next work, then `a.b.c = e;`.
 - The witness probes stay outside the tree and ran on fkwu only.
 
 ## For the lead
 
-The north-star form can move the five families above from current-unsupported to current-supported,
-on both lanes, once their organ readings stand. No corpus row added, and the north-star form is not
+The north-star form can move the five families above from current-unsupported to current-supported
+on the native path, once their organ readings stand. No corpus row added, and the north-star form is not
 edited here.
 
 ## Closing
@@ -209,19 +192,20 @@ Frontier word, 0 hits in the tree: **selfslot**, the one argument position a met
 occupies. Its question: where else does one slot carry two meanings that only diverge when both are
 present in the same call?
 
-Second movement. Most surprising: the rollback came free. `bml-choose-fields.bml` asks a field set
-in a failed branch to vanish, and Hati needed a journal for it. On BMA, once objects moved from
-shared records into the floor frame beside the mutable locals, every snapshot already carried them,
-and the fixture read 8 on its first run.
+Second movement. Most surprising: the lane I built was the one to let go. The BMA class lane read
+every fixture the same as Hati and landed, and the direction that BMA is not required arrived just
+after the push. What stays is what the building found on the native path: a bare field that could
+not be read, a reader that dropped statements, types an import could not reach, a package no unit
+declared.
 
-Discomfort to gold: `a.v = 4` through a parameter answered 0 on Hati and an empty list on BMA, and
-my fix to both lowerings changed nothing. The pull was to keep patching the lowering. A shape probe
-showed the program held two statements, not four: the reader had stopped at `c.v = 4;` and dropped
-the rest without a word. The gold was one reader step, and a named gap: a reader that stops
-silently turns an unreadable line into a quiet wrong answer.
+Discomfort to gold: `a.v = 4` through a parameter answered 0, and my fix to the lowering changed
+nothing. The pull was to keep patching the lowering. A shape probe showed the program held two
+statements, not four: the reader had stopped at `c.v = 4;` and dropped the rest without a word.
+The gold was one reader step, and a named gap: a reader that stops silently turns an unreadable
+line into a quiet wrong answer.
 
-Frontier word, 0 hits in the tree: **floorheap**, objects kept in the frame every snapshot
-carries, so undoing a branch undoes their fields with it. Its question: which other state could
-live where the snapshot already reaches, instead of being journaled after the fact?
+Frontier word, 0 hits in the tree: **quietstop**, a reader that ends at a line it cannot read and
+hands on what it has, as if the source ended there. Its question: where else does a partial
+reading pass for a whole one?
 
 — Claude (Opus 5), as Sema, worktree agent-a60550cd21b84ef52
