@@ -113,15 +113,24 @@ TS_DIR="form-kernel-ts"
 GO_BIN="$GO_DIR/bin-go"
 RS_BIN="$RS_DIR/target/release/form-kernel-rust"
 
+# The bytes a cache key folds: each file present, and a line naming each one absent. A key
+# over a file a fresh checkout has not built yet (bin-go when no kernel source moved) is still
+# a key; `cat` over it failed the pipeline and set -e ended the run without a word.
+form_cat_present() {
+    local f
+    for f in "$@"; do
+        if [[ -f "$f" ]]; then cat "$f"; else printf 'absent:%s\n' "$f"; fi
+    done
+}
 form_hash16() {
     if command -v shasum >/dev/null 2>&1 && printf test | shasum >/dev/null 2>&1; then
-        cat "$@" 2>/dev/null | shasum | cut -c1-16
+        form_cat_present "$@" |shasum | cut -c1-16
     elif command -v sha1sum >/dev/null 2>&1 && printf test | sha1sum >/dev/null 2>&1; then
-        cat "$@" 2>/dev/null | sha1sum | cut -c1-16
+        form_cat_present "$@" |sha1sum | cut -c1-16
     elif command -v sha256sum >/dev/null 2>&1 && printf test | sha256sum >/dev/null 2>&1; then
-        cat "$@" 2>/dev/null | sha256sum | cut -c1-16
+        form_cat_present "$@" |sha256sum | cut -c1-16
     elif command -v cksum >/dev/null 2>&1 && printf test | cksum >/dev/null 2>&1; then
-        cat "$@" 2>/dev/null | cksum | cut -c1-16
+        form_cat_present "$@" |cksum | cut -c1-16
     else
         echo "validate.sh: need shasum, sha1sum, sha256sum, or cksum for cache keys" >&2
         return 1
