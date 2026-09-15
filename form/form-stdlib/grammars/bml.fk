@@ -11937,8 +11937,12 @@
                 (bml-hati-layout-empty)
                 (bml-local-binding-value binding))))
 
-    (defn bml-hati-class-entry (name base ifaces fields members id node)
-        (list "bml-hati-class" name base ifaces fields members id node))
+    ;; delegates: the classes named after the structural base, each a
+    ;; delegation base in the thesis's class model
+    (defn bml-hati-class-entry (name base ifaces fields members id node delegates)
+        (list "bml-hati-class" name base ifaces fields members id node delegates))
+
+    (defn bml-hati-class-delegates (entry) (nth entry 8))
 
     (defn bml-hati-class-name (entry) (nth entry 1))
     (defn bml-hati-class-base (entry) (nth entry 2))
@@ -12388,22 +12392,29 @@
 
     ;; --- class queries: chains, fields, interfaces, implementations ------
 
-    (defn bml-hati-class-chain-loop (layout name depth)
-        (if (gt depth (len (bml-hati-layout-classes layout)))
-            (empty)
-            (do
-                (let entry (bml-hati-layout-class layout name))
-                (if (nil? entry)
-                    (empty)
-                    (cons
-                        entry
-                        (bml-hati-class-chain-loop
-                            layout
-                            (bml-hati-class-base entry)
-                            (add depth 1)))))))
-
+    ;; A class, then each of its supers in declaration order, depth first:
+    ;; the structural base's line, then each delegation base's; each class
+    ;; once. This is the thesis model's lookup order (bml-class-method-
+    ;; lookup): members, fields, interfaces and subtyping all read it.
     (defn bml-hati-class-chain (layout name)
-        (bml-hati-class-chain-loop layout name 0))
+        (reverse-list (bml-hati-chain-dfs layout (list name) (empty) 0)))
+
+    (defn bml-hati-chain-dfs (layout pending seen steps)
+        (if (nil? pending)
+            seen
+        (if (gt steps (mul 4 (add 1 (len (bml-hati-layout-classes layout)))))
+            seen
+            (do
+                (let entry (bml-hati-layout-class layout (head pending)))
+                (if (if (nil? entry) true (bml-hati-entries-named? seen (head pending)))
+                    (bml-hati-chain-dfs layout (tail pending) seen (add steps 1))
+                    (bml-hati-chain-dfs
+                        layout
+                        (append
+                            (cons (bml-hati-class-base entry) (bml-hati-class-delegates entry))
+                            (tail pending))
+                        (cons entry seen)
+                        (add steps 1)))))))
 
     (defn bml-hati-fields-of-chain (chain)
         (if (nil? chain)
@@ -14377,7 +14388,8 @@
                             (nth built 1)
                             (nth built 0)
                             id
-                            node)
+                            node
+                            (empty))
                         acc)))))
 
     (defn bml-hati-iface-entries-from (nodes index acc)
@@ -14411,9 +14423,11 @@
                 (cons (head names) (bml-hati-names-in (tail names) allowed))
                 (bml-hati-names-in (tail names) allowed))))
 
-    ;; The first super is the structural base unless it names an interface;
-    ;; the others are the interfaces the class declares.
-    (defn bml-hati-normalize-classes (entries iface-names)
+    ;; The first super is the structural base unless it names an interface.
+    ;; Of the others, an interface is one the class declares and a class is
+    ;; a delegation base: the thesis's class model reads the first
+    ;; superclass as structural and each later one as delegated.
+    (defn bml-hati-normalize-classes (entries iface-names class-names)
         (if (nil? entries)
             (empty)
             (do
@@ -14432,8 +14446,9 @@
                         (bml-hati-class-fields entry)
                         (bml-hati-class-members entry)
                         (bml-hati-class-id entry)
-                        (bml-hati-class-node entry))
-                    (bml-hati-normalize-classes (tail entries) iface-names)))))
+                        (bml-hati-class-node entry)
+                        (bml-hati-names-in (bml-hati-class-ifaces entry) class-names))
+                    (bml-hati-normalize-classes (tail entries) iface-names class-names)))))
 
     (defn bml-hati-super-reasons (supers class-names iface-names)
         (if (nil? supers)
@@ -14442,7 +14457,7 @@
                 (if (fsc-string-list-contains? iface-names (head supers))
                     (empty)
                 (if (fsc-string-list-contains? class-names (head supers))
-                    (list "class/delegated-base")
+                    (empty)
                     (list "class/unknown-super")))
                 (bml-hati-super-reasons (tail supers) class-names iface-names))))
 
@@ -14592,7 +14607,7 @@
                 (bml-hati-template-names (bml-scope-nodes-of decls BML-AST-TEMPLATE)))
             (let plain
                 (bml-hati-layout
-                    (bml-hati-normalize-classes raw-classes iface-names)
+                    (bml-hati-normalize-classes raw-classes iface-names class-names)
                     ifaces
                     (empty)
                     -1
