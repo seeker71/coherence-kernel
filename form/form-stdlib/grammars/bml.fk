@@ -3763,6 +3763,18 @@
     (defn bml-source-restore-simple (_object)
         (list (bml-src-keyword "restore") (bml-src-op ";")))
 
+    (defn bml-emit-discard-simple (_objects)
+        (bml-ast-discard 0))
+
+    (defn bml-source-discard-simple (_object)
+        (list (bml-src-keyword "discard") (bml-src-op ";")))
+
+    (defn bml-emit-save-simple (_objects)
+        (bml-ast-save 0))
+
+    (defn bml-source-save-simple (_object)
+        (list (bml-src-keyword "save") (bml-src-op ";")))
+
     (defn bml-emit-state-int (objects)
         (bml-ast-block
             (list (bml-ast-save 0)
@@ -3890,6 +3902,8 @@
       cut-simple ::= "cut" ";" => bml-emit-cut-simple <= bml-source-cut-simple;
       mark-simple ::= "mark" ";" => bml-emit-mark-simple <= bml-source-mark-simple;
       restore-simple ::= "restore" ";" => bml-emit-restore-simple <= bml-source-restore-simple;
+      discard-simple ::= "discard" ";" => bml-emit-discard-simple <= bml-source-discard-simple;
+      save-simple ::= "save" ";" => bml-emit-save-simple <= bml-source-save-simple;
       nostate-property ::= "nostate" => bml-emit-node-source;
       choice-fail-int ::= "choice" "{" "fail" ";" "}" "," "{" "return" $value:int ";" "}" => bml-emit-choose-fail-int;
       choice ::= "choice" code-block choose-tail => bml-emit-node-source;
@@ -4031,6 +4045,8 @@
               "cut-simple"
               "mark-simple"
               "restore-simple"
+              "discard-simple"
+              "save-simple"
               "array-int"
               "throw-int"))
 
@@ -5074,10 +5090,13 @@
     (defn bml-ast-index (target at)
         (bml-ast-call-args "__bml_index" (list target at)))
 
+    ;; a CALL-shaped node whose first child is no string names no call
     (defn bml-call-named? (node name)
         (if (node_eq (node_category node) BML-AST-CALL)
             (if (eq (len (node_children node)) 2)
-                (str_eq (bml-call-name node) name)
+                (if (str_eq (value_kind (bml-call-name node)) "string")
+                    (str_eq (bml-call-name node) name)
+                    false)
                 false)
             false))
 
@@ -6261,6 +6280,8 @@
             (bmf-native "bml-emit-cut-simple" bml-emit-cut-simple BML-AST-CUT)
             (bmf-native "bml-emit-mark-simple" bml-emit-mark-simple BML-AST-SAVE)
             (bmf-native "bml-emit-restore-simple" bml-emit-restore-simple BML-AST-RESTORE)
+            (bmf-native "bml-emit-discard-simple" bml-emit-discard-simple BML-AST-DISCARD)
+            (bmf-native "bml-emit-save-simple" bml-emit-save-simple BML-AST-SAVE)
             (bmf-native "bml-emit-char-lit" bml-emit-char-lit BML-AST-CHAR)
             (bmf-native "bml-emit-array-int" bml-emit-array-int BML-AST-ARRAY)
             (bmf-native "bml-emit-method-return-add" bml-emit-method-return-add BML-AST-METHOD)
@@ -6297,6 +6318,8 @@
                 (compiler-rule "bml" "cut-simple" "BML cut primitive to BMA ops" bml-emit-cut-simple)
                 (compiler-rule "bml" "mark-simple" "BML mark primitive to BMA save ops" bml-emit-mark-simple)
                 (compiler-rule "bml" "restore-simple" "BML restore primitive to BMA restore ops" bml-emit-restore-simple)
+                (compiler-rule "bml" "discard-simple" "BML discard primitive to BMA discard ops" bml-emit-discard-simple)
+                (compiler-rule "bml" "save-simple" "BML save primitive to BMA save ops" bml-emit-save-simple)
                 (compiler-rule "bml" "char-lit" "BML char literal source objects" bml-emit-char-lit)
                 (compiler-rule "bml" "array-int" "BML array literal source objects" bml-emit-array-int)
                 (compiler-rule "bml" "method-return-add" "BML method object to BMA ops" bml-emit-method-return-add)
@@ -6466,7 +6489,25 @@
             (not (str_eq (bml-local-binding-kind binding) ""))))
 
     (defn bml-bnml-new-key (name env)
-        (str_concat name (str_concat "@" (int_to_str (len env)))))
+        (str_concat name (str_concat "@" (int_to_str (bml-bnml-depth env)))))
+
+    ;; How deep a binding sits: its env's length, plus the depth of the call
+    ;; an inlined BMA callee was compiled from, so a callee's slots never
+    ;; share a key with its caller's.
+    (defn bml-bnml-depth (env)
+        (add (len env) (bml-bnml-base env)))
+
+    (defn bml-bnml-base (env)
+        (if (nil? env)
+            0
+            (if (str_eq (bml-local-binding-kind (head env)) "bnml-base")
+                (bml-local-binding-key (head env))
+                (bml-bnml-base (tail env)))))
+
+    (defn bml-bnml-with-base (callee-env caller-env)
+        (cons
+            (bml-bnml-binding "__bnml_base" (empty) callee-env "bnml-base" (bml-bnml-depth caller-env))
+            callee-env))
 
     (defn bml-bnml-assign-key (node env)
         (do
@@ -6518,6 +6559,17 @@
                 (bml-bnml-any-reads-mutable? (tail nodes) env))))
 
     (defn bml-bnml-env-after-node (node env)
+        (if (bml-bnml-top-node? node)
+            (bml-local-env-after-node (head (bml-call-args node)) env)
+        (if (node_eq (node_category node) BML-AST-SAVE)
+            (cons (bml-bnml-binding "__bnml_mark" (empty) env "bnml-mark" "") env)
+        (if (node_eq (node_category node) BML-AST-RESTORE)
+            (bml-bnml-env-after-restore env)
+        (if (node_eq (node_category node) BML-AST-DISCARD)
+            (bml-bnml-env-after-discard env)
+            (bml-bnml-env-after-core node env))))))
+
+    (defn bml-bnml-env-after-core (node env)
         (if (node_eq (node_category node) BML-AST-BLOCK)
             (bml-bnml-block-env-after node env)
         (if (bml-bnml-declare-node? node)
@@ -6555,7 +6607,7 @@
             (do
                 (let binding (head bindings))
                 (let name (bml-local-binding-name binding))
-                (if (str_eq (bml-local-binding-kind binding) "bnml-assign")
+                (if (bml-bnml-rides-out? (bml-local-binding-kind binding))
                     (if (fsc-string-list-contains? declared name)
                         (bml-bnml-outward (tail bindings) declared env)
                         (bml-bnml-outward (tail bindings) declared (cons binding env)))
@@ -6586,7 +6638,9 @@
                 (bml-compile-choose-branches-in (tail branches) env))))
 
     (defn bml-compile-node (node)
-        (bml-compile-node-in node (empty)))
+        (if (bml-bnml-uses-locals? node)
+            (cons (bma-frame-init 0) (bml-compile-node-in node (empty)))
+            (bml-compile-node-in node (empty))))
 
     (defn bml-call-bind-first-arg (method-node call-node env)
         (do
@@ -6654,7 +6708,7 @@
                                         (bml-method-node-parameters method-node)
                                         (bml-call-args node)
                                         env
-                                        (bml-bma-home-env method-node env)))))))))))
+                                        (bml-bnml-with-base (bml-bma-home-env method-node env) env)))))))))))
 
     ;; A callee's final return is the call's value: inlined BMA keeps the
     ;; caller's stream running instead of ending it at the callee's return.
@@ -6676,17 +6730,32 @@
                         (tail children)
                         (bml-local-env-after-node (head children) env))))))
 
-    ;; Inside an inlined callee a binding statement (const, local, assign)
-    ;; only binds: BMA reads locals by substitution, and a value pushed here
-    ;; would sit under the call's result in the caller's expression.
+    ;; Inside an inlined callee a binding statement leaves nothing on the
+    ;; stack under the call's result: a const that reads no mutable local
+    ;; only binds; a local, an assignment, or a const that reads one stores
+    ;; its value in the floor frame and drops it. A nested block's
+    ;; statements follow the same rule.
     (defn bml-compile-callee-statement-in (node env)
         (if (node_eq (node_category node) BML-AST-CONST)
-            (empty)
+            (if (bml-bnml-reads-mutable? (bml-local-const-value node) env)
+                (append (bml-compile-const-in node env) (list (bma-drop 0)))
+                (empty))
         (if (bml-bnml-declare-node? node)
-            (empty)
+            (append (bml-compile-node-in node env) (list (bma-drop 0)))
         (if (bml-bnml-assign-node? node)
+            (append (bml-compile-node-in node env) (list (bma-drop 0)))
+        (if (node_eq (node_category node) BML-AST-BLOCK)
+            (bml-compile-callee-block-in (node_children node) env)
+            (bml-compile-child-in node env))))))
+
+    (defn bml-compile-callee-block-in (children env)
+        (if (nil? children)
             (empty)
-            (bml-compile-child-in node env)))))
+            (append
+                (bml-compile-callee-statement-in (head children) env)
+                (bml-compile-callee-block-in
+                    (tail children)
+                    (bml-local-env-after-node (head children) env)))))
 
     (defn bml-compile-node-in (node env)
         (do
@@ -6706,7 +6775,7 @@
                         (append (bml-compile-node-in (bml-node-child node 1) env)
                                 (list (bma-add 0))))
             (if (node_eq cat BML-AST-CONST)
-                (bml-compile-node-in (bml-local-const-value node) env)
+                (bml-compile-const-in node env)
             (if (node_eq cat BML-AST-NAME)
                 (bml-compile-name-in node env)
             (if (node_eq cat BML-AST-CALL)
@@ -6918,10 +6987,38 @@
                     (bml-bma-refusal "name/unbound")
                 (if (bml-bma-method-value? (bml-local-binding-value binding))
                     (bml-bma-refusal "name/method")
+                (if (bml-bnml-binding? binding)
+                    (list (bma-lget (bml-local-binding-key binding)))
                     (bml-compile-value-in
                         (bml-local-binding-value binding)
-                        (bml-local-binding-env binding)))))
+                        (bml-local-binding-env binding))))))
             (bml-compile-node-in node env))))
+
+    ;; A const that reads a mutable local keeps what it read in its own slot.
+    (defn bml-compile-const-in (node env)
+        (if (bml-bnml-reads-mutable? (bml-local-const-value node) env)
+            (append
+                (bml-compile-value-in (bml-local-const-value node) env)
+                (list (bma-lset (bml-bnml-new-key (bml-local-const-name node) env))))
+            (bml-compile-node-in (bml-local-const-value node) env)))
+
+    ;; A leaf (no children) is a value, never a statement: the walk asks
+    ;; only nodes that carry children.
+    (defn bml-bnml-uses-locals? (node)
+        (if (eq (len (node_children node)) 0)
+            false
+        (if (bml-bnml-declare-node? node)
+            true
+        (if (bml-bnml-assign-node? node)
+            true
+            (bml-bnml-any-uses-locals? (node_children node))))))
+
+    (defn bml-bnml-any-uses-locals? (nodes)
+        (if (nil? nodes)
+            false
+            (if (bml-bnml-uses-locals? (head nodes))
+                true
+                (bml-bnml-any-uses-locals? (tail nodes)))))
 
     (defn bml-compile-values-in (nodes env)
         (if (nil? nodes)
@@ -6932,9 +7029,13 @@
 
     (defn bml-compile-call-node-in (node env)
         (if (bml-bnml-declare-node? node)
-            (bml-compile-node-in (bml-bnml-value node) env)
+            (append
+                (bml-compile-value-in (bml-bnml-value node) env)
+                (list (bma-lset (bml-bnml-new-key (bml-bnml-target-name node) env))))
         (if (bml-bnml-assign-node? node)
-            (bml-compile-node-in (bml-bnml-value node) env)
+            (append
+                (bml-compile-value-in (bml-bnml-value node) env)
+                (list (bma-lset (bml-bnml-assign-key node env))))
         (if (bml-index-node? node)
             (append
                 (bml-compile-value-in (bml-index-target node) env)
@@ -6960,7 +7061,57 @@
             (bma-exec-index state)
         (if (str_eq (comp-op-name op) "list-set")
             (bma-exec-list-set state)
-            state))))
+        (if (str_eq (comp-op-name op) "frame")
+            (comp-vm-push state (empty))
+        (if (str_eq (comp-op-name op) "lset")
+            (bma-exec-lset (comp-op-value op) state)
+        (if (str_eq (comp-op-name op) "lget")
+            (bma-exec-lget (comp-op-value op) state)
+        (if (str_eq (comp-op-name op) "drop")
+            (comp-vm-pop-state state)
+            state))))))))
+
+    ;; The mutable-local frame rides the floor of the value stack, so every
+    ;; stack snapshot (save, a choose branch, a try) carries the locals too.
+    (defn bma-frame-init (_x) (bma-op "frame" 0))
+    (defn bma-lset (key) (bma-op "lset" key))
+    (defn bma-lget (key) (bma-op "lget" key))
+    (defn bma-drop (_x) (bma-op "drop" 0))
+
+    (defn bma-frame-rows-get (rows key)
+        (if (nil? rows)
+            0
+            (if (str_eq (head (head rows)) key)
+                (head (tail (head rows)))
+                (bma-frame-rows-get (tail rows) key))))
+
+    (defn bma-frame-rows-set (rows key value)
+        (if (nil? rows)
+            (list (list key value))
+            (if (str_eq (head (head rows)) key)
+                (cons (list key value) (tail rows))
+                (cons (head rows) (bma-frame-rows-set (tail rows) key value)))))
+
+    (defn bma-stack-floor (stack)
+        (if (nil? (tail stack)) (head stack) (bma-stack-floor (tail stack))))
+
+    (defn bma-stack-with-floor (stack floor)
+        (if (nil? (tail stack))
+            (list floor)
+            (cons (head stack) (bma-stack-with-floor (tail stack) floor))))
+
+    (defn bma-exec-lset (key s)
+        (do
+            (let stack (comp-vm-stack s))
+            (comp-vm-state
+                (bma-stack-with-floor
+                    stack
+                    (bma-frame-rows-set (bma-stack-floor stack) key (head stack)))
+                (comp-vm-snapshots s)
+                (comp-vm-mode s))))
+
+    (defn bma-exec-lget (key s)
+        (comp-vm-push s (bma-frame-rows-get (bma-stack-floor (comp-vm-stack s)) key)))
 
     ;; Past the end the write is dropped; the Hati list-set function agrees.
     (defn bml-list-set-at (items at value)
@@ -7089,13 +7240,17 @@
         (fk-node 110 (fk-lit (bml-hati-frame-slot))))
 
     (defn bml-bnml-needs-frame? (node)
+        (if (bml-bnml-mark-node? node)
+            true
+        (if (eq (len (node_children node)) 0)
+            false
         (if (bml-bnml-declare-node? node)
             true
         (if (bml-bnml-assign-node? node)
             true
         (if (node_eq (node_category node) BML-AST-METHOD)
             false
-            (bml-bnml-any-needs-frame? (node_children node))))))
+            (bml-bnml-any-needs-frame? (node_children node))))))))
 
     (defn bml-bnml-any-needs-frame? (nodes)
         (if (nil? nodes)
@@ -7104,6 +7259,7 @@
                 true
                 (bml-bnml-any-needs-frame? (tail nodes)))))
 
+    ;; A body with snapshots starts its frame with an empty __marks stack.
     (defn bml-hati-bnml-body-in (nodes result)
         (if (bml-bnml-any-needs-frame? nodes)
             (do
@@ -7111,6 +7267,11 @@
                     (bml-hati-pool-ensure
                         (bml-hati-lower-pool result)
                         (bml-hati-bnml-frame-blueprint-name)))
+                (let marks-entry
+                    (bml-hati-pool-ensure
+                        (bml-hati-pool-entry-pool entry)
+                        (bml-bnml-marks-key)))
+                (let marked (bml-bnml-any-marks? nodes))
                 (bml-hati-lower-result
                     (fk-node 109
                         (ms-intern
@@ -7126,29 +7287,265 @@
                                                         (bml-hati-pool-entry-index entry)
                                                         (bml-hati-bnml-frame-blueprint-name)))
                                                 (fk-empty)))
-                                        (fk-empty)))
+                                        (if marked
+                                            (fk-cons
+                                                (fk-cons
+                                                    (fk-slit
+                                                        (bml-hati-pool-entry-index marks-entry)
+                                                        (bml-bnml-marks-key))
+                                                    (fk-cons (fk-empty) (fk-empty)))
+                                                (fk-empty))
+                                            (fk-empty))))
                                 (bml-hati-lower-expr result))))
-                    (bml-hati-pool-entry-pool entry)))
+                    (if marked
+                        (bml-hati-pool-entry-pool marks-entry)
+                        (bml-hati-pool-entry-pool entry))))
             result))
 
     (defn bml-hati-lower-method-body-in (node pool env)
         (bml-hati-bnml-body-in
             (list (bml-method-node-body node))
             (bml-hati-lower-node-in-env
-                (bml-method-node-body node)
+                (bml-bnml-top-body-node (bml-method-node-body node))
                 pool
                 (bml-hati-method-param-env node env))))
 
+    ;; a store answers the value it stored, as BMA's store leaves it on top
     (defn bml-hati-lower-bnml-store (key value-node pool env)
         (do
             (let value (bml-hati-lower-node-in-env value-node pool env))
             (let slot (bml-hati-pool-ensure (bml-hati-lower-pool value) key))
             (bml-hati-lower-result
+                (fk-sequence
+                    (fk-rset
+                        (bml-hati-bnml-frame-expr)
+                        (fk-slit (bml-hati-pool-entry-index slot) key)
+                        (bml-hati-lower-expr value))
+                    (fk-rget
+                        (bml-hati-bnml-frame-expr)
+                        (fk-slit (bml-hati-pool-entry-index slot) key)))
+                (bml-hati-pool-entry-pool slot))))
+
+    ;; --- Hati: save/restore/discard as one state snapshot ---------------
+    ;; The state is the mutable locals and the value the statement list
+    ;; stands on. A body that takes a snapshot keeps that value in the
+    ;; frame's __top slot (each statement that yields a value writes it),
+    ;; and the frame keeps a stack of snapshots under __marks: save pushes
+    ;; the live slots and __top, restore writes them back and pops, discard
+    ;; pops. BMA's stack snapshot holds the same state: its locals ride the
+    ;; floor of the stack it snapshots.
+
+    (defn bml-bnml-top-key () "__top")
+    (defn bml-bnml-marks-key () "__marks")
+
+    (defn bml-bnml-mark-node? (node)
+        (if (node_eq node (bml-ast-save 0))
+            true
+        (if (node_eq node (bml-ast-restore 0))
+            true
+            (node_eq node (bml-ast-discard 0)))))
+
+    (defn bml-bnml-has-marks? (node)
+        (if (bml-bnml-mark-node? node)
+            true
+        (if (eq (len (node_children node)) 0)
+            false
+        (if (node_eq (node_category node) BML-AST-METHOD)
+            false
+            (bml-bnml-any-marks? (node_children node))))))
+
+    (defn bml-bnml-any-marks? (nodes)
+        (if (nil? nodes)
+            false
+            (if (bml-bnml-has-marks? (head nodes))
+                true
+                (bml-bnml-any-marks? (tail nodes)))))
+
+    (defn bml-bnml-top-node? (node)
+        (bml-call-named? node "__bnml_top"))
+
+    ;; each statement that yields a value writes it to __top on its way
+    (defn bml-bnml-top-rewrite (node)
+        (if (node_eq (node_category node) BML-AST-BLOCK)
+            (bml-ast-block (bml-bnml-top-rewrite-list (node_children node)))
+        (if (bml-bnml-mark-node? node)
+            node
+        (if (node_eq (node_category node) BML-AST-METHOD)
+            node
+            (bml-ast-call-args "__bnml_top" (list node))))))
+
+    (defn bml-bnml-top-rewrite-list (nodes)
+        (if (nil? nodes)
+            (empty)
+            (cons
+                (bml-bnml-top-rewrite (head nodes))
+                (bml-bnml-top-rewrite-list (tail nodes)))))
+
+    (defn bml-bnml-top-body (nodes)
+        (if (bml-bnml-any-marks? nodes) (bml-bnml-top-rewrite-list nodes) nodes))
+
+    (defn bml-bnml-top-body-node (node)
+        (if (bml-bnml-has-marks? node) (bml-bnml-top-rewrite node) node))
+
+    (defn bml-bnml-rides-out? (kind)
+        (if (str_eq kind "bnml-assign")
+            true
+        (if (str_eq kind "bnml-mark")
+            true
+            (str_eq kind "bnml-unmark"))))
+
+    ;; the snapshot a restore or discard answers to: the newest save that
+    ;; no later discard dropped
+    (defn bml-bnml-active-mark (env skip)
+        (if (nil? env)
+            (empty)
+            (do
+                (let kind (bml-local-binding-kind (head env)))
+                (if (str_eq kind "bnml-unmark")
+                    (bml-bnml-active-mark (tail env) (add skip 1))
+                (if (str_eq kind "bnml-mark")
+                    (if (eq skip 0)
+                        (head env)
+                        (bml-bnml-active-mark (tail env) (sub skip 1)))
+                    (bml-bnml-active-mark (tail env) skip))))))
+
+    (defn bml-bnml-env-after-restore (env)
+        (do
+            (let mark (bml-bnml-active-mark env 0))
+            (if (nil? mark) env (bml-local-binding-env mark))))
+
+    (defn bml-bnml-env-after-discard (env)
+        (if (nil? (bml-bnml-active-mark env 0))
+            env
+            (cons (bml-bnml-binding "__bnml_unmark" (empty) env "bnml-unmark" "") env)))
+
+    (defn bml-bnml-mark-need (env reason)
+        (if (nil? (bml-bnml-active-mark env 0)) (list reason) (empty)))
+
+    (defn bml-bnml-slot-kind? (kind)
+        (if (str_eq kind "bnml-declare")
+            true
+        (if (str_eq kind "bnml-assign")
+            true
+            (str_eq kind "bnml-const"))))
+
+    ;; every slot a binding in env names, shadowed ones included
+    (defn bml-bnml-snapshot-keys (env keys)
+        (if (nil? env)
+            keys
+            (if (bml-bnml-slot-kind? (bml-local-binding-kind (head env)))
+                (if (fsc-string-list-contains? keys (bml-local-binding-key (head env)))
+                    (bml-bnml-snapshot-keys (tail env) keys)
+                    (bml-bnml-snapshot-keys
+                        (tail env)
+                        (cons (bml-local-binding-key (head env)) keys)))
+                (bml-bnml-snapshot-keys (tail env) keys))))
+
+    (defn bml-hati-bnml-get (key pool)
+        (do
+            (let slot (bml-hati-pool-ensure pool key))
+            (bml-hati-lower-result
+                (fk-rget
+                    (bml-hati-bnml-frame-expr)
+                    (fk-slit (bml-hati-pool-entry-index slot) key))
+                (bml-hati-pool-entry-pool slot))))
+
+    (defn bml-hati-bnml-set (key value-expr pool)
+        (do
+            (let slot (bml-hati-pool-ensure pool key))
+            (bml-hati-lower-result
                 (fk-rset
                     (bml-hati-bnml-frame-expr)
                     (fk-slit (bml-hati-pool-entry-index slot) key)
-                    (bml-hati-lower-expr value))
+                    value-expr)
                 (bml-hati-pool-entry-pool slot))))
+
+    ;; the snapshot: each slot's value, then __top last
+    (defn bml-hati-snapshot-expr (keys pool)
+        (if (nil? keys)
+            (do
+                (let top (bml-hati-bnml-get (bml-bnml-top-key) pool))
+                (bml-hati-lower-result
+                    (fk-cons (bml-hati-lower-expr top) (fk-empty))
+                    (bml-hati-lower-pool top)))
+            (do
+                (let first (bml-hati-bnml-get (head keys) pool))
+                (let rest (bml-hati-snapshot-expr (tail keys) (bml-hati-lower-pool first)))
+                (bml-hati-lower-result
+                    (fk-cons (bml-hati-lower-expr first) (bml-hati-lower-expr rest))
+                    (bml-hati-lower-pool rest)))))
+
+    (defn bml-hati-then-top (effect)
+        (do
+            (let top (bml-hati-bnml-get (bml-bnml-top-key) (bml-hati-lower-pool effect)))
+            (bml-hati-lower-result
+                (fk-sequence (bml-hati-lower-expr effect) (bml-hati-lower-expr top))
+                (bml-hati-lower-pool top))))
+
+    (defn bml-hati-lower-top (node pool env)
+        (do
+            (let inner (bml-hati-lower-node-in-env (head (bml-call-args node)) pool env))
+            (bml-hati-then-top
+                (bml-hati-bnml-set
+                    (bml-bnml-top-key)
+                    (bml-hati-lower-expr inner)
+                    (bml-hati-lower-pool inner)))))
+
+    (defn bml-hati-lower-save-in (pool env)
+        (do
+            (let snap (bml-hati-snapshot-expr (bml-bnml-snapshot-keys env (empty)) pool))
+            (let marks (bml-hati-bnml-get (bml-bnml-marks-key) (bml-hati-lower-pool snap)))
+            (bml-hati-then-top
+                (bml-hati-bnml-set
+                    (bml-bnml-marks-key)
+                    (fk-cons (bml-hati-lower-expr snap) (bml-hati-lower-expr marks))
+                    (bml-hati-lower-pool marks)))))
+
+    (defn bml-hati-restore-sets (keys at snap pool)
+        (if (nil? keys)
+            (bml-hati-lower-result (fk-lit 0) pool)
+            (do
+                (let one (bml-hati-bnml-set (head keys) (fk-nth snap (fk-lit at)) pool))
+                (let rest (bml-hati-restore-sets (tail keys) (add at 1) snap (bml-hati-lower-pool one)))
+                (bml-hati-lower-result
+                    (fk-sequence (bml-hati-lower-expr one) (bml-hati-lower-expr rest))
+                    (bml-hati-lower-pool rest)))))
+
+    (defn bml-hati-lower-restore-in (pool env)
+        (do
+            (let mark (bml-bnml-active-mark env 0))
+            (if (nil? mark)
+                (bml-hati-lower-result (fk-lit 0) pool)
+                (do
+                    (let keys
+                        (append
+                            (bml-bnml-snapshot-keys (bml-local-binding-env mark) (empty))
+                            (list (bml-bnml-top-key))))
+                    (let marks (bml-hati-bnml-get (bml-bnml-marks-key) pool))
+                    (let sets
+                        (bml-hati-restore-sets
+                            keys
+                            0
+                            (fk-head (bml-hati-lower-expr marks))
+                            (bml-hati-lower-pool marks)))
+                    (let pop
+                        (bml-hati-bnml-set
+                            (bml-bnml-marks-key)
+                            (fk-tail (bml-hati-lower-expr marks))
+                            (bml-hati-lower-pool sets)))
+                    (bml-hati-then-top
+                        (bml-hati-lower-result
+                            (fk-sequence (bml-hati-lower-expr sets) (bml-hati-lower-expr pop))
+                            (bml-hati-lower-pool pop)))))))
+
+    (defn bml-hati-lower-discard-in (pool env)
+        (do
+            (let marks (bml-hati-bnml-get (bml-bnml-marks-key) pool))
+            (bml-hati-then-top
+                (bml-hati-bnml-set
+                    (bml-bnml-marks-key)
+                    (fk-tail (bml-hati-lower-expr marks))
+                    (bml-hati-lower-pool marks)))))
 
     (defn bml-hati-lower-name-node-in (node pool env)
         (do
@@ -7176,6 +7573,11 @@
             (bml-hati-lower-node-in-env (bml-local-const-value node) pool env)))
 
     (defn bml-hati-lower-call-node-in (node pool env)
+        (if (bml-bnml-top-node? node)
+            (bml-hati-lower-top node pool env)
+            (bml-hati-lower-call-node-core node pool env)))
+
+    (defn bml-hati-lower-call-node-core (node pool env)
         (if (bml-bnml-declare-node? node)
             (bml-hati-lower-bnml-store
                 (bml-bnml-new-key (bml-bnml-target-name node) env)
@@ -7727,11 +8129,11 @@
             (if (node_eq cat BML-AST-CUT)
                 (list "cut")
             (if (node_eq cat BML-AST-SAVE)
-                (list "save")
+                (empty)
             (if (node_eq cat BML-AST-RESTORE)
-                (list "restore")
+                (bml-bnml-mark-need env "restore/no-mark")
             (if (node_eq cat BML-AST-DISCARD)
-                (list "discard")
+                (bml-bnml-mark-need env "discard/no-mark")
                 (list "unknown"))))))))))))))))))))))))))))
 
     (defn bml-hati-unsupported-section-in (node env)
@@ -8004,11 +8406,11 @@
             (if (node_eq cat BML-AST-CUT)
                 (bml-hati-lower-result (fk-lit 0) pool)
             (if (node_eq cat BML-AST-SAVE)
-                (bml-hati-lower-result (fk-lit 0) pool)
+                (bml-hati-lower-save-in pool env)
             (if (node_eq cat BML-AST-RESTORE)
-                (bml-hati-lower-result (fk-lit 0) pool)
+                (bml-hati-lower-restore-in pool env)
             (if (node_eq cat BML-AST-DISCARD)
-                (bml-hati-lower-result (fk-lit 0) pool)
+                (bml-hati-lower-discard-in pool env)
                 (bml-hati-lower-result (fk-lit 0) pool))))))))))))))))))))))
 
     (defn bml-hati-compile-class-image (node)
@@ -8122,7 +8524,7 @@
                     (let lowered
                         (bml-hati-bnml-body-in
                             (list node)
-                            (bml-hati-lower-node-in node (empty))))
+                            (bml-hati-lower-node-in (bml-bnml-top-body-node node) (empty))))
                     (bml-hati-image
                         (list (bml-hati-lower-expr lowered))
                         (bml-hati-lower-pool lowered)
@@ -8927,7 +9329,7 @@
             (let main-lowered
                 (bml-hati-bnml-body-in
                     main-nodes
-                    (bml-hati-lower-nodes-in-env main-nodes (empty) method-env)))
+                    (bml-hati-lower-nodes-in-env (bml-bnml-top-body main-nodes) (empty) method-env)))
             (let methods-lowered
                 (bml-hati-lower-methods-in
                     methods
@@ -8966,9 +9368,27 @@
             (let link (bml-scope-link node units))
             (comp-program
                 "bma"
-                (bml-compile-node-in
-                    node
-                    (bml-scope-unit-env link (bml-scope-link-main link) "bma")))))
+                (bml-bma-with-frame
+                    (bml-bma-link-uses-locals? node link)
+                    (bml-compile-node-in
+                        node
+                        (bml-scope-unit-env link (bml-scope-link-main link) "bma"))))))
+
+    ;; A program whose units declare or assign opens the floor frame first.
+    (defn bml-bma-with-frame (uses ops)
+        (if uses (cons (bma-frame-init 0) ops) ops))
+
+    (defn bml-bma-units-use-locals? (units)
+        (if (nil? units)
+            false
+            (if (bml-bnml-any-uses-locals? (bml-scope-unit-all-nodes (head units)))
+                true
+                (bml-bma-units-use-locals? (tail units)))))
+
+    (defn bml-bma-link-uses-locals? (node link)
+        (if (bml-bnml-uses-locals? node)
+            true
+            (bml-bma-units-use-locals? (bml-scope-link-linked link))))
 
     ;; --- BMA: the same scope rule, inlined ---------------------------
 
@@ -8978,6 +9398,8 @@
     (defn bml-bma-method-value? (value)
         (node_eq (node_category value) BML-AST-METHOD))
 
+    ;; A mutable local reads its slot in the frame on the stack floor; any
+    ;; other name reads by substitution.
     (defn bml-compile-name-in (node env)
         (do
             (let binding (bml-local-lookup env (bml-local-name node)))
@@ -8985,9 +9407,11 @@
                 (bml-bma-refusal "name/unbound")
             (if (bml-bma-method-value? (bml-local-binding-value binding))
                 (bml-bma-refusal "name/method")
+            (if (bml-bnml-binding? binding)
+                (list (bma-lget (bml-local-binding-key binding)))
                 (bml-compile-node-in
                     (bml-local-binding-value binding)
-                    (bml-local-binding-env binding))))))
+                    (bml-local-binding-env binding)))))))
 
     (defn bml-bma-method-binding-for-arity (env name arity)
         (if (nil? env)
