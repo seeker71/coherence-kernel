@@ -44,7 +44,7 @@
 ; over socket bytes, not as the primitive substrate. _get lowers to tag 106 so
 ; source recipes can read returned dict/list receipts inside fkwu.
 ;
-; preludes: form-stdlib/host-effect-grammar.fk form-stdlib/fk-opt.fk
+; preludes: form-stdlib/host-effect-grammar.fk form-stdlib/fk-opt.fk form-stdlib/bml/native-rewrite-rules.bml
 
 ; ── walker-carried ops as DATA rows (name arity tag) — one generic engine ──
 ; (div/mod ride the m4d tags 10/11; the figure-ops family rides 34..42 —
@@ -70,6 +70,7 @@
         (list "input_byte" 1 17)
         (list "read_line" 0 114)
         (list "print_str" 1 115)
+        (list "host-exec" 2 136)
         (list "isatty" 0 116)
         (list "self_source" 0 117)
         (list "kernel_stat" 1 127)
@@ -142,7 +143,9 @@
         (list "host_kill" 1 157)
         (list "host_nice" 1 158)
         (list "host_capture" 1 159)
-        (list "host_pid" 0 160)(list "host_cwd" 0 29)(list "fs_truncate" 2 143)
+        (list "host_pid" 0 160)
+        (list "host_cwd" 0 29)
+        (list "fs_truncate" 2 143)
         (list "host_spawn_quiet" 1 161)
         (list "kernel_live_pids" 0 162)
         (list "kernel_live" 1 163)
@@ -163,7 +166,6 @@
         (list "kernel_hot" 1 179)
         (list "node_gift_read" 1 177)
         (list "node_gift_write" 2 178)
-
         (list "kernel_ast" 2 32)
         (list "host_file_read_text" 1 63)
         (list "read_file" 1 63)
@@ -193,9 +195,6 @@
         (list "metal_submit" 0 255)
         (list "metal_fence_wait" 1 142)
         (list "metal_deadline" 1 148)
-
-
-
         (list "file_open" 1 133)
         (list "file_read" 2 134)
         (list "file_close" 1 135)
@@ -746,13 +745,54 @@
         (fk-cons (head args) (flt-pack2 (tail args)))))
 
 (defn flt-call (fname s pos fns env)
-    (flt-call2 (flt-assoc fname env) (flt-assoc fname fns) s pos fns env))
+    (flt-call-resolved fname s pos fns env (flt-call-signature fname fns env)))
+(defn flt-forwardq () "(table-forward-functions)")
+(defn flt-call-signature (fname fns env)
+    (if (eq (len (flt-assoc fname fns)) 0)
+        (flt-assoc fname (flt-env-row-value (flt-assoc (flt-forwardq) env) (list)))
+        (flt-assoc fname fns)))
+(defn flt-call-resolved (fname s pos fns env row)
+    (if (and (eq (len (flt-assoc fname env)) 0) (eq (len row) 0))
+        (flt-rewrite-call (flt-assoc fname (ntr-rules)) fname s pos fns env)
+        (flt-call2 (flt-assoc fname env) row s pos fns env)))
+(defn flt-rewrite-call (rule fname s pos fns env)
+    (if (eq (len rule) 0)
+        (form_error (str_concat "[table-unresolved-call] "
+            (str_concat fname (str_concat " at byte " (int_to_str pos)))))
+        (flt-rewrite-args rule (flt-args s pos fns env))))
+(defn flt-rewrite-args (rule args)
+    (if (eq (len (nth args 0)) (nth rule 1))
+        (list (flt-rewrite-template (nth rule 2) (nth args 0) (list)) (nth args 1))
+        (form_error (str_concat "[table-rewrite-arity] " (nth rule 0)))))
+(defn flt-rewrite-template (code args stack)
+    (if (eq (len code) 0)
+        (if (eq (len stack) 1) (head stack) (form_error "[table-rewrite-stack] final extent"))
+        (flt-rewrite-step (head code) (tail code) args stack)))
+(defn flt-rewrite-step (word rest args stack)
+    (if (eq (nth word 0) 0)
+        (if (and (ge (nth word 1) 0) (lt (nth word 1) (len args)))
+            (flt-rewrite-template rest args (cons (nth args (nth word 1)) stack))
+            (form_error "[table-rewrite-argument] index"))
+        (if (eq (nth word 0) 1)
+            (flt-rewrite-template rest args (cons (fk-lit (nth word 1)) stack))
+            (if (eq (nth word 0) 2)
+                (flt-rewrite-node word rest args stack)
+                (form_error "[table-rewrite-opcode] unknown")))))
+(defn flt-rewrite-node (word rest args stack)
+    (if (and (ge (nth word 2) 1) (and (le (nth word 2) 3) (ge (len stack) (nth word 2))))
+        (flt-rewrite-template rest args
+            (cons (fk-node (nth word 1) (flt-rewrite-body (flt-rev (take (nth word 2) stack) (list))))
+                  (drop (nth word 2) stack)))
+        (form_error "[table-rewrite-node] child extent")))
+(defn flt-rewrite-body (children)
+    (if (eq (len children) 1) (head children)
+        (ms-intern (head children) (flt-rewrite-body (tail children)))))
 (defn flt-call2 (erow frow s pos fns env)
     (if (eq (len erow) 0)
         (flt-call3 frow (flt-args s pos fns env))
         (flt-icall (nth erow 1) s pos fns env)))
 (defn flt-call3 (row ae)
-    (if (eq (len row) 0) (list (fk-lit 0) (nth ae 1))
+    (if (eq (len row) 0) (form_error "[table-unresolved-call] absent function signature")
         (list (fk-call (nth row 1) (flt-pack (nth ae 0) (nth row 2))) (nth ae 1))))
 (defn flt-icall (fv s pos fns env)
     (flt-icall2 fv (flt-arglist s pos fns env)))
@@ -943,7 +983,8 @@
 (defn flt-defn-done (s k be fns rbodies env main)
     (flt-items s (fp-close s (nth be 1)) fns (cons (flt-reserve-wrap-k k (nth be 0)) rbodies) env main))
 
-; (let name value) — the value cell binds into env and inlines at each use
+; A module initializer executes once before entry. Its value occupies shared
+; run memory; references from functions load that same rooted value.
 (defn flt-let (s pos fns rbodies env main)
     (flt-let-n s (fp-skip s (fp-sym-end s (fp-skip s (add pos 1)))) fns rbodies env main))
 (defn flt-let-n (s pos fns rbodies env main)
@@ -951,7 +992,9 @@
 (defn flt-let-v (name s pos fns rbodies env main)
     (flt-let-done name s (flt-expr s pos fns env) fns rbodies env main))
 (defn flt-let-done (name s ve fns rbodies env main)
-    (flt-items s (fp-close s (nth ve 1)) fns rbodies (cons (list name (nth ve 0)) env) main))
+    (flt-items s (fp-close s (nth ve 1)) fns rbodies
+        (cons (list name (fk-load (flt-slot env))) env)
+        (flt-sequence main (fk-store (flt-slot env) (nth ve 0)))))
 
 ; The band source's top-level do is an ordered program, not a module constant
 ; carrier. Snapshot each top-level let once so reads before record_set keep
@@ -1117,7 +1160,10 @@
 (defn flt-band-fns2 (modsrc bandsrc pool)
     (flt-band2 (flt-top modsrc (list) (list) pool) bandsrc pool))
 (defn flt-band2 (mr bandsrc pool)
-    (flt-band3 bandsrc (flt-top-env-snap bandsrc (nth mr 0) (nth mr 1) pool (nth mr 4))))
+    (flt-band-join mr bandsrc (flt-top-env-snap bandsrc (nth mr 0) (nth mr 1) pool (nth mr 4))))
+(defn flt-band-join (mr bandsrc br)
+    (flt-band3 bandsrc (list (nth br 0) (nth br 1)
+        (flt-sequence (nth mr 2) (nth br 2)) (nth br 3) (nth br 4))))
 (defn flt-band3 (bandsrc br)
     (cons (flt-reserve-wrap-k (flt-count-lets bandsrc 0 (str_len bandsrc)) (nth br 2))
           (flt-rev (nth br 1) (list))))
@@ -1127,11 +1173,24 @@
     (if (eq (len modsrcs) 0) (list fns rbodies (fk-lit 0) 0 env)
         (flt-modsrcs-top2 (flt-top-env (head modsrcs) fns rbodies pool env) (tail modsrcs) pool)))
 (defn flt-modsrcs-top2 (mr rest pool)
-    (flt-modsrcs-top-env rest (nth mr 0) (nth mr 1) pool (nth mr 4)))
+    (flt-modsrcs-join mr (flt-modsrcs-top-env rest (nth mr 0) (nth mr 1) pool (nth mr 4))))
+(defn flt-modsrcs-join (mr next)
+    (list (nth next 0) (nth next 1) (flt-sequence (nth mr 2) (nth next 2))
+        (nth next 3) (nth next 4)))
 (defn flt-band-sources-fns (modsrcs bandsrc)
     (flt-band-sources-fns2 modsrcs bandsrc (flt-band-sources-pool modsrcs bandsrc)))
+(defn flt-source-signatures (srcs fns)
+    (if (eq (len srcs) 0) fns
+        (flt-source-signatures (tail srcs) (flt-sig-scan (head srcs) 0 fns))))
+; Future functions contribute declarations only. Bodies, lexical bindings and
+; module initializers keep their original order; an existing binding wins.
+; The first future definition supplies the exact eventual function-table slot.
 (defn flt-band-sources-fns2 (modsrcs bandsrc pool)
-    (flt-band2 (flt-modsrcs-top modsrcs (list) (list) pool) bandsrc pool))
+    (flt-band2
+        (flt-modsrcs-top-env modsrcs (list) (list) pool
+            (list (list (flt-forwardq)
+                (flt-rev (flt-sig-scan bandsrc 0 (flt-source-signatures modsrcs (list))) (list)))))
+        bandsrc pool))
 
 ; Compatibility door: older bands pass one list whose last source is the
 ; band and whose earlier sources are modules. Keep it as a stable recipe

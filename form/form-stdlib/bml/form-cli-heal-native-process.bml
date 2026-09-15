@@ -1,6 +1,6 @@
 // Form supervises native argv children, streams and correlated choices.
 // The shell script only establishes cwd, file descriptors and a child group.
-// preludes: form-stdlib/bml/form-cli-heal-native-io.bml form-stdlib/bml/form-cli-heal-dynamic.bml form-stdlib/bml/form-cli-heal-timing.bml form-stdlib/organ-health.bml
+// preludes: form-stdlib/bml/form-cli-heal-native-io.bml form-stdlib/bml/form-cli-heal-dynamic.bml form-stdlib/bml/form-cli-heal-timing.bml form-stdlib/organ-health.bml form-stdlib/organ-care.bml form-stdlib/bml/organ-health-discovery.bml
 section [form.bml] {
  class FormCliHealNativeProcess {
   def fhn-stage-path(job, stage, suffix) = fhn-at(job, str_concat(stage, suffix));
@@ -69,7 +69,7 @@ section [form.bml] {
   }
   def fhn-observe-health(job,stage,line,elapsed) {
    let row = parse-json("organ-health",substring(line,18,str_len(line)));
-   if oh-valid(row) then fhn-record-health(job,stage,row,elapsed) else fhn-record-health(job,stage,oh-reading("health-flow-reader",stage,"protocol",json-node-string("complete organ reading"),json-node-int(str_len(line)),json-node-int(0),list(oh-need("source-diagnostics",oh-reference(fhn-stage-path(job,stage,".out")))),list("request-evidence","defer"),oh-reference(fhn-stage-path(job,stage,".out"))),elapsed);
+   if and(oh-valid(row),oc-needs-valid(json-array-elements(oh-get(row,"needs")))) then fhn-record-health(job,stage,row,elapsed) else fhn-record-health(job,stage,oh-reading("health-flow-reader",stage,"protocol",json-node-string("complete organ reading with declared needs"),json-node-int(str_len(line)),json-node-int(0),list(oh-need("source-diagnostics",oh-reference(fhn-stage-path(job,stage,".out")))),list("request-evidence","defer"),oh-reference(fhn-stage-path(job,stage,".out"))),elapsed);
   }
   def fhn-observe-line(job, stage, line, elapsed) = if eq(str_find(line,"form-organ health ",0),0) then fhn-observe-health(job,stage,line,elapsed) else if eq(str_find(line, "form-peer stage ", 0), 0) then fhn-observe-stage(job, stage, line, elapsed) else if eq(str_find(line, "form-heal flow ", 0), 0) then fhn-observe-flow(job, stage, line, elapsed) else if and(str_eq(fhn-read(fhn-stage-path(job, stage, ".format")), "ollama-ndjson"), eq(str_byte_at(line, 0), 123)) then fhn-observe-ollama(job, stage, line, elapsed) else "";
   def fhn-observe-ollama(job, stage, line, elapsed) {
@@ -85,6 +85,15 @@ section [form.bml] {
    fhn-stage-event(job, stage, str_concat("ollama-", state), elapsed, append(list(fhn-n("response_bytes", file_size(fhn-stage-path(job, stage, ".reply.partial")))), counts));
   }
   def fhn-observe-lines(job, stage, lines, elapsed) = if nil?(lines) then 0 else add(if str_eq(fhn-observe-line(job, stage, head(lines), elapsed), "appended") then 1 else 0, fhn-observe-lines(job, stage, tail(lines), elapsed));
+  // Byte availability is not severity, interpretation or semantic progress.
+  // The shared observation owner supplies identity; the span names the bytes.
+  def fhn-observe-diagnostics(job, stage, offset, bytes, elapsed) {
+   let end = add(offset,bytes);
+   let source = oh-reference(fhn-stage-path(job,stage,".err"));
+   let span = json-node-object(list(fhn-s("stream","stderr"),fhn-s("interpretation","unknown"),fhn-n("offset",offset),fhn-n("end",end),fhn-n("new_bytes",bytes),json-node-pair("source",source)));
+   let reading = oh-reading("native-process",fhn-stage-path(job,stage,""),"diagnostic-availability",json-node-string("organ interpretation of retained diagnostics"),span,json-node-null(),list(oh-need("diagnostic-evidence",span),oh-need("diagnostic-interpretation",span)),list("request-evidence","defer"),source);
+   fhn-record-health(job,stage,reading,elapsed);
+  }
   // Reader state: byte offset plus an incomplete diagnostic line. The private
   // output is already durable; a long non-diagnostic line is never truncated.
   def fhn-drain(job, stage, suffix, reader, elapsed) {
@@ -94,6 +103,7 @@ section [form.bml] {
    if le(remaining, 0) then list(reader, 0) else fhn-drain-bytes(job, stage, suffix, reader, elapsed, read_file_slice(path, offset, fhd-min(65536, remaining)));
   }
   def fhn-drain-bytes(job, stage, suffix, reader, elapsed, chunk) {
+   let available = if and(str_eq(suffix,".err"),and(str_eq(value_kind(chunk),"string"),gt(str_len(chunk),0))) then fhn-observe-diagnostics(job,stage,head(reader),str_len(chunk),elapsed) else "";
    let text = str_concat(nth(reader, 1), chunk);
    let rows = split-on(text, "\n");
    let complete = reverse(tail(reverse(rows)));
@@ -113,6 +123,17 @@ section [form.bml] {
    let cwd = if str_eq(directory, "root") then fhn-string(doc, "root") else fhn-at(job, directory);
    if not(and(fhn-owned(job, doc), and(fhn-id(stage), fhn-member(list("root", "work", "empty"), directory)))) then "refused:process-contract" else fhn-run-start(job, stage, seconds, cwd, input, argv);
   }
+  def fhn-discover-process(job,stage,elapsed) {
+   let root = fhn-string(fhn-json(fhn-at(job,"snapshot.json")),"root");
+   let source = fhn-stage-path(job,stage,".events.jsonl");
+   let declaration = ohd-renew(root,source,list("organ-health-v1","diagnostic-availability","process-exit","correlated-care"));
+   if eq(json-int-value(json-object-get(declaration,"ok")),1) then declaration else fhn-discovery-refused(job,stage,elapsed,source,declaration);
+  }
+  def fhn-discovery-refused(job,stage,elapsed,source,declaration) {
+   let reading = oh-reading("native-process",fhn-stage-path(job,stage,""),"event-discovery",json-node-string("advertised event stream"),declaration,json-node-int(0),list(oh-need("event-source-discovery",declaration)),list("request-evidence","defer"),oh-reference(source));
+   let recorded = fhn-record-health(job,stage,reading,elapsed);
+   declaration;
+  }
   def fhn-run-start(job, stage, seconds, cwd, input, argv) {
    let started = host_monotonic_ms();
    let wall = now_unix_ms();
@@ -125,6 +146,7 @@ section [form.bml] {
    let clearedAdmission = fs_remove(fhn-stage-path(job, stage, ".admitted"));
    let clearedOut = write_file(fhn-stage-path(job, stage, ".out"), "");
    let clearedErr = write_file(fhn-stage-path(job, stage, ".err"), "");
+   let discovery = fhn-discover-process(job,stage,sub(host_monotonic_ms(),started));
    let script = fhn-stage-path(job, stage, ".launch.sh");
    let wrote = write_file(script, fhn-launch-script(job, stage, cwd, input, argv));
    let metadata = fhn-write-json(fhn-stage-path(job, stage, ".argv.json"), json-node-array(fhn-strings(argv)));
@@ -216,20 +238,51 @@ section [form.bml] {
   }
   def fhn-record-health(job,stage,row,elapsed) {
    let recorded = fhn-stage-event(job,stage,"organ-health",elapsed,list(json-node-pair("health",row)));
-   if and(oh-pain(row),str_eq(oh-str(row,"stage"),"observe")) then fhn-care-health(job,stage,row,elapsed) else recorded;
+   if and(str_eq(recorded,"appended"),and(oh-valid(row),str_eq(oh-str(row,"stage"),"observe"))) then fhn-care-health(job,stage,row,elapsed) else recorded;
   }
   def fhn-care-health(job,stage,row,elapsed) {
-   let offers = oh-values(json-array-elements(oh-get(row,"offers")));
-   let response = oh-response(row,if oh-has(offers,"request-evidence") then "request-evidence" else "defer");
-   let action = oh-select(row,response,"defer");
-   let selected = fhn-choice(job,stage,oh-str(row,"id"),"selected",offers,action,oh-str(row,"aspect"),"organ-request");
-   let incoming = fhn-stage-event(job,stage,"organ-response",elapsed,list(json-node-pair("health",response)));
-   let started = host_monotonic_ms();
-   let result = if str_eq(action,"request-evidence") then json-node-object(list(json-node-pair("stdout",oh-reference(fhn-stage-path(job,stage,".out"))),json-node-pair("stderr",oh-reference(fhn-stage-path(job,stage,".err"))),json-node-pair("token_flow",oh-reference(fhn-stage-path(job,stage,".flow.jsonl"))),fhn-s("child_status",fhn-read(fhn-stage-path(job,stage,".raw-status"))))) else json-node-string("need-remains-open");
-   let applied = oh-applied(row,action,result);
-   let observed = fhn-stage-event(job,stage,"organ-action-observed",add(elapsed,sub(host_monotonic_ms(),started)),list(json-node-pair("health",applied)));
-   let choice = fhn-choice(job,stage,oh-str(row,"id"),"applied",offers,action,oh-str(row,"aspect"),json-emit-precise(result));
+   let context = record_new(0);
+   record_set(context,"job",job); record_set(context,"stage",stage);
+   record_set(context,"elapsed",elapsed); record_set(context,"started",host_monotonic_ms());
+   record_set(context,"bytes",nothing()); record_set(context,"span",json-node-null());
+   let result = oc-hear(context,row,list(oc-provider("owned-process-diagnostic-evidence",list("diagnostic-evidence"),"request-evidence",fhn-care-supply)),fhn-care-emit,fhn-care-observe);
+   record_set(context,"bytes",nothing());
    "appended";
+  }
+  def fhn-care-emit(context,phase,row) {
+   let job = record_get(context,"job"); let stage = record_get(context,"stage");
+   let elapsed = add(record_get(context,"elapsed"),sub(host_monotonic_ms(),record_get(context,"started")));
+   fhn-stage-event(job,stage,phase,elapsed,list(json-node-pair("health",row)));
+  }
+  def fhn-care-span?(context,span) {
+   let path = fhn-stage-path(record_get(context,"job"),record_get(context,"stage"),".err");
+   and(str_eq(fhn-string(span,"stream"),"stderr"),and(str_eq(fhn-string(oh-get(span,"source"),"path"),path),and(fhn-flow-uint(oh-get(span,"offset")),and(fhn-flow-uint(oh-get(span,"end")),and(fhn-flow-uint(oh-get(span,"new_bytes")),and(gt(fhn-number(span,"new_bytes"),0),and(ge(fhn-number(span,"end"),fhn-number(span,"offset")),eq(sub(fhn-number(span,"end"),fhn-number(span,"offset")),fhn-number(span,"new_bytes")))))))));
+  }
+  def fhn-care-supply(context,reading,need) {
+   record_set(context,"bytes",nothing()); record_set(context,"span",json-node-null());
+   let span = oh-get(need,"detail");
+   if not(fhn-care-span?(context,span)) then json-node-object(list(fhn-s("resource","diagnostic-evidence"),fhn-s("state","unavailable"),fhn-s("reason","typed-owned-diagnostic-range-required"))) else fhn-care-supply-span(context,span);
+  }
+  def fhn-care-supply-span(context,span) {
+   let path = fhn-stage-path(record_get(context,"job"),record_get(context,"stage"),".err");
+   let offset = fhn-number(span,"offset"); let count = fhn-number(span,"new_bytes");
+   let bytes = if ge(file_size(path),fhn-number(span,"end")) then read_file_slice(path,offset,count) else nothing();
+   let exact = and(str_eq(value_kind(bytes),"string"),and(eq(str_len(bytes),count),ge(file_size(path),fhn-number(span,"end"))));
+   record_set(context,"span",span);
+   record_set(context,"bytes",if exact then bytes else nothing());
+   json-node-object(list(fhn-s("resource","diagnostic-evidence"),fhn-s("state",if exact then "delivered" else "unavailable"),fhn-n("offset",offset),fhn-n("end",fhn-number(span,"end")),fhn-n("read_bytes",if str_eq(value_kind(bytes),"string") then str_len(bytes) else 0),fhn-n("exact",exact),json-node-pair("source",oh-reference(path)),fhn-s("content","private-in-process"),fhn-s("interpretation","unknown")));
+  }
+  def fhn-care-needs(needs,span,settled) = if nil?(needs) then list() else if and(settled,and(str_eq(oh-str(head(needs),"resource"),"diagnostic-evidence"),node_eq(oh-get(head(needs),"detail"),span))) then fhn-care-needs(tail(needs),span,settled) else cons(head(needs),fhn-care-needs(tail(needs),span,settled));
+  def fhn-care-observe(context,reading,delivery) {
+   let path = fhn-stage-path(record_get(context,"job"),record_get(context,"stage"),".err");
+   let span = record_get(context,"span"); let held = record_get(context,"bytes");
+   let valid = and(fhn-care-span?(context,span),str_eq(value_kind(held),"string"));
+   let again = if valid then read_file_slice(path,fhn-number(span,"offset"),fhn-number(span,"new_bytes")) else nothing();
+   let exact = and(valid,and(str_eq(value_kind(again),"string"),and(str_eq(held,again),ge(file_size(path),fhn-number(span,"end")))));
+   record_set(context,"bytes",nothing());
+   let evidence = json-node-object(list(json-node-pair("source",oh-reference(path)),fhn-n("evidence_reobserved",exact),fhn-n("offset",fhn-number(delivery,"offset")),fhn-n("end",fhn-number(delivery,"end")),fhn-s("interpretation","unknown")));
+   let fresh = oh-reading(oh-str(reading,"organ"),oh-str(reading,"flow"),oh-str(reading,"aspect"),oh-get(reading,"expected"),oh-get(reading,"observed"),oh-get(reading,"health"),fhn-care-needs(json-array-elements(oh-get(reading,"needs")),span,exact),oh-values(json-array-elements(oh-get(reading,"offers"))),evidence);
+   oh-set(fresh,"care_of",json-node-string(oh-str(reading,"id")));
   }
   // The status rename can occur between the first read and the liveness probe.
   // Reconcile after reaping; explicit cancellation/deadline statuses retain meaning.

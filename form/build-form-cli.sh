@@ -1,288 +1,142 @@
 #!/usr/bin/env zsh
-# build-form-cli.sh — produce the standalone native form-cli binary.
-#
-# Build-time honest floor (2026-06-24):
-#   STANDARD — copy the committed platform binary when the source stamp matches
-#              (no Go, no clang, no shell in the receipt path).
-#   REGEN    — maintainer-only bootstrap artifacts refresh the table/C/platform
-#              binaries. Runtime remains the standalone fkwu binary.
-# Runtime: the resulting form-cli runs toolchain-free.
-#
-#   ./build-form-cli.sh            # -> form/form-cli
-#   echo ping | ./form-cli        # -> pong   (no toolchain present)
-#   ./form-cli                     # interactive REPL on a real tty
+# Build or copy the source-runtime CLI and its exact native recipe companions.
+# Form owns source closure, checked snapshots, startup emission and compilation.
+# This carrier owns host linking, artifact copies and publication ordering.
 set -euo pipefail
-cd "$(dirname "$0")"
-
-S=form-stdlib
-OUT="${1:-form-cli}"
-CC_BIN="${CC:-clang}"
-CLI_BOOTSTRAP_C="$S/bootstrap/form-cli-emitted.c"
-CLI_BOOTSTRAP_STAMP="$S/bootstrap/form-cli.stamp"
-CLI_BOOTSTRAP_SOURCE_SHA256="$S/bootstrap/form-cli.source.sha256"
-CLI_BOOTSTRAP_ATTESTATION="$S/bootstrap/form-cli.generation.attestation"
-FORM_CLI_FORCE_LINK="${FORM_CLI_FORCE_LINK:-0}"
-FORM_CLI_CALLER_EXTRA_SRC="${FORM_CLI_EXTRA_SRC:-}"
-FORM_CLI_CALLER_EXTRA_LDFLAGS="${FORM_CLI_EXTRA_LDFLAGS:-}"
-FORM_CLI_EXTRA_SRC="$FORM_CLI_CALLER_EXTRA_SRC"
-FORM_CLI_EXTRA_LDFLAGS="$FORM_CLI_CALLER_EXTRA_LDFLAGS"
-
-# Canonical bootstrap/platform publication is not an extension point. The
-# normal build command may still accept an explicit local carrier addition,
-# but a publisher has to produce the exact source-defined carrier rather than
-# inherit arbitrary objects or linker flags from its environment.
-if [[ "${FORM_CLI_CANONICAL_PUBLISH:-0}" == 1 ]] && \
-        [[ -n "$FORM_CLI_CALLER_EXTRA_SRC" || -n "$FORM_CLI_CALLER_EXTRA_LDFLAGS" ]]; then
-    printf '%s\n' 'form-cli canonical publish refuses FORM_CLI_EXTRA_SRC/FORM_CLI_EXTRA_LDFLAGS' >&2
-    exit 1
-fi
-
-# Metal is admitted as a dynamic carrier by the runtime. This builder does not
-# link the Objective-C carrier into form-cli.
-
-is_windows_host() {
-    [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]
-}
-
-patch_windows_emitted_c() {
-    local c_file="$1"
-    sed -i '1i #define _CRT_SECURE_NO_WARNINGS 1' "$c_file"
-    sed -i 's|extern unsigned int arc4random(void);|extern int rand(void); static unsigned int arc4random(void) { return (unsigned int)rand(); }|' "$c_file"
-    sed -i 's|extern long long read(int, void \*, unsigned long);|extern int read(int, void *, unsigned int);|' "$c_file"
-    sed -i 's|extern long long write(long long, const void \*, unsigned long);|extern int write(int, const void *, unsigned int);|' "$c_file"
-    sed -i 's|mkdir(d, 0777)|mkdir(d)|g; s|mkdir(p, 0777)|mkdir(p)|g' "$c_file"
-    sed -i 's|extern int sprintf(char \*, const char \*, ...);|typedef __builtin_va_list fk_va_list; extern int vsnprintf(char *, unsigned long long, const char *, fk_va_list); static int sprintf(char *b, const char *fmt, ...) { fk_va_list ap; __builtin_va_start(ap, fmt); int n = vsnprintf(b, 4096ULL, fmt, ap); __builtin_va_end(ap); return n; }|' "$c_file"
-    sed -i 's|struct timeval { long tv_sec; int tv_usec; }; extern int gettimeofday(struct timeval \*, void \*);|struct timeval { long tv_sec; int tv_usec; }; struct fk_filetime { unsigned int dwLowDateTime; unsigned int dwHighDateTime; }; __declspec(dllimport) void __stdcall GetSystemTimeAsFileTime(struct fk_filetime *); static int gettimeofday(struct timeval *tv, void *tz) { (void)tz; struct fk_filetime ft; unsigned long long ticks; unsigned long long us; GetSystemTimeAsFileTime(\&ft); ticks = ((unsigned long long)ft.dwHighDateTime * 4294967296ULL) + (unsigned long long)ft.dwLowDateTime; us = (ticks / 10ULL) - 11644473600000000ULL; tv->tv_sec = (long)(us / 1000000ULL); tv->tv_usec = (int)(us % 1000000ULL); return 0; }|' "$c_file"
-    sed -i 's|extern void \*dlopen(const char \*, int); extern void \*dlsym(void \*, const char \*);|static void *dlopen(const char *p, int f) { (void)p; (void)f; return 0; } static void *dlsym(void *h, const char *s) { (void)h; (void)s; return 0; }|' "$c_file"
-}
-
-if [[ "${FORM_STANDARD_LANE:-0}" != 1 ]]; then
-    command -v "$CC_BIN" >/dev/null || { echo "${CC_BIN} is required at BUILD time (not at run time)"; exit 1; }
-fi
-
-W="$(mktemp -d)"
-trap 'rm -rf "$W"' EXIT
-BOOTSTRAP_SNAPSHOT_DIR="$W/bootstrap-snapshot"
-SNAPSHOT_TABLE="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-table.txt"
-SNAPSHOT_EMITTED_C="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-emitted.c"
-SNAPSHOT_STAMP="$BOOTSTRAP_SNAPSHOT_DIR/form-cli.stamp"
-SNAPSHOT_SOURCE_SHA256="$BOOTSTRAP_SNAPSHOT_DIR/form-cli.source.sha256"
-SNAPSHOT_ATTESTATION="$BOOTSTRAP_SNAPSHOT_DIR/form-cli.generation.attestation"
-SNAPSHOT_PLATFORM_BIN="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-platform"
-SNAPSHOT_PLATFORM_STAMP="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-platform.stamp"
-SNAPSHOT_PLATFORM_ATTESTATION="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-platform.generation.attestation"
-
-# EMIT_CHAIN, FLAT_CHAIN, MODS and BAND stood here and were assigned, never read.
-# Four of the "SIX lists, one program" below, kept in step by hand for nothing: a
-# cell added to them reached no build and a cell missing from them broke none.
-# form_cli_source_list.sh is the one identity now, so they are gone rather than
-# reconciled — two lines had each edited MODS in the same hour, which is the cost
-# of mirroring a list that no reader ever consults. Found by reading every
-# capitalised assignment in this file for a matching read: 3 of 31 had none, and
-# EMIT_CHAIN's only reader was FLAT_CHAIN, itself dead.
-
-# One source identity is shared by the build, bootstrap regeneration, and
-# platform-carrier regeneration.  The retired host turn carrier is neither
-# part of this identity nor a Form flatten input.
-# shellcheck source=scripts/form_cli_source_list.sh
+export LC_ALL=C
+FORM="$(cd -P "$(dirname "$0")" && pwd)"
+BODY="$(dirname "$FORM")"
+cd "$FORM"
+source scripts/fourth-arm.sh
+source scripts/form_cli_bootstrap_proof.sh
 source scripts/form_cli_source_list.sh
 form_cli_load_sources
-# shellcheck source=scripts/fourth-arm.sh
-source scripts/fourth-arm.sh
-# shellcheck source=scripts/form_cli_bootstrap_proof.sh
-source scripts/form_cli_bootstrap_proof.sh
+
+OUT="${1:-form-cli}"
+[[ "$OUT" == /* ]] || OUT="$FORM/$OUT"
+BOOT="${FORM_CLI_NATIVE_BOOTSTRAP_DIR:-$FORM/form-stdlib/bootstrap}"
+CC_BIN="${CC:-cc}"
 slug="$(fourth_platform_slug)"
-CLI_BOOTSTRAP_BIN="$S/bootstrap/form-cli-${slug}"
-CLI_BOOTSTRAP_BIN_STAMP="$S/bootstrap/form-cli-${slug}.stamp"
-CLI_BOOTSTRAP_BIN_ATTESTATION="$S/bootstrap/form-cli-${slug}.generation.attestation"
-stamp="$(fourth_fkwu_cache_stamp)"
-cached_fkwu="$FOURTH_DIR/fkwu-$stamp"
-[[ -x "$cached_fkwu" ]] && FKWU="$cached_fkwu"
-if [[ -z "${FKWU:-}" ]]; then
-    if [[ "${FORM_STANDARD_LANE:-0}" == 1 ]]; then
-        build_fourth
+want_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
+want_sha="$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")"
+W=""
+publication_stages=()
+cleanup() {
+    local rc=$?
+    if [[ "${#publication_stages[@]}" -gt 0 ]]; then
+        rm -f "${publication_stages[@]}"
+        publication_stages=()
+    fi
+    [[ -n "$W" ]] || return 0
+    if [[ "$rc" -ne 0 && "${FORM_CLI_RETAIN_WORKDIR:-0}" == 1 ]]; then
+        printf 'build: retained failed native CLI work directory %s\n' "$W" >&2
     else
-        build_fourth >/dev/null 2>&1 || true
+        rm -rf "$W"
     fi
-fi
-
-want_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
-want_source_sha256="$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")"
-
-snapshot_regular_file() {
-    local source="$1" destination="$2"
-    [[ -f "$source" && ! -L "$source" ]] || {
-        printf 'form-cli bootstrap: missing regular input for snapshot: %s\n' "$source" >&2
-        return 1
-    }
-    cp "$source" "$destination"
-    [[ -f "$destination" && ! -L "$destination" ]]
+    W=""
+    return 0
 }
-
-verify_staged_bootstrap_carrier() {
-    form_cli_verify_bootstrap \
-        "$SNAPSHOT_TABLE" "$SNAPSHOT_EMITTED_C" "$SNAPSHOT_STAMP" "$want_cli_stamp" \
-        && form_cli_verify_source_digest "$SNAPSHOT_SOURCE_SHA256" "$want_source_sha256" \
-        && form_cli_verify_generation_attestation \
-            "$SNAPSHOT_ATTESTATION" "$want_source_sha256" "$want_cli_stamp" \
-            "$SNAPSHOT_TABLE" "$SNAPSHOT_EMITTED_C" "not-applicable"
-}
-
-snapshot_bootstrap_carrier() {
-    mkdir "$BOOTSTRAP_SNAPSHOT_DIR"
-    snapshot_regular_file "$S/bootstrap/form-cli-table.txt" "$SNAPSHOT_TABLE" \
-        && snapshot_regular_file "$CLI_BOOTSTRAP_C" "$SNAPSHOT_EMITTED_C" \
-        && snapshot_regular_file "$CLI_BOOTSTRAP_STAMP" "$SNAPSHOT_STAMP" \
-        && snapshot_regular_file "$CLI_BOOTSTRAP_SOURCE_SHA256" "$SNAPSHOT_SOURCE_SHA256" \
-        && snapshot_regular_file "$CLI_BOOTSTRAP_ATTESTATION" "$SNAPSHOT_ATTESTATION" \
-        && verify_staged_bootstrap_carrier
-}
-
-snapshot_platform_carrier() {
-    snapshot_regular_file "$CLI_BOOTSTRAP_BIN" "$SNAPSHOT_PLATFORM_BIN" \
-        && snapshot_regular_file "$CLI_BOOTSTRAP_BIN_STAMP" "$SNAPSHOT_PLATFORM_STAMP" \
-        && snapshot_regular_file "$CLI_BOOTSTRAP_BIN_ATTESTATION" "$SNAPSHOT_PLATFORM_ATTESTATION" \
-        && [[ -x "$SNAPSHOT_PLATFORM_BIN" ]] \
-        && [[ "$(cat "$SNAPSHOT_PLATFORM_STAMP")" == "$want_cli_stamp" ]] \
-        && form_cli_verify_generation_attestation \
-            "$SNAPSHOT_PLATFORM_ATTESTATION" "$want_source_sha256" "$want_cli_stamp" \
-            "$SNAPSHOT_TABLE" "$SNAPSHOT_EMITTED_C" "$slug" "$SNAPSHOT_PLATFORM_BIN" \
-            "$SNAPSHOT_ATTESTATION"
-}
-
-bootstrap_carrier_fresh=0
-if snapshot_bootstrap_carrier; then
-    bootstrap_carrier_fresh=1
+if [[ -n "${ZSH_VERSION:-}" ]]; then
+    trap cleanup ZERR EXIT
 else
-    printf '%s\n' 'form-cli bootstrap: staged generation attestation missing or mixed; regeneration required' >&2
+    trap cleanup ERR EXIT
 fi
-platform_carrier_fresh=0
-if [[ "$bootstrap_carrier_fresh" == 1 ]] && snapshot_platform_carrier; then
-    platform_carrier_fresh=1
-fi
+trap 'exit 130' INT
+trap 'exit 143' TERM
+W="$(mktemp -d)"
 
-# Standard lane: copy a verified private snapshot of the platform carrier (no
-# clang).  Its attestation is checked against the snapshot bootstrap hash, so
-# a publisher cannot replace table/C between a live check and this copy.
+regular_copy() {
+    [[ -f "$1" && ! -L "$1" ]] || { printf 'build: missing regular artifact %s\n' "$1" >&2; return 1; }
+    cp "$1" "$2"
+}
+source_current() {
+    [[ "$(fourth_hash16 "${FORM_CLI_SRCS[@]}")" == "$want_stamp" \
+        && "$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")" == "$want_sha" ]]
+}
+regular_copy "$BOOT/form-cli-native.c" "$W/startup.c"
+regular_copy "$BOOT/form-cli.native.attestation" "$W/bootstrap.attestation"
+regular_copy "$BODY/runtime/fkwu-uni.c" "$W/runtime-source.c"
+regular_copy "$BODY/runtime/fkwu-optable.h" "$W/fkwu-optable.h"
+[[ "$(cat "$BOOT/form-cli.source.sha256")" == "$want_sha" \
+    && "$(cat "$BOOT/form-cli.stamp")" == "$want_stamp" ]] || {
+    printf '%s\n' 'build: native CLI source generation is stale; regenerate bootstrap' >&2; exit 1;
+}
+form_cli_native_verify_attestation "$W/bootstrap.attestation" "$want_sha" "$want_stamp" "$W/startup.c" "$W/runtime-source.c" || {
+    printf '%s\n' 'build: native startup identity refused' >&2; exit 1;
+}
+
+candidate="$W/form-cli"
+platform="$FORM/form-stdlib/bootstrap/form-cli-$slug"
+copy_platform() {
+    regular_copy "$platform" "$candidate" \
+        && regular_copy "$platform.fkb" "$candidate.fkb" \
+        && regular_copy "$platform.sym" "$candidate.sym" \
+        && regular_copy "$platform.native.attestation" "$W/platform.attestation" \
+        && form_cli_native_verify_platform_attestation "$W/platform.attestation" "$want_sha" "$want_stamp" "$W/bootstrap.attestation" "$slug" "$candidate" "$candidate.fkb" "$candidate.sym"
+}
+
 if [[ "${FORM_STANDARD_LANE:-0}" == 1 ]]; then
-    if [[ "$bootstrap_carrier_fresh" == 1 && "$platform_carrier_fresh" == 1 ]]; then
-        cp "$SNAPSHOT_PLATFORM_BIN" "$OUT"
-        chmod +x "$OUT"
-        form_cli_verify_binary_identity "$OUT" "$want_source_sha256"
-        echo "standard lane: $OUT from bootstrap/${slug} (no clang)" >&2
-        exit 0
-    fi
-    echo "standard lane: bootstrap form-cli-${slug} missing or stale" >&2
-    exit 1
-fi
-
-# Warm path: same snapshot rule before invoking clang when available.
-if [[ "$bootstrap_carrier_fresh" == 1 && "$platform_carrier_fresh" == 1 && "$FORM_CLI_FORCE_LINK" != 1 && -z "$FORM_CLI_EXTRA_SRC" ]]; then
-    if form_cli_verify_generation_attestation \
-            "$SNAPSHOT_PLATFORM_ATTESTATION" "$want_source_sha256" "$want_cli_stamp" \
-            "$SNAPSHOT_TABLE" "$SNAPSHOT_EMITTED_C" "$slug" "$SNAPSHOT_PLATFORM_BIN" \
-            "$SNAPSHOT_ATTESTATION"; then
-        cp "$SNAPSHOT_PLATFORM_BIN" "$OUT"
-        chmod +x "$OUT"
-        form_cli_verify_binary_identity "$OUT" "$want_source_sha256"
-        echo "  link: bootstrap form-cli-${slug} (no clang)" >&2
-        exit 0
-    fi
-    printf '%s\n' 'form-cli bootstrap: staged platform carrier attestation missing or mixed; relinking from staged C' >&2
-fi
-
-# 1. Link the verified table/C pair published by native Form regeneration.
-if [[ "$bootstrap_carrier_fresh" == 1 ]]; then
-    verify_staged_bootstrap_carrier || {
-        printf '%s\n' 'form-cli bootstrap: staged table/C identity changed before flatten; refusing link' >&2
-        exit 1
-    }
-    cp "$SNAPSHOT_TABLE" "$W/table.txt"
-    echo "  flatten: bootstrap table (no Go)" >&2
+    copy_platform || { printf '%s\n' 'build: standard native CLI bundle is missing or stale' >&2; exit 1; }
+elif [[ "${FORM_CLI_FORCE_LINK:-0}" != 1 && -f "$platform.native.attestation" ]]; then
+    copy_platform || { printf '%s\n' 'build: published native CLI bundle refused; explicit regeneration is required' >&2; exit 1; }
 else
-    echo "  flatten: verified bootstrap required; run scripts/regen_form_cli_bootstrap.sh" >&2
-    exit 1
-fi
-[[ -s "$W/table.txt" ]] || { echo "flatten produced no table"; exit 1; }
-
-# 2. emit the combined walker with the table baked in (fk_prog).
-if [[ "$bootstrap_carrier_fresh" == 1 ]]; then
-    verify_staged_bootstrap_carrier || {
-        printf '%s\n' 'form-cli bootstrap: staged table/C identity changed before emit; refusing link' >&2
-        exit 1
+    [[ -z "${FORM_CLI_EXTRA_SRC:-}${FORM_CLI_EXTRA_LDFLAGS:-}" ]] || {
+        printf '%s\n' 'build: native CLI admits host capabilities dynamically; linked extensions are outside this build identity' >&2; exit 1;
     }
-    cp "$SNAPSHOT_EMITTED_C" "$W/form-cli.c"
-    echo "  emit: bootstrap (no Go)" >&2
-else
-    echo "  emit: unavailable — need bootstrap/form-cli-emitted.c (maintainer: scripts/regen_form_cli_bootstrap.sh)" >&2
-    exit 1
+    command -v "$CC_BIN" >/dev/null || { printf 'build: compiler required for native startup: %s\n' "$CC_BIN" >&2; exit 1; }
+    runner="${FORM_FOURTH_SOURCE_FKWU:-$BODY/fkwu}"
+    [[ -f "$runner" && -x "$runner" && ! -L "$runner" ]] || { printf 'build: native source runner required: %s\n' "$runner" >&2; exit 1; }
+    regular_copy "$runner" "$W/source-fkwu"
+    if [[ -n "${FORM_CLI_NATIVE_SOURCE_SNAPSHOT:-}${FORM_CLI_NATIVE_SOURCE_SEAL:-}${FORM_CLI_NATIVE_SOURCE_SEAL_SHA256:-}" ]]; then
+        source_seal="${FORM_CLI_NATIVE_SOURCE_SEAL:?native source seal required}"
+        source_snapshot="${FORM_CLI_NATIVE_SOURCE_SNAPSHOT:?native source snapshot required}"
+        seal_sha="${FORM_CLI_NATIVE_SOURCE_SEAL_SHA256:?native source seal identity required}"
+        source_dir="$(dirname "$source_seal")"
+        [[ "$source_snapshot" == "$source_dir/body" ]] || { printf '%s\n' 'build: snapshot path disagrees with source seal owner' >&2; exit 1; }
+    else
+        { printf '%s\n' FCSC1 "$FORM" "$W/sources" ''; form_cli_source_roots; } > "$W/source.request"
+        (cd "$BODY" && "$W/source-fkwu" form/form-stdlib/bml/form-cli-source-closure.bml) < "$W/source.request" > "$W/source.log"
+        source_dir="$W/sources"
+        source_seal="$source_dir/sources.json"
+        source_snapshot="$source_dir/body"
+        seal_sha="$(cat "$source_dir/ready")"
+    fi
+    form_cli_generation_hash_valid "$seal_sha" || { printf '%s\n' 'build: source snapshot completion absent' >&2; exit 1; }
+    [[ "$(cat "$source_dir/source.sha256")" == "$want_sha" ]] || { printf '%s\n' 'build: held source snapshot identity changed' >&2; exit 1; }
+    printf '%s\n' FCSV1 "$source_seal" "$seal_sha" END > "$W/verify.request"
+    (cd "$BODY" && "$W/source-fkwu" form/form-stdlib/bml/form-cli-source-closure.bml) < "$W/verify.request" > "$W/verify-before.log"
+    cmp "$W/fkwu-optable.h" "$source_snapshot/runtime/fkwu-optable.h"
+    args=(-O2 -I "$W" -o "$candidate" "$W/startup.c")
+    if [[ "$slug" == windows-* ]]; then
+        args+=(-lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp)
+    fi
+    "$CC_BIN" "${args[@]}"
+    recipe="$source_snapshot/form/form-stdlib/form-cli-repl.fk"
+    (cd "$source_snapshot" && "$candidate" --compile-source "$recipe") > "$W/compile.out" 2> "$W/compile.err" || {
+        cat "$W/compile.err" >&2; printf '%s\n' 'build: native recipe compilation refused' >&2; exit 1;
+    }
+    cat "$W/compile.err" >&2
+    regular_copy "${recipe%.fk}.fkb" "$candidate.fkb"
+    regular_copy "${recipe%.fk}.sym" "$candidate.sym"
+    (cd "$BODY" && "$W/source-fkwu" form/form-stdlib/bml/form-cli-source-closure.bml) < "$W/verify.request" > "$W/verify-after.log"
+    form_cli_native_write_platform_attestation "$W/platform.attestation" "$W/bootstrap.attestation" "$slug" "$candidate" "$candidate.fkb" "$candidate.sym"
 fi
-grep -q fk_prog "$W/form-cli.c" || { echo "emit missing baked program"; exit 1; }
 
-# 3. Bake GENESIS from this same canonical identity list. It is both the
-#    source digest's input and the file-marked source carried by the binary, so
-#    a new active compiler/carrier input cannot be stamped without being
-#    re-observable through the source verb.
-{
-  while IFS= read -r source; do
-    printf ';;;; ==== FILE: %s ====\n' "$source"
-    cat "$source"
-  done < <(form_cli_source_list)
-} > "$W/genesis.txt"
-GEN_LEN=$(wc -c < "$W/genesis.txt" | tr -d ' ')
-# The source identity is not a promise made at the start of a long link.  It
-# must still name the bytes just carried into genesis; otherwise leave the
-# prior carrier in place and ask for a fresh regeneration/build.
-current_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
-current_source_sha256="$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")"
-[[ "$current_cli_stamp" == "$want_cli_stamp" && "$current_source_sha256" == "$want_source_sha256" ]] || {
-  printf '%s\n' 'form-cli build: canonical source identity changed during genesis; refusing link' >&2
-  exit 1
-}
-{
-  printf '\nconst unsigned char fk_genesis[] = {'
-  od -An -v -tu1 "$W/genesis.txt" | tr -s ' \n' ',' | sed 's/^,//; s/,$//'
-  printf '};\nconst long long fk_genesis_len = %s;\n' "$GEN_LEN"
-} >> "$W/form-cli.c"
-
-# 4. compile once -> the standalone native binary (program + own source baked in).
-if [[ "${FORM_STANDARD_LANE:-0}" == 1 ]]; then
-    echo "standard lane: skip clang link (use warmed $OUT)" >&2
-    exit 0
-fi
-out_dir="$(dirname "$OUT")"
-[[ "$out_dir" == "." ]] || mkdir -p "$out_dir"
-clang_args=(
-  -O2
-  -Wno-error=implicit-function-declaration
-  -Wno-implicit-function-declaration
-  -Wno-incompatible-library-redeclaration
-  -o "$OUT" "$W/form-cli.c"
-)
-if [[ -n "$FORM_CLI_EXTRA_SRC" ]]; then
-  extra_srcs=(${=FORM_CLI_EXTRA_SRC})
-  clang_args+=("${extra_srcs[@]}")
-fi
-if [[ -n "$FORM_CLI_EXTRA_LDFLAGS" ]]; then
-  extra_ldflags=(${=FORM_CLI_EXTRA_LDFLAGS})
-  clang_args+=("${extra_ldflags[@]}")
-fi
-if is_windows_host; then
-  patch_windows_emitted_c "$W/form-cli.c"
-  # The emitted Form walker carries recursive recipe frames on the native
-  # thread stack. PE/COFF's 1 MiB default is below the observed production
-  # floor for a 600-byte semantic-v2 source excerpt and exits with
-  # STATUS_STACK_OVERFLOW (0xC00000FD). Keep the evidence width identical on
-  # every host and give the Windows carrier the same practical headroom used
-  # by the other proof siblings instead of truncating the grounded source.
-  compiler_target="$("$CC_BIN" -dumpmachine 2>/dev/null || true)"
-  if [[ "$compiler_target" == *-windows-msvc ]]; then
-    clang_args+=(-Wl,/STACK:16777216)
-  else
-    clang_args+=(-Wl,--stack=16777216)
-  fi
-  clang_args+=(-lws2_32 -llegacy_stdio_definitions)
-fi
-"$CC_BIN" "${clang_args[@]}"
-form_cli_verify_binary_identity "$OUT" "$want_source_sha256"
-echo "built $OUT  ($(wc -c < "$OUT") bytes, self-contained — runs with no Go/clang/table; carries ${GEN_LEN}B of its own source)"
+mkdir -p "$W/check/.hearth/session-learning"
+printf '%s\n' 1 > "$W/check/.hearth/session-learning/paused"
+(cd "$W/check" && form_cli_verify_binary_identity "$candidate" "$want_sha")
+form_cli_native_verify_platform_attestation "$W/platform.attestation" "$want_sha" "$want_stamp" "$W/bootstrap.attestation" "$slug" "$candidate" "$candidate.fkb" "$candidate.sym"
+source_current || { printf '%s\n' 'build: source generation changed before publication' >&2; exit 1; }
+mkdir -p "$(dirname "$OUT")"
+# Publish the executable last; existing processes retain their loaded recipe.
+publication_stages=("$OUT.fkb.writing-$$" "$OUT.sym.writing-$$" "$OUT.native.attestation.writing-$$" "$OUT.writing-$$")
+regular_copy "$candidate.fkb" "$OUT.fkb.writing-$$"
+regular_copy "$candidate.sym" "$OUT.sym.writing-$$"
+regular_copy "$W/platform.attestation" "$OUT.native.attestation.writing-$$"
+regular_copy "$candidate" "$OUT.writing-$$"
+chmod +x "$OUT.writing-$$"
+mv -f "$OUT.fkb.writing-$$" "$OUT.fkb"
+mv -f "$OUT.sym.writing-$$" "$OUT.sym"
+mv -f "$OUT.native.attestation.writing-$$" "$OUT.native.attestation"
+mv -f "$OUT.writing-$$" "$OUT"
+printf 'built %s with native Form image and symbols; source=%s\n' "$OUT" "$want_sha"

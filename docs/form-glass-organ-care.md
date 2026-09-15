@@ -1,50 +1,28 @@
 # Glass organ care
 
-Run the native Glass care reading directly through the body:
+`./fkwu observe/form-glass-organ-care-run.fk` reads the same live organ flows as
+the core `care` command and sends their current unease through the
+existing framebuffer. It preserves the framebuffer’s other observations.
 
-```sh
-./fkwu observe/form-glass-organ-care-run.fk
-```
+The JSON report names discovered sources, directed attention, resource needs,
+supply outcomes, observation age and source state. Pain comes first; unknown health
+and open needs remain visible. There is no fixed organ count or inferred
+health from a source file’s presence. Coverage means currently advertised
+flows. An undiscovered organ has supplied no evidence to this reading.
 
-It reads the declared local/offline health census and emits one short report,
-plus one source-attributed framebuffer event for each census member.  The
-current shape is intentionally human-readable:
+Observation, proposed response, applied action and fresh outcome remain
+distinct. An applied response does not turn an earlier unknown or unhealthy
+observation green. Only the owning organ’s next observation can establish
+recovery. Offered actions are descriptions from their owner, not commands
+that Glass executes.
 
-```text
-glass-organ-care
-scope declared-local-offline-census
-coverage complete
-organs 62
-healthy 48
-asking 14
-attention-received 0
-attention-applied 0
-unobserved 0
-all-held 0
-next concept-digest-evidence-and-bucket-image
-```
+The care view is `form/form-stdlib/bml/form-core-care.bml`; its source
+reader and discovery contracts are described in [native care](native-core-care.md).
+The resident CLI retains readers and consumes only new complete events.
+This standalone Glass door takes one fresh snapshot per execution.
+Care begins when an executing organ sends a signal to `organ-care.bml`.
+Glass reads that exchange; it does not initiate a schedule of checks.
 
-`scope` matters.  This is an exact statement about the live declared census,
-not a claim that every `.fk` or `.bml` file is a healthy organ.  Glass permits
-`all-held 1` only when coverage is complete and every census member is either
-freshly `healthy`, has an exact `attention-received` receipt, or has an exact
-`attention-applied` receipt.  Quiet and missing readings remain `unobserved`.
-
-An attention receipt is a pure Form value carrying five matching facts:
-organ identity, its evidence identity, its requested move, the receipt stage
-(`received` or `applied`), and a receipt identity.  It matches only the same
-organ/evidence/move triple.  It says a request was received or applied; it
-does **not** say the organ healed.  Only a new positive organ reading restores
-`healthy`.
-
-The reusable authority is
-`form/form-stdlib/bml/form-glass-organ-care.bml`.  A cell that already carries
-its own Form values calls `fgoc-attention` and passes the returned value into
-`fgoc-status` or `fgoc-all-held?`; it never opens a host process, file, socket,
-or network path.  The runner deliberately supplies no attention receipts, so
-it cannot fabricate care that has not occurred.
-
-The current census adapter is `observe/form-local-offline-health-pulse.fk`.
-To widen the word “all,” add an organ to that explicit census with its source,
-evidence, requested move, and fresh health reading; do not infer membership
-from source-file presence.
+The pure `form/form-stdlib/bml/form-glass-organ-care.bml` library remains
+available to callers that already hold explicit Form census and attention
+values. The live Glass door uses organ events directly.

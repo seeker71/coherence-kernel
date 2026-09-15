@@ -317,10 +317,12 @@ form_cli_behavioral_proof() (
     if [[ -z "$expected_source_sha256" ]]; then
         expected_source_sha256="$(tr -d '\r\n' < "$form_dir/form-stdlib/bootstrap/form-cli.source.sha256")"
     fi
-    form_cli_verify_binary_identity "$binary" "$expected_source_sha256"
-
     root="$(mktemp -d "${TMPDIR:-/tmp}/form-cli-behavior.XXXXXX")"
     trap 'rm -rf "$root"' EXIT
+    # Evaluation commands have a private home with learning paused throughout.
+    mkdir -p "$root/.hearth/session-learning"
+    printf '%s\n' 1 > "$root/.hearth/session-learning/paused"
+    (cd "$root" && form_cli_verify_binary_identity "$binary" "$expected_source_sha256")
     request_dir="$root/.coherence-network/rag-requests"
     index_file="$root/.coherence-network/rag-index/index.jsonl"
     source_file="$root/$source_path"

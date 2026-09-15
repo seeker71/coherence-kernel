@@ -1,0 +1,163 @@
+// Ordered source assembly for the native table compiler. Authored paths own
+// relative dependencies; an explicit read path can carry a source override.
+// Dependencies absent from the explicit order enter once, before their user.
+// Explicit modules retain their supplied order, including repeated overrides.
+// preludes: form-stdlib/bml/native-source-prepare.bml form-stdlib/bml-source.fk
+section [form.bml] {
+ class NativeTableSources {
+  def nts-refuse(reason, path) = form_error(str_concat("[native-table-source] ", str_concat(reason, str_concat(": ", path))));
+  def nts-path(path) {
+   if not(str_eq(value_kind(path), "string")) then nts-refuse("path-type", "")
+   else if or(eq(str_len(path), 0), ge(str_find(path, byte_to_str(0), 0), 0)) then nts-refuse("path-bytes", path)
+   else nts-parts(split-on(path, "/"), list());
+  }
+  def nts-parts(parts, held) =
+   if nil?(parts) then str_concat("/", nts-join(reverse(held)))
+   else if or(str_eq(head(parts), "."), str_eq(head(parts), "")) then nts-parts(tail(parts), held)
+   else if str_eq(head(parts), "..") then if nil?(held) then nts-refuse("path-above-root", "") else nts-parts(tail(parts), tail(held))
+   else nts-parts(tail(parts), cons(head(parts), held));
+  def nts-join(parts) = if nil?(parts) then "" else if nil?(tail(parts)) then head(parts) else str_concat(head(parts), str_concat("/", nts-join(tail(parts))));
+  def nts-absolute(path) = nts-path(if str_eq(substring(path, 0, 1), "/") then path else fs-path-join(host_cwd(), path));
+  def nts-text(parts) = if nil?(parts) then "" else if nil?(tail(parts)) then head(parts) else nts-text-split(parts, div(len(parts), 2));
+  def nts-text-split(parts, half) = str_concat(nts-text(take(half, parts)), nts-text(drop(half, parts)));
+  def nts-read(path) {
+   let size = file_size(path);
+   let source = read_file(path);
+   if or(lt(size, 0), or(nothing?(source), not(eq(str_len(source), size)))) then nts-refuse("incomplete-read", path)
+   else if not(eq(file_size(path), size)) then nts-refuse("changed-extent", path) else source;
+  }
+  def nts-token-char(s, at) = if ge(at, str_len(s)) then 0 else if or(bml-source-space?(char_at(s, at)), str_eq(char_at(s, at), ",")) then 0 else 1;
+  def nts-token-end(s, at) = if nts-token-char(s, at) then nts-token-end(s, add(at, 1)) else at;
+  def nts-token-start(s, at) = if ge(at, str_len(s)) then at else if nts-token-char(s, at) then at else nts-token-start(s, add(at, 1));
+  def nts-token-path?(token) = or(str_eq(fs-path-extension(token), ".fk"), str_eq(fs-path-extension(token), ".bml"));
+  def nts-tokens(s, at, held) {
+   let start = nts-token-start(s, at);
+   let end = nts-token-end(s, start);
+   let token = substring(s, start, end);
+   if eq(start, str_len(s)) then list(reverse(held), 0)
+   else if str_eq(token, "\\") then list(reverse(held), 1)
+   else if not(nts-token-path?(token)) then list(reverse(held), 0)
+   else nts-tokens(s, end, cons(token, held));
+  }
+  def nts-import(line) {
+   let stripped = bml-source-strip-semi(line);
+   if not(str_eq(substring(stripped, 0, 7), "import ")) then nothing()
+   else json-string-value(parse-json("native-table-import", bml-source-trim(substring(stripped, 7, str_len(stripped)))));
+  }
+  // The shared quote-state reader keeps directive-looking multiline string
+  // data out of the dependency graph. Direct Form uses semicolon comments.
+  def nts-declarations(source, semi) = nts-lines(source, 0, 0, 0, semi, list(), list());
+  // A sealed source runtime resolves names from this exact registry. Carry
+  // every declared home and its dependencies, including homes not yet called.
+  def nts-home-index?(owner) {
+   let suffix = "/form-stdlib/home-index.txt";
+   and(ge(str_len(owner), str_len(suffix)), str_eq(substring(owner, sub(str_len(owner), str_len(suffix)), str_len(owner)), suffix));
+  }
+  def nts-home-declarations(source) = if ge(str_find(source, byte_to_str(0), 0), 0) then nts-refuse("home-index-nul", "") else nts-home-lines(lx-lines(source), list());
+  def nts-home-lines(lines, held) {
+   if nil?(lines) then reverse(held) else {
+    let line = lx-strip(head(lines));
+    if or(eq(str_len(line), 0), lx-at?(line, 0, "#")) then nts-home-lines(tail(lines), held)
+    else nts-home-row(tail(lines), held, nsp-words(line));
+   }
+  }
+  def nts-home-row(rest, held, words) =
+   if not(eq(len(words), 2)) then nts-refuse("home-index-row", nts-text(words))
+   else if not(nts-token-path?(nth(words, 1))) then nts-refuse("home-index-unit", nth(words, 1))
+   else nts-home-lines(rest, cons(nth(words, 1), held));
+  def nts-source-declarations(owner, source) =
+   if nts-home-index?(owner) then list(nts-home-declarations(source), source)
+   else if nts-token-path?(owner) then nts-declarations(source, lt(fsc-find-section-open(source, 0), 0))
+   else list(list(), source);
+  def nts-lines(source, at, quoted, continued, semi, deps, text) {
+   if ge(at, str_len(source)) then if continued then nts-refuse("unfinished-prelude-continuation", "") else list(reverse(deps), nts-text(reverse(text)))
+   else nts-line(source, at, str_find(source, "\n", at), quoted, continued, semi, deps, text);
+  }
+  def nts-line(source, at, found, quoted, continued, semi, deps, text) {
+   let end = if lt(found, 0) then str_len(source) else found;
+   let line = substring(source, at, end);
+   let stripped = bml-source-trim(line);
+   let payload = if quoted then nothing() else if continued then if str_eq(substring(stripped, 0, 1), ";") then substring(stripped, 1, str_len(stripped)) else nts-refuse("prelude-continuation-comment", "") else bml-source-prelude-line(line);
+   let tokens = if nothing?(payload) then list(list(), 0) else nts-tokens(payload, 0, list());
+   let imported = if quoted then nothing() else nts-import(stripped);
+   let pathImport = if nothing?(imported) then 0 else nts-token-path?(imported);
+   let nextQuoted = if and(not(quoted), str_eq(substring(stripped, 0, 1), ";")) then 0 else bml-source-quote-state(line, 0, quoted, semi);
+   let bodyLine = if and(semi, pathImport) then "" else line;
+   nts-lines(source, add(end, 1), nextQuoted, nth(tokens, 1), semi,
+    append(reverse(nth(tokens, 0)), if pathImport then cons(imported, deps) else deps),
+    cons(str_concat(bodyLine, if lt(found, 0) then "" else "\n"), text));
+  }
+  def nts-open(modules, entry) {
+   let state = record_new(0, "explicit", record_new(0), "seen", record_new(0), "rows", list(), "lower", 1);
+   nts-explicit(state, append(modules, list(entry)));
+   state;
+  }
+  def nts-explicit(state, rows) {
+   if nil?(rows) then 1 else {
+    let path = nts-absolute(nth(head(rows), 0));
+    let explicit = record_get(state, "explicit");
+    if record_has(explicit, path) then 1 else record_set(explicit, path, nts-absolute(nth(head(rows), 1)));
+    nts-explicit(state, tail(rows));
+   }
+  }
+  def nts-deps(state, owner, deps) {
+   if nil?(deps) then 1 else {
+    let resolved = nsp-resolve(owner, head(deps));
+    let path = if nothing?(resolved) then nts-refuse("missing-dependency", str_concat(owner, str_concat(" -> ", head(deps)))) else nts-absolute(resolved);
+    if record_has(record_get(state, "explicit"), path) then 1 else nts-add(state, path, path, 0);
+    nts-deps(state, owner, tail(deps));
+   }
+  }
+  def nts-add(state, ownerPath, readPath, force) {
+   let owner = nts-absolute(ownerPath);
+   let path = nts-absolute(readPath);
+   let seen = record_get(state, "seen");
+   if and(not(force), record_has(seen, owner)) then 1 else {
+    record_set(seen, owner, 1);
+    let source = nts-read(path);
+    let form = nts-token-path?(owner);
+    let high = if form then ge(fsc-find-section-open(source, 0), 0) else 0;
+    let declaration = nts-source-declarations(owner, source);
+    nts-deps(state, owner, nth(declaration, 0));
+    let lowered = if and(high, record_get(state, "lower")) then form-source-compile-text(source, owner) else nth(declaration, 1);
+    if nothing?(lowered) then nts-refuse("lowering-refused", owner) else 1;
+    record_set(state, "rows", cons(list(owner, path, source, lowered), record_get(state, "rows")));
+    1;
+   }
+  }
+  def nts-modules(state, modules) {
+   if nil?(modules) then 1 else {
+    nts-add(state, nth(head(modules), 0), nth(head(modules), 1), 1);
+    nts-modules(state, tail(modules));
+   }
+  }
+  def nts-assemble(modules, entry) {
+   let state = nts-open(modules, entry);
+   nts-modules(state, modules);
+   nts-add(state, nth(entry, 0), nth(entry, 1), 1);
+   reverse(record_get(state, "rows"));
+  }
+  def nts-held(rows) {
+   if nil?(rows) then 1 else {
+    let row = head(rows);
+    if not(str_eq(nts-read(nth(row, 1)), nth(row, 2))) then nts-refuse("source-changed", nth(row, 0)) else 1;
+    nts-held(tail(rows));
+   }
+  }
+  def nts-root-pairs(paths) = if nil?(paths) then list() else cons(list(head(paths), head(paths)), nts-root-pairs(tail(paths)));
+  def nts-owner-paths(rows) = if nil?(rows) then list() else cons(nth(head(rows), 0), nts-owner-paths(tail(rows)));
+  // Read-only closure for source identity. Non-Form roots remain in the list
+  // but have no interpreted dependencies. No source text is lowered or run.
+  def nts-closure-records(paths) {
+   let modules = nts-root-pairs(paths);
+   let state = record_new(0, "explicit", record_new(0), "seen", record_new(0), "rows", list(), "lower", 0);
+   nts-explicit(state, modules);
+   nts-modules(state, modules);
+   let rows = reverse(record_get(state, "rows"));
+   nts-held(rows);
+   rows;
+  }
+  def nts-closure-paths(paths) = nts-owner-paths(nts-closure-records(paths));
+ }
+ 0;
+}

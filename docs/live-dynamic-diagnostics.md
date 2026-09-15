@@ -95,6 +95,20 @@ bytes remain referenced; framebuffer events carry only opaque numeric data.
 Stage timing and choices retain their actual observations. The current JSON
 timing report projects the health of each organ/flow/aspect.
 
+Every newly consumed nonempty stderr span also emits a live availability
+observation, even when it has no recognized prefix or final newline. Its health
+and interpretation stay unknown. Exact byte ranges and private evidence
+references support a correlated evidence request while the child is running.
+Diagnostic availability does not count as semantic progress or decide the
+child's result. Exit and resource release retain their separate observations.
+
+The native care organ receives unease at execution boundaries and routes
+attention and offered resources immediately. The core `care` command and Glass
+care door view that exchange through retained native readers. They expose
+observation age, source state, incomplete delivery and open resources. The
+[native care contract](native-core-care.md) defines signal handling, discovery
+coverage, stream generations and caller-adjustable work budgets.
+
 Read a flow by sending its event-file path to
 `./fkwu observe/organ-health-run.bml`. The reader holds one input chunk, the
 unfinished event and the current organ map. An empty flow yields no readings;

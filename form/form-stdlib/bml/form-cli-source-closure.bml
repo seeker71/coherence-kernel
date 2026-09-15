@@ -1,0 +1,225 @@
+// FCSC1: form base, new output directory, optional carrier owner, then roots.
+// FCSI1/FCSV1: seal path, expected seal SHA256, END. Every field is one line.
+// Checked files carry publication; stdout is never completion evidence.
+// preludes: form-stdlib/bml/native-table-source-seal.bml form-stdlib/bml/native-cli-startup.bml
+section [form.bml] {
+ class FormCliSourceClosure {
+  def fcsc-input(rows) {
+   let line = read_line();
+   if nothing?(line) then reverse(rows)
+   else if or(eq(str_len(line),0),or(ge(str_len(line),4096),ge(str_find(line,byte_to_str(0),0),0))) then nts-refuse("closure-root-line","")
+   else fcsc-input(cons(line,rows));
+  }
+  def fcsc-relative(base,root,path) {
+   if or(ge(str_find(path,"\n",0),0),ge(str_find(path,"\r",0),0)) then nts-refuse("manifest-path-line",path)
+   else if eq(str_find(path,str_concat(base,"/"),0),0) then substring(path,add(str_len(base),1),str_len(path))
+   else if eq(str_find(path,str_concat(root,"/"),0),0) then str_concat("../",substring(path,add(str_len(root),1),str_len(path)))
+   else nts-refuse("manifest-outside-body",path);
+  }
+  def fcsc-lines(base,root,paths) = if nil?(paths) then list() else cons(str_concat(fcsc-relative(base,root,head(paths)),"\n"),fcsc-lines(base,root,tail(paths)));
+  def fcsc-roots-at(base,paths) = if nil?(paths) then list() else cons(if str_eq(substring(head(paths),0,1),"/") then head(paths) else fs-path-join(base,head(paths)),fcsc-roots-at(base,tail(paths)));
+  def fcsc-line() {
+   let line = read_line();
+   if nothing?(line) then nts-refuse("closure-request-incomplete","")
+   else if or(ge(str_len(line),4096),ge(str_find(line,byte_to_str(0),0),0)) then nts-refuse("closure-request-line","") else line;
+  }
+  def fcsc-manifest-name() = "form-stdlib/bootstrap/form-cli.dependencies";
+  def fcsc-frame(path,bytes) = nts-text(list("path:",path,"\nbytes:",int_to_str(str_len(bytes)),"\n",bytes,"\n"));
+  def fcsc-digest-rows(base,root,rows,state) = if nil?(rows) then ntss-hex(sha256-stream-finalize(state)) else fcsc-digest-rows(base,root,tail(rows),sha256-stream-fold-string-from(state,fcsc-frame(fcsc-relative(base,root,nth(head(rows),0)),nth(head(rows),2))));
+  def fcsc-digest(base,rows,manifest) = fcsc-digest-rows(base,fs-path-dirname(base),rows,sha256-stream-fold-string-from(sha256-stream-initial(),fcsc-frame(fcsc-manifest-name(),manifest)));
+  def fcsc-originals(base,rows) = if nil?(rows) then list() else cons(json-node-object(list(ntss-s("owner",nth(head(rows),0)),ntss-s("identity_path",fcsc-relative(base,fs-path-dirname(base),nth(head(rows),0))),ntss-n("bytes",str_len(nth(head(rows),2))),ntss-s("sha256",ntss-hash(nth(head(rows),2))))),fcsc-originals(base,tail(rows)));
+  def fcsc-raw(rows) = if nil?(rows) then list() else cons(nth(head(rows),2),fcsc-raw(tail(rows)));
+  def fcsc-genesis-row(path,text) = nts-text(list(";;;; ==== FILE: ",path," ====\n",text));
+  def fcsc-genesis-rows(base,rows) = if nil?(rows) then list() else cons(fcsc-genesis-row(fcsc-relative(base,fs-path-dirname(base),nth(head(rows),0)),nth(head(rows),2)),fcsc-genesis-rows(base,tail(rows)));
+  def fcsc-genesis(base,rows,manifest) = nts-text(cons(fcsc-genesis-row(fcsc-manifest-name(),manifest),fcsc-genesis-rows(base,rows)));
+  def fcsc-held-find(rows,owner) = if nil?(rows) then nts-refuse("carrier-not-in-closure",owner) else if str_eq(nth(head(rows),0),owner) then head(rows) else fcsc-held-find(tail(rows),owner);
+  def fcsc-replace(text,needle,value,at,held,count) {
+   let found = str_find(text,needle,at);
+   if lt(found,0) then list(nts-text(reverse(cons(substring(text,at,str_len(text)),held))),count)
+   else fcsc-replace(text,needle,value,add(found,str_len(needle)),cons(value,cons(substring(text,at,found),held)),add(count,1));
+  }
+  def fcsc-carrier(rows,owner,digest) {
+   let original = nth(fcsc-held-find(rows,owner),2);
+   let replaced = fcsc-replace(original,"FORM_CLI_SOURCE_SHA256_PLACEHOLDER",digest,0,list(),0);
+   ntss-need(gt(nth(replaced,1),0),"carrier-placeholder-absent",owner);
+   head(replaced);
+  }
+  def fcsc-overrides(base,directory,carrier,rows,digest) {
+   if eq(str_len(carrier),0) then list() else {
+    let owner = nts-absolute(if str_eq(substring(carrier,0,1),"/") then carrier else fs-path-join(base,carrier));
+    let text = fcsc-carrier(rows,owner,digest);
+    let path = fcsc-write(fs-path-join(directory,"form-cli-carrier.fk"),text);
+    list(json-node-object(list(ntss-s("owner",owner),ntss-s("read",path),ntss-n("bytes",str_len(text)),ntss-s("sha256",ntss-hash(text)))));
+   };
+  }
+  def fcsc-write(path,text) {
+   ntss-need(eq(write_file(path,text),str_len(text)),"publication-write",path);
+   ntss-need(str_eq(ntss-read(path),text),"publication-readback",path);
+   path;
+  }
+  def fcsc-mkdir(path) {
+   ntss-need(not(fs-exists?(path)),"publication-directory-exists",path);
+   let pid = host_spawn_at(list("/bin/mkdir","-m","700",path),list("/dev/null","/dev/null","/dev/null"));
+   ntss-need(and(gt(pid,0),eq(host_wait(pid),0)),"publication-directory",path);
+   path;
+  }
+  def fcsc-tree-directory(path) {
+   if fs-exists?(path) then 1 else {
+    fcsc-tree-directory(fs-path-dirname(path));
+    fcsc-mkdir(path);
+   };
+  }
+  def fcsc-portable-deps(owner,deps) = if nil?(deps) then 1 else {
+   ntss-need(not(str_eq(substring(head(deps),0,1),"/")),"snapshot-absolute-dependency",owner);
+   fcsc-portable-deps(owner,tail(deps));
+  };
+  def fcsc-snapshot-rows(root,directory,rows,identities) = if nil?(rows) then list() else {
+   let owner = nth(head(rows),0); let text = nth(head(rows),2); let identity = head(identities);
+   fcsc-portable-deps(owner,head(nts-source-declarations(owner,text)));
+   let path = fs-path-join(directory,fcsc-relative(root,root,owner));
+   fcsc-tree-directory(fs-path-dirname(path));
+   fcsc-write(path,text);
+   cons(json-node-object(list(ntss-s("owner",owner),ntss-s("read",path),ntss-n("bytes",ntss-num(identity,"bytes")),ntss-s("sha256",ntss-str(identity,"sha256")))),fcsc-snapshot-rows(root,directory,tail(rows),tail(identities)));
+  };
+  def fcsc-create(base,directory,carrier,roots) {
+   ntss-need(not(nil?(roots)),"manifest-roots-empty",base);
+   let rows = nts-closure-records(fcsc-roots-at(base,roots));
+   let manifest = nts-text(fcsc-lines(base,fs-path-dirname(base),nts-owner-paths(rows)));
+   let digest = fcsc-digest(base,rows,manifest);
+   let originalRows = fcsc-originals(base,rows);
+   let raw = nts-text(cons(manifest,fcsc-raw(rows)));
+   let genesis = fcsc-genesis(base,rows,manifest);
+   fcsc-mkdir(directory);
+   let snapshotRoot = fs-path-join(directory,"body");
+   fcsc-mkdir(snapshotRoot);
+   let boundaryPath = fcsc-write(fs-path-join(snapshotRoot,".git"),"sealed source lookup boundary\n");
+   let snapshotRows = fcsc-snapshot-rows(fs-path-dirname(base),snapshotRoot,rows,originalRows);
+   let snapshotManifest = fs-path-join(snapshotRoot,str_concat("form/",fcsc-manifest-name()));
+   fcsc-tree-directory(fs-path-dirname(snapshotManifest));
+   fcsc-write(snapshotManifest,manifest);
+   let manifestRead = fcsc-write(fs-path-join(directory,"form-cli.dependencies"),manifest);
+   let digestPath = fcsc-write(fs-path-join(directory,"source.sha256"),str_concat(digest,"\n"));
+   let rawPath = fcsc-write(fs-path-join(directory,"stamp.bytes"),raw);
+   let genesisPath = fcsc-write(fs-path-join(directory,"genesis.txt"),genesis);
+   let overrides = fcsc-overrides(base,directory,carrier,rows,digest);
+   let manifestRow = json-node-object(list(ntss-s("path",fs-path-join(base,fcsc-manifest-name())),ntss-s("read",manifestRead),ntss-n("bytes",str_len(manifest)),ntss-s("sha256",ntss-hash(manifest))));
+   let snapshot = json-node-object(list(ntss-s("root",snapshotRoot),json-node-pair("manifest",ntss-reference(snapshotManifest,manifest)),json-node-pair("boundary",ntss-reference(boundaryPath,"sealed source lookup boundary\n")),json-node-pair("sources",json-node-array(snapshotRows))));
+   let seal = json-node-object(list(ntss-s("schema","native-table-source-seal-v1"),ntss-s("base",base),ntss-s("source_sha256",digest),json-node-pair("manifest",manifestRow),json-node-pair("digest",ntss-reference(digestPath,str_concat(digest,"\n"))),json-node-pair("stamp_input",ntss-reference(rawPath,raw)),json-node-pair("genesis",ntss-reference(genesisPath,genesis)),json-node-pair("snapshot",snapshot),json-node-pair("sources",json-node-array(originalRows)),json-node-pair("overrides",json-node-array(overrides))));
+   let encoded = json-emit(seal);
+   fcsc-write(fs-path-join(directory,"sources.json"),encoded);
+   nts-held(rows);
+   fcsc-write(fs-path-join(directory,"ready"),str_concat(ntss-hash(encoded),"\n"));
+   1;
+  }
+  def fcsc-current-originals(rows) = if nil?(rows) then 1 else {
+   ntss-need(ntss-file-current(head(rows),ntss-str(head(rows),"owner")),"sealed-source-changed",ntss-str(head(rows),"owner"));
+   fcsc-current-originals(tail(rows));
+  };
+  def fcsc-current-overrides(rows) = if nil?(rows) then 1 else {
+   ntss-need(ntss-file-current(head(rows),ntss-str(head(rows),"read")),"sealed-override-changed",ntss-str(head(rows),"owner"));
+   fcsc-current-overrides(tail(rows));
+  };
+  def fcsc-load(path,expected) {
+   let text = ntss-read(path);
+   ntss-need(str_eq(ntss-hash(text),expected),"seal-identity-changed",path);
+   ntss-parse(path,text);
+  }
+  def fcsc-verify(seal,installed) {
+   fcsc-current-originals(json-array-elements(ntss-get(seal,"sources")));
+   fcsc-current-overrides(json-array-elements(ntss-get(seal,"overrides")));
+   let manifest = ntss-get(seal,"manifest");
+   ntss-need(ntss-file-current(manifest,ntss-str(manifest,"read")),"sealed-manifest-changed",ntss-str(manifest,"read"));
+   if installed then ntss-need(ntss-file-current(manifest,ntss-str(manifest,"path")),"published-manifest-changed",ntss-str(manifest,"path")) else 1;
+   let digest = ntss-get(seal,"digest"); let raw = ntss-get(seal,"stamp_input");
+   ntss-need(and(ntss-file-current(digest,ntss-str(digest,"path")),str_eq(ntss-read(ntss-str(digest,"path")),str_concat(ntss-str(seal,"source_sha256"),"\n"))),"sealed-digest-changed",ntss-str(digest,"path"));
+   ntss-need(ntss-file-current(raw,ntss-str(raw,"path")),"sealed-stamp-changed",ntss-str(raw,"path"));
+   let snapshot = ntss-get(seal,"snapshot"); let snapshotManifest = ntss-get(snapshot,"manifest"); let genesis = ntss-get(seal,"genesis");
+   let boundary = ntss-get(snapshot,"boundary");
+   ntss-need(ntss-file-current(boundary,ntss-str(boundary,"path")),"sealed-snapshot-boundary-changed",ntss-str(boundary,"path"));
+   fcsc-current-overrides(json-array-elements(ntss-get(snapshot,"sources")));
+   ntss-need(ntss-file-current(snapshotManifest,ntss-str(snapshotManifest,"path")),"sealed-snapshot-manifest-changed",ntss-str(snapshotManifest,"path"));
+   ntss-need(ntss-file-current(genesis,ntss-str(genesis,"path")),"sealed-genesis-changed",ntss-str(genesis,"path"));
+   1;
+  }
+  def fcsc-install(seal) {
+   fcsc-verify(seal,0);
+   let manifest = ntss-get(seal,"manifest"); let target = ntss-str(manifest,"path");
+   let stage = str_concat(target,str_concat(".writing-",int_to_str(host_pid())));
+   ntss-need(not(fs-exists?(stage)),"manifest-stage-exists",stage);
+   let text = ntss-read(ntss-str(manifest,"read"));
+   fcsc-write(stage,text);
+   ntss-need(eq(host_path_rename(stage,target),0),"manifest-rename",target);
+   ntss-need(str_eq(ntss-read(target),text),"manifest-installed-readback",target);
+   1;
+  }
+  def fcsc-sealed(mode) {
+   let path = fcsc-line(); let expected = fcsc-line();
+   ntss-need(and(str_eq(fcsc-line(),"END"),nothing?(read_line())),"closure-request-end",path);
+   let seal = fcsc-load(path,expected);
+   let result = if str_eq(mode,"FCSI1") then fcsc-install(seal) else fcsc-verify(seal,1);
+   ntss-need(str_eq(ntss-hash(ntss-read(path)),expected),"seal-identity-changed",path);
+   result;
+  }
+  def fcsc-original-read(seal,path) {
+   let owner = nts-absolute(path);
+   let row = ntss-find(json-array-elements(ntss-get(ntss-get(seal,"snapshot"),"sources")),owner);
+   ntss-need(not(nothing?(row)),"unsealed-emission-source",owner);
+   let text = ntss-read(ntss-str(row,"read"));
+   ntss-need(ntss-content-current(row,text),"sealed-emission-source-changed",owner);
+   text;
+  }
+  def fcsc-c-hex(text,at,end,held) = if eq(at,end) then nts-text(reverse(held)) else {
+   let byte = str_byte_at(text,at);
+   fcsc-c-hex(text,add(at,1),end,cons(str_concat("\\x",str_concat(json-hex-digit(div(byte,16)),json-hex-digit(mod(byte,16)))),held));
+  };
+  def fcsc-c-strings(text,at,held) = if eq(at,str_len(text)) then nts-text(reverse(held)) else {
+   let end = if lt(str_len(text),add(at,1024)) then str_len(text) else add(at,1024);
+   fcsc-c-strings(text,end,cons(nts-text(list("\"",fcsc-c-hex(text,at,end,list()),"\"\n")),held));
+  };
+  def fcsc-genesis-c(text) = nts-text(list("\nconst unsigned char fk_genesis[] =\n",if eq(str_len(text),0) then "\"\"\n" else fcsc-c-strings(text,0,list()),";\nconst long long fk_genesis_len = ",int_to_str(str_len(text)),";\n"));
+  def fcsc-emission() {
+   let path = fcsc-line(); let expected = fcsc-line(); let directory = nts-absolute(fcsc-line());
+   ntss-need(and(str_eq(fcsc-line(),"END"),nothing?(read_line())),"closure-emission-end",path);
+   let seal = fcsc-load(path,expected);
+   fcsc-verify(seal,1);
+   let runtimePath = fs-path-join(fs-path-dirname(ntss-str(seal,"base")),"runtime/fkwu-uni.c");
+   let runtimeText = fcsc-original-read(seal,runtimePath);
+   let sourceSHA = ntss-str(seal,"source_sha256");
+   let genesisRow = ntss-get(seal,"genesis"); let genesis = ntss-read(ntss-str(genesisRow,"path"));
+   ntss-need(ntss-content-current(genesisRow,genesis),"sealed-genesis-changed",ntss-str(genesisRow,"path"));
+   let startup = nts-text(list(ncs-binding(sourceSHA),ncs-image(runtimeText,sourceSHA),fcsc-genesis-c(genesis)));
+   fcsc-mkdir(directory);
+   let startupPath = fcsc-write(fs-path-join(directory,"form-cli-native.c"),startup);
+   let heldRuntime = fcsc-write(fs-path-join(directory,"runtime-source.c"),runtimeText);
+   let report = json-node-object(list(ntss-s("schema","form-cli-native-emission-v1"),ntss-s("source_sha256",sourceSHA),ntss-s("seal_sha256",expected),json-node-pair("runtime",ntss-reference(heldRuntime,runtimeText)),json-node-pair("startup",ntss-reference(startupPath,startup))));
+   fcsc-write(fs-path-join(directory,"emission.json"),json-emit(report));
+   fcsc-verify(seal,1);
+   ntss-need(str_eq(ntss-hash(ntss-read(path)),expected),"seal-identity-changed",path);
+   fcsc-write(fs-path-join(directory,"ready"),str_concat(ntss-hash(json-emit(report)),"\n"));
+   1;
+  }
+  def fcsc-emitted(mode) {
+   let path = fcsc-line(); let expected = fcsc-line(); let target = fcsc-line();
+   ntss-need(and(str_eq(fcsc-line(),"END"),nothing?(read_line())),"emission-request-end",path);
+   let held = ntss-read(path);
+   ntss-need(str_eq(ntss-hash(held),expected),"emission-record-changed",path);
+   let report = parse-json(path,held);
+   ntss-need(str_eq(ntss-str(report,"schema"),"form-cli-native-emission-v1"),"emission-schema",path);
+   let startup = ntss-get(report,"startup"); let runtime = ntss-get(report,"runtime");
+   ntss-need(ntss-file-current(runtime,ntss-str(runtime,"path")),"emitted-runtime-changed",ntss-str(runtime,"path"));
+   let bytes = ntss-read(if str_eq(mode,"FCEP1") then ntss-str(startup,"path") else target);
+   ntss-need(ntss-content-current(startup,bytes),"emitted-startup-changed",target);
+   if str_eq(mode,"FCEP1") then fcsc-write(target,bytes) else 1;
+   ntss-need(str_eq(ntss-read(path),held),"emission-record-changed",path);
+   1;
+  }
+  def fcsc-run() {
+   let mode = read_line();
+   if nothing?(mode) then 0 else if str_eq(mode,"FCSC1") then {
+    let base = nts-absolute(fcsc-line()); let directory = nts-absolute(fcsc-line()); let carrier = fcsc-line();
+    fcsc-create(base,directory,carrier,fcsc-input(list()));
+   } else if or(str_eq(mode,"FCSI1"),str_eq(mode,"FCSV1")) then fcsc-sealed(mode) else if str_eq(mode,"FCSE1") then fcsc-emission() else if or(str_eq(mode,"FCEP1"),str_eq(mode,"FCEV1")) then fcsc-emitted(mode) else nts-refuse("closure-request-version",mode);
+  }
+ }
+ fcsc-run();
+}
