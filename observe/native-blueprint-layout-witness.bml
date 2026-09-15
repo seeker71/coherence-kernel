@@ -1,0 +1,162 @@
+// Actual owned CPU and GPU execution, independent storage bits and retirement.
+// preludes: form-stdlib/bml/native-blueprint-layout.bml form-stdlib/f16-decode.fk
+section [form.bml] {
+ def nblt-need(ok,why) = if ok then 1 else form_error(str_concat("native blueprint witness: ",why));
+ def nblt-fields(widths,index) = if nil?(widths) then list() else cons(list(str_concat("field-",int_to_str(index)),head(widths),"raw"),nblt-fields(tail(widths),add(index,1)));
+ def nblt-byte(width,row,field,byte) {
+  let remaining = sub(width,mul(byte,8)); let value = mod(add(add(173,mul(row,37)),add(mul(field,23),mul(byte,19))),256);
+  if le(remaining,0) then 0 else if ge(remaining,8) then value else mod(value,nnw-power(remaining));
+ }
+ def nblt-word(width,row,field,byte,out) = if eq(byte,8) then out else nblt-word(width,row,field,add(byte,1),str_concat(out,byte_to_str(nblt-byte(width,row,field,byte))));
+ def nblt-row(widths,row,field,out) = if nil?(widths) then out else nblt-row(tail(widths),row,add(field,1),str_concat(out,nblt-word(head(widths),row,field,0,"")));
+ def nblt-raw(widths,row,count,out) = if eq(row,count) then out else nblt-raw(widths,add(row,1),count,str_concat(out,nblt-row(widths,row,0,"")));
+ // Independent bit-by-bit oracle, never called by the runtime codec.
+ def nblt-bit(fields,raw,row,total,bit) = if lt(bit,nth(head(fields),2)) then mod(div(str_byte_at(raw,add(mul(add(mul(row,total),sub(total,len(fields))),8),div(bit,8))),nnw-power(mod(bit,8))),2) else nblt-bit(tail(fields),raw,row,total,sub(bit,nth(head(fields),2)));
+ def nblt-oracle(layout,raw,count,at,bits,byte,used,out) = if eq(at,bits) then if eq(used,0) then out else str_concat(out,byte_to_str(byte)) else {
+  let value = nblt-bit(nbl-fields(layout),raw,div(at,nbl-bits(layout)),nbl-count(layout),mod(at,nbl-bits(layout)));
+  let next = add(byte,mul(value,nnw-power(used)));
+  if eq(used,7) then nblt-oracle(layout,raw,count,add(at,1),bits,0,0,str_concat(out,byte_to_str(next))) else nblt-oracle(layout,raw,count,add(at,1),bits,next,add(used,1),out);
+ };
+ // Enumerate every row's semantic byte interval, then cover that interval by
+ // the native leaf's eight-byte accesses. This does not use the runtime's
+ // final-row extent calculation or its crossing predicate.
+ def nblt-access-fields(fields,base,extent) = if nil?(fields) then extent else {
+  let field = head(fields); let firstBit = add(base,nth(field,1)); let firstByte = div(firstBit,8); let lastByte = div(sub(add(firstBit,nth(field,2)),1),8);
+  let touchedEnd = add(firstByte,mul(div(add(sub(lastByte,firstByte),8),8),8));
+  nblt-access-fields(tail(fields),base,if gt(touchedEnd,extent) then touchedEnd else extent);
+ };
+ def nblt-access-rows(layout,count,row,extent) = if eq(row,count) then extent else nblt-access-rows(layout,count,add(row,1),nblt-access-fields(nbl-fields(layout),mul(row,nbl-bits(layout)),extent));
+ def nblt-allocation(run,layout,count) {
+  let expected = if eq(count,0) then 1 else nblt-access-rows(layout,count,0,0); let allocated = record_get(run,"allocated-bytes"); let payload = record_get(run,"payload-bytes"); let region = record_get(run,"region");
+  nblt-need(and(eq(allocated,expected),eq(allocated,nbl-allocation(layout,count))),"allocated bytes equal independently enumerated native extent");
+  nblt-need(eq(record_get(region,"bytes"),expected),"owned span matches requested native extent");
+  nblt-need(eq(payload,nbl-bytes(mul(count,nbl-bits(layout)))),"payload is the semantic bit extent");
+  nblt-need(str_eq(nfm-bytes-list(npd-bytes(region,payload,sub(allocated,payload)),""),nfm-low(0,sub(allocated,payload))),"native trailing bytes remain zero");
+  if and(eq(count,1),and(eq(nbl-count(layout),1),eq(nbl-bits(layout),64))) then nblt-need(eq(allocated,8),"one native word requests exactly eight bytes") else 0;
+  if eq(count,0) then nblt-need(and(eq(payload,0),eq(allocated,1)),"empty run requests one byte and has no payload") else 0; 1;
+ }
+ def nblt-native(widths,count,metal) {
+  let layout = nbl-layout(nblt-fields(widths,0)); let owner = nbl-open(layout); let raw = nblt-raw(widths,0,count,"");
+  let run = nbl-pack(owner,raw); nblt-need(not(nothing?(run)),"native packed admission");
+  nblt-allocation(run,layout,count);
+  let payload = record_get(run,"payload-bytes"); let actual = nfm-bytes-list(npd-bytes(record_get(run,"region"),0,payload),"");
+  let expected = nblt-oracle(layout,raw,count,0,mul(count,nbl-bits(layout)),0,0,"");
+  nblt-need(str_eq(actual,expected),"native packed bytes equal independent bit oracle");
+  let output = npd-region(record_get(owner,"memory"),add(str_len(raw),16));
+  nblt-need(eq(nbl-project(run,0,count,output,8),count),"native complete projection count");
+  nblt-need(str_eq(nfm-output-raw(output,8,mul(count,len(widths)),list()),raw),"native full u64 fields exact");
+  nblt-need(and(str_eq(nfm-output-raw(output,0,1,list()),nfm-low(0,8)),str_eq(nfm-output-raw(output,add(str_len(raw),8),1,list()),nfm-low(0,8))),"complete native output guards");
+  if gt(count,2) then {
+   nblt-need(eq(nbl-project(run,1,sub(count,2),output,8),sub(count,2)),"indexed projection count");
+   nblt-need(str_eq(nfm-output-raw(output,8,mul(sub(count,2),len(widths)),list()),substring(raw,mul(len(widths),8),sub(str_len(raw),mul(len(widths),8)))),"indexed unaligned fields exact");
+   let tailStart = mul(mul(sub(count,2),len(widths)),8);
+   nblt-need(str_eq(nfm-output-raw(output,add(8,tailStart),mul(2,len(widths)),list()),substring(raw,tailStart,str_len(raw))),"indexed projection retains bytes beyond its output range");
+  } else 0;
+  nblt-need(and(str_eq(nfm-output-raw(output,0,1,list()),nfm-low(0,8)),str_eq(nfm-output-raw(output,add(str_len(raw),8),1,list()),nfm-low(0,8))),"complete output guards after indexed projection");
+  let gpu = if metal then nblt-metal(layout,actual,raw,count) else 0;
+  print(list("native-blueprint-layout","widths",widths,"stride_bits",nbl-bits(layout),"rows",count,"payload_bytes",payload,"allocated_bytes",record_get(run,"allocated-bytes"),"u64_field_bytes",str_len(raw),"native_code_bytes",len(record_get(owner,"image")),"native_calls",record_get(owner,"calls"),"cpu_exact",1,"metal_exact",gpu));
+  npd-region-close(output); nbl-run-close(run); nblt-need(eq(nbl-close(owner),1),"native run, output and code retirement"); 1;
+ }
+ def nblt-metal(layout,packed,raw,count) {
+  let version = mj-memory(nbl-msl(layout),"nbl_project"); nblt-need(gt(mj-handle(version),0),"Metal RAM program admission");
+  let input = metal_buf_alloc(str_len(packed)); let output = metal_buf_alloc(str_len(raw));
+  nblt-need(and(gt(input,0),gt(output,0)),"Metal owned buffers");
+  nblt-need(eq(metal_buf_write(input,0,packed),str_len(packed)),"Metal exact packed upload");
+  nblt-need(eq(mj-enqueue(version,md-bind(list(input,output),list()),count),1),"Metal native projection enqueue");
+  let fence = metal_submit(); nblt-need(gt(fence,0),"Metal command fence"); nblt-need(eq(metal_fence_wait(fence),1),"Metal fence completion");
+  nblt-need(str_eq(metal_buf_read(output,0,str_len(raw)),raw),"Metal u64 fields bit identical to CPU");
+  nblt-need(eq(add(metal_buf_free(input),metal_buf_free(output)),2),"Metal buffer retirement"); nblt-need(eq(mj-release(version),1),"Metal program retirement"); 1;
+ }
+ def nblt-widths(width) = if gt(width,64) then 0 else add(nblt-native(list(7,width,3),11,1),nblt-widths(add(width,1)));
+ def nblt-refusals() {
+  nblt-need(nothing?(nbl-layout(list(list("a",0,"raw")))),"zero-width field refused");
+  nblt-need(nothing?(nbl-layout(list(list("a",65,"raw")))),"oversized field refused");
+  nblt-need(nothing?(nbl-layout(list(list("a",7,"raw"),list("a",3,"raw")))),"duplicate field name refused");
+  nblt-need(nothing?(nbl-layout(list(list("a",8,"unknown")))),"unknown interpretation refused");
+  nblt-need(nothing?(nbl-layout(list(list("a",7,"e4m3")))),"numeric width mismatch refused");
+  nblt-need(nothing?(nbl-layout(list(list("a",8,record_new(0))))),"non-string interpretation refused");
+  let fields = list(list("a",0,3,"raw"));
+  nblt-need(not(nbl-valid?(list("native-blueprint-layout-v1",fields,3.0,1))),"floating bit extent refused");
+  nblt-need(not(nbl-valid?(list("native-blueprint-layout-v1",fields,3,1.0))),"floating field count refused");
+  nblt-need(not(nbl-valid?(list("native-blueprint-layout-v1",list(list("a",0.0,3,"raw")),3,1))),"floating field offset refused");
+  nblt-need(not(nbl-valid?(list("native-blueprint-layout-v1",list(list("a",1,3,"raw")),3,1))),"incorrect field offset refused");
+  nblt-need(not(nbl-valid?(list("native-blueprint-layout-v1",list(list("a",0,7,"e4m3")),7,1))),"manufactured numeric width mismatch refused");
+  let owner = nbl-open(nbl-layout(list(list("a",3,"raw"))));
+  nblt-need(nothing?(nbl-pack(owner,nfm-low(8,8))),"out-of-width input refused before publication");
+  nblt-need(nothing?(nbl-pack(owner,"short")),"partial input row refused");
+  let run = nbl-pack(owner,nfm-low(7,8)); let output = npd-region(record_get(owner,"memory"),8);
+  nblt-allocation(run,record_get(owner,"layout"),1);
+  nblt-need(nothing?(nbl-project(run,0,1,record_get(run,"region"),0)),"immutable packed run cannot be output");
+  nblt-need(nothing?(nbl-project(run,1,1,output,0)),"past-end projection refused");
+  nblt-need(eq(nbl-project(run,0,1,output,0),1),"refusals preserve admitted run");
+  nblt-need(eq(npd-peek(output,0,1),7),"current run remains exact");
+  nbl-run-close(run); npd-region-close(output);
+  let emptyRun = nbl-pack(owner,""); let zero = npd-region(record_get(owner,"memory"),8);
+  nblt-allocation(emptyRun,record_get(owner,"layout"),0);
+  nblt-need(and(eq(record_get(emptyRun,"payload-bytes"),0),eq(nbl-project(emptyRun,0,0,zero,0),0)),"empty run has no payload and no native loop");
+  nbl-run-close(emptyRun); npd-region-close(zero); nblt-need(eq(nbl-close(owner),1),"refusal owner retirement"); 1;
+ }
+ // Numerical expectations use the arithmetic reference, not emitted CPU or
+ // Metal conversion. Specials and negative zero have explicit bit expectations.
+ def nblt-float-special(format,code) {
+  let row = nbf-format(format); let eb = head(row); let mb = nth(row,1); let e = fd-exp(code,eb,mb); let m = fd-mant(code,mb);
+  if and(eq(nth(row,3),1),eq(e,sub(nbf-power(eb),1))) then if eq(m,0) then 1 else 2 else if and(eq(nth(row,3),2),and(eq(e,sub(nbf-power(eb),1)),eq(m,sub(nbf-power(mb),1)))) then 2 else 0;
+ }
+ def nblt-float-slot(format,code,mode) {
+  let row = nbf-format(format); let eb = head(row); let mb = nth(row,1); let sign = fd-sign(code,eb,mb); let special = nblt-float-special(format,code); let value = fd-value(code,eb,mb);
+  if eq(mode,0) then nfm-low(code,8) else if eq(mode,1) then if gt(special,0) then nfm-fields(if eq(special,1) then 0 else 2251799813685248,2047,sign) else if eq(mod(code,nbf-power(add(eb,mb))),0) then nfm-fields(0,0,sign) else nfm-f64-image(value)
+  else str_concat(md-le32(add(mul(sign,2147483648),if gt(special,0) then if eq(special,1) then 2139095040 else 2143289344 else if lt(abs(value),fq-pow2(-126)) then trunc(mul(abs(value),fq-pow2(149))) else md-f32-bits(abs(value)))),nfm-low(0,4));
+ }
+ def nblt-numeric-row(row,mode) = str-join-with(list(
+  nblt-word(7,row,0,0,""),
+  nblt-float-slot("f16",nth(list(0,32768,1,32769,1023,33791,1024,15360,31743,31744,32256,65024),row),mode),
+  nblt-word(5,row,2,0,""),
+  nblt-float-slot("bf16",nth(list(0,32768,1,32769,127,32895,128,16256,32639,32640,32704,65472),row),mode),
+  nblt-float-slot("e2m1",nth(list(0,8,1,9,2,10,3,11,7,15,6,14),row),mode),
+  nblt-float-slot("e4m3",nth(list(0,128,1,129,7,135,8,56,126,254,127,255),row),mode),
+  nblt-float-slot("e5m2",nth(list(0,128,1,129,3,131,4,60,123,124,125,255),row),mode),
+  nblt-word(64,row,7,0,""),nblt-word(3,row,8,0,"")),"");
+ def nblt-numeric-rows(row,mode,out) = if eq(row,12) then out else nblt-numeric-rows(add(row,1),mode,str_concat(out,nblt-numeric-row(row,mode)));
+ def nblt-numeric-metal(layout,packed,expected) {
+  let version = mj-memory(nbl-msl-numeric(layout),"nbl_project"); nblt-need(gt(mj-handle(version),0),"numeric Metal RAM program admission");
+  let input = metal_buf_alloc(str_len(packed)); let output = metal_buf_alloc(str_len(expected));
+  nblt-need(and(gt(input,0),gt(output,0)),"numeric Metal owned buffers");
+  nblt-need(eq(metal_buf_write(input,0,packed),str_len(packed)),"numeric Metal exact packed upload");
+  nblt-need(eq(mj-enqueue(version,md-bind(list(input,output),list()),12),1),"numeric Metal projection enqueue");
+  let fence = metal_submit(); nblt-need(gt(fence,0),"numeric Metal command fence"); nblt-need(eq(metal_fence_wait(fence),1),"numeric Metal fence completion");
+  nblt-need(str_eq(metal_buf_read(output,0,str_len(expected)),expected),"numeric Metal fp32 bits and raw u64 neighbors exact");
+  nblt-need(eq(add(metal_buf_free(input),metal_buf_free(output)),2),"numeric Metal buffer retirement"); nblt-need(eq(mj-release(version),1),"numeric Metal program retirement"); 1;
+ }
+ def nblt-numeric() {
+  let layout = nbl-layout(list(list("prefix",7,"raw"),list("half",16,"f16"),list("flags",5,"raw"),list("brain",16,"bf16"),list("small",4,"e2m1"),list("wide",8,"e4m3"),list("range",8,"e5m2"),list("identity",64,"raw"),list("tail",3,"raw")));
+  nblt-need(eq(nbl-bits(layout),131),"numeric row has no byte padding");
+  let owner = nbl-open(layout); let raw = nblt-numeric-rows(0,0,""); let cpuExpected = nblt-numeric-rows(0,1,""); let gpuExpected = nblt-numeric-rows(0,2,"");
+  let run = nbl-pack(owner,raw); nblt-need(not(nothing?(run)),"mixed numeric packed admission");
+  nblt-allocation(run,layout,12);
+  let payload = record_get(run,"payload-bytes"); let packed = nfm-bytes-list(npd-bytes(record_get(run,"region"),0,payload),"");
+  nblt-need(str_eq(packed,nblt-oracle(layout,raw,12,0,mul(12,nbl-bits(layout)),0,0,"")),"mixed numeric packed bytes equal independent bit oracle");
+  let output = npd-region(record_get(owner,"memory"),add(str_len(raw),16));
+  nblt-need(nothing?(nbl-close(owner)),"owner retains live run and output");
+  nblt-need(eq(nbl-project-numeric(run,0,12,output,8),12),"numeric CPU complete projection count");
+  nblt-need(str_eq(nfm-output-raw(output,8,108,list()),cpuExpected),"numeric CPU fp64 bits and raw u64 neighbors exact");
+  nblt-need(and(str_eq(nfm-output-raw(output,0,1,list()),nfm-low(0,8)),str_eq(nfm-output-raw(output,add(str_len(raw),8),1,list()),nfm-low(0,8))),"complete numeric output guards");
+  nblt-need(eq(nbl-project-numeric(run,1,10,output,8),10),"indexed numeric projection count");
+  nblt-need(str_eq(nfm-output-raw(output,8,90,list()),substring(cpuExpected,72,792)),"indexed numeric projection at unaligned row exact");
+  nblt-need(str_eq(nfm-output-raw(output,728,18,list()),substring(cpuExpected,720,864)),"indexed numeric projection retains bytes beyond its output range");
+  nblt-need(eq(nbl-project(run,0,12,output,8),12),"raw projection remains available");
+  nblt-need(str_eq(nfm-output-raw(output,8,108,list()),raw),"raw projection retains all original float and identity bits");
+  nblt-need(and(str_eq(nfm-output-raw(output,0,1,list()),nfm-low(0,8)),str_eq(nfm-output-raw(output,add(str_len(raw),8),1,list()),nfm-low(0,8))),"complete numeric output guards after all projections");
+  let gpu = nblt-numeric-metal(layout,packed,gpuExpected);
+  nblt-need(eq(npd-region-close(output),0),"numeric CPU output retirement"); nblt-need(eq(nbl-run-close(run),0),"numeric packed run retirement");
+  nblt-need(nothing?(nbl-project(run,0,1,output,0)),"released packed run refused"); nblt-need(eq(nbl-close(owner),1),"numeric owner and code retirement");
+  nblt-need(nothing?(nbl-pack(owner,raw)),"released owner refused");
+  print(list("native-blueprint-numeric","stride_bits",131,"rows",12,"payload_bytes",payload,"allocated_bytes",record_get(run,"allocated-bytes"),"full_u64_fields",108,"formats",list("f16","bf16","e2m1","e4m3","e5m2"),"cpu_fp64_exact",1,"metal_fp32_exact",gpu,"raw_bits_retained",1)); 1;
+ }
+ def nblt-run() {
+  nblt-need(eq(nblt-widths(1),64),"all field widths");
+  nblt-native(list(64),1,1); nblt-native(list(1,64),17,1); nblt-native(list(7,13,4,8,16,29),19,1);
+  nblt-native(list(8,64,8),11,1); nblt-native(list(64,64),3,1);
+  nblt-refusals(); nblt-numeric(); print(list("native-blueprint-layout","field_widths",64,"metal_layouts",70,"scope","Form-owned-packed-runs")); 1;
+ }
+ if str_eq(read_line(),"run") then nblt-run() else 0;
+}

@@ -1,0 +1,41 @@
+// Optional numeric projection of lossless blueprint fields.
+// Format rows are [exponent bits, fraction bits, bias, specials policy].
+// Policy 0: finite codebook; 1: all-ones exponent is infinity/NaN;
+// 2: all-ones exponent and fraction is NaN, other codes remain finite.
+// Projection canonicalizes NaN payloads to a signed quiet NaN. Raw storage
+// retains every original bit, including NaN payloads and signed zero.
+// E2M1/E4M3 are payload projections. A block scale is a separate relation.
+// preludes: form-stdlib/bml/native-fp64-matrix.bml
+section [form.bml] {
+ class NativeBlueprintFloat {
+  def nbf-format(format) = if str_eq(format,"f16") then list(5,10,15,1) else if str_eq(format,"bf16") then list(8,7,127,1) else if str_eq(format,"e2m1") then list(2,1,1,0) else if str_eq(format,"e4m3") then list(4,3,7,2) else if str_eq(format,"e5m2") then list(5,2,15,1) else nothing();
+  def nbf-width(format) = if nothing?(nbf-format(format)) then 0 else add(1,add(head(nbf-format(format)),nth(nbf-format(format),1)));
+  def nbf-power(n) = if eq(n,0) then 1 else mul(2,nbf-power(sub(n,1)));
+  // Each fragment resolves its own branches before composition, so several
+  // fields of the same format can appear in one native image.
+  // x7 enters as raw bits and leaves as fp64 bits. Only x11..14, d0/d1 and
+  // condition flags are scratch. No raw u64 travels through a tagged return.
+  def nbf-cpu(format) = if nothing?(nbf-format(format)) then nothing() else nbf-cpu-format(nbf-format(format));
+  def nbf-cpu-format(row) = nbf-cpu-fields(head(row),nth(row,1),nth(row,2),nth(row,3));
+  def nbf-cpu-special(eb,mb,policy) = if eq(policy,0) then list() else npd-cat(list(
+   list(fa-cmp-x(12,sub(nbf-power(eb),1)),npd-branch(1,"normal")),
+   if eq(policy,2) then list(fa-cmp-x(13,sub(nbf-power(mb),1)),npd-branch(1,"normal")) else list(),
+   list(fa-movz-x(12,2047)),
+   if eq(policy,1) then list(fa-cmp-x(13,0),npd-branch(0,"assemble")) else list(),
+   list(fa-movz-x(13,nbf-power(sub(mb,1))),npd-branch(14,"assemble"))));
+  def nbf-cpu-fields(eb,mb,bias,policy) {
+   let rows = npd-cat(list(
+    list(nfm-ubfx(11,7,add(eb,mb),add(eb,mb)),fa-lsl-x-imm(11,11,63),nfm-ubfx(12,7,mb,sub(add(eb,mb),1)),nfm-ubfx(13,7,0,sub(mb,1)),fa-cmp-x(12,0),npd-branch(0,"subnormal")),
+    nbf-cpu-special(eb,mb,policy),
+    list(npd-label("normal"),fa-add-x-imm(12,12,sub(1023,bias)),npd-label("assemble"),fa-lsl-x-imm(12,12,52),fa-lsl-x-imm(13,13,sub(52,mb)),fa-add-x-r(7,12,13),fa-add-x-r(7,7,11),npd-branch(14,"done"),
+     npd-label("subnormal"),fa-scvtf(0,13),fa-movz-x(14,sub(sub(1024,bias),mb)),fa-lsl-x-imm(14,14,52),fa-fmov-d-x(1,14),fa-fmul(0,0,1),fa-fmov-x-d(7,0),fa-add-x-r(7,7,11),npd-label("done"))));
+   npd-emit(rows,npd-labels(rows,0,list()),0);
+  }
+  // Integer reconstruction preserves f32 subnormals without depending on a
+  // device's arithmetic flush mode. Constants specialize one shared helper.
+  def nbf-msl-helpers() = "static inline float nbf_float(uint raw, uint eb, uint mb, uint bias, uint policy) { uint sign = ((raw >> (eb + mb)) & 1u) << 31u; uint em = (1u << eb) - 1u; uint mm = (1u << mb) - 1u; uint e = (raw >> mb) & em; uint m = raw & mm; if (policy == 1u && e == em) return as_type<float>(sign | (m == 0u ? 0x7f800000u : 0x7fc00000u)); if (policy == 2u && e == em && m == mm) return as_type<float>(sign | 0x7fc00000u); if (e == 0u) { if (m == 0u) return as_type<float>(sign); if (bias == 127u) return as_type<float>(sign | (m << (23u - mb))); int ex = 1 - int(bias); uint leading = 1u << mb; while ((m & leading) == 0u) { m <<= 1u; ex -= 1; } m -= leading; return as_type<float>(sign | (uint(ex + 127) << 23u) | (m << (23u - mb))); } return as_type<float>(sign | ((e + 127u - bias) << 23u) | (m << (23u - mb))); } ";
+  def nbf-msl(format,expression) = if nothing?(nbf-format(format)) then nothing() else nbf-msl-format(nbf-format(format),expression);
+  def nbf-msl-format(row,expression) = str_concat("nbf_float(uint(",str_concat(expression,str_concat("), ",str_concat(int_to_str(head(row)),str_concat("u, ",str_concat(int_to_str(nth(row,1)),str_concat("u, ",str_concat(int_to_str(nth(row,2)),str_concat("u, ",str_concat(int_to_str(nth(row,3)),"u)"))))))))));
+ }
+ 0;
+}

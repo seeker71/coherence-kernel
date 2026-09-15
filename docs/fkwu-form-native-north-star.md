@@ -145,6 +145,22 @@ for existing owners. The [current native word](native-node-word.md) establishes
 the resident representation; Form-native module admission and live lifetime
 management must also own its evolution and storage.
 
+The blueprint is the shared layout authority. A primitive occupies one native
+word when its meaning fits, or the few additional bits its meaning requires.
+Complex cells share blueprint metadata across a run; fields and rows need no
+8-, 16- or 32-bit rounding. Execution IDs stay native 64-bit words while stored
+IDs and other payloads use widths selected from their actual values and schema.
+CPU JIT and device expressions consume the same offsets, widths, numeric
+interpretations and scale relationships. Layout changes create an identified
+generation; existing readers and submitted work retain their original meaning.
+
+Compact storage is a measured choice. Aligned fields lower directly to native
+word operations; other fields lower to the required bit extraction. A format
+names its signed zero, subnormal, infinity, NaN and rounding behavior. ML block
+scales remain explicit relations. Form compares footprint, compile cost and
+execution over the same data, then selects from observed results. Neither
+packing nor a wider arithmetic carrier silently changes numeric semantics.
+
 ## Contexts, modules and live replacement
 
 A runtime context owns values, roots, intern pools, executable images, dynamic modules, handles, metrics and outstanding work. Several contexts coexist. Closing one completes or transfers its obligations and releases its resources while others retain allocations and progress.

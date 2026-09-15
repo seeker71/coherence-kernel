@@ -1,0 +1,137 @@
+// A blueprint owns one immutable field layout for an entire packed run.
+// Execution values and IDs remain u64. Storage fields occupy arbitrary bits.
+// CPU leaves pack/project whole batches; generated Metal reads the same offsets.
+// preludes: form-stdlib/bml/native-node-storage.bml form-stdlib/bml/native-node-word.bml form-stdlib/bml/native-blueprint-float.bml form-stdlib/bml/metal-jit.bml form-stdlib/bml/string-join.bml
+section [form.bml] {
+ class NativeBlueprintLayout {
+  // Input fields: (name, bit width, interpretation). Names must be unique.
+  // Layout fields: (name, bit offset, bit width, interpretation).
+  def nbl-int?(x) = str_eq(value_kind(x),"int");
+  def nbl-seen(names,name) = if nil?(names) then 0 else if str_eq(head(names),name) then 1 else nbl-seen(tail(names),name);
+  def nbl-format?(width,format) = if not(str_eq(value_kind(format),"string")) then 0 else or(str_eq(format,"raw"),eq(width,nbf-width(format)));
+  def nbl-layout(fields) = if not(str_eq(value_kind(fields),"list")) then nothing() else if nil?(fields) then nothing() else nbl-layout-walk(fields,0,list(),list());
+  def nbl-layout-walk(fields,offset,names,out) = if nil?(fields) then list("native-blueprint-layout-v1",reverse(out),offset,len(out)) else {
+   let field = head(fields);
+   if not(str_eq(value_kind(field),"list")) then nothing() else if not(eq(len(field),3)) then nothing() else nbl-layout-field(fields,field,offset,names,out);
+  };
+  def nbl-layout-field(fields,field,offset,names,out) {
+   let name = nth(field,0); let width = nth(field,1);
+   if not(and(str_eq(value_kind(name),"string"),nbl-int?(width))) then nothing() else if or(eq(str_len(name),0),or(nbl-seen(names,name),or(lt(width,1),gt(width,64)))) then nothing() else if not(nbl-format?(width,nth(field,2))) then nothing() else if gt(offset,sub(4611686018427387903,width)) then nothing() else nbl-layout-walk(tail(fields),add(offset,width),cons(name,names),cons(list(name,offset,width,nth(field,2)),out));
+  }
+  def nbl-fields(layout) = nth(layout,1);
+  def nbl-bits(layout) = nth(layout,2);
+  def nbl-count(layout) = nth(layout,3);
+  def nbl-bytes(bits) = add(div(bits,8),if eq(mod(bits,8),0) then 0 else 1);
+  // One run carries only the trailing bytes its native loads actually touch.
+  // A word-aligned u64 primitive needs exactly its payload extent.
+  def nbl-native-extent(fields,base,extent) = if nil?(fields) then extent else {
+   let field = head(fields); let bit = add(base,nth(field,1)); let width = nth(field,2);
+   let end = add(div(bit,8),if and(gt(width,57),gt(add(mod(bit,8),width),64)) then 16 else 8);
+   nbl-native-extent(tail(fields),base,if gt(end,extent) then end else extent);
+  };
+  def nbl-allocation(layout,count) = if eq(count,0) then 1 else nbl-native-extent(nbl-fields(layout),mul(sub(count,1),nbl-bits(layout)),nbl-bytes(mul(count,nbl-bits(layout))));
+  def nbl-valid?(layout) = if not(str_eq(value_kind(layout),"list")) then 0 else if not(eq(len(layout),4)) then 0 else if not(str_eq(head(layout),"native-blueprint-layout-v1")) then 0 else if not(and(nbl-int?(nbl-bits(layout)),nbl-int?(nbl-count(layout)))) then 0 else if or(le(nbl-bits(layout),0),le(nbl-count(layout),0)) then 0 else if not(str_eq(value_kind(nbl-fields(layout)),"list")) then 0 else if or(nil?(nbl-fields(layout)),not(eq(nbl-count(layout),len(nbl-fields(layout))))) then 0 else nbl-valid-fields(nbl-fields(layout),0,list(),nbl-bits(layout));
+  def nbl-valid-fields(fields,offset,names,bits) = if nil?(fields) then eq(offset,bits) else {
+   let field = head(fields);
+   if not(str_eq(value_kind(field),"list")) then 0 else if not(eq(len(field),4)) then 0 else nbl-valid-field(fields,field,offset,names,bits);
+  };
+  def nbl-valid-field(fields,field,offset,names,bits) {
+   let name = nth(field,0); let width = nth(field,2);
+   if not(and(str_eq(value_kind(name),"string"),and(nbl-int?(width),nbl-int?(nth(field,1))))) then 0 else if or(eq(str_len(name),0),or(nbl-seen(names,name),or(lt(width,1),gt(width,64)))) then 0 else if not(nbl-format?(width,nth(field,3))) then 0 else if or(not(eq(nth(field,1),offset)),gt(offset,sub(4611686018427387903,width))) then 0 else nbl-valid-fields(tail(fields),add(offset,width),cons(name,names),bits);
+  }
+  def nbl-cmp-x(rn,rm) = fa-asm(3942645791,list(32,65536),list(rn,rm));
+  def nbl-immediate(rd,value) = list(fa-movz-x(rd,mod(value,65536)),fa-movk-x(rd,mod(div(value,65536),65536),1),fa-movk-x(rd,mod(div(value,4294967296),65536),2),fa-movk-x(rd,div(value,281474976710656),3));
+  def nbl-pack-field(field,index) {
+   let width = nth(field,2); let label = str_concat("pack-field-",int_to_str(index));
+   npd-cat(list(list(fa-ldr(7,16,0)),if eq(width,64) then list() else list(nfm-ubfx(11,7,0,sub(width,1)),nbl-cmp-x(7,11),npd-branch(1,"refused")),nns-address(),list(fa-ldr(11,10,0),nns-lsl(12,7,9),nns-or(11,11,12),nns-str(11,10,0)),nns-cross(width,label,1),list(fa-add-x-imm(16,16,8),fa-add-x-imm(6,6,width),fa-sub-x-imm(2,2,8))));
+  }
+  def nbl-project-field(field,index,numeric) {
+   let width = nth(field,2); let label = str_concat(if numeric then "numeric-field-" else "project-field-",int_to_str(index));
+   npd-cat(list(nns-address(),list(fa-ldr(11,10,0),nns-lsr(7,11,9)),nns-cross(width,label,0),if eq(width,64) then list() else list(nfm-ubfx(7,7,0,sub(width,1))),if and(numeric,not(str_eq(nth(field,3),"raw"))) then nbf-cpu(nth(field,3)) else list(),list(nns-str(7,4,0),fa-add-x-imm(4,4,8),fa-add-x-imm(6,6,width))));
+  }
+  def nbl-word-field?(field,stride) = and(eq(nth(field,2),64),and(eq(mod(nth(field,1),8),0),eq(mod(stride,8),0)));
+  def nbl-native-word(mode) = if eq(mode,0) then list(fa-ldr(7,16,0),nfm-ubfx(8,6,3,63),fa-add-x-r(10,1,8),nns-str(7,10,0),fa-add-x-imm(16,16,8),fa-add-x-imm(6,6,64),fa-sub-x-imm(2,2,8)) else list(nfm-ubfx(8,6,3,63),fa-add-x-r(10,1,8),fa-ldr(7,10,0),nns-str(7,4,0),fa-add-x-imm(4,4,8),fa-add-x-imm(6,6,64));
+  def nbl-native-fields(fields,index,mode,stride) = if nil?(fields) then list() else append(if nbl-word-field?(head(fields),stride) then nbl-native-word(mode) else if eq(mode,0) then nbl-pack-field(head(fields),index) else nbl-project-field(head(fields),index,eq(mode,2)),nbl-native-fields(tail(fields),add(index,1),mode,stride));
+  def nbl-numeric?(fields) = if nil?(fields) then 0 else if not(str_eq(nth(head(fields),3),"raw")) then 1 else nbl-numeric?(tail(fields));
+  def nbl-project-image(layout,mode) {
+   let label = if eq(mode,2) then "numeric-row" else "project-row";
+   npd-cat(list(nbl-immediate(7,nbl-bits(layout)),list(nns-mul(6,2,7),fa-add-x-imm(15,3,0),npd-label(label)),nbl-native-fields(nbl-fields(layout),0,mode,nbl-bits(layout)),list(fa-sub-x-imm(3,3,1),fa-cmp-x(3,0),npd-branch(1,label),fa-add-x-imm(0,15,0),fa-ret())));
+  }
+  def nbl-image(layout) = nns-image(npd-cat(list(
+   npd-route(1,"project"),if nbl-numeric?(nbl-fields(layout)) then npd-route(2,"numeric") else npd-route(2,"project"),
+   // Pack: x1 raw u64 fields, x2 byte length, x3 zeroed output, x4 row count.
+   list(fa-add-x-imm(16,1,0),fa-add-x-imm(1,3,0),fa-add-x-imm(15,4,0),fa-movz-x(6,0),npd-label("pack-row")),nbl-native-fields(nbl-fields(layout),0,0,nbl-bits(layout)),
+   list(fa-cmp-x(2,0),npd-branch(1,"pack-row"),fa-add-x-imm(0,15,0),fa-ret(),npd-label("refused"),fa-movz-x(0,0),fa-ret(),
+    // Project: x1 packed run, x2 first row, x3 row count, x4 raw u64 output.
+    npd-label("project")),nbl-project-image(layout,1),if nbl-numeric?(nbl-fields(layout)) then append(list(npd-label("numeric")),nbl-project-image(layout,2)) else list())));
+  def nbl-open(layout) = if not(nbl-valid?(layout)) then nothing() else {
+   let image = nbl-image(layout); let owner = record_new(0,"kind","native-blueprint-owner","pid",host_pid(),"active",1,"layout",layout,"memory",npd-open(),"calls",0,"code-live",0);
+   let identity = intern_node(make_nodeid(31,2,0,204),list(intern_trivial_string("native-blueprint-raw-v1"),intern_trivial_int(owner),intern_trivial_string(nfm-bytes-list(image,""))));
+   record_set(owner,"identity",identity); record_set(owner,"image",image); record_set(owner,"request",list(0,identity,image)); owner;
+  };
+  def nbl-active(owner) = if not(record?(owner)) then 0 else and(str_eq(record_get(owner,"kind"),"native-blueprint-owner"),and(eq(record_get(owner,"pid"),host_pid()),eq(record_get(owner,"active"),1)));
+  def nbl-unease(owner,aspect,need) {
+   let row = oh-reading("native-blueprint-layout",int_to_str(host_pid()),aspect,json-node-int(1),json-node-int(0),json-node-null(),list(oh-need(need,json-node-null())),list("retain-owned-layout","revise-input"),json-node-null()); oh-voice(row); nothing();
+  }
+  def nbl-call(owner,args) {
+   let result = jit_leaf_inram(record_get(owner,"request"),args); if not(nothing?(result)) then record_set(owner,"code-live",1) else 0; record_set(owner,"calls",add(record_get(owner,"calls"),1)); result;
+  }
+  def nbl-pack(owner,raw) = if not(nbl-active(owner)) then nothing() else if not(str_eq(value_kind(raw),"string")) then nbl-unease(owner,"input","raw-u64-fields") else {
+   let layout = record_get(owner,"layout"); let rowBytes = mul(nbl-count(layout),8);
+   if not(eq(mod(str_len(raw),rowBytes),0)) then nbl-unease(owner,"input-extent","whole-blueprint-rows") else nbl-pack-rows(owner,raw,div(str_len(raw),rowBytes));
+  };
+  def nbl-pack-rows(owner,raw,count) {
+   let bits = nbl-bits(record_get(owner,"layout"));
+   if gt(count,div(4611686018427387895,bits)) then nbl-unease(owner,"bit-extent","representable-packed-run") else {
+    let payload = nbl-bytes(mul(count,bits)); let allocated = nbl-allocation(record_get(owner,"layout"),count); let region = npd-region(record_get(owner,"memory"),allocated);
+    if nothing?(region) then nbl-unease(owner,"allocation","native-memory") else nbl-pack-region(owner,raw,count,payload,allocated,region);
+   };
+  }
+  def nbl-pack-region(owner,raw,count,payload,allocated,region) {
+   let result = if eq(count,0) then 0 else nbl-call(owner,list(0,raw,npd-span(region,0,allocated),count));
+   if not(eq(result,count)) then { npd-region-close(region); nbl-unease(owner,"field-width","bits-representable-by-blueprint"); } else {
+    record_set(region,"node-storage-generation",1); record_new(0,"kind","native-blueprint-run","owner",owner,"region",region,"count",count,"payload-bytes",payload,"allocated-bytes",allocated);
+   };
+  }
+  def nbl-run?(run) = if not(record?(run)) then 0 else if not(str_eq(record_get(run,"kind"),"native-blueprint-run")) then 0 else and(nbl-active(record_get(run,"owner")),eq(record_get(record_get(run,"region"),"active"),1));
+  def nbl-project(run,first,count,output,offset) = nbl-project-mode(run,first,count,output,offset,1);
+  // Numeric projection writes fp64 bits for floats; raw fields stay u64.
+  def nbl-project-numeric(run,first,count,output,offset) = nbl-project-mode(run,first,count,output,offset,2);
+  def nbl-project-mode(run,first,count,output,offset,mode) = if not(nbl-run?(run)) then nothing() else {
+   let owner = record_get(run,"owner"); let valid = if not(and(nbl-int?(first),nbl-int?(count))) then 0 else and(ge(first,0),and(ge(count,0),le(count,sub(record_get(run,"count"),first))));
+   if not(valid) then nbl-unease(owner,"read-range","existing-blueprint-rows") else if and(record?(output),record_has(output,"node-storage-generation")) then nbl-unease(owner,"immutable-output","separate-writable-output") else nbl-project-span(run,first,count,npd-owned-span(record_get(owner,"memory"),output,offset,mul(mul(count,nbl-count(record_get(owner,"layout"))),8)),mode);
+  };
+  def nbl-project-span(run,first,count,pointer,mode) = if nothing?(pointer) then nbl-unease(record_get(run,"owner"),"output","owned-u64-field-span") else if eq(count,0) then 0 else nbl-call(record_get(run,"owner"),list(mode,npd-span(record_get(run,"region"),0,record_get(run,"allocated-bytes")),first,count,pointer));
+  def nbl-run-close(run) = if not(nbl-run?(run)) then 0 else npd-region-close(record_get(run,"region"));
+  def nbl-close(owner) = if not(nbl-active(owner)) then 0 else if not(npd-regions-closed(record_get(record_get(owner,"memory"),"regions"))) then nbl-unease(owner,"retirement","released-runs-and-output") else {
+   let released = if eq(record_get(owner,"code-live"),1) then jit_leaf_inram(list(1,record_get(owner,"identity"),list()),0) else 1;
+   if not(eq(released,1)) then nbl-unease(owner,"code-retirement","native-code-release") else { record_set(owner,"code-live",0); let closed = npd-close(record_get(owner,"memory")); if eq(closed,1) then record_set(owner,"active",0) else 0; closed; };
+  };
+  // Byte-bounded extraction handles fields crossing a u64 boundary without a
+  // full-width shift or unaligned pointer cast. No per-cell padding is read.
+  def nbl-msl-byte-loads(at,count,out) = if eq(at,count) then out else nbl-msl-byte-loads(add(at,1),count,str_concat(out,str-join-with(list(if eq(at,0) then "" else "|", "(ulong(p[b+",int_to_str(at),"ul])<<",int_to_str(mul(at,8)),"u)"),"")));
+  def nbl-msl-width(width) {
+   let bytes = nbl-bytes(width);
+   let prefix = str-join-with(list("inline ulong nbl_w",int_to_str(width),"(device const uchar *p, ulong at) { ulong b=at>>3; uint s=uint(at&7ul); ulong v=",nbl-msl-byte-loads(0,bytes,""),"; "),"");
+   let tail = if eq(width,64) then "if(s==0u) return v; return (v>>s)|(ulong(p[b+8ul])<<(64u-s)); }\n" else if eq(bytes,8) then str-join-with(list("v>>=s; if(s>",int_to_str(sub(64,width)),"u) v|=ulong(p[b+8ul])<<(64u-s); return v&((1ul<<",int_to_str(width),"u)-1ul); }\n"),"") else str-join-with(list(if eq(mod(width,8),1) then "" else str-join-with(list("if(s>",int_to_str(sub(mul(bytes,8),width)),"u) v|=ulong(p[b+",int_to_str(bytes),"ul])<<",int_to_str(mul(bytes,8)),"u; "),""),"return (v>>s)&((1ul<<",int_to_str(width),"u)-1ul); }\n"),"");
+   str_concat(prefix,tail);
+  }
+  def nbl-msl-widths(fields,seen,out) = if nil?(fields) then out else {
+   let width = nth(head(fields),2); let key = int_to_str(width);
+   if nbl-seen(seen,key) then nbl-msl-widths(tail(fields),seen,out) else nbl-msl-widths(tail(fields),cons(key,seen),str_concat(out,nbl-msl-width(width)));
+  };
+  def nbl-msl-value(field,stride) = if and(eq(nth(field,2),64),and(eq(mod(stride,64),0),eq(mod(nth(field,1),64),0))) then str-join-with(list("reinterpret_cast<device const ulong *>(p)[ulong(row)*",int_to_str(div(stride,64)),"ul+",int_to_str(div(nth(field,1),64)),"ul]"),"") else str-join-with(list("nbl_w",int_to_str(nth(field,2)),"(p,ulong(row)*",int_to_str(stride),"ul+",int_to_str(nth(field,1)),"ul)"),"");
+  def nbl-msl-rows(fields,index,total,stride,out,numeric) = if nil?(fields) then out else {
+   let field = head(fields);
+   let value = nbl-msl-value(field,stride);
+   let converted = if and(numeric,not(str_eq(nth(field,3),"raw"))) then str_concat("ulong(as_type<uint>(",str_concat(nbf-msl(nth(field,3),value),"))")) else value;
+   let line = str-join-with(list("o[ulong(row)*",int_to_str(total),"ul+",int_to_str(index),"ul]=",converted,";\n"),"");
+   nbl-msl-rows(tail(fields),add(index,1),total,stride,str_concat(out,line),numeric);
+  };
+  def nbl-msl(layout) = nbl-msl-mode(layout,0);
+  // Metal numeric slots carry fp32 bits in the low half of a u64 output slot.
+  def nbl-msl-numeric(layout) = nbl-msl-mode(layout,1);
+  def nbl-msl-mode(layout,numeric) = if not(nbl-valid?(layout)) then nothing() else mj-source(str_concat(str_concat(nbl-msl-widths(nbl-fields(layout),list(),""),if numeric then nbf-msl-helpers() else ""),str_concat("kernel void nbl_project(device const uchar *p [[buffer(0)]], device ulong *o [[buffer(1)]], uint row [[thread_position_in_grid]]) {\n",str_concat(nbl-msl-rows(nbl-fields(layout),0,nbl-count(layout),nbl-bits(layout),"",numeric),"}\n"))));
+ }
+ 0;
+}

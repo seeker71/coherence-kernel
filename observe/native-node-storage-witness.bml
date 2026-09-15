@@ -1,0 +1,62 @@
+// Every adaptive bit width, full u64 bytes, random access and retained generations.
+// preludes: form-stdlib/bml/native-node-storage.bml form-stdlib/bml/native-node-word.bml
+section [form.bml] {
+ def nnst-require(ok,why) = if ok then 1 else form_error(str_concat("native-node-storage witness: ",why));
+ def nnst-byte(width,at,seed,bit,value) = if eq(bit,8) then value else nnst-byte(width,at,seed,add(bit,1),add(value,mul(nnw-power(bit),if and(lt(add(mul(at,8),bit),width),and(gt(seed,0),or(eq(add(mul(at,8),bit),sub(width,1)),eq(mod(add(seed,bit),3),0)))) then sub(1,mod(div(165,nnw-power(bit)),2)) else mod(div(165,nnw-power(bit)),2))));
+ def nnst-row(width,seed,at,out) = if eq(at,8) then out else nnst-row(width,seed,add(at,1),str_concat(out,byte_to_str(nnst-byte(width,at,seed,0,0))));
+ def nnst-raw(width,at,count,out) = if eq(at,count) then out else nnst-raw(width,add(at,1),count,str_concat(out,nnst-row(width,at,0,"")));
+ def nnst-read(reader,output,index,count) {
+  nnst-require(eq(nns-read-into(reader,index,count,output,8),count),"native read count");
+  nfm-output-raw(output,8,count,list());
+ }
+ def nnst-one(owner,width) {
+  let raw = nnst-raw(width,0,19,""); let slot = nns-create(owner,raw); let block = record_get(slot,"current");
+  nnst-require(eq(record_get(block,"width"),width),"observed exact residual width");
+  nnst-require(eq(record_get(block,"bytes"),add(16,nns-payload(19,width))),"owned payload, base and padding extent");
+  let reader = nns-acquire(slot); let output = npd-region(record_get(owner,"memory"),168);
+  nnst-require(str_eq(nnst-read(reader,output,0,19),raw),"whole block preserves every u64 bit");
+  nnst-require(and(and(eq(npd-peek(output,0,7),0),eq(npd-peek(output,7,1),0)),and(eq(npd-peek(output,160,7),0),eq(npd-peek(output,167,1),0))),"complete output guards retained");
+  nnst-require(str_eq(nnst-read(reader,output,1,17),substring(raw,8,144)),"unaligned indexed range");
+  nnst-require(eq(nns-release(reader),0),"reader release");
+  nnst-require(nothing?(nns-read-into(reader,0,1,output,8)),"released reader refused");
+  nnst-require(eq(nns-slot-close(slot),0),"slot region release");
+  nnst-require(eq(npd-region-close(output),0),"output region release");
+  print(list("native-storage-width",width,"count",19,"stored_bytes",record_get(block,"bytes"),"full_u64_bytes",152,"exact",1)); 1;
+ }
+ def nnst-widths(owner,width) = if gt(width,64) then 0 else add(nnst-one(owner,width),nnst-widths(owner,add(width,1)));
+ def nnst-generations(owner) {
+  let a = nnst-raw(3,0,19,""); let b = nnst-raw(61,0,19,""); let c = nnst-raw(7,0,19,"");
+  let slot = nns-create(owner,a); let old = nns-acquire(slot); let oldBlock = record_get(old,"block");
+  let first = record_get(oldBlock,"generation"); let next = nns-replace(slot,b); let wide = nns-acquire(slot); let wideBlock = record_get(wide,"block");
+  let output = npd-region(record_get(owner,"memory"),168);
+  nnst-require(and(gt(next,first),eq(record_get(record_get(oldBlock,"region"),"active"),1)),"widen retains pinned generation");
+  nnst-require(nothing?(nns-read-into(old,0,1,record_get(wideBlock,"region"),0)),"immutable generation cannot be output");
+  nnst-require(and(str_eq(nnst-read(old,output,0,19),a),str_eq(nnst-read(wide,output,0,19),b)),"old and new readers retain exact words");
+  nnst-require(gt(nns-replace(slot,c),next),"narrow generation publication"); let current = nns-acquire(slot);
+  nnst-require(and(eq(record_get(record_get(current,"block"),"width"),7),str_eq(nnst-read(current,output,0,19),c)),"narrow generation exact");
+  nnst-require(nothing?(nns-replace(slot,"short")),"partial word replacement refused");
+  nnst-require(str_eq(nnst-read(current,output,0,19),c),"refusal preserves current generation");
+  nnst-require(nothing?(nns-read-into(current,19,1,output,8)),"past-end range refused");
+  nnst-require(str_eq(nnst-read(current,output,0,19),c),"range refusal preserves readable generation");
+  nnst-require(eq(nns-release(wide),0),"wide retired reader release");
+  nnst-require(eq(record_get(record_get(wideBlock,"region"),"active"),0),"wide generation physically unmapped");
+  nnst-require(eq(nns-release(current),0),"current reader release");
+  nnst-require(eq(npd-region-close(output),0),"generation output released");
+  nnst-require(nothing?(nns-close(owner)),"owner close retains old live reader");
+  nnst-require(eq(record_get(record_get(oldBlock,"region"),"active"),1),"old mapping survives attempted close");
+  nnst-require(eq(nns-release(old),0),"final reader releases old generation");
+  nnst-require(eq(nns-close(owner),1),"all native mappings and code released");
+  print(list("native-storage-generations","widths",list(3,61,7),"old-readers-preserved",1,"refusal-preserves-current",1,"final-release",1)); 1;
+ }
+ def nnst-run() {
+  let owner = nns-open(); let widths = nnst-widths(owner,0);
+  nnst-require(eq(widths,65),"all bit widths exercised");
+  let emptySlot = nns-create(owner,""); let reader = nns-acquire(emptySlot); let output = npd-region(record_get(owner,"memory"),8);
+  nnst-require(and(eq(record_get(record_get(emptySlot,"current"),"count"),0),eq(nns-read-into(reader,0,0,output,0),0)),"empty generation and empty read");
+  nns-release(reader); nns-slot-close(emptySlot); npd-region-close(output);
+  let generations = nnst-generations(owner);
+  print(list("native-node-storage","widths",widths,"generations",generations,"scope","process-local-Form-owner"));
+  1;
+ }
+ if str_eq(read_line(),"run") then nnst-run() else 0;
+}

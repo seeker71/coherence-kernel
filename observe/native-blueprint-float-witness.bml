@@ -1,0 +1,57 @@
+// preludes: form-stdlib/bml/native-blueprint-float.bml form-stdlib/bml/metal-jit.bml form-stdlib/f16-decode.fk
+section [form.bml] {
+ def nbfw-require(ok,why) = if ok then 1 else form_error(str_concat("blueprint float witness: ",why));
+ def nbfw-range(at,end,out) = if eq(at,end) then reverse(out) else nbfw-range(add(at,1),end,cons(at,out));
+ def nbfw-negative(xs,sign) = if nil?(xs) then list() else cons(add(head(xs),sign),nbfw-negative(tail(xs),sign));
+ def nbfw-cases(format) {
+  let positive = if str_eq(format,"f16") then list(0,1,2,511,512,1023,1024,1025,15360,15361,31743,31744,31745,32256,32767) else list(0,1,2,63,64,127,128,129,16256,16257,32639,32640,32641,32704,32767);
+  if str_eq(format,"e2m1") then nbfw-range(0,16,list()) else if or(str_eq(format,"e4m3"),str_eq(format,"e5m2")) then nbfw-range(0,256,list()) else append(positive,nbfw-negative(positive,32768));
+ }
+ def nbfw-raw(xs) = if nil?(xs) then "" else str_concat(nfm-low(head(xs),8),nbfw-raw(tail(xs)));
+ def nbfw-special(row,code) {
+  let eb = head(row); let mb = nth(row,1); let e = fd-exp(code,eb,mb); let m = fd-mant(code,mb); let policy = nth(row,3);
+  if and(eq(policy,1),eq(e,sub(nbf-power(eb),1))) then if eq(m,0) then 1 else 2 else if and(eq(policy,2),and(eq(e,sub(nbf-power(eb),1)),eq(m,sub(nbf-power(mb),1)))) then 2 else 0;
+ }
+ def nbfw-f64(row,code) {
+  let eb = head(row); let mb = nth(row,1); let sign = fd-sign(code,eb,mb); let special = nbfw-special(row,code);
+  if gt(special,0) then nfm-fields(if eq(special,1) then 0 else 2251799813685248,2047,sign) else if eq(mod(code,nbf-power(add(eb,mb))),0) then nfm-fields(0,0,sign) else nfm-f64-image(fd-value(code,eb,mb));
+ }
+ def nbfw-f32(row,code) {
+  let eb = head(row); let mb = nth(row,1); let sign = mul(fd-sign(code,eb,mb),2147483648); let special = nbfw-special(row,code); let value = abs(fd-value(code,eb,mb));
+  md-le32(add(sign,if gt(special,0) then if eq(special,1) then 2139095040 else 2143289344 else if lt(value,fq-pow2(-126)) then trunc(mul(value,fq-pow2(149))) else md-f32-bits(value)));
+ }
+ def nbfw-expected(row,xs,gpu) = if nil?(xs) then "" else str_concat(if gpu then nbfw-f32(row,head(xs)) else nbfw-f64(row,head(xs)),nbfw-expected(row,tail(xs),gpu));
+ def nbfw-image(format) {
+  let rows = npd-cat(list(list(fa-add-x-imm(16,0,0),fa-add-x-imm(17,2,0),nfm-ubfx(15,1,3,63),npd-label("word"),fa-ldr(7,16,0)),nbf-cpu(format),
+   // Resolve the same fragment twice inside one image; neither local branch
+   // label may bind into the other fragment.
+   list(fa-ldr(7,16,0)),nbf-cpu(format),list(fa-fmov-d-x(0,7),fa-str-d(0,17,0),fa-add-x-imm(16,16,8),fa-add-x-imm(17,17,8),fa-sub-x-imm(1,1,8),fa-cmp-x(1,0),npd-branch(1,"word"),fa-add-x-imm(0,15,0),fa-ret())));
+  fa-image(npd-emit(rows,npd-labels(rows,0,list()),0));
+ }
+ def nbfw-one(memory,format) {
+  let cases = nbfw-cases(format); let count = len(cases); let row = nbf-format(format); let raw = nbfw-raw(cases); let image = nbfw-image(format);
+  let identity = intern_node(make_nodeid(31,2,0,207),list(intern_trivial_string("blueprint-float-witness"),intern_trivial_string(format),intern_trivial_int(memory),intern_trivial_string(nfm-bytes-list(image,""))));
+  let region = npd-region(memory,add(16,mul(count,8)));
+  nbfw-require(eq(jit_leaf_inram(list(0,identity,image),list(raw,npd-span(region,8,mul(count,8)))),count),"CPU native projection count");
+  let cpu = nfm-output-raw(region,8,count,list());
+  nbfw-require(str_eq(cpu,nbfw-expected(row,cases,0)),str_concat(format," CPU exact fp64 bits"));
+  nbfw-require(and(and(eq(npd-peek(region,0,7),0),eq(npd-peek(region,7,1),0)),and(eq(npd-peek(region,add(8,mul(count,8)),7),0),eq(npd-peek(region,add(15,mul(count,8)),1),0))),"full CPU output guards");
+  let source = mj-source(str_concat(nbf-msl-helpers(),str_concat("kernel void project(device const uint *x [[buffer(0)]], device uint *y [[buffer(1)]], uint i [[thread_position_in_grid]]) { y[i] = as_type<uint>(",str_concat(nbf-msl(format,"x[i]"),"); }"))));
+  let version = mj-memory(source,"project"); nbfw-require(gt(mj-handle(version),0),"real Metal RAM admission");
+  let input = metal_buf_alloc(mul(count,4)); let output = metal_buf_alloc(mul(count,4));
+  nbfw-require(and(gt(input,0),gt(output,0)),"Metal buffers");
+  metal_buf_write(input,0,md-le32-list(cases,"")); nbfw-require(eq(mj-enqueue(version,md-bind(list(input,output),list()),count),1),"Metal dispatch");
+  let fence = metal_submit(); nbfw-require(and(gt(fence,0),eq(metal_fence_wait(fence),1)),"Metal completed fence");
+  let gpu = metal_buf_read(output,0,mul(count,4)); nbfw-require(str_eq(gpu,nbfw-expected(row,cases,1)),str_concat(format," GPU exact fp32 bits"));
+  nbfw-require(eq(metal_buf_free(input),1),"Metal input release"); nbfw-require(eq(metal_buf_free(output),1),"Metal output release"); nbfw-require(eq(mj-release(version),1),"Metal code release");
+  nbfw-require(eq(jit_leaf_inram(list(1,identity,list()),0),1),"CPU code release"); nbfw-require(eq(npd-region-close(region),0),"CPU output release");
+  print(list("blueprint-float",format,"cases",count,"cpu-fp64-exact",1,"metal-fp32-exact",1,"signed-zero-and-specials",1)); count;
+ }
+ def nbfw-run() {
+  nbfw-require(and(nothing?(nbf-cpu("unknown")),nothing?(nbf-msl("unknown","x"))),"unknown interpretation refused");
+  let memory = npd-open(); let total = add(nbfw-one(memory,"f16"),add(nbfw-one(memory,"bf16"),add(nbfw-one(memory,"e2m1"),add(nbfw-one(memory,"e4m3"),nbfw-one(memory,"e5m2")))));
+  nbfw-require(eq(npd-close(memory),1),"all owned mappings released"); nbfw-require(eq(total,588),"complete bounded format cases");
+  print(list("blueprint-float-total",total,"exact",1)); 1;
+ }
+ if str_eq(read_line(),"run") then nbfw-run() else 0;
+}
