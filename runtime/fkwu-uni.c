@@ -15716,6 +15716,10 @@ static long long fk_prog_read(long long pid, long long spec) {
                 long long *row = (long long *)((char *)D + FK_PROG_D_FN_OFF) + j * 3;
                 long long idx = row[2];
                 long long body = idx >= 0 && idx < FK_PROG_FNS ? ((long long *)((char *)D + FK_PROG_D_BODY_OFF))[idx] : -1;
+                /* the process's own program answers its live body: an image-loaded defn's published
+                 * copy can read 0 when the note came before the load's assignment, and a crystallized
+                 * defn's body is the tag-194 node it wears now */
+                if (pid == (long long)getpid() && idx >= 0 && idx < fk_fn_count) { body = fk_fn[idx]; }
                 out = fk_cons_val(row[0] << 1, fk_cons_val(row[1] << 1, fk_cons_val(idx << 1, fk_cons_val(body << 1, 1))));
             }
         }
