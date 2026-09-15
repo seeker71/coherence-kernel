@@ -1,0 +1,293 @@
+// bml-form-lower.bml — the BML native compiler's run step on fkwu itself.
+//
+// A parsed, linked BML unit lowers into Form defns. Each method is one defn over
+// its own parameters. Each mutable local is one Form name per assignment, found
+// through the slot key grammars/bml.fk's scope reading gives its binding. A
+// construct that carries locals out of it answers them as one tuple beside its
+// value. The run's shared state -- the control mode, the returned and thrown
+// values, FAILED and the field journal -- lives in one record the program owns.
+// fkwu compiles the defns, runs them on its own evaluator and JIT, and prints
+// one answer line; no recipe walker reads the program.
+//
+// The scope, the overload choice and the class layout are grammars/bml.fk's own
+// readings; this unit reads them and writes Form.
+//
+// preludes: form-stdlib/core.fk form-stdlib/minimal-surface.fk form-stdlib/json.fk form-stdlib/cache.fk form-stdlib/form-ontology-bp.fk form-stdlib/engine.fk form-stdlib/compiler.fk form-stdlib/source-compiler.fk form-stdlib/hati-os-kernel.fk form-stdlib/hati-os-kernel-emit.fk form-stdlib/grammars/bml.fk
+section [form.bml] {
+ class BmlFormLower {
+
+  // ── Form text ─────────────────────────────────────────────────────────
+  def bfk-q() = byte_to_str(34);
+  def bfk-join(xs) = if nil?(xs) then "" else if nil?(tail(xs)) then head(xs) else str_concat(head(xs), str_concat(" ", bfk-join(tail(xs))));
+  def bfk-form(xs) = str_concat("(", str_concat(bfk-join(xs), ")"));
+  def bfk-f1(h, a) = bfk-form(list(h, a));
+  def bfk-f2(h, a, b) = bfk-form(list(h, a, b));
+  def bfk-f3(h, a, b, c) = bfk-form(list(h, a, b, c));
+  def bfk-let(v, e) = bfk-f2("let", v, e);
+  def bfk-do(items, last) = if nil?(items) then last else bfk-form(cons("do", append(items, list(last))));
+  def bfk-int(n) = int_to_str(n);
+  def bfk-special?(c) = or(eq(c, 34), or(eq(c, 92), or(eq(c, 10), or(eq(c, 9), eq(c, 13)))));
+  def bfk-plain?(s, i, n) = if ge(i, n) then true else if bfk-special?(str_byte_at(s, i)) then false else bfk-plain?(s, add(i, 1), n);
+  def bfk-esc-byte(c) = if eq(c, 34) then "\\\"" else if eq(c, 92) then "\\\\" else if eq(c, 10) then "\\n" else if eq(c, 9) then "\\t" else if eq(c, 13) then "\\r" else byte_to_str(c);
+  def bfk-esc(s, i, n) = if ge(i, n) then "" else str_concat(bfk-esc-byte(str_byte_at(s, i)), bfk-esc(s, add(i, 1), n));
+  def bfk-str(s) = str_concat(bfk-q(), str_concat(if bfk-plain?(s, 0, str_len(s)) then s else bfk-esc(s, 0, str_len(s)), bfk-q()));
+  def bfk-if(c, t, e) = bfk-f3("if", c, t, e);
+
+  // ── the run's state: one record the program owns ───────────────────────
+  // m the control mode, v a returned value, t a thrown value, f FAILED,
+  // j the field journal, c its count, d how many snapshots are open
+  def bfk-cell(k) = bfk-form(list("record_get", "BFK", bfk-str(k)));
+  def bfk-cell-set(k, e) = bfk-form(list("record_set", "BFK", bfk-str(k), e));
+  def bfk-unfailed() = bfk-f2("le", bfk-cell("f"), "0");
+  def bfk-mode-ok() = bfk-f2("le", bfk-cell("m"), "0");
+  def bfk-mode-is(m) = bfk-f2("eq", bfk-cell("m"), bfk-int(m));
+  def bfk-set-mode(m) = bfk-cell-set("m", bfk-int(m));
+
+  // ── the lowering's own state ───────────────────────────────────────────
+  def bfk-cx() {
+   let cx = record_new(0);
+   record_set(cx, "n", 0);
+   record_set(cx, "defs", empty);
+   record_set(cx, "needs", empty);
+   cx;
+  }
+  def bfk-fresh(cx, stem) = bfk-fresh-at(cx, stem, add(record_get(cx, "n"), 1));
+  def bfk-fresh-at(cx, stem, n) {
+   record_set(cx, "n", n);
+   str_concat(stem, int_to_str(n));
+  }
+  def bfk-add-def(cx, text) = record_set(cx, "defs", cons(text, record_get(cx, "defs")));
+  // a need the lowering meets is voiced where it is met and withholds the program
+  def bfk-need-add(cx, reason) {
+   record_set(cx, "needs", append(record_get(cx, "needs"), list(reason)));
+   "0";
+  }
+  def bfk-need(cx, reason) = bfk-need-add(cx, bml-voice-then(bml-refusal-reading("form-lowering", reason), reason));
+  def bfk-need-name(cx, reason, name) = bfk-need-add(cx, bml-voice-then(bml-name-reading("form-lowering", reason, name), reason));
+
+  // ── names: a binding's slot key -> the Form name holding its value now ─
+  def bfk-vm-get(vm, key) = if nil?(vm) then "" else if str_eq(head(head(vm)), key) then nth(head(vm), 1) else bfk-vm-get(tail(vm), key);
+  def bfk-vm-put(vm, key, v) = cons(list(key, v), vm);
+  def bfk-vm-or0(vm, key) = if str_eq(bfk-vm-get(vm, key), "") then "0" else bfk-vm-get(vm, key);
+  def bfk-vm-has?(vm, key) = not(str_eq(bfk-vm-get(vm, key), ""));
+  def bfk-vm-vars(vm, keys) = if nil?(keys) then empty else cons(bfk-vm-or0(vm, head(keys)), bfk-vm-vars(vm, tail(keys)));
+  def bfk-vm-keys(vm, seen) = if nil?(vm) then reverse-list(seen) else if fsc-string-list-contains?(seen, head(head(vm))) then bfk-vm-keys(tail(vm), seen) else bfk-vm-keys(tail(vm), cons(head(head(vm)), seen));
+  def bfk-top(vm) = bfk-vm-or0(vm, "__top");
+
+  // A statement lowers to (items vm value): the let forms it adds, the names
+  // after it, and the Form text of its value.
+  def bfk-r(items, vm, val) = list(items, vm, val);
+  def bfk-r-items(r) = nth(r, 0);
+  def bfk-r-vm(r) = nth(r, 1);
+  def bfk-r-val(r) = nth(r, 2);
+  def bfk-r-expr(r) = bfk-do(bfk-r-items(r), bfk-r-val(r));
+  def bfk-value-stmt(cx, expr, vm) {
+   let v = bfk-fresh(cx, "v");
+   bfk-r(list(bfk-let(v, expr)), vm, v);
+  }
+
+  // The names a construct carries out: every slot its env-after names, and
+  // the standing value and the snapshot stack while the body keeps them.
+  def bfk-out-keys(env-after, vm) = append(bml-bnml-snapshot-keys(env-after, empty), bfk-extra-keys(vm));
+  def bfk-extra-keys(vm) = append(if bfk-vm-has?(vm, "__top") then list("__top") else empty, if bfk-vm-has?(vm, "__marks") then list("__marks") else empty);
+  def bfk-tuple(val, vm, keys) = if nil?(keys) then val else bfk-form(cons("list", cons(val, bfk-vm-vars(vm, keys))));
+  def bfk-untuple(cx, expr, keys, vm) = if nil?(keys) then bfk-value-stmt(cx, expr, vm) else bfk-untuple-many(cx, expr, keys, vm);
+  def bfk-untuple-many(cx, expr, keys, vm) {
+   let r = bfk-fresh(cx, "r");
+   let val = bfk-fresh(cx, "v");
+   let rest = bfk-untuple-keys(cx, r, keys, 1, vm, empty);
+   bfk-r(cons(bfk-let(r, expr), cons(bfk-let(val, bfk-f2("nth", r, "0")), bfk-r-items(rest))), bfk-r-vm(rest), val);
+  }
+  def bfk-untuple-keys(cx, r, keys, i, vm, items) = if nil?(keys) then bfk-r(reverse-list(items), vm, "0") else bfk-untuple-key(cx, r, keys, i, vm, items, bfk-fresh(cx, "v"));
+  def bfk-untuple-key(cx, r, keys, i, vm, items, v) = bfk-untuple-keys(cx, r, tail(keys), add(i, 1), bfk-vm-put(vm, head(keys), v), cons(bfk-let(v, bfk-f2("nth", r, bfk-int(i))), items));
+
+  // ── blocks ──────────────────────────────────────────────────────────────
+  // grammars/bml.fk's nodes-in-env: a list that bears control runs as a
+  // control body, any other list statement by statement
+  def bfk-nodes(cx, nodes, env, vm, outk) = if bml-ctl-function-entry?(nodes, env) then bfk-ctl-function(cx, nodes, env, vm, outk) else bfk-plain(cx, nodes, env, vm, outk, "0");
+
+  // a statement that may stop guards the ones after it; a stopped list
+  // answers the value it stood on
+  def bfk-plain(cx, nodes, env, vm, outk, val) = if nil?(nodes) then bfk-tuple(val, vm, outk) else bfk-plain-then(cx, nodes, env, bfk-stmt(cx, head(nodes), env, vm), outk);
+  def bfk-plain-then(cx, nodes, env, r, outk) {
+   let rest = bfk-plain(cx, tail(nodes), bml-local-env-after-node(head(nodes), env), bfk-r-vm(r), outk, bfk-r-val(r));
+   let stops = if nil?(tail(nodes)) then false else bml-bnml-may-stop?(head(nodes), env);
+   bfk-do(bfk-r-items(r), if stops then bfk-if(bfk-unfailed(), rest, bfk-tuple(bfk-top(bfk-r-vm(r)), bfk-r-vm(r), outk)) else rest);
+  }
+
+  // ── statements ──────────────────────────────────────────────────────────
+  def bfk-stmt(cx, node, env, vm) = if bml-ctl-expr-node?(node) then bfk-value-stmt(cx, bfk-reserved(cx, node, env, vm), vm) else if bml-ctl-statement-node?(node) then bfk-lone-control(cx, node, env, vm) else bfk-stmt-core(cx, node, env, vm);
+  def bfk-lone-control(cx, node, env, vm) = if bml-ctl-env-active?(env) then bfk-value-stmt(cx, bfk-need(cx, "control/nested"), vm) else bfk-sub(cx, list(node), env, vm, bfk-out-keys(bml-local-env-after-node(node, env), vm));
+  def bfk-sub(cx, nodes, env, vm, keys) = bfk-untuple(cx, bfk-nodes(cx, nodes, env, vm, keys), keys, vm);
+
+  def bfk-stmt-core(cx, node, env, vm) {
+   let cat = node_category(node);
+   if node_eq(cat, BML-AST-CALL) then bfk-call-stmt(cx, node, env, vm) else if node_eq(cat, BML-AST-BLOCK) then bfk-sub(cx, node_children(node), env, vm, bfk-out-keys(bml-local-env-after-node(node, env), vm)) else if node_eq(cat, BML-AST-CONST) then bfk-const-stmt(cx, node, env, vm) else if node_eq(cat, BML-AST-CHOOSE) then bfk-choose-stmt(cx, node, env, vm) else if node_eq(cat, BML-AST-FAIL) then bfk-fail-stmt(cx, env, vm) else if node_eq(cat, BML-AST-SAVE) then bfk-save-stmt(cx, env, vm) else if node_eq(cat, BML-AST-RESTORE) then bfk-restore-stmt(cx, env, vm) else if node_eq(cat, BML-AST-DISCARD) then bfk-discard-stmt(cx, env, vm) else bfk-value-stmt(cx, bfk-expr-core(cx, node, env, vm), vm);
+  }
+
+  def bfk-call-stmt(cx, node, env, vm) = if bfk-class-shaped?(node, env) then bfk-value-stmt(cx, bfk-class-call(cx, node, env, vm), vm) else if bml-bnml-top-node?(node) then bfk-top-stmt(cx, node, env, vm) else if bml-bnml-declare-node?(node) then bfk-store(cx, bml-bnml-new-key(bml-bnml-target-name(node), env), bml-bnml-value(node), env, vm) else if bml-bnml-assign-node?(node) then bfk-store(cx, bml-bnml-assign-key(node, env), bml-bnml-value(node), env, vm) else bfk-value-stmt(cx, bfk-call-expr(cx, node, env, vm), vm);
+
+  // a store answers the value it stored
+  def bfk-store(cx, key, value-node, env, vm) {
+   let v = bfk-fresh(cx, "v");
+   bfk-r(list(bfk-let(v, bfk-expr(cx, value-node, env, vm))), bfk-vm-put(vm, key, v), v);
+  }
+
+  // a statement's value becomes the standing value only if it ran to the end
+  def bfk-top-stmt(cx, node, env, vm) = bfk-top-keep(cx, bfk-stmt(cx, head(bml-call-args(node)), env, vm));
+  def bfk-top-keep(cx, r) {
+   let t = bfk-fresh(cx, "t");
+   bfk-r(append(bfk-r-items(r), list(bfk-let(t, bfk-if(bfk-unfailed(), bfk-r-val(r), bfk-top(bfk-r-vm(r)))))), bfk-vm-put(bfk-r-vm(r), "__top", t), t);
+  }
+
+  def bfk-const-stmt(cx, node, env, vm) = if bml-bnml-reads-mutable?(bml-local-const-value(node), env) then bfk-store(cx, bml-bnml-new-key(bml-local-const-name(node), env), bml-local-const-value(node), env, vm) else bfk-value-stmt(cx, bfk-expr(cx, bml-local-const-value(node), env, vm), vm);
+
+  // a choose no branch of which assigns or fails partway runs its first branch that is not a bare fail
+  def bfk-choose-stmt(cx, node, env, vm) = if bml-bnml-choose-tracks?(node) then bfk-choose-track(cx, node, env, vm) else bfk-choose-first(cx, node_children(node), env, vm);
+  def bfk-choose-first(cx, branches, env, vm) = if nil?(branches) then bfk-value-stmt(cx, "0", vm) else if bml-hati-node-fail?(head(branches)) then bfk-choose-first(cx, tail(branches), env, vm) else bfk-stmt(cx, head(branches), env, vm);
+
+  // ── expressions ─────────────────────────────────────────────────────────
+  def bfk-expr(cx, node, env, vm) = if bml-ctl-expr-node?(node) then bfk-reserved(cx, node, env, vm) else if bml-ctl-statement-node?(node) then bfk-r-val(bfk-lone-control(cx, node, env, vm)) else bfk-expr-core(cx, node, env, vm);
+  def bfk-exprs(cx, nodes, env, vm) = if nil?(nodes) then empty else cons(bfk-expr(cx, head(nodes), env, vm), bfk-exprs(cx, tail(nodes), env, vm));
+
+  def bfk-expr-core(cx, node, env, vm) {
+   let cat = node_category(node);
+   if node_eq(cat, BML-AST-INT) then bfk-int(node_value(bml-node-child(node, 0))) else if node_eq(cat, BML-AST-FLOAT) then bfk-f2("mul", bfk-int(bml-hati-float-micros(bml-node-child(node, 0))), bml-hati-float-scale-literal()) else if node_eq(cat, BML-AST-STRING) then bfk-str(node_value(bml-node-child(node, 0))) else if node_eq(cat, BML-AST-CHAR) then bfk-str(node_value(bml-node-child(node, 0))) else if node_eq(cat, BML-AST-ARRAY) then bfk-form(cons("list", bfk-exprs(cx, node_children(node), env, vm))) else if node_eq(cat, BML-AST-ADD) then bfk-f2("add", bfk-expr(cx, bml-node-child(node, 0), env, vm), bfk-expr(cx, bml-node-child(node, 1), env, vm)) else if node_eq(cat, BML-AST-CONST) then bfk-expr(cx, bml-local-const-value(node), env, vm) else if node_eq(cat, BML-AST-NAME) then bfk-name(cx, node, env, vm) else if node_eq(cat, BML-AST-CALL) then bfk-call-expr(cx, node, env, vm) else if node_eq(cat, BML-AST-RETURN) then bfk-expr(cx, bml-node-child(node, 0), env, vm) else if node_eq(cat, BML-AST-BLOCK) then bfk-nodes(cx, node_children(node), env, vm, empty) else if node_eq(cat, BML-AST-METHOD) then bfk-need(cx, "form/nested-method") else if bfk-stmt-only?(cat) then bfk-r-expr(bfk-stmt-core(cx, node, env, vm)) else "0";
+  }
+  def bfk-stmt-only?(cat) = or(node_eq(cat, BML-AST-CHOOSE), or(node_eq(cat, BML-AST-FAIL), or(node_eq(cat, BML-AST-SAVE), or(node_eq(cat, BML-AST-RESTORE), node_eq(cat, BML-AST-DISCARD)))));
+
+  // the operators BML's own rules name; each answers 1 or 0 where it compares
+  def bfk-reserved(cx, node, env, vm) = if bml-ctl-thrown-node?(node) then bfk-cell("t") else if bml-ctl-with-access?(node) then bfk-with-access(cx, node, env, vm) else if bml-ctl-known-op?(node) then bfk-op(bml-ctl-op-rule-of(node), bfk-exprs(cx, bml-call-args(node), env, vm)) else bfk-need(cx, "op/unknown");
+  def bfk-op(rule, args) = if nil?(tail(args)) then bfk-op1(rule, head(args)) else bfk-op2(rule, head(args), nth(args, 1));
+  def bfk-op1(rule, a) = if str_eq(rule, "op-not") then bfk-if(bfk-f2("eq", a, "0"), "1", "0") else bfk-f2("sub", "0", a);
+  def bfk-op2(rule, a, b) = if str_eq(rule, "op-lt") then bfk-f2("lt", a, b) else if str_eq(rule, "op-le") then bfk-f2("le", a, b) else if str_eq(rule, "op-gt") then bfk-f2("gt", a, b) else if str_eq(rule, "op-ge") then bfk-f2("ge", a, b) else if str_eq(rule, "op-eq") then bfk-if(bfk-f2("value_eq", a, b), "1", "0") else if str_eq(rule, "op-ne") then bfk-if(bfk-f2("value_eq", a, b), "0", "1") else if str_eq(rule, "op-and") then bfk-if(bfk-f2("eq", a, "0"), "0", bfk-if(bfk-f2("eq", b, "0"), "0", "1")) else if str_eq(rule, "op-or") then bfk-if(bfk-f2("eq", a, "0"), bfk-if(bfk-f2("eq", b, "0"), "0", "1"), "1") else if str_eq(rule, "op-sub") then bfk-f2("sub", a, b) else bfk-f2("mul", a, b);
+
+  def bfk-name(cx, node, env, vm) = if bml-hati-receiver-name?(bml-local-name(node), env) then bfk-class-name(cx, node, env, vm) else bfk-name-binding(cx, node, env, vm, bml-local-lookup(env, bml-local-name(node)));
+  def bfk-name-binding(cx, node, env, vm, binding) = if bml-bnml-binding?(binding) then bfk-vm-or0(vm, bml-local-binding-key(binding)) else if nil?(binding) then bfk-need-name(cx, "name/unbound", bml-local-name(node)) else if bml-hati-arg-node?(bml-local-binding-value(binding)) then bfk-vm-or0(vm, "@a") else if bml-hati-method-ref?(bml-local-binding-value(binding)) then bfk-need(cx, "name/method") else bfk-expr(cx, bml-local-binding-value(binding), bml-local-binding-env(binding), vm);
+
+  def bfk-call-expr(cx, node, env, vm) = if bfk-class-shaped?(node, env) then bfk-class-call(cx, node, env, vm) else if bml-bnml-top-node?(node) then bfk-expr(cx, head(bml-call-args(node)), env, vm) else if or(bml-bnml-declare-node?(node), bml-bnml-assign-node?(node)) then bfk-need(cx, "form/store-in-expression") else if bml-index-node?(node) then bfk-f2("nth", bfk-expr(cx, bml-index-target(node), env, vm), bfk-expr(cx, bml-index-at(node), env, vm)) else if bml-list-set-node?(node) then bfk-f3("bfk-list-set", bfk-expr(cx, bml-index-target(node), env, vm), bfk-expr(cx, bml-index-at(node), env, vm), bfk-expr(cx, bml-list-set-value(node), env, vm)) else if bml-hati-arg-node?(node) then bfk-vm-or0(vm, "@a") else if bml-hati-arg-at-node?(node) then bfk-vm-or0(vm, str_concat("@a", int_to_str(bml-hati-arg-at-index(node)))) else bfk-free-call(cx, node, env, vm, bml-local-lookup(env, bml-call-name(node)));
+
+  def bfk-free-call(cx, node, env, vm, binding) = if nil?(binding) then bfk-need-name(cx, bml-scope-unbound-call-reason(env, bml-call-name(node)), bml-call-name(node)) else if bml-hati-method-ref?(bml-local-binding-value(binding)) then bfk-chosen-call(cx, node, env, vm, bml-hati-free-call-choice(env, bml-call-name(node), bml-call-args(node))) else bfk-need(cx, "call/not-method");
+  def bfk-chosen-call(cx, node, env, vm, choice) = if bml-hati-choice-ok?(choice) then bfk-ref-call(cx, node, env, vm, bml-local-binding-value(bml-hati-choice-value(choice))) else bfk-need(cx, bml-hati-choice-value(choice));
+  def bfk-ref-call(cx, node, env, vm, ref) = bfk-form(cons(bfk-fn-name(bml-hati-method-ref-index(ref)), bfk-call-args(cx, node, env, vm, bml-hati-method-ref-arity(ref))));
+  def bfk-call-args(cx, node, env, vm, arity) = if eq(arity, 0) then empty else if eq(arity, 1) then list(bfk-expr(cx, head(bml-call-args(node)), env, vm)) else bfk-exprs(cx, bml-call-args(node), env, vm);
+  def bfk-fn-name(index) = str_concat("m", int_to_str(index));
+
+  // ── what later rungs carry ──────────────────────────────────────────────
+  def bfk-class-shaped?(node, env) = if bml-hati-class-call?(node) then true else if bml-hati-field-assign?(node, env) then true else if bml-hati-dotted-assign?(node, env) then true else if bml-hati-receiver-name?(bml-call-name(node), env) then true else bml-hati-member-call?(bml-call-name(node), env);
+  def bfk-class-call(cx, node, env, vm) = bfk-need(cx, "form/class");
+  def bfk-class-name(cx, node, env, vm) = bfk-need(cx, "form/class");
+  def bfk-with-access(cx, node, env, vm) = bfk-need(cx, "form/with");
+  def bfk-ctl-function(cx, nodes, env, vm, outk) = str_concat(bfk-need(cx, "form/control"), "");
+  def bfk-choose-track(cx, node, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/choose"), vm);
+  def bfk-fail-stmt(cx, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/fail"), vm);
+  def bfk-save-stmt(cx, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/save"), vm);
+  def bfk-restore-stmt(cx, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/restore"), vm);
+  def bfk-discard-stmt(cx, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/discard"), vm);
+
+  // ── methods and the program ─────────────────────────────────────────────
+  def bfk-params(n, i) = if ge(i, n) then empty else cons(str_concat("a", int_to_str(i)), bfk-params(n, add(i, 1)));
+  def bfk-param-vm(params, i, vm) = if nil?(params) then vm else bfk-param-vm(tail(params), add(i, 1), bfk-vm-put(vm, str_concat("@a", int_to_str(i)), head(params)));
+  def bfk-arg-vm(params) = if eq(len(params), 1) then bfk-vm-put(empty, "@a", head(params)) else bfk-param-vm(params, 0, empty);
+
+  // a body that keeps the value it stands on starts it at 0; one that takes
+  // snapshots starts an empty stack of them
+  def bfk-frame-vm(nodes, env, vm) = bfk-marks-vm(nodes, if bml-bnml-keeps-standing?(nodes, env) then bfk-vm-put(vm, "__top", "0") else vm);
+  def bfk-marks-vm(nodes, vm) = if bml-bnml-any-snapshots?(nodes) then bfk-vm-put(vm, "__marks", "(list)") else vm;
+
+  def bfk-body-text(cx, node, env, vm) = if node_eq(node_category(node), BML-AST-BLOCK) then bfk-nodes(cx, node_children(node), env, vm, empty) else bfk-r-expr(bfk-stmt(cx, node, env, vm));
+
+  def bfk-method(cx, node, env, index) {
+   let body-env = bml-hati-method-param-env(node, env);
+   let params = bfk-params(len(bml-method-node-parameters(node)), 0);
+   let body = bml-method-node-body(node);
+   let vm = bfk-frame-vm(list(body), body-env, bfk-arg-vm(params));
+   bfk-form(list("defn", bfk-fn-name(index), bfk-form(params), bfk-body-text(cx, bml-bnml-top-body-node-in(body, body-env), body-env, vm)));
+  }
+  def bfk-methods(cx, methods, env, index) = if nil?(methods) then empty else cons(bfk-method(cx, head(methods), env, index), bfk-methods(cx, tail(methods), env, add(index, 1)));
+  def bfk-linked(cx, link, units, symbols, index) = if nil?(units) then empty else append(bfk-methods(cx, bml-scope-unit-methods(head(units)), bml-scope-unit-env-with(link, head(units), symbols, "hati"), index), bfk-linked(cx, link, tail(units), symbols, add(index, len(bml-scope-unit-methods(head(units))))));
+  def bfk-main(cx, nodes, env) = bfk-form(list("defn", "m0", "()", bfk-nodes(cx, bml-bnml-top-body-in(nodes, env), env, bfk-frame-vm(nodes, env, empty), empty)));
+
+  // the runtime the program carries: its state, the journal's undo, element
+  // assignment, and the answer line the run reads back
+  def bfk-state() = bfk-let("BFK", "(record_new 0)");
+  def bfk-inits() = list(bfk-cell-set("m", "0"), bfk-cell-set("v", "0"), bfk-cell-set("t", "0"), bfk-cell-set("f", "0"), bfk-cell-set("j", "(list)"), bfk-cell-set("c", "0"), bfk-cell-set("d", "0"));
+  def bfk-undo-def() = bfk-form(list("defn", "bfk-undo", "(n)", bfk-if("(le n 0)", "0", bfk-do(list(bfk-let("e", bfk-f1("head", bfk-cell("j"))), bfk-form(list("record_set", "(nth e 0)", "(nth e 1)", "(nth e 2)")), bfk-cell-set("j", bfk-f1("tail", bfk-cell("j"))), bfk-cell-set("c", bfk-f2("sub", bfk-cell("c"), "1"))), "(bfk-undo (sub n 1))"))));
+  def bfk-list-set-def() = bfk-form(list("defn", "bfk-list-set", "(xs at v)", bfk-if("(eq (len xs) 0)", "xs", bfk-if("(eq at 0)", "(cons v (tail xs))", "(cons (head xs) (bfk-list-set (tail xs) (sub at 1) v))"))));
+  def bfk-tab() = bfk-str(byte_to_str(9));
+  def bfk-out-def() = bfk-form(list("defn", "bfk-out", "(v)", bfk-f2("str_concat", bfk-str("@bfk "), bfk-f2("str_concat", "(value_kind v)", bfk-f2("str_concat", bfk-tab(), bfk-f2("str_concat", bfk-if(bfk-unfailed(), bfk-str("0"), bfk-str("1")), bfk-f2("str_concat", bfk-tab(), "(value_str v)")))))));
+  def bfk-program(cx, texts) = bfk-form(cons("do", cons(bfk-state(), append(bfk-inits(), append(list(bfk-undo-def(), bfk-list-set-def(), bfk-out-def()), append(reverse-list(record_get(cx, "defs")), append(texts, list("(bfk-out (m0))"))))))));
+
+  // (text reasons): the program and the needs against it, read over the same
+  // link, env, layout and refusal passes the table lowering reads
+  def bfk-block(node) = if node_eq(node_category(node), BML-AST-BLOCK) then node else bml-ast-block(list(node));
+  def bfk-compile-linked(node, units) = bfk-compile-link(bml-scope-link(bfk-block(node), units));
+  def bfk-compile-link(link) {
+   let main = bml-scope-link-main(link);
+   let methods = bml-scope-unit-methods(main);
+   let main-nodes = bml-scope-unit-mains(main);
+   let symbols = bml-scope-lane-symbols(link, "hati");
+   let others = tail(bml-scope-link-linked(link));
+   let layout = bml-hati-unit-layout(bml-scope-layout-nodes(link), add(1, add(len(methods), bml-scope-units-method-count(others))));
+   let env = bml-hati-env-with-layout(bml-scope-unit-env-with(link, main, symbols, "hati"), layout);
+   let passes = append(bml-scope-link-reasons(link), append(bml-hati-unsupported-nodes-in-env(main-nodes, env), append(bml-hati-unsupported-methods-in(methods, env), bml-scope-linked-unsupported(link, others, symbols))));
+   let cx = bfk-cx();
+   let main-text = bfk-main(cx, main-nodes, env);
+   let method-texts = bfk-methods(cx, methods, env, 1);
+   let other-texts = bfk-linked(cx, link, others, symbols, add(1, len(methods)));
+   let reasons = bml-hati-reasons-merge(append(passes, bml-hati-layout-reasons(layout)), record_get(cx, "needs"));
+   list(bfk-program(cx, cons(main-text, append(method-texts, other-texts))), reasons);
+  }
+
+  // ── the run: fkwu itself compiles and runs the program ──────────────────
+  def bfk-dir(d) = if eq(str_len(d), 0) then "/tmp/" else if eq(str_byte_at(d, sub(str_len(d), 1)), 47) then d else str_concat(d, "/");
+  def bfk-scratch(ext) = str_concat(bfk-dir(host_temp_dir()), str_concat("bfk-run-", str_concat(int_to_str(host_pid()), ext)));
+  def bfk-run-text(text) {
+   let src = bfk-scratch(".fk");
+   let out = bfk-scratch(".out");
+   let err = bfk-scratch(".err");
+   write_file_text(src, text);
+   let pid = host_spawn_at(list("./fkwu", src), list("/dev/null", out, err));
+   host_wait(pid);
+   let said = read_file(out);
+   let heard = read_file(err);
+   bfk-clear(list(src, out, err, bfk-scratch(".fkb"), bfk-scratch(".sym")));
+   bfk-decode(said, heard);
+  }
+  def bfk-clear(paths) = if nil?(paths) then 0 else bfk-clear-then(fs_remove(head(paths)), tail(paths));
+  def bfk-clear-then(_gone, rest) = bfk-clear(rest);
+
+  // the answer line: "@bfk <kind>\t<unheld 0|1>\t<value>"
+  def bfk-marker() = "@bfk ";
+  def bfk-line-marker(out, from) = bfk-line-marker-at(out, str_find(out, bfk-marker(), from));
+  def bfk-line-marker-at(out, at) = if lt(at, 0) then -1 else if eq(at, 0) then at else if eq(str_byte_at(out, sub(at, 1)), 10) then at else bfk-line-marker(out, add(at, 1));
+  def bfk-trim-end(out) = if eq(str_len(out), 0) then 0 else if eq(str_byte_at(out, sub(str_len(out), 1)), 10) then sub(str_len(out), 1) else str_len(out);
+  def bfk-decode(out, err) = bfk-decode-at(out, err, bfk-line-marker(out, 0));
+  def bfk-decode-at(out, err, at) = if lt(at, 0) then list(bfk-died(out, err), false) else bfk-decode-line(substring(out, add(at, str_len(bfk-marker())), bfk-trim-end(out)));
+  def bfk-decode-line(line) {
+   let t1 = str_find(line, byte_to_str(9), 0);
+   let t2 = str_find(line, byte_to_str(9), add(t1, 1));
+   list(bfk-typed(substring(line, 0, t1), substring(line, add(t2, 1), str_len(line))), str_eq(substring(line, add(t1, 1), t2), "1"));
+  }
+  def bfk-typed(kind, text) = if str_eq(kind, "int") then str_to_int(text) else if str_eq(kind, "float") then str_to_float(text) else if str_eq(kind, "null") then nothing() else text;
+
+  // a program fkwu could not run to its answer says so where it ran
+  def bfk-last-line(text) = substring(text, add(bfk-nl-before(text, sub(bfk-trim-end(text), 1)), 1), bfk-trim-end(text));
+  def bfk-nl-before(s, i) = if lt(i, 0) then -1 else if eq(str_byte_at(s, i), 10) then i else bfk-nl-before(s, sub(i, 1));
+  def bfk-died(out, err) {
+   let said = bfk-last-line(str_concat(out, err));
+   oh-voice(bch-reading("run", "value", str_concat("died:", said), list(oh-need("runtime", json-node-string(said))), list("abstain", "request-evidence"), "form-run"));
+   str_concat("BML-FORM-DIED ", said);
+  }
+
+  def bfk-run-linked-at(where, node, units) = bml-run-heard(where, "form", bfk-outcome(bfk-compile-linked(node, units)));
+  def bfk-outcome(image) = bfk-outcome-with(nth(image, 0), bch-admit("form-image", nth(image, 1)));
+  def bfk-outcome-with(text, reasons) = if nil?(reasons) then bfk-run-text(text) else list(str_concat(bml-hati-refusal-prefix(0), bml-hati-unsupported-reasons-text(reasons)), false);
+
+  // one source on the native path: its imports and Units: are cared for once,
+  // the linked units run on fkwu, and an answer the lowering could not give
+  // says so where it ran
+  def bfk-run-unit-value-at(where, node, units) = bch-ran("form", bfk-run-linked-at(where, node, bml-scope-care-imports(node, units)));
+ }
+ 0;
+}
