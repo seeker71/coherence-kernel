@@ -305,12 +305,36 @@ set asking `bml-hati-recv-field-key`, `new` running `bml-hati-init-fns` over the
 table lowering in `bml.fk` took the same three. Through the table lowering the three fixtures and
 `bml-class-field-init.bml` read 38, 42, 142 and 56.
 
+## After a named call, the member tail reads
+
+`e.Get().a` and `f().a` stopped the statement: the member tail followed only `new`. A named call now
+hands what it answers to the same tail (`bml-source-call-then-tail`), so a field, a call with or
+without arguments, and any chain of them read, each step on what the one before answers. Each
+step's static type is the return type of the method it resolves to, so a field read finds its class.
+
+Witnessed on fkwu (fixture `bml-class-call-chain.bml`, 60): `e.Get().v` 3, `Make().p.v` 3,
+`e.Get().Next().v` 10, `Make().Get().Plus(8)` 11, `e.Get().next.v` 10, `e.Get().Next().Plus(13)` 23.
+A tree of HEAD read `BML-HATI-UNSUPPORTED source/unread`.
+
+## A field set straight off new or a call
+
+`new E().a = 5;` had no statement shape: the member-assign reader starts only at `this` or a name. A
+statement whose target the member tail reads, ending in a field, now reads as a set of that field on
+what the value before it answers (`__hati_set`). The step stands after every other statement step,
+so it reads only what none of them took. The lowering was already there: the field store a named
+receiver uses takes any receiver node, so each lowering needed one arm for the new marker, in
+`bml-form-lower.bml` and in the table lowering.
+
+Witnessed on fkwu (fixture `bml-class-member-set.bml`, 42): every E shares one P, so `q` shows each
+set: 7 through `new E(q).p.v`, 12 through `Wrap(q).Get().v`, 42 through `e.Get().v`;
+`new E(q).a = 5;` sets a field on an object nothing keeps. A tree of HEAD read
+`BML-HATI-UNSUPPORTED source/unread`. Before the band move (77c0edd87) released the table walk's run
+entries, the two fixtures read 42 and 60 through the table lowering too.
+
 ## Still open, with the reason
 
-- A field set straight off a `new` or a call (`new E().a = 5;`) is not read: the member-assign
-  reader starts only at `this` or a name.
-- A field or member straight off a named call (`e.Get().a`, `f().a`) is not read: the member tail
-  follows only `new`.
+- A member straight off a parenthesized value (`(p).v`) is not read: the member tail follows only
+  `new` and a named call. A probe read `source/unread`.
 
 ## For the lead
 
@@ -371,5 +395,15 @@ took three small seams, the table lowering the same three, and both read one slo
 Frontier word, 0 hits in the tree: **keyride**, a key that rides the entry the producer already hands
 every consumer, so no consumer works out where a thing lives. Its question: where else does each
 reader recompute what the one who built the entry could carry once?
+
+Fifth movement. Most surprising: the set needed no lowering of its own. The field store every named
+receiver used already takes any receiver node; what was missing was a reader that hands it one.
+Discomfort to gold: the choice was where the new statement step stands. Ahead of the class-led
+steps it would meet every statement first and could change a reading that stood. The gold was to
+put it last, after every step declines, so it adds readings and changes none.
+
+Frontier word, 0 hits in the tree: **falllast**, a rule placed after every other one declines, so
+it can only add a reading, never change one that stood. Its question: where else would a new rule
+be safer as the last one asked than as the first?
 
 — Claude (Opus 5), as Sema, worktree agent-a60550cd21b84ef52
