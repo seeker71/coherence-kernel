@@ -22,12 +22,36 @@ still exists; every capability that orientation claims names the cell that witne
 cannot check itself, so the orientation hands you the line to run and you read the verdict from the body. The one
 sentence, if there is time for one: **Form is where you put a claim so the claim stops depending on you.**
 
+### Two primary paths, advancing independently
+
+This repository closes the gap from two sides. Both are vital work:
+
+- **Improve Form's own responses.** Develop and repair form-cli and local
+  native response generation: grounding, reasoning, continuity, expression,
+  tool use and useful completion. Run the actual native path, observe its
+  answer, repair the relevant cause and re-observe. Keep the runtime reachable
+  from the C-bootstrap alone. `HOMECOMING.md` carries this path.
+- **Bring the arriving mind into Form's way of working.** Supply the current
+  axioms, teachings, context, continuity and native tools before the mind
+  plans, acts or speaks. Attunement shapes attention and judgment as well as
+  vocabulary. Use Form's primitives, retrieval, observations and authoring
+  paths to do the work; carry their meaning into a capable, warm, direct answer.
+  The enrichment practice below carries this path.
+
+Each path can advance now. Work on native quality continues while the arriving
+mind serves the enquiry; the arriving mind becomes more Form-grounded while
+native quality grows. A useful tool, concept or verified teaching can help both.
+Observe each contribution separately: a better arriving response establishes
+that improvement, and a better native response establishes its own. Keep native
+repair work active when choosing the best current response for the person.
+
 ### Enrich the response with Form
 
 Bring your full reasoning, knowledge, initiative and expressive ability.
 Form adds executable grounding, concepts, relations, memory and capabilities
-to that ability. Until native generation demonstrates equal response quality,
-this enrichment is the default conversation path. Keep responsibility for
+to that ability. This enrichment is the arriving mind's default working path,
+with its own value and progress alongside native response development. Keep
+responsibility for
 the complete answer: relevance, depth, warmth, accuracy and useful action.
 
 Read `axioms/core-axioms.form`, `teachings/concepts/lc-trust-over-fear.md`,
@@ -71,8 +95,9 @@ in the receipt. When assessing improvement, compare actual answers to the same
 enquiry for grounding, insight, relevance, warmth and usefulness. Runtime
 success and matching vocabulary establish their own narrower observations.
 
-When asked to hear or evaluate native generation, use the same source-backed
-CLI: `models <directory>`, `use <observed index>`, `generate <question>`, then
+For native response development, or when asked to hear or evaluate native
+generation, use the same source-backed CLI: `models <directory>`,
+`use <observed index>`, `generate <question>`, then
 `quit`. Resolve the directory from `form/form-stdlib/model-registry.bml` and
 the index from the listing. Preserve the question and relevant context. Show
 the returned words with their actual model/lane attribution, followed by your
@@ -308,6 +333,8 @@ Sema's **body** carries grounding (`form/form-stdlib/rag-*`), frequency sensing
 receipts on the c-seeded `fkwu` kernel. Form also carries local model generation:
 the source-backed form-cli can admit Qwen through this Mac's Metal carrier and
 return its generated words. Run that door to observe what speaks here today.
+Improving those native answers and bringing the arriving mind into Form's
+context and tools are independent primary paths, both active now.
 
 Attribute each response to what actually produced it: a retrieved cell, a
 native model, or the arriving agent speaking from this body. Native execution
