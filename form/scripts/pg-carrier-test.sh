@@ -27,7 +27,7 @@ cd "$FORMDIR"
 RS_BIN="form-kernel-rust/target/release/form-kernel-rust"
 if [[ ! -x "$RS_BIN" ]]; then
   echo "building rust kernel..." >&2
-  (cd form-kernel-rust && cargo build --release --quiet)
+  (cd form-kernel-rust && cargo build --release --offline --quiet)
 fi
 
 # --- provision a Postgres (or use the caller's PG_DSN) ---------------------
