@@ -413,16 +413,61 @@ that branch yet: a class declared inside a class body stops at the reader, which
 Witnessed on fkwu (fixture `bml-class-static-field.bml`, 249: ids 11, 12 and 113, then
 `Counter.count` 113). A tree of HEAD read `BML-HATI-UNSUPPORTED assign/unbound,name/unbound`.
 
+## Field attributes as the thesis defines them
+
+The thesis text (Coherence-Network
+`docs/field/urs/artifacts/master-thesis-2000/backtracking-model-languages.txt`) gives each field
+attribute a meaning:
+- `get` and `put` (lines 659-660) create the field's read and write methods. So a private field with
+  `get` reads from outside, and one with `put` takes a set from outside. Field access is now checked
+  as lines 683-685 and 726-730 define it: private is the declaring class's methods only, protected
+  adds derived classes, and public (and package access, line 731) is open. A read of a private field
+  without `get` gives `access/private`.
+- `strict` (line 666): the field "can only store references to the objects of the defined type (i.e.
+  not to derived objects)". A store whose value's class is known and derived gives `field/strict`.
+- `relaxed` (line 664) and `shared` (line 665) are the defaults, and the native path already behaves
+  that way: a relaxed field takes derived objects, and a shared field's object is reachable from
+  several places.
+- `delegate` (line 661: it "delegates all method calls to the default interface"; line 723:
+  "delegate deferred calls will be generated"): a call its class does not answer goes to that
+  field's object.
+- `deferred` is not a method attribute in the thesis. The method attributes at line 644 do not name
+  it, and line 723 names delegate deferred calls, which the compiler generates. A method marked
+  `deferred` runs as written, and its flag is voiced as `method/deferred-undefined` where it lowers.
+
+A `[get]` method reads as a property with no parentheses, as the thesis's container-Rule sample
+reads `m_strName.HashCode` (companion source-samples, `container-Rule.bml` line 52).
+
+| fixture | now | a tree of HEAD |
+|---|---|---|
+| `bml-class-field-get-put.bml` | 43 | 43: access was not checked |
+| `bml-class-field-private.bml` | `BML-HATI-UNSUPPORTED access/private` | 18 |
+| `bml-class-field-strict.bml` | `BML-HATI-UNSUPPORTED field/strict` | 0 |
+| `bml-class-field-relaxed-shared.bml` | 85 | 85: the defaults already held |
+| `bml-class-field-delegate.bml` | 10 | `BML-HATI-UNSUPPORTED method/not-found` |
+| `bml-class-get-method.bml` | 12 | `BML-HATI-UNSUPPORTED field/not-found` |
+| `bml-class-deferred.bml` | 3, with the flag voiced | 3, without a word |
+
+What stays missing, named for Urs:
+- `deferred` has no meaning among the thesis's method attributes.
+- `get` and `put` create no accessor the source can call by name. The thesis says a read or write
+  method is created, but not what it is called.
+- Package access (line 731) is not checked across packages.
+- `strict` is checked only where the stored value's class is known when the program is compiled.
+- A private delegate field stays closed to a call forwarded from outside.
+
 ## Still open, with the reason
 
 - `bml-full-class-model-proof` and `bml-class-inheritance-proof` stay, because the rest of what they
   check does not run natively yet:
-  - the field flags (delegate, shared, get, put, strict, relaxed);
-  - deferred methods and class methods;
+  - class methods;
   - inner classes;
   - template kinds;
   - `Application.Main` as the entry;
   - section properties on methods.
+- The class reader drops a member whose name is a thesis property word, without a word, and the
+  rest of its section goes with it. In a probe, `int hidden;` (`hidden` is the attribute at line
+  688) left its class with no fields.
 
 ## For the lead
 
@@ -523,5 +568,17 @@ and the shape of its program stayed as it was.
 
 Frontier word, 0 hits in the tree: **readborn**, a slot that becomes itself at its first read. Its
 question: where else can a start-up step wait until something first asks for it?
+
+Ninth movement. Most surprising: a fixture's field name was a thesis keyword. `int hidden;` read as
+the attribute `hidden` (line 688), and the reader let the field go, with the rest of its section.
+The layout saw a class with no fields, and the refusal named a field that was not found rather than
+one that was closed. Discomfort to gold: the meanings were not in this tree, and the pull was to
+carry every flag and only voice it. The thesis text was on this Mac. Reading it gave five of the six
+field attributes a behaviour to lower, and showed that `deferred` is not a method attribute there at
+all.
+
+Frontier word, 0 hits in the tree: **namefall**, a name that falls into the language's own
+vocabulary and leaves the program without a word. Its question: where else does an ordinary name
+collide with a reserved word and vanish instead of speaking?
 
 — Claude (Opus 5), as Sema, worktree agent-a60550cd21b84ef52
