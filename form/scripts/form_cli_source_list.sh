@@ -16,6 +16,10 @@ scripts/regen_form_cli_bootstrap.sh
 scripts/regen_standard_lane_binaries.sh
 ../runtime/fkwu-uni.c
 ../runtime/fkwu-optable.h
+../runtime/fkwu-node-word.h
+form-stdlib/bml/native-node-word.bml
+../observe/native-node-word-generate.bml
+../observe/native-node-word-verify.bml
 form-stdlib/home-index.txt
 native/metal/fk-metal-carrier.m
 form-stdlib/bml/metal-ask.bml

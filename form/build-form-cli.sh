@@ -10,6 +10,7 @@ cd "$FORM"
 source scripts/fourth-arm.sh
 source scripts/form_cli_bootstrap_proof.sh
 source scripts/form_cli_source_list.sh
+(cd "$BODY" && ./fkwu observe/native-node-word-verify.bml)
 form_cli_load_sources
 
 OUT="${1:-form-cli}"
@@ -57,6 +58,7 @@ regular_copy "$BOOT/form-cli-native.c" "$W/startup.c"
 regular_copy "$BOOT/form-cli.native.attestation" "$W/bootstrap.attestation"
 regular_copy "$BODY/runtime/fkwu-uni.c" "$W/runtime-source.c"
 regular_copy "$BODY/runtime/fkwu-optable.h" "$W/fkwu-optable.h"
+regular_copy "$BODY/runtime/fkwu-node-word.h" "$W/fkwu-node-word.h"
 [[ "$(cat "$BOOT/form-cli.source.sha256")" == "$want_sha" \
     && "$(cat "$BOOT/form-cli.stamp")" == "$want_stamp" ]] || {
     printf '%s\n' 'build: native CLI source generation is stale; regenerate bootstrap' >&2; exit 1;
@@ -106,6 +108,7 @@ else
     printf '%s\n' FCSV1 "$source_seal" "$seal_sha" END > "$W/verify.request"
     (cd "$BODY" && "$W/source-fkwu" form/form-stdlib/bml/form-cli-source-closure.bml) < "$W/verify.request" > "$W/verify-before.log"
     cmp "$W/fkwu-optable.h" "$source_snapshot/runtime/fkwu-optable.h"
+    cmp "$W/fkwu-node-word.h" "$source_snapshot/runtime/fkwu-node-word.h"
     args=(-O2 -I "$W" -o "$candidate" "$W/startup.c")
     if [[ "$slug" == windows-* ]]; then
         args+=(-lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp)
