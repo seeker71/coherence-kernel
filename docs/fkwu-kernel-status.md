@@ -90,8 +90,9 @@ translation and new-generation publication remain separate work.
 
 [Native source inspection](native-source-inventory.md) captures source lists into owned files and checks child exit status, exact reads and NUL termination. `observe/carrier-mass.bml` counts source bytes in Form, including unknown-extension shebangs and paths containing spaces or newlines. It retains the complete source reading at `.hearth/carrier-mass-current.json`; weighted exclusions remain present in that evidence. The native authoring guide retains its separate Python inventory at `.hearth/native-authoring-current.json`. Neither lexical inventory establishes execution or native ownership by itself.
 
-The current guide identifies one retained Python implementation:
-`test_glass_keyboard_pty.py` retains POSIX/Linux terminal acceptance.
+The current guide identifies no retained Python implementation. Terminal
+acceptance lives in `observe/glass-keyboard-pty-run.bml` and in the terminal
+door's own read-back ([glass keyboard](glass-keyboard.md)).
 The three large-model comparison callers use native Form references and
 generation. Their [source-bound evidence](evidence/fkwu/dsv4-oracle.json)
 records all 1,106 consumer checks passing at existing tolerances; the replaced

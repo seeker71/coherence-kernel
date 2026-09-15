@@ -78,12 +78,16 @@ prompt. There are no reads when stdin/stdout are not terminals.
 
 The existing `host_sleep_ms` effect accepts `["terminal-input", mode]`:
 `1` acquire noncanonical/no-echo input, `2` read currently available bytes,
-`3` report active (1/0), `0` restore. Acquisition reports 0 on a non-TTY or
-unsupported host and `nothing` on an operational error. Read returns a string
-(empty when quiet), or `nothing` on loss/error. The POSIX carrier preserves
-signal handling and output processing; exit, interrupt, termination and hangup
-restore saved settings. Suspension restores settings and resume reacquires them.
-SIGKILL cannot run cleanup. Windows currently reports unavailable.
+`3` report active (1/0), `0` restore and answer the read-back: 1 when the
+terminal reads back as saved, 0 when it differs. Acquisition reports 0 on a
+non-TTY or unsupported host and `nothing` on an operational error, including a
+terminal that does not read back in direct mode. Read returns a string (empty
+when quiet), or `nothing` on loss/error. The POSIX carrier preserves signal
+handling and output processing; exit, interrupt, termination and hangup restore
+saved settings. Suspension restores settings and resume reacquires them. Every
+restoration, the signal and suspension arms included, reads the terminal back
+against the saved state; Darwin's PENDIN queue bit is left out. SIGKILL cannot
+run cleanup. Windows currently reports unavailable.
 
 This is a **temporary C checkout carrier**, not new runtime meaning in C.
 `fk_tty_door`, its restoration hooks and the wait-readiness check in
@@ -104,7 +108,7 @@ selected state, frame production and a human-visible paint are distinct claims.
   controller transitions, including a correlated framebuffer clear/re-observation.
 - `./fkwu observe/glass-keyboard-pty-run.bml`: Form owns real Darwin arm64 PTY
   admission, byte matching, deadlines, signals, terminal snapshots and cleanup.
-  It executes the unchanged production fixture through a private session driver.
+  It executes the production fixture through a private session driver.
   Six sessions observe immediate keys, filters, views, split VT input, bracketed
   paste, evidence selection, quit, SIGINT/TERM/HUP, suspend/resume and non-TTY
   input retention. All termios fields, control characters and speeds must match;
@@ -120,10 +124,13 @@ selected state, frame production and a human-visible paint are distinct claims.
   not a transcript limit. These are cooperative process-local owners, not
   protected address spaces. This acceptance module does not replace the
   production terminal signal hooks in C.
-- `form/scripts/test_glass_keyboard_pty.py` retains the unretired POSIX/Linux
-  acceptance responsibility. The current native RAM admission carrier is
-  Darwin arm64; the Form door explicitly refuses other targets. No native Linux
-  PTY result is claimed, and Python is not invoked by the native witness.
+- The door's own read-back is the live check on every POSIX host: a direct-mode
+  acquisition that does not read back as set answers `nothing`, and a close
+  answers whether the terminal read back as saved. The production fixture prints
+  `RESTORED` only on that answer, so the PTY sessions witness the kernel's own
+  reading beside their external termios comparison. The native RAM admission
+  carrier is Darwin arm64 and the Form door runs on that target only, so no
+  Linux PTY session result is claimed.
 - Existing `form-glass-live-ui-band.fk`, `form-glass-launch-band.fk` and
   `form-glass-event-loop-band.fk` retain the full renderer/launcher proofs.
 

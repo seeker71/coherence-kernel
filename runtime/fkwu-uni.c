@@ -4833,12 +4833,19 @@ static int fk_inram_resident_request(long long request, long long *action,
     return 1;
 }
 
+static void fk_nodes_grow(void);
 static int fk_inram_node_index(long long identity, long long *index) {
     long long ix;
     if (identity >= 0) {
         return 0;
     }
     ix = fk_nidx(identity);
+    /* A field node another process minted arrives by its field index, and
+     * fk_field_fill grows the per-node columns only for a node minted here. This
+     * process's admission columns grow until they reach the node it holds. */
+    while (fk_field_on && ix >= 1 && ix <= fk_np && ix >= fk_node_cap) {
+        fk_nodes_grow();
+    }
     if (ix < 1 || ix > fk_np || ix >= fk_node_cap) {
         return 0;
     }
@@ -15466,9 +15473,29 @@ static int fk_tty_active, fk_tty_cleanup_registered;
 static const int fk_tty_signals[] = { SIGINT, SIGTERM, SIGHUP, SIGTSTP, SIGCONT };
 static struct sigaction fk_tty_old[5];
 extern int atexit(void (*)(void));
+/* The terminal is read back after each change. Direct input must read back as
+ * set, and a restoration must read back as the saved state; Darwin's PENDIN bit
+ * is kernel queue state, not a setting, and is left out. tcgetattr and
+ * cfget*speed are async-signal-safe, so the signal arms read back too. */
+static int fk_tty_readback = -1; /* last restoration: 1 as saved, 0 differed, -1 none */
+static int fk_tty_same(const struct termios *a, const struct termios *b) {
+    tcflag_t pend = 0;
+#if defined(PENDIN)
+    pend = PENDIN;
+#endif
+    if (a->c_iflag != b->c_iflag || a->c_oflag != b->c_oflag || a->c_cflag != b->c_cflag ||
+        (a->c_lflag & ~pend) != (b->c_lflag & ~pend)) { return 0; }
+    for (int k = 0; k < NCCS; k++) { if (a->c_cc[k] != b->c_cc[k]) { return 0; } }
+    return cfgetispeed(a) == cfgetispeed(b) && cfgetospeed(a) == cfgetospeed(b);
+}
+static void fk_tty_put_saved(void) {
+    struct termios now;
+    tcsetattr(0, TCSANOW, &fk_tty_saved);
+    fk_tty_readback = (tcgetattr(0, &now) == 0 && fk_tty_same(&now, &fk_tty_saved)) ? 1 : 0;
+}
 static void fk_tty_restore(void) {
     if (!fk_tty_active) { return; }
-    tcsetattr(0, TCSANOW, &fk_tty_saved);
+    fk_tty_put_saved();
     fk_tty_active = 0;
     for (int k = 0; k < 5; k++) { sigaction(fk_tty_signals[k], &fk_tty_old[k], 0); }
     write(1, "\033[?2004l", 8);
@@ -15479,7 +15506,7 @@ static void fk_tty_signal(int sig) {
         return;
     }
     if (sig == SIGTSTP) {
-        tcsetattr(0, TCSANOW, &fk_tty_saved);
+        fk_tty_put_saved();
         /* SIGSTOP avoids changing the saved SIGTSTP disposition while suspended. */
         raise(SIGSTOP);
         if (fk_tty_active) { tcsetattr(0, TCSANOW, &fk_tty_direct); }
@@ -15499,7 +15526,12 @@ static int fk_tty_ready(void) { return 0; }
 #endif
 static long long fk_tty_door(long long mode) {
 #if !defined(_WIN32)
-    if (mode == 0) { fk_tty_restore(); return 2; }
+    /* close answers whether the terminal read back as saved: 1, or 0 when it differed */
+    if (mode == 0) {
+        if (!fk_tty_active) { return 2; }
+        fk_tty_restore();
+        return fk_tty_readback == 1 ? 2 : 0;
+    }
     if (mode == 3) { return fk_tty_active ? 2 : 0; }
     if (mode == 1) {
         if (fk_tty_active) { return 2; }
@@ -15510,6 +15542,15 @@ static long long fk_tty_door(long long mode) {
         fk_tty_direct.c_cc[VMIN] = 0;
         fk_tty_direct.c_cc[VTIME] = 0;
         if (tcsetattr(0, TCSANOW, &fk_tty_direct) != 0) { return fk_nothing; }
+        {
+            /* direct input must read back as set: no canonical line, no echo */
+            struct termios got;
+            if (tcgetattr(0, &got) != 0 || (got.c_lflag & (ICANON | ECHO | IEXTEN)) != 0 ||
+                got.c_cc[VMIN] != 0 || got.c_cc[VTIME] != 0) {
+                tcsetattr(0, TCSANOW, &fk_tty_saved);
+                return fk_nothing;
+            }
+        }
         struct sigaction sa;
         sa.sa_handler = fk_tty_signal; sigemptyset(&sa.sa_mask); sa.sa_flags = 0;
         int k = 0;
@@ -18189,11 +18230,40 @@ static char *fk_sig_b;
 static long long fk_sig_n;
 static long long fk_sig_cap;
 static int fk_sig_bad;
-#define FK_SIG_HEAL_CAP 16
+/* The images set aside and not yet rebuilt. The table starts empty and doubles
+ * on demand, as the kernel's other tables do; a heal it cannot hold dies loudly
+ * rather than go unanswered. */
 static long long fk_sig_heal_n;
-static long long fk_sig_heal_at[FK_SIG_HEAL_CAP];
-static long long fk_sig_heal_seq[FK_SIG_HEAL_CAP];
-static char fk_sig_heal_path[FK_SIG_HEAL_CAP][FK_PATH_CAP];
+static long long fk_sig_heal_cap;
+static long long *fk_sig_heal_at;
+static long long *fk_sig_heal_seq;
+static char **fk_sig_heal_path;
+static void fk_sig_heal_reserve(long long need) {
+    long long nc;
+    if (need <= fk_sig_heal_cap) {
+        return;
+    }
+    nc = fk_sig_heal_cap > 0 ? fk_sig_heal_cap * 2 : 1;
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    long long *at = realloc(fk_sig_heal_at, (unsigned long)nc * 8);
+    if (at == 0) {
+        fk_die("fk_sig_heal_reserve: out of memory growing the pending-heal table");
+    }
+    fk_sig_heal_at = at;
+    long long *seq = realloc(fk_sig_heal_seq, (unsigned long)nc * 8);
+    if (seq == 0) {
+        fk_die("fk_sig_heal_reserve: out of memory growing the pending-heal table");
+    }
+    fk_sig_heal_seq = seq;
+    char **held = realloc(fk_sig_heal_path, (unsigned long)nc * sizeof(char *));
+    if (held == 0) {
+        fk_die("fk_sig_heal_reserve: out of memory growing the pending-heal table");
+    }
+    fk_sig_heal_path = held;
+    fk_sig_heal_cap = nc;
+}
 static void fk_sig_raw(const char *s, long long n) {
     if (fk_sig_bad || n <= 0) {
         return;
@@ -18424,7 +18494,7 @@ static void fk_diag_path_signal(const char *level, const char *path, const char 
     long long pn = path != 0 ? fk_cstrlen(path) : 0;
     int image = pn > 0 && (fk_sig_ends_at(path, pn, ".fkb") || fk_sig_ends_at(path, pn, ".sym") ||
                            fk_sig_ends_at(path, pn, ".dylib"));
-    int heal = !err && pn > 0 && pn < FK_PATH_CAP &&
+    int heal = !err && pn > 0 &&
                (fk_sig_has(msg, "rebuilding") || fk_sig_has(msg, "re-lowering") ||
                 fk_sig_has(msg, "stale .fkb ignored"));
     long long at = fk_now_ms();
@@ -18446,12 +18516,18 @@ static void fk_diag_path_signal(const char *level, const char *path, const char 
     fk_sig_cstr(path);
     fk_sig_lit(image ? ",\"form\":\"image\"}" : ",\"form\":\"unit\"}");
     fk_sig_send(at, at);
-    if (heal && fk_sig_heal_n < FK_SIG_HEAL_CAP) {
+    if (heal) {
         long long i = 0;
+        char *held = malloc((unsigned long)pn + 1);
+        if (held == 0) {
+            fk_die("fk_diag_path_signal: out of memory holding an image heal");
+        }
         while (i <= pn) {
-            fk_sig_heal_path[fk_sig_heal_n][i] = path[i];
+            held[i] = path[i];
             i = i + 1;
         }
+        fk_sig_heal_reserve(fk_sig_heal_n + 1);
+        fk_sig_heal_path[fk_sig_heal_n] = held;
         fk_sig_heal_at[fk_sig_heal_n] = at;
         fk_sig_heal_seq[fk_sig_heal_n] = fk_sig_seq;
         fk_sig_heal_n = fk_sig_heal_n + 1;
@@ -18465,10 +18541,9 @@ static long long fk_sig_stem_n(const char *p) {
     }
     return n;
 }
-/* A rebuilt image was written, and the images it answers get their applied row.
- * The printed (authoritative) compile rebuilt the program from source, which
- * answers every image set aside before it; a quiet (speculative) compile answers
- * only an image of its own stem. */
+/* A rebuilt image was written, and the heal of that image (the image or its lens,
+ * one stem) gets its applied row, naming this path at this time. An image set
+ * aside and never rewritten keeps its observation alone. */
 static void fk_sig_heal_settle(const char *fkb_path) {
     long long i = 0;
     long long kept = 0;
@@ -18483,7 +18558,7 @@ static void fk_sig_heal_settle(const char *fkb_path) {
             same = p[k] == fkb_path[k];
             k = k + 1;
         }
-        if (fk_diag_quiet == 0 || same) {
+        if (same) {
             fk_sig_head(fk_sig_heal_at[i], fk_sig_heal_seq[i], p, "applied", "compile-warning", "null");
             fk_sig_lit("],\"offers\":[\"rebuild\"],\"selected\":\"rebuild\",\"evidence\":{\"path\":");
             fk_sig_cstr(p);
@@ -18491,17 +18566,11 @@ static void fk_sig_heal_settle(const char *fkb_path) {
             fk_sig_cstr(fkb_path);
             fk_sig_lit("}");
             fk_sig_send(fk_sig_heal_at[i], now);
+            free(fk_sig_heal_path[i]);
         } else {
-            if (kept != i) {
-                k = 0;
-                while (p[k] != 0) {
-                    fk_sig_heal_path[kept][k] = p[k];
-                    k = k + 1;
-                }
-                fk_sig_heal_path[kept][k] = 0;
-                fk_sig_heal_at[kept] = fk_sig_heal_at[i];
-                fk_sig_heal_seq[kept] = fk_sig_heal_seq[i];
-            }
+            fk_sig_heal_path[kept] = fk_sig_heal_path[i];
+            fk_sig_heal_at[kept] = fk_sig_heal_at[i];
+            fk_sig_heal_seq[kept] = fk_sig_heal_seq[i];
             kept = kept + 1;
         }
         i = i + 1;
@@ -23741,6 +23810,63 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     free(carry_len);
     return ok;
 }
+/* A dep image the import lane set aside ("rebuilding from source") is rebuilt
+ * here from its own source, through the same artifact-only compile the lane uses
+ * for a stale image, so its heal settles on its own write and names its own path.
+ * The program is rebuilt by the compile that follows; its own heal settles there. */
+static void fk_sig_heal_rebuild_deps(const char *root_fkb_path) {
+    long long n = fk_sig_heal_n;
+    long long rn = fk_sig_stem_n(root_fkb_path);
+    long long t = 0;
+    long long i = 0;
+    char **todo;
+    if (n <= 0) {
+        return;
+    }
+    todo = malloc((unsigned long)n * sizeof(char *));
+    if (todo == 0) {
+        return;
+    }
+    while (i < n) {
+        const char *p = fk_sig_heal_path[i];
+        long long pn = fk_sig_stem_n(p);
+        int same = pn == rn;
+        long long k = 0;
+        while (same && k < pn) {
+            same = p[k] == root_fkb_path[k];
+            k = k + 1;
+        }
+        char *src = (!same && pn < fk_cstrlen(p)) ? malloc((unsigned long)pn + 4) : 0;
+        if (src != 0) {
+            k = 0;
+            while (k < pn) {
+                src[k] = p[k];
+                k = k + 1;
+            }
+            src[pn] = '.';
+            src[pn + 1] = 'f';
+            src[pn + 2] = 'k';
+            src[pn + 3] = 0;
+            todo[t] = src;
+            t = t + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < t) {
+        if (fk_path_mtime_raw(todo[i]) > 0 && !fk_unit_lowers(todo[i])) {
+            fk_src_compile_artifact_only(todo[i]);
+        }
+        free(todo[i]);
+        i = i + 1;
+    }
+    free(todo);
+}
+/* --check <unit>: the compile-only door. The unit compiles fresh from today's
+ * source -- no cached image, no .dylib -- its diagnostics and organ-health
+ * signals print as they always do, and nothing runs. The exit is the compile's:
+ * 0 clean, 1 when it carried an error or refused. */
+static int fk_check_only;
 static int fk_run_src(const char *path, long long arg) {
     char fkb_path[FK_PATH_CAP];
     char sym_path[FK_PATH_CAP];
@@ -23755,8 +23881,8 @@ static int fk_run_src(const char *path, long long arg) {
     if (!fk_src_load_unit(path, expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
         return 2;
     }
-    long long fkb_mtime = fk_path_mtime_raw(fkb_path);
-    long long dylib_mtime = fk_path_mtime_raw(dylib_path);
+    long long fkb_mtime = fk_check_only ? -1 : fk_path_mtime_raw(fkb_path);
+    long long dylib_mtime = fk_check_only ? -1 : fk_path_mtime_raw(dylib_path);
     if (dylib_mtime >= unit_mtime) {
         fk_run_door = 3;
         if (fk_run_dylib_artifact(dylib_path, arg, 0)) {
@@ -23816,6 +23942,7 @@ static int fk_run_src(const char *path, long long arg) {
     int import_images_loaded = fk_src_try_import_fkb_images(path);
     fk_run_door = import_images_loaded ? 1 : 0;
     if (!import_images_loaded) {
+        fk_sig_heal_rebuild_deps(fkb_path);
         if (!fk_src_load_unit(path, expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
             return 2;
         }
@@ -23830,6 +23957,9 @@ static int fk_run_src(const char *path, long long arg) {
      * OTHER compile error still recovers INTO a runnable (if degraded) program and
      * runs, carrying a nonzero EXIT via fk_nerr at the final return. */
     fk_diag_flush();
+    if (fk_check_only) {
+        return (fk_nerr > 0 || fk_nerr_seen > 0 || fk_src_truncated || fk_src_unrunnable) ? 1 : 0;
+    }
     if (fk_src_truncated || fk_src_unrunnable) {
         fk_heat_report();
         return 1;
@@ -24505,7 +24635,7 @@ static int fk_run_bml(const char *path, long long arg) {
             expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
         return 2;
     }
-    if (fk_path_mtime_raw(fkb_path) > 0) {
+    if (!fk_check_only && fk_path_mtime_raw(fkb_path) > 0) {
         long long recorded = fk_src_sym_recorded_errors(sym_path);
         long long unrunnable = fk_src_sym_recorded_unrunnable(sym_path);
         if (unrunnable > 0) {
@@ -24538,6 +24668,9 @@ static int fk_run_bml(const char *path, long long arg) {
     fk_vs[0] = arg << 1;
     fk_vsp = 1;
     fk_diag_flush();
+    if (fk_check_only) {
+        return (fk_nerr > 0 || fk_nerr_seen > 0 || fk_src_truncated || fk_src_unrunnable) ? 1 : 0;
+    }
     if (fk_src_truncated || fk_src_unrunnable) {
         fk_heat_report();
         return 1;
@@ -24555,6 +24688,19 @@ static int fk_run(int argc, char **argv) {
     }
     if (argv[0] && argv[0][0]) {
         fk_self_path = argv[0];
+    }
+    /* --check <unit>: compile only (fk_check_only, above fk_run_src) */
+    if (argc >= 3 && fk_cstr_eq(argv[1], "--check")) {
+        fk_check_only = 1;
+        if (fk_path_has_suffix(argv[2], ".bml") ||
+            (fk_path_has_suffix(argv[2], ".fk") && fk_unit_lowers(argv[2]))) {
+            return fk_run_bml(argv[2], 0);
+        }
+        if (fk_path_has_suffix(argv[2], ".fk")) {
+            return fk_run_src(argv[2], 0);
+        }
+        fk_diag_path("error", argv[2], "--check reads .fk and .bml units");
+        return 2;
     }
     if (argc > 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH) {
         fk_stage_input(argv[3]);
