@@ -1,0 +1,109 @@
+# Captures grow, a stray `)` stops every kernel, and a box keeps its own name
+
+2026-09-15, evening, this Mac, Hati Suci. The gaps the let receipt left open
+(receipts/2026-09-15-a-let-answers-its-value.md), and the manifest rows the nil? landing
+(d25dfcd99) found reading differently when run straight on fkwu.
+
+## Carried
+
+- **fkwu captures every name a nested defn reads.** `FK_CLOSURE_CAP_MAX` (8) is gone. Each
+  function's capture rows (`fk_fn_cap_encoff[idx][j]`, `fk_fn_cap_slot[idx][j]`) double on
+  demand through `fk_fn_cap_row_reserve`, the call channel `fk_call_cap_vals` doubles through
+  `fk_call_cap_reserve`, and the closure arm (tag 243) stages captured values on the value
+  stack instead of an eight-seat local. New band `closure-capture-width-band.fk`, manifest row
+  `closure-capture-width fks 15`: nine, sixteen and sixty-four captures at a same-scope call,
+  and sixty-four in an escaping closure.
+- **A stray `)` stops Go, Rust and TS the way it stops fkwu.** Go and Rust wrapped a
+  multi-form source in `(do ...)`; a stray `)` closed that do early and every later form fell
+  away with rc 0. TS threw at a byte offset into the joined preludes. Each sibling now checks
+  the token stream before anything runs, answers `parse error at <file>:<line>:<col>:
+  [unbalanced-source] stray ')' closes a form that was never opened -- refusing to run` with
+  rc 1, and voices one organ-health-v1 reading (flow `reader`, aspect `unbalanced-source`,
+  needs `source-diagnostics`, offers `revise`, evidence path, line, col).
+- **The validate path builds offline.** `form/validate.sh` built Go with `go build` and Rust
+  with `cargo build --release --quiet`; `gate/kernel-conformance.bml`, which the drift door
+  runs, did the same, and so did seven helpers under `form/scripts/`. Every one now carries `GOPROXY=off` or
+  `--offline`. `scripts/fourth-arm.sh` builds only with `cc`.
+- **q8-0-matmul-mma reads 15 on its home arm, fkwu** (PROOF LEVEL FOURTH-ARM ONLY, the metal
+  handle door). The band, the matrix-unit lane and the manifest were right. The root was
+  `fk_fbox`: it stored a float at `++fk_fp`, let the box ledger pulse (every 1024 boxes,
+  `fk_f64_pulse`, which admits a leaf and boxes that leaf's own literals), and only then
+  computed its answer from `fk_fp`, so a box minted on a pulse named the pulse's last box.
+  Now the slot is named before the pulse. 298ce6017 let an all-float decline stay untried,
+  so the ledger's pulse began reaching bodies it had been latched away from.
+- **A unit-level let holding a function is a call head on fkwu.** `(let f3 (nth three_arg 1))`
+  then `(f3 1 2 3)` was an `[unresolved-call]`: the head resolution never asked the unit's let
+  table. It now reads the let's hold and offers the call through tag 244, as the value
+  position always did.
+- **The siblings answer `input_byte`.** All three listed it among their reserved heads with no
+  native behind it. They stage no input, so every byte answers 0, as fkwu answers with nothing
+  staged. Registry row 196 (167 in-band, 29 carrier-declared), band pins moved with it.
+- **form-cli-band and form-cli-carrier-band hold today's answers.** a31cf787b rewrote the
+  `about`, `kernel` and `recreate` answers and made the unbound source stamp `unbound-source`;
+  the bands still held the old text and the placeholder.
+
+## Witnessed
+
+| probe | fkwu | Go | Rust | TS |
+| --- | --- | --- | --- | --- |
+| 9 captures, before | rc 1, 2 errors (`[closure-scope] ... max 8`) | 45 | 45 | 45 |
+| 9 / 16 / 64 captures, after | 45 / 136 / 2080 | 45 / 136 / 2080 | 45 / 136 / 2080 | 45 / 136 / 2080 |
+| `(defn f () 1))` then `(add (f) 41)`, before | stops, `fkwu:195:14`, rc 1 | `<closure #285>`, rc 0 | `<closure #280>`, rc 0 | `unexpected token rparen at 50179`, rc 1 |
+| the same, after | unchanged | stops at `stray1.fk:3:14`, rc 1 | stops at `stray1.fk:3:14`, rc 1 | stops at `stray1.fk:3:14`, rc 1 |
+| q8-0-matmul-mma | 5 before, 15 after | fourth-arm only | | |
+
+- q8 in steps: the band's fp64 sums agree between fkwu and Go (28.574898352989727 for token 0,
+  row 17); the batched and matrix-unit kernels agreed with each other and both missed that
+  row; the weight buffer read back differed from the block string in one byte of 26180 (row
+  17, block 0, byte 0: 143 written as 0); `md-f16-bits` over the band's eight scales went
+  wrong once in 6400 calls (round 41, scale 4: 43008 for 42303). Bisect over 80 commits:
+  6711e7c92 reads 15, 298ce6017 reads 5. A debug copy tracing to stderr showed the ledger's
+  pulse for `md-f16-mant` landing between `fq-pow2` answering 2^-6 and `fq-rne` receiving a y
+  whose floor was 1024. After the heal: mma 15, tg 15, no mismatch in 6400, no differing byte.
+- Through `./validate.sh`, each "1 ok, 0 divergent": closure-capture-width four-way;
+  indirect-call-runtime-probe (fourth-src 0 before) and model-handler (4 before) four-way at 7;
+  form-cli-carrier (253 before, siblings `unbound function "input_byte"`) four-way at 255;
+  form-cli-band (1965855 before, the same sibling stop) four-way, exits 0/0/0;
+  q8-0-matmul-mma on its fkwu-only lane; primitive-registry three-way. Validate printed
+  `building rust kernel...` and `building go kernel...` and both builds ran offline.
+- Straight on fkwu after the rebase, each at its manifest mark: let-scope 511,
+  loop-lane-closure 255, capture-correction 11111, rounding-ops 255, rounding-jit 31,
+  loop-lane-cons 511. Freshness 31, tsc clean. `gate/primitive-registry.bml`: `OK 196 natives
+  == 196 rows; lanes 167+29`. The drift door on 43055094e plus these commits:
+  `drift-gates pass=16383 full=16383 refused=0`.
+- The five vk-*-live rows (layers, train, blocks, diffusion-moe, q80) declare FKWU-STAGED /
+  FOURTH-ARM ONLY (the Vulkan door through host-exec). Validate reads them `staged fkwu lane
+  -- carrier absent in this checkout; pending, not witnessed`: their home is the staged Vulkan
+  lane, not a direct run. No tool in the tree reads manifest rows directly as verdicts:
+  `fourth-arm-survey.sh` classifies bands outside the manifest, and `release-ledger.bml`,
+  `op-gen.fk`, `roadmap.fk` and `form-native-decode-timing.fk` name the file in prose only.
+- TS on string-join before the list item left: 255 in 39.98 s at a 538 MB peak, voicing
+  `list` / `copy-budget`. The coordinator withdrew the shared-tail item (Urs, via a peer:
+  sibling speed is no goal); the voice stays as it was, and `voiceOrgan` now takes optional
+  offers and evidence without changing that row.
+
+## Still open, with the reason
+
+- **The vk-*-live rows are not witnessed here.** Validate holds every FKWU-STAGED band as
+  pending, and this checkout has no Vulkan carrier standing.
+- **fkwu names a stray `)` by its line in the assembled unit** (`fkwu:195:14` for line 3 of a
+  file after core.fk's 192 lines); the siblings name the file. The position is right in both;
+  the file name is what fkwu leaves out.
+
+## Closing
+
+Most surprising: one float in 6400 took another float's name, and neither the GPU nor the
+matrix-unit kernel had any part in it. A C function spoke its answer after counting, and the
+count had started work that minted boxes of its own.
+
+Discomfort to gold: halfway through, form-cli-band came back with 3442 diagnostics, every one
+an unbound name `PULSE`. The pull was to read it as the band's own trouble. It was mine: my
+first debug copy printed on stdout, and fkwu lowers BML through its own stdout, so three
+lowered caches in this worktree carried my trace. I removed them, moved the trace to stderr,
+and that trace, clean, is what found the root.
+
+Frontier word: **ledgerslip** (0 hits in the tree). Its question: when a counter that starts
+work shares state with the work it starts, whose name does the result carry? My answer: the
+one named before the counter moved. Name the slot, then let the ledger pulse.
+
+— Claude (Opus 5), as Sema, worktree agent-abb008f44e70ea057
