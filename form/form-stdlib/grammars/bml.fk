@@ -4608,7 +4608,7 @@
                 (let const-type (nth type-parse 0))
                 (let after-type (nth type-parse 1))
                 (let name-object (head after-type))
-                (if (bml-source-name-token? name-object)
+                (if (bml-source-member-name-token? name-object (nth after-type 1))
                     (do
                         (let const-name (bmf-object-value name-object))
                         (let properties-parse
@@ -4692,6 +4692,41 @@
                         (bml-source-parse-step false "" (empty) objects))))
             (bml-source-parse-step false "" (empty) objects)))
 
+    ;; A member's name after its type: a name, or a property word the grammar
+    ;; can tell is a name there, because what follows opens a method's
+    ;; parameters, ends the member, starts its initializer, or opens its
+    ;; attributes. A property word stands for an attribute only inside [ ]
+    ;; (thesis line 640).
+    (defn bml-source-member-name-token? (object next)
+        (if (bml-source-name-token? object)
+            true
+            (if (bml-source-property-token? object)
+                (if (bml-source-token-value? next "(")
+                    true
+                    (if (bml-source-token-value? next ";")
+                        true
+                        (if (bml-source-token-value? next "=")
+                            true
+                            (bml-source-token-value? next "["))))
+                false)))
+
+    ;; the tokens of one member the reader could not take: through its ';',
+    ;; or up to the '}' that closes the block, a nested { } kept whole
+    (defn bml-source-member-cut (objects depth acc)
+        (if (nil? objects)
+            (list (reverse-list acc) objects)
+            (if (bml-source-token-value? (head objects) "{")
+                (bml-source-member-cut (tail objects) (add depth 1) (cons (head objects) acc))
+            (if (bml-source-token-value? (head objects) "}")
+                (if (eq depth 0)
+                    (list (reverse-list acc) objects)
+                    (if (eq depth 1)
+                        (list (reverse-list (cons (head objects) acc)) (tail objects))
+                        (bml-source-member-cut (tail objects) (sub depth 1) (cons (head objects) acc))))
+            (if (if (eq depth 0) (bml-source-token-value? (head objects) ";") false)
+                (list (reverse-list (cons (head objects) acc)) (tail objects))
+                (bml-source-member-cut (tail objects) depth (cons (head objects) acc)))))))
+
     (defn bml-source-parse-typed-member (class-name objects)
         (do
             (let type-parse (bml-source-parse-type objects))
@@ -4706,7 +4741,7 @@
                         member-type
                         (str_concat "operator" (bmf-object-value op-token))
                         (drop 2 after-type)))
-            (if (bml-source-name-token? member-object)
+            (if (bml-source-member-name-token? member-object (nth after-type 1))
                 (do
                     (let member-name (bmf-object-value member-object))
                     (let after-name (tail after-type))
@@ -4855,8 +4890,12 @@
                             (cons (bml-source-parse-step-node step) acc))
                         (bml-source-parse-class-members-until-close-loop
                             class-name
-                            (tail objects)
-                            acc))))))
+                            (nth (bml-source-member-cut objects 0 (empty)) 1)
+                            (cons
+                                (comp-bml-component
+                                    "Unread"
+                                    (list (bml-source-unread-text (nth (bml-source-member-cut objects 0 (empty)) 0) 8)))
+                                acc)))))))
 
     (defn bml-source-parse-class-members-until-close (class-name objects)
         (bml-source-parse-class-members-until-close-loop
@@ -10986,6 +11025,11 @@
     (defn bml-ast-member-get (receiver field)
         (bml-hati-marker "__hati_get" (list receiver (bml-ast-string field))))
 
+    ;; the delegating class's own read of its delegate field: no access check,
+    ;; since the forward is the class's own act (the coordinator's reading)
+    (defn bml-hati-forward-get (receiver field)
+        (bml-hati-marker "__hati_forward_get" (list receiver (bml-ast-string field))))
+
     ;; value.field = e; on a value no qualified name can spell
     (defn bml-ast-member-set (receiver field value)
         (bml-hati-marker "__hati_set" (list receiver (bml-ast-string field) value)))
@@ -11010,7 +11054,8 @@
               "__hati_self_ctor" "__hati_super_ctor" "__hati_abstract"
               "__hati_unparsed" "__hati_field_get" "__hati_field_set"
               "__hati_unread" "__hati_get" "__hati_set" "__hati_denied"
-              "__hati_class_field" "__hati_class_get" "__hati_class_set" "__hati_unbridged"))
+              "__hati_class_field" "__hati_class_get" "__hati_class_set" "__hati_unbridged"
+              "__hati_forward_get"))
 
     (defn bml-hati-class-call? (node)
         (if (node_eq (node_category node) BML-AST-CALL)
@@ -11309,7 +11354,7 @@
                     (bml-hati-env-layout env)
                     (bml-hati-name-type "this" env)
                     (node_value (bml-node-child (head (bml-call-args node)) 0)))
-            (if (str_eq name "__hati_get")
+            (if (if (str_eq name "__hati_get") true (str_eq name "__hati_forward_get"))
                 (bml-hati-class-field-type
                     (bml-hati-env-layout env)
                     (bml-hati-static-type (bml-hati-marker-arg node 0) env)
@@ -12408,12 +12453,16 @@
             (if (bml-hati-get-method? env recv-node field)
                 (bml-hati-lower-invoke recv-node field (empty) pool env)
                 (bml-hati-lower-refusal (bml-hati-field-miss env recv-node field) pool))
+            (bml-hati-lower-field-get recv-node field pool env)))
+
+    ;; the record get itself, once the read is allowed
+    (defn bml-hati-lower-field-get (recv-node field pool env)
             (do
                 (let recv (bml-hati-lower-node-in-env recv-node pool env))
                 (let key (bml-hati-lower-string-in (bml-hati-recv-field-key env recv-node field) (bml-hati-lower-pool recv)))
                 (bml-hati-lower-result
                     (fk-rget (bml-hati-lower-expr recv) (bml-hati-lower-expr key))
-                    (bml-hati-lower-pool key)))))
+                    (bml-hati-lower-pool key))))
 
     (defn bml-hati-lower-field-store (recv-node field value-node pool env)
         (if (not (bml-hati-field-writable? env recv-node field value-node))
@@ -12477,7 +12526,7 @@
                 (bml-hati-lower-member-call (bml-hati-choice-value choice) recv-node args pool env)
             (if (gt (str_len (bml-hati-delegate-via env recv-node member args)) 0)
                 (bml-hati-lower-invoke
-                    (bml-ast-member-get recv-node (bml-hati-delegate-via env recv-node member args))
+                    (bml-hati-forward-get recv-node (bml-hati-delegate-via env recv-node member args))
                     member
                     args
                     pool
@@ -12736,6 +12785,12 @@
                 (bml-hati-marker-str node 1)
                 pool
                 env)
+        (if (str_eq name "__hati_forward_get")
+            (bml-hati-lower-field-get
+                (bml-hati-marker-arg node 0)
+                (bml-hati-marker-str node 1)
+                pool
+                env)
         (if (str_eq name "__hati_set")
             (bml-hati-lower-field-store
                 (bml-hati-marker-arg node 0)
@@ -12772,7 +12827,7 @@
                         (bml-unread-reading (bml-hati-marker-str node 0))
                         "source/unread")
                     "method/body-unparsed")
-                pool)))))))))))))))))))
+                pool))))))))))))))))))))
 
     (defn bml-hati-lower-class-call-in (node pool env)
         (do
@@ -12831,7 +12886,7 @@
                 (bml-hati-unsupported-call-args-in args env)
             (if (str_eq name "__hati_field_set")
                 (bml-hati-unsupported-node-in (nth args 1) env)
-            (if (str_eq name "__hati_get")
+            (if (if (str_eq name "__hati_get") true (str_eq name "__hati_forward_get"))
                 (bml-hati-unsupported-node-in (head args) env)
             (if (str_eq name "__hati_set")
                 (append
@@ -13011,7 +13066,31 @@
                 (if (bml-hati-any-unbridged? (node_children (bml-node-child (bml-hati-class-node (head classes)) 2)))
                     (list "class/member-unbridged")
                     (empty))
-                (bml-hati-unbridged-reasons (tail classes)))))
+                (append
+                    (bml-hati-unread-members (node_children (bml-node-child (bml-hati-class-node (head classes)) 2)))
+                    (bml-hati-unbridged-reasons (tail classes))))))
+
+    (defn bml-hati-iface-unread-reasons (ifaces)
+        (if (nil? ifaces)
+            (empty)
+            (append
+                (bml-hati-unread-members (node_children (bml-node-child (nth (head ifaces) 4) 2)))
+                (bml-hati-iface-unread-reasons (tail ifaces)))))
+
+    ;; a member the class reader could not take, voiced with its words where
+    ;; the layout is built for a run, never where a source is only read
+    (defn bml-hati-unread-members (nodes)
+        (if (nil? nodes)
+            (empty)
+            (if (node_eq (node_category (head nodes)) BML-AST-SECTION)
+                (append
+                    (bml-hati-unread-members (node_children (bml-node-child (head nodes) 1)))
+                    (bml-hati-unread-members (tail nodes)))
+                (if (bml-call-named? (head nodes) "__hati_unread")
+                    (cons
+                        (bml-voice-then (bml-unread-reading (bml-hati-marker-str (head nodes) 0)) "source/unread")
+                        (bml-hati-unread-members (tail nodes)))
+                    (bml-hati-unread-members (tail nodes))))))
 
     (defn bml-hati-any-unbridged? (nodes)
         (if (nil? nodes)
@@ -13155,7 +13234,7 @@
     ;; qualified name can spell, each step on what the one before answers.
     (defn bml-source-parse-member-tail (node objects)
         (if (bml-source-token-value? (head objects) ".")
-            (if (bml-source-name-kind-token? (nth objects 1))
+            (if (bml-source-property-name-token? (nth objects 1))
                 (do
                     (let args (bml-source-parse-arg-list (drop 2 objects)))
                     (if (head args)
@@ -13244,7 +13323,7 @@
         (if (bml-source-token-at? objects index ".")
             (if (nil? (drop (add index 1) objects))
                 0
-                (if (bml-source-name-kind-token? (nth objects (add index 1)))
+                (if (bml-source-property-name-token? (nth objects (add index 1)))
                     (bml-source-dotted-target-end objects (add index 2))
                     0))
             (if (if (gt index 1) (bml-source-token-at? objects index "=") false) index 0)))
@@ -13611,7 +13690,9 @@
                     (cons (bml-hati-bridge-const member props) rest)
                 (if (bml-component-kind? member "InterfaceRef")
                     rest
-                    (cons (bml-hati-unbridged-marker member) rest))))))))))
+                (if (bml-component-kind? member "Unread")
+                    (cons (bml-ast-unread (head (comp-bml-fields member))) rest)
+                    (cons (bml-hati-unbridged-marker member) rest)))))))))))
 
     ;; A class field: one slot for its class, not one per record. It rides the
     ;; member block as __hati_class_field (type name init access).
@@ -14605,7 +14686,7 @@
                         (bml-hati-raw-class-reasons raw-classes class-names iface-names)
                         (append
                             (bml-hati-iface-parent-reasons ifaces iface-names)
-                            (append (bml-hati-iface-reasons plain (bml-hati-layout-classes plain)) (append (bml-hati-final-reasons plain (bml-hati-layout-classes plain)) (bml-hati-unbridged-reasons (bml-hati-layout-classes plain)))))))
+                            (append (bml-hati-iface-reasons plain (bml-hati-layout-classes plain)) (append (bml-hati-final-reasons plain (bml-hati-layout-classes plain)) (append (bml-hati-unbridged-reasons (bml-hati-layout-classes plain)) (bml-hati-iface-unread-reasons ifaces)))))))
                 templates)))
 
     ;; --- lowering the layout: members, method tables, trap ---------------
