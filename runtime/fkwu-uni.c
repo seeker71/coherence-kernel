@@ -629,7 +629,6 @@ static long long fk_is_nothing(long long v) {
 static const long long fk_fnbase = -8000000000000000000LL;
 static const long long fk_fnval_floor = -8500000000000000000LL;
 #define FK_CLOSURE_IDX_BASE 1000000000LL
-#define FK_CLOSURE_CAP_MAX 8
 static long long *fk_clo_target, *fk_clo_capbase, *fk_clo_capcount;
 static long long fk_clo_top, fk_clo_cap;
 static long long *fk_clo_capvals;
@@ -679,8 +678,27 @@ static long long fk_fnval_is_closure(long long v) {
  * 245, see fk_walk) reads it right back out into its own frame slots before any of its own
  * statements run. Nothing else executes between the write and that read (this is a single-threaded
  * tree-walker: one call's args are written, then control passes straight to the callee), so there
- * is no window for a nested or recursive call to clobber it first. */
-static long long fk_call_cap_vals[FK_CLOSURE_CAP_MAX];
+ * is no window for a nested or recursive call to clobber it first. It holds as many values as the
+ * widest capture set a call has carried, and doubles when a wider one arrives. */
+static long long *fk_call_cap_vals;
+static long long fk_call_cap_room;
+static void fk_call_cap_reserve(long long need) {
+    long long nc;
+    long long *grown;
+    if (need <= fk_call_cap_room) {
+        return;
+    }
+    nc = fk_call_cap_room > 0 ? fk_call_cap_room * 2 : 8;
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    grown = realloc(fk_call_cap_vals, (unsigned long)nc * sizeof(long long));
+    if (grown == 0) {
+        fk_die("fk_call_cap_reserve: out of memory growing the capture channel");
+    }
+    fk_call_cap_vals = grown;
+    fk_call_cap_room = nc;
+}
 static void fk_clo_reserve(long long needed) {
     if (needed <= fk_clo_cap) {
         return;
@@ -803,13 +821,16 @@ static long long fk_fbox(double d) {
         }
     }
     fk_fv[fk_fp] = d;
+    /* the slot this box holds, named before the ledger's pulse: a pulse that admits a leaf boxes
+     * its own literals, and the word read off fk_fp after it named the pulse's last box instead */
+    long long mine = fk_fp;
     fk_box_total = fk_box_total + 1;
     if (fk_fn_fbox != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) {
         long long nb = fk_fn_fbox[fk_cur_fn] + 1;
         fk_fn_fbox[fk_cur_fn] = nb;
         if ((nb & (FK_F64_HEAT - 1)) == 0) { fk_f64_pulse(fk_cur_fn); } /* the box ledger is the JIT trigger: every FK_F64_HEAT boxes a cold defn is asked once more */
     }
-    return fk_fbase - (fk_fp << 1) - 1;
+    return fk_fbase - (mine << 1) - 1;
 }
 static void fk_pr(long long v) {
     char b[32];
@@ -8843,13 +8864,16 @@ static void fk_fn_reserve(long long needed) {
  *                              statement (-1 for a top-level defn, which has no enclosing frame to
  *                              capture from at all).
  *   fk_fn_cap_count[idx]    -- how many free variables idx's body actually captured.
- *   fk_fn_cap_encoff[idx*8+j] -- for captured var j, the slot offset in the PARENT's own frame its
+ *   fk_fn_cap_encoff[idx][j] -- for captured var j, the slot offset in the PARENT's own frame its
  *                              live value reads from (valid only when the parent's own frame is the
  *                              current one -- a same-scope call).
- *   fk_fn_cap_slot[idx*8+j] -- for captured var j, the slot in idx's OWN frame its value is
+ *   fk_fn_cap_slot[idx][j]  -- for captured var j, the slot in idx's OWN frame its value is
  *                              delivered to (both by idx's own compiled body's ordinary reads, and
- *                              by the prologue that populates it from fk_call_cap_vals). */
-static long long *fk_fn_parent_idx, *fk_fn_cap_count, *fk_fn_cap_encoff, *fk_fn_cap_slot;
+ *                              by the prologue that populates it from fk_call_cap_vals).
+ *   fk_fn_cap_room[idx]     -- the seats idx's two rows hold; a row doubles when one more name is
+ *                              captured than it holds, so a function captures as many as it names. */
+static long long *fk_fn_parent_idx, *fk_fn_cap_count, *fk_fn_cap_room;
+static long long **fk_fn_cap_encoff, **fk_fn_cap_slot;
 static long long fk_fn_cap_capacity;
 static void fk_fn_cap_reserve(long long needed) {
     if (needed <= fk_fn_cap_capacity) {
@@ -8860,31 +8884,63 @@ static void fk_fn_cap_reserve(long long needed) {
         next = next << 1;
     }
     unsigned long bytes1 = (unsigned long)next * sizeof(long long);
-    unsigned long bytes8 = (unsigned long)next * FK_CLOSURE_CAP_MAX * sizeof(long long);
+    unsigned long bytesp = (unsigned long)next * sizeof(long long *);
     long long *np = realloc(fk_fn_parent_idx, bytes1);
+    if (np != 0) {
+        fk_fn_parent_idx = np;
+    }
     long long *nc = realloc(fk_fn_cap_count, bytes1);
-    long long *ne = realloc(fk_fn_cap_encoff, bytes8);
-    long long *ns = realloc(fk_fn_cap_slot, bytes8);
-    if (np == 0 || nc == 0 || ne == 0 || ns == 0) {
+    if (nc != 0) {
+        fk_fn_cap_count = nc;
+    }
+    long long *nr = realloc(fk_fn_cap_room, bytes1);
+    if (nr != 0) {
+        fk_fn_cap_room = nr;
+    }
+    long long **ne = realloc(fk_fn_cap_encoff, bytesp);
+    if (ne != 0) {
+        fk_fn_cap_encoff = ne;
+    }
+    long long **ns = realloc(fk_fn_cap_slot, bytesp);
+    if (ns != 0) {
+        fk_fn_cap_slot = ns;
+    }
+    if (np == 0 || nc == 0 || nr == 0 || ne == 0 || ns == 0) {
         fk_die("fk_fn_cap_reserve: out of memory growing closure-capture tables");
     }
-    fk_fn_parent_idx = np;
-    fk_fn_cap_count = nc;
-    fk_fn_cap_encoff = ne;
-    fk_fn_cap_slot = ns;
     long long i = fk_fn_cap_capacity;
     while (i < next) {
         fk_fn_parent_idx[i] = -1;
         fk_fn_cap_count[i] = 0;
-        long long j = 0;
-        while (j < FK_CLOSURE_CAP_MAX) {
-            fk_fn_cap_encoff[i * FK_CLOSURE_CAP_MAX + j] = 0;
-            fk_fn_cap_slot[i * FK_CLOSURE_CAP_MAX + j] = 0;
-            j = j + 1;
-        }
+        fk_fn_cap_room[i] = 0;
+        fk_fn_cap_encoff[i] = 0;
+        fk_fn_cap_slot[i] = 0;
         i = i + 1;
     }
     fk_fn_cap_capacity = next;
+}
+/* Seat `need` captures in function idx's two rows (idx already reserved). */
+static void fk_fn_cap_row_reserve(long long idx, long long need) {
+    long long nc;
+    if (need <= fk_fn_cap_room[idx]) {
+        return;
+    }
+    nc = fk_fn_cap_room[idx] > 0 ? fk_fn_cap_room[idx] * 2 : 8;
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    long long *ne = realloc(fk_fn_cap_encoff[idx], (unsigned long)nc * sizeof(long long));
+    if (ne != 0) {
+        fk_fn_cap_encoff[idx] = ne;
+    }
+    long long *ns = realloc(fk_fn_cap_slot[idx], (unsigned long)nc * sizeof(long long));
+    if (ns != 0) {
+        fk_fn_cap_slot[idx] = ns;
+    }
+    if (ne == 0 || ns == 0) {
+        fk_die("fk_fn_cap_row_reserve: out of memory growing a function's capture rows");
+    }
+    fk_fn_cap_room[idx] = nc;
 }
 #define FK_AST_NODE_CAP_INIT 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP_INIT). Birth size only -- the table DOUBLES on demand (fk_ast_reserve), so program size is not a wall; .fkb images reserve to fit before bulk-loading. History: 65536->262144 (2026-07-02, a full mel-spectrogram program); a clamp-and-halt wall stood 2026-07-18..09-02 after a doubling probe caught fk_sparse's stray-rparen zero-advance spin re-minting sentinels to the brim (677,766 diagnostics in 6s -- a treadmill, not capacity; fixed at root in the bare-symbol path). That teaching survives the wall's removal: a parse that grows without advancing fk_spos is a parser wound -- kernel_stat 23/24 (live cap / doublings) make the growth observable, and the fill-position question stays the probe. */
 static long long fk_node_count;
@@ -9473,6 +9529,7 @@ static long long fk_walk_body(long long i, long long fp) {
                 long long cb244 = fk_clo_capbase[inst244];
                 long long cn244 = fk_clo_capcount[inst244];
                 long long ci244 = 0;
+                fk_call_cap_reserve(cn244);
                 while (ci244 < cn244) {
                     fk_call_cap_vals[ci244] = fk_clo_capvals[cb244 + ci244];
                     ci244 = ci244 + 1;
@@ -12656,14 +12713,14 @@ static long long fk_walk(long long i, long long fp) {
          * freeze them into a new closure-instance row (fk_clo_make) so they survive after this
          * frame is gone (form-stdlib/model-service.fk's ms-predict-handler returning ms-handle,
          * to be called much later on some future request, is the standing example). */
-        long long vals243[FK_CLOSURE_CAP_MAX];
-        long long n243 = 0;
-        while (chain243 >= 0 && fk_node[chain243][0] == 242 && n243 < FK_CLOSURE_CAP_MAX) {
-            vals243[n243] = fk_walk(fk_node[chain243][1], fp);
-            n243 = n243 + 1;
+        long long base243 = fk_vsp;
+        while (chain243 >= 0 && fk_node[chain243][0] == 242) {
+            fk_vp(fk_walk(fk_node[chain243][1], fp));
             chain243 = fk_node[chain243][2];
         }
-        return fk_clo_make(fk_node[i][1], vals243, n243);
+        long long made243 = fk_clo_make(fk_node[i][1], fk_vs + base243, fk_vsp - base243);
+        fk_vsp = base243;
+        return made243;
     }
     if (t == 244) {
         long long hv244 = fk_walk(fk_node[i][1], fp);
@@ -12689,6 +12746,7 @@ static long long fk_walk(long long i, long long fp) {
             long long cb244 = fk_clo_capbase[inst244];
             long long cn244 = fk_clo_capcount[inst244];
             long long ci244 = 0;
+            fk_call_cap_reserve(cn244);
             while (ci244 < cn244) {
                 fk_call_cap_vals[ci244] = fk_clo_capvals[cb244 + ci244];
                 ci244 = ci244 + 1;
@@ -13188,15 +13246,15 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 149) {
         /* A capturing function's own prologue read (see fk_wrap_cap_prologue): the value the
          * call mechanism just placed in fk_call_cap_vals[j], for its own tag-109 wrapper to bind
-         * into this frame's slot -- a bare field read, node[1] is a raw C int (which of the
-         * FK_CLOSURE_CAP_MAX scratch slots), never a walkable sub-node or a .fkb-remappable one.
+         * into this frame's slot -- a bare field read, node[1] is a raw C int (which seat of the
+         * capture channel), never a walkable sub-node or a .fkb-remappable one.
          * Tag 149, and only after checking runtime/fkwu-optable.h: 245 names the real
          * "metal_pipeline" op and 148 names "metal_deadline" (arity 1) -- each was once taken
          * for this arm as "free", and because this arm is tested before fk_walk_cold, every
          * metal_pipeline / metal_deadline call was silently answered from a scratch slot instead
          * (metal-deadline-band 33 of 127 with the caller's patience never reaching the carrier).
          * 149 has no optable row and no other tag==/smknode( site names it. */
-        return fk_call_cap_vals[fk_node[i][1]];
+        return fk_node[i][1] < fk_call_cap_room ? fk_call_cap_vals[fk_node[i][1]] : 0;
     }
     return fk_walk_cold(t, i, fp);
 }
@@ -17637,6 +17695,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (fk_fnval_is_closure(fv199)) {
             long long inst199 = fk_fnval_idx(fv199) - FK_CLOSURE_IDX_BASE;
             long long ci199 = 0;
+            fk_call_cap_reserve(fk_clo_capcount[inst199]);
             while (ci199 < fk_clo_capcount[inst199]) {
                 fk_call_cap_vals[ci199] = fk_clo_capvals[fk_clo_capbase[inst199] + ci199];
                 ci199 = ci199 + 1;
@@ -19209,8 +19268,7 @@ static long long fk_cur_defn_idx = -1;
  * creates or invokes it knows what to supply. Answers the slot, or -1 when the enclosing frame does
  * not bind the name. A captured name shadows every global of the same name, a defn or a constant,
  * as the three siblings scope it, so the call head and value position both ask here before either
- * table. Capped at FK_CLOSURE_CAP_MAX per function; a cap that is HIT diagnoses rather than
- * silently drops the (n+1)-th capture. */
+ * table. A function captures every enclosing name it reads: its capture rows grow on demand. */
 static long long fk_enc_capture(long long s, long long n) {
     if (fk_cur_defn_idx < 0 || fk_enc_count <= 0) {
         return -1;
@@ -19220,19 +19278,13 @@ static long long fk_enc_capture(long long s, long long n) {
         return -1;
     }
     long long fcc = (fk_cur_defn_idx < fk_fn_cap_capacity) ? fk_fn_cap_count[fk_cur_defn_idx] : 0;
-    if (fcc >= FK_CLOSURE_CAP_MAX) {
-        fk_diag(FK_DIAG_ERR, s,
-                "[closure-scope] '%.*s' would be this function's %dth captured name (max %d) -- "
-                "not captured",
-                (int)n, fk_srctext + s, (int)fcc + 1, FK_CLOSURE_CAP_MAX);
-        return -1;
-    }
     fk_fn_cap_reserve(fk_cur_defn_idx + 1);
+    fk_fn_cap_row_reserve(fk_cur_defn_idx, fcc + 1);
     long long capslot = fk_maxslot + 1;
     fk_maxslot = capslot;
     fk_bd_push(s, n, capslot);
-    fk_fn_cap_encoff[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + fcc] = encoff;
-    fk_fn_cap_slot[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + fcc] = capslot;
+    fk_fn_cap_encoff[fk_cur_defn_idx][fcc] = encoff;
+    fk_fn_cap_slot[fk_cur_defn_idx][fcc] = capslot;
     fk_fn_cap_count[fk_cur_defn_idx] = fcc + 1;
     return capslot;
 }
@@ -19473,7 +19525,7 @@ static long long fk_wrap_cap_prologue(long long idx, long long body) {
     long long j = n;
     while (j > 0) {
         j = j - 1;
-        long long slot = fk_fn_cap_slot[idx * FK_CLOSURE_CAP_MAX + j];
+        long long slot = fk_fn_cap_slot[idx][j];
         long long capread = fk_smknode(149, j, 0, 0);
         body = fk_smknode(109, fk_smklit(slot), capread, body);
     }
@@ -19896,7 +19948,7 @@ static long long fk_sparse(void) {
             long long ce = fcc;
             while (ce > 0) {
                 ce = ce - 1;
-                long long encoff = fk_fn_cap_encoff[fidx * FK_CLOSURE_CAP_MAX + ce];
+                long long encoff = fk_fn_cap_encoff[fidx][ce];
                 envchain = fk_smknode(242, fk_smknode(110, fk_smklit(encoff), 0, 0), envchain, 0);
             }
             long long closurenode = fk_smknode(243, fidx, envchain, 0);
@@ -19914,8 +19966,19 @@ static long long fk_sparse(void) {
          * resolves at fk_fn_lookup above into the direct tag-241 path); a BOUND name always
          * lands here, even when a global defn shares its spelling (locals shadow globals). */
         long long hoff = hshadow;
-        if (hoff >= 0) {
-            long long head244 = fk_smknode(110, fk_smklit(hoff), 0, 0);
+        /* A unit-level let holding a function value is a computed callee too: the head reads the
+         * let's hold the way a value position reads it, as Go, Rust and TS call a let-bound fn. */
+        long long hcrow = hoff >= 0 ? -1 : fk_const_lookup(s, hn);
+        if (hoff >= 0 || hcrow >= 0) {
+            long long head244;
+            if (hoff >= 0) {
+                head244 = fk_smknode(110, fk_smklit(hoff), 0, 0);
+            } else {
+                if (fk_const_wrapp1[hcrow] == 0) {
+                    fk_const_wrapp1[hcrow] = fk_smknode(FK_TAG_CONST_HOLD, fk_const_node[hcrow], 0, 0) + 1;
+                }
+                head244 = fk_const_wrapp1[hcrow] - 1;
+            }
             long long iargn[256];
             long long iai = 0;
             while (iai < 256) {
@@ -20172,7 +20235,7 @@ static long long fk_sparse(void) {
         long long vce = vcc;
         while (vce > 0) {
             vce = vce - 1;
-            long long vencoff = fk_fn_cap_encoff[vfidx * FK_CLOSURE_CAP_MAX + vce];
+            long long vencoff = fk_fn_cap_encoff[vfidx][vce];
             venvchain = fk_smknode(242, fk_smknode(110, fk_smklit(vencoff), 0, 0), venvchain, 0);
         }
         return fk_smknode(243, vfidx, venvchain, 0);
