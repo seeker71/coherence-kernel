@@ -220,9 +220,27 @@ still names `field/init`.
 Witnessed on fkwu (fixture `bml-class-field-init.bml`, 56): a const of the unit plus one, a method
 call, a new record and a literal, where the tree before read `BML-HATI-UNSUPPORTED field/init`.
 
+## A second class base is a delegation base
+
+The layout named a class that follows the first super `class/delegated-base` and stopped there. The
+thesis's class model already says what it is: `bml-class-inheritance-proof` reads the first
+superclass as the structural base and each later one as delegated, and `bml-class-method-lookup`
+searches a class's own members, then each super in declaration order, depth first, binding a
+delegated method's `this` to the delegate and its `self` to the object's own class. The native
+layout now reads it the same way: a class entry keeps its delegation bases, and a class's chain is
+that depth-first order over its structural base and its delegates, each class once. The delegating
+class answers the delegate's members, the delegate's fields ride in its record, it counts as a
+subtype of the delegate for dispatch and overloads, and a call on `this` inside the delegate's code
+dispatches from the object itself. The delegate's fields sit in the delegating record, not in a
+separate delegate object; a field name two lines both declare reads one slot.
+
+Witnessed on fkwu (fixture `bml-class-delegation.bml`, 47): `E : A, D` answers `D.DOnly` with
+`this.d` 20 and `this.Who()` dispatching to E's own `Who` (3); `Take(D)` takes an E; `e.a` reads the
+structural base's field (1). The tree before read
+`BML-HATI-UNSUPPORTED call/type,class/delegated-base,method/not-found,field/not-found`.
+
 ## Still open, with the reason
 
-- A second class base (delegation) is named `class/delegated-base`.
 - Records made on the host carry no class id; method tables read records made by `new`.
 - The witness probes stay outside the tree and ran on fkwu only.
 
