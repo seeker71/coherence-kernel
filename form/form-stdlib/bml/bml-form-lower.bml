@@ -319,7 +319,37 @@ section [form.bml] {
   // crystallizes. Any other loop keeps the mode.
   def bfk-ctl-loop-pick(cx, node, parts, env, vm, ctx) = if bfk-pure-loop?(cx, node, parts, env) then bfk-pl-loop(cx, node, parts, env, vm, ctx) else bfk-ctl-loop(cx, node, parts, env, vm, ctx);
   def bfk-pure-loop?(cx, node, parts, env) = if not(bfk-quiet-calls?(cx, node, env)) then false else if bml-bnml-fails-inside?(node) then false else if gt(bfk-if-count(node), 4) then false else if bfk-holds-control?(bml-ctl-loop-test(parts)) then false else bfk-pl-all-ok?(append(bfk-stmts-of(bml-ctl-loop-body(parts)), bfk-stmts-of(bml-ctl-loop-update(parts))), list(bml-ctl-loop-label(parts)));
-  def bfk-if-count(node) = add(if node_eq(node_category(node), BML-AST-IF) then if gt(len(node_children(node)), 0) then 1 else 0 else 0, bfk-if-count-list(node_children(node)));
+  // an if that becomes selects copies nothing, so only the others count
+  def bfk-if-count(node) = add(if node_eq(node_category(node), BML-AST-IF) then if gt(len(node_children(node)), 0) then if bfk-plain-branches?(node) then 0 else 1 else 0 else 0, bfk-if-count-list(node_children(node)));
+  def bfk-plain-branches?(node) = bfk-select-if?(node, empty);
+
+  // ── an if that becomes selects ──────────────────────────────────────────
+  // An if in a mode-free loop whose branches only assign plain values (no
+  // call, no index, no field) keeps the pass one chain: each branch is read
+  // as the values it leaves on each name, and every name the branches leave
+  // differently takes one select, (if test then-value else-value). Only the
+  // taken side of each select runs.
+  def bfk-select-if?(node, env) = if bfk-holds-any-call?(bml-node-child(node, 0)) then false else if bfk-assigns-only?(bfk-stmts-of(bml-node-child(node, 1)), env) then bfk-assigns-only?(bfk-stmts-of(bml-ctl-child-or-block(node, 2)), env) else false;
+  def bfk-assigns-only?(nodes, env) = if nil?(nodes) then true else if bfk-assign-only?(head(nodes), env) then bfk-assigns-only?(tail(nodes), env) else false;
+  def bfk-assign-only?(node, env) = if node_eq(node_category(node), BML-AST-BLOCK) then bfk-assigns-only?(node_children(node), env) else if or(bml-bnml-declare-node?(node), bml-bnml-assign-node?(node)) then bfk-plain-store?(node, env) else false;
+  def bfk-plain-store?(node, env) = if bfk-holds-any-call?(bml-bnml-value(node)) then false else if nil?(env) then true else if bml-hati-field-assign?(node, env) then false else not(bml-hati-dotted-assign?(node, env));
+  def bfk-holds-any-call?(node) = if eq(len(node_children(node)), 0) then false else if bml-bnml-user-call?(node) then true else if bml-hati-class-call?(node) then true else if bml-index-node?(node) then true else if bml-list-set-node?(node) then true else if bfk-holds-control?(node) then true else bfk-any-any-call?(node_children(node));
+  def bfk-any-any-call?(nodes) = if nil?(nodes) then false else if bfk-holds-any-call?(head(nodes)) then true else bfk-any-any-call?(tail(nodes));
+  def bfk-sel-vm(cx, nodes, env, vm) = if nil?(nodes) then vm else bfk-sel-vm(cx, tail(nodes), bml-ctl-env-after(head(nodes), env), bfk-sel-one(cx, head(nodes), env, vm));
+  def bfk-sel-one(cx, node, env, vm) = if node_eq(node_category(node), BML-AST-BLOCK) then bfk-sel-vm(cx, node_children(node), env, vm) else bfk-sel-top(env, bfk-vm-put(vm, bfk-sel-key(node, env), bfk-expr(cx, bml-bnml-value(node), env, vm)), bfk-sel-key(node, env));
+  def bfk-sel-top(env, vm, key) = if bml-ctl-standing?(env) then bfk-vm-put(vm, "__top", bfk-vm-or0(vm, key)) else vm;
+  def bfk-sel-key(node, env) = if bml-bnml-declare-node?(node) then bml-bnml-new-key(bml-bnml-target-name(node), env) else bml-bnml-assign-key(node, env);
+  def bfk-pl-select(cx, node, rest, env, vm, li, kont) {
+   let yes = bfk-sel-vm(cx, bfk-stmts-of(bml-node-child(node, 1)), env, vm);
+   let no = bfk-sel-vm(cx, bfk-stmts-of(bml-ctl-child-or-block(node, 2)), env, vm);
+   let swapped = bfk-int-eq?(bml-node-child(node, 0), env, "op-ne");
+   let test = bfk-sel-test(cx, bml-node-child(node, 0), env, vm);
+   let r = bfk-sel-binds(cx, bfk-out-keys(bml-ctl-env-after(node, env), vm), test, if swapped then no else yes, if swapped then yes else no, vm, empty);
+   bfk-do(bfk-r-items(r), bfk-pl-seq(cx, rest, bml-ctl-env-after(node, env), bfk-r-vm(r), li, kont));
+  }
+  def bfk-sel-test(cx, test, env, vm) = if bfk-int-eq?(test, env, "op-ne") then bfk-eq-text(cx, test, env, vm) else if bfk-int-eq?(test, env, "op-eq") then bfk-eq-text(cx, test, env, vm) else bfk-cond(cx, test, env, vm);
+  def bfk-sel-binds(cx, keys, test, yes, no, vm, items) = if nil?(keys) then bfk-r(reverse-list(items), vm, "0") else if str_eq(bfk-vm-or0(yes, head(keys)), bfk-vm-or0(no, head(keys))) then bfk-sel-binds(cx, tail(keys), test, yes, no, bfk-vm-put(vm, head(keys), bfk-vm-or0(yes, head(keys))), items) else bfk-sel-bind(cx, keys, test, yes, no, vm, items, bfk-fresh(cx, "v"));
+  def bfk-sel-bind(cx, keys, test, yes, no, vm, items, v) = bfk-sel-binds(cx, tail(keys), test, yes, no, bfk-vm-put(vm, head(keys), v), cons(bfk-let(v, bfk-if(test, bfk-vm-or0(yes, head(keys)), bfk-vm-or0(no, head(keys)))), items));
   def bfk-if-count-list(nodes) = if nil?(nodes) then 0 else add(bfk-if-count(head(nodes)), bfk-if-count-list(tail(nodes)));
   def bfk-pl-all-ok?(nodes, label) = if nil?(nodes) then true else if bfk-pl-ok?(head(nodes), label) then bfk-pl-all-ok?(tail(nodes), label) else false;
   def bfk-pl-ok?(node, label) = if nil?(node_children(node)) then true else bfk-pl-ok-shape?(node, node_category(node), label);
@@ -416,11 +446,14 @@ section [form.bml] {
   // an if over BML's truth; a compare of two ints stays a compare
   def bfk-pl-if(cx, test, env, vm, yes, no) = if bfk-int-eq?(test, env, "op-ne") then bfk-if(bfk-eq-text(cx, test, env, vm), no, yes) else if bfk-int-eq?(test, env, "op-eq") then bfk-if(bfk-eq-text(cx, test, env, vm), yes, no) else bfk-if(bfk-cond(cx, test, env, vm), yes, no);
   def bfk-int-eq?(node, env, rule) = if not(bml-ctl-op-node?(node)) then false else if str_eq(bml-ctl-op-rule-of(node), rule) then bfk-ints?(bml-call-args(node), env) else false;
-  def bfk-ints?(nodes, env) = if nil?(nodes) then true else if str_eq(bml-hati-static-type(head(nodes), env), "int") then bfk-ints?(tail(nodes), env) else false;
+  def bfk-ints?(nodes, env) = if nil?(nodes) then true else if bfk-int-typed?(head(nodes), env) then bfk-ints?(tail(nodes), env) else false;
+  // an int by what the compiler sees: an int literal, a name typed int, or +, -, * and unary - over ints
+  def bfk-int-typed?(node, env) = if node_eq(node_category(node), BML-AST-INT) then gt(len(node_children(node)), 0) else if node_eq(node_category(node), BML-AST-ADD) then bfk-ints?(node_children(node), env) else if bml-ctl-op-node?(node) then bfk-int-op?(node, env) else str_eq(bml-hati-static-type(node, env), "int");
+  def bfk-int-op?(node, env) = if fsc-string-list-contains?(list("op-sub", "op-mul", "op-neg"), bml-ctl-op-rule-of(node)) then bfk-ints?(bml-call-args(node), env) else false;
   def bfk-eq-text(cx, node, env, vm) = bfk-form(cons("eq", bfk-exprs(cx, bml-call-args(node), env, vm)));
   def bfk-pl-seq(cx, nodes, env, vm, li, kont) = if nil?(nodes) then bfk-pl-kont(cx, kont, vm, li) else bfk-pl-node(cx, head(nodes), tail(nodes), env, vm, li, kont);
   def bfk-pl-node(cx, node, rest, env, vm, li, kont) = if nil?(node_children(node)) then bfk-pl-plain(cx, node, rest, env, vm, li, kont) else bfk-pl-shape(cx, node, node_category(node), rest, env, vm, li, kont);
-  def bfk-pl-shape(cx, node, cat, rest, env, vm, li, kont) = if node_eq(cat, BML-AST-BLOCK) then bfk-pl-seq(cx, node_children(node), env, vm, li, list("rest", rest, bml-ctl-env-after(node, env), kont)) else if node_eq(cat, BML-AST-IF) then bfk-pl-if(cx, bml-node-child(node, 0), env, vm, bfk-pl-seq(cx, bfk-stmts-of(bml-node-child(node, 1)), env, vm, li, list("rest", rest, bml-ctl-env-after(node, env), kont)), bfk-pl-seq(cx, bfk-stmts-of(bml-ctl-child-or-block(node, 2)), env, vm, li, list("rest", rest, bml-ctl-env-after(node, env), kont))) else if node_eq(cat, BML-AST-BREAK) then bfk-pl-jump(cx, li, vm, bml-local-name(node), "break") else if node_eq(cat, BML-AST-CONTINUE) then bfk-pl-jump(cx, li, vm, bml-local-name(node), "continue") else if node_eq(cat, BML-AST-RETURN) then bfk-pl-cross(cx, node, bml-ctl-return-mode(0), env, vm, li) else if node_eq(cat, BML-AST-THROW) then bfk-pl-cross(cx, node, bml-ctl-throw-mode(0), env, vm, li) else if bml-ctl-while-node?(node) then bfk-pl-inner(cx, node, bml-ctl-while-parts(node), rest, env, vm, li, kont) else if node_eq(cat, BML-AST-FOR) then bfk-pl-inner(cx, node, bml-ctl-for-parts(node), rest, env, vm, li, kont) else bfk-pl-plain(cx, node, rest, env, vm, li, kont);
+  def bfk-pl-shape(cx, node, cat, rest, env, vm, li, kont) = if node_eq(cat, BML-AST-BLOCK) then bfk-pl-seq(cx, node_children(node), env, vm, li, list("rest", rest, bml-ctl-env-after(node, env), kont)) else if node_eq(cat, BML-AST-IF) then if bfk-select-if?(node, env) then bfk-pl-select(cx, node, rest, env, vm, li, kont) else bfk-pl-if(cx, bml-node-child(node, 0), env, vm, bfk-pl-seq(cx, bfk-stmts-of(bml-node-child(node, 1)), env, vm, li, list("rest", rest, bml-ctl-env-after(node, env), kont)), bfk-pl-seq(cx, bfk-stmts-of(bml-ctl-child-or-block(node, 2)), env, vm, li, list("rest", rest, bml-ctl-env-after(node, env), kont))) else if node_eq(cat, BML-AST-BREAK) then bfk-pl-jump(cx, li, vm, bml-local-name(node), "break") else if node_eq(cat, BML-AST-CONTINUE) then bfk-pl-jump(cx, li, vm, bml-local-name(node), "continue") else if node_eq(cat, BML-AST-RETURN) then bfk-pl-cross(cx, node, bml-ctl-return-mode(0), env, vm, li) else if node_eq(cat, BML-AST-THROW) then bfk-pl-cross(cx, node, bml-ctl-throw-mode(0), env, vm, li) else if bml-ctl-while-node?(node) then bfk-pl-inner(cx, node, bml-ctl-while-parts(node), rest, env, vm, li, kont) else if node_eq(cat, BML-AST-FOR) then bfk-pl-inner(cx, node, bml-ctl-for-parts(node), rest, env, vm, li, kont) else bfk-pl-plain(cx, node, rest, env, vm, li, kont);
   // in a standing body a plain statement writes the value it stands on, which the loop carries out
   def bfk-pl-plain(cx, node, rest, env, vm, li, kont) = bfk-pl-then(cx, bfk-stmt(cx, if bml-ctl-standing?(env) then bml-bnml-top-rewrite(node) else node, env, vm), rest, bml-ctl-env-after(node, env), li, kont);
   def bfk-with-top(env, vm, keys) = if bml-ctl-standing?(env) then if bfk-vm-has?(vm, "__top") then bfk-with-key(keys, "__top") else keys else keys;
