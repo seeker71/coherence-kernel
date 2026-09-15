@@ -35,8 +35,8 @@ for j in "$OUT"/*__t1.json; do
   # named as such, never scored as a wrong answer.
   for t in t1 t2 t2b t3 t4; do
     f="$OUT/${SLUG}__${t}.json"; [ -e "$f" ] || continue
-    if grep -q '"empty": true' "$f"; then verdict "$t" "NORUN" "empty response (edgedrop)"; fi
-    if grep -q '"degenerate": true' "$f"; then verdict "$t" "NORUN" "degenerate repetition (zerobirth)"; fi
+    if grep -qE '"empty": ?true' "$f"; then verdict "$t" "NORUN" "empty response (edgedrop)"; fi
+    if grep -qE '"degenerate": ?true' "$f"; then verdict "$t" "NORUN" "degenerate repetition (zerobirth)"; fi
   done
 
   # t1 — one file name, exact.
