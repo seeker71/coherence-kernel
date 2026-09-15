@@ -102,10 +102,18 @@
     (defn bma-try (branches) (bma-op "try" branches))
     (defn bma-while-success (body) (bma-op "while-success" body))
 
+    ;; An inlined callee's slots sit deeper than every slot of the call it
+    ;; was compiled from: its env is padded by the caller's depth, so a
+    ;; callee's keys never meet its caller's.
+    (defn bml-bma-depth-pad (n env)
+        (if (le n 0)
+            env
+            (bml-bma-depth-pad (sub n 1) (cons (bml-local-binding "__bnml_pad" (empty) (empty)) env))))
+
     (defn bml-bnml-with-base (callee-env caller-env)
         (cons
             (bml-bnml-binding "__bnml_base" (empty) callee-env "bnml-base" (bml-bnml-depth caller-env))
-            callee-env))
+            (bml-bma-depth-pad (bml-bnml-depth caller-env) callee-env)))
 
     (defn bml-compile-child-in (node env)
         (if (node_eq (node_category node) BML-AST-METHOD)
@@ -655,12 +663,80 @@
                     (tail promos)
                     (bml-local-env-after-node (head promos) env)))))
 
-    (defn bml-scope-unit-env (link unit lane)
-        (bml-scope-unit-env-with
-            link
-            unit
-            (bml-scope-lane-symbols link lane)
-            lane))
+    ;; --- BMA's scope: the shared bind chain over method nodes ----------
+    ;; BMA inlines calls, so a method name binds its node where the native
+    ;; builder binds a ref, and each env carries at its base the link and
+    ;; the symbols it was built from: a callee's body compiles in its own
+    ;; unit's env, rebuilt from them at the call.
+
+    (defn bml-scope-link-key (_x) "__bml_link")
+
+    (defn bml-bma-node-symbol (symbol)
+        (if (bml-scope-const-symbol? symbol)
+            symbol
+            (bml-scope-symbol
+                (bml-scope-symbol-package symbol)
+                (bml-scope-symbol-name symbol)
+                (bml-scope-symbol-node symbol)
+                (bml-scope-symbol-node symbol)
+                (bml-scope-symbol-pos symbol))))
+
+    (defn bml-bma-node-symbols (symbols)
+        (if (nil? symbols)
+            (empty)
+            (cons
+                (bml-bma-node-symbol (head symbols))
+                (bml-bma-node-symbols (tail symbols)))))
+
+    (defn bml-bma-base-env (link unit symbols)
+        (append
+            (bml-scope-base-env unit)
+            (list
+                (bml-local-binding
+                    (bml-scope-link-key 0)
+                    (list link symbols)
+                    (empty)))))
+
+    (defn bml-bma-unit-env-with (link unit symbols)
+        (do
+            (let nodes (bml-bma-node-symbols symbols))
+            (bml-scope-own-env
+                nodes
+                (bml-scope-unit-pos unit)
+                (bml-scope-import-env
+                    (bml-scope-link-all link)
+                    (bml-scope-unit-imports unit)
+                    nodes
+                    (bml-bma-base-env link unit symbols)))))
+
+    ;; consts gather importee first, each bound to the env its value reads
+    (defn bml-bma-consts-loop (link units known)
+        (if (nil? units)
+            known
+            (bml-bma-consts-loop
+                link
+                (tail units)
+                (append
+                    known
+                    (bml-scope-consts-fold
+                        (bml-scope-unit-mains (head units))
+                        (bml-bma-unit-env-with
+                            link
+                            (head units)
+                            (append (bml-scope-link-symbols link) known))
+                        (head units)
+                        (empty))))))
+
+    (defn bml-bma-lane-symbols (link)
+        (append
+            (bml-scope-link-symbols link)
+            (bml-bma-consts-loop
+                link
+                (reverse-list (bml-scope-link-linked link))
+                (empty))))
+
+    (defn bml-bma-unit-env (link unit)
+        (bml-bma-unit-env-with link unit (bml-bma-lane-symbols link)))
 
     (defn bml-compile-unit-program (node units)
         (bml-compile-linked-program node (bml-scope-care-imports node units)))
@@ -675,7 +751,7 @@
                     (bml-bma-link-uses-locals? node link)
                     (bml-compile-node-in
                         node
-                        (bml-scope-unit-env link (bml-scope-link-main link) "bma"))))))
+                        (bml-bma-unit-env link (bml-scope-link-main link)))))))
 
     ;; A program whose units declare or assign opens the floor frame first.
     (defn bml-bma-with-frame (uses ops)
@@ -788,7 +864,7 @@
                         (bml-scope-home-unit (bml-scope-link-linked link) method-node))
                     (if (nil? home)
                         env
-                        (bml-scope-unit-env-with link home symbols "bma"))))))
+                        (bml-bma-unit-env-with link home symbols))))))
 
     (defn bma-trace-count-mode (trace mode)
         (if (nil? trace) 0
