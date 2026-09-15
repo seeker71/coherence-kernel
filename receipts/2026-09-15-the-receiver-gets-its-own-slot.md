@@ -196,10 +196,21 @@ answers 42 when the main unit imports only `Lib.*`; before, it read `call/unboun
 calling `Helper` itself still reads `call/unbound`, and a class reading its own unit's const reads
 42.
 
+## A call's result carries the type it returns
+
+A call's result had no static type, so an overload chosen over it tied (`call/ambiguous`). A
+method's declared return type now rides its node as one trailing string child: the reader sets it
+for a free method, the bridge for a class member, and template specialization maps it like any
+other type position. A call's static type is the return type of what it resolves to (a free
+method through its ref, a member through its receiver, `super` through the base); a method's own
+type parameter stays unknown.
+
+Witnessed on fkwu (fixture `bml-call-result-type.bml`, 45): `Pick(Name()) + Pick(Num())` reads 3
+where it read `call/ambiguous`; over a class member's results 21; over `Box<String>` and
+`Box<int>`'s `Get()` 21; a generic method declared to return int picks `Pick(int)`.
+
 ## Still open, with the reason
 
-- A call's result has no static type (method nodes carry no return type), so overloads over call
-  results score as unknown.
 - A field initializer is read only as a literal; a second class base (delegation) is named
   `class/delegated-base`.
 - Records made on the host carry no class id; method tables read records made by `new`.
