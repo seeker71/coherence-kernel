@@ -247,6 +247,11 @@ fk_band_proof_level() {
 fk_band_staged_carrier() {
     sed -n 's/^; STAGED CARRIER: \([^ ]*\).*/\1/p' "$1" 2>/dev/null | head -1
 }
+# the door that builds a staged band's carrier (`; STAGED CARRIER DOOR: <command>`), named
+# in the pending line so the next reader knows how to make the carrier present
+fk_band_staged_door() {
+    sed -n 's/^; STAGED CARRIER DOOR: \(.*\)$/\1/p' "$1" 2>/dev/null | head -1
+}
 fk_band_declared_verdict() {
     awk '/^;/ { if (match($0, /Verdict [0-9]+/)) { print substr($0, RSTART + 8, RLENGTH - 8); exit } } !/^;/ && NF { exit }' "$1" 2>/dev/null
 }
@@ -939,7 +944,13 @@ run_workload() {
             fi
             return
         elif [[ "$level" == "FKWU-STAGED" ]]; then
-            printf "  ⧗  %-30s  staged fkwu lane — carrier absent in this checkout; pending, not witnessed\n" "$label"
+            local door
+            door="$(fk_band_staged_door "$band")"
+            if [[ -n "$door" ]]; then
+                printf "  ⧗  %-30s  staged fkwu lane — carrier absent in this checkout (%s builds it); pending, not witnessed\n" "$label" "$door"
+            else
+                printf "  ⧗  %-30s  staged fkwu lane — carrier absent in this checkout; pending, not witnessed\n" "$label"
+            fi
             if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "staged" > "$SUITE_STATUS_FILE"; fi
             staged=$((staged + 1))
             return
