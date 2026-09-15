@@ -236,11 +236,16 @@ fk_form_balance() {
 #   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu (the source door),
 #     compared against the first "Verdict <n>" its head declares. Loud
 #     pass/fail — a wrong home-arm answer is a real failure, never skipped.
-#   ; PROOF LEVEL: FKWU-STAGED ...       → needs a host carrier staging bytes
-#     into input_byte; the carrier did not travel in the CN→CK consolidation,
-#     so the band is reported ⧗ pending — visible every run, never green.
+#   ; PROOF LEVEL: FKWU-STAGED ...       → needs a host carrier. A band that
+#     names it (`; STAGED CARRIER: <path from the repo root>`) runs on the
+#     fkwu-only lane, verdict and diagnostics held as above, whenever that
+#     carrier stands; otherwise it is reported ⧗ pending — visible every run,
+#     never green.
 fk_band_proof_level() {
     sed -n 's/^; PROOF LEVEL: \([A-Z-]*\).*/\1/p' "$1" 2>/dev/null | head -1
+}
+fk_band_staged_carrier() {
+    sed -n 's/^; STAGED CARRIER: \([^ ]*\).*/\1/p' "$1" 2>/dev/null | head -1
 }
 fk_band_declared_verdict() {
     awk '/^;/ { if (match($0, /Verdict [0-9]+/)) { print substr($0, RSTART + 8, RLENGTH - 8); exit } } !/^;/ && NF { exit }' "$1" 2>/dev/null
@@ -885,6 +890,13 @@ run_workload() {
     if [[ $binary_mode -eq 0 ]]; then
         local band="${*: -1}" level declared answered
         level="$(fk_band_proof_level "$band")"
+        if [[ "$level" == "FKWU-STAGED" ]]; then
+            local carrier
+            carrier="$(fk_band_staged_carrier "$band")"
+            if [[ -n "$carrier" && -x "../$carrier" ]]; then
+                level="FOURTH-ARM"
+            fi
+        fi
         if [[ "$level" == "FOURTH-ARM" ]]; then
             declared="$(fk_band_declared_verdict "$band")"
             if [[ -z "$FKWU_SRC" ]]; then
