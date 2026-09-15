@@ -1,0 +1,60 @@
+; preludes: form-stdlib/core.fk form-stdlib/bml/vector-ops.bml form-stdlib/bml/gpu-lower.bml
+; gpu-lower-band — a BML body's own nodes become a Metal kernel, admitted by content, run with one
+; enqueue per call and no wait until the answer is read.
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+;
+; vo-dot-onto lives in form-stdlib/bml/vector-ops.bml as an ordinary recipe. The lane reads its
+; nodes through kernel_ast, recognises the reduce-onto shape, inlines vo-f, and emits one kernel.
+; The GPU folds in float32 and in another order than the walker, so the answers are held to a
+; relative tolerance, never to equality.
+;
+; Verdict 127 when every claim lands:
+;   1   the lowering answers a kernel over two buffers whose element is (p0[i] + 0.0f) * (p1[i] + 0.0f)
+;   2   the program admits with a handle, and a second lowering of the same body has the same identity
+;   4   1k floats: the GPU's dot equals the CPU lane's within one part in ten thousand
+;   8   100k floats: the same
+;   16  one gl-run is one dispatch, still pending before the read
+;   32  magnitude declines with a reason: its body is not the reduce shape
+;   64  the source turns fma contraction off, so mul and add stay the walker's two operations
+;
+; Verdict 127
+(do
+    (defn glb-fill (n acc) (if (eq n 0) acc (glb-fill (sub n 1) (cons (add 0.5 (div (add (mod n 97) 0.0) 97.0)) acc))))
+    (defn glb-near? (a b) (do (let d (if (lt (sub a b) 0.0) (sub b a) (sub a b))) (let m (if (lt a 0.0) (sub 0.0 a) a)) (le d (mul m 0.0001))))
+    (let low (gl-lower "vo-dot-onto"))
+    (let prog (gl-program "vo-dot-onto"))
+    (let again (gl-program "vo-dot-onto"))
+    (let a1 (glb-fill 1000 (empty)))
+    (let b1 (glb-fill 1000 (empty)))
+    (let a2 (glb-fill 100000 (empty)))
+    (let b2 (glb-fill 100000 (empty)))
+    (let ha1 (gl-f32-buf a1))
+    (let hb1 (gl-f32-buf b1))
+    (let ha2 (gl-f32-buf a2))
+    (let hb2 (gl-f32-buf b2))
+    (let d0 (gl-count "total_dispatch"))
+    (let out1 (gl-run prog (list ha1 hb1) 1000 0.0))
+    (let d1 (gl-count "total_dispatch"))
+    (let pend (gl-count "pending"))
+    (let g1 (gl-read out1))
+    (let c1 (dot_product a1 b1))
+    (let out2 (gl-run prog (list ha2 hb2) 100000 0.0))
+    (let g2 (gl-read out2))
+    (let c2 (dot_product a2 b2))
+    (let mag (gl-program "magnitude"))
+    (let src (if (gl-ok? low) (nth low 1) ""))
+    (print (list "gpu" g1 "cpu" c1 "gpu" g2 "cpu" c2 "dispatch" (sub d1 d0) "pending" pend))
+    (print (if (gl-ok? low) "lowered" (nth low 1)))
+    (print (if (gl-ok? mag) "magnitude lowered" (nth mag 1)))
+    (let v0 (if (and (gl-ok? low) (and (ge (str_find src "kernel void form_reduce(" 0) 0) (ge (str_find src "((p0[i] + 0.0f) * (p1[i] + 0.0f))" 0) 0))) 1 0))
+    (let v1 (if (and (gl-ok? prog) (and (gt (mj-handle (nth prog 1)) 0) (str_eq (gl-identity prog) (gl-identity again)))) 2 0))
+    (let v2 (if (glb-near? g1 c1) 4 0))
+    (let v3 (if (glb-near? g2 c2) 8 0))
+    (let v4 (if (and (eq (sub d1 d0) 1) (ge pend 1)) 16 0))
+    (let v5 (if (and (eq (gl-ok? mag) 0) (gt (str_len (nth mag 1)) 0)) 32 0))
+    (let v6 (if (ge (str_find src "contract(off)" 0) 0) 64 0))
+    (metal_buf_free ha1)
+    (metal_buf_free hb1)
+    (metal_buf_free ha2)
+    (metal_buf_free hb2)
+    (add v0 (add v1 (add v2 (add v3 (add v4 (add v5 v6)))))))
