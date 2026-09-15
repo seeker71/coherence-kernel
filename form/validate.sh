@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# validate.sh — sibling kernels run every Form source file;
-# outputs must be identical. The kernels are siblings; they keep each
-# other honest. Any divergence is a bug in one of them or a spec corner
-# nobody documented — worth knowing.
+# validate.sh — every Form band answers on fkwu, the runtime. When a kernel
+# source moved since origin/main (gate/kernel-change.bml), the sibling kernels
+# (Go, Rust, TypeScript) run it too and every output must be identical: they
+# validate the kernel change, they are not a runtime, and their speed is no
+# goal. Otherwise each band answers its pin on fkwu alone and no sibling is
+# built or started; FORM_VALIDATE_SIBLINGS=1 asks them anyway. Any divergence
+# is a bug in one of them or a spec corner nobody documented — worth knowing.
 #
 # Run from form/.
 #   ./validate.sh            # validate all samples
@@ -160,10 +163,22 @@ build_ts() {
     fi
 }
 
-build_go &
-build_rs &
-build_ts &
-wait
+# The sibling kernels validate a kernel change. gate/kernel-change.bml answers
+# whether a kernel source moved since origin/main; when none did, no sibling is
+# built or started and every band runs on fkwu against its pin (run_fkwu_lane).
+# FORM_VALIDATE_SIBLINGS=1 asks the siblings anyway; --binary always does.
+SIBLINGS=1
+if [[ "${FORM_VALIDATE_SIBLINGS:-0}" != 1 && "${1:-}" != "--binary" ]]; then
+    kernel_change="$(cd .. && ./fkwu gate/kernel-change-run.fk 2>/dev/null)" || kernel_change=""
+    if [[ -n "$kernel_change" ]]; then printf '%s\n' "$kernel_change" | sed -e '$d' -e '/^$/d' -e 's/^/  /'; fi
+    if [[ "${kernel_change##*$'\n'}" == "0" ]]; then SIBLINGS=0; fi
+fi
+if [[ $SIBLINGS -eq 1 ]]; then
+    build_go &
+    build_rs &
+    build_ts &
+    wait
+fi
 
 # The runtime walker (repo-root fkwu, runtime/fkwu-uni.c) carries the
 # resolver-driven the source door door that fkwu-only proof-level bands run on.
@@ -811,6 +826,59 @@ run_siblings_binary() {
     fi
 }
 
+# --- run_fkwu_lane: no kernel source moved, so no sibling is asked ---------
+# The workload's closure runs on fkwu from source, and the band's last line
+# answers its pins: the Verdict its head declares and its fourth-arm-bands.txt
+# row, whichever it carries. A band with neither runs clean or fails; its
+# answer is shown, not judged. A nonzero exit or a diagnostic on stderr fails
+# the band as it fails the fourth leg, and a failure keeps its streams.
+run_fkwu_lane() {
+    local label="$1"; shift
+    local band="${*: -1}" src legs fk rc diags answered head_pin reg_pin stem why=""
+    src="$(fourth_prepare_source_workload "$FOURTH_SOURCE_RUN_DIR" "$@")" || src=""
+    if [[ -z "$src" ]]; then
+        printf "  ✗  %-30s  fkwu lane: the workload's source closure did not prepare\n" "$label"
+        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+        fail=$((fail + 1))
+        return
+    fi
+    mkdir -p ../.hearth
+    legs="$(mktemp -d "$PWD/../.hearth/validation-legs.XXXXXX")"
+    fk="$FOURTH_SOURCE_FKWU"
+    case "$fk" in /*|[A-Za-z]:*) ;; *) fk="$PWD/$fk" ;; esac
+    ( set +e; cd .. && TMPDIR="$legs" "$fk" "$src" > "$legs/fk" 2> "$legs/fk.err"; printf '%s\n' "$?" > "$legs/fk.rc" )
+    rc="$(cat "$legs/fk.rc" 2>/dev/null || echo 1)"
+    diags="$(fk_diag_count "$legs/fk.err")"
+    answered="$(organ_steady "$legs/fk")"
+    answered="${answered##*$'\n'}"
+    head_pin="$(fk_band_declared_verdict "$band")"
+    stem="$(fourth_band_stem "$band" || true)"
+    reg_pin=""
+    if [[ -n "$stem" ]]; then reg_pin="$(awk -v b="$stem" '!/^#/ && $1==b{print $3; exit}' "$FOURTH_MANIFEST")"; fi
+    [[ "$reg_pin" =~ ^[0-9]+$ ]] || reg_pin=""
+    if [[ "$rc" != 0 ]]; then why="exit $rc"
+    elif [[ "${diags:-0}" -gt 0 ]]; then why="$diags diagnostic line(s) on stderr"
+    elif [[ -n "$head_pin" && "$answered" != "$head_pin" ]]; then why="answered ${answered:-<nothing>}, its head pins $head_pin"
+    elif [[ -n "$reg_pin" && "$answered" != "$reg_pin" ]]; then why="answered ${answered:-<nothing>}, the manifest registers $reg_pin"
+    fi
+    if [[ -n "$why" ]]; then
+        printf "  ✗  %-30s  fkwu lane: %s\n      evidence=%s\n" "$label" "$why" "$legs"
+        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+        fail=$((fail + 1))
+        return
+    fi
+    rm -rf "$legs"
+    if [[ -n "$head_pin" || -n "$reg_pin" ]]; then
+        printf "  ✓  %-30s  → %s (fkwu, its pin)\n" "$label" "$answered"
+        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok fkwu-lane" > "$SUITE_STATUS_FILE"; fi
+        ok=$((ok + 1)); fkwu_lane=$((fkwu_lane + 1))
+    else
+        printf "  ·  %-30s  → %s (fkwu, ran clean; no pin to answer)\n" "$label" "${answered:-<nothing>}"
+        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok unpinned" > "$SUITE_STATUS_FILE"; fi
+        ok=$((ok + 1)); unpinned=$((unpinned + 1))
+    fi
+}
+
 run_workload() {
     local label="$1"; shift
     local bin_artifact
@@ -864,6 +932,10 @@ run_workload() {
             staged=$((staged + 1))
             return
         fi
+        if [[ $SIBLINGS -eq 0 ]]; then
+            run_fkwu_lane "$label" "$@"
+            return
+        fi
     fi
     if [[ $binary_mode -eq 1 ]]; then
         bin_artifact="$(mktemp "${TMPDIR:-/tmp}/form-kernel.XXXXXX")"
@@ -880,6 +952,8 @@ ok=0
 fail=0
 fourth_ok=0
 fkwu_only=0
+fkwu_lane=0
+unpinned=0
 staged=0
 
 # --- explicit mode: validate one file list as one workload --------------
@@ -929,7 +1003,7 @@ else
     # Pre-compile the one prelude every band shares so the pool's first
     # wave doesn't race N copies of the same compile (atomic mv converges
     # them, but each lost race re-pays the full source-compiler walk).
-    prepare_sources form-stdlib/core.fk
+    if [[ $SIBLINGS -eq 1 ]]; then prepare_sources form-stdlib/core.fk; fi
 
     # The suite fans out ACROSS bands: each workload is one job in a pool
     # (VALIDATE_JOBS wide, default 8), writing an ordered result block plus
@@ -1004,6 +1078,8 @@ else
         case "$(cat "$suite_dir/$i.status" 2>/dev/null || echo fail)" in
             "ok fourth")    ok=$((ok + 1)); fourth_ok=$((fourth_ok + 1)) ;;
             "ok fkwu-only") ok=$((ok + 1)); fkwu_only=$((fkwu_only + 1)) ;;
+            "ok fkwu-lane") ok=$((ok + 1)); fkwu_lane=$((fkwu_lane + 1)) ;;
+            "ok unpinned")  ok=$((ok + 1)); unpinned=$((unpinned + 1)) ;;
             ok)             ok=$((ok + 1)) ;;
             staged)         staged=$((staged + 1)) ;;
             *)              fail=$((fail + 1)) ;;
@@ -1014,7 +1090,10 @@ else
 fi
 
 echo ""
-if [[ $fourth_ok -gt 0 ]]; then
+if [[ $SIBLINGS -eq 0 ]]; then
+    echo "  sibling kernels: not asked — no kernel source moved (FORM_VALIDATE_SIBLINGS=1 asks them)"
+    echo "  fkwu lane: $fkwu_lane band(s) answered their pins; $unpinned ran clean with no pin to answer"
+elif [[ $fourth_ok -gt 0 ]]; then
     echo "  fourth arm: $fourth_ok band(s) four-way (runtime fkwu source/JIT; no flatten gate)"
 elif [[ $((ok - fkwu_only)) -gt 0 ]]; then
     # The SECOND way a zero happens, and the one the fourth_available refusal
@@ -1043,6 +1122,8 @@ fi
 if [[ $fail -eq 0 ]]; then
     if [[ $binary_mode -eq 1 ]]; then
         echo "  $ok ok, 0 divergent — kernels agree on every binary artifact."
+    elif [[ $SIBLINGS -eq 0 ]]; then
+        echo "  $ok ok, 0 failed — fkwu answered every pin it was asked."
     else
         echo "  $ok ok, 0 divergent — kernels agree on every sample."
     fi
