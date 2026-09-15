@@ -18,11 +18,16 @@
 ;   64  the source turns fma contraction off, so mul and add stay the walker's two operations
 ;   128 the write door packs a list once in C: floats as binary32, ints as 32-bit words, four bytes
 ;       each, and a list holding a string writes nothing
+;   256 vo-scale-onto lowers as a map: out[i] = ((p0[i] + 0.0f) * c1), the scalar k riding as a constant
+;   512 the mapped 1k buffer's first eight floats equal the CPU vector_scale's within the tolerance
+;   1024 a 100k map stays resident and a reduce over it (dot with ones) equals the CPU sum within the tolerance
 ;
-; Verdict 255
+; Verdict 2047
 (do
     (defn glb-fill (n acc) (if (eq n 0) acc (glb-fill (sub n 1) (cons (add 0.5 (div (add (mod n 97) 0.0) 97.0)) acc))))
     (defn glb-near? (a b) (do (let d (if (lt (sub a b) 0.0) (sub b a) (sub a b))) (let m (if (lt a 0.0) (sub 0.0 a) a)) (le d (mul m 0.0001))))
+    (defn glb-fill-ones (n acc) (if (eq n 0) acc (glb-fill-ones (sub n 1) (cons 1.0 acc))))
+    (defn glb-all-near? (xs ys) (if (nil? xs) 1 (if (glb-near? (head xs) (head ys)) (glb-all-near? (tail xs) (tail ys)) 0)))
     (let low (gl-lower "vo-dot-onto"))
     (let prog (gl-program "vo-dot-onto"))
     (let again (gl-program "vo-dot-onto"))
@@ -35,14 +40,24 @@
     (let ha2 (gl-f32-buf a2))
     (let hb2 (gl-f32-buf b2))
     (let d0 (gl-count "total_dispatch"))
-    (let out1 (gl-run prog (list ha1 hb1) 1000 0.0))
+    (let out1 (gl-run prog (list ha1 hb1) 1000 0.0 (list)))
     (let d1 (gl-count "total_dispatch"))
     (let pend (gl-count "pending"))
     (let g1 (gl-read out1))
     (let c1 (dot_product a1 b1))
-    (let out2 (gl-run prog (list ha2 hb2) 100000 0.0))
+    (let out2 (gl-run prog (list ha2 hb2) 100000 0.0 (list)))
     (let g2 (gl-read out2))
     (let c2 (dot_product a2 b2))
+    (let mlow (gl-lower "vo-scale-onto"))
+    (let mprog (gl-program "vo-scale-onto"))
+    (let msrc (if (gl-ok? mlow) (nth mlow 1) ""))
+    (let m1 (gl-run mprog (list ha1) 1000 0.0 (list 2.5)))
+    (let m1-first (gl-read-n m1 8))
+    (let s1-first (take 8 (vector_scale a1 2.5)))
+    (let m2 (gl-run mprog (list ha2) 100000 0.0 (list 2.5)))
+    (let ones (gl-f32-buf (glb-fill-ones 100000 (empty))))
+    (let m2-sum (gl-read (gl-run prog (list m2 ones) 100000 0.0 (list))))
+    (let s2-sum (sum (vector_scale a2 2.5)))
     (let mag (gl-program "magnitude"))
     (let src (if (gl-ok? low) (nth low 1) ""))
     (print (list "gpu" g1 "cpu" c1 "gpu" g2 "cpu" c2 "dispatch" (sub d1 d0) "pending" pend))
@@ -60,9 +75,17 @@
     (let back (metal_buf_read hm 0 12))
     (let refused (metal_buf_write hm 0 (list 1.0 "x")))
     (let v7 (if (and (eq wrote 12) (and (eq refused 0) (str_eq back (str_concat (md-le32 1069547520) (str_concat (md-le32 4294967294) (md-le32 7)))))) 128 0))
+    (print (list "map-first" m1-first "cpu" s1-first "map-sum" m2-sum "cpu" s2-sum))
+    (print (if (gl-ok? mlow) (str_concat "map " (gl-kind mlow)) (nth mlow 1)))
+    (let v8 (if (and (gl-ok? mlow) (and (str_eq (gl-kind mlow) "map") (ge (str_find msrc "out[i] = ((p0[i] + 0.0f) * c1)" 0) 0))) 256 0))
+    (let v9 (if (and (gl-ok? mprog) (eq (glb-all-near? m1-first s1-first) 1)) 512 0))
+    (let v10 (if (glb-near? m2-sum s2-sum) 1024 0))
     (metal_buf_free hm)
     (metal_buf_free ha1)
     (metal_buf_free hb1)
     (metal_buf_free ha2)
     (metal_buf_free hb2)
-    (add v0 (add v1 (add v2 (add v3 (add v4 (add v5 (add v6 v7))))))))
+    (metal_buf_free m1)
+    (metal_buf_free m2)
+    (metal_buf_free ones)
+    (add v0 (add v1 (add v2 (add v3 (add v4 (add v5 (add v6 (add v7 (add v8 (add v9 v10)))))))))))
