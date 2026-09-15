@@ -239,9 +239,18 @@ Witnessed on fkwu (fixture `bml-class-delegation.bml`, 47): `E : A, D` answers `
 structural base's field (1). The tree before read
 `BML-HATI-UNSUPPORTED call/type,class/delegated-base,method/not-found,field/not-found`.
 
+## A record made on the host carries its class id
+
+A record the host builds and hands to a class image (`bml-hati-run-class-method`) carried no
+`bmlClassId`, and method tables read the id `new` stamps. The class door now stamps a plain host
+record on its way in: its `bmlClass` (the image's class when it names none) and that class's id in
+the image's layout (`bml-hati-host-record`); a record `new` made passes as it is. The live door runs
+BML sources, and a BML source cannot make a host record, so the witness is two checks in
+`bml-hati-native-class-dispatch-proof.fk`: after `Read`, the host record reads `bmlClass` "Rule"
+and `bmlClassId` 0, and the proof moves from 17 to 19.
+
 ## Still open, with the reason
 
-- Records made on the host carry no class id; method tables read records made by `new`.
 - The witness probes stay outside the tree and ran on fkwu only.
 
 ## For the lead
