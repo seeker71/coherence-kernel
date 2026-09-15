@@ -2986,7 +2986,7 @@ export class Kernel {
         // Go panics, Rust panics.
         throw new Error(
           `bp: unregistered blueprint name ${JSON.stringify(name)} — register it: ` +
-            `python3 scripts/scan_form_blueprints.py register ${name} (bp tables then regenerate). ` +
+            `add its row to form/form-stdlib/blueprint-registry.json and carry the same coordinates into bp_table.ts. ` +
             `The substrate never invents a NodeID for an unknown name.`,
         );
       }

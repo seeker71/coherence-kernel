@@ -5493,9 +5493,9 @@ impl Kernel {
             // Sibling parity: Go panics, TS throws.
             panic!(
                 "bp: unregistered blueprint name {:?} — register it: \
-                 python3 scripts/scan_form_blueprints.py register {} (bp tables then regenerate). \
+                 add its row to form/form-stdlib/blueprint-registry.json and carry the same coordinates into bp_table.rs. \
                  The substrate never invents a NodeID for an unknown name.",
-                name, name
+                name
             )
         });
         self.register_native("intern_trivial_int", cat_witness(), |k, _, args| {

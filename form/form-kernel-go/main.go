@@ -3094,8 +3094,8 @@ func (k *Kernel) registerNatives() {
 		// is bounded by what is registered; an unregistered name is a missing
 		// registration, not a valid shape. Sibling parity: Rust panics, TS throws.
 		panic(fmt.Sprintf("bp: unregistered blueprint name %q — register it: "+
-			"python3 scripts/scan_form_blueprints.py register %s (bp tables then regenerate). "+
-			"The substrate never invents a NodeID for an unknown name.", args[0].Str, args[0].Str))
+			"add its row to form/form-stdlib/blueprint-registry.json and carry the same coordinates into bp_table.go. "+
+			"The substrate never invents a NodeID for an unknown name.", args[0].Str))
 	})
 	k.registerNative("intern_trivial_int", catWitness(), func(k *Kernel, args []Value) Value {
 		return Value{Kind: VNodeID, Nid: k.internTrivialInt(args[0].AsInt())}
