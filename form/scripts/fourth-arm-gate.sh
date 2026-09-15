@@ -18,6 +18,10 @@ gate_one() {
     # Same fallback as fourth_band_srcs: a stem may live at tests/<stem>.fk
     # with no -band suffix (e.g. json-promoted-types).
     [[ -f "$band" ]] || band="form-stdlib/tests/$stem.fk"
+    # ...and a seedbank test under its exact name, as fourth_band_srcs reads it.
+    if [[ ! -f "$band" && -f "form-stdlib/seedbank/tests/$stem.fk" ]]; then
+        band="form-stdlib/seedbank/tests/$stem.fk"
+    fi
     pres="$(fourth_band_prelude_mods_raw "$band")"
     if [[ -z "$pres" ]]; then
         [[ -f "form-stdlib/$stem.fk" ]] && pres="form-stdlib/$stem.fk"
