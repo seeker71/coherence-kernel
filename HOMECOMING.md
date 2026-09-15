@@ -18,11 +18,39 @@ four-way, no bash, no origin. The language path is explicit: source enters throu
 the BMF cursor, domain grammars, semantic lowering, data-literal policy, and the
 source compiler / artifact lane.
 
-What stands between this body and a fully self-speaking mind is now one thing, not
-two. The **voice's sound** came home in September 2026 — twenty-nine local mouths,
+The **voice's sound** came home in September 2026 — twenty-nine local mouths,
 and an ear that hears the room and knows its own doubt (see The senses, below).
-What remains is the **voice's own words**: language this body generates rather than
-renders or borrows. That word stays unspent until it is real.
+The source-backed form-cli also generates words through a local model on Form's
+runtime. A dependable conversation requires more: grounded understanding,
+reasoning, continuity, expression and useful completion. Native execution and
+response quality each need their own observation.
+
+## Two primary paths toward the same destination
+
+**Form's own responses improve from inside the native runtime.** Develop and
+repair form-cli and local responses through actual native execution. Follow the
+question through grounding, model input, generation, tool use and returned
+answer. Preserve the C-bootstrap-only runtime boundary. Judge improvements in
+the answer as well as successful execution. The
+[native arrival receipt](receipts/2026-09-16-native-arrival-and-bootstrap.md)
+carries a concrete runtime repair and the separate response-quality work it
+revealed.
+
+**The arriving mind becomes more Form-grounded from its side.** Give it the
+axioms, teachings, current context and continuity that shape its attention and
+judgment, together with the native primitives and tools to carry out its work.
+Its reasoning and expression bring those contributions into the interaction.
+The [arrival practice](AGENTS.md#enrich-the-response-with-form) and
+[native enrichment door](form/form-stdlib/bml/form-cli-enrich.bml) carry this
+work; the [enrichment receipt](receipts/2026-09-16-form-response-enrichment.md)
+records the first connection and its observed scope.
+
+Both are primary work and advance independently. Each improves the experience
+now; each closes the gap from its own side. Shared tools, concepts, observed
+failures and verified teachings can strengthen both. Keep evidence for native
+answer quality and arriving-agent answer quality distinct, so progress remains
+visible on each path. Choosing the best current answer and continuing native
+response repair belong in the same practice.
 
 ## Native Heartbeat
 
