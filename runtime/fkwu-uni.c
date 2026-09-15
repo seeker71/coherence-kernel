@@ -493,9 +493,7 @@ static long long fk_gpu_step(long long now_us) {
  *     5 unit identity hash exceeded buffer, 6 dep image carries recorded
  *     compile errors, 7 image load/identity refused (foreign, stale, corrupt),
  *     8 carried or root text exceeded the source-text cap (dissolved
- *       2026-09-02: the buffer grows, so 8 no longer fires), 9 two direct deps' closures
- *     overlap and neither holds the other, 10 running the images' own sequences
- *     could not keep the order the flat compile runs every unit in. A refusal is not a
+ *       2026-09-02: the buffer grows, so 8 no longer fires). A refusal is not a
  *     wound — the flat compile is the fully correct door — but it is a
  *     decision, and decisions are observable. */
 static long long fk_run_door;
@@ -19261,6 +19259,10 @@ static void fk_parse_top(void);
  * a redefinition or reused row drops it. (FK_TAG_CONST_HOLD is #defined
  * up by fk_arms, where the walker arm can reach it.) */
 static long long *fk_const_s, *fk_const_n, *fk_const_node, *fk_const_wrapp1, fk_const_top;
+/* the unit each top-level let belongs to (a canonical-path id), and the unit the binding
+ * being made belongs to; an image carries the column so an importer knows whose let it is */
+static unsigned long long *fk_const_unit;
+static unsigned long long fk_const_unit_now;
 static long long fk_const_cap;
 /* A FORWARD row: a defn read the name before the unit's let arrived. Its node is this
  * sentinel until the let fills the shared hold; fk_const_fwd[row] keeps the first read's
@@ -19304,9 +19306,11 @@ static long long fk_const_set(long long s, long long n, long long node) {
                 fk_node[fk_const_wrapp1[i] - 1][1] = node;
                 fk_const_node[i] = node;
                 fk_const_fwd[i] = -1;
+                fk_const_unit[i] = fk_const_unit_now;
                 return i;
             }
             fk_const_node[i] = node;
+            fk_const_unit[i] = fk_const_unit_now;
             /* a redefinition drops the old hold node; old references keep
              * their already-spliced meaning, new references bind fresh. */
             fk_const_wrapp1[i] = 0;
@@ -19321,8 +19325,9 @@ static long long fk_const_set(long long s, long long n, long long node) {
         fk_const_node = (long long *)realloc(fk_const_node, (unsigned long)(nc * 8));
         fk_const_wrapp1 = (long long *)realloc(fk_const_wrapp1, (unsigned long)(nc * 8));
         fk_const_fwd = (long long *)realloc(fk_const_fwd, (unsigned long)(nc * 8));
+        fk_const_unit = (unsigned long long *)realloc(fk_const_unit, (unsigned long)(nc * 8));
         if (fk_const_s == 0 || fk_const_n == 0 || fk_const_node == 0 ||
-            fk_const_wrapp1 == 0 || fk_const_fwd == 0) {
+            fk_const_wrapp1 == 0 || fk_const_fwd == 0 || fk_const_unit == 0) {
             fk_die("fk_const_set: out of memory growing the top-level constant table");
         }
         fk_const_cap = nc;
@@ -19334,8 +19339,92 @@ static long long fk_const_set(long long s, long long n, long long node) {
      * must never inherit the previous tenant's hold node. */
     fk_const_wrapp1[fk_const_top] = 0;
     fk_const_fwd[fk_const_top] = -1;
+    fk_const_unit[fk_const_top] = fk_const_unit_now;
     fk_const_top = fk_const_top + 1;
     return fk_const_top - 1;
+}
+/* ONE SEQUENCE PER UNIT. Every compile files each top-level form under the unit whose text
+ * holds it, so an image carries, beside its whole program, each unit's own sequence and the
+ * unit each top-level let belongs to. The import lane then runs every unit of a program once,
+ * in the order the flat compile runs them, whichever image carries it: a unit two images both
+ * carry runs from the first, and the second image's holds for that unit's lets read the
+ * first's, so each let is built once. */
+static long long fk_units_n;
+static long long fk_units_cap;
+static unsigned long long *fk_unit_id;   /* canonical-path id, 63 bits */
+static long long *fk_unit_lo;            /* the unit's text span in fk_srctext; -1 when imaged */
+static long long *fk_unit_hi;
+static long long *fk_unit_chain;         /* its sequence; -1 when it has none */
+static long long *fk_unit_sec;           /* the sequence as its image carries it, framed */
+static long long fk_units_cur = -1;      /* the unit of the form being parsed */
+static int fk_units_lane;                /* 1 when the import lane planned the units */
+static void fk_units_add(unsigned long long id, long long lo, long long hi, long long chain) {
+    if (fk_units_n >= fk_units_cap) {
+        long long nc = fk_units_cap == 0 ? 64 : fk_units_cap * 2;
+        fk_unit_id = (unsigned long long *)realloc(fk_unit_id, (unsigned long)(nc * 8));
+        fk_unit_lo = (long long *)realloc(fk_unit_lo, (unsigned long)(nc * 8));
+        fk_unit_hi = (long long *)realloc(fk_unit_hi, (unsigned long)(nc * 8));
+        fk_unit_chain = (long long *)realloc(fk_unit_chain, (unsigned long)(nc * 8));
+        fk_unit_sec = (long long *)realloc(fk_unit_sec, (unsigned long)(nc * 8));
+        if (fk_unit_id == 0 || fk_unit_lo == 0 || fk_unit_hi == 0 || fk_unit_chain == 0 ||
+            fk_unit_sec == 0) {
+            fk_die("fk_units_add: out of memory growing the unit table");
+        }
+        fk_units_cap = nc;
+    }
+    fk_unit_id[fk_units_n] = id;
+    fk_unit_lo[fk_units_n] = lo;
+    fk_unit_hi[fk_units_n] = hi;
+    fk_unit_chain[fk_units_n] = chain;
+    fk_unit_sec[fk_units_n] = -1;
+    fk_units_n = fk_units_n + 1;
+}
+static long long fk_units_at(long long pos) {
+    long long u = 0;
+    while (u < fk_units_n) {
+        if (fk_unit_lo[u] >= 0 && pos >= fk_unit_lo[u] && pos < fk_unit_hi[u]) {
+            return u;
+        }
+        u = u + 1;
+    }
+    return -1;
+}
+/* a top-level form joins the program's sequence and its own unit's */
+static void fk_root_append(long long x) {
+    fk_root = fk_root >= 0 ? fk_smknode(69, fk_root, x, 0) : x;
+    if (fk_units_cur >= 0 && fk_units_cur < fk_units_n) {
+        long long c = fk_unit_chain[fk_units_cur];
+        fk_unit_chain[fk_units_cur] = c >= 0 ? fk_smknode(69, c, x, 0) : x;
+    }
+}
+/* the owner of each unit an imported image carries: the first image that brought it */
+static unsigned long long *fk_lane_have_id;
+static long long *fk_lane_have_chain;
+static long long fk_lane_have_n;
+static long long fk_lane_have_cap;
+static long long fk_lane_have_find(unsigned long long id) {
+    long long k = 0;
+    while (k < fk_lane_have_n) {
+        if (fk_lane_have_id[k] == id) {
+            return k;
+        }
+        k = k + 1;
+    }
+    return -1;
+}
+static void fk_lane_have_add(unsigned long long id, long long chain) {
+    if (fk_lane_have_n >= fk_lane_have_cap) {
+        long long nc = fk_lane_have_cap == 0 ? 64 : fk_lane_have_cap * 2;
+        fk_lane_have_id = (unsigned long long *)realloc(fk_lane_have_id, (unsigned long)(nc * 8));
+        fk_lane_have_chain = (long long *)realloc(fk_lane_have_chain, (unsigned long)(nc * 8));
+        if (fk_lane_have_id == 0 || fk_lane_have_chain == 0) {
+            fk_die("fk_lane_have_add: out of memory");
+        }
+        fk_lane_have_cap = nc;
+    }
+    fk_lane_have_id[fk_lane_have_n] = id;
+    fk_lane_have_chain[fk_lane_have_n] = chain;
+    fk_lane_have_n = fk_lane_have_n + 1;
 }
 /* A value-position name inside a defn body that nothing binds yet may still be bound by a
  * let later in the unit -- a unit's defns see all of its lets, in any order. Hold it open:
@@ -20663,7 +20752,7 @@ static void fk_parse_top(void) {
                 if (fk_maxslot > 0) {
                     dv = fk_smknode(111, fk_smklit(fk_maxslot), dv, 0);
                 }
-                fk_root = fk_root >= 0 ? fk_smknode(69, fk_root, dv, 0) : dv;
+                fk_root_append(dv);
                 return;
             }
         }
@@ -20780,7 +20869,7 @@ static void fk_parse_top(void) {
                     fk_smknode(FK_TAG_CONST_HOLD, fk_const_node[crow3], 0, 0) + 1;
             }
             long long held3 = fk_const_wrapp1[crow3] - 1;
-            fk_root = fk_root >= 0 ? fk_smknode(69, fk_root, held3, 0) : held3;
+            fk_root_append(held3);
             return;
         }
     }
@@ -20795,7 +20884,7 @@ static void fk_parse_top(void) {
      * four-way divergence, witnessed 2026-09-02 through a direct .bml whose
      * lowering is exactly such a statement sequence. */
     long long stmt = fk_sparse();
-    fk_root = fk_root >= 0 ? fk_smknode(69, fk_root, stmt, 0) : stmt;
+    fk_root_append(stmt);
 }
 static long long fk_path_len(const char *p) {
     long long n = 0;
@@ -22373,7 +22462,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     fk_fkb_out_n = 0;
     ok = ok && fk_fkb_out(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
-    ok = ok && fk_fkb_write_u32(fd, 6);
+    ok = ok && fk_fkb_write_u32(fd, 7);
     ok = ok && fk_fkb_write_cstr(fd, FK_FKB_BUILDER_ID);
     ok = ok && fk_fkb_write_cstr(fd, fk_path_canon_id(src_path, canon));
     ok = ok && fk_fkb_write_cstr(fd, source_hash);
@@ -22432,6 +22521,21 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     while (ok && i < fk_const_top) {
         ok = fk_fkb_write_srctext_slice(fd, fk_const_s[i], fk_const_n[i]) &&
              fk_fkb_write_signed(fd, fk_const_node[i]);
+        i = i + 1;
+    }
+    /* v7: each unit's own sequence (framed, -1 when it has none), then the unit each
+     * constant row belongs to, so an importer runs every unit once and builds each let once */
+    ok = ok && fk_fkb_write_signed(fd, fk_units_n);
+    i = 0;
+    while (ok && i < fk_units_n) {
+        ok = fk_fkb_write_signed(fd, (long long)fk_unit_id[i]) &&
+             fk_fkb_write_signed(fd, fk_unit_sec[i]);
+        i = i + 1;
+    }
+    ok = ok && fk_fkb_write_signed(fd, fk_const_top);
+    i = 0;
+    while (ok && i < fk_const_top) {
+        ok = fk_fkb_write_signed(fd, (long long)fk_const_unit[i]);
         i = i + 1;
     }
     ok = ok && fk_fkb_flush(fd);
@@ -22709,25 +22813,6 @@ static int fk_fkb_read_symbol_to_srctext(long long *start, long long *len) {
     fk_srctext[fk_slen] = 0;
     return 1;
 }
-/* The sequences of the images the import lane brought in, in the order they run: each
- * image's own root (its units' top-level forms, in text order), run once before the program's
- * root, so a prelude's top-level statement runs once on an imported image as it does on the
- * flat compile and on Go. */
-static long long *fk_import_roots;
-static long long fk_import_roots_n;
-static long long fk_import_roots_cap;
-static void fk_import_root_add(long long node) {
-    if (fk_import_roots_n >= fk_import_roots_cap) {
-        long long nc = fk_import_roots_cap == 0 ? 16 : fk_import_roots_cap * 2;
-        fk_import_roots = (long long *)realloc(fk_import_roots, (unsigned long)(nc * 8));
-        if (fk_import_roots == 0) {
-            fk_die("fk_import_root_add: out of memory");
-        }
-        fk_import_roots_cap = nc;
-    }
-    fk_import_roots[fk_import_roots_n] = node;
-    fk_import_roots_n = fk_import_roots_n + 1;
-}
 static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_src_path,
                                    const char *expected_source_hash,
                                    long long expected_source_mtime) {
@@ -22754,9 +22839,9 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         mi = mi + 1;
     }
     long long version = fk_fkb_read_u32();
-    if (version < 6) {
-        /* pre-v6 artifacts carry no constant table (and pre-v5 no builder
-         * identity), so a unit's top-level lets cannot be bound from them --
+    if (version < 7) {
+        /* pre-v7 artifacts carry no unit sequences (pre-v6 no constant table,
+         * pre-v5 no builder identity), so the lane cannot run their units once --
          * superseded, not corrupt. */
         return 0;
     }
@@ -22839,20 +22924,6 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         fk_fkb_read_table_string();
         i = i + 1;
     }
-    /* the image's own sequence, when its unit had one: a unit of defns only answers its
-     * last defn's body as fn 0 (the staged-arg door, under a frame wrapper when it needs
-     * one), and a unit with no forms a literal 0; neither is a statement to run. */
-    long long image_root = fn_roots[0] < 0 ? -1 : fn_roots[0] + node_base;
-    if (image_root >= 0) {
-        long long inner = image_root;
-        if (fk_node[inner][0] == 111) {
-            inner = fk_node[inner][2];
-        }
-        if (fk_node[inner][0] == 1 ||
-            (nf > 1 && fn_roots[nf - 1] >= 0 && inner == fn_roots[nf - 1] + node_base)) {
-            image_root = -1;
-        }
-    }
     i = 1;
     while (i < nf) {
         fk_fn[fn_base + i - 1] = fn_roots[i] < 0 ? fn_roots[i] : fn_roots[i] + node_base;
@@ -22914,8 +22985,13 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     if (const_count < 0 || const_count > fk_fkb_len) {
         return 0;
     }
-    long long *crows = const_count > 0 ? malloc((unsigned long)const_count * 8) : 0;
-    if (const_count > 0 && crows == 0) {
+    long long cap1 = const_count > 0 ? const_count : 1;
+    long long *ccs = malloc((unsigned long)cap1 * 8);
+    long long *ccn = malloc((unsigned long)cap1 * 8);
+    long long *ccnode = malloc((unsigned long)cap1 * 8);
+    long long *chold = malloc((unsigned long)cap1 * 8);
+    unsigned long long *cown = calloc((unsigned long)cap1, 8);
+    if (ccs == 0 || ccn == 0 || ccnode == 0 || chold == 0 || cown == 0) {
         fk_die("fk_src_import_fkb_image: out of memory reading the constant table");
     }
     i = 0;
@@ -22923,28 +22999,54 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         long long cs = 0;
         long long cn = 0;
         if (!fk_fkb_read_symbol_to_srctext(&cs, &cn)) {
-            free(crows);
+            free(ccs); free(ccn); free(ccnode); free(chold); free(cown);
             return 0;
         }
         long long cnode = fk_fkb_read_signed();
-        long long crow = fk_const_set(cs, cn, cnode >= 0 ? cnode + node_base : cnode);
-        crows[i] = cnode >= 0 ? crow : -1;
+        ccs[i] = cs;
+        ccn[i] = cn;
+        ccnode[i] = cnode >= 0 ? cnode + node_base : cnode;
+        chold[i] = -1;
         i = i + 1;
     }
-    /* ONE hold per binding: each row this image bound takes the image's own hold over the
-     * initializer it names. A row that learned only the initializer built a second hold on
-     * the program's first read of the name, so the initializer ran twice (a printing let
-     * printed twice, where Go prints it once). A name the image binds twice names its newest
-     * initializer, which no hold the image built wraps, and keeps a fresh hold. */
+    /* v7: each unit's own sequence, then the unit each constant row belongs to */
+    long long unit_count = fk_fkb_read_signed();
+    if (unit_count < 0 || unit_count > fk_fkb_len) {
+        fk_fkb_mark_bad("unit count exceeds artifact bounds");
+        unit_count = 0;
+    }
+    long long ucap = unit_count > 0 ? unit_count : 1;
+    unsigned long long *uid = malloc((unsigned long)ucap * 8);
+    long long *uchain = malloc((unsigned long)ucap * 8);
+    char *udup = calloc((unsigned long)ucap, 1);
+    if (uid == 0 || uchain == 0 || udup == 0) {
+        fk_die("fk_src_import_fkb_image: out of memory reading the unit sequences");
+    }
+    long long u = 0;
+    while (!fk_fkb_bad && u < unit_count) {
+        uid[u] = (unsigned long long)fk_fkb_read_signed();
+        long long c = fk_fkb_read_signed();
+        uchain[u] = c >= 0 ? c + node_base : -1;
+        u = u + 1;
+    }
+    long long owner_count = fk_fkb_read_signed();
+    if (!fk_fkb_bad && owner_count != const_count) {
+        fk_fkb_mark_bad("constant owner count differs from the constant table");
+    }
+    i = 0;
+    while (!fk_fkb_bad && i < const_count) {
+        cown[i] = (unsigned long long)fk_fkb_read_signed();
+        i = i + 1;
+    }
     if (!fk_fkb_bad) {
+        /* the hold this image built over each row's initializer */
         long long k = node_base;
         while (k < node_base + nr) {
             if (fk_node[k][0] == FK_TAG_CONST_HOLD) {
                 long long j = 0;
-                while (j < i) {
-                    long long r = crows[j];
-                    if (r >= 0 && fk_const_wrapp1[r] == 0 && fk_const_node[r] == fk_node[k][1]) {
-                        fk_const_wrapp1[r] = k + 1;
+                while (j < const_count) {
+                    if (chold[j] < 0 && ccnode[j] >= 0 && ccnode[j] == fk_node[k][1]) {
+                        chold[j] = k;
                         break;
                     }
                     j = j + 1;
@@ -22952,14 +23054,61 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
             }
             k = k + 1;
         }
+        /* a unit an earlier image brought belongs to that image: this copy's sequence stays
+         * unrun, and this copy's holds for its lets read the earlier image's */
+        u = 0;
+        while (u < unit_count) {
+            udup[u] = fk_lane_have_find(uid[u]) >= 0;
+            u = u + 1;
+        }
+        u = 0;
+        while (u < unit_count) {
+            if (!udup[u]) {
+                fk_lane_have_add(uid[u], uchain[u]);
+            }
+            u = u + 1;
+        }
+        /* ONE hold per binding: a row takes the image's own hold over the initializer it
+         * names, so a program that reads the name reads the hold the image's defns read and
+         * the initializer runs once (a printing let printed twice, where Go prints it once) */
+        i = 0;
+        while (i < const_count) {
+            int dup = 0;
+            if (cown[i] != 0) {
+                u = 0;
+                while (u < unit_count) {
+                    if (uid[u] == cown[i]) {
+                        dup = udup[u];
+                        break;
+                    }
+                    u = u + 1;
+                }
+            }
+            long long prior = dup ? fk_const_lookup(ccs[i], ccn[i]) : -1;
+            if (prior >= 0 && fk_const_node[prior] != FK_CONST_FORWARD) {
+                if (fk_const_wrapp1[prior] == 0) {
+                    fk_const_wrapp1[prior] =
+                        fk_smknode(FK_TAG_CONST_HOLD, fk_const_node[prior], 0, 0) + 1;
+                }
+                if (chold[i] >= 0) {
+                    fk_node[chold[i]][1] = fk_const_wrapp1[prior] - 1;
+                }
+            } else {
+                fk_const_unit_now = cown[i];
+                long long row = fk_const_set(ccs[i], ccn[i], ccnode[i]);
+                fk_const_unit_now = 0;
+                if (ccnode[i] >= 0 && chold[i] >= 0 && fk_const_wrapp1[row] == 0) {
+                    fk_const_wrapp1[row] = chold[i] + 1;
+                }
+            }
+            i = i + 1;
+        }
     }
-    free(crows);
+    free(ccs); free(ccn); free(ccnode); free(chold); free(cown);
+    free(uid); free(uchain); free(udup);
     if (fk_fkb_bad || fk_fkb_pos != fk_fkb_len) {
         fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
         return 0;
-    }
-    if (image_root >= 0) {
-        fk_import_root_add(image_root);
     }
     fk_prog_note_ice(fkb_path, fk_fkb_len, expected_source_hash);
     return 1;
@@ -23043,6 +23192,29 @@ static int fk_fkb_restore_symbol_image(long long version) {
         (void)fk_fkb_read_signed();
         i = i + 1;
     }
+    /* v7's unit sequences and constant owners: a whole program image runs its own root, so
+     * they too are consumed to attest the end */
+    long long unit_count = fk_fkb_read_signed();
+    if (unit_count < 0 || unit_count > fk_fkb_len) {
+        fk_fkb_mark_bad("unit count exceeds artifact bounds");
+        return 0;
+    }
+    i = 0;
+    while (!fk_fkb_bad && i < unit_count) {
+        (void)fk_fkb_read_signed();
+        (void)fk_fkb_read_signed();
+        i = i + 1;
+    }
+    long long owner_count = fk_fkb_read_signed();
+    if (owner_count < 0 || owner_count > fk_fkb_len) {
+        fk_fkb_mark_bad("constant owner count exceeds artifact bounds");
+        return 0;
+    }
+    i = 0;
+    while (!fk_fkb_bad && i < owner_count) {
+        (void)fk_fkb_read_signed();
+        i = i + 1;
+    }
     return !fk_fkb_bad;
 }
 static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_src_path,
@@ -23075,14 +23247,15 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         mi = mi + 1;
     }
     long long version = fk_fkb_read_u32();
-    if (version >= 2 && version <= 5) {
-        /* pre-v6 lanes: v2/v3 are the old lane width, v4 carries no builder
-         * identity, v5 no constant table -- superseded, not corrupt. Invalidate
-         * so the caller recompiles from source and overwrites with a v6 artifact. */
-        fk_fkb_mark_bad("pre-v6 artifact lane; superseded");
+    if (version >= 2 && version <= 6) {
+        /* pre-v7 lanes: v2/v3 are the old lane width, v4 carries no builder
+         * identity, v5 no constant table, v6 no unit sequences -- superseded, not
+         * corrupt. Invalidate so the caller recompiles from source and overwrites
+         * with a v7 artifact. */
+        fk_fkb_mark_bad("pre-v7 artifact lane; superseded");
         return 0;
     }
-    if (version != 6) {
+    if (version != 7) {
         fk_fkb_mark_bad("unsupported version");
         return 0;
     }
@@ -23350,7 +23523,11 @@ static void fk_src_reset_compile_state(void) {
     fk_fntop = 0;
     if (fk_live_page != 0) { (fk_live_page + 2)[29] = 0; fk_live_blob_used = 0; } fk_f64_reset();
     fk_const_top = 0;
-    fk_import_roots_n = 0;
+    fk_units_n = 0;
+    fk_units_cur = -1;
+    fk_units_lane = 0;
+    fk_lane_have_n = 0;
+    fk_const_unit_now = 0;
     fk_defn_next = 1;
     fk_root = -1;
     /* fk_defn_next resets to 1: the NEXT compile pass renumbers fn-indices from scratch, so any
@@ -23461,6 +23638,65 @@ static void fk_src_check_balance(void) {
         fk_src_unrunnable = 1;
     }
 }
+/* a unit's canonical-path id, 63 bits so it rides the image's signed lane */
+static unsigned long long fk_canon_id63(const char *path) {
+    char canon[FK_PATH_CAP];
+    const char *cid = fk_path_canon_id(path, canon);
+    return fk_bytes_fnv1a(cid, fk_path_len(cid)) >> 1;
+}
+/* the flat compile's units: every unit of the table, in text order */
+static void fk_units_from_table(void) {
+    long long n = fk_src_dep_count;
+    long long *ord = malloc((unsigned long)(n > 0 ? n : 1) * 8);
+    if (ord == 0) {
+        fk_die("fk_units_from_table: out of memory");
+    }
+    fk_units_n = 0;
+    long long a = 0;
+    while (a < n) {
+        long long b = a - 1;
+        while (b >= 0 && fk_src_dep_text_off[ord[b]] > fk_src_dep_text_off[a]) {
+            ord[b + 1] = ord[b];
+            b = b - 1;
+        }
+        ord[b + 1] = a;
+        a = a + 1;
+    }
+    a = 0;
+    while (a < n) {
+        long long d = ord[a];
+        fk_units_add(fk_canon_id63(fk_src_dep_path[d]), fk_src_dep_text_off[d],
+                     fk_src_dep_text_off[d] + fk_src_dep_text_len[d], -1);
+        a = a + 1;
+    }
+    free(ord);
+}
+/* After the parse: the lane's program runs its units' sequences in order (an imaged unit's
+ * from the image that owns it); and every unit's sequence is framed for the image, since an
+ * importer runs it outside this program's root frame. */
+static void fk_units_seal(void) {
+    long long u = 0;
+    if (fk_units_lane) {
+        long long root = -1;
+        while (u < fk_units_n) {
+            long long c = fk_unit_chain[u];
+            if (c >= 0) {
+                root = root >= 0 ? fk_smknode(69, root, c, 0) : c;
+            }
+            u = u + 1;
+        }
+        fk_root = root;
+    }
+    u = 0;
+    while (u < fk_units_n) {
+        long long c = fk_unit_chain[u];
+        if (c >= 0 && fk_unit_lo[u] >= 0 && fk_maxslot > 0) {
+            c = fk_smknode(111, fk_smklit(fk_maxslot), c, 0);
+        }
+        fk_unit_sec[u] = c;
+        u = u + 1;
+    }
+}
 static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
                                         const char *sym_path, long long unit_mtime,
                                         const char *source_hash) {
@@ -23481,24 +23717,24 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
     fk_prescan_defns();
     /* two-pass: register every top-level defn name+index+arity BEFORE bodies, so forward + mutual
      * references resolve */
+    if (!fk_units_lane) {
+        fk_units_from_table();
+    }
     fk_spos = 0;
     while (1) {
         fk_sskip();
         if (fk_spos >= fk_slen) {
             break;
         }
+        /* each top-level form is filed under the unit whose text holds it */
+        fk_units_cur = fk_units_at(fk_spos);
+        fk_const_unit_now = fk_units_cur >= 0 ? fk_unit_id[fk_units_cur] : 0;
         fk_parse_top();
     }
+    fk_units_cur = -1;
+    fk_const_unit_now = 0;
     fk_const_forward_finalize();
-    /* the imported images' own sequences run first, each once, in the order the flat
-     * compile runs their units (fk_src_try_import_fkb_images imports only when it holds) */
-    if (fk_root >= 0 && fk_import_roots_n > 0) {
-        long long r = fk_import_roots_n;
-        while (r > 0) {
-            r = r - 1;
-            fk_root = fk_smknode(69, fk_import_roots[r], fk_root, 0);
-        }
-    }
+    fk_units_seal();
     if (fk_root >= 0) {
         fk_fn[0] = fk_root;
     } else if (fk_defn_next > 1) {
@@ -23676,11 +23912,9 @@ static int fk_src_standalone_unit(const char *path, int compile, char *hash_out,
                 ord[b + 1] = a;
                 a = a + 1;
             }
-            char canon[FK_PATH_CAP];
             a = 0;
             while (a < n) {
-                const char *cid = fk_path_canon_id(fk_src_dep_path[ord[a]], canon);
-                ids[a] = fk_bytes_fnv1a(cid, fk_path_len(cid));
+                ids[a] = fk_canon_id63(fk_src_dep_path[ord[a]]);
                 a = a + 1;
             }
             free(ord);
@@ -23758,17 +23992,16 @@ static int fk_src_ids_has(const unsigned long long *ids, long long n, unsigned l
  * engine.fk and core.fk, which a band that preludes all three also images on their own. The
  * lane reads each image's identity from that closure (fk_src_standalone_unit); the root's table
  * holds only the units the root had not already collected, and its fold never equalled the
- * image's own. The lane imports an image only when no other direct dep's closure holds it and
- * the closures it keeps share no unit, and only when running each kept image's own sequence,
- * then the carried units, then the root, is the order the flat compile runs every unit's
- * top-level forms in. Otherwise it steps aside, and the flat compile runs every unit once, in
- * order.
+ * image's own. An image no other direct dep's closure holds, and whose units the images before
+ * it do not already carry, is imported; each unit then runs once, from the first image that
+ * brought it (fk_lane_have), and the lane hands the compile the program's units in the order
+ * the flat compile runs them: an imaged unit's own sequence, a carried unit's text, the root.
  *
  * .bml deps are floor-lane units: their meaning lives with their carried prelude chain and
  * their cache is the floor's own .bml.fkb ice. Probing one "alone" reads the RAW brace surface
  * off disk, finds hundreds of unresolved names, and poisons the floor's cache with a REFUSED
  * sym (witnessed 2026-08-30). The lane does not image them -- it CARRIES their already-collected
- * text (and the text of every other unit no kept image covers) beside the imports. */
+ * text (and the text of every other unit no imported image covers) beside the imports. */
 static int fk_src_try_import_fkb_images(const char *root_path) {
     long long nd = 0;
     long long i = 1;
@@ -23796,10 +24029,13 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     char *keep = calloc((unsigned long)nd, 1);
     long long *flat = malloc((unsigned long)n_all * 8);
     unsigned long long *flat_id = malloc((unsigned long)n_all * 8);
-    unsigned long long *plan = malloc((unsigned long)n_all * 8);
+    long long *carried_at = malloc((unsigned long)n_all * 8);
     long long *carry_idx = malloc((unsigned long)n_all * 8);
+    long long *carry_lo = malloc((unsigned long)n_all * 8);
+    long long *carry_hi = malloc((unsigned long)n_all * 8);
     if (dix == 0 || dhash == 0 || dmtime == 0 || dids == 0 || dn == 0 || keep == 0 ||
-        flat == 0 || flat_id == 0 || plan == 0 || carry_idx == 0) {
+        flat == 0 || flat_id == 0 || carried_at == 0 || carry_idx == 0 || carry_lo == 0 ||
+        carry_hi == 0) {
         fk_die("fk_src_try_import_fkb_images: out of memory planning the imports");
     }
     int ok = 1;
@@ -23816,6 +24052,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     }
     /* each direct dep's own identity and closure; an image missing or older than it is
      * compiled standing alone now */
+    long long ids_total = 0;
     d = 0;
     while (ok && d < nd) {
         char dpath[FK_PATH_CAP];
@@ -23833,18 +24070,19 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
             break;
         }
         if (fk_path_mtime_raw(dep_fkb_path) < dmtime[d] ||
-            fk_src_fkb_version_raw(dep_fkb_path) < 6) {
+            fk_src_fkb_version_raw(dep_fkb_path) < 7) {
             if (!fk_src_compile_artifact_only(dpath)) {
                 fk_import_refusal = 3;
                 ok = 0;
                 break;
             }
         }
+        ids_total = ids_total + dn[d];
         keep[d] = 1;
         d = d + 1;
     }
-    /* keep an image only when no other direct dep's closure holds all of it (of two equal
-     * closures, the first) */
+    /* an image another direct dep's closure holds entirely stays out (of two equal closures,
+     * the first stays), and so does one whose units the images before it already carry */
     long long a = 0;
     while (ok && a < nd) {
         long long b = 0;
@@ -23864,35 +24102,34 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
         }
         a = a + 1;
     }
-    /* the kept closures share no unit */
-    a = 0;
-    while (ok && a < nd) {
-        if (keep[a]) {
-            long long b = a + 1;
-            while (ok && b < nd) {
-                if (keep[b]) {
-                    long long k = 0;
-                    while (k < dn[a]) {
-                        if (fk_src_ids_has(dids[b], dn[b], dids[a][k])) {
-                            fk_import_refusal = 9;
-                            ok = 0;
-                            break;
-                        }
-                        k = k + 1;
-                    }
+    unsigned long long *have = malloc((unsigned long)(ids_total > 0 ? ids_total : 1) * 8);
+    if (have == 0) {
+        fk_die("fk_src_try_import_fkb_images: out of memory planning the imports");
+    }
+    long long have_n = 0;
+    d = 0;
+    while (ok && d < nd) {
+        if (keep[d]) {
+            long long before = have_n;
+            long long k = 0;
+            while (k < dn[d]) {
+                if (!fk_src_ids_has(have, have_n, dids[d][k])) {
+                    have[have_n] = dids[d][k];
+                    have_n = have_n + 1;
                 }
-                b = b + 1;
+                k = k + 1;
+            }
+            if (have_n == before) {
+                keep[d] = 0;
             }
         }
-        a = a + 1;
+        d = d + 1;
     }
-    /* the flat order is every unit of the root's table in text order; the plan is each kept
-     * image's closure in its own text order, then the carried units in text order, then the
-     * root. They are the same sequence, or the lane steps aside. */
+    /* the program's units in the flat compile's order (text order); a unit no imported image
+     * carries is carried as text */
     long long carry_count = 0;
     long long carry_bytes = 0;
     if (ok) {
-        char canon[FK_PATH_CAP];
         a = 0;
         while (a < n_all) {
             long long b = a - 1;
@@ -23905,79 +24142,21 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
         }
         a = 0;
         while (a < n_all) {
-            const char *cid = fk_path_canon_id(fk_src_dep_path[flat[a]], canon);
-            flat_id[a] = fk_bytes_fnv1a(cid, fk_path_len(cid));
-            a = a + 1;
-        }
-        long long pn = 0;
-        d = 0;
-        while (ok && d < nd) {
-            if (keep[d]) {
-                long long k = 0;
-                while (k < dn[d]) {
-                    if (pn >= n_all) {
-                        fk_import_refusal = 10;
-                        ok = 0;
-                        break;
-                    }
-                    plan[pn] = dids[d][k];
-                    pn = pn + 1;
-                    k = k + 1;
-                }
-            }
-            d = d + 1;
-        }
-        unsigned long long root_id = 0;
-        a = 0;
-        while (ok && a < n_all) {
-            if (flat[a] == 0) {
-                root_id = flat_id[a];
-            } else {
-                int covered = 0;
-                d = 0;
-                while (!covered && d < nd) {
-                    if (keep[d] && fk_src_ids_has(dids[d], dn[d], flat_id[a])) {
-                        covered = 1;
-                    }
-                    d = d + 1;
-                }
-                if (!covered) {
-                    if (pn >= n_all) {
-                        fk_import_refusal = 10;
-                        ok = 0;
-                        break;
-                    }
-                    carry_idx[carry_count] = flat[a];
-                    carry_count = carry_count + 1;
-                    carry_bytes = carry_bytes + fk_src_dep_text_len[flat[a]];
-                    plan[pn] = flat_id[a];
-                    pn = pn + 1;
-                }
+            flat_id[a] = fk_canon_id63(fk_src_dep_path[flat[a]]);
+            carried_at[a] = -1;
+            if (flat[a] != 0 && !fk_src_ids_has(have, have_n, flat_id[a])) {
+                carried_at[a] = carry_count;
+                carry_idx[carry_count] = flat[a];
+                carry_count = carry_count + 1;
+                carry_bytes = carry_bytes + fk_src_dep_text_len[flat[a]];
             }
             a = a + 1;
-        }
-        if (ok && pn < n_all) {
-            plan[pn] = root_id;
-            pn = pn + 1;
-        }
-        if (ok) {
-            int same = pn == n_all;
-            a = 0;
-            while (same && a < n_all) {
-                same = plan[a] == flat_id[a];
-                a = a + 1;
-            }
-            if (!same) {
-                fk_import_refusal = 10;
-                ok = 0;
-            }
         }
     }
-    /* CARRY EVERY UNIT THE KEPT IMAGES DO NOT COVER. The wipe below erases the whole-program
-     * text, and imported symbol names are then written into fk_srctext -- so the uncovered
-     * units' text (a direct .bml prelude's lowered subtree, in the witnessed wound) is copied
-     * aside NOW and re-appended after the imports, in text order, or the compiled program
-     * silently loses those defns. */
+    /* CARRY EVERY UNIT NO IMPORTED IMAGE COVERS. The wipe below erases the whole-program text,
+     * and imported symbol names are then written into fk_srctext -- so the uncovered units' text
+     * (a direct .bml prelude's lowered subtree, in the witnessed wound) is copied aside NOW and
+     * re-appended after the imports, or the compiled program silently loses those defns. */
     char *carry_text = 0;
     long long *carry_pos = 0;
     long long *carry_len = 0;
@@ -24056,25 +24235,47 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
         long long cn = 0;
         while (cn < carry_count) {
             long long u = carry_idx[cn];
+            carry_lo[cn] = fk_slen;
             if (!fk_src_append_text(fk_src_dep_path[u], carry_text + carry_pos[cn],
                                     carry_len[cn])) {
                 fk_import_refusal = 8;
                 ok = 0;
                 break;
             }
+            carry_hi[cn] = fk_slen;
             fk_import_carried = fk_import_carried + 1;
             cn = cn + 1;
         }
     }
+    long long root_lo = fk_slen;
     if (ok && !fk_src_append_text(root_path, fk_src_root_text, fk_src_root_len)) {
         fk_import_refusal = 8;
         ok = 0;
+    }
+    long long root_hi = fk_slen;
+    if (ok) {
+        /* the plan the compile runs: every unit once, in the flat compile's order */
+        a = 0;
+        while (a < n_all) {
+            if (flat[a] == 0) {
+                fk_units_add(flat_id[a], root_lo, root_hi, -1);
+            } else if (carried_at[a] >= 0) {
+                fk_units_add(flat_id[a], carry_lo[carried_at[a]], carry_hi[carried_at[a]], -1);
+            } else {
+                long long h = fk_lane_have_find(flat_id[a]);
+                fk_units_add(flat_id[a], -1, -1, h >= 0 ? fk_lane_have_chain[h] : -1);
+            }
+            a = a + 1;
+        }
+        fk_units_lane = 1;
     }
     if (!ok) {
         /* the flat compile will carry everything; a refused lane imported and carried
          * nothing into the program that runs. */
         fk_import_images = 0;
         fk_import_carried = 0;
+        fk_units_n = 0;
+        fk_units_lane = 0;
     }
     d = 0;
     while (d < nd) {
@@ -24087,10 +24288,13 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     free(dids);
     free(dn);
     free(keep);
+    free(have);
     free(flat);
     free(flat_id);
-    free(plan);
+    free(carried_at);
     free(carry_idx);
+    free(carry_lo);
+    free(carry_hi);
     free(carry_text);
     free(carry_pos);
     free(carry_len);
