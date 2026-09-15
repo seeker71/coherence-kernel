@@ -512,6 +512,9 @@ static int fk_src_unrunnable;
 /* fk_diag / fk_diag_flush are DEFINED further down (right after fk_srctext /
  * fk_spos / fk_slen are declared), where they can read the source buffer. */
 static void fk_diag(int sev, long long off, const char *fmt, ...);
+static long long fk_srcseg_n;    /* the source map's rows, defined beside fk_diag_signal */
+static long long *fk_srcseg_off;
+static int fk_unit_lowers(const char *path);
 static void fk_diag_flush(void);
 static void fk_heat_pulse(void);
 static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
@@ -14534,7 +14537,14 @@ static long long fk_hot_pick_by(long long *ledger, long long want, long long *pi
      * the arithmetic that predicted otherwise is wrong about what this loop
      * costs. Kept here so the next reader does not rebuild it. */
     long long pos = 0, line = 1, lastnl = -1;
+    long long seg = 0; /* the next source-map row: its first byte starts its file's line 1 */
     while (pos <= fk_slen) {
+        while (seg < fk_srcseg_n && fk_srcseg_off[seg] <= pos) {
+            if (fk_srcseg_off[seg] == pos) {
+                line = 1;
+            }
+            seg = seg + 1;
+        }
         q = 0;
         while (q < np) {
             if (fk_fnsym_s[picked_j[q]] == pos) { line_of[q] = line; col_of[q] = pos - lastnl; }
@@ -18460,7 +18470,79 @@ static void fk_sig_send(long long observed_at, long long at) {
 }
 /* The signal for one printed source diagnostic. `ap` holds the diagnostic's own
  * arguments; a tagged diagnostic, "[tag] '%.*s' ...", names its offender first. */
-static void fk_diag_signal(int sev, long long off, long long line, long long col,
+/* Where each piece of the assembled unit came from. fk_src_append_text pushes one row per file
+ * or carried unit it appends: the offset its text starts at and the path it was read from. A
+ * symbol read back from an image pushes a row with no path. A diagnostic's offset maps back
+ * through these rows to a file and the line within it, so fkwu names file:line:col as the proof
+ * siblings do; the rows reset whenever the assembled text does. */
+static long long fk_srcseg_n;
+static long long fk_srcseg_cap;
+static long long *fk_srcseg_off;
+static char **fk_srcseg_path;
+static void fk_srcseg_drop_from(long long off) {
+    while (fk_srcseg_n > 0 && fk_srcseg_off[fk_srcseg_n - 1] >= off) {
+        fk_srcseg_n = fk_srcseg_n - 1;
+        free(fk_srcseg_path[fk_srcseg_n]);
+    }
+}
+static void fk_srcseg_reset(void) {
+    fk_srcseg_drop_from(0);
+}
+static void fk_srcseg_push(long long off, const char *path) {
+    if (fk_srcseg_n + 1 > fk_srcseg_cap) {
+        long long nc = fk_srcseg_cap > 0 ? fk_srcseg_cap * 2 : 16;
+        long long *o = realloc(fk_srcseg_off, (unsigned long)nc * sizeof(long long));
+        if (o == 0) {
+            fk_die("fk_srcseg_push: out of memory growing the source map");
+        }
+        fk_srcseg_off = o;
+        char **p = realloc(fk_srcseg_path, (unsigned long)nc * sizeof(char *));
+        if (p == 0) {
+            fk_die("fk_srcseg_push: out of memory growing the source map");
+        }
+        fk_srcseg_path = p;
+        fk_srcseg_cap = nc;
+    }
+    char *held = 0;
+    if (path != 0 && path[0] != 0) {
+        /* a unit that lowers arrives as its lowered text, so its lines are that text's */
+        const char *mark = fk_unit_lowers(path) ? " (lowered text)" : "";
+        long long n = fk_cstrlen(path);
+        long long m = fk_cstrlen(mark);
+        held = malloc((unsigned long)(n + m) + 1);
+        if (held == 0) {
+            fk_die("fk_srcseg_push: out of memory holding a source path");
+        }
+        memcpy(held, path, (unsigned long)n);
+        memcpy(held + n, mark, (unsigned long)m + 1);
+    }
+    fk_srcseg_off[fk_srcseg_n] = off;
+    fk_srcseg_path[fk_srcseg_n] = held;
+    fk_srcseg_n = fk_srcseg_n + 1;
+}
+/* the file and its own line for an offset into the assembled unit: 1 with both set, 0 when the
+ * offset lies in text no file holds (a symbol an image carried, or a unit built in memory) */
+static int fk_srcseg_where(long long off, const char **path, long long *line) {
+    long long i = fk_srcseg_n - 1;
+    while (i >= 0 && fk_srcseg_off[i] > off) {
+        i = i - 1;
+    }
+    if (i < 0 || fk_srcseg_path[i] == 0) {
+        return 0;
+    }
+    long long p = fk_srcseg_off[i];
+    long long n = 1;
+    while (p < off && p < fk_slen) {
+        if (fk_srctext[p] == FK_CH_LF) {
+            n = n + 1;
+        }
+        p = p + 1;
+    }
+    *path = fk_srcseg_path[i];
+    *line = n;
+    return 1;
+}
+static void fk_diag_signal(int sev, long long off, const char *where, long long line, long long col,
                            const char *fmt, __builtin_va_list ap) {
     const char *form = "source";
     long long form_n = 6;
@@ -18527,7 +18609,13 @@ static void fk_diag_signal(int sev, long long off, long long line, long long col
     if (sev == FK_DIAG_ERR) {
         fk_sig_lit("\"request-evidence\",\"revise\"");
     }
-    fk_sig_lit("],\"selected\":\"\",\"evidence\":{\"line\":");
+    fk_sig_lit("],\"selected\":\"\",\"evidence\":{");
+    if (where != 0) {
+        fk_sig_lit("\"path\":");
+        fk_sig_cstr(where);
+        fk_sig_lit(",");
+    }
+    fk_sig_lit("\"line\":");
     if (off >= 0) {
         fk_sig_int(line);
         fk_sig_lit(",\"col\":");
@@ -18659,6 +18747,7 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
         fk_nwarn_seen = fk_nwarn_seen + 1;
     }
     long long lastnl = -1, col = 0, line = 0;
+    const char *where = 0;
     if (off < 0) {
         dprintf(2, "fkwu: %s: ", sev == FK_DIAG_ERR ? "error" : "warning");
     } else {
@@ -18675,7 +18764,13 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
             i = i + 1;
         }
         col = off - lastnl; /* lastnl=-1 on line 1 => col = off+1 */
-        dprintf(2, "fkwu:%lld:%lld: %s: ", line, col, sev == FK_DIAG_ERR ? "error" : "warning");
+        long long wline = 0;
+        if (fk_srcseg_where(off, &where, &wline)) {
+            line = wline;
+            dprintf(2, "fkwu: %s:%lld:%lld: %s: ", where, line, col, sev == FK_DIAG_ERR ? "error" : "warning");
+        } else {
+            dprintf(2, "fkwu:%lld:%lld: %s: ", line, col, sev == FK_DIAG_ERR ? "error" : "warning");
+        }
     }
     __builtin_va_list ap;
     __builtin_va_list sig_ap;
@@ -18684,13 +18779,11 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
     vdprintf(2, fmt, ap);
     __builtin_va_end(ap);
     dprintf(2, "\n");
-    /* Quote the source line itself. Diagnostic positions count lines of the
-     * ASSEMBLED unit (preludes expanded), a text no file on disk holds --
-     * without the quote, a reported line number sends the reader hunting
-     * through files whose numbering can never match (witnessed 2026-08-31:
-     * three "phantom" strays hunted across sessions at file-space lines that
-     * do not exist). Window the line around the column so the caret always
-     * lands inside what is shown. */
+    /* Quote the source line itself. A position names the file and its own line
+     * when the source map holds one; text no file holds (a symbol an image
+     * carried) keeps the assembled unit's line, and the quote is what a reader
+     * finds it by. Window the line around the column so the caret always lands
+     * inside what is shown. */
     if (off >= 0 && fk_slen > 0) {
         long long ls = lastnl + 1, le = off;
         while (le < fk_slen && fk_srctext[le] != FK_CH_LF) {
@@ -18707,7 +18800,7 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
         }
         dprintf(2, "  | %.*s\n  | %*s^\n", (int)wn, fk_srctext + ws, (int)caret, "");
     }
-    fk_diag_signal(sev, off, line, col, fmt, sig_ap);
+    fk_diag_signal(sev, off, where, line, col, fmt, sig_ap);
     __builtin_va_end(sig_ap);
 }
 /* Called ONCE, after parse completes and before execution begins: gcc-style
@@ -21514,23 +21607,26 @@ static int fk_src_line_is_bare_import_fk(const char *text, long long line_start,
 static int fk_src_append_text(const char *path, const char *text, long long n) {
     long long line_start = 0;
     fk_srctext_reserve(fk_slen + n + 2);
+    fk_srcseg_push(fk_slen, path);
     while (line_start < n) {
         long long line_end = line_start;
         while (line_end < n && text[line_end] != FK_CH_LF && text[line_end] != FK_CH_CR) {
             line_end = line_end + 1;
         }
+        long long i = line_start;
         if (!fk_src_line_is_bare_import_fk(text, line_start, line_end)) {
-            long long i = line_start;
             while (i < line_end) {
                 fk_srctext[fk_slen] = text[i];
                 fk_slen = fk_slen + 1;
                 i = i + 1;
             }
-            while (i < n && (text[i] == FK_CH_LF || text[i] == FK_CH_CR)) {
-                fk_srctext[fk_slen] = text[i];
-                fk_slen = fk_slen + 1;
-                i = i + 1;
-            }
+        }
+        /* a bare import line leaves its line break, so every line after it keeps its number */
+        i = line_end;
+        while (i < n && (text[i] == FK_CH_LF || text[i] == FK_CH_CR)) {
+            fk_srctext[fk_slen] = text[i];
+            fk_slen = fk_slen + 1;
+            i = i + 1;
         }
         line_start = line_end;
         while (line_start < n && (text[line_start] == FK_CH_LF || text[line_start] == FK_CH_CR)) {
@@ -22077,6 +22173,7 @@ static int fk_src_load_unit(const char *root_path, char *source_hash, long long 
                             long long *unit_mtime) {
     fk_slen = 0;
     fk_srctext[0] = 0;
+    fk_srcseg_reset();
     fk_src_dep_count = 0;
     fk_src_root_len = 0;
     fk_src_root_text[0] = 0;
@@ -22101,6 +22198,7 @@ static int fk_src_load_unit_buffer(const char *root_path, char *owned, long long
                                    long long hash_cap, long long *unit_mtime) {
     fk_slen = 0;
     fk_srctext[0] = 0;
+    fk_srcseg_reset();
     fk_src_dep_count = 0;
     fk_src_root_len = 0;
     fk_src_root_text[0] = 0;
@@ -22858,6 +22956,7 @@ static int fk_fkb_read_symbol_to_srctext(long long *start, long long *len) {
         return 0;
     }
     fk_srctext_reserve(fk_slen + n + 4);
+    fk_srcseg_push(fk_slen, 0); /* an image's symbol: text no file holds */
     fk_srctext[fk_slen] = FK_CH_SEMI;
     fk_slen = fk_slen + 1;
     fk_srctext[fk_slen] = FK_CH_SPACE;
@@ -23999,6 +24098,7 @@ static int fk_src_standalone_unit(const char *path, int compile, char *hash_out,
     fk_cstr_copy(fk_src_root_path, saved_root_path, FK_PATH_CAP);
     fk_src_root_len = saved_root_len;
     fk_slen = saved_slen;
+    fk_srcseg_drop_from(saved_slen);
     fk_src_root_reserve(saved_root_len + 2);
     fk_srctext_reserve(saved_slen + 1);
     i = 0;
@@ -24254,6 +24354,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
         fk_src_reset_compile_state();
         fk_slen = 0;
         fk_srctext[0] = 0;
+        fk_srcseg_reset();
     }
     d = 0;
     while (ok && d < nd) {
@@ -24643,6 +24744,7 @@ static int fk_run_feval(const char *path) {
     }
     fk_srctext[w] = 0;
     fk_slen = w;
+    fk_srcseg_reset(); /* a unit built in memory: no file holds it */
     fk_spos = 0;
 
     /* same parse+walk pipeline as fk_run_src */
