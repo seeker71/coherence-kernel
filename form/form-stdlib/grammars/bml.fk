@@ -12150,6 +12150,7 @@
     ;; shadows it.
     (defn bml-hati-member-env (layout owner-name member base-env)
         (do
+            (let carried (bml-hati-deferred-voice layout owner-name member))
             (let env0 (bml-hati-env-with-layout base-env layout))
             (let env1
                 (bml-hati-bind-names-to
@@ -12226,20 +12227,187 @@
             true
             (not (nil? (bml-hati-field-declarer layout owner-type field))))))
 
-    ;; a field no class of the receiver's structural chain declares, voiced
-    ;; where it is read or set
+    ;; --- field attributes and access (thesis lines 659-666, 683-685, 726-730)
+    ;; The code a read or set lowers in belongs to the class this names; at a
+    ;; unit's top level it belongs to none.
+    (defn bml-hati-caller-class (env)
+        (do
+            (let binding (bml-local-lookup env "this"))
+            (if (bml-hati-marker-binding? binding "__hati_self")
+                (bml-hati-marker-str (bml-local-binding-value binding) 0)
+                "")))
+
+    ;; private: only the declaring class's methods (lines 685, 729-730);
+    ;; protected: the declaring class and those derived from it (lines 684,
+    ;; 728); public, and package access, anywhere (lines 683, 726-727, 731)
+    (defn bml-hati-access-ok? (layout declarer level caller)
+        (if (str_eq level "private")
+            (str_eq caller declarer)
+            (if (str_eq level "protected")
+                (bml-hati-entries-named? (bml-hati-structural-chain layout caller) declarer)
+                true)))
+
+    (defn bml-hati-field-level (layout owner field)
+        (if (bml-hati-class-flagged? layout owner (str_concat "private:" field))
+            "private"
+            (if (bml-hati-class-flagged? layout owner (str_concat "protected:" field))
+                "protected"
+                "public")))
+
+    ;; a field the caller may reach, or reach through the read (get, line 659)
+    ;; or write (put, line 660) method its attribute creates
+    (defn bml-hati-field-open? (layout type-name field env via)
+        (do
+            (let declarer (bml-hati-field-declarer layout type-name field))
+            (if (nil? declarer)
+                true
+                (do
+                    (let owner (bml-hati-class-name declarer))
+                    (if (bml-hati-access-ok? layout owner (bml-hati-field-level layout owner field) (bml-hati-caller-class env))
+                        true
+                        (bml-hati-class-flagged? layout owner (str_concat via (str_concat ":" field))))))))
+
+    (defn bml-hati-field-readable? (env recv-node field)
+        (do
+            (let layout (bml-hati-env-layout env))
+            (let type-name (bml-hati-static-type recv-node env))
+            (if (bml-hati-field-known? layout type-name field)
+                (bml-hati-field-open? layout type-name field env "get")
+                false)))
+
+    (defn bml-hati-field-writable? (env recv-node field value-node)
+        (do
+            (let layout (bml-hati-env-layout env))
+            (let type-name (bml-hati-static-type recv-node env))
+            (if (bml-hati-field-known? layout type-name field)
+                (if (bml-hati-field-open? layout type-name field env "put")
+                    (not (bml-hati-strict-miss? layout type-name field (bml-hati-static-type value-node env)))
+                    false)
+                false)))
+
+    ;; strict: the field "can only store references to the objects of the
+    ;; defined type (i.e. not to derived objects)" (line 666). Read where the
+    ;; stored value's class is known; relaxed, the default, takes derived ones
+    ;; (line 664).
+    (defn bml-hati-strict-miss? (layout type-name field value-type)
+        (do
+            (let declarer (bml-hati-field-declarer layout type-name field))
+            (if (nil? declarer)
+                false
+                (if (bml-hati-class-flagged? layout (bml-hati-class-name declarer) (str_concat "strict:" field))
+                    (if (nil? (bml-hati-layout-class layout value-type))
+                        false
+                        (not (str_eq value-type (bml-hati-class-field-type layout type-name field))))
+                    false))))
+
+    (defn bml-hati-access-reason (env recv-node field)
+        (do
+            (let layout (bml-hati-env-layout env))
+            (let declarer (bml-hati-field-declarer layout (bml-hati-static-type recv-node env) field))
+            (str_concat "access/" (bml-hati-field-level layout (bml-hati-class-name declarer) field))))
+
+    ;; why a read of recv.field did not lower, voiced where it is read
     (defn bml-hati-field-miss (env recv-node field)
         (bml-hati-voice-refusal
             "field"
-            "field/not-found"
+            (if (bml-hati-field-known? (bml-hati-env-layout env) (bml-hati-static-type recv-node env) field)
+                (bml-hati-access-reason env recv-node field)
+                "field/not-found")
             (str_concat (bml-hati-static-type recv-node env) (str_concat "." field))))
 
+    ;; why a set of recv.field did not lower, voiced where it is set
+    (defn bml-hati-store-miss (env recv-node field value-node)
+        (bml-hati-voice-refusal
+            "field"
+            (if (bml-hati-field-known? (bml-hati-env-layout env) (bml-hati-static-type recv-node env) field)
+                (if (bml-hati-field-open? (bml-hati-env-layout env) (bml-hati-static-type recv-node env) field env "put")
+                    "field/strict"
+                    (bml-hati-access-reason env recv-node field))
+                "field/not-found")
+            (str_concat (bml-hati-static-type recv-node env) (str_concat "." field))))
+
+    ;; obj.M where M is a method marked get reads as a property with no
+    ;; parentheses, as the thesis's container-Rule sample reads
+    ;; m_strName.HashCode (companion source-samples, container-Rule.bml:52)
+    (defn bml-hati-get-method? (env recv-node name)
+        (bml-hati-chain-get-named?
+            (bml-hati-class-chain (bml-hati-env-layout env) (bml-hati-static-type recv-node env))
+            name))
+
+    (defn bml-hati-chain-get-named? (chain name)
+        (if (nil? chain)
+            false
+            (if (nil? (bml-hati-members-named (bml-hati-class-members (head chain)) name))
+                (bml-hati-chain-get-named? (tail chain) name)
+                (fsc-string-list-contains?
+                    (bml-hati-node-flags (bml-hati-class-node (head chain)))
+                    (str_concat "get:" name)))))
+
+    ;; A call the receiver's class does not answer goes to a field marked
+    ;; delegate whose type answers it: the field "delegates all method calls
+    ;; to the default interface" (line 661), and for the methods not
+    ;; implemented, "delegate deferred calls will be generated" (line 723).
+    ;; The field's name, or "" when no such field stands.
+    (defn bml-hati-delegate-via (env recv-node member args)
+        (do
+            (let layout (bml-hati-env-layout env))
+            (bml-hati-delegate-field-in
+                layout
+                (bml-hati-structural-chain layout (bml-hati-static-type recv-node env))
+                member
+                (bml-hati-static-types args env))))
+
+    (defn bml-hati-delegate-field-in (layout chain member arg-types)
+        (if (nil? chain)
+            ""
+            (do
+                (let found
+                    (bml-hati-delegate-field-of
+                        layout
+                        (head chain)
+                        (bml-hati-class-fields (head chain))
+                        member
+                        arg-types))
+                (if (str_eq found "")
+                    (bml-hati-delegate-field-in layout (tail chain) member arg-types)
+                    found))))
+
+    (defn bml-hati-delegate-field-of (layout entry fields member arg-types)
+        (if (nil? fields)
+            ""
+            (if (if (bml-hati-class-flagged?
+                        layout
+                        (bml-hati-class-name entry)
+                        (str_concat "delegate:" (bml-hati-field-entry-name (head fields))))
+                    (bml-hati-choice-ok?
+                        (bml-hati-invoke-choice layout (bml-hati-field-entry-type (head fields)) member arg-types))
+                    false)
+                (bml-hati-field-entry-name (head fields))
+                (bml-hati-delegate-field-of layout entry (tail fields) member arg-types))))
+
+    ;; a flag the native path carries without a meaning the thesis gives,
+    ;; voiced where it is read, naming what is missing
+    (defn bml-hati-voice-carried (what detail)
+        (bml-hati-voice-refusal "carried" what detail))
+
+    ;; The thesis's method attributes (line 644) name no deferred; line 723
+    ;; names delegate deferred calls, which the compiler generates. A method
+    ;; marked deferred runs as written, and its flag is voiced where it lowers.
+    (defn bml-hati-deferred-voice (layout owner-name member)
+        (if (bml-hati-class-flagged?
+                layout
+                owner-name
+                (str_concat "deferred:" (bml-hati-member-name member)))
+            (bml-hati-voice-carried
+                "method/deferred-undefined"
+                (str_concat owner-name (str_concat "." (bml-hati-member-name member))))
+            ""))
+
     (defn bml-hati-lower-field-read (recv-node field pool env)
-        (if (not (bml-hati-field-known?
-                    (bml-hati-env-layout env)
-                    (bml-hati-static-type recv-node env)
-                    field))
-            (bml-hati-lower-refusal (bml-hati-field-miss env recv-node field) pool)
+        (if (not (bml-hati-field-readable? env recv-node field))
+            (if (bml-hati-get-method? env recv-node field)
+                (bml-hati-lower-invoke recv-node field (empty) pool env)
+                (bml-hati-lower-refusal (bml-hati-field-miss env recv-node field) pool))
             (do
                 (let recv (bml-hati-lower-node-in-env recv-node pool env))
                 (let key (bml-hati-lower-string-in (bml-hati-recv-field-key env recv-node field) (bml-hati-lower-pool recv)))
@@ -12248,11 +12416,8 @@
                     (bml-hati-lower-pool key)))))
 
     (defn bml-hati-lower-field-store (recv-node field value-node pool env)
-        (if (not (bml-hati-field-known?
-                    (bml-hati-env-layout env)
-                    (bml-hati-static-type recv-node env)
-                    field))
-            (bml-hati-lower-refusal (bml-hati-field-miss env recv-node field) pool)
+        (if (not (bml-hati-field-writable? env recv-node field value-node))
+            (bml-hati-lower-refusal (bml-hati-store-miss env recv-node field value-node) pool)
             (do
                 (let recv (bml-hati-lower-node-in-env recv-node pool env))
                 (let key (bml-hati-lower-string-in (bml-hati-recv-field-key env recv-node field) (bml-hati-lower-pool recv)))
@@ -12310,6 +12475,13 @@
                         arg-types)))
             (if (bml-hati-choice-ok? choice)
                 (bml-hati-lower-member-call (bml-hati-choice-value choice) recv-node args pool env)
+            (if (gt (str_len (bml-hati-delegate-via env recv-node member args)) 0)
+                (bml-hati-lower-invoke
+                    (bml-ast-member-get recv-node (bml-hati-delegate-via env recv-node member args))
+                    member
+                    args
+                    pool
+                    env)
                 (bml-hati-refuse-after
                     (bml-hati-voice-refusal
                         "receiver"
@@ -12317,7 +12489,7 @@
                         (str_concat (bml-hati-static-type recv-node env) (str_concat "." member)))
                     (cons recv-node args)
                     pool
-                    env))))
+                    env)))))
 
     ;; A refused call still lowers what it carries, so a refusal nested in
     ;; its receiver or arguments is named beside its own.
@@ -13488,26 +13660,67 @@
                 (bml-ast-string (bml-hati-member-access (bml-const-properties member) props)))))
 
     ;; what a class declares of itself for the layout: final, abstract, and
-    ;; final:Name for each final method
+    ;; flag:Name per member for the attributes the native path reads: a
+    ;; method's final, get and deferred; a field's get, put, delegate, shared,
+    ;; strict and relaxed (thesis lines 659-666); either's private or
+    ;; protected access, its own or its section's
     (defn bml-hati-class-flag-names (component)
         (append
             (if (bml-class-final? component) (list "final") (empty))
             (append
                 (if (bml-class-abstract? component) (list "abstract") (empty))
-                (bml-hati-final-method-flags (bml-class-body component)))))
+                (bml-hati-member-flags (bml-class-body component) (empty)))))
 
-    (defn bml-hati-final-method-flags (members)
+    (defn bml-hati-member-flags (members props)
         (if (nil? members)
             (empty)
             (append
-                (if (bml-component-kind? (head members) "Section")
-                    (bml-hati-final-method-flags (bml-section-body (head members)))
-                    (if (if (bml-component-kind? (head members) "Method")
-                            (bml-method-final? (head members))
-                            false)
-                        (list (str_concat "final:" (bml-method-name (head members))))
-                        (empty)))
-                (bml-hati-final-method-flags (tail members)))))
+                (bml-hati-member-flags-of (head members) props)
+                (bml-hati-member-flags (tail members) props))))
+
+    (defn bml-hati-member-flags-of (member props)
+        (if (bml-component-kind? member "Section")
+            (bml-hati-member-flags (bml-section-body member) (bml-section-properties member))
+        (if (bml-component-kind? member "Method")
+            (bml-hati-flags-named
+                (bml-method-name member)
+                (append
+                    (bml-hati-props-in (bml-method-properties member) (list "final" "get" "deferred"))
+                    (bml-hati-access-flag (bml-method-properties member) props)))
+        (if (bml-component-kind? member "Field")
+            (bml-hati-flags-named
+                (bml-field-name member)
+                (append
+                    (bml-hati-props-in
+                        (bml-field-properties member)
+                        (list "get" "put" "delegate" "shared" "strict" "relaxed"))
+                    (append
+                        (if (bml-properties-has? (bml-field-properties member) "delegated")
+                            (list "delegate")
+                            (empty))
+                        (bml-hati-access-flag (bml-field-properties member) props))))
+            (empty)))))
+
+    (defn bml-hati-props-in (props words)
+        (if (nil? words)
+            (empty)
+            (if (bml-properties-has? props (head words))
+                (cons (head words) (bml-hati-props-in props (tail words)))
+                (bml-hati-props-in props (tail words)))))
+
+    (defn bml-hati-access-flag (own section)
+        (do
+            (let level (bml-hati-member-access own section))
+            (if (if (str_eq level "private") true (str_eq level "protected"))
+                (list level)
+                (empty))))
+
+    (defn bml-hati-flags-named (name words)
+        (if (nil? words)
+            (empty)
+            (cons
+                (str_concat (head words) (str_concat ":" name))
+                (bml-hati-flags-named name (tail words)))))
 
     (defn bml-hati-bridge-iface-refs (members)
         (if (nil? members)
