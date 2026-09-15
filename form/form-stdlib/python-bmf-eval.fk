@@ -99,7 +99,7 @@
                 ;; honest panic: missing name → head of empty surfaces the
                 ;; site. Until the dispatcher carries source-positions, the
                 ;; stack trace is the diagnostic.
-                (trace "py-env-lookup: undefined name" name)
+                (py-refuse "py-env-lookup: undefined name" name)
                 (head (empty)))
             (if (str_eq (head (head env)) name)
                 (head (tail (head env)))
@@ -185,7 +185,7 @@
             (if (record_has cls "__base__")
                 (py-resolve-owner (record_get cls "__base__") mname)
                 (do
-                    (trace "py-resolve-owner: no such method" mname)
+                    (py-refuse "py-resolve-owner: no such method" mname)
                     (head (empty))))))
 
     ;; --- super proxy ----------------------------------------------------
@@ -245,15 +245,53 @@
     ;; an honest unknown-op panic (head empty) for any op we haven't
     ;; reached yet.
 
+    ;; A construct the model does not carry refuses by name — the error CPython
+    ;; would raise (NameError, TypeError, KeyError), never a value made up so
+    ;; the walk can continue.
+    (defn py-refuse (what detail)
+        (form_error (str_concat "python model: " (str_concat what (str_concat " " (value_str detail))))))
+
+    ;; `+` is overloaded in Python: list + list concatenates, str + str joins,
+    ;; numbers add. Kernel arithmetic stops on anything but numbers, so the two
+    ;; sequence cases are read here and every other pair keeps the numeric door.
+    (defn py-plus (left right)
+        (if (and (str_eq (value_kind left) "list") (str_eq (value_kind right) "list")) (append left right)
+            (if (and (str_eq (value_kind left) "string") (str_eq (value_kind right) "string")) (str_concat left right)
+                (_plus left right))))
+
+    ;; a ** b for a whole exponent: exact, by squaring. A fractional or negative
+    ;; exponent refuses by name — the model carries no float power yet.
+    (defn py-pow-sq (base e acc)
+        (if (eq e 0) acc
+            (py-pow-sq (mul base base) (div e 2) (if (eq (mod e 2) 1) (mul acc base) acc))))
+    (defn py-pow (left right)
+        (if (and (str_eq (value_kind right) "int") (ge right 0)) (py-pow-sq left right 1)
+            (py-refuse "py-binop: ** needs a whole exponent here, got" right)))
+
+    ;; Slices l[a:b], l[a:], l[:b] over lists and strings. An absent bound
+    ;; arrives as the empty list (py-slice-bound); a negative bound counts from
+    ;; the end, and every bound is clamped to the sequence the way CPython does.
+    (defn py-slice-norm (i n)
+        (if (lt i 0) (if (lt (add n i) 0) 0 (add n i)) (if (gt i n) n i)))
+    (defn py-slice (obj lo hi)
+        (do
+            (let text? (str_eq (value_kind obj) "string"))
+            (let n (if text? (str_len obj) (len obj)))
+            (let a (if (str_eq (value_kind lo) "list") 0 (py-slice-norm lo n)))
+            (let b (if (str_eq (value_kind hi) "list") n (py-slice-norm hi n)))
+            (if text?
+                (if (lt b a) "" (substring obj a b))
+                (if (lt b a) (empty) (take (sub b a) (drop a obj))))))
+
     (defn py-binop-apply (op left right)
-        (if (str_eq op "+")  (add left right)
+        (if (str_eq op "+")  (py-plus left right)
         (if (str_eq op "-")  (sub left right)
         (if (str_eq op "*")  (mul left right)
         (if (str_eq op "/")  (div left right)
         (if (str_eq op "%")  (mod left right)
         (if (str_eq op "//") (div left right)
-        (if (str_eq op "**") (pow left right)
-            (do (trace "py-binop: unsupported op" op) (head (empty)))))))))))
+        (if (str_eq op "**") (py-pow left right)
+            (py-refuse "py-binop: unsupported op" op)))))))))
 
     (defn py-compare-apply (op left right)
         (if (str_eq op "==") (if (eq left right) 1 0)
@@ -263,7 +301,7 @@
         (if (str_eq op ">")  (if (gt left right) 1 0)
         (if (str_eq op ">=") (if (ge left right) 1 0)
         (if (str_eq op "in") (py-member? left right)
-            (do (trace "py-compare: unsupported op" op) (head (empty)))))))))))
+            (py-refuse "py-compare: unsupported op" op)))))))))
 
     ;; ---- the interpreter --------------------------------------------
     ;;
@@ -334,7 +372,7 @@
     (defn py-dict-lookup-str-loop (pairs key)
         (if (nil? pairs)
             (do
-                (trace "py-dict-lookup: missing key" key)
+                (py-refuse "py-dict-lookup: missing key" key)
                 (head (empty)))
             (if (value_eq (head (head pairs)) key)
                 (head (tail (head pairs)))
@@ -430,7 +468,7 @@
         (if (str_eq member "log")   (math_log (head args))
         (if (str_eq member "exp")   (math_exp (head args))
             (do
-                (trace "py-math-resolve: unknown member" member)
+                (py-refuse "py-math-resolve: unknown member" member)
                 (head (empty)))))))))))
 
     ;; py-bind-from-import-loop — bind each `from math import ...` member: a
@@ -579,7 +617,7 @@
             ;; Unknown list method reaching here is a lowering bug; trace the
             ;; name so the next breath knows which clause to add, and leave the
             ;; list unchanged rather than corrupting the accumulator.
-            (do (trace "py-list-method-apply: unimplemented list method" mname)
+            (do (py-refuse "py-list-method-apply: unimplemented list method" mname)
                 oldlist)))
 
     ;; py-ident-name — recover the identifier string from a PY-BMF-IDENT node.
@@ -922,7 +960,7 @@
             ;; membership routes (tag_match_score). The native is three-way value-
             ;; identical for ASCII (string-natives-band.fk).
             (if (str_eq (head args) (head (tail args))) 1 0)
-            (do (trace "py-builtin: unknown" name) (head (empty))))))))))))
+            (do (py-refuse "py-builtin: unknown" name) (head (empty))))))))))))
 
     ;; py-builtin? — 1 iff name is one of the reducing builtins above.
     (defn py-builtin? (name)
@@ -975,14 +1013,12 @@
                     ;; `+` does numeric add AND string concat from one arm.
                     ;; int+int is identical to `add`; str+str / str+int / float
                     ;; promotion all dispatch inside the native.
-                    (if (eq math-inst 1) (_plus lhs-val rhs-val)
+                    (if (eq math-inst 1) (py-plus lhs-val rhs-val)
                     (if (eq math-inst 2) (sub lhs-val rhs-val)
                     (if (eq math-inst 3) (mul lhs-val rhs-val)
                     (if (eq math-inst 4) (div lhs-val rhs-val)
                     (if (eq math-inst 5) (mod lhs-val rhs-val)
-                        (do
-                            (trace "py-eval MATH: unknown inst" math-inst)
-                            (head (empty)))))))))
+                        (py-refuse "py-eval MATH: unknown inst" math-inst)))))))
             (if (and (eq (node_pkg cat) 1)
                      (and (eq (node_level cat) 2)
                           (eq (node_type cat) 13)))
@@ -1007,7 +1043,7 @@
                     (if (eq cmp-inst 5) (if (gt lhs-val rhs-val) 1 0)
                     (if (eq cmp-inst 6) (if (ge lhs-val rhs-val) 1 0)
                         (do
-                            (trace "py-eval COMPARE: unknown inst" cmp-inst)
+                            (py-refuse "py-eval COMPARE: unknown inst" cmp-inst)
                             (head (empty))))))))))
             (if (node_eq cat PY-BMF-BINOP)
                 (do
@@ -1124,15 +1160,22 @@
                 (cons (py-dict-tag) (py-eval-dict-pairs-loop kids env (empty)))
             (if (node_eq cat PY-BMF-SUBSCRIPT)
                 (do
-                    ;; SUBSCRIPT children: object-recipe, index-recipe.
+                    ;; SUBSCRIPT children: object-recipe, index-recipe — or, for
+                    ;; a slice, object-recipe, start-recipe, stop-recipe, where
+                    ;; an absent bound is PY-BMF-PASS (read here as the edge).
                     ;; Dict → string-keyed alist lookup. List → nth(idx).
                     ;; Integer-keyed dicts are a later breath; today's
                     ;; band-test exercises the common string-keyed case.
                     (let obj (py-eval (nth kids 0) env))
-                    (let idx (py-eval (nth kids 1) env))
-                    (if (py-dict? obj)
-                        (py-dict-lookup-str-loop (py-dict-pairs obj) idx)
-                        (nth obj idx)))
+                    (if (eq (len kids) 3)
+                        (py-slice obj
+                            (if (node_eq (node_category (nth kids 1)) PY-BMF-PASS) (empty) (py-eval (nth kids 1) env))
+                            (if (node_eq (node_category (nth kids 2)) PY-BMF-PASS) (empty) (py-eval (nth kids 2) env)))
+                        (do
+                            (let idx (py-eval (nth kids 1) env))
+                            (if (py-dict? obj)
+                                (py-dict-lookup-str-loop (py-dict-pairs obj) idx)
+                                (nth obj idx)))))
             (if (node_eq cat PY-BMF-LAMBDA)
                 ;; LAMBDA children: param-leaves..., body-recipe.
                 ;; Builds an anonymous closure with self-name "" so the
@@ -1150,7 +1193,7 @@
                     ;; Honest unimplemented arm. The trace names the
                     ;; category number so the next breath knows which
                     ;; arm to add.
-                    (trace "py-eval: unimplemented category" cat)
+                    (py-refuse "py-eval: unimplemented category" cat)
                     (head (empty))))))))))))))))))))))))
 
     ;; Surface for callers. py-run takes a module recipe and returns its
