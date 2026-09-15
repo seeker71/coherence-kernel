@@ -18166,6 +18166,348 @@ static void fk_srctext_reserve(long long need) {
 }
 static long long fk_spos;
 static long long fk_slen;
+/* ── the compiler's organ-health signal ──────────────────────────────────────
+ * Each diagnostic a person reads on stderr is followed by one line a running
+ * organ reads: `form-organ health {row}`, a row in the organ-health-v1 language
+ * of form/form-stdlib/organ-health.bml. organ fkwu-compiler; flow is this pid.
+ * A binding the compiler could not resolve asks for the resource `binding`,
+ * detail the name; any other error asks for `source-diagnostics`, detail the
+ * message; a warning is a reading of unknown health. An image the kernel sets
+ * aside to rebuild from source is care it already gives: its reading goes out
+ * with the warning (aspect image:<path>, offering rebuild), and once a rebuilt
+ * image is written the applied row follows under the same id.
+ *
+ * The human lines have readers that count their markers: observe/preflight.fk
+ * reads `[unresolved-call] '`, form/validate.sh counts lines holding
+ * `unresolved-call`, `error:` or `compiled with errors`. This line never spells
+ * them. Kind and name are separate fields, and the string writer \u-escapes the
+ * one byte that would complete such a marker inside a value; parsed, the text
+ * is the same. A quiet (speculative) compile prints neither line. */
+extern int vsnprintf(char *, fk_size_t, const char *, __builtin_va_list);
+static long long fk_sig_seq; /* diagnostics this process has signalled */
+static char *fk_sig_b;
+static long long fk_sig_n;
+static long long fk_sig_cap;
+static int fk_sig_bad;
+#define FK_SIG_HEAL_CAP 16
+static long long fk_sig_heal_n;
+static long long fk_sig_heal_at[FK_SIG_HEAL_CAP];
+static long long fk_sig_heal_seq[FK_SIG_HEAL_CAP];
+static char fk_sig_heal_path[FK_SIG_HEAL_CAP][FK_PATH_CAP];
+static void fk_sig_raw(const char *s, long long n) {
+    if (fk_sig_bad || n <= 0) {
+        return;
+    }
+    if (fk_sig_n + n + 1 > fk_sig_cap) {
+        long long nc = fk_sig_cap > 0 ? fk_sig_cap : 1024;
+        while (nc < fk_sig_n + n + 1) {
+            nc = nc * 2;
+        }
+        char *q = realloc(fk_sig_b, (unsigned long)nc);
+        if (q == 0) {
+            fk_sig_bad = 1;
+            return;
+        }
+        fk_sig_b = q;
+        fk_sig_cap = nc;
+    }
+    long long i = 0;
+    while (i < n) {
+        fk_sig_b[fk_sig_n + i] = s[i];
+        i = i + 1;
+    }
+    fk_sig_n = fk_sig_n + n;
+}
+static void fk_sig_lit(const char *s) {
+    fk_sig_raw(s, fk_cstrlen(s));
+}
+static void fk_sig_int(long long v) {
+    char t[32];
+    sprintf(t, "%lld", v);
+    fk_sig_lit(t);
+}
+/* does s hold `mark` immediately before index i? */
+static int fk_sig_ends_at(const char *s, long long i, const char *mark) {
+    long long m = fk_cstrlen(mark);
+    long long k = 0;
+    if (i < m) {
+        return 0;
+    }
+    while (k < m) {
+        if (s[i - m + k] != mark[k]) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+static int fk_sig_has(const char *s, const char *needle) {
+    long long n = fk_cstrlen(s);
+    long long i = fk_cstrlen(needle);
+    while (i <= n) {
+        if (fk_sig_ends_at(s, i, needle)) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+static void fk_sig_text(const char *s, long long n) {
+    long long i = 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        int marker = (c == ':' && fk_sig_ends_at(s, i, "error")) ||
+                     (c == '-' && fk_sig_ends_at(s, i, "unresolved")) ||
+                     (c == 's' && fk_sig_ends_at(s, i, "compiled with error"));
+        if (c == '"') {
+            fk_sig_raw("\\\"", 2);
+        } else if (c == '\\') {
+            fk_sig_raw("\\\\", 2);
+        } else if (c == '\n') {
+            fk_sig_raw("\\n", 2);
+        } else if (c == '\t') {
+            fk_sig_raw("\\t", 2);
+        } else if (c < 32 || c == 127 || marker) {
+            char u[8];
+            sprintf(u, "\\u%04x", (unsigned int)c);
+            fk_sig_raw(u, 6);
+        } else {
+            fk_sig_raw(s + i, 1);
+        }
+        i = i + 1;
+    }
+}
+static void fk_sig_str(const char *s, long long n) {
+    fk_sig_raw("\"", 1);
+    fk_sig_text(s, n);
+    fk_sig_raw("\"", 1);
+}
+static void fk_sig_cstr(const char *s) {
+    fk_sig_str(s, s != 0 ? fk_cstrlen(s) : 0);
+}
+/* identity and reading, up to the first need */
+static void fk_sig_head(long long at, long long seq, const char *image, const char *stage,
+                        const char *observed, const char *health) {
+    long long pid = (long long)getpid();
+    fk_sig_n = 0;
+    fk_sig_bad = 0;
+    fk_sig_lit("form-organ health {\"schema\":\"organ-health-v1\",\"id\":\"");
+    fk_sig_int(pid);
+    fk_sig_lit(":");
+    fk_sig_int(at);
+    fk_sig_lit(":");
+    fk_sig_int(seq);
+    fk_sig_lit("\",\"organ\":\"fkwu-compiler\",\"flow\":\"");
+    fk_sig_int(pid);
+    fk_sig_lit("\",\"aspect\":\"");
+    if (image != 0) {
+        fk_sig_lit("image:");
+        fk_sig_text(image, fk_cstrlen(image));
+    } else {
+        fk_sig_lit("diagnostic");
+    }
+    fk_sig_lit("\",\"stage\":\"");
+    fk_sig_lit(stage);
+    fk_sig_lit("\",\"expected\":\"clean\",\"observed\":\"");
+    fk_sig_lit(observed);
+    fk_sig_lit("\",\"health\":");
+    fk_sig_lit(health);
+    fk_sig_lit(",\"surprise\":1,\"needs\":[");
+}
+/* the times close the row, and the line goes out whole */
+static void fk_sig_send(long long observed_at, long long at) {
+    fk_sig_lit(",\"observed_at_ms\":");
+    fk_sig_int(observed_at);
+    fk_sig_lit(",\"at_ms\":");
+    fk_sig_int(at);
+    fk_sig_lit("}\n");
+    if (!fk_sig_bad) {
+        fk_write_all_raw(2, fk_sig_b, (unsigned long)fk_sig_n);
+    }
+}
+/* The signal for one printed source diagnostic. `ap` holds the diagnostic's own
+ * arguments; a tagged diagnostic, "[tag] '%.*s' ...", names its offender first. */
+static void fk_diag_signal(int sev, long long off, long long line, long long col,
+                           const char *fmt, __builtin_va_list ap) {
+    const char *form = "source";
+    long long form_n = 6;
+    const char *name = 0;
+    long long name_n = 0;
+    char *msg = 0;
+    long long msg_n = 0;
+    long long at = fk_now_ms();
+    long long k = 1;
+    int binding = 0;
+    __builtin_va_list msg_ap;
+    __builtin_va_copy(msg_ap, ap);
+    if (fmt[0] == '[') {
+        while (fmt[k] != 0 && fmt[k] != ']' && k < 64) {
+            k = k + 1;
+        }
+        if (fmt[k] == ']') {
+            form = fmt + 1;
+            form_n = k - 1;
+            if (fk_sig_ends_at(fmt, k + 8, "] '%.*s'")) {
+                int nn = __builtin_va_arg(ap, int);
+                name = __builtin_va_arg(ap, const char *);
+                name_n = nn > 0 ? nn : 0;
+            }
+        }
+    }
+    if (name != 0 && form_n == 15 && fk_sig_ends_at(form, 15, "unresolved-call")) {
+        binding = 1;
+        form = "call";
+        form_n = 4;
+    } else if (name != 0 && form_n == 12 && fk_sig_ends_at(form, 12, "unbound-name")) {
+        binding = 1;
+        form = "name";
+        form_n = 4;
+    }
+    if (sev == FK_DIAG_ERR && !binding) {
+        __builtin_va_list len_ap;
+        __builtin_va_copy(len_ap, msg_ap);
+        int mn = vsnprintf(0, 0, fmt, len_ap);
+        __builtin_va_end(len_ap);
+        if (mn > 0) {
+            msg = malloc((unsigned long)mn + 1);
+            if (msg != 0) {
+                vsnprintf(msg, (fk_size_t)mn + 1, fmt, msg_ap);
+                msg_n = mn;
+            }
+        }
+    }
+    __builtin_va_end(msg_ap);
+    fk_sig_seq = fk_sig_seq + 1;
+    fk_sig_head(at, fk_sig_seq, 0, "observe",
+                binding ? "binding-missing" : sev == FK_DIAG_ERR ? "compile-error" : "compile-warning",
+                sev == FK_DIAG_ERR ? "0" : "null");
+    if (binding) {
+        fk_sig_lit("{\"resource\":\"binding\",\"detail\":");
+        fk_sig_str(name, name_n);
+        fk_sig_lit("}");
+    } else if (sev == FK_DIAG_ERR) {
+        fk_sig_lit("{\"resource\":\"source-diagnostics\",\"detail\":");
+        fk_sig_str(msg != 0 ? msg : fmt, msg != 0 ? msg_n : fk_cstrlen(fmt));
+        fk_sig_lit("}");
+    }
+    fk_sig_lit("],\"offers\":[");
+    if (sev == FK_DIAG_ERR) {
+        fk_sig_lit("\"request-evidence\",\"revise\"");
+    }
+    fk_sig_lit("],\"selected\":\"\",\"evidence\":{\"line\":");
+    if (off >= 0) {
+        fk_sig_int(line);
+        fk_sig_lit(",\"col\":");
+        fk_sig_int(col);
+    } else {
+        fk_sig_lit("null,\"col\":null");
+    }
+    fk_sig_lit(",\"form\":");
+    fk_sig_str(form, form_n);
+    if (name != 0) {
+        fk_sig_lit(",\"name\":");
+        fk_sig_str(name, name_n);
+    }
+    if (fk_src_root_path[0] != 0) {
+        fk_sig_lit(",\"unit\":");
+        fk_sig_cstr(fk_src_root_path);
+    }
+    fk_sig_lit("}");
+    fk_sig_send(at, at);
+    free(msg);
+}
+/* The signal for a diagnostic that names a path instead of a source coordinate.
+ * An image set aside for a rebuild offers `rebuild` and is held until a rebuilt
+ * image is written (fk_sig_heal_settle). */
+static void fk_diag_path_signal(const char *level, const char *path, const char *msg) {
+    int err = level[0] == 'e';
+    long long pn = path != 0 ? fk_cstrlen(path) : 0;
+    int image = pn > 0 && (fk_sig_ends_at(path, pn, ".fkb") || fk_sig_ends_at(path, pn, ".sym") ||
+                           fk_sig_ends_at(path, pn, ".dylib"));
+    int heal = !err && pn > 0 && pn < FK_PATH_CAP &&
+               (fk_sig_has(msg, "rebuilding") || fk_sig_has(msg, "re-lowering") ||
+                fk_sig_has(msg, "stale .fkb ignored"));
+    long long at = fk_now_ms();
+    fk_sig_seq = fk_sig_seq + 1;
+    fk_sig_head(at, fk_sig_seq, heal ? path : 0, "observe", err ? "compile-error" : "compile-warning",
+                err ? "0" : "null");
+    if (err) {
+        fk_sig_lit("{\"resource\":\"source-diagnostics\",\"detail\":");
+        fk_sig_cstr(msg);
+        fk_sig_lit("}");
+    }
+    fk_sig_lit("],\"offers\":[");
+    if (err) {
+        fk_sig_lit("\"request-evidence\",\"revise\"");
+    } else if (heal) {
+        fk_sig_lit("\"rebuild\"");
+    }
+    fk_sig_lit("],\"selected\":\"\",\"evidence\":{\"path\":");
+    fk_sig_cstr(path);
+    fk_sig_lit(image ? ",\"form\":\"image\"}" : ",\"form\":\"unit\"}");
+    fk_sig_send(at, at);
+    if (heal && fk_sig_heal_n < FK_SIG_HEAL_CAP) {
+        long long i = 0;
+        while (i <= pn) {
+            fk_sig_heal_path[fk_sig_heal_n][i] = path[i];
+            i = i + 1;
+        }
+        fk_sig_heal_at[fk_sig_heal_n] = at;
+        fk_sig_heal_seq[fk_sig_heal_n] = fk_sig_seq;
+        fk_sig_heal_n = fk_sig_heal_n + 1;
+    }
+}
+/* the stem an image and its lens share: x.fkb, x.sym -> x */
+static long long fk_sig_stem_n(const char *p) {
+    long long n = fk_cstrlen(p);
+    if (fk_sig_ends_at(p, n, ".fkb") || fk_sig_ends_at(p, n, ".sym")) {
+        return n - 4;
+    }
+    return n;
+}
+/* A rebuilt image was written, and the images it answers get their applied row.
+ * The printed (authoritative) compile rebuilt the program from source, which
+ * answers every image set aside before it; a quiet (speculative) compile answers
+ * only an image of its own stem. */
+static void fk_sig_heal_settle(const char *fkb_path) {
+    long long i = 0;
+    long long kept = 0;
+    long long fn = fk_sig_stem_n(fkb_path);
+    long long now = fk_now_ms();
+    while (i < fk_sig_heal_n) {
+        const char *p = fk_sig_heal_path[i];
+        long long pn = fk_sig_stem_n(p);
+        int same = pn == fn;
+        long long k = 0;
+        while (same && k < pn) {
+            same = p[k] == fkb_path[k];
+            k = k + 1;
+        }
+        if (fk_diag_quiet == 0 || same) {
+            fk_sig_head(fk_sig_heal_at[i], fk_sig_heal_seq[i], p, "applied", "compile-warning", "null");
+            fk_sig_lit("],\"offers\":[\"rebuild\"],\"selected\":\"rebuild\",\"evidence\":{\"path\":");
+            fk_sig_cstr(p);
+            fk_sig_lit(",\"form\":\"image\"},\"result\":{\"image\":\"rebuilt\",\"path\":");
+            fk_sig_cstr(fkb_path);
+            fk_sig_lit("}");
+            fk_sig_send(fk_sig_heal_at[i], now);
+        } else {
+            if (kept != i) {
+                k = 0;
+                while (p[k] != 0) {
+                    fk_sig_heal_path[kept][k] = p[k];
+                    k = k + 1;
+                }
+                fk_sig_heal_path[kept][k] = 0;
+                fk_sig_heal_at[kept] = fk_sig_heal_at[i];
+                fk_sig_heal_seq[kept] = fk_sig_heal_seq[i];
+            }
+            kept = kept + 1;
+        }
+        i = i + 1;
+    }
+    fk_sig_heal_n = kept;
+}
 /* clang-style "fkwu:line:col: sev: msg". `off` is a byte offset into fk_srctext;
  * a negative off suppresses the coordinate (for artifact-load diagnostics that
  * read fk_buf, not source text). The variadic body delegates to vdprintf so
@@ -18184,11 +18526,12 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
     } else {
         fk_nwarn_seen = fk_nwarn_seen + 1;
     }
-    long long lastnl = -1, col = 0;
+    long long lastnl = -1, col = 0, line = 0;
     if (off < 0) {
         dprintf(2, "fkwu: %s: ", sev == FK_DIAG_ERR ? "error" : "warning");
     } else {
-        long long line = 1, i = 0;
+        long long i = 0;
+        line = 1;
         if (off > fk_slen) {
             off = fk_slen;
         }
@@ -18203,7 +18546,9 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
         dprintf(2, "fkwu:%lld:%lld: %s: ", line, col, sev == FK_DIAG_ERR ? "error" : "warning");
     }
     __builtin_va_list ap;
+    __builtin_va_list sig_ap;
     __builtin_va_start(ap, fmt);
+    __builtin_va_copy(sig_ap, ap);
     vdprintf(2, fmt, ap);
     __builtin_va_end(ap);
     dprintf(2, "\n");
@@ -18230,6 +18575,8 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
         }
         dprintf(2, "  | %.*s\n  | %*s^\n", (int)wn, fk_srctext + ws, (int)caret, "");
     }
+    fk_diag_signal(sev, off, line, col, fmt, sig_ap);
+    __builtin_va_end(sig_ap);
 }
 /* Called ONCE, after parse completes and before execution begins: gcc-style
  * tally. Silent when clean, so the default happy path prints nothing new.
@@ -20458,6 +20805,7 @@ static void fk_diag_path(const char *level, const char *path, const char *msg) {
     }
     fk_write_all_raw(2, msg, (unsigned long)fk_path_len(msg));
     fk_write_all_raw(2, "\n", 1);
+    fk_diag_path_signal(level, path, msg);
 }
 #define FK_SRC_HASH_CAP 16384
 /* A source unit is a graph, not a fixed-width table.  The former 128-file
@@ -23007,6 +23355,7 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
         }
         fk_die("fk_run_src: failed to write .fkb/.sym artifacts");
     }
+    fk_sig_heal_settle(fkb_path);
 }
 static int fk_src_compile_artifact_only(const char *path) {
     char compile_path[FK_PATH_CAP];
