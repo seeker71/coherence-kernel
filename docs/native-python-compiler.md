@@ -4,7 +4,7 @@
 
 ```sh
 form-run ./fkwu observe/python-specimen-compile-run.bml <<'EOF'
-{"source":"form/form-kernel-ts/seedbank/python-adapter/examples/python_demo.py","output":"/tmp/python-demo.fk"}
+{"source":"observe/fixtures/python_demo.py","output":"/tmp/python-demo.fk"}
 EOF
 form-run ./fkwu /tmp/python-demo.fk
 ```

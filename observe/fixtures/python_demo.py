@@ -1,16 +1,10 @@
-# python_demo.py — non-trivial Python parsed and executed through the
-# form-kernel-ts BMF Python language cell. BMF coverage today is
-# functional Python: def, recursion, conditional expressions, arithmetic,
-# comparisons, logic, function calls. Assignment + iteration land in a
-# follow-up breath; this demo stays pure-recursive to exercise the surface
-# that's actually shipped.
-#
-# The whole program runs through the Form-kernel walker (for native
-# dispatches) and the Python CTOR evaluator (for Form-shape dispatches);
-# both surfaces are visible in the python-trace JSON output.
+# python_demo.py — a Python input specimen for fkwu's Form-native Python
+# compiler: def, recursion, conditional expressions, arithmetic,
+# comparisons, logic and calls. Its compiled .fk returns 40949 on fkwu;
+# observe/python-native-compiler-witness.bml reads it from here.
 #
 # Usage:
-#   From the repository root, send {"source":"form/form-kernel-ts/seedbank/python-adapter/examples/python_demo.py"}
+#   From the repository root, send {"source":"observe/fixtures/python_demo.py"}
 #   to ./fkwu observe/kernel-trace-run.bml on stdin.
 
 def fact(n):
