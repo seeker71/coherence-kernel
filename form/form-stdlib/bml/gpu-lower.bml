@@ -77,7 +77,7 @@ section [form.bml] {
         }
         def gl-param-text(k, lists, env) {
             let bound = gl-env-get(env, gl-slot(k));
-            if nothing?(bound) then if gl-list-slot?(lists, gl-slot(k)) then gl-no("a list used as a value") else gl-no("a scalar parameter in the element expression") else gl-ok(bound);
+            if nothing?(bound) then if gl-list-slot?(lists, gl-slot(k)) then gl-no("a list used as a value") else gl-ok(str_concat("c", int_to_str(gl-slot(k)))) else gl-ok(bound);
         }
 
         // ---- the shape: ifs exiting on nil? of a list parameter, then the self call ----
@@ -98,25 +98,37 @@ section [form.bml] {
             let acc2 = if gl-param?(thn) then gl-slot(thn) else -1;
             if lt(slot, 0) then gl-no("an exit that is not nil? of a list parameter") else if lt(acc2, 0) then gl-no("an exit answering something other than the accumulator") else if and(ge(acc, 0), not(eq(acc, acc2))) then gl-no("two accumulators") else gl-shape(gl-c(k), idx, cons(slot, lists), acc2);
         }
-        def gl-self-args-ok?(args, slot, lists, acc) = if nil?(args) then 1 else if eq(slot, acc) then gl-self-args-ok?(tail(args), add(slot, 1), lists, acc) else if gl-list-slot?(lists, slot) then if and(eq(gl-tag(head(args)), 21), and(gl-param?(gl-a(head(args))), eq(gl-slot(gl-a(head(args))), slot))) then gl-self-args-ok?(tail(args), add(slot, 1), lists, acc) else 0 else 0;
+        // a self-call argument keeps its parameter: a list tailed, a scalar passed through, the accumulator folded
+        def gl-self-args-ok?(args, slot, lists, acc) = if nil?(args) then 1 else if eq(slot, acc) then gl-self-args-ok?(tail(args), add(slot, 1), lists, acc) else if gl-list-slot?(lists, slot) then if and(eq(gl-tag(head(args)), 21), and(gl-param?(gl-a(head(args))), eq(gl-slot(gl-a(head(args))), slot))) then gl-self-args-ok?(tail(args), add(slot, 1), lists, acc) else 0 else if and(gl-param?(head(args)), eq(gl-slot(head(args)), slot)) then gl-self-args-ok?(tail(args), add(slot, 1), lists, acc) else 0;
         def gl-fold-node(args, slot, acc) = if eq(slot, acc) then head(args) else gl-fold-node(tail(args), add(slot, 1), acc);
+        def gl-scalars(arity, lists, acc, s, out) = if ge(s, arity) then reverse(out) else gl-scalars(arity, lists, acc, add(s, 1), if or(eq(s, acc), gl-list-slot?(lists, s)) then out else cons(s, out));
+        // the fold: (add acc E) is a reduce, (cons E acc) is a map; answers list(kind, element text)
         def gl-element(fold, idx, lists, acc) {
             let x = gl-a(fold);
             let y = gl-b(fold);
             let side = if and(gl-param?(x), eq(gl-slot(x), acc)) then y else if and(gl-param?(y), eq(gl-slot(y), acc)) then x else -1;
-            if not(eq(gl-tag(fold), 3)) then gl-no("the accumulator folds with something other than add") else if lt(side, 0) then gl-no("the fold does not name the accumulator") else gl-expr(side, idx, lists, list(), 0);
+            let kind = if eq(gl-tag(fold), 3) then "reduce" else if and(eq(gl-tag(fold), 19), and(gl-param?(y), eq(gl-slot(y), acc))) then "map" else "";
+            let text = if eq(str_len(kind), 0) then gl-no("the accumulator folds with something other than add or cons") else if lt(side, 0) then gl-no("the fold does not name the accumulator") else gl-expr(if str_eq(kind, "map") then x else side, idx, lists, list(), 0);
+            if gl-ok?(text) then gl-ok(list(kind, gl-val(text))) else text;
         }
 
         // ---- the kernel text ----
         def gl-nl() = byte_to_str(10);
         def gl-buffers(lists, j, acc) = if nil?(lists) then reverse(acc) else gl-buffers(tail(lists), add(j, 1), cons(str_concat("device const float *p", str_concat(int_to_str(head(lists)), str_concat(" [[buffer(", str_concat(int_to_str(j), ")]], ")))), acc));
-        def gl-source(lists, elem) {
+        def gl-consts(scalars, j, acc) = if nil?(scalars) then reverse(acc) else gl-consts(tail(scalars), add(j, 1), cons(str_concat("constant float &c", str_concat(int_to_str(head(scalars)), str_concat(" [[buffer(", str_concat(int_to_str(j), ")]], ")))), acc));
+        def gl-source(kind, lists, scalars, elem) = if str_eq(kind, "map") then gl-source-map(lists, scalars, elem) else gl-source-reduce(lists, scalars, elem);
+        def gl-source-map(lists, scalars, elem) {
             let nb = len(lists);
-            let sig = str_concat(str-join(gl-buffers(lists, 0, list())), str_concat("device float *out [[buffer(", str_concat(int_to_str(nb), str_concat(")]], constant uint &n [[buffer(", str_concat(int_to_str(add(nb, 1)), str_concat(")]], constant float &init [[buffer(", str_concat(int_to_str(add(nb, 2)), ")]], uint tid [[thread_position_in_threadgroup]], uint tpg [[threads_per_threadgroup]], uint sid [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]")))))));
+            let sig = str_concat(str-join(gl-buffers(lists, 0, list())), str_concat("device float *out [[buffer(", str_concat(int_to_str(nb), str_concat(")]], constant uint &n [[buffer(", str_concat(int_to_str(add(nb, 1)), str_concat(")]], ", str_concat(str-join(gl-consts(scalars, add(nb, 2), list())), "uint i [[thread_position_in_grid]]")))))));
+            str-join-with(list("#pragma clang fp contract(off)", "#include <metal_stdlib>", "using namespace metal;", str_concat("kernel void form_map(", str_concat(sig, ") {")), str_concat("    if (i < n) { out[i] = ", str_concat(elem, "; }")), "}", ""), gl-nl());
+        }
+        def gl-source-reduce(lists, scalars, elem) {
+            let nb = len(lists);
+            let sig = str_concat(str-join(gl-buffers(lists, 0, list())), str_concat("device float *out [[buffer(", str_concat(int_to_str(nb), str_concat(")]], constant uint &n [[buffer(", str_concat(int_to_str(add(nb, 1)), str_concat(")]], constant float &init [[buffer(", str_concat(int_to_str(add(nb, 2)), str_concat(")]], ", str_concat(str-join(gl-consts(scalars, add(nb, 3), list())), "uint tid [[thread_position_in_threadgroup]], uint tpg [[threads_per_threadgroup]], uint sid [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]")))))))));
             str-join-with(list("#pragma clang fp contract(off)", "#include <metal_stdlib>", "using namespace metal;", str_concat("kernel void form_reduce(", str_concat(sig, ") {")), "    threadgroup float part[32];", "    float acc = 0.0f;", str_concat("    for (uint i = tid; i < n; i += tpg) { acc = (acc + ", str_concat(elem, "); }")), "    acc = simd_sum(acc);", "    if (lane == 0) { part[sid] = acc; }", "    threadgroup_barrier(mem_flags::mem_threadgroup);", "    if (tid == 0) { float s = init; uint g = (tpg + 31u) / 32u; for (uint k = 0; k < g; k++) { s = (s + part[k]); } out[0] = s; }", "}", ""), gl-nl());
         }
 
-        // ---- lowering a named defn: list(1, msl, lists, acc-slot) or list(0, reason) ----
+        // ---- lowering a named defn: list(1, msl, lists, acc-slot, kind, scalars) or list(0, reason) ----
         def gl-lower(name) {
             let row = gl-find(name);
             if nothing?(row) then gl-no(str_concat("no defn named ", name)) else gl-lower-row(row);
@@ -129,18 +141,20 @@ section [form.bml] {
         }
         def gl-lower-shape(idx, lists, acc, self) {
             let args = gl-args(self);
-            let elem = if eq(gl-self-args-ok?(args, 0, lists, acc), 1) then gl-element(gl-fold-node(args, 0, acc), idx, lists, acc) else gl-no("the self call does not tail every list and keep the accumulator");
-            if gl-ok?(elem) then list(1, gl-source(lists, gl-val(elem)), lists, acc) else elem;
+            let scalars = gl-scalars(len(args), lists, acc, 0, list());
+            let elem = if eq(gl-self-args-ok?(args, 0, lists, acc), 1) then gl-element(gl-fold-node(args, 0, acc), idx, lists, acc) else gl-no("the self call does not tail every list and keep every parameter");
+            if gl-ok?(elem) then list(1, gl-source(nth(gl-val(elem), 0), lists, scalars, nth(gl-val(elem), 1)), lists, acc, nth(gl-val(elem), 0), scalars) else elem;
         }
+        def gl-kind(low) = nth(low, 4);
 
-        // ---- a program: lowered, admitted; list(1, version, lists, msl) or list(0, reason) ----
+        // ---- a program: lowered, admitted; list(1, version, lists, msl, kind, scalars) or list(0, reason) ----
         def gl-program(name) {
             let low = gl-lower(name);
-            if gl-ok?(low) then gl-admit(nth(low, 1), nth(low, 2)) else low;
+            if gl-ok?(low) then gl-admit(nth(low, 1), nth(low, 2), nth(low, 4), nth(low, 5)) else low;
         }
-        def gl-admit(msl, lists) {
-            let version = mj-memory(msl, "form_reduce");
-            if nothing?(version) then gl-no(str_concat("metal refused the program: ", metal_status())) else list(1, version, lists, msl);
+        def gl-admit(msl, lists, kind, scalars) {
+            let version = mj-memory(msl, if str_eq(kind, "map") then "form_map" else "form_reduce");
+            if nothing?(version) then gl-no(str_concat("metal refused the program: ", metal_status())) else list(1, version, lists, msl, kind, scalars);
         }
         def gl-identity(prog) = nth(nth(prog, 1), 1);
 
@@ -161,13 +175,20 @@ section [form.bml] {
         }
 
         // ---- one call: one enqueue, nothing waited; the pending answer is the out buffer ----
-        def gl-run(prog, bufs, n, init) {
-            let out = metal_buf_alloc(4);
-            let bind = md-bind16(append(bufs, list(out)), list(n, md-f32-bits(init)), 1024, 0, 1, 0);
-            let enq = mj-enqueue(nth(prog, 1), bind, 1);
+        // a reduce answers one float at out; a map answers n floats; scalars ride as constants in slot order
+        def gl-bits-onto(xs, acc) = if nil?(xs) then reverse(acc) else gl-bits-onto(tail(xs), cons(md-f32-bits(head(xs)), acc));
+        def gl-run(prog, bufs, n, init, scalars) {
+            let map = str_eq(nth(prog, 4), "map");
+            let out = metal_buf_alloc(if map then mul(4, n) else 4);
+            let consts = if map then cons(n, gl-bits-onto(scalars, list())) else cons(n, cons(md-f32-bits(init), gl-bits-onto(scalars, list())));
+            let bind = if map then md-bind(append(bufs, list(out)), consts) else md-bind16(append(bufs, list(out)), consts, 1024, 0, 1, 0);
+            let enq = mj-enqueue(nth(prog, 1), bind, if map then n else 1);
             if eq(enq, 1) then out else gl-no(str_concat("enqueue refused: ", metal_status()));
         }
         def gl-read(out) = gl-f32-of(gl-u32(metal_buf_read(out, 0, 4)));
+        // the first n floats of a resident buffer, decoded here: a small read, never the whole tensor
+        def gl-read-n(out, n) = gl-floats-at(metal_buf_read(out, 0, mul(4, n)), 0, n, list());
+        def gl-floats-at(s, i, n, acc) = if ge(i, n) then reverse(acc) else gl-floats-at(s, add(i, 1), n, cons(gl-f32-of(gl-u32(substring(s, mul(4, i), mul(4, add(i, 1))))), acc));
 
         // ---- a counter out of metal_status ----
         def gl-count(key) {
