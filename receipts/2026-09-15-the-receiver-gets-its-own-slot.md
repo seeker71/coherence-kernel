@@ -249,9 +249,23 @@ BML sources, and a BML source cannot make a host record, so the witness is two c
 `bml-hati-native-class-dispatch-proof.fk`: after `Read`, the host record reads `bmlClass` "Rule"
 and `bmlClassId` 0, and the proof moves from 17 to 19.
 
+## The witnesses run where the door runs
+
+The probes I wrote outside the tree became fixtures the live-run door reads with their own answers:
+`bml-class-bare-fields.bml` (24), `bml-class-aliasing.bml` (13), `bml-class-interface-default.bml`
+("hi"), `bml-class-interface-dispatch.bml` (21), `bml-field-path-member.bml` (17),
+`bml-field-dotted.bml` (9), `bml-source-unread-import.bml` (`source/unread,call/unbound`, with its
+unit `bml-source-unread-import-cut.bml`), `bml-class-import-scope-main.bml` (`call/unbound`),
+`bml-class-import-const.bml` (42, with `bml-class-import-const-lib.bml`) and
+`bml-call-result-generic.bml` (1). The host-record witness lives in the class-dispatch proof.
+
 ## Still open, with the reason
 
-- The witness probes stay outside the tree and ran on fkwu only.
+- A field read straight off a call or a `new` (`new E().a`) is not read: the reader's member tail
+  takes only `.member(args)`. Writing the delegation fixture found it.
+- A delegate's fields ride in the delegating record, not in a separate delegate object; a field
+  name two lines both declare reads one slot.
+- A field initializer reads the unit's names, not `this` or another field.
 
 ## For the lead
 
