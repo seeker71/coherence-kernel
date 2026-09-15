@@ -1785,6 +1785,8 @@ func (k *Kernel) registerNatives() {
 		rec := &Record{}
 		if args[0].Kind == VInt && args[0].Int == 0 {
 			rec.NoBlueprint = true
+		} else if args[0].Kind == VRecord {
+			rec.BlueprintRec = args[0].Rec
 		} else {
 			rec.Blueprint = args[0].AsNid()
 		}
@@ -1818,6 +1820,9 @@ func (k *Kernel) registerNatives() {
 	// record_blueprint — (record_blueprint rec) → the blueprint NodeID, or 0
 	// for a record built without one.
 	k.registerNative("record_blueprint", catAccess(), func(_ *Kernel, args []Value) Value {
+		if args[0].Rec.BlueprintRec != nil {
+			return Value{Kind: VRecord, Rec: args[0].Rec.BlueprintRec}
+		}
 		if args[0].Rec.NoBlueprint {
 			return Value{Kind: VInt, Int: 0}
 		}

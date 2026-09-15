@@ -2564,6 +2564,9 @@ pub(crate) struct Record {
     /// no method table; record_blueprint reads back 0 (fkwu keeps the operand
     /// verbatim).
     blueprint: Option<NodeID>,
+    /// A record given as the blueprint, kept verbatim as fkwu keeps the
+    /// operand (native-recipe-record.bml's owner); no method table.
+    blueprint_rec: Option<Arc<Mutex<Record>>>,
     fields: Vec<(NameID, Value)>,
 }
 
@@ -2608,6 +2611,9 @@ impl Value {
             Value::Nid(n) => format!("@{}.{}.{}.{}", n.pkg, n.level, n.ty, n.inst),
             Value::Record(r) => {
                 let rec = r.lock().unwrap();
+                if rec.blueprint_rec.is_some() {
+                    return format!("<record @record #{}fields>", rec.fields.len());
+                }
                 match rec.blueprint {
                     Some(bp) => format!(
                         "<record @{}.{}.{}.{} #{}fields>",
@@ -3576,9 +3582,10 @@ impl Kernel {
         // method dispatches on it. fkwu keeps the blueprint operand verbatim,
         // and 0 is the body's most common record shape (a plain field map).
         self.register_native("record_new", cat_method(), |k, _, args| {
-            let blueprint = match &args[0] {
-                Value::Int(0) => None,
-                other => Some(other.as_nid()),
+            let (blueprint, blueprint_rec) = match &args[0] {
+                Value::Int(0) => (None, None),
+                Value::Record(owner) => (None, Some(owner.clone())),
+                other => (Some(other.as_nid()), None),
             };
             let mut fields: Vec<(NameID, Value)> = Vec::new();
             let mut i = 1;
@@ -3587,7 +3594,11 @@ impl Kernel {
                 fields.push((name, args[i + 1].clone()));
                 i += 2;
             }
-            Value::Record(Arc::new(Mutex::new(Record { blueprint, fields })))
+            Value::Record(Arc::new(Mutex::new(Record {
+                blueprint,
+                blueprint_rec,
+                fields,
+            })))
         });
         // record_get — (record_get rec "field") → value, or 0 when the record
         // carries no such field: fkwu's answer, which the body reads as eq(v, 0).
@@ -3623,10 +3634,14 @@ impl Kernel {
         // (the record's class/type tag, for method dispatch by the lifter).
         self.register_native("record_blueprint", cat_access(), |_, _, args| {
             match &args[0] {
-                Value::Record(r) => match r.lock().unwrap().blueprint {
-                    Some(bp) => Value::Nid(bp),
-                    None => Value::Int(0),
-                },
+                Value::Record(r) => {
+                    let rec = r.lock().unwrap();
+                    match (&rec.blueprint_rec, rec.blueprint) {
+                        (Some(owner), _) => Value::Record(owner.clone()),
+                        (None, Some(bp)) => Value::Nid(bp),
+                        (None, None) => Value::Int(0),
+                    }
+                }
                 _ => panic!("record_blueprint: not a record: {:?}", args[0]),
             }
         });
