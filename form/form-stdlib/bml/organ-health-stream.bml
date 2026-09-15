@@ -1,0 +1,67 @@
+// A retained native reader for an append-only organ flow. Only complete JSONL
+// records become observations. A caller owns the reader and its work budget.
+// preludes: form-stdlib/organ-health.bml form-stdlib/bml/json-wire-admission.bml
+section [form.bml] {
+ class OrganHealthStream {
+  def ohs-open(path,generation) = record_new(0,"path",path,"generation",generation,"offset",0,"pending","","current",list(),"state","unobserved","read_bytes",0,"invalid_records",0,"extent",0);
+  def ohs-path(owner) = record_get(owner,"path");
+  def ohs-smaller(a,b) = if le(a,b) then a else b;
+  def ohs-diagnostic(owner,aspect,expected,observed) {
+   let row = oh-reading("organ-health-reader",ohs-path(owner),aspect,json-node-string(expected),observed,json-node-int(0),list(oh-need("complete-organ-evidence",oh-reference(ohs-path(owner)))),list("request-evidence","defer"),oh-reference(ohs-path(owner)));
+   let identified = oh-set(row,"id",json-node-string(str_concat(oh-str(row,"id"),str_concat(":",str_concat(int_to_str(record_get(owner,"offset")),str_concat(":",int_to_str(record_get(owner,"invalid_records"))))))));
+   record_set(owner,"current",oh-current(list(identified),record_get(owner,"current")));
+   oh-frame(identified);
+  }
+  def ohs-poll(owner,budget) {
+   if le(budget,0) then form_error("organ reading needs a positive byte work budget") else ohs-poll-size(owner,budget,file_size(ohs-path(owner)));
+  }
+  def ohs-poll-size(owner,budget,size) {
+   record_set(owner,"read_bytes",0);
+   record_set(owner,"extent",size);
+   if lt(size,0) then ohs-unavailable(owner,"absent-or-unreadable") else if lt(size,record_get(owner,"offset")) then ohs-reset(owner,budget,size) else ohs-read(owner,budget,size);
+  }
+  def ohs-unavailable(owner,state) {
+   record_set(owner,"state",state);
+   ohs-report(owner);
+  }
+  def ohs-reset(owner,budget,size) {
+   record_set(owner,"offset",0); record_set(owner,"pending",""); record_set(owner,"current",list());
+   ohs-diagnostic(owner,"source-reset","append-only source generation",json-node-int(size));
+   ohs-read(owner,budget,size);
+  }
+  def ohs-read(owner,budget,extent) {
+   let offset = record_get(owner,"offset");
+   if ge(offset,extent) then ohs-settled(owner,"caught-up") else if le(budget,0) then ohs-settled(owner,"backlog") else ohs-chunk(owner,budget,extent,read_file_slice(ohs-path(owner),offset,ohs-smaller(65536,ohs-smaller(budget,sub(extent,offset)))));
+  }
+  def ohs-chunk(owner,budget,extent,chunk) {
+   if or(nothing?(chunk),eq(str_len(chunk),0)) then ohs-unavailable(owner,"read-refused") else ohs-chunk-read(owner,budget,extent,chunk);
+  }
+  def ohs-chunk-read(owner,budget,extent,chunk) {
+   let text = str_concat(record_get(owner,"pending"),chunk);
+   let parts = reverse(split-on(text,"\n"));
+   record_set(owner,"offset",add(record_get(owner,"offset"),str_len(chunk)));
+   record_set(owner,"read_bytes",add(record_get(owner,"read_bytes"),str_len(chunk)));
+   record_set(owner,"pending",head(parts));
+   ohs-lines(owner,reverse(tail(parts)));
+   ohs-read(owner,sub(budget,str_len(chunk)),extent);
+  }
+  def ohs-lines(owner,lines) = if nil?(lines) then 0 else { ohs-line(owner,head(lines)); ohs-lines(owner,tail(lines)); };
+  def ohs-line(owner,line) {
+   if str_eq(trim(line),"") then 0 else if not(jwa-valid(line)) then ohs-invalid(owner,"complete JSON record",json-node-int(str_len(line))) else ohs-row(owner,parse-json("organ-health-stream",line));
+  }
+  def ohs-invalid(owner,expected,observed) {
+   record_set(owner,"invalid_records",add(record_get(owner,"invalid_records"),1));
+   ohs-diagnostic(owner,"event-admission",expected,observed);
+  }
+  def ohs-row(owner,record) {
+   let row = oh-extract(record);
+   if node_eq(row,json-node-null()) then 0 else if not(oh-valid(row)) then ohs-invalid(owner,"complete organ observation",json-node-null()) else record_set(owner,"current",oh-current(list(row),record_get(owner,"current")));
+  }
+  def ohs-settled(owner,state) {
+   record_set(owner,"state",if and(str_eq(state,"caught-up"),gt(str_len(record_get(owner,"pending")),0)) then "awaiting-complete-record" else state);
+   ohs-report(owner);
+  }
+  def ohs-report(owner) = json-node-object(list(oh-s("source",ohs-path(owner)),oh-s("generation",record_get(owner,"generation")),oh-s("state",record_get(owner,"state")),oh-n("offset",record_get(owner,"offset")),oh-n("extent",record_get(owner,"extent")),oh-n("read_bytes",record_get(owner,"read_bytes")),oh-n("pending_bytes",str_len(record_get(owner,"pending"))),oh-n("invalid_records",record_get(owner,"invalid_records")),json-node-pair("current",json-node-array(oh-age(record_get(owner,"current"),now_unix_ms())))));
+ }
+ 0;
+}

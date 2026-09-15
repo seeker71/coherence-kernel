@@ -4,6 +4,74 @@
 
 A computation carries its meaning, resource needs, evidence and lifetime. Form specializes it for available hardware, submits work over resident data, observes results and cost, and publishes a better version while existing work continues. The [current status](fkwu-kernel-status.md) identifies running capabilities. The [bootstrap inspection](fkwu-c-bootstrap-inspection.md) identifies handwritten ownership.
 
+The organs speak from their own execution. They offer capabilities, signal
+unease and name the resources they need. A care organ listens, directs attention
+and brings available nourishment to the asking organ. That organ observes what
+arrived and what changed. The core interface makes this exchange visible.
+Missing, aging and unreadable signals remain unknown. Tests witness contracts;
+the living care loop follows signals as they arise.
+
+```mermaid
+flowchart LR
+  O[Executing organ] -->|Unease, context and needed resource| A[Care organ]
+  A -->|Attention and an offered response| N[Available native resource]
+  N -->|Actual supply outcome| O
+  O -->|Fresh observation and remaining needs| A
+  A --> V[Core care view]
+  O -->|Observed resolution| K[Retained usable knowledge]
+```
+
+## Live awareness and sovereignty
+
+Warnings, errors, pressure and unavailable results become signals of unease at
+their point of occurrence. The care organ preserves their origin, time, scope
+and evidence, and connects the asking organ to suitable resource providers.
+Supplying a resource, applying a response and observing recovery are distinct
+events. An unfamiliar organ can join this language without changing the carrier
+or adding another fixed health tally.
+
+In the intended runtime, the ability to ask for care survives resource pressure.
+The owning allocator
+reports its actual capacity, demand and reclamation opportunities while the
+signal and response path can still run. Care settles or transfers live owners
+before reclaiming shared storage. Growth and reclamation follow observed
+availability; exhaustion does not silence the organ that needs nourishment.
+
+In that runtime, stable identities reuse their existing cells. Changing
+observations have an
+owned lifetime and leave storage when no reader or submitted operation needs
+them. A quiet interface reuses retained meaning while computing age from the
+current clock. It accounts for its own allocations, bytes and crossings, so
+the act of observing cannot silently exhaust what it observes.
+
+A view owns the working memory used to render its current age, resource demand
+and delivery state. Its temporary values leave with the completed reader.
+Durable organ observations enter the retained field deliberately, with named
+owners and release conditions. The reader can renew its view without turning
+each clock tick into a permanent shared identity.
+
+Every membrane crossing carries its reason, available local choices, resource
+owner, actual outcome and observed cost. Unknown cost stays unknown. Form first
+uses its own sufficient capabilities, then sufficient local and sovereign
+resources. Free external resources still carry dependency and data movement;
+paid work requires an explicit choice. Measured sufficiency, resource pressure
+and the caller's needs guide selection, rather than a provider's prestige or an
+assumption that external work is better.
+
+Every external attempt returns something the body can use locally: an attributed
+experience, a diagnostic lesson, a checked reusable program, or verified teaching.
+An answer retained is not yet an answer verified; a training update is not yet
+improved capability. Reuse and independent observation establish what came home.
+Repeated needs direct nourishment toward the capability that can serve them
+locally. Sensitive experience remains private, and evaluation answers remain
+outside their own training and recall paths.
+
+Self-sufficiency means essential work continues when external services are absent.
+The outward direction is a useful gift: a capability, understanding or resource
+that another can receive and verify. Its value is observed in the recipient's
+use. Receiving remains open while dependence diminishes; giving grows from
+demonstrated local capacity.
+
 ```mermaid
 flowchart LR
   F[Form source and scoped policies] --> J[Native specialization in RAM]
@@ -32,6 +100,11 @@ The carrier starts, maps, calls, submits, waits and releases through a versioned
 | Discover devices, submit queues and report completions | Resource choice, batching, dependencies and release eligibility |
 
 Every function and mutable declaration has an owner, an ABI reason, an executable witness and a Form-native destination. Handwritten seed C, platform adapters, assembly, globals, exported operations and generated artifacts are measured separately.
+
+Faster execution alone does not discharge seed ownership. Native specialization
+rules and code generation belong to replaceable Form programs; C additions need
+an executable removal path. Progress means preserved behavior, lower handwritten
+ownership, and measured resource cost together.
 
 The same ownership applies to inspections, generators, numerical references, build identity, migrations and temporary helpers. Form carries their decisions and checks. A host process carries an explicit OS operation with owned input, complete output, actual completion status and confirmed release. A replacement takes over every active responsibility before its preceding implementation is removed. Foreign-language specimens remain clearly identified input data, and independent proof engines retain their distinct role.
 
@@ -68,6 +141,8 @@ Physical capacity, encoding width and policy admission are distinct, discoverabl
 A runtime context owns values, roots, intern pools, executable images, dynamic modules, handles, metrics and outstanding work. Several contexts coexist. Closing one completes or transfers its obligations and releases its resources while others retain allocations and progress.
 
 The value ABI defines tags, arithmetic and overflow, layouts, spans, handles, capabilities and compatibility. Module manifests bind content, builder, ABI, target requirements, effects, layouts, destruction, leases and evidence. Admission checks these obligations before publication.
+Cache identity follows exact source, compiler configuration and ABI. Build time
+measures work; it does not replace those identities.
 
 ABI identities remain unambiguous across images. Submitted work retains its granted version, buffers and completion identity until it settles. Programs, policies and evidence can be compared, renewed, published and retired for subsequent work. A deadline bounds observation; cancellation can discard a result while work still owns resources. Destruction follows the final lease. Indeterminate work never becomes successful through aggregate cleanup. Completed resources remain independent of unrelated work.
 

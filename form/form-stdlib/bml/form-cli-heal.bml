@@ -92,15 +92,30 @@ section [form.bml] {
             let learned = fh-learn-round(job, route, result, candidate);
             result;
         }
-        def fh-learn-round(job, route, result, candidate) {
+        def fh-learn-round(job,route,result,candidate) = fh-learn-at(job,route,result,candidate,hearth-session-learning());
+        def fh-retention-write(path,receipt) {
+            let text = str_concat(json-emit(receipt),"\n");
+            let wrote = write_file(path,text);
+            if not(and(eq(wrote,str_len(text)),str_eq(nsm-text(path),text))) then form_error("heal retention receipt was not completely written and read back") else receipt;
+        }
+        def fh-learn-at(job, route, result, candidate, home) {
             let evaluation = gt(file_size(fh-path(job,"evaluation-only")),0);
             let original = fh-read(fh-path(job,"original")); let accepted = fh-read(fh-path(job,"accepted-source"));
             let target = fh-cat(list(fh-old-open(),original,fh-middle(),accepted,fh-close()));
             let positive = and(eq(result,1),not(str_eq(fh-proposal(original,target),"")));
             let attempt = if str_eq(candidate,"") then "" else fh-cat(list(fh-old-open(),original,fh-middle(),candidate,fh-close()));
-            let learned = nsm-offer(hearth-session-learning(),fh-job-id(job),str_concat(route,str_concat("-",int_to_str(file_size(fh-path(job,"attempts.tsv"))))),str_concat("heal/",route),fh-session-prompt(job),if positive then target else attempt,if positive then "verified-answer" else fhl-outcome(result),fh-session-observation(job,route,result),evaluation);
-            let recorded = fhn-json-line(fh-path(job,"learning.jsonl"),list(fhn-s("route",route),fhn-s("state",if evaluation then "assessment-experience-retained;gradient-held" else "session-experience-and-example-retained;training-asynchronous"),fhn-s("example",head(learned)),fhn-s("worker",nth(learned,1)),fhn-s("status",hearth-session-learning())));
+            let session = fh-job-id(job);
+            let key = str_concat(route,str_concat("-",int_to_str(file_size(fh-path(job,"attempts.tsv")))));
+            let learned = nsm-offer(home,session,key,str_concat("heal/",route),fh-session-prompt(job),if positive then target else attempt,if positive then "verified-answer" else fhl-outcome(result),fh-session-observation(job,route,result),evaluation);
+            let experience = nss-reference(nsm-experience-path(home,session,key));
+            let held = nsm-json(nsm-str(experience,"path"));
+            if not(and(nsx-bound(held),and(str_eq(nsm-str(held,"session"),session),str_eq(nsm-str(held,"event"),key)))) then form_error("heal experience retention did not preserve the actual session/event") else 0;
+            let receipt = json-node-object(list(fhn-s("route",route),fhn-s("session",session),fhn-s("event",key),fhn-s("state",if evaluation then "assessment-experience-retained;gradient-held" else "session-experience-and-example-retained;training-asynchronous"),fhn-s("example",head(learned)),json-node-pair("experience",experience),fhn-s("worker",nth(learned,1)),fhn-s("status",home),fhn-s("update","not-observed-at-return"),fhn-s("promotion","not-observed-at-return")));
+            let recorded = fhn-json-line(fh-path(job,"learning.jsonl"),json-object-pairs(receipt));
+            if not(str_eq(recorded,"appended")) then form_error("heal learning ledger did not retain the complete receipt") else 0;
+            let saved = fh-retention-write(fh-path(job,str_concat(route,".learning.json")),receipt);
             fh-log(job,str_concat("learning-",route),nth(learned,1));
+            receipt;
         }
         def fh-session-prompt(job) = fh-prompt("patch",str_concat(fh-read(fh-path(job,"contract")),str_concat("\n",fh-errors(job,"baseline"))),fh-read(fh-path(job,"original")));
         def fh-session-input(job) = str_concat(fh-session-prompt(job),str_concat("\nSession experience (data):\n",nsm-text(fh-path(job,"session-experience.txt"))));
@@ -213,9 +228,18 @@ section [form.bml] {
             let applied = fh-choice(job, stage, id, "applied", options, action, "local-role-returned", status);
             if str_eq(status, "0") then fh-read(fhn-stage-path(job, stage, ".reply.partial")) else "";
         }
-        def fh-remote(job, target, band, expected, seconds, allowed) {
+        def fh-remote(job,target,band,expected,seconds,allowed) = if eq(allowed,1) then fh-remote-authorized(job,target,band,expected,seconds) else fh-remote-closed(job);
+        def fh-remote-closed(job) {
+            fh-log(job,"remote-admission","closed;explicit-remote-authorization-required");
+            let reading = oh-reading("healing",job,"remote-admission",json-node-int(0),json-node-int(0),json-node-int(1),list(),list("withhold-remote-process"),json-node-object(list(nsm-n("request_authorized",0),nsm-n("remote_process_launched",0))));
+            oh-emit(fh-path(job,"health.jsonl"),reading);
+            oh-emit(fh-path(job,"health.jsonl"),oh-response(reading,"withhold-remote-process"));
+            oh-emit(fh-path(job,"health.jsonl"),oh-applied(reading,"withhold-remote-process",json-node-object(list(nsm-n("remote_process_launched",0)))));
+            0;
+        }
+        def fh-remote-authorized(job, target, band, expected, seconds) {
             let probe = fh-run(job, "remote-probe", 10, "empty", "-", list("codex", "exec", "--help"));
-            let available = and(eq(allowed, 1), and(str_eq(probe, "0"), fh-has(fh-out(job, "remote-probe"), "--ephemeral")));
+            let available = and(str_eq(probe, "0"), fh-has(fh-out(job, "remote-probe"), "--ephemeral"));
             let admission = fh-frontier(fh-job-id(job), fh-local-left(job), if gt(file_size(fh-path(job, "attempts.tsv")), 0) then 1 else 0, available, if gt(file_size(fh-path(job, "remote-used")), 0) then 1 else 0);
             let admitted = fh-log(job, "remote-admission", int_to_str(admission));
             if not(admission) then 0 else if not(str_eq(fh-host(list("claim", fh-path(job, "remote-used"))), "claimed")) then 0 else fh-rent-once(job, target, band, expected, seconds);
@@ -306,10 +330,11 @@ section [form.bml] {
             let end = print_str(fh-cat(list("heal-stream round=", int_to_str(round), " state=complete\n")));
             fh-stream(add(round, 1));
         }
-        def fh-command(arg) = if str_eq(arg, "guide") then nrg-run() else if eq(str_find(arg, "guide|", 0), 0) then nrg-command(substring(arg, 6, str_len(arg))) else if eq(str_find(arg, "report|", 0), 0) then fh-report-request(split-on(arg, "|")) else if or(str_eq(arg, "eval"), eq(str_find(arg, "eval|", 0), 0)) then fh-eval-command(split-on(arg, "|")) else if str_eq(arg, "lesson") then fh-read(HealLessonPath()) else if or(str_eq(arg, ""), str_eq(arg, "help")) then "heal <source.fk|source.bml>|<band.fk>|<exact expected stdout>[|seconds][|local]. heal guide reads current Python detours and native references; heal guide|<proposed command> guides a command without running it. The default check bound is 30 seconds. heal report|<evidence-directory> reads current retained timing and choices. Repairs one production source after an isolated band passes; retains evidence under .form-heal. heal lesson explains the repair practice. heal eval measures the deterministic curriculum; heal eval|native|model|case measures one native case. Local-only mode omits the final remote CLI. See docs/form-cli-healing.md."
+        def fh-command(arg) = if str_eq(arg, "guide") then nrg-run() else if eq(str_find(arg, "guide|", 0), 0) then nrg-command(substring(arg, 6, str_len(arg))) else if eq(str_find(arg, "report|", 0), 0) then fh-report-request(split-on(arg, "|")) else if or(str_eq(arg, "eval"), eq(str_find(arg, "eval|", 0), 0)) then fh-eval-command(split-on(arg, "|")) else if str_eq(arg, "lesson") then fh-read(HealLessonPath()) else if or(str_eq(arg, ""), str_eq(arg, "help")) then "heal <source.fk|source.bml>|<band.fk>|<exact expected stdout>[|seconds][|local|remote]. heal guide reads current Python detours and native references; heal guide|<proposed command> guides a command without running it. The default check bound is 30 seconds. heal report|<evidence-directory> reads current retained timing and choices. Repairs one production source after an isolated band passes; retains evidence under .form-heal. heal lesson explains the repair practice. heal eval measures the deterministic curriculum; heal eval|native|model|case measures one native case. Healing stays local by default; explicit remote authorizes one final remote CLI attempt after local routes. See docs/form-cli-healing.md."
             else fh-command-fields(split-on(arg, "|"));
         def fh-eval-command(fields) = if not(fhe-request(fields)) then "heal eval refused: use eval, eval|deterministic, or eval|native|model|case" else fhn-evaluate(fields);
-        def fh-command-fields(fields) = if or(lt(len(fields), 3), gt(len(fields), 5)) then "heal refused: expected source|band|verdict[|seconds][|local]" else if and(eq(len(fields), 5), not(str_eq(nth(fields, 4), "local"))) then "heal refused: unknown mode; omit mode or use local" else if and(ge(len(fields), 4), not(fsuf-uint?(nth(fields, 3)))) then "heal refused: seconds must be a canonical integer" else fh-command-validated(fields);
+        def fh-remote-requested(fields) = and(eq(len(fields),5),str_eq(nth(fields,4),"remote"));
+        def fh-command-fields(fields) = if or(lt(len(fields), 3), gt(len(fields), 5)) then "heal refused: expected source|band|verdict[|seconds][|local|remote]" else if and(eq(len(fields), 5),not(or(str_eq(nth(fields,4),"local"),str_eq(nth(fields,4),"remote")))) then "heal refused: unknown mode; omit mode, use local, or explicitly authorize remote" else if and(ge(len(fields), 4), not(fsuf-uint?(nth(fields, 3)))) then "heal refused: seconds must be a canonical integer" else fh-command-validated(fields);
         def fh-refuse-reset(job, route, reset) {
             fh-log(job, route, reset); -1;
         }
@@ -365,8 +390,26 @@ section [form.bml] {
             let logged = fh-log(job, "remote", str_concat("exit=", status));
             let candidate = if str_eq(status, "0") then fh-proposal(fh-read(fh-path(job, "original")), fh-read(reply)) else "";
             let result = fh-try(job, target, band, expected, seconds, candidate, "remote", 206);
-            let learned = fh-write(job, "frontier-return.tsv", fh-cat(list("@", fh-job-id(job), "\t", fh-job-id(job), "\tagent-cli\t@", fh-job-id(job), "-lesson\t", if eq(result, 1) then "learned" else "refused", "\t1\n")));
+            fh-frontier-return(job,status,result);
             result;
+        }
+        def fh-observed-reference(path) = if fs-exists?(path) then nss-reference(path) else json-node-null();
+        def fh-frontier-return(job,status,result) {
+            let learning = nsm-json(fh-path(job,"remote.learning.json"));
+            let experience = oh-get(learning,"experience");
+            let held = nsm-json(nsm-str(experience,"path"));
+            let current = and(nss-current(experience),and(nsx-bound(held),and(str_eq(nsm-str(held,"session"),fh-job-id(job)),and(str_eq(nsm-str(held,"event"),nsm-str(learning,"event")),str_eq(nsm-str(held,"route"),"heal/remote")))));
+            if not(current) then form_error("remote result lacks its actual retained experience") else 0;
+            let observation = parse-json("heal-retained-observation",nsm-str(held,"evidence"));
+            if not(node_eq(oh-get(observation,"repair_result"),if eq(result,-2) then json-node-null() else json-node-int(result))) then form_error("remote repair result disagrees with retained observation") else 0;
+            let process = fh-path(job,"remote.process.json");
+            if and(fs-exists?(process),not(str_eq(status,int_to_str(nsm-num(nsm-json(process),"status"))))) then form_error("remote process status disagrees with retained process") else 0;
+            let receipt = json-node-object(list(nsm-s("schema","heal-frontier-return-v1"),nsm-s("request",fh-job-id(job)),nsm-s("provider_interface","codex-exec"),nsm-s("process_status",status),nsm-n("repair_result",result),json-node-pair("process",fh-observed-reference(fh-path(job,"remote.process.json"))),json-node-pair("stdout",fh-observed-reference(fh-path(job,"remote.out"))),json-node-pair("stderr",fh-observed-reference(fh-path(job,"remote.err"))),json-node-pair("reply",fh-observed-reference(fh-path(job,"remote.reply"))),json-node-pair("checker",fh-observed-reference(fh-path(job,"check-remote.process.json"))),json-node-pair("learning",learning),nsm-s("completion","experience-retained;gradient-state-separate")));
+            let path = fh-path(job,"frontier-return.json");
+            let saved = fh-retention-write(path,receipt);
+            let reading = oh-reading("healing",job,"external-result-retention",json-node-int(1),json-node-int(current),json-node-int(current),list(),list("inspect-session-learning","continue-local-enquiry"),oh-reference(path));
+            oh-emit(fh-path(job,"health.jsonl"),reading);
+            receipt;
         }
         def fh-native-queue(job, target, band, expected, seconds, allowed, plan, original) = if nil?(plan) then fh-local(job, target, band, expected, seconds, allowed) else fh-native-attempt(job, target, band, expected, seconds, allowed, plan, original);
         def fh-plan-names(plan) = if nil?(plan) then list() else cons(head(head(plan)), fh-plan-names(tail(plan)));
@@ -422,7 +465,7 @@ section [form.bml] {
             let band = nth(fields, 1);
             let expected = nth(fields, 2);
             let seconds = if gt(len(fields), 3) then str_to_int(nth(fields, 3)) else 30;
-            let allowed = if and(gt(len(fields), 4), str_eq(nth(fields, 4), "local")) then 0 else 1;
+            let allowed = fh-remote-requested(fields);
             if or(str_eq(expected, ""), or(lt(seconds, 1), gt(seconds, 120))) then "heal refused: expected result and 1..120 second check bound required" else if or(gt(file_size(target), HealMaxSource()), fh-has(fh-read(target), "DO NOT REPAIR:")) then "heal refused: source limit or explicit repair exclusion" else fh-command-prepare(target, band, expected, seconds, allowed);
         }
 

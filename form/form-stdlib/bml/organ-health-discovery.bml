@@ -1,0 +1,201 @@
+// Lifecycle declarations carry only event-source references and capability names.
+// An explicit owner holds one shared frame per declared root. Register at
+// source creation; renew after truncation; retire when the source is no longer
+// offered. Unchanged explicit-owner registration performs no shared-memory
+// operation. The three-argument lifecycle API rehydrates its process-birth frame
+// on each call, so allocator compaction cannot discard its registry state.
+// It skips publication when unchanged; no registration runs per health event.
+// Discovery covers currently advertised sources, not every organ. The existing
+// roster has 511 slots and evicts its least recently registered name. Frames
+// outlive their writers; PID existence is an observation, not process identity.
+// Paths are absolute lexical names: dot/duplicate separators normalize, parent
+// traversal refuses, and symlink/inode equivalence is not claimed. Cooperative
+// publishers own their records; the shared roster is not an isolation boundary.
+// shm_release acknowledges a live handle after invoking unmap; its current
+// carrier does not return the platform unmap result. Any refused acknowledgement
+// keeps the handle in the returned result/diagnostic for explicit release retry.
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/line-grammar.fk form-stdlib/form-glass-gift-frame.bml form-stdlib/bml/native-owner-clock.bml
+section [form.bml] {
+ class OrganHealthDiscovery {
+  def ohd-shared-append-capability() = "append-only-shared-source";
+  def ohd-owner() = ohd-owner-page(kernel_live(host_pid()));
+  def ohd-owner-page(page) = if lt(len(page),3) then nothing() else if not(and(eq(nth(page,1),host_pid()),and(ohd-int(nth(page,2)),gt(nth(page,2),0)))) then nothing() else record_new(0,"kind","organ-health-discovery","pid",host_pid(),"incarnation",str_concat(int_to_str(nth(page,2)),"-default"),"counter",0,"roots",record_new(0),"rootnames",list(),"publications",0,"unsettled",list());
+  def ohd-s(key,value) = json-node-pair(key,json-node-string(value));
+  def ohd-n(key,value) = json-node-pair(key,json-node-int(value));
+  def ohd-get(row,key) = json-object-get(row,key);
+  def ohd-str(row,key) = json-string-value(ohd-get(row,key));
+  def ohd-num(row,key) = json-int-value(ohd-get(row,key));
+  def ohd-text(value) = if not(str_eq(value_kind(value),"string")) then 0 else and(gt(str_len(value),0),lt(str_find(value,byte_to_str(0),0),0));
+  def ohd-int(value) = and(str_eq(value_kind(value),"int"),ge(value,0));
+  def ohd-has(xs,x) = if nil?(xs) then 0 else or(str_eq(head(xs),x),ohd-has(tail(xs),x));
+  def ohd-string-list(xs) = if not(str_eq(value_kind(xs),"list")) then 0 else if nil?(xs) then 1 else and(ohd-text(head(xs)),ohd-string-list(tail(xs)));
+  def ohd-strings(xs) = if nil?(xs) then list() else cons(json-node-string(head(xs)),ohd-strings(tail(xs)));
+  def ohd-unique(xs,seen) = if nil?(xs) then reverse(seen) else ohd-unique(tail(xs),if ohd-has(seen,head(xs)) then seen else cons(head(xs),seen));
+  def ohd-path-parts(parts,held) = if nil?(parts) then reverse(held) else if str_eq(head(parts),"..") then nothing() else if or(str_eq(head(parts),""),str_eq(head(parts),".")) then ohd-path-parts(tail(parts),held) else ohd-path-parts(tail(parts),cons(head(parts),held));
+  def ohd-path-join(parts) = if nil?(parts) then "" else str_concat("/",str_concat(head(parts),ohd-path-join(tail(parts))));
+  def ohd-path(base,path) = if not(and(ohd-text(base),ohd-text(path))) then nothing() else ohd-path-ready(ohd-path-parts(split-on(if eq(str_byte_at(path,0),47) then path else str_concat(base,str_concat("/",path)),"/"),list()));
+  def ohd-path-ready(parts) = if nothing?(parts) then nothing() else if nil?(parts) then "/" else ohd-path-size(ohd-path-join(parts));
+  def ohd-path-size(path) = if ge(str_len(path),4096) then nothing() else path;
+  def ohd-valid(owner) = if not(record?(owner)) then 0 else and(str_eq(record_get(owner,"kind"),"organ-health-discovery"),eq(record_get(owner,"pid"),host_pid()));
+  def ohd-next(owner) {
+   if ge(record_get(owner,"counter"),4611686018427387903) then form_error("discovery owner generation exhausted") else 0;
+   let count = add(record_get(owner,"counter"),1);
+   record_set(owner,"counter",count);
+   count;
+  }
+  def ohd-open() {
+   let owner = ohd-owner();
+   if nothing?(owner) then nothing() else ohd-open-owned(owner);
+  }
+  def ohd-open-owned(owner) {
+   // The existing construction counter advances for every new record and
+   // survives allocator compaction. A display string is not record identity.
+   let allocation = noc-sequence();
+   record_set(owner,"incarnation",str_concat(record_get(owner,"incarnation"),str_concat("-owned-allocation-",fstr-int-to-str(allocation))));
+   owner;
+  }
+  def ohd-release(handle) = ggf-release(handle);
+  def ohd-release-pending(handles) = ohd-release-list(handles);
+  def ohd-release-list(handles) = if nil?(handles) then list() else if eq(ggf-release(head(handles)),1) then ohd-release-list(tail(handles)) else cons(head(handles),ohd-release-list(tail(handles)));
+  def ohd-prefix(root) = str_concat("ohd1:",str_concat(ggf-hex8(crc32(ggf-bytes(root))),":"));
+  def ohd-publisher(owner,root) = str_concat(ohd-prefix(root),str_concat(int_to_str(record_get(owner,"pid")),str_concat(":",record_get(owner,"incarnation"))));
+  def ohd-root-owner(owner,root) {
+   let roots = record_get(owner,"roots");
+   if record_has(roots,root) then record_get(roots,root) else ohd-root-new(owner,roots,root);
+  }
+  def ohd-root-new(owner,roots,root) {
+   let state = record_new(0,"root",root,"publisher",ohd-publisher(owner,root),"rows",list(),"revision",0,"sequence",0,"slot",-1,"published",0,"attempts",0,"refusal","","unsettled",list());
+   record_set(roots,root,state);
+   record_set(owner,"rootnames",cons(root,record_get(owner,"rootnames")));
+   ohd-root-hydrate(owner,state,ohd-take(record_get(state,"publisher")));
+  }
+  def ohd-root-hydrate(owner,state,taken) {
+   let frame = nth(taken,1);
+   if not(eq(nth(taken,3),1)) then ohd-state-refusal(state,"mapping-release",list(nth(taken,4))) else if or(str_eq(head(taken),"absent"),and(str_eq(head(taken),"unreadable"),eq(nth(taken,2),0))) then state else if not(ohd-same-owner(frame,owner,state)) then ohd-state-refusal(state,"frame-identity-collision-or-unreadable",list()) else ohd-root-restored(state,frame,nth(taken,2));
+  }
+  def ohd-state-refusal(state,reason,handles) {
+   record_set(state,"refusal",reason); record_set(state,"unsettled",handles);
+   state;
+  }
+  def ohd-root-restored(state,frame,sequence) {
+   record_set(state,"rows",nth(frame,7)); record_set(state,"revision",nth(frame,5));
+   record_set(state,"sequence",sequence); record_set(state,"published",1);
+   state;
+  }
+  def ohd-find(rows,path) = if nil?(rows) then nothing() else if str_eq(head(head(rows)),path) then head(rows) else ohd-find(tail(rows),path);
+  def ohd-without(rows,path) = if nil?(rows) then list() else if str_eq(head(head(rows)),path) then ohd-without(tail(rows),path) else cons(head(rows),ohd-without(tail(rows),path));
+  def ohd-int-nodes(xs) = if nil?(xs) then list() else cons(json-node-int(head(xs)),ohd-int-nodes(tail(xs)));
+  def ohd-result(ok,state,reason,source,rootState,row) = json-node-object(list(ohd-n("ok",ok),ohd-s("state",state),ohd-s("reason",reason),ohd-s("source",source),ohd-s("publisher",if record?(rootState) then record_get(rootState,"publisher") else ""),ohd-s("generation",if nothing?(row) then "" else nth(row,1)),ohd-n("sequence",if record?(rootState) then record_get(rootState,"sequence") else 0),ohd-n("roster_slot",if record?(rootState) then record_get(rootState,"slot") else -1),ohd-n("stream_count",if record?(rootState) then len(record_get(rootState,"rows")) else 0),ohd-n("handle_owner_pid",host_pid()),json-node-pair("unsettled_handles",json-node-array(ohd-int-nodes(if record?(rootState) then record_get(rootState,"unsettled") else list())))));
+  def ohd-refused(reason,source) = ohd-result(0,"refused",reason,if str_eq(value_kind(source),"string") then source else "",nothing(),nothing());
+  def ohd-register(root,source,capabilities) = ohd-register-with(ohd-owner(),root,source,capabilities);
+  def ohd-register-with(owner,root,source,capabilities) = ohd-change(owner,root,source,capabilities,0);
+  def ohd-renew(root,source,capabilities) = ohd-change(ohd-owner(),root,source,capabilities,1);
+  def ohd-renew-with(owner,root,source,capabilities) = ohd-change(owner,root,source,capabilities,1);
+  def ohd-change(owner,root,source,capabilities,renew) = if nothing?(owner) then ohd-refused("process-birth-unavailable",source) else if not(ohd-valid(owner)) then ohd-refused("owner",source) else if not(ohd-string-list(capabilities)) then ohd-refused("capabilities",source) else ohd-change-root(owner,ohd-path(host_cwd(),root),source,ohd-unique(capabilities,list()),renew);
+  def ohd-change-root(owner,root,source,caps,renew) = if nothing?(root) then ohd-refused("root-path",source) else ohd-change-path(owner,root,ohd-path(root,source),caps,renew);
+  def ohd-change-path(owner,root,path,caps,renew) = if nothing?(path) then ohd-refused("source-path","") else ohd-change-held(owner,ohd-root-owner(owner,root),path,caps,renew);
+  def ohd-change-held(owner,state,path,caps,renew) {
+   let prior = ohd-find(record_get(state,"rows"),path);
+   let same = if nothing?(prior) then 0 else and(eq(renew,0),value_eq(nth(prior,2),caps));
+   if not(str_eq(record_get(state,"refusal"),"")) then ohd-result(0,"refused",record_get(state,"refusal"),path,state,prior) else if and(same,eq(record_get(state,"published"),1)) then ohd-result(1,"unchanged","",path,state,prior) else ohd-change-row(owner,state,path,caps,prior,same);
+  }
+  def ohd-change-row(owner,state,path,caps,prior,same) {
+   let row = if same then prior else list(path,str_concat(record_get(state,"publisher"),str_concat(":",int_to_str(add(record_get(state,"revision"),1)))),caps);
+   record_set(state,"rows",append(ohd-without(record_get(state,"rows"),path),list(row)));
+   record_set(state,"published",0);
+   ohd-publish(owner,state,path,row);
+  }
+  def ohd-frame(owner,state) = list("organ-health-discovery-v1",record_get(state,"publisher"),record_get(state,"root"),record_get(owner,"pid"),record_get(owner,"incarnation"),record_get(state,"revision"),now_unix_ms(),record_get(state,"rows"));
+  // This flat string/int/list frame uses the existing cell carrier. Its exact
+  // carrier byte size is calculated before mapping, without a fixed stream cap.
+  def ohd-wire-size(value) = if str_eq(value_kind(value),"string") then if gt(str_len(value),4294967295) then -1 else add(5,str_len(value)) else if str_eq(value_kind(value),"int") then 9 else if str_eq(value_kind(value),"list") then if ge(len(value),100000000) then -1 else ohd-wire-list(value,6) else -1;
+  def ohd-wire-list(rows,size) = if nil?(rows) then size else ohd-wire-next(tail(rows),size,ohd-wire-size(head(rows)));
+  def ohd-wire-next(rows,size,n) = if or(lt(n,0),gt(n,sub(4611686018427387887,size))) then -1 else ohd-wire-list(rows,add(size,n));
+  def ohd-take(publisher) {
+   let handle = ggf-receive(publisher);
+   if nothing?(handle) then list("absent",nothing(),0,1,-1) else ohd-take-held(handle);
+  }
+  def ohd-take-held(handle) {
+   let frame = node_gift_read(handle);
+   let seq = ggf-seq(handle);
+   let released = ohd-release(handle);
+   list(if nothing?(frame) then "unreadable" else "read",frame,seq,released,if eq(released,1) then -1 else handle);
+  }
+  def ohd-frame-shape(frame) = if not(str_eq(value_kind(frame),"list")) then 0 else if ne(len(frame),8) then 0 else and(str_eq(head(frame),"organ-health-discovery-v1"),and(ohd-text(nth(frame,1)),and(ohd-text(nth(frame,2)),and(and(ohd-int(nth(frame,3)),gt(nth(frame,3),0)),and(ohd-text(nth(frame,4)),and(ohd-int(nth(frame,5)),and(ohd-int(nth(frame,6)),ohd-rows-valid(nth(frame,7),list()))))))));
+  def ohd-rows-valid(rows,seen) = if not(str_eq(value_kind(rows),"list")) then 0 else if nil?(rows) then 1 else if not(ohd-row-valid(head(rows))) then 0 else if ohd-has(seen,head(head(rows))) then 0 else ohd-rows-valid(tail(rows),cons(head(head(rows)),seen));
+  def ohd-row-valid(row) = if not(str_eq(value_kind(row),"list")) then 0 else if ne(len(row),3) then 0 else and(ohd-text(head(row)),and(eq(str_byte_at(head(row),0),47),and(ohd-text(nth(row,1)),ohd-string-list(nth(row,2)))));
+  def ohd-frame-bound(frame) = if not(ohd-frame-shape(frame)) then 0 else if not(str_eq(nth(frame,2),ohd-path("/",nth(frame,2)))) then 0 else if not(str_eq(nth(frame,1),str_concat(ohd-prefix(nth(frame,2)),str_concat(int_to_str(nth(frame,3)),str_concat(":",nth(frame,4)))))) then 0 else ohd-rows-bound(nth(frame,7),nth(frame,1));
+  def ohd-rows-bound(rows,publisher) = if nil?(rows) then 1 else and(str_eq(head(head(rows)),ohd-path("/",head(head(rows)))),and(eq(str_find(nth(head(rows),1),str_concat(publisher,":"),0),0),ohd-rows-bound(tail(rows),publisher)));
+  def ohd-same-owner(frame,owner,state) = if not(ohd-frame-bound(frame)) then 0 else and(str_eq(nth(frame,1),record_get(state,"publisher")),and(str_eq(nth(frame,2),record_get(state,"root")),and(eq(nth(frame,3),record_get(owner,"pid")),str_eq(nth(frame,4),record_get(owner,"incarnation")))));
+  def ohd-publish(owner,state,path,row) {
+   let prior = ohd-take(record_get(state,"publisher"));
+   let available = or(str_eq(head(prior),"absent"),and(str_eq(head(prior),"unreadable"),eq(nth(prior,2),0)));
+   if not(eq(nth(prior,3),1)) then ohd-result(0,"refused","mapping-release",path,ohd-state-refusal(state,"mapping-release",list(nth(prior,4))),row) else if not(or(available,ohd-same-owner(nth(prior,1),owner,state))) then ohd-result(0,"refused","frame-identity-collision-or-unreadable",path,state,row) else ohd-publish-new(owner,state,path,row);
+  }
+  def ohd-publish-new(owner,state,path,row) {
+   if ge(record_get(state,"revision"),4611686018427387903) then form_error("discovery frame revision exhausted") else 0;
+   record_set(state,"revision",add(record_get(state,"revision"),1));
+   let frame = ohd-frame(owner,state);
+   let bytes = ohd-wire-size(frame);
+   if lt(bytes,0) then ohd-result(0,"refused","carrier-extent",path,state,row) else ohd-publish-open(owner,state,path,row,frame,bytes);
+  }
+  def ohd-publish-open(owner,state,path,row,frame,bytes) {
+   let handle = ggf-offer(record_get(state,"publisher"),bytes);
+   if nothing?(handle) then ohd-result(0,"refused","frame-admission",path,state,row) else ohd-publish-held(owner,state,path,row,frame,handle);
+  }
+  def ohd-publish-held(owner,state,path,row,frame,handle) {
+   let prior = node_gift_read(handle); let seq = ggf-seq(handle);
+   let compatible = or(eq(seq,0),ohd-same-owner(prior,owner,state));
+   let given = if compatible then node_gift_write(handle,frame) else nothing();
+   let received = if nothing?(given) then nothing() else node_gift_read(handle);
+   let released = ohd-release(handle);
+   record_set(state,"attempts",add(record_get(state,"attempts"),1));
+   if not(eq(released,1)) then ohd-result(0,"refused","mapping-release",path,ohd-state-refusal(state,"mapping-release",list(handle)),row) else if not(compatible) then ohd-result(0,"refused","frame-identity-collision",path,state,row) else if nothing?(given) then ohd-result(0,"refused","frame-write",path,state,row) else if not(value_eq(received,frame)) then ohd-result(0,"refused","frame-readback",path,state,row) else ohd-published(owner,state,path,row,given);
+  }
+  def ohd-published(owner,state,path,row,sequence) {
+   let slot = gift_roster_register(record_get(state,"publisher"));
+   record_set(state,"sequence",sequence); record_set(state,"slot",slot);
+   record_set(owner,"publications",add(record_get(owner,"publications"),1));
+   if or(nothing?(slot),lt(slot,0)) then ohd-result(0,"refused","roster-admission",path,state,row) else ohd-published-ready(state,path,row);
+  }
+  def ohd-published-ready(state,path,row) {
+   record_set(state,"published",1);
+   ohd-result(1,"advertised","",path,state,row);
+  }
+  def ohd-retire(root,source) = ohd-retire-with(ohd-owner(),root,source);
+  def ohd-retire-with(owner,root,source) = if not(ohd-valid(owner)) then ohd-refused("owner",source) else ohd-retire-root(owner,ohd-path(host_cwd(),root),source);
+  def ohd-retire-root(owner,root,source) = if nothing?(root) then ohd-refused("root-path",source) else ohd-retire-path(owner,root,ohd-path(root,source));
+  def ohd-retire-path(owner,root,path) = if nothing?(path) then ohd-refused("source-path","") else ohd-retire-state(owner,ohd-root-owner(owner,root),path);
+  def ohd-retire-state(owner,state,path) = if not(str_eq(record_get(state,"refusal"),"")) then ohd-result(0,"refused",record_get(state,"refusal"),path,state,nothing()) else if nothing?(ohd-find(record_get(state,"rows"),path)) then ohd-result(1,"absent","",path,state,nothing()) else ohd-retire-held(owner,state,path);
+  def ohd-retire-held(owner,state,path) {
+   record_set(state,"rows",ohd-without(record_get(state,"rows"),path)); record_set(state,"published",0);
+   ohd-publish(owner,state,path,nothing());
+  }
+  def ohd-diagnostic(state,publisher,reason) = ohd-diagnostic-held(state,publisher,reason,list());
+  def ohd-diagnostic-held(state,publisher,reason,handles) = json-node-object(list(ohd-s("state",state),ohd-s("publisher",publisher),ohd-s("reason",reason),ohd-n("handle_owner_pid",host_pid()),json-node-pair("unsettled_handles",json-node-array(ohd-int-nodes(handles)))));
+  def ohd-source(frame,row,alive) = json-node-object(list(ohd-s("root",nth(frame,2)),ohd-s("source",head(row)),ohd-s("publisher",nth(frame,1)),ohd-n("pid",nth(frame,3)),ohd-n("publisher_pid_exists",alive),ohd-s("incarnation",nth(frame,4)),ohd-s("generation",nth(row,1)),ohd-n("advertised_at_ms",nth(frame,6)),json-node-pair("capabilities",json-node-array(ohd-strings(nth(row,2))))));
+  def ohd-sources(frame,rows,alive) = if nil?(rows) then list() else cons(ohd-source(frame,head(rows),alive),ohd-sources(frame,tail(rows),alive));
+  def ohd-read-advertisement(root,publisher) {
+   let taken = ohd-take(publisher); let frame = nth(taken,1);
+   if not(eq(nth(taken,3),1)) then list(list(),list(ohd-diagnostic-held("refused",publisher,"mapping-release",list(nth(taken,4))))) else if not(str_eq(head(taken),"read")) then list(list(),list(ohd-diagnostic(head(taken),publisher,"advertised-frame"))) else if not(ohd-frame-bound(frame)) then list(list(),list(ohd-diagnostic("refused",publisher,"frame-shape-or-binding"))) else if not(and(str_eq(nth(frame,1),publisher),str_eq(nth(frame,2),root))) then list(list(),list(ohd-diagnostic("refused",publisher,"frame-identity"))) else list(ohd-sources(frame,nth(frame,7),host_alive(nth(frame,3))),list());
+  }
+  def ohd-scan(root,rows,sources,diagnostics) = if nil?(rows) then list(sources,diagnostics) else if not(eq(str_find(head(head(rows)),ohd-prefix(root),0),0)) then ohd-scan(root,tail(rows),sources,diagnostics) else ohd-scan-read(root,tail(rows),sources,diagnostics,ohd-read-advertisement(root,head(head(rows))));
+  def ohd-scan-read(root,rows,sources,diagnostics,read) = ohd-scan(root,rows,append(sources,head(read)),append(diagnostics,nth(read,1)));
+  def ohd-roster() {
+   let handle = shm_receive("/fg-roster");
+   if nothing?(handle) then list("absent",list(),list()) else ohd-roster-held(handle);
+  }
+  def ohd-roster-held(handle) {
+   let released = ohd-release(handle);
+   if not(eq(released,1)) then list("release-refused",list(),list(handle)) else list("read",gift_roster_names(),list());
+  }
+  def ohd-discover(root) = ohd-discover-roots(list(root));
+  def ohd-discover-roots(roots) = if not(ohd-string-list(roots)) then ohd-discovery-result(list(),list(ohd-diagnostic("refused","","roots")),"not-read",0) else ohd-discover-roster(roots,ohd-roster());
+  def ohd-discover-roster(roots,roster) = ohd-discover-next(ohd-unique(roots,list()),nth(roster,1),list(),if nil?(nth(roster,2)) then list() else list(ohd-diagnostic-held("refused","/fg-roster","mapping-release",nth(roster,2))),head(roster));
+  def ohd-discover-next(roots,roster,sources,diagnostics,state) = if nil?(roots) then ohd-discovery-result(sources,diagnostics,state,len(roster)) else ohd-discover-root(tail(roots),roster,sources,diagnostics,state,ohd-path(host_cwd(),head(roots)));
+  def ohd-discover-root(roots,roster,sources,diagnostics,state,root) = if nothing?(root) then ohd-discover-next(roots,roster,sources,cons(ohd-diagnostic("refused","","root-path"),diagnostics),state) else ohd-discover-read(roots,roster,sources,diagnostics,state,ohd-scan(root,roster,list(),list()));
+  def ohd-discover-read(roots,roster,sources,diagnostics,state,read) = ohd-discover-next(roots,roster,append(sources,head(read)),append(diagnostics,nth(read,1)),state);
+  def ohd-discovery-result(sources,diagnostics,state,count) = json-node-object(list(ohd-s("schema","organ-health-discovery-v1"),ohd-s("coverage","currently-advertised"),ohd-s("roster_state",state),ohd-n("roster_entries",count),ohd-n("roster_capacity",511),ohd-n("roster_name_bytes",119),ohd-s("roster_eviction","least-recent-registration;quiet-publishers-can-be-displaced"),ohd-s("identity_scope","cooperative-publisher;lexical-path;pid-reuse-not-excluded"),json-node-pair("sources",json-node-array(sources)),json-node-pair("diagnostics",json-node-array(diagnostics))));
+ }
+ 0;
+}

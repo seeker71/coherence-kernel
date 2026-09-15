@@ -1,7 +1,7 @@
 // One language for an organ's live reading, need, response and changed state.
 // The organ supplies health and meaning. This carrier knows no error names,
 // model families, resource catalogue, thresholds or expected verdict numbers.
-// preludes: form-stdlib/json-precise.bml form-stdlib/spool-bell-transport.fk form-stdlib/line-grammar.fk
+// preludes: form-stdlib/json-precise.bml form-stdlib/spool-bell-transport.fk form-stdlib/line-grammar.fk form-stdlib/bml/native-owner-clock.bml
 section [form.bml] {
  class OrganHealth {
   def oh-s(key,value) = json-node-pair(key,json-node-string(value));
@@ -18,14 +18,16 @@ section [form.bml] {
   def oh-need(resource,detail) = json-node-object(list(oh-s("resource",resource),json-node-pair("detail",detail)));
   def oh-reference(path) = json-node-object(list(oh-s("path",path),oh-n("bytes",file_size(path)),oh-n("observed_unix_ms",now_unix_ms())));
   def oh-reading(organ,flow,aspect,expected,observed,health,needs,offers,evidence) {
-   let id = str_concat(int_to_str(host_pid()),str_concat(":",str_concat(int_to_str(now_unix_ms()),str_concat(":",str_concat(flow,str_concat(":",aspect))))));
-   json-node-object(list(oh-s("schema","organ-health-v1"),oh-s("id",id),oh-s("organ",organ),oh-s("flow",flow),oh-s("aspect",aspect),oh-s("stage","observe"),json-node-pair("expected",expected),json-node-pair("observed",observed),json-node-pair("health",health),oh-n("surprise",not(node_eq(expected,observed))),json-node-pair("needs",json-node-array(needs)),json-node-pair("offers",json-node-array(oh-strings(offers))),oh-s("selected",""),json-node-pair("evidence",evidence),oh-n("observed_at_ms",now_unix_ms()),oh-n("at_ms",now_unix_ms())));
+   let id = str_concat(noc-open(),str_concat(":",str_concat(flow,str_concat(":",aspect))));
+   let at = now_unix_ms();
+   json-node-object(list(oh-s("schema","organ-health-v1"),oh-s("id",id),oh-s("organ",organ),oh-s("flow",flow),oh-s("aspect",aspect),oh-s("stage","observe"),json-node-pair("expected",expected),json-node-pair("observed",observed),json-node-pair("health",health),oh-n("surprise",not(node_eq(expected,observed))),json-node-pair("needs",json-node-array(needs)),json-node-pair("offers",json-node-array(oh-strings(offers))),oh-s("selected",""),json-node-pair("evidence",evidence),oh-n("observed_at_ms",at),oh-n("at_ms",at)));
   }
   def oh-text(row,key) = and(eq(node_type(oh-get(row,key)),2),gt(str_len(oh-str(row,key)),0));
   def oh-health-value(value) = or(node_eq(value,json-node-null()),or(node_eq(value,json-node-int(0)),node_eq(value,json-node-int(1))));
   def oh-array(row,key) = node_eq(node_category(oh-get(row,key)),JSON-ARRAY());
   def oh-valid(row) = and(str_eq(oh-str(row,"schema"),"organ-health-v1"),and(oh-text(row,"id"),and(oh-text(row,"organ"),and(oh-text(row,"flow"),and(oh-text(row,"aspect"),and(oh-has(list("observe","response","applied"),oh-str(row,"stage")),and(json-object-has?(row,"expected"),and(json-object-has?(row,"observed"),and(oh-health-value(oh-get(row,"health")),and(oh-array(row,"needs"),oh-array(row,"offers")))))))))));
   def oh-pain(row) = node_eq(oh-get(row,"health"),json-node-int(0));
+  def oh-unease(row) = and(oh-valid(row),or(oh-pain(row),or(node_eq(oh-get(row,"health"),json-node-null()),or(not(nil?(json-array-elements(oh-get(row,"needs")))),node_eq(oh-get(row,"surprise"),json-node-int(1))))));
   def oh-response(reading,selected) = oh-set(oh-set(oh-set(reading,"stage",json-node-string("response")),"selected",json-node-string(selected)),"at_ms",json-node-int(now_unix_ms()));
   def oh-select(reading,response,fallback) = if not(oh-valid(response)) then fallback else if not(and(str_eq(oh-key(reading),oh-key(response)),and(str_eq(oh-str(reading,"id"),oh-str(response,"id")),and(str_eq(oh-str(response,"stage"),"response"),oh-has(oh-values(json-array-elements(oh-get(reading,"offers"))),oh-str(response,"selected")))))) then fallback else oh-str(response,"selected");
   // Applied describes an action, never a repaired health reading.
@@ -54,12 +56,26 @@ section [form.bml] {
   def oh-replace(rows,row) = if nil?(rows) then list(row) else if str_eq(oh-key(head(rows)),oh-key(row)) then cons(row,tail(rows)) else cons(head(rows),oh-replace(tail(rows),row));
   def oh-observed(row) = if json-object-has?(row,"observed_at_ms") then row else oh-set(row,"observed_at_ms",oh-get(row,"at_ms"));
   def oh-find(rows,row) = if nil?(rows) then json-node-null() else if str_eq(oh-key(head(rows)),oh-key(row)) then head(rows) else oh-find(tail(rows),row);
+  // Attention annotates an already observed identity. It never replaces the
+  // organ's measured content, and a delayed annotation cannot revive old pain.
+  def oh-attentions(rows,attention) = if nil?(rows) then list(attention) else if node_eq(oh-get(head(rows),"need"),oh-get(attention,"need")) then cons(attention,tail(rows)) else cons(head(rows),oh-attentions(tail(rows),attention));
+  def oh-attention-reading(held,row) {
+   let prior = oh-find(held,row);
+   let bound = and(oh-valid(prior),str_eq(oh-str(prior,"id"),oh-str(row,"id")));
+   if not(bound) then held else oh-replace(held,oh-set(oh-set(prior,"attention",oh-get(row,"attention")),"attentions",json-node-array(oh-attentions(if oh-array(prior,"attentions") then json-array-elements(oh-get(prior,"attentions")) else list(),oh-get(row,"attention")))));
+  }
+  def oh-control-metadata(held,row) {
+   let clean = if json-object-has?(row,"care_need") then json-node-object(oh-without(json-object-pairs(held),"care_delivery")) else held;
+   let responder = if json-object-has?(row,"responder") then oh-set(clean,"responder",oh-get(row,"responder")) else clean;
+   let need = if json-object-has?(row,"care_need") then oh-set(responder,"care_need",oh-get(row,"care_need")) else responder;
+   if json-object-has?(row,"care_of") then oh-set(need,"care_of",oh-get(row,"care_of")) else need;
+  }
   def oh-control-reading(held,row) {
    let prior = oh-find(held,row);
    let bound = and(oh-valid(prior),and(str_eq(oh-str(prior,"id"),oh-str(row,"id")),oh-has(oh-values(json-array-elements(oh-get(prior,"offers"))),oh-str(row,"selected"))));
-   if bound then oh-replace(held,oh-set(oh-set(oh-set(oh-set(prior,"stage",oh-get(row,"stage")),"selected",oh-get(row,"selected")),"result",oh-get(row,"result")),"at_ms",oh-get(row,"at_ms"))) else oh-replace(held,oh-reading("health-flow",oh-str(row,"flow"),"control-correlation",json-node-string("response bound to an observed offer"),json-node-string(oh-str(row,"id")),json-node-int(0),list(oh-need("correlated-observation",oh-get(row,"evidence"))),list("request-evidence","defer"),oh-get(row,"evidence")));
+   if bound then oh-replace(held,oh-control-metadata(oh-set(oh-set(oh-set(oh-set(prior,"stage",oh-get(row,"stage")),"selected",oh-get(row,"selected")),"result",oh-get(row,"result")),"at_ms",oh-get(row,"at_ms")),row)) else oh-replace(held,oh-reading("health-flow",oh-str(row,"flow"),"control-correlation",json-node-string("response bound to an observed offer"),json-node-string(oh-str(row,"id")),json-node-int(0),list(oh-need("correlated-observation",oh-get(row,"evidence"))),list("request-evidence","defer"),oh-get(row,"evidence")));
   }
-  def oh-current(rows,held) = if nil?(rows) then held else oh-current(tail(rows),if not(oh-valid(oh-extract(head(rows)))) then held else if str_eq(oh-str(oh-extract(head(rows)),"stage"),"observe") then oh-replace(held,oh-observed(oh-extract(head(rows)))) else oh-control-reading(held,oh-extract(head(rows))));
+  def oh-current(rows,held) = if nil?(rows) then held else oh-current(tail(rows),if not(oh-valid(oh-extract(head(rows)))) then held else if str_eq(oh-str(oh-extract(head(rows)),"stage"),"observe") then if json-object-has?(oh-extract(head(rows)),"attention") then oh-attention-reading(held,oh-extract(head(rows))) else oh-replace(held,oh-observed(oh-extract(head(rows)))) else oh-control-reading(held,oh-extract(head(rows))));
   def oh-lines(lines,held) = if nil?(lines) then held else if str_eq(head(lines),"") then oh-lines(tail(lines),held) else oh-lines(tail(lines),oh-current(list(parse-json("organ-health-flow",head(lines))),held));
   // One transport chunk and the unfinished event are held while the file flows.
   // The current map grows with distinct organ/flow/aspect identities, not tokens.

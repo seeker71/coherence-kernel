@@ -18,9 +18,10 @@ heal model/example.fk|model/tests/example-band.fk|255|30|local
 ```
 
 The paths above illustrate the syntax; supply the actual production source,
-its existing checker, and its exact expected stdout. The final `local` field
-omits remote generation. Leaving it off enables one final Codex CLI attempt
-after the offered local routes have completed or reported their inability.
+its existing checker, and its exact expected stdout. Healing stays local when
+the final mode is omitted or is `local`; neither path invokes the remote CLI
+probe. A final `remote` field explicitly authorizes one Codex CLI attempt after
+the offered local routes have completed or reported their inability.
 The checker timeout defaults to 30 seconds and accepts 1–120 seconds.
 
 The same native recipe has a stdin door:
@@ -65,14 +66,19 @@ alongside the state.
    observation. Form reads the loopback NDJSON stream through curl and retains
    partial responses as they arrive. This client sets no generation lifetime
    or token limit; the service and model retain their own context limits.
-6. Require a valid native inventory, a completed candidate check or refusal
-   for each planned native model, and receipts for the adapter and local model
+6. With explicit `remote` authorization, require a valid native inventory, a
+   completed candidate check or refusal for each planned native model, and receipts for the adapter and local model
    roles before using the existing exact frontier-admission predicate. A model
    starting or returning text does not establish completion. An invalid or
    oversized inventory leaves remote fallback closed. An invocation-specific claim allows at most
    one remote call, including after failure. Codex receives the bounded repair
    prompt in an empty directory with read-only permissions, ephemeral mode,
    and no user configuration. Its answer is another proposed local edit.
+   `frontier-return.json` binds the actual process, reply, checker and retained
+   session experience. An absent process or reply remains absent. The repair
+   result does not assert a gradient update or promotion; `learning.jsonl` and
+   session status carry those separate stages. Prompt and answer bytes stay
+   private; the health flow carries the receipt reference.
 
 Accepted model responses contain one exact unique old/new replacement. Ambiguous
 matches, commentary around the replacement, empty output, and oversized edits
@@ -177,13 +183,14 @@ each checker and model call, snapshot release, and report generation.
 contracts. A later matching failure offers that repair again and rechecks it
 against the current snapshot. Each accepted example includes a training-candidate
 record; failed candidates remain counterexamples in their attempt directories.
-The shared teaching names the successful and refused repairs from 2026-09-07.
 
-Every candidate/check round now offers its observed outcome to the shared
+Every candidate/check round offers its observed outcome to the shared
 native session learner by default. Verified replacements become supervised
-repair targets; failed proposals teach only the observed execution status.
-Evaluation rounds are excluded. `learning.jsonl` links the private example and
-worker state; queued work is never labelled a completed weight update.
+repair targets; failed proposals retain the problem, attempt and observed
+outcome without treating the proposal as a correct answer. Evaluation experience
+is retained but excluded from the gradient. `learning.jsonl` links the actual
+private experience, example and worker state; queued or paused work is never
+labelled a completed weight update or promotion.
 
 The Llama learner uses full next-token LoRA gradients and restores Adam state
 from the previous generation. Every completed learning round updates all loaded
@@ -195,7 +202,8 @@ process exits and timing stay under `.hearth/session-learning/`.
 After deterministic repair and verified memory, healing attempts the evaluated
 session adapter before the existing native/local model inventory. Its generated
 replacement still has to pass the unchanged isolated checker. Failure continues
-through local resources and models; the rented CLI remains the final fallback.
+through local resources and models. The explicitly selected `remote` mode can
+admit an external CLI after the local routes are exhausted.
 `session status`, `session pause` and `session resume` expose the shared learner.
 See [Native session learning](native-session-learning.md) for the exact scope
 and the distinction between validation loss and demonstrated repair quality.

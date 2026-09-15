@@ -2,9 +2,37 @@
 
 The [north star](fkwu-form-native-north-star.md) defines the complete Form-native runtime and OS. This page describes current execution. The [bootstrap inspection](fkwu-c-bootstrap-inspection.md) carries the function/global ownership census.
 
+The source runtime passes direct bootstrap (`42`, `55`, numeric lists), binary
+freshness (`31`) and native-body execution (`11111`). Signal-driven care runs in
+source and through the installed CLI's compiled default entry. The
+[source evidence](evidence/fkwu/native-core-care.json) contains 13 resource
+scenarios, real child diagnostics and retained resident reads. The
+[installed care evidence](evidence/fkwu/native-startup-care.json) binds its
+actual executable and companions. The
+[canonical CLI artifact](evidence/fkwu/native-cli-artifact.json) passes source
+generation, Darwin ARM64 publication, ordinary cached installation, the existing
+behavior proof and 14 artifact admission cases.
+
+The shared field reuses identical NodeID coordinates; the allocation witness
+returns `7`. Its node columns still have a fixed 2^26-cell capacity and no live
+reclamation. Reset requires every other kernel to settle. The
+[Form admission predicate](evidence/fkwu/field-reset-admission.json) requires a
+singleton registered-kernel roster containing this process's PID; empty,
+missing-self and additional-owner readings refuse. The roster remains bounded
+and does not establish complete host liveness. No reset is exercised by those
+pure admission observations.
+Interning prevents duplicate identities from consuming fresh cells; it does
+not establish a bounded lifetime for changing diagnostic values.
+
 ## Runtime and native computation
 
-Form source and executable BML run through `fkwu`. BML lowers in memory; native artifacts are reusable caches. Source admission materializes a whole unit synchronously. The Form table compiler generates the bootstrap table and emitted CLI carrier, with source and generation identities checked by the canonical builder.
+Form source and executable BML run through `fkwu`. BML lowers in memory; native artifacts are reusable caches. Source admission materializes a whole unit synchronously. The [native CLI builder](native-cli-assembly.md) emits startup around this source runtime and compiles the Form REPL into an adjacent `.fkb` image with its `.sym` record. Source snapshots and build/install attestations bind the three-file platform unit. Default launch accepts a clean, compatible recipe and symbol pair; it does not require the installation attestation. The table compiler remains an independent proof surface.
+
+The source snapshot holds the exact name registry and all its declared source
+homes. Form owns this dependency expansion; the snapshot runtime resolves names
+from those copied bytes. The [six-case observation](evidence/fkwu/native-home-registry.json)
+includes actual snapshot execution by name and malformed or nonportable registry
+refusals. Adding a declared home renews source identity without editing the seed.
 
 [Native BML admission](native-bml-admission.md) owns statement and balanced-body
 boundaries in Form. Inline and multiline class/function bodies preserve their
@@ -17,7 +45,7 @@ The [32-case execution](evidence/fkwu/bml-admission.json) retains actual success
 and refusal statuses. A [direct cache renewal](evidence/fkwu/bml-cache-renewal.json)
 executes the complete body with the root binary and C source unchanged.
 
-Metal is loaded dynamically through a selected adapter. The root and emitted CLI executable link only libSystem on this Darwin host. Form generates Metal source, identifies program/entry/target, and chooses RAM admission or an explicit compiled-archive mode. Shader source files and shader compiler subprocesses are unnecessary.
+Metal is loaded dynamically through a selected adapter. Form generates Metal source, identifies program/entry/target, and chooses RAM admission or an explicit compiled-archive mode. Shader source files and shader compiler subprocesses are unnecessary. Each executable linkage observation applies to its recorded artifact.
 
 Form owns BMP validation, the nine-field integer interpretation, policy thresholds, GPU source generation, captures, submissions and result eligibility. Several versions can use one captured input. Its 144-byte ARM64 frame fold reads each pixel once through three synchronous borrowed-string calls for a normal frame. Larger rectangles subdivide according to the integer result capacity. The interpreter is an explicitly requested equivalence reference.
 
@@ -91,6 +119,26 @@ source-emission capability.
 
 ## Ownership boundary
 
+[Native care](native-core-care.md) defines receipt of organ-emitted unease at execution
+boundaries and directs attention toward each declared resource need. Available
+native providers supply resources; the asking organ re-observes delivery and
+remaining needs. The process organ requests local diagnostic evidence while a
+child runs, and session memory supplies verified learning evidence. The core
+`care` view and Glass retain source readers and expose this current exchange,
+including uncertainty and observation age. Applied attention does not invent recovery.
+Eight alternating-order pairs over one retained failed-child exchange preserve
+the complete care result except timing fields. Direct care projection mints
+252 nodes versus 305 through the intermediate health view. Both retained
+readers consume zero repeated event bytes. These are warm workload observations;
+the reader still allocates changing observations, and no memory bound is claimed.
+Discovery uses the existing bounded shared-memory roster and reports only its
+advertised scope. This is not a complete census of all organs or crossings.
+
+Healing uses local routes by default; the explicit remote mode opens external
+admission after the existing local and checker gates. Attempt retention and
+frontier returns bind real local experience and execution evidence. They do
+not claim that a retained example has already improved the serving model.
+
 Shared-field admission preserves a local list prefix and its already shared
 tail, including nested lists and scalar values. The
 [ownership witness](../observe/shared-field-ownership-witness.bml) uses fresh
@@ -112,6 +160,11 @@ Identical Metal source can share compiled content while each FMJ1 admission has 
 
 Context close and frame-version retirement publish bounded lifetime observations through `organ-health.bml`. The owner retains the current reading, preceding refusal, correlated retry response and applied result. The shared process flow receives typed health rows with opaque owner identity and resource state; captured bytes remain outside that channel. A fresh observation after the actual retry determines whether the release succeeded.
 
+Release-flow identity is retained on each owner and combines process birth with
+the observed record-construction clock. It survives allocator compaction.
+Independent owners remain separate current observations, and one owner's
+correlated response cannot authorize another owner's retry.
+
 The shared append transport exposes file extent through `sbt-append` and confirmed bytes for the current write through `sbt-append-count`. Health events, process diagnostics and generated-text streaming use the byte-count door; carrier refusal remains a refusal.
 
 Metal micro-thoughts carry source-and-entry seals and independent admissions. `mj-thought-table` maps arbitrary string addresses to separate metadata records; `mj-thought-recall` reads their handles. Each record binds its owner and address. An explicit thought release retires its native handle; a later thought call can give that vacant address a new admission. A different program at the same live address refuses replacement. Scoped policy sets can coexist, expire, be re-witnessed and select different resident programs over observed outputs.
@@ -128,16 +181,30 @@ Handle widths, device capabilities and observed allocation limits are explicit. 
 
 The [CPU benchmark](../observe/frame-cpu-benchmark-run.fk) and [GPU benchmark](../observe/frame-metal-benchmark-run.fk) expose admission and execution costs over synthetic captured bytes. Current [CPU](evidence/fkwu/cpu-benchmark.txt) and [Metal](evidence/fkwu/metal-benchmark.txt) samples retain the complete result rows and crossing counts. The fixture is 1,050,678 bytes; the CPU sample takes three native calls per fold, while the GPU sample includes upload, submission, wait, readback and cleanup.
 
-[Identities](evidence/fkwu/identities.json) bind current sources and artifacts. `observe/fkwu-current-identities-run.bml` regenerates them with Form's ARM64 SHA program. The canonical CLI build answers `pong`; root and CLI linkage reads show libSystem only. An explicitly unavailable Metal adapter returns the absence verdict `31`.
+[Identities](evidence/fkwu/identities.json) bind the sources and artifacts recorded
+in that observation. `observe/fkwu-current-identities-run.bml` regenerates them
+with Form's ARM64 SHA program. Each newer execution carries its own source
+identities; a recorded snapshot is not evidence for subsequently changed files.
+That retained snapshot's CLI answers `pong`, and its root and CLI linkage reads
+show libSystem only. The current canonical generation has its own
+[artifact evidence](evidence/fkwu/native-cli-artifact.json); that earlier linkage
+reading remains bound to its recorded executable. An explicitly unavailable Metal adapter returns the snapshot's
+absence verdict `31`.
 
-The [bounded Glass observation](evidence/fkwu/glass-stage-observation.json)
-records 19 of 20 frames under 50 ms, with
-first/max 119 ms and warm maximum 45 ms during concurrent proof work.
-Its complete stage rows place 91 ms of the first frame in heat/fast/kernel
-work and 30 ms of the slowest warm frame in flow/render. These measurements
-locate observed time; they do not establish its cause. The all-frames target
-remains unmet. Without a standing hearth, the counsel's eleven unobserved lanes
-remain unobserved.
+The [current bounded Glass observation](evidence/fkwu/glass-current-observation.json)
+records all 20 frames under 50 ms, with first/max 43 ms and warm maximum
+13 ms while the sensors stood. Missing indexed metrics retain their requested
+identity as unavailable rows; existing zero measurements remain measurements.
+This is one bounded execution, not a general latency guarantee. Without a
+standing hearth, the counsel's eleven unobserved lanes remain unobserved.
+
+The independent Form recipe walker interprets record construction, reads,
+mutation, presence, keys, blueprint and both record aliases through
+`native-recipe-record.bml`. Its [comparison](evidence/fkwu/native-recipe-record.json)
+preserves duplicate field order, aliases and explicit sharing between recipe
+runs. The flattener's unchanged verdict is `131071`. Setters require string
+keys and refuse another kind. Packet records retain their originating owner;
+raw native access to the wrapper is outside this representation contract.
 
 Each result applies to its recorded source and host. A zero-millisecond sample is below the clock's resolution; these fixture samples do not establish maximum hardware bandwidth. The [per-symbol census](evidence/fkwu/c-bootstrap-audit.json) is a lexical inventory with active-platform reconciliation, not a semantic proof of every function.
 
@@ -150,3 +217,23 @@ Form emits the guest string-equality and length leaves used by the shell and RAM
 Paging, separate address spaces, privilege transitions, persistent block I/O, networking, multicore startup and remaining device/power contracts require their own implementations and execution witnesses. Hosted execution does not establish freestanding ownership.
 
 Resource ownership includes names, metadata and event delivery: a native handle is usable only while its Form owner can retain, observe and release it. The checks above make that contract executable.
+
+## Next executable steps
+
+1. Give changing observations an owned, reclaimable lifetime. Measure allocations
+   at actual organ boundaries, preserve the care path under pressure, and prove
+   another live owner keeps its values during reclamation. The direct care
+   projection is the executing first reduction in this path. The remaining
+   seed boundary is `fk_field_fill` and `fk_field_intern_node`: allocation must
+   report pressure and settle its claimed intern slot before a caller stops.
+   Exercise this in an isolated field, including another live caller, before
+   changing shared-field admission.
+2. Replace synchronous whole-unit source admission with Form-owned module
+   compilation on demand. Measure cold admission, cache reuse and replacement
+   latency separately, preserving exact source identities and outstanding work.
+3. Move native specialization policy and emitter construction from the seed to
+   Form. Accept replacements over identical inputs, retain submitted versions
+   until completion, and delete each C implementation after its callers move.
+4. Carry these ownership and completion contracts into async scheduling and the
+   freestanding memory/interrupt floor. Hosted capabilities do not establish a
+   complete Form-native OS.

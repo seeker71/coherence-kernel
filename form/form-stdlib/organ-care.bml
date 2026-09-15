@@ -20,28 +20,86 @@ section [form.bml] {
   def oc-chosen(line) = if nothing?(line) then list() else oc-chosen-words(split-on(line," "));
   // every reading, each answered by the asking organ's own care
   def oc-care-each(context,rows,care) = if nil?(rows) then list() else cons(care(context,head(rows)),oc-care-each(context,tail(rows),care));
-  def oc-care(context,reading,need,providers,emit,observe) {
+  // Unease is declared content. An applied action cannot hide a still-open
+  // need before the asking organ supplies its next observation.
+  def oc-unease(reading) = oh-unease(reading);
+  def oc-needs-valid(needs) = if nil?(needs) then 1 else and(oh-text(head(needs),"resource"),and(json-object-has?(head(needs),"detail"),oc-needs-valid(tail(needs))));
+  def oc-need-declared(needs,need) = if nil?(needs) then 0 else or(node_eq(head(needs),need),oc-need-declared(tail(needs),need));
+  def oc-need-resource(needs,need) = if nil?(needs) then 0 else or(str_eq(oh-str(head(needs),"resource"),oh-str(need,"resource")),oc-need-resource(tail(needs),need));
+  def oc-observation-state(reading,settled) = if oh-pain(reading) then "need-open" else if node_eq(oh-get(reading,"health"),json-node-null()) then "unmeasured" else if not(nil?(json-array-elements(oh-get(reading,"needs")))) then "need-open" else if node_eq(oh-get(reading,"surprise"),json-node-int(1)) then "unresolved" else settled;
+  def oc-attention(reading,need,provider,state) = oh-set(reading,"attention",json-node-object(list(oh-s("state",state),json-node-pair("need",need),json-node-pair("provider",if nil?(provider) then json-node-null() else json-node-string(head(provider))))));
+  // The asking organ has already emitted this observation. Attention adds a
+  // routing annotation to it; it is not a new measurement or an implicit offer.
+  def oc-hear(context,reading,providers,emit,observe) {
+   if not(and(oh-valid(reading),str_eq(oh-str(reading,"stage"),"observe"))) then form_error("care hears an original organ observation") else {
+    let needs = json-array-elements(oh-get(reading,"needs"));
+    if not(oc-needs-valid(needs)) then form_error("care needs a declared resource and detail")
+    else if nil?(needs) then oc-hear-empty(context,reading,emit)
+    else oc-hear-needs(context,reading,reading,needs,providers,emit,observe,list());
+   };
+  }
+  def oc-hear-empty(context,reading,emit) {
+   let state = if oh-pain(reading) then "need-open" else if node_eq(oh-get(reading,"health"),json-node-null()) then "unmeasured" else if oc-unease(reading) then "unresolved" else "observed";
+   if oc-unease(reading) then oc-emit(emit,context,"organ-attention",oc-attention(reading,json-node-null(),list(),state)) else 1;
+   json-node-object(list(oh-s("state",state),json-node-pair("observation",reading),json-node-pair("outcomes",json-node-array(list()))));
+  }
+  def oc-hear-needs(context,origin,reading,needs,providers,emit,observe,held) {
+   let need = head(needs); let current = json-array-elements(oh-get(reading,"needs"));
+   let result = if oc-need-declared(current,need) then oc-hear-declared(context,reading,need,providers,emit,observe) else oc-hear-settled(context,reading,need,current,emit);
+   let outcome = oh-set(oh-set(result,"need",need),"requested_by",oh-get(origin,"id"));
+   let outcomes = cons(outcome,held);
+   if nil?(tail(needs)) then oc-hear-finish(result,reverse(outcomes))
+   else oc-hear-needs(context,origin,oh-get(result,"observation"),tail(needs),providers,emit,observe,outcomes);
+  }
+  def oc-hear-declared(context,reading,need,providers,emit,observe) {
    let provider = oc-find(providers,reading,need);
-   if not(oh-valid(reading)) then form_error("care needs a valid organ observation") else if nil?(provider) then json-node-object(list(oh-s("state","unclaimed"),json-node-pair("observation",reading))) else oc-owned(context,reading,need,provider,emit,observe);
+   oc-emit(emit,context,"organ-attention",oc-attention(reading,need,provider,if nil?(provider) then "unclaimed" else "offered"));
+   oc-care(context,reading,need,providers,emit,observe);
+  }
+  // A previous delivery may settle or change another original need. The
+  // latest observation is authoritative; stale need details cannot actuate.
+  def oc-hear-settled(context,reading,need,current,emit) {
+   let state = if oc-need-resource(current,need) then "superseded-by-observation" else "settled-by-observation";
+   oc-emit(emit,context,"organ-attention",oc-attention(reading,need,list(),state));
+   json-node-object(list(oh-s("state",state),json-node-pair("observation",reading)));
+  }
+  def oc-any-delivery(outcomes) = if nil?(outcomes) then 0 else or(json-object-has?(head(outcomes),"delivery"),oc-any-delivery(tail(outcomes)));
+  def oc-all-state(outcomes,state) = if nil?(outcomes) then 1 else and(str_eq(oh-str(head(outcomes),"state"),state),oc-all-state(tail(outcomes),state));
+  def oc-hear-finish(result,outcomes) {
+   let state = if eq(len(outcomes),1) then oh-str(result,"state") else if oc-all-state(outcomes,"unclaimed") then "unclaimed" else oc-observation-state(oh-get(result,"observation"),if oc-any-delivery(outcomes) then "resource-observed" else "observed");
+   oh-set(oh-set(result,"state",json-node-string(state)),"outcomes",json-node-array(outcomes));
+  }
+  def oc-care(context,reading,need,providers,emit,observe) {
+   if not(oh-valid(reading)) then form_error("care needs a valid organ observation") else {
+    let provider = oc-find(providers,reading,need);
+    if nil?(provider) then json-node-object(list(oh-s("state","unclaimed"),json-node-pair("observation",reading))) else oc-owned(context,reading,need,provider,emit,observe);
+   };
   }
   def oc-owned(context,reading,need,provider,emit,observe) {
-   let response = oh-set(oh-response(reading,nth(provider,2)),"responder",json-node-string(head(provider)));
+   let response = oc-control(oh-response(reading,nth(provider,2)),reading,need,provider);
    let selected = oh-select(reading,response,"");
    if str_eq(selected,"") then form_error("care response does not match the asking organ") else oc-supply(context,reading,need,provider,emit,observe,response);
+  }
+  def oc-control(row,reading,need,provider) {
+   let clean = json-node-object(oh-without(json-object-pairs(row),"care_delivery"));
+   let current = if str_eq(oh-str(row,"stage"),"response") then json-node-object(oh-without(json-object-pairs(clean),"result")) else clean;
+   oh-set(oh-set(oh-set(current,"responder",json-node-string(head(provider))),"care_need",need),"care_of",oh-get(reading,"id"));
   }
   def oc-supply(context,reading,need,provider,emit,observe,response) {
    let claimed = oc-emit(emit,context,"organ-response",response);
    let started = host_monotonic_ms();
    let supplied = oc-call(nth(provider,3),context,reading,need);
    let delivery = oh-set(supplied,"supply_elapsed_ms",json-node-int(sub(host_monotonic_ms(),started)));
-   let applied = oc-emit(emit,context,"organ-action-observed",oh-set(oh-applied(reading,oh-str(response,"selected"),delivery),"responder",json-node-string(head(provider))));
+   let applied = oc-emit(emit,context,"organ-action-observed",oc-control(oh-applied(reading,oh-str(response,"selected"),delivery),reading,need,provider));
    let fresh = oc-observe(observe,context,reading,delivery);
-   let bound = and(oh-valid(fresh),and(not(str_eq(oh-str(fresh,"id"),oh-str(reading,"id"))),and(str_eq(oh-key(fresh),oh-key(reading)),and(str_eq(oh-str(fresh,"stage"),"observe"),str_eq(oh-str(fresh,"care_of"),oh-str(reading,"id"))))));
-   if not(bound) then form_error("care needs a fresh observation from the asking organ") else oc-finish(context,emit,provider,delivery,fresh);
+   let bound = and(oh-valid(fresh),and(oc-needs-valid(json-array-elements(oh-get(fresh,"needs"))),and(not(str_eq(oh-str(fresh,"id"),oh-str(reading,"id"))),and(str_eq(oh-key(fresh),oh-key(reading)),and(str_eq(oh-str(fresh,"stage"),"observe"),str_eq(oh-str(fresh,"care_of"),oh-str(reading,"id")))))));
+   if not(bound) then form_error("care needs a fresh observation from the asking organ") else oc-finish(context,emit,need,provider,delivery,fresh);
   }
-  def oc-finish(context,emit,provider,delivery,fresh) {
-   let observed = oc-emit(emit,context,"organ-health",fresh);
-   json-node-object(list(oh-s("state",if oh-pain(fresh) then "need-open" else if node_eq(oh-get(fresh,"health"),json-node-int(1)) then "resource-observed" else "unmeasured"),oh-s("responder",head(provider)),json-node-pair("delivery",delivery),json-node-pair("observation",fresh)));
+  def oc-finish(context,emit,need,provider,delivery,fresh) {
+   let measured = json-node-object(oh-without(oh-without(json-object-pairs(fresh),"attention"),"attentions"));
+   let current = oh-set(oh-set(oh-set(measured,"responder",json-node-string(head(provider))),"care_delivery",delivery),"care_need",need);
+   let observed = oc-emit(emit,context,"organ-health",current);
+   json-node-object(list(oh-s("state",oc-observation-state(fresh,"resource-observed")),oh-s("responder",head(provider)),json-node-pair("delivery",delivery),json-node-pair("observation",current)));
   }
  }
  0;

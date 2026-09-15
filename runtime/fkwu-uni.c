@@ -13297,7 +13297,7 @@ static long long fk_field_share_float(long long fv) {
             if (__atomic_compare_exchange_n(&fk_fftab[slot], &z, -1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
                 long long j = fk_field_claim(6, 1);
                 if (j >= FK_FIELD_FLOATS) { __atomic_store_n(&fk_fftab[slot], 0, __ATOMIC_RELEASE); return fv; }
-                fk_ffv[j] = d; 
+                fk_ffv[j] = d;
                 __atomic_store_n(&fk_fftab[slot], j + 1, __ATOMIC_RELEASE);
                 return fk_fbase - ((FK_FLT_BASE + j) << 1) - 1;
             }

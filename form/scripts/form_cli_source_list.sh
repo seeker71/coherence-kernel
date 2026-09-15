@@ -2,18 +2,21 @@
 # form_cli_source_list.sh — one source-identity order for every form-cli
 # bootstrap publisher.  Source this only after the caller has cd'd to form/.
 #
-# These paths describe the direct emitted-carrier identity: its Form program,
-# the Form lowering/emission chain that shapes that program, and its fixed
-# carrier/link scripts. They are intentionally *not* a Form flatten list:
-# non-Form inputs are hashed and carried in genesis, never parsed as Form.
+# Roots name the Form program, its compilers and its host build carriers.
+# Native dependency expansion publishes the complete bootstrap manifest.
+# Its bytes and every referenced source participate in identity and genesis.
+# Non-Form inputs are carried and hashed; they are never parsed as Form.
 
-form_cli_source_list() {
+form_cli_source_roots() {
     cat <<'EOF'
 build-form-cli.sh
 scripts/fourth-arm.sh
 scripts/form_cli_bootstrap_proof.sh
 scripts/regen_form_cli_bootstrap.sh
 scripts/regen_standard_lane_binaries.sh
+../runtime/fkwu-uni.c
+../runtime/fkwu-optable.h
+form-stdlib/home-index.txt
 native/metal/fk-metal-carrier.m
 form-stdlib/bml/metal-ask.bml
 form-stdlib/bml/metal-ask-request.bml
@@ -41,6 +44,9 @@ form-stdlib/bmf-grammar.fk
 form-stdlib/host-effect-grammar.fk
 form-stdlib/form-flatten.fk
 form-stdlib/bml/native-table-compile.bml
+form-stdlib/bml/native-table-sources.bml
+form-stdlib/bml/form-cli-source-closure.bml
+form-stdlib/bml-floor-compile.fk
 form-stdlib/form-ontology-loader.fk
 form-stdlib/bml.fk
 form-stdlib/bml-source.fk
@@ -127,6 +133,16 @@ form-stdlib/relational-inquiry-metabolism.fk
 form-stdlib/native-model-native-hierarchy.fk
 form-stdlib/ds4-query-channel.fk
 form-stdlib/form-cli.fk
+form-stdlib/bml/form-core-health.bml
+form-stdlib/bml/organ-health-discovery.bml
+form-stdlib/bml/organ-health-stream.bml
+form-stdlib/organ-health.bml
+form-stdlib/organ-care.bml
+form-stdlib/bml/form-cli-heal.bml
+form-stdlib/bml/form-cli-heal-native-process.bml
+form-stdlib/native-session-memory.bml
+form-stdlib/native-session-experience.bml
+form-stdlib/form-glass-gift-frame.bml
 form-stdlib/native-model-control-plane.fk
 form-stdlib/ask-lane-router.fk
 form-stdlib/form-cli-gguf-cell.fk
@@ -197,17 +213,128 @@ scripts/form_cli_source_list.sh
 EOF
 }
 
+# Native startup and companion images use the current source runtime. These
+# metadata readers validate host artifacts without invoking a Form compiler.
+form_cli_native_load_attestation() {
+    local artifact_path="$1" line key value seen='|'
+    FORM_CLI_NATIVE_SCHEMA="" FORM_CLI_NATIVE_SOURCE_SHA256="" FORM_CLI_NATIVE_SOURCE_STAMP=""
+    FORM_CLI_NATIVE_STARTUP_SHA256="" FORM_CLI_NATIVE_AUTHOR_BINARY_SHA256="" FORM_CLI_NATIVE_RUNTIME_SOURCE_SHA256=""
+    FORM_CLI_NATIVE_BOOTSTRAP_ATTESTATION_SHA256="" FORM_CLI_NATIVE_PLATFORM_SLUG=""
+    FORM_CLI_NATIVE_BINARY_SHA256="" FORM_CLI_NATIVE_IMAGE_SHA256="" FORM_CLI_NATIVE_SYMBOLS_SHA256=""
+    [[ -f "$artifact_path" && ! -L "$artifact_path" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == *=* ]] || return 1
+        key="${line%%=*}" value="${line#*=}"
+        [[ "$seen" != *"|$key|"* && -n "$value" ]] || return 1
+        seen="$seen$key|"
+        case "$key" in
+            schema) FORM_CLI_NATIVE_SCHEMA="$value" ;;
+            source_sha256) FORM_CLI_NATIVE_SOURCE_SHA256="$value" ;;
+            source_stamp) FORM_CLI_NATIVE_SOURCE_STAMP="$value" ;;
+            startup_sha256) FORM_CLI_NATIVE_STARTUP_SHA256="$value" ;;
+            author_binary_sha256) FORM_CLI_NATIVE_AUTHOR_BINARY_SHA256="$value" ;;
+            runtime_source_sha256) FORM_CLI_NATIVE_RUNTIME_SOURCE_SHA256="$value" ;;
+            bootstrap_attestation_sha256) FORM_CLI_NATIVE_BOOTSTRAP_ATTESTATION_SHA256="$value" ;;
+            platform_slug) FORM_CLI_NATIVE_PLATFORM_SLUG="$value" ;;
+            binary_sha256) FORM_CLI_NATIVE_BINARY_SHA256="$value" ;;
+            image_sha256) FORM_CLI_NATIVE_IMAGE_SHA256="$value" ;;
+            symbols_sha256) FORM_CLI_NATIVE_SYMBOLS_SHA256="$value" ;;
+            *) return 1 ;;
+        esac
+    done < "$artifact_path"
+    form_cli_generation_hash_valid "$FORM_CLI_NATIVE_SOURCE_SHA256" && form_cli_generation_stamp_valid "$FORM_CLI_NATIVE_SOURCE_STAMP" || return 1
+    case "$FORM_CLI_NATIVE_SCHEMA" in
+        form-cli-native-attestation-v1)
+            form_cli_generation_hash_valid "$FORM_CLI_NATIVE_STARTUP_SHA256" \
+                && form_cli_generation_hash_valid "$FORM_CLI_NATIVE_AUTHOR_BINARY_SHA256" \
+                && form_cli_generation_hash_valid "$FORM_CLI_NATIVE_RUNTIME_SOURCE_SHA256" \
+                && [[ -z "$FORM_CLI_NATIVE_PLATFORM_SLUG$FORM_CLI_NATIVE_BOOTSTRAP_ATTESTATION_SHA256$FORM_CLI_NATIVE_BINARY_SHA256$FORM_CLI_NATIVE_IMAGE_SHA256$FORM_CLI_NATIVE_SYMBOLS_SHA256" ]]
+            ;;
+        form-cli-native-platform-attestation-v1)
+            form_cli_generation_hash_valid "$FORM_CLI_NATIVE_BOOTSTRAP_ATTESTATION_SHA256" \
+                && [[ "$FORM_CLI_NATIVE_PLATFORM_SLUG" =~ ^[A-Za-z0-9._-]+$ ]] \
+                && form_cli_generation_hash_valid "$FORM_CLI_NATIVE_BINARY_SHA256" \
+                && form_cli_generation_hash_valid "$FORM_CLI_NATIVE_IMAGE_SHA256" \
+                && form_cli_generation_hash_valid "$FORM_CLI_NATIVE_SYMBOLS_SHA256" \
+                && [[ -z "$FORM_CLI_NATIVE_STARTUP_SHA256$FORM_CLI_NATIVE_AUTHOR_BINARY_SHA256$FORM_CLI_NATIVE_RUNTIME_SOURCE_SHA256" ]]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+form_cli_native_write_attestation() {
+    local artifact_path="$1" source_sha="$2" source_stamp="$3" startup="$4" author_sha="$5" runtime_source="$6"
+    form_cli_generation_hash_valid "$source_sha" && form_cli_generation_stamp_valid "$source_stamp" && form_cli_generation_hash_valid "$author_sha" || return 1
+    local startup_sha runtime_sha
+    startup_sha="$(form_cli_generation_sha256_file "$startup")" || return 1
+    runtime_sha="$(form_cli_generation_sha256_file "$runtime_source")" || return 1
+    {
+        printf '%s\n' 'schema=form-cli-native-attestation-v1'
+        printf 'source_sha256=%s\nsource_stamp=%s\nstartup_sha256=%s\nauthor_binary_sha256=%s\nruntime_source_sha256=%s\n' "$source_sha" "$source_stamp" "$startup_sha" "$author_sha" "$runtime_sha"
+    } > "$artifact_path" || return 1
+    form_cli_native_verify_attestation "$artifact_path" "$source_sha" "$source_stamp" "$startup" "$runtime_source" "$author_sha"
+}
+
+form_cli_native_verify_attestation() {
+    local artifact_path="$1" source_sha="$2" source_stamp="$3" startup="$4" runtime_source="$5" author_sha="${6:-}"
+    form_cli_native_load_attestation "$artifact_path" || return 1
+    [[ "$FORM_CLI_NATIVE_SCHEMA" == form-cli-native-attestation-v1 \
+        && "$FORM_CLI_NATIVE_SOURCE_SHA256" == "$source_sha" && "$FORM_CLI_NATIVE_SOURCE_STAMP" == "$source_stamp" \
+        && "$FORM_CLI_NATIVE_STARTUP_SHA256" == "$(form_cli_generation_sha256_file "$startup")" \
+        && "$FORM_CLI_NATIVE_RUNTIME_SOURCE_SHA256" == "$(form_cli_generation_sha256_file "$runtime_source")" \
+        && ( -z "$author_sha" || "$FORM_CLI_NATIVE_AUTHOR_BINARY_SHA256" == "$author_sha" ) ]]
+}
+
+form_cli_native_write_platform_attestation() {
+    local artifact_path="$1" bootstrap="$2" slug="$3" binary="$4" image="$5" symbols="$6"
+    form_cli_native_load_attestation "$bootstrap" || return 1
+    [[ "$FORM_CLI_NATIVE_SCHEMA" == form-cli-native-attestation-v1 && "$slug" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+    local source_sha="$FORM_CLI_NATIVE_SOURCE_SHA256" source_stamp="$FORM_CLI_NATIVE_SOURCE_STAMP" bootstrap_sha binary_sha image_sha symbols_sha
+    bootstrap_sha="$(form_cli_generation_sha256_file "$bootstrap")" || return 1
+    binary_sha="$(form_cli_generation_sha256_file "$binary")" || return 1
+    image_sha="$(form_cli_generation_sha256_file "$image")" || return 1
+    symbols_sha="$(form_cli_generation_sha256_file "$symbols")" || return 1
+    {
+        printf '%s\n' 'schema=form-cli-native-platform-attestation-v1'
+        printf 'source_sha256=%s\nsource_stamp=%s\nbootstrap_attestation_sha256=%s\nplatform_slug=%s\nbinary_sha256=%s\nimage_sha256=%s\nsymbols_sha256=%s\n' "$source_sha" "$source_stamp" "$bootstrap_sha" "$slug" "$binary_sha" "$image_sha" "$symbols_sha"
+    } > "$artifact_path" || return 1
+    form_cli_native_verify_platform_attestation "$artifact_path" "$source_sha" "$source_stamp" "$bootstrap" "$slug" "$binary" "$image" "$symbols"
+}
+
+form_cli_native_verify_platform_attestation() {
+    local artifact_path="$1" source_sha="$2" source_stamp="$3" bootstrap="$4" slug="$5" binary="$6" image="$7" symbols="$8"
+    form_cli_native_load_attestation "$artifact_path" || return 1
+    [[ "$FORM_CLI_NATIVE_SCHEMA" == form-cli-native-platform-attestation-v1 \
+        && "$FORM_CLI_NATIVE_SOURCE_SHA256" == "$source_sha" && "$FORM_CLI_NATIVE_SOURCE_STAMP" == "$source_stamp" \
+        && "$FORM_CLI_NATIVE_PLATFORM_SLUG" == "$slug" \
+        && "$FORM_CLI_NATIVE_BOOTSTRAP_ATTESTATION_SHA256" == "$(form_cli_generation_sha256_file "$bootstrap")" \
+        && "$FORM_CLI_NATIVE_BINARY_SHA256" == "$(form_cli_generation_sha256_file "$binary")" \
+        && "$FORM_CLI_NATIVE_IMAGE_SHA256" == "$(form_cli_generation_sha256_file "$image")" \
+        && "$FORM_CLI_NATIVE_SYMBOLS_SHA256" == "$(form_cli_generation_sha256_file "$symbols")" ]]
+}
+
+form_cli_source_list() {
+    local manifest="form-stdlib/bootstrap/form-cli.dependencies"
+    [[ -f "$manifest" && -s "$manifest" && ! -L "$manifest" ]] || {
+        printf 'form-cli source dependency manifest missing: %s\n' "$manifest" >&2
+        return 1
+    }
+    printf '%s\n' "$manifest"
+    cat "$manifest"
+}
+
 form_cli_load_sources() {
-    local source
+    local source sources
+    sources="$(form_cli_source_list)" || return 1
     FORM_CLI_SRCS=()
     while IFS= read -r source; do
         [[ -z "$source" ]] || FORM_CLI_SRCS+=("$source")
-    done < <(form_cli_source_list)
+    done <<< "$sources"
 }
 
-# Bootstrap and platform-carrier publication share one lock.  A platform
-# binary is meaningful only relative to one exact bootstrap table/C and its
-# authoring attestation, so neither publisher may move those artifacts while
+# Bootstrap and platform publication share one lock. A platform trio is
+# meaningful relative to one exact startup and its authoring attestation,
+# so neither publisher may move those artifacts while
 # the other is between verification and publication.
 form_cli_publish_lock_acquire() {
     local lock_dir="${1:-form-stdlib/bootstrap/.form-cli-publish.lock}"
@@ -245,7 +372,11 @@ form_cli_publish_lock_acquire() {
         return 75
     fi
     printf '%s\n' "$$" > "$owner_file" || {
-        rmdir "$lock_dir" 2>/dev/null || true
+        # Redirection may already have created a partial owner file. This
+        # process owns the directory from mkdir, so release that file first.
+        if ! rm -f "$owner_file" || ! rmdir "$lock_dir"; then
+            printf 'form-cli publish: cannot release incomplete owned lock %s\n' "$lock_dir" >&2
+        fi
         printf 'form-cli publish: cannot initialise lock %s\n' "$lock_dir" >&2
         return 75
     }
