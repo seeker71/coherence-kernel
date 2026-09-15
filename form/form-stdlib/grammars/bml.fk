@@ -1552,8 +1552,62 @@
                     self
                     env))))
 
+    ;; `if ( ... ) statement [else statement]` holds its statements behind a
+    ;; guard. The return a body answers directly is the first one no guard
+    ;; holds -- in operator== the final `return m_hItem == hOther.Item;`,
+    ;; not the guarded `return false;` before it.
+    (defn bml-body-source-if-guard-at? (values)
+        (if (gt (len values) 1)
+            (if (str_eq (head values) "if")
+                (str_eq (nth values 1) "(")
+                false)
+            false))
+
+    (defn bml-body-source-skip-closing (values open close depth)
+        (if (nil? values)
+            values
+            (if (str_eq (head values) open)
+                (bml-body-source-skip-closing (tail values) open close (add depth 1))
+            (if (str_eq (head values) close)
+                (if (eq depth 0)
+                    (tail values)
+                    (bml-body-source-skip-closing (tail values) open close (sub depth 1)))
+                (bml-body-source-skip-closing (tail values) open close depth)))))
+
+    (defn bml-body-source-skip-past-semicolon (values)
+        (if (nil? values)
+            values
+            (if (str_eq (head values) ";")
+                (tail values)
+                (bml-body-source-skip-past-semicolon (tail values)))))
+
+    (defn bml-body-source-skip-statement (values)
+        (if (nil? values)
+            values
+            (if (str_eq (head values) "{")
+                (bml-body-source-skip-closing (tail values) "{" "}" 0)
+            (if (bml-body-source-if-guard-at? values)
+                (bml-body-source-skip-if-guard values)
+                (bml-body-source-skip-past-semicolon values)))))
+
+    (defn bml-body-source-skip-if-guard (values)
+        (do
+            (let after-guard
+                (bml-body-source-skip-statement
+                    (bml-body-source-skip-closing (drop 2 values) "(" ")" 0)))
+            (if (nil? after-guard)
+                after-guard
+                (if (str_eq (head after-guard) "else")
+                    (bml-body-source-skip-statement (tail after-guard))
+                    after-guard))))
+
     (defn bml-body-source-exec-return-loop (values self env)
         (if (nil? values) (empty)
+            (if (bml-body-source-if-guard-at? values)
+                (bml-body-source-exec-return-loop
+                    (bml-body-source-skip-if-guard values)
+                    self
+                    env)
             (if (bml-body-source-return-member-add-at? values)
                 (bml-body-source-eval-return-member-add-at values self env)
             (if (bml-body-source-return-member-eq-at? values)
@@ -1571,7 +1625,7 @@
                 (bml-body-source-exec-return-loop
                     (tail values)
                     self
-                    env))))))))))
+                    env)))))))))))
 
     (defn bml-body-source-exec-return (body-component self env)
         (bml-body-source-exec-return-loop
@@ -4138,11 +4192,13 @@
     (defn bml-source-class-property-parse (objects)
         (bml-source-properties-parse objects))
 
+    ;; After a dot any word reads as a name segment: a property word
+    ;; (native, public, get, ...) or a keyword names a path segment there.
     (defn bml-source-parse-qualified-name-loop (objects current)
         (if (nil? objects)
             (list current objects)
             (if (bml-source-token-value? (head objects) ".")
-                (if (bml-source-name-token? (nth objects 1))
+                (if (bml-source-property-name-token? (nth objects 1))
                     (bml-source-parse-qualified-name-loop
                         (drop 2 objects)
                         (str_concat
@@ -5018,7 +5074,9 @@
 
     (defn bml-call-named? (node name)
         (if (node_eq (node_category node) BML-AST-CALL)
-            (str_eq (bml-call-name node) name)
+            (if (eq (len (node_children node)) 2)
+                (str_eq (bml-call-name node) name)
+                false)
             false))
 
     (defn bml-bnml-declare-node? (node)
@@ -5107,7 +5165,7 @@
                     (bml-expr-result true (bml-ast-string value) (tail objects))
                 (if (str_eq kind "bml-char")
                     (bml-expr-result true (bml-ast-char value) (tail objects))
-                (if (str_eq kind "bml-name")
+                (if (or (str_eq kind "bml-name") (str_eq kind "bml-property"))
                     (bml-source-parse-name-primary objects)
                 (if (str_eq value "#(")
                     (bml-source-parse-array-literal (tail objects))
@@ -5147,7 +5205,7 @@
     ;; scope) and may call; each argument is an expression.
     (defn bml-source-parse-name-primary (objects)
         (do
-            (let name-parse (bml-source-parse-qualified-name objects))
+            (let name-parse (bml-source-parse-path-name objects))
             (let name (nth name-parse 0))
             (let rest (nth name-parse 1))
             (if (bml-source-token-value? (head rest) "(")
@@ -5826,10 +5884,18 @@
                 env)
             (bml-local-bind-const env node)))
 
+    ;; BML-AST categories are trivial ints, so a literal leaf answers
+    ;; node_category with itself: the leaf 13 reads as NAME, 35 as CALL. A
+    ;; name node is the one that also carries its one name child.
     (defn bml-bnml-reads-mutable? (node env)
-        (if (node_eq (node_category node) BML-AST-NAME)
+        (if (bml-name-node? node)
             (bml-bnml-binding? (bml-local-lookup env (bml-local-name node)))
             (bml-bnml-any-reads-mutable? (node_children node) env)))
+
+    (defn bml-name-node? (node)
+        (if (node_eq (node_category node) BML-AST-NAME)
+            (eq (len (node_children node)) 1)
+            false))
 
     (defn bml-bnml-any-reads-mutable? (nodes env)
         (if (nil? nodes)
@@ -5943,16 +6009,39 @@
                 (bml-call-args call-node))
             env))
 
+    ;; A call resolves as on Hati: the name through package and import
+    ;; scope, the overload by arity, and the callee's body in the callee's
+    ;; own unit env with its parameters bound to arguments read in the
+    ;; caller's env. What cannot resolve compiles to its named refusal.
+    ;; Reserved __ names (field access, arg slots) keep their own lanes.
     (defn bml-compile-call-in (node env)
-        (do
-            (let binding (bml-local-lookup env (bml-call-name node)))
-            (if (nil? binding)
-                (empty)
-                (do
-                    (let method-node (bml-local-binding-value binding))
-                    (bml-compile-callee-body-in
-                        (bml-method-node-body method-node)
-                        (bml-call-bind-args method-node node env)))))))
+        (if (bml-scope-prefix? (bml-call-name node) "__")
+            (empty)
+            (do
+                (let name (bml-scope-resolve-name env (bml-call-name node)))
+                (let binding (bml-local-lookup-direct env name))
+                (if (nil? binding)
+                    (bml-bma-refusal
+                        (bml-scope-unbound-call-reason env (bml-call-name node)))
+                (if (not (bml-bma-method-value? (bml-local-binding-value binding)))
+                    (bml-bma-refusal "call/not-method")
+                    (do
+                        (let method-binding
+                            (bml-bma-method-binding-for-arity
+                                env
+                                name
+                                (len (bml-call-args node))))
+                        (if (nil? method-binding)
+                            (bml-bma-refusal "call/arity")
+                            (do
+                                (let method-node (bml-local-binding-value method-binding))
+                                (bml-compile-callee-body-in
+                                    (bml-method-node-body method-node)
+                                    (bml-bma-bind-params
+                                        (bml-method-node-parameters method-node)
+                                        (bml-call-args node)
+                                        env
+                                        (bml-bma-home-env method-node env)))))))))))
 
     ;; A callee's final return is the call's value: inlined BMA keeps the
     ;; caller's stream running instead of ending it at the callee's return.
@@ -5969,10 +6058,22 @@
             (if (nil? (tail children))
                 (bml-compile-callee-body-in (head children) env)
                 (append
-                    (bml-compile-child-in (head children) env)
+                    (bml-compile-callee-statement-in (head children) env)
                     (bml-compile-callee-children-in
                         (tail children)
                         (bml-local-env-after-node (head children) env))))))
+
+    ;; Inside an inlined callee a binding statement (const, local, assign)
+    ;; only binds: BMA reads locals by substitution, and a value pushed here
+    ;; would sit under the call's result in the caller's expression.
+    (defn bml-compile-callee-statement-in (node env)
+        (if (node_eq (node_category node) BML-AST-CONST)
+            (empty)
+        (if (bml-bnml-declare-node? node)
+            (empty)
+        (if (bml-bnml-assign-node? node)
+            (empty)
+            (bml-compile-child-in node env)))))
 
     (defn bml-compile-node-in (node env)
         (do
@@ -5994,13 +6095,7 @@
             (if (node_eq cat BML-AST-CONST)
                 (bml-compile-node-in (bml-local-const-value node) env)
             (if (node_eq cat BML-AST-NAME)
-                (do
-                    (let binding (bml-local-lookup env (bml-local-name node)))
-                    (if (nil? binding)
-                        (empty)
-                        (bml-compile-node-in
-                            (bml-local-binding-value binding)
-                            (bml-local-binding-env binding))))
+                (bml-compile-name-in node env)
             (if (node_eq cat BML-AST-CALL)
                 (bml-compile-call-node-in node env)
             (if (node_eq cat BML-AST-RETURN)
@@ -6043,8 +6138,9 @@
                 (list (bma-discard 0))
                 (empty))))))))))))))))))))))))))
 
+    ;; A program is a unit: one scope rule on both lanes.
     (defn bml-compile-program (node)
-        (comp-program "bma" (bml-compile-node node)))
+        (bml-compile-unit-program node (empty)))
 
     ;; --- BMA-like runtime -------------------------------------------
 
@@ -6206,10 +6302,12 @@
             (do
                 (let binding (bml-local-lookup env (bml-local-name node)))
                 (if (nil? binding)
-                    (empty)
+                    (bml-bma-refusal "name/unbound")
+                (if (bml-bma-method-value? (bml-local-binding-value binding))
+                    (bml-bma-refusal "name/method")
                     (bml-compile-value-in
                         (bml-local-binding-value binding)
-                        (bml-local-binding-env binding))))
+                        (bml-local-binding-env binding)))))
             (bml-compile-node-in node env))))
 
     (defn bml-compile-values-in (nodes env)
@@ -7443,9 +7541,18 @@
     (defn bml-source-scoped-fail (objects)
         (bml-source-parse-step false "" (empty) objects))
 
+    ;; A path (package, import, a qualified reference) may begin with any
+    ;; word: a name, a keyword, or a property word such as `native`.
+    (defn bml-source-parse-path-name (objects)
+        (if (bml-source-property-name-token? (head objects))
+            (bml-source-parse-qualified-name-loop
+                (tail objects)
+                (bmf-object-value (head objects)))
+            (list "" objects)))
+
     (defn bml-source-scoped-package (objects)
         (do
-            (let name-parse (bml-source-parse-qualified-name (tail objects)))
+            (let name-parse (bml-source-parse-path-name (tail objects)))
             (let name (nth name-parse 0))
             (let rest (nth name-parse 1))
             (if (str_eq name "")
@@ -7460,7 +7567,7 @@
 
     (defn bml-source-scoped-import (objects)
         (do
-            (let name-parse (bml-source-parse-qualified-name (tail objects)))
+            (let name-parse (bml-source-parse-path-name (tail objects)))
             (let name (nth name-parse 0))
             (let rest (nth name-parse 1))
             (if (str_eq name "")
@@ -7714,10 +7821,24 @@
                 true
                 (bml-scope-methods-define? (tail methods) name))))
 
+    (defn bml-scope-consts-define? (nodes name)
+        (if (nil? nodes)
+            false
+            (if (node_eq (node_category (head nodes)) BML-AST-CONST)
+                (if (str_eq (bml-local-const-name (head nodes)) name)
+                    true
+                    (bml-scope-consts-define? (tail nodes) name))
+                (bml-scope-consts-define? (tail nodes) name))))
+
+    (defn bml-scope-unit-defines? (unit name)
+        (if (bml-scope-methods-define? (bml-scope-unit-methods unit) name)
+            true
+            (bml-scope-consts-define? (bml-scope-unit-mains unit) name)))
+
     (defn bml-scope-units-defining (units name)
         (if (nil? units)
             (empty)
-            (if (bml-scope-methods-define? (bml-scope-unit-methods (head units)) name)
+            (if (bml-scope-unit-defines? (head units) name)
                 (cons (head units) (bml-scope-units-defining (tail units) name))
                 (bml-scope-units-defining (tail units) name))))
 
@@ -7831,23 +7952,55 @@
 
     (defn bml-scope-package-key (_x) "__bml_package")
 
-    (defn bml-scope-base-env (unit)
-        (if (str_eq (bml-scope-unit-package unit) "")
-            (empty)
-            (list
-                (bml-local-binding
-                    (bml-scope-package-key 0)
-                    (bml-ast-package (bml-scope-unit-package unit))
-                    (empty)))))
+    (defn bml-scope-link-key (_x) "__bml_link")
+
+    ;; BMA inlines calls, so its env also carries the link and the lane's
+    ;; symbols: a callee's body compiles in its own unit's env, rebuilt from
+    ;; them at the call.
+    (defn bml-scope-base-env (link unit symbols lane)
+        (do
+            (let held
+                (if (str_eq lane "bma")
+                    (list
+                        (bml-local-binding
+                            (bml-scope-link-key 0)
+                            (list link symbols)
+                            (empty)))
+                    (empty)))
+            (if (str_eq (bml-scope-unit-package unit) "")
+                held
+                (cons
+                    (bml-local-binding
+                        (bml-scope-package-key 0)
+                        (bml-ast-package (bml-scope-unit-package unit))
+                        (empty))
+                    held))))
+
+    ;; a const symbol carries its value node and the env that value reads
+    (defn bml-scope-const-symbol (package name value env pos)
+        (list "bml-scope-const" package name value env pos))
+
+    (defn bml-scope-const-symbol? (symbol)
+        (str_eq (head symbol) "bml-scope-const"))
 
     (defn bml-scope-symbol-value (symbol lane)
+        (if (bml-scope-const-symbol? symbol)
+            (nth symbol 3)
         (if (str_eq lane "bma")
             (bml-scope-symbol-node symbol)
-            (bml-scope-symbol-ref symbol)))
+            (bml-scope-symbol-ref symbol))))
+
+    (defn bml-scope-symbol-env (symbol)
+        (if (bml-scope-const-symbol? symbol)
+            (nth symbol 4)
+            (empty)))
 
     (defn bml-scope-bind (env name symbol lane)
         (cons
-            (bml-local-binding name (bml-scope-symbol-value symbol lane) env)
+            (bml-local-binding
+                name
+                (bml-scope-symbol-value symbol lane)
+                (bml-scope-symbol-env symbol))
             env))
 
     (defn bml-scope-bind-target-symbol (env target symbol lane)
@@ -7913,16 +8066,74 @@
                     env)
                 lane)))
 
-    (defn bml-scope-unit-env (link unit lane)
+    (defn bml-scope-unit-env-with (link unit symbols lane)
         (bml-scope-own-env
-            (bml-scope-link-symbols link)
+            symbols
             (bml-scope-unit-pos unit)
             (bml-scope-import-env
                 (bml-scope-link-all link)
                 (bml-scope-unit-imports unit)
-                (bml-scope-link-symbols link)
-                (bml-scope-base-env unit)
+                symbols
+                (bml-scope-base-env link unit symbols lane)
                 lane)
+            lane))
+
+    ;; A unit's top-level consts, in source order, each bound to the env its
+    ;; value reads: the unit's methods and imports and the consts before it.
+    (defn bml-scope-consts-fold (nodes env unit acc)
+        (if (nil? nodes)
+            (reverse-list acc)
+            (if (node_eq (node_category (head nodes)) BML-AST-CONST)
+                (bml-scope-consts-fold
+                    (tail nodes)
+                    (bml-local-env-after-node (head nodes) env)
+                    unit
+                    (cons
+                        (bml-scope-const-symbol
+                            (bml-scope-unit-package unit)
+                            (bml-local-const-name (head nodes))
+                            (bml-local-const-value (head nodes))
+                            env
+                            (bml-scope-unit-pos unit))
+                        acc))
+                (bml-scope-consts-fold (tail nodes) env unit acc))))
+
+    ;; Consts gather importee first (reverse link order), so a const built
+    ;; from a const its unit imports finds that const already bound.
+    (defn bml-scope-consts-loop (link units known lane)
+        (if (nil? units)
+            known
+            (bml-scope-consts-loop
+                link
+                (tail units)
+                (append
+                    known
+                    (bml-scope-consts-fold
+                        (bml-scope-unit-mains (head units))
+                        (bml-scope-unit-env-with
+                            link
+                            (head units)
+                            (append (bml-scope-link-symbols link) known)
+                            lane)
+                        (head units)
+                        (empty)))
+                lane)))
+
+    ;; every symbol a lane binds: the linked methods, then the linked consts
+    (defn bml-scope-lane-symbols (link lane)
+        (append
+            (bml-scope-link-symbols link)
+            (bml-scope-consts-loop
+                link
+                (reverse-list (bml-scope-link-linked link))
+                (empty)
+                lane)))
+
+    (defn bml-scope-unit-env (link unit lane)
+        (bml-scope-unit-env-with
+            link
+            unit
+            (bml-scope-lane-symbols link lane)
             lane))
 
     ;; lookup: a name qualified by the unit's own package names its member.
@@ -8031,16 +8242,16 @@
 
     ;; compile: the main unit plus every unit its imports reach.
 
-    (defn bml-scope-linked-unsupported (link units)
+    (defn bml-scope-linked-unsupported (link units symbols)
         (if (nil? units)
             (empty)
             (append
                 (bml-hati-unsupported-methods-in
                     (bml-scope-unit-methods (head units))
-                    (bml-scope-unit-env link (head units) "hati"))
-                (bml-scope-linked-unsupported link (tail units)))))
+                    (bml-scope-unit-env-with link (head units) symbols "hati"))
+                (bml-scope-linked-unsupported link (tail units) symbols))))
 
-    (defn bml-scope-lower-linked (link units pool)
+    (defn bml-scope-lower-linked (link units symbols pool)
         (if (nil? units)
             (bml-hati-fns-result (empty) pool)
             (do
@@ -8048,11 +8259,12 @@
                     (bml-hati-lower-methods-in
                         (bml-scope-unit-methods (head units))
                         pool
-                        (bml-scope-unit-env link (head units) "hati")))
+                        (bml-scope-unit-env-with link (head units) symbols "hati")))
                 (let rest
                     (bml-scope-lower-linked
                         link
                         (tail units)
+                        symbols
                         (bml-hati-fns-result-pool first)))
                 (bml-hati-fns-result
                     (append
@@ -8066,7 +8278,8 @@
             (let main (bml-scope-link-main link))
             (let methods (bml-scope-unit-methods main))
             (let main-nodes (bml-scope-unit-mains main))
-            (let method-env (bml-scope-unit-env link main "hati"))
+            (let symbols (bml-scope-lane-symbols link "hati"))
+            (let method-env (bml-scope-unit-env-with link main symbols "hati"))
             (let others (tail (bml-scope-link-linked link)))
             (let unsupported
                 (append
@@ -8075,7 +8288,7 @@
                         (bml-hati-unsupported-nodes-in-env main-nodes method-env)
                         (append
                             (bml-hati-unsupported-methods-in methods method-env)
-                            (bml-scope-linked-unsupported link others)))))
+                            (bml-scope-linked-unsupported link others symbols)))))
             (let main-lowered
                 (bml-hati-bnml-body-in
                     main-nodes
@@ -8089,6 +8302,7 @@
                 (bml-scope-lower-linked
                     link
                     others
+                    symbols
                     (bml-hati-fns-result-pool methods-lowered)))
             (bml-hati-image
                 (cons
@@ -8121,6 +8335,140 @@
                     node
                     (bml-scope-unit-env link (bml-scope-link-main link) "bma")))))
 
+    ;; --- BMA: the same scope rule, inlined ---------------------------
+
+    (defn bml-bma-refusal (reason)
+        (list (bma-push-lit (str_concat (bml-hati-refusal-prefix 0) reason))))
+
+    (defn bml-bma-method-value? (value)
+        (node_eq (node_category value) BML-AST-METHOD))
+
+    (defn bml-compile-name-in (node env)
+        (do
+            (let binding (bml-local-lookup env (bml-local-name node)))
+            (if (nil? binding)
+                (bml-bma-refusal "name/unbound")
+            (if (bml-bma-method-value? (bml-local-binding-value binding))
+                (bml-bma-refusal "name/method")
+                (bml-compile-node-in
+                    (bml-local-binding-value binding)
+                    (bml-local-binding-env binding))))))
+
+    (defn bml-bma-method-binding-for-arity (env name arity)
+        (if (nil? env)
+            (empty)
+            (do
+                (let binding (head env))
+                (if (str_eq (bml-local-binding-name binding) name)
+                    (if (bml-bma-method-value? (bml-local-binding-value binding))
+                        (if (eq (len (bml-method-node-parameters
+                                        (bml-local-binding-value binding)))
+                                arity)
+                            binding
+                            (bml-bma-method-binding-for-arity (tail env) name arity))
+                        (bml-bma-method-binding-for-arity (tail env) name arity))
+                    (bml-bma-method-binding-for-arity (tail env) name arity)))))
+
+    ;; parameters bind to argument nodes read in the caller's env, over the
+    ;; callee's own env
+    (defn bml-bma-bind-params (params args arg-env body-env)
+        (if (or (nil? params) (nil? args))
+            body-env
+            (bml-bma-bind-params
+                (tail params)
+                (tail args)
+                arg-env
+                (cons
+                    (bml-local-binding
+                        (bml-parameter-name (head params))
+                        (head args)
+                        arg-env)
+                    body-env))))
+
+    (defn bml-scope-nodes-hold? (nodes node)
+        (if (nil? nodes)
+            false
+            (if (node_eq (head nodes) node)
+                true
+                (bml-scope-nodes-hold? (tail nodes) node))))
+
+    (defn bml-scope-home-unit (units method-node)
+        (if (nil? units)
+            (empty)
+            (if (bml-scope-nodes-hold? (bml-scope-unit-methods (head units)) method-node)
+                (head units)
+                (bml-scope-home-unit (tail units) method-node))))
+
+    ;; the env of the unit that defines a method, rebuilt from the link the
+    ;; env carries; a method no linked unit holds at top level (one declared
+    ;; in a nested block) reads the env it was reached from
+    (defn bml-bma-home-env (method-node env)
+        (do
+            (let held (bml-local-lookup-direct env (bml-scope-link-key 0)))
+            (if (nil? held)
+                env
+                (do
+                    (let link (head (bml-local-binding-value held)))
+                    (let symbols (head (tail (bml-local-binding-value held))))
+                    (let home
+                        (bml-scope-home-unit (bml-scope-link-linked link) method-node))
+                    (if (nil? home)
+                        env
+                        (bml-scope-unit-env-with link home symbols "bma"))))))
+
+    ;; refusals a BMA program carries; running it answers them the way a
+    ;; Hati image does, before any op runs
+    (defn bml-bma-refusal-text? (value)
+        (if (str_eq (value_kind value) "string")
+            (bml-scope-prefix? value (bml-hati-refusal-prefix 0))
+            false))
+
+    (defn bml-bma-op-refusals (op)
+        (do
+            (let name (comp-op-name op))
+            (if (str_eq name "push-lit")
+                (if (bml-bma-refusal-text? (comp-op-value op))
+                    (list
+                        (substring
+                            (comp-op-value op)
+                            (str_len (bml-hati-refusal-prefix 0))
+                            (str_len (comp-op-value op))))
+                    (empty))
+            (if (or (str_eq name "choose") (str_eq name "try"))
+                (bml-bma-branch-refusals (comp-op-value op))
+            (if (str_eq name "while-success")
+                (bml-bma-ops-refusals (comp-op-value op))
+                (empty))))))
+
+    (defn bml-bma-ops-refusals (ops)
+        (if (nil? ops)
+            (empty)
+            (append
+                (bml-bma-op-refusals (head ops))
+                (bml-bma-ops-refusals (tail ops)))))
+
+    (defn bml-bma-branch-refusals (branches)
+        (if (nil? branches)
+            (empty)
+            (append
+                (bml-bma-ops-refusals (head branches))
+                (bml-bma-branch-refusals (tail branches)))))
+
+    (defn bml-bma-run-unit-value (node units)
+        (do
+            (let program (bml-compile-unit-program node units))
+            (let reasons
+                (bml-hati-reasons-merge
+                    (bml-hati-reasons-merge
+                        (empty)
+                        (bml-scope-link-reasons (bml-scope-link node units)))
+                    (bml-bma-ops-refusals (comp-program-ops program))))
+            (if (nil? reasons)
+                (bma-run-value program)
+                (str_concat
+                    (bml-hati-refusal-prefix 0)
+                    (bml-hati-unsupported-reasons-text reasons)))))
+
     (defn bma-trace-count-mode (trace mode)
         (if (nil? trace) 0
             (add
@@ -8133,4 +8481,4 @@
                 (if (str_eq (bma-trace-op-name (head trace)) op-name) 1 0)
                 (bma-trace-count-op (tail trace) op-name))))
 
-    0
+    0)
