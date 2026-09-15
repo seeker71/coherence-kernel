@@ -5257,7 +5257,7 @@
                 (if (str_eq value "#(")
                     (bml-source-parse-array-literal (tail objects))
                 (if (str_eq value "(")
-                    (bml-source-parse-paren-expr (tail objects))
+                    (bml-source-call-then-tail (bml-source-parse-paren-expr (tail objects)))
                     (bml-expr-fail objects)))))))))))
 
     (defn bml-source-parse-array-literal (objects)
@@ -12433,8 +12433,8 @@
     ;; A field's record key is its name, unless another class that can share
     ;; an object with its class (one depth-first chain holds both) declares
     ;; the same name: then each keeps its own slot, Class.name. A class's own
-    ;; code reads its own; a read from outside reaches the first class of the
-    ;; receiver's chain that declares the name, the order a method resolves in.
+    ;; code reads its own; a read reaches the first class of the receiver's
+    ;; structural chain that declares the name (a delegate lends no fields).
     (defn bml-hati-keyed-layout-classes (layout)
         (bml-hati-keyed-classes
             (bml-hati-layout-classes layout)
@@ -12494,9 +12494,21 @@
                 true
                 (bml-hati-other-declares? (tail chain) class-name field))))
 
-    ;; the class of type-name's chain whose field a read of field reaches
+    ;; the class of type-name's structural chain whose field a read of field
+    ;; reaches: itself, then its base, never a delegate. Delegation lends
+    ;; methods and subtype, not fields (bml-class-field-lookup-structural).
     (defn bml-hati-field-declarer (layout type-name field)
-        (bml-hati-chain-declarer (bml-hati-class-chain layout type-name) field))
+        (bml-hati-chain-declarer (bml-hati-structural-chain layout type-name) field))
+
+    (defn bml-hati-structural-chain (layout name)
+        (bml-hati-structural-chain-from layout name 0))
+
+    (defn bml-hati-structural-chain-from (layout name depth)
+        (do
+            (let entry (bml-hati-layout-class layout name))
+            (if (if (nil? entry) true (gt depth (len (bml-hati-layout-classes layout))))
+                (empty)
+                (cons entry (bml-hati-structural-chain-from layout (bml-hati-class-base entry) (add depth 1))))))
 
     (defn bml-hati-chain-declarer (chain field)
         (if (nil? chain)
@@ -12988,7 +13000,8 @@
                         env2
                         (reverse-list (bml-hati-visible-consts layout owner-name))
                         owner-name)
-                    (bml-hati-class-fields-all layout owner-name)))
+                    (bml-hati-fields-of-chain
+                        (reverse-list (bml-hati-structural-chain layout owner-name)))))
             (let env4
                 (if (str_eq (bml-hati-member-kind member) "ctor")
                     (cons (bml-local-binding "__hati_ctor" (bml-hati-ctor-marker owner-name) env3) env3)
@@ -13044,14 +13057,22 @@
             false
         (if (nil? (bml-hati-layout-class layout owner-type))
             true
-            (not (nil? (bml-hati-find-field (bml-hati-class-fields-all layout owner-type) field))))))
+            (not (nil? (bml-hati-field-declarer layout owner-type field))))))
+
+    ;; a field no class of the receiver's structural chain declares, voiced
+    ;; where it is read or set
+    (defn bml-hati-field-miss (env recv-node field)
+        (bml-hati-voice-refusal
+            "field"
+            "field/not-found"
+            (str_concat (bml-hati-static-type recv-node env) (str_concat "." field))))
 
     (defn bml-hati-lower-field-read (recv-node field pool env)
         (if (not (bml-hati-field-known?
                     (bml-hati-env-layout env)
                     (bml-hati-static-type recv-node env)
                     field))
-            (bml-hati-lower-refusal "field/not-found" pool)
+            (bml-hati-lower-refusal (bml-hati-field-miss env recv-node field) pool)
             (do
                 (let recv (bml-hati-lower-node-in-env recv-node pool env))
                 (let key (bml-hati-lower-string-in (bml-hati-recv-field-key env recv-node field) (bml-hati-lower-pool recv)))
@@ -13064,7 +13085,7 @@
                     (bml-hati-env-layout env)
                     (bml-hati-static-type recv-node env)
                     field))
-            (bml-hati-lower-refusal "field/not-found" pool)
+            (bml-hati-lower-refusal (bml-hati-field-miss env recv-node field) pool)
             (do
                 (let recv (bml-hati-lower-node-in-env recv-node pool env))
                 (let key (bml-hati-lower-string-in (bml-hati-recv-field-key env recv-node field) (bml-hati-lower-pool recv)))

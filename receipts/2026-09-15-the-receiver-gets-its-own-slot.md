@@ -370,10 +370,29 @@ Witnessed on fkwu, each fixture against a tree of HEAD:
 Both lowerings read these through the layout and the env. The fkwu lowering needed one more line,
 the reason for `__hati_denied`.
 
+## A delegate lends methods and subtype, not fields
+
+The native field lookup went depth first through delegates, so an outside `e.d` read the delegate's
+field. The thesis's class model reads a field structurally (`bml-class-field-lookup-structural`): the
+receiver's class, then its base, never a delegate. The native lookup now does the same
+(`bml-hati-field-declarer` over `bml-hati-structural-chain`). An outside `e.d`, where only the
+delegate D declares `d`, now reads `field/not-found`, voiced with the receiver's type. D's own code
+still reads D's field, on an E too, and D's slot stays in E's record, so keyride's two slots stand.
+A class's bare field names now bind from its structural chain, so `bml-class-delegation.bml` sets
+D's `d` through D's own `SetD`.
+
+After a parenthesized value, the reader now takes the same member tail as after `new` and a named
+call.
+
+Witnessed on fkwu, each fixture against a tree of HEAD:
+
+| fixture | now | a tree of HEAD |
+|---|---|---|
+| `bml-class-delegate-field-hidden.bml` | `BML-HATI-UNSUPPORTED field/not-found` | 0 |
+| `bml-class-paren-member.bml` | 26 | `BML-HATI-UNSUPPORTED source/unread` |
+
 ## Still open, with the reason
 
-- A member straight off a parenthesized value (`(p).v`) is not read: the member tail follows only
-  `new` and a named call. A probe read `source/unread`.
 - `bml-full-class-model-proof` and `bml-class-inheritance-proof` stay, because the rest of what they
   check does not run natively yet:
   - a `[class]` field, which the bridge still drops;
@@ -382,9 +401,7 @@ the reason for `__hati_denied`.
   - inner classes;
   - template kinds;
   - `Application.Main` as the entry;
-  - section properties on methods;
-  - the thesis's structural field lookup, where a delegate's own field is not a field of the
-    object. On the native path it is one: the delegating record carries it.
+  - section properties on methods.
 
 ## For the lead
 
@@ -466,5 +483,15 @@ says why, `access/private`, voiced where it lowers.
 Frontier word, 0 hits in the tree: **flagdrop**, a bridge that carries a node's shape and leaves
 behind the flags that say what the node allows. Its question: where else does a translation keep
 the structure and lose the permissions?
+
+Seventh movement. Most surprising: the thesis had already answered the question I had built on a
+direction. `bml-class-field-lookup-structural` was in the tree the whole time, and the inheritance
+proof names it. Discomfort to gold: an earlier fixture leaned on the wrong reading, with E's
+constructor setting D's `d` directly. The pull was to keep that working with a special case. The
+gold was to move the set into D's own method, where the thesis puts it.
+
+Frontier word, 0 hits in the tree: **lendline**, the line between what delegation lends (methods,
+subtype) and what it keeps (fields). Its question: where else does lending a behavior quietly lend
+the state behind it?
 
 — Claude (Opus 5), as Sema, worktree agent-a60550cd21b84ef52
