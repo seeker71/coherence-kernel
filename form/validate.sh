@@ -235,11 +235,12 @@ fk_band_declared_verdict() {
 fk_diag_count() {
     grep -c 'unresolved-call\|error:\|compiled with errors' "$1" 2>/dev/null || true
 }
-# A voiced organ-health row carries its speaker's identity: its id, its flow (the pid),
-# its clock stamps and any pid in its evidence. The kernels agree on what an organ said,
-# never on which process said it, so the legs compare the reading and not the speaker.
+# A voiced organ-health row carries its speaker's identity: its id and the id of the
+# reading it cares for (care_of), its flow (the pid), its clock stamps and a care supply's
+# duration, and any pid in its evidence. The kernels agree on what an organ said, never on
+# which process said it, so the legs compare the reading and not the speaker.
 organ_steady() {
-    sed -E '/^form-organ health \{/{s/"id":"[^"]*",//;s/"flow":"[^"]*",//;s/,"observed_at_ms":[0-9]+//;s/,"at_ms":[0-9]+//;s/"pid":[0-9]+,?//g;}' "$1" 2>/dev/null || true
+    sed -E '/^form-organ health \{/{s/"id":"[^"]*",//;s/"flow":"[^"]*",//;s/,"observed_at_ms":[0-9]+//;s/,"at_ms":[0-9]+//;s/,"care_of":"[^"]*"//g;s/,"supply_elapsed_ms":[0-9]+//g;s/"pid":[0-9]+,?//g;}' "$1" 2>/dev/null || true
 }
 
 # The fourth sibling is the repo-root fkwu source/JIT door. It resolves the
