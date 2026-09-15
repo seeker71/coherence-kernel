@@ -1,0 +1,69 @@
+// vk-carrier.bml — the Vulkan carrier the vk-*-live bands run through (.hearth/vk/run_vk, built
+// from form/native/vulkan/run_vk.c), made from what this host already holds. It finds each piece
+// rather than naming a path: MoltenVK in Homebrew's lib or inside a Docker.app, the vulkan/ and
+// vk_video/ headers under any NDK in ~/Library/Android/ndk, and glslangValidator and clang on the
+// PATH vk-door.bml calls them with. It links the two header directories into .hearth/vk/include,
+// builds with clang, and answers the carrier's path; a piece it cannot find is named, with where
+// it looked, and voiced as organ health. Door: ./fkwu observe/vk-carrier-build.bml
+// preludes: form-stdlib/core.fk form-stdlib/form-fs.fk form-stdlib/organ-health.bml
+section [form.bml] {
+ class VulkanCarrier {
+  def vcb-carrier() = ".hearth/vk/run_vk";
+  def vcb-source() = "form/native/vulkan/run_vk.c";
+  def vcb-include() = ".hearth/vk/include";
+  def vcb-path-env() = "PATH=/opt/homebrew/bin:/usr/local/bin:$PATH";
+  def vcb-home() = host_capture(list("/bin/sh", "-c", "printf %s \"$HOME\""));
+  def vcb-lines(text) = split-on(trim(text), "\n");
+  def vcb-first-line(text) = if eq(str_len(trim(text)), 0) then "" else head(vcb-lines(text));
+
+  // ---- the pieces ----
+  def vcb-tool(name) = vcb-first-line(host_capture(list("/bin/sh", "-c", str_concat(vcb-path-env(), str_concat(" command -v ", name)))));
+  def vcb-brew-moltenvk() = if fs_exists("/opt/homebrew/lib/libMoltenVK.dylib") then "/opt/homebrew/lib/libMoltenVK.dylib" else if fs_exists("/usr/local/lib/libMoltenVK.dylib") then "/usr/local/lib/libMoltenVK.dylib" else "";
+  def vcb-docker-moltenvk(home) = vcb-first-line(host_capture(list("/usr/bin/find", "/Applications", str_concat(home, "/Applications"), "-maxdepth", "6", "-path", "*Docker.app/Contents/*", "-name", "libMoltenVK.dylib")));
+  def vcb-moltenvk(home) = vcb-moltenvk-or(vcb-brew-moltenvk(), home);
+  def vcb-moltenvk-or(brew, home) = if gt(str_len(brew), 0) then brew else vcb-docker-moltenvk(home);
+  def vcb-ndk-root(home) = str_concat(home, "/Library/Android/ndk");
+  // the first NDK sysroot include directory holding both vulkan/ and vk_video/
+  def vcb-headers(home) = vcb-headers-in(vcb-lines(host_capture(list("/usr/bin/find", vcb-ndk-root(home), "-type", "d", "-path", "*/sysroot/usr/include/vulkan"))));
+  def vcb-headers-in(dirs) = if nil?(dirs) then "" else vcb-headers-at(head(dirs), tail(dirs));
+  def vcb-headers-at(dir, rest) = if and(gt(str_len(dir), 0), fs-is-dir?(str_concat(fs-path-dirname(dir), "/vk_video"))) then fs-path-dirname(dir) else vcb-headers-in(rest);
+
+  // ---- the answer: 1 with the carrier standing or built, 0 with the missing piece named ----
+  def vcb-state() = if le(file_size(vcb-carrier()), 0) then "absent" else if lt(file_mtime(vcb-carrier()), file_mtime(vcb-source())) then "older-than-source" else "standing";
+  def vcb-missing(piece, looked) {
+   let row = oh-reading("vk-carrier", "build", piece, json-node-string("found"), json-node-string("absent"), json-node-int(0), list(oh-need(piece, json-node-string(looked))), list("request-evidence", "defer"), json-node-object(list(oh-s("carrier", vcb-carrier()), oh-s("looked", looked))));
+   let said = oh-voice(row);
+   let told = print_str(str_concat("vk-carrier missing ", str_concat(piece, str_concat(": looked in ", looked))));
+   0;
+  }
+  def vcb-run() = if str_eq(vcb-state(), "standing") then vcb-told("standing") else vcb-find(vcb-home());
+  def vcb-told(state) {
+   let told = print_str(str_concat("vk-carrier ", str_concat(state, str_concat(" ", vcb-carrier()))));
+   1;
+  }
+  def vcb-find(home) = vcb-with-lib(home, vcb-moltenvk(home));
+  def vcb-with-lib(home, lib) = if eq(str_len(lib), 0) then vcb-missing("moltenvk", "/opt/homebrew/lib, /usr/local/lib, and Docker.app under /Applications and ~/Applications") else vcb-with-headers(home, lib, vcb-headers(home));
+  def vcb-with-headers(home, lib, inc) = if eq(str_len(inc), 0) then vcb-missing("vulkan-headers", str_concat(vcb-ndk-root(home), "/*/toolchains/llvm/prebuilt/*/sysroot/usr/include (vulkan/ beside vk_video/)")) else vcb-with-glslang(lib, inc, vcb-tool("glslangValidator"));
+  def vcb-with-glslang(lib, inc, glslang) = if eq(str_len(glslang), 0) then vcb-missing("glslangValidator", "PATH with /opt/homebrew/bin and /usr/local/bin ahead") else vcb-with-clang(lib, inc, glslang, vcb-tool("clang"));
+  def vcb-with-clang(lib, inc, glslang, clang) = if eq(str_len(clang), 0) then vcb-missing("clang", "PATH with /opt/homebrew/bin and /usr/local/bin ahead") else vcb-build(lib, inc, glslang, clang);
+
+  // ---- the build ----
+  def vcb-spawn(argv, out, err) = vcb-wait(host_spawn_at(argv, list("/dev/null", out, err)));
+  def vcb-wait(pid) = if gt(pid, 0) then host_wait(pid) else -1;
+  def vcb-build(lib, inc, glslang, clang) {
+   let made = list(fs_mkdir(".hearth"), fs_mkdir(".hearth/vk"), fs_mkdir(vcb-include()));
+   let err = str_concat(".hearth/vk/build-", str_concat(int_to_str(host_pid()), ".err"));
+   let linked = add(vcb-spawn(list("/bin/ln", "-sfn", str_concat(inc, "/vulkan"), str_concat(vcb-include(), "/vulkan")), "/dev/null", err), vcb-spawn(list("/bin/ln", "-sfn", str_concat(inc, "/vk_video"), str_concat(vcb-include(), "/vk_video")), "/dev/null", err));
+   let stage = str_concat(vcb-carrier(), str_concat(".building-", int_to_str(host_pid())));
+   let rc = if eq(linked, 0) then vcb-spawn(list(clang, "-O2", "-ffp-contract=off", str_concat("-DFORM_VK_LIB=\"", str_concat(lib, "\"")), "-I", vcb-include(), vcb-source(), "-o", stage), "/dev/null", err) else linked;
+   let placed = if eq(rc, 0) then fs-rename(stage, vcb-carrier()) else -1;
+   if and(eq(rc, 0), eq(placed, 0)) then vcb-built(lib, inc, glslang, err) else vcb-missing("clang-build", str_concat("clang exit ", str_concat(int_to_str(rc), str_concat(", stderr in ", err))));
+  }
+  def vcb-built(lib, inc, glslang, err) {
+   let gone = fs_remove(err);
+   let told = print_str(str_concat("vk-carrier built ", str_concat(vcb-carrier(), str_concat(" moltenvk=", str_concat(lib, str_concat(" headers=", str_concat(inc, str_concat(" glslang=", glslang))))))));
+   1;
+  }
+ }
+ 0;
+}

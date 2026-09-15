@@ -18,8 +18,9 @@
  * Output: "device=<name>", "vklib=<path>", "elapsed-us <n>", then per read "buf <b> <n> <w0> ...".
  *
  * Driver-only, like matvec_vk.c: dlopen of the host's Vulkan implementation, links no Vulkan.
- * Build (macOS, MoltenVK): clang -O2 -ffp-contract=off -I <dir holding vulkan/ and vk_video/> run_vk.c -o run_vk
- *   (the Android NDK sysroot's usr/include holds both directories)
+ * Build (macOS, MoltenVK): ./fkwu observe/vk-carrier-build.bml finds MoltenVK, the Android NDK
+ *   sysroot's vulkan/ and vk_video/ headers, glslangValidator and clang, and builds .hearth/vk/run_vk
+ *   with clang -O2 -ffp-contract=off -DFORM_VK_LIB="<found dylib>" -I <dir holding both> run_vk.c
  * Build (Android, NDK arm64): aarch64-linux-android24-clang -O2 -ffp-contract=off run_vk.c -o run_vk -ldl
  * Run:  run_vk plan.txt
  */
@@ -41,7 +42,12 @@
 #else
   #include <dlfcn.h>
   #if defined(__APPLE__)
-  static const char *const VKLIBS[] = { "/opt/homebrew/lib/libMoltenVK.dylib", "/usr/local/lib/libMoltenVK.dylib",
+  /* the MoltenVK the carrier's builder found on this host (observe/vk-carrier-build.bml passes it
+   * as -DFORM_VK_LIB=...), tried before the usual places */
+  #ifndef FORM_VK_LIB
+  #define FORM_VK_LIB "libMoltenVK.dylib"
+  #endif
+  static const char *const VKLIBS[] = { FORM_VK_LIB, "/opt/homebrew/lib/libMoltenVK.dylib", "/usr/local/lib/libMoltenVK.dylib",
       "/Applications/Docker.app/Contents/Resources/linuxkit/libMoltenVK.dylib", "libMoltenVK.dylib",
       "libvulkan.1.dylib", 0 };
   #else
