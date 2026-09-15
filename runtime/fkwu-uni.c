@@ -19512,11 +19512,11 @@ static long long fk_sparse(void) {
             fk_sskip();
             long long body;
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
-                /* bare 2-arg (let name val): no body follows. Emit the same lit-0
-                 * body the old fk_sparse-on-rparen call produced, WITHOUT sending
-                 * fk_sparse to the rparen -- that is now the loud stray-rparen
-                 * path below, and this legal shape must not trip it. */
-                body = fk_smklit(0);
+                /* bare 2-arg (let name val): no body follows, so the let answers
+                 * the value it bound (its own slot), binding nothing past itself;
+                 * fk_sparse is not sent to the rparen -- that is the loud
+                 * stray-rparen path below, and this legal shape must not trip it. */
+                body = fk_smknode(110, fk_smklit(slot), 0, 0);
             } else {
                 body = fk_sparse();
             }
@@ -20146,7 +20146,15 @@ static long long fk_parse_do(void) {
             long long slot = fk_maxslot + 1;
             fk_maxslot = slot;
             fk_bd_push(ns, nlen, slot);
-            long long rest = fk_parse_do();
+            fk_sskip();
+            long long rest;
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                /* nothing follows the let: the do answers the value it bound */
+                fk_spos = fk_spos + 1;
+                rest = fk_smknode(110, fk_smklit(slot), 0, 0);
+            } else {
+                rest = fk_parse_do();
+            }
             fk_bd_pop();
             return fk_smknode(109, fk_smklit(slot), val, rest);
         }
@@ -20342,6 +20350,12 @@ static long long fk_parse_top_do_value(void) {
                 fk_const_wrapp1[crow] = fk_smknode(FK_TAG_CONST_HOLD, fk_const_node[crow], 0, 0) + 1;
             }
             long long held = fk_const_wrapp1[crow] - 1;
+            fk_sskip();
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                /* nothing follows the let: the do answers the value it bound */
+                fk_spos = fk_spos + 1;
+                return held;
+            }
             long long rest = fk_parse_top_do_value();
             return fk_smknode(69, held, rest, 0);
         }
