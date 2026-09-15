@@ -24,6 +24,7 @@ import { buildFormatLibrary } from "../formats.ts";
 import { makeVectorFormat } from "../vector.ts";
 import { vectorize } from "../parallel.ts";
 import { WasmSimdBackend } from "./wasm.ts";
+import { readForm } from "../reader.ts";
 
 let passed = 0;
 let failed = 0;
@@ -355,6 +356,25 @@ test("emitted WAT has balanced parens (basic well-formedness)", () => {
     if (depth < 0) throw new Error("unbalanced: extra )");
   }
   assertEq(depth, 0, "module-level paren balance");
+});
+
+// ---------------------------------------------------------------------------
+// Let scope — as the walkers read it
+// ---------------------------------------------------------------------------
+
+test("a LET in a nested DO or an IF arm does not reach past it", () => {
+  for (const src of [
+    "(do (let t 7) (do (let t 5)) t)",
+    "(do (let t 7) (if 1 (let t 5) 0) t)",
+  ]) {
+    const k = new Kernel();
+    const wat = WasmSimdBackend.emit(k, readForm(k, src));
+    const outer = /\(local\.set (\$let_\d+_\d+) \(i32\.const 7\)\)/.exec(wat)?.[1];
+    const gets = wat.match(/\(local\.get \$let_\d+_\d+\)/g) ?? [];
+    if (outer === undefined || gets[gets.length - 1] !== `(local.get ${outer})`) {
+      throw new Error(`${src}: the last read should name ${outer}, got:\n${wat}`);
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------

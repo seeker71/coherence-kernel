@@ -27,6 +27,7 @@ import {
   type NodeID,
 } from "../kernel.ts";
 import { CudaBackend } from "./cuda.ts";
+import { readForm } from "../reader.ts";
 
 // Helpers — build category and recipe nodes the way the reader / compiler
 // would, but without dragging the S-expr reader into the test.
@@ -200,6 +201,20 @@ test("LET binding emits a typed declaration in the kernel body", () => {
   const letNode = block(k, RBlock.LET, [name, value]);
   const src = CudaBackend.emit(k, letNode);
   assert.match(src, /float let_x_\d+ = /);
+});
+
+test("a LET in a nested DO or an IF arm does not reach past it", () => {
+  for (const src of [
+    "(do (let t 7) (do (let t 5)) t)",
+    "(do (let t 7) (if 1 (let t 5) 0) t)",
+  ]) {
+    const k = new Kernel();
+    const out = CudaBackend.emit(k, readForm(k, src));
+    const declared = [...out.matchAll(/float (let_t_\d+) = /g)].map((m) => m[1]);
+    const reads = out.match(/let_t_\d+/g) ?? [];
+    assert.equal(declared.length, 2, `${src}: two lets declared`);
+    assert.equal(reads[reads.length - 1], declared[0], `${src}: last read is the outer let`);
+  }
 });
 
 test("emit is a pure string — stable across repeated calls", () => {

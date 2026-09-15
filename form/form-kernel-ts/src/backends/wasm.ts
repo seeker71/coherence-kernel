@@ -311,27 +311,60 @@ function emitBlock(
   scope: EmitScope,
 ): string {
   if (op === RBlock.LET) {
-    if (kids.length !== 2) return `(; malformed let ;) (i32.const 0)`;
-    const name = kids[0]!;
-    const valSrc = emitExpr(k, kids[1]!, scope);
-    if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
-      return valSrc;
-    }
-    const watLocal = fresh(scope, `let_${name.inst}`);
-    scope.vars.set(name.inst, watLocal);
-    scope.locals.push(`(local ${watLocal} i32)`);
-    // The block expression value: the bound value (set then read).
-    return `(block (result i32) (local.set ${watLocal} ${valSrc}) (local.get ${watLocal}))`;
+    // A let binds the rest of its own do (the loop below keeps a do's own
+    // lets). Met anywhere else — an if arm, a do's last form — nothing
+    // follows it, so its name reaches nothing past itself.
+    return emitLet(k, kids, scope, false);
   }
-  // DO / SEQUENCE — drop intermediates, return last value.
+  // DO / SEQUENCE — a lexical scope, as the walkers read it: its lets bind
+  // for the rest of this block only. Drop intermediates, return last value.
   if (kids.length === 0) return `(i32.const 0)`;
-  if (kids.length === 1) return emitExpr(k, kids[0]!, scope);
-  const parts: string[] = [];
-  for (let i = 0; i < kids.length - 1; i++) {
-    parts.push(`(drop ${emitExpr(k, kids[i]!, scope)})`);
+  const outer = new Map(scope.vars);
+  try {
+    if (kids.length === 1) return emitExpr(k, kids[0]!, scope);
+    const parts: string[] = [];
+    for (let i = 0; i < kids.length - 1; i++) {
+      const c = kids[i]!;
+      const src = isLetNode(k, c)
+        ? emitLet(k, k.children(c), scope, true)
+        : emitExpr(k, c, scope);
+      parts.push(`(drop ${src})`);
+    }
+    parts.push(emitExpr(k, kids[kids.length - 1]!, scope));
+    return `(block (result i32) ${parts.join(" ")})`;
+  } finally {
+    restoreVars(scope.vars, outer);
   }
-  parts.push(emitExpr(k, kids[kids.length - 1]!, scope));
-  return `(block (result i32) ${parts.join(" ")})`;
+}
+
+function emitLet(
+  k: Kernel,
+  kids: readonly NodeID[],
+  scope: EmitScope,
+  keep: boolean,
+): string {
+  if (kids.length !== 2) return `(; malformed let ;) (i32.const 0)`;
+  const name = kids[0]!;
+  const valSrc = emitExpr(k, kids[1]!, scope);
+  if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
+    return valSrc;
+  }
+  const watLocal = fresh(scope, `let_${name.inst}`);
+  if (keep) scope.vars.set(name.inst, watLocal);
+  scope.locals.push(`(local ${watLocal} i32)`);
+  // The block expression value: the bound value (set then read).
+  return `(block (result i32) (local.set ${watLocal} ${valSrc}) (local.get ${watLocal}))`;
+}
+
+function isLetNode(k: Kernel, n: NodeID): boolean {
+  if (n.level === Level.TRIVIAL) return false;
+  const cat = k.category(n);
+  return cat.type === RBasic.BLOCK && cat.inst === RBlock.LET;
+}
+
+function restoreVars<V>(vars: Map<number, V>, outer: Map<number, V>): void {
+  vars.clear();
+  for (const [key, value] of outer) vars.set(key, value);
 }
 
 function emitFnDef(

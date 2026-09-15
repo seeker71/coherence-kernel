@@ -703,31 +703,50 @@ class MlirEmitter {
 
   private emitBlock(op: number, kids: readonly NodeID[]): Local {
     if (op === RBlock.LET) {
+      // A let binds the rest of its own do (the loop below binds a do's own
+      // lets). Met anywhere else — an if arm, a do's last form — nothing
+      // follows it, so it answers its value and binds no name.
       if (kids.length < 2) return this.emitZero();
-      const name = kids[0]!;
-      const val = this.emitExpr(kids[1]!);
-      if (name.level === Level.TRIVIAL && name.type === Triv.STRING) {
-        this.bind(name.inst, val);
-      }
-      return val;
+      return this.emitExpr(kids[1]!);
     }
-    // DO / SEQUENCE — evaluate each, return last
+    // DO / SEQUENCE — a lexical scope, as the walkers read it: its lets bind
+    // for the rest of this block only. Evaluate each, return last.
     if (kids.length === 0) return this.emitZero();
-    let last: Local = this.emitZero();
-    for (const c of kids) {
-      // Skip nested FNDEFs — they were already hoisted at the top level if
-      // applicable, but inside arbitrary blocks they emit a module-scope
-      // func.func as a side effect.
-      if (c.level !== Level.TRIVIAL) {
-        const cc = this.k.category(c);
-        if (cc.type === RBasic.FNDEF) {
-          this.emitFunctionDefinition(this.k.children(c));
-          continue;
+    this.pushScope();
+    try {
+      let last: Local = this.emitZero();
+      for (let i = 0; i < kids.length; i++) {
+        const c = kids[i]!;
+        // Skip nested FNDEFs — they were already hoisted at the top level if
+        // applicable, but inside arbitrary blocks they emit a module-scope
+        // func.func as a side effect.
+        if (c.level !== Level.TRIVIAL) {
+          const cc = this.k.category(c);
+          if (cc.type === RBasic.FNDEF) {
+            this.emitFunctionDefinition(this.k.children(c));
+            continue;
+          }
+          if (cc.type === RBasic.BLOCK && cc.inst === RBlock.LET && i < kids.length - 1) {
+            last = this.emitLetBinding(this.k.children(c));
+            continue;
+          }
         }
+        last = this.emitExpr(c);
       }
-      last = this.emitExpr(c);
+      return last;
+    } finally {
+      this.popScope();
     }
-    return last;
+  }
+
+  private emitLetBinding(kids: readonly NodeID[]): Local {
+    if (kids.length < 2) return this.emitZero();
+    const name = kids[0]!;
+    const val = this.emitExpr(kids[1]!);
+    if (name.level === Level.TRIVIAL && name.type === Triv.STRING) {
+      this.bind(name.inst, val);
+    }
+    return val;
   }
 
   // ----- functions ---------------------------------------------------------

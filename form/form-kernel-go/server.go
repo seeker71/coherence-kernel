@@ -1037,7 +1037,7 @@ func compileSourceSectionToRecipeNode(dialectName, body, stdlibAbs string) (outK
 	root := readRootFromSource(k, driverSource)
 	env := NewFrame(nil)
 	k.activeRoots = []NodeID{root}
-	value := k.walk(root, env)
+	value := k.walkUnit(root, env)
 	if value.Kind != VNodeID {
 		return nil, NodeID{}, errors.New("source compiler did not return a recipe NodeID")
 	}
@@ -1184,6 +1184,7 @@ func parseRawRouteSegment(k *Kernel, roots *[]NodeID, src string) {
 		_ = next
 	} else {
 		root = readRootFromSource(k, fmt.Sprintf("(do %s)", src))
+		k.markUnitRoot(root, true)
 	}
 	*roots = append(*roots, root)
 }
@@ -1370,7 +1371,7 @@ func buildGoServeWorker(program *goServeProgram) (*goServeWorker, error) {
 	}
 	env := NewFrame(nil)
 	k.activeRoots = []NodeID{root}
-	_ = k.walk(root, env)
+	_ = k.walkUnit(root, env)
 	routes, err := buildGoRoutes(k, env)
 	if err != nil {
 		return nil, err

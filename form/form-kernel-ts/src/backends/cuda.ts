@@ -417,16 +417,10 @@ function emitBlock(
   opts: NormalizedOptions,
 ): string {
   if (op === RBlock.LET) {
-    const name = kids[0]!;
-    const valueSrc = emitExpr(k, kids[1]!, scope, opts);
-    if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
-      return valueSrc;
-    }
-    const cName = fresh(scope, `let_${k.nameStr(name.inst)}`);
-    scope.vars.set(name.inst, cName);
-    // Emit as a statement in the kernel body via the device_fns side-channel.
-    scope.device_fns.push(`${cudaScalar(opts.dtype)} ${cName} = ${valueSrc};`);
-    return cName;
+    // A let binds the rest of its own do (the loop below keeps a do's own
+    // lets). Met anywhere else — an if arm, a do's last form — nothing
+    // follows it, so its name reaches nothing past itself.
+    return emitLet(k, kids, scope, opts, false);
   }
   if (op === RBlockGpu.PARALLELIZE) {
     return emitParallelize(k, kids, scope, opts);
@@ -434,13 +428,53 @@ function emitBlock(
   if (op === RBlockGpu.VECTORIZE) {
     return emitVectorize(k, kids, scope, opts);
   }
-  // DO / SEQUENCE
+  // DO / SEQUENCE — a lexical scope, as the walkers read it: its lets bind
+  // for the rest of this block only.
   if (kids.length === 0) return `((${cudaScalar(opts.dtype)})0)`;
-  let last = `((${cudaScalar(opts.dtype)})0)`;
-  for (const c of kids) {
-    last = emitExpr(k, c, scope, opts);
+  const outer = new Map(scope.vars);
+  try {
+    let last = `((${cudaScalar(opts.dtype)})0)`;
+    for (let i = 0; i < kids.length; i++) {
+      const c = kids[i]!;
+      last =
+        i < kids.length - 1 && isLetNode(k, c)
+          ? emitLet(k, k.children(c), scope, opts, true)
+          : emitExpr(k, c, scope, opts);
+    }
+    return last;
+  } finally {
+    restoreVars(scope.vars, outer);
   }
-  return last;
+}
+
+function emitLet(
+  k: Kernel,
+  kids: readonly NodeID[],
+  scope: EmitScope,
+  opts: NormalizedOptions,
+  keep: boolean,
+): string {
+  const name = kids[0]!;
+  const valueSrc = emitExpr(k, kids[1]!, scope, opts);
+  if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
+    return valueSrc;
+  }
+  const cName = fresh(scope, `let_${k.nameStr(name.inst)}`);
+  if (keep) scope.vars.set(name.inst, cName);
+  // Emit as a statement in the kernel body via the device_fns side-channel.
+  scope.device_fns.push(`${cudaScalar(opts.dtype)} ${cName} = ${valueSrc};`);
+  return cName;
+}
+
+function isLetNode(k: Kernel, n: NodeID): boolean {
+  if (n.level === Level.TRIVIAL) return false;
+  const cat = k.category(n);
+  return cat.type === RBasic.BLOCK && cat.inst === RBlock.LET;
+}
+
+function restoreVars<V>(vars: Map<number, V>, outer: Map<number, V>): void {
+  vars.clear();
+  for (const [key, value] of outer) vars.set(key, value);
 }
 
 // Parallelize → emits the __global__ kernel scaffolding (recorded for the

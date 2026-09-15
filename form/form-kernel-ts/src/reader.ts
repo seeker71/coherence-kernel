@@ -144,11 +144,16 @@ export function readAll(k: Kernel, src: string): NodeID {
     forms.push(readOne(k, s));
   }
   if (forms.length === 0) return k.internTrivialNull();
-  if (forms.length === 1) return forms[0]!;
-  return k.intern(
+  if (forms.length === 1) {
+    k.markUnitRoot(forms[0]!, false);
+    return forms[0]!;
+  }
+  const wrapper = k.intern(
     { pkg: 1, level: Level.BASIC, type: RBasic.BLOCK, inst: RBlock.DO },
     forms,
   );
+  k.markUnitRoot(wrapper, true);
+  return wrapper;
 }
 
 // makeAttributor — byte position → (file, line, col) recorder. Line starts

@@ -475,6 +475,25 @@ test("emit: every emitted line that defines an SSA value uses %-prefixed names",
 });
 
 // ---------------------------------------------------------------------------
+// Let scope — as the walkers read it
+// ---------------------------------------------------------------------------
+
+test("emit: a LET in a nested DO or an IF arm does not reach past it", () => {
+  const k = new Kernel();
+  const t = (v: number): NodeID => letNode(k, "t", k.internTrivialInt(v));
+  const one = k.internTrivialInt(1);
+  const zero = k.internTrivialInt(0);
+  for (const inner of [
+    block(k, RBlock.DO, [t(5)]),
+    ifElse(k, one, t(5), zero),
+  ]) {
+    const out = emit(k, block(k, RBlock.DO, [t(7), inner, ident(k, "t")]));
+    const seven = /(%[\w.]+)\s*=\s*arith\.constant\s+7\s*:/.exec(out.text)?.[1];
+    assertEq(out.rootValue, seven, "the last read is the outer let");
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Done
 // ---------------------------------------------------------------------------
 

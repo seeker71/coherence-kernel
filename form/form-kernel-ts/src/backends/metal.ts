@@ -640,34 +640,58 @@ function emitBlock(
   kids: readonly NodeID[],
 ): string {
   if (op === RBlock.LET) {
-    if (kids.length !== 2) {
-      ctx.fallback.hit = true;
-      return `/* fallback: let arity */ 0`;
-    }
-    const name = kids[0]!;
-    if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
-      ctx.fallback.hit = true;
-      return `/* fallback: let name */ 0`;
-    }
-    const valSrc = emitExpr(ctx, kids[1]!);
-    const mslName = fresh(ctx, `let_${name.inst}`);
-    ctx.params.set(name.inst, mslName);
-    // MSL is statement-based — express LET via comma operator inside a
-    // GNU statement expression-ish trick that MSL actually supports via
-    // `({...})`. Apple's MSL compiler accepts GCC-statement-expressions in
-    // most modern versions; if it doesn't, this would lift to a local var
-    // outside the expression. Conservative form: a parenthesized assignment
-    // chained with the bound name.
-    return `(${mslName} = ${valSrc}, ${mslName})`;
+    // A let binds the rest of its own do (the fold below keeps a do's own
+    // lets). Met anywhere else — an if arm, a do's last form — nothing
+    // follows it, so its name reaches nothing past itself.
+    return emitLet(ctx, kids, false);
   }
   if (kids.length === 0) {
     ctx.fallback.hit = true;
     return `/* fallback: empty block */ 0`;
   }
-  if (kids.length === 1) return emitExpr(ctx, kids[0]!);
-  // DO / SEQUENCE — comma-fold; MSL accepts comma operator in expressions.
-  const parts = kids.map((c) => `(${emitExpr(ctx, c)})`);
-  return `(${parts.join(", ")})`;
+  // DO / SEQUENCE — a lexical scope, as the walkers read it: its lets bind
+  // for the rest of this block only. Comma-fold; MSL accepts the comma
+  // operator in expressions.
+  const outer = new Map(ctx.params);
+  try {
+    if (kids.length === 1) return emitExpr(ctx, kids[0]!);
+    const parts = kids.map(
+      (c, i) =>
+        `(${i < kids.length - 1 && isLetNode(ctx.k, c) ? emitLet(ctx, ctx.k.children(c), true) : emitExpr(ctx, c)})`,
+    );
+    return `(${parts.join(", ")})`;
+  } finally {
+    ctx.params.clear();
+    for (const [key, value] of outer) ctx.params.set(key, value);
+  }
+}
+
+function emitLet(ctx: EmitCtx, kids: readonly NodeID[], keep: boolean): string {
+  if (kids.length !== 2) {
+    ctx.fallback.hit = true;
+    return `/* fallback: let arity */ 0`;
+  }
+  const name = kids[0]!;
+  if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
+    ctx.fallback.hit = true;
+    return `/* fallback: let name */ 0`;
+  }
+  const valSrc = emitExpr(ctx, kids[1]!);
+  const mslName = fresh(ctx, `let_${name.inst}`);
+  if (keep) ctx.params.set(name.inst, mslName);
+  // MSL is statement-based — express LET via comma operator inside a
+  // GNU statement expression-ish trick that MSL actually supports via
+  // `({...})`. Apple's MSL compiler accepts GCC-statement-expressions in
+  // most modern versions; if it doesn't, this would lift to a local var
+  // outside the expression. Conservative form: a parenthesized assignment
+  // chained with the bound name.
+  return `(${mslName} = ${valSrc}, ${mslName})`;
+}
+
+function isLetNode(k: Kernel, n: NodeID): boolean {
+  if (n.level === Level.TRIVIAL) return false;
+  const cat = k.category(n);
+  return cat.type === RBasic.BLOCK && cat.inst === RBlock.LET;
 }
 
 function emitFnDef(ctx: EmitCtx, kids: readonly NodeID[]): string {

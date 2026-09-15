@@ -667,6 +667,10 @@ export class Kernel {
   private walkCacheMisses = 0;
   private activeRoots: NodeID[] = [];
   private framebufferRoots: NodeID[] = [];
+  // unitRoots — the unit roots the reader built, by how walkUnit reads them:
+  // UNIT_DO for a source whose one form is a (do ...), UNIT_WRAPPER for the
+  // implicit do that holds several top-level forms.
+  readonly unitRoots = new Map<string, number>();
 
   // String table — substrate strings + identifier names share this table.
   // A name's NodeID.inst is its index into `strs`.
@@ -758,6 +762,15 @@ export class Kernel {
 
   pushActiveRoot(root: NodeID): void {
     this.activeRoots.push(root);
+  }
+
+  // markUnitRoot — the reader names each do it hands back as a unit root:
+  // the implicit do around several top-level forms (wrapper), or the one
+  // top-level (do ...) of a source.
+  markUnitRoot(root: NodeID, wrapper: boolean): void {
+    if (blockKind(this, root) === BLOCK_KIND_DO) {
+      this.unitRoots.set(nodeKey(root), wrapper ? UNIT_WRAPPER : UNIT_DO);
+    }
   }
 
   remapImportedLeaf(scope: number, nid: NodeID): NodeID {
@@ -3231,7 +3244,7 @@ export class Kernel {
       return { kind: "nodeid", nodeid: root };
     });
     this.registerNative("walk_recipe", catWitness(), (k, args) =>
-      walk(k, argNodeID(args, 0), new Frame(null)),
+      walkUnit(k, argNodeID(args, 0), new Frame(null)),
     );
     // walk_recipe_here — walks a Recipe in the CALLER's env, so let-
     // bindings inside the Recipe land in the caller's scope. Matches
@@ -3244,7 +3257,7 @@ export class Kernel {
       // closures with deleted bodies.
       const root = argNodeID(args, 0);
       k.pushActiveRoot(root);
-      return walk(k, root, env);
+      return walkUnit(k, root, env);
     });
     const walkParallel: NativeFn = (k, args) => {
       const roots = argList(args, 0).map((value) => {
@@ -3367,7 +3380,7 @@ export class Kernel {
         return cached;
       }
       k.walkCacheMisses++;
-      const value = walk(k, nid, new Frame(null));
+      const value = walkUnit(k, nid, new Frame(null));
       k.walkCache.set(key, value);
       return value;
     });
@@ -5275,19 +5288,107 @@ function walkBlock(
   frame: Frame,
 ): Value {
   if (op === RBlock.LET) {
-    if (kids.length !== 2) throw new Error("let: need 2 args (name, value)");
-    const name = kids[0]!;
-    if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
-      throw new Error("let: name must be a string trivial");
-    }
-    const value = walk(k, kids[1]!, frame);
-    frame.bind(name.inst, value);
-    return value;
+    // A let binds the rest of its own do (the loop below binds a do's own
+    // lets). Met anywhere else -- an if arm, an argument, a do's last form --
+    // nothing follows it, so it answers its value and binds no name.
+    return letValue(k, kids, frame);
   }
-  // DO or SEQUENCE — evaluate each, return last
+  // DO or SEQUENCE -- a lexical scope: its lets and defns bind for the rest
+  // of this do only. The scope opens at the first binding form, so a do that
+  // binds nothing costs no frame. A unit's top-level do reads flat (walkUnit).
+  const last = kids.length - 1;
+  let scope = frame;
   let result: Value = { kind: "null" };
-  for (const c of kids) {
-    result = walk(k, c, frame);
+  for (let i = 0; i <= last; i++) {
+    const c = kids[i]!;
+    const kind = blockKind(k, c);
+    if (kind === BLOCK_KIND_LET && i < last) {
+      if (scope === frame) scope = new Frame(frame);
+      result = bindLet(k, c, scope);
+      continue;
+    }
+    if (kind === BLOCK_KIND_DEFN && scope === frame) scope = new Frame(frame);
+    result = walk(k, c, scope);
+  }
+  return result;
+}
+
+const BLOCK_KIND_LET = 1;
+const BLOCK_KIND_DEFN = 2;
+const BLOCK_KIND_DO = 3;
+const UNIT_DO = 1;
+const UNIT_WRAPPER = 2;
+
+function blockKind(k: Kernel, n: NodeID): number {
+  if (n.level === Level.TRIVIAL) return 0;
+  const cat = k.category(n);
+  if (cat.type === RBasic.BLOCK) {
+    return cat.inst === RBlock.LET ? BLOCK_KIND_LET : BLOCK_KIND_DO;
+  }
+  return cat.type === RBasic.FNDEF ? BLOCK_KIND_DEFN : 0;
+}
+
+function letValue(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
+  if (kids.length !== 2) throw new Error("let: need 2 args (name, value)");
+  const name = kids[0]!;
+  if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
+    throw new Error("let: name must be a string trivial");
+  }
+  return walk(k, kids[1]!, frame);
+}
+
+// bindLet -- a let a do (or a unit) binds itself: the value reads the frame
+// before the name joins it, then the name binds there.
+function bindLet(k: Kernel, node: NodeID, frame: Frame): Value {
+  if (k.trace !== undefined) k.trace.record(RBasic.BLOCK, RBlock.LET);
+  const kids = k.children(node);
+  const value = letValue(k, kids, frame);
+  frame.bind(kids[0]!.inst, value);
+  return value;
+}
+
+// walkUnit -- a unit root read in the unit's own frame. The unit's top-level
+// do is its sequence, as fkwu's fk_parse_top reads it: a let there binds the
+// unit's frame, where every defn of the unit and every unit loaded after it
+// reads it; a defn binds there; a do before the first let or expression is a
+// top-level do too; a later do is a lexical scope (walkBlock). The implicit do
+// around several top-level forms holds each form at column 0, where every do
+// is a top-level do. A root the reader did not name (a deserialized recipe, a
+// combined program) keeps every do at its top flat.
+export function walkUnit(k: Kernel, node: NodeID, frame: Frame): Value {
+  const kind = blockKind(k, node);
+  if (kind === BLOCK_KIND_LET) return bindLet(k, node, frame);
+  if (kind !== BLOCK_KIND_DO) return walk(k, node, frame);
+  const mark = k.unitRoots.get(nodeKey(node));
+  if (mark === UNIT_DO) return walkUnitDo(k, node, frame);
+  if (k.trace !== undefined) k.trace.record(RBasic.BLOCK, k.category(node).inst);
+  let result: Value = { kind: "null" };
+  for (const c of k.children(node)) {
+    result =
+      mark === UNIT_WRAPPER &&
+      blockKind(k, c) === BLOCK_KIND_DO &&
+      k.unitRoots.get(nodeKey(c)) !== UNIT_WRAPPER
+        ? walkUnitDo(k, c, frame)
+        : walkUnit(k, c, frame);
+  }
+  return result;
+}
+
+function walkUnitDo(k: Kernel, node: NodeID, frame: Frame): Value {
+  if (k.trace !== undefined) k.trace.record(RBasic.BLOCK, k.category(node).inst);
+  let leading = true;
+  let result: Value = { kind: "null" };
+  for (const c of k.children(node)) {
+    const kind = blockKind(k, c);
+    if (kind === BLOCK_KIND_DO) {
+      result = leading ? walkUnitDo(k, c, frame) : walk(k, c, frame);
+    } else if (kind === BLOCK_KIND_LET) {
+      result = bindLet(k, c, frame);
+      leading = false;
+    } else {
+      result = walk(k, c, frame);
+      if (kind !== BLOCK_KIND_DEFN) leading = false;
+    }
   }
   return result;
 }
