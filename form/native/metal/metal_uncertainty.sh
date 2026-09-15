@@ -40,14 +40,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST="$HERE/metal_first_token.sh"
 PATCHED="$HERE/.metal_uncertainty_patched.sh"     # dot-prefixed, regenerated every run, never committed
 
+REPO="$(cd "$HERE/../../.." && pwd)"
 [[ -f "$HOST" ]] || { echo "FAIL  the host harness is missing: $HOST"; exit 1; }
+[[ -x "$REPO/fkwu" ]] || { echo "FAIL  the body's kernel is missing: $REPO/fkwu (cc -O2 -o fkwu runtime/fkwu-uni.c)"; exit 1; }
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/metal-uncertainty.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
 
-python3 - "$HOST" "$PATCHED" <<'PY' || exit 1
-import sys
-src, dst = sys.argv[1], sys.argv[2]
-t = open(src).read()
+# The measurement block, bytes as written. form/native/metal/metal-uncertainty-splice.bml
+# sets it before the forward and the three hooks beside their anchors.
+cat > "$WORK/block.swift" <<'SWIFT'
 
-BLOCK = r'''
 // ==== STONE 43 (metal_uncertainty.sh, read-only extension): the logit vector's own decisiveness ====
 // Spliced in by metal_uncertainty.sh. metal_first_token.sh itself is never modified. Everything below
 // reads `bLogits` AFTER the token's single command buffer has completed, so the bytes are final.
@@ -139,30 +141,9 @@ func uncReport(_ nPrompt: Int) {
                  1000.0 * (uncTScan + uncTTopK) / Double(n)))
 }
 // ==== end STONE 43 extension ====
-'''
-
-ANCHORS = [
-    ("func forward(_ id: Int, _ pos: Int) -> Int {", BLOCK + "\n", "before"),
-    ("    return Int(bOutI.contents().bindMemory(to: UInt32.self, capacity: 1)[0])",
-     "    if uncRecording { uncMeasure() }\n", "before"),
-    ("    usePartsNow = 1; fastOps = true; mvNow = .slot",
-     "\n    uncRecording = uncOn", "after"),
-    ("                 encodeS, g.prefill, promptIds.count, g.decode, g.forwards, encodeS + g.prefill + g.decode))",
-     "\n    if uncOn { uncReport(promptIds.count) }", "after"),
-]
-
-for anchor, ins, where_ in ANCHORS:
-    n = t.count(anchor)
-    if n != 1:
-        sys.stderr.write("REFUSED  the anchor is not unique (%d occurrences) in %s:\n  %s\n"
-                         "         metal_first_token.sh has drifted; this extension will not guess.\n"
-                         % (n, src, anchor))
-        sys.exit(1)
-    t = t.replace(anchor, (ins + anchor) if where_ == "before" else (anchor + ins), 1)
-
-open(dst, "w").write(t)
-print("  splice OK — 4 anchors matched exactly, %d bytes -> %d" % (len(open(src).read()), len(t)))
-PY
+SWIFT
+printf '%s\n%s\n%s\n' "$HOST" "$PATCHED" "$WORK/block.swift" > "$WORK/paths"
+(cd "$REPO" && ./fkwu form/native/metal/metal-uncertainty-splice.bml < "$WORK/paths") || exit 1
 
 chmod +x "$PATCHED"
 echo "=== running the patched carrier (FORM_GEN_ONLY=1 FORM_UNC=1) ==="

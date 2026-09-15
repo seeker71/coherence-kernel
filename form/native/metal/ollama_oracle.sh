@@ -37,7 +37,10 @@ command -v ollama >/dev/null 2>&1 || { echo "ollama_oracle: no ollama on PATH �
 # (corpus: selfload)
 CORES="$(sysctl -n hw.ncpu 2>/dev/null || echo 8)"
 LOAD1="$(uptime | sed 's/.*averages*: *//' | awk '{print $1}' | tr -d ,)"
-BUSY="$(python3 -c "print(1 if float('${LOAD1:-0}') > ${CORES} * 0.35 else 0)" 2>/dev/null || echo 0)"
+REPO="$(cd "$HERE/../../.." && pwd)"
+STATS="form/native/metal/ollama-oracle-stats.bml"   # the oracle's arithmetic, in the body
+BUSY="$(printf 'busy\n%s\n%s\n' "${LOAD1:-0}" "$CORES" | (cd "$REPO" && ./fkwu "$STATS") 2>/dev/null | tail -1)"
+[ -n "$BUSY" ] || BUSY=0
 SIBS="$(pgrep -fl 'fkwu|metal_first_token|metal_batched|swiftc' 2>/dev/null | grep -vc ollama_oracle || echo 0)"
 if [ "$BUSY" = "1" ] || [ "${SIBS:-0}" -gt 0 ]; then
     echo "ollama_oracle: ⚠ HOST IS NOT QUIET — load1 ${LOAD1} on ${CORES} cores, ${SIBS} kernel/harness process(es) running." >&2
@@ -88,14 +91,7 @@ done
 [ "${#pcounts[@]}"  -gt 0 ] && PCSET="${pcounts[*]}" || PCSET=""
 
 read -r DMED DMIN DMAX PMED PMIN PMAX PTOK SAMPLE <<EOF
-$(D="${decodes[*]}" P="$PSET" PC="$PCSET" python3 -c '
-import os, statistics as s
-d=[float(x) for x in os.environ["D"].split()]
-p=[float(x) for x in os.environ["P"].split()] or [0.0]
-pc=[float(x) for x in os.environ["PC"].split()] or [0.0]
-print(f"{s.median(d):.2f} {min(d):.2f} {max(d):.2f} "
-      f"{s.median(p):.2f} {min(p):.2f} {max(p):.2f} {int(s.median(pc))} {len(d)}")
-')
+$(printf 'stats\n%s\n%s\n%s\n' "${decodes[*]}" "$PSET" "$PCSET" | (cd "$REPO" && ./fkwu "$STATS") 2>/dev/null | tail -1)
 EOF
 
 cat > "$OUT" <<EOF
