@@ -32,6 +32,14 @@ const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder();
 const UTF8_STRICT_DECODER = new TextDecoder("utf-8", { fatal: true });
 const KH_TAG_HEADER_TS = 43001;
+// The record-construction clock kernel_stat 164 reads: every record_new this process has run,
+// counted where the record is made. fkwu answers the same key from its arm counter for tag 64
+// (record_new). Nothing lowers it.
+let recordConstructions = 0;
+// This kernel's birth on the wall clock: word 2 (start-ms) of the page kernel_live answers for
+// this process. KERNEL_LIVE_MAGIC is word 0, fkwu's live-page magic.
+const HOST_BIRTH_UNIX_MS = Date.now();
+const KERNEL_LIVE_MAGIC = 0x464b4c4956;
 
 function utf8Encode(text: string): Uint8Array {
   return UTF8_ENCODER.encode(text);
@@ -1412,6 +1420,7 @@ export class Kernel {
     // dispatches on it. fkwu keeps the blueprint operand verbatim, and 0 is
     // the body's most common record shape (a plain field map).
     this.registerNative("record_new", catMethod(), (k, args) => {
+      recordConstructions += 1;
       const a0 = args[0];
       const owner = a0?.kind === "record" ? a0.record : undefined;
       const bp =
@@ -3474,6 +3483,44 @@ export class Kernel {
     this.registerNative("host_cwd", catCall(), (_k, _args) => {
       const dir = this.host.workingDirectory?.();
       return dir === undefined ? { kind: "null" } : { kind: "str", str: dir };
+    });
+    // kernel_stat, kernel_live, print_str — the doors fkwu carries as tags 127, 163 and 115.
+    //
+    // kernel_stat key reads fkwu's self-measurement key space. Key 164 is fkwu's arm counter for
+    // tag 64 (record_new): the record-construction clock, every record this process has made,
+    // which compaction never lowers. This kernel counts the same event where it happens. A key
+    // this kernel does not measure answers nothing, never a zero it did not read.
+    this.registerNative("kernel_stat", catWitness(), (_k, args) => {
+      const key = args[0];
+      return key?.kind === "int" && key.int === 164
+        ? { kind: "int", int: recordConstructions }
+        : { kind: "null" };
+    });
+    // kernel_live pid answers that kernel's live page in fkwu's word order: 0 the page magic,
+    // 1 the pid, 2 the start-ms. This kernel holds those three words of its own page; fkwu's
+    // further words count fkwu's own tissue and are not claimed here. Any other pid, or a host
+    // with no process id, answers the empty list, fkwu's answer where no page can be read.
+    this.registerNative("kernel_live", catWitness(), (_k, args) => {
+      const pid = this.host.processId?.();
+      const asked = args[0];
+      if (pid === undefined || asked?.kind !== "int" || asked.int !== pid) {
+        return { kind: "list", list: [] };
+      }
+      return {
+        kind: "list",
+        list: [
+          { kind: "int", int: KERNEL_LIVE_MAGIC },
+          { kind: "int", int: pid },
+          { kind: "int", int: HOST_BIRTH_UNIX_MS },
+        ],
+      };
+    });
+    // print_str s writes the string's bytes and one newline to stdout and answers 0, as fkwu
+    // does. A value that is not a string writes the newline alone.
+    this.registerNative("print_str", catCall(), (_k, args) => {
+      const s = args[0];
+      this.host.writeStdout?.((s?.kind === "str" ? s.str : "") + "\n");
+      return { kind: "int", int: 0 };
     });
 
     // `unix_ms_to_iso_utc` — render a millisecond instant as the

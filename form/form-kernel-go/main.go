@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -649,6 +650,17 @@ func NewKernel() *Kernel {
 // hostMonotonicStart anchors host_monotonic_ms: milliseconds on Go's monotonic clock since this
 // kernel started. Only differences between two readings mean anything.
 var hostMonotonicStart = time.Now()
+
+// recordConstructions is the record-construction clock kernel_stat 164 reads: every record_new
+// this process has run, counted where the record is made. fkwu answers the same key from its arm
+// counter for tag 64 (record_new). Nothing lowers it.
+var recordConstructions atomic.Int64
+
+// hostBirthUnixMs is this kernel's birth on the wall clock: word 2 (start-ms) of the page
+// kernel_live answers for this process. kernelLiveMagic is word 0, fkwu's live-page magic.
+var hostBirthUnixMs = time.Now().UnixMilli()
+
+const kernelLiveMagic = 0x464B4C4956
 
 // resolveKernelHostPath answers where a host path names a file for a read-side door, the same way
 // on every kernel. A path that stands where the kernel runs names itself. Otherwise the walk tries
@@ -1782,6 +1794,7 @@ func (k *Kernel) registerNatives() {
 	// on it. fkwu keeps the blueprint operand verbatim, and 0 is the body's
 	// most common record shape (a plain field map).
 	k.registerNative("record_new", catMethod(), func(k *Kernel, args []Value) Value {
+		recordConstructions.Add(1)
 		rec := &Record{}
 		if args[0].Kind == VInt && args[0].Int == 0 {
 			rec.NoBlueprint = true
@@ -3858,6 +3871,42 @@ func (k *Kernel) registerNatives() {
 			return Value{Kind: VNull}
 		}
 		return Value{Kind: VStr, Str: dir}
+	})
+	// kernel_stat, kernel_live, print_str — the doors fkwu carries as tags 127, 163 and 115.
+	//
+	// kernel_stat key reads fkwu's self-measurement key space. Key 164 is fkwu's arm counter for
+	// tag 64 (record_new): the record-construction clock, every record this process has made,
+	// which compaction never lowers. This kernel counts the same event where it happens. A key
+	// this kernel does not measure answers nothing, never a zero it did not read.
+	k.registerNative("kernel_stat", catWitness(), func(_ *Kernel, args []Value) Value {
+		if len(args) > 0 && args[0].Kind == VInt && args[0].Int == 164 {
+			return Value{Kind: VInt, Int: recordConstructions.Load()}
+		}
+		return Value{Kind: VNull}
+	})
+	// kernel_live pid answers that kernel's live page in fkwu's word order: 0 the page magic,
+	// 1 the pid, 2 the start-ms. This kernel holds those three words of its own page; fkwu's
+	// further words count fkwu's own tissue and are not claimed here. Any other pid answers the
+	// empty list, fkwu's answer where no page can be read.
+	k.registerNative("kernel_live", catWitness(), func(_ *Kernel, args []Value) Value {
+		if len(args) == 0 || args[0].Kind != VInt || args[0].Int != int64(os.Getpid()) {
+			return Value{Kind: VList, List: []Value{}}
+		}
+		return Value{Kind: VList, List: []Value{
+			{Kind: VInt, Int: kernelLiveMagic},
+			{Kind: VInt, Int: args[0].Int},
+			{Kind: VInt, Int: hostBirthUnixMs},
+		}}
+	})
+	// print_str s writes the string's bytes and one newline to stdout as one write, and
+	// answers 0, as fkwu does. A value that is not a string writes the newline alone.
+	k.registerNative("print_str", catCall(), func(_ *Kernel, args []Value) Value {
+		s := ""
+		if len(args) > 0 && args[0].Kind == VStr {
+			s = args[0].Str
+		}
+		os.Stdout.WriteString(s + "\n")
+		return Value{Kind: VInt, Int: 0}
 	})
 }
 
