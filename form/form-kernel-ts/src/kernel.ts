@@ -676,6 +676,16 @@ export class Kernel {
   // UNIT_DO for a source whose one form is a (do ...), UNIT_WRAPPER for the
   // implicit do that holds several top-level forms.
   readonly unitRoots = new Map<string, number>();
+  // unitView — the unit version: a later unit let that rebinds a name raises
+  // it, and a closure defined at the unit level reads the unit as of its own.
+  unitView = 1;
+  // closuresCreated — closures made so far; a do binds a let in a fresh frame
+  // when one was made since the do's scope last opened.
+  closuresCreated = 0;
+  // voiced — the organ-health readings this process has already spoken.
+  private readonly voiced = new Set<string>();
+  // listCopies — list elements cons and tail have copied in this run.
+  private listCopies = 0;
 
   // String table — substrate strings + identifier names share this table.
   // A name's NodeID.inst is its index into `strs`.
@@ -775,6 +785,61 @@ export class Kernel {
   markUnitRoot(root: NodeID, wrapper: boolean): void {
     if (blockKind(this, root) === BLOCK_KIND_DO) {
       this.unitRoots.set(nodeKey(root), wrapper ? UNIT_WRAPPER : UNIT_DO);
+    }
+  }
+
+  // voiceOrgan — the kernel says it when its reading of a form departs from
+  // the language, or a list operation outgrows its budget: one
+  // organ-health-v1 reading on stderr, the line the native process runner
+  // reads live (form/form-stdlib/organ-health.bml). A reading speaks once per
+  // process; its need stays open while the kernel holds no remedy.
+  voiceOrgan(
+    flow: string,
+    aspect: string,
+    expected: string,
+    observed: string,
+    resource: string,
+    detail: string,
+  ): void {
+    const key = `${flow} ${aspect} ${observed}`;
+    if (this.voiced.has(key)) return;
+    this.voiced.add(key);
+    const now = Date.now();
+    const row = {
+      schema: "organ-health-v1",
+      id: `form-kernel-ts-${now}-${this.voiced.size}:${flow}:${aspect}`,
+      organ: "form-kernel-ts",
+      flow,
+      aspect,
+      stage: "observe",
+      expected,
+      observed,
+      health: 0,
+      surprise: 1,
+      needs: [{ resource, detail }],
+      offers: ["continue"],
+      selected: "",
+      evidence: { kernel: "ts" },
+      observed_at_ms: now,
+      at_ms: now,
+    };
+    this.host.writeStderr?.(`form-organ health ${JSON.stringify(row)}\n`);
+  }
+
+  // noteListCopy — cons and tail copy the list they are given; past the
+  // budget the kernel says so once: a list that shared its tail would not copy.
+  noteListCopy(n: number): void {
+    const before = this.listCopies;
+    this.listCopies = before + n;
+    if (before < LIST_COPY_BUDGET && this.listCopies >= LIST_COPY_BUDGET) {
+      this.voiceOrgan(
+        "list",
+        "copy-budget",
+        `cons and tail copy at most ${LIST_COPY_BUDGET} list elements in one run`,
+        `copied ${this.listCopies} list elements`,
+        "shared-tail-list",
+        "cons and tail copy the whole list they are given; a list that shares its tail would make both constant-time",
+      );
     }
   }
 
@@ -1067,6 +1132,11 @@ export class Kernel {
       for (const [name, value] of cur.entries()) {
         liveStrings.add(name);
         this.markValue(value, liveNodes, liveStrings, liveFrames);
+      }
+      if (cur.history !== undefined) {
+        for (const h of cur.history.values()) {
+          for (const e of h) this.markValue(e.val, liveNodes, liveStrings, liveFrames);
+        }
       }
     }
   }
@@ -1762,9 +1832,10 @@ export class Kernel {
       kind: "list",
       list: args.slice(),
     }));
-    this.registerNative("cons", catListNat(), (_k, args) => {
+    this.registerNative("cons", catListNat(), (k, args) => {
       const head = args[0] ?? { kind: "null" };
       const tail = argList(args, 1);
+      k.noteListCopy(tail.length);
       return { kind: "list", list: [head, ...tail] };
     });
     // A receiver that is not a list answers null, as nth does; the tail of a list is a list.
@@ -1773,9 +1844,10 @@ export class Kernel {
       if (xs?.kind !== "list") return { kind: "null" };
       return xs.list[0] ?? { kind: "null" };
     });
-    this.registerNative("tail", catListNat(), (_k, args) => {
+    this.registerNative("tail", catListNat(), (k, args) => {
       const xs = args[0];
       if (xs?.kind !== "list") return { kind: "null" };
+      k.noteListCopy(xs.list.length);
       return { kind: "list", list: xs.list.slice(1) };
     });
     // len is HONEST cell count. Dicts ride on list values tagged with the
@@ -4271,10 +4343,31 @@ export interface Closure {
 // Frame — scope primitive
 // ---------------------------------------------------------------------------
 
+// LIST_COPY_BUDGET — the list elements cons and tail may copy in one run
+// before the kernel voices the cost (Kernel.noteListCopy).
+const LIST_COPY_BUDGET = 2 ** 28;
+
+// bindingAtView — what a rebound unit name held at a unit version: the latest
+// binding made at or before it, else the first (a read that came before the
+// name's first let reads that let, as fkwu's forward hold does).
+function bindingAtView(h: { v: number; val: Value }[], view: number): Value {
+  let out = h[0]!.val;
+  for (const e of h) {
+    if (e.v <= view) out = e.val;
+  }
+  return out;
+}
+
 export class Frame {
   readonly parent: Frame | null;
   private readonly keys: NameID[] = [];
   private readonly vals: Value[] = [];
+  // view — the unit version a closure defined at the unit level was made
+  // under; its own empty frame carries it, 0 on every other frame.
+  view = 0;
+  // history — unit bindings a later unit let rebound, each with the unit
+  // version it took effect at (the first at 0).
+  history: Map<NameID, { v: number; val: Value }[]> | undefined;
 
   constructor(parent: Frame | null = null) {
     this.parent = parent;
@@ -4294,14 +4387,47 @@ export class Frame {
     return this.keys.map((key, i) => [key, this.vals[i] ?? { kind: "null" }]);
   }
 
+  // lookup — the nearest binding. A rebound unit name answers what the unit
+  // held at the view of the closure reading it (the nearest view on the way
+  // up), and its latest binding where no closure view stands.
   lookup(name: NameID): Value | undefined {
     let frame: Frame | null = this;
+    let view = 0;
     while (frame !== null) {
+      if (view === 0) view = frame.view;
       const idx = frame.keys.indexOf(name);
-      if (idx >= 0) return frame.vals[idx];
+      if (idx >= 0) {
+        if (view !== 0 && frame.history !== undefined) {
+          const h = frame.history.get(name);
+          if (h !== undefined) return bindingAtView(h, view);
+        }
+        return frame.vals[idx];
+      }
       frame = frame.parent;
     }
     return undefined;
+  }
+
+  hasOwn(name: NameID): boolean {
+    return this.keys.indexOf(name) >= 0;
+  }
+
+  // rebind — a later unit let: the name takes the new value, and the history
+  // keeps what each unit version held.
+  rebind(name: NameID, value: Value, version: number): void {
+    const idx = this.keys.indexOf(name);
+    if (idx < 0) {
+      this.bind(name, value);
+      return;
+    }
+    if (this.history === undefined) this.history = new Map();
+    let h = this.history.get(name);
+    if (h === undefined) {
+      h = [{ v: 0, val: this.vals[idx]! }];
+      this.history.set(name, h);
+    }
+    h.push({ v: version, val: value });
+    this.vals[idx] = value;
   }
 
   // hasLocal — a binding of name in any frame but the root, whose bindings are
@@ -4320,21 +4446,88 @@ export class Frame {
 // Walker — recipe → value
 // ---------------------------------------------------------------------------
 
+// walk — a recipe to its value. A conditional's taken arm, a do's last form
+// and a closure's body are tail positions: the loop takes them in place, so a
+// tail-recursive Form loop runs in constant host stack and holds no caller's
+// frame alive, as the Go and Rust walkers do. A closure entered in tail
+// position replaces this walk's form-stack slot.
 export function walk(k: Kernel, node: NodeID, frame: Frame): Value {
-  if (node.level === Level.TRIVIAL) {
-    return k.trivialValue(node);
-  }
-  const cat = k.category(node);
-  const kids = k.children(node);
+  let pushed = false;
+  let result: Value;
+  for (;;) {
+    if (node.level === Level.TRIVIAL) {
+      result = k.trivialValue(node);
+      break;
+    }
+    const cat = k.category(node);
+    const kids = k.children(node);
 
-  // Tracing hook: when k.trace is set, record arm dispatch. Pure
-  // counter increment — no allocation, no IO. Sibling-parity with the
-  // Rust and Go kernels. Records (ty, inst) so typed-numeric
-  // distribution stays distinguishable.
-  if (k.trace !== undefined) {
-    k.trace.record(cat.type, cat.inst);
-  }
+    // Tracing hook: when k.trace is set, record arm dispatch. Pure
+    // counter increment — no allocation, no IO. Sibling-parity with the
+    // Rust and Go kernels. Records (ty, inst) so typed-numeric
+    // distribution stays distinguishable.
+    if (k.trace !== undefined) {
+      k.trace.record(cat.type, cat.inst);
+    }
 
+    if (cat.type === RBasic.COND) {
+      const arm = condArm(k, cat.inst, kids, frame);
+      if (arm === null) {
+        result = { kind: "null" };
+        break;
+      }
+      node = arm;
+      continue;
+    }
+    if (cat.type === RBasic.BLOCK) {
+      if (cat.inst === RBlock.LET) {
+        // A let binds the rest of its own do (blockScope binds a do's own
+        // lets). Met anywhere else — an if arm, an argument, a do's last
+        // form — nothing follows it: it answers its value, binding no name.
+        result = letValue(k, kids, frame);
+        break;
+      }
+      if (kids.length === 0) {
+        result = { kind: "null" };
+        break;
+      }
+      frame = blockScope(k, kids, frame);
+      node = kids[kids.length - 1]!;
+      continue;
+    }
+    if (cat.type === RBasic.FNCALL) {
+      const step = resolveCall(k, kids, frame);
+      if (step.closure === undefined) {
+        result = step.value;
+        break;
+      }
+      const closure = step.closure;
+      frame = closureFrame(k, closure, kids, frame);
+      k.trace?.recordFn(k.nameStr(closure.name));
+      const label = k.formFrameLabel(closure.name, closure.body);
+      if (pushed) {
+        k.formStack[k.formStack.length - 1] = label;
+      } else {
+        k.formStack.push(label);
+        pushed = true;
+      }
+      node = closure.body;
+      continue;
+    }
+    result = walkNode(k, node, cat, kids, frame);
+    break;
+  }
+  if (pushed) k.formStack.pop();
+  return result;
+}
+
+function walkNode(
+  k: Kernel,
+  node: NodeID,
+  cat: NodeID,
+  kids: readonly NodeID[],
+  frame: Frame,
+): Value {
   switch (cat.type) {
     case RBasic.IDENT: {
       const id = k.identID(node);
@@ -4360,14 +4553,8 @@ export function walk(k: Kernel, node: NodeID, frame: Frame): Value {
       return cat.inst === RMatch.SWITCH
         ? walkMatchSwitch(k, node, kids, frame)
         : { kind: "nodeid", nodeid: node };
-    case RBasic.COND:
-      return walkCond(k, cat.inst, kids, frame);
-    case RBasic.BLOCK:
-      return walkBlock(k, cat.inst, kids, frame);
     case RBasic.FNDEF:
       return walkFnDef(k, kids, frame);
-    case RBasic.FNCALL:
-      return walkFnCall(k, kids, frame);
     case RBasic.LIST: {
       const items = kids.map((c) => walk(k, c, frame));
       return { kind: "list", list: items };
@@ -5110,53 +5297,56 @@ function walkLogic(
   return boolInt(op === RLogic.AND);
 }
 
-function walkCond(
+// condArm — the arm a conditional takes, or null when an if without an else
+// declines; walk takes the arm in tail position.
+function condArm(
   k: Kernel,
   op: number,
   kids: readonly NodeID[],
   frame: Frame,
-): Value {
+): NodeID | null {
   if (op === RCond.IF_THEN) {
     if (kids.length !== 2) throw new Error("if: need 2 args");
-    const c = walk(k, kids[0]!, frame);
-    return truthy(c) ? walk(k, kids[1]!, frame) : { kind: "null" };
+    return truthy(walk(k, kids[0]!, frame)) ? kids[1]! : null;
   }
   if (kids.length !== 3) throw new Error("if/else: need 3 args");
-  const c = walk(k, kids[0]!, frame);
-  return truthy(c) ? walk(k, kids[1]!, frame) : walk(k, kids[2]!, frame);
+  return truthy(walk(k, kids[0]!, frame)) ? kids[1]! : kids[2]!;
 }
 
-function walkBlock(
-  k: Kernel,
-  op: number,
-  kids: readonly NodeID[],
-  frame: Frame,
-): Value {
-  if (op === RBlock.LET) {
-    // A let binds the rest of its own do (the loop below binds a do's own
-    // lets). Met anywhere else -- an if arm, an argument, a do's last form --
-    // nothing follows it, so it answers its value and binds no name.
-    return letValue(k, kids, frame);
-  }
-  // DO or SEQUENCE -- a lexical scope: its lets and defns bind for the rest
-  // of this do only. The scope opens at the first binding form, so a do that
-  // binds nothing costs no frame. A unit's top-level do reads flat (walkUnit).
+// blockScope — a do or sequence is a lexical scope: its lets and defns bind
+// for the rest of this do only. It walks every form but the last and answers
+// the frame the last form reads, which walk takes in tail position. The scope
+// opens at the first binding form, so a do that binds nothing costs no frame;
+// a let binds in a fresh frame when a closure was made since the scope last
+// opened, so a closure keeps the bindings it was made under. A unit's
+// top-level do reads flat (walkUnit).
+function blockScope(k: Kernel, kids: readonly NodeID[], frame: Frame): Frame {
   const last = kids.length - 1;
   const kinds = doKinds(k, kids);
   let scope = frame;
-  let result: Value = { kind: "null" };
-  for (let i = 0; i <= last; i++) {
+  let mark = k.closuresCreated;
+  for (let i = 0; i < last; i++) {
     const c = kids[i]!;
     const kind = kinds[i]!;
-    if (kind === BLOCK_KIND_LET && i < last) {
-      if (scope === frame) scope = new Frame(frame);
-      result = bindLet(k, c, scope);
+    if (kind === BLOCK_KIND_LET) {
+      if (k.trace !== undefined) k.trace.record(RBasic.BLOCK, RBlock.LET);
+      const letKids = k.children(c);
+      const value = letValue(k, letKids, scope);
+      if (scope === frame || k.closuresCreated !== mark) {
+        scope = new Frame(scope);
+        mark = k.closuresCreated;
+      }
+      scope.bind(letKids[0]!.inst, value);
       continue;
     }
-    if (kind === BLOCK_KIND_DEFN && scope === frame) scope = new Frame(frame);
-    result = walk(k, c, scope);
+    if (kind === BLOCK_KIND_DEFN && scope === frame) {
+      scope = new Frame(frame);
+      mark = k.closuresCreated;
+    }
+    walk(k, c, scope);
   }
-  return result;
+  if (kinds[last] === BLOCK_KIND_DEFN && scope === frame) scope = new Frame(frame);
+  return scope;
 }
 
 const BLOCK_KIND_LET = 1;
@@ -5197,13 +5387,21 @@ function letValue(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
   return walk(k, kids[1]!, frame);
 }
 
-// bindLet -- a let a do (or a unit) binds itself: the value reads the frame
-// before the name joins it, then the name binds there.
+// bindLet -- a unit's let binds the unit's frame: the value reads the frame
+// before the name joins it. A later unit let that rebinds a name raises the
+// unit version, so a closure defined before it keeps the binding it was made
+// under, as fkwu's hold per reference keeps it.
 function bindLet(k: Kernel, node: NodeID, frame: Frame): Value {
   if (k.trace !== undefined) k.trace.record(RBasic.BLOCK, RBlock.LET);
   const kids = k.children(node);
   const value = letValue(k, kids, frame);
-  frame.bind(kids[0]!.inst, value);
+  const name = kids[0]!.inst;
+  if (frame.parent === null && frame.hasOwn(name)) {
+    k.unitView++;
+    frame.rebind(name, value, k.unitView);
+  } else {
+    frame.bind(name, value);
+  }
   return value;
 }
 
@@ -5280,7 +5478,15 @@ function walkFnDef(
     return p.inst;
   });
 
-  const closure: Closure = { name: nameID, params, body, env: frame };
+  // A closure defined at the unit level reads the unit as it stands now: its
+  // own empty frame carries the unit version (Frame.view).
+  let env = frame;
+  if (frame.parent === null) {
+    env = new Frame(frame);
+    env.view = k.unitView;
+  }
+  k.closuresCreated++;
+  const closure: Closure = { name: nameID, params, body, env };
   const value: Value = { kind: "closure", closure };
   frame.bind(nameID, value);
   return value;
@@ -5289,11 +5495,15 @@ function walkFnDef(
 // FNCALL children: [callee, arg0, arg1, ...]
 // Callee is either an IDENT recipe, a bare string trivial, or any expression
 // that evaluates to a closure.
-function walkFnCall(
+// CallStep — a call either answered (a native) or names the closure walk
+// enters in tail position.
+type CallStep = { value: Value; closure?: undefined } | { closure: Closure; value?: undefined };
+
+function resolveCall(
   k: Kernel,
   kids: readonly NodeID[],
   frame: Frame,
-): Value {
+): CallStep {
   if (kids.length < 1) throw new Error("call: need callee");
   const calleeNode = kids[0]!;
 
@@ -5334,7 +5544,7 @@ function walkFnCall(
       k.formStack.push(k.nameStr(envNe.name));
       const envOut = envNe.fn(k, frame, envArgs);
       k.formStack.pop();
-      return envOut;
+      return { value: envOut };
     }
     // Native dispatch. A local binding of the name (a parameter, a let) is
     // nearer than the native unless fkwu reserves the head: the one
@@ -5355,7 +5565,7 @@ function walkFnCall(
       k.formStack.push(k.nameStr(ne.name));
       const neOut = ne.fn(k, args);
       k.formStack.pop();
-      return neOut;
+      return { value: neOut };
     }
     // Closure via frame — use the ORIGINAL function-name (not the JIT-
     // aliased one): the user defined this function under rawName and
@@ -5369,7 +5579,7 @@ function walkFnCall(
         `call: ${k.nameStr(rawName)} is not a closure (got ${v.kind})`,
       );
     }
-    return invokeClosure(k, v.closure, kids, frame);
+    return { closure: v.closure };
   }
 
   // General path: callee is an expression
@@ -5377,15 +5587,17 @@ function walkFnCall(
   if (calleeVal.kind !== "closure") {
     throw new Error(`call: callee is not a closure (got ${calleeVal.kind})`);
   }
-  return invokeClosure(k, calleeVal.closure, kids, frame);
+  return { closure: calleeVal.closure };
 }
 
-function invokeClosure(
+// closureFrame — the frame a closure's body reads: its parameters bound to the
+// call's arguments, each argument read in the caller's frame.
+function closureFrame(
   k: Kernel,
   closure: Closure,
   kids: readonly NodeID[],
   frame: Frame,
-): Value {
+): Frame {
   if (kids.length - 1 !== closure.params.length) {
     throw new Error(
       `call: arity mismatch (expected ${closure.params.length}, got ${kids.length - 1})`,
@@ -5396,11 +5608,7 @@ function invokeClosure(
     const v = walk(k, kids[i + 1]!, frame);
     callFrame.bind(closure.params[i]!, v);
   }
-  k.trace?.recordFn(k.nameStr(closure.name));
-  k.formStack.push(k.formFrameLabel(closure.name, closure.body));
-  const out = walk(k, closure.body, callFrame);
-  k.formStack.pop();
-  return out;
+  return callFrame;
 }
 
 function nodeIDKey(nid: NodeID): string {

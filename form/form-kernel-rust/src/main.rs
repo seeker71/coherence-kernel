@@ -1651,6 +1651,10 @@ pub(crate) struct Kernel {
     // them: UNIT_DO for a source whose one form is a (do ...), UNIT_WRAPPER for
     // the implicit do that holds several top-level forms.
     unit_roots: HashMap<NodeID, u8>,
+    // unit_view -- the unit version: a later unit let that rebinds a name
+    // raises it, and a closure defined at the unit level reads the unit as of
+    // its own.
+    unit_view: u64,
     // Optional tracing — None for hot-path runs, Some for `trace` subcommand.
     // Hooked at the top of walk() to record per-arm dispatch counts and
     // choice success/failure rates. Per lc-native-kernel-binary's
@@ -1949,6 +1953,8 @@ impl Arena {
         self.frames.push(Frame {
             parent,
             bindings: Vec::new(),
+            view: 0,
+            history: None,
         });
         id
     }
@@ -1966,6 +1972,8 @@ impl Arena {
         self.frames.push(Frame {
             parent,
             bindings: Vec::with_capacity(cap),
+            view: 0,
+            history: None,
         });
         id
     }
@@ -1998,18 +2006,72 @@ impl Arena {
         false
     }
 
+    // lookup -- the nearest binding. A rebound unit name answers what the unit
+    // held at the view of the closure reading it (the nearest view on the way
+    // up), and its latest binding where no closure view stands.
     pub(crate) fn lookup(&self, fid: FrameId, name: NameID) -> Option<Value> {
         let mut cur = Some(fid);
+        let mut view = 0u64;
         while let Some(id) = cur {
             let f = &self.frames[id as usize];
+            if view == 0 {
+                view = f.view;
+            }
             for slot in &f.bindings {
                 if slot.0 == name {
+                    if view != 0 {
+                        if let Some(h) = f.history.as_ref().and_then(|h| h.get(&name)) {
+                            return Some(binding_at_view(h, view));
+                        }
+                    }
                     return Some(slot.1.clone());
                 }
             }
             cur = f.parent;
         }
         None
+    }
+
+    fn is_root(&self, fid: FrameId) -> bool {
+        self.frames[fid as usize].parent.is_none()
+    }
+
+    fn set_view(&mut self, fid: FrameId, view: u64) {
+        self.frames[fid as usize].view = view;
+    }
+
+    fn has_own(&self, fid: FrameId, name: NameID) -> bool {
+        self.frames[fid as usize]
+            .bindings
+            .iter()
+            .any(|slot| slot.0 == name)
+    }
+
+    // rebind -- a later unit let: the name takes the new value, and the
+    // history keeps what each unit version held.
+    fn rebind(&mut self, fid: FrameId, name: NameID, v: Value, version: u64) {
+        let f = &mut self.frames[fid as usize];
+        let old = f
+            .bindings
+            .iter()
+            .find(|slot| slot.0 == name)
+            .map(|slot| slot.1.clone());
+        let Some(old) = old else {
+            f.bindings.push((name, v));
+            return;
+        };
+        {
+            let h = f.history.get_or_insert_with(|| Box::new(HashMap::new()));
+            h.entry(name)
+                .or_insert_with(|| vec![(0, old)])
+                .push((version, v.clone()));
+        }
+        for slot in &mut f.bindings {
+            if slot.0 == name {
+                slot.1 = v;
+                break;
+            }
+        }
     }
 }
 
@@ -2038,6 +2100,7 @@ impl Kernel {
             switch_tables: HashMap::new(),
             active_roots: Vec::new(),
             unit_roots: HashMap::new(),
+            unit_view: 1,
             trace: None,
         };
         k.register_natives();
@@ -2327,6 +2390,13 @@ impl Kernel {
                 live_strings.insert(*name);
                 self.mark_value(value, Some(arena), live_nodes, live_strings, live_frames);
             }
+            if let Some(h) = &f.history {
+                for entries in h.values() {
+                    for (_, value) in entries {
+                        self.mark_value(value, Some(arena), live_nodes, live_strings, live_frames);
+                    }
+                }
+            }
             cur = f.parent;
         }
     }
@@ -2434,6 +2504,7 @@ impl Kernel {
             switch_tables: self.switch_tables.clone(),
             active_roots: Vec::new(),
             unit_roots: self.unit_roots.clone(),
+            unit_view: self.unit_view,
             trace: None,
         }
     }
@@ -3178,6 +3249,25 @@ native_field_constructor!(native_field_evidence, RB_EVIDENCE, 1, "field_evidence
 struct Frame {
     parent: Option<FrameId>,
     bindings: Vec<(NameID, Value)>,
+    /// The unit version a closure defined at the unit level was made under;
+    /// its own empty frame carries it, 0 on every other frame.
+    view: u64,
+    /// Unit bindings a later unit let rebound, each with the unit version it
+    /// took effect at (the first at 0).
+    history: Option<Box<HashMap<NameID, Vec<(u64, Value)>>>>,
+}
+
+// binding_at_view -- what a rebound unit name held at a unit version: the
+// latest binding made at or before it, else the first (a read that came
+// before the name's first let reads that let, as fkwu's forward hold does).
+fn binding_at_view(h: &[(u64, Value)], view: u64) -> Value {
+    let mut out = h[0].1.clone();
+    for (v, val) in h {
+        if *v <= view {
+            out = val.clone();
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -6148,8 +6238,10 @@ pub(crate) fn mark_unit_root(k: &mut Kernel, root: NodeID, wrapper: bool) {
     }
 }
 
-// bind_let -- a let a do (or a unit) binds itself: the value reads the frame
-// before the name joins it, then the name binds there.
+// bind_let -- a unit's let binds the unit's frame: the value reads the frame
+// before the name joins it. A later unit let that rebinds a name raises the
+// unit version, so a closure defined before it keeps the binding it was made
+// under, as fkwu's hold per reference keeps it.
 fn bind_let(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
     if let Some(t) = &mut k.trace {
         t.record(RB_BLOCK, RBLK_LET);
@@ -6157,7 +6249,12 @@ fn bind_let(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
     let kids = k.children(n);
     let name = k.ident_id(kids[0]);
     let v = walk(k, a, kids[1], env);
-    a.bind(env, name, v.clone());
+    if a.is_root(env) && a.has_own(env, name) {
+        k.unit_view += 1;
+        a.rebind(env, name, v.clone(), k.unit_view);
+    } else {
+        a.bind(env, name, v.clone());
+    }
     v
 }
 
@@ -6249,6 +6346,11 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
     // kernel parse the full thesis grammar files without overflowing.
     let mut n = n;
     let mut env = env;
+    // Frames this loop makes sit at or past loop_mark. A tail call leaves them
+    // all behind; while no closure has been made since the loop began (a
+    // closure is the one Value that captures a FrameId), none is reachable.
+    let loop_mark = a.frames.len();
+    let loop_clo = a.closures_created;
     // One Form-stack slot per host walk invocation: a closure entered by TCO
     // REPLACES the slot (its tail-caller's frame is complete); a closure
     // entered through a fresh recursive walk (arg evaluation, native
@@ -6401,18 +6503,32 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                     // top-level do reads flat (walk_unit).
                     let last = kids.len() - 1;
                     let mut scope = env;
+                    let mut mark = a.closures_created;
                     for c in &kids[..last] {
                         let kind = block_kind(k, *c);
-                        if kind == BLOCK_KIND_LET || kind == BLOCK_KIND_DEFN {
-                            if scope == env {
-                                scope = a.new_frame(Some(env));
-                            }
-                        }
                         if kind == BLOCK_KIND_LET {
-                            bind_let(k, a, *c, scope);
-                        } else {
-                            walk(k, a, *c, scope);
+                            // The value reads the scope as it stands; the name
+                            // binds in a fresh frame when the scope is not yet
+                            // open or a closure was made since it opened, so a
+                            // closure keeps the bindings it was made under.
+                            if let Some(t) = &mut k.trace {
+                                t.record(RB_BLOCK, RBLK_LET);
+                            }
+                            let let_kids = k.children(*c);
+                            let name = k.ident_id(let_kids[0]);
+                            let v = walk(k, a, let_kids[1], scope);
+                            if scope == env || a.closures_created != mark {
+                                scope = a.new_frame(Some(scope));
+                                mark = a.closures_created;
+                            }
+                            a.bind(scope, name, v);
+                            continue;
                         }
+                        if kind == BLOCK_KIND_DEFN && scope == env {
+                            scope = a.new_frame(Some(env));
+                            mark = a.closures_created;
+                        }
+                        walk(k, a, *c, scope);
                     }
                     if scope == env && block_kind(k, kids[last]) == BLOCK_KIND_DEFN {
                         scope = a.new_frame(Some(env));
@@ -6430,11 +6546,20 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
             RB_FNDEF => {
                 let name = k.ident_id(kids[0]);
                 let params: Vec<NameID> = k.children(kids[1]).iter().map(|p| p.inst).collect();
+                // A closure defined at the unit level reads the unit as it
+                // stands now: its own empty frame carries the unit version.
+                let cl_env = if a.is_root(env) {
+                    let view_frame = a.new_frame(Some(env));
+                    a.set_view(view_frame, k.unit_view);
+                    view_frame
+                } else {
+                    env
+                };
                 let cl = Arc::new(Closure {
                     name,
                     params,
                     body: kids[2],
-                    env,
+                    env: cl_env,
                 });
                 // This closure captures `env`; record it so the walk wrapper
                 // will not reclaim frames at/above its definition mark.
@@ -6519,12 +6644,22 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                         kids.len() - 1
                     );
                 }
-                let call_frame = a.new_frame_with_capacity(Some(cl.env), cl.params.len());
                 // Evaluate args in CALLER's env, then bind in call_frame.
                 // The clone is Arc<Closure> — bump-the-refcount, not deep.
                 let cl2 = cl.clone();
-                for (i, p) in cl2.params.iter().enumerate() {
-                    let arg = walk(k, a, kids[i + 1], env);
+                let mut args = Vec::with_capacity(cl2.params.len());
+                for i in 0..cl2.params.len() {
+                    args.push(walk(k, a, kids[i + 1], env));
+                }
+                // The call is in tail position: the frames this loop made
+                // (earlier call frames, do scopes) are dead once the args are
+                // read, so drop them before the callee's frame -- a tail-
+                // recursive loop then holds one frame, not one per step.
+                if a.closures_created == loop_clo && a.frames.len() > loop_mark {
+                    a.frames.truncate(loop_mark);
+                }
+                let call_frame = a.new_frame_with_capacity(Some(cl.env), cl.params.len());
+                for (p, arg) in cl2.params.iter().zip(args) {
                     a.bind(call_frame, *p, arg);
                 }
                 let fn_name = k.name_str(cl.name).to_string();

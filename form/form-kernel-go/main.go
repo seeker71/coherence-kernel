@@ -595,6 +595,13 @@ type Kernel struct {
 	// them: unitDo for a source whose one form is a (do ...), unitWrapper for
 	// the implicit do that holds several top-level forms.
 	unitRoots map[NodeID]uint8
+	// unitView — the unit version: a later unit let that rebinds a name
+	// raises it, and a closure defined at the unit level reads the unit as of
+	// its own.
+	unitView uint64
+	// closuresCreated — closures made so far; a do binds a let in a fresh
+	// frame when one was made since the do's scope last opened.
+	closuresCreated uint64
 }
 
 type switchTable struct {
@@ -627,6 +634,7 @@ func NewKernel() *Kernel {
 		strIdx:       make(map[string]NameID),
 		sourceAttr:   make(map[NodeID]sourceLoc),
 		importSeq:    1,
+		unitView:     1,
 		next:         1,
 		f64Idx:       make(map[uint64]uint32),
 		i64Idx:       make(map[int64]uint32),
@@ -1090,6 +1098,11 @@ func (k *Kernel) markFrame(frame *Frame, liveNodes map[NodeID]bool, liveStrings 
 		for _, binding := range cur.Bindings {
 			liveStrings[binding.Name] = true
 			k.markValue(binding.Val, liveNodes, liveStrings, liveFrames)
+		}
+		for _, h := range cur.History {
+			for _, e := range h {
+				k.markValue(e.Val, liveNodes, liveStrings, liveFrames)
+			}
 		}
 	}
 }
@@ -3733,13 +3746,22 @@ func (k *Kernel) observeBlock(cat NodeID) {
 	k.observeRecipeDispatch(cat)
 }
 
-// bindLet — a let a do (or a unit) binds itself: the value reads the frame
-// before the name joins it, then the name binds there.
+// bindLet — a unit's let binds the unit's frame: the value reads the frame
+// before the name joins it. A later unit let that rebinds a name raises the
+// unit version, so a closure defined before it keeps the binding it was made
+// under, as fkwu's hold per reference keeps it.
 func (k *Kernel) bindLet(n NodeID, env *Frame) Value {
 	r := k.recipeAt(n)
 	k.observeBlock(r.Category)
 	v := k.walk(r.Children[1], env)
-	env.Bind(k.identID(r.Children[0]), v)
+	name := k.identID(r.Children[0])
+	switch {
+	case env.Parent == nil && env.HasOwn(name):
+		k.unitView++
+		env.Rebind(name, v, k.unitView)
+	default:
+		env.Bind(name, v)
+	}
 	return v
 }
 
@@ -3986,16 +4008,29 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 			// top-level do reads flat (walkUnit).
 			last := len(kids) - 1
 			scope := env
+			mark := k.closuresCreated
 			for i := 0; i < last; i++ {
 				kind := k.blockKind(kids[i])
-				if (kind == blockKindLet || kind == blockKindDefn) && scope == env {
-					scope = NewFrame(env)
-				}
 				if kind == blockKindLet {
-					k.bindLet(kids[i], scope)
-				} else {
-					k.walk(kids[i], scope)
+					// The value reads the scope as it stands; the name binds
+					// in a fresh frame when the scope is not yet open or a
+					// closure was made since it opened, so a closure keeps
+					// the bindings it was made under.
+					r := k.recipeAt(kids[i])
+					k.observeBlock(r.Category)
+					v := k.walk(r.Children[1], scope)
+					if scope == env || k.closuresCreated != mark {
+						scope = NewFrame(scope)
+						mark = k.closuresCreated
+					}
+					scope.Bind(k.identID(r.Children[0]), v)
+					continue
 				}
+				if kind == blockKindDefn && scope == env {
+					scope = NewFrame(env)
+					mark = k.closuresCreated
+				}
+				k.walk(kids[i], scope)
 			}
 			if scope == env && k.blockKind(kids[last]) == blockKindDefn {
 				scope = NewFrame(env)
@@ -4057,7 +4092,15 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 			for i, p := range paramKids {
 				params[i] = NameID(p.Inst)
 			}
-			cl := &Closure{Name: name, Params: params, Body: kids[2], Env: env}
+			// A closure defined at the unit level reads the unit as it stands
+			// now: its own empty frame carries the unit version (Frame.View).
+			clEnv := env
+			if env.Parent == nil {
+				clEnv = NewFrame(env)
+				clEnv.View = k.unitView
+			}
+			k.closuresCreated++
+			cl := &Closure{Name: name, Params: params, Body: kids[2], Env: clEnv}
 			env.Bind(name, Value{Kind: VClosure, Cl: cl})
 			return Value{Kind: VClosure, Cl: cl}
 
