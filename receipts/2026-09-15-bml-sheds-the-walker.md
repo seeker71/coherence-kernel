@@ -98,13 +98,70 @@ fixture. The upstream diff (654732cf6) said otherwise: initializers now lower
 where their class lives, and my lowering still read them in an empty env. The
 difference was mine, and 5b3114fe9 heals it.
 
-## The next stone, named with its measure
+## Addendum: BML loops on the loop lane
 
-The loop runs in constant stack on fkwu's evaluator, but the JIT's loop lane
-does not take it. Each pass reads the run's record cells for the mode, so 40M
-passes cost about 9.5 s (about 4.2M passes/s). The same shape with the mode as
-a value name ran a million passes in about 5 ms. The stone: when no call in a
-loop can carry a transfer back, keep the mode local to the loop defn.
+Each pass of a loop used to read the run's record for the control mode, so the
+JIT's loop lane declined every BML loop. Now a loop that holds no call that
+can carry a transfer back, no fail, no return or throw, and no statement but
+lets, ifs, blocks and its own break and continue lowers with no mode at all:
+break is its exit, and the end of a pass and continue are its self tail call.
+Its defn takes only the names the loop reads or assigns and answers the one
+name it carries out. That is the chain of lets and compares ending in a self
+tail call the lane crystallizes, for example
+`(defn w6 (p5) (if (lt p5 40000000) (do (let v7 (add p5 1)) (w6 v7)) p5))`.
+Every other loop keeps the mode.
+
+The lane's own counters, read at the end of the child program (`kernel_stat`
+49 counts standing loops, 50 the passes run native), with the child's time.
+Measured back-to-back under load 3.3 to 5.6, eight agents sharing the host:
+
+| source | before | after |
+|---|---|---|
+| `bml-control-loop.bml` (1M passes) | 314 ms, 0 loops, 0 native | 6 ms, 1 loop, 998,976 native |
+| 40M passes (`while (i < 40000000)`) | 8,977 ms, 0 loops, 0 native | 35 ms, 1 loop, 39,998,977 native |
+
+The door read 88 ok of 88 in 4.30 s warm; 2 s of that is the forever-loop
+fixture's budget. When the native proofs came home as fixtures (77c0edd87),
+`bml-class-loops.bml` died in the child: a loop over `this.n` reached the
+member's packed argument without taking it as a parameter, because a field
+marker names no variable. The name collector now counts a field marker as a
+read of `this`, and the door reads 119 ok of 119.
+
+What is left between a BML loop and the lane's full speed:
+
+- **The heat trigger.** The first 1,024 passes walk before the lane
+  crystallizes the loop (998,976 of 1,000,000 ran native). A loop shorter than
+  that never reaches the lane: `bml-control-flow.bml`'s Count and Sum loops
+  lower to the lane's shape but run 4 and 10 passes, and read 0 standing.
+- **A call in the loop.** A loop holding a user call keeps the mode, because
+  the callee might carry a return, throw or fail back. The lowering could lift
+  that once it can read a callee as quiet: no throw, no fail, and only quiet
+  callees.
+- **A transfer the loop carries out.** A return or throw in the body, a
+  labeled break or continue to an outer loop (Grid's nested loops), or a
+  nested loop, switch, try or choose keeps the mode.
+- **A standing body.** In a unit that holds a fail, each plain statement's
+  standing-value update reads FAILED.
+- **Two names carried out.** The exit then answers a list, and the lane wants
+  one scalar exit type.
+- **The lane's own limits** (runtime/fkwu-uni.c:12177-12246): at most 6
+  slots for parameters and lets; an if whose branches both lead on into
+  further ifs is declined; frames carry ints, floats, strings, lists and defn
+  values only, so a loop over a record receiver walks.
+- **The lowering's own bound.** More than 4 ifs in one loop keeps the mode,
+  because each if duplicates the rest of the pass into both branches.
+
+The first two readings above are witnessed by run; the lane limits are read
+from fkwu's code; the rest are the lowering's own conditions, read in its
+code.
+
+## Frontier word for the addendum
+
+**modefree** (0 hits in the tree before this addendum).
+*Question:* when does a loop need no control mode at all?
+*Answer:* when nothing inside it can carry a transfer past its own edge. Its
+break is then its exit and its continue its self call, so the loop is plain
+data flow the lane can crystallize.
 
 ## Frontier word
 
