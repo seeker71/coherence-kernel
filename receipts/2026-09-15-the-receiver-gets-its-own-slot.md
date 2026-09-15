@@ -154,6 +154,20 @@ verdict as before the class work; freshness 31. From `form/`, `./validate.sh` re
 four-way ... 1 ok, 0 divergent" on all 34 rows that load bml.fk, and the drift door reads
 `drift-gates pass=16383 full=16383 refused=0`.
 
+## The reader says where it stopped
+
+The reader stopped at a statement it could not read and kept what came before, so a run answered
+the part before the stop and said nothing. Now a stream the reader stops short in ends with an
+unread mark carrying its first unread tokens (`bml-ast-unread`). Lowering that mark voices them
+through the compiler organ (a `reading` of `unread:` and the tokens) and answers `source/unread`;
+a linked unit that carries one gives the link that reason, so an import cut short is named instead
+of reading the names after the cut as unbound. A unit the home walk only asks whether it declares
+a package or defines a name is read, not run, and stays quiet.
+
+Witnessed on fkwu: `c.v.w = 4;` in the running unit answers `BML-HATI-UNSUPPORTED source/unread`
+and voices `unread:c . v . w = 4 ;`; an imported unit cut short answers
+`source/unread,call/unbound`; sources read whole answer as before (2, 4, 3).
+
 ## Still open, with the reason
 
 - A call's result has no static type (method nodes carry no return type), so overloads over call
@@ -164,9 +178,7 @@ four-way ... 1 ok, 0 divergent" on all 34 rows that load bml.fk, and the drift d
 - A type reached through an import lowers its member bodies in the importing unit's scope. The
   interface this order names has no bodies; a class from another unit whose bodies call that
   unit's own names would read them unbound.
-- The reader stops at a statement it cannot read and keeps what came before, without a reason.
-  That is how `c.v = 4;` answered the record itself. An unreadable statement should voice through
-  the compiler organ instead of vanishing; that is the next work, then `a.b.c = e;`.
+- `a.b.c = e;` is not read yet.
 - The witness probes stay outside the tree and ran on fkwu only.
 
 ## For the lead

@@ -5588,8 +5588,40 @@
     (defn bml-source-exec-parse-nodes (result) (nth result 2))
     (defn bml-source-exec-parse-rest (result) (nth result 3))
     (defn bml-source-exec-parse-rules (result) (nth result 4))
+    ;; A stream read to its end is one block. Where the reader stopped
+    ;; short, the block keeps what it read and an unread mark closes it,
+    ;; carrying the first unread tokens: a run of the unit answers
+    ;; source/unread and voices them, instead of a program cut short
+    ;; without a word. A unit only asked whether it declares a package or
+    ;; defines a name is read, not run, and stays quiet.
     (defn bml-source-exec-parse-node (result)
-        (bml-ast-block (bml-source-exec-parse-nodes result)))
+        (if (bml-source-exec-parse-ok? result)
+            (bml-ast-block (bml-source-exec-parse-nodes result))
+            (bml-ast-block
+                (append
+                    (bml-source-exec-parse-nodes result)
+                    (list
+                        (bml-ast-unread
+                            (bml-source-unread-text (bml-source-exec-parse-rest result) 8)))))))
+
+    ;; the first tokens where the reader stopped, for the reading
+    (defn bml-source-unread-text (objects budget)
+        (if (if (nil? objects) true (le budget 0))
+            ""
+            (do
+                (let rest (bml-source-unread-text (tail objects) (sub budget 1)))
+                (str_concat
+                    (value_str (bmf-object-value (head objects)))
+                    (if (str_eq rest "") "" (str_concat " " rest))))))
+
+    (defn bml-unread-reading (text)
+        (bch-reading
+            "reading"
+            "every statement read"
+            (str_concat "unread:" text)
+            (list (oh-need "source" (json-node-string text)))
+            (list "revise" "request-evidence")
+            "reader"))
 
     (defn bml-source-parse-executable-stream-loop (objects nodes rules)
         (if (nil? objects)
@@ -9987,7 +10019,20 @@
             (if (gt (len (bml-scope-nodes-of (bml-scope-unit-all-nodes unit) BML-AST-PACKAGE)) 1)
                 (list "package/duplicate")
                 (empty))
-            (bml-scope-import-reasons all-units (bml-scope-unit-imports unit))))
+            (append
+                (if (bml-scope-any-unread? (bml-scope-unit-all-nodes unit))
+                    (list "source/unread")
+                    (empty))
+                (bml-scope-import-reasons all-units (bml-scope-unit-imports unit)))))
+
+    ;; a linked unit the reader stopped short in: what came after the stop
+    ;; is not in it, so the run names that instead of reading names unbound
+    (defn bml-scope-any-unread? (nodes)
+        (if (nil? nodes)
+            false
+            (if (bml-call-named? (head nodes) "__hati_unread")
+                true
+                (bml-scope-any-unread? (tail nodes)))))
 
     (defn bml-scope-link-reasons-loop (all-units linked)
         (if (nil? linked)
@@ -11763,11 +11808,16 @@
     (defn bml-ast-unparsed-body (name)
         (bml-hati-marker "__hati_unparsed" (list (bml-ast-string name))))
 
+    ;; where the executable reader stopped: the first unread tokens
+    (defn bml-ast-unread (text)
+        (bml-hati-marker "__hati_unread" (list (bml-ast-string text))))
+
     (defn bml-hati-class-call-names ()
         (list "__hati_self" "__hati_super" "__hati_ctor" "__hati_param"
               "__hati_field" "__hati_member" "__hati_new" "__hati_invoke"
               "__hati_self_ctor" "__hati_super_ctor" "__hati_abstract"
-              "__hati_unparsed" "__hati_field_get" "__hati_field_set"))
+              "__hati_unparsed" "__hati_field_get" "__hati_field_set"
+              "__hati_unread"))
 
     (defn bml-hati-class-call? (node)
         (if (node_eq (node_category node) BML-AST-CALL)
@@ -13050,7 +13100,13 @@
             (bml-hati-lower-refusal "name/constructor" pool)
         (if (str_eq name "__hati_abstract")
             (bml-hati-lower-refusal "method/abstract" pool)
-            (bml-hati-lower-refusal "method/body-unparsed" pool)))))))))))))))
+            (bml-hati-lower-refusal
+                (if (str_eq name "__hati_unread")
+                    (bml-voice-then
+                        (bml-unread-reading (bml-hati-marker-str node 0))
+                        "source/unread")
+                    "method/body-unparsed")
+                pool)))))))))))))))
 
     (defn bml-hati-lower-class-call-in (node pool env)
         (do
