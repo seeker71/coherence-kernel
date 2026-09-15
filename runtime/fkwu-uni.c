@@ -1314,7 +1314,8 @@ static long long *fk_nkind;
 static long long *fk_ncat;
 static long long *fk_nkids;
 static long long *fk_nval;
-static long long (*fk_nid)[4];
+#include "fkwu-node-word.h"
+static fk_node_id *fk_nid;
 static long long fk_np_private;
 static volatile long long *fk_np_p = &fk_np_private;
 #define fk_np (*fk_np_p)
@@ -1361,10 +1362,10 @@ static long long fk_neq(long long a, long long b) {
         return 0;
     }
     if (fk_nkind[ia] == 1) {
-        if (fk_nid[ia][2] != fk_nid[ib][2]) {
+        if (fk_nid_get(fk_nid[ia], 2) != fk_nid_get(fk_nid[ib], 2)) {
             return 0;
         }
-        if (fk_nid[ia][2] == 7 || fk_nid[ia][2] == 6) {
+        if (fk_nid_get(fk_nid[ia], 2) == 7 || fk_nid_get(fk_nid[ia], 2) == 6) {
             double fna = fk_num(fk_nval[ia]);
             double fnb = fk_num(fk_nval[ib]);
             return ((fna == fnb) || (fna != fna && fnb != fnb)) ? 1 : 0;
@@ -1372,8 +1373,7 @@ static long long fk_neq(long long a, long long b) {
         return fk_nval[ia] == fk_nval[ib] || (fk_is_str(fk_nval[ia]) && fk_is_str(fk_nval[ib]) && fk_str_bytes_eq(fk_nval[ia], fk_nval[ib]));
     }
     if (fk_nkind[ia] == 3) {
-        return fk_nid[ia][0] == fk_nid[ib][0] && fk_nid[ia][1] == fk_nid[ib][1] &&
-               fk_nid[ia][2] == fk_nid[ib][2] && fk_nid[ia][3] == fk_nid[ib][3];
+        return fk_nid[ia] == fk_nid[ib];
     }
     if (fk_veq(fk_ncat[ia], fk_ncat[ib]) == 0) {
         return 0;
@@ -1468,13 +1468,13 @@ static long long fk_deep_hash_node(long long idx) {
     }
     unsigned long long h = fk_mix64(7, (unsigned long long)fk_nkind[idx]);
     if (fk_nkind[idx] == 1) {
-        h = fk_mix64(h, (unsigned long long)fk_nid[idx][2]);
+        h = fk_mix64(h, (unsigned long long)fk_nid_get(fk_nid[idx], 2));
         h = fk_mix64(h, (unsigned long long)fk_nval[idx]);
     } else if (fk_nkind[idx] == 3) {
-        h = fk_mix64(h, (unsigned long long)fk_nid[idx][0]);
-        h = fk_mix64(h, (unsigned long long)fk_nid[idx][1]);
-        h = fk_mix64(h, (unsigned long long)fk_nid[idx][2]);
-        h = fk_mix64(h, (unsigned long long)fk_nid[idx][3]);
+        h = fk_mix64(h, (unsigned long long)fk_nid_get(fk_nid[idx], 0));
+        h = fk_mix64(h, (unsigned long long)fk_nid_get(fk_nid[idx], 1));
+        h = fk_mix64(h, (unsigned long long)fk_nid_get(fk_nid[idx], 2));
+        h = fk_mix64(h, (unsigned long long)fk_nid_get(fk_nid[idx], 3));
     } else {
         h = fk_mix64(h, (unsigned long long)fk_deep_hash(fk_ncat[idx]));
         h = fk_mix64(h, (unsigned long long)fk_deep_hash(fk_nkids[idx]));
@@ -1940,8 +1940,7 @@ static long long fk_bp_ideq(long long a, long long b) {
         long long ib = fk_nidx(b);
         if (ia >= 1 && ia <= fk_np && ib >= 1 && ib <= fk_np &&
             fk_nkind[ia] == 3 && fk_nkind[ib] == 3) {
-            return (fk_nid[ia][0] == fk_nid[ib][0] && fk_nid[ia][1] == fk_nid[ib][1] &&
-                    fk_nid[ia][2] == fk_nid[ib][2] && fk_nid[ia][3] == fk_nid[ib][3]) ? 1 : 0;
+            return fk_nid[ia] == fk_nid[ib] ? 1 : 0;
         }
     }
     return a == b ? 1 : 0;
@@ -5096,7 +5095,7 @@ static void fk_nodes_grow(void) {
     fk_ncat = (long long *)fk_store_grow('c', (void **)&fk_ncat, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
     fk_nkids = (long long *)fk_store_grow('i', (void **)&fk_nkids, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
     fk_nval = (long long *)fk_store_grow('v', (void **)&fk_nval, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
-    fk_nid = (long long (*)[4])fk_store_grow('n', (void **)&fk_nid, oc * 32, nc * 32, FK_STORE_NODE_CELLS * 32, 1);
+    fk_nid = (fk_node_id *)fk_store_grow('n', (void **)&fk_nid, oc * sizeof(*fk_nid), nc * sizeof(*fk_nid), FK_STORE_NODE_CELLS * sizeof(*fk_nid), 1);
     fk_nhash_memo = (long long *)fk_nodes_grow_col(fk_nhash_memo, oc, nc, 8);
     fk_nsfile = (long long *)fk_store_grow('f', (void **)&fk_nsfile, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
     fk_nsline = (long long *)fk_store_grow('l', (void **)&fk_nsline, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
@@ -5163,7 +5162,7 @@ static void fk_nodes_init(void) {
     fk_ncat = fk_nkind == 0 ? 0 : (long long *)fk_store_take('c', FK_STORE_NODE_CELLS * 8);
     fk_nkids = fk_ncat == 0 ? 0 : (long long *)fk_store_take('i', FK_STORE_NODE_CELLS * 8);
     fk_nval = fk_nkids == 0 ? 0 : (long long *)fk_store_take('v', FK_STORE_NODE_CELLS * 8);
-    fk_nid = fk_nval == 0 ? 0 : (long long (*)[4])fk_store_take('n', FK_STORE_NODE_CELLS * 32);
+    fk_nid = fk_nval == 0 ? 0 : (fk_node_id *)fk_store_take('n', FK_STORE_NODE_CELLS * sizeof(*fk_nid));
     fk_nsfile = fk_nid == 0 ? 0 : (long long *)fk_store_take('f', FK_STORE_NODE_CELLS * 8);
     fk_nsline = fk_nsfile == 0 ? 0 : (long long *)fk_store_take('l', FK_STORE_NODE_CELLS * 8);
     fk_nscol = fk_nsline == 0 ? 0 : (long long *)fk_store_take('o', FK_STORE_NODE_CELLS * 8);
@@ -5176,7 +5175,7 @@ static void fk_nodes_init(void) {
         fk_ncat = (long long *)calloc(FK_NODE_CAP_INIT, 8);
         fk_nkids = (long long *)calloc(FK_NODE_CAP_INIT, 8);
         fk_nval = (long long *)calloc(FK_NODE_CAP_INIT, 8);
-        fk_nid = (long long (*)[4])calloc(FK_NODE_CAP_INIT, 32);
+        fk_nid = (fk_node_id *)calloc(FK_NODE_CAP_INIT, sizeof(*fk_nid));
         fk_nsfile = (long long *)calloc(FK_NODE_CAP_INIT, 8);
         fk_nsline = (long long *)calloc(FK_NODE_CAP_INIT, 8);
         fk_nscol = (long long *)calloc(FK_NODE_CAP_INIT, 8);
@@ -12995,8 +12994,8 @@ static long long fk_walk(long long i, long long fp) {
                must return the BOOLEAN, not the sentinel. nid[3] holds 1/0;
                return it tagged (v<<1) to equal the true/false literals
                (which lower to fk_smklit(1)/fk_smklit(0) -> 2/0). */
-            if (fk_nid[ni49][2] == 3) {
-                return fk_nid[ni49][3] << 1;
+            if (fk_nid_get(fk_nid[ni49], 2) == 3) {
+                return fk_nid_get(fk_nid[ni49], 3) << 1;
             }
             return fk_nval[ni49];
         }
@@ -13063,7 +13062,7 @@ static long long fk_walk(long long i, long long fp) {
         if (ni93 < 1 || ni93 > fk_np) {
             return 0;
         }
-        return fk_nid[ni93][2] << 1;
+        return fk_nid_get(fk_nid[ni93], 2) << 1;
     }
     if (t == 94) {
         long long nv94 = fk_walk(fk_node[i][1], fp);
@@ -13074,7 +13073,7 @@ static long long fk_walk(long long i, long long fp) {
         if (ni94 < 1 || ni94 > fk_np) {
             return 0;
         }
-        return fk_nid[ni94][3] << 1;
+        return fk_nid_get(fk_nid[ni94], 3) << 1;
     }
     if (t == 95) {
         long long nv95 = fk_walk(fk_node[i][1], fp);
@@ -13085,7 +13084,7 @@ static long long fk_walk(long long i, long long fp) {
         if (ni95 < 1 || ni95 > fk_np) {
             return 0;
         }
-        return fk_nid[ni95][0] << 1;
+        return fk_nid_get(fk_nid[ni95], 0) << 1;
     }
     if (t == 96) {
         long long nv96 = fk_walk(fk_node[i][1], fp);
@@ -13096,7 +13095,7 @@ static long long fk_walk(long long i, long long fp) {
         if (ni96 < 1 || ni96 > fk_np) {
             return 0;
         }
-        return fk_nid[ni96][1] << 1;
+        return fk_nid_get(fk_nid[ni96], 1) << 1;
     }
     if (t == 70) {
         long long a70 = fk_walk(fk_node[i][1], fp);
@@ -13181,10 +13180,7 @@ static long long fk_walk(long long i, long long fp) {
             long long ib102 = fk_nidx(be);
             if (ia102 >= 1 && ia102 <= fk_np && ib102 >= 1 && ib102 <= fk_np &&
                 fk_nkind[ia102] == 3 && fk_nkind[ib102] == 3) {
-                return (fk_nid[ia102][0] == fk_nid[ib102][0] &&
-                        fk_nid[ia102][1] == fk_nid[ib102][1] &&
-                        fk_nid[ia102][2] == fk_nid[ib102][2] &&
-                        fk_nid[ia102][3] == fk_nid[ib102][3]) ? 2 : 0;
+                return fk_nid[ia102] == fk_nid[ib102] ? 2 : 0;
             }
         }
         /* Two cons pairs (odd words above nil's 1) meet by their items, as
@@ -13264,13 +13260,13 @@ static long long fk_walk(long long i, long long fp) {
 static int fk_gift_live(long long gh) {
     return gh >= 0 && gh < fk_gift_count && fk_gift_base[gh] != 0;
 }
-/* ---- the field store: /fg-field-<letter>, host-wide, never unlinked by a kernel ----
+/* ---- the field store: /fg-field2-<letter>, host-wide, never unlinked by a kernel ----
  * header h (words after the 16-byte gift header): 0 magic 1 version 2 nodes 3 pairs 4 strings 5 string bytes 6 floats
  * columns: k kind c cat i kids v val n nid f sfile l sline o scol a sattr m hash-memo x intern hash;
  * P Q shared pairs; s O L X shared node-strings (bytes, offsets, lengths, hash); F Y shared floats (values, hash).
  * A kernel that cannot open the field keeps private tables and says so on its live page (word 22). */
 #define FK_FIELD_MAGIC 0x4649454C44LL
-#define FK_FIELD_VERSION 1
+#define FK_FIELD_VERSION 2
 #define FK_FIELD_NODES (1LL << 26)
 #define FK_FIELD_PAIRS (1LL << 27)
 #define FK_FIELD_STRB (1LL << 31)
@@ -13283,7 +13279,7 @@ static const char fk_field_letters[] = "hkcivnfloamxPQsOLXFY";
 static long long *fk_field_itab;
 static long long *fk_fstab;
 static long long *fk_fftab;
-static void fk_field_name(char letter, char *out) { const char *p = "/fg-field-"; long long k = 0; while (p[k]) { out[k] = p[k]; k = k + 1; } out[k] = letter; out[k + 1] = 0; }
+static void fk_field_name(char letter, char *out) { const char *p = "/fg-field2-"; long long k = 0; while (p[k]) { out[k] = p[k]; k = k + 1; } out[k] = letter; out[k + 1] = 0; }
 static void *fk_field_take(char letter, long long bytes) {
 #if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
     char nm[32];
@@ -13319,7 +13315,7 @@ static int fk_field_open(void) {
     if (__atomic_compare_exchange_n(&w[0], &zero, FK_FIELD_MAGIC, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) { __atomic_store_n(&w[1], FK_FIELD_VERSION, __ATOMIC_RELEASE); }
     else if (w[0] != FK_FIELD_MAGIC || w[1] != FK_FIELD_VERSION) { return 0; }
     void *k = fk_field_take('k', FK_FIELD_NODES * 8), *c = fk_field_take('c', FK_FIELD_NODES * 8), *i = fk_field_take('i', FK_FIELD_NODES * 8), *v = fk_field_take('v', FK_FIELD_NODES * 8);
-    void *n = fk_field_take('n', FK_FIELD_NODES * 32), *f = fk_field_take('f', FK_FIELD_NODES * 8), *l = fk_field_take('l', FK_FIELD_NODES * 8), *o = fk_field_take('o', FK_FIELD_NODES * 8), *a = fk_field_take('a', FK_FIELD_NODES * 8), *m = fk_field_take('m', FK_FIELD_NODES * 8);
+    void *n = fk_field_take('n', FK_FIELD_NODES * sizeof(*fk_nid)), *f = fk_field_take('f', FK_FIELD_NODES * 8), *l = fk_field_take('l', FK_FIELD_NODES * 8), *o = fk_field_take('o', FK_FIELD_NODES * 8), *a = fk_field_take('a', FK_FIELD_NODES * 8), *m = fk_field_take('m', FK_FIELD_NODES * 8);
     void *x = fk_field_take('x', FK_FIELD_HASH * 8), *P = fk_field_take('P', FK_FIELD_PAIRS * 8), *Q = fk_field_take('Q', FK_FIELD_PAIRS * 8);
     void *s = fk_field_take('s', FK_FIELD_STRB), *O = fk_field_take('O', FK_FIELD_STRS * 8), *L = fk_field_take('L', FK_FIELD_STRS * 8), *X = fk_field_take('X', FK_FIELD_SHASH * 8);
     void *F = fk_field_take('F', FK_FIELD_FLOATS * 8), *Y = fk_field_take('Y', FK_FIELD_FHASH * 8);
@@ -13446,19 +13442,19 @@ static long long fk_field_share_value(long long v) {
     return ((FK_PAIR_BASE + base) << 1) | 1;
 }
 static void fk_nodes_grow(void);
-static long long fk_field_node_matches(long long ix, long long kind, long long sub, long long a, long long b, long long *nid4) {
+static long long fk_field_node_matches(long long ix, long long kind, long long sub, long long a, long long b, fk_node_id id) {
     if (fk_nkind[ix] != kind) { return 0; }
     if (kind == 1) {
-        if (fk_nid[ix][2] != sub) { return 0; }
+        if (fk_nid_get(fk_nid[ix], 2) != sub) { return 0; }
         if (sub == 2) { return fk_str_bytes_eq(fk_nval[ix], a); }
         if (sub == 6 || sub == 7) { double x = fk_num(fk_nval[ix]), y = fk_num(a); return (x == y || (x != x && y != y)) ? 1 : 0; }
         return fk_nval[ix] == a;
     }
     if (kind == 2) { return fk_veq(fk_ncat[ix], a) != 0 && fk_veq(fk_nkids[ix], b) != 0; }
-    if (kind == 3) { return fk_nid[ix][0] == nid4[0] && fk_nid[ix][1] == nid4[1] && fk_nid[ix][2] == nid4[2] && fk_nid[ix][3] == nid4[3]; }
+    if (kind == 3) { return fk_nid[ix] == id; }
     return 0;
 }
-static long long fk_field_fill(long long kind, long long sub, long long a, long long b, long long *nid4, long long h) {
+static long long fk_field_fill(long long kind, long long sub, long long a, long long b, fk_node_id id, long long h) {
     long long idx = fk_field_claim(2, 1) + 1;
     fk_mint_total = fk_mint_total + 1; if (fk_fn_mint != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_mint[fk_cur_fn] = fk_fn_mint[fk_cur_fn] + 1; } /* a fresh field cell: this kernel grew the permanent arena by one */
     if (idx >= FK_FIELD_NODES) { fk_die("fkwu: the field's node columns are full (2^26 cells): run observe/field-reset-run.fk with no kernel alive"); }
@@ -13467,36 +13463,35 @@ static long long fk_field_fill(long long kind, long long sub, long long a, long 
     fk_nhash_memo[idx] = h;
     if (kind == 1) {
         fk_nval[idx] = fk_field_share_value(a); fk_nkids[idx] = 1; fk_ncat[idx] = 0;
-        fk_nid[idx][0] = 1; fk_nid[idx][1] = 1; fk_nid[idx][2] = sub;
         /* a bool's inst is its truth (1/0), read off the interning sentinel -- the sentinel itself is
          * never zero, so `a != 0` named every bool true (measured: node_inst of false answered 1);
          * a float32's inst is its IEEE bits (b), so a hand-built type-6 leaf and an interned one agree */
-        fk_nid[idx][3] = sub == 1 ? (a >> 1) : (sub == 3 ? ((a == (0 - 9223372036854775807LL)) ? 1 : 0) : (sub == 6 ? b : idx));
+        fk_nid[idx] = fk_nid_make(1, 1, sub, sub == 1 ? (a >> 1) : (sub == 3 ? ((a == (0 - 9223372036854775807LL)) ? 1 : 0) : (sub == 6 ? b : idx)));
     } else if (kind == 2) {
         fk_ncat[idx] = fk_field_share_value(a); fk_nkids[idx] = fk_field_share_value(b); fk_nval[idx] = 0;
-        fk_nid[idx][0] = 0; fk_nid[idx][1] = 0; fk_nid[idx][2] = 0; fk_nid[idx][3] = idx;
-        if (a < 0) { long long ci = fk_nidx(a); if (ci >= 1 && ci < idx) { fk_nid[idx][1] = fk_nid[ci][1]; fk_nid[idx][2] = fk_nid[ci][2]; } }
+        long long ci = fk_nidx(a);
+        fk_nid[idx] = fk_nid_make(0, ci >= 1 && ci < idx ? fk_nid_get(fk_nid[ci], 1) : 0, ci >= 1 && ci < idx ? fk_nid_get(fk_nid[ci], 2) : 0, idx);
     } else {
         fk_ncat[idx] = 0; fk_nkids[idx] = 1; fk_nval[idx] = 0;
-        fk_nid[idx][0] = nid4[0]; fk_nid[idx][1] = nid4[1]; fk_nid[idx][2] = nid4[2]; fk_nid[idx][3] = nid4[3];
+        fk_nid[idx] = id;
     }
     return idx;
 }
 /* one intern door for every kind: find the cell in the shared hash or claim a slot, fill, publish */
-static long long fk_field_intern_node(long long kind, long long sub, long long a, long long b, long long *nid4, long long h) {
+static long long fk_field_intern_node(long long kind, long long sub, long long a, long long b, fk_node_id id, long long h) {
     long long mask = FK_FIELD_HASH - 1;
     long long slot = h & mask;
     long long probes = 0;
     while (probes < FK_FIELD_HASH) {
         long long cur = __atomic_load_n(&fk_field_itab[slot], __ATOMIC_ACQUIRE);
         if (cur > 0) {
-            if (fk_field_node_matches(cur, kind, sub, a, b, nid4)) { return fk_nbox(cur); }
+            if (fk_field_node_matches(cur, kind, sub, a, b, id)) { return fk_nbox(cur); }
             slot = (slot + 1) & mask; probes = probes + 1; continue;
         }
         if (cur == 0) {
             long long z = 0;
             if (__atomic_compare_exchange_n(&fk_field_itab[slot], &z, -1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                long long idx = fk_field_fill(kind, sub, a, b, nid4, h);
+                long long idx = fk_field_fill(kind, sub, a, b, id, h);
                 __atomic_store_n(&fk_field_itab[slot], idx, __ATOMIC_RELEASE);
                 return fk_nbox(idx);
             }
@@ -13518,7 +13513,7 @@ static long long fk_field_find_float(double d, long long h) {
     while (probes < FK_FIELD_HASH) {
         long long cur = __atomic_load_n(&fk_field_itab[slot], __ATOMIC_ACQUIRE);
         if (cur <= 0) { return 0; }
-        if (fk_nkind[cur] == 1 && fk_nid[cur][2] == 7) {
+        if (fk_nkind[cur] == 1 && fk_nid_get(fk_nid[cur], 2) == 7) {
             double x = fk_num(fk_nval[cur]);
             if (x == d || (x != x && d != d)) { return cur; }
         }
@@ -13659,7 +13654,7 @@ static void fk_store_go_private(void) {
     long long c = fk_node_cap;
     if (c > 0) {
         fk_nkind = fk_store_copy_out(fk_nkind, c * 8); fk_ncat = fk_store_copy_out(fk_ncat, c * 8); fk_nkids = fk_store_copy_out(fk_nkids, c * 8); fk_nval = fk_store_copy_out(fk_nval, c * 8);
-        fk_nid = (long long (*)[4])fk_store_copy_out(fk_nid, c * 32); fk_nsfile = fk_store_copy_out(fk_nsfile, c * 8); fk_nsline = fk_store_copy_out(fk_nsline, c * 8); fk_nscol = fk_store_copy_out(fk_nscol, c * 8); fk_nsattr = fk_store_copy_out(fk_nsattr, c * 8);
+        fk_nid = (fk_node_id *)fk_store_copy_out(fk_nid, c * sizeof(*fk_nid)); fk_nsfile = fk_store_copy_out(fk_nsfile, c * 8); fk_nsline = fk_store_copy_out(fk_nsline, c * 8); fk_nscol = fk_store_copy_out(fk_nscol, c * 8); fk_nsattr = fk_store_copy_out(fk_nsattr, c * 8);
     }
     if (fk_cap > 0) { fk_hh = fk_store_copy_out(fk_hh, fk_cap * 8); fk_ht = fk_store_copy_out(fk_ht, fk_cap * 8); fk_heap_alt_h = 0; fk_heap_alt_t = 0; }
     if (fk_scap_b > 0) { fk_sb = fk_store_copy_out(fk_sb, fk_scap_b); fk_so = fk_store_copy_out(fk_so, fk_scap_s * 8); fk_sl = fk_store_copy_out(fk_sl, fk_scap_s * 8); }
@@ -13794,7 +13789,7 @@ static long long fk_intern_int_node(long long iv43) {
         slot43 = h43 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot43]) {
             long long ix43 = fk_intern_tab[slot43];
-            if (fk_nkind[ix43] == 1 && fk_nid[ix43][2] == 1 && fk_nval[ix43] == iv43) {
+            if (fk_nkind[ix43] == 1 && fk_nid_get(fk_nid[ix43], 2) == 1 && fk_nval[ix43] == iv43) {
                 return fk_nbox(ix43);
             }
             slot43 = (slot43 + 1) & (fk_intern_hash_cap - 1);
@@ -13804,10 +13799,7 @@ static long long fk_intern_int_node(long long iv43) {
         fk_nval[fk_np] = iv43;
         fk_nkids[fk_np] = 1;
         fk_ncat[fk_np] = 0;
-        fk_nid[fk_np][0] = 1;
-        fk_nid[fk_np][1] = 1;
-        fk_nid[fk_np][2] = 1;
-        fk_nid[fk_np][3] = iv43 >> 1;
+        fk_nid[fk_np] = fk_nid_make(1, 1, 1, iv43 >> 1);
         fk_intern_tab[slot43] = fk_np;
         fk_nhash_memo[fk_np] = h43;
         return fk_nbox(fk_np);
@@ -13823,7 +13815,7 @@ static long long fk_intern_str_node(long long sv46) {
         slot46 = h46 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot46]) {
             long long ix46 = fk_intern_tab[slot46];
-            if (fk_nkind[ix46] == 1 && fk_nid[ix46][2] == 2 && fk_nval[ix46] == sv46) {
+            if (fk_nkind[ix46] == 1 && fk_nid_get(fk_nid[ix46], 2) == 2 && fk_nval[ix46] == sv46) {
                 return fk_nbox(ix46);
             }
             slot46 = (slot46 + 1) & (fk_intern_hash_cap - 1);
@@ -13836,10 +13828,7 @@ static long long fk_intern_str_node(long long sv46) {
         fk_nval[fk_np] = sv46;
         fk_nkids[fk_np] = 1;
         fk_ncat[fk_np] = 0;
-        fk_nid[fk_np][0] = 1;
-        fk_nid[fk_np][1] = 1;
-        fk_nid[fk_np][2] = 2;
-        fk_nid[fk_np][3] = sa46;
+        fk_nid[fk_np] = fk_nid_make(1, 1, 2, sa46);
         fk_intern_tab[slot46] = fk_np;
         fk_nhash_memo[fk_np] = h46;
         return fk_nbox(fk_np);
@@ -13855,7 +13844,7 @@ static long long fk_intern_bool_node(long long bv112) {
         slot112 = h112 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot112]) {
             long long ix112 = fk_intern_tab[slot112];
-            if (fk_nkind[ix112] == 1 && fk_nid[ix112][2] == 3 && fk_nval[ix112] == se112) {
+            if (fk_nkind[ix112] == 1 && fk_nid_get(fk_nid[ix112], 2) == 3 && fk_nval[ix112] == se112) {
                 return fk_nbox(ix112);
             }
             slot112 = (slot112 + 1) & (fk_intern_hash_cap - 1);
@@ -13865,12 +13854,9 @@ static long long fk_intern_bool_node(long long bv112) {
         fk_nval[fk_np] = se112;
         fk_nkids[fk_np] = 1;
         fk_ncat[fk_np] = 0;
-        fk_nid[fk_np][0] = 1;
-        fk_nid[fk_np][1] = 1;
-        fk_nid[fk_np][2] = 3;
+        fk_nid[fk_np] = fk_nid_make(1, 1, 3, (bv112 != 0) ? 1 : 0);
         fk_intern_tab[slot112] = fk_np;
         fk_nhash_memo[fk_np] = h112;
-        fk_nid[fk_np][3] = (bv112 != 0) ? 1 : 0;
         return fk_nbox(fk_np);
 }
 static long long fk_intern_float_node(double fd113) {
@@ -13897,7 +13883,7 @@ static long long fk_intern_float_node(double fd113) {
         long long slot113 = h113 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot113]) {
             long long ix113 = fk_intern_tab[slot113];
-            if (fk_nkind[ix113] == 1 && fk_nid[ix113][2] == 7) {
+            if (fk_nkind[ix113] == 1 && fk_nid_get(fk_nid[ix113], 2) == 7) {
                 double dv113 = fk_num(fk_nval[ix113]);
                 unsigned long long db113;
                 memcpy(&db113, &dv113, 8);
@@ -13913,10 +13899,7 @@ static long long fk_intern_float_node(double fd113) {
         fk_nval[fk_np] = fb113;
         fk_nkids[fk_np] = 1;
         fk_ncat[fk_np] = 0;
-        fk_nid[fk_np][0] = 1;
-        fk_nid[fk_np][1] = 1;
-        fk_nid[fk_np][2] = 7;
-        fk_nid[fk_np][3] = fk_fidx(fb113);
+        fk_nid[fk_np] = fk_nid_make(1, 1, 7, fk_fidx(fb113));
         fk_intern_tab[slot113] = fk_np;
         fk_nhash_memo[fk_np] = h113;
         return fk_nbox(fk_np);
@@ -13950,31 +13933,22 @@ static long long fk_intern_composite(long long cat47, long long kids47) {
         fk_nval[fk_np] = 0;
         fk_intern_tab[slot47] = fk_np;
         fk_nhash_memo[fk_np] = h47;
-        fk_nid[fk_np][0] = 0;
-        fk_nid[fk_np][1] = 0;
-        fk_nid[fk_np][2] = 0;
-        fk_nid[fk_np][3] = fk_np;
-        if (cat47 < 0) {
-            long long ci47 = fk_nidx(cat47);
-            if (ci47 >= 1 && ci47 <= fk_np) {
-                fk_nid[fk_np][1] = fk_nid[ci47][1];
-                fk_nid[fk_np][2] = fk_nid[ci47][2];
-            }
-        }
+        long long ci47 = fk_nidx(cat47);
+        fk_nid[fk_np] = fk_nid_make(0, ci47 >= 1 && ci47 < fk_np ? fk_nid_get(fk_nid[ci47], 1) : 0, ci47 >= 1 && ci47 < fk_np ? fk_nid_get(fk_nid[ci47], 2) : 0, fk_np);
         return fk_nbox(fk_np);
 }
 static long long fk_make_nodeid(long long p91, long long l91, long long ty91, long long in91) {
-        /* a NodeID is identity by content (eq compares the four coordinates), so the same coordinates answer the same
-         * cell. Minting afresh on every call grew the host field by one NodeID thousands of times a second. */
+        /* Validate and generate the native identity before claiming storage. */
+        fk_node_id id91 = fk_nid_make(p91, l91, ty91, in91);
         long long h91 = fk_nodeid_key(p91, l91, ty91, in91);
-        if (fk_field_on) { long long nid91[4]; nid91[0] = p91; nid91[1] = l91; nid91[2] = ty91; nid91[3] = in91; return fk_field_intern_node(3, 0, 0, 0, nid91, h91); }
+        if (fk_field_on) { return fk_field_intern_node(3, 0, 0, 0, id91, h91); }
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
         }
         long long slot91 = h91 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot91]) {
             long long ix91 = fk_intern_tab[slot91];
-            if (fk_nkind[ix91] == 3 && fk_nid[ix91][0] == p91 && fk_nid[ix91][1] == l91 && fk_nid[ix91][2] == ty91 && fk_nid[ix91][3] == in91) {
+            if (fk_nkind[ix91] == 3 && fk_nid[ix91] == id91) {
                 return fk_nbox(ix91);
             }
             slot91 = (slot91 + 1) & (fk_intern_hash_cap - 1);
@@ -13984,10 +13958,7 @@ static long long fk_make_nodeid(long long p91, long long l91, long long ty91, lo
         fk_ncat[fk_np] = 0;
         fk_nkids[fk_np] = 1;
         fk_nval[fk_np] = 0;
-        fk_nid[fk_np][0] = p91;
-        fk_nid[fk_np][1] = l91;
-        fk_nid[fk_np][2] = ty91;
-        fk_nid[fk_np][3] = in91;
+        fk_nid[fk_np] = id91;
         fk_intern_tab[slot91] = fk_np;
         fk_nhash_memo[fk_np] = h91;
         return fk_nbox(fk_np);
@@ -14116,14 +14087,14 @@ static void fk_cross_emit(long long v, long long depth) {
     long long ix = fk_nidx(v);
     if (ix < 1 || ix > fk_np) { fk_cross_refused = 1; fk_sappend("N", 1); return; }
     if (fk_nkind[ix] == 1) {
-        long long sub = fk_nid[ix][2];
+        long long sub = fk_nid_get(fk_nid[ix], 2);
         if (sub == 1) { fk_sappend("i", 1); fk_cross_put_i64(fk_nval[ix] >> 1); return; }
         if (sub == 2) { long long si = fk_stri(fk_nval[ix]); fk_sappend("s", 1); if (si < 0) { fk_cross_put_u32(0); return; } fk_cross_put_u32(FK_SLEN(si)); fk_sappend(FK_SBYTES(si), FK_SLEN(si)); return; }
         if (sub == 3) { fk_sappend("b", 1); fk_sappend(fk_nval[ix] == (0 - 9223372036854775807LL) ? "\1" : "\0", 1); return; }
         if (sub == 7) { double d = fk_num(fk_nval[ix]); fk_sappend("f", 1); fk_sappend((const char *)&d, 8); return; }
         fk_cross_refused = 1; fk_sappend("N", 1); return;
     }
-    if (fk_nkind[ix] == 3) { fk_sappend("D", 1); fk_cross_put_i64(fk_nid[ix][0]); fk_cross_put_i64(fk_nid[ix][1]); fk_cross_put_i64(fk_nid[ix][2]); fk_cross_put_i64(fk_nid[ix][3]); return; }
+    if (fk_nkind[ix] == 3) { fk_sappend("D", 1); fk_cross_put_i64(fk_nid_get(fk_nid[ix], 0)); fk_cross_put_i64(fk_nid_get(fk_nid[ix], 1)); fk_cross_put_i64(fk_nid_get(fk_nid[ix], 2)); fk_cross_put_i64(fk_nid_get(fk_nid[ix], 3)); return; }
     fk_sappend("C", 1);
     fk_cross_emit(fk_ncat[ix], depth + 1);
     fk_cross_emit(fk_nkids[ix], depth + 1);
@@ -14169,7 +14140,7 @@ static long long fk_cross_decode(const char *b, long long n, long long *pos, lon
  * 21 melt generation 22 store shared (1: per-kernel columns, 2: the field) 23 heap generation (0: h/t, 1: H/T)
  * 24 float boxes minted 25 float boxes read 26 native leaf calls */
 #define FK_LIVE_MAGIC 0x464B4C4956LL
-#define FK_LIVE_WORDS 34
+#define FK_LIVE_WORDS 35
 static volatile long long *fk_live_page;
 static long long fk_live_ticks;
 static void fk_live_pid_name(long long pid, char *out) {
@@ -14430,6 +14401,7 @@ static void fk_live_note(int final) {
     }
     w[6] = fk_np; w[7] = fk_sp; w[8] = fk_hp; w[9] = fk_fntop; w[10] = fk_gift_active; w[11] = fk_gift_bytes; w[12] = fk_node_cap; w[13] = fk_cap; w[14] = fk_vsp; w[15] = fk_fp;
     w[18] = fk_live_cpu_us(); w[19] = final ? 0 : 1; w[21] = fk_melt_gen; w[22] = fk_field_on ? 2 : fk_store_shared; w[23] = fk_heap_gen; w[27] = fk_fntop;
+    w[34] = FK_FIELD_VERSION;
     __atomic_store_n(&w[3], w[3] + 1, __ATOMIC_RELEASE);
     fk_prog_note_counts();
 }
@@ -14438,6 +14410,7 @@ static void fk_live_publish(int final) { fk_live_note(final); }
 static long long fk_live_read_words(const char *name, long long *out, long long count) {
     long long gh = fk_gift_open(name, 0, 0);
     if (gh == fk_nothing) { return -1; }
+    if (count < 0 || count > (fk_gift_size[gh >> 1] - 16) / 8) { fk_gift_close(gh >> 1); return -1; }
     volatile long long *w = (volatile long long *)fk_gift_base[gh >> 1] + 2;
     long long k = 0;
     while (k < count) { out[k] = w[k]; k = k + 1; }
@@ -14578,6 +14551,13 @@ static long long fk_cell_enc(long long raw) { if (raw <= -7000000000000000000LL)
 static long long fk_cell_dec(long long v) { long long x = v >> 1; if (x <= 0 - (1LL << 60)) { return (0 - (x + FK_CELL_BIG)) - FK_CELL_BASE; } return x; }
 static long long fk_cell_map_open(long long pid) {
 #if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    char hn[32]; long long header[2];
+    fk_field_name('h', hn);
+    if (fk_live_read_words(hn, header, 2) != 2 || header[0] != FK_FIELD_MAGIC || header[1] != FK_FIELD_VERSION) { return -1; }
+    if (pid > 0) {
+        char pn[32]; long long owner[FK_LIVE_WORDS]; fk_live_pid_name(pid, pn);
+        if (fk_live_read_words(pn, owner, FK_LIVE_WORDS) != FK_LIVE_WORDS || owner[0] != FK_LIVE_MAGIC || owner[22] != 2 || owner[34] != FK_FIELD_VERSION) { return -1; }
+    }
     long long s = 0;
     while (s < FK_CELL_MAPS && fk_cell_maps[s].pid != 0) { s = s + 1; }
     if (s == FK_CELL_MAPS) { return -1; }
@@ -14676,7 +14656,7 @@ static long long fk_cell_field(long long s, long long raw, long long k) {
         if (k == 1) { return fk_cell_col(m, 'c', idx, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
         if (k == 2) { return fk_cell_col(m, 'i', idx, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
         if (k == 3) { return fk_cell_col(m, 'v', idx, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
-        if (k >= 4 && k <= 7) { int c = fk_cell_letter('n'); if (c >= 0 && m->base[c] == 0) { fk_cell_col_open(m, c); } if (c < 0 || m->base[c] == 0 || (idx + 1) * 32 > m->size[c]) { return fk_nothing; } return (*(long long *)((char *)m->base[c] + idx * 32 + (k - 4) * 8)) << 1; }
+        if (k >= 4 && k <= 7) { return fk_cell_col(m, 'n', idx, sizeof(fk_node_id), &w) ? fk_nid_get((fk_node_id)w, (int)(k - 4)) << 1 : fk_nothing; }
         if (k == 8) { return fk_cell_col(m, 'f', idx, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
         if (k == 9) { return fk_cell_col(m, 'l', idx, 8, &w) ? (w << 1) : fk_nothing; }
         if (k == 10) { return fk_cell_col(m, 'o', idx, 8, &w) ? (w << 1) : fk_nothing; }
@@ -14925,7 +14905,7 @@ static long long fk_intern_float32_node(double d) {
     long long slot = h & (fk_intern_hash_cap - 1);
     while (fk_intern_tab[slot]) {
         long long ix = fk_intern_tab[slot];
-        if (fk_nkind[ix] == 1 && fk_nid[ix][2] == 6 && fk_nid[ix][3] == (long long)bits) { return fk_nbox(ix); }
+        if (fk_nkind[ix] == 1 && fk_nid_get(fk_nid[ix], 2) == 6 && fk_nid_get(fk_nid[ix], 3) == (long long)bits) { return fk_nbox(ix); }
         slot = (slot + 1) & (fk_intern_hash_cap - 1);
     }
     long long fb = fk_fbox((double)f);
@@ -14934,10 +14914,7 @@ static long long fk_intern_float32_node(double d) {
     fk_nval[fk_np] = fb;
     fk_nkids[fk_np] = 1;
     fk_ncat[fk_np] = 0;
-    fk_nid[fk_np][0] = 1;
-    fk_nid[fk_np][1] = 1;
-    fk_nid[fk_np][2] = 6;
-    fk_nid[fk_np][3] = (long long)bits;
+    fk_nid[fk_np] = fk_nid_make(1, 1, 6, (long long)bits);
     fk_intern_tab[slot] = fk_np;
     fk_nhash_memo[fk_np] = h;
     return fk_nbox(fk_np);
@@ -14954,17 +14931,17 @@ static long long fk_float_leaf(long long mode, long long x) {
     if (mode != 0 || x >= 0) { return fk_nothing; }
     long long ni = fk_nidx(x);
     if (ni < 1 || ni > fk_np) { return fk_nothing; }
-    long long ty = fk_nid[ni][2];
+    long long ty = fk_nid_get(fk_nid[ni], 2);
     if (ty != 6 && ty != 7) { return fk_nothing; }
     if (fk_nkind[ni] == 1) { return fk_isf(fk_nval[ni]) ? fk_nval[ni] : fk_fbox(fk_num(fk_nval[ni])); }
     if (fk_nkind[ni] != 3) { return fk_nothing; }
     if (ty == 6) {
-        unsigned int bits = (unsigned int)fk_nid[ni][3];
+        unsigned int bits = (unsigned int)fk_nid_get(fk_nid[ni], 3);
         float f;
         memcpy(&f, &bits, 4);
         return fk_fbox((double)f);
     }
-    long long fi = fk_nid[ni][3];
+    long long fi = fk_nid_get(fk_nid[ni], 3);
     if (fi < 0 || fi > fk_fp) { return fk_nothing; }
     return fk_fbox(FK_FV(fi));
 }
@@ -15055,7 +15032,7 @@ static void fk_fb_collect(long long v) {
             while (q >= 1 && FK_POK(q)) { fk_fb_collect(FK_HH(q)); q = FK_HT(q) >> 1; }
             return;
         }
-        if (fk_nkind[ni] == 1 && fk_nid[ni][2] == 2) { fk_fb_str_index(fk_nval[ni], 1); }
+        if (fk_nkind[ni] == 1 && fk_nid_get(fk_nid[ni], 2) == 2) { fk_fb_str_index(fk_nval[ni], 1); }
     }
 }
 static void fk_fb_reserve(long long n) {
@@ -15115,11 +15092,11 @@ static void fk_fb_emit(long long v) {
             return;
         }
         if (fk_nkind[ni] == 1) {
-            long long ty = fk_nid[ni][2];
+            long long ty = fk_nid_get(fk_nid[ni], 2);
             if (ty == 1) { fk_fb_int(fk_nval[ni] >> 1); return; }
             if (ty == 2) { fk_fb_leaf(1, 1, 2, fk_fb_str_index(fk_nval[ni], 0)); return; }
             if (ty == 7) { fk_fb_u32(2); fk_fb_f64le(fk_num(fk_nval[ni])); return; }
-            if (ty == 3) { fk_fb_leaf(1, 1, 3, fk_nid[ni][3]); return; }
+            if (ty == 3) { fk_fb_leaf(1, 1, 3, fk_nid_get(fk_nid[ni], 3)); return; }
             if (ty == 6) {
                 float f = (float)fk_num(fk_nval[ni]);
                 unsigned int bits;
@@ -15127,10 +15104,10 @@ static void fk_fb_emit(long long v) {
                 fk_fb_leaf(1, 1, 6, (long long)bits);
                 return;
             }
-            fk_fb_leaf(fk_nid[ni][0], fk_nid[ni][1], ty, fk_nid[ni][3]);
+            fk_fb_leaf(fk_nid_get(fk_nid[ni], 0), fk_nid_get(fk_nid[ni], 1), ty, fk_nid_get(fk_nid[ni], 3));
             return;
         }
-        fk_fb_leaf(fk_nid[ni][0], fk_nid[ni][1], fk_nid[ni][2], fk_nid[ni][3]);
+        fk_fb_leaf(fk_nid_get(fk_nid[ni], 0), fk_nid_get(fk_nid[ni], 1), fk_nid_get(fk_nid[ni], 2), fk_nid_get(fk_nid[ni], 3));
         return;
     }
     if ((v & 1) == 0) { fk_fb_int(v >> 1); return; }
@@ -15405,13 +15382,13 @@ static void fk_valstr_word(long long v, int item) {
         long long ni = fk_nidx(v);
         if (ni >= 1 && ni <= fk_np) {
             fk_valstr_put("@", 1);
-            fk_valstr_dec(fk_nid[ni][0]);
+            fk_valstr_dec(fk_nid_get(fk_nid[ni], 0));
             fk_valstr_put(".", 1);
-            fk_valstr_dec(fk_nid[ni][1]);
+            fk_valstr_dec(fk_nid_get(fk_nid[ni], 1));
             fk_valstr_put(".", 1);
-            fk_valstr_dec(fk_nid[ni][2]);
+            fk_valstr_dec(fk_nid_get(fk_nid[ni], 2));
             fk_valstr_put(".", 1);
-            fk_valstr_dec(fk_nid[ni][3]);
+            fk_valstr_dec(fk_nid_get(fk_nid[ni], 3));
             return;
         }
     }
@@ -17943,7 +17920,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * had a way out. The node population lives in exactly one of three
          * homes at a time (fk_nodes_init chooses; fk_store_go_private can move
          * it), and those three homes ARE the phases the glass already speaks:
-         *   ice   -- the shared field /fg-field-*: content-addressed, shared by
+         *   ice   -- the shared field /fg-field2-*: content-addressed, shared by
          *            every kernel on the host, outlives all of them;
          *   water -- the per-pid shared store /fg-c<pid>-*: mapped and visible
          *            to siblings, gone when this pid goes;
@@ -17981,10 +17958,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return fk_field_on ? (fk_np << 1) : 0;
         }
         if (ks_k == 61) {
-            /* the tissue's own extent: the ten interned columns are 104 bytes a
-             * node (kind, cat, kids, val, the four-word id, file, line, col,
-             * attr, hash memo), committed page by page as the fill advances. */
-            return (fk_np * 104) << 1;
+            /* Logical occupied column bytes; residency is measured separately. */
+            return (fk_np * (9 * 8 + sizeof(fk_node_id))) << 1;
         }
         if (ks_k == 62) {
             /* the RAM this kernel holds privately over that tissue whatever its
@@ -17998,6 +17973,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return ((fk_node_cap * 16) + (fk_intern_hash_cap * 8)) << 1;
 #endif
         }
+        if (ks_k == 63) { return sizeof(fk_node_id) << 1; }
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
         }

@@ -13,6 +13,16 @@ actual executable and companions. The
 generation, Darwin ARM64 publication, ordinary cached installation, the existing
 behavior proof and 14 artifact admission cases.
 
+Each node identity is generated as [one native 64-bit word](native-node-word.md).
+Its structured format uses 6 package bits, 13 level bits, 12 type bits and 32
+instance bits with one format bit. Integer coordinates retain a signed 63-bit
+instance. Form owns the layout and generates its bootstrap header; source
+identity and freshness bind that header. The identity column is 8 bytes per
+cell; logical column accounting is 80 bytes per cell. The field and mapped
+readers use layout version 2. The [execution evidence](evidence/fkwu/native-node-word.json)
+includes exact boundaries, ordinary refusal, per-process storage and current
+operator, lexicon, interning, serialization and Glass consumers.
+
 The shared field reuses identical NodeID coordinates; the allocation witness
 returns `7`. Its node columns still have a fixed 2^26-cell capacity and no live
 reclamation. Reset requires every other kernel to settle. The
@@ -221,7 +231,10 @@ Resource ownership includes names, metadata and event delivery: a native handle 
 
 ## Next executable steps
 
-1. Give changing observations an owned, reclaimable lifetime. Measure allocations
+1. Give changing observations an owned, reclaimable lifetime and decouple field
+   allocation from its current fixed capacity. The native identity already
+   occupies one word; its encoding width does not require preallocating its
+   identity space. Measure allocations
    at actual organ boundaries, preserve the care path under pressure, and prove
    another live owner keeps its values during reclamation. The direct care
    projection is the executing first reduction in this path. The remaining

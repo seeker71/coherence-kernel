@@ -1,12 +1,12 @@
 # fkwu bootstrap ownership inspection
 
-Scope: `runtime/fkwu-uni.c`, its generated opcode table, and the dynamic Metal carrier. The [runtime status](fkwu-kernel-status.md) describes observed capabilities; the [north star](fkwu-form-native-north-star.md) defines the destination.
+Scope: `runtime/fkwu-uni.c`, its generated opcode and node-word headers, and the dynamic Metal carrier. The [runtime status](fkwu-kernel-status.md) describes observed capabilities; the [north star](fkwu-form-native-north-star.md) defines the destination.
 
 The complete lexical census indexes every function definition, file-scope declaration and local static, and reconciles the index with the active Clang AST. Source-region labels and migration suggestions support navigation; they do not establish semantic correctness for every symbol.
 
 ## Current seed census
 
-The inspected seed contains 1,077,910 bytes and 24,231 source lines. The census
+The inspected seed contains 1,077,352 bytes and 24,207 source lines. The census
 includes every conditional branch; the Clang reconciliation describes the
 active Darwin build.
 
@@ -18,12 +18,23 @@ active Darwin build.
 | Distinct global names | 432 |
 | Individual file-scope global declarations | 455 |
 | Local-static declaration units | 67 |
-| Preprocessor directives | 352 |
+| Preprocessor directives | 353 |
 | Unresolved top-level units | 0 |
-| Active Darwin Clang functions | 615 |
+| Active Darwin Clang functions | 618 |
 | Active Darwin Clang globals | 421 |
 
-The active AST additionally sees `__sigbits` from host headers and `fk_optab`, `fk_optab_n`, `fk_rwtab`, `fk_rwtab_n` from the generated opcode header. Conditional source branches and the active platform are different populations.
+The active AST additionally sees `__sigbits` from host headers, three functions
+(`fk_nid_fits`, `fk_nid_make`, `fk_nid_get`) from the Form-generated node-word
+header, and `fk_optab`, `fk_optab_n`, `fk_rwtab`, `fk_rwtab_n` from the generated
+opcode header. The node-word header is 2,241 bytes and 37 lines, measured
+separately from handwritten seed ownership. Conditional source branches and
+the active platform are different populations.
+
+The [native identity authority](native-node-word.md) owns the one-word layout,
+admission predicate and generated constructor/readers. The seed carries one
+8-byte identity column through allocation, interning, mapped reading and
+serialization. The current implementation still compiles that generated
+header into the bootstrap; live Form-native replacement is its destination.
 
 The current [per-symbol audit](evidence/fkwu/c-bootstrap-audit.json) carries positions, signatures, declarations, call-shaped tokens, references matching global names, numeric tokens and ownership/migration information. Matched names may be shadowed; call-shaped tokens may be macros or indirect calls. Missing or reordered region anchors prevent publication.
 

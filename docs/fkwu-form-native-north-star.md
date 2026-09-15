@@ -136,6 +136,15 @@ allocation and process residency measurements guide the next resource choice.
 
 Physical capacity, encoding width and policy admission are distinct, discoverable limits. Growth follows actual availability and declared policy. Performance is measured through latency distributions, copies, copied bytes, occupancy and achieved bandwidth over a stated workload. Correctness is independently checked.
 
+A node identity is generated as one native 64-bit word. Semantic fields may
+occupy any required number of bits within that word; byte alignment is not a
+requirement. Form owns their interpretation and admission. Physical storage
+follows the population actually retained, independent of the identity space.
+Changing an interpretation requires an explicit version and preserved meaning
+for existing owners. The [current native word](native-node-word.md) establishes
+the resident representation; Form-native module admission and live lifetime
+management must also own its evolution and storage.
+
 ## Contexts, modules and live replacement
 
 A runtime context owns values, roots, intern pools, executable images, dynamic modules, handles, metrics and outstanding work. Several contexts coexist. Closing one completes or transfers its obligations and releases its resources while others retain allocations and progress.
