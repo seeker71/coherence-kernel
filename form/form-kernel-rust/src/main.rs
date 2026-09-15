@@ -1538,13 +1538,13 @@ struct ShapeKey {
 }
 
 // NativeFn now takes &mut Kernel + &mut Arena so substrate-write natives
-// (intern_node, intern_trivial_*) can grow the substrate, and walk_recipe
-// can re-enter the walker. Pure natives ignore the mutable handles. The
+// (intern_node, intern_trivial_*) can grow the substrate. Pure natives
+// ignore the mutable handles. The
 // cost: walker's children() must return owned Vec (the Breath 1 slice
 // optimization is undone). Future breath: restore via Cow or split tables.
 type NativeFn = fn(&mut Kernel, &mut Arena, &[Value]) -> Value;
 
-// EnvAwareNativeFn — natives that need the caller's env (walk_recipe_here).
+// EnvAwareNativeFn — natives that need the caller's env (_dispatch, _dispatch_super).
 // Separate registry path to avoid changing the NativeFn signature across
 // every existing native.
 type EnvAwareNativeFn = fn(&mut Kernel, &mut Arena, FrameId, &[Value]) -> Value;
@@ -1602,16 +1602,6 @@ pub(crate) struct Kernel {
     // can name the Form source file:line. Empty outside file loads
     // (inline strings, route bodies that carry their own labels).
     reading_files: Vec<(NameID, u32)>,
-    // walk_cache — JIT-vector memoization: pure recipes (no I/O, no
-    // external state) can have their walk result cached by NodeID.
-    // Content-addressing means same recipe shape → same NodeID, so
-    // cache lookups are O(1) by structure. Real JIT compiles to
-    // native code; memoization skips redundant interpretation.
-    // For now: opt-in via `walk-cached` native; not used by default
-    // `walk_recipe` to avoid invalidating semantics for impure recipes.
-    walk_cache: HashMap<NodeID, Value>,
-    walk_cache_hits: u64,
-    walk_cache_misses: u64,
     import_seq: u32,
     strs: Vec<String>,
     str_idx: HashMap<String, NameID>,
@@ -2031,9 +2021,6 @@ impl Kernel {
             source_attr: HashMap::new(),
             framebuffer_roots: Vec::new(),
             reading_files: Vec::new(),
-            walk_cache: HashMap::new(),
-            walk_cache_hits: 0,
-            walk_cache_misses: 0,
             import_seq: 1,
             strs: Vec::new(),
             str_idx: HashMap::new(),
@@ -2256,7 +2243,6 @@ impl Kernel {
         for nid in &doomed {
             self.by_id.remove(nid);
             self.source_attr.remove(nid);
-            self.walk_cache.remove(nid);
             self.switch_tables.remove(nid);
         }
         self.by_shape
@@ -2266,7 +2252,6 @@ impl Kernel {
         }
         self.strs.truncate(str_mark);
         self.next_inst = next_mark;
-        self.walk_cache.clear();
         doomed.len() as i64
     }
 
@@ -2377,23 +2362,6 @@ impl Kernel {
                 &mut live_frames,
             );
         }
-        let mut changed = true;
-        while changed {
-            let before_nodes = live_nodes.len();
-            let before_strings = live_strings.len();
-            for (nid, value) in &self.walk_cache {
-                if live_nodes.contains(nid) {
-                    self.mark_value(
-                        value,
-                        stack.map(|(arena, _)| arena),
-                        &mut live_nodes,
-                        &mut live_strings,
-                        &mut live_frames,
-                    );
-                }
-            }
-            changed = live_nodes.len() != before_nodes || live_strings.len() != before_strings;
-        }
         let doomed: Vec<NodeID> = self
             .by_id
             .keys()
@@ -2403,13 +2371,10 @@ impl Kernel {
         for nid in &doomed {
             self.by_id.remove(nid);
             self.source_attr.remove(nid);
-            self.walk_cache.remove(nid);
             self.switch_tables.remove(nid);
         }
         self.by_shape
             .retain(|_, nid| !(nid.pkg == 0 && !live_nodes.contains(nid)));
-        self.walk_cache
-            .retain(|nid, _| nid.pkg != 0 || live_nodes.contains(nid));
         let mut pruned = 0usize;
         if stack.is_some() {
             while let Some(idx) = self.strs.len().checked_sub(1) {
@@ -2450,9 +2415,6 @@ impl Kernel {
             source_attr: self.source_attr.clone(),
             framebuffer_roots: self.framebuffer_roots.clone(),
             reading_files: Vec::new(),
-            walk_cache: HashMap::new(),
-            walk_cache_hits: 0,
-            walk_cache_misses: 0,
             import_seq: self.import_seq,
             strs: self.strs.clone(),
             str_idx: self.str_idx.clone(),
@@ -2473,25 +2435,6 @@ impl Kernel {
             active_roots: Vec::new(),
             unit_roots: self.unit_roots.clone(),
             trace: None,
-        }
-    }
-
-    fn is_parallel_pure(&self, n: NodeID, seen: &mut HashSet<NodeID>) -> bool {
-        if n.level == LEVEL_TRIVIAL {
-            return true;
-        }
-        if !seen.insert(n) {
-            return true;
-        }
-        let Some(recipe) = self.by_id.get(&n) else {
-            return false;
-        };
-        match recipe.category.ty {
-            RB_MATH | RB_COMPARE | RB_LOGIC | RB_COND | RB_LIST | RB_MATCH => recipe
-                .children
-                .iter()
-                .all(|child| self.is_parallel_pure(*child, seen)),
-            _ => false,
         }
     }
 
@@ -3164,173 +3107,6 @@ fn compose_scaled_decimal(kept: &str, n: i64, neg: bool) -> String {
     } else {
         body
     }
-}
-
-fn native_walk_parallel(k: &mut Kernel, _: &mut Arena, args: &[Value]) -> Value {
-    let roots: Vec<NodeID> = match &args[0] {
-        Value::List(xs) => xs.iter().map(|v| v.as_nid()).collect(),
-        _ => panic!("walk_parallel: first argument must be a list of NodeIDs"),
-    };
-    let mut workers = args[1].as_int().max(1) as usize;
-    if roots.is_empty() {
-        return Value::List(Vec::new().into());
-    }
-    workers = workers.min(roots.len());
-    let sequential = |k: &mut Kernel, roots: &[NodeID]| {
-        let mut out = Vec::with_capacity(roots.len());
-        for root in roots {
-            let mut sub_arena = Arena::new();
-            let env = sub_arena.new_frame(None);
-            out.push(walk(k, &mut sub_arena, *root, env));
-        }
-        Value::List(out.into())
-    };
-    if workers <= 1
-        || k.trace.is_some()
-        || !roots
-            .iter()
-            .all(|root| k.is_parallel_pure(*root, &mut HashSet::new()))
-    {
-        return sequential(k, &roots);
-    }
-
-    let mut buckets = vec![Vec::<(usize, NodeID)>::new(); workers];
-    for (idx, root) in roots.iter().copied().enumerate() {
-        buckets[idx % workers].push((idx, root));
-    }
-    let mut handles = Vec::with_capacity(workers);
-    for bucket in buckets {
-        let mut worker = k.readonly_worker_clone();
-        handles.push(std::thread::spawn(move || {
-            let mut chunk = Vec::with_capacity(bucket.len());
-            for (idx, root) in bucket {
-                let mut sub_arena = Arena::new();
-                let env = sub_arena.new_frame(None);
-                chunk.push((idx, walk(&mut worker, &mut sub_arena, root, env)));
-            }
-            chunk
-        }));
-    }
-    let mut out: Vec<Option<Value>> = vec![None; roots.len()];
-    for handle in handles {
-        for (idx, value) in handle.join().expect("walk_parallel worker panicked") {
-            out[idx] = Some(value);
-        }
-    }
-    Value::List(Arc::new(
-        out.into_iter()
-            .map(|value| value.expect("walk_parallel missing worker result"))
-            .collect(),
-    ))
-}
-
-fn native_walk_parallel_cached(k: &mut Kernel, _: &mut Arena, args: &[Value]) -> Value {
-    let roots: Vec<NodeID> = match &args[0] {
-        Value::List(xs) => xs.iter().map(|v| v.as_nid()).collect(),
-        _ => panic!("walk_parallel_cached: first argument must be a list of NodeIDs"),
-    };
-    let mut workers = args[1].as_int().max(1) as usize;
-    if roots.is_empty() {
-        return Value::List(Vec::new().into());
-    }
-    workers = workers.min(roots.len());
-    let all_pure = roots
-        .iter()
-        .all(|root| k.is_parallel_pure(*root, &mut HashSet::new()));
-    if !all_pure {
-        let mut out = Vec::with_capacity(roots.len());
-        for root in &roots {
-            let mut sub_arena = Arena::new();
-            let env = sub_arena.new_frame(None);
-            out.push(walk(k, &mut sub_arena, *root, env));
-        }
-        return Value::List(out.into());
-    }
-    if workers <= 1 || roots.len() <= 1 || k.trace.is_some() {
-        let cache_enabled = k.trace.is_none();
-        let mut out = Vec::with_capacity(roots.len());
-        let mut local = HashMap::<NodeID, Value>::new();
-        for root in &roots {
-            if cache_enabled {
-                if let Some(v) = k.walk_cache.get(root).cloned() {
-                    k.walk_cache_hits += 1;
-                    out.push(v);
-                    continue;
-                }
-                if let Some(v) = local.get(root).cloned() {
-                    k.walk_cache_hits += 1;
-                    out.push(v);
-                    continue;
-                }
-                k.walk_cache_misses += 1;
-            }
-            let mut sub_arena = Arena::new();
-            let env = sub_arena.new_frame(None);
-            let value = walk(k, &mut sub_arena, *root, env);
-            if cache_enabled {
-                k.walk_cache.insert(*root, value.clone());
-                local.insert(*root, value.clone());
-            }
-            out.push(value);
-        }
-        return Value::List(out.into());
-    }
-
-    let mut out: Vec<Option<Value>> = vec![None; roots.len()];
-    let mut jobs = Vec::<(usize, NodeID)>::new();
-    let mut first = HashMap::<NodeID, usize>::new();
-    let mut fanout = HashMap::<usize, Vec<usize>>::new();
-    for (idx, root) in roots.iter().copied().enumerate() {
-        if let Some(v) = k.walk_cache.get(&root).cloned() {
-            k.walk_cache_hits += 1;
-            out[idx] = Some(v);
-        } else if let Some(primary) = first.get(&root).copied() {
-            k.walk_cache_hits += 1;
-            fanout.entry(primary).or_default().push(idx);
-        } else {
-            k.walk_cache_misses += 1;
-            first.insert(root, idx);
-            jobs.push((idx, root));
-        }
-    }
-    if !jobs.is_empty() {
-        let mut buckets = vec![Vec::<(usize, NodeID)>::new(); workers];
-        for (pos, job) in jobs.into_iter().enumerate() {
-            buckets[pos % workers].push(job);
-        }
-        let mut handles = Vec::with_capacity(workers);
-        for bucket in buckets {
-            if bucket.is_empty() {
-                continue;
-            }
-            let mut worker = k.readonly_worker_clone();
-            handles.push(std::thread::spawn(move || {
-                let mut chunk = Vec::with_capacity(bucket.len());
-                for (idx, root) in bucket {
-                    let mut sub_arena = Arena::new();
-                    let env = sub_arena.new_frame(None);
-                    chunk.push((idx, root, walk(&mut worker, &mut sub_arena, root, env)));
-                }
-                chunk
-            }));
-        }
-        for handle in handles {
-            for (idx, root, value) in handle.join().expect("walk_parallel_cached worker panicked") {
-                k.walk_cache.insert(root, value.clone());
-                out[idx] = Some(value);
-                if let Some(dups) = fanout.get(&idx) {
-                    for dup in dups {
-                        out[*dup] = out[idx].clone();
-                    }
-                }
-            }
-        }
-    }
-    Value::List(Arc::new(
-        out.into_iter()
-            .map(|value| value.expect("walk_parallel_cached missing worker result"))
-            .collect(),
-    ))
 }
 
 fn native_field_node(
@@ -6025,85 +5801,6 @@ impl Kernel {
         self.register_native("host_file_write_text", cat_call(), write_file_text_native);
         self.register_native("write_file", cat_call(), write_file_text_native);
         self.register_native("write_file_text", cat_call(), write_file_text_native);
-        // walk_recipe — evaluate a NodeID in a fresh root frame. Returns
-        // the value the recipe produces. Use case: Form code builds a
-        // recipe via intern_node, then walks it to get the runtime result.
-        self.register_native("walk_recipe", cat_witness(), |k, _, args| {
-            let mut sub_arena = Arena::new();
-            let env = sub_arena.new_frame(None);
-            walk_unit(k, &mut sub_arena, args[0].as_nid(), env)
-        });
-        // walk_recipe_here — walks a Recipe in the CALLER's env, so let-
-        // bindings inside the Recipe land in the caller's scope. Matches
-        // the Go kernel's env-aware variant.
-        self.register_env_native("walk_recipe_here", cat_witness(), |k, a, env, args| {
-            // Pin the recipe root as an active root so substrate_gc keeps the
-            // definitions reachable. Closures bound here hold body NodeIDs
-            // that aren't reachable from the source-parsed root, so without
-            // this pin a subsequent substrate_gc would sweep them and leave
-            // env holding closures with deleted bodies.
-            let root = args[0].as_nid();
-            k.active_roots.push(root);
-            walk_unit(k, a, root, env)
-        });
-        self.register_native("walk_parallel", cat_witness(), native_walk_parallel);
-        self.register_native("walk-parallel", cat_witness(), native_walk_parallel);
-        self.register_native(
-            "walk_parallel_cached",
-            cat_witness(),
-            native_walk_parallel_cached,
-        );
-        self.register_native(
-            "walk-parallel-cached",
-            cat_witness(),
-            native_walk_parallel_cached,
-        );
-        // walk-cached — JIT-vector memoization. Caller asserts the
-        // recipe is pure (no I/O, no external state). Result cached
-        // by recipe NodeID. Subsequent calls return O(1) from cache
-        // instead of re-walking the tree. Demonstrates the JIT slot:
-        // once a recipe is identified as a hot path (via framebuffer
-        // observation), its result can be cached / pre-compiled.
-        // Real JIT replaces this cache with native machine code; the
-        // architectural shape stays the same.
-        self.register_native("walk-cached", cat_witness(), |k, _, args| {
-            let nid = args[0].as_nid();
-            if let Some(v) = k.walk_cache.get(&nid).cloned() {
-                k.walk_cache_hits += 1;
-                return v;
-            }
-            k.walk_cache_misses += 1;
-            let mut sub_arena = Arena::new();
-            let env = sub_arena.new_frame(None);
-            let v = walk_unit(k, &mut sub_arena, nid, env);
-            k.walk_cache.insert(nid, v.clone());
-            v
-        });
-        // walk-cache-clear — reset the memoization cache. Use when
-        // the substrate state changes in ways that would invalidate
-        // cached results (e.g. native re-registration).
-        self.register_native("walk-cache-clear", cat_witness(), |k, _, _| {
-            k.walk_cache.clear();
-            k.walk_cache_hits = 0;
-            k.walk_cache_misses = 0;
-            Value::Null
-        });
-        // walk-cache-size — number of cached recipes. Useful for
-        // observability — when paired with framebuffer-events, lets
-        // tooling compare "recipes seen" vs "recipes JIT-cached".
-        self.register_native("walk-cache-size", cat_witness(), |k, _, _| {
-            Value::Int(k.walk_cache.len() as i64)
-        });
-        self.register_native("walk-cache-stats", cat_witness(), |k, _, _| {
-            Value::List(
-                vec![
-                    Value::Int(k.walk_cache_hits as i64),
-                    Value::Int(k.walk_cache_misses as i64),
-                    Value::Int(k.walk_cache.len() as i64),
-                ]
-                .into(),
-            )
-        });
 
         // --- Debug / inspection -----------------------------------------
         // `trace` — print-and-return. Drop into any Form expression to
@@ -6752,7 +6449,7 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                 // the canonical truth; `register_jit form-name native-name` opts
                 // calls into a kernel-resident optimized native.
                 let name = k.jit_aliases.get(&raw_name).copied().unwrap_or(raw_name);
-                // Env-aware natives first — they need caller env (walk_recipe_here).
+                // Env-aware natives first — they need the caller env.
                 let env_ne_opt = k.env_natives.get(&name).copied();
                 if let Some(ne) = env_ne_opt {
                     if a.lookup(env, name).is_none() {

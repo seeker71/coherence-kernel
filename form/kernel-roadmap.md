@@ -52,7 +52,7 @@ kernel. A kernel grows only when something genuinely cannot be expressed in Form
 - **The substrate write surface** — NodeIDs as first-class values and the natives
   that construct and read recipes: `make_nodeid`, `intern_trivial_int` /
   `intern_trivial_string`, `intern_node`, `node_category` / `node_children` /
-  `node_value`, `walk_recipe`
+  `node_value`; a recipe is identity, observed and never walked
   ([`form-stdlib/tests/substrate-write.fk`](form-stdlib/tests/substrate-write.fk)).
 - **Source-located errors and `trace`** — 1-based line/col on every bootstrap
   token, bounds-checked recipe reads pointing at the opening `(`, `(trace v)` /

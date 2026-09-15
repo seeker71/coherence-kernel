@@ -250,7 +250,7 @@ function sourceInventoryRow(relPath: string, loc: number): Value {
 
 export type NativeFn = (k: Kernel, args: Value[]) => Value;
 
-// EnvAwareNativeFn — natives that need the caller's env (walk_recipe_here).
+// EnvAwareNativeFn — natives that need the caller's env.
 // Separate registry path to avoid changing the NativeFn signature across
 // every existing native.
 export type EnvAwareNativeFn = (
@@ -670,9 +670,6 @@ export class Kernel {
     return label;
   }
   private importSeq = 1;
-  private walkCache = new Map<string, Value>();
-  private walkCacheHits = 0;
-  private walkCacheMisses = 0;
   private activeRoots: NodeID[] = [];
   private framebufferRoots: NodeID[] = [];
   // unitRoots — the unit roots the reader built, by how walkUnit reads them:
@@ -1003,7 +1000,6 @@ export class Kernel {
       if (nid.pkg === 0 && nid.inst >= next) {
         this.byID.delete(key);
         this.sourceAttr.delete(key);
-        this.walkCache.delete(key);
         this.switchTables.delete(key);
         released += 1;
       }
@@ -1019,7 +1015,6 @@ export class Kernel {
     }
     this.strs.length = strLen;
     this.nextInst = next;
-    this.walkCache.clear();
     this.switchTables.clear();
     return released;
   }
@@ -1085,24 +1080,12 @@ export class Kernel {
     for (const root of this.activeRoots) this.markNode(root, liveNodes, liveStrings);
     for (const root of roots) this.markValue(root, liveNodes, liveStrings, liveFrames);
     this.markFrame(stack, liveNodes, liveStrings, liveFrames);
-    let changed = true;
-    while (changed) {
-      const beforeNodes = liveNodes.size;
-      const beforeStrings = liveStrings.size;
-      for (const [key, value] of this.walkCache.entries()) {
-        if (liveNodes.has(key)) {
-          this.markValue(value, liveNodes, liveStrings, liveFrames);
-        }
-      }
-      changed = liveNodes.size !== beforeNodes || liveStrings.size !== beforeStrings;
-    }
     let freed = 0;
     for (const key of Array.from(this.byID.keys())) {
       const nid = nodeFromKey(key);
       if (nid.pkg === 0 && !liveNodes.has(key)) {
         this.byID.delete(key);
         this.sourceAttr.delete(key);
-        this.walkCache.delete(key);
         this.switchTables.delete(key);
         freed += 1;
       }
@@ -1111,9 +1094,6 @@ export class Kernel {
       if (nid.pkg === 0 && !liveNodes.has(nodeKey(nid))) {
         this.byKey.delete(key);
       }
-    }
-    for (const key of Array.from(this.walkCache.keys())) {
-      if (!liveNodes.has(key)) this.walkCache.delete(key);
     }
     let pruned = 0;
     if (stack !== null) {
@@ -3260,165 +3240,6 @@ export class Kernel {
       if (end !== bytes.length) throw new Error("deserialize-recipe: trailing bytes");
       return { kind: "nodeid", nodeid: root };
     });
-    this.registerNative("walk_recipe", catWitness(), (k, args) =>
-      walkUnit(k, argNodeID(args, 0), new Frame(null)),
-    );
-    // walk_recipe_here — walks a Recipe in the CALLER's env, so let-
-    // bindings inside the Recipe land in the caller's scope. Matches
-    // the Go and Rust kernels' env-aware variant.
-    this.registerEnvNative("walk_recipe_here", catWitness(), (k, env, args) => {
-      // Pin the recipe root as an active root so substrate_gc keeps the
-      // definitions reachable. Closures bound here hold body NodeIDs that
-      // aren't reachable from the source-parsed root, so without this pin
-      // a subsequent substrate_gc would sweep them and leave env holding
-      // closures with deleted bodies.
-      const root = argNodeID(args, 0);
-      k.pushActiveRoot(root);
-      return walkUnit(k, root, env);
-    });
-    const walkParallel: NativeFn = (k, args) => {
-      const roots = argList(args, 0).map((value) => {
-        if (value.kind !== "nodeid")
-          throw new Error("walk_parallel: first argument must be a list of NodeIDs");
-        return value.nodeid;
-      });
-      const workers = Math.max(1, argInt(args, 1));
-      const sequential = (): Value => ({
-        kind: "list",
-        list: roots.map((root) => walk(k, root, new Frame(null))),
-      });
-      if (
-        workers <= 1 ||
-        roots.length <= 1 ||
-        k.trace !== undefined ||
-        roots.some((root) => !isParallelPure(k, root, new Set<string>()))
-      ) {
-        return sequential();
-      }
-      const out: Value[] = new Array(roots.length);
-      const workerCount = Math.min(workers, roots.length);
-      for (let worker = 0; worker < workerCount; worker++) {
-        for (let i = worker; i < roots.length; i += workerCount) {
-          out[i] = walk(k, roots[i]!, new Frame(null));
-        }
-      }
-      return { kind: "list", list: out };
-    };
-    this.registerNative("walk_parallel", catWitness(), walkParallel);
-    this.registerNative("walk-parallel", catWitness(), walkParallel);
-    const walkParallelCached: NativeFn = (k, args) => {
-      const roots = argList(args, 0).map((value) => {
-        if (value.kind !== "nodeid")
-          throw new Error("walk_parallel_cached: first argument must be a list of NodeIDs");
-        return value.nodeid;
-      });
-      const workers = Math.max(1, argInt(args, 1));
-      const allPure = roots.every((root) => isParallelPure(k, root, new Set<string>()));
-      const sequential = (cache: boolean): Value => {
-        const local = new Map<string, Value>();
-        const list = roots.map((root) => {
-          const key = nodeKey(root);
-          if (cache) {
-            const cached = k.walkCache.get(key);
-            if (cached !== undefined) {
-              k.walkCacheHits++;
-              return cached;
-            }
-            const localCached = local.get(key);
-            if (localCached !== undefined) {
-              k.walkCacheHits++;
-              return localCached;
-            }
-            k.walkCacheMisses++;
-          }
-          const value = walk(k, root, new Frame(null));
-          if (cache) {
-            k.walkCache.set(key, value);
-            local.set(key, value);
-          }
-          return value;
-        });
-        return { kind: "list", list };
-      };
-      if (!allPure) return sequential(false);
-      if (
-        workers <= 1 ||
-        roots.length <= 1 ||
-        k.trace !== undefined
-      ) {
-        return sequential(k.trace === undefined);
-      }
-      const out: Value[] = new Array(roots.length);
-      const jobs: Array<[number, NodeID]> = [];
-      const first = new Map<string, number>();
-      const fanout = new Map<number, number[]>();
-      for (let i = 0; i < roots.length; i++) {
-        const root = roots[i]!;
-        const key = nodeKey(root);
-        const cached = k.walkCache.get(key);
-        if (cached !== undefined) {
-          k.walkCacheHits++;
-          out[i] = cached;
-        } else if (first.has(key)) {
-          k.walkCacheHits++;
-          const primary = first.get(key)!;
-          const duplicates = fanout.get(primary) ?? [];
-          duplicates.push(i);
-          fanout.set(primary, duplicates);
-        } else {
-          k.walkCacheMisses++;
-          first.set(key, i);
-          jobs.push([i, root]);
-        }
-      }
-      const workerCount = Math.min(workers, roots.length);
-      for (let worker = 0; worker < workerCount; worker++) {
-        for (let i = worker; i < jobs.length; i += workerCount) {
-          const [idx, root] = jobs[i]!;
-          out[idx] = walk(k, root, new Frame(null));
-        }
-      }
-      for (const [idx, root] of jobs) {
-        k.walkCache.set(nodeKey(root), out[idx]!);
-        for (const dup of fanout.get(idx) ?? []) {
-          out[dup] = out[idx]!;
-        }
-      }
-      return { kind: "list", list: out };
-    };
-    this.registerNative("walk_parallel_cached", catWitness(), walkParallelCached);
-    this.registerNative("walk-parallel-cached", catWitness(), walkParallelCached);
-    this.registerNative("walk-cached", catWitness(), (k, args) => {
-      const nid = argNodeID(args, 0);
-      const key = nodeKey(nid);
-      const cached = k.walkCache.get(key);
-      if (cached !== undefined) {
-        k.walkCacheHits++;
-        return cached;
-      }
-      k.walkCacheMisses++;
-      const value = walkUnit(k, nid, new Frame(null));
-      k.walkCache.set(key, value);
-      return value;
-    });
-    this.registerNative("walk-cache-clear", catWitness(), (k, _args) => {
-      k.walkCache.clear();
-      k.walkCacheHits = 0;
-      k.walkCacheMisses = 0;
-      return { kind: "null" };
-    });
-    this.registerNative("walk-cache-size", catWitness(), (k, _args) => ({
-      kind: "int",
-      int: k.walkCache.size,
-    }));
-    this.registerNative("walk-cache-stats", catWitness(), (k, _args) => ({
-      kind: "list",
-      list: [
-        { kind: "int", int: k.walkCacheHits },
-        { kind: "int", int: k.walkCacheMisses },
-        { kind: "int", int: k.walkCache.size },
-      ],
-    }));
 
     // Typed-numeric construction and decoding — attributed as WITNESS
     // (substrate-write for typed trivials) and METHOD (value conversion).
@@ -4499,25 +4320,6 @@ export class Frame {
 // Walker — recipe → value
 // ---------------------------------------------------------------------------
 
-function isParallelPure(k: Kernel, node: NodeID, seen: Set<string>): boolean {
-  if (node.level === Level.TRIVIAL) return true;
-  const key = nodeKey(node);
-  if (seen.has(key)) return true;
-  seen.add(key);
-  const cat = k.category(node);
-  switch (cat.type) {
-    case RBasic.MATH:
-    case RBasic.COMPARE:
-    case RBasic.LOGIC:
-    case RBasic.COND:
-    case RBasic.LIST:
-    case RBasic.MATCH:
-      return k.children(node).every((child) => isParallelPure(k, child, seen));
-    default:
-      return false;
-  }
-}
-
 export function walk(k: Kernel, node: NodeID, frame: Frame): Value {
   if (node.level === Level.TRIVIAL) {
     return k.trivialValue(node);
@@ -5518,7 +5320,7 @@ function walkFnCall(
     // into a kernel-resident optimized native.
     const aliased = k.jitAliases.get(rawName);
     const dispatchName = aliased !== undefined ? aliased : rawName;
-    // Env-aware natives first — need the caller's env (walk_recipe_here).
+    // Env-aware natives first — they need the caller's env.
     const envNe = k.envNatives.get(dispatchName);
     if (envNe !== undefined && frame.lookup(dispatchName) === undefined) {
       const envArgs: Value[] = [];

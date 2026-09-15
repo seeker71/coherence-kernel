@@ -581,14 +581,8 @@ type Kernel struct {
 	// (file_name_id, first_global_line) per concatenated part. When
 	// non-empty, readSexpr attributes every parenthesized form so fatal
 	// diagnostics can name the Form source line.
-	readingFiles []readingPart
-	importSeq    uint32
-	// walkCache — JIT-vector memoization for pure recipes. Keyed by
-	// recipe NodeID. Real JIT replaces this with compiled native code;
-	// the architectural slot is the same: same NodeID = same result.
-	walkCache        map[NodeID]Value
-	walkCacheHits    uint64
-	walkCacheMisses  uint64
+	readingFiles     []readingPart
+	importSeq        uint32
 	activeRoots      []NodeID
 	framebufferRoots []NodeID
 	observeRuntime   bool
@@ -633,7 +627,6 @@ func NewKernel() *Kernel {
 		strIdx:       make(map[string]NameID),
 		sourceAttr:   make(map[NodeID]sourceLoc),
 		importSeq:    1,
-		walkCache:    make(map[NodeID]Value),
 		next:         1,
 		f64Idx:       make(map[uint64]uint32),
 		i64Idx:       make(map[int64]uint32),
@@ -1037,7 +1030,6 @@ func (k *Kernel) substrateRelease(mark []Value) int64 {
 			delete(k.byID, nid)
 			delete(k.byHash, hashRecipe(recipe))
 			delete(k.sourceAttr, nid)
-			delete(k.walkCache, nid)
 			delete(k.switchTables, nid)
 			released++
 		}
@@ -1047,7 +1039,6 @@ func (k *Kernel) substrateRelease(mark []Value) int64 {
 	}
 	k.strs = k.strs[:strMark]
 	k.next = nextMark
-	k.walkCache = make(map[NodeID]Value)
 	return released
 }
 
@@ -1122,30 +1113,14 @@ func (k *Kernel) substrateGC(roots []Value, stack *Frame) []Value {
 	if stack != nil {
 		k.markFrame(stack, liveNodes, liveStrings, liveFrames)
 	}
-	for changed := true; changed; {
-		beforeNodes := len(liveNodes)
-		beforeStrings := len(liveStrings)
-		for nid, value := range k.walkCache {
-			if liveNodes[nid] {
-				k.markValue(value, liveNodes, liveStrings, liveFrames)
-			}
-		}
-		changed = len(liveNodes) != beforeNodes || len(liveStrings) != beforeStrings
-	}
 	var freed int64
 	for nid, recipe := range k.byID {
 		if nid.Pkg == 0 && !liveNodes[nid] {
 			delete(k.byID, nid)
 			delete(k.byHash, hashRecipe(recipe))
 			delete(k.sourceAttr, nid)
-			delete(k.walkCache, nid)
 			delete(k.switchTables, nid)
 			freed++
-		}
-	}
-	for nid := range k.walkCache {
-		if !liveNodes[nid] {
-			delete(k.walkCache, nid)
 		}
 	}
 	pruned := 0
@@ -1184,31 +1159,6 @@ func (k *Kernel) children(n NodeID) []NodeID {
 // to do ONE map lookup per composite step instead of two. For trivials,
 // the caller already short-circuited on Level before calling.
 func (k *Kernel) recipeAt(n NodeID) Recipe { return k.byID[n] }
-
-func (k *Kernel) isParallelPure(n NodeID, seen map[NodeID]bool) bool {
-	if n.Level == LevelTrivial {
-		return true
-	}
-	if seen[n] {
-		return true
-	}
-	seen[n] = true
-	r, ok := k.byID[n]
-	if !ok {
-		return false
-	}
-	switch r.Category.Type {
-	case RBasicMath, RBasicCompare, RBasicLogic, RBasicCond, RBasicList, RBasicMatch:
-		for _, child := range r.Children {
-			if !k.isParallelPure(child, seen) {
-				return false
-			}
-		}
-		return true
-	default:
-		return false
-	}
-}
 
 func (k *Kernel) trivialValue(n NodeID) Value {
 	if n.Level != LevelTrivial {
@@ -1608,9 +1558,7 @@ type methodKey struct {
 type NativeFn func(k *Kernel, args []Value) Value
 
 // EnvAwareNativeFn — natives that need access to the caller's env to do
-// in-scope evaluation (e.g. walk_recipe_here, which walks a pre-built
-// Recipe in the calling scope so its `let` bindings land in the caller's
-// env, not a fresh one). Separate registry to avoid changing the existing
+// in-scope work. Separate registry to avoid changing the existing
 // NativeFn signature across ~60 sites.
 type EnvAwareNativeFn func(k *Kernel, env *Frame, args []Value) Value
 
@@ -3628,194 +3576,6 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("host_file_write_text", catCall(), writeFileTextNative)
 	k.registerNative("write_file", catCall(), writeFileTextNative)
 	k.registerNative("write_file_text", catCall(), writeFileTextNative)
-	// walk-cached — JIT-vector memoization. Caller asserts purity.
-	k.registerNative("walk-cached", catWitness(), func(k *Kernel, args []Value) Value {
-		if v, ok := k.walkCache[args[0].AsNid()]; ok {
-			k.walkCacheHits++
-			return v
-		}
-		k.walkCacheMisses++
-		env := NewFrame(nil)
-		v := k.walkUnit(args[0].AsNid(), env)
-		k.walkCache[args[0].AsNid()] = v
-		return v
-	})
-	k.registerNative("walk-cache-clear", catWitness(), func(k *Kernel, _ []Value) Value {
-		k.walkCache = make(map[NodeID]Value)
-		k.walkCacheHits = 0
-		k.walkCacheMisses = 0
-		return Value{Kind: VNull}
-	})
-	k.registerNative("walk-cache-size", catWitness(), func(k *Kernel, _ []Value) Value {
-		return Value{Kind: VInt, Int: int64(len(k.walkCache))}
-	})
-	k.registerNative("walk-cache-stats", catWitness(), func(k *Kernel, _ []Value) Value {
-		return Value{Kind: VList, List: []Value{
-			{Kind: VInt, Int: int64(k.walkCacheHits)},
-			{Kind: VInt, Int: int64(k.walkCacheMisses)},
-			{Kind: VInt, Int: int64(len(k.walkCache))},
-		}}
-	})
-	k.registerNative("walk_recipe", catWitness(), func(k *Kernel, args []Value) Value {
-		env := NewFrame(nil)
-		return k.walkUnit(args[0].AsNid(), env)
-	})
-	// walk_recipe_here — walks a Recipe in the CALLER's env, so let-
-	// bindings inside the Recipe land in the caller's scope. This is
-	// how source-compiled output can produce Form definitions directly
-	// from a Recipe tree without going through text round-trip: build
-	// the Recipe via intern_node, serialize to .fkb, then load via
-	//   (walk_recipe_here (deserialize-recipe (read_file_bytes "out.fkb")))
-	// the lets propagate into the surrounding load chain's env.
-	k.registerEnvNative("walk_recipe_here", catWitness(), func(k *Kernel, env *Frame, args []Value) Value {
-		// Pin the recipe root as an active root so substrate_gc keeps the
-		// definitions reachable. Closures bound here hold body NodeIDs that
-		// aren't reachable from the source-parsed root, so without this pin
-		// a subsequent substrate_gc would sweep them and leave the env
-		// holding closures with deleted bodies.
-		k.activeRoots = append(k.activeRoots, args[0].AsNid())
-		return k.walkUnit(args[0].AsNid(), env)
-	})
-	walkParallel := func(k *Kernel, args []Value) Value {
-		roots := make([]NodeID, len(args[0].List))
-		for i, v := range args[0].List {
-			roots[i] = v.Nid
-		}
-		workers := int(args[1].AsInt())
-		if workers < 1 {
-			workers = 1
-		}
-		if workers > len(roots) && len(roots) > 0 {
-			workers = len(roots)
-		}
-		sequential := func() Value {
-			out := make([]Value, len(roots))
-			for i, root := range roots {
-				out[i] = k.walk(root, NewFrame(nil))
-			}
-			return Value{Kind: VList, List: out}
-		}
-		if workers <= 1 || len(roots) <= 1 || k.Trace != nil {
-			return sequential()
-		}
-		for _, root := range roots {
-			if !k.isParallelPure(root, make(map[NodeID]bool)) {
-				return sequential()
-			}
-		}
-		out := make([]Value, len(roots))
-		jobs := make(chan int)
-		var wg sync.WaitGroup
-		for w := 0; w < workers; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for idx := range jobs {
-					out[idx] = k.walk(roots[idx], NewFrame(nil))
-				}
-			}()
-		}
-		for i := range roots {
-			jobs <- i
-		}
-		close(jobs)
-		wg.Wait()
-		return Value{Kind: VList, List: out}
-	}
-	k.registerNative("walk_parallel", catWitness(), walkParallel)
-	k.registerNative("walk-parallel", catWitness(), walkParallel)
-	walkParallelCached := func(k *Kernel, args []Value) Value {
-		roots := make([]NodeID, len(args[0].List))
-		for i, v := range args[0].List {
-			roots[i] = v.Nid
-		}
-		workers := int(args[1].AsInt())
-		if workers < 1 {
-			workers = 1
-		}
-		if workers > len(roots) && len(roots) > 0 {
-			workers = len(roots)
-		}
-		sequential := func(cache bool) Value {
-			out := make([]Value, len(roots))
-			local := make(map[NodeID]Value)
-			for i, root := range roots {
-				if cache {
-					if cached, ok := k.walkCache[root]; ok {
-						k.walkCacheHits++
-						out[i] = cached
-						continue
-					}
-					if cached, ok := local[root]; ok {
-						k.walkCacheHits++
-						out[i] = cached
-						continue
-					}
-					k.walkCacheMisses++
-				}
-				out[i] = k.walk(root, NewFrame(nil))
-				if cache {
-					k.walkCache[root] = out[i]
-					local[root] = out[i]
-				}
-			}
-			return Value{Kind: VList, List: out}
-		}
-		if len(roots) == 0 {
-			return Value{Kind: VList, List: []Value{}}
-		}
-		for _, root := range roots {
-			if !k.isParallelPure(root, make(map[NodeID]bool)) {
-				return sequential(false)
-			}
-		}
-		if workers <= 1 || len(roots) <= 1 || k.Trace != nil {
-			return sequential(k.Trace == nil)
-		}
-		out := make([]Value, len(roots))
-		jobs := make([]int, 0, len(roots))
-		first := make(map[NodeID]int)
-		fanout := make(map[int][]int)
-		for i, root := range roots {
-			if cached, ok := k.walkCache[root]; ok {
-				k.walkCacheHits++
-				out[i] = cached
-			} else if primary, ok := first[root]; ok {
-				k.walkCacheHits++
-				fanout[primary] = append(fanout[primary], i)
-			} else {
-				k.walkCacheMisses++
-				first[root] = i
-				jobs = append(jobs, i)
-			}
-		}
-		jobCh := make(chan int)
-		var wg sync.WaitGroup
-		for w := 0; w < workers; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for idx := range jobCh {
-					root := roots[idx]
-					out[idx] = k.walk(root, NewFrame(nil))
-				}
-			}()
-		}
-		for _, i := range jobs {
-			jobCh <- i
-		}
-		close(jobCh)
-		wg.Wait()
-		for _, i := range jobs {
-			k.walkCache[roots[i]] = out[i]
-			for _, dup := range fanout[i] {
-				out[dup] = out[i]
-			}
-		}
-		return Value{Kind: VList, List: out}
-	}
-	k.registerNative("walk_parallel_cached", catWitness(), walkParallelCached)
-	k.registerNative("walk-parallel-cached", catWitness(), walkParallelCached)
 
 	k.registerHostIONatives()
 
@@ -4311,9 +4071,9 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 			if aliased, ok := k.jitAliases[rawName]; ok {
 				name = aliased
 			}
-			// Env-aware natives first — they need the caller env to splice
-			// pre-built Recipes (walk_recipe_here, etc.). Checked before
-			// plain natives so a name registered both ways prefers env-aware.
+			// Env-aware natives first — they need the caller env. Checked
+			// before plain natives so a name registered both ways prefers
+			// env-aware.
 			if ne, ok := k.envNatives[name]; ok {
 				if _, hasUserBinding := env.Lookup(name); !hasUserBinding {
 					args := make([]Value, len(kids)-1)

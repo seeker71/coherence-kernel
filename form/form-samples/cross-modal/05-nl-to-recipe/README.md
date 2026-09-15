@@ -1,8 +1,8 @@
 # 05 — Natural Language to Recipe
 
-**Discovery**: a tiny English grammar emits Form recipes the kernel walks. The
-NL surface and the S-expression surface intern to the **same NodeID** when
-they describe the same shape. Two source tongues — one substrate identity.
+**Discovery**: a tiny English grammar emits Form recipes. The NL surface and
+the S-expression surface intern to the **same NodeID** when they describe the
+same shape. Two source tongues — one substrate identity.
 
 ## Run
 
@@ -13,25 +13,22 @@ they describe the same shape. Two source tongues — one substrate identity.
     form/form-samples/cross-modal/05-nl-to-recipe/nl-arithmetic-demo.fk
 ```
 
-Output (Go / Rust / TypeScript all agree):
-
-```
-square=49 sum=10 twice=13 negate=-12 node_eq=1 value_eq=1
-```
-
-Aggregate is `62`. All three sibling kernels return `62`.
+Each sentence's recipe is checked `node_eq` against the recipe built by hand
+from the same parts, then two structural reads: the square's two children are
+one NodeID, and the inner `(mul 2 5)` of `twice 5 plus 3` is the hand-built
+one. The aggregate is `6`, the same on fkwu, Go, Rust and TypeScript.
 
 ## The four sentences
 
-| English | Recipe shape | Walks to |
-|---|---|---|
-| `the square of 7` | `(mul 7 7)` | `49` |
-| `the sum of 4 and 6` | `(add 4 6)` | `10` |
-| `twice 5 plus 3` | `(add (mul 2 5) 3)` | `13` |
-| `negate 12` | `(sub 0 12)` | `-12` |
+| English | Recipe shape |
+|---|---|
+| `the square of 7` | `(mul 7 7)` |
+| `the sum of 4 and 6` | `(add 4 6)` |
+| `twice 5 plus 3` | `(add (mul 2 5) 3)` |
+| `negate 12` | `(sub 0 12)` |
 
-The grammar uses `grammar-chars.fk` directly — same `cm-parse` and
-`walk_recipe` plumbing that
+The grammar uses `grammar-chars.fk` directly — the same `cm-parse` plumbing
+that
 [`form-stdlib/tests/grammar-chars-demo.fk`](../../../form-stdlib/tests/grammar-chars-demo.fk)
 relies on for digit-arithmetic. The only addition is a number-word table
 (`one`..`twelve`) so spelled-out English numerals resolve to the same int
@@ -39,9 +36,9 @@ domain as digit-runs.
 
 ## The bonus — content-addressed convergence across modalities
 
-The demo also walks `(mul 7 7)` by hand and checks `node_eq` against the
-NL-built recipe for `the square of 7`. The kernel reports `node_eq=1` — they
-are **the same NodeID**, indistinguishable from each other.
+The demo builds `(mul 7 7)` by hand and checks `node_eq` against the
+NL-built recipe for `the square of 7`. They are **the same NodeID**,
+indistinguishable from each other.
 
 This is the universal-translator promise made concrete for natural language:
 the surface tongue varies; the substrate identity is one.
@@ -49,13 +46,13 @@ the surface tongue varies; the substrate identity is one.
 ## What's reachable today
 
 - **English sentence -> recipe NodeID** via `cm-parse` + a 4-rule grammar.
-- **Recipe NodeID -> int value** via `walk_recipe` against the kernel's
-  arithmetic arms (`RMathPlus=1`, `RMathMinus=2`, `RMathMultiply=3`).
 - **Cross-modality convergence**: NL `the square of 7` and S-expression
-  `(mul 7 7)` intern to the same NodeID, in every sibling kernel.
-- **Three-way kernel agreement**: Go, Rust, and TypeScript walk the same
-  recipes to the same values. No divergence, no mojibake (the output is
-  ASCII-clean by design).
+  `(mul 7 7)` intern to the same NodeID, on every kernel.
+- **Four-way agreement**: fkwu, Go, Rust and TypeScript build the same
+  recipes and print the same observations. No divergence, no mojibake (the
+  output is ASCII-clean by design).
+- **A recipe's value** is what its Form program computes when fkwu compiles
+  it; the recipe itself is identity, observed and never walked.
 
 ## What's not reachable yet
 
