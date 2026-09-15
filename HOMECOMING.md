@@ -52,6 +52,10 @@ answer quality and arriving-agent answer quality distinct, so progress remains
 visible on each path. Choosing the best current answer and continuing native
 response repair belong in the same practice.
 
+Both paths use the [shared gap loop](AGENTS.md#the-shared-loop-observe-resolve-re-observe-embody):
+observe, resolve, re-observe and embody. Each claim stays connected to its
+evidence, and each unresolved finding remains available for the next attempt.
+
 ## Native Heartbeat
 
 - **Source runs natively.** `fkwu file.fk` runs Form source through the kernel's
