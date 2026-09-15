@@ -9886,47 +9886,117 @@
     (defn bml-scope-home-skips (_x)
         (list "tests" ".cache" "seedbank" "node_modules" "target"))
 
-    (defn bml-scope-home-root? (name)
-        (if (bml-scope-prefix? name ".") false (fs_is_dir name)))
+    ;; The walk starts at the checkout root, found by what the working
+    ;; directory holds: the root holds form/, and form/ holds form-stdlib/.
+    ;; Paths travel relative to the root and are read through the prefix, so a
+    ;; run at the root and a run in form/ see one tree and name it alike.
+    (defn bml-scope-tree-prefix (_x)
+        (do
+            (let here (fs_list "."))
+            (if (bml-scope-strings-hold? here "form")
+                ""
+                (if (bml-scope-strings-hold? here "form-stdlib") "../" ""))))
 
-    (defn bml-scope-home-paths (root rows needle acc)
+    (defn bml-scope-tree-dir (prefix)
+        (if (str_eq prefix "") "." ".."))
+
+    (defn bml-scope-tree-path (path)
+        (str_concat (bml-scope-tree-prefix 0) path))
+
+    (defn bml-scope-home-root? (prefix name)
+        (if (bml-scope-prefix? name ".") false (fs_is_dir (str_concat prefix name))))
+
+    (defn bml-scope-home-paths (prefix root rows needle acc)
         (if (nil? rows)
             acc
             (do
                 (let path (str_concat root (str_concat "/" (head (head rows)))))
                 (bml-scope-home-paths
+                    prefix
                     root
                     (tail rows)
                     needle
-                    (if (ge (str_find (read_file path) needle 0) 0)
+                    (if (ge (str_find (read_file (str_concat prefix path)) needle 0) 0)
                         (cons path acc)
                         acc)))))
 
-    (defn bml-scope-home-roots (roots needle acc)
+    (defn bml-scope-home-roots (prefix roots needle acc)
         (if (nil? roots)
-            (reverse-list acc)
+            (bml-scope-sort-paths acc)
             (bml-scope-home-roots
+                prefix
                 (tail roots)
                 needle
-                (if (bml-scope-home-root? (head roots))
+                (if (bml-scope-home-root? prefix (head roots))
                     (bml-scope-home-paths
+                        prefix
                         (head roots)
-                        (source_inventory (head roots) ".bml" (bml-scope-home-skips 0))
+                        (source_inventory
+                            (str_concat prefix (head roots))
+                            ".bml"
+                            (bml-scope-home-skips 0))
                         needle
                         acc)
                     acc))))
 
     (defn bml-scope-text-homes (needle)
-        (bml-scope-home-roots (fs_list ".") needle (empty)))
+        (do
+            (let prefix (bml-scope-tree-prefix 0))
+            (bml-scope-home-roots prefix (fs_list (bml-scope-tree-dir prefix)) needle (empty))))
+
+    ;; homes in one order on every kernel, whatever order a directory lists in
+    (defn bml-scope-path-before? (a b i)
+        (if (ge i (str_len a))
+            (lt i (str_len b))
+            (if (ge i (str_len b))
+                false
+                (if (lt (str_byte_at a i) (str_byte_at b i))
+                    true
+                    (if (gt (str_byte_at a i) (str_byte_at b i))
+                        false
+                        (bml-scope-path-before? a b (add i 1)))))))
+
+    (defn bml-scope-alternate (paths keep)
+        (if (nil? paths)
+            (empty)
+            (if keep
+                (cons (head paths) (bml-scope-alternate (tail paths) false))
+                (bml-scope-alternate (tail paths) true))))
+
+    (defn bml-scope-merge-paths (a b)
+        (if (nil? a)
+            b
+            (if (nil? b)
+                a
+                (if (bml-scope-path-before? (head b) (head a) 0)
+                    (cons (head b) (bml-scope-merge-paths a (tail b)))
+                    (cons (head a) (bml-scope-merge-paths (tail a) b))))))
+
+    (defn bml-scope-sort-paths (paths)
+        (if (nil? paths)
+            paths
+            (if (nil? (tail paths))
+                paths
+                (bml-scope-merge-paths
+                    (bml-scope-sort-paths (bml-scope-alternate paths true))
+                    (bml-scope-sort-paths (bml-scope-alternate paths false))))))
 
     (defn bml-scope-load-unit (path)
         (bml-source-exec-parse-node
-            (bml-source-parse-executable-stream (bml-source-scan-file path))))
+            (bml-source-parse-executable-stream
+                (bml-source-scan-file (bml-scope-tree-path path)))))
+
+    ;; a BML source unit, as the scope reads it; an organ opens a form.bml
+    ;; section and counts only by its own `def name(` spelling
+    (defn bml-scope-source-unit? (path)
+        (lt (str_find (read_file (bml-scope-tree-path path)) "section [form.bml]" 0) 0))
 
     (defn bml-scope-paths-where (paths keep? key)
         (if (nil? paths)
             (empty)
-            (if (keep? (bml-scope-unit 0 (bml-scope-load-unit (head paths))) key)
+            (if (if (bml-scope-source-unit? (head paths))
+                    (keep? (bml-scope-unit 0 (bml-scope-load-unit (head paths))) key)
+                    false)
                 (cons (head paths) (bml-scope-paths-where (tail paths) keep? key))
                 (bml-scope-paths-where (tail paths) keep? key))))
 
@@ -9965,13 +10035,19 @@
                     (bml-scope-unresolved-modules all-units (tail rows)))
                 (bml-scope-unresolved-modules all-units (tail rows)))))
 
-    ;; `import P;` names package P itself; `import P.s;` asks for P's unit
+    ;; `import P;` names package P itself; `import P.s;` asks for P's unit;
+    ;; a one-word import of a default-package symbol names itself
     (defn bml-scope-import-home-package (all-units row)
         (do
             (let module (bnii-import-module row))
             (if (nil? (bml-scope-package-homes-held module))
-                (bml-scope-qualifier module)
+                (bml-scope-import-qualifier module)
                 module)))
+
+    (defn bml-scope-import-qualifier (module)
+        (if (str_eq (bml-scope-qualifier module) "")
+            module
+            (bml-scope-qualifier module)))
 
     (defn bml-scope-link-unresolved-modules (link)
         (bml-scope-link-unresolved-loop
