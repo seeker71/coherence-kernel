@@ -1,0 +1,92 @@
+//////////////////////////////////////////////////////////////////////
+//
+// ask.bml — STONE 44's instrument, the body's half.
+//
+// run.sh carries the host: it checks the model is resident, sends each
+// request with curl (which times itself) and reads the load average. This
+// door carries the meaning on both sides of that call:
+//
+//   body    model, prompt file, num_predict, stem
+//           -> writes <stem>.warm.json (the one-token thaw) and
+//              <stem>.request.json; JSON escaping lives here, not in the shell
+//   record  model, prompt file, stem, curl exit, warm seconds, seconds, load
+//           -> reads <stem>.response.json, writes <stem>.txt and <stem>.json,
+//              answers the one summary line
+//
+// An empty answer and a one-token loop are FAILED RUNS, not wrong answers
+// (edgedrop / zerobirth), and <stem>.json says which. Seconds round half up
+// to the millisecond and load to the hundredth; chars counts code points.
+//
+//   ./fkwu tools/local-authoring-capability/ask.bml < lines
+//
+// preludes: form-stdlib/core.fk form-stdlib/json.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class LocalAuthoringAsk {
+        def lac-chomp(s) = if eq(str_len(s), 0) then s else if or(eq(str_byte_at(s, sub(str_len(s), 1)), 10), eq(str_byte_at(s, sub(str_len(s), 1)), 13)) then lac-chomp(substring(s, 0, sub(str_len(s), 1))) else s;
+        def lac-line() {
+            let raw = read_line();
+            if nothing?(raw) then "" else lac-chomp(raw);
+        }
+        def lac-basename(path) = lac-base-from(path, sub(str_len(path), 1));
+        def lac-base-from(path, i) = if lt(i, 0) then path else if eq(str_byte_at(path, i), 47) then substring(path, add(i, 1), str_len(path)) else lac-base-from(path, sub(i, 1));
+        def lac-s(key, value) = json-node-pair(key, json-node-string(value));
+        def lac-n(key, value) = json-node-pair(key, json-node-int(value));
+        def lac-flag(key, bit) = json-node-pair(key, json-node-bool(if eq(bit, 1) then true else false));
+        def lac-options(npred) = json-node-object(list(lac-n("temperature", 0), lac-n("seed", 44), lac-n("num_predict", npred), lac-n("num_ctx", 8192)));
+        def lac-request(model, prompt, npred) = str_concat(json-emit(json-node-object(list(lac-s("model", model), lac-s("prompt", prompt), json-node-pair("stream", json-node-bool(false)), json-node-pair("options", lac-options(npred))))), "\n");
+        def lac-write(path, text) = if eq(write_file(path, text), str_len(text)) then 1 else form_error(str_concat("local authoring ask: incomplete write ", path));
+        def lac-body(model, promptPath, npred, stem) {
+            let prompt = read_file(promptPath);
+            let warm = lac-write(str_concat(stem, ".warm.json"), lac-request(model, "hi", 1));
+            let real = if nothing?(prompt) then form_error(str_concat("local authoring ask: prompt unread ", promptPath)) else lac-write(str_concat(stem, ".request.json"), lac-request(model, prompt, npred));
+            "ok";
+        }
+        // ---- the answer's shape ----
+        def lac-space(b) = or(eq(b, 32), or(and(ge(b, 9), le(b, 13)), eq(b, 0)));
+        def lac-blank(s, i) = if ge(i, str_len(s)) then 1 else if lac-space(str_byte_at(s, i)) then lac-blank(s, add(i, 1)) else 0;
+        def lac-words(s, at, start, acc) = if ge(at, str_len(s)) then reverse(lac-keep(s, start, at, acc)) else if lac-space(str_byte_at(s, at)) then lac-words(s, add(at, 1), add(at, 1), lac-keep(s, start, at, acc)) else lac-words(s, add(at, 1), start, acc);
+        def lac-keep(s, start, at, acc) = if gt(at, start) then cons(substring(s, start, at), acc) else acc;
+        def lac-seen(w, ws) = if nil?(ws) then 0 else if str_eq(w, head(ws)) then 1 else lac-seen(w, tail(ws));
+        def lac-distinct(ws, acc) = if nil?(ws) then len(acc) else if lac-seen(head(ws), acc) then lac-distinct(tail(ws), acc) else lac-distinct(tail(ws), cons(head(ws), acc));
+        def lac-loop(ws) = if and(le(lac-distinct(ws, list()), 2), gt(len(ws), 8)) then 1 else 0;
+        def lac-chars(s, i, n) = if ge(i, str_len(s)) then n else if eq(div(str_byte_at(s, i), 64), 2) then lac-chars(s, add(i, 1), n) else lac-chars(s, add(i, 1), add(n, 1));
+        // ---- numbers the way the record reads them ----
+        def lac-scaled(text, scale) = float_to_int(add(0.5, mul(str_to_float(if eq(str_len(text), 0) then "0" else text), add(scale, 0.0))));
+        def lac-pad(s, width) = if ge(str_len(s), width) then s else lac-pad(str_concat("0", s), width);
+        def lac-trim0(s) = if and(gt(str_len(s), 1), eq(str_byte_at(s, sub(str_len(s), 1)), 48)) then lac-trim0(substring(s, 0, sub(str_len(s), 1))) else s;
+        // shortest decimal of a value rounded to `digits` places: 1.2340 -> 1.234, 2.000 -> 2.0
+        def lac-round(text, digits, scale) = str_concat(int_to_str(div(lac-scaled(text, scale), scale)), str_concat(".", lac-trim0(lac-pad(int_to_str(mod(lac-scaled(text, scale), scale)), digits))));
+        def lac-tenth(text) = str_concat(int_to_str(div(lac-scaled(text, 10), 10)), str_concat(".", int_to_str(mod(lac-scaled(text, 10), 10))));
+        def lac-meta(resp, key) = if json-object-has?(resp, key) then json-object-get(resp, key) else json-node-null();
+        def lac-meta-rows(resp) = list(json-node-pair("eval_count", lac-meta(resp, "eval_count")), json-node-pair("prompt_eval_count", lac-meta(resp, "prompt_eval_count")), json-node-pair("eval_duration", lac-meta(resp, "eval_duration")), json-node-pair("prompt_eval_duration", lac-meta(resp, "prompt_eval_duration")), json-node-pair("done_reason", lac-meta(resp, "done_reason")));
+        def lac-object?(text) = and(gt(str_len(text), 0), eq(str_byte_at(text, 0), 123));
+        def lac-head400(text) = if gt(str_len(text), 400) then substring(text, 0, 400) else text;
+        def lac-record-json(model, promptPath, rc, warm, secs, load, txt, meta) {
+            let ws = lac-words(txt, 0, 0, list());
+            let fields = list(lac-s("model", model), lac-s("task", lac-basename(promptPath)), lac-n("curl_rc", str_to_int(rc)), json-node-pair("warm_seconds", json-node-float-text(lac-round(warm, 3, 1000))), json-node-pair("seconds", json-node-float-text(lac-round(secs, 3, 1000))), json-node-pair("loadavg_1m", json-node-float-text(lac-round(load, 2, 100))), lac-n("chars", lac-chars(txt, 0, 0)), lac-flag("empty", lac-blank(txt, 0)), lac-flag("degenerate", lac-loop(ws)));
+            str_concat(json-emit(json-node-object(append(fields, meta))), "\n");
+        }
+        def lac-eval-shown(resp, ok) = if and(ok, json-object-has?(resp, "eval_count")) then json-emit(json-object-get(resp, "eval_count")) else "None";
+        def lac-record(model, promptPath, stem, rc, warm, secs, load) {
+            let raw = read_file(str_concat(stem, ".response.json"));
+            let out = if nothing?(raw) then "" else raw;
+            let ok = lac-object?(out);
+            let resp = if ok then parse-json("ollama-generate-response", out) else json-node-null();
+            let txt = if and(ok, json-object-has?(resp, "response")) then json-string-value(json-object-get(resp, "response")) else "";
+            let meta = if ok then lac-meta-rows(resp) else list(lac-s("parse_error", "response is not a JSON object"), lac-s("raw_head", lac-head400(out)));
+            let wroteTxt = lac-write(str_concat(stem, ".txt"), txt);
+            let wroteJson = lac-write(str_concat(stem, ".json"), lac-record-json(model, promptPath, rc, warm, secs, load, txt, meta));
+            str_concat("  ", str_concat(lac-basename(stem), str_concat(": ", str_concat(lac-tenth(secs), str_concat("s (warm ", str_concat(lac-tenth(warm), str_concat("s) load ", str_concat(lac-tenth(load), str_concat(" chars ", str_concat(int_to_str(lac-chars(txt, 0, 0)), str_concat(" eval ", lac-eval-shown(resp, ok))))))))))));
+        }
+        def lac-run() {
+            let mode = lac-line();
+            let model = lac-line();
+            let promptPath = lac-line();
+            if str_eq(mode, "body") then lac-body(model, promptPath, str_to_int(lac-line()), lac-line()) else if str_eq(mode, "record") then lac-record(model, promptPath, lac-line(), lac-line(), lac-line(), lac-line(), lac-line()) else form_error("local authoring ask: first line names body or record");
+        }
+    }
+    lac-run();
+}
