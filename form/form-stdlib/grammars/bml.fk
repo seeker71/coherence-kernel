@@ -7390,8 +7390,12 @@
                 (bml-bnml-any-needs-frame? (tail nodes)))))
 
     ;; A body with snapshots starts its frame with an empty __marks stack.
+    ;; A body that keeps the value it stands on keeps a frame for it.
     (defn bml-hati-bnml-body-in (nodes result)
-        (if (bml-bnml-any-needs-frame? nodes)
+        (bml-hati-bnml-body-in-env nodes result (empty)))
+
+    (defn bml-hati-bnml-body-in-env (nodes result env)
+        (if (if (bml-bnml-any-needs-frame? nodes) true (bml-bnml-keeps-standing? nodes env))
             (do
                 (let entry
                     (bml-hati-pool-ensure
@@ -7433,12 +7437,15 @@
             result))
 
     (defn bml-hati-lower-method-body-in (node pool env)
-        (bml-hati-bnml-body-in
-            (list (bml-method-node-body node))
-            (bml-hati-lower-node-in-env
-                (bml-bnml-top-body-node (bml-method-node-body node))
-                pool
-                (bml-hati-method-param-env node env))))
+        (do
+            (let body-env (bml-hati-method-param-env node env))
+            (bml-hati-bnml-body-in-env
+                (list (bml-method-node-body node))
+                (bml-hati-lower-node-in-env
+                    (bml-bnml-top-body-node-in (bml-method-node-body node) body-env)
+                    pool
+                    body-env)
+                body-env)))
 
     ;; a store answers the value it stored, as BMA's store leaves it on top
     (defn bml-hati-lower-bnml-store (key value-node pool env)
@@ -7517,14 +7524,97 @@
     ;; a body that carries control keeps its statements as they are: the
     ;; control lowering reads each statement's own shape
     (defn bml-bnml-top-body (nodes)
-        (if (bml-bnml-any-snapshots? nodes)
+        (bml-bnml-top-body-in nodes (empty)))
+
+    (defn bml-bnml-top-body-in (nodes env)
+        (if (bml-bnml-keeps-standing? nodes env)
             (if (bml-ctl-any-bearing? nodes) nodes (bml-bnml-top-rewrite-list nodes))
             nodes))
 
     (defn bml-bnml-top-body-node (node)
-        (if (bml-bnml-takes-snapshots? node)
+        (bml-bnml-top-body-node-in node (empty)))
+
+    (defn bml-bnml-top-body-node-in (node env)
+        (if (bml-bnml-keeps-standing? (list node) env)
             (if (bml-ctl-bearing? node) node (bml-bnml-top-rewrite node))
             node))
+
+    ;; --- a failure travels to the top ---------------------------------
+    ;; A fail no choose catches ends the program, as BMA's fail mode does:
+    ;; FAILED stays set, every body up the call chain stops after the
+    ;; statement that failed, and the program answers the value it stood
+    ;; on. In a unit that holds a fail anywhere (a failure can travel) a
+    ;; statement that calls a method or fails may stop the ones after it,
+    ;; and its body keeps the value it stands on. A unit with no fail
+    ;; lowers as before.
+
+    (defn bml-bnml-keeps-standing? (nodes env)
+        (if (bml-bnml-any-snapshots? nodes)
+            true
+            (if (bml-bnml-env-fallible? env)
+                (if (bml-bnml-any-holds-user-call? nodes)
+                    true
+                    (bml-bnml-any-fails-inside? nodes))
+                false)))
+
+    (defn bml-bnml-env-fallible (env fallible)
+        (if fallible
+            (cons (bml-local-binding "__bml_fallible" (bml-ast-int 1) env) env)
+            env))
+
+    (defn bml-bnml-env-fallible? (env)
+        (not (nil? (bml-local-lookup env "__bml_fallible"))))
+
+    (defn bml-bnml-fails-anywhere? (node)
+        (if (node_eq node (bml-ast-fail 0))
+            true
+            (if (eq (len (node_children node)) 0)
+                false
+                (bml-bnml-any-fails-anywhere? (node_children node)))))
+
+    (defn bml-bnml-any-fails-anywhere? (nodes)
+        (if (nil? nodes)
+            false
+            (if (bml-bnml-fails-anywhere? (head nodes))
+                true
+                (bml-bnml-any-fails-anywhere? (tail nodes)))))
+
+    (defn bml-bnml-units-fail? (units)
+        (if (nil? units)
+            false
+            (if (bml-bnml-any-fails-anywhere? (bml-scope-unit-all-nodes (head units)))
+                true
+                (bml-bnml-units-fail? (tail units)))))
+
+    ;; a call that can carry a failure back: a method, a member, a new
+    (defn bml-bnml-user-call? (node)
+        (if (node_eq (node_category node) BML-AST-CALL)
+            (if (ge (len (node_children node)) 2)
+                (if (str_eq (value_kind (bml-call-name node)) "string")
+                    (if (bml-scope-prefix? (bml-call-name node) "__")
+                        (fsc-string-list-contains?
+                            (list "__hati_invoke" "__hati_new" "__hati_self_ctor" "__hati_super_ctor")
+                            (bml-call-name node))
+                        true)
+                    false)
+                false)
+            false))
+
+    (defn bml-bnml-holds-user-call? (node)
+        (if (eq (len (node_children node)) 0)
+            false
+        (if (bml-bnml-user-call? node)
+            true
+        (if (node_eq (node_category node) BML-AST-METHOD)
+            false
+            (bml-bnml-any-holds-user-call? (node_children node))))))
+
+    (defn bml-bnml-any-holds-user-call? (nodes)
+        (if (nil? nodes)
+            false
+            (if (bml-bnml-holds-user-call? (head nodes))
+                true
+                (bml-bnml-any-holds-user-call? (tail nodes)))))
 
     (defn bml-bnml-rides-out? (kind)
         (if (str_eq kind "bnml-assign")
@@ -7623,14 +7713,30 @@
                 (fk-sequence (bml-hati-lower-expr effect) (bml-hati-lower-expr top))
                 (bml-hati-lower-pool top))))
 
+    ;; a statement's value becomes the standing value only if it ran to
+    ;; the end: once FAILED is set the value it stood on before stays
+    (defn bml-bnml-value-key () "__value")
+
     (defn bml-hati-lower-top (node pool env)
         (do
             (let inner (bml-hati-lower-node-in-env (head (bml-call-args node)) pool env))
-            (bml-hati-then-top
+            (let held
+                (bml-hati-bnml-set
+                    (bml-bnml-value-key)
+                    (bml-hati-lower-expr inner)
+                    (bml-hati-lower-pool inner)))
+            (let value (bml-hati-bnml-get (bml-bnml-value-key) (bml-hati-lower-pool held)))
+            (let keep
                 (bml-hati-bnml-set
                     (bml-bnml-top-key)
-                    (bml-hati-lower-expr inner)
-                    (bml-hati-lower-pool inner)))))
+                    (bml-hati-lower-expr value)
+                    (bml-hati-lower-pool value)))
+            (bml-hati-then-top
+                (bml-hati-lower-result
+                    (fk-sequence
+                        (bml-hati-lower-expr held)
+                        (fk-if (bml-hati-unfailed 0) (bml-hati-lower-expr keep) (fk-lit 0)))
+                    (bml-hati-lower-pool keep)))))
 
     (defn bml-hati-lower-save-in (pool env)
         (do
@@ -7779,12 +7885,17 @@
                 (fk-empty))))
 
     ;; a statement that can fail stops the ones after it: inside a branch
-    ;; every statement can (a callee's failure reads the same cell), outside
-    ;; one a statement that holds a choose that tracks
+    ;; every statement can (a callee's failure reads the same cell); outside
+    ;; one, a statement that holds a choose that tracks, and, in a unit
+    ;; where a failure travels, one that fails or calls a method
     (defn bml-bnml-may-stop? (node env)
         (if (bml-bnml-choosing? env)
             true
-            (bml-bnml-holds-tracking-choose? node)))
+        (if (bml-bnml-holds-tracking-choose? node)
+            true
+        (if (bml-bnml-env-fallible? env)
+            (if (bml-bnml-holds-user-call? node) true (bml-bnml-fails-inside? node))
+            false))))
 
     (defn bml-bnml-holds-tracking-choose? (node)
         (if (eq (len (node_children node)) 0)
@@ -7956,15 +8067,13 @@
                 true
                 (bml-bnml-choosing? (tail env)))))
 
-    ;; a fail answers the choose around it; with none, it is named
-    (defn bml-bnml-fail-need (env)
-        (if (bml-bnml-choosing? env) (empty) (list "fail")))
+    ;; a fail answers the choose around it; with none left to catch it, it
+    ;; ends the program at the value it stood on, as BMA's fail mode does
+    (defn bml-bnml-fail-need (env) (empty))
 
     (defn bml-hati-lower-fail-in (pool env)
         (bml-hati-lower-result
-            (if (bml-bnml-choosing? env)
-                (bml-ctl-set-cell (bml-bnml-failed-cell 0) (fk-lit 1))
-                (fk-lit 0))
+            (bml-ctl-set-cell (bml-bnml-failed-cell 0) (fk-lit 1))
             pool))
 
     (defn bml-hati-unsupported-choose-node-in (node env)
@@ -9572,17 +9681,23 @@
                     env)
                 lane)))
 
+    ;; On the Hati lane a unit's env says whether a failure can travel:
+    ;; any linked unit holds a fail somewhere.
     (defn bml-scope-unit-env-with (link unit symbols lane)
-        (bml-scope-own-env
-            symbols
-            (bml-scope-unit-pos unit)
-            (bml-scope-import-env
-                (bml-scope-link-all link)
-                (bml-scope-unit-imports unit)
+        (bml-bnml-env-fallible
+            (bml-scope-own-env
                 symbols
-                (bml-scope-base-env link unit symbols lane)
+                (bml-scope-unit-pos unit)
+                (bml-scope-import-env
+                    (bml-scope-link-all link)
+                    (bml-scope-unit-imports unit)
+                    symbols
+                    (bml-scope-base-env link unit symbols lane)
+                    lane)
                 lane)
-            lane))
+            (if (str_eq lane "hati")
+                (bml-bnml-units-fail? (bml-scope-link-linked link))
+                false)))
 
     ;; A unit's top-level consts, in source order, each bound to the env its
     ;; value reads: the unit's methods and imports and the consts before it.
@@ -9959,9 +10074,13 @@
                             (bml-hati-unsupported-methods-in methods method-env)
                             (bml-scope-linked-unsupported link others symbols)))))
             (let main-lowered
-                (bml-hati-bnml-body-in
+                (bml-hati-bnml-body-in-env
                     main-nodes
-                    (bml-hati-lower-nodes-in-env (bml-bnml-top-body main-nodes) (empty) method-env)))
+                    (bml-hati-lower-nodes-in-env
+                        (bml-bnml-top-body-in main-nodes method-env)
+                        (empty)
+                        method-env)
+                    method-env))
             (let methods-lowered
                 (bml-hati-lower-methods-in
                     methods
@@ -10505,20 +10624,46 @@
                 (bnsc-throw (bml-node-child node 0) (bml-ctl-source 0))
                 (bnsc-value (bml-node-child node 0) (bml-ctl-source 0)))))))
 
+    ; A body that keeps the value it stands on writes it at each plain
+    ; statement, at any depth of its control; a failure that stopped the
+    ; body answers it through the epilogue.
     (defn bml-ctl-lower-function (nodes pool env)
         (do
             (let fn-index (bml-ctl-env-fn-index env))
+            (let standing (bml-bnml-keeps-standing? nodes env))
             (let body-r
                 (bml-ctl-lower-stmts
                     nodes
                     (bml-ctl-st pool (empty) 1)
-                    (bml-ctl-env-active env)
-                    (bml-ctl-ctx fn-index (empty) (bml-bnml-any-needs-frame? nodes))))
+                    (bml-ctl-env-standing (bml-ctl-env-active env) standing)
+                    (bml-ctl-ctx
+                        fn-index
+                        (empty)
+                        (if standing true (bml-bnml-any-needs-frame? nodes)))))
+            (let body-pool (bml-ctl-st-pool (bml-ctl-r-st body-r)))
+            (let top
+                (if standing
+                    (bml-hati-bnml-get (bml-bnml-top-key) body-pool)
+                    (bml-hati-lower-result (fk-lit 0) body-pool)))
             (bml-hati-lower-result
                 (bml-ctl-dispatch
                     (bml-ctl-st-helpers (bml-ctl-r-st body-r))
-                    (fk-sequence (bml-ctl-r-expr body-r) (bml-ctl-epilogue 0)))
-                (bml-ctl-st-pool (bml-ctl-r-st body-r)))))
+                    (fk-sequence
+                        (bml-ctl-r-expr body-r)
+                        (if standing
+                            (fk-if (bml-hati-unfailed 0)
+                                   (bml-ctl-epilogue 0)
+                                   (bml-hati-lower-expr top))
+                            (bml-ctl-epilogue 0))))
+                (bml-hati-lower-pool top))))
+
+    (defn bml-ctl-env-standing (env standing)
+        (if standing
+            (cons (bml-local-binding "__bml_ctl_standing" (bml-ast-int 1) env) env)
+            env))
+
+    (defn bml-ctl-standing? (env)
+        (not (nil? (bml-local-lookup env "__bml_ctl_standing"))))
 
     (defn bml-ctl-epilogue (_x)
         (fk-if (bml-ctl-mode-is (bml-ctl-return-mode 0))
@@ -10556,7 +10701,7 @@
                 (tail nodes)
                 (bml-ctl-env-after (head nodes) env)
                 ctx
-                (bml-bnml-holds-tracking-choose? (head nodes)))))
+                (bml-bnml-may-stop? (head nodes) env))))
 
     ; a statement whose choose can fail also stops the ones after it
     (defn bml-ctl-lower-stmts-after (first-r nodes env ctx stops)
@@ -10654,7 +10799,10 @@
                 (bml-ctl-refuse "with" st)
             (if (node_eq cat BML-AST-METHOD)
                 (bml-ctl-refuse "control/nested-method" st)
-                (bml-ctl-lower-expr node st env))))))))))))
+                (bml-ctl-lower-expr
+                    (if (bml-ctl-standing? env) (bml-bnml-top-rewrite node) node)
+                    st
+                    env))))))))))))
 
     (defn bml-ctl-lower-effect (effect st env ctx)
         (if (bml-ctl-targeted-kind? (bnsc-effect-kind effect))
@@ -10788,8 +10936,7 @@
                                        (bml-ctl-loop-react
                                            id
                                            (bml-hati-unfailed-guard
-                                               (bml-bnml-holds-tracking-choose?
-                                                   (bml-ctl-loop-body parts))
+                                               (bml-bnml-may-stop? (bml-ctl-loop-body parts) env)
                                                (fk-sequence
                                                    (bml-ctl-r-expr update-r)
                                                    (bml-ctl-guard reenter))))))
@@ -13606,9 +13753,13 @@
                         (let env (bml-hati-member-env layout owner member base-env))
                         (let body (bml-method-node-body (bml-hati-member-node member)))
                         (let lowered
-                            (bml-hati-bnml-body-in
+                            (bml-hati-bnml-body-in-env
                                 (list body)
-                                (bml-hati-lower-node-in-env body pool env)))
+                                (bml-hati-lower-node-in-env
+                                    (bml-bnml-top-body-node-in body env)
+                                    pool
+                                    env)
+                                env))
                         (bml-hati-lower-members
                             layout
                             owner
