@@ -40,7 +40,10 @@ The [Form-native accessor](native-node-accessor.md) now provides an independent
 raw-u64 call boundary and leased blueprint storage without changing this seed.
 The [identity directory](native-identity-directory.md) adds sparse adaptive
 segments and imports published primary handles through Form-emitted read-only
-host calls. The directory and importer add no handwritten C ownership.
+host calls. The [resident arena](native-identity-arena.md) adds Form-emitted
+semantic-word generation, native chunk growth, pinned readers and adaptive
+freezing. Its native image is admitted before data allocation; measured hot
+generation and append calls mint no primary nodes. These owners add no C code.
 Primary field migration still crosses `fk_field_fill`/`fk_field_intern_node`,
 the direct column readers, the collector's mark/relocation passes and native
 admission side tables. A raw semantic ID is not a tagged handle or a reusable

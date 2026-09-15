@@ -68,7 +68,11 @@ The [sparse identity directory](native-identity-directory.md) serves complete
 64-bit words from adaptive segments through a native getter. Its read-only
 importer accepts published primary node handles and retains their exact words
 after source mappings close. Distant rows allocate only their populated
-segments. Primary C allocation, interning and readers still own the shared field.
+segments. The [resident arena](native-identity-arena.md) generates the same
+semantic words directly in native RAM and grows owned chunks without primary
+node minting in measured hot batches. Its allocation rows remain distinct from
+primary tagged handles. Primary C allocation, interning and readers still own
+the shared field.
 
 ## Executable observation and direction
 

@@ -67,10 +67,12 @@ The primary shared field still uses C arrays and a fixed 2^26-cell capacity.
 Its semantic identity word, tagged runtime handle and physical slot are
 different objects. The [Form-owned identity directory](native-identity-directory.md)
 now serves sparse stable rows through this ABI and imports published primary
-identities through read-only native mappings. Primary producers and C readers
-still need to move behind that directory.
-Before replacing allocation, native admission must be resident so it cannot
-recursively depend on the allocator it replaces. Reference-bearing category,
+identities through read-only native mappings. The [resident arena](native-identity-arena.md)
+adds native generation and chunk allocation behind this getter ABI. Its image
+stands before its data allocations; pinned prefixes can freeze into adaptive
+segments and survive producer retirement. Primary canonical interning, tagged
+handles and C readers still need to move behind a native owner. That cutover
+must keep admission independent of the allocator it replaces. Reference-bearing category,
 children and value columns need a root/relocation bridge: the current collector
 marks and rewrites those arrays and cannot see arbitrary raw RAM. Slot reuse
 also needs handle generations and ownership of native side tables. Those

@@ -56,6 +56,9 @@ over adaptive segments. Existing readers retain their exact generation while
 new ranges publish. An owned-span input lets the storage emitter probe and
 encode native words directly. A read-only importer brings published primary
 node identities into one owned generation without per-word Form conversion.
+The [resident arena](native-identity-arena.md) generates identities and grows
+native chunks before freezing pinned prefixes into adaptive directory segments.
+Frozen words remain available after all producer chunks and code release.
 
 The [layout witness](../observe/native-blueprint-layout-witness.bml) compares
 all field widths against an independent bit oracle, executes actual CPU and

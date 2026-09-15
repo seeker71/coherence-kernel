@@ -82,10 +82,16 @@ source closure; the refusal must occur before the importer opens primary-field
 objects. This mode selects the kernel's per-process node home; it does not
 establish private-heap execution.
 
-[Source-bound evidence](evidence/fkwu/native-blueprint-layout.json) retains eight
+[Source-bound evidence](evidence/fkwu/native-blueprint-layout.json) retains nine
 actual child executions, including non-field-home refusal and the existing
 CPU/Metal layout and float checks. Every child exits zero, has empty stderr and
 releases its native owners.
+
+The [resident arena](native-identity-arena.md) generates and allocates identities
+in native RAM, then freezes a pinned prefix into this directory in one
+publication. Native generation and a 4,096-row append mint no primary nodes in
+the measured hot calls. The directory retains its owned adaptive words after
+complete arena retirement. Arena rows remain owner-local allocation coordinates.
 
 Publication and release are serialized in one Form process. The current root
 is a copied 32-byte descriptor, not an atomic publication for concurrent readers.
@@ -102,10 +108,11 @@ RSS. Form record metadata and retired range reservations remain retained until
 the seed process ends. The execution establishes correct access and lifetime,
 not a general bandwidth improvement.
 
-The next boundary is resident native allocation and the primary producer/read
-path. Admission must stand before allocator cutover, so it cannot recursively
-depend on the allocator being replaced. Then C allocation and identity readers
-can move behind the Form directory. Reference-bearing columns additionally need
+The next boundary is canonical interning and the primary producer/read path.
+The arena admits its implementation before allocating data. Primary cutover
+must preserve that ordering while retaining tagged handles and native side-table
+ownership. C allocation and identity readers can then move behind the Form
+owner. Reference-bearing columns additionally need
 collector root retention and relocation; slot reuse needs handle generations
 and side-table ownership. The [north star](fkwu-form-native-north-star.md) keeps
 these obligations with the resource owner.
