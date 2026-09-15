@@ -367,11 +367,82 @@ section [form.bml] {
    bfk-r(list(bfk-let(m, bfk-f1("tail", bfk-vm-marks(vm))), bfk-journal-close()), bfk-vm-put(vm, "__marks", m), bfk-top(vm));
   }
 
-  // ── what later rungs carry ──────────────────────────────────────────────
+  // ── classes ─────────────────────────────────────────────────────────────
+  // A record is a Form record carrying bmlClass, bmlClassId and every field.
+  // A member is one defn over the packed (self a0 a1 ...) list the layout's
+  // calls pass; a method table reads self's class id and hands the same list
+  // to the member that answers it. Which member a call reaches, which
+  // constructor a new runs, which field a path names: the layout's own choice.
+  def bfk-pack(vm) = bfk-vm-or0(vm, "@pack");
+  def bfk-self(vm) = bfk-f1("head", bfk-pack(vm));
   def bfk-class-shaped?(node, env) = if bml-hati-class-call?(node) then true else if bml-hati-field-assign?(node, env) then true else if bml-hati-dotted-assign?(node, env) then true else if bml-hati-receiver-name?(bml-call-name(node), env) then true else bml-hati-member-call?(bml-call-name(node), env);
-  def bfk-class-call(cx, node, env, vm) = if bml-call-named?(node, "__hati_unread") then bfk-need-add(cx, bml-voice-then(bml-unread-reading(bml-hati-marker-str(node, 0)), "source/unread")) else bfk-need(cx, "form/class");
-  def bfk-class-name(cx, node, env, vm) = bfk-need(cx, "form/class");
-  def bfk-class-with(cx, node, env, vm) = bfk-need(cx, "form/class");
+  def bfk-class-call(cx, node, env, vm) = if bml-hati-class-call?(node) then bfk-class-marker(cx, node, bml-call-name(node), env, vm) else if bml-hati-field-assign?(node, env) then bfk-this-field-store(cx, bml-bnml-target-name(node), bml-bnml-value(node), env, vm) else if bml-hati-dotted-assign?(node, env) then bfk-path-store(cx, bml-hati-dotted-split(bml-bnml-target-name(node)), bml-bnml-value(node), env, vm) else if bml-hati-receiver-name?(bml-call-name(node), env) then bfk-path-invoke(cx, bml-hati-dotted-split(bml-call-name(node)), bml-call-args(node), env, vm) else bfk-invoke(cx, bml-ast-name("this"), bml-call-name(node), bml-call-args(node), env, vm);
+  def bfk-class-name(cx, node, env, vm) = bfk-path-read(cx, bml-hati-dotted-split(bml-local-name(node)), env, vm);
+  def bfk-class-with(cx, node, env, vm) = if bml-ctl-with-member-node?(node) then bfk-field-read(cx, bml-ctl-with-base-node(0), bml-ctl-with-member-name(node), env, vm) else bfk-expr(cx, bml-ctl-with-call-of(node), env, vm);
+
+  def bfk-class-marker(cx, node, name, env, vm) = if or(str_eq(name, "__hati_self"), str_eq(name, "__hati_super")) then bfk-self(vm) else if str_eq(name, "__hati_param") then bfk-f2("nth", bfk-pack(vm), bfk-int(add(bml-hati-marker-int(node, 0), 1))) else if str_eq(name, "__hati_field") then bfk-this-field-read(cx, bml-hati-marker-str(node, 0), env, vm) else if str_eq(name, "__hati_field_get") then bfk-this-field-read(cx, node_value(bml-node-child(head(bml-call-args(node)), 0)), env, vm) else if str_eq(name, "__hati_field_set") then bfk-this-field-store(cx, node_value(bml-node-child(head(bml-call-args(node)), 0)), nth(bml-call-args(node), 1), env, vm) else if str_eq(name, "__hati_new") then bfk-new(cx, bml-hati-env-layout(env), bml-hati-marker-str(node, 0), tail(bml-call-args(node)), env, vm) else if str_eq(name, "__hati_invoke") then bfk-invoke(cx, bml-hati-marker-arg(node, 0), bml-hati-marker-str(node, 1), drop(2, bml-call-args(node)), env, vm) else if str_eq(name, "__hati_self_ctor") then bfk-ctor-chain(cx, "self", bml-call-args(node), env, vm) else if str_eq(name, "__hati_super_ctor") then bfk-ctor-chain(cx, "super", bml-call-args(node), env, vm) else bfk-need(cx, bfk-marker-need(node, name));
+  def bfk-marker-need(node, name) = if str_eq(name, "__hati_member") then "name/method" else if str_eq(name, "__hati_ctor") then "name/constructor" else if str_eq(name, "__hati_abstract") then "method/abstract" else if str_eq(name, "__hati_unread") then bml-voice-then(bml-unread-reading(bml-hati-marker-str(node, 0)), "source/unread") else "method/body-unparsed";
+
+  // fields: a field of a class the layout knows, or of an owner it cannot see;
+  // a primitive has none. A set under an open snapshot journals the value it
+  // replaces, and answers 0 as the table's record set does.
+  def bfk-field-known?(env, recv-node, field) = bml-hati-field-known?(bml-hati-env-layout(env), bml-hati-static-type(recv-node, env), field);
+  def bfk-field-read(cx, recv-node, field, env, vm) = if bfk-field-known?(env, recv-node, field) then bfk-f2("record_get", bfk-expr(cx, recv-node, env, vm), bfk-str(field)) else bfk-need(cx, "field/not-found");
+  def bfk-field-store(cx, recv-node, field, value-node, env, vm) = if bfk-field-known?(env, recv-node, field) then bfk-set-field(bfk-fresh(cx, "o"), bfk-expr(cx, recv-node, env, vm), bfk-str(field), bfk-expr(cx, value-node, env, vm)) else bfk-need(cx, "field/not-found");
+  def bfk-set-field(o, recv, key, value) = bfk-do(list(bfk-let(o, recv), bfk-f2("bfk-jot", o, key), bfk-f3("record_set", o, key, value)), "0");
+  def bfk-this-field-read(cx, field, env, vm) = if bml-hati-has-receiver?(env) then bfk-field-read(cx, bml-ast-name("this"), field, env, vm) else bfk-need(cx, "field/no-receiver");
+  def bfk-this-field-store(cx, field, value-node, env, vm) = if bml-hati-has-receiver?(env) then bfk-field-store(cx, bml-ast-name("this"), field, value-node, env, vm) else bfk-need(cx, "field/no-receiver");
+  def bfk-path-read(cx, split, env, vm) = bfk-field-read(cx, bml-ast-name(head(split)), nth(split, 1), env, vm);
+  def bfk-path-store(cx, split, value-node, env, vm) = bfk-field-store(cx, bml-ast-name(head(split)), nth(split, 1), value-node, env, vm);
+  def bfk-path-invoke(cx, split, args, env, vm) = bfk-invoke(cx, bml-ast-name(head(split)), nth(split, 1), args, env, vm);
+
+  // recv.member(args): the layout's choice, a direct member or its method
+  // table; super.member starts at the base and is direct
+  def bfk-invoke(cx, recv-node, member, args, env, vm) = bfk-invoke-with(cx, recv-node, member, args, env, vm, bfk-invoke-choice(recv-node, member, args, env));
+  def bfk-invoke-choice(recv-node, member, args, env) = if bml-hati-super-receiver?(recv-node, env) then bml-hati-super-choice(bml-hati-env-layout(env), bml-hati-name-type(bml-local-name(recv-node), env), member, bml-hati-static-types(args, env)) else bml-hati-invoke-choice(bml-hati-env-layout(env), bml-hati-static-type(recv-node, env), member, bml-hati-static-types(args, env));
+  def bfk-invoke-with(cx, recv-node, member, args, env, vm, choice) = if bml-hati-choice-ok?(choice) then bfk-member-call(cx, bml-hati-choice-value(choice), recv-node, args, env, vm) else bfk-after(cx, bml-hati-voice-refusal("receiver", bml-hati-choice-value(choice), str_concat(bml-hati-static-type(recv-node, env), str_concat(".", member))), cons(recv-node, args), env, vm);
+  def bfk-member-call(cx, fn, recv-node, args, env, vm) = bfk-f1(bfk-fn-name(fn), bfk-form(cons("list", bfk-exprs(cx, cons(recv-node, args), env, vm))));
+  // a call the layout cannot give still lowers what it carries, so a need
+  // nested in its receiver or arguments is named beside its own
+  def bfk-after(cx, reason, nodes, env, vm) = bfk-after-then(bfk-exprs(cx, nodes, env, vm), bfk-need(cx, reason));
+  def bfk-after-then(_carried, text) = text;
+
+  // new C(args): one record with the class's id and its fields, then the
+  // constructor the layout picks over it
+  def bfk-new(cx, layout, class-type, args, env, vm) = if nil?(bml-hati-layout-class(layout, class-type)) then bfk-after(cx, bfk-unknown-class(layout, class-type), args, env, vm) else if bml-hati-class-abstract?(layout, class-type) then bfk-need(cx, bml-hati-voice-refusal("construction", "new/abstract-class", class-type)) else if not(bml-hati-fields-init-ok?(bml-hati-class-fields-all(layout, class-type))) then bfk-need(cx, bml-hati-voice-refusal("construction", "field/init", class-type)) else bfk-new-ctor(cx, layout, bml-hati-layout-class(layout, class-type), args, env, vm, bml-hati-ctor-choice(layout, class-type, bml-hati-static-types(args, env)));
+  def bfk-unknown-class(layout, class-type) = if bml-hati-template-named?(layout, bml-hati-type-base(class-type)) then bml-hati-voice-refusal("specialization", "template/unspecialized", class-type) else bml-hati-voice-refusal("construction", "new/unknown-class", class-type);
+  def bfk-new-ctor(cx, layout, entry, args, env, vm, choice) = if not(bml-hati-choice-ok?(choice)) then bfk-need(cx, bml-hati-voice-refusal("construction", bml-hati-choice-value(choice), bml-hati-class-name(entry))) else if lt(bml-hati-choice-value(choice), 0) then bfk-instance(cx, layout, entry) else bfk-f1(bfk-fn-name(bml-hati-choice-value(choice)), bfk-form(cons("list", cons(bfk-instance(cx, layout, entry), bfk-exprs(cx, args, env, vm)))));
+  def bfk-instance(cx, layout, entry) = bfk-f2("bfk-obj", "(record_new 0)", bfk-form(cons("list", append(list(bfk-row("bmlClass", bfk-str(bml-hati-class-name(entry))), bfk-row("bmlClassId", bfk-int(bml-hati-class-id(entry)))), bfk-field-rows(cx, bml-hati-field-rows(bml-hati-class-fields-all(layout, bml-hati-class-name(entry))))))));
+  def bfk-row(key, value) = bfk-f2("list", bfk-str(key), value);
+  def bfk-field-rows(cx, rows) = if nil?(rows) then empty else cons(bfk-row(head(head(rows)), bfk-expr(cx, nth(head(rows), 1), empty, empty)), bfk-field-rows(cx, tail(rows)));
+
+  // self(args) runs another constructor of this class on the same record;
+  // super(args) runs one of the base class's
+  def bfk-ctor-chain(cx, which, args, env, vm) = bfk-ctor-chain-at(cx, which, args, env, vm, bml-local-lookup-direct(env, "__hati_ctor"));
+  def bfk-ctor-chain-at(cx, which, args, env, vm, binding) = if nil?(binding) then bfk-need(cx, "ctor/outside-constructor") else bfk-ctor-target(cx, bml-hati-env-layout(env), bfk-chain-class(bml-hati-env-layout(env), which, bml-hati-marker-str(bml-local-binding-value(binding), 0)), args, env, vm);
+  def bfk-chain-class(layout, which, class-name) = if str_eq(which, "self") then class-name else bml-hati-class-base-name(layout, class-name);
+  def bfk-ctor-target(cx, layout, target, args, env, vm) = if nil?(bml-hati-layout-class(layout, target)) then bfk-need(cx, "super/no-base") else bfk-ctor-call(cx, bml-hati-ctor-choice(layout, target, bml-hati-static-types(args, env)), args, env, vm);
+  def bfk-ctor-call(cx, choice, args, env, vm) = if not(bml-hati-choice-ok?(choice)) then bfk-need(cx, bml-hati-choice-value(choice)) else if lt(bml-hati-choice-value(choice), 0) then bfk-self(vm) else bfk-member-call(cx, bml-hati-choice-value(choice), bml-ast-name("this"), args, env, vm);
+
+  // every member of every class and interface, each in its owner's env,
+  // then the method tables and the trap
+  def bfk-decls(cx, layout, env, homes) = append(bfk-owners(cx, layout, append(bml-hati-layout-classes(layout), bml-hati-layout-ifaces(layout)), env, homes), append(bfk-stubs(layout, bml-hati-layout-stubs(layout)), bfk-trap(layout)));
+  def bfk-owners(cx, layout, owners, env, homes) = if nil?(owners) then empty else append(bfk-members(cx, layout, nth(head(owners), 1), nth(head(owners), if str_eq(head(head(owners)), "bml-hati-class") then 5 else 3), bml-hati-owner-env(homes, nth(head(owners), 1), env)), bfk-owners(cx, layout, tail(owners), env, homes));
+  def bfk-members(cx, layout, owner, members, base-env) = if nil?(members) then empty else if lt(bml-hati-member-fn(head(members)), 0) then bfk-members(cx, layout, owner, tail(members), base-env) else cons(bfk-member(cx, layout, owner, head(members), base-env), bfk-members(cx, layout, owner, tail(members), base-env));
+  def bfk-member(cx, layout, owner, member, base-env) {
+   let env = bml-hati-member-env(layout, owner, member, base-env);
+   let body = bml-method-node-body(bml-hati-member-node(member));
+   let heard = bfk-need-all(cx, bml-hati-unsupported-node-in(body, env));
+   let text = bfk-body-text(cx, bml-bnml-top-body-node-in(body, env), env, bfk-frame-vm(list(body), env, bfk-vm-put(empty, "@pack", "a0")));
+   bfk-form(list("defn", bfk-fn-name(bml-hati-member-fn(member)), "(a0)", if str_eq(bml-hati-member-kind(member), "ctor") then bfk-do(list(text), "(head a0)") else text));
+  }
+  def bfk-need-all(cx, reasons) = if nil?(reasons) then 0 else bfk-need-all-then(cx, bfk-need-add(cx, head(reasons)), tail(reasons));
+  def bfk-need-all-then(cx, _added, rest) = bfk-need-all(cx, rest);
+  def bfk-stubs(layout, stubs) = if nil?(stubs) then empty else cons(bfk-stub(layout, head(stubs)), bfk-stubs(layout, tail(stubs)));
+  def bfk-stub(layout, stub) = bfk-form(list("defn", bfk-fn-name(nth(stub, 1)), "(a0)", bfk-do(list(bfk-let("k", bfk-f2("record_get", "(head a0)", bfk-str("bmlClassId")))), bfk-disp(nth(stub, 2), 0, bml-hati-layout-trap(layout)))));
+  def bfk-disp(table, k, trap) = if nil?(table) then bfk-trap-call(trap) else bfk-if(bfk-f2("eq", "k", bfk-int(k)), bfk-f1(bfk-fn-name(if lt(head(table), 0) then trap else head(table)), "a0"), bfk-disp(tail(table), add(k, 1), trap));
+  def bfk-trap-call(trap) = if lt(trap, 0) then "0" else bfk-f1(bfk-fn-name(trap), "a0");
+  def bfk-trap(layout) = if lt(bml-hati-layout-trap(layout), 0) then empty else list(bfk-form(list("defn", bfk-fn-name(bml-hati-layout-trap(layout)), "(a0)", bfk-str(bml-hati-trap-text()))));
 
   // ── methods and the program ─────────────────────────────────────────────
   def bfk-params(n, i) = if ge(i, n) then empty else cons(str_concat("a", int_to_str(i)), bfk-params(n, add(i, 1)));
@@ -402,9 +473,11 @@ section [form.bml] {
   def bfk-inits() = list(bfk-cell-set("m", "0"), bfk-cell-set("v", "0"), bfk-cell-set("t", "0"), bfk-cell-set("f", "0"), bfk-cell-set("j", "(list)"), bfk-cell-set("c", "0"), bfk-cell-set("d", "0"));
   def bfk-undo-def() = bfk-form(list("defn", "bfk-undo", "(n)", bfk-if("(le n 0)", "0", bfk-do(list(bfk-let("e", bfk-f1("head", bfk-cell("j"))), bfk-form(list("record_set", "(nth e 0)", "(nth e 1)", "(nth e 2)")), bfk-cell-set("j", bfk-f1("tail", bfk-cell("j"))), bfk-cell-set("c", bfk-f2("sub", bfk-cell("c"), "1"))), "(bfk-undo (sub n 1))"))));
   def bfk-list-set-def() = bfk-form(list("defn", "bfk-list-set", "(xs at v)", bfk-if("(eq (len xs) 0)", "xs", bfk-if("(eq at 0)", "(cons v (tail xs))", "(cons (head xs) (bfk-list-set (tail xs) (sub at 1) v))"))));
+  def bfk-jot-def() = bfk-form(list("defn", "bfk-jot", "(o k)", bfk-if(bfk-f2("le", bfk-cell("d"), "0"), "0", bfk-do(list(bfk-cell-set("j", bfk-f2("cons", "(list o k (record_get o k))", bfk-cell("j"))), bfk-cell-set("c", bfk-f2("add", bfk-cell("c"), "1"))), "0"))));
+  def bfk-obj-def() = bfk-form(list("defn", "bfk-obj", "(o rows)", bfk-if("(eq (len rows) 0)", "o", bfk-do(list("(record_set o (head (head rows)) (nth (head rows) 1))"), "(bfk-obj o (tail rows))"))));
   def bfk-tab() = bfk-str(byte_to_str(9));
   def bfk-out-def() = bfk-form(list("defn", "bfk-out", "(v)", bfk-f2("str_concat", bfk-str("@bfk "), bfk-f2("str_concat", "(value_kind v)", bfk-f2("str_concat", bfk-tab(), bfk-f2("str_concat", bfk-if(bfk-unfailed(), bfk-str("0"), bfk-str("1")), bfk-f2("str_concat", bfk-tab(), "(value_str v)")))))));
-  def bfk-program(cx, texts) = bfk-form(cons("do", cons(bfk-state(), append(bfk-inits(), append(list(bfk-undo-def(), bfk-list-set-def(), bfk-out-def()), append(reverse-list(record_get(cx, "defs")), append(texts, list("(bfk-out (m0))"))))))));
+  def bfk-program(cx, texts) = bfk-form(cons("do", cons(bfk-state(), append(bfk-inits(), append(list(bfk-undo-def(), bfk-list-set-def(), bfk-jot-def(), bfk-obj-def(), bfk-out-def()), append(reverse-list(record_get(cx, "defs")), append(texts, list("(bfk-out (m0))"))))))));
 
   // (text reasons): the program and the needs against it, read over the same
   // link, env, layout and refusal passes the table lowering reads
@@ -423,8 +496,9 @@ section [form.bml] {
    let main-text = bfk-main(cx, main-nodes, env);
    let method-texts = bfk-methods(cx, methods, env, 1);
    let other-texts = bfk-linked(cx, link, others, symbols, add(1, len(methods)));
+   let decl-texts = bfk-decls(cx, layout, env, bml-scope-type-homes(link, others, symbols, layout, bml-hati-type-decls(bml-scope-unit-all-nodes(main))));
    let reasons = bml-hati-reasons-merge(append(passes, bml-hati-layout-reasons(layout)), record_get(cx, "needs"));
-   list(bfk-program(cx, cons(main-text, append(method-texts, other-texts))), reasons);
+   list(bfk-program(cx, cons(main-text, append(method-texts, append(other-texts, decl-texts)))), reasons);
   }
 
   // ── the run: fkwu itself compiles and runs the program ──────────────────
