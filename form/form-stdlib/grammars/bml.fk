@@ -5295,13 +5295,21 @@
             (let name (nth name-parse 0))
             (let rest (nth name-parse 1))
             (if (bml-source-token-value? (head rest) "(")
-                (if (bml-source-token-value? (nth rest 1) ")")
-                    (bml-expr-result
-                        true
-                        (bml-source-call-node name (empty))
-                        (drop 2 rest))
-                    (bml-source-parse-call-args name (tail rest) (empty)))
+                (bml-source-call-then-tail
+                    (if (bml-source-token-value? (nth rest 1) ")")
+                        (bml-expr-result
+                            true
+                            (bml-source-call-node name (empty))
+                            (drop 2 rest))
+                        (bml-source-parse-call-args name (tail rest) (empty))))
                 (bml-expr-result true (bml-ctl-name-node name) rest))))
+
+    ;; a named call, then the member tail on what it answers: f().a,
+    ;; e.Get().a, e.Get().Next().v
+    (defn bml-source-call-then-tail (parsed)
+        (if (bml-expr-ok? parsed)
+            (bml-source-parse-member-tail (bml-expr-node parsed) (bml-expr-rest parsed))
+            parsed))
 
     (defn bml-source-parse-call-args (name objects args)
         (do
@@ -11813,6 +11821,10 @@
     (defn bml-ast-member-get (receiver field)
         (bml-hati-marker "__hati_get" (list receiver (bml-ast-string field))))
 
+    ;; value.field = e; on a value no qualified name can spell
+    (defn bml-ast-member-set (receiver field value)
+        (bml-hati-marker "__hati_set" (list receiver (bml-ast-string field) value)))
+
     (defn bml-ast-self-ctor (args) (bml-hati-marker "__hati_self_ctor" args))
 
     (defn bml-ast-super-ctor (args) (bml-hati-marker "__hati_super_ctor" args))
@@ -11832,7 +11844,7 @@
               "__hati_field" "__hati_member" "__hati_new" "__hati_invoke"
               "__hati_self_ctor" "__hati_super_ctor" "__hati_abstract"
               "__hati_unparsed" "__hati_field_get" "__hati_field_set"
-              "__hati_unread" "__hati_get"))
+              "__hati_unread" "__hati_get" "__hati_set"))
 
     (defn bml-hati-class-call? (node)
         (if (node_eq (node_category node) BML-AST-CALL)
@@ -13352,6 +13364,13 @@
                 (bml-hati-marker-str node 1)
                 pool
                 env)
+        (if (str_eq name "__hati_set")
+            (bml-hati-lower-field-store
+                (bml-hati-marker-arg node 0)
+                (bml-hati-marker-str node 1)
+                (bml-hati-marker-arg node 2)
+                pool
+                env)
         (if (str_eq name "__hati_invoke")
             (bml-hati-lower-invoke
                 (bml-hati-marker-arg node 0)
@@ -13375,7 +13394,7 @@
                         (bml-unread-reading (bml-hati-marker-str node 0))
                         "source/unread")
                     "method/body-unparsed")
-                pool))))))))))))))))
+                pool)))))))))))))))))
 
     (defn bml-hati-lower-class-call-in (node pool env)
         (do
@@ -13436,7 +13455,11 @@
                 (bml-hati-unsupported-node-in (nth args 1) env)
             (if (str_eq name "__hati_get")
                 (bml-hati-unsupported-node-in (head args) env)
-                (empty)))))))))
+            (if (str_eq name "__hati_set")
+                (append
+                    (bml-hati-unsupported-node-in (head args) env)
+                    (bml-hati-unsupported-node-in (nth args 2) env))
+                (empty))))))))))
 
     (defn bml-hati-unsupported-class-call-in (node env)
         (do
@@ -13710,7 +13733,38 @@
                 (let step (bml-source-parse-name-led-step objects))
                 (if (bml-source-parse-step-ok? step)
                     step
-                    (bml-source-parse-expr-statement-step objects)))))))
+                    (bml-source-parse-expr-led-step objects)))))))
+
+    ;; value.field = e; where value is what the member tail reads (a new, a
+    ;; call, a chain): a set of that field on what value answers.
+    (defn bml-source-parse-member-set-step (objects)
+        (do
+            (let target (bml-source-parse-expr objects))
+            (if (if (bml-expr-ok? target)
+                    (if (bml-call-named? (bml-expr-node target) "__hati_get")
+                        (bml-source-token-value? (head (bml-expr-rest target)) "=")
+                        false)
+                    false)
+                (do
+                    (let value (bml-source-parse-expr-semicolon (tail (bml-expr-rest target))))
+                    (if (bml-expr-ok? value)
+                        (bml-source-parse-step
+                            true
+                            "member-set"
+                            (bml-ast-member-set
+                                (bml-hati-marker-arg (bml-expr-node target) 0)
+                                (bml-hati-marker-str (bml-expr-node target) 1)
+                                (bml-expr-node value))
+                            (bml-expr-rest value))
+                        (bml-source-parse-no-step objects)))
+                (bml-source-parse-no-step objects))))
+
+    (defn bml-source-parse-expr-led-step (objects)
+        (do
+            (let step (bml-source-parse-member-set-step objects))
+            (if (bml-source-parse-step-ok? step)
+                step
+                (bml-source-parse-expr-statement-step objects))))
 
     ;; A generic member name<T>(...) in the component parser: its type
     ;; parameters become the Method component's sixth field.
