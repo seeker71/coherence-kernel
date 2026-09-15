@@ -33,13 +33,6 @@ Python: `xs[0]` for `(head xs)`, `xs[1:]` for
   walk-and-emit, returning a Python source string. Public entry
   points: `pn-emit-string source-text → python-text` and
   `pn-emit-file in-fk-path out-py-path`.
-- **`python-native-driver.fk`** — runs `pn-emit-string` on a slice of
-  `engine.fk` and writes a generated module under
-  `form/.cache/emit_native_python/python_bmf/`. The
-  slice covers `cap-empty`, `cap-pair`, `cap-name`, `cap-value`,
-  `cap-get`, `cap-set`, `cap-merge`, `mk-match`, `mk-fail`, `match?`,
-  `fail?` — enough to exercise let / nested if / head / tail / nil? /
-  cons / list / str_eq / recursion in real engine code.
 
 ## Running
 
@@ -48,10 +41,9 @@ Python: `xs[0]` for `(head xs)`, `xs[1:]` for
 cd form && ./validate.sh form-stdlib/core.fk \
                          form-stdlib/emits/python-native.fk
 
-# Emit the demo file from a slice of engine.fk.
-cd form && ./validate.sh form-stdlib/core.fk \
-                         form-stdlib/emits/python-native.fk \
-                         form-stdlib/emits/python-native-driver.fk
+# Emit the objects module from form-ontology.json on fkwu; its second step
+# lets the body's own Python grammar read the page back.
+form/scripts/emit_native_python.sh
 
 # The body's own Python grammar reads the page; a shape it does not carry
 # refuses by name.
