@@ -13,7 +13,12 @@
 // after it, never together. The authoring altitude is
 // observe/authoring-altitude-run.fk's to say.
 //
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
+// The GPU column is the chooser's first reading: the same family's recipe lowered by
+// form-stdlib/bml/gpu-lower.bml from its own nodes, run over a resident buffer with the
+// answer read back (so the wait is paid), wall time per call at the organ's 19 elements and
+// at 100,000, beside the body's own warm reading at 100,000. A family without a list
+// recipe or with string work has no GPU lane and says so.
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/bml/gpu-lower.bml
 //
 // The observe/stdlib-standing-run.fk door only asks this class. It answers the
 // count of families whose named defns all read a native state.
@@ -64,6 +69,35 @@ section [form.bml] {
         }
         def sst-measure-all(fams, xs) = if eq(len(fams), 0) then list() else cons(sst-measure(head(fams), xs), sst-measure-all(tail(fams), xs));
 
+        // ---- the GPU lane, after the body: the same recipe lowered from its nodes, resident data ----
+        def sst-gpu-spec(name) = if str_eq(name, "accumulate") then list("foldl", list(list(0, "sst-add"))) else if str_eq(name, "transform") then list("map-onto", list(list(0, "sst-dbl"))) else if str_eq(name, "copy_if") then list("filter-onto", list(list(0, "sst-even?"))) else if str_eq(name, "reduce") then list("sum-onto", list()) else list();
+        def sst-floats(xs) = if eq(len(xs), 0) then list() else cons(add(head(xs), 0.0), sst-floats(tail(xs)));
+        // one call: enqueue, read the answer (the wait), free the out buffer
+        def sst-gpu-call(prog, h, n) {
+            let out = gl-run(prog, list(h), n, 0.0, list());
+            let v = gl-read(out);
+            let freed = metal_buf_free(out);
+            v;
+        }
+        def sst-gpu-calls(prog, h, n, k, seen) = if le(k, 0) then 0 else sst-gpu-calls(prog, h, n, sub(k, 1), sst-gpu-call(prog, h, n));
+        // wall ns per call over 512 calls, each with its answer read back; -1 when the lane declines
+        def sst-gpu-ns(spec, xs) {
+            let prog = gl-program-bound(nth(spec, 0), nth(spec, 1));
+            let h = if gl-ok?(prog) then gl-f32-buf(sst-floats(xs)) else 0;
+            let warm = if gl-ok?(prog) then sst-gpu-calls(prog, h, len(xs), 8, 0) else 0;
+            let t0 = host_monotonic_ms();
+            let ran = if gl-ok?(prog) then sst-gpu-calls(prog, h, len(xs), 512, 0) else 0;
+            let t1 = host_monotonic_ms();
+            let freed = if gl-ok?(prog) then metal_buf_free(h) else 0;
+            if gl-ok?(prog) then div(mul(sub(t1, t0), 1000000), 512) else -1;
+        }
+        def sst-gpu-text(name, xs, big) {
+            let spec = sst-gpu-spec(name);
+            if eq(len(spec), 0) then "  gpu: no lane" else sst-cat(list("  gpu wall ", int_to_str(sst-gpu-ns(spec, xs)), " ns/call at 19, ", int_to_str(sst-gpu-ns(spec, big)), " at 100k resident (", nth(spec, 0), ")"));
+        }
+        // the body's own warm reading at 100k, so the two sizes name the crossover
+        def sst-big-text(fam, big) = if eq(len(sst-gpu-spec(nth(fam, 0))), 0) then "" else sst-cat(list("  body warm at 100k ", int_to_str(sst-batch(nth(fam, 1), big)), " ns/call"));
+
         // ---- measuring the host's C++, after the body ----
         def sst-host(cmd) {
             let v = host-exec(cmd, "");
@@ -99,6 +133,11 @@ section [form.bml] {
             nth(b, 4);
         }
         def sst-say-all(bs, refs, acc) = if eq(len(bs), 0) then acc else sst-say-all(tail(bs), refs, add(acc, sst-say(head(bs), refs)));
+        def sst-gpu-all(fams, xs, big) = if eq(len(fams), 0) then 0 else sst-gpu-one(head(fams), tail(fams), xs, big);
+        def sst-gpu-one(fam, rest, xs, big) {
+            let shown = print(sst-cat(list("chooser ", nth(fam, 0), sst-gpu-text(nth(fam, 0), xs, big), sst-big-text(fam, big))));
+            sst-gpu-all(rest, xs, big);
+        }
         def sst-run() {
             print(sst-cat(list("stdlib standing, measured: host load ", sst-chomp(sst-host("sysctl -n vm.loadavg")), "  reference ", sst-chomp(sst-host("c++ --version | head -1")))));
             print("both sides: process CPU time, cold = the first 32 calls, warm = median of five 512-call batches past warm-up");
@@ -106,6 +145,8 @@ section [form.bml] {
             let body = sst-measure-all(sst-families(), range(1, 20));
             let refs = sst-oracle-rows(sst-host(sst-oracle-cmd()));
             let warm = sst-say-all(body, refs, 0);
+            let big = range(1, 100001);
+            let gpu = sst-gpu-all(sst-families(), range(1, 20), big);
             print(sst-cat(list("families fully warm: ", int_to_str(warm), " of ", int_to_str(len(sst-families())), "  reference rows: ", int_to_str(len(refs)))));
             warm;
         }
