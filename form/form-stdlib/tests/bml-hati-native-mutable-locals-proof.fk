@@ -1,0 +1,113 @@
+; tests/bml-hati-native-mutable-locals-proof.fk
+;
+; preludes: form-stdlib/core.fk form-stdlib/minimal-surface.fk form-stdlib/json.fk form-stdlib/cache.fk form-stdlib/form-ontology-bp.fk form-stdlib/engine.fk form-stdlib/compiler.fk form-stdlib/source-compiler.fk form-stdlib/hati-os-kernel.fk form-stdlib/hati-os-kernel-emit.fk form-stdlib/grammars/bml.fk
+;
+; general-mutable-local-source-lowering. A local declared in source
+; (`int x = 1;`) is rebound by `x = expr;`, also from inside a nested block,
+; and the rebinding is read after the block. On the Hati lane every function
+; body that declares or assigns opens its own bnml frame: frame slot 1
+; (tag 109) holds a recipe record (tag 64) whose blueprint row is
+; BML-MUTABLE-LOCAL-FRAME; declare and assign are record sets (tag 98) and
+; reads are record gets (tag 97). The BMA reference lane reaches the same
+; values. An unbound or const target is named before any table exists.
+
+(do
+    (defn score-bool (actual)
+        (if actual 1 0))
+
+    (defn score-int (actual expected)
+        (if (eq actual expected) 1 0))
+
+    (defn score-str (actual expected)
+        (if (nil? actual)
+            0
+            (if (str_eq actual expected) 1 0)))
+
+    (defn str-contains? (haystack needle)
+        (ge (str_find haystack needle 0) 0))
+
+    (defn parse (source)
+        (bml-source-parse-executable-stream (bml-source-scan-text source)))
+
+    ;; top level: declare, rebind inside a nested block, read after it
+    (let block-parsed (parse "int x = 2;\n{\n    x = x + 3;\n}\nreturn x + 1;\n"))
+    (let block-node (bml-source-exec-parse-node block-parsed))
+    (let block-image (bml-hati-compile-image block-node))
+    (let block-table (bml-hati-table-file block-image))
+
+    ;; a method body: the nested block's rebinding reaches the return
+    (let method-parsed
+        (parse "int Run() {\n    int x = 1;\n    {\n        x = x + 4;\n    }\n    return x + 10;\n}\n"))
+    (let method-node (head (bml-source-exec-parse-nodes method-parsed)))
+    (let method-image (bml-hati-compile-image method-node))
+
+    ;; a parameter rebound inside a nested block becomes a frame slot
+    (let param-node
+        (head (bml-source-exec-parse-nodes
+            (parse "int Bump(int n) {\n    {\n        n = n + 5;\n    }\n    return n;\n}\n"))))
+
+    ;; two blocks deep, then the outer block, then after both
+    (let deep-node
+        (bml-source-exec-parse-node
+            (parse "int x = 1;\n{\n    {\n        x = x + 2;\n    }\n    x = x + 3;\n}\nreturn x;\n")))
+
+    ;; an inner declaration shadows; the outer local stays itself
+    (let shadow-node
+        (bml-source-exec-parse-node
+            (parse "int x = 1;\n{\n    int x = 5;\n    x = x + 1;\n}\nreturn x;\n")))
+
+    ;; a const that reads a mutable local keeps the value it read
+    (let snapshot-node
+        (bml-source-exec-parse-node
+            (parse "int x = 1;\nconst int y = x + 1;\nx = 10;\nreturn y + x;\n")))
+
+    ;; a called method opens its own frame; the caller opens none
+    (let call-node
+        (bml-source-exec-parse-node
+            (parse "int Twice(int n) {\n    int x = n;\n    x = x + n;\n    return x;\n}\nreturn Twice(4);\n")))
+    (let call-image (bml-hati-compile-image call-node))
+
+    ;; named before table emission, never a silent zero
+    (let unbound-image
+        (bml-hati-compile-image
+            (bml-source-exec-parse-node (parse "x = 3;\nreturn x;\n"))))
+    (let const-image
+        (bml-hati-compile-image
+            (bml-source-exec-parse-node (parse "const int k = 2;\nk = 3;\nreturn k;\n"))))
+
+    (sum
+        (list
+            (score-bool (bml-source-exec-parse-ok? block-parsed))
+            (score-int (len (bml-source-exec-parse-rest block-parsed)) 0)
+            (score-str (nth (bml-source-exec-parse-rules block-parsed) 0) "local-decl")
+            (score-str (nth (bml-source-exec-parse-rules block-parsed) 1) "block")
+            (score-int (bma-run-value (bml-compile-program block-node)) 6)
+            (score-bool (bml-hati-image-supported? block-image))
+            (score-int (fk-tag (head (bml-hati-image-fns block-image))) 109)
+            (score-bool (str-contains? block-table "98"))
+            (score-bool (str-contains? block-table "97"))
+            (score-bool (not (str-contains? block-table "BML-HATI-UNSUPPORTED")))
+            (score-int (bml-hati-run-value block-node) 6)
+            (score-bool (bml-source-exec-parse-ok? method-parsed))
+            (score-str (head (bml-source-exec-parse-rules method-parsed)) "method-body")
+            (score-bool (node_eq (node_category method-node) BML-AST-METHOD))
+            (score-int (bma-run-value (bml-compile-program method-node)) 15)
+            (score-int (fk-tag (head (bml-hati-image-fns method-image))) 109)
+            (score-int (bml-hati-run-value method-node) 15)
+            (score-int (bml-hati-run-value-with-arg param-node 2) 7)
+            (score-int (bml-hati-run-value-with-arg param-node 30) 35)
+            (score-int (bma-run-value (bml-compile-program deep-node)) 6)
+            (score-int (bml-hati-run-value deep-node) 6)
+            (score-int (bma-run-value (bml-compile-program shadow-node)) 1)
+            (score-int (bml-hati-run-value shadow-node) 1)
+            (score-int (bma-run-value (bml-compile-program snapshot-node)) 12)
+            (score-int (bml-hati-run-value snapshot-node) 12)
+            (score-int (bma-run-value (bml-compile-program call-node)) 8)
+            (score-bool (bml-hati-image-supported? call-image))
+            (score-bool (not (eq (fk-tag (nth (bml-hati-image-fns call-image) 0)) 109)))
+            (score-int (fk-tag (nth (bml-hati-image-fns call-image) 1)) 109)
+            (score-int (bml-hati-run-value call-node) 8)
+            (score-str (head (bml-hati-image-unsupported unbound-image)) "assign/unbound")
+            (score-bool (str-contains? (bml-hati-table-file unbound-image) "BML-HATI-UNSUPPORTED assign/unbound"))
+            (score-str (head (bml-hati-image-unsupported const-image)) "assign/const")
+            (score-bool (str-contains? (bml-hati-table-file const-image) "BML-HATI-UNSUPPORTED assign/const")))))
