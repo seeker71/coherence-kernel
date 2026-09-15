@@ -43,6 +43,22 @@ fn process_clock_start() -> Instant {
     *START.get_or_init(Instant::now)
 }
 
+/// The record-construction clock kernel_stat 164 reads: every record_new this process has run,
+/// counted where the record is made. fkwu answers the same key from its arm counter for tag 64
+/// (record_new). Nothing lowers it.
+static RECORD_CONSTRUCTIONS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// fkwu's live-page magic: word 0 of the page kernel_live answers.
+const KERNEL_LIVE_MAGIC: i64 = 0x464B4C4956;
+
+/// This kernel's birth on the wall clock: word 2 (start-ms) of the page kernel_live answers for
+/// this process, fixed on first reading (registration reads it, so it is the kernel's start).
+/// None when the wall clock stands before the epoch; then no page is answered.
+fn host_birth_unix_ms() -> Option<i64> {
+    static BIRTH: OnceLock<Option<i64>> = OnceLock::new();
+    *BIRTH.get_or_init(|| SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as i64))
+}
+
 /// Where a host path names a file for a read-side door, the same way on every kernel. A path that
 /// stands where the kernel runs names itself. Otherwise the walk tries dir/p, dir/form/p and
 /// dir/form/form/p from the working directory upward and stops at the checkout that holds it, the
@@ -3582,6 +3598,7 @@ impl Kernel {
         // method dispatches on it. fkwu keeps the blueprint operand verbatim,
         // and 0 is the body's most common record shape (a plain field map).
         self.register_native("record_new", cat_method(), |k, _, args| {
+            RECORD_CONSTRUCTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (blueprint, blueprint_rec) = match &args[0] {
                 Value::Int(0) => (None, None),
                 Value::Record(owner) => (None, Some(owner.clone())),
@@ -6134,6 +6151,46 @@ impl Kernel {
         self.register_native("host_cwd", cat_call(), |_, _, _| match env::current_dir() {
             Ok(dir) => Value::Str(dir.to_string_lossy().to_string().into()),
             Err(_) => Value::Null,
+        });
+        // kernel_stat, kernel_live, print_str — the doors fkwu carries as tags 127, 163 and 115.
+        //
+        // kernel_stat key reads fkwu's self-measurement key space. Key 164 is fkwu's arm counter
+        // for tag 64 (record_new): the record-construction clock, every record this process has
+        // made, which compaction never lowers. This kernel counts the same event where it
+        // happens. A key this kernel does not measure answers nothing, never a zero it did not read.
+        self.register_native("kernel_stat", cat_witness(), |_, _, args| match args.first() {
+            Some(Value::Int(164)) => {
+                Value::Int(RECORD_CONSTRUCTIONS.load(std::sync::atomic::Ordering::Relaxed))
+            }
+            _ => Value::Null,
+        });
+        // kernel_live pid answers that kernel's live page in fkwu's word order: 0 the page magic,
+        // 1 the pid, 2 the start-ms. This kernel holds those three words of its own page; fkwu's
+        // further words count fkwu's own tissue and are not claimed here. Any other pid answers
+        // the empty list, fkwu's answer where no page can be read.
+        let _ = host_birth_unix_ms();
+        self.register_native("kernel_live", cat_witness(), |_, _, args| {
+            match (args.first(), host_birth_unix_ms()) {
+                (Some(Value::Int(pid)), Some(birth)) if *pid == std::process::id() as i64 => {
+                    Value::List(Arc::new(vec![
+                        Value::Int(KERNEL_LIVE_MAGIC),
+                        Value::Int(*pid),
+                        Value::Int(birth),
+                    ]))
+                }
+                _ => Value::List(Arc::new(Vec::new())),
+            }
+        });
+        // print_str s writes the string's bytes and one newline to stdout, flushed, and answers
+        // 0, as fkwu does. A value that is not a string writes the newline alone.
+        self.register_native("print_str", cat_call(), |_, _, args| {
+            let mut out = std::io::stdout().lock();
+            if let Some(Value::Str(s)) = args.first() {
+                let _ = out.write_all(s.as_bytes());
+            }
+            let _ = out.write_all(b"\n");
+            let _ = out.flush();
+            Value::Int(0)
         });
 
         // No Form category claimed — `trace` is a debug surface, honest
