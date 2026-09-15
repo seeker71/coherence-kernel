@@ -1,0 +1,84 @@
+// ontology-emit.bml - what form-stdlib/form-ontology.json generates, emitted in Form.
+//
+//   dialects          -> the whole text of form-stdlib/dialect-categories.fk
+//   engine_constants  -> the two row lets form-stdlib/engine-constants.fk carries
+//
+// The JSON holds every coordinate; this unit names no number. Dialects emit
+// in the byte order of their keys, categories in the order the JSON lists
+// them. Door: form/form-stdlib/ontology-emit-run.fk. Band:
+// form/form-stdlib/tests/ontology-emit-band.fk folds emitted == carried and
+// reads every row against the reviewed table in form-ontology-bp.fk.
+//
+// preludes: form-stdlib/core.fk form-stdlib/json.fk
+
+section [form.bml] {
+    class OntologyEmit {
+        thought ontology-emit-pattern = list("the-json-holds-the-coordinates", "emitted-equals-carried", "keys-in-byte-order");
+
+        def oe-json-path() = "form/form-stdlib/form-ontology.json";
+        def oe-dialect-path() = "form/form-stdlib/dialect-categories.fk";
+        def oe-engine-path() = "form/form-stdlib/engine-constants.fk";
+        def oe-nl() = byte_to_str(10);
+        def oe-quote(s) = str_concat(byte_to_str(34), str_concat(s, byte_to_str(34)));
+        def oe-root() = parse-json(oe-json-path(), read_file(oe-json-path()));
+        def oe-field(obj, key) = json-object-get(obj, key);
+        def oe-text(obj, key) = json-string-value(json-object-get(obj, key));
+        def oe-number(obj, key) = json-int-value(json-object-get(obj, key));
+        def oe-lines(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), str_concat(oe-nl(), oe-lines(tail(parts))));
+        def oe-join(parts, sep) = if eq(len(parts), 0) then "" else if eq(len(tail(parts)), 0) then head(parts) else str_concat(head(parts), str_concat(sep, oe-join(tail(parts), sep)));
+
+        // byte order of two keys: 1 when a sorts before b
+        def oe-before(a, b, i) {
+            if ge(i, str_len(b)) then 0
+            else if ge(i, str_len(a)) then 1
+            else if lt(str_byte_at(a, i), str_byte_at(b, i)) then 1
+            else if gt(str_byte_at(a, i), str_byte_at(b, i)) then 0
+            else oe-before(a, b, add(i, 1));
+        }
+        def oe-insert(x, sorted) = if eq(len(sorted), 0) then list(x) else if eq(oe-before(x, head(sorted), 0), 1) then cons(x, sorted) else cons(head(sorted), oe-insert(x, tail(sorted)));
+        def oe-sort(xs) = if eq(len(xs), 0) then list() else oe-insert(head(xs), oe-sort(tail(xs)));
+
+        // ---- dialect categories: one section per dialect, one let per category ----
+        def oe-dialects(root) = oe-field(root, "dialects");
+        def oe-dialect-keys(root) = oe-sort(json-object-keys(oe-dialects(root)));
+        def oe-categories(d) = json-array-elements(oe-field(d, "categories"));
+        def oe-row(d, c) = list(str_concat(oe-text(d, "name_prefix"), str_concat("-", oe-text(c, "name"))), oe-number(d, "category_type"), oe-number(c, "inst"));
+        def oe-rows-in(d, cs) = if eq(len(cs), 0) then list() else cons(oe-row(d, head(cs)), oe-rows-in(d, tail(cs)));
+        def oe-rows-of(dialects, keys) = if eq(len(keys), 0) then list() else append(oe-rows-in(oe-field(dialects, head(keys)), oe-categories(oe-field(dialects, head(keys)))), oe-rows-of(dialects, tail(keys)));
+        def oe-dialect-rows(root) = oe-rows-of(oe-dialects(root), oe-dialect-keys(root));
+        def oe-prefixes-of(dialects, keys) = if eq(len(keys), 0) then list() else cons(str_concat(oe-text(oe-field(dialects, head(keys)), "name_prefix"), "-"), oe-prefixes-of(dialects, tail(keys)));
+        def oe-dialect-prefixes(root) = oe-prefixes-of(oe-dialects(root), oe-dialect-keys(root));
+        def oe-let(row) = str_concat("(let ", str_concat(nth(row, 0), str_concat(" (intern_trivial_int ", str_concat(int_to_str(nth(row, 2)), "))"))));
+        def oe-lets(rows) = if eq(len(rows), 0) then list() else cons(oe-let(head(rows)), oe-lets(tail(rows)));
+        def oe-section-head(key, d) = str_concat("; ", str_concat(key, str_concat(" (", str_concat(oe-text(d, "name_prefix"), str_concat(") category_type=", int_to_str(oe-number(d, "category_type")))))));
+        def oe-section(key, d) = cons(oe-section-head(key, d), oe-lets(oe-rows-in(d, oe-categories(d))));
+        def oe-sections(dialects, keys) = if eq(len(keys), 0) then list() else if eq(len(tail(keys)), 0) then oe-section(head(keys), oe-field(dialects, head(keys))) else append(oe-section(head(keys), oe-field(dialects, head(keys))), cons("", oe-sections(dialects, tail(keys))));
+        def oe-dialect-header() = list(
+            "; dialect-categories.fk - generated from form-stdlib/form-ontology.json by form-stdlib/bml/ontology-emit.bml",
+            "; per grammar headers (e.g. typescript-bmf.fk): load as prelude before grammars that reference *-BMF-* / BML-AST-* etc.",
+            "; values are the 'inst' (with category_type in make_nodeid 1 2 <type> <inst>); intern_trivial_int holds the local id used by intern_node in grammar rules.",
+            "; regenerate: ./fkwu form/form-stdlib/ontology-emit-run.fk -- form/form-stdlib/tests/ontology-emit-band.fk folds emitted == carried.",
+            "");
+        def oe-dialect-text(root) = oe-lines(append(oe-dialect-header(), oe-sections(oe-dialects(root), oe-dialect-keys(root))));
+
+        // ---- engine constants: the two row lets engine-constants.fk carries ----
+        def oe-entry-name(fam, e) = oe-quote(str_concat(oe-text(fam, "name_prefix"), str_concat("-", oe-text(e, "name"))));
+        def oe-factory-row(fam, e) = str_concat("(list ", str_concat(oe-entry-name(fam, e), str_concat(" ", str_concat(oe-quote(oe-text(fam, "factory")), str_concat(" ", str_concat(int_to_str(oe-number(e, "value")), ")"))))));
+        def oe-string-row(fam, e) = str_concat("(list ", str_concat(oe-entry-name(fam, e), str_concat(" ", str_concat(oe-quote(oe-text(e, "value")), ")"))));
+        def oe-factory?(fam) = if json-object-has?(fam, "factory") then 1 else 0;
+        def oe-entry-row(fam, e) = if eq(oe-factory?(fam), 1) then oe-factory-row(fam, e) else oe-string-row(fam, e);
+        def oe-entry-rows(fam, es) = if eq(len(es), 0) then list() else cons(oe-entry-row(fam, head(es)), oe-entry-rows(fam, tail(es)));
+        def oe-family-entries(fam) = json-array-elements(oe-field(fam, "entries"));
+        def oe-family-rows(families, keys, factory) {
+            if eq(len(keys), 0) then list()
+            else if eq(oe-factory?(oe-field(families, head(keys))), factory) then append(oe-entry-rows(oe-field(families, head(keys)), oe-family-entries(oe-field(families, head(keys)))), oe-family-rows(families, tail(keys), factory))
+            else oe-family-rows(families, tail(keys), factory);
+        }
+        def oe-engine-let(name, rows) = list(str_concat("(let ", name), str_concat("    (list ", str_concat(oe-join(rows, " "), "))")));
+        def oe-engine-block(root) {
+            let families = oe-field(root, "engine_constants");
+            let keys = json-object-keys(families);
+            oe-lines(append(oe-engine-let("FOL-ENGINE-FACTORY-ROWS", oe-family-rows(families, keys, 1)), cons("", oe-engine-let("FOL-ENGINE-STRING-ROWS", oe-family-rows(families, keys, 0)))));
+        }
+    }
+}
