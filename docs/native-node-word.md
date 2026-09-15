@@ -64,6 +64,12 @@ blueprint field offsets can vary by individual bits. These owners execute
 native CPU code and generated Metal programs. They do not yet replace the
 shared field's primary columns or its allocation policy.
 
+The [sparse identity directory](native-identity-directory.md) serves complete
+64-bit words from adaptive segments through a native getter. Its read-only
+importer accepts published primary node handles and retains their exact words
+after source mappings close. Distant rows allocate only their populated
+segments. Primary C allocation, interning and readers still own the shared field.
+
 ## Executable observation and direction
 
 The [source-bound executions](evidence/fkwu/native-node-word.json) retain real

@@ -1,0 +1,66 @@
+// Real sparse lookup, full u64 words, generation ownership and reclamation.
+// preludes: form-stdlib/bml/native-identity-directory.bml
+section [form.bml] {
+ def ndit-need(ok,why) = if ok then 1 else form_error(str_concat("identity directory witness: ",why));
+ def ndit-repeat(byte,count) = if eq(count,0) then "" else str_concat(byte_to_str(byte),ndit-repeat(byte,sub(count,1)));
+ def ndit-bit(width,byte) = if eq(byte,8) then "" else str_concat(byte_to_str(if and(gt(width,0),eq(byte,div(sub(width,1),8))) then nnw-power(mod(sub(width,1),8)) else 0),ndit-bit(width,add(byte,1)));
+ def ndit-raw(width) = str_concat(ndit-repeat(0,8),ndit-bit(width,0));
+ def ndit-query(row) = str_concat(nfm-low(row,8),nfm-low(0,8));
+ def ndit-queries(width) = if gt(width,64) then "" else str_concat(str_concat(ndit-query(mul(width,4)),ndit-query(add(mul(width,4),1))),ndit-queries(add(width,1)));
+ def ndit-expected(width) = if gt(width,64) then "" else str_concat(ndit-raw(width),ndit-expected(add(width,1)));
+ def ndit-add(owner,width) = if lt(width,0) then 1 else {
+  ndit-need(gt(ndi-append(owner,mul(width,4),ndit-raw(width)),0),"descending sparse insertion");
+  let segment = ndi-find(ndi-current-segments(owner),mul(width,4)); let block = record_get(record_get(segment,"reader"),"block");
+  ndit-need(eq(record_get(block,"width"),width),"adaptive width follows actual identity residual"); ndit-add(owner,sub(width,1));
+ };
+ def ndit-bytes(region,offset,bytes) = nfm-bytes-list(npd-bytes(region,offset,bytes),"");
+ def ndit-closed-generations(generations) = if nil?(generations) then 1 else and(eq(record_get(head(generations),"active"),0),ndit-closed-generations(tail(generations)));
+ def ndit-run() {
+  let owner = ndi-open(); ndit-need(ndi-active(owner),"directory admitted in RAM"); let entry = record_get(owner,"entry"); let root = record_get(record_get(owner,"root"),"pointer");
+  let output = npd-region(ndi-memory(owner),4096); ndit-need(not(nothing?(output)),"owned output");
+  ndit-need(eq(ndi-project-current(owner,ndit-query(0),output,8),0),"unpublished directory has no row");
+  ndit-add(owner,64); let old = ndi-acquire(owner); let generation = record_get(old,"generation"); let segment = ndi-find(ndi-current-segments(owner),0); let block = record_get(record_get(segment,"reader"),"block");
+  let expected = ndit-expected(0); let queries = ndit-queries(0);
+  ndi-write(owner,output,ndit-repeat(165,4096)); let calls = record_get(record_get(owner,"carrier"),"calls");
+  ndit-need(eq(ndi-project(old,queries,output,8),130),"all residual widths through native directory lookup");
+  ndit-need(eq(record_get(record_get(owner,"carrier"),"calls"),add(calls,1)),"one membrane crossing for 130 native reads");
+  ndit-need(str_eq(ndit-bytes(output,8,str_len(expected)),expected),"all 64 raw bits exact");
+  ndit-need(and(str_eq(ndit-bytes(output,0,8),ndit-repeat(165,8)),str_eq(ndit-bytes(output,add(8,str_len(expected)),sub(4088,str_len(expected))),ndit-repeat(165,sub(4088,str_len(expected))))),"complete untouched output guards");
+  let sparse = add(67108864,17); let upper = str_concat(ndit-repeat(255,8),str_concat(ndit-bit(64,0),ndit-repeat(0,8)));
+  ndit-need(gt(ndi-append(owner,sparse,upper),0),"sparse row beyond 2^26 without lower-slot allocation");
+  ndit-need(eq(ndi-project(old,ndit-query(sparse),output,8),0),"old reader cannot see new range");
+  ndit-need(eq(ndi-project-current(owner,ndit-query(sparse),output,8),1),"current root sees new range"); ndit-need(str_eq(ndit-bytes(output,8,8),ndit-repeat(255,8)),"u64 maximum preserved");
+  ndit-need(and(eq(entry,record_get(owner,"entry")),eq(root,record_get(record_get(owner,"root"),"pointer"))),"native entry and root stay stable across publication");
+  ndit-need(nothing?(ndi-append(owner,1,ndit-repeat(0,8))),"overlap refused");
+  ndit-need(gt(ndi-remove(owner,0),0),"range retired from new generation"); ndit-need(eq(ndi-project-current(owner,ndit-query(0),output,8),0),"removed row unavailable to new work");
+  ndit-need(eq(ndi-project(old,ndit-query(0),output,8),1),"old reader preserves removed row"); ndit-need(eq(record_get(record_get(block,"region"),"active"),1),"old reader retains removed payload");
+  ndit-need(nothing?(ndi-append(owner,0,ndit-repeat(255,8))),"removed handle cannot silently name a different identity");
+  ndit-need(nothing?(ndi-close(owner)),"live reader refuses owner retirement");
+  let payloadBefore = json-int-value(oh-get(ndi-storage-state(owner),"payload_requested_bytes"));
+  let reading = record_get(owner,"last-reading"); let response = oh-response(reading,"release-reader"); ndit-need(str_eq(oh-select(reading,response,""),"release-reader"),"correlated retirement response"); oh-voice(response);
+  let stale = record_get(record_get(old,"descriptor"),"pointer"); ndit-need(eq(ndi-release(old),0),"old reader released"); oh-voice(oh-applied(reading,"release-reader",ndi-state(owner)));
+  ndit-need(eq(record_get(record_get(block,"region"),"active"),0),"removed payload physically unmapped after last reader");
+  ndit-need(eq(sub(payloadBefore,json-int-value(oh-get(ndi-storage-state(owner),"payload_requested_bytes"))),record_get(block,"bytes")),"live signal accounts for the exact retired payload span");
+  ndit-need(eq(record_get(record_get(generation,"table"),"active"),0),"retired directory table unmapped");
+  oh-voice(oh-set(oh-reading("native-identity-directory",record_get(owner,"flow"),"retired-payload",json-node-int(0),json-node-int(record_get(record_get(block,"region"),"active")),json-node-null(),list(),list(),ndi-state(owner)),"care_of",oh-get(reading,"id")));
+  ndit-need(eq(ndi-project-at(owner,stale,ndit-query(0),output,8),0),"released descriptor refuses before unmapped table");
+  ndit-need(nothing?(ndi-close(owner)),"ordinary output refuses close"); ndit-need(eq(ndi-project-at(owner,stale,ndit-query(0),output,8),0),"refused close retains released descriptor");
+  let current = ndi-acquire(owner); ndi-write(owner,output,ndit-repeat(90,4096));
+  ndit-need(eq(ndi-project(current,str_concat(ndit-query(4),ndit-query(6)),output,8),1),"sparse gap stops before store"); ndit-need(str_eq(ndit-bytes(output,16,4080),ndit-repeat(90,4080)),"unavailable prefix suffix untouched");
+  ndit-need(eq(ndi-project(current,str_concat(ndit-repeat(255,8),nfm-low(0,8)),output,8),0),"unsigned row maximum checked");
+  ndit-need(eq(ndi-project(current,str_concat(nfm-low(4,8),nfm-low(1,8)),output,8),0),"identity has only field zero");
+  ndit-need(nothing?(ndi-project(current,queries,record_get(owner,"root"),0)),"directory root cannot be output");
+  ndit-need(eq(ndi-project(current,"",output,4096),0),"empty batch touches no bytes"); ndi-release(current);
+  let maximum = ndit-repeat(255,8); let lower = str_concat(byte_to_str(254),ndit-repeat(255,7));
+  ndit-need(gt(ndi-append(owner,1000,str_concat(maximum,maximum)),0),"nonzero full-u64 constant base admitted");
+  ndit-need(gt(ndi-append(owner,1004,str_concat(maximum,lower)),0),"full-u64 base with one-bit residual admitted");
+  ndit-need(eq(ndi-project-current(owner,str_concat(ndit-query(1000),str_concat(ndit-query(1004),ndit-query(1005))),output,8),3),"nonzero bases project natively");
+  ndit-need(str_eq(ndit-bytes(output,8,24),str_concat(maximum,str_concat(maximum,lower))),"constant and XOR restore every high bit");
+  let generations = len(record_get(owner,"generations")); let code = len(record_get(owner,"image"));
+  ndit-need(eq(npd-region-close(output),0),"output released"); ndit-need(eq(ndi-close(owner),1),"directory, storage and native carrier closed");
+  ndit-need(ndit-closed-generations(record_get(owner,"generations")),"all directory generations retired");
+  ndit-need(eq(ndi-close(owner),0),"duplicate close inert");
+  print(list("native-identity-directory","widths",65,"native-read-fields",130,"generations",generations,"code-bytes",code,"sparse-row",sparse,"retired-payload-unmapped",1,"released",1)); 1;
+ }
+ if str_eq(read_line(),"run") then ndit-run() else 0;
+}

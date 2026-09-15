@@ -163,7 +163,10 @@ Semantic identities, runtime handles and physical slots remain distinct, so
 layout changes and slot reuse cannot silently change what an existing handle
 means. Reference-bearing storage participates in root retention and relocation.
 The [current raw accessor](native-node-accessor.md) establishes the local
-native call and lease boundary; the primary shared directory remains to move.
+native call and lease boundary. The [sparse identity directory](native-identity-directory.md)
+retains exact generations and imports published primary handles through native
+read-only mappings. Resident allocation, primary producers and readers,
+concurrent publication and collector ownership remain to move behind it.
 
 Compact storage is a measured choice. Aligned fields lower directly to native
 word operations; other fields lower to the required bit extraction. A format
