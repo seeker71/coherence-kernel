@@ -1,0 +1,812 @@
+; bml/bml-thesis-assembly.fk - BMA, the thesis's assembly for BML
+;
+; The 2000 BML/JBML compiler lowered BMF matches into component objects, then
+; into an instruction stream for a backtracking stack machine. This unit keeps
+; that machine as the thesis's own record: the op constructors (bma-*), the
+; BML-to-BMA compile (bml-compile-program), the reversible stack machine
+; (comp-vm-*) with its runner (bma-run-program), and the DO/UNDO trace
+; (bma-run-forward-backward). The thesis proofs prelude it
+; (tests/bml-thesis-*-proof.fk).
+;
+; The native compiler does not use it. BML lowers to Form in
+; bml/bml-form-lower.bml and runs on fkwu (observe/bml-native-run.bml).
+;
+; preludes: form-stdlib/grammars/bml.fk
+
+(do
+    ;; --- instruction program objects --------------------------------
+
+    (defn comp-op (name value inverse)
+        (compiler-object "compiler-op"
+                         (list name value)
+                         value
+                         inverse))
+
+    (defn comp-op-name (op) (nth (cell-value op) 0))
+    (defn comp-op-value (op) (nth (cell-value op) 1))
+
+    (defn comp-op-identity-inverse (op)
+        (cell-origin op))
+
+    (defn comp-program (language ops)
+        (compiler-object "compiler-program"
+                         (list language ops)
+                         ops
+                         compiler-identity-inverse))
+
+    (defn comp-program-ops (p) (nth (cell-value p) 1))
+
+    ;; --- small reversible VM surface --------------------------------
+
+    (defn comp-vm-state (stack snapshots mode)
+        (list "comp-vm-state" stack snapshots mode))
+
+    (defn comp-vm-stack (s) (nth s 1))
+    (defn comp-vm-snapshots (s) (nth s 2))
+    (defn comp-vm-mode (s) (nth s 3))
+
+    (defn comp-vm-with-stack (s stack)
+        (comp-vm-state stack (comp-vm-snapshots s) (comp-vm-mode s)))
+
+    (defn comp-vm-with-snapshots (s snapshots)
+        (comp-vm-state (comp-vm-stack s) snapshots (comp-vm-mode s)))
+
+    (defn comp-vm-with-mode (s mode)
+        (comp-vm-state (comp-vm-stack s) (comp-vm-snapshots s) mode))
+
+    (defn comp-vm-push (s value)
+        (comp-vm-with-stack s (cons value (comp-vm-stack s))))
+
+    (defn comp-vm-pop-value (s)
+        (head (comp-vm-stack s)))
+
+    (defn comp-vm-pop-state (s)
+        (comp-vm-with-stack s (tail (comp-vm-stack s))))
+
+    (defn comp-vm-save (s)
+        (comp-vm-with-snapshots s (cons (comp-vm-stack s) (comp-vm-snapshots s))))
+
+    (defn comp-vm-restore (s)
+        (comp-vm-state (head (comp-vm-snapshots s))
+                       (tail (comp-vm-snapshots s))
+                       (comp-vm-mode s)))
+
+    (defn comp-vm-discard (s)
+        (comp-vm-with-snapshots s (tail (comp-vm-snapshots s))))
+
+    (defn comp-vm-empty (_x)
+        (comp-vm-state (empty) (empty) "run"))
+
+    ;; --- BMA-like program lowering ----------------------------------
+
+    (defn bma-op (name value)
+        (comp-op name value comp-op-identity-inverse))
+
+    (defn bma-push-int (n) (bma-op "push-int" n))
+    (defn bma-push-lit (value) (bma-op "push-lit" value))
+    (defn bma-add (_x) (bma-op "add" 0))
+    (defn bma-return (_x) (bma-op "return" 0))
+    (defn bma-break (label) (bma-op "break" label))
+    (defn bma-continue (label) (bma-op "continue" label))
+    (defn bma-throw (_x) (bma-op "throw" 0))
+    (defn bma-raise (_x) (bma-op "raise" 0))
+    (defn bma-resume (_x) (bma-op "resume" 0))
+    (defn bma-save (_x) (bma-op "save" 0))
+    (defn bma-mark (_x) (bma-op "mark" 0))
+    (defn bma-restore (_x) (bma-op "restore" 0))
+    (defn bma-discard (_x) (bma-op "discard" 0))
+    (defn bma-nostate (_x) (bma-op "nostate" 0))
+    (defn bma-fail (_x) (bma-op "fail" 0))
+    (defn bma-cut (_x) (bma-op "cut" 0))
+    (defn bma-choose (branches) (bma-op "choose" branches))
+    (defn bma-try (branches) (bma-op "try" branches))
+    (defn bma-while-success (body) (bma-op "while-success" body))
+
+    (defn bml-bnml-with-base (callee-env caller-env)
+        (cons
+            (bml-bnml-binding "__bnml_base" (empty) callee-env "bnml-base" (bml-bnml-depth caller-env))
+            callee-env))
+
+    (defn bml-compile-child-in (node env)
+        (if (node_eq (node_category node) BML-AST-METHOD)
+            (empty)
+            (bml-compile-node-in node env)))
+
+    (defn bml-compile-children-in (children env)
+        (if (nil? children)
+            (empty)
+            (append
+                (bml-compile-child-in (head children) env)
+                (bml-compile-children-in
+                    (tail children)
+                    (bml-local-env-after-node (head children) env)))))
+
+    (defn bml-compile-choose-branches-in (branches env)
+        (if (nil? branches)
+            (empty)
+            (cons
+                (bml-compile-node-in (head branches) env)
+                (bml-compile-choose-branches-in (tail branches) env))))
+
+    (defn bml-call-bind-first-arg (method-node call-node env)
+        (do
+            (let param-name (bml-method-node-first-parameter-name method-node))
+            (if (str_eq param-name "")
+                env
+                (cons
+                    (bml-local-binding
+                        param-name
+                        (bml-call-arg call-node)
+                        env)
+                    env))))
+
+    ;; A call resolves as on Hati: the name through package and import
+    ;; scope, the overload by arity, and the callee's body in the callee's
+    ;; own unit env with its parameters bound to arguments read in the
+    ;; caller's env. What cannot resolve compiles to its named refusal.
+    ;; Reserved __ names (field access, arg slots) keep their own lanes.
+    ;; A class shape (a record, a receiver, a constructor) has no BMA
+    ;; reading yet; it answers its name instead of lowering to nothing.
+    (defn bml-compile-call-in (node env)
+        (if (bml-hati-class-call? node)
+            (bml-bma-refusal "bma/class-lane")
+        (if (bml-scope-prefix? (bml-call-name node) "__")
+            (empty)
+            (do
+                (let name (bml-scope-resolve-name env (bml-call-name node)))
+                (let binding (bml-local-lookup-direct env name))
+                (if (nil? binding)
+                    (bml-bma-name-refusal
+                        (bml-scope-unbound-call-reason env (bml-call-name node))
+                        (bml-call-name node))
+                (if (not (bml-bma-method-value? (bml-local-binding-value binding)))
+                    (bml-bma-refusal "call/not-method")
+                    (do
+                        (let choice
+                            (bml-hati-resolve
+                                (bml-hati-env-layout env)
+                                (bml-bma-call-candidates env name)
+                                (bml-hati-static-types (bml-call-args node) env)
+                                "call"))
+                        (if (not (bml-hati-choice-ok? choice))
+                            (bml-bma-refusal (bml-hati-choice-value choice))
+                            (do
+                                (let method-node
+                                    (bml-local-binding-value (bml-hati-choice-value choice)))
+                                (bml-compile-callee-body-in
+                                    (bml-method-node-body method-node)
+                                    (bml-bma-bind-params
+                                        (bml-method-node-parameters method-node)
+                                        (bml-call-args node)
+                                        env
+                                        (bml-bnml-with-base (bml-bma-home-env method-node env) env))))))))))))
+
+    ;; A callee's final return is the call's value: inlined BMA keeps the
+    ;; caller's stream running instead of ending it at the callee's return.
+    (defn bml-compile-callee-body-in (body env)
+        (if (node_eq (node_category body) BML-AST-RETURN)
+            (bml-compile-node-in (bml-node-child body 0) env)
+        (if (node_eq (node_category body) BML-AST-BLOCK)
+            (bml-compile-callee-children-in (node_children body) env)
+            (bml-compile-node-in body env))))
+
+    (defn bml-compile-callee-children-in (children env)
+        (if (nil? children)
+            (empty)
+            (if (nil? (tail children))
+                (bml-compile-callee-body-in (head children) env)
+                (append
+                    (bml-compile-callee-statement-in (head children) env)
+                    (bml-compile-callee-children-in
+                        (tail children)
+                        (bml-local-env-after-node (head children) env))))))
+
+    ;; Inside an inlined callee a binding statement leaves nothing on the
+    ;; stack under the call's result: a const that reads no mutable local
+    ;; only binds; a local, an assignment, or a const that reads one stores
+    ;; its value in the floor frame and drops it. A nested block's
+    ;; statements follow the same rule.
+    (defn bml-compile-callee-statement-in (node env)
+        (if (node_eq (node_category node) BML-AST-CONST)
+            (if (bml-bnml-reads-mutable? (bml-local-const-value node) env)
+                (append (bml-compile-const-in node env) (list (bma-drop 0)))
+                (empty))
+        (if (bml-bnml-declare-node? node)
+            (append (bml-compile-node-in node env) (list (bma-drop 0)))
+        (if (bml-bnml-assign-node? node)
+            (append (bml-compile-node-in node env) (list (bma-drop 0)))
+        (if (node_eq (node_category node) BML-AST-BLOCK)
+            (bml-compile-callee-block-in (node_children node) env)
+        (if (node_eq (node_category node) BML-AST-CHOOSE)
+            (bml-compile-callee-choose-in node env)
+            (bml-compile-child-in node env)))))))
+
+    ;; A choose statement inside an inlined callee leaves nothing under the
+    ;; call's result either: its promotions drop, and every branch keeps the
+    ;; callee's statement rule. Without it a chosen branch's values stayed
+    ;; between two operands (Stop() + Nested() read 14 on BMA, 9 on Hati).
+    (defn bml-compile-callee-choose-in (node env)
+        (do
+            (let promos (bml-bnml-choose-promotions node env))
+            (append
+                (bml-compile-promotions-in promos env)
+                (list
+                    (bma-choose
+                        (bml-compile-callee-branches-in
+                            (node_children node)
+                            (bml-bnml-fold-env promos env)))))))
+
+    (defn bml-compile-callee-branches-in (branches env)
+        (if (nil? branches)
+            (empty)
+            (cons
+                (bml-compile-callee-statement-in (head branches) env)
+                (bml-compile-callee-branches-in (tail branches) env))))
+
+    (defn bml-compile-callee-block-in (children env)
+        (if (nil? children)
+            (empty)
+            (append
+                (bml-compile-callee-statement-in (head children) env)
+                (bml-compile-callee-block-in
+                    (tail children)
+                    (bml-local-env-after-node (head children) env)))))
+
+    (defn bml-compile-node-in (node env)
+        (do
+            (let cat (node_category node))
+            (if (node_eq cat BML-AST-INT)
+                (list (bma-push-int (node_value (bml-node-child node 0))))
+            (if (node_eq cat BML-AST-FLOAT)
+                (list (bma-push-lit (bml-node-child node 0)))
+            (if (node_eq cat BML-AST-STRING)
+                (list (bma-push-lit (node_value (bml-node-child node 0))))
+            (if (node_eq cat BML-AST-CHAR)
+                (list (bma-push-lit (node_value (bml-node-child node 0))))
+            (if (node_eq cat BML-AST-ARRAY)
+                (bml-compile-children-in (node_children node) env)
+            (if (node_eq cat BML-AST-ADD)
+                (append (bml-compile-node-in (bml-node-child node 0) env)
+                        (append (bml-compile-node-in (bml-node-child node 1) env)
+                                (list (bma-add 0))))
+            (if (node_eq cat BML-AST-CONST)
+                (bml-compile-const-in node env)
+            (if (node_eq cat BML-AST-NAME)
+                (bml-compile-name-in node env)
+            (if (node_eq cat BML-AST-CALL)
+                (bml-compile-call-node-in node env)
+            (if (node_eq cat BML-AST-RETURN)
+                (append (bml-compile-value-in (bml-node-child node 0) env)
+                        (list (bma-return 0)))
+            (if (node_eq cat BML-AST-BREAK)
+                (list (bma-break (node_value (bml-node-child node 0))))
+            (if (node_eq cat BML-AST-CONTINUE)
+                (list (bma-continue (node_value (bml-node-child node 0))))
+            (if (node_eq cat BML-AST-THROW)
+                (append (bml-compile-node-in (bml-node-child node 0) env)
+                        (list (bma-throw 0)))
+            (if (node_eq cat BML-AST-TRY)
+                (list (bma-try
+                        (list (bml-compile-node-in (bml-node-child node 0) env)
+                              (bml-compile-node-in (bml-node-child node 1) env))))
+            (if (node_eq cat BML-AST-WHILE)
+                (list (bma-while-success
+                        (bml-compile-node-in (bml-node-child node 0) env)))
+            (if (node_eq cat BML-AST-METHOD)
+                (bml-compile-node-in
+                    (bml-method-node-body node)
+                    (bml-call-bind-first-arg
+                        node
+                        (bml-ast-call "" (bml-ast-int 0))
+                        env))
+            (if (node_eq cat BML-AST-BLOCK)
+                (bml-compile-children-in (node_children node) env)
+            (if (node_eq cat BML-AST-CHOOSE)
+                (bml-compile-choose-in node env)
+            (if (node_eq cat BML-AST-FAIL)
+                (list (bma-fail 0))
+            (if (node_eq cat BML-AST-CUT)
+                (list (bma-cut 0))
+            (if (node_eq cat BML-AST-SAVE)
+                (list (bma-save 0))
+            (if (node_eq cat BML-AST-RESTORE)
+                (list (bma-restore 0))
+            (if (node_eq cat BML-AST-DISCARD)
+                (list (bma-discard 0))
+                (empty))))))))))))))))))))))))))
+
+    ;; A program is a unit: one scope rule on both lanes.
+    (defn bml-compile-program (node)
+        (bml-compile-unit-program node (empty)))
+
+    ;; --- BMA-like runtime -------------------------------------------
+
+    (defn bma-bin-add (s)
+        (do
+            (let right (comp-vm-pop-value s))
+            (let s1 (comp-vm-pop-state s))
+            (let left (comp-vm-pop-value s1))
+            (let s2 (comp-vm-pop-state s1))
+            (comp-vm-push s2 (add left right))))
+
+    (defn bma-exec-choose-branches (branches state)
+        (if (nil? branches)
+            (comp-vm-with-mode state "fail")
+            (do
+                (let branch-state (bma-exec-ops (head branches) (comp-vm-with-mode state "run")))
+                (if (str_eq (comp-vm-mode branch-state) "fail")
+                    (bma-exec-choose-branches (tail branches) state)
+                    branch-state))))
+
+    (defn bma-exec-try-branches (branches state)
+        (do
+            (let body-state (bma-exec-ops (head branches) (comp-vm-with-mode state "run")))
+            (if (str_eq (comp-vm-mode body-state) "throw")
+                (bma-exec-ops (head (tail branches)) (comp-vm-with-mode state "run"))
+                body-state)))
+
+    (defn bma-while-success-iteration-limit (_x) 64)
+
+    (defn bma-exec-while-success-loop (body state remaining)
+        (if (eq remaining 0)
+            (comp-vm-with-mode state "fail")
+            (do
+                (let body-state (bma-exec-ops body (comp-vm-with-mode state "run")))
+                (if (str_eq (comp-vm-mode body-state) "fail")
+                    (comp-vm-with-mode state "run")
+                    (if (str_eq (comp-vm-mode body-state) "run")
+                        (bma-exec-while-success-loop body body-state (sub remaining 1))
+                        body-state)))))
+
+    (defn bma-exec-while-success (body state)
+        (do
+            (bma-exec-while-success-loop
+                body
+                state
+                (bma-while-success-iteration-limit 0))))
+
+    (defn bma-exec-op (op state)
+        (do
+            (let name (comp-op-name op))
+            (if (str_eq name "push-int") (comp-vm-push state (comp-op-value op))
+            (if (str_eq name "push-lit") (comp-vm-push state (comp-op-value op))
+            (if (str_eq name "add") (bma-bin-add state)
+            (if (str_eq name "return") (comp-vm-with-mode state "return")
+            (if (str_eq name "break") (comp-vm-with-mode state "break")
+            (if (str_eq name "continue") (comp-vm-with-mode state "continue")
+            (if (str_eq name "throw") (comp-vm-with-mode state "throw")
+            (if (str_eq name "raise") (comp-vm-with-mode state "raise")
+            (if (str_eq name "resume") (comp-vm-with-mode state "run")
+            (if (str_eq name "save") (comp-vm-save state)
+            (if (str_eq name "mark") (comp-vm-save state)
+            (if (str_eq name "restore") (comp-vm-restore state)
+            (if (str_eq name "discard") (comp-vm-discard state)
+            (if (str_eq name "nostate") state
+            (if (str_eq name "fail") (comp-vm-with-mode state "fail")
+            (if (str_eq name "cut") (comp-vm-with-mode state "cut")
+            (if (str_eq name "choose") (bma-exec-choose-branches (comp-op-value op) state)
+            (if (str_eq name "try") (bma-exec-try-branches (comp-op-value op) state)
+            (if (str_eq name "while-success") (bma-exec-while-success (comp-op-value op) state)
+                (bma-exec-array-op op state))))))))))))))))))))))
+
+    (defn bma-exec-ops (ops state)
+        (if (nil? ops) state
+            (if (str_eq (comp-vm-mode state) "run")
+                (bma-exec-ops (tail ops) (bma-exec-op (head ops) state))
+                state)))
+
+    (defn bma-run-program (program)
+        (bma-exec-ops (comp-program-ops program) (comp-vm-empty 0)))
+
+    (defn bma-run-value (program)
+        (comp-vm-pop-value (bma-run-program program)))
+
+    ;; Thesis exit proof: record the executable BMA stream in forward
+    ;; DO mode, then replay the trace backward in UNDO mode by restoring
+    ;; each op's saved pre-state.
+    (defn bma-trace-entry (mode op before after)
+        (list "bma-trace-entry" mode (comp-op-name op) before after))
+
+    (defn bma-trace-mode (entry) (nth entry 1))
+    (defn bma-trace-op-name (entry) (nth entry 2))
+    (defn bma-trace-before (entry) (nth entry 3))
+    (defn bma-trace-after (entry) (nth entry 4))
+
+    (defn bma-trace-result (state trace)
+        (list "bma-trace-result" state trace))
+
+    (defn bma-trace-result-state (result) (nth result 1))
+    (defn bma-trace-result-trace (result) (nth result 2))
+
+    (defn bma-run-program-forward-trace-loop (ops state trace)
+        (if (nil? ops)
+            (bma-trace-result state (reverse trace))
+            (if (str_eq (comp-vm-mode state) "run")
+                (do
+                    (let op (head ops))
+                    (let after (bma-exec-op op state))
+                    (bma-run-program-forward-trace-loop
+                        (tail ops)
+                        after
+                        (cons (bma-trace-entry "DO" op state after) trace)))
+                (bma-trace-result state (reverse trace)))))
+
+    (defn bma-run-program-forward-trace (program)
+        (bma-run-program-forward-trace-loop
+            (comp-program-ops program)
+            (comp-vm-empty 0)
+            (empty)))
+
+    (defn bma-run-program-backward-trace-loop (entries state trace)
+        (if (nil? entries)
+            (bma-trace-result state (reverse trace))
+            (do
+                (let entry (head entries))
+                (let before (bma-trace-before entry))
+                (let op (bma-op (bma-trace-op-name entry) 0))
+                (bma-run-program-backward-trace-loop
+                    (tail entries)
+                    before
+                    (cons (bma-trace-entry "UNDO" op state before) trace)))))
+
+    (defn bma-run-program-backward-trace (forward-result)
+        (bma-run-program-backward-trace-loop
+            (reverse (bma-trace-result-trace forward-result))
+            (bma-trace-result-state forward-result)
+            (empty)))
+
+    (defn bma-forward-backward-result (forward-state restored-state trace)
+        (list "bma-forward-backward" forward-state restored-state trace))
+
+    (defn bma-forward-backward-forward-state (result) (nth result 1))
+    (defn bma-forward-backward-restored-state (result) (nth result 2))
+    (defn bma-forward-backward-trace (result) (nth result 3))
+
+    ;; --- BMA values: arrays, index, mutable-local calls -----------------
+    ;; A value position (a return, an array element, an index target)
+    ;; builds an array literal into one list; a bare array statement keeps
+    ;; pushing its items. Declare and assign push their value like a const.
+
+    (defn bma-array (n) (bma-op "array" n))
+    (defn bma-index (_x) (bma-op "index" 0))
+
+    (defn bml-compile-value-in (node env)
+        (if (node_eq (node_category node) BML-AST-ARRAY)
+            (append
+                (bml-compile-values-in (node_children node) env)
+                (list (bma-array (len (node_children node)))))
+        (if (node_eq (node_category node) BML-AST-NAME)
+            (do
+                (let binding (bml-local-lookup env (bml-local-name node)))
+                (if (nil? binding)
+                    (bml-bma-name-refusal "name/unbound" (bml-local-name node))
+                (if (bml-bma-method-value? (bml-local-binding-value binding))
+                    (bml-bma-refusal "name/method")
+                (if (bml-bnml-binding? binding)
+                    (list (bma-lget (bml-local-binding-key binding)))
+                    (bml-compile-value-in
+                        (bml-local-binding-value binding)
+                        (bml-local-binding-env binding))))))
+            (bml-compile-node-in node env))))
+
+    ;; A const that reads a mutable local keeps what it read in its own slot.
+    (defn bml-compile-const-in (node env)
+        (if (bml-bnml-reads-mutable? (bml-local-const-value node) env)
+            (append
+                (bml-compile-value-in (bml-local-const-value node) env)
+                (list (bma-lset (bml-bnml-new-key (bml-local-const-name node) env))))
+            (bml-compile-node-in (bml-local-const-value node) env)))
+
+    (defn bml-compile-values-in (nodes env)
+        (if (nil? nodes)
+            (empty)
+            (append
+                (bml-compile-value-in (head nodes) env)
+                (bml-compile-values-in (tail nodes) env))))
+
+    (defn bml-compile-call-node-in (node env)
+        (if (bml-bnml-declare-node? node)
+            (append
+                (bml-compile-value-in (bml-bnml-value node) env)
+                (list (bma-lset (bml-bnml-new-key (bml-bnml-target-name node) env))))
+        (if (bml-bnml-assign-node? node)
+            (append
+                (bml-compile-value-in (bml-bnml-value node) env)
+                (list (bma-lset (bml-bnml-assign-key node env))))
+        (if (bml-index-node? node)
+            (append
+                (bml-compile-value-in (bml-index-target node) env)
+                (append
+                    (bml-compile-node-in (bml-index-at node) env)
+                    (list (bma-index 0))))
+        (if (bml-list-set-node? node)
+            (append
+                (bml-compile-value-in (bml-index-target node) env)
+                (append
+                    (bml-compile-node-in (bml-index-at node) env)
+                    (append
+                        (bml-compile-value-in (bml-list-set-value node) env)
+                        (list (bma-list-set 0)))))
+            (bml-compile-call-in node env))))))
+
+    (defn bma-list-set (_x) (bma-op "list-set" 0))
+
+    (defn bma-exec-array-op (op state)
+        (if (str_eq (comp-op-name op) "array")
+            (bma-exec-make-array (comp-op-value op) state (empty))
+        (if (str_eq (comp-op-name op) "index")
+            (bma-exec-index state)
+        (if (str_eq (comp-op-name op) "list-set")
+            (bma-exec-list-set state)
+        (if (str_eq (comp-op-name op) "frame")
+            (comp-vm-push state (empty))
+        (if (str_eq (comp-op-name op) "lset")
+            (bma-exec-lset (comp-op-value op) state)
+        (if (str_eq (comp-op-name op) "lget")
+            (bma-exec-lget (comp-op-value op) state)
+        (if (str_eq (comp-op-name op) "drop")
+            (comp-vm-pop-state state)
+            state))))))))
+
+    ;; The mutable-local frame rides the floor of the value stack, so every
+    ;; stack snapshot (save, a choose branch, a try) carries the locals too.
+    (defn bma-frame-init (_x) (bma-op "frame" 0))
+    (defn bma-lset (key) (bma-op "lset" key))
+    (defn bma-lget (key) (bma-op "lget" key))
+    (defn bma-drop (_x) (bma-op "drop" 0))
+
+    (defn bma-frame-rows-get (rows key)
+        (if (nil? rows)
+            0
+            (if (str_eq (head (head rows)) key)
+                (head (tail (head rows)))
+                (bma-frame-rows-get (tail rows) key))))
+
+    (defn bma-frame-rows-set (rows key value)
+        (if (nil? rows)
+            (list (list key value))
+            (if (str_eq (head (head rows)) key)
+                (cons (list key value) (tail rows))
+                (cons (head rows) (bma-frame-rows-set (tail rows) key value)))))
+
+    (defn bma-stack-floor (stack)
+        (if (nil? (tail stack)) (head stack) (bma-stack-floor (tail stack))))
+
+    (defn bma-stack-with-floor (stack floor)
+        (if (nil? (tail stack))
+            (list floor)
+            (cons (head stack) (bma-stack-with-floor (tail stack) floor))))
+
+    (defn bma-exec-lset (key s)
+        (do
+            (let stack (comp-vm-stack s))
+            (comp-vm-state
+                (bma-stack-with-floor
+                    stack
+                    (bma-frame-rows-set (bma-stack-floor stack) key (head stack)))
+                (comp-vm-snapshots s)
+                (comp-vm-mode s))))
+
+    (defn bma-exec-lget (key s)
+        (comp-vm-push s (bma-frame-rows-get (bma-stack-floor (comp-vm-stack s)) key)))
+
+    ;; Past the end the write is dropped; the Hati list-set function agrees.
+    (defn bml-list-set-at (items at value)
+        (if (nil? items)
+            items
+            (if (eq at 0)
+                (cons value (tail items))
+                (cons (head items) (bml-list-set-at (tail items) (sub at 1) value)))))
+
+    (defn bma-exec-list-set (s)
+        (do
+            (let value (comp-vm-pop-value s))
+            (let s1 (comp-vm-pop-state s))
+            (let at (comp-vm-pop-value s1))
+            (let s2 (comp-vm-pop-state s1))
+            (let items (comp-vm-pop-value s2))
+            (let s3 (comp-vm-pop-state s2))
+            (comp-vm-push s3 (bml-list-set-at items at value))))
+
+    (defn bma-exec-make-array (n state items)
+        (if (le n 0)
+            (comp-vm-push state items)
+            (bma-exec-make-array
+                (sub n 1)
+                (comp-vm-pop-state state)
+                (cons (comp-vm-pop-value state) items))))
+
+    (defn bma-exec-index (s)
+        (do
+            (let at (comp-vm-pop-value s))
+            (let s1 (comp-vm-pop-state s))
+            (let items (comp-vm-pop-value s1))
+            (let s2 (comp-vm-pop-state s1))
+            (comp-vm-push s2 (nth items at))))
+
+    (defn bma-run-forward-backward (program)
+        (do
+            (let forward (bma-run-program-forward-trace program))
+            (let backward (bma-run-program-backward-trace forward))
+            (bma-forward-backward-result
+                (bma-trace-result-state forward)
+                (bma-trace-result-state backward)
+                (append (bma-trace-result-trace forward)
+                        (bma-trace-result-trace backward)))))
+
+    ;; BMA: the promoted parameters, then the choose over their slots
+    (defn bml-compile-choose-in (node env)
+        (do
+            (let promos (bml-bnml-choose-promotions node env))
+            (append
+                (bml-compile-promotions-in promos env)
+                (list
+                    (bma-choose
+                        (bml-compile-choose-branches-in
+                            (node_children node)
+                            (bml-bnml-fold-env promos env)))))))
+
+    (defn bml-compile-promotions-in (promos env)
+        (if (nil? promos)
+            (empty)
+            (append
+                (append (bml-compile-node-in (head promos) env) (list (bma-drop 0)))
+                (bml-compile-promotions-in
+                    (tail promos)
+                    (bml-local-env-after-node (head promos) env)))))
+
+    (defn bml-scope-unit-env (link unit lane)
+        (bml-scope-unit-env-with
+            link
+            unit
+            (bml-scope-lane-symbols link lane)
+            lane))
+
+    (defn bml-compile-unit-program (node units)
+        (bml-compile-linked-program node (bml-scope-care-imports node units)))
+
+    ;; the BMA program for units already linked: no import care here
+    (defn bml-compile-linked-program (node units)
+        (do
+            (let link (bml-scope-link node units))
+            (comp-program
+                "bma"
+                (bml-bma-with-frame
+                    (bml-bma-link-uses-locals? node link)
+                    (bml-compile-node-in
+                        node
+                        (bml-scope-unit-env link (bml-scope-link-main link) "bma"))))))
+
+    ;; A program whose units declare or assign opens the floor frame first.
+    (defn bml-bma-with-frame (uses ops)
+        (if uses (cons (bma-frame-init 0) ops) ops))
+
+    (defn bml-bma-units-use-locals? (units)
+        (if (nil? units)
+            false
+            (if (bml-bnml-any-uses-locals? (bml-scope-unit-all-nodes (head units)))
+                true
+                (bml-bma-units-use-locals? (tail units)))))
+
+    (defn bml-bma-link-uses-locals? (node link)
+        (if (bml-bnml-uses-locals? node)
+            true
+            (bml-bma-units-use-locals? (bml-scope-link-linked link))))
+
+    ;; --- BMA: the same scope rule, inlined ---------------------------
+
+    (defn bml-bma-refusal (reason)
+        (bml-voice-then
+            (bml-refusal-reading "bma-compile" reason)
+            (list (bma-push-lit (str_concat (bml-hati-refusal-prefix 0) reason)))))
+
+    ;; a name the BMA lane cannot bind, read the way the Hati lane reads it
+    (defn bml-bma-name-refusal (reason name)
+        (bml-voice-then
+            (bml-name-reading "bma-compile" reason name)
+            (list (bma-push-lit (str_concat (bml-hati-refusal-prefix 0) reason)))))
+
+    (defn bml-bma-method-value? (value)
+        (node_eq (node_category value) BML-AST-METHOD))
+
+    ;; A mutable local reads its slot in the frame on the stack floor; any
+    ;; other name reads by substitution.
+    (defn bml-compile-name-in (node env)
+        (do
+            (let binding (bml-local-lookup env (bml-local-name node)))
+            (if (nil? binding)
+                (bml-bma-name-refusal "name/unbound" (bml-local-name node))
+            (if (bml-bma-method-value? (bml-local-binding-value binding))
+                (bml-bma-refusal "name/method")
+            (if (bml-bnml-binding? binding)
+                (list (bma-lget (bml-local-binding-key binding)))
+                (bml-compile-node-in
+                    (bml-local-binding-value binding)
+                    (bml-local-binding-env binding)))))))
+
+    ;; every method the name reaches, as a typed candidate: BMA picks an
+    ;; overload the way Hati does, by arity and then by declared types
+    (defn bml-bma-call-candidates (env name)
+        (if (nil? env)
+            (empty)
+            (do
+                (let binding (head env))
+                (let rest (bml-bma-call-candidates (tail env) name))
+                (if (str_eq (bml-local-binding-name binding) name)
+                    (if (bml-bma-method-value? (bml-local-binding-value binding))
+                        (cons
+                            (bml-hati-candidate
+                                (bml-hati-param-types (bml-local-binding-value binding))
+                                (bml-method-node-type-parameters (bml-local-binding-value binding))
+                                binding)
+                            rest)
+                        rest)
+                    rest))))
+
+    ;; parameters bind to argument nodes read in the caller's env, over the
+    ;; callee's own env
+    (defn bml-bma-bind-params (params args arg-env body-env)
+        (if (or (nil? params) (nil? args))
+            body-env
+            (bml-bma-bind-params
+                (tail params)
+                (tail args)
+                arg-env
+                (cons
+                    (bml-local-binding
+                        (bml-parameter-name (head params))
+                        (head args)
+                        arg-env)
+                    body-env))))
+
+    (defn bml-scope-nodes-hold? (nodes node)
+        (if (nil? nodes)
+            false
+            (if (node_eq (head nodes) node)
+                true
+                (bml-scope-nodes-hold? (tail nodes) node))))
+
+    (defn bml-scope-home-unit (units method-node)
+        (if (nil? units)
+            (empty)
+            (if (bml-scope-nodes-hold? (bml-scope-unit-methods (head units)) method-node)
+                (head units)
+                (bml-scope-home-unit (tail units) method-node))))
+
+    ;; the env of the unit that defines a method, rebuilt from the link the
+    ;; env carries; a method no linked unit holds at top level (one declared
+    ;; in a nested block) reads the env it was reached from
+    (defn bml-bma-home-env (method-node env)
+        (do
+            (let held (bml-local-lookup-direct env (bml-scope-link-key 0)))
+            (if (nil? held)
+                env
+                (do
+                    (let link (head (bml-local-binding-value held)))
+                    (let symbols (head (tail (bml-local-binding-value held))))
+                    (let home
+                        (bml-scope-home-unit (bml-scope-link-linked link) method-node))
+                    (if (nil? home)
+                        env
+                        (bml-scope-unit-env-with link home symbols "bma"))))))
+
+    (defn bma-trace-count-mode (trace mode)
+        (if (nil? trace) 0
+            (add
+                (if (str_eq (bma-trace-mode (head trace)) mode) 1 0)
+                (bma-trace-count-mode (tail trace) mode))))
+
+    (defn bma-trace-count-op (trace op-name)
+        (if (nil? trace) 0
+            (add
+                (if (str_eq (bma-trace-op-name (head trace)) op-name) 1 0)
+                (bma-trace-count-op (tail trace) op-name))))
+
+
+    ;; a .bml file on disk, parsed by the executable reader, compiled to BMA
+    (defn bml-source-file-compile-executable (path)
+        (bml-compile-program
+            (bml-source-exec-parse-node
+                (bml-source-file-parse-executable path))))
+
+    0)
