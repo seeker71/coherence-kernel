@@ -15617,6 +15617,14 @@ static long long fk_prog_read(long long pid, long long spec) {
                     munmap(S, (size_t)ssz);
                 }
             }
+        } else if (fk_cstr_eq(mode, "str") && p >= 1 && FK_POK(p)) {
+            /* (list "str" k): the text of string-literal node k, for this process's own nodes. A tag-24 node
+             * carries only its pool index, which means nothing outside the process that minted it; a JIT
+             * written in Form reads its own program's literals here (a float literal is a 53 over a 24). */
+            long long k = FK_HH(p) >> 1;
+            if (pid == (long long)getpid() && k >= 0 && k < fk_node_count && fk_node[k][0] == 24) {
+                out = fk_strv(fk_node[k][1]);
+            }
         } else if (fk_cstr_eq(mode, "defn") && p >= 1 && FK_POK(p)) {
             long long j = FK_HH(p) >> 1;
             if (j >= 0 && j < D[4] && j < FK_PROG_FNS) {
