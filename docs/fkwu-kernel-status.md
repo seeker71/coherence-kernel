@@ -48,9 +48,22 @@ intervening rows. Reader leases retain removed segments until final release;
 retired ranges cannot be reassigned. The native read-only importer takes 25
 published primary handles into one generation and preserves all 200 raw bytes
 after source mappings close. Non-field handles refuse before the importer opens
-primary-field objects. Eight [source-bound executions](evidence/fkwu/native-blueprint-layout.json)
+primary-field objects. Nine [source-bound executions](evidence/fkwu/native-blueprint-layout.json)
 cover these boundaries and the CPU/Metal storage consumers. Directory
 publication is serialized; the C allocator and primary readers are unchanged.
+
+The [resident arena](native-identity-arena.md) generates 64-bit semantic words,
+maps and fills native chunks, serves pinned prefixes and freezes them into
+adaptive directory segments. Its 1,380-byte Form-emitted image stands before
+data allocation; its growth preference can change in RAM without readmission.
+The witness generates 70 coordinate rows, rejects 14 malformed batches before
+writes, and appends 4,113 raw words across three mappings. Measured native
+generation and the 4,096-row append each mint zero primary nodes. The repeated
+sample uses 33,104 requested arena bytes and 112 adaptive payload bytes; these
+are not RSS or bandwidth results. Readers and outputs hold retirement, every
+mapping releases, and frozen identities survive arena close. Owner-local rows
+do not replace primary tagged handles or canonical interning. Whole-arena
+release and serialized growth remain the current ownership boundary.
 
 The shared field reuses identical NodeID coordinates; the allocation witness
 returns `7`. Its node columns still have a fixed 2^26-cell capacity and no live
@@ -265,10 +278,12 @@ Resource ownership includes names, metadata and event delivery: a native handle 
    occupies one word; its encoding width does not require preallocating its
    identity space. The raw-u64 accessor, leased blueprint runs and sparse
    identity directory are executable. The primary importer already consumes
-   published handles without scanning unfinished reservations. Next, move the
-   primary producer/read path behind the directory while preserving tagged
-   handles. Admit the native implementation before changing allocation so
-   admission cannot call the allocator it replaces. Concurrent publication
+   published handles without scanning unfinished reservations. The resident
+   native arena now admits its image before data allocation, generates semantic
+   words, grows chunks and freezes prefixes into the directory. Next, give
+   canonical interning a native owner and move the primary producer/read path
+   behind it while preserving tagged handles and native side-table lifetimes.
+   Keep admission independent of the allocator it replaces. Concurrent publication
    requires ordered immutable-generation selection and retained readers.
    Reference-bearing columns require a collector
    root/relocation bridge; slot reuse requires handle generations and side-table

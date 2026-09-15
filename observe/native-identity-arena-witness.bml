@@ -1,0 +1,94 @@
+// Published native rows, resident growth and adaptive freezing meet actual RAM.
+// preludes: form-stdlib/bml/native-identity-arena.bml
+section [form.bml] {
+ def niat-need(ok,why) = if ok then 1 else form_error(str_concat("native identity arena witness: ",why));
+ def niat-repeat(text,count) = if eq(count,0) then "" else if eq(count,1) then text else {
+  let half = niat-repeat(text,div(count,2)); str_concat(str_concat(half,half),if eq(mod(count,2),0) then "" else text);
+ };
+ def niat-query(row) = str_concat(nfm-low(row,8),nfm-low(0,8));
+ def niat-queries(first,count) = if eq(count,0) then "" else str_concat(niat-query(first),niat-queries(add(first,1),sub(count,1)));
+ def niat-bytes(region,offset,count) = nfm-bytes-list(npd-bytes(region,offset,count),"");
+ def niat-mints() { let live = kernel_live(host_pid()); niat-need(ge(len(live),35),"current kernel mint counter available"); nth(live,33); }
+ def niat-signed(value,upper) = if ge(value,0) then nfm-low(value,8) else {
+  let biased = add(add(value,4611686018427387903),1); str_concat(nfm-low(biased,7),byte_to_str(add(upper,div(biased,72057594037927936))));
+ };
+ def niat-tuple(p,l,t,instanceBytes) = str-join-with(list(niat-signed(p,192),niat-signed(l,192),niat-signed(t,192),instanceBytes),"");
+ def niat-input(rows) = if nil?(rows) then "" else { let row = head(rows); str_concat(niat-tuple(head(row),nth(row,1),nth(row,2),niat-signed(nth(row,3),192)),niat-input(tail(rows))); };
+ def niat-expected(rows) = if nil?(rows) then "" else {
+  let row = head(rows); let p = head(row); let l = nth(row,1); let t = nth(row,2); let i = nth(row,3);
+  let word = if and(eq(p,1),and(eq(l,1),eq(t,1))) then niat-signed(i,64) else str_concat(nfm-low(i,4),nfm-low(add(2147483648,add(mul(p,33554432),add(mul(l,4096),t))),4));
+  str_concat(word,niat-expected(tail(rows)));
+ };
+ def niat-bits(field,index,width) = if eq(index,width) then list() else {
+  let bit = nnw-power(index); cons(list(if eq(field,0) then bit else 0,if eq(field,1) then bit else 0,if eq(field,2) then bit else 0,if eq(field,3) then bit else 0),niat-bits(field,add(index,1),width));
+ };
+ def niat-coordinate-rows() = append(list(list(0,0,0,0),list(63,8191,4095,4294967295)),append(niat-bits(0,0,6),append(niat-bits(1,0,13),append(niat-bits(2,0,12),append(niat-bits(3,0,32),list(list(1,1,1,-4611686018427387904),list(1,1,1,-1),list(1,1,1,0),list(1,1,1,1),list(1,1,1,4611686018427387903)))))));
+ def niat-invalid-coordinates() = list(niat-tuple(64,0,0,nfm-low(0,8)),niat-tuple(0,8192,0,nfm-low(0,8)),niat-tuple(0,0,4096,nfm-low(0,8)),niat-tuple(0,0,0,nfm-low(4294967296,8)),niat-tuple(-1,0,0,nfm-low(0,8)),niat-tuple(1,1,1,str_concat(nfm-low(0,7),byte_to_str(64))),niat-tuple(1,1,1,str_concat(niat-repeat(byte_to_str(255),7),byte_to_str(191))));
+ def niat-reject-coordinates(owner,rows) = if nil?(rows) then 0 else {
+  let maps = nia-word(owner,7); let count = nia-word(owner,3); let batches = nia-word(owner,9);
+  niat-need(nothing?(nia-generate(owner,str_concat(niat-tuple(0,0,0,nfm-low(0,8)),head(rows)))),"late invalid coordinate refuses whole native batch");
+  niat-need(and(eq(nia-word(owner,7),maps),and(eq(nia-word(owner,3),count),eq(nia-word(owner,9),batches))),"invalid coordinate preserves maps count and batches"); niat-reject-coordinates(owner,tail(rows));
+ };
+ def niat-generator() {
+  let rows = niat-coordinate-rows(); let input = niat-input(rows); let expected = niat-expected(rows); let count = len(rows); let first = add(72057594037927936,9);
+  let owner = nia-open(first,128); niat-reject-coordinates(owner,niat-invalid-coordinates());
+  let before = niat-mints(); let generated = nia-generate(owner,input); let minted = sub(niat-mints(),before);
+  niat-need(and(eq(generated,count),eq(minted,0)),"native semantic generation makes no primary node allocation");
+  niat-reject-coordinates(owner,niat-invalid-coordinates());
+  let chunk = nia-borrow(owner,nia-word(owner,2),1072); niat-need(str_eq(niat-bytes(chunk,add(48,mul(count,8)),mul(sub(128,count),8)),niat-repeat(byte_to_str(0),mul(sub(128,count),8))),"late refusal leaves spare tail bytes untouched");
+  let view = nia-acquire(owner); let output = npd-region(nia-memory(owner),add(str_len(expected),16)); nia-write(owner,output,niat-repeat(byte_to_str(90),add(str_len(expected),16)));
+  let queries = niat-queries(first,count); niat-need(eq(nia-project(view,queries,output,8),count),"generated identities readable at rows above 56 bits");
+  niat-need(str_eq(niat-bytes(output,8,str_len(expected)),expected),"every semantic field bit and signed extrema match the independent oracle");
+  niat-need(and(str_eq(niat-bytes(output,0,8),niat-repeat(byte_to_str(90),8)),str_eq(niat-bytes(output,add(8,str_len(expected)),8),niat-repeat(byte_to_str(90),8))),"generated raw output guards intact");
+  let directory = ndi-open(); niat-need(eq(nia-freeze(view,directory),count),"generated words freeze at their stable high rows"); let frozen = ndi-acquire(directory); let held = npd-region(ndi-memory(directory),str_len(expected));
+  nia-release(view); npd-region-close(output); niat-need(eq(nia-close(owner),1),"semantic producer retired");
+  niat-need(eq(ndi-project(frozen,queries,held,0),count),"native-generated identities survive producer retirement"); niat-need(str_eq(niat-bytes(held,0,str_len(expected)),expected),"frozen semantic identity bits exact");
+  ndi-release(frozen); npd-region-close(held); niat-need(eq(ndi-close(directory),1),"generated directory retired");
+  print(list("native-identity-generator","coordinate-rows",count,"field-bits",63,"invalid-batches",14,"primary-mints",minted,"exact",1,"released",1)); 1;
+ }
+ def niat-run() {
+  niat-need(eq(niat-generator(),1),"native semantic producer executed");
+  let first = 67108881; let owner = nia-open(first,8); niat-need(nia-active?(owner),"resident owner admitted");
+  niat-need(and(eq(record_get(owner,"code-live"),1),and(eq(nia-word(owner,3),0),eq(nia-word(owner,7),0))),"native image resident before first data mapping");
+  let maximum = niat-repeat(byte_to_str(255),8); let raw7 = niat-repeat(maximum,7); let raw1 = nfm-low(0,8); let raw9 = niat-repeat(str_concat(nfm-low(0,7),byte_to_str(128)),9);
+  let emptyView = nia-acquire(owner); niat-need(eq(nia-append(owner,raw7),7),"initial native chunk fills"); let old = nia-acquire(owner);
+  niat-need(eq(nia-append(owner,raw1),1),"unused native tail capacity fills"); niat-need(eq(nia-word(owner,7),1),"tail reuse makes no new mapping");
+  let entry = record_get(owner,"entry"); niat-need(eq(nia-chunk-words(owner,16),8),"Form changes the live growth policy"); niat-need(and(eq(record_get(owner,"entry"),entry),eq(nia-word(owner,5),16)),"policy changes without code replacement");
+  niat-need(eq(nia-append(owner,raw9),9),"oversized batch grows a new chunk"); niat-need(eq(nia-word(owner,7),2),"growth observed");
+  let rawBulk = niat-repeat(maximum,4096); let before = niat-mints(); let batch = nia-append(owner,rawBulk); let minted = sub(niat-mints(),before);
+  niat-need(eq(batch,4096),"resident hot batch complete"); niat-need(eq(minted,0),"hot native allocation mints no primary nodes");
+  let count = 4113; let expected = str_concat(raw7,str_concat(raw1,str_concat(raw9,rawBulk))); let queries = niat-queries(first,count);
+  let output = npd-region(nia-memory(owner),add(str_len(expected),16)); let guards = niat-repeat(byte_to_str(165),add(str_len(expected),16)); nia-write(owner,output,guards);
+  niat-need(eq(nia-project(emptyView,niat-query(first),output,8),0),"empty view stays empty after growth");
+  niat-need(eq(nia-project(old,niat-query(add(first,7)),output,8),0),"prefix view excludes later tail writes");
+  niat-need(eq(nia-project(old,niat-queries(first,7),output,8),7),"prefix view retains exact earlier rows"); niat-need(str_eq(niat-bytes(output,8,56),raw7),"old raw words exact");
+  let prefixDirectory = ndi-open(); niat-need(eq(nia-freeze(old,prefixDirectory),7),"freezing an older prefix excludes later tail writes"); let prefixView = ndi-acquire(prefixDirectory); let prefixOutput = npd-region(ndi-memory(prefixDirectory),64);
+  niat-need(eq(ndi-project(prefixView,niat-queries(first,8),prefixOutput,0),7),"frozen prefix ends at its original seventh row"); niat-need(str_eq(niat-bytes(prefixOutput,0,56),raw7),"frozen prefix raw words exact");
+  ndi-release(prefixView); npd-region-close(prefixOutput); niat-need(eq(ndi-close(prefixDirectory),1),"older frozen prefix retires independently");
+  let current = nia-acquire(owner); let calls = record_get(owner,"calls"); niat-need(eq(nia-project(current,queries,output,8),count),"native getter crosses chunk boundaries"); niat-need(eq(sub(record_get(owner,"calls"),calls),1),"one carrier entry for all projected rows");
+  niat-need(str_eq(niat-bytes(output,8,str_len(expected)),expected),"all unsigned words exact");
+  niat-need(and(str_eq(niat-bytes(output,0,8),niat-repeat(byte_to_str(165),8)),str_eq(niat-bytes(output,add(8,str_len(expected)),8),niat-repeat(byte_to_str(165),8))),"both nonzero output guards intact");
+  niat-need(eq(nia-project(current,str_concat(maximum,nfm-low(0,8)),output,8),0),"unsigned out-of-range row refused");
+  niat-need(eq(nia-project(current,str_concat(nfm-low(first,8),nfm-low(1,8)),output,8),0),"identity-only field ABI");
+  niat-need(nothing?(nia-project(current,queries,record_get(owner,"root"),0)),"native root cannot become output");
+  niat-need(eq(nia-append(owner,""),0),"empty append changes no data"); niat-need(nothing?(nia-append(owner,"x")),"partial input refused"); niat-need(eq(nia-word(owner,3),count),"refused append retains publication");
+  let directory = ndi-open(); niat-need(eq(nia-freeze(current,directory),count),"whole prefix freezes into one adaptive generation"); niat-need(eq(record_get(directory,"generation"),1),"freeze publishes once");
+  niat-need(nothing?(nia-freeze(current,directory)),"freeze cannot reassign existing directory rows");
+  let retained = ndi-acquire(directory); let packedOutput = npd-region(ndi-memory(directory),str_len(expected));
+  niat-need(eq(ndi-project(retained,queries,packedOutput,0),count),"adaptive directory reads native-produced rows"); niat-need(str_eq(niat-bytes(packedOutput,0,str_len(expected)),expected),"frozen raw words exact");
+  niat-need(nothing?(nia-close(owner)),"live prefix leases refuse retirement"); let reading = record_get(owner,"last-reading"); let response = oh-response(reading,"release-reader"); niat-need(str_eq(oh-select(reading,response,""),"release-reader"),"release response correlated"); oh-voice(response);
+  let saved = npd-span(record_get(current,"descriptor"),0,32); nia-release(emptyView); nia-release(old); nia-release(current); oh-voice(oh-applied(reading,"release-reader",nia-state(owner)));
+  niat-need(eq(nia-project-at(owner,saved,niat-query(first),output,8),0),"released descriptor unavailable while owner stands");
+  niat-need(nothing?(nia-close(owner)),"ordinary output retains owner"); npd-region-close(output); let maps = nia-word(owner,7); let bytes = nia-word(owner,6);
+  niat-need(eq(nia-close(owner),1),"native chunks code and carrier released");
+  let retired = record_get(owner,"retired-state"); niat-need(eq(json-int-value(oh-get(retired,"mapped_requested_bytes")),0),"release signal shows zero native chunk bytes"); niat-need(eq(json-int-value(oh-get(retired,"unmaps")),maps),"every native mapping unmapped");
+  let closedState = nia-state(owner); niat-need(and(eq(json-int-value(oh-get(closedState,"state")),0),eq(json-int-value(oh-get(closedState,"code_live")),0)),"closed state remains observable after root and code unmap"); niat-need(eq(json-int-value(oh-get(closedState,"unmaps")),maps),"closed observation retains the witnessed releases");
+  niat-need(nothing?(nia-project-at(owner,saved,niat-query(first),packedOutput,0)),"closed native owner refuses before code use"); niat-need(eq(nia-close(owner),0),"duplicate close inert");
+  niat-need(eq(ndi-project(retained,queries,packedOutput,0),count),"frozen directory survives complete arena retirement"); niat-need(str_eq(niat-bytes(packedOutput,0,str_len(expected)),expected),"retired producer leaves exact owned words");
+  let packed = json-int-value(oh-get(ndi-storage-state(directory),"payload_requested_bytes")); ndi-release(retained); npd-region-close(packedOutput); niat-need(eq(ndi-close(directory),1),"frozen directory retired");
+  let high = nia-open(4611686018427387901,1); niat-need(eq(nia-append(high,raw1),1),"row metadata above 56 bits preserved"); let highView = nia-acquire(high); niat-need(eq(record_get(highView,"first"),4611686018427387901),"full Form row width retained"); nia-release(highView);
+  niat-need(nothing?(nia-append(high,raw7)),"row-space overflow refuses before allocation"); niat-need(and(eq(nia-word(high,3),1),eq(nia-word(high,7),1)),"overflow preserves earlier published row and map"); niat-need(eq(nia-close(high),1),"high-row owner releases");
+  print(list("native-identity-arena","rows",count,"maps",maps,"requested-bytes",bytes,"adaptive-requested-bytes",packed,"native-primary-mints",minted,"code-bytes",len(record_get(owner,"image")),"exact",1,"released",1)); 1;
+ }
+ if str_eq(read_line(),"run") then niat-run() else 0;
+}
