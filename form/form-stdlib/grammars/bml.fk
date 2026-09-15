@@ -4849,6 +4849,8 @@
                 (bml-source-parse-section class-name objects)
             (if (bml-source-token-value? (head objects) "syntax")
                 (bml-source-parse-syntax-section objects)
+            (if (bml-source-token-value? (head objects) "class")
+                (bml-source-parse-inner-class objects)
             (if (bml-source-token-value? (head objects) "const")
                 (bml-source-parse-const objects)
                 (do
@@ -4856,7 +4858,16 @@
                         (bml-source-parse-constructor class-name objects))
                     (if (bml-source-parse-step-ok? constructor-step)
                         constructor-step
-                        (bml-source-parse-typed-member class-name objects))))))))
+                        (bml-source-parse-typed-member class-name objects)))))))))
+
+    ;; a class declared inside a class body (thesis line 261): the same class
+    ;; reader, its component a member of the outer class
+    (defn bml-source-parse-inner-class (objects)
+        (do
+            (let open (bml-source-parse-class-open objects))
+            (if (head open)
+                (bml-source-parse-step true "inner-class" (nth open 1) (nth open 3))
+                (bml-source-parse-step false "" (empty) objects))))
 
     (defn bml-source-parse-class-members-loop (class-name objects acc)
         (if (nil? objects)
@@ -7159,12 +7170,12 @@
     ;; x = e; and Class.x = e; where the env binds x to a class field: a set of
     ;; that class's one slot. A name the body declares keeps its local reading.
     (defn bml-hati-rewrite-class-sets (node env)
-        (if (bml-hati-layout-has-class-fields? (bml-hati-env-layout env))
+        (if (bml-hati-layout-rewrites? (bml-hati-env-layout env))
             (bml-hati-rewrite-sets-in node env (bml-hati-declared-names node (empty)))
             node))
 
     (defn bml-hati-rewrite-class-sets-list (nodes env)
-        (if (bml-hati-layout-has-class-fields? (bml-hati-env-layout env))
+        (if (bml-hati-layout-rewrites? (bml-hati-env-layout env))
             (bml-hati-rewrite-sets-list nodes env (bml-hati-declared-names-list nodes (empty)))
             nodes))
 
@@ -7185,9 +7196,11 @@
                 (bml-hati-class-set-of node env declared)
                 (if (node_eq (node_category node) BML-AST-METHOD)
                     node
-                    (intern_node
-                        (node_category node)
-                        (bml-hati-rewrite-sets-list (node_children node) env declared))))))
+                    (bml-hati-rewrite-inner-new
+                        (intern_node
+                            (node_category node)
+                            (bml-hati-rewrite-sets-list (node_children node) env declared))
+                        env)))))
 
     (defn bml-hati-rewrite-sets-list (nodes env declared)
         (if (nil? nodes)
@@ -11016,7 +11029,7 @@
               "__hati_unparsed" "__hati_field_get" "__hati_field_set"
               "__hati_unread" "__hati_get" "__hati_set" "__hati_denied"
               "__hati_class_field" "__hati_class_get" "__hati_class_set" "__hati_unbridged"
-              "__hati_forward_get"))
+              "__hati_forward_get" "__hati_new_outer"))
 
     (defn bml-hati-class-call? (node)
         (if (node_eq (node_category node) BML-AST-CALL)
@@ -11149,7 +11162,139 @@
                 (bml-hati-find-named (tail entries) name))))
 
     (defn bml-hati-layout-class (layout name)
-        (bml-hati-find-named (bml-hati-layout-classes layout) name))
+        (do
+            (let found (bml-hati-find-named (bml-hati-layout-classes layout) name))
+            (if (nil? found)
+                (bml-hati-nested-by-full-name layout name)
+                found)))
+
+    ;; --- classes declared in classes (thesis lines 261, 654) ---------------
+    ;; Outer.Inner, the full name line 261 gives a class declared in Outer
+    (defn bml-hati-nested-by-full-name (layout name)
+        (do
+            (let at (bml-scope-last-dot-from name 0 -1))
+            (if (lt at 0)
+                (empty)
+                (do
+                    (let inner
+                        (bml-hati-find-named
+                            (bml-hati-layout-classes layout)
+                            (substring name (add at 1) (str_len name))))
+                    (if (nil? inner)
+                        (empty)
+                        (if (bml-hati-nested-under? inner (substring name 0 at)) inner (empty)))))))
+
+    (defn bml-hati-nested-under? (entry outer-name)
+        (do
+            (let flags (bml-hati-node-flags (bml-hati-class-node entry)))
+            (if (fsc-string-list-contains? flags (str_concat "inner-of:" outer-name))
+                true
+                (fsc-string-list-contains? flags (str_concat "nested-in:" outer-name)))))
+
+    ;; the classes decls declare, then each class declared inside one of
+    ;; them, at any depth
+    (defn bml-hati-with-nested (classes)
+        (append classes (bml-hati-nested-classes-of classes)))
+
+    (defn bml-hati-nested-classes-of (classes)
+        (if (nil? classes)
+            (empty)
+            (do
+                (let inner (bml-hati-nested-in (node_children (bml-node-child (head classes) 2))))
+                (append
+                    inner
+                    (append (bml-hati-nested-classes-of inner) (bml-hati-nested-classes-of (tail classes)))))))
+
+    (defn bml-hati-nested-in (nodes)
+        (if (nil? nodes)
+            (empty)
+            (if (node_eq (node_category (head nodes)) BML-AST-SECTION)
+                (append
+                    (bml-hati-nested-in (node_children (bml-node-child (head nodes) 1)))
+                    (bml-hati-nested-in (tail nodes)))
+                (if (node_eq (node_category (head nodes)) BML-AST-CLASS)
+                    (cons (head nodes) (bml-hati-nested-in (tail nodes)))
+                    (bml-hati-nested-in (tail nodes))))))
+
+    ;; the outer class an inner class belongs to, or ""
+    (defn bml-hati-inner-of (node)
+        (bml-hati-flag-suffix (bml-hati-node-flags node) "inner-of:"))
+
+    (defn bml-hati-flag-suffix (flags prefix)
+        (if (nil? flags)
+            ""
+            (if (eq (str_find (head flags) prefix 0) 0)
+                (substring (head flags) (str_len prefix) (str_len (head flags)))
+                (bml-hati-flag-suffix (tail flags) prefix))))
+
+    ;; "An inner class contains a hidden field that allows it to access
+    ;; fields from the outer class" (line 654)
+    (defn bml-hati-outer-field (node)
+        (do
+            (let outer (bml-hati-inner-of node))
+            (if (str_eq outer "")
+                (empty)
+                (list (bml-hati-field-entry "__outer" outer (bml-ast-int 0) false)))))
+
+    ;; code of an inner class acts for its outer class on the outer's members
+    (defn bml-hati-inner-in? (layout caller declarer)
+        (do
+            (let entry (bml-hati-layout-class layout caller))
+            (if (nil? entry)
+                false
+                (str_eq (bml-hati-inner-of (bml-hati-class-node entry)) declarer))))
+
+    (defn bml-hati-layout-has-inner? (classes)
+        (if (nil? classes)
+            false
+            (if (str_eq (bml-hati-inner-of (bml-hati-class-node (head classes))) "")
+                (bml-hati-layout-has-inner? (tail classes))
+                true)))
+
+    ;; an inner class's code reads its outer instance's fields by name,
+    ;; through the hidden field
+    (defn bml-hati-bind-outer-fields (env layout owner-name)
+        (do
+            (let entry (bml-hati-layout-class layout owner-name))
+            (let outer (if (nil? entry) "" (bml-hati-inner-of (bml-hati-class-node entry))))
+            (if (str_eq outer "")
+                env
+                (bml-hati-bind-outer-reads
+                    env
+                    (bml-hati-fields-of-chain (reverse-list (bml-hati-structural-chain layout outer)))))))
+
+    (defn bml-hati-bind-outer-reads (env fields)
+        (if (nil? fields)
+            env
+            (bml-hati-bind-outer-reads
+                (cons
+                    (bml-local-binding
+                        (bml-hati-field-entry-name (head fields))
+                        (bml-ast-member-get (bml-ast-this-field "__outer") (bml-hati-field-entry-name (head fields)))
+                        env)
+                    env)
+                (tail fields))))
+
+    ;; new of an inner class: made where an instance of its outer class is
+    ;; this (line 654: "these classes can only be created if an instance of
+    ;; the outer class exists"), its hidden field set to it; elsewhere refused
+    (defn bml-hati-rewrite-inner-new (node env)
+        (if (bml-call-named? node "__hati_new")
+            (do
+                (let layout (bml-hati-env-layout env))
+                (let entry (bml-hati-layout-class layout (bml-hati-marker-str node 0)))
+                (let outer (if (nil? entry) "" (bml-hati-inner-of (bml-hati-class-node entry))))
+                (if (str_eq outer "")
+                    node
+                    (if (bml-hati-entries-named? (bml-hati-structural-chain layout (bml-hati-caller-class env)) outer)
+                        (bml-hati-marker "__hati_new_outer" (list node))
+                        (bml-hati-denied-marker "class/inner-needs-outer" (bml-hati-marker-str node 0)))))
+            node))
+
+    (defn bml-hati-layout-rewrites? (layout)
+        (if (bml-hati-layout-has-class-fields? layout)
+            true
+            (bml-hati-layout-has-inner? (bml-hati-layout-classes layout))))
 
     (defn bml-hati-layout-iface (layout name)
         (bml-hati-find-named (bml-hati-layout-ifaces layout) name))
@@ -11207,7 +11352,19 @@
                 (if (bml-hati-numeric? b) "float" "")
                 "")))))
 
+    ;; a type as the layout names it: Outer.Inner, a nested class's full name
+    ;; (thesis line 261), reads as the class's own entry name
     (defn bml-hati-static-type (node env)
+        (bml-hati-type-alias-in env (bml-hati-static-type-raw node env)))
+
+    (defn bml-hati-type-alias-in (env name)
+        (if (lt (str_find name "." 0) 0)
+            name
+            (do
+                (let found (bml-hati-nested-by-full-name (bml-hati-env-layout env) name))
+                (if (nil? found) name (bml-hati-class-name found)))))
+
+    (defn bml-hati-static-type-raw (node env)
         (do
             (let cat (node_category node))
             (if (node_eq cat BML-AST-INT)
@@ -11310,6 +11467,8 @@
             (let name (bml-call-name node))
             (if (str_eq name "__hati_new")
                 (bml-hati-marker-str node 0)
+            (if (str_eq name "__hati_new_outer")
+                (bml-hati-marker-str (bml-hati-marker-arg node 0) 0)
             (if (str_eq name "__hati_field_get")
                 (bml-hati-class-field-type
                     (bml-hati-env-layout env)
@@ -11334,7 +11493,7 @@
                     (bml-hati-invoke-type (bml-ast-name (head split)) (nth split 1) (bml-call-args node) env))
             (if (bml-hati-member-call? name env)
                 (bml-hati-invoke-type (bml-ast-name "this") name (bml-call-args node) env)
-                (bml-hati-free-call-type node env))))))))))
+                (bml-hati-free-call-type node env)))))))))))
 
     (defn bml-hati-member-return (member)
         (do
@@ -12171,7 +12330,7 @@
             (let env3
                 (bml-hati-bind-fields
                     (bml-hati-bind-consts
-                        env2
+                        (bml-hati-bind-outer-fields env2 layout owner-name)
                         (reverse-list (bml-hati-visible-consts layout owner-name))
                         owner-name)
                     (bml-hati-fields-of-chain
@@ -12250,7 +12409,7 @@
     ;; 731)
     (defn bml-hati-access-ok? (layout declarer level caller env)
         (if (str_eq level "private")
-            (str_eq caller declarer)
+            (if (str_eq caller declarer) true (bml-hati-inner-in? layout caller declarer))
             (if (str_eq level "protected")
                 (bml-hati-entries-named? (bml-hati-structural-chain layout caller) declarer)
                 (if (str_eq level "package")
@@ -12830,6 +12989,13 @@
                 (bml-hati-marker-str node 1)
                 pool
                 env)
+        (if (str_eq name "__hati_new_outer")
+            (bml-hati-lower-refusal
+                (bml-hati-voice-refusal
+                    "construction"
+                    "class/inner-table-lane"
+                    (bml-hati-marker-str (bml-hati-marker-arg node 0) 0))
+                pool)
         (if (str_eq name "__hati_set")
             (bml-hati-lower-field-store
                 (bml-hati-marker-arg node 0)
@@ -12866,7 +13032,7 @@
                         (bml-unread-reading (bml-hati-marker-str node 0))
                         "source/unread")
                     "method/body-unparsed")
-                pool))))))))))))))))))))
+                pool)))))))))))))))))))))
 
     (defn bml-hati-lower-class-call-in (node pool env)
         (do
@@ -13731,7 +13897,17 @@
                     rest
                 (if (bml-component-kind? member "Unread")
                     (cons (bml-ast-unread (head (comp-bml-fields member))) rest)
-                    (cons (bml-hati-unbridged-marker member) rest)))))))))))
+                (if (bml-component-kind? member "Class")
+                    (cons (bml-hati-bridge-class-with member (bml-hati-nested-flags member ctor-name)) rest)
+                    (cons (bml-hati-unbridged-marker member) rest))))))))))))
+
+    ;; an inner class names its outer class, so the layout can give it the
+    ;; hidden field line 654 describes; one marked outer is a normal class
+    ;; nested in it
+    (defn bml-hati-nested-flags (member outer-name)
+        (if (bml-properties-has? (bml-class-properties member) "outer")
+            (list (str_concat "nested-in:" outer-name))
+            (list (str_concat "inner-of:" outer-name))))
 
     ;; A class field: one slot for its class, not one per record. It rides the
     ;; member block as __hati_class_field (type name init access).
@@ -13868,6 +14044,9 @@
             (list (bml-ast-section (bml-ast-name "public") (bml-ast-block members)))))
 
     (defn bml-hati-bridge-class (component)
+        (bml-hati-bridge-class-with component (empty)))
+
+    (defn bml-hati-bridge-class-with (component extra-flags)
         (do
             (let name (bml-class-name component))
             (let supers (bml-class-supers component))
@@ -13883,7 +14062,8 @@
                             (append
                                 (if (nil? supers) (empty) (tail supers))
                                 (bml-hati-bridge-iface-refs members))))
-                    (bml-ast-block (bml-ast-name-nodes (bml-hati-class-flag-names component)))))))
+                    (bml-ast-block
+                        (bml-ast-name-nodes (append (bml-hati-class-flag-names component) extra-flags)))))))
 
     (defn bml-hati-bridge-interface (component)
         (do
@@ -14491,7 +14671,7 @@
                             name
                             (node_value (bml-node-child node 1))
                             (bml-hati-class-node-supers node)
-                            (nth built 1)
+                            (append (bml-hati-outer-field node) (nth built 1))
                             (append (nth built 0) (bml-hati-const-members (bml-hati-decl-consts node) name))
                             id
                             node
@@ -14698,7 +14878,7 @@
         (do
             (let classes-built
                 (bml-hati-class-entries-from
-                    (bml-scope-nodes-of decls BML-AST-CLASS)
+                    (bml-hati-with-nested (bml-scope-nodes-of decls BML-AST-CLASS))
                     0
                     base-index
                     (empty)))

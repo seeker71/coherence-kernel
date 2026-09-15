@@ -496,12 +496,35 @@ forward is the class's own act. The thesis defines the forward (lines 661 and 72
 | `bml-class-package-same.bml` | 4 | 4 |
 | `bml-class-field-strict-run.bml` | `BML-HATI-TRAP field/strict H.b`, voiced | 5: the derived object was stored without a word |
 
+## A class declared in a class
+
+The class member reader now takes a class declared inside a class body; it used to stop there with
+`source/unread`. Thesis line 261: "a class is a collection of member variables, constants, inner
+classes, and implemented interfaces". The bridge carries the nested class in its outer class's
+member block, flagged with its outer class, and the layout gathers nested classes at any depth.
+
+Without the `outer` attribute, a nested class is an inner class (line 654):
+- It holds a hidden field, `__outer`, to its outer instance, and its code reads the outer's fields by
+  name through it, private ones included.
+- `new` of an inner class inside its outer's code sets that field to `this`.
+- Where there is no outer instance, it is refused as `class/inner-needs-outer`, voiced: "these
+  classes can only be created if an instance of the outer class exists".
+
+Marked `outer`, it is a normal class nested in its outer. Either kind is reached by its simple name
+or by its full name, `Outer.Name` (line 261), and a static type spelled `Outer.Name` reads as the
+class's own name. The table lane has no let to hold the new record, so an inner `new` there gives
+`class/inner-table-lane`, voiced.
+
+| fixture | now | a tree of HEAD |
+|---|---|---|
+| `bml-class-inner.bml` | 48 | `BML-HATI-UNSUPPORTED source/unread,source/unread,new/unknown-class,call/receiver-dispatch` |
+| `bml-class-inner-needs-outer.bml` | `BML-HATI-UNSUPPORTED class/inner-needs-outer` | `BML-HATI-UNSUPPORTED source/unread,new/unknown-class,call/receiver-dispatch` |
+
 ## Still open, with the reason
 
 - `bml-full-class-model-proof` and `bml-class-inheritance-proof` stay, because the rest of what they
   check does not run natively yet:
   - class methods;
-  - inner classes;
   - template kinds;
   - `Application.Main` as the entry;
   - section properties on methods.
@@ -639,5 +662,15 @@ always written, in its unit's own env.
 Frontier word, 0 hits in the tree: **homekeep**, an env that carries the map of where things live
 along with the place it stands for. Its question: where else does a scope forget the map it was
 drawn from?
+
+Twelfth movement. Most surprising: the full name made a call refuse. `new Outer.Plain()` found its
+class, but a later call on it read `method/abstract`: dispatch compared the class's own name,
+`Plain`, with the name the program spelled, `Outer.Plain`, and found no class under it. Discomfort
+to gold: the pull was to teach each comparison both names. The gold was one place: a static type
+spelled as a nested class's full name reads as the class's own name before anything compares it.
+
+Frontier word, 0 hits in the tree: **namewear**, one thing wearing two names, where each comparison
+sees only the one it was handed. Its question: where else does an alias pass a lookup and fail a
+comparison?
 
 — Claude (Opus 5), as Sema, worktree agent-a60550cd21b84ef52
