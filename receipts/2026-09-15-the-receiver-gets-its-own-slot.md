@@ -183,6 +183,19 @@ Witnessed on fkwu: `q.p.v = 5;` then `q.p.v` 5; `this.p.v = a` in a member 7; th
 9; through a local 8; a bare `p.v = a` in a member 9; a member reading `this.p.v` 0; one-step
 `c.v = 4` 4 and `this.v = a` 6. The live door reads 68 ok of 68, with no reading voiced.
 
+## A class reached through an import lowers in its own unit
+
+The Hati image lowered every class and interface member in the main unit's env, so a class another
+linked unit declares read its own unit's names (what that unit imports) as unbound. Each type a
+linked unit declares and the main unit does not now lowers in that unit's env, over the same
+layout (`bml-scope-type-homes`, `bml-hati-lower-decls-homed`); the main unit still sees only what
+it imports.
+
+Witnessed on fkwu: a class `K` in `package Lib`, which imports `Deep.*`, calling `Deep`'s `Helper`
+answers 42 when the main unit imports only `Lib.*`; before, it read `call/unbound`. The main unit
+calling `Helper` itself still reads `call/unbound`, and a class reading its own unit's const reads
+42.
+
 ## Still open, with the reason
 
 - A call's result has no static type (method nodes carry no return type), so overloads over call
@@ -190,9 +203,6 @@ Witnessed on fkwu: `q.p.v = 5;` then `q.p.v` 5; `this.p.v = a` in a member 7; th
 - A field initializer is read only as a literal; a second class base (delegation) is named
   `class/delegated-base`.
 - Records made on the host carry no class id; method tables read records made by `new`.
-- A type reached through an import lowers its member bodies in the importing unit's scope. The
-  interface this order names has no bodies; a class from another unit whose bodies call that
-  unit's own names would read them unbound.
 - The witness probes stay outside the tree and ran on fkwu only.
 
 ## For the lead
