@@ -17540,17 +17540,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (fk_is_fnval(fv197) == 0) {
             fk_die("fk_walk tag 197: method_define third arg must be a function value (a defn name in value position)");
         }
-        if (fk_fnval_is_closure(fv197)) {
-            /* method_invoke's own dispatch (tag 199, fi199 = fk_mth_fn[m199]; i = fk_fn[fi199])
-             * jumps straight into fk_fn[] by raw index -- it does not go through
-             * fk_fnval_target, so a closure instance's captures would never be delivered and
-             * a raw closure-instance number would misread as an ordinary (and almost certainly
-             * out-of-range) fn-idx. Not yet wired; die loudly rather than silently dispatch
-             * wrong, same as this op already does for a non-function third arg. */
-            fk_die("fk_walk tag 197: method_define third arg is a capturing closure, which method "
-                   "dispatch does not yet support -- define the method from a non-capturing "
-                   "function instead");
-        }
         long long m197 = fk_mth_find(bp197, nm197);
         if (m197 < 0) {
             fk_mth_ensure();
@@ -17559,7 +17548,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_mth_bp[m197] = bp197;
             fk_mth_name[m197] = nm197;
         }
-        fk_mth_fn[m197] = fk_fnval_idx(fv197);
+        /* the table keeps the function VALUE, so a closure instance carries its captures to
+         * dispatch (tag 199) exactly as an indirect call (tag 244) carries them */
+        fk_mth_fn[m197] = fv197;
         return bp197;
     }
     if (t == 198) {
@@ -17586,7 +17577,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (m199 < 0) {
             fk_die("fk_walk tag 199: no method under that name on the record's blueprint (method_define it first)");
         }
-        long long fi199 = fk_mth_fn[m199];
+        long long fv199 = fk_mth_fn[m199];
+        long long fi199 = fk_fnval_target(fv199);
         long long base199 = fk_vsp;
         fk_vp(rv199);
         long long cell199 = fk_node[i][3];
@@ -17595,6 +17587,16 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             cell199 = fk_node[cell199][2];
         }
         long long n199 = fk_vsp - base199;
+        /* a closure method's captures fill fk_call_cap_vals after every argument is walked,
+         * right before the jump, the same invariant tag 244 keeps */
+        if (fk_fnval_is_closure(fv199)) {
+            long long inst199 = fk_fnval_idx(fv199) - FK_CLOSURE_IDX_BASE;
+            long long ci199 = 0;
+            while (ci199 < fk_clo_capcount[inst199]) {
+                fk_call_cap_vals[ci199] = fk_clo_capvals[fk_clo_capbase[inst199] + ci199];
+                ci199 = ci199 + 1;
+            }
+        }
         fk_fn_heat[fi199] = fk_fn_heat[fi199] + 1;
         fk_heat_pulse();
         long long r199 = fk_walk_body(fk_fn[fi199], base199);

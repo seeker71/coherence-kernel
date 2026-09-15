@@ -1,0 +1,49 @@
+; tests/bml-hati-native-lane-parity-proof.fk
+;
+; preludes: form-stdlib/core.fk form-stdlib/minimal-surface.fk form-stdlib/json.fk form-stdlib/cache.fk form-stdlib/form-ontology-bp.fk form-stdlib/engine.fk form-stdlib/compiler.fk form-stdlib/source-compiler.fk form-stdlib/hati-os-kernel.fk form-stdlib/hati-os-kernel-emit.fk form-stdlib/grammars/bml.fk
+;
+; The BMA reference lane and the Hati native lane read one scope rule: a
+; callee's body resolves its names in the callee's own unit (its package, its
+; imports, its methods and consts, its parameters), never in the caller's.
+; An imported method that calls its own unit's helpers therefore runs on both
+; lanes, a caller's parameter stays invisible to a callee, and calls select
+; their overload by arity on both lanes. Each source runs on both lanes and
+; must give one answer: the value, or the same named refusal.
+
+(do
+    (defn lp-node (text)
+        (bml-source-exec-parse-node
+            (bml-source-parse-executable-stream (bml-source-scan-text text))))
+
+    (defn lp-equal (node units expected)
+        (do
+            (let on-bma (bml-bma-run-unit-value node units))
+            (let on-hati (bml-hati-run-unit-value node units))
+            (if (value_eq on-bma on-hati)
+                (if (value_eq on-hati expected) 1 0)
+                0)))
+
+    (let bmf-unit
+        (lp-node "package BMF;\nint Twice(int n) { return n + n; }\nint F(int a, int b) { return a + b; }\nint F(int a, int b, int c) { return a + b + c; }\n"))
+    (let deep-unit
+        (lp-node "package Deep;\nimport BMF.*;\nint Quad(int n) { return Twice(Twice(n)); }\n"))
+    (let lib-unit
+        (lp-node "package Lib;\nint Helper(int n) { return n + 1; }\nint Api(int n) { return Helper(n) + 1; }\n"))
+    (let units (list bmf-unit deep-unit lib-unit))
+
+    (sum
+        (list
+            (lp-equal (lp-node "import Deep.*;\nreturn Quad(10) + 2;\n") units 42)
+            (lp-equal (lp-node "import Lib.Api;\nreturn Api(40);\n") units 42)
+            (lp-equal (lp-node "import Lib.Api;\nreturn Helper(1);\n") units "BML-HATI-UNSUPPORTED call/unbound")
+            (lp-equal (lp-node "int Inner(int n) { return n + m; }\nint Outer(int m) { return Inner(m); }\nreturn Outer(1);\n") (empty) "BML-HATI-UNSUPPORTED name/unbound")
+            (lp-equal (lp-node "const int x = 1;\nint AddX(int n) { return n + x; }\nreturn AddX(41);\n") (empty) 42)
+            (lp-equal (lp-node "int F(int a, int b) { return a + b; }\nint F(int a, int b, int c) { return a + b + c; }\nreturn F(1, 2) + F(13, 13, 13);\n") (empty) 42)
+            (lp-equal (lp-node "import BMF.*;\nreturn F(1, 2) + F(13, 13, 13);\n") units 42)
+            (lp-equal (lp-node "int Sum3(int a, int b, int c) { return a + b + c; }\nreturn Sum3(1, 2);\n") (empty) "BML-HATI-UNSUPPORTED call/arity")
+            (lp-equal (lp-node "const int k = 1;\nreturn k(2);\n") (empty) "BML-HATI-UNSUPPORTED call/not-method")
+            (lp-equal (lp-node "int Inc(int n) { return n + 1; }\nreturn Inc;\n") (empty) "BML-HATI-UNSUPPORTED name/method")
+            (lp-equal (lp-node "package Calc;\nint Inc(int n) { return n + 1; }\nreturn Calc.Inc(Calc.Inc(40));\n") (empty) 42)
+            (lp-equal (lp-node "int F(int n) { int acc = n; acc = acc + 1; return acc; }\nreturn F(41);\n") (empty) 42)
+            (lp-equal (lp-node "int F(int n) { const int one = 1; int acc = n; acc = acc + one; return acc; }\nreturn F(40) + 1;\n") (empty) 42)
+            (lp-equal (lp-node "import BMF.*;\nreturn Twice(Twice(10)) + 2;\n") units 42))))
