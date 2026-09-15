@@ -456,6 +456,31 @@ What stays missing, named for Urs:
 - `strict` is checked only where the stored value's class is known when the program is compiled.
 - A private delegate field stays closed to a call forwarded from outside.
 
+## The class reader drops no member without a word
+
+The class member reader skipped a member it could not take one token at a time, without a word,
+and the rest of the section often went with it. There were two cases:
+- A property word now stands as a member's name wherever the grammar can tell it is a name: after
+  the member's type, before `(`, `;`, `=` or `[`. A property word is an attribute only inside `[ ]`
+  (thesis line 640). After a dot, a property word also reads as a name in a dotted set and in the
+  member tail.
+- A member the reader truly cannot take becomes an Unread component, running through its `;` or up
+  to the `}` that closes its block. The bridge carries it as `__hati_unread`, and the layout names it
+  `source/unread` and voices its words where it is built for a run. The door voiced
+  `unread:int = 3 ;` once.
+
+## A private delegate field takes its own class's forwarded calls
+
+The forward reads the delegate field through `__hati_forward_get`, with no access check. This is the
+coordinator's reading, not the thesis's: privacy governs who names the field from outside, and the
+forward is the class's own act. The thesis defines the forward (lines 661 and 723), not its access.
+
+| fixture | now | a tree of HEAD |
+|---|---|---|
+| `bml-class-member-property-name.bml` | 12 | `BML-HATI-UNSUPPORTED source/unread,field/not-found` |
+| `bml-class-member-unread.bml` | `BML-HATI-UNSUPPORTED source/unread`, voiced | 1: the member went without a word |
+| `bml-class-delegate-private.bml` | 10 | `BML-HATI-UNSUPPORTED access/private` |
+
 ## Still open, with the reason
 
 - `bml-full-class-model-proof` and `bml-class-inheritance-proof` stay, because the rest of what they
@@ -465,9 +490,6 @@ What stays missing, named for Urs:
   - template kinds;
   - `Application.Main` as the entry;
   - section properties on methods.
-- The class reader drops a member whose name is a thesis property word, without a word, and the
-  rest of its section goes with it. In a probe, `int hidden;` (`hidden` is the attribute at line
-  688) left its class with no fields.
 
 ## For the lead
 
@@ -580,5 +602,16 @@ all.
 Frontier word, 0 hits in the tree: **namefall**, a name that falls into the language's own
 vocabulary and leaves the program without a word. Its question: where else does an ordinary name
 collide with a reserved word and vanish instead of speaking?
+
+Tenth movement. Most surprising: the drop was never at the name. `int hidden;` failed at one token,
+and the reader's member loop stepped past it one token at a time until something parsed again,
+taking whatever it had skipped along with it. Discomfort to gold: the pull was to add `hidden` to a
+list of words that may stand as names. The gold was the grammar's own line: an attribute lives only
+inside `[ ]`, so any property word after a type is a name when what follows says so. And what still
+cannot be read now keeps its words and says them.
+
+Frontier word, 0 hits in the tree: **stepskip**, a reader that steps past what it cannot read one
+token at a time and hands on whatever parses next. Its question: where else does recovery quietly
+eat the text it was recovering from?
 
 — Claude (Opus 5), as Sema, worktree agent-a60550cd21b84ef52
