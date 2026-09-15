@@ -86,9 +86,27 @@
 
 - **The vk-*-live rows are not witnessed here.** Validate holds every FKWU-STAGED band as
   pending, and this checkout has no Vulkan carrier standing.
-- **fkwu names a stray `)` by its line in the assembled unit** (`fkwu:195:14` for line 3 of a
-  file after core.fk's 192 lines); the siblings name the file. The position is right in both;
-  the file name is what fkwu leaves out.
+
+## Addendum: fkwu names the file
+
+fkwu counted a diagnostic's line in the assembled unit, preludes expanded, a text no file on
+disk holds. `fk_src_append_text` now records where each file's text begins, and a bare import
+line keeps its line break so every later line keeps its number; `fk_diag` maps the offset back
+and prints `fkwu: <file>:<line>:<col>:`, and its organ-health evidence carries the path and that
+line. An image's symbol text keeps the assembled coordinate, a unit that lowers says `(lowered
+text)`, and the hot-rows report counts lines per file.
+
+| probe | origin/main fkwu | this fkwu |
+| --- | --- | --- |
+| stray `)` on line 3 after core.fk | `fkwu:196:14` | `stray1.fk:3:14` |
+| stray `)` in a bare file, line 3 | `fkwu:3:1` | `strayb.fk:3:1` |
+| unresolved call on line 3 after core.fk | `fkwu:823:13` | `unres.fk:3:13` |
+| unresolved call on line 3 of a prelude | `fkwu:823:14` | `pre-a.fk:3:14` |
+
+python-exec (the one manifest row carrying bare import lines) reads 7 and python-bnf 23 on both
+binaries. Through `./validate.sh`, one band at a time, each "1 ok, 0 divergent": let-scope,
+closure-capture-width, indirect-call-runtime-probe, model-handler, rounding-ops,
+q8-0-matmul-mma (its fkwu-only lane), form-cli-carrier, core-band and string-join.
 
 ## Closing
 
