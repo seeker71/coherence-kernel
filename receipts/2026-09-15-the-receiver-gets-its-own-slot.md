@@ -209,10 +209,20 @@ Witnessed on fkwu (fixture `bml-call-result-type.bml`, 45): `Pick(Name()) + Pick
 where it read `call/ambiguous`; over a class member's results 21; over `Box<String>` and
 `Box<int>`'s `Get()` 21; a generic method declared to return int picks `Pick(int)`.
 
+## A field initializer is any expression
+
+The bridge read an initializer only as one digit token; anything else stood unparsed and `new`
+answered `field/init`. The field reader now keeps the initializer's token objects, the bridge reads
+them as one expression, and `new` lowers each initializer where its class lives: the unit that
+declares it, over the layout (`bml-hati-class-init-env`). An initializer the reader cannot take
+still names `field/init`.
+
+Witnessed on fkwu (fixture `bml-class-field-init.bml`, 56): a const of the unit plus one, a method
+call, a new record and a literal, where the tree before read `BML-HATI-UNSUPPORTED field/init`.
+
 ## Still open, with the reason
 
-- A field initializer is read only as a literal; a second class base (delegation) is named
-  `class/delegated-base`.
+- A second class base (delegation) is named `class/delegated-base`.
 - Records made on the host carry no class id; method tables read records made by `new`.
 - The witness probes stay outside the tree and ran on fkwu only.
 
