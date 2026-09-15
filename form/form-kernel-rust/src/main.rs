@@ -2202,23 +2202,6 @@ impl Kernel {
         }
     }
 
-    /// Build a Record value from a blueprint and (field-name, value) pairs.
-    ///
-    /// The structure-access marshalling seam: the PyO3 bridge lowers a Python
-    /// dict (or a model via model_dump()) onto a kernel Record so a transmuted
-    /// recipe can read named fields via `record_get`. Field names intern to
-    /// NameIDs here exactly as the `record_new` native does (main.rs ~2051), so
-    /// a record marshalled from Python and one built by `record_new` in Form
-    /// are the same shape — `record_get`/`record_has` read both identically.
-    #[cfg(feature = "pyo3")]
-    pub(crate) fn make_record(&mut self, blueprint: NodeID, pairs: Vec<(String, Value)>) -> Value {
-        let fields: Vec<(NameID, Value)> = pairs
-            .into_iter()
-            .map(|(name, value)| (self.intern_string(&name).inst, value))
-            .collect();
-        Value::Record(Arc::new(Mutex::new(Record { blueprint: Some(blueprint), fields })))
-    }
-
     fn substrate_mark(&self) -> Vec<Value> {
         vec![
             Value::Int(self.next_inst as i64),

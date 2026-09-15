@@ -6,7 +6,7 @@ From the repository root, provide one JSON stdin line:
 
 ```sh
 form-run ./fkwu observe/kernel-trace-run.bml <<'EOF'
-{"source":"form/form-kernel-ts/seedbank/python-adapter/examples/python_demo.py","columns":100}
+{"source":"observe/fixtures/python_demo.py","columns":100}
 EOF
 ```
 
@@ -18,7 +18,7 @@ The native source compiler door publishes a reusable `.fk` after successful comp
 
 ```sh
 form-run ./fkwu observe/python-specimen-compile-run.bml <<'EOF'
-{"source":"form/form-kernel-ts/seedbank/python-adapter/examples/python_demo.py","output":"/tmp/python-demo.fk"}
+{"source":"observe/fixtures/python_demo.py","output":"/tmp/python-demo.fk"}
 EOF
 ```
 
@@ -26,6 +26,6 @@ The output directory must exist. The Form parser, lifter and emitter execute dir
 
 `python_demo.py` and its compiled `.fk` return **40949**. A literal-only program produces zero dispatches. Dispatch counts describe the actual emitted specimen and are read from its current trace. Threshold equality and nonconserving trace refusal are observed independently of the rendering.
 
-The [native compiler witness](../observe/python-native-compiler-witness.bml) drives the public door and executes its output on `fkwu`, including class dispatch, inheritance, `super`, child-owned fields and explicit missing-member or arity refusal. The seedbank parity suite compiles through this same door and runs the emitted `.fk` on `fkwu`; its direct Python interpreter leg (`kernel-bmf-run`) still requires its own observed migration.
+The [native compiler witness](../observe/python-native-compiler-witness.bml) drives the public door and executes its output on `fkwu`, including class dispatch, inheritance, `super`, child-owned fields and explicit missing-member or arity refusal.
 
 The north star is reusable native compilation with complete source identity, adaptable Form emission and direct resource ownership. A proof sibling contributes independent agreement; Form owns compilation and the public utility.
