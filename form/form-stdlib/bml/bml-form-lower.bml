@@ -122,7 +122,7 @@ section [form.bml] {
 
   def bfk-stmt-core(cx, node, env, vm) {
    let cat = node_category(node);
-   if node_eq(cat, BML-AST-CALL) then bfk-call-stmt(cx, node, env, vm) else if node_eq(cat, BML-AST-BLOCK) then bfk-sub(cx, node_children(node), env, vm, bfk-out-keys(bml-local-env-after-node(node, env), vm)) else if node_eq(cat, BML-AST-CONST) then bfk-const-stmt(cx, node, env, vm) else if node_eq(cat, BML-AST-CHOOSE) then bfk-choose-stmt(cx, node, env, vm) else if node_eq(cat, BML-AST-FAIL) then bfk-fail-stmt(cx, env, vm) else if node_eq(cat, BML-AST-SAVE) then bfk-save-stmt(cx, env, vm) else if node_eq(cat, BML-AST-RESTORE) then bfk-restore-stmt(cx, env, vm) else if node_eq(cat, BML-AST-DISCARD) then bfk-discard-stmt(cx, env, vm) else bfk-value-stmt(cx, bfk-expr-core(cx, node, env, vm), vm);
+   if node_eq(cat, BML-AST-CALL) then bfk-call-stmt(cx, node, env, vm) else if node_eq(cat, BML-AST-BLOCK) then bfk-sub(cx, node_children(node), env, vm, bfk-out-keys(bml-local-env-after-node(node, env), vm)) else if node_eq(cat, BML-AST-CONST) then bfk-const-stmt(cx, node, env, vm) else if node_eq(cat, BML-AST-CHOOSE) then bfk-choose-stmt(cx, node, env, vm) else if node_eq(cat, BML-AST-FAIL) then bfk-fail-stmt(cx, env, vm) else if node_eq(cat, BML-AST-SAVE) then bfk-save-stmt(cx, env, vm) else if node_eq(cat, BML-AST-RESTORE) then bfk-restore-stmt(cx, env, vm) else if node_eq(cat, BML-AST-DISCARD) then bfk-discard-stmt(cx, env, vm) else if node_eq(cat, BML-AST-CUT) then bfk-cut-stmt(env, vm) else bfk-value-stmt(cx, bfk-expr-core(cx, node, env, vm), vm);
   }
 
   def bfk-call-stmt(cx, node, env, vm) = if bfk-class-shaped?(node, env) then bfk-value-stmt(cx, bfk-class-call(cx, node, env, vm), vm) else if bml-bnml-top-node?(node) then bfk-top-stmt(cx, node, env, vm) else if bml-bnml-declare-node?(node) then bfk-store(cx, bml-bnml-new-key(bml-bnml-target-name(node), env), bml-bnml-value(node), env, vm) else if bml-bnml-assign-node?(node) then bfk-store(cx, bml-bnml-assign-key(node, env), bml-bnml-value(node), env, vm) else bfk-value-stmt(cx, bfk-call-expr(cx, node, env, vm), vm);
@@ -410,11 +410,26 @@ section [form.bml] {
    let outk = bfk-out-keys(inner-env, bfk-r-vm(pr));
    let fin = bfk-fresh(cx, "f");
    let jc = bfk-fresh(cx, "c");
-   let r = bfk-untuple(cx, bfk-branches(cx, node_children(node), bml-bnml-choosing(inner-env), bfk-r-vm(pr), outk, fin, jc), outk, bfk-r-vm(pr));
-   bfk-r(append(bfk-r-items(pr), append(list(bfk-let(fin, bfk-cell("f")), bfk-let(jc, bfk-cell("c")), bfk-journal-open()), bfk-r-items(r))), bfk-r-vm(r), bfk-r-val(r));
+   let kin = bfk-fresh(cx, "k");
+   let r = bfk-untuple(cx, bfk-branches(cx, node_children(node), bml-bnml-choosing(inner-env), bfk-r-vm(pr), outk, list(fin, jc, kin)), outk, bfk-r-vm(pr));
+   bfk-r(append(bfk-r-items(pr), append(list(bfk-let(fin, bfk-cell("f")), bfk-let(jc, bfk-cell("c")), bfk-let(kin, bfk-cell("k")), bfk-journal-open()), bfk-r-items(r))), bfk-r-vm(r), bfk-r-val(r));
   }
-  def bfk-branches(cx, branches, env, vm0, outk, fin, jc) = if nil?(branches) then bfk-do(list(bfk-cell-set("f", "1"), bfk-journal-close()), bfk-tuple(bfk-top(vm0), vm0, outk)) else bfk-branch(cx, branches, env, vm0, outk, fin, jc, bfk-fresh(cx, "b"));
-  def bfk-branch(cx, branches, env, vm0, outk, fin, jc, b) = bfk-do(list(bfk-cell-set("f", "0"), bfk-let(b, bfk-nodes(cx, bfk-stmts-of(head(branches)), env, vm0, outk))), bfk-if(bfk-unfailed(), bfk-do(list(bfk-cell-set("f", fin), bfk-journal-close()), b), bfk-do(list(bfk-journal-undo(jc)), bfk-branches(cx, tail(branches), env, vm0, outk, fin, jc))));
+  // held: (incoming FAILED, journal count, incoming commit). A choose that
+  // answers hands both flags back. A branch that failed after its cut fails
+  // the whole choose: the branches after it are discarded, as a failure after
+  // every branch fails it.
+  def bfk-choose-fails(vm0, outk, held) = bfk-do(list(bfk-cell-set("f", "1"), bfk-journal-close(), bfk-cell-set("k", nth(held, 2))), bfk-tuple(bfk-top(vm0), vm0, outk));
+  def bfk-branches(cx, branches, env, vm0, outk, held) = if nil?(branches) then bfk-choose-fails(vm0, outk, held) else bfk-branch(cx, branches, env, vm0, outk, held, bfk-fresh(cx, "b"));
+  def bfk-branch(cx, branches, env, vm0, outk, held, b) = bfk-do(list(bfk-cell-set("f", "0"), bfk-cell-set("k", "0"), bfk-let(b, bfk-nodes(cx, bfk-stmts-of(head(branches)), env, vm0, outk))), bfk-if(bfk-unfailed(), bfk-do(list(bfk-cell-set("f", nth(held, 0)), bfk-journal-close(), bfk-cell-set("k", nth(held, 2))), b), bfk-do(list(bfk-journal-undo(nth(held, 1))), bfk-if(bfk-f2("le", bfk-cell("k"), "0"), bfk-branches(cx, tail(branches), env, vm0, outk, held), bfk-choose-fails(vm0, outk, held)))));
+
+  // A cut commits the choose around it to this branch: a failure after it in
+  // the branch fails the whole choose, one before it still falls through, and
+  // its scope is its own choose (form-stdlib/engine.fk's cut-aware sequence
+  // and choice). Outside any choose it commits nothing. Like the marks, it
+  // answers the value its body stands on.
+  def bfk-cut-stmt(env, vm) = bfk-r(if bml-bnml-choosing?(env) then list(bfk-cell-set("k", "1")) else empty, vm, bfk-top(vm));
+  // the table lowering names cut as a need it cannot meet; this lowering meets it
+  def bfk-without(reasons, reason) = if nil?(reasons) then empty else if str_eq(head(reasons), reason) then bfk-without(tail(reasons), reason) else cons(head(reasons), bfk-without(tail(reasons), reason));
 
   def bfk-vm-marks(vm) = if bfk-vm-has?(vm, "__marks") then bfk-vm-get(vm, "__marks") else "(list)";
   def bfk-save-stmt(cx, env, vm) {
@@ -504,7 +519,7 @@ section [form.bml] {
   def bfk-member(cx, layout, owner, member, base-env) {
    let env = bml-hati-member-env(layout, owner, member, base-env);
    let body = bml-method-node-body(bml-hati-member-node(member));
-   let heard = bfk-need-all(cx, bml-hati-unsupported-node-in(body, env));
+   let heard = bfk-need-all(cx, bfk-without(bml-hati-unsupported-node-in(body, env), "cut"));
    let text = bfk-body-text(cx, bml-bnml-top-body-node-in(body, env), env, bfk-frame-vm(list(body), env, bfk-vm-put(empty, "@pack", "a0")));
    bfk-form(list("defn", bfk-fn-name(bml-hati-member-fn(member)), "(a0)", if str_eq(bml-hati-member-kind(member), "ctor") then bfk-do(list(text), "(head a0)") else text));
   }
@@ -542,7 +557,7 @@ section [form.bml] {
   // the runtime the program carries: its state, the journal's undo, element
   // assignment, and the answer line the run reads back
   def bfk-state() = bfk-let("BFK", "(record_new 0)");
-  def bfk-inits() = list(bfk-cell-set("m", "0"), bfk-cell-set("v", "0"), bfk-cell-set("t", "0"), bfk-cell-set("f", "0"), bfk-cell-set("j", "(list)"), bfk-cell-set("c", "0"), bfk-cell-set("d", "0"));
+  def bfk-inits() = list(bfk-cell-set("m", "0"), bfk-cell-set("v", "0"), bfk-cell-set("t", "0"), bfk-cell-set("f", "0"), bfk-cell-set("j", "(list)"), bfk-cell-set("c", "0"), bfk-cell-set("d", "0"), bfk-cell-set("k", "0"));
   def bfk-undo-def() = bfk-form(list("defn", "bfk-undo", "(n)", bfk-if("(le n 0)", "0", bfk-do(list(bfk-let("e", bfk-f1("head", bfk-cell("j"))), bfk-form(list("record_set", "(nth e 0)", "(nth e 1)", "(nth e 2)")), bfk-cell-set("j", bfk-f1("tail", bfk-cell("j"))), bfk-cell-set("c", bfk-f2("sub", bfk-cell("c"), "1"))), "(bfk-undo (sub n 1))"))));
   def bfk-list-set-def() = bfk-form(list("defn", "bfk-list-set", "(xs at v)", bfk-if("(eq (len xs) 0)", "xs", bfk-if("(eq at 0)", "(cons v (tail xs))", "(cons (head xs) (bfk-list-set (tail xs) (sub at 1) v))"))));
   def bfk-jot-def() = bfk-form(list("defn", "bfk-jot", "(o k)", bfk-if(bfk-f2("le", bfk-cell("d"), "0"), "0", bfk-do(list(bfk-cell-set("j", bfk-f2("cons", "(list o k (record_get o k))", bfk-cell("j"))), bfk-cell-set("c", bfk-f2("add", bfk-cell("c"), "1"))), "0"))));
@@ -566,7 +581,7 @@ section [form.bml] {
    let unit-env = bml-hati-env-with-layout(bml-scope-unit-env-with(link, main, symbols, "hati"), layout);
    // a field initializer lowers where its class lives: this unit, or the linked unit that declares the class
    let env = cons(bml-local-binding(bml-hati-class-homes-key(), list(unit-env, homes), unit-env), unit-env);
-   let passes = append(bml-scope-link-reasons(link), append(bml-hati-unsupported-nodes-in-env(main-nodes, env), append(bml-hati-unsupported-methods-in(methods, env), bml-scope-linked-unsupported(link, others, symbols))));
+   let passes = bfk-without(append(bml-scope-link-reasons(link), append(bml-hati-unsupported-nodes-in-env(main-nodes, env), append(bml-hati-unsupported-methods-in(methods, env), bml-scope-linked-unsupported(link, others, symbols)))), "cut");
    let cx = bfk-cx();
    let main-text = bfk-main(cx, main-nodes, env);
    let method-texts = bfk-methods(cx, methods, env, 1);
