@@ -377,42 +377,69 @@ function emitBlock(
   scope: EmitScope,
 ): string {
   if (op === RBlock.LET) {
-    const name = kids[0]!;
-    if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
-      throw new Error("WgslBackend: LET name must be a string trivial");
-    }
-    const valSrc = emitExpr(k, kids[1]!, scope);
-    const jsName = fresh(scope, `let_${k.nameStr(name.inst)}`);
-    scope.vars.set(name.inst, jsName);
-    // Inline as a let-binding expression. WGSL doesn't have
-    // expression-let, so we surface this as a parenthesised assignment
-    // helper — but realistically LET appears inside a DO block, where
-    // emitBlockStmts (below) lowers it to a proper `let`.
-    return `/* let ${jsName} = ${valSrc} */ ${jsName}`;
+    // A let binds the rest of its own do (the loop below keeps a do's own
+    // lets). Met anywhere else — an if arm, a do's last form — nothing
+    // follows it, so its name reaches nothing past itself.
+    return emitLetExpr(k, kids, scope, false);
   }
-  // DO / SEQUENCE — evaluate each, return last
+  // DO / SEQUENCE — a lexical scope, as the walkers read it: its lets bind
+  // for the rest of this block only. Evaluate each, return last.
   if (kids.length === 0) {
     return scope.scalarType === "f32" ? "0.0" : "0";
   }
-  if (kids.length === 1) {
-    return emitExpr(k, kids[0]!, scope);
+  const outer = new Map(scope.vars);
+  try {
+    if (kids.length === 1) {
+      return emitExpr(k, kids[0]!, scope);
+    }
+    // Multi-statement blocks need WGSL statements, not expressions.
+    // Emit as a `{ let _0 = ...; let _1 = ...; final }` block, returned
+    // via an inline expression-evaluation pattern. Since WGSL doesn't
+    // have block-expressions, the typical use is at the top level via
+    // emitBlockStmts.
+    const stmts: string[] = [];
+    for (let i = 0; i < kids.length - 1; i++) {
+      const c = kids[i]!;
+      const e = isLetNode(k, c)
+        ? emitLetExpr(k, k.children(c), scope, true)
+        : emitExpr(k, c, scope);
+      const tmp = fresh(scope, "tmp");
+      stmts.push(`let ${tmp} = ${e};`);
+    }
+    // The last child is the block's value — but expression context can't
+    // hold statements. Surface that the caller should use emitBlockStmts
+    // for non-trivial blocks; for now we collapse to the last expression.
+    return emitExpr(k, kids[kids.length - 1]!, scope);
+  } finally {
+    scope.vars.clear();
+    for (const [key, value] of outer) scope.vars.set(key, value);
   }
-  // Multi-statement blocks need WGSL statements, not expressions.
-  // Emit as a `{ let _0 = ...; let _1 = ...; final }` block, returned
-  // via an inline expression-evaluation pattern. Since WGSL doesn't
-  // have block-expressions, the typical use is at the top level via
-  // emitBlockStmts.
-  const stmts: string[] = [];
-  for (let i = 0; i < kids.length - 1; i++) {
-    const c = kids[i]!;
-    const e = emitExpr(k, c, scope);
-    const tmp = fresh(scope, "tmp");
-    stmts.push(`let ${tmp} = ${e};`);
+}
+
+function emitLetExpr(
+  k: Kernel,
+  kids: readonly NodeID[],
+  scope: EmitScope,
+  keep: boolean,
+): string {
+  const name = kids[0]!;
+  if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
+    throw new Error("WgslBackend: LET name must be a string trivial");
   }
-  // The last child is the block's value — but expression context can't
-  // hold statements. Surface that the caller should use emitBlockStmts
-  // for non-trivial blocks; for now we collapse to the last expression.
-  return emitExpr(k, kids[kids.length - 1]!, scope);
+  const valSrc = emitExpr(k, kids[1]!, scope);
+  const jsName = fresh(scope, `let_${k.nameStr(name.inst)}`);
+  if (keep) scope.vars.set(name.inst, jsName);
+  // Inline as a let-binding expression. WGSL doesn't have
+  // expression-let, so we surface this as a parenthesised assignment
+  // helper — but realistically LET appears inside a DO block, where
+  // emitBlockStmts (below) lowers it to a proper `let`.
+  return `/* let ${jsName} = ${valSrc} */ ${jsName}`;
+}
+
+function isLetNode(k: Kernel, n: NodeID): boolean {
+  if (n.level === Level.TRIVIAL) return false;
+  const cat = k.category(n);
+  return cat.type === RBasic.BLOCK && cat.inst === RBlock.LET;
 }
 
 // Emit a block as WGSL statements, with the final expression returned

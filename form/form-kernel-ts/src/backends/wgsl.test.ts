@@ -83,6 +83,23 @@ test("WgslBackend: target_hints includes gpu-webgpu", () => {
   assert.equal(WgslBackend.name, "wgsl");
 });
 
+test("a LET in a nested DO or an IF arm does not reach past it", () => {
+  for (const src of [
+    "(do (let t 7) (do (let t 5)) t)",
+    "(do (let t 7) (if 1 (let t 5) 0) t)",
+  ]) {
+    const k = new Kernel();
+    const out = WgslBackend.emit(k, readForm(k, src), {
+      params: [],
+      return_format: I32_SCALAR,
+    });
+    const outer = /let (let_t_\d+) = 7;/.exec(out)?.[1];
+    const reads = out.match(/let_t_\d+/g) ?? [];
+    assert.ok(outer !== undefined, `${src}: outer let declared`);
+    assert.equal(reads[reads.length - 1], outer, `${src}: last read is the outer let`);
+  }
+});
+
 test("emits a simple add(a, b) recipe as a scalar fn", () => {
   const k = new Kernel();
   // (defn add (a b) (+ a b))  then call add — but the backend takes the

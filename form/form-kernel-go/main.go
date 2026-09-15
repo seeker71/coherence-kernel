@@ -596,6 +596,10 @@ type Kernel struct {
 	// Per lc-native-kernel-binary's "tracing and observation pattern."
 	Trace        *Trace
 	switchTables map[NodeID]*switchTable
+	// unitRoots — the unit roots the reader built, by how walkUnit reads
+	// them: unitDo for a source whose one form is a (do ...), unitWrapper for
+	// the implicit do that holds several top-level forms.
+	unitRoots map[NodeID]uint8
 }
 
 type switchTable struct {
@@ -3614,7 +3618,7 @@ func (k *Kernel) registerNatives() {
 		}
 		k.walkCacheMisses++
 		env := NewFrame(nil)
-		v := k.walk(args[0].AsNid(), env)
+		v := k.walkUnit(args[0].AsNid(), env)
 		k.walkCache[args[0].AsNid()] = v
 		return v
 	})
@@ -3636,7 +3640,7 @@ func (k *Kernel) registerNatives() {
 	})
 	k.registerNative("walk_recipe", catWitness(), func(k *Kernel, args []Value) Value {
 		env := NewFrame(nil)
-		return k.walk(args[0].AsNid(), env)
+		return k.walkUnit(args[0].AsNid(), env)
 	})
 	// walk_recipe_here — walks a Recipe in the CALLER's env, so let-
 	// bindings inside the Recipe land in the caller's scope. This is
@@ -3652,7 +3656,7 @@ func (k *Kernel) registerNatives() {
 		// a subsequent substrate_gc would sweep them and leave the env
 		// holding closures with deleted bodies.
 		k.activeRoots = append(k.activeRoots, args[0].AsNid())
-		return k.walk(args[0].AsNid(), env)
+		return k.walkUnit(args[0].AsNid(), env)
 	})
 	walkParallel := func(k *Kernel, args []Value) Value {
 		roots := make([]NodeID, len(args[0].List))
@@ -3877,6 +3881,128 @@ func (k *Kernel) registerNatives() {
 // Walker — full RBasic dispatch
 // ---------------------------------------------------------------------------
 
+// Block kinds walkInner reads off a do's own forms, and how walkUnit reads a
+// unit root the reader named.
+const (
+	blockKindLet  = 1
+	blockKindDefn = 2
+	blockKindDo   = 3
+	unitDo        = uint8(1)
+	unitWrapper   = uint8(2)
+)
+
+func (k *Kernel) blockKind(n NodeID) int {
+	if n.Level == LevelTrivial {
+		return 0
+	}
+	cat := k.recipeAt(n).Category
+	switch cat.Type {
+	case RBasicBlock:
+		if cat.Inst == RBlockLet {
+			return blockKindLet
+		}
+		return blockKindDo
+	case RBasicFnDef:
+		return blockKindDefn
+	}
+	return 0
+}
+
+// markUnitRoot — the reader names each do it hands back as a unit root: the
+// implicit do around several top-level forms (wrapper), or the one top-level
+// (do ...) of a source.
+func (k *Kernel) markUnitRoot(root NodeID, wrapper bool) {
+	if k.blockKind(root) != blockKindDo {
+		return
+	}
+	if k.unitRoots == nil {
+		k.unitRoots = make(map[NodeID]uint8)
+	}
+	if wrapper {
+		k.unitRoots[root] = unitWrapper
+	} else {
+		k.unitRoots[root] = unitDo
+	}
+}
+
+// observeBlock — the dispatch record walkInner makes, for a block form that
+// bindLet or walkUnit reads without passing it through walkInner.
+func (k *Kernel) observeBlock(cat NodeID) {
+	if k.Trace != nil {
+		k.Trace.record(cat.Type, cat.Inst)
+	}
+	k.observeRecipeDispatch(cat)
+}
+
+// bindLet — a let a do (or a unit) binds itself: the value reads the frame
+// before the name joins it, then the name binds there.
+func (k *Kernel) bindLet(n NodeID, env *Frame) Value {
+	r := k.recipeAt(n)
+	k.observeBlock(r.Category)
+	v := k.walk(r.Children[1], env)
+	env.Bind(k.identID(r.Children[0]), v)
+	return v
+}
+
+// walkUnit — a unit root read in the unit's own frame. The unit's top-level
+// do is its sequence, as fkwu's fk_parse_top reads it: a let there binds the
+// unit's frame, where every defn of the unit and every unit loaded after it
+// reads it; a defn binds there; a do before the first let or expression is a
+// top-level do too; a later do is a lexical scope (walkInner's block arm). The
+// implicit do around several top-level forms holds each form at column 0,
+// where every do is a top-level do. A root the reader did not name (a
+// deserialized recipe, a combined program) keeps every do at its top flat.
+func (k *Kernel) walkUnit(n NodeID, env *Frame) Value {
+	kind := k.blockKind(n)
+	if kind == blockKindLet {
+		return k.bindLet(n, env)
+	}
+	if kind != blockKindDo {
+		return k.walk(n, env)
+	}
+	mark := k.unitRoots[n]
+	if mark == unitDo {
+		return k.walkUnitDo(n, env)
+	}
+	r := k.recipeAt(n)
+	k.observeBlock(r.Category)
+	v := Value{}
+	for _, c := range r.Children {
+		if mark == unitWrapper && k.blockKind(c) == blockKindDo && k.unitRoots[c] != unitWrapper {
+			v = k.walkUnitDo(c, env)
+		} else {
+			v = k.walkUnit(c, env)
+		}
+	}
+	return v
+}
+
+func (k *Kernel) walkUnitDo(n NodeID, env *Frame) Value {
+	r := k.recipeAt(n)
+	k.observeBlock(r.Category)
+	leading := true
+	v := Value{}
+	for _, c := range r.Children {
+		switch kind := k.blockKind(c); kind {
+		case blockKindDo:
+			if leading {
+				v = k.walkUnitDo(c, env)
+			} else {
+				v = k.walk(c, env)
+			}
+		case blockKindLet:
+			v = k.bindLet(c, env)
+			leading = false
+		default:
+			v = k.walk(c, env)
+			if kind != blockKindDefn {
+				leading = false
+			}
+		}
+	}
+	return v
+}
+
 func (k *Kernel) walk(n NodeID, env *Frame) Value {
 	// One Form-stack slot per host walk invocation (see walkInner's closure
 	// arm). The truncation runs only on the success path — a panic leaves
@@ -4046,18 +4172,37 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 
 		case RBasicBlock:
 			if cat.Inst == RBlockLet {
-				name := k.identID(kids[0])
-				v := k.walk(kids[1], env)
-				env.Bind(name, v)
-				return v
+				// A let binds the rest of its own do (the loop below binds a
+				// do's own lets). Met anywhere else — an if arm, an argument,
+				// a do's last form — nothing follows it, so it answers its
+				// value and binds no name.
+				return k.walk(kids[1], env)
 			}
 			if len(kids) == 0 {
 				return Value{}
 			}
-			for i := 0; i < len(kids)-1; i++ {
-				k.walk(kids[i], env)
+			// DO / SEQUENCE — a lexical scope: its lets and defns bind for
+			// the rest of this do only. The scope opens at the first binding
+			// form, so a do that binds nothing costs no frame. A unit's
+			// top-level do reads flat (walkUnit).
+			last := len(kids) - 1
+			scope := env
+			for i := 0; i < last; i++ {
+				kind := k.blockKind(kids[i])
+				if (kind == blockKindLet || kind == blockKindDefn) && scope == env {
+					scope = NewFrame(env)
+				}
+				if kind == blockKindLet {
+					k.bindLet(kids[i], scope)
+				} else {
+					k.walk(kids[i], scope)
+				}
 			}
-			n = kids[len(kids)-1] // TCO: a do/seq block's last expr is in tail position
+			if scope == env && k.blockKind(kids[last]) == blockKindDefn {
+				scope = NewFrame(env)
+			}
+			env = scope
+			n = kids[last] // TCO: a do/seq block's last expr is in tail position
 			continue
 
 		case RBasicMatch:
@@ -4856,6 +5001,7 @@ func readRootFromSource(k *Kernel, src string) NodeID {
 	}
 	toks = tokenizeSexp(wrapped)
 	root, _ := k.readSexpr(toks, 0)
+	k.markUnitRoot(root, wrapped != src)
 	return root
 }
 
@@ -5231,7 +5377,7 @@ func lowerBmlSource(bmlAbsPath string) (string, error) {
 	lowerKernel := NewKernel()
 	root := readRootFromSource(lowerKernel, strings.Join(compilerParts, "\n"))
 	lowerKernel.activeRoots = []NodeID{root}
-	lowerKernel.walk(root, NewFrame(nil))
+	lowerKernel.walkUnit(root, NewFrame(nil))
 
 	lowered, err := os.ReadFile(outPath)
 	if err != nil || len(lowered) == 0 {
@@ -5581,7 +5727,7 @@ func main() {
 		}
 		k.activeRoots = []NodeID{root}
 		env := NewFrame(nil)
-		result := k.walk(root, env)
+		result := k.walkUnit(root, env)
 		k.substrateGC([]Value{{Kind: VNodeID, Nid: root}, result}, env)
 		fmt.Println(result.String())
 		return
@@ -5641,7 +5787,7 @@ func main() {
 	}
 	k.activeRoots = []NodeID{root}
 	env := NewFrame(nil)
-	result := k.walk(root, env)
+	result := k.walkUnit(root, env)
 	k.substrateGC([]Value{result}, env)
 	fmt.Println(result.String())
 }
@@ -5700,10 +5846,11 @@ func cliTrace(args []string) int {
 	}
 	toks = tokenizeSexp(wrapped)
 	root, _ := k.readSexpr(toks, 0)
+	k.markUnitRoot(root, wrapped != src)
 	k.activeRoots = []NodeID{root}
 	env := NewFrame(nil)
 	start := time.Now()
-	result := k.walk(root, env)
+	result := k.walkUnit(root, env)
 	k.substrateGC([]Value{result}, env)
 	elapsed := time.Since(start)
 

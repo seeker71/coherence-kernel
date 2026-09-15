@@ -20,6 +20,7 @@ import {
   serializeRecipeArtifact,
   Trace,
   walk,
+  walkUnit,
 } from "./kernel.ts";
 import { createNodeKernelHost } from "./node-host.ts";
 import { readAll, readForm } from "./reader.ts";
@@ -220,7 +221,7 @@ async function lowerBmlSource(bmlAbsPath: string): Promise<string> {
     const lowerKernel = new Kernel(createNodeKernelHost());
     const lowerFrame = new Frame(null);
     const root = readAll(lowerKernel, compilerSrc);
-    walk(lowerKernel, root, lowerFrame);
+    walkUnit(lowerKernel, root, lowerFrame);
 
     const lowered = await readFile(outPath, "utf8").catch(() => "");
     if (lowered.length === 0) {
@@ -512,7 +513,7 @@ async function main(): Promise<void> {
     setCrashTraceContext("binary", args);
     const root = deserializeRecipeArtifact(k, await readFile(path));
     k.setActiveRoots([root]);
-    const value = walk(k, root, frame);
+    const value = walkUnit(k, root, frame);
     k.substrateGC([value], frame);
     console.log(k.render(value));
     return;
@@ -543,7 +544,7 @@ async function main(): Promise<void> {
     setCrashTraceContext("expr", args, expr);
     const node = readForm(k, expr);
     k.setActiveRoots([node]);
-    const value = walk(k, node, frame);
+    const value = walkUnit(k, node, frame);
     k.substrateGC([value], frame);
     console.log(k.render(value));
     return;
@@ -586,7 +587,7 @@ async function main(): Promise<void> {
   const node = readAll(k, src);
   k.readingFiles = [];
   k.setActiveRoots([node]);
-  const value = walk(k, node, frame);
+  const value = walkUnit(k, node, frame);
   k.substrateGC([value], frame);
   console.log(k.render(value));
 }
@@ -618,7 +619,7 @@ async function runTrace(args: string[]): Promise<void> {
   const node = readAll(k, src);
   k.setActiveRoots([node]);
   const start = process.hrtime.bigint();
-  const value = walk(k, node, frame);
+  const value = walkUnit(k, node, frame);
   k.substrateGC([value], frame);
   const elapsedNs = Number(process.hrtime.bigint() - start);
 

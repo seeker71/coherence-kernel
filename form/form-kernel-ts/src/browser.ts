@@ -10,7 +10,7 @@ import {
   Kernel,
   Trace,
   nodeKey,
-  walk,
+  walkUnit,
   type NodeID,
   type TraceJSON,
 } from "./kernel.ts";
@@ -59,7 +59,7 @@ export function runLocalFormBinary(
   kernel.trace = new Trace();
   const start = globalThis.performance.now();
   const root = readAll(kernel, source);
-  const value = walk(kernel, root, new Frame(null));
+  const value = walkUnit(kernel, root, new Frame(null));
   const elapsedMs = globalThis.performance.now() - start;
   return {
     source,

@@ -1641,6 +1641,10 @@ pub(crate) struct Kernel {
     // pays the table build once and then dispatches by O(1) lookup.
     switch_tables: HashMap<NodeID, SwitchTable>,
     active_roots: Vec<NodeID>,
+    // unit_roots -- the unit roots the reader built, by how walk_unit reads
+    // them: UNIT_DO for a source whose one form is a (do ...), UNIT_WRAPPER for
+    // the implicit do that holds several top-level forms.
+    unit_roots: HashMap<NodeID, u8>,
     // Optional tracing — None for hot-path runs, Some for `trace` subcommand.
     // Hooked at the top of walk() to record per-arm dispatch counts and
     // choice success/failure rates. Per lc-native-kernel-binary's
@@ -2030,6 +2034,7 @@ impl Kernel {
             next_map: 0,
             switch_tables: HashMap::new(),
             active_roots: Vec::new(),
+            unit_roots: HashMap::new(),
             trace: None,
         };
         k.register_natives();
@@ -2450,6 +2455,7 @@ impl Kernel {
             next_map: self.next_map,
             switch_tables: self.switch_tables.clone(),
             active_roots: Vec::new(),
+            unit_roots: self.unit_roots.clone(),
             trace: None,
         }
     }
@@ -5993,7 +5999,7 @@ impl Kernel {
         self.register_native("walk_recipe", cat_witness(), |k, _, args| {
             let mut sub_arena = Arena::new();
             let env = sub_arena.new_frame(None);
-            walk(k, &mut sub_arena, args[0].as_nid(), env)
+            walk_unit(k, &mut sub_arena, args[0].as_nid(), env)
         });
         // walk_recipe_here — walks a Recipe in the CALLER's env, so let-
         // bindings inside the Recipe land in the caller's scope. Matches
@@ -6006,7 +6012,7 @@ impl Kernel {
             // env holding closures with deleted bodies.
             let root = args[0].as_nid();
             k.active_roots.push(root);
-            walk(k, a, root, env)
+            walk_unit(k, a, root, env)
         });
         self.register_native("walk_parallel", cat_witness(), native_walk_parallel);
         self.register_native("walk-parallel", cat_witness(), native_walk_parallel);
@@ -6037,7 +6043,7 @@ impl Kernel {
             k.walk_cache_misses += 1;
             let mut sub_arena = Arena::new();
             let env = sub_arena.new_frame(None);
-            let v = walk(k, &mut sub_arena, nid, env);
+            let v = walk_unit(k, &mut sub_arena, nid, env);
             k.walk_cache.insert(nid, v.clone());
             v
         });
@@ -6354,6 +6360,123 @@ fn walk_match_switch(
 // gigabytes on a 15 KB file. Nested walks each truncate to their OWN entry mark,
 // so every pre-existing frame (including an active call frame the caller still
 // needs) is preserved. Mirrors how the Go kernel's GC reclaims dead *Frames.
+const BLOCK_KIND_LET: u8 = 1;
+const BLOCK_KIND_DEFN: u8 = 2;
+const BLOCK_KIND_DO: u8 = 3;
+const UNIT_DO: u8 = 1;
+const UNIT_WRAPPER: u8 = 2;
+
+fn block_kind(k: &Kernel, n: NodeID) -> u8 {
+    if n.level == LEVEL_TRIVIAL {
+        return 0;
+    }
+    let cat = k.category(n);
+    if cat.ty == RB_BLOCK {
+        if cat.inst == RBLK_LET {
+            BLOCK_KIND_LET
+        } else {
+            BLOCK_KIND_DO
+        }
+    } else if cat.ty == RB_FNDEF {
+        BLOCK_KIND_DEFN
+    } else {
+        0
+    }
+}
+
+// mark_unit_root -- the reader names each do it hands back as a unit root: the
+// implicit do around several top-level forms (wrapper), or the one top-level
+// (do ...) of a source.
+pub(crate) fn mark_unit_root(k: &mut Kernel, root: NodeID, wrapper: bool) {
+    if block_kind(k, root) == BLOCK_KIND_DO {
+        k.unit_roots
+            .insert(root, if wrapper { UNIT_WRAPPER } else { UNIT_DO });
+    }
+}
+
+// bind_let -- a let a do (or a unit) binds itself: the value reads the frame
+// before the name joins it, then the name binds there.
+fn bind_let(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
+    if let Some(t) = &mut k.trace {
+        t.record(RB_BLOCK, RBLK_LET);
+    }
+    let kids = k.children(n);
+    let name = k.ident_id(kids[0]);
+    let v = walk(k, a, kids[1], env);
+    a.bind(env, name, v.clone());
+    v
+}
+
+// walk_unit -- a unit root read in the unit's own frame. The unit's top-level
+// do is its sequence, as fkwu's fk_parse_top reads it: a let there binds the
+// unit's frame, where every defn of the unit and every unit loaded after it
+// reads it; a defn binds there; a do before the first let or expression is a
+// top-level do too; a later do is a lexical scope (walk's RB_BLOCK arm). The
+// implicit do around several top-level forms holds each form at column 0,
+// where every do is a top-level do. A root the reader did not name (a
+// deserialized recipe, a combined program) keeps every do at its top flat.
+pub(crate) fn walk_unit(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
+    let kind = block_kind(k, n);
+    if kind == BLOCK_KIND_LET {
+        return bind_let(k, a, n, env);
+    }
+    if kind != BLOCK_KIND_DO {
+        return walk(k, a, n, env);
+    }
+    let mark = k.unit_roots.get(&n).copied();
+    if mark == Some(UNIT_DO) {
+        return walk_unit_do(k, a, n, env);
+    }
+    let inst = k.category(n).inst;
+    if let Some(t) = &mut k.trace {
+        t.record(RB_BLOCK, inst);
+    }
+    let kids = k.children(n);
+    let mut v = Value::Null;
+    for c in kids.iter() {
+        let c = *c;
+        v = if mark == Some(UNIT_WRAPPER)
+            && block_kind(k, c) == BLOCK_KIND_DO
+            && k.unit_roots.get(&c).copied() != Some(UNIT_WRAPPER)
+        {
+            walk_unit_do(k, a, c, env)
+        } else {
+            walk_unit(k, a, c, env)
+        };
+    }
+    v
+}
+
+fn walk_unit_do(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
+    let inst = k.category(n).inst;
+    if let Some(t) = &mut k.trace {
+        t.record(RB_BLOCK, inst);
+    }
+    let kids = k.children(n);
+    let mut leading = true;
+    let mut v = Value::Null;
+    for c in kids.iter() {
+        let c = *c;
+        let kind = block_kind(k, c);
+        if kind == BLOCK_KIND_DO {
+            v = if leading {
+                walk_unit_do(k, a, c, env)
+            } else {
+                walk(k, a, c, env)
+            };
+        } else if kind == BLOCK_KIND_LET {
+            v = bind_let(k, a, c, env);
+            leading = false;
+        } else {
+            v = walk(k, a, c, env);
+            if kind != BLOCK_KIND_DEFN {
+                leading = false;
+            }
+        }
+    }
+    v
+}
+
 pub(crate) fn walk(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
     let frame_mark = a.frames.len();
     let clo_mark = a.closures_created;
@@ -6509,18 +6632,38 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
             }
             RB_BLOCK => {
                 if cat.inst == RBLK_LET {
-                    let name = k.ident_id(kids[0]);
-                    let v = walk(k, a, kids[1], env);
-                    a.bind(env, name, v.clone());
-                    return v;
+                    // A let binds the rest of its own do (the loop below binds a
+                    // do's own lets). Met anywhere else -- an if arm, an argument,
+                    // a do's last form -- nothing follows it, so it answers its
+                    // value and binds no name.
+                    return walk(k, a, kids[1], env);
                 }
                 if kids.is_empty() {
                     Value::Null
                 } else {
+                    // DO / SEQ -- a lexical scope: its lets and defns bind for the
+                    // rest of this do only. The scope opens at the first binding
+                    // form, so a do that binds nothing costs no frame. A unit's
+                    // top-level do reads flat (walk_unit).
                     let last = kids.len() - 1;
+                    let mut scope = env;
                     for c in &kids[..last] {
-                        walk(k, a, *c, env);
+                        let kind = block_kind(k, *c);
+                        if kind == BLOCK_KIND_LET || kind == BLOCK_KIND_DEFN {
+                            if scope == env {
+                                scope = a.new_frame(Some(env));
+                            }
+                        }
+                        if kind == BLOCK_KIND_LET {
+                            bind_let(k, a, *c, scope);
+                        } else {
+                            walk(k, a, *c, scope);
+                        }
                     }
+                    if scope == env && block_kind(k, kids[last]) == BLOCK_KIND_DEFN {
+                        scope = a.new_frame(Some(env));
+                    }
+                    env = scope;
                     n = kids[last]; // TCO: a do/seq block's last expr is in tail position
                     continue;
                 }
@@ -7393,13 +7536,15 @@ pub(crate) fn run_source_mapped(src: &str, line_map: &[(String, u32)]) -> Value 
 pub(crate) fn read_root_from_source(k: &mut Kernel, src: &str) -> NodeID {
     let toks = tokenize_sexp(src);
     let wrapped: String;
-    let toks = if count_top_level(&toks) == 1 {
+    let single = count_top_level(&toks) == 1;
+    let toks = if single {
         toks
     } else {
         wrapped = format!("(do {})", src);
         tokenize_sexp(&wrapped)
     };
     let (root, _) = read_sexp(k, &toks, 0);
+    mark_unit_root(k, root, !single);
     root
 }
 
@@ -7407,7 +7552,7 @@ fn execute_root(k: &mut Kernel, root: NodeID) -> Value {
     let mut a = Arena::new();
     let env = a.new_frame(None);
     k.active_roots = vec![root];
-    let value = walk(k, &mut a, root, env);
+    let value = walk_unit(k, &mut a, root, env);
     k.substrate_gc(&[value.clone()], Some((&a, env)));
     value
 }
@@ -7543,7 +7688,8 @@ fn run_bench() {
 fn run_source_traced(src: &str) -> (Value, Trace) {
     let toks = tokenize_sexp(src);
     let wrapped: String;
-    let toks = if count_top_level(&toks) == 1 {
+    let single = count_top_level(&toks) == 1;
+    let toks = if single {
         toks
     } else {
         wrapped = format!("(do {})", src);
@@ -7552,10 +7698,11 @@ fn run_source_traced(src: &str) -> (Value, Trace) {
     let mut k = Kernel::new();
     k.trace = Some(Trace::new());
     let (root, _) = read_sexp(&mut k, &toks, 0);
+    mark_unit_root(&mut k, root, !single);
     let mut a = Arena::new();
     let env = a.new_frame(None);
     k.active_roots = vec![root];
-    let value = walk(&mut k, &mut a, root, env);
+    let value = walk_unit(&mut k, &mut a, root, env);
     k.substrate_gc(&[value.clone()], Some((&a, env)));
     let trace = k.trace.take().unwrap_or_default();
     (value, trace)
@@ -8589,7 +8736,7 @@ fn build_worker_kernel_with_route_data(
     let mut arena = Arena::new();
     let root_env = arena.new_frame(None);
     k.active_roots = vec![root];
-    let _ = walk(&mut k, &mut arena, root, root_env);
+    let _ = walk_unit(&mut k, &mut arena, root, root_env);
     let route_specs = build_route_specs(&mut k, &arena, root_env, routes_path, route_data)?;
     // root_env is returned so the --form serve path can resolve kh-serve / routes
     // / registry globals from it (the same global frame build_route_specs reads).
@@ -9551,7 +9698,9 @@ fn parse_raw_route_segment(k: &mut Kernel, roots: &mut Vec<NodeID>, src: &str) {
         root
     } else {
         let wrapped = format!("(do {})", src);
-        read_root_from_source(k, &wrapped)
+        let root = read_root_from_source(k, &wrapped);
+        mark_unit_root(k, root, true);
+        root
     };
     roots.push(root);
 }
@@ -9775,7 +9924,7 @@ fn name_check_route_recipe(
     let mut a = Arena::new();
     let env = a.new_frame(None);
     // Walk name-check.fk so `name-check` / `name-check-clean?` / `nc-*` bind in env.
-    walk(k, &mut a, nc_root, env);
+    walk_unit(k, &mut a, nc_root, env);
     // `known` seeds the resolvable set with every kernel native name. The manifest's
     // own defns are collected from the recipe by name-check's PASS 1; the natives are
     // NOT in the recipe, so they must be named here or every native call would report.

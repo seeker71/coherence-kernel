@@ -34,6 +34,20 @@ test("emits a scalar kernel with metal_stdlib header", () => {
   assert.equal(out.resolved.vectorize, 1);
 });
 
+test("a LET in a nested DO or an IF arm does not reach past it", () => {
+  for (const src of [
+    "(do (let t 7) (do (let t 5)) t)",
+    "(do (let t 7) (if 1 (let t 5) 0) t)",
+  ]) {
+    const k = new Kernel();
+    const out = MetalBackend.emit(k, readForm(k, src));
+    const bound = [...out.source.matchAll(/\((let_\d+_\d+) = /g)].map((m) => m[1]);
+    const reads = out.source.match(/let_\d+_\d+/g) ?? [];
+    assert.equal(bound.length, 2, `${src}: two lets bound`);
+    assert.equal(reads[reads.length - 1], bound[0], `${src}: last read is the outer let`);
+  }
+});
+
 test("respects a custom kernel name", () => {
   const k = new Kernel();
   const expr = readForm(k, "(+ 1 2)");
