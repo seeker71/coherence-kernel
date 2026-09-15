@@ -1,6 +1,6 @@
 // Form supervises native argv children, streams and correlated choices.
 // The shell script only establishes cwd, file descriptors and a child group.
-// preludes: form-stdlib/bml/form-cli-heal-native-io.bml form-stdlib/bml/form-cli-heal-dynamic.bml form-stdlib/bml/form-cli-heal-timing.bml form-stdlib/organ-health.bml form-stdlib/organ-care.bml form-stdlib/bml/organ-health-discovery.bml
+// preludes: form-stdlib/bml/form-cli-heal-native-io.bml form-stdlib/bml/form-cli-heal-dynamic.bml form-stdlib/bml/form-cli-heal-timing.bml form-stdlib/organ-health.bml form-stdlib/organ-care.bml form-stdlib/bml/organ-health-discovery.bml form-stdlib/bml/fkwu-binding-care.bml
 section [form.bml] {
  class FormCliHealNativeProcess {
   def fhn-stage-path(job, stage, suffix) = fhn-at(job, str_concat(stage, suffix));
@@ -245,9 +245,17 @@ section [form.bml] {
    record_set(context,"job",job); record_set(context,"stage",stage);
    record_set(context,"elapsed",elapsed); record_set(context,"started",host_monotonic_ms());
    record_set(context,"bytes",nothing()); record_set(context,"span",json-node-null());
-   let result = oc-hear(context,row,list(oc-provider("owned-process-diagnostic-evidence",list("diagnostic-evidence"),"request-evidence",fhn-care-supply)),fhn-care-emit,fhn-care-observe);
+   let result = oc-hear(context,row,fhn-care-providers(job),fhn-care-emit,fhn-care-observe);
    record_set(context,"bytes",nothing());
    "appended";
+  }
+  // Owned diagnostic evidence is always offered. A job's snapshot may ask for more care
+  // by name; a `binding` asked for adds the fkwu binding provider.
+  def fhn-care-providers(job) = if fhn-member(fhn-care-asked(job),"binding") then list(fhn-evidence-provider(),fkbc-provider()) else list(fhn-evidence-provider());
+  def fhn-evidence-provider() = oc-provider("owned-process-diagnostic-evidence",list("diagnostic-evidence"),"request-evidence",fhn-care-supply);
+  def fhn-care-asked(job) {
+   let doc = fhn-json(fhn-at(job,"snapshot.json"));
+   if json-object-has?(doc,"care") then oh-values(json-array-elements(json-object-get(doc,"care"))) else list();
   }
   def fhn-care-emit(context,phase,row) {
    let job = record_get(context,"job"); let stage = record_get(context,"stage");
@@ -273,7 +281,9 @@ section [form.bml] {
    json-node-object(list(fhn-s("resource","diagnostic-evidence"),fhn-s("state",if exact then "delivered" else "unavailable"),fhn-n("offset",offset),fhn-n("end",fhn-number(span,"end")),fhn-n("read_bytes",if str_eq(value_kind(bytes),"string") then str_len(bytes) else 0),fhn-n("exact",exact),json-node-pair("source",oh-reference(path)),fhn-s("content","private-in-process"),fhn-s("interpretation","unknown")));
   }
   def fhn-care-needs(needs,span,settled) = if nil?(needs) then list() else if and(settled,and(str_eq(oh-str(head(needs),"resource"),"diagnostic-evidence"),node_eq(oh-get(head(needs),"detail"),span))) then fhn-care-needs(tail(needs),span,settled) else cons(head(needs),fhn-care-needs(tail(needs),span,settled));
-  def fhn-care-observe(context,reading,delivery) {
+  // each provider's delivery is re-observed by the reading it answers
+  def fhn-care-observe(context,reading,delivery) = if str_eq(fhn-string(delivery,"resource"),"binding") then fkbc-observe(context,reading,delivery) else fhn-care-observe-evidence(context,reading,delivery);
+  def fhn-care-observe-evidence(context,reading,delivery) {
    let path = fhn-stage-path(record_get(context,"job"),record_get(context,"stage"),".err");
    let span = record_get(context,"span"); let held = record_get(context,"bytes");
    let valid = and(fhn-care-span?(context,span),str_eq(value_kind(held),"string"));
