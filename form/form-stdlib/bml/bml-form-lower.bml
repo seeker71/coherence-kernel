@@ -309,16 +309,69 @@ section [form.bml] {
   // with( e ): .self is the base the node declares
   def bfk-with-access(cx, node, env, vm) = if not(bml-ctl-with-bound?(env)) then bfk-need(cx, "with/no-base") else if bml-ctl-with-self-node?(node) then bfk-expr(cx, bml-ctl-with-base-node(0), env, vm) else bfk-class-with(cx, node, env, vm);
 
+  // ── choose, fail and the snapshot ───────────────────────────────────────
+  // A fail sets FAILED and the statements after it stand down. A choose whose
+  // branches assign or fail partway runs each branch from the names it was
+  // entered with, FAILED clear: the first branch that ends unfailed hands back
+  // the incoming flag and answers, and a branch that failed undoes the field
+  // sets the journal kept since the choose opened it, so the next branch meets
+  // the state the choose met. If every branch fails the choose fails and its
+  // body stops at the value it stood on. save pushes the names in scope, the
+  // standing value and the journal count; restore writes them back and undoes
+  // the journal to that count; discard drops the newest. A field lives in its
+  // record, outside every frame: while a snapshot is open a field set journals
+  // the value it replaces.
+  def bfk-fail-stmt(cx, env, vm) = bfk-r(list(bfk-cell-set("f", "1")), vm, if or(bml-bnml-choosing?(env), bml-bnml-env-fallible?(env)) then bfk-top(vm) else "0");
+
+  def bfk-journal-open() = bfk-cell-set("d", bfk-f2("add", bfk-cell("d"), "1"));
+  def bfk-journal-close() = bfk-do(list(bfk-cell-set("d", bfk-f2("sub", bfk-cell("d"), "1"))), bfk-if(bfk-f2("le", bfk-cell("d"), "0"), bfk-do(list(bfk-cell-set("j", "(list)")), bfk-cell-set("c", "0")), "0"));
+  def bfk-journal-undo(saved) = bfk-f1("bfk-undo", bfk-f2("sub", bfk-cell("c"), saved));
+
+  // statements in order, their items gathered: (items vm value)
+  def bfk-seq-items(cx, nodes, env, vm) = bfk-seq-items-at(cx, nodes, env, bfk-r(empty, vm, "0"));
+  def bfk-seq-items-at(cx, nodes, env, acc) = if nil?(nodes) then acc else bfk-seq-items-at(cx, tail(nodes), bml-local-env-after-node(head(nodes), env), bfk-r-prefix(bfk-r-items(acc), bfk-stmt(cx, head(nodes), env, bfk-r-vm(acc))));
+  def bfk-stmts-of(node) = if node_eq(node_category(node), BML-AST-BLOCK) then node_children(node) else list(node);
+
+  def bfk-choose-track(cx, node, env, vm) {
+   let promos = bml-bnml-choose-promotions(node, env);
+   let inner-env = bml-bnml-fold-env(promos, env);
+   let heard = bml-bnml-edge-check("choose", node, inner-env);
+   let told = bml-bch-all-fail(node_children(node));
+   let pr = bfk-seq-items(cx, promos, env, vm);
+   let outk = bfk-out-keys(inner-env, bfk-r-vm(pr));
+   let fin = bfk-fresh(cx, "f");
+   let jc = bfk-fresh(cx, "c");
+   let r = bfk-untuple(cx, bfk-branches(cx, node_children(node), bml-bnml-choosing(inner-env), bfk-r-vm(pr), outk, fin, jc), outk, bfk-r-vm(pr));
+   bfk-r(append(bfk-r-items(pr), append(list(bfk-let(fin, bfk-cell("f")), bfk-let(jc, bfk-cell("c")), bfk-journal-open()), bfk-r-items(r))), bfk-r-vm(r), bfk-r-val(r));
+  }
+  def bfk-branches(cx, branches, env, vm0, outk, fin, jc) = if nil?(branches) then bfk-do(list(bfk-cell-set("f", "1"), bfk-journal-close()), bfk-tuple(bfk-top(vm0), vm0, outk)) else bfk-branch(cx, branches, env, vm0, outk, fin, jc, bfk-fresh(cx, "b"));
+  def bfk-branch(cx, branches, env, vm0, outk, fin, jc, b) = bfk-do(list(bfk-cell-set("f", "0"), bfk-let(b, bfk-nodes(cx, bfk-stmts-of(head(branches)), env, vm0, outk))), bfk-if(bfk-unfailed(), bfk-do(list(bfk-cell-set("f", fin), bfk-journal-close()), b), bfk-do(list(bfk-journal-undo(jc)), bfk-branches(cx, tail(branches), env, vm0, outk, fin, jc))));
+
+  def bfk-vm-marks(vm) = if bfk-vm-has?(vm, "__marks") then bfk-vm-get(vm, "__marks") else "(list)";
+  def bfk-save-stmt(cx, env, vm) {
+   let s = bfk-fresh(cx, "s");
+   let m = bfk-fresh(cx, "k");
+   let snap = bfk-form(cons("list", append(bfk-vm-vars(vm, bml-bnml-snapshot-keys(env, empty)), list(bfk-top(vm), bfk-cell("c")))));
+   bfk-r(list(bfk-let(s, snap), bfk-let(m, bfk-f2("cons", s, bfk-vm-marks(vm))), bfk-journal-open()), bfk-vm-put(vm, "__marks", m), bfk-top(vm));
+  }
+  def bfk-restore-stmt(cx, env, vm) = bfk-restore-at(cx, bml-bnml-active-mark(env, 0), vm);
+  def bfk-restore-at(cx, mark, vm) = if nil?(mark) then bfk-value-stmt(cx, "0", vm) else bfk-restore-keys(cx, append(bml-bnml-snapshot-keys(bml-local-binding-env(mark), empty), list("__top")), vm);
+  def bfk-restore-keys(cx, keys, vm) {
+   let s = bfk-fresh(cx, "s");
+   let m = bfk-fresh(cx, "k");
+   let back = bfk-untuple-keys(cx, s, keys, 0, vm, empty);
+   bfk-r(cons(bfk-let(s, bfk-f1("head", bfk-vm-marks(vm))), append(bfk-r-items(back), list(bfk-journal-undo(bfk-f2("nth", s, bfk-int(len(keys)))), bfk-let(m, bfk-f1("tail", bfk-vm-marks(vm))), bfk-journal-close()))), bfk-vm-put(bfk-r-vm(back), "__marks", m), bfk-top(bfk-r-vm(back)));
+  }
+  def bfk-discard-stmt(cx, env, vm) {
+   let m = bfk-fresh(cx, "k");
+   bfk-r(list(bfk-let(m, bfk-f1("tail", bfk-vm-marks(vm))), bfk-journal-close()), bfk-vm-put(vm, "__marks", m), bfk-top(vm));
+  }
+
   // ── what later rungs carry ──────────────────────────────────────────────
   def bfk-class-shaped?(node, env) = if bml-hati-class-call?(node) then true else if bml-hati-field-assign?(node, env) then true else if bml-hati-dotted-assign?(node, env) then true else if bml-hati-receiver-name?(bml-call-name(node), env) then true else bml-hati-member-call?(bml-call-name(node), env);
   def bfk-class-call(cx, node, env, vm) = if bml-call-named?(node, "__hati_unread") then bfk-need-add(cx, bml-voice-then(bml-unread-reading(bml-hati-marker-str(node, 0)), "source/unread")) else bfk-need(cx, "form/class");
   def bfk-class-name(cx, node, env, vm) = bfk-need(cx, "form/class");
   def bfk-class-with(cx, node, env, vm) = bfk-need(cx, "form/class");
-  def bfk-choose-track(cx, node, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/choose"), vm);
-  def bfk-fail-stmt(cx, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/fail"), vm);
-  def bfk-save-stmt(cx, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/save"), vm);
-  def bfk-restore-stmt(cx, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/restore"), vm);
-  def bfk-discard-stmt(cx, env, vm) = bfk-value-stmt(cx, bfk-need(cx, "form/discard"), vm);
 
   // ── methods and the program ─────────────────────────────────────────────
   def bfk-params(n, i) = if ge(i, n) then empty else cons(str_concat("a", int_to_str(i)), bfk-params(n, add(i, 1)));
