@@ -48,7 +48,6 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form
-GO_BIN="$ROOT/form-kernel-go/bin-go"
 ITERS="${1:-200}"; STEPS="${2:-64}"
 BLOB="${FORM_GGUF_BLOB:-$HOME/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff}"
 WTENSOR="${FORM_W_TENSOR:-blk.0.ffn_down.weight}"
@@ -71,54 +70,27 @@ if [[ ! -f "$BLOB" ]]; then
     echo "      (ollama pull llama3.2:3b, or set FORM_GGUF_BLOB)"
     exit 2
 fi
-if [[ ! -x "$GO_BIN" ]]; then
-    echo "  building go kernel..." >&2
-    (cd "$ROOT/form-kernel-go" && go build -o bin-go .)
+if [[ ! -x "$ROOT/../fkwu" ]]; then
+    echo "FAIL  the body's kernel is missing: $ROOT/../fkwu (cc -O2 -o fkwu runtime/fkwu-uni.c)"
+    exit 1
 fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/fkwhole.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-# ── the `; preludes:` directives are LIVE recursive load instructions; walked, never hand-catted ──
-FK_SEEN=""
-fk_deps() {
-    awk '
-        /^;[ \t]*preludes:/ {
-            s = $0; sub(/^;[ \t]*preludes:[ \t]*/, "", s); gsub(/,/, " ", s)
-            n = split(s, a, /[ \t]+/)
-            for (i = 1; i <= n; i++) {
-                low = tolower(a[i])
-                if (a[i] == "\\" || low == "none" || low == "(none)" || a[i] == "") continue
-                if (a[i] ~ /\.fk$/) print a[i]
-            }
-        }' "$1" 2>/dev/null
-}
-fk_path() {
-    local dir; dir="$(dirname "$1")"
-    if   [[ -f "$dir/$2" ]]; then printf '%s\n' "$dir/$2"
-    elif [[ -f "$2" ]];      then printf '%s\n' "$2"
-    elif [[ "$2" == form/* && -f "${2#form/}" ]]; then printf '%s\n' "${2#form/}"
-    else printf '%s\n' "$dir/$2"; fi
-}
-fk_expand() {
-    local f="$1" d p
-    case " $FK_SEEN " in *" $f "*) return ;; esac
-    FK_SEEN="$FK_SEEN $f"
-    while read -r d; do
-        [[ -z "$d" ]] && continue
-        p="$(fk_path "$f" "$d")"
-        fk_expand "$p"
-    done < <(fk_deps "$f")
-    printf '%s\n' "$f"
-}
-
 cd "$ROOT"
-FILES=()
-while read -r x; do FILES+=("$x"); done < <(fk_expand native/metal/whole-tensor-residency.fk)
+# the body runs on fkwu: each cell preludes the residency body, and fkwu walks the
+# `; preludes:` chain itself
+body_cell() {   # body_cell <cell.fk>
+    local wrapped="${1%.fk}.body.fk"
+    printf '; preludes: form/native/metal/whole-tensor-residency.fk\n' > "$wrapped"
+    cat "$1" >> "$wrapped"
+    (cd "$ROOT/.." && ./fkwu "$wrapped")
+}
 
 # ── 1. the body emits the Metal source (both kernels, one helper spine) ────────────────────────
 echo '(wtr-emit-msl)' > "$work/msl.fk"
-"$GO_BIN" "${FILES[@]}" "$work/msl.fk" > "$work/msl.out" 2>"$work/msl.err" || {
+body_cell "$work/msl.fk" > "$work/msl.out" 2>"$work/msl.err" || {
     echo "FAIL  MSL emission failed"; cat "$work/msl.err"; exit 1; }
 awk '/^MSL$/{d=1;next} /^END$/{d=0;next} d{print}' "$work/msl.out" > "$work/q6k.metal"
 for k in form_q6k_dequant_f32 form_q6k_matvec_f32 form_q4k_dequant_f32 form_q4k_matvec_f32; do
@@ -152,7 +124,7 @@ fi
 echo "walking the file's own 7.8 MB header ONCE for all 255 tensor-info rows..."
 printf '(wtr-emit-table "%s")\n' "$BLOB" > "$work/table.fk"
 tw0=$(date +%s)
-"$GO_BIN" "${FILES[@]}" "$work/table.fk" > "$work/table.txt" 2>"$work/table.err" || {
+body_cell "$work/table.fk" > "$work/table.txt" 2>"$work/table.err" || {
     echo "FAIL  table emission failed"; tail -5 "$work/table.err"; exit 1; }
 tw1=$(date +%s)
 grep -qx 'END' "$work/table.txt" || { echo "FAIL  table stream truncated"; exit 1; }
@@ -193,7 +165,7 @@ echo "dequantizing reference tiles at both ends of both tensors, real x, and 4 f
   printf '    (wtr-line "END"))\n'
 } > "$work/ref.fk"
 rf0=$(date +%s)
-"$GO_BIN" "${FILES[@]}" "$work/ref.fk" > "$work/ref.txt" 2>"$work/ref.err" || {
+body_cell "$work/ref.fk" > "$work/ref.txt" 2>"$work/ref.err" || {
     echo "FAIL  reference emission failed"; tail -5 "$work/ref.err"; exit 1; }
 rf1=$(date +%s)
 grep -qx 'END' "$work/ref.txt" || { echo "FAIL  reference stream truncated"; exit 1; }
