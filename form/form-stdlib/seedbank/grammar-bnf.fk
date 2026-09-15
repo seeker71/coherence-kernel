@@ -275,7 +275,17 @@
                                    (bnf-tok-sk st) (bnf-tok-ik st)
                                    (bnf-tok-ops st) (bnf-tok-kws st)
                                    (bnf-tok-sq st) (head rest))
-                st))))))))))
+            (if (str_eq kind "newline-kind")
+                ;; "newline-kind KIND": a line feed is a KIND token, for a
+                ;; tongue whose line ends a statement. It rides the operator
+                ;; table, so the grammar leaves 10 off its whitespace line.
+                (bnf-mk-tok-state (bnf-tok-ws st) (bnf-tok-di st)
+                                   (bnf-tok-sk st) (bnf-tok-ik st)
+                                   (bnf-cons-op (bnf-tok-ops st)
+                                                 (byte_to_str 10) (head rest))
+                                   (bnf-tok-kws st)
+                                   (bnf-tok-sq st) (bnf-tok-lc st))
+                st)))))))))))
 
     (defn bnf-finalize-token-config (st)
         (list
@@ -690,17 +700,25 @@
     ;; rule sets for different regions, BMF "mixed grammar" shape.
     ;; ──────────────────────────────────────────────────────────────────
 
-    ;; Mutable-ish: a list-based registry stored at top-level scope.
-    ;; bnf-register-grammar adds; bnf-lookup-grammar finds. The form
-    ;; runtime resolves let at each invocation, so this lives as a
-    ;; mutable-by-reassignment list.
+    ;; The registry lives in one record the unit holds: bnf-register-grammar
+    ;; writes the grown list into its "grammars" field and bnf-match-region
+    ;; reads that field at each match. A defn keeps the bindings it was made
+    ;; under, so a caller that binds bnf-grammar-registry again reaches only
+    ;; code written after it; the record's field is the one place every reader
+    ;; shares, on fkwu, Go, Rust and TS.
+    (let bnf-grammar-registry-home (record_new 0 "grammars" (empty)))
     (let bnf-grammar-registry (empty))
 
+    (defn bnf-registered-grammars ()
+        (record_get bnf-grammar-registry-home "grammars"))
+
     (defn bnf-register-grammar (name grammar)
-        ;; Returns the new registry — caller binds it back to overwrite.
-        ;; Convention: register at grammar-load time via load-bnf-grammar's
-        ;; optional second-pass; tests pass it explicitly.
-        (cons (list name grammar) bnf-grammar-registry))
+        ;; Registers NAME and answers the grown registry, so a caller that
+        ;; binds it back (region-streaming.fk, jsx.bnf.fk) holds it as well.
+        (do
+            (let grown (cons (list name grammar) (bnf-registered-grammars)))
+            (record_set bnf-grammar-registry-home "grammars" grown)
+            grown))
 
     (defn bnf-lookup-grammar (reg name)
         (if (nil? reg) (empty)
@@ -713,7 +731,7 @@
     ;; the inner grammar's start rule returns, wrapped as _result.
     (defn bnf-match-region (grammar-name stream rules)
         (do
-            (let inner-grammar (bnf-lookup-grammar bnf-grammar-registry
+            (let inner-grammar (bnf-lookup-grammar (bnf-registered-grammars)
                                                     grammar-name))
             (if (nil? inner-grammar)
                 (mk-fail (str_concat "no such grammar: " grammar-name))
