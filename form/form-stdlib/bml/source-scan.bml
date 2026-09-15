@@ -37,13 +37,29 @@ section [form.bml] {
         }
 
         def ssc-escape(b) = if eq(b, 110) then byte_to_str(10) else if eq(b, 116) then byte_to_str(9) else if eq(b, 114) then byte_to_str(13) else if eq(b, 48) then byte_to_str(0) else byte_to_str(b);
+        // A plain run takes its first byte and ends at the closing quote or a
+        // backslash. Both are single bytes, so a run is one whole slice on
+        // every kernel, and a longer character inside it never splits.
+        def ssc-run-end(s, j, n, q) = ssc-run-scan(s, add(j, 1), n, q);
+        def ssc-run-scan(s, j, n, q) {
+            let c = ssc-byte(s, j, n);
+            if ge(j, n) then n else if or(eq(c, q), eq(c, 92)) then j else ssc-run-scan(s, add(j, 1), n, q);
+        }
+        // continuation bytes (128-191) travel with the byte that opens them
+        def ssc-char-end(s, j, n) {
+            let c = ssc-byte(s, j, n);
+            if and(ge(c, 128), le(c, 191)) then ssc-char-end(s, add(j, 1), n) else j;
+        }
+        def ssc-escaped-end(s, j, n) = if lt(str_byte_at(s, add(j, 1)), 128) then add(j, 2) else ssc-char-end(s, add(j, 2), n);
+        def ssc-escaped(s, j, n) = if lt(str_byte_at(s, add(j, 1)), 128) then ssc-escape(str_byte_at(s, add(j, 1))) else substring(s, add(j, 1), ssc-escaped-end(s, j, n));
         def ssc-quoted(s, j, n, q, acc) {
             let c = ssc-byte(s, j, n);
             if ge(j, n) then list(acc, j)
-            else if and(eq(c, 92), lt(add(j, 1), n)) then ssc-quoted(s, add(j, 2), n, q, str_concat(acc, ssc-escape(str_byte_at(s, add(j, 1)))))
+            else if and(eq(c, 92), lt(add(j, 1), n)) then ssc-quoted(s, ssc-escaped-end(s, j, n), n, q, str_concat(acc, ssc-escaped(s, j, n)))
             else if eq(c, q) then list(acc, add(j, 1))
-            else ssc-quoted(s, add(j, 1), n, q, str_concat(acc, substring(s, j, add(j, 1))));
+            else ssc-quoted-from(s, j, ssc-run-end(s, j, n, q), n, q, acc);
         }
+        def ssc-quoted-from(s, j, e, n, q, acc) = ssc-quoted(s, e, n, q, str_concat(acc, substring(s, j, e)));
 
         def ssc-run-digits(s, j, n) = if ssc-digit?(ssc-byte(s, j, n)) then ssc-run-digits(s, add(j, 1), n) else j;
         def ssc-run-hex(s, j, n) = if ssc-hex?(ssc-byte(s, j, n)) then ssc-run-hex(s, add(j, 1), n) else j;
