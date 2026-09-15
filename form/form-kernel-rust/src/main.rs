@@ -6088,21 +6088,6 @@ impl Kernel {
             )
         });
 
-        // native_blueprint — read a native's Form category from inside Form.
-        // Returns the category NodeID (level=2, ty=RBasic, inst=instance) or
-        // Null if the name isn't bound to a native. Makes attribution legible
-        // from Form code: `(native_blueprint "intern_node")` → @1.2.6.1.
-        self.register_native("native_blueprint", cat_witness(), |k, _, args| {
-            let s = args[0].as_str();
-            match k.str_idx.get(s).copied() {
-                Some(name_id) => match k.natives.get(&name_id) {
-                    Some(ne) => Value::Nid(ne.category),
-                    None => Value::Null,
-                },
-                None => Value::Null,
-            }
-        });
-
         // --- Debug / inspection -----------------------------------------
         // `trace` — print-and-return. Drop into any Form expression to
         // inspect a value mid-computation without breaking control flow.
