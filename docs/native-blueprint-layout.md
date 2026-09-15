@@ -51,6 +51,12 @@ descriptors. A native batch consumer calls it without per-field Form crossings;
 only completed counts return through the tagged JIT surface. Leased descriptors
 preserve retired runs and refuse reads after view release.
 
+The [identity directory](native-identity-directory.md) adds sparse stable rows
+over adaptive segments. Existing readers retain their exact generation while
+new ranges publish. An owned-span input lets the storage emitter probe and
+encode native words directly. A read-only importer brings published primary
+node identities into one owned generation without per-word Form conversion.
+
 The [layout witness](../observe/native-blueprint-layout-witness.bml) compares
 all field widths against an independent bit oracle, executes actual CPU and
 Metal projections, and checks indexed reads, complete output guards, typed
@@ -70,8 +76,9 @@ Smaller storage does not imply faster computation on every workload.
 
 These are Form-owned packed runs, not the primary shared node columns. The
 shared field still uses 8-byte identity entries, 80 logical bytes per node and
-a fixed 2^26-cell capacity. Replacing it needs the native accessor connected to
-a Form-owned primary directory, shared publication and owner-aware reclamation.
+a fixed 2^26-cell capacity. The Form directory can serve sparse rows above that
+capacity; replacing the primary field requires its producers and readers to
+use this owner, along with shared publication and owner-aware reclamation.
 Moving tagged references requires the collector to retain and relocate them.
 Current Metal dispatch uses
 32-bit row indices; a larger run needs explicit range submissions. The

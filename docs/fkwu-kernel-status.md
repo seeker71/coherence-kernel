@@ -41,6 +41,17 @@ until that close. Unease reports current ownership and byte counts. These
 process-local leases do not establish atomic cross-process publication or
 collection of tagged references stored in raw memory.
 
+The [identity directory](native-identity-directory.md) serves sparse stable rows
+over adaptive segments through one 312-byte native image. Its witness covers
+65 residual widths, 69 generations and row 67,108,881 without allocating the
+intervening rows. Reader leases retain removed segments until final release;
+retired ranges cannot be reassigned. The native read-only importer takes 25
+published primary handles into one generation and preserves all 200 raw bytes
+after source mappings close. Non-field handles refuse before the importer opens
+primary-field objects. Eight [source-bound executions](evidence/fkwu/native-blueprint-layout.json)
+cover these boundaries and the CPU/Metal storage consumers. Directory
+publication is serialized; the C allocator and primary readers are unchanged.
+
 The shared field reuses identical NodeID coordinates; the allocation witness
 returns `7`. Its node columns still have a fixed 2^26-cell capacity and no live
 reclamation. Reset requires every other kernel to settle. The
@@ -252,11 +263,14 @@ Resource ownership includes names, metadata and event delivery: a native handle 
 1. Give changing observations an owned, reclaimable lifetime and decouple field
    allocation from its current fixed capacity. The native identity already
    occupies one word; its encoding width does not require preallocating its
-   identity space. The raw-u64 accessor and leased blueprint runs are executable.
-   Next, give the identity column a Form-owned directory and route its native
-   readers through that directory while preserving tagged handles. Admit the
-   native implementation before changing allocation so admission cannot call
-   the allocator it replaces. Reference-bearing columns require a collector
+   identity space. The raw-u64 accessor, leased blueprint runs and sparse
+   identity directory are executable. The primary importer already consumes
+   published handles without scanning unfinished reservations. Next, move the
+   primary producer/read path behind the directory while preserving tagged
+   handles. Admit the native implementation before changing allocation so
+   admission cannot call the allocator it replaces. Concurrent publication
+   requires ordered immutable-generation selection and retained readers.
+   Reference-bearing columns require a collector
    root/relocation bridge; slot reuse requires handle generations and side-table
    ownership. Measure allocations
    at actual organ boundaries, preserve the care path under pressure, and prove

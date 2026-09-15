@@ -65,8 +65,10 @@ advantage over a layout-specialized native projection.
 
 The primary shared field still uses C arrays and a fixed 2^26-cell capacity.
 Its semantic identity word, tagged runtime handle and physical slot are
-different objects. The next migration is a Form-owned identity column and
-stable directory consumed through native access, preserving existing handles.
+different objects. The [Form-owned identity directory](native-identity-directory.md)
+now serves sparse stable rows through this ABI and imports published primary
+identities through read-only native mappings. Primary producers and C readers
+still need to move behind that directory.
 Before replacing allocation, native admission must be resident so it cannot
 recursively depend on the allocator it replaces. Reference-bearing category,
 children and value columns need a root/relocation bridge: the current collector
