@@ -602,6 +602,25 @@ fourth_prepare_source_band() {
     printf '%s\n' "$abs"
 }
 
+# fourth_in_string_awk — the string-literal tracker the workload composer below
+# reads: an escaped character stays inside a literal, and a ";" outside one starts
+# a comment. A line that opens inside a literal is carried as text.
+fourth_in_string_awk='
+    function fk_scan(line,   i, c, n) {
+        n = length(line)
+        for (i = 1; i <= n; i++) {
+            c = substr(line, i, 1)
+            if (fk_in) {
+                if (c == "\\") { i++; continue }
+                if (c == "\"") fk_in = 0
+            } else {
+                if (c == ";") break
+                if (c == "\"") fk_in = 1
+            }
+        }
+    }
+'
+
 # fourth_prepare_source_workload — compose validate.sh's already-prepared
 # sibling workload into one direct-source root. Section-bearing BML arguments
 # have already crossed the Form source-text lens; every non-root source becomes
@@ -645,11 +664,14 @@ fourth_prepare_source_workload() {
             # Dependency declarations have already been expanded into the
             # absolute prelude list above. Keeping the old relative directive
             # would load a second, sometimes BML-bearing, copy of the module.
-            awk '
+            # A line that opens inside a string literal is text, never a
+            # directive (validate.sh's fk_in_string_awk reads it the same way).
+            awk "$fourth_in_string_awk"'
+                fk_in { print; fk_scan($0); next }
                 /^;[[:space:]]*preludes:/ { next }
                 /^[[:space:]]*import([[:space:]:]|\")/ { next }
                 /^;[[:space:]]*import([[:space:]:]|\")/ { next }
-                { print }
+                { print; fk_scan($0) }
             ' "$band"
         } > "$tmp"
         mv -f "$tmp" "$out"
@@ -669,12 +691,26 @@ fourth_prepare_source_workload() {
 # against the sample's own three-kernel output — a false divergence. Anchoring
 # to the tests/ path keeps the stem the contract for the real band only.
 fourth_band_stem() {
-    local band="$1" stem hit
-    [[ "$band" == form-stdlib/tests/* || "$band" == */form-stdlib/tests/* ]] || return 0
+    local band="$1" stem hit home="tests"
+    if [[ "$band" == form-stdlib/seedbank/tests/* || "$band" == */form-stdlib/seedbank/tests/* ]]; then
+        home="seedbank"
+    elif [[ "$band" != form-stdlib/tests/* && "$band" != */form-stdlib/tests/* ]]; then
+        return 0
+    fi
     stem="$(basename "$band")"
     stem="${stem%.fk}"
     stem="${stem%.bml}"
     [[ -f "$FOURTH_MANIFEST" ]] || return 0
+    # A seedbank test (form-stdlib/seedbank/tests/<stem>.fk) is a band home too, under its
+    # exact name and only when no form-stdlib/tests band claims the stem: fourth_band_srcs
+    # resolves tests/ first, so one stem names one file from either side.
+    if [[ "$home" == seedbank ]]; then
+        if [[ -f "form-stdlib/tests/${stem}-band.fk" || -f "form-stdlib/tests/${stem}.fk" ]]; then
+            return 0
+        fi
+        awk -v b="$stem" '$1==b{print $1; exit}' "$FOURTH_MANIFEST"
+        return 0
+    fi
     # Exact name FIRST, stripped second. Stripping -band unconditionally sent a
     # file literally named <x>-band.fk to look up row <x>, so the four rows whose
     # registered name KEEPS the -band suffix (form-cli-band, form-cli-repl-
@@ -821,6 +857,11 @@ fourth_band_srcs() {
     # Read the preludes header from whichever file exists, else a stem registered
     # under the plain name silently builds an empty table and runs three-kernel only.
     [[ -f "$band" ]] || band="form-stdlib/tests/${stem}.fk"
+    # ...and a seedbank test under its exact name when no tests/ band claims the stem
+    # (fourth_band_stem answers a seedbank path on the same terms).
+    if [[ ! -f "$band" && -f "form-stdlib/seedbank/tests/${stem}.fk" ]]; then
+        band="form-stdlib/seedbank/tests/${stem}.fk"
+    fi
     # Drop ONLY the exact core.fk prelude (the shim mirrors it). Anchor the match
     # to a path boundary so sibling-named modules — substrate-core.fk, bmf-core.fk
     # — keep their place in the source list instead of vanishing as substrings.

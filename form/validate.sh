@@ -500,13 +500,35 @@ prepared_args=()
 # already just a comment line, inert to any Form parser; only the kernels'
 # new directive SCAN treats its text as meaningful, and only that scan is
 # what this suppresses.
+# A line that opens inside a string literal is text, never a directive. A band may
+# carry another language's source in a string (seedbank python-exec's "import os"
+# lines at column 0), and the import rule cut those lines, their closing quotes and
+# parens with them. fk_scan carries the literal across lines: an escaped character
+# stays inside, and a ";" outside a string starts a comment. The prepared-copy keys
+# below end in "-q" so copies stripped by the old rule are not reused.
+fk_in_string_awk='
+    function fk_scan(line,   i, c, n) {
+        n = length(line)
+        for (i = 1; i <= n; i++) {
+            c = substr(line, i, 1)
+            if (fk_in) {
+                if (c == "\\") { i++; continue }
+                if (c == "\"") fk_in = 0
+            } else {
+                if (c == ";") break
+                if (c == "\"") fk_in = 1
+            }
+        }
+    }
+'
 fk_strip_prelude_header() {
     local src_file="$1" dest_file="$2"
-    awk '
+    awk "$fk_in_string_awk"'
+        fk_in { print; fk_scan($0); next }
         /^;[[:space:]]*preludes:/ { next }
         /^[[:space:]]*import([[:space:]:]|")/ { next }
         /^;[[:space:]]*import([[:space:]:]|")/ { next }
-        { print }
+        { print; fk_scan($0) }
     ' "$src_file" > "$dest_file"
 }
 
@@ -528,7 +550,8 @@ fk_prelude_has_bml_dep() {
 # directive walk to lower. Tokens split the way fk_declared_deps splits them.
 fk_keep_bml_prelude_deps() {
     local src_file="$1" dest_file="$2"
-    awk '
+    awk "$fk_in_string_awk"'
+        fk_in { print; fk_scan($0); next }
         match($0, /^(;+|\/\/)[[:space:]]*preludes:/) {
             marker = substr($0, 1, RLENGTH)
             n = split(substr($0, RLENGTH + 1), a, /[ \t,;]+/)
@@ -543,7 +566,7 @@ fk_keep_bml_prelude_deps() {
         }
         /^[[:space:]]*import([[:space:]:]|")/ { next }
         /^;[[:space:]]*import([[:space:]:]|")/ { next }
-        { print }
+        { print; fk_scan($0) }
     ' "$src_file" > "$dest_file"
 }
 
@@ -554,7 +577,7 @@ prepare_sources() {
         if grep -Eq '^[[:space:]]*section \[' "$src"; then
             # "-bmlhead": a lowered file keeps only its ".bml" header names
             # (fk_keep_bml_prelude_deps); copies cached under the old rule kept all.
-            key="$(form_hash16 "$src")-$compiler_stamp-bmlhead"
+            key="$(form_hash16 "$src")-$compiler_stamp-bmlhead-q"
             cached="$SOURCE_CACHE_DIR/$key.fk"
             if [[ ! -s "$cached" ]]; then
                 safe="${src//\//__}"
@@ -596,7 +619,7 @@ prepare_sources() {
             # callers leave to the kernels' own directive walk to find and
             # lower: a cached copy keeps exactly those names and drops the
             # ".fk" ones, already their own prepared entries.
-            key="$(form_hash16 "$src")-bmlhead"
+            key="$(form_hash16 "$src")-bmlhead-q"
             plain="$SOURCE_CACHE_DIR/$key.fk"
             if [[ ! -s "$plain" ]]; then
                 stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.stripped.XXXXXX")"
@@ -605,7 +628,7 @@ prepare_sources() {
             fi
             prepared_args+=("$plain")
         else
-            key="$(form_hash16 "$src")-plain"
+            key="$(form_hash16 "$src")-plain-q"
             plain="$SOURCE_CACHE_DIR/$key.fk"
             if [[ ! -s "$plain" ]]; then
                 stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.stripped.XXXXXX")"
