@@ -86,6 +86,61 @@ type binding struct {
 type Frame struct {
 	Parent   *Frame
 	Bindings []binding
+	// View — the unit version a closure defined at the unit level was made
+	// under; its own empty frame carries it, 0 on every other frame.
+	View uint64
+	// History — unit bindings a later unit let rebound, each with the unit
+	// version it took effect at (the first at 0).
+	History map[NameID][]HistBinding
+}
+
+// HistBinding — the binding a rebound unit name held from unit version V on.
+type HistBinding struct {
+	V   uint64
+	Val Value
+}
+
+// bindingAtView — what a rebound unit name held at a unit version: the latest
+// binding made at or before it, else the first (a read that came before the
+// name's first let reads that let, as fkwu's forward hold does).
+func bindingAtView(h []HistBinding, view uint64) Value {
+	out := h[0].Val
+	for _, e := range h {
+		if e.V <= view {
+			out = e.Val
+		}
+	}
+	return out
+}
+
+// HasOwn — whether this frame itself binds name.
+func (f *Frame) HasOwn(name NameID) bool {
+	for i := range f.Bindings {
+		if f.Bindings[i].Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Rebind — a later unit let: the name takes the new value, and the history
+// keeps what each unit version held.
+func (f *Frame) Rebind(name NameID, v Value, version uint64) {
+	for i := range f.Bindings {
+		if f.Bindings[i].Name == name {
+			if f.History == nil {
+				f.History = make(map[NameID][]HistBinding)
+			}
+			h, ok := f.History[name]
+			if !ok {
+				h = []HistBinding{{V: 0, Val: f.Bindings[i].Val}}
+			}
+			f.History[name] = append(h, HistBinding{V: version, Val: v})
+			f.Bindings[i].Val = v
+			return
+		}
+	}
+	f.Bind(name, v)
 }
 
 func NewFrame(parent *Frame) *Frame { return &Frame{Parent: parent} }
@@ -118,10 +173,22 @@ func (f *Frame) HasLocal(name NameID) bool {
 	return false
 }
 
+// Lookup — the nearest binding. A rebound unit name answers what the unit
+// held at the view of the closure reading it (the nearest view on the way
+// up), and its latest binding where no closure view stands.
 func (f *Frame) Lookup(name NameID) (Value, bool) {
+	var view uint64
 	for cur := f; cur != nil; cur = cur.Parent {
+		if view == 0 {
+			view = cur.View
+		}
 		for i := range cur.Bindings {
 			if cur.Bindings[i].Name == name {
+				if view != 0 && cur.History != nil {
+					if h, ok := cur.History[name]; ok {
+						return bindingAtView(h, view), true
+					}
+				}
 				return cur.Bindings[i].Val, true
 			}
 		}
