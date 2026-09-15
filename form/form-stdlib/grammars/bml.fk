@@ -9277,6 +9277,162 @@
             (bml-scope-link-all link)
             (bml-scope-link-linked link)))
 
+    ;; --- homes: the source units in the tree a name can come from -----
+    ;; The walk reads the tree's own top-level directories; dot-directories
+    ;; hold caches, scratch and other worktrees, and band helpers, seedbank
+    ;; copies and toolchain trees are not units, so it passes them by.
+    ;; A text match is only a candidate: the unit must parse and declare the
+    ;; package, or define the name, before it counts as a home.
+
+    (defn bml-scope-home-skips (_x)
+        (list "tests" ".cache" "seedbank" "node_modules" "target"))
+
+    (defn bml-scope-home-root? (name)
+        (if (bml-scope-prefix? name ".") false (fs_is_dir name)))
+
+    (defn bml-scope-home-paths (root rows needle acc)
+        (if (nil? rows)
+            acc
+            (do
+                (let path (str_concat root (str_concat "/" (head (head rows)))))
+                (bml-scope-home-paths
+                    root
+                    (tail rows)
+                    needle
+                    (if (ge (str_find (read_file path) needle 0) 0)
+                        (cons path acc)
+                        acc)))))
+
+    (defn bml-scope-home-roots (roots needle acc)
+        (if (nil? roots)
+            (reverse-list acc)
+            (bml-scope-home-roots
+                (tail roots)
+                needle
+                (if (bml-scope-home-root? (head roots))
+                    (bml-scope-home-paths
+                        (head roots)
+                        (source_inventory (head roots) ".bml" (bml-scope-home-skips 0))
+                        needle
+                        acc)
+                    acc))))
+
+    (defn bml-scope-text-homes (needle)
+        (bml-scope-home-roots (fs_list ".") needle (empty)))
+
+    (defn bml-scope-load-unit (path)
+        (bml-source-exec-parse-node
+            (bml-source-parse-executable-stream (bml-source-scan-file path))))
+
+    (defn bml-scope-paths-where (paths keep? key)
+        (if (nil? paths)
+            (empty)
+            (if (keep? (bml-scope-unit 0 (bml-scope-load-unit (head paths))) key)
+                (cons (head paths) (bml-scope-paths-where (tail paths) keep? key))
+                (bml-scope-paths-where (tail paths) keep? key))))
+
+    (defn bml-scope-declares-package? (unit package)
+        (str_eq (bml-scope-unit-package unit) package))
+
+    ;; the units that declare `package P;` -- an import's explicit home
+    (defn bml-scope-package-homes (package)
+        (bml-scope-paths-where
+            (bml-scope-text-homes (str_concat "package " (str_concat package ";")))
+            bml-scope-declares-package?
+            package))
+
+    ;; the units that define a name: evidence for a bare name no import
+    ;; covers, never loaded on its behalf. A BML source unit counts when it
+    ;; parses and defines the method or const; an organ counts by its own
+    ;; `def name(` spelling.
+    (defn bml-scope-name-homes (name)
+        (bml-scope-new-homes
+            (bml-scope-text-homes (str_concat "def " (str_concat name "(")))
+            (empty)
+            (bml-scope-paths-where
+                (bml-scope-text-homes (str_concat name "("))
+                bml-scope-unit-defines?
+                name)))
+
+    ;; the modules an import row asks for when no supplied unit answers it
+    (defn bml-scope-unresolved-modules (all-units rows)
+        (if (nil? rows)
+            (empty)
+            (if (nil? (bml-scope-target-units (bml-scope-resolve-import all-units (head rows))))
+                (cons
+                    (if (eq (bnii-import-star? (head rows)) 1)
+                        (bnii-import-module (head rows))
+                        (bml-scope-import-home-package all-units (head rows)))
+                    (bml-scope-unresolved-modules all-units (tail rows)))
+                (bml-scope-unresolved-modules all-units (tail rows)))))
+
+    ;; `import P;` names package P itself; `import P.s;` asks for P's unit
+    (defn bml-scope-import-home-package (all-units row)
+        (do
+            (let module (bnii-import-module row))
+            (if (nil? (bml-scope-package-homes module))
+                (bml-scope-qualifier module)
+                module)))
+
+    (defn bml-scope-link-unresolved-modules (link)
+        (bml-scope-link-unresolved-loop
+            (bml-scope-link-all link)
+            (bml-scope-link-linked link)))
+
+    (defn bml-scope-link-unresolved-loop (all-units linked)
+        (if (nil? linked)
+            (empty)
+            (append
+                (bml-scope-unresolved-modules all-units (bml-scope-unit-imports (head linked)))
+                (bml-scope-link-unresolved-loop all-units (tail linked)))))
+
+    (defn bml-scope-strings-hold? (values value)
+        (if (nil? values)
+            false
+            (if (str_eq (head values) value)
+                true
+                (bml-scope-strings-hold? (tail values) value))))
+
+    (defn bml-scope-new-homes (paths held acc)
+        (if (nil? paths)
+            acc
+            (bml-scope-new-homes
+                (tail paths)
+                held
+                (if (bml-scope-strings-hold? (append held acc) (head paths))
+                    acc
+                    (append acc (list (head paths)))))))
+
+    (defn bml-scope-homes-of (modules)
+        (if (nil? modules)
+            (empty)
+            (append
+                (bml-scope-package-homes (head modules))
+                (bml-scope-homes-of (tail modules)))))
+
+    ;; Heal an import that resolves nowhere: load each unit that declares the
+    ;; package it names, and repeat for the imports those units bring, until
+    ;; no new home appears. Answers (list units loaded-paths still-missing);
+    ;; the caller re-links and re-observes.
+    (defn bml-scope-heal-imports (node units loaded)
+        (do
+            (let link (bml-scope-link node units))
+            (let missing (bml-scope-link-unresolved-modules link))
+            (let fresh (bml-scope-new-homes (bml-scope-homes-of missing) loaded (empty)))
+            (if (nil? fresh)
+                (list units loaded missing)
+                (bml-scope-heal-imports
+                    node
+                    (append units (bml-scope-load-units fresh))
+                    (append loaded fresh)))))
+
+    (defn bml-scope-load-units (paths)
+        (if (nil? paths)
+            (empty)
+            (cons
+                (bml-scope-load-unit (head paths))
+                (bml-scope-load-units (tail paths)))))
+
     ;; compile: the main unit plus every unit its imports reach.
 
     (defn bml-scope-linked-unsupported (link units symbols)
