@@ -130,12 +130,23 @@ instruction about the paired evidence and verified proposal. These are generatio
 instructions; their effects must be checked in the returned answer and are not
 established by passing report-field checks.
 
+Observation prefill uses the existing sliced batched route when the admitted
+context records a scratch width greater than one. Each outer slice is bounded
+by that actual width and the normal admission slice limit. Legacy contexts and
+width-one contexts retain the per-position barrier route. Both routes keep the
+same resident state and validate position, pending-token range and settled GPU
+state. A failed submission is not retried: the existing caller preserves the
+last completed counters and retains ownership for release, without claiming
+that physical state was rolled back.
+
 The effectful comparison `observe/form-cli-observation-prefill-compare.bml`
-opens the registered local Q8 model once and compares observation routes using
-fresh stream states, a shared prefix, a nonzero observation position and 16
-continued predictions. It reports timing, prediction agreement, settled GPU
-state and release. It does not change serving dispatch or establish equality
-outside its recorded sample. Run it without overlapping another GPU owner.
+compares the retained barrier reference with the actual serving dispatch on the
+registered local Q8 model. It uses fresh stream states, identical prefixes,
+nonzero observation positions and 16 continued predictions for each pair.
+Recorded scratch widths are 64, 4 and 1; cases include short, boundary-crossing
+and multiple-slice observations. It reports timing, prediction agreement,
+settled GPU state and release. The probe does not alter dispatch configuration
+or establish equality outside its samples. Run it without another GPU owner.
 
 At each model admission, including checkpoint resume, the controller records
 the exact resident documents supplied in that context. A successful single-file

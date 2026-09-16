@@ -1,5 +1,6 @@
 // Nonzero-position observations and continuation on the registered local Q8.
-// witnessed: 2026-09-17 -> 15; sample equality, not full floating-point equality.
+// Compare the retained barrier reference with the actual serving dispatch.
+// witnessed: 2026-09-17 -> 7; five samples, not universal state equality.
 // preflight-exec: forbidden
 // preludes: form-stdlib/form-cli-model-session.fk
 section [form.bml] {
@@ -10,28 +11,40 @@ section [form.bml] {
    let sts = q38-new-state(nth(ctx,2));
    let admitted = q38-prefill-span-sliced(nth(ctx,0),nth(ctx,1),nth(ctx,2),nth(ctx,3),sts,nth(ctx,4),nth(ctx,5),nth(ctx,6),prefix,0,nth(ctx,10));
    let start = now_unix_ms();
-   let observed = if sliced then q38-prefill-span-sliced(nth(ctx,0),nth(ctx,1),nth(ctx,2),nth(ctx,3),sts,nth(ctx,4),nth(ctx,5),nth(ctx,6),ids,nth(admitted,1),nth(ctx,10)) else fcmo-prefill(ctx,sts,ids,nth(admitted,1));
+   let observed = if sliced then fcmo-prefill(ctx,sts,ids,nth(admitted,1)) else fcmo-prefill-reference(ctx,sts,ids,nth(admitted,1));
    let elapsed = sub(now_unix_ms(),start);
    let settled = fcmo-settled(metal_live());
    let continued = osp-next(ctx,sts,head(observed),nth(observed,1),16);
    let freed = q38-free-state(sts);
    list(admitted,observed,continued,elapsed,settled);
   }
+  def osp-case(ctx,prefixCount,count) {
+   let prefix = osp-ids(0,prefixCount);
+   let ids = osp-ids(prefixCount,add(prefixCount,count));
+   let current = osp-one(ctx,prefix,ids,0);
+   let sliced = osp-one(ctx,prefix,ids,1);
+   let agree = and(value_eq(head(current),head(sliced)),and(value_eq(nth(current,1),nth(sliced,1)),value_eq(nth(current,2),nth(sliced,2))));
+   print(list("nonzero-observation","span",q38-ctx-span(ctx),"prefix",len(prefix),"observation",len(ids),"continuation",16,"reference-ms",nth(current,3),"serving-ms",nth(sliced,3),"predictions-agree",agree,"reference-settled",nth(current,4),"serving-settled",nth(sliced,4)));
+   and(agree,and(nth(current,4),nth(sliced,4)));
+  }
+  def osp-cases(ctx,rows) = if nil?(rows) then 1 else { let passed = osp-case(ctx,head(head(rows)),nth(head(rows),1)); let rest = osp-cases(ctx,tail(rows)); and(passed,rest); };
+  def osp-context(path,x,span,rows) {
+   let ctx = qsx-open-span(path,1024,x,span);
+   if not(and(q38-context-ok?(ctx),and(ge(len(ctx),11),eq(q38-ctx-span(ctx),span)))) then form_error("span context unavailable") else 0;
+   let passed = osp-cases(ctx,rows);
+   let expected = q38-close-expected(ctx,list());
+   let released = q38-close(ctx,list());
+   print(list("context-release","span",span,"release-ok",eq(released,expected)));
+   and(passed,eq(released,expected));
+  }
   def osp-run() {
    let path = mr-path(mr-find("qwen38-q8"));
    if not(eq(qaf-seal-verdict(path),1)) then form_error("model seal refused") else 0;
    let x = qsx-load(path);
-   let ctx = qsx-open-span(path,256,x,64);
-   if not(and(q38-context-ok?(ctx),and(ge(len(ctx),11),eq(nth(ctx,10),64)))) then form_error("span context unavailable") else 0;
-   let prefix = osp-ids(0,96);
-   let ids = osp-ids(96,161);
-   let current = osp-one(ctx,prefix,ids,0);
-   let sliced = osp-one(ctx,prefix,ids,1);
-   let expected = q38-close-expected(ctx,list());
-   let released = q38-close(ctx,list());
-   let agree = and(value_eq(head(current),head(sliced)),and(value_eq(nth(current,1),nth(sliced,1)),value_eq(nth(current,2),nth(sliced,2))));
-   print(list("nonzero-observation","prefix",len(prefix),"observation",len(ids),"continuation",16,"current-ms",nth(current,3),"sliced-ms",nth(sliced,3),"predictions-agree",agree,"current-settled",nth(current,4),"sliced-settled",nth(sliced,4),"release-ok",eq(released,expected)));
-   if and(agree,and(nth(current,4),and(nth(sliced,4),eq(released,expected)))) then 15 else form_error("observation continuation or release differed");
+   let wide = osp-context(path,x,64,list(list(1,1),list(96,65),list(512,129)));
+   let narrow = osp-context(path,x,4,list(list(9,17)));
+   let fallback = osp-context(path,x,1,list(list(4,5)));
+   if and(wide,and(narrow,fallback)) then 7 else form_error("observation continuation or release differed");
   }
  }
  osp-run();
