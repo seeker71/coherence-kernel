@@ -390,6 +390,41 @@ controller carries failed observations into its existing repair and diagnostic
 flow. `tests/form-cli-review-execution-band.fk` checks actual return values,
 lazy evaluation, successful absence, callback errors and whole-source refusal.
 
+### Search a small native repair before another model call
+
+`bml/form-cli-review-search.bml` searches one explicit repair family: replace
+one existing call with a call that forwards the function's original parameters
+to a compatible caller-owned binding. Compatibility comes from caller-supplied
+result roles and matching parameter count. Roles describe the caller's domain;
+they are not inferred types or a guarantee that a callback accepts every value.
+
+```text
+roles = list(list("finish", "continuation-result"),
+             list("continue", "continuation-result"))
+result = fcrs-search(source, name, arity, bindings, roles,
+                     behavioral-checker, immutable-contract, check-budget)
+```
+
+The checker receives `(immutable-contract, prepared-expression)` and returns
+`list(passed, actual-observation)`. It can call `fcre-run` for each case. The
+search first checks the unchanged function, then reparses and checks each
+generated candidate. It never invents expected outputs or changes the contract.
+Candidates use existing parameters and bindings; no reference implementation
+is required. Callers must supply safe, appropriately validated callbacks.
+
+The result is `[status, source, checker-runs, observation]`. Status is
+`unchanged`, `repaired`, `exhausted` or `refused`. Failed or exhausted search
+returns the original source. The budget counts actual checker invocations,
+including the original. No model, filesystem or process call is made by the
+search itself. Attribute its output as native structural repair, separately
+from model generation. A passing result establishes the supplied behaviors;
+inspect and independently execute the generated source before a broader claim.
+
+This is a targeted search strategy, not unrestricted program synthesis.
+`tests/form-cli-review-search-band.fk` exercises a separate two-argument task,
+additional input values, budget exhaustion, malformed checks, missing roles,
+unchanged source and escaped/unicode source rendering.
+
 Review currently shares the same Qwen and context: **not independent-model
 validation**. Qwen weights remain unchanged; the shared native Llama adapter
 learns asynchronously from observed outcomes. The loop does not assert rented-model
