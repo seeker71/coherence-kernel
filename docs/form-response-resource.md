@@ -3,7 +3,10 @@
 `observe/form-cli-response-resource-run.bml` repairs a retained, failing
 read-only report through one optional provider CLI process. The caller owns
 the question, source documents, assertions and provider permission. Ordinary
-native `code` and response-session execution remain local-only.
+native `code` remains local-only. Response sessions also remain native-only by
+default; a manifest can explicitly offer this resource with a small
+session-wide process allowance as described in
+[`form-response-comparison.md`](form-response-comparison.md).
 
 Supply one JSON object on stdin:
 

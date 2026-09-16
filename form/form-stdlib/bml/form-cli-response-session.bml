@@ -1,21 +1,17 @@
 // One native invocation owns a set of frozen assessments and all their results.
-// Each member uses the native-only coding/review executor. No provider admission
-// exists here; coordinating/provider costs must be retained outside this scope.
-// preludes: form-stdlib/bml/form-cli-code-request.bml
+// Each member first uses the native coding/review executor. A caller may offer
+// one bounded session resource for failed read-only reports after local release.
+// preludes: form-stdlib/bml/form-cli-response-shared.bml form-stdlib/bml/form-cli-response-resource.bml
 section [form.bml] {
  class FormCliResponseSession {
   def frss-file(path) = if or(nothing?(path),or(le(file_size(path),0),gt(file_size(path),FatMaxBytes()))) then form_error("response session manifest file unavailable or oversized") else frss-text(read_file(path));
   def frss-text(raw) = if or(gt(str_len(raw),FatMaxBytes()),not(faj-valid(raw))) then form_error("response session manifest JSON invalid or oversized") else frss-run(parse-json("response-session",raw));
-  def frss-member-valid(member) = and(fat-wire-object?(member),and(gt(str_len(fcap-string(member,"id")),0),frss-request-valid(json-object-get(member,"request"))));
-  def frss-request-valid(request) = and(fcaq-request-valid(request),and(fcaq-evaluation(request),and(str_eq(fcap-string(request,"resume"),""),str_eq(fat-wire-error(fat-wire-documents(request)),""))));
+  def frss-member-valid(member) = and(fat-wire-object?(member),and(gt(str_len(fcap-string(member,"id")),0),frsh-request-valid(json-object-get(member,"request"))));
   def frss-members-valid(members,seen) = if nil?(members) then 1 else and(frss-member-valid(head(members)),and(not(fat-has(seen,fcap-string(head(members),"id"))),frss-members-valid(tail(members),cons(fcap-string(head(members),"id"),seen))));
-  def frss-valid(manifest) = and(fat-wire-object?(manifest),and(gt(str_len(fcap-string(manifest,"session")),0),and(fat-wire-array?(json-object-get(manifest,"cases")),and(gt(len(node_children(json-object-get(manifest,"cases"))),0),frss-members-valid(node_children(json-object-get(manifest,"cases")),list())))));
-  def frss-path(root,name) = str_concat(root,str_concat("/",name));
-  def frss-write-confirmed(written,present,actual,expected) = and(ge(written,0),and(present,str_eq(actual,expected)));
-  def frss-frozen(path,text) {
-   let saved = write_file(path,text);
-   if frss-write-confirmed(saved,fs-exists?(path),read_file(path),text) then 1 else form_error("response-session evidence write failed, is absent, or differs after write");
-  }
+  def frss-provider-allowed(manifest) = and(fat-wire-object?(json-object-get(manifest,"provider")),node_eq(json-object-get(json-object-get(manifest,"provider"),"allowed"),intern_trivial_bool(true)));
+  def frss-provider-contract(provider) = and(str_eq(fcap-string(provider,"interface"),"codex-exec"),and(gt(fcaq-number(provider,"max_processes",0),0),and(le(fcaq-number(provider,"max_processes",0),hearth-response-process-limit()),gt(fcaq-number(provider,"seconds",0),0))));
+  def frss-provider-valid(manifest) = if not(json-object-has?(manifest,"provider")) then 1 else if not(fat-wire-object?(json-object-get(manifest,"provider"))) then 0 else if not(frss-provider-allowed(manifest)) then 1 else frss-provider-contract(json-object-get(manifest,"provider"));
+  def frss-valid(manifest) = and(fat-wire-object?(manifest),and(gt(str_len(fcap-string(manifest,"session")),0),and(frss-provider-valid(manifest),and(fat-wire-array?(json-object-get(manifest,"cases")),and(gt(len(node_children(json-object-get(manifest,"cases"))),0),frss-members-valid(node_children(json-object-get(manifest,"cases")),list()))))));
   def frss-originals-kept(original,returned,writable) = if nil?(original) then 1 else frss-original-next(original,returned,writable,fat-find-doc(returned,nth(head(original),1)));
   def frss-original-next(original,returned,writable,found) = if nil?(found) then 0 else and(str_eq(head(found),head(head(original))),and(if fat-has(writable,nth(head(original),1)) then 1 else value_eq(head(original),found),frss-originals-kept(tail(original),returned,writable)));
   def frss-new-paths(rows,original,writable) = if nil?(rows) then 1 else and(or(not(nil?(fat-find-doc(original,nth(head(rows),1)))),fat-has(writable,nth(head(rows),1))),frss-new-paths(tail(rows),original,writable));
@@ -36,30 +32,56 @@ section [form.bml] {
    let outcome = and(contract,and(str_eq(fcap-string(result,"status"),"complete"),and(eq(nsm-num(result,"release_ok"),1),and(eq(head(source),1),and(eq(head(report),1),if review then unchanged else not(unchanged))))));
    json-node-object(list(nsm-n("checked_behavior_passed",outcome),nsm-n("document_contract_passed",contract),nsm-n("source_checks_passed",head(source)),nsm-s("source_evidence",nth(source,1)),nsm-n("report_checks_passed",head(report)),nsm-s("report_evidence",nth(report,1)),nsm-n("documents_unchanged",unchanged),json-node-pair("semantic_quality",json-node-null()),json-node-pair("frequency_and_resonance",json-node-null())));
   }
-  def frss-member(root,member,index) {
+  def frss-assistance-reason(manifest,request,result,checked,reportPresent,remaining) = if not(str_eq(fcaq-mode(request),"review")) then "code-case-native-only" else if eq(nsm-num(checked,"checked_behavior_passed"),1) then "native-review-passed" else if not(eq(nsm-num(checked,"source_checks_passed"),1)) then "source-check-failed" else if not(eq(nsm-num(checked,"documents_unchanged"),1)) then "review-documents-changed" else if not(eq(nsm-num(result,"release_ok"),1)) then "local-model-not-released" else if eq(nsm-num(checked,"report_checks_passed"),1) then "local-report-assertions-passed" else if not(reportPresent) then "local-report-missing" else if not(frss-provider-allowed(manifest)) then "provider-not-offered" else if le(remaining,0) then "provider-budget-exhausted" else "provider-repair";
+  def frss-resource-provider(manifest) = json-node-object(list(json-node-pair("allowed",intern_trivial_bool(true)),nsm-s("interface","codex-exec"),nsm-n("max_processes",1),nsm-n("seconds",fcaq-number(json-object-get(manifest,"provider"),"seconds",0))));
+  def frss-resource-request(manifest,member,request,reportPath) = json-node-object(list(nsm-s("id",fcam-hash(str_concat(fcap-string(manifest,"session"),str_concat(":",fcap-string(member,"id"))))),json-node-pair("assessment",request),json-node-pair("local_reports",json-node-array(list(json-node-string(reportPath)))),json-node-pair("provider",frss-resource-provider(manifest))));
+  def frss-assistance(reason,result) = json-node-object(list(nsm-s("selection",reason),nsm-s("status",if str_eq(reason,"provider-repair") then fcap-string(result,"status") else "not-used"),nsm-s("answer_source",if str_eq(reason,"provider-repair") then fcap-string(result,"answer_source") else "none"),nsm-n("provider_processes_new",if str_eq(reason,"provider-repair") then nsm-num(result,"provider_processes_new") else 0),nsm-n("verified_repair",if str_eq(reason,"provider-repair") then nsm-num(result,"verified_repair") else 0),json-node-pair("resource",if str_eq(reason,"provider-repair") then result else json-node-null())));
+  def frss-case-status(checked,assistance) = if eq(nsm-num(checked,"checked_behavior_passed"),1) then "native-only-success" else if eq(nsm-num(assistance,"verified_repair"),1) then "assisted-success" else "unresolved";
+  def frss-event-has(rows,event) = if nil?(rows) then 0 else or(str_eq(fcap-string(head(rows),"usage_event"),event),frss-event-has(tail(rows),event));
+  def frss-usage-add(rows,assistance) {
+   let resource = json-object-get(assistance,"resource");
+   let event = fcap-string(resource,"usage_event");
+   if or(str_eq(event,""),frss-event-has(rows,event)) then rows else append(rows,list(json-node-object(list(nsm-s("usage_event",event),json-node-pair("provider_usage",json-object-get(resource,"provider_usage"))))));
+  }
+  def frss-member(root,manifest,member,index,remaining) {
    let request = json-object-get(member,"request");
    let text = json-emit(request);
    let digest = fcam-hash(text);
-   let dir = frss-path(root,str_concat(int_to_str(index),str_concat("-",digest)));
+   let dir = frsh-path(root,str_concat(int_to_str(index),str_concat("-",digest)));
    let made = fs-mkdir(dir);
-   let frozen = frss-frozen(frss-path(dir,"request.json"),text);
+   let frozen = frsh-frozen(frsh-path(dir,"request.json"),text);
    print_str(str_concat("form-response-session ",json-emit(json-node-object(list(nsm-s("event","case-started"),nsm-s("id",fcap-string(member,"id")),nsm-s("evidence",dir))))));
    let started = now_unix_ms();
    let resultText = fcaq-call(text);
    let elapsed = sub(now_unix_ms(),started);
-   let retained = frss-frozen(frss-path(dir,"result.json"),resultText);
+   let retained = frsh-frozen(frsh-path(dir,"result.json"),resultText);
    let result = parse-json("response-session-result",resultText);
    let checked = frss-recheck(request,result);
-   let receipt = json-node-object(list(nsm-s("id",fcap-string(member,"id")),nsm-s("request_sha256",digest),nsm-s("evidence",dir),nsm-s("status",fcap-string(result,"status")),nsm-n("elapsed_ms",elapsed),json-node-pair("generated_ids",json-object-get(result,"generated_ids")),json-node-pair("injected_ids",json-object-get(result,"injected_ids")),json-node-pair("check",checked),nsm-n("rented_provider_calls",0),nsm-s("rented_basis","native-only executor;coordinator excluded")));
-   let written = frss-frozen(frss-path(dir,"receipt.json"),json-emit(receipt));
-   let health = oh-emit(frss-path(root,"events.jsonl"),oh-reading("response-session",root,fcap-string(member,"id"),json-node-int(1),json-object-get(checked,"checked_behavior_passed"),json-object-get(checked,"checked_behavior_passed"),list(),list("inspect-evidence","continue-assessment"),oh-reference(frss-path(dir,"receipt.json"))));
+   let reportText = fcap-string(result,"report");
+   let reportPath = frsh-path(dir,"local-report.json");
+   let reportPresent = gt(str_len(reportText),0);
+   let reportRetained = if reportPresent then frsh-frozen(reportPath,reportText) else 0;
+   let reason = frss-assistance-reason(manifest,request,result,checked,and(reportPresent,fs-exists?(reportPath)),remaining);
+   let resource = if str_eq(reason,"provider-repair") then frr-run(frss-resource-request(manifest,member,request,reportPath)) else json-node-object(list());
+   let assistance = frss-assistance(reason,resource);
+   let receipt = json-node-object(list(nsm-s("id",fcap-string(member,"id")),nsm-s("request_sha256",digest),nsm-s("evidence",dir),nsm-s("status",fcap-string(result,"status")),nsm-s("native_status",fcap-string(result,"status")),nsm-s("case_status",frss-case-status(checked,assistance)),nsm-n("elapsed_ms",elapsed),nsm-n("native_elapsed_ms",elapsed),json-node-pair("generated_ids",json-object-get(result,"generated_ids")),json-node-pair("injected_ids",json-object-get(result,"injected_ids")),json-node-pair("check",checked),json-node-pair("native_check",checked),json-node-pair("provider_assistance",assistance),nsm-n("provider_processes_new",nsm-num(assistance,"provider_processes_new")),nsm-n("rented_provider_calls",nsm-num(assistance,"provider_processes_new")),nsm-s("attribution_basis","native result retained intact;provider assistance separate;coordinator excluded")));
+   let written = frsh-frozen(frsh-path(dir,"receipt.json"),json-emit(receipt));
+   let casePassed = if str_eq(fcap-string(receipt,"case_status"),"unresolved") then 0 else 1;
+   let health = oh-emit(frsh-path(root,"events.jsonl"),oh-reading("response-session",root,fcap-string(member,"id"),json-node-int(1),json-node-int(casePassed),json-node-int(casePassed),list(),list("inspect-evidence","continue-assessment"),oh-reference(frsh-path(dir,"receipt.json"))));
    let response = fcap-control(add(now_unix_ms(),index),list(index,nsm-num(checked,"checked_behavior_passed")),0);
    if not(eq(response,0)) then form_error("response session continuation control unavailable") else 0;
    print_str(str_concat("form-response-session ",json-emit(receipt)));
-   receipt;
+   list(receipt,sub(remaining,nsm-num(assistance,"provider_processes_new")),assistance);
   }
-  def frss-loop(root,members,index,completed) = if nil?(members) then reverse(completed) else frss-loop(root,tail(members),add(index,1),cons(frss-member(root,head(members),index),completed));
-  def frss-pass-count(rows) = if nil?(rows) then 0 else add(nsm-num(json-object-get(head(rows),"check"),"checked_behavior_passed"),frss-pass-count(tail(rows)));
+  def frss-loop(root,manifest,members,index,completed,remaining,usage) {
+   if nil?(members) then list(reverse(completed),remaining,usage) else {
+    let member = frss-member(root,manifest,head(members),index,remaining);
+    frss-loop(root,manifest,tail(members),add(index,1),cons(head(member),completed),nth(member,1),frss-usage-add(usage,nth(member,2)));
+   };
+  }
+  def frss-status-one(row,status) = if str_eq(fcap-string(row,"case_status"),status) then 1 else 0;
+  def frss-status-count(rows,status) = if nil?(rows) then 0 else add(frss-status-one(head(rows),status),frss-status-count(tail(rows),status));
+  def frss-process-count(rows) = if nil?(rows) then 0 else add(nsm-num(head(rows),"provider_processes_new"),frss-process-count(tail(rows)));
   def frss-run(manifest) {
    if not(frss-valid(manifest)) then form_error("response session requires unique case ids and valid evaluation=1 requests") else 0;
    let text = json-emit(manifest);
@@ -67,14 +89,16 @@ section [form.bml] {
    let parent = fs-mkdir(fs-path-dirname(base));
    let made = fs-mkdir(base);
    let digest = fcam-hash(text);
-   let root = frss-path(base,str_concat(digest,str_concat("-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(now_unix_ms()))))));
+   let root = frsh-path(base,str_concat(digest,str_concat("-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(now_unix_ms()))))));
    if fs-exists?(root) then form_error("response-session evidence directory already exists") else 0;
    let opened = fs-mkdir(root);
-   let frozen = frss-frozen(frss-path(root,"manifest.json"),text);
+   let frozen = frsh-frozen(frsh-path(root,"manifest.json"),text);
    let started = now_unix_ms();
-   let rows = frss-loop(root,node_children(json-object-get(manifest,"cases")),0,list());
-   let report = json-node-object(list(nsm-s("schema","form-response-session-v1"),nsm-s("session",fcap-string(manifest,"session")),nsm-s("manifest_sha256",digest),nsm-s("evidence",root),nsm-n("cases",len(rows)),nsm-n("checked_behavior_passed",frss-pass-count(rows)),nsm-n("elapsed_ms",sub(now_unix_ms(),started)),nsm-n("rented_provider_calls",0),nsm-s("rented_basis","native-only executor;coordinator excluded"),json-node-pair("results",json-node-array(rows)),json-node-pair("overall_session_quality",json-node-null()),json-node-pair("frequency_and_resonance",json-node-null()),nsm-n("goal_complete",0)));
-   let retained = frss-frozen(frss-path(root,"summary.json"),json-emit(report));
+   let budget = if frss-provider-allowed(manifest) then fcaq-number(json-object-get(manifest,"provider"),"max_processes",0) else 0;
+   let state = frss-loop(root,manifest,node_children(json-object-get(manifest,"cases")),0,list(),budget,list());
+   let rows = head(state);
+   let report = json-node-object(list(nsm-s("schema","form-response-session-v1"),nsm-s("session",fcap-string(manifest,"session")),nsm-s("manifest_sha256",digest),nsm-s("evidence",root),nsm-n("cases",len(rows)),nsm-n("checked_behavior_passed",frss-status-count(rows,"native-only-success")),nsm-n("native_only_success",frss-status-count(rows,"native-only-success")),nsm-n("assisted_success",frss-status-count(rows,"assisted-success")),nsm-n("unresolved",frss-status-count(rows,"unresolved")),nsm-n("elapsed_ms",sub(now_unix_ms(),started)),nsm-n("provider_process_budget",budget),nsm-n("provider_processes_new",frss-process-count(rows)),nsm-n("rented_provider_calls",frss-process-count(rows)),nsm-n("provider_processes_remaining",nth(state,1)),json-node-pair("provider_usage_events",json-node-array(nth(state,2))),nsm-s("rented_basis","actual new response-resource processes;coordinator excluded"),nsm-s("attribution_basis","native results and failed checks retained;provider events deduplicated by usage_event;coordinator excluded"),json-node-pair("results",json-node-array(rows)),json-node-pair("overall_session_quality",json-node-null()),json-node-pair("frequency_and_resonance",json-node-null()),nsm-n("goal_complete",0)));
+   let retained = frsh-frozen(frsh-path(root,"summary.json"),json-emit(report));
    json-emit(report);
   }
  }
