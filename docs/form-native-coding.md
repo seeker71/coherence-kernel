@@ -82,6 +82,11 @@ Failure feedback distinguishes a tool failure from a successful check whose
 stdout differs. It names the tool and query arguments with the actual result;
 the caller's expected `stdout` is withheld. Review guidance keeps conditions for
 the requested decision separate from limits on broader claims.
+Its shared native function lives in
+[`form-cli-review-guidance.bml`](../form/form-stdlib/bml/form-cli-review-guidance.bml).
+The next action follows the supported current decision; broader evaluation
+becomes a prerequisite only when the supplied policy requires it. The guidance
+asks for source-backed requirements and thresholds.
 
 At each model admission, including checkpoint resume, the controller records
 the exact resident documents supplied in that context. A successful single-file
