@@ -68,6 +68,15 @@ it is not sent to repair unchanged source documents. Failed report assertions
 still enter the report-repair loop. Coding review rejections still enter
 implementation repair.
 
+After a failed report assertion, a read-only review may submit
+`{"report":<complete corrected report>}` immediately. The original source and
+report checks run again; this path preserves the read-only document boundary.
+The existing diagnosis/change/replan path remains available for deeper work.
+Failure feedback distinguishes a tool failure from a successful check whose
+stdout differs. It names the tool and query arguments with the actual result;
+the caller's expected `stdout` is withheld. Review guidance keeps conditions for
+the requested decision separate from limits on broader claims.
+
 Each completed model reply emits `form-code-reply` metadata: JSON validity,
 wrapper/tool presence, report type, before/after role and check/repair counts.
 It includes no answer text, prompt text or document content. These observations
