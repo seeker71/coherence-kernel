@@ -77,6 +77,16 @@ stdout differs. It names the tool and query arguments with the actual result;
 the caller's expected `stdout` is withheld. Review guidance keeps conditions for
 the requested decision separate from limits on broader claims.
 
+At each model admission, including checkpoint resume, the controller records
+the exact resident documents supplied in that context. A successful single-file
+`read` still executes. When its output equals a supplied document byte-for-byte,
+the model observation carries `stdout_reference` with its id, path, byte count
+and context scope. The original content remains in the model context and the
+caller-owned documents. Changed content, errors and reads without an admission
+snapshot return the full result. `cat` and focused queries remain available for
+another inspection. Source/report verification continues to use actual document
+bytes; it does not consume these model-context references.
+
 Each completed model reply emits `form-code-reply` metadata: JSON validity,
 wrapper/tool presence, report type, before/after role and check/repair counts.
 It includes no answer text, prompt text or document content. These observations
