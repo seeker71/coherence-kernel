@@ -68,6 +68,16 @@ optimizer, configuration and input data are content-bound. An interrupted round
 with a complete generation can finish assessment without repeating its update.
 All completed generations remain available; storage grows with experience.
 
+`nsl-loss-evidence(before, after, tolerance)` exposes the numeric comparison
+without changing learning state. Its JSON contains the supplied values,
+`allowed_after`, `strictly_improved` and `within_tolerance`. The last field uses
+the same comparator as `nsl-row-health`; identity checks remain in that executing
+boundary. Callers supply bound numeric observations and may add this derived
+evidence beside the original source when requesting a local explanation.
+The function computes arithmetic only: it supplies no promotion decision,
+quality verdict or replacement for missing usage. The decision remains subject
+to the caller's policy and the complete assessment bindings above.
+
 An unsuccessful attempt trains a contextual outcome: given the original problem
 and attempted answer, recall the result that was actually observed. The attempted
 answer is input data; the supervised completion is the outcome and evidence.
