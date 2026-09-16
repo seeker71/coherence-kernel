@@ -31,8 +31,9 @@ section [form.bml] {
   }
   def frr-intact(answer,events,process) = and(str_eq(fcam-hash(answer),fcap-string(process,"answer_sha256")),str_eq(fcam-hash(events),fcap-string(process,"usage_sha256")));
   def frr-lifecycle(checked,process) {
-   let released = and(str_eq(nsm-str(process,"state"),"finished"),and(eq(fcaq-number(process,"status",-1),0),str_eq(nsm-str(json-object-get(process,"cleanup"),"state"),"released")));
-   oh-set(oh-set(checked,"process_released",json-node-int(released)),"verified_repair",json-node-int(and(eq(nsm-num(checked,"verified_repair"),1),released)));
+   let released = and(str_eq(nsm-str(process,"state"),"finished"),str_eq(nsm-str(json-object-get(process,"cleanup"),"state"),"released"));
+   let succeeded = eq(fcaq-number(process,"status",-1),0);
+   oh-set(oh-set(checked,"process_released",json-node-int(released)),"verified_repair",json-node-int(and(eq(nsm-num(checked,"verified_repair"),1),and(released,succeeded))));
   }
   def frr-result(root,request,process,newProcess) {
    let job = fcap-string(process,"job");
@@ -60,7 +61,13 @@ section [form.bml] {
     if not(faj-valid(text)) then frr-pending(root,"process-record-incomplete;no-duplicate-call") else frr-result(root,request,parse-json("retained-resource-process",text),0);
    };
   }
-  def frr-execute(root,prompt,seconds) {
+  def frr-execute(root,prompt,seconds) = frr-execute-scoped(root,prompt,seconds,0);
+  // Explicit native tool sessions may write only their caller-owned evidence
+  // directory in addition to the isolated workspace. Ordinary calls keep the
+  // original sandbox scope. This does not make the repository writable.
+  def frr-execute-tool-session(root,prompt,seconds) = frr-execute-scoped(root,prompt,seconds,1);
+  def frr-command(work,output,writeRoot) = append(list("codex","exec","--sandbox","workspace-write","--ephemeral","--skip-git-repo-check","--ignore-user-config","--json","--cd",work),append(if str_eq(writeRoot,"") then list() else list("--add-dir",writeRoot),list("-o",output,"-")));
+  def frr-execute-scoped(root,prompt,seconds,toolSession) {
    let repo = fhn-root();
    let spool = fhn-at(repo,".form-heal");
    fs_mkdir(spool);
@@ -72,7 +79,8 @@ section [form.bml] {
    let input = frsh-path(job,"resource.prompt");
    let output = frsh-path(job,"resource.reply");
    frsh-frozen(input,prompt);
-   let status = fhn-run(job,"resource",seconds,"root",input,list("codex","exec","--sandbox","workspace-write","--ephemeral","--skip-git-repo-check","--ignore-user-config","--json","--cd",work,"-o",output,"-"));
+   let writeRoot = if toolSession then if fat-starts(root,"/") then root else fhn-at(repo,root) else "";
+   let status = fhn-run(job,"resource",seconds,"root",input,frr-command(work,output,writeRoot));
    let retainedAnswer = frsh-path(root,"provider-answer.json");
    let retainedUsage = frsh-path(root,"provider-events.jsonl");
    let answer = if fs-exists?(output) then read_file(output) else "";
