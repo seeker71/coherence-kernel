@@ -30,6 +30,10 @@ section [form.bml] {
   def fcap-report-source(s) = if ge(len(fcap-memory(s)),12) then nth(fcap-memory(s),11) else "submitted";
   def fcap-provenance(s,events,source) = fcap-with-memory(s,list(fcap-failures(s),fcap-evidence(s),fcap-reflections(s),fcap-checks(s),fcap-repeat(s),fcap-tool-history(s),fcap-mode(s),fcap-report(s),fcap-context-docs(s),fcap-context-instructions(s),events,source));
   def fcap-record-native(s,method,status,observation,source) = fcap-provenance(s,append(fcap-native-repairs(s),list(list(method,status,observation,fcap-checks(s)))),source);
+  // Exact reports and their own checker results stay paired. These records are
+  // returned to the caller, not automatically injected into model context.
+  def fcap-report-check-evidence(report,result) = list(report,if fcap-check-shape?(result) then result else list());
+  def fcap-record-native-evidence(s,method,status,observation,source,before,after) = fcap-provenance(s,append(fcap-native-repairs(s),list(list(method,status,observation,fcap-checks(s),before,after))),source);
   def fcap-begin-context(s) = fcap-with-memory(s,list(fcap-failures(s),fcap-evidence(s),fcap-reflections(s),fcap-checks(s),fcap-repeat(s),fcap-tool-history(s),fcap-mode(s),fcap-report(s),fcap-docs(s),list(fcap-work-instruction(s))));
   // Only a completed observation admits its instruction to this context.
   // Bootstrap always carries full instructions, including after resume.
@@ -156,18 +160,24 @@ section [form.bml] {
   def fcap-native-attempt(s,checker,failed) = if fcap-done(s) then s else {
    let callback = nth(checker,4);
    let proposal = callback(nth(checker,5),list(fcap-docs(s),fcap-report(s),nth(failed,1)));
-   let next = fcap-native-proposed(s,checker,proposal);
+   let next = fcap-native-proposed(s,checker,proposal,fcap-report-check-evidence(fcap-report(s),failed));
    // Native work stays inside this submitted turn; its checks have their own count.
    append(append(fat-take(next,9),list(fcap-turns(s))),fat-drop(next,10));
   };
   def fcap-native-shape(proposal) = if not(str_eq(value_kind(proposal),"list")) then 0 else if not(eq(len(proposal),4)) then 0 else and(or(value_eq(head(proposal),0),value_eq(head(proposal),1)),and(str_eq(value_kind(nth(proposal,1)),"string"),and(str_eq(value_kind(nth(proposal,2)),"string"),and(gt(str_len(nth(proposal,2)),0),str_eq(value_kind(nth(proposal,3)),"string")))));
-  def fcap-native-proposed(s,checker,proposal) = if not(fcap-native-shape(proposal)) then fcap-terminal(fcap-record-native(s,"caller-native-repair","malformed","native repair callback returned a malformed proposal",fcap-report-source(s)),"caller-native-repair-returned-malformed-proposal") else if not(head(proposal)) then fcap-record-native(s,nth(proposal,2),"declined",nth(proposal,3),fcap-report-source(s)) else if or(eq(str_len(fat-trim(nth(proposal,1))),0),str_eq(nth(proposal,1),fcap-report(s))) then fcap-record-native(s,nth(proposal,2),"unchanged",nth(proposal,3),fcap-report-source(s)) else fcap-native-recheck(fcap-count-check(fcap-with-report(s,nth(proposal,1))),checker,proposal);
-  def fcap-native-recheck(s,checker,proposal) {
+  def fcap-native-proposed(s,checker,proposal,before) = if not(fcap-native-shape(proposal)) then fcap-terminal(fcap-record-native-evidence(s,"caller-native-repair","malformed","native repair callback returned a malformed proposal",fcap-report-source(s),before,list()),"caller-native-repair-returned-malformed-proposal") else if not(head(proposal)) then fcap-record-native-evidence(s,nth(proposal,2),"declined",nth(proposal,3),fcap-report-source(s),before,list()) else if or(eq(str_len(fat-trim(nth(proposal,1))),0),str_eq(nth(proposal,1),fcap-report(s))) then fcap-record-native-evidence(s,nth(proposal,2),"unchanged",nth(proposal,3),fcap-report-source(s),before,list()) else fcap-native-recheck(fcap-count-check(fcap-with-report(s,nth(proposal,1))),checker,proposal,before);
+  def fcap-native-recheck(s,checker,proposal,before) {
    let checked = fcap-check-state(s,checker);
-   let observed = fcap-record-native(s,nth(proposal,2),if fcap-check-passed?(checked) then "accepted" else "rejected",nth(proposal,3),"caller-native-repair");
+   let observed = fcap-record-native-evidence(s,nth(proposal,2),if fcap-check-passed?(checked) then "accepted" else "rejected",nth(proposal,3),"caller-native-repair",before,fcap-report-check-evidence(fcap-report(s),checked));
    fcap-verified(observed,checked);
   }
-  def fcap-native-repairs-json(rows) = if nil?(rows) then list() else cons(json-node-object(list(json-node-pair("method",json-node-string(head(head(rows)))),json-node-pair("status",json-node-string(nth(head(rows),1))),json-node-pair("observation",json-node-string(nth(head(rows),2))),json-node-pair("check_runs",json-node-int(nth(head(rows),3))))),fcap-native-repairs-json(tail(rows)));
+  def fcap-native-evidence-json(row,index) = if or(le(len(row),index),nil?(nth(row,index))) then json-node-null() else {
+   let evidence = nth(row,index);
+   let result = nth(evidence,1);
+   let valid = fcap-check-shape?(result);
+   json-node-object(list(json-node-pair("report",json-node-string(head(evidence))),json-node-pair("check_status",json-node-string(if valid then "observed" else "malformed")),json-node-pair("check",if valid then json-node-object(list(json-node-pair("passed",json-node-int(head(result))),json-node-pair("observation",json-node-string(nth(result,1))))) else json-node-null())));
+  };
+  def fcap-native-repairs-json(rows) = if nil?(rows) then list() else cons(json-node-object(list(json-node-pair("method",json-node-string(head(head(rows)))),json-node-pair("status",json-node-string(nth(head(rows),1))),json-node-pair("observation",json-node-string(nth(head(rows),2))),json-node-pair("check_runs",json-node-int(nth(head(rows),3))),json-node-pair("before",fcap-native-evidence-json(head(rows),4)),json-node-pair("after",fcap-native-evidence-json(head(rows),5)))),fcap-native-repairs-json(tail(rows)));
   def fcap-verified(s, result) = if not(fcap-check-shape?(result)) then fcap-terminal(s, "caller-checker-returned-malformed-result") else if not(eq(head(result), 1)) then fcap-rework(s, str_concat("Native verification failed: ", nth(result, 1))) else fcap-note-at(s, "complete", nth(result, 1));
   def fcap-rework(s, reason) = fcap-repair-state(fcap-note-at(s, fcap-stage(s), reason), reason);
   def fcap-repair-state(s, reason) {
