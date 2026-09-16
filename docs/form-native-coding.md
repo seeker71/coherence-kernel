@@ -476,6 +476,8 @@ Decision-first guidance applies when the task asks for a decision. Originals,
 rejected candidates, proposed changes and verification results keep their own
 attribution when the model explains the evidence. These instructions guide
 generation; inspect the returned answer to establish whether it followed them.
+The shared guidance also keeps a format check's scope separate from behavioral
+verification, and a total attempt count separate from the final observed result.
 
 Review currently shares the same Qwen and context: **not independent-model
 validation**. Qwen weights remain unchanged; the shared native Llama adapter
