@@ -43,6 +43,27 @@ first door therefore does not claim autonomous arbitrary-repository completion.
 Multiple supplied documents and multiple ordered tasks are supported. Only paths
 in `writable` can change, and only during implementation.
 
+### Direct implementation entry
+
+For a fully specified task, set `"code_entry":"direct"`. A fresh coding
+session begins in implementation with one pending task referring to the original
+goal. The full goal is admitted in the model context and on resume; later tool
+observations carry that reference, including a reminder to complete explicitly
+requested tool calls. It does not generate separate refinement, planning and
+task-splitting replies first. Original documents, writable paths and caller checks remain
+authoritative. The brief and plan stay empty rather than claiming work that
+did not occur.
+
+The candidate still goes through model review and the caller's native checks.
+An unchanged candidate cannot complete. Failed checks retain the existing
+repair and replanning path. Omitting the field, or using `"staged"`, keeps the
+ordinary entry. The option applies to coding; review has its own
+`review_entry`. A resumed checkpoint retains its saved phase. Optional initial
+reasoning is independent of this entry choice.
+The controlled timing and source-quality observations are recorded in
+[`direct-code-entry`](../receipts/2026-09-16-direct-code-entry.md); fewer stages
+alone did not make the initial-reasoning variant faster.
+
 ### Read-only review
 
 Set `"mode":"review"`, keep `writable` empty, and supply both source `checks`
