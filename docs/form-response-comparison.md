@@ -23,7 +23,41 @@ arrival needs writable temporary/cache locations; a source-read-only task can
 still fail in a filesystem read-only sandbox. Such a failure consumed tokens
 and belongs in the comparison.
 
-## Provider usage
+## Native session runner
+
+`observe/form-cli-response-session-run.bml` owns multiple frozen assessments
+in one native invocation. Send the **manifest file path** on stdin:
+
+```sh
+form-run ./fkwu observe/form-cli-response-session-run.bml <<'EOF'
+.hearth/my-response-session.json
+EOF
+```
+
+The manifest has `session` and a nonempty `cases` array. Each case has a unique
+`id` and a `request` using the existing native coding/review schema. Every
+request must set `evaluation: 1`; recall, checkpoint resume, LoRA proposals
+and training from assessment answers remain excluded.
+
+Before generation, the runner retains the manifest and each request. Each
+attempt gets a separate directory under `.hearth/response-sessions/`. It saves
+the actual result and independently re-runs source/report assertions, checks
+document preservation and allowed writes, and requires completed execution
+with model release before calling the checked behavior successful. A failed
+case remains in the results and does not silently disappear from the session.
+
+Receipts include request digests, elapsed time, generated/injected token IDs,
+and the native executor's provider-call count. Organ observations expose actual
+case outcomes. The final summary leaves semantic quality and frequency
+unassessed: its assertion tally is not overall session parity. A successful
+runner exit means the assessment was retained, not that every case passed.
+Coordinating and baseline provider costs remain separate, using the reader below.
+
+The ordinary `code` door also accepts `@request.json` to preserve requests
+larger than the host line buffer. A failed input admission is retained as an
+attempt; it does not establish anything about the model's response quality.
+
+## Provider usage records
 
 Send the owned Codex stdout path as one stdin line:
 

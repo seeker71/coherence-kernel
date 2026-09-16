@@ -16,7 +16,15 @@ Ollama. Do not use that spelling to request this native-only workflow.
 
 In form-cli, enter `code` followed by a JSON object. The standalone native door
 is `form-run ./fkwu observe/form-cli-code-run.fk`; send that same JSON object as
-one stdin line, without the `code` prefix. For example:
+one stdin line, without the `code` prefix.
+
+For larger requests, use `code @request.json`, or send `@request.json` as the
+standalone door's stdin line. This reads the complete native file before JSON
+admission. The host line reader returns at most 8,191 bytes per call; passing a
+large inline JSON request through that reader loses the remainder before
+admission. The file-backed route preserves the existing request-size checks
+and needs no additional runtime. For example, this request may be passed inline
+or saved to a file:
 
 ```json
 {"goal":"Enable local coding in config.json. Preserve provider and remote.","documents":[{"id":"config","path":"config.json","text":"{\"enabled\":false,\"provider\":\"native-qwen\",\"remote\":false}\n"}],"writable":["config.json"],"checks":[{"tool":"jq","arguments":[".enabled","config.json"],"stdout":"true\n"},{"tool":"jq","arguments":["-r",".provider","config.json"],"stdout":"native-qwen\n"},{"tool":"jq","arguments":[".remote","config.json"],"stdout":"false\n"}],"model":"qwen38-q8","context":8192,"turns":64}
@@ -46,11 +54,28 @@ refused rather than silently replacing the report. Exit zero, empty diagnostics
 and exact stdout are required. These checks establish only their assertions;
 extracting configuration fields is not a benchmark of code-review quality.
 
-The final review-role reply is
-`{"verdict":"accept","report":"evidence-backed findings"}`. Here `accept`
-submits the report for checking; it does not declare that the audited source
-passed. Negative findings belong in the report. `reject` with a `reason` means
-continue inspection. Read-only restrictions apply in every role, including repair.
+Read-only review accepts the requested JSON report object directly. The older
+`{"verdict":"accept","report":"evidence-backed findings"}` wrapper remains
+available, and its `report` may also be an object or array. Every form reaches
+the same caller-owned report checks. Here `accept` submits the report for
+checking; it does not declare that the audited source passed. Negative findings
+belong in the report. `reject` with a `reason` means continue inspection.
+Read-only restrictions apply in every role, including repair.
+
+A rejected read-only review retains its finding in the review stage. The
+model may inspect further or submit a report containing negative findings;
+it is not sent to repair unchanged source documents. Failed report assertions
+still enter the report-repair loop. Coding review rejections still enter
+implementation repair.
+
+Each completed model reply emits `form-code-reply` metadata: JSON validity,
+wrapper/tool presence, report type, before/after role and check/repair counts.
+It includes no answer text, prompt text or document content. These observations
+separate protocol handling from the candidate's semantic quality.
+The actual completed model reply is retained separately beneath the private
+hearth's `code-memory/replies/` directory. `reply_evidence` points to it, or is
+null when retention failed. This is diagnostic evidence, never a verified
+training target. Reply contents are not placed in the framebuffer.
 
 `model` defaults to `qwen38-q8`, `context` to 8192 positions, and `turns` to 64
 model replies. Both Qwen registry rows require actual artifacts, seals, tokenizer
