@@ -26,6 +26,10 @@ section [form.bml] {
   // including checkpoint resume; source edits do not update it implicitly.
   def fcap-context-docs(s) = if ge(len(fcap-memory(s)),9) then nth(fcap-memory(s),8) else list();
   def fcap-context-instructions(s) = if ge(len(fcap-memory(s)),10) then nth(fcap-memory(s),9) else list();
+  def fcap-native-repairs(s) = if ge(len(fcap-memory(s)),11) then nth(fcap-memory(s),10) else list();
+  def fcap-report-source(s) = if ge(len(fcap-memory(s)),12) then nth(fcap-memory(s),11) else "submitted";
+  def fcap-provenance(s,events,source) = fcap-with-memory(s,list(fcap-failures(s),fcap-evidence(s),fcap-reflections(s),fcap-checks(s),fcap-repeat(s),fcap-tool-history(s),fcap-mode(s),fcap-report(s),fcap-context-docs(s),fcap-context-instructions(s),events,source));
+  def fcap-record-native(s,method,status,observation,source) = fcap-provenance(s,append(fcap-native-repairs(s),list(list(method,status,observation,fcap-checks(s)))),source);
   def fcap-begin-context(s) = fcap-with-memory(s,list(fcap-failures(s),fcap-evidence(s),fcap-reflections(s),fcap-checks(s),fcap-repeat(s),fcap-tool-history(s),fcap-mode(s),fcap-report(s),fcap-docs(s),list(fcap-work-instruction(s))));
   // Only a completed observation admits its instruction to this context.
   // Bootstrap always carries full instructions, including after resume.
@@ -36,7 +40,7 @@ section [form.bml] {
    let reference = "Continue the supplied instructions for this role and the original caller requirements.";
    if and(fat-has(fcap-context-instructions(s),full),lt(str_len(reference),str_len(full))) then reference else full;
   }
-  def fcap-with-report(s, report) = fcap-with-memory(s, append(fat-take(fcap-memory(s), 7), list(report)));
+  def fcap-with-report(s, report) = fcap-provenance(fcap-with-memory(s, append(fat-take(fcap-memory(s), 7), list(report))),fcap-native-repairs(s),"submitted");
   def fcap-inherit(s, next) = append(fat-take(fcap-with-memory(next, fcap-memory(s)), 13), if ge(len(s), 14) then list(nth(s, 13)) else list());
   def fcap-failures(s) = head(fcap-memory(s));
   def fcap-evidence(s) = nth(fcap-memory(s), 1);
@@ -144,7 +148,26 @@ section [form.bml] {
   // A review checker receives [documents, report]; a coding checker retains
   // its original documents-only signature. Neither is supplied by the model.
   def fcap-check-state(s, checker) = fcap-check(head(checker), nth(checker, 1), if fcap-reviewing(s) then list(fcap-docs(s), fcap-report(s)) else fcap-docs(s));
-  def fcap-submit(s, checker) = fcap-verified(fcap-count-check(s), fcap-check-state(s, checker));
+  def fcap-submit(s, checker) = fcap-submitted(fcap-count-check(s),checker,fcap-check-state(s,checker));
+  // Optional checker entries 4/5 are a caller-owned native repair callback and
+  // contract. The model cannot supply either. One attempt per failed submission;
+  // every changed report runs the original complete checker again.
+  def fcap-submitted(s,checker,result) = if and(fcap-reviewing(s),and(ge(len(checker),6),and(fcap-check-shape?(result),not(head(result))))) then fcap-native-attempt(fcap-verified(s,result),checker,result) else fcap-verified(s,result);
+  def fcap-native-attempt(s,checker,failed) = if fcap-done(s) then s else {
+   let callback = nth(checker,4);
+   let proposal = callback(nth(checker,5),list(fcap-docs(s),fcap-report(s),nth(failed,1)));
+   let next = fcap-native-proposed(s,checker,proposal);
+   // Native work stays inside this submitted turn; its checks have their own count.
+   append(append(fat-take(next,9),list(fcap-turns(s))),fat-drop(next,10));
+  };
+  def fcap-native-shape(proposal) = if not(str_eq(value_kind(proposal),"list")) then 0 else if not(eq(len(proposal),4)) then 0 else and(or(value_eq(head(proposal),0),value_eq(head(proposal),1)),and(str_eq(value_kind(nth(proposal,1)),"string"),and(str_eq(value_kind(nth(proposal,2)),"string"),and(gt(str_len(nth(proposal,2)),0),str_eq(value_kind(nth(proposal,3)),"string")))));
+  def fcap-native-proposed(s,checker,proposal) = if not(fcap-native-shape(proposal)) then fcap-terminal(fcap-record-native(s,"caller-native-repair","malformed","native repair callback returned a malformed proposal",fcap-report-source(s)),"caller-native-repair-returned-malformed-proposal") else if not(head(proposal)) then fcap-record-native(s,nth(proposal,2),"declined",nth(proposal,3),fcap-report-source(s)) else if or(eq(str_len(fat-trim(nth(proposal,1))),0),str_eq(nth(proposal,1),fcap-report(s))) then fcap-record-native(s,nth(proposal,2),"unchanged",nth(proposal,3),fcap-report-source(s)) else fcap-native-recheck(fcap-count-check(fcap-with-report(s,nth(proposal,1))),checker,proposal);
+  def fcap-native-recheck(s,checker,proposal) {
+   let checked = fcap-check-state(s,checker);
+   let observed = fcap-record-native(s,nth(proposal,2),if fcap-check-passed?(checked) then "accepted" else "rejected",nth(proposal,3),"caller-native-repair");
+   fcap-verified(observed,checked);
+  }
+  def fcap-native-repairs-json(rows) = if nil?(rows) then list() else cons(json-node-object(list(json-node-pair("method",json-node-string(head(head(rows)))),json-node-pair("status",json-node-string(nth(head(rows),1))),json-node-pair("observation",json-node-string(nth(head(rows),2))),json-node-pair("check_runs",json-node-int(nth(head(rows),3))))),fcap-native-repairs-json(tail(rows)));
   def fcap-verified(s, result) = if not(fcap-check-shape?(result)) then fcap-terminal(s, "caller-checker-returned-malformed-result") else if not(eq(head(result), 1)) then fcap-rework(s, str_concat("Native verification failed: ", nth(result, 1))) else fcap-note-at(s, "complete", nth(result, 1));
   def fcap-rework(s, reason) = fcap-repair-state(fcap-note-at(s, fcap-stage(s), reason), reason);
   def fcap-repair-state(s, reason) {

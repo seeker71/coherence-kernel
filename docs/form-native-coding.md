@@ -425,6 +425,50 @@ This is a targeted search strategy, not unrestricted program synthesis.
 additional input values, budget exhaustion, malformed checks, missing roles,
 unchanged source and escaped/unicode source rendering.
 
+### Attach native repair to the review loop
+
+An embedding caller may append a native repair callback and its immutable
+contract to the four-entry review checker:
+
+```text
+checker = list(report-checker, report-contract, source-checker, source-contract,
+               native-repair, repair-contract)
+```
+
+After a valid failed report check, the controller retains that failure and calls
+`native-repair(repair-contract, list(documents, report, actual-failure))` once.
+The callback returns `list(available, proposed-report, method, observation)`:
+`available` is 0 or 1; the other entries are strings, with a nonempty method.
+It may use `fcrs-search` or another caller-owned native capability. The caller
+must update any explanation or related claims made stale by a changed proposal.
+
+A changed, nonempty report runs the original complete checker again. Passing
+is required for completion. A failed native candidate returns to ordinary
+repair without recursively invoking the callback; declining or returning the
+same report preserves the existing failure. Malformed checker/proposal results
+cannot approve a report. The hook does not run for passing reports or coding
+mode. Model JSON cannot install or replace it; ordinary JSON requests retain
+their existing behavior.
+
+Results expose `report_source` and `native_repairs`. Each native event records
+method, outcome, caller observation and controller check count. A later submitted
+report resets its own attribution while preserving the native attempt history.
+Context renewal and binary continuity preserve those records. Nested search
+checks remain the native callback's observations, distinct from the controller's
+whole-checker count. Callback execution and its side effects are caller-owned.
+Native work remains inside the submitted turn and does not consume another
+model-turn allowance; its verification runs and provenance are counted separately.
+
+`tests/form-cli-native-review-repair-band.fk` exercises successful and failed
+repair, declines, unchanged proposals, malformed results, source preservation,
+attribution, result projection and binary continuity without loading a model.
+
+Review guidance follows the caller's requested report fields and value types.
+Decision-first guidance applies when the task asks for a decision. Originals,
+rejected candidates, proposed changes and verification results keep their own
+attribution when the model explains the evidence. These instructions guide
+generation; inspect the returned answer to establish whether it followed them.
+
 Review currently shares the same Qwen and context: **not independent-model
 validation**. Qwen weights remain unchanged; the shared native Llama adapter
 learns asynchronously from observed outcomes. The loop does not assert rented-model
