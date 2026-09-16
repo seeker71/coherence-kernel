@@ -6,10 +6,15 @@ section [form.bml] {
   def frsy-members-valid(members) = if nil?(members) then 1 else and(str_eq(fcaq-mode(json-object-get(head(members),"request")),"review"),frsy-members-valid(tail(members)));
   def frsy-valid(manifest) = and(frss-valid(manifest),and(frsy-members-valid(node_children(json-object-get(manifest,"cases"))),and(frss-provider-allowed(manifest),frr-provider-valid(json-object-get(manifest,"provider")))));
   def frsy-sources(members) = if nil?(members) then 1 else and(eq(head(frr-source(json-object-get(head(members),"request"))),1),frsy-sources(tail(members)));
+  def frsy-source-pairs(request) = if not(str_eq(fcaq-document-context(request),"catalog")) then list(json-node-pair("documents",json-object-get(request,"documents"))) else {
+   let docs = fat-wire-value(fat-wire-documents(request));
+   let queries = fcap-source-query-rows(node_children(json-object-get(request,"source_queries")));
+   list(nsm-s("document_context","catalog"),json-node-pair("source_catalog",json-node-array(fcap-document-catalog(docs))),json-node-pair("source_observations",json-node-array(fcap-source-observations(docs,queries))),nsm-s("source_scope","Only the supplied native read-only observations are visible here. They may be partial excerpts. Preserve query failures and missing facts; do not claim to have read unseen source text. This bounded call has no further tool access. Full originals remain with Form for unchanged source/report checks."));
+  };
   def frsy-packet(members) = if nil?(members) then list() else {
    let member = head(members);
    let request = json-object-get(member,"request");
-   cons(json-node-object(list(nsm-s("id",fcap-string(member,"id")),nsm-s("request_sha256",fcam-hash(json-emit(request))),json-node-pair("goal",json-object-get(request,"goal")),json-node-pair("documents",json-object-get(request,"documents")),nsm-n("native_source_verification_passed",1))),frsy-packet(tail(members)));
+   cons(json-node-object(append(list(nsm-s("id",fcap-string(member,"id")),nsm-s("request_sha256",fcam-hash(json-emit(request))),json-node-pair("goal",json-object-get(request,"goal"))),append(frsy-source-pairs(request),list(nsm-n("native_source_verification_passed",1))))),frsy-packet(tail(members)));
   };
   def frsy-prompt(manifest) = str_concat("Form requests one bounded response for the supplied read-only tasks. Form has already verified each task's source assertions. Use the supplied goals and source documents, preserving their scope. No prior answers or expected report assertions are supplied. No tools, repository exploration, file changes, additional model calls or training are needed. Return exactly one JSON object with a results array containing one {id,report} object for each supplied id; each report is the complete JSON object requested by that task. No markdown fences or surrounding prose. Keep each report complete, warm, specific, faithful to the sources and useful in its next action. Form will recheck the unchanged source and report assertions.\n",json-emit(json-node-object(list(json-node-pair("cases",json-node-array(frsy-packet(node_children(json-object-get(manifest,"cases")))))))));
   def frsy-find(rows,id) = if nil?(rows) then json-node-null() else if str_eq(fcap-string(head(rows),"id"),id) then head(rows) else frsy-find(tail(rows),id);
@@ -44,6 +49,10 @@ section [form.bml] {
    and(or(str_eq(kind,""),str_eq(kind,"agent_message")),frsy-no-tools(tail(lines)));
   };
   def frsy-brief(status,root) = json-node-object(list(nsm-s("schema","form-response-synthesis-v1"),nsm-s("status",status),nsm-s("evidence",root),nsm-n("provider_processes_new",0),nsm-n("checked",0)));
+  def frsy-has-catalog(members) = if nil?(members) then 0 else or(str_eq(fcaq-document-context(json-object-get(head(members),"request")),"catalog"),frsy-has-catalog(tail(members)));
+  // Older synthesis sent full sources even for catalog requests. A selected
+  // packet therefore owns a distinct replay identity, including actual views.
+  def frsy-identity(manifest,text,prompt) = if frsy-has-catalog(node_children(json-object-get(manifest,"cases"))) then fcam-hash(json-emit(json-node-array(list(json-node-string(text),json-node-string(prompt))))) else fcam-hash(text);
   def frsy-result(root,manifest,process,newProcess) {
    let answer = read_file(fcap-string(process,"answer_path"));
    let events = read_file(fcap-string(process,"usage_path"));
@@ -65,11 +74,12 @@ section [form.bml] {
    let process = frsh-path(root,"process.json");
    if not(fs-exists?(retained)) then frsy-brief("claim-pending",root) else if not(str_eq(read_file(retained),text)) then frsy-brief("retained-manifest-differs",root) else if not(fs-exists?(process)) then frsy-brief("process-unresolved;inspect-owned-evidence;no-duplicate-call",root) else if not(faj-valid(read_file(process))) then frsy-brief("process-record-incomplete;no-duplicate-call",root) else frsy-result(root,manifest,parse-json("synthesis-process",read_file(process)),0);
   }
-  def frsy-held(root,manifest,text) {
+  def frsy-held(root,manifest,text,prompt) {
    frsh-frozen(frsh-path(root,"manifest.json"),text);
+   frsh-frozen(frsh-path(root,"prompt.txt"),prompt);
    let action = fcap-control(now_unix_ms(),list("native-source-verified","provider-synthesis"),2);
    if not(eq(action,2)) then form_error("synthesis control did not correlate; claim retained") else 0;
-   let process = frr-execute(root,frsy-prompt(manifest),fcaq-number(json-object-get(manifest,"provider"),"seconds",0));
+   let process = frr-execute(root,prompt,fcaq-number(json-object-get(manifest,"provider"),"seconds",0));
    frsy-result(root,manifest,process,1);
   }
   def frsy-run(manifest) {
@@ -80,8 +90,10 @@ section [form.bml] {
     fs-mkdir(fs-path-dirname(fs-path-dirname(home)));
     fs-mkdir(fs-path-dirname(home));
     fs-mkdir(home);
-    let root = frsh-path(home,fcam-hash(text));
-    if eq(host_dir_mkdir(root),1) then frsy-held(root,manifest,text) else frsy-remembered(root,manifest,text);
+    let prompt = frsy-prompt(manifest);
+    if gt(str_len(prompt),FatMaxBytes()) then form_error("synthesis provider prompt oversized") else 0;
+    let root = frsh-path(home,frsy-identity(manifest,text,prompt));
+    if eq(host_dir_mkdir(root),1) then frsy-held(root,manifest,text,prompt) else frsy-remembered(root,manifest,text);
    };
   }
   def frsy-text(text) = if or(gt(str_len(text),FatMaxBytes()),not(faj-valid(text))) then frsy-brief("invalid-or-oversized-synthesis-manifest","") else frsy-run(parse-json("synthesis-manifest",text));
