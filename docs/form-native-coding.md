@@ -135,6 +135,21 @@ instruction about the paired evidence and verified proposal. These are generatio
 instructions; their effects must be checked in the returned answer and are not
 established by passing report-field checks.
 
+The JSON review door now normalizes exact `"yes"`, `"no"`, `"true"` and
+`"false"` string literals when a caller-owned check expects a boolean result
+from one root field. `form-cli-boolean-report.bml` uses only that result type;
+it never chooses a truth value from the expected assertion. All original source
+and report checks run again. A contrary decision stays failed, and native repair
+history attributes accepted normalization as `caller-native-repair`. Other
+fields and source documents retain their values. Missing values, numeric 0/1,
+null, ambiguous text, duplicate root keys and unsupported query shapes are
+left alone. This changes representation, not the answer's prose or reasoning.
+`fcaq-live-checker` installs this behavior in the ordinary JSON request path;
+the four-element `fcaq-checker` contract remains available to embedding callers
+that attach their own repair. Type-mismatch feedback separately names expected
+and actual JSON types when both outputs are valid JSON, while keeping expected
+values hidden. Neither mechanism establishes semantic quality.
+
 Caller-owned native repair can restore an exact source quotation when a model
 has changed only its ASCII whitespace. The pure helper
 `fcqe-restore(source, quote, maxBytes)` in
