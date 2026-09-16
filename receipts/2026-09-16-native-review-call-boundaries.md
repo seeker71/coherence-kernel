@@ -46,9 +46,12 @@ budget check, and retained the distinction between this observation and a
 universal speed or quality claim. It no longer named a nonexistent function or
 assigned model-input delivery to telemetry.
 
-This is one observed improvement. The explanation still gives less detail than
-the provider baseline about preserving checkpoint and offline termination paths
-through `fcac-loop`. The abstract fixture counter measures controlled behavior;
+This is one observed improvement. The explanation does not explicitly discuss
+checkpoint and offline termination paths through `fcac-loop`. Correction after
+directly rereading the retained baseline: that baseline also leaves those paths
+implicit; the earlier claim that it explicitly explained them was too strong.
+Both proposals preserve the loop and pass the stronger behavior checks.
+The abstract fixture counter measures controlled behavior;
 it does not measure production token delivery or physical cache rollback. The
 added evidence and scope wording changed together. Their individual effects
 were not isolated. The detailed run took 10466 ms longer; no throughput gain or
