@@ -237,6 +237,18 @@ Catalog mode currently accepts reviews only. A smaller initial prompt is a
 measurable resource change; answer quality and total session time still need
 observation, including subsequent source reads.
 
+Bounded read-only provider synthesis (`form-cli-response-synthesis.bml`) also
+honors `document_context="catalog"` and these `source_queries`. Form retains
+and checks the complete original request. The provider receives the document
+catalog, actual native query outputs with exit/status evidence, and an explicit
+partial-visibility statement. It has no further tool access in this lane, so
+the caller must select enough evidence for the enquiry; missing facts remain
+missing. Query failures are preserved, never promoted into successful reads.
+Full-document requests keep their existing packet and replay identity. Catalog
+requests bind replay identity to the exact provider prompt, so an older
+full-document admission cannot masquerade as a selected-source run. New
+admissions retain that exact prompt alongside the original manifest.
+
 Native embedding callers can request one follow-up before releasing a review's
 model through `bml/form-cli-review-followup.bml`:
 
