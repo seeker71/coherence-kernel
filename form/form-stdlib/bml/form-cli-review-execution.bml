@@ -1,0 +1,44 @@
+// Execute an expression-bodied BML proposal against caller-owned native bindings.
+// The complete grammar tree is admitted before any binding runs. Model text
+// cannot add a binding, recurse, mutate documents or select a host operation.
+// Bindings are [name, arity, callback]; callback(args) returns [ok,value,reason].
+// Callers own the purity, behavior and cost of those explicit callbacks.
+// preludes: form-stdlib/bml/form-cli-code-policy.bml form-stdlib/form-bml-lower.fk
+section [form.bml] {
+ class FormCliReviewExecution {
+  def fcre-ok(value) = list(1,value,"");
+  def fcre-no(reason) = list(0,nothing(),reason);
+  def fcre-find(rows,name) = if nil?(rows) then list() else if str_eq(head(head(rows)),name) then head(rows) else fcre-find(tail(rows),name);
+  def fcre-literal(n) = or(eq(node_type(n),node_type(intern_trivial_int(0))),or(eq(node_type(n),node_type(intern_trivial_string(""))),eq(node_type(n),node_type(intern_trivial_bool(0)))));
+  def fcre-unique(names,seen) = if nil?(names) then 1 else if fat-has(seen,head(names)) then 0 else fcre-unique(tail(names),cons(head(names),seen));
+  def fcre-call-name(n) = node_value(head(node_children(head(node_children(n)))));
+  def fcre-valid(n,names,bindings,depth) = if le(depth,0) then 0 else if fcre-literal(n) then 1 else if fbl-is?(n,"ident") then and(eq(len(node_children(n)),1),fat-has(names,node_value(head(node_children(n))))) else if fbl-is?(n,"if") then and(eq(len(node_children(n)),3),fcre-valid-list(node_children(n),names,bindings,sub(depth,1))) else if fbl-is?(n,"fncall") then fcre-valid-call(n,names,bindings,depth) else 0;
+  def fcre-valid-list(ns,names,bindings,depth) = if nil?(ns) then 1 else and(fcre-valid(head(ns),names,bindings,depth),fcre-valid-list(tail(ns),names,bindings,depth));
+  def fcre-valid-call(n,names,bindings,depth) {
+   let kids = node_children(n);
+   if nil?(kids) then 0 else if not(fbl-is?(head(kids),"ident")) then 0 else {
+    let binding = fcre-find(bindings,fcre-call-name(n));
+    if nil?(binding) then 0 else and(eq(len(tail(kids)),nth(binding,1)),fcre-valid-list(tail(kids),names,bindings,sub(depth,1)));
+   };
+  }
+  def fcre-prepare(source,name,arity,bindings) = if or(eq(str_len(source),0),gt(str_len(source),65536)) then fcre-no("proposal-source-size-refused") else fcre-prepare-tree(g-parse-full(form-bml-grammar(),source),name,arity,bindings);
+  def fcre-prepare-tree(tree,name,arity,bindings) = if nothing?(tree) then fcre-no("proposal-requires-one-complete-expression-definition") else if not(fbl-is?(tree,"fndef")) then fcre-no("proposal-definition-absent") else {
+   let kids = node_children(tree);
+   let names = fbl-names(node_children(nth(kids,1)));
+   if not(and(str_eq(node_value(head(kids)),name),eq(len(names),arity))) then fcre-no("proposal-name-or-arity-mismatch") else if not(fcre-unique(names,list())) then fcre-no("proposal-duplicate-parameter") else if not(fcre-valid(nth(kids,2),names,bindings,64)) then fcre-no("proposal-outside-caller-bound-expression-lane") else fcre-ok(list(names,nth(kids,2),bindings));
+  };
+  def fcre-env(names,args) = if nil?(names) then list() else cons(list(head(names),head(args)),fcre-env(tail(names),tail(args)));
+  def fcre-run(prepared,args,bindings) = if not(head(prepared)) then prepared else if not(value_eq(nth(nth(prepared,1),2),bindings)) then fcre-no("proposal-binding-contract-changed") else if not(eq(len(args),len(head(nth(prepared,1))))) then fcre-no("proposal-call-arity-mismatch") else fcre-eval(nth(nth(prepared,1),1),fcre-env(head(nth(prepared,1)),args),bindings);
+  def fcre-eval(n,env,bindings) = if fcre-literal(n) then fcre-ok(node_value(n)) else if fbl-is?(n,"ident") then fcre-ok(nth(fcre-find(env,node_value(head(node_children(n)))),1)) else if fbl-is?(n,"if") then fcre-if(node_children(n),env,bindings,fcre-eval(head(node_children(n)),env,bindings)) else fcre-call(fcre-find(bindings,fcre-call-name(n)),fcre-args(tail(node_children(n)),env,bindings));
+  def fcre-if(kids,env,bindings,condition) = if not(head(condition)) then condition else fcre-eval(if nth(condition,1) then nth(kids,1) else nth(kids,2),env,bindings);
+  def fcre-args(ns,env,bindings) = if nil?(ns) then fcre-ok(list()) else fcre-arg-next(ns,env,bindings,fcre-eval(head(ns),env,bindings));
+  def fcre-arg-next(ns,env,bindings,value) = if not(head(value)) then value else fcre-arg-tail(value,fcre-args(tail(ns),env,bindings));
+  def fcre-arg-tail(value,rest) = if not(head(rest)) then rest else fcre-ok(cons(nth(value,1),nth(rest,1)));
+  def fcre-call(binding,args) = if not(head(args)) then args else {
+   let callback = nth(binding,2);
+   let result = callback(nth(args,1));
+   if not(str_eq(value_kind(result),"list")) then fcre-no("caller-binding-returned-malformed-result") else if not(eq(len(result),3)) then fcre-no("caller-binding-returned-malformed-result") else if not(and(or(value_eq(head(result),0),value_eq(head(result),1)),str_eq(value_kind(nth(result,2)),"string"))) then fcre-no("caller-binding-returned-malformed-result") else result;
+  };
+ }
+ 0;
+}
