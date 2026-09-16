@@ -453,6 +453,14 @@ their existing behavior.
 Results expose `report_source` and `native_repairs`. Each native event records
 method, outcome, caller observation and controller check count. A later submitted
 report resets its own attribution while preserving the native attempt history.
+Each new event also pairs the exact prior report with its original failed check
+under `before`, and a changed native report with its own check under `after`.
+A declined or unchanged proposal has no `after` check. Older events expose null
+evidence instead of reconstructing a history they did not retain. Malformed
+checker output is explicitly marked, with no valid check asserted. These records
+are returned to the caller and preserved in continuity; they are not automatically
+added to model feedback. A caller preparing an explanation can select the relevant
+records while keeping each observation attached to the report it actually checked.
 Context renewal and binary continuity preserve those records. Nested search
 checks remain the native callback's observations, distinct from the controller's
 whole-checker count. Callback execution and its side effects are caller-owned.
