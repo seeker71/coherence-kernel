@@ -64,6 +64,19 @@ The controlled timing and source-quality observations are recorded in
 [`direct-code-entry`](../receipts/2026-09-16-direct-code-entry.md); fewer stages
 alone did not make the initial-reasoning variant faster.
 
+### Resident instruction context
+
+Within one resident model context, repeated role instructions may be replaced
+by a shorter reference to the instructions already supplied. The full text
+enters at bootstrap and when a role's exact instruction is first encountered.
+The controller records a later instruction only after its observation has
+completed successfully. A failed or partial observation does not mark it as
+delivered. A resumed admission resets that record and supplies the current
+role's full instruction again. Tool results, failure evidence, pending work and
+caller constraints retain their existing paths.
+The measured coding and review pairs are recorded in
+[`resident-instruction-context`](../receipts/2026-09-16-resident-instruction-context.md).
+
 ### Read-only review
 
 Set `"mode":"review"`, keep `writable` empty, and supply both source `checks`
