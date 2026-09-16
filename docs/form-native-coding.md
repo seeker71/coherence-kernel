@@ -13,8 +13,10 @@ The existing `heal ... local` command is a different route: it still permits
 Ollama. Do not use that spelling to request this native-only workflow.
 
 A caller can separately offer the optional [response resource](form-response-resource.md)
-for a retained, failing read-only report. Form owns that provider CLI process,
-usage receipt and unchanged assertions.
+for a retained, failing read-only report, either through its standalone door or
+as a bounded session-manifest allowance. Form owns that provider CLI process,
+usage receipt and unchanged assertions. This does not add a fallback to the
+native `code` controller itself.
 
 ## Call without knowing Form syntax
 

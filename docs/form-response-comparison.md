@@ -39,6 +39,30 @@ The manifest has `session` and a nonempty `cases` array. Each case has a unique
 request must set `evaluation: 1`; recall, checkpoint resume, LoRA proposals
 and training from assessment answers remain excluded.
 
+The native-only shape is unchanged: omit `provider`. A caller may instead offer
+one session-level resource shared across cases:
+
+```json
+{
+  "session": "frozen-review-set",
+  "provider": {
+    "allowed": true,
+    "interface": "codex-exec",
+    "max_processes": 2,
+    "seconds": 180
+  },
+  "cases": [
+    {"id": "review-one", "request": {"mode": "review", "evaluation": 1}}
+  ]
+}
+```
+
+The abbreviated request only shows placement; each request still needs the
+complete coding/review schema. The session admits at most eight processes, and
+each selected repair receives a one-process resource derived from this
+caller-owned allowance. Case/model output cannot create or enlarge it. Missing
+or `allowed:false` permission leaves every case native-only.
+
 Before generation, the runner retains the manifest and each request. Each
 attempt gets a separate directory under `.hearth/response-sessions/`. It saves
 the actual result and independently re-runs source/report assertions, checks
@@ -46,9 +70,22 @@ document preservation and allowed writes, and requires completed execution
 with model release before calling the checked behavior successful. A failed
 case remains in the results and does not silently disappear from the session.
 
-Receipts include request digests, elapsed time, generated/injected token IDs,
-and the native executor's provider-call count. Organ observations expose actual
-case outcomes. The final summary leaves semantic quality and frequency
+Only a failed read-only review can use the optional resource: source assertions
+must pass, returned documents must remain unchanged, the local model must be
+released, and the nonempty local report must be retained first. Passing reviews,
+code cases, source failures, changed documents, missing reports and release
+failures do not call a provider. Eligible cases consume the shared allowance
+only when a new provider process actually starts. The existing response-resource
+authority owns execution, verification, release checking and replay prevention.
+
+Receipts preserve the complete native `result.json`, its failed checks, native
+elapsed time and generated/injected token IDs. Provider assistance is a separate
+object with its true source, evidence, elapsed time, usage event and new-process
+count; it never changes the original result or labels it native success. Cases
+are summarized as `native-only-success`, `assisted-success` or `unresolved`.
+The session reports total new provider processes and one actual usage record per
+stable `usage_event`, so replayed evidence is not added twice. Organ observations
+expose actual case outcomes. The final summary leaves semantic quality and frequency
 unassessed: its assertion tally is not overall session parity. A successful
 runner exit means the assessment was retained, not that every case passed.
 Coordinating and baseline provider costs remain separate, using the reader below.
