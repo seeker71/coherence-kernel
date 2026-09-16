@@ -112,7 +112,10 @@ model replies. Both Qwen registry rows require actual artifacts, seals, tokenize
 indexes, tokenizer crystals and a wired native session lane. Actual digest verification happens on
 admission. Missing resources never select another provider. Context or caller
 budget exhaustion returns `attention` with candidate values retained; partial
-generation is never accepted as a completed action. This door releases its
+generation is never accepted as a completed action. After the last permitted
+reply, the controller checks that allowance before injecting another model
+observation. It retains the candidate and uses the existing stop path. An
+already-complete result still completes normally. This door releases its
 model on completion; it is not a long-lived shared hearth service.
 
 ## Roles and tools
