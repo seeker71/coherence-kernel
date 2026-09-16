@@ -1,6 +1,8 @@
 ; Real Metal dispatch against independent per-token lane dispatches.
 ; Q4_K/Q6_K/Q8_0 committed byte fixtures; F32 deterministic weights.
 ; Nine distinct inputs cross the eight-token tile; output pitch exceeds rows.
+; Q4_K/Q6_K decode also answers to the original serial dispatch byte-for-byte,
+; across superblocks and the 256-thread boundary, with untouched output padding.
 ; Q4_K, Q6_K and F32 floats must match byte-for-byte; Q8_0 runs on the matrix unit and its floats must
 ; sit within the lane's named bound of the per-token lane's; padding must retain its sentinel.
 ; Expected 31. Runs small fixture buffers only; no model admission or living state.
@@ -61,7 +63,28 @@
    (let same (qpqb-token ps batch ref wh input rows cols pitch tokens 0 sentinel type weights))
    (let freed (sum (list (metal_buf_free wh) (metal_buf_free x) (metal_buf_free y))))
    (print (list "type" type "tokens" tokens "rows" rows "cols" cols "pitch" pitch "same-and-padding" same))
-   (if (and (gt dispatched 0) same) bit 0)))
+    (if (and (gt dispatched 0) same) bit 0)))
+ (defn qpqb-decode (ps type fixture stride rows cols refindex)
+  (do
+   (let row (qpqb-repeat (read_file_slice fixture 0 (mul stride 2)) (div cols 512) ""))
+   (let weights (qpqb-repeat row rows ""))
+   (let wh (metal_buf_alloc (str_len weights)))
+   (let x (metal_buf_alloc (mul cols 4)))
+   (let y (metal_buf_alloc (mul (add rows 1) 4)))
+   (let z (metal_buf_alloc (mul (add rows 1) 4)))
+   (let sentinel (md-le32 (md-f32-bits 42.25)))
+   (let writes (list (metal_buf_write wh 0 weights) (metal_buf_write x 0 (qpqb-input cols 0 ""))
+    (metal_buf_write y 0 (qpqb-repeat sentinel (add rows 1) ""))
+    (metal_buf_write z 0 (qpqb-repeat sentinel (add rows 1) ""))))
+   (metal_batch_concurrent)
+   (let reference (metal_enqueue (nth ps refindex) (md-bind16 (list wh x y) (list rows cols) 256 0 0 1) rows))
+   (let dispatched (q38-mv ps (list wh rows cols type) x z 1))
+   (let expected (metal_buf_read y 0 (mul (add rows 1) 4)))
+   (let actual (metal_buf_read z 0 (mul (add rows 1) 4)))
+   (let same (and (str_eq expected actual) (str_eq (substring actual (mul rows 4) (str_len actual)) sentinel)))
+   (let freed (sum (list (metal_buf_free wh) (metal_buf_free x) (metal_buf_free y) (metal_buf_free z))))
+   (print (list "decode-type" type "rows" rows "cols" cols "same-and-padding" same "freed" freed))
+   (and (and (gt reference 0) (gt dispatched 0)) (and same (eq freed 4)))))
  (let refs (str_concat (qml-lane-msl "qpqb_q4" "q4k" "144") (str_concat (qml-lane-msl "qpqb_q6" "q6k" "210")
    "kernel void qpqb_f32(device const float* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float a = 0.0f; uint k = (cols > lane) ? ((cols-lane+31u)/32u) : 0u; while(k > 0u) { --k; uint j = lane+k*32u; float p = w[r*cols+j]*x[j]; a = p+a; } float s = metal::simd_sum(a); if (lane == 0u) y[r]=s; }")))
  (let msl (str_concat (q38-msl) refs))
@@ -70,6 +93,11 @@
  (let c6 (qpqb-shape ps msl 14 (read_file_slice "form/form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 0 420) 2 256 "qpqb_q6" 2))
  (let c8 (qpqb-shape ps msl 8 (read_file_slice "form/form-stdlib/tests/fixtures/q8-0-three-blocks.bin" 0 102) 3 32 "form_q8_0_matvec_lane_f32" 4))
  (let cf (qpqb-shape ps msl 0 (qpqb-input 512 0 "") 2 256 "qpqb_f32" 8))
- (let guard (if (and (eq (q38pq-index 99) -1) (eq (nth (metal_live) 2) 0)) 16 0))
+ (let d4a (qpqb-decode ps 12 "form/form-stdlib/tests/fixtures/q4k-two-superblocks.bin" 144 3 512 1))
+ (let d4b (qpqb-decode ps 12 "form/form-stdlib/tests/fixtures/q4k-two-superblocks.bin" 144 257 5120 1))
+ (let d6a (qpqb-decode ps 14 "form/form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 210 3 512 3))
+ (let d6b (qpqb-decode ps 14 "form/form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 210 257 5120 3))
+ (let guard (if (and (and (eq (q38pq-index 99) -1) (eq (q38dq-index 99) -1))
+   (and (eq (nth (metal_live) 2) 0) (and (and d4a d4b) (and d6a d6b)))) 16 0))
  (let verdict (sum (list c4 c6 c8 cf guard)))
  (if (eq verdict 31) verdict (form_error (str_concat "qwen prefill quant band failed: " (int_to_str verdict)))))

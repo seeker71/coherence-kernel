@@ -11,6 +11,7 @@
 ; preludes: form-stdlib/declarative-attention-metal.bml
 ; preludes: form-stdlib/bml/qwen38-embedding.bml
 ; preludes: form-stdlib/bml/qwen38-prefill-quant.bml
+; preludes: form-stdlib/bml/qwen38-decode-quant.bml
 
 (do
     ; Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
@@ -203,7 +204,7 @@
         (str_concat (q38-joined-attention-msl)
         (str_concat (q38-linear-span-msl)
                     (q38-lora-rank1-msl)))))))))
-    (defn q38-msl () (str_concat (q38-msl-base) (str_concat (q38e-msl) (q38pq-msl))))
+    (defn q38-msl () (str_concat (q38-msl-base) (str_concat (q38e-msl) (str_concat (q38pq-msl) (q38dq-msl)))))
 
     ; Order here IS the pipeline order for indices 40..46, and the layout
     ; contract names each one. Appending is safe; inserting renumbers a
@@ -244,7 +245,7 @@
                   (metal_pipeline msl (nth linear 6)))))
         ; 47/48 follow the existing 40..46 span lane; appending preserves all
         ; established pipeline identities.
-        (append (append (append base (q38-lora-rank1-pipes msl)) (q38e-pipes msl)) (q38pq-pipes msl))))
+        (append (append (append (append base (q38-lora-rank1-pipes msl)) (q38e-pipes msl)) (q38pq-pipes msl)) (q38dq-pipes msl))))
 
     (defn q38-embed (ps bs geo embTv id barrier)
         (if (lt (q38e-index (kth-tv-ty embTv)) 0) -1
@@ -253,8 +254,9 @@
                     (list (mul id (nth geo 0)) (nth geo 0)) 0 barrier)
                 (nth geo 0))))
 
-    ; One exact 256-thread group per output-row pair for Q8_0.  All other declared types retain the
-    ; already-proven KAT dispatches.  Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
+    ; One exact 256-thread group per output-row pair for Q8_0. Q4_K/Q6_K retain
+    ; the serial fold and reuse block scales through a one-partition hoist.
+    ; Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
     ; norm type 0.  md-bind16's mode=1 makes the op's threads argument a group count.
     ; A dense forward runs in the carrier's concurrent encoder.  The last bit is an explicit
     ; buffer-scope dependency before this dispatch: independent projections carry 0; their first
@@ -278,13 +280,13 @@
                 (md-bind16 (list (kth-tv-h tv) xh yh) (list (kth-tv-r tv) (kth-tv-c tv))
                     256 0 1 barrier)
                 (div (add (kth-tv-r tv) 1) 2))
-            (metal_enqueue
-                (if (eq (kth-tv-ty tv) 12) (nth ps 1)
-                (if (eq (kth-tv-ty tv) 14) (nth ps 3)
-                (if (eq (kth-tv-ty tv) 8) (nth ps 4) (nth ps 27))))
+            (if (ge (q38dq-index (kth-tv-ty tv)) 0)
+                (q38dq-enqueue ps (kth-tv-ty tv) (kth-tv-h tv) xh yh
+                    (kth-tv-r tv) (kth-tv-c tv) barrier)
+            (metal_enqueue (nth ps 27)
                 (q38-b16 (list (kth-tv-h tv) xh yh)
                     (list (kth-tv-r tv) (kth-tv-c tv)) 0 barrier)
-                (kth-tv-r tv))))
+                (kth-tv-r tv)))))
 
     ; Adapter = [A-handle B-handle dot-handle width alpha-f32-bits].  Its
     ; buffers are independent allocations owned by the adapter, so this is an
