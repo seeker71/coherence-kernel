@@ -349,6 +349,47 @@ provides ordinary continuity unless `evaluation` is 1. Neither door grants an
 arbitrary filesystem or compiler surface: richer native tests belong to the
 caller-bound callback.
 
+### Execute a proposed function during review
+
+`bml/form-cli-review-execution.bml` lets a caller's report checker evaluate an
+expression-bodied BML function against explicit native bindings. Use it when
+the report proposes code and a field assertion cannot establish its behavior:
+
+```text
+bindings = list(list("combine", 2, native-combine-callback), ...)
+prepared = fcre-prepare(proposed-source, expected-function-name,
+                        expected-parameter-count, bindings)
+result = fcre-run(prepared, arguments, bindings)
+```
+
+Each binding callback receives one argument list and returns
+`list(ok, value, observation-string)`. `fcre-ok(value)` and
+`fcre-no(observation)` construct those results. Successful `nothing()` is
+distinct from a refused evaluation. The caller owns each callback's behavior,
+argument validation, purity and execution cost. Preparation retains the binding
+contract; execution refuses changed bindings.
+
+The existing Form BML grammar must consume the entire source as one expression
+definition with the expected name and arity. Every branch is checked before
+execution: names must be parameters or explicit bindings; calls must match
+their arities. Literals, parameter references, bound calls and lazy
+`if … then … else …` expressions are supported. Extra definitions, unknown
+names, recursion and dynamic callees are refused. Source is limited to 65,536
+bytes and admitted expression depth to 64. This is an expression lane, not a
+general BML module compiler or an isolation boundary for effectful callbacks.
+
+Compare the returned values with caller-owned expected behaviors inside the
+report callback, retaining the original source and report assertions. Pass that
+combined callback to `fcac-review` or `fcac-admit`. It then runs on **every report
+submission, including repair submissions**. Supplying a failure once at repair
+entry and subsequently checking only report fields leaves the failure outside
+the acceptance contract. An explanation of a counterexample is not its repair.
+
+The evaluator makes no filesystem, process or model calls. The normal review
+controller carries failed observations into its existing repair and diagnostic
+flow. `tests/form-cli-review-execution-band.fk` checks actual return values,
+lazy evaluation, successful absence, callback errors and whole-source refusal.
+
 Review currently shares the same Qwen and context: **not independent-model
 validation**. Qwen weights remain unchanged; the shared native Llama adapter
 learns asynchronously from observed outcomes. The loop does not assert rented-model
@@ -363,6 +404,10 @@ not individual assertions. A failed check remains counted after a later pass.
 Generation refreshes these counts every four IDs, preserving the pending ID
 exactly once and decoding the complete reply only after generation ends.
 Terminal metadata adds injected IDs, position and elapsed milliseconds.
+Repair observations carry complete current failure evidence once. Notes and
+pending tasks exactly equal to that evidence use a shorter reference to the
+same message's `failure_evidence` field. Distinct text and retained controller
+state stay intact; no earlier context is required to resolve the reference.
 Prompt, response and source content stay out of the diagnostic framebuffer.
 The JSON result carries candidate document content and, for review, the report
 back to its caller. Rechecks on recall/resume count as actual checker calls.
