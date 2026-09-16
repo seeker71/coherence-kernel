@@ -18,6 +18,11 @@ as a bounded session-manifest allowance. Form owns that provider CLI process,
 usage receipt and unchanged assertions. This does not add a fallback to the
 native `code` controller itself.
 
+For a read-only assessment that explicitly requests provider synthesis after
+native grounding, the separate [synthesis door](form-response-synthesis.md)
+collects the tasks into one provider call and rechecks every report in Form.
+This path has zero local-model generation and retains its provider attribution.
+
 ## Call without knowing Form syntax
 
 In form-cli, enter `code` followed by a JSON object. The standalone native door

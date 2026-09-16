@@ -1,5 +1,9 @@
 # A provider resource owned by Form
 
+For native grounding followed directly by one explicitly offered provider
+response, use the separate [synthesis path](form-response-synthesis.md).
+The repair resource below retains its failed-local-report condition.
+
 `observe/form-cli-response-resource-run.bml` repairs a retained, failing
 read-only report through one optional provider CLI process. The caller owns
 the question, source documents, assertions and provider permission. Ordinary

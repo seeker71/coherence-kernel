@@ -222,7 +222,7 @@ a host command.
 | Tool | Native profile |
 | --- | --- |
 | `rg` | Line search; `-i -S -F -n -w -v -l -c -q`, `--column`, `--files`, `-e/--regexp`, `-g/--glob`, `-m/--max-count`, `-A/-B/-C`, `--`, and common long aliases. Short boolean flags can be clustered; value flags take a separate argv value. |
-| `jq` | `.`, object paths and quoted bracket keys, nonnegative array indexes, `[]`, pipes, `//`, `map`, `select`, comparisons, array collection and explicit-key object construction; `keys length type empty sort unique to_entries`; literals and bound variables. Flags `-r -c -e -s -n`, `--arg`, `--argjson` precede the filter. |
+| `jq` | `.`, object paths and quoted bracket keys, nonnegative array indexes, `[]`, pipes, `//`, `map`, `select`, comparisons, array collection and explicit-key object construction; object-key `has` (string key, including present null/false/zero; array-index `has` is outside this subset); `keys length type empty sort unique to_entries`; literals and bound variables. Flags `-r -c -e -s -n`, `--arg`, `--argjson` precede the filter. |
 | `read`, `cat` | Read held input or concatenate resident documents selected by identity/path. |
 | `head`, `tail` | `-n N`, `-c N`, default ten lines; preserve final-newline state. |
 | `sed` | Numeric print ranges only: `-n 'Np'` or `-n 'N,Mp'`. |

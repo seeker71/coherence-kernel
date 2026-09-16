@@ -1,0 +1,90 @@
+// Native source verification, one explicitly offered provider synthesis, native recheck.
+// This read-only assessment lane performs no local-model generation or learning.
+// preludes: form-stdlib/bml/form-cli-response-session.bml
+section [form.bml] {
+ class FormCliResponseSynthesis {
+  def frsy-members-valid(members) = if nil?(members) then 1 else and(str_eq(fcaq-mode(json-object-get(head(members),"request")),"review"),frsy-members-valid(tail(members)));
+  def frsy-valid(manifest) = and(frss-valid(manifest),and(frsy-members-valid(node_children(json-object-get(manifest,"cases"))),and(frss-provider-allowed(manifest),frr-provider-valid(json-object-get(manifest,"provider")))));
+  def frsy-sources(members) = if nil?(members) then 1 else and(eq(head(frr-source(json-object-get(head(members),"request"))),1),frsy-sources(tail(members)));
+  def frsy-packet(members) = if nil?(members) then list() else {
+   let member = head(members);
+   let request = json-object-get(member,"request");
+   cons(json-node-object(list(nsm-s("id",fcap-string(member,"id")),nsm-s("request_sha256",fcam-hash(json-emit(request))),json-node-pair("goal",json-object-get(request,"goal")),json-node-pair("documents",json-object-get(request,"documents")),nsm-n("native_source_verification_passed",1))),frsy-packet(tail(members)));
+  };
+  def frsy-prompt(manifest) = str_concat("Form requests one bounded response for the supplied read-only tasks. Form has already verified each task's source assertions. Use the supplied goals and source documents, preserving their scope. No prior answers or expected report assertions are supplied. No tools, repository exploration, file changes, additional model calls or training are needed. Return exactly one JSON object with a results array containing one {id,report} object for each supplied id; each report is the complete JSON object requested by that task. No markdown fences or surrounding prose. Keep each report complete, warm, specific, faithful to the sources and useful in its next action. Form will recheck the unchanged source and report assertions.\n",json-emit(json-node-object(list(json-node-pair("cases",json-node-array(frsy-packet(node_children(json-object-get(manifest,"cases")))))))));
+  def frsy-find(rows,id) = if nil?(rows) then json-node-null() else if str_eq(fcap-string(head(rows),"id"),id) then head(rows) else frsy-find(tail(rows),id);
+  def frsy-answer-rows(rows,seen) = if nil?(rows) then 1 else {
+   let row = head(rows);
+   let id = fcap-string(row,"id");
+   and(fat-wire-object?(row),and(not(fat-has(seen,id)),and(fat-wire-object?(json-object-get(row,"report")),frsy-answer-rows(tail(rows),cons(id,seen)))));
+  };
+  def frsy-cases(members,answers) = if nil?(members) then list() else {
+   let member = head(members);
+   let request = json-object-get(member,"request");
+   let id = fcap-string(member,"id");
+   let found = frsy-find(answers,id);
+   let source = frr-source(request);
+   let report = if fat-wire-object?(found) then frr-report(request,json-emit(json-object-get(found,"report"))) else list(0,"report missing for supplied case id");
+   cons(json-node-object(list(nsm-s("id",id),nsm-n("source_checks_passed",head(source)),nsm-s("source_evidence",nth(source,1)),nsm-n("report_checks_passed",head(report)),nsm-s("report_evidence",nth(report,1)),json-node-pair("semantic_quality",json-node-null()))),frsy-cases(tail(members),answers));
+  };
+  def frsy-cases-pass(rows) = if nil?(rows) then 1 else and(eq(nsm-num(head(rows),"source_checks_passed"),1),and(eq(nsm-num(head(rows),"report_checks_passed"),1),frsy-cases-pass(tail(rows))));
+  def frsy-check(manifest,answer) {
+   let parsed = if faj-valid(answer) then parse-json("synthesis-answer",answer) else json-node-null();
+   let results = json-object-get(parsed,"results");
+   let answers = node_children(results);
+   let members = node_children(json-object-get(manifest,"cases"));
+   let shape = and(fat-wire-array?(results),and(eq(len(answers),len(members)),frsy-answer-rows(answers,list())));
+   let cases = frsy-cases(members,answers);
+   json-node-object(list(nsm-n("answer_shape_passed",shape),nsm-n("assertions_passed",and(shape,frsy-cases-pass(cases))),json-node-pair("cases",json-node-array(cases))));
+  }
+  def frsy-no-tools(lines) = if nil?(lines) then 1 else {
+   let line = head(lines);
+   let event = if faj-valid(line) then parse-json("synthesis-event",line) else json-node-null();
+   let kind = fcap-string(json-object-get(event,"item"),"type");
+   and(or(str_eq(kind,""),str_eq(kind,"agent_message")),frsy-no-tools(tail(lines)));
+  };
+  def frsy-brief(status,root) = json-node-object(list(nsm-s("schema","form-response-synthesis-v1"),nsm-s("status",status),nsm-s("evidence",root),nsm-n("provider_processes_new",0),nsm-n("checked",0)));
+  def frsy-result(root,manifest,process,newProcess) {
+   let answer = read_file(fcap-string(process,"answer_path"));
+   let events = read_file(fcap-string(process,"usage_path"));
+   if not(frr-intact(answer,events,process)) then form_error("synthesis retained evidence changed; no provider retry") else 0;
+   let usage = feu-read(fcap-string(process,"usage_path"));
+   let lifecycle = fhn-json(fhn-stage-path(fcap-string(process,"job"),"resource",".process.json"));
+   let released = nsm-num(frr-lifecycle(json-node-object(list(nsm-n("verified_repair",1))),lifecycle),"process_released");
+   let checks = frsy-check(manifest,answer);
+   let noTools = frsy-no-tools(sh-lines(events));
+   let checked = and(eq(nsm-num(checks,"assertions_passed"),1),and(str_eq(fcap-string(process,"status"),"0"),and(released,and(noTools,str_eq(fcap-string(usage,"status"),"observed")))));
+   let result = json-node-object(list(nsm-s("schema","form-response-synthesis-v1"),nsm-s("status",if checked then "checked" else "attention"),nsm-s("answer_source","codex-exec-through-native-form"),nsm-s("evidence",root),nsm-s("answer_path",fcap-string(process,"answer_path")),nsm-n("checked",checked),nsm-n("process_released",released),nsm-n("provider_items_message_only",noTools),nsm-n("local_model_calls",0),nsm-n("provider_processes_new",newProcess),nsm-n("provider_processes_for_request",1),nsm-s("usage_event",root),json-node-pair("provider_usage",usage),json-node-pair("provider_elapsed_ms",json-object-get(lifecycle,"elapsed_ms")),json-node-pair("check",checks),json-node-pair("semantic_quality",json-node-null()),json-node-pair("frequency_and_resonance",json-node-null()),nsm-s("scope","one provider synthesis with native source/report assertions; coordinator excluded; replay retains the same usage_event")));
+   let observation = frsh-path(root,str_concat("observation-",str_concat(int_to_str(host_pid()),str_concat("-",str_concat(int_to_str(now_unix_ms()),".json")))));
+   frsh-frozen(observation,json-emit(result));
+   oh-emit(frsh-path(root,"events.jsonl"),oh-reading("response-synthesis",root,"checked-report",json-node-int(1),json-node-int(checked),json-node-int(checked),list(),list("inspect-evidence","continue-assessment"),oh-reference(observation)));
+   result;
+  }
+  def frsy-remembered(root,manifest,text) {
+   let retained = frsh-path(root,"manifest.json");
+   let process = frsh-path(root,"process.json");
+   if not(fs-exists?(retained)) then frsy-brief("claim-pending",root) else if not(str_eq(read_file(retained),text)) then frsy-brief("retained-manifest-differs",root) else if not(fs-exists?(process)) then frsy-brief("process-unresolved;inspect-owned-evidence;no-duplicate-call",root) else if not(faj-valid(read_file(process))) then frsy-brief("process-record-incomplete;no-duplicate-call",root) else frsy-result(root,manifest,parse-json("synthesis-process",read_file(process)),0);
+  }
+  def frsy-held(root,manifest,text) {
+   frsh-frozen(frsh-path(root,"manifest.json"),text);
+   let action = fcap-control(now_unix_ms(),list("native-source-verified","provider-synthesis"),2);
+   if not(eq(action,2)) then form_error("synthesis control did not correlate; claim retained") else 0;
+   let process = frr-execute(root,frsy-prompt(manifest),fcaq-number(json-object-get(manifest,"provider"),"seconds",0));
+   frsy-result(root,manifest,process,1);
+  }
+  def frsy-run(manifest) {
+   if not(frsy-valid(manifest)) then frsy-brief("requires-readonly-evaluations-and-one-explicit-provider-process","") else if not(frsy-sources(node_children(json-object-get(manifest,"cases")))) then frsy-brief("source-check-failed","") else {
+    let text = json-emit(manifest);
+    if gt(str_len(text),FatMaxBytes()) then form_error("synthesis manifest oversized") else 0;
+    let home = hearth-response-syntheses();
+    fs-mkdir(fs-path-dirname(fs-path-dirname(home)));
+    fs-mkdir(fs-path-dirname(home));
+    fs-mkdir(home);
+    let root = frsh-path(home,fcam-hash(text));
+    if eq(host_dir_mkdir(root),1) then frsy-held(root,manifest,text) else frsy-remembered(root,manifest,text);
+   };
+  }
+  def frsy-text(text) = if or(gt(str_len(text),FatMaxBytes()),not(faj-valid(text))) then frsy-brief("invalid-or-oversized-synthesis-manifest","") else frsy-run(parse-json("synthesis-manifest",text));
+ }
+ 0;
+}

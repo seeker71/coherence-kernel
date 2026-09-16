@@ -1,0 +1,83 @@
+# Native grounding with one provider synthesis
+
+`observe/form-cli-response-synthesis-run.bml` accepts a set of read-only
+assessment tasks, checks their sources in Form, asks an explicitly offered
+provider for one complete response, and rechecks each returned report. This
+is a provider-assisted response path with zero local-model generation. It
+advances alongside the native-only response work.
+
+Pass one JSON manifest on stdin:
+
+```sh
+form-run ./fkwu observe/form-cli-response-synthesis-run.bml < manifest.json
+```
+
+The manifest uses the existing response-session shape:
+
+```json
+{
+  "session": "my-grounded-review-v1",
+  "cases": [{"id": "my-review", "request": {}}],
+  "provider": {
+    "allowed": true,
+    "interface": "codex-exec",
+    "max_processes": 1,
+    "seconds": 180
+  }
+}
+```
+
+Replace the empty `request` with a valid native review request: `mode=review`,
+`evaluation=1`, the complete `goal`, read-only `documents`, source `checks`,
+and `report_checks`. Every case needs a unique nonempty ID. The request
+contract and examples live in [native coding](form-native-coding.md).
+
+Do the useful native calculation, retrieval or execution before constructing
+the manifest. Preserve original sources and label any derived observations
+with their scope. The synthesis organ verifies the supplied source assertions;
+it does not infer which additional grounding a question needs. Its prompt
+contains case IDs, request hashes, goals and documents. Expected report-check
+values and prior model answers are excluded.
+
+The provider returns one JSON object:
+
+```json
+{"results":[{"id":"my-review","report":{}}]}
+```
+
+Each `report` contains the complete answer requested by that case. Form
+requires exactly one object report per supplied ID, reruns the original
+source/report assertions, verifies successful process completion and release,
+and reads actual usage from the completed provider transcript. Tool execution
+events leave the result needing attention. The instruction asks for synthesis
+without tools; this event check observes compliance after execution and is not
+a provider-side tool-disabling mechanism.
+
+The native process organ owns the optional CLI process in an empty directory
+outside the repository. A single atomic claim keyed by the complete manifest
+prevents duplicate admission. Repeating the same manifest checks the retained
+answer and usage hashes, returns zero new processes and preserves the same
+`usage_event`. Count that event once. An interrupted claim stays unresolved;
+inspect its owned evidence before further action. The deadline limits elapsed
+process time, not tokens. Missing provider usage stays unknown.
+
+The output contains metadata and a private `answer_path`. It leaves semantic
+quality and frequency/resonance unscored. Source/report assertions establish
+their declared checks; inspect the actual answer and add relevant behavioral
+checks to assess its usefulness. This assessment path sends no answers to
+learning. Provider availability is optional for Form itself and required only
+for this explicitly selected path.
+
+The [native-first repair resource](form-response-resource.md) continues to
+require a failed retained report. Synthesis has its own explicit entry point;
+it does not fabricate a failure to obtain assistance.
+
+## Observed comparison
+
+On one retained three-task comparison, native arithmetic/source preparation,
+one provider synthesis and final checks took 92,060 ms, with 26,946 reported
+input-plus-output tokens. The context-equipped baseline took 258,074 ms and
+459,735 reported tokens. Their uncached input counts were 14,683 and 21,113.
+This is a sample observation, not proof of a global token minimum or native
+voice parity. The [receipt](../receipts/2026-09-17-bounded-provider-synthesis.md)
+retains the accounting, answer review and open quality boundaries.
