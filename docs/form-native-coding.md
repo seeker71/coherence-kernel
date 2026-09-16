@@ -82,10 +82,15 @@ the exact resident documents supplied in that context. A successful single-file
 `read` still executes. When its output equals a supplied document byte-for-byte,
 the model observation carries `stdout_reference` with its id, path, byte count
 and context scope. The original content remains in the model context and the
-caller-owned documents. Changed content, errors and reads without an admission
-snapshot return the full result. `cat` and focused queries remain available for
-another inspection. Source/report verification continues to use actual document
-bytes; it does not consume these model-context references.
+caller-owned documents. A changed read may carry `stdout_patch`: one exact
+line splice against that original admission document, with the current changed
+lines in full. The controller reconstructs the current read from that base and
+splice, checks byte equality, and uses it only when its serialized observation
+is smaller. Every splice refers to the admission snapshot, never to a previous
+splice. Errors, absent snapshots and splices that save no space return the full
+result. `cat` always returns full current text; focused queries remain available.
+Source/report verification continues to use actual document bytes; it does not
+consume these model-context references or splices.
 
 Each completed model reply emits `form-code-reply` metadata: JSON validity,
 wrapper/tool presence, report type, before/after role and check/repair counts.
