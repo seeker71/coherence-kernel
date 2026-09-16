@@ -1,0 +1,44 @@
+// One-edit delegation search over an admitted expression, with caller-owned
+// result roles and behavioral checks. No model, process or filesystem calls.
+// A replacement forwards the function's existing parameters to a binding of
+// the same result role and matching arity. This is a bounded search family.
+// result: [status, source, checker-runs, latest-observation].
+// preludes: form-stdlib/bml/form-cli-review-execution.bml
+section [form.bml] {
+ class FormCliReviewSearch {
+  def fcrs-join(xs,separator) = if nil?(xs) then "" else if nil?(tail(xs)) then head(xs) else str_concat(head(xs),str_concat(separator,fcrs-join(tail(xs),separator)));
+  def fcrs-expressions(ns) = if nil?(ns) then list() else cons(fcrs-expression(head(ns)),fcrs-expressions(tail(ns)));
+  def fcrs-expression(n) = if fcre-literal(n) then if eq(node_type(n),node_type(intern_trivial_string(""))) then json-emit(json-node-string(node_value(n))) else int_to_str(node_value(n)) else if fbl-is?(n,"ident") then node_value(head(node_children(n))) else if fbl-is?(n,"if") then fcrs-join(list("(if ",fcrs-expression(head(node_children(n)))," then ",fcrs-expression(nth(node_children(n),1))," else ",fcrs-expression(nth(node_children(n),2)),")"),"") else fcrs-join(list(fcre-call-name(n),"(",fcrs-join(fcrs-expressions(tail(node_children(n))),", "),")"),"");
+  def fcrs-source(name,names,body) = fcrs-join(list("def ",name,"(",fcrs-join(names,", "),") = ",fcrs-expression(body),";"),"");
+  def fcrs-role(roles,name) = if nil?(fcre-find(roles,name)) then "" else nth(fcre-find(roles,name),1);
+  def fcrs-paths(n,path) = if fbl-is?(n,"if") then fcrs-child-paths(node_children(n),path,0) else if fbl-is?(n,"fncall") then cons(path,fcrs-child-paths(tail(node_children(n)),path,1)) else list();
+  def fcrs-child-paths(ns,path,index) = if nil?(ns) then list() else append(fcrs-paths(head(ns),append(path,list(index))),fcrs-child-paths(tail(ns),path,add(index,1)));
+  def fcrs-at(n,path) = if nil?(path) then n else fcrs-at(nth(node_children(n),head(path)),tail(path));
+  def fcrs-replace(n,path,replacement) = if nil?(path) then replacement else intern_node(node_category(n),fcrs-replace-kid(node_children(n),head(path),tail(path),replacement));
+  def fcrs-replace-kid(ns,index,path,replacement) = if eq(index,0) then cons(fcrs-replace(head(ns),path,replacement),tail(ns)) else cons(head(ns),fcrs-replace-kid(tail(ns),sub(index,1),path,replacement));
+  def fcrs-ident(name) = intern_node(bmf-bp("ident"),list(intern_trivial_string(name)));
+  def fcrs-identifiers(names) = if nil?(names) then list() else cons(fcrs-ident(head(names)),fcrs-identifiers(tail(names)));
+  def fcrs-forward(binding,names) = intern_node(bmf-bp("fncall"),cons(fcrs-ident(head(binding)),fcrs-identifiers(names)));
+  def fcrs-result(status,source,count,observation) = list(status,source,count,observation);
+  def fcrs-search(source,name,arity,bindings,roles,checker,contract,budget) = if le(budget,0) then fcrs-result("refused",source,0,"positive-check-budget-required") else fcrs-prepared(source,name,bindings,roles,checker,contract,budget,fcre-prepare(source,name,arity,bindings));
+  def fcrs-prepared(source,name,bindings,roles,checker,contract,budget,prepared) = if not(head(prepared)) then fcrs-result("refused",source,0,nth(prepared,2)) else fcrs-initial(source,name,bindings,roles,checker,contract,budget,prepared,checker(contract,prepared));
+  def fcrs-initial(source,name,bindings,roles,checker,contract,budget,prepared,checked) = if not(fcap-check-shape?(checked)) then fcrs-result("refused",source,1,"caller-checker-returned-malformed-result") else if head(checked) then fcrs-result("unchanged",source,1,nth(checked,1)) else fcrs-walk(source,name,bindings,roles,checker,contract,budget,prepared,fcrs-paths(nth(nth(prepared,1),1),list()),bindings,1,nth(checked,1));
+  def fcrs-walk(source,name,bindings,roles,checker,contract,budget,prepared,paths,candidates,count,observation) = if ge(count,budget) then fcrs-result("exhausted",source,count,observation) else if nil?(paths) then fcrs-result("exhausted",source,count,observation) else if nil?(candidates) then fcrs-walk(source,name,bindings,roles,checker,contract,budget,prepared,tail(paths),bindings,count,observation) else {
+   let names = head(nth(prepared,1));
+   let body = nth(nth(prepared,1),1);
+   let target = fcrs-at(body,head(paths));
+   let role = fcrs-role(roles,fcre-call-name(target));
+   let binding = head(candidates);
+   if or(str_eq(role,""),or(not(eq(nth(binding,1),len(names))),not(str_eq(role,fcrs-role(roles,head(binding)))))) then fcrs-walk(source,name,bindings,roles,checker,contract,budget,prepared,paths,tail(candidates),count,observation) else {
+    let replacement = fcrs-forward(binding,names);
+    if node_eq(target,replacement) then fcrs-walk(source,name,bindings,roles,checker,contract,budget,prepared,paths,tail(candidates),count,observation) else {
+     let next = fcrs-source(name,names,fcrs-replace(body,head(paths),replacement));
+     let admitted = fcre-prepare(next,name,len(names),bindings);
+     if not(head(admitted)) then fcrs-result("refused",source,count,str_concat("generated-candidate-refused: ",nth(admitted,2))) else fcrs-checked(source,name,bindings,roles,checker,contract,budget,prepared,paths,candidates,count,next,checker(contract,admitted));
+    };
+   };
+  };
+  def fcrs-checked(source,name,bindings,roles,checker,contract,budget,prepared,paths,candidates,count,next,checked) = if not(fcap-check-shape?(checked)) then fcrs-result("refused",source,add(count,1),"caller-checker-returned-malformed-result") else if head(checked) then fcrs-result("repaired",next,add(count,1),nth(checked,1)) else fcrs-walk(source,name,bindings,roles,checker,contract,budget,prepared,paths,tail(candidates),add(count,1),nth(checked,1));
+ }
+ 0;
+}
