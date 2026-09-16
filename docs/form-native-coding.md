@@ -249,6 +249,24 @@ requests bind replay identity to the exact provider prompt, so an older
 full-document admission cannot masquerade as a selected-source run. New
 admissions retain that exact prompt alongside the original manifest.
 
+For composition claims, `fccw-observe()` in
+`bml/form-cli-composition-witness.bml` returns an actual native observation:
+same-composition interning, changed recipe identity, retained original children,
+and forward/reverse tree patches. The public door runs the observation and its
+organ-health response:
+
+```sh
+form-run ./fkwu observe/form-cli-composition-witness-run.bml
+```
+
+The report records `[2,3]`, its `[2,4]` revision, and the reconstruction using
+retained information. Collection of unreferenced cells, durability after process
+exit, automatic response-text persistence and the identity of an absent reply
+remain explicitly unobserved. A caller can retain this report as a source
+document and select it with an ordinary native source query. Such an addition
+changes the model's evidence and belongs in the retained request. Its execution
+result does not itself establish response quality.
+
 Native embedding callers can request one follow-up before releasing a review's
 model through `bml/form-cli-review-followup.bml`:
 
