@@ -1,0 +1,58 @@
+// Native repair is caller-owned, attributed, and checked again before acceptance.
+// preludes: form-stdlib/bml/form-cli-code-request.bml
+section [form.bml] {
+ class FormCliNativeReviewRepairBand {
+  def fnrrb-check(docs,subject) = list(and(value_eq(head(subject),docs),str_eq(nth(subject,1),"correct")),"actual caller report check");
+  def fnrrb-source(docs,actual) = list(value_eq(docs,actual),"original source check");
+  def fnrrb-repair(contract,subject) = if not(and(str_eq(nth(subject,1),"wrong"),str_eq(nth(subject,2),"actual caller report check"))) then form_error("native callback lost actual failure") else list(1,"correct","native-fixture","candidate generated from caller data");
+  def fnrrb-still-wrong(contract,subject) = list(1,"still wrong","native-fixture","candidate remains unverified");
+  def fnrrb-decline(contract,subject) = list(0,"","native-fixture","no candidate");
+  def fnrrb-same(contract,subject) = list(1,nth(subject,1),"native-fixture","same candidate");
+  def fnrrb-malformed(contract,subject) = list(1,"correct");
+  def fnrrb-bomb(contract,subject) = form_error("unauthorized native repair invocation");
+  def fnrrb-never(contract,subject) = list(0,"source check refuses");
+  def fnrrb-bad-check(contract,subject) = 1;
+  def fnrrb-assert(name,ok) = if ok then 1 else form_error(str_concat("native report repair: ",name));
+  def fnrrb-run() {
+   let docs = list(list("source","source.txt","immutable"));
+   let initial = fcap-open-direct-review("review caller source",docs);
+   let base = list(fnrrb-check,docs,fnrrb-source,docs);
+   let checked = fcap-step(initial,"{\"report\":\"wrong\"}",append(base,list(fnrrb-repair,list())));
+   fnrrb-assert("native candidate is independently rechecked",and(str_eq(fcap-stage(checked),"complete"),and(eq(fcap-checks(checked),2),eq(fcap-failures(checked),1))));
+   fnrrb-assert("native source and original documents are preserved",and(str_eq(fcap-report-source(checked),"caller-native-repair"),and(str_eq(fcap-report(checked),"correct"),value_eq(fcap-docs(checked),docs))));
+   fnrrb-assert("accepted event and actual check count are retained",and(eq(len(fcap-native-repairs(checked)),1),and(str_eq(nth(head(fcap-native-repairs(checked)),1),"accepted"),eq(nth(head(fcap-native-repairs(checked)),3),2))));
+   let failed = fcap-step(initial,"{\"report\":\"wrong\"}",append(base,list(fnrrb-still-wrong,list())));
+   fnrrb-assert("failed native candidate returns to ordinary repair exactly once",and(str_eq(fcap-stage(failed),"repair"),and(eq(fcap-checks(failed),2),and(eq(fcap-failures(failed),2),eq(len(fcap-native-repairs(failed)),1)))));
+   let declined = fcap-step(initial,"{\"report\":\"wrong\"}",append(base,list(fnrrb-decline,list())));
+   fnrrb-assert("decline preserves failed report and checker count",and(str_eq(fcap-stage(declined),"repair"),and(eq(fcap-checks(declined),1),str_eq(fcap-report(declined),"wrong"))));
+   let same = fcap-step(initial,"{\"report\":\"wrong\"}",append(base,list(fnrrb-same,list())));
+   fnrrb-assert("unchanged proposal does not buy another checker call",and(eq(fcap-checks(same),1),str_eq(nth(head(fcap-native-repairs(same)),1),"unchanged")));
+   let malformed = fcap-step(initial,"{\"report\":\"wrong\"}",append(base,list(fnrrb-malformed,list())));
+   fnrrb-assert("malformed proposal cannot complete",and(str_eq(fcap-stage(malformed),"attention"),str_eq(fcap-report(malformed),"wrong")));
+   let passed = fcap-step(initial,"{\"report\":\"correct\"}",append(base,list(fnrrb-bomb,list())));
+   fnrrb-assert("passing reports never invoke repair",and(str_eq(fcap-stage(passed),"complete"),nil?(fcap-native-repairs(passed))));
+   let unconfigured = fcap-step(initial,"{\"report\":\"wrong\",\"native_repair\":\"invented\"}",base);
+   fnrrb-assert("model fields cannot install a callback",and(str_eq(fcap-stage(unconfigured),"repair"),nil?(fcap-native-repairs(unconfigured))));
+   fnrrb-assert("native work does not consume an extra submitted turn",and(eq(fcap-turns(checked),fcap-turns(unconfigured)),eq(fcap-turns(failed),fcap-turns(unconfigured))));
+   let sourceFailure = fcap-step(initial,"{\"report\":\"wrong\"}",list(fnrrb-never,docs,fnrrb-source,docs,fnrrb-still-wrong,list()));
+   fnrrb-assert("native proposal cannot bypass a refusing complete checker",and(str_eq(fcap-stage(sourceFailure),"repair"),eq(fcap-checks(sourceFailure),2)));
+   let invalidCheck = fcap-step(initial,"{\"report\":\"wrong\"}",list(fnrrb-bad-check,docs,fnrrb-source,docs,fnrrb-bomb,list()));
+   fnrrb-assert("malformed original checker does not invoke repair",str_eq(fcap-stage(invalidCheck),"attention"));
+   let later = fcap-step(failed,"{\"report\":\"correct\"}",base);
+   fnrrb-assert("later submitted report has its own attribution",and(str_eq(fcap-report-source(later),"submitted"),eq(len(fcap-native-repairs(later)),1)));
+   let resumed = fcap-begin-context(checked);
+   fnrrb-assert("context renewal preserves provenance",and(str_eq(fcap-report-source(resumed),"caller-native-repair"),value_eq(fcap-native-repairs(resumed),fcap-native-repairs(checked))));
+   let roundtrip = fcam-unpack(bytes_to_recipe(recipe_to_bytes(fcam-pack(checked))));
+   fnrrb-assert("binary continuity preserves native attribution",and(str_eq(fcap-report-source(roundtrip),"caller-native-repair"),value_eq(fcap-native-repairs(roundtrip),fcap-native-repairs(checked))));
+   let output = parse-json("result",fcaq-result-core(list(checked,1,0,0,0)));
+   fnrrb-assert("agent result exposes native provenance",and(str_eq(fcap-string(output,"report_source"),"caller-native-repair"),eq(len(node_children(json-object-get(output,"native_repairs"))),1)));
+   let code = fcap-with-report(fcap-open("code",docs,list("source.txt")),"wrong");
+   fnrrb-assert("coding does not invoke a review repair hook",str_eq(fcap-stage(fcap-submit(code,list(fnrrb-never,docs,fnrrb-source,docs,fnrrb-bomb,list()))),"repair"));
+   let stopped = fcap-terminal(initial,"diagnostic-control-unavailable");
+   fnrrb-assert("native repair cannot bypass a terminal refusal",value_eq(fcap-native-attempt(stopped,append(base,list(fnrrb-bomb,list())),list(0,"failed")),stopped));
+   print(list("native-review-repair-checks",18));
+   262143;
+  }
+ }
+ fnrrb-run();
+}
