@@ -1,6 +1,6 @@
 // Agent-shaped JSON door. Checks are caller-owned read-only native tool calls;
 // applications may instead supply a richer in-process callback to fcac-run.
-// preludes: form-stdlib/bml/form-cli-code-reasoning.bml form-stdlib/bml/form-cli-code-definition.bml form-stdlib/bml/native-session-code.bml
+// preludes: form-stdlib/bml/form-cli-code-reasoning.bml form-stdlib/bml/form-cli-code-definition.bml form-stdlib/bml/native-session-code.bml form-stdlib/bml/form-cli-boolean-report.bml
 section [form.bml] {
  class FormCliCodeRequest {
   def fcaq-number(obj, key, fallback) = if not(json-object-has?(obj, key)) then fallback else if not(str_eq(faj-type(json-object-get(obj, key)), "number")) then 0 else if not(str_eq(json-emit(json-object-get(obj, key)), int_to_str(json-int-value(json-object-get(obj, key))))) then 0 else json-int-value(json-object-get(obj, key));
@@ -24,12 +24,20 @@ section [form.bml] {
   def fcaq-report-failure(row,result) {
    let query = json-node-object(list(json-node-pair("tool",json-object-get(row,"tool")),json-node-pair("arguments",json-object-get(row,"arguments"))));
    let ran = and(eq(fat-exit(result),0),str_eq(fat-error(result),""));
-   str_concat(if ran then "Report value mismatch: the native check completed successfully and produced the value below. It did not report a tool or parse error. Compare this check's subject with the supplied rule and evidence before changing response structure. " else "Report check tool failed; inspect its exit and diagnostics. ",str_concat("check=",str_concat(json-emit(query),str_concat(" actual=",fat-wire-render(result)))));
+   str_concat(if ran then "Report value mismatch: the native check completed successfully and produced the value below. It did not report a tool or parse error. Compare this check's subject with the supplied rule and evidence before changing response structure. " else "Report check tool failed; inspect its exit and diagnostics. ",str_concat("check=",str_concat(json-emit(query),str_concat(" actual=",str_concat(fat-wire-render(result),if ran then fcaq-report-type-hint(fcap-string(row,"stdout"),fat-out(result)) else "")))));
+  }
+  def fcaq-report-type-hint(expected,actual) {
+   if not(and(faj-valid(expected),faj-valid(actual))) then "" else {
+    let wanted = faj-type(faj-json("expected-result-type",expected));
+    let found = faj-type(faj-json("actual-result-type",actual));
+    if str_eq(wanted,found) then "" else str_concat(" result-types=",json-emit(json-node-object(list(nsm-s("expected",wanted),nsm-s("actual",found),nsm-s("instruction","Return the expected JSON type while deriving its value from the supplied sources. The expected value is not disclosed.")))));
+   };
   }
   def fcaq-checker(obj) {
    let source = node_children(json-object-get(obj, "checks"));
    if str_eq(fcaq-mode(obj), "review") then list(fcaq-review-check, list(source, json-object-get(obj, "report_checks")), fcaq-check, source) else list(fcaq-check, source);
   }
+  def fcaq-live-checker(obj) = if str_eq(fcaq-mode(obj),"review") then append(fcaq-checker(obj),list(fcbr-repair,node_children(json-object-get(obj,"report_checks")))) else fcaq-checker(obj);
   def fcaq-initial(obj, docs) = if str_eq(fcaq-mode(obj), "review") then if str_eq(fcap-string(obj,"review_entry"),"direct") then fcap-open-direct-review(fcap-string(obj,"goal"),docs) else fcap-open-review(fcap-string(obj, "goal"), docs) else if str_eq(fcap-string(obj,"code_entry"),"direct") then fcap-open-direct-code(fcap-string(obj,"goal"),docs,fcap-array(obj,"writable")) else fcap-open(fcap-string(obj, "goal"), docs, fcap-array(obj, "writable"));
   // Evaluation begins before continuity preparation, not after recall. It
   // cannot resume or consult learned repairs, and writes no coding checkpoint.
@@ -53,7 +61,7 @@ section [form.bml] {
   def fcaq-decoded(obj) = if not(fcaq-request-valid(obj)) then fcaq-refused("valid goal,writable,documents,checks required; review needs empty writable and report_checks; evaluation cannot resume") else fcaq-docs(obj, fat-wire-documents(obj));
   def fcaq-docs(obj, docs) = if not(str_eq(fat-wire-error(docs), "")) then fcaq-refused(fat-wire-error(docs)) else if or(le(fcaq-number(obj, "context", 8192), 0), le(fcaq-number(obj, "turns", 64), 0)) then fcaq-refused("positive-context-and-turns-required") else if and(json-object-has?(obj, "resume"), not(fat-wire-string?(json-object-get(obj, "resume")))) then fcaq-refused("resume-must-be-checkpoint-id") else fcaq-managed(obj, fat-wire-value(docs));
   def fcaq-managed(obj, docs) {
-   let checker = fcaq-checker(obj);
+   let checker = fcaq-live-checker(obj);
    let state = fcaq-prepare(obj, docs, checker, hearth-code-memory());
    let saved = if fcap-done(state) then 1 else fcam-save(state);
    let evaluation = fcaq-evaluation(obj);
