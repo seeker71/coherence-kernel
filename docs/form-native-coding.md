@@ -390,6 +390,19 @@ controller carries failed observations into its existing repair and diagnostic
 flow. `tests/form-cli-review-execution-band.fk` checks actual return values,
 lazy evaluation, successful absence, callback errors and whole-source refusal.
 
+`bml/form-cli-review-trace.bml` adds `fcrt-run(prepared, arguments, bindings)`.
+It returns `[ordinary-result, invoked-binding-names]`. The trace records actual
+evaluation order: arguments before their enclosing call, only the selected
+branch, and no later calls after an argument fails. Each callback runs once.
+Changed bindings and rejected source produce no calls. The ordinary evaluator
+remains available without trace allocation.
+
+These are expression call sites. Supplied callback bodies remain opaque; the
+trace does not infer their internal calls or effects from their names. A caller
+can compare original, rejected and verified candidates using the same inputs
+and bindings, then return those observed traces alongside the paired checks.
+Use the source to explain internal effects, and preserve the trace's scope.
+
 ### Search a small native repair before another model call
 
 `bml/form-cli-review-search.bml` searches one explicit repair family: replace
@@ -474,6 +487,12 @@ the newest pair under `native_review` once per resident context. Only a complete
 observation marks it delivered; later feedback may use `native_review_reference`.
 A fresh or resumed context receives the full pair again. Historical failed checks
 stay attached to the rejected report instead of appearing as a current failure.
+When the live controller matches the exact rejected report to the resident's
+just-generated submission, `before.report_reference=preceding-submission` replaces
+that duplicate report text in feedback. Its check still travels in full. Without
+that match the complete report travels. Bootstrap always includes the full pair,
+and renewed contexts clear the submission attestation. Returned provenance keeps
+the exact report in every case.
 Context renewal and binary continuity preserve those records. Nested search
 checks remain the native callback's observations, distinct from the controller's
 whole-checker count. Callback execution and its side effects are caller-owned.
