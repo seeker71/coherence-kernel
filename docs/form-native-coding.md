@@ -123,6 +123,12 @@ the caller's expected `stdout` is withheld. Review guidance keeps conditions for
 the requested decision separate from limits on broader claims.
 Its shared native function lives in
 [`form-cli-review-guidance.bml`](../form/form-stdlib/bml/form-cli-review-guidance.bml).
+An explicit textual requirement can also have a necessary presence check:
+`{"tool":"jq","arguments":[".answer | contains(\"?\")"],"stdout":"true\n"}`
+checks for question punctuation in the answer field. This does not establish
+that the question is relevant or advances the enquiry. Preserve the original
+checks and assess those semantic requirements in the actual answer.
+
 The next action follows the supported current decision; broader evaluation
 becomes a prerequisite only when the supplied policy requires it. The guidance
 asks for source-backed requirements and thresholds.
