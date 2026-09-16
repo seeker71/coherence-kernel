@@ -442,6 +442,16 @@ The callback returns `list(available, proposed-report, method, observation)`:
 It may use `fcrs-search` or another caller-owned native capability. The caller
 must update any explanation or related claims made stale by a changed proposal.
 
+When a verified proposal still needs the resident's full explanation, return
+`list(available, proposed-report, method, observation, "review")`. After the
+unchanged checks pass, this leaves the task in review with event status
+`accepted-for-review`. The same resident receives the exact rejected and verified
+reports with their respective check results. It must complete the original
+caller report; that submission runs the same checks again. A passing native
+candidate alone does not finish this continuation. Existing turn and context
+budgets still apply, and no additional model admission is requested by this hook.
+Other fifth-element values are malformed.
+
 A changed, nonempty report runs the original complete checker again. Passing
 is required for completion. A failed native candidate returns to ordinary
 repair without recursively invoking the callback; declining or returning the
@@ -458,9 +468,12 @@ under `before`, and a changed native report with its own check under `after`.
 A declined or unchanged proposal has no `after` check. Older events expose null
 evidence instead of reconstructing a history they did not retain. Malformed
 checker output is explicitly marked, with no valid check asserted. These records
-are returned to the caller and preserved in continuity; they are not automatically
-added to model feedback. A caller preparing an explanation can select the relevant
-records while keeping each observation attached to the report it actually checked.
+are returned to the caller and preserved in continuity. The four-element callback
+does not add them to model feedback. The explicit `"review"` continuation sends
+the newest pair under `native_review` once per resident context. Only a completed
+observation marks it delivered; later feedback may use `native_review_reference`.
+A fresh or resumed context receives the full pair again. Historical failed checks
+stay attached to the rejected report instead of appearing as a current failure.
 Context renewal and binary continuity preserve those records. Nested search
 checks remain the native callback's observations, distinct from the controller's
 whole-checker count. Callback execution and its side effects are caller-owned.
@@ -469,7 +482,8 @@ model-turn allowance; its verification runs and provenance are counted separatel
 
 `tests/form-cli-native-review-repair-band.fk` exercises successful and failed
 repair, declines, unchanged proposals, malformed results, source preservation,
-attribution, result projection and binary continuity without loading a model.
+attribution, result projection, continuation, observation admission and binary
+continuity without loading a model.
 
 Review guidance follows the caller's requested report fields and value types.
 Decision-first guidance applies when the task asks for a decision. Originals,

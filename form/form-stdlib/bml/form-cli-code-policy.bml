@@ -28,16 +28,26 @@ section [form.bml] {
   def fcap-context-instructions(s) = if ge(len(fcap-memory(s)),10) then nth(fcap-memory(s),9) else list();
   def fcap-native-repairs(s) = if ge(len(fcap-memory(s)),11) then nth(fcap-memory(s),10) else list();
   def fcap-report-source(s) = if ge(len(fcap-memory(s)),12) then nth(fcap-memory(s),11) else "submitted";
+  def fcap-context-native-review(s) = if ge(len(fcap-memory(s)),13) then nth(fcap-memory(s),12) else 0;
+  def fcap-with-native-context(s,count) {
+   let padded = fcap-provenance(s,fcap-native-repairs(s),fcap-report-source(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),12),list(count)));
+  }
+  def fcap-last-native(s) = head(reverse(fcap-native-repairs(s)));
+  def fcap-awaiting-native-review(s) = if not(and(fcap-reviewing(s),and(str_eq(fcap-stage(s),"review"),str_eq(fcap-report-source(s),"caller-native-repair")))) then 0 else if nil?(fcap-native-repairs(s)) then 0 else str_eq(nth(fcap-last-native(s),1),"accepted-for-review");
+  def fcap-native-context-start(s) = if nil?(fcap-native-repairs(s)) then s else fcap-with-native-context(s,len(fcap-native-repairs(s)));
+  def fcap-native-context-admitted(s) = if fcap-awaiting-native-review(s) then fcap-with-native-context(s,len(fcap-native-repairs(s))) else s;
   def fcap-provenance(s,events,source) = fcap-with-memory(s,list(fcap-failures(s),fcap-evidence(s),fcap-reflections(s),fcap-checks(s),fcap-repeat(s),fcap-tool-history(s),fcap-mode(s),fcap-report(s),fcap-context-docs(s),fcap-context-instructions(s),events,source));
   def fcap-record-native(s,method,status,observation,source) = fcap-provenance(s,append(fcap-native-repairs(s),list(list(method,status,observation,fcap-checks(s)))),source);
   // Exact reports and their own checker results stay paired. These records are
-  // returned to the caller, not automatically injected into model context.
+  // returned to the caller. An explicit continuation also admits the newest
+  // pair once per resident context, with full evidence again after resume.
   def fcap-report-check-evidence(report,result) = list(report,if fcap-check-shape?(result) then result else list());
   def fcap-record-native-evidence(s,method,status,observation,source,before,after) = fcap-provenance(s,append(fcap-native-repairs(s),list(list(method,status,observation,fcap-checks(s),before,after))),source);
-  def fcap-begin-context(s) = fcap-with-memory(s,list(fcap-failures(s),fcap-evidence(s),fcap-reflections(s),fcap-checks(s),fcap-repeat(s),fcap-tool-history(s),fcap-mode(s),fcap-report(s),fcap-docs(s),list(fcap-work-instruction(s))));
+  def fcap-begin-context(s) = fcap-native-context-start(fcap-with-memory(s,list(fcap-failures(s),fcap-evidence(s),fcap-reflections(s),fcap-checks(s),fcap-repeat(s),fcap-tool-history(s),fcap-mode(s),fcap-report(s),fcap-docs(s),list(fcap-work-instruction(s)))));
   // Only a completed observation admits its instruction to this context.
   // Bootstrap always carries full instructions, including after resume.
-  def fcap-observation-admitted(s,before,after,live) = if and(live,eq(after,add(before,1))) then fcap-admit-instruction(s) else s;
+  def fcap-observation-admitted(s,before,after,live) = if and(live,eq(after,add(before,1))) then fcap-native-context-admitted(fcap-admit-instruction(s)) else s;
   def fcap-admit-instruction(s) = if or(lt(len(fcap-memory(s)),9),fat-has(fcap-context-instructions(s),fcap-work-instruction(s))) then s else fcap-with-memory(s,append(fat-take(fcap-memory(s),9),list(append(fcap-context-instructions(s),list(fcap-work-instruction(s))))));
   def fcap-observation-instruction(s) {
    let full = fcap-work-instruction(s);
@@ -164,12 +174,16 @@ section [form.bml] {
    // Native work stays inside this submitted turn; its checks have their own count.
    append(append(fat-take(next,9),list(fcap-turns(s))),fat-drop(next,10));
   };
-  def fcap-native-shape(proposal) = if not(str_eq(value_kind(proposal),"list")) then 0 else if not(eq(len(proposal),4)) then 0 else and(or(value_eq(head(proposal),0),value_eq(head(proposal),1)),and(str_eq(value_kind(nth(proposal,1)),"string"),and(str_eq(value_kind(nth(proposal,2)),"string"),and(gt(str_len(nth(proposal,2)),0),str_eq(value_kind(nth(proposal,3)),"string")))));
+  def fcap-native-shape(proposal) = if not(str_eq(value_kind(proposal),"list")) then 0 else if not(or(eq(len(proposal),4),eq(len(proposal),5))) then 0 else and(if eq(len(proposal),5) then value_eq(nth(proposal,4),"review") else 1,and(or(value_eq(head(proposal),0),value_eq(head(proposal),1)),and(str_eq(value_kind(nth(proposal,1)),"string"),and(str_eq(value_kind(nth(proposal,2)),"string"),and(gt(str_len(nth(proposal,2)),0),str_eq(value_kind(nth(proposal,3)),"string"))))));
+  def fcap-native-continue(proposal) = and(eq(len(proposal),5),value_eq(nth(proposal,4),"review"));
+  def fcap-native-review-task() = "Complete the original report from the verified native proposal and its paired evidence.";
+  def fcap-native-review-instruction() = "The native candidate passed the supplied checks. Use native_review, or its already-admitted reference, to distinguish the rejected submission from the verified candidate and each check's scope. Complete the original caller's report and causal explanation, preserving the verified proposal and original source documents. Return {\"report\":<complete report>}; the same caller checks run again. Passing these checks is not proof of general semantic quality.";
   def fcap-native-proposed(s,checker,proposal,before) = if not(fcap-native-shape(proposal)) then fcap-terminal(fcap-record-native-evidence(s,"caller-native-repair","malformed","native repair callback returned a malformed proposal",fcap-report-source(s),before,list()),"caller-native-repair-returned-malformed-proposal") else if not(head(proposal)) then fcap-record-native-evidence(s,nth(proposal,2),"declined",nth(proposal,3),fcap-report-source(s),before,list()) else if or(eq(str_len(fat-trim(nth(proposal,1))),0),str_eq(nth(proposal,1),fcap-report(s))) then fcap-record-native-evidence(s,nth(proposal,2),"unchanged",nth(proposal,3),fcap-report-source(s),before,list()) else fcap-native-recheck(fcap-count-check(fcap-with-report(s,nth(proposal,1))),checker,proposal,before);
   def fcap-native-recheck(s,checker,proposal,before) {
    let checked = fcap-check-state(s,checker);
-   let observed = fcap-record-native-evidence(s,nth(proposal,2),if fcap-check-passed?(checked) then "accepted" else "rejected",nth(proposal,3),"caller-native-repair",before,fcap-report-check-evidence(fcap-report(s),checked));
-   fcap-verified(observed,checked);
+   let continue = and(fcap-check-passed?(checked),fcap-native-continue(proposal));
+   let observed = fcap-record-native-evidence(s,nth(proposal,2),if continue then "accepted-for-review" else if fcap-check-passed?(checked) then "accepted" else "rejected",nth(proposal,3),"caller-native-repair",before,fcap-report-check-evidence(fcap-report(s),checked));
+   if continue then fcap-move(observed,"review",fcap-docs(observed),list(fcap-native-review-task()),nth(observed,6),nth(observed,7),fcap-native-review-task(),fcap-calls(observed),nth(observed,11)) else fcap-verified(observed,checked);
   }
   def fcap-native-evidence-json(row,index) = if or(le(len(row),index),nil?(nth(row,index))) then json-node-null() else {
    let evidence = nth(row,index);
@@ -192,7 +206,7 @@ section [form.bml] {
    fcap-move(remembered, route, fcap-docs(s), nth(s, 5), nth(s, 6), nth(s, 7), str_concat("Apply the changed approach, then review and run the unchanged caller checks: ", change), fcap-calls(s), nth(s, 11));
   }
   def fcap-instruction(s) = if str_eq(fcap-stage(s), "refine") then "Return {\"brief\":\"precise goal, constraints and observable acceptance\"}." else if str_eq(fcap-stage(s), "plan") then "Return {\"plan\":\"approach, dependencies, checks and edge cases\"}." else if str_eq(fcap-stage(s), "split") then "Return {\"tasks\":[\"first concrete task\",\"next dependent task\"]}." else if str_eq(fcap-stage(s), "review") then "Read and review the actual changes. Return {\"verdict\":\"accept\",\"reason\":\"checked findings\"} or verdict=reject with actionable findings. This is same-model review, not independent validation." else if str_eq(fcap-stage(s), "repair") then "Inspect the actual failure evidence. Return {\"diagnosis\":\"observed cause, not a guess of success\",\"change\":\"what to do differently and check\",\"next\":\"implement\"}. Use next=plan when the approach or task order needs revision. You may read; editing resumes only in implement. Do not merely repeat the failed approach or weaken the checks." else "Use tools to implement the first pending task. Return {\"task\":\"done\"} only when it is implemented.";
-  def fcap-work-instruction(s) = if not(fcap-reviewing(s)) then fcap-instruction(s) else if str_eq(fcap-stage(s), "review") then fcrg-review() else if str_eq(fcap-stage(s),"repair") then "Read the named failed check, its actual result and the original evidence. Distinguish a wrong value from a structure or tool failure using that observation. Keep the decision conditions separate from limits on broader claims. Submit {\"report\":<complete corrected report>} to rerun the unchanged source and report checks now. Read-only tools remain available. If further inspection needs a plan, return diagnosis, change and next=plan. Preserve every source document and constraint." else if str_eq(fcap-stage(s), "implement") then "Inspect the first pending review task with read-only native tools. No document may change. Return {\"task\":\"done\"} when that inspection is complete." else fcap-instruction(s);
+  def fcap-work-instruction(s) = if not(fcap-reviewing(s)) then fcap-instruction(s) else if fcap-awaiting-native-review(s) then fcap-native-review-instruction() else if str_eq(fcap-stage(s), "review") then fcrg-review() else if str_eq(fcap-stage(s),"repair") then "Read the named failed check, its actual result and the original evidence. Distinguish a wrong value from a structure or tool failure using that observation. Keep the decision conditions separate from limits on broader claims. Submit {\"report\":<complete corrected report>} to rerun the unchanged source and report checks now. Read-only tools remain available. If further inspection needs a plan, return diagnosis, change and next=plan. Preserve every source document and constraint." else if str_eq(fcap-stage(s), "implement") then "Inspect the first pending review task with read-only native tools. No document may change. Return {\"task\":\"done\"} when that inspection is complete." else fcap-instruction(s);
   // Reply diagnostics contain shape and control counters, never answer text.
   def fcap-shape-s(key,value) = json-node-pair(key,json-node-string(value));
   def fcap-shape-n(key,value) = json-node-pair(key,json-node-int(value));
@@ -208,8 +222,9 @@ section [form.bml] {
   def fcap-evidence-reference(s,text) = if and(gt(fcap-failures(s),0),and(gt(str_len(fcap-evidence(s)),str_len(fcap-evidence-reference-text())),str_eq(text,fcap-evidence(s)))) then fcap-evidence-reference-text() else text;
   def fcap-pending-observation(s,rows) = if nil?(rows) then list() else cons(json-node-string(fcap-evidence-reference(s,head(rows))),fcap-pending-observation(s,tail(rows)));
   def fcap-observation-with-instruction(s,instruction) = json-node-object(append(list(json-node-pair("role", json-node-string(fcap-stage(s))), json-node-pair("mode", json-node-string(fcap-mode(s))), json-node-pair("instruction", json-node-string(instruction)), json-node-pair("observation", json-node-string(fcap-evidence-reference(s,fcap-note(s)))), json-node-pair("pending", json-node-array(fcap-pending-observation(s,nth(s, 5))))), if eq(fcap-failures(s), 0) then list() else list(json-node-pair("failure_evidence", json-node-string(fcap-evidence(s))), json-node-pair("repair_attempts", json-node-int(fcap-failures(s))), json-node-pair("replan_required", json-node-int(fcap-repeat(s))))));
-  def fcap-observation-node(s) = fcap-observation-with-instruction(s,fcap-work-instruction(s));
-  def fcap-observation(s) = json-emit(fcap-observation-with-instruction(s,fcap-observation-instruction(s)));
+  def fcap-native-review-observation(s,instruction,full) = json-node-object(append(list(json-node-pair("role",json-node-string(fcap-stage(s))),json-node-pair("mode",json-node-string(fcap-mode(s))),json-node-pair("instruction",json-node-string(instruction)),json-node-pair("observation",json-node-string(fcap-note(s))),json-node-pair("pending",json-node-array(fcap-string-json(nth(s,5))))),if full then list(json-node-pair("native_review",head(fcap-native-repairs-json(list(fcap-last-native(s)))))) else list(json-node-pair("native_review_reference",json-node-int(len(fcap-native-repairs(s)))))));
+  def fcap-observation-node(s) = if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-native-review-instruction(),1) else fcap-observation-with-instruction(s,fcap-work-instruction(s));
+  def fcap-observation(s) = json-emit(if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-observation-instruction(s),gt(len(fcap-native-repairs(s)),fcap-context-native-review(s))) else fcap-observation-with-instruction(s,fcap-observation-instruction(s)));
   def fcap-reflections-json(rows) = if nil?(rows) then list() else cons(json-node-object(list(json-node-pair("attempt", json-node-int(head(head(rows)))), json-node-pair("evidence", json-node-string(nth(head(rows), 1))), json-node-pair("diagnosis", json-node-string(nth(head(rows), 2))), json-node-pair("change", json-node-string(nth(head(rows), 3))), json-node-pair("next", json-node-string(nth(head(rows), 4))))), fcap-reflections-json(tail(rows)));
   def fcap-string-json(xs) = if nil?(xs) then list() else cons(json-node-string(head(xs)), fcap-string-json(tail(xs)));
   def fcap-bootstrap(s) {
