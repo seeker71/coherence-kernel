@@ -122,6 +122,21 @@ The next action follows the supported current decision; broader evaluation
 becomes a prerequisite only when the supplied policy requires it. The guidance
 asks for source-backed requirements and thresholds.
 
+Initial review uses `fcrg-substance` to ask for the complete enquiry, relevant
+source values and identities, an explanation of preserved paths, and an immediate
+action whose prerequisites follow the supplied rule. Broader research remains a
+separate optional follow-up. Review after native repair keeps its narrower
+instruction about the paired evidence and verified proposal. These are generation
+instructions; their effects must be checked in the returned answer and are not
+established by passing report-field checks.
+
+The effectful comparison `observe/form-cli-observation-prefill-compare.bml`
+opens the registered local Q8 model once and compares observation routes using
+fresh stream states, a shared prefix, a nonzero observation position and 16
+continued predictions. It reports timing, prediction agreement, settled GPU
+state and release. It does not change serving dispatch or establish equality
+outside its recorded sample. Run it without overlapping another GPU owner.
+
 At each model admission, including checkpoint resume, the controller records
 the exact resident documents supplied in that context. A successful single-file
 `read` still executes. When its output equals a supplied document byte-for-byte,
