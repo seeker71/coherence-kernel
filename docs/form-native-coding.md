@@ -403,6 +403,21 @@ can compare original, rejected and verified candidates using the same inputs
 and bindings, then return those observed traces alongside the paired checks.
 Use the source to explain internal effects, and preserve the trace's scope.
 
+`fcre-trace-detail(prepared, arguments, bindings)` returns
+`[ordinary-result, events]`, where each event is
+`[binding-name, evaluated-arguments, execution-result]`. This retains the inputs
+and result at each actual call boundary, including a failed call. Calls skipped
+after failure have no event. `fcre-trace-run` projects names from the same
+execution; it does not invoke callbacks again. The trace itself emits no values
+to the framebuffer. The caller owns retained data and any public projection.
+
+When supplying native observations as initial context, keep the original source
+documents and place the derived evidence in its own document. Name the controlled
+inputs, observed values and scope. A final counter alone does not attribute its
+change to a particular call; use the corresponding arguments and results for
+that attribution. An accurate observation still requires checking the generated
+answer against the source.
+
 ### Search a small native repair before another model call
 
 `bml/form-cli-review-search.bml` searches one explicit repair family: replace
