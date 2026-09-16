@@ -12,6 +12,10 @@ The optional LoRA proposal and asynchronous learner run as native `fkwu` workers
 The existing `heal ... local` command is a different route: it still permits
 Ollama. Do not use that spelling to request this native-only workflow.
 
+A caller can separately offer the optional [response resource](form-response-resource.md)
+for a retained, failing read-only report. Form owns that provider CLI process,
+usage receipt and unchanged assertions.
+
 ## Call without knowing Form syntax
 
 In form-cli, enter `code` followed by a JSON object. The standalone native door

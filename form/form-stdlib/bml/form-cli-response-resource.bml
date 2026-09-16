@@ -1,0 +1,111 @@
+// An optional provider resource for a failed, caller-owned read-only report.
+// Default native execution remains independent of provider CLI availability.
+// preludes: form-stdlib/bml/form-cli-response-session.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/form-cli-exec-usage.bml
+section [form.bml] {
+ class FormCliResponseResource {
+  def frr-assessment(request) = json-object-get(request,"assessment");
+  def frr-provider(request) = json-object-get(request,"provider");
+  def frr-allowed(request) = node_eq(json-object-get(frr-provider(request),"allowed"),intern_trivial_bool(true));
+  def frr-valid(request) = and(fat-wire-object?(request),and(fhn-id(fcap-string(request,"id")),and(frss-request-valid(frr-assessment(request)),and(str_eq(fcaq-mode(frr-assessment(request)),"review"),and(fcap-string-array(json-object-get(request,"local_reports")),gt(len(fcap-array(request,"local_reports")),0))))));
+  def frr-provider-valid(provider) = and(str_eq(fcap-string(provider,"interface"),"codex-exec"),and(eq(fcaq-number(provider,"max_processes",0),1),gt(fcaq-number(provider,"seconds",0),0)));
+  def frr-source(assessment) = fcaq-check(node_children(json-object-get(assessment,"checks")),fat-wire-value(fat-wire-documents(assessment)));
+  def frr-report(assessment,text) = fcaq-report-check(node_children(json-object-get(assessment,"report_checks")),text);
+  def frr-plan(allowed,source,report) = if not(eq(head(source),1)) then "source-needs-repair" else if eq(head(report),1) then "local-report-passed" else if not(allowed) then "provider-not-offered" else "provider-repair";
+  def frr-brief(status) = json-node-object(list(nsm-s("schema","form-response-resource-v1"),nsm-s("status",status),nsm-n("provider_processes_new",0),nsm-n("verified_repair",0)));
+  def frr-read(paths) = frr-read-budget(paths,FatMaxBytes());
+  def frr-read-budget(paths,remaining) {
+   if nil?(paths) then list() else {
+    let path = head(paths);
+    if or(le(file_size(path),0),gt(file_size(path),remaining)) then form_error("response resource local report unavailable or oversized") else 0;
+    let text = read_file(path);
+    cons(json-node-object(list(nsm-s("path",path),nsm-s("bytes_sha256",fcam-hash(text)),nsm-s("text",text))),frr-read-budget(tail(paths),sub(remaining,str_len(text))));
+   };
+  }
+  def frr-packet(request,reports) = json-node-object(list(json-node-pair("request",request),json-node-pair("reports",json-node-array(reports))));
+  def frr-prompt(assessment,prior,failed) = str_concat("Form requests one bounded repair after a retained local report failed its unchanged caller-owned assertions. Use the question and supplied documents to return the complete final JSON report. No tools, repository exploration, file changes or additional model calls are needed. Source assertions have passed. The failed-check feedback supplies its observed value, not an expected answer. Preserve valid fields and resolve the actual error.\n",json-emit(json-node-object(list(json-node-pair("goal",json-object-get(assessment,"goal")),json-node-pair("documents",json-object-get(assessment,"documents")),nsm-s("prior_report",prior),nsm-s("failed_check",nth(failed,1))))));
+  def frr-judgment(assessment,answer,status,usage) {
+   let source = frr-source(assessment);
+   let report = if and(str_eq(status,"0"),faj-valid(answer)) then frr-report(assessment,answer) else list(0,"provider process or final JSON report incomplete");
+   let observed = str_eq(nsm-str(usage,"status"),"observed");
+   json-node-object(list(nsm-n("source_checks_passed",head(source)),nsm-n("report_checks_passed",head(report)),nsm-n("usage_observed",observed),nsm-n("verified_repair",and(eq(head(source),1),and(eq(head(report),1),observed))),json-node-pair("semantic_quality",json-node-null())));
+  }
+  def frr-intact(answer,events,process) = and(str_eq(fcam-hash(answer),fcap-string(process,"answer_sha256")),str_eq(fcam-hash(events),fcap-string(process,"usage_sha256")));
+  def frr-lifecycle(checked,process) {
+   let released = and(str_eq(nsm-str(process,"state"),"finished"),and(eq(fcaq-number(process,"status",-1),0),str_eq(nsm-str(json-object-get(process,"cleanup"),"state"),"released")));
+   oh-set(oh-set(checked,"process_released",json-node-int(released)),"verified_repair",json-node-int(and(eq(nsm-num(checked,"verified_repair"),1),released)));
+  }
+  def frr-result(root,request,process,newProcess) {
+   let job = fcap-string(process,"job");
+   let answerPath = fcap-string(process,"answer_path");
+   let answer = if fs-exists?(answerPath) then read_file(answerPath) else "";
+   let usagePath = fcap-string(process,"usage_path");
+   let intact = frr-intact(answer,read_file(usagePath),process);
+   if not(intact) then form_error("response resource retained answer or usage changed; no provider retry") else 0;
+   let usage = feu-read(usagePath);
+   let processRecord = fhn-json(fhn-stage-path(job,"resource",".process.json"));
+   let checked = frr-lifecycle(frr-judgment(frr-assessment(request),answer,fcap-string(process,"status"),usage),processRecord);
+   let result = json-node-object(list(nsm-s("schema","form-response-resource-v1"),nsm-s("status",if eq(nsm-num(checked,"verified_repair"),1) then "checked" else "attention"),nsm-s("answer_source","codex-exec-through-native-form"),nsm-s("evidence",root),nsm-s("answer_path",answerPath),nsm-s("process_evidence",job),nsm-s("process_status",fcap-string(process,"status")),nsm-n("provider_processes_new",newProcess),nsm-n("provider_processes_for_request",1),nsm-s("usage_event",root),nsm-s("usage_scope","one logical resource request;replayed readings do not add provider usage"),json-node-pair("provider_usage",usage),json-node-pair("check",checked),nsm-n("verified_repair",nsm-num(checked,"verified_repair")),nsm-s("local_evidence_basis","caller-supplied report paths;contents frozen and assertions rechecked"),json-node-pair("overall_session_quality",json-node-null())));
+   let measured = oh-set(result,"provider_elapsed_ms",if json-object-has?(processRecord,"elapsed_ms") then json-object-get(processRecord,"elapsed_ms") else json-node-null());
+   let observationPath = frss-path(root,str_concat("observation-",str_concat(int_to_str(host_pid()),str_concat("-",str_concat(int_to_str(now_unix_ms()),".json")))));
+   frss-frozen(observationPath,json-emit(measured));
+   oh-emit(frss-path(root,"events.jsonl"),oh-reading("response-resource",root,"checked-report",json-node-int(1),json-object-get(checked,"verified_repair"),json-object-get(checked,"verified_repair"),list(),list("retain","inspect-evidence"),oh-reference(observationPath)));
+   measured;
+  }
+  def frr-pending(root,status) = oh-set(frr-brief(status),"evidence",json-node-string(root));
+  def frr-remembered(root,request,packet) {
+   let frozen = frss-path(root,"request.json");
+   let process = frss-path(root,"process.json");
+   if not(fs-exists?(frozen)) then frr-pending(root,"claim-pending-or-different") else if not(str_eq(read_file(frozen),packet)) then frr-pending(root,"claim-pending-or-different") else if not(fs-exists?(process)) then frr-pending(root,"process-unresolved;inspect-owned-evidence;no-duplicate-call") else {
+    let text = read_file(process);
+    if not(faj-valid(text)) then frr-pending(root,"process-record-incomplete;no-duplicate-call") else frr-result(root,request,parse-json("retained-resource-process",text),0);
+   };
+  }
+  def frr-held(root,request,reports,packet,failed) {
+   frss-frozen(frss-path(root,"request.json"),packet);
+   let repo = fhn-root();
+   let spool = fhn-at(repo,".form-heal");
+   fs_mkdir(spool);
+   let job = fhn-unique(spool,"process-",0);
+   let work = fhn-unique(hearth-response-resource-work-parent(),hearth-response-resource-work-prefix(),0);
+   if or(str_eq(job,""),str_eq(work,"")) then form_error("response resource process directory unavailable;claim retained") else 0;
+   fhn-write-json(fhn-at(job,"snapshot.json"),json-node-object(list(fhn-s("root",repo))));
+   frss-frozen(frss-path(root,"owner.json"),json-emit(json-node-object(list(nsm-s("job",job),nsm-n("owner_pid",host_pid())))));
+   let input = frss-path(job,"resource.prompt");
+   let output = frss-path(job,"resource.reply");
+   frss-frozen(input,frr-prompt(frr-assessment(request),fcap-string(nth(reports,sub(len(reports),1)),"text"),failed));
+   let action = fcap-control(now_unix_ms(),list("failed-native-report",head(failed)),2);
+   if not(eq(action,2)) then form_error("response resource control did not correlate;claim retained") else 0;
+   let status = fhn-run(job,"resource",fcaq-number(frr-provider(request),"seconds",0),"root",input,list("codex","exec","--sandbox","workspace-write","--ephemeral","--skip-git-repo-check","--ignore-user-config","--json","--cd",work,"-o",output,"-"));
+   let retainedAnswer = frss-path(root,"provider-answer.json");
+   let retainedUsage = frss-path(root,"provider-events.jsonl");
+   let answer = if fs-exists?(output) then read_file(output) else "";
+   let events = read_file(fhn-stage-path(job,"resource",".out"));
+   frss-frozen(retainedAnswer,answer);
+   frss-frozen(retainedUsage,events);
+   let process = json-node-object(list(nsm-s("job",job),nsm-s("status",status),nsm-s("answer_path",retainedAnswer),nsm-s("answer_sha256",fcam-hash(answer)),nsm-s("usage_path",retainedUsage),nsm-s("usage_sha256",fcam-hash(events))));
+   frss-frozen(frss-path(root,"process.json"),json-emit(process));
+   frr-result(root,request,process,1);
+  }
+  def frr-admit(request,reports,failed) {
+   let packet = json-emit(frr-packet(request,reports));
+   if gt(str_len(packet),FatMaxBytes()) then form_error("response resource aggregate evidence oversized") else 0;
+   let home = hearth-response-resources();
+   fs-mkdir(fs-path-dirname(fs-path-dirname(home)));
+   fs-mkdir(fs-path-dirname(home));
+   fs-mkdir(home);
+   let root = frss-path(home,fcam-hash(packet));
+   if eq(host_dir_mkdir(root),1) then frr-held(root,request,reports,packet,failed) else frr-remembered(root,request,packet);
+  }
+  def frr-run(request) {
+   if not(frr-valid(request)) then frr-brief("invalid-readonly-assessment-or-local-evidence-contract") else {
+    let reports = frr-read(fcap-array(request,"local_reports"));
+    let assessment = frr-assessment(request);
+    let failed = frr-report(assessment,fcap-string(nth(reports,sub(len(reports),1)),"text"));
+    let plan = frr-plan(frr-allowed(request),frr-source(assessment),failed);
+    if not(str_eq(plan,"provider-repair")) then frr-brief(plan) else if not(frr-provider-valid(frr-provider(request))) then frr-brief("provider-contract-needs-one-process-and-positive-deadline") else frr-admit(request,reports,failed);
+   };
+  }
+  def frr-text(text) = if or(gt(str_len(text),FatMaxBytes()),not(faj-valid(text))) then frr-brief("invalid-or-oversized-resource-request") else frr-run(parse-json("response-resource",text));
+ }
+ 0;
+}
