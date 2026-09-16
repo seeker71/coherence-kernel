@@ -3,6 +3,7 @@
 section [form.bml] {
  class DocumentContextWitness {
   def dcb-observe(name,ok) = if ok then 1 else form_error(str_concat("document context: ",name));
+  def dcb-query-check(row,expected) = dcb-observe("source query contract",eq(fcap-source-query-valid(parse-json("query",row)),expected));
  }
  let docs = list(list("evidence","evidence.txt","unseen-source-sentinel\nobserved=yes"));
  let request = parse-json("review","{\"mode\":\"review\",\"review_entry\":\"direct\",\"goal\":\"Read evidence before reporting\",\"writable\":[],\"checks\":[{\"tool\":\"cat\",\"arguments\":[\"evidence.txt\"],\"stdout\":\"unseen-source-sentinel\\nobserved=yes\"}],\"report_checks\":[{\"tool\":\"jq\",\"arguments\":[\".found\"],\"stdout\":\"true\\n\"}],\"evaluation\":1}");
@@ -39,5 +40,37 @@ section [form.bml] {
  dcb-observe("wrong report still fails",str_eq(fcap-stage(fcap-step(catalog,"{\"found\":false}",fcaq-live-checker(catalogRequest))),"repair"));
  let wrongSource = oh-set(catalogRequest,"checks",parse-json("bad-source","[{\"tool\":\"cat\",\"arguments\":[\"evidence.txt\"],\"stdout\":\"different\"}]"));
  dcb-observe("source assertions still run",str_eq(fcap-stage(fcap-step(catalog,"{\"found\":true}",fcaq-live-checker(wrongSource))),"repair"));
+ dcb-query-check("{\"tool\":\"rg\",\"arguments\":[\"observed\",\"evidence.txt\"]}",1);
+ dcb-query-check("{\"tool\":\"read\",\"arguments\":[],\"note\":\"caller metadata\"}",1);
+ dcb-query-check("{\"tool\":\"write\",\"arguments\":[\"evidence.txt\"]}",0);
+ dcb-query-check("{\"tool\":\"verify\",\"arguments\":[]}",0);
+ dcb-query-check("{\"tool\":\"rg\",\"arguments\":[1]}",0);
+ dcb-query-check("{\"tool\":\"rg\",\"arguments\":[] ,\"input\":\"\"}",0);
+ dcb-query-check("{\"tool\":\"rg\",\"arguments\":[],\"input\":null}",0);
+ dcb-query-check("{\"tool\":\"rg\",\"arguments\":[],\"stdout\":\"invented\"}",0);
+ dcb-query-check("{\"tool\":\"rg\",\"arguments\":[],\"stdout\":null}",0);
+ dcb-query-check("null",0);
+ let sourceQueries = parse-json("queries","[{\"tool\":\"rg\",\"arguments\":[\"observed\",\"evidence.txt\"]}]");
+ let focusedRequest = oh-set(catalogRequest,"source_queries",sourceQueries);
+ dcb-observe("source query request admitted",fcaq-request-valid(focusedRequest));
+ dcb-observe("source queries need catalog",not(fcaq-request-valid(oh-set(request,"source_queries",sourceQueries))));
+ dcb-observe("source queries need array",not(fcaq-request-valid(oh-set(catalogRequest,"source_queries",json-node-null()))));
+ dcb-observe("source query injection rejected before model",not(fcaq-request-valid(oh-set(catalogRequest,"source_queries",parse-json("injected","[{\"tool\":\"cat\",\"arguments\":[\"evidence.txt\"],\"stdout\":\"invented\"}]")))));
+ let focused = fcap-begin-context(fcaq-initial(focusedRequest,docs));
+ let focusedPrompt = fcap-bootstrap(focused);
+ dcb-observe("actual excerpt admitted",and(ge(str_find(focusedPrompt,"observed=yes",0),0),lt(str_find(focusedPrompt,"unseen-source-sentinel",0),0)));
+ dcb-observe("partial excerpt does not attest full document",nil?(fcap-context-docs(focused)));
+ dcb-observe("queries preserve originals",value_eq(fcap-docs(focused),docs));
+ let focusedResume = fcap-begin-context(fcam-unpack(fcam-pack(focused)));
+ dcb-observe("checkpoint preserves source query commands",value_eq(fcap-source-queries(focused),fcap-source-queries(focusedResume)));
+ dcb-observe("new caller can clear old queries",nil?(fcap-source-queries(fcaq-context-state(catalogRequest,focusedResume))));
+ let absent = head(fcap-source-observations(docs,list(list("cat",list("absent.txt")))));
+ dcb-observe("query failure keeps diagnostics",and(not(eq(json-int-value(json-object-get(absent,"exit")),0)),gt(str_len(fcap-string(absent,"stderr")),0)));
+ let focusedRead = fcap-step(focused,"{\"tool\":\"read\",\"arguments\":[\"evidence.txt\"]}",fcaq-checker(focusedRequest));
+ dcb-observe("full source remains available",ge(str_find(fcap-note(focusedRead),"unseen-source-sentinel",0),0));
+ let focusedAccepted = fcap-step(focusedRead,"{\"found\":true}",fcaq-live-checker(focusedRequest));
+ dcb-observe("focused report passes original checks",and(str_eq(fcap-stage(focusedAccepted),"complete"),value_eq(fcap-docs(focusedAccepted),docs)));
+ dcb-observe("focused wrong report keeps original failure",str_eq(fcap-stage(fcap-step(focused,"{\"found\":false}",fcaq-live-checker(focusedRequest))),"repair"));
+ dcb-observe("absent queries preserve bootstrap",str_eq(fcap-bootstrap(catalog),fcap-bootstrap(fcap-with-source-queries(catalog,list()))));
  1;
 }

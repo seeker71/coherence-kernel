@@ -207,6 +207,30 @@ reference or patch against source text omitted from the prompt. Reads continue
 returning full results in this mode. Resume starts a fresh catalog context;
 previous tool reads do not implicitly establish visibility there.
 
+Catalog reviews can also supply `source_queries` to put selected native source
+observations into the initial model context:
+
+```json
+"source_queries": [
+  {"tool":"rg","arguments":["observed","evidence.txt"]},
+  {"tool":"sed","arguments":["-n","10,20p","notes.md"]}
+]
+```
+
+Each row names a read-only native tool and a string arguments array. Form runs
+the query over the actual resident documents and includes its output, exit
+status and diagnostics. Caller-supplied `input` or `stdout` fields are rejected,
+including empty or null values. Other row metadata is not admitted as an
+observation. A failed query remains a failed observation. The request chooses
+the queries, including on resume; omission clears old query selections.
+Checkpointing retains the commands and recomputes observations from the current
+resident sources at admission. An excerpt does not establish that the full
+document was supplied, so subsequent reads still return full source text.
+
+This is caller-directed retrieval. It does not choose relevance automatically,
+replace original documents or source/report checks, or establish semantic
+quality. With no queries, the existing prompt is unchanged.
+
 The default is `"full"`. The request selects the admission mode, including on
 resume, without changing its source/report assertions or read-only boundary.
 Catalog mode currently accepts reviews only. A smaller initial prompt is a
