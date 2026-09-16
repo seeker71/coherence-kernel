@@ -39,6 +39,20 @@ Responses retain the process duration, name their provider origin and leave
 overall semantic quality unassessed. Assessment answers are not sent to
 session learning.
 
+Process release and successful completion are separate observations. A process
+that exits nonzero can still have released all its owned resources; that release
+does not make its answer an accepted repair. Missing completed provider usage
+remains unknown, including after interruption.
+
+Native callers that explicitly need a provider to operate a stateful Form tool
+can use `frr-execute-tool-session(root, prompt, seconds)`. It adds that caller's
+owned evidence directory to the isolated workspace's writable roots through
+`codex exec --add-dir`. The caller supplies the tool command and its working
+directory. Ordinary `frr-execute` calls retain their existing scope. This is an
+internal execution option; it does not enable provider tools in the bounded
+report-repair or synthesis prompts, or enable a provider for ordinary native
+code sessions.
+
 An atomic claim keyed by the complete request and retained report bytes admits
 one provider process. Repeating the same request rechecks the retained answer
 and reports zero new processes. Answer and usage bytes are frozen and their

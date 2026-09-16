@@ -454,6 +454,14 @@ names, recursion and dynamic callees are refused. Source is limited to 65,536
 bytes and admitted expression depth to 64. This is an expression lane, not a
 general BML module compiler or an isolation boundary for effectful callbacks.
 
+Admission refusals retain `proposal-outside-caller-bound-expression-lane` and
+append the first concrete cause, such as
+`binding-arity-mismatch name=and expected=2 actual=5`, an unbound call or
+parameter, or excessive depth. This diagnostic walks the rejected syntax;
+it never executes proposed callbacks. The same validator still decides which
+expressions may run. A native repair can therefore act on the actual mismatch
+while the caller keeps the original behavior checks.
+
 Compare the returned values with caller-owned expected behaviors inside the
 report callback, retaining the original source and report assertions. Pass that
 combined callback to `fcac-review` or `fcac-admit`. It then runs on **every report
