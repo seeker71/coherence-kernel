@@ -120,6 +120,35 @@ model on completion; it is not a long-lived shared hearth service.
 
 ## Roles and tools
 
+### Optional initial reasoning
+
+Add `"initial_reasoning_tokens":4096` to a coding or review request to open
+the model's reasoning channel for the first reply of that admission. The
+positive integer limits **all generated tokens in that reply**, including
+reasoning and the final answer. The maximum is 8192; the caller's context
+capacity still applies. Omit the field to keep the ordinary entry.
+
+Form separates the final channel at the actual closing token. Only that final
+response enters the existing tool, edit, report and verification loop. Later
+replies use the ordinary controller. A missing boundary or unfinished initial
+generation returns `attention` and releases the model; a partial answer does
+not become an action or a successful report.
+
+The result reports `requested_initial_reasoning_tokens`. Actual initial
+generation counts, completion, boundary presence and a private evidence path
+appear in `form-code-reasoning` metadata. Reasoning text stays outside the
+framebuffer and tool actions. Evaluation still excludes its answers from
+training. The model, source checks, document constraints and release owner are
+unchanged. This optional local path adds no provider or model-server dependency.
+
+More reasoning has an actual local cost; passing fields still leaves broader
+answer quality to be assessed. The earlier native experiments are retained in
+[`../receipts/2026-09-16-matched-session-and-turn-budget.md`](../receipts/2026-09-16-matched-session-and-turn-budget.md).
+The public request's incomplete and completed executions are recorded in
+[`../receipts/2026-09-16-public-native-reasoning.md`](../receipts/2026-09-16-public-native-reasoning.md).
+
+### Controller roles
+
 | Role | Qwen supplies | Form applies |
 |---|---|---|
 | Refine | `{"brief":"..."}` | Preserve the original goal alongside the refined brief |
