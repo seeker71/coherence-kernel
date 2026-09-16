@@ -390,7 +390,7 @@ controller carries failed observations into its existing repair and diagnostic
 flow. `tests/form-cli-review-execution-band.fk` checks actual return values,
 lazy evaluation, successful absence, callback errors and whole-source refusal.
 
-`bml/form-cli-review-trace.bml` adds `fcrt-run(prepared, arguments, bindings)`.
+`bml/form-cli-review-trace.bml` adds `fcre-trace-run(prepared, arguments, bindings)`.
 It returns `[ordinary-result, invoked-binding-names]`. The trace records actual
 evaluation order: arguments before their enclosing call, only the selected
 branch, and no later calls after an argument fails. Each callback runs once.
