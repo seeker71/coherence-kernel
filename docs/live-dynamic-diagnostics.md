@@ -71,6 +71,15 @@ health reading (`1`, `0`, or `null` for unknown); needed resources; offered
 responses; and source evidence. The transport does not maintain an error-name
 catalogue or decide what health means for another organ.
 
+`oh-reading` derives a fresh identity from the native process owner clock.
+An organ that already owns a unique retained event may instead call
+`oh-reading-with-id(id, organ, flow, aspect, expected, observed, health, needs,
+offers, evidence)`. This keeps the same event schema, transport and response
+correlation without requiring host process-birth inspection. The caller owns
+uniqueness and replay identity: use a retained event key in an exclusively
+claimed run, not a reused label. An empty identity is refused. This is an
+explicit identity contract, not a fallback that guesses a process birth time.
+
 The process organ observes its actual exit and owned-process release. The
 generation organ senses output-byte delivery, prediction refusal and context
 pressure where they occur. The session learner reads each actual before/after
