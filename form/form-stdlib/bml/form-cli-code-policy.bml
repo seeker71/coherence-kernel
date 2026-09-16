@@ -29,13 +29,25 @@ section [form.bml] {
   def fcap-native-repairs(s) = if ge(len(fcap-memory(s)),11) then nth(fcap-memory(s),10) else list();
   def fcap-report-source(s) = if ge(len(fcap-memory(s)),12) then nth(fcap-memory(s),11) else "submitted";
   def fcap-context-native-review(s) = if ge(len(fcap-memory(s)),13) then nth(fcap-memory(s),12) else 0;
+  def fcap-context-native-submission(s) = if ge(len(fcap-memory(s)),14) then nth(fcap-memory(s),13) else 0;
+  def fcap-with-native-submission(s,count) {
+   let padded = fcap-with-native-context(s,fcap-context-native-review(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),13),list(count)));
+  }
+  // Only the live controller can attest that this exact rejected report was
+  // generated in the current context. A replay or bootstrap cannot infer it.
+  def fcap-native-submission-admitted(s,raw) = if not(fcap-awaiting-native-review(s)) then s else if not(faj-valid(raw)) then s else {
+   let obj = parse-json("native-submission",raw);
+   let report = if json-object-has?(obj,"report") then fcap-report-text(obj) else json-emit(obj);
+   if str_eq(report,head(nth(fcap-last-native(s),4))) then fcap-with-native-submission(s,len(fcap-native-repairs(s))) else s;
+  };
   def fcap-with-native-context(s,count) {
    let padded = fcap-provenance(s,fcap-native-repairs(s),fcap-report-source(s));
    fcap-with-memory(padded,append(fat-take(fcap-memory(padded),12),list(count)));
   }
   def fcap-last-native(s) = head(reverse(fcap-native-repairs(s)));
   def fcap-awaiting-native-review(s) = if not(and(fcap-reviewing(s),and(str_eq(fcap-stage(s),"review"),str_eq(fcap-report-source(s),"caller-native-repair")))) then 0 else if nil?(fcap-native-repairs(s)) then 0 else str_eq(nth(fcap-last-native(s),1),"accepted-for-review");
-  def fcap-native-context-start(s) = if nil?(fcap-native-repairs(s)) then s else fcap-with-native-context(s,len(fcap-native-repairs(s)));
+  def fcap-native-context-start(s) = if nil?(fcap-native-repairs(s)) then s else fcap-with-native-submission(fcap-with-native-context(s,len(fcap-native-repairs(s))),0);
   def fcap-native-context-admitted(s) = if fcap-awaiting-native-review(s) then fcap-with-native-context(s,len(fcap-native-repairs(s))) else s;
   def fcap-provenance(s,events,source) = fcap-with-memory(s,list(fcap-failures(s),fcap-evidence(s),fcap-reflections(s),fcap-checks(s),fcap-repeat(s),fcap-tool-history(s),fcap-mode(s),fcap-report(s),fcap-context-docs(s),fcap-context-instructions(s),events,source));
   def fcap-record-native(s,method,status,observation,source) = fcap-provenance(s,append(fcap-native-repairs(s),list(list(method,status,observation,fcap-checks(s)))),source);
@@ -191,7 +203,12 @@ section [form.bml] {
    let valid = fcap-check-shape?(result);
    json-node-object(list(json-node-pair("report",json-node-string(head(evidence))),json-node-pair("check_status",json-node-string(if valid then "observed" else "malformed")),json-node-pair("check",if valid then json-node-object(list(json-node-pair("passed",json-node-int(head(result))),json-node-pair("observation",json-node-string(nth(result,1))))) else json-node-null())));
   };
-  def fcap-native-repairs-json(rows) = if nil?(rows) then list() else cons(json-node-object(list(json-node-pair("method",json-node-string(head(head(rows)))),json-node-pair("status",json-node-string(nth(head(rows),1))),json-node-pair("observation",json-node-string(nth(head(rows),2))),json-node-pair("check_runs",json-node-int(nth(head(rows),3))),json-node-pair("before",fcap-native-evidence-json(head(rows),4)),json-node-pair("after",fcap-native-evidence-json(head(rows),5)))),fcap-native-repairs-json(tail(rows)));
+  def fcap-native-event-json(row,before) = json-node-object(list(json-node-pair("method",json-node-string(head(row))),json-node-pair("status",json-node-string(nth(row,1))),json-node-pair("observation",json-node-string(nth(row,2))),json-node-pair("check_runs",json-node-int(nth(row,3))),json-node-pair("before",before),json-node-pair("after",fcap-native-evidence-json(row,5))));
+  def fcap-native-repairs-json(rows) = if nil?(rows) then list() else cons(fcap-native-event-json(head(rows),fcap-native-evidence-json(head(rows),4)),fcap-native-repairs-json(tail(rows)));
+  def fcap-native-review-before(s,bootstrap) {
+   let before = fcap-native-evidence-json(fcap-last-native(s),4);
+   if or(bootstrap,not(eq(fcap-context-native-submission(s),len(fcap-native-repairs(s))))) then before else json-node-object(list(json-node-pair("report_reference",json-node-string("preceding-submission")),json-node-pair("check_status",json-object-get(before,"check_status")),json-node-pair("check",json-object-get(before,"check"))));
+  }
   def fcap-verified(s, result) = if not(fcap-check-shape?(result)) then fcap-terminal(s, "caller-checker-returned-malformed-result") else if not(eq(head(result), 1)) then fcap-rework(s, str_concat("Native verification failed: ", nth(result, 1))) else fcap-note-at(s, "complete", nth(result, 1));
   def fcap-rework(s, reason) = fcap-repair-state(fcap-note-at(s, fcap-stage(s), reason), reason);
   def fcap-repair-state(s, reason) {
@@ -222,8 +239,8 @@ section [form.bml] {
   def fcap-evidence-reference(s,text) = if and(gt(fcap-failures(s),0),and(gt(str_len(fcap-evidence(s)),str_len(fcap-evidence-reference-text())),str_eq(text,fcap-evidence(s)))) then fcap-evidence-reference-text() else text;
   def fcap-pending-observation(s,rows) = if nil?(rows) then list() else cons(json-node-string(fcap-evidence-reference(s,head(rows))),fcap-pending-observation(s,tail(rows)));
   def fcap-observation-with-instruction(s,instruction) = json-node-object(append(list(json-node-pair("role", json-node-string(fcap-stage(s))), json-node-pair("mode", json-node-string(fcap-mode(s))), json-node-pair("instruction", json-node-string(instruction)), json-node-pair("observation", json-node-string(fcap-evidence-reference(s,fcap-note(s)))), json-node-pair("pending", json-node-array(fcap-pending-observation(s,nth(s, 5))))), if eq(fcap-failures(s), 0) then list() else list(json-node-pair("failure_evidence", json-node-string(fcap-evidence(s))), json-node-pair("repair_attempts", json-node-int(fcap-failures(s))), json-node-pair("replan_required", json-node-int(fcap-repeat(s))))));
-  def fcap-native-review-observation(s,instruction,full) = json-node-object(append(list(json-node-pair("role",json-node-string(fcap-stage(s))),json-node-pair("mode",json-node-string(fcap-mode(s))),json-node-pair("instruction",json-node-string(instruction)),json-node-pair("observation",json-node-string(fcap-note(s))),json-node-pair("pending",json-node-array(fcap-string-json(nth(s,5))))),if full then list(json-node-pair("native_review",head(fcap-native-repairs-json(list(fcap-last-native(s)))))) else list(json-node-pair("native_review_reference",json-node-int(len(fcap-native-repairs(s)))))));
-  def fcap-observation-node(s) = if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-native-review-instruction(),1) else fcap-observation-with-instruction(s,fcap-work-instruction(s));
+  def fcap-native-review-observation(s,instruction,full) = json-node-object(append(list(json-node-pair("role",json-node-string(fcap-stage(s))),json-node-pair("mode",json-node-string(fcap-mode(s))),json-node-pair("instruction",json-node-string(instruction)),json-node-pair("observation",json-node-string(fcap-note(s))),json-node-pair("pending",json-node-array(fcap-string-json(nth(s,5))))),if full then list(json-node-pair("native_review",fcap-native-event-json(fcap-last-native(s),fcap-native-review-before(s,eq(full,2))))) else list(json-node-pair("native_review_reference",json-node-int(len(fcap-native-repairs(s)))))));
+  def fcap-observation-node(s) = if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-native-review-instruction(),2) else fcap-observation-with-instruction(s,fcap-work-instruction(s));
   def fcap-observation(s) = json-emit(if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-observation-instruction(s),gt(len(fcap-native-repairs(s)),fcap-context-native-review(s))) else fcap-observation-with-instruction(s,fcap-observation-instruction(s)));
   def fcap-reflections-json(rows) = if nil?(rows) then list() else cons(json-node-object(list(json-node-pair("attempt", json-node-int(head(head(rows)))), json-node-pair("evidence", json-node-string(nth(head(rows), 1))), json-node-pair("diagnosis", json-node-string(nth(head(rows), 2))), json-node-pair("change", json-node-string(nth(head(rows), 3))), json-node-pair("next", json-node-string(nth(head(rows), 4))))), fcap-reflections-json(tail(rows)));
   def fcap-string-json(xs) = if nil?(xs) then list() else cons(json-node-string(head(xs)), fcap-string-json(tail(xs)));
