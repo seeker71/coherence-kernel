@@ -258,6 +258,33 @@ state without its live context cannot satisfy a new follow-up. Empty feedback
 requests no additional pass. The caller owns the feedback; this API does not
 provide an independent reviewer or infer semantic quality from a second pass.
 
+`bml/form-cli-review-bindings.bml` checks the evidence links in a retained
+review. Call `fcrb-check(draftObject, reportObject, sourceDocuments)` with parsed
+JSON objects and caller-selected native documents `[id, path, text]`. Exclude
+candidate answers from the evidence list unless they are explicitly the source
+being assessed. Each `review_findings` row carries:
+
+- `draft_field` and an exact, nonempty `draft_quote` in that original field;
+- `source_path` and an exact, nonempty `source_quote` in that supplied document;
+- `explanation`, and `status` equal to `applied` or `unresolved`;
+- `replacement_quote`: an exact, nonempty quotation in the changed report
+  field when applied, or an empty string when unresolved.
+
+An applied removal uses explicit `operation="delete"` with an empty
+`replacement_quote`. Its original quotation must be absent from the changed
+field. Missing `operation` means `replace`; an empty replacement alone never
+counts as a deletion. Both operations retain the original and source quotes.
+
+The result is `[passed, observation, appliedCount, unresolvedCount]`. A failed
+check identifies the first invalid link; its counts do not summarize partial
+success. Keep applied findings so the correction remains inspectable. The
+checker preserves exact whitespace and rejects an unchanged field claimed as
+applied. Callers retain their original source and report checks alongside it.
+An empty findings array establishes no correction. Valid links establish
+neither entailment nor completeness: the reviewer can quote a real source and
+still reason incorrectly. This boundary is covered by a counterexample in
+`tests/form-cli-review-bindings-band.bml`.
+
 Each completed model reply emits `form-code-reply` metadata: JSON validity,
 wrapper/tool presence, report type, before/after role and check/repair counts.
 It includes no answer text, prompt text or document content. These observations
