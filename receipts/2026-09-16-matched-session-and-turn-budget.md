@@ -132,6 +132,35 @@ recorded verdict of the first attempt. The metadata-only framebuffer exchange
 selects continuation of that owned re-observation; answer and reasoning text
 remain outside the framebuffer.
 
+That second attempt completed in **519,917 ms**, with **2,094 generated IDs**,
+zero injected IDs, one reply, zero repairs, source/report checks **1**, release
+**1**, and provider calls **0**. It correctly identifies every supplied loss
+change as an improvement. Evidence:
+`.hearth/response-parity/open-thinking-session-1258-1789542926242`.
+Both attempts count: the earlier **473,628 ms** failed run remains part of
+development cost. The successful run alone is not the entire experiment.
+
+The numerical decision improved, while the next-action wording remains a
+qualitative concern: it moves to a later promotion window, obtaining usage
+and adding "at least two" held-out rows, without clearly taking the currently
+supported promotion action. The source does not specify that number. The
+baseline more clearly executes the supported decision and keeps further
+evaluation separate. This is a coordinator assessment of the actual response;
+the boolean field checks do not resolve it.
+
+Initial reasoning remains an explicit native experiment, with its cost and
+generation bound visible. No production chat default changed. The result
+supports continuing that path; it does not establish whole-session parity.
+
+The verified controller teaching was returned through the native session home
+as event `verified-unused-feedback-elision-v1`, session
+`matched-session-and-turn-budget`. Its contents concern the observed execution
+boundary, not an assessment answer. Retention and any learning/promotion state
+are observed separately; this does not claim a Qwen weight update.
+
+Final controller checks: preflight clean, native request validation passed,
+actual before/after preservation witness **1**, clean diff, drift **8191**.
+
 Panel: **0 orphans**, **11/12 counsel lanes unobserved** with no standing hearth.
 Neither that panel nor these assertions establishes whole-session quality,
 resonance, throughput parity or a global minimum in rented tokens.
