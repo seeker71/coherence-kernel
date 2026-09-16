@@ -237,6 +237,27 @@ Catalog mode currently accepts reviews only. A smaller initial prompt is a
 measurable resource change; answer quality and total session time still need
 observation, including subsequent source reads.
 
+Native embedding callers can request one follow-up before releasing a review's
+model through `bml/form-cli-review-followup.bml`:
+
+```text
+followed = fcrf-admit(model, initialReviewState, checker, context, turns, feedback)
+outcome = head(followed)
+```
+
+The first review must complete before the caller's feedback is injected into
+the same live context. The same checker, read-only boundaries, context capacity
+and total turn allowance govern the follow-up. There is one model admission
+and a final release. Ordinary review entry remains unchanged.
+
+The returned list contains the ordinary outcome, the first report, its check
+count, whether the follow-up observation was admitted, and the selected route.
+Keep the first report alongside the final one. Exhausting the shared turn
+allowance leaves the requested follow-up incomplete; a previously completed
+state without its live context cannot satisfy a new follow-up. Empty feedback
+requests no additional pass. The caller owns the feedback; this API does not
+provide an independent reviewer or infer semantic quality from a second pass.
+
 Each completed model reply emits `form-code-reply` metadata: JSON validity,
 wrapper/tool presence, report type, before/after role and check/repair counts.
 It includes no answer text, prompt text or document content. These observations
