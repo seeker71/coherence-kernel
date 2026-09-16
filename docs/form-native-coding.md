@@ -130,6 +130,22 @@ instruction about the paired evidence and verified proposal. These are generatio
 instructions; their effects must be checked in the returned answer and are not
 established by passing report-field checks.
 
+Caller-owned native repair can restore an exact source quotation when a model
+has changed only its ASCII whitespace. The pure helper
+`fcqe-restore(source, quote, maxBytes)` in
+`form/form-stdlib/bml/form-cli-quote-evidence.bml` returns
+`[available, sourceExcerpt, startByte, endByte, reason]`; endByte is exclusive.
+Exact quotations remain unchanged. A unique whitespace-normalized match yields
+the original source bytes and offsets. Changed text, ambiguous normalized
+matches, empty quotations and caller byte-limit violations yield no candidate.
+The caller retains source identity and these transitions, proposes the restored
+report through its existing native repair callback, and the controller reruns
+the same complete checker. This helper does not enable automatic report edits
+or add a report schema. Quote membership establishes an excerpt's provenance;
+interpretation, topic coverage and answer quality require their own observation.
+The quotation band witnesses both restoration and the existing checked-repair
+boundary, including a changed-word candidate that remains in repair.
+
 Observation prefill uses the existing sliced batched route when the admitted
 context records a scratch width greater than one. Each outer slice is bounded
 by that actual width and the normal admission slice limit. Legacy contexts and
