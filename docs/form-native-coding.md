@@ -187,6 +187,31 @@ must already be admissible; boolean-arity repair remains a separate operation.
 `[status,source,attempts,reason]`, performs no IO or model calls itself, and
 delegates execution exclusively to the caller's callback.
 
+### Caller-enabled rehearsal after an unchanged edit
+
+A coding request can set `native_rehearsal_checks` to an integer from 0 to 64.
+Zero, the default, disables automatic rehearsal. An in-process caller uses
+`fcap-with-rehearsal-budget(state, allowance)`. This is a total allowance for
+automatic checks in that request, including original-source checks; it does
+not change the explicit tool's allowance. The caller still bounds each check's
+execution separately. Review requests cannot enable it.
+
+When an implementation edit finds one matching occurrence but supplies
+identical old and new text, the original failed action is retained. For a
+writable BML source, the policy can then run native rehearsal without another
+model response. Each path and source digest is attempted at most once in the
+retained state. Only a passing candidate changes the document. Failed,
+malformed or exhausted attempts preserve it. Every actual check spends the
+caller allowance; model tool and reply counts do not increase for native work.
+
+The model receives the native source attribution, final check observation and
+exact current source or reconstructed source patch. Full attempts and the
+original unchanged-edit failure remain in `native_rehearsals` in the returned
+result and checkpoint. `native_rehearsal_checks_remaining` reports the balance.
+The candidate still goes through task completion, review and final caller
+verification. Making this assistance available does not attest model adoption
+or broader correctness.
+
 ## Call without knowing Form syntax
 
 In form-cli, enter `code` followed by a JSON object. The standalone native door

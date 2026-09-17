@@ -203,6 +203,49 @@ section [form.bml] {
    let padded = fcap-with-amendments(s,fcap-amendments(s));
    fcap-with-memory(padded,append(fat-take(fcap-memory(padded),17),list(limit)));
   }
+  // Caller-owned total automatic-search allowance; model JSON cannot set it.
+  def fcap-rehearsal-budget(s) = if ge(len(fcap-memory(s)),19) then nth(fcap-memory(s),18) else 0;
+  def fcap-rehearsals(s) = if ge(len(fcap-memory(s)),20) then nth(fcap-memory(s),19) else list();
+  def fcap-rehearsals-json(rows) = if nil?(rows) then list() else cons(parse-json("native-rehearsal",head(rows)),fcap-rehearsals-json(tail(rows)));
+  def fcap-rehearsal-budget-valid(n) = and(str_eq(value_kind(n),"int"),and(ge(n,0),le(n,fbvs-limit())));
+  def fcap-with-rehearsal-budget(s,n) = if not(fcap-rehearsal-budget-valid(n)) then form_error("native rehearsal allowance outside range") else {
+   let padded = fcap-with-reply-token-limit(s,fcap-reply-token-limit(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),18),list(n)));
+  };
+  def fcap-with-rehearsals(s,rows) {
+   let padded = fcap-with-rehearsal-budget(s,fcap-rehearsal-budget(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),19),list(rows)));
+  }
+  def fcap-rehearsed(rows,path,digest) = if nil?(rows) then 0 else {
+   let row = parse-json("native-rehearsal",head(rows));
+   or(and(str_eq(fcap-string(row,"path"),path),str_eq(fcap-string(row,"before_sha256"),digest)),fcap-rehearsed(tail(rows),path,digest));
+  };
+  def fcap-tools-assisted(s,obj,checker) {
+   let next = fcap-tool(s,obj);
+   let args = fcap-array(obj,"arguments");
+   if not(and(gt(fcap-rehearsal-budget(s),0),and(str_eq(fcap-string(obj,"tool"),"edit"),and(eq(len(args),3),and(fcap-tool-allowed(s,"edit",args),and(str_eq(fcap-stage(next),"repair"),ge(str_find(fcap-note(next),"edit-unchanged:",0),0))))))) then next else {
+    let doc = fat-find-doc(fcap-docs(s),head(args));
+    let digest = hex-encode(sha256-stream-string(nth(doc,2)));
+    if or(not(fcbmr-relevant(list(doc))),fcap-rehearsed(fcap-rehearsals(s),head(args),digest)) then next else fcap-auto-rehearse(next,doc,digest,checker);
+   };
+  }
+  def fcap-auto-rehearse(s,doc,digest,checker) {
+   let sourceChecker = if ge(len(checker),4) then list(nth(checker,2),nth(checker,3)) else checker;
+   let action = fcap-control(add(now_unix_ms(),fcap-turns(s)),list(fcap-checks(s),fcap-rehearsal-budget(s)),1);
+   if not(eq(action,1)) then s else {
+    let searched = fcbvs-call(fcap-docs(s),list(nth(doc,1),int_to_str(fcap-rehearsal-budget(s))),"",sourceChecker);
+    let result = head(searched); let used = nth(searched,1);
+    let trace = if faj-valid(fat-out(result)) then parse-json("native-search",fat-out(result)) else json-node-object(list());
+    let attempts = node_children(json-object-get(trace,"attempts"));
+    let passed = and(eq(fat-exit(result),0),str_eq(fat-error(result),""));
+    let summary = json-node-object(list(json-node-pair("source",json-node-string("caller-enabled-native-rehearsal")),json-node-pair("path",json-node-string(nth(doc,1))),json-node-pair("before_sha256",json-node-string(digest)),json-node-pair("status",json-node-string(if passed then fcap-string(trace,"status") else "failed")),json-node-pair("checks_run",json-node-int(used)),json-node-pair("exit",json-node-int(fat-exit(result))),json-node-pair("stderr",json-node-string(fat-error(result))),json-node-pair("last_check",if nil?(attempts) then json-node-null() else head(reverse(attempts))),json-node-pair("current_source",parse-json("current-source",fcap-read-note(doc,fat-ok(nth(fat-find-doc(fat-documents(result),nth(doc,1)),2),fat-documents(result))))),json-node-pair("next",json-node-string(if passed then "Native candidate passed the caller source checks. Inspect the actual change, finish the original task, and retain review and final verification." else "Native rehearsal did not repair this source. Inspect the retained failure and choose a different approach; the original source remains."))));
+    let event = json-node-object(list(json-node-pair("path",json-node-string(nth(doc,1))),json-node-pair("before_sha256",json-node-string(digest)),json-node-pair("trigger",json-node-string(fcap-note(s))),json-node-pair("summary",summary),json-node-pair("result",parse-json("native-result",fcap-result-note(result)))));
+    let counted = fcap-with-rehearsal-budget(fcap-count-checks(s,used),sub(fcap-rehearsal-budget(s),used));
+    let recorded = fcap-with-rehearsals(counted,append(fcap-rehearsals(s),list(json-emit(event))));
+    fcap-control(add(now_unix_ms(),fcap-turns(s)),list(used,fat-exit(result)),0);
+    fcap-inherit(recorded,fcap-state(if passed then "implement" else "repair",nth(s,1),nth(s,2),fat-documents(result),nth(s,4),nth(s,5),nth(s,6),nth(s,7),json-emit(summary),fcap-turns(s),fcap-calls(s),nth(s,11)));
+   };
+  }
   def fcap-amendable(s) = and(fcap-reviewing(s),and(str_eq(fcap-stage(s),"repair"),faj-valid(fcap-report(s))));
   def fcap-amend-pairs(s) = if not(fcap-amendable(s)) then list() else list(json-node-pair("report_amend",json-node-object(list(json-node-pair("base",json-node-string(fcra-id(fcap-report(s)))),json-node-pair("instruction",json-node-string("To correct retained JSON without repeating it, return only {\"report_amend\":{\"base\":\"<this base>\",\"replacements\":[{\"path\":[\"answer\"],\"value\":\"corrected answer\"}]}}. Paths select existing object keys or zero-based integer array indexes. Use nonoverlapping paths; all original checks rerun on the complete report. These edits are your proposed reasoning, applied by the native carrier."))))));
   def fcap-amend(s,obj,checker) = if not(fcap-amendable(s)) then fcap-revise(s,"Report amendments require a retained JSON report in review repair. Submit the full report for native review continuation.") else if not(value_eq(nth(s,2),fcap-docs(s))) then fcap-terminal(s,"read-only-review-documents-changed") else {
@@ -226,7 +269,7 @@ section [form.bml] {
    if and(fat-wire-object?(obj),json-object-has?(obj,"report_amend")) then fcap-amend(s,obj,checker) else fcap-object(s,faj-normalize(obj),checker);
   }
   def fcap-step(s, raw, checker) = if fcap-done(s) then s else if not(faj-valid(raw)) then fcap-revise(s, "Malformed response. Return exactly one JSON object; no markdown or commentary.") else fcap-response(s,raw,checker);
-  def fcap-object(s, obj, checker) = if not(fat-wire-object?(obj)) then fcap-revise(s, "Response must be an object.") else if json-object-has?(obj, "tool") then if str_eq(fcap-string(obj, "tool"), "verify") then fcap-verify-tool(s, obj, checker) else if str_eq(fcap-string(obj,"tool"),"rehearse-bml") then fcap-rehearse(s,obj,checker) else fcap-tool(s, obj) else fcap-role(s, obj, checker);
+  def fcap-object(s, obj, checker) = if not(fat-wire-object?(obj)) then fcap-revise(s, "Response must be an object.") else if json-object-has?(obj, "tool") then if str_eq(fcap-string(obj, "tool"), "verify") then fcap-verify-tool(s, obj, checker) else if str_eq(fcap-string(obj,"tool"),"rehearse-bml") then fcap-rehearse(s,obj,checker) else fcap-tools-assisted(s,obj,checker) else fcap-role(s, obj, checker);
   def fcap-count-checks(s,n) = if le(n,0) then s else fcap-count-checks(fcap-count-check(s),sub(n,1));
   def fcap-rehearse(s,obj,checker) = if not(fcap-string-array(json-object-get(obj,"arguments"))) then fcap-revise(s,"rehearse-bml arguments must be strings.") else if and(json-object-has?(obj,"input"),not(and(fat-wire-string?(json-object-get(obj,"input")),str_eq(fcap-string(obj,"input"),"")))) then fcap-revise(s,"rehearse-bml takes empty input.") else {
    let args = fcap-array(obj,"arguments");
