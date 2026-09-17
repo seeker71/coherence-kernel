@@ -41,6 +41,14 @@ or saved to a file:
 {"goal":"Enable local coding in config.json. Preserve provider and remote.","documents":[{"id":"config","path":"config.json","text":"{\"enabled\":false,\"provider\":\"native-qwen\",\"remote\":false}\n"}],"writable":["config.json"],"checks":[{"tool":"jq","arguments":[".enabled","config.json"],"stdout":"true\n"},{"tool":"jq","arguments":["-r",".provider","config.json"],"stdout":"native-qwen\n"},{"tool":"jq","arguments":[".remote","config.json"],"stdout":"false\n"}],"model":"qwen38-q8","context":8192,"turns":64}
 ```
 
+`turns` limits generated replies, including replies that request tools. Native
+admission and subsequent observations disclose the limit, completed count and
+remaining replies. The final available reply is identified before generation,
+so the model can use it for the supported deliverable and retain unresolved
+findings honestly. Source observations and caller checks remain intact; budget
+awareness grants neither extra replies nor permission to claim unchecked work.
+Initial reasoning and same-resident review follow-ups carry the same counters.
+
 Documents are **resident values**, not filesystem permissions. The result returns
 the candidate document values; it does not overwrite repository files. The caller
 owns loading files, publication, stale-file checks, and repository landing. This

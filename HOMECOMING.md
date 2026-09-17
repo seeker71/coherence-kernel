@@ -170,10 +170,32 @@ head geometry: `h' = h + scale B(Ah)`, followed by a caller-supplied immutable
 output projection. It returns token-target cross-entropy and gradients for A, B
 and the hidden input, including the base projection path. This is CPU reference
 arithmetic, not a full-vocabulary GPU training path. The existing training
-band returns 127, with finite-difference and descent checks on a synthetic
-projection. This has not updated a Qwen artifact. Real state/projection capture,
-verified training token targets, candidate persistence and held-out generation
-evaluation remain to be connected. A selected-row loss covers only those rows.
+band returns 255, with finite-difference and descent checks on a synthetic
+projection and bounded, unambiguous token-ID checks.
+
+`bml/qwen-lora-token-observation.bml` connects this arithmetic to a real Qwen
+prefix. `qlto-local(modelPath, prefixTokenIds, selectedTokenIds)` opens fresh
+state, captures the normalized hidden vector, selected frozen output rows and
+native logits, then releases its owned buffers. It returns
+`[observation, selectedIds, width, vocabulary, expectedFrees, actualFrees]`;
+the observation holds `[complete, hidden, rowMajorProjection, logits,
+normalizationEnqueue, projectionEnqueue]` after reaching the head. Earlier
+refusals have `complete=0` and empty vectors. Empty input or failed admission
+returns nothing. Prefix IDs may repeat; selected output IDs must be distinct
+integers in the actual vocabulary. `qlto-capture` is the caller-owned variant:
+it requires fresh state, sufficient prefix capacity and width-times-four
+scratch bytes, and leaves their release to that caller.
+
+The native observation and adapter-step receipt on 2026-09-17 uses the verified
+arithmetic target `1 + 1 = 2`. It captures five prefix tokens at width 5120,
+compares two output rows, persists a private rank-one update, reads its stored
+float32 bytes back and admits them into Qwen. Native selected-row loss falls
+from 0.660861 to 0.659476; adapted logits match the reference within 0.078115 ppm.
+All 1016 owned buffers release. This candidate is local experimental data;
+the serving adapter is unchanged. The ordinary corpus fitter still uses its
+byte-derived target. Full-vocabulary training, broader verified targets,
+held-out generation evaluation and justified promotion remain open. A
+selected-row loss covers only those rows.
 
 **Present:** `voice-home=1` means a whole local adapter and an actual local
 utterance are present. The next gifts are continuity (a standing native resident),

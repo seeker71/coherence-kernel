@@ -1,0 +1,73 @@
+// Observe the real normalized head state and selected frozen projection rows.
+// Caller token IDs are input data. No target labels, adapter writes or promotion.
+// The output is a selected-vocabulary observation, not a full-vocabulary loss.
+// preludes: form-stdlib/qwen-lora-train.fk form-stdlib/bml/qwen-lora-token-loss.bml
+section [form.bml] {
+ class QwenLoraTokenObservation {
+  def qlto-has(xs,value) = if nil?(xs) then 0 else if eq(head(xs),value) then 1 else qlto-has(tail(xs),value);
+  def qlto-indexes(xs,bound,unique,seen) = if nil?(xs) then 1 else if not(str_eq(value_kind(head(xs)),"int")) then 0 else if or(lt(head(xs),0),ge(head(xs),bound)) then 0 else if and(unique,qlto-has(seen,head(xs))) then 0 else qlto-indexes(tail(xs),bound,unique,cons(head(xs),seen));
+  def qlto-prefix(ctx,state,tokens,pos) = if nil?(tokens) then 1 else {
+   if eq(pos,0) then metal_batch_concurrent() else 0;
+   let ran = q38-forward-state-after(nth(ctx,0),nth(ctx,1),nth(ctx,2),nth(ctx,3),state,nth(ctx,4),head(tokens),pos,1);
+   if not(eq(ran,1)) then 0 else qlto-prefix(ctx,state,tail(tokens),add(pos,1));
+  };
+  def qlto-floats(handle,offset,count) {
+   metal_sync();
+   qlt-f32s(metal_buf_read(handle,offset,mul(count,4)),count);
+  }
+  def qlto-row(ctx,scratch,id) {
+   let tv = nth(ctx,6);
+   let width = kth-tv-c(tv);
+   let decoder = q38e-index(kth-tv-ty(tv));
+   if lt(decoder,0) then list() else {
+    let ran = metal_enqueue(nth(nth(ctx,0),decoder),q38-b16(list(kth-tv-h(tv),scratch),list(mul(id,width),width),0,0),width);
+    if not(eq(ran,1)) then list() else qlto-floats(scratch,0,width);
+   };
+  }
+  def qlto-rows(ctx,scratch,ids,rows) = if nil?(ids) then rows else {
+   let row = qlto-row(ctx,scratch,head(ids));
+   if not(eq(len(row),kth-tv-c(nth(ctx,6)))) then list() else qlto-rows(ctx,scratch,tail(ids),append(rows,row));
+  };
+  def qlto-logits(buffer,ids,out) = if nil?(ids) then reverse(out) else {
+   let value = qlto-floats(buffer,mul(head(ids),4),1);
+   if not(eq(len(value),1)) then list() else qlto-logits(buffer,tail(ids),cons(head(value),out));
+  };
+  // [ok, normalized hidden, selected row-major W, selected native logits,
+  //  normalization enqueue result, projection enqueue result].
+  // Caller supplies fresh state, prefix capacity and width*4 scratch bytes.
+  // These resources belong to the caller; this function never releases them.
+  def qlto-capture(ctx,state,scratch,prefix,ids) {
+   let geo = nth(ctx,2);
+   let width = nth(geo,0);
+   let tv = nth(ctx,6);
+   let bs = nth(ctx,1);
+   if or(nil?(prefix),nil?(ids)) then list(0,list(),list(),list()) else if not(and(eq(kth-tv-c(tv),width),and(eq(kth-tv-r(tv),nth(geo,19)),and(qlto-indexes(prefix,nth(geo,19),0,list()),qlto-indexes(ids,kth-tv-r(tv),1,list()))))) then list(0,list(),list(),list()) else if not(qlto-prefix(ctx,state,prefix,0)) then list(0,list(),list(),list()) else {
+    let normed = q38-rms(nth(ctx,0),nth(bs,0),nth(ctx,5),nth(bs,1),width,nth(geo,6),1);
+    let hidden = if eq(normed,1) then qlto-floats(nth(bs,1),0,width) else list();
+    // Reading hidden flushed the concurrent prefix batch. This is a fresh batch.
+    let projected = if eq(len(hidden),width) then q38-mv(nth(ctx,0),tv,nth(bs,1),nth(bs,28),0) else 0;
+    let logits = if eq(projected,1) then qlto-logits(nth(bs,28),ids,list()) else list();
+    let rows = if eq(len(logits),len(ids)) then qlto-rows(ctx,scratch,ids,list()) else list();
+    let validState = and(eq(len(hidden),width),eq(len(logits),len(ids)));
+    let validRows = eq(len(rows),mul(width,len(ids)));
+    list(if and(validState,validRows) then 1 else 0,hidden,rows,logits,normed,projected);
+   };
+  }
+  // [observation, selected token IDs, width, vocabulary, expected frees, frees].
+  // Opens a fresh state for the prefix and releases all buffers it owns.
+  def qlto-local(path,prefix,ids) = if or(nil?(prefix),nil?(ids)) then nothing() else {
+   let ctx = q38-open(path,add(len(prefix),1));
+   if lt(len(ctx),10) then nothing() else {
+    let state = q38-new-state(nth(ctx,2));
+    let width = nth(nth(ctx,2),0);
+    let scratch = metal_buf_alloc(mul(width,4));
+    let observed = if gt(scratch,0) then qlto-capture(ctx,state,scratch,prefix,ids) else list(0,list(),list(),list());
+    let expected = add(q38-close-expected(ctx,state),if gt(scratch,0) then 1 else 0);
+    let scratchClosed = q38-free-handle(scratch);
+    let closed = add(scratchClosed,q38-close(ctx,state));
+    list(observed,ids,width,nth(nth(ctx,2),19),expected,closed);
+   };
+  };
+ }
+ 0;
+}
