@@ -14,6 +14,13 @@ section [form.bml] {
    print_str("\n");
   }
   def fcac-open(model, state, context) = fcms-open-with-profile(mr-path(mr-find(model)), fcap-bootstrap(state), context, "knowledge-query");
+  def fcac-replies-left(state,turns) = fat-max(0,sub(turns,fcap-turns(state)));
+  def fcac-budget(state,turns) = json-node-object(list(json-node-pair("limit",json-node-int(turns)),json-node-pair("completed",json-node-int(fcap-turns(state))),json-node-pair("remaining",json-node-int(fcac-replies-left(state,turns)))));
+  def fcac-budget-instruction(state,turns) = str_concat("Every generated reply counts, including tool reads. Source observations already supplied remain available. ",if eq(fcac-replies-left(state,turns),1) then "This is the final allowed reply. Submit the requested deliverable from the supported evidence, retaining unresolved findings honestly. A further tool read leaves no reply for the deliverable. All caller checks still apply." else "Plan inspection and the requested deliverable within the remaining replies. All caller checks still apply.");
+  def fcac-budget-pairs(state,turns) = list(json-node-pair("reply_budget",fcac-budget(state,turns)),json-node-pair("budget_instruction",json-node-string(fcac-budget-instruction(state,turns))));
+  def fcac-bootstrap-budget(state,turns) = str_concat(fcap-bootstrap(state),str_concat("\nCALLER REPLY BUDGET: ",json-emit(json-node-object(fcac-budget-pairs(state,turns)))));
+  def fcac-observation-budget(state,turns) = json-emit(json-node-object(append(json-object-pairs(parse-json("observation",fcap-observation(state))),fcac-budget-pairs(state,turns))));
+  def fcac-open-budget(model,state,context,turns) = fcms-open-with-profile(mr-path(mr-find(model)),fcac-bootstrap-budget(state,turns),context,"knowledge-query");
   def fcac-model-ready(model) {
    let row = mr-find(model);
    if str_eq(mr-path(row), "") then 0 else if not(fat-starts(model, "qwen")) then 0 else if not(and(mr-file?(mr-path(row)), and(mr-side?(mr-path(row), mr-suffix-seal()), and(mr-side?(mr-path(row), mr-suffix-tokfast()), mr-side?(mr-path(row), mr-suffix-crystal()))))) then 0 else mr-wired?(mr-arch(row));
@@ -26,7 +33,7 @@ section [form.bml] {
   def fcac-review(model, goal, docs, checker, context, turns) = if not(and(fat-docs-valid(docs, list()), and(gt(str_len(goal), 0), and(gt(context, 0), gt(turns, 0))))) then list(fcap-terminal(fcap-open-review(goal, docs), "invalid-caller-contract"), 1, 0, 0, 0) else fcac-admit(model, fcap-open-review(goal, docs), checker, context, turns);
   def fcac-admit(model, state, checker, context, turns) = if fcap-done(state) then list(state, 1, 0, 0, 0) else if not(fcac-model-ready(model)) then list(fcap-terminal(state, "native-qwen-artifact-seal-tokenizer-or-lane-unavailable"), 1, 0, 0, 0) else fcac-open-timed(model, state, checker, context, turns, now_unix_ms());
   def fcac-open-timed(model, state, checker, context, turns, started) = fcac-open-context(model,fcap-begin-context(state),checker,context,turns,started);
-  def fcac-open-context(model,state,checker,context,turns,started) = fcac-resident(fcac-open(model,state,context),state,checker,turns,started);
+  def fcac-open-context(model,state,checker,context,turns,started) = fcac-resident(fcac-open-budget(model,state,context,turns),state,checker,turns,started);
   def fcac-resident(session, state, checker, turns, started) = fcac-settle(fcac-loop(session,state,checker,turns,started),started);
   def fcac-settle(result,started) {
    let last = head(result);
@@ -71,7 +78,7 @@ section [form.bml] {
    if fs-exists?(path) then fcac-unused-reply-path(base,add(index,1)) else path;
   }
   def fcac-retained-reply(path,raw,written) = if str_eq(read_file(path),raw) then path else "";
-  def fcac-advance(session, next, checker, turns, started) = if fcap-done(next) then fcac-finish(session, next, started) else if ge(fcap-turns(next), turns) then fcac-loop(session, next, checker, turns, started) else fcac-observed(session,fcacs-observe(session, fcap-observation(next)),next,checker,turns,started);
+  def fcac-advance(session, next, checker, turns, started) = if fcap-done(next) then fcac-finish(session, next, started) else if ge(fcap-turns(next), turns) then fcac-loop(session, next, checker,turns,started) else fcac-observed(session,fcacs-observe(session,fcac-observation-budget(next,turns)),next,checker,turns,started);
   def fcac-observed(before,after,next,checker,turns,started) = fcac-loop(after,fcap-observation-admitted(next,fcms-observations(before),fcms-observations(after),fcms-live?(after)),checker,turns,started);
   def fcac-decode(session, state, started, stops, ids) = fcac-decoded(fcacs-quantum(session, stops, fat-min(CodeProgressQuantum(), sub(fcms-maxpos(session), fcms-pos(session)))), state, started, stops, ids);
   def fcac-decoded(generation, state, started, stops, before) {
