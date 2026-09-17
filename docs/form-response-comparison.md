@@ -16,6 +16,27 @@ entry retains refine, plan, split and inspection before review. Direct entry
 reduces role transitions for already bounded reviews; it does not relax the
 acceptance contract. A failed report still enters repair.
 
+Ordinary conversation uses a different interface: the REPL's `generate` command
+calls `fcmg-generate-resident`. It carries Form's teaching overlay and native
+knowledge-query capability, without the coding-review bootstrap. Compare these
+interfaces explicitly; `review_entry=direct` still uses the review controller.
+Preserve the same enquiry and source material, and record differences in
+prompt profile, resource allowances and output protocol.
+
+For ordinary generation, the requested token allowance applies to the direct
+reply or query phase. A lookup opens a separate answer allowance at least as
+large as that request, with the existing default reserve as its floor. The
+runtime supplies those actual allowances in the model prompt. Unused query
+fuel remains separate; it cannot consume the answer reserve. The specialized
+knowledge-query callers retain their explicit budgets. Native admission uses
+the same BML scratch-width authority and sliced prefill as model sessions.
+
+Retain the complete generation report: it includes lookup/control text,
+generated and injected token counts, phase allowances and stop state. Releasing
+the model successfully does not establish that its answer finished. The
+[ordinary-generation receipt](../receipts/2026-09-17-dialogue-revision-and-generation.md)
+records a real reply cut off by the old 32-token post-lookup reserve.
+
 An external comparison runs through Form's process organ,
 `observe/form-cli-heal-process-run.bml`, with `codex exec --json`. Retain the
 process receipt, its stdout, stderr and the separate `-o` answer file. Native
