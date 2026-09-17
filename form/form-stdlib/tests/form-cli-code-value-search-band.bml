@@ -1,0 +1,49 @@
+// Deterministic policy replay with a mock checker; real semantic execution is
+// covered by form-bml-value-search-band.bml. No reply is attributed to a model.
+// preludes: form-stdlib/bml/form-cli-code-policy.bml
+section [form.bml] {
+ class CodeValueSearchBand {
+  def cvsb-need(ok,name) = if ok then 1 else form_error(str_concat("code value search: ",name));
+  def cvsb-source(counter,docs) {
+   record_set(counter,"source",add(record_get(counter,"source"),1));
+   cvsb-need(str_eq(nth(fat-find-doc(docs,"checks.bml"),2),"caller-owned"),"checker receives unchanged locked document");
+   list(str_eq(nth(fat-find-doc(docs,"candidate.bml"),2),record_get(counter,"expected")),"mock behavior result");
+  }
+  def cvsb-final(counter,docs) { record_set(counter,"final",add(record_get(counter,"final"),1)); list(0,"final checker must not replace source checker"); }
+  def cvsb-malformed(counter,docs) = list(1);
+ }
+ let source = "section [form.bml] { def result(flag) = flag; def support(flag) = not(flag); }";
+ let expected = "section [form.bml] { def result(flag) = not(flag); def support(flag) = not(flag); }";
+ let docs = list(list("code","candidate.bml",source),list("locked","checks.bml","caller-owned"));
+ let counter = record_new(0); record_set(counter,"source",0); record_set(counter,"final",0); record_set(counter,"expected",expected);
+ let checker = list(cvsb-final,counter,cvsb-source,counter);
+ let state = fcap-open-direct-code("Repair behavior",docs,list("candidate.bml"));
+ let wire = "{\"tool\":\"rehearse-bml\",\"arguments\":[\"candidate.bml\",\"8\"],\"input\":\"\"}";
+ let repaired = fcap-step(state,wire,checker);
+ cvsb-need(str_eq(nth(fat-find-doc(fcap-docs(repaired),"candidate.bml"),2),expected),"passing candidate changes resident source");
+ cvsb-need(and(eq(fcap-checks(repaired),2),and(eq(record_get(counter,"source"),2),eq(record_get(counter,"final"),0))),"actual source callbacks counted");
+ cvsb-need(and(eq(fcap-calls(repaired),1),str_eq(fcap-stage(repaired),"implement")),"tool success leaves review to the workflow");
+ cvsb-need(and(value_eq(nth(repaired,2),docs),value_eq(fat-find-doc(fcap-docs(repaired),"checks.bml"),nth(docs,1))),"original and locked evidence preserved");
+ let outer = parse-json("tool-observation",fcap-note(repaired));
+ let trace = parse-json("search-observation",fcap-string(outer,"stdout"));
+ let rows = node_children(json-object-get(trace,"attempts"));
+ cvsb-need(and(eq(len(rows),2),and(eq(node_value(json-object-get(head(rows),"passed")),0),eq(node_value(json-object-get(nth(rows,1),"passed")),1))),"failure and passing candidate both retained");
+ cvsb-need(str_eq(fcap-string(nth(rows,1),"source_sha256"),hex-encode(sha256-stream-string(expected))),"passing observation binds exact source");
+ let automatic = fcap-step(state,"{\"tool\":\"rehearse-bml\",\"arguments\":[\"candidate.bml\"]}",checker);
+ cvsb-need(and(eq(fcap-checks(automatic),2),str_eq(nth(fat-find-doc(fcap-docs(automatic),"candidate.bml"),2),expected)),"one path uses the native check allowance");
+ let before = record_get(counter,"source");
+ let review = fcap-step(fcap-open-direct-review("Inspect",docs),wire,checker);
+ let locked = fcap-step(fcap-open-direct-code("Repair",docs,list("checks.bml")),wire,checker);
+ cvsb-need(and(value_eq(fcap-docs(review),docs),and(value_eq(fcap-docs(locked),docs),eq(record_get(counter,"source"),before))),"unauthorized targets never invoke checker");
+ let exhausted = fcap-step(state,"{\"tool\":\"rehearse-bml\",\"arguments\":[\"candidate.bml\",\"1\"]}",checker);
+ cvsb-need(and(value_eq(fcap-docs(exhausted),docs),and(eq(fcap-checks(exhausted),1),str_eq(fcap-stage(exhausted),"repair"))),"exhaustion retains source and returns real failure");
+ let invalid = fcap-step(state,"{\"tool\":\"rehearse-bml\",\"arguments\":[\"candidate.bml\",\"9999999999999999999999\"]}",checker);
+ cvsb-need(and(value_eq(fcap-docs(invalid),docs),eq(fcap-checks(invalid),0)),"oversized budget never executes");
+ let malformed = fcap-step(state,wire,list(cvsb-malformed,0));
+ cvsb-need(and(value_eq(fcap-docs(malformed),docs),eq(fcap-checks(malformed),1)),"malformed callback still counts its actual invocation");
+ let input = fcbvs-call(docs,list("candidate.bml","8"),"replace the contract",checker);
+ cvsb-need(and(eq(nth(input,1),0),value_eq(fat-documents(head(input)),docs)),"input cannot supply a replacement contract");
+ cvsb-need(ge(str_find(fcap-bootstrap(state),fcbvs-guidance(),0),0),"BML coding receives tool guidance");
+ cvsb-need(lt(str_find(fcap-bootstrap(fcap-open-direct-review("Inspect",docs)),fcbvs-guidance(),0),0),"review receives no mutating guidance");
+ 1;
+}
