@@ -54,6 +54,38 @@ or connect the separate Llama session learner to Qwen. The live
 transport, native-head correspondence and resource release for one existing
 candidate; response quality and held-out improvement remain unproved.
 
+### Full-vocabulary Qwen head learning
+
+`bml/qwen-lora-full-loss.bml` supplies the loss and gradient needed to train
+the head adapter against every output token. It reuses the native Llama
+cross-entropy operation and adds a chunked transpose multiply over Qwen's
+immutable Q8_0 output projection. It does not expand that matrix into float32.
+
+- `qlfg-open(rows,cols)` returns an owner for six scratch buffers and cached
+  Metal pipelines. `rows` is the complete vocabulary and `cols` the hidden
+  width. Check `qlfg-live` before use.
+- `qlfg-loss(owner,logits,target)` returns full-vocabulary cross-entropy.
+  `target` is an integer token index. Invalid targets, refused admission and
+  nonfinite loss return `nothing`.
+- `qlfg-gradient(owner,projection,logits,target)` returns
+  `[ok,loss,hiddenGradient]`. It computes `W^T(softmax(logits)-onehot(target))`.
+  The existing `lbw-backward` carries this through `h + scale*B*(A*h)` to A/B.
+- `qlfg-owned` counts owned buffers; `qlfg-close` synchronizes and releases
+  them, including partial admission. Release once even after refusal.
+
+The caller owns and validates the supplied buffer handles, their lengths,
+the Q8_0 storage type and matching geometry. This API bounds packed byte
+offsets before multiplication and requires whole Q8_0 blocks per row. It
+synchronizes pending device work at entry and reads back a finite loss and
+hidden gradient. It neither updates parameters nor writes an adapter by itself.
+
+The [actual Qwen witness](../receipts/2026-09-17-qwen-full-vocabulary-gradient.md)
+measured a 248,320-by-5,120 gradient in 13 ms. A private persisted step reduced
+training loss; two held-out losses increased slightly while both greedy
+answers stayed correct. The candidate remains unpromoted. These observations
+establish a working learning operation and an adverse generalization reading,
+not response-quality improvement or end-to-end training throughput.
+
 ## Call without knowing Form syntax
 
 In form-cli, enter `code` followed by a JSON object. The standalone native door

@@ -1,0 +1,64 @@
+// Full-vocabulary head loss and W^T(p-onehot) for an immutable Q8_0 projection.
+// The caller owns projection/logit buffers and their geometry. This owner holds
+// only six scratch buffers; release it even when device admission is incomplete.
+// No labels are inferred, parameters updated, artifacts written or models promoted.
+// preludes: form-stdlib/bml/qwen-lora-token-observation.bml form-stdlib/native-llama-backward.bml
+section [form.bml] {
+ class QwenLoraFullLoss {
+  field RowSpan = 1024;
+  // q80_w uses uint for packed byte offsets as well as flat weight indexes.
+  // Divide the bound before multiplying any caller dimensions.
+  def qlfg-geometry(rows,cols) = if not(and(str_eq(value_kind(rows),"int"),str_eq(value_kind(cols),"int"))) then 0 else if or(le(rows,0),le(cols,0)) then 0 else and(eq(mod(cols,q80-block-n()),0),le(div(cols,q80-block-n()),div(div(4294967295,q80-stride()),rows)));
+  def qlfg-chunks(rows) = div(add(rows,sub(RowSpan(),1)),RowSpan());
+  def qlfg-msl() = str_concat("#include <metal_stdlib>\nusing namespace metal;\n",str_concat(q80-msl-spine(),str_concat(q80-msl-weight(),"
+kernel void qlfg_partial(device const uchar* w [[buffer(0)]],device const float* dz [[buffer(1)]],device float* partial [[buffer(2)]],constant uint& rows [[buffer(3)]],constant uint& cols [[buffer(4)]],constant uint& span [[buffer(5)]],uint gid [[thread_position_in_grid]]) {
+ uint chunk=gid/cols,j=gid%cols,begin=chunk*span;if(begin>=rows)return;
+ uint end=min(rows,begin+span);float s=0;for(uint r=begin;r<end;r++)s+=q80_w(w,r*cols+j)*dz[r];partial[gid]=s;
+}
+kernel void qlfg_reduce(device const float* partial [[buffer(0)]],device float* dh [[buffer(1)]],constant uint& chunks [[buffer(2)]],constant uint& cols [[buffer(3)]],uint j [[thread_position_in_grid]]) {
+ if(j>=cols)return;float s=0;for(uint k=0;k<chunks;k++)s+=partial[k*cols+j];dh[j]=s;
+}
+")));
+  def qlfg-positive(xs) = if nil?(xs) then 1 else and(gt(head(xs),0),qlfg-positive(tail(xs)));
+  // [rows,cols,chunks,pipelines,[dz,target,loss,mask,partials,dh]].
+  def qlfg-open(rows,cols) = if not(qlfg-geometry(rows,cols)) then list() else {
+   let chunks = qlfg-chunks(rows);
+   let pipes = list(metal_pipeline(nlb-msl(),"nlb_ce"),metal_pipeline(qlfg-msl(),"qlfg_partial"),metal_pipeline(qlfg-msl(),"qlfg_reduce"));
+   let buffers = list(metal_buf_alloc(mul(rows,4)),metal_buf_alloc(4),metal_buf_alloc(4),metal_buf_alloc(4),metal_buf_alloc(mul(mul(chunks,cols),4)),metal_buf_alloc(mul(cols,4)));
+   list(rows,cols,chunks,pipes,buffers);
+  };
+  def qlfg-live(owner) = if not(eq(len(owner),5)) then 0 else and(qlfg-positive(nth(owner,3)),qlfg-positive(nth(owner,4)));
+  def qlfg-count(xs) = if nil?(xs) then 0 else add(if gt(head(xs),0) then 1 else 0,qlfg-count(tail(xs)));
+  def qlfg-owned(owner) = if not(eq(len(owner),5)) then 0 else qlfg-count(nth(owner,4));
+  def qlfg-close(owner) = if not(eq(len(owner),5)) then 0 else {
+   metal_sync();
+   q38-free-handles(nth(owner,4));
+  };
+  // The read below synchronizes this operation. Callers must finish a previous
+  // concurrent encoder before entering; this boundary makes that explicit.
+  def qlfg-ce(owner,logits,target) = if not(qlfg-live(owner)) then 0 else if not(qltl-target-valid(head(owner),target)) then 0 else if le(logits,0) then 0 else {
+   metal_sync();
+   let b = nth(owner,4);
+   let wroteTarget = metal_buf_write(nth(b,1),0,md-le32(target));
+   let wroteMask = metal_buf_write(nth(b,3),0,md-le32(md-f32-bits(1.0)));
+   if not(and(eq(wroteTarget,4),eq(wroteMask,4))) then 0 else metal_enqueue(head(nth(owner,3)),md-bind16(list(logits,nth(b,1),head(b),nth(b,2),nth(b,3)),list(head(owner),1,md-f32-bits(1.0),md-f32-bits(1.0)),32,0,1,0),1);
+  };
+  def qlfg-read-loss(owner) {
+   let bytes = metal_buf_read(nth(nth(owner,4),2),0,4);
+   let values = qlt-f32s(bytes,1);
+   if eq(len(values),1) then head(values) else nothing();
+  }
+  def qlfg-loss(owner,logits,target) = if not(eq(qlfg-ce(owner,logits,target),1)) then nothing() else qlfg-read-loss(owner);
+  // Return [ok, full-vocabulary loss, gradient wrt adapted hidden]. A/B chain
+  // rule remains lbw-backward; the immutable projection is never materialized.
+  def qlfg-gradient(owner,projection,logits,target) = if le(projection,0) then list(0,nothing(),list()) else if not(eq(qlfg-ce(owner,logits,target),1)) then list(0,nothing(),list()) else {
+   let b = nth(owner,4); let p = nth(owner,3);
+   let partial = metal_enqueue(nth(p,1),md-bind(list(projection,head(b),nth(b,4)),list(head(owner),nth(owner,1),RowSpan())),mul(nth(owner,2),nth(owner,1)));
+   let reduced = if eq(partial,1) then metal_enqueue(nth(p,2),md-bind(list(nth(b,4),nth(b,5)),list(nth(owner,2),nth(owner,1))),nth(owner,1)) else 0;
+   let loss = qlfg-read-loss(owner);
+   let gradient = if eq(reduced,1) then qlt-f32s(metal_buf_read(nth(b,5),0,mul(nth(owner,1),4)),nth(owner,1)) else list();
+   list(if and(not(nothing?(loss)),eq(len(gradient),nth(owner,1))) then 1 else 0,loss,gradient);
+  };
+ }
+ 0;
+}

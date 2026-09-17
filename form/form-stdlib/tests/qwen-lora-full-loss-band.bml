@@ -1,0 +1,53 @@
+// Full-vocabulary CE and quantized transpose against independent CPU arithmetic.
+// Includes a partial final row chunk. No model, corpus or checkpoint is modified.
+// preludes: form-stdlib/bml/qwen-lora-full-loss.bml form-stdlib/lora-step-live.bml
+section [form.bml] {
+ class QwenFullLossBand {
+  def qfgb-assert(name,ok) = if ok then 1 else form_error(str_concat("Qwen full loss: ",name));
+  def qfgb-q(i) = sub(mod(add(mul(i,7),mul(div(i,32),3)),15),7);
+  def qfgb-scale(i) = add(0.25,mul(0.125,add(mod(div(i,32),3),0.0)));
+  def qfgb-values(n,i,out) = if ge(i,n) then reverse(out) else qfgb-values(n,add(i,1),cons(mul(qfgb-scale(i),qfgb-q(i)),out));
+  def qfgb-block(i,left,out) = if le(left,0) then out else qfgb-block(add(i,1),sub(left,1),str_concat(out,byte_to_str(mod(add(qfgb-q(i),256),256))));
+  def qfgb-packed(n,i,out) = if ge(i,n) then out else {
+   let bits = add(13312,mul(mod(div(i,32),3),512));
+   let scale = str_concat(byte_to_str(mod(bits,256)),byte_to_str(div(bits,256)));
+   qfgb-packed(n,add(i,32),str_concat(out,str_concat(scale,qfgb-block(i,32,""))));
+  };
+  def qfgb-hidden(n,i,out) = if ge(i,n) then reverse(out) else qfgb-hidden(n,add(i,1),cons(div(add(sub(mod(mul(i,13),17),8),0.0),128.0),out));
+  def qfgb-run(rows,cols,target) {
+   let weights = qfgb-values(mul(rows,cols),0,list());
+   let hidden = qfgb-hidden(cols,0,list());
+   let logits = lbw-mv(weights,rows,cols,hidden);
+   let reference = lbw-tmv(weights,rows,cols,lbw-dce(logits,target));
+   let owner = qlfg-open(rows,cols);
+   let wh = metal_buf_alloc(q80-bytes(mul(rows,cols)));
+   let zh = metal_buf_alloc(mul(rows,4));
+   let wroteWeights = metal_buf_write(wh,0,qfgb-packed(mul(rows,cols),0,""));
+   let wroteLogits = metal_buf_write(zh,0,lsl-bytes(logits));
+   let observed = qlfg-gradient(owner,wh,zh,target);
+   let targetRefused = nothing?(qlfg-loss(owner,zh,rows));
+   let before = lbw-ce(logits,target);
+   let lossError = if head(observed) then tn-abs(sub(nth(observed,1),before)) else 1.0;
+   let gradientError = if head(observed) then lbw-reldiff(reference,nth(observed,2)) else 1.0;
+   let badWrite = metal_buf_write(zh,0,md-le32(2139095040));
+   let nonfiniteRefused = nothing?(qlfg-loss(owner,zh,target));
+   let expected = add(qlfg-owned(owner),2);
+   let closed = add(qlfg-close(owner),q38-free-handles(list(wh,zh)));
+   print(list("qwen-full-loss",rows,cols,"loss-error",lossError,"gradient-relative-error",gradientError,"owned",expected,"closed",closed));
+   qfgb-assert("complete fixture writes",and(eq(wroteWeights,q80-bytes(mul(rows,cols))),eq(wroteLogits,mul(rows,4))));
+   qfgb-assert("whole vocabulary loss",lt(lossError,0.00001));
+   qfgb-assert("Q8 transpose matches CPU derivative",lt(gradientError,0.00001));
+   qfgb-assert("invalid target and nonfinite loss refused",and(targetRefused,nonfiniteRefused));
+   qfgb-assert("all scratch and fixture buffers released",and(eq(expected,8),eq(closed,expected)));
+   1;
+  }
+ }
+ qfgb-assert("geometry rejects fractional and non-block widths",and(not(qlfg-geometry(3.5,32)),not(qlfg-geometry(3,31))));
+ qfgb-assert("geometry rejects zero and overflowing flat index",and(not(qlfg-geometry(0,32)),not(qlfg-geometry(134217728,32))));
+ qfgb-assert("geometry multiplication cannot wrap into admission",not(qlfg-geometry(4294967296,4294967296)));
+ qfgb-assert("packed byte offset also fits uint",not(qlfg-geometry(126322568,32)));
+ qfgb-assert("invalid owner holds no buffers",and(nil?(qlfg-open(0,32)),eq(qlfg-close(list()),0)));
+ qfgb-run(37,64,36);
+ qfgb-run(1025,32,1024);
+ 1;
+}
