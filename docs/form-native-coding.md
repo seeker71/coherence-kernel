@@ -321,6 +321,36 @@ neither entailment nor completeness: the reviewer can quote a real source and
 still reason incorrectly. This boundary is covered by a counterexample in
 `tests/form-cli-review-bindings-band.bml`.
 
+Review callers can let the model select source lines instead of reproducing
+quotation bytes. `bml/form-cli-review-source-lines.bml` supplies
+`fcrl-propose(sourceDocuments, reportText, maxSourceBytes)` and the controller
+callback `fcrl-repair([sourceDocuments, maxSourceBytes], subject)`. A finding
+uses its existing `source_path`, adds `source_lines: [first, last]`, and leaves
+`source_quote` absent or empty. Indexes are one-based inclusive integers into
+the original caller document. Native `rg -n` observations expose those indexes.
+The resolver retains Markdown, UTF-8 bytes and original line terminators;
+a trailing newline creates no extra physical line.
+
+The proposal has the ordinary native repair shape
+`[available, candidateText, "native-source-lines", evidenceOrReason]`.
+Evidence identifies each changed finding, its source path, selected lines,
+source byte length and half-open byte offsets. Keep the raw report and source
+snapshot alongside that candidate. The existing controller records the native
+repair and reruns the full caller checker. Use
+`fcrl-check(draftObject, reportObject, sourceDocuments, maxSourceBytes)` in that
+checker: it validates coordinates even when a supplied literal quote already
+passes, then calls the unchanged `fcrb-check`. Install the repair callback
+explicitly when constructing the six-element checker. It does not
+automatically replace a caller's existing repair callback.
+
+Conflicting explicit quotations, duplicate object keys, ambiguous source paths,
+invalid or blank ranges and source byte-limit violations yield no candidate.
+Literal quotations remain unchanged, and resolution is all-or-nothing across
+findings. The pure `fcqe-lines(source, first, last, maxSourceBytes)` helper in
+`form-cli-quote-evidence.bml` exposes the same byte selection separately.
+This resolves citation representation only. The selected passage can still be
+irrelevant, the interpretation incorrect, or the answer unhelpful.
+
 Each completed model reply emits `form-code-reply` metadata: JSON validity,
 wrapper/tool presence, report type, before/after role and check/repair counts.
 It includes no answer text, prompt text or document content. These observations
