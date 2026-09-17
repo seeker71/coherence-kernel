@@ -289,6 +289,25 @@ optional provider resource.
 
 ## Provider usage records
 
+For the coordinating session, run:
+
+```sh
+form-run ./fkwu observe/form-cli-turn-cost-run.bml
+```
+
+This completes up to eight pending steps in the existing explicitly bound
+turn collector, checking a five-second attention allowance between steps.
+A single step retains the collector's own bounded reads and can cross that
+time allowance. The result names the selected completed turn, its model,
+timestamps, call count and provider-reported input, cached input, uncached
+input, output, reasoning output and total tokens. Input includes cached input;
+output includes reasoning. An unfinished or unreconciled reading returns null
+quantities and the collector's reason. It reports neither the current open
+turn nor separately launched provider processes. Repeated readings of the
+same turn are one usage record, not additional spend. The first live record
+and its substantial coordination cost are in
+`receipts/2026-09-17-native-span-review.md`.
+
 Send the owned Codex stdout path as one stdin line:
 
 ```sh

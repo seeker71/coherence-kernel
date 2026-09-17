@@ -128,6 +128,32 @@ procedure was retained as `indexed-review-carrier-boundary-verified-v1` under
 prompt, answer, expected label or model-generated reason was a training target.
 Its serving effect remains unobserved.
 
+## Settled coordinating cost, read in the following turn
+
+The existing collector reconciled completed turn
+`01a0aefc-a2b3-7da1-b0de-55fcb1d7306d`, from **1789642187446** to
+**1789643454815** milliseconds since epoch. The new bounded cost door returned
+the same record in **420 ms**. It reports **35** coordinating model calls:
+
+| Provider quantity | Tokens |
+| --- | ---: |
+| Input, including cached input | 4572599 |
+| Cached input subset | 4472320 |
+| Uncached input | 100279 |
+| Output, including reasoning | 26727 |
+| Reasoning output subset | 14454 |
+| Cache write / unattributed | 0 / 0 |
+| Input plus output | 4599326 |
+
+This is the settled cost of the coordinating turn, not the two local model
+executions or a new provider subprocess. Cached input and reasoning output
+are subsets and are not added again. The collector reconciles carrier
+identity, completion, tool calls and usage; its parser/state band passes
+**33555454**. The native reviews' zero provider-call count did not make this
+movement cheap. These costs exceed the retained bounded provider synthesis
+and must remain visible when judging the value of local experimentation.
+This is a measured observation, not a monetary price or semantic score.
+
 The exchange stayed useful by returning to the failed enquiry after the new
 probe. The surprising teaching was that a reviewer could remove a relationship
 guarantee in a plain technical scenario and endorse its counterpart when
