@@ -18,7 +18,7 @@ re-run 2026-09-04; the others declare their own.
 | RAG: embed, index codec, ask, adaptive-k, freshness, nearest-shape | `form/form-stdlib/rag-*.fk`, `nearest-shape.fk` | exists |
 | bounded raw-byte heed cursor: decoded output → query → typed prefill | `form-cli-heed-cursor.fk` | 524287 |
 | attributed lookup against the current Form source body | `form-cli-heed-current-source.fk` | 16777215 |
-| generation-path wiring, two ledgers, sealed-path context hint, bounded counters | `form-cli-model-generate.fk` | `form-cli-model-generate-heed-report-band` 8388607 |
+| generation-path wiring, two ledgers, distinct prompt hints and source bindings, bounded counters | `form-cli-model-generate.fk` | `form-cli-model-generate-heed-report-band` 16777215 |
 | teach overlay, local-ready marks, one-turn budget | `form-cli-local-ready.bml`, `form-cli-one-turn.bml` | 1023 and 2047 |
 | the mints — knowledge, universe, unique, domain, organ, lane, lens, planner, LoRA corpus, embodiment census, speaker home | `form-cli-*-mint.bml`, `form-cli-lora-corpus.bml`, `form-cli-embody-census.bml`, `form-cli-speaker-home.bml` | each band declares its own; row counts are census evidence, never a target |
 | BML/BMF live-byte curriculum and control curriculum | `bml-bmf-stream-curriculum.bml`, `bml-bmf-control-curriculum.bml` | 16777215 and 1048575 (each band preludes its `.bml` authority) |
