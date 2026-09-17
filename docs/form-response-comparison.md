@@ -82,6 +82,30 @@ still needs observation.
 
 ### Local review evidence
 
+`bml/form-cli-review-enquiry.bml` exposes
+`fcrq-prompt(goal,documents,reportText,fields)` for an explicit indexed review.
+It returns the existing carrier result shape: success, prompt text and reason.
+An invalid or ambiguous report, or invalid editable fields, returns the
+original packet failure. The prompt carries the caller's source documents,
+original enquiry and report, plus the exact `fcre-packet` base and spans.
+Expected verdicts and report-check answers are not part of this interface.
+
+Generate an answer through the native model session, retain its completion
+and release evidence, then pass its decoded edit object to
+`fcre-apply(reportText,fields,edits)`. That carrier checks complete ordered
+coverage and the original byte identity, composes the selected text fields,
+and preserves other values. Re-run the original caller checks and read the
+actual reasons and revised report. This is an explicit review interface;
+its structural guarantees do not establish the model's judgment quality.
+
+The first live use, recorded in
+`receipts/2026-09-17-native-span-review.md`, repaired two unsupported claims
+in a new mixed-evidence probe while misreading one supported span. It then
+kept every span of the retained failed dialogue, including its unsupported
+consequence and unprovided commitment. Both edit sets applied successfully.
+The interface remains an explicit diagnostic; that result does not support
+automatically reviewing ordinary answers or claiming a semantic repair.
+
 The 2026-09-17 retained-answer review used the same caller material through
 two profiles. Ordinary generation copied the input after a STORE marker and
 exhausted 1,536 tokens. Compact chat produced a complete 828-token review and
