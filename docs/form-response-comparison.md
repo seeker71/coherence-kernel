@@ -393,6 +393,16 @@ candidate instruction was removed from the default review path. A successful
 check or a better-sounding instruction does not establish a semantic repair;
 retain the actual failed answer before choosing another intervention.
 
+Review improvements also need a sound control. The retained-pair experiment in
+`receipts/2026-09-17-native-intent-review-boundaries.md` separates source support
+from intent preservation, but both reviews keep the original draft, including
+the missed concession. Asking instead for a concrete recipient counterexample
+creates an unsupported objection to the sound control and still misses the
+concession in the other draft. Neither prompt is promoted. Exact quote matching
+proves where words came from; it does not prove the permission or consequence
+a model attributes to those words. Keep completion, format recovery, edit
+application, source support and actual usefulness as separate observations.
+
 Passing a few structured assertions establishes only that task's checked
 behavior. Read the actual answers for unsupported claims, omitted constraints,
 warmth, initiative and usefulness. Numeric text-valence readings, where used,
