@@ -1,0 +1,47 @@
+// Resolve caller-selected source lines before the unchanged exact-link checker.
+// The raw report and immutable source documents remain the caller's evidence.
+// preludes: form-stdlib/bml/form-cli-review-bindings.bml form-stdlib/bml/form-cli-quote-evidence.bml form-stdlib/organ-health.bml
+section [form.bml] {
+ class FormCliReviewSourceLines {
+  def fcrl-unique(pairs,seen) = if nil?(pairs) then 1 else if fat-has(seen,json-pair-key(head(pairs))) then 0 else fcrl-unique(tail(pairs),cons(json-pair-key(head(pairs)),seen));
+  def fcrl-object(value) = if not(fat-wire-object?(value)) then 0 else fcrl-unique(json-object-pairs(value),list());
+  def fcrl-source-count(sources,path) = if nil?(sources) then 0 else add(if str_eq(nth(head(sources),1),path) then 1 else 0,fcrl-source-count(tail(sources),path));
+  def fcrl-fail(index,reason) = list(0,list(),list(),str_concat("Source lines ",str_concat(int_to_str(index),str_concat(": ",reason))));
+  def fcrl-row(row,sources,limit,index) = if not(fcrl-object(row)) then fcrl-fail(index,"finding must be an unambiguous object") else if not(json-object-has?(row,"source_lines")) then list(1,row,list(),"") else {
+   let lines = json-object-get(row,"source_lines");
+   let path = fcap-string(row,"source_path");
+   if not(fat-wire-array?(lines)) then fcrl-fail(index,"source_lines must be [first,last]") else if not(eq(len(node_children(lines)),2)) then fcrl-fail(index,"source_lines needs two indexes") else if not(and(str_eq(faj-type(head(node_children(lines))),"number"),str_eq(faj-type(nth(node_children(lines),1)),"number"))) then fcrl-fail(index,"line indexes must be numbers") else if not(eq(fcrl-source-count(sources,path),1)) then fcrl-fail(index,"source_path must select exactly one caller document") else {
+    let source = nth(fat-find-doc(sources,path),2);
+    let found = fcqe-lines(source,node_value(head(node_children(lines))),node_value(nth(node_children(lines),1)),limit);
+    let hasQuote = json-object-has?(row,"source_quote");
+    let quote = fcap-string(row,"source_quote");
+    if not(head(found)) then fcrl-fail(index,nth(found,4)) else if and(hasQuote,not(fat-wire-string?(json-object-get(row,"source_quote")))) then fcrl-fail(index,"source_quote must be a string when supplied") else if and(not(str_eq(quote,"")),not(str_eq(quote,nth(found,1)))) then fcrl-fail(index,"explicit source_quote conflicts with selected lines") else if str_eq(quote,nth(found,1)) then list(1,row,list(),"") else {
+     let evidence = json-node-object(list(oh-n("finding",index),oh-s("source_path",path),json-node-pair("source_lines",lines),oh-n("start_byte",nth(found,2)),oh-n("end_byte",nth(found,3)),oh-n("source_bytes",str_len(source))));
+     list(1,oh-set(row,"source_quote",json-node-string(nth(found,1))),list(evidence),"");
+    };
+   };
+  };
+  def fcrl-rows(rows,sources,limit,index,out,evidence) = if nil?(rows) then list(1,reverse(out),reverse(evidence),"") else {
+   let resolved = fcrl-row(head(rows),sources,limit,index);
+   if not(head(resolved)) then resolved else fcrl-rows(tail(rows),sources,limit,add(index,1),cons(nth(resolved,1),out),append(nth(resolved,2),evidence));
+  };
+  // Validate coordinates even when a literal quotation already passes fcrb-check.
+  // Missing quotation bytes still fail that original checker and request repair.
+  def fcrl-check(draft,report,sources,limit) = if not(fcrl-object(report)) then fcrb-fail(0,"report must be an unambiguous object") else if not(fat-wire-array?(json-object-get(report,"review_findings"))) then fcrb-check(draft,report,sources) else {
+   let checked = fcrl-rows(node_children(json-object-get(report,"review_findings")),sources,limit,0,list(),list());
+   if not(head(checked)) then list(0,nth(checked,3),0,0) else fcrb-check(draft,report,sources);
+  };
+  // [available, candidate text, repair identity, evidence/reason]. All-or-nothing.
+  // Attach as a native repair callback; the controller reruns all original checks.
+  def fcrl-propose(sources,text,limit) {
+   let report = if faj-valid(text) then parse-json("source-lines",text) else json-node-null();
+   let rows = if fcrl-object(report) then json-object-get(report,"review_findings") else json-node-null();
+   if not(fat-wire-array?(rows)) then list(0,text,"native-source-lines","review_findings must be an array in an unambiguous object") else {
+    let resolved = fcrl-rows(node_children(rows),sources,limit,0,list(),list());
+    if not(head(resolved)) then list(0,text,"native-source-lines",nth(resolved,3)) else if nil?(nth(resolved,2)) then list(0,text,"native-source-lines","no source quotation needs materialization") else list(1,json-emit(oh-set(report,"review_findings",json-node-array(nth(resolved,1)))),"native-source-lines",json-emit(json-node-array(nth(resolved,2))));
+   };
+  }
+  def fcrl-repair(contract,subject) = fcrl-propose(head(contract),nth(subject,1),nth(contract,1));
+ }
+ 0;
+}

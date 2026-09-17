@@ -1,11 +1,18 @@
 // Counterexamples for citation and application links, without a semantic oracle.
-// preludes: form-stdlib/bml/form-cli-review-bindings.bml
+// preludes: form-stdlib/bml/form-cli-review-source-lines.bml
 section [form.bml] {
  class ReviewBindingsWitness {
   def rbw-check(name,ok) = if ok then 1 else form_error(str_concat("review bindings: ",name));
   def rbw-row(field,draft,source,quote,status,replacement) = json-node-object(list(json-node-pair("draft_field",json-node-string(field)),json-node-pair("draft_quote",json-node-string(draft)),json-node-pair("source_path",json-node-string(source)),json-node-pair("source_quote",json-node-string(quote)),json-node-pair("explanation",json-node-string("This is a reviewer claim, not a verified inference.")),json-node-pair("status",json-node-string(status)),json-node-pair("replacement_quote",json-node-string(replacement))));
   def rbw-report(answer,rows) = json-node-object(list(json-node-pair("answer",json-node-string(answer)),json-node-pair("next_action",json-node-string("Continue.")),json-node-pair("review_findings",json-node-array(rows))));
   def rbw-operation(row,operation) = json-node-object(append(json-object-pairs(row),list(json-node-pair("operation",json-node-string(operation)))));
+  def rbw-lines(row,lines) = oh-set(row,"source_lines",parse-json("lines",lines));
+  def rbw-propose(row,sources) = fcrl-propose(sources,json-emit(rbw-report("Referenced objects persist.",list(row))),1024);
+  def rbw-live(contract,subject) {
+   let checked = fcrl-check(head(contract),parse-json("report",nth(subject,1)),nth(contract,1),1024);
+   list(head(checked),nth(checked,1));
+  }
+  def rbw-sources(expected,subject) = list(value_eq(expected,subject),"source documents unchanged");
  }
  let draft = rbw-report("All objects persist.",list());
  let sources = list(list("source","rule.txt","Referenced objects persist. Unreferenced objects can be reclaimed."));
@@ -32,6 +39,56 @@ section [form.bml] {
  rbw-check("unknown operation",not(head(fcrb-check(draft,rbw-report("Referenced objects persist.",list(rbw-operation(good,"invented"))),sources))));
  // A real quote can support a bad inference: the checker must not claim otherwise.
  let unsound = rbw-row("answer","All objects persist.","rule.txt","Referenced objects persist.","applied","Every object disappears immediately.");
- rbw-check("entailment outside this check",head(fcrb-check(draft,rbw-report("Every object disappears immediately.",list(unsound)),sources)));
+  rbw-check("entailment outside this check",head(fcrb-check(draft,rbw-report("Every object disappears immediately.",list(unsound)),sources)));
+ let lineText = "Header\r\n**Referenced objects** persist.\r\n  α stays referenced.\nTail";
+ let lineSources = list(list("source","rule.txt",lineText));
+ let lineRow = rbw-lines(oh-set(good,"source_quote",json-node-string("")),"[2,3]");
+ let raw = rbw-report("Referenced objects persist.",list(lineRow));
+ let proposed = fcrl-propose(lineSources,json-emit(raw),1024);
+ let resolved = parse-json("resolved",nth(proposed,1));
+ let quoted = fcap-string(head(node_children(json-object-get(resolved,"review_findings"))),"source_quote");
+ rbw-check("source bytes materialized",and(head(proposed),str_eq(quoted,"**Referenced objects** persist.\r\n  α stays referenced.\n")));
+ rbw-check("unchanged exact checker accepts resolved source",head(fcrb-check(draft,resolved,lineSources)));
+ rbw-check("answer untouched",str_eq(fcap-string(raw,"answer"),fcap-string(resolved,"answer")));
+ rbw-check("raw report retained",str_eq(fcap-string(head(node_children(json-object-get(raw,"review_findings"))),"source_quote"),""));
+ rbw-check("byte offsets",str_eq(substring(lineText,8,add(8,str_len(quoted))),quoted));
+ rbw-check("end without terminator",str_eq(nth(fcqe-lines(lineText,4,4,1024),1),"Tail"));
+ rbw-check("no phantom final line",not(head(fcqe-lines("x\n",2,2,1024))));
+ rbw-check("zero index",not(head(fcqe-lines(lineText,0,1,1024))));
+ rbw-check("reversed indexes",not(head(fcqe-lines(lineText,3,2,1024))));
+ rbw-check("fractional index",not(head(fcqe-lines(lineText,1.5,2,1024))));
+ rbw-check("out of range",not(head(fcqe-lines(lineText,1,5,1024))));
+ rbw-check("blank line",not(head(fcqe-lines("x\n \t\ny",2,2,1024))));
+ rbw-check("source byte limit",not(head(fcqe-lines(lineText,2,3,4))));
+ rbw-check("conflicting quote never overwritten",not(head(rbw-propose(rbw-lines(good,"[2,3]"),lineSources))));
+ rbw-check("wrong path",not(head(rbw-propose(lineRow,list()))));
+ rbw-check("ambiguous path",not(head(rbw-propose(lineRow,append(lineSources,lineSources)))));
+ rbw-check("boolean index refused",not(head(rbw-propose(rbw-lines(lineRow,"[true,3]"),lineSources))));
+ rbw-check("string index refused",not(head(rbw-propose(rbw-lines(lineRow,"[\"2\",3]"),lineSources))));
+ rbw-check("wrong range size",not(head(rbw-propose(rbw-lines(lineRow,"[2]"),lineSources))));
+ rbw-check("idempotent",not(head(fcrl-propose(lineSources,nth(proposed,1),1024))));
+ let conflicting = rbw-report("Referenced objects persist.",list(rbw-lines(oh-set(lineRow,"source_quote",json-node-string("Tail")),"[2,3]")));
+ rbw-check("literal membership alone does not validate coordinates",head(fcrb-check(draft,conflicting,lineSources)));
+ rbw-check("coordinates checked alongside valid literal",not(head(fcrl-check(draft,conflicting,lineSources,1024))));
+ rbw-check("resolved coordinates and links checked",head(fcrl-check(draft,resolved,lineSources,1024)));
+ let mixed = rbw-report("Referenced objects persist.",list(lineRow,oh-set(unresolved,"source_quote",json-node-string("Tail"))));
+ let mixedProposal = fcrl-propose(lineSources,json-emit(mixed),1024);
+ rbw-check("literal and reference findings",value_eq(tail(tail(fcrb-check(draft,parse-json("mixed",nth(mixedProposal,1)),lineSources))),list(1,1)));
+ let badAfterGood = json-emit(rbw-report("Referenced objects persist.",list(lineRow,rbw-lines(good,"[99,99]"))));
+ let failed = fcrl-propose(lineSources,badAfterGood,1024);
+ rbw-check("no partial candidate",and(not(head(failed)),str_eq(nth(failed,1),badAfterGood)));
+ rbw-check("duplicate root refused",not(head(fcrl-propose(lineSources,"{\"review_findings\":[],\"review_findings\":[]}",1024))));
+ rbw-check("missing quote materialized",head(fcrl-row(parse-json("row","{\"source_path\":\"rule.txt\",\"source_lines\":[2,3]}"),lineSources,1024,0)));
+ rbw-check("null quote refused",not(head(fcrl-row(parse-json("row","{\"source_path\":\"rule.txt\",\"source_lines\":[2,3],\"source_quote\":null}"),lineSources,1024,0))));
+ rbw-check("duplicate finding key refused",not(head(fcrl-row(parse-json("row","{\"source_path\":\"rule.txt\",\"source_lines\":[2,3],\"source_lines\":[1,1]}"),lineSources,1024,0))));
+ let checker = list(rbw-live,list(draft,lineSources),rbw-sources,lineSources,fcrl-repair,list(lineSources,1024));
+ let state = fcap-open-direct-review("Review source links.",lineSources);
+ let completed = fcap-step(state,str_concat("{\"report\":",str_concat(json-emit(raw),"}")),checker);
+ rbw-check("controller checks resolved report",str_eq(fcap-stage(completed),"complete"));
+ rbw-check("controller retains native attribution",and(eq(len(fcap-native-repairs(completed)),1),str_eq(nth(head(fcap-native-repairs(completed)),1),"accepted")));
+ rbw-check("controller preserves source documents",value_eq(fcap-docs(completed),lineSources));
+ let falseApplication = oh-set(raw,"answer",json-node-string("All objects persist."));
+ let declined = fcap-step(state,str_concat("{\"report\":",str_concat(json-emit(falseApplication),"}")),checker);
+ rbw-check("source resolution cannot bypass application checks",str_eq(fcap-stage(declined),"repair"));
  1;
 }
