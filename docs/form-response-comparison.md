@@ -23,6 +23,15 @@ arrival needs writable temporary/cache locations; a source-read-only task can
 still fail in a filesystem read-only sandbox. Such a failure consumed tokens
 and belongs in the comparison.
 
+Give a provider the native tool's exact working directory and a noninteractive
+stdin invocation. Put the full JSON in a pipe, input file or heredoc in that
+same command, with `tty: false`. Typing a long JSON line into an interactive
+terminal can fill its canonical input buffer before the newline reaches the
+reader. The retained transfer comparison observed truncated input, overflow
+bells and a timed-out checker. A noninteractive heredoc completed the same
+frozen tasks and both batched checks. Keep the failed attempt and its unknown
+usage; changing the transport does not make those costs disappear.
+
 ## Native session runner
 
 `observe/form-cli-response-session-run.bml` owns multiple frozen assessments
