@@ -1,0 +1,72 @@
+// Teacher-forced, completion-only head learning from cached normalized features.
+// The frozen transformer need not run again during head optimization. The caller
+// owns the cache, split, context, adapter, scratch and optimizer lifetimes.
+// Shared context head scratch is overwritten; refresh the session head before
+// resuming generation. No corpus selection, persistence or promotion occurs here.
+// preludes: form-stdlib/bml/qwen-lora-full-loss.bml form-stdlib/lora-step-live.bml
+section [form.bml] {
+ class QwenLoraHeadBatch {
+  def qlhb-context(ctx,owner,adapter) = if lt(len(ctx),7) then 0 else if not(qlfg-live(owner)) then 0 else {
+   let tv = nth(ctx,6);
+   and(eq(kth-tv-ty(tv),8),and(eq(kth-tv-r(tv),head(owner)),and(eq(kth-tv-c(tv),nth(owner,1)),q38-lora-rank1-valid?(adapter,nth(owner,1)))));
+  };
+  def qlhb-feature(bytes,width) = if not(str_eq(value_kind(bytes),"string")) then 0 else if not(eq(str_len(bytes),mul(width,4))) then 0 else qlt-finite-bytes?(bytes,0,width);
+  def qlhb-project(ctx,owner,adapter,bytes,target) {
+   let width = nth(owner,1);
+   if not(and(qlhb-feature(bytes,width),qltl-target-valid(head(owner),target))) then form_error("head batch feature or target refused") else 0;
+   let bs = nth(ctx,1);
+   // Optimizer initialization can leave a serial encoder open. End that work
+   // before opening the concurrent adapter/projection batch, including loss-only
+   // callers that never passed through qlhb-gradients' synchronization boundary.
+   metal_sync();
+   if not(eq(metal_buf_write(nth(bs,1),0,bytes),str_len(bytes))) then form_error("head batch feature write incomplete") else 0;
+   metal_batch_concurrent();
+   let applied = q38-lora-rank1-apply(nth(ctx,0),nth(bs,1),adapter,width);
+   let projected = if eq(applied,1) then q38-mv(nth(ctx,0),nth(ctx,6),nth(bs,1),nth(bs,28),1) else 0;
+   if eq(projected,1) then nth(bs,28) else form_error(str_concat("head batch projection refused: adapter=",str_concat(int_to_str(applied),str_concat(" projection=",int_to_str(projected)))));
+  }
+  // Samples are [exact float32 feature bytes, integer target token]. The sum
+  // is token-weighted; row length never grants a separate implicit multiplier.
+  def qlhb-mean(count,loss,ga,gb) = if le(count,0) then nothing() else list(count,div(loss,add(count,0.0)),lbw-scale(ga,div(1.0,add(count,0.0))),lbw-scale(gb,div(1.0,add(count,0.0))));
+  def qlhb-gradients(ctx,owner,adapter,samples) = if or(nil?(samples),not(qlhb-context(ctx,owner,adapter))) then nothing() else {
+   metal_sync();
+   let width = nth(owner,1);
+   let a = qlt-f32s(metal_buf_read(head(adapter),0,mul(width,4)),width);
+   let b = qlt-f32s(metal_buf_read(nth(adapter,1),0,mul(width,4)),width);
+   if not(and(eq(len(a),width),eq(len(b),width))) then nothing() else qlhb-fold(ctx,owner,adapter,samples,a,b,0,0.0,lbw-zeros(width,list()),lbw-zeros(width,list()));
+  };
+  def qlhb-fold(ctx,owner,adapter,samples,a,b,count,loss,ga,gb) = if nil?(samples) then qlhb-mean(count,loss,ga,gb) else {
+   let sample = head(samples);
+   if not(eq(len(sample),2)) then form_error("head batch sample shape refused") else 0;
+   let logits = qlhb-project(ctx,owner,adapter,head(sample),nth(sample,1));
+   let observed = qlfg-gradient(owner,kth-tv-h(nth(ctx,6)),logits,nth(sample,1));
+   if not(head(observed)) then form_error("head batch full-vocabulary gradient refused") else 0;
+   let hidden = qlt-f32s(head(sample),nth(owner,1));
+   let scale = ln-f32-decode(nth(adapter,4));
+   let reverse = lbw-backward(a,b,1,len(a),len(b),hidden,list(lbw-dot(a,hidden)),nth(observed,2),scale);
+   if nothing?(reverse) then form_error("head batch rank-one reverse refused") else qlhb-fold(ctx,owner,adapter,tail(samples),a,b,add(count,1),add(loss,nth(observed,1)),lbw-axpy(ga,lbw-dA(reverse),1.0),lbw-axpy(gb,lbw-dB(reverse),1.0));
+  };
+  def qlhb-loss(ctx,owner,adapter,samples) = if or(nil?(samples),not(qlhb-context(ctx,owner,adapter))) then nothing() else qlhb-loss-fold(ctx,owner,adapter,samples,0,0.0);
+  def qlhb-loss-fold(ctx,owner,adapter,samples,count,loss) = if nil?(samples) then list(count,div(loss,add(count,0.0))) else {
+   let sample = head(samples);
+   if not(eq(len(sample),2)) then form_error("head validation sample shape refused") else 0;
+   let logits = qlhb-project(ctx,owner,adapter,head(sample),nth(sample,1));
+   let value = qlfg-loss(owner,logits,nth(sample,1));
+   if nothing?(value) then form_error("head validation loss refused") else qlhb-loss-fold(ctx,owner,adapter,tail(samples),add(count,1),add(loss,value));
+  };
+  // Six Adam buffers are owned by this state; A/B remain the adapter's buffers.
+  def qlhb-optimizer(adapter) = if not(eq(len(adapter),5)) then list() else nlb-state-rows(list(list("qwen-head-rank1",head(adapter),nth(adapter,1),nth(adapter,3),1,nth(adapter,3),ln-f32-decode(nth(adapter,4)))));
+  def qlhb-step(state,batch,rate,step,maxNorm) {
+   if or(nil?(state),nothing?(batch)) then form_error("head optimizer state or batch absent") else 0;
+   let row = head(state);
+   if not(and(eq(len(state),1),eq(len(batch),4))) then form_error("head optimizer needs one rank-one pair and a complete batch") else 0;
+   let width = nth(head(row),3);
+   if not(and(eq(len(nth(batch,2)),width),eq(len(nth(batch,3)),width))) then form_error("head optimizer gradient shape refused") else 0;
+   if not(and(gt(rate,0.0),and(str_eq(value_kind(step),"int"),and(gt(step,0),ge(maxNorm,0.0))))) then form_error("head optimizer rate, step or norm refused") else 0;
+   let a = lsl-bytes(nth(batch,2)); let b = lsl-bytes(nth(batch,3));
+   let wroteA = metal_buf_write(nth(row,1),0,a); let wroteB = metal_buf_write(nth(row,2),0,b);
+   if not(and(eq(wroteA,str_len(a)),eq(wroteB,str_len(b)))) then form_error("head optimizer gradient write incomplete") else nlb-safe-step(state,rate,step,maxNorm);
+  }
+ }
+ 0;
+}

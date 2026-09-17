@@ -86,6 +86,40 @@ answers stayed correct. The candidate remains unpromoted. These observations
 establish a working learning operation and an adverse generalization reading,
 not response-quality improvement or end-to-end training throughput.
 
+### Cached head batches
+
+`bml/qwen-lora-head-batch.bml` reuses normalized hidden features from a frozen
+Qwen teacher-forced pass. A sample is `[float32Bytes,targetToken]`; callers
+own the completion mask and the separation of training, validation and tests.
+Head optimization can revisit those features without replaying the transformer.
+
+`qlhb-gradients(ctx,lossOwner,adapter,samples)` returns
+`[tokenCount,meanLoss,meanGradientA,meanGradientB]` over the full vocabulary.
+The mean weights every supplied token equally. `qlhb-loss` returns the count
+and mean loss without gradients. Both require a matching Q8_0 projection and
+finite, complete normalized features. Empty batches are refused.
+
+`qlhb-optimizer(adapter)` owns six gradient/Adam buffers while borrowing A/B
+from the adapter. `qlhb-step(state,batch,rate,step,maxNorm)` writes the complete
+mean gradients and uses the native finite-gradient check, clipping and Adam
+update. Release those buffers through `nlb-state-close`; its return value is
+a success flag, not a count. The adapter and full-loss scratch retain their
+separate owners. Model weights stay unchanged.
+
+These calls overwrite the context's head scratch. Before resuming generation,
+refresh the session head from its retained stream, or attach the persisted
+candidate to a fresh session through the explicit adapter API. The projection
+boundary synchronizes pending work, including optimizer initialization. The
+API chooses no corpus, checkpoint or serving candidate by itself.
+
+The first real batch experiment trained on six verified boolean repair
+programs and selected against two separate programs. Validation loss fell
+from 0.312946 to 0.097776 over eight rounds. On the original, separate review
+utility repair, the selected adapter still produced 14 compiler errors and
+repeated comments until the 1,536-token limit. It remains unpromoted. This
+establishes reusable native batch learning, with unsuccessful transfer to that
+repair task; see `receipts/2026-09-17-qwen-cached-head-batches.md`.
+
 ## Call without knowing Form syntax
 
 In form-cli, enter `code` followed by a JSON object. The standalone native door

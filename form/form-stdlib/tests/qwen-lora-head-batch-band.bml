@@ -1,0 +1,53 @@
+// Device batch gradient versus independent complete CPU chain rule; real Adam step.
+// preludes: form-stdlib/bml/qwen-lora-head-batch.bml
+section [form.bml] {
+ class QwenHeadBatchBand {
+  def qhbb-assert(name,ok) = if ok then 1 else form_error(str_concat("Qwen head batch: ",name));
+  def qhbb-vector(first) = cons(first,lbw-zeros(31,list()));
+  def qhbb-zero-bytes(n) = if le(n,0) then "" else str_concat(byte_to_str(0),qhbb-zero-bytes(sub(n,1)));
+  def qhbb-qrow(value) = str_concat(byte_to_str(0),str_concat(byte_to_str(60),str_concat(byte_to_str(value),qhbb-zero-bytes(31))));
+ }
+ let source = str_concat("#include <metal_stdlib>\nusing namespace metal;\n",str_concat(q80-msl-spine(),str_concat(q80-msl-weight(),str_concat(q80-matvec-wide-body("qhbb_projection"),q38-lora-rank1-msl()))));
+ let pipe = metal_pipeline(source,"qhbb_projection");
+ let pipes = append(append(append(lbw-zeros(29,list()),list(pipe)),lbw-zeros(17,list())),q38-lora-rank1-pipes(source));
+ let wh = metal_buf_alloc(136); let xh = metal_buf_alloc(128); let zh = metal_buf_alloc(16);
+ let packed = str_concat(qhbb-qrow(0),str_concat(qhbb-qrow(1),str_concat(qhbb-qrow(2),qhbb-qrow(3))));
+ qhbb-assert("projection fixture written",eq(metal_buf_write(wh,0,packed),136));
+ let bs = append(append(list(0,xh),lbw-zeros(26,list())),list(zh));
+ let ctx = list(pipes,bs,list(),list(),list(),list(),list(wh,4,32,8));
+ let a = qhbb-vector(0.1); let b = qhbb-vector(0.2);
+ let adapter = q38-lora-rank1-open(lsl-bytes(a),lsl-bytes(b),32,md-f32-bits(0.5));
+ let owner = qlfg-open(4,32);
+ let optimizer = qlhb-optimizer(adapter);
+ let positive = qhbb-vector(1.0); let negative = qhbb-vector(-0.5);
+ let samples = list(list(lsl-bytes(positive),0),list(lsl-bytes(positive),0),list(lsl-bytes(negative),3));
+ let weights = append(append(qhbb-vector(0.0),qhbb-vector(1.0)),append(qhbb-vector(2.0),qhbb-vector(3.0)));
+ let gp = qltl-grad(weights,4,positive,a,b,0.5,0);
+ let gn = qltl-grad(weights,4,negative,a,b,0.5,3);
+ let expectedA = lbw-scale(lbw-axpy(lbw-scale(head(gp),2.0),head(gn),1.0),div(1.0,3.0));
+ let expectedB = lbw-scale(lbw-axpy(lbw-scale(nth(gp,1),2.0),nth(gn,1),1.0),div(1.0,3.0));
+ let expectedLoss = div(add(mul(2.0,qltl-loss(weights,4,positive,a,b,0.5,0)),qltl-loss(weights,4,negative,a,b,0.5,3)),3.0);
+ let baseline = qlhb-loss(ctx,owner,adapter,samples);
+ let batch = qlhb-gradients(ctx,owner,adapter,samples);
+ let lossError = tn-abs(sub(nth(batch,1),expectedLoss));
+ let aError = lbw-reldiff(nth(batch,2),expectedA); let bError = lbw-reldiff(nth(batch,3),expectedB);
+ let stepped = qlhb-step(optimizer,batch,0.001,1,1.0);
+ let after = qlhb-loss(ctx,owner,adapter,samples);
+ let unchanged = str_eq(metal_buf_read(wh,0,136),packed);
+ let emptyRefused = nothing?(qlhb-gradients(ctx,owner,adapter,list()));
+ let expectedOptimizer = len(nlb-state-handles(optimizer));
+ metal_sync();
+ let closedOptimizer = q38-free-handles(nlb-state-handles(optimizer));
+ let closedAdapter = q38-lora-rank1-close(adapter);
+ let closedScratch = qlfg-close(owner);
+ let closedFixture = q38-free-handles(list(wh,xh,zh));
+ print(list("head-batch","loss-error",lossError,"A-relative-error",aError,"B-relative-error",bError,"loss-before",nth(batch,1),"loss-after",nth(after,1),"released",closedOptimizer,closedAdapter,closedScratch,closedFixture));
+ qhbb-assert("weighted batch matches full CPU chain rule",and(lt(lossError,0.000001),and(lt(aError,0.000001),lt(bError,0.000001))));
+ qhbb-assert("Adam lowers this fixture loss",lt(nth(after,1),nth(batch,1)));
+ qhbb-assert("base projection stays immutable",unchanged);
+ qhbb-assert("empty batch refused",emptyRefused);
+ qhbb-assert("sample count retained",eq(head(batch),3));
+ qhbb-assert("loss works after queued optimizer initialization",lt(tn-abs(sub(nth(baseline,1),nth(batch,1))),0.000001));
+ qhbb-assert("all owners released",and(eq(closedOptimizer,expectedOptimizer),and(eq(closedOptimizer,6),and(eq(closedAdapter,3),and(eq(closedScratch,6),eq(closedFixture,3))))));
+ 1;
+}
