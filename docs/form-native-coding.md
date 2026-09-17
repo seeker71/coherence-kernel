@@ -733,6 +733,28 @@ framebuffer and tool actions. Evaluation still excludes its answers from
 training. The model, source checks, document constraints and release owner are
 unchanged. This optional local path adds no provider or model-server dependency.
 
+To reserve a separate answer stage, also supply `reasoning_answer_tokens`:
+
+```json
+{"initial_reasoning_tokens":512,"reasoning_answer_tokens":1024}
+```
+
+Both allowances are positive integers at most 8192. The answer reserve requires
+the initial allowance. `max_reply_tokens`, when present, caps each stage
+separately. Both stages must fit the context; the controller also checks room
+for its observation before opening the answer stage. If the model completes
+its final response naturally during the initial stage, that response is used.
+Otherwise Form adds an explicit runtime observation and opens one final-response
+stage with the reserved allowance. It supplies no new task evidence. An
+incomplete or refused final stage cannot submit a report or execute an action.
+
+The result includes `requested_reasoning_answer_tokens` (0 when omitted).
+`form-code-reasoning-reserve` metadata reports the effective allowances, both
+generation counts, observation token count, answer origin, completion and
+private evidence paths. Original single-stage behavior remains available by
+omitting this option. The reserve improves access to a completed answer; it
+does not establish that extra reasoning improves that answer's quality.
+
 More reasoning has an actual local cost; passing fields still leaves broader
 answer quality to be assessed. The earlier native experiments are retained in
 [`../receipts/2026-09-16-matched-session-and-turn-budget.md`](../receipts/2026-09-16-matched-session-and-turn-budget.md).

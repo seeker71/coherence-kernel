@@ -1,0 +1,29 @@
+// Caller-selected final-response reserve for the initial reasoning stage.
+// The existing controller owns actions, checks, continuation and release.
+// preludes: form-stdlib/bml/form-cli-code-reasoning.bml form-stdlib/bml/form-cli-reasoning-budget.bml
+section [form.bml] {
+ class FormCliCodeAnswerReserve {
+  def fcacr-reserved-help() = str_concat(fcacr-help()," Optional reasoning_answer_tokens (positive integer within the initial reasoning limit) requires initial_reasoning_tokens and reserves a separate final-response stage if the initial stage has no complete answer. max_reply_tokens caps each stage separately. The native controller records its stage transition, retains both generations privately, and acts only on a complete answer. Omission retains the single-stage behavior.");
+  def fcacr-reserved-answer(result) = if not(frbg-complete(result)) then list(0,"",str_concat("reasoning-reserve-",str_concat(frbg-reason(result),";candidate-retained"))) else if not(frbg-stopped(frbg-session(result))) then list(0,"","reasoning-reserve-stream-not-stopped;candidate-retained") else list(1,fat-trim(frbg-answer(result)),"");
+  def fcacr-reserved-admit(model,state,checker,context,turns,initial,answer) = if fcap-done(state) then list(state,1,0,0,0) else if not(and(fcacr-limit-valid(initial),fcacr-limit-valid(answer))) then list(fcap-terminal(state,"reasoning-reserve-limit-refused"),1,0,0,0) else if not(fcac-model-ready(model)) then list(fcap-terminal(state,"native-qwen-artifact-seal-tokenizer-or-lane-unavailable"),1,0,0,0) else fcacr-reserved-open(model,fcap-begin-context(state),checker,context,turns,initial,answer,now_unix_ms());
+  def fcacr-reserved-open(model,state,checker,context,turns,initial,answer,started) {
+   let session = fcms-open-with-profile(mr-path(mr-find(model)),fcac-bootstrap-budget(state,turns),context,"knowledge-query-reasoning");
+   let result = if not(fcms-live?(session)) then fcac-finish(session,fcap-terminal(state,fcms-reason(session)),started) else if not(str_eq(fcms-reason(session),"opened-live-cursor")) then fcac-finish(session,fcap-terminal(state,"initial-reasoning-requires-live-tokenizer-cursor"),started) else fcacr-reserved-first(session,state,checker,turns,initial,answer,started);
+   fcac-settle(result,started);
+  }
+  def fcacr-reserved-first(session,state,checker,turns,initial,answer,started) {
+   let initialLimit = fcac-token-allowance(state,initial);
+   let answerLimit = fcac-token-allowance(state,answer);
+   let bounded = frbg-generate(session,initialLimit,answerLimit);
+   let next = frbg-session(bounded);
+   let first = frbg-first(bounded); let final = frbg-final(bounded);
+   let firstEvidence = fcac-retain-reply(fcms-generation-text(first));
+   let finalEvidence = if gt(str_len(fcms-generation-text(final)),0) then fcac-retain-reply(fcms-generation-text(final)) else "";
+   let noticeEvidence = if gt(str_len(frbg-notice(bounded)),0) then fcac-retain-reply(frbg-notice(bounded)) else "";
+   let selected = fcacr-reserved-answer(bounded);
+   print_str(str_concat("form-code-reasoning-reserve ",json-emit(json-node-object(list(fcap-shape-n("requested_initial_tokens",initial),fcap-shape-n("requested_answer_tokens",answer),fcap-shape-n("effective_initial_tokens",initialLimit),fcap-shape-n("effective_answer_tokens",answerLimit),fcap-shape-n("initial_generated_ids",len(fcms-generation-ids(first))),fcap-shape-n("final_generated_ids",len(fcms-generation-ids(final))),fcap-shape-n("observation_prefill_ids",fcms-injected-ids(next)),fcap-shape-s("answer_origin",frbg-origin(bounded)),fcap-shape-n("completion_observed",head(selected)),fcap-shape-s("generation_reason",frbg-reason(bounded)),fcap-shape-s("private_initial_evidence",firstEvidence),fcap-shape-s("private_final_evidence",finalEvidence),fcap-shape-s("private_controller_evidence",noticeEvidence))))));
+   if head(selected) then fcac-replied(next,state,nth(selected,1),checker,turns,started) else fcac-finish(next,fcap-terminal(state,nth(selected,2)),started);
+  }
+ }
+ 0;
+}
