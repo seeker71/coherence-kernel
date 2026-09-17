@@ -187,7 +187,7 @@ must already be admissible; boolean-arity repair remains a separate operation.
 `[status,source,attempts,reason]`, performs no IO or model calls itself, and
 delegates execution exclusively to the caller's callback.
 
-### Caller-enabled rehearsal after an unchanged edit
+### Caller-enabled rehearsal after a failed action
 
 A coding request can set `native_rehearsal_checks` to an integer from 0 to 64.
 Zero, the default, disables automatic rehearsal. An in-process caller uses
@@ -204,9 +204,16 @@ retained state. Only a passing candidate changes the document. Failed,
 malformed or exhausted attempts preserve it. Every actual check spends the
 caller allowance; model tool and reply counts do not increase for native work.
 
+A failed `verify` during implementation can trigger the same search when
+exactly one caller-writable BML document is available. Multiple eligible
+documents leave target selection to the model's explicit tool call. Passing
+or malformed checks, other stages and read-only review do not trigger this
+search. The initial verification remains counted separately; rehearsal's
+own original-source check and candidate checks spend the native allowance.
+
 The model receives the native source attribution, final check observation and
 exact current source or reconstructed source patch. Full attempts and the
-original unchanged-edit failure remain in `native_rehearsals` in the returned
+original triggering failure remain in `native_rehearsals` in the returned
 result and checkpoint. `native_rehearsal_checks_remaining` reports the balance.
 The candidate still goes through task completion, review and final caller
 verification. Making this assistance available does not attest model adoption
