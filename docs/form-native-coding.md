@@ -359,6 +359,40 @@ findings. The pure `fcqe-lines(source, first, last, maxSourceBytes)` helper in
 This resolves citation representation only. The selected passage can still be
 irrelevant, the interpretation incorrect, or the answer unhelpful.
 
+### Amend a retained report
+
+After a JSON report fails review, the repair observation includes a
+`report_amend.base` SHA-256 of its exact retained bytes. The model can submit
+only the changed values:
+
+```json
+{"report_amend":{"base":"<observed hash>","replacements":[
+  {"path":["answer"],"value":"Corrected answer"},
+  {"path":["review_findings",0,"source_quote"],"value":""}
+]}}
+```
+
+Paths address existing object keys and zero-based integer array indexes.
+An amendment has 1–32 nonoverlapping replacements, each 1–32 path segments
+deep. Missing paths, stale bases, duplicate object keys, overlapping paths
+and malformed edits refuse the whole amendment and preserve the retained
+report. This door replaces values; it does not insert or remove array items.
+Unselected JSON values remain unchanged; emitting the candidate can change
+JSON formatting.
+
+The retained report is supplied when a fresh model context opens in repair.
+Later repair observations carry its current hash and amendment instructions,
+without repeating the report text.
+
+The complete candidate runs through the original checker and any configured
+native repair callback. Source documents and the caller's contract stay
+unchanged. `report_source="model-amendment"` identifies model-authored edits
+applied by the native carrier; a subsequent native repair has its own
+attribution. `model_amendments` retains each before report, submitted message,
+candidate and actual checker result, including failures. A successful edit
+operation establishes no semantic quality. The explicit native-review
+continuation still requires its complete report submission.
+
 Each completed model reply emits `form-code-reply` metadata: JSON validity,
 wrapper/tool presence, report type, before/after role and check/repair counts.
 It includes no answer text, prompt text or document content. These observations

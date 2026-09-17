@@ -1,0 +1,37 @@
+// Replace existing report values atomically. Model text chooses every edit;
+// this carrier proves addressing and retention, never semantic correctness.
+// preludes: form-stdlib/bml/form-agent-tool-wire.bml form-stdlib/sha256.fk form-stdlib/hex.fk
+section [form.bml] {
+ class FormCliReportAmend {
+  def fcra-id(text) = hex-encode(sha256-stream-string(text));
+  def fcra-unique(pairs,seen) = if nil?(pairs) then 1 else if fat-has(seen,json-pair-key(head(pairs))) then 0 else and(fcra-unambiguous(json-pair-value(head(pairs))),fcra-unique(tail(pairs),cons(json-pair-key(head(pairs)),seen)));
+  def fcra-items(xs) = if nil?(xs) then 1 else and(fcra-unambiguous(head(xs)),fcra-items(tail(xs)));
+  def fcra-unambiguous(n) = if fat-wire-object?(n) then fcra-unique(json-object-pairs(n),list()) else if fat-wire-array?(n) then fcra-items(node_children(n)) else 1;
+  def fcra-fail(note) = list(0,json-node-null(),note);
+  def fcra-ok(n) = list(1,n,"");
+  def fcra-index(n,size) = if not(str_eq(faj-type(n),"number")) then 0 else if not(str_eq(value_kind(node_value(n)),"int")) then 0 else and(ge(node_value(n),0),lt(node_value(n),size));
+  def fcra-replace(n,path,value) = if nil?(path) then fcra-ok(value) else if fat-wire-object?(n) then if not(fat-wire-string?(head(path))) then fcra-fail("object path needs a string key") else if not(json-object-has?(n,node_value(head(path)))) then fcra-fail("replacement key is absent") else fcra-object(n,path,value,fcra-replace(json-object-get(n,node_value(head(path))),tail(path),value)) else if fat-wire-array?(n) then if not(fcra-index(head(path),len(node_children(n)))) then fcra-fail("array path needs an existing integer index") else fcra-array(n,path,fcra-replace(nth(node_children(n),node_value(head(path))),tail(path),value)) else fcra-fail("replacement path crosses a scalar");
+  def fcra-object(n,path,value,result) = if not(head(result)) then result else fcra-ok(json-node-object(faj-put-pair(json-object-pairs(n),json-node-pair(node_value(head(path)),nth(result,1)))));
+  def fcra-array(n,path,result) = if not(head(result)) then result else fcra-ok(json-node-array(append(append(fat-take(node_children(n),node_value(head(path))),list(nth(result,1))),fat-drop(node_children(n),add(node_value(head(path)),1)))));
+  def fcra-prefix(a,b) = if nil?(a) then 1 else if nil?(b) then 0 else and(node_eq(head(a),head(b)),fcra-prefix(tail(a),tail(b)));
+  def fcra-overlap(path,seen) = if nil?(seen) then 0 else or(or(fcra-prefix(path,head(seen)),fcra-prefix(head(seen),path)),fcra-overlap(path,tail(seen)));
+  def fcra-edits(n,rows,seen) = if nil?(rows) then fcra-ok(n) else {
+   let row = head(rows);
+   let path = json-object-get(row,"path");
+   if not(and(fat-wire-object?(row),and(eq(len(json-object-pairs(row)),2),and(json-object-has?(row,"value"),fat-wire-array?(path))))) then fcra-fail("each replacement needs only path and value") else if or(nil?(node_children(path)),gt(len(node_children(path)),32)) then fcra-fail("replacement path needs 1 to 32 segments") else if fcra-overlap(node_children(path),seen) then fcra-fail("replacement paths overlap") else {
+    let edited = fcra-replace(n,node_children(path),json-object-get(row,"value"));
+    if not(head(edited)) then edited else fcra-edits(nth(edited,1),tail(rows),cons(node_children(path),seen));
+   };
+  };
+  // Result [available, candidate JSON node, diagnostic]. All failures leave the
+  // caller's retained bytes intact. Array insertion/deletion is not this door.
+  def fcra-apply(text,message) = if not(faj-valid(text)) then fcra-fail("retained report is not JSON") else if not(and(fat-wire-object?(message),fcra-unambiguous(message))) then fcra-fail("amendment must be an unambiguous object") else if not(and(eq(len(json-object-pairs(message)),1),json-object-has?(message,"report_amend"))) then fcra-fail("report_amend must be the only message key") else {
+   let report = parse-json("retained-report",text);
+   let amendment = json-object-get(message,"report_amend");
+   let base = json-object-get(amendment,"base");
+   let edits = json-object-get(amendment,"replacements");
+   if not(and(fat-wire-object?(report),fcra-unambiguous(report))) then fcra-fail("retained report must be an unambiguous object") else if not(and(fat-wire-object?(amendment),eq(len(json-object-pairs(amendment)),2))) then fcra-fail("report_amend needs only base and replacements") else if not(and(fat-wire-string?(base),str_eq(node_value(base),fcra-id(text)))) then fcra-fail("amendment base does not match the retained report bytes") else if not(fat-wire-array?(edits)) then fcra-fail("replacements must be an array") else if or(nil?(node_children(edits)),gt(len(node_children(edits)),32)) then fcra-fail("amendment needs 1 to 32 replacements") else fcra-edits(report,node_children(edits),list());
+  };
+ }
+ 0;
+}
