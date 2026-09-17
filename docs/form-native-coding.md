@@ -49,6 +49,24 @@ findings honestly. Source observations and caller checks remain intact; budget
 awareness grants neither extra replies nor permission to claim unchecked work.
 Initial reasoning and same-resident review follow-ups carry the same counters.
 
+Optional `max_reply_tokens` sets a positive integer ceiling for **each**
+generated reply. For example, `"max_reply_tokens":384` bounds generation
+while retaining the normal native admission: original goal, source documents,
+source observations, retained report, tools and checks. The model sees the
+ceiling before generation. Omission preserves the existing context-only
+default; zero, negative, fractional, string and null limits are rejected.
+
+The decode quantum shrinks to the remaining allowance. If the ceiling arrives
+before the reply ends, the controller returns `attention` with
+`reply-token-budget-reached;partial-reply-retained;no-action`, preserves the
+last candidate, and releases the model. A fragment that happens to parse as
+JSON still cannot act without the completed reply boundary. Private partial
+text is referenced by `form-code-incomplete` metadata; it does not enter the
+framebuffer. A complete reply still runs the unchanged caller checks.
+The result reports `max_reply_tokens` (0 means no separate ceiling).
+The allowance survives checkpoints; on resume the current request selects
+the allowance, with omission restoring the context-only default.
+
 Documents are **resident values**, not filesystem permissions. The result returns
 the candidate document values; it does not overwrite repository files. The caller
 owns loading files, publication, stale-file checks, and repository landing. This
@@ -421,7 +439,9 @@ Add `"initial_reasoning_tokens":4096` to a coding or review request to open
 the model's reasoning channel for the first reply of that admission. The
 positive integer limits **all generated tokens in that reply**, including
 reasoning and the final answer. The maximum is 8192; the caller's context
-capacity still applies. Omit the field to keep the ordinary entry.
+capacity still applies. When `max_reply_tokens` is also supplied, the smaller
+ceiling governs this initial reply, including its reasoning. Omit
+`initial_reasoning_tokens` to keep the ordinary entry.
 
 Form separates the final channel at the actual closing token. Only that final
 response enters the existing tool, edit, report and verification loop. Later
