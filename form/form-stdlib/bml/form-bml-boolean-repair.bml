@@ -1,0 +1,60 @@
+// Explicit source repair, separate from compiler acceptance. No evaluation or IO.
+// Reuse the compiler's lexical boundaries; retain original bytes through inserts.
+// Result: [ok, candidate, edits, reason]. Edits: [operator,start,end,arity].
+// Only unqualified and/or calls inside section [form.bml] are candidates.
+// preludes: form-stdlib/source-compiler.fk
+section [form.bml] {
+ class FormBmlBooleanRepair {
+  def fbr-token(t) = head(t);
+  def fbr-at(ts,i) = if ge(i,len(ts)) then "" else fbr-token(nth(ts,i));
+  def fbr-quote(s,i,q) = if ge(i,str_len(s)) then -1 else if eq(str_byte_at(s,i),92) then fbr-quote(s,add(i,2),q) else if eq(str_byte_at(s,i),q) then add(i,1) else fbr-quote(s,add(i,1),q);
+  def fbr-lex(s,i,out) {
+   let p = fsc-bml-skip-trivia(s,i,str_len(s));
+   if ge(p,str_len(s)) then list(1,reverse(out),"") else if fsc-find-string-at?(s,"/*",p,0) then list(0,list(),"block-comment-outside-repair-lane") else {
+    let b = str_byte_at(s,p);
+    let after = if or(eq(b,34),eq(b,39)) then fbr-quote(s,add(p,1),b) else fsc-bml-token-after(s,p,str_len(s));
+    if le(after,p) then list(0,list(),"unterminated-quoted-source") else fbr-lex(s,after,cons(list(substring(s,p,after),p,after),out));
+   };
+  }
+  def fbr-op(t) = or(str_eq(t,"and"),str_eq(t,"or"));
+  def fbr-closer(t) = if str_eq(t,"(") then ")" else if str_eq(t,"{") then "}" else if str_eq(t,"[") then "]" else "";
+  def fbr-closing(t) = or(str_eq(t,")"),or(str_eq(t,"}"),str_eq(t,"]")));
+  def fbr-bad(reason) = list(0,0,list(),list(),reason);
+  def fbr-good(next,inserts,edits) = list(1,next,inserts,edits,"");
+  def fbr-repeat(text,n) = if le(n,0) then "" else str_concat(text,fbr-repeat(text,sub(n,1)));
+  def fbr-prefixes(op,commas) = if nil?(commas) then list() else if nil?(tail(commas)) then list() else cons(list(head(commas),str_concat(op,"(")),fbr-prefixes(op,tail(commas)));
+  def fbr-close(ts,i,op,start,hasValue,commas,inserts,edits) = if str_eq(op,"") then fbr-good(add(i,1),inserts,edits) else if not(hasValue) then fbr-bad("empty-boolean-argument") else if lt(len(commas),2) then fbr-good(add(i,1),inserts,edits) else {
+   let row = nth(ts,i);
+   let changes = append(fbr-prefixes(op,reverse(commas)),list(list(nth(row,1),fbr-repeat(")",sub(len(commas),1)))));
+   fbr-good(add(i,1),append(inserts,changes),cons(list(op,start,nth(row,2),add(len(commas),1)),edits));
+  };
+  // The recursive result carries the next unread token and every insertion.
+  // Stop tokens are validated before a candidate can be returned.
+  def fbr-walk(ts,i,stop,active,op,start,depth,previous,hasValue,commas,inserts,edits) = if gt(depth,128) then fbr-bad("source-nesting-limit") else if ge(i,len(ts)) then if str_eq(stop,"") then fbr-good(i,inserts,edits) else fbr-bad("unclosed-source-group") else {
+   let token = fbr-at(ts,i);
+   if fbr-closing(token) then if str_eq(token,stop) then fbr-close(ts,i,op,start,hasValue,commas,inserts,edits) else fbr-bad("mismatched-source-group") else if and(active,and(str_eq(token,"do"),not(or(str_eq(fbr-at(ts,add(i,1)),"{"),str_eq(fbr-at(ts,add(i,1)),"("))))) then fbr-bad("unbraced-do-outside-repair-lane") else if and(active,and(fbr-op(token),or(str_eq(previous,"def"),str_eq(previous,"fn")))) then fbr-bad("boolean-name-declaration") else if and(eq(depth,0),str_eq(token,"section")) then fbr-section(ts,i,stop,depth,commas,inserts,edits) else if and(active,and(fbr-op(token),and(not(or(str_eq(previous,"."),str_eq(previous,"::"))),str_eq(fbr-at(ts,add(i,1)),"(")))) then {
+    let child = fbr-walk(ts,add(i,2),")",active,token,nth(nth(ts,i),1),add(depth,1),"",0,list(),inserts,edits);
+    fbr-resume(child,ts,stop,active,op,start,depth,token,commas);
+   } else if not(str_eq(fbr-closer(token),"")) then {
+    let child = fbr-walk(ts,add(i,1),fbr-closer(token),active,"",0,add(depth,1),"",0,list(),inserts,edits);
+    fbr-resume(child,ts,stop,active,op,start,depth,token,commas);
+   } else if str_eq(token,",") then if and(not(str_eq(op,"")),not(hasValue)) then fbr-bad("empty-boolean-argument") else fbr-walk(ts,add(i,1),stop,active,op,start,depth,token,0,cons(nth(nth(ts,i),2),commas),inserts,edits) else fbr-walk(ts,add(i,1),stop,active,op,start,depth,token,1,commas,inserts,edits);
+  };
+  def fbr-resume(child,ts,stop,active,op,start,depth,previous,commas) = if not(head(child)) then child else fbr-walk(ts,nth(child,1),stop,active,op,start,depth,previous,1,commas,nth(child,2),nth(child,3));
+  def fbr-section(ts,i,stop,depth,commas,inserts,edits) = if not(and(str_eq(fbr-at(ts,add(i,1)),"["),and(str_eq(fbr-at(ts,add(i,3)),"]"),str_eq(fbr-at(ts,add(i,4)),"{")))) then fbr-bad("section-header-outside-repair-lane") else {
+   let child = fbr-walk(ts,add(i,5),"}",str_eq(fbr-at(ts,add(i,2)),"form.bml"),"",0,add(depth,1),"",0,list(),inserts,edits);
+   fbr-resume(child,ts,stop,0,"",0,depth,"section",commas);
+  };
+  def fbr-insert(row,rows) = if nil?(rows) then list(row) else if lt(head(row),head(head(rows))) then cons(row,rows) else cons(head(rows),fbr-insert(row,tail(rows)));
+  def fbr-sort(rows,out) = if nil?(rows) then out else fbr-sort(tail(rows),fbr-insert(head(rows),out));
+  def fbr-apply(s,rows,at) = if nil?(rows) then substring(s,at,str_len(s)) else str_concat(substring(s,at,head(head(rows))),str_concat(nth(head(rows),1),fbr-apply(s,tail(rows),head(head(rows)))));
+  def fbr-repair(source) = if not(str_eq(value_kind(source),"string")) then list(0,"",list(),"source-must-be-text") else if gt(str_len(source),262144) then list(0,source,list(),"source-byte-limit") else {
+   let lexed = fbr-lex(source,0,list());
+   if not(head(lexed)) then list(0,source,list(),nth(lexed,2)) else {
+    let parsed = fbr-walk(nth(lexed,1),0,"",0,"",0,0,"",0,list(),list(),list());
+    if not(head(parsed)) then list(0,source,list(),nth(parsed,4)) else list(1,fbr-apply(source,fbr-sort(nth(parsed,2),list()),0),reverse(nth(parsed,3)),if nil?(nth(parsed,3)) then "unchanged" else "binary-boolean-calls-inserted;compile-and-behavior-checks-still-required");
+   };
+  };
+ }
+ 0;
+}
