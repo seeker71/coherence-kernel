@@ -154,6 +154,39 @@ The pure source API is `fbr-repair(source)` in
 `bml/form-bml-boolean-repair.bml`, returning
 `[ok,candidate,edits,reason]` without evaluation or file access.
 
+## Rehearse a small BML repair
+
+In implementation, `rehearse-bml` takes `arguments=[path]` and empty input.
+The native allowance is at most `64` checks, including the original-source
+check. An optional second argument sets a smaller positive decimal budget.
+For example:
+`{"tool":"rehearse-bml","arguments":["candidate.bml"],"input":""}`.
+
+The native search wraps one bare value expression with a unary call already
+present in the same source's `form.bml` sections. It preserves all other
+bytes. Each candidate starts from the original source and runs the same
+caller-owned source checker as `verify`. A passing original stays unchanged;
+a passing candidate changes only the writable target; exhausted or refused
+searches retain the original. Review and final verification remain in the
+coding workflow. This searches one repair family, not arbitrary programs.
+
+The result retains each actual check's source digest, edit span, wrapper,
+status and observation. Check counts include malformed callback responses.
+Read-only review and non-writable targets cannot invoke the search. The tool
+accepts no replacement checker, test contract or host command from a model.
+
+The budget bounds checker invocations. The caller must separately bound each
+candidate's execution time: even a small pure edit can make recursion fail
+to advance. The existing native process organ supplies explicit deadlines
+and owned-process cleanup; timeouts remain failed observations. The checker
+also owns admission, test coverage and the meaning of a pass. Source syntax
+must already be admissible; boolean-arity repair remains a separate operation.
+
+`fbvs-search(source,checker,contract,budget)` in
+`bml/form-bml-value-search.bml` is the pure search API. It returns
+`[status,source,attempts,reason]`, performs no IO or model calls itself, and
+delegates execution exclusively to the caller's callback.
+
 ## Call without knowing Form syntax
 
 In form-cli, enter `code` followed by a JSON object. The standalone native door

@@ -111,6 +111,20 @@ references support a correlated evidence request while the child is running.
 Diagnostic availability does not count as semantic progress or decide the
 child's result. Exit and resource release retain their separate observations.
 
+Final output draining has its own bound as well. After a child stops, each
+stream receives the number of final read slices named by
+`hearth-process-final-drain-chunks`. A large backlog stays in its original raw
+file. The process record's `output_drains` fields distinguish complete byte
+traversal from deferred work, retaining the byte offset, partial-line length,
+raw size and remaining bytes. A `process-output-drain-deferred` event exposes
+that boundary; process release does not imply all output was interpreted.
+
+Native callers can resume with `fhn-retained-reader` and `fhn-drain-final`.
+The saved cursor reconstructs a partial line from the retained raw bytes.
+The final line is observed even without a newline, and a completed cursor
+does not replay it. The witness is
+`form/form-stdlib/tests/form-native-process-drain-band.bml`.
+
 The native care organ receives unease at execution boundaries and routes
 attention and offered resources immediately. The core `care` command and Glass
 care door view that exchange through retained native readers. They expose

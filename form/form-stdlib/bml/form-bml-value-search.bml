@@ -1,0 +1,56 @@
+// Bounded one-edit search. Wrap a bare value expression with a unary call
+// already used in this source. The caller owns admission, execution and cost
+// of checker(contract, source) -> [0|1, observation]. No IO or model calls.
+// Result: [status, source, attempts, reason]. Each attempt is
+// [start-byte, end-byte, wrapper, passed, observation, source-sha256].
+// A passing original is unchanged; exhaustion/refusal preserves the original.
+// preludes: form-stdlib/bml/form-bml-boolean-repair.bml form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/hearth.bml
+section [form.bml] {
+ class FormBmlValueSearch {
+  def fbvs-limit() = hearth-code-value-search-check-limit();
+  def fbvs-has(xs,x) = if nil?(xs) then 0 else or(str_eq(head(xs),x),fbvs-has(tail(xs),x));
+  def fbvs-name(t) = if eq(str_len(t),0) then 0 else {
+   let c = str_byte_at(t,0);
+   and(or(and(ge(c,65),le(c,90)),or(and(ge(c,97),le(c,122)),eq(c,95))),and(fsc-bml-expression-name?(t),and(lt(str_find(t,".",0),0),and(lt(str_find(t,":",0),0),not(fbvs-has(list("if","then","else","def","fn","let","do","end","class","section","true","false","nothing"),t))))));
+  };
+  def fbvs-group-end(ts,i,stop) = if ge(i,len(ts)) then i else if str_eq(fbr-at(ts,i),stop) then add(i,1) else if not(str_eq(fbr-closer(fbr-at(ts,i)),"")) then fbvs-group-end(ts,fbvs-group-end(ts,add(i,1),fbr-closer(fbr-at(ts,i))),stop) else fbvs-group-end(ts,add(i,1),stop);
+  def fbvs-arity(ts,i,count,value) = if ge(i,len(ts)) then -1 else if str_eq(fbr-at(ts,i),")") then add(count,value) else if str_eq(fbr-at(ts,i),",") then fbvs-arity(ts,add(i,1),add(count,1),0) else if not(str_eq(fbr-closer(fbr-at(ts,i)),"")) then fbvs-arity(ts,fbvs-group-end(ts,add(i,1),fbr-closer(fbr-at(ts,i))),count,1) else fbvs-arity(ts,add(i,1),count,1);
+  def fbvs-value-site(ts,i) = and(fbvs-name(fbr-at(ts,i)),and(fbvs-has(list("then","else","=","{",";"),if eq(i,0) then "" else fbr-at(ts,sub(i,1))),fbvs-has(list("else",";", ")","}"),fbr-at(ts,add(i,1)))));
+  def fbvs-unary(ts,i) = and(fbvs-name(fbr-at(ts,i)),and(str_eq(fbr-at(ts,add(i,1)),"("),and(not(fbvs-has(list("def","fn",".","::"),if eq(i,0) then "" else fbr-at(ts,sub(i,1)))),eq(fbvs-arity(ts,add(i,2),0,0),1))));
+  def fbvs-scan(ts,i,depth,active,sites,wrappers) = if ge(i,len(ts)) then list(reverse(sites),reverse(wrappers)) else {
+   let token = fbr-at(ts,i);
+   if and(eq(depth,0),str_eq(token,"section")) then fbvs-scan(ts,add(i,5),1,str_eq(fbr-at(ts,add(i,2)),"form.bml"),sites,wrappers) else {
+    let nextSites = if and(active,fbvs-value-site(ts,i)) then cons(nth(ts,i),sites) else sites;
+    let nextWrappers = if and(active,and(fbvs-unary(ts,i),not(fbvs-has(wrappers,token)))) then cons(token,wrappers) else wrappers;
+    let nextDepth = if not(str_eq(fbr-closer(token),"")) then add(depth,1) else if fbr-closing(token) then sub(depth,1) else depth;
+    fbvs-scan(ts,add(i,1),nextDepth,if eq(nextDepth,0) then 0 else active,nextSites,nextWrappers);
+   };
+  };
+  def fbvs-shape(r) = if not(str_eq(value_kind(r),"list")) then 0 else if not(eq(len(r),2)) then 0 else and(or(value_eq(head(r),0),value_eq(head(r),1)),str_eq(value_kind(nth(r,1)),"string"));
+  def fbvs-result(status,source,attempts,reason) = list(status,source,reverse(attempts),reason);
+  def fbvs-malformed() = "caller-checker-returned-malformed-result";
+  def fbvs-row(start,end,wrapper,result,source) = list(start,end,wrapper,head(result),nth(result,1),hex-encode(sha256-stream-string(source)));
+  def fbvs-wrap(source,site,wrapper) = str_concat(substring(source,0,nth(site,1)),str_concat(wrapper,str_concat("(",str_concat(substring(source,nth(site,1),nth(site,2)),str_concat(")",substring(source,nth(site,2),str_len(source)))))));
+  def fbvs-search(source,checker,contract,budget) = if not(and(str_eq(value_kind(budget),"int"),and(gt(budget,0),le(budget,fbvs-limit())))) then fbvs-result("refused",source,list(),"check-budget-must-be-integer-in-range") else {
+   let syntax = fbr-repair(source);
+   if not(head(syntax)) then fbvs-result("refused",source,list(),nth(syntax,3)) else if not(nil?(nth(syntax,2))) then fbvs-result("refused",source,list(),"boolean-syntax-repair-required") else {
+    let prepared = fbvs-scan(nth(fbr-lex(source,0,list()),1),0,0,0,list(),list());
+    let checked = checker(contract,source);
+    let attempts = list(fbvs-row(0,0,"",if fbvs-shape(checked) then checked else list(0,fbvs-malformed()),source));
+    if not(fbvs-shape(checked)) then fbvs-result("refused",source,attempts,fbvs-malformed()) else {
+     if head(checked) then fbvs-result("unchanged",source,attempts,nth(checked,1)) else fbvs-next(source,checker,contract,budget,head(prepared),nth(prepared,1),nth(prepared,1),attempts);
+    };
+   };
+  };
+  def fbvs-next(source,checker,contract,budget,sites,wrappers,remaining,attempts) = if ge(len(attempts),budget) then fbvs-result("exhausted",source,attempts,"check-budget-exhausted") else if nil?(sites) then fbvs-result("exhausted",source,attempts,"no-passing-single-value-wrapper") else if nil?(remaining) then fbvs-next(source,checker,contract,budget,tail(sites),wrappers,wrappers,attempts) else {
+   let site = head(sites); let wrapper = head(remaining);
+   let candidate = fbvs-wrap(source,site,wrapper);
+   let checked = checker(contract,candidate);
+   let next = cons(fbvs-row(nth(site,1),nth(site,2),wrapper,if fbvs-shape(checked) then checked else list(0,fbvs-malformed()),candidate),attempts);
+   if not(fbvs-shape(checked)) then fbvs-result("refused",source,next,fbvs-malformed()) else {
+    if head(checked) then fbvs-result("repaired",candidate,next,nth(checked,1)) else fbvs-next(source,checker,contract,budget,sites,wrappers,tail(remaining),next);
+   };
+  };
+ }
+ 0;
+}

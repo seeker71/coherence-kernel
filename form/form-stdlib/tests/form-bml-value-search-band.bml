@@ -1,0 +1,62 @@
+// Real native compiler and execution checks for three different meanings.
+// Temporary files are isolated; no repository or session state is changed.
+// preludes: form-stdlib/bml/form-bml-value-search.bml
+section [form.bml] {
+ class BmlValueSearchBand {
+  def fbvsb-need(ok,name) = if ok then 1 else form_error(str_concat("value search: ",name));
+  def fbvsb-run(args,base) {
+   let pid = host_spawn_at(args,list("/dev/null",str_concat(base,".stdout"),str_concat(base,".stderr")));
+   if le(pid,0) then form_error("value search witness could not start fkwu") else host_wait(pid);
+  }
+  def fbvsb-check(contract,source) {
+   let counter = nth(contract,1);
+   let count = add(record_get(counter,"count"),1);
+   record_set(counter,"count",count);
+   let base = str_concat(head(contract),str_concat("/",int_to_str(count)));
+   let path = str_concat(base,".bml");
+   write_file(path,str_concat("// preludes: form-stdlib/core.fk\n",str_concat(source,str_concat("\nsection [form.bml] {\n if ",str_concat(nth(contract,2)," then 1 else form_error(\"behavior mismatch\");\n}\n")))));
+   let compiled = fbvsb-run(list("./fkwu","--check",path),str_concat(base,"-compile"));
+   if not(eq(compiled,0)) then list(0,"native compiler refused candidate") else {
+    let status = fbvsb-run(list("./fkwu",path),base);
+    list(and(eq(status,0),str_eq(read_file(str_concat(base,".stdout")),"1\n")),str_concat("native behavior exit=",int_to_str(status)));
+   };
+  }
+  def fbvsb-source(body) = str_concat("section [form.bml] {\n class Example {\n",str_concat(body,"\n }\n}\n"));
+  def fbvsb-case(root,counter,name,body,checks) {
+   let source = fbvsb-source(body);
+   let contract = list(root,counter,checks);
+   let result = fbvs-search(source,fbvsb-check,contract,fbvs-limit());
+   fbvsb-need(str_eq(head(result),"repaired"),name);
+   fbvsb-need(and(gt(len(nth(result,2)),1),head(head(reverse(nth(result,2))))),"attempt trace retains a changed site");
+   let repeated = fbvs-search(nth(result,1),fbvsb-check,contract,fbvs-limit());
+   fbvsb-need(and(str_eq(head(repeated),"unchanged"),str_eq(nth(result,1),nth(repeated,1))),"passing original remains unchanged");
+   print_str(str_concat(name,str_concat(" checks=",int_to_str(len(nth(result,2))))));
+  }
+  def fbvsb-fail(counter,source) { record_set(counter,"count",add(record_get(counter,"count"),1)); list(0,"retained failure"); }
+  def fbvsb-malformed(counter,source) = list(1);
+  def fbvsb-many(n) = if le(n,0) then "def available(x) = not(x);" else str_concat("def value",str_concat(int_to_str(n),str_concat("(x) = x;\n",fbvsb-many(sub(n,1)))));
+ }
+ let root = str_concat("/tmp/form-value-search-",int_to_str(now_unix_ms()));
+ fbvsb-need(eq(host_dir_mkdir(root),1),"fresh temporary directory");
+ let counter = record_new(0); record_set(counter,"count",0);
+ fbvsb-case(root,counter,"recursive-list-order","def gather(xs,acc) = if nil?(xs) then acc else gather(tail(xs),cons(head(xs),acc));\n def result(xs) = gather(xs,list());\n def available(xs) = reverse(xs);","and(value_eq(result(list(4,8,15)),list(4,8,15)),and(value_eq(result(list()),list()),and(value_eq(result(list(7)),list(7)),value_eq(result(list(2,2,1)),list(2,2,1)))))");
+ fbvsb-case(root,counter,"boolean-complement","def result(flag) = flag;\n def available(flag) = not(flag);","and(eq(result(0),1),eq(result(1),0))");
+ fbvsb-case(root,counter,"utf8-byte-length","def result(text) = text;\n def available(text) = str_len(text);","and(eq(result(\"abc\"),3),and(eq(result(\"é\"),2),eq(result(\"\"),0)))");
+ let source = fbvsb-source("def result(x) = x;\n def available(x) = not(x);");
+ let failed = fbvs-search(source,fbvsb-fail,counter,1);
+ fbvsb-need(and(str_eq(head(failed),"exhausted"),and(str_eq(nth(failed,1),source),eq(len(nth(failed,2)),1))),"budget exhaustion preserves source and failure");
+ let before = record_get(counter,"count");
+ let invalid = fbvs-search(source,fbvsb-fail,counter,0);
+ fbvsb-need(and(str_eq(head(invalid),"refused"),eq(record_get(counter,"count"),before)),"invalid budget never checks");
+ let malformed = fbvs-search(source,fbvsb-malformed,counter,4);
+ fbvsb-need(and(str_eq(head(malformed),"refused"),str_eq(nth(malformed,1),source)),"malformed checker preserves source");
+ let unsafe = fbvs-search(str_concat(source,"/* unfinished"),fbvsb-fail,counter,4);
+ fbvsb-need(and(str_eq(head(unsafe),"refused"),eq(record_get(counter,"count"),before)),"unsupported lexical input never checks");
+ let large = fbvsb-source(fbvsb-many(fbvs-limit()));
+ let exhausted = fbvs-search(large,fbvsb-fail,counter,fbvs-limit());
+ fbvsb-need(and(str_eq(head(exhausted),"exhausted"),and(eq(len(nth(exhausted,2)),fbvs-limit()),and(eq(sub(record_get(counter,"count"),before),fbvs-limit()),str_eq(nth(exhausted,1),large)))),"full budget counts actual callbacks and preserves original source");
+ let scoped = "section [text] { def x(a) = a; outside(a); }\nsection [form.bml] {\n def result(x) = x; // fake(x)\n def available(x) = not(x);\n \"quoted(x)\"; obj.method(x);\n}";
+ let parsed = fbvs-scan(nth(fbr-lex(scoped,0,list()),1),0,0,0,list(),list());
+ fbvsb-need(value_eq(nth(parsed,1),list("not")),"other sections, declarations, comments, strings and qualified names do not supply wrappers");
+ 1;
+}
