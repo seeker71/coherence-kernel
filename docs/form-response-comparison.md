@@ -106,6 +106,43 @@ answer was empty. It does not support enabling open reasoning by default;
 the outcome and full costs remain in
 `receipts/2026-09-17-native-reasoning-profile-and-review.md`.
 
+### Reserve a final-response stage
+
+`bml/form-cli-reasoning-budget.bml` provides
+`frbg-generate(session,initialTokens,finalTokens)` for a session opened with
+`knowledge-query-reasoning`. A complete model final answer returns directly.
+If the initial stage yields no complete final answer, the native controller
+offers a runtime observation in the same resident state and opens an ordinary
+assistant turn with its own final allowance. This is a new controller stage,
+not a model-generated reasoning close. The initial generation is retained
+unchanged; no text from it is promoted by trimming or rewriting.
+
+Read `frbg-answer`, `frbg-complete`, `frbg-origin` and `frbg-reason`. Origins
+distinguish `model-final`, `controller-final-stage` and refusal (`none`).
+`frbg-first`, `frbg-final` and `frbg-notice` retain both generation records and
+the exact controller observation for private evidence. When the first stage
+already completes, the second generation is empty. The caller releases
+`frbg-session` through `fcms-release-ok?` and retains that result separately.
+An incomplete final response stays available as evidence with complete=0.
+
+The initial fit check reserves both allowances; the transition checks the
+actual observation IDs and the remaining final allowance before any injection.
+Generation failure does not authorize continuation. Token counters keep
+generated IDs separate from observation-prefill IDs; the latter include
+committing the pending generated token as well as the new role/observation
+IDs. Mechanical word counts are available through native `sh-count-words`;
+callers still apply their original field checks and assess the actual answer.
+This API establishes bounded stage control, not semantic correctness.
+
+The first retained-review observation uses 512 initial tokens and a separate
+1536-token final allowance. It completes with 512 + 605 generated tokens,
+98 observation-prefill IDs, one controller transition and release=1. The
+112-word revised answer passes the original field checks and removes the
+earlier budget-expiry assertion. Its review still misjudges that analogy.
+It takes 456153 ms versus the compact review's 372536 ms; this is a bounded
+quality/cost observation, not general parity or a default-policy recommendation.
+See `receipts/2026-09-17-native-final-response-reserve.md`.
+
 An external comparison runs through Form's process organ,
 `observe/form-cli-heal-process-run.bml`, with `codex exec --json`. Retain the
 process receipt, its stdout, stderr and the separate `-o` answer file. Native

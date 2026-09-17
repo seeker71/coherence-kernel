@@ -1,0 +1,57 @@
+// Bounded deliberation with a separately reserved final-response stage.
+// A controller observation opens a new assistant turn; it never impersonates
+// a model-generated thought close. Callers own release and private retention.
+// preludes: form-stdlib/form-cli-model-session.fk
+section [form.bml] {
+ class FormCliReasoningBudget {
+  def frbg-result(session,first,final,answer,origin,notice,complete,reason) = list(session,first,final,answer,origin,notice,complete,reason);
+  def frbg-session(result) = nth(result,0);
+  def frbg-first(result) = nth(result,1);
+  def frbg-final(result) = nth(result,2);
+  def frbg-answer(result) = nth(result,3);
+  def frbg-origin(result) = nth(result,4);
+  def frbg-notice(result) = nth(result,5);
+  def frbg-complete(result) = nth(result,6);
+  def frbg-reason(result) = nth(result,7);
+  def frbg-empty(session) = fcms-generation("",list(),session);
+  def frbg-valid-session(session) = and(fcms-live?(session),ge(fcms-pending(session),0));
+  def frbg-stopped(session) = and(frbg-valid-session(session),fcms-stopped?(session));
+  def frbg-refuse(session,first,reason) = frbg-result(session,first,frbg-empty(session),"","none","",0,reason);
+  def frbg-reserve-fits(session,added,reserve) = lt(add(add(fcms-pos(session),added),reserve),fcms-maxpos(session));
+  def frbg-observation(used,reasoning,answer) = str_concat("Form runtime observation: the initial generation stage ended after ",str_concat(int_to_str(used),str_concat(" tokens, within an allowance of ",str_concat(int_to_str(reasoning),str_concat(", without a complete final response. The controller is opening a separate final-response stage with ",str_concat(int_to_str(answer)," output tokens. Return the response requested by the original enquiry now. Native computation can count words after generation; do not enumerate words to count them. This observation supplies no new domain evidence."))))));
+  def frbg-bridge(session,text,reserve) {
+   let ids = fcms-observation-ids(session,text);
+   if not(frbg-reserve-fits(session,len(ids),reserve)) then fcms-refuse(session,"final-response-reserve-does-not-fit")
+   else fcms-observe-ids(session,ids,"reasoning-budget-observation-refused");
+  }
+  def frbg-decode(session,ids) = tkz-decode-text(fcms-src(session),ids);
+  def frbg-after(first,reasoning,answer,closing,generate,bridge,decode) {
+   let session = fcms-generation-session(first);
+   let boundary = fcrt-answer(fcms-generation-ids(first),closing);
+   if not(frbg-valid-session(session)) then frbg-refuse(session,first,"initial-generation-refused")
+   else if and(frbg-stopped(session),head(boundary)) then frbg-result(session,first,frbg-empty(session),decode(session,nth(boundary,1)),"model-final","",1,"complete")
+   else {
+    let notice = frbg-observation(len(fcms-generation-ids(first)),reasoning,answer);
+    let next = bridge(session,notice,answer);
+    if not(frbg-valid-session(next)) then frbg-result(next,first,frbg-empty(next),"","controller-final-stage",notice,0,fcms-reason(next))
+    else {
+     let final = generate(next,answer);
+     let last = fcms-generation-session(final);
+     let complete = frbg-stopped(last);
+     frbg-result(last,first,final,fcms-generation-text(final),"controller-final-stage",notice,complete,if complete then "complete" else "final-generation-incomplete");
+    };
+   };
+  }
+  def frbg-with(session,reasoning,answer,closing,generate,bridge,decode) = if or(not(frbg-valid-session(session)),or(le(reasoning,0),or(le(answer,0),lt(closing,0)))) then frbg-refuse(session,frbg-empty(session),"reasoning-budget-input-refused")
+   else if not(frbg-reserve-fits(session,reasoning,answer)) then frbg-refuse(session,frbg-empty(session),"reasoning-and-answer-reserves-do-not-fit")
+   else frbg-after(generate(session,reasoning),reasoning,answer,closing,generate,bridge,decode);
+  // The caller opens knowledge-query-reasoning. The close ID is obtained from
+  // the same tokenizer that owns the session, including its reference fallback.
+  def frbg-generate(session,reasoning,answer) = if not(frbg-valid-session(session)) then frbg-refuse(session,frbg-empty(session),"reasoning-session-unavailable") else {
+   let crystal = qsx-load(fcms-path(session));
+   let closing = if eq(head(crystal),1) then nth(crystal,4) else q35-special-id(fcms-src(session),"</think>");
+   frbg-with(session,reasoning,answer,closing,fcms-generate,frbg-bridge,frbg-decode);
+  };
+ }
+ 0;
+}
