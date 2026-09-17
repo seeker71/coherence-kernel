@@ -158,6 +158,16 @@ IDs. Mechanical word counts are available through native `sh-count-words`;
 callers still apply their original field checks and assess the actual answer.
 This API establishes bounded stage control, not semantic correctness.
 
+Response decoding uses `bml/form-token-decode-batch.bml`. For repeated token
+lookups it walks the source vocabulary once, retains only requested pieces,
+and reconstructs their original order. Short sequences keep scalar lookup
+when the estimated traversal savings do not justify a batch. IDs must be
+integers inside the source vocabulary; zero and one are ordinary values.
+The reference byte alphabet and text rendering remain the same. No model
+generation, persistent index or additional runtime is involved. Decode-only
+timings and live integration evidence are recorded separately from total
+session latency and answer quality.
+
 The first retained-review observation uses 512 initial tokens and a separate
 1536-token final allowance. It completes with 512 + 605 generated tokens,
 98 observation-prefill IDs, one controller transition and release=1. The

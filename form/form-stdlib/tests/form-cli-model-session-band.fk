@@ -23,6 +23,37 @@
         (if ok 1 (form_error (str_concat "model adapter boundary: " name))))
     (defn fcmsb-bytes (xs)
         (if (nil? xs) "" (str_concat (byte_to_str (head xs)) (fcmsb-bytes (tail xs)))))
+    ; Tiny in-memory GGUF: the selected IDs exercise the actual tokenizer
+    ; metadata walk, byte alphabet, output order and repeated/empty pieces.
+    (defn fcmsb-u64 (n) (str_concat (byte_to_str n) (fcmsb-bytes (list 0 0 0 0 0 0 0))))
+    (defn fcmsb-str (s) (str_concat (fcmsb-u64 (str_len s)) s))
+    (defn fcmsb-token-rows (rows)
+        (if (nil? rows) "" (str_concat (fcmsb-str (head rows)) (fcmsb-token-rows (tail rows)))))
+    (defn fcmsb-token-source (letter)
+        (str_concat "GGUF" (str_concat (fcmsb-bytes (list 3 0 0 0))
+        (str_concat (fcmsb-u64 0) (str_concat (fcmsb-u64 1)
+        (str_concat (fcmsb-str "tokenizer.ggml.tokens")
+        (str_concat (fcmsb-bytes (list 9 0 0 0 8 0 0 0))
+        (str_concat (fcmsb-u64 8) (fcmsb-token-rows (list "" letter "Ġ" "Ã©" "Ċ" "Ā" "Ń" "｜"))))))))))
+    (let token-src (fcmsb-token-source "A"))
+    (let token-ids (list 0 1 6 3 5 4 2 0 1 6))
+    (fcmsb-assert "batch decode preserves byte alphabet and exact requested order"
+        (value_eq (ftdb-bytes token-src token-ids) (list 65 173 195 169 0 10 32 65 173)))
+    (fcmsb-assert "batch text preserves the reference rendering"
+        (str_eq (ftdb-text token-src token-ids) (tkz-decode-text token-src token-ids)))
+    (fcmsb-assert "empty decode needs no source" (str_eq (ftdb-text "" (list)) ""))
+    (fcmsb-assert "zero and one are present token IDs"
+        (value_eq (ftdb-bytes token-src (list 0 1 0 1)) (list 65 65)))
+    (fcmsb-assert "a later source cannot reuse another vocabulary's pieces"
+        (value_eq (ftdb-bytes (fcmsb-token-source "B") (list 1 1 1)) (list 66 66 66)))
+    (fcmsb-assert "out-of-radius special token keeps reference behavior"
+        (value_eq (ftdb-bytes token-src (list 7 7 0)) (tkz-decode-bytes token-src (list 7 7 0))))
+    (fcmsb-assert "one high token keeps scalar lookup" (not (ftdb-batch? (ftdb-plan (list 7) 8))))
+    (fcmsb-assert "repeated traversals choose the single pass" (ftdb-batch? (ftdb-plan token-ids 8)))
+    (fcmsb-assert "negative oversized float and string IDs refuse before reading"
+        (and (not (head (ftdb-plan (list -1) 8)))
+        (and (not (head (ftdb-plan (list 8) 8)))
+        (and (not (head (ftdb-plan (list 1.5) 8))) (not (head (ftdb-plan (list "1") 8)))))))
     (let ctx (list "opaque-model-context"))
     (let sts (list "opaque-stream-state"))
     (let s (fcms-session "live" "opened" "m.gguf" "src" ctx sts
