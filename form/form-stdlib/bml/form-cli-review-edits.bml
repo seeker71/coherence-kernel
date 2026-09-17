@@ -1,0 +1,43 @@
+// Complete indexed review with model-authored text edits. This carrier checks
+// coverage, addressing and actual changes; judgment correctness is unmeasured.
+// preludes: form-stdlib/bml/form-cli-review-spans.bml form-stdlib/bml/form-cli-report-amend.bml
+section [form.bml] {
+ class FormCliReviewEdits {
+  def fcre-string(row,key) = if fat-wire-string?(json-object-get(row,key)) then node_value(json-object-get(row,key)) else "";
+  def fcre-fields(report,fields,seen) = if nil?(fields) then 1 else if not(fcrs-is-str(head(fields))) then 0 else and(not(fat-has(seen,head(fields))),and(fat-wire-string?(json-object-get(report,head(fields))),fcre-fields(report,tail(fields),cons(head(fields),seen))));
+  def fcre-spans(field,rows,id) = if nil?(rows) then list() else {
+   let row = head(rows);
+   cons(json-node-object(list(json-node-pair("id",json-node-int(id)),json-node-pair("field",json-node-string(field)),json-node-pair("start_byte",json-node-int(head(row))),json-node-pair("end_byte",json-node-int(nth(row,1))),json-node-pair("text",json-node-string(nth(row,2))))),fcre-spans(field,tail(rows),add(id,1)));
+  };
+  def fcre-rows(report,fields,id) = if nil?(fields) then list() else {
+   let rows = fcrs-spans(fcre-string(report,head(fields)));
+   append(fcre-spans(head(fields),rows,id),fcre-rows(report,tail(fields),add(id,len(rows))));
+  };
+  def fcre-packet(text,fields) = if or(gt(str_len(text),FatMaxBytes()),not(faj-valid(text))) then fcra-fail("review report unavailable or invalid JSON") else {
+   let report = parse-json("review-report",text);
+   if not(and(fat-wire-object?(report),and(fcra-unambiguous(report),and(fcrs-is-list(fields),and(not(nil?(fields)),fcre-fields(report,fields,list())))))) then fcra-fail("review fields must be unique existing strings in an unambiguous object") else fcra-ok(json-node-object(list(json-node-pair("base",json-node-string(fcra-id(text))),json-node-pair("spans",json-node-array(fcre-rows(report,fields,0))))));
+  };
+  def fcre-edit-valid(span,row,id) = if not(and(fat-wire-object?(row),fcra-unambiguous(row))) then 0 else if not(and(fcra-index(json-object-get(row,"id"),add(id,1)),eq(node_value(json-object-get(row,"id")),id))) then 0 else {
+   let action = fcre-string(row,"action");
+   let reason = json-object-get(row,"reason");
+   let status = fcre-string(row,"status");
+   if not(and(fat-wire-string?(reason),and(gt(str_len(fat-trim(node_value(reason))),0),fat-has(list("supported","inference","unsupported","style","action-gap"),status)))) then 0 else if str_eq(action,"replace") then and(eq(len(json-object-pairs(row)),5),and(fat-wire-string?(json-object-get(row,"text")),and(gt(str_len(fcre-string(row,"text")),0),not(str_eq(fcre-string(row,"text"),fcre-string(span,"text")))))) else and(eq(len(json-object-pairs(row)),4),fat-has(list("keep","remove"),action));
+  };
+  def fcre-edits-valid(spans,rows,id) = if nil?(spans) then nil?(rows) else if nil?(rows) then 0 else and(fcre-edit-valid(head(spans),head(rows),id),fcre-edits-valid(tail(spans),tail(rows),add(id,1)));
+  def fcre-text(span,row) = if str_eq(fcre-string(row,"action"),"keep") then fcre-string(span,"text") else if str_eq(fcre-string(row,"action"),"replace") then fcre-string(row,"text") else "";
+  def fcre-field-text(field,spans,rows) = if nil?(spans) then "" else str_concat(if str_eq(fcre-string(head(spans),"field"),field) then fcre-text(head(spans),head(rows)) else "",fcre-field-text(field,tail(spans),tail(rows)));
+  def fcre-compose(report,fields,spans,rows) = if nil?(fields) then fcra-ok(report) else {
+   let changed = fcra-replace(report,list(json-node-string(head(fields))),json-node-string(fcre-field-text(head(fields),spans,rows)));
+   if not(head(changed)) then changed else fcre-compose(nth(changed,1),tail(fields),spans,rows);
+  };
+  def fcre-apply(text,fields,message) {
+   let packet = fcre-packet(text,fields);
+   if not(head(packet)) then packet else if not(and(fat-wire-object?(message),and(fcra-unambiguous(message),and(eq(len(json-object-pairs(message)),2),and(str_eq(fcre-string(message,"base"),fcra-id(text)),fat-wire-array?(json-object-get(message,"edits"))))))) then fcra-fail("review needs matching base and complete edits array") else {
+    let spans = node_children(json-object-get(nth(packet,1),"spans"));
+    let rows = node_children(json-object-get(message,"edits"));
+    if not(fcre-edits-valid(spans,rows,0)) then fcra-fail("each span needs its ordered integer id, status, action and reason; replace needs different nonempty text") else fcre-compose(parse-json("review-report",text),fields,spans,rows);
+   };
+  }
+ }
+ 0;
+}
