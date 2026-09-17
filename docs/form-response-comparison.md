@@ -10,6 +10,23 @@ The local coding door is `observe/form-cli-code-run.fk`. A review request uses
 Its Qwen session has no provider fallback. Parent orchestration costs remain
 separate from this local execution boundary.
 
+Caller report assertions can expose a concrete unfinished-draft condition to
+the existing native repair loop. For an application where square brackets
+denote unfilled message slots, an additional assertion is:
+
+```json
+{"tool":"jq","arguments":[".follow_up | contains(\"[\")"],"stdout":"false\n"}
+```
+
+Keep the original assertions alongside it. This detects that delimiter in the
+selected field; it does not certify every aspect of a complete, grounded draft.
+In the [draft-repair comparison](../receipts/2026-09-17-native-draft-check-and-source-review.md),
+the local model repaired a failing placeholder after one native observation,
+preserving every other report field. A separate indexed native review removed
+an unsupported reason for another person's silence. Remaining wording and
+deadline-scope concerns stayed visible, with the native and provider costs
+recorded separately.
+
 `review_entry=direct` enters read-only review immediately, keeping the same
 tools, source checks, report checks and repair loop. The default `staged`
 entry retains refine, plan, split and inspection before review. Direct entry
