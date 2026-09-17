@@ -1,0 +1,73 @@
+// Decode the declared JSON response boundary of an ordinary generation report.
+// Raw output is always retained; no content inside the JSON value is rewritten.
+// Completion, transport decoding and semantic correctness are separate facts.
+// preludes: form-stdlib/form-cli-model-generate.fk form-stdlib/bml/form-agent-json-query.bml
+section [form.bml] {
+ class FormCliGenerationJson {
+  def fcgj-result(ok,body,reason,prefix,suffix,raw) = list(ok,body,reason,prefix,suffix,raw);
+  def fcgj-ok(result) = nth(result,0);
+  def fcgj-body(result) = nth(result,1);
+  def fcgj-reason(result) = nth(result,2);
+  def fcgj-prefix(result) = nth(result,3);
+  def fcgj-suffix(result) = nth(result,4);
+  def fcgj-raw(result) = nth(result,5);
+  def fcgj-report(result) = if gt(len(result),6) then nth(result,6) else "";
+  def fcgj-refuse(raw,reason) = fcgj-result(0,"",reason,"","",raw);
+  def fcgj-tag(name) = ftl-ctl-tag(ftl-ctl-locate(name));
+  def fcgj-at(raw,i,token) = str_eq(substring(raw,i,add(i,str_len(token))),token);
+
+  // Only leading, complete query frames may precede the response. Their count
+  // must match the generator's observed honor attempts. Interleaved frames,
+  // prose, Markdown fences and unexplained control actions are not repaired.
+  def fcgj-prefix-end(raw,i,left) {
+   let start = fat-skip(raw,i);
+   if not(fcgj-at(raw,start,HeedOpen())) then if eq(left,0) then start else -1
+   else if le(left,0) then -1 else {
+    let query = add(start,str_len(HeedOpen()));
+    let close = str_find(raw,HeedClose(),query);
+    if or(lt(close,0),or(le(close,query),gt(sub(close,query),MaxQueryBytes()))) then -1
+    else if ge(str_find(substring(raw,query,close),HeedOpen(),0),0) then -1
+    else fcgj-prefix-end(raw,add(close,str_len(HeedClose())),sub(left,1));
+   };
+  }
+  def fcgj-value(raw,start) {
+   let bodyStart = fat-skip(raw,if fcgj-at(raw,start,fcgj-tag("choice")) then add(start,str_len(fcgj-tag("choice"))) else start);
+   let end = faj-end(raw,bodyStart,0);
+   if lt(end,0) then fcgj-refuse(raw,"response-json-incomplete-or-invalid") else {
+    let suffix = fat-skip(raw,end);
+    let after = if fcgj-at(raw,suffix,fcgj-tag("stop")) then fat-skip(raw,add(suffix,str_len(fcgj-tag("stop")))) else suffix;
+    if ne(after,str_len(raw)) then fcgj-refuse(raw,"unrecognized-response-suffix")
+    else fcgj-result(1,substring(raw,bodyStart,end),"json-transport-decoded",substring(raw,0,bodyStart),substring(raw,end,str_len(raw)),raw);
+   };
+  }
+  def fcgj-surface(raw,completed,queries) = if ne(completed,1) then fcgj-refuse(raw,"generation-not-complete")
+   else if or(gt(str_len(raw),FatMaxBytes()),or(lt(queries,0),gt(queries,MaxHeeds()))) then fcgj-refuse(raw,"response-bound-exceeded") else {
+    let start = fcgj-prefix-end(raw,0,queries);
+    if lt(start,0) then fcgj-refuse(raw,"query-framing-does-not-match-observation") else fcgj-value(raw,start);
+   };
+  // Report metadata is read only before the text boundary. It is an observed
+  // local report, not an attestation for arbitrary untrusted report strings.
+  def fcgj-field-once(header,name) {
+   let marker = str_concat("\n",str_concat(name,"="));
+   let at = str_find(header,marker,0);
+   if lt(at,0) then "" else if ge(str_find(header,marker,add(at,str_len(marker))),0) then "" else fcmg-span-field(header,name);
+  }
+  def fcgj-read-generation(report,modelReleased) {
+   let marker = "\ntext:\n";
+   let at = str_find(report,marker,0);
+   if lt(at,0) then fcgj-refuse(report,"generation-report-missing-text-boundary") else {
+    let header = substring(report,0,at);
+    let raw = substring(report,add(at,str_len(marker)),str_len(report));
+    let queries = fcgj-field-once(header,"heed_honor_attempts");
+    let queryCount = str_to_int(queries);
+    let complete = and(eq(modelReleased,1),and(str_eq(fcgj-field-once(header,"state_released"),"1"),and(str_eq(fcgj-field-once(header,"heed_stopped"),"1"),and(str_eq(fcgj-field-once(header,"heed_decode_timeout"),"0"),and(str_eq(fcgj-field-once(header,"heed_injection_refusals"),"0"),str_eq(fcgj-field-once(header,"heed_frame_refusals"),"0"))))));
+    if not(str_eq(queries,int_to_str(queryCount))) then fcgj-refuse(raw,"generation-query-count-missing-or-invalid") else fcgj-surface(raw,complete,queryCount);
+   };
+  }
+  def fcgj-generation(report,modelReleased) = append(fcgj-read-generation(report,modelReleased),list(report));
+  // The ordinary one-shot generator releases its model before returning.
+  // Its release refusal has no report boundary and cannot be decoded as JSON.
+  def fcgj-generate(path,prompt,limit) = fcgj-generation(fcmg-generate(path,prompt,limit),1);
+ }
+ 0;
+}

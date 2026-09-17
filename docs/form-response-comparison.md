@@ -37,6 +37,61 @@ the model successfully does not establish that its answer finished. The
 [ordinary-generation receipt](../receipts/2026-09-17-dialogue-revision-and-generation.md)
 records a real reply cut off by the old 32-token post-lookup reserve.
 
+### Read a declared JSON response
+
+`bml/form-cli-generation-json.bml` provides `fcgj-generate(modelPath,prompt,limit)`
+for an ordinary one-shot generation whose requested response is JSON. It uses
+the same local generator and releases its model, then decodes the report's
+response boundary. `fcgj-generation(report,modelReleaseOk)` reads a retained
+report using the separately observed model-release result.
+
+The result keeps `fcgj-body`, `fcgj-prefix`, `fcgj-suffix` and `fcgj-raw`.
+On success, prefix + body + suffix reconstruct the raw model output exactly.
+The body is the original JSON byte slice, not a rewritten or repaired answer.
+`fcgj-report` retains the complete input generation report for diagnostics and
+usage accounting, including on refusal.
+
+The reader requires completed generation, stream/model release, no recorded
+decode timeout or frame/injection refusal, and a unique observed query count.
+It accepts complete leading knowledge-query frames matching that count, an
+optional CHOICE marker, one JSON value, and an optional final STOP marker.
+The tags come from the existing Form authorities. It refuses unfinished JSON,
+unexplained prose, Markdown fences, extra values and other control actions.
+Marker text inside JSON strings stays data; JSON `0`, `false` and `null` stay
+distinct valid values. The report is trusted local execution evidence, not an
+attestation for an arbitrary supplied string.
+
+Use `fcgj-ok` and `fcgj-reason` to inspect the result, then run the original
+report checks on `fcgj-body`. Keep raw-format and decoded-format results
+separate when comparing interfaces. Decoding proves transport handling; it
+does not establish grounding, useful completion or response quality.
+
+### Preserve source-selection authority
+
+Ordinary generation treats paths mentioned in a prompt as hints. A unique
+eligible path can supply the source for an unqualified knowledge query;
+repeated mentions of that same path remain one hint. Multiple distinct paths
+provide no inferred hint. An explicit path in the generated query takes
+precedence over a prompt hint. The separately source-bound APIs retain their
+caller-supplied binding. `bml/form-cli-source-affinity.bml` carries this
+distinction through both fresh and resident generation.
+
+Retained-query replay verifies source selection without another model run.
+That establishes the lookup behavior; any effect on a later generated answer
+still needs observation.
+
+### Local review evidence
+
+The 2026-09-17 retained-answer review used the same caller material through
+two profiles. Ordinary generation copied the input after a STORE marker and
+exhausted 1,536 tokens. Compact chat produced a complete 828-token review and
+revised report. It corrected the speaker and removed a placeholder, while
+retaining an unsupported interpretation of human silence as budget expiry.
+The original field checks passed on that revised report. They do not cover
+this conceptual error. The intervention changed the whole prompt profile;
+it does not isolate a particular instruction or establish general superiority.
+See `receipts/2026-09-17-native-json-boundary-and-review.md` for costs and scope.
+
 An external comparison runs through Form's process organ,
 `observe/form-cli-heal-process-run.bml`, with `codex exec --json`. Retain the
 process receipt, its stdout, stderr and the separate `-o` answer file. Native
