@@ -103,6 +103,39 @@ The ordinary `code` door also accepts `@request.json` to preserve requests
 larger than the host line buffer. A failed input admission is retained as an
 attempt; it does not establish anything about the model's response quality.
 
+## One admitted model for independent assessments
+
+`observe/form-cli-response-resident-run.bml` accepts a manifest file path on
+stdin, like the ordinary session runner. Every case is a read-only evaluation;
+all cases use the same model and context capacity, positive reply allowances,
+and the non-thinking generation channel. A provider allowance is refused.
+
+```sh
+form-run ./fkwu observe/form-cli-response-resident-run.bml <<'EOF'
+.hearth/my-response-session.json
+EOF
+```
+
+The first case admits the model. Later cases replace the conversation stream
+while retaining those weights; their prompts contain their own task and source
+documents. The existing native controller performs each review and repair with
+the original caller checks. Evaluation answers do not enter training or recall.
+
+Each case retains its report and stream boundary with shared release pending.
+Only after the final owner is released does the runner publish final results
+and recheck every case. `release_ok` in those results refers to the shared
+lifecycle: all stream transitions succeeded and the final owner released.
+The summary exposes those two observations separately. A failed transition or
+release preserves reports with an incomplete lifecycle; it cannot become a
+successful case. Intermediate boundaries are evidence of progress, not completed
+release. An interrupted run keeps its pending evidence for inspection.
+
+The public Form API is `frsr-run(manifest)` in
+`bml/form-cli-response-resident.bml`. Its result remains an assessment receipt:
+successful runner execution does not establish answer quality or session parity.
+The ordinary session runner continues to own separate model admissions and its
+optional provider resource.
+
 ## Provider usage records
 
 Send the owned Codex stdout path as one stdin line:

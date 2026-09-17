@@ -1,0 +1,95 @@
+// Read-only evaluations share one admitted model, with a fresh stream per case.
+// Final shared release is observed before any case receives release_ok=1.
+// preludes: form-stdlib/bml/form-cli-response-session.bml form-stdlib/bml/form-cli-model-renew.bml
+section [form.bml] {
+ class FormCliResponseResident {
+  def frsr-model(request) = if json-object-has?(request,"model") then fcap-string(request,"model") else "qwen38-q8";
+  def frsr-context(request) = fcaq-number(request,"context",8192);
+  def frsr-turns(request) = fcaq-number(request,"turns",64);
+  def frsr-compatible(rows,model,context) = if nil?(rows) then 1 else {
+   let request = json-object-get(head(rows),"request");
+   let own = and(str_eq(fcaq-mode(request),"review"),and(str_eq(frsr-model(request),model),and(eq(frsr-context(request),context),and(gt(frsr-turns(request),0),eq(fcaq-number(request,"initial_reasoning_tokens",0),0)))));
+   and(own,frsr-compatible(tail(rows),model,context));
+  };
+  def frsr-valid(manifest) = if not(frss-valid(manifest)) then 0 else if frss-provider-allowed(manifest) then 0 else {
+   let rows = node_children(json-object-get(manifest,"cases"));
+   let first = json-object-get(head(rows),"request");
+   and(gt(frsr-context(first),0),frsr-compatible(rows,frsr-model(first),frsr-context(first)));
+  };
+  def frsr-open(previous,request,state) = if nil?(previous) then list(1,"first-admission",fcac-open-budget(frsr-model(request),state,frsr-context(request),frsr-turns(request))) else fcmr-replace-with-profile(previous,fcac-bootstrap-budget(state,frsr-turns(request)),"knowledge-query");
+  def frsr-transition-ok(opened) = and(head(opened),or(str_eq(nth(opened,1),"first-admission"),str_eq(nth(opened,1),"fresh-stream-same-weights")));
+  def frsr-one(root,member,index,previous) {
+   let request = json-object-get(member,"request");
+   let dir = frsh-path(root,int_to_str(index));
+   fs-mkdir(dir);
+   frsh-frozen(frsh-path(dir,"request.json"),json-emit(request));
+   let started = now_unix_ms();
+   let docs = fat-wire-value(fat-wire-documents(request));
+   let state = fcap-begin-context(fcaq-initial(request,docs));
+   let opened = frsr-open(previous,request,state);
+   let session = if frsr-transition-ok(opened) then nth(opened,2) else fcms-refuse(nth(opened,2),nth(opened,1));
+   let ready = and(frsr-transition-ok(opened),fcms-live?(session));
+   let raw = if ready then fcac-loop(session,state,fcaq-live-checker(request),frsr-turns(request),started) else list(session,fcap-terminal(state,str_concat("resident-stream-refused:",nth(opened,1))));
+   let last = head(raw);
+   let final = nth(raw,1);
+   let elapsed = sub(now_unix_ms(),started);
+   let report = fcap-report(final);
+   frsh-frozen(frsh-path(dir,"local-report.json"),report);
+   let boundary = json-node-object(list(nsm-s("id",fcap-string(member,"id")),nsm-s("evidence",dir),nsm-s("status_before_shared_release",fcap-stage(final)),nsm-s("stream_transition",nth(opened,1)),nsm-n("stream_ready",ready),nsm-n("elapsed_ms",elapsed),nsm-n("generated_ids",if ready then fcms-generated-ids(last) else 0),nsm-n("injected_ids",if ready then fcms-injected-ids(last) else 0),nsm-n("observations",if ready then fcms-observations(last) else 0),nsm-s("shared_release","pending")));
+   let continuity = json-node-object(append(json-object-pairs(boundary),list(nsm-n("old_stream_handles_expected",if nil?(previous) then 0 else q38-state-handle-count(fcms-sts(previous))),nsm-n("old_stream_retirement_verified",if nil?(previous) then 1 else frsr-transition-ok(opened)),json-node-pair("same_model_context",if nil?(previous) then json-node-null() else json-node-int(value_eq(fcms-ctx(previous),fcms-ctx(session)))))));
+   frsh-frozen(frsh-path(dir,"boundary.json"),json-emit(continuity));
+   print_str(str_concat("form-response-resident ",json-emit(continuity)));
+   list(last,list(member,final,continuity));
+  }
+  def frsr-loop(root,rows,index,previous,completed) = if nil?(rows) then list(previous,reverse(completed)) else {
+   let result = frsr-one(root,head(rows),index,previous);
+   frsr-loop(root,tail(rows),add(index,1),head(result),cons(nth(result,1),completed));
+  };
+  def frsr-outcome(held,released) {
+   let state = if released then nth(held,1) else fcap-terminal(nth(held,1),"resident-batch-lifecycle-incomplete");
+   let boundary = nth(held,2);
+   list(state,released,nsm-num(boundary,"generated_ids"),nsm-num(boundary,"injected_ids"),nsm-num(boundary,"observations"));
+  }
+  def frsr-completed(held,released) {
+   let member = head(held);
+   let outcome = frsr-outcome(held,released);
+   let state = head(outcome);
+   let boundary = nth(held,2);
+   let dir = fcap-string(boundary,"evidence");
+   let resultText = fcaq-result-core(outcome);
+   frsh-frozen(frsh-path(dir,"result.json"),resultText);
+   let result = parse-json("resident-case",resultText);
+   let checked = frss-recheck(json-object-get(member,"request"),result);
+   let fields = list(nsm-s("id",fcap-string(member,"id")),nsm-s("evidence",dir),nsm-s("status",fcap-stage(state)),nsm-s("case_status",if eq(nsm-num(checked,"checked_behavior_passed"),1) then "native-only-success" else "unresolved"),json-node-pair("check",checked),json-node-pair("elapsed_ms",json-object-get(boundary,"elapsed_ms")),json-node-pair("generated_ids",json-object-get(boundary,"generated_ids")),json-node-pair("injected_ids",json-object-get(boundary,"injected_ids")),nsm-n("shared_model_release_ok",released),nsm-n("provider_processes_new",0));
+   let row = json-node-object(fields);
+   frsh-frozen(frsh-path(dir,"receipt.json"),json-emit(row));
+   oh-emit(frsh-path(dir,"events.jsonl"),oh-reading("response-resident",dir,"checked-case-after-shared-release",json-node-int(1),json-node-int(nsm-num(checked,"checked_behavior_passed")),json-node-int(nsm-num(checked,"checked_behavior_passed")),list(),list("inspect-evidence","continue-assessment"),oh-reference(frsh-path(dir,"receipt.json"))));
+   row;
+  }
+  def frsr-finish(rows,released) = if nil?(rows) then list() else cons(frsr-completed(head(rows),released),frsr-finish(tail(rows),released));
+  def frsr-all-ready(rows) = if nil?(rows) then 1 else and(eq(nsm-num(nth(head(rows),2),"stream_ready"),1),frsr-all-ready(tail(rows)));
+  def frsr-run(manifest) {
+   if not(frsr-valid(manifest)) then form_error("resident response session requires read-only evaluations, one model/context, positive limits, no initial reasoning and no provider allowance") else 0;
+   let members = node_children(json-object-get(manifest,"cases"));
+   let first = json-object-get(head(members),"request");
+   if not(fcac-model-ready(frsr-model(first))) then form_error("resident model is unavailable") else 0;
+   let home = hearth-response-sessions();
+   fs-mkdir(fs-path-dirname(home));
+   fs-mkdir(home);
+   let root = frsh-path(home,str_concat("resident-",str_concat(fcam-hash(json-emit(manifest)),str_concat("-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(now_unix_ms())))))));
+   if not(eq(host_dir_mkdir(root),1)) then form_error("resident response evidence already owned") else 0;
+   frsh-frozen(frsh-path(root,"manifest.json"),json-emit(manifest));
+   let started = now_unix_ms();
+   let walked = frsr-loop(root,members,0,list(),list());
+   let finalRelease = fcms-release-ok?(head(walked));
+   let transitions = frsr-all-ready(nth(walked,1));
+   let released = and(finalRelease,transitions);
+   let rows = frsr-finish(nth(walked,1),released);
+   let report = json-node-object(list(nsm-s("schema","form-response-resident-v1"),nsm-s("session",fcap-string(manifest,"session")),nsm-s("evidence",root),nsm-n("cases",len(rows)),nsm-n("model_admission_attempts",1),nsm-n("stream_reset_attempts",sub(len(rows),1)),nsm-n("shared_model_release_ok",released),nsm-n("native_only_success",frss-status-count(rows,"native-only-success")),nsm-n("unresolved",frss-status-count(rows,"unresolved")),nsm-n("elapsed_ms",sub(now_unix_ms(),started)),nsm-n("provider_processes_new",0),json-node-pair("results",json-node-array(rows)),json-node-pair("overall_session_quality",json-node-null()),json-node-pair("frequency_and_resonance",json-node-null()),nsm-s("release_scope","release_ok in every result refers to the same final shared model release; preceding stream retirement is retained at each boundary")));
+   let lifecycle = json-node-object(append(json-object-pairs(report),list(nsm-n("final_owner_release_ok",finalRelease),nsm-n("all_stream_transitions_ok",transitions))));
+   frsh-frozen(frsh-path(root,"summary.json"),json-emit(lifecycle));
+   json-emit(lifecycle);
+  }
+ }
+ 0;
+}
