@@ -19,6 +19,10 @@
 
 (do
     (defn fcmsb-bit (ok bit) (if ok bit 0))
+    (defn fcmsb-assert (name ok)
+        (if ok 1 (form_error (str_concat "model adapter boundary: " name))))
+    (defn fcmsb-bytes (xs)
+        (if (nil? xs) "" (str_concat (byte_to_str (head xs)) (fcmsb-bytes (tail xs)))))
     (let ctx (list "opaque-model-context"))
     (let sts (list "opaque-stream-state"))
     (let s (fcms-session "live" "opened" "m.gguf" "src" ctx sts
@@ -32,6 +36,29 @@
     (let stopped-prefix (fcms-crossing-prefix-ids 1 1 77 1))
     (let rejected-zero (fcms-crossing-prefix-ids 0 0 77 0))
     (let rejected-one (fcms-crossing-prefix-ids 1 0 77 0))
+    ; Opaque numeric handles exercise ownership shape only; no device is opened.
+    (let carrier (list "qwen-session-adapter-v1" "candidate.safetensors" "tensor-digest"
+        (list 101 102 103 (qlh-width) (md-f32-bits 1.0))))
+    (let carried (fcmd-with-carrier s carrier))
+    (let advanced (fcms-with-stream carried 44 9 1 6 12 2))
+    (let carrier-refused (fcms-refuse advanced "test-refusal"))
+    (fcmsb-assert "ordinary sessions have no adapter" (nil? (fcmd-carrier s)))
+    (fcmsb-assert "stream update keeps exact adapter owner" (value_eq (fcmd-carrier advanced) carrier))
+    (fcmsb-assert "refusal keeps the owner for release" (value_eq (fcmd-carrier carrier-refused) carrier))
+    (fcmsb-assert "refusal retains stream counters" (and (eq (fcms-pos carrier-refused) 44) (eq (fcms-generated-ids carrier-refused) 6)))
+    (fcmsb-assert "adapter buffers have separate release accounting" (eq (fcmd-owned carrier) 3))
+    (fcmsb-assert "partial allocation remains counted" (eq (fcmd-owned (list "qwen-session-adapter-v1" "p" "d" (list 101 102 0 (qlh-width) 0))) 2))
+    (fcmsb-assert "second attachment refuses without replacing the first" (value_eq (fcmd-carrier (fcms-attach-adapter carried "other")) carrier))
+    (fcmsb-assert "late attachment refuses before artifact access" (str_eq (fcms-reason (fcms-attach-adapter s "missing")) "adapter-admission-requires-fresh-session"))
+    (fcmsb-assert "unadapted token zero remains a prediction" (eq (fcmd-pending (list) (list) 0) 0))
+    (let zero (fcmsb-bytes (hex-decode "00000000")))
+    (let one (fcmsb-bytes (hex-decode "0000803f")))
+    (fcmsb-assert "finite byte pair accepted" (fcmd-pair-valid? zero one 1))
+    (fcmsb-assert "short pair refused" (not (fcmd-pair-valid? zero "" 1)))
+    (fcmsb-assert "infinity refused" (not (fcmd-pair-valid? zero (fcmsb-bytes (hex-decode "0000807f")) 1)))
+    (fcmsb-assert "NaN refused" (not (fcmd-pair-valid? (fcmsb-bytes (hex-decode "0000c07f")) zero 1)))
+    (fcmsb-assert "byte lists are not silently treated as strings" (not (fcmd-pair-valid? (list 0 0 0 0) zero 1)))
+    (fcmsb-assert "tensor identity retains vector order" (not (str_eq (fcmd-pair-digest zero one) (fcmd-pair-digest one zero))))
     (sum (list
         (fcmsb-bit (and (str_eq (nth s 0) "form-cli-model-session-v1")
             (and (str_eq (head (fcms-ctx s)) "opaque-model-context")

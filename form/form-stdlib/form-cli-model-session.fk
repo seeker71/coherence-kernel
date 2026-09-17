@@ -25,7 +25,7 @@
 ; per-conversation state are both explicit and both released. No persistence,
 ; model weight update, or remote call is implied.
 ;
-; preludes: form-stdlib/form-cli-model-generate.fk form-stdlib/model-registry.bml form-stdlib/bml/form-cli-model-admission.bml form-stdlib/bml/form-cli-model-observation.bml
+; preludes: form-stdlib/form-cli-model-generate.fk form-stdlib/model-registry.bml form-stdlib/bml/form-cli-model-admission.bml form-stdlib/bml/form-cli-model-observation.bml form-stdlib/bml/form-cli-model-adapter.bml
 ; Proven by: form-stdlib/tests/form-cli-model-session-band.fk
 
 (do
@@ -61,9 +61,35 @@
         (fcms-session "nothing" reason "" "" (empty) (empty) 0 0 -1 0
                       0 0 0 0))
     (defn fcms-with-stream (s pos pending stopped generated injected observations)
-        (fcms-session (fcms-status s) (fcms-reason s) (fcms-path s)
+        (fcmd-inherit s (fcms-session (fcms-status s) (fcms-reason s) (fcms-path s)
             (fcms-src s) (fcms-ctx s) (fcms-sts s) (fcms-maxpos s)
-            pos pending stopped (fcms-prompt-ids s) generated injected observations))
+            pos pending stopped (fcms-prompt-ids s) generated injected observations)))
+    (defn fcms-refuse (s reason)
+        (fcmd-inherit s (fcms-session "nothing" reason (fcms-path s)
+            (fcms-src s) (fcms-ctx s) (fcms-sts s) (fcms-maxpos s)
+            (fcms-pos s) (fcms-pending s) (fcms-stopped? s)
+            (fcms-prompt-ids s) (fcms-generated-ids s)
+            (fcms-injected-ids s) (fcms-observations s))))
+    (defn fcms-forward (s id pos)
+        (fcmd-forward (fcms-ctx s) (fcms-sts s) (fcmd-carrier s) id pos))
+    (defn fcms-refresh-head (s)
+        (do
+            (let pending (fcmd-pending (fcms-ctx s) (fcmd-carrier s) (fcms-pending s)))
+            (let next (fcms-with-stream s (fcms-pos s) pending 0
+                (fcms-generated-ids s) (fcms-injected-ids s) (fcms-observations s)))
+            (if (lt pending 0) (fcms-refuse next "adapter-head-refused") next)))
+    (defn fcms-attach-adapter (s path)
+        (if (not (fcms-live? s)) s
+            (if (not (nil? (fcmd-carrier s))) (fcms-refuse s "adapter-already-attached")
+            (if (or (gt (fcms-generated-ids s) 0) (gt (fcms-observations s) 0))
+                (fcms-refuse s "adapter-admission-requires-fresh-session")
+                (do
+                    (let admitted (fcmd-admit (fcms-ctx s) path))
+                    (let owned (fcmd-with-carrier s (nth admitted 2)))
+                    (if (eq (head admitted) 1) (fcms-refresh-head owned)
+                        (fcms-refuse owned (nth admitted 1))))))))
+    (defn fcms-open-adapted (path prompt maxpos profile adapter-path)
+        (fcms-attach-adapter (fcms-open-with-profile path prompt maxpos profile) adapter-path))
 
     ; The API names what is and is not encoded. A live observation can report
     ; these strings without reproducing model or user content.
@@ -273,11 +299,7 @@
                 (let next-width (fcms-decode-next-width steps-to-checkpoint checkpoint-width))
                 (if (eq left 1) (list out2 id pos 0)
                     (do
-                        (let ctx (fcms-ctx s))
-                        (let nid (q38-forward
-                            (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
-                            (fcms-sts s) (nth ctx 4) (nth ctx 5) (nth ctx 6)
-                            id pos))
+                        (let nid (fcms-forward s id pos))
                         (if (lt nid 0) (list out2 -1 (add pos 1) 1)
                         (if (eq (q38-stop? nid stops) 1)
                             (list out2 nid (add pos 1) 1)
@@ -406,12 +428,7 @@
         (if (not (eq (fcms-live? s) 1)) s
             (if (or (eq (len ids) 0)
                     (gt (add (fcms-pos s) (len ids)) (fcms-maxpos s)))
-                    (fcms-session "nothing" refusal-reason
-                        (fcms-path s) (fcms-src s) (fcms-ctx s) (fcms-sts s)
-                        (fcms-maxpos s) (fcms-pos s) (fcms-pending s)
-                        (fcms-stopped? s) (fcms-prompt-ids s)
-                        (fcms-generated-ids s) (fcms-injected-ids s)
-                        (fcms-observations s))
+                    (fcms-refuse s refusal-reason)
                 (do
                     (let ctx (fcms-ctx s))
                     ; All IDs retain their order and the same stream state.
@@ -423,16 +440,11 @@
                         ; Counters retain the last completed observation, not a
                         ; claim that physical KV was rolled back. Keep ownership
                         ; so the original context can still be released.
-                        (fcms-session "nothing" "observation-prefill-refused"
-                            (fcms-path s) (fcms-src s) ctx (fcms-sts s)
-                            (fcms-maxpos s) (fcms-pos s) (fcms-pending s)
-                            (fcms-stopped? s) (fcms-prompt-ids s)
-                            (fcms-generated-ids s) (fcms-injected-ids s)
-                            (fcms-observations s))
-                        (fcms-with-stream s (nth pf 1) (nth pf 0) 0
+                        (fcms-refuse s "observation-prefill-refused")
+                        (fcms-refresh-head (fcms-with-stream s (nth pf 1) (nth pf 0) 0
                             (fcms-generated-ids s)
                             (add (fcms-injected-ids s) (len ids))
-                            (add (fcms-observations s) 1)))))))
+                            (add (fcms-observations s) 1))))))))
 
     ; Injects one typed Form observation into the SAME q38 state. It returns a
     ; session whose pending ID is the first prediction after the observation.
@@ -458,13 +470,18 @@
             "rejection-observation-context-window-refused"))
 
     (defn fcms-release-ok? (s)
-        (if (eq (fcms-resident? s) 0) 1
-            (do
+        (do
+            (let adapter-expected (fcmd-owned (fcmd-carrier s)))
+            (if (gt adapter-expected 0) (metal_sync) 0)
+            (let adapter-closed (fcmd-close (fcmd-carrier s)))
+            (let adapter-ok (eq adapter-closed adapter-expected))
+            (if (eq (fcms-resident? s) 0) adapter-ok
+              (do
                 (let state-expected (q38-state-handle-count (fcms-sts s)))
                 (let state-closed (q38-free-state (fcms-sts s)))
                 (let context-expected (q38-close-expected (fcms-ctx s) (empty)))
                 (let context-closed (q38-close (fcms-ctx s) (empty)))
-                (if (and (eq state-closed state-expected)
-                         (eq context-closed context-expected)) 1 0))))
+                (if (and adapter-ok (and (eq state-closed state-expected)
+                         (eq context-closed context-expected))) 1 0)))))
 
     0)

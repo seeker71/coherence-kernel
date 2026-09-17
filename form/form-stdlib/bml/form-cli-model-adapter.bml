@@ -1,0 +1,46 @@
+// Explicit, session-owned Qwen head adapters. No default selection or promotion.
+// Identity covers the exact finite A/B bytes supplied to the Metal admission.
+// preludes: form-stdlib/qwen-lora-train.fk
+section [form.bml] {
+ class FormCliModelAdapter {
+  field SessionPrefixSize = 15;
+  def fcmd-carrier(session) = if gt(len(session),SessionPrefixSize()) then nth(session,SessionPrefixSize()) else list();
+  def fcmd-with-carrier(session,carrier) = append(take(SessionPrefixSize(),session),cons(carrier,drop(add(SessionPrefixSize(),1),session)));
+  def fcmd-inherit(before,after) = append(take(SessionPrefixSize(),after),drop(SessionPrefixSize(),before));
+  def fcmd-path(carrier) = if eq(len(carrier),4) then nth(carrier,1) else "";
+  def fcmd-digest(carrier) = if eq(len(carrier),4) then nth(carrier,2) else "";
+  def fcmd-adapter(carrier) = if eq(len(carrier),4) then nth(carrier,3) else list();
+  def fcmd-active?(carrier) = qlh-admitted?(fcmd-adapter(carrier));
+  def fcmd-pair-valid?(a,b,width) = if not(and(str_eq(value_kind(a),"string"),str_eq(value_kind(b),"string"))) then 0 else if not(str_eq(value_kind(width),"int")) then 0 else if le(width,0) then 0 else if not(and(eq(str_len(a),mul(width,4)),eq(str_len(b),mul(width,4)))) then 0 else and(qlt-finite-bytes?(a,0,width),qlt-finite-bytes?(b,0,width));
+  def fcmd-pair-digest(a,b) = hex-encode(sha256-stream-string(str_concat(a,b)));
+  def fcmd-snapshot(path) = if le(file_size(path),0) then list() else if not(qlh-whole?(path)) then list() else {
+   let a = qlh-tensor-bytes(path,qlh-a-name());
+   let b = qlh-tensor-bytes(path,qlh-b-name());
+   if not(fcmd-pair-valid?(a,b,qlh-width())) then list() else list(a,b,fcmd-pair-digest(a,b));
+  };
+  // [admitted, reason, owned carrier]. Even an incomplete returned allocation
+  // remains owned by the refused session until its normal release boundary.
+  def fcmd-admit(ctx,path) = if lt(len(ctx),7) then list(0,"adapter-context-unavailable",list()) else if not(eq(nth(nth(ctx,2),0),qlh-width())) then list(0,"adapter-model-width-mismatch",list()) else {
+   let material = fcmd-snapshot(path);
+   if nil?(material) then list(0,"adapter-artifact-missing-invalid-or-nonfinite",list()) else {
+    let adapter = q38-lora-rank1-open(head(material),nth(material,1),qlh-width(),md-f32-bits(1.0));
+    let carrier = list("qwen-session-adapter-v1",path,nth(material,2),adapter);
+    if qlh-admitted?(adapter) then list(1,"adapter-admitted",carrier) else list(0,"adapter-device-admission-refused",carrier);
+   };
+  };
+  def fcmd-owned(carrier) {
+   let adapter = fcmd-adapter(carrier);
+   if not(eq(len(adapter),5)) then 0 else sum(list(if gt(nth(adapter,0),0) then 1 else 0,if gt(nth(adapter,1),0) then 1 else 0,if gt(nth(adapter,2),0) then 1 else 0));
+  }
+  def fcmd-close(carrier) = qlh-close(fcmd-adapter(carrier));
+  def fcmd-forward(ctx,state,carrier,id,pos) = if nil?(carrier) then q38-forward(nth(ctx,0),nth(ctx,1),nth(ctx,2),nth(ctx,3),state,nth(ctx,4),nth(ctx,5),nth(ctx,6),id,pos) else q38-forward-adapted(nth(ctx,0),nth(ctx,1),nth(ctx,2),nth(ctx,3),state,nth(ctx,4),nth(ctx,5),nth(ctx,6),fcmd-adapter(carrier),id,pos);
+  // Prefill already advanced the stream. Recompute only its final head; never
+  // replay the final input token or insert an intermediate prediction into KV.
+  def fcmd-pending(ctx,carrier,basePending) = if nil?(carrier) then basePending else if not(fcmd-active?(carrier)) then -1 else {
+   metal_batch_concurrent();
+   q38-head-adapted(nth(ctx,0),nth(ctx,1),nth(ctx,2),nth(ctx,5),nth(ctx,6),fcmd-adapter(carrier));
+   kth-u32at(metal_buf_read(nth(nth(ctx,1),31),0,4),0);
+  };
+ }
+ 0;
+}
