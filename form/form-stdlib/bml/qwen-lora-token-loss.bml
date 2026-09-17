@@ -1,0 +1,39 @@
+// Token-target loss for Qwen's hidden-space rank-one adapter:
+// h' = h + scale B(Ah); z = W h'. W remains caller-owned and unchanged.
+// The caller supplies a flat row-major output projection and an integer target row.
+// A selected-row projection measures only that subset's cross-entropy.
+// CPU reference arithmetic; no full-vocabulary GPU training path is supplied.
+// This arithmetic neither captures Qwen states nor trains/promotes an artifact.
+// preludes: form-stdlib/lora-backward.bml
+section [form.bml] {
+ class QwenLoraTokenLoss {
+  def qltl-state(w,classes,h,a,b,scale) {
+   if not(str_eq(value_kind(classes),"int")) then nothing() else if or(le(classes,0),nil?(h)) then nothing() else {
+    let st = lbw-forward(a,b,1,len(h),len(h),h,scale);
+    if nothing?(st) then nothing() else {
+     let z = lbw-mv(w,classes,len(h),lbw-axpy(h,lbw-y(st),1.0));
+     if nothing?(z) then nothing() else list(st,z);
+    };
+   };
+  }
+  def qltl-logits(w,classes,h,a,b,scale) {
+   let state = qltl-state(w,classes,h,a,b,scale);
+   if nothing?(state) then nothing() else nth(state,1);
+  }
+  def qltl-target-valid(classes,target) = if not(and(str_eq(value_kind(classes),"int"),str_eq(value_kind(target),"int"))) then 0 else and(gt(classes,0),and(ge(target,0),lt(target,classes)));
+  def qltl-loss(w,classes,h,a,b,scale,target) = if not(qltl-target-valid(classes,target)) then nothing() else lbw-loss-of(qltl-logits(w,classes,h,a,b,scale),target);
+  // Return [dA,dB,dh]. dh includes the unchanged base path through W.
+  def qltl-grad(w,classes,h,a,b,scale,target) {
+   let state = if qltl-target-valid(classes,target) then qltl-state(w,classes,h,a,b,scale) else nothing();
+   if nothing?(state) then nothing() else {
+    let dz = lbw-dce(nth(state,1),target);
+    if nothing?(dz) then nothing() else {
+     let dh = lbw-tmv(w,classes,len(h),dz);
+     let g = lbw-backward(a,b,1,len(h),len(h),h,lbw-u(head(state)),dh,scale);
+     if nothing?(g) then nothing() else list(lbw-dA(g),lbw-dB(g),lbw-axpy(dh,lbw-dx(g),1.0));
+    };
+   };
+  }
+ }
+ 0;
+}

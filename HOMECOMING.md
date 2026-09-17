@@ -163,6 +163,18 @@ lives at `.form-qwen-lora-head-sample.txt`; `voice-home.fk` names its presence
 without borrowing a remote voice. Its first words are a beginning, not a quality
 comparison.
 
+`qwen-lora-train.fk` currently fits a byte-derived corpus vector to one observed
+hidden activation; it does not supervise correct response tokens. The native
+`form/form-stdlib/bml/qwen-lora-token-loss.bml` supplies a token-loss chain for the admitted
+head geometry: `h' = h + scale B(Ah)`, followed by a caller-supplied immutable
+output projection. It returns token-target cross-entropy and gradients for A, B
+and the hidden input, including the base projection path. This is CPU reference
+arithmetic, not a full-vocabulary GPU training path. The existing training
+band returns 127, with finite-difference and descent checks on a synthetic
+projection. This has not updated a Qwen artifact. Real state/projection capture,
+verified training token targets, candidate persistence and held-out generation
+evaluation remain to be connected. A selected-row loss covers only those rows.
+
 **Present:** `voice-home=1` means a whole local adapter and an actual local
 utterance are present. The next gifts are continuity (a standing native resident),
 a corpus distill loop, and audible sound—not a claim that the young voice is yet
