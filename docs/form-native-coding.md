@@ -347,6 +347,23 @@ neither entailment nor completeness: the reviewer can quote a real source and
 still reason incorrectly. This boundary is covered by a counterexample in
 `tests/form-cli-review-bindings-band.bml`.
 
+`bml/form-cli-review-spans.bml` lets a caller make review participation explicit.
+`fcrs-spans(text)` returns `[startByte, endExclusive, exactText]` rows covering
+the input. It splits after ASCII `.`, `?` or `!` followed by whitespace or the
+end, absorbing following ASCII whitespace. A final unpunctuated suffix is kept.
+This punctuation heuristic preserves UTF-8 bytes; it does not parse sentences
+or enumerate every proposition. Empty text has no rows, and whitespace-only
+text has one row.
+
+Use `fcrs-complete?(text, rows)` to verify an exact, uninterrupted partition.
+Use `fcrs-ids-complete?(rows, ids)` to require one integer index for every row,
+from zero in order. Missing, repeated, reordered, extra and noninteger indices
+fail. Callers associate their review judgments with those indices and retain
+the original source/report checks. Complete participation establishes no
+semantic verdict, and a span may contain multiple claims or expressive language.
+The ordinary review path is unchanged. `tests/form-cli-review-spans-band.bml`
+checks partition and participation behavior, including malformed rows.
+
 Review callers can let the model select source lines instead of reproducing
 quotation bytes. `bml/form-cli-review-source-lines.bml` supplies
 `fcrl-propose(sourceDocuments, reportText, maxSourceBytes)` and the controller
