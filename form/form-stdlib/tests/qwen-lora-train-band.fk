@@ -1,16 +1,43 @@
 ; qwen-lora-train-band.fk — pure algebraic witness for the local fitting rule.
 ;
-; Verdict 63:
+; Verdict 127:
 ;   1 vectors preserve width
 ;   2 fitted scalar is nonzero
 ;   4 rank-one output lowers loss from the zero adapter
 ;   8 rank-one output reaches the one-example target
 ;  16 A persists as a Qwen-shaped safetensors tensor
 ;  32 B persists as a Qwen-shaped safetensors tensor
-; preludes: form-stdlib/qwen-lora-train.fk
+;  64 projected token-loss gradients, descent and shape refusals
+; preludes: form-stdlib/qwen-lora-train.fk form-stdlib/bml/qwen-lora-token-loss.bml
 
 (do
     (defn qltb-path () (fs-path-join (fs-temp-dir) "qwen-lora-train-band.safetensors"))
+    (defn qltb-token-loss (h a b)
+        (qltl-loss (list 1.0 2.0 -1.0 0.5 0.25 -0.75) 3 h a b 0.75 1))
+    (defn qltb-token-fd (h a b which i eps)
+        (lbw-fd-of
+            (qltb-token-loss (if (eq which 2) (lbw-bump h i eps) h)
+                (if (eq which 0) (lbw-bump a i eps) a) (if (eq which 1) (lbw-bump b i eps) b))
+            (qltb-token-loss (if (eq which 2) (lbw-bump h i (sub 0.0 eps)) h)
+                (if (eq which 0) (lbw-bump a i (sub 0.0 eps)) a) (if (eq which 1) (lbw-bump b i (sub 0.0 eps)) b)) eps))
+    (defn qltb-token-check ()
+        (do
+            (let w (list 1.0 2.0 -1.0 0.5 0.25 -0.75))
+            (let h (list 0.5 -0.25))
+            (let a (list 0.1 -0.2))
+            (let b (list 0.3 0.4))
+            (let g (qltl-grad w 3 h a b 0.75 1))
+            (let ea (lbw-reldiff (lbw-dA g) (list (qltb-token-fd h a b 0 0 0.0001) (qltb-token-fd h a b 0 1 0.0001))))
+            (let eb (lbw-reldiff (lbw-dB g) (list (qltb-token-fd h a b 1 0 0.0001) (qltb-token-fd h a b 1 1 0.0001))))
+            (let eh (lbw-reldiff (lbw-dx g) (list (qltb-token-fd h a b 2 0 0.0001) (qltb-token-fd h a b 2 1 0.0001))))
+            (and (lt (lbw-maxabs (list ea eb eh)) 0.00001)
+                (and (lt (qltb-token-loss h (lbw-sgd a (lbw-dA g) 0.1) (lbw-sgd b (lbw-dB g) 0.1)) (qltb-token-loss h a b))
+                    (and (and (nothing? (qltl-grad w 3 h a b 0.75 3))
+                              (and (nothing? (qltl-grad w 3 h a b 0.75 1.5))
+                                   (nothing? (qltl-loss w 3.5 h a b 0.75 1))))
+                        (and (nothing? (qltl-grad (list 1.0) 3 h a b 0.75 1))
+                            (and (nothing? (qltl-grad w 3 h (list 0.1) b 0.75 1))
+                                 (nothing? (qltl-grad (list) 3 (list) (list) (list) 0.75 1)))))))))
     (let h (list 1.0 2.0 3.0 4.0))
     (let target (list 0.5 (sub 0.0 1.0) 2.0 3.0))
     (let fit (qlt-fit h target))
@@ -27,4 +54,5 @@
         (if (lt after before) 4 0)
         (if (lt after 0.0001) 8 0)
         (if (eq (str_len (qlh-tensor-bytes path (qlh-a-name))) (mul (qlh-width) 4)) 16 0)
-        (if (eq (str_len (qlh-tensor-bytes path (qlh-b-name))) (mul (qlh-width) 4)) 32 0))))
+        (if (eq (str_len (qlh-tensor-bytes path (qlh-b-name))) (mul (qlh-width) 4)) 32 0)
+        (if (qltb-token-check) 64 0))))
