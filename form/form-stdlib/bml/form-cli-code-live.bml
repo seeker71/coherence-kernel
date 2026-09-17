@@ -17,7 +17,11 @@ section [form.bml] {
   def fcac-replies-left(state,turns) = fat-max(0,sub(turns,fcap-turns(state)));
   def fcac-budget(state,turns) = json-node-object(list(json-node-pair("limit",json-node-int(turns)),json-node-pair("completed",json-node-int(fcap-turns(state))),json-node-pair("remaining",json-node-int(fcac-replies-left(state,turns)))));
   def fcac-budget-instruction(state,turns) = str_concat("Every generated reply counts, including tool reads. Source observations already supplied remain available. ",if eq(fcac-replies-left(state,turns),1) then "This is the final allowed reply. Submit the requested deliverable from the supported evidence, retaining unresolved findings honestly. A further tool read leaves no reply for the deliverable. All caller checks still apply." else "Plan inspection and the requested deliverable within the remaining replies. All caller checks still apply.");
-  def fcac-budget-pairs(state,turns) = list(json-node-pair("reply_budget",fcac-budget(state,turns)),json-node-pair("budget_instruction",json-node-string(fcac-budget-instruction(state,turns))));
+  def fcac-token-budget-pairs(state) = if le(fcap-reply-token-limit(state),0) then list() else list(json-node-pair("max_reply_tokens",json-node-int(fcap-reply-token-limit(state))),json-node-pair("token_budget_instruction",json-node-string("Each generated reply has this token ceiling, including reasoning when enabled. Finish the JSON and end the reply within it. A partial reply is retained as evidence and never acts. All original goals, sources and checks remain in force.")));
+  def fcac-budget-pairs(state,turns) = append(list(json-node-pair("reply_budget",fcac-budget(state,turns)),json-node-pair("budget_instruction",json-node-string(fcac-budget-instruction(state,turns)))),fcac-token-budget-pairs(state));
+  def fcac-token-allowance(state,available) = if le(fcap-reply-token-limit(state),0) then available else fat-min(available,fcap-reply-token-limit(state));
+  def fcac-reply-exhausted(state,count) = and(gt(fcap-reply-token-limit(state),0),ge(count,fcap-reply-token-limit(state)));
+  def fcac-decode-width(state,session,count) = fat-max(0,fat-min(CodeProgressQuantum(),fat-min(sub(fcms-maxpos(session),fcms-pos(session)),if le(fcap-reply-token-limit(state),0) then CodeProgressQuantum() else sub(fcap-reply-token-limit(state),count))));
   def fcac-bootstrap-budget(state,turns) = str_concat(fcap-bootstrap(state),str_concat("\nCALLER REPLY BUDGET: ",json-emit(json-node-object(fcac-budget-pairs(state,turns)))));
   def fcac-observation-budget(state,turns) = json-emit(json-node-object(append(json-object-pairs(parse-json("observation",fcap-observation(state))),fcac-budget-pairs(state,turns))));
   def fcac-open-budget(model,state,context,turns) = fcms-open-with-profile(mr-path(mr-find(model)),fcac-bootstrap-budget(state,turns),context,"knowledge-query");
@@ -56,8 +60,16 @@ section [form.bml] {
   }
   def fcac-generated(generation, state, checker, turns, started) {
    let session = fcms-generation-session(generation);
-   if or(not(fcms-stopped?(session)), lt(fcms-pending(session), 0)) then fcac-finish(session, fcap-terminal(state, "generation-incomplete;candidate-retained"), started) else fcac-replied(session,state,fat-trim(fcms-generation-text(generation)),checker,turns,started);
+   if or(not(fcms-stopped?(session)), lt(fcms-pending(session), 0)) then fcac-incomplete(generation,state,started) else fcac-replied(session,state,fat-trim(fcms-generation-text(generation)),checker,turns,started);
   }
+  def fcac-incomplete(generation,state,started) {
+   let session = fcms-generation-session(generation);
+   let evidence = fcac-retain-reply(fcms-generation-text(generation));
+   let reason = if lt(fcms-pending(session),0) then "generation-incomplete;candidate-retained" else fcac-incomplete-reason(state,len(fcms-generation-ids(generation)),evidence,"generation-incomplete;candidate-retained");
+   print_str(str_concat("form-code-incomplete ",json-emit(json-node-object(list(fcap-shape-s("reason",reason),fcap-shape-n("max_reply_tokens",fcap-reply-token-limit(state)),fcap-shape-n("generated_ids",len(fcms-generation-ids(generation))),fcap-shape-s("private_reply_evidence",evidence))))));
+   fcac-finish(session,fcap-terminal(state,reason),started);
+  }
+  def fcac-incomplete-reason(state,count,evidence,fallback) = if not(fcac-reply-exhausted(state,count)) then fallback else if str_eq(evidence,"") then "reply-token-budget-reached;partial-reply-retention-failed;no-action" else "reply-token-budget-reached;partial-reply-retained;no-action";
   def fcac-replied(session,state,raw,checker,turns,started) {
    let evidence = fcac-retain-reply(raw);
    let next = fcap-native-submission-admitted(fcap-step(state,raw,checker),raw);
@@ -77,15 +89,15 @@ section [form.bml] {
    let path = str_concat(base,str_concat(if eq(index,0) then "" else str_concat("-",int_to_str(index)),".txt"));
    if fs-exists?(path) then fcac-unused-reply-path(base,add(index,1)) else path;
   }
-  def fcac-retained-reply(path,raw,written) = if str_eq(read_file(path),raw) then path else "";
+  def fcac-retained-reply(path,raw,written) = if and(fs-exists?(path),str_eq(read_file(path),raw)) then path else "";
   def fcac-advance(session, next, checker, turns, started) = if fcap-done(next) then fcac-finish(session, next, started) else if ge(fcap-turns(next), turns) then fcac-loop(session, next, checker,turns,started) else fcac-observed(session,fcacs-observe(session,fcac-observation-budget(next,turns)),next,checker,turns,started);
   def fcac-observed(before,after,next,checker,turns,started) = fcac-loop(after,fcap-observation-admitted(next,fcms-observations(before),fcms-observations(after),fcms-live?(after)),checker,turns,started);
-  def fcac-decode(session, state, started, stops, ids) = fcac-decoded(fcacs-quantum(session, stops, fat-min(CodeProgressQuantum(), sub(fcms-maxpos(session), fcms-pos(session)))), state, started, stops, ids);
+  def fcac-decode(session, state, started, stops, ids) = fcac-decoded(fcacs-quantum(session, stops, fcac-decode-width(state,session,len(ids))), state, started, stops, ids);
   def fcac-decoded(generation, state, started, stops, before) {
    let session = fcms-generation-session(generation);
    let ids = append(before, fcms-generation-ids(generation));
    let observed = fcac-observe(state, session, started);
-   if or(fcms-stopped?(session), ge(fcms-pos(session), sub(fcms-maxpos(session), 1))) then fcms-generation(tkz-decode-text(fcms-src(session), ids), ids, session) else fcac-decode(fcacs-next(session, stops), state, started, stops, ids);
+   if or(fcac-reply-exhausted(state,len(ids)),or(fcms-stopped?(session), ge(fcms-pos(session), sub(fcms-maxpos(session), 1)))) then fcms-generation(tkz-decode-text(fcms-src(session), ids), ids, session) else fcac-decode(fcacs-next(session, stops), state, started, stops, ids);
   }
  }
  0;
