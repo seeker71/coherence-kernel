@@ -30,12 +30,32 @@ actual source. The first check rejected it; the model then requested the full
 dialogue and trust teachings. This is one correction cycle with additional
 reads, not proof that the remaining interpretation has been repaired.
 
-Final execution and answer assessment are pending at this landing checkpoint.
 The retained first-response audit independently observed original source and
 report checks passing, followed by `Review binding 0: source_quote is absent
 from its named document`. After two full rereads, the next submission repeated
 that nonliteral quotation and was rejected again. A targeted source query
-followed. The owned run remains active; it has not been restarted.
+followed. The owned run was never restarted.
+
+The run ended at its **8-turn caller budget** with status **attention**, after
+**1723382 ms**, **2989 generated IDs**, **6231 injected IDs**, **5 tool calls**,
+**3 repairs** and **3 check runs**. Model release returned **1**. Source documents
+remained unchanged; the original source/report assertions passed. The final
+binding audit still refused row 0's source quotation. The review reported two
+applied findings, but the failed binding fold validates neither as a completed
+review. No provider process ran inside this experiment.
+
+The final retained answer and next action are each byte-identical to the first
+review submission, observed by the native comparison. The quotation shortened
+during repair but remained nonliteral. The answer still conflates translation
+with enrichment, leaves the composition observation unused, retains defensive
+self-description and asks for authorization already given. This attempt does
+not establish the required response-quality or throughput improvement. It is
+not a default response step or an accepted replacement answer.
+
+The next repair should reduce dependence on model-authored source quotations:
+carry source spans through native references while preserving their exact
+origin and leaving semantic interpretation subject to review. A literal-link
+check and a useful answer remain separate requirements.
 
 ## A real token-loss chain, before a language-training claim
 
@@ -102,3 +122,19 @@ At this landing checkpoint, the native authoring guide reported **0 Python
 implementations**, **2 existing invocation candidates**, and **0 unread**.
 Counsel panel: **orphans 0**, with **11/12 lanes unobserved** because no hearth
 stands. Drift gates returned **8191**, exit 0; whitespace checks passed.
+
+At the post-run checkpoint the parent goal meter read **9090540 tokens** and
+the transcript meter read **1868167 cumulative output tokens**. These include
+coordinating work and have different scopes from local generation IDs. Zero
+provider calls inside this run does not establish minimal overall rental.
+
+The private final-comparison helper initially had an extra closing parenthesis;
+preflight refused it and an attempted execution also failed. The expression
+was split into named strings, preflight passed, and the actual comparison ran.
+No failed output was accepted as a verdict. Earlier guessed source paths were
+resolved through the file inventory or an actual native type probe.
+
+Verified procedural teaching is retained under
+`2026-09-17-qwen-token-loss-procedure-v1`; its worker launched after the Qwen
+review released. Completion remains pending at this checkpoint. The target
+contains the tested mechanics and limits, never an assessed answer.
