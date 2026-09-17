@@ -92,6 +92,20 @@ this conceptual error. The intervention changed the whole prompt profile;
 it does not isolate a particular instruction or establish general superiority.
 See `receipts/2026-09-17-native-json-boundary-and-review.md` for costs and scope.
 
+The `knowledge-query-reasoning` profile leaves the model's thought channel
+open. Its scaffold is shared by the live tokenizer cursor and the indexed or
+reference fallback. Session admission preserves the requested profile when
+the live cursor is unavailable. The tokenizer-only witness compares actual
+token IDs across these routes, including literal marker text in the prompt;
+matching input IDs establishes profile consistency, not answer quality.
+The session carrier retains generated IDs, so final-channel extraction uses
+the actual closing token through `fcrt-answer`, rather than a text search.
+The 2026-09-17 plain review with that channel open spent all 4096 generated
+tokens before a final-channel boundary, then released cleanly. Its final
+answer was empty. It does not support enabling open reasoning by default;
+the outcome and full costs remain in
+`receipts/2026-09-17-native-reasoning-profile-and-review.md`.
+
 An external comparison runs through Form's process organ,
 `observe/form-cli-heal-process-run.bml`, with `codex exec --json`. Retain the
 process receipt, its stdout, stderr and the separate `-o` answer file. Native
