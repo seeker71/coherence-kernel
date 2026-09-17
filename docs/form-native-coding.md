@@ -129,6 +129,11 @@ during implementation on a caller-writable document. The native operation
 inserts right-nested binary calls: `and(a,b,c)` becomes `and(a,and(b,c))`;
 `or` follows the same pattern. Nested calls are handled in the same pass.
 
+The source compiler names invalid boolean arity before lowering the call:
+`and(1,1,1)` reports `form.bml boolean call requires 2 arguments; got 3`.
+The call itself follows in the diagnostic. Valid binary calls keep their
+short-circuit behavior; repairing a rejected call remains an explicit edit.
+
 The tool preserves every original byte and inserts only operator names and
 parentheses. It reports native attribution, edit byte locations, original
 arity and before/after hashes. Strings, line comments, other dialect sections
