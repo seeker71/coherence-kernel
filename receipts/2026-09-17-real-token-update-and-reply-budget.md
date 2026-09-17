@@ -75,10 +75,46 @@ count and remaining replies. The final reply is identified before generation.
 Existing role/source observations, checks and termination limit remain intact.
 Reasoning admission and same-resident follow-ups use the same disclosure.
 
-`grounded-semantic-review-v3` is running the same request with that disclosure.
-Its process and private evidence are retained; answer quality and cost are
-pending. The budget change currently has boundary evidence, not a demonstrated
-quality benefit. It does not extend the allowance or waive checks.
+`grounded-semantic-review-v3` completed its allowance with status `attention`.
+The native comparison verifies byte-identical requests and drafts; the initial
+prompt retains the old prompt as its exact prefix and adds 315 budget bytes.
+Subsequent observations also disclose the remaining allowance.
+
+| Full-review result | Without / with budget disclosure |
+| --- | --- |
+| Elapsed | 510948 / 1482485 ms |
+| Generated IDs | 49 / 4242 |
+| Injected IDs | 1458 / 1412 |
+| Reads | 3 / 1 |
+| Report checks run | 0 / 2 |
+| Final source / report assertions | passed / passed in the second run |
+| Exact review bindings | failed |
+| Release / original documents | passed / unchanged |
+| Provider processes | 0 / 0 |
+
+The budget-aware run submitted a report on its second reply. Its final reply
+repeated that report: native JSON-value comparison gives equality 1. Source
+line rows 0, 1 and 3 conflict with their explicit quotations; row 2 passes.
+The run costs 971537 ms and 4193 generated IDs more than the no-report attempt.
+All original checks remain in force. Four findings were claimed applied by
+the model; the failed binding fold reports zero validated applied links.
+
+The actual answer reduces repeated self-defense and removes the extra approval
+request. It still calls translation grounding, asks Urs to choose which already
+requested offering to use, and generalizes the composition witness into claims
+that rewriting this prose creates a Form node and preserves its history. That
+last behavior was explicitly unobserved by the supplied witness. The review
+therefore has substantive errors even apart from its failed citation checks.
+Budget disclosure changed this run from reads-only to report submission; it
+did not deliver a successful repair or useful throughput parity.
+
+Private v3 evidence includes the first and final reports, comparison.json,
+repair-comparison.json and answers.md. The comparison runner is
+`.hearth/response-parity/review-budget-comparison.bml`. Its preflight caught and
+repaired a misspelled helper before running. No assessed answer became a
+training target. The repeated full report also exposes the cost of requiring
+full resubmission for a small quotation correction; a native amendment path
+and explicit output-token budget remain useful next attempts.
 
 ## Checks and current floor
 
@@ -89,8 +125,10 @@ quality benefit. It does not extend the allowance or waive checks.
   two existing invocation candidates and zero unread files.
 - Counsel: orphans 0; 11/12 lanes unobserved without a standing hearth.
 - The preceding procedural learner completed candidate 54; serving generation
-  5 stayed unchanged. New procedural teaching waits for the live review to
-  release, preserving separate GPU ownership.
+  5 stayed unchanged. After Qwen released, verified procedural teaching was
+  retained under `2026-09-17-real-token-update-and-budget-procedure-v1` and its
+  learner launched. This establishes retention, not promotion. Assessed answer
+  prose was excluded.
 - Parent goal counter checkpoint: 9,488,058 tokens. Native transcript meter:
   1,935,580 cumulative output tokens. These scopes differ; zero provider calls
   inside the local probes does not imply zero rented development cost.
@@ -98,5 +136,5 @@ quality benefit. It does not extend the allowance or waive checks.
 The useful surprise was that the existing row decoder already supplied the
 missing real projection data. The difficult observation was the review's
 complete failure to deliver within three replies. That produced an explicit
-budget channel, whose effect still needs observation. The broader quality,
+budget channel, whose observed effect fell short of successful repair. The broader quality,
 resonance and minimal-rental objective remains active.
