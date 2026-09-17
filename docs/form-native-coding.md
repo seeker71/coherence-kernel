@@ -23,6 +23,37 @@ native grounding, the separate [synthesis door](form-response-synthesis.md)
 collects the tasks into one provider call and rechecks every report in Form.
 This path has zero local-model generation and retains its provider attribution.
 
+### Explicit Qwen adapter sessions
+
+Native embeddings can attach a rank-one Qwen head adapter with
+`fcms-open-adapted(modelPath,prompt,context,profile,adapterPath)`, or call
+`fcms-attach-adapter(session,adapterPath)` immediately after opening a fresh
+session. The returned session owns the adapter. Always use the returned value,
+including on refusal, and release its final owner through `fcms-release-ok?`.
+Attachment after generation or a tool observation, and a second attachment,
+are refused. Inspect `fcms-live?` and `fcms-reason` before generation.
+
+An attached session carries its adapter through ordinary generation, coding
+continuations, recipe/NodeID/BML-prefix continuations, tool observations and
+independent-stream renewal. Observation and renewal prefill the base stream,
+then recompute its final adapted head without replaying an input token. A
+successful renewal transfers ownership to its returned session; the previous
+stream has already been released and must not be released again.
+
+`fcmd-carrier(session)` exposes the owner; `fcmd-path`, `fcmd-digest` and
+`fcmd-owned` read its artifact path, exact admitted A/B tensor-byte SHA-256 and
+owned buffer count. Admission checks the 5,120-wide model boundary, artifact
+layout, byte lengths and finite float32 values. This digest does not bind
+artifact metadata or establish the adapter's training-base identity. The caller
+must supply an adapter trained for the selected base model.
+
+This is an explicit Form API. The JSON `code` request and resident turnwheel
+do not select this Qwen adapter automatically. It does not promote a candidate
+or connect the separate Llama session learner to Qwen. The live
+[session witness](../receipts/2026-09-17-qwen-session-adapter.md) establishes
+transport, native-head correspondence and resource release for one existing
+candidate; response quality and held-out improvement remain unproved.
+
 ## Call without knowing Form syntax
 
 In form-cli, enter `code` followed by a JSON object. The standalone native door
