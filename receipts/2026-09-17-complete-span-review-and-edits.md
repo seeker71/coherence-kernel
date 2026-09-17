@@ -63,6 +63,37 @@ documents, source checks and source queries match this retained enquiry, but
 report checks differ. It is therefore a source-matched reference, not an
 identical-contract control. No new provider process is called in this probe.
 
+## Actual local result and repair
+
+The first local review returned all **16** rows, but replacement row **8**
+omitted its reason. Atomic refusal preserved the original report. The native
+diagnostic now identifies the first invalid span; the behavior band also
+checks the missing-reason case and passes **1**, exit 0. The model marked the
+numeric-identity/translation sentence supported and kept a next action that
+it labeled an action gap. Complete participation did not yield sound judgment.
+
+A second local admission supplied only the missing reason (**13** generated
+IDs). Native replay verifies that no other decision changed. Composition then
+applied **14** keeps, **1** replacement and **1** removal. Original source and
+report assertions passed. The same admitted session reviewed the whole
+assembled answer and returned it byte-identically. It still conflates numeric
+identity with performed translation, defers the authorized action, and asks
+Urs to diagnose its voice. No semantic or resonance improvement is claimed.
+
+The second run completed and released the model: **383,980 ms**, **549**
+generated IDs, **4,430** injected IDs. Both runs together cost **736,204 ms**
+and **1,123** generated IDs; no provider subprocess ran. The original request
+and original report remain byte-identical. Evidence for the second run lives
+under `.hearth/response-parity/generalization-v2/complete-span-review-v2`.
+The audit initially ran before the result existed and preflight reported an
+unreadable chain. Compile-only checking was clean; after model release, fresh
+preflight and actual replay passed. The timing failure was not a syntax defect.
+
+This closes the malformed-row diagnosis and native edit-composition gap.
+It leaves the response-quality gap open. Further blind retries on this same
+answer would add cost without a new discriminating observation; the next
+comparison needs actual session outcomes and semantic assessment across tasks.
+
 ## Instruments and retained limits
 
 The preceding session learner completed round **66**, promotions **4**, with
