@@ -212,6 +212,40 @@ The candidate still goes through task completion, review and final caller
 verification. Making this assistance available does not attest model adoption
 or broader correctness.
 
+## Complete text review with explicit edits
+
+`bml/form-cli-review-edits.bml` connects indexed participation to actual text
+changes. `fcre-packet(reportText, fields)` returns `[ok, packet, diagnostic]`.
+The caller selects unique existing top-level string fields. The packet carries
+the exact report's SHA-256 base and ordered byte spans across those fields.
+Its punctuation heuristic and limits are the existing review-span utility's.
+
+`fcre-apply(reportText, fields, message)` requires the matching base and exactly
+one ordered decision for every span:
+
+```json
+{"base":"<packet base>","edits":[
+  {"id":0,"status":"supported","action":"keep","reason":"brief assessment"},
+  {"id":1,"status":"style","action":"replace","reason":"brief assessment","text":"Actual replacement text. "},
+  {"id":2,"status":"action-gap","action":"remove","reason":"brief assessment"}
+]}
+```
+
+Statuses are `supported`, `inference`, `unsupported`, `style` and `action-gap`.
+They are the reviewing model's judgments; the carrier does not certify them.
+Each action is `keep`, `replace` or `remove`. Replacement text must differ
+from the original and be nonempty; removal is explicit. Text is joined exactly,
+without added punctuation or spacing. Keep/remove cannot carry replacement
+text. Unselected values, including boolean observations, remain unchanged.
+
+The result is `[ok, candidateJson, diagnostic]`. A stale base, missing or repeated
+index, malformed decision or unchanged replacement refuses the whole edit;
+the original remains with the caller. Retain the packet and model message
+beside the candidate, then run the original response checks and read the whole
+answer. Complete participation establishes coverage, not correct judgments,
+coherent prose or response-quality parity. This API is a callable native
+review/composition step; ordinary generation policy is unchanged.
+
 ## Call without knowing Form syntax
 
 In form-cli, enter `code` followed by a JSON object. The standalone native door
