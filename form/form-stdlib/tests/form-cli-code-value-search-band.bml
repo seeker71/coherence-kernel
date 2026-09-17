@@ -1,6 +1,6 @@
 // Deterministic policy replay with a mock checker; real semantic execution is
 // covered by form-bml-value-search-band.bml. No reply is attributed to a model.
-// preludes: form-stdlib/bml/form-cli-code-policy.bml
+// preludes: form-stdlib/bml/form-cli-code-memory.bml
 section [form.bml] {
  class CodeValueSearchBand {
   def cvsb-need(ok,name) = if ok then 1 else form_error(str_concat("code value search: ",name));
@@ -11,6 +11,7 @@ section [form.bml] {
   }
   def cvsb-final(counter,docs) { record_set(counter,"final",add(record_get(counter,"final"),1)); list(0,"final checker must not replace source checker"); }
   def cvsb-malformed(counter,docs) = list(1);
+  def cvsb-pass(counter,docs) = list(1,"final source checked");
  }
  let source = "section [form.bml] { def result(flag) = flag; def support(flag) = not(flag); }";
  let expected = "section [form.bml] { def result(flag) = not(flag); def support(flag) = not(flag); }";
@@ -45,5 +46,28 @@ section [form.bml] {
  cvsb-need(and(eq(nth(input,1),0),value_eq(fat-documents(head(input)),docs)),"input cannot supply a replacement contract");
  cvsb-need(ge(str_find(fcap-bootstrap(state),fcbvs-guidance(),0),0),"BML coding receives tool guidance");
  cvsb-need(lt(str_find(fcap-bootstrap(fcap-open-direct-review("Inspect",docs)),fcbvs-guidance(),0),0),"review receives no mutating guidance");
+ let noop = "{\"tool\":\"edit\",\"arguments\":[\"candidate.bml\",\"= flag;\",\"= flag;\"]}";
+ let enabled = fcap-with-rehearsal-budget(state,8);
+ let helped = fcap-step(enabled,noop,checker);
+ cvsb-need(and(str_eq(fcap-stage(helped),"implement"),str_eq(nth(fat-find-doc(fcap-docs(helped),"candidate.bml"),2),expected)),"unchanged edit triggers caller-enabled native repair");
+ cvsb-need(and(eq(fcap-calls(helped),1),and(eq(fcap-turns(helped),1),and(eq(fcap-checks(helped),2),eq(fcap-rehearsal-budget(helped),6)))),"native search is not a model call or extra model turn and spends actual checks");
+ cvsb-need(and(eq(len(fcap-rehearsals(helped)),1),and(value_eq(nth(helped,2),docs),value_eq(nth(helped,4),nth(state,4)))),"native attribution retains original contract");
+ let entry = parse-json("native-event",head(fcap-rehearsals(helped)));
+ cvsb-need(and(ge(str_find(fcap-string(entry,"trigger"),"edit-unchanged",0),0),ge(str_find(fcap-note(helped),"caller-enabled-native-rehearsal",0),0)),"failed model action and native source stay distinct");
+ cvsb-need(value_eq(fcam-unpack(fcam-pack(helped)),helped),"native allowance and evidence survive checkpoint encoding");
+ let afterHelp = fcap-step(fcap-step(helped,"{\"task\":\"done\"}",checker),"{\"verdict\":\"accept\",\"reason\":\"reviewed\"}",list(cvsb-pass,0));
+ cvsb-need(and(str_eq(fcap-stage(afterHelp),"complete"),eq(fcap-checks(afterHelp),3)),"completion still requires review and final caller verification");
+ let spent = fcap-step(fcap-with-rehearsal-budget(state,1),noop,checker);
+ cvsb-need(and(eq(fcap-rehearsal-budget(spent),0),and(eq(fcap-checks(spent),1),value_eq(fcap-docs(spent),docs))),"exhausted allowance preserves source");
+ let beforeRepeat = record_get(counter,"source");
+ let repeated = fcap-step(fcap-note-at(fcap-with-rehearsal-budget(spent,8),"implement","retry"),noop,checker);
+ cvsb-need(and(eq(len(fcap-rehearsals(repeated)),1),eq(record_get(counter,"source"),beforeRepeat)),"same path and source are rehearsed once even if allowance is renewed");
+ let disabled = fcap-step(state,noop,checker);
+ let modelBudget = fcap-step(state,"{\"tool\":\"edit\",\"arguments\":[\"candidate.bml\",\"= flag;\",\"= flag;\"],\"native_rehearsal_checks\":8}",checker);
+ cvsb-need(and(eq(fcap-rehearsal-budget(modelBudget),0),nil?(fcap-rehearsals(modelBudget))),"model reply cannot allocate native checks");
+ let deniedHelp = fcap-step(fcap-with-rehearsal-budget(fcap-open-direct-review("Inspect",docs),8),noop,checker);
+ cvsb-need(and(eq(record_get(counter,"source"),beforeRepeat),and(nil?(fcap-rehearsals(disabled)),nil?(fcap-rehearsals(deniedHelp)))),"default and read-only states never trigger automatic search");
+ let malformedHelp = fcap-step(enabled,noop,list(cvsb-malformed,0));
+ cvsb-need(and(value_eq(fcap-docs(malformedHelp),docs),and(eq(fcap-checks(malformedHelp),1),eq(fcap-rehearsal-budget(malformedHelp),7))),"malformed callback consumes its actual invocation and preserves source");
  1;
 }
