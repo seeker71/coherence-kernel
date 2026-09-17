@@ -120,6 +120,35 @@ repeated comments until the 1,536-token limit. It remains unpromoted. This
 establishes reusable native batch learning, with unsuccessful transfer to that
 repair task; see `receipts/2026-09-17-qwen-cached-head-batches.md`.
 
+## Native BML boolean repair
+
+The coding loop offers `repair-bml` when its documents contain a
+`section [form.bml]` declaration. A model can call
+`{"tool":"repair-bml","arguments":["candidate.bml"],"input":""}`
+during implementation on a caller-writable document. The native operation
+inserts right-nested binary calls: `and(a,b,c)` becomes `and(a,and(b,c))`;
+`or` follows the same pattern. Nested calls are handled in the same pass.
+
+The tool preserves every original byte and inserts only operator names and
+parentheses. It reports native attribution, edit byte locations, original
+arity and before/after hashes. Strings, line comments, other dialect sections
+and qualified names are preserved. Malformed groups, empty arguments,
+`and`/`or` function declarations, block comments and unbraced `do` are refused
+without changing the document. Source size and nesting are bounded.
+
+This operation repairs source syntax; it does not change compiler acceptance
+or establish correct behavior. The model must still use `verify` and resolve
+any remaining failure. Review mode and non-writable documents cannot invoke
+the mutation. Unrelated coding contexts receive no additional tool guidance.
+Each `verify` result identifies the exact resident documents passed to the
+callback by ID, path, byte length and SHA-256. An unchanged error after an edit
+therefore carries the changed source identity. The callback's output and exit
+status stay intact; these identities establish which input was supplied,
+not the adequacy of the caller's checks.
+The pure source API is `fbr-repair(source)` in
+`bml/form-bml-boolean-repair.bml`, returning
+`[ok,candidate,edits,reason]` without evaluation or file access.
+
 ## Call without knowing Form syntax
 
 In form-cli, enter `code` followed by a JSON object. The standalone native door
