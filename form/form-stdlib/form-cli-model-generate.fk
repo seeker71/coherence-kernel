@@ -12,6 +12,7 @@
 ; preludes: form-stdlib/knowledge-rest-answer.fk form-stdlib/language-template.fk form-stdlib/bml/form-cli-resident-continuity.bml form-stdlib/form-cli-heedmark.bml form-stdlib/form-cli-heed-cursor.fk form-stdlib/form-cli-heed-telemetry.fk
 ; preludes: form-stdlib/form-cli-heed-current-source.fk form-stdlib/form-cli-heed-grounded.fk
 ; preludes: form-stdlib/bml/form-cli-reasoning-template.bml
+; preludes: form-stdlib/bml/form-cli-model-admission.bml
 
 (do
     (defn fcmg-src (path) (eqr-of-file path 0 40000000))
@@ -725,12 +726,12 @@
 
     ; Admission prefill, span-batched: materialize the live cursor to its
     ; id list first (a token walk with no forwards, no dispatches), then
-    ; the whole prompt rides the SAME chunk=0 span door every incremental
-    ; turn already uses -- one concurrent batch instead of one
-    ; dispatch-set per token. Admissions on the per-token walk measured
-    ; 230-300s; the span door is the round this lane never inherited.
-    ; The final id stays pending exactly as q38-prefill's contract holds
-    ; it (the prefill returns the first GENERATED token -- seedslip witness).
+    ; advance slices bounded by the admitted scratch width. Generation and
+    ; model sessions share this route and the BML admission-width authority.
+    ; The prompt id list remains live during prefill; model scratch is bounded
+    ; by q38-ctx-span, including scalar residents admitted by older callers.
+    ; Prefill returns the first generated token and the position after the
+    ; prompt, matching q38-prefill's contract (the seedslip witness).
     (defn fcmg-live-ids-go (cursor acc)
         (do (let one (qtlc-next cursor))
             (if (eq (qtlc-next-present? one) 1)
@@ -763,7 +764,7 @@
                 (do
                     (let before-status (metal_status))
                     (let _prefill-begin (fcmg-live-stage "model-prefill-begin" 4587521))
-                    (let live-pf (fcmg-live-prefill ctx sts cursor 64))
+                    (let live-pf (fcmg-live-prefill-span ctx sts cursor))
                     (let _prefill-complete (fcmg-live-stage "model-prefill-complete" 4653057))
                     (if (not (str_eq (nth live-pf 1) "ok"))
                         (fcmg-state-close-result sts
@@ -1004,8 +1005,8 @@
                 (let live-cursor (if (str_eq (qtlc-status cursor) "open") 1 0))
                 ; When the live cursor is absent the sorted-row index encodes
                 ; (10x the scanner, byte-identical); the reference scanner
-                ; remains the last lane inside qei itself. A current cursor
-                ; never creates a whole prompt-id list.
+                ; remains the last lane inside qei itself. Cursor admission
+                ; sizes from segment bounds; span prefill materializes ids.
                 (let tfx (qtf2-load (qtf2-root-for path) (qsx-seal-line path)))
                 (let ids (if (eq live-cursor 1) (empty)
                     (qei-chat-ids-profile src tfx prompt profile)))
@@ -1041,7 +1042,11 @@
                           (fcmr-none))
                     (do
                         (let _open-begin (fcmg-live-stage "model-open-begin" 6356993))
-                        (let ctx (if (eq iced 1) (qsx-open path maxpos x) (q38-open path maxpos)))
+                        (let span (if (eq live-cursor 1) (fcma-span prompt-bound) 1))
+                        (let _span (q38oo-stage (str_concat "model-prefill-span-" (int_to_str span)) 8388624))
+                        (let ctx (if (eq iced 1)
+                            (qsx-open-span path maxpos x span)
+                            (q38-open-span path maxpos span)))
                         (let _open-complete (fcmg-live-stage "model-open-complete" 6422529))
                         (if (lt (len ctx) 10)
                             (list (fcmg-noted prompt arch model
@@ -1190,7 +1195,7 @@
     (defn fcmg-plain-ledger-mark () "form-cli-plain-answer-ledger-v1")
     (defn fcmg-plain-ledger (query)
         (list (fcmg-plain-ledger-mark) query
-            (fcmg-current-source-answer-reserve)))
+            (fhm-caller-answer-reserve query)))
     (defn fcmg-plain-ledger-query (ledger) (nth ledger 1))
     (defn fcmg-plain-ledger-reserve (ledger) (nth ledger 2))
     (defn fcmg-plain-ledger-valid? (ledger)
@@ -1296,7 +1301,9 @@
         (if (str_eq path "")
             (list "no model is picked — run `models <dir>`, then `use <n>`, then `generate <prompt>`" r)
             (if (str_eq prompt "") (list "usage: generate <prompt>" r)
-                (fcmg-generate-plain-resident r path (fcmg-teach prompt) n))))
+                (fcmg-generate-plain-resident r path
+                    (str_concat (fcmg-teach prompt)
+                        (str_concat "\n" (fhm-caller-budget-text n))) n))))
     ; The same door for a caller that holds nothing: admit, generate, release.
     (defn fcmg-generate (path prompt n)
         (do

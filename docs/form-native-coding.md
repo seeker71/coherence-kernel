@@ -642,6 +642,27 @@ The retained report is supplied when a fresh model context opens in repair.
 Later repair observations carry its current hash and amendment instructions,
 without repeating the report text.
 
+A caller can also request revision after the original assertions passed. Keep
+that feedback attributed to the caller; it is not an automatic check failure.
+For a released session, build a fresh repair context with the original request,
+documents and exact retained report:
+
+```bml
+let docs = fat-wire-value(fat-wire-documents(request));
+let state = fcap-begin-context(fcap-rework(
+  fcap-with-report(fcaq-initial(request,docs),retainedReport),callerFeedback));
+```
+
+Check `fcap-amendable(state)` before model admission. Merely setting the report
+with `fcap-with-report` leaves the state outside repair, so the fresh bootstrap
+does not supply it as an amendment target. Open the new session using
+`fcac-bootstrap-budget(state,turns)`, retain the original
+`fcaq-live-checker(request)`, and let `fcac-resident` complete and release it.
+This reconstructs context from retained evidence; it does not recover old KV.
+Read the revised answer after its checks: the observed dialogue revision fixed
+an unsupported guarantee and draft placeholders while leaving other caller
+feedback unresolved. [Revision receipt](../receipts/2026-09-17-dialogue-revision-and-generation.md).
+
 The complete candidate runs through the original checker and any configured
 native repair callback. Source documents and the caller's contract stay
 unchanged. `report_source="model-amendment"` identifies model-authored edits
