@@ -1,5 +1,5 @@
 ; Session admission and independent checks, without generation or living writes.
-; preludes: form-stdlib/bml/form-cli-response-session.bml
+; preludes: form-stdlib/bml/form-cli-response-resident.bml
 (do
  (defn frssb-assert (name ok) (if ok 1 (form_error name)))
  (let request (parse-json "request" "{\"mode\":\"review\",\"review_entry\":\"direct\",\"evaluation\":1,\"goal\":\"Read the value\",\"documents\":[{\"id\":\"value\",\"path\":\"value.json\",\"text\":\"{\\\"value\\\":7}\"}],\"writable\":[],\"checks\":[{\"tool\":\"jq\",\"arguments\":[\".value\",\"value.json\"],\"stdout\":\"7\\n\"}],\"report_checks\":[{\"tool\":\"jq\",\"arguments\":[\".value\"],\"stdout\":\"7\\n\"}]}"))
@@ -24,6 +24,23 @@
  (let provider (parse-json "provider" "{\"allowed\":true,\"interface\":\"codex-exec\",\"max_processes\":2,\"seconds\":60}"))
  (let offered (oh-set manifest "provider" provider))
  (let denied (oh-set manifest "provider" (parse-json "denied" "{\"allowed\":false}")))
+ (frssb-assert "resident read-only evaluation admitted" (frsr-valid manifest))
+ (frssb-assert "resident excludes provider allowance" (not (frsr-valid offered)))
+ (frssb-assert "resident explicitly denied provider stays local" (frsr-valid denied))
+ (frssb-assert "resident rejects code mutation" (not (frsr-compatible (list (oh-set member "request" code)) "qwen38-q8" 8192)))
+ (frssb-assert "resident rejects mixed model" (not (frsr-compatible (list (oh-set member "request" (oh-set request "model" (json-node-string "different-model")))) "qwen38-q8" 8192)))
+ (frssb-assert "resident rejects mixed context" (not (frsr-compatible (list (oh-set member "request" (oh-set request "context" (json-node-int 4096)))) "qwen38-q8" 8192)))
+ (frssb-assert "resident rejects zero reply allowance" (not (frsr-compatible (list (oh-set member "request" (oh-set request "turns" (json-node-int 0)))) "qwen38-q8" 8192)))
+ (frssb-assert "resident reasoning channel is explicit" (not (frsr-compatible (list (oh-set member "request" (oh-set request "initial_reasoning_tokens" (json-node-int 32)))) "qwen38-q8" 8192)))
+ (let retained-state (fcap-with-report (fcaq-initial request (fat-wire-value (fat-wire-documents request))) "{\"value\":7}"))
+ (let boundary (json-node-object (list (nsm-n "generated_ids" 17) (nsm-n "injected_ids" 4) (nsm-n "observations" 1))))
+ (let held (list member retained-state boundary))
+ (let released-outcome (frsr-outcome held 1))
+ (let refused-outcome (frsr-outcome held 0))
+ (frssb-assert "shared release preserves original state and counts" (and (value_eq (head released-outcome) retained-state) (value_eq (tail released-outcome) (list 1 17 4 1))))
+ (frssb-assert "failed lifecycle preserves report with an incomplete result" (and (str_eq (fcap-report (head refused-outcome)) "{\"value\":7}") (and (eq (nth refused-outcome 1) 0) (str_eq (fcap-note (head refused-outcome)) "resident-batch-lifecycle-incomplete"))))
+ (frssb-assert "retired stream failure cannot be treated as renewal success" (not (frsr-transition-ok (list 1 "old-stream-release-incomplete" (list)))))
+ (frssb-assert "successful stream retirement admitted" (frsr-transition-ok (list 1 "fresh-stream-same-weights" (list))))
  (let failed (oh-set result "report" (json-node-string "{\"value\":8}")))
  (let failed-check (frss-recheck request failed))
  (let passed-check (frss-recheck request result))
