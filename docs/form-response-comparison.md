@@ -303,6 +303,16 @@ preserve the original constraints and the assessment evidence. The native
 review instruction now performs this check before submission and asks for a
 warm, direct, concise answer.
 
+The fresh direct comparison in
+`receipts/2026-09-17-native-direct-transfer.md` completes two original tasks
+with no provider generation and verifies the proposed edit by applying it.
+Its dialogue still transfers a technical property into an unsupported human
+consequence. Adding a generic evidence-domain instruction did not repair that
+error and introduced an unprovided commitment in the follow-up draft. That
+candidate instruction was removed from the default review path. A successful
+check or a better-sounding instruction does not establish a semantic repair;
+retain the actual failed answer before choosing another intervention.
+
 Passing a few structured assertions establishes only that task's checked
 behavior. Read the actual answers for unsupported claims, omitted constraints,
 warmth, initiative and usefulness. Numeric text-valence readings, where used,
