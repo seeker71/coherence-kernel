@@ -428,6 +428,15 @@ interpretation, topic coverage and answer quality require their own observation.
 The quotation band witnesses both restoration and the existing checked-repair
 boundary, including a changed-word candidate that remains in repair.
 
+For a caller explicitly reading a single-level Markdown blockquote,
+`fcqe-blockquote-restore(source, quote, maxBytes)` also recognizes line-leading
+`>` markers followed by whitespace, with up to three preceding spaces. It
+maps a unique whitespace-folded match back to the original source bytes,
+including intervening markers. Inline `>`, joined words, changed words and
+ambiguous projected matches remain unavailable. This is an explicit reading
+view, not a complete Markdown parser or a change to the default quotation
+checker. The returned source excerpt must still pass that original checker.
+
 Observation prefill uses the existing sliced batched route when the admitted
 context records a scratch width greater than one. Each outer slice is bounded
 by that actual width and the normal admission slice limit. Legacy contexts and

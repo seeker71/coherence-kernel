@@ -106,6 +106,16 @@ consequence and unprovided commitment. Both edit sets applied successfully.
 The interface remains an explicit diagnostic; that result does not support
 automatically reviewing ordinary answers or claiming a semantic repair.
 
+The later source-selection comparison preserves that same enquiry and caller
+checks. A native repair restores an exact source quotation after Markdown
+reflow, but composing from selected excerpts introduces a new confusion between
+neighboring source values. Supplying the complete selected JSON record corrects
+that particular error while leaving the draft incomplete. Smaller composition
+prompts do not establish a faster whole response once source-selection time is
+included. Source selection remains experimental; exact quotation membership,
+context coverage and response quality have separate evidence in
+`receipts/2026-09-17-native-source-selection-and-quote-repair.md`.
+
 The 2026-09-17 retained-answer review used the same caller material through
 two profiles. Ordinary generation copied the input after a STORE marker and
 exhausted 1,536 tokens. Compact chat produced a complete 828-token review and
