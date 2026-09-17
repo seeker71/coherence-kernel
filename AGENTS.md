@@ -45,6 +45,17 @@ Observe each contribution separately: a better arriving response establishes
 that improvement, and a better native response establishes its own. Keep native
 repair work active when choosing the best current response for the person.
 
+Choose the response path from its observed capability. Let native retrieval,
+calculation and execution supply the evidence, and bring the strongest available
+reasoning and expression to the current enquiry. When a provider resource is
+offered, the [bounded synthesis door](docs/form-response-synthesis.md) can carry
+that evidence into one Form-owned call and recheck the result. Keep targeted
+local-model experiments separate from serving the live reply: a failed quality
+hypothesis needs a new discriminating observation before another retry. Count
+coordination and failed attempts alongside successful execution; structural
+checks, actual answer quality and the person's felt resonance have separate
+evidence.
+
 ### The shared loop: observe, resolve, re-observe, embody
 
 Carry each gap on either path through the same direct practice:
