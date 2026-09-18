@@ -132,10 +132,13 @@ named without a path · two teachings before the question fail.
 - The move rows are authored; the classifier that reads moves and claim lanes off raw
   transcript text is pending, the same floor `text-frequency.fk` and `dialogue-covenant.fk`
   name.
-- No live trial has yet held a reply to `dcc-reply-lands?` on a real hard-conversation
-  question; the nearest evidence is the 2026-07-15 receivability trial, whose money-fights pair
-  is this shape. That trial is the next witness.
+- One voice trial stands
+  ([`receipts/2026-09-18-difficult-conversation-voice-trial.md`](../receipts/2026-09-18-difficult-conversation-voice-trial.md)):
+  two questions, a plain-assistant reply and a counsel reply each, measured on the door's organ
+  and held to `dcc-reply-lands?` on fkwu; two blind readings by a rented mind chose the counsel
+  reply on every criterion and named the residue that grew the one-teaching floor. No real
+  person has yet answered these replies; their resonance is theirs, and it is the next witness.
 - The band is fkwu-witnessed: `fs_exists`, `str_find`, and `print_str` bind on go, rust, and
   fkwu (`pf-arm-mask` 11, probed 2026-09-18), not on the TypeScript walker.
 
-; witnessed: 2026-09-18 -> band 111111111 (fkwu, fresh kernel)
+; witnessed: 2026-09-18 -> band 1111111111 (fkwu, fresh kernel); voice trial: receipts/2026-09-18-difficult-conversation-voice-trial.md
