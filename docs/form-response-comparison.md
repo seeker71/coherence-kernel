@@ -426,3 +426,8 @@ planes it crossed. The bounded shape cost 7% of the unbounded one and under
 2% of the guided floor; only the guided route produced a measurement. A
 provider launched from inside Form inherited the coordinating session's
 identity; giving it its own is the named next repair.
+
+`observe/form-cli-grounded-synthesis-run.bml` runs that shape as one door:
+native `enrich` plus a dated receipt index, then one provider turn with its
+own session identity and no tools. On the same enquiry it spent 13,222 tokens
+and cited four receipts by path; the receipt above records the measurement.
