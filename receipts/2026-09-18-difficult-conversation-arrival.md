@@ -33,7 +33,7 @@ them apart, none of them at the door:
 
 ## What was built (name → build → observe, one movement)
 
-- **`cognition/difficult-conversation-counsel.fk`** — the counsel as DATA: twelve moves, each
+- **`cognition/difficult-conversation-counsel.fk`** — the counsel as DATA: eleven moves, each
   naming the cell it lives in; six held in this body (paths the band checks on disk), five
   named from the origin field without a path (the seam kept executable). One new predicate:
   a claim carries *who* (`self` / `other`) and a *lane* (`observed` / `reported` / `inferred`
