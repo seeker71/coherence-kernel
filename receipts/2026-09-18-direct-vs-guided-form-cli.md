@@ -217,3 +217,41 @@ Private, container-bound evidence: `.form-heal/process-1249-374305-0` and
 `.form-heal/process-2800-435921-0`. The surprising teaching is that a
 process launched from inside the body can still carry the caller's name, and
 that the cheapest answer was the one that saw the least and said so.
+
+## Improvement landed, same enquiry
+
+`observe/form-cli-grounded-synthesis-run.bml` is the door named above:
+native grounding first, one provider turn second. Grounding is one in-process
+`enrich` reading plus an index of receipts whose names carry the enquiry's
+terms, ranked by terms matched and then by date, each with its opening 400
+bytes; it took 20 ms. The provider turn runs in the job's owned empty
+directory with its own config home and its own session identity (a
+host-random UUID through `--session-id`), no tools, one turn. The report
+carries the provider's own usage; the answer stays at its evidence path.
+
+| Route | Provider turns | Tool calls inside | Input + output tokens | Uncached input | Output | Provider ms | Receipts cited by path |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Direct | 9 | 20 | 648,411 | 59,917 | 10,972 | 113,112 | 1 |
+| Bounded, earlier today | 1 | 0 | 44,495 | 7,514 | 4,520 | 50,814 | 0 |
+| Grounded door | 1 | 0 | 13,222 | 5,547 | 4,386 | 48,436 | 4 |
+
+The grounded turn spent 30% of the bounded turn's tokens and 2% of direct's.
+Most of the saving is the empty tool surface: cache-read input fell from
+32,461 to 3,289 because no tool definitions travel with the prompt. The
+answer cites four receipts by path, reasons from their openings, and closes
+by saying the material it was handed does not contain the measured
+comparison, which is true of that material. Mirror: two counted words, both
+inside its reasoning about the receipts it read.
+
+The identity seam closed: the provider's transcript is its own file under the
+job's config home, and the coordinating transcript gained no rows. Bound to
+that transcript, the share meter's token-pressure lane reads the same 13,222
+tokens the provider reported, an independent native cross-check. Its share
+stays `declared`: the headless transcript carries no completed-turn evidence
+row the collector recognizes. That lane is the next seam.
+
+Artifacts: `receipts/artifacts/2026-09-18-grounded-form-cli-*` (request,
+packet, report, answer). Preflight of the door: delimiters balanced, errors
+0, unresolved 0, compiled only. One launch failed before any token was spent
+(`env` takes `-u` before assignments); the argv order was repaired and the
+failed job retained at its own evidence path.
