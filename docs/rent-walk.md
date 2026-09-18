@@ -103,3 +103,16 @@ in the call's own census and printed. A small movement is one call. Exact edits 
 ```sh
 printf '%s\n' '{"append":[{"path":"docs/x.md","text":"..."}],"witness":"","paths":["docs/x.md"],"subject":"...","body":"..."}' | ./fkwu observe/land-run.bml
 ```
+
+## The body draws its own progress
+
+`observe/rent-ladder-page-run.bml` reads the contest, rent and flow ledgers and
+fills `docs/rent-ladder.template.html` at its data mark, writing
+`docs/rent-ladder.html`: the rent ladder, calls that left the body, the
+session's flow, calls per movement as differences between flow rows, and the
+straight path. No provider, no oracle, nothing leaves the body. Republish the
+rendered file to the same page and the picture follows the rows.
+
+```sh
+./fkwu observe/rent-ladder-page-run.bml </dev/null
+```
