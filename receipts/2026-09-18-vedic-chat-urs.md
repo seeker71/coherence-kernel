@@ -91,6 +91,17 @@ The question rides stdin so two askers never replace each other's line (the seam
 Coherence-Network body the same cell answers behind `GET /api/vedic/ask?q=...` through the
 fkwu carrier and a `/vedic` page — that door lands with the next gitlink bump of this kernel.
 
+## Chart, not chat (second breath, same day)
+
+Urs: "Chart not chat." The door is the chart. `(vc-json-chart moment year)` now emits the whole
+cast as data — ground, dated ayanamsa, lagna, the nine grahas with rashi, degree, nakshatra,
+pada and house, and the Vimshottari cycle with the running period marked — hand-rolled on
+`str_concat` so the cell stays in the four-kernel-safe subset (json.fk interns nodes). The band's
+seventh claim reads the JSON alongside the words; verdict still 1111111 four-way (go=0 rust=0
+typescript=0, 0 divergent), preflight clean. In the Coherence-Network body the `/vedic` page draws
+this as the South Indian square with the placements and the dasha cycle from `GET /api/vedic/chart`;
+`GET /api/vedic/ask` keeps the words for whoever asks in them.
+
 ## What it taught
 
 The chat is not a new engine. Every table rides `guidance-channel.fk`, every longitude rides
