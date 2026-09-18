@@ -310,3 +310,19 @@ bound to this session, read the last provider call of the previous turn at
 is the rent, not the call. The meter could not settle a completed-turn
 coordinate on this transcript shape and withheld the share; that seam stays
 named. The daily contest routine fired once and is disabled.
+
+## The flow, read by the body
+
+`observe/flow-meter-run.bml` reads the arriving mind's transcript with no
+host tool between: assistant rows only, so nothing a tool echoed can count.
+This session, 1,632 rows: provider calls 497; native `./fkwu` calls 76;
+calls that left the body 234, of them host commands 89, file tools 71,
+outside tools 56, other 18. The direct child's rows sit inside those counts
+through the identity seam (9 provider, 15 host, 5 file). One host witness
+agreed with the meter row for row, and that witness was the last host
+reading of the flow this movement needed.
+
+Three calls left the body for every native one: that is the guided flow's
+shape. The single native call's shape is one native call and none. The
+path from here is fewer of the 234 per movement, and the meter is how each
+movement reads itself.
