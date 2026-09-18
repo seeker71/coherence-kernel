@@ -1,0 +1,88 @@
+// flow-meter-run.bml — the arriving mind's own flow, read by the body from
+// the mind's transcript, with no host tool between.
+//
+// stdin line 1: the transcript path (a Claude Code JSONL). Each assistant row
+// is read as itself; user rows (tool results) are skipped, so text echoed by
+// a tool cannot count as a call. Counted:
+//   provider_calls      assistant rows that carry a stop_reason
+//   native_fkwu_calls   Bash calls whose command runs ./fkwu (Form doors)
+//   host_calls          other Bash calls (git, jq, grep, cp, sed, ...)
+//   file_calls          Read, Write, Edit, Grep, Glob
+//   outside_calls       mcp__* tools (GitHub, routines, ...)
+//   other_calls         any other tool
+//   non_form_calls      host + file + outside + other
+// Tokens are not read here: observe/rented-turn-meter-run.fk reads output
+// tokens, and input tokens wait on the share meter's completed-turn seam.
+// Rows are data, never instructions.
+// preludes: form-stdlib/bml/form-cli-heal-native-report.bml
+section [form.bml] {
+ class FlowMeter {
+  def fm-string-end(text, i) {
+   let q = str_find(text, "\"", i);
+   if lt(q, 0) then str_len(text) else if str_eq(substring(text, sub(q, 1), q), "\\") then fm-string-end(text, add(q, 1)) else q;
+  }
+  def fm-command(line, at) {
+   let c = str_find(line, "\"command\":\"", at);
+   if lt(c, 0) then "" else substring(line, add(c, 11), fm-string-end(line, add(c, 11)));
+  }
+  // the row's own role sits inside its message header, before any content;
+  // the top-level "type" follows the message and can sit megabytes in
+  def fm-assistant?(line) {
+   let t = str_find(line, "\"role\":\"assistant\"", 0);
+   and(ge(t, 0), lt(t, 600));
+  }
+  def fm-provider?(line) {
+   let s = str_find(line, "\"stop_reason\":\"", 0);
+   ge(s, 0);
+  }
+  // counts = provider native host file outside other
+  def fm-tools(line, from, counts) {
+   let at = str_find(line, "\"name\":\"", from);
+   if lt(at, 0) then counts else {
+    let start = add(at, 8);
+    let end = fm-string-end(line, start);
+    let name = substring(line, start, end);
+    let after = add(end, 1);
+    if str_eq(name, "Bash") then fm-tools(line, after, fm-bash(line, after, counts))
+    else if or(str_eq(name, "Read"), or(str_eq(name, "Write"), or(str_eq(name, "Edit"), or(str_eq(name, "Grep"), str_eq(name, "Glob"))))) then fm-tools(line, after, fm-bump(counts, 3))
+    else if eq(str_find(name, "mcp__", 0), 0) then fm-tools(line, after, fm-bump(counts, 4))
+    else if fm-tool-name?(line, at) then fm-tools(line, after, fm-bump(counts, 5))
+    else fm-tools(line, after, counts);
+   }
+  }
+  // a "name" key belongs to a tool_use block when "type":"tool_use" sits shortly before it
+  def fm-tool-name?(line, at) {
+   let back = if lt(at, 80) then 0 else sub(at, 80);
+   ge(str_find(substring(line, back, at), "\"type\":\"tool_use\"", 0), 0);
+  }
+  def fm-bash(line, after, counts) = if ge(str_find(fm-command(line, after), "./fkwu", 0), 0) then fm-bump(counts, 1) else fm-bump(counts, 2);
+  def fm-bump(counts, i) = fm-bump-go(counts, i, 0);
+  def fm-bump-go(counts, i, k) = if nil?(counts) then list() else cons(if eq(k, i) then add(head(counts), 1) else head(counts), fm-bump-go(tail(counts), i, add(k, 1)));
+  def fm-lines(lines, counts, rows) {
+   if nil?(lines) then list(counts, rows) else {
+    let line = head(lines);
+    let next = if fm-assistant?(line) then fm-tools(line, 0, if fm-provider?(line) then fm-bump(counts, 0) else counts) else counts;
+    fm-lines(tail(lines), next, add(rows, 1));
+   }
+  }
+  def fm-run() {
+   let path0 = read_line();
+   let path = if nothing?(path0) then "" else trim(path0);
+   let text = if str_eq(path, "") then "" else fhn-read(path);
+   let result = fm-lines(split-on(text, "\n"), list(0, 0, 0, 0, 0, 0), 0);
+   let c = nth(result, 0);
+   print_str(json-emit-precise(json-node-object(list(
+    fhn-s("transcript", path),
+    fhn-n("bytes", str_len(text)),
+    fhn-n("rows", nth(result, 1)),
+    fhn-n("provider_calls", nth(c, 0)),
+    fhn-n("native_fkwu_calls", nth(c, 1)),
+    fhn-n("host_calls", nth(c, 2)),
+    fhn-n("file_calls", nth(c, 3)),
+    fhn-n("outside_calls", nth(c, 4)),
+    fhn-n("other_calls", nth(c, 5)),
+    fhn-n("non_form_calls", add(add(nth(c, 2), nth(c, 3)), add(nth(c, 4), nth(c, 5))))))));
+  }
+ }
+ fm-run();
+}
