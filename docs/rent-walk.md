@@ -120,6 +120,22 @@ in the call's own census and printed. A small movement is one call. Exact edits 
 printf '%s\n' '{"append":[{"path":"docs/x.md","text":"..."}],"witness":"","paths":["docs/x.md"],"subject":"...","body":"..."}' | ./fkwu observe/land-run.bml
 ```
 
+## A whole movement is one call
+
+`observe/movement-run.bml` walks a whole movement inside one census window:
+the native voice through the loopback oracle, the native single call that
+floors itself, the flow meter on the arriving mind's transcript, the page
+redrawn from the ledgers, and the landing with its restart, gates, commit and
+push. Every door is a child kernel of the body; no provider is asked anywhere.
+The arriving mind makes one call and relays one line. Every field is optional:
+`voice`, `compare` and `land` default to 1, `transcript` and `restart` to
+empty, `paths` adds files beyond the ledgers and the page, `subject` and
+`body` name the commit.
+
+```sh
+printf '%s\n' '{"movement":"nightly","transcript":"/path/to/transcript.jsonl"}' | ./fkwu observe/movement-run.bml
+```
+
 ## The body draws its own progress
 
 `observe/rent-ladder-page-run.bml` reads the contest, rent and flow ledgers and

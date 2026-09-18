@@ -483,3 +483,30 @@ and again no receipt by path. The floor read 3 axes on it: the answer names
 its axes as capitalised headings and the floor's axis count read only the
 lowercase forms, the same seam the limit phrases had. The floor now reads the
 capitalised forms too; the row stays as it was read.
+
+## A whole movement is one call
+
+The rent that remains on this path is the arriving mind's own flow: every
+tool call it makes is a provider turn. After #585 merged (rebase, main at
+`0528ea9`), the next rung is the movement itself.
+`observe/movement-run.bml` walks a whole movement inside one census window,
+each door a child kernel of the body: the native voice through the loopback
+oracle, the native single call that floors itself, the flow meter on this
+transcript, the page redrawn from the ledgers, and the landing with its
+restart, gates, commit and push. No provider is asked anywhere in it.
+
+First witness, without the landing, one call:
+
+| door | result |
+|---|---|
+| native voice, 7B | source local-oracle, 732 predicted, 9 axes, 0 receipts cited, 183.2 s, rent 0 |
+| native single call | floor axes 9, receipts cited 9, existing 9, limits 1, 9,405 bytes |
+| flow meter | provider 947, native 140, non-Form 423 (this session, at that moment) |
+| page | 26,020 bytes redrawn from the ledgers |
+| crossings | 5 dispatches: 4 local-process (the child kernels), 1 stdio |
+
+What the arriving mind did for this movement: one call to the door, and the
+relay of its one line. The landing run that follows is the same door with
+`land` on and `restart` set to `origin/main`, so the branch restarts from the
+merged main inside the same call. The daily routine shrinks to the same shape:
+check out, build, one movement call, republish, reply.
