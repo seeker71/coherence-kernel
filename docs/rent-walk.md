@@ -1,0 +1,34 @@
+# The body walks the rent goal itself
+
+`observe/rent-walk-run.bml` answers the pinned enquiry of
+`docs/rent-to-zero-goal.form` through the grounded synthesis door and appends
+one row to `receipts/rent-ledger.jsonl`. No rented mind stands between the
+doors. With empty stdin the provider is not asked, so an unattended walk
+cannot spend rent by itself.
+
+The order of voices inside one walk: native grounding (an `enrich` reading
+plus a dated receipt index), then the loopback oracle the body already speaks
+to on `127.0.0.1:18082` (llama.cpp `/completion`, ChatML envelope) at rent 0,
+then one provider turn only when the request allows it.
+
+```sh
+./form-run ./fkwu observe/rent-walk-run.bml </dev/null
+printf '%s\n' '{"movement":"nightly","provider":{"allowed":1}}' | ./form-run ./fkwu observe/rent-walk-run.bml
+```
+
+A host schedule is one line; the body's landing cadence carries the row to
+origin:
+
+```
+*/30 * * * * cd /path/to/coherence-kernel && ./form-run ./fkwu observe/rent-walk-run.bml </dev/null
+```
+
+Each row carries when, the movement's name, which voice answered, rent
+tokens, the oracle's local token counts, receipts in the packet, sizes,
+timings and the answer's evidence path. The answer text never enters the
+ledger. The first row, 2026-09-18, walked with no oracle standing and the
+provider not asked: rent 0, source none, 8 receipts in a 6,330-byte packet,
+grounding 312 ms.
+
+The grounded door itself is `observe/form-cli-grounded-synthesis-run.bml`;
+its authority is `form/form-stdlib/bml/form-cli-grounded-synthesis.bml`.
