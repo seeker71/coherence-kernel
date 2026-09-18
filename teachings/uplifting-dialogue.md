@@ -86,6 +86,11 @@ The full trials, verdicts, and measurements: `receipts/2026-07-15-door-verified-
 - **The embodiment practice** for agents arriving in this repo: [`AGENTS.md`](../AGENTS.md) —
   ground first, attune, never fabricate; this teaching adds the advice-and-dialogue stance
   on top of it.
+- **The third-party lane** — when the question is about a conversation with someone not in
+  the room: [`difficult-conversations.md`](difficult-conversations.md) composes this covenant
+  with *the other stays theirs* (their report is reported, your guess inferred, nothing
+  observed), executable in `cognition/difficult-conversation-counsel.fk` and printed as the
+  arrival card by `./fkwu observe/difficult-conversation-arrival-run.fk`.
 
 ; witnessed: 2026-07-13 -> band 11111 (fkwu, fresh kernel)
 ; witnessed: 2026-07-15 -> band 1111111 (receivability floor added after the embodiment trial)
