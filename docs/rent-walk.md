@@ -45,6 +45,17 @@ the single-call flow the parity goal measures against the guided one.
 ./fkwu observe/form-cli-compare-run.bml </dev/null
 ```
 
+## The flow, read by the body
+
+`observe/flow-meter-run.bml` reads the arriving mind's transcript and counts
+its provider calls, its native `./fkwu` calls, and every call that left the
+body by kind: host commands, file tools, outside tools, other. User rows are
+skipped, so nothing a tool echoed can count as a call.
+
+```sh
+echo /path/to/transcript.jsonl | ./fkwu observe/flow-meter-run.bml
+```
+
 ## The contest walks the same way
 
 `observe/parity-contest-run.bml` is the measurement of
