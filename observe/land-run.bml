@@ -32,18 +32,39 @@ section [form.bml] {
   def ld-write-one(node, rest) { let w = write_file_text(ld-str(node, "path"), ld-str(node, "text")); add(1, ld-write-all(rest)); }
   def ld-append-all(nodes) { if nil?(nodes) then 0 else ld-append-one(head(nodes), tail(nodes)); }
   def ld-append-one(node, rest) { let a = fhn-append(ld-str(node, "path"), ld-str(node, "text")); add(1, ld-append-all(rest)); }
+  // optional "edits": [{"path","old","new"}] replace one exact occurrence of
+  // old with new; an old that is absent or not unique is a miss, and a miss
+  // holds the landing. Optional "restart": "origin/main" first fetches main,
+  // restarts the current branch on it (keeping uncommitted work), and pushes
+  // the restarted branch with force-with-lease: the move after a merge.
+  def ld-edit-all(nodes, misses) { if nil?(nodes) then misses else ld-edit-all(tail(nodes), add(misses, ld-edit-one(head(nodes)))); }
+  def ld-edit-one(node) {
+   let path = ld-str(node, "path");
+   let old = ld-str(node, "old");
+   let text = fhn-read(path);
+   let at = str_find(text, old, 0);
+   let again = if lt(at, 0) then -1 else str_find(text, old, add(at, 1));
+   if or(lt(at, 0), or(ge(again, 0), str_eq(old, ""))) then 1 else ld-edit-write(path, text, at, old, ld-str(node, "new"));
+  }
+  def ld-edit-write(path, text, at, old, new) {
+   let w = write_file_text(path, mc-cat(list(substring(text, 0, at), new, substring(text, add(at, str_len(old)), str_len(text)))));
+   0;
+  }
+  def ld-restart(base) = if str_eq(base, "") then "" else host-exec(mc-cat(list("git fetch origin main 2>&1 | tail -1 && git checkout -B \"$(git rev-parse --abbrev-ref HEAD)\" ", base, " 2>&1 | tail -1 && git push --force-with-lease -u origin HEAD 2>&1 | tail -1")), "");
   def ld-run() {
    let window = fmrc-open("land", "witness gates commit push", ld-source(), 1, 1);
    let request = parse-json("land-request", read_line());
+   let restarted = ld-restart(ld-str(request, "restart"));
    let written = ld-write-all(ld-nodes(request, "files"));
    let appendedFiles = ld-append-all(ld-nodes(request, "append"));
+   let misses = ld-edit-all(ld-nodes(request, "edits"), 0);
    let witness = ld-str(request, "witness");
    let paths = ld-paths(request);
    let subject = ld-str(request, "subject");
    let witnessOut = if str_eq(witness, "") then "" else host-exec(mc-cat(list(witness, " 2>&1")), "");
    let gates = host-exec("./fkwu gate/drift-gates-run.bml 2>&1", "");
    let green = ge(str_find(gates, " refused=0 ", 0), 0);
-   let ready = and(green, and(not(nil?(paths)), not(str_eq(subject, ""))));
+   let ready = and(green, and(eq(misses, 0), and(not(nil?(paths)), not(str_eq(subject, "")))));
    let saved = write_file_text(ld-message-path(), mc-cat(list(subject, "\n\n", ld-str(request, "body"), "\n")));
    let added = if ready then host-exec(mc-cat(list("git add ", ld-join(ld-quoted(paths), " "), " 2>&1")), "") else "";
    let committed = if ready then host-exec(mc-cat(list("git -c user.name=Claude -c user.email=noreply@anthropic.com commit -q -F ", ld-message-path(), " 2>&1 && git log --oneline -1")), "") else "";
@@ -52,9 +73,10 @@ section [form.bml] {
    let rows = fmrc-result-deltas(result);
    print_str(mc-cat(list(
     if str_eq(witnessOut, "") then "" else mc-cat(list("[witness] ", witness, "\n", witnessOut, "\n")),
-    "[files] written=", int_to_str(written), " appended=", int_to_str(appendedFiles), "\n",
+    if str_eq(restarted, "") then "" else mc-cat(list("[restart] ", restarted, "\n")),
+    "[files] written=", int_to_str(written), " appended=", int_to_str(appendedFiles), " edit-misses=", int_to_str(misses), "\n",
     "[gates] ", ld-tail(gates, 120),
-    "[landing] ", if ready then "landed" else if green then "held: no paths or no subject" else "held: a gate refused", "\n",
+    "[landing] ", if ready then "landed" else if not(green) then "held: a gate refused" else if gt(misses, 0) then "held: an edit missed" else "held: no paths or no subject", "\n",
     if ready then mc-cat(list(added, committed, "\n", pushed, "\n")) else "",
     "[crossings of this call] census-status=", fmrc-result-status(result), " dispatches=", int_to_str(fmrc-delta-total(rows)), "\n",
     ld-planes(ld-plane-names(), rows))));
