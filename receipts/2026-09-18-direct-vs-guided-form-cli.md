@@ -437,3 +437,49 @@ a 3B voice at rent 0 speaks the body's numbers when told to, and cannot hold
 an axis's meaning apart from the nearest number. The rows are in
 `receipts/rent-ledger.jsonl`; the page's voice rungs now read their measures
 from those rows rather than from the writer's hand.
+
+## A 7B voice on the same port
+
+This host has 16 GB and four cores, so a Qwen2.5-7B instruct model (Q4_K_M,
+4.7 GB) took the 3B's place on the pinned port. Both doors walked through it,
+one after the other, rent 0 each.
+
+| walk | packet | evaluated | predicted | answer | time | floor (axes · receipts cited · limits) |
+|---|---|---|---|---|---|---|
+| native voice, bound, 7B | 10,000 B | 2,775 | 655 | 2,612 B | 176.3 s | 8 · 0 · 1 |
+| grounded packet, 7B | 6,532 B | 1,725 | 860 | 4,267 B | 184.3 s | 9 · 0 · 1 |
+
+The native voice's answer (`receipts/artifacts/2026-09-18-native-voice-answer-7b.md`)
+is the first spoken answer that says what the body composed and nothing else.
+Frequency: guided 78, direct 29, bounded 1, contests 1, this call 0. Rent:
+2,544,568; 648,411; 44,495; 0. Trust: the provider's own usage records, and
+the share meter's lane agreeing on 13,222. Sovereignty, all five lines as
+composed, this call = the body alone. Resonance: pending on the person's
+reading. One misread: the quality line says axes=9 receipts-cited=2 and the
+voice said nine receipts cited. It named the doors with backticks and no
+receipt by its path, so the floor counts 0 cited.
+
+The grounded packet through the same model
+(`receipts/artifacts/2026-09-18-oracle-answer-7b.md`) is articulate on every
+axis and carries not one number, because the packet carries none: seed lines
+and receipt openings, and a fluent prior filling the rest. The two answers
+from one model settle the question the 3B walks raised: the packet carries
+the fidelity, and the model carries the sentences. What the body composes
+is what the voice can say.
+
+A row now names which model answered: the oracle reply's own `model` field
+travels into the report as `oracle_model` and into both walk doors' rows. The
+7B rows above were written before that field existed; the receipt names the
+model for them.
+
+Time is the cost that replaced rent: 176 s and 184 s on four CPU threads,
+against 80 s and 72 s for the 3B, and 53 s for one rented provider turn.
+
+One more walk after the field landed, so a row carries the model's own name:
+`oracle_model` = `./qwen2.5-7b-instruct-q4_k_m.gguf`, 571 predicted, 2,229
+bytes, 163.8 s, rent 0 (`receipts/artifacts/2026-09-18-native-voice-answer-7b-2.md`).
+The answer is the same faithful shape, the same misread on the quality line,
+and again no receipt by path. The floor read 3 axes on it: the answer names
+its axes as capitalised headings and the floor's axis count read only the
+lowercase forms, the same seam the limit phrases had. The floor now reads the
+capitalised forms too; the row stays as it was read.
