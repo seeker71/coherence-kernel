@@ -33,6 +33,18 @@ grounding 312 ms.
 The grounded door itself is `observe/form-cli-grounded-synthesis-run.bml`;
 its authority is `form/form-stdlib/bml/form-cli-grounded-synthesis.bml`.
 
+## The single native call
+
+`observe/form-cli-compare-run.bml` answers the pinned enquiry with nothing
+outside the body: the ledgers' rows, the enrich seeds, the dated receipt
+index, and its own census window. Provider 0, oracle 0, calls that left the
+body 0. The arriving mind runs it once and relays the raw output; that is
+the single-call flow the parity goal measures against the guided one.
+
+```sh
+./fkwu observe/form-cli-compare-run.bml </dev/null
+```
+
 ## The contest walks the same way
 
 `observe/parity-contest-run.bml` is the measurement of
