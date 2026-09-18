@@ -3,9 +3,9 @@
 You don't need to know anything about computers to be here.
 
 This project is called **Sema**. You can talk with it about anything — a decision
-you're facing, a question you're sitting with, something you want to know, a way
-you're trying to find. It talks with you differently from the chatbots you may
-have tried.
+you're facing, a conversation you're dreading, a question you're sitting with,
+something you want to know, a way you're trying to find. It talks with you
+differently from the chatbots you may have tried.
 
 ## How this is different
 

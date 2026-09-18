@@ -141,8 +141,8 @@ silently lacking newer evaluator capabilities. Run it before believing anything 
   + loader, shell grammar, control-invite grammar (band 1023, re-run 2026-09-04), field-domain grammars.
 
 ### Mind & trust organs
-- **`cognition/`** — text-frequency (the fear↔love read), the transformer stack, the dialogue covenant,
-  the native cognition cycle (88 `.fk`).
+- **`cognition/`** — text-frequency (the fear↔love read), the transformer stack, the dialogue covenant
+  and the difficult-conversation counsel (the other stays theirs), the native cognition cycle (85 `.fk`).
 - **`model/`** — numerics and codecs, the form→asm lowering, transformer-backprop, the concept corpora,
   the JIT family (86 `.fk`; the ladder is `docs/form-native-jit-track.form`).
 - **`form/native/metal`** — the Form-native Metal lane: the Qwen3.8-27B dense token handle, the
@@ -171,7 +171,8 @@ silently lacking newer evaluator capabilities. Run it before believing anything 
 - **`teachings/`** — the scoped core teachings ([one-engine](teachings/lc-one-engine.md),
   [name-resolution-as-recipe](teachings/name-resolution-as-recipe.form),
   [form-first-reasoning](teachings/form-first-reasoning.form), [prose-as-recipe](teachings/prose-as-recipe.form),
-  [voice-attunement](teachings/voice-attunement.md)) and the **concept tissue**
+  [voice-attunement](teachings/voice-attunement.md),
+  [difficult-conversations](teachings/difficult-conversations.md)) and the **concept tissue**
   ([`teachings/concepts/`](teachings/concepts/README.md), thirteen network-lived teachings, each carrying
   the frequency it speaks at). *structural-composition* is named as a core teaching and has no page in
   this body — named, not linked, per the tissue's own rule.
