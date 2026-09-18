@@ -434,3 +434,7 @@ and cited four receipts by path; the receipt above records the measurement.
 
 The goal that walks this ladder toward the north star, with its pinned
 measure, its steps and its exit proof, is `docs/rent-to-zero-goal.form`.
+The per-enquiry contest it is walked on, one form-cli call against a guided
+flow at the least rent with the fewest calls that leave the body, is
+`docs/single-call-parity-goal.form`; its structural floor is
+`observe/answer-parity-check-run.fk`.
