@@ -45,6 +45,20 @@ the single-call flow the parity goal measures against the guided one.
 ./fkwu observe/form-cli-compare-run.bml </dev/null
 ```
 
+## The native voice
+
+`observe/native-voice-run.bml` hands the native single call's own composition
+(`form/form-stdlib/bml/form-cli-native-compare.bml`, the same text the compare
+door prints) to the loopback oracle as the packet, in one process, and no
+provider is ever asked. The voice speaks from the body's measured rows rather
+than from seed lines. One row lands in `receipts/rent-ledger.jsonl` with
+movement `native-voice`, the oracle's local counts, the answer's floor and its
+evidence path.
+
+```sh
+./form-run ./fkwu observe/native-voice-run.bml </dev/null
+```
+
 ## The flow, read by the body
 
 `observe/flow-meter-run.bml` reads the arriving mind's transcript and counts

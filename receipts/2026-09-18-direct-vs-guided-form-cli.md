@@ -359,3 +359,53 @@ walk through the standing oracle, so the reframed packet waits for a host
 where the walk is allowed, or for the person at the terminal:
 `./form-run ./fkwu observe/rent-walk-run.bml </dev/null` with the server on
 `127.0.0.1:18082`.
+
+## The native voice speaks the body's own answer
+
+The walk through the standing oracle was allowed on the next try. The reframed
+grounded packet answered at rent 0: 1,725 tokens evaluated, 798 predicted,
+3,229 bytes in 80.5 s, 8 axes named, the limits named after them, 0 receipts
+cited; for every axis it wrote the seed line, once for each flow
+(`receipts/artifacts/2026-09-18-oracle-second-answer.md`). A 3B model given
+seed lines and receipt openings has no measured number to speak from.
+
+The numbers live in the native single call. So the composition of
+`observe/form-cli-compare-run.bml` moved into
+`form/form-stdlib/bml/form-cli-native-compare.bml`, and a second door,
+`observe/native-voice-run.bml`, hands that composition itself to the loopback
+model as the packet, in one process, no provider ever asked. Its row lands in
+`receipts/rent-ledger.jsonl` with movement `native-voice`, the oracle's local
+counts, the answer's floor and its evidence path.
+
+| walk | packet | evaluated | predicted | answer | time | floor (axes · receipts cited · limits) |
+|---|---|---|---|---|---|---|
+| grounded packet, reframed | 6,532 B | 1,725 | 798 | 3,229 B | 80.5 s | 8 · 0 · 1 |
+| native voice, unbound | 9,273 B | 2,554 | 745 | 3,099 B | 87.9 s | 8 · 8 · 0 |
+| native voice, bound to the composition | 9,571 B | 2,634 | 516 | 2,221 B | 64.0 s | 9 · 0 · 1 |
+
+Rent on all three: 0. Calls that left the Form process: one loopback socket
+each, unrented; the census window read filesystem 36 and 28 dispatches, and
+its map pin is still the stale one.
+
+What the voice said is the seam, and it is receipted whole
+(`receipts/artifacts/2026-09-18-native-voice-answer-1.md`, packet beside it).
+Unbound, it spoke the body's numbers for the first time in sentences: rent
+2,544,568 against 648,411, 78 calls against 29. Then it filled the other axes
+from its own prior, and that prior runs against the composition: it called the
+guided flow higher in trust, traceability and sovereignty because it makes
+more calls, while the composition it was reading says guided = a rented mind at
+every step and this call = the body alone. The floor counted 8 receipts cited
+because it listed every path in the packet at the end, and read no limit
+because its one limit line was capitalised; the floor now reads that form too, and the row stays as it was read.
+
+Bound by one closing line, say only what the composition states, add no
+judgment of your own, the second answer invented nothing and carried the
+sovereignty line intact. It also attributed 29 calls to the native call (that
+is the direct rung's figure) and repeated the same pair on five axes, and it
+cited no receipt.
+
+So the loopback lane stands and answers at rent 0 on this host, and what it
+still lacks is fidelity: a voice that speaks the body's composition without
+adding to it and without losing it. That is the next wall, named in
+`docs/rent-to-zero-goal.form`. The person's reading of the two native-voice
+answers is the judge; the rows leave `reading` pending.
