@@ -281,3 +281,32 @@ The band `observe/tests/form-cli-grounded-synthesis-band.fk` answers 127 for
 the lane's escape, reply reader, ranking, argv identity and HTTP split. The
 REPL's `rag-status` verb, met on the way, answered an error on an absent
 index; it now answers `signal=nothing` with the path it looked at.
+
+## The single native call
+
+Urs's correction: look at the flow, not an artificial contest. The contest
+door launches a rented child inside one organ call; that is a rung on the
+rent ladder, not the arriving mind's flow. The flow is what the arriving mind
+runs. Guided: this session's first turn, 22 native calls, 57 host tool
+calls, 21 provider calls. Single: one door, run once, raw output relayed.
+
+`observe/form-cli-compare-run.bml` is that door. It reads the body's own
+rows (`receipts/rent-ledger.jsonl`, `receipts/parity-contest-ledger.jsonl`),
+the enrich seeds, the dated receipt index and its own census window, and
+prints the comparison axis by axis with what is pending named. Its raw
+output is `receipts/artifacts/2026-09-18-native-compare-answer.txt`.
+
+| Answer | Rent | Calls that left the body | Axes | Receipts cited, existing | Limits named | Bytes |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| Guided flow, this receipt | 2,544,568 | 78 | 9 | 0, 0 | yes | 16,209 |
+| Provider contests, best floor | 10,875 | 1 | 9 | 0 to 4 | yes | 3,084 to 6,217 |
+| Single native call | 0 | 0 | 9 | 9, 9 | yes | 7,199 |
+
+The call's own census: 21 filesystem dispatches, no other plane. What it
+lacks is prose reasoning across the axes; that is the person's to read and
+the native voice's to add on a host with a model. The body's share meter,
+bound to this session, read the last provider call of the previous turn at
+537,460 input tokens, nearly all cached context: the guided flow's history
+is the rent, not the call. The meter could not settle a completed-turn
+coordinate on this transcript shape and withheld the share; that seam stays
+named. The daily contest routine fired once and is disabled.
