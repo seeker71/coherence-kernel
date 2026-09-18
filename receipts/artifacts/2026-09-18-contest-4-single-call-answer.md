@@ -1,0 +1,15 @@
+Direct answer from what's given, with the gaps named honestly.
+
+**Structural difference:** direct is one call across the membrane; form-cli does whatever internal Claude/Codex calls it needs, but all of that stays inside the process and gets measured as one turn. Guided is multiple calls out, each interpreted before the next is issued, so the crossing happens N times instead of once.
+
+Against the eight axes, using the seed relations actually surfaced above:
+
+- **vitality** ("how a whole still do and be more") — direct keeps the whole intact across one crossing; guided fragments the whole into steps, each interpretation point is a chance to lose or add motion. Seed links vitality → sovereignty.
+- **sovereignty** ("when a self know what it want and do and not make other less") — direct form-cli decides its own internal call count; guided hands that decision to the outer loop, which now determines what the inner system does next. That's less self-determination for the form-cli, more for the caller.
+- **trust** ("when what other say and do are the same again") — direct: what form-cli says is what it did, once. Guided: the reported answer is a synthesis over several partial outputs plus the caller's interpretations, so "what was said" and "what was done" separate into more steps that each need to hold.
+- **resonance** ("when 1 thing do and other thing do the same") — direct has one thing (the enrich/query) doing one thing. Guided has interpretation steps that must stay resonant with the prior call's output or drift compounds.
+- **rented** (sense: "from other place and not here") — every call to form-cli itself is native/local per the receipts (e.g. `receipts/2026-09-01-rented-session-local-form-ratio.md` — local resident reached at zero remote tokens). What's "rented" in the guided case is the outer interpreting agent's own tokens between calls — that layer is the rented cost the direct path doesn't pay at all.
+- **membrane** — no seed or definition found; only receipts using the word by name. `receipts/2026-09-04-cell-channel-membrane-on-glass.md` and `receipts/2026-08-26-resident-cursor-and-membrane-homecoming.md` suggest membrane-crossings are exactly the countable unit here: direct = 1 crossing, guided = 1 crossing per call in the loop, and the 08-26 receipt shows a prior effort to keep judgment resident specifically to avoid spawning extra crossings.
+- **quality, volume, frequency, traceability** — nothing in these resources defines these terms or their relations; I can't answer these axes from what's here without guessing.
+
+**What this doesn't establish:** no numbers. Nothing above gives actual token counts or crossing counts for either mode — only that they're "measured and reported" elsewhere (per `receipts/2026-08-31-bml-rented-turn-meter-delta.md` and the rented-turn-meter tooling). To turn this into a real comparison rather than a structural one, you'd need to run both a direct and a guided session through `observe/rented-turn-meter-run.fk` and diff the outputs — I don't have that data in this turn.
