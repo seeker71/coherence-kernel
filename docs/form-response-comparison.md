@@ -412,3 +412,17 @@ tasks and actual session outcomes. Keep those conclusions open until observed.
 
 The first measured pair and its local revision are recorded in
 `receipts/2026-09-16-response-cost-and-review.md`.
+
+## Three routes on one enquiry
+
+`receipts/2026-09-18-direct-vs-guided-form-cli.md` runs the same enquiry
+three ways: one process-organ call with an unbounded provider loop inside,
+one process-organ call bounded to a single provider turn carrying a native
+`enrich` reading, and a guided session where the arriving mind chooses each
+native door. It reads rented tokens, crossings and what each answer could
+see, and it lands `observe/form-cli-native-call-census-run.fk`, which wraps
+one in-process `enrich` call in a runtime membrane window and reports the
+planes it crossed. The bounded shape cost 7% of the unbounded one and under
+2% of the guided floor; only the guided route produced a measurement. A
+provider launched from inside Form inherited the coordinating session's
+identity; giving it its own is the named next repair.
