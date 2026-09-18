@@ -71,3 +71,11 @@ empty stdin asks no provider.
 
 The person records `reading` in the row after reading both answers; the
 door leaves it `pending`.
+
+With a movement name on a second stdin line, the meter also appends its
+reading as one row to `receipts/flow-ledger.jsonl`, so a movement reads its
+own flow and leaves the row in the same call:
+
+```sh
+printf '%s\n%s\n' /path/to/transcript.jsonl "movement name" | ./fkwu observe/flow-meter-run.bml
+```
