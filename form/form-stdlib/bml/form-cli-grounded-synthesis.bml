@@ -11,9 +11,13 @@
 //   2. one provider turn through the native process organ, no tools, in the
 //      job's owned empty directory with its own config home and session
 //      identity — only when the caller allows it and the oracle did not answer.
-// The report carries the provider's own usage, the oracle's token counts, and
-// the answer's path. Answer quality stays with the reader. Every quantity that
-// was not observed stays 0 with its source named "none"; nothing is inferred.
+//      A thin first answer (under fgs-min-answer-bytes, the shape of a turn
+//      that reached for a tool it did not have) earns exactly one repair turn
+//      carrying that finding; both answers are kept and both costs are summed.
+// The report carries the provider's own usage over all attempts, the oracle's
+// token counts, and the answer's path. Answer quality stays with the reader.
+// Every quantity that was not observed stays 0 with its source named "none";
+// nothing is inferred.
 //
 // preludes: form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/form-cli-enrich.bml
 //////////////////////////////////////////////////////////////////////
@@ -42,7 +46,9 @@ section [form.bml] {
    substring(text, 0, fgs-min(str_len(text), fgs-opening-bytes()));
   }
   def fgs-index(rows) = if nil?(rows) then "" else mc-cat(list("--- ", nth(head(rows), 1), " (terms matched: ", int_to_str(nth(head(rows), 2)), ")\n", fgs-opening(nth(head(rows), 1)), "\n", fgs-index(tail(rows))));
-  def fgs-packet(enquiry, enrichment, index) = mc-cat(list(enquiry, "\n\n[Native Form grounding: one in-process enrich reading of the enquiry's exact terms. Use the observed definitions and relations.]\n", enrichment, "\n[Receipts in this body whose names carry the terms, with their opening bytes. Cite by path only what these openings support; name what would need the full receipt.]\n", index, "\nAnswer directly from the material above, and say plainly what it does not establish.\n"));
+  def fgs-packet(enquiry, enrichment, index) = mc-cat(list(enquiry, "\n\n[Native Form grounding: one in-process enrich reading of the enquiry's exact terms. Use the observed definitions and relations.]\n", enrichment, "\n[Receipts in this body whose names carry the terms, with their opening bytes. Cite by path only what these openings support; name what would need the full receipt.]\n", index, "\nThis turn has no tools and no file access; everything usable is in this message. Answer directly from the material above, and say plainly what it does not establish.\n"));
+  def fgs-min-answer-bytes() = 1200;
+  def fgs-repair-packet(packet, thin) = mc-cat(list(packet, "\n[The previous attempt returned ", int_to_str(str_len(thin)), " bytes and stopped, reaching for a tool this turn does not have. There are no tools and no file access; everything usable is in this message. Answer the enquiry fully from it now.]\n"));
   def fgs-names(rows) = if nil?(rows) then list() else cons(json-node-string(nth(head(rows), 1)), fgs-names(tail(rows)));
   def fgs-usage(doc, key) = if json-object-has?(doc, key) then json-int-value(json-object-get(doc, key)) else 0;
   def fgs-text(doc, key) = if json-object-has?(doc, key) then json-string-value(json-object-get(doc, key)) else "";
@@ -78,14 +84,17 @@ section [form.bml] {
   }
 
   // provider result = status doc; doc is the provider's own result JSON or an empty object
-  def fgs-ask-provider(job, seconds, packetPath) {
+  def fgs-ask-provider(job, stage, seconds, packetPath) {
    let emptyDir = fs_mkdir(fhn-at(job, "empty"));
    let home = fhn-at(job, "claude-home");
    let homeDir = fs_mkdir(home);
-   let status = fhn-run(job, "synthesis", seconds, "empty", packetPath, fgs-argv(home, fgs-uuid()));
-   let raw = fhn-read(fhn-stage-path(job, "synthesis", ".out"));
+   let status = fhn-run(job, stage, seconds, "empty", packetPath, fgs-argv(home, fgs-uuid()));
+   let raw = fhn-read(fhn-stage-path(job, stage, ".out"));
    list(status, if and(str_eq(status, "0"), gt(str_len(raw), 0)) then parse-json("provider-result", raw) else json-node-object(list()));
   }
+  def fgs-not-asked() = list("not-asked", json-node-object(list()));
+  def fgs-doc-usage(doc) = if json-object-has?(doc, "usage") then json-object-get(doc, "usage") else json-node-object(list());
+  def fgs-usage2(doc1, doc2, key) = add(fgs-usage(fgs-doc-usage(doc1), key), fgs-usage(fgs-doc-usage(doc2), key));
 
   // The one public door. request: enquiry, terms, seconds, receipts, oracle (1/0), provider {allowed}.
   def fgs-answer(request) {
@@ -113,22 +122,32 @@ section [form.bml] {
    let oracle = if askOracle then fgs-ask-oracle(packet) else list("not-asked", "", 0, 0);
    let oracleDone = now_unix_ms();
    let oracleAnswered = str_eq(nth(oracle, 0), "answered");
-   let provider = if and(allowProvider, not(oracleAnswered)) then fgs-ask-provider(job, seconds, packetPath) else list("not-asked", json-node-object(list()));
+   let askProvider = and(allowProvider, not(oracleAnswered));
+   let first = if askProvider then fgs-ask-provider(job, "synthesis", seconds, packetPath) else fgs-not-asked();
+   let firstAnswer = fgs-text(nth(first, 1), "result");
+   let thin = and(askProvider, lt(str_len(trim(firstAnswer)), fgs-min-answer-bytes()));
+   let keptFirst = if thin then write_file_text(fhn-at(job, "answer-1.md"), firstAnswer) else 0;
+   let repairPath = fhn-at(job, "packet-repair.txt");
+   let wroteRepair = if thin then write_file_text(repairPath, fgs-repair-packet(packet, firstAnswer)) else 0;
+   let second = if thin then fgs-ask-provider(job, "synthesis-repair", seconds, repairPath) else fgs-not-asked();
    let ended = now_unix_ms();
-   let doc = nth(provider, 1);
-   let usage = if json-object-has?(doc, "usage") then json-object-get(doc, "usage") else json-node-object(list());
-   let providerAnswer = fgs-text(doc, "result");
+   let doc1 = nth(first, 1);
+   let doc2 = nth(second, 1);
+   let secondAnswer = fgs-text(doc2, "result");
+   let providerAnswer = if and(thin, gt(str_len(trim(secondAnswer)), 0)) then secondAnswer else firstAnswer;
+   let doc = if and(thin, gt(str_len(trim(secondAnswer)), 0)) then doc2 else doc1;
    let source = if oracleAnswered then "local-oracle" else if str_eq(trim(providerAnswer), "") then "none" else "provider";
    let answer = if oracleAnswered then nth(oracle, 1) else providerAnswer;
    let answerPath = fhn-at(job, "answer.md");
    let kept = write_file_text(answerPath, answer);
-   let input = fgs-usage(usage, "input_tokens");
-   let cacheWrite = fgs-usage(usage, "cache_creation_input_tokens");
-   let cacheRead = fgs-usage(usage, "cache_read_input_tokens");
-   let output = fgs-usage(usage, "output_tokens");
+   let input = fgs-usage2(doc1, doc2, "input_tokens");
+   let cacheWrite = fgs-usage2(doc1, doc2, "cache_creation_input_tokens");
+   let cacheRead = fgs-usage2(doc1, doc2, "cache_read_input_tokens");
+   let output = fgs-usage2(doc1, doc2, "output_tokens");
    json-node-object(list(
     fhn-s("source", source),
-    fhn-s("status", nth(provider, 0)),
+    fhn-s("status", if thin then nth(second, 0) else nth(first, 0)),
+    fhn-n("provider_attempts", if thin then 2 else if askProvider then 1 else 0),
     fhn-s("evidence", job),
     fhn-s("packet", packetPath),
     fhn-s("answer", answerPath),
@@ -143,7 +162,7 @@ section [form.bml] {
     fhn-n("answer_bytes", str_len(answer)),
     fhn-n("grounding_ms", sub(grounded, started)),
     fhn-n("provider_ms", sub(ended, oracleDone)),
-    fhn-n("provider_turns", fgs-usage(doc, "num_turns")),
+    fhn-n("provider_turns", add(fgs-usage(doc1, "num_turns"), fgs-usage(doc2, "num_turns"))),
     fhn-n("input_tokens", input),
     fhn-n("cache_write_input_tokens", cacheWrite),
     fhn-n("cache_read_input_tokens", cacheRead),
