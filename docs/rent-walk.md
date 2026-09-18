@@ -79,3 +79,14 @@ own flow and leaves the row in the same call:
 ```sh
 printf '%s\n%s\n' /path/to/transcript.jsonl "movement name" | ./fkwu observe/flow-meter-run.bml
 ```
+
+## One door, any enquiry
+
+`observe/form-cli-ask-native-run.bml` is the native single call for any
+enquiry: one line on stdin, the enquiry's own longer words as terms, the
+enrich seeds, receipts by name, the body's latest measured rows, and its own
+census. Provider 0, oracle 0, calls that leave the body 0.
+
+```sh
+echo "your enquiry, one line" | ./fkwu observe/form-cli-ask-native-run.bml
+```
