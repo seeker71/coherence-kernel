@@ -1,0 +1,103 @@
+// form-cli-grounded-synthesis-run.bml — the body grounds first, then spends
+// exactly one provider turn.
+// stdin: {"enquiry":"...","terms":"a b c","seconds":600,"receipts":8}
+// Grounding is native: one in-process enrich reading of the exact terms and
+// an index of receipts whose names carry those terms, ranked by terms matched
+// and then by date, newest first,
+// each with its opening bytes. The packet goes to one provider turn with no
+// tools, in the job's owned empty directory, with its own config home and its
+// own session identity, so its transcript is a completed turn the share meter
+// can bind on its own. The report carries the provider's own usage and the
+// answer's path; answer quality stays with the reader.
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/form-cli-enrich.bml
+section [form.bml] {
+ class FormCliGroundedSynthesis {
+  def fgs-opening-bytes() = 400;
+  def fgs-uuid-source() = "/proc/sys/kernel/random/uuid";
+  def fgs-min(a, b) = if lt(a, b) then a else b;
+  def fgs-clean(parts) = if nil?(parts) then list() else if str_eq(trim(head(parts)), "") then fgs-clean(tail(parts)) else cons(trim(head(parts)), fgs-clean(tail(parts)));
+  def fgs-hits(name, terms) = if nil?(terms) then 0 else add(if lt(str_find(name, head(terms), 0), 0) then 0 else 1, fgs-hits(name, tail(terms)));
+  def fgs-md?(name) = and(gt(str_len(name), 3), str_eq(substring(name, sub(str_len(name), 3), str_len(name)), ".md"));
+  def fgs-path(name) = if lt(str_find(name, "/", 0), 0) then mc-cat(list("receipts/", name)) else name;
+  def fgs-date(path) = if lt(str_len(path), 19) then 0 else add(mul(str_to_int(substring(path, 9, 13)), 10000), add(mul(str_to_int(substring(path, 14, 16)), 100), str_to_int(substring(path, 17, 19))));
+  def fgs-row(name, terms) = list(add(mul(fgs-hits(name, terms), 100000000), fgs-date(fgs-path(name))), fgs-path(name), fgs-hits(name, terms));
+  def fgs-rank(names, terms) = if nil?(names) then list() else if and(fgs-md?(head(names)), gt(fgs-hits(head(names), terms), 0)) then cons(fgs-row(head(names), terms), fgs-rank(tail(names), terms)) else fgs-rank(tail(names), terms);
+  def fgs-best(rows, best) = if nil?(rows) then best else fgs-best(tail(rows), if or(nil?(best), gt(nth(head(rows), 0), nth(best, 0))) then head(rows) else best);
+  def fgs-without(rows, row) = if nil?(rows) then list() else if str_eq(nth(head(rows), 1), nth(row, 1)) then tail(rows) else cons(head(rows), fgs-without(tail(rows), row));
+  def fgs-top(rows, limit) = if or(nil?(rows), eq(limit, 0)) then list() else fgs-take(rows, limit, fgs-best(rows, list()));
+  def fgs-take(rows, limit, best) = cons(best, fgs-top(fgs-without(rows, best), sub(limit, 1)));
+  def fgs-opening(path) {
+   let text = read_file(path);
+   substring(text, 0, fgs-min(str_len(text), fgs-opening-bytes()));
+  }
+  def fgs-index(rows) = if nil?(rows) then "" else mc-cat(list("--- ", nth(head(rows), 1), " (terms matched: ", int_to_str(nth(head(rows), 2)), ")\n", fgs-opening(nth(head(rows), 1)), "\n", fgs-index(tail(rows))));
+  def fgs-packet(enquiry, enrichment, index) = mc-cat(list(enquiry, "\n\n[Native Form grounding: one in-process enrich reading of the enquiry's exact terms. Use the observed definitions and relations.]\n", enrichment, "\n[Receipts in this body whose names carry the terms, with their opening bytes. Cite by path only what these openings support; name what would need the full receipt.]\n", index, "\nAnswer directly from the material above, and say plainly what it does not establish.\n"));
+  def fgs-names(rows) = if nil?(rows) then list() else cons(json-node-string(nth(head(rows), 1)), fgs-names(tail(rows)));
+  def fgs-usage(doc, key) = if json-object-has?(doc, key) then json-int-value(json-object-get(doc, key)) else 0;
+  def fgs-text(doc, key) = if json-object-has?(doc, key) then json-string-value(json-object-get(doc, key)) else "";
+  def fgs-uuid() {
+   let text = if fs_exists(fgs-uuid-source()) then trim(read_file(fgs-uuid-source())) else "";
+   if eq(str_len(text), 36) then text else "";
+  }
+  def fgs-argv(home, uuid) = append(list("env", "-u", "CLAUDECODE", "-u", "CLAUDE_CODE_CHILD_SESSION", "-u", "CLAUDE_CODE_SESSION_ID", mc-cat(list("CLAUDE_CONFIG_DIR=", home)), "claude", "-p"), append(if str_eq(uuid, "") then list() else list("--session-id", uuid), list("--output-format", "json", "--max-turns", "1", "--tools", "")));
+  def fgs-run() {
+   let request = parse-json("grounded-synthesis-request", read_line());
+   let enquiry = fgs-text(request, "enquiry");
+   let terms = fgs-text(request, "terms");
+   let seconds = if json-object-has?(request, "seconds") then fhn-number(request, "seconds") else 600;
+   let limit = if json-object-has?(request, "receipts") then fhn-number(request, "receipts") else 8;
+   if or(str_eq(trim(enquiry), ""), str_eq(trim(terms), "")) then form_error("grounded synthesis needs enquiry and terms") else fgs-start(enquiry, terms, seconds, limit);
+  }
+  def fgs-start(enquiry, terms, seconds, limit) {
+   let started = now_unix_ms();
+   let root = fhn-root();
+   let spool = fhn-at(root, ".form-heal");
+   let made = fs_mkdir(spool);
+   let job = fhn-unique(spool, "grounded-", 0);
+   let saved = fhn-write-json(fhn-at(job, "snapshot.json"), json-node-object(list(fhn-s("root", root))));
+   let enrichment = fce-command(terms);
+   let rows = fgs-top(fgs-rank(fs_list(fhn-at(root, "receipts")), fgs-clean(split-on(terms, " "))), limit);
+   let packet = fgs-packet(enquiry, enrichment, fgs-index(rows));
+   let packetPath = fhn-at(job, "packet.txt");
+   let wrote = write_file_text(packetPath, packet);
+   let emptyDir = fs_mkdir(fhn-at(job, "empty"));
+   let home = fhn-at(job, "claude-home");
+   let homeDir = fs_mkdir(home);
+   let uuid = fgs-uuid();
+   let grounded = now_unix_ms();
+   let status = fhn-run(job, "synthesis", seconds, "empty", packetPath, fgs-argv(home, uuid));
+   let ended = now_unix_ms();
+   let raw = fhn-read(fhn-stage-path(job, "synthesis", ".out"));
+   let doc = if and(str_eq(status, "0"), gt(str_len(raw), 0)) then parse-json("provider-result", raw) else json-node-object(list());
+   let usage = if json-object-has?(doc, "usage") then json-object-get(doc, "usage") else json-node-object(list());
+   let answer = fgs-text(doc, "result");
+   let answerPath = fhn-at(job, "answer.md");
+   let kept = write_file_text(answerPath, answer);
+   let input = fgs-usage(usage, "input_tokens");
+   let cacheWrite = fgs-usage(usage, "cache_creation_input_tokens");
+   let cacheRead = fgs-usage(usage, "cache_read_input_tokens");
+   let output = fgs-usage(usage, "output_tokens");
+   print_str(json-emit-precise(json-node-object(list(
+    fhn-s("status", status),
+    fhn-s("evidence", job),
+    fhn-s("packet", packetPath),
+    fhn-s("answer", answerPath),
+    fhn-s("session_identity", if str_eq(uuid, "") then "inherited" else "own"),
+    fhn-s("provider_session", fgs-text(doc, "session_id")),
+    fhn-a("receipts", fgs-names(rows)),
+    fhn-n("enrichment_bytes", str_len(enrichment)),
+    fhn-n("packet_bytes", str_len(packet)),
+    fhn-n("answer_bytes", str_len(answer)),
+    fhn-n("grounding_ms", sub(grounded, started)),
+    fhn-n("provider_ms", sub(ended, grounded)),
+    fhn-n("provider_turns", fgs-usage(doc, "num_turns")),
+    fhn-n("input_tokens", input),
+    fhn-n("cache_write_input_tokens", cacheWrite),
+    fhn-n("cache_read_input_tokens", cacheRead),
+    fhn-n("output_tokens", output),
+    fhn-n("input_plus_output_tokens", add(add(input, cacheWrite), add(cacheRead, output)))))));
+  }
+ }
+ fgs-run();
+}
