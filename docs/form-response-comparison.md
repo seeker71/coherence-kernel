@@ -431,3 +431,6 @@ identity; giving it its own is the named next repair.
 native `enrich` plus a dated receipt index, then one provider turn with its
 own session identity and no tools. On the same enquiry it spent 13,222 tokens
 and cited four receipts by path; the receipt above records the measurement.
+
+The goal that walks this ladder toward the north star, with its pinned
+measure, its steps and its exit proof, is `docs/rent-to-zero-goal.form`.
