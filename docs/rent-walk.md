@@ -53,7 +53,9 @@ door prints) to the loopback oracle as the packet, in one process, and no
 provider is ever asked. The voice speaks from the body's measured rows rather
 than from seed lines. One row lands in `receipts/rent-ledger.jsonl` with
 movement `native-voice`, the oracle's local counts, the answer's floor and its
-evidence path.
+evidence path. The row names the model that answered (`oracle_model`, the
+server's own name for it), so a port that carries different models over time
+stays traceable row by row.
 
 ```sh
 ./form-run ./fkwu observe/native-voice-run.bml </dev/null
