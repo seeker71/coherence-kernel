@@ -409,3 +409,31 @@ still lacks is fidelity: a voice that speaks the body's composition without
 adding to it and without losing it. That is the next wall, named in
 `docs/rent-to-zero-goal.form`. The person's reading of the two native-voice
 answers is the judge; the rows leave `reading` pending.
+
+## Walked again with the oracle up
+
+The server was still standing, so both doors walked through it once more,
+one after the other, rent 0 each.
+
+| walk | packet | evaluated | predicted | answer | time | floor (axes · receipts cited · limits) |
+|---|---|---|---|---|---|---|
+| native voice, bound, third walk | 9,701 B | 2,678 | 696 | 3,022 B | 82.3 s | 8 · 0 · 1 |
+| grounded packet, fourth walk | 6,532 B | 1,725 | 838 | 4,118 B | 72.5 s | 9 · 0 · 1 |
+
+The bound voice (`receipts/artifacts/2026-09-18-native-voice-answer-3.md`)
+spoke the rent and the calls correctly on quality and frequency: 2,544,568
+against 648,411, 78 against 29, this call 0. Then it carried the calls figure
+into trust, traceability and sovereignty as a "level" of each, which the
+composition never says; on volume it gave the guided answer's byte count
+from the quality line to two rungs and 0 bytes to two others, a figure the
+composition does not carry. It cited no receipt. The grounded packet's fourth
+answer (`receipts/artifacts/2026-09-18-oracle-fourth-answer.md`) reached the
+openings of `receipts/2026-09-04-sovereignty-as-gift.md` and
+`receipts/2026-09-03-zg-enters-form-cli-without-membrane.md` and said, for
+eight axes, that the material gives no direct comparison. Honest, and empty.
+
+Read together with the first two native-voice walks, the picture is steady:
+a 3B voice at rent 0 speaks the body's numbers when told to, and cannot hold
+an axis's meaning apart from the nearest number. The rows are in
+`receipts/rent-ledger.jsonl`; the page's voice rungs now read their measures
+from those rows rather than from the writer's hand.
