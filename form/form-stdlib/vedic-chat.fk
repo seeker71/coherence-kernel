@@ -27,6 +27,9 @@
 ;                                                  nakshatra, dated from birth
 ;   THE CHAT              (vedic-respond q)        words in, the reading out - Urs's chart
 ;                         (vedic-respond-for q moment year)   any birth-moment
+;   THE CHART AS DATA     (vc-json-chart moment year)  the same cast as JSON - ground,
+;                         ayanamsa, lagna, nine grahas with houses, the dasha cycle -
+;                         for a door that draws the chart; (urs-chart-json year)
 ;
 ; HONEST FLOOR. Longitudes carry the stack's own accuracy: Sun ~0.01 deg, Moon ~0.2-0.3
 ; deg, Kepler planets a few tenths, mean node exact to its own model. Rashis (30 deg) and
@@ -387,6 +390,71 @@
     (defn vedic-respond-in (q year) (vedic-respond-for q (urs-birth-moment) year))
     ;; and with no year in hand, the cycle is still shown; "running" needs a year in the question
     (defn vedic-respond (q) (vedic-respond-for q (urs-birth-moment) (if (ge (vc-year-in q) 0) (vc-year-in q) 2026)))
+
+    ;; ================================================================
+    ;; THE CHART AS DATA - the same cast, emitted as JSON for a door that draws
+    ;; ================================================================
+    ;; Hand-rolled on str_concat so the cell stays in the four-kernel-safe subset
+    ;; (json.fk interns nodes, a substrate op). Every name here is ASCII; numbers
+    ;; carry two decimals.
+    (defn vc-fmt2s (x) (if (lt x 0.0) (str_concat "-" (vc-fmt2 (mul -1.0 x))) (vc-fmt2 x)))
+    (defn vc-jstr (s) (str_concat "\"" (str_concat s "\"")))
+    (defn vc-jkv (k v) (str_concat (vc-jstr k) (str_concat ":" v)))
+    (defn vc-join (items sep)
+        (if (eq (len items) 0) ""
+            (if (eq (len items) 1) (head items)
+                (str_concat (head items) (str_concat sep (vc-join (tail items) sep))))))
+    (defn vc-jobj (pairs) (str_concat "{" (str_concat (vc-join pairs ",") "}")))
+    (defn vc-jarr (items) (str_concat "[" (str_concat (vc-join items ",") "]")))
+
+    ;; a position (lagna or graha) at a sidereal longitude
+    (defn vc-json-position (slon)
+        (list (vc-jkv "longitude" (vc-fmt2 slon))
+              (vc-jkv "rashi" (int_to_str (vc-rashi slon)))
+              (vc-jkv "rashi_name" (vc-jstr (rashi-name (vc-rashi slon))))
+              (vc-jkv "western" (vc-jstr (rashi-western (vc-rashi slon))))
+              (vc-jkv "degree" (vc-fmt2 (vc-deg-in-rashi slon)))
+              (vc-jkv "nakshatra" (int_to_str (vc-nakshatra slon)))
+              (vc-jkv "nakshatra_name" (vc-jstr (nakshatra-name (vc-nakshatra slon))))
+              (vc-jkv "pada" (int_to_str (vc-pada slon)))))
+    (defn vc-json-graha (p lagna-rashi)
+        (vc-jobj (append (list (vc-jkv "key" (int_to_str (pl-key p)))
+                               (vc-jkv "name" (vc-jstr (graha-name (pl-key p))))
+                               (vc-jkv "english" (vc-jstr (graha-english (pl-key p)))))
+                         (append (vc-json-position (pl-slon p))
+                                 (list (vc-jkv "house" (int_to_str (vc-house (pl-rashi p) lagna-rashi))))))))
+    (defn vc-json-grahas (ps lagna-rashi)
+        (if (eq (len ps) 0) (empty)
+            (cons (vc-json-graha (head ps) lagna-rashi) (vc-json-grahas (tail ps) lagna-rashi))))
+    (defn vc-json-dasha (r year)
+        (vc-jobj (list (vc-jkv "lord" (int_to_str (ds-lord r)))
+                       (vc-jkv "name" (vc-jstr (graha-name (ds-lord r))))
+                       (vc-jkv "english" (vc-jstr (graha-english (ds-lord r))))
+                       (vc-jkv "start" (vc-fmt2 (ds-start r)))
+                       (vc-jkv "end" (vc-fmt2 (ds-end r)))
+                       (vc-jkv "running" (if (lt year (ds-end r)) (if (ge year (ds-start r)) "true" "false") "false")))))
+    (defn vc-json-dashas (rows year)
+        (if (eq (len rows) 0) (empty)
+            (cons (vc-json-dasha (head rows) year) (vc-json-dashas (tail rows) year))))
+    (defn vc-json-ground (mo)
+        (vc-jobj (list (vc-jkv "y" (int_to_str (vc-y mo)))
+                       (vc-jkv "m" (int_to_str (vc-m mo)))
+                       (vc-jkv "d" (int_to_str (vc-d mo)))
+                       (vc-jkv "uth" (int_to_str (vc-uth mo)))
+                       (vc-jkv "utm" (int_to_str (vc-utm mo)))
+                       (vc-jkv "lat" (vc-fmt2s (mul 1.0 (vc-lat mo))))
+                       (vc-jkv "lon" (vc-fmt2s (mul 1.0 (vc-lon mo)))))))
+    ;; the whole chart: ground, ayanamsa, lagna, nine grahas with houses, the dasha cycle
+    (defn vc-json-chart (mo year)
+        (do (let lr (vc-lagna-rashi mo))
+            (vc-jobj (list
+                (vc-jkv "ground" (vc-json-ground mo))
+                (vc-jkv "ayanamsa" (vc-fmt2 (vc-lahiri (vc-nf mo))))
+                (vc-jkv "lagna" (vc-jobj (vc-json-position (vc-lagna mo))))
+                (vc-jkv "grahas" (vc-jarr (vc-json-grahas (vc-chart mo) lr)))
+                (vc-jkv "year" (vc-fmt2 (mul 1.0 year)))
+                (vc-jkv "dashas" (vc-jarr (vc-json-dashas (vc-dashas mo) (mul 1.0 year))))))))
+    (defn urs-chart-json (year) (vc-json-chart (urs-birth-moment) year))
 
     (defn vedic-chat-teaching () "lc-cross-modal-unity")
 
