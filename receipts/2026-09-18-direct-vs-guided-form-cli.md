@@ -342,3 +342,20 @@ with no rented mind in the loop: a host schedule, or a person at the terminal.
 The ladder now reads: guided 2,544,568; direct 648,411; bounded 44,495;
 native call relayed by a fresh rented mind 26,751; one provider turn inside
 the call 9,428 to 15,558; the call itself 0.
+
+## The oracle stood, and answered at rent 0
+
+With full permission given, llama.cpp built on this host and a Qwen2.5-3B
+instruct model (Q4_K_M, 2.1 GB) stood on the body's pinned loopback port. One
+walk with no provider: source local-oracle, rent 0, 1,657 tokens evaluated,
+44 predicted, 17.7 s, nothing rented and one unrented call that left the body.
+The answer was hollow: the model took the packet's closing line, say what the
+material does not establish, as the whole task and listed the nine words
+(`receipts/artifacts/2026-09-18-oracle-first-answer.md`). The floor would have
+counted it as parity; the goal's honest floor names it as what it is. The packet
+now asks for the answer point by point first and the limits after, and the
+oracle carries a system line saying the same. The harness declined the next
+walk through the standing oracle, so the reframed packet waits for a host
+where the walk is allowed, or for the person at the terminal:
+`./form-run ./fkwu observe/rent-walk-run.bml </dev/null` with the server on
+`127.0.0.1:18082`.
