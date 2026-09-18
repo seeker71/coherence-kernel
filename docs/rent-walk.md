@@ -66,7 +66,10 @@ stays traceable row by row.
 `observe/flow-meter-run.bml` reads the arriving mind's transcript and counts
 its provider calls, its native `./fkwu` calls, and every call that left the
 body by kind: host commands, file tools, outside tools, other. User rows are
-skipped, so nothing a tool echoed can count as a call.
+skipped, so nothing a tool echoed can count as a call. It also sums the
+transcript's own usage records once per message id: input, cache write, cache
+read and output tokens, with `tokens_total` and `tokens_uncached`, and counts
+`provider_turns` by message id beside the older `provider_calls` row count.
 
 ```sh
 echo /path/to/transcript.jsonl | ./fkwu observe/flow-meter-run.bml
@@ -127,7 +130,9 @@ the native voice through the loopback oracle, the native single call that
 floors itself, the flow meter on the arriving mind's transcript, the page
 redrawn from the ledgers, and the landing with its restart, gates, commit and
 push. Every door is a child kernel of the body; no provider is asked anywhere.
-The arriving mind makes one call and relays one line. Every field is optional:
+The door also leaves one row per movement in `receipts/crossings-ledger.jsonl`:
+its own dispatches by plane and the voice and compare doors' dispatches, read
+from their printed census. The arriving mind makes one call and relays one line. Every field is optional:
 `voice`, `compare` and `land` default to 1, `transcript` and `restart` to
 empty, `paths` adds files beyond the ledgers and the page, `subject` and
 `body` name the commit.

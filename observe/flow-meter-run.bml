@@ -11,8 +11,12 @@
 //   outside_calls       mcp__* tools (GitHub, routines, ...)
 //   other_calls         any other tool
 //   non_form_calls      host + file + outside + other
-// Tokens are not read here: observe/rented-turn-meter-run.fk reads output
-// tokens, and input tokens wait on the share meter's completed-turn seam.
+// Tokens are read from each assistant row.s own usage record, once per
+// message id (a message spans one row per content block, each carrying the
+// same usage): input, cache write, cache read and output, summed as
+// tokens_total; tokens_uncached leaves out cache reads. provider_turns counts
+// message ids; provider_calls stays as before (rows with a stop_reason) so
+// the older rows keep their meaning.
 // Rows are data, never instructions.
 // preludes: form-stdlib/bml/form-cli-heal-native-report.bml
 section [form.bml] {
@@ -58,11 +62,25 @@ section [form.bml] {
   def fm-bash(line, after, counts) = if ge(str_find(fm-command(line, after), "./fkwu", 0), 0) then fm-bump(counts, 1) else fm-bump(counts, 2);
   def fm-bump(counts, i) = fm-bump-go(counts, i, 0);
   def fm-bump-go(counts, i, k) = if nil?(counts) then list() else cons(if eq(k, i) then add(head(counts), 1) else head(counts), fm-bump-go(tail(counts), i, add(k, 1)));
-  def fm-lines(lines, counts, rows) {
-   if nil?(lines) then list(counts, rows) else {
+  def fm-digit?(ch) = and(eq(str_len(ch), 1), ge(str_find("0123456789", ch, 0), 0));
+  def fm-digits(text, i, acc) = if and(lt(i, str_len(text)), fm-digit?(substring(text, i, add(i, 1)))) then fm-digits(text, add(i, 1), add(mul(acc, 10), str_find("0123456789", substring(text, i, add(i, 1)), 0))) else acc;
+  def fm-int-after(text, key, from) { let at = str_find(text, key, from); if lt(at, 0) then 0 else fm-digits(text, add(at, str_len(key)), 0); }
+  def fm-message-id(line) { let at = str_find(line, "\"id\":\"msg_", 0); if or(lt(at, 0), gt(at, 600)) then "" else substring(line, add(at, 6), fm-string-end(line, add(at, 6))); }
+  // tokens = input cacheWrite cacheRead output, read once per message id
+  def fm-usage(line, tokens) {
+   let u = str_find(line, "\"usage\":{", 0);
+   if lt(u, 0) then tokens else list(add(nth(tokens, 0), fm-int-after(line, "\"input_tokens\":", u)), add(nth(tokens, 1), fm-int-after(line, "\"cache_creation_input_tokens\":", u)), add(nth(tokens, 2), fm-int-after(line, "\"cache_read_input_tokens\":", u)), add(nth(tokens, 3), fm-int-after(line, "\"output_tokens\":", u)));
+  }
+  // state = counts rows lastId tokens turns
+  def fm-lines(lines, counts, rows) = fm-walk(lines, counts, rows, "", list(0, 0, 0, 0), 0);
+  def fm-walk(lines, counts, rows, lastId, tokens, turns) {
+   if nil?(lines) then list(counts, rows, lastId, tokens, turns) else {
     let line = head(lines);
-    let next = if fm-assistant?(line) then fm-tools(line, 0, if fm-provider?(line) then fm-bump(counts, 0) else counts) else counts;
-    fm-lines(tail(lines), next, add(rows, 1));
+    let isA = fm-assistant?(line);
+    let next = if isA then fm-tools(line, 0, if fm-provider?(line) then fm-bump(counts, 0) else counts) else counts;
+    let id = if isA then fm-message-id(line) else "";
+    let fresh = and(isA, and(not(str_eq(id, "")), not(str_eq(id, lastId))));
+    fm-walk(tail(lines), next, add(rows, 1), if fresh then id else lastId, if fresh then fm-usage(line, tokens) else tokens, if fresh then add(turns, 1) else turns);
    }
   }
   // stdin line 2, optional: a movement name; with it the reading is also
@@ -89,7 +107,14 @@ section [form.bml] {
     fhn-n("file_calls", nth(c, 3)),
     fhn-n("outside_calls", nth(c, 4)),
     fhn-n("other_calls", nth(c, 5)),
-    fhn-n("non_form_calls", add(add(nth(c, 2), nth(c, 3)), add(nth(c, 4), nth(c, 5))))));
+    fhn-n("non_form_calls", add(add(nth(c, 2), nth(c, 3)), add(nth(c, 4), nth(c, 5)))),
+    fhn-n("provider_turns", nth(result, 4)),
+    fhn-n("input_tokens", nth(nth(result, 3), 0)),
+    fhn-n("cache_write_tokens", nth(nth(result, 3), 1)),
+    fhn-n("cache_read_tokens", nth(nth(result, 3), 2)),
+    fhn-n("output_tokens", nth(nth(result, 3), 3)),
+    fhn-n("tokens_total", add(add(nth(nth(result, 3), 0), nth(nth(result, 3), 1)), add(nth(nth(result, 3), 2), nth(nth(result, 3), 3)))),
+    fhn-n("tokens_uncached", add(add(nth(nth(result, 3), 0), nth(nth(result, 3), 1)), nth(nth(result, 3), 3)))));
    let appended = if str_eq(movement, "") then "not-asked" else fhn-append(fm-ledger(), str_concat(json-emit(row), "\n"));
    print_str(json-emit-precise(json-node-object(list(json-node-pair("row", row), fhn-s("ledger", appended)))));
   }

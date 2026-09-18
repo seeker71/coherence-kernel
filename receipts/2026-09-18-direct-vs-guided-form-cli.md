@@ -510,3 +510,37 @@ relay of its one line. The landing run that follows is the same door with
 `land` on and `restart` set to `origin/main`, so the branch restarts from the
 merged main inside the same call. The daily routine shrinks to the same shape:
 check out, build, one movement call, republish, reply.
+
+## The rent of the flow, read from the transcript
+
+The single call is at rent 0. What is still rented is the flow around it:
+this session, the arriving mind that issues the calls. Until now the flow
+meter counted calls; now it reads each assistant row's own usage record,
+once per message id (a message spans one row per content block and each row
+repeats the same usage), and leaves the sums in the flow row.
+
+This session, at the reading `rent read, tokens in the flow row`:
+
+| what | count |
+|---|---|
+| provider turns (message ids) | 381 |
+| assistant rows with a stop reason (`provider_calls`, the older count) | 979 |
+| input tokens | 10,014 |
+| cache write tokens | 2,802,632 |
+| cache read tokens | 142,112,647 |
+| output tokens | 494,056 |
+| tokens through the provider | 145,419,349 |
+| uncached (input, cache write, output) | 3,306,702 |
+
+That is the measured rent of the guided flow, whole: 145 million tokens
+through the provider across one day of walking, of which 142 million were
+cache reads of the same context, again and again. The older `provider_calls`
+count read rows, not messages, so it stood at 979 where 381 messages were
+sent; both stay in the row, named for what they count. From here the page
+differences consecutive rows, so each movement shows what it cost through
+the provider, turns and tokens, beside its calls.
+
+The movement door also leaves one row per movement in
+`receipts/crossings-ledger.jsonl`: its own dispatches by plane, and the voice
+and compare doors' dispatches read from their printed census. The page draws
+them; fewer crossings for the same answer is the direction.
