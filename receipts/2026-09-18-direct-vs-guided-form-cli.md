@@ -326,3 +326,19 @@ Three calls left the body for every native one: that is the guided flow's
 shape. The single native call's shape is one native call and none. The
 path from here is fewer of the 234 per movement, and the meter is how each
 movement reads itself.
+
+## Zero rented seemed odd, and the oddness was real
+
+The native call's zero is the body's own spend for that call. A rented mind that
+issues the call and relays its raw output spends its own turn. Measured in a
+fresh session that was told to run exactly one command and reply with its raw
+output: 26,751 tokens (input 4, cache write 4,742, cache read 19,691, output
+2,314), two provider calls, one native call. The attempt before it stopped at a
+permission prompt and spent 34,418 without running the call; both results are
+artifacts (`receipts/artifacts/2026-09-18-fresh-session-native-call-*.json`).
+In this long session every relaying call carries the whole history: 668,816
+input tokens per call at the last reading. Zero rent per answer holds only
+with no rented mind in the loop: a host schedule, or a person at the terminal.
+The ladder now reads: guided 2,544,568; direct 648,411; bounded 44,495;
+native call relayed by a fresh rented mind 26,751; one provider turn inside
+the call 9,428 to 15,558; the call itself 0.
