@@ -255,3 +255,29 @@ packet, report, answer). Preflight of the door: delimiters balanced, errors
 0, unresolved 0, compiled only. One launch failed before any token was spent
 (`env` takes `-u` before assignments); the argv order was repaired and the
 failed job retained at its own evidence path.
+
+## March measurement, same enquiry, refactored door
+
+The grounded synthesis now lives in its authority unit with the loopback
+oracle asked first, and `observe/rent-walk-run.bml` walks the pinned enquiry
+and writes the ledger row itself. One walk with the provider allowed:
+
+| Reading | Provider turns | Input + output tokens | Receipts cited by path | Answer bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Direct, unbounded loop inside | 9 | 648,411 | 1 | 5,837 |
+| Bounded, one turn | 1 | 44,495 | 0 | 5,561 |
+| Grounded door, first run | 1 | 13,222 | 4 | 4,672 |
+| Grounded door, march-2 | 1 | 13,285 | 6 | 5,087 |
+
+The oracle was unreachable on this host in 6 ms; grounding took 22 ms; the
+provider turn 53,495 ms. The answer, at
+`receipts/artifacts/2026-09-18-march-2-grounded-answer.md`, reads the five
+terms with no seed entry as structural reasoning and says so, cites six
+receipts by path, and names that none of its material contains the measured
+comparison. Mirror: one counted word. The walk with the provider not asked
+cost 0 and left a row too; `receipts/rent-ledger.jsonl` carries both.
+
+The band `observe/tests/form-cli-grounded-synthesis-band.fk` answers 127 for
+the lane's escape, reply reader, ranking, argv identity and HTTP split. The
+REPL's `rag-status` verb, met on the way, answered an error on an absent
+index; it now answers `signal=nothing` with the path it looked at.
