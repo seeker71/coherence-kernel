@@ -90,3 +90,16 @@ census. Provider 0, oracle 0, calls that leave the body 0.
 ```sh
 echo "your enquiry, one line" | ./fkwu observe/form-cli-ask-native-run.bml
 ```
+
+## Land in one call
+
+`observe/land-run.bml` closes a movement from one JSON line on stdin: files
+to write whole, texts to append, a witness command to show, the paths to
+land, the commit subject and body. The drift gates run inside it as a child
+kernel and a refusal lands nothing; host git adds, commits and pushes the
+current branch to its own name. Every crossing to a child process is counted
+in the call's own census and printed. A small movement is one call.
+
+```sh
+printf '%s\n' '{"append":[{"path":"docs/x.md","text":"..."}],"witness":"","paths":["docs/x.md"],"subject":"...","body":"..."}' | ./fkwu observe/land-run.bml
+```
