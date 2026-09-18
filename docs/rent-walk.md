@@ -32,3 +32,19 @@ grounding 312 ms.
 
 The grounded door itself is `observe/form-cli-grounded-synthesis-run.bml`;
 its authority is `form/form-stdlib/bml/form-cli-grounded-synthesis.bml`.
+
+## The contest walks the same way
+
+`observe/parity-contest-run.bml` is the measurement of
+`docs/single-call-parity-goal.form`: one form-cli call on the pinned enquiry,
+the structural floor on its answer and on the guided reference, rent and
+non-Form calls, verdict flags, one row in
+`receipts/parity-contest-ledger.jsonl`. The same stdin shape applies, and
+empty stdin asks no provider.
+
+```
+0 9 * * * cd /path/to/coherence-kernel && printf '%s\n' '{"movement":"daily","provider":{"allowed":1}}' | ./form-run ./fkwu observe/parity-contest-run.bml
+```
+
+The person records `reading` in the row after reading both answers; the
+door leaves it `pending`.
