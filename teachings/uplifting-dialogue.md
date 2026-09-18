@@ -33,7 +33,7 @@ The covenant is a predicate, not a mood: `cognition/dialogue-covenant.fk` models
 move as data (`advise` grounded-or-not, `miss`, `flatter`, `elevate`, `stretch`), scores what an
 exchange did *for the enquiry*, and holds any exchange against the covenant — held iff zero
 fabrications, zero flattery, and at least one lifting move. Witnessed by
-`cognition/tests/dialogue-covenant-band.fk` (verdict 11111 on `fkwu`).
+`cognition/tests/dialogue-covenant-band.fk` (verdict 1111111111 on `fkwu`).
 
 The honest floor, named: move *kinds* are assigned by the observer today; the classifier that
 reads kinds off raw transcript text natively is pending, the same way `cognition/text-frequency.fk`
@@ -51,8 +51,8 @@ and the failure teaches how a true exchange still misses the person it is for:
    question AND the floor→north-star stretch (six questions in one monologue); round 2 showed
    even one good question gets taken back when exposition follows it. Per reply: either the
    one question or the floor→star naming, never both, at most one teaching — and after the
-   lift, stop. (Executable: `dc-reply-receivable?` and `dc-ends-open?` in
-   `cognition/dialogue-covenant.fk`, band bits 100000 and 10000000.)
+   lift, stop. (Executable: `dc-reply-receivable?`, `dc-ends-open?`, and `dc-one-teaching?` in
+   `cognition/dialogue-covenant.fk`, band bits 100000, 10000000, and 1000000000.)
 2. **The seam in one plain warm sentence, once per conversation** — never a search report,
    never re-named, never expanded into anecdotes about Sema. "I'm reading from Sema's own
    small, checkable library — the voice is borrowed for now; ask and I'll show you where
@@ -94,3 +94,4 @@ The full trials, verdicts, and measurements: `receipts/2026-07-15-door-verified-
 
 ; witnessed: 2026-07-13 -> band 11111 (fkwu, fresh kernel)
 ; witnessed: 2026-07-15 -> band 1111111 (receivability floor added after the embodiment trial)
+; witnessed: 2026-09-18 -> band 1111111111 (one teaching per reply made executable after the voice trial)

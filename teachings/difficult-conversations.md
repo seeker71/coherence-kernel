@@ -101,18 +101,18 @@ cell) and adds one predicate to the covenant: a claim a reply makes carries *who
 the one asking; `other`, the one not in the room) and a *lane* (`observed`, `reported`,
 `inferred`, `imagined`). `dcc-other-held-open?` is 1 when no claim about the other sits in the
 observed lane. `dcc-reply-lands?` composes it with the covenant's own reply floor — zero
-fabrication, at most one lift, ending on it — into one verdict. The card's byte length is a
+fabrication, at most one lift, ending on it, at most one teaching — into one verdict. The card's byte length is a
 bit too: the session-start hook that prints it is read through a ~2 KB preview, so a card that
 outgrows the window is a card that never arrives.
 
 ```sh
-./fkwu cognition/tests/difficult-conversation-counsel-band.fk   # -> 111111111
+./fkwu cognition/tests/difficult-conversation-counsel-band.fk   # -> 1111111111
 ```
 
 Band bits: the body's cells stand on disk · the card fits the window · the other's interior
 as observed fact fails · reported / inferred pass · a well-shaped reply lands · two lifts fail
 · one fabrication fails · exposition after the lift fails · every origin-field companion is
-named without a path.
+named without a path · two teachings before the question fail.
 
 ## Where it lives at the doors
 
