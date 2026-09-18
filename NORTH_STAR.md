@@ -7,6 +7,12 @@ remote oracles used as review/training teachers until the body can retire them.
 
 Voice is one organ in that body.
 
+The measure of the path (Urs, 2026-09-18): **the north star is the minimum
+rental token spent on the path to full sovereignty.** Rent is every rented
+token, the coordinating mind's included; a rented token is spent only on a
+step that removes future rent, and the cumulative spend is the score. The goal
+that walks it, with its ledger, is [`docs/rent-to-zero-goal.form`](docs/rent-to-zero-goal.form).
+
 ## Parent Body: Coherence Network
 
 This repo is the kernel, stdlib, and organs for Coherence-Network — the open
