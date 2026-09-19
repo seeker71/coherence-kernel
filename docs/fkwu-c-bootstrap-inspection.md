@@ -43,7 +43,10 @@ segments and imports published primary handles through Form-emitted read-only
 host calls. The [resident arena](native-identity-arena.md) adds Form-emitted
 semantic-word generation, native chunk growth, pinned readers and adaptive
 freezing. Its native image is admitted before data allocation; measured hot
-generation and append calls mint no primary nodes. These owners add no C code.
+generation and append calls mint no primary nodes. The
+[native interner](native-identity-intern.md) adds exact-u64 canonical rows,
+native hash growth and index retirement within a separate arena owner. These
+owners add no C code.
 Primary field migration still crosses `fk_field_fill`/`fk_field_intern_node`,
 the direct column readers, the collector's mark/relocation passes and native
 admission side tables. A raw semantic ID is not a tagged handle or a reusable
