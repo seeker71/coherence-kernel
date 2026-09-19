@@ -677,3 +677,10 @@ And the daily walk moves to the Mac, where the oracle lives and the push is
 the person's own: `docs/local-walk-prompt.md` carries the goal and the one
 call, for a Desktop local routine or a `claude -p` job. The cloud routine
 is paused, not deleted, so its two runs stay readable.
+
+Read after that landing, from the routine's own stored request: it carries
+no repository source. The two fresh sessions it fired had no checkout at
+all, so their first step, the fetch, failed before any door ran, and the
+green status was the session exiting with its report. A routine minted from
+inside a session must name its repository. The local prompt runs in the
+person's own checkout and has no such seam.
