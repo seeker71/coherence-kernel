@@ -42,7 +42,13 @@ its external model-server dependency. The live answer completed and released;
 receipt citation, interpretation of exact lookup misses, and response time
 remain open. Its source calculation now keeps provider cost separate from
 native zero-cost rows. The retained answer precedes that calculation repair;
-its effect on the next generated answer still needs observation.
+the [September 20 follow-up](receipts/2026-09-20-native-citation-and-metric-scope.md)
+supplied the corrected figure, but its full answer exhausted the generation
+allowance and introduced unsupported trust and vitality ratings. That prompt
+trial remains unpromoted. A focused contrast completed: Qwen distinguished
+observed crossings, absent judgments, participant-reported judgments and a
+single dictionary miss. This makes context organization and decomposition the
+next response-quality experiment; the complete comparison remains open.
 
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
