@@ -602,3 +602,19 @@ not asserted.
 Landed by the movement door in one call, voice and compare walking inside
 it; the rows of that walk are in the ledgers and its crossings row on the
 page.
+
+## Composed once per movement
+
+Inside a movement the composition was built twice: the compare door built
+it to floor and print, and the voice door built it again to speak. The voice
+door's 31 dispatches were almost all that second reading. The movement door
+now runs the compare door first, takes its printed text up to the floor line,
+and hands it to the voice door as `composition` in the same stdin line; the
+voice door composes only when no composition is given. What the voice door
+crosses now is the packet it writes, the answer it writes, the row it appends
+and the one loopback; the crossings row of the movement that landed this
+carries the count.
+
+The route lines of the composition also name their evidence path again, read
+from the route ledger, so the compare door's floor counts the guided receipt
+among the receipts it cites.
