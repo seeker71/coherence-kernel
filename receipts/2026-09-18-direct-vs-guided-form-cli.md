@@ -653,3 +653,27 @@ prints `held: no paths or no subject` and the directory exists after it.
 The first day's landings never met this because the voice door had made the
 directory first; the routine met it on its first morning. That is what a
 fresh session is for.
+
+## The witness landed nothing, and the walk moves home
+
+The routine was fired once more as a witness after the landing door learned
+to make its own directory. Its run read green and finished in 57 seconds;
+the branch did not move, no other branch appeared, and the published page
+carries no row of it. The routines documentation says what green means
+there: the session exited without an infrastructure error, not that the
+task succeeded; the run's log is readable only from the web. The same
+movement, in a fresh clone of this checkout pushing to a bare copy, lands in
+two seconds with the oracle down and in three minutes with it up. Whatever
+held the cloud run is outside the body's doors.
+
+Two things follow. The landing door now carries the push's own exit: the
+landing line reads `landed` only when the push reached origin, and
+`held: the push did not reach origin` with the push's last line when it did
+not; the movement's JSON line carries that line as `push`. Tested in the
+fresh clone against a reachable and an unreachable remote. A commit that
+stayed local can no longer read as landed.
+
+And the daily walk moves to the Mac, where the oracle lives and the push is
+the person's own: `docs/local-walk-prompt.md` carries the goal and the one
+call, for a Desktop local routine or a `claude -p` job. The cloud routine
+is paused, not deleted, so its two runs stay readable.
