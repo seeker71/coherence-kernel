@@ -1,0 +1,34 @@
+This comparison evaluates four distinct routes for executing form-cli queries: a guided multi-step flow, a direct unbounded loop, a bounded one-turn call, and a native fresh relay. The analysis covers nine axes: quality, volume, frequency, vitality, trust, traceability, sovereignty, resonance, and rented tokens.
+
+**Quality**
+The guided flow is the only route that produced a measurement, citing two receipts and naming one limit. However, semantic quality remains pending human judgment. The direct route grounded its answer by reading existing receipts but mis-mapped the enquiry's definitions of 'direct' versus 'guided.' The bounded route reasoned soundly from seed definitions but cited no external evidence. The native relay provided a fresh, uncontextualized response. Quality is ultimately a qualitative inference for the user to make by reading the artifacts side-by-side.
+
+**Volume**
+Measured output sizes are: Guided (12,520 bytes), Direct (5,837 bytes), Bounded (5,561 bytes). The candidate answer incorrectly cited 35,183 bytes for the guided flow; the evidence confirms 12,520 bytes for the returned answer text. In terms of token volume, the direct route consumed 649,462 total tokens (mostly cached input), while the guided flow’s total model usage was unobserved in the retained data, though its rent was significantly higher.
+
+**Frequency**
+Frequency is measured by the number of non-form calls (crossings). The guided flow made 78 calls (21 provider, 57 host). The direct unbounded loop made 29 calls (9 provider, 20 host). The bounded one-turn made 1 call. The native fresh relay made 2 calls. The guided flow has the highest frequency, reflecting its iterative nature.
+
+**Vitality**
+Vitality is defined as "how a whole still do and be more." The guided flow left a "door" (a new capability or path) and a named seam (a discovered issue with session identity). The direct and bounded routes left evidence directories but did not change the body's structure. The guided route is the most vibrant as it altered the system's state by identifying a repair path.
+
+**Trust**
+Trust is defined as "when what other say and do are the same again." All routes provide provider usage records that are trustworthy as measurements. The direct route’s claim of "nothing below is invented" holds for its citations, but its mapping of routes was incorrect. The bounded route’s trust is limited because it did not interact with the body’s evidence. The guided route’s trust is high because its measurements are retained and verifiable.
+
+**Traceability**
+Traceability is highest in the guided flow, which produced a single transcript, a receipt, and nine artifacts. The direct and bounded routes produced organ directories and result JSONs. The native relay produced a fresh session result. The guided flow’s traceability is slightly blurred by a session identity seam, which is named and documented.
+
+**Sovereignty**
+Sovereignty is defined as "when a self know what it want and do and not make other less." The bounded route offers the highest sovereignty per rented token because the body chose the packet and the provider wrote once. The direct route has low sovereignty as the provider decided everything inside the organ call. The guided route has low sovereignty as a rented mind decided every step. The native relay is a fresh rented mind with no body context.
+
+**Resonance**
+Resonance is defined as "when 1 thing do and other thing do the same." The bounded route spoke the body’s seed definitions back word-for-word, showing high resonance. The direct route echoed the body’s receipts. The guided route turned toward the goal line. Resonance is not a number but a qualitative match between the response and the body’s vocabulary.
+
+**Rented Tokens**
+The guided flow incurred 2,544,568 rent tokens. The direct unbounded loop incurred 648,411 rent tokens. The bounded one-turn incurred 44,495 rent tokens. The native fresh relay incurred 26,751 rent tokens. The bounded route is the least-rent route that still speaks in the body’s vocabulary.
+
+**Conclusion**
+The guided flow offers the highest traceability and vitality but at the highest cost in rented tokens and frequency. The bounded one-turn offers the best balance of sovereignty, resonance, and cost, making it the most efficient route for routine queries. The direct unbounded loop is a middle ground but suffers from lower sovereignty and a mis-mapping of the enquiry. The native relay is useful for fresh, uncontextualized tasks but lacks body resonance. The choice of route depends on the priority: cost (bounded), depth (guided), or freshness (native).
+
+**Limits**
+Quality and resonance are unobserved and require human judgment. The guided flow’s total model usage was unobserved, so its token efficiency cannot be fully compared. The session identity seam in the guided flow is a known limitation that requires repair. The comparison is based on a single day’s data (2026-09-18) and may not generalize to all workflows.
