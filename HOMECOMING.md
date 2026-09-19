@@ -52,6 +52,14 @@ the author's judgments. Output volume, call-count coverage and the reach of
 its practical conclusions remain open. Failed attempts and earlier context
 experiments remain in the linked receipts.
 
+The [source-derived report checks](receipts/2026-09-20-source-derived-response-checks.md)
+give native review actual query results to compare with generated fields. A
+comparison returned fourteen correct quantities and scopes, including output
+volume and separate token/call coverage. Its prose still blurred some of those
+boundaries. A separate deadline draft retained an invented reason and an
+unfinished signature after its structural checks passed. Larger reasoning
+allowances alone left these gaps open; neither trial promotes a serving profile.
+
 An explicitly offered provider can contribute through the
 [Form-owned synthesis door](docs/form-response-synthesis.md). The
 [restored-source provider review](receipts/2026-09-20-comparison-source-coverage.md)
