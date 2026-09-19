@@ -56,6 +56,14 @@ movement repaired the native comparison's cost evidence: retained CLI results
 now contribute every reported model's usage, with partial-turn and unknown
 call coverage explicit.
 
+The [original-reference and review movement](receipts/2026-09-20-original-reference-and-matched-review.md)
+pins the guided answer to its original committed bytes and measures output
+volume separately from rent. Qwen's native review corrected volume but added
+false findings and unsupported rankings. A Form-owned provider review of the
+same supplied packet handled the principal distinctions better at measured
+cost; its remaining ambiguities and human resonance are still open. Neither
+review is a verified learning target or proof of overall parity.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
