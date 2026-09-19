@@ -64,6 +64,13 @@ same supplied packet handled the principal distinctions better at measured
 cost; its remaining ambiguities and human resonance are still open. Neither
 review is a verified learning target or proof of overall parity.
 
+The [source coverage repair](receipts/2026-09-20-comparison-source-coverage.md)
+restored an omitted antecedent and selected historical grounding through Form.
+One provider review then kept the identity repair proposed and stopped treating
+the omitted material as fabrication. It cost 21,069 tokens; native-only quality
+and human resonance remain open. The retained source preparation is available
+to either response path, and replaying either provider result adds no call.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.

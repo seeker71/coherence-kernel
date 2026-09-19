@@ -1,0 +1,21 @@
+The closest measured comparison is the 2026-09-18 direct unbounded run versus the guided first-answer run. Here, “direct” means one outer form-cli call within which the provider could loop; “guided” means repeated visible calls interpreted by a coordinator. These are recorded runs, not universal rankings.
+
+Quality: No semantic quality score was measured. The source author observed that the direct answer grounded itself in several body documents but inverted the enquiry’s route definitions once and made a percentage transcription error. The guided run measured three arms, discovered an identity seam, and produced implementation artifacts. Those are the author’s judgments; deciding which answer is more useful still requires reading them side by side (`receipts/artifacts/2026-09-18-guided-first-answer.md`).
+
+Volume: The returned direct answer was 5,837 bytes; the guided artifact was 12,520 bytes—about 2.1× larger (`receipts/artifacts/2026-09-18-direct-form-cli-answer.md`; `receipts/artifacts/2026-09-18-guided-first-answer.md`). A separate 35,183-byte structural count concerns a different historically grounded answer and is not this guided artifact.
+
+Frequency: Direct recorded 29 non-Form calls: 9 provider and 20 host calls. Guided recorded 78: 21 provider and 57 host calls. Thus guided exposed a much denser coordination cadence, although its count is only through call 21 and excludes closing and landing (`receipts/2026-09-18-direct-vs-guided-form-cli.md`).
+
+Vitality: Using the supplied definition—“how a whole still do and be more”—the source author regarded guided as more body-changing because it left a receipt, linked artifacts, a grounded door, and a named session-identity seam. Direct left evidence too, but the author says its container-local directories were ephemeral. This is an interpretation, not a vitality measurement (`receipts/artifacts/2026-09-18-guided-first-answer.md`; `cognition/form-neutral-word-field.fk`).
+
+Trust: Both routes retain provider usage evidence. Direct’s grounding was largely checkable, but its route-mapping mistake weakens claim-level trust. Guided names its measurement boundary and the identity seam that blurred transcript separation. Trust therefore depends on both retained evidence and candid limits, not token count alone (`receipts/2026-09-18-direct-vs-guided-form-cli.md`).
+
+Traceability: Direct has an answer, result JSON, per-model usage, and transcript rows; guided has a transcript, receipt, and multiple artifacts. Guided created more explicit links, but inherited session identity blurred provenance until rows were partitioned by model. The proposed repair—give Form-launched providers an independent session identity or home—would materially improve traceability (`receipts/artifacts/2026-09-18-guided-first-answer.md`).
+
+Sovereignty: Neither route is an unrented native voice. In direct, Form owns the outer boundary while the provider chooses the inner steps. In guided, the rented coordinator chooses each successive call. The source author therefore does not support calling guided more sovereign; the separate bounded one-turn route gave the body greater control over the packet per rented token (`receipts/artifacts/2026-09-18-guided-first-answer.md`).
+
+Resonance: No felt-resonance score exists. Direct echoed body receipts; guided turned toward the goal during the run. Whether either “does the same” as the user’s intent remains a human reading (`cognition/form-neutral-word-field.fk`).
+
+Rented tokens: Direct recorded 648,411 primary-model rent tokens; its retained two-model result totals 649,462. Guided recorded at least 2,544,568, but no retained all-model total is available and the turn was partial (`receipts/2026-09-18-direct-vs-guided-form-cli.md`; `receipts/artifacts/2026-09-18-direct-form-cli-result.json`).
+
+Conclusion: For this run, direct was smaller, crossed membranes less often, and used roughly one quarter of the recorded guided rent. Guided produced richer instrumentation and more durable connective artifacts, but not demonstrated higher quality, resonance, or sovereignty. Choose direct when economy and a simple boundary matter; choose guided when iterative steering and artifact-building justify substantial extra rent. A fresh paired benchmark with independent session identities and human scoring is needed before making a general ranking.
