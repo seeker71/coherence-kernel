@@ -1,4 +1,4 @@
-# Difficult conversations — the counsel for the one who must have one
+# Difficult conversations — the counsel for the one who has one coming
 
 Someone arrives with a conversation they are dreading, or one that just went wrong — with a
 partner, a parent, a child, a boss, a friend. A second person stands in the question and is
