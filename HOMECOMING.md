@@ -60,6 +60,13 @@ boundaries. A separate deadline draft retained an invented reason and an
 unfinished signature after its structural checks passed. Larger reasoning
 allowances alone left these gaps open; neither trial promotes a serving profile.
 
+Adding the native [conversation counsel](receipts/2026-09-20-native-conversation-counsel.md)
+to that same deadline request preserved its other fields. The new draft
+again invented a reason for silence and retained an unfilled signature after
+repair. Its explanation stated the evidence boundary correctly. The receipt
+keeps both native replies and a separately attributed arriving answer: the
+remaining gap lies in carrying the boundary into the practical wording.
+
 An explicitly offered provider can contribute through the
 [Form-owned synthesis door](docs/form-response-synthesis.md). The
 [restored-source provider review](receipts/2026-09-20-comparison-source-coverage.md)
