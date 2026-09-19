@@ -45,6 +45,13 @@ the single-call flow the parity goal measures against the guided one.
 ./fkwu observe/form-cli-compare-run.bml </dev/null
 ```
 
+## The route rows
+
+`receipts/route-ledger.jsonl` holds the four route rows of the first day, guided,
+direct, bounded and the fresh rented relay, each with its measured date, rent,
+calls that left the body, note and evidence path. The native compare
+composition and the page read them; no door carries those figures as literals.
+
 ## The native voice
 
 `observe/native-voice-run.bml` hands the native single call's own composition
@@ -70,6 +77,9 @@ skipped, so nothing a tool echoed can count as a call. It also sums the
 transcript's own usage records once per message id: input, cache write, cache
 read and output tokens, with `tokens_total` and `tokens_uncached`, and counts
 `provider_turns` by message id beside the older `provider_calls` row count.
+`observe/tests/flow-meter-band.fk` proves the reading on a fixture transcript:
+usage counted once per message id, a tool echo in a user row counted as nothing;
+its value is 127 when all seven checks hold.
 
 ```sh
 echo /path/to/transcript.jsonl | ./fkwu observe/flow-meter-run.bml
