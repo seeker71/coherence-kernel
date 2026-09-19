@@ -703,3 +703,19 @@ so this session republished the Mac's page as version 19.
 That is W1 of the goal, measured for the first time on the person's own
 metal: the body walks the whole daily movement and the rented mind spends
 two turns issuing one call. The cloud routine never walked at all.
+
+## Main moved; the ledgers merge as the union
+
+While the branch waited, main advanced by four of the person's own commits,
+the comparison voices moving inside the native Form model session. The only
+conflict was the rent ledger: both sides appended rows at its end. Ledgers
+are append-only rows, so their merge is the union of both sides;
+`.gitattributes` now says so for every ledger under receipts. The branch
+took main by a merge with that driver, main's 17 rows and the branch's 4,
+no line lost, no duplicate, every line still a row; a merge rather than a
+rebase keeps the Mac's checkout fast-forwardable. A rebase was walked first
+and verified the same way, and its push, a rewrite of the branch, was held
+by the session's own permission layer; the rebased history is kept as a
+local branch, unpushed. The doors preflight clean on the merged tree, the
+flow meter band holds 127 and the gates 8191. The local prompt's first step
+now rebases onto origin's head, so a moved branch does not stop the walk.
