@@ -136,3 +136,13 @@ returns retained metadata with `native_model_calls_new=0` and the same
 `native_usage_event`. This is an evaluation with no provider call or
 training. Carrier envelopes differ from the provider run; the source and task
 are compared separately from answer quality.
+
+`observe/form-cli-comparison-fresh-run.bml` tests fresh local composition. It
+selects the original question and current evidence fields, omitting the old
+candidate and the grounding supplied only to review that candidate. The source
+band checks those omissions and preserves the selected values byte-equivalently
+through JSON encoding. Its retained packet must match before replay. This is a
+different task from review, so an observed improvement does not isolate which
+change caused it. The [fresh-answer receipt](../receipts/2026-09-20-fresh-native-comparison.md)
+records a smaller, faster answer that still mixes token scopes and overstates
+which workflow is necessary. It establishes no quality parity.
