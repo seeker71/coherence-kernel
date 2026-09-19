@@ -50,6 +50,22 @@ scope. Offer this meaning alongside source when asking a model to reason
 about the reader. It states the intended contract; executing the reader and
 examining the answer remain separate observations.
 
+`observe/form-cli-provider-usage-probe-run.bml` takes the exported notification
+schema path on stdin. It executes one valid two-event sequence per declared
+usage field: the selected cumulative quantity decreases by one and the other
+quantities stay equal. The report names accepted decreases, detected regressions
+and fields without an available probe value. This small observation can supply
+concrete evidence before model review; it does not certify complete coverage.
+The report's `answer` is deterministic wording from those observed rows,
+produced by `fpup-explain()`. It preserves the probe's coverage boundary and
+does not represent a model review.
+
+```sh
+form-run ./fkwu observe/form-cli-provider-usage-probe-run.bml <<'SCHEMA'
+receipts/artifacts/2026-09-20-provider-notification-schema.json
+SCHEMA
+```
+
 ## Native transport observation
 
 `observe/form-cli-provider-protocol-probe.bml` takes one fresh owned directory
