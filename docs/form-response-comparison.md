@@ -27,6 +27,29 @@ an unsupported reason for another person's silence. Remaining wording and
 deadline-scope concerns stayed visible, with the native and provider costs
 recorded separately.
 
+### Derive report checks from source queries
+
+`bml/form-cli-source-report-check.bml` provides
+`fsrc-derive(documents,sourceQuery,reportQuery)`. Both queries use the existing
+read-only native tools. It executes the source query and returns
+`[available, reportCheck, sourceObservation]`. The report check carries those
+actual stdout bytes as its expected result; append it to the request's existing
+`report_checks`. Freeze the source documents and retain the observation before
+generation. Expected values stay in the caller's checks.
+
+The command door is `observe/form-cli-source-report-check-run.bml`. Send JSON
+with `documents`, `source_query` and `report_query`, or `@request-file` on stdin:
+
+```json
+{"documents":[{"id":"sample","path":"source.json","text":"{\"count\":0}"}],"source_query":{"tool":"jq","arguments":[".count","source.json"]},"report_query":{"tool":"jq","arguments":[".reported_count"]}}
+```
+
+The returned `report_check` expects the observed zero. Zero, false and null
+remain distinct outputs; an unavailable source yields no assertion. A query
+that returns null establishes that query result, not whether the underlying
+field exists. Use a presence query when that distinction matters. Exact query
+agreement does not establish prose accuracy, complete coverage or a conclusion.
+
 `review_entry=direct` enters read-only review immediately, keeping the same
 tools, source checks, report checks and repair loop. The default `staged`
 entry retains refine, plan, split and inspection before review. Direct entry
