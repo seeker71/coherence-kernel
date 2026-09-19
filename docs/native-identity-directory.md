@@ -82,7 +82,7 @@ source closure; the refusal must occur before the importer opens primary-field
 objects. This mode selects the kernel's per-process node home; it does not
 establish private-heap execution.
 
-[Source-bound evidence](evidence/fkwu/native-blueprint-layout.json) retains nine
+[Source-bound evidence](evidence/fkwu/native-blueprint-layout.json) retains ten
 actual child executions, including non-field-home refusal and the existing
 CPU/Metal layout and float checks. Every child exits zero, has empty stderr and
 releases its native owners.
@@ -92,6 +92,8 @@ in native RAM, then freezes a pinned prefix into this directory in one
 publication. Native generation and a 4,096-row append mint no primary nodes in
 the measured hot calls. The directory retains its owned adaptive words after
 complete arena retirement. Arena rows remain owner-local allocation coordinates.
+The [native interner](native-identity-intern.md) freezes unique exact-u64 words
+through that same path; its directory survives both index and arena retirement.
 
 Publication and release are serialized in one Form process. The current root
 is a copied 32-byte descriptor, not an atomic publication for concurrent readers.
@@ -108,8 +110,9 @@ RSS. Form record metadata and retired range reservations remain retained until
 the seed process ends. The execution establishes correct access and lifetime,
 not a general bandwidth improvement.
 
-The next boundary is canonical interning and the primary producer/read path.
-The arena admits its implementation before allocating data. Primary cutover
+The next boundary is the primary producer/read path and kind-sensitive handle
+ownership. Exact-word interning already has a resident native owner. The arena
+admits its implementation before allocating data. Primary cutover
 must preserve that ordering while retaining tagged handles and native side-table
 ownership. C allocation and identity readers can then move behind the Form
 owner. Reference-bearing columns additionally need

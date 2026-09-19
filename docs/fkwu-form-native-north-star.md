@@ -169,7 +169,9 @@ read-only mappings. The [resident arena](native-identity-arena.md) admits its
 native image before data allocation, generates semantic words, grows owned
 chunks and freezes pinned prefixes into that directory. Growth policy changes
 in RAM; executing native batches require no per-row Form callback or primary
-node mint. Primary canonical interning, tagged-handle resolution and direct
+node mint. The [native interner](native-identity-intern.md) assigns exact-u64
+words stable owner-local rows across index growth, duplicate replay and adaptive
+freezing. Primary kind-sensitive interning, tagged-handle resolution and direct
 readers remain to move behind a shared native owner. Concurrent publication,
 side-table lifetimes and collector ownership belong at that same boundary.
 

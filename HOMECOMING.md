@@ -36,6 +36,26 @@ the answer as well as successful execution. The
 carries a concrete runtime repair and the separate response-quality work it
 revealed.
 
+The [September 19 native voice repair](receipts/2026-09-19-c-bootstrap-native-voice.md)
+connects the comparison voice to the existing in-process Qwen session, replacing
+its external model-server dependency. The live answer completed and released;
+receipt citation, interpretation of exact lookup misses, and response time
+remain open. Its source calculation now keeps provider cost separate from
+native zero-cost rows. The retained answer precedes that calculation repair;
+the [September 20 follow-up](receipts/2026-09-20-native-citation-and-metric-scope.md)
+supplied the corrected figure, but its full answer exhausted the generation
+allowance and introduced unsupported trust and vitality ratings. That prompt
+trial remains unpromoted. A focused contrast completed: Qwen distinguished
+observed crossings, absent judgments, participant-reported judgments and a
+single dictionary miss. This makes context organization and decomposition the
+next response-quality experiment; the complete comparison remains open. The
+[sectioned-context attempt](receipts/2026-09-20-sectioned-context-and-reported-model-cost.md)
+completed and preserved lookup scope, but its conclusion still inferred
+unsupported qualitative superiority. Its default remains unpromoted. The same
+movement repaired the native comparison's cost evidence: retained CLI results
+now contribute every reported model's usage, with partial-turn and unknown
+call coverage explicit.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.

@@ -70,8 +70,10 @@ now serves sparse stable rows through this ABI and imports published primary
 identities through read-only native mappings. The [resident arena](native-identity-arena.md)
 adds native generation and chunk allocation behind this getter ABI. Its image
 stands before its data allocations; pinned prefixes can freeze into adaptive
-segments and survive producer retirement. Primary canonical interning, tagged
-handles and C readers still need to move behind a native owner. That cutover
+segments and survive producer retirement. The [native interner](native-identity-intern.md)
+adds exact-word canonical rows and index growth using those same prefix readers.
+Primary kind-sensitive interning, tagged handles and C readers still need to
+move behind a native owner. That cutover
 must keep admission independent of the allocator it replaces. Reference-bearing category,
 children and value columns need a root/relocation bridge: the current collector
 marks and rewrites those arrays and cannot see arbitrary raw RAM. Slot reuse
