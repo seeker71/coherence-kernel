@@ -78,6 +78,13 @@ citation count. It completed in 515,784 ms with zero provider calls and remains
 an unsuccessful quality-parity attempt. Its native door retains the full answer
 and reuses the completed result without another generation.
 
+The [fresh composition](receipts/2026-09-20-fresh-native-comparison.md) leaves
+the flawed draft out of the local prompt. Qwen dropped its obsolete citation
+count and supplied a source path, completing in 311,755 ms with zero provider
+calls. Token scopes and an unsupported necessity claim remain open. Current
+evidence preparation is now separate from the material needed to review an
+earlier answer; neither observation establishes served quality parity.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.

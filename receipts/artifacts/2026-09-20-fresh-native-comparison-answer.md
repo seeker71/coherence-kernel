@@ -1,0 +1,21 @@
+This comparison evaluates direct, bounded, and guided form-cli sessions across nine axes, using measurements from 2026-09-18. The direct route involves a single call where the provider executes an unbounded internal loop; the guided route involves multiple calls interpreted by a coordinator; and the bounded route represents a single, constrained turn. These distinctions are critical: the direct route’s internal complexity is hidden within one crossing, while the guided route’s complexity is distributed across visible crossings.
+
+**Quality** is qualitative. The direct answer grounded itself in receipts but mis-mapped the enquiry’s definitions, inverting the roles of direct and guided routes. The bounded answer reasoned coherently from seed definitions but cited no external evidence. The guided answer measured live runs and identified a technical seam. As noted in `receipts/artifacts/2026-09-18-guided-first-answer.md`, the machine record leaves semantic quality null, requiring human reading to decide.
+
+**Volume** is dominated by cache re-reading. Direct used 649,462 total tokens (9% uncached input); guided used over 2.5 million rented tokens (7% uncached input). The bounded route used only 45,966 total tokens. The dominant cost is not new information but the re-processing of context already seen.
+
+**Frequency** varies by cadence. Direct executed 9 provider and 20 host calls in 113 seconds. Bounded executed 1 provider call in 51 seconds. Guided executed 21 provider and 57 host calls over 13 minutes. The guided route’s higher frequency reflects its iterative nature, where each step is judged before the next.
+
+**Vitality** refers to what remains alive in the system. Direct and bounded left evidence directories that the container forgets. Guided left a "door," a receipt with edges into the comparison doc, and a named seam. The teaching on edges-as-vitality suggests that connections landing with content create lasting structure.
+
+**Trust** is defined as "when what other say and do are the same again." Direct’s citations held, but its mapping of routes did not. Bounded’s answer could not be checked against the body because it touched none of it. Guided’s numbers have retained paths, making its claims verifiable. Trust is linked to sovereignty, as a self must know what it wants and does.
+
+**Traceability** is strongest in guided, which produced one transcript, a receipt, and nine artifacts. Direct and bounded left organ directories and result JSONs, but also unexpectedly wrote rows into the parent transcript due to an identity seam. This seam, where the provider inherited the parent’s session identity, is the one place traceability blurred.
+
+**Sovereignty** is "when a self know what it want and do and not make other less." In direct, Form owned the boundary but the provider decided everything. In bounded, Form decided what the provider saw, and the provider decided nothing else. In guided, the arriving mind decided every step. Bounded is the route where the body’s own choice shaped the most of what was said per rented token.
+
+**Resonance** is "when 1 thing do and other thing do the same." Bounded spoke the body’s seed definitions back word for word. Direct echoed the body’s receipts. Guided turned toward the goal line when it arrived mid-run. Resonance is not a number but a felt alignment.
+
+**Rented tokens** show bounded at 44,495, direct at 648,411, and guided at over 2,544,568. Bounded is the least-rent route that still speaks in the body’s vocabulary. Direct spends 15 times bounded’s rent to read the body as text. Guided spends the most and is the only route that produced a measurement.
+
+**Practical Conclusion:** For tasks requiring high sovereignty and low rent, the bounded route is optimal, as it maximizes the body’s influence per token. For tasks requiring measurement and traceability, the guided route is necessary, despite its high cost. The direct route is a middle ground but suffers from hidden complexity and potential mis-mapping. The way forward is to use bounded for routine queries and guided for investigative tasks, while repairing the identity seam to improve traceability.
