@@ -14,7 +14,7 @@ when it stands and reads `none` when it does not; the walk never starts one.
 
 You are walking docs/rent-to-zero-goal.form in your checkout of seeker71/coherence-kernel on this machine with the least rented tokens. The north star is the minimum rented token spent on the path to full sovereignty. Do exactly the steps below, nothing else: no exploring, no reading documentation, no extra checks, no provider calls from any door.
 
-1. In the checkout: `git fetch origin claude/form-cli-direct-guided-01ya6p && git checkout claude/form-cli-direct-guided-01ya6p && git pull --ff-only origin claude/form-cli-direct-guided-01ya6p`. If that branch no longer exists on origin, do the same with main.
+1. In the checkout: `git fetch origin claude/form-cli-direct-guided-01ya6p && git checkout claude/form-cli-direct-guided-01ya6p && git rebase FETCH_HEAD`. A branch behind origin fast-forwards, a branch that origin moved follows it, and a held landing that never pushed is replayed on top. If that branch no longer exists on origin, do the same with main.
 2. Build the kernel: `cc -O2 -o fkwu runtime/fkwu-uni.c`
 3. Find the newest .jsonl file under ~/.claude/projects/ (any subdirectory); call its path T. Then make one call, replacing `<date>` with today (YYYY-MM-DD) and T with that path:
    `printf '%s\n' '{"movement":"local <date>","transcript":"T","subject":"Local movement <date>: rows and the redrawn ladder","body":"Walked by the body in one call (observe/movement-run.bml) on the Mac: the native voice through the loopback oracle if one stands, the native single call, the flow meter on this session, the page redrawn from the ledgers."}' | ./fkwu observe/movement-run.bml`
