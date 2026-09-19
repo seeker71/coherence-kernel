@@ -67,3 +67,17 @@ the completed CLI transcript; absent usage is never treated as zero. Provider
 CLI availability is needed only when the caller explicitly offers this resource.
 This repair path is one part of the wider native/session comparison, not proof
 of whole-session parity.
+
+Positive process budgets also travel in the provider's prompt. The notice asks
+the worker to finish within the enforced duration and preserve completed work
+if the task remains unfinished. Process evidence records the budget and both
+the caller's prompt hash and the sent prompt hash. The notice does not establish
+that a worker will finish in time; the process organ still enforces the deadline.
+
+The usage reader exposes `completed_prefix_usage` separately from whole-stream
+totals. If one turn completed before a later turn failed or was interrupted,
+its validated usage remains visible with `unobserved_remainder=1`. Parsing
+stops accepting usage at the first invalid or failed event. Whole-stream totals
+stay null. With no completed turn, or a failed file read, prefix quantities also
+remain null. Do not add the prefix to a complete total from the same stream:
+these are two scopes over the same usage events, not separate spending.
