@@ -36,6 +36,11 @@ can allocate two rows. These rows are neither canonical interning results nor
 the primary kernel's tagged handles. Primary C allocation and readers remain
 unchanged, including their fixed 2^26-cell capacity.
 
+The [native interner](native-identity-intern.md) owns a separate arena and adds
+exact-u64 duplicate detection. It preserves unique rows across index growth
+and reuses this arena's prefix, adaptive freezing and retirement contracts.
+`nia-open-image` admits that combined image through the same resource owner.
+
 `nia-acquire` pins a published prefix. Its unique four-word descriptor retains
 the first row, count and head pointer. Later tail writes and new chunks remain
 outside that prefix. The getter uses the raw-u64 accessor ABI and walks chunks;
@@ -86,7 +91,7 @@ ratio, RSS measurement or bandwidth benchmark. Every native mapping releases,
 and the frozen directory still serves exact identities after arena retirement.
 
 [Source-bound evidence](evidence/fkwu/native-blueprint-layout.json) retains this
-execution alongside the eight storage, CPU/Metal, accessor, directory and
+execution alongside nine storage, CPU/Metal, accessor, directory, interner and
 primary-import executions, with actual child exits and held source bytes.
 Host-unmap failure recovery is source-reviewed; no syscall fault injection is
 claimed. Operations are cooperative and serialized within one process. Reader
@@ -95,9 +100,10 @@ calls must finish before release. Form row admission ends at exclusive end
 
 ## Next boundary
 
-The next executable owner must preserve canonical interning while resolving
-native semantic words, tagged runtime handles and physical slots separately.
-Its native admission must stand before primary allocation changes. Primary
+The exact-word interner now preserves canonical rows within a native owner.
+The next bridge must resolve native semantic words, kind-sensitive node
+equality, tagged runtime handles and physical slots separately. Its native
+admission must stand before primary allocation changes. Primary
 producers and direct readers can then share that owner, with side-table
 lifetimes and collector roots carried explicitly. Concurrent publication needs
 ordered generation selection and retained readers; reference-bearing columns

@@ -71,8 +71,11 @@ after source mappings close. Distant rows allocate only their populated
 segments. The [resident arena](native-identity-arena.md) generates the same
 semantic words directly in native RAM and grows owned chunks without primary
 node minting in measured hot batches. Its allocation rows remain distinct from
-primary tagged handles. Primary C allocation, interning and readers still own
-the shared field.
+primary tagged handles. The [native interner](native-identity-intern.md)
+canonicalizes exact words within that owner and preserves rows through index
+growth. It consumes already generated words; it does not normalize alternate
+raw coordinate encodings or provide equality for other node kinds. Primary C
+allocation, interning and readers still own the shared field.
 
 ## Executable observation and direction
 
