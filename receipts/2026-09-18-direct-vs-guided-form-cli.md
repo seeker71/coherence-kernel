@@ -559,3 +559,20 @@ The host under this session also changed: the container restarted onto a CPU
 the llama.cpp build did not know, the server died on an illegal instruction,
 and it was rebuilt for the host. The model files and the kernel binary
 survived both restarts; every row and page had already landed.
+
+## A knob that made the voice worse
+
+To get receipts cited by path, the voice door's closing line asked the 7B to
+name, in the same sentence as each number, the ledger or receipt path that
+carries it. One walk on the rebuilt server, rent 0: 609 predicted, 2,777
+bytes, 258.7 s, 9 axes, 0 receipts cited
+(`receipts/artifacts/2026-09-19-native-voice-answer-paths-knob.md`). It named
+no path at all, and the longer line loosened the binding that had held: it
+called the guided flow's quality higher and folded the local-oracle walks into
+the direct rung, judgments and joins the composition never makes. The line is
+restored to the bound form that spoke faithfully. Receipts by path stay on
+the fidelity wall; the way through it is not a longer instruction.
+
+The movement that carried this walk: one call, six dispatches (five child
+kernels, one stdio), census `observed`; the flow row and crossings row are
+in the ledgers.
