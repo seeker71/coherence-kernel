@@ -69,18 +69,17 @@ retained content, see
 
 ## Consumer Submodule
 
-Repositories that already address the runtime as `form/` consume a generated,
-path-preserving branch rather than mounting this repository root (which would
-introduce an extra `form/form/` level). The `form-submodule` branch is generated
-from `main` and contains this directory at its repository root:
+Repositories that already address the runtime as `form/` consume the `form-submodule`
+distribution branch on origin: a curated lineage that carries this repository's root
+(the runtime, `observe/`, `cognition/`, `teachings/`, `form/`, and the rest of the body)
+and leaves out what belongs to one machine only (session launchers, `.coherence-network/`,
+`.cursor/`, the LoRA voice trees). It is not a mechanical copy of `main`. Each carry is one
+single-parent commit on the lineage, authored by the owner, whose message names the `main`
+commit it carries ("Distribution carry of coherence-kernel main <sha> (PR #n) onto the
+form-submodule lineage"). The lineage keeps its own shape of the orientation docs
+(`AGENTS.md`, `MANIFEST.md`, `WELCOME.md`), so a carry resolves those by hand, rebuilds
+`fkwu` at the lineage root, runs the bands there, and pushes. `main` remains the only source
+of authored kernel changes; the lineage is a distribution artifact.
 
-```sh
-git switch main
-git pull --ff-only
-split_sha="$(git subtree split --prefix=form main)"
-git push origin "${split_sha}:refs/heads/form-submodule"
-```
-
-Consumers pin the resulting commit as their `form/` gitlink and initialize it
-with `git submodule update --init --recursive`. `main` remains the only source
-of authored kernel changes; the split branch is a distribution artifact.
+Consumers pin the resulting commit as their `form/` gitlink and initialize it with
+`git submodule update --init --recursive`.
