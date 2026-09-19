@@ -72,13 +72,70 @@ that absence is retained in the
 [counterexample search](artifacts/2026-09-20-native-review-counterexamples.json).
 No live decreasing pair is claimed.
 
-`fpn-contract()` now offers the reader's field roles as native JSON. A new
-local experiment inserts this intended contract into the same selected packet,
-preserving the source excerpts, question, model, profile, context and output
-allowance. It supplies no provider answer or expected defect list. Its native
-process is running in `.hearth/response-parity/provider-packet-native-contract-v1`
-at this receipt. The instruction and actual answer remain separate evidence;
-an improvement is pending until the answer is read.
+`fpn-contract()` now offers the reader's field roles as native JSON. The next
+local experiment inserted that intended contract into the same selected
+packet, preserving the source excerpts, question, model, profile, context and
+output allowance. It supplied no provider answer or expected defect list.
+
+The [contract-enriched answer](artifacts/2026-09-20-native-review-field-contract-answer.md)
+completed in **349 generated tokens**, with 6,496 prompt tokens and **471,634
+ms** of supervised runtime. It correctly described the three field roles that
+the previous answer had misread. It still missed the real cache-write defect
+and claimed the original band verified decreasing per-call usage, which that
+supplied band did not test. Completion and interpretation improved; supported
+review findings remained absent. The
+[observation](artifacts/2026-09-20-native-review-field-contract-observation.json)
+keeps both facts distinct.
+
+### Let execution supply the finding
+
+The new native cumulative-field probe reads the exported schema and executes
+one valid pair per declared usage field. In each pair the selected cumulative
+value decreases by one while the other quantities stay equal. It reports
+accepted decreases, detected regressions and fields for which its probe value
+is unavailable. This is a bounded diagnostic, not complete code review.
+
+The probe ran against the original reader in the retained baseline checkout,
+whose source bytes were checked against the original question packet. It
+detected **5 of 6** regressions and found **1 gap**: cache writes decreasing
+from **5 to 4** were accepted as `observed-prefix`. The repaired current
+reader detected **6 of 6**, with zero gaps. The supervised baseline probe
+took **131 ms**. The [differential observation](artifacts/2026-09-20-native-review-probe-differential.json)
+preserves the source identities, six individual results and lifecycle.
+
+A fourth local response received those actual native observations, the exact
+original reader, the field-role contract and original check results. Supporting
+helper and band source was explicitly omitted. Its packet was **9,424 bytes**;
+it used **2,486 prompt tokens** and **1,975 generated tokens**, completing in
+**489,965 ms**. Its [raw answer](artifacts/2026-09-20-native-probe-grounded-review-answer.md)
+finally identified the observed regression and gave the correct original
+check results. It also invented cache-write attribution and subset obligations
+unsupported by the supplied contract. This mixed answer is still below the
+provider review; its successful process exit does not change that assessment.
+
+The probe now returns its own deterministic `answer` from the measured rows.
+The [native diagnostic answer](artifacts/2026-09-20-native-provider-usage-probe-answer.md)
+states the actual gap, trigger, reader location and coverage. It uses no model
+call. This is a small executable capability with an accurate explanation,
+not evidence of general native reasoning parity. The unedited model answers
+remain available beside it.
+
+Across all **four** local model attempts, supervised model-process time was
+**2,288,382 ms**, with zero new provider calls and zero evaluation training.
+The [fourth-attempt record](artifacts/2026-09-20-native-probe-grounded-review-observation.json)
+keeps the separate native probe time and preceding attempts visible. A
+cheaper future use of this diagnostic does not erase the cost of building it.
+
+The summary formatter first failed preflight with unbalanced parentheses,
+then with a missing expression terminator. Direct attempts during that second
+failure also exited 2. A temporary publisher subsequently lacked the
+`fhn-json` prelude and exited 1 while producing an unusable intermediate
+summary. It now reads the JSON through its already-loaded parser. Those
+failures remain in the command transcript and compiler health observations.
+The corrected formatter passed clean preflight; both baseline and current
+reader observations were repeated successfully, and the final publication
+was read back with its numeric evidence intact. The intermediate output was
+never treated as a valid result or landed.
 
 ## Whole cost and instruments
 
@@ -95,10 +152,15 @@ unobserved** with no standing hearth. The previous procedural learner finished
 round **97**, pending zero, with serving generation **5** unchanged. That
 learner is separate from Qwen and establishes no Qwen improvement. Drift
 checks return **8191**, exit 0, with no kernel source changes.
+The verified procedural teaching was retained under event
+`native-usage-probe-2026-09-20`; its learner launched. An applied serving
+change from that teaching is pending at this receipt.
 
-The evidence points to two distinct needs: economical source selection and
-explicit field meaning before model judgment. Overall quality, human resonance
-and whole-session efficiency remain open. The original pinned enquiry keeps
-its own comparison; this source review adds a separate task observation.
+The evidence separates economical source selection, explicit field meaning,
+executable observation and faithful expression. Context helped the model
+finish; execution supplied the missing finding; faithful general synthesis
+still needs work. Overall quality, human resonance and whole-session efficiency
+remain open. The original pinned enquiry keeps its own comparison; this source
+review adds a separate task observation.
 
 Signed: Codex, arriving agent observing native Form and the attributed Qwen answer.

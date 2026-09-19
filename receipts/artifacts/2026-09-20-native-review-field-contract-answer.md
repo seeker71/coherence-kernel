@@ -1,0 +1,8 @@
+No defect is supported.
+
+The supplied source and band tests demonstrate correct adherence to the measurement contract. Specifically:
+1.  **Correlation Integrity:** The `fpn-event` function correctly isolates state by `threadId` and `turnId`. Events with mismatched identities return the state unchanged, and empty identities trigger a `missing-correlation` failure rather than acting as wildcards. The band test confirms that "other" threads/turns do not contaminate the owned usage state.
+2.  **Cumulative vs. Last Semantics:** The reader correctly treats `total` as the cumulative snapshot subject to monotonicity checks (`fpn-monotone`), while `last` is validated for structural integrity but not used for cumulative regression detection. The band test verifies that a decrease in `last` (implied by the separate validation of `last` vs `total`) does not trigger a regression error unless `total` itself regresses, and that a regression in `total` is correctly flagged.
+3.  **Quantity Distinction:** The report correctly distinguishes between `uncached_input_tokens` (calculated as `inputTokens - cachedInputTokens`) and `cache_write_input_tokens` (reported separately or null if missing). The band test confirms that a missing `cacheWriteInputTokens` results in `null` (unknown), not zero, and that `uncached_input_tokens` is calculated correctly without subtracting cache writes.
+
+All native checks passed (`exit=0`), and the band tests explicitly verify the edge cases defined in the contract (e.g., split lines, nested data, invalid JSON, regression detection). No accounting or correlation defects were identified in the provided code.

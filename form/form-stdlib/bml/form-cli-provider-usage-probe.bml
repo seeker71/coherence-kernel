@@ -1,0 +1,39 @@
+// A bounded native observation of each schema-declared cumulative field.
+// The actual reader answers; this probe reports gaps without rewriting it.
+// preludes: form-stdlib/bml/form-cli-provider-notification.bml
+section [form.bml] {
+ class FormProviderUsageProbe {
+  def fpup-base() = parse-json("usage-probe","{\"inputTokens\":200,\"cachedInputTokens\":60,\"outputTokens\":20,\"reasoningOutputTokens\":7,\"totalTokens\":225,\"cacheWriteInputTokens\":5}");
+  def fpup-set(object,key,value) = json-node-object(fpup-pairs(json-object-pairs(object),key,value));
+  def fpup-pairs(pairs,key,value) = if nil?(pairs) then list() else cons(if str_eq(json-pair-key(head(pairs)),key) then json-node-pair(key,value) else head(pairs),fpup-pairs(tail(pairs),key,value));
+  def fpup-event(total) = json-node-object(list(json-node-pair("method",json-node-string("thread/tokenUsage/updated")),json-node-pair("params",json-node-object(list(json-node-pair("threadId",json-node-string("native-probe")),json-node-pair("turnId",json-node-string("cumulative-fields")),json-node-pair("tokenUsage",json-node-object(list(json-node-pair("total",total),json-node-pair("last",total)))))))));
+  def fpup-one(key) {
+   let first = fpup-base(); let covered = fpn-int(first,key);
+   if not(covered) then json-node-object(list(json-node-pair("field",json-node-string(key)),json-node-pair("status",json-node-string("probe-value-unavailable")),json-node-pair("gap",json-node-null()))) else {
+    let second = fpup-set(first,key,json-node-int(sub(fpn-num(first,key),1)));
+    let valid = and(fpn-valid-usage(first),fpn-valid-usage(second));
+    let initialState = fpn-event(fpn-empty("native-probe","cumulative-fields"),fpup-event(first));
+    let observed = if valid then fpn-event(initialState,fpup-event(second)) else initialState;
+    let detected = str_eq(nth(observed,4),"cumulative-usage-regressed");
+    json-node-object(list(json-node-pair("field",json-node-string(key)),json-node-pair("first",json-object-get(first,key)),json-node-pair("second",json-object-get(second,key)),json-node-pair("inputs_valid",json-node-int(valid)),json-node-pair("status",json-node-string(if valid then nth(observed,4) else "probe-input-invalid")),json-node-pair("gap",if valid then json-node-int(not(detected)) else json-node-null())));
+   }
+  }
+  def fpup-rows(keys) = if nil?(keys) then list() else cons(fpup-one(head(keys)),fpup-rows(tail(keys)));
+  def fpup-count(rows,want) = if nil?(rows) then 0 else add(if str_eq(json-emit(json-object-get(head(rows),"gap")),want) then 1 else 0,fpup-count(tail(rows),want));
+  def fpup-text(parts) = if nil?(parts) then "" else str_concat(head(parts),fpup-text(tail(parts)));
+  def fpup-findings(rows) = if nil?(rows) then "" else {
+   let row = head(rows);
+   let finding = if str_eq(json-emit(json-object-get(row,"gap")),"1") then fpup-text(list("Observed gap: ",fpn-str(row,"field")," decreased from ",int_to_str(fpn-num(row,"first"))," to ",int_to_str(fpn-num(row,"second")),"; the reader returned ",fpn-str(row,"status"),".\n")) else "";
+   str_concat(finding,fpup-findings(tail(rows)));
+  };
+  def fpup-explain(report) = fpup-text(list(fpup-findings(json-array-elements(json-object-get(report,"observations"))),int_to_str(fpn-num(report,"regressions_detected"))," of ",int_to_str(fpn-num(report,"declared_fields"))," supplied cumulative-field decreases were detected; ",int_to_str(fpn-num(report,"gaps"))," gaps and ",int_to_str(fpn-num(report,"unobserved"))," unobserved fields.\nEach pair uses matching thread/turn IDs and leaves other usage quantities equal. Reader: form/form-stdlib/bml/form-cli-provider-notification.bml, fpn-event and fpn-usage.\nCoverage: one valid pair per supplied field. This establishes these observed behaviors, not a complete accounting or correlation review."));
+  def fpup-run(schema) {
+   let definitions = frte-json-object-field(schema,"definitions");
+   let properties = frte-json-object-field(frte-json-object-field(definitions,"TokenUsageBreakdown"),"properties");
+   let rows = fpup-rows(json-object-keys(properties));
+   let report = json-node-object(list(json-node-pair("schema",json-node-string("form-provider-cumulative-field-probe-v1")),json-node-pair("scope",json-node-string("One valid pair per declared usage field: the selected cumulative quantity decreases by one while other quantities stay equal. This bounded probe does not establish complete review coverage.")),json-node-pair("declared_fields",json-node-int(len(rows))),json-node-pair("regressions_detected",json-node-int(fpup-count(rows,"0"))),json-node-pair("gaps",json-node-int(fpup-count(rows,"1"))),json-node-pair("unobserved",json-node-int(fpup-count(rows,"null"))),json-node-pair("observations",json-node-array(rows))));
+   json-node-object(append(json-object-pairs(report),list(json-node-pair("answer",json-node-string(fpup-explain(report))))));
+  }
+ }
+ 0;
+}
