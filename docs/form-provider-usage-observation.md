@@ -43,6 +43,13 @@ snapshot cannot account for unfinished or unreported work. The report includes
 cached, uncached, reasoning and unattributed quantities separately. A caller
 must retain the source and lifecycle evidence before using it in a comparison.
 
+`fpn-contract()` offers the reader's field roles as native JSON for context
+preparation: selected identities, cumulative `total`, per-call `last`, the
+defined input/cache-hit partition, optional cache writes and measurement
+scope. Offer this meaning alongside source when asking a model to reason
+about the reader. It states the intended contract; executing the reader and
+examining the answer remain separate observations.
+
 ## Native transport observation
 
 `observe/form-cli-provider-protocol-probe.bml` takes one fresh owned directory
