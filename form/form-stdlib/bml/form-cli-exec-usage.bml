@@ -1,7 +1,8 @@
 // Read codex exec --json's owned stdout, never prose or nested tool content.
 // Each turn.completed carries the turn's aggregate usage; it is counted once
 // after a turn.started. This is a different carrier from rollout token_count.
-// Missing, failed, malformed, duplicated or incomplete evidence stays unknown.
+// Whole-stream totals stay unknown on missing, failed or incomplete evidence.
+// Retain a separately scoped completed prefix before the first invalid event.
 // preludes: form-stdlib/bml/form-cli-remote-token-evidence.bml form-stdlib/bml/json-wire-admission.bml
 section [form.bml] {
  class FormCliExecUsage {
@@ -11,7 +12,8 @@ section [form.bml] {
   // cache-write and reasoning (the last two may be nothing).
   def feu-empty() = list("",0,0,0,0,0,0,0,0,0);
   def feu-state(s, thread, opened, started, completed, invalid, input, cached, output, writes, reasoning) = list(thread,opened,started,completed,invalid,input,cached,output,writes,reasoning);
-  def feu-bad(s) = feu-state(s,nth(s,0),nth(s,1),nth(s,2),nth(s,3),1,nth(s,5),nth(s,6),nth(s,7),nth(s,8),nth(s,9));
+  def feu-bad(s) = if not(eq(nth(s,4),0)) then s else feu-state(s,nth(s,0),nth(s,1),nth(s,2),nth(s,3),1,nth(s,5),nth(s,6),nth(s,7),nth(s,8),nth(s,9));
+  def feu-unreadable(s) = feu-state(s,nth(s,0),nth(s,1),nth(s,2),nth(s,3),2,nth(s,5),nth(s,6),nth(s,7),nth(s,8),nth(s,9));
   def feu-optional(u,key) = if frte-json-nonnegative-int-field?(u,key) then json-int-value(json-object-get(u,key)) else nothing();
   def feu-optional-valid(u,key) = if json-object-has?(u,key) then frte-json-nonnegative-int-field?(u,key) else 1;
   def feu-plus(a,b) = if or(nothing?(a),nothing?(b)) then nothing() else add(a,b);
@@ -19,7 +21,8 @@ section [form.bml] {
   def feu-completed(s,u) = if or(not(eq(nth(s,1),1)),not(feu-valid-usage(u))) then feu-bad(s) else feu-state(s,nth(s,0),0,nth(s,2),add(nth(s,3),1),nth(s,4),add(nth(s,5),json-int-value(json-object-get(u,"input_tokens"))),add(nth(s,6),json-int-value(json-object-get(u,"cached_input_tokens"))),add(nth(s,7),json-int-value(json-object-get(u,"output_tokens"))),feu-plus(nth(s,8),feu-optional(u,"cache_write_input_tokens")),feu-plus(nth(s,9),feu-optional(u,"reasoning_output_tokens")));
   def feu-event(s,row) {
    let kind = frte-json-string-field(row,"type");
-   if str_eq(kind,"thread.started") then if or(not(str_eq(nth(s,0),"")),str_eq(frte-json-string-field(row,"thread_id"),"")) then feu-bad(s) else feu-state(s,frte-json-string-field(row,"thread_id"),nth(s,1),nth(s,2),nth(s,3),nth(s,4),nth(s,5),nth(s,6),nth(s,7),nth(s,8),nth(s,9))
+   if not(eq(nth(s,4),0)) then s
+   else if str_eq(kind,"thread.started") then if or(not(str_eq(nth(s,0),"")),str_eq(frte-json-string-field(row,"thread_id"),"")) then feu-bad(s) else feu-state(s,frte-json-string-field(row,"thread_id"),nth(s,1),nth(s,2),nth(s,3),nth(s,4),nth(s,5),nth(s,6),nth(s,7),nth(s,8),nth(s,9))
    else if str_eq(kind,"turn.started") then if or(str_eq(nth(s,0),""),eq(nth(s,1),1)) then feu-bad(s) else feu-state(s,nth(s,0),1,add(nth(s,2),1),nth(s,3),nth(s,4),nth(s,5),nth(s,6),nth(s,7),nth(s,8),nth(s,9))
    else if str_eq(kind,"turn.completed") then feu-completed(s,frte-json-object-field(row,"usage"))
    else if or(str_eq(kind,"turn.failed"),str_eq(kind,"error")) then feu-bad(s)
@@ -35,17 +38,20 @@ section [form.bml] {
    if str_eq(nth(read,1),"") then head(read) else feu-bad(head(read));
   }
   def feu-file(path,size,offset,pending,s) {
-   if ge(offset,size) then if or(not(str_eq(pending,"")),not(eq(file_size(path),size))) then feu-bad(s) else s
+   if ge(offset,size) then if not(eq(file_size(path),size)) then feu-unreadable(s) else if not(str_eq(pending,"")) then feu-bad(s) else s
    else feu-slice(path,size,offset,pending,s,read_file_slice(path,offset,if lt(feu-chunk(),sub(size,offset)) then feu-chunk() else sub(size,offset)));
   }
   def feu-slice(path,size,offset,pending,s,bytes) {
-   if or(nothing?(bytes),eq(str_len(bytes),0)) then feu-bad(s) else feu-next(path,size,add(offset,str_len(bytes)),feu-lines(s,str_concat(pending,bytes),0));
+   if or(nothing?(bytes),eq(str_len(bytes),0)) then feu-unreadable(s) else feu-next(path,size,add(offset,str_len(bytes)),feu-lines(s,str_concat(pending,bytes),0));
   }
   def feu-next(path,size,offset,read) = if gt(str_len(nth(read,1)),feu-row-limit()) then feu-bad(head(read)) else feu-file(path,size,offset,nth(read,1),head(read));
   def feu-complete(s) = and(not(str_eq(nth(s,0),"")),and(eq(nth(s,1),0),and(eq(nth(s,4),0),and(gt(nth(s,3),0),eq(nth(s,2),nth(s,3))))));
   def feu-number(value) = if nothing?(value) then json-node-null() else json-node-int(value);
   def feu-quantity(s,index) = if feu-complete(s) then feu-number(nth(s,index)) else json-node-null();
-  def feu-report(path,size,s) = json-node-object(list(json-node-pair("schema",json-node-string("form-codex-exec-usage-v1")),json-node-pair("source",json-node-string(path)),json-node-pair("source_bytes",json-node-int(size)),json-node-pair("basis",json-node-string("codex-exec-json;sum-completed-turn-usage")),json-node-pair("status",json-node-string(if feu-complete(s) then "observed" else "incomplete-or-invalid")),json-node-pair("thread_id",json-node-string(nth(s,0))),json-node-pair("started_turns",json-node-int(nth(s,2))),json-node-pair("completed_turns",json-node-int(nth(s,3))),json-node-pair("input_tokens",feu-quantity(s,5)),json-node-pair("cached_input_tokens",feu-quantity(s,6)),json-node-pair("output_tokens",feu-quantity(s,7)),json-node-pair("cache_write_input_tokens",feu-quantity(s,8)),json-node-pair("reasoning_output_tokens",feu-quantity(s,9)),json-node-pair("input_plus_output_tokens",if feu-complete(s) then json-node-int(add(nth(s,5),nth(s,7))) else json-node-null()),json-node-pair("quality",json-node-string("not-assessed-by-usage-reader"))));
+  def feu-prefix-observed(s) = and(lt(nth(s,4),2),and(not(str_eq(nth(s,0),"")),gt(nth(s,3),0)));
+  def feu-prefix-quantity(s,index) = if feu-prefix-observed(s) then feu-number(nth(s,index)) else json-node-null();
+  def feu-prefix-report(s) = json-node-object(list(json-node-pair("status",json-node-string(if feu-prefix-observed(s) then "observed" else "unknown")),json-node-pair("scope",json-node-string("validated completed turns before the first invalid or failed event;excludes any unfinished turn and later events")),json-node-pair("completed_turns",json-node-int(nth(s,3))),json-node-pair("unobserved_remainder",json-node-int(not(feu-complete(s)))),json-node-pair("input_tokens",feu-prefix-quantity(s,5)),json-node-pair("cached_input_tokens",feu-prefix-quantity(s,6)),json-node-pair("output_tokens",feu-prefix-quantity(s,7)),json-node-pair("cache_write_input_tokens",feu-prefix-quantity(s,8)),json-node-pair("reasoning_output_tokens",feu-prefix-quantity(s,9)),json-node-pair("input_plus_output_tokens",if feu-prefix-observed(s) then json-node-int(add(nth(s,5),nth(s,7))) else json-node-null())));
+  def feu-report(path,size,s) = json-node-object(list(json-node-pair("schema",json-node-string("form-codex-exec-usage-v1")),json-node-pair("source",json-node-string(path)),json-node-pair("source_bytes",json-node-int(size)),json-node-pair("basis",json-node-string("codex-exec-json;sum-completed-turn-usage")),json-node-pair("status",json-node-string(if feu-complete(s) then "observed" else "incomplete-or-invalid")),json-node-pair("thread_id",json-node-string(nth(s,0))),json-node-pair("started_turns",json-node-int(nth(s,2))),json-node-pair("completed_turns",json-node-int(nth(s,3))),json-node-pair("input_tokens",feu-quantity(s,5)),json-node-pair("cached_input_tokens",feu-quantity(s,6)),json-node-pair("output_tokens",feu-quantity(s,7)),json-node-pair("cache_write_input_tokens",feu-quantity(s,8)),json-node-pair("reasoning_output_tokens",feu-quantity(s,9)),json-node-pair("input_plus_output_tokens",if feu-complete(s) then json-node-int(add(nth(s,5),nth(s,7))) else json-node-null()),json-node-pair("completed_prefix_usage",feu-prefix-report(s)),json-node-pair("quality",json-node-string("not-assessed-by-usage-reader"))));
   def feu-read(path) {
    let size = if nothing?(path) then -1 else file_size(path);
    let state = if le(size,0) then feu-bad(feu-empty()) else feu-file(path,size,0,"",feu-empty());
