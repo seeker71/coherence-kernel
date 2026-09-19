@@ -576,3 +576,29 @@ the fidelity wall; the way through it is not a longer instruction.
 The movement that carried this walk: one call, six dispatches (five child
 kernels, one stdio), census `observed`; the flow row and crossings row are
 in the ledgers.
+
+## Every number the body speaks is a row, and the rent reading is proven
+
+Two hand-written figures still lived in the body's own answer: the route
+rows of the first day (guided 2,544,568 and 78, direct 648,411 and 29,
+bounded 44,495 and 1, the fresh relay 26,751 and 2) sat as literals in the
+native compare composition and again in the page door. They now live once, in
+`receipts/route-ledger.jsonl`, four rows with their measured date, note and
+evidence path; the composition reads them for its rented and frequency
+lines and for the guided figures of its own contest row, and the page reads
+them for the ladder's first rungs and the calls chart. Nothing the native
+call says about rent is a literal any more.
+
+The flow meter's rent reading now has a band. A fixture transcript
+(`observe/tests/fixtures/flow-meter-transcript.jsonl`) carries one message
+that spans two rows with the same usage record, one message on a single row,
+and a user row that echoes a tool name and a stop reason.
+`observe/tests/flow-meter-band.fk` runs the meter on it as a child and reads
+its line: rows with a stop reason 3, message ids 2, native 1, file 1,
+non-Form 1, tokens 110, uncached 77. Seven checks, 127. The usage record
+counted once per message and the echo counted as nothing are now proven,
+not asserted.
+
+Landed by the movement door in one call, voice and compare walking inside
+it; the rows of that walk are in the ledgers and its crossings row on the
+page.
