@@ -618,3 +618,18 @@ carries the count.
 The route lines of the composition also name their evidence path again, read
 from the route ledger, so the compare door's floor counts the guided receipt
 among the receipts it cites.
+
+## One crossing per read
+
+A probe of the compare composition, one census window per part, named its
+crossings: the enrich reading 3 reads and 2 directory lists, the receipt
+index 8 reads and 1 list, the ledgers and the guided floor 2 presence checks,
+3 size calls and 7 reads. All of them are reads the answer needs; none is
+waste. What was waste was the shape of the shared reader: `fhn-read` asked
+the file's size before reading it, two crossings per file, when a missing
+file already answers nothing on read. It now reads once and takes nothing as
+empty. Every door that reads through it, the compare door, the voice door,
+the page, the flow meter, the landing and the movement, crosses less by the
+same count. The grounded band holds 255 and the flow meter band 127 after
+the change; the movement that landed this carries the compare and voice
+doors' new counts in its crossings row.
