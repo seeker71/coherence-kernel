@@ -684,3 +684,22 @@ all, so their first step, the fetch, failed before any door ran, and the
 green status was the session exiting with its report. A routine minted from
 inside a session must name its repository. The local prompt runs in the
 person's own checkout and has no such seam.
+
+## The walk came home: the first local landing
+
+Ten minutes after the local prompt landed, the Mac walked it. Commit
+0c8eea3, `Local movement 2026-09-19: rows and the redrawn ladder`, arrived
+on the branch from a Claude Code worktree of the person's own checkout,
+pushed by the landing door with the push's exit read. Its rows: the flow
+meter on that session read 2 provider turns, 3 provider calls, 1 native
+call, 0 calls outside the form, 169,826 tokens seen and 41,631 uncached;
+the voice read `none` with the oracle unreachable on that machine's
+loopback at that hour; the native single call held its floor, 9 axes, 9
+receipts cited and existing, rent 0; the movement crossed 6 times, the
+voice door 8 with one loopback attempt, the compare door 35. The page was
+redrawn on the Mac; the republish did not reach the artifact from there,
+so this session republished the Mac's page as version 19.
+
+That is W1 of the goal, measured for the first time on the person's own
+metal: the body walks the whole daily movement and the rented mind spends
+two turns issuing one call. The cloud routine never walked at all.
