@@ -94,3 +94,33 @@ correction. These execution windows exclude coordinating work, whose separate
 cost is retained in the [fresh comparison receipt](../receipts/2026-09-19-fresh-matched-native-synthesis.md).
 Actual answer review still found a causal error; passing the original checks
 does not establish semantic parity or human resonance.
+
+## Preserve source coverage while shrinking the packet
+
+The retained comparison has native preparation and evaluation doors:
+
+```sh
+form-run ./fkwu observe/form-cli-comparison-review-prepare.bml
+form-run ./fkwu observe/form-cli-comparison-review-run.bml
+```
+
+Preparation reads the committed comparison artifacts, keeps the original
+question, candidate and measurements, restores the antecedent of the identity
+seam, and supplies selected historical grounding that the candidate had seen.
+It separates the review instructions from the JSON document instead of nesting
+an encoded packet inside another encoded packet. Preparation calls no model.
+The second door explicitly uses the offered provider for this retained
+evaluation; its manifest claim prevents a second admission on replay.
+
+The source checks establish preserved content and schema. They do not establish
+that every relevant source was selected. Historical grounding describes what
+the candidate saw; it does not independently verify that grounding's claims.
+Keep an unsupported claim distinct from a contradiction, and retain the scope
+of partial excerpts. Expected report assertions stay outside the provider
+prompt.
+
+The [source restoration receipt](../receipts/2026-09-20-comparison-source-coverage.md)
+records both the improved answer and its cost: 21,069 provider tokens, 716 more
+than the prior review. Rewrapping saved 1,106 prompt bytes before adding the
+missing context. Those byte counts are not token measurements. Both retained
+answers replayed with zero new provider processes; count each usage event once.
