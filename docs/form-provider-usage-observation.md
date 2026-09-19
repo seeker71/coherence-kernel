@@ -50,6 +50,13 @@ scope. Offer this meaning alongside source when asking a model to reason
 about the reader. It states the intended contract; executing the reader and
 examining the answer remain separate observations.
 
+`cache_write_input_relation` is explicitly null. This contract supplies no
+subset or additive relationship between cache writes and input tokens.
+Absence of that relation neither establishes nor disproves a provider-specific
+relationship. A proposed additional check needs its supporting evidence before
+it becomes a defect finding. The contract's `relation_scope` carries this
+distinction into native review context.
+
 `observe/form-cli-provider-usage-probe-run.bml` takes the exported notification
 schema path on stdin. It executes one valid two-event sequence per declared
 usage field: the selected cumulative quantity decreases by one and the other
