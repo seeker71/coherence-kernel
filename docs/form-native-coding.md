@@ -18,6 +18,25 @@ as a bounded session-manifest allowance. Form owns that provider CLI process,
 usage receipt and unchanged assertions. This does not add a fallback to the
 native `code` controller itself.
 
+Native assessment sessions (`observe/form-cli-response-session-run.bml`, one
+manifest file path on stdin) accept an optional nonblank string `run_id`. The
+pair `session` + `run_id` names one logical execution. Repeating it verifies the
+frozen manifest, terminal seal, requested case identities, retained results,
+native assertions and provider evidence before returning `terminal-replay`.
+`native_executions_new` and `provider_processes_new` are zero on replay;
+historical counts, case receipts and usage events remain retained evidence.
+Native execution counts name case-controller invocations, not model admissions.
+
+An incomplete claim remains unresolved, with unknown historical work represented
+as null. Owner metadata is admission evidence, not proof that a process is live.
+Changed bytes under the same identity and invalid terminal evidence start no
+new work. Use a new `run_id` for a deliberate new execution. With no `run_id`,
+each invocation remains fresh. `frss-file`/`frss-text` preserve input bytes;
+`frss-run` uses JSON encoding, so use consistent input encoding for a replay.
+This verifies retained work rather than establishing fresh semantic quality.
+The [replay observation](../receipts/2026-09-20-response-session-replay.md)
+records the executing boundary and the failed provider implementation attempt.
+
 For a read-only assessment that explicitly requests provider synthesis after
 native grounding, the separate [synthesis door](form-response-synthesis.md)
 collects the tasks into one provider call and rechecks every report in Form.
