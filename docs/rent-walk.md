@@ -51,8 +51,17 @@ the single-call flow the parity goal measures against the guided one.
 
 `receipts/route-ledger.jsonl` holds the four route rows of the first day, guided,
 direct, bounded and the fresh rented relay, each with its measured date, rent,
-calls that left the body, note and evidence path. The native compare
-composition and the page read them; no door carries those figures as literals.
+calls that left the body, note and evidence path. Usage and crossing scopes
+travel with each row. The guided row covers a partial turn through call 21;
+the other recorded rents cover their main conversation model.
+
+The native comparison also reads each available `usage_evidence` result with
+`form-cli-provider-model-usage.bml`. It sums all reported models, including
+auxiliary models, and reports cached input, uncached input and output. Missing
+or invalid counters leave the total unobserved; observed zero stays zero.
+The result's model usage does not establish auxiliary call counts or the cost
+of the surrounding coordinating session. Historical `rent_tokens` stay at their
+declared scope; the page's route plot continues to read those recorded values.
 
 ## The native voice
 
