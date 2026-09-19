@@ -1,0 +1,63 @@
+// One caller-offered provider session, with native process-tree supervision.
+// preludes: form-stdlib/bml/form-cli-response-resource.bml form-stdlib/bml/form-cli-provider-notification.bml
+section [form.bml] {
+ class FormProviderSession {
+  def fps-components(parts) = if nil?(parts) then 1 else and(not(fhn-member(list("",".",".."),head(parts))),fps-components(tail(parts)));
+  def fps-absolute(path) = and(fat-starts(path,"/"),fps-components(tail(split-on(path,"/"))));
+  def fps-dry-valid(request) = if not(json-object-has?(request,"dry_run")) then 1 else fhn-member(list("true","false"),json-emit(json-object-get(request,"dry_run")));
+  def fps-program-valid(request) = if json-object-has?(request,"program") then fps-absolute(nsm-str(request,"program")) else 1;
+  def fps-valid(request) = and(fps-program-valid(request),and(str_eq(json-emit(json-object-get(request,"allowed")),"true"),and(fps-dry-valid(request),and(fpn-int(request,"seconds"),and(gt(nsm-num(request,"seconds"),0),and(fps-absolute(nsm-str(request,"root")),and(fps-absolute(nsm-str(request,"cwd")),gt(str_len(nsm-str(request,"prompt")),0))))))));
+  def fps-files() = list("request.json","worker-input.txt","worker-report.json","binding.json","answer.md","provider-events.jsonl","requests.jsonl","first-usage.json","usage-live.json","commands.jsonl","thread-config.json","rpc-error.json","provider-stderr.txt","provider-errors.jsonl");
+  def fps-seal(path) = json-node-object(list(nsm-s("path",path),nsm-n("present",fs_exists(path)),nsm-s("sha256",if fs_exists(path) then fcam-hash(read_file(path)) else "")));
+  def fps-seals(root,names) = if nil?(names) then list() else cons(fps-seal(frsh-path(root,head(names))),fps-seals(root,tail(names)));
+  def fps-seal-valid(row) = and(eq(fs_exists(nsm-str(row,"path")),nsm-num(row,"present")),if eq(nsm-num(row,"present"),1) then str_eq(fcam-hash(read_file(nsm-str(row,"path"))),nsm-str(row,"sha256")) else 1);
+  def fps-seals-valid(rows) = if nil?(rows) then 1 else and(fps-seal-valid(head(rows)),fps-seals-valid(tail(rows)));
+  def fps-summary-intact(report) {
+   let seals = json-object-get(report,"evidence_seal");
+   and(node_eq(node_category(seals),JSON-ARRAY()),and(eq(json-array-length(seals),add(len(fps-files()),1)),fps-seals-valid(json-array-elements(seals))));
+  }
+  def fps-run(raw) {
+   if not(fps-packet-valid(raw)) then form_error("provider request must be complete JSON within one MiB;use a request file for large input") else 0;
+   let request = parse-json("provider-session",raw);
+   if not(fps-valid(request)) then form_error("provider session needs caller permission, paths, prompt and positive deadline") else 0;
+   let root = nsm-str(request,"root"); let summary = frsh-path(root,"summary.json");
+   if fs_exists(summary) then {
+    if not(str_eq(read_file(frsh-path(root,"request.json")),str_concat(raw,"\n"))) then form_error("provider session identity conflict;no retry") else 0;
+    let held = read_file(summary);
+    if not(str_eq(fcam-hash(held),read_file(frsh-path(root,"summary.sha256")))) then form_error("provider session summary changed;no retry") else 0;
+    let report = parse-json("provider-session-summary",held);
+    if not(fps-summary-intact(report)) then form_error("provider session evidence changed;no retry") else 0;
+    json-emit(oh-set(report,"provider_processes_new",json-node-int(0)));
+   } else fps-admit(request,raw);
+  }
+  def fps-packet-valid(raw) = and(le(str_len(raw),1048576),jwa-valid(raw));
+  def fps-input(line) = if fat-starts(line,"@") then read_file(substring(line,1,str_len(line))) else line;
+  def fps-admit(request,raw) {
+   let root = nsm-str(request,"root");
+   if not(and(fat-starts(root,"/"),and(fat-starts(nsm-str(request,"cwd"),str_concat(root,"/")),eq(host_path_is_dir(nsm-str(request,"cwd")),1)))) then form_error("provider cwd must exist inside its absolute owned root") else 0;
+   if not(eq(host_dir_mkdir(frsh-path(root,"admission")),1)) then form_error("provider session already admitted;inspect retained process;no restart") else 0;
+   frsh-frozen(frsh-path(root,"request.json"),str_concat(raw,"\n"));
+   frsh-frozen(frsh-path(root,"worker-input.txt"),str_concat(frsh-path(root,"request.json"),"\n"));
+   let repo = fhn-root(); let job = fhn-unique(fhn-at(repo,".form-heal"),"process-",0);
+   if str_eq(job,"") then form_error("provider process directory unavailable;claim retained") else 0;
+   fhn-write-json(frsh-path(job,"snapshot.json"),json-node-object(list(nsm-s("root",repo))));
+   frsh-frozen(frsh-path(root,"owner.json"),json-emit(json-node-object(list(nsm-s("job",job),nsm-n("owner_pid",host_pid())))));
+   let status = fhn-run(job,"resource",nsm-num(request,"seconds"),"root",frsh-path(root,"worker-input.txt"),list(fhn-at(repo,"fkwu"),fhn-at(repo,"observe/form-cli-provider-worker-run.bml")));
+   let lifecycle = fhn-json(fhn-stage-path(job,"resource",".process.json"));
+   let worker = if fs_exists(frsh-path(root,"worker-report.json")) then fhn-json(frsh-path(root,"worker-report.json")) else json-node-null();
+   let binding = if fs_exists(frsh-path(root,"binding.json")) then fhn-json(frsh-path(root,"binding.json")) else json-node-object(list());
+   let usage = fpn-read(frsh-path(root,"provider-events.jsonl"),nsm-str(binding,"thread_id"),nsm-str(binding,"turn_id"));
+   let report = json-node-object(list(nsm-s("schema","form-owned-provider-session-v1"),nsm-s("usage_event",root),nsm-n("provider_processes_new",1),nsm-n("provider_processes_for_request",1),nsm-s("process_status",status),nsm-s("process_evidence",job),nsm-s("cleanup",nsm-str(frte-json-object-field(lifecycle,"cleanup"),"state")),nsm-n("elapsed_ms",nsm-num(lifecycle,"elapsed_ms")),json-node-pair("worker",worker),json-node-pair("retained_provider_usage",usage),nsm-s("answer_path",frsh-path(root,"answer.md")),json-node-pair("semantic_quality",json-node-null())));
+   let seals = append(fps-seals(root,fps-files()),list(fps-seal(fhn-stage-path(job,"resource",".process.json"))));
+   let text = json-emit(oh-set(report,"evidence_seal",json-node-array(seals)));
+   frsh-frozen(frsh-path(root,"summary.json"),text); frsh-frozen(frsh-path(root,"summary.sha256"),fcam-hash(text));
+   text;
+  }
+  def fps-brief(raw) {
+   let report = parse-json("provider-session",raw); let worker = frte-json-object-field(report,"worker");
+   let usage = frte-json-object-field(frte-json-object-field(report,"retained_provider_usage"),"usage");
+   json-emit(json-node-object(list(nsm-s("evidence",nsm-str(report,"usage_event")),nsm-s("process_status",nsm-str(report,"process_status")),nsm-n("provider_processes_new",nsm-num(report,"provider_processes_new")),nsm-s("cleanup",nsm-str(report,"cleanup")),nsm-n("elapsed_ms",nsm-num(report,"elapsed_ms")),nsm-s("turn_status",nsm-str(worker,"turn_status")),nsm-s("reason",nsm-str(worker,"reason")),json-node-pair("commands_completed",json-object-get(worker,"commands_completed")),json-node-pair("usage_observed_before_terminal",json-object-get(worker,"usage_observed_before_terminal")),json-node-pair("provider_usage",usage),nsm-s("answer_path",nsm-str(report,"answer_path")))));
+  }
+ }
+ 0;
+}

@@ -1,0 +1,144 @@
+// One native App Server conversation inside the caller's process supervisor.
+// The outer fhn-run owns the process group, deadline and descendant release.
+// preludes: form-stdlib/bml/native-pipe-darwin.bml form-stdlib/bml/form-cli-response-resource.bml form-stdlib/bml/form-cli-provider-notification.bml
+section [form.bml] {
+ class FormProviderWorker {
+  def fpw-rpc(id,method,params) = str_concat(json-emit(json-node-object(list(nsm-n("id",id),nsm-s("method",method),json-node-pair("params",params)))),"\n");
+  def fpw-path(state,name) = frsh-path(record_get(state,"root"),name);
+  def fpw-program(request) = if json-object-has?(request,"program") then nsm-str(request,"program") else "codex";
+  def fpw-queue(state,bytes) = record_set(state,"outbox",str_concat(record_get(state,"outbox"),bytes));
+  def fpw-fail(state,reason) { record_set(state,"reason",reason); record_set(state,"done",1); }
+  def fpw-state(request) = record_new(0,"root",nsm-str(request,"root"),"request",request,"outbox","","pending","","thread","","turn","","model","","usage",fpn-empty("",""),"done",0,"reason","","terminal","","started",host_monotonic_ms(),"rows",0,"usage-before-terminal",0,"commands",0,"command-failures",0,"command-exits-unknown",0,"tool-requests",0,"generation-requested",0,"answer-phase","");
+  def fpw-thread-params(request) {
+   let config = parse-json("provider-config","{\"web_search\":\"disabled\",\"features\":{\"multi_agent\":false},\"mcp_servers\":{}}");
+   json-node-object(list(nsm-s("cwd",nsm-str(request,"cwd")),nsm-s("sandbox","workspace-write"),nsm-s("approvalPolicy","never"),json-node-pair("ephemeral",json-node-bool(1)),json-node-pair("config",config),nsm-s("developerInstructions","Complete only the supplied bounded repository task. Use local shell and file tools only. Do not call another model, spawn agents, contact external services, send messages, commit, push, install dependencies or change files outside the supplied working directory. Return a concise final report with actual checks and remaining gaps.")));
+  }
+  def fpw-initialize() = fpw-rpc(1,"initialize",parse-json("initialize","{\"clientInfo\":{\"name\":\"form_owned_session\",\"version\":\"1\"}}"));
+  def fpw-config-valid(request,result) {
+   let sandbox = frte-json-object-field(result,"sandbox"); let roots = json-object-get(result,"runtimeWorkspaceRoots");
+   and(str_eq(json-emit(json-object-get(sandbox,"writableRoots")),"[]"),and(str_eq(nsm-str(result,"cwd"),nsm-str(request,"cwd")),and(str_eq(nsm-str(result,"approvalPolicy"),"never"),and(str_eq(nsm-str(sandbox,"type"),"workspaceWrite"),and(str_eq(json-emit(json-object-get(sandbox,"networkAccess")),"false"),and(eq(json-array-length(roots),1),str_eq(json-string-value(head(json-array-elements(roots))),nsm-str(request,"cwd"))))))));
+  }
+  def fpw-start-thread(state) {
+   fpw-queue(state,"{\"method\":\"initialized\"}\n");
+   fpw-queue(state,fpw-rpc(2,"thread/start",fpw-thread-params(record_get(state,"request"))));
+  }
+  def fpw-thread-ready(state,result) {
+   let thread = nsm-str(frte-json-object-field(result,"thread"),"id");
+   if str_eq(thread,"") then fpw-fail(state,"thread-response-missing-identity") else {
+    record_set(state,"thread",thread); record_set(state,"model",nsm-str(result,"model"));
+    frsh-frozen(fpw-path(state,"thread-config.json"),json-emit(result));
+    if not(fpw-config-valid(record_get(state,"request"),result)) then fpw-fail(state,"provider-effective-scope-mismatch")
+    else if str_eq(json-emit(json-object-get(record_get(state,"request"),"dry_run")),"true") then { record_set(state,"terminal","thread-only"); record_set(state,"done",1); }
+    else fpw-start-turn(state);
+   }
+  }
+  def fpw-start-turn(state) {
+   let request = record_get(state,"request");
+   let input = json-node-object(list(nsm-s("type","text"),nsm-s("text",frr-timed-prompt(nsm-str(request,"prompt"),nsm-num(request,"seconds")))));
+   let params = json-node-object(list(nsm-s("threadId",record_get(state,"thread")),json-node-pair("input",json-node-array(list(input)))));
+   record_set(state,"generation-requested",1);
+   fpw-queue(state,fpw-rpc(3,"turn/start",params));
+  }
+  def fpw-bind-turn(state,turn) {
+   let previous = record_get(state,"turn");
+   if str_eq(turn,"") then fpw-fail(state,"turn-response-missing-identity") else if and(not(str_eq(previous,"")),not(str_eq(previous,turn))) then fpw-fail(state,"turn-identity-changed") else if str_eq(previous,"") then {
+    record_set(state,"turn",turn); record_set(state,"usage",fpn-empty(record_get(state,"thread"),turn));
+    frsh-frozen(fpw-path(state,"binding.json"),json-emit(json-node-object(list(nsm-s("thread_id",record_get(state,"thread")),nsm-s("turn_id",turn)))));
+   } else 0;
+  }
+  def fpw-reply(state,row) {
+   let id = fpn-num(row,"id"); let result = frte-json-object-field(row,"result");
+   if json-object-has?(row,"error") then { frsh-frozen(fpw-path(state,"rpc-error.json"),json-emit(row)); fpw-fail(state,"rpc-error"); }
+   else if eq(id,1) then fpw-start-thread(state)
+   else if eq(id,2) then fpw-thread-ready(state,result)
+   else if eq(id,3) then fpw-bind-turn(state,nsm-str(frte-json-object-field(result,"turn"),"id"))
+   else if eq(id,4) then record_set(state,"done",1) else 0;
+  }
+  def fpw-usage(state,row) {
+   let current = fpn-event(record_get(state,"usage"),row);
+   record_set(state,"usage",current);
+   let report = fpn-report(current);
+   fhn-write-json(fpw-path(state,"usage-live.json"),report);
+   if and(gt(nth(current,2),0),str_eq(record_get(state,"terminal"),"")) then record_set(state,"usage-before-terminal",1) else 0;
+   if and(eq(nth(current,2),1),not(fs_exists(fpw-path(state,"first-usage.json")))) then frsh-frozen(fpw-path(state,"first-usage.json"),json-emit(json-node-object(list(nsm-n("elapsed_ms",sub(host_monotonic_ms(),record_get(state,"started"))),nsm-s("turn_status_at_observation",record_get(state,"terminal")),json-node-pair("usage",report))))) else 0;
+  }
+  def fpw-exit-kind(item) = if not(frte-json-int-node?(json-object-get(item,"exitCode"))) then "unknown" else if eq(nsm-num(item,"exitCode"),0) then "success" else "failure";
+  def fpw-item(state,item) {
+   let kind = nsm-str(item,"type");
+   if str_eq(kind,"agentMessage") then { write_file(fpw-path(state,"answer.md"),nsm-str(item,"text")); record_set(state,"answer-phase",nsm-str(item,"phase")); }
+   else if str_eq(kind,"commandExecution") then {
+    record_set(state,"commands",add(record_get(state,"commands"),1));
+    let exitKind = fpw-exit-kind(item);
+    if str_eq(exitKind,"failure") then record_set(state,"command-failures",add(record_get(state,"command-failures"),1)) else if str_eq(exitKind,"unknown") then record_set(state,"command-exits-unknown",add(record_get(state,"command-exits-unknown"),1)) else 0;
+    fhn-json-line(fpw-path(state,"commands.jsonl"),list(nsm-s("id",nsm-str(item,"id")),nsm-s("status",nsm-str(item,"status")),json-node-pair("exit_code",json-object-get(item,"exitCode")),nsm-n("output_bytes",str_len(nsm-str(item,"aggregatedOutput"))),nsm-s("output_sha256",fcam-hash(nsm-str(item,"aggregatedOutput")))));
+   } else 0;
+  }
+  def fpw-notice(state,row) {
+   let method = nsm-str(row,"method"); let params = frte-json-object-field(row,"params");
+   if not(str_eq(nsm-str(params,"threadId"),record_get(state,"thread"))) then 0
+   else if str_eq(method,"turn/started") then fpw-bind-turn(state,nsm-str(frte-json-object-field(params,"turn"),"id"))
+   else if str_eq(method,"thread/tokenUsage/updated") then fpw-usage(state,row)
+   else if str_eq(method,"turn/completed") then fpw-terminal(state,params)
+   else if str_eq(method,"item/completed") then if str_eq(nsm-str(params,"turnId"),record_get(state,"turn")) then fpw-item(state,frte-json-object-field(params,"item")) else 0
+   else if str_eq(method,"error") then fpw-error(state,row) else 0;
+  }
+  def fpw-error(state,row) {
+   let params = frte-json-object-field(row,"params");
+   fhn-append(fpw-path(state,"provider-errors.jsonl"),str_concat(json-emit(row),"\n"));
+   if str_eq(json-emit(json-object-get(params,"willRetry")),"false") then record_set(state,"reason","provider-error")
+   else if str_eq(json-emit(json-object-get(params,"willRetry")),"true") then 0 else fpw-fail(state,"provider-error-retry-state-unknown");
+  }
+  def fpw-terminal(state,params) {
+   let turn = frte-json-object-field(params,"turn");
+   if not(str_eq(nsm-str(turn,"id"),record_get(state,"turn"))) then fpw-fail(state,"terminal-identity-mismatch") else {
+    record_set(state,"terminal",nsm-str(turn,"status"));
+    fpw-queue(state,fpw-rpc(4,"thread/read",json-node-object(list(nsm-s("threadId",record_get(state,"thread")),json-node-pair("includeTurns",json-node-bool(0))))));
+   }
+  }
+  def fpw-server-request(state,row) {
+   record_set(state,"tool-requests",add(record_get(state,"tool-requests"),1));
+   let error = json-node-object(list(nsm-n("code",-32601),nsm-s("message","This native client does not grant additional approvals or capabilities.")));
+   fpw-queue(state,str_concat(json-emit(json-node-object(list(json-node-pair("id",json-object-get(row,"id")),json-node-pair("error",error)))),"\n"));
+  }
+  def fpw-line(state,line) {
+   record_set(state,"rows",add(record_get(state,"rows"),1));
+   if not(jwa-valid(line)) then fpw-fail(state,"invalid-provider-json") else {
+    let row = parse-json("provider-event",line);
+    if json-object-has?(row,"method") then if json-object-has?(row,"id") then fpw-server-request(state,row) else fpw-notice(state,row)
+    else if fpn-int(row,"id") then fpw-reply(state,row) else 0;
+   }
+  }
+  def fpw-lines(state,bytes,at) {
+   let end = str_find(bytes,"\n",at);
+   if lt(end,0) then record_set(state,"pending",substring(bytes,at,str_len(bytes))) else { fpw-line(state,substring(bytes,at,end)); fpw-lines(state,bytes,add(end,1)); }
+  }
+  def fpw-flush(state,owner,job) {
+   let bytes = record_get(state,"outbox");
+   if gt(str_len(bytes),0) then if npp-submit(owner,job,bytes) then { fhn-append(fpw-path(state,"requests.jsonl"),bytes); record_set(state,"outbox",""); } else 0 else 0;
+  }
+  def fpw-drain(state,owner,job) {
+   let bytes = npp-take(owner,job,"stdout"); let errors = npp-take(owner,job,"stderr");
+   if gt(str_len(errors),0) then fhn-append(fpw-path(state,"provider-stderr.txt"),errors) else 0;
+   if gt(str_len(bytes),0) then {
+    if not(str_eq(fhn-append(fpw-path(state,"provider-events.jsonl"),bytes),"appended")) then fpw-fail(state,"event-retention-failed") else 0;
+    fpw-lines(state,str_concat(record_get(state,"pending"),bytes),0);
+   } else 0;
+   if gt(str_len(record_get(state,"pending")),2097152) then fpw-fail(state,"provider-row-limit") else 0;
+  }
+  def fpw-loop(state,owner,job) {
+   fpw-flush(state,owner,job); npp-pump(owner,50); fpw-drain(state,owner,job);
+   if eq(record_get(state,"done"),1) then 1 else if npp-done(owner,job) then fpw-fail(state,"provider-ended-before-terminal") else if gt(sub(host_monotonic_ms(),record_get(state,"started")),mul(nsm-num(record_get(state,"request"),"seconds"),1000)) then fpw-fail(state,"worker-deadline") else fpw-loop(state,owner,job);
+  }
+  def fpw-run(request) {
+   let state = fpw-state(request); let owner = npp-open(); let job = npp-spawn(owner,list(fpw-program(request),"app-server","--stdio"));
+   fpw-queue(state,fpw-initialize());
+   if record?(job) then fpw-loop(state,owner,job) else fpw-fail(state,"spawn-failed");
+   let closed = npp-close(owner);
+   if record?(job) then fpw-drain(state,owner,job) else 0;
+   let report = json-node-object(list(nsm-s("schema","form-owned-provider-worker-v1"),nsm-s("thread_id",record_get(state,"thread")),nsm-s("turn_id",record_get(state,"turn")),nsm-s("model",record_get(state,"model")),nsm-s("turn_status",record_get(state,"terminal")),nsm-s("reason",record_get(state,"reason")),nsm-n("generation_requested",record_get(state,"generation-requested")),nsm-n("usage_observed_before_terminal",record_get(state,"usage-before-terminal")),nsm-n("commands_completed",record_get(state,"commands")),nsm-n("command_failures",record_get(state,"command-failures")),nsm-n("server_requests_declined",record_get(state,"tool-requests")),nsm-n("resources_closed",closed),nsm-n("process_reaped",if record?(job) then record_get(job,"reaped") else 0),nsm-n("elapsed_ms",sub(host_monotonic_ms(),record_get(state,"started"))),nsm-s("answer_phase",record_get(state,"answer-phase")),json-node-pair("provider_usage",fpn-report(record_get(state,"usage")))));
+   frsh-frozen(fpw-path(state,"worker-report.json"),json-emit(oh-set(report,"command_exits_unknown",json-node-int(record_get(state,"command-exits-unknown")))));
+   if and(closed,and(str_eq(record_get(state,"reason"),""),or(str_eq(record_get(state,"terminal"),"completed"),str_eq(record_get(state,"terminal"),"thread-only")))) then 1 else form_error("owned provider worker incomplete;retained local evidence");
+  }
+ }
+ 0;
+}
