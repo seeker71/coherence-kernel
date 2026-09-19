@@ -185,6 +185,16 @@ IDs. Mechanical word counts are available through native `sh-count-words`;
 callers still apply their original field checks and assess the actual answer.
 This API establishes bounded stage control, not semantic correctness.
 
+The 2026-09-20 source-review trial completed with the same evidence packet
+through this staged route. Its answer retained an unsupported subset finding.
+Making the missing relation explicit in native context removed that finding,
+while the next answer misstated the triggering event sequence. Replaying the
+claimed sequence through the actual reader exposed the discrepancy. The
+[comparison receipt](../receipts/2026-09-20-native-review-relation-grounding.md)
+keeps the raw answers, changed context, stage observations and cost boundaries.
+These observations support targeted development; they leave general response
+quality open.
+
 Response decoding uses `bml/form-token-decode-batch.bml`. For repeated token
 lookups it walks the source vocabulary once, retains only requested pieces,
 and reconstructs their original order. Short sequences keep scalar lookup
