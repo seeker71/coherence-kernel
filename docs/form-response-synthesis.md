@@ -37,7 +37,8 @@ the manifest. Preserve original sources and label any derived observations
 with their scope. The synthesis organ verifies the supplied source assertions;
 it does not infer which additional grounding a question needs. Its prompt
 contains case IDs, request hashes, goals and documents. Expected report-check
-values and prior model answers are excluded.
+values stay local. Caller-supplied documents can contain drafts to review;
+the synthesis prompt identifies that possibility explicitly.
 
 The provider returns one JSON object:
 

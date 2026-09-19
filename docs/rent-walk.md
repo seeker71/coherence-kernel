@@ -63,6 +63,14 @@ The result's model usage does not establish auxiliary call counts or the cost
 of the surrounding coordinating session. Historical `rent_tokens` stay at their
 declared scope; the page's route plot continues to read those recorded values.
 
+The guided answer reference is the original receipt from commit `1736af3c8`,
+retained at `receipts/artifacts/2026-09-18-guided-first-answer.md` and checked
+against its SHA-256 before comparison. The native composition and contest use
+that same reference. Later additions to the living receipt have their own
+scope. Output volume reads the original direct and bounded answer artifacts
+and the original guided receipt; the guided scope includes its measurement
+and implementation account. Missing output artifacts remain unobserved.
+
 ## The native voice
 
 `observe/native-voice-run.bml` hands the native single call's own composition
