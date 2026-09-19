@@ -544,3 +544,18 @@ The movement door also leaves one row per movement in
 `receipts/crossings-ledger.jsonl`: its own dispatches by plane, and the voice
 and compare doors' dispatches read from their printed census. The page draws
 them; fewer crossings for the same answer is the direction.
+
+## The census pin, re-witnessed
+
+Every census row so far read `stale-map`: `observe/form-membrane-runtime-census.fk`
+pinned an optable digest (`5980b09b…`) that predated the runtime map
+(`runtime/fkwu-optable.h`, now `1248a526…`), so the rows read live but the
+status named the pin as owed. On 2026-09-19 the band ran on both sides of the
+move, 8191 before and 8191 after, and the pin now names the current digest;
+the native call's census reads `observed`. The goal's wall
+`stale-census-pin` is closed as `census-pin-witnessed`.
+
+The host under this session also changed: the container restarted onto a CPU
+the llama.cpp build did not know, the server died on an illegal instruction,
+and it was rebuilt for the host. The model files and the kernel binary
+survived both restarts; every row and page had already landed.
