@@ -1,28 +1,36 @@
 ; form-cli-grounded-synthesis-band.fk — the grounded synthesis authority answers
-; its pins with no model, no provider and no socket: the JSON escape the oracle
-; request rides on, the reader of a llama.cpp /completion reply, the receipt
+; its pins with no model, no provider and no socket: completed native generation
+; and release, preserved incomplete evidence, default provider permission, receipt
 ; ranking (terms matched first, then date, newest first), the provider argv
-; (own identity, no tools, an effort flag only when asked) and the HTTP body
-; split. 8 bits -> 255.
-; witnessed: 2026-09-18 -> 255
-; preludes: form-stdlib/bml/form-cli-grounded-synthesis.bml
+; (own identity, no tools, an effort flag only when asked), typed resource
+; allowances and source-scoped rent minima. 10 bits -> 1023.
+; preludes: form-stdlib/bml/form-cli-native-compare.bml
 
 (do
     (defn gsb-bit (ok n) (if ok n 0))
+    (defn gsb-rent (source rent passed)
+        (json-node-object (list (fhn-s "single_source" source)
+            (fhn-n "single_rent_tokens" rent) (fhn-n "floor_parity" passed))))
 
-    ; 1: escape — backslash, quote and newline survive as JSON escapes
-    (let escaped (fgs-escape "a\"b\\c\nd"))
-    (let b1 (str_eq escaped "a\\\"b\\\\c\\nd"))
+    ; 1: provider permission comes from an explicit offer
+    (let b1 (and (not (fgs-provider-allowed (parse-json "none" "{}")))
+                 (and (not (fgs-provider-allowed (parse-json "no" "{\"provider\":{\"allowed\":0}}")))
+                      (fgs-provider-allowed (parse-json "yes" "{\"provider\":{\"allowed\":1}}")))))
 
-    ; 2: a llama.cpp-shaped reply reads as answered with its counts
-    (let reply (fgs-oracle-read "{\"content\":\"hello\",\"tokens_evaluated\":12,\"tokens_predicted\":3}"))
+    ; 2: complete, stopped and released native generation can answer
+    (let session (fcms-session "live" "fixture" "fixture" "" (empty) (empty) 100 15 77 1 12 3 0 0))
+    (let generation (fcms-generation "hello" (list 1 2 3) session))
+    (let reply (fcnv-read generation 1 "fixture"))
     (let b2 (and (str_eq (nth reply 0) "answered")
                  (and (str_eq (nth reply 1) "hello")
                       (and (eq (nth reply 2) 12) (eq (nth reply 3) 3)))))
 
-    ; 3: blank content is empty, never an answer
-    (let blank (fgs-oracle-read "{\"content\":\"  \",\"tokens_evaluated\":5,\"tokens_predicted\":0}"))
-    (let b3 (str_eq (nth blank 0) "empty"))
+    ; 3: blank output or unfinished release leaves no accepted answer
+    (let blank (fcnv-read (fcms-generation "  " (empty) session) 1 "fixture"))
+    (let held (fcnv-read generation 0 "fixture"))
+    (let b3 (and (str_eq (nth blank 0) "empty")
+                 (and (str_eq (nth held 0) "release-incomplete")
+                      (and (str_eq (nth held 1) "") (str_eq (nth held 8) "hello")))))
 
     ; 4: equal hits rank by date, newest first; non-.md names and misses drop
     (let rows (fgs-top (fgs-rank (list "2026-01-01-trust-a.md" "2026-09-01-trust-b.md" "notes.txt" "2026-05-05-other.md") (list "trust")) 5))
@@ -40,13 +48,45 @@
                       (and (lt (str_find (fgs-join argv " ") "--effort" 0) 0)
                            (str_eq (nth argv (sub (len argv) 1)) "")))))
 
-    ; 7: the HTTP body is what follows the first blank line
-    (let b7 (str_eq (fgs-http-body "HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}") "{}"))
+    ; 7: unfinished or failed generation preserves raw evidence only
+    (let unfinished (fcnv-read (fcms-generation "partial" (list 1 2)
+        (fcms-with-stream session 14 2 0 2 0 0)) 1 "fixture"))
+    (let failed (fcnv-read (fcms-generation "partial" (list 1 2)
+        (fcms-with-stream session 14 -1 1 2 0 0)) 1 "fixture"))
+    (let absent (fcnv-run "probe" "" 100 10))
+    (let b7 (and (str_eq (nth unfinished 0) "incomplete")
+                 (and (str_eq (nth unfinished 1) "")
+                      (and (str_eq (nth unfinished 8) "partial")
+                           (and (str_eq (nth failed 0) "incomplete")
+                                (str_eq (nth absent 7) "registry-model-artifact-absent"))))))
 
     ; 8: a requested effort rides the argv as its own flag
     (let argv2 (fgs-argv "/tmp/home" "" "low"))
     (let b8 (and (ge (str_find (fgs-join argv2 " ") "--effort low" 0) 0)
                  (lt (str_find (fgs-join argv2 " ") "--session-id" 0) 0)))
+
+    ; 9: resource options preserve integer identity and positive bounds
+    (let limits (parse-json "limits" "{\"ok\":12,\"boolean\":true,\"fraction\":1.5,\"text\":\"12\"}"))
+    (let invalid (fcnv-run "probe" "" 100 0))
+    (let b9 (and (eq (fcnv-number limits "ok" 0) 12)
+                 (and (eq (fcnv-number limits "missing" 7) 7)
+                      (and (eq (fcnv-number limits "boolean" 9) 0)
+                           (and (eq (fcnv-number limits "fraction" 9) 0)
+                                (and (eq (fcnv-number limits "text" 9) 0)
+                                     (str_eq (nth invalid 7) "positive-token-allowance-up-to-8192-with-larger-context-required")))))))
+
+    ; 10: provider minima exclude native rows and preserve absence and zero
+    (let costs (list (gsb-rent "provider" 40 1) (gsb-rent "native" 0 1)
+                     (gsb-rent "provider" 8 0) (gsb-rent "provider" 20 1)))
+    (let missingCost (json-node-object (list (fhn-s "single_source" "provider")
+                                           (fhn-n "floor_parity" 1))))
+    (let invalidCosts (node_children (parse-json "invalid-costs"
+        "[{\"single_source\":\"provider\",\"floor_parity\":1,\"single_rent_tokens\":null},{\"single_source\":\"provider\",\"floor_parity\":1,\"single_rent_tokens\":true},{\"single_source\":\"provider\",\"floor_parity\":1,\"single_rent_tokens\":1.5},{\"single_source\":\"provider\",\"floor_parity\":1,\"single_rent_tokens\":\"0\"},{\"single_source\":\"provider\",\"floor_parity\":1,\"single_rent_tokens\":-1}]")))
+    (let b10 (and (eq (fnc-min-rent costs (nothing)) 20)
+                  (and (nothing? (fnc-min-rent (list (gsb-rent "native" 0 1)) (nothing)))
+                       (and (eq (fnc-min-rent (list (gsb-rent "provider" 0 1) (gsb-rent "provider" 4 1)) (nothing)) 0)
+                            (and (nothing? (fnc-min-rent (list missingCost) (nothing)))
+                                 (nothing? (fnc-min-rent invalidCosts (nothing))))))))
 
     (add (gsb-bit b1 1)
          (add (gsb-bit b2 2)
@@ -54,4 +94,6 @@
                    (add (gsb-bit b4 8)
                         (add (gsb-bit b5 16)
                              (add (gsb-bit b6 32)
-                                  (add (gsb-bit b7 64) (gsb-bit b8 128)))))))))
+                                  (add (gsb-bit b7 64)
+                                       (add (gsb-bit b8 128)
+                                            (add (gsb-bit b9 256) (gsb-bit b10 512)))))))))))

@@ -748,6 +748,12 @@ Otherwise Form adds an explicit runtime observation and opens one final-response
 stage with the reserved allowance. It supplies no new task evidence. An
 incomplete or refused final stage cannot submit a report or execute an action.
 
+Generation completion and JSON validity are separate. An already complete final
+response goes to the ordinary reply parser and report checks, even when its JSON
+is invalid. Invalid JSON alone does not open an extra reserved stage. The
+ordinary controller retains responsibility for parsing failures and failed
+caller assertions; its checks remain in force.
+
 The result includes `requested_reasoning_answer_tokens` (0 when omitted).
 `form-code-reasoning-reserve` metadata reports the effective allowances, both
 generation counts, observation token count, answer origin, completion and

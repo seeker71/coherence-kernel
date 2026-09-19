@@ -81,3 +81,15 @@ input-plus-output tokens. The context-equipped baseline took 258,074 ms and
 This is a sample observation, not proof of a global token minimum or native
 voice parity. The [receipt](../receipts/2026-09-17-bounded-provider-synthesis.md)
 retains the accounting, answer review and open quality boundaries.
+
+A fresh three-task comparison retained the same original documents and checks
+for both routes. Its first synthesis took 29,609 ms and 24,082 input-plus-output
+tokens; the baseline took 53,482 ms and 76,135 tokens. Both answers blurred
+generation completion with JSON validity. One further synthesis received
+executed native counterexamples. Including that refinement, the synthesis path
+took 54,203 ms and 48,520 tokens, with 25,370 uncached input tokens versus the
+baseline's 15,613. Its initial speed advantage therefore did not survive the
+correction. These execution windows exclude coordinating work, whose separate
+cost is retained in the [fresh comparison receipt](../receipts/2026-09-19-fresh-matched-native-synthesis.md).
+Actual answer review still found a causal error; passing the original checks
+does not establish semantic parity or human resonance.
