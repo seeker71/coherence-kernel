@@ -161,3 +161,24 @@ records that Qwen still chose historical figures from the prose excerpt.
 `observe/form-cli-comparison-scoped-audit.bml` checks the retained source bytes,
 unchanged instruction and non-usage evidence, and counts this attempt once in
 the seven-run native chain, including failed answers.
+
+`observe/form-cli-comparison-attributed-run.bml` keeps the same fresh instruction
+and current measurements, replacing the long historical commentary with selected
+verbatim sections. Each section identifies its author-observation status; the
+full pinned source and omitted section names remain explicit. The source band
+checks identity, exact excerpts, unchanged current evidence and JSON roundtrip.
+The paired audit counts the eighth native attempt and distinguishes this source
+selection from a training update. Actual quality remains a reading of the answer.
+`observe/form-cli-comparison-attributed-provider-run.bml` carries that retained
+source and the same instruction into one explicitly offered Form-owned provider
+process. Its pair audit verifies source bytes and instruction separately from
+the different carrier envelopes. The native answer is absent from the provider's
+input. Both completed answers replay without another model call. Their
+[paired observation](../receipts/2026-09-20-attributed-native-comparison.md)
+keeps measured costs and the remaining quality differences visible.
+
+The ordinary native comparison now uses the same `fsu-select` boundary in its
+route lines. It emits one token quantity with its basis, scope and source,
+preserving null breakdowns and the independent coverage of call counts. Original
+recorded figures remain in the source ledger. This source repair serves
+`fnc-compose` and its callers independently of the model experiment.

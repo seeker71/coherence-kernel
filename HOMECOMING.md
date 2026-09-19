@@ -44,12 +44,13 @@ reuses its usage event without another generation. Native execution is present;
 dependable response quality remains active work.
 
 Fresh composition uses current evidence without an earlier candidate answer.
-The [scoped comparison](receipts/2026-09-20-scoped-native-comparison.md) supplies
-one selected token quantity per route and preserves its coverage. Qwen still
-reused narrower figures from historical commentary and broadened qualitative
-judgments. The next observation must separate historical interpretation from
-current measurements while retaining both sources. Failed attempts and the
-earlier context experiments remain in the linked receipts.
+The native comparison supplies one selected token quantity per route and keeps
+its coverage. The [attributed comparison](receipts/2026-09-20-attributed-native-comparison.md)
+also separates historical judgments from current measurements. Qwen then used
+the current totals consistently, named the guided partial scope and attributed
+the author's judgments. Output volume, call-count coverage and the reach of
+its practical conclusions remain open. Failed attempts and earlier context
+experiments remain in the linked receipts.
 
 An explicitly offered provider can contribute through the
 [Form-owned synthesis door](docs/form-response-synthesis.md). The

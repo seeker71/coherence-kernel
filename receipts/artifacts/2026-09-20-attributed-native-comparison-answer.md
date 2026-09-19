@@ -1,0 +1,19 @@
+This comparison evaluates direct, bounded, and guided form-cli sessions across nine axes, distinguishing measured data from qualitative observations. The direct route represents a single unbounded call where the provider decides internally; the guided route involves multiple interpreted calls; and the bounded route represents a single constrained turn. These are distinct from other recorded routes which provide context but are not the primary comparison subjects.
+
+**Volume and Frequency**
+Measured token usage varies significantly. The direct route consumed 649,462 tokens (638,475 input, 10,987 output) across 9 provider calls [receipts/artifacts/2026-09-18-direct-form-cli-result.json]. The guided route, in its first partial turn, consumed 2,544,568 tokens across 21 provider calls [receipts/2026-09-18-direct-vs-guided-form-cli.md]. The bounded route used 45,966 tokens (41,431 input, 4,535 output) in a single provider call [receipts/artifacts/2026-09-18-bounded-form-cli-result.json]. Frequency is reflected in call counts: direct had 9 provider calls, guided had 21, and bounded had 1. The direct route executed 0 Form cells, while the guided route involved 57 host tool calls [receipts/2026-09-18-direct-vs-guided-form-cli.md].
+
+**Quality and Trust**
+The source author observes that direct grounded by reading but mis-mapped the question once, while bounded reasoned soundly with nothing to check against [receipts/artifacts/2026-09-18-guided-first-answer.md]. Trust is defined as "when what other say and do are the same again." The author notes that direct’s citations held, but its mapping did not, whereas bounded’s answer could not be checked against the body because it touched none of it [receipts/artifacts/2026-09-18-guided-first-answer.md]. Every number in the comparison has a retained path, supporting traceability.
+
+**Sovereignty and Vitality**
+Sovereignty is defined as "when a self know what it want and do and not make other less." The author observes that in direct, Form owned the boundary but the provider decided everything; in bounded, Form decided what the provider saw; in guided, the arriving mind decided every step [receipts/artifacts/2026-09-18-guided-first-answer.md]. Vitality, defined as "how a whole still do and be more," is observed differently: direct and bounded left evidence directories that the container forgets, while guided left a door, a receipt, and a named seam [receipts/artifacts/2026-09-18-guided-first-answer.md].
+
+**Resonance and Rented Tokens**
+Resonance is defined as "when 1 thing do and other thing do the same." The author notes that bounded spoke the body’s seed definitions back word for word, while direct echoed receipts [receipts/artifacts/2026-09-18-guided-first-answer.md]. Rented tokens are measured as the total tokens consumed by the provider. The direct route used 649,462 tokens, guided used 2,544,568 tokens (partial), and bounded used 45,966 tokens. The guided route’s high token count reflects its iterative nature, while the bounded route’s low count reflects its constraint.
+
+**Traceability**
+Traceability is supported by retained paths. Direct and bounded have organ directories and result JSONs with per-model usage. Guided has one transcript, a receipt, and nine artifacts. The author notes a seam where traceability blurred due to session identity inheritance, but this is named with its repair [receipts/artifacts/2026-09-18-guided-first-answer.md].
+
+**Practical Conclusion**
+For tasks requiring high fidelity to body definitions and low token cost, the bounded route is efficient. For tasks requiring iterative refinement and high volume, the guided route is appropriate but costly. The direct route offers a middle ground but risks mis-mapping. Choose based on the trade-off between sovereignty (body control) and vitality (iterative depth).
