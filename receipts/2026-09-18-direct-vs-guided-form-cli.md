@@ -633,3 +633,23 @@ the page, the flow meter, the landing and the movement, crosses less by the
 same count. The grounded band holds 255 and the flow meter band 127 after
 the change; the movement that landed this carries the compare and voice
 doors' new counts in its crossings row.
+
+## The routine walked and landed nothing
+
+The daily routine fired at 09:07 UTC in a fresh session, ran 46 seconds,
+reported success, and the branch did not move. Its transcript is not
+readable from here, so its conditions were rebuilt instead: a fresh clone
+with no caches and no evidence directory, the kernel built, the movement door
+run without landing, and the landing door run in its held path. The movement's
+steps all held; the landing printed no verdict at all. The cause: the landing
+door wrote its commit message under `.form-heal/`, a directory that every
+door in this checkout had already made and a fresh checkout does not have;
+the write answered nothing, the commit found no message file, and the files
+stayed staged. The landing door now makes the directory before it writes,
+and takes nothing from its host calls as empty rather than letting a missing
+value swallow the printed verdict. In the fresh clone the held landing now
+prints `held: no paths or no subject` and the directory exists after it.
+
+The first day's landings never met this because the voice door had made the
+directory first; the routine met it on its first morning. That is what a
+fresh session is for.
