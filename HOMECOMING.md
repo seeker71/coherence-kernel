@@ -71,6 +71,13 @@ the omitted material as fabrication. It cost 21,069 tokens; native-only quality
 and human resonance remain open. The retained source preparation is available
 to either response path, and replaying either provider result adds no call.
 
+The [matched local re-observation](receipts/2026-09-20-restored-source-local-review.md)
+returned the same repaired source and task to Qwen. Numeric findings improved,
+but the full answer still broadened qualitative claims and retained an obsolete
+citation count. It completed in 515,784 ms with zero provider calls and remains
+an unsuccessful quality-parity attempt. Its native door retains the full answer
+and reuses the completed result without another generation.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.

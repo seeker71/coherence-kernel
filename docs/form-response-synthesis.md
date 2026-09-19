@@ -124,3 +124,15 @@ records both the improved answer and its cost: 21,069 provider tokens, 716 more
 than the prior review. Rewrapping saved 1,106 prompt bytes before adding the
 missing context. Those byte counts are not token measurements. Both retained
 answers replayed with zero new provider processes; count each usage event once.
+
+The matched local door is
+`form-run ./fkwu observe/form-cli-comparison-native-review-run.bml`.
+It reads the retained restored source directly, uses the same review instruction,
+and runs registry `qwen38-q8` in the current `fkwu` process with the
+`knowledge-query` profile, 12,288 positions and 2,048 generated-token allowance.
+It retains raw output even when completion or JSON parsing fails. Its separate
+claim directory prevents a duplicate generation; a repeated completed request
+returns retained metadata with `native_model_calls_new=0` and the same
+`native_usage_event`. This is an evaluation with no provider call or
+training. Carrier envelopes differ from the provider run; the source and task
+are compared separately from answer quality.
