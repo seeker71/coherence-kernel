@@ -163,3 +163,11 @@ rendered file to the same page and the picture follows the rows.
 ```sh
 ./fkwu observe/rent-ladder-page-run.bml </dev/null
 ```
+
+## The daily walk on the Mac
+
+`docs/local-walk-prompt.md` is the prompt for a Desktop local routine or a
+`claude -p` job: checkout, build, the one movement call, the page
+republished. The movement's JSON line carries `landing` and `push`; `landed`
+means the push reached origin. The cloud routine that walked this in a fresh
+session is paused.
