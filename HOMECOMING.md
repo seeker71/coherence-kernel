@@ -36,54 +36,29 @@ the answer as well as successful execution. The
 carries a concrete runtime repair and the separate response-quality work it
 revealed.
 
-The [September 19 native voice repair](receipts/2026-09-19-c-bootstrap-native-voice.md)
-connects the comparison voice to the existing in-process Qwen session, replacing
-its external model-server dependency. The live answer completed and released;
-receipt citation, interpretation of exact lookup misses, and response time
-remain open. Its source calculation now keeps provider cost separate from
-native zero-cost rows. The retained answer precedes that calculation repair;
-the [September 20 follow-up](receipts/2026-09-20-native-citation-and-metric-scope.md)
-supplied the corrected figure, but its full answer exhausted the generation
-allowance and introduced unsupported trust and vitality ratings. That prompt
-trial remains unpromoted. A focused contrast completed: Qwen distinguished
-observed crossings, absent judgments, participant-reported judgments and a
-single dictionary miss. This makes context organization and decomposition the
-next response-quality experiment; the complete comparison remains open. The
-[sectioned-context attempt](receipts/2026-09-20-sectioned-context-and-reported-model-cost.md)
-completed and preserved lookup scope, but its conclusion still inferred
-unsupported qualitative superiority. Its default remains unpromoted. The same
-movement repaired the native comparison's cost evidence: retained CLI results
-now contribute every reported model's usage, with partial-turn and unknown
-call coverage explicit.
+The [native voice](receipts/2026-09-19-c-bootstrap-native-voice.md) runs Qwen
+inside `fkwu`, using the optional in-process Metal carrier. Form prepares source
+evidence, distinguishes recorded and all-reported-model costs, pins the original
+answer's bytes, and retains complete and unfinished attempts. A completed replay
+reuses its usage event without another generation. Native execution is present;
+dependable response quality remains active work.
 
-The [original-reference and review movement](receipts/2026-09-20-original-reference-and-matched-review.md)
-pins the guided answer to its original committed bytes and measures output
-volume separately from rent. Qwen's native review corrected volume but added
-false findings and unsupported rankings. A Form-owned provider review of the
-same supplied packet handled the principal distinctions better at measured
-cost; its remaining ambiguities and human resonance are still open. Neither
-review is a verified learning target or proof of overall parity.
+Fresh composition uses current evidence without an earlier candidate answer.
+The [scoped comparison](receipts/2026-09-20-scoped-native-comparison.md) supplies
+one selected token quantity per route and preserves its coverage. Qwen still
+reused narrower figures from historical commentary and broadened qualitative
+judgments. The next observation must separate historical interpretation from
+current measurements while retaining both sources. Failed attempts and the
+earlier context experiments remain in the linked receipts.
 
-The [source coverage repair](receipts/2026-09-20-comparison-source-coverage.md)
-restored an omitted antecedent and selected historical grounding through Form.
-One provider review then kept the identity repair proposed and stopped treating
-the omitted material as fabrication. It cost 21,069 tokens; native-only quality
-and human resonance remain open. The retained source preparation is available
-to either response path, and replaying either provider result adds no call.
-
-The [matched local re-observation](receipts/2026-09-20-restored-source-local-review.md)
-returned the same repaired source and task to Qwen. Numeric findings improved,
-but the full answer still broadened qualitative claims and retained an obsolete
-citation count. It completed in 515,784 ms with zero provider calls and remains
-an unsuccessful quality-parity attempt. Its native door retains the full answer
-and reuses the completed result without another generation.
-
-The [fresh composition](receipts/2026-09-20-fresh-native-comparison.md) leaves
-the flawed draft out of the local prompt. Qwen dropped its obsolete citation
-count and supplied a source path, completing in 311,755 ms with zero provider
-calls. Token scopes and an unsupported necessity claim remain open. Current
-evidence preparation is now separate from the material needed to review an
-earlier answer; neither observation establishes served quality parity.
+An explicitly offered provider can contribute through the
+[Form-owned synthesis door](docs/form-response-synthesis.md). The
+[restored-source provider review](receipts/2026-09-20-comparison-source-coverage.md)
+handled the main distinctions better at 21,069 reported provider tokens;
+coordinator cost is accounted separately. The
+[matched native review](receipts/2026-09-20-restored-source-local-review.md)
+preserves the comparison's limitations. Neither path has established overall
+quality parity or human resonance, and evaluation answers stay out of training.
 
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
