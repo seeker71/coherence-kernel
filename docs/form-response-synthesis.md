@@ -146,3 +146,18 @@ different task from review, so an observed improvement does not isolate which
 change caused it. The [fresh-answer receipt](../receipts/2026-09-20-fresh-native-comparison.md)
 records a smaller, faster answer that still mixes token scopes and overstates
 which workflow is necessary. It establishes no quality parity.
+
+`observe/form-cli-comparison-scoped-run.bml` keeps that fresh instruction and
+changes only the representation of route usage. Native `fsu-select` selects
+consistent all-reported-model totals when available, otherwise the recorded
+quantity with its explicit scope. It preserves absent values as null and
+observed zero as zero. Invalid broader counters retain a reason alongside the
+narrower fallback. Crossing counts retain their own coverage, including unknown
+auxiliary-model calls. The scoped-usage band checks these boundaries against
+retained evidence and counterexamples. The paired answer is an evaluation;
+neither the representation nor its checks establish response quality.
+The [scoped-answer receipt](../receipts/2026-09-20-scoped-native-comparison.md)
+records that Qwen still chose historical figures from the prose excerpt.
+`observe/form-cli-comparison-scoped-audit.bml` checks the retained source bytes,
+unchanged instruction and non-usage evidence, and counts this attempt once in
+the seven-run native chain, including failed answers.
