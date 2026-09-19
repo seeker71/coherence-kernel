@@ -9,9 +9,10 @@ names that notification. The installed CLI can export its precise schema:
 form-run codex app-server generate-json-schema --out <owned-schema-directory>
 ```
 
-This is a provider-interface investigation. The existing response resource
-still calls `codex exec --json`; it does not yet consume App Server events.
-Native local generation continues to run on the C-bootstrap.
+The native owned-session door below consumes these events during execution.
+The existing response-synthesis resource continues to use `codex exec --json`.
+Native local generation runs on the C-bootstrap; an offered provider is an
+optional resource for a bounded task.
 
 ## Native reading
 
@@ -31,6 +32,9 @@ snapshots together. Another thread or turn, or a usage-shaped value nested in
 tool output, cannot update that state. A regression or malformed matching
 snapshot retains the preceding observation and its new error status; later
 events do not silently restore validity. Missing quantities remain null.
+The optional cumulative cache-write counter retains its last known floor even
+when intervening snapshots omit it. Its reported value remains null during
+that absence; a later decrease below the known floor exposes a regression.
 
 The reported scope is cumulative thread usage observed during the selected
 turn. It may include earlier turns of that thread. `whole_session_tokens` and
@@ -48,8 +52,61 @@ correlated response. It then closes and reaps its owned process and pipes,
 retaining the request, stdout, stderr and compact result in that directory.
 This probe sends neither `thread/start` nor `turn/start`.
 
-The observed initialization response establishes that this installed interface
-is reachable through native Form. It does not establish live usage delivery,
-generation quality, task completion, or full process-tree supervision for a
-tool-using provider. Those remain required observations before this transport
-can replace the current owned response resource.
+The initialization probe establishes reachability. The owned-session work
+below separately observes generation, live usage and process-tree release.
+
+## One Form-owned provider turn
+
+`observe/form-cli-provider-session-run.bml` accepts one JSON request or an
+`@absolute-request-file` line. Use the file door for evidence packets: the
+native line reader carries at most 8,191 bytes, while the full-file door checks
+complete JSON up to one MiB before starting a provider.
+
+```sh
+form-run ./fkwu observe/form-cli-provider-session-run.bml <<'FORM_REQUEST'
+@/absolute/owned/request-to-offer.json
+FORM_REQUEST
+```
+
+The request contains:
+
+| Field | Meaning |
+| --- | --- |
+| `allowed` | Boolean `true`, recording the caller's offered provider resource. |
+| `root` | Fresh absolute owned evidence directory, already created. |
+| `cwd` | Existing directory beneath `root` for provider work. |
+| `prompt` | Bounded question and relevant evidence. |
+| `seconds` | Positive integer deadline for the entire supervised process. |
+| `program` | Optional absolute provider CLI path; defaults to `codex` on PATH. |
+| `dry_run` | Optional boolean; `true` opens a thread and inspects its configuration without requesting generation. |
+
+The current transport uses the existing Form-generated Darwin ARM64 pipes.
+The native process organ owns the worker, provider and descendant process
+group. The worker checks the returned cwd, workspace roots, additional write
+roots, approval mode and network setting before sending `turn/start`. Paths
+are checked lexically; this is an owned-workspace workflow, not a new
+filesystem isolation mechanism. Host temporary-directory access follows the
+provider's reported sandbox settings.
+
+Form retains the request, correlated protocol events, first usage observation,
+latest usage, command exits, answer, worker report and supervisor lifecycle.
+Missing command exits have their own count. `summary.json` and its evidence
+hashes support replay: offering identical request bytes returns the retained
+result with `provider_processes_new=0`. An admitted unfinished run stays
+available for inspection; it is not silently restarted. Changed evidence or
+request bytes cannot trigger another call through that identity.
+
+Keep raw requests, events and answers in the local owned directory. The
+command emits compact metadata. The latest completed agent-message text is
+in `answer.md`; inspect `answer_phase` and `turn_status` before treating it as
+a final answer. A successful process exit and a completed turn establish
+execution facts; answer quality needs its own observation.
+
+For source reviews, let native Form gather the relevant bytes and perform the
+checks first. Offer that frozen packet from an empty owned working directory
+outside repository ancestry when repository discovery is unnecessary. A
+2026-09-20 trial completed with 34,267 reported tokens; the preceding
+tool-driven review timed out with an 820,030-token observed prefix. These
+different contexts establish the packet route's useful result for that task,
+not whole-session parity. The [session receipt](../receipts/2026-09-20-provider-owned-session.md)
+retains the attempts, scopes, repairs and open questions.
