@@ -36,6 +36,14 @@ the answer as well as successful execution. The
 carries a concrete runtime repair and the separate response-quality work it
 revealed.
 
+The [September 19 native voice repair](receipts/2026-09-19-c-bootstrap-native-voice.md)
+connects the comparison voice to the existing in-process Qwen session, replacing
+its external model-server dependency. The live answer completed and released;
+receipt citation, interpretation of exact lookup misses, and response time
+remain open. Its source calculation now keeps provider cost separate from
+native zero-cost rows. The retained answer precedes that calculation repair;
+its effect on the next generated answer still needs observation.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.

@@ -7,9 +7,11 @@ doors. With empty stdin the provider is not asked, so an unattended walk
 cannot spend rent by itself.
 
 The order of voices inside one walk: native grounding (an `enrich` reading
-plus a dated receipt index), then the loopback oracle the body already speaks
-to on `127.0.0.1:18082` (llama.cpp `/completion`, ChatML envelope) at rent 0,
-then one provider turn only when the request allows it.
+plus a dated receipt index), then the registry's answer model in the current
+`fkwu` process, then an optional provider only when explicitly allowed. The
+local path uses model weights as data and the existing in-process Metal carrier;
+it has no model-server dependency. Absent local capability leaves an observed
+reason. Omitted provider permission keeps the request native-only.
 
 ```sh
 ./form-run ./fkwu observe/rent-walk-run.bml </dev/null
@@ -56,13 +58,25 @@ composition and the page read them; no door carries those figures as literals.
 
 `observe/native-voice-run.bml` hands the native single call's own composition
 (`form/form-stdlib/bml/form-cli-native-compare.bml`, the same text the compare
-door prints) to the loopback oracle as the packet, in one process, and no
-provider is ever asked. The voice speaks from the body's measured rows rather
-than from seed lines. One row lands in `receipts/rent-ledger.jsonl` with
-movement `native-voice`, the oracle's local counts, the answer's floor and its
-evidence path. The row names the model that answered (`oracle_model`, the
-server's own name for it), so a port that carries different models over time
-stays traceable row by row.
+door prints) to the existing in-process model session. No provider is asked.
+The default model is the registry row with role `answer`; optional `model`,
+`context` and `max_reply_tokens` select a registered model and bounded resources.
+Defaults are 12,288 context positions and 1,536 generated IDs. The compact
+`knowledge-query` profile carries the supplied composition; generated text
+does not execute tools or enter training.
+
+Only stopped generation with a valid stream and successful release becomes an
+accepted answer. Each job retains raw text, original generated IDs, completion,
+release and the artifact path, including for unfinished output. The organ's
+health event names missing resources and the next inspection. One row lands in
+`receipts/rent-ledger.jsonl` with source `fkwu-model-session`, local counts,
+the answer's structural floor and its evidence path. Legacy `oracle_*` columns
+carry these local counts; `native_generation` states their source explicitly.
+Earlier rows keep their original external-server attribution.
+
+The grounded synthesis door's legacy `oracle` option now selects this same
+local path. Its provider fallback remains separately attributed. Completion,
+release and a structural floor still leave the answer's quality to be examined.
 
 ```sh
 ./form-run ./fkwu observe/native-voice-run.bml </dev/null
@@ -136,7 +150,7 @@ printf '%s\n' '{"append":[{"path":"docs/x.md","text":"..."}],"witness":"","paths
 ## A whole movement is one call
 
 `observe/movement-run.bml` walks a whole movement inside one census window:
-the native voice through the loopback oracle, the native single call that
+the native voice through the in-process model, the native single call that
 floors itself, the flow meter on the arriving mind's transcript, the page
 redrawn from the ledgers, and the landing with its restart, gates, commit and
 push. Every door is a child kernel of the body; no provider is asked anywhere.
