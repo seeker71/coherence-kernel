@@ -195,6 +195,22 @@ keeps the raw answers, changed context, stage observations and cost boundaries.
 These observations support targeted development; they leave general response
 quality open.
 
+Review callers can now attach native event-sequence execution through
+`report_checks: [{"kind":"provider-usage-sequences"}]`. The
+[usage replay door](form-provider-usage-observation.md#replay-a-proposed-finding-before-accepting-its-trigger)
+uses the existing report-check and repair controller. Its evidence covers the
+submitted sequences, with contract interpretation and prose accuracy still
+requiring assessment.
+
+`observe/form-cli-turn-cost-run.bml` emits `form-completed-turn-cost-v2`.
+It validates completed provider-call token quantities separately from tool
+output counts, then recontacts the carrier's identity, timestamps, completion
+and source coordinates. An unreconciled tool-event count can coexist with an
+observed token-cost reading; `full_turn_reconciled` and
+`tool_counts_reconciled` expose that distinction. The contribution-share
+validator remains unchanged and can withhold its share. The current open turn
+and separate provider processes remain outside this completed-turn reading.
+
 Response decoding uses `bml/form-token-decode-batch.bml`. For repeated token
 lookups it walks the source vocabulary once, retains only requested pieces,
 and reconstructs their original order. Short sequences keep scalar lookup

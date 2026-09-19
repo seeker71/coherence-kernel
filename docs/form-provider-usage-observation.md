@@ -73,6 +73,40 @@ receipts/artifacts/2026-09-20-provider-notification-schema.json
 SCHEMA
 ```
 
+## Replay a proposed finding before accepting its trigger
+
+`observe/form-cli-provider-usage-replay-run.bml` accepts one JSON request or
+`@request-file` on stdin. The request has nonempty `thread_id` and `turn_id`,
+an `events` array of complete notification objects, and optional nonempty
+`claimed_status`. It executes those events in order through the linked
+`fpn-event`, retaining each parsed event and its before/after status. The
+report includes the actual final reading and `claim_matches` (null when no
+claim was supplied). Requests are bounded to 64 events and 131,072 bytes.
+The file door reads at most that bound plus one byte.
+
+The linked reader is the source version loaded by this fkwu process. A caller
+reviewing a historical source must execute that source version and retain its
+identity; presenting historical text to the current reader does not change
+which implementation runs. The replay starts no model, provider or server.
+
+The existing `form-cli code` review door can apply the same observation on
+report submission. Add this row to `report_checks`:
+
+```json
+{"kind":"provider-usage-sequences"}
+```
+
+The report supplies `findings`, with a `sequence` request as described above
+inside each finding. A contradictory or absent status claim enters the
+existing review repair path with actual per-event results. Other source and
+report checks remain in force. Native callers can compose
+`fpur-check-report` with their own review callback in the same way.
+
+A match establishes the behavior of the exact events. It does not establish
+a contract violation, accurate surrounding prose, or complete review coverage.
+An empty findings array performs zero sequence checks and can still miss a
+real defect. The result keeps `defect_verified` null.
+
 ## Native transport observation
 
 `observe/form-cli-provider-protocol-probe.bml` takes one fresh owned directory
