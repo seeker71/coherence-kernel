@@ -618,3 +618,104 @@ carries the count.
 The route lines of the composition also name their evidence path again, read
 from the route ledger, so the compare door's floor counts the guided receipt
 among the receipts it cites.
+
+## One crossing per read
+
+A probe of the compare composition, one census window per part, named its
+crossings: the enrich reading 3 reads and 2 directory lists, the receipt
+index 8 reads and 1 list, the ledgers and the guided floor 2 presence checks,
+3 size calls and 7 reads. All of them are reads the answer needs; none is
+waste. What was waste was the shape of the shared reader: `fhn-read` asked
+the file's size before reading it, two crossings per file, when a missing
+file already answers nothing on read. It now reads once and takes nothing as
+empty. Every door that reads through it, the compare door, the voice door,
+the page, the flow meter, the landing and the movement, crosses less by the
+same count. The grounded band holds 255 and the flow meter band 127 after
+the change; the movement that landed this carries the compare and voice
+doors' new counts in its crossings row.
+
+## The routine walked and landed nothing
+
+The daily routine fired at 09:07 UTC in a fresh session, ran 46 seconds,
+reported success, and the branch did not move. Its transcript is not
+readable from here, so its conditions were rebuilt instead: a fresh clone
+with no caches and no evidence directory, the kernel built, the movement door
+run without landing, and the landing door run in its held path. The movement's
+steps all held; the landing printed no verdict at all. The cause: the landing
+door wrote its commit message under `.form-heal/`, a directory that every
+door in this checkout had already made and a fresh checkout does not have;
+the write answered nothing, the commit found no message file, and the files
+stayed staged. The landing door now makes the directory before it writes,
+and takes nothing from its host calls as empty rather than letting a missing
+value swallow the printed verdict. In the fresh clone the held landing now
+prints `held: no paths or no subject` and the directory exists after it.
+
+The first day's landings never met this because the voice door had made the
+directory first; the routine met it on its first morning. That is what a
+fresh session is for.
+
+## The witness landed nothing, and the walk moves home
+
+The routine was fired once more as a witness after the landing door learned
+to make its own directory. Its run read green and finished in 57 seconds;
+the branch did not move, no other branch appeared, and the published page
+carries no row of it. The routines documentation says what green means
+there: the session exited without an infrastructure error, not that the
+task succeeded; the run's log is readable only from the web. The same
+movement, in a fresh clone of this checkout pushing to a bare copy, lands in
+two seconds with the oracle down and in three minutes with it up. Whatever
+held the cloud run is outside the body's doors.
+
+Two things follow. The landing door now carries the push's own exit: the
+landing line reads `landed` only when the push reached origin, and
+`held: the push did not reach origin` with the push's last line when it did
+not; the movement's JSON line carries that line as `push`. Tested in the
+fresh clone against a reachable and an unreachable remote. A commit that
+stayed local can no longer read as landed.
+
+And the daily walk moves to the Mac, where the oracle lives and the push is
+the person's own: `docs/local-walk-prompt.md` carries the goal and the one
+call, for a Desktop local routine or a `claude -p` job. The cloud routine
+is paused, not deleted, so its two runs stay readable.
+
+Read after that landing, from the routine's own stored request: it carries
+no repository source. The two fresh sessions it fired had no checkout at
+all, so their first step, the fetch, failed before any door ran, and the
+green status was the session exiting with its report. A routine minted from
+inside a session must name its repository. The local prompt runs in the
+person's own checkout and has no such seam.
+
+## The walk came home: the first local landing
+
+Ten minutes after the local prompt landed, the Mac walked it. Commit
+0c8eea3, `Local movement 2026-09-19: rows and the redrawn ladder`, arrived
+on the branch from a Claude Code worktree of the person's own checkout,
+pushed by the landing door with the push's exit read. Its rows: the flow
+meter on that session read 2 provider turns, 3 provider calls, 1 native
+call, 0 calls outside the form, 169,826 tokens seen and 41,631 uncached;
+the voice read `none` with the oracle unreachable on that machine's
+loopback at that hour; the native single call held its floor, 9 axes, 9
+receipts cited and existing, rent 0; the movement crossed 6 times, the
+voice door 8 with one loopback attempt, the compare door 35. The page was
+redrawn on the Mac; the republish did not reach the artifact from there,
+so this session republished the Mac's page as version 19.
+
+That is W1 of the goal, measured for the first time on the person's own
+metal: the body walks the whole daily movement and the rented mind spends
+two turns issuing one call. The cloud routine never walked at all.
+
+## Main moved; the ledgers merge as the union
+
+While the branch waited, main advanced by four of the person's own commits,
+the comparison voices moving inside the native Form model session. The only
+conflict was the rent ledger: both sides appended rows at its end. Ledgers
+are append-only rows, so their merge is the union of both sides;
+`.gitattributes` now says so for every ledger under receipts. The branch
+took main by a merge with that driver, main's 17 rows and the branch's 4,
+no line lost, no duplicate, every line still a row; a merge rather than a
+rebase keeps the Mac's checkout fast-forwardable. A rebase was walked first
+and verified the same way, and its push, a rewrite of the branch, was held
+by the session's own permission layer; the rebased history is kept as a
+local branch, unpushed. The doors preflight clean on the merged tree, the
+flow meter band holds 127 and the gates 8191. The local prompt's first step
+now rebases onto origin's head, so a moved branch does not stop the walk.

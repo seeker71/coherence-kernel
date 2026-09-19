@@ -6,7 +6,8 @@
 // The witness runs first and its output is shown. The drift gates run next as
 // a child fkwu; a refused gate lands nothing. Then host git adds the named
 // paths, commits with exactly subject, blank line, body, and pushes the
-// current branch to its own name on origin. Every crossing to a child process
+// current branch to its own name on origin; the push answers with its own
+// exit, so a commit that did not reach origin reads held, never landed. Every crossing to a child process
 // happens inside this call's census window and is printed at the end, so what
 // left the body is counted, never hidden. The message file lives under
 // .form-heal, which git forgets.
@@ -61,22 +62,30 @@ section [form.bml] {
    let witness = ld-str(request, "witness");
    let paths = ld-paths(request);
    let subject = ld-str(request, "subject");
-   let witnessOut = if str_eq(witness, "") then "" else host-exec(mc-cat(list(witness, " 2>&1")), "");
-   let gates = host-exec("./fkwu gate/drift-gates-run.bml 2>&1", "");
+   let witnessOut0 = if str_eq(witness, "") then "" else host-exec(mc-cat(list(witness, " 2>&1")), "");
+   let witnessOut = if nothing?(witnessOut0) then "" else witnessOut0;
+   let gates0 = host-exec("./fkwu gate/drift-gates-run.bml 2>&1", "");
+   let gates = if nothing?(gates0) then "" else gates0;
    let green = ge(str_find(gates, " refused=0 ", 0), 0);
    let ready = and(green, and(eq(misses, 0), and(not(nil?(paths)), not(str_eq(subject, "")))));
-   let saved = write_file_text(ld-message-path(), mc-cat(list(subject, "\n\n", ld-str(request, "body"), "\n")));
+   // the message lives under .form-heal, which a fresh checkout does not have yet: make it before writing
+   let spool = fs_mkdir(".form-heal");
+   let saved0 = write_file_text(ld-message-path(), mc-cat(list(subject, "\n\n", ld-str(request, "body"), "\n")));
+   let saved = if nothing?(saved0) then 0 else saved0;
    let added = if ready then host-exec(mc-cat(list("git add ", ld-join(ld-quoted(paths), " "), " 2>&1")), "") else "";
    let committed = if ready then host-exec(mc-cat(list("git -c user.name=Claude -c user.email=noreply@anthropic.com commit -q -F ", ld-message-path(), " 2>&1 && git log --oneline -1")), "") else "";
-   let pushed = if ready then host-exec("git push -u origin HEAD 2>&1 | tail -1", "") else "";
-   let result = fmrc-close(window, if ready then "landed" else "held", ld-source(), 2, 1);
+   // the push answers with its own exit: a commit that did not reach origin is held, never landed
+   let pushed0 = if ready then host-exec("out=$(git push -u origin HEAD 2>&1); code=$?; printf '[push] exit=%s %s\\n' \"$code\" \"$(printf '%s' \"$out\" | tail -n 1)\"", "") else "";
+   let pushed = if nothing?(pushed0) then "" else pushed0;
+   let pushOk = ge(str_find(pushed, "[push] exit=0", 0), 0);
+   let result = fmrc-close(window, if and(ready, pushOk) then "landed" else "held", ld-source(), 2, 1);
    let rows = fmrc-result-deltas(result);
    print_str(mc-cat(list(
     if str_eq(witnessOut, "") then "" else mc-cat(list("[witness] ", witness, "\n", witnessOut, "\n")),
     if str_eq(restarted, "") then "" else mc-cat(list("[restart] ", restarted, "\n")),
     "[files] written=", int_to_str(written), " appended=", int_to_str(appendedFiles), " edit-misses=", int_to_str(misses), "\n",
     "[gates] ", ld-tail(gates, 120),
-    "[landing] ", if ready then "landed" else if not(green) then "held: a gate refused" else if gt(misses, 0) then "held: an edit missed" else "held: no paths or no subject", "\n",
+    "[landing] ", if and(ready, pushOk) then "landed" else if ready then "held: the push did not reach origin" else if not(green) then "held: a gate refused" else if gt(misses, 0) then "held: an edit missed" else "held: no paths or no subject", "\n",
     if ready then mc-cat(list(added, committed, "\n", pushed, "\n")) else "",
     "[crossings of this call] census-status=", fmrc-result-status(result), " dispatches=", int_to_str(fmrc-delta-total(rows)), "\n",
     ld-planes(ld-plane-names(), rows))));
