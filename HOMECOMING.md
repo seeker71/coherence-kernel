@@ -48,7 +48,13 @@ allowance and introduced unsupported trust and vitality ratings. That prompt
 trial remains unpromoted. A focused contrast completed: Qwen distinguished
 observed crossings, absent judgments, participant-reported judgments and a
 single dictionary miss. This makes context organization and decomposition the
-next response-quality experiment; the complete comparison remains open.
+next response-quality experiment; the complete comparison remains open. The
+[sectioned-context attempt](receipts/2026-09-20-sectioned-context-and-reported-model-cost.md)
+completed and preserved lookup scope, but its conclusion still inferred
+unsupported qualitative superiority. Its default remains unpromoted. The same
+movement repaired the native comparison's cost evidence: retained CLI results
+now contribute every reported model's usage, with partial-turn and unknown
+call coverage explicit.
 
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
