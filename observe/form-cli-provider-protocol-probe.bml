@@ -1,0 +1,41 @@
+// preflight-exec: forbidden
+// Local protocol negotiation only. Never sends thread/start or turn/start.
+// Darwin ARM64 transport through existing Form-generated pipes in RAM.
+// preludes: form-stdlib/bml/native-pipe-darwin.bml form-stdlib/bml/form-cli-response-shared.bml form-stdlib/bml/form-cli-provider-notification.bml
+section [form.bml] {
+ class FormProviderProtocolProbe {
+  def fpp-request() = "{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"form_usage_probe\",\"version\":\"1\"}}}\n";
+  def fpp-response(text,at) {
+   let end = str_find(text,"\n",at);
+   if lt(end,0) then json-node-null() else fpp-row(substring(text,at,end),text,add(end,1));
+  }
+  def fpp-row(line,text,next) {
+   let row = if jwa-valid(line) then parse-json("provider-protocol",line) else json-node-null();
+   if and(frte-json-nonnegative-int-field?(row,"id"),eq(json-int-value(json-object-get(row,"id")),1)) then row else fpp-response(text,next);
+  }
+  def fpp-loop(owner,job,start,bytes,errors) {
+   npp-pump(owner,50);
+   let output = str_concat(bytes,npp-take(owner,job,"stdout"));
+   let stderr = str_concat(errors,npp-take(owner,job,"stderr"));
+   let reply = fpp-response(output,0);
+   if or(not(node_eq(reply,json-node-null())),or(gt(sub(host_monotonic_ms(),start),5000),or(npp-done(owner,job),or(gt(str_len(output),1048576),gt(str_len(stderr),1048576))))) then list(reply,output,stderr) else fpp-loop(owner,job,start,output,stderr);
+  }
+  def fpp-run(root) {
+   if not(eq(host_dir_mkdir(root),1)) then form_error("protocol probe requires a fresh owned directory;no automatic restart") else 0;
+   let owner = npp-open(); let started = host_monotonic_ms();
+   let job = npp-spawn(owner,list("codex","app-server","--stdio"));
+   let submitted = if record?(job) then npp-submit(owner,job,fpp-request()) else 0;
+   let seen = if submitted then fpp-loop(owner,job,started,"","") else list(json-node-null(),"","");
+   let received = nth(seen,0);
+   let closed = npp-close(owner);
+   let ok = and(submitted,and(frte-json-object?(frte-json-object-field(received,"result")),closed));
+   frsh-frozen(frsh-path(root,"request.jsonl"),fpp-request());
+   frsh-frozen(frsh-path(root,"stdout.jsonl"),nth(seen,1));
+   frsh-frozen(frsh-path(root,"stderr.txt"),nth(seen,2));
+   let result = json-node-object(list(nsm-s("schema","form-provider-protocol-probe-v1"),nsm-n("initialize_response",frte-json-object?(frte-json-object-field(received,"result"))),nsm-n("process_pid",if record?(job) then record_get(job,"pid") else -1),nsm-n("process_reaped",if record?(job) then record_get(job,"reaped") else 0),nsm-n("owned_resources_closed",closed),nsm-n("elapsed_ms",sub(host_monotonic_ms(),started)),nsm-n("sent_requests",1),nsm-n("thread_start_requests",0),nsm-n("turn_start_requests",0),nsm-n("provider_generation_requests",0),nsm-n("stdout_bytes",str_len(nth(seen,1))),nsm-n("stderr_bytes",str_len(nth(seen,2))),nsm-s("boundary","protocol handshake only;usage notification delivery and generation unobserved")));
+   frsh-frozen(frsh-path(root,"result.json"),json-emit(result)); print_str(json-emit(result));
+   if ok then 1 else form_error("provider protocol probe incomplete;inspect retained owned evidence");
+  }
+ }
+ fpp-run(read_line());
+}

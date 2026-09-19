@@ -81,3 +81,7 @@ stops accepting usage at the first invalid or failed event. Whole-stream totals
 stay null. With no completed turn, or a failed file read, prefix quantities also
 remain null. Do not add the prefix to a complete total from the same stream:
 these are two scopes over the same usage events, not separate spending.
+
+[App Server usage observation](form-provider-usage-observation.md) carries the
+native reader and transport probe for an interface that exposes usage updates
+during a task. Its integration into this execution resource remains open.
