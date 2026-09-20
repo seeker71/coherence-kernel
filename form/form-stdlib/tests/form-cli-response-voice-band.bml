@@ -1,0 +1,49 @@
+// Admission, unchanged caller checks and retained output; no model or living writes.
+// preludes: form-stdlib/bml/form-cli-response-resident.bml form-stdlib/bml/form-cli-response-synthesis.bml
+section [form.bml] {
+ class FormResponseVoiceBand {
+  def frsvb-assert(name,value) = if value then 1 else form_error(name);
+  def frsvb-manifest(member) = json-node-object(list(nsm-s("session","voice-band"),json-node-pair("cases",json-node-array(list(member)))));
+ }
+ let request = parse-json("request","{\"mode\":\"review\",\"evaluation\":1,\"goal\":\"Return value from value.json.\",\"documents\":[{\"id\":\"value\",\"path\":\"value.json\",\"text\":\"{\\\"value\\\":false}\"}],\"writable\":[],\"checks\":[{\"tool\":\"jq\",\"arguments\":[\".value\",\"value.json\"],\"stdout\":\"false\\n\"}],\"report_checks\":[{\"tool\":\"jq\",\"arguments\":[\".value\"],\"stdout\":\"false\\n\"}]}");
+ let agent = json-node-object(list(nsm-s("id","one"),json-node-pair("request",request)));
+ let member = oh-set(agent,"response_path",json-node-string("voice"));
+ let manifest = frsvb-manifest(member);
+ frsvb-assert("agent remains the default",and(str_eq(frsv-path(agent),"agent"),frss-valid(frsvb-manifest(agent))));
+ frsvb-assert("explicit voice admitted",frss-valid(manifest));
+ frsvb-assert("unknown path is not silently ignored",not(frss-member-valid(oh-set(member,"response_path",json-node-string("other")))));
+ frsvb-assert("non-string path is not silently ignored",not(frss-member-valid(oh-set(member,"response_path",json-node-int(1)))));
+ frsvb-assert("voice cannot execute coding tasks",not(frsv-request-valid(oh-set(request,"mode",json-node-string("code")))));
+ frsvb-assert("voice requires supplied full source",not(frsv-request-valid(oh-set(request,"document_context",json-node-string("catalog")))));
+ frsvb-assert("requested source queries are not silently dropped",not(frsv-request-valid(oh-set(request,"source_queries",parse-json("queries","[{\"tool\":\"cat\",\"arguments\":[\"value.json\"]}]")))));
+ frsvb-assert("voice enforces its generation bound",not(frsv-request-valid(oh-set(request,"max_reply_tokens",json-node-int(8193)))));
+ frsvb-assert("context must exceed reply allowance",not(frsv-request-valid(oh-set(oh-set(request,"max_reply_tokens",json-node-int(2)),"context",json-node-int(1)))));
+ frsvb-assert("resident cannot silently use the agent for a voice case",not(frsr-valid(manifest)));
+ let provider = parse-json("provider","{\"allowed\":true,\"interface\":\"codex-exec\",\"max_processes\":1,\"seconds\":60}");
+ frsvb-assert("provider synthesis cannot silently consume a voice case",not(frsy-valid(oh-set(manifest,"provider",provider))));
+ let sentinel = oh-set(request,"report_checks",parse-json("sentinel","[{\"tool\":\"cat\",\"arguments\":[],\"stdout\":\"private-expected-sentinel\"}]"));
+ frsvb-assert("expected assertions stay out of the packet",lt(str_find(frsv-packet(sentinel),"private-expected-sentinel",0),0));
+ let text = "{\"value\":false}";
+ let voice = list("answered",text,10,4,"fixture-model",1,1,"answered",text,list());
+ let source = fcaq-check(node_children(json-object-get(request,"checks")),fat-wire-value(fat-wire-documents(request)));
+ let result = parse-json("result",frsv-result(request,voice,source));
+ frsvb-assert("original false-valued assertions still run",eq(nsm-num(frss-recheck(request,result),"checked_behavior_passed"),1));
+ frsvb-assert("source documents preserved",node_eq(json-object-get(result,"documents"),json-object-get(request,"documents")));
+ frsvb-assert("voice source is explicit",and(str_eq(fcap-string(result,"report_source"),"native-voice"),frsv-result-path-valid(member,result)));
+ frsvb-assert("voice result cannot be relabeled agent",not(frsv-result-path-valid(agent,result)));
+ let agentResult = json-node-object(list(nsm-s("schema","form-native-code-v1")));
+ frsvb-assert("agent result cannot be relabeled voice",not(frsv-result-path-valid(member,agentResult)));
+ let incomplete = parse-json("incomplete",frsv-result(request,list("incomplete","",10,4,"fixture-model",0,1,"incomplete","{\"value\":",list()),source));
+ frsvb-assert("unfinished bytes retained without a report",and(str_eq(fcap-string(incomplete,"report"),""),str_eq(fcap-string(incomplete,"unaccepted_response"),"{\"value\":")));
+ frsvb-assert("unfinished response cannot pass",eq(nsm-num(frss-recheck(request,incomplete),"checked_behavior_passed"),0));
+ let unreleased = parse-json("unreleased",frsv-result(request,list("release-incomplete","",10,4,"fixture-model",1,0,"release-incomplete",text,list()),source));
+ frsvb-assert("unreleased response stays unaccepted and retained",and(str_eq(fcap-string(unreleased,"unaccepted_response"),text),eq(nsm-num(frss-recheck(request,unreleased),"checked_behavior_passed"),0)));
+ let badSource = oh-set(request,"documents",parse-json("changed","[{\"id\":\"value\",\"path\":\"value.json\",\"text\":\"{\\\"value\\\":true}\"}]"));
+ let stopped = parse-json("source-stopped",frsv-run(badSource));
+ frsvb-assert("failed source prevents model admission",and(eq(nsm-num(stopped,"source_checks_prechecked"),0),str_eq(fcap-string(json-object-get(stopped,"generation"),"status"),"not-asked")));
+ let digest = fcam-hash(json-emit(request));
+ let row = json-node-object(list(nsm-s("id","one"),nsm-s("request_sha256",digest),nsm-s("evidence",frsh-path("fixture-root",str_concat("0-",digest))),nsm-s("response_path","voice")));
+ frsvb-assert("replay binds the selected response path",and(frss-rows-bound(list(row),list(member),"fixture-root",0),not(frss-rows-bound(list(oh-set(row,"response_path",json-node-string("agent"))),list(member),"fixture-root",0))));
+ frsvb-assert("checks leave semantic quality unknown",node_eq(json-object-get(frss-recheck(request,result),"semantic_quality"),json-node-null()));
+ 1;
+}

@@ -1,0 +1,33 @@
+// A source-backed answer through the native voice, with caller checks outside it.
+// preludes: form-stdlib/bml/form-cli-response-shared.bml form-stdlib/bml/form-cli-native-voice.bml
+section [form.bml] {
+ class FormCliResponseVoice {
+  def frsv-path(member) = if json-object-has?(member,"response_path") then fcap-string(member,"response_path") else "agent";
+  def frsv-request-valid(request) {
+   let queries = json-object-get(request,"source_queries");
+   let noQueries = or(not(json-object-has?(request,"source_queries")),and(fat-wire-array?(queries),nil?(node_children(queries))));
+   let limit = fcnv-number(request,"max_reply_tokens",fcnv-limit());
+   let context = fcnv-number(request,"context",fcnv-context());
+   and(str_eq(fcaq-mode(request),"review"),and(str_eq(fcaq-document-context(request),"full"),and(noQueries,fcnv-allowance-valid(context,limit))));
+  }
+  def frsv-member-valid(member) = if str_eq(frsv-path(member),"agent") then 1 else if str_eq(frsv-path(member),"voice") then frsv-request-valid(json-object-get(member,"request")) else 0;
+  def frsv-packet(request) = str_concat(fcap-string(request,"goal"),str_concat("\n\nSupplied sources:\n",json-emit(json-object-get(request,"documents"))));
+  def frsv-result(request,voice,source) {
+   let answered = and(eq(head(source),1),and(str_eq(nth(voice,0),"answered"),and(eq(nth(voice,5),1),eq(nth(voice,6),1))));
+   let report = if answered then nth(voice,1) else "";
+   let state = if not(eq(nth(voice,6),1)) then "release-incomplete" else if answered then "complete" else "attention";
+   let fields = list(nsm-s("schema","form-native-response-voice-v1"),nsm-s("mode","review"),nsm-s("status",state),nsm-s("reason",if eq(head(source),1) then nth(voice,7) else nth(source,1)),nsm-s("report",report),nsm-s("report_source",if answered then "native-voice" else "none"),nsm-n("turns",if gt(nth(voice,3),0) then 1 else 0),nsm-n("tool_calls",0),nsm-n("repair_attempts",0),nsm-n("check_runs",0),nsm-n("generated_ids",nth(voice,3)),nsm-n("injected_ids",0),nsm-n("release_ok",nth(voice,6)),nsm-n("source_checks_prechecked",head(source)),json-node-pair("documents",json-object-get(request,"documents")));
+   let detail = list(json-node-pair("generation",fcnv-metadata(voice)),nsm-s("profile",fcnv-profile()),nsm-s("unaccepted_response",if answered then "" else nth(voice,8)),nsm-s("execution_scope","one native generation; full supplied sources; no model tools, agent stages, reasoning reserve or training; session rechecks original source/report assertions"));
+   json-emit(json-node-object(append(fields,detail)));
+  }
+  def frsv-run(request) {
+   if not(and(frsh-request-valid(request),frsv-request-valid(request))) then form_error("native voice requires a read-only evaluation with full documents, no source queries and a valid generation allowance") else {
+    let source = fcaq-check(node_children(json-object-get(request,"checks")),fat-wire-value(fat-wire-documents(request)));
+    let voice = if eq(head(source),1) then fcnv-ask(frsv-packet(request),request) else fcnv-none("not-asked","","source-check-failed");
+    frsv-result(request,voice,source);
+   };
+  }
+  def frsv-result-path-valid(row,result) = if str_eq(frsv-path(row),"voice") then str_eq(fcap-string(result,"schema"),"form-native-response-voice-v1") else and(str_eq(frsv-path(row),"agent"),not(str_eq(fcap-string(result,"schema"),"form-native-response-voice-v1")));
+ }
+ 0;
+}
