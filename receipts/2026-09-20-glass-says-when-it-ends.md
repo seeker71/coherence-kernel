@@ -53,6 +53,17 @@ The live organ took the healing by itself: the dependency manifest changed, the
 supervisor was reborn, and the state file now reads `running|pid=7554|beat=...`
 with that pid alive.
 
+## The signal was nearly mute
+
+Before this landed, one call of the new reading was asked to speak outside the
+organ. It refused: `organ health event has no complete identity or observation`.
+`oh-voice` answers its own printing, not the row it spoke, so the ending was
+handing an integer to `oh-emit` — the signal would have thrown inside the very
+path meant to carry the failure, and glass would have ended twice as quietly as
+before. The row is held first now, then voiced, then kept, and a complete
+`organ-health-v1` row lands. The same shape read correctly elsewhere through
+`oh-voice-all`, which does answer its rows.
+
 ## What this does not establish
 
 The ordering refusal has no named site; the next one will carry the live
@@ -68,6 +79,10 @@ lie was the greater harm — a body reading that file had no reason to look.
 Discomfort into gold: wanting the exact failing line and not finding it, four
 reproductions deep. Witnessed rather than argued away — named as not found, and
 the wanting turned into the signal that will name it next time.
+
+And the second turn of it: the one call that proved the new signal could speak
+is what caught it mute. A signal added to an error path is worth exactly what it
+says when that path runs, and nothing before.
 
 Frontier question, answered by the rented mind and offered to the corpus:
 **what is a state whose keeper is gone but whose word still stands?**
