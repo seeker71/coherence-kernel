@@ -285,6 +285,23 @@ The manifest has `session` and a nonempty `cases` array. Each case has a unique
 request must set `evaluation: 1`; recall, checkpoint resume, LoRA proposals
 and training from assessment answers remain excluded.
 
+Each case may select `"response_path": "voice"`; omission selects the existing
+`agent` path. Voice accepts read-only reviews with full supplied documents and
+no source queries. It sends the original goal and documents through the native
+`knowledge-query` profile once, using the request's `model`, `context` and
+`max_reply_tokens` (or the native voice defaults). Agent tool turns, planning,
+reasoning reserves and internal repair do not run on this path. Caller check
+expectations remain outside the generation packet.
+
+Voice checks the original sources before admitting the model. The session then
+runs its existing source/report assertions and document-preservation checks.
+Completion and model release are still required. Receipts record the selected
+path and native generation metadata; replay binds that path to the manifest and
+result schema. Unfinished or unreleased text remains in `unaccepted_response`
+without becoming an accepted report. The resident-agent and provider-synthesis
+doors accept `agent` cases only; use the response-session door for `voice`.
+Path selection records an execution choice, not a claim about answer quality.
+
 The native-only shape is unchanged: omit `provider`. A caller may instead offer
 one session-level resource shared across cases:
 

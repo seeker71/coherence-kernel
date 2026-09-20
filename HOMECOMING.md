@@ -74,6 +74,15 @@ the unsupported claim and unfinished draft as compliant, then exhausted its
 final allowance before completing the revision. Both attempts remain
 visible; neither supplies an automatic quality safeguard for serving.
 
+The [native voice response path](receipts/2026-09-20-native-voice-response-path.md)
+returns the original deadline question and sources through the existing
+knowledge-query voice. Its draft preserves the deadline without inventing a
+reason for silence or leaving a signature placeholder. The public response
+session reproduces that answer byte for byte in 205 generated IDs, keeps the
+original checks and replays without new generation. Cases can now explicitly
+select `response_path: "voice"`. Wording and conceptual precision still have
+visible gaps; this known-case improvement establishes no general quality parity.
+
 An explicitly offered provider can contribute through the
 [Form-owned synthesis door](docs/form-response-synthesis.md). The
 [restored-source provider review](receipts/2026-09-20-comparison-source-coverage.md)
