@@ -67,6 +67,13 @@ repair. Its explanation stated the evidence boundary correctly. The receipt
 keeps both native replies and a separately attributed arriving answer: the
 remaining gap lies in carrying the boundary into the practical wording.
 
+The [native response reviews](receipts/2026-09-20-native-response-review.md)
+tested recognition of that gap. A general review returned no findings and
+copied the candidate unchanged. A requirement-by-requirement review marked
+the unsupported claim and unfinished draft as compliant, then exhausted its
+final allowance before completing the revision. Both attempts remain
+visible; neither supplies an automatic quality safeguard for serving.
+
 An explicitly offered provider can contribute through the
 [Form-owned synthesis door](docs/form-response-synthesis.md). The
 [restored-source provider review](receipts/2026-09-20-comparison-source-coverage.md)
