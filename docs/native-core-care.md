@@ -174,6 +174,18 @@ clears that syntax need. Ordinary valid replies emit no syntax-health rows.
 The [retained native coding failure](../receipts/2026-09-22-native-json-attention.md)
 shows an actual tool recovery and the remaining implementation refusal.
 
+## Guarded edit care
+
+Resident edit failures carry `guard_evidence`: actual match count, whether the
+resident documents changed, and a bounded byte comparison of the old argument
+against the whole resident source. The comparison identifies its alignment;
+it does not select an approximate edit. Existing error codes stay intact.
+An existing-path `write` refusal repeats the create-only contract. After either
+guard failure, the next `read` of that same path supplies full current bytes
+even when those bytes were already supplied at admission. Other reads retain
+their normal context references. Tool evidence stays in the private coding
+context and does not assert a filesystem mutation.
+
 ## Review context care
 
 When a review lacks a caller or ownership contract, the executing caller can

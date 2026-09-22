@@ -1,5 +1,15 @@
 # Measuring the voice
 
+**Scope correction, Codex, 2026-09-22:** the original interpretation below
+overstates what this counter measures. It compares digit strings and exact
+trimmed lines; it does not verify claims. The statements that these answers
+“invented nothing” and that their shortfall is abandonment are not established
+by these counts. A retained native coding diagnosis reused byte 3166 while
+incorrectly suggesting syntax care changed a document that remained unchanged.
+Current readings use `form-voice-text-overlap-v2`, explicitly leave claim support
+unmeasured, and distinguish absent sources from empty ones. The original
+reading and interpretation follow as historical evidence.
+
 2026-09-22, this Mac. The wall in front of the native voice is fidelity, and
 fidelity was being asserted rather than counted. Now the body counts it.
 
