@@ -828,6 +828,28 @@ action. Context references become admitted only after loading completes; the
 next checkpoint retains those references as well. A refused checkpoint write
 stops advancement with the candidate retained in the returned state.
 
+When completed work fills the model context, the coding owner uses the existing
+independent-stream renewal cell. It keeps the admitted weights, prefills a fresh
+bootstrap from the current candidate and retained task, and checks retirement
+of the old stream. The returned session becomes the sole owner. Role and failure
+references reset so the new stream receives their full evidence. Source documents,
+permissions, caller checks and the absolute reply limit remain unchanged.
+
+Renewal requires a completed reply in the departing context and remaining reply
+allowance. A bootstrap that leaves no usable space therefore stops instead of
+repeating admission. Partial generations, empty encoded feedback and failed
+prefills retain their failure paths. Capacity is checked before feedback touches
+the stream; only that nonmutating failure can retain its earlier live owner.
+An unsuccessful renewal ends the call, releases the returned owner and retains
+any incomplete stream release as a failed release. Initial reasoning and answer
+reserve routes use this same continuation after their initial stage.
+
+`form-code-context` records actual renewal, ownership replacement, reason,
+context prompt size and accumulated generated/injected IDs. Ordinary progress
+frames retain their current-context counters. Final generated IDs, injected IDs
+and completed-observation counts sum all contexts in the coding call. Those
+counters do not include all prefill work or establish response quality.
+
 The coding-loop `verify` tool invokes the caller's existing source checks in
 any role. It accepts an empty argument array and no input; the model cannot
 provide a program, command, path or replacement checker. Its actual outcome
