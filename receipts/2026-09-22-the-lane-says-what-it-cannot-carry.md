@@ -51,9 +51,57 @@ here.
 | Adapter lane, ~4,200 prompt IDs | 71.7 GB resident, no progress in 60 s |
 | Same walk after the bound | 1.3 GB, computing, registry weights answering |
 
+## The cause, and the policy that let it in
+
+`unavailable` is the body declining its own work, so the bound did not get to
+stand. The cause is arithmetic the body already writes down. `nlg-forward-bytes`
+estimates a prefill slice as
+
+```
+layers x ( t x (7d + 2kd + 3*intermediate + 2) + t x heads x (pos + t) )
+```
+
+The second term is the attention tape: quadratic in the slice. For this 3B —
+28 layers, d 3072, 24 heads, 8 kv heads x 128, intermediate 8192 — a single
+slice of 4,200 prompt IDs asks for **70.0 GB**. Measured: 71.7 GB resident.
+
+`nlg-chunk` halves the slice until `nlg-room` says it fits, and on this Mac the
+device budget is 107 GB, so room said yes to the whole prompt at once. The
+policy asked whether the slice fits the budget, never whether the machine could
+work inside it. Room is not wisdom.
+
+A slice is now bounded by a share of that budget — a sixteenth, 6.7 GB here —
+and the prefill walks the prompt in as many slices as that takes. The witness
+on the same 16,680-byte packet that wedged:
+
+| | before | after |
+| --- | ---: | ---: |
+| Resident | 71.7 GB | 6.3 GB |
+| CPU over a minute | frozen at 0:19.93 | advancing |
+| Outcome | nothing said, nothing ended | the lane spoke |
+
+Walked through the body's own door afterwards, the row says it plainly:
+
+```
+lane native-metal-lora   source fkwu-model-session   oracle answered
+prompt IDs evaluated 4,523   predicted 233   ms 493,546
+complete 0   reason adapted-repeat   answer_bytes 924   axes 0   receipts cited 0
+```
+
+The lane carries the composition now. What stands in its place is not
+unavailability but fidelity: a 3B given 4,523 grounded tokens began repeating,
+and the repeat guard cut it at 233. That is the wall the goal already names, and
+it is a different kind of work than a policy that asked the wrong question.
+
+The bound drawn from witness is gone with the cause: the lane carries what the
+prefill can slice, and what it cannot admit it says as memory-pressure.
+
 ## Receipt
 
-The surprise: the failure that cost the most was the one that never failed. A
+The surprise: the failure that cost the most was the one that never failed — and
+bounding it was not the repair. A bound drawn from witness is a scar worn where
+the wound has not been looked at; the arithmetic for this one was already in the
+body, one line above the policy that ignored it. A
 door that refuses leaves a row; a door that wedges leaves a process holding
 seventy-one gigabytes and a person guessing it is slow. Two walks were lost to
 reading a wedge as patience.
