@@ -814,6 +814,20 @@ The full existing native tool set is reused: `rg`, `jq`, `read`, `cat`, `head`,
 existing supported subsets and error behavior remain unchanged. An unavailable
 tool or invalid edit becomes a tool observation, not a shell fallback. Malformed
 model responses receive a correlated native revise action and a format reminder.
+Closing the last implementation task also runs the caller's existing source
+checks before entering review. A failed check enters repair with the current
+diagnostic and checked document hashes. A passing check supplies that evidence
+to review; final acceptance runs the caller checks again. This consumes one
+model reply and one actual check, with no invented tool call. Intermediate tasks
+continue without this whole-candidate check. Read-only report work keeps its
+report-aware submission boundary.
+
+The coding runtime saves a completed action before loading its feedback into
+the model context. Interrupted feedback loading can therefore resume from that
+action. Context references become admitted only after loading completes; the
+next checkpoint retains those references as well. A refused checkpoint write
+stops advancement with the candidate retained in the returned state.
+
 The coding-loop `verify` tool invokes the caller's existing source checks in
 any role. It accepts an empty argument array and no input; the model cannot
 provide a program, command, path or replacement checker. Its actual outcome
