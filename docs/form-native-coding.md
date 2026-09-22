@@ -489,7 +489,7 @@ result. `cat` always returns full current text; focused queries remain available
 Source/report verification continues to use actual document bytes; it does not
 consume these model-context references or splices.
 
-Read-only reviews may opt into `"document_context":"catalog"`. The initial
+Coding and read-only reviews may opt into `"document_context":"catalog"`. The initial
 prompt contains source IDs, paths and byte counts; native tools retain all
 original source text. `read`, `cat` and focused queries retrieve that text on
 demand. The admission snapshot starts empty, so a catalog cannot produce a
@@ -497,7 +497,7 @@ reference or patch against source text omitted from the prompt. Reads continue
 returning full results in this mode. Resume starts a fresh catalog context;
 previous tool reads do not implicitly establish visibility there.
 
-Catalog reviews can also supply `source_queries` to put selected native source
+Catalog requests can also supply `source_queries` to put selected native source
 observations into the initial model context:
 
 ```json

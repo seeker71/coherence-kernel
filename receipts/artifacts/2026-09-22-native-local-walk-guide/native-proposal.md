@@ -1,16 +1,21 @@
 # The daily walk, on the Mac
 
-The walk runs directly through the local kernel. It uses registry model weights
-and the host's optional Metal carrier in-process.
+The walk runs directly through the local kernel; the model runs in-process. No
+external assistant, no loopback server, no transcript discovery, no schedule.
 
 ## Run
 
-Follow the [C-bootstrap and freshness instructions](../AGENTS.md#ground-the-kernel-first-temporary-c-seed-shrinking-to-zero), then run from the repository root:
+Build the kernel once per checkout (see AGENTS.md for the full C-bootstrap and
+freshness recipe):
 
 ```sh
-./form-run ./fkwu observe/movement-run.bml <<'FORM_MOVEMENT'
-{"movement":"local walk","transcript":"","subject":"Local native movement"}
-FORM_MOVEMENT
+cc -O2 -o fkwu runtime/fkwu-uni.c
+```
+
+Then make one call, replacing `<date>` with today (YYYY-MM-DD):
+
+```sh
+printf '%s\n' '{"movement":"local <date>","subject":"Local movement <date>: rows and the redrawn ladder","body":"Walked by the body in one call (observe/movement-run.bml) on the Mac: the in-process model, the native single call, the flow meter, the page redrawn from the ledgers."}' | ./form-run ./fkwu observe/movement-run.bml
 ```
 
 ## Inputs
@@ -25,6 +30,7 @@ Stdin is one JSON object; every field is optional.
   unmeasured, not zero cost.
 - `lane`, `adapter`, `model`, `max_reply_tokens`: voice/model options.
 - `land` (1/0): land the movement (default 1). `land=0` skips landing.
+- `restart`: optional restart command.
 - `paths`: extra paths to include in the landing.
 - `subject`, `body`: commit message fields.
 
@@ -55,3 +61,8 @@ success.
 A failure asks for inspection and repair from retained evidence before
 continuation. An observation timeout is not terminal and must not trigger
 another model admission.
+
+## Bootstrap
+
+See AGENTS.md for the C-bootstrap and freshness requirements. Do not duplicate
+that recipe here.

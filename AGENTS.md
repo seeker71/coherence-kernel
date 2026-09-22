@@ -152,6 +152,15 @@ supplies caller-selected source through `oc-hear`, retains the packet and
 re-observes its coverage. Select the relevant callers and contracts; the cell
 checks that supply, while the review establishes what the code does.
 
+For ongoing native coding, use the public `code` request so its owned
+checkpoint retains the work. Select `code_entry: "direct"` when the task is
+already defined; review and verification still run. Coding and review can select
+`document_context: "catalog"` and read relevant source through native tools;
+all documents and caller checks remain available. Use the process organ's
+progress-aware supervision (`seconds: 0`) when no caller requires a wall-time
+limit. An explicit deadline can interrupt progressing work; retain that
+outcome and recover its evidence before admitting another model.
+
 For native response development, or when asked to hear or evaluate native
 generation, use the same source-backed CLI: `models <directory>`,
 `use <observed index>`, `generate <question>`, then
