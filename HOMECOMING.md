@@ -181,6 +181,16 @@ felt outcome. Source fidelity after explicit feedback improved on this case;
 independent detection, reliable instruction following and retained learning
 in this answering model remain open.
 
+The [Qwen teaching-learning path](receipts/2026-09-23-qwen-teaching-learning.md)
+now captures verified completions, trains and retains an explicit Qwen head
+adapter, and binds it to later serving. Validation loss fell from 3.6598 to
+3.3194. On the unchanged enquiry, the candidate gained the label/sense distinction
+but retained source errors, introduced a content-identity/Node-ID conflation,
+and still exceeded the requested length. Both answers completed and released
+their resources. The adapter remains unpromoted; faithful composition and
+whole-session quality parity remain open. Automatic session learning still
+selects Llama; Qwen learning currently uses this explicit native door.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
