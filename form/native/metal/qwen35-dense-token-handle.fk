@@ -12,6 +12,7 @@
 ; preludes: form-stdlib/bml/qwen38-embedding.bml
 ; preludes: form-stdlib/bml/qwen38-prefill-quant.bml
 ; preludes: form-stdlib/bml/qwen38-decode-quant.bml
+; preludes: form-stdlib/bml/qwen38-prefill-completion.bml
 
 (do
     ; Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
@@ -859,7 +860,8 @@
 
     (defn q38-head-only (ps bs geo onormTv projTv)
         (do (q38-head ps bs geo onormTv projTv)
-            (kth-u32at (metal_buf_read (nth bs 31) 0 4) 0)))
+            (let bytes (metal_buf_read (nth bs 31) 0 4))
+            (if (q38pc-head-bytes? bytes) (kth-u32at bytes 0) -1)))
 
     (defn q38-prefill-lm (ps bs geo lays sts embTv onormTv projTv ids pos)
         (do
@@ -1103,23 +1105,30 @@
     ; (q38-open-span, span >= slice). The head is read once, after the
     ; last slice; the final id stays pending per the prefill contract.
     (defn q38-prefill-sliced-go (ps bs geo lays sts embTv ids pos span)
-        (if (eq (len ids) 0) pos
+        (if (eq (len ids) 0) (list pos 1)
             (do (let n (if (lt (len ids) span) (len ids) span))
                 (metal_batch_concurrent)
+                (q38pc-stage pos "embed-begin")
                 (q38-lm-embed ps bs geo embTv (take n ids) 0)
+                (q38pc-stage pos "layers-begin")
                 (q38-lm-layers-span ps bs geo lays sts 0 (nth geo 21) n pos)
-                (metal_sync)
-                (q38oo-stage (str_concat "model-prefill-positions-" (int_to_str (add pos n))) 8388623)
-                (q38-prefill-sliced-go ps bs geo lays sts embTv
-                    (drop n ids) (add pos n) span))))
+                (if (not (q38pc-sync pos n)) (list pos 0)
+                    (do
+                        (q38oo-stage (str_concat "model-prefill-positions-" (int_to_str (add pos n))) 8388623)
+                        (q38-prefill-sliced-go ps bs geo lays sts embTv
+                            (drop n ids) (add pos n) span))))))
     (defn q38-prefill-span-sliced (ps bs geo lays sts embTv onormTv projTv ids pos span)
-        (do (let end (q38-prefill-sliced-go ps bs geo lays sts embTv ids pos span))
+        (if (or (le span 0) (eq (len ids) 0)) (list -1 pos)
+        (do (q38pc-wait-policy)
+            (let end (q38-prefill-sliced-go ps bs geo lays sts embTv ids pos span))
+            (if (not (nth end 1)) (list -1 (nth end 0))
+            (do
             ; The final slice sync closed its concurrent batch. Re-arm before
             ; the barrier-bearing gather and head, or their enqueues refuse
             ; and the first prediction is read from an unwritten/stale buffer.
             (metal_batch_concurrent)
             (q38-gather ps bs geo (sub (q38-last-slice-n (len ids) span) 1) 1)
-            (list (q38-head-only ps bs geo onormTv projTv) end)))
+            (list (q38-head-only ps bs geo onormTv projTv) (nth end 0)))))))
     (defn q38-last-slice-n (n span)
         (if (le n span) n
             (do (let r (mod n span))
