@@ -300,21 +300,25 @@ Embodied knowing means a claim meets real input, can be rejected by an executabl
 
 ## Next completed boundary
 
-Care and Glass already construct and render transient projection values outside
-permanent primary interning, with collector-visible Form roots and an explicit
-node-materialization door. This is the current construction boundary. Event
-admission, reader records and collection still use the seed; the complete
-lifetime below remains the destination.
+Care and Glass parse, retain and render changing observations outside permanent
+primary interning, with collector-visible Form roots and an explicit
+node-materialization door. Shared JSON construction and health protocol logic
+preserve typed data and correlation through that transition. The collector,
+boxed floats, reader records and framebuffer timestamps still use the seed;
+the complete native lifetime below remains the destination.
 Declared stream generations reuse their owned reader, releasing its obsolete
-working references while held views retain their values. Changing events still
-mint permanent primary nodes. Measure those admissions, temporary working
-storage, retained state and latency separately; a quiet-path zero cannot stand
-for the whole lifetime.
+working references while held views retain their values. Current-state updates
+release obsolete event trees instead of extending an overlay chain. Measure
+primary admission, float boxes, temporary storage, retained state, diagnostics
+and latency separately. No primary mints in an observed interval does not mean
+no allocation. Ordinary health text output still materializes nodes through
+its explicit node API; its next caller transition is direct value emission.
 
 The immediate runtime milestone is an owned lifetime for the retained care
 view, connected to the primary value path. It is a real, recurring consumer
-whose changing observations currently depend on primary allocation. The native
-storage components support the attempt; they do not yet replace that path.
+whose changing observations now have reclaimable list/string lifetimes but
+still rely on seed collection and value pools. The native storage components
+support the attempt; they do not yet replace those owners.
 
 The implementation begins with explicit value/handle resolution and collector
 roots for this consumer, including its records and reference-bearing values.

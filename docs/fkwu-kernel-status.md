@@ -93,18 +93,24 @@ pure admission observations.
 Interning prevents duplicate identities from consuming fresh cells; it does
 not establish a bounded lifetime for changing diagnostic values.
 
-Care and Glass now render transient ages, source metadata and report composition
-through collector-visible Form JSON views. Borrowed observation nodes remain
-explicit; primary materialization is requested through the node-returning API.
-The [care lifetime observation](evidence/fkwu/care-view-lifetime.json) shows zero
-new primary nodes during warmed explicit-source commands including serialization,
-with exact retained views across collection. Event admission, discovery, reader
-records, the collector and pressure-independent signaling remain seed work.
+Care and Glass parse, retain and render changing observations through
+collector-visible Form JSON values. The shared parser selects constructors;
+one health reducer serves both value and node APIs. Current-state replacement
+releases obsolete references while held snapshots remain exact. Primary
+materialization is requested through the node-returning API.
+The current observation includes changing event consumption and serialization,
+with exact retained views across collection. Discovery, reader records, boxed
+floats, the collector and pressure-independent signaling remain seed work.
 Publisher renewal reuses the source's reader and clears obsolete mutable
 references. The [changing-event observation](evidence/fkwu/care-changing-lifetime.json)
-records fresh primary-node growth alongside quiet rereads, actual collection,
-preserved snapshots and independent source state. It establishes reader reuse;
-it does not establish allocation-free event handling or primary-node release.
+records no primary-node creation in its append, renewal and quiet intervals,
+alongside actual collection, preserved snapshots and independent source state.
+Admission diagnostics reuse the reader's identity and retain their separate
+framebuffer timestamp cost. The [value-contract observation](evidence/fkwu/care-value-contract.json)
+preserves typed/order-sensitive protocol semantics and the real retained organ
+exchange. Temporary values still allocate; three float inputs allocate three
+seed boxes. Ordinary `health` output explicitly materializes nodes. No primary
+reclamation or complete native lifetime is established.
 Session-owned data paths are absolute to their selected home, so an absent local
 worker or state file stays absent even when an ancestor has its own session.
 
@@ -211,11 +217,10 @@ remaining needs. The process organ requests local diagnostic evidence while a
 child runs, and session memory supplies verified learning evidence. The core
 `care` view and Glass retain source readers and expose this current exchange,
 including uncertainty and observation age. Applied attention does not invent recovery.
-Eight alternating-order pairs over one retained failed-child exchange preserve
-the complete care result except timing fields. That retained direct care
-projection mints 269 nodes versus 317 through the intermediate health view.
-Both retained readers consume zero repeated event bytes. These are warm workload observations;
-the reader still allocates changing observations, and no memory bound is claimed.
+Care's direct value projection preserves the retained failed-child exchange.
+The actual resident CLI consumes its 44,397 bytes once; later care and health
+commands share the cursor. Changing observations use temporary Form values,
+and no memory bound is claimed.
 Discovery uses the existing bounded shared-memory roster and reports only its
 advertised scope. This is not a complete census of all organs or crossings.
 
@@ -310,8 +315,10 @@ Resource ownership includes names, metadata and event delivery: a native handle 
    storage. Connect its primary values, tagged handles, records and collector
    roots before moving construction, reading, rendering and release. Preserve
    its existing result while changing observations gain reclaimable lifetimes.
-   Quiet projections already avoid fresh primary nodes, and generation renewal
-   reuses the reader. The [north-star milestone](fkwu-form-native-north-star.md#next-completed-boundary)
+   Changing event trees and projections already avoid primary admission on the
+   value path; generation renewal reuses the reader. Move ordinary health text
+   output to that path, then retire seed ownership of boxed floats, records and
+   collection with measured caller transitions. The [north-star milestone](fkwu-form-native-north-star.md#next-completed-boundary)
    names the actual caller transition and its acceptance conditions.
 2. In that same consumer, keep the minimal signal/response path available when
    ordinary allocation cannot grow. Use an isolated constrained owner, retain

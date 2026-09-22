@@ -105,29 +105,34 @@ the timing field. Request parsing and final JSON serialization sit outside that
 interval. Read-byte counters
 describe event payload consumption, not shared-memory discovery traffic.
 
-Health and care share the retained reader. Care and Glass construct ages,
-source metadata and report composition as reclaimable Form values through
-`json-view.bml`, borrowing immutable observation nodes with an explicit tag.
-They serialize those values directly. `occ-view-request-at` returns this view;
+Health and care share the retained reader. Complete event records, current
+observations, ages and report composition use collector-visible Form values
+through `json-view.bml`. The shared JSON parser selects value constructors;
+strict wire admission, ordered duplicate pairs and typed scalar meanings stay
+intact. `organ-health-values.bml` owns validation, observation replacement,
+attention and response correlation for both value and node APIs. Care and Glass
+serialize the values directly. `occ-view-request-at` returns this view;
 `occ-request-at` explicitly materializes primary nodes for a caller requesting
 content identity. The working lists and strings remain visible to the current
-collector. A view creates no new record owner; callers retaining a view in a
-record release that reference explicitly because seed records remain roots.
+collector. Current-state updates copy surviving pairs, so obsolete revisions
+leave the reader's roots; deliberately held snapshots keep their own values.
+A view creates no new record owner; callers retaining a view in a record
+release that reference explicitly because seed records remain roots.
 
-The [current observation](evidence/fkwu/care-view-lifetime.json) includes eight
-alternating comparisons preserving all fields except elapsed time and derived
-age. Complete warmed explicit-source commands, including request parsing and
-serialization, mint zero primary nodes in that workload. Retained views remain
-exact through observed collection while temporary strings are reclaimed.
-Send a nonempty retained organ JSONL path on stdin to
-`./fkwu observe/form-care-view-witness.bml` to re-observe this boundary. The
-witness observes actual collection within its finite exercise budget; its
-sample count does not constrain the reader.
+Retained views remain exact through observed collection while temporary strings
+are reclaimed. The changing-event witness below measures event consumption
+and serialization, with discovery declarations prepared outside its intervals.
+Its finite collection exercise does not constrain the reader's lifetime.
 
-New event admission, discovery, reader records, framebuffer publication and the
-collector still depend on the seed. Default discovery and newly arriving events
-are outside the zero-mint observation. Complete native ownership and signaling
-when primary allocation cannot grow remain open.
+Discovery and explicit node-returning APIs still admit primary nodes. The
+ordinary `health` text command uses that node API; its output materializes the
+event tree. Reader records, the collector, boxed floats and framebuffer timestamp
+publication remain seed-backed. Three floating inputs in the
+[value-contract observation](evidence/fkwu/care-value-contract.json) create
+three float boxes and no primary nodes. The same observation compares twelve
+protocol transitions and a real 44,397-byte organ exchange against the parent
+implementation. Complete native ownership and signaling when ordinary
+allocation cannot grow remain open.
 
 Shrinking files reset the reader. A known publisher's renewed generation also
 resets it, including replacements of equal or greater size. A new publisher at
@@ -148,8 +153,12 @@ The [changing-event observation](evidence/fkwu/care-changing-lifetime.json)
 executes local writes, observes their readback and carries fresh events through
 32 append/renewal cycles. It includes malformed and unfinished records,
 equal-size replacements, another live source, shared-writer joins, truncation
-and an old view held across actual collection. New-event reads still mint
-primary nodes. Reader restart invokes no record constructor. Per-stage costs
+and an old view held across actual collection. Its append and renewal intervals
+mint no primary nodes; they still allocate temporary lists and strings. Reader
+restart and repeated admission diagnostics invoke no record constructor.
+One reader identity and a monotonic diagnostic sequence outlive publisher
+generations. Framebuffer timestamps are measured in each admission diagnostic
+row, separately from event parsing. Per-stage costs
 include reading and serialization; declaration preparation and event production
 are outside those intervals. Heap slots include garbage and are not retained
 RAM or total allocation. Run `observe/form-care-changing-witness.bml` with a

@@ -9,8 +9,8 @@ section [form.bml] {
   def ccw-pad(n) = if le(n,0) then "" else if eq(n,1) then " " else { let half = ccw-pad(div(n,2)); str_concat(half,str_concat(half,if eq(mod(n,2),1) then " " else "")); };
   def ccw-source(root,path,generation) = oh-set(oh-set(ohc-source(root,path),"publisher",json-node-string("changing-care-witness")),"generation",json-node-string(generation));
   def ccw-discovery(source) = json-node-object(list(oh-s("coverage","owned-local-source"),json-node-pair("sources",json-node-array(list(source)))));
-  // The observation is made as a transient value. New event content is first
-  // admitted to primary nodes by the production reader, inside its interval.
+  // The observation and the production reader both carry transient values.
+  // Primary admission is measured independently from the changing event data.
   def ccw-event(root,index) {
    let payload = str_concat("native care write ",int_to_str(index)); let data = str_concat(root,"/payload");
    ccw-write(data,payload); let actual = read_file(data); let exact = str_eq(actual,payload);
@@ -22,11 +22,11 @@ section [form.bml] {
    list(id,text);
   }
   def ccw-read(owner,root,discovery) {
-   let minted = kernel_stat(53); let records = kernel_stat(164); let heap = kernel_stat(6); let reclaimed = kernel_stat(51); let page = kernel_live(host_pid()); let start = host_monotonic_ms();
+   let minted = kernel_stat(53); let records = kernel_stat(164); let floats = kernel_stat(45); let heap = kernel_stat(6); let reclaimed = kernel_stat(51); let page = kernel_live(host_pid()); let start = host_monotonic_ms();
    let view = ohc-read-through(owner,root,discovery,65536,host_monotonic_ms(),occ-source-report,occ-view);
    let text = jv-emit(view);
-   let elapsed = sub(host_monotonic_ms(),start); let growth = sub(kernel_stat(53),minted); let created = sub(kernel_stat(164),records); let heapAfter = kernel_stat(6); let freed = sub(kernel_stat(51),reclaimed); let cycles = sub(nth(kernel_live(host_pid()),21),nth(page,21));
-   list(view,text,jv-object(list(jv-n("primary_mints",growth),jv-n("record_constructor_dispatches",created),jv-n("elapsed_ms",elapsed),jv-n("pair_slots_before",heap),jv-n("pair_slots_after",heapAfter),jv-n("reclaimed_strings",freed),jv-n("collector_cycles",cycles),jv-n("emitted_bytes",str_len(text)),jv-pair("read_bytes",jv-get(view,"read_bytes")))));
+   let elapsed = sub(host_monotonic_ms(),start); let growth = sub(kernel_stat(53),minted); let created = sub(kernel_stat(164),records); let boxed = sub(kernel_stat(45),floats); let heapAfter = kernel_stat(6); let freed = sub(kernel_stat(51),reclaimed); let cycles = sub(nth(kernel_live(host_pid()),21),nth(page,21));
+   list(view,text,jv-object(list(jv-n("primary_mints",growth),jv-n("record_constructor_dispatches",created),jv-n("float_boxes",boxed),jv-n("elapsed_ms",elapsed),jv-n("pair_slots_before",heap),jv-n("pair_slots_after",heapAfter),jv-n("reclaimed_strings",freed),jv-n("collector_cycles",cycles),jv-n("emitted_bytes",str_len(text)),jv-pair("read_bytes",jv-get(view,"read_bytes")))));
   }
   def ccw-current(result,id) {
    let signals = jv-items(jv-get(head(result),"signals"));
@@ -42,7 +42,10 @@ section [form.bml] {
    ccw-assert(eq(sbt-append-count(path,"bad\n"),4),"malformed record append incomplete");
    let partial = str_concat("{\"unfinished_generation\":",int_to_str(index));
    ccw-assert(eq(sbt-append-count(path,partial),str_len(partial)),"partial append incomplete");
-   let reader = record_get(ohc-stream(owner,source),"reader"); ohs-update(reader,65536);
+   let reader = record_get(ohc-stream(owner,source),"reader");
+   let diagnosticMints = kernel_stat(53); let diagnosticRecords = kernel_stat(164);
+   ohs-update(reader,65536);
+   let diagnostic = jv-object(list(jv-n("primary_mints",sub(kernel_stat(53),diagnosticMints)),jv-n("record_constructor_dispatches",sub(kernel_stat(164),diagnosticRecords))));
    ccw-assert(str_eq(record_get(reader,"pending"),partial),"partial record retained until its generation ends");
    ccw-assert(eq(record_get(reader,"invalid_records"),1),"malformed complete event remains an observed admission gap");
    let extent = file_size(path); let event = ccw-event(root,add(mul(index,2),1));
@@ -55,11 +58,13 @@ section [form.bml] {
    ccw-assert(and(eq(record_get(current,"offset"),extent),and(eq(str_len(record_get(current,"pending")),0),eq(record_get(current,"invalid_records"),0))),"new generation fully consumed without old partial state");
    let quiet = ccw-read(owner,root,discovery); ccw-current(quiet,head(event));
    ccw-assert(eq(jv-str(head(quiet),"read_bytes"),0),"unchanged generation keeps its cursor");
-   jv-object(list(jv-n("generation",index),jv-pair("append",nth(appendRead,2)),jv-pair("renew",nth(renewed,2)),jv-pair("quiet",nth(quiet,2)),jv-n("retained_observations",len(record_get(current,"current"))),jv-n("pending_bytes",str_len(record_get(current,"pending")))));
+   ccw-assert(and(eq(jv-str(nth(appendRead,2),"primary_mints"),0),eq(jv-str(nth(renewed,2),"primary_mints"),0)),"changing event reads retain values without primary admission");
+   ccw-assert(eq(jv-str(diagnostic,"record_constructor_dispatches"),0),"admission diagnostics reuse their reader owner");
+   jv-object(list(jv-n("generation",index),jv-pair("append",nth(appendRead,2)),jv-pair("renew",nth(renewed,2)),jv-pair("quiet",nth(quiet,2)),jv-pair("admission_diagnostic",diagnostic),jv-n("retained_observations",len(record_get(current,"current"))),jv-n("pending_bytes",str_len(record_get(current,"pending")))));
   }
   def ccw-rounds(owner,root,path,index,end,rows) = if ge(index,end) then reverse(rows) else ccw-rounds(owner,root,path,add(index,1),end,cons(ccw-round(owner,root,path,index),rows));
   def ccw-sum(rows,stage,key) = if nil?(rows) then 0 else add(jv-str(jv-get(head(rows),stage),key),ccw-sum(tail(rows),stage,key));
-  def ccw-stage(rows,stage) = jv-object(list(jv-n("primary_mints",ccw-sum(rows,stage,"primary_mints")),jv-n("record_constructor_dispatches",ccw-sum(rows,stage,"record_constructor_dispatches")),jv-n("elapsed_ms",ccw-sum(rows,stage,"elapsed_ms")),jv-n("read_bytes",ccw-sum(rows,stage,"read_bytes")),jv-n("emitted_bytes",ccw-sum(rows,stage,"emitted_bytes"))));
+  def ccw-stage(rows,stage) = jv-object(list(jv-n("primary_mints",ccw-sum(rows,stage,"primary_mints")),jv-n("record_constructor_dispatches",ccw-sum(rows,stage,"record_constructor_dispatches")),jv-n("float_boxes",ccw-sum(rows,stage,"float_boxes")),jv-n("elapsed_ms",ccw-sum(rows,stage,"elapsed_ms")),jv-n("read_bytes",ccw-sum(rows,stage,"read_bytes")),jv-n("emitted_bytes",ccw-sum(rows,stage,"emitted_bytes"))));
   def ccw-empty(reader,generation) = and(str_eq(record_get(reader,"generation"),generation),and(eq(record_get(reader,"offset"),0),and(str_eq(record_get(reader,"pending"),""),and(nil?(record_get(reader,"current")),and(str_eq(record_get(reader,"state"),"unobserved"),and(eq(record_get(reader,"read_bytes"),0),and(eq(record_get(reader,"invalid_records"),0),eq(record_get(reader,"extent"),0))))))));
   def ccw-lifecycle(root) {
    let path = str_concat(root,"/lifecycle.jsonl"); let event = ccw-event(root,900);
@@ -77,22 +82,24 @@ section [form.bml] {
    ohc-sync-source(stream,shared);
    ccw-assert(and(value_eq(record_get(stream,"reader"),reader),and(eq(record_get(reader,"offset"),sharedOffset),and(str_eq(record_get(reader,"pending"),first),and(value_eq(record_get(reader,"current"),sharedRows),str_eq(record_get(reader,"generation"),"append-only-source"))))),"shared append writer preserves reader, current, pending and generation");
    let remainder = substring(nth(next,1),cut,str_len(nth(next,1))); ccw-assert(eq(sbt-append-count(path,remainder),str_len(remainder)),"shared writer completion"); ohs-update(reader,65536);
-   ccw-assert(and(eq(record_get(reader,"read_bytes"),str_len(remainder)),str_eq(oh-str(head(record_get(reader,"current")),"id"),head(next))),"shared writer completion consumes only new bytes");
+   ccw-assert(and(eq(record_get(reader,"read_bytes"),str_len(remainder)),str_eq(ohv-str(head(record_get(reader,"current")),"id"),head(next))),"shared writer completion consumes only new bytes");
    ccw-assert(eq(sbt-append-count(path,"bad\n{\"pending\":"),15),"lifecycle incomplete record append");
    ohs-update(reader,65536);
    ccw-assert(and(eq(record_get(reader,"invalid_records"),1),gt(str_len(record_get(reader,"pending")),0)),"reader owns malformed and incomplete evidence");
    let renewal = oh-set(shared,"generation",json-node-string("renewed"));
+   let diagnosticIdentity = record_get(reader,"identity"); let diagnosticSequence = record_get(reader,"diagnostic_sequence");
    let constructions = kernel_stat(164); ohc-sync-source(stream,renewal); let restartCalls = sub(kernel_stat(164),constructions);
+   ccw-assert(and(str_eq(record_get(reader,"identity"),diagnosticIdentity),eq(record_get(reader,"diagnostic_sequence"),diagnosticSequence)),"reader diagnostic identity and sequence outlive publisher generation");
    ccw-assert(and(eq(restartCalls,0),and(value_eq(reader,record_get(stream,"reader")),ccw-empty(reader,"renewed"))),"restart reuses identity and releases all old mutable fields");
    ohs-update(other,65536);
    ccw-assert(and(value_eq(record_get(other,"current"),otherRows),and(eq(record_get(other,"offset"),otherOffset),and(str_eq(record_get(other,"pending"),otherPending),eq(record_get(other,"read_bytes"),0)))),"another source retains its observation, cursor and incomplete record");
    ccw-write(path,nth(event,1)); ohs-update(reader,65536);
    ccw-write(path,nth(next,1)); let joined = oh-set(oh-set(renewal,"publisher",json-node-string("joined-replacing-writer")),"capabilities",json-node-array(list())); ohc-sync-source(stream,joined);
    ccw-assert(and(value_eq(reader,record_get(stream,"reader")),ccw-empty(reader,"renewed")),"ordinary new publisher starts a fresh reading on the same owner");
-   ohs-update(reader,65536); ccw-assert(str_eq(oh-str(head(record_get(reader,"current")),"id"),head(next)),"ordinary publisher reads replacement event");
+   ohs-update(reader,65536); ccw-assert(str_eq(ohv-str(head(record_get(reader,"current")),"id"),head(next)),"ordinary publisher reads replacement event");
    ccw-assert(eq(sbt-append-count(path,"bad\n{"),5),"truncation diagnostic preparation"); ohs-update(reader,65536);
    let invalid = record_get(reader,"invalid_records"); ccw-write(path,nth(event,1)); ohs-update(reader,65536);
-   ccw-assert(and(eq(record_get(reader,"invalid_records"),invalid),and(str_eq(record_get(reader,"generation"),"renewed"),and(str_eq(record_get(reader,"pending"),""),and(eq(len(record_get(reader,"current")),2),and(str_eq(oh-str(head(record_get(reader,"current")),"aspect"),"source-reset"),str_eq(oh-str(nth(record_get(reader,"current"),1),"id"),head(event))))))),"truncation preserves generation, invalid-record history, source-reset signal and new observation");
+   ccw-assert(and(eq(record_get(reader,"invalid_records"),invalid),and(str_eq(record_get(reader,"generation"),"renewed"),and(str_eq(record_get(reader,"pending"),""),and(eq(len(record_get(reader,"current")),2),and(str_eq(ohv-str(head(record_get(reader,"current")),"aspect"),"source-reset"),str_eq(ohv-str(nth(record_get(reader,"current"),1),"id"),head(event))))))),"truncation preserves generation, invalid-record history, source-reset signal and new observation");
    jv-object(list(jv-n("restart_constructor_dispatches",restartCalls),jv-n("restart_fields_clear",1),jv-n("shared_append_preserved",1),jv-n("ordinary_publisher_restarted",1),jv-n("other_source_preserved",1),jv-n("truncation_diagnostic_preserved",1)));
   }
   def ccw-churn(owner,root,discovery,count,bytes) = if le(count,0) then bytes else ccw-churn(owner,root,discovery,sub(count,1),add(bytes,str_len(jv-emit(ohc-read-through(owner,root,discovery,65536,host_monotonic_ms(),occ-source-report,occ-view)))));
@@ -102,7 +109,7 @@ section [form.bml] {
   def ccw-run(root) {
    ccw-assert(and(eq(str_byte_at(root,0),47),eq(fs_exists(root),0)),"supply a new absolute observation directory");
    ccw-assert(eq(host_dir_mkdir(root),1),"observation directory creation failed");
-   let paths = list("runtime/fkwu-uni.c","fkwu","form/form-stdlib/bml/form-core-health.bml","form/form-stdlib/bml/organ-health-stream.bml","form/form-stdlib/bml/form-core-care.bml","form/form-stdlib/bml/json-view.bml","form/form-stdlib/bml/organ-health-discovery.bml","form/form-stdlib/organ-health.bml","form/form-stdlib/json.fk","form/form-stdlib/bml/json-wire-admission.bml","observe/form-care-changing-witness.bml");
+   let paths = list("runtime/fkwu-uni.c","fkwu","form/form-stdlib/bml/form-core-health.bml","form/form-stdlib/bml/organ-health-stream.bml","form/form-stdlib/bml/form-core-care.bml","form/form-stdlib/bml/json-view.bml","form/form-stdlib/bml/json-view-parse.bml","form/form-stdlib/bml/organ-health-values.bml","form/form-stdlib/bml/organ-health-discovery.bml","form/form-stdlib/organ-health.bml","form/form-stdlib/json.fk","form/form-stdlib/bml/json-wire-admission.bml","observe/form-care-changing-witness.bml");
    let bindings = ccw-bindings(paths);
    let path = str_concat(root,"/events.jsonl"); let event = ccw-event(root,199); ccw-write(path,nth(event,1));
    let owner = ohc-open(); let discovery = ccw-discovery(ccw-source(root,path,"99"));
