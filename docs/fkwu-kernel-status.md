@@ -32,6 +32,12 @@ The adaptive word owner independently widens or shrinks immutable generations
 while retaining pinned readers. These local owners are separate from the
 primary shared field.
 
+The retained six-field layout sample uses 157,696 compact payload bytes versus
+786,432 aligned bytes, with warm CPU batches of 55 versus 43 ms and Metal
+batches of 408 versus 146 ms. Both produce exact results. These source-bound,
+host-load-dependent timings exclude GPU upload: denser storage alone does not
+establish faster execution. Selection still needs complete workload costs.
+
 The [native accessor](native-node-accessor.md) carries full raw-u64 fields
 between native functions without tagged returns. One 424-byte RAM image serves
 67 observed layouts and all 64 field widths. Immutable descriptors pin packed
@@ -191,9 +197,9 @@ child runs, and session memory supplies verified learning evidence. The core
 `care` view and Glass retain source readers and expose this current exchange,
 including uncertainty and observation age. Applied attention does not invent recovery.
 Eight alternating-order pairs over one retained failed-child exchange preserve
-the complete care result except timing fields. Direct care projection mints
-269 nodes versus 317 through the intermediate health view. Both retained
-readers consume zero repeated event bytes. These are warm workload observations;
+the complete care result except timing fields. That retained direct care
+projection mints 269 nodes versus 317 through the intermediate health view.
+Both retained readers consume zero repeated event bytes. These are warm workload observations;
 the reader still allocates changing observations, and no memory bound is claimed.
 Discovery uses the existing bounded shared-memory roster and reports only its
 advertised scope. This is not a complete census of all organs or crossings.
@@ -284,35 +290,32 @@ Resource ownership includes names, metadata and event delivery: a native handle 
 
 ## Next executable steps
 
-1. Give changing observations an owned, reclaimable lifetime and decouple field
-   allocation from its current fixed capacity. The native identity already
-   occupies one word; its encoding width does not require preallocating its
-   identity space. The raw-u64 accessor, leased blueprint runs and sparse
-   identity directory are executable. The primary importer already consumes
-   published handles without scanning unfinished reservations. The resident
-   native arena now admits its image before data allocation, generates semantic
-   words, grows chunks and freezes prefixes into the directory. Exact-word
-   interning now has a native owner with stable rows across index growth. Next,
-   connect kind-sensitive equality and tagged handles to native ownership, then
-   move the primary producer/read path while retaining native side-table lifetimes.
-   Keep admission independent of the allocator it replaces. Concurrent publication
-   requires ordered immutable-generation selection and retained readers.
-   Reference-bearing columns require a collector
-   root/relocation bridge; slot reuse requires handle generations and side-table
-   ownership. Measure allocations
-   at actual organ boundaries, preserve the care path under pressure, and prove
-   another live owner keeps its values during reclamation. The direct care
-   projection is the executing first reduction in this path. The remaining
-   seed boundary is `fk_field_fill` and `fk_field_intern_node`: allocation must
-   report pressure and settle its claimed intern slot before a caller stops.
-   Exercise this in an isolated field, including another live caller, before
-   changing shared-field admission.
-2. Replace synchronous whole-unit source admission with Form-owned module
-   compilation on demand. Measure cold admission, cache reuse and replacement
-   latency separately, preserving exact source identities and outstanding work.
-3. Move native specialization policy and emitter construction from the seed to
-   Form. Accept replacements over identical inputs, retain submitted versions
-   until completion, and delete each C implementation after its callers move.
-4. Carry these ownership and completion contracts into async scheduling and the
-   freestanding memory/interrupt floor. Hosted capabilities do not establish a
-   complete Form-native OS.
+1. Move the retained care view's complete working lifetime onto native owned
+   storage. Connect its primary values, tagged handles, records and collector
+   roots before moving construction, reading, rendering and release. Preserve
+   its existing result while repeated quiet views stop accumulating permanent
+   primary observations. The [north-star milestone](fkwu-form-native-north-star.md#next-completed-boundary)
+   names the actual caller transition and its acceptance conditions.
+2. In that same consumer, keep the minimal signal/response path available when
+   ordinary allocation cannot grow. Use an isolated constrained owner, retain
+   completed work, apply real care and observe recovery while another owner
+   continues. `fk_field_fill` and `fk_field_intern_node` remain the seed
+   boundary: a producer must settle or relinquish its claimed intern slot before
+   stopping. The current logical-row-end witness does not establish survival
+   of primary field exhaustion. No live shared-field reset is part of this test.
+3. Generalize the observed value/lifetime contract to primary node kinds and
+   CPU/device submissions. Prove live replacement with old readers and work
+   still held, single publication of selected effects, cancellation and final
+   release. Remove each old implementation after its callers move. Slot reuse
+   requires handle generations and native side-table ownership; concurrent
+   publication requires ordering and retained readers.
+4. Build Form-owned compilation on demand alongside the migration. Measure
+   cold admission, reuse, native emission and replacement separately, and keep
+   compiler policy and emitters replaceable without a seed edit.
+5. Carry the same ownership contract into the freestanding memory, interrupt
+   and scheduler path. Reclaim exited tasks and establish address-space,
+   wait/wake and device lifetimes before claiming complete OS ownership.
+
+The first two steps form one next runtime milestone. They are direction, not
+implemented primary cutover. Existing hosted owners and the freestanding guest
+retain the separate execution scopes described above.
