@@ -161,6 +161,15 @@ both distinctions explicitly. A separately attributed Codex answer supplies
 the source corrections. Native uptake of the new teaching and dependable
 self-correction remain open.
 
+The [Form-owned correction](receipts/2026-09-23-assisted-fidelity.md) used the
+identical review request and preserved the reference condition, numeric-input
+contract and language-surface distinction. It cost 21,301 provider tokens,
+including cached input; coordinator work remains separate. The ordinary CLI
+now exposes `synthesize @manifest.json`, and its actual replay returned the
+same checked result and usage event with zero new provider processes. This
+advances the assisted serving path while native self-correction and expression
+remain active work.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.

@@ -12,6 +12,18 @@ Pass one JSON manifest on stdin:
 form-run ./fkwu observe/form-cli-response-synthesis-run.bml < manifest.json
 ```
 
+The source-backed form-cli exposes the same path:
+
+```text
+synthesize @manifest.json
+```
+
+Use `synthesize help` for the request surface. A file carries the complete
+manifest beyond the interactive line limit; inline JSON is also accepted.
+Provider permission remains in the manifest. The command returns the retained
+answer path, attribution, assertions and usage. Repeating the identical
+manifest rechecks its retained answer without a new provider process.
+
 The manifest uses the existing response-session shape:
 
 ```json
