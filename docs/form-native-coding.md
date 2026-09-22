@@ -837,7 +837,14 @@ permissions, caller checks and the absolute reply limit remain unchanged.
 
 Renewal requires a completed reply in the departing context and remaining reply
 allowance. A bootstrap that leaves no usable space therefore stops instead of
-repeating admission. Partial generations, empty encoded feedback and failed
+repeating admission. When `max_reply_tokens` is set, the controller reserves
+that many usable positions before beginning the next ordinary reply. A short
+remaining context selects renewal before any reply token is generated; the
+configured allowance stays unchanged. A fresh bootstrap that cannot leave the
+requested room stops without repeating admission. An omitted token ceiling
+retains the ordinary context-bound generation behavior.
+
+Partial generations, empty encoded feedback and failed
 prefills retain their failure paths. Capacity is checked before feedback touches
 the stream; only that nonmutating failure can retain its earlier live owner.
 An unsuccessful renewal ends the call, releases the returned owner and retains
@@ -845,7 +852,8 @@ any incomplete stream release as a failed release. Initial reasoning and answer
 reserve routes use this same continuation after their initial stage.
 
 `form-code-context` records actual renewal, ownership replacement, reason,
-context prompt size and accumulated generated/injected IDs. Ordinary progress
+capacity trigger, remaining positions, reply allowance, context prompt size
+and accumulated generated/injected IDs. Ordinary progress
 frames retain their current-context counters. Final generated IDs, injected IDs
 and completed-observation counts sum all contexts in the coding call. Those
 counters do not include all prefill work or establish response quality.
