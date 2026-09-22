@@ -1,96 +1,11 @@
-// land-run.bml — one native call closes a movement: witness, gates, commit, push.
-//
-// stdin: one JSON object
-//   {"witness":"<a command to run and show, or empty>",
-//    "paths":["file", ...], "subject":"<commit subject>", "body":"<commit body>"}
-// The witness runs first and its output is shown. The drift gates run next as
-// a child fkwu; a refused gate lands nothing. Then host git adds the named
-// paths, commits with exactly subject, blank line, body, and pushes the
-// current branch to its own name on origin. Every crossing to a child process
-// happens inside this call's census window and is printed at the end, so what
-// left the body is counted, never hidden. The message file lives under
-// .form-heal, which git forgets.
+// land-run.bml — a movement's close in one call: write, append, edit, witness,
+// gate, commit, push, and the restart onto a new base. The landing itself is
+// form-stdlib/bml/form-cli-landing.bml, so a movement lands inside its own
+// call; git is the crossing it needs, and the drift gates run as their own
+// fresh kernel so a warm image cannot vouch for the tree.
+// stdin: one JSON line — files, append, edits, witness, paths, subject, body, restart.
 // preflight-exec: forbidden
-// preludes: form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml observe/form-membrane-runtime-census.fk
+// preludes: form-stdlib/bml/form-cli-landing.bml
 section [form.bml] {
- class Land {
-  def ld-source() = "observe/land-run.bml";
-  def ld-message-path() = ".form-heal/land-message.txt";
-  def ld-str(doc, key) = if json-object-has?(doc, key) then json-string-value(json-object-get(doc, key)) else "";
-  def ld-paths(doc) = if json-object-has?(doc, "paths") then oh-values(json-array-elements(json-object-get(doc, "paths"))) else list();
-  def ld-join(parts, sep) = if nil?(parts) then "" else if nil?(tail(parts)) then head(parts) else mc-cat(list(head(parts), sep, ld-join(tail(parts), sep)));
-  def ld-quote(s) = mc-cat(list("'", ld-join(split-on(s, "'"), "'\\''"), "'"));
-  def ld-quoted(paths) = if nil?(paths) then list() else cons(ld-quote(head(paths)), ld-quoted(tail(paths)));
-  def ld-tail(text, n) = if le(str_len(text), n) then text else substring(text, sub(str_len(text), n), str_len(text));
-  def ld-planes(planes, rows) = if nil?(planes) then "" else mc-cat(list("  ", head(planes), "=", int_to_str(fmrc-delta-plane-total(rows, head(planes))), "\n", ld-planes(tail(planes), rows)));
-  def ld-plane-names() = list("stdio", "filesystem", "local-process", "network-address-unknown", "mesh");
-  // optional "files": [{"path","text"}] are written whole and "append":
-  // [{"path","text"}] are appended, natively, before the witness runs; so a
-  // small movement needs no host write at all.
-  def ld-nodes(doc, key) = if json-object-has?(doc, key) then json-array-elements(json-object-get(doc, key)) else list();
-  def ld-write-all(nodes) { if nil?(nodes) then 0 else ld-write-one(head(nodes), tail(nodes)); }
-  def ld-write-one(node, rest) { let w = write_file_text(ld-str(node, "path"), ld-str(node, "text")); add(1, ld-write-all(rest)); }
-  def ld-append-all(nodes) { if nil?(nodes) then 0 else ld-append-one(head(nodes), tail(nodes)); }
-  def ld-append-one(node, rest) { let a = fhn-append(ld-str(node, "path"), ld-str(node, "text")); add(1, ld-append-all(rest)); }
-  // optional "edits": [{"path","old","new"}] replace one exact occurrence of
-  // old with new; an old that is absent or not unique is a miss, and a miss
-  // holds the landing. Optional "restart": "origin/main" first fetches main,
-  // restarts the current branch on it (keeping uncommitted work), and pushes
-  // the restarted branch with force-with-lease: the move after a merge.
-  def ld-edit-all(nodes, misses) { if nil?(nodes) then misses else ld-edit-all(tail(nodes), add(misses, ld-edit-one(head(nodes)))); }
-  def ld-edit-one(node) {
-   let path = ld-str(node, "path");
-   let old = ld-str(node, "old");
-   let text = fhn-read(path);
-   let at = str_find(text, old, 0);
-   let again = if lt(at, 0) then -1 else str_find(text, old, add(at, 1));
-   if or(lt(at, 0), or(ge(again, 0), str_eq(old, ""))) then 1 else ld-edit-write(path, text, at, old, ld-str(node, "new"));
-  }
-  def ld-edit-write(path, text, at, old, new) {
-   let w = write_file_text(path, mc-cat(list(substring(text, 0, at), new, substring(text, add(at, str_len(old)), str_len(text)))));
-   0;
-  }
-  def ld-restart(base) = if str_eq(base, "") then "" else host-exec(mc-cat(list("git fetch origin main 2>&1 | tail -1 && git checkout -B \"$(git rev-parse --abbrev-ref HEAD)\" ", base, " 2>&1 | tail -1 && git push --force-with-lease -u origin HEAD 2>&1 | tail -1")), "");
-  def ld-run() {
-   let window = fmrc-open("land", "witness gates commit push", ld-source(), 1, 1);
-   let request = parse-json("land-request", read_line());
-   let restarted = ld-restart(ld-str(request, "restart"));
-   let written = ld-write-all(ld-nodes(request, "files"));
-   let appendedFiles = ld-append-all(ld-nodes(request, "append"));
-   let misses = ld-edit-all(ld-nodes(request, "edits"), 0);
-   let witness = ld-str(request, "witness");
-   let paths = ld-paths(request);
-   let subject = ld-str(request, "subject");
-   let witnessOut0 = if str_eq(witness, "") then "" else host-exec(mc-cat(list(witness, " 2>&1")), "");
-   let witnessOut = if nothing?(witnessOut0) then "" else witnessOut0;
-   let gates0 = host-exec("./fkwu gate/drift-gates-run.bml 2>&1", "");
-   let gates = if nothing?(gates0) then "" else gates0;
-   let green = ge(str_find(gates, " refused=0 ", 0), 0);
-   let ready = and(green, and(eq(misses, 0), and(not(nil?(paths)), not(str_eq(subject, "")))));
-   // the message lives under .form-heal, which a fresh checkout does not have yet: make it before writing
-   let spool = fs_mkdir(".form-heal");
-   let saved0 = write_file_text(ld-message-path(), mc-cat(list(subject, "\n\n", ld-str(request, "body"), "\n")));
-   let saved = if nothing?(saved0) then 0 else saved0;
-   let added = if ready then host-exec(mc-cat(list("git add ", ld-join(ld-quoted(paths), " "), " 2>&1")), "") else "";
-   let committed0 = if ready then host-exec(mc-cat(list("out=$(git -c user.name=Claude -c user.email=noreply@anthropic.com commit -q -F ", ld-message-path(), " 2>&1); code=$?; printf '[commit] exit=%s %s\\n' \"$code\" \"$(git log --oneline -1)\"")), "") else "";
-   let committed = if nothing?(committed0) then "" else committed0;
-   let commitOk = ge(str_find(committed, "[commit] exit=0", 0), 0);
-   // the push answers with its own exit: a commit that did not reach origin is held, never landed
-   let pushed0 = if commitOk then host-exec("out=$(git push -u origin HEAD 2>&1); code=$?; printf '[push] exit=%s %s\\n' \"$code\" \"$(printf '%s' \"$out\" | tail -n 1)\"", "") else "";
-   let pushed = if nothing?(pushed0) then "" else pushed0;
-   let pushOk = ge(str_find(pushed, "[push] exit=0", 0), 0);
-   let result = fmrc-close(window, if and(ready, and(commitOk, pushOk)) then "landed" else "held", ld-source(), 2, 1);
-   let rows = fmrc-result-deltas(result);
-   print_str(mc-cat(list(
-    if str_eq(witnessOut, "") then "" else mc-cat(list("[witness] ", witness, "\n", witnessOut, "\n")),
-    if str_eq(restarted, "") then "" else mc-cat(list("[restart] ", restarted, "\n")),
-    "[files] written=", int_to_str(written), " appended=", int_to_str(appendedFiles), " edit-misses=", int_to_str(misses), "\n",
-    "[gates] ", ld-tail(gates, 120),
-    "[landing] ", if and(ready, and(commitOk, pushOk)) then "landed" else if and(ready, commitOk) then "held: the push did not reach origin" else if ready then "held: the commit did not take" else if not(green) then "held: a gate refused" else if gt(misses, 0) then "held: an edit missed" else "held: no paths or no subject", "\n",
-    if ready then mc-cat(list(added, committed, "\n", pushed, "\n")) else "",
-    "[crossings of this call] census-status=", fmrc-result-status(result), " dispatches=", int_to_str(fmrc-delta-total(rows)), "\n",
-    ld-planes(ld-plane-names(), rows))));
-  }
- }
  ld-run();
 }

@@ -82,6 +82,12 @@ Defaults are 12,288 context positions and 1,536 generated IDs. The compact
 `knowledge-query` profile carries the supplied composition; generated text
 does not execute tools or enter training.
 
+With `"lane":"lora"` the voice speaks through the body's own native 3B on this
+metal wearing the adapter it was taught with, `adapter` naming another when the
+caller has one. The row then carries `native_generation.lane` and the adapter's
+path beside the local counts, so a walk says which weights and which teaching
+spoke.
+
 Only stopped generation with a valid stream and successful release becomes an
 accepted answer. Each job retains raw text, original generated IDs, completion,
 release and the artifact path, including for unfinished output. The organ's
@@ -170,10 +176,14 @@ printf '%s\n' '{"append":[{"path":"docs/x.md","text":"..."}],"witness":"","paths
 the native voice through the in-process model, the native single call that
 floors itself, the flow meter on the arriving mind's transcript, the page
 redrawn from the ledgers, and the landing with its restart, gates, commit and
-push. Every door is a child kernel of the body; no provider is asked anywhere.
-The door also leaves one row per movement in `receipts/crossings-ledger.jsonl`:
-its own dispatches by plane and the voice and compare doors' dispatches, read
-from their printed census. The arriving mind makes one call and relays one line. Every field is optional:
+push. Every door is a call in the body's own process — the composition never
+travels through a pipe and the model is admitted once — so a movement crosses
+no membrane of its own. What crossings remain are the landing's: git, and the
+drift gates in their own fresh kernel, so a warm image cannot vouch for the
+tree. The door also leaves one row per movement in
+`receipts/crossings-ledger.jsonl`: its own dispatches by plane, with the voice
+and compare columns at zero now that they are counted in the movement's own
+window. The arriving mind makes one call and relays one line. Every field is optional:
 `voice`, `compare` and `land` default to 1, `transcript` and `restart` to
 empty, `paths` adds files beyond the ledgers and the page, `subject` and
 `body` name the commit.
