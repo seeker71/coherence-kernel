@@ -5,31 +5,43 @@ section [form.bml] {
  class FormCliGenerateCommand {
   field DefaultAnswerTokens = 2048;
   def fgc-default-tokens() = DefaultAnswerTokens();
-  def fgc-help() = str_concat("generate [--tokens N] [--reasoning N] <prompt> — local generation; default ",str_concat(int_to_str(fgc-default-tokens())," answer tokens. --reasoning opens a separate initial stage and reserves the answer allowance.\n"));
-  // request = answer allowance, original prompt, diagnostic, reasoning allowance.
+  def fgc-help() = str_concat("generate [--tokens N] [--reasoning N] [--words MIN:MAX] <prompt> — local generation; default ",str_concat(int_to_str(fgc-default-tokens())," answer tokens. --reasoning reserves a final answer stage. --words counts whitespace-delimited words and offers one correction in the same model session.\n"));
+  // request = answer allowance, original prompt, diagnostic, reasoning allowance,
+  // word minimum, word maximum (0 disables the word requirement).
   // Invalid input reaches
   // no model admission. The prompt after the option keeps its exact bytes.
-  def fgc-request(arg) = fgc-parse(arg,fgc-default-tokens(),0,0,0);
-  def fgc-parse(arg,answer,reasoning,tokensSeen,reasoningSeen) {
-   if eq(str_find(arg,"--tokens ",0),0) then fgc-option(substring(arg,9,str_len(arg)),"--tokens",answer,reasoning,tokensSeen,reasoningSeen)
-   else if eq(str_find(arg,"--reasoning ",0),0) then fgc-option(substring(arg,12,str_len(arg)),"--reasoning",answer,reasoning,tokensSeen,reasoningSeen)
-   else if or(str_eq(trim(arg),""),or(str_eq(arg,"--tokens"),str_eq(arg,"--reasoning"))) then list(0,"",fgc-help(),0)
-   else list(answer,arg,"",reasoning);
+  def fgc-request(arg) = fgc-parse(arg,fgc-default-tokens(),0,0,0,0,0);
+  def fgc-invalid(message) = list(0,"",message,0,0,0);
+  def fgc-parse(arg,answer,reasoning,tokensSeen,reasoningSeen,lower,upper) {
+   if eq(str_find(arg,"--tokens ",0),0) then fgc-option(substring(arg,9,str_len(arg)),"--tokens",answer,reasoning,tokensSeen,reasoningSeen,lower,upper)
+   else if eq(str_find(arg,"--reasoning ",0),0) then fgc-option(substring(arg,12,str_len(arg)),"--reasoning",answer,reasoning,tokensSeen,reasoningSeen,lower,upper)
+   else if eq(str_find(arg,"--words ",0),0) then fgc-words(substring(arg,8,str_len(arg)),answer,reasoning,tokensSeen,reasoningSeen,upper)
+   else if or(str_eq(trim(arg),""),or(str_eq(arg,"--words"),or(str_eq(arg,"--tokens"),str_eq(arg,"--reasoning")))) then fgc-invalid(fgc-help())
+   else list(answer,arg,"",reasoning,lower,upper);
   }
-  def fgc-option(rest,option,answer,reasoning,tokensSeen,reasoningSeen) {
+  def fgc-option(rest,option,answer,reasoning,tokensSeen,reasoningSeen,lower,upper) {
    let at = str_find(rest," ",0);
-   if le(at,0) then list(0,"",fgc-help(),0) else {
+   if le(at,0) then fgc-invalid(fgc-help()) else {
     let text = substring(rest,0,at); let count = str_to_int(text);
     let prompt = substring(rest,add(at,1),str_len(rest));
     let isTokens = str_eq(option,"--tokens");
     let repeated = if isTokens then tokensSeen else reasoningSeen;
-    if not(and(gt(count,0),str_eq(text,int_to_str(count)))) then list(0,"",str_concat("generate ",str_concat(option," needs a positive whole number.\n")),0)
-    else if repeated then list(0,"",str_concat("generate repeats ",str_concat(option,".\n")),0)
-    else fgc-parse(prompt,if isTokens then count else answer,if isTokens then reasoning else count,if isTokens then 1 else tokensSeen,if isTokens then reasoningSeen else 1);
+    if not(and(gt(count,0),str_eq(text,int_to_str(count)))) then fgc-invalid(str_concat("generate ",str_concat(option," needs a positive whole number.\n")))
+    else if repeated then fgc-invalid(str_concat("generate repeats ",str_concat(option,".\n")))
+    else fgc-parse(prompt,if isTokens then count else answer,if isTokens then reasoning else count,if isTokens then 1 else tokensSeen,if isTokens then reasoningSeen else 1,lower,upper);
+   };
+  }
+  def fgc-words(rest,answer,reasoning,tokensSeen,reasoningSeen,previous) {
+   let at = str_find(rest," ",0); let colon = str_find(rest,":",0);
+   if or(gt(previous,0),or(le(at,0),or(le(colon,0),ge(colon,sub(at,1))))) then fgc-invalid("generate --words needs one MIN:MAX range and a prompt.\n") else {
+    let lowText = substring(rest,0,colon); let highText = substring(rest,add(colon,1),at);
+    let lower = str_to_int(lowText); let upper = str_to_int(highText);
+    if not(and(gt(lower,0),and(ge(upper,lower),and(str_eq(lowText,int_to_str(lower)),str_eq(highText,int_to_str(upper)))))) then fgc-invalid("generate --words needs positive whole MIN:MAX with MIN <= MAX.\n") else fgc-parse(substring(rest,add(at,1),str_len(rest)),answer,reasoning,tokensSeen,reasoningSeen,lower,upper);
    };
   }
   def fgc-run(resident,path,arg) = fgc-run-request(resident,path,fgc-request(arg));
-  def fgc-run-request(resident,path,request) = if gt(str_len(nth(request,2)),0) then list(nth(request,2),resident) else if gt(nth(request,3),0) then fgcr-run(resident,path,nth(request,1),nth(request,3),head(request)) else fcmg-generate-resident(resident,path,nth(request,1),head(request));
+  def fgc-has-word-range(request) = if gt(len(request),5) then gt(nth(request,5),0) else 0;
+  def fgc-run-request(resident,path,request) = if gt(str_len(nth(request,2)),0) then list(nth(request,2),resident) else if fgc-has-word-range(request) then fgcr-run-bounded(resident,path,nth(request,1),nth(request,3),head(request),nth(request,4),nth(request,5)) else if gt(nth(request,3),0) then fgcr-run(resident,path,nth(request,1),nth(request,3),head(request)) else fcmg-generate-resident(resident,path,nth(request,1),head(request));
  }
  0;
 }

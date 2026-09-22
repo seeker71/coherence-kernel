@@ -191,6 +191,14 @@ their resources. The adapter remains unpromoted; faithful composition and
 whole-session quality parity remain open. Automatic session learning still
 selects Llama; Qwen learning currently uses this explicit native door.
 
+The [native length and tool-message observation](receipts/2026-09-23-native-answer-length.md)
+now checks an explicit word range and carries one measured correction in the
+same model session. It also repairs tool-result encoding to match the selected
+Qwen GGUF template. The actual answer stayed byte-identical at 510 words before
+and after that encoding repair, outside its 350–450-word request. Detection and
+message-layout conformance are observed; effective feedback uptake and the
+requested answer quality remain open.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
