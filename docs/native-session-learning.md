@@ -16,7 +16,9 @@ The integration points are the real CLI doors:
   outcome when that existing fallback is used. An unsuccessful proposal is
   never trained as a correct answer.
 - An interactive session closes with its observed completed-command count and
-  elapsed time. This is status learning, not a claim to understand its transcript.
+  elapsed time retained as continuity evidence. These counters create no
+  training example. Actual task outcomes and explicit teachings carry their
+  own context into the learning queue.
 - `session learn|{"prompt":"...","completion":"..."}` accepts an explicit
   local correction. Optional `session` and `event` values provide stable replay
   identity. `session ask|question` uses the serving adapter or the disclosed seed.

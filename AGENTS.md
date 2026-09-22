@@ -190,7 +190,9 @@ For native response development, or when asked to hear or evaluate native
 generation, use the same source-backed CLI: `models <directory>`,
 `use <observed index>`, `generate <question>`, then
 `quit`. Resolve the directory from `form/form-stdlib/model-registry.bml` and
-the index from the listing. Preserve the question and relevant context. Show
+the index from the listing. Ordinary generation allows 2,048 generated tokens;
+`generate --tokens <positive integer> <question>` selects another allowance.
+Preserve the question and relevant context. Show
 the returned words with their actual model/lane attribution, followed by your
 commentary. Keep unfinished output visible as unfinished. A failed attempt
 enters the native process/health loop in `docs/live-dynamic-diagnostics.md`:
@@ -347,8 +349,9 @@ behavior checks; update callers; then remove the old implementation. A missing
 native capability is work we carry, with the attempt and remaining seam recorded.
 The reading guides the work; it creates no new approval step or landing rule.
 
-Session learning is carried by the body as well. `learn`, `code`, `heal` and
-interactive session completion retain their observed outcomes for native LoRA;
+Session learning is carried by the body as well. `learn`, `code` and `heal`
+retain their observed task outcomes for native LoRA. Interactive session
+completion retains its command count and timing as continuity evidence;
 `session status` reports the actual candidate, serving generation and queue.
 Before closing an agent coding movement, return a concise verified teaching
 through `./fkwu observe/form-cli-session-home-embody-run.fk`: one JSON stdin line
