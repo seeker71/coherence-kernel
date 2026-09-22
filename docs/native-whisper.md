@@ -31,3 +31,38 @@ The existing quiet `ear-okay-2s.wav` fixture remains a disagreement: tiny's pinn
 STT latency is dominated by the encoder in the measured runs. The events expose GPU time and dispatches alongside wall time. Those readings do not establish a hardware floor; concurrent work, admission, the full 1,500-position encoder, preprocessing and kernel choices still affect latency.
 
 `heal guide` names the native STT, training and fusion witnesses and detects MLX import candidates. Cached checkpoint names and historical provenance retain their original publisher names. Piper phonemization and unrelated Python organs remain separate native-authoring work; eliminating the MLX runtime does not claim that the entire repository is Python-free.
+
+## Measured on 2026-09-22, toward a live ear at SOTA
+
+`observe/stt-wer-fixtures-run.fk` measures a lane over a fixture manifest with `sw-wer-bounded`
+(the naive `sw-wer` recursion is exponential: a 40-token hypothesis never returns) and lands one
+row per run in `receipts/stt-wer-ledger.jsonl`. On the three stored references the native
+large-v3-turbo reads WER 0 / 0 / 0 at 1.0–1.5 s per four-second clip; whisper-tiny's raw greedy
+line repeats the sentence to its cap (raw WER 700 / 658) and hears Persian as noise (300).
+
+Encoding a window at its own extent instead of the padded thirty seconds — tiny's own path,
+`enw-encode-at-gain` — collapses large-v3-turbo: WER 100 / 100 / 163 and slower, so the reduced
+audio context that serves small models is not a lever for this one. The encoder hears thirty
+seconds; measured, reverted.
+
+Live, beside the glass while a song played: the live lane opened on turbo passes in 0.39–0.87 s
+(encode) + ~40 ms (decode), says speech (nsp 0) where tiny leaves forty phantoms a minute, and
+its timestamp-prompted greedy line returns only "you" — whisper's mark for music. The
+full-policy WAV door on twelve seconds of the same room (−35 dBFS) returned "Thank you." The
+plain no-timestamps greedy pass (`enw-transcribe`) on the same twelve seconds returned words —
+"Anyway, there's a cold one / cold weather" — the same at gain 1×, 4× and 12×. The decoding
+prompt, not the level and not the model, is what stands between the live ear and the song.
+
+`observe/native-whisper-homecoming-run.fk` reads eight of nine on this branch today: `freed`
+(zero retained Metal buffers after its eight recordings) is 0, while one transcription alone
+retains nothing (0 → 0). Its case is not yet found.
+
+Later the same day the live lane learned to choose: `.hearth/ear.model` reading `turbo` opens the
+registry's native large-v3-turbo through `nws-open` (the same state shape as tiny's `enw-open`) and
+takes its live line through the plain no-timestamps pass (`eac-open-plain`); the loop drains what the
+microphone buffered during a pass (`el-drain`); a standing `.hearth/ear.cadence` passes on everything
+and closes only on the full window. On the song, 90 s: 192 frames, 124 growing lines, 7 full-window
+commits, 3 phantoms (the glass's tiny lane: 94 in the same seconds); the hook came through — "Take me,
+won't you take me?", "Won't you take me? Take me." at mean logprob −0.09, "I wanna go to function
+down" for *Funkytown* — at ~230–250 ms encode + 10–70 ms decode per pass. Without cadence the floor
+follower learned the song as quiet (8 passes in 90 s, each a sub-second pause commit, each "you").
