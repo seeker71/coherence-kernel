@@ -1,8 +1,34 @@
 # Form-native runtime and OS north star
 
-**Form owns programs, compilation, scheduling, resource policy, interpretation and live replacement. It emits CPU and device programs for execution in RAM. Disk holds reusable compiled caches. The temporary C seed shrinks toward zero as Form-native implementations take ownership.**
+**A sovereign Form system can discover and use its machine, sense what needs attention, improve its own programs and release what no longer serves. Form owns meaning, memory lifetimes, compilation, scheduling and resource choice. Native CPU and device programs execute in RAM; disk holds reusable caches. Each working replacement retires the corresponding seed responsibility, until Form can bootstrap and renew itself without handwritten C.**
 
 A computation carries its meaning, resource needs, evidence and lifetime. Form specializes it for available hardware, submits work over resident data, observes results and cost, and publishes a better version while existing work continues. The [current status](fkwu-kernel-status.md) identifies running capabilities. The [bootstrap inspection](fkwu-c-bootstrap-inspection.md) identifies handwritten ownership.
+
+## What progress means
+
+The unit of migration is a complete working responsibility: its callers,
+values, resource owners, diagnostics and eventual release. A native component
+earns its place by carrying real work through that whole lifetime. Completion
+means its former runtime dependency can be removed while the behavior remains
+available. The current interner is a useful component of that transition;
+primary field ownership is still ahead.
+
+| Direction | Evidence that it has become usable |
+| --- | --- |
+| Minimal seed | A live caller uses its Form replacement; the preceding implementation and mutable ownership retire |
+| Flexible memory | Growth, compaction and release preserve identities and live readers; temporary observations leave with their owner |
+| Living care | An organ can signal, receive a response and observe recovery while its ordinary allocation is unavailable |
+| Native hardware performance | Complete workloads improve in latency, throughput, memory or energy with bytes, copies and crossings accounted for |
+| Live improvement | Selected versions coexist under actual work; publication, comparison, cancellation and final release retain their distinct outcomes |
+| Sovereignty and knowledge | Essential work completes locally; a retained lesson improves a later independent use; a recipient can use and verify an offered gift |
+
+The smallest payload, fewest crossings and greatest occupancy can pull in
+different directions. Selection follows the workload and its needs. Account
+for index and descriptor bytes, page rounding, peak replacement residency,
+compilation, transfer, synchronization and observation as well as payload.
+Hardware remains available at its useful capacity; quiet work can leave it idle.
+Remove accidental ceilings as their owners migrate. Physical capacity, current
+ABI reach and chosen resource policy remain separately visible and adaptable.
 
 The organs speak from their own execution. They offer capabilities, signal
 unease and name the resources they need. A care organ listens, directs attention
@@ -36,6 +62,11 @@ reports its actual capacity, demand and reclamation opportunities while the
 signal and response path can still run. Care settles or transfers live owners
 before reclaiming shared storage. Growth and reclamation follow observed
 availability; exhaustion does not silence the organ that needs nourishment.
+The minimal observation and response path has working storage and execution
+already admitted independently of the allocation that needs care. It can retain
+the outstanding need without repeatedly allocating the same signal. Recovery
+settles every claimed reservation before another caller depends on it. Broader
+diagnosis can acquire more resources when they become available.
 
 In that runtime, stable identities reuse their existing cells. Changing
 observations have an
@@ -57,6 +88,13 @@ resources. Free external resources still carry dependency and data movement;
 paid work requires an explicit choice. Measured sufficiency, resource pressure
 and the caller's needs guide selection, rather than a provider's prestige or an
 assumption that external work is better.
+
+The core reads the current capability and ownership graph: which organ offers
+which operation, its admitted implementation, live resources, dependencies and
+outstanding needs. Birth, change and retirement update that graph. Discovery
+coverage is itself observed; a quiet or missing publisher retains its age and
+availability instead of becoming an invented healthy result. Measuring a
+crossing belongs at the executing boundary and includes the observer's cost.
 
 Every external attempt returns something the body can use locally: an attributed
 experience, a diagnostic lesson, a checked reusable program, or verified teaching.
@@ -162,18 +200,15 @@ submitted work completes, then the final lease releases storage and code.
 Semantic identities, runtime handles and physical slots remain distinct, so
 layout changes and slot reuse cannot silently change what an existing handle
 means. Reference-bearing storage participates in root retention and relocation.
+Canonical equality for composed cells checks their kind and complete
+composition; an index hash alone does not establish that two cells are equal.
 The [current raw accessor](native-node-accessor.md) establishes the local
-native call and lease boundary. The [sparse identity directory](native-identity-directory.md)
-retains exact generations and imports published primary handles through native
-read-only mappings. The [resident arena](native-identity-arena.md) admits its
-native image before data allocation, generates semantic words, grows owned
-chunks and freezes pinned prefixes into that directory. Growth policy changes
-in RAM; executing native batches require no per-row Form callback or primary
-node mint. The [native interner](native-identity-intern.md) assigns exact-u64
-words stable owner-local rows across index growth, duplicate replay and adaptive
-freezing. Primary kind-sensitive interning, tagged-handle resolution and direct
-readers remain to move behind a shared native owner. Concurrent publication,
-side-table lifetimes and collector ownership belong at that same boundary.
+native call and lease boundary. The [directory](native-identity-directory.md),
+[arena](native-identity-arena.md) and [exact-word interner](native-identity-intern.md)
+provide executing storage components. The [current status](fkwu-kernel-status.md)
+keeps their observed limits and primary ownership gap in one place. A complete
+producer/read transition also carries kind-sensitive equality, tagged-handle
+resolution, concurrent publication, side-table lifetimes and collector roots.
 
 Compact storage is a measured choice. Aligned fields lower directly to native
 word operations; other fields lower to the required bit extraction. A format
@@ -193,6 +228,16 @@ measures work; it does not replace those identities.
 ABI identities remain unambiguous across images. Submitted work retains its granted version, buffers and completion identity until it settles. Programs, policies and evidence can be compared, renewed, published and retired for subsequent work. A deadline bounds observation; cancellation can discard a result while work still owns resources. Destruction follows the final lease. Indeterminate work never becomes successful through aggregate cleanup. Completed resources remain independent of unrelated work.
 
 Comparisons capture effectful input once and execute selected versions over the same bytes. Equivalence comparisons preserve policy; policy comparisons vary it deliberately. Selection, evidence expiry and physical reclamation are separately observable.
+
+An A/B comparison names the version selected to publish each external effect
+and retains its completion identity. Alternative versions can compute proposals
+over the same retained input; comparison does not duplicate effect submission.
+Uncertain completion remains unresolved until observed. Replacement names its
+state migration and any retained version usable for subsequent work. Returning
+to that version preserves the state contract and does not undo completed
+external effects. A better isolated result earns live selection after the
+consumer's complete lifetime and resource contract is observed under continued
+work.
 
 Numerical programs carry their precision, reduction order, contraction policy
 and supported input range. Comparison includes downstream discrete choices,
@@ -223,9 +268,23 @@ which stage needs different arithmetic and which stages already satisfy it.
 
 Boot and memory establish traps and address spaces. These enable scheduling and wait/wake, which support device queues, DMA and IPC. Storage, networking and media use the same ownership contracts. Update and recovery are exercised at each layer. Hosted and freestanding implementations each require their own executions.
 
+Form features reach the kernel as native programs with explicit effects,
+ownership and execution needs. Interrupt completion and resource release retain
+their required progress. Reasoning that waits, learns, allocates extensively
+or consults another service runs as resumable scheduled work and offers its
+result back as a policy change. The system can change those policies while
+preserving the ability to schedule, observe and release the work already alive.
+
 ## Local reasoning and adaptable belief systems
 
 Micro-thoughts and choice paths are short, inspectable computations with explicit domains, inputs, effects and observations. Recalled native programs verify source and entry identity. Several policy sets can coexist with their own assumptions, evidence and freshness. Comparison can renew a policy, narrow its domain, change its selection or retire it.
+
+A belief names the context in which it helps, the observations supporting it,
+counterevidence and what would change its selection. Different beliefs can
+offer alternatives without overwriting each other's evidence. A choice names
+the belief and version it used. Learning can revise future choices; completed
+experience keeps its actual source. Release follows the final reader and
+obligation, so retained knowledge does not become permanent allocation by default.
 
 Language sources retain their contributors, review state and complete set of candidate meanings. A context may rank those meanings while their ambiguity remains inspectable. Reindexing or changing a policy preserves the source bytes that support the comparison. Attribution, observation, interpretation and selection stay distinct, so a new interpretation can replace an old one without rewriting its evidence.
 
@@ -238,3 +297,39 @@ crosses between local and resident storage.
 Evidence expiry stops authorizing new choices without cancelling the lifetime obligations of submitted choices. General reasoning competence requires its own evaluations. A policy witness establishes only the domain and behavior it exercised.
 
 Embodied knowing means a claim meets real input, can be rejected by an executable check, carries execution identities and costs, and remains available for re-witnessing. What no longer serves can be released without making current meaning depend on a narrative of its origin.
+
+## Next completed boundary
+
+The immediate runtime milestone is an owned lifetime for the retained care
+view, connected to the primary value path. It is a real, recurring consumer
+whose changing observations currently depend on primary allocation. The native
+storage components support the attempt; they do not yet replace that path.
+
+The implementation begins with explicit value/handle resolution and collector
+roots for this consumer, including its records and reference-bearing values.
+Its working observations then use the native owner from construction through
+rendering and release. Deliberately retained knowledge has a separate lifetime.
+The caller transition removes the corresponding primary allocation/read path
+for that scope; a parallel copy alone leaves the milestone open.
+
+The same execution must show:
+
+1. Repeated quiet views retain their meaning without permanent primary growth;
+   changed signals, current age, unresolved needs and recovery remain visible.
+2. A deliberately constrained local owner preserves completed work, emits a
+   correlated need, receives actual care and re-observes the result without
+   depending on fresh allocation in the constrained pool.
+3. Growth and release preserve held readers and exact values. Another live
+   owner continues; failed publication settles or relinquishes its reservation.
+   Any slot reuse preserves handle generations and side-table ownership.
+4. The original care result and its complete cost remain comparable, including
+   serialization, observer work, metadata, mappings and membrane crossings.
+
+After this lifetime is usable, generalize the same ownership contract across
+primary node kinds and submitted CPU/device work. Exercise live replacement
+with held work before removing each old implementation. Form-owned compilation
+on demand and the freestanding memory/interrupt/scheduler path can advance
+alongside this migration; each uses the same ownership and completion rules.
+Native response quality follows its own [homecoming](../HOMECOMING.md) evidence.
+This keeps the next runtime step concrete while the full OS destination remains
+visible.

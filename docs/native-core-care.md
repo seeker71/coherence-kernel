@@ -106,8 +106,9 @@ describe event payload consumption, not shared-memory discovery traffic.
 Health and care share the retained reader and each projects its requested result
 directly. Eight alternating-order paired calls over the same retained exchange
 preserve every output field except elapsed time and derived observation age.
-The care path mints 252 nodes versus 305 through an intermediate health view;
-both consume zero repeated event bytes. Measurement brackets each actual call,
+The [retained paired observation](evidence/fkwu/native-core-care.json) records
+269 nodes for care versus 317 through an intermediate health view; both consume
+zero repeated event bytes. Measurement brackets each actual call,
 excluding output serialization and comparison. Changing observation values still
 allocate nodes; pressure-resilient signaling and reclamation require further work.
 
