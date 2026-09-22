@@ -1,0 +1,58 @@
+// One observation/correlation reducer over JSON values. Node-facing APIs wrap
+// immutable nodes and explicitly materialize the result; retained readers keep
+// values rooted only by their current state and deliberately held snapshots.
+// preludes: form-stdlib/bml/json-view.bml form-stdlib/bml/native-owner-clock.bml
+section [form.bml] {
+ class OrganHealthValues {
+  def ohv-str(row,key) = if eq(jv-kind(jv-get(row,key)),3) then jv-str(row,key) else "";
+  def ohv-has(values,value) = if nil?(values) then 0 else or(str_eq(head(values),value),ohv-has(tail(values),value));
+  def ohv-text(row,key) = and(eq(jv-kind(jv-get(row,key)),3),gt(str_len(ohv-str(row,key)),0));
+  def ohv-is-int(value,number) = and(eq(jv-kind(value),4),eq(jv-value(value),number));
+  def ohv-health(value) = or(eq(jv-kind(value),8),or(ohv-is-int(value,0),ohv-is-int(value,1)));
+  def ohv-array(row,key) = eq(jv-kind(jv-get(row,key)),2);
+  def ohv-valid(row) = and(str_eq(ohv-str(row,"schema"),"organ-health-v1"),and(ohv-text(row,"id"),and(ohv-text(row,"organ"),and(ohv-text(row,"flow"),and(ohv-text(row,"aspect"),and(ohv-has(list("observe","response","applied"),ohv-str(row,"stage")),and(jv-has(row,"expected"),and(jv-has(row,"observed"),and(ohv-health(jv-get(row,"health")),and(ohv-array(row,"needs"),ohv-array(row,"offers")))))))))));
+  def ohv-pain(row) = ohv-is-int(jv-get(row,"health"),0);
+  def ohv-unease(row) = and(ohv-valid(row),or(ohv-pain(row),or(eq(jv-kind(jv-get(row,"health")),8),or(not(nil?(jv-items(jv-get(row,"needs")))),ohv-is-int(jv-get(row,"surprise"),1)))));
+  def ohv-extract(row) = if str_eq(ohv-str(row,"schema"),"organ-health-v1") then row else if jv-has(row,"health") then jv-get(row,"health") else jv-null();
+  def ohv-key(row) = jv-emit(jv-array(list(jv-get(row,"organ"),jv-get(row,"flow"),jv-get(row,"aspect"))));
+  def ohv-replace(rows,row) = if nil?(rows) then list(row) else if str_eq(ohv-key(head(rows)),ohv-key(row)) then cons(row,tail(rows)) else cons(head(rows),ohv-replace(tail(rows),row));
+  def ohv-observed(row) = if jv-has(row,"observed_at_ms") then row else jv-set(row,"observed_at_ms",jv-get(row,"at_ms"));
+  def ohv-find(rows,row) = if nil?(rows) then jv-null() else if str_eq(ohv-key(head(rows)),ohv-key(row)) then head(rows) else ohv-find(tail(rows),row);
+  def ohv-strings(values) = if nil?(values) then list() else cons(jv-string(head(values)),ohv-strings(tail(values)));
+  def ohv-values(views) = if nil?(views) then list() else cons(jv-value(head(views)),ohv-values(tail(views)));
+  def ohv-need(resource,detail) = jv-object(list(jv-s("resource",resource),jv-pair("detail",detail)));
+  def ohv-reference(path) = jv-object(list(jv-s("path",path),jv-n("bytes",file_size(path)),jv-n("observed_unix_ms",now_unix_ms())));
+  def ohv-reading(organ,flow,aspect,expected,observed,health,needs,offers,evidence) = ohv-reading-with-id(str_concat(noc-open(),str_concat(":",str_concat(flow,str_concat(":",aspect)))),organ,flow,aspect,expected,observed,health,needs,offers,evidence);
+  def ohv-reading-with-id(id,organ,flow,aspect,expected,observed,health,needs,offers,evidence) {
+   if str_eq(id,"") then form_error("organ health reading identity is empty") else 0;
+   let at = now_unix_ms();
+   jv-object(list(jv-s("schema","organ-health-v1"),jv-s("id",id),jv-s("organ",organ),jv-s("flow",flow),jv-s("aspect",aspect),jv-s("stage","observe"),jv-pair("expected",expected),jv-pair("observed",observed),jv-pair("health",health),jv-n("surprise",not(jv-equal(expected,observed))),jv-pair("needs",jv-array(needs)),jv-pair("offers",jv-array(ohv-strings(offers))),jv-s("selected",""),jv-pair("evidence",evidence),jv-n("observed_at_ms",at),jv-n("at_ms",at)));
+  }
+  def ohv-frame(row) = fb_record(intern_trivial_int(now_unix_ms()),"organ-health.bml",if ohv-pain(row) then 1 else 0);
+  def ohv-attentions(rows,attention) = if nil?(rows) then list(attention) else if jv-equal(jv-get(head(rows),"need"),jv-get(attention,"need")) then cons(attention,tail(rows)) else cons(head(rows),ohv-attentions(tail(rows),attention));
+  def ohv-attention-reading(held,row) {
+   let prior = ohv-find(held,row); let bound = and(ohv-valid(prior),str_eq(ohv-str(prior,"id"),ohv-str(row,"id")));
+   if not(bound) then held else ohv-replace(held,jv-set(jv-set(prior,"attention",jv-get(row,"attention")),"attentions",jv-array(ohv-attentions(if ohv-array(prior,"attentions") then jv-items(jv-get(prior,"attentions")) else list(),jv-get(row,"attention")))));
+  }
+  def ohv-control-metadata(held,row) {
+   let clean = if jv-has(row,"care_need") then jv-remove(held,"care_delivery") else held;
+   let responder = if jv-has(row,"responder") then jv-set(clean,"responder",jv-get(row,"responder")) else clean;
+   let need = if jv-has(row,"care_need") then jv-set(responder,"care_need",jv-get(row,"care_need")) else responder;
+   if jv-has(row,"care_of") then jv-set(need,"care_of",jv-get(row,"care_of")) else need;
+  }
+  def ohv-offered(values,action) = if nil?(values) then 0 else or(and(eq(jv-kind(head(values)),3),str_eq(jv-value(head(values)),action)),ohv-offered(tail(values),action));
+  def ohv-correlation(id,row) = ohv-reading-with-id(id,"health-flow",ohv-str(row,"flow"),"control-correlation",jv-string("response bound to an observed offer"),jv-string(ohv-str(row,"id")),jv-int(0),list(ohv-need("correlated-observation",jv-get(row,"evidence"))),list("request-evidence","defer"),jv-get(row,"evidence"));
+  def ohv-correlation-owned(row,context) = ohv-correlation(str_concat(noc-open(),str_concat(":",str_concat(ohv-str(row,"flow"),":control-correlation"))),row);
+  def ohv-control-reading(held,row) = ohv-control-through(held,row,ohv-correlation-owned,nothing());
+  def ohv-control-through(held,row,diagnostic,context) {
+   let prior = ohv-find(held,row);
+   let bound = and(ohv-valid(prior),and(str_eq(ohv-str(prior,"id"),ohv-str(row,"id")),ohv-offered(jv-items(jv-get(prior,"offers")),ohv-str(row,"selected"))));
+   if bound then ohv-replace(held,ohv-control-metadata(jv-set(jv-set(jv-set(jv-set(prior,"stage",jv-get(row,"stage")),"selected",jv-get(row,"selected")),"result",jv-get(row,"result")),"at_ms",jv-get(row,"at_ms")),row)) else ohv-replace(held,diagnostic(row,context));
+  }
+  def ohv-one(row,held,diagnostic,context) = if not(ohv-valid(row)) then held else if str_eq(ohv-str(row,"stage"),"observe") then if jv-has(row,"attention") then ohv-attention-reading(held,row) else ohv-replace(held,ohv-observed(row)) else ohv-control-through(held,row,diagnostic,context);
+  def ohv-current(rows,held) = ohv-current-through(rows,held,ohv-correlation-owned,nothing());
+  def ohv-current-through(rows,held,diagnostic,context) = if nil?(rows) then held else ohv-current-through(tail(rows),ohv-one(ohv-extract(head(rows)),held,diagnostic,context),diagnostic,context);
+  def ohv-age(rows,now) = if nil?(rows) then list() else cons(jv-overlay(head(rows),list(jv-pair("observation_age_ms",if jv-has(head(rows),"observed_at_ms") then jv-int(sub(now,jv-value(jv-get(head(rows),"observed_at_ms")))) else jv-null()))),ohv-age(tail(rows),now));
+ }
+ 0;
+}
