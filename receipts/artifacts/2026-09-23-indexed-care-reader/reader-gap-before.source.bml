@@ -1,6 +1,6 @@
 // A retained native reader for an append-only organ flow. Only complete JSONL
 // records become observations. A caller owns the reader and its work budget.
-// preludes: form-stdlib/organ-health.bml form-stdlib/bml/json-view-parse.bml form-stdlib/keyed-map.fk
+// preludes: form-stdlib/organ-health.bml form-stdlib/bml/json-view-parse.bml
 section [form.bml] {
  class OrganHealthStream {
   def ohs-open(path,generation) {
@@ -14,7 +14,7 @@ section [form.bml] {
   // identity and diagnostic sequence outlive publisher generations.
   def ohs-restart(owner,generation) {
    record_set(owner,"generation",generation); record_set(owner,"offset",0);
-   record_set(owner,"pending",""); ohs-clear-current(owner);
+   record_set(owner,"pending",""); record_set(owner,"current",list());
    record_set(owner,"state","unobserved"); record_set(owner,"read_bytes",0);
    record_set(owner,"invalid_records",0); record_set(owner,"extent",0);
    owner;
@@ -26,38 +26,7 @@ section [form.bml] {
    str_concat(record_get(owner,"identity"),str_concat(":diagnostic:",int_to_str(record_get(owner,"diagnostic_sequence"))));
   }
   def ohs-correlation(row,owner) = ohv-correlation(ohs-identity(owner),row);
-  def ohs-clear-current(owner) {
-   record_set(owner,"current",list()); record_set(owner,"current_index",km-new(1));
-   record_set(owner,"current_keys",list()); record_set(owner,"current_count",0);
-   record_set(owner,"current_capacity",km-arity()); record_set(owner,"current_dirty",0); owner;
-  }
-  // The existing reducer owns observation and control meaning. Give it the
-  // one matching prior observation; the exact-key map owns lookup and order.
-  def ohs-current(owner,row) {
-   let key = km-key-of-string(ohv-key(row));
-   let prior = km-get(record_get(owner,"current_index"),key,jv-null());
-   let rows = ohv-current-through(list(row),if eq(jv-kind(prior),8) then list() else list(prior),ohs-correlation,owner);
-   ohs-index-rows(owner,rows);
-  }
-  def ohs-index-rows(owner,rows) = if nil?(rows) then owner else { ohs-index-row(owner,head(rows)); ohs-index-rows(owner,tail(rows)); };
-  def ohs-reindex(keys,old,index) = if nil?(keys) then index else ohs-reindex(tail(keys),old,km-put(index,head(keys),km-get(old,head(keys),jv-null())));
-  def ohs-index-row(owner,row) {
-   let key = km-key-of-string(ohv-key(row)); let index = record_get(owner,"current_index");
-   let fresh = not(km-has?(index,key)); let count = record_get(owner,"current_count");
-   let grow = and(fresh,ge(count,record_get(owner,"current_capacity")));
-   let ready = if grow then ohs-reindex(record_get(owner,"current_keys"),index,km-for(add(count,1))) else index;
-   if grow then record_set(owner,"current_capacity",mul(record_get(owner,"current_capacity"),km-arity())) else 0;
-   if fresh then { record_set(owner,"current_keys",cons(key,record_get(owner,"current_keys"))); record_set(owner,"current_count",add(count,1)); } else 0;
-   record_set(owner,"current_index",km-put(ready,key,row));
-   record_set(owner,"current_dirty",1);
-  }
-  def ohs-index-values(keys,index,rows) = if nil?(keys) then rows else ohs-index-values(tail(keys),index,cons(km-get(index,head(keys),jv-null()),rows));
-  def ohs-publish-current(owner) {
-   if record_get(owner,"current_dirty") then {
-    record_set(owner,"current",ohs-index-values(record_get(owner,"current_keys"),record_get(owner,"current_index"),list()));
-    record_set(owner,"current_dirty",0);
-   } else owner;
-  }
+  def ohs-current(owner,row) = record_set(owner,"current",ohv-current-through(list(row),record_get(owner,"current"),ohs-correlation,owner));
   def ohs-diagnostic(owner,aspect,expected,observed) {
    let row = ohv-reading-with-id(ohs-identity(owner),"organ-health-reader",ohs-path(owner),aspect,jv-string(expected),observed,jv-int(0),list(ohv-need("complete-organ-evidence",ohv-reference(ohs-path(owner)))),list("request-evidence","defer"),ohv-reference(ohs-path(owner)));
    ohs-current(owner,row);
@@ -67,7 +36,6 @@ section [form.bml] {
   // Consume once; the caller chooses the representation of its report.
   def ohs-update(owner,budget) {
    if le(budget,0) then form_error("organ reading needs a positive byte work budget") else ohs-poll-size(owner,budget,file_size(ohs-path(owner)));
-   ohs-publish-current(owner);
   }
   def ohs-poll-size(owner,budget,size) {
    record_set(owner,"read_bytes",0);
@@ -79,7 +47,7 @@ section [form.bml] {
    owner;
   }
   def ohs-reset(owner,budget,size) {
-   record_set(owner,"offset",0); record_set(owner,"pending",""); ohs-clear-current(owner);
+   record_set(owner,"offset",0); record_set(owner,"pending",""); record_set(owner,"current",list());
    ohs-diagnostic(owner,"source-reset","append-only source generation",jv-int(size));
    ohs-read(owner,budget,size);
   }
