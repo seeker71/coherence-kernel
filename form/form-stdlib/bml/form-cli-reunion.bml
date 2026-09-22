@@ -1,0 +1,87 @@
+// The reunion: the body brings its own work home when origin has moved.
+//
+// A landing whose push is refused for want of a fast-forward used to hold, and
+// a hand did the rest: fetch, rebase, resolve the ledgers, redraw the page,
+// push. That hand was the most repeated work of 2026-09-22 — six reunions in
+// one session, each a handful of rented turns for a recipe that never varied.
+//
+// This is not a second attempt at the first push. The push failed because
+// origin held commits this checkout did not; the reunion changes that ground
+// and then pushes the new ground. A repeat that carries nothing from the
+// attempt it replaces is blind; this carries the whole reason.
+//
+// Two kinds of conflict the body can settle itself, and no others. A ledger is
+// a river of rows: both banks are true, so the union stands, ordered by the
+// moment each row was written. A drawn page is made from the ledgers, so
+// neither side is worth merging — it is redrawn after the rows agree. Anything
+// else is a wall: the rebase is undone and the reunion says what stopped it.
+// preludes: form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml
+section [form.bml] {
+ class FormCliReunion {
+  def fcr-mine() = "<<<<<<<";
+  def fcr-theirs() = ">>>>>>>";
+  def fcr-split() = "=======";
+  def fcr-ledger?(path) = and(ge(str_find(path, "receipts/", 0), 0), ge(str_find(path, ".jsonl", 0), 0));
+  def fcr-drawn?(path) = ge(str_find(path, "docs/rent-ladder.html", 0), 0);
+  def fcr-settleable?(path) = or(fcr-ledger?(path), fcr-drawn?(path));
+  // ── the union of two banks of rows ──
+  def fcr-live(xs) = if nil?(xs) then list() else if str_eq(trim(head(xs)), "") then fcr-live(tail(xs)) else cons(head(xs), fcr-live(tail(xs)));
+  def fcr-marked?(line, mark) = eq(str_find(line, mark, 0), 0);
+  def fcr-any-mark?(line) = or(fcr-marked?(line, fcr-mine()), or(fcr-marked?(line, fcr-theirs()), fcr-marked?(line, fcr-split())));
+  def fcr-without-marks(xs) = if nil?(xs) then list() else if fcr-any-mark?(head(xs)) then fcr-without-marks(tail(xs)) else cons(head(xs), fcr-without-marks(tail(xs)));
+  def fcr-digit?(b) = and(ge(b, 48), le(b, 57));
+  def fcr-digits(text, i, acc) = if and(lt(i, str_len(text)), fcr-digit?(str_byte_at(text, i))) then fcr-digits(text, add(i, 1), add(mul(acc, 10), sub(str_byte_at(text, i), 48))) else acc;
+  def fcr-when(line) { let at = str_find(line, "\"at_unix_ms\":", 0); if lt(at, 0) then 0 else fcr-digits(line, add(at, 13), 0); }
+  def fcr-seen?(xs, line) = if nil?(xs) then 0 else if str_eq(head(xs), line) then 1 else fcr-seen?(tail(xs), line);
+  def fcr-once(xs, kept) = if nil?(xs) then kept else fcr-once(tail(xs), if eq(fcr-seen?(kept, head(xs)), 1) then kept else append(kept, list(head(xs))));
+  def fcr-insert(row, sorted) = if nil?(sorted) then list(row) else if le(fcr-when(row), fcr-when(head(sorted))) then cons(row, sorted) else cons(head(sorted), fcr-insert(row, tail(sorted)));
+  def fcr-order(xs, sorted) = if nil?(xs) then sorted else fcr-order(tail(xs), fcr-insert(head(xs), sorted));
+  def fcr-join(xs) = if nil?(xs) then "" else mc-cat(list(head(xs), "\n", fcr-join(tail(xs))));
+  // Both banks, each row once, in the order the rows were written.
+  def fcr-union(text) = fcr-join(fcr-order(fcr-once(fcr-without-marks(fcr-live(split-on(text, "\n"))), list()), list()));
+  def fcr-settle-ledger(path) = write_file_text(path, fcr-union(fhn-read(path)));
+  // ── the walk ──
+  def fcr-run(cmd) = fcr-said(host-exec(cmd, ""));
+  def fcr-said(out) = if nothing?(out) then "" else out;
+  def fcr-ok?(out) = ge(str_find(out, "[ok] exit=0", 0), 0);
+  def fcr-exit(cmd) = fcr-run(mc-cat(list("out=$(", cmd, " 2>&1); code=$?; printf '[ok] exit=%s %s\\n' \"$code\" \"$(printf '%s' \"$out\" | tail -n 1)\"")));
+  def fcr-conflicts() = fcr-live(split-on(trim(fcr-run("git diff --name-only --diff-filter=U 2>/dev/null")), "\n"));
+  def fcr-unsettleable(paths) = if nil?(paths) then list() else if fcr-settleable?(trim(head(paths))) then fcr-unsettleable(tail(paths)) else cons(trim(head(paths)), fcr-unsettleable(tail(paths)));
+  def fcr-drawn-among?(paths) = if nil?(paths) then 0 else if fcr-drawn?(trim(head(paths))) then 1 else fcr-drawn-among?(tail(paths));
+  def fcr-settle(path) = if fcr-ledger?(path) then fcr-settle-then(path, fcr-settle-ledger(path)) else fcr-settle-then(path, fcr-run(mc-cat(list("git checkout --theirs ", path, " 2>/dev/null"))));
+  def fcr-settle-then(path, settled) = fcr-run(mc-cat(list("git add ", path, " 2>/dev/null")));
+  def fcr-settle-all(paths) = if nil?(paths) then 0 else fcr-settle-all-next(tail(paths), fcr-settle(trim(head(paths))));
+  def fcr-settle-all-next(rest, done) = fcr-settle-all(rest);
+  // Each round: settle what the body may settle, or stop at the wall and undo
+  // the rebase, so a checkout is never left standing in a half-joined state.
+  def fcr-rounds(round, drawn) {
+   let conflicts = fcr-conflicts();
+   if nil?(conflicts) then list("joined", "", drawn)
+   else if ge(round, 8) then fcr-wall("more rounds than the body will take", drawn)
+   else fcr-round-at(round, drawn, conflicts, fcr-unsettleable(conflicts));
+  }
+  def fcr-round-at(round, drawn, conflicts, walls) {
+   if not(nil?(walls)) then fcr-wall(head(walls), drawn)
+   else fcr-round-go(round, or(eq(drawn, 1), eq(fcr-drawn-among?(conflicts), 1)), fcr-settle-all(conflicts));
+  }
+  def fcr-round-go(round, drawn, settled) = fcr-rounds-after(round, drawn, fcr-exit("git -c core.editor=true rebase --continue"));
+  def fcr-rounds-after(round, drawn, out) = fcr-rounds(add(round, 1), if drawn then 1 else 0);
+  def fcr-wall(path, drawn) = fcr-wall-undone(path, fcr-run("git rebase --abort 2>/dev/null"));
+  def fcr-wall-undone(path, undone) = list("wall", path, 0);
+  // The reunion itself: bring origin in, join, redraw what is drawn, push once
+  // on the new ground. The push that follows is not the push that failed.
+  def fcr-reunion(redraw) {
+   let fetched = fcr-exit("git fetch origin main");
+   let rebased = fcr-exit("git rebase origin/main");
+   let joined = if fcr-ok?(rebased) then list("joined", "", 0) else fcr-rounds(0, 0);
+   if not(str_eq(nth(joined, 0), "joined")) then list("held", mc-cat(list("a conflict the body may not settle: ", nth(joined, 1))), "")
+   else fcr-reunion-drawn(redraw, nth(joined, 2));
+  }
+  def fcr-reunion-drawn(redraw, drawn) {
+   let drew = if and(eq(drawn, 1), gt(str_len(redraw), 0)) then fcr-redraw(redraw) else "";
+   list("joined", "", fcr-exit("git push -u origin HEAD"));
+  }
+  def fcr-redraw(redraw) = fcr-redrawn(fcr-run(redraw), fcr-run("git add docs/rent-ladder.html 2>/dev/null"));
+  def fcr-redrawn(drew, added) = fcr-run("git -c user.name=Claude -c user.email=noreply@anthropic.com commit -q --amend --no-edit 2>&1 | tail -1");
+ }
+}
