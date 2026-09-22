@@ -76,9 +76,10 @@ total. No saving or whole-session parity claim follows.
 A replacement teaching was retained under
 `2026-09-23-qwen-teaching-learning-procedure-v2-corrected`, with the same session
 `native-arrival-bootstrap`, through the required native embodiment door.
-At this receipt's close, the supervisor is alive, pending is 1, stderr is empty,
-and the selected candidate remains the restored step 141. The replacement's
-learning completion is pending; retention alone establishes no weight update.
+The subsequent supervisor result completed with exit 0 and pending 0. The
+corrected lesson continued from restored step 141 to a new step-142 candidate;
+cumulative learned rounds are 143, withdrawals 1, promotions 4. Serving remains
+step 5. This completed update belongs to the separate Llama learner, not Qwen.
 
 The next native answer still needs faithful composition of supplied sources
 and reliable length control. This movement repairs the evidence used to guide
