@@ -1,0 +1,175 @@
+// Reusable, completion-only native learning for an explicitly named Qwen model.
+// No base weight is written and no candidate is promoted to serving.
+// qlhb/Metal kernel failures may terminate the process: BML has no exception or
+// finally construct. Ordinary preconditions and partial admissions return an
+// owned structured result and are released at the boundary below.
+// preludes: form-stdlib/bml/form-cli-model-renew.bml form-stdlib/bml/qwen-lora-head-batch.bml form-stdlib/bml/form-cli-model-adapter.bml form-stdlib/bml/form-cli-response-shared.bml
+section [form.bml] {
+ class QwenLoraLearning {
+  def qll-value(node,key) = node_value(json-object-get(node,key));
+  def qll-read(path) { let source = read_file(path); if not(str_eq(value_kind(source),"string")) then json-node-null() else if faj-valid(source) then parse-json(path,source) else json-node-null(); }
+  def qll-real(key,value) = json-node-pair(key,json-precise-float(value));
+  def qll-bool(value) = if value then 1 else 0;
+  def qll-result(ok,status,reason,root,detail) = json-node-object(list(nsm-n("ok",qll-bool(ok)),nsm-s("status",status),nsm-s("reason",reason),nsm-s("output_directory",root),json-node-pair("detail",detail),nsm-n("serving_promotion",0),json-node-pair("serving_quality_verdict",json-node-null()),nsm-n("provider_processes",0),nsm-s("process_failure_boundary","qlhb and Metal helpers may terminate the process on kernel failure; BML has no exception/finally recovery after such a throw")));
+  def qll-write-result(root,name,result) = if str_eq(root,"") then 0 else frsh-frozen(frsh-path(root,name),json-emit-precise(result));
+  def qll-observe(phase,ok,observed) = oh-voice(oh-reading("qwen-learning",int_to_str(host_pid()),phase,json-node-int(1),json-node-int(ok),json-node-int(ok),if ok then list() else list(oh-need("inspect-retained-learning-result",json-node-null())),list("continue","revise","abstain"),observed));
+  def qll-fail(reason) = qll-result(0,"refused",reason,"",json-node-null());
+  def qll-kind(node,key) = value_kind(qll-value(node,key));
+  def qll-string-present(node,key) = and(str_eq(qll-kind(node,key),"string"),gt(str_len(fcap-string(node,key)),0));
+  def qll-int-positive(node,key) = if str_eq(qll-kind(node,key),"int") then gt(qll-value(node,key),0) else 0;
+  def qll-number?(value) = if not(or(str_eq(value_kind(value),"float"),str_eq(value_kind(value),"int"))) then 0 else qlt-finite-bytes?(md-le32(md-f32-bits(value)),0,1);
+  def qll-number-positive(node,key) { let value = qll-value(node,key); if qll-number?(value) then gt(value,0.0) else 0; }
+  def qll-number-nonnegative(node,key) { let value = qll-value(node,key); if qll-number?(value) then ge(value,0.0) else 0; }
+  def qll-profile-valid(profile) = or(str_eq(profile,"full"),str_eq(profile,"knowledge-query"));
+  def qll-runtime-profile(profile) = profile;
+  def qll-row-basic?(row) = and(qll-string-present(row,"id"),and(qll-string-present(row,"prompt"),and(qll-string-present(row,"completion"),or(str_eq(fcap-string(row,"split"),"train"),str_eq(fcap-string(row,"split"),"validation")))));
+  def qll-rows-basic?(rows) = if nil?(rows) then 1 else and(qll-row-basic?(head(rows)),qll-rows-basic?(tail(rows)));
+  def qll-id-in?(id,rows) = if nil?(rows) then 0 else or(str_eq(id,fcap-string(head(rows),"id")),qll-id-in?(id,tail(rows)));
+  def qll-unique-ids?(rows) = if nil?(rows) then 1 else and(not(qll-id-in?(fcap-string(head(rows),"id"),tail(rows))),qll-unique-ids?(tail(rows)));
+  def qll-prompt-in-split?(prompt,split,rows) = if nil?(rows) then 0 else or(and(str_eq(split,fcap-string(head(rows),"split")),str_eq(prompt,fcap-string(head(rows),"prompt"))),qll-prompt-in-split?(prompt,split,tail(rows)));
+  def qll-no-overlap?(rows,all) = if nil?(rows) then 1 else { let row = head(rows); let opposite = if str_eq(fcap-string(row,"split"),"train") then "validation" else "train"; and(not(qll-prompt-in-split?(fcap-string(row,"prompt"),opposite,all)),qll-no-overlap?(tail(rows),all)); };
+  def qll-has-split?(split,rows) = if nil?(rows) then 0 else or(str_eq(split,fcap-string(head(rows),"split")),qll-has-split?(split,tail(rows)));
+  def qll-request-reason(request) {
+   let rowsNode = json-object-get(request,"rows");
+   let rows = if fat-wire-array?(rowsNode) then node_children(rowsNode) else list();
+   if not(fat-wire-object?(request)) then "request must be an object"
+   else if not(qll-string-present(request,"model")) then "model registry key is required"
+   else if not(qll-string-present(request,"output_directory")) then "immutable output directory is required"
+   else if not(fat-wire-array?(rowsNode)) then "rows must be an array"
+   else if nil?(rows) then "rows must not be empty"
+   else if not(qll-rows-basic?(rows)) then "each row needs a nonempty id, prompt and completion and split train or validation"
+   else if not(qll-unique-ids?(rows)) then "row ids must be unique"
+   else if not(qll-no-overlap?(rows,rows)) then "exact prompt overlap between train and validation is refused"
+   else if not(and(qll-has-split?("train",rows),qll-has-split?("validation",rows))) then "both train and validation rows are required"
+   else if not(qll-string-present(request,"profile")) then "profile is required"
+   else if not(qll-profile-valid(fcap-string(request,"profile"))) then "profile must be full or knowledge-query"
+   else if not(qll-int-positive(request,"context")) then "context must be a positive integer"
+   else if not(qll-int-positive(request,"epochs")) then "epochs must be a positive integer"
+   else if not(qll-number-positive(request,"learning_rate")) then "learning_rate must be positive and finite in float32"
+   else if not(qll-number-nonnegative(request,"max_norm")) then "max_norm must be nonnegative and finite in float32"
+   else "";
+  }
+  def qll-json-ids(ids) = if nil?(ids) then list() else cons(json-node-int(head(ids)),qll-json-ids(tail(ids)));
+  def qll-completion-ids(path,text) { let walked = fcmg-live-ids-go(qtlc-open(path,qsx-seal-line(path),list(qtlc-text-segment(text))),list()); if not(str_eq(head(walked),"done")) then list() else reverse(nth(walked,2)); }
+  def qll-targets(path,text) { let ids = qll-completion-ids(path,text); if nil?(ids) then list() else append(ids,list(nth(qsx-load(path),2))); }
+  def qll-capture-walk(session,ids,path,width) = if nil?(ids) then list(1,"captured",session) else {
+   let bytes = metal_buf_read(nth(nth(fcms-ctx(session),1),1),0,mul(width,4));
+   if not(and(eq(str_len(bytes),mul(width,4)),qlt-finite-bytes?(bytes,0,width))) then list(0,"teacher feature is incomplete or nonfinite",session)
+   else if not(eq(sbt-append-count(path,bytes),str_len(bytes))) then list(0,"teacher feature append incomplete",session)
+   else if nil?(tail(ids)) then list(1,"captured",session)
+   else { let pending = fcms-forward(session,head(ids),fcms-pos(session)); if lt(pending,0) then list(0,"teacher-forced forward refused",session) else qll-capture-walk(fcms-with-stream(session,add(fcms-pos(session),1),pending,0,0,0,0),tail(ids),path,width); };
+  };
+  def qll-release-session(session) = fcms-release-ok?(session);
+  // Capture returns the sole session owner even when a row or renewal refuses.
+  def qll-capture-one(row,opened,featuresPath,offset,expectedWidth) {
+   if not(fcms-live?(opened)) then list(0,fcms-reason(opened),offset,json-node-null(),expectedWidth,opened)
+   else {
+    let width = nth(nth(fcms-ctx(opened),2),0);
+    let ids = qll-targets(fcms-path(opened),fcap-string(row,"completion"));
+    if nil?(ids) then list(0,"completion tokenizer refused",offset,json-node-null(),width,opened)
+    else if and(gt(expectedWidth,0),not(eq(width,expectedWidth))) then list(0,"model width changed between rows",offset,json-node-null(),width,opened)
+    else if ge(add(fcms-pos(opened),len(ids)),fcms-maxpos(opened)) then list(0,"whole example exceeds context",offset,json-node-null(),width,opened)
+    else {
+     let started = now_unix_ms(); let walked = qll-capture-walk(opened,ids,featuresPath,width); let final = nth(walked,2);
+     let record = json-node-object(list(nsm-s("id",fcap-string(row,"id")),nsm-s("split",fcap-string(row,"split")),nsm-n("offset",offset),nsm-n("prompt_ids",fcms-prompt-ids(opened)),nsm-n("tokens",len(ids)),json-node-pair("targets",json-node-array(qll-json-ids(ids))),nsm-n("completion_tokens",sub(len(ids),1)),nsm-n("end_tokens",1),nsm-n("prompt_tokens_supervised",0),nsm-n("capture_ms",sub(now_unix_ms(),started)),nsm-n("complete",head(walked))));
+     list(head(walked),nth(walked,1),if head(walked) then add(offset,len(ids)) else offset,record,width,final);
+    };
+   };
+  }
+  def qll-capture-rows(rows,session,first,profile,featuresPath,root,offset,width,records) = if nil?(rows) then list(1,"captured",offset,width,reverse(records),session) else {
+   let row = head(rows); let renewed = if first then fcmr-result(1,"fresh-stream-same-weights",session) else fcmr-replace-with-profile(session,fcap-string(row,"prompt"),profile);
+   if not(and(fcmr-changed(renewed),str_eq(fcmr-reason(renewed),"fresh-stream-same-weights"))) then list(0,fcmr-reason(renewed),offset,width,reverse(records),fcmr-session(renewed))
+   else { let one = qll-capture-one(row,fcmr-session(renewed),featuresPath,offset,width); let record = nth(one,3); let hasRecord = fat-wire-object?(record);
+    if hasRecord then frsh-frozen(frsh-path(root,str_concat(hex-encode(sha256-stream-string(fcap-string(row,"id"))),".json")),json-emit(record)) else 0;
+    qll-observe("capture",head(one),json-node-object(list(nsm-n("completed_rows",add(len(records),head(one))),nsm-n("completed_tokens",nth(one,2)),nsm-s("status",nth(one,1)))));
+    if not(head(one)) then list(0,nth(one,1),offset,nth(one,4),reverse(if hasRecord then cons(record,records) else records),nth(one,5)) else qll-capture-rows(tail(rows),nth(one,5),0,profile,featuresPath,root,nth(one,2),nth(one,4),cons(record,records));
+   };
+  };
+  def qll-token-samples(ids,offset,features,width,out) = if nil?(ids) then out else { let begin = mul(mul(offset,width),4); let bytes = substring(features,begin,add(begin,mul(width,4))); qll-token-samples(tail(ids),add(offset,1),features,width,cons(list(bytes,json-int-value(head(ids))),out)); };
+  def qll-samples(records,split,features,width,out) = if nil?(records) then reverse(out) else { let row = head(records); let next = if str_eq(fcap-string(row,"split"),split) then qll-token-samples(node_children(json-object-get(row,"targets")),qll-value(row,"offset"),features,width,out) else out; qll-samples(tail(records),split,features,width,next); };
+  def qll-row-samples(row,features,width) = reverse(qll-token-samples(node_children(json-object-get(row,"targets")),qll-value(row,"offset"),features,width,list()));
+  def qll-save(root,adapter,epoch) {
+   metal_sync(); let width = nth(adapter,3); let a = qlt-f32s(metal_buf_read(head(adapter),0,mul(width,4)),width); let b = qlt-f32s(metal_buf_read(nth(adapter,1),0,mul(width,4)),width);
+   if not(and(eq(len(a),width),eq(len(b),width))) then "" else { let path = frsh-path(root,str_concat("checkpoint-",str_concat(int_to_str(epoch),".safetensors"))); qlh-write-vectors(path,a,b); if qlh-whole?(path) then path else ""; };
+  }
+  def qll-validation-rows(ctx,owner,adapter,records,features,width,out) = if nil?(records) then reverse(out) else { let row = head(records); if not(str_eq(fcap-string(row,"split"),"validation")) then qll-validation-rows(ctx,owner,adapter,tail(records),features,width,out) else { let observed = qlhb-loss(ctx,owner,adapter,qll-row-samples(row,features,width)); if nothing?(observed) then nothing() else qll-validation-rows(ctx,owner,adapter,tail(records),features,width,cons(json-node-object(list(nsm-s("id",fcap-string(row,"id")),nsm-n("tokens",head(observed)),qll-real("loss",nth(observed,1)))),out)); }; };
+  def qll-close-training(session,owner,adapter,optimizer) { metal_sync(); let optimizerHandles = nlb-state-handles(optimizer); let optimizerOk = eq(qlfg-count(optimizerHandles),q38-free-handles(optimizerHandles)); let adapterExpected = if eq(len(adapter),5) then qlfg-count(take(3,adapter)) else 0; let adapterReleased = if eq(len(adapter),5) then q38-lora-rank1-close(adapter) else 0; let scratchExpected = if nil?(owner) then 0 else qlfg-owned(owner); let scratchReleased = if nil?(owner) then 0 else qlfg-close(owner); let sessionOk = qll-release-session(session); list(and(optimizerOk,and(eq(adapterExpected,adapterReleased),and(eq(scratchExpected,scratchReleased),sessionOk))),optimizerOk,adapterReleased,scratchReleased,sessionOk); }
+  def qll-rounds(ctx,owner,adapter,optimizer,train,records,features,width,root,epoch,last,rate,maxNorm,bestLoss,bestPath,rounds) = if gt(epoch,last) then list(1,"trained",bestLoss,bestPath,reverse(rounds)) else {
+   let started = now_unix_ms(); let batch = qlhb-gradients(ctx,owner,adapter,train);
+   if nothing?(batch) then list(0,"training gradient refused",bestLoss,bestPath,reverse(rounds)) else { let updated = qlhb-step(optimizer,batch,rate,epoch,maxNorm);
+    if not(and(eq(len(updated),4),and(eq(head(updated),epoch),eq(nth(updated,3),1)))) then list(0,"optimizer update did not reconcile",bestLoss,bestPath,reverse(rounds)) else {
+    let validation = qll-samples(records,"validation",features,width,list()); let aggregate = qlhb-loss(ctx,owner,adapter,validation); let perRow = qll-validation-rows(ctx,owner,adapter,records,features,width,list());
+    if or(nothing?(aggregate),nothing?(perRow)) then list(0,"validation loss refused",bestLoss,bestPath,reverse(rounds)) else { let loss = nth(aggregate,1); let path = qll-save(root,adapter,epoch);
+     if str_eq(path,"") then list(0,"complete checkpoint persistence refused",bestLoss,bestPath,reverse(rounds)) else { let improved = lt(loss,bestLoss); let selected = if improved then path else bestPath; let row = json-node-object(list(nsm-n("epoch",epoch),nsm-n("training_tokens",head(batch)),qll-real("train_loss_before_step",nth(batch,1)),nsm-n("validation_tokens",head(aggregate)),qll-real("validation_loss_after_step",loss),json-node-pair("validation_rows",json-node-array(perRow)),qll-real("gradient_norm",nth(updated,1)),qll-real("gradient_clip",nth(updated,2)),nsm-n("elapsed_ms",sub(now_unix_ms(),started)),nsm-s("checkpoint",path),nsm-s("selected_candidate",selected),nsm-n("serving_promotion",0),nsm-n("semantic_quality_claim",0))); frsh-frozen(frsh-path(root,str_concat("checkpoint-",str_concat(int_to_str(epoch),".json"))),json-emit-precise(row)); qll-rounds(ctx,owner,adapter,optimizer,train,records,features,width,root,add(epoch,1),last,rate,maxNorm,if improved then loss else bestLoss,selected,cons(row,rounds)); };
+    }; };
+   };
+  };
+  def qll-train(request,root,session,features,width,records) {
+   let train = qll-samples(records,"train",features,width,list()); let valid = qll-samples(records,"validation",features,width,list());
+   if not(fcms-live?(session)) then { let reason = fcms-reason(session); let closed = qll-close-training(session,list(),list(),list()); qll-result(0,"refused",reason,root,json-node-object(list(nsm-n("release_ok",head(closed))))); }
+   else { let ctx = fcms-ctx(session); let owner = qlfg-open(kth-tv-r(nth(ctx,6)),width);
+    if not(qlfg-live(owner)) then { let closed = qll-close-training(session,owner,list(),list()); qll-result(0,"refused","full-vocabulary loss scratch admission refused",root,json-node-object(list(nsm-n("release_ok",head(closed))))); }
+    else { let firstHidden = qlt-f32s(head(head(train)),width); let a = lbw-scale(firstHidden,div(1.0,add(width,0.0))); let b = lbw-zeros(width,list()); let adapter = q38-lora-rank1-open(lsl-bytes(a),lsl-bytes(b),width,md-f32-bits(1.0));
+     if not(qlhb-context(ctx,owner,adapter)) then { let closed = qll-close-training(session,owner,adapter,list()); qll-result(0,"refused","Qwen head training shape admission refused",root,json-node-object(list(nsm-n("release_ok",head(closed))))); }
+     else { let optimizer = qlhb-optimizer(adapter);
+      if not(and(eq(len(nlb-state-handles(optimizer)),6),qlfg-positive(nlb-state-handles(optimizer)))) then { let closed = qll-close-training(session,owner,adapter,optimizer); qll-result(0,"refused","Adam optimizer admission refused",root,json-node-object(list(nsm-n("release_ok",head(closed))))); }
+      else { let trainBefore = qlhb-loss(ctx,owner,adapter,train); let validBefore = qlhb-loss(ctx,owner,adapter,valid); let perRowBefore = qll-validation-rows(ctx,owner,adapter,records,features,width,list()); let initial = qll-save(root,adapter,0);
+       if or(or(nothing?(trainBefore),nothing?(validBefore)),or(nothing?(perRowBefore),str_eq(initial,""))) then { let closed = qll-close-training(session,owner,adapter,optimizer); qll-result(0,"refused","baseline loss or initial checkpoint refused",root,json-node-object(list(nsm-n("release_ok",head(closed))))); }
+       else { let trained = qll-rounds(ctx,owner,adapter,optimizer,train,records,features,width,root,1,qll-value(request,"epochs"),qll-value(request,"learning_rate"),qll-value(request,"max_norm"),nth(validBefore,1),initial,list()); let closed = qll-close-training(session,owner,adapter,optimizer);
+        let detail = json-node-object(list(nsm-n("training_tokens",len(train)),nsm-n("validation_tokens",len(valid)),qll-real("initial_train_loss",nth(trainBefore,1)),qll-real("initial_validation_loss",nth(validBefore,1)),json-node-pair("initial_validation_rows",json-node-array(perRowBefore)),qll-real("selected_validation_loss",nth(trained,2)),nsm-s("selected_adapter",nth(trained,3)),json-node-pair("rounds",json-node-array(nth(trained,4))),nsm-n("optimizer_release_ok",nth(closed,1)),nsm-n("adapter_buffers_released",nth(closed,2)),nsm-n("loss_buffers_released",nth(closed,3)),nsm-n("session_release_ok",nth(closed,4)),nsm-n("release_ok",head(closed)),nsm-s("selection_basis","minimum aggregate cached-token validation loss including baseline"),nsm-s("candidate_status","retained-unpromoted"),nsm-s("adverse_observation","prior cached-head witness improved held-out loss but failed the separate review-repair transfer")));
+        if not(head(trained)) then qll-result(0,"refused",nth(trained,1),root,detail) else if not(head(closed)) then qll-result(0,"release-incomplete","training completed but an owned resource release was incomplete",root,detail) else qll-result(1,"candidate-selected","validation selected an unpromoted candidate",root,detail);
+       };
+      };
+     };
+    };
+   };
+  }
+  def qll-admit(request,source,sourceHash,root) {
+   let rows = node_children(json-object-get(request,"rows")); let modelEntry = mr-find(fcap-string(request,"model")); let modelPath = mr-path(modelEntry); let profile = qll-runtime-profile(fcap-string(request,"profile"));
+   if str_eq(modelPath,"") then qll-result(0,"refused","model registry key did not resolve",root,json-node-null()) else { let tokenizer = qsx-seal-line(modelPath); let featuresPath = frsh-path(root,"features.f32"); frsh-frozen(featuresPath,""); frsh-frozen(frsh-path(root,"request.json"),source);
+    let session = fcms-open-with-profile(modelPath,fcap-string(head(rows),"prompt"),qll-value(request,"context"),profile);
+    let captured = qll-capture-rows(rows,session,1,profile,featuresPath,root,0,0,list()); let features = read_file(featuresPath); let expected = mul(mul(nth(captured,2),nth(captured,3)),4);
+    let identity = json-node-object(list(nsm-s("model_registry_key",fcap-string(request,"model")),nsm-s("model_path",modelPath),nsm-s("base_and_tokenizer_seal",tokenizer),nsm-s("profile",fcap-string(request,"profile")),nsm-s("runtime_profile",profile),nsm-n("context",qll-value(request,"context")),nsm-n("width",nth(captured,3)),nsm-n("complete",head(captured)),nsm-n("complete_samples",nth(captured,2)),nsm-n("expected_feature_bytes",expected),nsm-n("feature_bytes",str_len(features)),nsm-s("source_sha256",sourceHash),nsm-s("features_sha256",hex-encode(sha256-stream-string(features))),json-node-pair("rows",json-node-array(nth(captured,4))),nsm-n("base_weight_updates",0),nsm-n("serving_promotion",0)));
+    frsh-frozen(frsh-path(root,"capture.json"),json-emit(identity));
+    let reason = if not(head(captured)) then nth(captured,1) else if not(and(eq(str_len(features),expected),eq(nth(captured,3),qlh-width()))) then "captured feature shape does not reconcile" else if not(str_eq(tokenizer,qsx-seal-line(modelPath))) then "base or tokenizer seal changed during capture" else "";
+    if not(str_eq(reason,"")) then { let released = qll-release-session(nth(captured,5)); qll-result(0,"refused",reason,root,json-node-object(list(json-node-pair("capture",identity),nsm-n("release_ok",released)))); }
+    else { let trained = qll-train(request,root,nth(captured,5),features,nth(captured,3),nth(captured,4)); qll-bind(trained,request,modelPath,tokenizer,sourceHash,root); };
+   };
+  }
+  def qll-bind(result,request,modelPath,seal,sourceHash,root) {
+   if not(qll-value(result,"ok")) then result else {
+    let candidate = fcap-string(json-object-get(result,"detail"),"selected_adapter"); let material = fcmd-snapshot(candidate);
+    if not(and(str_eq(seal,qsx-seal-line(modelPath)),eq(qaf-seal-verdict(modelPath),1))) then qll-result(0,"refused","base or tokenizer identity changed during learning",root,json-object-get(result,"detail"))
+    else if not(eq(len(material),3)) then qll-result(0,"refused","selected candidate bytes refused",root,json-object-get(result,"detail"))
+    else { let binding = json-node-object(list(nsm-s("model_registry_key",fcap-string(request,"model")),nsm-s("model_path",modelPath),nsm-s("base_and_tokenizer_seal",seal),nsm-s("source_sha256",sourceHash),nsm-s("profile",fcap-string(request,"profile")),nsm-s("candidate",candidate),nsm-s("adapter_ab_sha256",nth(material,2)),nsm-n("serving_promotion",0)));
+     frsh-frozen(frsh-path(root,"candidate.json"),json-emit(binding)); result;
+    };
+   };
+  }
+  def qll-run-source(source) {
+   if not(str_eq(value_kind(source),"string")) then qll-fail("request must be a JSON string") else if not(faj-valid(source)) then qll-fail("request must be complete JSON") else {
+   let request = parse-json("qwen-lora-learning-request",source); let reason = qll-request-reason(request);
+   if not(str_eq(reason,"")) then qll-fail(reason) else { let root = fcap-string(request,"output_directory"); if not(eq(host_dir_mkdir(root),1)) then qll-result(0,"refused","output directory already exists or could not be created",root,json-node-null()) else { let sourceHash = hex-encode(sha256-stream-string(source)); let admitted = qll-admit(request,source,sourceHash,root); qll-write-result(root,"result.json",admitted); admitted; }; };
+   };
+  }
+  // Selection names one retained learning run. The admitted pair must match its
+  // exact base/tokenizer seal and A/B bytes; selection is never a promotion.
+  def qll-open-selected(root,prompt,context,profile) {
+   let binding = qll-read(frsh-path(root,"candidate.json")); let result = qll-read(frsh-path(root,"result.json"));
+   let modelPath = mr-path(mr-find(fcap-string(binding,"model_registry_key"))); let candidate = fcap-string(binding,"candidate");
+   if not(eq(qll-value(result,"ok"),1)) then fcms-none("learning-run-not-complete")
+   else if or(str_eq(modelPath,""),not(str_eq(modelPath,fcap-string(binding,"model_path")))) then fcms-none("learning-base-path-mismatch")
+   else if not(str_eq(qsx-seal-line(modelPath),fcap-string(binding,"base_and_tokenizer_seal"))) then fcms-none("learning-base-seal-mismatch")
+   else if not(str_eq(candidate,fcap-string(json-object-get(result,"detail"),"selected_adapter"))) then fcms-none("learning-candidate-path-mismatch")
+   else if not(fs-exists?(frsh-path(root,"request.json"))) then fcms-none("learning-request-absent")
+   else if not(str_eq(hex-encode(sha256-stream-string(read_file(frsh-path(root,"request.json")))),fcap-string(binding,"source_sha256"))) then fcms-none("learning-request-identity-mismatch")
+   else if not(str_eq(profile,fcap-string(binding,"profile"))) then fcms-none("learning-profile-mismatch")
+   else { let session = fcms-open-adapted(modelPath,prompt,context,profile,candidate);
+    if not(fcms-live?(session)) then session
+    else if str_eq(fcmd-digest(fcmd-carrier(session)),fcap-string(binding,"adapter_ab_sha256")) then session
+    else { let released = qll-release-session(session); fcms-none(if released then "learning-candidate-identity-mismatch" else "learning-candidate-release-incomplete"); };
+   };
+  }
+ }
+ 0;
+}

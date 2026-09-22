@@ -232,6 +232,44 @@ Lower sentinel loss establishes that measured objective only; fewer rented
 calls and broader coding quality must be measured on real subsequent requests.
 The existing code and repair checks remain the decision at each such request.
 
+## Learning for the Qwen answering model
+
+`observe/qwen-lora-learning-run.bml` accepts one JSON line on stdin. It captures
+completion features and trains an explicitly named Qwen output-head adapter
+inside `fkwu`, using the existing Metal carrier. It makes no provider call.
+The automatic session worker described above still selects Llama 3B.
+
+The request carries `model` (a registry key), a fresh `output_directory`,
+`profile` (`full` or `knowledge-query`), positive integer `context` and `epochs`,
+positive finite `learning_rate`, nonnegative finite `max_norm`, and `rows`.
+Each row carries a unique `id`, `prompt`, `completion`, and `split` of `train`
+or `validation`. Both splits are required; exact prompt overlap is refused.
+The caller establishes target correctness and meaningful separation. Distinct
+prompts alone do not establish unseen-concept generalization.
+
+One model admission serves the capture and training. Each example receives
+fresh conversation state; a refused renewal stops capture with its owner
+retained for release. Only completion tokens and their end marker receive
+supervision. The `full` profile teaches the answer channel. Validation targets
+never enter gradient updates. Cached normalized features allow repeated head
+updates without rerunning the transformer.
+
+The run retains the exact request, per-row target IDs and feature offsets,
+feature bytes and digest, baseline losses, per-epoch aggregate and per-row
+validation losses, checkpoints, release results, and candidate binding.
+The binding identifies the sealed base/tokenizer and exact adapter A/B bytes.
+Minimum aggregate validation loss, including the unchanged baseline, selects
+an **unpromoted candidate**. Answer quality remains unmeasured at this boundary.
+
+For an explicit later comparison, import `bml/qwen-lora-learning.bml` and call
+`qll-open-selected(root, prompt, context, profile)` with that retained run's
+directory. It verifies the binding and returns the normal owned model session;
+the caller must release that session even after refusal. The profile must match
+capture. Ordinary input and ownership failures return retained evidence. A
+kernel-level Metal or batch-helper exception remains a process-failure boundary;
+this BML layer has no exception/finally recovery. The runner emits its result
+before returning a nonzero exit on ordinary refusal.
+
 [Executable BML practice](native-bml-execution-learning.md) binds small native
 training targets to successful execution, freezes distinct transfer tests, and
 compares exact generated proposals before and after native session updates.
