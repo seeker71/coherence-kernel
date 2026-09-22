@@ -170,6 +170,17 @@ same checked result and usage event with zero new provider processes. This
 advances the assisted serving path while native self-correction and expression
 remain active work.
 
+The [bounded native generation](receipts/2026-09-23-native-generation-reasoning.md)
+door now exposes `generate --reasoning N` with the full Form context and a
+reserved final-answer stage. Opening reasoning on the same enquiry corrected
+the numeric-input description but still contradicted the supplied retention
+condition and invented an out-of-box comparison. With those two findings and
+its actual draft returned through the public CLI, Qwen corrected both claims.
+The revision still exceeded the requested length and promised an unmeasured
+felt outcome. Source fidelity after explicit feedback improved on this case;
+independent detection, reliable instruction following and retained learning
+in this answering model remain open.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
