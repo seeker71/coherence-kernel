@@ -143,6 +143,15 @@ answer remains open. One Form-owned assisted synthesis supplied a fuller
 answer. Its report-shape failure was repaired losslessly by native care and
 rechecked against the original assertions without another model call.
 
+The subsequent [direct-answer template repair](receipts/2026-09-23-direct-answer-template.md)
+addresses a separate completion failure. The original enquiry exhausted 4,096
+IDs inside an unclosed thinking channel, producing no final answer. Direct
+follow-ups now reuse the ordinary CLI's explicit no-thinking chat template.
+The unchanged packet then completed in 627 IDs; encoding and native checks pass.
+Its explanation still misstates source contracts, including a frequency-input
+distinction the earlier answer preserved. Completion improved; faithful synthesis
+and overall quality parity remain open.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
