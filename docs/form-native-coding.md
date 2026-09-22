@@ -346,6 +346,15 @@ alone did not make the initial-reasoning variant faster.
 
 ### Resident instruction context
 
+Coding and review bootstraps receive the shared current Form meanings from
+`form-cli-qwen-meaning.bml`: symbol identity, model tokenization, language
+surfaces, source evidence and reference-conditioned persistence. This is the
+same meaning source used by the ordinary Qwen teaching overlay. It enters
+alongside the code/review protocol, including after context renewal; caller
+goals, document trust boundaries, writable paths and verification retain their
+authority. Teaching delivery is observable in the bootstrap. The returned
+answer establishes whether the model used it accurately.
+
 Within one resident model context, repeated role instructions may be replaced
 by a shorter reference to the instructions already supplied. The full text
 enters at bootstrap and when a role's exact instruction is first encountered.
