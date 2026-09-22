@@ -106,6 +106,36 @@ section [form.bml] {
   def ccw-collect(owner,root,discovery,before,count,bytes) = if gt(nth(kernel_live(host_pid()),21),before) then list(count,bytes) else if ge(count,4096) then form_error("changing care observation budget ended before collection") else ccw-collect(owner,root,discovery,before,add(count,128),ccw-churn(owner,root,discovery,128,bytes));
   def ccw-bind(path) = jv-object(list(jv-s("path",path),jv-n("bytes",file_size(path)),jv-s("sha256",qaf-string-hex(saj-file-digest-any-tail(path,file_size(path))))));
   def ccw-bindings(paths) = if nil?(paths) then list() else cons(ccw-bind(head(paths)),ccw-bindings(tail(paths)));
+  def ccw-index-append(reader,path,row,expected) {
+   let text = str_concat(jv-emit(row),"\n");
+   ccw-assert(eq(sbt-append-count(path,text),str_len(text)),"indexed care event append");
+   ohs-update(reader,65536);
+   let fresh = ohv-current-through(list(row),expected,ohs-correlation,reader);
+   ccw-assert(jv-equal(jv-array(record_get(reader,"current")),jv-array(fresh)),"indexed reader preserves the shared reducer's complete ordered observations");
+   fresh;
+  }
+  def ccw-index-rounds(reader,root,path,index,expected) = if eq(index,32) then expected else {
+   let event = ccw-event(root,add(index,1000));
+   let row = jv-set(jv-set(jvp-parse(nth(event,1)),"flow",jv-string(str_concat(root,str_concat("/write-",int_to_str(index))))),"offers",jv-array(list(jv-string("read-back"))));
+   let observed = ccw-index-append(reader,path,row,expected);
+   let actual = read_file(str_concat(root,"/payload"));
+   let applied = jv-set(jv-set(jv-set(row,"stage",jv-string("applied")),"selected",jv-string("read-back")),"result",jv-string(actual));
+   let cared = ccw-index-append(reader,path,applied,observed);
+   ccw-index-rounds(reader,root,path,add(index,1),cared);
+  };
+  def ccw-indexed(root) {
+   let path = str_concat(root,"/indexed.jsonl"); ccw-write(path,"");
+   let reader = ohs-open(path,"indexed-writes");
+   let expected = ccw-index-rounds(reader,root,path,0,list());
+   let first = head(expected);
+   let wrong = jv-set(first,"id",jv-string("unmatched-read-back"));
+   ccw-assert(eq(sbt-append-count(path,str_concat(jv-emit(wrong),"\n")),add(str_len(jv-emit(wrong)),1)),"mismatched control append");
+   ohs-update(reader,65536);
+   let current = record_get(reader,"current");
+   let diagnostic = ohv-find(current,jv-object(list(jv-s("organ","health-flow"),jv-pair("flow",jv-get(first,"flow")),jv-s("aspect","control-correlation"))));
+   ccw-assert(and(eq(len(current),33),and(jv-equal(ohv-find(current,first),first),and(ohv-pain(diagnostic),str_eq(ohv-str(diagnostic,"observed"),"unmatched-read-back")))),"mismatched control preserves its prior observation and adds the correlation need");
+   jv-object(list(jv-n("actual_writes",32),jv-n("read_back_actions",32),jv-n("ordered_reducer_equivalence",1),jv-n("mismatched_control_preserved",1)));
+  }
   def ccw-run(root) {
    ccw-assert(and(eq(str_byte_at(root,0),47),eq(fs_exists(root),0)),"supply a new absolute observation directory");
    ccw-assert(eq(host_dir_mkdir(root),1),"observation directory creation failed");
@@ -122,9 +152,10 @@ section [form.bml] {
    ccw-assert(str_eq(jv-emit(held),rendered),"held view survives changing reader generations");
    ccw-assert(and(gt(cycles,0),gt(freed,0)),"retained view crossed actual collection and temporary string release");
    let lifecycle = ccw-lifecycle(root);
+   let indexed = ccw-indexed(root);
    ccw-assert(str_eq(jv-emit(jv-array(bindings)),jv-emit(jv-array(ccw-bindings(paths)))),"selected runtime and source bytes stayed unchanged during observation");
    let report = jv-object(list(jv-s("schema","care-changing-witness-v1"),jv-n("accepted",1),jv-n("generations",32),jv-pair("initial_admission",nth(admitted,2)),jv-pair("append_totals",ccw-stage(rows,"append")),jv-pair("renew_totals",ccw-stage(rows,"renew")),jv-pair("quiet_totals",ccw-stage(rows,"quiet")),jv-pair("rows",jv-array(rows)),jv-n("collector_cycles",cycles),jv-n("reclaimed_strings",freed),jv-n("collection_exercise_reads",head(collected)),jv-n("held_view_exact",1),jv-pair("lifecycle",lifecycle),jv-pair("sources",jv-array(bindings)),jv-pair("observations",ccw-bind(str_concat(root,"/observations.jsonl"))),jv-s("scope","real local payload writes and readback events; append, equal-size declared renewal and quiet reads; discovery declarations prepared before measured reader plus serialization; pair slots are occupied heap slots including garbage, not total allocation or retained RAM; constructor dispatches may count one allocation twice; malformed-event diagnostics and collection exercise measured separately from stage totals; selected source bindings are not the complete dependency closure; primary nodes and seed records remain permanent")));
-   let text = jv-emit(report); ccw-write(str_concat(root,"/evidence.json"),text);
+   let text = jv-emit(jv-set(report,"indexed_writes",indexed)); ccw-write(str_concat(root,"/evidence.json"),text);
    print(list("care-changing",32,"append",jv-emit(ccw-stage(rows,"append")),"renew",jv-emit(ccw-stage(rows,"renew")),"quiet",jv-emit(ccw-stage(rows,"quiet")),"collection-cycles",cycles,"reclaimed-strings",freed,"held-view-exact",1,"evidence",str_concat(root,"/evidence.json"))); 0;
   }
  }

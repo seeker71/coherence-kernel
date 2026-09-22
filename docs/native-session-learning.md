@@ -135,6 +135,13 @@ reader identity, read duration and total attendance duration, so event reading
 can be distinguished from source discovery and care. A new worker reads the
 history again; the cursor is currently process-local.
 
+The reader indexes current observations by their exact `(organ, flow, aspect)`
+key through Form's keyed map. It supplies the matching prior observation to
+the existing observation/control reducer and preserves first-seen report order.
+The map resolves hash collisions by exact key equality. Publisher renewal and
+truncation release the index with the reader's other current values; unchanged
+reads reuse the published view.
+
 Unchanged evidence under the same running program image reuses its
 response; a miss stays open. Source-compiled processes without an observed image
 identity do not reuse another process's answer. The cache reads the executing

@@ -1,0 +1,45 @@
+// Retain one current observation at a time. The complete result stays private.
+// preludes: form-stdlib/qwen35-artifact-seal-reader.fk form-stdlib/spool-bell-transport.fk
+section [form.bml] {
+ class ReaderGapBounded {
+  def rgb-need(ok,reason) = if ok then 1 else form_error(reason);
+  def rgb-write(path,text) = rgb-need(eq(write_file(path,text),str_len(text)),"reader evidence write incomplete");
+  def rgb-append(path,text) = rgb-need(eq(sbt-append-count(path,text),str_len(text)),"reader evidence append incomplete");
+  def rgb-rows(path,rows,index) = if nil?(rows) then index else {
+   if gt(index,0) then rgb-append(path,",") else 0;
+   rgb-append(path,jv-emit(head(rows)));
+   if eq(mod(add(index,1),256),0) then print(list("retained-current-rows",add(index,1))) else 0;
+   rgb-rows(path,tail(rows),add(index,1));
+  };
+  def rgb-equal(a,b,at,size) = if ge(at,size) then 1 else {
+   let count = if lt(sub(size,at),65536) then sub(size,at) else 65536;
+   let left = read_file_slice(a,at,count); let right = read_file_slice(b,at,count);
+   and(and(eq(str_len(left),count),str_eq(left,right)),rgb-equal(a,b,add(at,count),size));
+  };
+  def rgb-run(label) {
+   let source = str_concat(host_cwd(),"/.hearth/session-learning/events.jsonl");
+   let prefix = str_concat(".hearth/reader-gap-bounded-",label);
+   let extent = file_size(source); rgb-need(gt(extent,0),"reader history unavailable");
+   print(list("source-seal-begin",label,extent));
+   let seal = qaf-string-hex(saj-file-digest-any-tail(source,extent));
+   rgb-need(eq(str_len(seal),64),"reader history digest unavailable");
+   print(list("source-seal-ready",label));
+   let reader = ohs-open(source,"session-learning-evidence");
+   let start = host_monotonic_ms(); let primary = kernel_stat(53);
+   ohs-update(reader,extent);
+   let elapsed = sub(host_monotonic_ms(),start); let minted = sub(kernel_stat(53),primary);
+   let rows = record_get(reader,"current");
+   print(list("reader-complete",label,elapsed,len(rows)));
+   let output = str_concat(prefix,".current.json");
+   rgb-need(not(fs_exists(output)),"reader result already retained");
+   rgb-write(output,"["); rgb-rows(output,rows,0); rgb-append(output,"]");
+   rgb-need(and(eq(file_size(source),extent),str_eq(seal,qaf-string-hex(saj-file-digest-any-tail(source,extent)))),"history changed during reading");
+   let baseline = ".hearth/reader-gap-bounded-before.current.json";
+   let same = if str_eq(label,"after") then and(eq(file_size(output),file_size(baseline)),rgb-equal(output,baseline,0,file_size(output))) else 1;
+   rgb-need(same,"indexed current observations differed from original reducer");
+   let report = jv-object(list(jv-s("schema","native-reader-gap-bounded-v1"),jv-s("label",label),jv-n("pid",host_pid()),jv-s("source_sha256",seal),jv-n("source_bytes",extent),jv-n("elapsed_ms",elapsed),jv-n("primary_mints",minted),jv-n("current_rows",len(rows)),jv-n("invalid_records",record_get(reader,"invalid_records")),jv-n("pending_bytes",str_len(record_get(reader,"pending"))),jv-n("current_bytes",file_size(output)),jv-pair("current_exact",if str_eq(label,"after") then jv-int(same) else jv-null())));
+   let text = jv-emit(report); rgb-write(str_concat(prefix,".json"),text); print_str(str_concat(text,"\n")); 0;
+  }
+ }
+ 0;
+}
