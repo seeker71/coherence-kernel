@@ -103,14 +103,29 @@ the timing field. Request parsing and final JSON serialization sit outside that
 interval. Read-byte counters
 describe event payload consumption, not shared-memory discovery traffic.
 
-Health and care share the retained reader and each projects its requested result
-directly. Eight alternating-order paired calls over the same retained exchange
-preserve every output field except elapsed time and derived observation age.
-The [retained paired observation](evidence/fkwu/native-core-care.json) records
-269 nodes for care versus 317 through an intermediate health view; both consume
-zero repeated event bytes. Measurement brackets each actual call,
-excluding output serialization and comparison. Changing observation values still
-allocate nodes; pressure-resilient signaling and reclamation require further work.
+Health and care share the retained reader. Care and Glass construct ages,
+source metadata and report composition as reclaimable Form values through
+`json-view.bml`, borrowing immutable observation nodes with an explicit tag.
+They serialize those values directly. `occ-view-request-at` returns this view;
+`occ-request-at` explicitly materializes primary nodes for a caller requesting
+content identity. The working lists and strings remain visible to the current
+collector. A view creates no new record owner; callers retaining a view in a
+record release that reference explicitly because seed records remain roots.
+
+The [current observation](evidence/fkwu/care-view-lifetime.json) includes eight
+alternating comparisons preserving all fields except elapsed time and derived
+age. Complete warmed explicit-source commands, including request parsing and
+serialization, mint zero primary nodes in that workload. Retained views remain
+exact through observed collection while temporary strings are reclaimed.
+Send a nonempty retained organ JSONL path on stdin to
+`./fkwu observe/form-care-view-witness.bml` to re-observe this boundary. The
+witness observes actual collection within its finite exercise budget; its
+sample count does not constrain the reader.
+
+New event admission, discovery, reader records, framebuffer publication and the
+collector still depend on the seed. Default discovery and newly arriving events
+are outside the zero-mint observation. Complete native ownership and signaling
+when primary allocation cannot grow remain open.
 
 Shrinking files reset the reader. A known publisher's renewed generation also
 resets it, including replacements of equal or greater size. A new publisher at

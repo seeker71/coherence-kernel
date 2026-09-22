@@ -23,7 +23,9 @@ section [form.bml] {
    if reset then record_set(stream,"reader",ohs-open(oh-str(source,"source"),generation)) else 0;
    record_set(publishers,publisher,generation); record_set(stream,"seen",1); 0;
   }
-  def ohc-poll(owner,sources,budget,seen) = if nil?(sources) then list() else if oh-has(seen,oh-str(head(sources),"source")) then ohc-poll(owner,tail(sources),budget,seen) else cons(oh-set(ohs-poll(record_get(ohc-stream(owner,head(sources)),"reader"),budget),"declaration",head(sources)),ohc-poll(owner,tail(sources),budget,cons(oh-str(head(sources),"source"),seen)));
+  def ohc-source-report(reader,source) = oh-set(ohs-report(reader),"declaration",source);
+  def ohc-poll(owner,sources,budget,seen) = ohc-poll-with(owner,sources,budget,seen,ohc-source-report);
+  def ohc-poll-with(owner,sources,budget,seen,report) = if nil?(sources) then list() else if oh-has(seen,oh-str(head(sources),"source")) then ohc-poll-with(owner,tail(sources),budget,seen,report) else cons(report(ohs-update(record_get(ohc-stream(owner,head(sources)),"reader"),budget),head(sources)),ohc-poll-with(owner,tail(sources),budget,cons(oh-str(head(sources),"source"),seen),report));
   def ohc-needs(row) = json-array-elements(oh-get(row,"needs"));
   def ohc-attend(row) = oh-unease(row);
   def ohc-row(source,row) = oh-set(oh-set(row,"source",oh-get(source,"source")),"source_state",oh-get(source,"state"));
@@ -35,9 +37,10 @@ section [form.bml] {
   def ohc-source-needs(sources) = if nil?(sources) then list() else if and(str_eq(oh-str(head(sources),"state"),"caught-up"),gt(len(json-array-elements(oh-get(head(sources),"current"))),0)) then ohc-source-needs(tail(sources)) else cons(json-node-object(list(oh-s("source",oh-str(head(sources),"source")),oh-s("state",oh-str(head(sources),"state")),oh-s("resource",if str_eq(oh-str(head(sources),"state"),"backlog") then "local-reader-work" else if str_eq(oh-str(head(sources),"state"),"awaiting-complete-record") then "complete-event" else if str_eq(oh-str(head(sources),"state"),"caught-up") then "organ-observation" else "readable-organ-evidence"))),ohc-source-needs(tail(sources)));
   def ohc-read(owner,root,discovery,budget) = ohc-read-at(owner,root,discovery,budget,host_monotonic_ms());
   def ohc-read-at(owner,root,discovery,budget,started) = ohc-read-with(owner,root,discovery,budget,started,ohc-project);
-  def ohc-read-with(owner,root,discovery,budget,started,project) {
+  def ohc-read-with(owner,root,discovery,budget,started,project) = ohc-read-through(owner,root,discovery,budget,started,ohc-source-report,project);
+  def ohc-read-through(owner,root,discovery,budget,started,report,project) {
    ohc-sync(owner,json-array-elements(oh-get(discovery,"sources")));
-   let sources = ohc-poll(owner,json-array-elements(oh-get(discovery,"sources")),budget,list());
+   let sources = ohc-poll-with(owner,json-array-elements(oh-get(discovery,"sources")),budget,list(),report);
    project(root,discovery,sources,started);
   }
   def ohc-project(root,discovery,sources,started) {
@@ -53,11 +56,12 @@ section [form.bml] {
    json-node-object(list(oh-s("coverage","caller-specified-sources"),json-node-pair("sources",json-node-array(sources)),json-node-pair("diagnostics",json-node-array(list()))));
   }
   def ohc-request-at(owner,request) = ohc-request-with(owner,request,ohc-project);
-  def ohc-request-with(owner,request,project) {
+  def ohc-request-with(owner,request,project) = ohc-request-through(owner,request,ohc-source-report,project);
+  def ohc-request-through(owner,request,report,project) {
    let started = host_monotonic_ms();
    let root = host_cwd();
    let discovery = if json-object-has?(request,"sources") then ohc-explicit(root,request) else ohd-discover(root);
-   ohc-read-with(owner,root,discovery,if json-object-has?(request,"budget_bytes") then json-int-value(oh-get(request,"budget_bytes")) else 65536,started,project);
+   ohc-read-through(owner,root,discovery,if json-object-has?(request,"budget_bytes") then json-int-value(oh-get(request,"budget_bytes")) else 65536,started,report,project);
   }
   def ohc-command(arg) = ohc-command-at(ohc-open(),arg);
   def ohc-command-at(owner,arg) = if or(str_eq(arg,""),str_eq(arg,"status")) then json-emit-precise(ohc-request-at(owner,json-node-object(list()))) else if str_eq(arg,"help") then "health [status|JSON]: live advertised organ observations, offered responses, needed local resources and observation age. JSON may name sources and a positive budget_bytes per source; the resident REPL retains native cursors and consumes only new complete events. No model or remote call. Coverage is explicit; absent evidence is not health." else if not(jwa-valid(arg)) then "health refused: expected status or JSON with sources and budget_bytes" else ohc-command-request(owner,parse-json("core-health-request",arg));
