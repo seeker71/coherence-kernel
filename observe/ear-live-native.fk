@@ -1,7 +1,10 @@
 ; ear-live-native.fk — the ear's live lane, the body's own: the native microphone stream
 ; (sense_mic_stream_read, 200 ms at a time), a window of the audio since the last commit (at
-; most 8 s), the native whisper-tiny pass (ear-native) on every arrival once speech is heard,
-; one frame per pass into the ear spool. Speech is a level above the
+; most 8 s), the body's own whisper pass on every arrival once speech is heard — whisper-tiny by
+; default, or the registry's native large-v3-turbo when .hearth/ear.model reads "turbo" (its live line
+; is the plain no-timestamps pass) — one frame per pass into the ear spool. A standing .hearth/ear.cadence
+; passes on everything and closes only on the full window, for a room whose steady sound (a song) the
+; floor would otherwise learn as quiet. Speech is a level above the
 ; room's own quiet, with a two-hop soft onset; the decoder's own end timestamp, a real pause at the mic, or a
 ; full window commits the line: a heard frame naming which of the three closed it, and
 ; one line for the tongue lane (t_end, tongue, text). While the line grows, every
@@ -12,12 +15,24 @@
 ; last three, and the window is joined into one string only for a pass. stdin: run seconds,
 ; reserved language line, optional owner lease. Blank owner keeps the standalone door.
 ; preflight-exec: forbidden
-; preludes: form/form-stdlib/spool-bell-transport.fk form/form-stdlib/hearth.bml form/form-stdlib/bml/ear-worker-life.bml form/form-stdlib/bml/ear-acoustic-review.bml
+; preludes: form/form-stdlib/spool-bell-transport.fk form/form-stdlib/hearth.bml form/form-stdlib/bml/ear-worker-life.bml form/form-stdlib/bml/ear-acoustic-review.bml form/form-stdlib/native-whisper.bml
 (do
     (defn el-spool () ".hearth/ear.spool")
     (defn el-segs () ".hearth/ear.spool.segments")
     (defn el-stop () ".hearth/ear.spool.stop")
     (defn el-window () (ELWindowBytes))
+    ; the ear's model is a standing choice: .hearth/ear.model reads "turbo" for the registry's native
+    ; large-v3-turbo through nws-open (the same st shape), anything else for whisper-tiny's npz. Turbo's live
+    ; pass is the plain no-timestamps line (eac-open-plain); tiny keeps its timestamp-prompted line.
+    (defn el-model () (if (lt (file_size ".hearth/ear.model") 0) "" (trim (en-text (read_file ".hearth/ear.model")))))
+    (defn el-turbo? () (str_eq (el-model) "turbo"))
+    ; cadence: a standing .hearth/ear.cadence file asks the lane to pass on everything it hears and to close a
+    ; line only when the window is full — for a room whose steady sound (a song) the floor follower would
+    ; otherwise learn as quiet, and whose pauses would cut the line into sub-second pieces
+    (defn el-cadence? () (ge (file_size ".hearth/ear.cadence") 0))
+    ; a pass that takes longer than a chunk must not let the microphone pile up behind it: after the
+    ; waited read, everything already buffered is taken at once, so the window stays at the present
+    (defn el-drain (acc) (if (lt (str_len acc) 3200) acc (do (let more (sense_mic_stream_read 3200 0)) (if (eq (str_len more) 0) acc (el-drain (str_concat acc more))))))
     ; how often this lane writes a frame whether or not the line moved: its own pulse,
     ; and the only thing a watcher can read to tell a lane that is thinking from one that is gone
     (defn el-beat () 800)
@@ -114,7 +129,7 @@
             w))
     (defn el-loop (st win total cut speech lastvoice lastquiet deadline live lasth lang p1 p2 stable listening annt tst)
         (if (or (not (ewl-running? deadline)) (ge (file_size (el-stop)) 0)) live
-            (do (let fresh (sense_mic_stream_read 3200 120))
+            (do (let fresh (el-drain (sense_mic_stream_read 3200 120)))
                 (let tend (now_unix_ms))
                 (if (eq (str_len fresh) 0) (el-loop st win total cut speech lastvoice lastquiet deadline live lasth lang p1 p2 stable listening annt tst)
                     (do (let total1 (add total (str_len fresh)))
@@ -126,10 +141,10 @@
                         (let listening1 (head decision))
                         (let heard? (nth decision 1))
                         (let fl1 (elp-floor listening1))
-                        (let speech1 (if (eq heard? 1) 1 speech))
+                        (let speech1 (if (el-cadence?) 1 (if (eq heard? 1) 1 speech)))
                         (let lastvoice1 (if (eq heard? 1) tend lastvoice))
                         (if (and (eq speech1 1) (ge (sub total1 cut) 9600))
-                            (do (let h (eac-open st w1 total1 cut (add 8 (div (sub total1 cut) 2000)) listening1))
+                            (do (let h (if (el-turbo?) (eac-open-plain st w1 total1 cut (add 8 (div (sub total1 cut) 2000)) listening1) (eac-open st w1 total1 cut (add 8 (div (sub total1 cut) 2000)) listening1)))
                                 (if (not (ewl-running? deadline)) live
                                 (do (let now (now_unix_ms))
                                 (let changed (if (eq (len lasth) 0) 1 (if (str_eq (nth h 1) (nth lasth 1)) 0 1)))
@@ -163,7 +178,7 @@
                                 ; end is first because it is looking at the audio: it costs one comparison on a
                                 ; number the pass already answered with.
                                 (let tsil (el-tail-sil (nth h 6)))
-                                (let why1 (elp-close (sub now lastvoice1) tsil (if (eq words? 1) stable1 0) (ge (sub total1 cut) (el-window))))
+                                (let why1 (if (el-cadence?) (if (ge (sub total1 cut) (el-window)) "full" "") (elp-close (sub now lastvoice1) tsil (if (eq words? 1) stable1 0) (ge (sub total1 cut) (el-window)))))
                                 (if (gt (str_len why1) 0)
                                     (do (let review (eac-close st w1 total1 cut (add 8 (div (sub total1 cut) 2000)) (nth h 10) best))
                                         (let final (head review))
@@ -182,7 +197,7 @@
     (defn el-first-line () (do (let l (read_line)) (if (nothing? l) "" (trim l))))
     (defn el-start (secs owner) (do
     (let snap (str_concat "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/snapshots/" (trim (en-text (read_file "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/refs/main")))))
-    (let st (enw-open (str_concat snap "/weights.npz") (enw-tokenizer-path)))
+    (let st (if (el-turbo?) (nws-open (nws-base) (nws-tokenizer)) (enw-open (str_concat snap "/weights.npz") (enw-tokenizer-path))))
     (let mic (if (ewl-owned? owner) (sense_mic_stream_start) -1))
     (let born (if (ewl-owned? owner) (el-emit "born" -120 "" "" 0 "" "" 0 0) 0))
     ; the lane names its own birth in its own log, so the glass reads who is standing

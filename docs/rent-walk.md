@@ -18,11 +18,17 @@ reason. Omitted provider permission keeps the request native-only.
 printf '%s\n' '{"movement":"nightly","provider":{"allowed":1}}' | ./form-run ./fkwu observe/rent-walk-run.bml
 ```
 
-A host schedule is one line; the body's landing cadence carries the row to
-origin:
+The body walks on its own schedule on this Mac. `observe/scheduled-walk.bml` brings
+its checkout to the branch head, builds the kernel and the Metal carrier when they
+are stale, and makes the one movement call; `docs/launchd/earth.hati.rent-walk.plist`
+runs it at 03:30 from the walk checkout `/Users/ursmuff/source/coherence-kernel-walk`,
+a worktree that owns the branch. No rented mind is in the movement, so it carries no
+transcript and leaves no flow row; the rent ledger row and the landing are its witness.
 
-```
-*/30 * * * * cd /path/to/coherence-kernel && ./form-run ./fkwu observe/rent-walk-run.bml </dev/null
+```sh
+cp docs/launchd/earth.hati.rent-walk.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/earth.hati.rent-walk.plist
+launchctl kickstart -k gui/$(id -u)/earth.hati.rent-walk   # walk now instead of waiting for 03:30
 ```
 
 Each row carries when, the movement's name, which voice answered, rent

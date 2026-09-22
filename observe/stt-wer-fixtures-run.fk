@@ -1,0 +1,65 @@
+; stt-wer-fixtures-run.fk — word error rate of a native speech lane over a fixture manifest.
+;
+; The body's two ears, measured the same way on the same recordings: "turbo" is the native
+; large-v3-turbo pass (native-whisper-transcribe.bml, resamples any WAV itself); "tiny" is the
+; live ear's whisper-tiny pass (ear-native.fk, 16 kHz mono s16 only). Each fixture's reference
+; text is a file beside it; observe/stt-wer.fk tokenizes both sides the same way and counts
+; edits. One row per run lands in receipts/stt-wer-ledger.jsonl: lane, files, every WER and
+; the mean, so the ladder to SOTA is rows, not claims. Nothing leaves the body but the model
+; files and the fixtures.
+; stdin line 1: lane, "turbo" (blank) or "tiny"; line 2: max new tokens for tiny (blank -> 120);
+; remaining lines: "<wav path>\t<reference text path>" — blank list -> the three stored
+; multilingual references under model/fixtures/whisper-native/.
+; preflight-exec: forbidden
+; preludes: observe/stt-wer.fk form-stdlib/native-whisper-transcribe.bml form-stdlib/bml/form-cli-heal-native-report.bml
+(do
+    (defn wf-line () (do (let v (read_line)) (if (nothing? v) (nothing) (trim v))))
+    (defn wf-or (s d) (if (eq (str_len s) 0) d s))
+    (defn wf-default () (list
+        "model/fixtures/whisper-native/en_GB-cori-high.wav\tmodel/fixtures/whisper-native/en_GB-cori-high.txt"
+        "model/fixtures/whisper-native/de_DE-thorsten-high.wav\tmodel/fixtures/whisper-native/de_DE-thorsten-high.txt"
+        "model/fixtures/whisper-native/fa_IR-amir-medium.wav\tmodel/fixtures/whisper-native/fa_IR-amir-medium.txt"))
+    (defn wf-read-manifest (acc) (do (let l (wf-line)) (if (nothing? l) (reverse acc) (if (eq (str_len l) 0) (wf-read-manifest acc) (wf-read-manifest (cons l acc))))))
+    (defn wf-split (line) (do (let at (str_find line "\t" 0)) (if (lt at 0) (list line "") (list (substring line 0 at) (substring line (add at 1) (str_len line))))))
+    (defn wf-text (t) (if (nothing? t) "" t))
+    (defn wf-tiny-snap () (str_concat "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/snapshots/" (trim (wf-text (read_file "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/refs/main")))))
+    ; a hypothesis is (text, ms)
+    (defn wf-turbo (wav) (do (let t0 (now_unix_ms)) (let r (nwt-transcribe (nws-base) wav "" "" "" "")) (list (sti-value r "text") (sub (now_unix_ms) t0))))
+    (defn wf-tiny (st wav cap) (do
+        (let t0 (now_unix_ms))
+        (let bytes (wf-text (read_file wav)))
+        (let pcm (substring bytes 44 (str_len bytes)))
+        (let Te (if (lt (str_len pcm) 3200) 0 (enw-encode st pcm)))
+        (let r (if (eq Te 0) (list (enw-lang-lo) (list)) (enw-transcribe st Te cap)))
+        (list (enw-text st (nth r 1)) (sub (now_unix_ms) t0))))
+    (defn wf-hyp (lane st cap wav) (if (str_eq lane "tiny") (wf-tiny st wav cap) (wf-turbo wav)))
+    (defn wf-name (p) (do (let at (str_find p "/" 0)) (if (lt at 0) p (wf-name (substring p (add at 1) (str_len p))))))
+    (defn wf-rows (lane st cap lines acc) (if (eq (len lines) 0) (reverse acc) (do
+        (let parts (wf-split (head lines)))
+        (let ref (trim (wf-text (read_file (nth parts 1)))))
+        (let hyp (wf-hyp lane st cap (head parts)))
+        (let wer (sw-wer-bounded (sw-tokens (head hyp)) (sw-tokens ref)))
+        (print_str (str_concat (wf-name (head parts)) (str_concat " wer=" (str_concat (int_to_str wer) (str_concat " ms=" (str_concat (int_to_str (nth hyp 1)) (str_concat "\n  ref: " (str_concat ref (str_concat "\n  hyp: " (str_concat (head hyp) "\n"))))))))))
+        (wf-rows lane st cap (tail lines) (cons (list (head parts) wer (nth hyp 1) (head hyp)) acc)))))
+    (defn wf-sum (rows i) (if (eq (len rows) 0) 0 (add (nth (head rows) i) (wf-sum (tail rows) i))))
+    (defn wf-json-rows (rows) (if (eq (len rows) 0) (list) (cons (json-node-object (list (fhn-s "wav" (head (head rows))) (fhn-n "wer" (nth (head rows) 1)) (fhn-n "ms" (nth (head rows) 2)) (fhn-s "hyp" (nth (head rows) 3)))) (wf-json-rows (tail rows)))))
+    (let lane (wf-or (wf-text (wf-line)) "turbo"))
+    (let capText (wf-text (wf-line)))
+    (let cap (if (eq (str_len capText) 0) 120 (str_to_int capText)))
+    (let listed (wf-read-manifest (list)))
+    (let lines (if (eq (len listed) 0) (wf-default) listed))
+    (let st (if (str_eq lane "tiny") (enw-open (str_concat (wf-tiny-snap) "/weights.npz") (enw-tokenizer-path)) 0))
+    (let rows (wf-rows lane st cap lines (list)))
+    (let n (len rows))
+    (let mean (if (eq n 0) 0 (div (wf-sum rows 1) n)))
+    (let row (json-node-object (list
+        (fhn-n "at_unix_ms" (now_unix_ms))
+        (fhn-s "lane" lane)
+        (fhn-s "model" (if (str_eq lane "tiny") "whisper-tiny native (ear-native)" "whisper-large-v3-turbo native (native-whisper-transcribe)"))
+        (fhn-n "files" n)
+        (fhn-n "wer_mean" mean)
+        (fhn-n "ms_total" (wf-sum rows 2))
+        (json-node-pair "rows" (json-node-array (wf-json-rows rows))))))
+    (let appended (fhn-append "receipts/stt-wer-ledger.jsonl" (str_concat (json-emit row) "\n")))
+    (print_str (str_concat "lane=" (str_concat lane (str_concat " files=" (str_concat (int_to_str n) (str_concat " wer_mean=" (str_concat (int_to_str mean) (str_concat " ms_total=" (str_concat (int_to_str (wf-sum rows 2)) (str_concat " ledger=" (str_concat appended "\n")))))))))))
+    0)
