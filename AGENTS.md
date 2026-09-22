@@ -156,7 +156,12 @@ For ongoing native coding, use the public `code` request so its owned
 checkpoint retains the work. Select `code_entry: "direct"` when the task is
 already defined; review and verification still run. Coding and review can select
 `document_context: "catalog"` and read relevant source through native tools;
-all documents and caller checks remain available. Use the process organ's
+all supplied documents and caller checks remain available. Native source tools
+read this caller-supplied catalog. Include the called helpers and their contracts;
+a file on disk becomes available to these tools when its source is supplied.
+An unavailable search path enters repair with the missing path named; a search
+with no matching text in available source keeps its ordinary no-match result.
+Use the process organ's
 progress-aware supervision (`seconds: 0`) when no caller requires a wall-time
 limit. An explicit deadline can interrupt progressing work; retain that
 outcome and recover its evidence before admitting another model.
