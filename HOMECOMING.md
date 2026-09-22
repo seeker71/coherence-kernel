@@ -185,8 +185,8 @@ The [Qwen teaching-learning path](receipts/2026-09-23-qwen-teaching-learning.md)
 now captures verified completions, trains and retains an explicit Qwen head
 adapter, and binds it to later serving. Validation loss fell from 3.6598 to
 3.3194. On the unchanged enquiry, the candidate gained the label/sense distinction
-but retained source errors, introduced a content-identity/Node-ID conflation,
-and still exceeded the requested length. Both answers completed and released
+but retained source errors and still exceeded the requested length. Both answers
+completed and released
 their resources. The adapter remains unpromoted; faithful composition and
 whole-session quality parity remain open. Automatic session learning still
 selects Llama; Qwen learning currently uses this explicit native door.

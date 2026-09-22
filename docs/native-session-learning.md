@@ -33,6 +33,31 @@ gradient. No transcript, prompt or answer
 is copied into Glass or the diagnostic framebuffer. Training text and generated
 streams remain private in the hearth; telemetry carries identities and counts.
 
+### Withdrawing an unsupported teaching
+
+`form-run ./fkwu observe/native-session-withdrawal-run.bml` accepts one JSON
+stdin line with the original `session`, `event`, and a nonempty `reason`.
+It withdraws the latest completed, unpromoted lesson when no learning is pending.
+The learner's lock serializes the operation; a live maintenance owner prevents
+that lock from being mistaken for an abandoned worker.
+
+The door verifies the retained parent adapter, optimizer, serving adapter and
+base seals, journals the withdrawal, and atomically restores the parent state.
+Original records, results and adapter bytes remain intact. `optimizer_step`
+reports the selected checkpoint; `learned_rounds` retains cumulative work and
+`withdrawals` records completed retirements. The serving adapter stays selected.
+
+The journal excludes the lesson from pending training, source delivery and
+replay. Recalled experience labels the original attempt `withdrawn-teaching`.
+If execution stops between journal and state publication, continuation refuses
+the withdrawn candidate; repeating the same request completes the publication.
+A completed repeat returns its original receipt without changing newer state.
+
+This selects a checkpoint from before the lesson; it does not claim arbitrary
+unlearning. Older lessons, promoted lessons and descendants in other homes need
+their own repair. The door refuses those cases. A replacement teaching uses a
+new event identity after the withdrawal has been observed.
+
 One supervisor serializes the learning queue and records the learner's actual
 exit and stderr. Before the learner starts, the supervisor admits the dynamic
 Metal carrier through `form/form-stdlib/metal-carrier.bml`. A fresh worktree

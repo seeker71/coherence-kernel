@@ -1,0 +1,69 @@
+// Retire the latest unpromoted lesson and select its sealed parent. The journal
+// precedes state publication so interruption excludes the record immediately.
+// Historical records, gradients, results and generation bytes stay available.
+// preludes: form-stdlib/native-session-learning.bml
+section [form.bml] {
+ class NativeSessionWithdrawal {
+  def nsw-refused(reason) = json-node-object(list(nsm-n("ok",0),nsm-s("reason",reason)));
+  def nsw-same(a,b) = str_eq(json-emit-precise(a),json-emit-precise(b));
+  def nsw-withdraw(home,request) {
+   let session = nsm-str(request,"session"); let event = nsm-str(request,"event");
+   let id = nsm-hash(str_concat(session,str_concat("\n",event)));
+   if or(str_eq(session,""),or(str_eq(event,""),str_eq(nsm-str(request,"reason"),""))) then nsw-refused("session-event-and-reason-required") else if not(nsm-lock(home)) then nsw-refused("learner-or-maintenance-standing") else nsw-held(home,nsm-at(nsm-at(home,"rows"),id),request);
+  }
+  def nsw-held(home,dir,request) {
+   let owner = nag-write(nsm-at(home,"maintenance.pid"),int_to_str(host_pid()));
+   let result = if nsm-withdrawn(dir) then nsw-resume(home,dir,request) else nsw-plan(home,dir,request);
+   let gone = fs-remove-file(nsm-at(home,"maintenance.pid"));
+   let released = host_dir_rmdir(nsm-at(home,"worker.lock"));
+   result;
+  }
+  def nsw-plan(home,dir,request) {
+   let record = nsm-json(nsm-at(dir,"record.json")); let result = nsm-json(nsm-at(dir,"result.json"));
+   let state = nsm-state(home); let before = nsm-json(nsm-at(dir,"before.json")); let prior = oh-get(before,"state");
+   let latest = and(str_eq(nsm-str(state,"last_row"),dir),str_eq(nsm-str(state,"candidate"),nsm-str(result,"candidate")));
+   let complete = and(str_eq(nsm-str(result,"status"),"learned-candidate;serving-retained"),eq(nsm-num(result,"promoted"),0));
+   let parent = and(not(str_eq(nsm-str(before,"parent"),"")),and(str_eq(nsm-str(before,"parent"),nsm-str(prior,"candidate")),eq(nsm-num(state,"optimizer_step"),add(nsm-num(prior,"optimizer_step"),1))));
+   let serving = and(str_eq(nsm-str(state,"serving"),nsm-str(prior,"serving")),str_eq(nsm-str(state,"serving_seal"),nsm-str(prior,"serving_seal")));
+   if not(nse-record-valid(record)) then nsw-refused("record-seal-invalid") else if not(and(latest,and(complete,and(parent,serving)))) then nsw-refused("requires-latest-completed-unpromoted-lesson-with-retained-parent") else if gt(len(nsm-pending(home,nsm-dirs(home))),0) then nsw-refused("pending-learning-must-finish-before-withdrawal") else if not(nsw-sealed(before,prior)) then nsw-refused("parent-base-or-serving-bytes-changed") else nsw-journal(home,dir,request,record,state,prior);
+  }
+  def nsw-sealed(before,prior) {
+   let parent = nsm-str(before,"parent"); let serving = nsm-str(prior,"serving");
+   if nsm-withdrawn(nsm-str(prior,"last_row")) then 0 else and(str_eq(nsm-str(before,"base_seal"),nsl-base-seal(nsm-model())),and(str_eq(nsm-str(before,"base_seal"),nsm-str(prior,"base_seal")),and(str_eq(nsm-str(before,"parent_seal"),nsm-str(prior,"candidate_seal")),and(str_eq(nsm-str(before,"parent_seal"),nsl-adapter-seal(parent)),or(str_eq(serving,""),str_eq(nsm-str(prior,"serving_seal"),nsl-adapter-seal(serving)))))));
+  }
+  def nsw-journal(home,dir,request,record,state,prior) {
+   // Keep the cumulative work count while restoring the selected optimizer step.
+   let restored = oh-set(oh-set(prior,"learned_rounds",oh-get(state,"learned_rounds")),"withdrawals",json-node-int(add(nsm-num(state,"withdrawals"),1)));
+   let journal = json-node-object(list(nsm-s("schema","native-session-withdrawal-v1"),nsm-s("session",nsm-str(request,"session")),nsm-s("event",nsm-str(request,"event")),nsm-s("reason",nsm-str(request,"reason")),nsm-s("record_sha256",nsm-str(record,"content_sha256")),json-node-pair("previous_state",state),json-node-pair("replacement_state",restored),nsm-n("at_ms",now_unix_ms())));
+   let saved = nsm-atomic(nsm-withdrawal(dir),journal);
+   nsw-apply(home,dir,journal);
+  }
+  def nsw-resume(home,dir,request) {
+   let journal = nsm-json(nsm-withdrawal(dir)); let record = nsm-json(nsm-at(dir,"record.json"));
+   let bound = and(str_eq(nsm-str(journal,"schema"),"native-session-withdrawal-v1"),and(str_eq(nsm-str(journal,"session"),nsm-str(request,"session")),and(str_eq(nsm-str(journal,"event"),nsm-str(request,"event")),and(str_eq(nsm-str(journal,"reason"),nsm-str(request,"reason")),and(nse-record-valid(record),str_eq(nsm-str(journal,"record_sha256"),nsm-str(record,"content_sha256")))))));
+   let done = nsm-json(nsm-at(dir,"withdrawal-result.json"));
+   if not(bound) then nsw-refused("withdrawal-journal-request-or-record-mismatch") else if and(eq(nsm-num(done,"ok"),1),str_eq(nsm-str(done,"journal_sha256"),nsm-hash(json-emit-precise(journal)))) then done else if not(nsw-sealed(nsm-json(nsm-at(dir,"before.json")),oh-get(journal,"replacement_state"))) then nsw-refused("withdrawal-parent-base-or-serving-bytes-changed") else nsw-apply(home,dir,journal);
+  }
+  def nsw-apply(home,dir,journal) {
+   let state = nsm-state(home); let prior = oh-get(journal,"previous_state"); let next = oh-get(journal,"replacement_state");
+   if not(or(nsw-same(state,prior),nsw-same(state,next))) then nsw-refused("state-moved-since-withdrawal-journal") else nsw-publish(home,dir,journal,next);
+  }
+  def nsw-publish(home,dir,journal,next) {
+   let reading = oh-reading("session-learning",dir,"teaching-withdrawal",json-node-string("verified source target"),json-node-string("caller-withdrew-target"),json-node-int(0),list(oh-need("verified-teaching",oh-reference(nsm-withdrawal(dir)))),list("exclude-record;restore-sealed-parent","defer"),oh-reference(nsm-withdrawal(dir)));
+   let seen = nsm-event(home,"organ-health",list(json-node-pair("health",reading)));
+   let response = oh-response(reading,"exclude-record;restore-sealed-parent");
+   let received = nsm-event(home,"organ-response",list(json-node-pair("health",response)));
+   let selected = oh-select(reading,response,"defer");
+   if not(str_eq(selected,"exclude-record;restore-sealed-parent")) then nsw-refused("withdrawal-control-not-correlated") else nsw-published(home,dir,journal,next,reading,selected);
+  }
+  def nsw-published(home,dir,journal,next,reading,selected) {
+   let saved = nsm-atomic(nsm-at(home,"state.json"),next);
+   let checked = nsm-state(home); let ok = and(nsm-withdrawn(dir),nsw-same(checked,next));
+   let result = json-node-object(list(nsm-n("ok",ok),nsm-s("status","withdrawn;sealed-parent-selected"),nsm-s("journal_sha256",nsm-hash(json-emit-precise(journal))),nsm-n("optimizer_step",nsm-num(checked,"optimizer_step")),nsm-n("learned_rounds",nsm-num(checked,"learned_rounds")),nsm-n("withdrawals",nsm-num(checked,"withdrawals")),nsm-n("record_excluded",nsm-withdrawn(dir)),nsm-s("candidate",nsm-str(checked,"candidate")),nsm-s("serving",nsm-str(checked,"serving"))));
+   let retained = if ok then nsm-atomic(nsm-at(dir,"withdrawal-result.json"),result) else result;
+   let observed = nsm-event(home,"organ-action-observed",list(json-node-pair("health",oh-applied(reading,selected,result))));
+   result;
+  }
+ }
+ 0;
+}

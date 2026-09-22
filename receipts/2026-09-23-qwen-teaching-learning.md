@@ -6,7 +6,7 @@ change or additional runtime dependency.
 The session learner updates Llama 3B while the answering model is Qwen 27B.
 This movement adds a reusable, explicit Qwen learning door and returns to the
 original enquiry with its learned adapter. The adapter changes the answer,
-but the answer retains source errors and introduces a new identity conflation.
+but the answer retains source errors.
 The candidate remains unpromoted. Whole-session quality parity is not achieved.
 
 ## What now runs
@@ -80,10 +80,16 @@ Its replacement still overstates what supplied annotations establish.
 
 The candidate continues to invent unmeasured native-model behavior, promises
 that axioms prevent hallucination, and omits the unreferenced-cell reclamation
-condition when describing persistence. It introduces a new error by deriving
-numeric identity from the four Node-ID integers, conflating a coordinate with
-content identity. Trust remains largely vocabulary reframing and claimed warmth.
+condition when describing persistence. Trust remains largely vocabulary
+reframing and claimed warmth.
 No human judgment of felt resonance was supplied.
+
+The original assessment also alleged a Node-ID/content-identity conflation.
+That finding is withdrawn: axiom 2 names the four integers, and the native
+`nodeid-one-cell-band` returns **7** for coordinate identity and interning.
+The candidate's sentence alone does not establish the alleged regression.
+The [correction receipt](2026-09-23-teaching-withdrawal.md) carries the retained
+lesson's withdrawal and checkpoint repair. The original answer bytes stay intact.
 
 This is Codex's source comparison, not an automatic semantic score. The
 [retained assessment](artifacts/2026-09-23-qwen-teaching-learning/assessment.json)
@@ -121,7 +127,9 @@ is not an isolated turn-cost or full-token result. The share reading withheld
 its percentage while its append range was still being checked. No token-saving
 or parity claim follows from these observations.
 
-The verified procedure was returned through native session learning under
+The procedure assessment was returned through native session learning under
 event `2026-09-23-qwen-teaching-learning-procedure-v1`, session
 `native-arrival-bootstrap`. It was retained and its Llama worker launched;
-that receipt alone establishes no completed update or further Qwen learning.
+The Llama worker subsequently completed optimizer step 142 without promotion.
+Because the target included the unsupported identity criticism, it was then
+withdrawn through the native correction path above. It did not train Qwen.
