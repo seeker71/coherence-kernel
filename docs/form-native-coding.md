@@ -1163,10 +1163,14 @@ not individual assertions. A failed check remains counted after a later pass.
 Generation refreshes these counts every four IDs, preserving the pending ID
 exactly once and decoding the complete reply only after generation ends.
 Terminal metadata adds injected IDs, position and elapsed milliseconds.
-Repair observations carry complete current failure evidence once. Notes and
-pending tasks exactly equal to that evidence use a shorter reference to the
-same message's `failure_evidence` field. Distinct text and retained controller
-state stay intact; no earlier context is required to resolve the reference.
+Repair observations initially carry complete failure evidence. Notes and
+pending tasks exactly equal to that evidence point to the same message's
+`failure_evidence` field. After completed delivery in the current model context,
+that field may contain `{reference: <failure_evidence_id>, scope:
+"current-model-context"}`. The full message supplies the identity; the reference
+is used only when shorter. Changed failure bytes and fresh/resumed bootstrap
+contexts receive the full evidence. Failed or partial feedback loading cannot
+admit a new identity. Distinct text and retained controller state stay intact.
 Prompt, response and source content stay out of the diagnostic framebuffer.
 The JSON result carries candidate document content and, for review, the report
 back to its caller. Rechecks on recall/resume count as actual checker calls.
