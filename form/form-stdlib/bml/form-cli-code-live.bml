@@ -21,6 +21,9 @@ section [form.bml] {
   def fcac-budget-pairs(state,turns) = append(list(json-node-pair("reply_budget",fcac-budget(state,turns)),json-node-pair("budget_instruction",json-node-string(fcac-budget-instruction(state,turns)))),fcac-token-budget-pairs(state));
   def fcac-token-allowance(state,available) = if le(fcap-reply-token-limit(state),0) then available else fat-min(available,fcap-reply-token-limit(state));
   def fcac-reply-exhausted(state,count) = and(gt(fcap-reply-token-limit(state),0),ge(count,fcap-reply-token-limit(state)));
+  // The pending prediction is the first ID; this is the decode-width boundary.
+  def fcac-reply-room(session) = fat-max(0,sub(fcms-maxpos(session),fcms-pos(session)));
+  def fcac-reply-fits(session,state) = or(le(fcap-reply-token-limit(state),0),ge(fcac-reply-room(session),fcap-reply-token-limit(state)));
   def fcac-decode-width(state,session,count) = fat-max(0,fat-min(CodeProgressQuantum(),fat-min(sub(fcms-maxpos(session),fcms-pos(session)),if le(fcap-reply-token-limit(state),0) then CodeProgressQuantum() else sub(fcap-reply-token-limit(state),count))));
   def fcac-bootstrap-budget(state,turns) = str_concat(fcap-bootstrap(state),str_concat("\nCALLER REPLY BUDGET: ",json-emit(json-node-object(fcac-budget-pairs(state,turns)))));
   def fcac-observation-budget(state,turns) = json-emit(json-node-object(append(json-object-pairs(parse-json("observation",fcap-observation(state))),fcac-budget-pairs(state,turns))));
@@ -45,7 +48,7 @@ section [form.bml] {
   def fcac-capacity-stop(session,state,reason,started) = append(fcac-finish(session,fcap-terminal(state,reason),started),list(state));
   def fcac-renewable(result,firstTurn,turns) = if not(eq(len(result),3)) then 0 else {
    let session = head(result); let state = nth(result,2);
-   let capacity = or(str_eq(fcap-note(nth(result,1)),"coding-observation-context-capacity"),ge(fcms-pos(session),sub(fcms-maxpos(session),1)));
+   let capacity = or(fat-has(list("coding-observation-context-capacity","coding-reply-context-capacity"),fcap-note(nth(result,1))),ge(fcms-pos(session),sub(fcms-maxpos(session),1)));
    and(fcms-live?(session),and(capacity,and(not(fcap-done(state)),and(gt(fcap-turns(state),firstTurn),lt(fcap-turns(state),turns)))));
   };
   def fcac-context-cost(session,prior) = list(add(head(prior),fcms-generated-ids(session)),add(nth(prior,1),fcms-injected-ids(session)),add(nth(prior,2),fcms-observations(session)));
@@ -67,7 +70,7 @@ section [form.bml] {
    let changed = fcmr-changed(renewed); let reason = fcmr-reason(renewed);
    let good = and(changed,str_eq(reason,"fresh-stream-same-weights"));
    let spent = if changed then fcac-context-cost(session,prior) else prior;
-   let evidence = json-node-object(list(oh-n("renewed",good),oh-n("owner_replaced",changed),oh-s("reason",reason),oh-n("weight_admissions",0),oh-n("completed_contexts",number),oh-n("context_prompt_ids",fcms-prompt-ids(session)),oh-n("generated_ids",if changed then head(spent) else add(head(prior),fcms-generated-ids(session))),oh-n("injected_ids",if changed then nth(spent,1) else add(nth(prior,1),fcms-injected-ids(session)))));
+   let evidence = json-node-object(list(oh-n("renewed",good),oh-n("owner_replaced",changed),oh-s("reason",reason),oh-s("trigger",fcap-note(nth(result,1))),oh-n("remaining_positions",fcac-reply-room(session)),oh-n("max_reply_tokens",fcap-reply-token-limit(state)),oh-n("weight_admissions",0),oh-n("completed_contexts",number),oh-n("context_prompt_ids",fcms-prompt-ids(session)),oh-n("generated_ids",if changed then head(spent) else add(head(prior),fcms-generated-ids(session))),oh-n("injected_ids",if changed then nth(spent,1) else add(nth(prior,1),fcms-injected-ids(session)))));
    oh-voice(oh-applied(reading,"renew-context",evidence));
    print_str(str_concat("form-code-context ",json-emit(evidence)));
    oh-voice(oh-set(fcac-context-reading(next,if changed then add(number,1) else number,good),"care_of",oh-get(reading,"id")));
@@ -92,7 +95,7 @@ section [form.bml] {
   def fcac-loop(session, state, checker, turns, started) {
    let saved = fcam-save(state);
    let observed = fcac-observe(state, session, started);
-   if not(saved) then fcac-finish(session, fcap-terminal(state, "checkpoint-write-refused;candidate-retained"), started) else if fcap-done(state) then list(session, state) else if not(fcms-live?(session)) then fcac-finish(session,fcap-terminal(state,fcms-reason(session)),started) else if ge(fcap-turns(state), turns) then fcac-finish(session, fcap-terminal(state, str_concat("caller-turn-budget-reached", fcac-retained(state))), started) else if ge(fcms-pos(session), sub(fcms-maxpos(session), 1)) then fcac-capacity-stop(session,state,str_concat("context-capacity",fcac-retained(state)),started) else fcac-generated(fcac-decode(session, state, started, fcacs-stops(session, qsx-load(fcms-path(session))), list()), state, checker, turns, started);
+   if not(saved) then fcac-finish(session, fcap-terminal(state, "checkpoint-write-refused;candidate-retained"), started) else if fcap-done(state) then list(session, state) else if not(fcms-live?(session)) then fcac-finish(session,fcap-terminal(state,fcms-reason(session)),started) else if ge(fcap-turns(state), turns) then fcac-finish(session, fcap-terminal(state, str_concat("caller-turn-budget-reached", fcac-retained(state))), started) else if ge(fcms-pos(session), sub(fcms-maxpos(session), 1)) then fcac-capacity-stop(session,state,str_concat("context-capacity",fcac-retained(state)),started) else if not(fcac-reply-fits(session,state)) then fcac-capacity-stop(session,state,"coding-reply-context-capacity",started) else fcac-generated(fcac-decode(session, state, started, fcacs-stops(session, qsx-load(fcms-path(session))), list()), state, checker, turns, started);
   }
   def fcac-finish(session, state, started) {
    let observed = fcac-observe(state, session, started);
