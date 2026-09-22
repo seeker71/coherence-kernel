@@ -1,0 +1,83 @@
+// What each turn of the conversation cost, read by the body from the rented
+// mind's own transcript.
+//
+// The flow meter sums a whole session. A sum cannot say which asking was
+// expensive, so it cannot be argued with and it cannot be aimed at. This reads
+// the transcript exchange by exchange: a turn opens at a person's own message
+// — a tool result is not one — and every provider message that follows belongs
+// to it, counted once per message id, since a message spans one row per content
+// block and each row repeats the same usage.
+//
+// Cache reads are separated from the rest throughout: they are the cheapest
+// tokens and the largest number, and a total that hides them flatters nothing.
+// preludes: form-stdlib/bml/form-cli-heal-native-report.bml
+section [form.bml] {
+ class FormCliTurnMeter {
+  def ftm-has?(line, key) = ge(str_find(line, key, 0), 0);
+  def ftm-assistant?(line) = ftm-has?(line, "\"type\":\"assistant\"");
+  def ftm-user?(line) = ftm-has?(line, "\"type\":\"user\"");
+  def ftm-tool-result?(line) = ftm-has?(line, "\"type\":\"tool_result\"");
+  // A person's own asking, and nothing else: a tool result arrives as a user row,
+  // and so do the host's reminders and the notices a background task leaves. Those
+  // are the session talking to itself. Only what a person typed opens a turn.
+  def ftm-content-at(line) = str_find(line, "\"content\":\"", 0);
+  def ftm-content(line) = ftm-content-of(line, ftm-content-at(line));
+  def ftm-content-of(line, at) = if lt(at, 0) then "" else substring(line, add(at, 11), ftm-string-end(line, add(at, 11)));
+  def ftm-starts?(text, mark) = eq(str_find(text, mark, 0), 0);
+  def ftm-person?(text) = and(not(str_eq(trim(text), "")), and(not(ftm-starts?(text, "<system-reminder>")), not(ftm-starts?(text, "<task-notification>"))));
+  def ftm-asking?(line) = and(and(ftm-user?(line), not(ftm-tool-result?(line))), ftm-person?(ftm-content(line)));
+  def ftm-digit?(ch) = and(ge(ch, 48), le(ch, 57));
+  def ftm-digits(text, i, acc) = if and(lt(i, str_len(text)), ftm-digit?(str_byte_at(text, i))) then ftm-digits(text, add(i, 1), add(mul(acc, 10), sub(str_byte_at(text, i), 48))) else acc;
+  def ftm-int-after(text, key, from) { let at = str_find(text, key, from); if lt(at, 0) then 0 else ftm-digits(text, add(at, str_len(key)), 0); }
+  def ftm-string-end(line, from) = if or(ge(from, str_len(line)), eq(str_byte_at(line, from), 34)) then from else ftm-string-end(line, add(from, if eq(str_byte_at(line, from), 92) then 2 else 1));
+  def ftm-message-id(line) { let at = str_find(line, "\"id\":\"msg_", 0); if or(lt(at, 0), gt(at, 600)) then "" else substring(line, add(at, 6), ftm-string-end(line, add(at, 6))); }
+  def ftm-opening(line) = ftm-cut(ftm-content(line));
+  def ftm-cut(text) = if gt(str_len(text), 72) then str_concat(substring(text, 0, 72), "…") else text;
+  // a turn: opening, provider messages, input, cache write, cache read, output
+  def ftm-open(opening) = list(opening, 0, 0, 0, 0, 0);
+  def ftm-add(turn, line) = list(nth(turn, 0), add(nth(turn, 1), 1),
+   add(nth(turn, 2), ftm-int-after(line, "\"input_tokens\":", str_find(line, "\"usage\":{", 0))),
+   add(nth(turn, 3), ftm-int-after(line, "\"cache_creation_input_tokens\":", str_find(line, "\"usage\":{", 0))),
+   add(nth(turn, 4), ftm-int-after(line, "\"cache_read_input_tokens\":", str_find(line, "\"usage\":{", 0))),
+   add(nth(turn, 5), ftm-int-after(line, "\"output_tokens\":", str_find(line, "\"usage\":{", 0))));
+  def ftm-spoken?(turn) = gt(nth(turn, 1), 0);
+  def ftm-close(turns, turn) = if ftm-spoken?(turn) then cons(turn, turns) else turns;
+  def ftm-walk(lines, turns, turn, lastId) {
+   if nil?(lines) then ftm-close(turns, turn) else ftm-walk-line(tail(lines), turns, turn, lastId, head(lines));
+  }
+  def ftm-walk-line(rest, turns, turn, lastId, line) {
+   if ftm-asking?(line) then ftm-walk(rest, ftm-close(turns, turn), ftm-open(ftm-opening(line)), lastId)
+   else if not(ftm-assistant?(line)) then ftm-walk(rest, turns, turn, lastId)
+   else ftm-walk-fresh(rest, turns, turn, lastId, line, ftm-message-id(line));
+  }
+  def ftm-walk-fresh(rest, turns, turn, lastId, line, id) {
+   if or(str_eq(id, ""), str_eq(id, lastId)) then ftm-walk(rest, turns, turn, lastId) else ftm-walk(rest, turns, ftm-add(turn, line), id);
+  }
+  def ftm-turns(text) = ftm-reverse(ftm-walk(split-on(text, "\n"), list(), ftm-open(""), ""), list());
+  def ftm-reverse(xs, acc) = if nil?(xs) then acc else ftm-reverse(tail(xs), cons(head(xs), acc));
+  def ftm-uncached(turn) = add(add(nth(turn, 2), nth(turn, 3)), nth(turn, 5));
+  def ftm-total(turn) = add(ftm-uncached(turn), nth(turn, 4));
+  def ftm-row(turn, i) = json-node-object(list(
+   fhn-n("turn", i),
+   fhn-s("asking", nth(turn, 0)),
+   fhn-n("provider_messages", nth(turn, 1)),
+   fhn-n("input", nth(turn, 2)),
+   fhn-n("cache_write", nth(turn, 3)),
+   fhn-n("cache_read", nth(turn, 4)),
+   fhn-n("output", nth(turn, 5)),
+   fhn-n("uncached", ftm-uncached(turn)),
+   fhn-n("total", ftm-total(turn))));
+  def ftm-rows(turns, i) = if nil?(turns) then list() else cons(ftm-row(head(turns), i), ftm-rows(tail(turns), add(i, 1)));
+  def ftm-sum(turns, f) = if nil?(turns) then 0 else add(f(head(turns)), ftm-sum(tail(turns), f));
+  def ftm-reading(path) {
+   let text = if gt(file_size(path), 0) then fhn-read(path) else "";
+   let turns = ftm-turns(text);
+   json-node-object(list(
+    fhn-s("transcript", path),
+    fhn-n("turns", len(turns)),
+    fhn-n("uncached", ftm-sum(turns, ftm-uncached)),
+    fhn-n("total", ftm-sum(turns, ftm-total)),
+    json-node-pair("per_turn", json-node-array(ftm-rows(turns, 1)))));
+  }
+ }
+}
