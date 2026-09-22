@@ -152,6 +152,15 @@ Its explanation still misstates source contracts, including a frequency-input
 distinction the earlier answer preserved. Completion improved; faithful synthesis
 and overall quality parity remain open.
 
+The [actual fidelity review](receipts/2026-09-23-native-fidelity-review.md)
+then corrected the numeric-input description but retained unconditional
+persistence and the confusion between language labels and senses. It completed
+in 1,746 generated IDs with seven findings and zero tool calls; some of its
+criticism was not carried into its own rewrite. The shared teaching now names
+both distinctions explicitly. A separately attributed Codex answer supplies
+the source corrections. Native uptake of the new teaching and dependable
+self-correction remain open.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
