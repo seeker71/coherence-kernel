@@ -1,0 +1,156 @@
+Review this actual native prefill implementation for correctness. Find actionable bugs, especially failed GPU completion and resource ownership. For each finding name the function, the concrete execution that fails, and the smallest repair. If the supplied source establishes no defect, say so. Do not invent execution results. Review only this source; no tools are available in this model call.
+
+// Completion belongs to the executing prefill slice. Positions advance only
+// after the carrier settles its work; refusal leaves the owning session intact.
+// preludes: form-stdlib/bml/qwen38-open-observation.bml form-stdlib/hearth.bml form-stdlib/organ-health.bml
+section [form.bml] {
+ class Qwen38PrefillCompletion {
+  def q38pc-wait-policy() {
+   let live = metal_live();
+   // Preserve an existing caller deadline. Sessions without one receive the
+   // body's deadline for this carrier lifetime, including subsequent release.
+   if and(ge(len(live),14),lt(nth(live,13),0)) then metal_deadline(hearth-metal-deadline-ms()) else 0;
+  }
+  def q38pc-stage(pos,phase) = q38oo-stage(str_concat("model-prefill-positions-",str_concat(int_to_str(pos),str_concat("-",phase))),8388623);
+  def q38pc-settled(live) = if lt(len(live),15) then 0 else and(eq(nth(live,5),0),and(eq(nth(live,6),0),eq(nth(live,14),0)));
+  def q38pc-frame(status) = if ge(str_find(status,"wait_frame=timeout\n",0),0) then "timeout" else if ge(str_find(status,"wait_frame=error\n",0),0) then "error" else if ge(str_find(status,"wait_frame=completed\n",0),0) then "completed" else if ge(str_find(status,"wait_frame=released\n",0),0) then "released" else "unobserved";
+  def q38pc-sync(pos,count) {
+   q38pc-stage(pos,"sync-begin");
+   let drained = metal_sync();
+   let frame = q38pc-frame(metal_status());
+   let live = metal_live();
+   let complete = and(gt(drained,0),and(q38pc-settled(live),or(str_eq(frame,"completed"),str_eq(frame,"released"))));
+   if complete then 1 else q38pc-refuse(pos,count,drained,frame,live);
+  }
+  def q38pc-refuse(pos,count,drained,frame,live) {
+   let evidence = json-node-object(list(oh-n("completed_positions",pos),oh-n("slice_positions",count),oh-n("drained_dispatches",drained),oh-s("wait_frame",frame),json-node-pair("carrier",json-node-array(oh-ints(live)))));
+   let reading = oh-reading("qwen-prefill","native-model-session","slice-completion",json-node-int(1),json-node-int(0),json-node-int(0),list(oh-need("settled-gpu-work",evidence)),list("stop-prefill"),evidence);
+   oh-voice(reading);
+   let response = oh-response(reading,"stop-prefill");
+   oh-voice(response);
+   let action = oh-select(reading,response,"");
+   q38pc-stage(pos,"refused");
+   oh-voice(oh-applied(reading,action,json-node-object(list(oh-n("next_slice_admitted",0),oh-n("prediction_accepted",0)))));
+   0;
+  }
+  def q38pc-head-bytes?(bytes) = if nothing?(bytes) then 0 else if not(str_eq(value_kind(bytes),"string")) then 0 else eq(str_len(bytes),4);
+ }
+}
+    (defn q38-prefill-sliced-go (ps bs geo lays sts embTv ids pos span)
+        (if (eq (len ids) 0) (list pos 1)
+            (do (let n (if (lt (len ids) span) (len ids) span))
+                (metal_batch_concurrent)
+                (q38pc-stage pos "embed-begin")
+                (q38-lm-embed ps bs geo embTv (take n ids) 0)
+                (q38pc-stage pos "layers-begin")
+                (q38-lm-layers-span ps bs geo lays sts 0 (nth geo 21) n pos)
+                (if (not (q38pc-sync pos n)) (list pos 0)
+                    (do
+                        (q38oo-stage (str_concat "model-prefill-positions-" (int_to_str (add pos n))) 8388623)
+                        (q38-prefill-sliced-go ps bs geo lays sts embTv
+                            (drop n ids) (add pos n) span))))))
+    (defn q38-prefill-span-sliced (ps bs geo lays sts embTv onormTv projTv ids pos span)
+        (if (or (le span 0) (eq (len ids) 0)) (list -1 pos)
+        (do (q38pc-wait-policy)
+            (let end (q38-prefill-sliced-go ps bs geo lays sts embTv ids pos span))
+            (if (not (nth end 1)) (list -1 (nth end 0))
+            (do
+            ; The final slice sync closed its concurrent batch. Re-arm before
+            ; the barrier-bearing gather and head, or their enqueues refuse
+            ; and the first prediction is read from an unwritten/stale buffer.
+            (metal_batch_concurrent)
+            (q38-gather ps bs geo (sub (q38-last-slice-n (len ids) span) 1) 1)
+            (list (q38-head-only ps bs geo onormTv projTv) (nth end 0)))))))
+    (defn fcmg-live-prefill-span (ctx sts cursor)
+        (do (let walked (fcmg-live-ids-go cursor (empty)))
+            (if (not (str_eq (nth walked 0) "done"))
+                (fcmg-live-pf (nth walked 0) (sub 0 1) 0 (nth walked 1)
+                    (qtlc-reason (nth walked 1)))
+                (do (let ids (reverse (nth walked 2)))
+                    (let pf (q38-prefill-span-sliced
+                        (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                        (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0
+                        (q38-ctx-span ctx)))
+                    (if (or (lt (nth pf 0) 0) (ne (nth pf 1) (len ids)))
+                        (fcmg-live-pf "nothing" -1 (nth pf 1)
+                            (nth walked 1) "model-prefill-refused")
+                        (fcmg-live-pf "ok" (nth pf 0) (nth pf 1)
+                            (nth walked 1) "complete"))))))
+
+    (defn fcms-open-context
+        (path src maxpos prompt-count cursor ids live-cursor x iced)
+        (do
+            (let span (fcma-span prompt-count))
+            (let _span (q38oo-stage (str_concat "model-session-prefill-span-" (int_to_str span)) 8388624))
+            (let _open-begin (q38oo-stage "model-session-context-open-begin" 8388620))
+            (let ctx (if (eq iced 1)
+                (qsx-open-span path maxpos x span) (q38-open-span path maxpos span)))
+            (let _open-ready (q38oo-stage "model-session-context-open-ready" 8388620))
+            (if (not (eq (q38-context-ok? ctx) 1))
+                (do
+                    (let closed (if (lt (len ctx) 10) 0
+                        (q38-close ctx (empty))))
+                    (fcms-none "model-context-open-refused"))
+                (do
+                    (let _state-begin (q38oo-stage "model-session-state-begin" 8388621))
+                    (let sts (q38-new-state (nth ctx 2)))
+                    (let _state-ready (q38oo-stage "model-session-state-ready" 8388621))
+                    (if (not (eq (q38-state-ok? sts) 1))
+                        (do
+                            (let state-closed (q38-free-state sts))
+                            (let context-closed (q38-close ctx (empty)))
+                            (fcms-none "model-stream-state-refused"))
+                        (if (eq live-cursor 1)
+                            (do
+                                (let _prefill-begin (q38oo-stage "model-session-prefill-begin" 8388622))
+                                (let pf (fcmg-live-prefill-span ctx sts cursor))
+                                (let _prefill-ready (q38oo-stage
+                                    (if (str_eq (nth pf 1) "ok") "model-session-prefill-ready"
+                                        "model-session-prefill-refused") 8388622))
+                                (if (not (str_eq (nth pf 1) "ok"))
+                                    (fcms-session "nothing" (nth pf 5)
+                                        path src ctx sts maxpos (nth pf 3)
+                                        -1 0 prompt-count 0 0 0)
+                                    (fcms-session "live" "opened-live-cursor"
+                                        path src ctx sts maxpos (nth pf 3)
+                                        (nth pf 2) 0 prompt-count 0 0 0)))
+                            (do
+                                (let _prefill-begin (q38oo-stage "model-session-prefill-begin" 8388622))
+                                (let pf (q38-prefill-span-sliced
+                                    (nth ctx 0) (nth ctx 1) (nth ctx 2)
+                                    (nth ctx 3) sts (nth ctx 4) (nth ctx 5)
+                                    (nth ctx 6) ids 0 span))
+                                (let complete (and (ge (nth pf 0) 0) (eq (nth pf 1) prompt-count)))
+                                (let _prefill-ready (q38oo-stage
+                                    (if complete "model-session-prefill-ready"
+                                        "model-session-prefill-refused") 8388622))
+                                (fcms-session (if complete "live" "nothing")
+                                    (if complete "opened-scanner-fallback" "model-prefill-refused")
+                                    path src ctx sts maxpos (nth pf 1) (nth pf 0) 0
+                                    prompt-count 0 0 0))))))))
+
+    (defn fcms-release-ok? (s)
+        (do
+            (let adapter-expected (fcmd-owned (fcmd-carrier s)))
+            (if (gt adapter-expected 0) (metal_sync) 0)
+            (let adapter-closed (fcmd-close (fcmd-carrier s)))
+            (let adapter-ok (eq adapter-closed adapter-expected))
+            (if (eq (fcms-resident? s) 0) adapter-ok
+              (do
+                (let state-expected (q38-state-handle-count (fcms-sts s)))
+                (let state-closed (q38-free-state (fcms-sts s)))
+                (let context-expected (q38-close-expected (fcms-ctx s) (empty)))
+                (let context-closed (q38-close (fcms-ctx s) (empty)))
+                (if (and adapter-ok (and (eq state-closed state-expected)
+                         (eq context-closed context-expected))) 1 0)))))
+
+    (defn q38-close (ctx sts)
+        (do
+            (metal_sync)
+            (sum (list
+                (q38-free-handles (nth ctx 1))
+                (q38-free-layers (nth ctx 3))
+                (q38-free-handle (kth-tv-h (nth ctx 4)))
+                (q38-free-handle (kth-tv-h (nth ctx 5)))
+                (q38-free-handle (kth-tv-h (nth ctx 6)))
+                (q38-free-state sts)))))

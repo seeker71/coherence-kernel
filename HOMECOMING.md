@@ -96,6 +96,17 @@ for release. Embedding, layer execution and synchronization now have separate
 stage evidence. Compilation, session contracts and landing checks pass. The
 original stall's cause and recovery on a subsequent real workload remain open.
 
+The [actual prefill code review](receipts/2026-09-22-prefill-code-review.md)
+then ran through that native path: both steps finished prefill and released
+their resources. The first review was unfinished and proposed incorrect cleanup.
+With the omitted ownership predicate and release caller, the same local model
+withdrew those findings in a completed answer. It still overstated cleanup as
+guaranteed. The source packets, original answers and separate costs are retained;
+the working guidance now asks reviews to carry the complete lifetime contract.
+Native [review-context care](docs/native-core-care.md#review-context-care)
+now supplies those declared source needs through the existing care cells,
+re-reads the source and retains the packet for the next review step.
+
 An explicitly offered provider can contribute through the
 [Form-owned synthesis door](docs/form-response-synthesis.md). The
 [restored-source provider review](receipts/2026-09-20-comparison-source-coverage.md)

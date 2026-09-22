@@ -1,0 +1,63 @@
+Based on the provided source code, here is the review for correctness, focusing on GPU completion and resource ownership.
+
+### Finding 1: Resource Leak on Prefill Refusal in `fcms-open-context`
+
+**Function:** `fcms-open-context`
+**Concrete Execution that Fails:**
+1.  The function successfully opens a context (`ctx`) and allocates a state (`sts`).
+2.  It enters the branch where `live-cursor` is **not** 1 (the scanner fallback path, lines starting with `(do (let _prefill-begin ...)`).
+3.  It calls `q38-prefill-span-sliced`.
+4.  Inside `q38-prefill-span-sliced`, a slice fails to sync (e.g., GPU timeout or error), causing `q38pc-sync` to return 0.
+5.  `q38-prefill-span-sliced` returns `(list -1 pos)`.
+6.  Back in `fcms-open-context`, the variable `complete` evaluates to false because `(nth pf 0)` is -1.
+7.  The code proceeds to `(fcms-session "nothing" "model-prefill-refused" ...)`.
+8.  **The Bug:** The function returns immediately without freeing the allocated `ctx` or `sts`. Unlike the `live-cursor` branch (which also has this issue, see Finding 2) or the earlier error checks in `fcms-open-context` (which explicitly call `q38-close` and `q38-free-state`), this specific failure path leaks the Metal resources associated with the context and state. The session is marked as "nothing" (failed), but the underlying GPU memory and handles remain allocated.
+
+**Smallest Repair:**
+Wrap the `fcms-session` call in the scanner fallback branch (and the live-cursor branch) with cleanup logic if the prefill is not complete. Specifically, before returning the failed session, call `q38-close` on the context and `q38-free-state` on the state.
+
+```scheme
+;; In fcms-open-context, scanner fallback branch:
+(if complete
+    (fcms-session "live" "opened-scanner-fallback" ...)
+    (do
+        ;; Cleanup resources on refusal
+        (let _ (q38-close ctx (empty)))
+        (let _ (q38-free-state sts))
+        (fcms-session "nothing" "model-prefill-refused" ...)))
+```
+
+### Finding 2: Resource Leak on Prefill Refusal in `fcms-open-context` (Live Cursor Path)
+
+**Function:** `fcms-open-context`
+**Concrete Execution that Fails:**
+1.  The function successfully opens a context (`ctx`) and allocates a state (`sts`).
+2.  It enters the branch where `live-cursor` is 1.
+3.  It calls `fcmg-live-prefill-span`.
+4.  Inside `fcmg-live-prefill-span`, the prefill is refused (e.g., `q38-prefill-span-sliced` returns a negative head or mismatched position).
+5.  `fcmg-live-prefill-span` returns a structure where `(nth pf 1)` is not "ok" (e.g., "model-prefill-refused").
+6.  Back in `fcms-open-context`, the condition `(not (str_eq (nth pf 1) "ok"))` is true.
+7.  The code proceeds to `(fcms-session "nothing" (nth pf 5) ...)`.
+8.  **The Bug:** Similar to Finding 1, the function returns the failed session without freeing the allocated `ctx` or `sts`. The resources are leaked.
+
+**Smallest Repair:**
+Apply the same cleanup logic as Finding 1 to the `live-cursor` branch.
+
+```scheme
+;; In fcms-open-context, live-cursor branch:
+(if (not (str_eq (nth pf 1) "ok"))
+    (do
+        ;; Cleanup resources on refusal
+        (let _ (q38-close ctx (empty)))
+        (let _ (q38-free-state sts))
+        (fcms-session "nothing" (nth pf 5) ...))
+    (fcms-session "live" "opened-live-cursor" ...))
+```
+
+### Finding 3: Incorrect Resource Ownership Check in `fcms-release-ok?`
+
+**Function:** `fcms-release-ok?`
+**Concrete Execution that Fails:**
+1.  A session `s` is being released.
+2.  `fcms-resident? s` returns 1 (the session is resident).
+3.  The code calculates `state-expected` using `q
