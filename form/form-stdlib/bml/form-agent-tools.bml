@@ -2,6 +2,7 @@
 // Existing sh-bi helpers below are pure Form functions. No shell AST is parsed
 // or executed, and the file-reading sh-bi-cat branch is never called.
 // preludes: form-stdlib/core.fk form-stdlib/tool-channel.fk form-stdlib/native-edit.fk form-stdlib/shell-exec.fk form-stdlib/bml/form-agent-search.bml form-stdlib/bml/form-agent-json-query.bml
+// preludes: form-stdlib/sha256.fk form-stdlib/hex.fk
 section [form.bml] {
     class FormAgentTools {
         def fat-tools() = tc-agent-tool-names();
@@ -31,7 +32,18 @@ section [form.bml] {
         def fat-command-argv(docs, input, parsed) = if not(str_eq(nth(parsed, 1), "")) then fat-fail(nth(parsed, 1), docs) else if nil?(head(parsed)) then fat-fail("missing-tool", docs) else fat-call(docs, head(head(parsed)), tail(head(parsed)), input);
         def fat-read(docs, args, input) = fat-read-result(docs, fat-input(docs, args, input));
         def fat-read-result(docs, r) = if not(str_eq(nth(r, 1), "")) then fat-fail(nth(r, 1), docs) else fat-ok(head(r), docs);
-        def fat-edit(docs, args) = if not(eq(len(args), 3)) then fat-fail("edit-needs-path-old-new", docs) else if str_eq(nth(args, 1), "") then fat-fail("empty-edit-pattern", docs) else fat-edit-doc(docs, args, fat-find-doc(docs, head(args)));
+        def fat-edit-guidance() = "Existing documents require edit: arguments [path,exact unique old text,new text], or [path,\"sha256\",expected resident_sha256,new whole-document text]. The hash form compares all current bytes before replacing them; obtain resident_sha256 from read, cat or guard_evidence. A stale hash refuses the edit. write only creates an absent path; it cannot overwrite an existing document. ";
+        def fat-document-sha(doc) = hex-encode(sha256-stream-string(nth(doc,2)));
+        def fat-sha-bytes?(text,at) = if ge(at,str_len(text)) then 1 else and(ge(str_find(hex-alphabet(),substring(text,at,add(at,1)),0),0),fat-sha-bytes?(text,add(at,1)));
+        def fat-sha?(text) = and(eq(str_len(text),64),fat-sha-bytes?(text,0));
+        def fat-edit(docs, args) = if eq(len(args),4) then fat-edit-sha(docs,args) else if not(eq(len(args), 3)) then fat-fail("edit-needs-path-old-new", docs) else if str_eq(nth(args, 1), "") then fat-fail("empty-edit-pattern", docs) else fat-edit-doc(docs, args, fat-find-doc(docs, head(args)));
+        def fat-edit-sha(docs,args) = if not(str_eq(nth(args,1),"sha256")) then fat-fail("edit-needs-path-sha256-digest-new-text",docs) else if not(fat-sha?(nth(args,2))) then fat-fail("edit-invalid-sha256",docs) else {
+            let doc = fat-find-doc(docs,head(args));
+            if nil?(doc) then fat-fail("resident-document-not-found",docs)
+            else if not(str_eq(nth(args,2),fat-document-sha(doc))) then fat-fail("edit-sha256-mismatch",docs)
+            else if str_eq(nth(doc,2),nth(args,3)) then fat-fail("edit-unchanged: old and new text are identical; no source changed",docs)
+            else fat-ok("edited\n",fat-put-doc(docs,list(head(doc),nth(doc,1),nth(args,3))));
+        };
         def fat-edit-doc(docs, args, doc) = if nil?(doc) then fat-fail("resident-document-not-found", docs) else fat-edit-count(docs, args, doc, ne-count(nth(doc, 2), nth(args, 1)));
         def fat-edit-count(docs, args, doc, count) = if eq(count, 0) then fat-fail("edit-not-found", docs) else if not(eq(count, 1)) then fat-fail("edit-ambiguous", docs) else if str_eq(nth(args,1),nth(args,2)) then fat-fail("edit-unchanged: old and new text are identical; no source changed",docs) else fat-ok("edited\n", fat-put-doc(docs, list(nth(doc, 0), nth(doc, 1), ne-replace-first(nth(doc, 2), nth(args, 1), nth(args, 2)))));
         def fat-write(docs, args, input) = if not(or(eq(len(args), 1), eq(len(args), 2))) then fat-fail("write-needs-new-path-and-text", docs) else if str_eq(head(args), "") then fat-fail("empty-document-path", docs) else if not(nil?(fat-find-doc(docs, head(args)))) then fat-fail("document-exists-use-guarded-edit", docs) else fat-ok("created\n", append(docs, list(list(str_concat("resident:", head(args)), head(args), if eq(len(args), 2) then nth(args, 1) else input))));
@@ -45,12 +57,12 @@ section [form.bml] {
             let start = fat-max(0,sub(at,32));
             json-node-object(list(json-node-pair("scope",json-node-string("old argument compared with the whole resident document at equal byte offsets; no approximate match or edit")),json-node-pair("first_difference_byte",if str_eq(source,old) then json-node-null() else json-node-int(at)),json-node-pair("old_byte",fat-guard-byte(old,at)),json-node-pair("resident_byte",fat-guard-byte(source,at)),json-node-pair("context_start_byte",json-node-int(start)),json-node-pair("old_context",json-node-string(substring(old,start,fat-min(str_len(old),add(at,48))))),json-node-pair("resident_context",json-node-string(substring(source,start,fat-min(str_len(source),add(at,48)))))));
         }
-        def fat-guard-evidence(docs,tool,args,result) = if or(nil?(args),not(fat-has(list("edit-not-found","edit-ambiguous","document-exists-use-guarded-edit"),fat-error(result)))) then nothing() else {
+        def fat-guard-evidence(docs,tool,args,result) = if or(nil?(args),not(fat-has(list("edit-not-found","edit-ambiguous","document-exists-use-guarded-edit","edit-sha256-mismatch"),fat-error(result)))) then nothing() else {
             let doc = fat-find-doc(docs,head(args));
-            if or(nil?(doc),not(or(and(str_eq(tool,"edit"),eq(len(args),3)),str_eq(tool,"write")))) then nothing() else {
+            if or(nil?(doc),not(or(and(str_eq(tool,"edit"),or(eq(len(args),3),eq(len(args),4))),str_eq(tool,"write")))) then nothing() else {
                 let source = nth(doc,2);
-                let base = list(json-node-pair("scope",json-node-string("caller-supplied resident documents; tools do not write the filesystem")),json-node-pair("path",json-node-string(nth(doc,1))),json-node-pair("documents_changed",json-node-int(not(value_eq(docs,fat-documents(result))))),json-node-pair("resident_bytes",json-node-int(str_len(source))),json-node-pair("next",json-node-string("Existing documents require edit with arguments [path,exact unique old text,new text]. Read or cat supplies the resident bytes. write only creates an absent path; it cannot overwrite this document.")));
-                json-node-object(append(base,if str_eq(tool,"write") then list() else list(json-node-pair("exact_matches",json-node-int(ne-count(source,nth(args,1)))),json-node-pair("old_bytes",json-node-int(str_len(nth(args,1)))),json-node-pair("whole_document_comparison",fat-guard-comparison(source,nth(args,1))))));
+                let base = list(json-node-pair("scope",json-node-string("caller-supplied resident documents; tools do not write the filesystem")),json-node-pair("path",json-node-string(nth(doc,1))),json-node-pair("documents_changed",json-node-int(not(value_eq(docs,fat-documents(result))))),json-node-pair("resident_bytes",json-node-int(str_len(source))),json-node-pair("resident_sha256",json-node-string(fat-document-sha(doc))),json-node-pair("next",json-node-string(fat-edit-guidance())));
+                json-node-object(append(base,if str_eq(tool,"write") then list() else if eq(len(args),4) then list(json-node-pair("expected_sha256",json-node-string(nth(args,2)))) else list(json-node-pair("exact_matches",json-node-int(ne-count(source,nth(args,1)))),json-node-pair("old_bytes",json-node-int(str_len(nth(args,1)))),json-node-pair("whole_document_comparison",fat-guard-comparison(source,nth(args,1))))));
             };
         };
 
