@@ -89,6 +89,13 @@ stopped process it identifies the intact request, absent result artifacts and
 current PID absence in one call, without restarting generation. Completed work
 still replays unchanged. The original prefill stall remains an open runtime fault.
 
+The [prefill completion repair](receipts/2026-09-22-qwen-prefill-completion.md)
+connects sliced prefill to the existing Form-owned Metal deadline, checks actual
+completion before advancing positions, and retains a refused session's ownership
+for release. Embedding, layer execution and synchronization now have separate
+stage evidence. Compilation, session contracts and landing checks pass. The
+original stall's cause and recovery on a subsequent real workload remain open.
+
 An explicitly offered provider can contribute through the
 [Form-owned synthesis door](docs/form-response-synthesis.md). The
 [restored-source provider review](receipts/2026-09-20-comparison-source-coverage.md)
