@@ -878,10 +878,21 @@ These are model reflections, **not proven causal explanations or weight
 training**. The JSON door now persists native binary checkpoints beneath
 `.hearth/code-memory/` after complete model/tool transitions. A completed repair
 also becomes a lesson. Retrieval requires the exact original goal, documents,
-writable paths and checks; the prior candidate must pass the current checker
-again before its last three repair notes enter a fresh Qwen prompt. Candidates
-are not silently copied into the new job, and a recalled lesson cannot change
-the caller's checks. Other tasks load none of its private context.
+writable paths and checks. For coding, the prior completed candidate must pass
+the current checker again; only then does the new job return that candidate
+as complete without model admission. The result names
+`source=verified-native-code-reuse`, the prior checkpoint and the actual current
+check in its reason. New model replies, tool calls and generation counters stay
+zero; the current check is counted. The sealed lesson keeps the original
+attempt history. This is explicit reuse of verified work, not fresh generation
+or a weight update.
+
+A failed or malformed current check leaves the new job's original source and
+work phase intact and retains the refused check result in its observation.
+Changed goals, original documents, writable paths or check
+contracts cannot select that lesson. Read-only review recall remains guidance
+for a fresh report; it does not return a prior report as new work. Evaluation
+continues to exclude recall. Other tasks load none of this private context.
 
 Budget/context exhaustion returns `checkpoint_id`. To continue, send the same
 original request with `"resume":"<checkpoint_id>"`; `turns` is the additional
