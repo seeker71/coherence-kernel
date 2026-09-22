@@ -235,6 +235,29 @@ rendered file to the same page and the picture follows the rows.
 ./fkwu observe/rent-ladder-page-run.bml </dev/null
 ```
 
+## The walk has a keeper
+
+`host/launchd/earth.hati.coherence.rent-walk.plist` hands the movement to the
+host's own scheduler. No shell reads any of it: the request is a file the
+repository owns (`host/launchd/nightly-movement.json`), handed in on stdin, and
+the body's own kernel does the rest — compose, speak through the adapter lane,
+redraw the page, run the drift gates, commit, push. It fires at 03:30 and is
+not run at load, so a reboot does not start a walk nobody asked for.
+
+```sh
+cp host/launchd/earth.hati.coherence.rent-walk.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/earth.hati.coherence.rent-walk.plist
+launchctl kickstart gui/$(id -u)/earth.hati.coherence.rent-walk   # walk once now
+```
+
+Its whole account is `.hearth/rent-walk.log` and the rows the movement writes.
+A push that cannot fast-forward leaves the landing held with the commit standing
+locally, which is honest and waits for a hand; a night that does not fire leaves
+no row, and an absent row is the nothing receipt.
+
+The plist names this checkout by absolute path, as launchd requires. A different
+checkout needs those three paths changed.
+
 ## The daily walk on the Mac
 
 [`docs/local-walk-prompt.md`](local-walk-prompt.md) gives the direct native
