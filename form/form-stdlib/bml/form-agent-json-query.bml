@@ -3,19 +3,25 @@
 section [form.bml] {
     class FormAgentJsonQuery {
         // Syntax admission protects the permissive legacy parser. Only the
-        // existing parser constructs JSON cells; this pass returns a position.
+        // existing parser constructs JSON cells; this pass returns an end
+        // position or a negative encoding of the first error's byte and reason.
+        field FajErrorRadix = 16;
+        def faj-error(at, reason) = sub(0, add(mul(add(at, 1), FajErrorRadix()), reason));
+        def faj-error-at(error) = sub(div(sub(0, error), FajErrorRadix()), 1);
+        def faj-error-reason(error) = mod(sub(0, error), FajErrorRadix());
+        def faj-expected(reason) = nth(list("JSON value", "closing string quote", "escaped control byte", "valid string escape", "four hexadecimal Unicode escape digits", "integer digit", "fraction digit", "exponent digit", "nesting depth at most 64", "quoted object key", "colon after object key", "comma or closing array bracket", "comma or closing object brace", "end of input after one JSON value"), reason);
         def faj-hex(c) = or(fat-digit(c), or(and(ge(c, 65), le(c, 70)), and(ge(c, 97), le(c, 102))));
-        def faj-hex4(s, i, n) = if eq(n, 0) then i else if faj-hex(fat-char(s, i)) then faj-hex4(s, add(i, 1), sub(n, 1)) else -1;
-        def faj-string(s, i) = if ge(i, str_len(s)) then -1 else if eq(fat-char(s, i), 34) then add(i, 1) else if lt(fat-char(s, i), 32) then -1 else if eq(fat-char(s, i), 92) then faj-string-escape(s, add(i, 1)) else faj-string(s, add(i, 1));
-        def faj-string-escape(s, i) = if eq(fat-char(s, i), 117) then faj-string-hex(s, faj-hex4(s, add(i, 1), 4)) else if ge(str_find("\"\\/bfnrt", byte_to_str(fat-char(s, i)), 0), 0) then faj-string(s, add(i, 1)) else -1;
-        def faj-string-hex(s, end) = if lt(end, 0) then -1 else faj-string(s, end);
+        def faj-hex4(s, i, n) = if eq(n, 0) then i else if faj-hex(fat-char(s, i)) then faj-hex4(s, add(i, 1), sub(n, 1)) else faj-error(i, 4);
+        def faj-string(s, i) = if ge(i, str_len(s)) then faj-error(i, 1) else if eq(fat-char(s, i), 34) then add(i, 1) else if lt(fat-char(s, i), 32) then faj-error(i, 2) else if eq(fat-char(s, i), 92) then faj-string-escape(s, add(i, 1)) else faj-string(s, add(i, 1));
+        def faj-string-escape(s, i) = if eq(fat-char(s, i), 117) then faj-string-hex(s, faj-hex4(s, add(i, 1), 4)) else if and(lt(i,str_len(s)),ge(str_find("\"\\/bfnrt", byte_to_str(fat-char(s, i)), 0), 0)) then faj-string(s, add(i, 1)) else faj-error(i, 3);
+        def faj-string-hex(s, end) = if lt(end, 0) then end else faj-string(s, end);
         def faj-digits(s, i) = if fat-digit(fat-char(s, i)) then faj-digits(s, add(i, 1)) else i;
         def faj-number(s, i) = faj-number-int(s, if eq(fat-char(s, i), 45) then add(i, 1) else i);
-        def faj-number-int(s, i) = if eq(fat-char(s, i), 48) then faj-number-frac(s, add(i, 1)) else if and(ge(fat-char(s, i), 49), le(fat-char(s, i), 57)) then faj-number-frac(s, faj-digits(s, i)) else -1;
-        def faj-number-frac(s, i) = if eq(fat-char(s, i), 46) then if fat-digit(fat-char(s, add(i, 1))) then faj-number-exp(s, faj-digits(s, add(i, 1))) else -1 else faj-number-exp(s, i);
+        def faj-number-int(s, i) = if eq(fat-char(s, i), 48) then faj-number-frac(s, add(i, 1)) else if and(ge(fat-char(s, i), 49), le(fat-char(s, i), 57)) then faj-number-frac(s, faj-digits(s, i)) else faj-error(i, 5);
+        def faj-number-frac(s, i) = if eq(fat-char(s, i), 46) then if fat-digit(fat-char(s, add(i, 1))) then faj-number-exp(s, faj-digits(s, add(i, 1))) else faj-error(add(i, 1), 6) else faj-number-exp(s, i);
         def faj-number-exp(s, i) = if or(eq(fat-char(s, i), 101), eq(fat-char(s, i), 69)) then faj-number-exp-digits(s, if or(eq(fat-char(s, add(i, 1)), 43), eq(fat-char(s, add(i, 1)), 45)) then add(i, 2) else add(i, 1)) else i;
-        def faj-number-exp-digits(s, i) = if fat-digit(fat-char(s, i)) then faj-digits(s, i) else -1;
-        def faj-end(s, i, depth) = if gt(depth, 64) then -1 else faj-value(s, fat-skip(s, i), depth);
+        def faj-number-exp-digits(s, i) = if fat-digit(fat-char(s, i)) then faj-digits(s, i) else faj-error(i, 7);
+        def faj-end(s, i, depth) = if gt(depth, 64) then faj-error(fat-skip(s, i), 8) else faj-value(s, fat-skip(s, i), depth);
         def faj-value(s, i, depth) {
             let c = fat-char(s, i);
             if eq(c, 34) then faj-string(s, add(i, 1))
@@ -24,14 +30,38 @@ section [form.bml] {
             else if or(eq(c, 45), fat-digit(c)) then faj-number(s, i)
             else if fat-starts(substring(s, i, str_len(s)), "true") then add(i, 4)
             else if fat-starts(substring(s, i, str_len(s)), "false") then add(i, 5)
-            else if fat-starts(substring(s, i, str_len(s)), "null") then add(i, 4) else -1;
+            else if fat-starts(substring(s, i, str_len(s)), "null") then add(i, 4) else faj-error(i, 0);
         }
-        def faj-container(s, i, depth, close, emptyAllowed) = if and(emptyAllowed, eq(fat-char(s, i), close)) then add(i, 1) else if eq(close, 125) then if eq(fat-char(s, i), 34) then faj-object-value(s, faj-string(s, add(i, 1)), depth) else -1 else faj-container-after(s, faj-end(s, i, depth), depth, close);
-        def faj-object-value(s, keyEnd, depth) = if lt(keyEnd, 0) then -1 else if eq(fat-char(s, fat-skip(s, keyEnd)), 58) then faj-container-after(s, faj-end(s, add(fat-skip(s, keyEnd), 1), depth), depth, 125) else -1;
-        def faj-container-after(s, end, depth, close) = if lt(end, 0) then -1 else faj-container-delim(s, fat-skip(s, end), depth, close);
-        def faj-container-delim(s, i, depth, close) = if eq(fat-char(s, i), close) then add(i, 1) else if eq(fat-char(s, i), 44) then faj-container(s, fat-skip(s, add(i, 1)), depth, close, 0) else -1;
-        def faj-valid(s) = if eq(str_len(fat-trim(s)), 0) then 0 else faj-valid-end(s, faj-end(s, 0, 0));
+        def faj-container(s, i, depth, close, emptyAllowed) = if and(emptyAllowed, eq(fat-char(s, i), close)) then add(i, 1) else if eq(close, 125) then if eq(fat-char(s, i), 34) then faj-object-value(s, faj-string(s, add(i, 1)), depth) else faj-error(i, 9) else faj-container-after(s, faj-end(s, i, depth), depth, close);
+        def faj-object-value(s, keyEnd, depth) = if lt(keyEnd, 0) then keyEnd else if eq(fat-char(s, fat-skip(s, keyEnd)), 58) then faj-container-after(s, faj-end(s, add(fat-skip(s, keyEnd), 1), depth), depth, 125) else faj-error(fat-skip(s, keyEnd), 10);
+        def faj-container-after(s, end, depth, close) = if lt(end, 0) then end else faj-container-delim(s, fat-skip(s, end), depth, close);
+        def faj-container-delim(s, i, depth, close) = if eq(fat-char(s, i), close) then add(i, 1) else if eq(fat-char(s, i), 44) then faj-container(s, fat-skip(s, add(i, 1)), depth, close, 0) else faj-error(i, if eq(close, 93) then 11 else 12);
+        def faj-complete(s) = faj-complete-end(s, faj-end(s, 0, 0));
+        def faj-complete-end(s, end) = if lt(end, 0) then end else if eq(fat-skip(s, end), str_len(s)) then str_len(s) else faj-error(fat-skip(s, end), 13);
+        def faj-valid(s) = ge(faj-complete(s), 0);
         def faj-valid-end(s, end) = if lt(end, 0) then 0 else eq(fat-skip(s, end), str_len(s));
+        // The diagnostic names syntax without copying source or answer text.
+        // Offsets count bytes, starting at zero; end of input has no byte.
+        def faj-diagnostic(s, error) {
+            let at = faj-error-at(error);
+            let present = lt(at, str_len(s));
+            let byte = if present then fat-char(s, at) else 0;
+            json-node-object(list(json-node-pair("byte_offset", json-node-int(at)), json-node-pair("expected", json-node-string(faj-expected(faj-error-reason(error)))), json-node-pair("found_byte", if present then json-node-int(byte) else json-node-null()), json-node-pair("found", json-node-string(if not(present) then "end-of-input" else if and(ge(byte,32),lt(byte,127)) then byte_to_str(byte) else "non-printing-or-multibyte-byte"))));
+        }
+        // Offer one structural correction at the first parser failure. The
+        // mismatched closer must precede the expected closer. Every other
+        // byte, including all string contents, is preserved; strict admission
+        // must then accept the whole candidate. Nothing means no correction.
+        def faj-closer-candidate(s, error) = if ge(error, 0) then nothing() else {
+            let at = faj-error-at(error);
+            let reason = faj-error-reason(error);
+            let expected = if eq(reason,11) then 93 else if eq(reason,12) then 125 else 0;
+            let wrong = if eq(expected,93) then 125 else 93;
+            if or(eq(expected,0),not(and(eq(fat-char(s,at),wrong),eq(fat-char(s,fat-skip(s,add(at,1))),expected)))) then nothing() else {
+                let candidate = str_concat(substring(s,0,at),substring(s,add(at,1),str_len(s)));
+                if faj-valid(candidate) then candidate else nothing();
+            };
+        };
         def faj-null() = intern_node(JSON-NULL(), list());
         def faj-array(xs) = intern_node(JSON-ARRAY(), xs);
         def faj-is(node, kind) = node_eq(node_category(node), kind);

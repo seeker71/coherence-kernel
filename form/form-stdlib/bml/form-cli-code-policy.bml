@@ -216,6 +216,15 @@ section [form.bml] {
    let padded = fcap-with-rehearsal-budget(s,fcap-rehearsal-budget(s));
    fcap-with-memory(padded,append(fat-take(fcap-memory(padded),19),list(rows)));
   }
+  // Syntax repair receipts occupy slot 20 and survive owned checkpoints.
+  // The live caller retains raw replies; hashes and one-byte deltas identify
+  // the native correction without repeating private reply contents.
+  def fcap-json-repairs(s) = if ge(len(fcap-memory(s)),21) then nth(fcap-memory(s),20) else list();
+  def fcap-with-json-repairs(s,rows) {
+   let padded = fcap-with-rehearsals(s,fcap-rehearsals(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),20),list(rows)));
+  }
+  def fcap-json-repairs-json(rows) = if nil?(rows) then list() else cons(parse-json("native-json-repair",head(rows)),fcap-json-repairs-json(tail(rows)));
   def fcap-rehearsed(rows,path,digest) = if nil?(rows) then 0 else {
    let row = parse-json("native-rehearsal",head(rows));
    or(and(str_eq(fcap-string(row,"path"),path),str_eq(fcap-string(row,"before_sha256"),digest)),fcap-rehearsed(tail(rows),path,digest));
@@ -286,7 +295,34 @@ section [form.bml] {
    let obj = parse-json("native-code-response",raw);
    if and(fat-wire-object?(obj),json-object-has?(obj,"report_amend")) then fcap-amend(s,obj,checker) else fcap-object(s,faj-normalize(obj),checker);
   }
-  def fcap-step(s, raw, checker) = if fcap-done(s) then s else if not(faj-valid(raw)) then fcap-revise(s, "Malformed response. Return exactly one JSON object; no markdown or commentary.") else fcap-response(s,raw,checker);
+  def fcap-step(s, raw, checker) = if fcap-done(s) then s else fcap-syntax-step(s,raw,checker,faj-complete(raw));
+  def fcap-syntax-step(s,raw,checker,end) = if ge(end,0) then fcap-response(s,raw,checker) else fcap-syntax-candidate(s,raw,checker,end,faj-closer-candidate(raw,end));
+  def fcap-json-command?(candidate) = if nothing?(candidate) then 0 else {
+   let obj = parse-json("native-json-candidate",candidate);
+   and(fat-wire-object?(obj),and(json-object-has?(obj,"tool"),and(not(json-object-has?(obj,"report_amend")),and(fat-wire-string?(json-object-get(obj,"tool")),and(fcap-string-array(json-object-get(obj,"arguments")),or(not(json-object-has?(obj,"input")),fat-wire-string?(json-object-get(obj,"input"))))))));
+  };
+  def fcap-syntax-candidate(s,raw,checker,error,candidate) = if not(fcap-json-command?(candidate)) then fcap-syntax-revise(s,raw,error) else {
+   let action = fcap-control(add(now_unix_ms(),fcap-turns(s)),list(fcap-turns(s),fcap-calls(s),faj-error-at(error)),1);
+   if not(eq(action,1)) then fcap-syntax-revise(s,raw,error) else fcap-syntax-apply(s,raw,checker,error,candidate);
+  };
+  def fcap-syntax-apply(s,raw,checker,error,candidate) {
+   let evidence = str_concat("JSON syntax failure: ",json-emit(faj-diagnostic(raw,error)));
+   let counted = fcap-with-memory(s,list(add(fcap-failures(s),1),evidence,fcap-reflections(s),fcap-checks(s),0));
+   // The repaired command enters the ordinary role, writable-path, guarded
+   // edit and caller-check boundaries. Grammar repair grants no authority.
+   let next = fcap-response(counted,candidate,checker);
+   let row = json-node-object(list(fcap-shape-s("method","native-json-mismatched-closer-removal"),fcap-shape-n("byte_offset",faj-error-at(error)),fcap-shape-n("removed_byte",fat-char(raw,faj-error-at(error))),fcap-shape-s("before_sha256",hex-encode(sha256-stream-string(raw))),fcap-shape-s("after_sha256",hex-encode(sha256-stream-string(candidate))),fcap-shape-n("strict_candidate_valid",1),fcap-shape-n("tool_calls",sub(fcap-calls(next),fcap-calls(s))),fcap-shape-n("checks",sub(fcap-checks(next),fcap-checks(s))),fcap-shape-s("result_stage",fcap-stage(next))));
+   let saved = fcap-with-json-repairs(next,append(fcap-json-repairs(next),list(json-emit(row))));
+   let note = json-emit(json-node-object(list(json-node-pair("native_json_repair",row),json-node-pair("observation",if faj-valid(fcap-note(next)) then parse-json("native-json-tool-result",fcap-note(next)) else json-node-string(fcap-note(next))))));
+   fcap-inherit(saved,fcap-state(fcap-stage(saved),nth(saved,1),nth(saved,2),fcap-docs(saved),nth(saved,4),nth(saved,5),nth(saved,6),nth(saved,7),note,fcap-turns(saved),fcap-calls(saved),nth(saved,11)));
+  }
+  def fcap-syntax-revise(s,raw,end) {
+   let evidence = str_concat("JSON syntax failure: ",json-emit(faj-diagnostic(raw,end)));
+   let repeated = str_eq(evidence,fcap-evidence(s));
+   let note = str_concat(evidence,if repeated then " The same syntax failure repeated. Correct the named byte in the original response and return one complete JSON object. No tool ran and no document changed." else " Correct this syntax in the original response and return one complete JSON object. No tool ran and no document changed.");
+   let revised = fcap-revise(s,note);
+   fcap-with-memory(revised,list(add(fcap-failures(s),1),evidence,fcap-reflections(s),fcap-checks(s),repeated));
+  }
   def fcap-object(s, obj, checker) = if not(fat-wire-object?(obj)) then fcap-revise(s, "Response must be an object.") else if json-object-has?(obj, "tool") then if str_eq(fcap-string(obj, "tool"), "verify") then fcap-verify-tool(s, obj, checker) else if str_eq(fcap-string(obj,"tool"),"rehearse-bml") then fcap-rehearse(s,obj,checker) else fcap-tools-assisted(s,obj,checker) else fcap-role(s, obj, checker);
   def fcap-count-checks(s,n) = if le(n,0) then s else fcap-count-checks(fcap-count-check(s),sub(n,1));
   def fcap-rehearse(s,obj,checker) = if not(fcap-string-array(json-object-get(obj,"arguments"))) then fcap-revise(s,"rehearse-bml arguments must be strings.") else if and(json-object-has?(obj,"input"),not(and(fat-wire-string?(json-object-get(obj,"input")),str_eq(fcap-string(obj,"input"),"")))) then fcap-revise(s,"rehearse-bml takes empty input.") else {
@@ -376,6 +412,10 @@ section [form.bml] {
   def fcap-shape-s(key,value) = json-node-pair(key,json-node-string(value));
   def fcap-shape-n(key,value) = json-node-pair(key,json-node-int(value));
   def fcap-reply-shape(s,raw,next) {
+   let base = fcap-reply-shape-base(s,raw,next);
+   json-node-object(append(json-object-pairs(base),list(fcap-shape-n("native_json_repairs",sub(len(fcap-json-repairs(next)),len(fcap-json-repairs(s)))))));
+  }
+  def fcap-reply-shape-base(s,raw,next) {
    let valid = faj-valid(raw);
    let obj = if valid then faj-json("reply-shape",raw) else json-node-object(list());
    let verdict = fcap-string(obj,"verdict");

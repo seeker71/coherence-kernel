@@ -151,6 +151,27 @@ gifts remain the [north star](fkwu-form-native-north-star.md). The active care
 callbacks run synchronously in their owning process. Cross-process declarations
 make their exchange visible; they do not grant the view remote actuators.
 
+## Coding reply syntax
+
+The coding organ observes malformed reply syntax through `organ-health.bml`.
+The shared JSON validator retains the first failing byte and expected token.
+Its live boundary emits the need, applied action and a correlated observation;
+reply content stays in the retained reply file.
+
+For a typed tool command, one extra mismatched closing delimiter immediately
+before the expected delimiter can be removed natively. Every other byte stays
+unchanged, and the whole candidate must pass strict JSON admission. The command
+then enters the existing role, writable-path, guarded-edit and verification
+rules. `native_json_repairs` in the result and checkpoint identifies the byte,
+before/after hashes and actual tool/check counts. This establishes syntax
+recovery; completion still depends on the original caller checks.
+
+Other malformed replies receive precise correction feedback. Repeated syntax
+failures are counted; rejected replies execute no tools. A later valid reply
+clears that syntax need. Ordinary valid replies emit no syntax-health rows.
+The [retained native coding failure](../receipts/2026-09-22-native-json-attention.md)
+shows an actual tool recovery and the remaining implementation refusal.
+
 ## Review context care
 
 When a review lacks a caller or ownership contract, the executing caller can
