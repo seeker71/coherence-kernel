@@ -300,6 +300,12 @@ Embodied knowing means a claim meets real input, can be rejected by an executabl
 
 ## Next completed boundary
 
+Care and Glass already construct and render transient projection values outside
+permanent primary interning, with collector-visible Form roots and an explicit
+node-materialization door. This is the current construction boundary. Event
+admission, reader records and collection still use the seed; the complete
+lifetime below remains the destination.
+
 The immediate runtime milestone is an owned lifetime for the retained care
 view, connected to the primary value path. It is a real, recurring consumer
 whose changing observations currently depend on primary allocation. The native

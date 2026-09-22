@@ -4,6 +4,9 @@ Session learning is enabled by default. Form owns collection, routing,
 supervision, tokenization, full LoRA gradients, Adam continuation, assessment
 and checkpoint publication. The private home is `.hearth/session-learning/`,
 with directory access restricted to its owner.
+`nsm-at` anchors relative homes to the process's current working directory;
+absolute homes keep their selected path. Missing worker and state files remain
+local absences. An ancestor checkout's learning state cannot supply them.
 
 The integration points are the real CLI doors:
 

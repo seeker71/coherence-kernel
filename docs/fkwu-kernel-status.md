@@ -93,6 +93,16 @@ pure admission observations.
 Interning prevents duplicate identities from consuming fresh cells; it does
 not establish a bounded lifetime for changing diagnostic values.
 
+Care and Glass now render transient ages, source metadata and report composition
+through collector-visible Form JSON views. Borrowed observation nodes remain
+explicit; primary materialization is requested through the node-returning API.
+The [care lifetime observation](evidence/fkwu/care-view-lifetime.json) shows zero
+new primary nodes during warmed explicit-source commands including serialization,
+with exact retained views across collection. Event admission, discovery, reader
+records, the collector and pressure-independent signaling remain seed work.
+Session-owned data paths are absolute to their selected home, so an absent local
+worker or state file stays absent even when an ancestor has its own session.
+
 ## Runtime and native computation
 
 Form source and executable BML run through `fkwu`. BML lowers in memory; native artifacts are reusable caches. Source admission materializes a whole unit synchronously. The [native CLI builder](native-cli-assembly.md) emits startup around this source runtime and compiles the Form REPL into an adjacent `.fkb` image with its `.sym` record. Source snapshots and build/install attestations bind the three-file platform unit. Default launch accepts a clean, compatible recipe and symbol pair; it does not require the installation attestation. The table compiler remains an independent proof surface.
