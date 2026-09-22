@@ -67,6 +67,14 @@ records repair stage at four consumed coding steps. This continuing native
 work has not established a completed repair. It retains the original documents
 and receives no credit for Codex's later selector implementation.
 
+The [resumed model diagnosis](artifacts/2026-09-22-selector-admission/resumed-diagnosis.json)
+was valid JSON and returned the process to implementation. Its reasoning still
+needs repair: it speculated that syntax care modified the file, although the
+replay established zero document changes. It also proposed using `write` to
+overwrite the existing document, contrary to that tool's supplied contract.
+The next completed native step read the original resident source. Returning to
+execution establishes that transition, not a correct diagnosis or implementation.
+
 ## Verification and instruments
 
 - Clean preflights for the selector, cursor, syntax, policy and request checks.
