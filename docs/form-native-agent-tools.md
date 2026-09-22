@@ -232,8 +232,15 @@ a host command.
 | `tr` | Equal-length literal byte sets or `-d SET`; `\n \r \t \\` escapes. |
 | `cut` | `-d DELIMITER -f N`, one delimiter byte and one field. |
 | `awk` | Single field output `{print $N}`, N from 0 to 9. No arbitrary program or system call. |
-| `edit` | `path old new`; exactly one occurrence required, with nonempty old text. |
+| `edit` | `path old new`; exactly one literal occurrence, or no literal occurrence and `old` equals the current document's SHA256. Explicit whole-document replacement: `path sha256 digest new`. |
 | `write` | `new-path text`, or `new-path` plus held input. Existing documents cannot be overwritten. |
+
+Hash replacement uses the `resident_sha256` supplied by native coding reads or
+guard evidence. In the three-argument form, a literal match takes precedence:
+one match replaces that substring, multiple matches report ambiguity. Only a
+missing literal equal to the complete current document's hash selects whole-document
+replacement. A stale or malformed shorthand leaves the document unchanged.
+Role, writable-path and caller-check requirements remain in the coding owner.
 
 Search patterns are byte-oriented: literals, `. ^ $ |`, character classes and
 ranges, ASCII `\d \w \s \b`, and `? * +`. Case folding is ASCII. Groups,
