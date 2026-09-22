@@ -39,14 +39,14 @@ turbo reverted). Corpus rows 1583 `ownextent`, 1584 `songblind`; band 32767.
   The lever is the decoding prompt and the lane's policy — not gain, not the model.
 - The reduced audio context is a false lever for large-v3-turbo. Measured, reverted, written
   into `docs/native-whisper.md`.
-- Whether *"Anyway, there's a cold one"* is what the song sings is the person's reading; nothing
+- Whether *"Anyway, there's a cold one"* is what the song sings is our reading; nothing
   here claims it.
 
 ## Next rung, on purpose
 
 The live lane on turbo with the no-timestamps greedy pass for its words, keeping its own pause
 and full-window commits for the line's end, the tongue lane unchanged behind it; witnessed on
-the song with Urs's ear as the judge. Then a reference corpus with ground truth so "equal or
+the song, our reading the judge. Then a reference corpus with ground truth so "equal or
 better than SOTA" is a WER row and not a sentence.
 
 ## Rent
