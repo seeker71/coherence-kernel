@@ -1,6 +1,6 @@
 // A bounded voice in the current fkwu process, using registry weights as data.
 // No model server, provider, training or generated tool execution.
-// preludes: form-stdlib/form-cli-model-session.fk form-stdlib/organ-health.bml
+// preludes: form-stdlib/form-cli-model-session.fk form-stdlib/organ-health.bml form-stdlib/native-llama-voice.bml
 section [form.bml] {
  class FormCliNativeVoice {
   def fcnv-default-model() = mr-name(mr-for-role("answer"));
@@ -9,8 +9,9 @@ section [form.bml] {
   def fcnv-profile() = "knowledge-query";
   def fcnv-allowance-valid(context,limit) = if or(not(str_eq(value_kind(context),"int")),not(str_eq(value_kind(limit),"int"))) then 0 else and(gt(limit,0),and(le(limit,8192),gt(context,limit)));
   // Result: status, accepted text, prompt IDs, generated IDs, artifact path,
-  // completion, release, reason, raw generation text, original generated IDs.
-  def fcnv-none(status,path,reason) = list(status,"",0,0,path,0,1,reason,"",list());
+  // completion, release, reason, raw generation text, original generated IDs,
+  // adapter path when the voice wore one.
+  def fcnv-none(status,path,reason) = list(status,"",0,0,path,0,1,reason,"",list(),"");
   def fcnv-not-asked() = fcnv-none("not-asked","","caller-selected-no-local-generation");
   def fcnv-read(generation,released,path) {
    let session = fcms-generation-session(generation);
@@ -18,7 +19,7 @@ section [form.bml] {
    let complete = and(fcms-live?(session),and(fcms-stopped?(session),fcms-pending?(session)));
    let status = if not(released) then "release-incomplete" else if not(fcms-live?(session)) then "unavailable" else if not(complete) then "incomplete" else if str_eq(trim(raw),"") then "empty" else "answered";
    let reason = if str_eq(status,"unavailable") then fcms-reason(session) else status;
-   list(status,if str_eq(status,"answered") then raw else "",fcms-prompt-ids(session),len(fcms-generation-ids(generation)),path,complete,released,reason,raw,fcms-generation-ids(generation));
+   list(status,if str_eq(status,"answered") then raw else "",fcms-prompt-ids(session),len(fcms-generation-ids(generation)),path,complete,released,reason,raw,fcms-generation-ids(generation),"");
   }
   def fcnv-run(packet,path,context,limit) {
    if or(not(str_eq(value_kind(context),"int")),not(str_eq(value_kind(limit),"int"))) then fcnv-none("unavailable",path,"integer-context-and-token-allowance-required")
@@ -35,11 +36,36 @@ section [form.bml] {
    let node = json-object-get(request,key); let value = json-int-value(node);
    if and(str_eq(value_kind(value),"int"),node_eq(node,json-node-int(value))) then value else 0;
   };
-  def fcnv-ask(packet,request) {
-   let model = if json-object-has?(request,"model") then json-string-value(json-object-get(request,"model")) else fcnv-default-model();
-   fcnv-run(packet,mr-path(mr-find(model)),fcnv-number(request,"context",fcnv-context()),fcnv-number(request,"max_reply_tokens",fcnv-limit()));
+  def fcnv-adapter-default() = "form/form-stdlib/adapters/llama-3.2-3b-voice";
+  def fcnv-lora-ready?(base,adapter) = and(gt(file_size(str_concat(base,"/model.safetensors")),0),gt(file_size(str_concat(adapter,"/adapters.safetensors")),0));
+  def fcnv-lora-read(base,adapter,promptIds,spoken,released) {
+   let text = nth(spoken,0);
+   let why = nth(spoken,1);
+   let status = if str_eq(trim(text),"") then "empty" else "answered";
+   list(status,if str_eq(status,"answered") then text else "",promptIds,nth(spoken,2),base,if str_eq(why,"") then 1 else 0,released,if str_eq(why,"") then status else why,text,list(),adapter);
   }
-  def fcnv-metadata(result) = json-node-object(list(oh-s("source","fkwu-model-session"),oh-s("status",nth(result,0)),oh-s("model_path",nth(result,4)),oh-n("prompt_ids",nth(result,2)),oh-n("generated_ids",nth(result,3)),oh-n("complete",nth(result,5)),oh-n("release_ok",nth(result,6)),oh-s("reason",nth(result,7)),oh-n("model_server_calls",0),oh-n("provider_calls",0)));
+  def fcnv-lora-spoken(base,adapter,packet,limit) {
+   let session = nlg-open-at(base,adapter,"");
+   let promptIds = len(nlt-chat(nth(session,1),packet));
+   let spoken = nlg-ask(session,packet,limit,"","","");
+   let closed = nlg-close(session);
+   fcnv-lora-read(base,adapter,promptIds,spoken,if nothing?(closed) then 0 else 1);
+  }
+  def fcnv-lora(packet,adapter,limit) {
+   let base = nlg-base();
+   if not(fcnv-lora-ready?(base,adapter)) then fcnv-none("unavailable",base,"native-weights-or-adapter-absent")
+   else if or(le(limit,0),gt(limit,8192)) then fcnv-none("unavailable",base,"positive-token-allowance-up-to-8192-required")
+   else fcnv-lora-spoken(base,adapter,packet,limit);
+  }
+  def fcnv-lane(request) = if json-object-has?(request,"lane") then json-string-value(json-object-get(request,"lane")) else "";
+  def fcnv-adapter(request) = if json-object-has?(request,"adapter") then json-string-value(json-object-get(request,"adapter")) else fcnv-adapter-default();
+  def fcnv-ask(packet,request) {
+   if str_eq(fcnv-lane(request),"lora") then fcnv-lora(packet,fcnv-adapter(request),fcnv-number(request,"max_reply_tokens",fcnv-limit())) else {
+    let model = if json-object-has?(request,"model") then json-string-value(json-object-get(request,"model")) else fcnv-default-model();
+    fcnv-run(packet,mr-path(mr-find(model)),fcnv-number(request,"context",fcnv-context()),fcnv-number(request,"max_reply_tokens",fcnv-limit()));
+   };
+  }
+  def fcnv-metadata(result) = json-node-object(list(oh-s("source","fkwu-model-session"),oh-s("lane",if str_eq(nth(result,10),"") then "registry-weights" else "native-metal-lora"),oh-s("adapter",nth(result,10)),oh-s("status",nth(result,0)),oh-s("model_path",nth(result,4)),oh-n("prompt_ids",nth(result,2)),oh-n("generated_ids",nth(result,3)),oh-n("complete",nth(result,5)),oh-n("release_ok",nth(result,6)),oh-s("reason",nth(result,7)),oh-n("model_server_calls",0),oh-n("provider_calls",0)));
   def fcnv-retain(job,result) {
    let metadata = str_concat(job,"/native-generation.json");
    let raw = write_file_text(str_concat(job,"/native-generation.txt"),nth(result,8));
