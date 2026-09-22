@@ -65,8 +65,10 @@ Registration returns its actual publisher, generation and carrier outcome.
 Retained callers can pass an explicit `ohd-open()` owner to the corresponding
 `*-with` functions. The short lifecycle API recovers its exact process-birth
 frame when called again; allocator compaction cannot silently discard it.
-Explicit owners add the observed record-construction counter to that birth
+Explicit owners add the observed record-constructor dispatch counter to that birth
 identity. They do not derive identity from a record's display string.
+Tail dispatch can count one construction twice; this monotonic clock supplies
+identity and does not measure the number of allocated records.
 The shared `native-owner-clock.bml` owns that counter reading. Lifetime health
 retains its own birth-and-construction identity on the resource owner, so
 releasing one context cannot replace another context's unresolved observation.
@@ -134,6 +136,24 @@ an already read path resets by default. The declared
 shared append flow without rereading history; session memory uses that contract.
 Unannounced equal-size replacement, inode aliases and undeclared writers remain
 outside this append protocol.
+
+Each source keeps the same mutable reader across declared generations.
+Renewal clears its cursor, unfinished text, current readings, state, byte counts
+and invalid-record count. Previously returned views retain their own values.
+Truncation preserves the generation and accumulated invalid-record count while
+emitting a source-reset observation. Shared-append joins preserve pending bytes;
+a known shared writer renewing its generation still starts a fresh reading.
+
+The [changing-event observation](evidence/fkwu/care-changing-lifetime.json)
+executes local writes, observes their readback and carries fresh events through
+32 append/renewal cycles. It includes malformed and unfinished records,
+equal-size replacements, another live source, shared-writer joins, truncation
+and an old view held across actual collection. New-event reads still mint
+primary nodes. Reader restart invokes no record constructor. Per-stage costs
+include reading and serialization; declaration preparation and event production
+are outside those intervals. Heap slots include garbage and are not retained
+RAM or total allocation. Run `observe/form-care-changing-witness.bml` with a
+new absolute directory on stdin to retain another observation and its events.
 
 The result keeps pain first and unknown health or open resource needs visible.
 Every projected organ includes its source state and observation age. Applied

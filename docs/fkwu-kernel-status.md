@@ -100,6 +100,11 @@ The [care lifetime observation](evidence/fkwu/care-view-lifetime.json) shows zer
 new primary nodes during warmed explicit-source commands including serialization,
 with exact retained views across collection. Event admission, discovery, reader
 records, the collector and pressure-independent signaling remain seed work.
+Publisher renewal reuses the source's reader and clears obsolete mutable
+references. The [changing-event observation](evidence/fkwu/care-changing-lifetime.json)
+records fresh primary-node growth alongside quiet rereads, actual collection,
+preserved snapshots and independent source state. It establishes reader reuse;
+it does not establish allocation-free event handling or primary-node release.
 Session-owned data paths are absolute to their selected home, so an absent local
 worker or state file stays absent even when an ancestor has its own session.
 
@@ -241,7 +246,8 @@ Identical Metal source can share compiled content while each FMJ1 admission has 
 Context close and frame-version retirement publish bounded lifetime observations through `organ-health.bml`. The owner retains the current reading, preceding refusal, correlated retry response and applied result. The shared process flow receives typed health rows with opaque owner identity and resource state; captured bytes remain outside that channel. A fresh observation after the actual retry determines whether the release succeeded.
 
 Release-flow identity is retained on each owner and combines process birth with
-the observed record-construction clock. It survives allocator compaction.
+the observed record-constructor dispatch clock. It survives allocator compaction;
+tail forwarding can count a construction twice, so it is not an allocation total.
 Independent owners remain separate current observations, and one owner's
 correlated response cannot authorize another owner's retry.
 
@@ -303,8 +309,9 @@ Resource ownership includes names, metadata and event delivery: a native handle 
 1. Move the retained care view's complete working lifetime onto native owned
    storage. Connect its primary values, tagged handles, records and collector
    roots before moving construction, reading, rendering and release. Preserve
-   its existing result while repeated quiet views stop accumulating permanent
-   primary observations. The [north-star milestone](fkwu-form-native-north-star.md#next-completed-boundary)
+   its existing result while changing observations gain reclaimable lifetimes.
+   Quiet projections already avoid fresh primary nodes, and generation renewal
+   reuses the reader. The [north-star milestone](fkwu-form-native-north-star.md#next-completed-boundary)
    names the actual caller transition and its acceptance conditions.
 2. In that same consumer, keep the minimal signal/response path available when
    ordinary allocation cannot grow. Use an isolated constrained owner, retain
