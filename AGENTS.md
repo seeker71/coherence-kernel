@@ -115,6 +115,19 @@ stands, read its correlated reply and use what it contributes. A send receipt
 alone is not an answer. `no-standing-hearth` reports availability; continue
 enriching through the available native organs.
 
+For a source packet or multiline enquiry, keep its exact bytes in a file and
+send its path through the native client:
+
+```sh
+form-run ./fkwu observe/hearth-ask-file-run.bml <<'FORM_ASK'
+{"body_path":".hearth/current-enquiry.md","kind":"direct-answer"}
+FORM_ASK
+```
+
+The send receipt names the delivered body byte count. Read the correlated
+response and its `stopped` field: exhausting the generation budget leaves an
+unfinished response, even when durable delivery succeeded.
+
 For a concept-rich enquiry, select the relevant exact terms and read:
 
 ```sh
