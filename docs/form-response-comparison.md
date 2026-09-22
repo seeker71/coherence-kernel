@@ -353,6 +353,16 @@ unassessed: its assertion tally is not overall session parity. A successful
 runner exit means the assessment was retained, not that every case passed.
 Coordinating and baseline provider costs remain separate, using the reader below.
 
+Repeating an interrupted keyed session returns `admitted-unresolved;no-restart`
+with `retained_progress`. This reading lists each expected case's request,
+result, report and receipt paths, their current presence and byte counts, and
+whether the retained request matches the manifest. It also observes the recorded
+PID now. A present PID does not establish the original process lifetime; an
+unavailable observation stays unavailable. The native organ correlates an
+evidence-inspection response and retains the fresh reading in its event flow.
+No model work resumes. Historical usage remains unknown when the session lacks
+its sealed summary, and artifact presence does not establish a valid answer.
+
 The ordinary `code` door also accepts `@request.json` to preserve requests
 larger than the host line buffer. A failed input admission is retained as an
 attempt; it does not establish anything about the model's response quality.
