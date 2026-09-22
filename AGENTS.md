@@ -192,6 +192,12 @@ generation, use the same source-backed CLI: `models <directory>`,
 `quit`. Resolve the directory from `form/form-stdlib/model-registry.bml` and
 the index from the listing. Ordinary generation allows 2,048 generated tokens;
 `generate --tokens <positive integer> <question>` selects another allowance.
+`generate --reasoning <positive integer> <question>` opens native reasoning
+with a separately reserved answer stage. It retains both stages privately and
+reports their tokens, completion and release; read the final answer to assess
+its quality. This mode answers from supplied context and owns a session per
+call; automatic lookup and literal-thought injection are not bound to it.
+Both options may be combined in either order.
 Preserve the question and relevant context. Show
 the returned words with their actual model/lane attribution, followed by your
 commentary. Keep unfinished output visible as unfinished. A failed attempt
