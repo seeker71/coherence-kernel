@@ -138,6 +138,20 @@ in the receipt. When assessing improvement, compare actual answers to the same
 enquiry for grounding, insight, relevance, warmth and usefulness. Runtime
 success and matching vocabulary establish their own narrower observations.
 
+For code review, supply the affected operation together with its callers and
+the contracts for state, ownership and release. A returned failure can still
+own resources: establish who releases them before proposing local cleanup.
+Retain the source packet used by the reviewer. When a finding depends on an
+omitted definition, bring that definition into the same review and resolve the
+finding against the complete execution path.
+Distinguish a cleanup call from verified release; preserve an incomplete release
+as its own outcome.
+For an observed context gap, the native
+[review-context care door](docs/native-core-care.md#review-context-care)
+supplies caller-selected source through `oc-hear`, retains the packet and
+re-observes its coverage. Select the relevant callers and contracts; the cell
+checks that supply, while the review establishes what the code does.
+
 For native response development, or when asked to hear or evaluate native
 generation, use the same source-backed CLI: `models <directory>`,
 `use <observed index>`, `generate <question>`, then

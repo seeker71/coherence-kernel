@@ -1,0 +1,119 @@
+Complete this actual resource-ownership review. The earlier review called the absence of immediate cleanup a resource leak in both prefill refusal paths of fcms-open-context. Here is the surrounding ownership and caller code. Trace what happens after a refusal, decide whether those findings survive, and identify any concrete remaining fault supported by this source. At most 150 words; no code fences. Do not invent execution evidence.
+
+    (defn fcms-session (status reason path src ctx sts maxpos pos pending stopped
+                        prompt-ids generated-ids injected-ids observations)
+        (list "form-cli-model-session-v1" status reason path src ctx sts maxpos
+              pos pending stopped prompt-ids generated-ids injected-ids observations))
+    (defn fcms-status (s) (nth s 1))
+    (defn fcms-reason (s) (nth s 2))
+    (defn fcms-path (s) (nth s 3))
+    (defn fcms-src (s) (nth s 4))
+    (defn fcms-ctx (s) (nth s 5))
+    (defn fcms-sts (s) (nth s 6))
+    (defn fcms-maxpos (s) (nth s 7))
+    (defn fcms-pos (s) (nth s 8))
+    (defn fcms-pending (s) (nth s 9))
+    (defn fcms-stopped? (s) (nth s 10))
+    (defn fcms-prompt-ids (s) (nth s 11))
+    (defn fcms-generated-ids (s) (nth s 12))
+    (defn fcms-injected-ids (s) (nth s 13))
+    (defn fcms-observations (s) (nth s 14))
+    (defn fcms-live? (s) (if (str_eq (fcms-status s) "live") 1 0))
+    (defn fcms-pending? (s) (if (ge (fcms-pending s) 0) 1 0))
+    ; Status and ownership are deliberately separate. A context-window refusal
+    ; can make the conversational operation `nothing` while the already-opened
+    ; context and stream state still need their physical release.
+    (defn fcms-resident? (s)
+        (if (and (gt (len (fcms-ctx s)) 0) (gt (len (fcms-sts s)) 0)) 1 0))
+
+    (defn fcms-open-context
+        (path src maxpos prompt-count cursor ids live-cursor x iced)
+        (do
+            (let span (fcma-span prompt-count))
+            (let _span (q38oo-stage (str_concat "model-session-prefill-span-" (int_to_str span)) 8388624))
+            (let _open-begin (q38oo-stage "model-session-context-open-begin" 8388620))
+            (let ctx (if (eq iced 1)
+                (qsx-open-span path maxpos x span) (q38-open-span path maxpos span)))
+            (let _open-ready (q38oo-stage "model-session-context-open-ready" 8388620))
+            (if (not (eq (q38-context-ok? ctx) 1))
+                (do
+                    (let closed (if (lt (len ctx) 10) 0
+                        (q38-close ctx (empty))))
+                    (fcms-none "model-context-open-refused"))
+                (do
+                    (let _state-begin (q38oo-stage "model-session-state-begin" 8388621))
+                    (let sts (q38-new-state (nth ctx 2)))
+                    (let _state-ready (q38oo-stage "model-session-state-ready" 8388621))
+                    (if (not (eq (q38-state-ok? sts) 1))
+                        (do
+                            (let state-closed (q38-free-state sts))
+                            (let context-closed (q38-close ctx (empty)))
+                            (fcms-none "model-stream-state-refused"))
+                        (if (eq live-cursor 1)
+                            (do
+                                (let _prefill-begin (q38oo-stage "model-session-prefill-begin" 8388622))
+                                (let pf (fcmg-live-prefill-span ctx sts cursor))
+                                (let _prefill-ready (q38oo-stage
+                                    (if (str_eq (nth pf 1) "ok") "model-session-prefill-ready"
+                                        "model-session-prefill-refused") 8388622))
+                                (if (not (str_eq (nth pf 1) "ok"))
+                                    (fcms-session "nothing" (nth pf 5)
+                                        path src ctx sts maxpos (nth pf 3)
+                                        -1 0 prompt-count 0 0 0)
+                                    (fcms-session "live" "opened-live-cursor"
+                                        path src ctx sts maxpos (nth pf 3)
+                                        (nth pf 2) 0 prompt-count 0 0 0)))
+                            (do
+                                (let _prefill-begin (q38oo-stage "model-session-prefill-begin" 8388622))
+                                (let pf (q38-prefill-span-sliced
+                                    (nth ctx 0) (nth ctx 1) (nth ctx 2)
+                                    (nth ctx 3) sts (nth ctx 4) (nth ctx 5)
+                                    (nth ctx 6) ids 0 span))
+                                (let complete (and (ge (nth pf 0) 0) (eq (nth pf 1) prompt-count)))
+                                (let _prefill-ready (q38oo-stage
+                                    (if complete "model-session-prefill-ready"
+                                        "model-session-prefill-refused") 8388622))
+                                (fcms-session (if complete "live" "nothing")
+                                    (if complete "opened-scanner-fallback" "model-prefill-refused")
+                                    path src ctx sts maxpos (nth pf 1) (nth pf 0) 0
+                                    prompt-count 0 0 0))))))))
+
+    (defn fcms-generate (s n)
+        (if (or (not (eq (fcms-live? s) 1)) (le n 0))
+            (fcms-generation "" (empty) s)
+            (do
+                (let stops (fcmg-q35-stops (fcms-src s)))
+                (let walked (fcms-walk s (fcms-pending s) (fcms-pos s)
+                    n stops (empty) 1 1 0))
+                (let ids (nth walked 0))
+                (let next (fcms-with-stream s (nth walked 2) (nth walked 1)
+                    (nth walked 3) (add (fcms-generated-ids s) (len ids))
+                    (fcms-injected-ids s) (fcms-observations s)))
+                (fcms-generation (ftdb-text (fcms-src s) ids) ids next))))
+
+    (defn fcms-release-ok? (s)
+        (do
+            (let adapter-expected (fcmd-owned (fcmd-carrier s)))
+            (if (gt adapter-expected 0) (metal_sync) 0)
+            (let adapter-closed (fcmd-close (fcmd-carrier s)))
+            (let adapter-ok (eq adapter-closed adapter-expected))
+            (if (eq (fcms-resident? s) 0) adapter-ok
+              (do
+                (let state-expected (q38-state-handle-count (fcms-sts s)))
+                (let state-closed (q38-free-state (fcms-sts s)))
+                (let context-expected (q38-close-expected (fcms-ctx s) (empty)))
+                (let context-closed (q38-close (fcms-ctx s) (empty)))
+                (if (and adapter-ok (and (eq state-closed state-expected)
+                         (eq context-closed context-expected))) 1 0)))))
+
+  def fcnv-run(packet,path,context,limit) {
+   if or(not(str_eq(value_kind(context),"int")),not(str_eq(value_kind(limit),"int"))) then fcnv-none("unavailable",path,"integer-context-and-token-allowance-required")
+   else if not(fcnv-allowance-valid(context,limit)) then fcnv-none("unavailable",path,"positive-token-allowance-up-to-8192-with-larger-context-required")
+   else if or(str_eq(path,""),not(mr-file?(path))) then fcnv-none("unavailable",path,"registry-model-artifact-absent")
+   else {
+    let session = fcms-open-with-profile(path,packet,context,fcnv-profile());
+    let generated = fcms-generate(session,limit);
+    let released = fcms-release-ok?(fcms-generation-session(generated));
+    fcnv-read(generated,released,path);
+   };
+  }

@@ -150,3 +150,34 @@ every diagnostic, comprehensive resource-cost routing and measured outward
 gifts remain the [north star](fkwu-form-native-north-star.md). The active care
 callbacks run synchronously in their owning process. Cross-process declarations
 make their exchange visible; they do not grant the view remote actuators.
+
+## Review context care
+
+When a review lacks a caller or ownership contract, the executing caller can
+offer selected source sections to
+[`frcc-prepare`](../form/form-stdlib/bml/form-cli-review-context-care.bml).
+It emits the coverage gap, calls `oc-hear`, supplies the declared sections and
+re-reads them before returning the packet. An unavailable or changed selection
+leaves the need open and returns `nothing`. The source packet stays outside the
+shared events; those events carry coverage and delivery metadata.
+
+The stdin door is:
+
+```sh
+form-run ./fkwu observe/form-cli-review-context-care-run.bml < review-context-request.json
+```
+
+The caller supplies one JSON object with nonempty string fields `flow`, `events`,
+`before_path`, `goal`, `packet_path`, and a nonempty `parts` array. Each part is
+`[path, opening_marker, following_closing_marker]`. Source selection includes
+the opening marker and stops before the closing marker. Paths belong to the
+caller; relative paths resolve from the current directory. Create the output
+directories first and choose a fresh packet path. The door writes that packet,
+checks its retained bytes and returns metadata. An unavailable packet or failed
+write exits nonzero. Callers must check the exit before consuming the output.
+
+The [actual ownership review request](../receipts/artifacts/2026-09-22-prefill-code-review/context-care-request.json)
+and [receipt](../receipts/2026-09-22-prefill-code-review.md) carry its first use.
+The caller selects what the review needs; the cell does not discover a complete
+call graph or judge the answer. This door invokes no model or remote service.
+Its supplied packet can serve the next model call or a retained-answer check.

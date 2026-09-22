@@ -1,0 +1,89 @@
+// Native source nourishment for a review. The caller owns source selections,
+// instructions and the event path. Event text never chooses code to execute.
+// Supplied source bytes stay in the caller's record, outside the framebuffer.
+// preludes: form-stdlib/organ-care.bml form-stdlib/bml/organ-health-discovery.bml
+section [form.bml] {
+ class FormCliReviewContextCare {
+  // Each selection is [path, opening marker, following closing marker].
+  def frcc-part(part) {
+   if ne(len(part),3) then nothing() else {
+    let source = read_file(head(part));
+    if nothing?(source) then nothing() else {
+     let first = nth(part,1); let last = nth(part,2);
+     let begin = if str_eq(first,"") then -1 else str_find(source,first,0);
+     let end = if or(lt(begin,0),str_eq(last,"")) then -1 else str_find(source,last,add(begin,str_len(first)));
+     if or(lt(begin,0),le(end,begin)) then nothing() else substring(source,begin,end);
+    };
+   };
+  }
+  def frcc-read(parts) = if nil?(parts) then list() else cons(frcc-part(head(parts)),frcc-read(tail(parts)));
+  def frcc-ready(parts) = if nil?(parts) then 1 else and(not(nothing?(head(parts))),frcc-ready(tail(parts)));
+  def frcc-join(parts) = if nil?(parts) then "" else str_concat(head(parts),frcc-join(tail(parts)));
+  def frcc-covered(packet,parts) = if nil?(parts) then 1 else if nothing?(head(parts)) then 0 else and(ge(str_find(packet,head(parts),0),0),frcc-covered(packet,tail(parts)));
+  def frcc-evidence(context,ready) = json-node-object(list(oh-n("selected_sources",len(record_get(context,"parts"))),oh-n("packet_covers_selected_sources",ready),oh-s("content","private-in-process"),oh-s("scope","source coverage and delivery; answer correctness unobserved")));
+  def frcc-provider() = oc-provider("native-review-source-context",list("review-source-context"),"supply-review-context",frcc-supply);
+  def frcc-supply(context,reading,need) {
+   let sources = frcc-read(record_get(context,"parts"));
+   let ready = and(not(nil?(sources)),frcc-ready(sources));
+   let packet = if ready then str_concat(record_get(context,"goal"),frcc-join(sources)) else nothing();
+   record_set(context,"sources",sources);
+   record_set(context,"packet",packet);
+   json-node-object(list(oh-s("resource","review-source-context"),oh-s("state",if ready then "supplied" else "source-unavailable"),oh-n("bytes",if ready then str_len(packet) else 0),json-node-pair("evidence",frcc-evidence(context,ready))));
+  }
+  def frcc-needs(context,ready) = if ready then list() else list(oh-need("review-source-context",frcc-evidence(context,0)));
+  def frcc-reading(context,ready) = oh-reading("native-code-review",record_get(context,"flow"),"source-context",json-node-int(1),json-node-int(ready),json-node-int(ready),frcc-needs(context,ready),list("supply-review-context"),frcc-evidence(context,ready));
+  def frcc-emit(context,phase,row) = oh-emit(record_get(context,"events"),row);
+  def frcc-observe(context,reading,delivery) {
+   let again = frcc-read(record_get(context,"parts"));
+   let packet = record_get(context,"packet");
+   let exact = and(not(nothing?(packet)),and(not(nil?(again)),and(frcc-ready(again),and(value_eq(again,record_get(context,"sources")),str_eq(packet,str_concat(record_get(context,"goal"),frcc-join(again)))))));
+   // Only the returned packet closes coverage. Missing or changed source stays
+   // open, and the caller receives nothing instead of a partially supplied text.
+   if not(exact) then record_set(context,"packet",nothing()) else 0;
+   oh-set(frcc-reading(context,exact),"care_of",oh-get(reading,"id"));
+  }
+  // Return [packet or nothing, care result]. The caller decides whether that
+  // source supply serves a model call, a retained answer check or another task.
+  def frcc-prepare(root,flow,events,before,goal,parts) {
+   let context = record_new(0);
+   record_set(context,"flow",flow); record_set(context,"events",events);
+   record_set(context,"goal",goal); record_set(context,"parts",parts);
+   let sources = frcc-read(parts);
+   let ready = and(not(nil?(parts)),and(frcc-ready(sources),and(frcc-covered(before,sources),eq(str_find(before,goal,0),0))));
+   record_set(context,"sources",sources); record_set(context,"packet",if ready then before else nothing());
+   let declaration = ohd-renew(root,events,list("organ-health-v1","review-source-context","correlated-care"));
+   if not(eq(json-int-value(oh-get(declaration,"ok")),1)) then form_error("review context care source was not advertised") else 0;
+   let reading = frcc-reading(context,ready);
+   frcc-emit(context,"organ-health",reading);
+   let cared = oc-hear(context,reading,list(frcc-provider()),frcc-emit,frcc-observe);
+   list(record_get(context,"packet"),cared);
+  }
+  // The stdin door accepts caller-owned paths. It publishes only metadata;
+  // the assembled prompt is written to the requested packet file.
+  def frcc-strings?(nodes) = if nil?(nodes) then 1 else and(str_eq(value_kind(json-string-value(head(nodes))),"string"),frcc-strings?(tail(nodes)));
+  def frcc-selections?(nodes) = if nil?(nodes) then 1 else {
+   let part = head(nodes); let values = json-array-elements(part);
+   and(node_eq(part,json-node-array(values)),and(eq(len(values),3),and(frcc-strings?(values),frcc-selections?(tail(nodes)))));
+  };
+  def frcc-selections(nodes) = if nil?(nodes) then list() else cons(oh-values(json-array-elements(head(nodes))),frcc-selections(tail(nodes)));
+  def frcc-fields?(request,keys) = if nil?(keys) then 1 else {
+   let value = oh-get(request,head(keys));
+   and(json-object-has?(request,head(keys)),and(str_eq(value_kind(json-string-value(value)),"string"),and(gt(str_len(json-string-value(value)),0),frcc-fields?(request,tail(keys)))));
+  };
+  def frcc-request(root,request) {
+   let selected = oh-get(request,"parts"); let nodes = json-array-elements(selected);
+   let valid = and(frcc-fields?(request,list("flow","events","before_path","goal","packet_path")),and(node_eq(selected,json-node-array(nodes)),and(not(nil?(nodes)),frcc-selections?(nodes))));
+   if not(valid) then form_error("review context requires flow, events, before_path, goal, packet_path and nonempty parts of three strings") else 0;
+   let before = read_file(oh-str(request,"before_path"));
+   if nothing?(before) then form_error("review context original packet is unavailable") else 0;
+   let cared = frcc-prepare(root,oh-str(request,"flow"),oh-str(request,"events"),before,oh-str(request,"goal"),frcc-selections(nodes));
+   let packet = head(cared); let path = oh-str(request,"packet_path");
+   let available = not(nothing?(packet));
+   let wrote = if available then write_file_text(path,packet) else 0;
+   let saved = if available then str_eq(read_file(path),packet) else 0;
+   let result = json-node-object(list(oh-n("packet_available",available),oh-n("packet_saved",saved),oh-s("packet_path",path),oh-n("model_calls",0),oh-n("remote_calls",0),json-node-pair("care",nth(cared,1))));
+   print_str(json-emit(result));
+   if not(saved) then form_error("review context packet remains unavailable or was not retained") else 0;
+  }
+ }
+}
