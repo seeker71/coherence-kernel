@@ -165,13 +165,44 @@ section [form.bml] {
    let observed = frss-observe(root,"manifest-conflict",0,reference);
    frss-brief("run-identity-conflict",root,digest);
   }
+  def frss-artifact(path) = json-node-object(list(nsm-s("path",path),nsm-n("present",fs-exists?(path)),json-node-pair("bytes",if fs-exists?(path) then json-node-int(file_size(path)) else json-node-null())));
+  def frss-retained-cases(root,members,index) = if nil?(members) then list() else {
+   let member = head(members);
+   let requestText = json-emit(json-object-get(member,"request"));
+   let dir = frsh-path(root,str_concat(int_to_str(index),str_concat("-",fcam-hash(requestText))));
+   let requestPath = frsh-path(dir,"request.json");
+   let matches = if not(fs-exists?(requestPath)) then json-node-null() else if not(eq(file_size(requestPath),str_len(requestText))) then json-node-int(0) else json-node-int(str_eq(read_file(requestPath),requestText));
+   let artifacts = list(frss-artifact(requestPath),frss-artifact(frsh-path(dir,"result.json")),frss-artifact(frsh-path(dir,"local-report.json")),frss-artifact(frsh-path(dir,"receipt.json")));
+   let row = json-node-object(list(nsm-s("id",fcap-string(member,"id")),nsm-s("response_path",frsv-path(member)),nsm-s("evidence",dir),json-node-pair("request_matches_manifest",matches),json-node-pair("artifacts",json-node-array(artifacts))));
+   cons(row,frss-retained-cases(root,tail(members),add(index,1)));
+  };
+  def frss-retained-reading(root,owner) {
+   let manifestPath = frsh-path(root,"manifest.json");
+   let manifest = if and(fs-exists?(manifestPath),faj-valid(read_file(manifestPath))) then parse-json("retained-progress-manifest",read_file(manifestPath)) else json-node-null();
+   let valid = frss-valid(manifest);
+   let pid = nsm-num(owner,"owner_pid");
+   let process = if gt(pid,0) then host_capture(list("/bin/ps","-p",int_to_str(pid),"-o","stat=")) else nothing;
+   let state = if nothing?(process) then "" else trim(process);
+   let ownerObservation = json-node-object(list(json-node-pair("recorded_pid",if gt(pid,0) then json-node-int(pid) else json-node-null()),nsm-s("pid_observation",if nothing?(process) then "unavailable" else if str_eq(state,"") then "absent" else "present"),nsm-s("process_state",state),nsm-s("scope","Current PID presence only; a present PID may belong to another lifetime. Admission evidence and current observation remain separate.")));
+   let cases = if valid then json-node-array(frss-retained-cases(root,node_children(json-object-get(manifest,"cases")),0)) else json-node-null();
+   json-node-object(list(nsm-n("observed_unix_ms",now_unix_ms()),nsm-n("manifest_valid",valid),json-node-pair("owner",ownerObservation),json-node-pair("cases",cases),nsm-s("scope","Artifact presence and request identity only; no case execution, automatic resume, inferred model release, historical usage total or answer-quality claim")));
+  }
   def frss-unresolved(root,status,digest,reference) {
-   let observed = frss-observe(root,"admitted-unresolved",0,reference);
+   let source = if fs-exists?(reference) then oh-reference(reference) else json-node-null();
+   let observation = oh-reading("response-session",root,"admitted-unresolved",json-node-int(1),json-node-int(0),json-node-int(0),list(oh-need("retained-session-evidence",source)),list("inspect-evidence","retain-unresolved"),source);
+   let flow = frsh-path(root,"events.jsonl");
+   oh-emit(flow,observation);
+   let response = oh-response(observation,"inspect-evidence");
+   oh-emit(flow,response);
    let brief = frss-brief(status,root,digest);
    let report = oh-set(oh-set(oh-set(brief,"native_executions_historical",json-node-null()),"provider_processes_historical",json-node-null()),"provider_usage_events",json-node-null());
    let ownerPath = frsh-path(root,"owner.json");
    let owner = if and(fs-exists?(ownerPath),faj-valid(read_file(ownerPath))) then parse-json("response-session-owner",read_file(ownerPath)) else json-node-null();
-   oh-set(report,"owner_evidence",owner);
+   let progress = if str_eq(oh-select(observation,response,"retain-unresolved"),"inspect-evidence") then frss-retained-reading(root,owner) else json-node-null();
+   oh-emit(flow,oh-applied(observation,"inspect-evidence",progress));
+   let readable = nsm-num(progress,"manifest_valid");
+   oh-emit(flow,oh-reading("response-session",root,"retained-manifest-readable",json-node-int(1),json-node-int(readable),json-node-int(readable),list(),list("inspect-evidence","retain-unresolved"),progress));
+   oh-set(oh-set(report,"owner_evidence",owner),"retained_progress",progress);
   }
   def frss-root(base,manifest,digest) = if json-object-has?(manifest,"run_id") then frsh-path(base,str_concat("run-",fcam-hash(json-emit(json-node-array(list(json-object-get(manifest,"session"),json-object-get(manifest,"run_id"))))))) else frsh-path(base,str_concat(digest,str_concat("-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(now_unix_ms()))))));
   def frss-run(manifest) = frss-admit(manifest,json-emit(manifest));

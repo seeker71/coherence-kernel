@@ -83,6 +83,12 @@ original checks and replays without new generation. Cases can now explicitly
 select `response_path: "voice"`. Wording and conceptual precision still have
 visible gaps; this known-case improvement establishes no general quality parity.
 
+The [interrupted-session repair](receipts/2026-09-22-interrupted-session-recovery.md)
+puts retained-work inspection in the public native session door. On the actual
+stopped process it identifies the intact request, absent result artifacts and
+current PID absence in one call, without restarting generation. Completed work
+still replays unchanged. The original prefill stall remains an open runtime fault.
+
 An explicitly offered provider can contribute through the
 [Form-owned synthesis door](docs/form-response-synthesis.md). The
 [restored-source provider review](receipts/2026-09-20-comparison-source-coverage.md)
