@@ -16,7 +16,7 @@
 ;
 ; Effectful. A `release` byte written to the bell closes model/state handles.
 ; preflight-exec: forbidden
-; preludes: form-stdlib/form-cli-peer-contribution-turnwheel.fk form-stdlib/spool-bell-transport.fk form-stdlib/bml/form-cli-peer-contribution-live-birth.bml
+; preludes: form-stdlib/form-cli-peer-contribution-turnwheel.fk form-stdlib/spool-bell-transport.fk form-stdlib/bml/form-cli-peer-contribution-live-birth.bml form-stdlib/bml/form-cli-peer-recycle.bml
 
 (do
     (defn fcpctl-line (name value)
@@ -109,15 +109,9 @@
     ; bytes copied aside on the device (q38-state-mark). After every
     ; COMPLETED turn -- staged continuations keep their ground -- the
     ; recurrent bytes are restored and the session returns to the floor
-    ; position, so shared context stops accumulating across turns and
-    ; the crowdfade wall never approaches. Cross-turn memory lives in
+    ; position and pending-token/stop boundary, so shared context stops
+    ; accumulating across turns. Cross-turn memory lives in
     ; the durable spools, where it always lived.
-    (defn fcpctl-sess-with-pos (sess pos)
-        (fcms-session (fcms-status sess) (fcms-reason sess) (fcms-path sess)
-            (fcms-src sess) (fcms-ctx sess) (fcms-sts sess) (fcms-maxpos sess)
-            pos (fcms-pending sess) (fcms-stopped? sess) (fcms-prompt-ids sess)
-            (fcms-generated-ids sess) (fcms-injected-ids sess)
-            (fcms-observations sess)))
     (defn fcpctl-floor (state)
         (do
             (let sess (fcpct-session state))
@@ -125,16 +119,20 @@
             (let spare (q38-spare-state (nth ctx 2)))
             (let m (q38-state-mark (nth ctx 0) (fcms-sts sess) spare (nth ctx 2)))
             (fcpctl-int "recycle-floor-pos" (fcms-pos sess))
+            (fcpctl-int "recycle-floor-pending" (fcms-pending sess))
+            (fcpctl-int "recycle-floor-stopped" (fcms-stopped? sess))
             (fcpctl-int "recycle-marked-lanes" m)
-            (list spare (fcms-pos sess))))
+            (fcprc-floor sess spare)))
     (defn fcpctl-recycle (state floor)
         (do
             (let sess (fcpct-session state))
             (let ctx (fcms-ctx sess))
             (let r (q38-state-restore (nth ctx 0) (fcms-sts sess) (nth floor 0) (nth ctx 2)))
+            (let restored (fcprc-restore-stream sess floor))
+            (let observed (oh-voice (fcprc-reading restored floor)))
             (fcpctl-int "recycled-to-pos" (nth floor 1))
             (fcpct-with state (fcpct-transport state)
-                (fcpctl-sess-with-pos sess (nth floor 1))
+                restored
                 (fcpct-staged state) (fcpct-completed state)
                 (fcpct-contributions state))))
     (defn fcpctl-recycle-if-grown (state floor)
@@ -164,6 +162,7 @@
             (if (or (nothing? wake) (str_eq wake "release"))
                 (do
                     (let unregistered (fcpclb-unregister))
+                    (fcpctl-int "recycle-spare-release-count" (q38-free-spare (nth floor 0)))
                     (let released (fcms-release-ok? (fcpct-session state)))
                     (let release-frame (fcpclb-record-release released))
                     (fcpctl-int "accepted-contributions"
@@ -268,5 +267,6 @@
                 (fcpctl-loop state bell budget tensor-reservation 1 floor)
                 (do
                     (fcpctl-line "signal" "discovery-unavailable")
+                    (fcpctl-int "recycle-spare-release-count" (q38-free-spare (nth floor 0)))
                     (fcpctl-int "release-ok" (fcms-release-ok? resident))
                     (form_error "ready resident could not publish its hearth board"))))))))

@@ -116,6 +116,18 @@ coordinator cost is accounted separately. The
 preserves the comparison's limitations. Neither path has established overall
 quality parity or human resonance, and evaluation answers stay out of training.
 
+The [actual response revision](receipts/2026-09-22-native-answer-revision.md)
+preserves a further limit: corrected source and explicit feedback did not stop
+the native answer from claiming that symbol resolution replaced model token
+prediction. It repeated the contradiction in a completed answer and exceeded
+the requested length. Source delivery and completion are repaired boundaries;
+instruction following, source fidelity and useful synthesis remain active work.
+The same observation exposed a separate resident recycling defect: token
+position returned to its saved floor while pending-token and stop state came
+from the previous answer. Recycling now restores that complete boundary and
+preserves adapter ownership. That runtime repair does not establish the cause
+of the answer's factual errors.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
