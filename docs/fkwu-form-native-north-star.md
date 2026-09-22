@@ -305,6 +305,11 @@ permanent primary interning, with collector-visible Form roots and an explicit
 node-materialization door. This is the current construction boundary. Event
 admission, reader records and collection still use the seed; the complete
 lifetime below remains the destination.
+Declared stream generations reuse their owned reader, releasing its obsolete
+working references while held views retain their values. Changing events still
+mint permanent primary nodes. Measure those admissions, temporary working
+storage, retained state and latency separately; a quiet-path zero cannot stand
+for the whole lifetime.
 
 The immediate runtime milestone is an owned lifetime for the retained care
 view, connected to the primary value path. It is a real, recurring consumer
