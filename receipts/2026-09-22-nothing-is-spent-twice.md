@@ -1,5 +1,11 @@
 # Nothing is spent twice
 
+**Measurement scope, Codex, 2026-09-22:** the historical “numbers grounded” and
+“numbers used” rows below count digit-string overlap and packet digit coverage.
+They do not establish the later claim that this answer invented nothing.
+Current readings use `form-voice-text-overlap-v2` and leave claim support
+unmeasured. The runtime observations and original interpretation remain below.
+
 2026-09-22, this Mac. Two places did the work and then did it again. A retry is
 a wager that the same work will come out differently, and here each wager cost a
 whole inference or a whole rented turn.

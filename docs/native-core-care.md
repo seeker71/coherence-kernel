@@ -186,6 +186,14 @@ even when those bytes were already supplied at admission. Other reads retain
 their normal context references. Tool evidence stays in the private coding
 context and does not assert a filesystem mutation.
 
+`edit` also accepts `[path, "sha256", expected_hash, new_whole_document_text]`.
+Single-document `read`, `cat` and guard failures supply `resident_sha256` for the
+exact resident bytes. The tool checks that hash before changing any byte; a
+stale identity returns `edit-sha256-mismatch` and preserves the document. This
+form avoids repeating the old source inside a whole-document replacement.
+The same role, writable-path, review and caller-verification checks still apply.
+It edits the resident document; publication remains the caller's responsibility.
+
 ## Review context care
 
 When a review lacks a caller or ownership contract, the executing caller can
