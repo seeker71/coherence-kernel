@@ -47,6 +47,30 @@ the single-call flow the parity goal measures against the guided one.
 ./fkwu observe/form-cli-compare-run.bml </dev/null
 ```
 
+## Nothing is spent twice
+
+Two places used to do the work and then do it again. Neither does now.
+
+The adapter lane decides before it computes: opening the weights and counting
+the packet's IDs costs a memory map, a forward pass costs minutes, so the
+chunker is asked first whether any slice of this packet fits the device. A lane
+that cannot carry says `no-slice-of-this-packet-fits-the-device` before a single
+token is computed, and what follows that is the walk's first inference, not a
+second.
+
+The grounded door's repair turn is the caller's word: `provider` takes
+`{"allowed":1,"repair":1}`, and `repair` defaults to off. A thin first answer is
+observed and reported either way — `answer_thin` and `repair_allowed` are in the
+report beside `provider_attempts` — but a second rent is only spent when it was
+asked for.
+
+
+The allowance is a checkpoint rather than a ceiling: at `max_reply_tokens` the
+lane asks whether its own tail has begun to repeat, ending there if it has and
+growing the allowance toward the sentence's end if it has not. What was actually
+spoken is `oracle_tokens_predicted` in the row, and it can stand well above what
+was asked for — on 2026-09-22 a walk asking 320 spoke 1,322 and finished at its
+own end.
 ## The route rows
 
 `receipts/route-ledger.jsonl` holds the four route rows of the first day, guided,
