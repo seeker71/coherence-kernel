@@ -1,6 +1,6 @@
 // The serialized learner asks retained observed memory for training nutrients.
 // Delivery is by sealed reference. Assessment targets never become training data.
-// preludes: form-stdlib/native-session-sources.bml form-stdlib/organ-care.bml form-stdlib/rag-embed.fk
+// preludes: form-stdlib/native-session-sources.bml form-stdlib/organ-care.bml form-stdlib/rag-embed.fk form-stdlib/bml/organ-health-stream.bml
 section [form.bml] {
  class NativeSessionEvidence {
   def nse-resource() = "verified-training-evidence";
@@ -70,15 +70,27 @@ section [form.bml] {
   }
   def nse-need(row) = nse-find-need(json-array-elements(oh-get(row,"needs")));
   def nse-find-need(needs) = if nil?(needs) then json-node-null() else if oh-has(nse-resources(),oh-str(head(needs),"resource")) then head(needs) else nse-find-need(tail(needs));
-  def nse-attend(home) {
+  def nse-reader(home) = ohs-open(nsm-at(home,"events.jsonl"),"session-learning-evidence");
+  def nse-attend(home) = nse-attend-reader(home,nse-reader(home));
+  // The serialized learner owns this reader across rounds. Each update sees
+  // the file extent at entry; later appends remain for its next observation.
+  def nse-attend-reader(home,reader) {
+   let started = host_monotonic_ms();
    let dir = nsm-str(nsm-state(home),"last_row");
    let made = nsm-init(home);
    let sources = nss-catalog(home);
    let held = nse-valid(home,dir);
    let revision = nse-revision(sources,held,dir);
    let made = fs-mkdir(nsm-at(home,"evidence-requests"));
-   let rows = nse-attend-rows(home,dir,sources,held,revision,oh-read(nsm-at(home,"events.jsonl")),list());
-   nsm-atomic(nsm-at(home,"evidence-current.json"),json-node-object(list(nsm-s("candidate_row",dir),nsm-s("revision",revision),json-node-pair("requests",json-node-array(rows)))));
+   let extent = file_size(ohs-path(reader));
+   let readStarted = host_monotonic_ms();
+   let read = ohs-update(reader,if gt(extent,0) then extent else 1);
+   let readMs = sub(host_monotonic_ms(),readStarted);
+   let current = jv-materialize-items(ohv-age(record_get(reader,"current"),now_unix_ms()));
+   let rows = nse-attend-rows(home,dir,sources,held,revision,current,list());
+   let result = nsm-atomic(nsm-at(home,"evidence-current.json"),json-node-object(list(nsm-s("candidate_row",dir),nsm-s("revision",revision),json-node-pair("requests",json-node-array(rows)))));
+   nsm-event(home,"evidence-reader",list(nsm-s("reader",record_get(reader,"identity")),nsm-s("state",record_get(reader,"state")),nsm-n("source_bytes",record_get(reader,"extent")),nsm-n("read_bytes",record_get(reader,"read_bytes")),nsm-n("offset",record_get(reader,"offset")),nsm-n("pending_bytes",str_len(record_get(reader,"pending"))),nsm-n("invalid_records",record_get(reader,"invalid_records")),nsm-n("current_rows",len(current)),nsm-n("read_ms",readMs),nsm-n("attend_ms",sub(host_monotonic_ms(),started))));
+   result;
   }
   def nse-attend-rows(home,dir,sources,held,revision,rows,done) = if nil?(rows) then done else nse-attend-row(home,dir,sources,held,revision,head(rows),tail(rows),done);
   def nse-attend-row(home,dir,sources,held,revision,row,rest,done) {

@@ -125,7 +125,17 @@ the later loss observations determine whether model capability recovered.
 Normal training preparation requests related rehearsal through this same flow
 and incorporates accepted examples in the actual gradient batch. Retaining a
 new verified example wakes the worker, which also revisits the last candidate's
-open needs. Unchanged evidence under the same running program image reuses its
+open needs. Each serialized drain retains one native event reader across its
+rounds. The first attendance reads the existing history; subsequent attendances
+consume newly appended complete records and retain the current observations.
+Each read uses the file extent observed at entry, leaving later appends for the
+next attendance. Incomplete records and admission diagnostics remain with the
+reader. The `evidence-reader` event records source extent, consumed bytes,
+reader identity, read duration and total attendance duration, so event reading
+can be distinguished from source discovery and care. A new worker reads the
+history again; the cursor is currently process-local.
+
+Unchanged evidence under the same running program image reuses its
 response; a miss stays open. Source-compiled processes without an observed image
 identity do not reuse another process's answer. The cache reads the executing
 image identity, rather than treating current source-file bytes as running code.
