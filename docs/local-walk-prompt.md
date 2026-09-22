@@ -1,25 +1,57 @@
 # The daily walk, on the Mac
 
-The cloud routine walked the rent ladder in a fresh session each morning and
-landed nothing twice: a green run there means only that the session exited,
-and its log is not readable from the body. The walk moves home. Paste the
-prompt below into a Desktop routine with **Local** chosen (Code tab, Routines,
-New routine), or run it from a launchd or cron job on the Mac with
-`claude -p "$(cat docs/local-walk-prompt.md)"` and the tools Bash and
-Artifact allowed. It carries the goal, the one call that walks and lands the
-movement, and nothing else. The loopback oracle on 127.0.0.1:18082 speaks
-when it stands and reads `none` when it does not; the walk never starts one.
+The walk runs directly through the local kernel. It uses registry model weights
+and the host's optional Metal carrier in-process.
 
----
+## Run
 
-You are walking docs/rent-to-zero-goal.form in your checkout of seeker71/coherence-kernel on this machine with the least rented tokens. The north star is the minimum rented token spent on the path to full sovereignty. Do exactly the steps below, nothing else: no exploring, no reading documentation, no extra checks, no provider calls from any door.
+Follow the [C-bootstrap and freshness instructions](../AGENTS.md#ground-the-kernel-first-temporary-c-seed-shrinking-to-zero), then run from the repository root:
 
-1. In the checkout: `git fetch origin claude/form-cli-direct-guided-01ya6p && git checkout claude/form-cli-direct-guided-01ya6p && git rebase FETCH_HEAD`. A branch behind origin fast-forwards, a branch that origin moved follows it, and a held landing that never pushed is replayed on top. If that branch no longer exists on origin, do the same with main.
-2. Build the kernel: `cc -O2 -o fkwu runtime/fkwu-uni.c`
-3. Find the newest .jsonl file under ~/.claude/projects/ (any subdirectory); call its path T. Then make one call, replacing `<date>` with today (YYYY-MM-DD) and T with that path:
-   `printf '%s\n' '{"movement":"local <date>","transcript":"T","subject":"Local movement <date>: rows and the redrawn ladder","body":"Walked by the body in one call (observe/movement-run.bml) on the Mac: the native voice through the loopback oracle if one stands, the native single call, the flow meter on this session, the page redrawn from the ledgers."}' | ./fkwu observe/movement-run.bml`
-   This walks the whole movement and lands it: commit and push to the branch you checked out. It prints one JSON line. Its `landing` field reads `landed` only when the push reached origin; `push` carries the push's own exit and last line.
-4. Republish the page with the Artifact tool: read https://claude.ai/artifact/DzXVoJfo8T39G6V7GotT1b first, then publish docs/rent-ladder.html to that same url. If the Artifact tool is not available here, skip this step and say so in one line.
-5. Reply with only the JSON line from step 3, and the one line from step 4 if it was skipped.
+```sh
+./form-run ./fkwu observe/movement-run.bml <<'FORM_MOVEMENT'
+{"movement":"local walk","transcript":"","subject":"Local native movement"}
+FORM_MOVEMENT
+```
 
-If any step fails, stop, commit nothing further, and reply with the failing command and its last output line only. Never modify any other file, never comment on pull requests, never run a step twice, never start an oracle.
+## Inputs
+
+Stdin is one JSON object; every field is optional.
+
+- `movement`: name for the run (default `movement`).
+- `voice` (1/0): run the in-process model voice (default 1).
+- `compare` (1/0): run the native compare (default 1).
+- `transcript`: path to a supported transcript, or empty. Leave it empty unless
+  the operator deliberately supplies the relevant supported transcript. Empty is
+  unmeasured, not zero cost.
+- `lane`, `adapter`, `model`, `max_reply_tokens`: voice/model options.
+- `land` (1/0): land the movement (default 1). `land=0` skips landing.
+- `paths`: extra paths to include in the landing.
+- `subject`, `body`: commit message fields.
+
+## Outputs
+
+The call prints one JSON line with:
+
+- `movement`: the run name.
+- `voice`: source, model, predicted tokens, axes, receipts cited, ms, answer.
+- `compare`: the native compare result.
+- `flow`: provider_calls, native_fkwu_calls, non_form_calls.
+- `page_bytes`: size of the redrawn page.
+- `landing`: `landed` only when the push reached origin; otherwise a held
+  reason. Read the actual landing and push outcomes; a completed process does
+  not establish answer quality.
+- `push`: the push's own exit and last line.
+- `health`: readings, unease, spool.
+- `census`, `dispatches`, `planes`: census window totals.
+
+## Landing
+
+`land` defaults on. It pushes the current branch. Use `land=0` to skip.
+Actual landing and push outcomes must be read from the output; do not assume
+success.
+
+## Failure
+
+A failure asks for inspection and repair from retained evidence before
+continuation. An observation timeout is not terminal and must not trigger
+another model admission.

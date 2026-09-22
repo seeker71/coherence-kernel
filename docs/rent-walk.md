@@ -207,8 +207,9 @@ rendered file to the same page and the picture follows the rows.
 
 ## The daily walk on the Mac
 
-`docs/local-walk-prompt.md` is the prompt for a Desktop local routine or a
-`claude -p` job: checkout, build, the one movement call, the page
-republished. The movement's JSON line carries `landing` and `push`; `landed`
-means the push reached origin. The cloud routine that walked this in a fresh
-session is paused.
+[`docs/local-walk-prompt.md`](local-walk-prompt.md) gives the direct native
+command and its operating requirements. A host job can invoke that command
+without a rented assistant. The movement's JSON line carries `health`,
+`landing` and `push`; inspect each outcome. `landed` means the push reached
+origin, while answer quality remains a separate observation. The command
+redraws the local page; publishing it elsewhere is a separate action.
