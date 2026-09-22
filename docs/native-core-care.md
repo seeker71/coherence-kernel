@@ -158,9 +158,11 @@ The shared JSON validator retains the first failing byte and expected token.
 Its live boundary emits the need, applied action and a correlated observation;
 reply content stays in the retained reply file.
 
-For a typed tool command, one extra mismatched closing delimiter immediately
-before the expected delimiter can be removed natively. Every other byte stays
-unchanged, and the whole candidate must pass strict JSON admission. The command
+For a typed tool command, an extra mismatched closing delimiter immediately
+before the expected delimiter can be removed, or the missing expected closer
+can be inserted before the mismatched closer. Exactly one of these single-byte
+candidates must pass strict JSON admission. Every other byte stays unchanged;
+unfinished output at end-of-input is never completed. The command
 then enters the existing role, writable-path, guarded-edit and verification
 rules. `native_json_repairs` in the result and checkpoint identifies the byte,
 before/after hashes and actual tool/check counts. This establishes syntax
