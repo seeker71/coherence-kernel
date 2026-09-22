@@ -128,6 +128,13 @@ The send receipt names the delivered body byte count. Read the correlated
 response and its `stopped` field: exhausting the generation budget leaves an
 unfinished response, even when durable delivery succeeded.
 
+When comparing native answers, retain the admitted startup teaching alongside
+the caller's packet. The resident takes `fqt-overlay-prefix` from
+`form/form-stdlib/form-cli-qwen-teach-layer.fk` at admission. Its shared
+`bml/form-cli-qwen-meaning.bml` keeps Form symbols and scannerless parsing
+distinct from Qwen's tokenizer and decoder. A later source edit changes future
+admissions; it does not rewrite the context of an already standing resident.
+
 For a concept-rich enquiry, select the relevant exact terms and read:
 
 ```sh

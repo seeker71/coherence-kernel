@@ -128,6 +128,15 @@ from the previous answer. Recycling now restores that complete boundary and
 preserves adapter ownership. That runtime repair does not establish the cause
 of the answer's factual errors.
 
+The subsequent [current-source answer](receipts/2026-09-22-native-grounding-context.md)
+correctly distinguished Qwen decoding from Form grounding and supplied numeric
+annotations from felt resonance, while retaining unsupported baseline claims.
+Reading its admitted startup teaching exposed unscoped descriptions of symbols
+and scannerless parsing there as well. The resident overlay and public
+curriculum now share an explicit distinction between Form representations and
+model tokens. The same source packet is being answered under that corrected
+teaching; its outcome remains open.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
