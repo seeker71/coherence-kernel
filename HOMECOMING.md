@@ -231,9 +231,16 @@ change the answer: native Qwen correctly distinguishes prediction from grounding
 and states the enquiry covenant. The answer grows to 756 words and adds an
 overbroad assurance about releasing unreferenced cells. Specific feedback has
 an observed effect; concise, consistently faithful synthesis remains open.
-Native coding is working on explicit shortening and expansion directions for
-the word-range controller, with room reserved for either message. Preserve the
-source-fidelity findings alongside the length result when re-observing it.
+The [direction and delimiter repair](receipts/2026-09-23-native-direction-and-delimiter.md)
+gives the word-range controller explicit shortening and expansion directions,
+with room reserved for either message. Native JSON care recovered the actual
+blocked edit without regenerating it. Qwen's proposed BML still failed to compile
+and its resumed task returned an unchanged whole-document edit; Codex completed
+the executable structure and reserve. Keep that assistance visible, and preserve
+source-fidelity findings alongside the new length observation. Re-observation
+with the changed instruction returns the identical 812 IDs and 635 words;
+response quality remains unchanged. The native tool-response repair is verified,
+while effective correction and autonomous source completion remain open.
 
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
