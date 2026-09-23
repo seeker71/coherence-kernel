@@ -12,7 +12,21 @@ default; a manifest can explicitly offer this resource with a small
 session-wide process allowance as described in
 [`form-response-comparison.md`](form-response-comparison.md).
 
-Supply one JSON object on stdin:
+Supply inline JSON or a request file on stdin:
+
+```sh
+form-run ./fkwu observe/form-cli-response-resource-run.bml <<'FORM'
+@request.json
+FORM
+```
+
+The source-backed form-cli exposes the same operation as
+`response-repair @request.json`; `response-repair help` describes it.
+File input uses the native reader and the same request-size and permission
+checks as inline input. It retains the identical request identity, so a file
+containing an already checked request reuses its answer and usage event.
+
+The JSON object contains:
 
 - `id`: a nonempty identifier containing letters, digits or hyphens.
 - `assessment`: an existing `code` request with `mode=review`, `evaluation=1`,

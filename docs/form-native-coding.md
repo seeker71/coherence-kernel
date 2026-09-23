@@ -728,6 +728,11 @@ report. This door replaces values; it does not insert or remove array items.
 Unselected JSON values remain unchanged; emitting the candidate can change
 JSON formatting.
 
+If all report values remain equal under the native JSON comparison, the
+amendment returns an explicit unchanged diagnostic. It retains the candidate,
+failed-check evidence and check count, without adding an amendment record.
+Changing object key order alone is not a value correction.
+
 The retained report is supplied when a fresh model context opens in repair.
 Later repair observations carry its current hash and amendment instructions,
 without repeating the report text.
