@@ -4,12 +4,14 @@
 // preludes: form-stdlib/safetensors-index.bml form-stdlib/lora-adapter.bml form-stdlib/backprop-msl.bml form-stdlib/metal-carrier.bml
 section [form.bml] {
  class NativeAffineMetal {
+  field AffineDispatchGroups = 16777216;
+  field AffineIndexWord = 4294967296;
   def nam-msl() = str_concat("#include <metal_stdlib>\nusing namespace metal;\n", str_concat(nam-linear-msl(), nam-basic-msl()));
   def nam-linear-msl() = "
 inline float nam_read(device const uchar* p, uint i, uint ty) {uint at=i*(ty==0?4:2);uint bits=uint(p[at])|(uint(p[at+1])<<8);if(ty==0)return as_type<float>(bits|(uint(p[at+2])<<16)|(uint(p[at+3])<<24));if(ty==1)return float(as_type<half>(ushort(bits)));return as_type<float>(bits<<16);}
 inline float nam_w(device const uchar* w, device const uchar* s, device const uchar* b, uint i, uint group, uint ty) { return float((w[i/2] >> ((i%2)*4))&15)*nam_read(s,i/group,ty)+nam_read(b,i/group,ty); }
-kernel void nam_affine(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& transpose [[buffer(10)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
- uint width=transpose?cols:rows; uint token=gid/width, r=gid%width; if(token>=tokens) return; float a=0; uint n=transpose?rows:cols; for(uint c=lane;c<n;c+=32) { uint wi=transpose?c*cols+r:r*cols+c; a+=nam_w(w,s,b,wi,group,ty)*x[token*n+c]; } a=simd_sum(a); if(lane==0) y[token*width+r]=a;
+kernel void nam_affine(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& transpose [[buffer(10)]], constant uint& first_lo [[buffer(11)]], constant uint& first_hi [[buffer(12)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+ ulong index=(ulong(first_hi)<<32)+ulong(first_lo)+ulong(gid); uint width=transpose?cols:rows; ulong token=index/width; uint r=uint(index%width); if(token>=tokens) return; float a=0; uint n=transpose?rows:cols; for(uint c=lane;c<n;c+=32) { uint wi=transpose?c*cols+r:r*cols+c; a+=nam_w(w,s,b,wi,group,ty)*x[token*n+c]; } a=simd_sum(a); if(lane==0) y[index]=a;
 }
 kernel void nam_embed(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const uint* ids [[buffer(3)]], device float* y [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& tokens [[buffer(6)]], constant uint& group [[buffer(7)]], constant uint& ty [[buffer(8)]], uint i [[thread_position_in_grid]]) { if(i<tokens*cols) y[i]=nam_w(w,s,b,ids[i/cols]*cols+i%cols,group,ty); }
 kernel void nam_matmul(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* y [[buffer(2)]], constant uint& m [[buffer(3)]], constant uint& k [[buffer(4)]], constant uint& n [[buffer(5)]], constant uint& ta [[buffer(6)]], constant uint& tb [[buffer(7)]], constant float& scale [[buffer(8)]], constant uint& add [[buffer(9)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r=gid/n,c=gid%n; if(r>=m) return; float v=0; for(uint j=lane;j<k;j+=32) v+=a[ta?j*m+r:r*k+j]*b[tb?c*k+j:j*n+c]; v=simd_sum(v)*scale; if(lane==0) { if(add) y[gid]+=v; else y[gid]=v; } }
@@ -61,7 +63,14 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
   // The transposed product walks columns (form_affine4_t_f32, backprop-msl.bml): adjacent threads read
   // adjacent nibbles of one row. nam-linear-lanes is the simdgroup-per-output walk, in both directions.
   def nam-linear(view, x, y, tokens, transpose) = if transpose then bpm-affine4-t(view, x, y, tokens) else nam-linear-lanes(view, x, y, tokens, 0);
-  def nam-linear-lanes(view, x, y, tokens, transpose) = nam-run("nam_affine", list(nth(view, 0), nth(view, 1), nth(view, 2), x, y), list(nth(view, 3), nth(view, 4), tokens, nth(view, 5), nth(view, 6), transpose), mul(tokens, if transpose then nth(view, 4) else nth(view, 3)), 1);
+  // Bound each cooperative grid while retaining every output's global index.
+  def nam-linear-lanes(view,x,y,tokens,transpose) = if le(tokens,0) then form_error("native affine token count must be positive") else nam-linear-grid(view,x,y,tokens,transpose,0,mul(tokens,if transpose then nth(view,4) else nth(view,3)));
+  def nam-linear-grid(view,x,y,tokens,transpose,first,count) = if ge(first,count) then 1 else {
+   let width = if lt(sub(count,first),AffineDispatchGroups()) then sub(count,first) else AffineDispatchGroups();
+   let sent = nam-linear-span(view,x,y,tokens,transpose,first,width);
+   nam-linear-grid(view,x,y,tokens,transpose,add(first,width),count);
+  };
+  def nam-linear-span(view,x,y,tokens,transpose,first,count) = nam-run("nam_affine",list(nth(view,0),nth(view,1),nth(view,2),x,y),list(nth(view,3),nth(view,4),tokens,nth(view,5),nth(view,6),transpose,mod(first,AffineIndexWord()),div(first,AffineIndexWord())),count,1);
   def nam-embed(view, ids, out, tokens) = nam-run("nam_embed", list(nth(view, 0), nth(view, 1), nth(view, 2), ids, out), list(nth(view, 4), tokens, nth(view, 5), nth(view, 6)), mul(tokens, nth(view, 4)), 0);
   def nam-mm(a, b, y, m, k, n, ta, tb, scale, accumulate) = nam-run("nam_matmul", list(a, b, y), list(m, k, n, ta, tb, md-f32-bits(scale), accumulate), mul(m, n), 1);
   def nam-add(a, b, y, n, scale) = nam-run("nam_add", list(a, b, y), list(n, md-f32-bits(scale)), n, 0);
