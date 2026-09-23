@@ -65,5 +65,48 @@ was retained as session example
 `b1c55150fbe866670a2b7a8de9e82ebbf12c8c966f4a356b422b52e8a0746b56`;
 worker launch does not establish a serving-weight update or Qwen improvement.
 
+## Re-observe through the actual tokenizer
+
+The retained task, current controller instructions and registered Qwen
+tokenizer produced **803** indexed IDs plus two crossing IDs: **805** total.
+At the observed cursor position 14,654, old admission returned **1** and the
+repaired admission returned **0**, exit 0. The cursor was reconstructed from
+the failed run; no model was admitted or generated. The portable
+`reobserve.bml` takes the retained task path and output path on stdin.
+Current instructions include the landed literal report-edit capability, so
+805 is a new reading; the failed run's earlier 770-ID notice remains its own
+observation.
+
+The preceding completed coordinator turn
+`01a0cdfb-616d-7370-9bba-fe9d7e36aeef` used **5,852,508** rented tokens:
+5,782,772 input, including **5,642,752 cached**, 43,532 output and 26,204
+unattributed. Forty model calls and 38 tool calls reconcile. This cost includes
+the continuation preparation and runtime repair, excludes this open turn and
+separate provider subprocesses, and establishes no cost improvement or parity.
+
 Signed: Codex. The useful teaching is that a reply's working space includes
 the evidence needed to finish it, as well as the words it generates.
+
+## First completed continuation reply
+
+Reply seven is a valid public report amendment. It replaces the answer with
+**532 words**, up from 514, and preserves the original sources. The original
+report range still fails. Native replay returned the same failure with an
+explicit instruction to shorten by at least **82** words toward **400**.
+Missing numeric repair feedback is therefore not the cause to repair next.
+
+The answer now assigns the frequency response choice to a practitioner,
+instead of saying the arithmetic makes the response behave that way. It reduces
+the translation roster to Persian and German, and restores a practical sentence
+about naming absence. These are actual changes after the attributed caller
+feedback. Most of the definition inventory and the opening remain; the requested
+substantial recomposition is not observed. This is a mixed result, not parity
+or a quality score. The amendment also repeats the entire answer rather than
+using the available literal text-edit action.
+
+At the next observed boundary the same process had completed seven cumulative
+replies, six checks, and generated **1,284 IDs** in this residence. It had
+injected **1,617 IDs**, reached position **10,031**, and spent **1,057,530 ms**.
+It remained live in repair. These are intermediate counters, not a terminal
+run total or verified release. The public reply, returned answer and native
+check observation are retained beside the earlier evidence.
