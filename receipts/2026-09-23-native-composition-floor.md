@@ -75,10 +75,64 @@ request field is identical. The question, sources, checks, Qwen model,
 exclusion still applies. The health flow correlates this observation with the
 capacity correction.
 
-That request is running at `.hearth/native-final-capacity-2026-09-23`.
-Completion, actual answer quality and further cost remain open. Increasing a
-ceiling addresses the observed capacity failure; it establishes no quality
-improvement by itself.
+That request completed at `.hearth/native-final-capacity-2026-09-23` in
+**989,309 ms**, using **1,687 generated IDs**, **2,179 injected IDs**, one
+tool read and one check run. The final stage stopped after **1,095 IDs**;
+release and the original source/report assertions passed. Provider calls were
+zero. Increasing the ceiling allowed this report to complete; its answer
+quality has separate evidence below.
+
+The actual Qwen tokenizer encodes the retained 447-word answer in **609 IDs**
+and its complete report submission in **809 IDs**. This report retains its
+stale findings; it is a sizing observation, not a correct-answer target. Both
+the reference and indexed native encoders returned these counts and roundtripped
+the exact text. A complete report therefore can fit the former 1,024-ID ceiling.
+Exhaustion establishes what this generation used, not that the required report
+shape inherently needed more space. The larger allowance remains a recovery
+measure whose result must be examined.
+
+The sizing helper initially selected the slow reference encoder. It completed
+before an attempted stop: `ps` found no process and `kill` returned “No such
+process”; its original handle then returned exit 0. The helper now uses the
+existing indexed native cursor. The answering-model process was unchanged.
+
+## The review sees the gap and leaves the response undone
+
+The returned 447-word answer copies the supplied draft exactly after trimming
+outer whitespace. Its report carries `verdict: reject` and eight findings. The
+native model names the missing connection to Urs's correction, the missing
+correction-to-action example, and the two independent paths. Its proposed next
+move is useful: lead with the gap and let the six axes serve that connection.
+The report also retains the draft's unsupported claim that traceability changes
+resonance, while one finding says no such unsupported claim is made.
+
+The review controller accepted the report's shape and length; its `complete`
+status did not approve the candidate. Its contract permits negative findings
+inside a completed report. We routed composition through that review workflow.
+The most useful native contribution here was its criticism; the requested
+response still needed to be composed.
+
+The current repair uses the ordinary source-backed CLI's `generate` path.
+`generate --prompt-file PATH` now reads a complete context file after the
+generation options, preserves its bytes, and diagnoses unreadable, empty or
+size-mismatched reads before model admission. Ordinary inline prompts retain
+their behavior. The existing reasoning/generation band passed **1**, exit 0,
+after a clean preflight; its file case compares actual source bytes and all
+allowances. No C seed or external runtime changed.
+
+The prepared **15,518-byte** prompt retains the original enquiry/source text
+verbatim, includes the conversation correction and the native review's own
+actionable reason, and asks for a prose answer. The earlier draft is absent.
+Preparation verifies that the file-backed CLI request equals the exact inline
+request. This changes the response path and context arrangement; it is not a
+matched one-variable comparison.
+
+The real CLI listed Qwen Q8 at index **0**, then selected that observed index
+and ran the file-backed generation with 2,048 answer tokens, 512 reasoning
+tokens and the same 350–450 word range. Its prompt lives at
+`.hearth/native-compose-2026-09-23/prompt.txt`. The original review artifacts
+and checks remain retained. The generator owns response completion and one
+native length correction. Its final answer, quality and cost are still pending.
 
 ## Spend and instruments
 
@@ -88,6 +142,13 @@ Thirty-nine model calls and 37 tool calls reconcile; unattributed usage is zero.
 The separate Form-owned provider repair used 21,078 tokens and remains its own
 event. These different work scopes establish no savings ratio or parity.
 Coordination is still too expensive.
+
+The next completed coordinator turn, `01a0ce41-5bee-70e1-bddc-5c5c58c2ab04`,
+used **4,585,991 rented tokens**, including **4,416,640 cached input** and
+**25,683 unattributed tokens**. It records 44 model calls and 42 tool calls.
+The retained cost reader reconciles that completed turn and includes the
+unattributed quantity; it excludes the current open turn and separate provider
+subprocesses. This is further coordination cost, not a matched-route saving.
 
 Native guide: zero Python implementations, two invocation candidates, zero
 unread files. The latest counsel panel reports **orphans 0** and eleven of
@@ -102,5 +163,8 @@ learning path, so it establishes no update to the answering Qwen model.
 The observed capacity failure and correction were also retained as teaching
 `44b74465311ffbdfe272e5dd60b43fef0e55ac32feca7e16518ffaa82da7def1`;
 its worker was launched, with no serving update claimed.
+The verified distinction between review completion and response composition,
+and the file-backed generation checks, were retained as
+`d26be9aca80213678ec301b7f42e5818138b277d600666212ec428e7837b5faa`.
 
 — Codex
