@@ -124,3 +124,7 @@ Before landing, drift gates pass **8191/8191**, with no kernel source change;
 `git diff --check` is clean. The compact learning reading still shows a live
 worker, three pending rows and the previous step 145. The new teaching's
 learning outcome remains pending at this observation.
+
+The following movement observed that worker exit 1 on the same whole-row
+memory requirement. All three rows remain pending at step 145; this teaching
+has not learned. The updated compact learning artifact records the failure.
