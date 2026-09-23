@@ -113,8 +113,10 @@ input-inclusive turn cost. All native model runs above made zero provider calls.
 The verified state and message-role observations were retained for native
 session learning as event `2026-09-23-feedback-state-and-controller-request-v1`,
 session `native-arrival-bootstrap`, row `8c3ae69c73c7a98836fb3ced803fc44e6c1abdb3f3e2e412efef19df44acb18c`.
-The separate Llama learner launched; completion is pending. No failed generated
-answer was supplied as a correct learning target.
+The separate Llama learner completed in the following movement: candidate
+`144-47388-255094736`, optimizer step 144, learned rounds 145, pending 0.
+Serving remains generation 5. No failed generated answer was supplied as a
+correct learning target.
 
 The next real follow-up should retain its complete generated-ID sequence,
 decoded text and turn-close identity while doing the revision. The evidence narrows

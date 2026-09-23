@@ -207,6 +207,17 @@ of an unsolicited tool result. That change also returned the same 510 words.
 Delivery-path changes have not closed this case's response gap. Keep the actual
 generated IDs, decoded text and turn boundary together in the next real revision.
 
+The [ordinary-response prompt repair](receipts/2026-09-23-response-prompt.md)
+removes an unbound query protocol and its 48/32-token budget from bounded
+answers. Local Qwen wrote the small implementation through the public `code`
+request; compilation and behavior checks pass. On the unchanged original
+question, the answer grew from 481 to 635 words, and each run's correction
+repeated its initial answer exactly. The repaired-path answer also reverses
+the service-over-engagement covenant. This closes the prompt-contract mismatch
+and leaves response quality worse on this case. Retain full generated IDs and
+stop identities in the serving response evidence before another correction:
+the existing decoded-text and count receipts leave that distinction open.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
