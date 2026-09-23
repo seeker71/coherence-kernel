@@ -332,8 +332,11 @@ For a document with a length requirement, a caller may supply a range check:
 It counts the current resident document with the same ASCII-whitespace counter
 as ordinary generation, including headings. Bounds are nonnegative integers
 and include both endpoints. A missing document fails separately from an empty
-document. A failed `verify` or completion check returns the observed count and
-the required range to the existing repair flow. This establishes length only;
+document. A failed `verify` or completion check returns the observed count,
+required range and a computed repair direction, minimum word change and midpoint
+target to the existing repair flow. The target guides revision; the original
+range remains the acceptance rule. Passing counts receive no repair target.
+This establishes length only;
 source fidelity, completeness and useful wording still require review. The
 check reads document bytes and accepts exactly the four fields shown above.
 
