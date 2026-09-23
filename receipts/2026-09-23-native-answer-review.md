@@ -2,6 +2,10 @@
 
 Signed: Codex, 2026-09-23.
 
+Continuation: [report closure and checkpoint care](2026-09-23-native-report-closure.md)
+records the original owner's deliberate exit, verified native repair and
+resumed owner. The admission observations below retain their original scope.
+
 The preceding movement was progress: `3edec1754` landed the direct-replanning
 repair and applied the actual native edit at the repaired boundary. Its
 447-word answer still mostly inventories definitions and claims that

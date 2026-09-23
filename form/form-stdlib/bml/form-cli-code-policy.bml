@@ -371,19 +371,36 @@ section [form.bml] {
    let obj = parse-json("native-json-candidate",candidate);
    and(fat-wire-object?(obj),and(json-object-has?(obj,"tool"),and(not(json-object-has?(obj,"report_amend")),and(fat-wire-string?(json-object-get(obj,"tool")),and(fcap-string-array(json-object-get(obj,"arguments")),or(not(json-object-has?(obj,"input")),fat-wire-string?(json-object-get(obj,"input"))))))));
   };
-  def fcap-syntax-candidate(s,raw,checker,error,candidate) = if not(fcap-json-command?(candidate)) then fcap-syntax-revise(s,raw,error) else {
+  // A read-only report can contain its entire value but omit the
+  // envelope's final brace. Close only that one-member envelope; never fill
+  // an unfinished value, add report fields or complete an action at EOF.
+  def fcap-report-closer(s,raw,error) = if not(and(fcap-reviewing(s),and(fat-has(list("review","repair"),fcap-stage(s)),and(eq(faj-error-reason(error),12),eq(faj-error-at(error),str_len(raw)))))) then nothing() else {
+   let candidate = str_concat(raw,"}");
+   if not(faj-valid(candidate)) then nothing() else {
+    let obj = parse-json("native-report-envelope",candidate);
+    if not(and(fat-wire-object?(obj),and(eq(len(json-object-pairs(obj)),1),json-object-has?(obj,"report")))) then nothing() else {
+     let report = json-object-get(obj,"report");
+     if or(fat-wire-object?(report),fat-wire-string?(report)) then candidate else nothing();
+    };
+   };
+  };
+  def fcap-syntax-candidate(s,raw,checker,error,candidate) = if fcap-json-command?(candidate) then fcap-syntax-controlled(s,raw,checker,error,candidate) else {
+   let report = fcap-report-closer(s,raw,error);
+   if nothing?(report) then fcap-syntax-revise(s,raw,error) else fcap-syntax-controlled(s,raw,checker,error,report);
+  };
+  def fcap-syntax-controlled(s,raw,checker,error,candidate) {
    let action = fcap-control(add(now_unix_ms(),fcap-turns(s)),list(fcap-turns(s),fcap-calls(s),faj-error-at(error)),1);
    if not(eq(action,1)) then fcap-syntax-revise(s,raw,error) else fcap-syntax-apply(s,raw,checker,error,candidate);
   };
   def fcap-syntax-apply(s,raw,checker,error,candidate) {
    let evidence = str_concat("JSON syntax failure: ",json-emit(faj-diagnostic(raw,error)));
    let counted = fcap-with-memory(s,list(add(fcap-failures(s),1),evidence,fcap-reflections(s),fcap-checks(s),0));
-   // The repaired command enters the ordinary role, writable-path, guarded
+   // The repaired reply enters the ordinary role, writable-path, guarded
    // edit and caller-check boundaries. Grammar repair grants no authority.
    let next = fcap-response(counted,candidate,checker);
    let inserted = gt(str_len(candidate),str_len(raw));
    let at = faj-closer-offset(raw,error);
-   let method = if inserted then "native-json-missing-closer-insertion" else if eq(faj-error-reason(error),13) then "native-json-premature-root-closer-removal" else "native-json-mismatched-closer-removal";
+   let method = if inserted then if eq(at,str_len(raw)) then "native-json-report-envelope-closure" else "native-json-missing-closer-insertion" else if eq(faj-error-reason(error),13) then "native-json-premature-root-closer-removal" else "native-json-mismatched-closer-removal";
    let row = json-node-object(list(fcap-shape-s("method",method),fcap-shape-n("byte_offset",at),fcap-shape-n(if inserted then "inserted_byte" else "removed_byte",fat-char(if inserted then candidate else raw,at)),fcap-shape-s("before_sha256",hex-encode(sha256-stream-string(raw))),fcap-shape-s("after_sha256",hex-encode(sha256-stream-string(candidate))),fcap-shape-n("strict_candidate_valid",1),fcap-shape-n("tool_calls",sub(fcap-calls(next),fcap-calls(s))),fcap-shape-n("checks",sub(fcap-checks(next),fcap-checks(s))),fcap-shape-s("result_stage",fcap-stage(next))));
    let saved = fcap-with-json-repairs(next,append(fcap-json-repairs(next),list(json-emit(row))));
    let note = json-emit(json-node-object(list(json-node-pair("native_json_repair",row),json-node-pair("observation",if faj-valid(fcap-note(next)) then parse-json("native-json-tool-result",fcap-note(next)) else json-node-string(fcap-note(next))))));
