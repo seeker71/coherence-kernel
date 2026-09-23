@@ -49,7 +49,13 @@ Choose the response path from its observed capability. Let native retrieval,
 calculation and execution supply the evidence, and bring the strongest available
 reasoning and expression to the current enquiry. When a provider resource is
 offered, the [bounded synthesis door](docs/form-response-synthesis.md) can carry
-that evidence into one Form-owned call and recheck the result. Keep targeted
+that evidence into one Form-owned call and recheck the result. An actual retained
+failing report can use `response-repair @request.json` in the source-backed
+form-cli: the [repair resource](docs/form-response-resource.md) carries the
+original checks, explicit provider allowance, answer attribution and observed
+usage. Repeating that exact request rechecks the retained answer without a new
+provider call. Read the answer for quality; the checks establish their named
+conditions. Keep targeted
 local-model experiments separate from serving the live reply: a failed quality
 hypothesis needs a new discriminating observation before another retry. Count
 coordination and failed attempts alongside successful execution; structural
