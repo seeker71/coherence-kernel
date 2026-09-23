@@ -261,9 +261,11 @@ the serving generation was retained. The subsequent
 [large-projection observation](receipts/2026-09-23-native-affine-grid.md)
 found zeroed later output rows in the long-sequence affine dispatch. Bounded
 grids restore agreement with independent projections at all five inspected
-positions. Training now checks its final projected row before backpropagation;
-whole-row learning correctness still requires the original retry's evidence.
-Checkpoint completion alone did not establish that correctness. In the
+positions. Training now checks its final projected row before backpropagation.
+The original 5,485-token retry completed forward and backward execution from
+parent 152; its whole-row loss and same-parent sliced assessment differ by
+4.13e-10. Its final projected row agrees exactly. This establishes the observed
+numerical consistency; the update's promotion and quality remain pending. In the
 separate Qwen response path, native reasoning corrects three previous errors
 on the original enquiry, but the shortening step copies all 547 words and a
 cell-lifetime claim still contradicts the supplied axiom. Learning quality
