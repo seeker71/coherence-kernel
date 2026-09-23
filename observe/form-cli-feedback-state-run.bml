@@ -1,0 +1,78 @@
+// Compare feedback delivery paths at the actual retained answer boundary.
+// One admission, one original answer, a checked recurrent-state rewind.
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/form-cli-generate-command.bml form-stdlib/native-session-memory.bml
+section [form.bml] {
+ class FeedbackStateReading {
+  def fsr-root() = ".hearth/feedback-state-bytes-2026-09-23";
+  def fsr-keep(name,text) = if fgcr-keep(fsr-root(),name,text) then 1 else form_error("feedback state evidence retention refused");
+  def fsr-save(name,node) = fsr-keep(name,json-emit-precise(node));
+  def fsr-logits(session) = metal_buf_read(nth(nth(fcms-ctx(session),1),28),0,mul(nth(nth(fcms-ctx(session),2),19),4));
+  def fsr-read(handle,bytes) {
+   let text = metal_buf_read(handle,0,bytes);
+   if not(eq(str_len(text),bytes)) then form_error(str_concat("feedback state readback incomplete: ",json-emit-precise(json-node-object(list(nsm-n("handle",handle),nsm-n("expected_bytes",bytes),nsm-n("read_bytes",str_len(text))))))) else text;
+  }
+  def fsr-state(session,pos) = fsr-rows(fcms-sts(session),nth(fcms-ctx(session),2),pos,0);
+  def fsr-rows(rows,geo,pos,layer) = if nil?(rows) then list() else {
+   let full = kth-full?(layer,nth(geo,22)); let first = if full then 2 else 0;
+   let n = mul(4,if full then mul(pos,nth(geo,20)) else q38-recur-conv-n(geo));
+   let m = if full then n else mul(4,q38-recur-delta-n(geo));
+   cons(list(layer,fsr-read(nth(head(rows),first),n),fsr-read(nth(head(rows),add(first,1)),m)),fsr-rows(tail(rows),geo,pos,add(layer,1)));
+  };
+  def fsr-different(a,b) = if nil?(a) then 0 else add(if value_eq(head(a),head(b)) then 0 else 1,fsr-different(tail(a),tail(b)));
+  def fsr-nodes(a,b) = if nil?(a) then list() else cons(json-node-object(list(nsm-n("layer",head(head(a))),nsm-n("first_bytes",str_len(nth(head(a),1))),nsm-n("second_bytes",str_len(nth(head(a),2))),nsm-n("first_equal",str_eq(nth(head(a),1),nth(head(b),1))),nsm-n("second_equal",str_eq(nth(head(a),2),nth(head(b),2))))),fsr-nodes(tail(a),tail(b)));
+  def fsr-run() {
+   if not(eq(host_dir_mkdir(fsr-root()),1)) then form_error("feedback state evidence already exists") else 0;
+   nsm-settle-exit(nsm-settle(hearth-session-learning()));
+   if nsm-running(hearth-session-learning()) then form_error("learner still owns model resources") else 0;
+   let started = host_monotonic_ms(); let path = mr-path(mr-find("qwen38-q8"));
+   let prompt = nsm-str(nsm-json("receipts/artifacts/2026-09-23-native-answer-length/request.json"),"text");
+   let expected = read_file("receipts/artifacts/2026-09-23-native-answer-length/template-initial-answer.txt");
+   let enquiry = str_concat(prompt,str_concat("\n\n",fal-requirement(350,450)));
+   let text = str_concat(fcmg-teach(enquiry),str_concat("\n",fhm-caller-budget-text(2048)));
+   let reserve = add(fgcr-reserve(fcmg-src(path),0,2048),fal-reserve(fcmg-src(path),350,450,2048));
+   let session = fcms-open-reserved(path,text,reserve,"full");
+   if not(frbg-valid-session(session)) then form_error(fcms-reason(session)) else 0;
+   let openingLogits = fsr-logits(session);
+   let initial = fcms-generate(session,2048); let before = fcms-generation-session(initial);
+   fsr-keep("initial-answer.txt",fcms-generation-text(initial));
+   if not(frbg-stopped(before)) then { fcms-release-ok?(before); form_error("original answer did not complete; no feedback comparison"); } else 0;
+   let ctx = fcms-ctx(before); let geo = nth(ctx,2); let spare = q38-spare-state(geo);
+   let expectedSpare = mul(2,sub(nth(geo,21),div(nth(geo,21),nth(geo,22))));
+   let marked = q38-state-mark(head(ctx),fcms-sts(before),spare,geo);
+   let beforeState = fsr-state(before,fcms-pos(before));
+   let beforeLogits = fsr-logits(before);
+   let notice = fal-feedback(fal-count(fcms-generation-text(initial)),350,450);
+   let ids = fcms-observation-ids(before,notice);
+   let reading = oh-reading("native-generation",fsr-root(),"feedback-uptake",json-node-string("changed decoding state after appended correction"),json-node-string("retained answer repeated"),json-node-int(0),list(oh-need("matched-state-delivery-comparison",oh-reference("receipts/2026-09-23-native-answer-length.md"))),list("compare-prefill-paths"),json-node-object(list(nsm-n("position",fcms-pos(before)),nsm-n("observation_ids",len(ids)))));
+   oh-voice(reading); let control = oh-response(reading,"compare-prefill-paths"); oh-voice(control);
+   if not(str_eq(oh-select(reading,control,""),"compare-prefill-paths")) then form_error("feedback state control uncorrelated") else 0;
+   let slicedStart = host_monotonic_ms(); let sliced = fcms-observe-ids(before,ids,"feedback-context-refused");
+   let slicedMs = sub(host_monotonic_ms(),slicedStart);
+   if not(frbg-valid-session(sliced)) then form_error(fcms-reason(sliced)) else 0;
+   let slicedLogits = fsr-logits(sliced); let slicedState = fsr-state(sliced,fcms-pos(sliced));
+   let slicedPrefix = fcms-generate(sliced,16);
+   fsr-keep("sliced-prefix.txt",fcms-generation-text(slicedPrefix));
+   let restored = q38-state-restore(head(ctx),fcms-sts(before),spare,geo);
+   let restoredState = fsr-state(before,fcms-pos(before));
+   let restoreExact = value_eq(beforeState,restoredState);
+   if not(and(restoreExact,and(eq(marked,expectedSpare),eq(restored,expectedSpare)))) then form_error("feedback state rewind differs; reference path refused") else 0;
+   let referenceStart = host_monotonic_ms();
+   let pf = fcmo-prefill-reference(ctx,fcms-sts(before),ids,fcms-pos(before));
+   let referenceMs = sub(host_monotonic_ms(),referenceStart);
+   if not(fcmo-shape(pf,fcms-pos(before),len(ids))) then form_error("reference observation refused") else 0;
+   let reference = fcms-refresh-head(fcms-with-stream(before,nth(pf,1),head(pf),0,fcms-generated-ids(before),add(fcms-injected-ids(before),len(ids)),add(fcms-observations(before),1)));
+   let referenceLogits = fsr-logits(reference); let referenceState = fsr-state(reference,fcms-pos(reference));
+   let detail = json-node-object(list(nsm-n("initial_matches_retained",str_eq(fcms-generation-text(initial),expected)),nsm-n("initial_words",fal-count(fcms-generation-text(initial))),nsm-n("prompt_ids",fcms-prompt-ids(before)),nsm-n("position_before",fcms-pos(before)),nsm-n("position_after",fcms-pos(reference)),nsm-n("observation_ids",len(ids)),nsm-n("restored_state_exact",restoreExact),nsm-n("layers",len(beforeState)),nsm-n("changed_layers_between_paths",fsr-different(slicedState,referenceState)),nsm-n("sliced_pending",fcms-pending(sliced)),nsm-n("reference_pending",fcms-pending(reference)),nsm-n("logits_equal_between_paths",str_eq(slicedLogits,referenceLogits)),nsm-n("sliced_logits_equal_initial_prompt",str_eq(slicedLogits,openingLogits)),nsm-n("sliced_logits_equal_before_feedback",str_eq(slicedLogits,beforeLogits)),nsm-n("sliced_ms",slicedMs),nsm-n("reference_ms",referenceMs),nsm-n("sliced_logits_bytes",str_len(slicedLogits)),nsm-n("reference_logits_bytes",str_len(referenceLogits))));
+   fsr-save("delivery.json",detail); print_str(str_concat(json-emit-precise(detail),"\n"));
+   fsr-save("state-comparison.json",json-node-array(fsr-nodes(slicedState,referenceState)));
+   let answer = fcms-generate(reference,2048); let final = fcms-generation-session(answer);
+   fsr-keep("reference-answer.txt",fcms-generation-text(answer));
+   let freed = q38-free-spare(spare); let released = fcms-release-ok?(final);
+   let outcome = json-node-object(list(nsm-n("complete",frbg-stopped(final)),nsm-n("words",fal-count(fcms-generation-text(answer))),nsm-n("range_passed",fal-within(fal-count(fcms-generation-text(answer)),350,450)),nsm-n("reference_repeats_initial",str_eq(fcms-generation-text(answer),fcms-generation-text(initial))),nsm-n("prefix_ids_equal",value_eq(fcms-generation-ids(slicedPrefix),take(16,fcms-generation-ids(answer)))),nsm-n("initial_generated_ids",len(fcms-generation-ids(initial))),nsm-n("sliced_generated_ids",len(fcms-generation-ids(slicedPrefix))),nsm-n("reference_generated_ids",len(fcms-generation-ids(answer))),nsm-n("spare_release_ok",eq(freed,expectedSpare)),nsm-n("release_ok",released),nsm-n("provider_calls",0),nsm-n("elapsed_ms",sub(host_monotonic_ms(),started))));
+   fsr-save("outcome.json",outcome); oh-voice(oh-applied(reading,"compare-prefill-paths",outcome)); print_str(str_concat(json-emit-precise(outcome),"\n"));
+   if and(released,eq(freed,expectedSpare)) then 0 else form_error("feedback comparison release incomplete");
+  }
+ }
+ fsr-run();
+}

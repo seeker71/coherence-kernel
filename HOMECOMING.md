@@ -199,6 +199,14 @@ and after that encoding repair, outside its 350–450-word request. Detection an
 message-layout conformance are observed; effective feedback uptake and the
 requested answer quality remain open.
 
+The [feedback-state observation](receipts/2026-09-23-feedback-state.md) restored
+the actual pre-feedback boundary byte for byte across 64 layers. Feedback
+changed the next-token scores; the barrier path still repeated the same answer.
+The word-range controller now sends its revision as a follow-up request instead
+of an unsolicited tool result. That change also returned the same 510 words.
+Delivery-path changes have not closed this case's response gap. Keep the actual
+generated IDs, decoded text and turn boundary together in the next real revision.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.

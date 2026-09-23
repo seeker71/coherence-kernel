@@ -23,11 +23,11 @@ replays the original prompt. Its output allowance is the selected `--tokens`
 value. The runtime reserves room for this correction before admission and checks
 the actual encoded observation again before submission.
 
-Qwen observations use the selected model's tool-message layout: a `user` turn
-containing `<tool_response>` markup, followed by the assistant opening. The
-native GGUF reader exposes that contract in `tokenizer.chat_template`; tool
-output remains identified inside the markup. Direct user questions keep their
-own ordinary message path.
+The correction is an ordinary follow-up message, labeled by its text as a Form
+runtime measurement and request. It restates the caller's unmet requirement;
+the model made no tool call whose result this could represent. Actual Qwen tool
+results retain their separate `<tool_response>` envelope. Both paths preserve
+the pending token, completed turn boundary and explicit closed-thinking opening.
 
 The returned metadata distinguishes model completion, word-range success,
 retained evidence and resource release. A second out-of-range answer remains
