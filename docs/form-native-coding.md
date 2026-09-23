@@ -323,6 +323,20 @@ first door therefore does not claim autonomous arbitrary-repository completion.
 Multiple supplied documents and multiple ordered tasks are supported. Only paths
 in `writable` can change, and only during implementation.
 
+For a document with a length requirement, a caller may supply a range check:
+
+```json
+{"kind":"word-range","path":"answer.md","minimum":350,"maximum":450}
+```
+
+It counts the current resident document with the same ASCII-whitespace counter
+as ordinary generation, including headings. Bounds are nonnegative integers
+and include both endpoints. A missing document fails separately from an empty
+document. A failed `verify` or completion check returns the observed count and
+the required range to the existing repair flow. This establishes length only;
+source fidelity, completeness and useful wording still require review. The
+check reads document bytes and accepts exactly the four fields shown above.
+
 ### Direct implementation entry
 
 For a fully specified task, set `"code_entry":"direct"`. A fresh coding
