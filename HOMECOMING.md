@@ -214,9 +214,18 @@ request; compilation and behavior checks pass. On the unchanged original
 question, the answer grew from 481 to 635 words, and each run's correction
 repeated its initial answer exactly. The repaired-path answer also reverses
 the service-over-engagement covenant. This closes the prompt-contract mismatch
-and leaves response quality worse on this case. Retain full generated IDs and
-stop identities in the serving response evidence before another correction:
-the existing decoded-text and count receipts leave that distinction open.
+and leaves response quality worse on this case.
+
+The [generation evidence repair](receipts/2026-09-23-generation-evidence.md)
+now retains full generated IDs, decoded text and stop state in the serving
+response. On the unchanged question, the initial and correction sequences are
+identical across all 812 IDs. Fresh decoding independently reproduces both
+635-word texts; both stages end with stop ID 248046 while position advances
+from 4960 to 5858. Repetition is present in generation. This closes the missing
+evidence boundary and leaves answer quality unchanged. The next discriminating
+comparison is the exact retained continuation against fresh prefill of the
+same transcript, to separate continuation-state behavior from the model's
+response to that content. Keep the original question and adverse answer intact.
 
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
