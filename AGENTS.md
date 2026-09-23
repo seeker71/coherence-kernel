@@ -204,6 +204,11 @@ reports their tokens, completion and release; read the final answer to assess
 its quality. This mode answers from supplied context and owns a session per
 call; automatic lookup and literal-thought injection are not bound to it.
 Both options may be combined in either order.
+Use `generate --tokens 2048 --reasoning 512 --words 350:450 --prompt-file PATH`
+when the enquiry and source context need a complete file; choose allowances and
+word range for the actual request. Put the file option last. `generate` composes
+the response. The `code` review mode assesses candidates and returns findings;
+that review is a distinct contribution when the person asks for a completed answer.
 Preserve the question and relevant context. Show
 the returned words with their actual model/lane attribution, followed by your
 commentary. Keep unfinished output visible as unfinished. A failed attempt
