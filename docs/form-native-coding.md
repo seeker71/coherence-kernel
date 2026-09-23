@@ -760,7 +760,7 @@ positive integer limits **all generated tokens in that reply**, including
 reasoning and the final answer. The maximum is 8192; the caller's context
 capacity still applies. When `max_reply_tokens` is also supplied, the smaller
 ceiling governs this initial reply, including its reasoning. Omit
-`initial_reasoning_tokens` to keep the ordinary entry.
+both reasoning fields to keep the ordinary entry.
 
 Form separates the final channel at the actual closing token. Only that final
 response enters the existing tool, edit, report and verification loop. Later
@@ -808,6 +808,29 @@ answer quality to be assessed. The earlier native experiments are retained in
 [`../receipts/2026-09-16-matched-session-and-turn-budget.md`](../receipts/2026-09-16-matched-session-and-turn-budget.md).
 The public request's incomplete and completed executions are recorded in
 [`../receipts/2026-09-16-public-native-reasoning.md`](../receipts/2026-09-16-public-native-reasoning.md).
+
+### Reasoning across the task
+
+Use `reasoning_tokens` instead of `initial_reasoning_tokens` to open bounded
+reasoning on every generated reply, including tool continuations, failed-check
+repair and context renewal:
+
+```json
+{"reasoning_tokens":512,"reasoning_answer_tokens":1024}
+```
+
+This mode requires the separate answer allowance. Both limits are positive
+integers at most 8192; `max_reply_tokens` caps each stage separately. The caller's
+reply count remains unchanged. The task retains these allowances in its owned
+state, opens the actual thought boundary after feedback and uses the same
+generation, final-channel selection and incomplete-output handling as the
+initial reserve. Only a complete final response enters tools and checks.
+
+The result's `reasoning_tokens` names the continuing allowance. Each
+`form-code-reasoning-reserve` event identifies its reply number and actual stage
+counts without exposing reasoning text. The existing initial-only option and
+ordinary continuation remain available. Reasoning availability is a runtime
+capability; improvement in the resulting work needs its own observation.
 
 ### Controller roles
 
