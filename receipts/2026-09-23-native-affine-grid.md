@@ -91,3 +91,38 @@ Provider token quantities are observed; tool-event reconciliation remains
 incomplete and grants no contribution share. Current open-turn cost awaits
 completion. These costs remain far from the goal. Native answer quality,
 resonance, full long-row learning correctness and session parity remain open.
+
+## Original retry: numerical consistency observed
+
+Codex, later on 2026-09-23. The unchanged original example completed its full
+forward and backward passes from parent 152. Its [bound loss observation](artifacts/2026-09-23-native-affine-grid/original-retry/learning-loss-reobserved.json)
+retains the actual admission and canonical example identity: 5,485 input
+tokens, 2,502 supervised tokens, whole-row loss **0.04004204969014841** and
+same-parent sliced assessment **0.04004205010308151**. Their absolute difference
+is **4.129331043767337e-10**. The earlier disagreement was roughly 11.76 versus
+0.04 within parent 148. Parent identity changed between those runs; each
+whole-row/sliced comparison uses its own same parent. This is numerical
+consistency evidence, not promotion or answer-quality evidence.
+
+The real final-row guard also reports exact agreement and no non-finite values.
+Its diagnostic incorrectly set `surprise=1` because expected integer zero and
+observed real zero had different node types. The producer now expresses both
+as real-valued differences. A [diagnostic replay](artifacts/2026-09-23-native-affine-grid/original-retry/projection-health-reobserved.json)
+of those retained values keeps health 1 and changes surprise to 0; it does
+not rerun the model or update a gradient. Native resumed-learning checks
+verify both an exact match and a corrupted finite row, returning **7** with
+unchanged resumed parameters/moments and zero retained buffers. The first test
+preflight refused four uses of unavailable `nsm-num`; the loaded JSON accessors
+replaced them, and preflight and execution now pass. Full CLI preflight is
+clean; landing gates return **8191**, exit 0.
+
+Closing guide: 0 Python implementations, 2 invocation candidates, 0 unread.
+Glass first frame **45 ms**, stopped intentionally with Ctrl-C (130); counsel
+reports **0 orphans**, with 11/12 lanes unobserved. Share remains declared.
+The verified teaching is retained as
+`86458d047dc442b4738cd17bae70356c3565d71d59f2b3baa8e1455f76cab2a2`,
+event `2026-09-23-original-loss-consistency`; its update remains pending.
+The [preceding completed coordinator turn](artifacts/2026-09-23-native-affine-grid/original-retry/assessment-reuse-completed-turn-cost.json)
+used **5,163,518 tokens**, including **4,940,928 cached input tokens**, with
+provider and tool boundaries reconciled. Current open-turn cost remains
+unmeasured. The learner's complete update and native response task continue.
