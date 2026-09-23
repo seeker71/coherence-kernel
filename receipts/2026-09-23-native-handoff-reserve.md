@@ -1,0 +1,69 @@
+# Reserve the current task before spending its reasoning
+
+The actual native review stopped before its seventh completed reply. Its last
+answer is 514 words against the unchanged 350–450 range. It still assigns
+automatic response behavior to frequency arithmetic that only calculates over
+caller-supplied annotations. The answer-quality gap remains open.
+
+## Observed cause and repair
+
+The preceding run completed with model release confirmed: 2,166,718 ms,
+4,358 generated IDs, 3,957 injected IDs, six cumulative completed replies and
+five cumulative check runs. Its native path made zero provider calls; this
+does not describe the coordinating Codex session's rented cost.
+
+At position 14,654 of 16,384, the admission check reserved 512 reasoning and
+1,024 answer IDs. It omitted the controller request between those stages.
+That request needed 770 IDs including crossing controls. The next 512-ID
+reasoning stage completed, then the answer bridge reported
+`final-response-reserve-does-not-fit`. The last report and checkpoint survived.
+
+The native coding loop now encodes the actual current task notice before
+generation and includes it in admission. Insufficient room follows the existing
+capacity/renewal path. Renewal requires completed work in that residence; a
+fresh context cannot repeatedly renew itself without progress. This repair
+lives in BML and uses the existing tokenizer and C bootstrap.
+
+Fresh preflight reported zero errors, warnings and unresolved calls for both
+affected bands. Reasoning budget returned **1**, request returned **255**, both
+exit 0. They cover the actual overflow geometry, the pending-position boundary,
+unavailable sessions, and ordinary replies without reasoning.
+
+## Continue the actual enquiry
+
+The checkpoint remained in repair with six replies; terminal attention was
+not saved over it. Its contract, original documents and report were verified.
+The continuation keeps the original model, goal, sources and checks, with six
+remaining replies from the original twelve.
+
+Codex supplied explicit semantic feedback about the unsupported frequency
+claim and the observed 554 → 521 → 517 → 514 word sequence. It asks for practical
+response decisions and a substantive reduction while preserving the six axes
+and one witnessed translation. No replacement answer was supplied. The exact
+feedback and before/after checkpoint digests are retained in the artifacts.
+This changes the model's context and must be credited when assessing its reply.
+
+Preparation initially exited 1 with
+`care changed task identity, report or reply count`. The compound guard caught
+use of `fcap-rework`, whose transition increments the model-reply counter.
+No checkpoint write or model admission had occurred. Using `fcap-repair-state`
+retains six completed replies; the unchanged-report and contract checks passed.
+The first commentary interpretation that the report was lost was incorrect:
+the source identifies the count increment as the cause.
+
+The correlated organ-health exchange records the need, selected care, actual
+checkpoint update, and fresh preparation observation. Preparation success
+establishes retained state, not improved answer quality. The continuation owns
+PID 62918 and writes under `.hearth/native-handoff-reserve-2026-09-23`.
+
+Panel: counsel reports **orphans 0**; eleven of twelve lanes are unobserved
+without a standing hearth. Native guide: zero Python implementations, two
+remaining invocation candidates, zero unread files.
+
+Landing drift gates returned **8191/8191**, exit 0. Verified admission teaching
+was retained as session example
+`b1c55150fbe866670a2b7a8de9e82ebbf12c8c966f4a356b422b52e8a0746b56`;
+worker launch does not establish a serving-weight update or Qwen improvement.
+
+Signed: Codex. The useful teaching is that a reply's working space includes
+the evidence needed to finish it, as well as the words it generates.

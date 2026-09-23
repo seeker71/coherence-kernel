@@ -868,6 +868,13 @@ state, opens the actual thought boundary after feedback and uses the same
 generation, final-channel selection and incomplete-output handling as the
 initial reserve. Only a complete final response enters tools and checks.
 
+Before each reasoning reply, admission also tokenizes and reserves the current
+final-stage controller request, including its crossing control IDs. A completed
+action followed by insufficient room selects the existing context renewal on
+the same admitted weights. A fresh context that cannot fit the full reservation
+retains the candidate and reports capacity. This prevents spending a reasoning
+allowance on an answer stage that the current task handoff cannot reach.
+
 The result's `reasoning_tokens` names the continuing allowance. Each
 `form-code-reasoning-reserve` event identifies its reply number and actual stage
 counts without exposing reasoning text. The existing initial-only option and
