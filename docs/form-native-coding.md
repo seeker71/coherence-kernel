@@ -891,6 +891,14 @@ model reply and one actual check, with no invented tool call. Intermediate tasks
 continue without this whole-candidate check. Read-only report work keeps its
 report-aware submission boundary.
 
+A failed coding source check stays open through diagnosis, planning, a return
+to implementation, context renewal and checkpoint resume. Each accepted changed
+candidate in that repair runs the original source checks immediately, including
+when the model chose `next:"implement"`. A passing source check closes this
+condition; review and final verification still follow. Failed or unchanged tools
+retain the condition without running another source check. Before any source
+failure, ordinary implementation edits retain their existing behavior.
+
 The coding runtime saves a completed action before loading its feedback into
 the model context. Interrupted feedback loading can therefore resume from that
 action. Context references become admitted only after loading completes; the

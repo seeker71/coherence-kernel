@@ -273,6 +273,13 @@ section [form.bml] {
    let padded = fcap-with-context-evidence(s,fcap-context-evidence(s));
    fcap-with-memory(padded,append(fat-take(fcap-memory(padded),22),list(limits)));
   }
+  // A failed source check remains open across diagnosis, planning and renewal.
+  // A fresh passing source check closes it; a role change cannot do so.
+  def fcap-source-repair-open(s) = if ge(len(fcap-memory(s)),24) then nth(fcap-memory(s),23) else 0;
+  def fcap-track-source-check(s,result) = if fcap-reviewing(s) then s else {
+   let padded = fcap-with-reasoning(s,fcap-reasoning(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),23),list(not(head(result)))));
+  };
   def fcap-with-context-evidence(s,digest) {
    let padded = fcap-with-json-repairs(s,fcap-json-repairs(s));
    fcap-with-memory(padded,append(fat-take(fcap-memory(padded),21),list(digest)));
@@ -295,9 +302,9 @@ section [form.bml] {
   // A real repair edit is already an action. Record its observed provenance
   // and check the changed candidate now, without a role-only model round trip.
   // Failed/no-op tools and repeated counterexamples retain their own boundary.
-  def fcap-repair-edit-checked(s,next,obj,checker) = if not(and(str_eq(fcap-stage(s),"repair"),and(not(fcap-reviewing(s)),and(str_eq(fcap-stage(next),"repair"),and(eq(fcap-failures(s),fcap-failures(next)),not(value_eq(fcap-docs(s),fcap-docs(next)))))))) then next else {
+  def fcap-repair-edit-checked(s,next,obj,checker) = if not(and(or(str_eq(fcap-stage(s),"repair"),fcap-source-repair-open(s)),and(not(fcap-reviewing(s)),and(fat-has(list("implement","repair"),fcap-stage(next)),and(eq(fcap-failures(s),fcap-failures(next)),not(value_eq(fcap-docs(s),fcap-docs(next)))))))) then next else {
    let applied = str_concat("Native controller observed the model tool apply: ",str_concat(fcap-string(obj,"tool"),str_concat(" ",head(fcap-array(obj,"arguments")))));
-   let recorded = fcap-repaired(next,"Native controller retained the failure evidence; no model diagnosis was supplied with this action.",applied,"implement");
+   let recorded = if str_eq(fcap-stage(s),"repair") then fcap-repaired(next,"Native controller retained the failure evidence; no model diagnosis was supplied with this action.",applied,"implement") else next;
    let checked = fcap-verify-observed(recorded,fcap-source-check(recorded,checker));
    append(fat-take(checked,9),cons(fcap-turns(next),fat-drop(checked,10)));
   };
@@ -408,7 +415,7 @@ section [form.bml] {
   def fcap-verify-tool(s, obj, checker) = if not(fcap-string-array(json-object-get(obj, "arguments"))) then fcap-revise(s, "verify arguments must be an empty array.") else if not(nil?(fcap-array(obj, "arguments"))) then fcap-revise(s, "verify takes no arguments; the caller owns its checks.") else if and(json-object-has?(obj, "input"), not(and(fat-wire-string?(json-object-get(obj, "input")), str_eq(fcap-string(obj, "input"), "")))) then fcap-revise(s, "verify takes no input; the caller owns its checks.") else fcap-verify-assisted(s, fcap-source-check(s, checker),checker);
   def fcap-source-check(s, checker) = if ge(len(checker), 4) then fcap-check(nth(checker, 2), nth(checker, 3), fcap-docs(s)) else if fcap-reviewing(s) then list(0, "No source-only verification callback was supplied; the report checker runs on submission.") else fcap-check(head(checker), nth(checker, 1), fcap-docs(s));
   def fcap-verify-observed(s, result) = fcap-verify-counted(fcap-count-check(s), result);
-  def fcap-verify-counted(s, result) = if not(fcap-check-shape?(result)) then fcap-terminal(s, "caller-checker-returned-malformed-result") else fcap-tool-observed(s, "verify", list(), "", fat-result(if head(result) then 0 else 2, nth(result, 1), if head(result) then "" else "caller verification refused", fcap-docs(s)));
+  def fcap-verify-counted(s, result) = if not(fcap-check-shape?(result)) then fcap-terminal(s, "caller-checker-returned-malformed-result") else fcap-tool-observed(fcap-track-source-check(s,result), "verify", list(), "", fat-result(if head(result) then 0 else 2, nth(result, 1), if head(result) then "" else "caller verification refused", fcap-docs(s)));
   def fcap-role(s, obj, checker) = if str_eq(fcap-stage(s), "refine") then fcap-refine(s, fcap-string(obj, "brief")) else if str_eq(fcap-stage(s), "plan") then fcap-plan(s, fcap-string(obj, "plan")) else if str_eq(fcap-stage(s), "split") then fcap-split(s, obj) else if str_eq(fcap-stage(s), "implement") then fcap-implemented-checked(s, obj, checker) else if str_eq(fcap-stage(s), "review") then fcap-review(s, obj, checker) else if str_eq(fcap-stage(s), "repair") then fcap-review-repair(s, obj, checker) else fcap-terminal(s, "unknown-stage");
   def fcap-review-repair(s,obj,checker) = if and(fcap-reviewing(s),json-object-has?(obj,"report")) then fcap-review(s,obj,checker) else fcap-repair(s,obj);
   def fcap-refine(s, brief) = if eq(str_len(fat-trim(brief)), 0) then fcap-revise(s, "Return a nonempty brief preserving the original goal and constraints.") else fcap-move(s, "plan", fcap-docs(s), list(), brief, "", "Now plan from the original goal, brief and evidence.", fcap-calls(s), 0);
@@ -426,7 +433,7 @@ section [form.bml] {
   def fcap-before-review(s,result) = if not(fcap-check-shape?(result)) then fcap-terminal(s,"caller-checker-returned-malformed-result") else {
    let wire = fat-result(if head(result) then 0 else 2,nth(result,1),if head(result) then "" else "caller verification refused",fcap-docs(s));
    let note = str_concat(if head(result) then "Current implementation passed the caller source checks. Earlier failures describe earlier observations; review this candidate against the original goal. Final acceptance still runs the caller checks. " else "Current implementation failed the caller source checks before review. Repair this observed failure; earlier diagnostics may describe older source. ",fcap-verification-note(s,wire));
-   let observed = fcap-inherit(s,fcap-state(fcap-stage(s),nth(s,1),nth(s,2),fcap-docs(s),nth(s,4),nth(s,5),nth(s,6),nth(s,7),note,fcap-turns(s),fcap-calls(s),nth(s,11)));
+   let observed = fcap-inherit(fcap-track-source-check(s,result),fcap-state(fcap-stage(s),nth(s,1),nth(s,2),fcap-docs(s),nth(s,4),nth(s,5),nth(s,6),nth(s,7),note,fcap-turns(s),fcap-calls(s),nth(s,11)));
    if head(result) then observed else fcap-repair-state(observed,note);
   };
   def fcap-check(callback, contract, docs) = callback(contract, docs);
@@ -472,7 +479,7 @@ section [form.bml] {
    let before = fcap-native-evidence-json(fcap-last-native(s),4);
    if or(bootstrap,not(eq(fcap-context-native-submission(s),len(fcap-native-repairs(s))))) then before else json-node-object(list(json-node-pair("report_reference",json-node-string("preceding-submission")),json-node-pair("check_status",json-object-get(before,"check_status")),json-node-pair("check",json-object-get(before,"check"))));
   }
-  def fcap-verified(s, result) = if not(fcap-check-shape?(result)) then fcap-terminal(s, "caller-checker-returned-malformed-result") else if not(eq(head(result), 1)) then fcap-rework(s, str_concat("Native verification failed: ", nth(result, 1))) else fcap-note-at(s, "complete", nth(result, 1));
+  def fcap-verified(s, result) = if not(fcap-check-shape?(result)) then fcap-terminal(s, "caller-checker-returned-malformed-result") else if not(eq(head(result), 1)) then fcap-rework(fcap-track-source-check(s,result), str_concat("Native verification failed: ", nth(result, 1))) else fcap-note-at(fcap-track-source-check(s,result), "complete", nth(result, 1));
   def fcap-rework(s, reason) = fcap-repair-state(fcap-note-at(s, fcap-stage(s), reason), reason);
   // Verification retains the checked source hashes, but those hashes are not
   // the counterexample. A changed file can still produce the same failure.
