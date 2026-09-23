@@ -527,7 +527,7 @@ Source/report verification continues to use actual document bytes; it does not
 consume these model-context references or splices.
 
 Coding and read-only reviews may opt into `"document_context":"catalog"`. The initial
-prompt contains source IDs, paths and byte counts; native tools retain all
+prompt contains source IDs, paths, byte counts and current `resident_sha256` identities; native tools retain all
 original source text. `read`, `cat` and focused queries retrieve that text on
 demand. The admission snapshot starts empty, so a catalog cannot produce a
 reference or patch against source text omitted from the prompt. Reads continue
@@ -869,6 +869,14 @@ Other examples:
 {"tool":"edit","arguments":["config.json","\"enabled\":false","\"enabled\":true"]}
 {"tool":"write","arguments":["notes.md"],"input":"New document bytes\n"}
 ```
+
+Successful document mutations return the accepted document's `id`, `path`,
+`bytes` and `resident_sha256`, plus `documents_changed:1` and `before_sha256`
+(null for creation). This acknowledges the accepted bytes; caller verification
+has its own result. A later whole-document edit uses this new hash. Stale hashes
+still fail without changing the document. Full admission and context renewal
+include each current document's identity beside its text, so continued work
+can use that identity without another read.
 
 The full existing native tool set is reused: `rg`, `jq`, `read`, `cat`, `head`,
 `tail`, `wc`, `sort`, `uniq`, `tr`, `cut`, `awk`, `sed`, `edit`, `write`. Their
