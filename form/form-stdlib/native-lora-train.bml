@@ -1,13 +1,15 @@
 // One resident model and tokenizer serve a training run. Sequence microbatches
 // accumulate a token-weighted batch gradient; every completed round updates LoRA.
 // Parameters and Adam moments publish together, after device health and byte checks.
-// preludes: form-stdlib/native-lora-dataset.bml form-stdlib/native-lora-checkpoint.bml form-stdlib/native-llama-voice.bml observe/bidirectional-framebuffer-channel.fk form-stdlib/json-precise.bml form-stdlib/sha256.fk form-stdlib/native-lora-progress.bml
+// preludes: form-stdlib/native-lora-dataset.bml form-stdlib/native-lora-checkpoint.bml form-stdlib/native-llama-voice.bml form-stdlib/native-lora-recompute.bml observe/bidirectional-framebuffer-channel.fk form-stdlib/json-precise.bml form-stdlib/sha256.fk form-stdlib/native-lora-progress.bml
 section [form.bml] {
  class NativeLoraTrain {
   def ntr-int(k,v) = json-node-pair(k,json-node-int(v));
   def ntr-text(k,v) = json-node-pair(k,json-node-string(v));
   def ntr-real(k,v) = json-node-pair(k,json-precise-float(v));
   def ntr-get(r,k) = node_value(json-object-get(r,k));
+  def ntr-activation-policy() = "memory-selected-whole-tape-or-layer-input-checkpoints;whole-sequence";
+  def ntr-row-policy(checkpointed) = if checkpointed then "layer-input-checkpoints;whole-sequence-recompute" else "whole-tape;whole-sequence";
   def ntr-request(model,adapter,data,out,steps,batch,lr,masked,layers) = json-node-object(list(ntr-text("schema","native-lora-training-v1"),ntr-text("model",model),ntr-text("adapter",adapter),ntr-text("data",data),ntr-text("output",out),ntr-int("steps",steps),ntr-int("batch",batch),ntr-real("learning_rate",lr),ntr-int("mask_prompt",masked),ntr-int("layers",layers)));
   def ntr-event(out,kind,fields) {
    let text = str_concat(json-emit-precise(json-node-object(append(list(ntr-text("stage",kind),ntr-int("at_ms",host_monotonic_ms()),ntr-int("pid",host_pid()),ntr-text("owner","Form-native-Metal")),fields))),"\n");
@@ -36,7 +38,8 @@ section [form.bml] {
    let a = nlc-save(str_concat(gen,"/adapters.safetensors"),nlc-adapter-rows(nlb-pairs(nth(model,1))),nth(model,4),step);
    let o = nlc-save(str_concat(gen,"/optimizer.safetensors"),nlc-optimizer-rows(state),nth(model,4),step);
    let progress = json-object-get(r,"training_progress");
-   let c = if nlp-valid(progress) then nag-write(str_concat(gen,"/adapter_config.json"),json-emit-precise(oh-set(ntr-config(model,r,step),"training_progress",progress))) else form_error("native checkpoint requires dataset progress");
+   let config = oh-set(ntr-config(model,r,step),"activation_policy",json-node-string(ntr-activation-policy()));
+   let c = if nlp-valid(progress) then nag-write(str_concat(gen,"/adapter_config.json"),json-emit-precise(oh-set(config,"training_progress",progress))) else form_error("native checkpoint requires dataset progress");
    let complete = nag-write(str_concat(gen,"/complete.json"),json-emit-precise(json-node-object(list(ntr-int("step",step),ntr-int("adapter_bytes",nth(a,1)),ntr-int("adapter_tensors",nth(a,2)),ntr-int("optimizer_bytes",nth(o,1)),ntr-int("optimizer_tensors",nth(o,2)),json-node-pair("training_progress",progress)))));
    let sync = nlc-sync-host(host_spawn_at(list("/bin/sync"),list("/dev/null","/dev/null","/dev/null")));
    nag-publish(out,gen);
@@ -53,7 +56,10 @@ section [form.bml] {
    let restore = nlc-load-optimizer(state,str_concat(dir,"/optimizer.safetensors"));
    list(step,"Adam moments and step restored from the same published generation");
   }
-  def ntr-row-bytes(model,t) = add(nlg-cache-bytes(model,t),add(mul(3,nlg-forward-bytes(model,t,0)),mul(12,mul(t,nth(head(model),5)))));
+  def ntr-whole-tape-bytes(model,t) = add(nlg-cache-bytes(model,t),add(mul(3,nlg-forward-bytes(model,t,0)),mul(12,mul(t,nth(head(model),5)))));
+  def ntr-checkpointed?(model,t) = not(nlg-slice-fits?(ntr-whole-tape-bytes(model,t)));
+  def ntr-policy-bytes(model,t,checkpointed) = if checkpointed then nlrc-bytes(model,t) else ntr-whole-tape-bytes(model,t);
+  def ntr-row-bytes(model,t) = ntr-policy-bytes(model,t,ntr-checkpointed?(model,t));
   // Assessment retains the complete KV and releases each forward tape. Include
   // all head rows and masked-loss buffers in the slice admission estimate.
   def ntr-score-bytes(model,t,pos) {
@@ -134,20 +140,25 @@ section [form.bml] {
    ntr-event(out,str_concat("assessment-",phase),list(ntr-int("rows",len(scores)),ntr-int("wall_ms",sub(host_monotonic_ms(),started)),ntr-text("scores",path)));
   }
   def ntr-admit(model,sample) {
-   let t = len(head(sample)); let bytes = ntr-row-bytes(model,t);
-   if gt(t,nth(head(model),9)) then form_error(str_concat("native training row exceeds model positions; line=",int_to_str(nth(sample,4)))) else if not(nlg-room(bytes)) then form_error(str_concat("native training whole row awaits memory; line=",str_concat(int_to_str(nth(sample,4)),str_concat(" required_additional_bytes=",int_to_str(bytes))))) else 1;
+   ntr-admit-policy(model,sample,ntr-checkpointed?(model,len(head(sample))));
   }
+  def ntr-admit-policy(model,sample,checkpointed) {
+   let t = len(head(sample)); let bytes = ntr-policy-bytes(model,t,checkpointed);
+   if gt(t,nth(head(model),9)) then form_error(str_concat("native training row exceeds model positions; line=",int_to_str(nth(sample,4)))) else if not(nlg-room(bytes)) then form_error(str_concat("native training checkpointed row awaits memory; line=",str_concat(int_to_str(nth(sample,4)),str_concat(" required_additional_bytes=",int_to_str(bytes))))) else 1;
+  }
+  def ntr-recompute-event(context,stage,index,t,elapsed) = ntr-event(head(context),str_concat("row-",str_concat(stage,"-layer")),list(ntr-int("line",nth(context,1)),ntr-int("layer",index),ntr-int("input_tokens",t),ntr-int("wall_ms",elapsed),ntr-int("device_bytes",nth(metal_live(),18))));
   def ntr-batch(model,state,rows,total,out,loss) {
    if nil?(rows) then loss else ntr-batch-row(model,state,head(rows),tail(rows),total,out,loss);
   }
   def ntr-batch-row(model,state,sample,rest,total,out,loss) {
-   let entering = ntr-event(out,"row-start",list(ntr-int("line",nth(sample,4)),ntr-int("input_tokens",len(head(sample))),ntr-real("supervised_tokens",nth(sample,3)),ntr-int("required_additional_bytes",ntr-row-bytes(model,len(head(sample))))));
-   let admitted = ntr-admit(model,sample); let start = host_monotonic_ms(); let live = metal_live();
-   let ctx = nll-context(model,len(head(sample))); let r = nll-forward(model,ctx,head(sample),0,1);
+   let checkpointed = ntr-checkpointed?(model,len(head(sample)));
+   let entering = ntr-event(out,"row-start",list(ntr-int("line",nth(sample,4)),ntr-int("input_tokens",len(head(sample))),ntr-real("supervised_tokens",nth(sample,3)),ntr-int("required_additional_bytes",ntr-policy-bytes(model,len(head(sample)),checkpointed)),ntr-int("whole_tape_estimated_bytes",ntr-whole-tape-bytes(model,len(head(sample)))),ntr-text("activation_policy",ntr-row-policy(checkpointed))));
+   let admitted = ntr-admit-policy(model,sample,checkpointed); let start = host_monotonic_ms(); let live = metal_live();
+   let ctx = nll-context(model,len(head(sample))); let r = if checkpointed then nlrc-forward-observed(model,ctx,head(sample),list(out,nth(sample,4)),ntr-recompute-event) else nll-forward(model,ctx,head(sample),0,1);
    let forward = host_monotonic_ms(); let fg = metal_live();
    let forwardObserved = ntr-event(out,"row-forward-complete",list(ntr-int("line",nth(sample,4)),ntr-int("wall_ms",sub(forward,start)),ntr-int("dispatches",sub(nth(fg,7),nth(live,7)))));
    let weight = div(nth(sample,3),total);
-   let value = nlb-backward-masked(model,r,nth(sample,1),nth(sample,2),state,weight);
+   let value = if checkpointed then nlrc-backward-observed(model,r,nth(sample,1),nth(sample,2),state,weight,list(out,nth(sample,4)),ntr-recompute-event) else nlb-backward-masked(model,r,nth(sample,1),nth(sample,2),state,weight);
    let backward = host_monotonic_ms(); let bg = metal_live();
    let backwardObserved = ntr-event(out,"row-backward-complete",list(ntr-int("line",nth(sample,4)),ntr-int("wall_ms",sub(backward,forward)),ntr-int("dispatches",sub(nth(bg,7),nth(fg,7)))));
    let release = nll-forward-close(r); let close = nll-context-close(ctx);
