@@ -136,5 +136,8 @@ The verified implementation and adverse comparison were retained for native
 session learning as event `2026-09-23-ordinary-response-contract-v1`, session
 `native-arrival-bootstrap`, row
 `1e081fe23d355a6eb16d0d21367bbe1c5427f619bf68894dac20c961a0d42049`.
-The learner launched; its completion is pending. Neither failed generated
-answer was presented as a correct learning target.
+The following movement observed this row complete at optimizer step 145,
+learned rounds 146. A later queued code example failed whole-row memory
+admission; the [separate outcomes](2026-09-23-generation-evidence.md) remain
+visible. Neither failed generated answer was presented as a correct learning
+target.
