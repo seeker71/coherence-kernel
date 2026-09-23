@@ -804,11 +804,21 @@ Otherwise Form adds an explicit runtime observation and opens one final-response
 stage with the reserved allowance. It supplies no new task evidence. An
 incomplete or refused final stage cannot submit a report or execute an action.
 
-Generation completion and JSON validity are separate. An already complete final
-response goes to the ordinary reply parser and report checks, even when its JSON
-is invalid. Invalid JSON alone does not open an extra reserved stage. The
-ordinary controller retains responsibility for parsing failures and failed
-caller assertions; its checks remain in force.
+Generation completion and JSON validity are separate. Within the controller's
+reserved final stage, a stop predicted inside an unfinished JSON object string
+can yield to the highest finite non-stop logit. The model continues in the same
+stream using only the remaining answer allowance. The original prefix is
+retained; `form-code-json-prefix` and `form-code-json-continuation` identify it
+and record each stop selection and token count. The organ observes and rechecks
+this care through `json-string-completion` health events. Complete JSON,
+other syntax failures, private reasoning and ordinary dialogue retain their
+original stop behavior. A non-finite or unavailable head leaves the original
+response intact. No missing answer text or JSON closer is supplied by this path.
+
+The ordinary parser, tool permissions, review and caller assertions still
+apply. An exhausted final stage cannot execute its partial action. This bounded
+completion capability does not establish answer quality; compare the returned
+answer and the original task checks.
 
 The result includes `requested_reasoning_answer_tokens` (0 when omitted).
 `form-code-reasoning-reserve` metadata reports the effective allowances, both

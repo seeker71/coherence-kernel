@@ -1,0 +1,77 @@
+// Coding final responses own a JSON contract. An uncommitted stop prediction
+// inside a string can yield to the highest finite non-stop model logit within
+// the original answer allowance. No bytes are supplied as missing content.
+// Ordinary dialogue, private reasoning and already complete JSON keep their
+// original stop decisions. Strict syntax and tool admission still follow.
+// preludes: form-stdlib/bml/form-cli-reasoning-budget.bml form-stdlib/bml/form-agent-json-query.bml form-stdlib/organ-health.bml
+section [form.bml] {
+ class FormCliJsonCompletion {
+  def fcjc-open-string(text) {
+   let error = faj-complete(text);
+   if ge(error,0) then 0 else and(eq(fat-char(text,fat-skip(text,0)),123),and(eq(faj-error-reason(error),1),eq(faj-error-at(error),str_len(text))));
+  }
+  // Refuse a non-finite head, including one outside the winning position.
+  // Ascending traversal retains the first index on an exact tie.
+  def fcjc-best(raw,stops,i,n,best,value) = if ge(i,n) then best else {
+   let bits = ln-u32-le(raw,mul(i,4));
+   if eq(mod(div(bits,8388608),256),255) then -1 else {
+    let score = ln-f32-decode(bits);
+    let select = and(not(q38-stop?(i,stops)),or(lt(best,0),gt(score,value)));
+    fcjc-best(raw,stops,add(i,1),n,if select then i else best,if select then score else value);
+   };
+  };
+  def fcjc-select(raw,n,stops) = if not(str_eq(value_kind(raw),"string")) then -1 else if or(le(n,0),not(eq(str_len(raw),mul(n,4)))) then -1 else fcjc-best(raw,stops,0,n,-1,0.0);
+  def fcjc-pick(session,stops) {
+   let ctx = fcms-ctx(session);
+   let width = nth(nth(ctx,2),19);
+   fcjc-select(metal_buf_read(nth(nth(ctx,1),28),0,mul(width,4)),width,stops);
+  }
+  def fcjc-joined(before,after,decode) {
+   let ids = append(fcms-generation-ids(before),fcms-generation-ids(after));
+   let session = fcms-generation-session(after);
+   fcms-generation(decode(session,ids),ids,session);
+  }
+  def fcjc-decode(session,ids) = ftdb-text(fcms-src(session),ids);
+  def fcjc-walk(generation,left,stops,pick,generate,decode,events) {
+   let session = fcms-generation-session(generation);
+   if or(le(left,0),or(not(frbg-stopped(session)),or(not(q38-stop?(fcms-pending(session),stops)),not(fcjc-open-string(fcms-generation-text(generation)))))) then list(generation,events)
+   else if ge(add(fcms-pos(session),left),fcms-maxpos(session)) then list(generation,events)
+   else {
+    let chosen = pick(session,stops);
+    if or(lt(chosen,0),q38-stop?(chosen,stops)) then list(generation,events) else {
+     let continued = fcms-with-stream(session,fcms-pos(session),chosen,0,fcms-generated-ids(session),fcms-injected-ids(session),fcms-observations(session));
+     let part = generate(continued,left);
+     let used = len(fcms-generation-ids(part));
+     let row = json-node-object(list(json-node-pair("position",json-node-int(fcms-pos(session))),json-node-pair("stop_id",json-node-int(fcms-pending(session))),json-node-pair("selected_id",json-node-int(chosen)),json-node-pair("prefix_sha256",json-node-string(hex-encode(sha256-stream-string(fcms-generation-text(generation))))),json-node-pair("prefix_generated_ids",json-node-int(len(fcms-generation-ids(generation)))),json-node-pair("remaining_tokens",json-node-int(left)),json-node-pair("generated_ids",json-node-int(used))));
+     let recorded = append(events,list(row));
+     let joined = fcjc-joined(generation,part,decode);
+     if le(used,0) then list(joined,recorded) else fcjc-walk(joined,sub(left,used),stops,pick,generate,decode,recorded);
+    };
+   };
+  }
+  def fcjc-with(result,allowance,stops,pick,generate,decode) = if or(not(str_eq(frbg-origin(result),"controller-final-stage")),not(frbg-complete(result))) then list(result,list()) else {
+   let completion = fcjc-walk(frbg-final(result),sub(allowance,len(fcms-generation-ids(frbg-final(result)))),stops,pick,generate,decode,list());
+   if nil?(nth(completion,1)) then list(result,list()) else {
+    let final = head(completion); let session = fcms-generation-session(final);
+    let complete = frbg-stopped(session);
+    list(frbg-result(session,frbg-first(result),final,fcms-generation-text(final),frbg-origin(result),frbg-notice(result),complete,if complete then "complete" else "final-generation-incomplete"),nth(completion,1));
+   };
+  };
+  def fcjc-needed(result,allowance) = and(str_eq(frbg-origin(result),"controller-final-stage"),and(frbg-complete(result),and(frbg-stopped(frbg-session(result)),and(lt(len(fcms-generation-ids(frbg-final(result))),allowance),fcjc-open-string(frbg-answer(result))))));
+  def fcjc-complete(result,allowance) = if not(fcjc-needed(result,allowance)) then list(result,list()) else {
+   let flow = str_concat("code.",int_to_str(host_pid()));
+   let detail = json-node-object(list(oh-n("position",fcms-pos(frbg-session(result))),oh-n("remaining_tokens",sub(allowance,len(fcms-generation-ids(frbg-final(result))))),oh-s("scope","unfinished JSON string; same stream and original final token allowance")));
+   let reading = oh-reading("native-coding",flow,"json-string-completion",json-node-int(1),json-node-int(0),json-node-int(0),list(oh-need("model-json-completion",detail)),list("continue","abstain"),detail);
+   oh-voice(reading);
+   let completed = fcjc-with(result,allowance,fcmg-q35-stops(fcms-src(frbg-session(result))),fcjc-pick,fcms-generate,fcjc-decode);
+   let events = nth(completed,1);
+   let evidence = json-node-object(list(json-node-pair("transitions",json-node-array(events)),oh-n("stopped",frbg-complete(head(completed))),oh-n("valid_json",faj-valid(frbg-answer(head(completed))))));
+   oh-voice(oh-applied(reading,if nil?(events) then "abstain" else "continue",evidence));
+   let valid = and(frbg-complete(head(completed)),faj-valid(frbg-answer(head(completed))));
+   let fresh = oh-reading("native-coding",flow,"json-string-completion",json-node-int(1),json-node-int(valid),json-node-int(valid),if valid then list() else list(oh-need("complete-json-response",detail)),list("revise"),evidence);
+   oh-voice(oh-set(fresh,"care_of",oh-get(reading,"id")));
+   completed;
+  };
+ }
+ 0;
+}
