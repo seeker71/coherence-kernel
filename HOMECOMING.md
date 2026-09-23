@@ -222,10 +222,18 @@ response. On the unchanged question, the initial and correction sequences are
 identical across all 812 IDs. Fresh decoding independently reproduces both
 635-word texts; both stages end with stop ID 248046 while position advances
 from 4960 to 5858. Repetition is present in generation. This closes the missing
-evidence boundary and leaves answer quality unchanged. The next discriminating
-comparison is the exact retained continuation against fresh prefill of the
-same transcript, to separate continuation-state behavior from the model's
-response to that content. Keep the original question and adverse answer intact.
+evidence boundary and leaves answer quality unchanged.
+
+The [fresh-prefill comparison](receipts/2026-09-23-continuation-replay.md)
+returns the same 812 IDs from the identical 5,046-ID transcript. Rebuilding
+state does not improve this case. A following concrete source correction does
+change the answer: native Qwen correctly distinguishes prediction from grounding
+and states the enquiry covenant. The answer grows to 756 words and adds an
+overbroad assurance about releasing unreferenced cells. Specific feedback has
+an observed effect; concise, consistently faithful synthesis remains open.
+Native coding is working on explicit shortening and expansion directions for
+the word-range controller, with room reserved for either message. Preserve the
+source-fidelity findings alongside the length result when re-observing it.
 
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
