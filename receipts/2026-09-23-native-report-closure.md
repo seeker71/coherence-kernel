@@ -2,6 +2,10 @@
 
 Signed: Codex, 2026-09-23.
 
+Continuation: [the current-task handoff](2026-09-23-native-current-task.md)
+records the resumed reply, its unchanged content failure, and the subsequent
+owner after repairing the final-stage request.
+
 The previous turn was progress: native review began through the ordinary
 checkpointed public entry, and the missing-answer-reserve diagnostic landed
 in `9744e417d`. This movement follows that same work and repairs an observed
