@@ -16,6 +16,15 @@ and are refused explicitly. Rows are processed whole; a row that cannot fit the
 model's positions or current recommended device working set retains its line and
 required bytes in the refusal. The trainer does not shorten it silently.
 
+Validation and assessment preserve the complete token sequence and KV context,
+while releasing the forward tape after each memory-admitted slice. Every
+supervised target is scored; prompt-only slices advance context with zero loss weight.
+Slice losses are weighted by their supervised-token counts. Per-row assessment
+records input tokens, supervised tokens, slice count and peak estimated slice
+bytes. The `assessment-memory` care exchange selects slicing and re-observes
+full coverage. Training still needs its complete forward/backward tape; being
+able to assess a long row does not establish that its gradient fits.
+
 One admitted model and tokenizer serve the run. Sequences accumulate a batch
 gradient weighted by their supervised token counts. Each completed round performs
 Adam, with a full gradient norm and clipping measurement. A non-finite gradient

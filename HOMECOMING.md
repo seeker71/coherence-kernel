@@ -242,6 +242,13 @@ with the changed instruction returns the identical 812 IDs and 635 words;
 response quality remains unchanged. The native tool-response repair is verified,
 while effective correction and autonomous source completion remain open.
 
+The [assessment memory repair](receipts/2026-09-23-native-assessment-memory.md)
+removes the whole-row assessment refusal for the actual 5,485-token retained
+example. Native forward slices preserve all tokens and KV history, with
+supervised-token-weighted loss and verified release. Training still owns its
+separate full-gradient memory requirement. The reference correction execution
+also returned the unchanged 635-word Qwen answer; its quality gap remains open.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.

@@ -54,6 +54,55 @@ section [form.bml] {
    list(step,"Adam moments and step restored from the same published generation");
   }
   def ntr-row-bytes(model,t) = add(nlg-cache-bytes(model,t),add(mul(3,nlg-forward-bytes(model,t,0)),mul(12,mul(t,nth(head(model),5)))));
+  // Assessment retains the complete KV and releases each forward tape. Include
+  // all head rows and masked-loss buffers in the slice admission estimate.
+  def ntr-score-bytes(model,t,pos) {
+   let g = head(model);
+   add(nlg-forward-bytes(model,t,pos),mul(4,add(mul(5,t),add(mul(sub(t,1),add(nth(g,5),mul(2,nth(g,0)))),mul(t,nth(g,5))))));
+  }
+  def ntr-score-chunk(model,t,pos) = if le(t,0) then 0 else if nlg-slice-fits?(ntr-score-bytes(model,t,pos)) then t else ntr-score-chunk(model,div(t,2),pos);
+  // Totals: weighted loss, supervised tokens, input tokens, slices, peak estimate.
+  // A zero-mask slice still advances every prompt token through the same KV.
+  def ntr-score-slices(model,ctx,ids,targets,mask,pos,limit,loss,tokens,slices,peak) {
+   if nil?(ids) then list(loss,tokens,pos,slices,peak) else {
+    let t = ntr-score-chunk(model,nlg-min(limit,len(ids)),pos);
+    if eq(t,0) then form_error("native assessment awaits memory for one token") else {
+     let estimate = ntr-score-bytes(model,t,pos); let weights = take(t,mask); let count = sum(weights);
+     let r = if gt(count,0.0) then nll-forward-evaluation(model,ctx,take(t,ids),pos) else nll-forward(model,ctx,take(t,ids),pos,0);
+     let value = if gt(count,0.0) then nlb-loss-masked(model,r,take(t,targets),weights) else 0.0;
+     let released = nll-forward-close(r);
+     if not(released) then form_error("native assessment forward release incomplete") else ntr-score-slices(model,ctx,drop(t,ids),drop(t,targets),drop(t,mask),add(pos,t),limit,add(loss,mul(value,count)),add(tokens,count),add(slices,1),nlg-max(peak,estimate));
+    };
+   };
+  }
+  def ntr-score(model,sample) {
+   let ids = head(sample); let t = len(ids); let targets = nth(sample,1); let mask = nth(sample,2);
+   if not(and(gt(t,0),and(eq(t,len(targets)),and(eq(t,len(mask)),and(nlb-mask-valid(mask),and(eq(sum(mask),nth(sample,3)),gt(nth(sample,3),0.0))))))) then form_error("native assessment token/mask shape refused")
+   else if not(and(nll-ids-valid(ids,nth(head(model),5)),nll-ids-valid(targets,nth(head(model),5)))) then form_error("native assessment token IDs refused")
+   else if gt(t,nth(head(model),9)) then form_error("native assessment row exceeds model positions")
+   else if not(nlg-room(add(nlg-cache-bytes(model,t),ntr-score-bytes(model,1,sub(t,1))))) then form_error("native assessment awaits complete KV and one token")
+   else {
+    let ctx = nll-context(model,t);
+    let limit = ntr-score-chunk(model,t,0);
+    let totals = if lt(limit,t) then ntr-score-care(model,ctx,sample,limit) else ntr-score-slices(model,ctx,ids,targets,mask,0,t,0.0,0.0,0,0);
+    let freed = nll-context-close(ctx);
+    if not(and(freed,and(eq(nth(totals,2),t),eq(nth(totals,1),nth(sample,3))))) then form_error("native assessment coverage or release incomplete") else totals;
+   };
+  }
+  def ntr-score-care(model,ctx,sample,limit) {
+   let t = len(head(sample)); let expected = json-node-int(t);
+   let reading = oh-reading("native-lora",nth(model,4),"assessment-memory",expected,json-node-int(limit),json-node-int(0),list(oh-need("bounded-complete-assessment",expected)),list("slice-assessment","defer"),json-node-int(nth(sample,4)));
+   let sent = oh-voice(reading); let response = oh-response(reading,"slice-assessment"); let received = oh-voice(response);
+   if not(str_eq(oh-select(reading,response,"defer"),"slice-assessment")) then form_error("native assessment response did not correlate") else {
+    let applied = oh-voice(oh-applied(reading,"slice-assessment",json-node-int(limit)));
+    let totals = ntr-score-slices(model,ctx,head(sample),nth(sample,1),nth(sample,2),0,limit,0.0,0.0,0,0);
+    let covered = and(eq(nth(totals,2),t),eq(nth(totals,1),nth(sample,3)));
+    let fresh = oh-reading("native-lora",nth(model,4),"assessment-memory",expected,json-node-int(nth(totals,2)),json-node-int(covered),if covered then list() else list(oh-need("bounded-complete-assessment",expected)),list("inspect-assessment"),json-node-object(list(ntr-int("line",nth(sample,4)),ntr-int("slices",nth(totals,3)),ntr-int("peak_slice_estimated_bytes",nth(totals,4)))));
+    let observed = oh-voice(oh-set(fresh,"care_of",json-node-string(oh-str(reading,"id"))));
+    totals;
+   };
+  }
+  def ntr-score-loss(totals) = div(head(totals),nth(totals,1));
   def ntr-validation(model,tk,rows,masked,out,step) {
    let start = host_monotonic_ms();
    let totals = ntr-validation-rows(model,tk,rows,masked,0.0,0.0,0);
@@ -63,20 +112,14 @@ section [form.bml] {
    if nil?(rows) then list(loss,tokens,count) else ntr-validation-row(model,tk,head(nld-prepare(tk,list(head(rows)),masked)),tail(rows),masked,loss,tokens,count);
   }
   def ntr-validation-row(model,tk,sample,rest,masked,loss,tokens,count) {
-   let admitted = ntr-admit(model,sample); let ctx = nll-context(model,len(head(sample)));
-   let r = nll-forward(model,ctx,head(sample),0,1);
-   let value = nlb-loss-masked(model,r,nth(sample,1),nth(sample,2));
-   let closeForward = nll-forward-close(r); let closeContext = nll-context-close(ctx);
+   let value = ntr-score-loss(ntr-score(model,sample));
    ntr-validation-rows(model,tk,rest,masked,add(loss,mul(value,nth(sample,3))),add(tokens,nth(sample,3)),add(count,1));
   }
   def ntr-grade-hex(bytes) = nlp-hex(bytes);
   def ntr-grade-rows(model,tk,rows,index) = if nil?(rows) then list() else cons(ntr-grade-row(model,tk,head(rows),index),ntr-grade-rows(model,tk,tail(rows),add(index,1)));
   def ntr-grade-row(model,tk,row,index) {
-   let sample = nld-row(tk,row,1,add(index,1)); let admitted = ntr-admit(model,sample);
-   let ctx = nll-context(model,len(head(sample))); let forward = nll-forward(model,ctx,head(sample),0,1);
-   let loss = nlb-loss-masked(model,forward,nth(sample,1),nth(sample,2));
-   let done = nll-forward-close(forward); let freed = nll-context-close(ctx);
-   json-node-object(list(ntr-int("index",index),ntr-text("row_sha256",ntr-grade-hex(sha256-stream-string(json-emit-precise(row)))),ntr-real("loss",loss),ntr-real("supervised_tokens",nth(sample,3))));
+   let sample = nld-row(tk,row,1,add(index,1)); let totals = ntr-score(model,sample);
+   json-node-object(list(ntr-int("index",index),ntr-text("row_sha256",ntr-grade-hex(sha256-stream-string(json-emit-precise(row)))),ntr-real("loss",ntr-score-loss(totals)),ntr-real("supervised_tokens",nth(totals,1)),ntr-int("input_tokens",nth(totals,2)),ntr-int("assessment_slices",nth(totals,3)),ntr-int("peak_slice_estimated_bytes",nth(totals,4))));
   }
   def ntr-assessment(model,tk,r,phase) {
    if not(json-object-has?(r,"assessment")) then 0 else ntr-assessment-at(model,tk,r,phase,host_monotonic_ms());
