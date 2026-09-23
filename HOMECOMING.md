@@ -254,19 +254,30 @@ then follows the actual training refusal: the learner reached the whole example,
 whose retained-tape estimate was 341,213,194,880 bytes. Training now selects
 layer-input checkpoints and full-sequence recomputation for large tapes;
 gradient checks pass and resumed parameters and Adam moments match byte for
-byte. The unchanged example is queued for its full-size observation. In the
+byte. The [full-size observation](receipts/2026-09-23-native-answer-edit.md)
+now shows the original example's full forward and backward passes contributing
+to checkpoint 149 in a three-row batch from parent 148. Validation loss rose
+slightly; serving improvement remains a separate question. In the
 separate Qwen response path, native reasoning corrects three previous errors
 on the original enquiry, but the shortening step copies all 547 words and a
-cell-lifetime claim still contradicts the supplied axiom. Full-size learning
+cell-lifetime claim still contradicts the supplied axiom. Learning quality
 and dependable response correction each retain their own unfinished work.
 
 The [native answer editing path](receipts/2026-09-23-native-answer-edit.md)
 now accepts a document word-range assertion through the public coding request.
 Its native counter returns an overlong edited draft to repair before review.
-The actual 547-word answer and original sources are with the native editor;
-its first edit reached verification and returned to repair. A separately
-attributed 407-word Codex revision is retained for comparison. A completed
-native revision and its source fidelity remain to be observed.
+The actual editor corrects the lifetime claim, but its edits change the length
+from 547 to 560 to 549 words. It then repeats the 549-word text despite correctly
+diagnosing the needed reduction. The unchanged edit is refused. A separately
+attributed 407-word Codex revision is retained for comparison. The original
+task exhausts 12 replies after 66 minutes, returning the 549-word answer and
+verified release. Effective correction and completed review remain open.
+
+The [continuing reasoning door](receipts/2026-09-23-continuing-native-reasoning.md)
+keeps bounded reasoning available on each native coding reply, including repair
+and context renewal. Its boundary checks pass. The original editing request is
+retained with only this capability enabled; its actual revision must establish
+whether the added reasoning improves execution and answer quality.
 
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and

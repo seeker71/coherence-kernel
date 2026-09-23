@@ -42,13 +42,48 @@ This is a different response interface: native document tools and numerical
 verification are available throughout the editing task. It is not a controlled
 comparison of wording alone.
 
-The process finished prefill of 5,345 IDs, read the draft, applied an edit and
-called verification. Its first verification failed and it entered repair:
-three replies, three tool calls, one check and one repair were observed. The
-native task is still running; no completed revised answer or quality result is
-claimed in this initial receipt. The process is PID 85407, owned by the native
-helper retained beside the request. The final result belongs beside this
-observation when it arrives.
+The process finished prefill of 5,345 IDs and made two effective edits. The
+[completed-action reconstruction](artifacts/2026-09-23-native-answer-edit/observed-stages.json)
+applies the first eight retained native replies through the same policy and
+checker over the original documents, without generating another answer or
+writing source documents. Its [native reader](artifacts/2026-09-23-native-answer-edit/answer-edit-observe.bml)
+is retained. These are deterministic reconstructions, not snapshots of the
+running process's heap.
+
+| Actual action | Result |
+| --- | --- |
+| Original draft | 547 words; false unconditional lifetime claim |
+| First edit | 560 words; referenced cells persist, unreferenced cells compost |
+| First verification | Word range refused; repair entered |
+| Second edit | 549 words; lifetime correction retained |
+| Second verification | Word range refused; repair entered |
+| Third edit | Identical 549-word document; `edit-unchanged` refused it |
+
+The [first](artifacts/2026-09-23-native-answer-edit/candidate-after-2.txt) and
+[second](artifacts/2026-09-23-native-answer-edit/candidate-after-5.txt) candidates
+retain the model-token/graph distinction and French `offrait`. They still read
+largely as a glossary, retain redundant detail and end by asserting a resonance
+effect that has not been observed in the person. The lifetime repair is real;
+these findings leave answer quality open.
+
+The model correctly diagnosed the 99-word excess before its unchanged third
+edit. Additional numerical feedback alone is therefore not an established
+repair. The hash-guarded edit syntax was valid: Codex initially misread that
+action as a tool-shape failure, then corrected the interpretation after reading
+the implementation and native replay. The actual gap is carrying a diagnosis
+into an effective revision. The ninth reply acknowledges the unchanged edit;
+the tenth again returns the identical text, then the model replans.
+
+The [final result](artifacts/2026-09-23-native-answer-edit/result.json) reaches
+the original 12-reply limit with `status=attention`, 7 tool calls, 4 repairs and
+2 verification runs. Its [compact report](artifacts/2026-09-23-native-answer-edit/report.json)
+records **3,970,346 ms** elapsed, **3,642 generated IDs**, **3,706 injected IDs**,
+zero offered provider calls and verified model release. The [returned answer](artifacts/2026-09-23-native-answer-edit/answer.txt)
+is still **549 words**, with the lifetime correction retained. Process exit 0
+establishes a returned result, while the failed word range and unfinished task
+remain visible. Replanning consumed the final reply; it did not complete the
+requested answer. The [next runtime repair](2026-09-23-continuing-native-reasoning.md)
+opens bounded reasoning across the task and returns to the unchanged request.
 
 A [separate Codex revision](artifacts/2026-09-23-native-answer-edit/codex-answer.txt)
 of the same draft is **407 words** and passes the same check. Its
@@ -72,13 +107,31 @@ The first completion-path check failed because the authored fixture used
 failure observation. The production edit and completion boundaries remain
 intact. A temporary diagnostic print was removed after resolving that failure.
 
-The preceding memory repair is also advancing through real work: learner PID
-85268 completed all 28 forward layers of a **5,868-token** queued row in
-**461,038 ms**, using layer recomputation. Its backward pass and update remain
-ahead. This is another retained example; the original 5,485-token retry is
-still queued. Neither this training progress nor the new assertion establishes
-response parity. Training here adapts Llama 3.2 3B, separately from native Qwen
-editing. The two GPU workloads overlap, so their timings are not isolated.
+The preceding memory repair now has a completed full-size update. The
+[native observation](artifacts/2026-09-23-native-answer-edit/learning-gradient.json)
+and its [reader](artifacts/2026-09-23-native-answer-edit/full-gradient-identity.bml)
+establish that the original **5,485-token**, 2,502-supervised-token example was
+the third row of a real three-row batch. Its parsed example and canonical
+serialization hash match the original failed row. Its explicit retry remains
+queued; this batch independently selected the same example for replay.
+
+The original whole-tape estimate was **341,213,194,880 bytes**. Layer
+recomputation estimated **17,135,995,660 additional bytes**, completed its full
+forward pass in **365,554 ms** and backward pass in **266,781 ms**, and contributed
+to published optimizer step **149**. The [checkpoint observation](artifacts/2026-09-23-native-answer-edit/learning-checkpoint.json)
+verifies positive adapter and optimizer byte sizes against the actual files,
+112 adapter tensors, 224 optimizer tensors and all three examples consumed.
+The full batch updated 56 LoRA pairs over 11,528 input and 5,292 supervised
+tokens. This closes the observed memory refusal for the original example in
+this batch.
+
+Context changed: the parent was generation 148 and the update combined three
+rows. It is not an isolated comparison at the original parent. Validation loss
+rose from **3.37489495575428** to **3.3768423721194267**; full after-assessment and
+serving promotion remain pending. The memory estimate is not measured peak
+allocation. Training adapts Llama 3.2 3B, separately from native Qwen editing.
+The two GPU workloads overlap, so timings are not isolated. Execution progress
+does not establish better answers or response parity.
 
 Glass first frame: **35 ms**, followed by intentional Ctrl-C, exit 1. Counsel:
 **0 orphans**, 11/12 serving lanes unobserved because no hearth stands. The
