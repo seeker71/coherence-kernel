@@ -305,6 +305,17 @@ the unchanged caller checks. Replaying that exact native action reduces the
 350–450-word requirement. The workflow restriction is repaired; concise,
 useful completion and response quality remain the next observed gap.
 
+The [checked assistance](receipts/2026-09-23-checked-answer-assistance.md)
+serves that same unfinished enquiry through Form-owned provider calls. Initial
+synthesis returned 460 words. The report checker now carries the original word
+range, and the existing repair resource returned a checked 427-word answer.
+Both calls together used 40,577 provider tokens, including 21,248 cached input,
+over 59.4 seconds of provider execution; coordination is additional. The
+standalone synthesis door also accepts full packets through `@path` after the
+actual inline packet was truncated. Source fidelity improved, while expression,
+whole-session cost and local-only completion remain open. The original Qwen
+process continues from its 492-word revision without receiving this answer.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
