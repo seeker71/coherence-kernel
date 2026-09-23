@@ -269,6 +269,13 @@ on the original enquiry, but the shortening step copies all 547 words and a
 cell-lifetime claim still contradicts the supplied axiom. Learning quality
 and dependable response correction each retain their own unfinished work.
 
+The [assessment reuse repair](receipts/2026-09-23-assessment-reuse.md) addresses
+repeated serving-model calculations while queued lessons drain. On the two
+actual held-out examples, a fresh assessment took 35.3 seconds and reuse took
+1.06 seconds with identical serialized scores. A changed adapter forced new
+measurement. This is one assessment's throughput improvement; whole-session
+throughput and answer quality still need their own observations.
+
 The [native answer editing path](receipts/2026-09-23-native-answer-edit.md)
 now accepts a document word-range assertion through the public coding request.
 Its native counter returns an overlong edited draft to repair before review.
