@@ -705,8 +705,23 @@ only the changed values:
 ]}}
 ```
 
+For a small correction inside a string, `text_edits` replaces exact text
+without regenerating the whole field:
+
+```json
+{"report_amend":{"base":"<observed hash>","text_edits":[
+  {"path":["answer"],"old":"exact unique text","new":"corrected text"}
+]}}
+```
+
+Each selected value must be a string. `old` is nonempty and must occur exactly
+once, including overlapping occurrences; an empty `new` deletes it. Unchanged
+edits are refused. Use either `text_edits` or `replacements` in one amendment.
+Text edits follow the same path, identity and atomicity checks, and rerun the
+original source and report checks. The model chooses their meaning.
+
 Paths address existing object keys and zero-based integer array indexes.
-An amendment has 1–32 nonoverlapping replacements, each 1–32 path segments
+An amendment has 1–32 edits at nonoverlapping paths, each 1–32 path segments
 deep. Missing paths, stale bases, duplicate object keys, overlapping paths
 and malformed edits refuse the whole amendment and preserve the retained
 report. This door replaces values; it does not insert or remove array items.

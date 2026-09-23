@@ -58,6 +58,10 @@ invocation candidates and zero unread files. Native continuation and care use
 zero provider calls; coordinating Codex work still spends rented tokens. No
 whole-session savings or quality-parity claim follows from these checks.
 
+The [next completed amendment and native text-edit door](2026-09-23-native-report-text-edits.md)
+retain the later 521 → 517-word revision and the smaller representation of
+that exact model-authored deletion.
+
 ## First reply through the current-task boundary
 
 The same owner completed reply **4**, using 512 initial-stage and 771
