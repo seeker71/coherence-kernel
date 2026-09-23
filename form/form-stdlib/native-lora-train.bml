@@ -147,6 +147,24 @@ section [form.bml] {
    if gt(t,nth(head(model),9)) then form_error(str_concat("native training row exceeds model positions; line=",int_to_str(nth(sample,4)))) else if not(nlg-room(bytes)) then form_error(str_concat("native training checkpointed row awaits memory; line=",str_concat(int_to_str(nth(sample,4)),str_concat(" required_additional_bytes=",int_to_str(bytes))))) else 1;
   }
   def ntr-recompute-event(context,stage,index,t,elapsed) = ntr-event(head(context),str_concat("row-",str_concat(stage,"-layer")),list(ntr-int("line",nth(context,1)),ntr-int("layer",index),ntr-int("input_tokens",t),ntr-int("wall_ms",elapsed),ntr-int("device_bytes",nth(metal_live(),18))));
+  // Compare the final projected row with an independent one-row projection.
+  // This checks that boundary, not the transformer's earlier activations.
+  def ntr-head-equality(model,r) {
+   let g = head(model); let d = nth(g,0); let v = nth(g,5); let row = sub(nth(r,7),1);
+   let x = nam-alloc(d); let actual = nam-alloc(v); let expected = nam-alloc(v); let delta = nam-alloc(v);
+   nll-last(nth(r,2),x,d,mul(row,d)); nll-last(head(r),actual,v,mul(row,v));
+   nam-linear(nth(model,2),x,expected,1,0); nam-add(actual,expected,delta,v,-1.0); nam-sync();
+   let stats = nam-stats(delta,v); let released = nam-free(list(x,actual,expected,delta));
+   list(and(released,and(eq(head(stats),0.0),eq(nth(stats,2),0.0))),row,nth(stats,2),head(stats));
+  }
+  def ntr-head-observe(model,r,out,line) = if le(mul(nth(r,7),nth(head(model),5)),AffineDispatchGroups()) then 1 else {
+   let checked = ntr-head-equality(model,r); let valid = head(checked);
+   let detail = json-node-object(list(ntr-int("line",line),ntr-int("row",nth(checked,1)),ntr-real("max_absolute_difference",nth(checked,2)),ntr-real("nonfinite",nth(checked,3)),ntr-text("scope","final output row versus independent projection of the same normalized activation")));
+   let reading = oh-reading("native-lora",out,"head-projection",json-node-int(0),json-precise-float(nth(checked,2)),json-node-int(valid),if valid then list() else list(oh-need("faithful-output-projection",detail)),list("continue-gradient","abstain"),detail);
+   ntr-health-event(out,"row-head-check",reading,list(ntr-int("line",line)));
+   let control = oh-response(reading,if valid then "continue-gradient" else "abstain"); oh-voice(control);
+   and(valid,str_eq(oh-select(reading,control,"abstain"),"continue-gradient"));
+  };
   def ntr-batch(model,state,rows,total,out,loss) {
    if nil?(rows) then loss else ntr-batch-row(model,state,head(rows),tail(rows),total,out,loss);
   }
@@ -157,6 +175,8 @@ section [form.bml] {
    let ctx = nll-context(model,len(head(sample))); let r = if checkpointed then nlrc-forward-observed(model,ctx,head(sample),list(out,nth(sample,4)),ntr-recompute-event) else nll-forward(model,ctx,head(sample),0,1);
    let forward = host_monotonic_ms(); let fg = metal_live();
    let forwardObserved = ntr-event(out,"row-forward-complete",list(ntr-int("line",nth(sample,4)),ntr-int("wall_ms",sub(forward,start)),ntr-int("dispatches",sub(nth(fg,7),nth(live,7)))));
+   let headChecked = ntr-head-observe(model,r,out,nth(sample,4));
+   if not(headChecked) then { nll-forward-close(r); nll-context-close(ctx); form_error("native training output projection disagrees; gradient update withheld"); } else 0;
    let weight = div(nth(sample,3),total);
    let value = if checkpointed then nlrc-backward-observed(model,r,nth(sample,1),nth(sample,2),state,weight,list(out,nth(sample,4)),ntr-recompute-event) else nlb-backward-masked(model,r,nth(sample,1),nth(sample,2),state,weight);
    let backward = host_monotonic_ms(); let bg = metal_live();

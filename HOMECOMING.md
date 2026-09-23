@@ -256,8 +256,14 @@ layer-input checkpoints and full-sequence recomputation for large tapes;
 gradient checks pass and resumed parameters and Adam moments match byte for
 byte. The [full-size observation](receipts/2026-09-23-native-answer-edit.md)
 now shows the original example's full forward and backward passes contributing
-to checkpoint 149 in a three-row batch from parent 148. Validation loss rose
-slightly; serving improvement remains a separate question. In the
+to checkpoint 149 in a three-row batch from parent 148. Validation loss rose;
+the serving generation was retained. The subsequent
+[large-projection observation](receipts/2026-09-23-native-affine-grid.md)
+found zeroed later output rows in the long-sequence affine dispatch. Bounded
+grids restore agreement with independent projections at all five inspected
+positions. Training now checks its final projected row before backpropagation;
+whole-row learning correctness still requires the original retry's evidence.
+Checkpoint completion alone did not establish that correctness. In the
 separate Qwen response path, native reasoning corrects three previous errors
 on the original enquiry, but the shortening step copies all 547 words and a
 cell-lifetime claim still contradicts the supplied axiom. Learning quality
