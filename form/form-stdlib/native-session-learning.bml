@@ -25,6 +25,50 @@ section [form.bml] {
    values;
   }
   def nsl-grade-rows(model,tk,rows,index) = ntr-grade-rows(model,tk,rows,index);
+  // A drain owns a fresh cache directory. It never imports scores from another
+  // process or code image; seals bind the unchanged weights and tokenizer.
+  def nsl-cache-open(home) {
+   let parent = nsm-at(home,"assessment-cache"); let made = host_dir_mkdir(parent);
+   let path = nsm-at(parent,nsm-id());
+   if eq(host_dir_mkdir(path),1) then path else "";
+  }
+  def nsl-cache-key(binding,row) = nsm-hash(json-emit-precise(json-node-array(list(json-node-string(binding),row))));
+  def nsl-cache-score(record,key,row,index) {
+   let score = json-object-get(record,"score");
+   let indexed = oh-set(score,"index",json-node-int(index));
+   if and(str_eq(nsm-str(record,"key"),key),and(str_eq(nsm-str(record,"score_sha256"),nsm-hash(json-emit-precise(score))),nsl-scores-match(list(row),list(indexed),index))) then indexed else json-node-null();
+  }
+  def nsl-cache-plan(scope,binding,rows,index) = if nil?(rows) then list() else {
+   let key = nsl-cache-key(binding,head(rows)); let path = nsm-at(scope,str_concat(key,".json"));
+   let score = nsl-cache-score(nsm-json(path),key,head(rows),index);
+   cons(list(score,head(rows),path,key),nsl-cache-plan(scope,binding,tail(rows),add(index,1)));
+  };
+  def nsl-cache-miss(row) = node_eq(head(row),json-node-null());
+  def nsl-cache-misses(plan) = if nil?(plan) then 0 else add(nsl-cache-miss(head(plan)),nsl-cache-misses(tail(plan)));
+  def nsl-cache-values(plan) = if nil?(plan) then list() else cons(head(head(plan)),nsl-cache-values(tail(plan)));
+  def nsl-cache-observations(plan,index) = if nil?(plan) then list() else cons(json-node-object(list(nsm-n("index",index),nsm-s("row_sha256",nsm-hash(json-emit-precise(nth(head(plan),1)))),nsm-s("source",if nsl-cache-miss(head(plan)) then "measured" else "reused"))),nsl-cache-observations(tail(plan),add(index,1)));
+  def nsl-cache-fill(model,tk,plan,index) = if nil?(plan) then list() else cons(if nsl-cache-miss(head(plan)) then ntr-grade-row(model,tk,nth(head(plan),1),index) else head(head(plan)),nsl-cache-fill(model,tk,tail(plan),add(index,1)));
+  def nsl-cache-store(plan,scores) = if nil?(plan) then 1 else {
+   let saved = if not(nsl-cache-miss(head(plan))) then 1 else { nsm-atomic(nth(head(plan),2),json-node-object(list(nsm-s("key",nth(head(plan),3)),nsm-s("score_sha256",nsm-hash(json-emit-precise(head(scores)))),json-node-pair("score",head(scores))))); 1; };
+   let rest = nsl-cache-store(tail(plan),tail(scores)); and(saved,rest);
+  };
+  def nsl-grade-cached(home,base,adapter,rows,scope) = if str_eq(scope,"") then nsl-grade(base,adapter,rows) else {
+   let started = host_monotonic_ms();
+   let binding = json-emit(json-node-array(list(json-node-string(nsl-base-seal(base)),json-node-string(nsl-adapter-seal(adapter)))));
+   let plan = nsl-cache-plan(scope,binding,rows,0); let missing = nsl-cache-misses(plan);
+   let scores = if eq(missing,0) then nsl-cache-values(plan) else nsl-cache-measure(base,adapter,plan);
+   let current = json-emit(json-node-array(list(json-node-string(nsl-base-seal(base)),json-node-string(nsl-adapter-seal(adapter)))));
+   if not(and(str_eq(binding,current),nsl-scores-match(rows,scores,0))) then form_error("native assessment cache identity or coverage changed") else {
+    let saved = nsl-cache-store(plan,scores);
+    nsm-event(home,"assessment-reuse",list(nsm-s("scope",scope),nsm-s("binding_sha256",nsm-hash(binding)),nsm-n("rows",len(rows)),nsm-n("reused_rows",sub(len(rows),missing)),nsm-n("measured_rows",missing),nsm-n("model_admissions",if gt(missing,0) then 1 else 0),nsm-n("cache_retained",saved),json-node-pair("row_observations",json-node-array(nsl-cache-observations(plan,0))),nsm-n("wall_ms",sub(host_monotonic_ms(),started))));
+    scores;
+   };
+  };
+  def nsl-cache-measure(base,adapter,plan) {
+   let session = nlg-open(base,adapter);
+   let scores = nsl-cache-fill(head(session),nth(session,1),plan,0);
+   if not(nlg-close(session)) then form_error("native assessment cache model release incomplete") else scores;
+  }
   def nsl-loss-within(before,after,tolerance) = le(after,add(before,tolerance));
   // Arithmetic evidence only. The caller supplies bound numeric observations
   // and owns its decision rule, source identity and broader quality assessment.
@@ -38,13 +82,15 @@ section [form.bml] {
    let record = nsm-json(nsm-at(path,"record.json"));
    if or(nsm-withdrawn(path),or(str_eq(path,""),nse-record-overlap(record,valid))) then list() else list(json-object-get(record,"example"));
   }
-  def nsl-prepare(home,dir) {
+  def nsl-prepare(home,dir) = nsl-prepare-scoped(home,dir,"");
+  def nsl-prepare-scoped(home,dir,scope) {
    let state = nsm-state(home); let record = nsm-json(nsm-at(dir,"record.json"));
    let example = json-object-get(record,"example"); let validPath = nsm-valid-path(home);
    let valid = nsl-examples(nld-file(validPath)); let replay = nsl-replay(state,valid);
-   if or(nil?(valid),nse-record-overlap(record,valid)) then nsl-refused(home,dir,"validation-absent-or-training-overlap") else nsl-prepare-ready(home,dir,state,example,valid,replay);
+   if or(nil?(valid),nse-record-overlap(record,valid)) then nsl-refused(home,dir,"validation-absent-or-training-overlap") else nsl-prepare-ready-scoped(home,dir,state,example,valid,replay,scope);
   }
-  def nsl-prepare-ready(home,dir,state,example,valid,replay) {
+  def nsl-prepare-ready(home,dir,state,example,valid,replay) = nsl-prepare-ready-scoped(home,dir,state,example,valid,replay,"");
+  def nsl-prepare-ready-scoped(home,dir,state,example,valid,replay,scope) {
    let start = host_monotonic_ms();
    let beginning = nsm-event(home,"prepare-begin",list(nsm-s("id",fs-path-basename(dir))));
    let base = nsm-model(); let parent = nsl-candidate(home,base);
@@ -57,7 +103,7 @@ section [form.bml] {
    let rows = nsm-write(nsm-at(dir,"assessment.json"),json-node-array(assessment));
    let baseline = list();
    let serving = nsm-str(state,"serving");
-   let servingBaseline = if or(str_eq(serving,""),str_eq(serving,parent)) then baseline else nsl-grade(base,serving,assessment);
+   let servingBaseline = if or(str_eq(serving,""),str_eq(serving,parent)) then baseline else nsl-grade-cached(home,base,serving,assessment,scope);
    let before = json-node-object(list(nsm-s("parent",parent),nsm-s("parent_seal",nsl-adapter-seal(parent)),nsm-s("base_seal",nsl-base-seal(base)),nsm-s("validation_sha256",nsm-hash(nsl-lines(valid))),nsm-s("input_sha256",nsl-inputs(dir)),nsm-n("heldout_rows",len(valid)),nsm-n("replay_rows",len(prior)),nsm-real("learning_rate",nsm-rate(home)),json-node-pair("state",state),json-node-pair("scores",json-node-array(baseline)),json-node-pair("serving_scores",json-node-array(servingBaseline))));
    let saved = nsm-atomic(nsm-at(dir,"before.json"),before);
    let measured = nsm-event(home,"prepare-complete",list(nsm-s("id",fs-path-basename(dir)),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),nsm-n("rows",len(assessment))));
@@ -79,9 +125,10 @@ section [form.bml] {
    let request = ntr-request(nsm-model(),nsm-str(before,"parent"),dir,nsm-at(dir,"adapter"),1,add(1,nsm-num(before,"replay_rows")),nsm-num(before,"learning_rate"),1,nsm-num(cfg,"num_layers"));
    json-node-object(append(json-object-pairs(request),list(nsm-s("assessment",nsm-at(dir,"assessment.json")))));
   }
-  def nsl-one(home,dir) {
+  def nsl-one(home,dir) = nsl-one-scoped(home,dir,"");
+  def nsl-one-scoped(home,dir,scope) {
    let begin = nsm-event(home,"round-begin",list(nsm-s("id",fs-path-basename(dir)),nsm-s("selected","resume-Adam;one-update-per-observation;rehearse-prior;heldout-excluded")));
-   let prepared = if nsm-withdrawn(dir) then "withdrawn" else if gt(file_size(nsm-at(dir,"before.json")),0) then "prepared" else nsl-prepare(home,dir);
+   let prepared = if nsm-withdrawn(dir) then "withdrawn" else if gt(file_size(nsm-at(dir,"before.json")),0) then "prepared" else nsl-prepare-scoped(home,dir,scope);
    if not(str_eq(prepared,"prepared")) then prepared else nsl-train(home,dir,nsm-json(nsm-at(dir,"before.json")));
   }
   def nsl-train(home,dir,before) {
@@ -180,10 +227,17 @@ section [form.bml] {
   }
   def nsl-drain(home) = nsl-drain-reader(home,nse-reader(home));
   def nsl-drain-reader(home,reader) {
+   let scope = nsl-cache-open(home);
+   let result = nsl-drain-reader-scoped(home,reader,scope);
+   if str_eq(scope,"") then 0 else fs-remove-tree(scope);
+   result;
+  }
+  def nsl-drain-reader-scoped(home,reader,scope) {
    let care = nse-attend-reader(home,reader);
    let pending = nsm-pending(home,nsm-dirs(home));
-   if or(not(nsm-enabled(home)),nil?(pending)) then "drained" else nsl-drained-reader(home,reader,nsl-one(home,head(pending)));
+   if or(not(nsm-enabled(home)),nil?(pending)) then "drained" else nsl-drained-reader-scoped(home,reader,scope,nsl-one-scoped(home,head(pending),scope));
   }
+  def nsl-drained-reader-scoped(home,reader,scope,status) = if str_eq(status,"child-still-running") then status else nsl-drain-reader-scoped(home,reader,scope);
   def nsl-drained-reader(home,reader,status) = if str_eq(status,"child-still-running") then status else nsl-drain-reader(home,reader);
   def nsl-drained-one(home,status) = if str_eq(status,"child-still-running") then status else nsl-drain(home);
   def nsl-worker(home) {

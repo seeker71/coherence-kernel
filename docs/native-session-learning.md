@@ -97,6 +97,17 @@ training selects a whole tape for small rows and layer-input checkpointing
 with full-sequence recomputation when the tape exceeds the device slice
 allowance. Its separate admission still checks the selected memory estimate.
 
+One learner drain reuses serving-assessment rows already measured by that
+process. A fresh private cache scope belongs to the drain and is removed on
+ordinary completion; later drains create a new scope. Each row is bound to
+the complete example and content seals of the base, tokenizer, adapter,
+configuration and optimizer. Seals are checked before and after the reading.
+Changed bindings or examples are measured again; an all-hit reading admits
+no model. Stored score bytes have a checksum, and row identities and ordering
+are rechecked. `assessment-reuse` events distinguish measured and reused rows,
+including their identities. The trainer still measures the changing candidate
+before and after its update, and the same promotion checks apply.
+
 Promotion requires improvement on the current example and no per-row regression
 beyond `1e-6` against either the candidate or serving baseline. Every assessment
 row's identity and supervised-token count are checked. The base, adapter,
