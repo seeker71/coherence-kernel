@@ -126,3 +126,15 @@ The [preceding completed coordinator turn](artifacts/2026-09-23-native-affine-gr
 used **5,163,518 tokens**, including **4,940,928 cached input tokens**, with
 provider and tool boundaries reconciled. Current open-turn cost remains
 unmeasured. The learner's complete update and native response task continue.
+
+## Original retry: update completed, serving retained
+
+The same worker completed all three examples and persisted checkpoint **153**.
+Its [actual result](artifacts/2026-09-23-native-affine-grid/original-retry/learning-result.json)
+reports `learned-candidate;serving-retained`, `promoted=0`. The original example's
+loss changed from **0.04004205010308151** to **0.03983187012040402**. The two
+held-out losses changed from **1.9231765270233154 / 4.008831739425659** to
+**1.9232909679412842 / 4.012035995721817**. Serving remains generation **5**.
+Thus the full update is observed and numerically consistent; held-out improvement
+and better generated responses remain open. This is the Llama native learner,
+separate from the continuing Qwen27B response-editing task.
