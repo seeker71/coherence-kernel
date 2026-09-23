@@ -260,6 +260,14 @@ on the original enquiry, but the shortening step copies all 547 words and a
 cell-lifetime claim still contradicts the supplied axiom. Full-size learning
 and dependable response correction each retain their own unfinished work.
 
+The [native answer editing path](receipts/2026-09-23-native-answer-edit.md)
+now accepts a document word-range assertion through the public coding request.
+Its native counter returns an overlong edited draft to repair before review.
+The actual 547-word answer and original sources are with the native editor;
+its first edit reached verification and returned to repair. A separately
+attributed 407-word Codex revision is retained for comparison. A completed
+native revision and its source fidelity remain to be observed.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
