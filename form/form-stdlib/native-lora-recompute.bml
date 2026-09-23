@@ -1,0 +1,74 @@
+// Whole-sequence reverse mode with layer input checkpoints. Each layer's
+// activations are recomputed before its reverse pass; no token or gradient is cut.
+// preludes: form-stdlib/native-llama-backward.bml
+section [form.bml] {
+ class NativeLoraRecompute {
+  def nlrc-except(handles,keep) = if nil?(handles) then list() else if eq(head(handles),keep) then nlrc-except(tail(handles),keep) else cons(head(handles),nlrc-except(tail(handles),keep));
+  def nlrc-quiet(context,stage,index,t,elapsed) = 0;
+  // Checkpoint: input, layer, key cache, value cache, layer index.
+  // Layer outputs have one owner.
+  def nlrc-blocks(g,layers,x,ks,vs,t,scratch,checkpoints,outputs,context,emit,index) {
+   if nil?(layers) then list(x,reverse(checkpoints),outputs) else {
+    let started = host_monotonic_ms(); let block = nll-block(g,head(layers),x,head(ks),head(vs),t,0,scratch);
+    let done = nam-sync(); let next = head(block);
+    let freed = nam-free(nlrc-except(nth(block,1),next));
+    let observed = emit(context,"forward",index,t,sub(host_monotonic_ms(),started));
+    nlrc-blocks(g,tail(layers),next,tail(ks),tail(vs),t,scratch,cons(list(x,head(layers),head(ks),head(vs),index),checkpoints),cons(next,outputs),context,emit,add(index,1));
+   };
+  }
+  def nlrc-forward(model,ctx,ids) = nlrc-forward-observed(model,ctx,ids,list(),nlrc-quiet);
+  def nlrc-forward-observed(model,ctx,ids,context,emit) {
+   let g = head(model); let t = len(ids);
+   if or(le(t,0),or(gt(t,head(ctx)),not(nll-ids-valid(ids,nth(g,5))))) then form_error("native checkpointed training token/context admission refused") else {
+    let ib = nam-write(nam-alloc(t),md-le32-list(ids,"")); let x = nam-alloc(mul(t,nth(g,0)));
+    let scratch = nam-alloc(mul(t,nll-rank(nth(model,1))));
+    let embedded = nam-embed(nth(model,2),ib,x,t);
+    let blocks = nlrc-blocks(g,nth(model,1),x,nth(ctx,1),nth(ctx,2),t,scratch,list(),list(),context,emit,0);
+    let hn = nam-alloc(mul(t,nth(g,0))); let inv = nam-alloc(t); let logits = nam-alloc(mul(t,nth(g,5)));
+    let norm = nam-rms(head(blocks),nth(model,3),hn,inv,nth(g,0),t,nth(g,7));
+    let projected = nam-linear(nth(model,2),hn,logits,t,0); let done = nam-sync();
+    // Standard head and ownership fields; trailing fields carry recomputation data.
+    list(logits,list(),hn,head(blocks),inv,append(list(ib,x,scratch,hn,inv,logits),nth(blocks,2)),t,t,nth(blocks,1),scratch);
+   };
+  }
+  def nlrc-first(rows,i) = if nil?(rows) then i else if gt(nll-rank-layer(nth(head(rows),1)),0) then i else nlrc-first(tail(rows),add(i,1));
+  def nlrc-reverse(g,rows,dy,t,state,scratch,context,emit) {
+   if nil?(rows) then nam-free(list(dy)) else {
+    let started = host_monotonic_ms(); let row = head(rows);
+    let block = nll-block(g,nth(row,1),head(row),nth(row,2),nth(row,3),t,0,scratch);
+    let gradient = nlb-block(g,block,dy,t,state); let done = nam-sync();
+    let freeForward = nam-free(nth(block,1));
+    let freeIncoming = nam-free(list(dy));
+    let freeTemporaries = nam-free(nlrc-except(nth(gradient,1),head(gradient)));
+    let observed = emit(context,"backward",nth(row,4),t,sub(host_monotonic_ms(),started));
+    nlrc-reverse(g,tail(rows),head(gradient),t,state,scratch,context,emit);
+   };
+  }
+  def nlrc-backward(model,r,targets,mask,state,weight) = nlrc-backward-observed(model,r,targets,mask,state,weight,list(),nlrc-quiet);
+  def nlrc-backward-observed(model,r,targets,mask,state,weight,context,emit) {
+   let g = head(model); let t = len(targets);
+   if not(eq(len(r),10)) then form_error("native checkpointed reverse requires its forward owner") else {
+    let ce = nlb-loss-masked-parts(model,r,targets,mask,weight);
+    let dn = nam-alloc(mul(t,nth(g,0))); let dh = nam-alloc(mul(t,nth(g,0)));
+    let projected = nam-linear(nth(model,2),head(ce),dn,t,1);
+    let norm = nlb-rms(nth(r,3),nth(model,3),nth(r,4),dn,dh,nth(g,0),t);
+    let done = nam-sync(); let loss = nlb-finite-loss(nth(ce,1),t);
+    let freed = nam-free(cons(dn,nth(ce,2)));
+    let rows = nth(r,8);
+    let reversed = nlrc-reverse(g,reverse(drop(nlrc-first(rows,0),rows)),dh,t,state,nth(r,9),context,emit);
+    loss;
+   };
+  }
+  // Conservative simultaneous ownership: complete KV, retained layer inputs and
+  // head, head reverse buffers, one recomputed layer and one layer's reverse buffers.
+  def nlrc-bytes(model,t) {
+   let g = head(model); let d = nth(g,0); let kd = mul(nth(g,3),nth(g,4)); let rank = nll-rank(nth(model,1));
+   let cache = mul(8,mul(t,mul(nth(g,6),kd)));
+   let retained = mul(t,add(add(2,rank),add(mul(add(nth(g,6),2),d),nth(g,5))));
+   let headReverse = mul(t,add(nth(g,5),add(mul(2,d),3)));
+   let layer = add(mul(t,add(add(mul(17,d),mul(4,kd)),add(mul(6,nth(g,1)),add(mul(14,rank),2)))),mul(2,mul(t,mul(t,nth(g,2)))));
+   add(cache,mul(4,add(retained,add(headReverse,layer))));
+  }
+ }
+ 0;
+}

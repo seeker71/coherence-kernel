@@ -92,8 +92,10 @@ When a deferred candidate differs from the serving adapter, that serving
 adapter receives an additional comparison on the same rows. Assessment and
 validation use memory-admitted forward slices with complete KV history and
 supervised-token-weighted loss. Their coverage records retain all input tokens;
-this reduces assessment memory without shortening examples or changing the
-training gradient's whole-row admission.
+this reduces assessment memory without shortening examples. Full-gradient
+training selects a whole tape for small rows and layer-input checkpointing
+with full-sequence recomputation when the tape exceeds the device slice
+allowance. Its separate admission still checks the selected memory estimate.
 
 Promotion requires improvement on the current example and no per-row regression
 beyond `1e-6` against either the candidate or serving baseline. Every assessment

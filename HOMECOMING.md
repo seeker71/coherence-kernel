@@ -249,6 +249,17 @@ supervised-token-weighted loss and verified release. Training still owns its
 separate full-gradient memory requirement. The reference correction execution
 also returned the unchanged 635-word Qwen answer; its quality gap remains open.
 
+The [full-gradient memory repair](receipts/2026-09-23-full-gradient-recompute.md)
+then follows the actual training refusal: the learner reached the whole example,
+whose retained-tape estimate was 341,213,194,880 bytes. Training now selects
+layer-input checkpoints and full-sequence recomputation for large tapes;
+gradient checks pass and resumed parameters and Adam moments match byte for
+byte. The unchanged example is queued for its full-size observation. In the
+separate Qwen response path, native reasoning corrects three previous errors
+on the original enquiry, but the shortening step copies all 547 words and a
+cell-lifetime claim still contradicts the supplied axiom. Full-size learning
+and dependable response correction each retain their own unfinished work.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.

@@ -22,8 +22,20 @@ supervised target is scored; prompt-only slices advance context with zero loss w
 Slice losses are weighted by their supervised-token counts. Per-row assessment
 records input tokens, supervised tokens, slice count and peak estimated slice
 bytes. The `assessment-memory` care exchange selects slicing and re-observes
-full coverage. Training still needs its complete forward/backward tape; being
-able to assess a long row does not establish that its gradient fits.
+full coverage. Assessment completion alone does not establish that the
+training gradient fits.
+
+Training keeps the whole forward tape when its conservative estimate fits
+the device's slice allowance. Otherwise `native-lora-recompute.bml` retains
+each layer input and recomputes that layer before its reverse pass. It releases
+the layer's forward and backward temporaries before proceeding. Every token
+and full-sequence attention gradient remain present. This trades an extra
+forward pass for lower peak memory; small rows retain the existing faster path.
+The memory guard accounts for complete KV, retained inputs and head, head
+reverse buffers, and a recomputed layer with its reverse buffers. A row that
+still cannot fit is refused. Per-layer events report actual progress, timing
+and device bytes. Each row records its selected activation policy and both
+estimates; published adapter configuration records the selection policy.
 
 One admitted model and tokenizer serve the run. Sequences accumulate a batch
 gradient weighted by their supervised token counts. Each completed round performs
