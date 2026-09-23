@@ -321,7 +321,7 @@ the candidate document values; it does not overwrite repository files. The calle
 owns loading files, publication, stale-file checks, and repository landing. This
 first door therefore does not claim autonomous arbitrary-repository completion.
 Multiple supplied documents and multiple ordered tasks are supported. Only paths
-in `writable` can change, and only during implementation.
+in `writable` can change, during implementation or authorized code-mode repair.
 
 For a document with a length requirement, a caller may supply a range check:
 
@@ -336,6 +336,20 @@ document. A failed `verify` or completion check returns the observed count and
 the required range to the existing repair flow. This establishes length only;
 source fidelity, completeness and useful wording still require review. The
 check reads document bytes and accepts exactly the four fields shown above.
+
+For a read-only report, use `field` in `report_checks` to select one exact
+top-level JSON string field:
+
+```json
+{"kind":"word-range","field":"answer","minimum":350,"maximum":450}
+```
+
+The same counter runs on the decoded string, excluding JSON syntax and other
+fields. A missing, null or non-string field fails even when zero words are
+allowed. Source checks and all subsequent report checks remain in force.
+The observed count enters the ordinary report repair flow, including a
+caller-offered provider resource. Both forms accept exactly their four fields;
+`path` selects a resident document and `field` selects report text.
 
 ### Direct implementation entry
 

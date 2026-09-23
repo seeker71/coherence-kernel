@@ -6,13 +6,17 @@ provider for one complete response, and rechecks each returned report. This
 is a provider-assisted response path with zero local-model generation. It
 advances alongside the native-only response work.
 
-Pass one JSON manifest on stdin:
+Pass a manifest path on stdin so the native file reader carries the complete
+packet beyond the interactive line limit:
 
 ```sh
-form-run ./fkwu observe/form-cli-response-synthesis-run.bml < manifest.json
+form-run ./fkwu observe/form-cli-response-synthesis-run.bml <<'FORM_MANIFEST'
+@manifest.json
+FORM_MANIFEST
 ```
 
-The source-backed form-cli exposes the same path:
+Inline JSON remains available for short manifests. The source-backed form-cli
+exposes the same path:
 
 ```text
 synthesize @manifest.json
@@ -43,6 +47,9 @@ Replace the empty `request` with a valid native review request: `mode=review`,
 `evaluation=1`, the complete `goal`, read-only `documents`, source `checks`,
 and `report_checks`. Every case needs a unique nonempty ID. The request
 contract and examples live in [native coding](form-native-coding.md).
+For a length-constrained answer, include a report check such as
+`{"kind":"word-range","field":"answer","minimum":350,"maximum":450}`.
+This checks the returned answer text alongside its structure and source assertions.
 
 Do the useful native calculation, retrieval or execution before constructing
 the manifest. Preserve original sources and label any derived observations
