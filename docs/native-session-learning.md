@@ -89,7 +89,11 @@ normalized prompt with a held-out row. Rows are processed whole; the trainer rep
 position or memory refusal instead of silently truncating a row. The one loaded
 training model produces the before/after per-row scores as well as gradients.
 When a deferred candidate differs from the serving adapter, that serving
-adapter receives an additional comparison on the same rows.
+adapter receives an additional comparison on the same rows. Assessment and
+validation use memory-admitted forward slices with complete KV history and
+supervised-token-weighted loss. Their coverage records retain all input tokens;
+this reduces assessment memory without shortening examples or changing the
+training gradient's whole-row admission.
 
 Promotion requires improvement on the current example and no per-row regression
 beyond `1e-6` against either the candidate or serving baseline. Every assessment

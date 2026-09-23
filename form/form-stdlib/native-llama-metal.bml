@@ -180,21 +180,27 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
   // Forward result: logits, block tape, normalized head, head input, inverse,
   // non-layer owned buffers, token count, number of logit rows.
   def nll-forward(model,ctx,ids,pos,training) {
-   let g = head(model); let t = len(ids);
-   if or(and(training,not(eq(pos,0))),or(eq(t,0),or(not(nll-ids-valid(ids,nth(g,5))),or(lt(pos,0),gt(add(pos,t),head(ctx)))))) then form_error("native Llama token/context admission refused") else nll-forward-admitted(model,ctx,ids,pos,training,g,t);
+   if and(training,not(eq(pos,0))) then form_error("native Llama training requires the complete sequence") else nll-forward-rows(model,ctx,ids,pos,training);
   }
-  def nll-forward-admitted(model,ctx,ids,pos,training,g,t) {
+  // Assessment needs every logit row, including slices after position zero.
+  // Its retained KV is read-only history; backward still requires a whole row.
+  def nll-forward-evaluation(model,ctx,ids,pos) = nll-forward-rows(model,ctx,ids,pos,1);
+  def nll-forward-rows(model,ctx,ids,pos,allRows) {
+   let g = head(model); let t = len(ids);
+   if or(eq(t,0),or(not(nll-ids-valid(ids,nth(g,5))),or(lt(pos,0),gt(add(pos,t),head(ctx))))) then form_error("native Llama token/context admission refused") else nll-forward-admitted(model,ctx,ids,pos,allRows,g,t);
+  }
+  def nll-forward-admitted(model,ctx,ids,pos,allRows,g,t) {
    let ib = nam-write(nam-alloc(t),md-le32-list(ids,""));
    let x = nam-alloc(mul(t,nth(g,0)));
    let scratch = nam-alloc(mul(t,nll-rank(nth(model,1))));
    let emb = nam-embed(nth(model,2),ib,x,t);
    let blocks = nll-blocks(g,nth(model,1),x,nth(ctx,1),nth(ctx,2),t,pos,scratch,list());
-   let ht = if training then t else 1;
+   let ht = if allRows then t else 1;
    let hx = nam-alloc(mul(ht,nth(g,0)));
    let hn = nam-alloc(mul(ht,nth(g,0)));
    let inv = nam-alloc(ht);
    let logits = nam-alloc(mul(ht,nth(g,5)));
-   let copied = nll-last(head(blocks),hx,mul(ht,nth(g,0)),if training then 0 else mul(sub(t,1),nth(g,0)));
+   let copied = nll-last(head(blocks),hx,mul(ht,nth(g,0)),if allRows then 0 else mul(sub(t,1),nth(g,0)));
    let norm = nam-rms(hx,nth(model,3),hn,inv,nth(g,0),ht,nth(g,7));
    let out = nam-linear(nth(model,2),hn,logits,ht,0);
    let done = nam-sync();
