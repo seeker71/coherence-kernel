@@ -12,6 +12,13 @@ numbers with minimum no greater than maximum. Repeated or malformed options
 return before model admission. Prompt bytes after the options are preserved;
 the admitted request also carries the explicit word-range instruction.
 
+Bounded response generation carries the shared Form meaning teaching and an
+instruction to answer from supplied context, follow the requested format and
+length, and receive runtime revision requests. Its prompt does not advertise
+the automatic knowledge-query protocol or that protocol's 48/32-token budget;
+this execution path binds no query handler. Query-capable calls retain their
+own overlay and budget. The caller's text remains byte-for-byte intact.
+
 The runtime counts runs of non-whitespace bytes, using ASCII space, tab, newline,
 vertical tab, form feed and carriage return as separators. Headings count.
 This is a stated counting convention, not language-independent segmentation.
