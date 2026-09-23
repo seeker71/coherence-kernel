@@ -841,9 +841,10 @@ capability; improvement in the resulting work needs its own observation.
 | Split | `{"tasks":["first task","next task"]}` | An ordered work queue; no rented subagents |
 | Implement | Tool calls, then `{"task":"done"}` | In-memory edits and advancement to the next task |
 | Review | `{"verdict":"accept","reason":"..."}` or `reject` | Rework on rejection; caller verification on acceptance |
-| Repair | `{"diagnosis":"observed cause","change":"different approach","next":"implement"}` or `next:"plan"` | Retain failure evidence, then resume editing or rebuild the plan and task queue |
+| Repair | A document tool action, or `{"diagnosis":"observed cause","change":"different approach","next":"implement"}` / `next:"plan"` | Check an applied repair immediately, or retain the diagnosis and selected route |
 
-Every role may inspect documents. Only implementation may edit. Native calls use
+Every role may inspect documents. Implementation and repair may edit caller-writable
+documents; repeated counterexamples require replanning before further edits. Native calls use
 `{"tool":"rg","arguments":["-nF","enabled","config.json"],"input":""}`.
 Other examples:
 
@@ -911,15 +912,23 @@ enters the same tool observation and repair loop. Report checks run on submissio
 
 Repair is an active role, not a stopped job. A native tool error, review finding,
 or failed check enters repair. Read-only inspection stays available; its output
-does not overwrite the separately retained failure evidence. Qwen names what
-failed and what it will change. Replanning preserves original documents,
+does not overwrite the separately retained failure evidence. Qwen can apply a
+guarded `edit`, create with `write`, or call `repair-bml` directly. When a tool
+changes documents successfully, the controller records the actual action and
+original failure, then runs the caller's source checks in the same transition.
+This record explicitly supplies no model diagnosis. A failed check returns to
+repair; a pass returns to implementation and still requires task completion,
+review and final verification. Failed or unchanged edits do not advance.
+Qwen may instead name what failed, what it will change, and its next route.
+Replanning preserves original documents,
 constraints, candidates, completed-task counts and repair memory. If the exact
 same counterexample survives a repair, the next route must be `plan` before
 further edits. An `rg` no-match result is an observation, not a tool malfunction.
 Malformed JSON and unavailable tools receive correction in the current role.
 
 The result returns `repair_attempts`, `check_runs` and `repair_notes` containing
-each model diagnosis, intended change, selected route and the evidence it saw.
+each supplied model diagnosis or explicitly attributed controller observation,
+the change, selected route and retained failure evidence.
 These are model reflections, **not proven causal explanations or weight
 training**. The JSON door now persists native binary checkpoints beneath
 `.hearth/code-memory/` after complete model/tool transitions. A completed repair

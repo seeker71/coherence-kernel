@@ -265,7 +265,10 @@ positions. Training now checks its final projected row before backpropagation.
 The original 5,485-token retry completed forward and backward execution from
 parent 152; its whole-row loss and same-parent sliced assessment differ by
 4.13e-10. Its final projected row agrees exactly. This establishes the observed
-numerical consistency; the update's promotion and quality remain pending. In the
+numerical consistency. Checkpoint 153 completed: the original example's loss
+fell from 0.04004205 to 0.03983187, while both held-out losses rose slightly
+against parent 152. Promotion was refused and serving generation 5 retained.
+Improvement in generated answers remains unestablished. In the
 separate Qwen response path, native reasoning corrects three previous errors
 on the original enquiry, but the shortening step copies all 547 words and a
 cell-lifetime claim still contradicts the supplied axiom. Learning quality
@@ -293,6 +296,14 @@ keeps bounded reasoning available on each native coding reply, including repair
 and context renewal. Its boundary checks pass. The original editing request is
 retained with only this capability enabled; its actual revision must establish
 whether the added reasoning improves execution and answer quality.
+
+The [direct repair observation](receipts/2026-09-23-direct-native-repair.md)
+found a valid guarded edit refused solely because the coding role was `repair`.
+The controller now applies authorized document repairs and immediately runs
+the unchanged caller checks. Replaying that exact native action reduces the
+515-word candidate to 492 words in one reply transition. It still fails the
+350–450-word requirement. The workflow restriction is repaired; concise,
+useful completion and response quality remain the next observed gap.
 
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
