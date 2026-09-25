@@ -300,7 +300,7 @@ Embodied knowing means a claim meets real input, can be rejected by an executabl
 
 ## Next completed boundary
 
-Care and Glass parse, retain and render changing observations outside permanent
+Health, care and Glass parse, retain and render changing observations outside permanent
 primary interning, with collector-visible Form roots and an explicit
 node-materialization door. Shared JSON construction and health protocol logic
 preserve typed data and correlation through that transition. The collector,
@@ -311,8 +311,10 @@ working references while held views retain their values. Current-state updates
 release obsolete event trees instead of extending an overlay chain. Measure
 primary admission, float boxes, temporary storage, retained state, diagnostics
 and latency separately. No primary mints in an observed interval does not mean
-no allocation. Ordinary health text output still materializes nodes through
-its explicit node API; its next caller transition is direct value emission.
+no allocation. Ordinary health text emits values directly; explicit node APIs
+and custom node callbacks retain their materialization contract. Request
+parsing and discovery still use primary nodes. The next caller transition
+concerns the remaining seed-owned values, records and collector roots.
 
 The immediate runtime milestone is an owned lifetime for the retained care
 view, connected to the primary value path. It is a real, recurring consumer

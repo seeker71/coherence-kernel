@@ -93,7 +93,7 @@ pure admission observations.
 Interning prevents duplicate identities from consuming fresh cells; it does
 not establish a bounded lifetime for changing diagnostic values.
 
-Care and Glass parse, retain and render changing observations through
+Health, care and Glass parse, retain and render changing observations through
 collector-visible Form JSON values. The shared parser selects constructors;
 one health reducer serves both value and node APIs. Current-state replacement
 releases obsolete references while held snapshots remain exact. Primary
@@ -109,7 +109,13 @@ Admission diagnostics reuse the reader's identity and retain their separate
 framebuffer timestamp cost. The [value-contract observation](evidence/fkwu/care-value-contract.json)
 preserves typed/order-sensitive protocol semantics and the real retained organ
 exchange. Temporary values still allocate; three float inputs allocate three
-seed boxes. Ordinary `health` output explicitly materializes nodes. No primary
+seed boxes. Ordinary `health` text emits the shared value projection directly;
+explicit node APIs and custom node callbacks preserve materialization.
+The [health command observation](evidence/fkwu/health-view-lifetime.json)
+alternates health and care over changing events for 32 cycles with no primary
+mints in warmed explicit-source command intervals, including serialization.
+A held health view survives collection exactly. Request parsing and discovery
+still use primary nodes; temporary values still allocate. No primary
 reclamation or complete native lifetime is established.
 Session-owned data paths are absolute to their selected home, so an absent local
 worker or state file stays absent even when an ancestor has its own session.
@@ -316,8 +322,8 @@ Resource ownership includes names, metadata and event delivery: a native handle 
    roots before moving construction, reading, rendering and release. Preserve
    its existing result while changing observations gain reclaimable lifetimes.
    Changing event trees and projections already avoid primary admission on the
-   value path; generation renewal reuses the reader. Move ordinary health text
-   output to that path, then retire seed ownership of boxed floats, records and
+   value path, including ordinary health text; generation renewal reuses the
+   reader. Retire seed ownership of boxed floats, records and
    collection with measured caller transitions. The [north-star milestone](fkwu-form-native-north-star.md#next-completed-boundary)
    names the actual caller transition and its acceptance conditions.
 2. In that same consumer, keep the minimal signal/response path available when

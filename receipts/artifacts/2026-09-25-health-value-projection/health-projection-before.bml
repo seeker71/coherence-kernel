@@ -1,6 +1,6 @@
 // The core reads advertised organ flows and keeps their native cursors between
 // calls. This is observed scope, not a claim that undiscovered organs are well.
-// preludes: form-stdlib/bml/form-core-health-values.bml form-stdlib/bml/organ-health-discovery.bml
+// preludes: form-stdlib/bml/organ-health-stream.bml form-stdlib/bml/organ-health-discovery.bml
 section [form.bml] {
  class FormCoreHealth {
   def ohc-open() = record_new(0,"kind","form-core-health");
@@ -23,29 +23,31 @@ section [form.bml] {
    if reset then ohs-restart(record_get(stream,"reader"),generation) else 0;
    record_set(publishers,publisher,generation); record_set(stream,"seen",1); 0;
   }
-  def ohc-source-report(reader,source) = jv-materialize(ohcv-source-report(reader,source));
+  def ohc-source-report(reader,source) = oh-set(ohs-report(reader),"declaration",source);
   def ohc-poll(owner,sources,budget,seen) = ohc-poll-with(owner,sources,budget,seen,ohc-source-report);
   def ohc-poll-with(owner,sources,budget,seen,report) = if nil?(sources) then list() else if oh-has(seen,oh-str(head(sources),"source")) then ohc-poll-with(owner,tail(sources),budget,seen,report) else cons(report(ohs-update(record_get(ohc-stream(owner,head(sources)),"reader"),budget),head(sources)),ohc-poll-with(owner,tail(sources),budget,cons(oh-str(head(sources),"source"),seen),report));
   def ohc-needs(row) = json-array-elements(oh-get(row,"needs"));
   def ohc-attend(row) = oh-unease(row);
-  def ohc-row(source,row) = jv-materialize(ohcv-row(jv-node(source),jv-node(row)));
-  def ohc-current(source,rows) = jv-materialize-items(ohcv-current(jv-node(source),jv-wrap(rows)));
-  def ohc-readings(sources) = jv-materialize-items(ohcv-readings(jv-wrap(sources)));
-  def ohc-attention(rows,pain) = jv-materialize-items(ohcv-attention(jv-wrap(rows),pain));
-  def ohc-capabilities(rows) = jv-materialize-items(ohcv-capabilities(jv-wrap(rows)));
-  def ohc-bytes(sources) = ohcv-bytes(jv-wrap(sources));
-  def ohc-source-needs(sources) = jv-materialize-items(ohcv-source-needs(jv-wrap(sources)));
+  def ohc-row(source,row) = oh-set(oh-set(row,"source",oh-get(source,"source")),"source_state",oh-get(source,"state"));
+  def ohc-current(source,rows) = if nil?(rows) then list() else cons(ohc-row(source,head(rows)),ohc-current(source,tail(rows)));
+  def ohc-readings(sources) = if nil?(sources) then list() else append(ohc-current(head(sources),json-array-elements(oh-get(head(sources),"current"))),ohc-readings(tail(sources)));
+  def ohc-attention(rows,pain) = if nil?(rows) then list() else if and(ohc-attend(head(rows)),eq(oh-pain(head(rows)),pain)) then cons(head(rows),ohc-attention(tail(rows),pain)) else ohc-attention(tail(rows),pain);
+  def ohc-capabilities(rows) = if nil?(rows) then list() else cons(json-node-object(list(oh-s("organ",oh-str(head(rows),"organ")),oh-s("flow",oh-str(head(rows),"flow")),oh-s("aspect",oh-str(head(rows),"aspect")),json-node-pair("offered_responses",oh-get(head(rows),"offers")),json-node-pair("needed_resources",oh-get(head(rows),"needs")),json-node-pair("health",oh-get(head(rows),"health")),json-node-pair("observation_age_ms",oh-get(head(rows),"observation_age_ms")),json-node-pair("source",oh-get(head(rows),"source")),json-node-pair("source_state",oh-get(head(rows),"source_state")),oh-s("scope","offered-by-observed-organ;execution-owned-by-organ"))),ohc-capabilities(tail(rows)));
+  def ohc-bytes(sources) = if nil?(sources) then 0 else add(json-int-value(oh-get(head(sources),"read_bytes")),ohc-bytes(tail(sources)));
+  def ohc-source-needs(sources) = if nil?(sources) then list() else if and(str_eq(oh-str(head(sources),"state"),"caught-up"),gt(len(json-array-elements(oh-get(head(sources),"current"))),0)) then ohc-source-needs(tail(sources)) else cons(json-node-object(list(oh-s("source",oh-str(head(sources),"source")),oh-s("state",oh-str(head(sources),"state")),oh-s("resource",if str_eq(oh-str(head(sources),"state"),"backlog") then "local-reader-work" else if str_eq(oh-str(head(sources),"state"),"awaiting-complete-record") then "complete-event" else if str_eq(oh-str(head(sources),"state"),"caught-up") then "organ-observation" else "readable-organ-evidence"))),ohc-source-needs(tail(sources)));
   def ohc-read(owner,root,discovery,budget) = ohc-read-at(owner,root,discovery,budget,host_monotonic_ms());
-  def ohc-read-at(owner,root,discovery,budget,started) = jv-materialize(ohc-view-read-at(owner,root,discovery,budget,started));
+  def ohc-read-at(owner,root,discovery,budget,started) = ohc-read-with(owner,root,discovery,budget,started,ohc-project);
   def ohc-read-with(owner,root,discovery,budget,started,project) = ohc-read-through(owner,root,discovery,budget,started,ohc-source-report,project);
   def ohc-read-through(owner,root,discovery,budget,started,report,project) {
    ohc-sync(owner,json-array-elements(oh-get(discovery,"sources")));
    let sources = ohc-poll-with(owner,json-array-elements(oh-get(discovery,"sources")),budget,list(),report);
    project(root,discovery,sources,started);
   }
-  def ohc-view(root,discovery,sources,started) = ohcv-project(root,jv-node(discovery),sources,started);
-  def ohc-project(root,discovery,sources,started) = jv-materialize(ohc-view(root,discovery,jv-wrap(sources),started));
-  def ohc-view-read-at(owner,root,discovery,budget,started) = ohc-read-through(owner,root,discovery,budget,started,ohcv-source-report,ohc-view);
+  def ohc-project(root,discovery,sources,started) {
+   let rows = ohc-readings(sources);
+   let attention = append(ohc-attention(rows,1),ohc-attention(rows,0));
+   json-node-object(list(oh-s("schema","form-core-health-v1"),oh-s("root",root),oh-s("coverage",oh-str(discovery,"coverage")),oh-s("health_basis","latest-complete-organ-observations;age-and-source-state-retained"),json-node-pair("discovery",discovery),json-node-pair("sources",json-node-array(sources)),json-node-pair("organs",json-node-array(ohc-capabilities(rows))),json-node-pair("attention",json-node-array(attention)),json-node-pair("source_needs",json-node-array(ohc-source-needs(sources))),oh-n("read_bytes",ohc-bytes(sources)),oh-n("elapsed_ms",sub(host_monotonic_ms(),started)),oh-n("model_calls",0),oh-n("remote_calls",0),oh-s("crossing_scope","this health read;native shared-memory discovery and local file deltas"),oh-s("next","offer local resources to the asking organ;apply only owned responses;re-observe before claiming recovery")));
+  }
   def ohc-string-paths(nodes) = if nil?(nodes) then 1 else and(and(eq(node_type(head(nodes)),2),not(nothing?(ohd-path(host_cwd(),json-string-value(head(nodes)))))),ohc-string-paths(tail(nodes)));
   def ohc-request-valid(request) = and(node_eq(node_category(request),JSON-OBJECT()),and(if json-object-has?(request,"sources") then and(oh-array(request,"sources"),ohc-string-paths(json-array-elements(oh-get(request,"sources")))) else 1,if json-object-has?(request,"budget_bytes") then and(eq(node_type(oh-get(request,"budget_bytes")),1),gt(json-int-value(oh-get(request,"budget_bytes")),0)) else 1));
   def ohc-explicit(root,request) {
@@ -53,8 +55,7 @@ section [form.bml] {
    let sources = ohc-sources(root,paths);
    json-node-object(list(oh-s("coverage","caller-specified-sources"),json-node-pair("sources",json-node-array(sources)),json-node-pair("diagnostics",json-node-array(list()))));
   }
-  def ohc-view-request-at(owner,request) = ohc-request-through(owner,request,ohcv-source-report,ohc-view);
-  def ohc-request-at(owner,request) = jv-materialize(ohc-view-request-at(owner,request));
+  def ohc-request-at(owner,request) = ohc-request-with(owner,request,ohc-project);
   def ohc-request-with(owner,request,project) = ohc-request-through(owner,request,ohc-source-report,project);
   def ohc-request-through(owner,request,report,project) {
    let started = host_monotonic_ms();
@@ -63,8 +64,8 @@ section [form.bml] {
    ohc-read-through(owner,root,discovery,if json-object-has?(request,"budget_bytes") then json-int-value(oh-get(request,"budget_bytes")) else 65536,started,report,project);
   }
   def ohc-command(arg) = ohc-command-at(ohc-open(),arg);
-  def ohc-command-at(owner,arg) = if or(str_eq(arg,""),str_eq(arg,"status")) then jv-emit(ohc-view-request-at(owner,json-node-object(list()))) else if str_eq(arg,"help") then "health [status|JSON]: live advertised organ observations, offered responses, needed local resources and observation age. JSON may name sources and a positive budget_bytes per source; the resident REPL retains native cursors and consumes only new complete events. No model or remote call. Coverage is explicit; absent evidence is not health." else if not(jwa-valid(arg)) then "health refused: expected status or JSON with sources and budget_bytes" else ohc-command-request(owner,parse-json("core-health-request",arg));
-  def ohc-command-request(owner,request) = if not(ohc-request-valid(request)) then "health refused: sources must be valid lexical paths without NUL or parent traversal; budget_bytes must be a positive integer" else jv-emit(ohc-view-request-at(owner,request));
+  def ohc-command-at(owner,arg) = if or(str_eq(arg,""),str_eq(arg,"status")) then json-emit-precise(ohc-request-at(owner,json-node-object(list()))) else if str_eq(arg,"help") then "health [status|JSON]: live advertised organ observations, offered responses, needed local resources and observation age. JSON may name sources and a positive budget_bytes per source; the resident REPL retains native cursors and consumes only new complete events. No model or remote call. Coverage is explicit; absent evidence is not health." else if not(jwa-valid(arg)) then "health refused: expected status or JSON with sources and budget_bytes" else ohc-command-request(owner,parse-json("core-health-request",arg));
+  def ohc-command-request(owner,request) = if not(ohc-request-valid(request)) then "health refused: sources must be valid lexical paths without NUL or parent traversal; budget_bytes must be a positive integer" else json-emit-precise(ohc-request-at(owner,request));
  }
  0;
 }
