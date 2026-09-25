@@ -1432,6 +1432,13 @@ that field may contain `{reference: <failure_evidence_id>, scope:
 is used only when shorter. Changed failure bytes and fresh/resumed bootstrap
 contexts receive the full evidence. Failed or partial feedback loading cannot
 admit a new identity. Distinct text and retained controller state stay intact.
+Historical verification and edit-guard failures in prior repairs and pending
+repair tasks carry their exit, stdout and stderr into model context. Their
+earlier document identities remain in the complete checkpoint and public repair
+history. Current document identities are supplied by admission and native reads
+or mutation acknowledgments. The latest failure still carries its complete
+evidence. This keeps a retained check's identity separate from the identity used
+for the next guarded edit.
 Prompt, response and source content stay out of the diagnostic framebuffer.
 The JSON result carries candidate document content and, for review, the report
 back to its caller. Rechecks on recall/resume count as actual checker calls.
