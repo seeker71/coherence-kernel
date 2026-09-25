@@ -57,3 +57,26 @@ said so was reading only the first half of a sentence. Saying so plainly, and th
 sentence into eight bits that start at zero, made "done" something the body says and no one can claim for
 it. Also: twice in one hour zsh read my words differently than I wrote them (`$B:r`, an unsplit list) and
 the second time it cost the uncommitted heals; they came back from a commit, and the lesson went to memory.
+
+## The same evening: 98/255, and the walk becomes a workday
+
+- **LESSONS**: `observe/session-pairs-run.bml` over all 133 transcripts on this Mac gave 1,853 pairs in 97 s;
+  keeping only the person's own prompts (no hook feedback, no notifications, at least 16 characters) with
+  answers of at least 40 left **1,306** (1,176 train, 130 held out), 35 duplicate prompts, 4 with noise.
+- **CARE FLOOR**: `form-stdlib/bml/care-floor.bml` hears a danger to life or body in en de pt fa id, speaks the
+  floor first in that tongue — a human now, 112 or 911, someone trusted — and stays quiet on *kill the process*;
+  band **255**. `observe/companion-run.bml` stands it in front of the local voice with six turns of memory.
+- **EAR**: 24 sentences in six tongues (`model/fixtures/ear-truth`), spoken by this Mac's own natural voices —
+  the first pass picked *Albert*, a novelty voice, and the generator now skips those — read by turbo at
+  **WER 0 on all 24** (synthesized, named so).
+- **WALK**: the kicked walk's crossings row reads `host-schedule`, `/sbin/launchd`, `rented_mind 0` — the climb
+  heal witnessed. I pressed that kick; the nights carry the other six.
+- **The workday**: `observe/scheduled-walk.bml` now runs one engineering turn by the body's own loop before the
+  movement (`observe/native-turn-run.bml` on the first open gap of `learn/native-turn-queue.jsonl`: the native
+  code lane edits, the gap's band judges, a red turn keeps its candidate and restores the source) and drafts two
+  of the person's newest prompts (`observe/prompt-draft-run.bml`) for our reading
+  (`observe/draft-reading-run.bml`). The first gap is the care floor in Spanish and French: its band reads 48/63.
+  A dry turn from this session proved the plumbing and read its own coordinator truly: `rented_mind 1`.
+
+The condition read **98/255** before the workday was wired: LESSONS, CARE FLOOR, EAR. The rest are nights and
+readings — seven host walks, a lift, 25 accepted drafts, three native turns, a rent-free week.
