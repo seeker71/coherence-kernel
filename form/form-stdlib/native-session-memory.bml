@@ -215,9 +215,31 @@ section [form.bml] {
    let observed = nsm-event(home,"inference-worker-exit",list(nsm-n("child_exit",rc),nsm-s("stderr",nsm-at(home,str_concat(stem,".err"))),nsm-s("events",nsm-str(request,"events")),nsm-n("result_present",gt(file_size(nsm-str(request,"output")),0))));
    if eq(rc,0) then result else json-node-object(list(nsm-s("text",""),nsm-s("reason","native-session-ask-failed"),nsm-n("exit",rc),nsm-s("stderr",nsm-at(home,str_concat(stem,".err")))));
   }
-  // A short-lived caller keeps ownership until the supervisor writes its exit.
-  // This is also the normal session-close door; an external kill leaves the
-  // immutable spool ready for the next drain, never a fabricated completion.
+  // Closing a CLI retains its own supervisor. Other sessions keep their work;
+  // closing neither launches queued work nor waits for an unrelated learner.
+  def nsm-session-settle(home) {
+   let pid = str_to_int(trim(nsm-text(nsm-at(home,"worker.pid"))));
+   let parent = nsm-worker-parent(pid);
+   let owned = eq(parent,host_pid());
+   let event = nsm-event(home,"session-settle",list(nsm-n("worker_pid",pid),nsm-n("worker_parent",parent),nsm-n("owned",owned),nsm-s("selected",if owned then "wait-owned-supervisor" else "leave-shared-learning-with-owner")));
+   if owned then nsm-session-wait(home,pid) else event;
+  }
+  def nsm-worker-parent(pid) = nsm-worker-parent-row(host_process(pid));
+  def nsm-worker-parent-row(row) = if eq(row,-1) then 0 else nth(row,1);
+  def nsm-session-wait(home,pid) {
+   let rc = host_wait(pid);
+   if and(lt(rc,0),eq(nsm-worker-parent(pid),host_pid())) then nsm-session-wait-again(home,pid) else nsm-session-wait-observed(home,pid,rc);
+  }
+  def nsm-session-wait-again(home,pid) {
+   let pause = host_sleep_ms(250);
+   nsm-session-wait(home,pid);
+  }
+  def nsm-session-wait-observed(home,pid,rc) {
+   let retained = nsm-wait-retain(home,pid,rc);
+   nsm-event(home,"session-settle-observed",list(nsm-n("worker_pid",pid),nsm-n("wait_exit",rc),nsm-n("failure_retained",retained)));
+  }
+  // Explicit drain and one-shot embodiment keep the caller until shared work
+  // settles. An external kill leaves the immutable spool for the next drain.
   def nsm-settle(home) {
    if and(not(nsm-running(home)),or(not(nsm-enabled(home)),eq(len(nsm-pending(home,nsm-dirs(home))),0))) then nsm-status(home) else nsm-settle-kicked(home,nsm-kick(home));
   }
