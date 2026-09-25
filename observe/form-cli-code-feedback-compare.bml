@@ -1,8 +1,9 @@
 // Compare a public same-checkpoint response repair with its preceding result.
 // One JSON stdin line: root, prior_root, public_log. Each root holds request.json
 // and completed public artifacts. Only the current root receives new artifacts.
+// Optional owner_pid waits for that process and its complete public execution.
 // preflight-exec: forbidden
-// preludes: form-stdlib/bml/form-cli-response-resource.bml
+// preludes: form-stdlib/bml/form-cli-response-resource.bml form-stdlib/bml/form-cli-heal-native-process.bml
 section [form.bml] {
  def naf-last(text,marker,from,found) {
   let at=str_find(text,marker,from);
@@ -17,13 +18,29 @@ section [form.bml] {
   if lt(at,0) then form_error("public progress is absent") else parse-json("progress",naf-line(log,add(at,str_len(marker))));
  }
  def naf-event(rows,event) = if nil?(rows) then 0 else if node_eq(head(rows),event) then 1 else naf-event(tail(rows),event);
+ def naf-await(pid,path,drainLeft) {
+  if fhn-alive(pid) then {
+   host_sleep_ms(5000);
+   naf-await(pid,path,120);
+  } else {
+   let log=read_file(path);
+   let at=naf-last(log,"{\"schema\":\"form-native-code-v1\"",0,-1);
+   if and(ge(at,0),ge(str_find(log,"\n@form fkwu 0 ",at),0)) then log else
+   if le(drainLeft,0) then form_error("native owner exited without a complete successful public execution record; retain its failure before comparison") else {
+    host_sleep_ms(1000);
+    naf-await(pid,path,sub(drainLeft,1));
+   };
+  };
+ }
  let configText=read_line();
  if not(faj-valid(configText)) then form_error("feedback comparison requires a JSON path configuration") else 0;
  let config=parse-json("feedback-comparison",configText);
  let root=nsm-str(config,"root"); let priorRoot=nsm-str(config,"prior_root"); let logPath=nsm-str(config,"public_log");
  if or(str_eq(root,""),or(str_eq(priorRoot,""),str_eq(logPath,""))) then form_error("root, prior_root and public_log are required") else 0;
- let log=read_file(logPath);
- let raw=naf-line(log,str_find(log,"{\"schema\":\"form-native-code-v1\"",0));
+ let owner=nsm-num(config,"owner_pid");
+ if gt(owner,0) then print_str("native-feedback-comparison: awaiting the existing owner and its public execution record; no model or provider admitted") else 0;
+ let log=if gt(owner,0) then naf-await(owner,logPath,120) else read_file(logPath);
+ let raw=naf-line(log,naf-last(log,"{\"schema\":\"form-native-code-v1\"",0,-1));
  if not(faj-valid(raw)) then form_error("public native result is invalid JSON") else 0;
  let result=parse-json("absence-result",raw); let prior=nsm-json(frsh-path(priorRoot,"terminal-result.json"));
  let request=nsm-json(frsh-path(root,"request.json"));
@@ -37,9 +54,16 @@ section [form.bml] {
  let feedback=oh-get(request,"feedback"); let event=json-node-array(list(oh-get(feedback,"id"),oh-get(feedback,"text")));
  let retained=naf-event(json-array-elements(oh-get(result,"caller_feedback")),event);
  let observation=json-node-object(list(nsm-s("status",nsm-str(result,"status")),nsm-s("checkpoint_id",nsm-str(result,"checkpoint_id")),nsm-n("before_words",fal-count(oldAnswer)),nsm-n("after_words",fal-count(answer)),nsm-n("original_checks_passed",head(checked)),nsm-n("readonly_preserved",fcap-readonly-preserved(original,after,fcap-array(request,"writable"))),nsm-n("caller_feedback_retained",retained),nsm-n("release_ok",nsm-num(result,"release_ok")),nsm-n("new_turns",sub(nsm-num(result,"turns"),nsm-num(prior,"turns"))),nsm-n("new_tool_calls",sub(nsm-num(result,"tool_calls"),nsm-num(prior,"tool_calls"))),nsm-n("new_checks",sub(nsm-num(result,"check_runs"),nsm-num(prior,"check_runs"))),nsm-n("generated_ids_this_admission",nsm-num(result,"generated_ids")),nsm-n("injected_ids_this_admission",nsm-num(result,"injected_ids")),nsm-n("last_observed_elapsed_ms",nsm-num(progress,"elapsed_ms")),nsm-n("weight_training_excluded",nsm-num(result,"weight_training_excluded")),nsm-n("prior_initial_position",nsm-num(oldInitial,"position")),nsm-n("prior_initial_elapsed_ms",nsm-num(oldInitial,"elapsed_ms")),nsm-n("initial_position",nsm-num(initial,"position")),nsm-n("initial_elapsed_ms",nsm-num(initial,"elapsed_ms")),nsm-n("answer_changed",not(str_eq(answer,oldAnswer))),nsm-s("answer_sha256",nsm-hash(answer)),nsm-s("scope","Read the actual answer for semantic quality. Timings describe real requests; retained request context and host conditions must be compared separately. They do not isolate an effect or establish whole-response parity.")));
+ let reportText=nsm-str(result,"report");
+ let report=if faj-valid(reportText) then parse-json("retained-review",reportText) else json-node-null();
+ let structured=str_eq(nsm-str(report,"schema"),"native-coding-review-v1");
+ let sameGoal=and(structured,str_eq(nsm-str(report,"goal_sha256"),nsm-hash(nsm-str(request,"goal"))));
+ let sameDocs=and(structured,node_eq(oh-get(report,"documents"),json-node-array(fcap-document-catalog(after))));
+ let reviewScope=json-node-object(list(nsm-n("report_present",not(str_eq(reportText,""))),nsm-n("structured_coding_review",structured),nsm-n("goal_matches",sameGoal),nsm-n("documents_match",sameDocs),nsm-n("current_review",and(sameGoal,sameDocs)),nsm-s("scope","Identity match establishes which goal and documents were reviewed; it does not establish correctness or independent validation.")));
  frsh-frozen(frsh-path(root,"terminal-result.json"),raw);
  frsh-frozen(frsh-path(root,"answer.txt"),answer);
  frsh-frozen(frsh-path(root,"comparison.json"),json-emit(observation));
+ frsh-frozen(frsh-path(root,"review-scope.json"),json-emit(reviewScope));
  frsh-frozen(frsh-path(root,"public-cli.log.json"),json-emit(json-node-object(list(nsm-s("source",logPath),nsm-s("sha256",nsm-hash(log)),nsm-s("text",log)))));
- print_str(json-emit(observation)); print_str("Native review:"); print_str(nsm-str(result,"report")); print_str("Native answer:"); print_str(answer);
+ print_str(json-emit(observation)); print_str(json-emit(reviewScope)); print_str(if and(sameGoal,sameDocs) then "Native review of the returned documents:" else "Retained native review; not established for the returned documents:"); print_str(reportText); print_str("Native answer:"); print_str(answer);
 }
