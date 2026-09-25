@@ -1,0 +1,86 @@
+// native-turn-run.bml — one engineering turn by the body's own loop: a queued gap, the native code lane, the band.
+//
+// Reads learn/native-turn-queue.jsonl (id, goal, writable, band, full) and takes the first gap with no green row
+// in receipts/native-turn-ledger.jsonl. Runs the gap's band in its own fresh kernel; when it already reads full
+// the gap is closed and nothing runs. Otherwise hands the goal to the native code lane
+// (observe/form-cli-code-run.fk: local Qwen in one native session, no rented fallback) with the writable
+// sources as documents and a rehearse-bml check on each, then runs the band again. A turn that turned the band
+// green keeps its edit for the landing; a turn that did not keeps its candidate under .hearth/native-turns and
+// the source is restored. One row lands either way: gap, band before and after, full, band_green, and who began
+// the turn, read from the host's own process table (the first ancestor that is neither the body nor a shell:
+// launchd is the host's schedule, anything else a session with a rented mind).
+// stdin, optional: {"gap":"<id>","dry":1,"model":"qwen38-q8","context":16384,"turns":32}; dry skips the lane.
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml
+section [form.bml] {
+ class NativeTurn {
+  def nt-queue() = "learn/native-turn-queue.jsonl";
+  def nt-ledger() = "receipts/native-turn-ledger.jsonl";
+  def nt-dir() = ".hearth/native-turns";
+  def nt-str(doc, key) = if json-object-has?(doc, key) then json-string-value(json-object-get(doc, key)) else "";
+  def nt-int(doc, key, d) = if json-object-has?(doc, key) then json-int-value(json-object-get(doc, key)) else d;
+  def nt-strs(doc, key) = if json-object-has?(doc, key) then nt-values(json-array-elements(json-object-get(doc, key))) else list();
+  def nt-values(nodes) = if nil?(nodes) then list() else cons(json-string-value(head(nodes)), nt-values(tail(nodes)));
+  def nt-nonempty(xs) = if nil?(xs) then list() else if eq(str_len(trim(head(xs))), 0) then nt-nonempty(tail(xs)) else cons(head(xs), nt-nonempty(tail(xs)));
+  def nt-parse(xs) = if nil?(xs) then list() else cons(parse-json("native-turn-row", head(xs)), nt-parse(tail(xs)));
+  def nt-rows(path) = if lt(file_size(path), 1) then list() else nt-parse(nt-nonempty(split-on(fhn-read(path), "\n")));
+  def nt-green?(id, rows) = if nil?(rows) then 0 else if and(str_eq(nt-str(head(rows), "gap"), id), eq(nt-int(head(rows), "band_green", 0), 1)) then 1 else nt-green?(id, tail(rows));
+  def nt-pick(queue, done, want) = if nil?(queue) then list() else if and(or(str_eq(want, ""), str_eq(nt-str(head(queue), "id"), want)), eq(nt-green?(nt-str(head(queue), "id"), done), 0)) then list(head(queue)) else nt-pick(tail(queue), done, want);
+  def nt-band(path) {
+   let t = trim(host-exec(mc-cat(list("./fkwu ", path, " 2>/dev/null | tail -1")), ""));
+   if eq(str_len(t), 0) then -1 else str_to_int(t);
+  }
+  // who began this turn
+  def nt-row-of(value) = if str_eq(value_kind(value), "int") then list() else value;
+  def nt-self() = nt-row-of(host_process(host_pid()));
+  def nt-parent(me) = if lt(len(me), 2) then list() else nt-row-of(host_process(nth(me, 1)));
+  def nt-exe(row) = if lt(len(row), 3) then "" else nth(row, 2);
+  def nt-tail(path, i) = if le(i, 0) then path else if eq(str_byte_at(path, sub(i, 1)), 47) then substring(path, i, str_len(path)) else nt-tail(path, sub(i, 1));
+  def nt-base(path) = if str_eq(path, "") then "" else nt-tail(path, str_len(path));
+  def nt-glue?(exe) = or(str_eq(nt-base(exe), "fkwu"), or(str_eq(nt-base(exe), "sh"), or(str_eq(nt-base(exe), "zsh"), or(str_eq(nt-base(exe), "bash"), str_eq(nt-base(exe), "form-run")))));
+  def nt-climb(row, hops) = if or(lt(len(row), 3), le(hops, 0)) then row else if nt-glue?(nt-exe(row)) then nt-climb(nt-parent(row), sub(hops, 1)) else row;
+  def nt-coordinator() = nt-exe(nt-climb(nt-parent(nt-self()), 8));
+  def nt-keeper?(exe) = str_eq(nt-base(exe), "launchd");
+  // the request the native code lane reads
+  def nt-doc(path) = json-node-object(list(fhn-s("id", nt-base(path)), fhn-s("path", path), fhn-s("text", fhn-read(path))));
+  def nt-docs(paths) = if nil?(paths) then list() else cons(nt-doc(head(paths)), nt-docs(tail(paths)));
+  def nt-check(path) = json-node-object(list(fhn-s("tool", "rehearse-bml"), json-node-pair("arguments", json-node-array(list(json-node-string(path)))), fhn-s("input", "")));
+  def nt-checks(paths) = if nil?(paths) then list() else cons(nt-check(head(paths)), nt-checks(tail(paths)));
+  def nt-strings(xs) = if nil?(xs) then list() else cons(json-node-string(head(xs)), nt-strings(tail(xs)));
+  def nt-request(gap, opts) = json-node-object(list(fhn-s("goal", nt-str(gap, "goal")), json-node-pair("documents", json-node-array(nt-docs(nt-strs(gap, "writable")))), json-node-pair("writable", json-node-array(nt-strings(nt-strs(gap, "writable")))), json-node-pair("checks", json-node-array(nt-checks(nt-strs(gap, "writable")))), fhn-s("model", if json-object-has?(opts, "model") then nt-str(opts, "model") else "qwen38-q8"), fhn-n("context", nt-int(opts, "context", 16384)), fhn-n("turns", nt-int(opts, "turns", 32))));
+  def nt-quote(s) = mc-cat(list("'", s, "'"));
+  def nt-keep(paths, stamp) = if nil?(paths) then 0 else nt-keep-next(host-exec(mc-cat(list("cp ", nt-quote(head(paths)), " ", nt-quote(mc-cat(list(nt-dir(), "/", stamp, "-", nt-base(head(paths)), ".candidate"))), " && git checkout -- ", nt-quote(head(paths)))), ""), tail(paths), stamp);
+  def nt-keep-next(done, rest, stamp) = nt-keep(rest, stamp);
+  def nt-run() {
+   let line0 = read_line();
+   let line = if nothing?(line0) then "" else trim(line0);
+   let opts = if str_eq(line, "") then json-node-object(list()) else parse-json("native-turn-options", line);
+   let picked = nt-pick(nt-rows(nt-queue()), nt-rows(nt-ledger()), nt-str(opts, "gap"));
+   if nil?(picked) then print_str("[native-turn] no open gap\n") else nt-turn(head(picked), opts);
+  }
+  def nt-turn(gap, opts) {
+   let id = nt-str(gap, "id");
+   let full = nt-int(gap, "full", 0);
+   let band = nt-str(gap, "band");
+   let before = nt-band(band);
+   let coordinator = nt-coordinator();
+   if eq(before, full) then print_str(mc-cat(list("[native-turn] ", id, " already reads ", int_to_str(full), "\n"))) else nt-attempt(gap, opts, id, full, band, before, coordinator);
+  }
+  def nt-attempt(gap, opts, id, full, band, before, coordinator) {
+   let made = fs_mkdir(nt-dir());
+   let stamp = mc-cat(list(id, "-", int_to_str(now_unix_ms())));
+   let reqPath = mc-cat(list(nt-dir(), "/", stamp, ".json"));
+   let wrote = write_file_text(reqPath, json-emit(nt-request(gap, opts)));
+   let started = now_unix_ms();
+   let dry = eq(nt-int(opts, "dry", 0), 1);
+   let said = if dry then "dry" else host-exec(mc-cat(list("./fkwu observe/form-cli-code-run.fk 2>&1 | tail -c 6000 > ", nt-quote(mc-cat(list(nt-dir(), "/", stamp, ".out"))), "; echo lane-exit=$?")), mc-cat(list("@", reqPath, "\n")));
+   let after = nt-band(band);
+   let green = and(eq(after, full), not(eq(before, full)));
+   let kept = if green then 0 else nt-keep(nt-strs(gap, "writable"), stamp);
+   let row = json-node-object(list(fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", id), fhn-n("band_before", before), fhn-n("band_after", after), fhn-n("full", full), fhn-n("band_green", if green then 1 else 0), fhn-n("dry", if dry then 1 else 0), fhn-s("coordinated_by", if nt-keeper?(coordinator) then "host-schedule" else "session"), fhn-s("coordinator", coordinator), fhn-n("rented_mind", if nt-keeper?(coordinator) then 0 else 1), fhn-s("request", reqPath), fhn-s("lane", trim(said)), fhn-n("wall_ms", sub(now_unix_ms(), started))));
+   let appended = fhn-append(nt-ledger(), str_concat(json-emit(row), "\n"));
+   print_str(mc-cat(list("[native-turn] ", json-emit(row), "\n")));
+  }
+ }
+ nt-run();
+}
