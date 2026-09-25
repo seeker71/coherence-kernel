@@ -209,6 +209,13 @@ when the enquiry and source context need a complete file; choose allowances and
 word range for the actual request. Put the file option last. `generate` composes
 the response. The `code` review mode assesses candidates and returns findings;
 that review is a distinct contribution when the person asks for a completed answer.
+For an existing answer that needs concrete edits, the public `code` path can
+edit it as a writable document with `code_entry: "direct"`, original sources
+and original checks. Existing documents use guarded `edit`; `write` creates
+absent paths. Keep evaluated answers out of learning with `evaluation: 1`.
+Read the actual changed answer for quality, and attribute any caller-selected
+edits separately. The [retained-response editing door](docs/form-native-coding.md#edit-a-retained-response)
+records this path and its observed limits.
 Bounded word-range and reasoning requests use response profiles: the shared
 Form meanings travel with the enquiry, while execution profiles carry their
 own control-tag instructions. Read the returned prose for fidelity and useful
