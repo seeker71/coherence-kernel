@@ -4,6 +4,21 @@
 kernels. `lora-voice.bml` and `learn/corpus-train-door.fk` use it directly through a
 supervised Form worker. No Python, MLX executable or model server participates.
 
+Qwen has a separate completion-only, rank-one output-head learning door:
+`observe/qwen-lora-learning-run.bml`. It accepts verified caller-selected rows
+with separate training and validation prompts. `profile: "response"` uses the
+same closed-reasoning template as bounded prose generation; `full` and
+`knowledge-query` remain available. Reasoning profiles are refused for these
+public completion targets. This trains an explicit head adapter, not Qwen's
+full transformer or the automatic Llama session learner.
+
+`qll-open-selected` checks the retained candidate's base/tokenizer seal, request,
+profile and adapter digest. `fgcr-compose` can take ownership of that admitted
+session and run the ordinary response controller, retain its output and release
+it. Response metadata includes the actual adapter path and A/B digest. Candidate
+selection by validation loss is separate from response quality and serving
+promotion; the learning door performs no promotion.
+
 Build a request with `ntr-request(model, adapter, data, output, steps, batch,
 learningRate, maskPrompt, layers)`. `nlw-launch(request, logDirectory)` starts it;
 `nlw-run` also waits. `nlw-status(logDirectory)` reports the observed process state.
