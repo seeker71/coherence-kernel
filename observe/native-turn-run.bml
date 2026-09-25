@@ -4,12 +4,15 @@
 // in receipts/native-turn-ledger.jsonl. Runs the gap's band in its own fresh kernel; when it already reads full
 // the gap is closed and nothing runs. Otherwise hands the goal to the native code lane
 // (observe/form-cli-code-run.fk: local Qwen in one native session, no rented fallback) with the writable
-// sources as documents and a rehearse-bml check on each, then runs the band again. A turn that turned the band
+// sources as documents and the gap's own read-only checks (exact rg counts that pass only once the change is in), then runs the band again. A turn that turned the band
 // green keeps its edit for the landing; a turn that did not keeps its candidate under .hearth/native-turns and
 // the source is restored. One row lands either way: gap, band before and after, full, band_green, and who began
 // the turn, read from the host's own process table (the first ancestor that is neither the body nor a shell:
 // launchd is the host's schedule, anything else a session with a rented mind).
-// stdin, optional: {"gap":"<id>","dry":1,"model":"qwen38-q8","context":16384,"turns":32}; dry skips the lane.
+// A test turn ({"test":1}) writes its row to .hearth/native-turns/test-ledger.jsonl and always restores the source,
+// so a turn begun by a session can learn what the lane can do without closing a gap the nights must close.
+// {"publish_from":"<lane output>"} publishes a result already on disk instead of asking the lane (a test of the path).
+// stdin, optional: {"gap":"<id>","dry":1,"test":1,"model":"qwen38-q8","context":16384,"turns":32}; dry skips the lane.
 // preflight-exec: forbidden
 // preludes: form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml
 section [form.bml] {
@@ -53,8 +56,17 @@ section [form.bml] {
   def nt-bml?(path) = and(gt(str_len(path), 4), str_eq(substring(path, sub(str_len(path), 4), str_len(path)), ".bml"));
   def nt-checks(paths) = if nil?(paths) then list() else if nt-bml?(head(paths)) then cons(nt-check(head(paths)), nt-checks(tail(paths))) else nt-checks(tail(paths));
   def nt-strings(xs) = if nil?(xs) then list() else cons(json-node-string(head(xs)), nt-strings(tail(xs)));
-  def nt-request(gap, opts) = json-node-object(list(fhn-s("goal", nt-str(gap, "goal")), json-node-pair("documents", json-node-array(nt-docs(nt-strs(gap, "writable")))), json-node-pair("writable", json-node-array(nt-strings(nt-strs(gap, "writable")))), json-node-pair("checks", json-node-array(nt-checks(nt-strs(gap, "writable")))), fhn-s("model", if json-object-has?(opts, "model") then nt-str(opts, "model") else "qwen38-q8"), fhn-n("context", nt-int(opts, "context", 16384)), fhn-n("turns", nt-int(opts, "turns", 32))));
+  def nt-request(gap, opts) = json-node-object(list(fhn-s("goal", nt-str(gap, "goal")), json-node-pair("documents", json-node-array(nt-docs(nt-strs(gap, "writable")))), json-node-pair("writable", json-node-array(nt-strings(nt-strs(gap, "writable")))), json-node-pair("checks", if json-object-has?(gap, "checks") then json-object-get(gap, "checks") else json-node-array(nt-checks(nt-strs(gap, "writable")))), fhn-s("model", if json-object-has?(opts, "model") then nt-str(opts, "model") else "qwen38-q8"), fhn-n("context", nt-int(opts, "context", 16384)), fhn-n("turns", nt-int(opts, "turns", 32))));
   def nt-quote(s) = mc-cat(list("'", s, "'"));
+  // the lane keeps its documents in its own session and the caller publishes them: find the result line, write each
+  // final document whose path is writable, and read the lane's status beside it
+  def nt-marker() = "\"schema\":\"form-native-code-v1\"";
+  def nt-result(lines, found) = if nil?(lines) then found else nt-result(tail(lines), if ge(str_find(head(lines), nt-marker(), 0), 0) then head(lines) else found);
+  def nt-result-of(outPath) { let r = nt-result(split-on(if lt(file_size(outPath), 1) then "" else fhn-read(outPath), "\n"), ""); if str_eq(r, "") then json-node-object(list()) else parse-json("code-result", r); }
+  def nt-has(xs, x) = if nil?(xs) then 0 else if str_eq(head(xs), x) then 1 else nt-has(tail(xs), x);
+  def nt-publish(docs, writable, n) = if nil?(docs) then n else nt-publish(tail(docs), writable, if eq(nt-has(writable, nt-str(head(docs), "path")), 1) then nt-publish-one(head(docs), n) else n);
+  def nt-publish-one(doc, n) { let w = write_file_text(nt-str(doc, "path"), nt-str(doc, "text")); add(n, 1); }
+  def nt-docs-of(result) = if json-object-has?(result, "documents") then json-array-elements(json-object-get(result, "documents")) else list();
   def nt-keep(paths, stamp) = if nil?(paths) then 0 else nt-keep-next(host-exec(mc-cat(list("cp ", nt-quote(head(paths)), " ", nt-quote(mc-cat(list(nt-dir(), "/", stamp, "-", nt-base(head(paths)), ".candidate"))), " && git checkout -- ", nt-quote(head(paths)))), ""), tail(paths), stamp);
   def nt-keep-next(done, rest, stamp) = nt-keep(rest, stamp);
   def nt-run() {
@@ -79,12 +91,16 @@ section [form.bml] {
    let wrote = write_file_text(reqPath, json-emit(nt-request(gap, opts)));
    let started = now_unix_ms();
    let dry = eq(nt-int(opts, "dry", 0), 1);
-   let said = if dry then "dry" else host-exec(mc-cat(list("./fkwu observe/form-cli-code-run.fk 2>&1 | tail -c 6000 > ", nt-quote(mc-cat(list(nt-dir(), "/", stamp, ".out"))), "; echo lane-exit=$?")), mc-cat(list("@", reqPath, "\n")));
+   let outPath = if json-object-has?(opts, "publish_from") then nt-str(opts, "publish_from") else mc-cat(list(nt-dir(), "/", stamp, ".out"));
+   let said = if or(dry, json-object-has?(opts, "publish_from")) then "not-run" else host-exec(mc-cat(list("./fkwu observe/form-cli-code-run.fk > ", nt-quote(outPath), " 2> ", nt-quote(mc-cat(list(outPath, ".err"))), "; echo lane-exit=$?")), mc-cat(list("@", reqPath, "\n")));
+   let result = if dry then json-node-object(list()) else nt-result-of(outPath);
+   let published = nt-publish(nt-docs-of(result), nt-strs(gap, "writable"), 0);
    let after = nt-band(band);
    let green = and(eq(after, full), not(eq(before, full)));
-   let kept = if green then 0 else nt-keep(nt-strs(gap, "writable"), stamp);
-   let row = json-node-object(list(fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", id), fhn-n("band_before", before), fhn-n("band_after", after), fhn-n("full", full), fhn-n("band_green", if green then 1 else 0), fhn-n("dry", if dry then 1 else 0), fhn-s("coordinated_by", if nt-keeper?(coordinator) then "host-schedule" else "session"), fhn-s("coordinator", coordinator), fhn-n("rented_mind", if nt-keeper?(coordinator) then 0 else 1), fhn-s("request", reqPath), fhn-s("lane", trim(said)), fhn-n("wall_ms", sub(now_unix_ms(), started))));
-   let appended = fhn-append(nt-ledger(), str_concat(json-emit(row), "\n"));
+   let test = eq(nt-int(opts, "test", 0), 1);
+   let kept = if and(green, not(test)) then 0 else nt-keep(nt-strs(gap, "writable"), stamp);
+   let row = json-node-object(list(fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", id), fhn-n("band_before", before), fhn-n("band_after", after), fhn-n("full", full), fhn-n("band_green", if green then 1 else 0), fhn-n("dry", if dry then 1 else 0), fhn-n("test", if test then 1 else 0), fhn-s("coordinated_by", if nt-keeper?(coordinator) then "host-schedule" else "session"), fhn-s("coordinator", coordinator), fhn-n("rented_mind", if nt-keeper?(coordinator) then 0 else 1), fhn-s("request", reqPath), fhn-s("lane", trim(said)), fhn-s("lane_status", nt-str(result, "status")), fhn-n("lane_check_runs", nt-int(result, "check_runs", -1)), fhn-n("lane_turns", nt-int(result, "turns", -1)), fhn-n("published", published), fhn-n("wall_ms", sub(now_unix_ms(), started))));
+   let appended = fhn-append(if test then mc-cat(list(nt-dir(), "/test-ledger.jsonl")) else nt-ledger(), str_concat(json-emit(row), "\n"));
    print_str(mc-cat(list("[native-turn] ", json-emit(row), "\n")));
   }
  }

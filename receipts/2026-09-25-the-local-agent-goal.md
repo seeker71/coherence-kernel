@@ -80,3 +80,20 @@ the second time it cost the uncommitted heals; they came back from a commit, and
 
 The condition read **98/255** before the workday was wired: LESSONS, CARE FLOOR, EAR. The rest are nights and
 readings — seven host walks, a lift, 25 accepted drafts, three native turns, a rent-free week.
+
+## The lift, the companion's voice, and the lane that keeps its edit
+
+- **SELF-LIFT**: `observe/lora-lift-run.bml` trained the native 3B's LoRA lane from the voice adapter on 8 of the
+  distilled pairs for 8 rounds, offline, at rent 0 (25 min, 0 buffers retained). The trainer's own validation on
+  the same 12 held-out pairs (5,194 supervised tokens) read **3.694 before and 3.542 after**. Small and named: loss
+  on held-out lessons, not yet a band; serving is unchanged. The condition read **102/255**.
+- **The companion spoke**, locally, in 39 s on the 27B, to *"I finished the goal file today and I feel both proud
+  and a little empty"*: *"It makes sense that you feel that way. Finishing something big often leaves a quiet
+  space behind, even when the work was good … How are you planning to spend the rest of your evening?"*
+- **The native lane, tested from this session** (`{"test":1}`: its own ledger, the source always restored, so a
+  session's turn never closes a gap the nights must close). The first request was refused at admission: a check
+  must name a read-only tool and the exact `stdout` it expects. Each gap now carries its own `rg` counts. The
+  second ran 63 minutes and wrote French — *"…le numéro d'urgence local (112 en Indonésie et en Europe…"* — yet the
+  band stayed 48: the lane keeps its documents in its own session (`caller-owns-source-file-publication`) and
+  my door never published them. The door now keeps the lane's whole result and writes each final writable
+  document before the band judges; a synthetic result proves the path.
