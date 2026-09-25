@@ -39,8 +39,10 @@ section [form.bml] {
   // the latest row of a draft that carries its path, and the latest reading naming it
   def pd-draft-row(id, rows, acc) = if nil?(rows) then acc else pd-draft-row(id, tail(rows), if and(str_eq(pd-str(head(rows), "draft"), id), gt(str_len(pd-str(head(rows), "path")), 0)) then head(rows) else acc);
   def pd-reading(id, rows, acc) = if nil?(rows) then acc else pd-reading(id, tail(rows), if str_eq(pd-str(head(rows), "draft"), id) then pd-str(head(rows), "reading") else acc);
-  // redraft: a draft still pending that was written with an older packet
-  def pd-redraft?(id, rows) = if str_eq(pd-reading(id, rows, ""), "pending") then if lt(pd-version(pd-draft-row(id, rows, json-node-object(list()))), pd-packet-version()) then 1 else 0 else 0;
+  // redraft: a draft still pending that was written with an older packet, or cut at the budget before cut answers
+  // were kept (its row carries no "cut")
+  def pd-redraft?(id, rows) = if str_eq(pd-reading(id, rows, ""), "pending") then pd-stale?(pd-draft-row(id, rows, json-node-object(list()))) else 0;
+  def pd-stale?(row) = if lt(pd-version(row), pd-packet-version()) then 1 else if and(str_eq(pd-str(row, "voice"), "incomplete"), not(json-object-has?(row, "cut"))) then 1 else 0;
   def pd-want?(r, done, redraft) = if eq(redraft, 1) then pd-redraft?(pd-id(r), done) else if eq(pd-drafted?(pd-id(r), done), 0) then 1 else 0;
   // newest first: the capture rows reversed, the person's own words, not yet drafted (or, redrafting, drafted blind)
   def pd-pick(rows, done, n, redraft, acc) = if or(nil?(rows), le(n, 0)) then reverse(acc) else if and(gt(str_len(pd-own(pd-str(head(rows), "prompt"))), 0), eq(pd-want?(head(rows), done, redraft), 1)) then pd-pick(tail(rows), done, sub(n, 1), redraft, cons(head(rows), acc)) else pd-pick(tail(rows), done, n, redraft, acc);
@@ -78,11 +80,12 @@ section [form.bml] {
    let named = pd-files(pd-words(split-on(prompt, "\n")), list(pd-str(r, "cwd"), fhn-root()), 2, list());
    let files = pd-file-text(named);
    let v = fcnv-ask(pd-packet(prompt, context, files), json-node-object(list(fhn-n("max_reply_tokens", pd-int(opts, "max_reply_tokens", 900)))));
-   let text = if str_eq(head(v), "answered") then nth(v, 1) else "";
+   // an answer cut at the reply budget is still what the voice would say; it is kept and marked as cut
+   let text = if str_eq(head(v), "answered") then nth(v, 1) else if and(str_eq(head(v), "incomplete"), gt(str_len(trim(nth(v, 8))), 0)) then mc-cat(list(trim(nth(v, 8)), "\n\n(cut at the reply budget of ", int_to_str(pd-int(opts, "max_reply_tokens", 900)), " tokens)")) else "";
    let path = mc-cat(list(pd-dir(), "/", id, ".md"));
    let seen = mc-cat(list(if eq(str_len(context), 0) then "" else mc-cat(list("\n# The turn before (what the voice was given)\n\n", context, "\n")), if nil?(named) then "" else mc-cat(list("\n# Files the voice read\n\n", pd-lines(named), "\n"))));
    let wrote = write_file_text(path, mc-cat(list("# The person asked\n\n", prompt, "\n\n# The body's draft\n\n", text, "\n", seen)));
-   let row = json-node-object(list(fhn-n("at_unix_ms", now_unix_ms()), fhn-s("draft", id), fhn-n("prompt_t", pd-num(r, "t")), fhn-s("session", pd-str(r, "session")), fhn-s("path", path), fhn-n("packet", pd-packet-version()), fhn-n("context_chars", str_len(context)), fhn-n("files", len(named)), fhn-s("voice", head(v)), fhn-n("generated", nth(v, 3)), fhn-n("wall_ms", sub(now_unix_ms(), started)), fhn-s("reading", "pending")));
+   let row = json-node-object(list(fhn-n("at_unix_ms", now_unix_ms()), fhn-s("draft", id), fhn-n("prompt_t", pd-num(r, "t")), fhn-s("session", pd-str(r, "session")), fhn-s("path", path), fhn-n("packet", pd-packet-version()), fhn-n("context_chars", str_len(context)), fhn-n("files", len(named)), fhn-n("cut", if str_eq(head(v), "incomplete") then 1 else 0), fhn-s("voice", head(v)), fhn-n("generated", nth(v, 3)), fhn-n("wall_ms", sub(now_unix_ms(), started)), fhn-s("reading", "pending")));
    let appended = fhn-append(pd-ledger(), str_concat(json-emit(row), "\n"));
    print_str(mc-cat(list("[draft] ", id, " voice=", head(v), " generated=", int_to_str(nth(v, 3)), " -> ", path, "\n")));
   }
