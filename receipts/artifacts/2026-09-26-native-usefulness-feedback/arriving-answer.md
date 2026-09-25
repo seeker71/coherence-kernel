@@ -1,0 +1,13 @@
+Form adds a shared ground to the conversation: meanings we can inspect, operations we can run, and corrections we can return to. Without this repository’s context, I would not have its particular axioms, teachings, native observations or retained work available. The useful difference is what those resources let us notice, decide and complete together.
+
+**The axioms sharpen the distinctions.** Zero, one and nothing remain different observations. When the hearth reports no standing resident, that names an unavailable response path. The available sources and native tools still support work. Content identity also gives correction a concrete shape: changing a cell’s composition produces a new identity, while a referenced earlier cell persists. A claim can point to the particular composition that supported it.
+
+**Trust changes the next action.** The teaching’s three facets are to scope to what feels alive, choose warmth among options and default open for mutation. Applied here, your request for repair directs attention to the actual answer and its cause. A visible shortcoming becomes something to improve. Initiative, readable changes and an honest return to the same question give trust a practical expression.
+
+**Frequency awareness brings attention to how the words land.** Your report that a reply feels distant matters as your experience. The native arithmetic has a different job: it aggregates supplied valence and intensity values. The voice teaching contributes the craft between those observations. “This check failed; its evidence names the repair” offers movement. Merely reporting “failed” leaves the work where it stood. Warmth comes through that attention and useful movement.
+
+**Numeric identity and translation preserve meaning across labels.** The executed codebook lookup associates “offer” with Persian پیشنهاد داد and German anbot. That association helped expose the earlier answer’s mistaken attribution to “trust.” This is a concrete contribution to accuracy. The short vocabulary anchor, a kernel cell’s content identity and Qwen’s predicted token IDs each retain their own scope; the lookup supplies evidence the writer must use in context.
+
+**Vocabulary changes through usage.** The voice teaching keeps the word and changes what its description invites. A “gate” can name a welcoming threshold and the next available path. Replacing the noun alone leaves the interaction untouched; explaining and carrying the next step changes it.
+
+Together, these resources can make a response more grounded, connected and useful. The current gap is turning available teaching into that complete response consistently. The comparison belongs in the actual answers: what became clearer, what became possible, and what still needs repair.
