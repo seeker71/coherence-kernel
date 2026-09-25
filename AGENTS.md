@@ -209,6 +209,10 @@ when the enquiry and source context need a complete file; choose allowances and
 word range for the actual request. Put the file option last. `generate` composes
 the response. The `code` review mode assesses candidates and returns findings;
 that review is a distinct contribution when the person asks for a completed answer.
+Bounded word-range and reasoning requests use response profiles: the shared
+Form meanings travel with the enquiry, while execution profiles carry their
+own control-tag instructions. Read the returned prose for fidelity and useful
+completion; template checks establish the admitted instructions.
 Preserve the question and relevant context. Show
 the returned words with their actual model/lane attribution, followed by your
 commentary. Keep unfinished output visible as unfinished. A failed attempt
