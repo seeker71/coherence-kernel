@@ -4,6 +4,14 @@ Both approaches carry the same task, documents and caller-owned checks. Keep
 the task and checks before either answer exists. Preserve every attempt,
 including setup failures. Evaluation answers stay outside weight training.
 
+For an ongoing-work comparison, ordinary `code` with `weight_training: 0`
+retains native checkpoints, resume and contract-scoped recall while excluding
+the current answer from gradients. Continue with the original request and its
+returned checkpoint ID; retain the earlier work and cost in the comparison.
+This carries prior task context. The fresh evaluation interface below excludes
+that context deliberately and establishes a different observation. Report
+which context each participant received before comparing session quality.
+
 The local coding door is `observe/form-cli-code-run.fk`. A review request uses
 `mode=review`, `evaluation=1`, empty `writable`, source `checks` and nonempty
 `report_checks`. The returned documents must equal the supplied documents.

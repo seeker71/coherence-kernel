@@ -1112,6 +1112,14 @@ JSON request also contributes to the private native session learner: verified
 documents teach the caller contract, and unsuccessful requests teach observed
 status only. `session_learning_example` and `session_learning_worker` identify
 that work; `session status` distinguishes queued, failed, learned and promoted.
+For ongoing work whose answers are being assessed, `weight_training: 0` retains
+ordinary checkpoint, resume and contract-scoped recall while excluding this
+request's answer from gradients. Existing learned proposals remain available.
+Use the same option on continuation requests. Omission or `1` preserves the
+ordinary training policy; the field accepts only integer `0` or `1`.
+The result reports `evaluation` and `weight_training_excluded` separately.
+Continuity here can include previously observed task evidence, so this is an
+ongoing-work comparison, not a fresh held-out evaluation.
 `evaluation: 1` starts a fresh run **before continuity lookup**: no recalled
 repair notes, checkpoint resume/write, session LoRA proposal or weight training.
 Combining it with a nonempty `resume` is refused. Assessment experience may still
