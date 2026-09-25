@@ -1019,6 +1019,15 @@ configured allowance stays unchanged. A fresh bootstrap that cannot leave the
 requested room stops without repeating admission. An omitted token ceiling
 retains the ordinary context-bound generation behavior.
 
+Renewal checks the encoded bootstrap against the caller's next-reply capacity
+before allocating or prefilling a replacement stream. Coding uses its existing
+reply reservation, including the final-stage handoff for reasoning requests.
+A `prompt-caller-capacity-refused` result preserves the original owner and its
+counters for release. The model renewal API exposes this check through
+`fcmr-replace-with-profile-checked`; existing unchecked callers retain their
+ordinary prompt-window check. This avoids a full prefill that cannot admit even
+one complete reply; it does not shorten or weaken the caller's requested reply.
+
 Partial generations, empty encoded feedback and failed
 prefills retain their failure paths. Capacity is checked before feedback touches
 the stream; only that nonmutating failure can retain its earlier live owner.
