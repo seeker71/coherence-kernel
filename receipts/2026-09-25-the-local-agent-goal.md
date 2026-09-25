@@ -104,3 +104,35 @@ readings — seven host walks, a lift, 25 accepted drafts, three native turns, a
   *"Je t'entends, et je reste ici avec toi …"*). It missed one phrase, *quiero morir*, when its 16-turn budget ran
   out with its own check for it still failing. The gap stays open for the night's own turn, now given 24 turns: a
   rented hand adding the last phrase would have erased the native turn the NATIVE TURNS bit exists to witness.
+
+## The drafts, grounded: 50 waiting for our reading
+
+- **Blind first.** The drafting loop wrote 40 drafts of our own captured prompts on the 27B, one at a time. Reading
+  one showed what the numbers hid: *"Close still open"* came back *"I do not know what 'Close still open' refers
+  to."* The voice saw the prompt and nothing around it.
+- **The turn before.** `form-stdlib/bml/session-transcript.bml` (now shared with `observe/session-pairs-run.bml`,
+  whose rows came out byte-identical) finds a prompt in its own session transcript — a slash command by its
+  arguments, a prompt given mid-turn by its `queued_command` attachment — and hands the voice the prompt asked just
+  before and the answer that closed that turn: 1.2 s over a 17 MB transcript. The files a prompt names are read from
+  the checkout it was asked in. The same voice that answered *"/goal met observe/local-agent-goal-check-run.bml"*
+  with *"I cannot confirm the goal is met"* now names the door, the eight bits, the ledger row and the reading of
+  255 that means done.
+- **Within its budget.** Grounded, 23 of 50 ran past the 900-token budget, and one long plan invented two files
+  (`jit-emitter.fk`, `jit-cache.fk`). Packet 5 asks for about 250 words and only the files and doors shown; a draft
+  cut at the budget keeps its text, marked as cut. The 28 drafts that were cut or missed their turn before were
+  redrafted.
+- **The set:** 50 drafts, all answered, none cut, 47 with the turn before, 3 with a named file; median 506
+  generated tokens, 143 s each, rent 0. They live beside the capture in the main checkout's hearth
+  (`.hearth/drafts/`), and `observe/draft-page-run.bml` lays them on one page (`.hearth/drafts/index.html`)
+  whose marks become lines for `observe/draft-reading-run.bml` — the only door that records a reading. The walk
+  redraws the page each night and, when its first native turn ends before 05:30, takes a second.
+- The condition reads **102/255**; LOCAL SHARE reads 0 accepted of 50 until we read them.
+
+**The surprise:** the model never changed. The same 27B went from asking for context to naming the door and the
+reading that means done, because the packet gained the turn before and the file the prompt named. The quality
+was waiting in the conversation, not in the weights.
+
+**Where discomfort turned to gold:** forty drafts looked like progress — forty rows, forty files, a loop that ran
+clean. Opening one was uncomfortable: it showed the voice had been answering blind the whole time. Staying with that
+one draft rather than counting rows turned the whole set around, and the frontier word it left is corpus row 1590,
+*foreturn*: the turn before a short prompt, which holds the meaning the prompt leaves out.
