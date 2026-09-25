@@ -1010,6 +1010,14 @@ of the old stream. The returned session becomes the sole owner. Role and failure
 references reset so the new stream receives their full evidence. Source documents,
 permissions, caller checks and the absolute reply limit remain unchanged.
 
+Budget feedback includes `completion_replies_minimum`, a lower bound from the
+current phase and pending tasks. Unfinished edits, reads, failures and rejected
+reviews can require more. Coding guidance names the actual completion path:
+each implemented task needs `task=done`, then a separate review verdict. Closing
+the last task already runs the caller source checks, and acceptance checks again;
+an extra `verify` call is available for diagnosis. The metadata reserves no
+extra replies, changes no phase and grants no acceptance.
+
 Renewal requires a completed reply in the departing context and remaining reply
 allowance. A bootstrap that leaves no usable space therefore stops instead of
 repeating admission. When `max_reply_tokens` is set, the controller reserves
