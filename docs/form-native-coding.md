@@ -916,7 +916,7 @@ capability; improvement in the resulting work needs its own observation.
 | Plan | `{"plan":"..."}` | Retain approach and verification intent in the same session |
 | Split | `{"tasks":["first task","next task"]}` | An ordered work queue; no rented subagents |
 | Implement | Tool calls, then `{"task":"done"}` | In-memory edits and advancement to the next task |
-| Review | `{"verdict":"accept","reason":"..."}` or `reject` | Rework on rejection; caller verification on acceptance |
+| Review | `{"verdict":"accept","reason":"..."}` or `reject` | Rework on rejection; retain acceptance findings and run caller verification |
 | Repair | A document tool action, or `{"diagnosis":"observed cause","change":"different approach","next":"implement"}` / `next:"plan"` | Check an applied repair immediately, or retain the diagnosis and selected route |
 
 Every role may inspect documents. Implementation and repair may edit caller-writable
@@ -931,6 +931,16 @@ Other examples:
 {"tool":"edit","arguments":["config.json","\"enabled\":false","\"enabled\":true"]}
 {"tool":"write","arguments":["notes.md"],"input":"New document bytes\n"}
 ```
+
+Coding acceptance requires a nonempty string `reason`. An absent, blank or
+non-string reason stays in review without running final verification. The
+result's `report` retains a `native-coding-review-v1` JSON string containing the
+supplied reason, goal hash and reviewed document identities; checkpoint encoding
+preserves it. These findings belong to the submitting reviewer. Their presence
+does not establish their adequacy, and passing caller checks establishes only
+those assertions. Coding review reads prose requirements as well as source
+behavior. Historical completed checkpoints keep their existing evidence; this
+requirement applies when a fresh acceptance crosses the review boundary.
 
 Successful document mutations return the accepted document's `id`, `path`,
 `bytes` and `resident_sha256`, plus `documents_changed:1` and `before_sha256`
