@@ -358,7 +358,24 @@ accepts both. The run's last progress clock is 2,564,753 ms, with no provider
 call. Source fidelity improved narrowly; review quality and throughput remain
 open. The coding door now accepts identified caller feedback on the same
 checkpoint and returns it to repair without changing its original contract.
-That transition is observed on this actual answer; its native revision is running.
+The [completed feedback repair](receipts/2026-09-26-native-source-feedback.md)
+returns 426 words, removes both unsupported claims and preserves the corrected
+mapping. Four additional replies take approximately 51 minutes. Its reviewer
+accepts the revision, including the remaining generalization, "When I lack an
+answer, I say so and stop." The shared native teaching now keeps absence local
+to the affected operation and continues grounded work. That specific finding
+is back in the same checkpoint for repair; the revised instruction's effect
+on response quality remains under observation.
+
+The [prefill attention repair](receipts/2026-09-26-native-prefill-attention.md)
+parallelizes independent scores and output dimensions while keeping each
+reduction's arithmetic order. At the observed long-context geometry, the
+executing kernels produce the same 1,572,864 output bytes in both dispatch
+orders. Serial GPU time is 436–457 ms; cooperative time is 34–35 ms. Four
+shapes, output guards, buffer release and the full pipeline band pass. The
+new path is in the native span walker. Whole-response speed and answer quality
+remain separate observations. The completed 426-word revision used the earlier
+implementation; its next checkpoint repair admits the new attention path.
 
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
