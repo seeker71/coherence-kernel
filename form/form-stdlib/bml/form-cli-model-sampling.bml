@@ -1,0 +1,108 @@
+// Session-owned, seeded sampling of Qwen's actual output logits.
+// The device selects exact top-k after presence penalties; Form owns the
+// temperature, nucleus filter and MINSTD draw. Model weights stay read-only.
+// preludes: form-stdlib/bml/form-cli-model-adapter.bml form-stdlib/sampling.fk
+section [form.bml] {
+ class FormCliModelSampling {
+  field SessionSlot = 16;
+  field Partitions = 256;
+  field TopK = 20;
+  field Temperature = 0.7;
+  field TopP = 0.8;
+  field Presence = 1.5;
+  def fcsam-top-k() = TopK();
+  def fcsam-temperature() = Temperature();
+  def fcsam-top-p() = TopP();
+  def fcsam-presence() = Presence();
+  def fcsam-msl() = str_concat("#define FCSAM_K ",str_concat(int_to_str(TopK()),str_concat("\n",fcsam-kernels())));
+  def fcsam-kernels() = "#include <metal_stdlib>\nusing namespace metal;
+inline void fcsam_insert(thread float* v,thread uint* ids,uint k,float x,uint id) {
+ if(!isfinite(x))return;
+ uint at=k;for(uint j=0;j<k;j++){if(x>v[j]||(x==v[j]&&id<ids[j])){at=j;break;}}
+ if(at==k)return;for(uint j=k-1;j>at;j--){v[j]=v[j-1];ids[j]=ids[j-1];}v[at]=x;ids[at]=id;
+}
+kernel void fcsam_clear(device uint* seen [[buffer(0)]],constant uint& n [[buffer(1)]],uint i [[thread_position_in_grid]]) {if(i<n)seen[i]=0;}
+kernel void fcsam_parts(device const float* logits [[buffer(0)]],device const uint* seen [[buffer(1)]],device float* values [[buffer(2)]],device uint* ids [[buffer(3)]],constant uint& n [[buffer(4)]],constant uint& parts [[buffer(5)]],constant uint& k [[buffer(6)]],constant float& penalty [[buffer(7)]],uint part [[thread_position_in_grid]]) {
+ if(part>=parts||k>FCSAM_K)return;float v[FCSAM_K];uint ix[FCSAM_K];for(uint j=0;j<k;j++){v[j]=-INFINITY;ix[j]=0xffffffffu;}
+ for(uint i=part;i<n;i+=parts)fcsam_insert(v,ix,k,logits[i]-(seen[i]?penalty:0.0f),i);
+ for(uint j=0;j<k;j++){values[part*k+j]=v[j];ids[part*k+j]=ix[j];}
+}
+kernel void fcsam_merge(device const float* values [[buffer(0)]],device const uint* ids [[buffer(1)]],device float* chosen [[buffer(2)]],device uint* selected [[buffer(3)]],constant uint& parts [[buffer(4)]],constant uint& k [[buffer(5)]],uint i [[thread_position_in_grid]]) {
+ if(i!=0u||k>FCSAM_K)return;float v[FCSAM_K];uint ix[FCSAM_K];for(uint j=0;j<k;j++){v[j]=-INFINITY;ix[j]=0xffffffffu;}
+ for(uint j=0;j<parts*k;j++)fcsam_insert(v,ix,k,values[j],ids[j]);
+ for(uint j=0;j<k;j++){chosen[j]=v[j];selected[j]=ix[j];}
+}
+";
+  def fcsam-seed-valid(seed) = if not(str_eq(value_kind(seed),"int")) then 0 else and(gt(seed,0),lt(seed,2147483647));
+  def fcsam-positive(xs) = if nil?(xs) then 1 else and(gt(head(xs),0),fcsam-positive(tail(xs)));
+  // [vocabulary, pipelines, owned buffers, initial seed, current RNG, draws].
+  // Even partial admission owns its positive buffer handles until close.
+  def fcsam-open(vocab,seed) = if not(and(fcsam-seed-valid(seed),ge(vocab,TopK()))) then list() else {
+   let source = fcsam-msl();
+   let pipes = list(metal_pipeline(source,"fcsam_parts"),metal_pipeline(source,"fcsam_merge"),metal_pipeline(source,"fcsam_clear"));
+   let bytes = mul(mul(Partitions(),TopK()),4);
+   let buffers = list(metal_buf_alloc(bytes),metal_buf_alloc(bytes),metal_buf_alloc(mul(TopK(),4)),metal_buf_alloc(mul(TopK(),4)),metal_buf_alloc(mul(vocab,4)));
+   list(vocab,pipes,buffers,seed,seed,0);
+  };
+  def fcsam-live(owner) = if not(eq(len(owner),6)) then 0 else and(fcsam-positive(nth(owner,1)),fcsam-positive(nth(owner,2)));
+  def fcsam-owned(owner) = if not(eq(len(owner),6)) then 0 else fcsam-count(nth(owner,2));
+  def fcsam-count(xs) = if nil?(xs) then 0 else add(if gt(head(xs),0) then 1 else 0,fcsam-count(tail(xs)));
+  def fcsam-close(owner) = if not(eq(len(owner),6)) then 0 else { metal_sync(); q38-free-handles(nth(owner,2)); };
+  def fcsam-owner(session) = if gt(len(session),SessionSlot()) then nth(session,SessionSlot()) else list();
+  def fcsam-with-owner(session,owner) {
+   let base = if eq(len(session),SessionSlot()) then session else if eq(len(session),sub(SessionSlot(),1)) then append(session,list(list())) else take(SessionSlot(),session);
+   append(base,cons(owner,drop(add(SessionSlot(),1),session)));
+  }
+  def fcsam-reset(owner) = if not(fcsam-live(owner)) then 0 else {
+   metal_sync();
+   metal_enqueue(nth(nth(owner,1),2),md-bind(list(nth(nth(owner,2),4)),list(head(owner))),head(owner));
+  };
+  def fcsam-mark(owner,id) = if or(lt(id,0),ge(id,head(owner))) then 0 else eq(metal_buf_write(nth(nth(owner,2),4),mul(id,4),md-le32(1)),4);
+  def fcsam-ids(bytes,i,n,out) = if ge(i,n) then reverse(out) else fcsam-ids(bytes,add(i,1),n,cons(kth-u32at(bytes,i),out));
+  // Exact top-k, descending logit, lowest token ID first on ties. Nonfinite
+  // logits do not become candidates; fewer than k finite logits fail closed.
+  def fcsam-candidates(owner,logits,penalty) = if not(fcsam-live(owner)) then list() else {
+   let b = nth(owner,2); let p = nth(owner,1);
+   metal_sync(); metal_batch_concurrent();
+   let parts = metal_enqueue(head(p),q38-b16(list(logits,nth(b,4),head(b),nth(b,1)),list(head(owner),Partitions(),TopK(),md-f32-bits(penalty)),0,0),Partitions());
+   let merged = if eq(parts,1) then metal_enqueue(nth(p,1),q38-b16(list(head(b),nth(b,1),nth(b,2),nth(b,3)),list(Partitions(),TopK()),0,1),1) else 0;
+   let values = if eq(merged,1) then metal_buf_read(nth(b,2),0,mul(TopK(),4)) else "";
+   let ids = if eq(merged,1) then metal_buf_read(nth(b,3),0,mul(TopK(),4)) else "";
+   if not(and(eq(str_len(ids),mul(TopK(),4)),and(eq(str_len(values),mul(TopK(),4)),qlt-finite-bytes?(values,0,TopK())))) then list() else list(qlt-f32s(values,TopK()),fcsam-ids(ids,0,TopK(),list()));
+  };
+  // Top-p keeps the smallest sorted prefix reaching its threshold. Ties keep
+  // their stable order, so the explicit top-k cap is never widened by a tie.
+  def fcsam-prefix(probs,total,limit,out) = if nil?(probs) then reverse(out) else {
+   let next = add(total,head(probs)); let kept = cons(head(probs),out);
+   if ge(next,limit) then reverse(kept) else fcsam-prefix(tail(probs),next,limit,kept);
+  };
+  def fcsam-probs(logits) = smp-renorm(fcsam-prefix(smp-softmax(smp-temperature(logits,Temperature())),0.0,TopP(),list()));
+  def fcsam-draw(owner,logits) {
+   let candidates = fcsam-candidates(owner,logits,Presence());
+   if nil?(candidates) then list(-1,owner) else {
+    let state = smp-minstd(nth(owner,4));
+    let pick = smp-sample(fcsam-probs(head(candidates)),smp-uniform(state));
+    list(nth(nth(candidates,1),pick),append(take(4,owner),list(state,add(nth(owner,5),1))));
+   };
+  }
+  // The head at entry already predicts the next token. Each selected ID is
+  // committed exactly once by step; the last emitted ID stays pending at cap.
+  // [ids,pending,position,stopped,owner,reason]. The caller supplies its existing
+  // forward and progress functions; sampling never replays a prompt or state.
+  def fcsam-walk(session,owner,logits,step,pulse,pos,left,stops,out,untilPulse,width,completed) {
+   let chosen = fcsam-draw(owner,logits); let id = head(chosen); let next = nth(chosen,1);
+   if lt(id,0) then list(out,-1,pos,0,next,"sampling-candidates-unavailable")
+   else if q38-stop?(id,stops) then list(out,id,pos,1,next,"")
+   else if not(fcsam-mark(next,id)) then list(out,-1,pos,0,next,"sampling-presence-write-failed")
+   else {
+    let output = append(out,list(id)); let count = add(completed,1);
+    if le(untilPulse,1) then pulse(count) else 0;
+    if eq(left,1) then list(output,id,pos,0,next,"")
+    else if lt(step(session,id,pos),0) then list(output,-1,add(pos,1),0,next,"sampling-forward-failed")
+    else fcsam-walk(session,next,logits,step,pulse,add(pos,1),sub(left,1),stops,output,if le(untilPulse,1) then mul(width,2) else sub(untilPulse,1),if le(untilPulse,1) then mul(width,2) else width,count);
+   };
+  }
+  def fcsam-run(session,owner,logits,step,pulse,pos,limit,stops) = if not(fcsam-reset(owner)) then list(list(),-1,pos,0,owner,"sampling-reset-failed") else fcsam-walk(session,owner,logits,step,pulse,pos,limit,stops,list(),1,1,0);
+ }
+ 0;
+}

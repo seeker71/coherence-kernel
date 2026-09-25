@@ -35,11 +35,28 @@ section [form.bml] {
    str_concat(fgcr-response-prompt(enquiry),str_concat("\n",fhm-caller-budget-text(answer)));
   }
   def fgcr-open-bounded(path,prompt,reasoning,answer,lower,upper,started) {
+   fgcr-open-sampled(path,prompt,reasoning,answer,lower,upper,started,0);
+  }
+  def fgcr-run-sampled(resident,path,prompt,answer,lower,upper,seed) {
+   if str_eq(path,"") then list("generation needs a selected model\n",resident)
+   else if not(fcmr-release-ok?(resident)) then list("generation refused: previous model release incomplete\n",fcmr-none())
+   else fgcr-open-sampled(path,prompt,0,answer,lower,upper,host_monotonic_ms(),seed);
+  }
+  def fgcr-open-sampled(path,prompt,reasoning,answer,lower,upper,started,seed) {
    let text = fgcr-input-text(prompt,answer,lower,upper);
    let reserve = add(fgcr-reserve(fcmg-src(path),reasoning,answer),fal-reserve(fcmg-src(path),lower,upper,answer));
    let profile = fgcr-profile(reasoning);
-   let session = fcms-open-reserved(path,text,reserve,profile);
+   let opened = fcms-open-reserved(path,text,reserve,profile);
+   let session = if and(gt(seed,0),fcms-live?(opened)) then {
+    let owner = fcsam-open(nth(nth(fcms-ctx(opened),2),19),seed);
+    let owned = fcsam-with-owner(opened,owner);
+    if fcsam-live(owner) then owned else fcms-refuse(owned,"sampling-admission-failed");
+   } else opened;
    fgcr-compose(session,path,profile,reasoning,answer,lower,upper,started);
+  }
+  def fgcr-sampling(session) {
+   let owner = fcsam-owner(session);
+   if nil?(owner) then json-node-object(list(oh-s("mode","greedy"))) else json-node-object(list(oh-s("mode","qwen38-direct-seeded-v1"),oh-n("seed",nth(owner,3)),oh-n("rng_state",nth(owner,4)),oh-n("draws",nth(owner,5)),oh-n("top_k",fcsam-top-k()),json-node-pair("temperature",make_float64(fcsam-temperature())),json-node-pair("top_p",make_float64(fcsam-top-p())),json-node-pair("presence_penalty",make_float64(fcsam-presence())),oh-s("penalty_scope","current generation output IDs; reset at each answer or revision")));
   }
   // Takes ownership of an already admitted session, including an explicitly
   // selected learned adapter. The same controller, retention and release apply.
@@ -60,7 +77,7 @@ section [form.bml] {
    let retained = and(and(firstKept,finalKept),and(and(noticeKept,answerKept),and(priorKept,and(correctionKept,and(feedbackKept,sequenceKept)))));
    let complete = nth(measured,8); let rangePassed = nth(measured,6);
    let detail = json-node-object(list(
-    oh-s("model",path),oh-s("profile",profile),oh-s("adapter_path",fcmd-path(fcmd-carrier(last))),oh-s("adapter_ab_sha256",fcmd-digest(fcmd-carrier(last))),oh-n("reasoning_allowance",reasoning),oh-n("answer_allowance",answer),oh-n("context",fcms-maxpos(last)),oh-n("prompt_ids",fcms-prompt-ids(last)),
+    oh-s("model",path),oh-s("profile",profile),json-node-pair("sampling",fgcr-sampling(last)),oh-s("adapter_path",fcmd-path(fcmd-carrier(last))),oh-s("adapter_ab_sha256",fcmd-digest(fcmd-carrier(last))),oh-n("reasoning_allowance",reasoning),oh-n("answer_allowance",answer),oh-n("context",fcms-maxpos(last)),oh-n("prompt_ids",fcms-prompt-ids(last)),
     oh-n("initial_generated_ids",len(fcms-generation-ids(frbg-first(result)))),oh-n("final_generated_ids",len(fcms-generation-ids(frbg-final(result)))),oh-n("length_revision_generated_ids",len(fcms-generation-ids(nth(measured,2)))),oh-n("injected_ids",fcms-injected-ids(last)),
     oh-n("complete",complete),oh-s("reason",fgcr-result-reason(result,measured)),oh-s("answer_origin",if nth(measured,7) then "length-revision" else frbg-origin(result)),
     oh-n("word_minimum",lower),oh-n("word_maximum",upper),oh-n("initial_words",nth(measured,4)),oh-n("final_words",nth(measured,5)),oh-n("word_range_checked",gt(upper,0)),oh-n("word_range_passed",rangePassed),oh-n("length_revisions",nth(measured,7)),

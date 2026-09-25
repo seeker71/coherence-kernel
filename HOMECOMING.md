@@ -25,6 +25,11 @@ runtime. A dependable conversation requires more: grounded understanding,
 reasoning, continuity, expression and useful completion. Native execution and
 response quality each need their own observation.
 
+The [native generation door](docs/form-native-generation.md) also offers
+`generate --sample SEED` for explicit, reproducible Qwen3.8 direct-answer
+sampling. Its report carries the selected policy and draws. The answer's
+grounding and usefulness remain observations of the returned words.
+
 ## Two primary paths toward the same destination
 
 **Form's own responses improve from inside the native runtime.** Develop and

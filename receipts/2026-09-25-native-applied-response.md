@@ -32,11 +32,60 @@ The new work allows twelve replies of up to 1,024 tokens, including a guarded
 whole-document rewrite. Its findings, initial context and allowances differ from
 the preceding run; this is not an isolated instruction or timing comparison.
 
-At this cadence landing the owned native run remains active. Seven replies have
-produced four tool calls and four repair entries, and it has selected replanning.
-No completed public candidate or diagnosis is yet available. Those failures remain
-part of the work; no improvement is inferred from progress metadata. The admission
-and retained request live under `.hearth/native-applied-response-2026-09-25/`.
+The owned native run completed with `attention` after 1,860,712 ms (31.0 minutes).
+Twelve replies produced five tool calls, six repair entries and no verification.
+It generated 2,925 IDs and injected 4,743, with release verified and no provider
+call. The 389-word answer is byte-identical to the input. Its old assertions still
+pass when rechecked by the caller; that establishes no revision or quality gain.
+
+The completed public repair evidence names `edit-unchanged: old and new text are
+identical; no source changed`, followed by repeated identical actions without a
+document change. Qwen's diagnoses correctly ask for a new answer, but its actions
+do not supply one. The native edit guard behaved correctly. The returned report
+is empty, and review did not complete. Artifact attribution names the requested
+roles; this observed outcome is no newly composed answer. The result, original
+candidate, caller recheck and release are retained beside the request.
+
+## Composition with selected source evidence
+
+The earlier direct-generation receipt already records an 843-word answer and a
+failed shortening pass, together with unsupported claims. Switching lanes alone
+is therefore not a new remedy. This continuation changes the admitted context:
+native selection copies nine core-axiom lines, the bounded external-effect
+teaching, frequency and codebook descriptions, the dialogue covenant's opening,
+and the actual native vocabulary lookup from the original source packet. Raw
+implementation bodies and broad normative passages are omitted. No prior answer
+is admitted. The original enquiry and source packet remain retained unchanged.
+
+The selected evidence is 4,794 bytes; the complete prompt is 6,465 bytes. It uses
+Urs's reported caution and distance as a running example, preserving all six axes
+and the original 350–450 word requirement. The live source-backed CLI listed Q8
+at index zero and selected that index before ordinary generation with a 1,024-token
+allowance. This differs in packet, lane and allowances from the coding request;
+its result must establish any contribution.
+
+The completed response took 424,829 ms (7.1 minutes). Initial generation used
+680 IDs; the one length correction used another 680, with 84 feedback IDs.
+Both answers count 540 words, so the original range check still fails. Completion,
+retention and release are 1; provider calls are 0. The response profile admitted
+no adapter. The public CLI output and metadata are retained under
+`artifacts/2026-09-25-native-direct-application/`; no private generation files
+were opened for this observation.
+
+The answer claims “I do not make up responses” and describes itself as
+“embodied, centered, and radiant.” It also assigns an unobserved structural cause
+to the previous voice's hesitation. These claims are unsupported. Some source
+distinctions survive, but smaller context did not establish a quality gain.
+The caller re-ran the original assertions against the returned answer: the
+word-range failure remains. Another prompt-only retry supplies no new repair.
+
+Two helper failures were repaired before trusting their readings. The public
+findings reader lacked its input-dependent execution marker; adding
+`preflight-exec: forbidden` yielded a clean preflight and the same public findings
+on explicit execution. The source selector's nested expression failed with
+`delimiters UNBALANCED parens, depth -1`; replacing nested concatenation and
+predicates with native list composition restored a clean preflight. Its actual
+selection then verified nine source lines and the absence of the prior answer.
 
 ## Cost and learning
 

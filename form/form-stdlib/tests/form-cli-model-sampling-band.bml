@@ -1,0 +1,50 @@
+// Physical selection over multiple partitions, seeded distribution and ownership.
+// preludes: form-stdlib/bml/form-cli-generate-command.bml form-stdlib/moe-msl.fk
+section [form.bml] {
+ class FormCliSamplingBand {
+  def fcsamb-need(name,ok) = if ok then 1 else form_error(str_concat("native sampling: ",name));
+  def fcsamb-values(i,n) = if ge(i,n) then list() else cons(if eq(mod(i,97),0) then 4.0 else div(sub(0,i),1000.0),fcsamb-values(add(i,1),n));
+  def fcsamb-bytes(xs) = if nil?(xs) then "" else str_concat(md-le32(md-f32-bits(head(xs))),fcsamb-bytes(tail(xs)));
+  def fcsamb-floats-match(xs,ys) = if nil?(xs) then nil?(ys) else if nil?(ys) then 0 else and(lt(tn-abs(sub(head(xs),head(ys))),0.000001),fcsamb-floats-match(tail(xs),tail(ys)));
+  def fcsamb-gather(xs,ids) = if nil?(ids) then list() else cons(nth(xs,head(ids)),fcsamb-gather(xs,tail(ids)));
+  def fcsamb-step(s,id,pos) = if eq(metal_buf_write(s,124,md-le32(md-f32-bits(100.0))),4) then 31 else -1;
+  def fcsamb-pulse(n) = n;
+ }
+ let values = fcsamb-values(0,1025); let packed = fcsamb-bytes(values);
+ let logits = metal_buf_alloc(str_len(packed));
+ let owner = fcsam-open(len(values),1729);
+ fcsamb-need("device admitted",and(gt(logits,0),fcsam-live(owner)));
+ fcsamb-need("logits written",eq(metal_buf_write(logits,0,packed),str_len(packed)));
+ fcsamb-need("presence reset",fcsam-reset(owner));
+ let candidates = fcsam-candidates(owner,logits,1.5);
+ let expected = mm-topk(values,len(values),20);
+ print(list("device-selected",nth(candidates,1),"reference-selected",expected));
+ fcsamb-need("exact top-k with cross-partition ties",value_eq(nth(candidates,1),expected));
+ fcsamb-need("candidate values retain logits",fcsamb-floats-match(head(candidates),fcsamb-gather(values,expected)));
+ fcsamb-need("seen token marked",fcsam-mark(owner,0));
+ let penalized = fcsam-candidates(owner,logits,1.5);
+ let adjusted = cons(sub(head(values),1.5),tail(values));
+ fcsamb-need("penalty precedes selection",value_eq(nth(penalized,1),mm-topk(adjusted,len(values),20)));
+ fcsamb-need("logits immutable",str_eq(metal_buf_read(logits,0,str_len(packed)),packed));
+ fcsamb-need("smallest nucleus prefix",value_eq(fcsam-prefix(list(0.5,0.3,0.2),0.0,0.8,list()),list(0.5,0.3)));
+ let first = fcsam-draw(owner,logits); let replay = fcsam-draw(owner,logits);
+ fcsamb-need("seeded draw repeatable",value_eq(first,replay));
+ fcsamb-need("RNG advances once",and(eq(nth(nth(first,1),4),smp-minstd(1729)),eq(nth(nth(first,1),5),1)));
+ let walked = fcsam-run(logits,owner,logits,fcsamb-step,fcsamb-pulse,17,3,list(31));
+ fcsamb-need("sampled loop advances then stops",and(eq(len(head(walked)),1),and(eq(nth(walked,1),31),and(eq(nth(walked,2),18),and(eq(nth(walked,3),1),eq(nth(nth(walked,4),5),2))))));
+ fcsamb-need("cap leaves one emitted token pending",eq(metal_buf_write(logits,0,packed),str_len(packed)));
+ let capped = fcsam-run(logits,owner,logits,fcsamb-step,fcsamb-pulse,17,1,list());
+ fcsamb-need("pending was not forwarded at cap",and(eq(nth(capped,2),17),and(eq(nth(capped,3),0),and(eq(nth(capped,1),head(head(capped))),str_eq(metal_buf_read(logits,0,str_len(packed)),packed)))));
+ let base = fcms-none("fixture"); let attached = fcsam-with-owner(base,owner);
+ let refused = fcms-refuse(attached,"caller refusal");
+ fcsamb-need("adapter and sampler remain distinct",and(nil?(fcmd-carrier(attached)),value_eq(fcsam-owner(refused),owner)));
+ fcsamb-need("all owners released through refused session",and(eq(fcsam-owned(owner),5),fcms-release-ok?(refused)));
+ fcsamb-need("fixture released",eq(metal_buf_free(logits),1));
+ fcsamb-need("seed bounds",and(not(fcsam-seed-valid(0)),and(not(fcsam-seed-valid(2147483647)),fcsam-seed-valid(2147483646))));
+ let parsed = fgc-request("--tokens 1024 --sample 1729 --words 350:450 enquiry");
+ fcsamb-need("public parser preserves options",value_eq(parsed,list(1024,"enquiry","",0,350,450,1729)));
+ fcsamb-need("duplicate seed rejected",gt(str_len(nth(fgc-request("--sample 1 --sample 2 enquiry"),2)),0));
+ fcsamb-need("reasoning mixture rejected",gt(str_len(nth(fgc-request("--sample 1 --reasoning 10 enquiry"),2)),0));
+ fcsamb-need("missing seed rejected",gt(str_len(nth(fgc-request("--sample"),2)),0));
+ 1;
+}
