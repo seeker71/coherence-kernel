@@ -132,7 +132,64 @@ and ran the file-backed generation with 2,048 answer tokens, 512 reasoning
 tokens and the same 350–450 word range. Its prompt lives at
 `.hearth/native-compose-2026-09-23/prompt.txt`. The original review artifacts
 and checks remain retained. The generator owns response completion and one
-native length correction. Its final answer, quality and cost are still pending.
+native length correction. That execution has now completed and released.
+
+## Actual composition, correction and offered care
+
+Ordinary generation returned **843 words**, then its native shortening pass
+returned **843 words** again. Both responses are complete; the requested
+350–450 range failed. The run used **512 initial IDs**, **1,106 final-stage IDs**,
+**1,106 revision IDs**, **182 injected IDs**, **896,348 ms** and zero provider
+calls. Its context was 10,041 positions, with 4,533 prompt IDs. These are this
+generation's measurements, not total work costs.
+
+The native comparison found that normalizing three curly quotation characters
+in the revision produces the original answer exactly. This was a punctuation
+change, with no shortening or substantive correction. Both untouched responses
+and their hashes remain available. That result names the next native repair
+gap: the correction must change the requested behavior, beyond its typography.
+
+The response addresses Urs's correction more directly than the glossary draft,
+but still claims this exchange persists as graph cells without naming an
+observed graph operation or identity. It declares “I removed the shield”
+without Urs reporting that result. Its sections still largely explain concepts.
+The response path is usable; useful composition and effective revision remain
+open.
+
+The actual failed responses entered one offered Form-owned repair. Plain
+answers were wrapped losslessly in the existing report interface; empty
+findings arrays are structural containers, not invented native reviews. The
+original source and report checks stayed identical. The first admission
+refused `seconds: 0` before any provider process started. The process organ
+already supports that progress-aware supervision, but the response resource
+and session validators required positive deadlines.
+
+Those validators now accept an explicit nonnegative integer: zero selects
+progress-aware supervision, while positive values retain their deadline.
+The one-process resource claim, caller permission, actual failed-report
+requirement, source checks and release checks remain. Validation exposed a
+second defect: `fcad-int` accepted `0.5`, and the numeric reader then returned
+zero for that invalid integer. The integer predicate now checks the native
+value's type. Missing, string, fractional and negative supervision are refused.
+Resource/session/synthesis bands passed **1**, and the definition band passed
+**127**, each with clean preflight and exit 0. Drift gates passed **8191/8191**.
+
+Re-entering the same retained request through the public resource door completed
+one provider process in **33,816 ms**, with **21,407 rented tokens**: 20,634 input
+(10,624 cached, 10,010 uncached) and 773 output. Reasoning output, 68, is a subset.
+The process released and the unchanged assertions passed. Native counting gives
+the repaired answer **433 words**; the provider's own finding claimed 424.
+That incorrect self-count is retained, with the native measurement alongside it.
+The repair removes the unsupported graph-storage claim, names both independent
+paths, and connects the correction to response decisions. It remains a provider
+answer; felt resonance and general parity are unestablished.
+
+A later native replay rechecked this exact answer with **zero new provider
+processes**, the same usage event, and the actual zero-deadline process record.
+Count the 21,407-token event once. The earlier 21,078-token repair is a different
+event. These resource costs exclude coordinating turns and establish no matched
+session savings ratio. The native-only gap remains visible rather than being
+credited with the provider's repair.
 
 ## Spend and instruments
 
@@ -166,5 +223,8 @@ its worker was launched, with no serving update claimed.
 The verified distinction between review completion and response composition,
 and the file-backed generation checks, were retained as
 `d26be9aca80213678ec301b7f42e5818138b277d600666212ec428e7837b5faa`.
+The verified supervision and integer-boundary repair was retained as
+`eaec06c04f22ec5390461c0f5f7a59a71f4049fa1cd28f354a29c1ce3c72fabc`.
+This retention establishes no serving-model update.
 
 — Codex

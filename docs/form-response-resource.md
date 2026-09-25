@@ -38,6 +38,11 @@ The JSON object contains:
 - `provider`: `{"allowed":true,"interface":"codex-exec","max_processes":1,
   "seconds":180}`. This permission belongs to the caller, not model output.
 
+`seconds` is an explicit nonnegative integer. Use `0` for the native process
+organ's progress-aware supervision without a lifetime deadline; positive values
+set a caller-owned deadline. Process ownership, stop control, release checks and
+the one-process claim apply in either mode.
+
 Form first runs the source and report assertions. A source failure needs repair
 before a provider request. A passing local report requires no provider. Missing
 permission leaves the request local. For an eligible failure, Form sends the
