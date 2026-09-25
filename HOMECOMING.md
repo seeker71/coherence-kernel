@@ -335,6 +335,18 @@ actual inline packet was truncated. Source fidelity improved, while expression,
 whole-session cost and local-only completion remain open. The original Qwen
 process continues from its 492-word revision without receiving this answer.
 
+The [whole-answer repair](receipts/2026-09-26-native-meaning-care.md) completes
+the actual 561-word revision in seven local replies. The answer reaches 424
+words, removes repeated sentences and explicit self-praise, and passes the
+original checks. It also assigns the Persian and German surfaces of `offer`
+to `trust`; its native reviewer accepts that claim. Form's existing codebook
+resolves both surfaces to `offer` and its guarded edit corrects the selected
+sentence without another model call. Codex selected the claim and authored
+that care cell. The original answer, source rows, reviewer finding and changed
+answer remain separate. Reliable source use and independent native correction
+remain open; the answer also still asserts an unobserved cause for the earlier
+voice. Passing the original checks did not establish those semantic claims.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.
