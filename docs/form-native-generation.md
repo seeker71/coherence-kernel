@@ -34,7 +34,16 @@ feedback IDs are excluded. Presence starts afresh for each answer or length
 revision; the random sequence continues across the correction.
 
 The public report names the policy, initial seed, final random state and draw
-count, including a selected end token. A fixed seed makes the draws repeatable
+count, including a selected end token. Aggregate diagnostics count non-argmax
+draws, single-candidate nuclei and total nucleus candidates. The peak probability
+sum is conditional on the selected top twenty before nucleus filtering; it is
+not semantic confidence. The report retains both the pre-correction snapshot
+and final cumulative counters. Their difference describes the correction stage.
+`length_revision_change` distinguishes `not-requested`, `unchanged` and `changed`
+by comparing answer bytes in the executing controller. No private text or token
+sequence is exposed by these fields.
+
+A fixed seed makes the draws repeatable
 for the same logits; it is not a guarantee of identical floating-point model
 execution across hardware. The sampler owns five scratch buffers, released
 alongside the session even after a failure. Nonfinite candidate shortages,

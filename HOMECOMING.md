@@ -29,6 +29,9 @@ The [native generation door](docs/form-native-generation.md) also offers
 `generate --sample SEED` for explicit, reproducible Qwen3.8 direct-answer
 sampling. Its report carries the selected policy and draws. The answer's
 grounding and usefulness remain observations of the returned words.
+The [retained correction observation](receipts/2026-09-25-native-sampling-diagnostics.md)
+distinguishes working sampling from a correction that reproduces the preceding
+answer unchanged. Native reports now expose that boundary directly.
 
 ## Two primary paths toward the same destination
 
