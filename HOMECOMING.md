@@ -242,6 +242,17 @@ with the changed instruction returns the identical 812 IDs and 635 words;
 response quality remains unchanged. The native tool-response repair is verified,
 while effective correction and autonomous source completion remain open.
 
+The [concrete revision and response-profile repair](receipts/2026-09-25-native-response-profile.md)
+returns to the actual failed answer with specific edits. The native answer
+changes from 843 to 580 words. Its leaked execution markers expose a teaching
+contract mismatch: bounded prose generation now uses explicit response profiles
+while preserving shared Form meaning. On the same edit request, the repaired
+profile returns 516 words without those markers. Both shortening passes repeat
+their answers exactly, and the latest answer still loses the three-state
+distinction and attributes prediction to the tokenizer. The template repair
+has an observed effect; effective revision and complete source fidelity remain
+the active gap.
+
 The [assessment memory repair](receipts/2026-09-23-native-assessment-memory.md)
 removes the whole-row assessment refusal for the actual 5,485-token retained
 example. Native forward slices preserve all tokens and KV history, with
