@@ -376,6 +376,12 @@ distinctions. Its native review still accepted self-praise, which the arriving
 reviewer removed through explicit native guarded edits. This establishes those
 actual changes, not a general quality or resonance verdict.
 
+The [subsequent native review](../receipts/2026-09-25-native-answer-review.md)
+retains its acceptance findings and exact reviewed identities. It revised the
+translation explanation, returning 411 words, while still accepting explicit
+self-assessment and describing it as absent. The retained reason makes that
+contradiction inspectable; a nonempty explanation is not proof of its judgment.
+
 ### Direct implementation entry
 
 For a fully specified task, set `"code_entry":"direct"`. A fresh coding
