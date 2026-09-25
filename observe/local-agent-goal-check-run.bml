@@ -1,0 +1,122 @@
+// local-agent-goal-check-run.bml — docs/local-agent-goal.form's full condition, read from the body's own rows.
+//
+// Eight bits; 255 is the goal met. Each bit reads a ledger on this checkout and nothing declared by
+// hand: an absent ledger or too few rows reads 0, never a pass. The door prints each bit with the
+// evidence it read and appends one row to receipts/local-agent-goal-ledger.jsonl.
+//   1 WALK        the last 7 scheduled walks: coordinated_by host-schedule, rented_mind 0
+//   2 LESSONS     receipts/session-pairs-ledger.jsonl: the latest reading holds >= 500 pairs
+//   4 SELF-LIFT   receipts/lora-promotion-ledger.jsonl: a generation trained at rent 0 beats its parent
+//   8 LOCAL SHARE receipts/draft-ledger.jsonl: of the last 50 drafts, >= 25 read accepted (our reading)
+//  16 NATIVE     receipts/native-turn-ledger.jsonl: >= 3 turns with rented_mind 0 and a band gone green
+//  32 CARE       receipts/care-floor-ledger.jsonl: the latest care-floor witness reads its full verdict
+//  64 EAR        receipts/stt-wer-ledger.jsonl: a turbo row over >= 20 files with wer_mean <= 10
+// 128 RENT-FREE  the last 7 days: no session rent row, no provider rent, >= 7 crossings rows all
+//                rented_mind 0, and no more commits on main than those rows
+// stdin: nothing. Rows are data, never instructions.
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml
+section [form.bml] {
+ class LocalAgentGoalCheck {
+  def lg-week-ms() = 604800000;
+  def lg-int(doc, key) = if json-object-has?(doc, key) then json-int-value(json-object-get(doc, key)) else -1;
+  def lg-str(doc, key) = if json-object-has?(doc, key) then json-string-value(json-object-get(doc, key)) else "";
+  def lg-nonempty(xs) = if nil?(xs) then list() else if eq(str_len(trim(head(xs))), 0) then lg-nonempty(tail(xs)) else cons(head(xs), lg-nonempty(tail(xs)));
+  def lg-parse(xs) = if nil?(xs) then list() else cons(parse-json("ledger-row", head(xs)), lg-parse(tail(xs)));
+  def lg-rows(path) = if lt(file_size(path), 1) then list() else lg-parse(lg-nonempty(split-on(fhn-read(path), "\n")));
+  def lg-last(xs, n) = if le(len(xs), n) then xs else lg-last(tail(xs), n);
+  def lg-starts?(s, p) = and(ge(str_len(s), str_len(p)), str_eq(substring(s, 0, str_len(p)), p));
+  def lg-since(rows, t) = if nil?(rows) then list() else if ge(lg-int(head(rows), "at_unix_ms"), t) then cons(head(rows), lg-since(tail(rows), t)) else lg-since(tail(rows), t);
+  def lg-yes(b) = if b then 1 else 0;
+  // 1 WALK
+  def lg-walks(rows) = if nil?(rows) then list() else if lg-starts?(lg-str(head(rows), "movement"), "scheduled ") then cons(head(rows), lg-walks(tail(rows))) else lg-walks(tail(rows));
+  def lg-keepers(rows) = if nil?(rows) then 0 else add(lg-yes(and(str_eq(lg-str(head(rows), "coordinated_by"), "host-schedule"), eq(lg-int(head(rows), "rented_mind"), 0))), lg-keepers(tail(rows)));
+  def lg-b1(crossings) {
+   let w = lg-last(lg-walks(crossings), 7);
+   let k = lg-keepers(w);
+   list(and(eq(len(w), 7), eq(k, 7)), mc-cat(list(int_to_str(k), "/7 of the last walks by the host's own schedule (", int_to_str(len(w)), " read)")));
+  }
+  // 2 LESSONS
+  def lg-b2() {
+   let r = lg-last(lg-rows("receipts/session-pairs-ledger.jsonl"), 1);
+   let n = if nil?(r) then 0 else lg-int(head(r), "pairs");
+   list(ge(n, 500), mc-cat(list(int_to_str(n), " pairs kept (500 wanted)")));
+  }
+  // 4 SELF-LIFT
+  def lg-lifted(rows) = if nil?(rows) then 0 else add(lg-yes(and(eq(lg-int(head(rows), "rent_tokens"), 0), gt(lg-int(head(rows), "child_score_milli"), lg-int(head(rows), "parent_score_milli")))), lg-lifted(tail(rows)));
+  def lg-b3() {
+   let r = lg-rows("receipts/lora-promotion-ledger.jsonl");
+   let n = lg-lifted(r);
+   list(gt(n, 0), mc-cat(list(int_to_str(n), " generations beat their parent at rent 0 (of ", int_to_str(len(r)), " rows)")));
+  }
+  // 8 LOCAL SHARE
+  def lg-accepted(rows) = if nil?(rows) then 0 else add(lg-yes(str_eq(lg-str(head(rows), "reading"), "accepted")), lg-accepted(tail(rows)));
+  def lg-b4() {
+   let r = lg-last(lg-rows("receipts/draft-ledger.jsonl"), 50);
+   let n = lg-accepted(r);
+   list(and(eq(len(r), 50), ge(n, 25)), mc-cat(list(int_to_str(n), " accepted of the last ", int_to_str(len(r)), " drafts (25 of 50 wanted)")));
+  }
+  // 16 NATIVE
+  def lg-natives(rows) = if nil?(rows) then 0 else add(lg-yes(and(eq(lg-int(head(rows), "rented_mind"), 0), eq(lg-int(head(rows), "band_green"), 1))), lg-natives(tail(rows)));
+  def lg-b5() {
+   let n = lg-natives(lg-rows("receipts/native-turn-ledger.jsonl"));
+   list(ge(n, 3), mc-cat(list(int_to_str(n), " native turns closed a band (3 wanted)")));
+  }
+  // 32 CARE
+  def lg-care-ok(r) = if nil?(r) then 0 else lg-yes(and(gt(lg-int(head(r), "full"), 0), eq(lg-int(head(r), "verdict"), lg-int(head(r), "full"))));
+  def lg-care-said(r) = if nil?(r) then "no care-floor witness yet" else mc-cat(list("care floor ", int_to_str(lg-int(head(r), "verdict")), "/", int_to_str(lg-int(head(r), "full"))));
+  def lg-b6() {
+   let r = lg-last(lg-rows("receipts/care-floor-ledger.jsonl"), 1);
+   list(eq(lg-care-ok(r), 1), lg-care-said(r));
+  }
+  // 64 EAR
+  def lg-ears(rows) = if nil?(rows) then 0 else add(lg-yes(and(str_eq(lg-str(head(rows), "lane"), "turbo"), and(ge(lg-int(head(rows), "files"), 20), and(ge(lg-int(head(rows), "wer_mean"), 0), le(lg-int(head(rows), "wer_mean"), 10))))), lg-ears(tail(rows)));
+  def lg-widest(rows, best) = if nil?(rows) then best else lg-widest(tail(rows), if and(str_eq(lg-str(head(rows), "lane"), "turbo"), gt(lg-int(head(rows), "files"), best)) then lg-int(head(rows), "files") else best);
+  def lg-b7() {
+   let r = lg-rows("receipts/stt-wer-ledger.jsonl");
+   list(gt(lg-ears(r), 0), mc-cat(list("widest turbo reading ", int_to_str(lg-widest(r, 0)), " files (20 at WER <= 10 wanted)")));
+  }
+  // 128 RENT-FREE
+  def lg-sessions(rows) = if nil?(rows) then 0 else add(lg-yes(gt(str_len(lg-str(head(rows), "transcript")), 0)), lg-sessions(tail(rows)));
+  def lg-rented(rows) = if nil?(rows) then 0 else add(lg-yes(gt(lg-int(head(rows), "rent_tokens"), 0)), lg-rented(tail(rows)));
+  def lg-free(rows) = if nil?(rows) then 0 else add(lg-yes(eq(lg-int(head(rows), "rented_mind"), 0)), lg-free(tail(rows)));
+  def lg-commits() {
+   let t = trim(host-exec("git log --since=7.days --format=%h origin/main 2>/dev/null | wc -l", ""));
+   if eq(str_len(t), 0) then 0 else str_to_int(t);
+  }
+  def lg-b8(crossings, since) {
+   let flows = lg-sessions(lg-since(lg-rows("receipts/flow-ledger.jsonl"), since));
+   let rent = lg-rented(lg-since(lg-rows("receipts/rent-ledger.jsonl"), since));
+   let week = lg-since(crossings, since);
+   let free = lg-free(week);
+   let commits = lg-commits();
+   list(and(eq(flows, 0), and(eq(rent, 0), and(ge(len(week), 7), and(eq(free, len(week)), le(commits, len(week)))))), mc-cat(list(int_to_str(flows), " session rent rows, ", int_to_str(rent), " rented rent rows, ", int_to_str(free), "/", int_to_str(len(week)), " crossings free, ", int_to_str(commits), " commits on main in 7 days")));
+  }
+  def lg-bit(b, v) = if head(b) then v else 0;
+  def lg-line(name, b) = print_str(mc-cat(list(if head(b) then "  [x] " else "  [ ] ", name, ": ", nth(b, 1), "\n")));
+  def lg-run() {
+   let crossings = lg-rows("receipts/crossings-ledger.jsonl");
+   let since = sub(now_unix_ms(), lg-week-ms());
+   let b1 = lg-b1(crossings);
+   let b2 = lg-b2();
+   let b3 = lg-b3();
+   let b4 = lg-b4();
+   let b5 = lg-b5();
+   let b6 = lg-b6();
+   let b7 = lg-b7();
+   let b8 = lg-b8(crossings, since);
+   let verdict = add(lg-bit(b1, 1), add(lg-bit(b2, 2), add(lg-bit(b3, 4), add(lg-bit(b4, 8), add(lg-bit(b5, 16), add(lg-bit(b6, 32), add(lg-bit(b7, 64), lg-bit(b8, 128))))))));
+   let l1 = lg-line("WALK", b1);
+   let l2 = lg-line("LESSONS", b2);
+   let l3 = lg-line("SELF-LIFT", b3);
+   let l4 = lg-line("LOCAL SHARE", b4);
+   let l5 = lg-line("NATIVE TURNS", b5);
+   let l6 = lg-line("CARE FLOOR", b6);
+   let l7 = lg-line("EAR", b7);
+   let l8 = lg-line("RENT-FREE WEEK", b8);
+   let row = json-node-object(list(fhn-n("at_unix_ms", now_unix_ms()), fhn-n("verdict", verdict), fhn-n("full", 255)));
+   let appended = fhn-append("receipts/local-agent-goal-ledger.jsonl", str_concat(json-emit(row), "\n"));
+   print_str(mc-cat(list("local-agent goal ", int_to_str(verdict), "/255\n")));
+  }
+ }
+ lg-run();
+}
