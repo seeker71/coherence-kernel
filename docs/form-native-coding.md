@@ -354,6 +354,28 @@ The observed count enters the ordinary report repair flow, including a
 caller-offered provider resource. Both forms accept exactly their four fields;
 `path` selects a resident document and `field` selects report text.
 
+### Edit a retained response
+
+A retained prose answer can be a caller-writable document in a `mode: "code"`,
+`code_entry: "direct"` request. Supply the actual draft, the original enquiry
+and source documents, and the original checks. Keep sources read-only. An
+existing answer requires guarded `edit`; `write` creates an absent path and
+refuses to overwrite an existing document. The guard supplies the current
+document identity after refusal, so the native controller can repair its call.
+
+Read the returned document, then re-run its checks before publishing it. A
+completed coding result is distinct from its review verdict and from the
+answer's usefulness. Use `evaluation: 1` when comparing evaluated responses;
+their text stays out of learning and continuity reuse. Caller-selected edits
+executed through the native tools retain their caller attribution separately
+from model-selected edits.
+
+The [retained answer-edit movement](../receipts/2026-09-25-native-answer-edit.md)
+changed a repeated 509-word response to 397 words and repaired several source
+distinctions. Its native review still accepted self-praise, which the arriving
+reviewer removed through explicit native guarded edits. This establishes those
+actual changes, not a general quality or resonance verdict.
+
 ### Direct implementation entry
 
 For a fully specified task, set `"code_entry":"direct"`. A fresh coding
@@ -563,7 +585,7 @@ quality. With no queries, the existing prompt is unchanged.
 
 The default is `"full"`. The request selects the admission mode, including on
 resume, without changing its source/report assertions or read-only boundary.
-Catalog mode currently accepts reviews only. A smaller initial prompt is a
+Catalog mode accepts coding and review requests. A smaller initial prompt is a
 measurable resource change; answer quality and total session time still need
 observation, including subsequent source reads.
 
