@@ -1,0 +1,52 @@
+// Compare the executing kernels on identical nonzero data, including the
+// observed long-context geometry. No model admission or answer generation.
+// preflight-exec: forbidden
+// preludes: form-stdlib/form-cli-model-generate.fk form-stdlib/model-registry.bml
+section [form.bml] {
+ def qpao-need(ok,label) = if ok then 1 else form_error(str_concat("prefill attention: ",label));
+ def qpao-fill-msl() = "kernel void qpao_fill(device float* x [[buffer(0)]], constant uint& n [[buffer(1)]], constant uint& seed [[buffer(2)]], constant float& fill [[buffer(3)]], uint i [[thread_position_in_grid]]) { if(i<n) x[i]=seed ? float(int((i*17u+seed*31u)%257u)-128)/64.0f : fill; }";
+ def qpao-buffer(fill,n,seed,value) {
+  let h=metal_buf_alloc(mul(4,n)); qpao-need(gt(h,0),"allocation");
+  qpao-need(gt(metal_enqueue(fill,md-bind16(list(h),list(n,seed,md-f32-bits(value)),256,0,0,0),n),0),"fill enqueue");
+  h;
+ }
+ def qpao-run(p,bufs,args,groups,cooperative) {
+  metal_sync(); let gpu=mbw-status-int(metal_status(),"gpu_busy_us_total"); let start=now_unix_ms();
+  let enqueued=if cooperative then q38pa-enqueue(p,bufs,args,groups,0) else metal_enqueue(p,q38-b16(bufs,args,0,0),groups);
+  let drained=metal_sync(); let elapsed=sub(now_unix_ms(),start);
+  let spent=sub(mbw-status-int(metal_status(),"gpu_busy_us_total"),gpu);
+  qpao-need(and(gt(enqueued,0),gt(drained,0)),"dispatch completion");
+  list(spent,elapsed);
+ }
+ def qpao-case(old,new,fill,pos,ntok,nq,nkv,hd,scale) {
+  let npos=add(pos,ntok); let stride=add(npos,7);
+  let qn=mul(ntok,mul(nq,hd)); let kvn=mul(npos,mul(nkv,hd));
+  let sn=mul(2,mul(ntok,mul(nq,stride)));
+  let q=qpao-buffer(fill,qn,1,0.0); let k=qpao-buffer(fill,kvn,2,0.0); let v=qpao-buffer(fill,kvn,3,0.0);
+  let yo=qpao-buffer(fill,add(qn,1),0,17.25); let yn=qpao-buffer(fill,add(qn,1),0,29.5);
+  let so=qpao-buffer(fill,add(sn,1),0,41.25); let ss=qpao-buffer(fill,add(sn,1),0,41.25);
+  let args=list(pos,nq,nkv,hd,scale,stride,ntok); let groups=mul(ntok,nq);
+  let oldbufs=list(q,k,v,yo,so); let newbufs=list(q,k,v,yn,ss);
+  let oldTime=qpao-run(old,oldbufs,args,groups,0);
+  let newTime=qpao-run(new,newbufs,args,groups,1);
+  let expected=metal_buf_read(yo,0,mul(4,qn)); let actual=metal_buf_read(yn,0,mul(4,qn));
+  let same=and(eq(str_len(expected),mul(4,qn)),str_eq(expected,actual));
+  let guards=and(str_eq(metal_buf_read(yo,mul(4,qn),4),md-le32(md-f32-bits(17.25))),and(str_eq(metal_buf_read(yn,mul(4,qn),4),md-le32(md-f32-bits(29.5))),and(str_eq(metal_buf_read(so,mul(4,sn),4),md-le32(md-f32-bits(41.25))),str_eq(metal_buf_read(ss,mul(4,sn),4),md-le32(md-f32-bits(41.25))))));
+  // Reverse the order on the same data after both kernels have run once.
+  let newWarm=qpao-run(new,newbufs,args,groups,1); let oldWarm=qpao-run(old,oldbufs,args,groups,0);
+  let repeatSame=and(str_eq(expected,metal_buf_read(yo,0,mul(4,qn))),str_eq(expected,metal_buf_read(yn,0,mul(4,qn))));
+  let freed=sum(list(metal_buf_free(q),metal_buf_free(k),metal_buf_free(v),metal_buf_free(yo),metal_buf_free(yn),metal_buf_free(so),metal_buf_free(ss)));
+  print(list("span-attention","pos0",pos,"tokens",ntok,"heads",nq,"kv_heads",nkv,"head_dim",hd,"output_bytes",str_len(expected),"same_bytes",same,"guards",guards,"repeat_same",repeatSame,"freed",freed,"serial_gpu_us",head(oldTime),head(oldWarm),"cooperative_gpu_us",head(newTime),head(newWarm),"serial_wall_ms",nth(oldTime,1),nth(oldWarm,1),"cooperative_wall_ms",nth(newTime,1),nth(newWarm,1)));
+  qpao-need(and(same,and(guards,and(repeatSame,eq(freed,7)))),"output, bounds or release mismatch");
+ }
+ let msl=str_concat(q38-msl(),qpao-fill-msl());
+ let old=metal_pipeline(msl,"form_gqa_span_f32"); let new=head(q38pa-pipes(msl)); let fill=metal_pipeline(msl,"qpao_fill");
+ qpao-need(and(gt(old,0),and(gt(new,0),gt(fill,0))),"pipeline compilation");
+ qpao-case(old,new,fill,0,1,4,2,33,md-f32-bits(0.0625));
+ qpao-case(old,new,fill,257,3,6,2,65,md-f32-bits(0.0625));
+ qpao-case(old,new,fill,255,9,4,1,257,md-f32-bits(0.0625));
+ let path=mr-path(mr-find("qwen38-q8")); let source=eqr-of-file(path,0,40000000); let geo=q38-geo(source,8192);
+ print(list("geometry_source",path,"model_weights_admitted",0));
+ qpao-case(old,new,fill,6336,64,nth(geo,12),nth(geo,13),nth(geo,14),nth(geo,17));
+ print_str(metal_status());
+}
