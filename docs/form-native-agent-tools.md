@@ -87,7 +87,10 @@ recommended boundary for an agent or external tool caller:
 Result layout: `[schema, exit, stdout, stderr, next-documents, crossings]`, with
 schema `form-agent-tool-result-v1`. `fat-exit`, `fat-out`, `fat-error`,
 `fat-documents`, and `fat-crossings` are the accessors. Failure returns the
-original document values and empty stdout; no partial edit is accepted.
+original document values; no partial edit is accepted. Failure at a replacement
+within a multi-edit returns JSON in stdout naming the one-based `failed_edit`
+and `documents_changed: 0`. Invalid batch shape and unchanged final text use
+the ordinary empty-stdout errors.
 Ordinary errors use exit 2. `rg` uses 1 for a completed search with no match;
 `jq -e` uses 1 for a final false/null and 4 for no output values.
 
@@ -232,7 +235,7 @@ a host command.
 | `tr` | Equal-length literal byte sets or `-d SET`; `\n \r \t \\` escapes. |
 | `cut` | `-d DELIMITER -f N`, one delimiter byte and one field. |
 | `awk` | Single field output `{print $N}`, N from 0 to 9. No arbitrary program or system call. |
-| `edit` | `path old new`; exactly one literal occurrence, or no literal occurrence and `old` equals the current document's SHA256. Explicit whole-document replacement: `path sha256 digest new`. |
+| `edit` | `path old new`; exactly one literal occurrence, or no literal occurrence and `old` equals the current document's SHA256. Several literal replacements: `path old1 new1 old2 new2 ...`. Explicit whole-document replacement: `path sha256 digest new`. |
 | `write` | `new-path text`, or `new-path` plus held input. Existing documents cannot be overwritten. |
 
 Hash replacement uses the `resident_sha256` supplied by native coding reads or
@@ -240,6 +243,16 @@ guard evidence. In the three-argument form, a literal match takes precedence:
 one match replaces that substring, multiple matches report ambiguity. Only a
 missing literal equal to the complete current document's hash selects whole-document
 replacement. A stale or malformed shorthand leaves the document unchanged.
+
+For several focused changes, one `edit` can carry multiple old/new pairs for
+the same document. Replacements run in order, so a later pair may address text
+created by an earlier pair. Each old text must be nonempty and occur exactly
+once at that step; hashes in this form are ordinary literal text. Every pair
+must change its matched text, and the final document must differ from the
+original. Any failure returns the entire original corpus and identifies the
+failed pair. A batch that restores the original document returns the existing
+`edit-unchanged` error with empty stdout. Caller write permissions and checks
+apply to the complete result as they do to a single edit.
 Role, writable-path and caller-check requirements remain in the coding owner.
 
 Search patterns are byte-oriented: literals, `. ^ $ |`, character classes and
