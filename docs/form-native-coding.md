@@ -1439,6 +1439,12 @@ history. Current document identities are supplied by admission and native reads
 or mutation acknowledgments. The latest failure still carries its complete
 evidence. This keeps a retained check's identity separate from the identity used
 for the next guarded edit.
+Caller feedback has a separate lifetime: every retained `{id,text}` event is
+restored under `caller_feedback` on admission and context renewal. A subsequent
+tool or check failure changes the repair cursor without displacing those
+corrections. The original goal, documents, edit authority and checks remain the
+task contract; feedback is assessed against that evidence. Ordinary incremental
+observations do not resend the complete feedback history.
 Prompt, response and source content stay out of the diagnostic framebuffer.
 The JSON result carries candidate document content and, for review, the report
 back to its caller. Rechecks on recall/resume count as actual checker calls.
