@@ -138,6 +138,23 @@ and preserves other values. Re-run the original caller checks and read the
 actual reasons and revised report. This is an explicit review interface;
 its structural guarantees do not establish the model's judgment quality.
 
+For a targeted correction, `fcrq-amend-prompt(goal,documents,reportText,fields)`
+requests only changed span IDs. Its `{base,span_edits}` result goes through
+`fcrp-apply(reportText,fields,edits)` in `bml/form-cli-span-amend.bml`.
+Each entry carries an increasing integer `id`, `action` (`remove` or `replace`),
+and nonempty `reason`; replacement also carries complete span `text`, including
+any required trailing whitespace. Unmentioned spans retain their exact bytes.
+They acquire no review verdict. This interface reuses the indexed packet and
+omits the duplicate whole report from the prompt.
+
+The base binds both exact report bytes and the ordered selected fields, so a
+changed field order cannot silently retarget IDs. The carrier rejects stale
+identities, duplicate or out-of-range IDs, malformed
+entries, empty changes and edits whose combined result is unchanged. It applies
+the validated set atomically and preserves unselected report values. Re-run the
+original checks and assess the revised answer; compact patch delivery establishes
+neither semantic correctness nor faster model generation.
+
 The first live use, recorded in
 `receipts/2026-09-17-native-span-review.md`, repaired two unsupported claims
 in a new mixed-evidence probe while misreading one supported span. It then

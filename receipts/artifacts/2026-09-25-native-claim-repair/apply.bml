@@ -1,0 +1,64 @@
+// Apply only the completed public edit object through the existing native carrier.
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/form-cli-review-enquiry.bml form-stdlib/bml/form-cli-response-resource.bml
+section [form.bml] {
+ class NativeClaimRepair {
+  def ncr-string(node,key) = json-string-value(json-object-get(node,key));
+  def ncr-archive(path,text) = json-emit(json-node-object(list(nsm-s("schema","verbatim-public-artifact-v1"),nsm-s("original_path",path),nsm-n("bytes",str_len(text)),nsm-s("sha256",nsm-hash(text)),nsm-s("text",text))));
+  def ncr-count(rows,action) = if nil?(rows) then 0 else add(if str_eq(ncr-string(head(rows),"action"),action) then 1 else 0,ncr-count(tail(rows),action));
+  def ncr-sparse(rows) = if nil?(rows) then list() else {
+   let row = head(rows); let action = ncr-string(row,"action");
+   if str_eq(action,"keep") then ncr-sparse(tail(rows)) else {
+    let keys = list(json-node-pair("id",json-object-get(row,"id")),json-node-pair("action",json-object-get(row,"action")),json-node-pair("reason",json-object-get(row,"reason")));
+    cons(json-node-object(if str_eq(action,"replace") then append(keys,list(json-node-pair("text",json-object-get(row,"text")))) else keys),ncr-sparse(tail(rows)));
+   };
+  };
+  def ncr-apply(root,detail,reply,original) {
+   let complete = json-int-value(json-object-get(detail,"complete"));
+   let valid = faj-valid(fat-trim(reply));
+   let applied = if and(complete,valid) then fcre-apply(original,list("answer"),parse-json("public-edits",reply)) else fcra-fail("generation incomplete or edit object invalid");
+   if not(head(applied)) then {
+    let failure = json-node-object(list(nsm-n("complete",complete),nsm-n("valid_json",valid),nsm-n("applied",0),nsm-s("reason",nth(applied,2)),nsm-n("evaluation",1)));
+    frsh-frozen(frsh-path(root,"comparison.json"),json-emit(failure));
+    print_str(json-emit(failure));
+   } else {
+    let edits = parse-json("public-edits",reply);
+    let rows = node_children(json-object-get(edits,"edits"));
+    let sparseRows = ncr-sparse(rows);
+    let sparse = json-node-object(list(json-node-pair("base",json-node-string(fcrp-id(original,list("answer")))),json-node-pair("span_edits",json-node-array(sparseRows))));
+    let sparseApplied = if nil?(sparseRows) then fcra-fail("complete review selected no changes") else fcrp-apply(original,list("answer"),sparse);
+    let sparseSame = if not(head(sparseApplied)) then 0 else node_eq(nth(applied,1),nth(sparseApplied,1));
+    if and(not(nil?(sparseRows)),not(sparseSame)) then form_error("sparse carrier changed the model's complete edit result") else 0;
+    frsh-frozen(frsh-path(root,"sparse-edits.json"),json-emit(sparse));
+    frsh-frozen(frsh-path(root,"representation.json"),json-emit(json-node-object(list(nsm-n("complete_edit_bytes",str_len(json-emit(edits))),nsm-n("sparse_edit_bytes",str_len(json-emit(sparse))),nsm-n("same_composed_report",sparseSame),nsm-n("sparse_edits",len(sparseRows)),nsm-s("scope","native re-encoding of this completed edit set; no new generation or generation-speed claim")))));
+    let answer = ncr-string(nth(applied,1),"answer");
+    let before = ncr-string(parse-json("original",original),"answer");
+    let request = parse-json("original-checks",read_file("receipts/artifacts/2026-09-25-native-applied-response/request.json"));
+    let documents = fat-wire-value(fat-wire-documents(request)); let doc = fat-find-doc(documents,"answer.md");
+    let afterDocs = fat-put-doc(documents,list(head(doc),nth(doc,1),answer));
+    let checked = fcaq-check(node_children(json-object-get(request,"checks")),afterDocs);
+    let result = json-node-object(list(nsm-n("complete",complete),nsm-n("valid_json",valid),nsm-n("applied",1),nsm-n("span_count",len(rows)),nsm-n("kept",ncr-count(rows,"keep")),nsm-n("removed",ncr-count(rows,"remove")),nsm-n("replaced",ncr-count(rows,"replace")),nsm-n("before_words",fal-count(before)),nsm-n("after_words",fal-count(answer)),nsm-n("answer_changed",not(str_eq(before,answer))),nsm-s("answer_sha256",nsm-hash(answer)),nsm-n("original_assertions_passed",head(checked)),nsm-s("assertion_observation",nth(checked,1)),nsm-n("provider_calls",0),nsm-n("evaluation",1),json-node-pair("semantic_quality",json-node-null()),nsm-s("attribution","Qwen3.8-27B-Q8_0 selected indexed edits; Form applied them; Codex supplied the concrete defect report; no arriving-agent answer edit")));
+    frsh-frozen(frsh-path(root,"edits.json"),json-emit(edits));
+    frsh-frozen(frsh-path(root,"revised-report.json"),json-emit(nth(applied,1)));
+    frsh-frozen(frsh-path(root,"answer.txt"),answer);
+    frsh-frozen(frsh-path(root,"comparison.json"),json-emit(result));
+    print_str(json-emit(result)); print_str("\n"); print_str(answer);
+   };
+  }
+ }
+ let root = "receipts/artifacts/2026-09-25-native-claim-repair";
+ let logPath = ".hearth/native-claim-repair-cli.log"; let log = read_file(logPath);
+ let marker = "form-native-generation "; let at = str_find(log,marker,0);
+ if lt(at,0) then form_error("public generation report not yet available") else 0;
+ let begin = add(at,str_len(marker)); let end = str_find(log,"\n",begin);
+ let textMarker = "\ntext:\n"; let textAt = str_find(log,textMarker,end);
+ let textStart = add(textAt,str_len(textMarker)); let textEnd = str_find(log,"\nform-cli> ",textStart);
+ if or(lt(end,0),or(lt(textAt,0),lt(textEnd,0))) then form_error("public generation response incomplete") else 0;
+ let detail = parse-json("public-generation",substring(log,begin,end));
+ let reply = substring(log,textStart,textEnd);
+ frsh-frozen(frsh-path(root,"generation.json"),json-emit(detail));
+ frsh-frozen(frsh-path(root,"reply.txt.json"),ncr-archive(logPath,reply));
+ frsh-frozen(frsh-path(root,"public-cli.log.json"),ncr-archive(logPath,log));
+ frsh-frozen(frsh-path(root,"coordinator-cost.json"),read_file(".hearth/native-claim-repair-coordinator-cost.json"));
+ ncr-apply(root,detail,reply,read_file(frsh-path(root,"input-report.json")));
+}
