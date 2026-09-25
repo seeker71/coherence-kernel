@@ -347,6 +347,13 @@ answer remain separate. Reliable source use and independent native correction
 remain open; the answer also still asserts an unobserved cause for the earlier
 voice. Passing the original checks did not establish those semantic claims.
 
+The [native text lookup](receipts/2026-09-26-native-source-review.md) now selects
+locale surfaces directly from a retained answer, preserving all matching
+codebook meanings and byte offsets. `enrich --text-file PATH` exposes it through
+form-cli. Its source observations have been supplied to the actual local
+correction with reasoning and task continuity enabled. That answer is still
+pending; lookup correctness and generated answer quality retain separate evidence.
+
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
 judgment, together with the native primitives and tools to carry out its work.

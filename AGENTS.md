@@ -153,7 +153,12 @@ The same door is `enrich <terms>` inside the source-backed form-cli:
 `form-run ./fkwu form/form-stdlib/form-cli-repl.fk`. It reads definitions,
 all dictionary senses, seeded relations, usage examples and present language
 codes without loading a model. Choose terms for this enquiry; the example is
-an example. Follow a relevant source or native capability beyond the reading
+an example. For a retained answer containing language surfaces, use
+`enrich --text-file PATH` through the same door. It finds exact delimited
+locale surfaces and returns every matching codebook symbol with its codes.
+Use the surrounding language and sense to assess the claim; the lookup
+does not classify prose or certify a translation claim by itself.
+Follow a relevant source or native capability beyond the reading
 when it can resolve the question. `zg <query>` searches the resident tool
 catalog; `grounded <question>` queries the available native RAG index. An exact
 dictionary miss describes that lookup's coverage and leaves source search open.
