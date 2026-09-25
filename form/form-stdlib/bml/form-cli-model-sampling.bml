@@ -35,19 +35,20 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
 ";
   def fcsam-seed-valid(seed) = if not(str_eq(value_kind(seed),"int")) then 0 else and(gt(seed,0),lt(seed,2147483647));
   def fcsam-positive(xs) = if nil?(xs) then 1 else and(gt(head(xs),0),fcsam-positive(tail(xs)));
-  // [vocabulary, pipelines, owned buffers, initial seed, current RNG, draws].
+  // [vocabulary, pipelines, owned buffers, initial seed, current RNG, draws,
+  //  aggregate diagnostics]. Diagnostics contain no token IDs or text.
   // Even partial admission owns its positive buffer handles until close.
   def fcsam-open(vocab,seed) = if not(and(fcsam-seed-valid(seed),ge(vocab,TopK()))) then list() else {
    let source = fcsam-msl();
    let pipes = list(metal_pipeline(source,"fcsam_parts"),metal_pipeline(source,"fcsam_merge"),metal_pipeline(source,"fcsam_clear"));
    let bytes = mul(mul(Partitions(),TopK()),4);
    let buffers = list(metal_buf_alloc(bytes),metal_buf_alloc(bytes),metal_buf_alloc(mul(TopK(),4)),metal_buf_alloc(mul(TopK(),4)),metal_buf_alloc(mul(vocab,4)));
-   list(vocab,pipes,buffers,seed,seed,0);
+   list(vocab,pipes,buffers,seed,seed,0,list(0,0,0,0.0));
   };
-  def fcsam-live(owner) = if not(eq(len(owner),6)) then 0 else and(fcsam-positive(nth(owner,1)),fcsam-positive(nth(owner,2)));
-  def fcsam-owned(owner) = if not(eq(len(owner),6)) then 0 else fcsam-count(nth(owner,2));
+  def fcsam-live(owner) = if lt(len(owner),6) then 0 else and(fcsam-positive(nth(owner,1)),fcsam-positive(nth(owner,2)));
+  def fcsam-owned(owner) = if lt(len(owner),6) then 0 else fcsam-count(nth(owner,2));
   def fcsam-count(xs) = if nil?(xs) then 0 else add(if gt(head(xs),0) then 1 else 0,fcsam-count(tail(xs)));
-  def fcsam-close(owner) = if not(eq(len(owner),6)) then 0 else { metal_sync(); q38-free-handles(nth(owner,2)); };
+  def fcsam-close(owner) = if lt(len(owner),6) then 0 else { metal_sync(); q38-free-handles(nth(owner,2)); };
   def fcsam-owner(session) = if gt(len(session),SessionSlot()) then nth(session,SessionSlot()) else list();
   def fcsam-with-owner(session,owner) {
    let base = if eq(len(session),SessionSlot()) then session else if eq(len(session),sub(SessionSlot(),1)) then append(session,list(list())) else take(SessionSlot(),session);
@@ -77,12 +78,22 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
    if ge(next,limit) then reverse(kept) else fcsam-prefix(tail(probs),next,limit,kept);
   };
   def fcsam-probs(logits) = smp-renorm(fcsam-prefix(smp-softmax(smp-temperature(logits,Temperature())),0.0,TopP(),list()));
+  // Cumulative over draws, including stop tokens. The peak is conditional on
+  // the selected top-k, before nucleus filtering; it is not model confidence.
+  def fcsam-stats(owner) = if gt(len(owner),6) then nth(owner,6) else list(0,0,0,0.0);
+  def fcsam-observe(owner,pick,nucleus,peak) {
+   let prior = fcsam-stats(owner);
+   list(add(head(prior),if gt(pick,0) then 1 else 0),add(nth(prior,1),if eq(nucleus,1) then 1 else 0),add(nth(prior,2),nucleus),add(nth(prior,3),peak));
+  }
   def fcsam-draw(owner,logits) {
    let candidates = fcsam-candidates(owner,logits,Presence());
    if nil?(candidates) then list(-1,owner) else {
     let state = smp-minstd(nth(owner,4));
-    let pick = smp-sample(fcsam-probs(head(candidates)),smp-uniform(state));
-    list(nth(nth(candidates,1),pick),append(take(4,owner),list(state,add(nth(owner,5),1))));
+    let probabilities = smp-softmax(smp-temperature(head(candidates),Temperature()));
+    let nucleus = fcsam-prefix(probabilities,0.0,TopP(),list());
+    let pick = smp-sample(smp-renorm(nucleus),smp-uniform(state));
+    let stats = fcsam-observe(owner,pick,len(nucleus),head(probabilities));
+    list(nth(nth(candidates,1),pick),append(take(4,owner),list(state,add(nth(owner,5),1),stats)));
    };
   }
   // The head at entry already predicts the next token. Each selected ID is
