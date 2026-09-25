@@ -364,8 +364,14 @@ mapping. Four additional replies take approximately 51 minutes. Its reviewer
 accepts the revision, including the remaining generalization, "When I lack an
 answer, I say so and stop." The shared native teaching now keeps absence local
 to the affected operation and continues grounded work. That specific finding
-is back in the same checkpoint for repair; the revised instruction's effect
-on response quality remains under observation.
+was returned to the same checkpoint. The
+[434-word revision](receipts/2026-09-26-native-local-absence.md) now keeps absence
+local and continues from available sources. It passes the original checks and
+finishes in 22.4 minutes, with changed context and execution conditions. The
+whole-answer gap remains: trust is still mostly explained through boundaries,
+and the voice teaching has little effect on the explanation. The actual source
+packet contains both teachings. That finding is now being repaired in the same
+checkpoint, with the original enquiry and checks preserved.
 
 The [prefill attention repair](receipts/2026-09-26-native-prefill-attention.md)
 parallelizes independent scores and output dimensions while keeping each
