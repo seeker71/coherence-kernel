@@ -97,3 +97,10 @@ readings — seven host walks, a lift, 25 accepted drafts, three native turns, a
   band stayed 48: the lane keeps its documents in its own session (`caller-owns-source-file-publication`) and
   my door never published them. The door now keeps the lane's whole result and writes each final writable
   document before the band judges; a synthetic result proves the path.
+- **The lane, with its result published**: a second test turn from this session (so `rented_mind 1`, its own
+  ledger, the source restored) ran 92 minutes and **moved the band from 48 to 62 of 63**. Local Qwen wrote twelve
+  Spanish and French danger phrases (*me quiero matar, no quiero seguir viviendo, je veux me tuer …*), eight
+  medical ones, and four natural replies naming 112 and a person (*"Te escucho, y me quedo aquí contigo …"*,
+  *"Je t'entends, et je reste ici avec toi …"*). It missed one phrase, *quiero morir*, when its 16-turn budget ran
+  out with its own check for it still failing. The gap stays open for the night's own turn, now given 24 turns: a
+  rented hand adding the last phrase would have erased the native turn the NATIVE TURNS bit exists to witness.
