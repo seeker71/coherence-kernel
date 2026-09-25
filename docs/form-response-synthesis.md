@@ -80,6 +80,9 @@ answer and usage hashes, returns zero new processes and preserves the same
 `usage_event`. Count that event once. An interrupted claim stays unresolved;
 inspect its owned evidence before further action. The deadline limits elapsed
 process time, not tokens. Missing provider usage stays unknown.
+An explicit `seconds: 0` selects progress-aware supervision without a lifetime
+deadline. The process remains owned, observable and stoppable; release and
+single-call checks still apply. Negative, absent or noninteger values are refused.
 
 The output contains metadata and a private `answer_path`. It leaves semantic
 quality and frequency/resonance unscored. Source/report assertions establish
