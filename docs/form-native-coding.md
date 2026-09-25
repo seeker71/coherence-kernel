@@ -1102,6 +1102,18 @@ checkpoints are rechecked without reopening Qwen. Incomplete generated text is
 discarded, not executed. This is explicit resumability, not automatic KV
 compaction or a persistent model resident across jobs.
 
+When a completed coding result has an observed quality failure beyond its
+checks, send that same original request with `resume` and
+`feedback: {"id":"stable-event-id","text":"the observed finding"}`.
+The caller's finding reopens repair while preserving the original contract,
+candidate documents and prior review. Source checks and review still run.
+The finding is caller evidence to assess, not a proven causal diagnosis.
+Feedback requires ordinary coding resume; fresh evaluation and read-only review
+do not admit it. Repeating an event ID with identical text does not reopen work
+again; changing its text is refused. Use a new ID for a new observation.
+The checkpoint retains applied events and the result exposes `caller_feedback`
+as `[id,text]` rows. Keep `weight_training: 0` when assessing response quality.
+
 The disk format is FORMBIN2 native nodes, decoded directly. Writes go to a
 process-specific temporary file, are read back, then atomically renamed. A
 digest detects corruption; it is not authentication against someone who can

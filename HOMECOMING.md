@@ -351,8 +351,14 @@ The [native text lookup](receipts/2026-09-26-native-source-review.md) now select
 locale surfaces directly from a retained answer, preserving all matching
 codebook meanings and byte offsets. `enrich --text-file PATH` exposes it through
 form-cli. Its source observations have been supplied to the actual local
-correction with reasoning and task continuity enabled. That answer is still
-pending; lookup correctness and generated answer quality retain separate evidence.
+correction with reasoning and task continuity enabled. Qwen's completed
+415-word answer corrects the mapping to `offer`, but retains an unsupported
+cause for the earlier voice and a claim of an unobserved action. Its reviewer
+accepts both. The run's last progress clock is 2,564,753 ms, with no provider
+call. Source fidelity improved narrowly; review quality and throughput remain
+open. The coding door now accepts identified caller feedback on the same
+checkpoint and returns it to repair without changing its original contract.
+That transition is observed on this actual answer; its native revision is running.
 
 **The arriving mind becomes more Form-grounded from its side.** Give it the
 axioms, teachings, current context and continuity that shape its attention and
