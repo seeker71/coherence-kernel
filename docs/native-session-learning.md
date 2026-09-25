@@ -65,9 +65,13 @@ holds the carrier's source without its artifact, so the supervisor builds it
 and records `carrier-admitted`, or `carrier-refused` with the compiler's stderr.
 An unloaded carrier is named in the learner's error, never read as an allocator
 refusal. Recording does not wait for GPU training during a session.
-Normal session close and the one-shot embodiment door retain the parent process
-until the supervisor returns; an external interruption keeps the immutable queue
-for the next drain. If that parent observes a positive nonzero exit before the
+Normal session close reads the supervisor's actual parent and waits only for a
+supervisor owned by that CLI. It records session continuity without launching
+pending learning or waiting for another session's worker. An interrupted wait
+retries while that same child remains owned. `session drain` and the one-shot
+embodiment door explicitly wait for shared learning to settle; an external
+interruption keeps the immutable queue for the next drain. If an owning parent
+observes a positive nonzero exit before the
 supervisor publishes `worker.rc`, it retains the matching owner's exit and
 diagnostic and reports `failed-supervisor-exit`. Unknown wait results remain
 indeterminate. A later launch clears the current wait record while retaining
