@@ -18,6 +18,26 @@ as a bounded session-manifest allowance. Form owns that provider CLI process,
 usage receipt and unchanged assertions. This does not add a fallback to the
 native `code` controller itself.
 
+Native tool assertions compare both returned bytes and exit status. Omitted
+`exit` means zero; an explicit canonical nonnegative integer selects another
+expected status. For example, a known phrase can be required absent:
+
+```json
+{"tool":"rg","arguments":["-F","obsolete claim","answer.md"],"stdout":"","exit":1}
+```
+
+This accepts the native search's ordinary no-match result. A missing source or
+tool diagnostic still fails, even if its status was requested. Source checks
+and read-only report checks use the same comparison. A literal absence check
+establishes that absence only; retain the original completeness, source and
+behavior checks alongside it.
+
+Failed source assertions retain the exact actual output, exit, diagnostics and
+checked document identities in `form-native-source-check-v1`. Full source text
+stays in the resident documents and remains readable through native tools; it
+is not duplicated inside the failure message. A tool's actual output is kept
+intact, including matching text needed to repair the assertion.
+
 Native assessment sessions (`observe/form-cli-response-session-run.bml`, one
 manifest file path on stdin) accept an optional nonblank string `run_id`. The
 pair `session` + `run_id` names one logical execution. Repeating it verifies the
