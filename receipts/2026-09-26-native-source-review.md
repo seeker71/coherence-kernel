@@ -131,6 +131,32 @@ and applied nothing; its corrected patch uses only the receipt's own text.
 
 ## Cost and continuity
 
+The completed feedback implementation turn used **5,139,532 rented tokens**:
+4,925,824 cached input, 163,091 uncached input, 24,658 output and 25,959
+unattributed. Its 42 model calls and 40 tool calls reconcile. The native cost
+collector retains this in `coordinator-feedback-cost.json`; the current open
+turn and separate provider subprocesses remain excluded.
+
+The resumed process was polled through the same exec **85874** and remained
+live. Its public progress reports all **6,709** prompt positions loaded at
+**485,675 ms**, followed by generation in repair, retaining five prior turns,
+three prior tool calls, one caller-feedback failure and three checks. A
+two-second macOS process sample at 01:41:19 +0800 observed the execution thread
+in `fk_metal_sync_external` / `fk_work_settle` for 166 of 169 samples. The
+sample is retained locally at `.hearth/native-source-feedback/process.sample.txt`.
+This locates the sampled wait; it does not establish which GPU kernel or
+scheduling condition caused its duration. The learning worker was also live,
+with one pending row and optimizer step 190. No performance change or speedup
+is claimed. Sampling itself is part of this run's changed observation context.
+
+Inspection of `fcac-final-task` found that full current correction evidence is
+deliberately supplied at the reasoning-to-answer boundary. Its existing check
+requires both the full failure and current role instruction after admission.
+Replacing that evidence with a reference has not been justified; it remains
+intact. The smallest supported next performance investigation is the executing
+GPU work, while the ongoing answer repair continues. A receipt patch with a
+misquoted context line applied nothing before this insertion.
+
 The newly measured completed coordinator turn used **7,665,506 rented tokens**:
 6,883,968 cached input, 716,411 uncached input, 38,284 output and 26,843
 unattributed tokens. Its 52 model calls and 49 tool calls reconcile. The current
