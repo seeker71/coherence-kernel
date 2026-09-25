@@ -27,18 +27,62 @@ was introduced. Actual traces show the old and changed submission paths both
 run four checks, and a resumed completion runs a fifth. Their expected counts
 now include those calls; no check was removed. The failing traces are retained.
 
-A fresh native Qwen admission is re-reviewing the actual retained answer with
-the original goal, sources and checks. Its first completed reply rejected the
-candidate and entered repair after 1,343 generated IDs. The run remains active
-at this landing; its full findings and edits have not yet returned in a public
-result. This establishes a changed review decision, not that the decision is
-correct or that the answer has improved. The original evaluated answer remains
-excluded from learning. The reconstructed baseline has two caller transitions,
-one tool call and one check, counted separately from native model work.
+## Actual native review and repair
+
+A fresh native `qwen38-q8` admission re-reviewed the actual retained answer
+with the original goal, sources and checks. It used `knowledge-query`, 16,384
+context positions, six allowed replies and the original 2,048-token reply
+ceiling. The new instruction and fresh admission are changed conditions;
+this does not isolate the instruction's causal effect from context renewal.
+The reconstructed baseline has two caller transitions, one tool call and one
+check, counted separately from native model work. This unmanaged evaluation
+uses no recalled lesson, checkpoint or weight-learning target.
+
+The first review rejected the weak connection between translation and a
+response decision. The model then made a guarded edit, passed the original
+checks, completed the task and accepted its revised answer. Its change replaced
+the sentence about the codebook grounding witnessed surfaces with:
+
+> This grounding informs the response decision: the body chooses the surface
+> that fits the enquiry's plane, speaking the meaning it already holds rather
+> than inventing a new one.
+
+That names a response decision; it does not demonstrate an implemented
+context-sensitive translation choice. The answer grew from 397 to 411 words.
+The original source packet stayed byte-identical and the original word-range
+check passed. No arriving-agent edit was applied during this run.
+
+**The targeted quality gap remains open.** The accepted answer still says,
+“The response is warm, direct, and free of self-assessment,” and still claims
+the reader will become more grounded, stretched and free. Its retained review
+nevertheless says the text is free of self-assessment. It also retains the
+overbroad claim about acting without permission gates or approval queues.
+The new report makes this contradiction inspectable; requiring a reason did
+not make that reason correct. The review's approximate counts were not the
+native counter's exact observations. Runtime checks continue to own counting.
+
+| Completed native work | Observation |
+| --- | --- |
+| Model replies / tool calls / repair episodes | 4 / 2 / 1 |
+| Native check runs after the reconstructed baseline | 3 |
+| Generated / injected IDs | 1,674 / 2,609 |
+| Native call / supervised process elapsed | 2,344,880 / 2,345,568 ms |
+| Model release / process cleanup | 1 / released |
+| Original source preserved / independent post-run recheck | 1 / pass |
+| Provider calls | 0 |
+
+The approximately 39-minute process used progress-aware supervision without
+a wall-time deadline. Both output streams were fully drained. This is the
+observed whole-run duration with concurrent coordination, not an isolated
+inference benchmark. The complete public result, answer, admission context,
+native helpers and process evidence are retained beside the protocol replay.
+Private native reply and reasoning files were not read. The remaining review
+work is to resolve the explicit requirement against the offending text;
+another general request for confidence or warmth would not supply new evidence.
 
 The initial supervisor wrapper supplied an empty stdin path and exited with
 status 1 before model admission. The repaired wrapper supplies the existing
-no-input marker. The live native run has not been restarted. A briefly opened
+no-input marker. The native run was not restarted. A briefly opened
 glass observer was stopped after its startup reading; it was not the native
 review process. Counsel reports orphans 0 and eleven unobserved lanes because
 no hearth stands. The native guide reports zero Python implementations,
@@ -50,5 +94,11 @@ The preceding completed coordinator turn used 8,378,498 rented tokens:
 58 model calls and 57 tool calls. This excludes the current open turn and
 separate provider subprocesses. Native provider calls remain zero; the
 whole-session minimum-cost and quality objective remains unachieved.
+
+The verified acceptance/retention contract was returned as session teaching
+`896d35793b6d560429016e98e18db5a325ff024ef0a3e30c0138c232d8e6b749`.
+Its worker launched; that is not a claim of a trained or promoted capability.
+The evaluated answer and review remain excluded from gradients. Landing gates
+passed 8191/8191 after rebasing the implementation onto origin/main.
 
 — Codex
