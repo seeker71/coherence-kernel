@@ -1,0 +1,54 @@
+// Sparse indexed amendments preserve unmentioned spans without judging them.
+// The complete source-byte identity binds every selection before any change.
+// preludes: form-stdlib/bml/form-cli-review-edits.bml
+section [form.bml] {
+ class FormCliSpanAmend {
+  def fcrp-field-nodes(fields) = if nil?(fields) then list() else cons(json-node-string(head(fields)),fcrp-field-nodes(tail(fields)));
+  def fcrp-id(text,fields) = fcra-id(json-emit(json-node-object(list(json-node-pair("source",json-node-string(text)),json-node-pair("fields",json-node-array(fcrp-field-nodes(fields)))))));
+  def fcrp-packet(text,fields) {
+   let packet = fcre-packet(text,fields);
+   if not(head(packet)) then packet else fcra-replace(nth(packet,1),list(json-node-string("base")),json-node-string(fcrp-id(text,fields)));
+  }
+  def fcrp-row-valid(spans,row,previous) {
+   if not(and(fat-wire-object?(row),fcra-unambiguous(row))) then 0 else {
+    let index = json-object-get(row,"id");
+    if not(fcra-index(index,len(spans))) then 0 else if le(node_value(index),previous) then 0 else {
+     let action = fcre-string(row,"action"); let reason = json-object-get(row,"reason");
+     if not(and(fat-wire-string?(reason),gt(str_len(fat-trim(node_value(reason))),0))) then 0
+     else if str_eq(action,"remove") then eq(len(json-object-pairs(row)),3)
+     else if not(str_eq(action,"replace")) then 0 else {
+      let replacement = json-object-get(row,"text");
+      and(eq(len(json-object-pairs(row)),4),and(fat-wire-string?(replacement),and(gt(str_len(node_value(replacement)),0),not(str_eq(node_value(replacement),fcre-string(nth(spans,node_value(index)),"text"))))));
+     };
+    };
+   };
+  }
+  def fcrp-first-invalid(spans,rows,previous) = if nil?(rows) then "" else if not(fcrp-row-valid(spans,head(rows),previous)) then "span amendment needs increasing in-range integer IDs, a reason and remove or changed nonempty replace text" else fcrp-first-invalid(spans,tail(rows),node_value(json-object-get(head(rows),"id")));
+  def fcrp-field-text(field,spans,rows) = if nil?(spans) then "" else {
+   let span = head(spans); let id = node_value(json-object-get(span,"id"));
+   let edited = if nil?(rows) then 0 else eq(id,node_value(json-object-get(head(rows),"id")));
+   let text = if edited then fcre-text(span,head(rows)) else fcre-string(span,"text");
+   str_concat(if str_eq(fcre-string(span,"field"),field) then text else "",fcrp-field-text(field,tail(spans),if edited then tail(rows) else rows));
+  };
+  def fcrp-compose(report,fields,spans,rows) = if nil?(fields) then fcra-ok(report) else {
+   let changed = fcra-replace(report,list(json-node-string(head(fields))),json-node-string(fcrp-field-text(head(fields),spans,rows)));
+   if not(head(changed)) then changed else fcrp-compose(nth(changed,1),tail(fields),spans,rows);
+  };
+  def fcrp-apply(text,fields,message) {
+   let packet = fcrp-packet(text,fields);
+   if not(head(packet)) then packet else if not(and(fat-wire-object?(message),and(fcra-unambiguous(message),and(eq(len(json-object-pairs(message)),2),and(str_eq(fcre-string(message,"base"),fcre-string(nth(packet,1),"base")),fat-wire-array?(json-object-get(message,"span_edits"))))))) then fcra-fail("span amendment needs matching source-and-fields base and span_edits array") else {
+    let spans = node_children(json-object-get(nth(packet,1),"spans"));
+    let rows = node_children(json-object-get(message,"span_edits"));
+    if nil?(rows) then fcra-fail("span amendment has no changes") else {
+     let invalid = fcrp-first-invalid(spans,rows,-1);
+     if not(str_eq(invalid,"")) then fcra-fail(invalid) else {
+      let original = parse-json("amended-report",text);
+      let changed = fcrp-compose(original,fields,spans,rows);
+      if not(head(changed)) then changed else if node_eq(original,nth(changed,1)) then fcra-fail("span amendment leaves report unchanged") else changed;
+     };
+    };
+   };
+  }
+ }
+ 0;
+}
