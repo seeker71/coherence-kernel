@@ -1,0 +1,36 @@
+// Correlate carrier metadata only. No prompt, answer or tool-output text leaves.
+// Preserve the legacy count-check failure while inspecting its actual cause.
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/form-cli-turn-cost.bml form-stdlib/bml/form-cli-response-resource.bml
+section [form.bml] {
+ def nol-find(rows,id) = if nil?(rows) then list() else if str_eq(head(head(rows)),id) then head(rows) else nol-find(tail(rows),id);
+ def nol-put(rows,id,call) = if nil?(rows) then list(list(id,call,sub(1,call))) else if str_eq(head(head(rows)),id) then cons(list(id,add(nth(head(rows),1),call),add(nth(head(rows),2),sub(1,call))),tail(rows)) else cons(head(rows),nol-put(tail(rows),id,call));
+ def nol-step(s,id,call) {
+  let prior=nol-find(head(s),id); let known=if nil?(prior) then 0 else gt(nth(prior,1),0);
+  let rows=nol-put(head(s),id,call);
+  if gt(len(rows),4096) then form_error("tool linkage identity bound reached") else 0;
+  list(rows,add(nth(s,1),call),add(nth(s,2),sub(1,call)),add(nth(s,3),str_eq(id,"")),add(nth(s,4),and(not(call),not(known))),add(nth(s,5),and(call,known)));
+ }
+ def nol-walk(text,at,s) = if ge(at,str_len(text)) then s else {
+  let end=fctel-min(scan_run(text,at,5),str_len(text)); let kind=fctel-payload-type-from(text,at);
+  let call=or(str_eq(kind,"custom_tool_call"),str_eq(kind,"function_call"));
+  let output=or(str_eq(kind,"custom_tool_call_output"),str_eq(kind,"function_call_output"));
+  let next=if or(call,output) then nol-step(s,fctel-json-payload-string-from(text,at,"call_id"),call) else s;
+  nol-walk(text,add(end,1),next);
+ };
+ def nol-count(rows,kind) = if nil?(rows) then 0 else add(if eq(kind,0) then and(gt(nth(head(rows),1),0),gt(nth(head(rows),2),0)) else if eq(kind,1) then gt(nth(head(rows),2),1) else and(gt(nth(head(rows),1),0),eq(nth(head(rows),2),0)),nol-count(tail(rows),kind));
+ let root="receipts/artifacts/2026-09-26-native-usefulness-feedback";
+ let cost=nsm-json(frsh-path(root,"preceding-coordinator-cost.json"));
+ let evidence=fcte-parse(read_file(fctel-candidate-row-path())); let path=fctel-bound-path();
+ if not(and(str_eq(fcte-turn-id(evidence),nsm-str(cost,"turn_id")),and(ftc-token-evidence-valid(evidence),fctec-codex-source-reconciled?(evidence,path)))) then form_error("selected cost carrier changed or is unverified") else 0;
+ let start=fcte-start-at(evidence); let end=fcte-complete-at(evidence); let bytes=sub(end,start);
+ if or(le(bytes,0),gt(bytes,16777216)) then form_error("selected metadata reading exceeds its bounded source range") else 0;
+ let source=read_file_slice(path,start,bytes);
+ if not(eq(str_len(source),bytes)) then form_error("carrier slice incomplete") else 0;
+ let s=nol-walk(source,0,list(list(),0,0,0,0,0));
+ let matched=nol-count(head(s),0); let multiple=nol-count(head(s),1); let missing=nol-count(head(s),2);
+ let linked=and(eq(nth(s,1),matched),and(eq(nth(s,3),0),and(eq(nth(s,4),0),and(eq(nth(s,5),0),eq(missing,0)))));
+ let result=json-node-object(list(nsm-s("schema","form-tool-output-linkage-v1"),nsm-s("turn_id",fcte-turn-id(evidence)),nsm-n("source_start",start),nsm-n("source_end",end),nsm-s("source_slice_sha256",nsm-hash(source)),nsm-n("tool_calls",nth(s,1)),nsm-n("output_events",nth(s,2)),nsm-n("calls_with_output",matched),nsm-n("calls_with_multiple_outputs",multiple),nsm-n("calls_without_output",missing),nsm-n("missing_ids",nth(s,3)),nsm-n("outputs_without_preceding_call",nth(s,4)),nsm-n("duplicate_call_ids",nth(s,5)),nsm-n("all_output_ids_linked",linked),nsm-n("legacy_tool_count_check",fcte-tool-valid?(evidence)),nsm-s("scope","Exact call-id linkage for this source-bound completed turn. Multiple output events remain counted. This does not replace the legacy row validator, certify runtime completion of the underlying operations, or grant a contribution share.")));
+ frsh-frozen(frsh-path(root,"tool-output-linkage.json"),json-emit(result));
+ print_str(json-emit(result));
+}
