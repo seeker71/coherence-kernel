@@ -5,20 +5,36 @@ section [form.bml] {
  class FormCliGenerateCommand {
   field DefaultAnswerTokens = 2048;
   def fgc-default-tokens() = DefaultAnswerTokens();
-  def fgc-help() = str_concat("generate [--tokens N] [--reasoning N] [--words MIN:MAX] <prompt> — local generation; default ",str_concat(int_to_str(fgc-default-tokens())," answer tokens. --reasoning reserves a final answer stage. --words counts whitespace-delimited words and offers one correction in the same model session. Use --prompt-file PATH last to read the complete enquiry and source context from a file, preserving its bytes.\n"));
+  def fgc-help() = str_concat("generate [--tokens N] [--reasoning N] [--words MIN:MAX] [--sample SEED] <prompt> — local generation; default ",str_concat(int_to_str(fgc-default-tokens())," answer tokens. --reasoning reserves a final answer stage. --words counts whitespace-delimited words and offers one correction in the same model session. --sample selects seeded Qwen3.8 direct-answer sampling (temperature 0.7, top-k 20, top-p 0.8, presence penalty 1.5); seed 1..2147483646, without --reasoning. Use --prompt-file PATH last to read the complete enquiry and source context from a file, preserving its bytes.\n"));
   // request = answer allowance, original prompt, diagnostic, reasoning allowance,
   // word minimum, word maximum (0 disables the word requirement).
   // Invalid input reaches
   // no model admission. The prompt after the option keeps its exact bytes.
-  def fgc-request(arg) = fgc-parse(arg,fgc-default-tokens(),0,0,0,0,0);
+  def fgc-seed(request) = if gt(len(request),6) then nth(request,6) else 0;
+  def fgc-request(arg) {
+   let request = fgc-parse(arg,fgc-default-tokens(),0,0,0,0,0);
+   if and(gt(fgc-seed(request),0),gt(nth(request,3),0)) then fgc-invalid("generate --sample currently serves direct answers; use it without --reasoning.\n") else request;
+  }
   def fgc-invalid(message) = list(0,"",message,0,0,0);
   def fgc-parse(arg,answer,reasoning,tokensSeen,reasoningSeen,lower,upper) {
    if eq(str_find(arg,"--tokens ",0),0) then fgc-option(substring(arg,9,str_len(arg)),"--tokens",answer,reasoning,tokensSeen,reasoningSeen,lower,upper)
    else if eq(str_find(arg,"--reasoning ",0),0) then fgc-option(substring(arg,12,str_len(arg)),"--reasoning",answer,reasoning,tokensSeen,reasoningSeen,lower,upper)
    else if eq(str_find(arg,"--words ",0),0) then fgc-words(substring(arg,8,str_len(arg)),answer,reasoning,tokensSeen,reasoningSeen,upper)
+   else if eq(str_find(arg,"--sample ",0),0) then fgc-sample(substring(arg,9,str_len(arg)),answer,reasoning,tokensSeen,reasoningSeen,lower,upper)
+   else if str_eq(arg,"--sample") then fgc-invalid(fgc-help())
    else if eq(str_find(arg,"--prompt-file ",0),0) then fgc-file(trim(substring(arg,14,str_len(arg))),answer,reasoning,lower,upper)
    else if or(str_eq(trim(arg),""),or(str_eq(arg,"--prompt-file"),or(str_eq(arg,"--words"),or(str_eq(arg,"--tokens"),str_eq(arg,"--reasoning"))))) then fgc-invalid(fgc-help())
    else list(answer,arg,"",reasoning,lower,upper);
+  }
+  def fgc-sample(rest,answer,reasoning,tokensSeen,reasoningSeen,lower,upper) {
+   let at = str_find(rest," ",0);
+   if le(at,0) then fgc-invalid("generate --sample needs a seed from 1 through 2147483646 and a prompt.\n") else {
+    let text = substring(rest,0,at); let seed = str_to_int(text);
+    if not(and(fcsam-seed-valid(seed),str_eq(text,int_to_str(seed)))) then fgc-invalid("generate --sample needs a seed from 1 through 2147483646.\n") else {
+     let request = fgc-parse(substring(rest,add(at,1),str_len(rest)),answer,reasoning,tokensSeen,reasoningSeen,lower,upper);
+     if gt(str_len(nth(request,2)),0) then request else if gt(fgc-seed(request),0) then fgc-invalid("generate repeats --sample.\n") else append(request,list(seed));
+    };
+   };
   }
   def fgc-option(rest,option,answer,reasoning,tokensSeen,reasoningSeen,lower,upper) {
    let at = str_find(rest," ",0);
@@ -48,7 +64,7 @@ section [form.bml] {
   def fgc-file-value(text,size,answer,reasoning,lower,upper) = if not(str_eq(value_kind(text),"string")) then fgc-invalid("generate --prompt-file could not read the enquiry.\n") else if not(eq(str_len(text),size)) then fgc-invalid("generate --prompt-file read size changed; inspect the file before generation.\n") else if str_eq(trim(text),"") then fgc-invalid("generate --prompt-file requires an enquiry.\n") else list(answer,text,"",reasoning,lower,upper);
   def fgc-run(resident,path,arg) = fgc-run-request(resident,path,fgc-request(arg));
   def fgc-has-word-range(request) = if gt(len(request),5) then gt(nth(request,5),0) else 0;
-  def fgc-run-request(resident,path,request) = if gt(str_len(nth(request,2)),0) then list(nth(request,2),resident) else if fgc-has-word-range(request) then fgcr-run-bounded(resident,path,nth(request,1),nth(request,3),head(request),nth(request,4),nth(request,5)) else if gt(nth(request,3),0) then fgcr-run(resident,path,nth(request,1),nth(request,3),head(request)) else fcmg-generate-resident(resident,path,nth(request,1),head(request));
+  def fgc-run-request(resident,path,request) = if gt(str_len(nth(request,2)),0) then list(nth(request,2),resident) else if gt(fgc-seed(request),0) then fgcr-run-sampled(resident,path,nth(request,1),head(request),nth(request,4),nth(request,5),fgc-seed(request)) else if fgc-has-word-range(request) then fgcr-run-bounded(resident,path,nth(request,1),nth(request,3),head(request),nth(request,4),nth(request,5)) else if gt(nth(request,3),0) then fgcr-run(resident,path,nth(request,1),nth(request,3),head(request)) else fcmg-generate-resident(resident,path,nth(request,1),head(request));
  }
  0;
 }
