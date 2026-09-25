@@ -42,15 +42,16 @@ Their complete text is now retained as JSON strings with hashes; the original
 spaces remain in those strings. A second receipt patch missed its context
 before applying; the corrected patch changed only the two archive writers.
 
-## Actual local correction is running
+## Actual local correction completed
 
-The public native coding door owns the next repair: exec **98236**, PID
-**63303**, public log `.hearth/native-source-review/public-cli.log`. This same
-process was observed advancing through admission and prefill, reaching
-all 6,368 prompt positions in 442,885 ms, then 512 reasoning IDs and the
-following answer-stage source admission. It has not returned a completed
-answer in this receipt. Continue observing this handle; an observation timeout
-does not select a new admission.
+The public native coding door completed exec **98236**, PID **63303**, exit 0.
+The exact answer, public terminal result, review, log and original-check
+re-observation are retained beside the request. Qwen changed 424 words to 415
+in five replies and three tool calls, with two check runs and no repair turn.
+It generated 3,685 IDs and injected 5,361. The last progress clock is
+**2,564,753 ms**, about 42.75 minutes; this is the run's reported elapsed time,
+not a separately measured full process wall time. Release and read-only source
+preservation both return 1. Checkpoint identity is retained in `comparison.json`.
 
 The request retains the actual 424-word answer with its wrong claim, the
 original enquiry, all original checks and Qwen3.8-27B-Q8_0. Form supplies the
@@ -64,8 +65,69 @@ meaning teaching is retained beside the request.
 
 Evidence, reasoning allowance and continuity all differ from the preceding
 run. A changed answer will establish the combined movement's result without
-isolating one setting's causal contribution. No provider call has been made
-for this repair. Answer quality remains pending.
+isolating one setting's causal contribution. No provider call was made.
+No recalled lesson was reported. The assessed answer remains excluded from
+gradients. Codex did not edit the returned answer.
+
+The exact translation example now names `offer`, matching Form's computed
+lookup. Two material gaps survive unchanged:
+
+- The opening says the earlier distance came from treating the exchange as a
+  risk. The enquiry reports how the voice felt; it does not establish that cause.
+- The ending says it acts by offering a cell with arguments and receiving one
+  result. The reply identifies no performed operation or observed result for
+  this claim.
+
+The native reviewer accepts the answer and lists the six axes. That acceptance
+does not resolve these findings. Much of the answer still describes interfaces
+rather than demonstrating how the concepts change this particular interaction.
+Compared with the retained provider answer, the local answer makes fewer
+concrete connections between concepts and useful actions. This last comparison
+is Codex's reading of the two texts, not a measured resonance score. The provider
+answer also contains unobserved claims about its effect on the reader and is not
+an unquestioned target.
+
+## Return the observed failure to the same work
+
+Completed coding resume previously re-ran only the caller checks. A semantic
+failure that survived those checks had no caller-feedback entry on that
+checkpoint. `feedback: {id,text}` now returns ordinary resumed coding to the
+existing repair flow. It preserves the original goal, documents, writable
+boundary, checks, current candidate and prior review. The event is caller
+evidence to assess against those sources. It does not establish a diagnosis.
+Applied IDs and text survive the checkpoint codec; repeated delivery is
+idempotent, and conflicting content under the same ID is refused.
+
+`observe-feedback.bml` uses the actual completed checkpoint. Before feedback it
+returns complete; after feedback it returns repair. It verifies unchanged
+contract and document bytes, original checks, retained review, exactly one new
+failure, no new model turn, codec round-trip idempotence, conflicting-ID refusal,
+missing-checkpoint refusal and continued gradient exclusion. The first run
+failed with `native feedback observation: no fabricated model turn`: using
+`fcap-rework` counted caller delivery as a model turn. The repair uses the native
+repair transition directly. The same observation then exits 0.
+
+The request and continuity bands return **255** and **65535**, each after clean
+preflight. Drift returns **8191/8191**, and staged whitespace checks pass.
+Public help and the native coding guide
+describe the feedback door. No C seed or external runtime changed.
+
+The exact two unsupported sentences now return as findings to Qwen through the
+public door, using the same original request and checkpoint. No replacement
+answer is supplied. Active exec **85874**, PID **76867**, writes only its public
+log to `.hearth/native-source-feedback/public-cli.log`. Follow this handle;
+the revised answer is pending. This is a concrete continuity repair, not yet
+evidence of improved native review judgment.
+
+Verified process teaching was retained as event
+`2026-09-26-native-caller-feedback-v1`, row
+`dfe2feb26c1955ea77cc4cf51cd24ec09b1f21b4b343bb4a4e59ea10b1eb3846`.
+Its learning worker launched while the resumed Qwen request was prefilling;
+that changed execution context must accompany any timing comparison. Retention
+does not establish a learned behavior. The share reader withheld percentages
+while validating the latest appended carrier range; semantic contribution is
+unmeasured. One later receipt patch included a context line from another file
+and applied nothing; its corrected patch uses only the receipt's own text.
 
 ## Cost and continuity
 
@@ -76,6 +138,12 @@ open turn and separate provider subprocesses are excluded. Coordination cost
 remains a substantial part of the gap; zero native provider calls does not
 erase it.
 
+The following completed waiting turn used **2,690,788 rented tokens**,
+including 2,456,576 cached input, 208,091 uncached input and 26,121 output.
+Its 13 model calls and 11 tool calls reconcile with zero unattributed tokens.
+`coordinator-wait-cost.json` retains this observation. Different work scopes
+prevent treating these two costs as a speed comparison.
+
 Counsel reports **zero orphans**, with 11/12 lanes unobserved without a standing
 hearth. The native guide reports zero Python implementations, two existing
 execution candidates and zero unread files. Stale images rebuilt through the
@@ -84,8 +152,17 @@ compiler health flow. The verified lookup teaching was retained as event
 `fdceccdb309da5b1f61f8ecb0de9fc05a05fe8771cc15d1659a0e27049956d9b`.
 Its worker was launched; retention does not establish learned behavior.
 
-The next comparison is the actual local edited answer and review. Automatic
-lookup is verified. Native semantic correction and the full quality,
-resonance and throughput goal remain open.
+Inspection failures retained: an unmatched shell source glob exited 1; a later
+search included an absent `form-cli-code-prompt.bml` and exited 2. The hearth
+send was first given JSON at its three-line door and returned
+`fkwu: form_error: hearth task body is absent`. The documented input returned
+`signal=nothing reason=no-standing-hearth`. The guide still reports zero Python
+implementations, two existing invocation candidates and zero unread files;
+counsel still reports **zero orphans**, with 11/12 lanes unobserved.
+
+The next comparison is the resumed native answer against these two exact
+findings and the original enquiry. Automatic lookup and feedback continuity are
+verified. General native source judgment, resonance and useful throughput
+remain open.
 
 — Codex

@@ -8,6 +8,27 @@ section [form.bml] {
   def fcaq-evaluation(obj) = eq(fcaq-number(obj, "evaluation", 0), 1);
   def fcaq-flag-valid(obj,key) = if not(json-object-has?(obj,key)) then 1 else and(fcad-int(json-object-get(obj,key)),or(eq(fcaq-number(obj,key,-1),0),eq(fcaq-number(obj,key,-1),1)));
   def fcaq-training-excluded(obj) = or(fcaq-evaluation(obj),or(str_eq(fcaq-mode(obj),"review"),eq(fcaq-number(obj,"weight_training",1),0)));
+  // A caller can return an observed failure to the same owned checkpoint.
+  // Stable event IDs distinguish delivery retries from new observations.
+  def fcaq-feedback-valid(obj) = if not(json-object-has?(obj,"feedback")) then 1 else {
+   let feedback = json-object-get(obj,"feedback");
+   and(str_eq(fcaq-mode(obj),"code"),and(not(fcaq-evaluation(obj)),and(fat-wire-string?(json-object-get(obj,"resume")),and(fcam-id-valid(fcap-string(obj,"resume")),and(fat-wire-object?(feedback),and(eq(len(json-object-pairs(feedback)),2),and(gt(str_len(fat-trim(fcap-string(feedback,"id"))),0),gt(str_len(fat-trim(fcap-string(feedback,"text"))),0))))))));
+  };
+  def fcaq-feedback-events(s) = if ge(len(fcap-memory(s)),25) then nth(fcap-memory(s),24) else list();
+  def fcaq-feedback-find(rows,id) = if nil?(rows) then list() else if str_eq(head(head(rows)),id) then head(rows) else fcaq-feedback-find(tail(rows),id);
+  def fcaq-with-feedback(s,rows) {
+   let padded = fcap-track-source-check(s,list(not(fcap-source-repair-open(s)),""));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),24),list(rows)));
+  }
+  def fcaq-feedback-state(obj,s) = if or(not(json-object-has?(obj,"feedback")),str_eq(fcap-stage(s),"attention")) then s else {
+   let feedback = json-object-get(obj,"feedback");
+   let id = fcap-string(feedback,"id"); let text = fcap-string(feedback,"text");
+   let seen = fcaq-feedback-find(fcaq-feedback-events(s),id);
+   if not(nil?(seen)) then if str_eq(nth(seen,1),text) then s else fcap-terminal(s,"caller-feedback-id-content-conflict") else {
+    let revised = fcap-repair-state(s,str_concat("Caller-observed failure (assess against the original evidence and constraints): ",text));
+    if str_eq(fcap-stage(revised),"attention") then revised else fcaq-with-feedback(revised,append(fcaq-feedback-events(s),list(list(id,text))));
+   };
+  };
   def fcaq-observe(obj,home,result,checker) = nsc-observe(home,result,checker,fcaq-training-excluded(obj));
   def fcaq-initial-reasoning-valid(obj) = if not(json-object-has?(obj,"initial_reasoning_tokens")) then 1 else and(fcad-int(json-object-get(obj,"initial_reasoning_tokens")),fcacr-limit-valid(fcaq-number(obj,"initial_reasoning_tokens",0)));
   def fcaq-answer-reserve-valid(obj) = if not(json-object-has?(obj,"reasoning_answer_tokens")) then 1 else and(or(json-object-has?(obj,"initial_reasoning_tokens"),json-object-has?(obj,"reasoning_tokens")),and(fcad-int(json-object-get(obj,"reasoning_answer_tokens")),fcacr-limit-valid(fcaq-number(obj,"reasoning_answer_tokens",0))));
@@ -19,7 +40,7 @@ section [form.bml] {
   def fcaq-document-context(obj) = if json-object-has?(obj,"document_context") then fcap-string(obj,"document_context") else "full";
   def fcaq-context-valid(obj) = if str_eq(fcaq-document-context(obj),"full") then 1 else and(fat-has(list("code","review"),fcaq-mode(obj)),str_eq(fcaq-document-context(obj),"catalog"));
   def fcaq-source-queries-valid(obj) = if not(json-object-has?(obj,"source_queries")) then 1 else and(str_eq(fcaq-document-context(obj),"catalog"),and(fat-wire-array?(json-object-get(obj,"source_queries")),fcap-source-query-rows-valid(node_children(json-object-get(obj,"source_queries")))));
-  def fcaq-entry-valid(obj) = and(fcaq-rehearsal-valid(obj),and(fcaq-source-queries-valid(obj),and(fcaq-context-valid(obj),and(fcaq-entry-for(obj,"review_entry","review"),fcaq-entry-for(obj,"code_entry","code")))));
+  def fcaq-entry-valid(obj) = and(fcaq-feedback-valid(obj),and(fcaq-rehearsal-valid(obj),and(fcaq-source-queries-valid(obj),and(fcaq-context-valid(obj),and(fcaq-entry-for(obj,"review_entry","review"),fcaq-entry-for(obj,"code_entry","code"))))));
   def fcaq-replay-check?(row) = str_eq(fcap-string(row,"kind"),"provider-usage-sequences");
   def fcaq-word-check?(row) = str_eq(fcap-string(row,"kind"),"word-range");
   def fcaq-word-check-valid(row) = and(eq(len(json-object-pairs(row)),4),and(gt(str_len(fcap-string(row,"path")),0),and(fcad-int(json-object-get(row,"minimum")),and(fcad-int(json-object-get(row,"maximum")),and(ge(fcaq-number(row,"minimum",-1),0),ge(fcaq-number(row,"maximum",-1),fcaq-number(row,"minimum",0)))))));
@@ -89,7 +110,7 @@ section [form.bml] {
   def fcaq-initial-work(obj, docs) = if str_eq(fcaq-mode(obj), "review") then if str_eq(fcap-string(obj,"review_entry"),"direct") then fcap-open-direct-review(fcap-string(obj,"goal"),docs) else fcap-open-review(fcap-string(obj, "goal"), docs) else if str_eq(fcap-string(obj,"code_entry"),"direct") then fcap-open-direct-code(fcap-string(obj,"goal"),docs,fcap-array(obj,"writable")) else fcap-open(fcap-string(obj, "goal"), docs, fcap-array(obj, "writable"));
   // Evaluation begins before continuity preparation, not after recall. It
   // cannot resume or consult learned repairs, and writes no coding checkpoint.
-  def fcaq-prepare(obj,docs,checker,root) = fcaq-context-state(obj,fcaq-prepare-work(obj,docs,checker,root));
+  def fcaq-prepare(obj,docs,checker,root) = fcaq-feedback-state(obj,fcaq-context-state(obj,fcaq-prepare-work(obj,docs,checker,root)));
   def fcaq-prepare-work(obj, docs, checker, root) = if fcaq-evaluation(obj) then fcaq-initial(obj, docs) else fcam-prepare(root, fcaq-initial(obj, docs), if str_eq(fcaq-mode(obj), "review") then json-emit(json-node-array(list(json-object-get(obj, "checks"), json-object-get(obj, "report_checks")))) else json-emit(json-object-get(obj, "checks")), fcap-string(obj, "resume"), checker);
   def fcaq-result-base(result) {
    let state = head(result);
@@ -100,7 +121,7 @@ section [form.bml] {
    let base = parse-json("code-result",fcaq-result-base(result));
    let detail = list(json-node-pair("document_context",json-node-string(fcap-document-context(state))),json-node-pair("report_source",json-node-string(fcap-report-source(state))),json-node-pair("native_repairs",json-node-array(fcap-native-repairs-json(fcap-native-repairs(state)))),json-node-pair("model_amendments",json-node-array(fcap-amendments-json(fcap-amendments(state)))),json-node-pair("max_reply_tokens",json-node-int(fcap-reply-token-limit(state))),json-node-pair("reasoning_tokens",json-node-int(head(fcap-reasoning(state)))));
    let rehearsal = list(json-node-pair("native_rehearsal_checks_remaining",json-node-int(fcap-rehearsal-budget(state))),json-node-pair("native_rehearsals",json-node-array(fcap-rehearsals-json(fcap-rehearsals(state)))),json-node-pair("native_json_repairs",json-node-array(fcap-json-repairs-json(fcap-json-repairs(state)))));
-   json-emit(json-node-object(append(json-object-pairs(base),append(detail,rehearsal))));
+   json-emit(json-node-object(append(json-object-pairs(base),append(detail,append(rehearsal,list(json-node-pair("caller_feedback",fcam-pack(fcaq-feedback-events(state)))))))));
   }
   def fcaq-result(result) {
    let original = parse-json("code-result",fcaq-result-core(result));
@@ -110,7 +131,7 @@ section [form.bml] {
   def fcaq-refused(reason) = json-emit(json-node-object(list(json-node-pair("status", json-node-string("attention")), json-node-pair("reason", json-node-string(reason)))));
   def fcaq-call(raw) = if or(gt(str_len(raw), FatMaxBytes()), not(faj-valid(raw))) then fcaq-refused("invalid-or-oversized-request-json") else fcaq-decoded(faj-json("native-code-request", raw));
   def fcaq-request-refusal(obj) = if and(fat-wire-object?(obj),and(json-object-has?(obj,"reasoning_tokens"),not(json-object-has?(obj,"reasoning_answer_tokens")))) then "reasoning_tokens requires reasoning_answer_tokens: retain the reasoning allowance and supply a separate positive integer answer allowance." else "valid goal,writable,documents,checks required; review needs empty writable and report_checks; evaluation cannot resume";
-  def fcaq-decoded(obj) = if not(fcaq-request-valid(obj)) then fcaq-refused(fcaq-request-refusal(obj)) else fcaq-docs(obj, fat-wire-documents(obj));
+  def fcaq-decoded(obj) = if not(fcaq-feedback-valid(obj)) then fcaq-refused("feedback requires ordinary code resume and exactly nonempty string id,text; reuse its id only with identical text") else if not(fcaq-request-valid(obj)) then fcaq-refused(fcaq-request-refusal(obj)) else fcaq-docs(obj, fat-wire-documents(obj));
   def fcaq-docs(obj, docs) = if not(str_eq(fat-wire-error(docs), "")) then fcaq-refused(fat-wire-error(docs)) else if or(le(fcaq-number(obj, "context", 8192), 0), le(fcaq-number(obj, "turns", 64), 0)) then fcaq-refused("positive-context-and-turns-required") else if and(json-object-has?(obj, "resume"), not(fat-wire-string?(json-object-get(obj, "resume")))) then fcaq-refused("resume-must-be-checkpoint-id") else fcaq-managed(obj, fat-wire-value(docs));
   def fcaq-managed(obj, docs) {
    let checker = fcaq-live-checker(obj);
@@ -127,8 +148,9 @@ section [form.bml] {
    json-emit(oh-set(oh-set(publicResult,"evaluation",json-node-int(evaluation)),"weight_training_excluded",json-node-int(fcaq-training-excluded(obj))));
   }
   def fcaq-help() = str_concat("code <JSON object>: local Qwen over caller-provided resident documents. Fields: goal, documents [{id,path,text}], writable [path], checks [{tool,arguments,input,stdout}], optional model, context, turns, resume, evaluation, weight_training, review_entry, code_entry. code_entry=staged is the default; code_entry=direct begins implementing the caller's supplied task and retains review, source checks, repair and replanning. Entry selects fresh state; resume retains its saved phase. mode=review requires writable=[] and nonempty report_checks; their native tools receive the report on stdin with no document access. review_entry=staged is the default; review_entry=direct preserves read-only documents, source/report checks and repair. Review returns report and preserves all documents. verify runs caller-owned source checks, with no model-supplied commands. evaluation=1 starts fresh without recall, resume, checkpoint writes or LoRA proposals and excludes its answers from weight training. Ordinary coding retains verified continuity and can use its checked session LoRA proposal. weight_training=0 excludes this request's answer from gradients while retaining ordinary continuity and existing learned proposals; omitted or 1 preserves the ordinary training policy. Evaluation and review answers remain excluded for either value. Review reports are retained as assessment experience, never implementation targets. See docs/form-native-coding.md.",fcacr-reserved-help());
+  def fcaq-feedback-help() = " Coding resume may add feedback={id,text}, two nonempty strings describing a caller-observed failure. It reopens repair under the unchanged contract. Reuse the stable id only for identical delivery retries; new observations use new ids. Applied events persist as caller_feedback. Evaluated response repair keeps weight_training=0.";
   def fcaq-from-file(path) = if or(le(file_size(path),0),gt(file_size(path),FatMaxBytes())) then fcaq-refused("request-file-unavailable-or-oversized") else fcaq-call(read_file(path));
-  def fcaq-command(arg) = if or(nothing?(arg),or(str_eq(arg, ""), str_eq(arg, "help"))) then str_concat(fcaq-help()," Coding and review document_context=catalog keep source text available through tools. Optional source_queries=[{tool,arguments}] admits actual read-only query observations before generation; no input or stdout fields. Full documents and original checks remain unchanged. Coding may set native_rehearsal_checks=0..64 to allow bounded native BML repair after an unchanged edit or failed implementation verify with one eligible writable BML document; default 0. Native attempts, remaining allowance and original failed actions are returned separately from model calls. Large requests: code @request.json reads the complete native file; the standalone stdin door accepts the same @path.") else if fat-starts(arg,"@") then fcaq-from-file(substring(arg,1,str_len(arg))) else fcaq-call(arg);
+  def fcaq-command(arg) = if or(nothing?(arg),or(str_eq(arg, ""), str_eq(arg, "help"))) then str_concat(str_concat(fcaq-help(),fcaq-feedback-help())," Coding and review document_context=catalog keep source text available through tools. Optional source_queries=[{tool,arguments}] admits actual read-only query observations before generation; no input or stdout fields. Full documents and original checks remain unchanged. Coding may set native_rehearsal_checks=0..64 to allow bounded native BML repair after an unchanged edit or failed implementation verify with one eligible writable BML document; default 0. Native attempts, remaining allowance and original failed actions are returned separately from model calls. Large requests: code @request.json reads the complete native file; the standalone stdin door accepts the same @path.") else if fat-starts(arg,"@") then fcaq-from-file(substring(arg,1,str_len(arg))) else fcaq-call(arg);
  }
  0;
 }

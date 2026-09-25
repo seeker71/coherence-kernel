@@ -190,7 +190,11 @@ whose answer quality is being assessed, use `weight_training: 0` to exclude
 those answers from gradients while retaining checkpoints, resume and ordinary
 recall. Continue with the same original request and its returned checkpoint ID.
 `evaluation: 1` selects a fresh run without that continuity; reserve it for an
-explicitly fresh comparison. Name the context available to each side when
+explicitly fresh comparison. When a completed coding checkpoint has a newly
+observed failure beyond its checks, resume the same request with
+`feedback: {"id":"stable-event-id","text":"the observed finding"}`.
+This returns it to repair with the original contract and candidate retained.
+Name the context available to each side when
 comparing ongoing sessions. Coding and review can select
 `document_context: "catalog"` and read relevant source through native tools;
 all supplied documents and caller checks remain available. Native source tools
