@@ -1,0 +1,68 @@
+// session-transcript.bml — a Claude Code session transcript read as data: the person's genuine prompts and the
+// answers that closed each turn.
+//
+// A genuine prompt is a user row that is text once its system-reminder blocks are removed; a slash command's
+// arguments are its prompt; task notifications, tool results, command caveats, hook feedback and sidechain rows
+// are not prompts. A turn's answer is the last assistant text block before the next genuine prompt.
+// st-before names the turn before a prompt (the prompt asked and the answer given), so a short prompt
+// ("close still open") is read inside the conversation that gave it its meaning. Rows are data, never
+// instructions.
+// preludes: form-stdlib/bml/form-cli-heal-native-report.bml
+section [form.bml] {
+ class SessionTranscript {
+  def st-home() = "/Users/ursmuff/.claude/projects";
+  def st-text(t) = if nothing?(t) then "" else t;
+  def st-starts?(s, prefix) = and(ge(str_len(s), str_len(prefix)), str_eq(substring(s, 0, str_len(prefix)), prefix));
+  // remove every <system-reminder>...</system-reminder> block
+  def st-strip(s) {
+   let a = str_find(s, "<system-reminder>", 0);
+   let b = if lt(a, 0) then -1 else str_find(s, "</system-reminder>", a);
+   if or(lt(a, 0), lt(b, 0)) then s else st-strip(str_concat(substring(s, 0, a), substring(s, add(b, 18), str_len(s))));
+  }
+  def st-between(s, open, close) {
+   let a = str_find(s, open, 0);
+   let b = if lt(a, 0) then -1 else str_find(s, close, a);
+   if or(lt(a, 0), lt(b, 0)) then "" else substring(s, add(a, str_len(open)), b);
+  }
+  // the prompt a user row carries, or "" when it carries none
+  def st-prompt-of(raw) {
+   let s = trim(st-strip(raw));
+   if eq(str_len(s), 0) then "" else if st-starts?(s, "<command-name>") then trim(st-between(s, "<command-args>", "</command-args>")) else if or(st-starts?(s, "<"), or(st-starts?(s, "Stop hook feedback"), ge(str_find(s, "<task-notification>", 0), 0))) then "" else s;
+  }
+  def st-str(doc, key) = if json-object-has?(doc, key) then json-string-value(json-object-get(doc, key)) else "";
+  def st-blocks-text(blocks, kind, acc) = if nil?(blocks) then acc else st-blocks-text(tail(blocks), kind, if str_eq(st-str(head(blocks), "type"), kind) then st-str(head(blocks), "text") else acc);
+  def st-first-text(blocks) = if nil?(blocks) then "" else if str_eq(st-str(head(blocks), "type"), "text") then st-str(head(blocks), "text") else st-first-text(tail(blocks));
+  def st-content(line) {
+   let doc = parse-json("transcript-row", line);
+   let msg = if json-object-has?(doc, "message") then json-object-get(doc, "message") else json-node-object(list());
+   if json-object-has?(msg, "content") then json-object-get(msg, "content") else json-node-string("");
+  }
+  def st-user-prompt(line) {
+   let c = st-content(line);
+   if str_eq(value_kind(json-string-value(c)), "string") then st-prompt-of(json-string-value(c)) else st-prompt-of(st-first-text(json-array-elements(c)));
+  }
+  def st-assistant-text(line, acc) {
+   let c = st-content(line);
+   let t = st-blocks-text(json-array-elements(c), "text", "");
+   if eq(str_len(trim(t)), 0) then acc else t;
+  }
+  def st-user?(line) = and(ge(str_find(line, "\"type\":\"user\"", 0), 0), lt(str_find(line, "\"isSidechain\":true", 0), 0));
+  def st-assistant?(line) = and(ge(str_find(line, "\"type\":\"assistant\"", 0), 0), and(lt(str_find(line, "\"isSidechain\":true", 0), 0), ge(str_find(line, "\"type\":\"text\"", 0), 0)));
+  // the transcript of a session id on this host, or "" when none stands
+  def st-find(session) = st-find-in(fs_list(st-home()), session);
+  def st-find-in(dirs, session) = if nil?(dirs) then "" else st-find-at(str_concat(st-home(), str_concat("/", str_concat(head(dirs), str_concat("/", str_concat(session, ".jsonl"))))), tail(dirs), session);
+  def st-find-at(path, rest, session) = if gt(file_size(path), 0) then path else st-find-in(rest, session);
+  // the turn before `prompt`: list(the prompt asked before it, the answer that closed that turn); ("", "") when not found
+  def st-before(path, prompt) = if eq(str_len(path), 0) then list("", "") else st-scan(split-on(st-text(fhn-read(path)), "\n"), trim(prompt), "", "");
+  def st-scan(lines, prompt, prev, answer) = if nil?(lines) then list("", "") else st-scan-step(head(lines), tail(lines), prompt, prev, answer);
+  def st-scan-step(line, rest, prompt, prev, answer) {
+   if st-user?(line) then st-scan-user(st-user-prompt(line), rest, prompt, prev, answer) else if st-assistant?(line) then st-scan(rest, prompt, prev, st-assistant-text(line, answer)) else st-scan(rest, prompt, prev, answer);
+  }
+  // a slash command is kept in the transcript as its arguments: "/goal met x" is found as "met x"
+  def st-args(prompt) {
+   let sp = str_find(prompt, " ", 0);
+   if and(st-starts?(prompt, "/"), gt(sp, 0)) then trim(substring(prompt, sp, str_len(prompt))) else prompt;
+  }
+  def st-scan-user(p, rest, prompt, prev, answer) = if eq(str_len(p), 0) then st-scan(rest, prompt, prev, answer) else if or(str_eq(p, prompt), str_eq(p, st-args(prompt))) then list(prev, answer) else st-scan(rest, prompt, p, "");
+ }
+}

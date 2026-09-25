@@ -3,17 +3,21 @@
 // Reads the prompts the harness captured (/Users/ursmuff/source/coherence-kernel/.hearth/prompt-capture.jsonl:
 // cwd, prompt, session, t), keeps the person's own words (system-reminder blocks removed; notifications, hook
 // feedback and prompts under 16 characters left out), and drafts the newest `count` not yet drafted through the
-// registry's answer model in this process (form-stdlib/bml/form-cli-native-voice.bml). Each draft lands under
-// .hearth/drafts/<id>.md, and one row in receipts/draft-ledger.jsonl with reading "pending"; our reading is
+// registry's answer model in this process (form-stdlib/bml/form-cli-native-voice.bml), given the turn before the
+// prompt from its own session transcript (form-stdlib/bml/session-transcript.bml). Each draft lands under that same
+// hearth, .hearth/drafts/<id>.md, and one row in receipts/draft-ledger.jsonl with reading "pending"; our reading is
 // recorded beside it by observe/draft-reading-run.bml. The draft text never enters the ledger.
-// stdin, optional: {"count":2,"max_reply_tokens":900}
+// stdin, optional: {"count":2,"max_reply_tokens":900,"redraft":0}; redraft 1 rewrites pending drafts written without
+// the turn before them (the row with context_chars is the draft's current one).
 // preflight-exec: forbidden
-// preludes: form-stdlib/bml/form-cli-native-voice.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml
+// preludes: form-stdlib/bml/session-transcript.bml form-stdlib/bml/form-cli-native-voice.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml
 section [form.bml] {
  class PromptDraft {
-  def pd-capture() = "/Users/ursmuff/source/coherence-kernel/.hearth/prompt-capture.jsonl";
+  // one hearth for every checkout: the capture and the drafts live beside each other in the main checkout
+  def pd-hearth() = "/Users/ursmuff/source/coherence-kernel/.hearth";
+  def pd-capture() = str_concat(pd-hearth(), "/prompt-capture.jsonl");
   def pd-ledger() = "receipts/draft-ledger.jsonl";
-  def pd-dir() = ".hearth/drafts";
+  def pd-dir() = str_concat(pd-hearth(), "/drafts");
   def pd-str(doc, key) = if json-object-has?(doc, key) then json-string-value(json-object-get(doc, key)) else "";
   def pd-num(doc, key) = if json-object-has?(doc, key) then json-int-value(json-object-get(doc, key)) else 0;
   def pd-int(doc, key, d) = if json-object-has?(doc, key) then json-int-value(json-object-get(doc, key)) else d;
@@ -32,18 +36,53 @@ section [form.bml] {
   def pd-rows(path) = if lt(file_size(path), 1) then list() else pd-parse(pd-nonempty(split-on(fhn-read(path), "\n")));
   def pd-id(r) = mc-cat(list(pd-str(r, "session"), "-", int_to_str(pd-num(r, "t"))));
   def pd-drafted?(id, rows) = if nil?(rows) then 0 else if str_eq(pd-str(head(rows), "draft"), id) then 1 else pd-drafted?(id, tail(rows));
-  // newest first: the capture rows reversed, the person's own words, not yet drafted
-  def pd-pick(rows, done, n, acc) = if or(nil?(rows), le(n, 0)) then reverse(acc) else if and(gt(str_len(pd-own(pd-str(head(rows), "prompt"))), 0), eq(pd-drafted?(pd-id(head(rows)), done), 0)) then pd-pick(tail(rows), done, sub(n, 1), cons(head(rows), acc)) else pd-pick(tail(rows), done, n, acc);
-  def pd-packet(prompt) = mc-cat(list("You are this body's own agent, speaking for the coherence-kernel body on its own Mac. The person below asked the body to do something or to answer something. Write the answer or the concrete plan you would give them, as the body would act on it: plainly, specifically, naming the files, doors or steps you would use when the request is about the body's work, and saying what you do not know rather than guessing.\n\nThe person asked:\n", prompt, "\n\nYour answer or plan:"));
+  // the latest row of a draft that carries its path, and the latest reading naming it
+  def pd-draft-row(id, rows, acc) = if nil?(rows) then acc else pd-draft-row(id, tail(rows), if and(str_eq(pd-str(head(rows), "draft"), id), gt(str_len(pd-str(head(rows), "path")), 0)) then head(rows) else acc);
+  def pd-reading(id, rows, acc) = if nil?(rows) then acc else pd-reading(id, tail(rows), if str_eq(pd-str(head(rows), "draft"), id) then pd-str(head(rows), "reading") else acc);
+  // redraft: a draft still pending that was written with an older packet
+  def pd-redraft?(id, rows) = if str_eq(pd-reading(id, rows, ""), "pending") then if lt(pd-version(pd-draft-row(id, rows, json-node-object(list()))), pd-packet-version()) then 1 else 0 else 0;
+  def pd-want?(r, done, redraft) = if eq(redraft, 1) then pd-redraft?(pd-id(r), done) else if eq(pd-drafted?(pd-id(r), done), 0) then 1 else 0;
+  // newest first: the capture rows reversed, the person's own words, not yet drafted (or, redrafting, drafted blind)
+  def pd-pick(rows, done, n, redraft, acc) = if or(nil?(rows), le(n, 0)) then reverse(acc) else if and(gt(str_len(pd-own(pd-str(head(rows), "prompt"))), 0), eq(pd-want?(head(rows), done, redraft), 1)) then pd-pick(tail(rows), done, sub(n, 1), redraft, cons(head(rows), acc)) else pd-pick(tail(rows), done, n, redraft, acc);
+  def pd-tail(s, n) = if le(str_len(s), n) then s else substring(s, sub(str_len(s), n), str_len(s));
+  // the files a prompt names, read so the voice answers from the body rather than asking for it
+  def pd-root() = "/Users/ursmuff/source/coherence-kernel";
+  // a named file is read from the checkout the person asked in, else from the checkout this door runs in
+  def pd-in?(c, set) = ge(str_find(set, c, 0), 0);
+  def pd-ltrim(w) = if and(gt(str_len(w), 0), pd-in?(substring(w, 0, 1), "`'\"([{<")) then pd-ltrim(substring(w, 1, str_len(w))) else w;
+  def pd-rtrim(w) = if and(gt(str_len(w), 0), pd-in?(substring(w, sub(str_len(w), 1), str_len(w)), "`'\")]}>,.:;!?")) then pd-rtrim(substring(w, 0, sub(str_len(w), 1))) else w;
+  def pd-word(w) = pd-rtrim(pd-ltrim(trim(w)));
+  def pd-at(root, w) = if pd-starts?(w, "/") then w else str_concat(root, str_concat("/", w));
+  def pd-find(w, roots) = if nil?(roots) then "" else if gt(file_size(pd-at(head(roots), w)), 0) then pd-at(head(roots), w) else pd-find(w, tail(roots));
+  def pd-named?(w) = and(gt(str_len(w), 3), and(ge(str_find(w, "/", 0), 0), or(not(pd-starts?(w, "/")), pd-starts?(w, pd-root()))));
+  def pd-words(lines) = if nil?(lines) then list() else append(split-on(head(lines), " "), pd-words(tail(lines)));
+  def pd-has?(w, xs) = if nil?(xs) then 0 else if str_eq(head(xs), w) then 1 else pd-has?(w, tail(xs));
+  def pd-files(words, roots, n, acc) = if or(nil?(words), le(n, 0)) then reverse(acc) else pd-files-at(pd-word(head(words)), tail(words), roots, n, acc);
+  def pd-files-at(w, rest, roots, n, acc) = if pd-named?(w) then pd-files-found(pd-find(w, roots), rest, roots, n, acc) else pd-files(rest, roots, n, acc);
+  def pd-files-found(p, rest, roots, n, acc) = if and(gt(str_len(p), 0), eq(pd-has?(p, acc), 0)) then pd-files(rest, roots, sub(n, 1), cons(p, acc)) else pd-files(rest, roots, n, acc);
+  def pd-head(s, n) = if le(str_len(s), n) then s else substring(s, 0, n);
+  def pd-lines(xs) = if nil?(xs) then "" else str_concat(head(xs), str_concat("\n", pd-lines(tail(xs))));
+  def pd-file-text(ws) = if nil?(ws) then "" else mc-cat(list("The file ", head(ws), " reads (its first 2500 characters):\n", pd-head(fhn-read(head(ws)), 2500), "\n\n", pd-file-text(tail(ws))));
+  // the packet's form: 0 blind, 1 the turn before, 3 the turn before and the files the prompt names (read from the
+  // checkout the person asked in)
+  def pd-packet-version() = 3;
+  def pd-version(row) = if json-object-has?(row, "packet") then json-int-value(json-object-get(row, "packet")) else 0;
+  // the turn before the prompt in its own conversation, so a short prompt keeps its meaning
+  def pd-context(before) = if and(eq(str_len(head(before)), 0), eq(str_len(trim(nth(before, 1))), 0)) then "" else mc-cat(list("The person asked just before: ", pd-tail(head(before), 800), "\n\nThe answer they received: ", pd-tail(nth(before, 1), 3000)));
+  def pd-packet(prompt, context, files) = mc-cat(list("You are this body's own agent, speaking for the coherence-kernel body on its own Mac. The person below asked the body to do something or to answer something. Write the answer or the concrete plan you would give them, as the body would act on it: plainly, specifically, naming the files, doors or steps you would use when the request is about the body's work, and saying what you do not know rather than guessing. You cannot run anything while you draft: when the request asks for something to be run or checked, name the door you would run and the reading that would mean it is done.\n\n", if eq(str_len(context), 0) then "" else str_concat(context, "\n\n"), files, "The person asks now:\n", prompt, "\n\nYour answer or plan:"));
   def pd-one(r, opts) {
    let id = pd-id(r);
    let prompt = pd-own(pd-str(r, "prompt"));
    let started = now_unix_ms();
-   let v = fcnv-ask(pd-packet(prompt), json-node-object(list(fhn-n("max_reply_tokens", pd-int(opts, "max_reply_tokens", 900)))));
+   let context = pd-context(st-before(st-find(pd-str(r, "session")), prompt));
+   let named = pd-files(pd-words(split-on(prompt, "\n")), list(pd-str(r, "cwd"), fhn-root()), 2, list());
+   let files = pd-file-text(named);
+   let v = fcnv-ask(pd-packet(prompt, context, files), json-node-object(list(fhn-n("max_reply_tokens", pd-int(opts, "max_reply_tokens", 900)))));
    let text = if str_eq(head(v), "answered") then nth(v, 1) else "";
-   let path = mc-cat(list(fhn-root(), "/", pd-dir(), "/", id, ".md"));
-   let wrote = write_file_text(path, mc-cat(list("# The person asked\n\n", prompt, "\n\n# The body's draft\n\n", text, "\n")));
-   let row = json-node-object(list(fhn-n("at_unix_ms", now_unix_ms()), fhn-s("draft", id), fhn-n("prompt_t", pd-num(r, "t")), fhn-s("session", pd-str(r, "session")), fhn-s("path", path), fhn-s("voice", head(v)), fhn-n("generated", nth(v, 3)), fhn-n("wall_ms", sub(now_unix_ms(), started)), fhn-s("reading", "pending")));
+   let path = mc-cat(list(pd-dir(), "/", id, ".md"));
+   let seen = mc-cat(list(if eq(str_len(context), 0) then "" else mc-cat(list("\n# The turn before (what the voice was given)\n\n", context, "\n")), if nil?(named) then "" else mc-cat(list("\n# Files the voice read\n\n", pd-lines(named), "\n"))));
+   let wrote = write_file_text(path, mc-cat(list("# The person asked\n\n", prompt, "\n\n# The body's draft\n\n", text, "\n", seen)));
+   let row = json-node-object(list(fhn-n("at_unix_ms", now_unix_ms()), fhn-s("draft", id), fhn-n("prompt_t", pd-num(r, "t")), fhn-s("session", pd-str(r, "session")), fhn-s("path", path), fhn-n("packet", pd-packet-version()), fhn-n("context_chars", str_len(context)), fhn-n("files", len(named)), fhn-s("voice", head(v)), fhn-n("generated", nth(v, 3)), fhn-n("wall_ms", sub(now_unix_ms(), started)), fhn-s("reading", "pending")));
    let appended = fhn-append(pd-ledger(), str_concat(json-emit(row), "\n"));
    print_str(mc-cat(list("[draft] ", id, " voice=", head(v), " generated=", int_to_str(nth(v, 3)), " -> ", path, "\n")));
   }
@@ -54,7 +93,7 @@ section [form.bml] {
    let line = if nothing?(line0) then "" else trim(line0);
    let opts = if str_eq(line, "") then json-node-object(list()) else parse-json("draft-options", line);
    let made = fs_mkdir(pd-dir());
-   let picked = pd-pick(reverse(pd-rows(pd-capture())), pd-rows(pd-ledger()), pd-int(opts, "count", 2), list());
+   let picked = pd-pick(reverse(pd-rows(pd-capture())), pd-rows(pd-ledger()), pd-int(opts, "count", 2), pd-int(opts, "redraft", 0), list());
    let done = pd-all(picked, opts);
    print_str(mc-cat(list("[draft] drafted ", int_to_str(len(picked)), "\n")));
   }
