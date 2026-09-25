@@ -110,10 +110,14 @@ observations, ages and report composition use collector-visible Form values
 through `json-view.bml`. The shared JSON parser selects value constructors;
 strict wire admission, ordered duplicate pairs and typed scalar meanings stay
 intact. `organ-health-values.bml` owns validation, observation replacement,
-attention and response correlation for both value and node APIs. Care and Glass
-serialize the values directly. `occ-view-request-at` returns this view;
-`occ-request-at` explicitly materializes primary nodes for a caller requesting
-content identity. The working lists and strings remain visible to the current
+attention and response correlation for both value and node APIs. Health, care
+and Glass serialize values directly. `form-core-health-values.bml` owns their
+shared source projection, attention order and source needs.
+`ohc-view-request-at` and `occ-view-request-at` return these views;
+`ohc-request-at` and `occ-request-at` explicitly materialize primary nodes for
+a caller requesting content identity. Custom `ohc-read-with` and
+`ohc-request-with` callbacks continue to receive node source reports.
+The working lists and strings remain visible to the current
 collector. Current-state updates copy surviving pairs, so obsolete revisions
 leave the reader's roots; deliberately held snapshots keep their own values.
 A view creates no new record owner; callers retaining a view in a record
@@ -124,15 +128,27 @@ are reclaimed. The changing-event witness below measures event consumption
 and serialization, with discovery declarations prepared outside its intervals.
 Its finite collection exercise does not constrain the reader's lifetime.
 
-Discovery and explicit node-returning APIs still admit primary nodes. The
-ordinary `health` text command uses that node API; its output materializes the
-event tree. Reader records, the collector, boxed floats and framebuffer timestamp
+Request parsing, discovery and explicit node-returning APIs still admit primary
+nodes. Reader records, the collector, boxed floats and framebuffer timestamp
 publication remain seed-backed. Three floating inputs in the
 [value-contract observation](evidence/fkwu/care-value-contract.json) create
 three float boxes and no primary nodes. The same observation compares twelve
 protocol transitions and a real 44,397-byte organ exchange against the parent
 implementation. Complete native ownership and signaling when ordinary
 allocation cannot grow remain open.
+
+The [health command observation](evidence/fkwu/health-view-lifetime.json)
+alternates health-first and care-first consumption of actual local write/readback
+events through 32 cycles. Warmed explicit-source commands include request
+parsing and serialization in their measured intervals; event production and
+reply decoding are outside. Those intervals mint no primary nodes. Partial
+records share the same cursor; a held health view remains exact through actual
+collection. Initial admission is recorded separately. This workload does not
+establish allocation-free execution or the cost of changing discovery.
+Run `observe/form-health-view-witness.bml` with a new absolute evidence directory
+on stdin. The [projection comparison](evidence/fkwu/health-view-contract.json)
+preserves typed nested data, duplicate fields, source states, pain-first order,
+request messages and custom node callbacks against the preceding implementation.
 
 Shrinking files reset the reader. A known publisher's renewed generation also
 resets it, including replacements of equal or greater size. A new publisher at

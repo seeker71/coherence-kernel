@@ -1,0 +1,62 @@
+// Actual health/care commands share changing local observations and one cursor.
+// stdin: a new absolute evidence directory. Empty stdin only admits this source.
+// preludes: observe/form-care-witness-common.bml
+section [form.bml] {
+ class HealthViewWitness {
+  def hvw-call(owner,arg,lane) {
+   let minted = kernel_stat(53); let records = kernel_stat(164); let floats = kernel_stat(45); let start = host_monotonic_ms();
+   let text = if str_eq(lane,"health") then ohc-command-at(owner,arg) else occ-command-at(owner,arg);
+   let elapsed = sub(host_monotonic_ms(),start); let growth = sub(kernel_stat(53),minted); let dispatches = sub(kernel_stat(164),records); let boxes = sub(kernel_stat(45),floats);
+   let value = jvp-parse(text);
+   list(value,text,jv-object(list(jv-s("lane",lane),jv-n("primary_mints",growth),jv-n("record_constructor_dispatches",dispatches),jv-n("float_boxes",boxes),jv-n("elapsed_ms",elapsed),jv-pair("read_bytes",jv-get(value,"read_bytes")),jv-n("emitted_bytes",str_len(text)))));
+  }
+  def hvw-current(result,id,bytes) {
+   let sources = jv-items(jv-get(head(result),"sources")); let rows = jv-items(jv-get(head(sources),"current"));
+   ccw-assert(and(eq(len(sources),1),and(eq(len(rows),1),and(str_eq(jv-str(head(rows),"id"),id),eq(jv-str(head(result),"read_bytes"),bytes)))),"health and care retain the new observation and shared byte cursor");
+   ccw-assert(eq(jv-str(nth(result,2),"primary_mints"),0),"warmed health/care text does not materialize changing event nodes");
+  }
+  def hvw-round(owner,root,path,arg,index) {
+   let a = ccw-event(root,mul(index,2)); ccw-assert(eq(sbt-append-count(path,nth(a,1)),str_len(nth(a,1))),"health-first append complete");
+   let health = hvw-call(owner,arg,"health"); hvw-current(health,head(a),str_len(nth(a,1)));
+   let careQuiet = hvw-call(owner,arg,"care"); hvw-current(careQuiet,head(a),0);
+   let b = ccw-event(root,add(mul(index,2),1)); ccw-assert(eq(sbt-append-count(path,nth(b,1)),str_len(nth(b,1))),"care-first append complete");
+   let care = hvw-call(owner,arg,"care"); hvw-current(care,head(b),str_len(nth(b,1)));
+   let healthQuiet = hvw-call(owner,arg,"health"); hvw-current(healthQuiet,head(b),0);
+   jv-object(list(jv-n("cycle",index),jv-pair("health",nth(health,2)),jv-pair("care_quiet",nth(careQuiet,2)),jv-pair("care",nth(care,2)),jv-pair("health_quiet",nth(healthQuiet,2))));
+  }
+  def hvw-rounds(owner,root,path,arg,index,end,rows) = if ge(index,end) then reverse(rows) else hvw-rounds(owner,root,path,arg,add(index,1),end,cons(hvw-round(owner,root,path,arg,index),rows));
+  def hvw-repeat(owner,arg,n,bytes) = if le(n,0) then bytes else hvw-repeat(owner,arg,sub(n,1),add(bytes,str_len(ohc-command-at(owner,arg))));
+  def hvw-collect(owner,arg,before,count,bytes) = if gt(nth(kernel_live(host_pid()),21),before) then list(count,bytes) else if ge(count,4096) then form_error("health value observation budget ended before collection") else hvw-collect(owner,arg,before,add(count,128),hvw-repeat(owner,arg,128,bytes));
+  def hvw-partial(owner,root,path,arg) {
+   let event = ccw-event(root,900); let cut = div(str_len(nth(event,1)),2); let first = substring(nth(event,1),0,cut); let rest = substring(nth(event,1),cut,str_len(nth(event,1)));
+   ccw-assert(eq(sbt-append-count(path,first),str_len(first)),"partial health event append");
+   let partial = hvw-call(owner,arg,"health");
+   ccw-assert(and(eq(jv-str(head(partial),"read_bytes"),cut),str_eq(jv-str(head(jv-items(jv-get(head(partial),"sources"))),"state"),"awaiting-complete-record")),"health preserves unfinished evidence");
+   let quiet = hvw-call(owner,arg,"care"); ccw-assert(eq(jv-str(head(quiet),"read_bytes"),0),"care does not reread an unfinished health event");
+   ccw-assert(eq(sbt-append-count(path,rest),str_len(rest)),"partial event completion");
+   let complete = hvw-call(owner,arg,"care"); hvw-current(complete,head(event),str_len(rest));
+   let next = hvw-call(owner,arg,"health"); hvw-current(next,head(event),0);
+   jv-object(list(jv-pair("partial_health",nth(partial,2)),jv-pair("quiet_care",nth(quiet,2)),jv-pair("completed_care",nth(complete,2)),jv-pair("quiet_health",nth(next,2))));
+  }
+  def hvw-run(root) {
+   ccw-assert(and(eq(str_byte_at(root,0),47),eq(fs_exists(root),0)),"supply a new absolute health observation directory"); ccw-assert(eq(host_dir_mkdir(root),1),"health observation directory creation");
+   let paths = list("fkwu","runtime/fkwu-uni.c","form/form-stdlib/bml/form-core-health.bml","form/form-stdlib/bml/form-core-health-values.bml","form/form-stdlib/bml/form-core-care.bml","form/form-stdlib/bml/organ-health-stream.bml","form/form-stdlib/bml/organ-health-values.bml","form/form-stdlib/bml/json-view.bml","form/form-stdlib/bml/json-view-parse.bml","form/form-stdlib/json.fk","observe/form-care-witness-common.bml","observe/form-health-view-witness.bml"); let bindings = ccw-bindings(paths);
+   let path = str_concat(root,"/events.jsonl"); let initial = ccw-event(root,99); ccw-write(path,nth(initial,1));
+   let owner = ohc-open(); let request = json-node-object(list(json-node-pair("sources",json-node-array(list(json-node-string(path)))))); let arg = json-emit-precise(request);
+   let admitted = hvw-call(owner,arg,"health"); ccw-assert(eq(jv-str(head(admitted),"read_bytes"),str_len(nth(initial,1))),"initial health consumes its event");
+   let reader = record_get(ohc-stream(owner,ohc-source(root,path)),"reader"); let held = ohc-view-request-at(owner,request); let heldText = jv-emit(held);
+   let rows = hvw-rounds(owner,root,path,arg,100,132,list()); let partial = hvw-partial(owner,root,path,arg);
+   let before = nth(kernel_live(host_pid()),21); let strings = kernel_stat(51); let minted = kernel_stat(53); let collected = hvw-collect(owner,arg,before,0,0);
+   let growth = sub(kernel_stat(53),minted); let cycles = sub(nth(kernel_live(host_pid()),21),before); let reclaimed = sub(kernel_stat(51),strings);
+   ccw-assert(and(eq(growth,0),and(gt(cycles,0),gt(reclaimed,0))),"health serialization crosses actual collection without primary report admission");
+   ccw-assert(str_eq(jv-emit(held),heldText),"old health view remains exact across changing values and collection");
+   ccw-assert(value_eq(reader,record_get(ohc-stream(owner,ohc-source(root,path)),"reader")),"health and care keep the same reader owner");
+   ccw-assert(str_eq(jv-emit(jv-array(bindings)),jv-emit(jv-array(ccw-bindings(paths)))),"selected execution source bytes remain exact");
+   let report = jv-object(list(jv-s("schema","health-view-lifetime-v1"),jv-n("accepted",1),jv-n("cycles",32),jv-pair("initial",nth(admitted,2)),jv-pair("health",ccw-stage(rows,"health")),jv-pair("care",ccw-stage(rows,"care")),jv-pair("health_quiet",ccw-stage(rows,"health_quiet")),jv-pair("care_quiet",ccw-stage(rows,"care_quiet")),jv-pair("rows",jv-array(rows)),jv-pair("partial",partial),jv-n("collector_cycles",cycles),jv-n("reclaimed_strings",reclaimed),jv-n("collection_commands",head(collected)),jv-n("collection_primary_mints",growth),jv-n("held_health_view_exact",1),jv-pair("sources",jv-array(bindings)),jv-pair("observations",ccw-bind(str_concat(root,"/observations.jsonl"))),jv-s("scope","complete explicit-source health/care commands including request parsing and serialization; initial admission separate; actual local write/readback events created outside measured commands; reply decoding and observer work outside intervals; no node baseline sees new events before measurement; temporary values still allocate; floats, records, discovery and collector remain seed-backed; selected source bindings are not the full closure")));
+   ccw-write(str_concat(root,"/evidence.json"),jv-emit(report));
+   print(list("health-values",32,"health",jv-emit(ccw-stage(rows,"health")),"health-quiet",jv-emit(ccw-stage(rows,"health_quiet")),"collection",cycles,"reclaimed-strings",reclaimed,"held-exact",1,"evidence",str_concat(root,"/evidence.json"))); 0;
+  }
+ }
+ let input = read_line();
+ if or(nothing?(input),str_eq(trim(input),"")) then 0 else hvw-run(trim(input));
+}
