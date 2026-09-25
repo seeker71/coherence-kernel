@@ -180,7 +180,13 @@ checks that supply, while the review establishes what the code does.
 
 For ongoing native coding, use the public `code` request so its owned
 checkpoint retains the work. Select `code_entry: "direct"` when the task is
-already defined; review and verification still run. Coding and review can select
+already defined; review and verification still run. For ongoing response work
+whose answer quality is being assessed, use `weight_training: 0` to exclude
+those answers from gradients while retaining checkpoints, resume and ordinary
+recall. Continue with the same original request and its returned checkpoint ID.
+`evaluation: 1` selects a fresh run without that continuity; reserve it for an
+explicitly fresh comparison. Name the context available to each side when
+comparing ongoing sessions. Coding and review can select
 `document_context: "catalog"` and read relevant source through native tools;
 all supplied documents and caller checks remain available. Native source tools
 read this caller-supplied catalog. Include the called helpers and their contracts;
