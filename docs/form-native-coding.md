@@ -6,11 +6,11 @@ caller explicitly selects a model, sets `evaluation: 1`, or requests
 checks decide whether that proposal suffices. Otherwise it gives local Qwen one
 native session for prompt refinement, planning,
 ordered task splitting, implementation, review, and verification. Generated token
-IDs and KV state stay resident across tool observations. No Ollama, HTTP,
-foreign model engine, shell tool, or rented fallback is invoked by this loop.
+IDs and KV state stay resident across tool observations. The whole loop runs in
+the `fkwu` session on this Mac's metal, and its tools are Form's native tools.
 The optional LoRA proposal and asynchronous learner run as native `fkwu` workers.
-The existing `heal ... local` command is a different route: it still permits
-Ollama. Do not use that spelling to request this native-only workflow.
+`heal` is a separate lane with its own native queue
+([`form-cli-healing.md`](form-cli-healing.md)).
 
 A caller can separately offer the optional [response resource](form-response-resource.md)
 for a retained, failing read-only report, either through its standalone door or
@@ -54,8 +54,6 @@ new work. Use a new `run_id` for a deliberate new execution. With no `run_id`,
 each invocation remains fresh. `frss-file`/`frss-text` preserve input bytes;
 `frss-run` uses JSON encoding, so use consistent input encoding for a replay.
 This verifies retained work rather than establishing fresh semantic quality.
-The [replay observation](../receipts/2026-09-20-response-session-replay.md)
-records the executing boundary and the failed provider implementation attempt.
 
 For a read-only assessment that explicitly requests provider synthesis after
 native grounding, the separate [synthesis door](form-response-synthesis.md)
@@ -88,10 +86,9 @@ must supply an adapter trained for the selected base model.
 
 This is an explicit Form API. The JSON `code` request and resident turnwheel
 do not select this Qwen adapter automatically. It does not promote a candidate
-or connect the separate Llama session learner to Qwen. The live
-[session witness](../receipts/2026-09-17-qwen-session-adapter.md) establishes
-transport, native-head correspondence and resource release for one existing
-candidate; response quality and held-out improvement remain unproved.
+or connect the separate Llama session learner to Qwen. An attached adapter
+carries transport, native-head correspondence and resource release; whether it
+improves responses or held-out answers is a separate observation.
 
 ### Full-vocabulary Qwen head learning
 
@@ -117,13 +114,8 @@ the Q8_0 storage type and matching geometry. This API bounds packed byte
 offsets before multiplication and requires whole Q8_0 blocks per row. It
 synchronizes pending device work at entry and reads back a finite loss and
 hidden gradient. It neither updates parameters nor writes an adapter by itself.
-
-The [actual Qwen witness](../receipts/2026-09-17-qwen-full-vocabulary-gradient.md)
-measured a 248,320-by-5,120 gradient in 13 ms. A private persisted step reduced
-training loss; two held-out losses increased slightly while both greedy
-answers stayed correct. The candidate remains unpromoted. These observations
-establish a working learning operation and an adverse generalization reading,
-not response-quality improvement or end-to-end training throughput.
+A lower training loss from these steps is a learning reading; held-out losses
+and answers say whether it generalizes.
 
 ### Cached head batches
 
@@ -149,15 +141,9 @@ These calls overwrite the context's head scratch. Before resuming generation,
 refresh the session head from its retained stream, or attach the persisted
 candidate to a fresh session through the explicit adapter API. The projection
 boundary synchronizes pending work, including optimizer initialization. The
-API chooses no corpus, checkpoint or serving candidate by itself.
-
-The first real batch experiment trained on six verified boolean repair
-programs and selected against two separate programs. Validation loss fell
-from 0.312946 to 0.097776 over eight rounds. On the original, separate review
-utility repair, the selected adapter still produced 14 compiler errors and
-repeated comments until the 1,536-token limit. It remains unpromoted. This
-establishes reusable native batch learning, with unsuccessful transfer to that
-repair task; see `receipts/2026-09-17-qwen-cached-head-batches.md`.
+API chooses no corpus, checkpoint or serving candidate by itself. Falling
+validation loss selects a candidate; transfer to a separate task is read in
+that task's own compiled and checked answer.
 
 ## Native BML boolean repair
 
@@ -310,6 +296,40 @@ or saved to a file:
 {"goal":"Enable local coding in config.json. Preserve provider and remote.","documents":[{"id":"config","path":"config.json","text":"{\"enabled\":false,\"provider\":\"native-qwen\",\"remote\":false}\n"}],"writable":["config.json"],"checks":[{"tool":"jq","arguments":[".enabled","config.json"],"stdout":"true\n"},{"tool":"jq","arguments":["-r",".provider","config.json"],"stdout":"native-qwen\n"},{"tool":"jq","arguments":[".remote","config.json"],"stdout":"false\n"}],"model":"qwen38-q8","context":8192,"turns":64}
 ```
 
+### Request fields
+
+`code help` prints the same contract from
+`form/form-stdlib/bml/form-cli-code-request.bml`. A field outside its mode, or a
+value outside its range, refuses the whole request.
+
+| Field | Values | Meaning |
+|---|---|---|
+| `goal` | string | The task, kept beside every refinement |
+| `documents` | `[{id,path,text}]` | Resident source values; never filesystem permissions |
+| `writable` | `[path]` | The only paths implementation and repair may change; `[]` in review |
+| `checks` | native tool rows `{tool,arguments,input,stdout,exit}`, `word-range` rows, `definition` rows | Caller-owned source assertions; `verify` runs them |
+| `mode` | `"code"` (default) or `"review"` | Review keeps every document byte-identical and returns a `report` |
+| `report_checks` | read-only tool rows without `input`, `word-range` rows with `field`, `{"kind":"provider-usage-sequences"}` ([usage observation](form-provider-usage-observation.md)) | Required and nonempty in review; each receives the report on stdin |
+| `model` | registry name, default `qwen38-q8` | Naming a model skips the session LoRA proposal |
+| `context` | positions, default 8192 | Size of each local admission |
+| `turns` | replies, default 64 | Generated replies; on resume, the additional allowance |
+| `max_reply_tokens` | positive integer | Ceiling for each generated reply |
+| `code_entry` | `"staged"` (default) or `"direct"` | Coding only: direct begins in implementation ([direct entry](#direct-implementation-entry)) |
+| `review_entry` | `"staged"` (default) or `"direct"` | Review only |
+| `document_context` | `"full"` (default) or `"catalog"` | Catalog admits source identities and keeps text behind native tools ([catalog](#resident-context-and-source-queries)) |
+| `source_queries` | `[{tool,arguments}]` | Catalog only: actual read-only query observations admitted before generation |
+| `evaluation` | integer `0` or `1` | `1` starts fresh before continuity lookup: no recall, resume, checkpoint write, LoRA proposal or weight training; refused with a nonempty `resume` |
+| `weight_training` | integer `0` or `1`, default `1` | `0` keeps this answer out of gradients while retaining checkpoints, resume and recall; evaluation and review answers stay out for either value |
+| `resume` | a returned `checkpoint_id` | Continue the same owned checkpoint ([checkpoints](#checkpoints-resume-and-feedback)) |
+| `feedback` | `{id,text}`, exactly two nonempty strings | Coding resume only, not with evaluation: reopens repair with a caller-observed finding |
+| `native_rehearsal_checks` | integer `0`..`64`, default `0` | Coding only: allowance for automatic native BML rehearsal |
+| `initial_reasoning_tokens` | positive integer ≤ 8192 | Reasoning on the first reply of an admission |
+| `reasoning_tokens` | positive integer ≤ 8192 | Reasoning on every reply; requires `reasoning_answer_tokens`, not with `initial_reasoning_tokens` |
+| `reasoning_answer_tokens` | positive integer ≤ 8192 | A reserved final-answer stage after reasoning |
+
+The result reports `evaluation` and `weight_training_excluded` separately.
+`checkpoint_id` names the owned checkpoint; it is empty under `evaluation: 1`.
+
 `turns` limits generated replies, including replies that request tools. Native
 admission and subsequent observations disclose the limit, completed count and
 remaining replies. The final available reply is identified before generation,
@@ -390,17 +410,11 @@ their text stays out of learning and continuity reuse. Caller-selected edits
 executed through the native tools retain their caller attribution separately
 from model-selected edits.
 
-The [retained answer-edit movement](../receipts/2026-09-25-native-answer-edit.md)
-changed a repeated 509-word response to 397 words and repaired several source
-distinctions. Its native review still accepted self-praise, which the arriving
-reviewer removed through explicit native guarded edits. This establishes those
-actual changes, not a general quality or resonance verdict.
-
-The [subsequent native review](../receipts/2026-09-25-native-answer-review.md)
-retains its acceptance findings and exact reviewed identities. It revised the
-translation explanation, returning 411 words, while still accepting explicit
-self-assessment and describing it as absent. The retained reason makes that
-contradiction inspectable; a nonempty explanation is not proof of its judgment.
+The limit to read for: the native review of an edited answer can accept
+self-assessment in the answer, and can describe it as absent. Its retained
+reason and reviewed identities make that contradiction inspectable; a nonempty
+explanation is not proof of its judgment. Remove such text with explicit
+guarded edits, attributed to the reader who made them.
 
 ### Direct implementation entry
 
@@ -419,9 +433,6 @@ repair and replanning path. Omitting the field, or using `"staged"`, keeps the
 ordinary entry. The option applies to coding; review has its own
 `review_entry`. A resumed checkpoint retains its saved phase. Optional initial
 reasoning is independent of this entry choice.
-The controlled timing and source-quality observations are recorded in
-[`direct-code-entry`](../receipts/2026-09-16-direct-code-entry.md); fewer stages
-alone did not make the initial-reasoning variant faster.
 
 ### Resident instruction context
 
@@ -442,8 +453,6 @@ completed successfully. A failed or partial observation does not mark it as
 delivered. A resumed admission resets that record and supplies the current
 role's full instruction again. Tool results, failure evidence, pending work and
 caller constraints retain their existing paths.
-The measured coding and review pairs are recorded in
-[`resident-instruction-context`](../receipts/2026-09-16-resident-instruction-context.md).
 
 ### Read-only review
 
@@ -458,13 +467,14 @@ edit or writable report file. For example:
 
 `report_checks` use the existing read-only native tool assertions. Each receives
 the returned report as stdin with **no document access**; an `input` field is
-refused rather than silently replacing the report. Exit zero, empty diagnostics
-and exact stdout are required. These checks establish only their assertions;
-extracting configuration fields is not a benchmark of code-review quality.
+refused rather than silently replacing the report. The expected exit (zero
+unless the row names `exit`), empty diagnostics and exact stdout are required.
+These checks establish only their assertions; extracting configuration fields
+does not measure code-review quality.
 
-Read-only review accepts the requested JSON report object directly. The older
-`{"verdict":"accept","report":"evidence-backed findings"}` wrapper remains
-available, and its `report` may also be an object or array. Every form reaches
+Read-only review accepts the requested JSON report object directly, or the
+`{"verdict":"accept","report":"evidence-backed findings"}` wrapper, whose
+`report` may also be an object or array. Every form reaches
 the same caller-owned report checks. Here `accept` submits the report for
 checking; it does not declare that the audited source passed. Negative findings
 belong in the report. `reject` with a `reason` means continue inspection.
@@ -504,7 +514,7 @@ instruction about the paired evidence and verified proposal. These are generatio
 instructions; their effects must be checked in the returned answer and are not
 established by passing report-field checks.
 
-The JSON review door now normalizes exact `"yes"`, `"no"`, `"true"` and
+The JSON review door normalizes exact `"yes"`, `"no"`, `"true"` and
 `"false"` string literals when a caller-owned check expects a boolean result
 from one root field. `form-cli-boolean-report.bml` uses only that result type;
 it never chooses a truth value from the expected assertion. All original source
@@ -546,8 +556,8 @@ checker. The returned source excerpt must still pass that original checker.
 
 Observation prefill uses the existing sliced batched route when the admitted
 context records a scratch width greater than one. Each outer slice is bounded
-by that actual width and the normal admission slice limit. Legacy contexts and
-width-one contexts retain the per-position barrier route. Both routes keep the
+by that actual width and the normal admission slice limit. Contexts that record
+no width, or width one, use the per-position barrier route. Both routes keep the
 same resident state and validate position, pending-token range and settled GPU
 state. A failed submission is not retried: the existing caller preserves the
 last completed counters and retains ownership for release, without claiming
@@ -561,6 +571,8 @@ Recorded scratch widths are 64, 4 and 1; cases include short, boundary-crossing
 and multiple-slice observations. It reports timing, prediction agreement,
 settled GPU state and release. The probe does not alter dispatch configuration
 or establish equality outside its samples. Run it without another GPU owner.
+
+### Resident context and source queries
 
 At each model admission, including checkpoint resume, the controller records
 the exact resident documents supplied in that context. A successful single-file
@@ -622,10 +634,10 @@ catalog, actual native query outputs with exit/status evidence, and an explicit
 partial-visibility statement. It has no further tool access in this lane, so
 the caller must select enough evidence for the enquiry; missing facts remain
 missing. Query failures are preserved, never promoted into successful reads.
-Full-document requests keep their existing packet and replay identity. Catalog
-requests bind replay identity to the exact provider prompt, so an older
-full-document admission cannot masquerade as a selected-source run. New
-admissions retain that exact prompt alongside the original manifest.
+Full-document requests keep their packet and replay identity. Catalog requests
+bind replay identity to the exact provider prompt, so a full-document admission
+cannot stand in for a selected-source run. Each admission retains that exact
+prompt alongside the original manifest.
 
 For composition claims, `fccw-observe()` in
 `bml/form-cli-composition-witness.bml` returns an actual native observation:
@@ -802,9 +814,8 @@ does not supply it as an amendment target. Open the new session using
 `fcac-bootstrap-budget(state,turns)`, retain the original
 `fcaq-live-checker(request)`, and let `fcac-resident` complete and release it.
 This reconstructs context from retained evidence; it does not recover old KV.
-Read the revised answer after its checks: the observed dialogue revision fixed
-an unsupported guarantee and draft placeholders while leaving other caller
-feedback unresolved. [Revision receipt](../receipts/2026-09-17-dialogue-revision-and-generation.md).
+Read the revised answer after its checks: a revision can settle some caller
+feedback and leave the rest unresolved.
 
 The complete candidate runs through the original checker and any configured
 native repair callback. Source documents and the caller's contract stay
@@ -858,7 +869,7 @@ generation counts, completion, boundary presence and a private evidence path
 appear in `form-code-reasoning` metadata. Reasoning text stays outside the
 framebuffer and tool actions. Evaluation still excludes its answers from
 training. The model, source checks, document constraints and release owner are
-unchanged. This optional local path adds no provider or model-server dependency.
+unchanged. Reasoning runs in the same local session as the rest of the loop.
 
 To reserve a separate answer stage, also supply `reasoning_answer_tokens`:
 
@@ -899,10 +910,7 @@ omitting this option. The reserve improves access to a completed answer; it
 does not establish that extra reasoning improves that answer's quality.
 
 More reasoning has an actual local cost; passing fields still leaves broader
-answer quality to be assessed. The earlier native experiments are retained in
-[`../receipts/2026-09-16-matched-session-and-turn-budget.md`](../receipts/2026-09-16-matched-session-and-turn-budget.md).
-The public request's incomplete and completed executions are recorded in
-[`../receipts/2026-09-16-public-native-reasoning.md`](../receipts/2026-09-16-public-native-reasoning.md).
+answer quality to be assessed.
 
 ### Reasoning across the task
 
@@ -940,7 +948,7 @@ capability; improvement in the resulting work needs its own observation.
 |---|---|---|
 | Refine | `{"brief":"..."}` | Preserve the original goal alongside the refined brief |
 | Plan | `{"plan":"..."}` | Retain approach and verification intent in the same session |
-| Split | `{"tasks":["first task","next task"]}` | An ordered work queue; no rented subagents |
+| Split | `{"tasks":["first task","next task"]}` | An ordered work queue in the same session |
 | Implement | Tool calls, then `{"task":"done"}` | In-memory edits and advancement to the next task |
 | Review | `{"verdict":"accept","reason":"..."}` or `reject` | Rework on rejection; retain acceptance findings and run caller verification |
 | Repair | A document tool action, or `{"diagnosis":"observed cause","change":"different approach","next":"implement"}` / `next:"plan"` | Check an applied repair immediately, or retain the diagnosis and selected route |
@@ -965,8 +973,8 @@ supplied reason, goal hash and reviewed document identities; checkpoint encoding
 preserves it. These findings belong to the submitting reviewer. Their presence
 does not establish their adequacy, and passing caller checks establishes only
 those assertions. Coding review reads prose requirements as well as source
-behavior. Historical completed checkpoints keep their existing evidence; this
-requirement applies when a fresh acceptance crosses the review boundary.
+behavior. A completed checkpoint keeps the evidence it was written with; this
+requirement applies whenever a fresh acceptance crosses the review boundary.
 
 Successful document mutations return the accepted document's `id`, `path`,
 `bytes` and `resident_sha256`, plus `documents_changed:1` and `before_sha256`
@@ -1075,7 +1083,11 @@ The result returns `repair_attempts`, `check_runs` and `repair_notes` containing
 each supplied model diagnosis or explicitly attributed controller observation,
 the change, selected route and retained failure evidence.
 These are model reflections, **not proven causal explanations or weight
-training**. The JSON door now persists native binary checkpoints beneath
+training**.
+
+### Checkpoints, resume and feedback
+
+The JSON door persists native binary checkpoints beneath
 `.hearth/code-memory/` after complete model/tool transitions. A completed repair
 also becomes a lesson. Retrieval requires the exact original goal, documents,
 writable paths and checks. For coding, the prior completed candidate must pass
@@ -1376,8 +1388,8 @@ method, outcome, caller observation and controller check count. A later submitte
 report resets its own attribution while preserving the native attempt history.
 Each new event also pairs the exact prior report with its original failed check
 under `before`, and a changed native report with its own check under `after`.
-A declined or unchanged proposal has no `after` check. Older events expose null
-evidence instead of reconstructing a history they did not retain. Malformed
+A declined or unchanged proposal has no `after` check. An event retained without
+that pair exposes null evidence rather than a reconstructed one. Malformed
 checker output is explicitly marked, with no valid check asserted. These records
 are returned to the caller and preserved in continuity. The four-element callback
 does not add them to model feedback. The explicit `"review"` continuation sends
@@ -1410,10 +1422,10 @@ generation; inspect the returned answer to establish whether it followed them.
 The shared guidance also keeps a format check's scope separate from behavioral
 verification, and a total attempt count separate from the final observed result.
 
-Review currently shares the same Qwen and context: **not independent-model
+Review shares the same Qwen and context: **not independent-model
 validation**. Qwen weights remain unchanged; the shared native Llama adapter
-learns asynchronously from observed outcomes. The loop does not assert rented-model
-parity, broad coding quality improvement, or `voice-home=1` from a passing example.
+learns asynchronously from observed outcomes. A passing example establishes its
+own checks, not broad coding quality or `voice-home=1`.
 
 ## Observe
 
@@ -1449,12 +1461,14 @@ Prompt, response and source content stay out of the diagnostic framebuffer.
 The JSON result carries candidate document content and, for review, the report
 back to its caller. Rechecks on recall/resume count as actual checker calls.
 
-Regression doors (preflight each FK band first):
+Regression doors (preflight each FK band first; each answers its full verdict
+on `./fkwu`):
 
 ```text
 form/form-stdlib/tests/form-cli-code-policy-band.fk   -> 65535
 form/form-stdlib/tests/form-cli-code-request-band.fk  -> 255
 form/form-stdlib/tests/form-cli-code-memory-band.fk -> 65535
+form/form-stdlib/tests/form-cli-code-progress-band.fk -> 255
 form/form-stdlib/tests/native-session-code-band.fk -> 511
 form/form-stdlib/tests/form-cli-code-session-band.fk  -> 31
 form/form-stdlib/tests/form-cli-code-telemetry-band.fk -> 7
@@ -1467,68 +1481,35 @@ form/form-stdlib/tests/form-cli-agent-tools-examples-band.fk -> 32767
 form/form-stdlib/tests/qwen38-sliced-head-band.fk -> 7
 ```
 
-The existing policy, request, memory and session-code bands also contain
-fail-fast review guards: immutable sources, report-aware checking, caller-bound
-verification, report checkpoint round trips, fresh evaluation before recall,
-and exclusion of review reports from supervised implementation examples.
+The policy, request, memory and session-code bands also carry fail-fast review
+guards: immutable sources, report-aware checking, caller-bound verification,
+report checkpoint round trips, fresh evaluation before recall, and exclusion of
+review reports from supervised implementation examples.
 
-For an explicit real-model recovery exercise, run
-`form-run ./fkwu observe/form-cli-code-retry-witness.fk` and send `qwen38-q8`
-on stdin. The fixture deliberately supplies a wrong candidate for `x*x+x+1`.
-The native checker fails it before Qwen is admitted; Qwen must then diagnose,
-repair, review and pass six arithmetic cases plus preservation of a second
-document. The initial wrong edit and six initial policy turns are **fixture
-inputs, not model-generated behavior**. The witness reports newly generated
-model replies separately. It admits real weights, publishes actual Glass
-metadata, and releases its model; it is not a simulated model test.
+The live witnesses admit real weights, so run each one while no other GPU owner
+holds the carrier:
 
-`observe/form-cli-code-first-reply-witness.fk` accepts the same model-name line
-and checks a bounded first reply on public two-document data. It requires a
-completed refinement reply advancing to `plan` and successful release. Its
-128-ID generation bound is a probe bound, not a production reply limit.
-The 2026-09-09 probe found that sliced prefill drained its concurrent batch,
-then submitted the gather/head with no concurrent batch armed. Re-arming
-before the head changed the identical prompt's first response from unrelated
-54-ID JavaScript to a valid 70-ID refinement. Generated text was never executed
-as host code. The structural band guards this batch boundary; the live probe
-checks actual first-role behavior.
+- `form-run ./fkwu observe/form-cli-code-retry-witness.fk` with `qwen38-q8` on
+  stdin is a real-model recovery exercise. The fixture deliberately supplies a
+  wrong candidate for `x*x+x+1`; the native checker fails it before Qwen is
+  admitted, and Qwen must diagnose, repair, review and pass six arithmetic cases
+  plus preservation of a second document. The initial wrong edit and six initial
+  policy turns are **fixture inputs, not model-generated behavior**; the witness
+  reports newly generated replies separately, publishes actual Glass metadata and
+  releases its model.
+- `observe/form-cli-code-first-reply-witness.fk` accepts the same model-name line
+  and checks a bounded first reply on public two-document data: a completed
+  refinement advancing to `plan`, then release. Its 128-ID bound is a probe
+  bound, not a production reply limit. `qwen38-sliced-head-band` guards the
+  structural half of this: sliced prefill arms a concurrent batch before the
+  final gather/head submission.
+- `observe/form-cli-code-tokenizer-witness.fk` checks that the scanner and
+  indexed tokenizer paths produce identical observation IDs and reports both
+  timings. It admits no model and runs no GPU forward.
 
-The native tokenizer parity witness is
-`observe/form-cli-code-tokenizer-witness.fk`. On this host, its 34 observation
-IDs were identical across the scanner and indexed paths: 19,328 ms versus
-1,124 ms. This is one encoding measurement, not a whole-task speedup claim.
-
-Live local Qwen observations on 2026-09-09:
-
-- Configuration edit: 11 model replies, 3 native tool calls, 3 completed tasks,
-  481 generated IDs, all three native `jq` checks passed, release verified.
-- Executable Form edit: changed `add(x,1)` to `add(mul(x,2),1)` in a resident
-  definition module. Four behavioral cases passed, including zero and a negative
-  input. 11 model replies, 3 native tool calls, 3 tasks, 579 generated IDs,
-  887 newly injected IDs, 10 same-session observations, release verified.
-
-Both runs recovered from a first reply that did not satisfy the refinement
-contract. These are observed small tasks, not a held-out coding benchmark.
-
-On 2026-09-11 the read-only JSON example above completed with real local Qwen:
-8 replies, 2 native calls (read and caller-bound verification), 2 check stages,
-249 generated IDs, 643 injected IDs, no repairs or recalled lessons, and verified
-model release. The source remained unchanged and all three returned report
-fields passed. Total admission-to-release time was 287,493 ms under other local
-workload. Its assessment record is excluded from training. This is a small
-functionality witness, not an unseen review benchmark or latency guarantee.
-
-## What we learned from open-source agents
-
-Qwen-Agent's [function-call loop](https://github.com/QwenLM/Qwen-Agent/blob/main/qwen_agent/agents/fncall_agent.py)
-feeds executed tool results back into the model's conversation and continues
-when tools were requested. We use that interaction pattern with Form functions,
-without importing its Python runtime or provider transports.
-
-Qwen Code's [engineering prompt](https://github.com/QwenLM/qwen-code/blob/main/packages/core/src/core/prompts.ts)
-emphasizes inspecting existing project conventions and reporting actual
-verification outcomes. Its [role-specific agents](https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/sub-agents.md)
-demonstrate restricted tool sets and specialized contexts. This implementation
-uses restricted roles but deliberately reports its shared-context review seam.
-These are design references, not evidence that this local model has passed a
-coding benchmark. No framework source was copied into Form.
+A small passing task is a functionality witness, not a held-out coding or review
+measure. The native engineering turns
+([`observe/native-turn-run.bml`](../observe/native-turn-run.bml)) already hand
+the body's own open gaps to this lane. Where it is going is a local agent that
+carries more of our work each day ([`local-agent-goal.form`](local-agent-goal.form));
+review by a mind other than the implementing one is the open seam.

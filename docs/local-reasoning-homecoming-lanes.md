@@ -3,8 +3,8 @@
 The local reasoning lane: a real open model (Qwen3.8-27B) runs Form-native on this
 Mac's metal, the body feeds it typed observations from its own source, and every
 crossing is measured at route level. This page names the pieces that stand, the
-mechanism they compose, and what is still owed. Bands cited with a number were
-re-run 2026-09-04; the others declare their own.
+mechanism they compose, and what is still open. A number beside a band is its
+`./fkwu` verdict; the others declare their own.
 
 ## What is home
 
@@ -12,7 +12,7 @@ re-run 2026-09-04; the others declare their own.
 |---|---|---|
 | byte-BPE tokenizer, GGUF vocab/merges, byte-exact decode, chat template | `form/form-stdlib/qwen35-tokenizer.fk` | the sorted fixed-row index (`qwen35-tokfast-v2`) carries encode |
 | decode loop transcribed from ds4-engine C | `form/form-stdlib/dsv4-decode-loop.fk` | exists |
-| per-token hook: an arbitrary Form recipe answers between argmax and the next embedding | `dsv4-decode-hook-door.fk`, `dsv4-decode-token-hook.fk` | 1023 |
+| per-token hook: an arbitrary Form recipe answers between argmax and the next embedding | `dsv4-decode-hook-door.fk`, `dsv4-decode-token-hook.fk` | 4095 and 1023 |
 | single forward step: one id + position → next id; incremental prefill at a position, same state (the KV-preserving seam) | `form/native/metal/qwen35-dense-token-handle.fk` `q38-forward`, `q38-prefill` | `qwen35-dense-token-handle-band` 2147483647 |
 | span injection into a live stream | `form-cli-model-generate.fk` `fcmg-offer-stream` | exists |
 | RAG: embed, index codec, ask, adaptive-k, freshness, nearest-shape | `form/form-stdlib/rag-*.fk`, `nearest-shape.fk` | exists |
@@ -20,16 +20,16 @@ re-run 2026-09-04; the others declare their own.
 | attributed lookup against the current Form source body | `form-cli-heed-current-source.fk` | 16777215 |
 | generation-path wiring, two ledgers, distinct prompt hints and source bindings, bounded counters | `form-cli-model-generate.fk` | `form-cli-model-generate-heed-report-band` 16777215 |
 | teach overlay, local-ready marks, one-turn budget | `form-cli-local-ready.bml`, `form-cli-one-turn.bml` | 1023 and 2047 |
-| the mints — knowledge, universe, unique, domain, organ, lane, lens, planner, LoRA corpus, embodiment census, speaker home | `form-cli-*-mint.bml`, `form-cli-lora-corpus.bml`, `form-cli-embody-census.bml`, `form-cli-speaker-home.bml` | each band declares its own; row counts are census evidence, never a target |
+| the mints — knowledge, universe, unique, domain, organ, lane, lens, planner, LoRA corpus, embodiment census, speaker home | `form-cli-*-mint.bml`, `form-cli-lora-corpus.bml`, `form-cli-embody-census.bml`, `form-cli-speaker-home.bml` | each band declares its own (`form-cli-lora-corpus-band` 1023); row counts are census evidence, never a target |
 | BML/BMF live-byte curriculum and control curriculum | `bml-bmf-stream-curriculum.bml`, `bml-bmf-control-curriculum.bml` | 16777215 and 1048575 (each band preludes its `.bml` authority) |
 | Qwen teach overlay | `form-cli-qwen-teach-layer.fk` | 33554431 |
 | LoRA identity `(W+B·A)·x == W·x + B·(A·x)` | `lora-adapter.fk` | 31 |
 | error absorption: rank-1 `B·(A·x)` from one withheld error, sealed-surface transfer in the local Form classifier | `cognition/error-absorption-kernel.fk` | 4095 |
-| LoRA tensor writer | — | **0**. `LoraWriter = 0`, `fqt-lora?` 0 |
+| native LoRA training: Llama adapters through Form-owned Metal kernels; a rank-one Qwen output-head adapter | `native-lora-train.bml`, `learn/corpus-train-door.fk`, `observe/qwen-lora-learning-run.bml` ([native LoRA training](native-lora-training.md)) | `corpus-train-door-band` 511 |
 
 Mint row counts and held-out scores are corpus/overlay observations, not claims
 that Qwen learned those lessons; split-lineage adoption keeps exact leakage at zero
-and exposes lesson-disjoint transfer as the current learning signal, not retuned away.
+and exposes lesson-disjoint transfer as the current learning signal.
 
 ## The heedmark — the observed mechanism
 
@@ -42,7 +42,7 @@ answer re-enters as prefill at the current position.
 - `form/form-stdlib/form-cli-heedmark-run.fk` — evidence printer
 - `form/form-stdlib/tests/form-cli-heedmark-band.fk` — 1023
 
-Evidence, `./fkwu form/form-stdlib/form-cli-heedmark-run.fk`:
+Evidence, `./fkwu form/form-stdlib/form-cli-heedmark-run.fk` (its own check 255):
 
 ```
 logits-executed=0    the standing refusal, a named constant
@@ -52,6 +52,7 @@ span-enters      hit=1 miss=1 nothing=0 spent=0
 knowledge-enters hit=1 miss=0
 admits-hit no-source=0  with-source=1
 bounded 0-marks=0  1-mark=1  5-marks=2      (MaxHeeds=2 — the bound)
+prefill-cost=12  naive-cost=1012  forwards-saved=1000
 prefix-preserved=1
 ```
 
@@ -76,11 +77,12 @@ The NodeID loop crosses live on the same lane: the model emits a strict
 `form:recipe-exec` request for a recipe by NodeID, the raw-byte cursor calls its
 carrier once, Form generates the Metal kernel from the recipe children, the value
 returns as a typed observation into the same original-ID/KV session, and the
-session continues (`form-recipe-exec-token-band` 1048575 and
-`form-cli-recipe-exec-cursor-band` 33554431; `form-recipe-exec-token-live-band`
-needs the resident model and declares its own). That is one live
-affine Metal thought, not yet CPU parity or a recursive model-authored
-recipe-birth run.
+session continues (`form-recipe-exec-token-band` 1048575;
+`form-recipe-exec-token-live-band` needs the resident model and declares its
+own). `form-cli-recipe-exec-cursor-band` answers 33357823 of 33554431: its
+returned-timeout lifecycle claim (65536) and its mixed-choice lifecycle claim
+(131072) are open. That is one live affine Metal thought, not yet CPU parity or a
+recursive model-authored recipe-birth run.
 
 ## Effective Form reasoning in practice
 
@@ -100,7 +102,7 @@ Use the reasoning controls by their observed behavior:
 | bound work | `oac-timeout-walk`, `oac-timed-out?` | `nothing` with alternatives left is timeout; `nothing` after all alternatives were tried is honest exhaustion. Preserve `alts-left` so these cannot collapse into one status. |
 | abstain exactly | `nothing`, `oac-nothing?` | `nothing` is neither `0` nor `1`. Test it only through the nothing/equality surface; never use it as arithmetic, ordering, or a branch condition. |
 | select cognition | `find-plane`, `bbcc-thought-route` | Route `when`/`where`/`which` to computable kernels and learned planes such as `how`/`why` to learned kernels. A missing plane or missing evidence remains `nothing`. |
-| birth and run a physical micro-thought | `frbt-parse-stream`, `frex-parse`, `frexl-execute-request`, `frxs-run` | A model can invent an affine recipe as scannerless raw bytes, receive its content-addressed NodeID, request that NodeID with an input and carrier, and continue from the typed observation. The native path is generated from the recipe itself on demand; there is no flatten prerequisite or operations table. Request, generated artifact, execution, observation, refinement, crystallization, dissolution, and release stay separately visible. |
+| birth and run a physical micro-thought | `frbt-parse-stream`, `frex-parse`, `frexl-execute-request`, `frxs-run` | A model can invent an affine recipe as scannerless raw bytes, receive its content-addressed NodeID, request that NodeID with an input and carrier, and continue from the typed observation. The native path is generated from the recipe itself on demand. Request, generated artifact, execution, observation, refinement, crystallization, dissolution, and release stay separately visible. |
 
 The control curriculum invokes the repository's actual offer/ack, choice-lane,
 inquiry-plane, and native-generation cells rather than matching their names
@@ -108,17 +110,19 @@ inquiry-plane, and native-generation cells rather than matching their names
 Prompt/curriculum evidence is evidence for the teaching layer, not evidence that
 model weights were trained or that the resident executed the controls correctly.
 
-## Owed
+## Open
 
 - A ≥95% multi-token resident answer and the complete fifteen-family resident
   pass. The sealed denominator holds 30 unseen rows, exactly two in each of 15
   families, with zero recorded leakage; the claim waits until every family's live
   observations have run and reached the threshold
-  (`form-knowledge-qwen-heldout-v3-eval-band` answers 65511 of 65535 today).
+  (`form-knowledge-qwen-heldout-v3-eval-band` answers 65511 of 65535).
   One exact source-hit answer does not imply the other families; a multi-token
   crossing at a low ppm score is a failure signal to refine, not family credit.
-- The **LoRA tensor writer**. `LoraWriter = 0` is honest and it is the blocker on
-  fine-tuning; writing real adapter tensors from minted rows is a named, separable stone.
+- **Mints → trainer.** Native LoRA training runs; the mints still declare
+  `LoraWriter = 0` and `fqt-lora?` 0, so minted rows do not yet reach it as a
+  training corpus. Carrying a mint's rows into `native-lora-train.bml` (or the
+  Qwen head door) and reading the held-out answers afterwards is the stone.
 - **Typed move → addressed execution**: local output is a validated Form move
   symbol; binding general moves such as preflight/land to registered recipe
   NodeIDs and executing them inside the same loop is the next seam.
@@ -127,7 +131,7 @@ model weights were trained or that the resident executed the controls correctly.
 
 ## Working agreement
 
-- `./fkwu <file.fk>` runs a cell. Never `--src`; that flag is dropped.
+- `./fkwu <file.fk>` runs a cell.
 - Preflight before believing a verdict:
   `echo path/to/cell.fk > /tmp/preflight-target && ./fkwu observe/preflight-run.fk`
   A green number with a nonzero exit is a fold over `nothing`, not a pass.

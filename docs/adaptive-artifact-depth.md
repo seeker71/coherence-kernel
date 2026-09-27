@@ -1,17 +1,22 @@
 # Adaptive artifact traversal
 
-The Go FORMBIN2 proof reader sends its artifact to a resident native process for
-that decode: `./fkwu observe/formbin-depth-native-run.fk`. Form owns traversal,
-continuations and attention in `form/form-stdlib/bml/formbin-depth.bml`. Go carries
-bytes and postorder node rows, interns physical NodeIDs and reports its measured
-time and memory activity. The body runs on fkwu throughout this path.
+Form owns FORMBIN2 traversal, continuations and attention in
+`form/form-stdlib/bml/formbin-depth.bml`, and the wire codec itself in
+`form/form-stdlib/bml/formbin-codec.bml`: numeric payloads stay eight
+little-endian bytes (every int64, signed zero, infinities and NaN payloads), and
+composite continuations and decoded ownership live in Form data, independent of
+host stack depth. The body runs on fkwu throughout.
+
+The Go proof kernel reads FORMBIN2 by handing the decode to a resident fkwu
+process, `./fkwu observe/formbin-depth-native-run.fk`. Go carries bytes and
+postorder node rows, interns physical NodeIDs and reports its measured time and
+memory activity; the traversal decisions are Form's.
 
 Depth is an observation. A linked continuation holds open composites, including
 their remaining children. Both descent and completion can yield between slices.
 A deeper valid artifact advances the attention watermark; it is never rejected
-because it crossed a depth number. Existing byte, node and child-count format
-checks still reject malformed or oversized input. Legacy FORMBIN1/raw decoders
-and the other proof readers have not been migrated by this change.
+because it crossed a depth number. Byte, node and child-count format checks
+still reject malformed or oversized input.
 
 The initial native policy offers 256 operations, a depth watermark of 32 and a
 50 ms attention target. These are starting observations, not depth limits or a
@@ -26,9 +31,9 @@ slice milliseconds, carrier elapsed time, control microseconds, offered and
 selected actions, next quantum/watermark, and whether the action was applied.
 An initial lifecycle row makes startup visible before admission. The first slice
 includes setup and temporary-input preparation time; a final lifecycle row
-records completion or the actual error. The framebuffer
-exchange correlates the outgoing observation with native control; JSON rows
-retain every round even when attributed framebuffer nodes share an identity.
+records completion or the actual error. The framebuffer exchange correlates the
+outgoing observation with native control; JSON rows retain every round even when
+attributed framebuffer nodes share an identity.
 
 Memory and GC fields prefixed `carrier_` measure the Go process only. They do
 not claim native heap coverage or system memory headroom. `elapsed_ms` covers
@@ -41,22 +46,24 @@ is involved in this decoder, and these timings do not establish a hardware floor
 
 The native process and its temporary input belong to the invocation. On return,
 the carrier closes/reaps its process and removes the temporary input. Native
-compiler/image freshness remains fkwu's responsibility. No persistent lowered
-source or separate compiler-cache invalidation rule is introduced.
+compiler/image freshness remains fkwu's responsibility.
 
 `heal guide|form binary: maximum node depth exceeded` names this implementation,
-`observe/formbin-depth-witness-run.fk` and this reference. The next repair can
-follow the real trace: find the last cursor/mode, compare elapsed time and
-selected quantum in consecutive rows, preserve the continuation, then witness
-the chosen path. GC count alone is insufficient evidence for shrinking work.
+`observe/formbin-depth-witness-run.fk` and this reference. A repair follows the
+real trace: find the last cursor/mode, compare elapsed time and selected quantum
+in consecutive rows, preserve the continuation, then witness the chosen path.
+GC count alone is insufficient evidence for shrinking work.
 
-The pure band is `form/form-stdlib/tests/formbin-depth-band.fk` (2047). The native
-witness authors depth 4096, exercises the real Go reader, requires output 42,
-copies its complete trace, and checks strings, float64 and int64 roundtrips.
-The shared malformed corpus now uses a genuinely truncated child-count field
-in place of a structurally valid depth-257 artifact.
+Witnesses:
 
-The integrated server compiler loads and hashes its declared transitive source
-closure. The API's `api-presence-supported?` closing parenthesis is repaired so
-subsequent handlers remain top-level definitions. The original route regression
-now exercises all three repairs together.
+- `form/form-stdlib/tests/formbin-depth-band.fk` (2047) — the pure traversal.
+- `form/form-stdlib/tests/formbin-codec-band.bml` and
+  `formbin-artifacts-band.bml` (16383 each) — the Form codec.
+- `./fkwu observe/formbin-depth-witness-run.fk` — authors a depth-4096 artifact,
+  runs the Go reader against the resident fkwu decode, requires output `42`,
+  copies its complete trace under `.hearth/formbin-depth-<pid>/`, and checks
+  string, float64 and int64 round trips.
+
+Where it is going: the codec already lives in Form, so the Go reader's part
+shrinks toward carrying bytes for its own witness, and every reader of FORMBIN2
+meets the same Form traversal.

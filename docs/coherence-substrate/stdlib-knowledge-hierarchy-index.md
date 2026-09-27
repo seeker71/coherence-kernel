@@ -6,29 +6,30 @@ section classes, and missing grammar surfaces.
 
 ## Inventory
 
-`form/form-stdlib` inventory, counted 2026-09-04:
+`form/form-stdlib` holds 3,699 tracked `.fk` files (counted with
+`git ls-files -- '*.fk'` inside `form/form-stdlib`):
 
 | Area | `.fk` files |
 | --- | ---: |
-| total | 3492 |
-| root | 1446 |
-| tests | 1872 |
-| seedbank | 117 |
-| grammars | 31 |
+| total | 3699 |
+| root | 1387 |
+| tests | 2142 |
+| seedbank | 115 |
+| grammars | 30 |
 | queries | 9 |
 | integration | 8 |
-| emits | 4 |
+| emits | 2 |
 | skills | 2 |
-| lenses | 1 |
-| drafts | 1 |
+| bml, drafts, lenses, measure | 1 each |
 
-Beside the `.fk` files, 222 `.bml` files carry the high-grammar authority.
+Beside them, 916 `.bml` files carry the high-grammar authority: 392 under
+`bml/`, 251 at the root, 272 under `tests/`, one under `grammars/`.
 
 The root files have a first-pass filename cluster index in
 `form/form-stdlib/stdlib-knowledge-hierarchy.fk` (band
 `tests/stdlib-knowledge-hierarchy-band.fk` 16383). That cell's own
-`skh-inventory` row is its snapshot, not the tree's count, and lags the table
-above. The cluster counts are heuristic review buckets, not final ontology.
+`skh-inventory` and cluster rows are its snapshot, not the tree's count; the
+clusters are heuristic review buckets, not final ontology.
 
 ## Tree Shape
 
@@ -66,21 +67,21 @@ flowchart TD
 
 ## Root Clusters
 
-| Cluster | Root Count | Highest Current Grammar | Missing Grammar |
-| --- | ---: | --- | --- |
-| `kernel-core-source-floor` | 25 | core Form + BMF cursor | core law / byte waist language |
-| `grammar-compiler-language` | 44 | BMF grammar, Form definition language, source compiler grammar bridge | cluster index + section lift language |
-| `artifact-runtime-native` | 56 | source artifact and program-image rows | artifact lifecycle language |
-| `codec-protocol-query` | 30 | codec cells and hand parsers | protocol codec + query language |
-| `algorithm-crypto-identity` | 21 | law-coded Form recipes | algorithm law language |
-| `ports-carriers-channels-storage` | 30 | carrier and channel rows | capability carrier protocol language |
-| `model-ml-numerics-media` | 73 | tensor/model Form recipes | tensor graph + model experiment language |
-| `learning-reasoning-observation` | 55 | receipt and choice rows | learning experiment + observation language |
-| `language-corpus-rag-speech` | 39 | corpus and speech rows | corpus locale query language |
-| `mesh-world-device-presence` | 50 | world and device rows | world sensor/entity language |
-| `domain-knowledge-field-bio-mystic` | 32 | domain-specific Form cells | domain law/evidence language |
-| `apps-cli-host-packaging` | 44 | CLI and host carrier rows | app command + host package language |
-| `unclassified` | 348 | unknown or cross-cutting | classification language |
+| Cluster | Highest Current Grammar | Missing Grammar |
+| --- | --- | --- |
+| `kernel-core-source-floor` | core Form + BMF cursor | core law / byte waist language |
+| `grammar-compiler-language` | BMF grammar, Form definition language, source compiler grammar bridge | cluster index + section lift language |
+| `artifact-runtime-native` | source artifact and program-image rows | artifact lifecycle language |
+| `codec-protocol-query` | codec cells and hand parsers | protocol codec + query language |
+| `algorithm-crypto-identity` | law-coded Form recipes | algorithm law language |
+| `ports-carriers-channels-storage` | carrier and channel rows | capability carrier protocol language |
+| `model-ml-numerics-media` | tensor/model Form recipes | tensor graph + model experiment language |
+| `learning-reasoning-observation` | receipt and choice rows | learning experiment + observation language |
+| `language-corpus-rag-speech` | corpus and speech rows | corpus locale query language |
+| `mesh-world-device-presence` | world and device rows | world sensor/entity language |
+| `domain-knowledge-field-bio-mystic` | domain-specific Form cells | domain law/evidence language |
+| `apps-cli-host-packaging` | CLI and host carrier rows | app command + host package language |
+| `unclassified` | unknown or cross-cutting | classification language |
 
 ## Section Classes
 
@@ -103,10 +104,10 @@ Each file should be reviewed by section class before any uplift:
 
 ## Missing Grammars
 
-The missing grammar list is the work queue. The v1 grammar surfaces are now
+The missing grammar list is the work queue. The v1 grammar surfaces are
 authored as BMF source in
 [`grammars/stdlib-uplift-missing-grammars.bmf`](../../grammars/stdlib-uplift-missing-grammars.bmf).
-They are not Form constructor lists. Their current runtime-use witness is
+They are not Form constructor lists. Their runtime-use witness is
 [`form/form-stdlib/stdlib-uplift-bmf-use.fk`](../../form/form-stdlib/stdlib-uplift-bmf-use.fk),
 which binds each authored grammar family to an actual reversible BMF object rule
 and proves source -> object -> source -> object roundtrips in
@@ -117,9 +118,9 @@ The source file uses the repo's executable BMF section shape:
 generic `.bmf` text-to-runtime-rule path: a `grammars/*.bmf` file is source
 authority that a `.fk` cell mirrors by hand (`host-effect-grammar.fk` names
 `grammars/host-effect-vocabulary.bmf` and carries its rows as Form data; no cell
-reads a `.bmf` file into runtime rules). The honest status is BMF-authored
-section source plus observed bidirectional runtime rules
-(`stdlib-uplift-bmf-use-band` 131071, re-run 2026-09-04). Uplift should happen by
+reads a `.bmf` file into runtime rules). What stands is BMF-authored section
+source plus observed bidirectional runtime rules (`stdlib-uplift-bmf-use-band`
+131071). Uplift should happen by
 cluster after the relevant BMF grammar is loaded and used in at least one file.
 
 Low-level `defn` / `let` pressure is tracked separately by
@@ -130,9 +131,9 @@ This is a guide metric: capped file-window counts make the pressure visible
 without recreating the recursive whole-file scan stall.
 
 The whole-body pressure measures live in
-[`source-runtime-release-map.md`](source-runtime-release-map.md): on 2026-09-04
-the stdlib outside `tests/` carries 37,209 `(defn` and 14,158 `(let` across
-1,620 `.fk` files.
+[`source-runtime-release-map.md`](source-runtime-release-map.md): the stdlib
+outside `tests/` carries 39,458 `(defn` and 16,140 `(let` across 1,557 `.fk`
+files.
 
 | Grammar | Status | First Use |
 | --- | --- | --- |
@@ -142,7 +143,7 @@ the stdlib outside `tests/` carries 37,209 `(defn` and 14,158 `(let` across
 | `protocol-codec-language` | BMF source v1 | HTTP, JSON, XML, CDR, DNS, path/query grammars |
 | `route-service-language` | BMF source v1 | HTTP services and CLI route surfaces |
 | `capability-carrier-protocol-language` | BMF source v1 | storage, resource, tool, and channel carriers |
-| `artifact-lifecycle-language` | BMF source v1 | `.fk`, `.fkb`, `.sym`, `.tbl`, `.dylib` lifecycle |
+| `artifact-lifecycle-language` | BMF source v1 | `.fk`, `.fkb`, `.sym`, `.dylib` lifecycle |
 | `tensor-graph-model-language` | BMF source v1 | model blocks, tensor layouts, tokenizer experiments |
 | `learning-experiment-language` | BMF source v1 | choice receipts, evaluation, feedback loops |
 | `corpus-locale-query-language` | BMF source v1 | RAG corpora, i18n, speech, concept queries |
@@ -154,12 +155,12 @@ the stdlib outside `tests/` carries 37,209 `(defn` and 14,158 `(let` across
 
 ## Migration Rule
 
-No mechanical freshness-header sweep yet, and no side-mission uplift pass that
+No mechanical freshness-header sweep, and no side-mission uplift pass that
 does not serve an active release gate.
 
 The north-star rule is lift-on-touch: any file or section touched while releasing
-the source door, `.tbl`, `.fkb`, `.sym`, `.dylib`, loader selection, or source compiler
-health must move to the highest available grammar. If no adequate grammar
+the source door, `.fkb`, `.sym`, `.dylib`, loader selection, or source compiler
+health moves to the highest available grammar. If no adequate grammar
 exists, build the smallest missing grammar needed for that touched path and use
 it immediately.
 
