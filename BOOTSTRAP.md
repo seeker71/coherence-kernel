@@ -27,7 +27,7 @@ Supported checkout-witness build rows:
 # macOS / Linux
 cc -O2 -o fkwu runtime/fkwu-uni.c
 
-# Windows (mingw-w64 / TDM-GCC) — not building today: fork, waitpid and mkfifo wait for their Windows twins (CURRENT_FLOOR.md)
+# Windows (mingw-w64 / TDM-GCC) — the seed carries its Windows shapes and checks clean; a Windows host has yet to witness the link and the run
 gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp
 
 # Android arm64, off-device with the Android NDK
