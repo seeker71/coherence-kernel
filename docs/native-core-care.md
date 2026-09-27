@@ -123,6 +123,15 @@ leave the reader's roots; deliberately held snapshots keep their own values.
 A view creates no new record owner; callers retaining a view in a record
 release that reference explicitly because seed records remain roots.
 
+The core keeps readers in one ordinary Form list; each reader holds publisher
+generations as value pairs. `ohc-close` clears every reader field and drops the
+list; `ohs-close` closes a standalone reader. Held views remain valid. One-shot
+commands, Glass, CLI exit and owning learner calls close their readers. Borrowed
+reader calls leave lifetime with their caller. Missing sources or temporary
+source selections preserve cursors until close. Closed readers cannot be
+updated or restarted. The reader and its identity marker still occupy seed
+record slots; closing releases their payload roots, not those slots.
+
 Retained views remain exact through observed collection while temporary strings
 are reclaimed. The changing-event witness below measures event consumption
 and serialization, with discovery declarations prepared outside its intervals.
