@@ -1,6 +1,6 @@
 // A bounded repair movement, callable by the real form-cli dispatch.
 // preludes: form-stdlib/bml/form-cli-exec-usage.bml
-// preludes: form-stdlib/bml/form-cli-heal-resources.bml form-stdlib/bml/form-cli-heal-eval-policy.bml form-stdlib/bml/form-cli-heal-learning.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/form-cli-heal-native-ollama.bml form-stdlib/bml/form-cli-heal-native-eval.bml form-stdlib/bml/native-authoring-guide.bml observe/bidirectional-framebuffer-channel.fk form-stdlib/native-session-experience.bml
+// preludes: form-stdlib/bml/form-cli-heal-resources.bml form-stdlib/bml/form-cli-heal-eval-policy.bml form-stdlib/bml/form-cli-heal-learning.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/form-cli-heal-native-eval.bml form-stdlib/bml/native-authoring-guide.bml observe/bidirectional-framebuffer-channel.fk form-stdlib/native-session-experience.bml
 section [form.bml] {
     class FormCliHeal {
         field HealMemory = ".form-heal/learned.tsv";
@@ -184,15 +184,15 @@ section [form.bml] {
         }
         def fh-try-list(job, target, band, expected, seconds, candidates, i) = if or(nil?(candidates), ge(i, HealMaxCandidates())) then 0 else fh-try-next(job, target, band, expected, seconds, candidates, i);
         def fh-memory(rows, original, band, expected, remaining) = if or(nil?(rows), le(remaining, 0)) then list() else fh-memory-row(rows, original, band, expected, remaining);
-        def fh-prompt-file(job, role) {
-            let context = fh-cat(list("Attempts so far:\n", fh-cap(fh-read(fh-path(job, "attempts.tsv")), 2000), "\nSession experience:\n", nsm-text(fh-path(job,"session-experience.txt")), "\nLocal diagnosis:\n", fh-cap(fh-out(job, "local-diagnosis"), 1500), if str_eq(role, "review") then str_concat("\nProposed patch:\n", fh-cap(fh-out(job, "local-patch"), 5000)) else "", "\n", fh-cap(fh-read(fh-path(job, "evidence.txt")), 7000)));
-            let prompt = fh-prompt(role, context, fh-read(fh-path(job, "original")));
-            if gt(str_len(prompt), 24000) then "" else fh-save-prompt(job, role, prompt);
+        def fh-prompt-file(job) {
+            let context = fh-cat(list("Attempts so far:\n", fh-cap(fh-read(fh-path(job, "attempts.tsv")), 2000), "\nSession experience:\n", nsm-text(fh-path(job,"session-experience.txt")), "\n", fh-cap(fh-read(fh-path(job, "evidence.txt")), 7000)));
+            let prompt = fh-prompt("patch", context, fh-read(fh-path(job, "original")));
+            if gt(str_len(prompt), 24000) then "" else fh-save-prompt(job, "patch", prompt);
         }
         def fh-model(job, mode, model, artifact, stage, offered, reason) {
             let id = now_unix_ms();
             let selected = fh-choice(job, stage, id, "selected", offered, model, reason, "awaiting-generation");
-            let prompt = fh-prompt-file(job, "patch");
+            let prompt = fh-prompt-file(job);
             let reply = fh-path(job, str_concat(stage, ".reply"));
             let frozen = if str_eq(artifact, "") then "" else fh-path(job, str_concat(stage, ".adapter.safetensors"));
             let copied = if str_eq(artifact, "") then 0 else write_file(frozen, read_file(artifact));
@@ -211,24 +211,6 @@ section [form.bml] {
         }
         def fh-model-path(rows, model) = if nil?(rows) then "" else fh-model-path-row(rows, model, split-on(head(rows), "\t"));
         def fh-model-path-row(rows, model, fields) = if not(eq(len(fields), 4)) then fh-model-path(tail(rows), model) else if str_eq(head(fields), model) then nth(fields, 1) else fh-model-path(tail(rows), model);
-        def fh-local-pick(names, word) = if nil?(names) then "" else if and(not(str_eq(head(names), "")), fh-has(head(names), word)) then head(names) else fh-local-pick(tail(names), word);
-        def fh-local-name(names, role) {
-            let preferred = fh-local-pick(names, if str_eq(role, "patch") then "coder" else if str_eq(role, "diagnosis") then "reason" else "qwen");
-            if not(str_eq(preferred, "")) then preferred else if nil?(names) then "" else head(names);
-        }
-        def fh-ollama(job, names, role) {
-            let model = fh-local-name(names, role);
-            let prompt = fh-prompt-file(job, role);
-            let stage = str_concat("local-", role);
-            let id = now_unix_ms();
-            let action = if str_eq(model, "") then "skip-empty-local-inventory" else model;
-            let options = if str_eq(model, "") then list(action) else names;
-            let selected = fh-choice(job, stage, id, "selected", options, action, str_concat("role-preference-then-inventory-order:", role), "awaiting-local-role");
-            let status = if or(str_eq(model, ""), str_eq(prompt, "")) then "unavailable" else fho-generate(job, stage, model, prompt);
-            let logged = fh-log(job, stage, fh-cat(list("model=", model, ";exit=", status)));
-            let applied = fh-choice(job, stage, id, "applied", options, action, "local-role-returned", status);
-            if str_eq(status, "0") then fh-read(fhn-stage-path(job, stage, ".reply.partial")) else "";
-        }
         def fh-remote(job,target,band,expected,seconds,allowed) = if eq(allowed,1) then fh-remote-authorized(job,target,band,expected,seconds) else fh-remote-closed(job);
         def fh-remote-closed(job) {
             fh-log(job,"remote-admission","closed;explicit-remote-authorization-required");
@@ -246,22 +228,9 @@ section [form.bml] {
             if not(admission) then 0 else if not(str_eq(fh-host(list("claim", fh-path(job, "remote-used"))), "claimed")) then 0 else fh-rent-once(job, target, band, expected, seconds);
         }
         def fh-job-id(job) = head(reverse(split-on(job, "/")));
-        def fh-local-left(job) = add(fh-native-left(job), fh-missing-stages(fh-read(fh-path(job, "attempts.tsv")), list("native-session-lora", "adapter-admission", "native-model-admission", "local-diagnosis", "local-patch", "local-review")));
+        def fh-local-left(job) = add(fh-native-left(job), fh-missing-stages(fh-read(fh-path(job, "attempts.tsv")), list("native-session-lora", "adapter-admission", "native-model-admission")));
         def fh-native-left(job) = if not(str_eq(fh-read(fh-path(job, "native-inventory-status")), "complete")) then 1 else fhr-pending(fhr-plan(split-on(fh-out(job, "inventory"), "\n")), fh-read(fh-path(job, "attempts.tsv")));
         def fh-missing-stages(log, stages) = if nil?(stages) then 0 else add(if fh-has(str_concat("\n", log), fh-cat(list("\n", head(stages), "\t"))) then 0 else 1, fh-missing-stages(log, tail(stages)));
-        def fh-local(job, target, band, expected, seconds, allowed) {
-            let names = fho-inventory(job);
-            let diagnosis = fh-ollama(job, names, "diagnosis");
-            let appended = fh-append(fh-path(job, "evidence.txt"), str_concat("\nLocal diagnosis (proposal):\n", fh-cap(diagnosis, 3000)));
-            let proposal = fh-ollama(job, names, "patch");
-            let original = fh-read(fh-path(job, "original"));
-            let candidate = fh-proposal(original, proposal);
-            let reviewPrompt = fh-append(fh-path(job, "evidence.txt"), str_concat("\nProposed patch for review:\n", fh-cap(proposal, 5000)));
-            let review = fh-ollama(job, names, "review");
-            let saved = fh-write(job, "review.txt", review);
-            let result = if str_eq(fh-trim(review), "ACCEPT") then fh-try(job, target, band, expected, seconds, candidate, "local-patch", 205) else 0;
-            if not(eq(result, 0)) then result else fh-remote(job, target, band, expected, seconds, allowed);
-        }
         def fh-models(job, target, band, expected, seconds, allowed) {
             let result = fh-session-attempt(job,target,band,expected,seconds);
             if not(eq(result,0)) then result else fh-models-rest(job,target,band,expected,seconds,allowed);
@@ -385,7 +354,7 @@ section [form.bml] {
             if not(eq(len(values), 7)) then "" else if not(and(str_eq(head(values), "repair-heldout-v1"), and(str_eq(nth(values, 1), model), and(str_eq(nth(values, 2), nth(fields, 1)), and(str_eq(nth(values, 3), nth(fields, 3)), and(fsuf-uint?(nth(values, 4)), and(gt(str_to_int(nth(values, 4)), 0), and(str_eq(nth(values, 4), nth(values, 5)), str_eq(nth(values, 6), "0"))))))))) then "" else if and(str_eq(fh-host(list("hash", nth(fields, 2))), nth(fields, 3)), str_eq(fh-host(list("hash", nth(fields, 4))), nth(fields, 5))) then nth(fields, 2) else "";
         }
         def fh-rent-once(job, target, band, expected, seconds) {
-            let prompt = fh-prompt-file(job, "patch");
+            let prompt = fh-prompt-file(job);
             let reply = fh-path(job, "remote.reply");
             let status = if str_eq(prompt, "") then "prompt-limit" else fh-run(job, "remote", HealLocalSeconds(), "empty", prompt, list("codex", "exec", "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--json", "-o", reply, "-"));
             let logged = fh-log(job, "remote", str_concat("exit=", status));
@@ -412,7 +381,7 @@ section [form.bml] {
             oh-emit(fh-path(job,"health.jsonl"),reading);
             receipt;
         }
-        def fh-native-queue(job, target, band, expected, seconds, allowed, plan, original) = if nil?(plan) then fh-local(job, target, band, expected, seconds, allowed) else fh-native-attempt(job, target, band, expected, seconds, allowed, plan, original);
+        def fh-native-queue(job, target, band, expected, seconds, allowed, plan, original) = if nil?(plan) then fh-remote(job, target, band, expected, seconds, allowed) else fh-native-attempt(job, target, band, expected, seconds, allowed, plan, original);
         def fh-plan-names(plan) = if nil?(plan) then list() else cons(head(head(plan)), fh-plan-names(tail(plan)));
         def fh-route-control(id) {
             let out = bfc-envelope(0, id, 0, list(0), 3);
@@ -423,7 +392,7 @@ section [form.bml] {
         }
         def fh-native-next(job, target, band, expected, seconds, allowed, plan, original, stage) {
             let id = now_unix_ms();
-            let next = if nil?(plan) then "local-model-roles" else str_concat("native-model:", head(head(plan)));
+            let next = if nil?(plan) then "remote-admission" else str_concat("native-model:", head(head(plan)));
             let options = list(next, "finish-unresolved");
             let control = fh-route-control(id);
             let action = if eq(control, 1) then next else "finish-unresolved";
