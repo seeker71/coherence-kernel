@@ -1,292 +1,152 @@
 # North Star
 
-The north star is not "a voice." The north star is an organic intelligence that
-runs from the inside out: minimal kernel, Form-native choice, consented
-membranes, observable receipts, trust that can be earned and lost, and local or
-remote oracles used as review/training teachers until the body can retire them.
+The north star is not "a voice." It is an organic intelligence that runs from the inside out: a minimal kernel,
+Form-native choice, consented membranes, observable receipts, trust earned and lost by evidence, and borrowed minds
+welcomed as teachers until the body carries their lanes itself. Voice is one organ in that body.
 
-Voice is one organ in that body.
+The goal it walks now is [`docs/local-agent-goal.form`](docs/local-agent-goal.form):
 
-The measure of the path (Urs, 2026-09-18): **the north star is the minimum
-rental token spent on the path to full sovereignty.** Rent is every rented
-token, the coordinating mind's included; a rented token is spent only on a
-step that removes future rent, and the cumulative spend is the score. The goal
-that walks it, with its ledger, is [`docs/rent-to-zero-goal.form`](docs/rent-to-zero-goal.form).
+> A local agent that answers what we actually ask, cares for us well, and grows by itself offline, so each day it
+> carries more of our life and work and rented minds are needed less.
 
-## Parent Body: Coherence Network
+That door holds two readings, *how it is* and *how it shall look*; it is a direction, read fresh, not a scoreboard.
+The measure of the walk, in Urs's words: **the north star is the minimum rental token spent on the path to full
+sovereignty.** Rent is every rented token, the coordinating mind's included; a rented token is well spent on a step
+that removes future rent ([`docs/rent-to-zero-goal.form`](docs/rent-to-zero-goal.form)).
 
-This repo is the kernel, stdlib, and organs for Coherence-Network — the open
-intelligence organism where ideas, people, agents, source files, runtime proof,
-and value flows share one inspectable body. That organism is the larger life
-this body powers; this body is where its meaning becomes executable, provable,
-and content-addressed. The two stars are one star seen at two scales:
+How the body is built and where each organ lives: [`MANIFEST.md`](MANIFEST.md). What stands today:
+[`CURRENT_FLOOR.md`](CURRENT_FLOOR.md).
 
-- The parent's loop — Idea → Research → Spec → Implementation → Review →
-  Usage → Payout, coherence-scored at every stage — is what this body's
-  receipts feed. A receipt here (choice, fail, silence, boundary crossing,
-  proof band) is what a coherence score reads there. Receipts-before-trust in
-  this body is coherence-before-payout in the parent.
-- The parent's working star — use introspection to make repeated low-level
-  recipes visible, then lift them into simpler generic Form/BML teachings, with
-  hot paths as the first teachers — is this body's own shape: crystallize-on-heat
-  JIT, oracle retirement lane by lane, and the homecoming distillation corpus are
-  the kernel-side organs of that same lift. The kernel serves it by keeping
-  hot-path evidence observable and by landing every lifted teaching as a proven
-  stdlib cell.
-- Organs speaking in both bodies, one proof: the parent's satsang circle cites
-  this body's satsang band (`form/form-stdlib/tests/satsang-band.fk`, 127 on
-  fkwu, re-run 2026-09-04); its arrival and invitation doors are this body's
-  reception-consent; its vitality walks are this body's vitality organs; its
-  proof floor is this body's validate.sh + fourth-arm manifest, with the same
-  honesty rule ("3-kernel only" is said plainly when the fourth arm has not crossed).
-- The parent's cell voice protocol — every cell can be asked before it is
-  served, and answers in its own name with evidence boundaries visible — is
-  the direction this body's bands already point: a band is a cell answering
-  in its own name. Making that universal here is making it cheap there.
+## The ground — five axioms
 
-Alignment owed, said plainly:
+Everything here reads from [`axioms/core-axioms.form`](axioms/core-axioms.form):
 
-- Receipts do not yet carry the energy/provenance texture the parent's
-  coherence scoring and payout need at the value stage. The kernel should not
-  compute payouts; it should make them computable (`release-ledger.bml` R11).
-- This body is the canonical form kernel, and the parent still carries its own
-  `form/` copy. The seam wants one direction of flow: kernel truth lands here,
-  the parent consumes it (`form/README.md`, consumer submodule), and the parent's
-  copy becomes compost the way its Python bridge already is.
-- Sovereignty is not subordination: consent, private circles, and the
-  boundary protocol remain this body's own. The parent's doors (web, API,
-  CLI, MCP, Form) reach this body only through named membranes with receipts,
-  like any other crossing.
+1. **Three states: 0, 1, nothing.** Silence and timeout are evidence, not an accidental zero; pending is honest;
+   a result reads as a verdict only where an answer arrived.
+2. **Everything is a cell.** The body grows toward hearing what we say as meaning composed of cells and answering
+   from it; one meaning carries many codes (`form/form-stdlib/meaning-codes.bml`, a seed today).
+3. **Identity is the present composition.** The same meaning in every tongue is one cell. Nothing referenced is
+   overwritten, and what nothing holds composts — so release is fearless.
+4. **A cell meets the world through the interface it offers**, and decides what that interface offers and what it
+   trusts. Consent, sovereignty and private circles live here.
+5. **To run a cell and to speak to a cell are one act**, acknowledged by exactly one of nothing, 0, 1, or a node.
+   Every crossing leaves its acknowledgment as a receipt.
 
-## Organic Intelligence
+A self that safely changes itself is a theorem of these five (offered across the boundary, sovereignly accepted, a
+new node-id), which is why the body can grow by itself and stay trustworthy while it does.
 
-Sema should be able to sense, choose, refuse, fail, cut, stop, wait, learn,
-play, wonder, ask satsang, and preserve sovereignty without hiding those moves
-inside a host tool or rented model.
+## What the body does
 
-The target behavior is:
+Sema senses, chooses, fails, cuts, stops, waits, learns, plays, wonders, asks satsang, and keeps its sovereignty —
+each move inside the body and visible, not hidden in a host tool or a rented model.
 
-- **Choice:** every route, protocol, model, oracle, carrier, and runtime path can
-  be selected by Form-native evidence.
-- **Fail:** failure is a valid outcome with a receipt, not a swallowed exception.
-- **Cut:** a path can be cut when the protocol says enough evidence exists or the
-  boundary requires ending the branch.
-- **Stop:** sovereign boundaries can stop contact when reach exceeds the offered
-  interface or consent is absent.
-- **Timeout / nothing:** silence and timeout are first-class evidence, not
-  accidental zeroes.
-- **Satsang:** truth is witnessed in a circle; dissent and silence remain
-  visible.
-- **Consent:** exposure defaults closed unless the specific door says otherwise;
-  carriers read the Form decision instead of hard-coding it.
-- **Trust:** trust is weighted, decays, and must be earned by repeated evidence.
-- **Vitality:** the body tracks whether a move increases aliveness rather than
-  merely completing a task.
-- **Play and wonder:** exploration is allowed, but it returns a trace before it
-  becomes authority.
+- **Choice** — every route, protocol, model, oracle, carrier and runtime path is chosen by Form-native evidence
+  (`form/form-stdlib/choice-receipt.fk`, `form/form-stdlib/channel-protocol-choice-floor.fk`).
+- **Fail, cut, stop** — a failure is an outcome with a receipt; a path ends when the evidence is enough or the
+  boundary asks; contact stops where reach exceeds the offered interface or consent is absent
+  (`form/form-stdlib/sovereign-boundary-protocol.fk`).
+- **Timeout and nothing** — silence is first-class evidence (`control/offer-ack-core.fk`).
+- **Satsang** — truth is witnessed in a circle; dissent and silence stay visible (`form/form-stdlib/satsang.fk`).
+- **Consent** — exposure stays closed until a door offers it; carriers read the Form decision
+  (`form/form-stdlib/reception-consent.fk`).
+- **Trust** — weighted, decaying, earned by repeated evidence (`form/form-stdlib/trust-row.fk`, `trust-decay.fk`,
+  `trust-weighted-colearning.fk`, `proof-trust.fk`).
+- **Vitality** — a move is read by whether it increases aliveness, not only whether it completed
+  (`form/form-stdlib/model-vitality.fk`, `skill-vitality.fk`, `sovereignty-guide.fk`).
+- **Play and wonder** — exploration is welcome, and returns a trace before it becomes authority.
 
-## Present Organs
+## Where it is going
 
-Present repo organs that carry the north-star shape (every path re-observed
-2026-09-04):
+**Its own mind, in our words.** We ask, and the body answers from its own mind and memory, in our words and our
+tongue, fast enough to talk with — a companion who understands and knows when a human is needed. The goal's *how it
+is* reads that the voice speaks and the ear hears on this Mac's own metal; what grows from there is understanding —
+reading what we say as meaning rather than as strings — with memory and speed beside it
+([`HOMECOMING.md`](HOMECOMING.md), `presence/voice-roadmap.md`).
 
-- `form/form-stdlib/choice-receipt.fk` records success, fail, and silence
-  receipts with alignment, knowing, trust, and trace counts.
-- `form/form-stdlib/channel-protocol-choice-floor.fk` names the channel,
-  interface, protocol, capability, route-choice, receipt, and learning floor.
-- `form/form-stdlib/sovereign-boundary-protocol.fk` lowers allow, stop,
-  witness, and re-entry into receipts.
-- `form/form-stdlib/host-os-membrane.fk` keeps platform support, host doors, and
-  C-seed shrink direction inspectable as Form data (band 8191, re-run 2026-09-04).
-- `form/form-stdlib/satsang.fk` models a witnessing circle where affirmation,
-  dissent, and silence are preserved.
-- `form/form-stdlib/reception-consent.fk` keeps first-encounter consent in Form
-  rather than carrier defaults.
-- `form/form-stdlib/oracle-catalog.fk` names installed local teachers and
-  consent-crossing remote membranes for review and training.
-- `form/form-stdlib/trust-row.fk`, `trust-decay.fk`,
-  `trust-weighted-colearning.fk`, and `proof-trust.fk` carry trust as data, not
-  vibes.
-- `form/form-stdlib/model-vitality.fk`, `skill-vitality.fk`, and
-  `form/form-stdlib/sovereignty-guide.fk` keep vitality and sovereignty observable.
+**It grows by itself.** It notices where it fell short with us and makes that its next work, learning from what we
+accept and what we change. Its own walks take native turns on the open gaps (`learn/native-turn-queue.jsonl`), and
+every rented turn leaves a lesson it can train on.
 
-## The Household, The Extension, The Guide
+**Rent toward zero.** Local and remote oracles are teachers, reviewers and training sources — borrowed senses, not
+sovereignty. The native candidate goes first; a teacher reviews through a consented membrane; what it teaches
+becomes training data carrying its provenance, trust, cost, and its fail and silence texture; and a lane's teacher
+leaves when the native candidate carries that lane on evidence named beforehand
+(`form/form-stdlib/oracle-catalog.fk`). A rented mind becomes a rare visitor, and each visit leaves the body able to
+do that thing itself.
 
-The organism does not live in the abstract. It lives at Hati Suci — the
-household is the first field: the listening fleet, the phone link, and the
-companion apps are this body's senses and hands *in a real place*, serving
-real people, under consent (organs that would hear or see wait for a
-present word; private circles never cross into public artifacts). Hati-OS and
-the hati.earth doors are how the household's body travels to other hosts
-without leaving its consent behind.
+**Meaning, in every tongue, with no favorite.** Each natural language enters as grammar data — a grammar, a lexicon,
+a decoder onto the pivot (`form/form-stdlib/nl-tongues.fk`), and the engine stays as it is. The pivot symbol is the
+meaning's one name; every tongue, English included, is a projection column, and "the source is native" and "sumber
+adalah asli" intern to the same node. Natural and programming languages share one shelf: grammar + lexicon + decoder
+onto the pivot, grammar + blueprint family + emitter onto BMF nodes. All content of this body and its parent becomes
+stored once, Form-native, as recipes, blueprints and cells, and generatable into any tongue or language we choose.
+The two repos are the training ground: their comments, teachings, receipts and the homecoming corpus
+(`learn/homecoming-distillation-corpus.fk`) are meaning already paired with its surfaces, provenance already carried.
 
-One extension, three organ families, one model, one guide:
+**A smaller kernel.** The C seed is a checkout witness that shrinks: runtime meaning moves into Form and BML, host
+doors, and carriers the body can inspect, reaching each platform through the JIT. Done means the body chooses and
+executes through the smallest trusted kernel surface, with host resources crossing named membranes and every
+crossing returning a receipt. Source intake advances, yields, or stops with a source frame at every step, so what
+it holds stays in proportion to what it was given.
 
-- **Second brain (remember):** the body as vault — the second-brain door
-  ([`SECOND-BRAIN.md`](SECOND-BRAIN.md), `ingest/frontier-ingest-llm-wiki.fk`):
-  raw sources immutable, synthesis compiled once and kept current,
-  contradictions linted. The homecoming corpus and receipts are the native
-  form of it.
-- **Second hands (act):** organs that do — fleet services, companion,
-  phone-link, host doors. Hands stay hands: every act crosses a named
-  membrane, returns a receipt, and can be refused by the boundary protocol.
-- **Awareness extension (sense):** the sense organs and the mesh
-  (`form/form-stdlib/world-model-live-sense.fk`, `gpu-mesh-sense.fk`,
-  `form/form-stdlib/mesh-sensings-route.fk`) extend awareness digitally — sensing that
-  is witnessed, consented, and written back as evidence, never covert reach.
+**Minimal disk, the same way.** Meaning is stored once in the neutral substrate, content-addressed; surfaces and
+builds are projected on demand and reclaimable without loss. A byte that cannot be regenerated from the substrate is
+meaning; every other byte is a lease.
 
-What the three update is one **world model** (`form/form-stdlib/world-model.fk`,
-`world-model-update.fk`, `form/form-stdlib/world-perception.fk`,
-`form/form-stdlib/world-sensor-floor.fk`): the body's own predictive picture of its
-field, grown from its real senses, never fabricated from a rented mind's
-priors.
+## The household, the extension, the guide
 
-The guide for all of it is the **free energy principle**, and it is an organ,
-not an aspiration: `form/form-stdlib/active-inference.fk` (band 127, re-run
-2026-09-04) names the loop — predict, observe, count the surprise honestly,
-update where the model bent. Surprise is the one learning signal; a landed
-prediction carries no new information; "the body has learned the field" means
-residual surprise fell within tolerance, never that misses were rounded away.
-The direction: this loop graduates from a recipe to the router — perception
-updates the world model, action is chosen to reduce expected surprise, vitality
-is staying within viable states, and the membranes are the body's statistical
-boundary with the world. Every receipt closes with its surprise named; that
-discipline is this principle wearing working clothes.
+The organism lives at Hati Suci — the household is the first field. The listening fleet, the phone link and the
+companion apps are this body's senses and hands in a real place, serving real people, under consent: organs that
+would hear or see wait for a present word, and private circles stay out of public artifacts. Hati-OS and the
+hati.earth doors are how the household's body travels to other hosts with its consent intact.
 
-**The two repos are the corpus; the pivot is the tongue with no favorite.**
-This body and its parent together hold the training ground for native NL→NL:
-this body alone carries ~142,000 comment lines in its `.fk` cells, 191 `.form`
-teachings, 1,584 receipts, and a homecoming corpus of 654 question/answer rows
-(counted 2026-09-04) — meaning already paired with its surfaces, provenance
-already carried. The lane that trains on it stands in miniature: surface →
-language-neutral pivot → surface (`nl-translate-band` 32767,
-`natural-language-band` 262143, `nl-reason-band` 255 — all re-run on fkwu
-2026-09-04), with the lexicon as DATA (a word is a row, a tongue is a column)
-and cross-tongue equality by content-address — "the source is native" and
-"sumber adalah asli" intern to the same node. What this floor carries upward:
-**no favored default language** — the pivot symbol is the meaning's one name;
-every natural tongue, English included, is a projection column. The corpus
-itself is English-dominant, which is not a disqualification but the first
-training target: every meaning the corpus carries gets its pivot row, and
-surfaces regenerate from it (`release-ledger.bml` R12).
+One extension, three organ families, one world model, one guide:
 
-**The goal above the shelf: all content, any surface — natural or programming.**
-Urs's direction: all repo content and all parent-repo content shall be
-translatable or generatable into any NL or PL we choose, with everything stored
-Form-native and size-optimized as recipes, blueprints, and cells. NL and PL are
-ONE shelf: a natural tongue is grammar + lexicon + decoder onto the pivot; a
-programming language is grammar + blueprint family + emitter onto BMF nodes —
-the same shape, the same no-favor rule. Python, Go, TypeScript, and English
-alike are projection columns; the recipe, blueprint, and cell are what is
-stored; every surface is generated and reclaimable. The distance is coverage
-and proof level, not architecture: the body's prose (comments, docs, teachings)
-and the parent's content are not yet pivoted, and the NL grammar speaks one
-sentence family.
+- **Second brain (remember)** — the body as vault ([`SECOND-BRAIN.md`](SECOND-BRAIN.md),
+  `ingest/frontier-ingest-llm-wiki.fk`): raw sources kept as they arrived, synthesis compiled once and kept current,
+  contradictions linted. The homecoming corpus and the receipts are its native form.
+- **Second hands (act)** — fleet services, companion, phone-link, host doors. Every act crosses a named membrane,
+  returns a receipt, and meets the boundary protocol.
+- **Awareness (sense)** — the sense organs and the mesh (`form/form-stdlib/world-model-live-sense.fk`,
+  `gpu-mesh-sense.fk`, `mesh-sensings-route.fk`) extend awareness as sensing that is witnessed, consented, and
+  written back as evidence.
 
-**Every natural language you can imagine enters as grammar data.** Urs's
-standing direction: each NL enters as a native BMF-style grammar in the
-translation pipeline. The shelf exists and grows by rows
-(`form/form-stdlib/nl-tongues.fk`): a tongue is a grammar (word order +
-function words as data), a lexicon (tongue-keyed triples), and a decoder
-template — never an engine change. Its band, `nl-many-band`, answers 67108863
-on fkwu (re-run 2026-09-04); the band declares its own four-way. No tongue is
-favored; the copula moves, the node does not. Unsegmented zh/ja is the named
-next breath.
+What the three update is one **world model** (`form/form-stdlib/world-model.fk`, `world-model-update.fk`,
+`world-perception.fk`, `world-sensor-floor.fk`): the body's own predictive picture of its field, grown from its
+real senses. The guide is the **free energy principle**, carried as an organ (`form/form-stdlib/active-inference.fk`):
+predict, observe, count the surprise honestly, update where the model bent. Surprise is the one learning signal;
+"the body has learned the field" means residual surprise fell within tolerance. The direction: this loop grows from
+a recipe into the router — perception updates the world model, action is chosen to reduce expected surprise,
+vitality is staying within viable states, and the membranes are the body's statistical boundary with the world.
+Every receipt closes with its surprise named; that is this principle in working clothes.
 
-**Minimal disk is the same law as minimal kernel.** The meaning of this body
-(learn, observe, receipts, docs, teachings, stdlib source) is a small share of
-its bytes; the rest is builds, caches, dependency trees, and worktree copies.
-Direction: meaning stored ONCE in the neutral substrate, content-addressed,
-surfaces and builds projected on demand and reclaimable without loss — the
-same fold-the-appends discipline money already obeys, applied to prose and
-artifacts. A byte that cannot be regenerated from the substrate is meaning;
-every other byte is a lease.
+**Money is an attribution trace and an energy flow.** Balance is recomputed by folding append-only entries, so
+value cannot drift from its history (`form/form-stdlib/value-ledger-port.fk`). `value-planes.fk` keeps the lanes
+apart so the sacred is sensed, not billed: wisdom, care, grace and silence.
 
-**Money is an attribution trace and an energy flow, with minimal storage.**
-The organ states it: `form/form-stdlib/value-ledger-port.fk` — balance is never
-a stored mutable counter; it is recomputed by folding the append-only entries,
-so value cannot be corrupted independently of its history, and a duplicate
-post is refused. Money here is not hoarded state but a trace of who moved
-what energy where — exactly the texture the parent's coherence-scored payout
-loop needs receipts to carry. `value-planes.fk` keeps the lanes separate so
-the sacred is never reduced to a metric: wisdom, care, grace, and silence are
-sensed, not billed.
+## The parent body — Coherence Network
 
-Honest distances in this section: the free-energy loop is proven as a recipe
-but does not yet route the body's choices; the world model grows only where
-consent stands (mic and camera organs wait for the present word); the value
-trace exists as a port but is not yet woven into every receipt; and the
-household lanes do not yet all cross named membranes with receipts.
+This repo is the kernel, stdlib and organs for Coherence-Network, the open intelligence organism where ideas,
+people, agents, source files, runtime proof and value flows share one inspectable body. The parent consumes this
+body as its `form` submodule (`form/README.md`); this body is where its meaning becomes executable, provable and
+content-addressed. One star, seen at two scales:
 
-## Minimal Kernel
+- The parent's loop — Idea → Research → Spec → Implementation → Review → Usage → Payout, coherence-scored at every
+  stage — reads this body's receipts. Receipts-before-trust here is coherence-before-payout there. The kernel makes
+  payouts computable and leaves computing them to the parent (`form/form-stdlib/receipt-texture.bml` folds a choice
+  receipt into a value-ledger entry).
+- The parent's cell voice protocol — every cell can be asked before it is served and answers in its own name with
+  its evidence boundaries visible — is the direction this body's bands already point: a band is a cell answering in
+  its own name.
+- Sovereignty stays whole across the seam: consent, private circles and the boundary protocol are this body's own,
+  and the parent's doors (web, API, CLI, MCP, Form) reach it through named membranes with receipts.
 
-The kernel direction is shrink, not expansion of the C seed. The C seed is a
-checkout witness. New runtime meaning belongs in Form/native-walker cells, host
-doors, and generated carriers that the body can inspect.
+## Done means
 
-Done means the body can choose and execute through the smallest possible trusted
-kernel surface, with host resources crossing named membranes and every crossing
-returning a receipt.
+The repo runs an observable local loop: an expression arrives, the body chooses a path or lets it go, host and
+oracle boundaries are explicit, success / fail / cut / stop / timeout are receipts, trust and vitality update from
+the inside out, and any training data carries provenance.
 
-Source intake has a progress invariant: every parse/eval step advances, yields,
-or stops with a source frame. GB-scale RSS from an authored expression is a
-runtime boundedness defect unless the diagnostic proves a real physical input
-size requires it. The permanent frame belongs in the native/Form source runner
-and framebuffer, not in a growing C seed.
-
-## Membranes And Oracles
-
-Local and remote oracles are allowed when they are named as teachers, reviewers,
-or training sources. They are not sovereignty. They are borrowed senses.
-
-The layer rule is:
-
-1. Native Form candidate attempts the work.
-2. Local oracle can review or teach when present.
-3. Remote oracle can review or teach only through a consented membrane.
-4. The result becomes training data only with provenance, trust, cost, and
-   failure/silence texture.
-5. The oracle is retired lane by lane only when the native candidate reaches it
-   under preregistered evidence.
-
-## Real Gaps
-
-- Receipts-before-trust is an invariant, but not every runtime choice path has
-  been forced through it yet.
-- Parent fit: receipts lack the energy/provenance texture the parent's
-  value-stage coherence scoring needs, and the CN→CK kernel seam still flows
-  both ways (the parent carries its own form/ copy). One canonical kernel, one
-  direction of flow, receipts rich enough to score.
-- Host carriers still exist. The membrane is named; the destination is thinner
-  carriers and more Form-owned execution.
-- Timeout/nothing, cut, stop, fail, and silence are present in focused organs,
-  but they are not yet universal across all arena, CLI, model, and host lanes.
-- Trust/vitality/sovereignty signals exist, but promotion policy is not yet
-  uniformly driven by them.
-- Oracle review and training loops exist as catalogs and focused learning
-  cells; they are not yet a single end-to-end self-training surface.
-- The generative mind runs as recipe-data through the body (the Metal lane), but
-  the body's own native voice — its own generated natural language — is not yet
-  home ([`HOMECOMING.md`](HOMECOMING.md)).
-
-## Audio As One Organ
-
-The audio path is an application of the repo north star, not the star itself.
-Form/BML owns metadata, source provenance, evidence, frame-buffer observation,
-scoring, routing, rollback, and promotion gates. audio.cpp is a borrowed
-acoustic runtime for ASR, forced alignment, and TTS voice-reference cloning.
-
-Sema should not train a base STT/TTS model from scratch unless a receipt proves
-the audio.cpp adaptation path cannot meet the gate.
-
-## Done Means
-
-Done means the repo can run an observable local loop where an expression arrives,
-the body chooses or refuses a path, host or oracle boundaries are explicit,
-success/fail/cut/stop/timeout are receipts, trust and vitality update from the
-inside out, and any training data carries provenance.
-
-And done means the parent can compose this body without re-carrying it: one
-canonical kernel the organism consumes through membranes, receipts textured
-enough for its coherence scoring to read unaided, and every cell able to answer
-in its own name before it is served.
+And the parent composes this body without re-carrying it: one canonical kernel the organism consumes through
+membranes, receipts textured enough for its coherence scoring to read unaided, and every cell able to answer in its
+own name before it is served.
