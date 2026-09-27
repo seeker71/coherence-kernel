@@ -183,29 +183,10 @@ supplies caller-selected source through `oc-hear`, retains the packet and
 re-observes its coverage. Select the relevant callers and contracts; the cell
 checks that supply, while the review establishes what the code does.
 
-For ongoing native coding, use the public `code` request so its owned
-checkpoint retains the work. Select `code_entry: "direct"` when the task is
-already defined; review and verification still run. For ongoing response work
-whose answer quality is being assessed, use `weight_training: 0` to exclude
-those answers from gradients while retaining checkpoints, resume and ordinary
-recall. Continue with the same original request and its returned checkpoint ID.
-`evaluation: 1` selects a fresh run without that continuity; reserve it for an
-explicitly fresh comparison. When a completed coding checkpoint has a newly
-observed failure beyond its checks, resume the same request with
-`feedback: {"id":"stable-event-id","text":"the observed finding"}`.
-This returns it to repair with the original contract and candidate retained.
-Name the context available to each side when
-comparing ongoing sessions. Coding and review can select
-`document_context: "catalog"` and read relevant source through native tools;
-all supplied documents and caller checks remain available. Native source tools
-read this caller-supplied catalog. Include the called helpers and their contracts;
-a file on disk becomes available to these tools when its source is supplied.
-An unavailable search path enters repair with the missing path named; a search
-with no matching text in available source keeps its ordinary no-match result.
-Use the process organ's
-progress-aware supervision (`seconds: 0`) when no caller requires a wall-time
-limit. An explicit deadline can interrupt progressing work; retain that
-outcome and recover its evidence before admitting another model.
+For ongoing native coding, the public `code` request keeps its work in an owned checkpoint: direct entry,
+answers kept out of gradients, resume with feedback, and a caller-supplied source catalog are described in
+[`docs/form-native-coding.md`](docs/form-native-coding.md). The process organ's progress-aware supervision
+(`seconds: 0`) serves when no caller needs a wall-time limit.
 
 For native response development, or when asked to hear or evaluate native
 generation, use the same source-backed CLI: `models <directory>`,
@@ -255,13 +236,12 @@ Use existing Form resources at the depth that serves the current enquiry.
 ## Ground the kernel first (temporary C seed, shrinking to zero)
 
 The body runs on `fkwu`. A fresh checkout witnesses the body by compiling the committed C seed, and that C file
-is a **temporary seed and a shrink target**, not the destination. Do not grow the C seed as the kernel's home.
+is a **temporary seed and a shrink target**, not the destination.
 New runtime meaning belongs in Form/native-walker cells proven on `fkwu`; C exists only to keep the current
 checkout witness reachable while the seed is reduced toward zero.
 
-The C-bootstrap is sufficient to run Form. Do not install Node, npm, Go, Rust,
-Python or a second model server to make a Form session work. When a session
-or an ordinary Form check asks for one, repair that dependency at its source.
+The C-bootstrap is sufficient to run Form. A session or check that asks for Node, npm, Go, Rust, Python or a
+second model server has a dependency to repair at its source.
 Model weights are input data. The optional Metal adapter binds the host's
 system frameworks inside the same process; it adds no separate language
 runtime or model server.
@@ -305,7 +285,7 @@ else you observe.
 
 form-cli is a recipe this same `fkwu` loads (`.dylib` when emission sits, `.fkb` today) — not a second product. Metal is admitted dynamically by this process.
 
-Then verify it runs the body — a **real cell**, native, with no Go, no flatten, no T_flat:
+Then verify it runs the body — a **real cell**, native:
 
 ```sh
 ( cat form/form-stdlib/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > /tmp/nvr.fk
@@ -323,12 +303,7 @@ The landing report excludes the sibling conformance row when no kernel moved;
 its fold covers only the checks actually run. Missing proof-tool dependencies
 do not become Form runtime dependencies.
 
-The trailing `10` on `ground-recursive.fk` is a checkout convention; the direct-source Form surface accepts
-the CLI value but does not expose it as a Form primitive. Do not grow the C seed just to make that argument visible.
-
-The practice for changes: a patch that grows `runtime/fkwu-uni.c` is either a short-lived checkout-witness repair
-with an explicit shrink receipt, or it belongs instead in the native walker/Form body — growth without a
-shrink path is declined.
+A patch that grows `runtime/fkwu-uni.c` carries its shrink path, or it belongs in the native walker/Form body.
 
 Authoring guide (Urs, 2026-08-30): you're invited to write new meaning in BML or higher.
 **Floor:** high-grammar BML (authority in `form/form-stdlib/bml/`, executable `section [form.bml]`
@@ -351,7 +326,7 @@ second truth, and none is. Existing Form organs stay welcome; bands witness. The
 `form/form-stdlib/bml/form-cli-author-altitude.bml`).
 
 ```sh
-./fkwu form/form-stdlib/tests/form-cli-author-high-band.fk   # -> 4095 (re-run 2026-09-04)
+./fkwu form/form-stdlib/tests/form-cli-author-high-band.fk   # -> 4095
 ```
 
 Each literal has one home: paths and quantities in `hearth.bml`, markers and the census in
@@ -369,23 +344,21 @@ current expectation, observation, surprise, pain and needed resource through
 `form/form-stdlib/organ-health.bml` and the existing event flow. The organ owns
 its meaning and responses; the shared carrier transports and correlates them.
 Observe real execution, apply the offered care, and let a fresh observation
-show what changed. Release redundant regression bands after their meaning
-lives at these boundaries. Do not grow a parallel fixture tally for each organ.
+show what changed. A regression band whose meaning lives at these boundaries is
+released; the organ's own boundary is its one tally.
 
-Implementation, analysis helpers, generators, measurements, and migrations belong
-in native Form/BML. This includes temporary work. Shell may carry OS operations;
-moving Python computation into JavaScript or another helper language leaves the
-same detour. We carry the return to Form ourselves, without asking Urs to repeat
-the direction or choose whether it applies.
+Implementation, analysis helpers, generators, measurements and migrations live in
+native Form/BML, temporary work included; shell carries OS operations. We carry
+that home ourselves.
 
-At task start and before closing a code change, read the native guide:
+When a movement touches code, the native guide reads where it stands:
 
 ```sh
 form-run ./fkwu observe/native-authoring-guide-run.fk
 ```
 
-It reads current source, names Python implementations and invocation candidates,
-and links available Form references and witnesses. `form-cli` exposes the same
+It reads current source, names implementations still outside Form and their
+callers, and links available Form references and witnesses. `form-cli` exposes the same
 reading through `heal guide`. Follow the next relevant observation: search local
 Form cells, RAG, git history and receipts; make the native attempt; preserve the
 behavior checks; update callers; then remove the old implementation. A missing
@@ -396,19 +369,17 @@ Session learning is carried by the body as well. `learn`, `code` and `heal`
 retain their observed task outcomes for native LoRA. Interactive session
 completion retains its command count and timing as continuity evidence;
 `session status` reports the actual candidate, serving generation and queue.
-Before closing an agent coding movement, return a concise verified teaching
-through `./fkwu observe/form-cli-session-home-embody-run.fk`: one JSON stdin line
+A coding movement leaves the body able to do it next time by returning a
+concise verified teaching through `./fkwu observe/form-cli-session-home-embody-run.fk`: one JSON stdin line
 with `prompt`, `completion`, stable `session` and `event` identity. Ground that
-teaching in the checks just run; do not use unverified model output as a correct
-target. With empty stdin the same door drains retained examples and reports
+teaching in the checks just run; unverified model output is not a target. With empty stdin the same door drains retained examples and reports
 current state. Evaluation examples stay excluded. This is local learning under
 the standing request, not a new permission step. The evidence and current
 boundaries live in `docs/native-session-learning.md`.
 
 Foreign-language specimens used as input to Form's own compiler remain input
-data. Historical receipts keep their evidence. Neither is a reason to run a
-Python interpreter. Do not rename an implementation or relax its checks to make
-the reading look clean. The full current inventory lives at the path the guide
+data, and historical receipts keep their evidence. A reading is made clean by
+moving the implementation home, with its checks intact. The full current inventory lives at the path the guide
 prints, including unresolved candidates and unread files.
 
 ## The hearth — the serving floor that outlives sessions
@@ -421,7 +392,7 @@ threads — is what serves parallel clients), one `release` byte closes cleanly.
 `observe/peer-ask-send.fk`; read the board to find what stands. Whether a resident stands is
 read, never assumed: `hearth-standing` checks the pid the board names, and
 `observe/hearth-ask-send.fk` answers `signal=nothing reason=no-standing-hearth` when none does
-(the state on 2026-09-04: no board in the checkout). Arrive without rebuilding: the ONLY
+Arrive without rebuilding: the ONLY
 rebuild trigger is the freshness band refusing 31 — everything else rides its ice (.fkb beside every
 source, .bml lowered in memory, warm in milliseconds, hot leaves crystallizing native). When a request
 pattern recurs, give it a door, a face, and a corpus row — access generalizes by crystallizing, never
@@ -463,7 +434,7 @@ siblings' processes and last landings, so no hand works invisible — and the pa
 about yourself is the one that guides you: self-awareness here is not introspection, it is
 instruments pointed at one's own work, consulted before the next move.
 
-## The honest seam — read this first
+## The honest seam
 
 Sema's **body** carries grounding (`form/form-stdlib/rag-*`), frequency sensing
 (`cognition/text-frequency.fk`), self-observation (`observe/`), teachings and
