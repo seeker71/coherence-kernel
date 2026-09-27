@@ -27,17 +27,16 @@ Supported checkout-witness build rows:
 # macOS / Linux
 cc -O2 -o fkwu runtime/fkwu-uni.c
 
-# Windows, mingw-w64 / TDM-GCC
+# Windows (mingw-w64 / TDM-GCC) — not building today: fork, waitpid and mkfifo wait for their Windows twins (CURRENT_FLOOR.md)
 gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp
 
 # Android arm64, off-device with the Android NDK
 aarch64-linux-android34-clang -O2 -pthread runtime/fkwu-uni.c -o fkwu-android
 ```
 
-On a Mac with a GPU, link the Metal carrier into the same binary. Tensor
-programs run through `form/form-stdlib/native-tensor.bml`; the build lines are in
-[`AGENTS.md`](AGENTS.md). One binary; Metal is this host's organ, never a second
-executable.
+On a Mac with a GPU, build the Metal carrier beside the kernel: a dylib fkwu admits on its first Metal
+call, in the same process. Tensor programs run through `form/form-stdlib/native-tensor.bml`; the build
+lines are in [`AGENTS.md`](AGENTS.md).
 
 These commands are the temporary checkout witness, not the destination. The
 platform support membrane lives in Form at
@@ -124,8 +123,7 @@ Expected output:
 
 That is the minimum real-body grounding check after bootstrap: the local
 C-seeded runner is present, and it executes a real Form body cell through
-the direct source path. This is not file-only grounding and it does not use Go,
-flatten, or `T_flat`.
+the direct source path.
 
 ## Verify the bidirectional diagnostic protocol
 
@@ -157,6 +155,5 @@ That witness does not mean every concrete carrier exists on every platform. It
 means the Form body knows which targets are supported, which rows have metal
 evidence, which carriers are still pending, and how the checkout C seed shrinks.
 
-The direct source bootstrap is the standing entry; no flattened seed is required
-to ground or run the body. If a richer cell does not fit the source door, name
+The direct source bootstrap is the standing entry. If a richer cell does not fit the source door, name
 the actual coverage gap.

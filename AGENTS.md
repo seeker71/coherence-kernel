@@ -279,7 +279,7 @@ if [ "$(uname -s)" = Darwin ] && [ -f form/native/metal/fk-metal-carrier.m ]; th
     -framework Metal -framework Foundation -fobjc-arc
 fi
 
-# Windows (mingw-w64 / TDM-GCC) — temporary checkout witness with host-carrier libs
+# Windows (mingw-w64 / TDM-GCC) — not building today: fork, waitpid and mkfifo wait for their Windows twins (CURRENT_FLOOR.md)
 gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp
 ```
 
