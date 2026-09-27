@@ -24,17 +24,20 @@ Part of this is real today, and part is not yet. Here is which is which.
   and you can teach it more yourself.
 - When it does not have something, it says so. It will not say what is not.
 
-**Not yet:**
+**Not yet on your computer:**
 
-- It cannot talk with you in flowing sentences on its own. That voice is still
-  coming home. If a thinking companion today is what you came for, the talking
-  doors on [`WELCOME.md`](WELCOME.md) are yours — this page will still be here
-  when you want the body itself.
-- It cannot read your book or your draft yet.
+- Talking with you in flowing sentences. The body's own voice speaks today on the
+  Mac where the body lives, from a large model file kept outside the project; the
+  walk that brings that voice to your computer is still to come. If a thinking
+  companion today is what you came for, the talking doors on
+  [`WELCOME.md`](WELCOME.md) are yours — this page will still be here when you
+  want the body itself.
+- Thinking your book or your draft through with you. (It can search a folder of
+  your own files and print what it found — door 2 on [`WELCOME.md`](WELCOME.md)
+  names how.)
 
-The doors that can talk today borrow a voice from another company — those doors are
-on [`WELCOME.md`](WELCOME.md). This page will change when the body's own voice
-arrives. The page that watches that journey home is [`HOMECOMING.md`](HOMECOMING.md).
+The map of the voice as it stands is [`HOMECOMING.md`](HOMECOMING.md). This page
+will change when the voice can walk to your computer.
 
 ## Step 1 — get the project
 
@@ -48,8 +51,8 @@ Copy this line into it, then press return:
 git clone https://github.com/seeker71/coherence-kernel.git
 ```
 
-The download is about a gigabyte — a few minutes on good internet, longer on slow
-— and the window counts its progress the whole way.
+The download is large — a few minutes on good internet, longer on slow — and the
+window counts its progress the whole way.
 
 The first time, your Mac may show a window offering to install Apple's helper
 tools. They are free, and they are from Apple. Saying yes installs them — the
@@ -73,10 +76,10 @@ with Apple silicon (any new Mac), nothing needs to be built or installed. Type:
 ```
 
 (To check which chip your Mac has: click the Apple menu at the top-left, choose
-About This Mac, and read the Chip line. If it says Intel, this small program may
-not start — nothing is wrong. Step 3 still shows you the body is real; the
-teaching words in this step wait for a newer Mac, and this page will say when
-that changes.)
+About This Mac, and read the Chip line. If it says Intel, this small program does
+not start there — nothing is wrong. Step 3 builds the body's engine from its
+source on your own Mac; that walk is witnessed on Apple silicon, and an Intel
+Mac's first walk is still to come.)
 
 Type that line by itself and press return. It says hello:
 
@@ -223,8 +226,10 @@ you're trying to find.
 ```
 
 Every answer from this door names the real file it came from — here,
-[`WELCOME.md`](WELCOME.md) — so you can open the source and check it yourself. A
-few more it can answer today: `grounded what is trust?`, `grounded where do my
+[`WELCOME.md`](WELCOME.md) — so you can open the source and check it yourself. The
+body answers from its own index of the project's pages, and the `source-key` line
+names the exact version of the page it read; if the page has grown since, its
+words can differ a little from the answer. A few more it can answer today: `grounded what is trust?`, `grounded where do my
 words go?`, `grounded what is the north star?`. A question it has no ground for
 answers `grounded:miss` — an honest miss, never a guess.
 
@@ -244,8 +249,8 @@ Two more things, so nothing surprises you:
   That receives your question and keeps a note that you asked. My words for you: about, improve, learn, inquire, quit.
   ```
 
-- `help` begins by naming your words — then the long list after it is for the
-  people building the body.
+- `help` prints a long list. The part that starts *For you:* names your words;
+  the rest is for the people building the body.
 
 To leave, type `quit`.
 
@@ -262,27 +267,16 @@ cc -O2 -o fkwu runtime/fkwu-uni.c
 ./fkwu bootstrap/ground.fk
 ```
 
-The answer is `42`.
-
-You may also see a line or two that start with `fkwu: warning:`. That is normal on
-a fresh copy — the body is laying down its notes for next time. One line may
-mention `.dylib ... not installed` — that is the body noting a speed shortcut it
-can skip, not something missing from your Mac. Other such lines use hard words —
-*unusable*, *foreign*, *stale* — but they are always about its own old notes,
-never about you or your computer. Nothing is broken. The number on the last line
-is the answer.
-
-(On an older Mac with an Intel chip, the small program in step 2 may not start.
-This step still works there — the engine builds itself the same way and proves
-itself — though the teaching and question-receiving of Step 2 are not on this
-door yet.)
+The answer is `42`. If other lines appear above it, the number on the last line is
+the answer.
 
 ## If you came for your project, your book, your writing, or your life
 
-Today, this door can receive you, learn what you teach it, answer about itself
-with its ground shown, answer about the roots of words, and prove itself. It
-cannot yet think your question through with you — that part is still coming
-home. When it arrives, this page will say so plainly.
+Today, this door receives you, learns what you teach it, answers about itself
+with its ground shown, answers about the roots of words, and proves itself.
+Thinking your question through with you, in the body's own voice, happens today on
+the Mac where the body lives; when that voice can walk to your computer, this page
+will say so plainly.
 
 Teaching it your own words counts as real work today: a cookbook keeper can type
 `learn braise|slow heat|gentle cooking in a little liquid|the way Dad softened
@@ -300,8 +294,7 @@ git pull
 
 If you want a thinking companion today, the borrowed-voice doors are on
 [`WELCOME.md`](WELCOME.md). The promise Sema keeps there — no flattery, honest
-misses, questions that lift — is the same promise this door will keep in its own
-voice.
+misses, questions that lift — is the promise the body's own voice is held to.
 
 If anything on this page doesn't work, that is our failure, not yours. Write to
 **umuff71@gmail.com**.

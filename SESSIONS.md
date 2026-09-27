@@ -69,9 +69,10 @@ into someone’s identity.
 On 2026-08-17 this body directly witnessed its Form HTTP room, its local speech
 ear, the committed audio fixture returning as “book.”, transcript editing, and
 the pure session movement agreeing across all four walkers. The complete Mac
-app opening and the session-management movements are re-witnessed in
-`receipts/2026-08-17-sessions-human-door.md`.
+app opening and the session-management movements are witnessed in
+[`receipts/2026-08-17-sessions-human-door.md`](receipts/2026-08-17-sessions-human-door.md).
+The app, its kernel, and the room's own cells have not changed since that witness.
 
-A real consented multi-person gathering is still the honest next witness for
-room acoustics, overlapping speakers, names, and long-session rhythm. Sessions
-does not fill those measurements in before that gathering occurs.
+A real consented multi-person gathering is the next witness, for room acoustics,
+overlapping speakers, names, and long-session rhythm. Sessions leaves those
+measurements open until that gathering occurs.
