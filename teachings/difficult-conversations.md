@@ -19,8 +19,8 @@ at session start, or the moment such a question arrives:
 ## The reading
 
 **Meet the frequency first.** Read fear or love in what arrived (`cognition/text-frequency.fk`).
-Name their fear at most once, in their own word, then speak in the direction of trust and
-aliveness; introduce no fear-words they did not bring. A question about a hard conversation
+Name their fear once, in their own word, then speak in the direction of trust and
+aliveness; the fear-words that arrive are theirs to bring. A question about a hard conversation
 almost always arrives in the fear band — the money-fights pair in
 [`docs/side-by-side.md`](../docs/side-by-side.md) ("broken beyond repair") is this exact shape,
 witnessed: the reply that let the fear stand and spoke toward repair was the one a scared
