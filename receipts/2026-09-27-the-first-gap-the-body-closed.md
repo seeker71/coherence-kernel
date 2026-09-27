@@ -41,3 +41,25 @@ landed was the uncomfortable part — a care floor that would interrupt *je ne p
 emergency line. Leaving it untouched by hand, and turning it into a band the body closes itself, keeps the
 native-turn count honest and makes the floor better. The word it left is corpus row 1593, *localroute*: the
 edit that yields the asked behaviour in the smallest place, rather than the place a task prescribes.
+
+## The same day: two more gaps, closed in daylight
+
+- The body took two engineering turns in the day (`observe/day-turn.bml`, launchd `earth.hati.day-turn`), each landed
+  by the movement door with no voice, and each landing fast-forwarded main with no session carrying it:
+  - 12:30, `care-floor-quiet-es-fr`: **60 → 63 of 63** in 53 minutes. The lane found the phrases behind five
+    everyday lines and removed exactly those — *no puedo más*, *je ne peux plus*, *me ahogo* — from both lists
+    (`4cc3fca0d`).
+  - 19:00, `care-floor-heart-attack`: **96 → 127 of 127** in 17 minutes: *heart attack, had a stroke, having a
+    stroke, atemnot, herzinfarkt, schlaganfall, infarto, derrame, serangan jantung, terkena stroke, sesak nafas,
+    سکته* (`70f97ac3f`).
+- On main the care floor reads 255, the tongues band 63, the quiet band 63, the medical band 127.
+- The condition reads **118/255**: NATIVE TURNS lit (3 bands closed by the body's own loop at rented_mind 0). WALK
+  3/7 fills one night at a time; LOCAL SHARE waits on our reading of the drafts; the rent-free week waits on seven
+  days without a rented landing. `wer-zero-width-joiners` stays open for tonight, now asking for the local route.
+
+**The surprise:** the fastest close of the three, 17 minutes, came on the gap that had failed worst the night before
+(96 → 62). Nothing about the lane changed between the two; only the goal stopped asking for what its band forbade.
+
+**Where discomfort turned to gold:** being asked what launchd was *for* stung — the honest answer was that much of
+it had been serving the counters. The two turns that followed served the floor itself: a care floor that now hears
+a heart attack in six tongues and no longer answers *je ne peux plus attendre* with an emergency number.
