@@ -79,9 +79,7 @@ carrier once, Form generates the Metal kernel from the recipe children, the valu
 returns as a typed observation into the same original-ID/KV session, and the
 session continues (`form-recipe-exec-token-band` 1048575;
 `form-recipe-exec-token-live-band` needs the resident model and declares its
-own). `form-cli-recipe-exec-cursor-band` answers 33357823 of 33554431: its
-returned-timeout lifecycle claim (65536) and its mixed-choice lifecycle claim
-(131072) are open. That is one live affine Metal thought, not yet CPU parity or a
+own). `form-cli-recipe-exec-cursor-band` answers 33554431. That is one live affine Metal thought, not yet CPU parity or a
 recursive model-authored recipe-birth run.
 
 ## Effective Form reasoning in practice
