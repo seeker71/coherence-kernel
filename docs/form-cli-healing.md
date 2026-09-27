@@ -2,7 +2,10 @@
 
 The `heal` verb turns a failing source/band pair into a checked repair attempt.
 The policy, candidate edits, resource order, verification decision, and learning
-live in executable BML. The working tree changes only after verification.
+live in executable BML. Every local model that proposes a repair runs inside
+`fkwu` on this machine; no model server or HTTP model service takes part. The
+only outside proposer is the caller's explicit `remote` door. The working tree
+changes only after verification.
 
 `heal guide` reads current Python detours and available native references;
 `heal guide|<proposed command>` guides a command without running it. The acting
@@ -18,11 +21,12 @@ heal model/example.fk|model/tests/example-band.fk|255|30|local
 ```
 
 The paths above illustrate the syntax; supply the actual production source,
-its existing checker, and its exact expected stdout. Healing stays local when
-the final mode is omitted or is `local`; neither path invokes the remote CLI
-probe. A final `remote` field explicitly authorizes one Codex CLI attempt after
-the offered local routes have completed or reported their inability.
-The checker timeout defaults to 30 seconds and accepts 1–120 seconds.
+its existing checker, and its exact expected stdout. Healing stays native when
+the final mode is omitted or is `local`; neither spelling launches the remote
+CLI probe. A final `remote` field is the caller's explicit provider door: it
+authorizes one Codex CLI attempt after every native route has completed or
+reported its inability. The checker timeout defaults to 30 seconds and accepts
+1–120 seconds.
 
 The same native recipe has a stdin door:
 
@@ -49,36 +53,36 @@ alongside the state.
 3. Replay matching verified repair examples. Try at most eight deterministic
    candidates, including closers before nested definitions and at EOF. Each is
    a hypothesis; the checker decides whether it survives.
-4. Read the model registry and build a native resource plan. Models with
-   `answer`, `fast-answer`, or `code` roles are eligible when their artifact,
-   seal, tokenizer index, and wired native session lane are present. Each
-   ineligible row records its reason; duplicate eligible artifact paths share
-   one attempt. Try a registered, evaluated, compatible Qwen output-head
-   adapter for any eligible model, then each eligible base model in registry
-   order. Admission and generation use dynamic observation without a lifetime
-   deadline. The existing
-   session and adapter APIs own model state and release it.
-5. Query the local Ollama service and assign diagnosis, patch, and review roles.
-   Selection prefers names containing `reason`, `coder`, and `qwen`, respectively,
-   and otherwise uses the first observed local model. Roles may share a model;
-   that is not independent-model validation. The patch is eligible only after
-   the reviewer returns exactly `ACCEPT`. The outer process uses dynamic
-   observation. Form reads the loopback NDJSON stream through curl and retains
-   partial responses as they arrive. This client sets no generation lifetime
-   or token limit; the service and model retain their own context limits.
-6. With explicit `remote` authorization, require a valid native inventory, a
-   completed candidate check or refusal for each planned native model, and receipts for the adapter and local model
-   roles before using the existing exact frontier-admission predicate. A model
-   starting or returning text does not establish completion. An invalid or
-   oversized inventory leaves remote fallback closed. An invocation-specific claim allows at most
-   one remote call, including after failure. Codex receives the bounded repair
-   prompt in an empty directory with read-only permissions, ephemeral mode,
-   and no user configuration. Its answer is another proposed local edit.
-   `frontier-return.json` binds the actual process, reply, checker and retained
-   session experience. An absent process or reply remains absent. The repair
-   result does not assert a gradient update or promotion; `learning.jsonl` and
-   session status carry those separate stages. Prompt and answer bytes stay
-   private; the health flow carries the receipt reference.
+4. Ask the shared native session learner through
+   `observe/native-session-learning-run.fk` when it holds a serving repair
+   adapter and this failure is not an unchanged, already-failed prediction.
+   Its reply is a proposal like any other.
+5. Read the model registry through `observe/form-cli-heal-model-run.bml` and
+   build a native resource plan. Models with `answer`, `fast-answer`, or `code`
+   roles are eligible when their artifact, seal, tokenizer index, and wired
+   native session lane are present. Each ineligible row records its reason;
+   duplicate eligible artifact paths share one attempt. Try a registered,
+   evaluated, compatible Qwen output-head adapter for any eligible model, then
+   each eligible base model in registry order. Each attempt runs in a child
+   `fkwu` process with dynamic observation and no lifetime deadline; the
+   existing session and adapter APIs own model state and release it.
+6. When the native plan is exhausted, the remote door stays closed unless the
+   caller wrote `remote`; the closed door is recorded as a health reading that
+   withholds the remote process. With explicit `remote` authorization, require
+   a valid native inventory, a completed candidate check or refusal for each
+   planned native model, and receipts for the session-learner, adapter and
+   native-admission stages before the exact frontier-admission predicate. A
+   model starting or returning text does not establish completion. An invalid
+   or oversized inventory leaves the remote door closed. An
+   invocation-specific claim allows at most one remote call, including after
+   failure. Codex receives the bounded repair prompt in an empty directory with
+   read-only permissions, ephemeral mode, and no user configuration. Its answer
+   is another proposed local edit. `frontier-return.json` binds the actual
+   process, reply, checker, provider usage and retained session experience. An
+   absent process or reply remains absent. The repair result does not assert a
+   gradient update or promotion; `learning.jsonl` and session status carry
+   those separate stages. Prompt and answer bytes stay private; the health flow
+   carries the receipt reference.
 
 Accepted model responses contain one exact unique old/new replacement. Ambiguous
 matches, commentary around the replacement, empty output, and oversized edits
@@ -117,8 +121,8 @@ Form adapts the observation interval to the last progress gap; silence offers
 process inspection, and observed progress continues. Quick processes finish
 immediately. Observation cadence ranges from one to thirty seconds, not a
 requirement to consume that time. CPU time and RSS are process observations,
-not proof of useful reasoning. A silent live process currently needs explicit
-stop control; the policy does not yet classify semantic stalls automatically.
+not proof of useful reasoning. A silent live process needs explicit stop
+control; the policy does not yet classify semantic stalls automatically.
 
 Write `stop` to the recorded `<stage>.control` file to cancel a dynamic stage.
 The supervisor records Form's offered, selected, and applied action, signals
@@ -132,11 +136,10 @@ Native generated bytes arrive incrementally in `<stage>.reply.partial` while
 metadata identifies route, model and base seal, frozen adapter path/hash/state,
 prompt count, cumulative output count, and position. Counts are cumulative,
 not a sum of successive readings. Completion publishes `.reply` only after EOS
-and resource release. Context capacity still bounds each native request;
-continuous context recycling and a resident model across these requests remain
-unimplemented. Ollama exposes its actual token totals on its final response;
-earlier stream chunks remain byte observations, never invented token counts.
-Remote-provider token telemetry remains a gap.
+and resource release. Context capacity bounds each native request; continuous
+context recycling and a resident model across these requests are not yet part
+of this lane. The remote door's usage is read from `codex exec --json` turn
+completions; totals stay unknown when that evidence is missing or incomplete.
 
 Each bounded process records its wall-clock start/end, monotonic elapsed time,
 budget, stage transitions, deadline signal, and reaped process status. Native
@@ -170,8 +173,8 @@ heal report|.form-heal/<eval-native-run>/<case>/evidence
 ```
 
 Reports retain lifecycle and opaque stage information without copying prompt
-or answer text into diagnostic events. An older run without process boundary
-events needs a fresh observation; the reporter does not fabricate its timeline.
+or answer text into diagnostic events. A run without process boundary events
+needs a fresh observation; the reporter does not fabricate its timeline.
 Cancellation observes descendants before termination and signals children in
 their separate groups too. An incomplete evaluation retains its source tree
 and unfinished evidence. Evaluation traces separate snapshot preparation,
@@ -199,14 +202,13 @@ row must avoid regression against both the preceding candidate and the serving
 adapter before promotion. The per-row scores, checkpoints, source seals, actual
 process exits and timing stay under `.hearth/session-learning/`.
 
-After deterministic repair and verified memory, healing attempts the evaluated
-session adapter before the existing native/local model inventory. Its generated
-replacement still has to pass the unchanged isolated checker. Failure continues
-through local resources and models. The explicitly selected `remote` mode can
-admit an external CLI after the local routes are exhausted.
-`session status`, `session pause` and `session resume` expose the shared learner.
-See [Native session learning](native-session-learning.md) for the exact scope
-and the distinction between validation loss and demonstrated repair quality.
+The session adapter's proposal passes through the same unchanged isolated
+checker; failure continues through the native plan. Only the explicitly
+selected `remote` mode admits an external CLI, after the native routes are
+exhausted. `session status`, `session pause` and `session resume` expose the
+shared learner. See [Native session learning](native-session-learning.md) for
+the exact scope and the distinction between validation loss and demonstrated
+repair quality.
 
 ## Measure repair behavior before training
 
@@ -261,29 +263,28 @@ repair-heldout-v1|model-name|base-sha256|adapter-sha256|passed|total|regressions
 Admission requires a positive, complete held-out count, zero recorded
 regressions, matching actual hashes, and the native adapter's shape/device
 check. Creating this registration is an evaluation attestation; the healer
-does not manufacture one. The current native adapter door
-supports the existing Qwen rank-one output-head format. Other adapter formats
-need their own compatible inference transport and evaluation.
+does not manufacture one. The native adapter door supports the Qwen rank-one
+output-head format. Other adapter formats need their own compatible inference
+transport and evaluation.
 
 ## Present limits
 
 The snapshot is filesystem isolation, not an OS sandbox for arbitrary test
 code. Run trusted repository checks: absolute-path effects in a checker can
 still reach host resources. The healing path requires fkwu and ordinary host
-utilities (git, tar, cp, ps, sh; curl for loopback HTTP). It runs no Python.
+utilities (git, tar, cp, ps, sh). It runs no Python and no model server.
 Form owns process supervision, snapshot hashes, guarded replacement, stream
-parsing, choices, reports, evaluation, and native adapter fitting. No C seed
-runtime meaning was added.
+parsing, choices, reports, evaluation, and native adapter fitting. Healing
+carries no C seed runtime meaning.
 
-The local model registry is an inventory, not a claim that every listed model
-has a working native lane. The healer offers every eligible native artifact
-in that registry and three local model roles; it does not exhaustively discover
-or try every model installed elsewhere. Dynamic stages may continue until
-completion or explicit cancellation. Seal presence is a discovery fact; the native runner
-still validates the seal on admission. An
-offline Ollama service is reported as unavailable, not started or installed.
-Base GGUF files and seed adapters remain unchanged; learning writes separate
-LoRA candidates when enabled.
+The model registry is an inventory, not a claim that every listed model has a
+working native lane. The healer offers every eligible native artifact in that
+registry; it does not discover or try models installed elsewhere. A registry
+row may point into another tool's on-disk store; those files are GGUF bytes
+read as input data. Dynamic stages may continue until completion or explicit
+cancellation. Seal presence is a discovery fact; the native runner still
+validates the seal on admission. Base GGUF files and seed adapters remain
+unchanged; learning writes separate LoRA candidates when enabled.
 
 The remote CLI options are verified against the installed `codex exec --help`
 and [official non-interactive documentation](https://learn.chatgpt.com/docs/non-interactive-mode).
@@ -298,6 +299,7 @@ form-run sh -c 'printf "%s\n" form/form-stdlib/tests/form-cli-heal-policy-band.f
 form-run ./fkwu form/form-stdlib/tests/form-cli-heal-policy-band.fk
 form-run ./fkwu form/form-stdlib/tests/form-cli-heal-resources-band.fk
 form-run ./fkwu form/form-stdlib/tests/form-cli-heal-load-band.fk
+form-run ./fkwu form/form-stdlib/tests/form-cli-native-guide-band.fk
 form-run ./fkwu observe/form-cli-heal-native-io-witness.bml
 form-run ./fkwu form/form-stdlib/tests/form-cli-heal-eval-policy-band.fk
 form-run sh -c 'printf "%s\n" eval | ./fkwu observe/form-cli-heal-run.fk'
@@ -310,15 +312,16 @@ form-run ./fkwu observe/native-session-homecoming-run.fk
 ```
 
 Policy authority: `form/form-stdlib/bml/form-cli-heal-policy.bml`.
-Process, generation and session-learning health now travels as organ-owned
+Process, generation and session-learning health travels as organ-owned
 events during real execution. Read an event path with
 `./fkwu observe/organ-health-run.bml`, or submit an argv request to
 `./fkwu observe/form-cli-heal-process-run.bml`. The latter returns the actual
 status and current health/needs without a separate regression fixture.
 The shared protocol and resource requests live in `docs/live-dynamic-diagnostics.md`.
-The separate `form-cli-heal-native-learning-witness.bml` measures the older
-Qwen activation-probe objective; it is not the production session learner.
+The separate `form-cli-heal-native-learning-witness.bml` measures the
+activation-probe objective; it is not the production session learner.
 Native resource planning: `form/form-stdlib/bml/form-cli-heal-resources.bml`.
+Native model door: `observe/form-cli-heal-model-run.bml`.
 Evaluation curriculum: `form/form-stdlib/bml/form-cli-heal-eval-policy.bml`.
 Executable movement: `form/form-stdlib/bml/form-cli-heal.bml`.
 Repair teaching: `teachings/form-cli-healing.md`.
