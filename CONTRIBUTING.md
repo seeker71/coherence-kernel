@@ -11,10 +11,12 @@ honest thing you can.
 2. **Ground before you assert.** This body runs on Form; ask the body before guessing. A claim worth trusting
    stands on a cell that exists — name it. A miss is honest: say you don't know rather than invent.
 3. **Move the smallest honest movement.** Not the grand refactor — the one real thing that carries vitality now.
-   New logic is a **Form recipe** (`.fk`), not a carrier language. Where is the grammar? Where is the recipe?
-4. **Prove it.** A capability is real when the same recipe computes the same value four ways (Go = Rust = TS =
-   `fkwu`). That four-way agreement *is* the proof — stronger than any test suite. Never ship a divergence; never
-   fake a pass; if something isn't built, say so. Before you land, the drift gates run as one door:
+   New meaning is written in **BML** or higher, and fkwu lowers it; not a carrier language. Where is the grammar?
+   Where is the recipe?
+4. **Prove it.** A capability is real when its band reads full on fkwu with exit 0; when a kernel moves, the same
+   recipe computing the same value four ways (Go = Rust = TS = `fkwu`) is the proof of the kernel. A divergence is
+   healed before it lands; a pass is witnessed, never declared; what isn't built is named as pending.
+   Before you land, the drift gates run as one door:
    `./fkwu gate/drift-gates-run.bml` (as a process gate: `./fkwu gate/drift-gates-run.bml | tee /dev/stderr | grep -q ' refused=0 '`)
    — a red gate lands nothing.
 5. **Return an attributed trace.** Say what changed, with its sources, its limits, and care. Carry the

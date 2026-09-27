@@ -75,10 +75,10 @@ honest. The seam is named there plainly: the body is native; the *voice* is stil
 # macOS / Linux
 cc -O2 -o fkwu runtime/fkwu-uni.c
 
-# Windows (mingw-w64 / TDM-GCC) — adds the host-carrier libs
+# Windows (mingw-w64 / TDM-GCC) — not building today: fork, waitpid and mkfifo wait for their Windows twins (CURRENT_FLOOR.md)
 gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp
 
-# verify it runs a real body cell — native, no Go / no flatten / no T_flat
+# verify it runs a real body cell
 ( cat form/form-stdlib/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > nvr.fk
 ./fkwu nvr.fk             # -> 11111   (bit-identical to the four-way proof walkers)
 ```
