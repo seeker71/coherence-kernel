@@ -18,17 +18,22 @@ reason. Omitted provider permission keeps the request native-only.
 printf '%s\n' '{"movement":"nightly","provider":{"allowed":1}}' | ./form-run ./fkwu observe/rent-walk-run.bml
 ```
 
-The body walks on its own schedule on this Mac. `observe/scheduled-walk.bml` brings
-its checkout to the branch head, builds the kernel and the Metal carrier when they
-are stale, and makes the one movement call; `docs/launchd/earth.hati.rent-walk.plist`
-runs it at 03:30 from the walk checkout `/Users/ursmuff/source/coherence-kernel-walk`,
-a worktree that owns the branch. No rented mind is in the movement, so it carries no
-transcript and leaves no flow row; the rent ledger row and the landing are its witness.
+The body walks on its own schedule on this Mac, from the walk checkout
+`/Users/ursmuff/source/coherence-kernel-walk`, a worktree whose branch follows main
+(`form-stdlib/bml/host-walk.bml`: it rebases onto main, builds the kernel and the Metal
+carrier when they are stale, and each landing fast-forwards main itself).
+`docs/launchd/earth.hati.rent-walk.plist` runs `observe/scheduled-walk.bml` at 03:30:
+native engineering turns, six drafts for our reading, and the one movement call.
+`docs/launchd/earth.hati.day-turn.plist` runs `observe/day-turn.bml` at 12:30 and
+19:00: one native turn, landed without the voice. No rented mind is in either, so they
+carry no transcript and leave no flow row; the rows and the landing are their witness.
 
 ```sh
 cp docs/launchd/earth.hati.rent-walk.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/earth.hati.rent-walk.plist
 launchctl kickstart -k gui/$(id -u)/earth.hati.rent-walk   # walk now instead of waiting for 03:30
+cp docs/launchd/earth.hati.day-turn.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/earth.hati.day-turn.plist
 ```
 
 Each row carries when, the movement's name, which voice answered, rent
