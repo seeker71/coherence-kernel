@@ -1,5 +1,6 @@
 #!/bin/sh
-# Run the three real, daily-comparable north-star flows.  Each child carrier
+# Run the two real, daily-comparable north-star flows: the session world model
+# and session grounding.  Each child carrier
 # persists its own Form-approved report; this shell writes only a compact
 # overview of those already-computed verdicts.
 
@@ -9,7 +10,6 @@ set -eu
 temp_dir=$(nm_new_temp_dir)
 world="$temp_dir/world"
 grounding="$temp_dir/grounding"
-lineage="$temp_dir/lineage"
 
 cleanup() {
     rm -rf "$temp_dir"
@@ -79,10 +79,9 @@ nm_reuse_child_report() {
 
 reuse_world=${NATIVE_MODEL_REAL_FLOWS_WORLD_REPORT:-}
 reuse_grounding=${NATIVE_MODEL_REAL_FLOWS_GROUNDING_REPORT:-}
-reuse_lineage=${NATIVE_MODEL_REAL_FLOWS_LINEAGE_REPORT:-}
-if [ -n "$reuse_world$reuse_grounding$reuse_lineage" ]; then
-    if [ -z "$reuse_world" ] || [ -z "$reuse_grounding" ] || [ -z "$reuse_lineage" ]; then
-        printf 'real-flow reuse requires all three child report paths\n' >&2
+if [ -n "$reuse_world$reuse_grounding" ]; then
+    if [ -z "$reuse_world" ] || [ -z "$reuse_grounding" ]; then
+        printf 'real-flow reuse requires both child report paths\n' >&2
         exit 1
     fi
     execution_mode=verified-existing-child-reports
@@ -92,9 +91,6 @@ if [ -n "$reuse_world$reuse_grounding$reuse_lineage" ]; then
     nm_reuse_child_report "$grounding" "$reuse_grounding" \
         "${NATIVE_MODEL_REAL_FLOWS_GROUNDING_SHA256:-}" \
         grounding_report_sha256 grounding_report_path
-    nm_reuse_child_report "$lineage" "$reuse_lineage" \
-        "${NATIVE_MODEL_REAL_FLOWS_LINEAGE_SHA256:-}" \
-        lineage_report_sha256 lineage_report_path
 else
     execution_mode=fresh-child-execution
     "$NM_SCRIPT_DIR/native_model_session_world.sh" > "$world"
@@ -107,14 +103,6 @@ else
     nm_require_report_value "$grounding" raw_query_persisted 0
     nm_require_report_value "$grounding" grounding_band 4095
     nm_bind_child_report "$grounding" grounding_report_sha256 grounding_report_path
-    "$NM_SCRIPT_DIR/native_model_lineage.sh" > "$lineage"
-    nm_require_report_value "$lineage" lineage_valid 1
-    nm_require_report_value "$lineage" q4_copy_equality 1
-    nm_require_report_value "$lineage" served_event_bound 1
-    nm_require_report_value "$lineage" edges_valid 4
-    nm_require_report_value "$lineage" edges_successful 4
-    nm_require_report_value "$lineage" lineage_band 33554431
-    nm_bind_child_report "$lineage" lineage_report_sha256 lineage_report_path
 fi
 
 nm_require_report_value "$world" world_model_valid 1
@@ -127,23 +115,15 @@ nm_require_report_value "$grounding" raw_query_persisted 0
 nm_require_report_value "$grounding" grounding_band 4095
 nm_bind_child_report "$grounding" grounding_report_sha256 grounding_report_path
 
-nm_require_report_value "$lineage" lineage_valid 1
-nm_require_report_value "$lineage" q4_copy_equality 1
-nm_require_report_value "$lineage" served_event_bound 1
-nm_require_report_value "$lineage" edges_valid 4
-nm_require_report_value "$lineage" edges_successful 4
-nm_require_report_value "$lineage" lineage_band 33554431
-nm_bind_child_report "$lineage" lineage_report_sha256 lineage_report_path
-
 day=$(date -u +%Y%m%d)
 epoch=$(date +%s)
 durable="$NM_STATE_DIR/real-flows-${day}-${epoch}.txt"
 {
-    printf 'schema=native-model-real-flows-v1\n'
+    printf 'schema=native-model-real-flows-v2\n'
     printf 'day=%s\n' "$day"
     printf 'execution_mode=%s\n' "$execution_mode"
-    printf 'flows_expected=3\n'
-    printf 'flows_valid=3\n'
+    printf 'flows_expected=2\n'
+    printf 'flows_valid=2\n'
     printf 'session_world_decision=%s\n' \
         "$(nm_report_value "$world" candidate_decision)"
     printf 'session_world_accuracy_ppm=%s\n' \
@@ -174,32 +154,14 @@ durable="$NM_STATE_DIR/real-flows-${day}-${epoch}.txt"
         "$(nm_report_value "$grounding" contract_identity_changed)"
     printf 'session_grounding_comparison_admissible=%s\n' \
         "$(nm_report_value "$grounding" comparison_admissible)"
-    printf 'lineage_dag_sha256=%s\n' \
-        "$(nm_report_value "$lineage" dag_sha256)"
-    printf 'lineage_artifact_drift_ppm=%s\n' \
-        "$(nm_report_value "$lineage" artifact_drift_ppm)"
-    printf 'lineage_edges_valid=%s\n' \
-        "$(nm_report_value "$lineage" edges_valid)"
-    printf 'lineage_edges_reviewed=%s\n' \
-        "$(nm_report_value "$lineage" edges_reviewed)"
-    printf 'lineage_edges_authorized=%s\n' \
-        "$(nm_report_value "$lineage" edges_authorized)"
-    printf 'lineage_edges_successful=%s\n' \
-        "$(nm_report_value "$lineage" edges_successful)"
-    printf 'lineage_authority_ready=%s\n' \
-        "$(nm_report_value "$lineage" authority_ready)"
     printf 'world_report_sha256=%s\n' \
         "$(nm_report_value "$world" world_model_report_sha256)"
     printf 'grounding_report_sha256=%s\n' \
         "$(nm_report_value "$grounding" grounding_report_sha256)"
-    printf 'lineage_report_sha256=%s\n' \
-        "$(nm_report_value "$lineage" lineage_report_sha256)"
     printf 'world_report_path=%s\n' \
         "$(nm_report_value "$world" world_model_report_path)"
     printf 'grounding_report_path=%s\n' \
         "$(nm_report_value "$grounding" grounding_report_path)"
-    printf 'lineage_report_path=%s\n' \
-        "$(nm_report_value "$lineage" lineage_report_path)"
 } > "$durable"
 chmod 600 "$durable"
 digest=$(nm_sha256_file "$durable")
