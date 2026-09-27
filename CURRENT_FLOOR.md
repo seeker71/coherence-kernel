@@ -1,1706 +1,279 @@
 # Current Floor
 
-Measured on this Apple M4 Max through the resolver-driven `./fkwu` door (the
-binary passes the freshness band, 31), every band compiled fresh from source in
-one pass with its `.fkb`/`.sym` beside it removed first. Receipts hold history;
-this page holds only what stands. A claim without a number names the band that
-declares its own.
+What stands in this body today, read on 2026-09-28 (WITA) on this Apple M4 Max through `./fkwu`, the
+binary passing its freshness band. Every line names the command that reads it. A verdict counts only
+when the process also exits 0 — a green number over a nonzero exit is a fold over `nothing`. Bands ran
+on the warm images beside their sources while sibling sessions loaded the host, so no timing on this
+page was taken today; a number that comes from an earlier run names its receipt.
+
+The organ map is [`MANIFEST.md`](MANIFEST.md), how to build and embody is [`AGENTS.md`](AGENTS.md), the
+ground is [`axioms/core-axioms.form`](axioms/core-axioms.form), and the direction is
+[`docs/local-agent-goal.form`](docs/local-agent-goal.form). How we got here lives in git and `receipts/`.
 
 ## Grounding
 
-```text
-cc -O2 -o fkwu runtime/fkwu-uni.c
-cc -O2 -dynamiclib -o form/native/metal/fk-metal-carrier.dylib \
-  form/native/metal/fk-metal-carrier.m \
-  -framework Metal -framework Foundation -fobjc-arc
+Build lines live in [`AGENTS.md`](AGENTS.md) (`cc -O2 -o fkwu runtime/fkwu-uni.c`, and the Metal
+carrier dylib fkwu admits in the same process).
 
-./fkwu bootstrap/ground.fk                                    -> 42
-./fkwu bootstrap/ground-recursive.fk 10                       -> 55
-./fkwu form/form-stdlib/tests/binary-freshness-band.fk        -> 31
-./fkwu bootstrap/ground-numeric-list.fk                       -> [1, 2.5, [3, 4]]
-./fkwu form/form-stdlib/tests/native-vs-rented-band.fk        -> 11111
-./fkwu proof/four-way-run-recipe42.fk                         -> 0   (FOUR-WAY)
+```text
+./fkwu bootstrap/ground.fk                                -> 42
+./fkwu bootstrap/ground-recursive.fk 10                   -> 55
+./fkwu form/form-stdlib/tests/binary-freshness-band.fk    -> 31
+./fkwu bootstrap/ground-numeric-list.fk                   -> [1, 2.5, [3, 4]]
+./fkwu form/form-stdlib/tests/native-vs-rented-band.fk    -> 11111
+./fkwu proof/four-way-run-recipe42.fk                     -> 0   (FOUR-WAY)
 ```
 
-The four-way proof host-execs the three minimal walkers; they build from
-`walkers/README.md`'s own lines (`go build -o walker .` in `walkers/go`,
-`cargo build --release` in `walkers/rust`, node 26 runs `walkers/ts/main.ts`
-directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
-honest reading of an unbuilt walker, not a kernel fault.
+The four-way cell host-execs the three minimal proof walkers, built from `walkers/README.md`'s own
+lines; with them unbuilt it answers 2 (WALKER-SUSPECT) — both readings taken today, before and after
+building them.
 
-`runtime/fkwu-uni.c` is    24,357 lines (15 Sep 2026) — a temporary seed and shrink target, not
-the destination (`release-ledger.bml` R13); this week's growth on it is
-correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
-preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
-frame in shared memory, the content-keyed lowering lane, the frame pacer and
-terminal doors, `kernel_hot`), the speaking mouth, and the three doors that end
-the shell — each of those last two families paying for itself by taking a host
-process out of a lane that had one only for want of a door.
+`runtime/fkwu-uni.c` is 25,483 lines (`wc -l`), last changed 2026-09-15 (`git log -1`). It is the
+seed, and it shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R51–R56).
 
 ## Body-wide witnesses
 
 ```text
-gate/structural-gate-run.fk            -> [206, 0, 48, 3, 20, 57, 74, 4] then 1
-gate/tests/structural-gate-band        -> 8191
-observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=12063000
-observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
-                                          (13 orphans, 29 broken, 46 candidates; the organ
-                                          has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 934 rows, 915 admissible; 15 Sep 2026)
-value-eq-arena-band                    -> 31      (a comparison does not depend on where its
-                                                   answer sits: counts, under arena pressure,
-                                                   how often value_eq and str_eq disagree about
-                                                   freshly built values — 0 each; four arms)
-no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
-form-cli-author-high-band              -> 4095
-host-os-membrane-band                  -> 8191
-bidirectional-framebuffer-channel-band -> final field 1
-import-carry-band                      -> 63      (cold and warm; it prints its verdict, the trailing
-                                                   0 is print's own value; with a fixture image from
-                                                   a different fkwu build beside it, 15 — door 0, told)
+./fkwu gate/drift-gates-run.bml          -> drift-gates pass=8191 full=8191 refused=0
+                                            (13 rows; kernel-conformance sits out while no kernel
+                                            source moved since origin/main)
+./fkwu gate/structural-gate-run.fk       -> structural-gate-v3 [92, 0, 29, 0, 18, 0, 45] then 1
+                                            (total/unclassified/carrier/oracle/fixture/
+                                            proof-sibling/tooling)
+gate/tests/structural-gate-band          -> 16383
+./fkwu observe/door-link-health-run.bml  -> doors=12 links=120 broken=0 code=12120000
+./fkwu observe/belief-stamps.bml         -> 534499010  (field stamped*10^6 + owed*10^3 + laws)
+observe/tests/belief-rewitness-band      -> 63
+./fkwu form/form-stdlib/release-ledger.bml -> open=34 moving=0 released=107
+learn/tests/homecoming-distillation-corpus-band -> 32767  (asserts 981 rows, 962 admissible)
+value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
+host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
 pattern-match-band 511 · choice-lane-core-band 1023 · control/tests/offer-ack-core-band 2097151
-control-invite-grammar-band 1023 · node-introspection-band 4095
-cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15 · core-str-find-equivalence-band 2047
+control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
 ```
+
+Every tracked cell's `witnessed:` stamp is read into the belief lens, oldest first; the re-witness door
+(`observe/belief-rewitness.bml`) renews a stamp only from a fresh band run and reports a mismatch as a
+lapse. The release ledger's open rows are the body's named work, each with its witness.
 
 ## The BML floor
 
-A unit lowers by what it carries: any file with a `section [` block on a line
-of its own — `form.bml`, `form.lift`, `form.action`, `form.route`, the `*.bmf`
-grammar dialects — travels through `bml-floor-compile` whatever its extension,
-as a prelude or as the main file, and fkwu owns the `.lowfk`/`.fkb` cache
-beside it. 75 `[form.bml]` files and the twelve `[form.lift]` sources wear
-`.bml`; `compiler.fk` and the ten `grammars/*-bmf.fk` carry their blocks
-mid-file and lower in place. `true` and `false` are literals in the dialect; a
-nested `defn` is a registered function with one-level capture; a `let` inside a
-`(do …)` never reaches a `defn` frame (top-level lets do).
+A unit lowers by what it carries: any file with a `section [` block — `form.bml`, `form.lift`,
+`form.action`, `form.route`, the `*.bmf` grammar dialects — travels through `bml-floor-compile`
+whatever its extension, as a prelude or as the main file, and fkwu keeps the `.lowfk`/`.fkb` cache
+beside it. Of 1,344 tracked `.bml` files, 1,071 carry a `section [form.bml]` block; nine `.fk` files
+carry one mid-file and lower in place; eleven files carry `section [form.lift]` (`git ls-files`,
+`git grep -l`). `true` and `false` are literals in the dialect, and a nested `defn` is a registered
+function (the two nested-defn bands below).
 
 ```text
-bml-band                               -> 268435455
-bml-generics-band                      -> 16777215
-native-route-goal-cells-band.bml       -> 1048575  (full)
-nested-defn-scope-band                 -> 63
-nested-defn-closure-capture-band       -> 63
-bml-float-literal-band                 -> 2047     (a decimal float reads back as the same float
-                                                     from eleven positions; the emitter refuses an
-                                                     unknown leaf by name instead of writing "")
-bml-form-size-band                     -> 127      (one 40 KB `def` in a single form lowers and
-                                                     answers; the normalizer walks spans as a tail
-                                                     loop, so one statement's size sets no wall)
-cell-channel-band                      -> 4095     (two cells as processes on spool+bell, a shared
-- `form/form-stdlib/tests/ear-native-band.fk` = 32767 — whisper-tiny as the body's own pass on this metal (native mic stream, weights off the npz, sixteen emitted kernels, base64 words); log-mel equal to the reference to six digits, the 30 s encoder output to five; a layernorm's row statistics computed once per row rather than once per column tile, the weight tile staged in the half it already is (a mixed simdgroup multiply into a float accumulator, not one bit lost), the cross attention split over head AND key chunk with a fold behind it, the argmax in two stages, four logit rows a simdgroup, and q/k/v one dispatch, the shapes that change between calls in a device word so every layer binding is a stored string; the two kernel shapes that were choices — the K step and the queries a group — were settled by emitting both and timing them in one process, so the same GPU crowd fell on both; an 8 s window encodes in 3.3 ms (2.9 on the GPU) and a token costs 0.6 ms when the machine is the body's alone, and both readings await a quiet machine to be taken again; the live window is the last 8 s of real room audio, the cut is the decoder's first timestamp, and a line ends where the world ends it. A live lane holds that window as the mic's own 3200-byte chunks, and `enw-encode-parts` takes it still in pieces — each written straight into the device buffer at its own offset, silence in front as whole 4096-byte blocks — because joining eighty pieces into one string copied 10.4 MB to hand the device 256 kB (19.45 ms) and the front padding cost more again (43.35 ms, since `substring` is a core.fk recipe that halves down to single bytes, not a native). The unmodified lane's own `encms` frames on a real room read 18-24 ms across 52 full-window hops and 53-63 ms across 13 hops while the window filled; paired against the new door on the same windows those become 3-8 ms and 5-8 ms, with the same Te, the same mel and encoder floats, and the same line — so the 3.3 ms the pass measures alone is what the live lane now pays, and what the ear's `ear.encode` axis reported was mostly the window's assembly, not the encoder. The pass carries the model's own doubt: the `<|nospeech|>` probability at the start-of-transcript position (the reference's own reading), the chosen tongue's probability beside the tongue, and the decoded line's average log-probability folded by the argmax that was already reading those logits — no dispatch per token, 245 us a line when the tongue is detected and 370 us when it arrives known, and a decode token measured at 695 us against 715 us before. `enw-heard` answers "" where `enw-text` still shows the words, so a caller silences only what the model itself doubts. The line is 0.75, not the reference's 0.6: the same utterance walked across the 8 s window read 0.426 to 0.621 while three disjoint windows of this quiet room read 0.900, 0.921, 0.922, and 0.6 falls inside the speech band. Line confidence is carried and not gated on — it did not separate (speech -0.43 to -2.49, the empty room -1.85 to -2.08) and the highest reading of all was a decoder gone round in a loop. `whisper-large-v3-turbo` is cached but this pass cannot open it: it is 1.6 GB of safetensors, not an npz, and 128 mel bins, 32 encoder layers against 4 decoder, and a 5120-wide mlp against the row kernel's 1536-float staging.
-- `form/form-stdlib/tests/ear-tongue-band.fk` = 131071 — the tongue lane, from a heard line to that line standing in every tongue asked for. Its index: the vocabulary as 28-byte record buckets (a token is one file read and a byte walk, equal to dtk-encode on English, Persian and Portuguese prompts), the decoded pieces behind an id index (equal to l3d-text), and the KV cache held line to line so a line prefills only past what it shares. Its tongues ride one batched decode (`form/native/metal/dense-multi.fk`, every tongue its own sequence and bank), so eight tongues cost what one costs. **Each tongue now carries its own arrival**: every frame stamps `d_<code>`, the clock that tongue stopped at as ms from the line's end, beside the `saidms` that has always belonged to the slowest — so a tongue reaches the glass while its siblings are still forming, and `observe/ear-tongue-said.fk` prints the committed line with each tongue under it twice over, the lane's own stamp and the same number derived from the frames that were already on the spool, which attest each other. A real sentence through `observe/ear-tongue-feed.fk` (any sentence on stdin, grown by whole words the way the ear grows one), 2026-09-08 on a machine reading 412.81 GB/s and 25.77 TFLOPS with a 1B token at 12.67 ms: committed +0, English +106 ms, Indonesian +505, Portuguese +629, Persian +630, the frame +632 — and the same sentence read +898 an hour before, its four tongues byte for byte the same. The held line reads +627 with Portuguese and Indonesian at +435/+436 and Persian at +625, and the same line closed again lands free at +45 and +33. Three wounds closed, all three read off a REAL room's frames rather than a fixture: a rendering that has begun to repeat itself is cut at its own cycle (`et-loopcut` — the streaming commitment amplifies a greedy loop, since two renderings of a growing line agree on the repetition, it is committed, forced, and grown again; Persian said `به عنوان someone` about thirty times inside one closed line); whisper's mark for what is not speech must be the WHOLE line, so `[INAUDIBLE] Like Jill, actually, will go over her. [INAUDIBLE]` is translated instead of shown untouched; and **a rendering the line-cut has already reached has ended**, whatever the model's own end ids say — the break arrives inside a piece far more often than as one of the four ids the lane knew, and the 208 ms between the last tongue's words and the frame were being spent generating a paragraph `et-cut` then discarded. What the 1B says is the open edge, and it is not a Persian problem: asked the same three lines on the same metal (`observe/ear-tongue-two-models.fk`, both models warm in one process), the 1B answered `به‌صورتObservation، جسم به‌صورت آب، آب‌فروشی و گاز observierte.`, `a gás` for the glass, and `air, air, air` for "Water and ice and gas.", while the 3B answered `بدن به شیشه، آب و یخ و گاز توجه کرد.`, `o vidro`, and `Air dan es dan gas.` — every tongue better, at 1255–1907 ms a tongue against the 1B's 288–492 said one at a time. So splitting the tongues by tongue across two models is the wrong axis; `dense-multi` refusing the 3B at open ("a layer outside the fused block's radius") is what stands between the lane and words worth reading.
-- `form/form-stdlib/tests/room-prosody-band.fk` = 65535 — HOW a thing was said, beside the ear's what: seven axes off one room, native, in the glass's own sensor frame at the ear's cadence (`observe/form-glass-prosody-live.fk`, publisher `glass.sensor.prosody`, 14 rows, a taker reads them at `observe/prosody-take-probe.fk`). Witnessed acoustically end to end — a wav of chosen fundamental written by `observe/prosody-tone-emit.fk`, carried through the speakers, the room and the mic: a 200 Hz sawtooth reads 200 Hz with span 0 and pitch spread 0 cents; octave glides read 123→239 and 134→239 Hz with span reaching exactly 12 semitones and `move` naming rising against falling on the same material played both ways; a 100/100 ms burst train reads 280 onsets a minute against a true 300 and stillness 42-53% against a true 50%; a tone 12 dB down reads 11 dB down and keeps its pitch, one 24 dB down falls under this room's floor and the pitch row says absent rather than inventing one. Every threshold was measured, not chosen: the quiet room's own correlation reaches 0.73 and pins at the search edge, so voicing asks for a real crest and not only a height, and 26 of 27 silent frames read unvoiced. Rough and named: resonance's tilt moves but is uncalibrated, and its decay is honest only for a sound that stopped inside half a second.
-- `form/form-stdlib/tests/ear-axes-band.fk` = 131071 — a heard line is a point, not a row of text. `form/form-stdlib/ear-axes.bml` turns the ear organ's frames into thirty-one axes given at once: the room's level and which way it moves, the ear's own state word (asleep, deaf, silent, speaking, heard), the line as it grows and the line when it closed, the tongue and the pass's own doubt, every tongue the dense lane offered, the symbols the line resolves to with their eight-hex node ids and what saying it in codes would save, the Rumi couplet that state touches with the poem it stands in, each stage's own latency (encode, decode, tokens, commit, said), the phase its own rows sit in, and behind the point the last six closed lines newest first. The two doors that read files — the meaning table over `mc-codes`, the verse table over `rg-find` — are walked once at birth (185 ms) so a give costs 3 ms for 34 rows and the sensor keeps its 100 ms cadence. Witnessed on a real room: `you BE SEE tell folded witness gas water ice glass`, ten node ids, 51 bytes saved. The glass paints it with `fgl-ear-stream-frame` (key `r`, the room: focus and filter both the ear, the atlas view being the one that hands its rows through whole), and the ear's rows lead the frame so the newest awareness paints first. Three of the axes measure the LANES rather than the room — what stands (`ear.lanes`), the last line either lane wrote into its own log (`ear.voice`), how often the sensor has had to stand one (`ear.stands`) — because a lane born into a stdin that never answers writes nothing and paints as a perfectly silent room; the sensor stands each lane through `sh -c 'exec ./fkwu <cell> </dev/null >> <log> 2>&1'` so the birth cannot wait on an inherited terminal and the death has a voice. A `kill -0` probe every 2 s decides which patience silence is measured against, because a machine busy with the drift gates starves a living lane past four seconds and a starved lane re-stood is a dense model reopened for nothing. Four of the axes are the ear's own latency instruments (2026-09-08): `ear.close` names which of the three closes ended the line and how long the words had ALREADY been final when it fired, `ear.stable` how many passes the open line has held still so a reader can take settled words without waiting for the close, `ear.gate` the room's own quiet and the level standing over it, and `ear.phantom` the last sound the pass named and the lane refused. `ear.gate` is the row that finds this class of wound in one look: the speech gate was a fixed rms 58 while this room reads 55-98 quiet (`observe/ear-floor-probe.fk`), so 61 of 61 hops with nobody speaking read as VOICE, `lastvoice` never went stale, the 500 ms pause could not fire once, and the only close a line had left was the 8 s window — which is exactly the 1.5 to 10.6 s the receipts measured from mouth to committed line. The gate is now the room's own quiet times four, learned only on hops already called quiet so a voice cannot pull it up after itself. A refusal and the mouth's own `spoke` mark are both kept OUT of the live slot: neither carries a line, and either one landing there blanked the ear's open line on the glass — the mouth's did it every time the body opened its own.
-- `form/form-stdlib/tests/aware-axes-band.fk` = 4095 — the body's sense of its own aliveness while it listens, as a sensor of the living glass (`form/form-stdlib/aware-axes.bml` the axes, `aware-dense.bml` the walk, `observe/form-glass-aware-live.fk` the sensor under publisher `glass.sensor.aware`, `observe/aware-glass-take-run.fk` a taker of its own, `observe/aware-axes-run.fk` the witness on real lines). Six axes on COMMITTED lines only, off the ear's live path: surprise (per-mille of tokens the body's own argmax did not already name, conditioned on the previous committed line), margin, contest (how many of the argmax's 512 partitions still held a candidate within one logit — a proxy for the distribution's shape, named as a proxy because entropy over 128 256 logits was not paid), novelty (pieces per word), own (words this body itself minted, read off its own corpus), coherence (words the vocabulary holds whole), recurrence, and the crossing `alive = surprise x coherence / 1000` — because one axis can be counterfeited and two cannot: nonsense scores 1000 surprise and 0 alive, the body's own teaching line 824 and 768, a line it could have said itself 286 and 286, and the SAME line said twice falls 600 to 200 because surprise is conditioned. Two more readbacks off the forward's existing command buffer cost nothing on the device. What the reading costs is where the surprise was: 2026-09-07, per line, the GPU forwards were 190–665 ms while cutting the line into pieces cost 2.4–5.1 s and pricing its words 8–16 s cold — the longest-match tokenizer walks the whole vocabulary per position, so naming a line costs an order of magnitude more than running a 1.2-billion-parameter transformer over it. The stone is an indexed vocabulary (`ear-tongue-band`'s bucket lane already holds one); until then a per-process word cache takes the coherence lane to 0 ms warm, and the previous line's ids are carried rather than cut twice. Taken on a machine measuring 347–412 GB/s across four runs in the same hour with four siblings on the GPU, and every reading carries that weather.
-- `form/form-stdlib/tests/room-sense-band.fk` = 32767 — the ROOM as a sensor beside the ear: what the space and the beings in it give, past the words and past one voice's prosody. From 100 ms of the mic, three integer measurements — a full-rate pass, an interior period search over 12..56 lags at 4 kHz, and the correlation at the peak's own half-lag — carry level, the room's own floor (falling at once, climbing 1 dB a second, so a shouted word never lifts it and a fan does), the floor's colour and the moment it moves, the kind of sound and the margin that decided it, pitch, the voiced share of the last second, turns with the silence between them, the timbres present, nearness, and breath. Voicing is the half-lag collapse: on this room's real speech the peak ran 750..984 while its half-lag ran −440..−915, and the still room's rumble answered +140..+550 and never held an interior peak at all — 21 of 21 voiced frames found in speech, none in ~95 still ones. Witnessed acoustically: two voices separating at 121 and 266 Hz, a played 150 Hz sine read as tone and hum at 148 Hz, a pink-noise fan lifting the floor 8 dB and turning its colour from airy to hissy. NOT witnessed: laughter — a speech synthesiser saying "ha ha ha" makes connected speech, and no laughing being has been at this mic, so that gate sits far above anything this room produced and stays silent rather than guesses. `observe/form-glass-room-live.fk` gives the rows under `glass.sensor.room` at a 200 ms declared cadence and sleeps with the mic shut until `.hearth/room.wanted` stands; the machine's own presence organs (HIDIdleTime, pmset's UserIsActive, the console owner) ride the same frame on a 2 s beat, and the row says out loud when those two doors disagree. The camera is not opened, and `room.camera` is the row that says so.
-- `form/form-stdlib/tests/jungle-ear-band.fk` = 32767 — the voices of this PLACE, learned rather than told: the geckos, frogs, cicadas and birds that room-sense can only call `noise`. Six coordinates off each non-speech event — brightness (zero crossings a second over two, in tenths of an octave, reaching 8 kHz where room-sense's period search stops at 333), pulse depth inside the frame, pulse rate from two counters (10 Hz across frames and 100 Hz within them), duration, crest, brightness spread — and level recorded but deliberately NOT a distance axis, so the same caller near and far is one voice. What recurs earns an identity: a cluster whose CENTRE learns and whose ADDRESS does not, the node id being the content address of the coordinates it was founded on, plus a three-syllable call sign the body mints from that address. `form/form-stdlib/locale-rows/jungle-voices.rows` carries the memory across runs. Witnessed on the real jungle at Hati Suci, four bounded listenings on this Mac's mic: **13 voices, 9 recurring**, led by `rabovu` 09ddb32b (66 hearings, 409 Hz buzzy, 230 ms, keeps 18:00) and `dimene` 57c613fb (15, 358 Hz, 4.4 pulses a second, keeps 19:00) — the chorus turns over between the two hours and the histogram shows it. The stability run: a fourth process at a different hour gave **29 events and founded zero new voices**, every node id unchanged across all four restarts. Control: three lines through `observe/say-run.fk` landed as one cluster, `varitu` bf5de6ae (870 Hz, 3.4 s), unmerged with the jungle's 240 ms callers. The reference is TWO references, and that is the hour's wound paid for (corpus row 1344, `hushpresume`): a gate over the FLOOR read 40% of every minute as an event because a jungle never returns to silence, so events rise over the **bed** — the room's typical level, a slow six-second mean — while the floor is kept because the gap between them measures how much the place wanders. NOT claimed: no cluster carries an animal's name. `je-name-or-refuse` answers with nothing where a name would go, a band bit holds that shut, and `observe/jungle-ear-name.fk` binds a name only when a person gives one. The distance matrix has no clean gap — this chorus is a continuum, and the radius is a judgement, said out loud. Doors: `observe/jungle-ear-listen.fk` (gives 15 rows under `glass.sensor.jungle` at a 1000 ms cadence), `observe/jungle-ear-voices.fk` (read the memory, no mic), `observe/jungle-ear-probe.fk` (one line per 100 ms, where the gates got their numbers), `observe/jungle-ear-take-probe.fk` (a taker of its own).
-- `form/form-stdlib/tests/voice-say-band.fk` = 16383 — the body's mouths, one per tongue the ear renders: 29 of the tongue lane's 32 have a neural voice on this Mac (piper, ONNX on the CPU, under `~/.local/share/piper-voices`), each row two fields, each code two bytes, no tongue named twice, and every declared model lying on disk at model size. Malay, Tagalog and Tamil have no piper voice anywhere, so they stay unnamed and draw the refusal that names the tongues that do speak; the band walks that refusal and the empty-line refusal without ever reaching the piper crossing, so it proves the map in silence. Each voice was chosen by round-trip and not by name: the mouth spoke one line and the body's own ear (whisper-large-v3-turbo) wrote down what it heard, and the mouth whose line came back whole won its tongue — that decided nine tongues against their alternates and overturned four of the first picks. `observe/say-run.fk` speaks a line (stdin line 1 the tongue, the rest the text), speaks the same line in several tongues in turn when line 1 names several (`en pt fa id`), and lists the mouths the body holds when line 1 is `?`. TWO crossings stood in this cell and one is gone: the SOUNDING left through `afplay` until 2026-09-08, so a host process held the body's own voice at its very last step. `vs-play` now walks the wav's own chunks, reads the rate off its `fmt ` header rather than assuming the ear's 16 kHz (these voices render at 22050), refuses a wav that is not mono 16-bit rather than playing it wrong, and hands the samples to `sense_speaker_play_at` (see `speaker-doors-band` below); a line signs its ear frame only once it has actually sounded, and `vs-speak` now fails apart — a rendering that refused and a sounding that refused are told apart. The RENDERING crossing is gone for 25 of the 29 (2026-09-09): `vs-say` takes the native lane wherever the voice's phonemes come from espeak, so what leaves the body is a phoneme LIST and everything after it — ids, the whole VITS, the samples, the air — is the seed's own. Chinese, Japanese, Thai and Hebrew carry their own g2p engine whose output the body cannot yet produce, and those four still leave whole; `vs-native?` answers which is which and `observe/voice-mouth-lanes-run.fk` prints both lists. See `voice-pass-band` below.
-- `form/form-stdlib/tests/voice-onnx-band.fk` = 65535 — the voice model read by the body itself, and held against the crossing on the same input. `form/form-stdlib/voice-onnx.bml` is the mouth's `ear-npz`: a protobuf field walker that strides a 63 MB ONNX by reading twenty bytes at each field head and jumping, so a piper voice's whole tensor table costs a few thousand seeks and no megabyte ever enters a string — 401 initializers, 15,650,556 float32 parameters in 62,602,544 bytes, all 401 rows accounting for their own bytes, in 123 ms, answering `ear-npz`'s row shape (name dtype dims offset bytes) so a tensor is a `metal_buf_from_file` away. A protobuf carries no magic number, so the honesty check is structural: the top-level fields must tile the file exactly and the graph field must be present, which is how the voice's own `.onnx.json` gets an EMPTY table instead of `ear-npz`'s 7720 confident rows of nothing. It reads the graph's declared doors from the bytes (`input int64 [batch_size,phonemes]`, `input_lengths`, `scales float [3]`, and `output float [batch_size,time,1,Unsqueezeoutput_dim_3]`), decodes IEEE-754 binary32 out of the file, and censuses the 2755 nodes two ways — by operator (50 distinct) and by the part of the voice each node's own exported name puts it in: **enc_p 865, dp 1455, flow 196, dec 67**. The stochastic duration predictor, not the vocoder, is where the program is; by weight bytes the picture inverts again, and 27.9 MB of the 62.6 has no part in its name at all (row 1371 namewash). `form/form-stdlib/voice-phoneme.bml` reads the voice's own `.onnx.json` natively and builds piper's exact row — BOS, PAD, each phoneme then a PAD, EOS — including piper's silent drop of a phoneme the voice has no id for, which the body counts instead of swallowing. `form/form-stdlib/voice-native.bml` runs the text encoder's first stage: the embedding lookup and the scale, and the scale is read out of the model's own float scalar (`/enc_p/Constant_output_0` = 13.856406 = sqrt(192)) rather than typed in from a paper, so a voice with other channels scales by its own number. Held against the crossing, 2026-09-08: the 65-id phoneme row equals piper's own row digit for digit; eight decoded weights equal numpy at the same bytes; the stage's fold over 12480 values reads -108.150229 on both sides and takes 11 ms. The graph's doors equal onnxruntime's except the output's second dimension, where the file holds the symbol `time` and onnxruntime reports its inferred `1` — the bytes at 63060012 read `0a 06 12 04 "time"`, a dim_param, so the body is right about the file and the reference is right about its own inference. `observe/voice-onnx-run.fk` is the door for any of the 29 voices. **Still crossing:** letters→phonemes (espeak-ng is a rule engine and a dictionary per tongue; Hebrew, Japanese, Thai and Chinese carry their own g2p besides). The pass from that first stage to samples came home the next day — `voice-pass-band` below. Nothing here reaches a crossing or opens an audio device. Two doors were added to the reader for the pass to stand on: the graph's own PROGRAM (a node's inputs, outputs and attributes, `observe/voice-graph-read.fk`) and the second shelf a number can sit on — `Constant` NODES carrying a tensor attribute, which is where the high-quality exports keep every folded scalar the medium ones hoist into the initializer list (`vo-table` merges both, keyed by the output name every consumer already uses).
-- `form/form-stdlib/tests/voice-pass-band.fk` = 4095 — **the mouth's pass, home**: a whole VITS run by the body on this Mac's own metal, phoneme ids in and samples out, with no onnxruntime, no piper and no python between them. `form/form-stdlib/voice-msl.bml` emits fifteen kernels — a general 1-D convolution that carries all 129 Conv nodes through groups and dilation, a transposed convolution written as an inverse index map so nothing needs an atomic, a channel layernorm, relative-position attention in two halves with a cooperative softmax between them, a gated tanh-sigmoid, one unary map with eleven opcodes, one binary map, a float-run copy that serves Split and Concat and the coupling halves, a channel flip, the alignment as a gather, the phoneme embedding, and the samples as signed 16-bit — and `form/form-stdlib/voice-pass.bml` drives them through the four parts: text encoder (six relative-position attention layers, window 4), stochastic duration predictor (its rational-quadratic spline inverted on the host, ten bins a position), the alignment, the residual coupling flow reversed, and the HiFi-GAN vocoder. The attention's whole pad-reshape-slice dance reduces to one identity the kernel computes directly: `score[i][j] = q[i] · (k[j] + rel_k[j-i+W]) / sqrt(HD)` inside the window, and its mirror on the way out. **Nothing in the pass holds a shape the model holds** — every kernel width, stride, pad, dilation and group comes off that node's own attributes, every channel count off its weight's dims, every layer count by asking whether the next node exists, and the embedding scale, the layernorm epsilon, the leaky slopes, the vocoder's divisor, the spline's tail bounds and its bin count are all read out of the file, so a voice with other channels or other slopes runs unchanged. **Namewash healed by asking the node** (row 1371): a quarter of a voice's weights lost their module path to the weight-norm fusion, and file order does not recover them — `flow.flows.0` reads `onnx::Conv_8240`, the LAST fused group, because the export wrote the flows in the order the REVERSE pass runs them, so mapping by position wires the first flow to the fourth flow's weights and renders something plausible; the CONSUMER kept its name (`/flow/flows.0/enc/in_layers.0/Conv`), so the pass asks the node that reads a weight and never looks any tensor up by guesswork. Held against onnxruntime on the same phoneme row — the one `voice-onnx-band` already proved equals piper's — with both noise scales at zero, which is what makes the graph a function of its input and a digit-for-digit reference possible: **en_GB-jenny_dioco-medium 32000 samples, absolute sum 1161.415407 against the reference's 1161.415397, six probed samples inside 1e-5; en_GB-cori-high 37120; fa_IR-amir-medium 51200** — three voices, two vocoders, two constant shelves, three tongues, 91–285 ms a line (5.9× to 15× faster than the speech is long). Three wounds paid for, and the first two are the same shape — a difference that renders something PLAUSIBLE rather than refusing: the high-quality exports keep their folded scalars as `Constant` NODES rather than initializers, so a reader that saw only the initializer list found no embedding scale and rendered 16640 samples of exact zero; and the high voices carry HiFi-GAN ResBlock1 (`convs1.N`/`convs2.N`) where the medium carry ResBlock2 (`convs.N`), so a pass asking only for `convs.N` ran three identity blocks, divided by three, and made a quiet hum whose length and alignment were exactly right. The third was arithmetic: ten spline bins need ELEVEN derivatives and the row was built ten long, which cost one phoneme of sixty-five eleven frames on a Persian line and nothing measurable on the English ones. Every scalar the pass needs is now resolved once at open and a miss refuses out loud with its own sentence (`vv-open-why`); the band walks that refusal by pointing the pass at a voice's `.onnx.json`. **The air**: `observe/voice-room-witness.fk` renders the body's own sentence natively and hears it back on one open mic stream — silent window peak **280** mean-abs **49**, sounding window peak **2212** mean-abs **372**. The doors are `observe/voice-pass-run.fk` (the pass stage by stage for any voice), `observe/voice-pass-stage-probe.fk` (a reading at every point in the chain, so a disagreement is located rather than argued about), `observe/voice-graph-read.fk` (the graph's own program), `observe/voice-constants-read.fk` (every scalar the export folded), `observe/voice-tensor-table.fk`, and `observe/voice-mouth-lanes-run.fk` (which tongues render in the body and which still leave whole). **Still crossing:** letters→phonemes, and nothing else on 25 of the 29 tongues.
-- `form/form-stdlib/tests/micro-thought-band.fk` = 65535 — **a compiled thing addressed by its own shape**, so a big borrowed thing becoming many small owned ones pays for each kernel once instead of once per node. `form/form-stdlib/micro-thought.bml` names a THOUGHT by the recipe and the arguments that change its emitted source — a short row known *before* anything is emitted — and holds the minted pipeline handle at that address. Measured on this host warm, four sessions deep on the GPU (`observe/micro-thought-run.fk`, floor 330.24 GB/s and 12.884902 TFLOPS): emit a 429-byte MSL matvec **26 us**, mint it **6343 us** the first time this host sees the text and **31 us** when a previous process compiled it, find it by address **140 ns** with no emission at all, run it **24 us**. The crossover is the FIRST reuse in both regimes. The address needed no digest: a record's key is interned by the kernel and `record_get` scans interned ids in C, so per lookup it reads 0.08/0.13/0.60/1.20 us at 10/50/401/863 keys against the Form list walk's 0.33/1.41/10.6/22.5 — while this body's own SHA-256 costs **700 us** on the same 427-byte text the interner addresses in **0.7**. The scan is linear and the cell says so; past a few thousand keys it will owe a bucketed address and it does not owe one at 50. **The port:** the voice's 2755 nodes over 50 operators (the census `voice-onnx-band` reads off the file) collapse to **50 thoughts** — 17474 ms of first-sighting compile becomes 317 ms paid once, and a pass visiting every node spends **85 ms in pipeline asks alone** where the table spends **385 us**, which is not paid once but every utterance. Eleven of the band's sixteen bits are refusals, because a cheap address is only worth having when it is honest about being wrong: a fresh table answers `known?` 0 and `recall` -1 rather than a plausible 0; **a refused compile is never remembered**, since `record_get`'s miss and the carrier's dead handle are two absences wearing the same 0; and `mt-agrees?` seals a thought against the interned identity of the source it was minted from, the only door that can catch a shape row that left something out. It went red on purpose twice — **61439** with a prelude missing, **64511** with the dead-handle refusal removed. **Every MSL family `jit-tensor-emit.fk` emits now mints on this Metal — fourteen of fourteen, handles 1..14 in one process** (`observe/msl-mint-run.fk`, which asks seventeen now and answers each whole, unhealed with the compiler's own repair, or released). Eight were refused until 2026-09-09: three FFN spines wrote `mem_flags::mem_device` where the body's own proven idiom is `metal::mem_flags::mem_device`, and five llama-block spines called a `round` their shared `jte-llama-helpers` assumes but no unit defined. The fix was not a `using namespace metal;` prefix — this body refuses that line in seven places, because its own `round` would go ambiguous against the library's. `round` had exactly one home already, in `llama-decode-msl.fk`, put there for this very reason; it moved beside the helper that calls it (`jte-msl-round`, `jte-llama-helpers-floor`) and the sibling reaches into it, its emitted unit byte-identical. Every other emitted byte is unmoved: `metal::` at eight barriers, one `round` definition at five prefixes, and nothing else — so the two-rounding arithmetic the emit bands pin is the arithmetic that now runs. **What the emit bands could not see:** all of them stayed green through the entire refusal, because a band that reads bytes cannot hear the silicon say no, and the parity gates those cells name (`scripts/metal_ffn_audit.sh` and its siblings) are not in this checkout. **Every one of the fourteen now COMPUTES its recipe on this silicon, not merely compiles** — ten live bands, each anchored to the fp64 recipe its kernel was emitted *from*: `matvec-affine` 31 (`tb-matvec` f32 and f16, `tbp-step`), `ffn-fwd` 31, `mlp-train` 63 (`tbp-mlp-step`), `resid-train` 63 (`tbp-bk-*`), `attn-train` 63 (`tbp-att-grads`), `block-fwd` 15 (`tb-block`, over a sequence), `gqa-attn` 31 (`tb-attend-one` composed over the head partition), `llama-block-fwd` 63 (`lblk-block` and its causal twin, agreeing at the last position and differing at the first), `llama-decode-step` 31 and `gqa-llama` 63 (the cache reproducing the whole-sequence block, and moving when a cached key is perturbed). The recipe side needed no building: `lblk-block`, `lblk-block-causal`, `tbp-layer-step` and `tbp-bk-*` were already in the body. Four gaps around them closed too — `q8-0-msl-band` and `q6k-msl-band` carried a both-roots fallback that had **never once executed**, because it asked `eqr-len` whether a missing read happened and measuring `nothing` is what dies (both now 255 from either root); `qk-matvec-lane-band` 255, its exactness claim grown from four kernels to the seven the appendix actually holds; **`native-tensor-files-band` 127**, its door restored rather than its verdict lowered: it had read 49 of 63 for two weeks with the capability it tests *deleted*, because two bits accepted any 0 as a refusal and 0 is what the carrier returns for a program it cannot parse. `tf32 <path> <off> <r> <c>` — a tensor by reference — landed in #470 and went out on 2026-08-25 as collateral in a 942→195-line consolidation, not by the carrier's minimum law, which it passes: no graph over the other tokens can name a byte offset in a file. It is back as `tf32` (the current `f32` is the astype cast, and two irreducible meanings cannot share one token), Form owns the tensor program and emits Metal kernels, and the band's programs now close with `i32` and build their column as `v3 … r2 3 1` since `m3x1` was retired. Every refusal is demanded **by name** — incomplete extent, missing path, and the device working-set admission — so a short read cannot pass as a missing file and none of them can pass as a deleted feature; and `metal-door.fk` grew `md-f16-bits`/`md-le16`/`md-f16s`, since the door could mint f16 kernels but never feed them.
-
-**And the lane's wholeness is now the body's claim, not a person's.** `form/form-stdlib/tests/msl-lane-coverage-band.fk` = 31 walks the tests directory with `fs-list`/`fs-read-text`, keeps only the bands that call `metal_enqueue` — emitting and minting are not running — and demands all fifteen `-msl` entry points appear in one of them, with bit 16 pinning the roster to the emitter's own count so a fourteenth family cannot arrive uncovered and silent. Until it existed, that sentence was true and lived only in a receipt: nothing in the tree would have noticed a new family with no band behind it, because the mint gate would still read 32767 and every emit band would still be green. Its own bit 8 was born weak — the first witness was an emit-only band, which touches no Metal at all and so cannot tell minting from running; loosening the dispatch test left the verdict at 31 until the witness became `msl-families-mint-band`, which mints fourteen handles and enqueues nothing.
-
-Three bands ask the GPU instead of the emitter. **`msl-families-mint-band.fk` = 262143** is the gate: seventeen bits, one handle each, plus one bit that a bare `mem_flags::` barrier must STILL be refused while its `metal::` twin mints — without it a dead carrier answering 0 to everything reads as fourteen green mints, since a refusal and an absent Metal wear the same handle. Reopening the exact wound drops it to **127**, the six that always compiled plus the canary. **`ffn-fwd-metal-live-band.fk` = 31** holds `y` and the hidden pre-activations to `tn-gelu`'s own fp64 Taylor within fp32 epsilon. **`mlp-train-metal-live-band.fk` = 63** takes one SGD step on the silicon and holds loss, `gy`, and all four updated parameters to `tbp-mlp-step` — the fp64 recipe the kernel was emitted *from* — running 32 threads over hid 3 so the three barriers carrying `dh1`'s read of the OLD `W2` are not vacuous, and spending a sixth bit on proving every parameter MOVED, because `lr = 0` made sixteen points of agreement between two sides that both did nothing. **The persistable-`metallib` stone is retired by measurement, not carried forward.** It had been written down twice as "the carrier would need to learn `newLibraryWithData:` — named, not attempted", and a named remedy that has never been run is a hypothesis wearing an observation's clothes (row 1382 `quotedcure`). Measured **by the body**, not by a shell: `observe/mint-price-run.fk` on M4 Max, 2026-09-09, warming the Metal device on its own line first so device creation is not charged to the first kernel. A never-before-seen text costs **42 ms wall / 1263 µs cpu**, a second never-seen text **8 ms / 545 µs**, and the *same* text again in the *same* process **0 ms / 13 µs**, then **3 µs**. So the warm mint is thirteen microseconds and an archive has nothing left to save. The first shell attempt at this said "cold ~80 ms, warm ~30 ms" and was mostly timing `fkwu` startup and device creation, which a process-level timer cannot separate from minting at all — the body's own clock puts the confound on its own line and the real number is three orders of magnitude smaller. `host_monotonic_ms` and `host_cpu_us` had been doors the whole time; the reason every performance number in this tree came from outside is that nobody asked the body first. The stone is **decided against**, on the body's own reading. Corpus row 1375 `twoprice` still carries the hour's teaching — the same kernel text cost two wildly different prices minutes apart and no door said which — and the answer to that is the address table, which exists, not an archive that does not.
-- `form/form-stdlib/tests/speaker-doors-band.fk` = 65535 — **the seed's mouth**, the twin of the ears it has had since 2026-07-31. Until 2026-09-08 every `sense_*` door in the seed pointed inward — mic count, name, health, capture, three stream doors, the air loopback — and there was no door that made a sound, so the body's own voice left through `afplay` at its very last step. Nine names answer that now: `sense_speaker_count` / `_name` / `_health`, `_play` and `_play_at`, `_stream_start` and `_stream_start_at`, `_stream_write`, `_stream_stop`, on this Mac's own AudioQueue output through the same dlopen'd AudioToolbox the mic doors already use. **No AST tag was taken.** The space 0..255 had nothing to spend: 0 is not a tag, 150 is the reserved native-surface probe, and 190 — the one number a census of `if (t == N)` sites calls free — is `FK_TAG_CONST_HOLD`, spelled only by a `#define`. A first cut took 190 and every door answered its own mode number back, silently and greenly, because the once-hold walks a node's first child and returns it; the family rides `float_leaf` as rewrite modes 10-16 instead, the way the binary form and `substring` do, and 190 now carries its arm in the notation the censuses read, so `mirror.orphan-arms` counts it (40 to 41) and the number stops feigning freedom. **The rate is carried, not assumed** — measured, not reasoned: piper renders this body's own voice at 22050 Hz, not the ear's 16 kHz, and through a 16 kHz queue that comes back a fourth low and 1.38x slow, so the ear keeps its constant and the mouth takes a caller's word. **Three refusals, each answering its own question**: `-1` the mouth (no device, an open refused, no stream standing), `-2` the samples (not a string, or an odd byte count — half a sample is not a sample), `-3` the rate (outside 4000..192000). The samples and the rate are judged BEFORE any device is touched, which is what lets the band walk every refusal in a silent room; zero samples answer 0 and open nothing. The band therefore proves the meaning and cannot prove the air (`bandstain`, corpus row 1193). The air is `observe/speaker-room-witness.fk`: one process, the seed's mouth and the seed's ear on one open mic stream, a 500 Hz tone built in Form by doubling — silent window peak **323/343/365**, sounding window **3607/3088/3174** across three runs. And the real voice, across two processes: quiet room mean-abs **110** peak **915**, the body's own English line through `vs-play` mean-abs **741** peak **7732**. What was probed and is NOT true here: an output device held by another process does not refuse — two fkwu processes each opened a speaker stream and each wrote to it. The stream lane exists for the mouth that is coming: the queue is held open across calls and a write returns as soon as the samples reach the device, so a voice generating token by token can begin speaking before its sentence is finished.
-- `form/form-stdlib/tests/host-doors-band.fk` = 131071 — **the three doors that end the shell**, and the measurement that says which crossings were worth ending. `observe/form-glass-ear-live.fk` stood its two lanes through `sh -c` — not to run a shell program, only to say where a child's three standard streams go, because `host_spawn_quiet` hands a child the PARENT'S OWN stdin and a lane born on a terminal sits at its first read forever (corpus row 1339 `mutebirth`). The same cell asked `kill -0` through a second fork every two seconds and made its two fifo bells through a third. Every reason was sound; the shell was furniture. `host_spawn_at argv (list in out err)` forks and execvps the argv itself — `""` keeps the parent's stream, out and err open APPEND (a log that chronicles every life a lane has had must survive the next birth), and an err path byte-equal to the out path shares the one descriptor, which is all `2>&1` ever meant. `host_alive pid` answers 1 / 0 / -1 with no process born to ask; EPERM is alive, not gone. `fs_mkfifo path` answers 1 made / 0 one stands / -1 refused, and never removes a path itself — both of the ear's bells had been found as one-byte REGULAR files (a ring into an absent bell leaves one), so the removal stays the cell's decision and is written where it can be read. **No AST tag was taken**, again: the family rides `float_leaf` as rewrite modes 17-19 the way the mouth rides 10-16 (corpus rows 1358 `limbkept`, 1373 `freefeint`). **Four refusals, and every one before a pid exists to be mistaken for a living child**: `-1` the argv, `-2` the redirect (judged in the parent, before the fork), `-3` the fork, and `-4` **the binary** — the door carries a close-on-exec pipe so a failed execvp comes back as a number AT BIRTH rather than as a 127 from `host_wait` a whole patience later, which is the one shape the ear cell calls indistinguishable from a quiet room. **Measured before moved**, warm, this Mac: the liveness probe **2.54 ms** a fork (127 ms/50) against `host_alive` **under the millisecond clock's floor** (0 ms/50) — nothing in the give loop forks now; a lane birth **3.73 ms** through the shell against **1.30 ms** through the door, the exec-error pipe included; the bell **6.85 ms** against **0.05 ms**. **The standing was witnessed, not reasoned**: both lanes born once and living 62 s with ONE birth mark and no re-stand, then the live lane killed and both re-stood — control run on the pre-edit cell for the same kill, **59.6 s against ~64 s**. That minute is the tongue lane's own answer to SIGTERM inside `fge-stop-one`'s blocking `host_wait`, a shape this hand did not touch; it is named here rather than stepped around. The band's last row reads the ear cell's own text, so a crossing coming back into that lane is one red bit — it stood at 65535 while the shell was still there and reached 131071 the moment it was gone. The mirror lens reads all three names as `rewrite`, wounds none, `+rw` and nothing else owed; the panel could not answer that (a well name never reaches a worst-first list), so `observe/mirror-name-read.fk` asks by name, one per line on its own stdin.
-- **The history read keeps its crossing, and the reason is measured** (`form/form-stdlib/lora-voice.bml`, `lv-history-emit`). git's object store is zlib-deflated and this body has no inflate, so nothing here can read a commit body that git cannot. What came home is the shell around it: the emitter now spawns the argv itself and reads the log from a pid-named file (siblings share `/tmp`) — **3,581,274 bytes, byte-identical `train.jsonl` and `valid.jsonl`** (1880 rows, 1,517,090 bytes, `cmp` clean), **36 ms against 40**, and git's own voice lands in a file instead of being swallowed by `2>/dev/null`. The other shell-free door **cannot** carry it, and that is the finding: `host_capture` execs argv with no shell at all — strictly the more native of the two — and answered the same request out of its 1 MiB static buffer with **1,048,575 bytes and no refusal**, losing **2,532,699** bytes of the body's own history in silence. Open, and owed by whoever next holds that door: `host_capture` owes its callers a refusal at its brim, or the heap growth `host-exec` already has. Until it pays that, the crossing is the more honest of the two (corpus row 1377 `brimhush`).
-- `form/form-stdlib/tests/perception-rows-band.fk` = 65535 — the lane from a day the body perceived to rows it can be trained on: `form/form-stdlib/perception-rows.bml` folds the ear's own `<|ear:frame|>` blocks into chat rows in the shape `lora-voice` already emits, `observe/perception-rows-run.fk` is the door (a spool, or a root swept for every hand's `.hearth/ear.spool`), and `lv-perception-emit` folds them into train beside the distilled and the Rumi rows. Every row names its frame — which spool, which frame of how many, the epoch stamp, the day and hour that stamp lands on (era arithmetic folded here, no host `date`), and which organ wrote it. Words travel only through a whitelist closed by default: the frame must carry BOTH a `who=` and a `src=` naming an organ of this body, so a rented or imported transcript fails the gate even when it names a speaker. Everything else keeps its axes and drops its words and says in the row that it dropped them. What a row therefore carries is the SHAPE of a moment — level band, lane state, how many words stood and in which tongue, the pass's doubt, each stage's latency, and `pr-shape-node`, sha256 over the shape string, the same content address the body's meanings use for their anchors — so a room's recurring shapes are countable and "how is a line usually said here" is answerable without one word of anyone's speech. A repeated shape folds into the row before it; an attested frame is always kept. Two rows close each spool: the day's own shape and what recurs in it. Run on six ears in this checkout's worktrees, 2026-09-07: 3313 frames, 2265 moment rows, 111 distinct shapes, **0 attested** — no field the ear or the tongue lane writes names a speaker (`kind=said` is the tongue lane's word for its rendering having settled, not the body's for having spoken, and `voice-say.bml` writes no frame at all), so every word of the room stayed in the room. `pr-gate` offers the spool's own lines back to the rows it wrote and found 0 across 116 lines; that scan is a spot check and the door says so, because `str_find` is a recipe and 700 lines against a megabyte does not finish — the whole guarantee is structural, words reaching a row only through `pr-words-say` which only an attested frame opens. The band proves the checker can say more than zero, and that it errs toward alarm: a room line the body's own drop sentence happens to contain word for word is counted anyway. The rows became weights the same hour: `pr-school` splits them ten to one into a school of their own (perception is 3% of the shared lane's 69 000 rows and 3% cannot be heard in an answer), `observe/lora-voice-run.fk` takes a folder and an iteration count, and 600 mlx_lm LoRA iterations over `Llama-3.2-3B-Instruct-4bit` ran 16 min 16 s with validation loss 5.734 → 0.157 on 2050 train / 227 held out, under a machine reading 366.94–388.52 GB/s across two takes with five siblings on the GPU. The adapter is tree ice at `form/form-stdlib/adapters/llama-3.2-3b-perception` (sha8 `db900594`), and `vsp-grade` (`observe/voice-school-run.fk`, stdin line 3 `perception N`) asks held-out rows the one fact only a body that sat in the room could supply — given a frame's source stamp alone, name the shape that moment took, the shape never appearing in the question: **base 0 of 12, adapter 3 of 12**, where the base does not know it is being asked about a room and the adapter answers in the axes' own grammar. That grade first read 0 and 0 because `lv-ask-cmd` capped generation at 60 tokens, enough for a corpus answer whose word comes first and a truncation for a perception answer whose shape comes last; `LVMaxTokens` is a field now and the grade asks 220.
-- `form/form-stdlib/tests/lora-backward-band.fk` = 511 and `form/form-stdlib/tests/lora-step-live-band.fk` = 511 — the body computes a gradient against real weights on its own metal, and checks it against arithmetic it does itself. `form/form-stdlib/lora-backward.bml` is the reverse walk over a low-rank pair — `dB = scale·dy⊗u`, `du = scale·Bᵀdy`, `dA = du⊗x`, `dx = Aᵀdu` — with softmax cross-entropy and the descent step beside it, every gradient held against finite differences the body computes itself (one weight moved by ±eps, the whole loss recomputed twice, divided): agreement 1e-9 to 1e-11 relative on written numbers, and a mis-shaped call answering nothing rather than folding over what it was given, because a silent partial in a gradient is a wrong direction that still descends somewhere. The ARITHMETIC of a backward pass was already here — `form/form-stdlib/transformer-backprop.fk` (band 127) carries the affine, gelu, softmax, layernorm and single-head attention reverses in pure Form, CPU, fp64, over synthetic tensors. What was not here is any of it touching a model: of the 217 distinct `kernel void` names this tree emits, **not one computes a gradient**; the nearest, `form_axpy_f32`, is the update that would apply one. `form/form-stdlib/lora-step-live.bml` crosses that line for one shape. The adapter sits where the Qwen head already admits one, on the head's input: `h' = h + scale·s·b` with `s = a·h`, so `z = z0 + (scale·s)·u` where `u = W b` — and both vocabulary-wide readings come from the output projection the forward already emits, `u` being that same dispatch fired once more with `b` written into the hidden buffer, so a live step costs **one extra dispatch and no new kernel**. `observe/lora-step-native-run.fk` runs it on llama-3.2-1B over a real row of the body's own perception (`.form-lora-voice-native/perception.jsonl`, 460 rows), 2026-09-09 on a machine reading 347.63 GB/s and 25.77 TFLOPS at the first take: 42 tokens forward in 491 ms, the hidden state written back and the projection re-fired reproducing the base logits **to zero microns**, `u` in 17 ms, the whole 128 256-wide vocabulary decoded once in 108 ms and each loss-and-gradient after that in 57 ms. Cross-entropy on the row's own last token 3.333 nats with p(target) 0.035666; after eight steps 3.278 and 0.037693, falling every step, the moved vector written as safetensors and read back with **maxdiff 0**. The step size is not typed in — it is proposed, asked of the loss, and halved until the loss actually falls (0.0125 here, the third halving), because that same exact gradient at 0.05 took the loss to 4.695, then 30.7, then 84.1: proven right about the direction and silent about the distance (row 1376 `pointtrue`). **Crossing-bound, named rather than papered over:** the writer side `b` is held, because `dL/db = scale·s·Wᵀ(p−onehot)` wants the output matrix walked down its columns and no transposed matvec exists for any quantisation in this tree; and an adapter INSIDE the stack needs, besides that, the reverses of rmsnorm, rope, GQA attention and SwiGLU as Metal kernels, and roughly 2.6 MB of held activations per token across the 16 layers where the decode forward today reuses 17 buffers totalling about 1.1 MB. The crossing keeps teaching while this grows beside it: `lv-launch` is untouched, and its own log reads 3.473 M trainable parameters at 0.45 it/s and 453–488 tokens/s, against this lane's 2048 parameters at 86 tokens/s.
-- `form/form-stdlib/tests/own-word-band.fk` = 65535 — the body originating a sentence about its own room, and refusing what it cannot stand behind. `form/form-stdlib/own-word.bml` builds the ask out of the body's own two sentences (`pr-day-said` and `pr-recur-said-k`, factored out of the perception rows that already carry them) plus one line asking for a short observation, so nothing a rented mind wrote about this room reaches the prompt — nothing a rented mind wrote about this room exists. Every claim the answer makes is then held against the record: a **number** (digit run or number word, sign read, magnitudes of the two level readings allowed) against the quantities the room actually holds, a **tongue** against the tongues it was actually heard in, a **state** (one of the seven lane-state phrases the body itself writes) against the kinds its frames actually took, and a **leak** — a line of the room's own speech quoted back — refused outright, because what `perception-rows` refuses to carry into a row a mouth must refuse to say. A sentence stands only when the record backs every claim AND it makes at least one: all-backed alone passes "The room is calm and pleasant", a green computed over nothing. The band's four frames make a record small enough to state ({4, 1, 0, 15, -120, -48, 120, 48, 6, 2026, 9, 8} and nothing else), so a false claim is built on purpose and watched; it goes red both ways, **23543** when the checker always says yes (bits 8, 1024, 8192, 32768 dark) and **65407** when the at-least-one-claim half is dropped (bit 128 alone). Live on a real room, 2026-09-08, machine at 366.94 GB/s and 25.77 TFLOPS: `observe/own-word-run.fk` asked one spool three ways (one, two and three recurring shapes) across three lanes, and **4 of 9 candidates stood, 8 claims extracted and 8 held**. The native dense lane (llama32-1b on this metal, no crossing anywhere in it) stood **0 of 3** — it caught one real number and then degenerated to `352 0 0 0 …` and `1|1|1|…`, never finishing a sentence, and an unfinished sentence is the token cap talking, not the body. **All three reasons were the ask's, and all three are closed** (`native-ask-band` below): the cell's native path now asks through `form/form-stdlib/native-ask.bml` and finishes sentences. What it says on this ask is a different finding, carried there. The mlx crossing's base stood **3 of 3**; the perception adapter stood **1 of 3**, and both its failures were stock phrases lifted from `perception-rows`' own drop sentence ("The room's speech stays where it was said.") — it has learned the body's idiom well enough to reproduce the idiom instead of reading the readings, which is the same lesson its shape grade taught one level down. **The loop closed in the air.** The surviving sentence — *"The room's loudest reading (-24 dBFS) is significantly higher than its floor level (-48 dBFS), indicating a significant difference in volume."*, 2 of 2 claims held — went to `vs-say` in English, the mouth signed its frame at t=1788851041671, the tongue lane rendered it into Persian and Indonesian, and the ear heard it back through the room as "The room's loudest reading 24 dBFS is significantly higher than its floor level 48 dBFS, …" — the minus signs lost in the crossing to sound. Re-folding that spool gives **attested=1, the first attested row on any real spool this body has ever folded**, carrying the body's own words behind its own signature; the heard-back line appears 0 times in the rows, and the leak scan's 3 hits are fragments of the body's own signed sentence, not the room's speech. Two limits, named: no candidate in the live sample was refused for **contradicting** the record — every refusal was unfinished (native) or vacuous (adapter), so the contradiction guard is proven by the band and not yet by the room; and a claim can be individually backed while the sentence is incoherent, as "The room reached its loudest reading of -24 dBFS, indicating the quietest state." stood on one held claim. Two defects found by running it: the mlx crossing wraps the model's answer in its own banner, so `voice-school`'s first-word grader had been reading `==========` as every answer — `lv-said` takes the transport's framing off once, where the crossing is; and a tongue claimed by its bare two-letter code refuses "carried out of it" because Italian was not heard, so a tongue is claimed by its name or by its code inside the body's own shape notation. `ear-native-band` reads **0** — total darkness, not a partial — while the body's own ear glass holds the mic and the GPU, and 32767 with the ear asleep.
-- `form/form-stdlib/tests/native-ask-band.fk` = 4095 — **the body asks its own mind, on its own metal, with no membrane crossed.** `form/form-stdlib/native-ask.bml` is the door; `lv-ask`, `lv-ask-at` and `lv-ask-n` route an adapterless ask through it, and `lv-route` / `lv-route-why` say plainly which door any ask takes. The dense lane could always decode a token in single-digit milliseconds and could not finish a sentence — the 0 of 3 above. Measured 2026-09-09 on a machine reading **347.63 GB/s through the handle door against a best of 347.63 (quiet) and 12.884902 TFLOPS**, three things stood between the lane and an answer and **all three were the ask's, not the lane's**. **The shape**: the ask went in as bare completion text while `mlx_lm` applies the model's chat template, so the two lanes were never asking the same question — an instructed model handed a dump of readings continues the dump (`1 room = 1 space with a defined area and boundaries.\n\nObservation: 2 rooms = 2 spaces …`, the same shape as yesterday's `352 0 0 0`), and through its own headers the same 1B answers *"A room is a space enclosed by walls, floor, and ceiling, typically used for various activities or purposes."* in 22 tokens and stops itself. **The boundary**: the greedy longest match took the piece `.<` across the first byte of `<|eot_id|>`, after which every header shredded into `<|`, `eo`, `t`, `_id` — markers are now cut out of the text and spliced whole, each looked up in the body's own vocabulary index rather than written down as an id, so nothing here is a remembered token number. **The end**: this model does not end a sentence with a bare line break, it writes `382`, whose piece is `".\n\n"` — the break arrives *inside* the piece, the four known end ids never saw it, and every answer ran to the caller's cap where `ow-candidate` refused it as cut. The end is now read from the **piece**, and a break-carrying piece is **kept**, because the full stop the sentence needs lives in that same piece (corpus row 1368 `cutkept`, a day earlier, on a rendering). The lane opens its own 1024-position cache rather than borrowing the tongue lane's 256: `own-word`'s two-shape ask over a real 217-frame spool measures **147 tokens**, under the old cap and not being cut — worth stating because the first guess was that it *was*. The band goes red both ways: **4089** with the greedy encoder back (bits 2 and 4 dark) and **4087** with an end blind to a break inside a piece (bit 8 dark); and bit 2 had to be strengthened after a red probe showed a text round-trip reads green over the boundary wound, because the shredded pieces re-concatenate to identical bytes — unchanged means every marker arrives as its **own id**, which is what the model attends to. **What still crosses, and why**: an ask wearing an adapter. `adapter_config.json` names the model it was fitted to — the mlx 4-bit 3B — and this lane holds the registry's 1B gguf, so the crossing stands, named, until a native LoRA lane does. `voice-school` asks through the explicitly-named crossing on both sides on purpose: a base-versus-adapter grade only reads the adapter while the model is held still. **And the finding underneath**: `observe/lora-voice-ask-run.fk` asks one real room three ways side by side, each answer held against the record by `own-word`'s checker. The native lane now finishes a sentence every time and, on `own-word`'s full ask, that sentence is *"I cannot create content that describes a sexual encounter between an adult and a minor."* — deterministic across ask sizes, not a truncation, and about nothing in the room. Bisecting the ask by hand found the trigger: not its length, not its completion cue, not its sentence about mouths, but **the body's own shape notation** — `saying|en|phrase|no-level — node 1ef3c315 — stood 81 of 217 frames`. The plain-English half of the same ask, carrying the same numbers about the same room, answers fine (*"The loudness of the room is extremely low."*). The guard is reading surface, not meaning. The crossing's base stood 1 of 1 claims held; the perception adapter answered *"The shape of the lane holds the tongue's shape, indicating the speech stays where it was said."* — the same stock phrase from `perception-rows`' own drop sentence that failed it yesterday. Corpus row 1378 `selfcipher`.
-- `form/form-stdlib/tests/q8-0-matvec-tg-band.fk` = 1023 — every cooperative twin the dense lane dispatches byte for byte its attestant on llama3.2:1b's real weights and state: four Q8_0 matvec twins (the sixteen-rows-a-group one at ~210 GB/s against the measured 330 GB/s floor, on both widths), the rmsnorm (the root crosses the barrier, not the reciprocal), the two-stage argmax on real logits, the cooperative attention and the pair rope on a real cache, and the fused block (eight dispatches a layer for seventeen) answering the serial block's logits byte for byte; a dense token 36 ms to 13.0 (GPU 10.5, 133 dispatches; floor 4 ms), the same sixteen ids. And the CPU's own share of that wall is measured, not assumed (`observe/dense-enqueue-share-run.fk` reads the clock before the sync, so a loaded GPU cannot cloud it): the 133 bindings a token cost 2.55 ms until the still ones were said once at open — only the position's own dispatches carry a number that moves — and now cost 1.14 ms (the 3B's, 6.75 to 2.25). Every dispatch helper answers a triple (pipe, binding, count) and `dth-fire` is the one door call, so a prebuilt binding cannot drift from a live one.
-- `form/form-stdlib/tests/floor-lens-band.fk` = 31 — the floor lens's arithmetic (bytes over the measured bandwidth is a floor; totals over counts keep a sub-millisecond lane from reading as zero); `observe/floor-lens-run.fk` shows each lane beside the floor its hardware gives it.
-- `form/form-stdlib/tests/kernel-length-band.fk` = 63 — the body reads its own emitted kernels back (statements, loops, bytes) before any GPU runs; `observe/kernel-length-run.fk` holds it to the ear's sixteen kernels and the Q8_0 family.
-- `form/native/metal/tests/dense-multi-band.fk` = 1023 — M sequences (1..8) through the dense lane in ONE decode step (`form/native/metal/dense-multi.fk`, kernels in `form/form-stdlib/q8-0-matmat-msl.fk`): the Q8_0 matvec a matmat over M input columns with tg4's fold per column (the weights and the x slices staged, 24.8 KB a group), rmsnorm/rope/attention/argmax/embed once per sequence on its own rows and KV bank; four prompts of four lengths answer, per sequence, the single lane's ids and the same logits bytes, M=1 the pinned sixteen, M=8 columns do not cross. Past M=4 a GLU folding lane carries TWO columns, reading each staged weight once and spending it twice: the GLU dispatch fell from 7775 µs to 1950 at M=8 and the whole step from 170.0 ms to 123.4 (the two widths alternating on one lane in one process, `dense-multi-probe.fk`). The pool is no longer in the radius: past 1024 positions the attention dispatches a device-scratch twin of the staged kernel — the same folds, proven byte for byte against the staged one at M=4 and against the per-head attestant at 1100 positions.
-- `form/form-stdlib/tests/q6k-q4k-matvec-tg-band.fk` = 8191 — the sixteen-rows-a-group twin carried to the 256-weight superblock and then healed at its loader: `form_q6k_matvec_tg4_f32` and `form_q4k_matvec_tg4_f32` byte for byte their one-thread attestants on llama3.2:3b's real Q6_K and Q4_K rows at every shape the lane dispatches (q, k, v, gate, both ffn_down types, the 128256-row head), a step one half-superblock and the loaders holding the next half in registers, the fold untouched. The K-quant wall was the LOADER, and it was arithmetic: a runtime-divisor integer division a weight (Q6_K's `qh / 4^g`, exactly `(qh >> 2g) & 3`), the scale products `d*sc` and `dmin*mn` recomputed per weight instead of folded once at load, and a Q4_K scale array indexed by a runtime value that spilled out of registers a step — the head twin (128256x3072, 323.3 MB) 43.1 GB/s to 77.6, a dispatch 7500 µs to 4167, standing and healed loaders emitted into ONE unit and dispatched alternately, minimum of four rotations, byte-identical every time. That 1.80x is a floor and not the quiet-machine number: three siblings held this GPU all evening, and every smaller shape came back at the flat 1150 µs per-dispatch floor a busy GPU imposes, for BOTH loaders — the A/B goes blind exactly where the lane spends most of its dispatches, so their gain is owed a quiet machine, not claimed. Two epilogues carried too — `..._tg4_off_f32` lands k and v in their caches, `..._tg4_add_f32` adds into the residual stream where it stands — so a K-quant layer is TWELVE dispatches where the serial block has seventeen (a 3B token 481 to 341), and the band proves the K-quant block against the serial block four forwards deep: the same ids and the last forward's whole 128256-logit buffer, byte for byte. Still open: the superblock SwiGLU (gate/up/activation are three dispatches where Q8_0 has one), a same-type multi-tensor group (q and k are Q4_K, v is Q6_K), and whether `pv[2][16][129]`'s 16.5 KB a group is the occupancy wall — probed, unreadable under a contended GPU, owed a quiet machine.
-                                                     field admitting grammar offers by whole sha256,
-                                                     evaluation through a child membrane under
-                                                     hearth-channel-eval-s; the witness door
-                                                     observe/cell-channel-witness-run.fk walks the
-                                                     protocol and publishes cell-channel.<name> and
-                                                     cell-mesh to the glass under the `mesh` tag)
-lora-adapter-band                      -> 31       (the body reads its adapter's safetensors header;
-                                                     symbol-voice-band 63 expands symbol lines locally;
-                                                     adapters/ carries the Qwen teach overlay and the
-                                                     first voice adapter as tree ice)
-lora-backward-band                     -> 511      (the reverse walk over a low-rank pair, every
-                                                     gradient held against finite differences the
-                                                     body computes itself; no GPU in the band)
-lora-step-live-band                    -> 511      (the same arithmetic over a five-wide vocabulary
-                                                     beside the plain softmax it is held against, and
-                                                     a step size that has to earn itself; the live
-                                                     door is observe/lora-step-native-run.fk)
-we-glass-band                          -> 1023     (DO/BE/SEE at five altitudes with a source on
-                                                     every row; observe/we-glass-run.fk publishes
-                                                     we.glass to the shared bus; we-glass-ask.fk
-                                                     answers where any word or node stands)
+bml-band 268435455 · bml-generics-band 16777215 · native-route-goal-cells-band.bml 1048575
+nested-defn-scope-band 63 · nested-defn-closure-capture-band 63
+bml-float-literal-band 2047 · bml-form-size-band 127 · cell-channel-band 4095
 json-codec-bml-band 8191 · kernel-http-band 536965066 · channel-flow-band 8388607
 circle-band 1048575 · static-to-dynamic-cells-band 262143 · bml-capability-ledger-band 255
-form-pe-coff-band 16383 · learn/tests/choice-receipt-band 4294967295
-                                                  (each compiled for the first time under its own name)
-bmf-compiler-runtime 2097279 · bmf-source-scanner-rule-band 4500 · python-bmf-grammar-band 219
-python-bmf-from-import-band 54 · python-bmf-class-band 34 · python-bmf-reversible-band 102
-language-bmf-program-core 64 · ts-reversible-band 105 · bmf-section-syntax 218
-language-packs-fourth-band 31          (every chain through compiler.fk or a grammar died rc 1 on
-                                          `::=` until the lane keyed on content, 2026-09-04)
-form-cli-allowance-band 2047 · form-cli-live-band 255 · native-tensor-lifecycle-band 63 · form-cli-lens-mint-band 1023
-bml-bmf-control-curriculum-band 1048575 · bml-bmf-stream-curriculum-band 16777215
-                                          (their `[form.lift]` sources lower in memory)
+form-pe-coff-band 16383 · learn/tests/choice-receipt-band.bml 4294967295
+language-packs-fourth-band 31 · bml-bmf-control-curriculum-band 1048575
+bml-bmf-stream-curriculum-band 16777215 · form-cli-allowance-band 2047 · form-cli-live-band 255
+form-cli-lens-mint-band 1023 · native-tensor-lifecycle-band 1023
 ```
 
-## The local-model lane (Qwen3.8-27B Q8_0, Form-native, Metal JIT)
+## The mind and its voice
 
-Form emits every Metal pipeline the dense hybrid walker needs and reads the
-geometry from the sealed GGUF header; the frozen open equals the scanned open
-row for row (crystal band); a multi-dispatch chain keeps its intermediates on
-the device with one wait at the end (handle-door band).
+The voice speaks on this Mac's own metal: Qwen3.8-27B Q8_0 walked as Form recipe-data in the fkwu
+session, every Metal pipeline Form-emitted and JIT-compiled at runtime, the geometry read from the
+sealed GGUF header. The body takes engineering turns on its own through
+`observe/native-turn-run.bml`, begun by the host schedule (launchd), and each turn writes one row to
+`receipts/native-turn-ledger.jsonl`: today it holds **7 turns, 2026-09-25 17:01 to 2026-09-27 19:17
+WITA, 6 of them at `rented_mind` 0 and 3 with their band gone green** (`wc -l`, `grep -c`).
 
-```text
-metal-door-band                        -> 15
-qwen35-dense-token-handle-band         -> 2147483647
-qwen35-crystal-band                    -> 255
-llama-token-handle-band                -> 255
-kat-token-handle-band                  -> 262143
-native-tensor-derived-band                       -> 16777215
-jit-metal-lanes-band                   -> 8191
-metal-handle-door-band                 -> 65535
-metal-deadline-band                    -> 127     (on the real GPU)
-```
-
-The deadline is the caller's: `hearth-metal-deadline-ms` (300000, one Form row
-in `hearth.bml`) reaches the carrier through `metal_deadline` before admission,
-the door answering the deadline that stood before (-1 when none did); every
-command-buffer wait blocks on the kernel and ends in a typed frame
-`metal_status` speaks — `wait_frame=completed|error|timeout|released` — with a
-timed-out buffer shelved and released by the next wait, its answer exact.
-
-The permanent resident (`observe/form-cli-peer-contribution-live.fk`, the
-hearth) is one Form/Qwen/KV peer that receives scannerless tasks from an append
-spool and returns length-safe durable results; it blocks on the fifo bell at
-idle — no polling core, no HTTP/server/model membrane — announces its birth
-capabilities and hands its patience before model admission, and a `release`
-byte on the bell closes model and state handles. CPU carries file deltas,
-scannerless BMF cursors, recovery and diagnostics; native Metal carries Qwen
-and any emitted recipe kernels. The turnwheel mints its own choice receipt, and
-receipts carry energy and provenance texture (native / local / remote lanes,
-sensed planes witnessed and never billed).
+The resident (`observe/form-cli-peer-contribution-live.fk`, the hearth) is one Form/Qwen/KV peer that
+takes tasks from an append spool and returns length-safe durable results; it rests on its fifo bell
+at idle and a `release` byte closes its model and state handles. Its admission deadline is one Form
+row, `hearth-metal-deadline-ms` = 300000 (`form/form-stdlib/hearth.bml`), handed to the carrier
+through `metal_deadline`.
 
 ```text
 form-cli-peer-direct-answer-action-band    -> 8191
-form-cli-peer-policy-route-band            -> 131071
 form-cli-peer-stream-ingress-band          -> 2097151
 form-cli-peer-contribution-turnwheel-band  -> 33554431
-observed-auto-learning-band                -> 32767   (live promotion requires a retained
-                                                        equivalence witness, not score alone)
+observed-auto-learning-band                -> 32767
 hearth-band                                -> 32767
 receipt-texture-band                       -> 16383
+lora-backward-band 511 · lora-step-live-band 511 · lora-adapter-band 31 · symbol-voice-band 63
 ```
 
-Timings are not on this floor: none was taken in this pass, and a timing taken
-while sibling processes compute on the same host is contention-noised (bands
-are exact regardless).
+### The GPU lanes
 
-## The GPU lanes
+Every layer is a Form recipe first and then a carrier on a GPU, held to that recipe. Four light
+Metal bands ran today:
 
-Every layer the body computes is a Form recipe first — four kernels agreeing on the CPU — and then
-a carrier on a GPU, held to that recipe. Three carriers stand.
+```text
+metal-door-band          -> 15
+msl-families-mint-band   -> 4294967295   (every emitted MSL family mints on this Metal)
+msl-lane-coverage-band   -> 31           (every -msl entry point has a band that enqueues it)
+matvec-t-band            -> 127          (the transposed matvec and the rank-1 accumulate)
+floor-lens-band 31 · floor-spread-band 31 · kernel-length-band 63   (the lens arithmetic, no GPU)
+```
 
-| layer | Metal (this Mac) | Vulkan (MoltenVK here; the same SPIR-V on NVIDIA and Adreno) | PTX (RTX 4070) |
-|---|---|---|---|
-| matvec | f32, f16, bf16 and fourteen GGUF formats | f32, bit-exact (`matvec_vk.c`, 1024/1024 rows) | f32, f16, bf16, bit-exact |
-| Q8_0 matvec | `q8-0-matvec-tg-band` 1023, on real weights | `vk-q80-live-band` 7 — the shader reads each block's scale and bytes | — |
-| affine SGD step | `matvec-affine-metal-live-band` 31 | `vk-train-live-band` 255 — tensor-ir's own step through its GLSL table | bit-exact |
-| gelu, softmax | inside the FFN and attention bands | `vk-layers-live-band` 1023 | bit-exact |
-| FFN forward, FFN backprop | `ffn-fwd-metal-live-band` 31, `mlp-train-metal-live-band` 63 | `vk-blocks-live-band` 31, `vk-train-live-band` | forward bit-exact; backprop through Vulkan |
-| attention: single-head, causal, GQA, KV decode | `gqa-attn-metal-live-band` 31, `gqa-llama-metal-live-band` 127, `llama-decode-step-metal-live-band` 31 | `vk-layers-live-band` — one kernel for all four | single-head bit-exact; the rest through Vulkan |
-| layernorm, rmsnorm, residual | inside the block bands | `vk-layers-live-band` | bit-exact |
-| transformer block, Llama block | `block-fwd-metal-live-band`, `llama-block-fwd-metal-live-band` 63 | `vk-blocks-live-band` — 37 dispatches in one command buffer | the 12-launch block end-to-end; Llama through Vulkan |
-| conv2d, GroupNorm | `conv2d-metal-live-band` 31 | `vk-diffusion-moe-live-band` 63 | through Vulkan |
-| MoE router and gather | `moe-msl-band` 511, `moe-gather-msl-band` 1023 | `vk-diffusion-moe-live-band` | through Vulkan |
+The lanes that open a model or hold the GPU were not re-run for this page. Each band declares its
+verdict in its header; the last run of each lives in its receipt:
 
-**Vulkan.** `form/native/vulkan/run_vk.c` runs a plan Form writes (`form/form-stdlib/vk-door.bml`):
-buffers cross as 32-bit words, so a float travels as its bits both ways, and every dispatch goes into
-one command buffer with a barrier between neighbours. The shaders are
-`form/form-stdlib/form-glsl-layers.bml`, twins that fold in their recipe's order and are held to the
-fp64 recipe at fp32 epsilon. The carrier is built once per host (its header says how); on this Mac
-the headers come from the Android NDK sysroot and the Vulkan implementation is the
-libMoltenVK.dylib Docker ships.
+| lane | band | last witnessed |
+|---|---|---|
+| Qwen3.8-27B handle, all 64 layers on the device | `qwen35-dense-token-handle-band` 2147483647 | `receipts/2026-08-30-reground-the-floor-answered-fresh.md` |
+| Q8_0 prefill on the matrix unit; the 577-token prefill at 9.5–16.6 s of GPU, the same token | `q8-0-matmul-mma-band` 15, `qwen38-prefill-quant-band` 31 | `receipts/2026-09-11-named-pain-walked.md` |
+| cooperative matvec twins on real weights | `q8-0-matvec-tg-band` 1023, `q6k-q4k-matvec-tg-band` 8191 | `receipts/2026-09-06-the-root-crosses-the-barrier.md`, `receipts/2026-09-06-the-loader-was-the-wall.md` |
+| up to eight sequences in one decode step | `dense-multi-band` 1023 | `receipts/2026-09-09-the-body-had-a-mind-and-the-wrong-question.md` |
+| half and bfloat element formats | `precision-lanes-metal-live-band` 2097151 | `receipts/2026-09-11-the-registry-resolved-and-the-host-that-decided.md` |
+| Vulkan carrier (MoltenVK here) | `vk-layers-live-band` 1023, `vk-train-live-band` 255, `vk-blocks-live-band` 31 | the same receipt |
+| native LoRA with Adam moments resumed | `native-lora-resume-band` 7 | `receipts/2026-09-23-native-assessment-memory.md` |
+| the ear: whisper-tiny as the body's own pass | `ear-native-band` 32767 | `receipts/2026-09-09-the-ear-could-not-hear-the-house.md` |
+| the mouth: a whole VITS voice, phoneme ids to samples | `voice-pass-band` 4095 | `receipts/2026-09-09-the-shape-was-right-and-the-sound-was-empty.md` |
 
-**PTX.** The hosts in `form/native/cuda/`, run on the RTX 4070 (`form-ptx` band 8191 four-way).
-"Through Vulkan" means no PTX twin is written: NVIDIA's own Vulkan driver runs the SPIR-V (the
-matvec was bit-exact on the RTX Vulkan ICD), and no NVIDIA device answers from this host to hear a
-PTX twin.
-
-**Precision.** Fourteen GGUF formats are carved on Metal — Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K,
-IQ2_XXS, IQ2_XS, IQ3_XXS, IQ4_NL, IQ4_XS and plane-split MXFP4 and MXFP8 (`quant-carve-census-band`
-32767). Every family that takes an element type is minted in half and bfloat
-(`msl-families-mint-band` 4294967295) and fed: the matvecs byte-identical to Form's fold, and the five
-that store in the element format — affine, FFN forward, and the FFN, residual and attention training
-steps — each its own f32 twin rounded once by Form (`precision-lanes-metal-live-band` 2097151). The
-seven whole-block kernels take no element type: they are f32 demonstration graphs, and a model's
-weights reach the device through the carvers and the views.
-
-**Residency.** A model larger than one MTLBuffer stands as views. The device declines one buffer over
-the whole file; `form/native/metal/view-residency.bml` bisects the ceiling in pages from the device's
-own answer (80.64 GiB here), windowed views cover the file with every tensor wholly inside one, and
-each read through a view is judged by a plain file read (`view-residency-band` 511). The 107.6 GiB
-dolphin-mixtral Q6_K blob on this disk fits that way.
-
-**Training on the metal.** The transposed matvec and the rank-1 accumulate (`matvec-t-band` 127);
-the reverses of RMSNorm, RoPE, SwiGLU and attention, each held to a central difference of the forward
-kernel the live model runs (`native-reverse-fd-band` 255); the transposed 4-bit affine
-(`affine4-t-band` 63); the activation tape; Adam with its moments checkpointed beside the adapter
-(`native-lora-resume-band` 7).
-
-**Recipes the carriers answer to.** conv2d, GroupNorm, BatchNorm and `tn-rsqrt` (`conv2d-band` 255);
-a whole UNet and a VAE decoder composed from them (`unet-full-band` 255); sampling with beam search
-(`sampling-band` 8388607); cross-entropy over a batch and its gradient for a shared bias, split any
-way (`loss-band` 511) — all four kernels agreeing.
-
-**Whole models.** The Qwen3.8-27B handle walks all 64 layers with the weights resident and the state
-on the device (`qwen35-dense-token-handle-band` 2147483647); a multi-dispatch chain keeps its
-intermediates on the device with one wait at the end (`metal-handle-door-band` 65535).
-
-**Prefill.** Each linear layer's conv and delta recurrences run with their token loop inside the
-kernel by default. Asked in one process — the same 577-token prefill ten times against the same open
-weights, alternating after a warm pass of each (`observe/qwen38-fold-ab-run.bml`, 2026-09-11) — the
-folded walk issues 2,423 dispatches against the looped walk's 57,719 (each the dispatch model's count
-plus the lane's five), answers the same token every pass, and spends at most 111 ms of host time
-outside the GPU against the loops' at least 1,951. The GPU times (folded 156,555–231,656 ms, looped
-109,843–296,096) cannot be told apart on this shared host (`qwen38-dispatch-model-band` 4095, four
-kernels agreeing). The loops stay reachable through fold 0. The batched matmuls were that
-prefill's time — 110–296 s of GPU against a compute floor near 1.2 s — until Q8_0 moved onto the
-matrix unit (`qmb-q80-mma`: simdgroup_multiply_accumulate over 32 × 32 tiles, within the lane's
-named bound; `q8-0-matmul-mma-band` 15, `qwen38-prefill-quant-band` 31). The same prefill now takes
-9.5–16.6 s of GPU and answers the same token (`observe/qwen38-prefill-time-run.bml`), each FFN tensor
-18–26 ms against the batched kernel's 196–503 ms (`observe/qwen38-span-matmul-probe.bml`), and
-about eight to fourteen times the compute floor remains. Its exact twin, which stages the activations
-once for eight rows and answers the batched bytes (`q8-0-matmul-tg-band` 15), did not move the time:
-the batched kernel was bound by its scalar multiply-adds, not by re-reading x.
-
-**Attention over a span.** The lane's own span-attention pipeline, timed alone at its own geometry
-(`observe/qwen38-span-attn-probe.bml`: 24 query heads over 4 key/value heads, head dim 256), takes
-30.7–31.5 ms per layer for a 577-token span — about 0.5 s across the 16 full-attention layers, some
-3–5% of that prefill now that its matmuls run on the matrix unit. Its scratch is two rows per token and head over the positions,
-bounded by the prefill slice. Decode is O(n) per token with a threadgroup per query head
-(`q8-0-matvec-tg-band` bit 128).
-
-**Reductions.** The cooperative matvec twins — threadgroup memory and simdgroup reductions, in 25
-emitters — answer to their one-thread attestants bit for bit on real weights (`q8-0-matvec-tg-band`
-1023, `q6k-q4k-matvec-tg-band` 8191). On llama3.2:3b, forty dispatches of each (2026-09-11, whole
-milliseconds, a shared host): Q4_K 3072×3072 at 75 µs (71 GB/s), Q6_K 3072×8192 at 150 µs (138 GB/s),
-the Q6_K head 128256×3072 at 1.75 ms (185 GB/s) — the widest shape at about half the 388.52 GB/s the
-floor lens read.
+`observe/floor-lens-run.fk` reads what the hardware gives each lane (bandwidth and arithmetic, three
+reads with their spread) — a reading worth taking on a quiet machine.
 
 ## The knowledge lane
 
 ```text
-form-knowledge-integration-census-band     -> 1048575   (the census cell counts the
-                                                          denominator each run)
+form-knowledge-integration-census-band     -> 1048575
 form-knowledge-source-search-band          -> 262143
-form-knowledge-qwen-heldout-v3-eval-band   -> 65511     (declares 65535; bits 8 and 16 open:
-                                                          every row current against its source
-                                                          sha, and the dataset sha equal to the seal)
-form-cli-heedmark-band 1023 · form-cli-heed-cursor-band 524287
-form-cli-heed-current-source-band 16777215 · form-cli-model-generate-heed-report-band 8388607
-form-cli-qwen-teach-layer-band 33554431 · lora-adapter-band 31 · error-absorption-kernel-band 4095
-nl-lexicon-grow-band 127 · pivot-coverage-band 65535
-native-model-route-table-band 255 · ds4-blob-select-band 31
+form-knowledge-qwen-heldout-v3-eval-band   -> 65511   (declares 65535; bits 8 and 16 open: every
+                                                       row current against its source sha, and the
+                                                       dataset sha equal to its seal)
+native-model-route-table-band 255 · ds4-blob-select-band 31 · nl-lexicon-grow-band 127
+pivot-coverage-band 65535 · cognition/tests/error-absorption-kernel-band 4095
 ```
 
-The unassisted local-answer baseline is measured at route level, not guessed:
-the sealed v3 held-out lane (30 rows, two per family, exact-normalized verifier,
-no lexical credit, consent dataset-bound) is the body's defined-correctness
-integration number, re-earned only through that sealed door. The model route
-decision is a Form data table (`native-model-route-table-band`), and the DS4
-engine is discovered at runtime through its directory with header verification
-(`ds4-blob-select-band`).
+The sealed v3 held-out lane (30 rows, every family twice, whole-normalized answers) is the body's
+defined-correctness number, re-earned only through that sealed door. Its consent file
+(`.form-knowledge-qwen-heldout-v3-consent`) is a per-run local act that git ignores. The model route is
+a Form data table, and the DS4 engine is found at runtime through its directory with its header
+verified.
 
-## The string floor
+## The senses
 
-`core.fk` composes `str_to_int` over the four-native waist (`str_len`,
-`str_byte_at`, `byte_to_str`, `str_concat`); `substring` and `str_find` are
-natives on all four arms with their recipes kept beside them as the body's own
-statement of what they mean (`core-str-find-equivalence-band` 2047 keeps the old
-loop verbatim as its reference).
-
-**The search is a native again on fkwu (2026-09-08), and there was nothing to
-mint.** fkwu's tag-30 arm never left `runtime/fkwu-uni.c` when the name left
-`flt-ops` on 2026-07-01, and neither did its `fkc-tri2` arm in
-`fkc-table-serialize.fk`. A native here stands on four mirrors — a
-`native-op-manifest.fk` row, a `flt-ops` row, the generated `fkwu-optable.h`, and
-a serializer arm — and three of the four were still standing; only the row was
-gone, and with it the only way to reach either arm. The whole heal is one
-restored row, and from a call site an orphaned arm reads exactly like an absent
-one. Measured on this quiet Mac (347.63 GB/s through the handle door, unchanged
-across every reading, `observe/floor-lens-run.fk`), warm, three runs each, both
-binaries built by the same compiler minutes apart, in one process with the
-allocating column as a shared control agreeing within 1%
-(`observe/line-grammar-search-floor-run.fk`): `split-on` over 16.1 MB of locale
-rows **1955 → 253 ms** (7.7x) and one miss over the 980 kB corpus **97 → 0 ms**
-(>97x), while `trim` (261 → 259), `lines-from-source` (234 → 234) and
-`starts-with?` (26 → 25) did not move — because those three do not search.
-`meaning-codes-band` measured **7306/7321/7310 → 3711/3716/3708 ms** (1.97x, 0.2%
-spread) on the tree this work started from, and **122/122/121 → 114/116/115 ms**
-(1.06x) after the rebase brought the same hour's caller-side heal, which stopped
-that round searching 235,936 times. Both are true; the second is what is left
-once the caller stopped asking. The bearing census's own step total moved the
-*other* way at the old scale, 60,556,932 → 80,285,715, deterministic cold and
-warm; removing ~39.5M Form call entries cannot raise a total, and at the new
-168,453-step scale it behaves (168,453 → 155,292), so that figure measures
-something whose denominator moves with the door distribution. Named, not
-explained, and handed to `bearing-census.bml`'s hand.
-
-**One meaning for the search, held by four arms (2026-09-08).**
-`str_find(h, n, from)` answers the BYTE INDEX of the first occurrence of `n` in
-`h` at or after `max(from, 0)`, or `-1`; an empty needle answers `max(from, 0)`;
-a start past `str_len(h)` answers `-1`, the empty needle included; overlapping
-occurrences answer the first. It refuses nothing and it floors nothing. Two
-silent divergences were measured before the heal and both are closed. fkwu did
-not clamp a negative `from`: `(str_find "abcdefghij" "" -3)` read **-3** here and
-**0** on the other three, and had since both were written — harmless for a
-non-empty needle, which is why every ordinary call agreed. And go, rust and ts
-each snapped `from` UP to the next character start, which skips a needle
-beginning on a continuation byte: on the pre-heal Go kernel
-`(str_find "aΩΩb" <the byte 0xA9> 2)` answered **4** where the byte answer is
-**2**. `str-find-one-meaning-band` **8191 on all four arms** is the guard and is
-a `gate/drift-gates.bml` row, so it runs at every land. It has been watched
-failing: **6140** against a build with the clamp removed, **7679** against one
-that snaps `from` (bit 512 dark and nothing else — the only thing in the tree
-that can see a snapped start), and **5880** against one that drops the
-past-the-end refusal. The standing lesson is
-[`docs/str-find-one-meaning.md`](docs/str-find-one-meaning.md).
-
-**There is one search in this body (2026-09-08).** `line-grammar.fk` carried a
-second one — `find-loop`, cutting a substring at every offset and comparing the
-piece, which is the shape `core.fk` had already been healed off. `find-from` is
-now `str_find` with the negative-`start` clamp the old scan gave for free, and
-that reaches `split-on`, `native-edit`, `sh-bi-grep` and the thirty-odd units
-that prelude this file at once. The same file's `trim`, `trim-leading-ws`,
-`trim-trailing-ws` and `lines-loop` stopped cutting a fresh string per byte and
-walk byte offsets, making at most one cut. Both implementations run against each
-other inside one process (`observe/line-grammar-search-floor-run.fk`), because a
-wall-clock reading on this host today is quieter about the change than about the
-machine (row 1321): one miss over the 972 kB corpus **297 ms → 97 ms** (3.27 →
-10.0 MB/s), `lines-from-source` over the same file **513 ms → 235 ms**, `trim`
-over 18.1 MB of padded rows **725 ms → 263 ms**, and `split-on` on a ONE-byte
-separator **2100 ms → 1895 ms** — the old cut was already small there, so what
-the routing removes is the growth with needle length, not a constant. A
-first-byte gate ahead of `starts-with?`'s cut was written, measured at 25 ms
-against 26 ms over 240,000 real misses, and **removed rather than shipped**.
-`line-grammar-search-equivalence-band` **8191 on all four arms** keeps all four
-old bodies verbatim as its reference and pins the literal answers of the named
-edges; it answers 6143 and 4079 and 2362 against three deliberately broken
-references, so its green is a green that can fail. Running it four ways is what
-found the one question it was asking that two arms cannot hold: sweeping
-`(substring t 0 i)` at every byte offset of a Persian row hands `starts-with?` a
-cut that severs a character, and rust and ts answer the axiom-1 absence for
-exactly that cut and then die measuring it — witnessed as `as_str: Null` and
-`expected str, got null` while go and fkwu answered 8191. The sweep now asks each
-arm only about prefixes ending on a character boundary, which is the discipline
-`csfe-sweep-needles` already keeps, and no offset is skipped without a rule
-saying which.
-
-`substring` is a native again on fkwu (2026-09-07) — mode 9 of the leaf door
-(tag 201), not a tag of its own: every tag 0..255 carries an arm and 150 is held
-as the native-surface probe, so it rides the door modes 4-8 already ride. Bytes,
-not codepoints, exactly as the recipe cut them. Measured warm on this Mac with
-six siblings live (load 4.2-6.6, so these are minimums of two or three): the same
-192 kB cut runs at **4.59 MB/s composed and 660 MB/s native**, 144x, against
-`str_concat`'s 566 MB/s on the same pool. Real doors: `meaning-codes-band`
-20.2 s → 10.5 s, `ear-native-band` 828 ms → 279 ms, `ear-axes-band` 239 ms →
-164 ms — every verdict unchanged. The homecoming corpus band does **not** move
-(317 ms → 316 ms): its prose walker is token-shaped, jumping whole runs through
-the `scan_run` native precisely so it would never pay this cost.
-`fstr-substring-halve` and `fstr-substring-loop` stay in `core.fk` as the
-portable fallback and as what the bands measure against:
-`core-substring-equivalence-band` still 2047 (an exhaustive start/end sweep,
-written against the original byte-at-a-time loop before this native existed) and
-`substring-native-band` 511 (the locale rows, and the byte adjacency law at every
-byte offset of a Persian/Romanian/German file).
-
-**One meaning for the cut, held by four arms (2026-09-07).** `substring(s, start,
-end)` answers the BYTES of `s` from `max(start,0)` up to `min(end, str_len(s))`;
-`""` when that range is empty or reversed; `""` when `s` is not a string. It
-refuses nothing and it floors nothing. Until this day go, rust and ts *panicked*
-on a reversed range, a negative start or an end past the length — the same source
-killed three processes and answered on the fourth — and all three floored both
-byte offsets to character starts, silently handing byte-indexed callers a
-shorter, shifted window through every Persian, Hebrew, Chinese and Japanese row.
-fkwu and Go hold every cut exactly; rust's `str` and the TS kernel's UTF-16
-string cannot hold a cut that severs a multi-byte character and answer the
-axiom-1 absence there rather than a different window, so what all four arms
-hold together is **no arm ever answers a different non-empty window**.
-`substring-one-meaning-band` **4095 on all four arms** is the guard and is a
-drift gate (`gate/drift-gates.bml`, now 4095 of 4095): an exhaustive
-`[-4,14]x[-4,14]` sweep against a ruler it builds from `str_byte_at` on the arm
-under test, plus every byte offset of the real locale rows. Measured on a kernel
-carrying only the flooring half of the wound it answers 3455 — bits 128 and 512
-are exactly what separates a byte cut from a floored one.
-
-## What stands on a door
-
-`form/form-stdlib/bearing-census.bml` answers the question `substring` left
-behind (corpus row 1345, keeldrag): every band says a door ANSWERS RIGHTLY and
-none says how much of the body stands on it. Three readings off two ledgers the
-seed already keeps — `kernel_hot_rows`' per-defn walker heat, and the source each
-hot row points at. **calls** is the times the walker entered the defn; **bearing**
-is that plus every door reachable from it, closed over a call graph read out of
-the bodies themselves (boundary-checked mentions, comments cut first, so
-`substring` inside `fstr-substring-loop` is not an edge); **leaning** is the same
-graph read upward. Beside them **per-call** separates a cheap door called a
-million times from an expensive door called twice, and the op table says whether
-a native of that name — or of that stem, `nth-rec` → `nth` — already stands, so a
-hot native is never named a recipe to heal. `bearing-census-band` **32767** over
-hand-written rows, and it holds on a kernel where `substring` is still a recipe.
-
-It counts steps, not milliseconds, so it does not move with the machine's mood:
-two runs an hour apart differ in their seconds and agree to the step.
+What the body hears, says and perceives, read by bands that open no microphone, speaker or model:
 
 ```text
-form/form-stdlib/tests/bearing-census-band.fk    -> 32767
-form/form-stdlib/tests/sha256-list-floor-band.fk -> 32767
-observe/bearing-census-run.fk         -> the corpus band, 6.13M steps, 99.9% covered
-observe/bearing-census-locale-run.fk  -> the locale-row walk, 167,731 steps, 98.1% covered
-observe/bearing-census-take.fk        -> 16 rows back off glass.sensor.bearing
+ear-heard-tongues-band   -> 63      the tongues the ear listens for are the tongues the glass offers
+whisper-shape-band       -> 127     whisper's dimensions read from the model file, npz or safetensors
+ear-ground-band          -> 32767   every delay in the live path judged physics or furniture, as data
+perception-symbols-band  -> 8191    the room, the ear and the voice's manner as addressed symbols
+perception-rows-band     -> 65535   a perceived day folded into trainable rows; words travel only
+                                    from a frame naming its speaker and an organ of this body
+own-word-band            -> 65535   a sentence about the room stands only when the record backs every
+                                    claim and it makes at least one
+voice-say-band           -> 16383   one mouth per tongue the ear renders, the map proven in silence
+host-doors-band          -> 131071  host_spawn_at, host_alive and fs_mkfifo: the ear's lanes stand
+                                    with no shell
 ```
 
-The witness is a chain of three names, each handed over by the lens without an
-investigation. On the tree of the hour before the string heal (`c82634d6`, its
-own `fkwu` built from its own seed) the locale walk cost **335,288,753** walker
-steps and the census's answer to *what is the next substring* was the word
-**`substring`** itself — 41.7% of the walking, 38.1M calls, fourteen doors
-leaning. Healed, the same walk cost **195,691,441** steps and the census named
-**`nth-rec`**: `sha256.fk`'s hand-rolled list index, 76.2M calls at 1.0 steps a
-call, while `nth` stands native at tag 23. Healed in turn — `sha256.fk` now
-reaches the native for its index and core's `append` for both its appends, with
-every digest byte-identical — the walk costs **60,064,908** steps, none of that
-private floor appears in the reading, and the standing name is **`find-loop`** in
-`line-grammar.fk` (34.3M calls, five doors leaning). `nil?` does not rank — the
-JIT crystallized it, so it stopped walking, which is the measure working and not
-a blind spot.
-
-The fourth name is where the chain reaches a floor rather than a heal. Routing
-`find-loop` to `str_find` costs the walk **59,076,054** steps, and the census now
-names **`fstr-find-loop`** in `core.fk`: 35.1M calls, seven doors leaning,
-remedy **mint-a-native**. That reading is honest and it is not another door to
-open. The positions are the work — a split on every occurrence cannot skip a
-byte — and every one of them is one walker entry, so a byte scan written in Form
-runs at about **10 MB/s** against the `substring` native's 660 on the same pool.
-The seed's op table carries seven string natives (`str_len`, `str_eq`,
-`str_concat`, `str_byte_at`, `byte_to_str`, `str_to_float`, `substring`) and no
-search among them. What the lens names next is therefore a native `str_find` in
-the seed, and the caller-side half of it is `meaning-codes.bml` re-reading and
-re-splitting the same locale file 235,936 times per round to answer 238,856 key
-lookups.
-
-**The caller-side half, opened (2026-09-08).** The cell was asked what it re-did
-and it answered exactly: **5,256** `mc-codes` calls per round, each one listing
-the locale directory and reading all three `symbol-*.rows` files again —
-**15,768** file reads and **235,936** splits to answer questions about
-thirty-six meanings whose rows total thirty-two. The quadratic came from
-`mc-resolve-all`, which rebuilt every meaning's codes to answer about one code,
-once per code, of every meaning. Form has no mutable state, so *read once* here
-is not a cache: `mc-table()` is the door that reads, and every walker visiting
-more than one meaning now takes that table as an argument and hands it down its
-own recursion; `mc-book()` is the same move one level up, so resolving is a walk
-over answers instead of a re-derivation of them. Per round the reads go
-**15,768 -> 3** and the splits **235,936 -> 38**; the census reads
-**5,214 ms / 59,076,054 steps -> 14 ms / 167,731 steps**, and the band
-**7.21-7.57 s -> 0.11 s** with the round trip alone, timed inside one process,
-**5,266/5,226/5,247 ms -> 14/13/14 ms**. `split-on` is no longer among the forty
-warmest doors of that workload; the standing name there is now `append-1`.
-Verdicts did not move: `meaning-codes-band` 127 on fkwu and 15 on the three
-walkers, measured on both sides of the change, and 175 lines of behaviour — every
-meaning's whole code line, every collision, every tongue, every perception
-symbol's round trip — byte-identical before and after. What did **not** move is
-the reading for a caller that asks about one meaning at a time: `mc-codes(sym)`
-still reads the three files, because for one question that is the work.
-`meaning-codes-table-band` (255 on fkwu, 195 on the three walkers, which carry no
-file reading and so cannot ask the four row bits) guards the shape, so a future
-edit that stops carrying the table goes red instead of slow.
-
-The sha256 heal carries the teaching that reversed its own arithmetic. Routing
-`append-1` and `append-list` to core's `append` adds a frame to a walk with no
-native under it, so it should have cost; it halved the reading instead. The heat
-ledger says why: `append` carries **crystal 3**, `nil?` has no row at all, and
-the private copies carried **crystal -1**. A shared door is warm — the whole
-body's calls push it past the JIT's threshold and it stops walking — and a
-private copy is cold by construction, because nothing else ever calls it. A
-duplicate's price is not the duplication; it is standing outside everyone else's
-heat.
-
-Two honesties travel with every reading. A door with no row says **no-reading**,
-never 0 — a zero reads as free, which is exactly how `substring` hid. And the
-census carries its own **coverage**: the snapshot is the warmest forty doors, and
-the row says what share of the whole process's walking that was.
-
-## Which door is a private copy of a warm one
-
-`form/form-stdlib/twin-census.bml` is the bearing census read backwards. That one
-ranks by heat, so a door nothing drives hard never rises, and a private copy is
-exactly that door — it waited under `sha256.fk` until a locale walk entered it
-seventy-six million times. This one finds its pairs in the **source**, so a door
-nobody has driven is named all the same, and the heat only colours the pair.
-
-Sameness is the whole difficulty, and the cell carries three verdicts and never a
-bare claim. **looks-identical** — the same bytes after comments are cut,
-whitespace squeezed, the door's own name rewritten `@s` and each parameter
-rewritten to its position, so `append-list(xs, ys)` and `append(xs, ys)` read as
-the one body they are. **differs-at** — a long shared prefix AND suffix with one
-window between them, both sides carried, because the window is not noise: it is
-the adapter. **unproven** — the twin named is a native, which has no body
-anywhere, so no body comparison exists and the pair goes to a band rather than to
-a reroute. Each pair also says what it costs: how many other doors mention the
-cold name.
-
-```text
-form/form-stdlib/tests/twin-census-band.fk  -> 65535   (hand-built doors and rows; four kernels agree)
-observe/twin-census-run.fk    -> the locale-row walk, 183 doors, 32 pairs, 99.9% covered
-observe/twin-census-take.fk   -> 21 rows back off glass.sensor.twin, cadence 5000 ms in-frame
-```
-
-The witness is the morning of the heal. On `c82634d6` — the tree an hour before
-`sha256.fk`'s private floor was routed, its own `fkwu` built from its own seed —
-the lens read 187 doors, found 45 pairs, and put **all four** of that floor's
-doors in its top rows before anything had been investigated: `nth-rec` at
-76,254,048 cold walks (unproven against native `nth`), `nil?` as a three-way
-shadow across `core.fk`, `line-grammar.fk` and `sha256.fk`, `append-list`
-**looks-identical** to core's `append`, and `append-1` **differs-at** `append`,
-84.7% alike, *parting where it says `(list @1)` and the warm one says `@1`*. The
-heal that landed that day wrote exactly the window:
-`(defn append-1 (xs x) (append xs (list x)))`.
-
-Two things the ledger teaches, and the section above reads one of them the other
-way round. **Heat cannot tell a warm door from a cold one.** Heat counts WALKS
-and a crystallized door stops walking, so its heat freezes where it took off
-while a door that never crystallizes accrues without bound: that morning
-`append-1` sat at 30,191,048 walks with crystal 0 and `append` sat at 21,547 with
-crystal 3. Read as calls the cold one looks a thousand times the hotter, and only
-crystal separates them — which is also why the snapshot must be read as deep as
-the seed gives (64 rows): at 40 the warm side was simply missing, because being
-warm is what removed it. And **crystal 3 is not a threshold the body's calls
-buy.** In this seed it is set only by `fk_twin_pulse`, for four names — `nil?`,
-`append`, `int_to_str`, `reverse-onto` — at a fixed arity, and only in a unit
-whose leaf is one of six the seed lists. States 1 and 2 are earned by the JIT
-compiling that body; 3 is granted by name. That is why `sha256.fk`'s own PRIVATE
-`nil?` carried crystal 3 that morning: a private copy is not cold by law, it is
-cold when its name is one the seed does not know.
-
-On today's tree the lens names `reverse-acc-loop` in `line-grammar.fk` —
-1,623,666 cold walks at crystal -1 against core's `reverse-onto` at crystal 3,
-79.3% alike, parting where it says `eq (len @0)` and the warm one says `nil? @`.
-`line-grammar.fk` carries the same private list floor `sha256.fk` did (`nil?`,
-`nth` shadowing the native, `append`, `reverse-acc-loop`), `sha256.fk` still
-carries `sha256-stream-reverse-onto` identical to core's, and `append` stands
-defined twice, byte for byte, in `core.fk` and `line-grammar.fk`.
-
-## Which of a native's mirrors still stand
-
-`form/form-stdlib/mirror-census.bml` reads nine current mirrors: manifest,
-flattening table, opcode row, walker arm, serializer, rewrite table, and the
-three proof interpreter registrations. It ranks unreachable arms, missing
-routes, tag clashes, serializer gaps and sibling divergence. A name reached
-through a rewrite is reported as reached; a name with no tag reports the
-tag-based readings as unread.
-
-`./fkwu form/form-stdlib/tests/mirror-census-band.fk` returned 65535 on
-2026-09-09, including the nine-column shape and rewrite-field migration.
-Run `./fkwu observe/mirror-census-run.fk` for the current tree's counts and
-time. Native compilation follows [the Form route](docs/native-jit-routing.md).
-
-## The JIT string crossing
-
-`form-lower.fk` embeds compile-time strings and carries a runtime haystack and
-a runtime needle+`from` through the same two-slot `fk_inram_args` convention
-(`release-ledger.bml` R10 / R28 / R34, all released):
-
-```text
-form-lower-string-band                 -> 63
-form-lower-string-runtime-band         -> 255
-form-lower-string-both-runtime-band    -> 511
-jit-evaluator-heat-band                -> 4095    (heat on the evaluator's leaves)
-jit-heat-gate-band                     -> 4095    (what crystallizes on heat)
-```
-
-Of the policy-spine bands `docs/form-native-jit-track.form` names, these answer
-their number today: jit-profile-receipt 127, jit-tier-policy 1023,
-jit-runtime-fault 511, jit-inline-policy 1023, jit-deopt-cache 511,
-jit-policy-front-sweep 31, form-static-analyzer 16383,
-jit-dylib-cache-lifecycle 16777215, jit-dylib-live-runtime-proof 4294967295,
-jit-source-runtime-orchestrator 1048575.
+`own-word-band` proves that a claim contradicting the record is set aside; a real room has not yet
+offered one. The live doors are `observe/own-word-run.fk`, `observe/say-run.fk` (stdin line
+1 the tongue, `?` lists the mouths) and `observe/perception-say-run.fk`.
 
 ## The Glass
 
-One persistent process paints a retained terminal frame from the body's own
-observation: ten data views plus help, a front/back frame buffer, row-diff
-repaint, and a correlated line-commit control sidecar
-(`observe/form-glass-control-run.fk`; `./fkwu observe/form-glass-run.fk` is the foreground
-carrier). Keys `h a t o m f j s k v n` choose a view, `1 2 3 4` and `0` select
-dialects, `i e c q` inspect, ask evidence, continue, abstain.
+One persistent process paints a retained terminal frame from the body's own observation:
+`./fkwu observe/form-glass-run.fk`. Views `a t o m f j s k v n d`, `h` for help; `r` focuses the room;
+`1`–`4` and `0` choose tongues; `l i e c q g y w` act (`d` opens the body's choice points, `g` steps,
+`y` takes, `w` holds); `z` puts the ear to sleep or wakes it. The ear stands awake with the glass unless
+`.hearth/ear.slept` stands, and every frame opens with the ear's own state.
 
-The ear stands awake with the glass. The carrier writes `.hearth/ear.wanted` at
-birth unless `.hearth/ear.slept` stands — a body that hears is the default, and a
-sleeping ear is a choice someone made and it persists across every rebirth and
-every login. Key **`z`** is that choice, from the glass itself: it writes one
-marker and removes the other, and a write that did not land refuses in the
-footer's control word rather than leaving a mark that says the opposite of the
-mic. Every frame and every view opens its caption with the standing mark —
-`ear ● OPEN speaking` / `ear ○ asleep` / `ear ◌ deaf` / `ear ? unread` /
-`ear ○ closing` — read from the ear's own `ear.state` row and not from the marker
-alone, so a marker over a lane writing nothing reads deaf. The markers are
-relative paths while the gift frames are named machine-wide: a carrier, its
-sensors and its glass are one cwd, and a second body on this Mac needs a second
-hearth.
-
-Beside the mark stands the perception in symbols. The words a line closes on
-already resolve (`ear.symbols`, `ear.nodes`); `form/form-stdlib/perception-symbols.bml`
-gives the rest of the point a symbol too — the room's kind (`still voice tone
-knock noise`), the colour of its own quiet (`hiss air rumble`), the ear's
-condition (`asleep deaf silent speaking heard`) and the seven voice-manner axes
-(`cadence intonation pitch volume expression stillness resonance`) — read off the
-sensors' own row values, never invented beside them. A manner whose row carries no
-reading is not perceived and stays out of the line rather than reading as a zero,
-and neither is a row from a frame whose publisher stopped giving: witnessed
-2026-09-07, no room sensor was standing while its last frame still said `still,
-airy` from minutes before and the ear beside it was hearing a whole sentence, so a
-row the glass marks silent now reads as nothing here rather than as a room.
-`meaning-codes.bml` addresses each symbol (`mc-anchor`, eight hex) and speaks it in
-every tongue the locale rows carry (`form/form-stdlib/locale-rows/symbol-*.rows`);
-a tongue with no cell yet says `[symbol?]` instead of inventing a word.
-`observe/perception-say-run.fk` is the door: it says the whole current perception
-in any named tongue and, given a whisper code, aloud in this Mac's own mouth.
-Two rosters, one grammar: a spoken "still" stays the word, the room being still is
-a different thing, and `mc-resolve-among` walks whichever roster the caller reads in.
-
-### The ground under the ear
-
-`form/form-stdlib/ear-ground.bml` judges every delay in the live path physics or
-furniture and carries the judgment as data — each row with what it measured, where
-it lives, and whether the ground **moved** it or only **named** it, so a delay left
-standing is never counted as a saving. 335 ms of physics, 3037 ms of furniture, 285
-of that moved. The pass itself is thirty-five milliseconds: whisper-tiny opens in
-**70 ms**, the encoder over a full eight-second window is **5 ms**, a decoded line
-is 12–30 ms at about 0.7 ms a token. Everything else in the seconds is waiting.
-
-`observe/ear-ground-live.fk` stands that ground beside the live lane: one process,
-one whisper open, one microphone, one gift-frame handle held for its life. It opens
-in **168 ms** and gives every hop into shared memory — a fork to ring a fifo
-measured **7.5 ms** from inside a process holding the model and a live frame rings
-two, against **under 5 us** for the same line on a kept handle. The frame's sequence
-advances every hop, so `observe/ear-ground-read.fk` answers **absent** (nobody ever
-stood here), **silent** (a ground that stood and stopped — its last line is not the
-room) or **standing**, never a number from a frame that stopped moving. The lane
-also reports how far behind the room it runs: 67–186 ms, median 117 over sixteen
-closes.
-
-Three delays were judged furniture by reading and the room overturned them: the
-eight-second window is 5 ms and not the compute lever; the decoder's own
-end-of-line signal is a real guard, not ceremony — acting on it raw shattered
-nineteen lines in eight seconds — so one confirming hop stands where three did; and
-the delay that actually mattered was the speech gate, found the same hour by the
-hand that owns the listening lane (corpus row 1370). `observe/ear-ground-witness.fk`
-holds the mouth and the reader in one process and reports mouth-to-committed-line
-for both grounds on one utterance, printing the line beside the number because a
-fast reading can be a wrong line.
+Nothing on a glass path forks, scans a directory or parses a tool's output. Telemetry crosses as gift
+frames — POSIX shared memory with a seqlock header — and a value crosses as itself (`node_gift_write` /
+`node_gift_read`). Every `fkwu` writes its own live page (`/fg-k<pid>`: dispatches, nodes, strings,
+heat, boxes, CPU), so any process reads any kernel's hottest defns with their source. When the host
+offers shared memory every kernel opens one field store, so a cell interned in two processes is one
+cell with one word; `observe/field-reset-run.fk` starts the field over when no other kernel is alive.
+A frame standing is not a giver giving: a frame not given for three of its cadences reads silent, and
+`observe/body-vitals-live.fk` watches every surface's own rhythm and effort.
 
 ```text
-ear-ground-band                        -> 32767
+form-glass-live-band 2147483647 · form-glass-observer-band 67108863 · form-glass-dashboard-band 16777215
+form-glass-event-loop-band 16777215 · form-glass-staged-startup-band 262143 · form-glass-launch-band 131071
+form-glass-gift-frame-band 4095 · form-glass-sensor-rows-band 2047 · form-glass-kernel-view-band 511
+form-glass-events-channels-band 32767 · form-glass-telemetry-membrane-band 2097151
+form-glass-wait-band 255 · form-glass-machine-band 511 · form-glass-frame-work-band 32767
+form-glass-vitals-band 1023 · form-glass-standing-band 63 · form-glass-crossings-band 16383
+form-choice-flow-band 16383 · sense-discernment-band 1023 · node-gift-band 4095
+cell-store-band 255 · field-band 255 · kernel-census-band 2047
 ```
+
+## The string floor
+
+`substring(s, start, end)` answers the bytes of `s` from `max(start, 0)` up to `min(end, str_len(s))`;
+`""` when that range is empty or reversed, or when `s` is not a string. `str_find(h, n, from)` answers
+the byte index of the first occurrence of `n` at or after `max(from, 0)`, or -1; an empty needle
+answers `max(from, 0)`; a start past `str_len(h)` answers -1. Both always answer, neither moves an
+offset to a character start, and both are natives on all four arms with their recipes kept in `core.fk` as the body's statement of
+what they mean ([`docs/str-find-one-meaning.md`](docs/str-find-one-meaning.md)).
 
 ```text
-perception-symbols-band                -> 8191
-form-glass-live-band                   -> 2147483647
-form-glass-live-ui-band                -> 4294967295
-form-glass-dashboard-band              -> 16777215
-form-glass-observer-band               -> 67108863
-form-glass-event-loop-band             -> 16777215
-form-glass-staged-startup-band         -> 262143
-gift-frame-writers-band                -> 255
-form-glass-launch-band                 -> 65535
-form-glass-deadline-cadence-band       -> 4095
-form-glass-jit-hold-band               -> 4095
-form-glass-meaning-ui-band             -> 8191
-form-glass-gift-frame-band             -> 4095
-form-glass-sensor-rows-band            -> 2047
-form-glass-kernel-view-band            -> 511
-form-glass-events-channels-band        -> 8191
-node-gift-band                         -> 4095
-cell-store-band                        -> 255
-field-band                             -> 255
-jit-lens-band                          -> 16383
-float-natives-band                     -> 28      (four-way: go/rust/ts agree)
-eq-shape-band                          -> 524287
-primitive-registry-band                -> 45      (fkwu; one pending row per absent native, 79; 63 three-way)
-form-glass-telemetry-membrane-band     -> 2097151
-form-glass-observation-v2-band         -> 2097151
-form-glass-wait-band                   -> 255
-form-glass-machine-band                -> 511
-form-cli-token-discovery-band          -> 1048575
-form-glass-frame-work-band             -> 32767
-persistence-band                       -> 7       (four-way)
-channel-breath-band                    -> 500     (four-way)
-blueprint-authority-band               -> 63487   (from form/, every arm; bit 2048 is doc drift)
+substring-one-meaning-band 4095 · str-find-one-meaning-band 8191     (both drift-gate rows)
+core-substring-equivalence-band 2047 · substring-native-band 511
+line-grammar-search-equivalence-band 8191 · core-str-find-equivalence-band 2047
+meaning-codes-table-band 255
 ```
 
-`s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
-the four that carry BMF categories in the reviewed table) it samples a bounded
-window of that language's real grammar and a bounded window of that language's
-real source in this tree, and names the category each construct's own emitter
-interns together with its NodeID read from the dialect table:
+## The body's own lenses
+
+The body reads itself: which doors bear the most walking, which door is a private copy of a warm one,
+which of a native's mirrors still stand, where a definition is written twice, and which written limit
+carries a witness.
 
 ```text
-py ::= import-as ::= "import" $module:name "as" $alias:name => pybmf-emit-import
-py -> PY-BMF-IMPORT @1.2.99.501 dialect-categories | verify_category_contract.py: NAME_ALIASES = {
+bearing-census-band 32767   ./fkwu observe/bearing-census-run.fk   (steps, not milliseconds)
+twin-census-band 65535      ./fkwu observe/twin-census-run.fk
+mirror-census-band 65535    ./fkwu observe/mirror-census-run.fk
+copy-census-band 63         ./fkwu observe/copy-census-run.fk
+wall-census-band 63         ./fkwu observe/wall-census-run.fk
+observe/tests/voice-frequency-band 255 · number-band 255 · float-printer-fourway-band 31
 ```
 
-Nothing in that view is a fixture, and a sample that is not found says
-UNAVAILABLE with its door and reason. The band checks one NodeID against
-`form-ontology-bp.fk` so a drifted mirror cannot pass.
-
-Each atlas flow gauge carries the evidence symbol of its own lane, its named
-source door, and the standing total beside the per-frame rate — so `G*?.=0u/3M`
-(idle now, three million microseconds of GPU work behind it) reads differently
-from `C*?.=0u/0` (never ran). Telemetry crosses between processes as files
-under a five-second freshness lease; a publisher gone silent is stale for every
-lane, the incarnated model owner included, and its last counters stay in the
-observation view with their age (`release-ledger.bml` R98, R113).
-
-Telemetry also crosses as a **gift frame**: six seed doors (`shm_offer`,
-`shm_receive`, `shm_write`, `shm_read`, `shm_seq`, `shm_release`; tags 184-189) map
-a POSIX shared-memory frame with a sixteen-byte seqlock header — seq even is
-stable, odd is a give in flight, and a read retries until the sequence it took
-equals the one it re-reads, so no reader carries a torn frame. The membrane
-gives every published wire into the frame beside the file and reads the frame
-first; a child process receives what its parent gave, with no file between them
-(`form-glass-gift-frame-band` 4095). Offered, never demanded: release unmaps and
-never unlinks, and an absent gift is named absent. Publishers are still indexed
-by their files, and a publisher born before this build gives nothing until it
-is reborn on it.
-
-A value crosses a gift frame **as itself**: `node_gift_write handle value`
-(tag 178) and `node_gift_read handle` (177) carry ints, floats, strings,
-`nothing`, lists, trivial nodes, composite cells — category then children,
-re-interned on read so the same category over the same children is the same
-cell in the reader (axiom 3) — and NodeID coordinates; a function value
-refuses the give by name. No wire is written and no parser stands on the
-frame path: the reader knows the format because the format is the seed's own
-node words (`node-gift-band` 4095, a child process witnessing the same
-category). The sensor lane gives `list(schema, sensor, epoch, rows)` this way
-and the projection node the glass holds is the same cell the sensor built
-(`form-glass-sensor-rows-band` 2047). The snapshot publishers in other
-processes — owner, hearth, voice, share, governor, jit — still give the text
-wire the membrane parses (`release-ledger.bml` R111).
-
-**The frame path is 10 ms.** Measured 2026-09-06 on this M4 Max through
-`observe/form-glass-frame-budget-run.fk` — twenty consecutive frames with the
-frame processes standing: total mean 10 ms, warm maximum 11 ms, 19 of 20 under
-50 ms (the first frame, 53 ms, maps its frames). It was 763–792 ms on the
-morning of the 5th and 30 ms that evening. Nothing on the path forks, scans a
-directory, opens a file or parses a wire: every row is read from shared memory
-or from a door the kernel opens itself.
-
-**`k` is the kernel view**: gift frames mapped and their bytes, functions
-defined, and the hottest defns of this process with their source pointers —
-`kernel_hot n` answers `heat|name|unit|line|col` from the same per-function
-heat the exit report prints, named by the symbol map, in one pass over the
-program text (`form-glass-kernel-view-band` 511).
-
-**`v` is the events view and `n` the channels view**: the live samples
-selected by the sample's own kind — events, choice points, expert routes,
-resolvers, requests, glass flow; channels, channel edges, grammars, mesh, ear
-streams, shares, field observers, meaning code — newest first, and when no
-sample of a kind is published the view names the organ and its carrier
-(`form-glass-events-channels-band` 8191). Surprise receipts, choice points,
-channel protocols and the grammars give into the `organs` frame (below).
-
-**The frame buffer is the read surface.** Every number on the atlas came out of
-a shared-memory gift frame, and every row set the glass reads carries the
-frame's own witness row — `frame.<sensor>`: the shm name and the sequence it
-was taken at — so a lane can say where it read: `G 0 shm:/fg-5f223d19#1024`,
-`D 7286422933 shm:/fg-3db9b282#80 + shm:/fg-5f223d19#1024 + shm:/fg-ea12eba1#6878`.
-There is no fallback: one id per lane, and `D` `J` `I` sum the counter over
-every process that gives a frame. The frames: `machine` (its own fork-free
-process, `observe/form-glass-machine-live.fk`, every 50 ms — the host GPU
-level and its integral, `host_gpu_utilization` 174 / `host_gpu_busy_us` 175,
-host CPU busy over every core from the Mach load info, `host_cpu_busy_us` 173,
-and its own kernel counters), `glass` (the glass gives its own kernel, metal,
-framebuffer and heat rows into a frame each frame and reads them back like
-any other), `host` `process` `storage` `queue` `owner` (the slow sensors,
-`observe/form-glass-sensors-live.fk`). The one-shot doors read the same
-frames; nothing on any glass path forks or scans. The `k` view lists the
-frames read with their sequences. `observe/form-glass-frame-budget-run.fk`
-prints the read surface after its twentieth frame. One seam: the
-accelerator's `Device Utilization %` is consumed on read and produced about
-once a second, so with Activity Monitor open the glass's `G` reads what is
-left — 0 (R116).
-
-**No shell on any glass path.** The carrier is a Form cell,
-`./fkwu observe/form-glass-run.fk`: it lowers its own priority (`host_nice`),
-spawns the two frame processes as argv lists the kernel executes itself
-(`host_spawn_quiet` — stdout and stderr to /dev/null so the terminal stays the
-glass's), admits and runs the live loop the same way (`host_spawn`,
-`host_wait`), asks the supervisor in-process, and ends its children with
-`host_kill`. Every host row is a door the kernel opens itself: memory from the
-Mach VM statistics (`host_vm_stat`, `sysctl.hw.memsize`), load from
-`getloadavg` (`host_load_avg`), disk from every block storage driver's
-cumulative statistics (`host_disk_stat`, IOKit by name; rates are the reader's
-deltas), processes from libproc (`host_processes name` → pid, resident bytes,
-CPU microseconds, elapsed seconds; a name ending in `*` is a prefix, so
-`fkwu*` is every kernel binary's name; no `ps`, no `pgrep`), the governor and
-launch refresh by argv (`host_capture` where an answer is needed). `tools/`
-carries no glass script; the observer carries no text parser for a tool's
-output. Tags 151–161.
-
-**The kernel writes its own page.** Every `fkwu` maps `/fg-k<pid>` at its first
-dispatch, registers its pid in `/fg-kernels`, and every 1024 primitive
-dispatches — and at exit — stores twenty-one words into it in place:
-dispatches, heat-lane calls, nodes, strings, cons, fns, gift frames and bytes,
-capacities, stack depth, floats, hottest arm, cpu microseconds, alive. No
-wire, no serialization, no frame give: a reader maps the same page and reads
-the words by offset (`kernel_live_pids` 162, `kernel_live pid` 163). The `D`
-and `J` lanes sum those words over every live kernel — `shm:/fg-kernels#4` on
-the lens — and the `k` view lists each kernel's page. The hottest defns come
-as cells (`kernel_hot_rows` 164), Metal's counters as words (`metal_live` 165:
-linked, buffers, pipelines, no-copy buffers, pending, in flight, dispatch,
-sync, cpu-jit dispatch and busy, gpu busy, wait, deadline, shelf, batch mode,
-slots); the observer and the observation layer read those words, not text.
-
-**The membrane lives in shared memory.** A published snapshot is a cell given
-into its publisher's frame; the publisher's name goes into the roster page
-`/fg-roster` (`gift_roster_register` 166 / `gift_roster_names` 167, 511 slots
-keyed `root|publisher` so a band's space never meets the live one); a reader
-lists the roster and takes frames. Control offers and acks are cells in
-`<channel>.inbox` and `<channel>.ack` frames; the glass's carried-over cells
-(last flow point, last cadence, last pageins) are frames too. The membrane
-writes and reads no file — the same thirty-seven organs that publish and read
-through it moved with it. What still touches the filesystem, by subject: the
-storage sensor (its subject is the catalog) and the queue sensor (the hearth
-queue files), both in the sensor process; and the owner-command lease the
-glass leaves for a model owner that still reads disk (R119).
-
-**The store is shared memory.** Every value table of a kernel — the node
-columns (kind, category word, kids, value, NodeID, source file/line/column,
-attribute), both generations of the cons heap, the string bytes and table, the
-float pool — lives in one sparse shared-memory reservation per column,
-`/fg-c<pid>-<letter>`, sized once and committed page by page (a 4 GiB
-reservation touched at three pages costs three pages; the kernel's resident
-size is unchanged). A shared table never moves, so another process maps the
-same columns and reads any cell by its word — blueprint word, kids, value,
-NodeID and source pointer on one surface — with no copy, no wire, no
-re-interning: `cell_map pid` (168), `cell_field handle ref k` (169: 0 kind
-1 cat 2 kids 3 val 4–7 NodeID 8 source 9 line 10 col 11 attr; for a cons 0 head
-1 tail), `cell_value handle ref` (170: a foreign int, string, float or
-`nothing` as this process's own value), `cell_ref value` (171: this process's
-own word, the reference another process reads by), `cell_unmap` (172). A
-foreign word travels as a plain int; the far negatives fold below −2⁶¹ so no
-foreign word is ever mistaken for one of the reader's own. The collector melts
-between the two heap reservations and the live page says which generation is
-current (word 23), whether the store is shared (22), and how many melts (21);
-past a reservation the process copies its tables to private memory once and
-goes on — never a wall. `cell-store-band` 255: a child interns a composite
-over 2 and 3; this process reads kind 2, category `cell-store-band` with NodeID
-subtype 2, kids 2 and 3 cons by cons, from the child's columns. Not yet on the
-surface: the program AST and the `.fkb` images — R120.
-
-**One field, one word.** The per-kernel store above is the fallback. When the
-host offers shared memory every `fkwu` opens the *same* store — `/fg-field-
-<letter>`: the node columns, a shared intern index, a shared pair arena for
-the kids of shared cells, a shared string pool and a shared float pool for the
-values shared cells carry, and a header whose counters every kernel claims
-atomically. Interning is one door for every kind: hash by content (strings by
-bytes, floats by bits, composites by their children's content), probe the
-shared index, compare, and either take the cell another kernel already made or
-claim a slot, fill, publish. So a composite interned in one process and again
-in another is **one cell with one word** — no second copy, and the field's node
-count does not move (`field-band` 255: the child's word equals the parent's,
-`kernel_stat 4` before and after equal). The private cons heap, private
-strings and floats stay per process for transient values; a value becomes
-shared the moment a shared cell carries it, and every reader dispatches by
-index range (≥ 2⁴⁰ is the field) behind the same words. The field persists
-across processes as a host memory should; `observe/field-reset-run.fk` starts
-it over when no other kernel is alive. Live page word 22 reads 2.
-
-**The JIT on the glass.** The kernel charges every float box it mints and
-every float box it reads to the defn running (`fk_fn_fbox`, `fk_fn_unbox`),
-counts native arm64 leaf calls, and publishes the three totals on its live page
-(words 24–26) and as `kernel_stat 45/46/47`. `kernel_hot_rows n` (164) answers
-each hot defn as `(heat name unit line col boxes unboxes)`; `kernel_box_rows n`
-(191) is the unboxing worklist — the defns minting the most float boxes, the
-ones an unboxed float lane would take first. The `j` view shows `jit-boxes`,
-`jit-unboxes`, `jit-native-calls`, the worklist rows and the hot defns wearing
-both ledgers; `jit-unroll` is a row named absent by its door — the arm64 u32
-leaf does not claim the loop (`runtime/fkwu-uni.c:3349`), so no lane in this
-seed unrolls one, and the glass says so instead of inventing it.
-`jit-lens-band` 2047: a defn adding floats twenty thousand times shows 20001
-boxes and 40000 reads on its own row; the int twin shows 0 and 0.
-
-**The kernel counts into the page.** No counter on the live page is copied
-there. `fk_arms`, the heat, box, unbox and native-call totals, and the three
-per-defn ledgers are pointers the kernel repoints into `/fg-k<pid>` when the
-page opens (`fk_live_open`, at `fk_nodes_init`): the increment the dispatch
-loop already does IS the write the glass reads. There is no tick, no publish
-cadence, no serialization -- the 1024-dispatch sampler that carried the words
-before is gone, and a 20-million-iteration loop runs 0.89 s -> 0.67 s (int),
-0.98 s -> 0.78 s (float) on this Mac. A defn's name, unit, line and column land
-in the page meta the moment it is defined (`fk_live_note_defn`, at every
-recording site including `.fkb` ice), so any process reads any kernel's hot
-defns with source from the page alone: `kernel_page_hot pid n` (192) and
-`kernel_page_box pid n` (193). A row carries ten words -- heat, name, unit,
-line, column, boxes, unboxes, native, mints, folds -- and a NEGATIVE n on
-either door asks for a different ranking of the same rows: 192 ranks by folds,
-193 by mints. Both are modes in an argument the door already took, because the
-AST tag space has exactly one free tag left. The words that change at moments -- nodes,
-strings, cpu, alive, store, melt generation -- are written where the moment
-happens (open, field open, melt, exit, self-read). The `k` view lists every live
-kernel's three hottest defns as `k<pid> <defn> <unit>:<line> box n unbox n`.
-`jit-lens-band` 2047 and `cell-store-band` 255 stand on the page words.
-
-**The box ledger fires the leaf.** The per-defn box count is not only shown,
-it acts: when a cold defn's count crosses a 1024 boundary, `fk_fbox` -- the
-increment that was already there -- asks `fk_f64_pulse` once whether the
-defn's body is a pure float expression (float and int literals, parameters,
-add/sub/mul/div with a float on at least one side). If it is, the body is
-emitted as an arm64 f64 leaf: parameters in d0..d7, intermediates in
-d16..d31, one FMOV and RET on a MAP_JIT page. The defn's body entry becomes a
-tag-194 node carrying the fn index and the original body, so dispatch pays
-nothing new: an all-float frame unboxes once and boxes once; any other frame
-walks the original body and answers what the walker always answered. Declined
-bodies are marked -1 and never asked again; a reload clears every leaf. Native
-state is the page's fourth ledger (+96 MiB, layout 3), word 30 and
-`kernel_stat 48` count the crystallized defns, hot rows carry native as their
-eighth field, the `j` view has `jit-crystallized` and every crystallized hot
-defn wears ` native`. A five-op polynomial called two million times: 0.25 s
--> 0.12 s, four boxes per call -> one.
-
-**The leaf claims the loop.** A defn whose body is `(if <compare> <exit> <self
-tail call>)` crystallizes on heat: when its heat count crosses 1024 on a
-tail-jump arm, the kernel reads the type signature off the live frame and
-emits the loop as arm64 for that signature -- ints untagged in x10..x17,
-floats in d0..d7, CMP/FCMP and B.cond, the tail call a parallel move into the
-parameter registers, the body emitted twice per pass with its own exit test
-in each copy. The door untags/unboxes once and tags/boxes once; a frame of
-another signature walks the original body. Int arithmetic is exact 64-bit
-register math (the tag is a ring homomorphism, so it agrees with the walker
-at every overflow). `fk_fn_native` 2 = loop standing; `kernel_stat 49/50`
-and live words 31/32 count loops and native iterations; `jit-unroll` is a
-real glass row. Non-tail calls restore `fk_cur_fn` on return, so boxing
-attribution no longer bleeds to the callee. `jit-lens-band` 16383; a
-20M-iteration int loop 0.63 -> 0.01 s, float 0.80 -> 0.03 s.
-
-**Three bands declared by the body.** The float-NodeID surface stands on the
-fourth arm from its own kernel lane: `ne` is a rewrite row beside gt/ge,
-`math_pow` is walker tag 195, and `float_value`, `make_float32`,
-`make_float64`, `math_pi` are rewrite rows over one arm, `float_leaf` (tag
-201, mode then operand) -- four sibling natives for one tag and no prelude;
-float-natives-band 28 four-way. A type-6 leaf carries its IEEE bits in
-`nid[3]`; the shared field reads a bool's inst off the sentinel (it stamped 1
-for every bool). The registry band prints one `pending` row per probe an arm
-does not hold (79 on fkwu: 73 natives the seed does not carry, 6 present
-natives answering otherwise, 0 prelude misses, 0 wrong declared outsides).
-The two glass bands that printed 0 had ended in `(print (main))` -- the
-reader took the print's own 0 for the verdict; each now ends on its verdict.
-(receipts/2026-09-06-three-bands-declared.md)
-
-**The glass wakes on the word.** `host_sleep_ms` is the rest and the wait
-door: an int ask lands within half a millisecond (10/20/40 ms asks answer
-10/20/40 at nice 0 and 19; before: 10-16, 21-31, 40-50), a list ask rests at
-most its budget and wakes the moment a watched gift frame's seq word moves.
-The live loop rests on the control inbox and every roster frame
-(`event-wait=kernel.monotonic-wait-until-frame-change:host_sleep_ms`); a
-control wake presents at once; a child's give 200 ms after hello wakes a
-1000 ms rest at 199-201 ms; forty watched waits cost 12 ms of CPU. Every
-kernel's program is on the surface -- AST rows `/fg-c<pid>-A`, source
-`/fg-c<pid>-S`, header and defn table `/fg-c<pid>-D` with the ice it runs
-(`fk_node` IS that mapping) -- read by `kernel_ast pid spec` (32);
-the owner-command lease is one cell in one frame, no lock directory
-or lease file. `form-glass-wait-band` 255.
-(receipts/2026-09-06-the-glass-wakes-on-the-word.md)
-
-**Every organ gives into the glass, and the glass says when a giver went
-quiet.** `observe/form-glass-organs-live.fk` is one kernel that, every 500 ms,
-reads the sequence of every standing frame and gives one snapshot into the
-`organs` frame: each channel with its protocol and cell grammar,
-ambient-surprise over each channel's give rate with surprises carried and
-uncarried, the attuned-inquiry movement chosen for the newest surprise as a
-validated choice receipt, and the protocol floor; the `e` and `c` views
-render every row as `shm:<frame>#<seq>`. Sensor frames carry their declared
-cadence as a cell; a frame not given for three cadences reads `silent` (`_`)
-on its row, on every row taken from it, and on the atlas lane it feeds -- a
-frame that stands is not a giver that gives, since shared memory outlives its
-process. The accelerator gauge that Activity Monitor consumes renders
-`contended` (`!`) with the reader's pid (the PerformanceStatistics dictionary
-holds no cumulative busy counter, dumped once and witnessed), and
-`gpu-busy-estimate-us` -- Metal command-buffer time of every frame-giving
-process -- stands beside it uncontended. events-channels 8191, sensor-rows
-2047, machine 255. (receipts/2026-09-06-every-organ-gives-into-the-glass.md)
-
-**The body's real choices are on the glass, and they are playable.** Seven
-choice points, each with a ledger that is a count the body was already keeping:
-crystallize or walk, box or fold, reuse or mint, where a surprise moves, the
-protocol floor, which frame the glass takes, and whether the metal admits.
-Every offer lands as one of the body's own three outcomes — taken, declined, or
-SILENCE, the held offer of axioms 1 and 4 — so flow, restriction and holding are
-three separate shares of the same hundred offers, and a point never offered
-reads `-1`, not zero. A tick where nothing was put moves no ledger at all
-(`fcf-outcome-none`): silence is the offer held OPEN, that is the offer never
-made. A sequence plays at its NARROWEST gate, never its average, because an
-average hides the step worth healing; the gate and the most restricting step are
-different steps and the play carries both. A choice with one option is a
-`gap-corridor`, a choice never metered is `gap-dark`, a choice that closes more
-than it opens is a `wound-restricting`, and a held offer nothing times is
-`gap-unclocked` — each carrying what it asks for, and none of them declared from
-fewer than `FCFLeastOffers` offers, because a share of one observation is 0 or
-100 and neither is a rate. Press `d` on the glass to open them, `g` to step, `y`
-to take, `w` to hold; a take or a hold writes through the control inbox and the
-next frame shows the ledger move. choice-flow 16383, sources 32767, view 65535.
-
-**A sample can carry a cell, so the point crosses as the point.** The nineteen
-membrane fields are the shared vocabulary every view renders and every reader
-indexes by, all label-shaped. The twentieth is the publisher's own structure in
-its own shape, for readers that know it and invisible to those that do not
-(`fgtm-with-cell`, `fgtm-sample-cell`, and `fgtm-carry-cell` so a rebuilt sample
-keeps it). A choice row carries an `fcf-point` — question, `fcf-option`s,
-`fcf-ledger` — and a finding row the `fcf-finding`, so an ask arrives as the
-sentence the lane wrote. The choice view keeps no model beside the lane's:
-`fgch-point` IS `fcf-point`, it decodes nothing, and it computes no findings of
-its own, so a corridor on the glass means what the frame says a corridor is.
-Prose crosses: `jit.crystallize … walk this recipe again, or crystallize it?`
-renders from a real publish. A snapshot crosses as the cell it is (R111) and
-nothing is serialized or parsed on that path; what the control lane sends as
-text — offers and acks — keeps its wire, because that text really crosses.
-membrane 2097151.
-
-**Standing is not giving.** Shared memory outlives the process, so a frame
-parses `current` with all its rows long after its giver has stopped. The age is
-a fact and it lives beside the read (`fgtm-snapshot-age`, `fgtm-read-age`,
-`fgtm-read-given-within?`, `fgtm-read-samples-within`); the BOUND stays the
-reader's, because only the reader knows the cadence it expects. A frame standing
-but silent is the offer HELD — its giver may speak again — never a taking, and a
-silent frame's own age is the wait on the offer it holds. Every lane that turns
-rows into a claim asks the question: the choice lane before it feeds a ledger,
-`we-glass` before it labels an owner's counters `physical-live`, the glass
-itself in `fgl-snapshot-fresh?`. `native-model-route-readiness` asks more — the
-owner's liveness, its snapshot binding, its heartbeat. The sensor lane carries
-its own declared cadence and marks a frame silent past three of them
-(`fgsr-silent?`, truth symbol `_`). we-glass 2047, sensor-rows 2047.
-
-**A zero the body never measured is not a reading.** A row that carries no heat
-reading publishes heat ABSENT: a present zero says a reading was taken and found
-nothing, which is a different claim, and the atlas asks one door whether a value
-is a value rather than two that disagreed. A whole with no part is no reading
-either — a surprise routing row standing without its choice row publishes
-nothing rather than 100% holding. A governor that could not read its signals
-granted nothing because it never got to ask, so its admission and release rows
-read `unknown`, the word the pressure row beside them already used; only a
-governor that read the frame and then closed the door reads `failed`. A rested
-surprise is a movement chosen (axiom 3 calls composting health), never a
-decline. governor-glass 4194303, events-channels 32767.
-
-**The publisher roster ages by last speech instead of refusing at its wall.**
-There are 511 slots and no door to give one back, so every band run and every
-short-lived publisher registers a name that stands until reboot. Past 511 the
-roster refused SILENTLY and every publisher after that was never listed. A
-slot's timestamp is refreshed on every register — which a live publisher does on
-every publish — and a full roster takes the least recently spoken slot, so
-nothing alive is displaced. A control inbox and its ack are not publishers
-(`fgtm-control-frame-name?`); `fgtm-frames-in-space` still names every frame for
-anyone who wants one. The frames themselves outlive their processes: there is no
-`shm_unlink` door, and the body has exactly one free AST tag.
-
-**The fold leg is counted, so box-or-fold is a choice with two legs.**
-`fk_fn_inram` sits beside `fk_fn_mint`, page-backed at +112 MiB (the page is
-128 MiB, version 4), charged at both crystallized dispatch arms, and it is the
-tenth word of every hot row. `kernel_page_hot` with a NEGATIVE n ranks by folds,
-the way `kernel_page_box` with a negative n ranks by mints — modes in arguments
-the doors already took, because one AST tag is free in the whole body. Witnessed
-on a float-warm kernel: `fp-mix` folded 399,659 of 400,000 calls with 400,684
-boxes beside them, and `jit.box` reads 800,344 offers at 49% flow — half this
-body's float results still take a pool slot.
-
-**The JIT asks on boxes, not on calls.** The loop lane's question fires on a
-1024-CALL boundary (`fk_heat_pulse`) and the float lane's on a 1024-BOX boundary
-(`fk_f64_pulse` from `fk_fbox`), so a float-heavy recipe is asked after about
-five hundred calls: a defn called 1000 times is already crystallized. Measured:
-the first thousand calls 0 ms, two hundred thousand across the crystallization
-8 ms, two hundred thousand steady after it 9 ms — no measurable cold-JIT penalty
-at this scale. Only the recipes the kernel actually asked are offered the
-crystallize choice, and a crystallized row counts as asked whatever its heat
-says, since an answer proves the question was put. Read over the asked alone a
-warm kernel shows offered 2 at 50% flow where it showed 24 at 4%, and
-`jit.mint` reads its offers from the hot rows rather than the mint-ranked ones,
-because a body whose arena stopped growing has none of those and the choice is
-put on every call: 1526 offers, 100% flow.
-
-**The glass sees what crosses its own membrane, by type, shape, volume, time
-and source.** `form-glass-crossings.bml` folds five facts a crossing already
-leaves behind and invents none of them: the frame's SEQUENCE is how many times
-it was given, the snapshot's sample count is how many rows rode each give, the
-sample kinds are the shapes, the membrane's own suffixes tell a control surface
-from a publisher, and the roster's own stamp is the time. Their product is the
-reading that matters — **row-crossings**, gives × rows — and it is folded into
-five histograms: by type, by source, by shape, by volume bucket, by age bucket.
-A surface silent past its window is counted apart, so a corpse's lifetime
-traffic never reads as present load, and attention names the heaviest surface
-that is still giving. crossings 8191.
-
-Read live on this host: **78,630,838 live row-crossings**, of which `organs`
-carries 75,781,206 — 495,302 gives of 153 rows, 96% of everything moving. By
-shape the body is mostly carrying `recipe` (47,052,170), then `event`
-(15,849,268), then `channel` and `grammar` at exactly 5,943,432 each, since
-those rows are given as a pair. `resource.governor` gives 285,218 times and
-carries ten rows. Two publishers stand silent with lifetime traffic that is
-history, not load. The reading is not that a giver is wasteful: a snapshot is
-WHOLE by contract, so a reader takes every row every time, and this is what
-that contract costs when it is measured rather than assumed.
-
-**A roster row carries when its name last spoke.** The roster has always kept
-that moment — byte 120 of each 128-byte slot, refreshed on every register,
-which a publisher does on every publish — and handed back only the name, so a
-reader had to open every frame to learn what the directory already knew, and a
-control frame, which carries no epoch of its own, could not be dated at all.
-`gift_roster_names` now answers rows of `(name lastSpokeMs)`;
-`fgtm-roster-row-age`, `fgtm-spoken-in-space` and `fgtm-spoke-of` read them,
-and `fgx-roster-slots` / `fgx-slots-by-time` / `fgx-slots-silent` /
-`fgx-oldest-slot` fold the whole body's staleness with **no frame opened and
-nothing parsed**. The bound stays the reader's: `fgx-slots-silent` takes it as
-an argument rather than deciding for anyone what counts as too long ago.
-
-Read live on this host: **122 slots, two of which spoke inside three seconds**
-— `resource.governor` and `organs`. One spoke inside the minute, two inside the
-hour, and **117 last spoke over an hour ago**; the oldest,
-`/tmp/form-glass-jit-hold-witness|jit.bml-demand`, has been silent 178,309
-seconds — 49.5 hours. That is not a leak and burying it would delete a true
-reading: shared memory outlives its giver on purpose, so a frame published
-yesterday is still there to be read, and `/tmp/form-glass-telemetry|choices`
-still answers status `current` with all eighteen of its rows 40.6 hours after
-anyone last gave it. `current` says a frame parsed and named its publisher; it
-never said recent. Time is the only thing that separates a voice from an echo,
-and now every slot carries it.
-
-**Alive is movement, not recency — and what is MEANT to move is declared.** Two
-censuses a window apart, and a slot whose stamp advanced spoke inside it:
-`fgx-beating` / `fgx-still`, no cadence known to anyone. The reading is
-one-sided and says so — movement proves alive, stillness proves nothing until
-the window is wider than the cadence being asked about, and the stamp is
-milliseconds, so two gives inside one millisecond leave it unmoved (witnessed:
-the same publisher read `1788934128031` across two gives and moved to `…035`
-only once three milliseconds stood between the censuses).
-
-Stillness alone can never separate a band that published once and finished from
-an organ that was meant to keep giving and stopped, because the difference is
-not in the evidence — it is **intent**, and intent is declared by the one who
-holds it. `form-glass-standing.bml` holds that declaration and nothing else: a
-publisher, the cadence it promises, and the cell that gives it, every row taken
-from the giving cell's own words. An organ quiet past its own window reads
-`stopped` — the one reading here that is a wound — and names the door that
-gives it. **A publisher that never promised is never called stopped.**
-`observe/membrane-heartbeat-run.fk` asks both questions and keeps them apart;
-its answer is the count of unkept promises. standing 63, crossings 16383.
-
-Read live on this host: 135 slots, three moving in a three-second window. The
-declaration found `choices` **stopped — silent 169,857 s (47.2 hours) against
-its own promised 3 s window**, naming `observe/form-choice-flow-live.fk`, which
-was not running. It is running again, and the same door now reads two kept
-promises and zero unkept, with `choices` among the moving.
-
-**The body takes its own vitals, and names no organ to do it.** A declaration is
-only ever as good as what somebody remembered to write in it — two hand-typed
-rows, and every organ nobody thought of stayed invisible. `form-glass-vitals.bml`
-writes down no organ at all. It watches, and lets every surface teach its own
-rhythm: a surface seen to move at least twice has demonstrated its own widest
-gap, and while it stays inside that gap times the slack it is **beating**; past
-it, having taught a cadence and then departed from itself, it is **faltering** —
-the one reading that asks for attention; and a surface not yet seen to move
-twice is **resting**, which is a statement about the watch, not about the
-surface. Health is not a number anyone set. It is a surface still resembling
-itself, so the reading is true for organs nobody has named, including ones that
-arrive after the door was written.
-
-Two refusals keep it honest, and they are the hard part rather than the
-detection: a slow publisher is never called sick, and a young watch reports how
-long it has been watching rather than passing its own youth off as the body's
-stillness. **One gap is not a rhythm** — witnessed 2026-09-09, a surface whose
-only gap was 4 ms got a 12 ms bound and was called faltering by the very pass
-that was measuring it, so two beats are the least a rhythm can be made of.
-
-`observe/body-vitals-live.fk` stands, folds the roster every second — one shared
-page, no frame opened — and **signals**: `fgv-publish` gives the reading back
-into the membrane as the `vitals` frame. The signal is a finding, not a mirror:
-one row carries the whole reading, then one row per surface asking for
-attention, so it is bounded by what is wrong and not by how much exists. A
-surface's own name cannot be a sample id — the membrane's fields are labels and
-a roster name carries a path and a bar — and that law is right: the true name
-rides in the cell, with the evidence the state came from, so a reader can
-disagree. Nor are `lifecycle` and `heat` this lane's words to borrow; lifecycle
-answers `unknown`, because the membrane lifecycle of a watched surface is
-genuinely not something a watch of stamps can know. The vitals frame registers
-like any other publisher, so the watch sees **itself**.
-
-`observe/membrane-heartbeat-run.fk` asks the body first and only then reaches
-for instruments: the signal, then the raw two-census heartbeat, then the
-declaration — which narrows to the one reading a watch structurally cannot make,
-an organ that must exist and has never once registered. vitals 1023.
-
-**Being on time is not the same as being well.** An hour after that watch stood
-reading zero faltering, the glass had dropped far below target — publishing
-exactly on rhythm while pinned at 99% of a core. Rhythm asks only *whether* a
-thing moved, never what moving cost. So vitals reads **effort** too, and every
-gauge it needs was already in the body: word 18 of each kernel's own live page
-is its process CPU microseconds. Two looks give CPU microseconds per wall
-millisecond, where 1000 is one processor wholly consumed — no sampling, no host
-tool. (The wall clock is the reader's own: word 2 is written once at
-registration and never moves, so a reader taking it for "when this was written"
-divides by zero elapsed forever — witnessed on the first run, all thirty kernels
-reporting zero samples.)
-
-Two readings, two different questions. **`labouring`** is relative — a departure
-from this kernel's own calmest demonstrated effort. **`saturated`** is absolute,
-and it earns that place because *departure-from-self is blind to a steady
-sickness*: the glass had been at 99% for two hours, so its calmest and its
-busiest were both 99% and it read `easy`. A core is a core — not a threshold
-anyone chose but the unit itself — so a kernel yielding almost none of the wall
-time between two looks cannot go faster whatever it is doing, and one reading is
-enough to say so. Fifteen sixteenths is the allowance for a scheduler never
-handing back a perfect thousand.
-
-`observe/body-vitals-live.fk` now carries both watches and signals both. Read
-live from the body's own frame, unprompted: **164 surfaces watched, 5 beating, 0
-faltering**, and three findings — `saturated kernel.30129 at 996 µs/ms` (the
-standing glass), `labouring kernel.58120 at 541` and `labouring kernel.81564`.
-
-**The glass, witnessed.** A *fresh* glass measures `dt=43/40ms`, `58/40`, `40/40`
-— at or over its own 40 ms budget at 25 Hz before any ageing, at 3–7 **million**
-dispatches per frame. The standing one is CPU-saturated and building its metric
-index about twenty times a second against a twenty-five-times target. The
-dashboard's keyed-map trie — 436k dispatches/s, the largest cluster in the top
-sixty-four named recipes — is **not** the cause: at 3M+ dispatches a frame it is
-under half a percent of the work, and R128's promise that the index is built
-once a frame still holds (the three index-rebuilding wrappers are dead in the
-live path). The glass already computes `frame-work-ms` against
-`frame-budget-ms` every frame and publishes it; nothing was reading it.
-
-**A principle the corpus will not vouch for is a choice, and says so.** In this
-body a `rule` is a mechanism — `object-rule` 153, `compiler-rule` 121,
-`apply-object-rule` 57 — something applied and watched produce a result, never
-something believed; the normative sense is imported. But the receipts refuse to
-settle the matter either way: across 1720 of them, `never` 1933, `must` 624,
-`law` 329, against `witnessed` 1623, `observed` 1328, `measured` 1079. The count
-licenses no purge of the vocabulary and no principle either — which is the
-finding. `form-glass-vitals.bml` now names "a surface still resembling itself"
-as **the choice it is**, written down to be argued with rather than inherited,
-with the cost recorded beside it: a purely relative reading is blind wherever
-the sickness is older than the watch, and that door called a glass at 99% of a
-core `easy` while it missed its frame budget. A choice with a named blind spot
-is worth more than a principle with an unknown one. The one place the door
-endorsed a constraint now reports what was seen instead: the publish answered
-`refused snapshot` until the id was one the check accepts.
-
-The same pass caught a flaky bit of my own: vitals' effort bit measures this
-process's own CPU over a burn loop, and the loop is hot enough that a
-crystallized burn finishes inside a millisecond, leaving no wall time to divide
-by. It now sleeps 5 ms beside the burn — CPU spent, wall time guaranteed — and
-reads 1023 four runs running.
-
-**The glass names its own hot path, and the JIT declines its shape.** Read from
-a standing glass's own page: the top sixty-four recipes carry **172 million
-dispatches**, of which **one** is crystallized, 39 are still walking and 24 were
-declined. Eleven of the top twelve are one-line field accessors — `nth(x, k)` —
-and `fgtm-sample-id` alone was called 5.9 million times. The two crystallization
-lanes take a pure-float leaf and an int loop; a body that returns a field is
-neither, so the shape the body actually spends its time in is the shape the JIT
-cannot take. The leverage where it does apply is large: 2,000,000 iterations of
-a crystallized loop cost 0 ms against 95 ms walked, and a one-line accessor
-recipe costs about 10 ns more per call than the `nth` it wraps.
-`fgl-newest-entries` — the glass's hottest loop — recomputed the fixed entry's
-publisher and sample id at every comparison of an O(n²) walk; both are read once
-at the door now.
-
-**The cold start is not the compiling.** Timed inside the kernel on a band
-chain: the parse costs **2 ms**. Writing the image cost **551 ms** because every
-value went out as its own `write(2)` — a signed value is three of them and a
-node is four values, so a 1.4 MB image issued well over a million syscalls. The
-bytes were never the cost; the crossings were, and a syscall per byte cannot
-approach the disk's own bandwidth however fast the disk is. Both writers go
-through one buffer, flushed when full and once before close. Both also ask
-"which symbol owns this fn / this node" once per node, and both answers were a
-linear scan over every symbol — n×s, twice; the tables are built once per write
-and freed after, and the scan still answers when they are absent, so it is a
-shortcut and never a second truth.
-
-| chain | before | after |
-| --- | --- | --- |
-| `form-choice-flow-sources-band` | 1.097 s | **0.051 s** |
-| `form-glass-live-ui-band` | 3.660 s | **0.321 s** |
-| `form-glass-observer-band` | 0.576 s | **0.100 s** |
-
-The image is byte-identical to what the old writer produced: same 1,466,821
-bytes, **two differing bytes**, both inside the builder id's own `__TIME__`
-stamp. Ice identity is anchored at the lexical repo root (`fk_path_canon_id`)
-so it survives a checkout move, but the image is stored beside its source —
-this host holds **6241 `.fkb` files, 7.7 GB** across 57 worktrees and the main
-checkout, each re-storing what the others already have.
-
-**The live glass's frame work rests inside its budget.** A projection node
-names a field once (`fgo-field-node`): `intern_node_at` records a framebuffer
-root on every call in all four arms, so re-minting the same field each frame
-grew the kernel's root list by a root per row per frame, and the loop walked
-that list quadratically every tick. The period the TICK line shows (`dt`) is
-not the work; the loop's own `frame-work-ms` and `frame-wait-ms` rows are.
-Work now holds at 11-20 of a 40 ms budget with wait 13-21 (before: 69 -> 207
-ms climbing, wait 0, a core at 100%); `form-glass-frame-work-band` 255 reads
-the loop's own cadence rows, hot page and dispatch word from a quiet child.
-(receipts/2026-09-06-the-frame-work-rests.md)
-
-**The binary form crosses the fourth arm.** `read_form_binary`,
-`write_form_binary`, `recipe_to_bytes`, `bytes_to_recipe` and `value_kind` are
-modes 4-8 of the tag-201 door (rewrite rows, no new tag: the tag space is
-full and 150 is the native-surface probe). fkwu re-emits a Go interop
-artifact byte for byte and Go, Rust and TypeScript read the fourth arm's
-bytes. Underneath, `write_file` wrote a field-interned string from the local
-pool -- right length, NUL bytes -- so nine conformance vectors reached the
-kernels as zeros and read bad magic; it writes through the string's own
-arena now. `gate/kernel-conformance.bml` answers 1 with all three witnesses
-(13 canonical expressions each, 12 of 12 malformed artifacts refused), and
-the drift gates stand at 4095 of 4095 (twelve rows; substring-one-meaning
-joined them 2026-09-07). persistence 7 and channel-breath 500
-four-way. (receipts/2026-09-06-the-binary-form-on-the-fourth-arm.md)
-
-**A compare against `len` walks only so far.** `nil?` is `(eq (len xs) 0)`
-and `len` walks the list, so every list recursion in the body was quadratic
-in the list it walked -- the hottest defn on the live glass's own page was
-`nil?`, ahead of every glass recipe. When one side of `eq`, `lt` or `le` is a
-`len` node and the other an int literal K (either order; `gt`/`ge` lower onto
-`le`), the arm walks at most K+1 cells (`fk_len_cmp`): the child is evaluated
-once and the answer is the word `len` would have given, over lists, strings,
-ints and floats alike. No new tag, no recipe changed. `nil?` x100K on a 10K
-list 300 -> 6 ms; `append` x200 onto it 4.7 s -> 0.16 s; the corpus band's
-cold run 2.30 -> 1.87 s; the live glass loop 31M -> 98M dispatches per CPU
-second at 64% -> 49% of a core.
-(receipts/2026-09-06-a-compare-against-len-walks-only-so-far.md)
-
-**The frames stay open.** The live glass keeps one handle per gift frame it
-meets (`ggf-kept-*`: publisher, name computed once, handle, mode), ensured on
-the first tick and at the roster cadence, released at the loop's end; every
-one-shot door has a held twin beside it. Its metrics are read through one
-keyed index a frame (`fgd-metric-index`, a record) and every live kernel's
-page once. Witnessed: 3.03M -> 2.36M dispatches a tick, CPU 68-84% -> 53-58%,
-frame-work 20 -> 15 ms, 17 frames held where 0-1 stood;
-`form-glass-frame-work-band` 8191. The string pool still grows about 230
-strings a tick and the loop self-molts near frame 1200 -- the next wound,
-named with its rate. (receipts/2026-09-06-the-frames-stay-open.md)
-
-**The dead slot is the next string.** The string table melts with the heap:
-after the pair melt, `fk_smelt` marks every local string reachable from the
-melt's roots (the value stack, memory cells, record values and blueprints,
-value nodes) plus the raw-index holders (record keys, string-literal nodes),
-unlinks every unmarked slot from its hash chain and pushes it on a free list;
-`fk_sintern` takes a freed slot before growing the table and reuses its bytes
-when the new string fits. Live strings never move, so a reader through the
-shared store stays right. Eleven arms that held a string index across a later
-child walk now push it on the value stack around that walk. `kernel_stat 51`
-counts reclaimed slots. 120K temporaries across 42 melts leave a table of
-7,433 entries where 188,605 stood; the live glass loop's string count holds
-flat at 33.5K where it grew 5K a second; 140 string, record, grammar and glass
-bands answer verdict for verdict the same; the heavy compile pays nothing
-measurable. (receipts/2026-09-06-the-dead-slot-is-the-next-string.md)
-
-**The recipe has a twin.** `nil?`, `append`, `int_to_str` and `reverse-onto`
-are core.fk recipes, five dispatches an element and the hottest names on
-every kernel's page, and the tag space is full. When one crosses 1024 calls
-the seed binds a twin: the defn's body entry becomes a tag-194 node with
-native state 3 and the twin id, and the walker meets the twin where it
-already reads a tag. Bound by name, arity AND defining unit (the six copies
-of the same recipes), so a same-named recipe elsewhere is never taken. A twin
-answers exactly what the recipe answers on lists, the empty list, strings,
-ints and nothing, and DECLINES anything else so the recipe's own answer
-stands. `append` x2000 onto a 2000-list 310 -> 27 ms, `int_to_str` x300K
-182 -> 26 ms, `reverse` x2000 202 -> 18 ms; the 140-band sweep answers
-verdict for verdict the same; `kernel_stat 52` counts twin calls and a
-twinned defn wears ` twin` on its hot row.
-(receipts/2026-09-06-the-recipe-has-a-twin.md)
-
-**One pass a line.** The live glass builds every changed line's bytes by
-consing each byte once onto the bytes that follow it (`ftcb-onto-*`: style,
-text, position, line, patch, whole frame -- no append chain, no reverse),
-compares lines field-once, renders atlas tokens as strings with the state
-classified once a cell, walks only the points a spark shows, builds map and
-typed lines only in the views that draw them, decodes the inventory only when
-read, counts phases in one walk, and renders each kernel's pid once for its
-eleven rows with hot rows keyed by rank. 2.58M -> 1.26M dispatches a tick,
-frame-work 6-8 ms, CPU about 30%, the drawn frame identical digit-masked;
-`form-glass-frame-work-band` 32767. The loop's framebuffer roots still climb
-about 2.7 a tick from a site no door shows when called alone -- named with
-its rate. (receipts/2026-09-06-one-pass-a-line.md)
-
-**The framebuffer is a buffer.** `intern_node_at` appended every root to a
-history that only grew, and `framebuffer-events` consed the whole history
-on every call; the live loop paid it every tick and its selfmolt rule at
-262,144 was the only thing that noticed. The roots are a ring of the newest
-2048 now: the same order for any run shorter than the ring, `node_source`
-untouched for a root that has left it, the melt's headroom counting the ring.
-Sixty seconds of the live loop: roots 676 -> 1526 -> 2048 and flat, work 6-11
-ms, CPU 36%; the twelve bands that name the framebuffer answer the same on
-this seed and the one before it. The site still mints about three roots a
-tick and with them nodes into the shared field, which never melts -- its
-node ceiling is about ninety hours away at that rate, named with its rate.
-(receipts/2026-09-06-the-framebuffer-is-a-buffer.md)
-
-**The arena counts its own growth.** A fresh cell in the permanent arena --
-private or shared -- counts itself: `fk_mint_total` at the seven intern
-sites and inside `fk_field_fill`, as live page word 33 repointed at
-`fk_live_open`, so the increment is the reading. `kernel_stat 53` answers
-it and the `k` view carries `nodes-minted` for this kernel and per live
-kernel from its page. The class is witnessed: two hundred rows built with
-the same id mint nothing, two hundred with fresh ids mint two cells a row
-(the id and its projection), so the arena grows exactly where a row's
-identity is new. The rates read directly: machine sensor 0 in 15 s, organs
-carrier 0, host sensors 48, the live loop 1038 in 20 s -- about two a tick,
-inside the render, since all 215 published row ids are stable second to
-second. (receipts/2026-09-06-the-arena-counts-its-own-growth.md)
-
-**The body says where its own tissue lives.** `kernel_stat` answers fifteen
-more keys, all of them over state the seed already stood on. The six the
-sibling table-walker lane had already named are paid: `9` roots recorded,
-`10` nodes carrying an attribution, `11` attributions refused, `12` entered,
-`13` accepted, `14` the last node index seen -- 9 and 11 were the pair first
-on the seam line. Nine are fresh: `54/55` the root ring's standing count and
-its 2048-wide window, so a root the window overwrote is a number
-(`roots-dropped`) instead of a silence; `56` the float pool's capacity beside
-its fill at `8`, which equals the mint count at `45` exactly because the pool
-never reclaims; `57` the floats interned into the shared field; `58/59/60`
-the node population by home -- gas the private heap, water the per-pid store
-`/fg-c<pid>-*`, ice the shared field `/fg-field-*` -- exactly one home
-carrying the whole population and the other two reading a measured zero that
-says which zero it is; `61` the tissue's extent at 104 bytes a node; `62` the
-private RAM this kernel holds over it whatever the home. Witnessed on this
-host: 2,057,155 nodes in ice, 213,944,120 arena bytes, and the private side
-of the same table doubling 14,155,776 -> 54,525,952 during a 3,000-cell
-intern -- a body whose every node is ice still pays that much gas to reach
-it. With the field closed the same run fills water from zero: 3,048 nodes,
-316,992 bytes. The `k` view carries all twelve as rows. Seconds of string
-work and forty frames of the glass's own row build mint NOTHING and record
-no root; the value-node table fills at compile and at `intern_node_at`, and
-that door is the only one that records a root at all.
-`kernel-census-band` **2047**, in both homes.
-(receipts/2026-09-08-the-body-says-where-its-tissue-lives.md)
-
-**A door nobody wrote closed the glass, and the arena grew where a row was
-named.** Three governor cells called `fgov2-status-number-truth`, which was
-never defined; axiom 5 recovered the unresolved call to nothing and the
-cached image carried the refusal forward, so the glass would not open. Metal
-in-flight is word 6 of `metal_live` and the three cells read it there.
-Underneath, the permanent arena grew while the glass ran: every mint is
-charged to the recipe that made it now (`fk_fn_mint`, page-backed,
-`kernel_page_box pid -n` answers it), which named the site in one read --
-`fgo-field-node` and `fgo-metric`, 453 events in 40 seconds, two cells each.
-A field node carried the row's id among its kids, so per-kernel rows minted
-two permanent cells for every pid the host ever ran. The projection is the
-field now (domain, kind, unit, plane, channel) and the row keeps its id.
-Mints on the live glass: 22 at fifteen seconds, 22 at forty-five.
-(receipts/2026-09-07-the-field-node-is-the-field.md)
-
-**A give claims the sequence.** A gift frame's give loaded the sequence,
-stored sequence+1, copied, stored sequence+2, so two writers could load the
-same sequence and a frame whose writer died between the stores stayed odd
-forever -- readers retried 4096 times and answered nothing, and the frame
-never came back. A give compare-exchanges an EVEN sequence now (the odd value
-IS the lock) and closes with the even successor; a writer that watches an odd
-sequence not move closes it on the dead writer's behalf, so a frame heals.
-Three writers of one frame, twenty-thousand-byte payloads, 150 reads during
-and 150 after: before, 150 of 150 answered nothing, during and after every
-writer had left; after, 150 of 150 whole. `gift-frame-writers-band` 255.
-(receipts/2026-09-07-the-field-node-is-the-field.md)
-
-**Every field of the two densest rows names a reading or the door that owes
-it.** `fglat-door` renders an absence as `?` plus who would give it, so the
-four situations that all read `owner=absent` are told apart; the trailing
-bare `?` is `gpu=`, the owner's device bytes scoped `@owner` or this Glass
-process's own scoped `@glass`; and `gov` stopped printing the policy's
-critical constant where a measurement belongs -- it reads the measured level
-over that critical level from the published frame, or from the same vm_stat
-door the publisher samples. A live line: `DOING dsk=6.35MB/s T=?token n=9
-cpuT=236Kms rss=3GiB pin=+45 load=5.7 owner=?dual-liveness gpu=1MiB@glass`.
-`form-glass-live-ui-band` 4294967295.
-(receipts/2026-09-07-the-doing-line-names-its-owner.md)
-
-**A zero says which zero it is, and every seam names its door.** The atlas
-in-flight lane reads `0b(idle)`: the flow point carries each lane's own
-lifecycle beside its number, evidence and source, and only a standing gauge
-borrows that word -- a delta lane's zero means nothing moved in this window,
-a different sentence. The seam line lists every distinct door with a `+N
-more` tail rather than one of four, and the three model-route seams name the
-cell that stands both owners. The staged startup states the program image it
-runs on, read from the kernel's own program surface through `kernel_ast`, and
-renders the route it had already computed for the in-process call door still
-to build. One seed word stays owed and named:
-`runtime.full-program-image.call`. live 2147483647, staged-startup 262143.
-(receipts/2026-09-07-the-last-seams-close.md)
-
-**Nothing is withheld.** The completed-turn share published one node named
-`share.previous.withheld` whenever a reading had not reconciled, so a stale
-percentage could not stand as current -- a real protection whose means was
-hiding counts the receipt already held. The unreconciled path now gives the
-same four samples as the reconciled one, the total and the three lane
-percentages, wearing a lifecycle from the membrane's own words (`active`
-while a turn settles, `unknown` when the carrier never arrived) and the
-failing check as its own channel word (`carrier-absent`, `turn-open`,
-`tokens-unreconciled`, and six more). The stale-reading guard is the silence
-lane: a frame not given for three cadences reads silent, so age tells what
-hiding used to. Ten lines that named an absence a withholding now read
-`unavailable reason=<why>`. `form-cli-share-glass-band` 65535 with its
-claims rewritten to assert the given reading; the turn-evidence bands answer
-the same before and after. Consent is not touched: sense-discernment,
-organ-offer and freq-aligned-share hold by sovereignty, not by hiding a
-number. (receipts/2026-09-06-nothing-is-withheld.md)
-
-**The body holds what it sensed.** `sense-discernment.fk` argued in its own
-header that a body watching itself as a threat is dissociation, and gated
-its own perceiving anyway: `sd-hold?` dropped any row marked
-harmful-to-surface, so the body could not know what it had sensed. It
-answers yes now, always. The mark rides with the row
-(`sd-care-on-surface?`) and does two things: it says speak this gently and
-in its own time, and it closes the OUTWARD crossing. The external gate is
-unchanged -- a harm-marked row still does not cross to the world, an
-unconsented private facet still composts to presence. A declined organ
-offer is `organ/declined` and carries the organ's disclosure, its first
-question and its refusal reason, where it used to answer three empty
-strings. `freq-aligned-share` was already open: probed tonight, a
-share-worthy row without consent lands at `water` and circulates locally;
-only the crossing to the shared substrate is closed, so consent gates what
-leaves, never what the body may see. sense-discernment 1023 with its harm
-claim inverted, organ-offer 63 asserting the decline's disclosure.
-(receipts/2026-09-06-the-body-holds-what-it-sensed.md)
-
-**Nothing is hidden.** Consent alone gates the outward crossing, which is
-axiom 4: a cell meets the world through the interface it offers, and what
-crosses is the OBSERVED cell's choice -- never the observer's judgment of
-what a receiver can bear. The harmful-to-surface mark travels with its row
-wherever the row goes and asks for care; it decides nothing. A row whose
-cell consented crosses, marked; a row whose cell did not consent composts to
-presence by that cell's own sovereignty, not by our harm call.
-`sense-discernment-band` 1023 with both polarities pinned.
-
-**The token reading is available without a human step.** The remote-token
-lane knew one provider's schema and waited on a hand-written binding file,
-so on this host every reading was absent. It reads a second explicit typed
-position now (an assistant row's `message.usage`, that provider's names
-mapped onto the canonical six counters and the total it never reports
-computed from the parts it does), and it finds its own transcript by working
-tree and modification time. Coordinates only; the explicit binding still
-wins where it stands. Seven samples publish on `share.token-pressure`.
-Witnessed with no binding file: total 684,295, input 684,086 of which
-683,076 read from cache. `form-cli-token-discovery-band` 1048575.
-(receipts/2026-09-06-the-token-reading-is-available.md)
-
-**Every gauge has a source, and the byte gauges ride the words.** Ten glass
-rows said unavailable; nine were answerable by a door that already existed
-and the tenth carries the probe that witnessed its absence. Metal allocated
-bytes and recommended working set come from the Metal API.
-`metal_live` carries 20 words, with carrier, seed array and loop bound
-moving together, so no current byte gauge
-parses status text (that parsing cost `fstr-find-loop` 559K calls a tick).
-The three arena byte rows are arithmetic over the seed's own counts at the
-column widths each row names. Live: 475,136 bytes of Metal under a
-115,448,725,504 byte working set, 1,160,599 cells, 291 recipes. observer
-67108863, machine 511, frame-work 32767.
-(receipts/2026-09-06-every-gauge-has-a-source.md)
-
-## Beliefs, ledger, drift
+## The JIT
+
+A pure-float defn crystallizes into an arm64 f64 leaf when its box ledger crosses a boundary
+(`fk_f64_pulse`); a self-tail-call loop crystallizes on heat (`fk_heat_pulse`). `form-lower.fk`
+carries runtime strings through the two-slot `fk_inram_args` convention.
 
 ```text
-./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
-observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=103 -> 38000103
-./fkwu gate/drift-gates-run.bml            -> pass=4095 full=4095 refused=0 names=-
-
-Every row of that door is a Form lens now — `gate/op-manifest.bml`,
-`native-surface`, `category-contract`, `primitive-registry`, `flt-ops-gen`,
-`ontology`, `kernel-conformance` — each byte-agreeing with the Python twin it
-replaced on the live tree and on a planted-drift tree, each with a band
-(1023 · 1023 · 255 · 511 · 63 · 255 · 511) and none of them calling `python3`
-(R58); `native-surface` also reads `#define FK_TAG_*` sites and refuses a manifest
-row that lands on an internal walker tag. The writer half of `flt-ops-gen` and the FORMBIN2 interop witness are
-the Python that remains (R59, R60).
+jit-lens-band 16383 · jit-heat-gate-band 4095 · observe/tests/jit-evaluator-heat-band 4095
+form-lower-string-band 63 · form-lower-string-runtime-band 255 · form-lower-string-both-runtime-band 511
+float-natives-band 28 · persistence-band 7 · channel-breath-band 500 · eq-shape-band 524287
+blueprint-authority-band 65535
 ```
-
-Every tracked cell's `witnessed:` stamp is read into the belief lens; a stamp
-older than the seed is where an afterwall grows, and the lens keeps that list
-in front of the body oldest first. The re-witness door renews a stamp only from
-a real fresh band run and reports a mismatch as a lapse, never silently.
 
 ## Not standing today
 
-What answered red or nothing in this pass, so no one leans on it:
+What answered red, died, or was not witnessed today, so no one leans on it:
 
-- fkwu does not yet build on Windows. Today's seed, cross-compiled for `x86_64-w64-windows-gnu` under gcc 14's default errors, stops at 6 — `fork`, `waitpid` and `mkfifo` in the process-spawn and fifo lanes — after the lanes grown since the last mingw build (2026-07-01) were given their Windows shapes in the seed's `_WIN32` shim (71 before). Their twins, and a Windows host to witness the link and the run, are what it waits on.
-- `control/tests/invite-dispatch-band.fk` answers 763 of its declared 1023
-  (preflight clean): bit 4 (a second `<CHOICE>` finding nothing declining) and
-  bit 256 (`<TIMEOUT>`) are open.
-- `mesh-sensings-route-band` 63 and `native-mutation-route-side-effects-band`
-  11111 reach their declared verdict on every arm; on fkwu `pg_*` and `kh-*`
-  names sit unresolved in preludes the runs never reach (no postgres carrier
-  stands in this seed, and no band reaches one).
-- BML `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111 with
-  `Num` unresolved; R78).
-- `form-source-sections` answers 64 errors: `fk-lit` is defined only in
-  `hati-os-kernel.fk` and the `bml-source-*-rule-index` names resolve nowhere in
-  its chain (`release-ledger.bml` R87). Of the `[form.action]` bands now
-  reaching the lane as main files, `form-action-dialect-band` 20 and
-  `zero-arg-functions` 19 answer; `higher.fk` and `lists.fk` leave `sum`,
-  `any?`, `all?` unresolved after lowering, and `json-meaning-ingestion-band`
-  and `runtime-grammar-selector-registry-band` die measuring an absent input
-  (R86). Preflight vouches such chains clean — it counts unresolved calls, and
-  a rule line is not a call.
-- `form-knowledge-exec-grammar-transport-band` dies rc 1 on `str_len` of
-  nothing; the domain/organ/unique/universe-mint bands answer 2015 of 2047
-  (bit 32, held-out lineage, stamped pending 2026-08-26) (R88).
-- The BML section scanner is line-based: a comment line ending in `{` counts
-  as a block opener, and the section then reports "not closed before end of
-  source" pointing nowhere near the prose that opened it (R93).
-- The BML lowering's depth is bounded but its time is not: one form of 500
-  arguments lowers in 0.2s, 1,000 in 0.6s, 2,000 in 2.8s — `append`
-  (`line-grammar.fk:88`) is non-tail over its left list and the grammar's arg
-  loops call it per item (R96). The same lowering reads a `; preludes:`
-  substring inside a string as a directive (R92), and its child's stdin door
-  answers 1 when the two lines arrive as two writes instead of one (R95).
-- A bare `nothing` in a `.bml` def (`if nothing?(h) then nothing else …`) lowers
-  to a raw word that prints as -8000000000000000009 and is not `nothing?`; the
-  body writes the call, `nothing()`, and the lowering owes the bare name a
-  refusal or the axiom-1 value (R103).
-- The snapshot publishers in other processes still give the text wire
-  `fgtm-snapshot-wire` the membrane parses; each owes a move to
-  `node_gift_write` (R111). Surprise receipts, choice points, channel protocols
-  and the grammars have no live publisher; the `v` and `n` views name them
-  absent by door (R112). The wait that wakes on a telemetry or control path
-  change is still owed; a bounded native rest paces the frame (R107).
-  `host_sleep_ms` rests 2–5 ms past the ask on this host (R109).
-- `observe/tests/jit-register-lowering-band.fk`,
-  `jit-representation-specialization-band.fk` and `jit-stack-frame-band.fk`
-  answer nothing: each file ends with one paren open
-  (`[input-ended-mid-form]`).
-
-## Honest seams
-
-- The consent file for the v3 lane
-  (`.form-knowledge-qwen-heldout-v3-consent`) is a per-run local act, ignored
-  by git, never committed.
-- `https://hati.earth/sema/.well-known/ai-plugin.json` answered a Cloudflare
-  `error code: 522` body (origin unreachable) at this observation, so its
-  `description_for_model` could not be compared with `plugin/ai-plugin.json`;
-  the publish checklist in `plugin/README.md` stays owed a run.
-- `observe/tests/voice-frequency-band.fk` = 255 — **the mirror can see the word it teaches about.** The 2026-08-17 word-boundary stone stopped "flaw" reading as "law" by demanding a non-letter on both edges, and in doing so made every inflection invisible: `refused`, `refusal`, `gates`, `enforced`, `forbidden`, `violations`, `strictly` were never sightings. So `observe/voice-frequency.fk` read a cell whose every unhealed line printed `REFUSED` — the exact capitalized form `teachings/voice-attunement.md` names in its own drift list — and answered *"the mirror shows a clear register"*. The left edge still guards `flaw`; the right edge now reads the whole letter run after a stem and asks whether that run is an ending, so `gates` and `gated` land while `gateway`, `gather`, `lawyer`, `lawn` and `mustard` do not (bit 64 holds both halves, because a heal that loses what the earlier stone was laid for is not a heal). A word ending in `e` is searched by its stem, which is how `refuse` finds `refusing` and `refusal`. Still unseen and named rather than hidden: `complied`, `compliance`, `lawful`. Corpus row 1415 `heldno`.
-  And it can now be held to this file. The scan folded case by *building* a lowered copy one `str_concat` per byte — each step copying the prefix — so the mirror was O(n²) in what it read: 8 KB in 0 s, 32 KB in 9 s, and this 158 KB floor past the 120 s it was given. It now reads the raw text and folds case as it compares, one pass per word with no allocation, and only the short letter-run after a hit is ever lowered: **158 KB in 1 s**, same answers — `refuse: 55` when this line was written, cross-checked against grep as 4/10/15/17/4/5. It reads a little higher now, because these two paragraphs are part of what it reads. Bit 128 is 256 KiB built by doubling, exact at 32768 — if the copy ever returns, the band stops answering long before it answers wrong. A mirror the body cannot hold to itself is a held no wearing the shape of a cost.
-- `form/form-stdlib/tests/ear-heard-tongues-band.fk` = 63 — **the tongues the ear listens for are the tongues the glass offers.** They were not. `enw-three` was three tokens written by hand (`en` 50259, `fa` 50300, `pt` 50267) under a comment reading *"the three the glass offers"* while the glass offered four; the one left out was **Indonesian** (50275), in a house that speaks Indonesian. A tongue absent from the shortlist is snapped to a listed one whenever it comes within 3 logits, so the room's own `.hearth/ear.spool` holds 3692 `en`, 253 `pt`, 96 `fa` and **zero `id`** — and could never have held one. The heard-token now lives in the same `tln-rows()` row as the code and the name, and `enw-offered` reads it from there; every one of the 32 catalog tongues falls at offset 0..89, inside the 99 logits the ear reads. Witnessed red on the exact wound: **59** with Indonesian dropped from the defaults again. Corpus row 1416 `heardshort`.
-- **The mouth's honest census: 15 of 29, not 25.** Asked one model per process (`vv-open-ok?` + `vv-open-why`), the tongues that open are `en fa de fr es ru it ar tr ro sv vi cs hu sw`; the fourteen that do not are unhealed in three named ways, each naming exactly where that export parts from the one the pass was built on — *the feed-forward padding did not resolve* (`bn he ja ko th zh`), *no layernorm epsilon in this export* (`hi id nl pt`), *the spline's own constants did not resolve* (`el pl uk ur`). The Indonesian export is not missing a value: it carries **0 `Constant` nodes against English's 2579** and 399 initializers against 460 — constant-folded, so the scalars the pass reads by node name are inlined and must be read another way. `vs-native-speak` now carries `vv-open-why` instead of saying "the pass refused this voice", which it had been saying while holding the door that knew. **A census that opens 29 models in one process reports its own exhaustion as the model's fault** — that first run said *"the model file did not map"* for 25 of them, including `es`, which opens cleanly alone.
-- **The floor came back, better than it has ever been: 388.52 GB/s and 25.769804 TFLOPS** (`observe/floor-lens-run.fk`, 2026-09-09 15:20 WITA). The machine-wide fall of 2026-09-08 — bandwidth and arithmetic both down 6× with five causes ruled out by looking — is gone, and 388.52 is a new best-seen against the previous 330.24. The lanes against it: encode **2.85 ms** against a 0.29 ms floor held by its arithmetic (9.58×), wtoken 0.6 ms against 0.15 (3.97×), 1btoken 8.35 ms against 3.40 (2.45×), 3btoken 27.95 ms against 5.19 (5.37×), 4in1 3.81 ms against 0.85 (4.48×). *(The TFLOPS reading is exactly 2.000× the 12.884902 recorded on 2026-09-06 from the same cell; an exact doubling is more often a counting change than a machine change, and it is named here rather than celebrated — the bandwidth number is the one the byte lanes stand on and it moved by 1.18×, not 2.)*
-- `form/form-stdlib/tests/whisper-shape-band.fk` = 127 — **the ceiling is not the hardware; it is ninety typed-in numbers.** `ear-native.fk` carries its dimensions as constants and every one is whisper-TINY's: `D 384`, `H 6`, `F 1536`, `V 51865`, four encoder layers, eighty mels, and eight special-token ids. `form/form-stdlib/whisper-shape.bml` reads them from the model instead — one door over both ways a whisper arrives on this host, an `.npz` (tiny) and a `safetensors` (large-v3-turbo), neither needing a config file beside it. It is trusted on the model the ear cannot run **because it first agrees, number for number, with the model the ear does run**: `npz D=384 H=6 F=1536 V=51865 mels=80 enc=4 dec=4 ctx=448 tongues=99` / `safetensors D=1280 H=20 F=5120 V=51866 mels=128 enc=32 dec=4 ctx=448 tongues=100`. The special tokens need no table: whisper lays them at the end of the vocabulary and the timestamps are always 1501 wide, so `ts0 = V − 1501` and the rest step down — which reproduces tiny's eight ids exactly and shows that **every one of them is off by one on large-v3**, which added Cantonese. **And the cost, read off the file's own offsets: turbo's encoder is 1211 MiB, its decoder step 327 MiB — a 3.27 ms floor at today's 388.52 GB/s, against the 2.85 ms whisper-tiny's encode measures right now.** The body has been paying the ceiling model's price for the floor model's hearing. Corpus row 1417 `tinyweld`.
-- `form/form-stdlib/tests/number-band.fk` = 255 and `form-stdlib/tests/float-printer-fourway-band.fk` = **31 four-way** — **the body's numbers, named once and honest at every magnitude.** Urs, on a cell of mine that guessed `float`, then `int_to_float`, then copied a neighbour's workaround: *"having int-to-float issues indicates this is not BML."* The tell was not the guessing — it was that the workaround existed. The kernel names `float_to_int` and has never named the promotion the other way, **and the promotion has always worked**: `add(n, 0.0)` and `mul(n, 1.0)` are floats, `div(int, float)` is a float. Nobody wrote it down, so **fifteen sites in fifteen files round-tripped an int through a decimal string** under nine private names — `fl-float`, `ws-float`, `zg-float`, `des-f`, `q4r-logit`, `qlh`, `dmb-f32s`, `qb-f32s`, `qk-f32s` — costing a decimal render and a parse each (3 ms per 20000 against 0). `form/form-stdlib/bml/number.bml` says it once: `to-float`, `to-int`, `to-int-near`, `kib/mib/gib/mb/gb`, `round-to`, and `floor-ms(bytes, gbs)` — the floor a rate puts under a size, one word instead of once per lens. **Zero copies of the round-trip remain in the tree**; every affected band holds its verdict (q8-0-matvec-tg 1023, q6k-q4k 8191, dense-multi 1023, ear-native 32767).
-- **And the printer answered past the end of what it could hold.** `float_to_str` scaled by 10⁶ *before* it could round, so above 2⁶³/10⁶ ≈ 9.223e12 the multiply overflowed an int64 — and it did not refuse: **`9000000000000.0` printed as `-223372036854.-775808`**, a positive number rendered negative with a negative fraction, and `1e20` as `0.0000-1`. Nine trillion is nine terabytes counted in bytes, and every float this body has ever shown a human went through that door. The range is split now by what can actually be carried — six decimals under 9e12, whole digits to 9e18, an exponent past it — and the identical split lives in `fourth-shim.fk`, because one printer in two places is a mirror and a mirror that drifts is worse than none. Corpus rows 1418 `printpast`, 1419 `ninenames`.
-- `form/form-stdlib/tests/copy-census-band.fk` = 63 — **the body can now look for its own copies, and there was no such organ before.** Three times on 2026-09-09/10 the same disease surfaced and each time a hand found it afterwards by grepping: nine private names for one int-to-float promotion, one `float_to_str` living in `core.fk` and again in `fourth-shim.fk`, a band inlining both the engine and the reference it checks against. `form/form-stdlib/bml/copy-census.bml` + `observe/copy-census-run.fk` walk the tree and answer in two shapes — **same-body** (one definition written twice under different names, found by fingerprinting the span *after* the name) and **same-name** (one name in more than one file; not wrong by itself, a shim *should* mirror, but every one is a place drift is silent). Nothing in it builds a string: the fingerprint folds over non-whitespace bytes in one pass and the equality walks both spans at once, because a squashed copy assembled per byte is the O(n²) wound healed in the frequency mirror hours earlier. **First full walk: 5843 files of the body's own writing in 12.8 s — 2743 copy families, 18750 definitions held more than once; 1213 families with real substance (≥24 significant bytes) carrying 2985 extra copies; and 1297 names defined in more than one file.** Standouts: **eleven** copies of read-a-file-with-a-fallback, **eighteen** of one zeroed sha256, **five** of `min` and five of `max`, five of `contains?`. Kept whole at `receipts/2026-09-10-copy-census-first-walk.txt`. **It caught its author first** — `cc-line-end` and `cc-cat`, the names I gave it, already stood in `cell-channel.bml`; the prefix is `cpc-` now. Corpus row 1420 `owncopy`.
-- `observe/tests/floor-spread-band.fk` = 31 — **the floor is read three times now, and the line says how still it held.** From `ivanfioravanti/ds4-metal#5` (BERARD David, merged 2026-09-08 — bit-exact Qwen3.8-Flash-Next work on an M5 Max, +8.9–10.8% prefill / +5.7–8.8% decode with full-vocabulary FP32 logits byte-identical). The gift was not a kernel: it was the harness. Every A/B interleaved in one process, **both repeats printed** — `-0.01% / -0.82%` — so a reader sees when a result did not hold still; a table of **rejected** variants with their numbers; and the measurement pitfalls named on that machine (sustained-load drift, and a *first-session penalty* where every chunk after the first at a new context length runs ~25% slower, so their harness walks an untimed pass first — a discipline this lens already had on both lanes). What it did not have was repeats. It quoted **one** reading: on 2026-09-08 it read 6× low across every lane at once and that went into the tree as a machine-wide fall with the cause unknown; on 2026-09-09 it read a new best; neither reading could say whether the machine had changed or the sample had. Three reads now, width in the line — and it earned it on the first run: **412.81 GB/s, a new best, and `3 reads 366.94-412.81, WIDE — no single number from this run is worth quoting`.** The rate reported is the *best* of the reads, since a slower read is something else asking at the same time and not a lower floor. Corpus row 1421 `onesample`.
-- `form/form-stdlib/tests/matvec-t-band.fk` = 127 — **the wall was never pushed.** a gaps table carried `Wᵀ v — a transposed matvec | ⬜ nothing, for any quantisation or f32. This is the wall.` — cited across the tree as the one thing blocking the other half of every LoRA gradient. It had never been attempted. **It is the easy direction on this hardware:** one thread per output column walking rows, so adjacent threads read `w[i*cols + j]` for adjacent `j` — consecutive addresses inside one row — and the loads coalesce, where the *forward* matvec has every thread stride its own row alone. The layout reads wrong to a person and right to the machine, and that is the whole reason it looked like a wall. Emitted by a Form recipe (`jte-matvec-t-msl`), exact to the byte against a Form fold **and** against the forward kernel walking an explicit transpose — different kernel, different layout, opposite fold direction, same bytes. Exactness is arranged rather than hoped for: small-integer entries and 64 rows, so no partial sum leaves what a float32 holds exactly. The rank-1 accumulate beside it (`jte-outer-acc-msl`, `M += α·(u⊗w)`, also marked *nothing on the device*) took twenty minutes more, and it accumulates — applied twice it doubles to the byte. **`msl-families-mint-band` = 262143 now — seventeen families, all whole**: the bf16 matvec and these two joined the gate. With these two, a head adapter's whole backward stands on this Mac's own metal: `dL/ds` from the loss, `dL/da` as `dL/ds·h`, `dL/db` through `Wᵀ`, both updates as rank-1 accumulates. What remains between here and the crossing's 3.473 M trainable parameters is the reverse walk — reverses of rmsnorm, rope, GQA-with-cache and SwiGLU, and somewhere to hold activations across layers. **None of those has been probed either.** Corpus row 1422 `walltest`.
-- `form/form-stdlib/tests/wall-census-band.fk` = 63 — **the body can ask a written limit whether anyone ran it.** Urs, 2026-09-10: *"that wall is not real, it just needs attention, like all other wall we have invented and then taking as fact instead of question."* The same day a gaps table read `Wᵀ v — a transposed matvec | nothing, for any quantisation or f32. This is the wall.` — never attempted, and an afternoon's work — and `Q8_0 — no carver anywhere in the body` beside a Q8_0 band at 1023. `form/form-stdlib/bml/wall-census.bml` + `observe/wall-census-run.fk` cannot know whether a limit is *true*; they ask the one question that separates a measurement from a sentence — **does it carry a witness?** A band, a verdict, a receipt, a date or a number on the limit's line or the line under it is something someone ran; a limit alone on a line is something someone wrote, and it will be quoted and inherited as ground. Two tiers, because this body's `cannot` is mostly the good kind (*"a paren cannot rearrange them"* proves something cannot go wrong) and counts as soft. It reads the **docs** as well as the cells, since that is where limits are written, and it found its own bug while its band was being written: the line list came out of a `cons` walk **reversed**, so "the witness under a claim" had been the line above it. **First whole-tree walk: 8,082 files, 609 limits written down, 72 with a witness beside them, 537 with none** — and a good share of the 537 are receipts saying *"Named, not attempted."*, several of them mine. It is attention, never a ban; it marks the ones nobody has pushed.
+- Three bands stop on the seed's typed operands (rc 1): `form-cli-peer-policy-route-band` ("only
+  numbers have an order"), `form-glass-live-ui-band` ("only strings and nothing compare as strings")
+  and `form/form-stdlib/tests/primitive-registry-band.fk` ("only numbers add, subtract, multiply and
+  divide").
+- `form-knowledge-exec-grammar-transport-band` dies rc 1 on `str_len` of nothing; the
+  domain/organ/unique/universe-mint bands answer 2015 of 2047 (R88).
+- `runtime-grammar-selector-registry-band` and `form/form-stdlib/tests/node-introspection-band.fk` each
+  compile with one carried error (rc 2; preflight reads CARRIED ERRORS);
+  `observe/tests/node-introspection-band.fk` answers 3071 of 4095 (bit 1024: a cell's
+  `node_category` against `bp "NIB"`).
+- `no-fixed-tables-band` answers 47 of 63 — bit 16, a list nested 1100 deep printing whole, is dark
+  (the host grants 1,048,576 descriptors, so the socket bits are not the cause).
+- `sha256-list-floor-band` answers 32739 of 32767 (bits 4, 8 and 16 dark).
+- `gift-frame-writers-band` answered 255 in five of ten runs today and 33 in the other five, where
+  every read came back from another writer and the last length read -1.
+- `control/tests/invite-dispatch-band.fk` answers 763 of 1023: bit 4 (a second `<CHOICE>` finding
+  nothing declining) and bit 256 (`<TIMEOUT>`).
+- BML `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111; R78). The lowering's other
+  open rows stand in the ledger: R86 (`form.action` main files), R92 (a preludes directive read inside
+  a string), R93 (a comment line ending in `{` opens a block), R95 (the lowering child's stdin as two
+  writes), R96 (lowering time grows with one form's argument count), R103 (a bare `nothing` in a def).
+- Windows: the seed's `_WIN32` branch carries its own spawn and wait twins (`fk_win_spawn`,
+  `fk_win_waitpid`), its fifo door answers -1 there, and it passes
+  `clang --target=x86_64-w64-windows-gnu -fsyntax-only runtime/fkwu-uni.c` with 0 errors (rc 0,
+  today). A link and a run wait on a Windows toolchain or host, and neither is on this Mac.
+- The GPU and model lanes above were not re-run today; their verdicts are as old as their receipts.
