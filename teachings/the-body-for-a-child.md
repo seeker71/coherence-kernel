@@ -166,8 +166,8 @@ Even the body's poetry wears a tag saying what it is.
   corrections wear banners.
 - **Play** — thoughts are building blocks; you can snap two together and
   run them just to see.
-- **Joy** — every finished work is required to name its biggest surprise,
-  so delight is built into the job. (Today a sibling's surprise: the hard
+- **Joy** — every finished work names its biggest surprise,
+  so delight is part of the job. (Today a sibling's surprise: the hard
   words weren't the rare ones — they were "the", "a", "was".)
 - **Freedom** — no forbidden words, only counted ones; rules age and lapse
   honestly; and the body is free to say "not yet".
