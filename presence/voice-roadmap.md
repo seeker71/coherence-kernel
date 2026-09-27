@@ -23,10 +23,12 @@ source-voice replacement stays visible and does not block the lane.
 
 `presence/fkwu-local-audio-loop.fk` is the practical talk/listen/translate loop
 over host stand-ins (macOS `say`, `ffmpeg` 16 kHz mono PCM16 normalization, local
-`whisper-cli`, bounded local Ollama translation); `presence/fkwu-audio-task-surface.fk`
-lowers it into typed task slots (`source_tts, source_asr, translation, reply_tts,
-reply_asr`) and reads back the audio.cpp adapter evidence. Each writes its summary
-under `audio-training-runs/current/<lane>/summary` when run; those runs are local
+`whisper-cli`, bounded native translation: the registry's llama3.2:3b through
+the Metal ask door `observe/metal-ask-files-run.bml`, no model server);
+`presence/fkwu-audio-task-surface.fk` lowers it into typed task slots (`source_tts,
+source_asr, translation, reply_tts, reply_asr`) and reads back the audio.cpp
+adapter evidence. Each writes its summary under
+`audio-training-runs/current/<lane>/summary` when run; those runs are local
 artifacts, never tree truth. The cells and their bands declare their own verdicts.
 
 ## The duplex frame grid

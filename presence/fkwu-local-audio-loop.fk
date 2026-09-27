@@ -2,8 +2,10 @@
 ;
 ; Form owns the task contract, prompts, command lowering, bounded oracle calls,
 ; WER scoring, and summary shape. Host tools remain effects behind host-exec:
-; macOS say for temporary TTS, ffmpeg for wav normalization, whisper-cli for ASR,
-; and the local Ollama HTTP API for translation.
+; macOS say for temporary TTS, ffmpeg for wav normalization, whisper-cli for ASR.
+; Translation is the body's own: the registry's llama3.2:3b weights through the
+; native Metal ask door (observe/metal-ask-files-run.bml) in a child fkwu, one
+; request directory in, the ASK-NATIVE answer artifact out. No model server.
 ;
 ; import "observe/stt-wer.fk"
 ;
@@ -18,8 +20,10 @@
     (defn flal-target-lang () "de")
     (defn flal-source-voice () "Samantha")
     (defn flal-target-voice () "Anna")
-    (defn flal-translation-model () "llama3.2:1b")
-    (defn flal-translation-oracle () "ollama:llama3.2:1b")
+    (defn flal-translation-model () "llama3.2:3b")
+    (defn flal-translation-oracle () "form-metal:llama3.2:3b")
+    (defn flal-translation-door () "observe/metal-ask-files-run.bml")
+    (defn flal-translation-token-cap () 16)
     (defn flal-source-max-wer () 25)
     (defn flal-reply-max-wer () 50)
     (defn flal-translation-byte-cap () 200)
@@ -68,7 +72,7 @@
     (defn flal-source-text-path () (flal-path "source.txt"))
     (defn flal-source-aiff-path () (flal-path "source.aiff"))
     (defn flal-source-wav-path () (flal-path "source.wav"))
-    (defn flal-translation-request-path () (flal-path "translation-request.json"))
+    (defn flal-translation-request-dir () (flal-path "translation-request"))
     (defn flal-translation-text-path () (flal-path "translation.txt"))
     (defn flal-reply-aiff-path () (flal-path "reply.aiff"))
     (defn flal-reply-wav-path () (flal-path "reply.wav"))
@@ -80,35 +84,23 @@
     (defn flal-write-field (name value) (flal-write-path (flal-path name) value))
     (defn flal-write-int-field (name value) (flal-write-field name (flal-int-str value)))
 
-    (defn flal-json-escape-loop (s i)
-        (if (ge i (str_len s)) ""
-            (do
-                (let b (str_byte_at s i))
-                (let rest (flal-json-escape-loop s (add i 1)))
-                (if (eq b 92)
-                    (str_concat "\\\\" rest)
-                    (if (eq b 34)
-                        (str_concat "\\\"" rest)
-                        (if (eq b 10)
-                            (str_concat "\\n" rest)
-                            (if (eq b 13)
-                                (str_concat "\\r" rest)
-                                (if (eq b 9)
-                                    (str_concat "\\t" rest)
-                                    (str_concat (byte_to_str b) rest)))))))))
-    (defn flal-json-string (s)
-        (str_concat "\"" (str_concat (flal-json-escape-loop s 0) "\"")))
     (defn flal-translation-prompt (text)
-        (str_concat
-            "Translate this exact text from English to German. Output only the German translation, no commentary. Text: "
-            text))
-    (defn flal-translation-request-json (text)
-        (flal-cat5
-            "{\"model\":"
-            (flal-json-string (flal-translation-model))
-            ",\"prompt\":"
-            (flal-json-string (flal-translation-prompt text))
-            ",\"stream\":false,\"options\":{\"num_predict\":16,\"temperature\":0,\"top_p\":0.1}}"))
+        (flal-cat3 "Translate English to German.\nEnglish: " text "\nGerman:"))
+    ; one request directory for the native door: each field is one file
+    (defn flal-translation-request-fields (text)
+        (list
+            (list "prompt" (flal-translation-prompt text))
+            (list "cap" (flal-int-str (flal-translation-token-cap)))
+            (list "model" (flal-translation-model))
+            (list "blob" "")
+            (list "stage" (flal-translation-request-dir))))
+    (defn flal-write-request-fields (fields)
+        (if (eq (len fields) 0) 1
+            (do
+                (let field (head fields))
+                (let _w (flal-write-path (flal-cat3 (flal-translation-request-dir) "/" (head field))
+                                         (nth field 1)))
+                (flal-write-request-fields (tail fields)))))
 
     (defn flal-say-file-command (voice text-file aiff)
         (str_concat
@@ -126,22 +118,27 @@
                 (str_concat
                     (str_concat " -f " (flal-q wav))
                     (flal-cat3 " -l " locale " -nt -np 2>/dev/null | tr '\\n' ' ' | head -c 500"))))
-    (defn flal-translation-command (request-json)
-        (str_concat
-            "curl --max-time 20 -s -X POST http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' --data-binary @"
-            (str_concat
-                (flal-q request-json)
-                (str_concat " | jq -r '.response // \"\"' | tr -d '\\r' | head -c "
+    ; the child fkwu reads the request directory, publishes <dir>/answer.txt;
+    ; the first answer line is the translation
+    (defn flal-translation-command (request-dir)
+        (do
+            (let answer (flal-q (str_concat request-dir "/answer.txt")))
+            (flal-cat5
+                (flal-cat3 "rm -f " answer "; ")
+                (flal-cat3 "printf '%s\\n' " (flal-q request-dir) " | ")
+                (flal-cat3 "./fkwu " (flal-translation-door) " >/dev/null 2>&1; ")
+                (flal-cat3 "sed -n '/^ANSWER-BEGIN$/,/^ANSWER-END$/p' " answer " 2>/dev/null")
+                (str_concat " | sed '1d;$d' | head -n 1 | tr -d '\\r' | head -c "
                             (flal-int-str (flal-translation-byte-cap))))))
 
     (defn flal-host-tools-ready? ()
         (if (str_eq
-                (host-exec "command -v say >/dev/null && command -v ffmpeg >/dev/null && command -v whisper-cli >/dev/null && command -v curl >/dev/null && command -v jq >/dev/null && printf 1 || printf 0" "")
+                (host-exec "command -v say >/dev/null && command -v ffmpeg >/dev/null && command -v whisper-cli >/dev/null && printf 1 || printf 0" "")
                 "1") 1 0))
     (defn flal-translation-model-ready? ()
-        (if (str_eq
-                (host-exec "curl --max-time 5 -s http://127.0.0.1:11434/api/tags | jq -e '.models[]? | select(.name==\"llama3.2:1b\")' >/dev/null && printf 1 || printf 0" "")
-                "1") 1 0))
+        (if (and (eq (flal-exists? (mr-path (mr-find "llama32-3b"))) 1)
+                 (and (eq (flal-exists? (flal-translation-door)) 1)
+                      (eq (flal-exists? "fkwu") 1))) 1 0))
     (defn flal-ready? ()
         (if (and (eq (flal-exists? (flal-model)) 1)
                  (and (eq (flal-host-tools-ready?) 1)
@@ -193,7 +190,7 @@
                             (add
                                 (flal-bit (eq summary-present 1) 2048)
                                 (add
-                                    (flal-bit (str_eq (flal-translation-oracle) "ollama:llama3.2:1b") 4096)
+                                    (flal-bit (str_eq (flal-translation-oracle) "form-metal:llama3.2:3b") 4096)
                                     (flal-bit (str_eq (flal-kind) "fkwu-local-audio-loop") 8192)))))))))
 
     (defn flal-summary-text (ready source-transcript source-wer translation reply-transcript reply-wer score)
@@ -215,7 +212,7 @@
                 (flal-int-line "reply_wer_pct" reply-wer)
                 (flal-line "tts_runtime" "macos_say_local_stand_in")
                 (flal-line "asr_runtime" "whisper.cpp_large_v3_turbo_local")
-                (flal-line "translator_runtime" "ollama_local_http_bounded")
+                (flal-line "translator_runtime" "form_metal_gguf_native")
                 (flal-int-line "translation_byte_cap" (flal-translation-byte-cap))
                 (flal-int-line "promotion_authority" 0)
                 (flal-int-line "base_model_training_authority" 0)
@@ -241,7 +238,7 @@
             (let _reply-wer (flal-write-int-field "reply_wer_pct" reply-wer))
             (let _tts-runtime (flal-write-field "tts_runtime" "macos_say_local_stand_in"))
             (let _asr-runtime (flal-write-field "asr_runtime" "whisper.cpp_large_v3_turbo_local"))
-            (let _translator-runtime (flal-write-field "translator_runtime" "ollama_local_http_bounded"))
+            (let _translator-runtime (flal-write-field "translator_runtime" "form_metal_gguf_native"))
             (let _promotion (flal-write-int-field "promotion_authority" 0))
             (let _training (flal-write-int-field "base_model_training_authority" 0))
             (let _score (flal-write-int-field "score" score))
@@ -259,8 +256,9 @@
                 (let _source-wav (host-exec (flal-ffmpeg-command (flal-source-aiff-path) (flal-source-wav-path)) ""))
                 (let source-transcript (flal-trim (host-exec (flal-whisper-command (flal-model) (flal-source-wav-path) (flal-source-lang)) "")))
                 (let source-wer (flal-wer source-transcript (flal-source-text)))
-                (let _request (flal-write-path (flal-translation-request-path) (flal-translation-request-json (flal-source-text))))
-                (let translation (flal-trim (host-exec (flal-translation-command (flal-translation-request-path)) "")))
+                (let _request-dir (flal-mkdir (flal-translation-request-dir)))
+                (let _request (flal-write-request-fields (flal-translation-request-fields (flal-source-text))))
+                (let translation (flal-trim (host-exec (flal-translation-command (flal-translation-request-dir)) "")))
                 (let _translation-text (flal-write-path (flal-translation-text-path) translation))
                 (let _reply-say (host-exec (flal-say-file-command (flal-target-voice) (flal-translation-text-path) (flal-reply-aiff-path)) ""))
                 (let _reply-wav (host-exec (flal-ffmpeg-command (flal-reply-aiff-path) (flal-reply-wav-path)) ""))

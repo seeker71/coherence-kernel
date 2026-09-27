@@ -1,28 +1,24 @@
 #!/bin/sh
-# Native-first local route with a Form-owned privacy-safe occurrence.
-# Prompt and output live only in mode-600 temporary files and stdout; the
-# durable ledger receives hashes and bounded metadata only.
+# Native local route: one route name in the environment, the prompt on stdin,
+# the ask carried by the native Metal door in one fkwu process. No model
+# server, socket, HTTP or JSON membrane sits on this route.
 
 set -eu
 . "$(CDPATH= cd "$(dirname "$0")" && pwd)/native_model_form_common.sh"
 
-kind=inference
-if [ "${1:-}" = "--probe" ]; then
-    kind=integration-probe
-elif [ "$#" -ne 0 ]; then
-    printf 'usage: %s [--probe] < prompt\n' "$0" >&2
+if [ "$#" -ne 0 ]; then
+    printf 'usage: %s < prompt\n' "$0" >&2
     exit 2
 fi
 
 route=${LOCAL_MODEL_ROUTE:-form-metal}
 
-# The routing DECISION -- which route names exist, which door each carries
-# the ask through, and each door's threshold -- lives in Form, as data:
+# The routing decision -- which route names exist, which door each carries
+# the ask through, and each door's token default -- lives in Form, as data:
 # form/form-stdlib/native-model-route-table.bml, read through its CLI
-# membrane. This shell carrier keeps only the host boundary a shell
-# invocation is actually for: reading $LOCAL_MODEL_ROUTE (and, below,
-# $FORM_METAL_STEPS) from the environment, and calling into the table to
-# resolve the name. See form/form-stdlib/tests/native-model-route-table-band.fk.
+# membrane (band form/form-stdlib/tests/native-model-route-table-band.fk).
+# This carrier keeps only the host boundary: $LOCAL_MODEL_ROUTE and the
+# FORM_* request values from the environment, and stdin.
 if [ ! -x "$NM_FKWU" ]; then
     printf 'missing executable kernel: %s\n' "$NM_FKWU" >&2
     exit 1
@@ -32,158 +28,23 @@ route_result=$(printf '%s\n' "$route" |
 route_kind=$(printf '%s\n' "$route_result" | awk -F= '$1 == "route_kind" { print $2; exit }')
 route_door=$(printf '%s\n' "$route_result" | awk -F= '$1 == "route_door" { print $2; exit }')
 route_steps=$(printf '%s\n' "$route_result" | awk -F= '$1 == "route_steps" { print $2; exit }')
-route_model=$(printf '%s\n' "$route_result" | awk -F= '$1 == "route_model" { print $2; exit }')
-route_registered_model=$(printf '%s\n' "$route_result" |
-    awk -F= '$1 == "route_registered_model" { print $2; exit }')
 route_known_names=$(printf '%s\n' "$route_result" |
     awk -F= '$1 == "route_known_names" { print $2; exit }')
 
-if [ "$route_kind" = "direct-metal" ]; then
-    # This boundary carries environment bytes and stdin. The Form program
-    # owns validation, model admission, generation, costs and publication.
-    native_request=$(nm_new_temp_dir)
-    trap 'rm -rf "$native_request"' EXIT HUP INT TERM
-    cat > "$native_request/prompt"
-    printf '%s' "${FORM_METAL_STEPS:-$route_steps}" > "$native_request/cap"
-    printf '%s' "${FORM_ASK_MODEL:-}" > "$native_request/model"
-    printf '%s' "${FORM_GGUF_BLOB:-}" > "$native_request/blob"
-    printf '%s' "${FORM_ASK_STAGE:-}" > "$native_request/stage"
-    cd "$NM_REPO_ROOT"
-    printf '%s\n' "$native_request" | "$NM_FKWU" "$route_door"
-    exit $?
-fi
-
-nm_require_command curl
-nm_require_command jq
-nm_require_command shasum
-
-if [ "$route_kind" = "unknown" ]; then
+if [ "$route_kind" != "direct-metal" ]; then
     printf 'unknown LOCAL_MODEL_ROUTE: %s\n' "$route" >&2
     printf 'known routes: %s\n' "$route_known_names" >&2
     exit 2
 fi
 
-ollama_url=${OLLAMA_URL:-http://127.0.0.1:11434}
-ollama_model=$route_model
-registered_model=$route_registered_model
-if [ "$route_kind" = "challenger-carrier" ]; then
-    package_result=$("$NM_REPO_ROOT/$route_door")
-    if ! printf '%s\n' "$package_result" | grep -q '^execution_admitted=1$'; then
-        printf 'Form refused the Nanbeige package\n%s\n' "$package_result" >&2
-        exit 1
-    fi
-fi
-ledger="$NM_STATE_DIR/events.jsonl"
-
-temp_dir=$(nm_new_temp_dir)
-before="$temp_dir/artifacts-before"
-after="$temp_dir/artifacts-after"
-prompt_file="$temp_dir/prompt"
-request_file="$temp_dir/request.json"
-response_file="$temp_dir/response.json"
-output_file="$temp_dir/output"
-show_file="$temp_dir/show.json"
-canonical_show="$temp_dir/show-canonical.json"
-show_after_file="$temp_dir/show-after.json"
-canonical_show_after="$temp_dir/show-after-canonical.json"
-event_result="$temp_dir/event-result"
-nm_snapshot_generated "$before"
-
-cleanup() {
-    nm_remove_new_generated "$before" "$after"
-    rm -rf "$temp_dir"
-}
-trap cleanup EXIT HUP INT TERM
-
-cat > "$prompt_file"
-if [ ! -s "$prompt_file" ]; then
-    printf 'refusing an empty prompt\n' >&2
-    exit 2
-fi
-
-input_sha=$(nm_sha256_file "$prompt_file")
-jq -n --arg name "$ollama_model" '{name:$name}' |
-    curl --silent --show-error --fail --max-time 30 \
-        -H 'Content-Type: application/json' --data-binary @- \
-        "$ollama_url/api/show" > "$show_file"
-jq -cS . "$show_file" > "$canonical_show"
-artifact_sha=$(nm_sha256_file "$canonical_show")
-
-jq -Rs --arg model "$ollama_model" \
-    '{model:$model,prompt:.,stream:false,options:{temperature:0}}' \
-    "$prompt_file" > "$request_file"
-
-started=$(date +%s)
-observed_success=1
-if curl --silent --show-error --fail --max-time 120 \
-        -H 'Content-Type: application/json' --data-binary @"$request_file" \
-        "$ollama_url/api/generate" > "$response_file" &&
-        jq -er '.response | strings' "$response_file" > "$output_file"
-then
-    :
-else
-    observed_success=0
-    : > "$output_file"
-fi
-ended=$(date +%s)
-latency_ms=$(( (ended - started) * 1000 ))
-if [ "$observed_success" -eq 1 ]; then
-    latency_ms=$(jq -r '((.total_duration // 0) / 1000000 | round)' "$response_file")
-fi
-output_sha=$(nm_sha256_file "$output_file")
-units=$(wc -c < "$output_file" | tr -d ' ')
-day=$(date -u +%Y%m%d)
-epoch_ms=$(( $(date +%s) * 1000 ))
-
-identity_stable=0
-identity_after=0
-artifact_after_sha=$(printf '' | shasum -a 256 | awk '{print $1}')
-if jq -n --arg name "$ollama_model" '{name:$name}' |
-    curl --silent --show-error --fail --max-time 30 \
-        -H 'Content-Type: application/json' --data-binary @- \
-        "$ollama_url/api/show" > "$show_after_file" &&
-        jq -cS . "$show_after_file" > "$canonical_show_after"
-then
-    identity_after=1
-    artifact_after_sha=$(nm_sha256_file "$canonical_show_after")
-    if [ "$artifact_sha" = "$artifact_after_sha" ]; then
-        identity_stable=1
-    fi
-fi
-
-{
-    printf '%s\n' "$ledger"
-    printf '%s\n' "$day"
-    printf '%s\n' "$epoch_ms"
-    printf '%s\n' "$registered_model"
-    printf '%s\n' "$kind"
-    printf '%s\n' "$observed_success"
-    printf '%s\n' "$artifact_sha"
-    printf '%s\n' "$artifact_after_sha"
-    printf '%s\n' 1
-    printf '%s\n' "$identity_after"
-    printf '%s\n' "$input_sha"
-    printf '%s\n' "$output_sha"
-    printf '%s\n' "$latency_ms"
-    printf '%s\n' "$units"
-    printf '\n'
-    printf '\n'
-} | "$NM_FKWU" form/form-stdlib/native-model-event-cli.fk > "$event_result"
-
-if ! grep -q '^append_ok=1$' "$event_result"; then
-    printf 'Form rejected the occurrence; model output withheld\n' >&2
-    cat "$event_result" >&2
-    exit 1
-fi
-
-event_sha=$(awk -F= '$1 == "event_sha256" { print $2; exit }' "$event_result")
-event_success=$(awk -F= '$1 == "event_success" { print $2; exit }' "$event_result")
-identity_stable=$(awk -F= '$1 == "identity_stable" { print $2; exit }' "$event_result")
-printf 'route_kind=%s model_id=%s latency_ms=%s identity_stable=%s event_sha256=%s\n' \
-    "$kind" "$registered_model" "$latency_ms" "$identity_stable" \
-    "$event_sha" >&2
-
-if [ "$event_success" -ne 1 ]; then
-    exit 1
-fi
-cat "$output_file"
+# This boundary carries environment bytes and stdin. The Form program owns
+# validation, model admission, generation, costs and publication.
+native_request=$(nm_new_temp_dir)
+trap 'rm -rf "$native_request"' EXIT HUP INT TERM
+cat > "$native_request/prompt"
+printf '%s' "${FORM_METAL_STEPS:-$route_steps}" > "$native_request/cap"
+printf '%s' "${FORM_ASK_MODEL:-}" > "$native_request/model"
+printf '%s' "${FORM_GGUF_BLOB:-}" > "$native_request/blob"
+printf '%s' "${FORM_ASK_STAGE:-}" > "$native_request/stage"
+cd "$NM_REPO_ROOT"
+printf '%s\n' "$native_request" | "$NM_FKWU" "$route_door"

@@ -63,10 +63,9 @@ The remaining foreign Metal scripts have distinct active responsibilities:
   denominator; the native ask does not invoke it.
 - The DeepSeek, MoE, KAT, GDN and quantization scripts carry separate model or
   operator witnesses. They require their own native replacements and checks.
-- `native_model_route.sh` still carries its explicit Ollama comparator and
-  challenger package route. Its direct Metal branch only carries environment
-  and stdin bytes to Form. Those comparator branches remain unresolved native
-  migration work.
+- `native_model_route.sh` reads the route table and hands the request to
+  `observe/metal-ask-files-run.bml`; it carries environment and stdin bytes to
+  Form and nothing else.
 
 The north star is one resident Form owner with reusable model, tokenizer and
 content observations; reusable independently retired CPU/GPU programs; native
