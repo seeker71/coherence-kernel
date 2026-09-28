@@ -304,6 +304,28 @@ async function loadFormSourceBmlPrelude(
   await loadFormSourceText(displayPath, canonical, lowered, seen, parts);
 }
 
+// Whether a Form string literal is still open at the end of line, given whether
+// one was open at its start: an escape takes the next byte, and a ; outside a
+// string comments out the rest of the line.
+function formLineEndsInString(line: string, open: boolean): boolean {
+  let inside = open;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inside) {
+      if (c === "\\") {
+        i++;
+      } else if (c === '"') {
+        inside = false;
+      }
+    } else if (c === ";") {
+      return false;
+    } else if (c === '"') {
+      inside = true;
+    }
+  }
+  return inside;
+}
+
 // Walks one source's lines for import/prelude directives (recursing into
 // each dependency) and appends the remaining body as one part. Shared by
 // the on-disk (.fk) and lowered-in-memory (.bml) loading paths so both get
@@ -315,8 +337,10 @@ async function loadFormSourceText(
   seen: Set<string>,
   parts: FormSourcePart[],
 ): Promise<void> {
+  // a line that begins inside a string literal is data, as the reader sees it
+  let inString = false;
   for (const line of source.split("\n")) {
-    if (line.trimStart().startsWith("section [")) {
+    if (!inString && line.trimStart().startsWith("section [")) {
       throw new Error(
         `${displayPath}: carries a raw "section [form.bml]" block -- this kernel runs plain Form, ` +
           "not BML, so it can't parse that block directly. It must be lowered through " +
@@ -324,6 +348,7 @@ async function loadFormSourceText(
           'automatically; see form-stdlib/AUTHORING.md\'s "two-layer trap")',
       );
     }
+    inString = formLineEndsInString(line, inString);
   }
   const body: string[] = [];
   for (const line of source.split("\n")) {

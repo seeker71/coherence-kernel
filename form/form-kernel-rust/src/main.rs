@@ -14572,6 +14572,31 @@ fn load_form_source_bml_prelude(
     load_form_source_text(display_path, &canonical, &lowered, seen, parts)
 }
 
+// Whether a Form string literal is still open at the end of line, given whether
+// one was open at its start: an escape takes the next byte, and a ; outside a
+// string comments out the rest of the line.
+fn form_line_ends_in_string(line: &str, open: bool) -> bool {
+    let bytes = line.as_bytes();
+    let mut inside = open;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if inside {
+            if c == b'\\' {
+                i += 1;
+            } else if c == b'"' {
+                inside = false;
+            }
+        } else if c == b';' {
+            return false;
+        } else if c == b'"' {
+            inside = true;
+        }
+        i += 1;
+    }
+    inside
+}
+
 // Walks one source's lines for import/prelude directives (recursing into
 // each dependency) and appends the remaining body as one part. Shared by
 // the on-disk (.fk) and lowered-in-memory (.bml) loading paths so both get
@@ -14583,8 +14608,10 @@ fn load_form_source_text(
     seen: &mut HashSet<PathBuf>,
     parts: &mut Vec<(String, String)>,
 ) -> Result<(), String> {
+    // a line that begins inside a string literal is data, as the reader sees it
+    let mut in_string = false;
     for line in source.split('\n') {
-        if line.trim_start().starts_with("section [") {
+        if !in_string && line.trim_start().starts_with("section [") {
             return Err(format!(
                 "{}: carries a raw \"section [form.bml]\" block -- this kernel runs plain Form, \
                  not BML, so it can't parse that block directly. It must be lowered through \
@@ -14593,6 +14620,7 @@ fn load_form_source_text(
                 display_path
             ));
         }
+        in_string = form_line_ends_in_string(line, in_string);
     }
     let mut body = Vec::new();
     for line in source.split('\n') {
