@@ -122,6 +122,20 @@ are still needed before claiming broad accuracy gains. Large-v3-turbo now has a
 [native WAV route](native-whisper.md); integrating that model into this live ear
 remains separate from its file-transcription witness.
 
+Doors that read the room itself:
+
+- `observe/ear-floor-probe.fk` reads the mic as the live lane does and reports each hop's
+  one-chunk and three-chunk rms against the lane's speech gate.
+- `observe/ear-ground-read.fk` shows the ear ground's frame with the word that says whether
+  the line is the room now, including `absent`.
+- `observe/ear-ground-witness.fk` speaks a line in the body's own voice and times it, in one
+  process, until the words stand in the ear ground's frame.
+- `observe/prosody-tone-emit.fk` plays a sawtooth of chosen pitch, loudness, glide and burst
+  rate, so the prosody axes are checked against a known stimulus.
+- `observe/jungle-ear-probe.fk` prints the jungle ear's coordinates per 100 ms of the real
+  room, where its gates get their numbers; `observe/jungle-ear-name.fk` binds a name a person
+  offers to a voice's content address.
+
 ## What we learned from open implementations
 
 - [Whisper-Streaming](https://github.com/ufal/whisper_streaming) separates growing

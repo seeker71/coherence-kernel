@@ -130,7 +130,10 @@ cell drives the device and the device agrees with Form's own arithmetic.
   `json.fk`); the HTTP body (`kernel-http` + parse/render/request/serve/client/adapter/socket, `http-negotiate.fk`);
   arrival / reception-consent / relationship-store (the come-in flow); host-os-membrane, somatic-coherence-loop,
   observed-auto-learning; the hearth (`hearth.bml`) — one resident form-cli serving sessions and cells as clients;
-  the voice (`bml/form-cli-native-voice.bml`) — the answer model in the fkwu session.
+  the voice (`bml/form-cli-native-voice.bml`) — the answer model in the fkwu session. Where two engines still do
+  one job — `source-compiler.fk`'s hand scanner beside `bml.fk`, `form-parse`/`grammar-chars` beside
+  `bmf-grammar`, `http-serve.fk` beside `kernel-http`, `cache.fk`'s mtime trust beside `cache-phase.fk`'s content
+  hash — the stdlib converges on the one engine and releases the other.
 - **`form/form-cli`** — the native agent binary. `form/form-stdlib/bml/native-cli-startup.bml` emits its startup C
   from the runtime seed, one `cc` links it, and it runs `form/form-stdlib/form-cli-repl.fk` as its compiled image;
   the published platform bundle stands in `form/form-stdlib/bootstrap/`. The form shell enters at
@@ -180,7 +183,7 @@ cell drives the device and the device agrees with Form's own arithmetic.
 ### Knowledge tree and witness ledger
 - **`docs/`** — [`coherence-substrate/`](docs/coherence-substrate/README.md) (the `.form` teaching/spec docs and prose
   specs — how Form reaches its environment), the strategic maps ([the penumbra map](docs/penumbra-map.md) — where
-  the proof's light falls), [`docs/inheritance/`](docs/inheritance/INHERITANCE.md) (what came home from the origin),
+  the proof's light falls), [`docs/inheritance/`](docs/inheritance/INHERITANCE.md) (how a body comes home from the origin),
   and the goals ([`docs/local-agent-goal.form`](docs/local-agent-goal.form),
   [`docs/rent-to-zero-goal.form`](docs/rent-to-zero-goal.form)).
 - **`receipts/`** — the dated witness ledger. Every claim of "proven / observed" traces to one. A receipt stays as

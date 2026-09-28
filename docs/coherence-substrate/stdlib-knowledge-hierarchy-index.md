@@ -4,6 +4,12 @@ This index comes before per-file uplift. The stdlib is too large to improve
 honestly file by file without first grouping files into semantic families,
 section classes, and missing grammar surfaces.
 
+Each touched surface answers one question: what does its realization want to become? Protocols
+become grammars, codecs declarations over cell shapes, routes route classes, queries path grammars,
+domain models cell classes — and low-level Form stays as generated realization or generic runtime,
+not the hand-authored public surface of a domain; where two public ways do the same thing, the
+higher one proves itself complete and the lower one is released.
+
 ## Inventory
 
 `form/form-stdlib` holds 3,699 tracked `.fk` files (counted with

@@ -3,6 +3,9 @@
 `./fkwu observe/form-glass-organ-care-run.fk` reads the same live organ flows as
 the core `care` command and sends their current unease through the
 existing framebuffer. It preserves the framebuffer’s other observations.
+`./fkwu observe/membrane-heartbeat-run.fk` asks how the body is: the vitals frame
+first, then the raw heartbeat across a window and the organs `form-glass-standing.bml`
+declares.
 
 The JSON report names discovered sources, directed attention, resource needs,
 supply outcomes, observation age and source state. Pain comes first; unknown health

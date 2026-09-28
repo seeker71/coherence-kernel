@@ -215,7 +215,9 @@ The body already holds expansion organs:
 - `cognition/language-neutral-symbol-identity.fk`: label-independent NL and PL
   identity;
 - `form/form-stdlib/core-lexicon.fk`: a 64-word definition-closed core;
-- the reviewed form-neutral meaning-space artifacts in this directory.
+- no membership law: any proposed meaning composition may exist as a candidate cell; grounding,
+  frequency, guidance, trust and embedding scores are observations about it, never permission for it
+  to exist, and a revision's identity is its content-addressed composition (axiom 3).
 
 Expansion is occurrence- and sense-first:
 
