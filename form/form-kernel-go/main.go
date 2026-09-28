@@ -1685,17 +1685,11 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("char_at", catAccess(), func(_ *Kernel, args []Value) Value {
 		s := argStr(args, 0)
 		i := args[1].AsInt()
+		// core.fk's recipe on fkwu, (substring s i (add i 1)): one byte, clamped
 		if i < 0 || i >= int64(len(s)) {
-			panic(fmt.Sprintf("char_at: bounds out of range index=%d len=%d", i, len(s)))
-		}
-		// At a char start: the whole char. Inside a multibyte char: nothing —
-		// a bytewise loop concatenating char_at over 0..str_len reconstructs
-		// the string exactly, once per char. Sibling parity with Rust.
-		if !utf8.RuneStart(s[i]) {
 			return Value{Kind: VStr, Str: ""}
 		}
-		r, _ := utf8.DecodeRuneInString(s[i:])
-		return Value{Kind: VStr, Str: string(r)}
+		return Value{Kind: VStr, Str: s[i : i+1]}
 	})
 	k.registerNative("str_concat", catMethod(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VStr, Str: argStr(args, 0) + argStr(args, 1)}

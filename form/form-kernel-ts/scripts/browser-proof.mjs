@@ -81,12 +81,13 @@ assert(printed.stderr === "", `stderr capture ${JSON.stringify(printed.stderr)}`
 
 const source = `(do (let message "browser-λ") (str_concat message "-roundtrip"))`;
 const sourceKernel = new browser.Kernel();
-const sourceRoot = browser.readAll(sourceKernel, source);
+// source text enters as its bytes and the answer reads back as text (byte-host.ts)
+const sourceRoot = browser.readAll(sourceKernel, browser.textToBstr(source));
 const artifact = browser.serializeRecipeArtifact(sourceKernel, sourceRoot);
 const targetKernel = new browser.Kernel();
 const targetRoot = browser.deserializeRecipeArtifact(targetKernel, artifact);
 const targetValue = browser.walk(targetKernel, targetRoot, new browser.Frame(null));
-assert(targetKernel.render(targetValue) === "browser-λ-roundtrip", "binary reader round-trip failed");
+assert(browser.bstrToText(targetKernel.render(targetValue)) === "browser-λ-roundtrip", "binary reader round-trip failed");
 
 const fieldProof = browser.runFieldRuntimeProof();
 assert(fieldProof.marker === "field-model-form-browser-runtime-proof:4", "field marker drifted");

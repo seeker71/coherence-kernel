@@ -23,6 +23,8 @@ import {
   walkUnit,
 } from "./kernel.ts";
 import { createNodeKernelHost } from "./node-host.ts";
+// sources are read as latin1: one code unit per byte, the kernel's byte strings (byte-host.ts)
+import { textToBstr } from "./byte-host.ts";
 import { readAll, readForm } from "./reader.ts";
 import { FKWU_RESERVED_HEADS } from "./reserved-heads.ts";
 
@@ -173,7 +175,7 @@ const FORM_BML_SOURCE_COMPILE_CHAIN = [
 // is a miss. The directory keeps one lowering per path for this kernel, so a
 // new key replaces the old entry rather than settling beside it.
 async function lowerBmlSource(bmlAbsPath: string): Promise<string> {
-  const body = await readFile(bmlAbsPath, "utf8");
+  const body = await readFile(bmlAbsPath, "latin1");
 
   const chainPaths = FORM_BML_SOURCE_COMPILE_CHAIN.map((rel) => {
     try {
@@ -208,7 +210,7 @@ async function lowerBmlSource(bmlAbsPath: string): Promise<string> {
   const cacheDir = join(dirname(compilerRoot), ".cache", "kernel-bml-lowered");
   const cachePath = join(cacheDir, name);
   try {
-    const cached = await readFile(cachePath, "utf8");
+    const cached = await readFile(cachePath, "latin1");
     if (cached.length > 0) return cached;
   } catch {
     // not lowered under this key yet
@@ -224,7 +226,7 @@ async function lowerBmlSource(bmlAbsPath: string): Promise<string> {
     const root = readAll(lowerKernel, compilerSrc);
     walkUnit(lowerKernel, root, lowerFrame);
 
-    const lowered = await readFile(outPath, "utf8").catch(() => "");
+    const lowered = await readFile(outPath, "latin1").catch(() => "");
     if (lowered.length === 0) {
       throw new Error(`form-source-compile-file produced no output for ${bmlAbsPath}`);
     }
@@ -250,7 +252,7 @@ async function loadFormSourceFile(
   const canonical = await realpath(path);
   if (seen.has(canonical)) return;
   seen.add(canonical);
-  const source = await readFile(canonical, "utf8");
+  const source = await readFile(canonical, "latin1");
   await loadFormSourceText(displayPath, canonical, source, seen, parts);
 }
 
@@ -275,7 +277,7 @@ async function loadFormSourceBmlPrelude(
   // and recursed on the RAW file, before lowering discards them, rather
   // than by scanning the lowered output the way every other dependency
   // kind is scanned.
-  const rawBody = await readFile(canonical, "utf8");
+  const rawBody = await readFile(canonical, "latin1");
   for (const line of rawBody.split("\n")) {
     const imported = formImportPath(line);
     if (imported !== null) {
@@ -372,7 +374,7 @@ function homeIndexFor(owner: string): Array<[string, string]> {
   if (cached !== undefined) return cached;
   const rows: Array<[string, string]> = [];
   try {
-    for (const line of readFileSync(path, "utf8").split("\n")) {
+    for (const line of readFileSync(path, "latin1").split("\n")) {
       const [name, unit] = line.trim().split(/\s+/);
       if (name === undefined || unit === undefined || name.startsWith("#")) continue;
       rows.push([name, unit]);
@@ -470,7 +472,7 @@ async function writeKernelCrashTrace(err: unknown): Promise<string | null> {
     mode: crashTraceContext.mode,
     args: crashTraceContext.args,
     error: message,
-    source_bytes: Buffer.byteLength(source, "utf8"),
+    source_bytes: Buffer.byteLength(source, "latin1"),
     source_line_count: sourceLineCount(source),
     source_head: source.slice(0, 2000),
     source_tail: source.slice(Math.max(0, source.length - 2000)),
@@ -533,7 +535,7 @@ async function main(): Promise<void> {
       process.exit(2);
     }
     const src = (
-      await Promise.all(paths.map((path) => readFile(path, "utf8")))
+      await Promise.all(paths.map((path) => readFile(path, "latin1")))
     ).join("\n");
     setCrashTraceContext("emit-binary", args, src);
     const node = readAll(k, src);
@@ -612,9 +614,9 @@ async function runTrace(args: string[]): Promise<void> {
       console.error("--expr requires an argument");
       process.exit(2);
     }
-    src = args[1];
+    src = textToBstr(args[1]);
   } else {
-    src = await readFile(args[0]!, "utf8");
+    src = await readFile(args[0]!, "latin1");
   }
   setCrashTraceContext("trace", args, src);
 

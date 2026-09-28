@@ -16,6 +16,7 @@
 
 import { BP_TABLE } from "./bp_table.ts";
 import { FKWU_RESERVED_HEADS } from "./reserved-heads.ts";
+import { byteHost, bstrToBytes, bytesToBstr, bstrToText, isWide, jsonLeavesToBstr } from "./byte-host.ts";
 import CATEGORY_CONTRACT from "../../category-contract.json" with { type: "json" };
 import {
   EMPTY_KERNEL_HOST,
@@ -29,8 +30,6 @@ import {
 export type { KernelHost } from "./host.ts";
 
 const UTF8_ENCODER = new TextEncoder();
-const UTF8_DECODER = new TextDecoder();
-const UTF8_STRICT_DECODER = new TextDecoder("utf-8", { fatal: true });
 const KH_TAG_HEADER_TS = 43001;
 // The record-construction clock kernel_stat 164 reads: every record_new this process has run,
 // counted where the record is made. fkwu answers the same key from its arm counter for tag 64
@@ -41,12 +40,9 @@ let recordConstructions = 0;
 const HOST_BIRTH_UNIX_MS = Date.now();
 const KERNEL_LIVE_MAGIC = 0x464b4c4956;
 
+// text the kernel made itself (a unit above 255) as UTF-8; a Form string is already bytes
 function utf8Encode(text: string): Uint8Array {
   return UTF8_ENCODER.encode(text);
-}
-
-function utf8Decode(bytes: Uint8Array): string {
-  return UTF8_DECODER.decode(bytes);
 }
 
 // The one float rendering, byte for byte fkwu's fk_fmt_float_js and Go's core.FormatFloatJS
@@ -71,14 +67,6 @@ function formatFloat(f: number): string {
   const point = exp + 1;
   if (digits.length <= point) return `${sign}${digits}${"0".repeat(point - digits.length)}`;
   return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
-}
-
-function utf8DecodeStrict(bytes: Uint8Array): string {
-  try {
-    return UTF8_STRICT_DECODER.decode(bytes);
-  } catch {
-    throw new Error("form binary: invalid utf8");
-  }
 }
 
 function asciiBytes(text: string): Uint8Array {
@@ -745,7 +733,8 @@ export class Kernel {
   private pgLastError = "";
 
   constructor(host: KernelHost = EMPTY_KERNEL_HOST) {
-    this.host = host;
+    // strings are bytes inside the kernel; text meets them only at the host (byte-host.ts)
+    this.host = byteHost(host);
     this.registerNatives();
   }
 
@@ -1364,9 +1353,10 @@ export class Kernel {
       return { kind: "null" };
     });
     // String ops
+    // a string is bytes, one code unit each (byte-host.ts): its length is its byte count
     this.registerNative("str_len", catAccess(), (_k, args) => ({
       kind: "int",
-      int: utf8Encode(argStr(args, 0)).length,
+      int: argStr(args, 0).length,
     }));
     // substring — BYTES, CLAMPED, NEVER DIES. The one meaning, four ways,
     // laid 2026-09-07 (substring-one-meaning-band.fk, drift gate).
@@ -1387,43 +1377,25 @@ export class Kernel {
     // throw here turned an ordinary out-of-range index into a dead process on
     // three arms and an empty string on the fourth.
     //
-    // THE ONE PLACE THIS ARM CANNOT SAY. A JS string is UTF-16 code units and
-    // str_len MEASURES its UTF-8 bytes, so a cut that severs a multi-byte
-    // character has no representation here: utf8Decode would hand back U+FFFD
-    // replacement characters, a plausible longer string. fkwu and the Go
-    // kernel hold those bytes exactly; this arm answers the axiom-1 absence
-    // instead. What all four arms hold together is that NO ARM EVER ANSWERS
-    // A DIFFERENT NON-EMPTY WINDOW.
+    // A string is bytes here as on fkwu (byte-host.ts), so every cut, one that
+    // severs a multi-byte character included, is the same bytes fkwu holds.
     this.registerNative("substring", catAccess(), (_k, args) => {
       const v = args[0];
       if (v?.kind !== "str") return { kind: "str", str: "" };
-      const bytes = utf8Encode(v.str);
-      const n = bytes.length;
+      const n = v.str.length;
       const rawStart = args[1] ? argInt(args, 1) : 0;
       const rawEnd = args[2] ? argInt(args, 2) : 0;
       const a = rawStart < 0 ? 0 : rawStart > n ? n : rawStart;
       const b = rawEnd < 0 ? 0 : rawEnd > n ? n : rawEnd;
       if (b <= a) return { kind: "str", str: "" };
-      if (isUtf8Continuation(bytes[a]!) || (b < n && isUtf8Continuation(bytes[b]!))) {
-        return { kind: "null" };
-      }
-      return { kind: "str", str: utf8Decode(bytes.subarray(a, b)) };
+      return { kind: "str", str: v.str.slice(a, b) };
     });
+    // char_at is core.fk's recipe on fkwu, (substring s i (add i 1)): one byte, clamped
     this.registerNative("char_at", catAccess(), (_k, args) => {
       const s = argStr(args, 0);
-      const bytes = utf8Encode(s);
       const i = argInt(args, 1);
-      if (i < 0 || i >= bytes.length) {
-        throw new Error(`char_at: bounds out of range index=${i} len=${bytes.length}`);
-      }
-      // At a UTF-8 char start: the whole char. Inside a multibyte char:
-      // nothing. A bytewise loop over 0..str_len reconstructs the string
-      // exactly once per char, matching Go/Rust/fkwu.
-      if (isUtf8Continuation(bytes[i]!)) {
-        return { kind: "str", str: "" };
-      }
-      const end = ceilUtf8Boundary(bytes, i + 1);
-      return { kind: "str", str: utf8Decode(bytes.subarray(i, end)) };
+      if (i < 0 || i >= s.length) return { kind: "str", str: "" };
+      return { kind: "str", str: s[i]! };
     });
     this.registerNative("str_concat", catMethod(), (_k, args) => ({
       kind: "str",
@@ -1611,8 +1583,8 @@ export class Kernel {
     this.registerNative("str_find", catAccess(), (_k, args) => {
       const s = argStr(args, 0);
       const needle = argStr(args, 1);
-      const bytes = utf8Encode(s);
-      const needleBytes = utf8Encode(needle);
+      const bytes = bstrToBytes(s);
+      const needleBytes = bstrToBytes(needle);
       const rawFrom = Math.max(0, argInt(args, 2));
       // A start past the end finds nothing — including the empty needle, which
       // this arm otherwise reported as found AT the clamped end. Sibling parity
@@ -1645,7 +1617,7 @@ export class Kernel {
     //              4=non-quote-non-escape, 5=non-newline,
     //              6=json-string-safe (code unit >= 0x20, not quote/backslash).
     this.registerNative("scan_run", catAccess(), (_k, args) => {
-      const bytes = utf8Encode(argStr(args, 0));
+      const bytes = bstrToBytes(argStr(args, 0));
       const from = Math.max(0, argInt(args, 1));
       const cls = argInt(args, 2);
       const n = bytes.length;
@@ -1717,7 +1689,7 @@ export class Kernel {
     // recursion, the byte list never exists and host stack depth is constant.
     // Embedded NUL and multibyte text are carried byte-for-byte.
     this.registerNative("string_byte_fold", catCall(), (k, args) => {
-      const bytes = utf8Encode(argStr(args, 0));
+      const bytes = bstrToBytes(argStr(args, 0));
       let acc = args[1]!;
       const fnVal = args[2]!;
       if (fnVal.kind !== "closure") {
@@ -1809,25 +1781,22 @@ export class Kernel {
       const s = argStr(args, 0);
       return { kind: "int", int: s.length === 0 ? -1 : s.charCodeAt(0) };
     });
-    // str_byte_at: the i-th raw UTF-8 BYTE of the string (0-255), byte-exact —
-    // the byte twin of char_at (which is unit-aware and answers "" inside a
-    // surrogate pair). JS strings are UTF-16, so the bytes come through a UTF-8
-    // byte array; this is the byte door the string-pool serializer (fks-lit-sp)
-    // emits any locale's script through, matching Go/Rust's byte index.
+    // str_byte_at: the i-th BYTE of the string (0-255) -- a string is bytes, one
+    // code unit each, so this is the unit itself; the byte door the string-pool
+    // serializer (fks-lit-sp) emits any locale's script through.
     this.registerNative("str_byte_at", catAccess(), (_k, args) => {
-      const bytes = utf8Encode(argStr(args, 0));
+      const s = argStr(args, 0);
       const i = argInt(args, 1);
-      if (i < 0 || i >= bytes.length) {
-        throw new Error(`str_byte_at: bounds out of range index=${i} len=${bytes.length}`);
+      if (i < 0 || i >= s.length) {
+        throw new Error(`str_byte_at: bounds out of range index=${i} len=${s.length}`);
       }
-      return { kind: "int", int: bytes[i]! };
+      return { kind: "int", int: s.charCodeAt(i) & 0xff };
     });
-    // string_bytes(text) → raw UTF-8 bytes as integer leaves. This is the
-    // whole-string twin of str_byte_at and preserves embedded NULs; it uses
-    // the platform-neutral TextEncoder shared by browser and Node kernels.
+    // string_bytes(text) → the string's bytes as integer leaves; the
+    // whole-string twin of str_byte_at, embedded NULs included.
     this.registerNative("string_bytes", catAccess(), (_k, args) => ({
       kind: "list",
-      list: Array.from(utf8Encode(argStr(args, 0)), (byte): Value => ({
+      list: Array.from(bstrToBytes(argStr(args, 0)), (byte): Value => ({
         kind: "int",
         int: byte,
       })),
@@ -2154,7 +2123,7 @@ export class Kernel {
       const key = argStr(args, 1);
       let parsed: unknown;
       try {
-        parsed = JSON.parse(body);
+        parsed = jsonLeavesToBstr(JSON.parse(bstrToText(body)));
       } catch {
         return { kind: "null" };
       }
@@ -2181,7 +2150,7 @@ export class Kernel {
       const body = argStr(args, 0);
       let parsed: unknown;
       try {
-        parsed = JSON.parse(body);
+        parsed = jsonLeavesToBstr(JSON.parse(bstrToText(body)));
       } catch {
         return { kind: "null" };
       }
@@ -2642,23 +2611,8 @@ export class Kernel {
       } catch {
         return { kind: "str", str: "" };
       }
-      // Decode STRICTLY, separately from the read. utf8Decode replaces every invalid byte with
-      // U+FFFD, so a binary slice came back as a plausible LONGER string: equireach-band.fk has
-      // carried the witness since 2026-07-21 — 767 bytes for a 420-byte Q6_K fixture, byte 4
-      // reading 239 instead of 210 — and that band is two-arm today because of it. A recipe
-      // reading binary here was silently reading a different file. Null is the failure value this
-      // kernel's read_file gives for non-UTF-8, so the string primitives stop loudly instead of
-      // computing on replacement characters. A JS string cannot hold arbitrary bytes; losslessness
-      // would need a byte string in the Value type. Until then it says it cannot, rather than
-      // answering wrong. An I/O failure keeps its own "" above — a short read is not a bad decode.
-      try {
-        return {
-          kind: "str",
-          str: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-        };
-      } catch {
-        return { kind: "null" };
-      }
+      // the slice's own bytes: a string is bytes (byte-host.ts), binary included
+      return { kind: "str", str: bytesToBstr(bytes) };
     };
     this.registerNative("host_file_read_slice", catCall(), readFileSliceNative);
     this.registerNative("read_file_slice", catCall(), readFileSliceNative);
@@ -2810,7 +2764,7 @@ export class Kernel {
         const write = this.host.writeTextFile;
         if (write === undefined) return { kind: "int", int: -1 };
         write(argStr(args, 0), text);
-        return { kind: "int", int: utf8Encode(text).length };
+        return { kind: "int", int: isWide(text) ? utf8Encode(text).length : text.length };
       } catch {
         return { kind: "int", int: -1 };
       }
@@ -3715,16 +3669,6 @@ function argBigInt(args: Value[], i: number): bigint {
     return BigInt(v.int);
   throw new Error(`arg ${i}: expected integer, got ${v.kind}`);
 }
-function isUtf8Continuation(b: number): boolean {
-  return (b & 0xc0) === 0x80;
-}
-
-function ceilUtf8Boundary(bytes: Uint8Array, i: number): number {
-  if (i >= bytes.length) return bytes.length;
-  while (i < bytes.length && isUtf8Continuation(bytes[i]!)) i++;
-  return i;
-}
-
 function argStr(args: Value[], i: number): string {
   const v = args[i];
   if (v?.kind !== "str") throw new Error(`arg ${i}: expected str, got ${v?.kind ?? "absent"}`);
@@ -5994,7 +5938,7 @@ export function serializeRecipeArtifact(k: Kernel, root: NodeID): Uint8Array {
   const out: number[] = Array.from(FORM_BINARY_MAGIC);
   pushU32(out, table.strings.length);
   for (const s of table.strings) {
-    const encoded = utf8Encode(s);
+    const encoded = isWide(s) ? utf8Encode(s) : bstrToBytes(s);
     pushU32(out, encoded.length);
     for (const byte of encoded) out.push(byte);
   }
@@ -6025,7 +5969,7 @@ export function deserializeRecipeArtifact(k: Kernel, bytes: Uint8Array): NodeID 
       throw new Error("form binary: maximum string bytes exceeded");
     }
     if (len > bytes.length - pos) throw new Error("form binary: truncated string");
-    strings.push(utf8DecodeStrict(bytes.subarray(pos, pos + len)));
+    strings.push(bytesToBstr(bytes.subarray(pos, pos + len)));
     pos += len;
   }
   const scope = k.nextImportScope();
