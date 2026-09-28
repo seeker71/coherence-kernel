@@ -44,12 +44,13 @@ gate/tests/structural-gate-band          -> 16383
 ./fkwu observe/door-link-health-run.bml  -> doors=12 links=120 broken=0 code=12120000
 ./fkwu observe/belief-stamps.bml         -> 534499010  (field stamped*10^6 + owed*10^3 + laws)
 observe/tests/belief-rewitness-band      -> 63
-./fkwu form/form-stdlib/release-ledger.bml -> open=32 moving=0 released=109
+./fkwu form/form-stdlib/release-ledger.bml -> open=28 moving=0 released=113
 learn/tests/homecoming-distillation-corpus-band -> 32767  (asserts 981 rows, 962 admissible)
 value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
 pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · control/tests/offer-ack-core-band 2097151
+control/tests/attempt-band 1023 · file-bytes-band 127 · form-bml-cursor-full-band 105  (each four-way)
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
 ```
 
@@ -252,8 +253,8 @@ blueprint-authority-band 65535
 What answered red, died, or was not witnessed today, so no one leans on it:
 
 - `form/form-stdlib/tests/primitive-registry-band.fk` stops rc 1 in `sum-onto`: the registry names
-  the Go sibling's native surface, and 88 of its calls (`field_*`, `substrate_*`, `register_jit`,
-  `string_bytes`, `pow`, `min`, `max`, ...) have no binding on fkwu, so its compile carries 88
+  the Go sibling's native surface, and 84 of its calls (`field_*`, `substrate_*`, `register_jit`,
+  `string_bytes`, `pow`, `min`, `max`, ...) have no binding on fkwu, so its compile carries 84
   unresolved-call errors and the first recovered `nothing` meets arithmetic. It waits on a registry
   grounded in fkwu's own op table (`runtime/fkwu-optable.h` and `core.fk`), or on a sibling-home lane
   in `form/validate.sh` for a band whose surface only the siblings carry.
@@ -261,9 +262,8 @@ What answered red, died, or was not witnessed today, so no one leans on it:
   claims heldout ≥ 9 on a lesson-disjoint split, which a lesson-bound overlay reaches only once a
   LoRA writer stands (the mints declare `LoraWriter = 0`) (R88).
 - BML `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111; R78). The lowering's other
-  open rows stand in the ledger: R86 (`form.action` main files), R92 (a preludes directive read inside
-  a string), R93 (a comment line ending in `{` opens a block), R95 (the lowering child's stdin as two
-  writes), R96 (lowering time grows with one form's argument count), R103 (a bare `nothing` in a def).
+  open rows stand in the ledger: R86 (`form.action` main files), R96 (lowering time grows with one
+  form's argument count).
 - Windows: the seed's `_WIN32` branch carries its own spawn and wait twins (`fk_win_spawn`,
   `fk_win_waitpid`), its fifo door answers -1 there, and it passes
   `clang --target=x86_64-w64-windows-gnu -fsyntax-only runtime/fkwu-uni.c` with 0 errors (rc 0,
