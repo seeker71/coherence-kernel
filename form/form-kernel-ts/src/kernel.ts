@@ -30,6 +30,7 @@ import {
 export type { KernelHost } from "./host.ts";
 
 const UTF8_ENCODER = new TextEncoder();
+const UTF8_STRICT = new TextDecoder("utf-8", { fatal: true });
 const KH_TAG_HEADER_TS = 43001;
 // The record-construction clock kernel_stat 164 reads: every record_new this process has run,
 // counted where the record is made. fkwu answers the same key from its arm counter for tag 64
@@ -5969,7 +5970,14 @@ export function deserializeRecipeArtifact(k: Kernel, bytes: Uint8Array): NodeID 
       throw new Error("form binary: maximum string bytes exceeded");
     }
     if (len > bytes.length - pos) throw new Error("form binary: truncated string");
-    strings.push(bytesToBstr(bytes.subarray(pos, pos + len)));
+    // FORMBIN2 strings are UTF-8 text by contract; validated, they are held as their bytes
+    const raw = bytes.subarray(pos, pos + len);
+    try {
+      UTF8_STRICT.decode(raw);
+    } catch {
+      throw new Error("form binary: invalid utf8");
+    }
+    strings.push(bytesToBstr(raw));
     pos += len;
   }
   const scope = k.nextImportScope();
