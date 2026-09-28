@@ -2201,6 +2201,10 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VList, List: out}
 	})
 	k.registerNative("cons", catListNat(), func(_ *Kernel, args []Value) Value {
+		// nothing is not a list: consing onto it is a stop, as on fkwu
+		if args[1].Kind == VNull {
+			panic("cons: nothing is not a list -- ask nothing? before consing")
+		}
 		out := make([]Value, 0, len(args[1].List)+1)
 		out = append(out, args[0])
 		out = append(out, args[1].List...)

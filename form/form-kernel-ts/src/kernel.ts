@@ -1816,6 +1816,8 @@ export class Kernel {
     }));
     this.registerNative("cons", catListNat(), (k, args) => {
       const head = args[0] ?? { kind: "null" };
+      // nothing is not a list: consing onto it is a stop, as on fkwu
+      if (args[1]?.kind === "null") throw new Error("cons: nothing is not a list -- ask nothing? before consing");
       const tail = argList(args, 1);
       k.noteListCopy(tail.length);
       return { kind: "list", list: [head, ...tail] };

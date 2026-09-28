@@ -4054,6 +4054,10 @@ impl Kernel {
             Value::List(args.to_vec().into())
         });
         self.register_native("cons", cat_list_nat(), |_, _, args| {
+            // nothing is not a list: consing onto it is a stop, as on fkwu
+            if matches!(args[1], Value::Null) {
+                panic!("cons: nothing is not a list -- ask nothing? before consing");
+            }
             let mut out = vec![args[0].clone()];
             if let Value::List(rest) = &args[1] {
                 out.extend(rest.iter().cloned());

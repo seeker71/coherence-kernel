@@ -12834,6 +12834,9 @@ static long long fk_walk(long long i, long long fp) {
         long long h19 = fk_walk(fk_node[i][1], fp);
         fk_vp(h19);
         long long t19 = fk_walk(fk_node[i][2], fp);
+        if (t19 == fk_nothing) {
+            fk_stop("fkwu: cons: nothing is not a list -- ask nothing? before consing");
+        }
         fk_vp(t19);
         if (fk_cap == 0) {
             fk_arena();
