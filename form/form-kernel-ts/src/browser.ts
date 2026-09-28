@@ -15,10 +15,12 @@ import {
   type TraceJSON,
 } from "./kernel.ts";
 import { readAll } from "./reader.ts";
+import { bstrToText, textToBstr } from "./byte-host.ts";
 import type { KernelHost } from "./host.ts";
 
 export * from "./host.ts";
 export * from "./kernel.ts";
+export { bstrToText, bytesToBstr, bstrToBytes, textToBstr } from "./byte-host.ts";
 export * from "./reader.ts";
 export * from "./field.ts";
 
@@ -58,12 +60,13 @@ export function runLocalFormBinary(
   });
   kernel.trace = new Trace();
   const start = globalThis.performance.now();
-  const root = readAll(kernel, source);
+  // the page holds text; the kernel reads and answers bytes (byte-host.ts)
+  const root = readAll(kernel, textToBstr(source));
   const value = walkUnit(kernel, root, new Frame(null));
   const elapsedMs = globalThis.performance.now() - start;
   return {
     source,
-    result: kernel.render(value),
+    result: bstrToText(kernel.render(value)),
     root: formatNodeID(root),
     rootCategory: formatNodeID(kernel.category(root)),
     stdout: stdout.join(""),

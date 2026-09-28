@@ -67,6 +67,9 @@ export interface KernelPgAnswer {
 export interface KernelHost {
   readonly writeStdout?: (text: string) => void;
   readonly writeStderr?: (text: string) => void;
+  // the same streams taking raw bytes: a Form string is bytes (byte-host.ts)
+  readonly writeStdoutBytes?: (bytes: Uint8Array) => void;
+  readonly writeStderrBytes?: (bytes: Uint8Array) => void;
 
   // Where a relative path names a file for a read-side door (see node-host's resolveHostReadPath);
   // a host without one leaves paths as given.

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Frame, Kernel, walk } from "./kernel.ts";
 import { createNodeKernelHost } from "./node-host.ts";
 import { readAll } from "./reader.ts";
+import { textToBstr } from "./byte-host.ts";
 
 let passed = 0;
 function check(name: string, condition: boolean, detail = ""): void {
@@ -24,8 +25,9 @@ const kernel = new Kernel(
   }),
 );
 
+// source text enters as its bytes, the way main.ts reads a file (byte-host.ts)
 function evaluate(source: string): string {
-  const root = readAll(kernel, source);
+  const root = readAll(kernel, textToBstr(source));
   return kernel.render(walk(kernel, root, new Frame(null)));
 }
 

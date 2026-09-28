@@ -594,6 +594,9 @@ export function createNodeKernelHost(options: NodeKernelHostOptions = {}): Kerne
   return {
     writeStdout: options.writeStdout ?? ((text) => process.stdout.write(text)),
     writeStderr: options.writeStderr ?? ((text) => process.stderr.write(text)),
+    // a caller that captures text keeps every write; otherwise bytes go out as they are
+    writeStdoutBytes: options.writeStdout ? undefined : (bytes) => process.stdout.write(bytes),
+    writeStderrBytes: options.writeStderr ? undefined : (bytes) => process.stderr.write(bytes),
     // Decode STRICTLY. `readFileSync(path, "utf8")` decodes with replacement, so a binary
     // file came back as a plausible string: measured 2026-07-30, a 19936-byte raw PCM clip
     // read as str_len 37558 with byte 255 arriving as 191 — a cell computing audio levels
