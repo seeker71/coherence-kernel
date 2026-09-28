@@ -2113,6 +2113,17 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("value_kind", catWitness(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VStr, Str: valueKindName(args[0])}
 	})
+	// nothing / nothing? — the axiom-1 third value and the one question that sees it,
+	// native as on fkwu (tags 137/138): never-was is neither 0 nor empty.
+	k.registerNative("nothing", catWitness(), func(_ *Kernel, _ []Value) Value {
+		return Value{Kind: VNull}
+	})
+	k.registerNative("nothing?", catWitness(), func(_ *Kernel, args []Value) Value {
+		if len(args) > 0 && args[0].Kind == VNull {
+			return Value{Kind: VInt, Int: 1}
+		}
+		return Value{Kind: VInt, Int: 0}
+	})
 	k.registerNative("value-kind", catWitness(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VStr, Str: valueKindName(args[0])}
 	})
@@ -2159,7 +2170,8 @@ func (k *Kernel) registerNatives() {
 		if args[0].AsInt() < 0 || args[0].AsInt() > 255 {
 			return Value{Kind: VStr, Str: ""}
 		}
-		return Value{Kind: VStr, Str: string(byte(args[0].AsInt()))}
+		// one raw byte, as on fkwu: the exact dual of str_byte_at, never a code point
+		return Value{Kind: VStr, Str: string([]byte{byte(args[0].AsInt())})}
 	})
 	// input_byte — byte i of the staged input, 0 outside it, as fkwu reads
 	// its staged buffer. This kernel stages no input, so every byte is 0.

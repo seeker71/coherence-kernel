@@ -803,7 +803,7 @@ export class Kernel {
     offers: string[] = ["continue"],
     evidence: { [key: string]: string | number } = { kernel: "ts" },
   ): void {
-    const key = `${flow} ${aspect} ${observed}`;
+    const key = `${flow}\u0000${aspect}\u0000${observed}`;
     if (this.voiced.has(key)) return;
     this.voiced.add(key);
     const now = Date.now();
@@ -1439,6 +1439,11 @@ export class Kernel {
     });
     this.registerNative("value_kind", catWitness(), valueKindNative);
     this.registerNative("value-kind", catWitness(), valueKindNative);
+    // nothing / nothing? — the axiom-1 third value and the one question that sees it,
+    // native as on fkwu (tags 137/138): never-was is neither 0 nor empty.
+    this.registerNative("nothing", catWitness(), () => ({ kind: "null" }));
+    this.registerNative("nothing?", catWitness(), (_k, args) =>
+      ({ kind: "int", int: args[0]?.kind === "null" ? 1 : 0 }));
     this.registerNative("source_scan_file", catCall(), (_k, args) => {
       const read = this.host.readTextFile;
       if (read === undefined) throw new Error("source_scan_file: host carrier unavailable");
