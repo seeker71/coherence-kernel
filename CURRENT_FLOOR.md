@@ -44,13 +44,13 @@ gate/tests/structural-gate-band          -> 16383
 ./fkwu observe/door-link-health-run.bml  -> doors=12 links=120 broken=0 code=12120000
 ./fkwu observe/belief-stamps.bml         -> 534499010  (field stamped*10^6 + owed*10^3 + laws)
 observe/tests/belief-rewitness-band      -> 63
-./fkwu form/form-stdlib/release-ledger.bml -> open=28 moving=0 released=114
-learn/tests/homecoming-distillation-corpus-band -> 32767  (asserts 982 rows, 963 admissible)
+./fkwu form/form-stdlib/release-ledger.bml -> open=29 moving=0 released=114
+learn/tests/homecoming-distillation-corpus-band -> 32767  (asserts 983 rows, 964 admissible)
 value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
 pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · control/tests/offer-ack-core-band 2097151
-control/tests/attempt-band 2047 · file-bytes-band 127 · form-bml-cursor-full-band 105  (each four-way)
+control/tests/attempt-band 4095 · file-bytes-band 127 · form-bml-cursor-full-band 105  (each four-way)
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
 ```
 
@@ -67,6 +67,17 @@ beside it. Of 1,344 tracked `.bml` files, 1,071 carry a `section [form.bml]` blo
 carry one mid-file and lower in place; eleven files carry `section [form.lift]` (`git ls-files`,
 `git grep -l`). `true` and `false` are literals in the dialect, and a nested `defn` is a registered
 function (the two nested-defn bands below).
+
+The cursor (`grammars/form-bml.fk`, lowered by `form-bml-lower.fk`) reads the same sections whole, with
+direct backtracking, to the compiler's recipes NodeID for NodeID after the contract pass they share:
+
+```text
+./fkwu observe/bml-cursor-coverage-run.bml -> sections=1094 parity=1093 apart=0 refused=1
+                                              (the one refused is a receipt artifact whose section the
+                                              compiler's own finder cannot bound either; R144 is the
+                                              cursor becoming the one reader)
+form-bml-cursor-full-band 105 · bmf-prefix-state-band 4194303 · form-bml-prefix-choice-band 4194303
+```
 
 ```text
 bml-band 268435455 · bml-generics-band 16777215 · native-route-goal-cells-band.bml 1048575
