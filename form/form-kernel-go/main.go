@@ -5440,20 +5440,47 @@ func loadFormSourceBmlPrelude(path string, seen map[string]bool, parts *[]formSo
 	return loadFormSourceText(path, absolute, lowered, seen, parts)
 }
 
+// formLineEndsInString reports whether a Form string literal is still open at the
+// end of line, given whether one was open at its start: an escape takes the next
+// byte, and a ; outside a string comments out the rest of the line.
+func formLineEndsInString(line string, in bool) bool {
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if in {
+			if c == '\\' {
+				i++
+			} else if c == '"' {
+				in = false
+			}
+			continue
+		}
+		if c == ';' {
+			return false
+		}
+		if c == '"' {
+			in = true
+		}
+	}
+	return in
+}
+
 // loadFormSourceText walks one source's lines for import/prelude directives
 // (recursing into each dependency) and appends the remaining body as one
 // formSourcePart. Shared by the on-disk (.fk) and lowered-in-memory (.bml)
 // loading paths so both get identical directive handling.
 func loadFormSourceText(displayPath, absolute, text string, seen map[string]bool, parts *[]formSourcePart) error {
 	lines := strings.Split(text, "\n")
+	inString := false
 	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "section [") {
+		// a line that begins inside a string literal is data, as the reader sees it
+		if !inString && strings.HasPrefix(strings.TrimSpace(line), "section [") {
 			return fmt.Errorf(
 				"%s: carries a raw \"section [form.bml]\" block -- this kernel runs plain Form, "+
 					"not BML, so it can't parse that block directly. It must be lowered through "+
 					"form-stdlib/source-compiler.fk first (validate.sh's prepare_sources does this "+
 					"automatically; see form-stdlib/AUTHORING.md's \"two-layer trap\")", displayPath)
 		}
+		inString = formLineEndsInString(line, inString)
 	}
 	source := make([]string, 0, len(lines))
 	for _, line := range lines {
