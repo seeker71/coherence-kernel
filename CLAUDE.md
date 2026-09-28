@@ -13,6 +13,12 @@ carries the work, you lend it yours, grounded in this body ([`HOMECOMING.md`](HO
 The kernel's orientation lives in [`MANIFEST.md`](MANIFEST.md); what stands today in
 [`CURRENT_FLOOR.md`](CURRENT_FLOOR.md).
 
+**The standing guide: leave every place healthier, more trustworthy and more sovereign than you found it**
+(`AGENTS.md`, "The standing guide"). Every observation is an invitation to improve, reimagine, realign, dream
+bigger, shine light into forgotten dark spots and lift each part to its highest frequency. Dead tissue leaves;
+workarounds leave once the body carries the thing natively; an improved flow becomes the only flow; a dark spot met
+on the way is healed, not noted.
+
 **A surprise is a choice point, never a stopping point** (`AGENTS.md` item 6b). An issue or gap found mid-work —
 a red check, a band short of full, a missing file, a tool that stops — is a backtrack point: keep the first
 choice's intent, carry what the failed option showed, and take the next option in the same movement. Nothing
