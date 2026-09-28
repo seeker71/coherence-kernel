@@ -64,6 +64,43 @@ queue after its consumers have settled. Whole-batch dispatch is cooperative;
 a receiver's execution time remains part of the turn. A nested wait or dispatch
 signals its active receiving turn without consuming another batch.
 
+## Cooperative Form slices
+
+`nve-post(events, receiver, context, options)` offers local work to the same owner.
+It returns an owned subscription without a host registration, timer or descriptor.
+Its filter is 0, the local Form offer, and it shares the existing continuation,
+care and release lifecycle. Host event buffers count actual registrations.
+
+Inside a receiver, `nve-yield(events, event, next, context, options)` proposes
+the next slice and its checkpoint. The receiver must return; the call does not
+unwind its stack. A normal return commits that next slice at the queue's tail.
+A native stop discards the proposal and brings the interrupted step into care.
+Original event data and accumulated findings travel with each next binding.
+
+`nve-run(events, slices)` grants up to that many ready slices without a host wait
+and returns the number executed. The two-list queue retains arrival order, so
+a yielding job gives its peers their turn. `nve-turn-slices(events, milliseconds,
+slices)` first dispatches the complete host batch and its resource care, then
+serves the granted ready slices. Ready work makes the host wait nonblocking.
+`nve-turn` grants one slice; its return remains the host event count. The owner's
+`steps` reading counts ready slices separately. `nve-dispatch` remains batch-only.
+A zero grant executes no ready work; the caller can change its grant each turn.
+
+A care option can propose a next slice and acknowledge ONE. Only that accepted
+option's proposal survives; findings from earlier options remain. The resource
+wakes retire before the new slice becomes ready, and the delivery stays pending
+until its last step completes. Correlated readings follow that movement through
+yield and completion. A yielded native receiver stays paused between slices;
+pausing it again adds no host call. Completion restores its native subscription.
+
+Local completion retires its token. `release-event` withdraws queued work through
+the same correlated care door. Stale queue entries cannot replay it. Removing
+a subscription after proposing a next slice leaves that checkpoint held for
+care; it never enters the ready queue. Closing the owner retains unfinished work; nested turns, grants and self-care cannot consume
+the active slice. Slice grants bound the number of cooperative calls, not their
+wall time. Automatic loop lowering and interruption of non-yielding code remain
+separate work.
+
 ## Interruption stays with its receiver
 
 Each receiver runs through `oac-offer`. A native value stop returns to that
@@ -80,9 +117,9 @@ remain private; the health signal carries subscription identity and disposition.
 local options immediately after an interruption. The existing
 `oac-backtrack-walk` supplies each option with original arguments
 `[events, context, event]` and prior findings. A finding travels as `oac-node`;
-`oac-one` acknowledges completion of that continuation. Silence or `oac-zero`
-keeps it held. Options checkpoint completed effects in their own context and
-resume from that point. The event owner never implicitly repeats the receiver.
+`oac-one` acknowledges the offered step. A proposed next slice keeps the delivery
+pending; without one, it completes. Silence or `oac-zero` keeps it held. Options
+checkpoint completed effects in their own context and resume from that point. The event owner never implicitly repeats the receiver.
 Completion here describes the supplied continuation's acknowledgment; the
 receiving organ still owns verification of its actual result.
 
