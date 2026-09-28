@@ -171,6 +171,11 @@ A failed cache write retains its original image and compilation identity for
 repair while native work continues. Acknowledging an older observation never
 restores old execution state or clears a newer fault. Cache repair establishes
 verified disk reuse; native recovery requires its own execution observation.
+The executing owner retains unease, the failed operation and its resource need.
+A changed resource resumes that continuation in place; unchanged conditions
+remain quiet. Explicit holds stay distinct from waiting. Repair observes the
+actual result before releasing care, and retains a new finding when another
+choice is needed.
 
 Bulk data stays in owned resident regions. A span carries allocation identity and generation, owner, offset, length, layout, access mode and completion dependencies. Crossings carry descriptors and batches. A zero-copy request preserves its alignment and lifetime contract or reports refusal.
 
