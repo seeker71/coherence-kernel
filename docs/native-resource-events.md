@@ -71,7 +71,8 @@ offer; later receivers in the batch continue. An ordinary return, including
 `nothing`, completes delivery. The interrupted event, captured binding and
 original context stay on the subscription as a continuation. Persistent
 readiness is disabled while held, so unchanged readiness does not repeat the
-receiver or spin the queue. `nve-pending(events)` exposes the held subscriptions;
+receiver or spin the queue. Pause and enable preserve the subscription's original
+filter notes and configured data. `nve-pending(events)` exposes the held subscriptions;
 `nve-care-reading(watch)` exposes each correlated need. Payload and context
 remain private; the health signal carries subscription identity and disposition.
 
@@ -98,6 +99,48 @@ findings for the next choice. Old responses and recursive care cannot replay
 the action. If the continuation completed but enabling readiness failed, the
 next response only re-enables it. A replacement binding does not take over
 the held context.
+
+## Resource changes bring attention back
+
+`nve-follow(events, held, resources, options)` transfers dedicated, unbound
+subscriptions to a held continuation. Path, timer, process and descriptor
+notifications share the same queue and original receiving context. Existing
+bindings and other owners' subscriptions remain theirs. One follow owns the
+resource set until completion or explicit withdrawal. Its returned record
+exposes active state, retained resources and actual attempt count.
+
+```text
+let resource = nve-path(events, resourcePath);
+let follow = nve-follow(events, held, list(resource), list(finishFromCheckpoint));
+```
+
+Enrollment reactivates offered paused subscriptions and offers one immediate
+observation after binding, covering a change
+that arrived before notifications were attached. When enrolled inside a care
+option, this observation follows that option's completed attempt and retains
+its findings. Subsequent quiet waits do no care work. Resource notifications
+queue attention; all ordinary receivers in the batch run before that attention.
+Multiple wakes for the same continuation become one attempt, with every event
+available in delivery order through `nve-wake-events(held)`. The enrollment
+observation has an empty wake list. Options observe their actual resource need
+and keep effect checkpoints in the original context.
+
+Care-owned descriptor readiness is renewed with `EV_CLEAR` at registration,
+so unread but unchanged readiness stays quiet and new data can wake it. The
+enrollment observation covers the renewal interval. Ordinary pipe receiving
+registrations keep their level behavior. Borrowed descriptors remain with
+their original owner. A registration failure keeps its resource owned and
+signals the incomplete admission.
+
+A delivered one-shot subscription retires. When no enabled, bound wake resource
+remains while work is held, the continuation signals `event-wake-source` as an
+additional need; it does not create another timer or repeat unchanged work.
+`nve-unfollow(events, held)` withdraws the wake subscriptions while preserving
+the original continuation and findings. A new resource set can then be offered.
+Completion and explicit event release withdraw their wake subscriptions before
+settling the continuation. Incomplete physical release keeps ownership and
+retains any already completed receiver acknowledgment for the next care attempt.
+Captured wakes from a released follow cannot replay its action.
 
 Unwatching releases the registration and preserves any held continuation.
 After the receiving organ settles its resources, an explicit `release-event`
