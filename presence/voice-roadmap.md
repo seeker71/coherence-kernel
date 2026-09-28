@@ -70,10 +70,6 @@ one ear on the room.
 - Improve native rate toward realtime.
 - Treat forced-aligner confidence zero as a calibrated sidecar, not a pass; add
   listener review before voice promotion.
-- The formant oracle (`sema_formant_oracle_live`) hears zero tokens: render a
-  phoneme-sequenced dynamic formant carrier with consonant onsets, syllable timing,
-  and moving formants, then rerun local Whisper. Promotion cannot begin until
-  `heard_token_count >= 1`.
 - Fine-tune the hati-translator on witnessed false friends (Air/air is the first
   row of that corpus).
 - Keep the bounded current gate; the monolithic audio contract does not return to
