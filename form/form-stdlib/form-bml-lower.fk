@@ -16,25 +16,49 @@
     ;; against a node freshly interned under the same op (mirrors bmf-to-fk's b2f-op?).
     (defn fbl-cat (name) (node_category (intern_node (bp name) (list (intern_trivial_string "")))))
     (defn fbl-bmf-cat (name) (node_category (intern_node (bmf-bp name) (list (intern_trivial_string "")))))
+    ;; the categories the lowering asks about, probed once per process: a name's pair
+    ;; (bp category, bmf-bp category), and each operator category's name
+    (defn fbl-infix-names () (list "add" "sub" "mul" "div" "mod" "lt" "le" "gt" "ge" "and" "or" "eq" "ne"))
+    (defn fbl-cat-table (names tab)
+        (if (nil? names) tab
+            (fbl-cat-table (tail names)
+                (record_set tab (head names) (list (fbl-cat (head names)) (fbl-bmf-cat (head names)))))))
+    (defn fbl-infix-table (names tab)
+        (if (nil? names) tab
+            (fbl-infix-table (tail names)
+                (record_set (record_set tab (value_str (fbl-cat (head names))) (head names))
+                    (value_str (fbl-bmf-cat (head names))) (head names)))))
+    (let FBL-CATS (fbl-cat-table (append (list "fndef" "do" "let" "if" "fncall" "ident") (fbl-infix-names)) (record_new 0)))
+    (let FBL-INFIX (fbl-infix-table (fbl-infix-names) (record_new 0)))
     (defn fbl-is? (n name)
-        (if (value_eq (node_category n) (fbl-cat name)) 1
-            (if (value_eq (node_category n) (fbl-bmf-cat name)) 1 0)))
+        (do (let pair (record_get FBL-CATS name))
+            (let cat (node_category n))
+            (if (eq pair 0)
+                (if (value_eq cat (fbl-cat name)) 1 (if (value_eq cat (fbl-bmf-cat name)) 1 0))
+                (if (value_eq cat (head pair)) 1 (if (value_eq cat (nth pair 1)) 1 0)))))
 
     ;; param leaves (trivial-strings under the grammar's do-node) -> name strings.
     (defn fbl-names (kids)
         (if (nil? kids) (empty)
-            (cons (node_value (head kids)) (fbl-names (tail kids)))))
+            (cons (fbl-bind-name (head kids)) (fbl-names (tail kids)))))
+    ;; a bound name: a name alone, or $bml-typed[name, type] spelled name:type, the
+    ;; text the comparison-contract pass reads
+    (defn fbl-bind-name (n)
+        (if (str_eq (fbl-call-name n) "$bml-typed")
+            (str_concat (node_value (nth (node_children n) 1))
+                (str_concat ":" (node_value (nth (node_children n) 2))))
+            (node_value n)))
+    (defn fbl-bare-name (n)
+        (if (str_eq (fbl-call-name n) "$bml-typed") (node_value (nth (node_children n) 1)) (node_value n)))
 
     (defn fbl-lower-list (xs)
         (if (nil? xs) (empty)
             (cons (fbl-lower (head xs)) (fbl-lower-list (tail xs)))))
 
     ;; an operator node's name, or "" -- the infix rule emits each by its bp name
-    (defn fbl-infix-find (n names)
-        (if (nil? names) ""
-            (if (eq (fbl-is? n (head names)) 1) (head names) (fbl-infix-find n (tail names)))))
     (defn fbl-infix-name (n)
-        (fbl-infix-find n (list "add" "sub" "mul" "div" "mod" "lt" "le" "gt" "ge" "and" "or" "eq" "ne")))
+        (do (let v (record_get FBL-INFIX (value_str (node_category n))))
+            (if (eq v 0) "" v)))
     ;; the source compiler's operator lowering: == and != keep their contract call
     (defn fbl-lower-infix (name args)
         (if (str_eq name "eq") (fsc-rec-call "$bml==" args)
@@ -45,17 +69,129 @@
         (if (nil? rest) acc
             (fbl-or-fold (fsc-bml-when-nothing "$or" acc (head rest)) (tail rest))))
 
+    ;; the name a call marker carries, or "" -- a call whose head is not a plain name
+    ;; (a member chain) carries none
+    (defn fbl-call-name (n)
+        (if (eq (fbl-is? n "fncall") 1)
+            (do (let f (nth (node_children n) 0))
+                (if (eq (fbl-is? f "ident") 1) (node_value (nth (node_children f) 0)) ""))
+            ""))
+
+    ;; a do's statements: a class hoists its members and then binds its name to its
+    ;; abstraction descriptor, in place, as the source compiler's class walker does;
+    ;; an import is a declaration and lowers to nothing
+    (defn fbl-lower-stmts (xs)
+        (if (nil? xs) (empty)
+            (do (let name (fbl-call-name (head xs)))
+                (if (str_eq name "$bml-import") (fbl-lower-stmts (tail xs))
+                (if (str_eq name "$bml-class")
+                    (append (fbl-class (node_children (head xs))) (fbl-lower-stmts (tail xs)))
+                (if (str_eq name "$bml-template")
+                    (cons (fbl-template (node_children (head xs))) (fbl-lower-stmts (tail xs)))
+                (if (str_eq name "$bml-template-line")
+                    (cons (fbl-template-line (node_children (head xs))) (fbl-lower-stmts (tail xs)))
+                (if (str_eq name "$bml-langclass")
+                    (append (fbl-langclass (node_children (head xs))) (fbl-lower-stmts (tail xs)))
+                    (cons (fbl-lower (head xs)) (fbl-lower-stmts (tail xs)))))))))))
+    ;; a language class: each def block becomes Class_method, then the class name binds
+    ;; to its language class over the template, its type arguments and its methods
+    (defn fbl-langclass (kids)
+        (do (let name (node_value (nth kids 1)))
+            (let ms (node_children (nth kids 4)))
+            (append (fbl-lang-methods name ms)
+                (list (fsc-rec-let name (fsc-rec-call "language-class" (list
+                    (fsc-rec-string name)
+                    (fsc-rec-ident (node_value (nth kids 2)))
+                    (fsc-rec-string-list (fbl-names (node_children (nth kids 3))))
+                    (fsc-rec-list-of (fbl-lang-members name ms)))))))))
+    (defn fbl-lang-qualified (class m)
+        (do (let n (nth (node_children m) 0))
+            (let q (fsc-bml-class-member-name class (fbl-bare-name n)))
+            (if (str_eq (fbl-call-name n) "$bml-typed")
+                (str_concat q (str_concat ":" (node_value (nth (node_children n) 2)))) q)))
+    (defn fbl-lang-method (class m)
+        (if (fbl-method? m)
+            (fsc-rec-fndef (fbl-lang-qualified class m)
+                (fbl-names (node_children (nth (node_children m) 1)))
+                (fbl-lower (nth (node_children m) 2)))
+            (form_error "unrecognized form.bml language class member")))
+    (defn fbl-lang-methods (class ms)
+        (if (nil? ms) (empty) (cons (fbl-lang-method class (head ms)) (fbl-lang-methods class (tail ms)))))
+    (defn fbl-lang-members (class ms)
+        (if (nil? ms) (empty)
+            (cons (fsc-rec-call "language-class-member-method"
+                    (list (fsc-rec-string (fbl-member-name (head ms)))
+                          (fsc-rec-ident (fsc-bml-class-member-name class (fbl-member-name (head ms))))))
+                  (fbl-lang-members class (tail ms)))))
+    ;; a match's arms, pattern then body, as the switch reads them
+    (defn fbl-arms (arms)
+        (if (nil? arms) (empty)
+            (cons (fbl-lower (nth (node_children (head arms)) 0))
+                (cons (fbl-lower (nth (node_children (head arms)) 1)) (fbl-arms (tail arms))))))
+    ;; a member's type as the compiler spells it: Offer<T>
+    (defn fbl-type-text (t)
+        (if (str_eq (fbl-call-name t) "$bml-gtype")
+            (str_concat (node_value (nth (node_children t) 1))
+                (str_concat "<" (str_concat (fbl-join (fbl-names (node_children (nth (node_children t) 2))) ", ") ">")))
+            (node_value t)))
+    (defn fbl-join (xs sep)
+        (if (nil? xs) "" (if (nil? (tail xs)) (head xs) (str_concat (head xs) (str_concat sep (fbl-join (tail xs) sep))))))
+    ;; a template binds its name to its language template and its members' types
+    (defn fbl-template-line (kids)
+        (do (let name (node_value (nth kids 1)))
+            (fsc-rec-let name (fsc-rec-call "language-template"
+                (list (fsc-rec-string name) (fsc-rec-string-list (fbl-names (node_children (nth kids 2)))))))))
+    (defn fbl-template (kids)
+        (do (let name (node_value (nth kids 1)))
+            (fsc-rec-let name (fsc-rec-call "language-template-with-members"
+                (list (fsc-rec-string name)
+                      (fsc-rec-string-list (fbl-names (node_children (nth kids 2))))
+                      (fsc-rec-list-of (fbl-tmembers (node_children (nth kids 3)))))))))
+    (defn fbl-tmembers (ms)
+        (if (nil? ms) (empty)
+            (cons (fsc-rec-call "language-template-member"
+                    (list (fsc-rec-string (node_value (nth (node_children (head ms)) 1)))
+                          (fsc-rec-string (fbl-type-text (nth (node_children (head ms)) 2)))))
+                  (fbl-tmembers (tail ms)))))
+    (defn fbl-method? (m) (eq (fbl-is? m "fndef") 1))
+    (defn fbl-member-kind (m) (if (fbl-method? m) "method" (node_value (nth (node_children m) 1))))
+    ;; the descriptor names a member bare; its recipe keeps the contract for the pass
+    (defn fbl-member-name (m) (fbl-bare-name (nth (node_children m) (if (fbl-method? m) 0 2))))
+    (defn fbl-member-recipe (m)
+        (if (fbl-method? m) (fbl-lower m)
+            (fsc-rec-fndef (fbl-bind-name (nth (node_children m) 2)) (empty) (fbl-lower (nth (node_children m) 3)))))
+    (defn fbl-members (ms)
+        (if (nil? ms) (empty) (cons (fbl-member-recipe (head ms)) (fbl-members (tail ms)))))
+    (defn fbl-member-names (ms kind)
+        (if (nil? ms) (empty)
+            (if (str_eq (fbl-member-kind (head ms)) kind)
+                (cons (fbl-member-name (head ms)) (fbl-member-names (tail ms) kind))
+                (fbl-member-names (tail ms) kind))))
+    (defn fbl-class (kids)
+        (do (let name (node_value (nth kids 1)))
+            (let ms (node_children (nth kids 3)))
+            (append (fbl-members ms)
+                (list (fsc-rec-fndef name (empty)
+                    (fsc-rec-call "list" (list
+                        (fsc-rec-string "abstraction")
+                        (fsc-rec-string name)
+                        (fsc-rec-string-list (fbl-names (node_children (nth kids 2))))
+                        (fsc-rec-string-list (fbl-member-names ms "method"))
+                        (fsc-rec-string-list (fbl-member-names ms "field"))
+                        (fsc-rec-string-list (fbl-member-names ms "ref"))
+                        (fsc-rec-string-list (fbl-member-names ms "thought")))))))))
+
     (defn fbl-lower (n)
         (if (fbl-is? n "fndef")
             (do (let kids (node_children n))
-                (fsc-rec-fndef (node_value (nth kids 0))
+                (fsc-rec-fndef (fbl-bind-name (nth kids 0))
                                (fbl-names (node_children (nth kids 1)))
                                (fbl-lower (nth kids 2))))
         (if (fbl-is? n "do")
-            (fsc-rec-do (fbl-lower-list (node_children n)))
+            (fsc-rec-do (fbl-lower-stmts (node_children n)))
         (if (fbl-is? n "let")
             (do (let kids (node_children n))
-                (fsc-rec-let (node_value (nth kids 0)) (fbl-lower (nth kids 1))))
+                (fsc-rec-let (fbl-bind-name (nth kids 0)) (fbl-lower (nth kids 1))))
         (if (fbl-is? n "if")
             (do (let kids (node_children n))
                 (fsc-rec-if3 (fbl-lower (nth kids 0))
@@ -78,16 +214,19 @@
                     (fsc-bml-choose-chain (fbl-lower-list (node_children (nth (tail kids) 0))))
                 (if (str_eq fname "$bml-or")
                     (fbl-or-fold (head args) (tail args))
-                    (fsc-rec-form-call fname args))))))
+                (if (str_eq fname "$bml-match")
+                    (fsc-rec-match-switch (cons (fbl-lower (nth kids 1)) (fbl-arms (tail (tail kids)))))
+                    (fsc-rec-form-call fname args)))))))
         (if (fbl-is? n "ident")
             (fsc-rec-ident (node_value (nth (node_children n) 0)))
             ;; literal leaves (trivial int / string / bool) are already
             ;; The source compiler uses the same literal representation.
             n))))))))
 
-    ;; form.bml has one executable source owner. The cursor grammar remains an
-    ;; explicit grammar witness; a prefix parse does not select runtime meaning.
-    ;; form.lift uses its own declared grammar through this dispatcher.
+    ;; form.bml has one executable source owner today, the source compiler's statement
+    ;; walker; the cursor reads the same sections to the same recipes and is on its way
+    ;; to owning them. A prefix parse does not select runtime meaning. form.lift uses its
+    ;; own declared grammar through this dispatcher.
     (defn fsc-compile-section-recipe (dialect-name body)
         (if (str_eq dialect-name "form.lift")
             (fbl-lower (g-parse (form-lift-section-grammar) body))

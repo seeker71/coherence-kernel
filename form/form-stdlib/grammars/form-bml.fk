@@ -1,16 +1,19 @@
-; grammars/form-bml.fk — the form.bml maintenance dialect as cursor rules, tuned to
-; core.fk's actual surface: `def name(params) = expr;` AND `def name(params) { stmts }`
-; (multi-line block bodies with `let n = e;` + a final expr), `?`/`-`/`!` in names,
-; call-form primitives + user calls, if..then..else, literals, and a trailing bare
-; `expr;` statement (core.fk ends with `0;`).
+; grammars/form-bml.fk — the form.bml dialect as cursor rules: a whole section read as
+; one source with direct backtracking. A section holds classes (generic, attributed, or
+; language classes over a template, with def / field / ref / thought members), templates,
+; imports, defs (`= expr;` or `{ stmts }`, with comparison contracts on names, params and
+; returns), lets and bare `expr;` statements. Expressions carry if / try / choose / match,
+; the spaced operators, `!`, the comparison casts, `??`, call and member chains, and
+; literals: numbers (negative, fractional, with an exponent), strings, true, false,
+; empty and nothing (a value keyword followed by a call is the name being called).
 ;
 ; Two entry points over the SAME rule set:
 ;   form-bml-grammar          — start "fdef": one expression def, including braces
-;   form-bml-section-grammar  — start "section": a whole section body -> do[defs.. , final]
+;   form-bml-section-grammar  — start "section": a whole section body -> do[...]
 ;
-; The cursor is an explicit proof sibling. form-bml-lower.fk lowers its universal
-; vocabulary to executable recipes. g-parse-full admits a complete source;
-; g-parse remains the prefix-reading door.
+; form-bml-lower.fk lowers the tree to the source compiler's executable recipes, NodeID
+; for NodeID; observe/bml-cursor-coverage-run.bml reads that parity over every section
+; in the tree. g-parse-full admits a complete source; g-parse remains the prefix door.
 ;
 ; Names use the "bmlname" character class (alnum + - ? !), defined in bmf-core.fk
 ; and read by gm-run through cp-in-class?.
@@ -24,26 +27,102 @@
         (rule3 "section" (p-cap "ds" (p-rep (p-ref "topstmt"))) (t-emit "do" (list (t-splices "ds"))))
         ;; def-block BEFORE def-expr (shared `def name(params)` prefix; the `{` vs `=`
         ;; decides), both BEFORE exprstmt (else `def` parses as a bare ident).
-        (rule3 "topstmt" (p-cap "v" (list "alt" (p-ref "defblock") (p-ref "fdef") (p-ref "exprstmt"))) (t-splice "v"))
+        (rule3 "topstmt" (p-cap "v" (list "alt" (p-ref "classblock") (p-ref "templateblock") (p-ref "templateline")
+            (p-ref "importstmt") (p-ref "defblock") (p-ref "fdef") (p-ref "letstmt") (p-ref "exprstmt"))) (t-splice "v"))
 
-        ;; -- def name(params) { stmts }  ->  fndef[name, do[params], do[stmts]] --
+        ;; -- template Name<T, ...> { member name: Type; ... }  and  template Name<T, ...>;
+        ;; bind the name to its language template, as the compiler's template walker does
+        (rule3 "templateblock" (list "seq"
+            (p-kw "template") (p-cap "name" (p-run "bmlname"))
+            (p-lit "<") (p-cap "tps" (p-sep (p-run "bmlname") (p-lit ","))) (p-lit ">")
+            (p-opt (p-ref "classattrs"))
+            (p-lit "{") (p-cap "ms" (p-rep (p-ref "tmember"))) (p-lit "}") (p-opt (p-lit ";")))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-template"))) (t-splice "name")
+            (t-emit "do" (list (t-splices "tps"))) (t-emit "do" (list (t-splices "ms"))))))
+        (rule3 "templateline" (list "seq"
+            (p-kw "template") (p-cap "name" (p-run "bmlname"))
+            (p-lit "<") (p-cap "tps" (p-sep (p-run "bmlname") (p-lit ","))) (p-lit ">")
+            (p-opt (p-ref "classattrs")) (p-lit ";"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-template-line"))) (t-splice "name")
+            (t-emit "do" (list (t-splices "tps"))))))
+        (rule3 "tmember" (list "seq" (p-kw "member") (p-cap "n" (p-run "bmlname")) (p-lit ":") (p-cap "t" (p-ref "typeref")) (p-lit ";"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-tmember"))) (t-splice "n") (t-splice "t"))))
+        ;; a type is a name, or a name over its arguments: Offer<T>
+        (rule3 "typeref" (p-cap "v" (list "alt" (p-ref "typegeneric") (p-ref "typeplain"))) (t-splice "v"))
+        (rule3 "typegeneric" (list "seq" (p-cap "n" (p-run "bmlname"))
+            (p-lit "<") (p-cap "as" (p-sep (p-run "bmlname") (p-lit ","))) (p-lit ">"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-gtype"))) (t-splice "n") (t-emit "do" (list (t-splices "as"))))))
+        (rule3 "typeplain" (p-cap "n" (p-run "bmlname")) (t-splice "n"))
+
+        ;; -- import NAME;  a declaration the ref resolver reads; it lowers to nothing
+        (rule3 "importstmt" (list "seq" (p-kw "import") (p-cap "n" (p-run "bmlname")) (p-lit ";"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-import"))) (t-splice "n"))))
+
+        ;; -- class Name<T, ...> { members }  ->  $bml-class[name, do[type params], do[members]]
+        ;; form-bml-lower hoists the members into the section and binds the class name to
+        ;; its abstraction descriptor, as the source compiler's class walker does
+        (rule3 "classblock" (p-cap "v" (list "alt" (p-ref "classlang") (p-ref "classtyped") (p-ref "classplain"))) (t-splice "v"))
+        ;; class Name : Template<A, ...> { def blocks }  ->  $bml-langclass[name, template, do[args], do[members]]
+        (rule3 "classlang" (list "seq"
+            (p-kw "class") (p-cap "name" (p-run "bmlname")) (p-lit ":") (p-cap "tn" (p-run "bmlname"))
+            (p-lit "<") (p-cap "tas" (p-sep (p-run "bmlname") (p-lit ","))) (p-lit ">")
+            (p-opt (p-ref "classattrs"))
+            (p-lit "{") (p-cap "ms" (p-rep (p-ref "member"))) (p-lit "}") (p-opt (p-lit ";")))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-langclass"))) (t-splice "name") (t-splice "tn")
+            (t-emit "do" (list (t-splices "tas"))) (t-emit "do" (list (t-splices "ms"))))))
+        ;; attributes ([public, observable, jit]) are read past, as the compiler reads them;
+        ;; a `;` after the closing brace is an empty statement
+        (rule3 "classtyped" (list "seq"
+            (p-kw "class") (p-cap "name" (p-run "bmlname"))
+            (p-lit "<") (p-cap "tps" (p-sep (p-run "bmlname") (p-lit ","))) (p-lit ">")
+            (p-opt (p-ref "classattrs"))
+            (p-lit "{") (p-cap "ms" (p-rep (p-ref "member"))) (p-lit "}") (p-opt (p-lit ";")))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-class"))) (t-splice "name")
+            (t-emit "do" (list (t-splices "tps"))) (t-emit "do" (list (t-splices "ms"))))))
+        (rule3 "classplain" (list "seq"
+            (p-kw "class") (p-cap "name" (p-run "bmlname"))
+            (p-opt (p-ref "classattrs"))
+            (p-lit "{") (p-cap "ms" (p-rep (p-ref "member"))) (p-lit "}") (p-opt (p-lit ";")))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-class"))) (t-splice "name")
+            (t-emit "do" (list)) (t-emit "do" (list (t-splices "ms"))))))
+        (rule3 "classattrs" (list "seq" (p-lit "[") (p-sep (p-run "bmlname") (p-lit ",")) (p-lit "]"))
+          (t-const ""))
+        ;; a member is a method, or a field / ref / thought: a named nullary value
+        (rule3 "member" (p-cap "v" (list "alt" (p-ref "defblock") (p-ref "fdef")
+            (p-ref "fieldm") (p-ref "refm") (p-ref "thoughtm"))) (t-splice "v"))
+        ;; a name may carry a comparison contract (x: Number); the name alone stays a
+        ;; name, a contract makes it $bml-typed[name, type] for the contract pass to read
+        (rule3 "fieldm" (list "seq" (p-kw "field") (p-cap "n" (p-run "bmlname")) (p-opt (p-cap "t" (p-ref "contract")))
+            (p-lit "=") (p-cap "e" (p-ref "expr")) (p-lit ";"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-member"))) (t-const "field") (t-bind "n" "t") (t-splice "e"))))
+        (rule3 "refm" (list "seq" (p-kw "ref") (p-cap "n" (p-run "bmlname")) (p-opt (p-cap "t" (p-ref "contract")))
+            (p-lit "=") (p-cap "e" (p-ref "expr")) (p-lit ";"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-member"))) (t-const "ref") (t-bind "n" "t") (t-splice "e"))))
+        (rule3 "thoughtm" (list "seq" (p-kw "thought") (p-cap "n" (p-run "bmlname")) (p-opt (p-cap "t" (p-ref "contract")))
+            (p-lit "=") (p-cap "e" (p-ref "expr")) (p-lit ";"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-member"))) (t-const "thought") (t-bind "n" "t") (t-splice "e"))))
+        (rule3 "contract" (list "seq" (p-lit ":") (p-cap "t" (p-run "bmlname"))) (t-splice "t"))
+        (rule3 "param" (list "seq" (p-cap "n" (p-run "bmlname")) (p-opt (p-cap "t" (p-ref "contract")))) (t-bind "n" "t"))
+
+        ;; -- def name(params)[: Type] { stmts }  ->  fndef[name, do[params], do[stmts]]
         (rule3 "defblock" (list "seq"
             (p-kw "def") (p-cap "name" (p-run "bmlname"))
-            (p-lit "(") (p-cap "ps" (p-sep (p-run "bmlname") (p-lit ","))) (p-lit ")")
-            (p-cap "body" (p-ref "blockexpr")))
-          (t-emit "fndef" (list (t-splice "name") (t-emit "do" (list (t-splices "ps"))) (t-splice "body"))))
+            (p-lit "(") (p-cap "ps" (p-sep (p-ref "param") (p-lit ","))) (p-lit ")") (p-opt (p-cap "t" (p-ref "contract")))
+            (p-cap "body" (p-ref "blockexpr")) (p-opt (p-lit ";")))
+          (t-emit "fndef" (list (t-bind "name" "t") (t-emit "do" (list (t-splices "ps"))) (t-splice "body"))))
 
-        ;; -- def name(params) = expr ;  ->  fndef[name, do[params], body] -------
+        ;; -- def name(params)[: Type] = expr ;  ->  fndef[name, do[params], body] ----
         (rule3 "fdef" (list "seq"
             (p-kw "def") (p-cap "name" (p-run "bmlname"))
-            (p-lit "(") (p-cap "ps" (p-sep (p-run "bmlname") (p-lit ","))) (p-lit ")")
+            (p-lit "(") (p-cap "ps" (p-sep (p-ref "param") (p-lit ","))) (p-lit ")") (p-opt (p-cap "t" (p-ref "contract")))
             (p-lit "=") (p-cap "e" (p-ref "expr")) (p-lit ";"))
-          (t-emit "fndef" (list (t-splice "name") (t-emit "do" (list (t-splices "ps"))) (t-splice "e"))))
+          (t-emit "fndef" (list (t-bind "name" "t") (t-emit "do" (list (t-splices "ps"))) (t-splice "e"))))
 
-        ;; -- block statements: let n = e;  |  bare e; ---------------------------
+        ;; -- block statements: let n[: Type] = e;  |  bare e; ---------------------
         (rule3 "blockstmt" (p-cap "v" (list "alt" (p-ref "letstmt") (p-ref "exprstmt"))) (t-splice "v"))
-        (rule3 "letstmt" (list "seq" (p-kw "let") (p-cap "n" (p-run "bmlname")) (p-lit "=") (p-cap "e" (p-ref "expr")) (p-lit ";"))
-          (t-emit "let" (list (t-splice "n") (t-splice "e"))))
+        (rule3 "letstmt" (list "seq" (p-kw "let") (p-cap "n" (p-run "bmlname")) (p-opt (p-cap "t" (p-ref "contract")))
+            (p-lit "=") (p-cap "e" (p-ref "expr")) (p-lit ";"))
+          (t-emit "let" (list (t-bind "n" "t") (t-splice "e"))))
         (rule3 "exprstmt" (list "seq" (p-cap "e" (p-ref "expr")) (p-lit ";")) (t-splice "e"))
 
         ;; A brace expression owns one do-node. Its final expression may omit
@@ -58,7 +137,15 @@
           (t-emit "do" (list (t-splices "body"))))
 
         ;; -- expr = if-then-else | postfix call-chain over a primary -----------
-        (rule3 "expr" (p-cap "v" (list "alt" (p-ref "ifx") (p-ref "tryx") (p-ref "choosex") (p-ref "orexpr"))) (t-splice "v"))
+        (rule3 "expr" (p-cap "v" (list "alt" (p-ref "ifx") (p-ref "tryx") (p-ref "choosex") (p-ref "matchx") (p-ref "orexpr"))) (t-splice "v"))
+        ;; match s { pattern => body, ... }  ->  $bml-match[s, do[pattern, body], ...];
+        ;; `_` is the ident _ the switch reads as its default
+        (rule3 "matchx" (list "seq"
+            (p-kw "match") (p-cap "s" (p-ref "orexpr"))
+            (p-lit "{") (p-cap "arms" (p-sep (p-ref "arm") (p-lit ","))) (p-opt (p-lit ",")) (p-lit "}"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-match"))) (t-splice "s") (t-splices "arms"))))
+        (rule3 "arm" (list "seq" (p-cap "p" (p-ref "expr")) (p-lit "=>") (p-cap "b" (p-ref "expr")))
+          (t-emit "do" (list (t-splice "p") (t-splice "b"))))
         ;; x ?? y ?? z binds loosest and folds left, as the source compiler splits at
         ;; the last ??; an operand with no ?? after it is itself, no wrapper
         (rule3 "orexpr" (list "seq" (p-cap "first" (p-ref "opexpr")) (p-cap "rest" (p-rep (p-ref "orrest"))))
@@ -110,11 +197,15 @@
         ;; -- primary: keyword literals first, then numbers, names, strings, parens
         (rule3 "primary" (p-cap "v" (list "alt"
             (p-ref "litempty") (p-ref "litnothing") (p-ref "littrue") (p-ref "litfalse")
-            (p-ref "litnum") (p-ref "litstr") (p-ref "ident") (p-ref "paren") (p-ref "blockexpr"))) (t-splice "v"))
-        (rule3 "litempty" (p-kw "empty") (t-emit "fncall" (list (t-emit "ident" (list (t-const "empty"))))))
-        (rule3 "litnothing" (p-kw "nothing") (t-emit "fncall" (list (t-emit "ident" (list (t-const "nothing"))))))
-        (rule3 "littrue"  (p-kw "true")  (t-const-bool 1))
-        (rule3 "litfalse" (p-kw "false") (t-const-bool 0))
+            (p-ref "litnum") (p-ref "litneg") (p-ref "litstr") (p-ref "ident") (p-ref "paren") (p-ref "blockexpr"))) (t-splice "v"))
+        ;; a value keyword followed by a call is the name being called: nothing() is a call
+        (rule3 "litempty" (p-kw-value "empty") (t-emit "fncall" (list (t-emit "ident" (list (t-const "empty"))))))
+        (rule3 "litnothing" (p-kw-value "nothing") (t-emit "fncall" (list (t-emit "ident" (list (t-const "nothing"))))))
+        (rule3 "littrue"  (p-kw-value "true")  (t-const-bool 1))
+        (rule3 "litfalse" (p-kw-value "false") (t-const-bool 0))
+        ;; -9 and -1.0 are numbers where an operand begins: a name may carry -, so this
+        ;; stands before ident
+        (rule3 "litneg" (list "seq" (p-lit "-") (p-cap "v" (p-num))) (t-splice-neg "v"))
         (rule3 "paren" (list "seq" (p-lit "(") (p-cap "e" (p-ref "expr")) (p-lit ")")) (t-splice "e"))
         (rule3 "litstr" (p-cap "v" (p-str)) (t-splice "v"))
         (rule3 "litnum" (p-cap "v" (p-num)) (t-splice-int "v"))
