@@ -44,7 +44,7 @@ gate/tests/structural-gate-band          -> 16383
 ./fkwu observe/door-link-health-run.bml  -> doors=12 links=120 broken=0 code=12120000
 ./fkwu observe/belief-stamps.bml         -> 534499010  (field stamped*10^6 + owed*10^3 + laws)
 observe/tests/belief-rewitness-band      -> 63
-./fkwu form/form-stdlib/release-ledger.bml -> open=28 moving=0 released=113
+./fkwu form/form-stdlib/release-ledger.bml -> open=29 moving=0 released=113
 learn/tests/homecoming-distillation-corpus-band -> 32767  (asserts 981 rows, 962 admissible)
 value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
