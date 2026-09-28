@@ -160,12 +160,15 @@ The owner also receives correlated organ responses through `bdjo-hear`.
 It attempts the selected waiting operation immediately, including while earlier
 telemetry waits, and queues the new observation in order. Old or unrelated
 responses leave the owner unchanged; a failed attempt creates a fresh reading.
-Resource observations at owner progress and this in-process event receiver are
-present; filesystem push delivery is not yet connected. The metadata carrier
-does not expose permission or free-space changes; a caller that observes those
-can offer the existing reading's `publish-retained-image` response. Publication
-and readback establish the actual outcome. Explicit holds keep their release
-control.
+The [native resource event owner](native-resource-events.md) now connects Darwin
+filesystem notifications and one-shot lease timers to that receiver. It watches
+surviving ancestors, handles path replacement, renews lease timers and resumes
+permission repairs through attribute events. Quiet waits avoid filesystem
+polling. Explicit holds withdraw their watches and keep their release control.
+The form-cli demand surface uses this event lifetime and closes its resources
+while preserving the caller's JIT owner. Volume free-space changes still need a
+resource observer's offered response; publication and readback establish the
+actual outcome. Held fault receipts retain their stage's measured duration.
 The current boundary is lowerable scalar graphs; whole-unit source admission
 and the complete program-image call path remain distinct work.
 
@@ -192,6 +195,7 @@ Form owns the following executing surfaces. Each linked page names its public do
 | [Real-model numerical oracle](native-dsv4-oracle.md) | Form owns GGUF admission, independent quantized CPU arithmetic, complete layer and token histories, exact retained vectors and tensor-sized Metal view plans |
 | [DSV4 proof generation](native-dsv4-proof-emission.md) | Form owns shader composition, complete GGUF metadata, typed requests, checked output settlement and proof archive retention |
 | [RAM pipe workers](native-pipe-workers.md) | Form emits Darwin ARM64 pipe and readiness operations in RAM, supervises resident workers, preserves complete binary frames and correlated stderr health, and settles partial writes, EOF, cancellation and physical release |
+| [Native resource events](native-resource-events.md) | Form emits Darwin ARM64 queue operations in RAM, batches path/timer/readiness events, grows owned event storage, resumes JIT care in place and releases registrations, descriptors and native admissions |
 | [Pinned Wiktionary sources](native-wiktionary-source.md) | Form reacquires the complete 111 retained revisions, binds page/revision/timestamp identities and reproduces their English hashes and selected meanings; actual acquisition and retained-response replay remain distinct |
 
 The deterministic substantive build and its three downstream generators share

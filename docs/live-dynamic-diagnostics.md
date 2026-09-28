@@ -76,8 +76,11 @@ with its retained image and runtime identity, including while telemetry waits.
 A failed attempt backtracks locally and retains a fresh reading; an old response
 cannot replay it. Explicit holds remain owned by their release control. The
 ordered telemetry queue carries observations without delaying this care or
-restoring old execution state. This is an in-process event receiver; host
-filesystem push delivery remains a separate integration.
+restoring old execution state. The [native resource event owner](native-resource-events.md)
+feeds Darwin vnode notifications and lease timers into this receiver. Quiet
+waits perform no resource polling; registration changes preserve the owning
+continuation. Attribute events can resume a permission repair even when the
+existing size/mtime observation is unchanged.
 
 ## Health belongs to the running organ
 
