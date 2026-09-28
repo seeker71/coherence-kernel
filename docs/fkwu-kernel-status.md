@@ -278,6 +278,16 @@ Handle widths, device capabilities and observed allocation limits are explicit. 
 
 The [CPU benchmark](../observe/frame-cpu-benchmark-run.fk) and [GPU benchmark](../observe/frame-metal-benchmark-run.fk) expose admission and execution costs over synthetic captured bytes. Current [CPU](evidence/fkwu/cpu-benchmark.txt) and [Metal](evidence/fkwu/metal-benchmark.txt) samples retain the complete result rows and crossing counts. The fixture is 1,050,678 bytes; the CPU sample takes three native calls per fold, while the GPU sample includes upload, submission, wait, readback and cleanup.
 
+Doors that measure a cost in one process, by the body's own clocks:
+
+- `observe/mint-price-run.fk` — what a Metal pipeline costs this host to mint.
+- `observe/micro-thought-run.fk` — a micro-thought's cost to mint, find and run, against the walk it replaces.
+- `observe/kernel-length-run.fk` — each emitted kernel's statements and loops (ear, Q8_0, Q6_K), before any dispatch.
+- `observe/dense-enqueue-share-run.fk` — of one dense llama3.2:1b token's wall, the CPU's encode beside the GPU's run.
+- `observe/qwen38-prefill-time-run.bml` — one Qwen3.8-27B Q8_0 prefill of a 577-token span: first token, GPU busy, wall, dispatches.
+- `observe/qwen38-span-attn-probe.bml` — that lane's span-attention kernel dispatched alone over the same span.
+- `observe/line-grammar-search-floor-run.fk` — the allocating and healed line floors on the locale rows, side by side.
+
 [Identities](evidence/fkwu/identities.json) bind the sources and artifacts recorded
 in that observation. `observe/fkwu-current-identities-run.bml` regenerates them
 with Form's ARM64 SHA program. Each newer execution carries its own source

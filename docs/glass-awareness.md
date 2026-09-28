@@ -33,6 +33,16 @@ Two bounded doors need no Form syntax:
 The second door does not publish or replace the standing observer. Its reported
 time measures collection and attention, not terminal painting or model speed.
 
+Doors beside the observer:
+
+- `observe/we-glass-run.fk` paints one frame of WE, publishes `we.glass` to the shared bus
+  and prints its census as name=value lines; `observe/we-glass-ask.fk` answers where one
+  word or node id stands across channel grammars, corpus rows, bus samples and op rows.
+- `observe/form-glass-room-live.fk` is the room sensor: timbres, silences, breaths, the
+  room's floor and a person's presence; it keeps the mic closed until `.hearth/room.wanted`.
+- `observe/prosody-take-probe.fk` and `observe/jungle-ear-take-probe.fk` read the prosody
+  and jungle-ear frames as a taker does, naming a publisher that is not standing as absent.
+
 ## What it notices
 
 It reads eight sensor frames and discovers namespaced snapshot publishers from

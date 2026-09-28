@@ -108,4 +108,6 @@ The model-free failed-child witness is
 `form/form-stdlib/tests/native-lora-worker-band.fk`. The small-transformer Adam
 continuation witness is `native-lora-resume-band.fk`. The actual 3B two-run witness
 is `observe/native-lora-training-homecoming-run.fk`; its public fixture outputs
-remain under `.hearth/native-training-homecoming`.
+remain under `.hearth/native-training-homecoming`. `observe/lora-step-native-run.fk`
+computes one rank-one step on llama-3.2-1B through the dense token handle against a
+row the body perceived (`.form-lora-voice-native/perception.jsonl`).

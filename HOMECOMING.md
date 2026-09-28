@@ -66,6 +66,22 @@ Every lane below speaks through this door.
   [`observe/lora-lift-run.bml`](observe/lora-lift-run.bml) trains a child adapter
   from them and records its held-out loss beside the parent's in
   [`receipts/lora-promotion-ledger.jsonl`](receipts/lora-promotion-ledger.jsonl).
+  [`observe/lora-voice-run.fk`](observe/lora-voice-run.fk) writes the teacher rows or
+  starts the native Metal trainer on one folder's school;
+  [`observe/voice-school-run.fk`](observe/voice-school-run.fk) harvests a finished
+  adapter, grades it on held-out questions beside the base and publishes it to the glass;
+  [`observe/lora-voice-ask-run.fk`](observe/lora-voice-ask-run.fk) asks one question about
+  a real room three ways (native 1B, base 3B, 3B wearing the perception adapter), side by side.
+- **Mouth** — the VITS pass on this Mac's metal:
+  [`observe/voice-pass-run.fk`](observe/voice-pass-run.fk) runs it stage by stage and
+  prints each part's answer; [`observe/voice-pass-stage-probe.fk`](observe/voice-pass-stage-probe.fk)
+  prints every stage's shape, sums and timing to locate a disagreement;
+  [`observe/voice-mouth-lanes-run.fk`](observe/voice-mouth-lanes-run.fk) names which
+  tongues the body renders itself and speaks one line on request;
+  [`observe/voice-tensor-table.fk`](observe/voice-tensor-table.fk),
+  [`observe/voice-constants-read.fk`](observe/voice-constants-read.fk) and
+  [`observe/voice-graph-read.fk`](observe/voice-graph-read.fk) read a voice's
+  initializers, folded constants and graph nodes out of its own file.
 
 **What the ledgers read on 2026-09-28.**
 
