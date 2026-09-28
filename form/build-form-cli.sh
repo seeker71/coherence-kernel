@@ -1,5 +1,8 @@
 #!/usr/bin/env zsh
-# Build or copy the source-runtime CLI and its exact native recipe companions.
+# Install, copy or build the native form-cli and its exact recipe companions.
+# With no argument, form/form-cli becomes the link to this host's published,
+# verified bundle in form-stdlib/bootstrap (the executable finds its .fkb and
+# .sym beside the resolved file). An argument names a copy or a new build.
 # Form owns source closure, checked snapshots, startup emission and compilation.
 # This carrier owns host linking, artifact copies and publication ordering.
 set -euo pipefail
@@ -7,18 +10,19 @@ export LC_ALL=C
 FORM="$(cd -P "$(dirname "$0")" && pwd)"
 BODY="$(dirname "$FORM")"
 cd "$FORM"
-source scripts/fourth-arm.sh
 source scripts/form_cli_bootstrap_proof.sh
 source scripts/form_cli_source_list.sh
 (cd "$BODY" && ./fkwu observe/native-node-word-verify.bml)
 form_cli_load_sources
 
+link_default=0
+[[ $# -gt 0 ]] || link_default=1
 OUT="${1:-form-cli}"
 [[ "$OUT" == /* ]] || OUT="$FORM/$OUT"
 BOOT="${FORM_CLI_NATIVE_BOOTSTRAP_DIR:-$FORM/form-stdlib/bootstrap}"
 CC_BIN="${CC:-cc}"
-slug="$(fourth_platform_slug)"
-want_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
+slug="$(form_cli_platform_slug)"
+want_stamp="$(form_cli_hash16 "${FORM_CLI_SRCS[@]}")"
 want_sha="$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")"
 W=""
 publication_stages=()
@@ -51,7 +55,7 @@ regular_copy() {
     cp "$1" "$2"
 }
 source_current() {
-    [[ "$(fourth_hash16 "${FORM_CLI_SRCS[@]}")" == "$want_stamp" \
+    [[ "$(form_cli_hash16 "${FORM_CLI_SRCS[@]}")" == "$want_stamp" \
         && "$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")" == "$want_sha" ]]
 }
 regular_copy "$BOOT/form-cli-native.c" "$W/startup.c"
@@ -77,10 +81,13 @@ copy_platform() {
         && form_cli_native_verify_platform_attestation "$W/platform.attestation" "$want_sha" "$want_stamp" "$W/bootstrap.attestation" "$slug" "$candidate" "$candidate.fkb" "$candidate.sym"
 }
 
+platform_verified=0
 if [[ "${FORM_STANDARD_LANE:-0}" == 1 ]]; then
     copy_platform || { printf '%s\n' 'build: standard native CLI bundle is missing or stale' >&2; exit 1; }
+    platform_verified=1
 elif [[ "${FORM_CLI_FORCE_LINK:-0}" != 1 && -f "$platform.native.attestation" ]]; then
     copy_platform || { printf '%s\n' 'build: published native CLI bundle refused; explicit regeneration is required' >&2; exit 1; }
+    platform_verified=1
 else
     [[ -z "${FORM_CLI_EXTRA_SRC:-}${FORM_CLI_EXTRA_LDFLAGS:-}" ]] || {
         printf '%s\n' 'build: native CLI admits host capabilities dynamically; linked extensions are outside this build identity' >&2; exit 1;
@@ -131,6 +138,16 @@ printf '%s\n' 1 > "$W/check/.hearth/session-learning/paused"
 form_cli_native_verify_platform_attestation "$W/platform.attestation" "$want_sha" "$want_stamp" "$W/bootstrap.attestation" "$slug" "$candidate" "$candidate.fkb" "$candidate.sym"
 source_current || { printf '%s\n' 'build: source generation changed before publication' >&2; exit 1; }
 mkdir -p "$(dirname "$OUT")"
+if [[ "$link_default" == 1 && "$platform_verified" == 1 && "$BOOT" == "$FORM/form-stdlib/bootstrap" ]]; then
+    # The verified bundle is the install: one relative link, swapped in whole.
+    publication_stages=("$OUT.linking-$$")
+    ln -s "form-stdlib/bootstrap/form-cli-$slug" "$OUT.linking-$$"
+    mv -f "$OUT.linking-$$" "$OUT"
+    publication_stages=()
+    (cd "$W/check" && form_cli_verify_binary_identity "$OUT" "$want_sha")
+    printf 'linked %s -> form-stdlib/bootstrap/form-cli-%s; source=%s\n' "$OUT" "$slug" "$want_sha"
+    exit 0
+fi
 # Publish the executable last; existing processes retain their loaded recipe.
 publication_stages=("$OUT.fkb.writing-$$" "$OUT.sym.writing-$$" "$OUT.native.attestation.writing-$$" "$OUT.writing-$$")
 regular_copy "$candidate.fkb" "$OUT.fkb.writing-$$"

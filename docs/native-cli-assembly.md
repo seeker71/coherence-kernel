@@ -22,19 +22,24 @@ identify the binary's build generation; they do not bind the bytes of replacemen
 companions. Such replacement requires a new attested build before it qualifies
 as the published CLI artifact.
 The compiler's BML lowering remains in RAM; no lowered source twin is published.
-The [current artifact evidence](evidence/fkwu/native-cli-artifact.json) accepts
-the complete canonical generation and Darwin ARM64 publication, ordinary cached
-installation, the existing behavior proof and 14 actual artifact cases.
-Relocated default execution and restored companions pass; missing or malformed
-companions refuse as recorded. A different compatible recipe runs with the same
-binary and refuses the original installation attestation. The
-[installed resident care execution](evidence/fkwu/native-startup-care.json) uses
-that exact executable and companion set. The source stamp is `b1c1e09caa0e65d1`,
-with 337 original source files held in the accepted generation.
+The [artifact evidence](evidence/fkwu/native-cli-artifact.json) records the
+14 artifact cases this contract answers: relocated default execution and
+restored companions pass; missing or malformed companions refuse; a different
+compatible recipe runs with the same binary and refuses the original
+installation attestation. The
+[installed resident care execution](evidence/fkwu/native-startup-care.json)
+shows the resident care organ running from such an installed set. The published
+generation holds 396 source files (the manifest and the 395 it names) under
+source stamp `da5ebd6434fecdbb`; its Darwin ARM64 executable is 8,190,296 bytes,
+the `.fkb` 42,307,765 and the `.sym` 3,553,616.
 
 The identity roots include the program, its compiler, the source runtime,
 opcode and generated node-word headers, the Form node-word authority and its
-verification door, and the host build carriers. Both generated and ordinary
+verification door, and the host build carriers (`build-form-cli.sh`,
+`regen_form_cli_bootstrap.sh`, `form_cli_source_list.sh`,
+`form_cli_bootstrap_proof.sh`). The platform name and the source stamp are
+computed in `form_cli_source_list.sh`; kernel validation's fourth-arm carrier
+and its flattener table are not part of this build. Both generated and ordinary
 copy installation run the repository runtime's node-word verification first;
 that door must remain reachable. The sealed copy includes the checked header.
 `native-table-sources.bml` follows
@@ -84,18 +89,33 @@ bootstrap attestation, platform, executable, image and symbols. Readers reject
 missing, duplicate, unknown, truncated and mismatched fields. The public stamp
 moves last, after the candidate's source/image checks and identity challenge.
 
-The normal builder validates and copies an available platform trio without
-running a source compiler. A native build prepares a new image with the exact
-startup binary that will load it. The dependency manifest is derived evidence;
-source and compiler changes invalidate the generation. Historical table/C
-artifacts and the `NTC2` compiler route remain independent proof
-surfaces, outside the active CLI runtime.
+One door regenerates everything: `form/scripts/regen_form_cli_bootstrap.sh
+[output-dir]` seals the closure, emits the startup, builds one candidate and
+publishes both the bootstrap set and that same witnessed candidate as
+`form-cli-<platform>` with its `.fkb`, `.sym`, platform attestation and stamp;
+nothing is rebuilt for publication. The output directory defaults to
+`form/form-stdlib/bootstrap`; another directory receives the whole set for
+inspection, while the dependency manifest always installs beside its sources.
 
-The recorded canonical generation takes 1,174,861 ms, platform generation
-339,722 ms, ordinary cached installation 9,512 ms and the existing behavior
-proof 7,687 ms on this host. These are
-individual wall-time observations, including their actual cache state and
-retained warnings; they establish neither peak memory nor general throughput.
+`form/build-form-cli.sh` with no argument validates this host's published
+bundle without running a source compiler and makes `form/form-cli` a relative
+link to it. The executable resolves its own path, so the `.fkb` and `.sym`
+beside the bundle are the ones it loads, and the identity challenge runs through
+the link before the build reports success. Given a path, the builder copies the
+validated trio there; with `FORM_CLI_FORCE_LINK=1` it prepares a new image with
+the exact startup binary that will load it. The dependency manifest is derived
+evidence; source and compiler changes invalidate the generation. Historical
+table/C artifacts in the bootstrap directory and the `NTC2` compiler route
+remain independent proof surfaces, outside the CLI build and runtime.
+
+On this host the whole regeneration (closure, emission, one candidate, both
+publications) took 1,186 s wall, the default link install 4.5 s and the
+behavior proof through the link 2.0 s. These are single observations on a
+shared, loaded machine; they establish neither peak memory nor general
+throughput.
+A regeneration stops without publishing when any held source changes while it runs, and a
+published generation reads stale as soon as any of its sources changes; with
+several authors editing the closure, regenerate after their work lands.
 This is a whole-program bootstrap path. The runtime north star remains native
 module admission on demand, retained context ownership and live selection of
 verified replacements. See [native care](native-core-care.md) for the running
