@@ -14,6 +14,7 @@ var fkwuReservedHeads = fkwuReservedHeadSet([]string{
 	"add_u32",
 	"and",
 	"api_health",
+	"attempt",
 	"band",
 	"bnot_u32",
 	"bor",

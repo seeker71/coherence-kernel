@@ -13,6 +13,7 @@ export const FKWU_RESERVED_HEADS: ReadonlySet<string> = new Set([
   "add_u32",
   "and",
   "api_health",
+  "attempt",
   "band",
   "bnot_u32",
   "bor",

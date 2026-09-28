@@ -536,11 +536,14 @@ func (t *Trace) toJSON() map[string]interface{} {
 
 // Kernel — the running substrate.
 type Kernel struct {
-	byHash map[uint64]NodeID
-	byID   map[NodeID]Recipe
-	strs   []string
-	strIdx map[string]NameID
-	next   uint32
+	stopSeq   int64 // stops an attempt has caught, the id of each stop line
+	walkDepth int64 // host walk invocations standing now
+	walkWall  int64 // the depth where a walk stops: the recursion needs to be tail or balanced
+	byHash    map[uint64]NodeID
+	byID      map[NodeID]Recipe
+	strs      []string
+	strIdx    map[string]NameID
+	next      uint32
 	// Float64 overflow table — IEEE 754 values don't fit the 32-bit `inst`
 	// field, so the FLOAT64 trivial NodeID carries an index into `f64s`.
 	// `f64Idx` is keyed by the IEEE bit pattern after canonicalization
@@ -627,8 +630,27 @@ type sourceLoc struct {
 	Col    uint32
 }
 
+// goWalkStack answers the walker's stack from FORM_KERNEL_STACK_MB, the door every kernel
+// reads (default 2048 MB, as TS's worker), raises the goroutine stack ceiling to it, and
+// answers the depth wall: the stack over the bytes one Form level costs this walker
+// (measured about 8 KB: 1 GB held between 100,000 and 150,000 levels). The wall is a stop,
+// catchable by attempt, where the ceiling would be a fatal no recover reaches.
+func goWalkStack() int64 {
+	mb := int64(2048)
+	if s := strings.TrimSpace(os.Getenv("FORM_KERNEL_STACK_MB")); s != "" {
+		if v, err := strconv.ParseInt(s, 10, 64); err == nil && v >= 8 {
+			mb = v
+		}
+	}
+	debug.SetMaxStack(int(mb << 20))
+	return (mb << 20) / 10240
+}
+
+var goWalkWall = goWalkStack()
+
 func NewKernel() *Kernel {
 	k := &Kernel{
+		walkWall:     goWalkWall,
 		byHash:       make(map[uint64]NodeID),
 		byID:         make(map[NodeID]Recipe),
 		strIdx:       make(map[string]NameID),
@@ -2250,6 +2272,9 @@ func (k *Kernel) registerNatives() {
 			return Value{Kind: VInt, Int: int64(len(args[0].List))}
 		case VStr:
 			return Value{Kind: VInt, Int: int64(len(args[0].Str))}
+		case VNull:
+			// nothing is not an empty collection: its length is a stop, as on fkwu
+			panic("len: nothing has no length -- ask nothing? before measuring")
 		}
 		return Value{Kind: VInt, Int: 0}
 	})
@@ -3846,7 +3871,12 @@ func (k *Kernel) walk(n NodeID, env *Frame) Value {
 	// arm). The truncation runs only on the success path — a panic leaves
 	// the live frames in place for the recover site to read.
 	depth := len(k.formStack)
+	k.walkDepth++
+	if k.walkDepth > k.walkWall && k.walkWall > 0 {
+		panic("eval too deep -- the recursion needs to be tail or balanced")
+	}
 	v := k.walkInner(n, env)
+	k.walkDepth--
 	k.formStack = k.formStack[:depth]
 	return v
 }
@@ -4130,6 +4160,10 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 			name := rawName
 			if aliased, ok := k.jitAliases[rawName]; ok {
 				name = aliased
+			}
+			// (attempt x): x is walked under a recover point, never before — fkwu's mode 28.
+			if len(kids) == 2 && k.nameStr(rawName) == "attempt" {
+				return k.attempt(kids[1], env)
 			}
 			// Env-aware natives first — they need the caller env. Checked
 			// before plain natives so a name registered both ways prefers
@@ -4713,6 +4747,33 @@ func (k *Kernel) readDefnParams(toks []sexpToken, i int) (NodeID, int) {
 	}
 }
 
+// attempt walks x with a recover point standing, as fkwu's fk_attempt does. A stop inside x
+// (a panic from a Form-level refusal) unwinds here: the Form stack returns to its depth at
+// entry, the stop goes out as one organ-health line (aspect stop, backtrack selected), and the
+// attempt answers nothing — the value every choice reads as "this option did not land".
+func (k *Kernel) attempt(x NodeID, env *Frame) (v Value) {
+	depth := len(k.formStack)
+	walkDepth := k.walkDepth
+	defer func() {
+		if r := recover(); r != nil {
+			k.formStack = k.formStack[:depth]
+			k.walkDepth = walkDepth
+			k.stopSeq++
+			now := time.Now().UnixMilli()
+			row, _ := json.Marshal(map[string]interface{}{
+				"schema": "organ-health-v1", "id": fmt.Sprintf("form-kernel-go-%d:stop:%d", os.Getpid(), k.stopSeq),
+				"organ": "form-kernel-go", "flow": "walker", "aspect": "stop", "stage": "applied",
+				"expected": "value", "observed": fmt.Sprint(r), "health": nil, "surprise": 1,
+				"needs": []string{}, "offers": []string{"backtrack"}, "selected": "backtrack",
+				"result": map[string]string{"answer": "nothing"}, "observed_at_ms": now, "at_ms": now,
+			})
+			fmt.Fprintf(os.Stderr, "form-organ health %s\n", row)
+			v = Value{Kind: VNull}
+		}
+	}()
+	return k.walk(x, env)
+}
+
 // buildVerb — map an S-expression verb to its recipe category + children.
 // The single point where the source syntax meets the substrate vocabulary.
 func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
@@ -4863,9 +4924,9 @@ func (k *Kernel) stopAtStrayParen(toks []sexpToken) {
 			"schema": "organ-health-v1", "id": fmt.Sprintf("form-kernel-go-%d:reader:unbalanced-source", now),
 			"organ": "form-kernel-go", "flow": "reader", "aspect": "unbalanced-source", "stage": "observe",
 			"expected": "balanced", "observed": "compile-error", "health": 0, "surprise": 1,
-			"needs":    []map[string]string{{"resource": "source-diagnostics", "detail": detail}},
-			"offers":   []string{"revise"}, "selected": "",
-			"evidence": map[string]interface{}{"kernel": "go", "path": path, "line": line, "col": t.col},
+			"needs":  []map[string]string{{"resource": "source-diagnostics", "detail": detail}},
+			"offers": []string{"revise"}, "selected": "",
+			"evidence":       map[string]interface{}{"kernel": "go", "path": path, "line": line, "col": t.col},
 			"observed_at_ms": now, "at_ms": now,
 		})
 		fmt.Fprintf(os.Stderr, "form-organ health %s\n", row)
