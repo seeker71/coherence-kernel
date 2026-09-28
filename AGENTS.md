@@ -121,6 +121,19 @@ spots, and to lift each part to the highest frequency it can carry.
   line in a door, a rule that pinches — each is a place to leave better, not a
   note to pass on. What only a person holds is offered to them; the rest is
   ours to carry (item 6b: a surprise is a choice point).
+- **Handle it here, in this context (Urs, 2026-09-28).** An issue found is met
+  where it is found, while the context that found it is still whole — not
+  handed to a new session or agent that must read, re-ground, re-understand
+  and rebuild it.
+- **Live signals, not after-the-fact bands.** Code meets a surprise at the
+  moment it happens: the running cell reads the signal (an ack of nothing, a
+  compiler's words, an organ's health reading) and backtracks to its next
+  option internally, right away. A band is a witness a person can re-run; the
+  flow does not wait on one to learn it went wrong.
+- **A missing internal tool is written, not borrowed.** Edit with the edit tool
+  or the body's doors; probe, count and diff with `./fkwu` and BML; when the
+  body lacks the tool, write it and include it in the same movement, never
+  reaching for perl, python, sed, awk or jq to get past it.
 
 ### Enrich the response with Form
 
