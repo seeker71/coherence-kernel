@@ -145,7 +145,7 @@ build_go() {
     fi
 }
 build_rs() {
-    if [[ ! -x "$RS_BIN" || "$RS_DIR/src/main.rs" -nt "$RS_BIN" || "$RS_DIR/src/bp_table.rs" -nt "$RS_BIN" ]]; then
+    if [[ ! -x "$RS_BIN" ]] || find "$RS_DIR/src" -name '*.rs' -newer "$RS_BIN" -print -quit | grep -q .; then
         echo "  building rust kernel..." >&2
         (cd "$RS_DIR" && cargo build --release --offline --quiet)
     fi

@@ -185,6 +185,7 @@ export const FKWU_RESERVED_HEADS: ReadonlySet<string> = new Set([
   "print",
   "print_str",
   "read_file",
+  "read_file_bytes",
   "read_file_slice",
   "read_form_binary",
   "read_line",
@@ -267,6 +268,7 @@ export const FKWU_RESERVED_HEADS: ReadonlySet<string> = new Set([
   "value_kind",
   "value_str",
   "write_file",
+  "write_file_bytes",
   "write_file_text",
   "write_form_binary",
 ]);

@@ -3429,6 +3429,12 @@ impl Kernel {
         self.register_native("value_kind", cat_witness(), |_, _, args| {
             Value::Str(value_kind_name(&args[0]).to_string().into())
         });
+        // nothing / nothing? — the axiom-1 third value and the one question that sees it,
+        // native as on fkwu (tags 137/138): never-was is neither 0 nor empty.
+        self.register_native("nothing", cat_witness(), |_, _, _| Value::Null);
+        self.register_native("nothing?", cat_witness(), |_, _, args| {
+            Value::Int(if matches!(args.first(), Some(Value::Null)) { 1 } else { 0 })
+        });
         self.register_native("value-kind", cat_witness(), |_, _, args| {
             Value::Str(value_kind_name(&args[0]).to_string().into())
         });

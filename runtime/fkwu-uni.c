@@ -15448,6 +15448,27 @@ static long long fk_substring_word(long long sword, long long a, long long b) {
     while (j < ln) { fk_sb[fk_sbp + j] = FK_SBYTES(ss)[a + j]; j = j + 1; }
     return fk_strv(fk_sintern(fk_sbp, ln));
 }
+/* One byte-list writer for every door that puts an int list on disk as raw bytes: tag 61
+ * (file_append_bytes) and mode 27 (write_file_bytes). Each element's low byte, in order,
+ * through one 8 KiB window. Answers whether every byte went out; *count holds how many did. */
+static int fk_write_byte_list(int fd, long long xs, long long *count) {
+    static char tmp[8192];
+    long long n = 0, done = 0;
+    long long q = xs >> 1;
+    while (q >= 1 && FK_POK(q)) {
+        if (n == 8192) {
+            if (!fk_write_all_raw(fd, tmp, n)) { *count = done; return 0; }
+            done = done + n;
+            n = 0;
+        }
+        tmp[n] = (char)(FK_HH(q) >> 1);
+        n = n + 1;
+        q = FK_HT(q) >> 1;
+    }
+    int ok = fk_write_all_raw(fd, tmp, n);
+    *count = done + n;
+    return ok;
+}
 static long long fk_fb_door(long long mode, long long x) {
     if (mode == 4) { return fk_value_kind(x); }
     if (mode == 5) {
@@ -15475,6 +15496,7 @@ static long long fk_fb_door(long long mode, long long x) {
     if (mode == 7) {
         static char p[FK_PATH_CAP];
         fk_cstr(x, p, FK_PATH_CAP);
+        fk_host_resolve(p);
         int fd = open(p, O_RDBIN);
         if (fd < 0) { fk_fb_err = "form binary: no such file"; return fk_nothing; }
         long long cap = 65536, n = 0;
@@ -15509,6 +15531,46 @@ static long long fk_fb_door(long long mode, long long x) {
         fk_sbp = start;
         if (wr < n) { return -2; }
         return n << 1;
+    }
+    /* mode 26: read_file_bytes path -- the whole file as a list of ints 0..255, one per byte,
+     * in order; an empty file is the empty list. A path that does not open answers nothing:
+     * never-was, not empty. */
+    if (mode == 26) {
+        static char p[FK_PATH_CAP];
+        fk_cstr(x, p, FK_PATH_CAP);
+        fk_host_resolve(p);
+        int fd = open(p, O_RDBIN);
+        if (fd < 0) { return fk_nothing; }
+        long long cap = 65536, n = 0;
+        unsigned char *buf = (unsigned char *)malloc((size_t)cap);
+        for (;;) {
+            if (n + 65536 > cap) { cap = cap * 2; buf = (unsigned char *)realloc(buf, (size_t)cap); }
+            long long got = read(fd, buf + n, 65536);
+            if (got <= 0) { break; }
+            n = n + got;
+        }
+        close(fd);
+        long long lst = 1;
+        long long k = n;
+        while (k > 0) { k = k - 1; lst = fk_cons_val(((long long)buf[k]) << 1, lst); }
+        free(buf);
+        return lst;
+    }
+    /* mode 27: write_file_bytes (cons path bytes) -- the file becomes exactly those bytes
+     * (created, or truncated first); answers how many were written, or -1 when the path does
+     * not open or a write falls short. */
+    if (mode == 27) {
+        long long q = x >> 1;
+        if ((x & 1) == 0 || q < 1 || !FK_POK(q)) { return -2; }
+        static char p[FK_PATH_CAP];
+        fk_cstr(FK_HH(q), p, FK_PATH_CAP);
+        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) { return -2; }
+        long long count = 0;
+        int ok = fk_write_byte_list(fd, FK_HT(q), &count);
+        close(fd);
+        if (!ok) { return -2; }
+        return count << 1;
     }
     return fk_nothing;
 }
@@ -16292,7 +16354,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * descriptors and to ask whether a pid answers; see fk_host_door. */
         /* modes 20-22: kernel_roster_adopt, kernel_roster_forget, kernel_page_bury -- see fk_roster_adopt;
          * mode 23: host_process -- see fk_host_process; mode 24: kernel_page_ended -- see fk_page_bury;
-         * mode 25: value_str -- see fk_value_str. */
+         * mode 25: value_str -- see fk_value_str; modes 26-27: read_file_bytes,
+         * write_file_bytes -- the raw byte file doors, see fk_fb_door. */
+        if ((fm201 >> 1) >= 26) { return fk_fb_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) == 25) { return fk_value_str(fx201); }
         if ((fm201 >> 1) >= 17) { return fk_host_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) >= 10) { return fk_spk_door(fm201 >> 1, fx201); }
@@ -16378,26 +16442,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         /* Files return their resulting extent; nonseekable streams return bytes
          * accepted. Form owns the frame commit; this seed only carries the write. */
-        static char tmp[8192];
-        long long n = 0;
         long long written = 0;
-        long long q = xs >> 1;
-        while (q >= 1 && FK_POK(q)) {
-            if (n == 8192) {
-                if (!fk_write_all_raw(fd, tmp, n)) {
-                    close(fd);
-                    return -2;
-                }
-                written += n;
-                n = 0;
-            }
-            tmp[n] = (char)(FK_HH(q) >> 1);
-            n = n + 1;
-            q = FK_HT(q) >> 1;
-        }
-        int complete = fk_write_all_raw(fd, tmp, n);
+        int complete = fk_write_byte_list(fd, xs, &written);
         long long total = lseek(fd, 0, 2);
-        if (total < 0 && errno == ESPIPE) total = written + n;
+        if (total < 0 && errno == ESPIPE) total = written;
         close(fd);
         if (!complete || total < 0) {
             return -2;
