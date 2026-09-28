@@ -44,7 +44,7 @@ gate/tests/structural-gate-band          -> 16383
 ./fkwu observe/door-link-health-run.bml  -> doors=12 links=120 broken=0 code=12120000
 ./fkwu observe/belief-stamps.bml         -> 534499010  (field stamped*10^6 + owed*10^3 + laws)
 observe/tests/belief-rewitness-band      -> 63
-./fkwu form/form-stdlib/release-ledger.bml -> open=29 moving=0 released=114
+./fkwu form/form-stdlib/release-ledger.bml -> open=28 moving=0 released=115
 learn/tests/homecoming-distillation-corpus-band -> 32767  (asserts 983 rows, 964 admissible)
 value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
@@ -273,8 +273,7 @@ What answered red, died, or was not witnessed today, so no one leans on it:
   claims heldout ≥ 9 on a lesson-disjoint split, which a lesson-bound overlay reaches only once a
   LoRA writer stands (the mints declare `LoraWriter = 0`) (R88).
 - BML `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111; R78). The lowering's other
-  open rows stand in the ledger: R86 (`form.action` main files), R96 (lowering time grows with one
-  form's argument count).
+  open row stands in the ledger: R96 (lowering time grows with one form's argument count).
 - Windows: the seed's `_WIN32` branch carries its own spawn and wait twins (`fk_win_spawn`,
   `fk_win_waitpid`), its fifo door answers -1 there, and it passes
   `clang --target=x86_64-w64-windows-gnu -fsyntax-only runtime/fkwu-uni.c` with 0 errors (rc 0,
