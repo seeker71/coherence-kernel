@@ -916,37 +916,47 @@
                          (fsc-compile-form-bml-expr-recipe yes-text)
                          (fsc-compile-form-bml-expr-recipe no-text))))))))
 
-    (defn fsc-bml-find-top-eqeq-loop (s i depth quoted)
-        (if (ge i (str_len s)) (sub 0 1)
+    ;; Spaced operators keep hyphenated Form names unambiguous. Each row owns
+    ;; spelling, native operation and precedence; lowering retains evaluation
+    ;; order, short circuit and numeric contracts. Equality is value equality.
+    (defn fsc-bml-operators ()
+        (list (list "||" "or" 1) (list "&&" "and" 2)
+              (list "==" "value_eq" 3) (list "!=" "value_ne" 3)
+              (list "<=" "le" 4) (list ">=" "ge" 4)
+              (list "<" "lt" 4) (list ">" "gt" 4)
+              (list "+" "add" 5) (list "-" "sub" 5)
+              (list "*" "mul" 6) (list "/" "div" 6) (list "%" "mod" 6)))
+    (defn fsc-bml-operator-at (s i rows)
+        (if (nil? rows) (empty)
+            (if (fsc-find-string-at? s (str_concat " " (str_concat (head (head rows)) " ")) i 0)
+                (head rows) (fsc-bml-operator-at s i (tail rows)))))
+    (defn fsc-bml-infix-scan (s i best)
+        (fsc-bml-infix-scan-at s i best (fsc-bml-operators)))
+    (defn fsc-bml-infix-scan-at (s i best rows)
+        (if (ge i (str_len s)) best
             (do
                 (let ch (char_at s i))
-                (if quoted
-                    (if (and (str_eq ch "\\") (lt (add i 1) (str_len s)))
-                        (fsc-bml-find-top-eqeq-loop s (add i 2) depth quoted)
-                        (if (str_eq ch "\"")
-                            (fsc-bml-find-top-eqeq-loop s (add i 1) depth false)
-                            (fsc-bml-find-top-eqeq-loop s (add i 1) depth quoted)))
-                    (if (str_eq ch "\"")
-                        (fsc-bml-find-top-eqeq-loop s (add i 1) depth true)
-                        (if (or (str_eq ch "(") (str_eq ch "{"))
-                            (fsc-bml-find-top-eqeq-loop s (add i 1) (add depth 1) quoted)
-                            (if (or (str_eq ch ")") (str_eq ch "}"))
-                                (fsc-bml-find-top-eqeq-loop s (add i 1) (sub depth 1) quoted)
-                                (if (and (eq depth 0) (fsc-find-string-at? s " == " i 0))
-                                    (add i 1)
-                                    (fsc-bml-find-top-eqeq-loop s (add i 1) depth quoted)))))))))
-
-    (defn fsc-bml-find-top-eqeq (s)
-        (fsc-bml-find-top-eqeq-loop s 0 0 false))
-
-    (defn fsc-compile-form-bml-eq-recipe (expr pos)
+                (let close (if (str_eq ch "(") ")" (if (str_eq ch "{") "}" (if (str_eq ch "[") "]" ""))))
+                (if (str_eq ch "\"")
+                    (fsc-bml-infix-scan-at s (fsc-bml-token-after s i (str_len s)) best rows)
+                (if (not (str_eq close ""))
+                    (fsc-bml-infix-scan-at s (add (fsc-bml-span-end s (add i 1) (str_len s) (list close) "group") 1) best rows)
+                    (do
+                        (let row (if (str_eq ch " ") (fsc-bml-operator-at s i rows) (empty)))
+                        (let chosen (if (nil? row) best
+                            (if (or (nil? best) (or (lt (nth row 2) (nth (nth best 1) 2))
+                                (and (ne (nth row 2) 3) (eq (nth row 2) (nth (nth best 1) 2))))) (list (add i 1) row) best)))
+                        (fsc-bml-infix-scan-at s (add i 1) chosen rows)))))))
+    (defn fsc-compile-form-bml-infix (expr found)
         (do
-            (let left-text (fsc-trim (fsc-sub expr 0 pos)))
-            (let right-text (fsc-trim (fsc-sub expr (add pos 2) (str_len expr))))
-            (fsc-rec-form-call "value_eq"
-                (list
-                    (fsc-compile-form-bml-expr-recipe left-text)
-                    (fsc-compile-form-bml-expr-recipe right-text)))))
+            (let pos (head found)) (let row (nth found 1))
+            (let left (fsc-trim (fsc-sub expr 0 pos)))
+            (let right (fsc-trim (fsc-sub expr (add pos (str_len (head row))) (str_len expr))))
+            (if (or (str_eq left "") (str_eq right "")) (fsc-compiler-error-line "form.bml operator needs two operands" expr) 0)
+            (let args (list (fsc-compile-form-bml-expr-recipe left) (fsc-compile-form-bml-expr-recipe right)))
+            (if (or (str_eq (head row) "==") (str_eq (head row) "!="))
+                (fsc-rec-call (str_concat "$bml" (head row)) args)
+                (fsc-rec-form-call (nth row 1) args))))
 
     (defn fsc-bml-find-top-brace-loop (s i depth quoted)
         (if (ge i (str_len s)) (sub 0 1)
@@ -1078,28 +1088,38 @@
                 (fsc-compiler-error-line "unconsumed form.bml do suffix" expr))
             (fsc-rec-do (fsc-bml-block-stmts-recipes-loop expr body-start close (empty)))))
 
+    (defn fsc-bml-control-prefix? (expr word)
+        (and (fsc-prefix? expr (str_concat word " "))
+            (nil? (fsc-bml-operator-at expr (str_len word) (fsc-bml-operators)))))
+
     (defn fsc-compile-form-bml-expr-recipe (raw)
         (do
             (let expr (fsc-bml-normalize-ws (fsc-strip-semi raw)))
             (let open (fsc-find-char-from expr "(" 0))
-            (let eq-pos (fsc-bml-find-top-eqeq expr))
             (if (eq (str_len expr) 0) (fsc-rec-call "empty" (empty))
-            (if (or (fsc-prefix? expr "do ") (fsc-prefix? expr "do{"))
+            (if (or (fsc-bml-control-prefix? expr "do") (fsc-prefix? expr "do{"))
                 (fsc-compile-form-bml-do-recipe expr 2)
             (if (fsc-prefix? expr "{")
                 (fsc-compile-form-bml-do-recipe expr 0)
+            (if (fsc-bml-control-prefix? expr "if")
+                (fsc-compile-form-bml-if-recipe expr)
+            (if (fsc-bml-control-prefix? expr "match")
+                (fsc-compile-form-bml-match-recipe expr)
+            (do
+            (let infix (fsc-bml-infix-scan expr 0 (empty)))
+            (if (not (nil? infix)) (fsc-compile-form-bml-infix expr infix)
+            (if (str_eq (char_at expr 0) "!")
+                (if (eq (str_len expr) 1) (fsc-compiler-error-line "form.bml not needs an operand" expr)
+                    (fsc-rec-form-call "not" (list (fsc-compile-form-bml-expr-recipe (fsc-sub expr 1 (str_len expr))))))
             (if (str_eq (char_at expr 0) "(")
                 (do
                     (let close (fsc-bml-span-end expr 1 (str_len expr) (list ")") "group"))
                     (if (eq close (fsc-last-char-index expr))
                         (fsc-compile-form-bml-expr-recipe (fsc-sub expr 1 close))
-                        (fsc-compiler-error-line "unconsumed form.bml parenthesized suffix" expr)))
-            (if (fsc-prefix? expr "if ")
-                (fsc-compile-form-bml-if-recipe expr)
-            (if (fsc-prefix? expr "match ")
-                (fsc-compile-form-bml-match-recipe expr)
-            (if (ge eq-pos 0)
-                (fsc-compile-form-bml-eq-recipe expr eq-pos)
+                        (if (fsc-bml-comparison-type? (fsc-trim (fsc-sub expr 1 close)))
+                            (fsc-rec-call "$bml-as" (list (intern_trivial_string (fsc-trim (fsc-sub expr 1 close)))
+                                (fsc-compile-form-bml-expr-recipe (fsc-sub expr (add close 1) (str_len expr)))))
+                            (fsc-compiler-error-line "unconsumed form.bml parenthesized suffix" expr))))
             (if (and (ge open 0) (str_eq (char_at expr (fsc-last-char-index expr)) ")"))
                 (fsc-compile-form-bml-call-recipe expr open)
             (if (str_eq expr "empty") (fsc-rec-call "empty" (empty))
@@ -1114,7 +1134,7 @@
                         (fsc-unescape-str (fsc-sub expr 1 (fsc-last-char-index expr))))
                     (fsc-compiler-error-line "unconsumed form.bml string suffix" expr))
                 (if (fsc-bml-expression-name? expr) (fsc-rec-ident expr)
-                    (fsc-compiler-error-line "unconsumed form.bml expression" expr)))))))))))))))))))
+                    (fsc-compiler-error-line "unconsumed form.bml expression" expr)))))))))))))))))))))
 
     (defn fsc-compile-form-bml-def-recipe (line)
         (do
@@ -1126,11 +1146,11 @@
             (if (lt close 0)
                 (fsc-compiler-error-line "form.bml def missing closing ')' on the definition line" line)
             (do
-            (let eq-pos (fsc-bml-skip-trivia line (add close 1) (str_len line)))
+            (let eq-pos (fsc-bml-header-end line (add close 1) (str_len line)))
             (if (not (str_eq (char_at line eq-pos) "="))
                 (fsc-compiler-error-line "form.bml def missing '=' before body" line)
             (do
-            (let name (fsc-trim (fsc-sub line 4 open)))
+            (let name (fsc-bml-return-name (fsc-trim (fsc-sub line 4 open)) line close eq-pos))
             (let args (fsc-sub line (add open 1) close))
             (let body (fsc-sub line (add eq-pos 1) (str_len line)))
             (let param-names (fsc-bml-name-list-strings-loop args 0 (empty)))
@@ -1249,7 +1269,7 @@
             (let stmt-recipes
                 (fsc-bml-block-stmts-recipes-loop body body-start body-end (empty)))
             (fsc-rec-fndef
-                (fsc-bml-class-member-name class-name method-name)
+                (fsc-bml-return-name (fsc-bml-class-member-name class-name method-name) line close (sub (str_len line) 1))
                 param-names
                 (fsc-rec-do stmt-recipes))))
 
@@ -1386,7 +1406,7 @@
             (let body-end (fsc-bml-block-end body body-start 0))
             (let stmt-recipes
                 (fsc-bml-block-stmts-recipes-loop body body-start body-end (empty)))
-            (fsc-rec-fndef name param-names (fsc-rec-do stmt-recipes))))
+            (fsc-rec-fndef (fsc-bml-return-name name line close (sub (str_len line) 1)) param-names (fsc-rec-do stmt-recipes))))
 
     (defn fsc-compile-form-bml-line-recipe (line)
         (do
@@ -1455,7 +1475,7 @@
         (do
             (let after-kw (fsc-bml-nullary-after-kw line))
             (let eq-pos (fsc-find-char-from line "=" after-kw))
-            (fsc-trim (fsc-sub line after-kw eq-pos))))
+            (head (fsc-bml-binding (fsc-trim (fsc-sub line after-kw eq-pos))))))
 
     (defn fsc-compile-form-bml-nullary-recipe (line)
         (do
@@ -1740,7 +1760,285 @@
     (defn fsc-compile-form-bml-section-recipe (body)
         (do
             (fsc-bml-check-section-refs body)
-            (fsc-rec-do (fsc-form-bml-lines-recipes-loop body 0 (empty)))))
+            (head (fsc-bml-typed (fsc-rec-do (fsc-form-bml-lines-recipes-loop body 0 (empty))) (empty) (empty)))))
+
+    ;; Declared comparison contracts are compiler metadata, never runtime
+    ;; wrappers. They choose an equality relationship, not a representation or
+    ;; a general type checker. Direct primitive calls retain their own meaning.
+    (defn fsc-bml-comparison-type? (name)
+        (or (str_eq name "Value") (or (str_eq name "String")
+            (or (str_eq name "Number") (str_eq name "Comparable")))))
+    (defn fsc-bml-binding (text)
+        (do
+            (let colon (str_find text ":" 0))
+            (if (lt colon 0) (list text "")
+                (do
+                    (let name (fsc-trim (fsc-sub text 0 colon)))
+                    (let kind (fsc-trim (fsc-sub text (add colon 1) (str_len text))))
+                    (if (and (not (str_eq name "")) (fsc-bml-comparison-type? kind)) (list name kind)
+                        (fsc-compiler-error-line "unknown form.bml comparison contract" text))))))
+    (defn fsc-bml-return-name (name line close stop)
+        (do
+            (let annotation (fsc-trim (fsc-sub line (add close 1) stop)))
+            (if (str_eq annotation "") name
+                (if (str_eq (char_at annotation 0) ":")
+                    (do (fsc-bml-binding (str_concat name annotation)) (str_concat name annotation))
+                    (fsc-compiler-error-line "invalid form.bml return contract" annotation)))))
+    (defn fsc-bml-type-find (rows name)
+        (if (nil? rows) (empty)
+            (if (str_eq (head (head rows)) name) (head rows) (fsc-bml-type-find (tail rows) name))))
+    (defn fsc-bml-type-of (rows name)
+        (do (let row (fsc-bml-type-find rows name)) (if (nil? row) "" (nth row 1))))
+    (defn fsc-bml-type-name (recipe)
+        (node_value (head (node_children recipe))))
+    (defn fsc-bml-type-signatures (recipes out)
+        (if (nil? recipes) out
+            (fsc-bml-type-signatures (tail recipes)
+                (if (node_eq (node_category (head recipes)) fsc-rec-FNDEF-CAT)
+                    (cons (fsc-bml-binding (fsc-bml-type-name (head recipes))) out) out))))
+    (defn fsc-bml-type-params (params)
+        (if (nil? params) (empty)
+            (cons (fsc-bml-binding (node_value (head params))) (fsc-bml-type-params (tail params)))))
+    (defn fsc-bml-type-names (rows)
+        (if (nil? rows) (empty) (cons (head (head rows)) (fsc-bml-type-names (tail rows)))))
+
+    ;; Read exported contracts from declaration headers, skipping executable
+    ;; bodies. Untyped definitions also enter the catalog: they shadow earlier
+    ;; contracts just as they shadow earlier functions in the source closure.
+    (defn fsc-bml-signature-head (line qualifier out)
+        (if (fsc-prefix? line "def ")
+            (do
+                (let open (fsc-find-char-from line "(" 4))
+                (let close (fsc-find-char-from line ")" open))
+                (let stop (fsc-bml-header-end line (add close 1) (str_len line)))
+                (let name (fsc-trim (fsc-sub line 4 open)))
+                (let qualified (if (str_eq qualifier "") name (fsc-bml-class-member-name qualifier name)))
+                (cons (fsc-bml-binding (fsc-bml-return-name qualified line close stop)) out))
+            (if (fsc-bml-class-nullary-member? line)
+                (cons (fsc-bml-binding (fsc-trim (fsc-sub line (fsc-bml-nullary-after-kw line)
+                    (fsc-find-char-from line "=" 0)))) out) out)))
+    (defn fsc-bml-signature-span (body i end qualifier out)
+        (do
+            (let p (fsc-bml-skip-trivia body i end))
+            (if (ge p end) out
+                (do
+                    (let line (fsc-bml-source-head body p end))
+                    (let named (fsc-bml-signature-head line qualifier out))
+                    (if (fsc-line-opens-block? line)
+                        (do
+                            (let start (fsc-bml-body-start body p end))
+                            (let stop (fsc-bml-block-end body start 0))
+                            (let members (if (fsc-prefix? line "class ")
+                                (cons (list (fsc-trim (fsc-sub line 6 (fsc-bml-word-end line 6))) "")
+                                  (fsc-bml-signature-span body start stop
+                                    (if (fsc-bml-class-header-has-colon? line)
+                                        (fsc-trim (fsc-sub line 6 (fsc-find-char-from line ":" 6))) "") named)) named))
+                            (fsc-bml-signature-span body (add stop 1) end qualifier members))
+                        (fsc-bml-signature-span body (fsc-bml-stmt-end body p end) end qualifier named))))))
+    (defn fsc-form-signature-span (source i end out)
+        (if (ge i end) out
+            (if (str_eq (char_at source i) "\"")
+                (fsc-form-signature-span source (fsc-bml-token-after source i end) end out)
+            (if (str_eq (char_at source i) ";")
+                (fsc-form-signature-span source (fsc-line-next source i) end out)
+            (if (str_eq (fsc-sub source i (add i 2)) "//")
+                (fsc-form-signature-span source (fsc-line-next source i) end out)
+            (if (and (str_eq (fsc-sub source i (add i 5)) "(defn")
+                     (bml-source-space? (char_at source (add i 5))))
+                (do (let start (bml-source-skip-spaces source (add i 5)))
+                    (let stop (bml-source-word-end source start))
+                    (fsc-form-signature-span source stop end (cons (list (fsc-sub source start stop) "") out)))
+                (fsc-form-signature-span source (add i 1) end out)))))))
+    (defn fsc-bml-source-signatures (source i out)
+        (do
+            (let pos (fsc-find-section-open source i))
+            (let prefix (fsc-form-signature-span source i (if (lt pos 0) (str_len source) pos) out))
+            (if (lt pos 0) prefix
+                (do
+                    (let dialect-end (fsc-find-char-from source "]" (add pos 9)))
+                    (let dialect (fsc-sub source (add pos 9) dialect-end))
+                    (let open (fsc-find-char-from source "{" dialect-end))
+                    (let close (if (fsc-high-level-form-dialect? dialect)
+                        (fsc-bml-block-end source (add open 1) 0) (fsc-section-end source (add open 1))))
+                    (fsc-bml-source-signatures source (fsc-section-after source close)
+                        (if (fsc-bml-contract-dialect? dialect)
+                            (fsc-bml-signature-span source (add open 1) close "" prefix) prefix))))))
+    (defn fsc-bml-contract-dialect? (name)
+        (or (str_eq name "form.bml") (or (str_eq name "form.route") (str_eq name "form.action"))))
+    (defn fsc-bml-dependency-signatures (owner tokens seen signatures observations homes)
+        (if (nil? tokens) (list seen signatures observations)
+            (do
+                (let resolution (bml-source-resolution (bml-source-candidates owner (head tokens)) observations))
+                (let path (head resolution))
+                (if (nothing? path) (fsc-compiler-error-line "BML contract source unavailable" (head tokens))
+                    (do
+                        (let next (if (fsc-bml-member? seen path) (list seen signatures (nth resolution 1))
+                            (fsc-bml-file-signatures path (fsc-bml-read-source path) (cons path seen) signatures (nth resolution 1) homes)))
+                        (fsc-bml-dependency-signatures owner (tail tokens) (head next) (nth next 1) (nth next 2) homes))))))
+    (defn fsc-bml-file-signatures (path source seen signatures observations homes)
+        (if (nothing? source) (fsc-compiler-error-line "BML contract source unreadable" path)
+            (do
+                (let current (cons (list "F" (bml-source-absolute path) (bml-source-fingerprint source)) observations))
+                (let surface (if (and (lt (fsc-find-section-open source 0) 0)
+                                      (not (str_eq (substring path (sub (str_len path) 4) (str_len path)) ".bml"))) source
+                    (str_concat (bml-source-prelude-prefix source) (form-source-compile-loop source path 0 (nothing)))))
+                (let dependencies (bml-source-dependencies surface 1))
+                (let imported (fsc-bml-dependency-signatures path dependencies seen signatures current homes))
+                (let linked (fsc-bml-dependency-signatures path (fsc-bml-selected-homes surface homes)
+                    (head imported) (nth imported 1) (nth imported 2) homes))
+                (list (head linked) (fsc-bml-source-signatures source 0 (nth linked 1)) (nth linked 2)))))
+    (defn fsc-bml-read-source (path)
+        (do (let absolute (bml-source-absolute path)) (let source (read_file absolute))
+            (if (nothing? source) (fsc-compiler-error-line "BML contract source unreadable" path)
+                (if (eq (str_len source) (file_size absolute)) source
+                    (fsc-compiler-error-line "BML contract source incomplete" path)))))
+
+    ;; Home discovery reads the emitted symbol surface with comparison metadata
+    ;; erased. It must not choose equality before the imported contracts arrive.
+    (defn fsc-bml-erased-list (recipes)
+        (if (nil? recipes) (empty) (cons (fsc-bml-erased (head recipes)) (fsc-bml-erased-list (tail recipes)))))
+    (defn fsc-bml-erased (recipe)
+        (do (let kids (node_children recipe)) (let cat (node_category recipe))
+            (if (nil? kids) recipe
+            (if (node_eq cat fsc-rec-FNDEF-CAT)
+                (fsc-rec-fndef (head (fsc-bml-binding (node_value (head kids))))
+                    (fsc-bml-type-names (fsc-bml-type-params (node_children (nth kids 1)))) (fsc-bml-erased (nth kids 2)))
+            (if (node_eq cat fsc-rec-LET-CAT)
+                (fsc-rec-let (head (fsc-bml-binding (node_value (head kids)))) (fsc-bml-erased (nth kids 1)))
+            (if (and (node_eq cat fsc-rec-FNCALL-CAT) (str_eq (fsc-bml-type-name (head kids)) "$bml-as"))
+                (fsc-bml-erased (nth kids 2))
+            (if (and (node_eq cat fsc-rec-FNCALL-CAT)
+                    (or (str_eq (fsc-bml-type-name (head kids)) "$bml==") (str_eq (fsc-bml-type-name (head kids)) "$bml!=")))
+                (fsc-rec-form-call "value_eq" (fsc-bml-erased-list (tail kids)))
+                (intern_node cat (fsc-bml-erased-list kids)))))))))
+    (defn fsc-bml-home-byte? (ch)
+        (and (not (str_eq ch "")) (lt (str_find " \t\n\r()\";,[]{}'`=:" ch 0) 0)))
+    (defn fsc-bml-home-token-end (source at end)
+        (if (and (lt at end) (fsc-bml-home-byte? (char_at source at)))
+            (fsc-bml-home-token-end source (add at 1) end) at))
+    (defn fsc-bml-home-symbols (source at end previous call-head homes used defined)
+        (if (ge at end) (list used defined)
+            (do (let ch (char_at source at))
+                (if (or (str_eq ch ";") (str_eq (fsc-sub source at (add at 2)) "//"))
+                    (fsc-bml-home-symbols source (fsc-line-next source at) end previous call-head homes used defined)
+                (if (str_eq ch "\"")
+                    (fsc-bml-home-symbols source (fsc-bml-token-after source at end) end previous 0 homes used defined)
+                (if (not (fsc-bml-home-byte? ch))
+                    (fsc-bml-home-symbols source (add at 1) end previous
+                        (if (str_eq ch "(") 1 (if (bml-source-space? ch) call-head 0)) homes used defined)
+                    (do
+                        (let stop (fsc-bml-home-token-end source at end))
+                        (let token (fsc-sub source at stop))
+                        (let home (fsc-bml-type-find homes token))
+                        (let known (not (nil? home)))
+                        (let defining (or (str_eq previous "defn") (str_eq previous "def")))
+                        (fsc-bml-home-symbols source stop end token 0 homes
+                            (if (and known (and (not defining) (not (and call-head (nth home 2))))) (cons token used) used)
+                            (if (and known defining) (cons token defined) defined)))))))))
+    (defn fsc-bml-home-selected (rows used defined)
+        (if (nil? rows) (empty)
+            (do (let row (head rows)) (let rest (fsc-bml-home-selected (tail rows) used defined))
+                (if (and (fsc-bml-member? used (head row)) (not (fsc-bml-member? defined (head row))))
+                    (cons (nth row 1) rest) rest))))
+    (defn fsc-bml-selected-homes (surface homes)
+        (if (nil? homes) (empty)
+            (do
+                (let candidates (fsc-bml-home-candidates surface homes))
+                (if (nil? candidates) (empty)
+                    (do
+                    (let names (fsc-bml-home-symbols surface 0 (str_len surface) "" 0 candidates (empty) (empty)))
+                    (fsc-bml-home-selected candidates (head names) (nth names 1)))))))
+    ;; A byte search only narrows the registry; the lexical pass still decides
+    ;; whether a name is used or defined. Raw Form already has that surface.
+    (defn fsc-bml-home-candidates (source rows)
+        (if (nil? rows) (empty)
+            (do (let rest (fsc-bml-home-candidates source (tail rows)))
+                (if (ge (str_find source (head (head rows)) 0) 0) (cons (head rows) rest) rest))))
+    (defn fsc-bml-home-rows (lines out bound)
+        (if (nil? lines) (reverse out)
+            (do (let line (bml-source-trim (head lines))) (let words (bml-source-words line))
+                (fsc-bml-home-rows (tail lines)
+                    (if (or (str_eq (substring line 0 1) "#") (lt (len words) 2)) out
+                        (cons (list (head words) (nth words 1) (fsc-bml-member? bound (head words))) out)) bound))))
+    (defn fsc-bml-home-open (path observations)
+        (if (or (nothing? path) (lt (file_size (bml-source-absolute path)) 0))
+            (list (empty) (if (nothing? path) observations (cons (list "N" (bml-source-absolute path) "0000000000000000") observations)))
+            (do (let source (fsc-bml-read-source path))
+                (let resolution (bml-source-resolution (list "runtime/fkwu-optable.h" "../runtime/fkwu-optable.h") observations))
+                (let table-path (head resolution))
+                (if (nothing? table-path) (form_error "native call-head table unavailable")
+                    (do (let table (fsc-bml-read-source table-path))
+                        (list (fsc-bml-home-rows (split-on source "\n") (empty) (bml-source-reserved-heads table))
+                            (cons (list "F" (bml-source-absolute table-path) (bml-source-fingerprint table))
+                                (cons (list "F" (bml-source-absolute path) (bml-source-fingerprint source)) (nth resolution 1)))))))))
+    (defn fsc-bml-home-context (owner)
+        (do (let resolution (bml-source-resolution (bml-source-candidates owner "form-stdlib/home-index.txt") (empty)))
+            (fsc-bml-home-open (head resolution) (nth resolution 1))))
+    (defn fsc-bml-typed-list (recipes env signatures)
+        (if (nil? recipes) (empty)
+            (cons (fsc-bml-typed (head recipes) env signatures) (fsc-bml-typed-list (tail recipes) env signatures))))
+    (defn fsc-bml-typed-nodes (rows)
+        (if (nil? rows) (empty) (cons (head (head rows)) (fsc-bml-typed-nodes (tail rows)))))
+    (defn fsc-bml-typed-sequence (recipes env signatures out result-type)
+        (if (nil? recipes) (list (fsc-rec-do (fsc-rev out)) result-type)
+            (do
+                (let recipe (head recipes))
+                (let row (fsc-bml-typed recipe env signatures))
+                (let next-env (if (node_eq (node_category recipe) fsc-rec-LET-CAT)
+                    (cons (list (head (fsc-bml-binding (fsc-bml-type-name recipe))) (nth row 1)) env) env))
+                (fsc-bml-typed-sequence (tail recipes) next-env signatures (cons (head row) out) (nth row 1)))))
+    (defn fsc-bml-comparison-contract (left right)
+        (if (or (str_eq left "Value") (str_eq right "Value")) "Value"
+        (if (str_eq left "") right
+        (if (str_eq right "") left
+        (if (str_eq left right) left
+        (if (and (or (str_eq left "Number") (str_eq left "Comparable"))
+                 (or (str_eq right "Number") (str_eq right "Comparable"))) "Comparable"
+            (fsc-compiler-error-line "incompatible form.bml equality contracts" (str_concat left (str_concat " / " right)))))))))
+    (defn fsc-bml-typed-equality (name rows)
+        (do
+            (let kind (fsc-bml-comparison-contract (nth (head rows) 1) (nth (nth rows 1) 1)))
+            (let args (fsc-bml-typed-nodes rows))
+            (let numeric (or (str_eq kind "Number") (str_eq kind "Comparable")))
+            (let positive (fsc-rec-form-call (if numeric "eq" (if (str_eq kind "String") "str_eq" "value_eq")) args))
+            (list (if (str_eq name "$bml==") positive
+                (if numeric (fsc-rec-form-call "ne" args) (fsc-rec-form-call "not" (list positive)))) "")))
+    (defn fsc-bml-typed (recipe env signatures)
+        (do
+            (let kids (node_children recipe))
+            (let cat (node_category recipe))
+            (if (nil? kids) (list recipe "")
+            (if (node_eq cat fsc-rec-IDENT-CAT)
+                (list recipe (fsc-bml-type-of env (node_value (head kids))))
+            (if (node_eq cat fsc-rec-DO-CAT)
+                (fsc-bml-typed-sequence kids env (fsc-bml-type-signatures kids signatures) (empty) "")
+            (if (node_eq cat fsc-rec-FNDEF-CAT)
+                (do
+                    (let binding (fsc-bml-binding (node_value (head kids))))
+                    (let params (fsc-bml-type-params (node_children (nth kids 1))))
+                    (let body (fsc-bml-typed (nth kids 2) (append params env) signatures))
+                    (list (fsc-rec-fndef (head binding) (fsc-bml-type-names params) (head body)) ""))
+            (if (node_eq cat fsc-rec-LET-CAT)
+                (do
+                    (let binding (fsc-bml-binding (node_value (head kids))))
+                    (let value (fsc-bml-typed (nth kids 1) env signatures))
+                    (list (fsc-rec-let (head binding) (head value))
+                        (if (str_eq (nth binding 1) "") (nth value 1) (nth binding 1))))
+            (if (node_eq cat fsc-rec-FNCALL-CAT)
+                (do
+                    (let name (fsc-bml-type-name (head kids)))
+                    (if (str_eq name "$bml-as")
+                        (list (head (fsc-bml-typed (nth kids 2) env signatures)) (node_value (nth kids 1)))
+                        (do
+                            (let rows (fsc-bml-typed-list (tail kids) env signatures))
+                            (if (or (str_eq name "$bml==") (str_eq name "$bml!=")) (fsc-bml-typed-equality name rows)
+                                (list (fsc-rec-call name (fsc-bml-typed-nodes rows))
+                                    (if (nil? (fsc-bml-type-find env name)) (fsc-bml-type-of signatures name) ""))))))
+                (do
+                    (let rows (fsc-bml-typed-list kids env signatures))
+                    (list (intern_node cat (fsc-bml-typed-nodes rows))
+                        (if (and (node_eq cat fsc-rec-IF3-CAT) (str_eq (nth (nth rows 1) 1) (nth (nth rows 2) 1)))
+                            (nth (nth rows 1) 1) "")))))))))))
 
     (defn fsc-compile-form-route-section-recipe (body)
         (fsc-compile-form-bml-section-recipe body))
@@ -3164,7 +3462,7 @@
             (let p (fsc-section-after-spaces src start))
             (if (str_eq (char_at src p) "\n") (add p 1) start)))
 
-    (defn form-source-compile-loop (src out-path i)
+    (defn form-source-compile-loop (src out-path i signatures)
         (do
             (let pos (fsc-find-section-open src i))
             (if (lt pos 0) (fsc-strip-bml-comments (fsc-sub src i (str_len src)))
@@ -3180,11 +3478,39 @@
                         (str_concat
                             (fsc-strip-bml-comments (fsc-sub src i pos))
                             (str_concat
-                            (fsc-compile-section dialect-name body out-path)
-                            (form-source-compile-loop src out-path (fsc-section-after src close))))))))
+                            (if (fsc-bml-contract-dialect? dialect-name)
+                                (do (fsc-bml-check-section-refs body)
+                                    (let recipes (fsc-form-bml-lines-recipes-loop body 0 (empty)))
+                                    (fsc-source-emit-module (if (nothing? signatures) (fsc-bml-erased (fsc-rec-do recipes))
+                                        (head (fsc-bml-typed-sequence recipes (empty) signatures (empty) "")))))
+                                (fsc-compile-section dialect-name body out-path))
+                            (form-source-compile-loop src out-path (fsc-section-after src close) signatures)))))))
 
     (defn form-source-compile-text (src out-path)
-        (form-source-compile-loop src out-path 0))
+        (do (let owner out-path)
+            (let homes (fsc-bml-home-context owner))
+            (let catalog (fsc-bml-file-signatures owner src (list owner) (empty) (nth homes 1) (head homes)))
+            (form-source-compile-loop src out-path 0 (nth catalog 1))))
+
+    ;; The memo's dependency choices are Form data. The checkout carrier only
+    ;; compares their bytes; it does not parse another dependency language.
+    (defn form-source-compile-packet (src path prefix home-path)
+        (do
+            (let owner path)
+            (let homes (fsc-bml-home-open home-path (empty)))
+            (let catalog (fsc-bml-file-signatures owner src (list owner) (empty) (nth homes 1) (head homes)))
+            (let compiler-resolution (bml-source-resolution
+                (list "form/form-stdlib/bml-floor-compile.fk" "form-stdlib/bml-floor-compile.fk") (nth catalog 2)))
+            (let compiler-path (head compiler-resolution))
+            (let compiler-homes (fsc-bml-home-context compiler-path))
+            (let compiler (fsc-bml-file-signatures compiler-path (fsc-bml-read-source compiler-path) (list compiler-path) (empty)
+                (append (nth compiler-homes 1) (nth compiler-resolution 1)) (head compiler-homes)))
+            (str_concat "fklow2\n"
+                (str_concat (bml-source-manifest-row "P" path "0000000000000000")
+                    (str_concat (bml-source-manifest-row "C" (host_cwd) "0000000000000000")
+                      (str_concat (bml-source-manifest-row "H" home-path "0000000000000000")
+                        (str_concat (bml-source-manifest (nth compiler 2))
+                            (str_concat prefix (form-source-compile-loop src path 0 (nth catalog 1))))))))))
 
     (defn fsc-string-to-bytes-len-loop (s s-len i)
         (if (ge i s-len) (empty)
@@ -3197,7 +3523,7 @@
     (defn form-source-compile-file (in-path out-path)
         (do
             (let src (read_file in-path))
-            (let compiled (form-source-compile-text src out-path))
+            (let compiled (form-source-compile-text src in-path))
             (write_file_text out-path compiled)))
 
 0

@@ -24,6 +24,7 @@ import {
 } from "./kernel.ts";
 import { createNodeKernelHost } from "./node-host.ts";
 import { readAll, readForm } from "./reader.ts";
+import { FKWU_RESERVED_HEADS } from "./reserved-heads.ts";
 
 type CrashTraceContext = {
   mode: string;
@@ -392,6 +393,7 @@ function homeLinks(text: string, rows: Array<[string, string]>): string[] {
   const used = rows.map(() => false);
   const defined = rows.map(() => false);
   let prev = "";
+  let callHead = false;
   let i = 0;
   while (i < text.length) {
     const c = text.charAt(i);
@@ -400,6 +402,7 @@ function homeLinks(text: string, rows: Array<[string, string]>): string[] {
       continue;
     }
     if (c === '"') {
+      callHead = false;
       i++;
       while (i < text.length && text[i] !== '"') {
         if (text[i] === "\\") i++;
@@ -409,6 +412,8 @@ function homeLinks(text: string, rows: Array<[string, string]>): string[] {
       continue;
     }
     if (!homeSymByte(c)) {
+      if (c === "(") callHead = true;
+      else if (!" \t\n\r".includes(c)) callHead = false;
       i++;
       continue;
     }
@@ -418,10 +423,11 @@ function homeLinks(text: string, rows: Array<[string, string]>): string[] {
     rows.forEach((row, h) => {
       if (row[0] === tok) {
         if (prev === "defn" || prev === "def") defined[h] = true;
-        else used[h] = true;
+        else if (!callHead || !FKWU_RESERVED_HEADS.has(tok)) used[h] = true;
       }
     });
     prev = tok;
+    callHead = false;
   }
   return rows.filter((_, h) => used[h] && !defined[h]).map((row) => row[1]);
 }
