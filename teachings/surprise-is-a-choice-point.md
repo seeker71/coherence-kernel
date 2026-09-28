@@ -62,3 +62,7 @@ let walk = oac-backtrack-walk(list(first, again), list(gap), list());
 The body's own loop walks this way: `observe/native-turn-run.bml` takes a gap as two options, and a turn that did
 not turn its band green hands its band reading, the lane's status and its candidate's diff to the second option,
 which asks the lane again in line with the first. Witness: `control/tests/backtrack-band.fk` (255).
+
+Where the code still meets surprise with a code: `./fkwu observe/choice-reading-run.bml` counts the `-1` returns and
+the control-invite uses outside `control/`, and names the files carrying the most returns — a mirror for the next
+movement, not a gate.
