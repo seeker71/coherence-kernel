@@ -148,6 +148,17 @@ cache or telemetry publication failure. Disk repair reuses those bytes without
 compilation or installation. Genuine carrier loss keeps its separate execution
 fault, including when older observations are still awaiting publication.
 Glass displays cache care without entering its execution-fault hold.
+The owner retains an organ-health reading alongside each exact image. Progress
+resumes publication when a source file or parent directory arrives, a lease is
+released or expires, or the relevant filesystem evidence changes. Unchanged
+waiting preserves the owner and emits no new Glass publication. Explicit holds
+require their correlated release. A failed resumed write backtracks through
+Form's choice flow with the original image, identity and new observation intact;
+other ready care can proceed. The selected cache path and measured bytes travel
+with their publication, so resource changes cannot redirect delayed evidence.
+These are observations at owner progress, not filesystem push notifications.
+The current metadata carrier does not expose permission or free-space changes;
+the existing digest-bound control can offer those changed conditions.
 The current boundary is lowerable scalar graphs; whole-unit source admission
 and the complete program-image call path remain distinct work.
 
