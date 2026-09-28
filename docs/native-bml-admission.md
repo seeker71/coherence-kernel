@@ -23,18 +23,56 @@ section [form.bml] {
   class Example {
     def answer(enabled) {
       let base = 40;
-      if enabled then do { add(base, 2); } else 0;
+      if enabled then do { base + 2; } else 0;
     }
   }
   answer(1);
 }
 ```
 
-The executable door lowers through `bml-floor-compile.fk` in a RAM pipe.
-The seed's existing floor digest includes the Form compiler's dependency chain,
-so a changed compiler invalidates affected cached BML images. Source admission
-still compiles a whole unit synchronously. On-demand specialization, publication
-under concurrent work and complete portable native emission remain
+Arithmetic, ordering and boolean operators lower to the existing native Form
+recipes, preserving evaluation order and short-circuit behavior. Binary operators
+are separated by whitespace so hyphenated Form names remain whole. Parentheses
+select grouping. `!` negates an expression.
+
+`==` and `!=` use exact value equality by default. Declared comparison contracts
+select another relationship without runtime wrappers:
+
+```bml
+def same-text(a: String, b: String) = a == b;
+def measured(): Number = 1;
+def same-number(a: Number, b: Number) = a == b;
+let exact: Value = measured();
+```
+
+`String` retains native string/nothing validation. `Number` and `Comparable`
+select native scalar numeric promotion and the existing general comparison
+relationship. `Value` selects exact value identity, including the distinction
+between integer and floating values. These are comparison contracts, not a
+general static type checker or a representation conversion. A `(Type)`
+ascription can state the relationship at a polymorphic boundary. Conflicting
+String and Number contracts refuse compilation; an explicit Value contract
+selects exact comparison. Parameters, local bindings and return declarations
+carry contracts; imported return declarations follow the admitted source order.
+
+Dependencies and selected function homes are read from the same emitted Form
+surface. Native primitive names in call position retain their built-in meaning;
+the same names in value position can select a declared function home. Registry
+selection belongs to the entry unit and travels through its dependency graph.
+Comment directives start with `preludes:` or `import`; quoted source and ordinary
+prose do not introduce dependencies. Raw Form imports remain active beside BML
+sections, including imports of `.fk` files that themselves carry BML sections.
+
+The executable door lowers through `bml-floor-compile.fk` in a RAM pipe. Form
+owns the source manifest for the optional `.lowfk` memo: the exact owner and
+working context and selected registry, imported source and compiler bytes, and absent earlier lookup
+candidates. The checkout carrier checks the packet, publishes it atomically and
+rejects incomplete or changed observations. The native `.fkb` image retains its
+own dependency identity checks. Changing an erased source annotation can change
+the emitted caller and therefore invalidates the lowering memo.
+
+Source admission still compiles a whole unit synchronously. On-demand
+specialization and complete portable native emission remain
 [north-star work](fkwu-form-native-north-star.md).
 
 The separate cursor grammar in `grammars/form-bml.fk` is an explicit proof
@@ -50,33 +88,13 @@ diagnostic flow retains the observation and correlated response and action.
 Expected nonzero children are identified individually; an unexpected nonzero
 child or mismatched result prevents acceptance.
 
-The [current execution](evidence/fkwu/bml-admission.json) accepts 32 cases and
-retains 24 source/runtime identities, checked before and after execution.
-Successful children have empty stderr. Deliberately refused children retain
-their actual nonzero status and diagnostic. The witness's own refusal retains
-three correlated observation, response and applied health rows through the
-shared process reader.
-The outer runner retains its cache-renewal warning separately from those child
-streams.
-
-The [cache renewal execution](evidence/fkwu/bml-cache-renewal.json) holds the
-same source and its old cached image, then invokes the ordinary source runner.
-Form renews the image and executes the complete body. The source, root binary
-and handwritten C remain unchanged; the compiler changes. The expected cache
-renewal warning remains in the evidence.
-
-The [integration reading](evidence/fkwu/bml-admission-integration.json) retains
-fresh preflight and exact output for ten existing compiler, class/ref, numeric
-literal, cursor and health checks. The compiler health owner reports scoped
-`observed` or `unobserved` state from complete source reads, ontology coverage,
-round trips and actual text emission. It does not certify every construct or
-platform. A missing source root is unobserved.
-
-The [retained-source re-observation](evidence/fkwu/dsv4-held-source-rewitness.json)
-walks all 81 held DSV4 source rows in order and refuses a changed final hash.
-It preserves the original execution identities and does not repeat or relabel
-the numerical runs. The [admission baseline](evidence/fkwu/bml-admission-baseline.json)
-retains its original, narrower identity scope as separate execution evidence.
+Successful witness children have empty stderr. Deliberately refused children
+retain their actual nonzero status and diagnostic. The witness's own refusal
+retains three correlated observation, response and applied health rows through
+the shared process reader. The outer runner retains cache-renewal warnings
+separately from those child streams. Its report names the current case count,
+source identities and exact observations; a successful process exit alone does
+not establish those behaviors.
 
 Custom BMF sections keep their rule data, including bare `do` and `end` names.
 Their quote/comment/brace reader does not assign executable BML scope to those

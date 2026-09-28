@@ -1,6 +1,6 @@
 ; bml-source.fk - shared BML source cells.
 ;
-; preludes: form-stdlib/core.fk form-stdlib/branch-choice-order.fk form-stdlib/choice-receipt.fk
+; preludes: form-stdlib/core.fk form-stdlib/branch-choice-order.fk form-stdlib/choice-receipt.fk form-stdlib/form-fs.fk form-stdlib/line-grammar.fk
 ;
 ; This module names BML-shaped source forms before any dialect chooses what
 ; they mean. A route lowerer can map these cells to KernelHTTPRoute values;
@@ -44,11 +44,10 @@
     (defn bml-source-prelude-line (line)
         (do
             (let text (bml-source-trim line))
-            (if (str_eq (substring text 0 12) "// preludes:")
-                (substring text 12 (str_len text))
-                (if (str_eq (substring text 0 11) "; preludes:")
-                    (substring text 11 (str_len text))
-                    (nothing)))))
+            (let width (if (str_eq (substring text 0 2) "//") 2 (if (str_eq (substring text 0 1) ";") 1 0)))
+            (let payload (if (eq width 0) "" (bml-source-trim (substring text width (str_len text)))))
+            (if (str_eq (substring payload 0 9) "preludes:")
+                (substring payload 9 (str_len payload)) (nothing))))
 
     (defn bml-source-quote-state (line at quoted semi-comment)
         (if (ge at (str_len line)) quoted
@@ -63,6 +62,12 @@
 
     (defn bml-source-preludes (text)
         (bml-source-preludes-kind text 0))
+    (defn bml-source-prelude-prefix (text)
+        (bml-source-prelude-prefix-lines (bml-source-preludes text) ""))
+    (defn bml-source-prelude-prefix-lines (payloads out)
+        (if (nil? payloads) out
+            (bml-source-prelude-prefix-lines (tail payloads)
+                (str_concat out (str_concat "; preludes:" (str_concat (head payloads) "\n"))))))
     ; Direct Form callers select semicolon comments; BML uses statement
     ; terminators and therefore keeps scanning after an inline semicolon.
     (defn bml-source-preludes-kind (text semi-comment)
@@ -79,6 +84,155 @@
                         (bml-source-quote-state line 0 quoted semi-comment)))
                 (bml-source-preludes-from text (add stop 1) next-quoted
                     (if (nothing? payload) held (cons payload held)) semi-comment))))
+
+    ;; Source dependencies use the same search order as the checkout runner.
+    ;; Absolute candidates keep host read-side searching out of the decision.
+    ;; Retain each loader spelling as its identity; `..` through a symlink
+    ;; and repeated differently spelled imports are not normalization steps.
+    (defn bml-source-absolute? (path)
+        (or (str_eq (substring path 0 1) "/")
+            (and (str_eq (substring path 1 2) ":")
+                (or (and (ge (ord (char_at path 0)) 65) (le (ord (char_at path 0)) 90))
+                    (and (ge (ord (char_at path 0)) 97) (le (ord (char_at path 0)) 122))))))
+    (defn bml-source-absolute (path)
+        (if (bml-source-absolute? path) path (fs-path-join (host_cwd) path)))
+    (defn bml-source-root-prefix (owner i last)
+        (do (let found (str_find owner "/form/" i))
+            (if (lt found 0) last (bml-source-root-prefix owner (add found 1) (add found 6)))))
+    (defn bml-source-repo-prefix (owner)
+        (do (let form (str_find owner "/form/" 0)) (let learn (str_find owner "/learn/" 0))
+            (if (lt form 0) (if (lt learn 0) 0 (add learn 1))
+                (if (or (lt learn 0) (lt form learn)) (add form 1) (add learn 1)))))
+    (defn bml-source-candidates (owner token)
+        (do
+            (let relative (str_concat (substring owner 0 (add (fs-last-slash owner) 1)) token))
+            (let form-root (if (str_eq (substring owner 0 5) "form/") 5 (bml-source-root-prefix owner 0 0)))
+            (let repo-root (bml-source-repo-prefix owner))
+            (if (bml-source-absolute? token) (list token)
+                (append (list relative)
+                    (append (if (gt form-root 0) (list (str_concat (substring owner 0 form-root) token)) (empty))
+                        (append (list (str_concat "form/" token) token)
+                            (if (gt repo-root 0) (list (str_concat (substring owner 0 repo-root) token)) (empty))))))))
+    (defn bml-source-resolution (paths absent)
+        (if (nil? paths) (list (nothing) absent)
+            (if (ge (file_size (bml-source-absolute (head paths))) 0) (list (head paths) absent)
+                (bml-source-resolution (tail paths) (cons (list "N" (bml-source-absolute (head paths)) "0000000000000000") absent)))))
+    (defn bml-source-resolve (owner token)
+        (head (bml-source-resolution (bml-source-candidates owner token) (empty))))
+
+    ;; FNV-1a uses two unsigned limbs so the fingerprint has the same bytes
+    ;; on every Form walker, without relying on tagged integer overflow.
+    (defn bml-source-hex-word (word digits out)
+        (if (eq digits 0) out
+            (bml-source-hex-word (div word 16) (sub digits 1)
+                (str_concat (substring "0123456789abcdef" (mod word 16) (add (mod word 16) 1)) out))))
+    (defn bml-source-fingerprint (source)
+        (bml-source-fingerprint-at source 0 (str_len source) 3421674724 2216829733))
+    (defn bml-source-fingerprint-at (source i end hi lo)
+        (if (ge i end) (str_concat (bml-source-hex-word hi 8 "") (bml-source-hex-word lo 8 ""))
+            (do (let low (bxor lo (str_byte_at source i)))
+                (let product (mul low 435))
+                (bml-source-fingerprint-at source (add i 1) end
+                    (band (add (add (mul hi 435) (mul low 256)) (div product 4294967296)) 4294967295)
+                    (band product 4294967295)))))
+    (defn bml-source-manifest-row (kind path hash)
+        (str_concat kind (str_concat " " (str_concat hash (str_concat " "
+            (str_concat (int_to_str (str_len path)) (str_concat ":" (str_concat path "\n"))))))))
+    (defn bml-source-manifest (rows)
+        (if (nil? rows) "\n"
+            (str_concat (bml-source-manifest-row (head (head rows)) (nth (head rows) 1) (nth (head rows) 2))
+                (bml-source-manifest (tail rows)))))
+    ;; The generated checkout table is also the call-head surface seen by the
+    ;; seed. Value-position names keep their ordinary home resolution.
+    (defn bml-source-reserved-heads (table)
+        (bml-source-reserved-rows table 0 (list "defn" "do" "let" "if")))
+    (defn bml-source-reserved-rows (table at names)
+        (do (let start (str_find table "{ \"" at))
+            (if (lt start 0) names
+                (do (let end (str_find table "\"" (add start 3)))
+                    (if (lt end 0) (form_error "incomplete native call-head table")
+                        (bml-source-reserved-rows table (add end 1) (cons (substring table (add start 3) end) names)))))))
+    (defn bml-source-word-end (s i)
+        (if (ge i (str_len s)) i
+            (if (or (bml-source-space? (char_at s i)) (str_eq (char_at s i) ",")) i
+                (bml-source-word-end s (add i 1)))))
+    (defn bml-source-words-at (s i held)
+        (do (let start (bml-source-skip-spaces s i))
+            (if (ge start (str_len s)) (reverse held)
+                (if (str_eq (char_at s start) ",") (bml-source-words-at s (add start 1) held)
+                    (do (let end (bml-source-word-end s start))
+                        (bml-source-words-at s end (cons (substring s start end) held)))))))
+    (defn bml-source-words (s) (bml-source-words-at s 0 (empty)))
+    (defn bml-source-path-token? (s)
+        (or (str_eq (substring s (sub (str_len s) 3) (str_len s)) ".fk")
+            (str_eq (substring s (sub (str_len s) 4) (str_len s)) ".bml")))
+    (defn bml-source-dependency-tokens (tokens held)
+        (if (nil? tokens) (list (reverse held) 0)
+            (do (let token (bml-source-import-token (head tokens)))
+                (if (str_eq token "\\") (list (reverse held) 1)
+                    (if (bml-source-path-token? token) (bml-source-dependency-tokens (tail tokens) (cons token held))
+                        (list (reverse held) 0))))))
+    (defn bml-source-import-token (token)
+        (do (let size (str_len token))
+            (if (eq size 0) token
+                (if (str_eq (char_at token 0) ";") (bml-source-import-token (substring token 1 size))
+                    (if (str_eq (char_at token (sub size 1)) ";") (bml-source-import-token (substring token 0 (sub size 1))) token)))))
+    (defn bml-source-import-end (source at)
+        (if (ge at (str_len source)) at
+            (if (or (bml-source-space? (char_at source at))
+                    (or (str_eq (char_at source at) ",") (str_eq (char_at source at) ";"))) at
+                (bml-source-import-end source (add at 1)))))
+    (defn bml-source-dependencies (source semi)
+        (bml-source-dependency-lines source 0 0 0 semi (empty)))
+    (defn bml-source-import-start (line i)
+        (if (ge i (str_len line)) i
+            (if (or (bml-source-space? (char_at line i)) (str_eq (char_at line i) ":"))
+                (bml-source-import-start line (add i 1)) i)))
+    (defn bml-source-import-word? (line i)
+        (if (eq i 6) true
+            (do (let byte (ord (char_at line i)))
+                (let lower (if (and (ge byte 65) (le byte 90)) (add byte 32) byte))
+                (and (eq lower (ord (char_at "import" i))) (bml-source-import-word? line (add i 1))))))
+    (defn bml-source-import-line (line)
+        (do
+            (let stripped (bml-source-trim line))
+            (let text (if (str_eq (substring stripped 0 1) ";")
+                (bml-source-trim (substring stripped 1 (str_len stripped))) stripped))
+            (if (or (lt (str_len text) 7) (not (bml-source-import-word? text 0))) (nothing)
+                (if (not (or (bml-source-space? (char_at text 6))
+                    (or (str_eq (char_at text 6) ":") (str_eq (char_at text 6) "\"")))) (nothing)
+                    (do
+                        (let start (bml-source-import-start text 6))
+                        (let quoted (str_eq (char_at text start) "\""))
+                        (let from (if quoted (add start 1) start))
+                        (let end (if quoted (str_find text "\"" from) (bml-source-import-end text from)))
+                        (if (lt end from) (form_error "unfinished source import")
+                            (bml-source-import-token (substring text from end))))))))
+    (defn bml-source-comment-at (line at quoted)
+        (if (ge at (str_len line)) -1
+            (do (let ch (char_at line at))
+                (if (and quoted (str_eq ch "\\")) (bml-source-comment-at line (add at 2) quoted)
+                    (if (str_eq ch "\"") (bml-source-comment-at line (add at 1) (not quoted))
+                        (if (and (not quoted) (str_eq ch ";")) at
+                            (bml-source-comment-at line (add at 1) quoted)))))))
+    (defn bml-source-dependency-lines (source at quoted continued semi held)
+        (if (ge at (str_len source))
+            (if continued (form_error "unfinished source prelude continuation") (reverse held))
+            (do
+                (let found (str_find source "\n" at)) (let end (if (lt found 0) (str_len source) found))
+                (let line (substring source at end)) (let stripped (bml-source-trim line))
+                (let comment (if semi (bml-source-comment-at line 0 quoted) -1))
+                (let directive (if (ge comment 0) (substring line comment (str_len line)) (if quoted "" line)))
+                (let payload (if continued
+                    (if (str_eq (substring stripped 0 1) ";") (substring stripped 1 (str_len stripped))
+                        (form_error "source prelude continuation needs a comment line")) (bml-source-prelude-line directive)))
+                (let tokens (if (nothing? payload) (list (empty) 0) (bml-source-dependency-tokens (bml-source-words payload) (empty))))
+                (let imported (if (ge comment 0) (bml-source-import-line directive) (nothing)))
+                (let bare (if (or quoted (str_eq (substring stripped 0 1) ";")) (nothing) (bml-source-import-line line)))
+                (let next-quoted (if (and (not quoted) (str_eq (substring stripped 0 1) ";")) 0 (bml-source-quote-state line 0 quoted semi)))
+                (bml-source-dependency-lines source (add end 1) next-quoted (nth tokens 1) semi
+                    (append (if (and (not (nothing? bare)) (bml-source-path-token? bare)) (list bare) (empty))
+                        (append (reverse (head tokens)) (if (and (not (nothing? imported)) (bml-source-path-token? imported)) (cons imported held) held)))))))
 
     (defn bml-source-last-char-index (s)
         (sub (str_len s) 1))

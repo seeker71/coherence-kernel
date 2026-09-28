@@ -5479,6 +5479,7 @@ func homeLinks(text string, rows [][2]string) []string {
 	used := make([]bool, len(rows))
 	defined := make([]bool, len(rows))
 	prev := ""
+	callHead := false
 	for i := 0; i < len(text); {
 		c := text[i]
 		if c == ';' || (c == '/' && i+1 < len(text) && text[i+1] == '/') {
@@ -5488,6 +5489,7 @@ func homeLinks(text string, rows [][2]string) []string {
 			continue
 		}
 		if c == '"' {
+			callHead = false
 			i++
 			for i < len(text) && text[i] != '"' {
 				if text[i] == '\\' {
@@ -5499,6 +5501,11 @@ func homeLinks(text string, rows [][2]string) []string {
 			continue
 		}
 		if !homeSymByte(c) {
+			if c == '(' {
+				callHead = true
+			} else if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+				callHead = false
+			}
 			i++
 			continue
 		}
@@ -5511,12 +5518,13 @@ func homeLinks(text string, rows [][2]string) []string {
 			if row[0] == tok {
 				if prev == "defn" || prev == "def" {
 					defined[h] = true
-				} else {
+				} else if !callHead || !fkwuReservedHeads[tok] {
 					used[h] = true
 				}
 			}
 		}
 		prev = tok
+		callHead = false
 	}
 	var units []string
 	for h, row := range rows {

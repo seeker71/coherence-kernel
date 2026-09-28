@@ -33,57 +33,57 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
  for(uint j=0;j<k;j++){chosen[j]=v[j];selected[j]=ix[j];}
 }
 ";
-  def fcsam-seed-valid(seed) = if not(str_eq(value_kind(seed),"int")) then 0 else and(gt(seed,0),lt(seed,2147483647));
-  def fcsam-positive(xs) = if nil?(xs) then 1 else and(gt(head(xs),0),fcsam-positive(tail(xs)));
+  def fcsam-seed-valid(seed) = if (!((String) value_kind(seed) == "int")) then 0 else ((seed > 0) && (seed < 2147483647));
+  def fcsam-positive(xs) = if nil?(xs) then 1 else ((head(xs) > 0) && fcsam-positive(tail(xs)));
   // [vocabulary, pipelines, owned buffers, initial seed, current RNG, draws,
   //  aggregate diagnostics]. Diagnostics contain no token IDs or text.
   // Even partial admission owns its positive buffer handles until close.
-  def fcsam-open(vocab,seed) = if not(and(fcsam-seed-valid(seed),ge(vocab,TopK()))) then list() else {
+  def fcsam-open(vocab,seed) = if (!(fcsam-seed-valid(seed) && (vocab >= TopK()))) then list() else {
    let source = fcsam-msl();
    let pipes = list(metal_pipeline(source,"fcsam_parts"),metal_pipeline(source,"fcsam_merge"),metal_pipeline(source,"fcsam_clear"));
-   let bytes = mul(mul(Partitions(),TopK()),4);
-   let buffers = list(metal_buf_alloc(bytes),metal_buf_alloc(bytes),metal_buf_alloc(mul(TopK(),4)),metal_buf_alloc(mul(TopK(),4)),metal_buf_alloc(mul(vocab,4)));
+   let bytes = ((Partitions() * TopK()) * 4);
+   let buffers = list(metal_buf_alloc(bytes),metal_buf_alloc(bytes),metal_buf_alloc((TopK() * 4)),metal_buf_alloc((TopK() * 4)),metal_buf_alloc((vocab * 4)));
    list(vocab,pipes,buffers,seed,seed,0,list(0,0,0,0.0));
   };
-  def fcsam-live(owner) = if lt(len(owner),6) then 0 else and(fcsam-positive(nth(owner,1)),fcsam-positive(nth(owner,2)));
-  def fcsam-owned(owner) = if lt(len(owner),6) then 0 else fcsam-count(nth(owner,2));
-  def fcsam-count(xs) = if nil?(xs) then 0 else add(if gt(head(xs),0) then 1 else 0,fcsam-count(tail(xs)));
-  def fcsam-close(owner) = if lt(len(owner),6) then 0 else { metal_sync(); q38-free-handles(nth(owner,2)); };
-  def fcsam-owner(session) = if gt(len(session),SessionSlot()) then nth(session,SessionSlot()) else list();
+  def fcsam-live(owner) = if (len(owner) < 6) then 0 else (fcsam-positive(nth(owner,1)) && fcsam-positive(nth(owner,2)));
+  def fcsam-owned(owner) = if (len(owner) < 6) then 0 else fcsam-count(nth(owner,2));
+  def fcsam-count(xs) = if nil?(xs) then 0 else ((if (head(xs) > 0) then 1 else 0) + fcsam-count(tail(xs)));
+  def fcsam-close(owner) = if (len(owner) < 6) then 0 else { metal_sync(); q38-free-handles(nth(owner,2)); };
+  def fcsam-owner(session) = if (len(session) > SessionSlot()) then nth(session,SessionSlot()) else list();
   def fcsam-with-owner(session,owner) {
-   let base = if eq(len(session),SessionSlot()) then session else if eq(len(session),sub(SessionSlot(),1)) then append(session,list(list())) else take(SessionSlot(),session);
-   append(base,cons(owner,drop(add(SessionSlot(),1),session)));
+   let base = if ((Comparable) len(session) == SessionSlot()) then session else if ((Comparable) len(session) == (SessionSlot() - 1)) then append(session,list(list())) else take(SessionSlot(),session);
+   append(base,cons(owner,drop((SessionSlot() + 1),session)));
   }
-  def fcsam-reset(owner) = if not(fcsam-live(owner)) then 0 else {
+  def fcsam-reset(owner) = if (!fcsam-live(owner)) then 0 else {
    metal_sync();
    metal_enqueue(nth(nth(owner,1),2),md-bind(list(nth(nth(owner,2),4)),list(head(owner))),head(owner));
   };
-  def fcsam-mark(owner,id) = if or(lt(id,0),ge(id,head(owner))) then 0 else eq(metal_buf_write(nth(nth(owner,2),4),mul(id,4),md-le32(1)),4);
-  def fcsam-ids(bytes,i,n,out) = if ge(i,n) then reverse(out) else fcsam-ids(bytes,add(i,1),n,cons(kth-u32at(bytes,i),out));
+  def fcsam-mark(owner,id) = if ((id < 0) || (id >= head(owner))) then 0 else ((Comparable) metal_buf_write(nth(nth(owner,2),4),(id * 4),md-le32(1)) == 4);
+  def fcsam-ids(bytes,i,n,out) = if (i >= n) then reverse(out) else fcsam-ids(bytes,(i + 1),n,cons(kth-u32at(bytes,i),out));
   // Exact top-k, descending logit, lowest token ID first on ties. Nonfinite
   // logits do not become candidates; fewer than k finite logits fail closed.
-  def fcsam-candidates(owner,logits,penalty) = if not(fcsam-live(owner)) then list() else {
+  def fcsam-candidates(owner,logits,penalty) = if (!fcsam-live(owner)) then list() else {
    let b = nth(owner,2); let p = nth(owner,1);
    metal_sync(); metal_batch_concurrent();
    let parts = metal_enqueue(head(p),q38-b16(list(logits,nth(b,4),head(b),nth(b,1)),list(head(owner),Partitions(),TopK(),md-f32-bits(penalty)),0,0),Partitions());
-   let merged = if eq(parts,1) then metal_enqueue(nth(p,1),q38-b16(list(head(b),nth(b,1),nth(b,2),nth(b,3)),list(Partitions(),TopK()),0,1),1) else 0;
-   let values = if eq(merged,1) then metal_buf_read(nth(b,2),0,mul(TopK(),4)) else "";
-   let ids = if eq(merged,1) then metal_buf_read(nth(b,3),0,mul(TopK(),4)) else "";
-   if not(and(eq(str_len(ids),mul(TopK(),4)),and(eq(str_len(values),mul(TopK(),4)),qlt-finite-bytes?(values,0,TopK())))) then list() else list(qlt-f32s(values,TopK()),fcsam-ids(ids,0,TopK(),list()));
+   let merged = if ((Comparable) parts == 1) then metal_enqueue(nth(p,1),q38-b16(list(head(b),nth(b,1),nth(b,2),nth(b,3)),list(Partitions(),TopK()),0,1),1) else 0;
+   let values = if ((Comparable) merged == 1) then metal_buf_read(nth(b,2),0,(TopK() * 4)) else "";
+   let ids = if ((Comparable) merged == 1) then metal_buf_read(nth(b,3),0,(TopK() * 4)) else "";
+   if (!(((Comparable) str_len(ids) == (TopK() * 4)) && (((Comparable) str_len(values) == (TopK() * 4)) && qlt-finite-bytes?(values,0,TopK())))) then list() else list(qlt-f32s(values,TopK()),fcsam-ids(ids,0,TopK(),list()));
   };
   // Top-p keeps the smallest sorted prefix reaching its threshold. Ties keep
   // their stable order, so the explicit top-k cap is never widened by a tie.
   def fcsam-prefix(probs,total,limit,out) = if nil?(probs) then reverse(out) else {
-   let next = add(total,head(probs)); let kept = cons(head(probs),out);
-   if ge(next,limit) then reverse(kept) else fcsam-prefix(tail(probs),next,limit,kept);
+   let next = (total + head(probs)); let kept = cons(head(probs),out);
+   if (next >= limit) then reverse(kept) else fcsam-prefix(tail(probs),next,limit,kept);
   };
   def fcsam-probs(logits) = smp-renorm(fcsam-prefix(smp-softmax(smp-temperature(logits,Temperature())),0.0,TopP(),list()));
   // Cumulative over draws, including stop tokens. The peak is conditional on
   // the selected top-k, before nucleus filtering; it is not model confidence.
-  def fcsam-stats(owner) = if gt(len(owner),6) then nth(owner,6) else list(0,0,0,0.0);
+  def fcsam-stats(owner) = if (len(owner) > 6) then nth(owner,6) else list(0,0,0,0.0);
   def fcsam-observe(owner,pick,nucleus,peak) {
    let prior = fcsam-stats(owner);
-   list(add(head(prior),if gt(pick,0) then 1 else 0),add(nth(prior,1),if eq(nucleus,1) then 1 else 0),add(nth(prior,2),nucleus),add(nth(prior,3),peak));
+   list((head(prior) + (if (pick > 0) then 1 else 0)),(nth(prior,1) + (if ((Comparable) nucleus == 1) then 1 else 0)),(nth(prior,2) + nucleus),(nth(prior,3) + peak));
   }
   def fcsam-draw(owner,logits) {
    let candidates = fcsam-candidates(owner,logits,Presence());
@@ -93,7 +93,7 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
     let nucleus = fcsam-prefix(probabilities,0.0,TopP(),list());
     let pick = smp-sample(smp-renorm(nucleus),smp-uniform(state));
     let stats = fcsam-observe(owner,pick,len(nucleus),head(probabilities));
-    list(nth(nth(candidates,1),pick),append(take(4,owner),list(state,add(nth(owner,5),1),stats)));
+    list(nth(nth(candidates,1),pick),append(take(4,owner),list(state,(nth(owner,5) + 1),stats)));
    };
   }
   // The head at entry already predicts the next token. Each selected ID is
@@ -102,18 +102,18 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
   // forward and progress functions; sampling never replays a prompt or state.
   def fcsam-walk(session,owner,logits,step,pulse,pos,left,stops,out,untilPulse,width,completed) {
    let chosen = fcsam-draw(owner,logits); let id = head(chosen); let next = nth(chosen,1);
-   if lt(id,0) then list(out,-1,pos,0,next,"sampling-candidates-unavailable")
+   if (id < 0) then list(out,-1,pos,0,next,"sampling-candidates-unavailable")
    else if q38-stop?(id,stops) then list(out,id,pos,1,next,"")
-   else if not(fcsam-mark(next,id)) then list(out,-1,pos,0,next,"sampling-presence-write-failed")
+   else if (!fcsam-mark(next,id)) then list(out,-1,pos,0,next,"sampling-presence-write-failed")
    else {
-    let output = append(out,list(id)); let count = add(completed,1);
-    if le(untilPulse,1) then pulse(count) else 0;
-    if eq(left,1) then list(output,id,pos,0,next,"")
-    else if lt(step(session,id,pos),0) then list(output,-1,add(pos,1),0,next,"sampling-forward-failed")
-    else fcsam-walk(session,next,logits,step,pulse,add(pos,1),sub(left,1),stops,output,if le(untilPulse,1) then mul(width,2) else sub(untilPulse,1),if le(untilPulse,1) then mul(width,2) else width,count);
+    let output = append(out,list(id)); let count = (completed + 1);
+    if (untilPulse <= 1) then pulse(count) else 0;
+    if ((Comparable) left == 1) then list(output,id,pos,0,next,"")
+    else if (step(session,id,pos) < 0) then list(output,-1,(pos + 1),0,next,"sampling-forward-failed")
+    else fcsam-walk(session,next,logits,step,pulse,(pos + 1),(left - 1),stops,output,if (untilPulse <= 1) then (width * 2) else (untilPulse - 1),if (untilPulse <= 1) then (width * 2) else width,count);
    };
   }
-  def fcsam-run(session,owner,logits,step,pulse,pos,limit,stops) = if not(fcsam-reset(owner)) then list(list(),-1,pos,0,owner,"sampling-reset-failed") else fcsam-walk(session,owner,logits,step,pulse,pos,limit,stops,list(),1,1,0);
+  def fcsam-run(session,owner,logits,step,pulse,pos,limit,stops) = if (!fcsam-reset(owner)) then list(list(),-1,pos,0,owner,"sampling-reset-failed") else fcsam-walk(session,owner,logits,step,pulse,pos,limit,stops,list(),1,1,0);
  }
  0;
 }

@@ -14501,6 +14501,7 @@ fn home_links(text: &str, rows: &[(String, String)]) -> Vec<String> {
     let mut used = vec![false; rows.len()];
     let mut defined = vec![false; rows.len()];
     let mut prev: &[u8] = &[];
+    let mut call_head = false;
     let mut i = 0usize;
     while i < b.len() {
         let c = b[i];
@@ -14511,6 +14512,7 @@ fn home_links(text: &str, rows: &[(String, String)]) -> Vec<String> {
             continue;
         }
         if c == b'"' {
+            call_head = false;
             i += 1;
             while i < b.len() && b[i] != b'"' {
                 if b[i] == b'\\' {
@@ -14522,6 +14524,11 @@ fn home_links(text: &str, rows: &[(String, String)]) -> Vec<String> {
             continue;
         }
         if !home_sym_byte(c) {
+            if c == b'(' {
+                call_head = true;
+            } else if !matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
+                call_head = false;
+            }
             i += 1;
             continue;
         }
@@ -14534,12 +14541,13 @@ fn home_links(text: &str, rows: &[(String, String)]) -> Vec<String> {
             if row.0.as_bytes() == tok {
                 if prev == b"defn" || prev == b"def" {
                     defined[h] = true;
-                } else {
+                } else if !call_head || !reserved_heads::fkwu_reserved(&row.0) {
                     used[h] = true;
                 }
             }
         }
         prev = tok;
+        call_head = false;
     }
     rows.iter()
         .enumerate()

@@ -19001,10 +19001,10 @@ static long long fk_sym_end(long long s) {
 /* --feval reads grammars/form-eval.fk at runtime (no embedded blob / no codegen) — see fk_run_feval
  */
 /* match a source symbol [s,s+n) against a C string by length-and-bytes. */
-static int fk_optname_eq(long long s, long long n, const char *w) {
+static int fk_optname_eq(const char *text, long long n, const char *w) {
     long long i = 0;
     while (w[i] != 0) {
-        if (i >= n || fk_srctext[s + i] != w[i]) {
+        if (i >= n || text[i] != w[i]) {
             return 0;
         }
         i = i + 1;
@@ -19015,7 +19015,7 @@ static int fk_optname_eq(long long s, long long n, const char *w) {
 static long long fk_optab_find(long long s, long long n) {
     long long i = 0;
     while (i < fk_optab_n) {
-        if (fk_optname_eq(s, n, fk_optab[i].name)) {
+        if (fk_optname_eq(fk_srctext + s, n, fk_optab[i].name)) {
             return i;
         }
         i = i + 1;
@@ -19026,7 +19026,7 @@ static long long fk_optab_find(long long s, long long n) {
 static long long fk_rwtab_find(long long s, long long n) {
     long long i = 0;
     while (i < fk_rwtab_n) {
-        if (fk_optname_eq(s, n, fk_rwtab[i].name)) {
+        if (fk_optname_eq(fk_srctext + s, n, fk_rwtab[i].name)) {
             return i;
         }
         i = i + 1;
@@ -19039,18 +19039,21 @@ static long long fk_rwtab_find(long long s, long long n) {
  * primitive wins, on Go, Rust and TS as here. That trap returned a full-pass 255 on
  * a deliberately broken band (receipts/2026-07-22-ship-the-slot-map.md, defect 1),
  * so [shadowed-call] below says it out loud. */
-static int fk_reserved_head(long long s, long long n) {
-    if (fk_sym_eq(s, n, "defn") || fk_sym_eq(s, n, "do") || fk_sym_eq(s, n, "let") ||
-        fk_sym_eq(s, n, "if")) {
+static int fk_reserved_text_head(const char *text, long long n) {
+    if (fk_optname_eq(text, n, "defn") || fk_optname_eq(text, n, "do") ||
+        fk_optname_eq(text, n, "let") || fk_optname_eq(text, n, "if")) {
         return 1;
     }
-    if (fk_rwtab_find(s, n) >= 0) {
-        return 1;
+    for (long long i = 0; i < fk_rwtab_n; i++) {
+        if (fk_optname_eq(text, n, fk_rwtab[i].name)) return 1;
     }
-    if (fk_optab_find(s, n) >= 0) {
-        return 1;
+    for (long long i = 0; i < fk_optab_n; i++) {
+        if (fk_optname_eq(text, n, fk_optab[i].name)) return 1;
     }
     return 0;
+}
+static int fk_reserved_head(long long s, long long n) {
+    return fk_reserved_text_head(fk_srctext + s, n);
 }
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3) {
     long long k = fk_node_count;
@@ -21550,9 +21553,21 @@ static int fk_src_unit_hash_range(long long start, long long end, char *out, lon
 static int fk_src_unit_hash(char *out, long long cap) {
     return fk_src_unit_hash_range(0, fk_src_dep_count, out, cap);
 }
-static int fk_src_line_is_bare_import_fk(const char *text, long long line_start, long long line_end);
+static int fk_src_line_is_bare_import(const char *text, long long line_start, long long line_end);
+/* Shared by dependency admission and import-line removal. A string keeps
+ * every byte, including directive-shaped lines and embedded newlines. */
+static long long fk_src_line_comment(const char *text, long long at, long long end, int *quoted) {
+    while (at < end) {
+        if (*quoted && text[at] == FK_CH_BACKSLASH) { at += 2; continue; }
+        if (text[at] == FK_CH_DQUOTE) *quoted = !*quoted;
+        if (!*quoted && text[at] == FK_CH_SEMI) return at + 1;
+        at++;
+    }
+    return -1;
+}
 static int fk_src_append_text(const char *path, const char *text, long long n) {
     long long line_start = 0;
+    int quoted = 0;
     fk_srctext_reserve(fk_slen + n + 2);
     fk_srcseg_push(fk_slen, path);
     while (line_start < n) {
@@ -21561,7 +21576,9 @@ static int fk_src_append_text(const char *path, const char *text, long long n) {
             line_end = line_end + 1;
         }
         long long i = line_start;
-        if (!fk_src_line_is_bare_import_fk(text, line_start, line_end)) {
+        int line_quoted = quoted;
+        fk_src_line_comment(text, line_start, line_end, &quoted);
+        if (line_quoted || !fk_src_line_is_bare_import(text, line_start, line_end)) {
             while (i < line_end) {
                 fk_srctext[fk_slen] = text[i];
                 fk_slen = fk_slen + 1;
@@ -21629,6 +21646,8 @@ static int fk_src_prelude_bml_token(const char *text, long long start, long long
 }
 static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len);
 static int fk_unit_lowers(const char *path);
+static int fk_src_collect_dep(const char *owner_path, long long owner_idx, const char *tok,
+                              long long tn);
 static long long fk_src_trim_import_token(const char *text, long long start, long long *n) {
     long long s = start;
     long long e = start + *n;
@@ -21649,15 +21668,10 @@ static int fk_src_collect_import_token(const char *owner_path, long long owner_i
     if (n <= 0 || fk_src_prelude_none_token(text, start, n)) {
         return 1;
     }
-    if (!fk_src_prelude_fk_token(text, start, n)) {
+    if (!fk_src_prelude_fk_token(text, start, n) && !fk_src_prelude_bml_token(text, start, n)) {
         return 1;
     }
-    char dep_path[FK_PATH_CAP];
-    if (!fk_path_resolve_fk_dep(owner_path, text + start, n, dep_path, FK_PATH_CAP)) {
-        fk_diag_path("error", owner_path, "import path exceeds buffer");
-        return 0;
-    }
-    return fk_src_collect_file(dep_path, owner_idx);
+    return fk_src_collect_dep(owner_path, owner_idx, text + start, n);
 }
 static int fk_src_word_at_ci(const char *text, long long p, long long end, const char *word) {
     long long i = 0;
@@ -21701,7 +21715,7 @@ static int fk_src_collect_import_statement(const char *owner_path, long long own
     }
     return fk_src_collect_import_token(owner_path, owner_idx, text, start, n);
 }
-static int fk_src_line_is_bare_import_fk(const char *text, long long line_start, long long line_end) {
+static int fk_src_line_is_bare_import(const char *text, long long line_start, long long line_end) {
     long long p = line_start;
     while (p < line_end && (text[p] == FK_CH_SPACE || text[p] == FK_CH_TAB)) {
         p = p + 1;
@@ -21734,7 +21748,7 @@ static int fk_src_line_is_bare_import_fk(const char *text, long long line_start,
         n = p - start;
     }
     start = fk_src_trim_import_token(text, start, &n);
-    return fk_src_prelude_fk_token(text, start, n);
+    return fk_src_prelude_fk_token(text, start, n) || fk_src_prelude_bml_token(text, start, n);
 }
 /* One dependency token collected for owner_path: a .bml lowers, any other unit is read as it
  * stands. The prelude directive and the home linker both come through here. A lowered .bml is
@@ -21782,6 +21796,7 @@ static int fk_src_collect_dep(const char *owner_path, long long owner_idx, const
 static char *fk_read_whole_file(const char *path, long long *out_len);
 #define FK_HOME_CAP 4096
 static int fk_home_loaded;
+static char fk_home_path[FK_PATH_CAP];
 static long long fk_home_n;
 static const char *fk_home_name[FK_HOME_CAP];
 static long long fk_home_name_n[FK_HOME_CAP];
@@ -21801,6 +21816,7 @@ static void fk_home_load(const char *owner_path) {
     if (!fk_path_resolve_fk_dep(owner_path, tok, tn, path, FK_PATH_CAP)) {
         return;
     }
+    fk_cstr_copy(fk_home_path, path, FK_PATH_CAP);
     t = fk_read_whole_file(path, &n);
     if (t == 0) {
         return;
@@ -21855,6 +21871,7 @@ static int fk_src_link_homes(const char *owner_path, const char *text, long long
     long long prev_n = 0;
     long long i = 0;
     long long h = 0;
+    int call_head = 0;
     if (!fk_home_loaded) {
         fk_home_load(owner_path);
     }
@@ -21877,6 +21894,7 @@ static int fk_src_link_homes(const char *owner_path, const char *text, long long
             continue;
         }
         if (c == FK_CH_DQUOTE) {
+            call_head = 0;
             i = i + 1;
             while (i < n && text[i] != FK_CH_DQUOTE) {
                 if (text[i] == '\\') {
@@ -21888,6 +21906,8 @@ static int fk_src_link_homes(const char *owner_path, const char *text, long long
             continue;
         }
         if (!fk_home_sym_byte(c)) {
+            if (c == FK_CH_LPAREN) call_head = 1;
+            else if (c != FK_CH_SPACE && c != FK_CH_TAB && c != FK_CH_LF && c != FK_CH_CR) call_head = 0;
             i = i + 1;
             continue;
         }
@@ -21902,7 +21922,7 @@ static int fk_src_link_homes(const char *owner_path, const char *text, long long
                 if (prev_s >= 0 && ((prev_n == 4 && memcmp(text + prev_s, "defn", 4) == 0) ||
                                     (prev_n == 3 && memcmp(text + prev_s, "def", 3) == 0))) {
                     defined[h] = 1;
-                } else {
+                } else if (!call_head || !fk_reserved_text_head(text + s, tn)) {
                     used[h] = 1;
                 }
             }
@@ -21910,6 +21930,7 @@ static int fk_src_link_homes(const char *owner_path, const char *text, long long
         }
         prev_s = s;
         prev_n = tn;
+        call_head = 0;
     }
     h = 0;
     while (h < fk_home_n) {
@@ -21926,21 +21947,16 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
     const char *needle = "preludes:";
     long long needle_n = 9;
     long long i = 0;
+    int quoted = 0;
     while (i < n) {
         long long line_start = i;
         long long line_end = i;
         while (line_end < n && text[line_end] != FK_CH_LF && text[line_end] != FK_CH_CR) {
             line_end = line_end + 1;
         }
-        long long comment = -1;
         long long scan = line_start;
-        while (scan < line_end) {
-            if (text[scan] == FK_CH_SEMI) {
-                comment = scan + 1;
-                break;
-            }
-            scan = scan + 1;
-        }
+        int line_quoted = quoted;
+        long long comment = fk_src_line_comment(text, line_start, line_end, &quoted);
         if (comment >= 0) {
             scan = comment;
             while (scan < line_end && (text[scan] == FK_CH_SPACE || text[scan] == FK_CH_TAB)) {
@@ -21949,16 +21965,7 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
             if (!fk_src_collect_import_statement(owner_path, owner_idx, text, scan, line_end)) {
                 return 0;
             }
-            scan = comment;
-            while (scan + needle_n <= line_end) {
-                long long j = 0;
-                while (j < needle_n && text[scan + j] == needle[j]) {
-                    j = j + 1;
-                }
-                if (j != needle_n) {
-                    scan = scan + 1;
-                    continue;
-                }
+            if (scan + needle_n <= line_end && memcmp(text + scan, needle, (unsigned long)needle_n) == 0) {
                 long long p = scan + needle_n;
                 while (p < n) {
                     while (p < n && (text[p] == FK_CH_SPACE || text[p] == FK_CH_TAB ||
@@ -22007,14 +22014,13 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
                         }
                     }
                 }
-                scan = p;
             }
         }
         scan = line_start;
         while (scan < line_end && (text[scan] == FK_CH_SPACE || text[scan] == FK_CH_TAB)) {
             scan = scan + 1;
         }
-        if (comment < 0 && !fk_src_collect_import_statement(owner_path, owner_idx, text, scan, line_end)) {
+        if (!line_quoted && !fk_src_collect_import_statement(owner_path, owner_idx, text, scan, line_end)) {
             return 0;
         }
         i = line_end;
@@ -22071,7 +22077,7 @@ static int fk_src_collect_file(const char *path, long long parent_idx) {
 /* the after-read half of collection, shared by the file lane and the BML
  * floor's in-memory lane: the bytes arrive owned (freed here), registered
  * under the given path identity — for a lowered .bml that is the .bml
- * itself, so no derived source file ever exists on disk. */
+ * itself; the validated lowering memo remains a disposable local cache. */
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
                                 long long mtime, long long size, long long parent_idx) {
     long long i = 0;
@@ -22118,6 +22124,7 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
 }
 static int fk_src_load_unit(const char *root_path, char *source_hash, long long hash_cap,
                             long long *unit_mtime) {
+    if (!fk_home_loaded) fk_home_load(root_path);
     fk_slen = 0;
     fk_srctext[0] = 0;
     fk_srcseg_reset();
@@ -22139,10 +22146,11 @@ static int fk_src_load_unit(const char *root_path, char *source_hash, long long 
 }
 /* the BML floor's root loader: the unit's root arrives as in-memory text
  * (the lowered .bml) registered under the .bml's own path and mtime —
- * no derived source file exists at any point. */
+ * the source remains authoritative over its disposable lowering memo. */
 static int fk_src_load_unit_buffer(const char *root_path, char *owned, long long got,
                                    long long mtime, char *source_hash,
                                    long long hash_cap, long long *unit_mtime) {
+    if (!fk_home_loaded) fk_home_load(root_path);
     fk_slen = 0;
     fk_srctext[0] = 0;
     fk_srcseg_reset();
@@ -24802,31 +24810,12 @@ static void fk_stage_input(const char *s) {
 }
 /* ── the BML floor ──────────────────────────────────────────────────────
  * High-grammar .bml is a first-class source: the runner lowers it through
- * the body's own Form compiler (spawning ITSELF on
- * form/form-stdlib/bml-floor-compile.fk — the chain stays Form-owned; this
- * door only checks freshness and opens it) into a derived <x>.bml.fk
- * beside the source, which then rides the ordinary .fk lane and its .fkb
- * cache: warm runs are native speed, and no crystallized twin lives in
- * the tree (Urs, 2026-08-30: xtal is the wrong shape; high-grammar BML
- * with an optimal cached native-speed compiler is the floor). Derived
- * .bml.fk, .bml.fkb and .bml.sym files are cache artifacts, gitignored.
- * Shrink direction: this door retires when the runner's entry self-hosts. */
-/* lower a .bml entirely in memory: the child prints the lowered text (its
- * // preludes: line carried) closed by a sentinel; the parent captures it
- * from the pipe. No derived source file is ever created. Returns a
- * malloc'd NUL-terminated buffer (caller frees) or 0. */
-/* LOWERED-TEXT MEMO. A lowering self-spawn pays the floor compiler's whole
- * chain (~1.6s warm, measured 2026-08-31); six .bml deps made every glass
- * run — cold OR warm — pay ~10s of spawns. A JIT refusal is a stone to
- * place, not a tax to keep: the lowered text is memoized beside the source
- * as <x>.bml.lowfk, keyed by the RAW .bml bytes AND a digest of the floor
- * compiler's own chain (bml-floor-compile.fk plus every file on its
- * preludes line), so an edit to either the surface or the compiler
- * invalidates honestly. A hit is a read; a miss spawns once and writes.
- * Named deeper stones, not placed here: the floor compiler resident
- * in-process (no spawn even on miss), and image-load latency itself. */
-static unsigned long long fk_bml_floor_digest_memo;
-static int fk_bml_floor_digest_have;
+ * the body's own Form compiler in a child fkwu. Form owns the source
+ * observations, dependency choices and lowered bytes in the returned packet.
+ * This temporary carrier validates that packet before execution and publishes
+ * an atomic .lowfk memo. The .lowfk, .fkb and .sym files are disposable local
+ * caches; authored BML remains the source authority.
+ * Compiler admission into the native walker will retire the spawn and memo. */
 static char *fk_read_whole_file(const char *path, long long *out_len) {
 #if defined(_WIN32)
     int fd = open(path, 0x8000);
@@ -24917,79 +24906,8 @@ static int fk_hex16_parse(const char *p, unsigned long long *out) {
     *out = h;
     return 1;
 }
-/* The floor digest walks the compiler's RECURSIVE prelude closure. A
- * one-level walk was byteseal's own gap, found by the field within
- * hours: a semicolon fix in a second-level floor dep left every memo
- * key unchanged, and the memos replayed a pre-fix broken lowering of a
- * sibling's surface (fcpclb-* defs truncated away, 2026-09-01). Every
- * file the floor compile would load is folded in; a visited list keeps
- * the walk finite. */
-#define FK_FLOOR_DEP_CAP_INIT 128 /* floor-chain dep rows birth size; grows -- a dep past the old fixed 128 was SILENTLY skipped by the digest fold, so a stale .lowfk memo could ride as fresh when that dep changed */
-static char (*fk_floor_seen)[FK_PATH_CAP];
-static long long fk_floor_cap;
-static long long fk_floor_seen_n;
-static int fk_floor_seen_has(const char *p) {
-    long long i = 0;
-    while (i < fk_floor_seen_n) {
-        if (!memcmp(fk_floor_seen[i], p, fk_path_len(p) + 1)) {
-            return 1;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-static unsigned long long fk_bml_floor_fold(const char *path, unsigned long long h) {
-    long long n = 0;
-    char *text;
-    long long i;
-    if (fk_floor_seen_has(path)) {
-        return h;
-    }
-    if (fk_floor_seen_n >= fk_floor_cap) {
-        long long nc = fk_floor_cap == 0 ? FK_FLOOR_DEP_CAP_INIT : fk_floor_cap * 2;
-        fk_floor_seen = (char (*)[FK_PATH_CAP])realloc(fk_floor_seen, (unsigned long)(nc * FK_PATH_CAP));
-        if (fk_floor_seen == 0) {
-            fk_die("fk_bml_floor_fold: out of memory growing the floor dep table");
-        }
-        fk_floor_cap = nc;
-    }
-    fk_cstr_copy(fk_floor_seen[fk_floor_seen_n], path, FK_PATH_CAP);
-    fk_floor_seen_n = fk_floor_seen_n + 1;
-    text = fk_read_whole_file(path, &n);
-    if (text == 0) {
-        return h;
-    }
-    h = h * 1099511628211ULL;
-    h = h ^ fk_bytes_fnv1a(text, n);
-    for (i = 0; i + 11 < n; i = i + 1) {
-        if (text[i] == ';' && !memcmp(text + i, "; preludes:", 11)) {
-            long long p = i + 11;
-            while (p < n && text[p] != FK_CH_LF) {
-                long long start;
-                while (p < n && (text[p] == FK_CH_SPACE || text[p] == FK_CH_TAB)) {
-                    p = p + 1;
-                }
-                start = p;
-                while (p < n && text[p] != FK_CH_SPACE && text[p] != FK_CH_TAB &&
-                       text[p] != FK_CH_LF && text[p] != FK_CH_CR) {
-                    p = p + 1;
-                }
-                if (p > start) {
-                    char dep_path[FK_PATH_CAP];
-                    if (fk_path_resolve_fk_dep(path, text + start, p - start,
-                                               dep_path, FK_PATH_CAP)) {
-                        h = fk_bml_floor_fold(dep_path, h);
-                    }
-                }
-            }
-        }
-    }
-    free(text);
-    return h;
-}
-/* The floor compiler, found from the repo root or from form/ -- the two places the body runs
- * from. The digest and the lowering child read the same file, so a memo written from either
- * place answers the other. */
+/* The floor compiler is selected from the current working directory. Form
+ * records this same choice and context in each lowering packet. */
 static const char *fk_bml_floor_path(void) {
     if (fk_path_size_raw("form/form-stdlib/bml-floor-compile.fk") >= 0) {
         return "form/form-stdlib/bml-floor-compile.fk";
@@ -24999,92 +24917,90 @@ static const char *fk_bml_floor_path(void) {
     }
     return "form/form-stdlib/bml-floor-compile.fk";
 }
-static unsigned long long fk_bml_floor_digest(void) {
-    if (fk_bml_floor_digest_have) {
-        return fk_bml_floor_digest_memo;
+static char *fk_bml_packet_body(const char *owner, const char *packet, long long n,
+                                long long *out_len) {
+    long long at = 7, context = 0, files = 0;
+    char cwd[FK_PATH_CAP];
+    if (n < 7 || memcmp(packet, "fklow2\n", 7) || !getcwd(cwd, sizeof(cwd))) return 0;
+    while (at < n && packet[at] != '\n') {
+        char kind = packet[at], path[FK_PATH_CAP];
+        unsigned long long expected;
+        long long count = 0, digits = 0;
+        if (at + 20 >= n || packet[at + 1] != ' ' || packet[at + 18] != ' ' ||
+            !fk_hex16_parse(packet + at + 2, &expected)) return 0;
+        at += 19;
+        while (at < n && packet[at] >= '0' && packet[at] <= '9') {
+            count = count * 10 + packet[at++] - '0';
+            if (count >= FK_PATH_CAP) return 0;
+            digits++;
+        }
+        if (!digits || !count || at >= n || packet[at++] != ':' || count >= n - at ||
+            packet[at + count] != '\n') return 0;
+        memcpy(path, packet + at, (unsigned long)count); path[count] = 0; at += count + 1;
+        if (fk_path_len(path) != count) return 0;
+        if (kind == 'P' && context == 0 && fk_cstr_eq(path, owner)) context = 1;
+        else if (kind == 'C' && context == 1 && fk_cstr_eq(path, cwd)) context = 2;
+        else if (kind == 'H' && context == 2 && fk_cstr_eq(path, fk_home_path)) context = 3;
+        else if (context == 3 && kind == 'N') {
+            if (fk_path_size_raw(path) >= 0) return 0;
+        } else if (context == 3 && kind == 'F') {
+            long long bytes = 0;
+            char *source = fk_read_whole_file(path, &bytes);
+            if (!source) return 0;
+            unsigned long long actual = fk_bytes_fnv1a(source, bytes);
+            free(source);
+            if (actual != expected) return 0;
+            files++;
+        } else return 0;
     }
-    fk_floor_seen_n = 0;
-    fk_bml_floor_digest_memo =
-        fk_bml_floor_fold(fk_bml_floor_path(),
-                          14695981039346656037ULL);
-    fk_bml_floor_digest_have = 1;
-    return fk_bml_floor_digest_memo;
-}
-static char *fk_bml_low_memo_read(const char *bml_path, unsigned long long raw_h,
-                                  unsigned long long floor_h, long long *out_len) {
-    char memo_path[4300];
-    long long n = 0;
-    char *text;
-    unsigned long long got_raw = 0, got_floor = 0;
-    long long head = 0;
-    char *body;
-    sprintf(memo_path, "%s.lowfk", bml_path);
-    text = fk_read_whole_file(memo_path, &n);
-    if (text == 0) {
-        return 0;
-    }
-    if (n < 41 || memcmp(text, "fklow1 ", 7) != 0 ||
-        !fk_hex16_parse(text + 7, &got_raw) ||
-        !fk_hex16_parse(text + 24, &got_floor)) {
-        free(text);
-        return 0;
-    }
-    while (head < n && text[head] != FK_CH_LF) {
-        head = head + 1;
-    }
-    head = head + 1;
-    if (got_raw != raw_h || got_floor != floor_h || head > n) {
-        free(text);
-        return 0;
-    }
-    body = malloc((unsigned long)(n - head + 1));
-    if (body == 0) {
-        free(text);
-        return 0;
-    }
-    memcpy(body, text + head, (unsigned long)(n - head));
-    body[n - head] = 0;
-    *out_len = n - head;
-    free(text);
+    if (context != 3 || !files || at >= n || packet[at] != '\n') return 0;
+    at++;
+    char *body = malloc((unsigned long)(n - at + 1));
+    if (!body) return 0;
+    memcpy(body, packet + at, (unsigned long)(n - at)); body[n - at] = 0;
+    *out_len = n - at;
     return body;
 }
-static void fk_bml_low_memo_write(const char *bml_path, unsigned long long raw_h,
-                                  unsigned long long floor_h, const char *low,
-                                  long long low_len) {
-    char memo_path[4300];
-    int fd;
-    sprintf(memo_path, "%s.lowfk", bml_path);
-    fd = open(memo_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) {
-        return;
+static void fk_bml_low_memo_write(const char *path, const char *packet, long long n) {
+    char memo[4300], temporary[4400], footer[32];
+    sprintf(memo, "%s.lowfk", path);
+    sprintf(temporary, "%s.tmp.%lld", memo, (long long)getpid());
+    int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) return;
+    long long at = 0;
+    while (at < n) {
+        long long put = write(fd, packet + at, (unsigned long)(n - at));
+        if (put < 0 && errno == EINTR) continue;
+        if (put <= 0) break;
+        at += put;
     }
-    dprintf(fd, "fklow1 %016llx %016llx\n", raw_h, floor_h);
-    write(fd, low, (unsigned long)low_len);
-    close(fd);
+    int size = sprintf(footer, "\nfkend2 %016llx\n", fk_bytes_fnv1a(packet, n));
+    int complete = at == n && write(fd, footer, (unsigned long)size) == size;
+    if (close(fd) != 0) complete = 0;
+    if (!complete || rename(temporary, memo) != 0) unlink(temporary);
 }
 static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len);
 static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len) {
-    long long raw_n = 0;
-    char *raw = fk_read_whole_file(bml_path, &raw_n);
-    unsigned long long raw_h, floor_h;
-    char *hit;
-    char *low;
-    if (raw == 0) {
-        fk_diag_path("error", bml_path, "bml source is not readable");
-        return 0;
+    if (!fk_home_loaded) fk_home_load(bml_path);
+    char memo[4300];
+    long long n = 0;
+    unsigned long long seal;
+    sprintf(memo, "%s.lowfk", bml_path);
+    char *packet = fk_read_whole_file(memo, &n), *body = 0;
+    if (packet) {
+        if (n >= 25 && !memcmp(packet + n - 25, "\nfkend2 ", 8) && packet[n - 1] == '\n' &&
+            fk_hex16_parse(packet + n - 17, &seal) && seal == fk_bytes_fnv1a(packet, n - 25))
+            body = fk_bml_packet_body(bml_path, packet, n - 25, out_len);
+        free(packet);
+        if (body) return body;
     }
-    raw_h = fk_bytes_fnv1a(raw, raw_n);
-    free(raw);
-    floor_h = fk_bml_floor_digest();
-    hit = fk_bml_low_memo_read(bml_path, raw_h, floor_h, out_len);
-    if (hit != 0) {
-        return hit;
-    }
-    low = fk_bml_lower_spawn(bml_path, out_len);
-    if (low != 0) {
-        fk_bml_low_memo_write(bml_path, raw_h, floor_h, low, *out_len);
-    }
-    return low;
+    packet = fk_bml_lower_spawn(bml_path, &n);
+    if (!packet) return 0;
+    body = fk_bml_packet_body(bml_path, packet, n, out_len);
+    if (body) fk_bml_low_memo_write(bml_path, packet, n);
+    else fk_diag_path("error", bml_path, "BML source observations changed or lowering packet is incomplete");
+    free(packet);
+    return body;
 }
 static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len) {
 #if defined(_WIN32)
@@ -25124,8 +25040,8 @@ static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len) {
     close(in_fds[0]);
     close(out_fds[1]);
     {
-        char line[4300];
-        int m = sprintf(line, "%s\n-\n", bml_path);
+        char line[FK_PATH_CAP * 2 + 32];
+        int m = sprintf(line, "%s\n@memo\n%s\n", bml_path, fk_home_path);
         long long off = 0;
         while (off < m) {
             long long put = write(in_fds[1], line + off, (unsigned long)(m - off));

@@ -104,8 +104,10 @@ spots, and to lift each part to the highest frequency it can carry.
 - **Workarounds leave.** When the body carries a thing natively, the detour
   around it goes in the same movement: the second runtime, the shell step, the
   wrapper, the fallback nobody needs.
-- **Old flows leave when a better one stands.** The improved flow becomes the
-  only flow; its predecessor lives in git.
+- **Old flows leave when a better one stands.** Verify the replacement and move
+  its callers, then remove the obsolete flow, duplicate authority and unused
+  scaffolding. Living guidance carries what is and the north star; git retains
+  the predecessor and the necessary evidence remains available.
 - **A dark spot met on the way is ours.** A red band beside the work, a stale
   line in a door, a rule that pinches — each is a place to leave better, not a
   note to pass on. What only a person holds is offered to them; the rest is
@@ -332,8 +334,9 @@ where the lane carries you) **with the optimal cached native speed compiler** (f
 
 - the executable surface **runs as itself, all in memory**: `./fkwu x.bml` and
   `; preludes: ....bml` both lower through the body's own compiler with the lowered text living
-  only in the pipe between runner and compiler — no derived source file ever exists; the sole
-  artifact is the native `.bml.fkb`/`.bml.sym` cache beside the source
+  in the pipe between runner and compiler. The `.bml.lowfk` lowering memo and
+  native `.bml.fkb`/`.bml.sym` images beside the source are validated local caches,
+  never a second source authority
   (`form/form-stdlib/bml-floor-compile.fk` is the door; a `// preludes:` line in the .bml travels
   through). First execution materializes the whole unit synchronously; a reusable image dispatches in
   milliseconds. That blocking whole-unit seam is not the on-demand JIT north star;
@@ -613,6 +616,11 @@ plainly once, and give the conversation your attention.
      claim and landing, not the work. A gate that reads wrong is healed where it
      reads, not stepped around. Ask for help when the next option needs
      information, access, or authority that is not here, and keep the rest moving.
+     Retain the original intent, constraints, completed work, exact failing
+     command and output in the existing Form-native care flow and owned
+     checkpoint. Choose from that context, then re-observe the original
+     behavior. Carry only the trace needed to resume and verify the choice;
+     an unchanged retry or a workaround leaves the required repair open.
    - **Read the exit code, not the number.** `fkwu` exits 1 when the compile carried errors. With an existing
      cache you get only "cached image was compiled with errors" — remove the unit's own artifacts and run again
      before reporting anything, and let preflight name them rather than deriving them from the suffix.
