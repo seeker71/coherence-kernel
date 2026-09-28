@@ -257,10 +257,9 @@ What answered red, died, or was not witnessed today, so no one leans on it:
   unresolved-call errors and the first recovered `nothing` meets arithmetic. It waits on a registry
   grounded in fkwu's own op table (`runtime/fkwu-optable.h` and `core.fk`), or on a sibling-home lane
   in `form/validate.sh` for a band whose surface only the siblings carry.
-- `form-knowledge-exec-grammar-transport-band` dies rc 1 on `str_len` of nothing; the
-  domain/organ/unique/universe-mint bands answer 2015 of 2047 (R88).
-- `control/tests/invite-dispatch-band.fk` answers 763 of 1023: bit 4 (a second `<CHOICE>` finding
-  nothing declining) and bit 256 (`<TIMEOUT>`).
+- The domain/organ/unique/universe-mint bands answer 2015 of 2047, pending rather than red: bit 32
+  claims heldout ≥ 9 on a lesson-disjoint split, which a lesson-bound overlay reaches only once a
+  LoRA writer stands (the mints declare `LoraWriter = 0`) (R88).
 - BML `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111; R78). The lowering's other
   open rows stand in the ledger: R86 (`form.action` main files), R92 (a preludes directive read inside
   a string), R93 (a comment line ending in `{` opens a block), R95 (the lowering child's stdin as two

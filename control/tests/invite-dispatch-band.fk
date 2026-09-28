@@ -21,8 +21,9 @@
 ;        never reaching the alternative after it
 ;   64   <FAIL> acks nothing without needing any alternatives at all
 ;   128  <RESTORE> returns to an explicit checkpoint on request
-;   256  <TIMEOUT> is honest: budget 1 over two declining alternatives
-;        reports a real timeout (alternatives were left untried)
+;   256  <TIMEOUT> is honest: the dispatcher's budget spent on declining
+;        lanes acks nothing while a live lane waits untried (a real
+;        timeout), and the same live lane inside the budget answers
 ;   512  a stream with no recognized invites at all runs to an
 ;        untouched, still-initial session
 (do
@@ -32,6 +33,8 @@
     (defn ack-int (ack) (node_value (oac-payload ack)))
 
     (defn idb-score (cond bit) (if cond bit 0))
+    ;; n declining lanes, to spend a budget on
+    (defn idb-silents (n) (if (eq n 0) (list) (cons cell-silent (idb-silents (sub n 1)))))
 
     (defn invite-dispatch-band ()
         (do
@@ -42,10 +45,16 @@
                                      (eq (ack-int (cid-ack s1)) 5)) 1))
             (let c2 (idb-score (eq (len (cid-checkpoint s1)) 1) 2))
 
-            ;; (3)+(4): a second stream continues past a decline, then undoes.
+            ;; (3): a second <CHOICE> that finds nothing declining: the session
+            ;; stands at the declined choice, the decline recorded in memory (a
+            ;; run answers its final session, so this moment is its own stream).
+            (let s3 (cid-run-stream "explore <CHOICE> then <STORE> then <CHOICE> again"
+                        (list (list cell-silent cell-five) (list cell-silent cell-silent)) (list)))
+            (let c3 (idb-score (and (eq (oac-nothing? (cid-ack s3)) 1)
+                                     (eq (len (cid-memory s3)) 2)) 4))
+            ;; (4): the same stream, then <UNDO> falls back to the stored checkpoint.
             (let s2 (cid-run-stream "explore <CHOICE> then <STORE> then <CHOICE> again then <UNDO>"
                         (list (list cell-silent cell-five) (list cell-silent cell-silent)) (list)))
-            (let c3 (idb-score (eq (len (cid-memory s2)) 2) 4))
             (let c4 (idb-score (eq (len (cid-memory s2)) 1) 8))
 
             ;; (5): <STOP> halts — a trailing <CHOICE> after it never runs.
@@ -73,11 +82,15 @@
             (let c8 (idb-score (and (eq (len (cid-memory s8)) 1)
                                       (eq (ack-int (head (cid-memory s8))) 5)) 128))
 
-            ;; (9): <TIMEOUT> with a budget too small to try every alt is a
-            ;; REAL timeout, not honest exhaustion.
+            ;; (9): a REAL timeout, not honest exhaustion: the dispatcher's own
+            ;; budget spent on declining lanes leaves a live lane untried, and
+            ;; the same live lane inside the budget answers.
             (let s9 (cid-run-stream "bounded search <TIMEOUT> now"
-                        (list (list cell-silent cell-silent cell-five)) (list)))
-            (let c9 (idb-score (eq (oac-nothing? (cid-ack s9)) 1) 256))
+                        (list (append (idb-silents (cid-timeout-budget)) (list cell-five))) (list)))
+            (let s9-reach (cid-run-stream "bounded search <TIMEOUT> now"
+                        (list (append (idb-silents (sub (cid-timeout-budget) 1)) (list cell-five))) (list)))
+            (let c9 (idb-score (and (eq (oac-nothing? (cid-ack s9)) 1)
+                                     (eq (ack-int (cid-ack s9-reach)) 5)) 256))
 
             ;; (10): no invites at all -> the untouched initial session.
             (let s10 (cid-run-stream "just an ordinary sentence" (list) (list)))
