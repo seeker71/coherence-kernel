@@ -2,10 +2,9 @@
 //
 // bml-demand-jit-owner.bml -- production request/progress boundary.
 //
-// Request answers through Form and only retains work. Progress owns the
-// effectful JIT step and the canonical, unscoped Glass publication. A step
-// whose snapshot has not been read back exactly remains the next work item;
-// it is republished byte-for-byte before any retry or heal may run.
+// Request adopts the current executable state. Progress owns the effectful
+// JIT step and canonical Glass publication. Unpublished observations remain
+// ordered, immutable evidence; acknowledging them never restores old state.
 //
 //////////////////////////////////////////////////////////////////////
 
@@ -13,19 +12,22 @@
 
 section [form.bml] {
     class BmlDemandJitOwner [public, observable, jit] {
-        field BDJOSchema = "bml-demand-jit-owner-v1";
+        field BDJOSchema = "bml-demand-jit-owner-v2";
         field BDJORequestSchema = "bml-demand-jit-owner-request-v1";
         field BDJOProgressSchema = "bml-demand-jit-owner-progress-v1";
 
         // owner = schema, JIT state, first receipt, measured first-answer ms,
-        //          exact step awaiting publication, lifecycle.
-        def bdjo-owner-state(state, first, firstMs, awaiting, lifecycle) = list(BDJOSchema(), state, first, firstMs, awaiting, lifecycle);
+        //          immutable observations awaiting publication in order, lifecycle.
+        def bdjo-owner-queue(state, first, firstMs, publications, lifecycle) = list(BDJOSchema(), state, first, firstMs, publications, lifecycle);
+        def bdjo-owner-state(state, first, firstMs, awaiting, lifecycle) = bdjo-owner-queue(state, first, firstMs, if nothing?(awaiting) then list() else list(bdjo-observe(state, awaiting)), lifecycle);
         def bdjo-owner(epoch) = bdjo-owner-state(bdj-empty(epoch), nothing(), 0, nothing(), "ready");
         def bdjo-owner-from-state(state) = bdjo-owner-state(state, nothing(), 0, nothing(), "ready");
         def bdjo-state(owner) = nth(owner, 1);
         def bdjo-first(owner) = nth(owner, 2);
         def bdjo-first-ms(owner) = nth(owner, 3);
-        def bdjo-awaiting(owner) = nth(owner, 4);
+        def bdjo-publications(owner) = nth(owner, 4);
+        def bdjo-awaiting-observation(owner) = if nil?(bdjo-publications(owner)) then nothing() else head(bdjo-publications(owner));
+        def bdjo-awaiting(owner) = if nil?(bdjo-publications(owner)) then nothing() else nth(bdjo-awaiting-observation(owner), 0);
         def bdjo-lifecycle(owner) = nth(owner, 5);
 
         def bdjo-request-result(first, owner) = list(BDJORequestSchema(), first, owner);
@@ -40,10 +42,21 @@ section [form.bml] {
             let lifecycle = if ((Comparable) bdj-state-faulted?(state) == 1) then "fault-publication-pending" else "step-pending";
             bdjo-owner-state(state, first, elapsed, awaiting, lifecycle);
         }
-        // While a prior demand is retained, later valid requests may still
-        // receive their Form answer. The retained first receipt and exact
-        // unpublished step remain the publication identity.
-        def bdjo-request-retained(owner, first) = bdjo-owner-state(bdjo-state(owner), bdjo-first(owner), bdjo-first-ms(owner), bdjo-awaiting(owner), bdjo-lifecycle(owner));
+        def bdjo-new-fault?(before, after) {
+            if !bdj-state-faulted?(after) then 0
+            else if !bdj-state-faulted?(before) then 1
+            else ((Value) bdj-fault-digest(bdj-state-fault(before))) != bdj-fault-digest(bdj-state-fault(after));
+        }
+        // The first demand supplies publication context, while each request
+        // supplies current ownership. A newly lost page queues its own fault
+        // behind older evidence rather than disappearing under that evidence.
+        def bdjo-request-retained(owner, first) {
+            let state = bdj-receipt-state(first);
+            let changed = bdjo-new-fault?(bdjo-state(owner), state);
+            let publications = if changed then append(bdjo-publications(owner), list(bdjo-observe(state, bdj-step-fault-held(state)))) else bdjo-publications(owner);
+            bdjo-owner-queue(state, bdjo-first(owner), bdjo-first-ms(owner), publications,
+                if changed && nothing?(bdjo-awaiting(owner)) then "fault-publication-pending" else bdjo-lifecycle(owner));
+        }
         def bdjo-request(owner, source, cache, program, root, argument) {
             let started = now_unix_ms();
             let first = bdj-request(bdjo-state(owner), source, cache, program, root, argument);
@@ -60,15 +73,25 @@ section [form.bml] {
         def bdjo-progress-confirmed?(result) = nth(result, 5);
         def bdjo-progress-owner(result) = nth(result, 6);
 
-        def bdjo-cache-path(first) {
-            let pending = bdj-state-pending(bdj-receipt-state(first));
-            if nothing?(pending) then "" else bdj-pending-cache(pending);
+        def bdjo-cache-path(state) {
+            let pending = bdj-state-pending(state);
+            let care = bdj-care-active(bdj-state-care(state));
+            if !nothing?(pending) then bdj-pending-cache(pending)
+            else if !nothing?(care) then bdj-pending-cache(bdj-care-pending(care))
+            else "";
         }
-        def bdjo-cache-bytes(first) {
-            let path = bdjo-cache-path(first);
-            let bytes = if ((String) path == "") then -1 else file_size(path);
-            if (bytes < 0) then 0 else bytes;
+        def bdjo-cache-bytes(path, step) {
+            let bytes = if !bdjg-disk-ready?(step) || ((String) path == "") then -1 else file_size(path);
+            if (bytes < 0) then nothing() else bytes;
         }
+        // Select from the state that will run the step, then measure only
+        // after it has executed. Delivery retries retain these observed facts;
+        // the original first-demand context is not the later cache's owner.
+        def bdjo-observe(state, step) {
+            let path = bdjo-cache-path(state);
+            list(step, path, bdjo-cache-bytes(path, step));
+        }
+        def bdjo-stage(owner, step) = bdjo-owner-queue(bdj-step-state(step), bdjo-first(owner), bdjo-first-ms(owner), list(bdjo-observe(bdjo-state(owner), step)), "telemetry-publication-pending");
         def bdjo-reading-snapshot(reading) {
             if (!((String) fgtm-read-state-status(reading) == "current")) then nothing()
             else if (!((Comparable) fgtm-field-present?(fgtm-read-state-value(reading)) == 1)) then nothing()
@@ -88,20 +111,25 @@ section [form.bml] {
             if nothing?(current) then now else max2(now, (fgtm-snapshot-epoch(current) + 1));
         }
         def bdjo-after-confirmed(owner, step) {
-            let state = bdj-step-state(step);
-            if ((Comparable) bdj-state-faulted?(state) == 1) then bdjo-owner-state(state, bdjo-first(owner), bdjo-first-ms(owner), nothing(), "fault-published")
+            let state = bdjo-state(owner);
+            let remaining = tail(bdjo-publications(owner));
+            if !nil?(remaining) then bdjo-owner-queue(state, bdjo-first(owner), bdjo-first-ms(owner), remaining, "telemetry-publication-pending")
+            else if bdj-state-faulted?(state) then bdjo-owner-state(state, bdjo-first(owner), bdjo-first-ms(owner), nothing(), "fault-published")
+            else if !nil?(bdj-state-care(state)) then bdjo-owner-state(state, bdjo-first(owner), bdjo-first-ms(owner), nothing(), "cache-care-published")
+            else if !nothing?(bdj-state-pending(state)) then bdjo-owner-state(state, bdjo-first(owner), bdjo-first-ms(owner), nothing(), "step-pending")
+            else if ((String) bdj-step-status(step)) == "cache-repaired" then bdjo-owner-state(state, nothing(), 0, nothing(), "cache-repaired-published")
             else if ((Comparable) bdjg-healed?(step) == 1) then bdjo-owner-state(state, nothing(), 0, nothing(), "healed-published")
             else bdjo-owner-state(state, nothing(), 0, nothing(), "resident-published");
         }
         def bdjo-after-publication(owner, step, publication, reading, epoch, expectedSamples) {
             let confirmed = bdjo-publish-confirmed?(publication, reading, epoch, expectedSamples);
-            let next = if ((Comparable) confirmed == 1) then bdjo-after-confirmed(owner, step) else bdjo-owner-state(bdj-step-state(step), bdjo-first(owner), bdjo-first-ms(owner), step, "telemetry-publication-unconfirmed");
+            let next = if ((Comparable) confirmed == 1) then bdjo-after-confirmed(owner, step) else bdjo-owner-queue(bdjo-state(owner), bdjo-first(owner), bdjo-first-ms(owner), bdjo-publications(owner), "telemetry-publication-unconfirmed");
             bdjo-progress-result(if ((Comparable) confirmed == 1) then bdjo-lifecycle(next) else "telemetry-publication-unconfirmed", step, publication, reading, confirmed, next);
         }
         def bdjo-publish-at(owner, step, telemetryRoot) {
             let epoch = bdjo-next-epoch-at(telemetryRoot);
             let first = bdjo-first(owner);
-            let cacheBytes = bdjo-cache-bytes(first);
+            let cacheBytes = nth(bdjo-awaiting-observation(owner), 2);
             let expected = bdjg-samples(epoch, bdjo-first-ms(owner), first, step, cacheBytes);
             let publication = bdjg-publish-at(telemetryRoot, BDJGPublisher(), epoch, bdjo-first-ms(owner), first, step, cacheBytes);
             let reading = fgtm-read-current(telemetryRoot, BDJGPublisher());
@@ -110,7 +138,7 @@ section [form.bml] {
         def bdjo-publish(owner, step) {
             let epoch = bdjo-next-epoch-at(BDJGRoot());
             let first = bdjo-first(owner);
-            let cacheBytes = bdjo-cache-bytes(first);
+            let cacheBytes = nth(bdjo-awaiting-observation(owner), 2);
             let expected = bdjg-samples(epoch, bdjo-first-ms(owner), first, step, cacheBytes);
             let publication = bdjg-publish(epoch, bdjo-first-ms(owner), first, step, cacheBytes);
             let reading = fgtm-read-current(BDJGRoot(), BDJGPublisher());
@@ -124,7 +152,7 @@ section [form.bml] {
         }
         def bdjo-progress-step-live(owner) {
             let step = bdj-step(bdjo-state(owner));
-            let staged = bdjo-owner-state(bdj-step-state(step), bdjo-first(owner), bdjo-first-ms(owner), step, "telemetry-publication-pending");
+            let staged = bdjo-stage(owner, step);
             bdjo-publish(staged, step);
         }
 
@@ -137,7 +165,7 @@ section [form.bml] {
         }
         def bdjo-progress-step-with-runtime-at(owner, telemetryRoot, runtimeIdentity) {
             let step = bdj-step-with-runtime(bdjo-state(owner), runtimeIdentity);
-            let staged = bdjo-owner-state(bdj-step-state(step), bdjo-first(owner), bdjo-first-ms(owner), step, "telemetry-publication-pending");
+            let staged = bdjo-stage(owner, step);
             bdjo-publish-at(staged, step, telemetryRoot);
         }
     }
