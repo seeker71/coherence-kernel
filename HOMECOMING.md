@@ -48,7 +48,7 @@ Every lane below speaks through this door.
   one session) and runs the band again. The turn is a backtrack walk: an attempt
   that did not turn the band green keeps its candidate under `.hearth/native-turns`,
   restores the source, and hands what it saw (the band's reading, the lane's status,
-  the candidate's diff) to a second attempt on the same goal. A green band keeps
+  the candidate's diff, the compiler's words when the band did not read) to a second attempt on the same goal. A green band keeps
   its edit for the landing. Each attempt lands its own row in
   [`receipts/native-turn-ledger.jsonl`](receipts/native-turn-ledger.jsonl), naming
   who began the turn.
