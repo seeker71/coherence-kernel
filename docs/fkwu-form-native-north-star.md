@@ -202,8 +202,12 @@ retirement retains unresolved continuations. A continuation can own its
 resource wake subscriptions: enrollment re-observes across registration, quiet
 waits stay quiet, and a complete batch brings one care attempt with every wake
 retained. Completed care releases its subscriptions; exhausted wake resources
-signal their own need. This is the current cooperative boundary beneath the
-broader scheduling destination.
+signal their own need. Form work shares that owner's ready queue without host
+registration. Explicit checkpoint yields give peers their turn; caller-granted
+slices preserve findings, local care and correlated completion. Pure ready work
+needs no host wait, while a shared turn serves resource events before its ready
+slices. This cooperative boundary now executes; automatic loop lowering,
+non-yielding work and preemptive scheduling remain beyond it.
 
 Bulk data stays in owned resident regions. A span carries allocation identity and generation, owner, offset, length, layout, access mode and completion dependencies. Crossings carry descriptors and batches. A zero-copy request preserves its alignment and lifetime contract or reports refusal.
 
