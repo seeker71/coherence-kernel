@@ -15946,13 +15946,24 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return FK_SLEN(sa) << 1;
     }
     if (t == 238) {
-        /* form_error — the voice of refusal. A program that raises it has
-         * declared its own cannot-recover, so per the two-phase law this is a
-         * legitimate runtime death: message to fd 2, exit nonzero, exactly as
-         * Go/Rust/TS panic on their native form_error. Before 2026-07-17 this
-         * op was absent here and axiom-5 lowered every raise to nothing — the
-         * bp "property" aphonia: bands sailed green past raised errors. */
+        /* form_error — the voice of refusal. Inside an attempt it is a stop
+         * like any other: voiced, unwound to the recover point, and the
+         * attempt answers nothing, as Go/Rust/TS catch their panic there.
+         * With no attempt standing the program has declared its own
+         * cannot-recover: message to fd 2, exit nonzero. */
         long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
+        if (fk_recovering()) {
+            static char fe[1024];
+            long long fn = 0;
+            const char *head = "fkwu: form_error: ";
+            while (head[fn] != 0) { fe[fn] = head[fn]; fn = fn + 1; }
+            if (sa >= 0 && FK_SOK(sa)) {
+                long long k = 0;
+                while (k < FK_SLEN(sa) && fn < (long long)sizeof(fe) - 1) { fe[fn] = FK_SBYTES(sa)[k]; fn = fn + 1; k = k + 1; }
+            }
+            fe[fn] = 0;
+            fk_stop(fe);
+        }
         fk_write_all_raw(2, "fkwu: form_error: ", 18);
         if (sa >= 0 && FK_SOK(sa)) {
             fk_write_all_raw(2, FK_SBYTES(sa), (unsigned long)FK_SLEN(sa));
