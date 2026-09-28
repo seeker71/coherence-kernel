@@ -1,0 +1,118 @@
+// defn-reach-run.bml — the definitions of a unit that only one root reaches.
+//
+// Before a reader leaves, the definitions that leave with it have to be known exactly. This mirror reads a
+// Form unit's (defn ...) forms and the names each one's body mentions, follows the root's reach, then keeps
+// back every definition something else still reaches: a definition of the unit outside that reach, or any
+// other .fk or .bml source under the search root (receipts and hidden trees aside) that names it. Mentions
+// of the root itself are set aside, since they are the call sites that change when the root leaves, and the
+// sources that make them are named. A mention in a comment or a string counts as a use, so the set
+// under-reports on purpose: what it names can leave together.
+// stdin: one line: the unit's path, the root definition, and optionally the directory to search (default ".").
+// preludes: form-stdlib/meaning-codes.bml form-stdlib/bml/stdin-source.bml
+section [form.bml] {
+ class DefnReach {
+  def dr-words(s) {
+   let sp = str_find(s, " ", 0);
+   if (str_len(s) == 0) then list() else if (sp < 0) then list(s) else cons(substring(s, 0, sp), dr-words(trim(substring(s, (sp + 1), str_len(s)))));
+  }
+  // a Form name runs until whitespace, a paren, a quote or a comment
+  def dr-name-byte?(b) = !((b <= 32) || eq(b, 40) || eq(b, 41) || eq(b, 34) || eq(b, 59));
+  def dr-name-end(s, i) = if ((i < str_len(s)) && dr-name-byte?(str_byte_at(s, i))) then dr-name-end(s, (i + 1)) else i;
+  // the byte after the form that opens at i: strings and ; comments carry no parens
+  def dr-close(s, i, depth) {
+   if (i >= str_len(s)) then i
+   else if eq(str_byte_at(s, i), 34) then dr-close(s, dr-string-end(s, (i + 1)), depth)
+   else if eq(str_byte_at(s, i), 59) then dr-close(s, dr-line-end(s, i), depth)
+   else if eq(str_byte_at(s, i), 40) then dr-close(s, (i + 1), (depth + 1))
+   else if eq(str_byte_at(s, i), 41) then (if eq(depth, 1) then (i + 1) else dr-close(s, (i + 1), (depth - 1)))
+   else dr-close(s, (i + 1), depth);
+  }
+  def dr-string-end(s, i) = if (i >= str_len(s)) then i else if eq(str_byte_at(s, i), 92) then dr-string-end(s, (i + 2)) else if eq(str_byte_at(s, i), 34) then (i + 1) else dr-string-end(s, (i + 1));
+  def dr-line-end(s, i) = if ((i >= str_len(s)) || eq(str_byte_at(s, i), 10)) then i else dr-line-end(s, (i + 1));
+  // every (defn name ...) of the unit as (name start end), read past comments and strings (a comment may
+  // say "(defn" too); a defn inside a defn is its own
+  def dr-defns(s, i) {
+   if (i >= str_len(s)) then list()
+   else if eq(str_byte_at(s, i), 59) then dr-defns(s, dr-line-end(s, i))
+   else if eq(str_byte_at(s, i), 34) then dr-defns(s, dr-string-end(s, (i + 1)))
+   else if (eq(str_byte_at(s, i), 40) && str_eq(substring(s, i, (i + 6)), "(defn ")) then dr-defn-at(s, i)
+   else dr-defns(s, (i + 1));
+  }
+  def dr-defn-at(s, at) {
+   let name-start = (at + 6);
+   let end = dr-close(s, at, 0);
+   cons(list(substring(s, name-start, dr-name-end(s, name-start)), at, end), dr-defns(s, end));
+  }
+  // the unit's names each body mentions
+  def dr-index(defs, i, tab) = if nil?(defs) then tab else dr-index(tail(defs), (i + 1), record_set(tab, head(head(defs)), (i + 1)));
+  def dr-mentions(s, i, end, names, seen, out) {
+   if (i >= end) then out
+   else if dr-name-byte?(str_byte_at(s, i)) then dr-mention(s, i, dr-name-end(s, i), end, names, seen, out)
+   else if eq(str_byte_at(s, i), 34) then dr-mentions(s, dr-string-end(s, (i + 1)), end, names, seen, out)
+   else dr-mentions(s, (i + 1), end, names, seen, out);
+  }
+  def dr-mention(s, i, e, end, names, seen, out) {
+   let w = substring(s, i, e);
+   let known = !eq(record_get(names, w), 0);
+   let fresh = eq(record_get(seen, w), 0);
+   if (known && fresh) then dr-mentions(s, e, end, names, record_set(seen, w, 1), cons(w, out)) else dr-mentions(s, e, end, names, seen, out);
+  }
+  def dr-edges(s, defs, names, tab) = if nil?(defs) then tab else dr-edges(s, tail(defs), names, record_set(tab, head(head(defs)), dr-mentions(s, (nth(head(defs), 1) + 6), nth(head(defs), 2), names, record_new(0), list())));
+  // the names reached from a frontier, never entering the root when it is fenced
+  def dr-reach(edges, frontier, fence, seen) {
+   if nil?(frontier) then seen
+   else if (str_eq(head(frontier), fence) || !eq(record_get(seen, head(frontier)), 0)) then dr-reach(edges, tail(frontier), fence, seen)
+   else dr-reach(edges, append(dr-out(edges, head(frontier)), tail(frontier)), fence, record_set(seen, head(frontier), 1));
+  }
+  def dr-out(edges, n) { let o = record_get(edges, n); if eq(o, 0) then list() else o; }
+  def dr-in?(tab, n) = !eq(record_get(tab, n), 0);
+  def dr-outside(defs, reach) = if nil?(defs) then list() else if dr-in?(reach, head(head(defs))) then dr-outside(tail(defs), reach) else cons(head(head(defs)), dr-outside(tail(defs), reach));
+  def dr-names(defs) = if nil?(defs) then list() else cons(head(head(defs)), dr-names(tail(defs)));
+  def dr-members(xs, tab) = if nil?(xs) then list() else if dr-in?(tab, head(xs)) then cons(head(xs), dr-members(tail(xs), tab)) else dr-members(tail(xs), tab);
+  def dr-without(xs, tab) = if nil?(xs) then list() else if dr-in?(tab, head(xs)) then dr-without(tail(xs), tab) else cons(head(xs), dr-without(tail(xs), tab));
+  // a whole-name mention of n in text: the bytes on either side cannot continue a name
+  def dr-named?(text, n, from) {
+   let at = str_find(text, n, from);
+   if (at < 0) then false
+   else if ((at == 0 || !dr-name-byte?(str_byte_at(text, (at - 1)))) && (((at + str_len(n)) >= str_len(text)) || !dr-name-byte?(str_byte_at(text, (at + str_len(n)))))) then true
+   else dr-named?(text, n, (at + 1));
+  }
+  def dr-named-in(text, xs) = if nil?(xs) then list() else if dr-named?(text, head(xs), 0) then cons(head(xs), dr-named-in(text, tail(xs))) else dr-named-in(text, tail(xs));
+  def dr-skips() = list("receipts", ".git", ".hearth", ".claude", ".cache", ".obsidian", "node_modules", "target", "dist");
+  def dr-sources(root) = append(source_inventory(root, ".fk", dr-skips()), source_inventory(root, ".bml", dr-skips()));
+  def dr-path(root, rel) = if str_eq(root, ".") then rel else mc-cat(list(root, "/", rel));
+  // the candidates other sources name, and the sources that name the root
+  def dr-external(root, rows, unit, cands, rootName, named, callers) {
+   if nil?(rows) then list(named, callers)
+   else dr-external-at(root, tail(rows), unit, cands, rootName, named, callers, dr-path(root, head(head(rows))));
+  }
+  def dr-external-at(root, rest, unit, cands, rootName, named, callers, path) {
+   let text = if (str_eq(path, unit) || (file_size(path) < 1)) then "" else read_file(path);
+   let hits = dr-named-in(text, cands);
+   let calls = if ((str_len(text) > 0) && dr-named?(text, rootName, 0)) then cons(path, callers) else callers;
+   dr-external(root, rest, unit, cands, rootName, dr-mark(hits, named), calls);
+  }
+  def dr-mark(xs, tab) = if nil?(xs) then tab else dr-mark(tail(xs), record_set(tab, head(xs), 1));
+  def dr-lines(xs) = if nil?(xs) then "" else mc-cat(list("\n  ", head(xs), dr-lines(tail(xs))));
+  def dr-run() {
+   let args = dr-words(trim(stdin-text()));
+   let unit = nth(args, 0);
+   let rootName = nth(args, 1);
+   let searchRoot = if (len(args) > 2) then nth(args, 2) else ".";
+   let s = read_file(unit);
+   let defs = dr-defns(s, 0);
+   let names = dr-index(defs, 0, record_new(0));
+   let edges = dr-edges(s, defs, names, record_new(0));
+   let reach = dr-reach(edges, list(rootName), "", record_new(0));
+   let cands = dr-without(dr-members(dr-names(defs), reach), dr-mark(list(rootName), record_new(0)));
+   let ext = dr-external(searchRoot, dr-sources(searchRoot), unit, cands, rootName, record_new(0), list());
+   let kept = dr-reach(edges, append(dr-outside(defs, reach), dr-members(cands, head(ext))), rootName, record_new(0));
+   let leaving = cons(rootName, dr-without(cands, kept));
+   print_str(mc-cat(list("[defn-reach] ", unit, " defns=", int_to_str(len(defs)), " root=", rootName, " reaches=", int_to_str((len(cands) + 1)), " leaves-with-it=", int_to_str(len(leaving)), " kept=", int_to_str((len(cands) + 1 - len(leaving))))));
+   print_str(mc-cat(list("[defn-reach] sources that name the root (their call sites change first):", dr-lines(nth(ext, 1)))));
+   print_str(mc-cat(list("[defn-reach] leaving with it:", dr-lines(leaving))));
+   len(leaving);
+  }
+ }
+ dr-run();
+}
