@@ -1,6 +1,6 @@
 # Native RAM pipe workers
 
-Form owns pipe creation, descriptor flags, readiness arrays, writes, process
+Form owns pipe creation, descriptor flags, readiness subscriptions, writes, process
 admission, framing, cancellation and release on Darwin ARM64. The native
 instructions are emitted and admitted in RAM. No C source change is required.
 
@@ -28,20 +28,43 @@ inside their worker; the parent multiplexes independent workers and streams.
 All original pipe descriptors carry close-on-exec. Parent endpoints are
 nonblocking; child standard streams remain blocking. Partial writes,
 interruption, would-block and broken-pipe results retain their actual status.
-Poll storage grows with the owned endpoint set. The 65,536-byte read chunk is
+Readiness stays registered in the [native event queue](native-resource-events.md).
+An event supplies the queued byte extent and EOF; the owner reads one chunk
+per ready stream in the batch. Level readiness carries the remaining bytes
+into the next turn. Idle input has no write subscription, and a partial write
+waits for capacity without repeating unsuccessful writes. The 65,536-byte read chunk is
 an operation size, not a message limit. The existing argv spawn carrier admits
 at most 32 arguments of at most 1,023 bytes each; work payloads travel separately
 through the pipe.
 
-Completion requires both process reaping and drained stdout/stderr EOF.
-Cancellation closes input, requests termination, escalates after the observed
-grace interval and continues draining. Confirmed output remains readable after
+Completion requires both process reaping and drained stdout/stderr EOF. A
+child-exit subscription prompts the actual reap; a quiet wait never probes
+every process. Admission re-observes exit after registration to cover an early
+child exit. Stream closure alone leaves the process obligation alive.
+
+`npp-cancel(owner, job, graceMilliseconds)` closes input, requests termination
+and retains an asynchronous cancellation. Its one-shot timer escalates when
+the child remains alive. Other work continues through the queue while output
+drains. Repeated cancellation preserves the first grace interval and completed
+effects. `npp-stop-for` additionally observes settlement for a caller-selected
+duration; `npp-stop` uses the shared defaults. Exhausting that observation
+leaves ownership intact. Confirmed output remains readable after
 owner retirement. Incomplete settlement retains ownership for another attempt.
+Failed managed writes retain their original bytes, accepted offset and error;
+the job's organ reading carries the need into local care.
 Worker refusal diagnostics stay on stderr through private resource release;
 inherited standard streams close only after the final cleanup observation.
 
+`npp-open-with(events)` borrows a shared event owner. `nve-turn` can then advance
+pipe I/O, child exit, cancellation and JIT cache care together; `npp-pump` uses
+that same dispatch. Closing a pipe owner removes its subscriptions and releases
+its processes and endpoints, preserving the shared queue and other consumers.
+Close consumers before closing the queue. `npp-open` owns a private queue when
+one is not supplied. Wait durations use native Form integers; the poll API's
+32-bit millisecond ceiling no longer defines this path.
+
 The owner is cooperative. Its records are not protected capabilities. Native
-readiness and queued-byte observations establish pipe EOF independently; the
+readiness and its queued-byte extent establish pipe EOF independently; the
 existing `file_read` carrier does not expose its underlying errno. Supervision
 covers the direct child. A descendant retaining inherited streams can prevent
 EOF and leave cancellation unsettled. Other CPU/OS targets, reusable TLS

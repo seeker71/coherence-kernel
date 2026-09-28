@@ -194,8 +194,8 @@ Form owns the following executing surfaces. Each linked page names its public do
 | [Ordered CPU mathematics](native-fp64-matrix.md) | Form emits binary64 MXFP8 matrix code in RAM; repeated calls reuse owned output memory without boxing intermediate products or sums |
 | [Real-model numerical oracle](native-dsv4-oracle.md) | Form owns GGUF admission, independent quantized CPU arithmetic, complete layer and token histories, exact retained vectors and tensor-sized Metal view plans |
 | [DSV4 proof generation](native-dsv4-proof-emission.md) | Form owns shader composition, complete GGUF metadata, typed requests, checked output settlement and proof archive retention |
-| [RAM pipe workers](native-pipe-workers.md) | Form emits Darwin ARM64 pipe and readiness operations in RAM, supervises resident workers, preserves complete binary frames and correlated stderr health, and settles partial writes, EOF, cancellation and physical release |
-| [Native resource events](native-resource-events.md) | Form emits Darwin ARM64 queue operations in RAM, batches path/timer/readiness events, grows owned event storage, resumes JIT care in place and releases registrations, descriptors and native admissions |
+| [RAM pipe workers](native-pipe-workers.md) | Form emits Darwin ARM64 pipe operations in RAM, uses persistent readiness and child-exit subscriptions, retains partial/failed writes, advances cancellation by its timer and settles EOF, reaping and physical release |
+| [Native resource events](native-resource-events.md) | Form emits Darwin ARM64 queue operations in RAM, dispatches path/timer/readiness/process events to retained receiving contexts, shares one queue across pipe workers and JIT care, and releases each consumer independently |
 | [Pinned Wiktionary sources](native-wiktionary-source.md) | Form reacquires the complete 111 retained revisions, binds page/revision/timestamp identities and reproduces their English hashes and selected meanings; actual acquisition and retained-response replay remain distinct |
 
 The deterministic substantive build and its three downstream generators share

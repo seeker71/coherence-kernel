@@ -188,8 +188,12 @@ working storage and final release. A quiet wait leaves filesystem metadata
 alone. Enrollment covers path arrival and replacement; a changed lease renews
 its deadline. Each host implementation supplies this lifecycle through Form's
 existing event and care language. The [Darwin event owner](native-resource-events.md)
-is the current working path; the broader scheduler and other hosts build from
-the same ownership contract.
+is the current working path. Pipe workers and JIT care now borrow one queue:
+readiness resumes only its receiver, process exit prompts physical reaping, and
+cancellation retains its grace timer while other owners continue. Partial writes
+keep their accepted offset; an error retains the unsent request and live need.
+The pipe path releases its poll arrays and repeated process probes. The broader
+scheduler and other hosts build from the same ownership contract.
 
 Bulk data stays in owned resident regions. A span carries allocation identity and generation, owner, offset, length, layout, access mode and completion dependencies. Crossings carry descriptors and batches. A zero-copy request preserves its alignment and lifetime contract or reports refusal.
 
