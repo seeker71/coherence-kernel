@@ -18,7 +18,10 @@ section [form.bml] {
         // ---- the door to this process's program ----
         def gl-pid() = host_pid();
         def gl-node(k) = kernel_ast(gl-pid(), k);
-        def gl-tag(k) = if nothing?(k) then -1 else if (k < 0) then -1 else nth(gl-node(k), 0);
+        // a node word that names no node: nothing, or kernel_ast's own negative word for an absent child. It is read
+        // here, once; every walk below asks gl-absent?, and the tag of no node is nothing
+        def gl-absent?(k) = if nothing?(k) then 1 else (k < 0);
+        def gl-tag(k) = if gl-absent?(k) then nothing() else nth(gl-node(k), 0);
         def gl-a(k) = nth(gl-node(k), 1);
         def gl-b(k) = nth(gl-node(k), 2);
         def gl-c(k) = nth(gl-node(k), 3);
@@ -42,19 +45,23 @@ section [form.bml] {
         def gl-param?(k) = ((Comparable) gl-tag(k) == 110);
         def gl-slot(k) = gl-a(gl-a(k));
         def gl-call?(k) = (((Comparable) gl-tag(k) == 241) || ((Comparable) gl-tag(k) == 12));
-        def gl-args-onto(cell, acc) = if (cell < 0) then reverse(acc) else gl-args-onto(gl-b(cell), cons(gl-a(cell), acc));
+        def gl-args-onto(cell, acc) = if gl-absent?(cell) then reverse(acc) else gl-args-onto(gl-b(cell), cons(gl-a(cell), acc));
         def gl-args(k) = if ((Comparable) gl-tag(k) == 12) then list(gl-b(k)) else gl-args-onto(gl-b(k), list());
         def gl-self?(k, idx) = (gl-call?(k) && ((Comparable) gl-a(k) == idx));
         def gl-arity(row) = gl-arity-of(gl-unwrap(gl-row-body(row)), gl-row-idx(row));
-        // the arity read off the self call, or off the highest parameter slot seen plus one
+        // the arity read off the self call, or off how many parameter slots the body reaches
         def gl-arity-of(body, idx) {
             let self = gl-find-self(body, idx);
-            if (self < 0) then (gl-max-slot(body) + 1) else len(gl-args(self));
+            if nothing?(self) then gl-slot-span(body) else len(gl-args(self));
         }
-        def gl-find-self(k, idx) = if (k < 0) then -1 else if gl-self?(k, idx) then k else gl-find-self-kids(gl-kids(k), idx);
-        def gl-find-self-kids(ks, idx) = if nil?(ks) then -1 else if (gl-find-self(head(ks), idx) >= 0) then gl-find-self(head(ks), idx) else gl-find-self-kids(tail(ks), idx);
-        def gl-max-slot(k) = if (k < 0) then -1 else if gl-param?(k) then gl-slot(k) else gl-max-slot-kids(gl-kids(k), -1);
-        def gl-max-slot-kids(ks, m) = if nil?(ks) then m else gl-max-slot-kids(tail(ks), if (gl-max-slot(head(ks)) > m) then gl-max-slot(head(ks)) else m);
+        // the first self call under a node, or nothing when the node never calls itself
+        def gl-find-self(k, idx) = if gl-absent?(k) then nothing() else if gl-self?(k, idx) then k else gl-find-self-kids(gl-kids(k), idx);
+        def gl-find-self-kids(ks, idx) = if nil?(ks) then nothing() else gl-find-self-or(gl-find-self(head(ks), idx), tail(ks), idx);
+        def gl-find-self-or(found, ks, idx) = if nothing?(found) then gl-find-self-kids(ks, idx) else found;
+        // how many parameter slots a node reaches: its highest slot plus one, 0 when it reads none
+        def gl-slot-span(k) = if gl-absent?(k) then 0 else if gl-param?(k) then (gl-slot(k) + 1) else gl-slot-span-kids(gl-kids(k), 0);
+        def gl-slot-span-kids(ks, m) = if nil?(ks) then m else gl-slot-span-kids(tail(ks), gl-larger(gl-slot-span(head(ks)), m));
+        def gl-larger(a, b) = if (a > b) then a else b;
         // the child nodes of a node, by tag: literals and parameters carry values, not children
         def gl-kids(k) {
             let t = gl-tag(k);
@@ -62,9 +69,9 @@ section [form.bml] {
         }
         def gl-unary?(t) = (((Comparable) t == 20) || (((Comparable) t == 21) || (((Comparable) t == 22) || (((Comparable) t == 72) || (((Comparable) t == 81) || (((Comparable) t == 89) || (((Comparable) t == 90) || (((Comparable) t == 54) || ((Comparable) t == 138)))))))));
         def gl-binary?(t) = (((Comparable) t == 3) || (((Comparable) t == 4) || (((Comparable) t == 42) || (((Comparable) t == 10) || (((Comparable) t == 11) || (((Comparable) t == 5) || (((Comparable) t == 102) || (((Comparable) t == 103) || (((Comparable) t == 70) || (((Comparable) t == 71) || (((Comparable) t == 195) || ((Comparable) t == 19))))))))))));
-        def gl-uses-slot?(k, s) = if (k < 0) then 0 else if (gl-param?(k) && ((Comparable) gl-slot(k) == s)) then 1 else gl-uses-slot-kids?(gl-kids(k), s);
+        def gl-uses-slot?(k, s) = if gl-absent?(k) then 0 else if (gl-param?(k) && ((Comparable) gl-slot(k) == s)) then 1 else gl-uses-slot-kids?(gl-kids(k), s);
         def gl-uses-slot-kids?(ks, s) = if nil?(ks) then 0 else if ((Comparable) gl-uses-slot?(head(ks), s) == 1) then 1 else gl-uses-slot-kids?(tail(ks), s);
-        def gl-has-self?(k, idx) = (gl-find-self(k, idx) >= 0);
+        def gl-has-self?(k, idx) = if nothing?(gl-find-self(k, idx)) then 0 else 1;
 
         // ---- results: list(1, value) or list(0, reason) ----
         def gl-ok(v) = list(1, v);
@@ -113,8 +120,10 @@ section [form.bml] {
         // a condition: compares and the truth of a number
         def gl-cond(k, c) {
             let t = gl-tag(k);
-            if gl-nil-call?(k) then if ((String) gl-ctx-mode(c) == "seq") then gl-ok(str_concat("(i", str_concat(int_to_str(gl-nil-slot(k)), " >= n)"))) else gl-no("nil? inside an element: the exits carry it") else if ((Comparable) t == 5) then gl-bin(" <= ", k, c) else if ((Comparable) t == 103) then gl-bin(" < ", k, c) else if ((Comparable) t == 102) then gl-bin(" == ", k, c) else if ((Comparable) t == 70) then gl-cond2(" && ", k, c) else if ((Comparable) t == 71) then gl-cond2(" || ", k, c) else if ((Comparable) t == 72) then gl-not(k, c) else if ((Comparable) t == 138) then gl-ok("false") else gl-truth(k, c);
+            if gl-nil-call?(k) then if ((String) gl-ctx-mode(c) == "seq") then gl-nil-cond(gl-nil-slot(k)) else gl-no("nil? inside an element: the exits carry it") else if ((Comparable) t == 5) then gl-bin(" <= ", k, c) else if ((Comparable) t == 103) then gl-bin(" < ", k, c) else if ((Comparable) t == 102) then gl-bin(" == ", k, c) else if ((Comparable) t == 70) then gl-cond2(" && ", k, c) else if ((Comparable) t == 71) then gl-cond2(" || ", k, c) else if ((Comparable) t == 72) then gl-not(k, c) else if ((Comparable) t == 138) then gl-ok("false") else gl-truth(k, c);
         }
+        // a walk's end test: the cursor of the list parameter nil? asks about has reached n
+        def gl-nil-cond(s) = if nothing?(s) then gl-no("nil? of something that is not a list parameter") else gl-ok(str_concat("(i", str_concat(int_to_str(s), " >= n)")));
         def gl-cond2(op, k, c) {
             let x = gl-cond(gl-a(k), c);
             let y = if gl-ok?(x) then gl-cond(gl-b(k), c) else x;
@@ -141,7 +150,7 @@ section [form.bml] {
         }
         def gl-expr(k, c) {
             let t = gl-tag(k);
-            if ((Comparable) t == 1) then gl-ok(str_concat(int_to_str(gl-a(k)), ".0f")) else if ((Comparable) t == 53) then gl-ok(gl-num-text(gl-str(gl-a(k)))) else if ((Comparable) t == 3) then gl-bin(" + ", k, c) else if ((Comparable) t == 4) then gl-bin(" - ", k, c) else if ((Comparable) t == 42) then gl-bin(" * ", k, c) else if ((Comparable) t == 10) then gl-bin(" / ", k, c) else if ((Comparable) t == 11) then gl-fn2("fmod", k, c) else if ((Comparable) t == 81) then gl-fn1("sqrt", k, c) else if ((Comparable) t == 89) then gl-fn1("exp", k, c) else if ((Comparable) t == 90) then gl-fn1("log", k, c) else if ((Comparable) t == 195) then gl-fn2("pow", k, c) else if ((Comparable) t == 54) then gl-fn1("trunc", k, c) else if ((Comparable) t == 20) then gl-head(k, c) else if ((Comparable) t == 110) then gl-param-text(k, c) else if ((Comparable) t == 6) then gl-if-expr(k, c) else if (((Comparable) t == 5) || (((Comparable) t == 102) || (((Comparable) t == 103) || (((Comparable) t == 70) || (((Comparable) t == 71) || (((Comparable) t == 72) || ((Comparable) t == 138))))))) then gl-cmp-value(k, c) else if ((Comparable) t == 109) then gl-no("a let inside an expression; write it as its own step") else if gl-call?(k) then if ((Comparable) gl-a(k) == gl-ctx-idx(c)) then gl-no("the self call inside an expression") else gl-call-text(gl-a(k), gl-args(k), c) else if ((Comparable) t == 244) then gl-bound-call(k, c) else if ((Comparable) t == 21) then gl-no("a list used as a value") else if ((Comparable) t == 24) then gl-no("a string in the element") else if ((Comparable) t == 19) then gl-no("a list built in the element") else gl-no(str_concat("no arm for node tag ", int_to_str(t)));
+            if nothing?(t) then gl-no("no node where an expression stands") else if ((Comparable) t == 1) then gl-ok(str_concat(int_to_str(gl-a(k)), ".0f")) else if ((Comparable) t == 53) then gl-ok(gl-num-text(gl-str(gl-a(k)))) else if ((Comparable) t == 3) then gl-bin(" + ", k, c) else if ((Comparable) t == 4) then gl-bin(" - ", k, c) else if ((Comparable) t == 42) then gl-bin(" * ", k, c) else if ((Comparable) t == 10) then gl-bin(" / ", k, c) else if ((Comparable) t == 11) then gl-fn2("fmod", k, c) else if ((Comparable) t == 81) then gl-fn1("sqrt", k, c) else if ((Comparable) t == 89) then gl-fn1("exp", k, c) else if ((Comparable) t == 90) then gl-fn1("log", k, c) else if ((Comparable) t == 195) then gl-fn2("pow", k, c) else if ((Comparable) t == 54) then gl-fn1("trunc", k, c) else if ((Comparable) t == 20) then gl-head(k, c) else if ((Comparable) t == 110) then gl-param-text(k, c) else if ((Comparable) t == 6) then gl-if-expr(k, c) else if (((Comparable) t == 5) || (((Comparable) t == 102) || (((Comparable) t == 103) || (((Comparable) t == 70) || (((Comparable) t == 71) || (((Comparable) t == 72) || ((Comparable) t == 138))))))) then gl-cmp-value(k, c) else if ((Comparable) t == 109) then gl-no("a let inside an expression; write it as its own step") else if gl-call?(k) then if ((Comparable) gl-a(k) == gl-ctx-idx(c)) then gl-no("the self call inside an expression") else gl-call-text(gl-a(k), gl-args(k), c) else if ((Comparable) t == 244) then gl-bound-call(k, c) else if ((Comparable) t == 21) then gl-no("a list used as a value") else if ((Comparable) t == 24) then gl-no("a string in the element") else if ((Comparable) t == 19) then gl-no("a list built in the element") else gl-no(str_concat("no arm for node tag ", int_to_str(t)));
         }
         def gl-call-text(callee, args, c) {
             let texts = gl-exprs(args, c, list());
@@ -158,19 +167,20 @@ section [form.bml] {
 
         // ---- callees as device functions ----
         // every callee reachable from a body, transitively, each once, callees before callers
-        def gl-callee-of(k, c) = if gl-call?(k) then gl-a(k) else if ((Comparable) gl-tag(k) == 244) then gl-bound-idx(k, c) else -1;
+        // the callee a node calls, or nothing when it calls none (or calls through a parameter with no binding)
+        def gl-callee-of(k, c) = if gl-call?(k) then gl-a(k) else if ((Comparable) gl-tag(k) == 244) then gl-bound-idx(k, c) else nothing();
         def gl-bound-idx(k, c) {
             let f = gl-a(k);
             let name = if gl-param?(f) then gl-env-get(gl-ctx-bind(c), gl-slot(f)) else nothing();
             let row = if nothing?(name) then nothing() else gl-find(name);
-            if nothing?(row) then -1 else gl-row-idx(row);
+            if nothing?(row) then nothing() else gl-row-idx(row);
         }
         // seen: list of (callee idx, arity), the arity read off the call site's argument count
         def gl-in?(xs, x) = if nil?(xs) then 0 else if ((Comparable) nth(head(xs), 0) == x) then 1 else gl-in?(tail(xs), x);
         def gl-call-arity(k, c) = if gl-call?(k) then len(gl-args(k)) else if ((Comparable) gl-tag(k) == 244) then len(gl-args-onto(gl-b(k), list())) else 0;
         def gl-collect(k, c, seen) {
             let callee = gl-callee-of(k, c);
-            let structural = if (callee < 0) then 1 else if ((String) gl-name-of(callee) == "nil?") then 1 else 0;
+            let structural = if nothing?(callee) then 1 else if ((String) gl-name-of(callee) == "nil?") then 1 else 0;
             let seen2 = if (((Comparable) structural == 0) && ((!((Comparable) callee == gl-ctx-idx(c))) && ((Comparable) gl-in?(seen, callee) == 0))) then gl-collect(gl-unwrap(gl-row-body(gl-callee-row(callee))), gl-ctx(callee, list(), list(), 0, gl-ctx-bind(c), "fn"), cons(list(callee, gl-call-arity(k, c)), seen)) else seen;
             gl-collect-kids(gl-kids(k), c, seen2);
         }
@@ -258,8 +268,8 @@ section [form.bml] {
             let t = gl-tag(fold);
             let direct = if gl-binary?(t) then (gl-acc?(gl-a(fold), acc) || gl-acc?(gl-b(fold), acc)) else 0;
             let args = if gl-call?(fold) then gl-args(fold) else if ((Comparable) t == 244) then gl-args-onto(gl-b(fold), list()) else list();
-            let callee = if gl-call?(fold) then gl-a(fold) else if ((Comparable) t == 244) then gl-bound-idx(fold, gl-ctx(0, list(), list(), 0, bind, "par")) else -1;
-            if (((Comparable) t == 3) && direct) then "add" else if (((Comparable) t == 42) && direct) then "mul" else if ((callee >= 0) && (((Comparable) len(args) == 2) && (gl-acc?(nth(args, 0), acc) || gl-acc?(nth(args, 1), acc)))) then gl-callee-kind(callee, if gl-acc?(nth(args, 0), acc) then 0 else 1, bind) else gl-fold-kind(fold, acc, bind);
+            let callee = if gl-call?(fold) then gl-a(fold) else if ((Comparable) t == 244) then gl-bound-idx(fold, gl-ctx(0, list(), list(), 0, bind, "par")) else nothing();
+            if (((Comparable) t == 3) && direct) then "add" else if (((Comparable) t == 42) && direct) then "mul" else if ((!nothing?(callee)) && (((Comparable) len(args) == 2) && (gl-acc?(nth(args, 0), acc) || gl-acc?(nth(args, 1), acc)))) then gl-callee-kind(callee, if gl-acc?(nth(args, 0), acc) then 0 else 1, bind) else gl-fold-kind(fold, acc, bind);
         }
         def gl-callee-kind(callee, pos, bind) {
             let body = gl-unwrap(gl-row-body(gl-callee-row(callee)));
@@ -284,13 +294,14 @@ section [form.bml] {
         // or fails (1). The step is the self call, an if choosing between self calls, or, for the
         // recursion that is not a tail call, an expression holding the self call as one operand.
         def gl-nil-call?(k) = (gl-call?(k) && ((String) gl-name-of(gl-a(k)) == "nil?"));
+        // the slot of the parameter nil? asks about, or nothing when it asks about something else
         def gl-nil-slot(k) {
             let args = gl-args(k);
-            if (((Comparable) len(args) == 1) && gl-param?(head(args))) then gl-slot(head(args)) else -1;
+            if (((Comparable) len(args) == 1) && gl-param?(head(args))) then gl-slot(head(args)) else nothing();
         }
-        def gl-has-tag?(k, want) = if (k < 0) then 0 else if ((Comparable) gl-tag(k) == want) then 1 else gl-has-tag-kids?(gl-kids(k), want);
+        def gl-has-tag?(k, want) = if gl-absent?(k) then 0 else if ((Comparable) gl-tag(k) == want) then 1 else gl-has-tag-kids?(gl-kids(k), want);
         def gl-has-tag-kids?(ks, want) = if nil?(ks) then 0 else if ((Comparable) gl-has-tag?(head(ks), want) == 1) then 1 else gl-has-tag-kids?(tail(ks), want);
-        def gl-add-list(lists, s) = if (s < 0) then lists else if gl-list-slot?(lists, s) then lists else append(lists, list(s));
+        def gl-add-list(lists, s) = if nothing?(s) then lists else if gl-list-slot?(lists, s) then lists else append(lists, list(s));
         // chain -> list(1, lists, items, step) or list(0, reason)
         def gl-chain(k, idx, lists, items) {
             let t = gl-tag(k);
@@ -309,9 +320,11 @@ section [form.bml] {
         def gl-items-exits(items) = if nil?(items) then list() else if ((String) nth(head(items), 0) == "exit") then cons(head(items), gl-items-exits(tail(items))) else gl-items-exits(tail(items));
         def gl-nil-exit?(x) = (gl-nil-call?(nth(x, 1)) && ((Comparable) nth(x, 3) == 0));
         def gl-early-exits(exits) = if nil?(exits) then list() else if gl-nil-exit?(head(exits)) then gl-early-exits(tail(exits)) else cons(head(exits), gl-early-exits(tail(exits)));
-        // the accumulator: the one parameter every exit answers; -1 when exits answer something else
+        // the accumulator: the one parameter every exit answers; nothing when there is no exit, or when an exit answers
+        // something else. The walk starts from nothing (no exit read yet); an exit that disagrees ends it at once, so its
+        // nothing is never read back as the start
         def gl-exits-acc(exits, acc) = if nil?(exits) then acc else gl-exits-acc-at(exits, acc, nth(head(exits), 2));
-        def gl-exits-acc-at(exits, acc, ans) = if (!gl-param?(ans)) then -2 else if (acc < 0) then gl-exits-acc(tail(exits), gl-slot(ans)) else if ((Comparable) acc == gl-slot(ans)) then gl-exits-acc(tail(exits), acc) else -2;
+        def gl-exits-acc-at(exits, acc, ans) = if (!gl-param?(ans)) then nothing() else if nothing?(acc) then gl-exits-acc(tail(exits), gl-slot(ans)) else if ((Comparable) acc == gl-slot(ans)) then gl-exits-acc(tail(exits), acc) else nothing();
         def gl-constant?(k) = (((Comparable) gl-tag(k) == 1) || ((Comparable) gl-tag(k) == 53));
         def gl-exits-constant?(exits) = if nil?(exits) then 1 else if gl-constant?(nth(head(exits), 2)) then gl-exits-constant?(tail(exits)) else 0;
         def gl-lets-use?(lets, s) = if nil?(lets) then 0 else if ((Comparable) gl-uses-slot?(nth(head(lets), 2), s) == 1) then 1 else gl-lets-use?(tail(lets), s);
@@ -327,7 +340,7 @@ section [form.bml] {
             let t = gl-tag(fold);
             if gl-binary?(t) then if gl-acc?(gl-a(fold), acc) then gl-b(fold) else gl-a(fold) else if (gl-call?(fold) || ((Comparable) t == 244)) then gl-non-acc(if ((Comparable) t == 244) then gl-args-onto(gl-b(fold), list()) else gl-args(fold), acc) else if ((Comparable) t == 6) then if gl-acc?(gl-b(fold), acc) then gl-c(fold) else gl-b(fold) else fold;
         }
-        def gl-non-acc(args, acc) = if nil?(args) then -1 else if gl-acc?(head(args), acc) then gl-non-acc(tail(args), acc) else head(args);
+        def gl-non-acc(args, acc) = if nil?(args) then nothing() else if gl-acc?(head(args), acc) then gl-non-acc(tail(args), acc) else head(args);
 
         // ---- kernel texts ----
         def gl-nl() = byte_to_str(10);
@@ -359,7 +372,7 @@ section [form.bml] {
         def gl-locals(scalars, acc, text) = if nil?(scalars) then text else gl-locals(tail(scalars), acc, str_concat(text, str_concat("    float v", str_concat(int_to_str(head(scalars)), str_concat(" = ", str_concat(if ((Comparable) head(scalars) == acc) then "init" else str_concat("c", int_to_str(head(scalars))), str_concat(";", gl-nl())))))));
         def gl-without(xs, x) = if nil?(xs) then list() else if ((Comparable) head(xs) == x) then gl-without(tail(xs), x) else cons(head(xs), gl-without(tail(xs), x));
 
-        // ---- lowering a named defn: list(1, msl, lists, acc, kind, scalars) or list(0, reason) ----
+        // ---- lowering a named defn: list(1, msl, lists, acc, kind, scalars) or list(0, reason); acc is nothing for a kind with no accumulator ----
         def gl-lower(name) = gl-lower-bound(name, list());
         def gl-lower-bound(name, bindings) {
             let row = gl-find(name);
@@ -377,11 +390,11 @@ section [form.bml] {
         def gl-lower-chain(idx, arity, lists, items, step, funcs, bindings) {
             let lets = gl-items-lets(items);
             let exits = gl-items-exits(items);
-            let acc = gl-exits-acc(exits, -1);
+            let acc = gl-exits-acc(exits, nothing());
             let early = gl-early-exits(exits);
-            let scalars = gl-drop-bound(gl-scalars(arity, lists, if (acc < 0) then -1 else acc, 0, list()), bindings);
+            let scalars = gl-drop-bound(gl-scalars(arity, lists, acc, 0, list()), bindings);
             let c = gl-ctx(idx, lists, list(), 0, bindings, "par");
-            if ((!gl-self?(step, idx)) && ((!((Comparable) gl-tag(step) == 6)) && gl-has-self?(step, idx))) then gl-lower-nontail(idx, arity, lists, scalars, lets, exits, step, funcs, bindings, c) else if ((acc >= 0) && (nil?(early) && ((Comparable) gl-lets-use?(lets, acc) == 0))) then gl-lower-tail(idx, arity, lists, acc, scalars, lets, exits, step, funcs, bindings, c) else if ((acc < 0) && (((Comparable) gl-exits-constant?(exits) == 1) && (((Comparable) len(early) == 1) && gl-self?(step, idx)))) then gl-lower-any(idx, arity, lists, scalars, lets, exits, early, step, funcs, bindings, c) else gl-lower-seq(idx, arity, lists, acc, scalars, lets, exits, step, funcs, bindings);
+            if ((!gl-self?(step, idx)) && ((!((Comparable) gl-tag(step) == 6)) && gl-has-self?(step, idx))) then gl-lower-nontail(idx, arity, lists, scalars, lets, exits, step, funcs, bindings, c) else if ((!nothing?(acc)) && (nil?(early) && ((Comparable) gl-lets-use?(lets, acc) == 0))) then gl-lower-tail(idx, arity, lists, acc, scalars, lets, exits, step, funcs, bindings, c) else if (nothing?(acc) && (((Comparable) gl-exits-constant?(exits) == 1) && (((Comparable) len(early) == 1) && gl-self?(step, idx)))) then gl-lower-any(idx, arity, lists, scalars, lets, exits, early, step, funcs, bindings, c) else gl-lower-seq(idx, arity, lists, acc, scalars, lets, exits, step, funcs, bindings);
         }
         // the tail shapes: map, filter, a reduce whose fold joins, else the walk
         def gl-lower-tail(idx, arity, lists, acc, scalars, lets, exits, step, funcs, bindings, c) {
@@ -429,7 +442,7 @@ section [form.bml] {
             let condtext = if ((Comparable) nth(e, 3) == 0) then cond else if gl-ok?(cond) then gl-ok(str_concat("(!", str_concat(gl-val(cond), ")"))) else cond;
             let hit = gl-expr(nth(e, 2), c2);
             let miss = gl-expr(nth(head(exits), 2), c2);
-            if (!gl-ok?(lt2)) then lt2 else if (!gl-ok?(condtext)) then condtext else if (!gl-ok?(hit)) then hit else if (!gl-ok?(miss)) then miss else if ((Comparable) gl-self-args-ok?(gl-args(step), 0, lists, -1) == 0) then gl-lower-seq(idx, arity, lists, -1, scalars, lets, exits, step, funcs, bindings) else list(1, gl-source-any(funcs, lists, scalars, nth(gl-val(lt2), 0), gl-val(condtext), gl-val(hit), gl-val(miss)), lists, -1, "any", scalars);
+            if (!gl-ok?(lt2)) then lt2 else if (!gl-ok?(condtext)) then condtext else if (!gl-ok?(hit)) then hit else if (!gl-ok?(miss)) then miss else if ((Comparable) gl-self-args-ok?(gl-args(step), 0, lists, nothing()) == 0) then gl-lower-seq(idx, arity, lists, nothing(), scalars, lets, exits, step, funcs, bindings) else list(1, gl-source-any(funcs, lists, scalars, nth(gl-val(lt2), 0), gl-val(condtext), gl-val(hit), gl-val(miss)), lists, nothing(), "any", scalars);
         }
         // (if (nil? xs) INIT (op E (self (tail xs)))): the fold seen from the right; joins run parallel, the rest walk from the end
         def gl-lower-nontail(idx, arity, lists, scalars, lets, exits, step, funcs, bindings, c) {
@@ -442,7 +455,7 @@ section [form.bml] {
             let elem = if (selfa || selfb) then gl-expr(if selfa then gl-b(step) else gl-a(step), c2) else gl-no("recursion that is not a fold: the self call is not one operand of the answer");
             let inittext = if nil?(exits) then gl-no("a fold with no base") else gl-expr(nth(head(exits), 2), c2);
             let folded = if ((String) kind == "general") then gl-rfold-text(step, idx, c2) else gl-ok("");
-            if (!gl-ok?(lt2)) then lt2 else if (!gl-ok?(elem)) then elem else if (!gl-ok?(inittext)) then inittext else if (!gl-ok?(folded)) then folded else if ((String) kind == "general") then list(1, gl-source-rfold(funcs, lists, scalars, nth(gl-val(lt2), 0), gl-val(folded), gl-val(inittext)), lists, -1, "seq", scalars) else list(1, gl-source-reduce(funcs, lists, scalars, nth(gl-val(lt2), 0), gl-val(elem), kind, gl-val(inittext)), lists, -1, "reduce", scalars);
+            if (!gl-ok?(lt2)) then lt2 else if (!gl-ok?(elem)) then elem else if (!gl-ok?(inittext)) then inittext else if (!gl-ok?(folded)) then folded else if ((String) kind == "general") then list(1, gl-source-rfold(funcs, lists, scalars, nth(gl-val(lt2), 0), gl-val(folded), gl-val(inittext)), lists, nothing(), "seq", scalars) else list(1, gl-source-reduce(funcs, lists, scalars, nth(gl-val(lt2), 0), gl-val(elem), kind, gl-val(inittext)), lists, nothing(), "reduce", scalars);
         }
         // the fold expression with the self call read as acc
         def gl-rfold-text(step, idx, c) {
@@ -458,7 +471,7 @@ section [form.bml] {
             let scalars = gl-seq-scalars(arity, lists, 0, list());
             let env = gl-seq-env(arity, lists, 0, list());
             let c = gl-ctx(idx, lists, env, 0, bindings, "seq");
-            let listacc = if (acc < 0) then 0 else gl-has-tag?(step, 19);
+            let listacc = if nothing?(acc) then 0 else gl-has-tag?(step, 19);
             let body = gl-seq-items(gl-seq-order(lets, exits), c, lists, acc, listacc, step, "        ");
             if gl-ok?(body) then list(1, gl-source-seq(funcs, lists, gl-drop-bound(scalars, bindings), gl-val(body), acc), lists, acc, "seq", gl-without(gl-drop-bound(scalars, bindings), acc)) else body;
         }
@@ -571,23 +584,22 @@ section [form.bml] {
             let consts = cons(n, cons(md-f32-bits(init), gl-bits-onto(scalars, list())));
             let bind = if group then md-bind16(append(bufs, list(out)), consts, 1024, 0, 1, 0) else md-bind(append(bufs, list(out)), consts);
             let enq = mj-enqueue(nth(prog, 1), bind, if group then 1 else if ((String) kind == "seq") then 1 else n);
-            if ((Comparable) enq == 1) then out else gl-no(str_concat("enqueue declined: ", metal_status()));
+            if ((Comparable) enq == 1) then out else nothing();
         }
-        def gl-read(out) = gl-f32-of(gl-u32(metal_buf_read(out, 0, 4)));
+        // a call whose enqueue was declined answers nothing (metal_status names why, at last_error), and so does its read
+        def gl-read(out) = if nothing?(out) then nothing() else gl-f32-of(gl-u32(metal_buf_read(out, 0, 4)));
         // the first n floats of a resident buffer, decoded here from one read
-        def gl-read-n(out, n) = gl-floats-onto(metal_buf_read(out, 0, (4 * n)), 0, n, list());
+        def gl-read-n(out, n) = if nothing?(out) then nothing() else gl-floats-onto(metal_buf_read(out, 0, (4 * n)), 0, n, list());
         def gl-floats-onto(s, i, n, acc) = if (i >= n) then reverse(acc) else gl-floats-onto(s, (i + 1), n, cons(gl-f32-of(gl-u32-at(s, (4 * i))), acc));
         // a filter's answer: the count at out[0], then that many floats
-        def gl-read-filter(out) {
-            let cnt = float_to_int(gl-read(out));
-            gl-floats-onto(metal_buf_read(out, 4, (4 * cnt)), 0, cnt, list());
-        }
+        def gl-read-filter(out) = if nothing?(out) then nothing() else gl-read-kept(out, float_to_int(gl-read(out)));
+        def gl-read-kept(out, cnt) = gl-floats-onto(metal_buf_read(out, 4, (4 * cnt)), 0, cnt, list());
 
-        // ---- a counter out of metal_status ----
+        // ---- a counter out of metal_status: nothing when the status does not carry it (a carrier not loaded names no counter) ----
         def gl-count(key) {
             let s = metal_status();
             let at = str_find(s, str_concat(key, "="), 0);
-            if (at < 0) then -1 else gl-count-at(s, (at + (str_len(key) + 1)), 0);
+            if (at < 0) then nothing() else gl-count-at(s, (at + (str_len(key) + 1)), 0);
         }
         def gl-count-at(s, i, acc) = if (i >= str_len(s)) then acc else if ((str_byte_at(s, i) >= 48) && (str_byte_at(s, i) <= 57)) then gl-count-at(s, (i + 1), ((acc * 10) + (str_byte_at(s, i) - 48))) else acc;
     }
