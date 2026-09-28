@@ -1,10 +1,9 @@
 #!/usr/bin/env zsh
-# Shared integrity checks for the committed form-cli bootstrap carrier.
+# Source identity and behavioral proof for a native form-cli executable.
 #
-# The source stamp proves which Form source set authored the bootstrap.  The
-# table/C comparison separately proves that the emitted carrier embeds that
-# exact table.  Both must hold: a matching stamp alone cannot make a truncated
-# table or a stale emitted carrier usable.
+# form_cli_source_sha256 folds the manifest and every listed source with the
+# closure door's framing; form_cli_verify_binary_identity asks the built
+# executable to answer that digest; form_cli_behavioral_proof exercises it.
 
 form_cli_sha256_stream() {
     if command -v shasum >/dev/null 2>&1; then
@@ -77,178 +76,6 @@ form_cli_verify_binary_identity() {
     fi
 }
 
-form_cli_verify_source_digest() {
-    local digest_file="$1"
-    local expected="$2"
-    local actual
-    actual="$(cat "$digest_file" 2>/dev/null || true)"
-    if [[ "$actual" != "$expected" ]]; then
-        printf 'form-cli bootstrap: full source digest stale (have=%s want=%s)\n' \
-            "${actual:-missing}" "$expected" >&2
-        return 1
-    fi
-}
-
-form_cli_validate_table() {
-    local table="$1"
-    LC_ALL=C awk '
-        function die(message) {
-            print "form-cli bootstrap: invalid table: " message > "/dev/stderr"
-            failed = 1
-            exit 1
-        }
-        {
-            for (field = 1; field <= NF; field++) {
-                if ($field !~ /^-?[0-9]+$/) {
-                    die("non-numeric token")
-                }
-                token[++token_count] = $field + 0
-            }
-        }
-        END {
-            if (failed) {
-                exit 1
-            }
-            cursor = 1
-            if (token_count < 1) {
-                die("empty")
-            }
-            function_count = token[cursor++]
-            if (function_count < 1 || cursor + function_count - 1 > token_count) {
-                die("function roots")
-            }
-            function_root_start = cursor
-            cursor += function_count
-            if (cursor > token_count) {
-                die("missing node count")
-            }
-            node_count = token[cursor++]
-            if (node_count < 1 || cursor + (node_count * 4) - 1 > token_count) {
-                die("node rows")
-            }
-            node_start = cursor
-            # A shape-valid table can still be aphonic if a function root or
-            # a direct CALL points outside the serialized function/node
-            # ranges.  Validate those links before a candidate reaches the
-            # voice canary.
-            for (root_index = 0; root_index < function_count; root_index++) {
-                root = token[function_root_start + root_index]
-                if (root < 0 || root >= node_count) {
-                    die("function root index")
-                }
-            }
-            for (node_index = 0; node_index < node_count; node_index++) {
-                node_cursor = node_start + (node_index * 4)
-                if (token[node_cursor] == 12) {
-                    call_target = token[node_cursor + 1]
-                    if (call_target < 0 || call_target >= function_count) {
-                        die("call target")
-                    }
-                }
-            }
-            cursor += node_count * 4
-            if (cursor > token_count) {
-                die("missing string count")
-            }
-            string_count = token[cursor++]
-            if (string_count < 1) {
-                die("string count")
-            }
-            for (string_index = 0; string_index < string_count; string_index++) {
-                if (cursor > token_count) {
-                    die("missing string length")
-                }
-                string_length = token[cursor++]
-                if (string_length < 0 || cursor + string_length - 1 > token_count) {
-                    die("string bytes")
-                }
-                cursor += string_length
-            }
-            if (cursor != token_count + 1) {
-                die("trailing tokens")
-            }
-            printf "functions=%d nodes=%d strings=%d tokens=%d\n", \
-                function_count, node_count, string_count, token_count
-        }
-    ' "$table"
-}
-
-form_cli_extract_emitted_table() {
-    local emitted_c="$1"
-    local output_table="$2"
-    local output_tmp
-    output_tmp="$(mktemp "${output_table}.tmp.XXXXXX")"
-
-    if ! LC_ALL=C awk '
-        BEGIN {
-            prefix = "static const char fk_prog[] = \""
-            suffix = "\"; extern const unsigned char fk_genesis[]"
-        }
-        {
-            start = index($0, prefix)
-            if (start > 0) {
-                payload = substr($0, start + length(prefix))
-                finish = index(payload, suffix)
-                if (finish < 1) {
-                    exit 2
-                }
-                print substr(payload, 1, finish - 1)
-                found = 1
-                exit
-            }
-        }
-        END {
-            if (!found) {
-                exit 1
-            }
-        }
-    ' "$emitted_c" > "$output_tmp"; then
-        rm -f "$output_tmp"
-        echo "form-cli bootstrap: emitted C has no complete fk_prog carrier" >&2
-        return 1
-    fi
-
-    if ! form_cli_validate_table "$output_tmp" >/dev/null; then
-        rm -f "$output_tmp"
-        return 1
-    fi
-    mv -f "$output_tmp" "$output_table"
-}
-
-form_cli_table_matches_emitted() {
-    local table="$1"
-    local emitted_c="$2"
-    local extracted
-    local result=0
-    extracted="$(mktemp "${TMPDIR:-/tmp}/form-cli-carrier.XXXXXX")"
-
-    if ! form_cli_extract_emitted_table "$emitted_c" "$extracted"; then
-        result=1
-    elif ! cmp -s "$table" "$extracted"; then
-        echo "form-cli bootstrap: table does not exactly match emitted C fk_prog" >&2
-        result=1
-    fi
-    rm -f "$extracted"
-    return "$result"
-}
-
-form_cli_verify_bootstrap() {
-    local table="$1"
-    local emitted_c="$2"
-    local stamp_file="$3"
-    local expected_stamp="$4"
-    local actual_stamp
-    actual_stamp="$(cat "$stamp_file" 2>/dev/null || true)"
-
-    if [[ "$actual_stamp" != "$expected_stamp" ]]; then
-        printf 'form-cli bootstrap: source stamp stale (have=%s want=%s)\n' \
-            "${actual_stamp:-missing}" "$expected_stamp" >&2
-        return 1
-    fi
-    form_cli_validate_table "$table" >/dev/null || return 1
-    form_cli_table_matches_emitted "$table" "$emitted_c" || return 1
-}
-
 form_cli_sha256_file() {
     local file_path="$1"
     if command -v shasum >/dev/null 2>&1; then
@@ -289,7 +116,7 @@ form_cli_assert_file_eq() {
 
 # Exercise the executable itself from an otherwise empty temporary working
 # directory. This is intentionally broader than the recipe bands: it crosses
-# native read_file/rename/remove/time, the baked program table, REPL framing,
+# native read_file/rename/remove/time, the adjacent recipe image, REPL framing,
 # the production-sized streaming ranker, and request-bound HMAC verification.
 form_cli_behavioral_proof() (
     set -euo pipefail
