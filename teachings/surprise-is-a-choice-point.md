@@ -7,7 +7,9 @@ codes, they are form primitive backtrack points and we use choice to handle erro
 An issue met on the way — a failing check, a missing file, a band that reads short, a tool that stops, a
 gap nobody named — is not an end and not a report to hand back. It is a point where the walk chooses again:
 the intent of the first choice stands, what the failed option saw is carried forward, and the next option is
-taken. The work continues in the same movement.
+taken. The work continues in the same movement and the same active context.
+Its understanding, live resources and completed work stay present; a new chat,
+subagent or model session is not a token-saving repair strategy.
 
 ## In the work
 
@@ -15,6 +17,10 @@ taken. The work continues in the same movement.
   same end; it does not become a new task.
 - **Carry what you saw.** The failed option's reading — the error line, the band's number, the diff that did not
   land — travels into the next option. Nothing learned is dropped, and nothing is retried blind.
+- **Let execution speak.** Put expectations, unease and the offered response in
+  the running organ. Apply the next available choice there and re-observe the
+  actual operation. Retire a separate band when its meaning is carried at that
+  live boundary; required release checks keep their verification role.
 - **Choose the next option and continue.** Another route, another tool, a smaller step, a repair at the cause.
   When the options at hand are spent, the walk answers nothing, honestly, with its memory: what was tried and
   what each attempt saw.

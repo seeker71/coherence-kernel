@@ -59,6 +59,22 @@ source coordinates, margins, or hashes. The inbound message must select a real
 next action. Then re-run and emit a second outbound observation. A logged event
 without an applied response is observation, not bidirectionality.
 
+The loop stays with the execution that raised the signal. Its original inputs,
+resource owners, intent, completed effects and findings remain available to the
+next choice. `oac-backtrack-walk` carries original arguments and option memory;
+`oc-hear` calls the running organ's supplied provider and observation callbacks
+with its retained context. Event text never creates another execution context.
+Handle an available repair there immediately. If a needed resource is external,
+retain the continuation with its owner and resume when its relevant signal
+changes. An unchanged failure supplies no reason for another identical attempt.
+
+The same practice applies while developing these organs: keep the repair in the
+active conversation and working context. Token savings do not justify another
+chat, subagent or fresh model session that must reconstruct the same problem.
+Put the expectation and its response at the executing boundary; retire a
+redundant regression band after observing that replacement. Required release
+checks remain independent verification of the resulting behavior.
+
 For ordinary successful work with no meaningful branch or surprise, a new window
 is optional. The practice exists to increase diagnostic resolution, not to add
 ceremony to every command.

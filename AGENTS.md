@@ -66,6 +66,15 @@ evidence.
 
 Carry each gap on either path through the same direct practice:
 
+**Stay in the context that found it.** Handle the issue immediately with the
+original intent, live state, inputs, owners and findings still present. Do not
+open another chat, subagent, fresh model session or side investigation to save
+tokens or hand off the repair. Reuse the understanding already acquired. The
+executing Form organ signals unease, chooses through its existing control and
+care flow, applies the next viable action and re-observes in that owned context.
+If an external resource must change first, its continuation waits with that
+owner and resumes on the relevant signal; rebuilding the context is not a step.
+
 1. **Observe.** Preserve the actual question, behavior and evidence. Name the
    specific gap, the affected path and what would show that it has closed.
 2. **Resolve.** Make the smallest useful repair at its cause. Keep the original
@@ -366,9 +375,12 @@ Organ health belongs in the executing organ (Urs, 2026-09-10). Express the
 current expectation, observation, surprise, pain and needed resource through
 `form/form-stdlib/organ-health.bml` and the existing event flow. The organ owns
 its meaning and responses; the shared carrier transports and correlates them.
-Observe real execution, apply the offered care, and let a fresh observation
-show what changed. A regression band whose meaning lives at these boundaries is
-released; the organ's own boundary is its one tally.
+Observe real execution, apply the offered care immediately in its retained
+context, and let a fresh observation show what changed. Move expectations and
+repair decisions into these live boundaries instead of adding a separate band
+for each finding. Release a redundant band once its meaning lives and has been
+observed there. Required release checks still run; they verify the movement,
+while the organ's live signal is where attention and repair begin.
 
 Implementation, analysis helpers, generators, measurements and migrations live in
 native Form/BML, temporary work included; shell carries OS operations. We carry
