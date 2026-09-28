@@ -20,7 +20,7 @@
 
 section [form.bml] {
     class BmlDemandJit [public, observable, jit] {
-        field BDJSchema = "bml-demand-jit-v1";
+        field BDJSchema = "bml-demand-jit-v2";
         field BDJCacheSchema = "bml-demand-jit-cache-v4";
         field BDJAttentionMs = 5000;
         field BDJMaxRows = 256;
@@ -50,11 +50,10 @@ section [form.bml] {
 
         thought bdj-pattern = list("first-answer", "pending", "inspect", "compile-or-load", "challenge", "atomic-publish", "install", "reuse", "stale");
 
-        // state = schema, epoch, retained registry, pending-or-nothing, status,
-        // fault-or-nothing, last-control-or-nothing.  A fault blocks both ordinary requests and retry;
-        // only a cause-matching typed control can hold or heal it.
+        // Execution, optional disk care and its completion have separate seats.
+        // A cache observation never revokes a challenged native page.
         // pending = source, cache, program, root, argument, exact structural wire.
-        def bdj-state-with-fault-and-control(epoch, registry, pending, status, fault, control) = list(BDJSchema(), epoch, registry, pending, status, fault, control);
+        def bdj-state-with-fault-and-control(epoch, registry, pending, status, fault, control) = list(BDJSchema(), epoch, registry, pending, status, fault, control, list(), nothing());
         def bdj-state-with-fault(epoch, registry, pending, status, fault) = bdj-state-with-fault-and-control(epoch, registry, pending, status, fault, nothing());
         def bdj-state(epoch, registry, pending, status) = bdj-state-with-fault(epoch, registry, pending, status, nothing());
         def bdj-empty(epoch) = bdj-state(epoch, jonb-registry(epoch), nothing(), "ready");
@@ -64,6 +63,10 @@ section [form.bml] {
         def bdj-state-status(state) = nth(state, 4);
         def bdj-state-fault(state) = nth(state, 5);
         def bdj-state-last-control(state) = nth(state, 6);
+        def bdj-state-care(state) = nth(state, 7);
+        def bdj-state-cache-healed(state) = nth(state, 8);
+        def bdj-state-with-care(state, care, healed) = list(BDJSchema(), bdj-state-epoch(state), bdj-state-registry(state), bdj-state-pending(state), bdj-state-status(state), bdj-state-fault(state), bdj-state-last-control(state), care, healed);
+        def bdj-next(state, registry, pending, status, fault, control) = bdj-state-with-care(bdj-state-with-fault-and-control(bdj-state-epoch(state), registry, pending, status, fault, control), bdj-state-care(state), nothing());
         def bdj-state-faulted?(state) = if nothing?(bdj-state-fault(state)) then 0 else 1;
         def bdj-pending(source, cache, program, root, argument, epoch) = list(source, cache, program, root, argument, bdj-program-wire(program, root, epoch));
         def bdj-pending-source(pending) = nth(pending, 0);
@@ -214,7 +217,7 @@ section [form.bml] {
         // carried by the separate control record; fault observed/key remain the
         // causal identity that a successful heal must reference exactly.
         def bdj-fault-with-disposition(fault, disposition, evidence) = list(BDJFaultSchema(), bdj-fault-cause(fault), bdj-fault-stage(fault), disposition, evidence, bdj-fault-observed(fault), bdj-fault-priority(fault), bdj-fault-publisher(fault), bdj-fault-key(fault), bdj-fault-digest(fault));
-        def bdj-fault-state(state, pending, cause, stage) = bdj-state-with-fault(bdj-state-epoch(state), bdj-state-registry(state), pending, "jit-fault-attention", bdj-fault(pending, bdj-state-epoch(state), cause, stage, "attention", "awaiting-specific-control-evidence", bdj-stage-finished(stage)));
+        def bdj-fault-state(state, pending, cause, stage) = bdj-next(state, bdj-state-registry(state), pending, "jit-fault-attention", bdj-fault(pending, bdj-state-epoch(state), cause, stage, "attention", "awaiting-specific-control-evidence", bdj-stage-finished(stage)), nothing());
         def bdj-fault-control(cause, disposition, evidence, observedEpoch) = list(BDJFaultControlSchema(), cause, disposition, evidence, observedEpoch);
         def bdj-fault-control-disposition(control) = nth(control, 2);
         def bdj-fault-control-evidence(control) = nth(control, 3);
@@ -235,11 +238,11 @@ section [form.bml] {
         def bdj-fault-control-status(result) = nth(result, 1);
         def bdj-fault-control-state(result) = nth(result, 2);
         def bdj-fault-apply(state, control) {
-            if (!((Comparable) bdj-state-faulted?(state) == 1)) then bdj-fault-control-result("refused-no-active-fault", state, control)
+            if (!((Comparable) bdj-state-faulted?(state) == 1)) then bdj-care-control(state, control)
             else if (!((Comparable) bdj-fault-control-valid?(control) == 1)) then bdj-fault-control-result("refused-malformed-control", state, control)
             else if (!((String) nth(control, 1) == bdj-fault-cause(bdj-state-fault(state)))) then bdj-fault-control-result("refused-cause-mismatch", state, control)
-            else if ((String) nth(control, 2) == "held") then bdj-fault-control-result("held-with-evidence", bdj-state-with-fault-and-control(bdj-state-epoch(state), bdj-state-registry(state), bdj-state-pending(state), "jit-fault-held", bdj-fault-with-disposition(bdj-state-fault(state), "held", nth(control, 3)), control), control)
-            else bdj-fault-control-result("heal-probe-armed", bdj-state-with-fault-and-control(bdj-state-epoch(state), bdj-state-registry(state), bdj-state-pending(state), "jit-heal-probe-armed", bdj-fault-with-disposition(bdj-state-fault(state), "probe-armed", nth(control, 3)), control), control);
+            else if ((String) nth(control, 2) == "held") then bdj-fault-control-result("held-with-evidence", bdj-next(state, bdj-state-registry(state), bdj-state-pending(state), "jit-fault-held", bdj-fault-with-disposition(bdj-state-fault(state), "held", nth(control, 3)), control), control)
+            else bdj-fault-control-result("heal-probe-armed", bdj-next(state, bdj-state-registry(state), bdj-state-pending(state), "jit-heal-probe-armed", bdj-fault-with-disposition(bdj-state-fault(state), "probe-armed", nth(control, 3)), control), control);
         }
 
         // parsed = status, runtime fingerprint, epoch, exact-program-wire,
@@ -351,7 +354,7 @@ section [form.bml] {
             else bdj-request-during-healing-lowerable(state, source, cache, program, root, argument);
         }
         def bdj-request-during-healing-lowerable(state, source, cache, program, root, argument) {
-            let next = bdj-state-with-fault-and-control(bdj-state-epoch(state), bdj-state-registry(state), bdj-state-pending(state), "jit-healing-specialization-pending", bdj-state-fault(state), bdj-state-last-control(state));
+            let next = bdj-next(state, bdj-state-registry(state), bdj-state-pending(state), "jit-healing-specialization-pending", bdj-state-fault(state), bdj-state-last-control(state));
             bdj-receipt("jit-healing-form-answer", bdj-fault-cause(bdj-state-fault(state)), jonb-eval(program, root, argument), "form-attention", next, 0);
         }
         def bdj-request-refused-program(state) = bdj-receipt("request-refused-invalid-program-shape", "not-requested", nothing(), "refused", state, 0);
@@ -362,13 +365,13 @@ section [form.bml] {
             else bdj-request-retained(state, source, cache, program, root, argument, "not-inspected");
         }
         def bdj-request-first(state, source, cache, program, root, argument, cacheState) {
-            let pending = bdj-pending(source, cache, program, root, argument, bdj-state-epoch(state));
-            let next = bdj-state(bdj-state-epoch(state), bdj-state-registry(state), pending, "specialization-pending");
+            let pending = if nothing?(bdj-state-pending(state)) then bdj-pending(source, cache, program, root, argument, bdj-state-epoch(state)) else bdj-state-pending(state);
+            let next = bdj-next(state, bdj-state-registry(state), pending, "specialization-pending", nothing(), nothing());
             bdj-receipt("form-ready-specialization-pending", cacheState, jonb-eval(program, root, argument), "form", next, 0);
         }
         def bdj-request-retained(state, source, cache, program, root, argument, cacheState) {
             let response = jonb-request(bdj-state-registry(state), program, root, argument);
-            let next = bdj-state(bdj-state-epoch(state), nth(response, 2), nothing(), "resident-native");
+            let next = bdj-next(state, nth(response, 2), bdj-state-pending(state), "resident-native", nothing(), nothing());
             if ((String) nth(response, 1) == "native") then bdj-receipt("resident-native", cacheState, nth(response, 0), "native", next, nth(response, 3))
             else bdj-request-retained-fault(state, source, cache, program, root, argument, cacheState, response);
         }
@@ -381,7 +384,7 @@ section [form.bml] {
             let stage = bdj-stage-empty(observed, now_unix_ms(), cacheState);
             let identity = jonb-identity(program, root, bdj-state-epoch(state));
             let registry = bdj-registry-without-identity(nth(response, 2), identity);
-            let faulted = bdj-fault-state(bdj-state(bdj-state-epoch(state), registry, pending, "retained-native-carrier-lost"), pending, "retained-native-carrier-unavailable", stage);
+            let faulted = bdj-fault-state(bdj-next(state, registry, pending, "retained-native-carrier-lost", nothing(), nothing()), pending, "retained-native-carrier-unavailable", stage);
             bdj-receipt("jit-fault-attention", cacheState, nth(response, 0), "form-attention", faulted, nth(response, 3));
         }
         def bdj-entries-without-identity(entries, identity) = if ((Comparable) len(entries) == 0) then list() else if ((Comparable) ((Value) nth(head(entries), 0) == identity) == 1) then bdj-entries-without-identity(tail(entries), identity) else cons(head(entries), bdj-entries-without-identity(tail(entries), identity));
@@ -407,7 +410,7 @@ section [form.bml] {
             let started = now_unix_ms();
             let pending = bdj-state-pending(state);
             if ((Comparable) bdj-state-faulted?(state) == 1) then if (((String) bdj-fault-disposition(bdj-state-fault(state)) == "probe-armed") && (!nothing?(pending))) then bdj-step-heal-probe(state, pending, started, runtimeIdentity) else if (((String) bdj-fault-disposition(bdj-state-fault(state)) == "attention") && (!nothing?(pending))) then bdj-step-auto-heal-probe(state, pending, started, runtimeIdentity) else bdj-step-fault-held(state)
-            else if nothing?(pending) then bdj-step-finish("idle", "not-requested", started, state, "none", 0, 1, bdj-stage-empty(started, now_unix_ms(), "not-requested"))
+            else if nothing?(pending) then if (len(bdj-state-care(state)) > 0) then bdj-step-care(state, started) else bdj-step-finish("idle", "not-requested", started, state, "none", 0, 1, bdj-stage-empty(started, now_unix_ms(), "not-requested"))
             else bdj-step-pending-with-runtime(state, pending, started, runtimeIdentity);
         }
         // One automatic, cause-bound rechallenge follows a newly latched fault.
@@ -422,7 +425,7 @@ section [form.bml] {
         def bdj-step-heal-probe(state, pending, started, runtimeIdentity) {
             let fault = bdj-state-fault(state);
             let control = bdj-state-last-control(state);
-            let probeState = bdj-state(bdj-state-epoch(state), bdj-state-registry(state), pending, "specialization-pending");
+            let probeState = bdj-next(state, bdj-state-registry(state), pending, "specialization-pending", nothing(), nothing());
             if (!((Comparable) bdj-fault-bound-to-pending?(fault, pending, bdj-state-epoch(state)) == 1)) then bdj-step-fault-integrity-held(state)
             else bdj-step-heal-probe-bound(state, fault, control, probeState, pending, started, runtimeIdentity);
         }
@@ -433,18 +436,19 @@ section [form.bml] {
         }
         def bdj-step-fault-integrity-held(state) {
             let fault = bdj-state-fault(state);
-            let held = bdj-state-with-fault-and-control(bdj-state-epoch(state), bdj-state-registry(state), bdj-state-pending(state), "jit-fault-identity-held", bdj-fault-with-disposition(fault, "held", "fault-identity-structure-mismatch"), bdj-state-last-control(state));
+            let held = bdj-next(state, bdj-state-registry(state), bdj-state-pending(state), "jit-fault-identity-held", bdj-fault-with-disposition(fault, "held", "fault-identity-structure-mismatch"), bdj-state-last-control(state));
             bdj-step-receipt-with-attention("jit-fault-attention", bdj-fault-cause(fault), 0, "immediate", held, "fault-held", 0, 0, bdj-fault-stage(fault));
         }
         def bdj-step-healed(probe, fault, control) {
             let probeState = bdj-step-state(probe);
             let healed = bdj-healed(fault, bdj-fault-control-evidence(control), now_unix_ms());
-            let next = bdj-state-with-fault-and-control(bdj-state-epoch(probeState), bdj-state-registry(probeState), bdj-state-pending(probeState), "resident-native", nothing(), healed);
+            let next = bdj-next(probeState, bdj-state-registry(probeState), bdj-state-pending(probeState), "resident-native", nothing(), healed);
             bdj-step-receipt("jit-healed", bdj-step-cache-state(probe), bdj-step-ms(probe), next, bdj-step-disk-action(probe), 1, 1, bdj-step-stage(probe));
         }
         def bdj-step-heal-probe-failed(state, probe) {
             let fault = bdj-state-fault(state);
-            let held = bdj-state-with-fault-and-control(bdj-state-epoch(state), bdj-state-registry(state), bdj-state-pending(state), "jit-fault-held", bdj-fault-with-disposition(fault, "held", "heal-probe-failed"), bdj-state-last-control(state));
+            let observed = bdj-step-state(probe);
+            let held = bdj-next(observed, bdj-state-registry(observed), bdj-state-pending(state), "jit-fault-held", bdj-fault-with-disposition(fault, "held", "heal-probe-failed"), bdj-state-last-control(state));
             bdj-step-receipt-with-attention("jit-fault-attention", bdj-fault-cause(fault), bdj-step-ms(probe), "immediate", held, "fault-held", 0, 0, bdj-step-stage(probe));
         }
         def bdj-step-fault-held(state) {
@@ -536,19 +540,77 @@ section [form.bml] {
             let published = now_unix_ms();
             let publishMs = (published - publishStarted);
             let stage = bdj-stage(started, published, cacheState, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, materializeMs, installMs, publishMs, materializeAction);
-            let next = bdj-state(bdj-state-epoch(state), retained, nothing(), "resident-native");
+            let next = bdj-next(state, retained, nothing(), "resident-native", nothing(), nothing());
             let status = if ((String) publish == "published") then "compiled-published-installed" else if ((String) publish == "reused-disk") then "disk-installed" else if ((String) publish == "withheld-source-missing") then "ram-installed-source-missing" else "ram-installed-disk-publish-failed";
-            if (((String) status == "ram-installed-disk-publish-failed") || ((String) status == "ram-installed-source-missing")) then bdj-step-publish-fault(state, pending, retained, cacheState, publish, stage)
+            if (((String) status == "ram-installed-disk-publish-failed") || ((String) status == "ram-installed-source-missing")) then bdj-step-publish-care(next, pending, image, runtimeIdentity, cacheState, publish, stage)
             else bdj-step-finish(status, cacheState, started, next, publish, 1, 1, stage);
         }
-        // A valid RAM page does not launder a failed durable publication into
-        // JIT success. Keep both the challenged page and original pending
-        // specialization, answer intervening work through Form, and latch the
-        // exact publication result at priority 1000 until a retry publishes.
-        def bdj-step-publish-fault(state, pending, retained, cacheState, publish, stage) {
-            let resident = bdj-state(bdj-state-epoch(state), retained, pending, "jit-disk-publish-fault");
-            let faulted = bdj-fault-state(resident, pending, bdj-cat(list("disk-publish-", publish)), stage);
-            bdj-step-receipt-with-attention("jit-fault-attention", cacheState, bdj-stage-total-ms(stage), "immediate", faulted, publish, 1, 1, stage);
+        // Cache care owns the exact bytes and their compilation identity. Its
+        // retry crosses only the disk membrane; it neither emits nor installs
+        // native code and cannot certify recovery of an execution fault.
+        def bdj-care(fault, pending, image, runtimeIdentity) = list(fault, pending, image, runtimeIdentity);
+        def bdj-care-fault(care) = nth(care, 0);
+        def bdj-care-pending(care) = nth(care, 1);
+        def bdj-care-image(care) = nth(care, 2);
+        def bdj-care-runtime(care) = nth(care, 3);
+        def bdj-care-with-disposition(care, disposition, evidence) = bdj-care(bdj-fault-with-disposition(bdj-care-fault(care), disposition, evidence), bdj-care-pending(care), bdj-care-image(care), bdj-care-runtime(care));
+        def bdj-care-fault-record(pending, epoch, publish, stage) {
+            let fault = bdj-fault(pending, epoch, bdj-cat(list("disk-publish-", publish)), stage, "attention", publish, bdj-stage-finished(stage));
+            list(BDJFaultSchema(), bdj-fault-cause(fault), stage, "attention", publish, bdj-fault-observed(fault), nothing(), bdj-fault-publisher(fault), bdj-fault-key(fault), bdj-fault-digest(fault));
+        }
+        def bdj-step-publish-care(state, pending, image, runtimeIdentity, cacheState, publish, stage) {
+            let care = bdj-care(bdj-care-fault-record(pending, bdj-state-epoch(state), publish, stage), pending, image, runtimeIdentity);
+            let next = bdj-state-with-care(state, append(bdj-state-care(state), list(care)), nothing());
+            bdj-step-receipt("ram-installed-cache-care", cacheState, bdj-stage-total-ms(stage), next, publish, 1, 1, stage);
+        }
+        def bdj-care-active(cares) = if ((Comparable) len(cares) == 0) then nothing() else if ((String) bdj-fault-disposition(bdj-care-fault(head(cares))) == "held") then bdj-care-active(tail(cares)) else head(cares);
+        def bdj-care-for-cause(cares, cause) = if ((Comparable) len(cares) == 0) then nothing() else if ((String) bdj-fault-cause(bdj-care-fault(head(cares))) == cause) then head(cares) else bdj-care-for-cause(tail(cares), cause);
+        def bdj-care-cause-count(cares, cause) = if ((Comparable) len(cares) == 0) then 0 else (if ((String) bdj-fault-cause(bdj-care-fault(head(cares))) == cause) then 1 else 0) + bdj-care-cause-count(tail(cares), cause);
+        def bdj-care-for-digest(cares, digest) = if ((Comparable) len(cares) == 0) then nothing() else if ((Value) bdj-fault-digest(bdj-care-fault(head(cares))) == digest) then head(cares) else bdj-care-for-digest(tail(cares), digest);
+        def bdj-care-replace(cares, care, replacement) = if ((Comparable) len(cares) == 0) then list() else if ((Value) head(cares) == care) then if nothing?(replacement) then tail(cares) else cons(replacement, tail(cares)) else cons(head(cares), bdj-care-replace(tail(cares), care, replacement));
+        def bdj-care-control(state, control) {
+            if ((Comparable) len(bdj-state-care(state)) == 0) then bdj-fault-control-result("refused-no-active-fault", state, control)
+            else if (!bdj-fault-control-valid?(control)) then bdj-fault-control-result("refused-malformed-control", state, control)
+            else if (bdj-care-cause-count(bdj-state-care(state), nth(control, 1)) > 1) then bdj-fault-control-result("refused-ambiguous-cache-cause", state, control)
+            else bdj-care-control-found(state, control, bdj-care-for-cause(bdj-state-care(state), nth(control, 1)));
+        }
+        def bdj-care-control-for(state, digest, control) {
+            if (!bdj-fault-control-valid?(control)) then bdj-fault-control-result("refused-malformed-control", state, control)
+            else bdj-care-control-found(state, control, bdj-care-for-digest(bdj-state-care(state), digest));
+        }
+        def bdj-care-control-found(state, control, care) {
+            if nothing?(care) then bdj-fault-control-result("refused-cause-mismatch", state, control)
+            else if (!((String) bdj-fault-cause(bdj-care-fault(care)) == nth(control, 1))) then bdj-fault-control-result("refused-cause-mismatch", state, control)
+            else bdj-care-control-update(state, control, care);
+        }
+        def bdj-care-control-update(state, control, care) {
+            let disposition = if ((String) nth(control, 2) == "held") then "held" else "probe-armed";
+            let updated = bdj-care-with-disposition(care, disposition, nth(control, 3));
+            bdj-fault-control-result(if ((String) disposition == "held") then "held-with-evidence" else "heal-probe-armed", bdj-state-with-care(state, bdj-care-replace(bdj-state-care(state), care, updated), nothing()), control);
+        }
+        def bdj-step-care(state, started) {
+            let care = bdj-care-active(bdj-state-care(state));
+            if nothing?(care) then bdj-step-receipt("cache-care-held", "not-inspected", 0, bdj-state-with-care(state, bdj-state-care(state), nothing()), "care-held", 0, 0, bdj-stage-empty(started, started, "not-inspected"))
+            else bdj-step-care-publish(state, care, started);
+        }
+        def bdj-step-care-publish(state, care, started) {
+            let pending = bdj-care-pending(care);
+            let cache = bdj-pending-cache(pending);
+            let source = bdj-pending-source(pending);
+            let sourceMtime = bdj-path-mtime(source);
+            let cacheMtime = bdj-path-mtime(cache);
+            let cacheAge = bdj-path-age-ms(cache, started);
+            let sourceAge = bdj-path-age-ms(source, started);
+            let bound = bdj-fault-bound-to-pending?(bdj-care-fault(care), pending, bdj-state-epoch(state));
+            let attempt = if (!bound) then "care-identity-mismatch" else if (!bdj-field-present?(sourceMtime)) then "withheld-source-missing" else bdj-publish-with-runtime(cache, bdj-state-epoch(state), bdj-pending-program-wire(pending), bdj-care-image(care), bdj-care-runtime(care));
+            let readback = if ((String) attempt == "published") then bdj-cache-inspection-status(bdj-cache-inspect-content-with-runtime(cache, bdj-state-epoch(state), bdj-pending-program-wire(pending), bdj-care-runtime(care))) else "not-requested";
+            let result = if (((String) attempt == "published") && (!((String) readback == "current"))) then bdj-cat(list("publish-readback-", readback)) else attempt;
+            let finished = now_unix_ms();
+            let repaired = ((String) result == "published");
+            let remaining = bdj-care-replace(bdj-state-care(state), care, if repaired then nothing() else bdj-care-with-disposition(care, "held", result));
+            let next = bdj-state-with-care(state, remaining, if repaired then bdj-healed(bdj-care-fault(care), "cache-readback-current", finished) else nothing());
+            let stage = bdj-stage(started, finished, "not-inspected", cacheAge, sourceAge, cacheMtime, sourceMtime, 0, 0, 0, (finished - started), "retained-image");
+            bdj-step-receipt(if repaired then "cache-repaired" else "cache-care-held", "not-inspected", (finished - started), next, result, 0, 0, stage);
         }
         // The receipt and stage share one finished endpoint.  This prevents a
         // refusal from claiming time after its preserved diagnostic stage.

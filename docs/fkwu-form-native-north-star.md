@@ -165,6 +165,13 @@ cleanup preserves the channel needed to witness its own completion.
 
 CPU and device code is generated and admitted in RAM. The runtime discovers and loads Metal dynamically; its bootstrap executables do not link the framework. Separate Swift comparison carriers still use the host framework directly. Compiled caches carry exact source, entry, target and ABI identities. Required reuse either meets that identity or reports a miss. Selection is explicit.
 
+An optional cache cannot govern the availability of a working native program.
+Execution ownership, cache care and observation delivery have separate lifetimes.
+A failed cache write retains its original image and compilation identity for
+repair while native work continues. Acknowledging an older observation never
+restores old execution state or clears a newer fault. Cache repair establishes
+verified disk reuse; native recovery requires its own execution observation.
+
 Bulk data stays in owned resident regions. A span carries allocation identity and generation, owner, offset, length, layout, access mode and completion dependencies. Crossings carry descriptors and batches. A zero-copy request preserves its alignment and lifetime contract or reports refusal.
 
 Device capacity is an admission ceiling. Each submitted resource view covers

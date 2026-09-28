@@ -141,6 +141,16 @@ The [32-case execution](evidence/fkwu/bml-admission.json) retains actual success
 and refusal statuses. A [direct cache renewal](evidence/fkwu/bml-cache-renewal.json)
 executes the complete body with the root binary and C source unchanged.
 
+The scalar BML demand JIT retains a challenged CPU page independently of its
+optional disk cache. Cache unease carries the original program, emitted bytes,
+compiler identity and correlated repair record. Calls remain native during
+cache or telemetry publication failure. Disk repair reuses those bytes without
+compilation or installation. Genuine carrier loss keeps its separate execution
+fault, including when older observations are still awaiting publication.
+Glass displays cache care without entering its execution-fault hold.
+The current boundary is lowerable scalar graphs; whole-unit source admission
+and the complete program-image call path remain distinct work.
+
 Metal is loaded dynamically through a selected adapter. Form generates Metal source, identifies program/entry/target, and chooses RAM admission or an explicit compiled-archive mode. Shader source files and shader compiler subprocesses are unnecessary. Each executable linkage observation applies to its recorded artifact.
 
 Form owns BMP validation, the nine-field integer interpretation, policy thresholds, GPU source generation, captures, submissions and result eligibility. Several versions can use one captured input. Its 144-byte ARM64 frame fold reads each pixel once through three synchronous borrowed-string calls for a normal frame. Larger rectangles subdivide according to the integer result capacity. The interpreter is an explicitly requested equivalence reference.
