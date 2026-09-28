@@ -16548,10 +16548,13 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * and any copy whose name begins with fkwu. A prefix read drops nothing the host withholds, because its reader counts
          * what the read did not see: a process of this user whose name proc_name withholds is named by the process table
          * (kinfo_proc's 16-byte command name, which a sandbox that denies other processes' info still answers); a named
-         * process whose figures are withheld answers -1 for resident bytes and CPU and takes its start, nice and parent from
-         * the process table; a process neither will name answers as (pid) alone; a host that will not list its processes
-         * answers -1. A bare "*" names no prefix and answers an empty list, so the door never hands out the host's whole
-         * table (ProcessPrivacyRule, form-glass-observer.bml). */
+         * process whose figures are withheld answers nothing for resident bytes and CPU and takes its start, nice and parent
+         * from the process table; a process neither will name answers as (pid) alone; a host that will not list its processes
+         * answers nothing. A bare "*" names no prefix and answers an empty list, so the door never hands out the host's whole
+         * table (ProcessPrivacyRule, form-glass-observer.bml).
+         * In either read a field the host did not tell is nothing in the row, never a number: resident bytes and CPU when
+         * the task info is withheld, elapsed when the start is, nice and parent when neither the bsd info nor the process
+         * table told them. */
 #ifdef __APPLE__
         static char nm154[256];
         fk_cstr(fk_walk(fk_node[i][1], fp), nm154, 256);
@@ -16561,7 +16564,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (pre154 && nl154 == 0) { return 1; }
         static int pids154[8192];
         int got154 = proc_listpids(1, 0, pids154, (int)sizeof pids154);
-        if (got154 <= 0) { return pre154 ? (0 - 1) * 2 : 1; }
+        if (got154 <= 0) { return pre154 ? fk_nothing : 1; }
         long long count154 = got154 / (long long)sizeof(int);
         struct fk_mach_timebase tb154; tb154.numer = 1; tb154.denom = 1;
         mach_timebase_info(&tb154);
@@ -16599,24 +16602,25 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             if (pre154 ? c154 < nl154 : !fk_cstr_eq(pn154, nm154)) { continue; }
             unsigned char ti154[128];
             unsigned char bi154[160];
-            long long rss154 = -1;
-            long long cpu154 = -1;
+            /* each figure is its value word as it is read; one the host withholds stays nothing */
+            long long rss154 = fk_nothing;
+            long long cpu154 = fk_nothing;
             if (proc_pidinfo(pid154, 4, 0, ti154, 128) >= 96) {
-                rss154 = *(long long *)(ti154 + 8);
+                rss154 = (*(long long *)(ti154 + 8)) << 1;
                 unsigned long long user154 = *(unsigned long long *)(ti154 + 16);
                 unsigned long long sys154 = *(unsigned long long *)(ti154 + 24);
-                cpu154 = (long long)(((user154 + sys154) * (unsigned long long)tb154.numer / (unsigned long long)tb154.denom) / 1000ULL);
+                cpu154 = ((long long)(((user154 + sys154) * (unsigned long long)tb154.numer / (unsigned long long)tb154.denom) / 1000ULL)) << 1;
             } else if (!pre154) { continue; }
             long long start154 = 0;
-            long long nice154 = 0;
-            long long ppid154 = 0;
-            if (proc_pidinfo(pid154, 3, 0, bi154, 160) >= 136) { start154 = *(long long *)(bi154 + 120); nice154 = (long long)(*(int *)(bi154 + 116)); ppid154 = (long long)(*(unsigned int *)(bi154 + 16)); }
+            long long nice154 = fk_nothing;
+            long long ppid154 = fk_nothing;
+            if (proc_pidinfo(pid154, 3, 0, bi154, 160) >= 136) { start154 = *(long long *)(bi154 + 120); nice154 = ((long long)(*(int *)(bi154 + 116))) << 1; ppid154 = ((long long)(*(unsigned int *)(bi154 + 16))) << 1; }
             else if (pre154) {
                 if (kl154 < 648) { int mb154[4] = {1, 14, 1, pid154}; kl154 = 648; if (sysctl(mb154, 4, kb154, &kl154, 0, 0) != 0) { kl154 = 0; } }
-                if (kl154 >= 648) { start154 = *(long long *)(kb154 + 0); nice154 = (long long)(signed char)kb154[242]; ppid154 = (long long)(*(int *)(kb154 + 560)); }
+                if (kl154 >= 648) { start154 = *(long long *)(kb154 + 0); nice154 = ((long long)(signed char)kb154[242]) << 1; ppid154 = ((long long)(*(int *)(kb154 + 560))) << 1; }
             }
-            long long elapsed154 = (start154 > 0 && now154 >= start154) ? now154 - start154 : -1;
-            l154 = fk_cons_val(fk_cons_val((long long)pid154 << 1, fk_cons_val(rss154 << 1, fk_cons_val(cpu154 << 1, fk_cons_val(elapsed154 << 1, fk_cons_val(nice154 << 1, fk_cons_val(ppid154 << 1, 1)))))), l154);
+            long long elapsed154 = (start154 > 0 && now154 >= start154) ? (now154 - start154) << 1 : fk_nothing;
+            l154 = fk_cons_val(fk_cons_val((long long)pid154 << 1, fk_cons_val(rss154, fk_cons_val(cpu154, fk_cons_val(elapsed154, fk_cons_val(nice154, fk_cons_val(ppid154, 1)))))), l154);
         }
         return l154;
 #else
