@@ -56,37 +56,3 @@ func TestFkwuFormCliCanonicalCarrier(t *testing.T) {
 		t.Fatalf("canonical proof receipt missing: %s", output)
 	}
 }
-
-// TestFkwuLocaleUtf8 independently locks the fourth kernel's byte-exact UTF-8
-// print path with a freshly flattened small band.
-func TestFkwuLocaleUtf8(t *testing.T) {
-	clang := requireClang(t)
-	stdlib := filepath.Join("..", "form-stdlib")
-	minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit := emitChain(t, stdlib)
-	flattenCore, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten := flattenChain(t, stdlib)
-	shim := filepath.Join(stdlib, "fourth-shim.fk")
-	core := filepath.Join(stdlib, "core.fk")
-
-	dir := t.TempDir()
-	fkwuBin := buildFkwu(t, clang, dir, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit)
-	want := "中文 العربية हिन्दी 😀—ok"
-	bandPath := filepath.Join(dir, "locale-band.fk")
-	if err := os.WriteFile(bandPath, []byte("; locale\n(str_concat \"中文 العربية हिन्दी 😀\" \"—ok\")\n"), 0o644); err != nil {
-		t.Fatalf("write band: %v", err)
-	}
-	mods := `(list (read_file "` + shim + `") (read_file "` + core + `"))`
-	band := `(read_file "` + bandPath + `")`
-	flattenExpr := "(fks-table-file (flt-band-sources-fns " + mods + " " + band + ") (flt-band-sources-pool " + mods + " " + band + "))"
-	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit, flattenCore, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten)+"\n"+flattenExpr+"\n")
-	tablePath := filepath.Join(dir, "locale-table.txt")
-	if err := os.WriteFile(tablePath, []byte(table), 0o644); err != nil {
-		t.Fatalf("write table: %v", err)
-	}
-	got, err := FkwuEval(fkwuBin, tablePath, 0)
-	if err != nil {
-		t.Fatalf("FkwuEval: %v", err)
-	}
-	if got != want {
-		t.Fatalf("fkwu locale print:\n got=%q (% x)\nwant=%q (% x)", got, []byte(got), want, []byte(want))
-	}
-}

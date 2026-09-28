@@ -82,7 +82,7 @@ func emitWindowsRecipeObject(t *testing.T, classCodeMethod string) []byte {
 		readFiles(t, filepath.Join(stdlib, "language-model.fk")),
 		compiledEmitter,
 		classCodeMethod)
-	res := k.walk(readRootFromSource(k, src), NewFrame(nil))
+	res := k.walkUnit(readRootFromSource(k, src), NewFrame(nil))
 	if res.Kind != VList {
 		t.Fatalf("WindowsX64RecipeEmitter_object_for did not return a byte list (kind %v)", res.Kind)
 	}
@@ -121,7 +121,7 @@ func callRecipeDLL(t *testing.T, dllPath string, arg int64) Value {
 	t.Helper()
 	src := fmt.Sprintf(`(dylib_call "%s" "recipe" %d)`, strings.ReplaceAll(dllPath, `"`, `\"`), arg)
 	k := NewKernel()
-	return k.walk(readRootFromSource(k, src), NewFrame(nil))
+	return k.walkUnit(readRootFromSource(k, src), NewFrame(nil))
 }
 
 func TestWindowsRecipeDLLLoadsCallsAndSwaps(t *testing.T) {
@@ -156,7 +156,7 @@ func TestWindowsDylibCallRefusesMissing(t *testing.T) {
 		`(dylib_call "C:/no/such/recipe.dll" "recipe" 5)`,
 		`(dylib_call "C:/Windows/System32/kernel32.dll" "no_such_symbol_xyz" 5)`,
 	} {
-		got := k.walk(readRootFromSource(k, src), NewFrame(nil))
+		got := k.walkUnit(readRootFromSource(k, src), NewFrame(nil))
 		if got.Kind != VNull {
 			t.Fatalf("%s: want null refusal, got %v", src, got)
 		}

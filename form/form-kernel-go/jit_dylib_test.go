@@ -35,7 +35,7 @@ func emitRecipeObject(t *testing.T) []byte {
   (let code (lo-compile-fn prog 4))
   (mo-object-sym code (list 95 114 101 99 105 112 101)))`
 	k := NewKernel()
-	res := k.walk(readRootFromSource(k, src), NewFrame(nil))
+	res := k.walkUnit(readRootFromSource(k, src), NewFrame(nil))
 	if res.Kind != VList {
 		t.Fatalf("mo-object-sym did not return a byte list (kind %v)", res.Kind)
 	}
@@ -84,7 +84,7 @@ func TestRecipeDylibLoadsAndCalls(t *testing.T) {
 	for _, tc := range []struct{ arg, want int64 }{{5, 22}, {0, 7}, {10, 37}, {100, 307}} {
 		src := fmt.Sprintf(`(dylib_call "%s" "recipe" %d)`, dylibPath, tc.arg)
 		k := NewKernel()
-		got := k.walk(readRootFromSource(k, src), NewFrame(nil))
+		got := k.walkUnit(readRootFromSource(k, src), NewFrame(nil))
 		if got.Kind != VInt || got.Int != tc.want {
 			t.Fatalf("dylib_call recipe(%d) = %v, want %d (n*3+7)", tc.arg, got, tc.want)
 		}
@@ -99,7 +99,7 @@ func TestDylibCallRefusesMissing(t *testing.T) {
 		`(dylib_call "/nonexistent/path.dylib" "recipe" 5)`,
 		`(dylib_call "/usr/lib/libSystem.B.dylib" "no_such_symbol_xyz" 5)`,
 	} {
-		got := k.walk(readRootFromSource(k, src), NewFrame(nil))
+		got := k.walkUnit(readRootFromSource(k, src), NewFrame(nil))
 		if got.Kind != VNull {
 			t.Fatalf("%s: want null refusal, got %v", src, got)
 		}
