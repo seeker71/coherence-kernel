@@ -47,7 +47,18 @@ Found on the way and healed:
   four-way. Four bands whose subject is fkwu's own surface (fkwu children through
   `host_spawn_at`, in-process machine-code leaves, the gift roster) now declare the
   fourth-arm lane they always were. The 21 python-bmf bands answer exactly what
-  main answers.
+  main answers. And the siblings' guard against a raw `section [` refused a
+  lowered unit whose string literal held `"\nsection ["`: a line that began inside
+  the string read as a section. The guard now carries the string state across
+  lines, as every reader does.
+- Go's own test suite had not been running: its first test panicked and took the
+  binary down with it. The harness pasted file texts and walked them as one plain
+  `do`, where the kernel's entry loads each file's preludes and walks a unit; and
+  the op table was looked for only from the root or `form/`. The harness now loads
+  and walks as the entry does, the table lookup ends with the checkout's root, and
+  the flattened-table offload (`fkwu_bridge.go` and its three tests), the lane the
+  body stopped walking on 08-27, is released. The suite runs whole: every test
+  green but the carrier proof, which waits on the regenerated bundle.
 
 Pace, read beside a running sweep, so only the ratio counts: rule references go
 through an index built once instead of a walk of the rule list; `skip-ws` reads one

@@ -28,7 +28,7 @@ func loInRAM(t *testing.T, preludes string, arg int64) Value {
   (jit_leaf_inram img %d))`, arg)
 	k := NewKernel()
 	root := readRootFromSource(k, src)
-	return k.walk(root, NewFrame(nil))
+	return k.walkUnit(root, NewFrame(nil))
 }
 
 func TestInRAMLeafRunsFormEmittedArm64(t *testing.T) {
@@ -65,7 +65,7 @@ func TestInRAMLeafRefusesBadImage(t *testing.T) {
 		`(jit_leaf_inram (list 1 2 3) "x")`,
 	}
 	for _, src := range cases {
-		got := k.walk(readRootFromSource(k, src), NewFrame(nil))
+		got := k.walkUnit(readRootFromSource(k, src), NewFrame(nil))
 		if got.Kind != VNull {
 			t.Fatalf("%s: want null refusal, got %v", src, got)
 		}
