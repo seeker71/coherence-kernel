@@ -35,6 +35,25 @@ recipes, preserving evaluation order and short-circuit behavior. Binary operator
 are separated by whitespace so hyphenated Form names remain whole. Parentheses
 select grouping. `!` negates an expression.
 
+A stop is a backtrack point, and BML names the choice in its own words.
+`try e else h` attempts `e`; when `e` stops (the length of nothing, a branch on
+nothing, arithmetic over a non-number, a recursion past the walker's wall) or
+answers nothing, `h` answers. `choose { e1; e2; ... }` attempts each option in
+order; the first that lands wins, and none landing is nothing. `x ?? y` is `x`
+unless `x` is nothing; it binds loosest of the operators. Each lowers to
+`(attempt ...)` and `nothing?` with the next option in the `if`'s branch, so an
+option that is not needed is never walked, and each caught stop is voiced as one
+organ-health line:
+
+```bml
+def size(x) = try len(x) else 0;
+def first-reading(x) = choose { len(x); str_len(x); 0 };
+def label(name) = name ?? "unnamed";
+```
+
+`form/form-stdlib/tests/bml-recover-surface-band.fk` reads 1023 on all four
+kernels.
+
 `==` and `!=` use exact value equality by default. Declared comparison contracts
 select another relationship without runtime wrappers:
 

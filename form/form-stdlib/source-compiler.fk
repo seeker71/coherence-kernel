@@ -889,7 +889,7 @@
                     (fsc-bml-branch-token s
                         (add (fsc-bml-span-end s after (str_len s) (list closer) "group")
                              (str_len closer)) wanted nested)
-                (if (and (str_eq wanted "else") (str_eq token "if"))
+                (if (and (str_eq wanted "else") (or (str_eq token "if") (str_eq token "try")))
                     (fsc-bml-branch-token s after wanted (add nested 1))
                 (if (str_eq token wanted)
                     (if (eq nested 0) p
@@ -920,7 +920,7 @@
     ;; spelling, native operation and precedence; lowering retains evaluation
     ;; order, short circuit and numeric contracts. Equality is value equality.
     (defn fsc-bml-operators ()
-        (list (list "||" "or" 1) (list "&&" "and" 2)
+        (list (list "??" "??" 0) (list "||" "or" 1) (list "&&" "and" 2)
               (list "==" "value_eq" 3) (list "!=" "value_ne" 3)
               (list "<=" "le" 4) (list ">=" "ge" 4)
               (list "<" "lt" 4) (list ">" "gt" 4)
@@ -954,9 +954,56 @@
             (let right (fsc-trim (fsc-sub expr (add pos (str_len (head row))) (str_len expr))))
             (if (or (str_eq left "") (str_eq right "")) (fsc-compiler-error-line "form.bml operator needs two operands" expr) 0)
             (let args (list (fsc-compile-form-bml-expr-recipe left) (fsc-compile-form-bml-expr-recipe right)))
+            (if (str_eq (head row) "??")
+                (fsc-bml-when-nothing "$or" (head args) (nth args 1))
             (if (or (str_eq (head row) "==") (str_eq (head row) "!="))
                 (fsc-rec-call (str_concat "$bml" (head row)) args)
-                (fsc-rec-form-call (nth row 1) args))))
+                (fsc-rec-form-call (nth row 1) args)))))
+
+    ;; ── the recover point and absence, lifted into BML ──────────────────
+    ;; `x ?? y`, `try e else h` and `choose { e1; e2; ... }` lower to one shape:
+    ;; hold the first value, and only when it is nothing walk the next. The next
+    ;; recipe is a branch of the if, so an option not needed is never walked.
+    ;;   (do (let <hold> first) (if (nothing? <hold>) next <hold>))
+    ;; `try` and `choose` hold (attempt e): a stop inside e unwinds to it and reads
+    ;; as nothing, so the next option answers; `??` holds x itself.
+    (defn fsc-bml-when-nothing (hold first next)
+        (fsc-rec-do (list
+            (fsc-rec-let hold first)
+            (fsc-rec-if3 (fsc-rec-form-call "nothing?" (list (fsc-rec-ident hold)))
+                         next
+                         (fsc-rec-ident hold)))))
+    (defn fsc-bml-attempt (e) (fsc-rec-call "attempt" (list e)))
+
+    (defn fsc-compile-form-bml-try-recipe (expr)
+        (do
+            (let else-pos (fsc-bml-branch-token expr 4 "else" 0))
+            (if (lt else-pos 0)
+                (fsc-compiler-error-line "form.bml try missing 'else'" expr)
+            (do
+            (let body-text (fsc-trim (fsc-sub expr 4 else-pos)))
+            (let handler-text (fsc-trim (fsc-sub expr (add else-pos 4) (str_len expr))))
+            (if (or (eq (str_len body-text) 0) (eq (str_len handler-text) 0))
+                (fsc-compiler-error-line "form.bml try requires an attempt and an else" expr) 0)
+            (fsc-bml-when-nothing "$try"
+                (fsc-bml-attempt (fsc-compile-form-bml-expr-recipe body-text))
+                (fsc-compile-form-bml-expr-recipe handler-text))))))
+
+    ;; every option of a choose is attempted in order; none landing is nothing
+    (defn fsc-bml-choose-chain (options)
+        (if (nil? options) (fsc-rec-call "nothing" (empty))
+            (if (nil? (tail options)) (fsc-bml-attempt (head options))
+                (fsc-bml-when-nothing "$choose" (fsc-bml-attempt (head options))
+                    (fsc-bml-choose-chain (tail options))))))
+    (defn fsc-compile-form-bml-choose-recipe (expr)
+        (do
+            (let p (fsc-bml-skip-trivia expr 6 (str_len expr)))
+            (if (str_eq (char_at expr p) "{") 0
+                (fsc-compiler-error-line "form.bml choose needs a { option; ... } body" expr))
+            (let close (fsc-bml-span-end expr (add p 1) (str_len expr) (list "}") "group"))
+            (if (eq (add close 1) (str_len expr)) 0
+                (fsc-compiler-error-line "unconsumed form.bml choose suffix" expr))
+            (fsc-bml-choose-chain (fsc-bml-block-stmts-recipes-loop expr (add p 1) close (empty)))))
 
     (defn fsc-bml-find-top-brace-loop (s i depth quoted)
         (if (ge i (str_len s)) (sub 0 1)
@@ -1103,6 +1150,10 @@
                 (fsc-compile-form-bml-do-recipe expr 0)
             (if (fsc-bml-control-prefix? expr "if")
                 (fsc-compile-form-bml-if-recipe expr)
+            (if (fsc-bml-control-prefix? expr "try")
+                (fsc-compile-form-bml-try-recipe expr)
+            (if (or (fsc-bml-control-prefix? expr "choose") (fsc-prefix? expr "choose{"))
+                (fsc-compile-form-bml-choose-recipe expr)
             (if (fsc-bml-control-prefix? expr "match")
                 (fsc-compile-form-bml-match-recipe expr)
             (do
@@ -1135,7 +1186,7 @@
                         (fsc-unescape-str (fsc-sub expr 1 (fsc-last-char-index expr))))
                     (fsc-compiler-error-line "unconsumed form.bml string suffix" expr))
                 (if (fsc-bml-expression-name? expr) (fsc-rec-ident expr)
-                    (fsc-compiler-error-line "unconsumed form.bml expression" expr))))))))))))))))))))))
+                    (fsc-compiler-error-line "unconsumed form.bml expression" expr))))))))))))))))))))))))
 
     (defn fsc-compile-form-bml-def-recipe (line)
         (do
