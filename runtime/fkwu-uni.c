@@ -270,6 +270,15 @@ static void fk_die(const char *msg) {
     write(2, "\n", 1);
     exit(1);
 }
+/* fk_stop -- a STOP is a state a Form expression cannot continue past (a length of nothing, a
+ * branch on nothing, arithmetic over a non-number), never corruption. It is a backtrack point:
+ * inside (attempt x) it unwinds to the attempt, which voices the stop as one organ-health line
+ * and answers nothing, so the choice that offered x takes its next option. Outside every
+ * attempt the program itself was the option and there is no other: it ends as fk_die does.
+ * fk_die stays for what no choice can meet: exhausted memory, a broken table. */
+static void fk_stop(const char *msg);
+static int fk_recovering(void);
+static long long fk_attempt(long long node, long long fp);
 /* ── COMPILE-PHASE DIAGNOSTIC COLLECTOR ──────────────────────────────────────
  * Two-phase law (2026-07-02): RUNTIME dies only when it truly cannot recover
  * (OOM, corruption); COMPILE-TIME collects EVERY warning/error and CONTINUES,
@@ -1603,6 +1612,21 @@ extern int ioctl(int, unsigned long, ...);
 #if defined(__has_include) && !defined(_WIN32)
 #if __has_include(<errno.h>)
 #include <errno.h>
+#endif
+#endif
+/* the recover point (fk_attempt): a stop inside an attempted expression unwinds to it.
+ * _setjmp/_longjmp leave the signal mask alone, so an offer costs no syscall. */
+#if defined(__has_include)
+#if __has_include(<setjmp.h>)
+#include <setjmp.h>
+#define FK_HAVE_SETJMP 1
+#if defined(_WIN32)
+#define FK_SETJMP(b) setjmp(b)
+#define FK_LONGJMP(b) longjmp(b, 1)
+#else
+#define FK_SETJMP(b) _setjmp(b)
+#define FK_LONGJMP(b) _longjmp(b, 1)
+#endif
 #endif
 #endif
 /* the BML floor's lowering door spawns the runner on itself; the seed
@@ -12514,7 +12538,9 @@ static long long fk_stack_wall = 6 * 1024 * 1024;
  * When one side of eq/lt/le is a len node and the other an int literal K, the
  * arm walks at most K+1 cells. The child is still evaluated exactly once; the
  * answer is the same word len would have given, compared the same way. */
+#define FK_LEN_REFUSAL "fkwu: len: nothing has no length -- ask nothing? before measuring"
 static long long fk_len_upto(long long v, long long cap) {
+    if (v == fk_nothing) { fk_stop(FK_LEN_REFUSAL); }
     if (fk_is_str(v)) { return FK_SLEN(fk_stri(v)); }
     if ((v & 1) == 0) { return 0; }
     long long p = v >> 1;
@@ -12548,19 +12574,22 @@ static int fk_len_cmp(long long i, long long fp, int op, long long *out) {
 #define FK_BRANCH_REFUSAL "fkwu: if: nothing is neither 0 nor 1 -- ask nothing? before branching"
 /* Only numbers take part in arithmetic: an odd word that is not a float refuses. */
 static void fk_arith_check(long long a, long long b) {
-    if (!((fk_isf(a) || (a & 1) == 0) && (fk_isf(b) || (b & 1) == 0))) { fk_die(FK_ARITH_REFUSAL); }
+    if (!((fk_isf(a) || (a & 1) == 0) && (fk_isf(b) || (b & 1) == 0))) { fk_stop(FK_ARITH_REFUSAL); }
 }
 /* A branch reads a state (axiom-1): 0 and a float zero are 0; nothing is neither
  * 0 nor 1 and refuses; every other word is 1. */
 static long long fk_truth(long long w) {
     if (w == 0) { return 0; }
-    if (w == fk_nothing) { fk_die(FK_BRANCH_REFUSAL); }
+    if (w == fk_nothing) { fk_stop(FK_BRANCH_REFUSAL); }
     if ((w & 1) && fk_isf(w) && fk_num(w) == 0.0) { return 0; }
     return 1;
 }
 /* the eval-depth wall: the walker meets it at every step, a leaf's non-tail self call before it recurses -- the same
  * report and the same stop, so a crystallized recursion ends where the walker would, honestly, never in a crash */
 static void fk_depth_wall(long long used) {
+    if (fk_recovering()) {
+        fk_stop("fkwu: eval too deep -- the recursion needs to be tail or balanced");
+    }
     printf("fkwu: eval too deep — %lld bytes of walker stack (wall %lld). The recursion "
            "needs to be tail or balanced; the wall is honest, the silent crash was not.\n",
            used, fk_stack_wall);
@@ -12857,8 +12886,12 @@ static long long fk_walk(long long i, long long fp) {
          * carried their own odd-negative band since (fk_sbase); the door reads
          * it now. Other non-lists answer 0 as the siblings do. The emitted
          * walker's fk_list_len (fkc-table-serialize.fk) still answers 0 for a
-         * string: its words carry no string band to read. */
+         * string: its words carry no string band to read.
+         * nothing is not an empty collection: its length is a stop, as str_len's is. */
         long long lv22 = fk_walk(fk_node[i][1], fp);
+        if (lv22 == fk_nothing) {
+            fk_stop(FK_LEN_REFUSAL);
+        }
         if (fk_is_str(lv22)) {
             return FK_SLEN(fk_stri(lv22)) << 1;
         }
@@ -15901,11 +15934,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
              * continue past), not a bounds check: Go's str_len dies this same
              * death, and callers name the absence with nothing? before
              * measuring. */
-            fk_die("fkwu: str_len: nothing has no length -- ask nothing? before measuring");
+            fk_stop("fkwu: str_len: nothing has no length -- ask nothing? before measuring");
         }
         long long sa = fk_stri(sv25);
         if (sa < 0 || !FK_SOK(sa)) {
-            fk_die("fkwu: str_len: only a string has a length -- ask value_kind first");
+            fk_stop("fkwu: str_len: only a string has a length -- ask value_kind first");
         }
         return FK_SLEN(sa) << 1;
     }
@@ -15930,7 +15963,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* the axiom-1 absence is a value str_eq may ask about -- it equals only an absence (str-eq-absence-band,
          * four-way); any other non-string stops, as on the sibling kernels */
         if ((wa26 != fk_nothing && (sa26 < 0 || !FK_SOK(sa26))) || (wb26 != fk_nothing && (sb26 < 0 || !FK_SOK(sb26)))) {
-            fk_die("fkwu: str_eq: only strings and nothing compare as strings -- ask value_kind first, or use value_eq");
+            fk_stop("fkwu: str_eq: only strings and nothing compare as strings -- ask value_kind first, or use value_eq");
         }
         if (fk_keyeq(sa26, sb26)) {
             return 2;
@@ -15941,7 +15974,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long wa27 = fk_walk(fk_node[i][1], fp); fk_vp(wa27); long long sa = fk_stri(wa27);
         long long sb = fk_stri(fk_walk(fk_node[i][2], fp)); fk_vsp = fk_vsp - 1;
         if (sa < 0 || !FK_SOK(sa) || sb < 0 || !FK_SOK(sb)) {
-            fk_die("fkwu: str_concat: only strings join -- ask value_kind first");
+            fk_stop("fkwu: str_concat: only strings join -- ask value_kind first");
         }
         long long ln = FK_SLEN(sa) + FK_SLEN(sb);
         while (fk_sbp + ln > fk_scap_b) {
@@ -15965,7 +15998,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long wa28 = fk_walk(fk_node[i][1], fp); fk_vp(wa28); long long sa = fk_stri(wa28);
         long long k = fk_walk(fk_node[i][2], fp) >> 1; fk_vsp = fk_vsp - 1;
         if (sa < 0 || !FK_SOK(sa)) {
-            fk_die("fkwu: str_byte_at: only a string has bytes -- ask value_kind first");
+            fk_stop("fkwu: str_byte_at: only a string has bytes -- ask value_kind first");
         }
         if (k < 0 || k >= FK_SLEN(sa)) {
             return 0 - 2;
@@ -16093,7 +16126,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 33) {
         long long w33 = fk_walk(fk_node[i][1], fp);
         if ((w33 & 1) != 0) {
-            fk_die("fkwu: byte_to_str: only an int is a byte -- ask value_kind first");
+            fk_stop("fkwu: byte_to_str: only an int is a byte -- ask value_kind first");
         }
         long long b = w33 >> 1;
         if (b < 0 || b > 255) {
@@ -16242,7 +16275,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
         if (sa < 0 || !FK_SOK(sa)) {
-            fk_die("fkwu: str_to_float: only a string reads as a float -- ask value_kind first");
+            fk_stop("fkwu: str_to_float: only a string reads as a float -- ask value_kind first");
         }
         long long fbv53;
         {
@@ -16290,6 +16323,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * 1 make_float32 (intern a type-6 leaf), 2 make_float64 (a type-7 leaf),
          * 3 math_pi. The four names are rewrite rows over this tag (fk_rwtab). */
         long long fm201 = fk_walk(fk_node[i][1], fp);
+        /* MODE 28 -- attempt x: x is walked here, under a recover point, never before */
+        if ((fm201 >> 1) == 28) { return fk_attempt(fk_node[i][2], fp); }
         if ((fm201 >> 1) == 9) {
             /* MODE 9 -- substring(s, start, end): the byte-indexed string slice.
              *
@@ -17648,10 +17683,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long wn197 = fk_walk(fk_node[i][2], fp); fk_vp(wn197); long long nm197 = fk_stri(wn197);
         long long fv197 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2;
         if (nm197 < 0) {
-            fk_die("fk_walk tag 197: method_define second arg must be a string name -- a non-string interns to the -1 sentinel and every such method would collide on it");
+            fk_stop("fk_walk tag 197: method_define second arg must be a string name -- a non-string interns to the -1 sentinel and every such method would collide on it");
         }
         if (fk_is_fnval(fv197) == 0) {
-            fk_die("fk_walk tag 197: method_define third arg must be a function value (a defn name in value position)");
+            fk_stop("fk_walk tag 197: method_define third arg must be a function value (a defn name in value position)");
         }
         long long m197 = fk_mth_find(bp197, nm197);
         if (m197 < 0) {
@@ -17683,12 +17718,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * numb answer wearing a verdict. */
         long long rv199 = fk_walk(fk_node[i][1], fp);
         if (fk_isrec(rv199) == 0) {
-            fk_die("fk_walk tag 199: method_invoke first arg must be a record");
+            fk_stop("fk_walk tag 199: method_invoke first arg must be a record");
         }
         long long nm199 = fk_stri(fk_walk(fk_node[i][2], fp));
         long long m199 = fk_mth_find(fk_rbp[fk_ridx(rv199)], nm199);
         if (m199 < 0) {
-            fk_die("fk_walk tag 199: no method under that name on the record's blueprint (method_define it first)");
+            fk_stop("fk_walk tag 199: no method under that name on the record's blueprint (method_define it first)");
         }
         long long fv199 = fk_mth_fn[m199];
         long long fi199 = fk_fnval_target(fv199);
@@ -18466,6 +18501,105 @@ static void fk_sig_send(long long observed_at, long long at) {
     if (!fk_sig_bad) {
         fk_write_all_raw(2, fk_sig_b, (unsigned long)fk_sig_n);
     }
+}
+/* ── the recover point: (attempt x) ─────────────────────────────────────────
+ * fk_attempt walks x with a recover point standing. A stop inside x (fk_stop) unwinds here:
+ * the value stack, the current recipe and the lane's crystallization depths return to what
+ * they were when x began, the stop goes out as one organ-health line (organ fkwu-walker,
+ * aspect stop, the stop's own sentence observed, backtrack selected), and the attempt answers
+ * nothing -- the one value every choice reads as "this option did not land". Attempts nest:
+ * each stop reaches the innermost. Heap cells x allocated stay behind as garbage the next
+ * melt reclaims; no live value points at them. */
+#if defined(FK_HAVE_SETJMP)
+static jmp_buf *fk_rp_top;
+#endif
+static long long fk_rp_seq;
+static int fk_recovering(void) {
+#if defined(FK_HAVE_SETJMP)
+    return fk_rp_top != 0;
+#else
+    return 0;
+#endif
+}
+static void fk_stop_voice(const char *msg) {
+    long long at = fk_now_ms();
+    long long pid = (long long)getpid();
+    fk_rp_seq = fk_rp_seq + 1;
+    fk_sig_n = 0;
+    fk_sig_bad = 0;
+    fk_sig_lit("form-organ health {\"schema\":\"organ-health-v1\",\"id\":\"");
+    fk_sig_int(pid);
+    fk_sig_lit(":stop:");
+    fk_sig_int(fk_rp_seq);
+    fk_sig_lit("\",\"organ\":\"fkwu-walker\",\"flow\":\"");
+    fk_sig_int(pid);
+    fk_sig_lit("\",\"aspect\":\"stop\",\"stage\":\"applied\",\"expected\":\"value\",\"observed\":");
+    fk_sig_cstr(msg);
+    fk_sig_lit(",\"health\":null,\"surprise\":1,\"needs\":[],\"offers\":[\"backtrack\"],"
+               "\"selected\":\"backtrack\",\"result\":{\"answer\":\"nothing\"}");
+    fk_sig_send(at, at);
+}
+/* where a stop happened: the recipe walking when it stopped, by name, and the unit whose text
+ * holds that name -- the symbol map, as kernel_hot reads it. Written into buf as
+ * "<msg> -- in <name> (<unit>)"; the message alone when the recipe has no symbol. */
+static const char *fk_stop_where(const char *msg, char *buf, long long cap) {
+    long long j = 0, n = 0, k = 0;
+    while (j <= fk_fntop && fk_fnidx[j] != fk_cur_fn) { j = j + 1; }
+    while (msg[n] != 0 && n < cap - 1) { buf[n] = msg[n]; n = n + 1; }
+    if (j > fk_fntop || fk_srctext == 0) { buf[n] = 0; return buf; }
+    long long so = fk_fnsym_s[j], nl = fk_fnsym_n[j];
+    const char *unit = fk_hot_unit_of(so);
+    long long d = 0;
+    while (d < fk_src_dep_count) {
+        if (so >= fk_src_dep_text_off[d] && so < fk_src_dep_text_off[d] + fk_src_dep_text_len[d] && fk_src_dep_text_len[d] > 0) { unit = fk_src_dep_path[d]; }
+        d = d + 1;
+    }
+    const char *in = " -- in ";
+    while (in[k] != 0 && n < cap - 1) { buf[n] = in[k]; n = n + 1; k = k + 1; }
+    k = 0;
+    while (k < nl && n < cap - 1) { buf[n] = fk_srctext[so + k]; n = n + 1; k = k + 1; }
+    if (n < cap - 1) { buf[n] = ' '; n = n + 1; }
+    if (n < cap - 1) { buf[n] = '('; n = n + 1; }
+    k = 0;
+    while (unit != 0 && unit[k] != 0 && n < cap - 1) { buf[n] = unit[k]; n = n + 1; k = k + 1; }
+    if (n < cap - 1) { buf[n] = ')'; n = n + 1; }
+    buf[n] = 0;
+    return buf;
+}
+static void fk_stop(const char *msg) {
+    static char where[1024];
+    fk_stop_where(msg, where, (long long)sizeof(where));
+#if defined(FK_HAVE_SETJMP)
+    if (fk_rp_top != 0) {
+        fk_stop_voice(where);
+        FK_LONGJMP(*fk_rp_top);
+    }
+#endif
+    fk_die(where);
+}
+static long long fk_attempt(long long node, long long fp) {
+#if defined(FK_HAVE_SETJMP)
+    jmp_buf here;
+    jmp_buf *outer = fk_rp_top;
+    long long vsp0 = fk_vsp;
+    long long cur0 = fk_cur_fn;
+    int warm0 = fk_f64_warm_depth;
+    int env0 = fk_f64_env_depth;
+    if (FK_SETJMP(here) == 0) {
+        fk_rp_top = &here;
+        long long v = fk_walk(node, fp);
+        fk_rp_top = outer;
+        return v;
+    }
+    fk_rp_top = outer;
+    fk_vsp = vsp0;
+    fk_cur_fn = cur0;
+    fk_f64_warm_depth = warm0;
+    fk_f64_env_depth = env0;
+    return fk_nothing;
+#else
+    return fk_walk(node, fp);
+#endif
 }
 /* The signal for one printed source diagnostic. `ap` holds the diagnostic's own
  * arguments; a tagged diagnostic, "[tag] '%.*s' ...", names its offender first. */

@@ -13,6 +13,7 @@ pub(crate) const FKWU_RESERVED_HEADS: &[&str] = &[
     "add_u32",
     "and",
     "api_health",
+    "attempt",
     "band",
     "bnot_u32",
     "bor",

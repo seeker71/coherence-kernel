@@ -616,6 +616,8 @@ export class Kernel {
   // success path only — after a throw the frames that were live at the
   // crash remain for the top-level catch to surface.
   formStack: string[] = [];
+  // stopSeq — stops an attempt has caught, the id of each stop line
+  stopSeq = 0;
   // readingFiles — line map for the source currently being read:
   // (file name, first global line) per concatenated part. When non-empty,
   // the reader attributes every parenthesized form so fatal diagnostics
@@ -1874,6 +1876,8 @@ export class Kernel {
       const v = args[0];
       if (v?.kind === "list") return { kind: "int", int: v.list.length };
       if (v?.kind === "str") return { kind: "int", int: v.str.length };
+      // nothing is not an empty collection: its length is a stop, as on fkwu
+      if (v?.kind === "null") throw new Error("len: nothing has no length -- ask nothing? before measuring");
       return { kind: "int", int: 0 };
     });
     // _len — the python-adapter's polymorphic length: dict PAIRS, list
@@ -4456,6 +4460,42 @@ export class Frame {
 // Walker — recipe → value
 // ---------------------------------------------------------------------------
 
+// attempt — (attempt x) walks x with a recover point standing, as fkwu's fk_attempt does.
+// A stop inside x (a throw from a Form-level refusal, a RangeError from deep recursion)
+// unwinds here: the Form stack returns to its depth at entry, the stop goes out as one
+// organ-health line (aspect stop, backtrack selected), and the attempt answers nothing —
+// the value every choice reads as "this option did not land".
+function attempt(k: Kernel, x: NodeID, frame: Frame): Value {
+  const depth = k.formStack.length;
+  try {
+    return walk(k, x, frame);
+  } catch (e) {
+    k.formStack.length = depth;
+    k.stopSeq++;
+    const now = Date.now();
+    const row = {
+      schema: "organ-health-v1",
+      id: `form-kernel-ts-${k.host.processId?.() ?? 0}:stop:${k.stopSeq}`,
+      organ: "form-kernel-ts",
+      flow: "walker",
+      aspect: "stop",
+      stage: "applied",
+      expected: "value",
+      observed: e instanceof Error ? e.message : String(e),
+      health: null,
+      surprise: 1,
+      needs: [],
+      offers: ["backtrack"],
+      selected: "backtrack",
+      result: { answer: "nothing" },
+      observed_at_ms: now,
+      at_ms: now,
+    };
+    k.host.writeStderr?.(`form-organ health ${JSON.stringify(row)}\n`);
+    return { kind: "null" };
+  }
+}
+
 // walk — a recipe to its value. A conditional's taken arm, a do's last form
 // and a closure's body are tail positions: the loop takes them in place, so a
 // tail-recursive Form loop runs in constant host stack and holds no caller's
@@ -5540,6 +5580,10 @@ function resolveCall(
     // into a kernel-resident optimized native.
     const aliased = k.jitAliases.get(rawName);
     const dispatchName = aliased !== undefined ? aliased : rawName;
+    // (attempt x): x is walked under a recover point, never before — fkwu's mode 28.
+    if (kids.length === 2 && k.nameStr(rawName) === "attempt") {
+      return { value: attempt(k, kids[1]!, frame) };
+    }
     // Env-aware natives first — they need the caller's env.
     const envNe = k.envNatives.get(dispatchName);
     if (envNe !== undefined && frame.lookup(dispatchName) === undefined) {

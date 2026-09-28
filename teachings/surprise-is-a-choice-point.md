@@ -26,6 +26,7 @@ of nothing, 0, 1, or a node:
 
 | Invite | What it does |
 | --- | --- |
+| `attempt` | the native recover point under every offer: a stop inside `(attempt x)` unwinds to it, is voiced as one organ-health line, and the attempt answers nothing |
 | `oac-choice` | offers options in order; the first that is not nothing wins |
 | `oac-backtrack` | offers each option the original args **and** the memory of what the options before it saw; an option that cannot land acks a node carrying its finding, and the next option receives it; 1 or 0 ends the walk |
 | `oac-try` | offers a cell; when it answers nothing, the handler decides the recovery — exceptions without throw |
@@ -39,6 +40,15 @@ of nothing, 0, 1, or a node:
 An absent reading is `nothing()`; an observed host exit remains evidence. A
 finding travels as `oac-node(finding)` beside the original arguments through
 `oac-backtrack-walk`. The receiving organ chooses what that finding means.
+
+A primitive that meets a state it cannot continue past — the length of nothing,
+a branch on nothing, arithmetic over a non-number, a recursion past the walker's
+wall — stops. Every offer stands inside `attempt`, so the stop unwinds to the
+offer, is voiced (`form-organ health`, aspect `stop`, `backtrack` selected,
+naming the recipe that stopped), and the choice that made the offer takes its
+next option. Outside every attempt the program itself was the option, and it
+ends aloud. Native on all four kernels; witness: `control/tests/attempt-band.fk`
+(1023).
 
 The demand-JIT owner uses this flow for an optional disk cache. It keeps the
 working RAM image, runtime identity and current observation while the resource

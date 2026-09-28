@@ -18,7 +18,7 @@
 
 use std::any::Any;
 use std::backtrace::Backtrace;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -120,6 +120,59 @@ thread_local! {
     static THREAD_CRASH_TRACE_CONTEXT: RefCell<Option<CrashTraceContext>> = const { RefCell::new(None) };
     static THREAD_LAST_CRASH_TRACE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static FORM_CALL_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    // The walker's stack, as fkwu measures its own: where this thread's walks began and
+    // how many bytes below that a walk may reach before it stops (eval too deep).
+    static WALK_BASE: Cell<usize> = const { Cell::new(0) };
+    static WALK_WALL: Cell<usize> = const { Cell::new(0) };
+    // attempts standing on this thread, and the stops they have caught
+    static ATTEMPT_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static STOP_SEQ: Cell<u64> = const { Cell::new(0) };
+}
+
+// walk_stack_begin — a thread that walks Form names its stack once, at its top: the wall
+// is that stack less 2 MB, fkwu's rule, so deep recursion stops (catchable by attempt)
+// before the host stack overflows into an abort no attempt reaches.
+fn walk_stack_begin(bytes: usize) {
+    let here = 0u8;
+    WALK_BASE.with(|b| b.set(&here as *const u8 as usize));
+    WALK_WALL.with(|w| w.set(bytes.saturating_sub(2 * 1024 * 1024)));
+}
+
+// attempt — (attempt x) walks x with a recover point standing, as fkwu's fk_attempt does.
+// A stop inside x unwinds here (the Form stack pops itself frame by frame on the way), the
+// stop goes out as one organ-health line (aspect stop, backtrack selected), and the attempt
+// answers nothing: the value every choice reads as "this option did not land".
+fn attempt(k: &mut Kernel, a: &mut Arena, x: NodeID, env: FrameId) -> Value {
+    ATTEMPT_DEPTH.with(|d| d.set(d.get() + 1));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| walk(k, a, x, env)));
+    ATTEMPT_DEPTH.with(|d| d.set(d.get() - 1));
+    match r {
+        Ok(v) => v,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "stop".to_string());
+            let seq = STOP_SEQ.with(|s| {
+                s.set(s.get() + 1);
+                s.get()
+            });
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let row = serde_json::json!({
+                "schema": "organ-health-v1", "id": format!("form-kernel-rust-{}:stop:{}", std::process::id(), seq),
+                "organ": "form-kernel-rust", "flow": "walker", "aspect": "stop", "stage": "applied",
+                "expected": "value", "observed": msg, "health": null, "surprise": 1,
+                "needs": [], "offers": ["backtrack"], "selected": "backtrack",
+                "result": {"answer": "nothing"}, "observed_at_ms": now, "at_ms": now,
+            });
+            eprintln!("form-organ health {}", row);
+            Value::Null
+        }
+    }
 }
 
 // FormStackFrame — one live frame on the Form-level call stack. Pushed when
@@ -1517,11 +1570,13 @@ const RMATCH_SWITCH: u32 = 1;
 // Form loops run flat); this stack covers genuine DATA-nesting depth — a recursive-
 // descent parse of a deeply nested source is inherently recursion proportional to
 // nesting. Env-tunable via FORM_KERNEL_STACK_MB for sizing to a workload without a
-// rebuild. (Go/V8 grow their stacks; this is the explicit equivalent.)
+// rebuild. (Go/V8 grow their stacks; this is the explicit equivalent.) The default holds
+// the depth fkwu's walker holds (about a million non-tail levels) at this walker's ~750
+// bytes a level; walks stop at the stack less 2 MB (walk_stack_begin).
 fn form_kernel_stack_bytes() -> usize {
     match std::env::var("FORM_KERNEL_STACK_MB") {
-        Ok(s) => s.trim().parse::<usize>().unwrap_or(256) * 1024 * 1024,
-        Err(_) => 256 * 1024 * 1024,
+        Ok(s) => s.trim().parse::<usize>().unwrap_or(1024) * 1024 * 1024,
+        Err(_) => 1024 * 1024 * 1024,
     }
 }
 
@@ -3942,6 +3997,8 @@ impl Kernel {
         self.register_native("len", cat_access(), |_, _, args| match &args[0] {
             Value::List(xs) => Value::Int(xs.len() as i64),
             Value::Str(s) => Value::Int(s.len() as i64),
+            // nothing is not an empty collection: its length is a stop, as on fkwu
+            Value::Null => panic!("len: nothing has no length -- ask nothing? before measuring"),
             _ => Value::Int(0),
         });
         // _len — the python-adapter's polymorphic length: dict PAIRS, list
@@ -6338,6 +6395,11 @@ fn walk_unit_do(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value
 }
 
 pub(crate) fn walk(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
+    let here = 0u8;
+    let base = WALK_BASE.with(|b| b.get());
+    if base != 0 && base.saturating_sub(&here as *const u8 as usize) > WALK_WALL.with(|w| w.get()) {
+        panic!("eval too deep -- the recursion needs to be tail or balanced");
+    }
     let frame_mark = a.frames.len();
     let clo_mark = a.closures_created;
     let r = walk_inner(k, a, n, env);
@@ -6583,6 +6645,10 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                 // the canonical truth; `register_jit form-name native-name` opts
                 // calls into a kernel-resident optimized native.
                 let name = k.jit_aliases.get(&raw_name).copied().unwrap_or(raw_name);
+                // (attempt x): x is walked under a recover point, never before — fkwu's mode 28.
+                if kids.len() == 2 && k.name_str(raw_name) == "attempt" {
+                    return attempt(k, a, kids[1], env);
+                }
                 // Env-aware natives first — they need the caller env.
                 let env_ne_opt = k.env_natives.get(&name).copied();
                 if let Some(ne) = env_ne_opt {
@@ -9470,6 +9536,7 @@ fn ensure_bmf_bootstrap(stdlib_abs: &std::path::Path) -> Result<Arc<Vec<u8>>, St
             .name("bmf-bootstrap-emit".to_string())
             .stack_size(form_kernel_stack_bytes())
             .spawn(move || {
+                walk_stack_begin(form_kernel_stack_bytes());
                 let mut k = Kernel::new();
                 let root = read_root_from_source(&mut k, &src);
                 serialize_artifact(&k, root)
@@ -9505,6 +9572,7 @@ fn run_source_with_bootstrap(
         .name(name.to_string())
         .stack_size(form_kernel_stack_bytes())
         .spawn(move || -> Result<(Kernel, Value), String> {
+            walk_stack_begin(form_kernel_stack_bytes());
             let mut k = Kernel::new();
             let bootstrap_root = deserialize_artifact(&mut k, &bootstrap)
                 .map_err(|e| format!("source-compile: load bootstrap: {}", e))?;
@@ -10392,6 +10460,7 @@ fn cli_serve(args: &[String]) -> i32 {
             .name(format!("kernel-worker-{}", id))
             .stack_size(WORKER_STACK_SIZE);
         match builder.spawn(move || {
+            walk_stack_begin(WORKER_STACK_SIZE);
             worker_loop(
                 id,
                 program,
@@ -13927,6 +13996,10 @@ fn install_panic_hook() {
     // backtrace. Kernel devs can set RUST_BACKTRACE=1 to get the full
     // story when debugging the kernel itself.
     std::panic::set_hook(Box::new(|info| {
+        // a stop inside an attempt is a backtrack point, not a fatal: the attempt voices it
+        if ATTEMPT_DEPTH.with(|d| d.get()) > 0 {
+            return;
+        }
         let msg = info
             .payload()
             .downcast_ref::<String>()
@@ -14646,7 +14719,10 @@ fn main() {
     let handle = std::thread::Builder::new()
         .name("form-kernel-rust".to_string())
         .stack_size(form_kernel_stack_bytes())
-        .spawn(move || main_with_args(args))
+        .spawn(move || {
+            walk_stack_begin(form_kernel_stack_bytes());
+            main_with_args(args)
+        })
         .unwrap_or_else(|e| {
             eprintln!("form-kernel-rust: failed to start execution worker: {}", e);
             std::process::exit(1);
