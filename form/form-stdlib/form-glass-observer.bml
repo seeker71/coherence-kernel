@@ -106,6 +106,9 @@ section [form.bml] {
         def fgo-nodeid-state(row) = if eq(fgo-nodeid-bound?(row), 1) then "bound-glass-projection" else "unbound";
         def fgo-nodeid-value(row) = if eq(fgo-nodeid-bound?(row), 1) then fgo-node-id(fgo-projection-node(row)) else "";
         def fgo-nodeid-door(row) = if eq(fgo-nodeid-bound?(row), 1) then "glass.metric-projection" else "telemetry.nodeid-owner-binding";
+        // The row's clock columns -- age (12), observed epoch (20), sequence (21) -- carry -1 for "not observed" and
+        // -2 for a clock that ran backwards. That is form-glass-metric-v2's wire shape: interned as trivial ints in
+        // fgo-frame-row, carried in gift frames, and ordered by eight sibling readers; nothing there is a v3 row.
         def fgo-observed-epoch(row) = if lt(len(row), 21) then -1 else nth(row, 20);
         def fgo-observation-sequence(row) = if lt(len(row), 22) then -1 else nth(row, 21);
         def fgo-source-node(row) = if lt(len(row), 23) then nothing() else nth(row, 22);
@@ -143,16 +146,18 @@ section [form.bml] {
         def fgo-age-rows-at(rows, epoch) = if eq(len(rows), 0) then list() else cons(fgo-age-row-at(head(rows), epoch), fgo-age-rows-at(tail(rows), epoch));
         def fgo-value-event(row) = list(FGOValueEvent(), fgo-projection-node(row), fgo-observed-epoch(row), fgo-observation-sequence(row), fgo-value-kind(row), fgo-int-value(row), fgo-text-value(row), fgo-present?(row), fgo-capacity(row), fgo-capacity-present?(row), fgo-heat(row), fgo-evidence(row), fgo-lifecycle(row), fgo-source(row), fgo-note(row), fgo-source-node(row));
 
+        // A `key=value` status line: a key the text does not carry, or carries empty, is nothing -- never a number.
+        // str_find's -1 is the primitive's own answer for "not found", read once here and nowhere past it.
         def fgo-status-start(status, name) {
             let key = str_concat(name, "=");
             let laterKey = str_concat("\n", key);
             let atFirst = str_find(status, key, 0);
             let atLater = str_find(status, laterKey, 0);
-            if eq(atFirst, 0) then str_len(key) else if lt(atLater, 0) then -1 else add(atLater, str_len(laterKey));
+            if eq(atFirst, 0) then str_len(key) else if lt(atLater, 0) then nothing() else add(atLater, str_len(laterKey));
         }
         def fgo-status-text(status, name) {
             let start = fgo-status-start(status, name);
-            if lt(start, 0) then "" else fgo-status-text-found(status, start);
+            if nothing?(start) then nothing() else fgo-status-text-found(status, start);
         }
         def fgo-status-text-found(status, start) {
             let stop = str_find(status, "\n", start);
@@ -160,15 +165,7 @@ section [form.bml] {
         }
         def fgo-status-int(status, name) {
             let value = fgo-status-text(status, name);
-            if eq(str_len(value), 0) then -1 else str_to_int(value);
-        }
-        def fgo-status-int-row(domain, id, label, status, field, unit, plane, source, channel, note) {
-            let value = fgo-status-int(status, field);
-            if lt(value, 0) then fgo-unavailable(domain, id, label, unit, plane, str_concat(source, str_concat(".", field)), channel, note) else fgo-int(domain, id, label, value, unit, value, plane, "physical-live", source, "live", channel, note);
-        }
-        def fgo-status-semantic-row(domain, id, label, status, field, unit, plane, source, channel, zeroState, zeroNote, activeNote) {
-            let value = fgo-status-int(status, field);
-            if lt(value, 0) then fgo-unavailable(domain, id, label, unit, plane, str_concat(source, str_concat(".", field)), channel, activeNote) else if eq(value, 0) then fgo-int(domain, id, label, value, unit, 0, plane, "physical-live", source, zeroState, channel, zeroNote) else fgo-int(domain, id, label, value, unit, value, plane, "physical-live", source, "live", channel, activeNote);
+            if nothing?(value) then nothing() else if eq(str_len(value), 0) then nothing() else str_to_int(value);
         }
 
         // ---- arena bytes: the seed's own column widths over the seed's own counts ----
@@ -234,13 +231,15 @@ section [form.bml] {
         def fgo-event-rows(events) = fgo-event-rows-go(events, 8);
 
         // ---- Metal, as words: metal_live -> 0 linked 1 unified 2 buffers 3 pipelines 4 nocopy 5 pending 6 in flight 7 dispatch 8 sync 9 cpu-jit dispatch 10 cpu-jit busy us 11 gpu busy us 12 wait ms 13 deadline 14 shelf ----
-        def fgo-metal-word(live, k) = if lt(len(live), 20) then -1 else nth(live, k);
+        // A word the carrier did not answer is nothing: metal_live answers nil when Metal is not up, and a negative
+        // word is the carrier's own "the device did not speak". Both become nothing here, at the first touch.
+        def fgo-metal-word(live, k) = if lt(len(live), 20) then nothing() else fgo-metal-reading(nth(live, k));
+        def fgo-metal-reading(word) = if lt(word, 0) then nothing() else word;
         def fgo-metal-semantic-row(id, label, value, unit, plane, channel, zeroState, zeroNote, activeNote) = fgo-metal-count-row(id, label, value, unit, plane, channel, zeroState, zeroNote, activeNote);
-        def fgo-metal-count-row(id, label, value, unit, plane, channel, zeroState, zeroNote, activeNote) = if lt(value, 0) then fgo-unavailable("metal", id, label, unit, plane, "metal_live", channel, "Metal is not up in this process") else if eq(value, 0) then fgo-int("metal", id, label, 0, unit, 0, plane, "physical-live", "metal_live", zeroState, channel, zeroNote) else fgo-int("metal", id, label, value, unit, value, plane, "physical-live", "metal_live", "live", channel, activeNote);
+        def fgo-metal-count-row(id, label, value, unit, plane, channel, zeroState, zeroNote, activeNote) = if nothing?(value) then fgo-unavailable("metal", id, label, unit, plane, "metal_live", channel, "Metal is not up in this process") else if eq(value, 0) then fgo-int("metal", id, label, 0, unit, 0, plane, "physical-live", "metal_live", zeroState, channel, zeroNote) else fgo-int("metal", id, label, value, unit, value, plane, "physical-live", "metal_live", "live", channel, activeNote);
         // The device's byte ledger rides in metal_live words 18 and 19 since
         // 2026-09-06: the carrier, the seed's array and its loop moved together.
         // Before that the two gauges parsed metal_status text by byte, which cost
-        // 559K dispatches a tick on the live glass.
         // 559K dispatches a tick on the live glass.
         def fgo-metal-rows(live, status) = list(
             fgo-metal-count-row("loaded", "Metal loaded", fgo-metal-word(live, 0), "flag", "unified-gpu", "metal", "unloaded", "Metal is not up in this process", "the carrier answers"),
@@ -256,39 +255,30 @@ section [form.bml] {
             fgo-metal-semantic-row("allocated-bytes", "Metal allocated bytes", fgo-metal-word(live, 18), "bytes", "unified-gpu", "metal", "empty", "semantic-zero=empty; the device answered and this process's Metal resources hold no device bytes", "MTLDevice.currentAllocatedSize: the device bytes this process's Metal resources hold right now; the handle rows say how many buffers stand, this says how large they are"),
             fgo-metal-count-row("working-set", "Metal recommended working set", fgo-metal-word(live, 19), "bytes", "unified-gpu", "metal", "empty", "semantic-zero=empty; the device reported no recommended working set", "MTLDevice.recommendedMaxWorkingSetSize: the device bytes the system suggests this process stay under before it pays for eviction; a ceiling, not an allocation"));
 
-        def fgo-colon-skip-space(text, index) = if ge(index, str_len(text)) then index else if eq(fgo-ps-space?(str_byte_at(text, index)), 1) then fgo-colon-skip-space(text, add(index, 1)) else index;
-        def fgo-colon-digits-end(text, index) = if ge(index, str_len(text)) then index else if and(ge(str_byte_at(text, index), 48), le(str_byte_at(text, index), 57)) then fgo-colon-digits-end(text, add(index, 1)) else index;
-        def fgo-colon-int(status, key) {
-            let at = str_find(status, key, 0);
-            if lt(at, 0) then -1 else fgo-colon-int-at(status, fgo-colon-skip-space(status, add(at, str_len(key))));
-        }
-        def fgo-colon-int-at(status, start) {
-            let stop = fgo-colon-digits-end(status, start);
-            if le(stop, start) then -1 else str_to_int(substring(status, start, stop));
-        }
         // ---- host memory: Mach vm_statistics64 read in-process (host_vm_stat) -- no memory_pressure, no vm_stat ----
         // list(page, memsize, free, active, inactive, wired, speculative, purgeable, compressor, pageins, pageouts, compressions, decompressions, swapins, swapouts, external, internal)
+        // A snapshot the door did not give whole answers nothing, never a number a reader must know to distrust.
         def fgo-vm-valid?(vm) = if lt(len(vm), 17) then 0 else if le(nth(vm, 0), 0) then 0 else if le(nth(vm, 1), 0) then 0 else 1;
         def fgo-vm-used-bytes(vm) = mul(add(nth(vm, 5), add(nth(vm, 3), nth(vm, 8))), nth(vm, 0));
-        def fgo-host-free-percent(vm) = if eq(fgo-vm-valid?(vm), 0) then -1 else sub(100, div(mul(fgo-vm-used-bytes(vm), 100), nth(vm, 1)));
-        def fgo-host-total-bytes(vm) = if eq(fgo-vm-valid?(vm), 0) then -1 else nth(vm, 1);
+        def fgo-host-free-percent(vm) = if eq(fgo-vm-valid?(vm), 0) then nothing() else sub(100, div(mul(fgo-vm-used-bytes(vm), 100), nth(vm, 1)));
+        def fgo-host-total-bytes(vm) = if eq(fgo-vm-valid?(vm), 0) then nothing() else nth(vm, 1);
         def fgo-vm-byte-row(vm, id, label, slot) = if eq(fgo-vm-valid?(vm), 0) then fgo-unavailable("host", id, label, "bytes", "os-memory", "host_vm_stat", "memory", "native VM snapshot unavailable") else fgo-int("host", id, label, mul(nth(vm, slot), nth(vm, 0)), "bytes", 0, "os-memory", "physical-live", str_concat("host_vm_stat.pages slot=", int_to_str(slot)), "live", "memory", "system-wide page-category bytes; categories may overlap, do not sum as a process allocation");
         def fgo-vm-byte-rows(vm) = list(fgo-vm-byte-row(vm, "vm-free-bytes", "host free pages", 2), fgo-vm-byte-row(vm, "vm-active-bytes", "host active pages", 3), fgo-vm-byte-row(vm, "vm-inactive-bytes", "host inactive pages", 4), fgo-vm-byte-row(vm, "vm-wired-bytes", "host wired pages", 5), fgo-vm-byte-row(vm, "vm-compressor-bytes", "host compressor storage", 8));
-        def fgo-vm-count-row(id, label, value, source, note) = if lt(value, 0) then fgo-unavailable("host", id, label, "pages", "os-memory", source, "health", "the Mach VM statistics door did not answer") else fgo-int("host", id, label, value, "pages", value, "os-memory", "physical-live", source, "live", "health", note);
-        def fgo-vmstat-rows(vm) = if eq(fgo-vm-valid?(vm), 0) then list(fgo-vm-count-row("pageins", "Mach pageins", -1, "mach.vm_statistics64.pageins", "")) else list(fgo-vm-count-row("pageins", "Mach pageins", nth(vm, 9), "mach.vm_statistics64.pageins", "cumulative since boot; the delta row is what moves"), fgo-vm-count-row("compressions", "compressor puts", nth(vm, 11), "mach.vm_statistics64.compressions", "cumulative since boot"), fgo-vm-count-row("decompressions", "compressor gets", nth(vm, 12), "mach.vm_statistics64.decompressions", "cumulative since boot"), fgo-vm-count-row("file-backed-pages", "file-backed pages", nth(vm, 15), "mach.vm_statistics64.external_page_count", "resident pages backed by files"), fgo-vm-count-row("compressor-pages", "compressor occupancy", nth(vm, 8), "mach.vm_statistics64.compressor_page_count", "pages held by the compressor"));
-        // ---- host load: getloadavg, thousandths kept as tenths ----
-        def fgo-loadavg-row(id, label, thousandths) = if lt(thousandths, 0) then fgo-unavailable("host", id, label, "tenths", "cpu-scheduler", "getloadavg", "cpu", "the load average door did not answer") else fgo-int("host", id, label, div(thousandths, 100), "tenths", div(thousandths, 100), "cpu-scheduler", "physical-live", "getloadavg", "live", "cpu", "run-queue length averaged by the kernel, in tenths");
-        def fgo-loadavg-rows(load) = if lt(len(load), 3) then list(fgo-loadavg-row("load-1", "load average 1m", -1)) else list(fgo-loadavg-row("load-1", "load average 1m", nth(load, 0)), fgo-loadavg-row("load-5", "load average 5m", nth(load, 1)), fgo-loadavg-row("load-15", "load average 15m", nth(load, 2)));
+        def fgo-vm-count-row(id, label, value, source, note) = if nothing?(value) then fgo-unavailable("host", id, label, "pages", "os-memory", source, "health", "the Mach VM statistics door did not answer") else fgo-int("host", id, label, value, "pages", value, "os-memory", "physical-live", source, "live", "health", note);
+        def fgo-vmstat-rows(vm) = if eq(fgo-vm-valid?(vm), 0) then list(fgo-vm-count-row("pageins", "Mach pageins", nothing(), "mach.vm_statistics64.pageins", "")) else list(fgo-vm-count-row("pageins", "Mach pageins", nth(vm, 9), "mach.vm_statistics64.pageins", "cumulative since boot; the delta row is what moves"), fgo-vm-count-row("compressions", "compressor puts", nth(vm, 11), "mach.vm_statistics64.compressions", "cumulative since boot"), fgo-vm-count-row("decompressions", "compressor gets", nth(vm, 12), "mach.vm_statistics64.decompressions", "cumulative since boot"), fgo-vm-count-row("file-backed-pages", "file-backed pages", nth(vm, 15), "mach.vm_statistics64.external_page_count", "resident pages backed by files"), fgo-vm-count-row("compressor-pages", "compressor occupancy", nth(vm, 8), "mach.vm_statistics64.compressor_page_count", "pages held by the compressor"));
+        // ---- host load: getloadavg, thousandths kept as tenths; host_load_avg answers nil when getloadavg does not ----
+        def fgo-loadavg-row(id, label, thousandths) = if nothing?(thousandths) then fgo-unavailable("host", id, label, "tenths", "cpu-scheduler", "getloadavg", "cpu", "the load average door did not answer") else fgo-int("host", id, label, div(thousandths, 100), "tenths", div(thousandths, 100), "cpu-scheduler", "physical-live", "getloadavg", "live", "cpu", "run-queue length averaged by the kernel, in tenths");
+        def fgo-loadavg-rows(load) = if lt(len(load), 3) then list(fgo-loadavg-row("load-1", "load average 1m", nothing())) else list(fgo-loadavg-row("load-1", "load average 1m", nth(load, 0)), fgo-loadavg-row("load-5", "load average 5m", nth(load, 1)), fgo-loadavg-row("load-15", "load average 15m", nth(load, 2)));
         // ---- host disk: every IOBlockStorageDriver's cumulative statistics; a rate is the reader's own delta ----
         def fgo-disk-count-row(id, label, value, unit, note) = fgo-int("host", id, label, value, unit, 0, "disk", "physical-live", "IOBlockStorageDriver.Statistics", "live", "health", note);
         def fgo-disk-rows(disk) = if lt(len(disk), 4) then list(fgo-unavailable("host", "disk-bytes-read", "disk bytes read", "bytes", "disk", "IOBlockStorageDriver.Statistics", "health", "no block storage driver answered")) else list(fgo-disk-count-row("disk-bytes-read", "disk bytes read", nth(disk, 0), "bytes", "cumulative since boot over every block storage driver"), fgo-disk-count-row("disk-bytes-written", "disk bytes written", nth(disk, 1), "bytes", "cumulative since boot over every block storage driver"), fgo-disk-count-row("disk-ops", "disk operations", add(nth(disk, 2), nth(disk, 3)), "ops", "reads + writes, cumulative since boot"));
         def fgo-host-rows(vm) {
             let free = fgo-host-free-percent(vm);
             let total = fgo-host-total-bytes(vm);
-            append(list(if lt(free, 0) then fgo-unavailable("host", "memory-free", "host reclaimable headroom", "percent", "os-memory", "mach.host_statistics64.vm_statistics64", "health", "the Mach VM statistics door did not answer") else fgo-sized("host", "memory-free", "host reclaimable headroom", free, "percent", 100, sub(100, free), "os-memory", "derived-window", "mach.host_statistics64: 100 - (wired+active+compressor)/memsize", "live", "health", "complement of active, wired and compressor storage; includes reclaimable pages, not literal free pages"), if lt(total, 0) then fgo-unavailable("host", "memory-total", "physical memory", "bytes", "os-memory", "sysctl.hw.memsize", "health", "the memsize door did not answer") else fgo-int("host", "memory-total", "physical memory", total, "bytes", 0, "os-memory", "physical-live", "sysctl.hw.memsize", "live", "health", "system-wide physical bytes")), append(fgo-vm-byte-rows(vm), append(fgo-loadavg-rows(host_load_avg()), append(fgo-vmstat-rows(vm), fgo-disk-rows(host_disk_stat())))));
+            append(list(if nothing?(free) then fgo-unavailable("host", "memory-free", "host reclaimable headroom", "percent", "os-memory", "mach.host_statistics64.vm_statistics64", "health", "the Mach VM statistics door did not answer") else fgo-sized("host", "memory-free", "host reclaimable headroom", free, "percent", 100, sub(100, free), "os-memory", "derived-window", "mach.host_statistics64: 100 - (wired+active+compressor)/memsize", "live", "health", "complement of active, wired and compressor storage; includes reclaimable pages, not literal free pages"), if nothing?(total) then fgo-unavailable("host", "memory-total", "physical memory", "bytes", "os-memory", "sysctl.hw.memsize", "health", "the memsize door did not answer") else fgo-int("host", "memory-total", "physical memory", total, "bytes", 0, "os-memory", "physical-live", "sysctl.hw.memsize", "live", "health", "system-wide physical bytes")), append(fgo-vm-byte-rows(vm), append(fgo-loadavg-rows(host_load_avg()), append(fgo-vmstat-rows(vm), fgo-disk-rows(host_disk_stat())))));
         }
-        // ---- processes: libproc, no ps, no pgrep -- tuples (pid, rss bytes, cpu microseconds, elapsed seconds) ----
-        def fgo-processes-from(tuples, remaining) = if or(eq(len(tuples), 0), le(remaining, 0)) then list() else if lt(len(head(tuples)), 4) then fgo-processes-from(tail(tuples), remaining) else cons(append(fgo-ps-process(nth(head(tuples), 0), nth(head(tuples), 1), nth(head(tuples), 2), nth(head(tuples), 3)), list(if ge(len(head(tuples)), 5) then nth(head(tuples), 4) else 0)), fgo-processes-from(tail(tuples), sub(remaining, 1)));
+        // ---- processes: libproc, no ps, no pgrep -- tuples (pid, rss bytes, cpu microseconds, elapsed seconds, nice, ppid); nice is signed, so a nice the host did not tell is nothing ----
+        def fgo-processes-from(tuples, remaining) = if or(eq(len(tuples), 0), le(remaining, 0)) then list() else if lt(len(head(tuples)), 4) then fgo-processes-from(tail(tuples), remaining) else cons(append(fgo-ps-process(nth(head(tuples), 0), nth(head(tuples), 1), nth(head(tuples), 2), nth(head(tuples), 3)), list(if ge(len(head(tuples)), 5) then nth(head(tuples), 4) else nothing())), fgo-processes-from(tail(tuples), sub(remaining, 1)));
         def fgo-fkwu-processes() = fgo-processes-from(host_processes("fkwu"), fgo-ps-max-processes());
         def fgo-process-by-pid(processes, pid) = if eq(len(processes), 0) then list() else if eq(fgo-ps-pid(head(processes)), pid) then head(processes) else fgo-process-by-pid(tail(processes), pid);
         def fgo-process-read(pid) = fgo-process-by-pid(fgo-fkwu-processes(), pid);
@@ -302,28 +292,14 @@ section [form.bml] {
         def fgo-process-rows(tuples) = fgo-process-rows-from(fgo-processes-from(tuples, fgo-ps-max-processes()));
         def fgo-live-process-rows() = fgo-process-rows-from(fgo-fkwu-processes());
 
-        // executable name, not argv.  The local command token is consumed only
         def fgo-ps-max-processes() = 32;
-        def fgo-ps-space?(byte) = if eq(byte, 32) then 1 else if eq(byte, 9) then 1 else 0;
-        def fgo-ps-skip-space(text, index) = if ge(index, str_len(text)) then index else if eq(fgo-ps-space?(str_byte_at(text, index)), 1) then fgo-ps-skip-space(text, add(index, 1)) else index;
-        def fgo-ps-token-end(text, index) = if ge(index, str_len(text)) then index else if eq(fgo-ps-space?(str_byte_at(text, index)), 1) then index else fgo-ps-token-end(text, add(index, 1));
-        def fgo-ps-token(text, index) {
-            let start = fgo-ps-skip-space(text, index);
-            let stop = fgo-ps-token-end(text, start);
-            list(substring(text, start, stop), stop);
-        }
-        def fgo-ps-rtrim(text, end) = if le(end, 0) then 0 else if eq(fgo-ps-space?(str_byte_at(text, sub(end, 1))), 1) then fgo-ps-rtrim(text, sub(end, 1)) else end;
-        def fgo-ps-digits?(text, index) = if ge(index, str_len(text)) then 1 else if and(ge(str_byte_at(text, index), 48), le(str_byte_at(text, index), 57)) then fgo-ps-digits?(text, add(index, 1)) else 0;
-        def fgo-ps-uint?(text) = if lt(str_len(text), 1) then 0 else if gt(str_len(text), 19) then 0 else if not(eq(fgo-ps-digits?(text, 0), 1)) then 0 else if and(gt(str_len(text), 1), eq(str_byte_at(text, 0), 48)) then 0 else str_eq(int_to_str(str_to_int(text)), text);
-        def fgo-ps-decimal?(text) = if lt(str_len(text), 1) then 0 else if gt(str_len(text), 10) then 0 else fgo-ps-digits?(text, 0);
-        def fgo-ps-command-fkwu?(command) = if str_eq(command, "fkwu") then 1 else if lt(str_len(command), 5) then 0 else str_eq(substring(command, sub(str_len(command), 5), str_len(command)), "/fkwu");
-        // process: tag, pid, RSS bytes, CPU tenths-percent, elapsed seconds.
-        def fgo-ps-process(pid, rssBytes, cpuTenths, elapsedSeconds) = list("fgo-ps-process-v1", pid, rssBytes, cpuTenths, elapsedSeconds);
+        // process: tag, pid, RSS bytes, CPU microseconds, elapsed seconds, and nice when the host told it.
+        def fgo-ps-process(pid, rssBytes, cpuMicros, elapsedSeconds) = list("fgo-ps-process-v1", pid, rssBytes, cpuMicros, elapsedSeconds);
         def fgo-ps-pid(process) = nth(process, 1);
         def fgo-ps-rss-bytes(process) = nth(process, 2);
         def fgo-ps-cpu(process) = nth(process, 3);
         def fgo-ps-elapsed(process) = nth(process, 4);
-        def fgo-ps-nice(process) = if lt(len(process), 6) then -1 else nth(process, 5);
+        def fgo-ps-nice(process) = if lt(len(process), 6) then nothing() else nth(process, 5);
         def fgo-process-id(process, suffix) = str_concat("fkwu-", str_concat(int_to_str(fgo-ps-pid(process)), str_concat("-", suffix)));
         def fgo-process-rows-from(processes) = if eq(len(processes), 0) then list() else append(fgo-process-metrics(head(processes)), fgo-process-rows-from(tail(processes)));
 
@@ -381,7 +357,7 @@ section [form.bml] {
 
         // A recursive source_inventory must hold its whole C-local listing and
         // cannot melt safely.  The live catalog therefore folds explicitly
-        // 559K dispatches a tick on the live glass.
+        // named immediate directories into three integers, never accepting a
         // truncated whole-tree list.
         def fgo-suffix?(name, suffix) {
             let nameBytes = str_len(name);
