@@ -1,9 +1,9 @@
 // host-walk.bml — the steps a walk the host's own schedule begins shares with every other such walk.
 //
 // A launchd door runs from the walk checkout, a worktree that keeps its own branch because main is checked out
-// elsewhere. It follows main: hw-sync rebases the branch onto origin/main (a commit a previous landing could not
-// carry to main rides along and lands with the next one) and realigns the branch on origin; the landing asks
-// "main": 1 so the landed commit fast-forwards main with no session carrying it. hw-build and hw-carrier rebuild
+// elsewhere. It follows main: hw-sync rebases the branch onto origin/main and realigns the branch on origin; the
+// landing asks "main": 1 so the landed commit fast-forwards main with no session carrying it, and hw-carry at the
+// walk's end carries a landing that stood on the branch once the drift gates pass. hw-build and hw-carrier rebuild
 // the kernel and the Metal carrier into fresh inodes when their sources are newer. hw-native-turn is one engineering
 // turn by the body's own loop (observe/native-turn-run.bml over learn/native-turn-queue.jsonl); hw-paths names what
 // a landing carries for it: the ledgers and every writable file of the queue.
@@ -25,5 +25,25 @@ section [form.bml] {
   def hw-queue-paths(lines) = if nil?(lines) then list() else if ((Comparable) str_len(trim(head(lines))) == 0) then hw-queue-paths(tail(lines)) else append(hw-writable(json-array-elements(json-object-get(parse-json("queue-row", head(lines)), "writable"))), hw-queue-paths(tail(lines)));
   def hw-paths() = cons(json-node-string("receipts/draft-ledger.jsonl"), cons(json-node-string("receipts/native-turn-ledger.jsonl"), if (file_size("learn/native-turn-queue.jsonl") < 1) then list() else hw-queue-paths(split-on(fhn-read("learn/native-turn-queue.jsonl"), "\n"))));
   def hw-movement(request) = host-exec("./fkwu observe/movement-run.bml 2>&1", mc-cat(list(json-emit(request), "\n")));
+  // A landing that stood on the branch (main moved while its turn ran, or no turn landed after it) is carried
+  // at the walk's end: the branch follows main again, and when it still leads main the rebased tree meets the
+  // drift gates and fast-forwards main. A main that moved once more answers non-fast-forward; the next walk
+  // carries it.
+  def hw-ahead() = str_to_int(hw-line(host-exec("git rev-list --count origin/main..HEAD", "")));
+  def hw-digits-end(s, i) = if ((i < str_len(s)) && (str_byte_at(s, i) >= 48) && (str_byte_at(s, i) <= 57)) then hw-digits-end(s, (i + 1)) else i;
+  def hw-field(s, key) {
+   let at = str_find(s, key, 0);
+   let from = (at + str_len(key));
+   if (at < 0) then -1 else str_to_int(substring(s, from, hw-digits-end(s, from)));
+  }
+  // the gates' own summary: every row passed its full reading and none refused
+  def hw-gates-green?(line) = ((hw-field(line, "pass=") >= 0) && ((Comparable) hw-field(line, "pass=") == hw-field(line, "full=")) && ((Comparable) hw-field(line, "refused=") == 0));
+  def hw-gates() = hw-line(host-exec("./fkwu gate/drift-gates-run.bml 2>/dev/null | grep -F 'drift-gates pass=' | tail -1", ""));
+  def hw-carry(branch) {
+   let sync = hw-sync(branch);
+   let ahead = hw-ahead();
+   if ((Comparable) ahead == 0) then mc-cat(list("[carry] ", sync, " even with main")) else hw-carry-gated(sync, ahead, hw-gates());
+  }
+  def hw-carry-gated(sync, ahead, gates) = if hw-gates-green?(gates) then mc-cat(list("[carry] ", sync, " ahead=", int_to_str(ahead), " ", gates, " ", hw-line(host-exec("git push -q origin HEAD:main 2>&1 | tail -1; echo main=$?", "")))) else mc-cat(list("[carry] ", sync, " ahead=", int_to_str(ahead), " held: ", gates));
  }
 }
