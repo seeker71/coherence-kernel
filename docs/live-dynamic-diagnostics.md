@@ -87,6 +87,13 @@ timers alongside JIT care. Each subscription carries its receiving context.
 Quiet turns do not probe child status or rebuild readiness arrays. Failed writes
 retain the submitted bytes and accepted offset with their organ reading; process
 exit and fully drained streams remain separate completion observations.
+Native event receivers now enter the same offer/backtrack flow. A stopped
+receiver keeps its event, captured version, context and findings while the rest
+of the batch proceeds. Local options can complete its continuation immediately;
+otherwise its readiness rests until a correlated response arrives. Each attempt
+renews the observation, and explicit event release remains distinct from
+receiver completion. The [event owner](native-resource-events.md) carries this
+boundary for the existing pipe and JIT consumers.
 
 ## Health belongs to the running organ
 

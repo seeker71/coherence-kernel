@@ -20,6 +20,9 @@ a descriptor for read (`0`) or write (`1`) readiness. The caller keeps a borrowe
 descriptor open until `nve-unwatch`. Owned path descriptors and the queue carry
 close-on-exec. Registration tokens are monotonic Form integers and are never
 recycled within an owner, including when host descriptor numbers are reused.
+Diagnostic flows bind process birth and the shared native owner-construction
+clock before adding the subscription token. Separate event owners retain
+separate readings even when their local token numbers agree.
 `nve-process` observes one process exit; its owning process organ still performs
 the actual wait/reap. Readiness is level-triggered so a partial read retains
 its next wake. Timers and exit subscriptions report once.
@@ -44,6 +47,10 @@ preemptive scheduling or a carrier for other operating systems.
 `nve-bind(events, watch, receiver, context)` binds a subscription to
 `receiver(context, event)`. `nve-turn(events, milliseconds)` reads a complete
 batch, dispatches each still-live subscription and returns the event count.
+A batch captures each receiver and its context. Rebinding a live subscription
+selects the receiver for later batches; a captured event keeps its original
+receiver. Bind before waiting. Raw event rows carry the binding after their
+signed data field.
 A receiver may release or replace registrations; later stale entries in that
 batch cannot act on their replacements. Unbound events remain available through
 `nve-take`, including their original registration references.
@@ -54,7 +61,50 @@ operations. Child exit, stream data, cancellation deadlines and cache-resource
 changes retain their separate owners and original context. Closing a consumer
 withdraws its subscriptions and preserves the queue. Its caller closes the
 queue after its consumers have settled. Whole-batch dispatch is cooperative;
-a receiver's execution time remains part of the turn.
+a receiver's execution time remains part of the turn. A nested wait or dispatch
+signals its active receiving turn without consuming another batch.
+
+## Interruption stays with its receiver
+
+Each receiver runs through `oac-offer`. A native value stop returns to that
+offer; later receivers in the batch continue. An ordinary return, including
+`nothing`, completes delivery. The interrupted event, captured binding and
+original context stay on the subscription as a continuation. Persistent
+readiness is disabled while held, so unchanged readiness does not repeat the
+receiver or spin the queue. `nve-pending(events)` exposes the held subscriptions;
+`nve-care-reading(watch)` exposes each correlated need. Payload and context
+remain private; the health signal carries subscription identity and disposition.
+
+`nve-bind-care(events, watch, receiver, context, options)` additionally offers
+local options immediately after an interruption. The existing
+`oac-backtrack-walk` supplies each option with original arguments
+`[events, context, event]` and prior findings. A finding travels as `oac-node`;
+`oac-one` acknowledges completion of that continuation. Silence or `oac-zero`
+keeps it held. Options checkpoint completed effects in their own context and
+resume from that point. The event owner never implicitly repeats the receiver.
+Completion here describes the supplied continuation's acknowledgment; the
+receiving organ still owns verification of its actual result.
+
+A resource change can resume the held work in the same process:
+
+```text
+let response = oh-response(nve-care-reading(watch), "continue-receiver");
+nve-hear(events, watch, response, list(finishFromCheckpoint));
+```
+
+The offered options are native function values supplied by the caller.
+Each attempt emits an applied action and a fresh correlated observation, retaining
+findings for the next choice. Old responses and recursive care cannot replay
+the action. If the continuation completed but enabling readiness failed, the
+next response only re-enables it. A replacement binding does not take over
+the held context.
+
+Unwatching releases the registration and preserves any held continuation.
+After the receiving organ settles its resources, an explicit `release-event`
+response to `nve-hear` releases that continuation without claiming its receiver
+completed. Queue close retains ownership while continuations remain. This
+boundary handles native value stops; fatal process exits, host faults and
+non-yielding work retain their separate lifecycle requirements.
 
 ## JIT care
 
