@@ -44,13 +44,13 @@ gate/tests/structural-gate-band          -> 16383
 ./fkwu observe/door-link-health-run.bml  -> doors=12 links=120 broken=0 code=12120000
 ./fkwu observe/belief-stamps.bml         -> 534499010  (field stamped*10^6 + owed*10^3 + laws)
 observe/tests/belief-rewitness-band      -> 63
-./fkwu form/form-stdlib/release-ledger.bml -> open=29 moving=0 released=113
+./fkwu form/form-stdlib/release-ledger.bml -> open=28 moving=0 released=114
 learn/tests/homecoming-distillation-corpus-band -> 32767  (asserts 982 rows, 963 admissible)
 value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
 pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · control/tests/offer-ack-core-band 2097151
-control/tests/attempt-band 1023 · file-bytes-band 127 · form-bml-cursor-full-band 105  (each four-way)
+control/tests/attempt-band 2047 · file-bytes-band 127 · form-bml-cursor-full-band 105  (each four-way)
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
 ```
 
