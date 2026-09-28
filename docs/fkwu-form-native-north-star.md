@@ -198,8 +198,12 @@ receivers now keep their captured version across live rebinding. A native stop
 retains the original event and context, offers local backtracking choices, and
 lets peers proceed. Completed effects belong in that context; resumption acts
 on the retained checkpoint. Held readiness rests until new care arrives, and
-retirement retains unresolved continuations. This is the current cooperative
-boundary beneath the broader scheduling destination.
+retirement retains unresolved continuations. A continuation can own its
+resource wake subscriptions: enrollment re-observes across registration, quiet
+waits stay quiet, and a complete batch brings one care attempt with every wake
+retained. Completed care releases its subscriptions; exhausted wake resources
+signal their own need. This is the current cooperative boundary beneath the
+broader scheduling destination.
 
 Bulk data stays in owned resident regions. A span carries allocation identity and generation, owner, offset, length, layout, access mode and completion dependencies. Crossings carry descriptors and batches. A zero-copy request preserves its alignment and lifetime contract or reports refusal.
 

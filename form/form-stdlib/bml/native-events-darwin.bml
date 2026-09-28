@@ -30,7 +30,7 @@ section [form.bml] {
   }
   def nve-open() {
    let memory = npd-open();
-   let owner = record_new(0,"kind","native-event-owner","id",host_monotonic_ms(),"flow",noc-open(),"pid",host_pid(),"active",1,"memory",memory,"buffer",nothing(),"queue",-1,"next",0,"watches",list(),"pending",list(),"dispatching",0,"calls",0,"waits",0,"delivered",0,"callbacks",0,"unhandled",list(),"reading",nothing(),"code-live",0);
+   let owner = record_new(0,"kind","native-event-owner","id",host_monotonic_ms(),"flow",noc-open(),"pid",host_pid(),"active",1,"memory",memory,"buffer",nothing(),"queue",-1,"next",0,"watches",list(),"pending",list(),"attention",list(),"dispatching",0,"calls",0,"waits",0,"delivered",0,"callbacks",0,"unhandled",list(),"reading",nothing(),"code-live",0);
    let image = nve-image();
    let identity = intern_node(make_nodeid(31,2,0,188),cons(intern_trivial_string("native-events-darwin-arm64-v1"),cons(intern_trivial_int(owner),npd-nodes(image))));
    record_set(owner,"identity",identity); record_set(owner,"request",list(0,identity,image));
@@ -61,7 +61,7 @@ section [form.bml] {
   }
   def nve-watch(owner,ident,filter,owned,path,notes,data,flags) {
    let token = (record_get(owner,"next") + 1); record_set(owner,"next",token);
-   let watch = record_new(0,"kind","native-event-watch","owner",owner,"token",token,"ident",ident,"filter",filter,"owned",owned,"path",path,"active",1,"registered",0,"binding",nothing(),"continuation",nothing(),"reading",nothing(),"paused",0,"caring",0,"receiver-settled",0);
+   let watch = record_new(0,"kind","native-event-watch","owner",owner,"token",token,"ident",ident,"filter",filter,"flags",flags,"notes",notes,"data",data,"owned",owned,"path",path,"active",1,"registered",0,"binding",nothing(),"continuation",nothing(),"follow",nothing(),"reading",nothing(),"paused",0,"caring",0,"receiver-settled",0);
    record_set(owner,"watches",cons(watch,record_get(owner,"watches")));
    let status = nve-change(owner,watch,flags,notes,data);
    if (!nothing?(status) && ((Comparable) status == 0)) then {
@@ -170,7 +170,7 @@ section [form.bml] {
   }
   def nve-dispatch(owner,events) {
    if record_get(owner,"dispatching") then nve-note(owner,"dispatch","a receiving turn is already active") else {
-    record_set(owner,"dispatching",1); nve-dispatch-batch(owner,events); record_set(owner,"dispatching",0); 1;
+    record_set(owner,"dispatching",1); nve-dispatch-batch(owner,events); nve-attend(owner); record_set(owner,"dispatching",0); 1;
    };
   }
   def nve-dispatch-batch(owner,events) {
@@ -195,21 +195,23 @@ section [form.bml] {
   def nve-care-reading(watch) = record_get(watch,"reading");
   def nve-pause(owner,watch) {
    if (!nve-live(owner,watch) || !record_get(watch,"registered")) then 1 else {
-    let status = nve-change(owner,watch,8,0,0);
+    let status = nve-change(owner,watch,8,record_get(watch,"notes"),record_get(watch,"data"));
     if (!nothing?(status) && (status == 0)) then { record_set(watch,"paused",1); 1; }
     else { nve-note(owner,"receiver-pause","registration remains owned"); 0; };
    };
   }
   def nve-enable(owner,watch) {
    if (!nve-live(owner,watch) || !record_get(watch,"registered") || !record_get(watch,"paused")) then 1 else {
-    let status = nve-change(owner,watch,4,0,0);
+    let status = nve-change(owner,watch,4,record_get(watch,"notes"),record_get(watch,"data"));
     if (!nothing?(status) && (status == 0)) then { record_set(watch,"paused",0); 1; }
     else { nve-note(owner,"receiver-enable","registration remains owned"); 0; };
    };
   }
   def nve-continuation-reading(owner,watch,state,settled) {
    let flow = str_concat(record_get(owner,"flow"),str_concat(":",int_to_str(record_get(watch,"token"))));
-   oh-reading("native-events",flow,"receiver-completion",json-node-string("delivery settled"),json-node-string(state),json-node-int(settled),if settled then list() else list(oh-need("event-continuation",json-node-int(record_get(watch,"token")))),if settled then list() else list("continue-receiver","release-event"),json-node-object(list(oh-n("token",record_get(watch,"token")),oh-n("filter",record_get(watch,"filter")))));
+   let follow = record_get(watch,"follow"); let wakes = if nothing?(follow) then 0 else nve-follow-count(record_get(follow,"resources"));
+   let needs = if settled then list() else cons(oh-need("event-continuation",json-node-int(record_get(watch,"token"))),if (!nothing?(follow) && (wakes == 0)) then list(oh-need("event-wake-source",json-node-string("resource subscriptions exhausted or unavailable"))) else list());
+   oh-reading("native-events",flow,"receiver-completion",json-node-string("delivery settled"),json-node-string(state),json-node-int(settled),needs,if settled then list() else list("continue-receiver","release-event"),json-node-object(list(oh-n("token",record_get(watch,"token")),oh-n("filter",record_get(watch,"filter")),oh-n("wake_subscriptions",wakes))));
   }
   def nve-hold(owner,event,binding) {
    let watch = nve-event-watch(event);
@@ -228,13 +230,13 @@ section [form.bml] {
     let selected = oh-select(nve-care-reading(watch),response,"");
     if ((String) selected == "") then nothing() else {
      record_set(watch,"caring",1);
-     let settled = if ((String) selected == "release-event") then nve-unwatch(owner,watch) else nve-continue(owner,watch,options);
+     let settled = if ((String) selected == "release-event") then (nve-unwatch(owner,watch) && nve-unfollow(owner,watch)) else nve-continue(owner,watch,options);
      let previous = nve-care-reading(watch);
      oh-frame(oh-applied(previous,selected,json-node-object(list(oh-n("completed",settled),oh-n("receiver_completed",record_get(watch,"receiver-settled"))))));
      let fresh = oh-set(nve-continuation-reading(owner,watch,if settled then if ((String) selected == "release-event") then "event-released" else "continuation-returned" else "continuation-held",settled),"care_of",oh-get(previous,"id"));
      record_set(watch,"reading",fresh); record_set(owner,"reading",fresh); oh-frame(fresh);
      if settled then { record_set(owner,"pending",nve-forget(nve-pending(owner),watch)); record_set(watch,"continuation",nothing()); } else 0;
-     record_set(watch,"caring",0); if settled then oac-one(intern_trivial_int(1)) else nothing();
+     record_set(watch,"caring",0); if settled then oac-one(intern_trivial_int(1)) else nve-follow-probe(owner,watch);
     };
    };
   }
@@ -245,7 +247,93 @@ section [form.bml] {
     record_set(watch,"continuation",list(head(held),binding,oac-backtrack-memory(walk)));
     record_set(watch,"receiver-settled",oac-one?(oac-backtrack-ack(walk)));
    } else 0;
-   if record_get(watch,"receiver-settled") then nve-enable(owner,watch) else 0;
+   if record_get(watch,"receiver-settled") then (nve-unfollow(owner,watch) && nve-enable(owner,watch)) else 0;
+  }
+  // A held continuation can own the resource events that bring attention back.
+  // Transfer dedicated, unbound subscriptions; their descriptors retain their
+  // existing ownership. A local enrollment probe covers changes before binding.
+  def nve-follow-valid(owner,watch,resources,seen) = if nil?(resources) then 1 else {
+   let resource = head(resources);
+   nve-live(owner,resource) && (resource != watch) && nothing?(record_get(resource,"binding")) && nothing?(record_get(resource,"continuation")) && !nve-follow-has(seen,resource) && nve-follow-valid(owner,watch,tail(resources),cons(resource,seen));
+  };
+  def nve-follow-count(resources) = if nil?(resources) then 0 else (if (record_get(head(resources),"active") && record_get(head(resources),"registered") && !record_get(head(resources),"paused") && !nothing?(record_get(head(resources),"binding"))) then 1 else 0) + nve-follow-count(tail(resources));
+  def nve-follow-has(resources,watch) = if nil?(resources) then 0 else (head(resources) == watch) || nve-follow-has(tail(resources),watch);
+  def nve-follow(owner,watch,resources,options) {
+   if (!nve-ready(owner) || !nve-owned(owner,watch)) then nothing() else if (nothing?(record_get(watch,"continuation")) || !nothing?(record_get(watch,"follow")) || nil?(resources) || !nve-follow-valid(owner,watch,resources,list())) then nve-note(owner,"continuation-wake","needs a held receiver and dedicated unbound resources") else {
+    let follow = record_new(0,"owner",owner,"watch",watch,"resources",resources,"options",options,"active",1,"probe",1,"queued",0,"incoming",list(),"events",list(),"attempts",0);
+    record_set(watch,"follow",follow); nve-follow-bind(follow,resources); nve-follow-probe(owner,watch); follow;
+   };
+  }
+  def nve-follow-bind(follow,resources) {
+   if nil?(resources) then 1 else {
+    let owner = record_get(follow,"owner"); let resource = head(resources); let filter = record_get(resource,"filter");
+    // Care listens for movement. EV_CLEAR prevents an unchanged level from
+    // repeatedly offering the same repair while the original receiver rests.
+    let prepared = if ((filter == -1) || (filter == -2)) then nve-follow-edge(owner,resource) else 1;
+    let admitted = prepared && nve-enable(owner,resource);
+    if admitted then nve-bind(owner,resource,nve-follow-event,follow) else nve-note(owner,"continuation-wake","resource wake admission incomplete; subscription retained");
+    nve-follow-bind(follow,tail(resources));
+   };
+  }
+  def nve-follow-edge(owner,resource) {
+   if nve-bit(record_get(resource,"flags"),32) then 1 else {
+    // Readiness behavior belongs to registration. Renew it with the same
+    // owned token; the enrollment probe observes across this interval.
+    let removed = nve-change(owner,resource,2,0,0);
+    if (nothing?(removed) || ((removed != 0) && (removed != -2))) then { nve-pause(owner,resource); 0; } else {
+     record_set(resource,"registered",0);
+     let added = nve-change(owner,resource,33,0,0);
+     if (nothing?(added) || (added != 0)) then 0 else { record_set(resource,"registered",1); record_set(resource,"flags",33); record_set(resource,"paused",0); 1; };
+    };
+   };
+  }
+  def nve-follow-probe(owner,watch) {
+   let follow = record_get(watch,"follow");
+   if (nothing?(follow) || !record_get(follow,"active") || !record_get(follow,"probe") || record_get(watch,"caring")) then nothing() else {
+    record_set(follow,"probe",0); nve-follow-attempt(follow);
+   };
+  }
+  def nve-follow-attempt(follow) {
+   let owner = record_get(follow,"owner"); let watch = record_get(follow,"watch");
+   if (!record_get(follow,"active") || nothing?(record_get(watch,"continuation")) || record_get(watch,"caring")) then nothing() else {
+    record_set(follow,"attempts",(record_get(follow,"attempts") + 1));
+    nve-hear(owner,watch,oh-response(nve-care-reading(watch),"continue-receiver"),record_get(follow,"options"));
+   };
+  }
+  def nve-follow-event(follow,event) {
+   let owner = record_get(follow,"owner"); let resource = nve-event-watch(event);
+   if !record_get(follow,"active") then 0 else {
+    record_set(follow,"incoming",cons(event,record_get(follow,"incoming")));
+    if !record_get(resource,"registered") then {
+     if nve-unwatch(owner,resource) then record_set(follow,"resources",nve-forget(record_get(follow,"resources"),resource)) else 0;
+    } else 0;
+    if record_get(follow,"queued") then 0 else {
+     record_set(follow,"queued",1); record_set(owner,"attention",cons(follow,record_get(owner,"attention")));
+    };
+   };
+  }
+  // The whole batch reaches its receivers before care. Every wake remains
+  // available to that one attempt, in delivery order; coalescing loses no event.
+  def nve-attend(owner) {
+   let attention = reverse(record_get(owner,"attention")); record_set(owner,"attention",list()); nve-attend-all(attention);
+  }
+  def nve-attend-all(attention) {
+   if nil?(attention) then 1 else {
+    let follow = head(attention); record_set(follow,"queued",0);
+    record_set(follow,"events",reverse(record_get(follow,"incoming"))); record_set(follow,"incoming",list());
+    nve-follow-attempt(follow); nve-attend-all(tail(attention));
+   };
+  }
+  def nve-wake-events(watch) = if nothing?(record_get(watch,"follow")) then list() else record_get(record_get(watch,"follow"),"events");
+  // Withdrawal keeps the original continuation. Failed physical release keeps
+  // the subscription list owned; completed receiver effects are not repeated.
+  def nve-unfollow(owner,watch) {
+   if !nve-owned(owner,watch) then 0 else {
+    let follow = record_get(watch,"follow");
+    if nothing?(follow) then 1 else if !nve-close-watches(owner,record_get(follow,"resources")) then 0 else {
+     record_set(follow,"active",0); record_set(follow,"resources",list()); record_set(follow,"incoming",list()); record_set(follow,"events",list()); record_set(watch,"follow",nothing()); 1;
+    };
+   };
   }
   def nve-take(owner) {
    let events = reverse(record_get(owner,"unhandled")); record_set(owner,"unhandled",list()); events;
