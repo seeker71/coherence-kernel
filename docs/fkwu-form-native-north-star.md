@@ -193,7 +193,13 @@ readiness resumes only its receiver, process exit prompts physical reaping, and
 cancellation retains its grace timer while other owners continue. Partial writes
 keep their accepted offset; an error retains the unsent request and live need.
 The pipe path releases its poll arrays and repeated process probes. The broader
-scheduler and other hosts build from the same ownership contract.
+scheduler and other hosts build from the same ownership contract. Event
+receivers now keep their captured version across live rebinding. A native stop
+retains the original event and context, offers local backtracking choices, and
+lets peers proceed. Completed effects belong in that context; resumption acts
+on the retained checkpoint. Held readiness rests until new care arrives, and
+retirement retains unresolved continuations. This is the current cooperative
+boundary beneath the broader scheduling destination.
 
 Bulk data stays in owned resident regions. A span carries allocation identity and generation, owner, offset, length, layout, access mode and completion dependencies. Crossings carry descriptors and batches. A zero-copy request preserves its alignment and lifetime contract or reports refusal.
 
