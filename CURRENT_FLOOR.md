@@ -251,21 +251,14 @@ blueprint-authority-band 65535
 
 What answered red, died, or was not witnessed today, so no one leans on it:
 
-- Three bands stop on the seed's typed operands (rc 1): `form-cli-peer-policy-route-band` ("only
-  numbers have an order"), `form-glass-live-ui-band` ("only strings and nothing compare as strings")
-  and `form/form-stdlib/tests/primitive-registry-band.fk` ("only numbers add, subtract, multiply and
-  divide").
+- `form/form-stdlib/tests/primitive-registry-band.fk` stops rc 1 in `sum-onto`: the registry names
+  the Go sibling's native surface, and 88 of its calls (`field_*`, `substrate_*`, `register_jit`,
+  `string_bytes`, `pow`, `min`, `max`, ...) have no binding on fkwu, so its compile carries 88
+  unresolved-call errors and the first recovered `nothing` meets arithmetic. It waits on a registry
+  grounded in fkwu's own op table (`runtime/fkwu-optable.h` and `core.fk`), or on a sibling-home lane
+  in `form/validate.sh` for a band whose surface only the siblings carry.
 - `form-knowledge-exec-grammar-transport-band` dies rc 1 on `str_len` of nothing; the
   domain/organ/unique/universe-mint bands answer 2015 of 2047 (R88).
-- `runtime-grammar-selector-registry-band` and `form/form-stdlib/tests/node-introspection-band.fk` each
-  compile with one carried error (rc 2; preflight reads CARRIED ERRORS);
-  `observe/tests/node-introspection-band.fk` answers 3071 of 4095 (bit 1024: a cell's
-  `node_category` against `bp "NIB"`).
-- `no-fixed-tables-band` answers 47 of 63 — bit 16, a list nested 1100 deep printing whole, is dark
-  (the host grants 1,048,576 descriptors, so the socket bits are not the cause).
-- `sha256-list-floor-band` answers 32739 of 32767 (bits 4, 8 and 16 dark).
-- `gift-frame-writers-band` answered 255 in five of ten runs today and 33 in the other five, where
-  every read came back from another writer and the last length read -1.
 - `control/tests/invite-dispatch-band.fk` answers 763 of 1023: bit 4 (a second `<CHOICE>` finding
   nothing declining) and bit 256 (`<TIMEOUT>`).
 - BML `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111; R78). The lowering's other
