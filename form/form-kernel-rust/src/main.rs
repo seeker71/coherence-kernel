@@ -1325,6 +1325,7 @@ fn form_http_headers(value: Option<&Value>) -> Vec<(String, String)> {
         let (Value::Str(name), Value::Str(value)) = (&items[1], &items[2]) else {
             continue;
         };
+        let name = name.text();
         let name = name.trim();
         if !name.is_empty() {
             out.push((name.to_string(), value.to_string()));
@@ -2624,12 +2625,86 @@ impl Kernel {
 
 // `Nid` lets Form code hold NodeIDs as first-class values — the foundation
 // for substrate-write natives that close form-runtime-in-form gaps W1-W3.
+// Bstr — a Form string: bytes, as fkwu holds them. A Rust String is its UTF-8
+// bytes, so text becomes a Bstr byte for byte; what a str could not hold (a cut
+// that severs a character, a lone byte above 127, a binary file) is held too.
+// str_len, str_byte_at, substring and char_at read bytes. Text is asked for only
+// where text is meant (a path, a name, a format): `text()` views it lossily,
+// and Value::as_str stops when the bytes are not text.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct Bstr(Arc<[u8]>);
+
+impl Bstr {
+    fn text(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.0)
+    }
+    fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+impl std::ops::Deref for Bstr {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+impl From<String> for Bstr {
+    fn from(s: String) -> Self {
+        Bstr(Arc::from(s.into_bytes()))
+    }
+}
+impl From<&str> for Bstr {
+    fn from(s: &str) -> Self {
+        Bstr(Arc::from(s.as_bytes()))
+    }
+}
+impl From<&String> for Bstr {
+    fn from(s: &String) -> Self {
+        Bstr(Arc::from(s.as_bytes()))
+    }
+}
+impl From<Arc<str>> for Bstr {
+    fn from(s: Arc<str>) -> Self {
+        Bstr(Arc::from(s.as_bytes()))
+    }
+}
+impl From<Vec<u8>> for Bstr {
+    fn from(b: Vec<u8>) -> Self {
+        Bstr(Arc::from(b))
+    }
+}
+impl From<&[u8]> for Bstr {
+    fn from(b: &[u8]) -> Self {
+        Bstr(Arc::from(b))
+    }
+}
+impl std::fmt::Display for Bstr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text())
+    }
+}
+impl std::fmt::Debug for Bstr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.text())
+    }
+}
+impl PartialEq<str> for Bstr {
+    fn eq(&self, other: &str) -> bool {
+        &self.0[..] == other.as_bytes()
+    }
+}
+impl PartialEq<&str> for Bstr {
+    fn eq(&self, other: &&str) -> bool {
+        &self.0[..] == other.as_bytes()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Value {
     Null,
     Int(i64),
     Float(f64),
-    Str(Arc<str>),
+    Str(Bstr),
     List(Arc<Vec<Value>>),
     Closure(Arc<Closure>),
     Nid(NodeID),
@@ -2748,9 +2823,20 @@ impl Value {
         }
     }
 
-    fn as_str(&self) -> &str {
+    // the string's bytes, where bytes are meant (length, search, compare, write)
+    fn as_bytes(&self) -> &[u8] {
         match self {
             Value::Str(s) => s,
+            _ => panic!("as_bytes: {:?}", self),
+        }
+    }
+
+    // the string as text, where text is meant (a path, a name, a format); bytes
+    // that are not text stop here, a stop an attempt can meet
+    fn as_str(&self) -> &str {
+        match self {
+            Value::Str(s) => std::str::from_utf8(s)
+                .unwrap_or_else(|_| panic!("as_str: the string's bytes are not text")),
             _ => panic!("as_str: {:?}", self),
         }
     }
@@ -3369,17 +3455,28 @@ impl Kernel {
         // inside, not only at its Form surface.
 
         self.register_native("print", cat_call(), |_, _, args| {
+            let mut out = std::io::stdout().lock();
             for (i, a) in args.iter().enumerate() {
                 if i > 0 {
-                    print!(" ");
+                    let _ = out.write_all(b" ");
                 }
-                print!("{}", a.display());
+                // a string is its bytes; any other value its rendering
+                match a {
+                    Value::Str(s) => {
+                        let _ = out.write_all(s);
+                    }
+                    other => {
+                        let _ = out.write_all(other.display().as_bytes());
+                    }
+                }
             }
-            println!();
+            let _ = out.write_all(b"\n");
             Value::Null
         });
-        self.register_native("str_len", cat_access(), |_, _, args| {
-            Value::Int(args[0].as_str().len() as i64)
+        // a string's length is its byte count
+        self.register_native("str_len", cat_access(), |_, _, args| match &args[0] {
+            Value::Str(s) => Value::Int(s.len() as i64),
+            other => Value::Int(other.as_str().len() as i64),
         });
         // substring — BYTES, CLAMPED, NEVER DIES. The one meaning, four ways,
         // laid 2026-09-07 (substring-one-meaning-band.fk, drift gate).
@@ -3400,13 +3497,8 @@ impl Kernel {
         // panic here turned an ordinary out-of-range index into a dead process
         // on three arms and an empty string on the fourth.
         //
-        // THE ONE PLACE THIS ARM CANNOT SAY. Rust's `str` carries a UTF-8
-        // invariant, so a cut that severs a multi-byte character has no
-        // representation here — the same wall read_file_slice already names,
-        // "losslessness would need a byte string in the Value type". fkwu and
-        // the Go kernel hold those bytes exactly; this arm answers the axiom-1
-        // absence rather than a plausible substitute. What all four arms hold
-        // together is that NO ARM EVER ANSWERS A DIFFERENT NON-EMPTY WINDOW.
+        // A string is bytes here as on fkwu (Bstr), so every cut, one that
+        // severs a multi-byte character included, is the same bytes fkwu holds.
         self.register_native("substring", cat_access(), |_, _, args| {
             let s = match args.first() {
                 Some(Value::Str(s)) => s.clone(),
@@ -3432,33 +3524,34 @@ impl Kernel {
             if b <= a {
                 return Value::Str(String::new().into());
             }
-            if !s.is_char_boundary(a) || !s.is_char_boundary(b) {
-                return Value::Null;
-            }
-            Value::Str(s[a..b].to_string().into())
+            Value::Str(Bstr::from(&s[a..b]))
         });
+        // char_at is core.fk's recipe on fkwu, (substring s i (add i 1)): one byte, clamped
         self.register_native("char_at", cat_access(), |_, _, args| {
-            let s = args[0].as_str();
+            let s = match args.first() {
+                Some(Value::Str(s)) => s.clone(),
+                _ => return Value::Str(String::new().into()),
+            };
             let i_i = args[1].as_int();
             if i_i < 0 || i_i as usize >= s.len() {
-                panic!("char_at: bounds out of range index={} len={}", i_i, s.len());
-            }
-            let i = i_i as usize;
-            // At a char start: the whole char. Inside a multibyte char:
-            // nothing — so a bytewise loop concatenating char_at over
-            // 0..str_len reconstructs the string exactly, once per char.
-            if !s.is_char_boundary(i) {
                 return Value::Str(String::new().into());
             }
-            match s[i..].chars().next() {
-                Some(ch) => Value::Str(ch.to_string().into()),
-                None => Value::Str(String::new().into()),
-            }
+            let i = i_i as usize;
+            Value::Str(Bstr::from(&s[i..i + 1]))
         });
         self.register_native("str_concat", cat_method(), |_, _, args| {
-            let mut s = args[0].as_str().to_string();
-            s.push_str(args[1].as_str());
-            Value::Str(s.into())
+            let a = match &args[0] {
+                Value::Str(s) => s.clone(),
+                other => Bstr::from(other.as_str()),
+            };
+            let b = match &args[1] {
+                Value::Str(s) => s.clone(),
+                other => Bstr::from(other.as_str()),
+            };
+            let mut joined = Vec::with_capacity(a.len() + b.len());
+            joined.extend_from_slice(&a);
+            joined.extend_from_slice(&b);
+            Value::Str(Bstr::from(joined))
         });
         self.register_native("form_error", cat_witness(), |_, _, args| {
             panic!("{}", args[0].as_str())
@@ -3479,6 +3572,7 @@ impl Kernel {
         // print writes it.
         self.register_native("value_str", cat_method(), |_, _, args| match &args[0] {
             Value::Null => Value::Str(String::new().into()),
+            Value::Str(s) => Value::Str(s.clone()),
             v => Value::Str(v.display().into()),
         });
         self.register_native("value_kind", cat_witness(), |_, _, args| {
@@ -3712,8 +3806,8 @@ impl Kernel {
         // clarity. Over bytes there is nothing to snap and nothing to panic on, and
         // the answer is the byte index fkwu and Go give.
         self.register_native("str_find", cat_access(), |_, _, args| {
-            let hay = args[0].as_str().as_bytes();
-            let needle = args[1].as_str().as_bytes();
+            let hay = args[0].as_bytes();
+            let needle = args[1].as_bytes();
             let from_i = args[2].as_int();
             let from = if from_i < 0 { 0 } else { from_i as usize };
             if from > hay.len() {
@@ -3740,10 +3834,9 @@ impl Kernel {
         //              4=non-quote-non-escape, 5=non-newline,
         //              6=json-string-safe (byte >= 0x20, not quote/backslash).
         self.register_native("scan_run", cat_access(), |_, _, args| {
-            let s = args[0].as_str();
             let from = args[1].as_int().max(0) as usize;
             let class = args[2].as_int();
-            let bytes = s.as_bytes();
+            let bytes = args[0].as_bytes();
             let n = bytes.len();
             let mut end = from.min(n);
             match class {
@@ -3796,7 +3889,6 @@ impl Kernel {
         self.register_native("string_bytes", cat_access(), |_, _, args| {
             Value::List(
                 args[0]
-                    .as_str()
                     .as_bytes()
                     .iter()
                     .map(|byte| Value::Int(i64::from(*byte)))
@@ -3808,7 +3900,7 @@ impl Kernel {
         // a Form step with each raw UTF-8 byte as an int. The host loop gives
         // streaming SHA/HMAC a stack bound independent of message length.
         self.register_native("string_byte_fold", cat_call(), |k, a, args| {
-            let s = args[0].as_str().to_string();
+            let s = args[0].as_bytes().to_vec();
             let mut acc = args[1].clone();
             let cl = match &args[2] {
                 Value::Closure(c) => c.clone(),
@@ -3820,7 +3912,7 @@ impl Kernel {
                     cl.params.len()
                 );
             }
-            for byte in s.as_bytes().to_vec() {
+            for byte in s {
                 // `walk` can only reclaim frames created *inside* the call; the
                 // argument frame below already exists at its entry mark. Keep
                 // the host loop stack-disciplined as well, otherwise a 100k
@@ -3879,7 +3971,7 @@ impl Kernel {
             if matches!(args[0], Value::Null) || matches!(args[1], Value::Null) {
                 return bool_int(matches!(args[0], Value::Null) && matches!(args[1], Value::Null));
             }
-            bool_int(args[0].as_str() == args[1].as_str())
+            bool_int(args[0].as_bytes() == args[1].as_bytes())
         });
         // int_to_str — value-to-string for trivial leaves. Historical name
         // (first use: line numbers in cell-trace.fk); semantics is "render
@@ -3893,8 +3985,9 @@ impl Kernel {
             Value::Float(f) => Value::Str(format_float(*f).into()),
             _ => Value::Str(args[0].as_int().to_string().into()),
         });
-        self.register_native("str_to_int", cat_method(), |_, _, args| {
-            Value::Int(leading_int(&args[0].as_str()))
+        self.register_native("str_to_int", cat_method(), |_, _, args| match &args[0] {
+            Value::Str(s) => Value::Int(leading_int(&s.text())),
+            other => Value::Int(leading_int(other.as_str())),
         });
         // float_to_int — truncate a float toward zero, exactly Python's int() on a
         // float. The missing leaf between str_to_float and an integer: it lets a
@@ -3916,15 +4009,16 @@ impl Kernel {
         // a stray token. This is what lets a native route parse arbitrary
         // float inputs from the request (e.g. weighted_average's values/weights)
         // and run the real arithmetic in Form, rather than serving a constant.
-        self.register_native("str_to_float", cat_method(), |_, _, args| {
-            Value::Float(args[0].as_str().parse().unwrap_or(0.0))
+        self.register_native("str_to_float", cat_method(), |_, _, args| match &args[0] {
+            Value::Str(s) => Value::Float(s.text().parse().unwrap_or(0.0)),
+            other => Value::Float(other.as_str().parse().unwrap_or(0.0)),
         });
         self.register_native("ord", cat_access(), |_, _, args| {
-            let s = args[0].as_str();
+            let s = args[0].as_bytes();
             if s.is_empty() {
                 Value::Int(-1)
             } else {
-                Value::Int(s.as_bytes()[0] as i64)
+                Value::Int(s[0] as i64)
             }
         });
         // str_byte_at: the i-th raw BYTE of the string (0-255), byte-exact —
@@ -3933,8 +4027,7 @@ impl Kernel {
         // byte door the string-pool serializer (fks-lit-sp) emits any locale's
         // script through, matching the emitted walker's byte-indexed char_at.
         self.register_native("str_byte_at", cat_access(), |_, _, args| {
-            let s = args[0].as_str();
-            let bytes = s.as_bytes();
+            let bytes = args[0].as_bytes();
             let i = args[1].as_int();
             if i < 0 || i as usize >= bytes.len() {
                 panic!(
@@ -3950,7 +4043,8 @@ impl Kernel {
             if !(0..=255).contains(&b) {
                 Value::Str(String::new().into())
             } else {
-                Value::Str((b as u8 as char).to_string().into())
+                // one raw byte, as on fkwu: the exact dual of str_byte_at
+                Value::Str(Bstr::from(vec![b as u8]))
             }
         });
         // input_byte — byte i of the staged input, 0 outside it, as fkwu reads
@@ -4007,7 +4101,7 @@ impl Kernel {
         self.register_native("_len", cat_access(), |_, _, args| match &args[0] {
             Value::List(xs) => {
                 if let Some(Value::Str(s)) = xs.first() {
-                    if **s == *"__dict__" {
+                    if *s == "__dict__" {
                         return Value::Int(((xs.len() - 1) / 2) as i64);
                     }
                 }
@@ -4077,7 +4171,7 @@ impl Kernel {
             // (Python `obj[k]` would KeyError, but the transmuted recipes read
             // fields they know exist, and Null is the honest "absent" surface).
             if let (Value::Record(r), Value::Str(key)) = (&args[0], &args[1]) {
-                let name = k.intern_string(key).inst;
+                let name = k.intern_string(&key.text()).inst;
                 return r.lock().unwrap().get(name).unwrap_or(Value::Null);
             }
             // Dict: ["__dict__", k0, v0, …] — key match by value.
@@ -4121,7 +4215,7 @@ impl Kernel {
                 if i < 0 || (i as usize) >= s.len() {
                     return Value::Str(String::new().into());
                 }
-                return Value::Str((s.as_bytes()[i as usize] as char).to_string().into());
+                return Value::Str(Bstr::from(&s[i as usize..i as usize + 1]));
             }
             Value::Null
         });
@@ -4144,7 +4238,7 @@ impl Kernel {
                 let mut found: Option<String> = None;
                 while i + 1 < xs.len() {
                     if let Value::Str(key) = &xs[i] {
-                        if **key == *"__class__" {
+                        if *key == "__class__" {
                             if let Value::Str(c) = &xs[i + 1] {
                                 found = Some(c.to_string());
                             }
@@ -4161,7 +4255,7 @@ impl Kernel {
                 panic!("_dispatch: receiver is not a record (got {:?})", args[0]);
             };
             let method_name = match &args[1] {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.text().to_string(),
                 _ => panic!("_dispatch: second arg must be the method name string"),
             };
             let (qualified, cl) = resolve_method(k, a, env, &class_name, &method_name);
@@ -4200,7 +4294,7 @@ impl Kernel {
         fn is_dict(v: &Value) -> bool {
             if let Value::List(xs) = v {
                 if let Some(Value::Str(s)) = xs.first() {
-                    return **s == *"__dict__";
+                    return *s == "__dict__";
                 }
             }
             false
@@ -4222,7 +4316,7 @@ impl Kernel {
         self.register_native("_dict_get", cat_access(), |_, _, args| {
             if let Value::List(xs) = &args[0] {
                 if let Some(Value::Str(tag)) = xs.first() {
-                    if **tag == *"__dict__" {
+                    if *tag == "__dict__" {
                         let mut i = 1;
                         while i + 1 < xs.len() {
                             if dict_key_eq(&xs[i], &args[1]) {
@@ -4240,7 +4334,7 @@ impl Kernel {
             // Immutable update — return a new dict; existing references unchanged.
             if let Value::List(xs) = &args[0] {
                 if let Some(Value::Str(tag)) = xs.first() {
-                    if **tag == *"__dict__" {
+                    if *tag == "__dict__" {
                         let mut out = xs.as_ref().clone();
                         let mut i = 1;
                         while i + 1 < out.len() {
@@ -4261,7 +4355,7 @@ impl Kernel {
         self.register_native("_dict_has", cat_compare(RCMP_EQ), |_, _, args| {
             if let Value::List(xs) = &args[0] {
                 if let Some(Value::Str(tag)) = xs.first() {
-                    if **tag == *"__dict__" {
+                    if *tag == "__dict__" {
                         let mut i = 1;
                         while i + 1 < xs.len() {
                             if dict_key_eq(&xs[i], &args[1]) {
@@ -4277,7 +4371,7 @@ impl Kernel {
         self.register_native("_dict_keys", cat_access(), |_, _, args| {
             if let Value::List(xs) = &args[0] {
                 if let Some(Value::Str(tag)) = xs.first() {
-                    if **tag == *"__dict__" {
+                    if *tag == "__dict__" {
                         let mut out = Vec::new();
                         let mut i = 1;
                         while i + 1 < xs.len() {
@@ -4293,7 +4387,7 @@ impl Kernel {
         self.register_native("_dict_values", cat_access(), |_, _, args| {
             if let Value::List(xs) = &args[0] {
                 if let Some(Value::Str(tag)) = xs.first() {
-                    if **tag == *"__dict__" {
+                    if *tag == "__dict__" {
                         let mut out = Vec::new();
                         let mut i = 1;
                         while i + 1 < xs.len() {
@@ -4367,7 +4461,7 @@ impl Kernel {
                 return bool_int(false);
             }
             if let (Value::Str(needle), Value::Str(hay)) = (&args[0], &args[1]) {
-                return bool_int(hay.contains(&needle[..]));
+                return bool_int(needle.is_empty() || hay.windows(needle.len()).any(|w| w == &needle[..]));
             }
             bool_int(false)
         });
@@ -4386,7 +4480,7 @@ impl Kernel {
                 _ => panic!("_dispatch_super: second arg must be the class name string"),
             };
             let method_name = match &args[2] {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.text().to_string(),
                 _ => panic!("_dispatch_super: third arg must be the method name string"),
             };
             // Look up <ClassName>__base to find the parent class name.
@@ -4415,7 +4509,7 @@ impl Kernel {
                     class_name
                 );
             }
-            let (qualified, cl) = resolve_method(k, a, env, &parent_name, &method_name);
+            let (qualified, cl) = resolve_method(k, a, env, &parent_name.text(), &method_name);
             // First arg is self (args[0]); method args follow at args[3..].
             let call_args: Vec<&Value> =
                 std::iter::once(&args[0]).chain(args[3..].iter()).collect();
@@ -4458,7 +4552,7 @@ impl Kernel {
             let mut i = 0;
             while i + 1 < parent.len() {
                 if let Value::Str(key) = &parent[i] {
-                    if **key == *"__class__" || **key == *"__base__" {
+                    if *key == "__class__" || *key == "__base__" {
                         i += 2;
                         continue;
                     }
@@ -4640,29 +4734,30 @@ impl Kernel {
                 (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
                 (Value::Int(a), Value::Float(b)) => Value::Float(*a as f64 + b),
                 (Value::Float(a), Value::Int(b)) => Value::Float(a + *b as f64),
+                // strings join as bytes; a number joins as its text
                 (Value::Str(a), Value::Str(b)) => {
-                    let mut s = a.to_string();
-                    s.push_str(b);
+                    let mut s = a.to_vec();
+                    s.extend_from_slice(b);
                     Value::Str(s.into())
                 }
                 (Value::Str(a), Value::Int(b)) => {
-                    let mut s = a.to_string();
-                    s.push_str(&b.to_string());
+                    let mut s = a.to_vec();
+                    s.extend_from_slice(b.to_string().as_bytes());
                     Value::Str(s.into())
                 }
                 (Value::Int(a), Value::Str(b)) => {
-                    let mut s = a.to_string();
-                    s.push_str(b);
+                    let mut s = a.to_string().into_bytes();
+                    s.extend_from_slice(b);
                     Value::Str(s.into())
                 }
                 (Value::Str(a), Value::Float(b)) => {
-                    let mut s = a.to_string();
-                    s.push_str(&format_float(*b));
+                    let mut s = a.to_vec();
+                    s.extend_from_slice(format_float(*b).as_bytes());
                     Value::Str(s.into())
                 }
                 (Value::Float(a), Value::Str(b)) => {
-                    let mut s = format_float(*a);
-                    s.push_str(b);
+                    let mut s = format_float(*a).into_bytes();
+                    s.extend_from_slice(b);
                     Value::Str(s.into())
                 }
                 (Value::List(a), Value::List(b)) => {
@@ -4753,8 +4848,9 @@ impl Kernel {
             Value::Str("<typing>".to_string().into())
         });
         let read_file_text_native: NativeFn =
-            |_, _, args| match fs::read_to_string(resolve_kernel_host_path(args[0].as_str())) {
-                Ok(s) => Value::Str(s.into()),
+            // the file's own bytes, binary included (Bstr)
+            |_, _, args| match fs::read(resolve_kernel_host_path(args[0].as_str())) {
+                Ok(bytes) => Value::Str(bytes.into()),
                 Err(_) => Value::Null,
             };
         self.register_native("host_file_read_text", cat_call(), read_file_text_native);
@@ -5084,19 +5180,8 @@ impl Kernel {
             }
             let mut buf = vec![0u8; length as usize];
             match file.read(&mut buf) {
-                // Decode STRICTLY. from_utf8_lossy replaced every invalid byte with U+FFFD, so a
-                // binary slice came back as a plausible longer string: equireach-band.fk has carried
-                // the witness since 2026-07-21 — 767 bytes handed back for a 420-byte Q6_K fixture,
-                // byte 4 reading 239 instead of 210 — and that band is two-arm today because of it.
-                // A recipe reading binary here was silently reading a different file. Null is the
-                // same failure value this kernel's read_file already gives for non-UTF-8, so the
-                // string primitives stop loudly instead of computing on replacement characters.
-                // Rust's String cannot hold arbitrary bytes at all; losslessness would need a byte
-                // string in the Value type. Until then the honest answer is that it cannot say.
-                Ok(n) => match String::from_utf8(buf[..n].to_vec()) {
-                    Ok(s) => Value::Str(s.into()),
-                    Err(_) => Value::Null,
-                },
+                // the slice's own bytes: a string is bytes (Bstr), binary included
+                Ok(n) => Value::Str(Bstr::from(&buf[..n])),
                 Err(_) => Value::Str(String::new().into()),
             }
         };
@@ -5234,7 +5319,7 @@ impl Kernel {
         });
         self.register_native("socket_send", cat_call(), |_, _, args| {
             let h = args[0].as_int();
-            let bytes = args[1].as_str().as_bytes().to_vec();
+            let bytes = args[1].as_bytes().to_vec();
             let s = match socket_lookup(h) {
                 Some(s) => s,
                 None => return Value::Int(-1),
@@ -5568,7 +5653,11 @@ impl Kernel {
             Value::Nid(k.intern_trivial_int(args[0].as_int()))
         });
         self.register_native("intern_trivial_string", cat_witness(), |k, _, args| {
-            let s = args[0].as_str().to_string();
+            // the intern table holds text; bytes that are not text intern as their lossy view
+            let s = match &args[0] {
+                Value::Str(b) => b.text().to_string(),
+                other => other.as_str().to_string(),
+            };
             Value::Nid(k.intern_string(&s))
         });
         self.register_native("intern_trivial_bool", cat_witness(), |_, _, args| {
@@ -5948,9 +6037,10 @@ impl Kernel {
         // materializing byte lists while byte codecs still use write_file_bytes.
         let write_file_text_native: NativeFn = |_, _, args| {
             let path = args[0].as_str().to_string();
-            let text = args[1].as_str().to_string();
-            match fs::write(&path, text.as_bytes()) {
-                Ok(_) => Value::Int(text.len() as i64),
+            // the string's own bytes
+            let bytes = args[1].as_bytes().to_vec();
+            match fs::write(&path, &bytes) {
+                Ok(_) => Value::Int(bytes.len() as i64),
                 Err(_) => Value::Int(-1),
             }
         };
@@ -6173,7 +6263,8 @@ fn switch_key_from_value(k: &mut Kernel, v: &Value) -> Option<NodeID> {
         }),
         Value::Int(n) => Some(k.intern_trivial_int(*n)),
         Value::Float(f) => Some(k.intern_trivial_float64(*f)),
-        Value::Str(s) => Some(k.intern_string(s)),
+        // the intern table holds text; bytes that are not text intern as their lossy view
+        Value::Str(s) => Some(k.intern_string(&s.text())),
         Value::Nid(nid) => Some(*nid),
         _ => None,
     }
@@ -8382,7 +8473,7 @@ fn parse_route_spec(
         }
         Value::List(ys) if ys.len() == 2 => match &ys[0] {
             Value::Str(path) => {
-                let handler = route_value_closure(&ys[1], path)?;
+                let handler = route_value_closure(&ys[1], &path.text())?;
                 let handler_name = k.name_str(handler.name).to_string();
                 Ok(RouteSpec {
                     name: path.to_string(),
@@ -9945,7 +10036,7 @@ fn name_check_route_recipe(
         .collect();
     let mut known: Vec<Value> = native_ids
         .into_iter()
-        .map(|id| Value::Str(Arc::from(k.name_str(id))))
+        .map(|id| Value::Str(Bstr::from(k.name_str(id))))
         .collect();
     // Seed the kernel's surface-verb vocabulary (build_verb): operators and
     // structural verbs resolve as typed nodes, not function lookups, so they are
@@ -9953,7 +10044,7 @@ fn name_check_route_recipe(
     // they ride as FNCALL callees in source-compiled machinery (verified: a
     // manifest using (add 6 2)/(mul 6 2) serves {"sum":8,"prod":12} while the gate
     // reported those very verbs unbound).
-    known.extend(BUILD_VERBS.iter().map(|v| Value::Str(Arc::from(*v))));
+    known.extend(BUILD_VERBS.iter().map(|v| Value::Str(Bstr::from(*v))));
     let known_val = Value::List(Arc::new(known));
     // Apply name-check(route_root, known) directly — the same closure resolution the
     // serve path uses for route handlers (resolve_route_handler -> arena.lookup).
@@ -10588,7 +10679,7 @@ fn kernel_http_header(value: &Value) -> Option<(String, String)> {
             if let (Value::Int(tag), Value::Str(name), Value::Str(header_value)) =
                 (&items[0], &items[1], &items[2])
             {
-                if *tag == KH_TAG_HEADER && !name.trim().is_empty() {
+                if *tag == KH_TAG_HEADER && !name.text().trim().is_empty() {
                     return Some((name.to_string(), header_value.to_string()));
                 }
             }
@@ -10649,7 +10740,7 @@ fn handler_status_response(result: &Value) -> Option<NativeHandlerResponse> {
             if let (Value::Str(tag), Value::Int(code), Value::Str(body)) =
                 (&items[0], &items[1], &items[2])
             {
-                if **tag == *"__http_status__" && (100..=599).contains(code) {
+                if *tag == "__http_status__" && (100..=599).contains(code) {
                     return Some(NativeHandlerResponse {
                         status_code: *code,
                         content_type: String::new(),
@@ -11768,7 +11859,7 @@ mod router_context_tests {
         if let Value::List(xs) = dict {
             let mut i = 1;
             while i + 1 < xs.len() {
-                if matches!(&xs[i], Value::Str(k) if k.as_ref() == key) {
+                if matches!(&xs[i], Value::Str(k) if k ==key) {
                     return &xs[i + 1];
                 }
                 i += 2;
@@ -11903,14 +11994,14 @@ mod router_context_tests {
             Value::List(xs) => xs,
             _ => panic!("router channel policy must be a Form list value"),
         };
-        assert!(matches!(&policy_rows[1], Value::Str(carrier) if carrier.as_ref() == "tcp"));
-        assert!(matches!(&policy_rows[2], Value::Str(protocol) if protocol.as_ref() == "http/1.1"));
+        assert!(matches!(&policy_rows[1], Value::Str(carrier) if carrier =="tcp"));
+        assert!(matches!(&policy_rows[2], Value::Str(protocol) if protocol =="http/1.1"));
         assert!(matches!(&policy_rows[3], Value::List(methods) if methods.len() == 7));
         assert!(
             matches!(&policy_rows[4], Value::List(bridges) if bridges.len() == 1 && list_tag(&bridges[0]) == KH_TAG_METHOD_BRIDGE)
         );
         assert!(
-            matches!(&policy_rows[5], Value::List(methods) if matches!(&methods[0], Value::Str(method) if method.as_ref() == "HEAD"))
+            matches!(&policy_rows[5], Value::List(methods) if matches!(&methods[0], Value::Str(method) if method =="HEAD"))
         );
         assert!(matches!(&policy_rows[6], Value::List(methods) if methods.len() == 7));
         let observation = value_for(&pairs, "__router_observation__");
@@ -11981,8 +12072,8 @@ mod router_context_tests {
             Value::List(xs)
                 if xs.len() == 3
                     && matches!(&xs[0], Value::Int(tag) if *tag == KH_TAG_FIELD)
-                    && matches!(&xs[1], Value::Str(name) if name.as_ref() == expected_name)
-                    && matches!(&xs[2], Value::Str(field_value) if field_value.as_ref() == expected_value)
+                    && matches!(&xs[1], Value::Str(name) if name ==expected_name)
+                    && matches!(&xs[2], Value::Str(field_value) if field_value ==expected_value)
         )
     }
 
@@ -12120,9 +12211,9 @@ mod router_context_tests {
             Value::List(xs) => xs,
             _ => panic!("kernel request must be a Form list value"),
         };
-        assert!(matches!(&request_rows[1], Value::Str(method) if method.as_ref() == "GET"));
+        assert!(matches!(&request_rows[1], Value::Str(method) if method =="GET"));
         assert!(
-            matches!(&request_rows[2], Value::Str(path) if path.as_ref() == "/api/runtime/health")
+            matches!(&request_rows[2], Value::Str(path) if path =="/api/runtime/health")
         );
         let request_headers = match &request_rows[3] {
             Value::List(xs) => xs,
@@ -12143,7 +12234,7 @@ mod router_context_tests {
             .iter()
             .any(|field| field_pair_matches(field, "limit", "20")));
         assert!(
-            matches!(&request_rows[5], Value::Str(body) if body.as_ref() == "{\"alive\":true}")
+            matches!(&request_rows[5], Value::Str(body) if body =="{\"alive\":true}")
         );
         let rows = match candidate_value {
             Value::List(xs) => xs,
