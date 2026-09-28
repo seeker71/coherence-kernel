@@ -10217,6 +10217,11 @@ static long long fk_f64_ovf_at[FK_F64_OVF_CAP]; /* the B.cond sites that leave f
 static long long fk_f64_ovf_n;
 static long long fk_f64_self_at[FK_F64_OVF_CAP]; /* the mov64 sites of a non-tail SELF call: the page's own address is 0 until install patches it here (word offset of the 4-word MOVZ/MOVK) */
 static long long fk_f64_self_n;
+/* the AST tag (12 or 241) of a non-tail self call this admission took, 0 for none. That call is emitted as csig 0 -- an int
+ * answer, no scratch, no cons -- before the recipe's own answer is known, so once the body is admitted the pulse holds the
+ * recipe to it: a recipe that answers a list, or conses, declines with this tag. Taken anyway, (list (self (sub n 1)))
+ * stored the inner list's word as a tagged int -- a list nested 1100 deep read 1024 levels and an int. */
+static long long fk_f64_self_tag;
 /* ── the loop lane ────────────────────────────────────────────────────────────
  * A defn whose body is `(if <compare> <exit> <self tail call>)` (either branch
  * order) is a loop: every iteration is one heat-lane dispatch. The heat ledger
@@ -10742,6 +10747,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         *out = fk_f64_push(19, slot, (int)car, 0.0, callee); /* the emit reads callee == fk_f64_cur_fx as the self-call */
         if (*out < 0) { return 0; }
         fk_f64_prog[*out].s = -1;
+        fk_f64_self_tag = t; /* the pulse holds the recipe's answer to this int once the body is admitted */
         return 1; /* an int answer */
     }
     if ((t == 241 || t == 12) && fk_node[i][1] != fk_f64_cur_fx) {
@@ -12090,6 +12096,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     long long nlets = 0;
     long long node = body;
     fk_f64_prog_n = 0;
+    fk_f64_self_tag = 0;
     while (node >= 0 && node < fk_node_count && fk_node[node][0] == 109) {
         if (nlets >= FK_F64_CHAIN_CAP) { return; }
         long long li = fk_node[node][1];
@@ -12114,6 +12121,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     if (tex == 0) { tex = fk_f64_admit(node, arity, types, &top); }
     if (tex == 0) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } return; }
     if (tex == 3 && !fk_f64_str_answer(top)) { fk_fn_native[fx] = 0 - (1000 + 27); return; } /* a string answer is a parameter or the accumulator: the door interns it */
+    if (fk_f64_self_tag != 0 && (tex != 1 || fk_f64_conses || fk_f64_need_scratch || fk_f64_calls_c)) { fk_fn_native[fx] = 0 - (1000 + fk_f64_self_tag); return; } /* a non-tail self call is csig 0: this recipe must answer an int and neither cons nor build a string */
     if (tex == 2) { sig = sig | (1LL << 8); }
     if (tex == 3) { sig = sig | (1LL << 24); }
     if (tex == 4) { sig = sig | (1LL << 25); } /* a list answer: the raw word */
@@ -12311,7 +12319,7 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     unsigned int ccs[FK_F64_CHAIN_CAP];
     int tex = 0, nex = 0;
     fk_f64_prog_n = 0;
-    fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0; /* a call inside the loop's steps may reach a crystallized leaf; a call to this defn is the self call */
+    fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0; fk_f64_self_tag = 0; /* a call inside the loop's steps may reach a crystallized leaf; a call to this defn is the self call */
     fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_calls_c = 0; fk_f64_ovf2_n = 0;
     long long j = 0;
     while (j < nsteps) {
@@ -12391,6 +12399,7 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
         j = j + 1;
     }
     if (nex == 0) { return; }
+    if (fk_f64_self_tag != 0 && (tex != 1 || fk_f64_conses || fk_f64_need_scratch || fk_f64_calls_c)) { fk_fn_native[fx] = 0 - (1000 + fk_f64_self_tag); return; } /* the exits' non-tail self call is csig 0, as in the typed leaf */
     if (tex == 2) { sig = sig | (1LL << 8); }
     if (tex == 3) { sig = sig | (1LL << 24); }
     if (tex == 4) { sig = sig | (1LL << 25); } /* a list answer: the raw word */
@@ -13182,6 +13191,12 @@ static long long fk_walk(long long i, long long fp) {
                 fk_nkind[ia102] == 3 && fk_nkind[ib102] == 3) {
                 return fk_nid[ia102] == fk_nid[ib102] ? 2 : 0;
             }
+        }
+        /* Two strings meet by their text, as value_eq and the siblings' eq do. Interning gives one text one word
+         * inside a process, but the shared field keeps its own word for the same text (a composite's category,
+         * a node string), so (eq (node_category (intern_node (bp "NIB") kids)) (bp "NIB")) read 0 by identity. */
+        if ((ae & be & 1) && ae < 0 && be < 0 && ae != be && fk_is_str(ae) && fk_is_str(be)) {
+            return fk_str_bytes_eq(ae, be) ? 2 : 0;
         }
         /* Two cons pairs (odd words above nil's 1) meet by their items, as
          * value_eq does: a list's identity is its composition (axiom-3), never
@@ -16837,59 +16852,15 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (!fk_gift_live(gh) || !fk_is_str(sv)) {
             return fk_nothing;
         }
-        volatile long long *gseq = (volatile long long *)fk_gift_base[gh];
-        volatile long long *glen = gseq + 1;
-        char *gpay = (char *)fk_gift_base[gh] + 16;
+        /* the claiming give (fk_gift_give): a frame that does not fit is refused, never truncated silently, and two
+         * writers never share a sequence. This arm kept the unclaimed load/store give after the claim landed, so
+         * three writers of one frame left it odd and every later read answered nothing (gift-frame-writers-band
+         * read 33 in 5 of 10 runs). */
         long long si = fk_stri(sv);
-        long long n = FK_SLEN(si);
-        if (n > fk_gift_size[gh] - 16) {
-            /* a frame that does not fit is refused, never truncated silently */
-            return fk_nothing;
-        }
-        long long s0 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
-        __atomic_store_n(gseq, s0 + 1, __ATOMIC_RELEASE);
-        { long long k = 0; while (k < n) { gpay[k] = FK_SBYTES(si)[k]; k = k + 1; } }
-        __atomic_store_n(glen, n, __ATOMIC_RELEASE);
-        __atomic_store_n(gseq, s0 + 2, __ATOMIC_RELEASE);
-        return (s0 + 2) << 1;
+        return fk_gift_give(gh, FK_SBYTES(si), FK_SLEN(si));
     }
     if (t == 187) {
-        long long gh = fk_walk(fk_node[i][1], fp) >> 1;
-        if (!fk_gift_live(gh)) {
-            return fk_nothing;
-        }
-        volatile long long *gseq = (volatile long long *)fk_gift_base[gh];
-        volatile long long *glen = gseq + 1;
-        char *gpay = (char *)fk_gift_base[gh] + 16;
-        int tries = 0;
-        for (;;) {
-            long long s1 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
-            if (s1 == 0) {
-                return fk_nothing;
-            }
-            if ((s1 & 1) == 0) {
-                long long n = __atomic_load_n(glen, __ATOMIC_ACQUIRE);
-                if (n < 0 || n > fk_gift_size[gh] - 16) {
-                    return fk_nothing;
-                }
-                fk_sinit();
-                while (fk_sbp + n > fk_scap_b) {
-                    fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
-                    fk_scap_b = fk_scap_b * 2;
-                    fk_sb_check();
-                }
-                { long long k = 0; while (k < n) { fk_sb[fk_sbp + k] = gpay[k]; k = k + 1; } }
-                long long s2 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
-                if (s1 == s2) {
-                    return fk_strv(fk_sintern(fk_sbp, n));
-                }
-            }
-            tries = tries + 1;
-            if (tries > 4096) {
-                /* a give that never settles is reported, never read torn */
-                return fk_nothing;
-            }
-        }
+        return fk_gift_take_str(fk_walk(fk_node[i][1], fp) >> 1);
     }
     if (t == 188) {
         long long gh = fk_walk(fk_node[i][1], fp) >> 1;
