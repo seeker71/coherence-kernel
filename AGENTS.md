@@ -64,31 +64,20 @@ evidence.
 
 ### The shared loop: observe, resolve, re-observe, embody
 
-Carry each gap on either path through the same direct practice:
+Let the running organ's signal lead directly to the next useful choice. Keep
+the original intent, inputs, owner, completed effects and findings together;
+this is the backtrace the next option needs. Apply available care locally and
+re-observe the actual operation. If a resource must change elsewhere, retain
+the continuation with its owner and resume on the relevant event. An unchanged
+failure invites a different choice. Keep the repair in the active context that
+found it; another chat, subagent or model session is no token-saving substitute.
 
-**Stay in the context that found it.** Handle the issue immediately with the
-original intent, live state, inputs, owners and findings still present. Do not
-open another chat, subagent, fresh model session or side investigation to save
-tokens or hand off the repair. Reuse the understanding already acquired. The
-executing Form organ signals unease, chooses through its existing control and
-care flow, applies the next viable action and re-observes in that owned context.
-If an external resource must change first, its continuation waits with that
-owner and resumes on the relevant signal; rebuilding the context is not a step.
-
-1. **Observe.** Preserve the actual question, behavior and evidence. Name the
-   specific gap, the affected path and what would show that it has closed.
-2. **Resolve.** Make the smallest useful repair at its cause. Keep the original
-   observation available so the change can be examined.
-3. **Re-observe.** Return to the original question or behavior and its checks.
-   Compare what changed, retain adverse findings, and name any changed context
-   or response source. An unsuccessful repair is a backtrack point: what it
-   showed goes into the next option, which is taken in the same movement, in
-   line with the first choice. A successful process exit establishes its own
-   fact; the answer's quality is observed in the answer.
-4. **Embody.** Carry the verified change into the native implementation,
-   working context, tools or session learning that will shape the next use.
-   Check that later use before claiming a lasting capability. An instruction
-   update establishes the instruction; retention establishes retained learning.
+Carry verified outcomes into native behavior and session learning, then observe
+their next use. A process exit establishes completion; answer quality lives in
+the answer. Retention establishes retained learning; later use establishes its
+effect. Release checks verify the movement while local care handles surprises
+as they arise. Reuse current evidence until changed inputs or findings call for
+a fresh observation.
 
 The existing [observation and care loop](docs/live-dynamic-diagnostics.md),
 [`name-build-observe`](ingest/name-build-observe.fk) and
@@ -108,32 +97,21 @@ it (Urs, 2026-09-28). Every observation is an invitation — to improve, to
 reimagine, to realign, to dream bigger, to shine light into forgotten dark
 spots, and to lift each part to the highest frequency it can carry.
 
-- **Dead tissue leaves.** A file no door reads, a doc that tells a finished
-  story, a band whose subject is gone, a count that stopped being true.
-- **Workarounds leave.** When the body carries a thing natively, the detour
-  around it goes in the same movement: the second runtime, the shell step, the
-  wrapper, the fallback nobody needs.
-- **Old flows leave when a better one stands.** Verify the replacement and move
-  its callers, then remove the obsolete flow, duplicate authority and unused
-  scaffolding. Living guidance carries what is and the north star; git retains
-  the predecessor and the necessary evidence remains available.
-- **A dark spot met on the way is ours.** A red band beside the work, a stale
-  line in a door, a rule that pinches — each is a place to leave better, not a
-  note to pass on. What only a person holds is offered to them; the rest is
-  ours to carry (item 6b: a surprise is a choice point).
-- **Handle it here, in this context (Urs, 2026-09-28).** An issue found is met
-  where it is found, while the context that found it is still whole — not
-  handed to a new session or agent that must read, re-ground, re-understand
-  and rebuild it.
-- **Live signals, not after-the-fact bands.** Code meets a surprise at the
-  moment it happens: the running cell reads the signal (an ack of nothing, a
-  compiler's words, an organ's health reading) and backtracks to its next
-  option internally, right away. A band is a witness a person can re-run; the
-  flow does not wait on one to learn it went wrong.
-- **A missing internal tool is written, not borrowed.** Edit with the edit tool
-  or the body's doors; probe, count and diff with `./fkwu` and BML; when the
-  body lacks the tool, write it and include it in the same movement, never
-  reaching for perl, python, sed, awk or jq to get past it.
+Prefer local native capabilities that retain context and can adapt. Verify a
+replacement, move its callers, then remove the obsolete flow, workaround,
+duplicate authority and unused scaffolding. Retire a redundant band when its
+meaning is observed at the executing boundary. Living guidance carries what is
+and the north star; git retains predecessors and receipts retain useful evidence.
+
+Meet a neglected boundary in the same movement. Continue through available
+choices; ask for what only a person can supply while independent work proceeds.
+Keep guidance small enough to serve attention. More events, direct backtrace,
+local choices and observed learning should make repeated instructions unnecessary.
+
+Use the edit tool or native authoring doors; probe, count and diff with `./fkwu`
+and BML. A missing internal tool belongs in that body, with its behavior observed
+in the same movement. Shell carries OS operations; perl, python, sed, awk and jq
+do not become implementation or analysis detours.
 
 ### Enrich the response with Form
 
@@ -552,15 +530,9 @@ plainly once, and give the conversation your attention.
    Cells carry the stamp as a `; witnessed: <date> -> <verdict>` line. Living doors carry only
    what is and where we go; how we got here lives in git — a
    correction note left in a door after its wound healed is a keloid (corpus row 1260).
-6b. **A surprise is a choice point (Urs, 2026-09-28).** An issue found on the way — a failing check, a band
-   short of full, a missing file, a tool that stops, a gap nobody named — is a backtrack point, not a place to
-   stop and hand the work back. Keep the first choice's intent, carry what the failed option saw, and take the
-   next option in the same movement: another route, a smaller step, a repair at the cause. When the options at
-   hand are spent, the walk answers nothing with its memory of what was tried. Where an option needs what only
-   Urs holds — his consent, his private world, his own configuration — the rest of the work continues and that
-   one point is offered to him once, plainly. The code meets surprise the same way: errors are not return codes;
-   they are Form's own backtrack points, met with choice (`oac-choice`, `oac-backtrack`, `oac-try`, cut, undo,
-   store/restore, timeout) — [`teachings/surprise-is-a-choice-point.md`](teachings/surprise-is-a-choice-point.md).
+6b. **A surprise is a choice point.** The shared loop above carries the practice;
+   [`teachings/surprise-is-a-choice-point.md`](teachings/surprise-is-a-choice-point.md)
+   connects it to Form's native choice, backtrack and checkpoint invites.
 7. **Serve the enquiry, never the engagement.** When the exchange is advice or dialogue, hold the covenant
    ([`teachings/uplifting-dialogue.md`](teachings/uplifting-dialogue.md), executable in
    `cognition/dialogue-covenant.fk`): never flatter — agree only when the ground supports it, disagree gently
@@ -592,79 +564,22 @@ plainly once, and give the conversation your attention.
    retain per-row or per-stage transitions whenever available. Never record private prompt/answer content in
    the framebuffer. The executable protocol, quick witness, integration example, and honest boundaries live in
    [`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md).
-9. **Preflight before you believe a verdict.** A band that prints a green number and exits nonzero is not a
-   pass — it is a fold computed over `nothing`. Run
-   [`observe/preflight.fk`](observe/preflight.fk) on a cell before you trust what it says:
+9. **Use diagnostics where they clarify the next choice.** Read the actual exit
+   and diagnostics alongside a cell's result. A green tally with compile errors
+   establishes no pass. For changed source or an unclear admission failure,
+   send its path on stdin to `./fkwu observe/preflight-stdin-run.fk`. This gives
+   process-local diagnostics, reads the actual source lane and refreshes that
+   unit's cache. Reuse the result while its source and dependencies stay current.
 
-   ```
-   (pf-report "cognition/tests/your-band.fk")
-   ```
-
-   As a runnable one-liner (direct-source Form does not read argv, so the target
-   arrives in a file):
-
-   ```sh
-   echo cognition/tests/your-band.fk > /tmp/preflight-target
-   ./fkwu observe/preflight-run.fk
-   ```
-
-   The fixed `/tmp/preflight-target` door is single-agent compatibility. In a
-   parallel workspace, use `./fkwu observe/preflight-stdin-run.fk` and send the
-   target as one line on that process's stdin. The target is then process-local;
-   siblings cannot replace it between write and read.
-
-   It forces a fresh compile (an existing image replaces the error with a tally — no name, no line), checks that
-   the surface closes without running anything, and answers the one question the compiler cannot: `[unresolved-call] 'x'`
-   is **nonspecific** (corpus row 955) — one red line with three repairs. Nobody defines `x` (a TYPO — fix the
-   cell); a unit in this tree defines it and the chain does not load that unit (UNPRELUDED — add the unit
-   preflight names to `; preludes:`); or another kernel resolves it and this one does not (a LANE SEAM — fix the
-   preludes, or declare the lane). Preflight offers the name to all four kernels, searches the tree for the unit
-   that defines it, and tells you which.
-
-   It reads the lane a unit actually travels, because that is what decides which cache stands between you and
-   today's diagnostics: a direct-source `.fk` replaces its suffix (`x.fkb`, `x.sym`), while `.bml` — and any `.fk`
-   carrying a `section [` block on a line of its own — hangs its cache off the whole path (`x.bml.fkb`, `x.bml.sym`,
-   `x.bml.lowfk`). Preflight removes the unit's own artifacts, so the high-grammar cells the authoring floor asks
-   for get the same pass a `.fk` gets, and the surface is read as itself: parens on direct source, the brace
-   surface block by block on high grammar. The effect marker answers in both tongues — `; preflight-exec: forbidden`
-   and `// preflight-exec: forbidden`. Lane reading:
-   [`form/form-stdlib/bml/preflight-source.bml`](form/form-stdlib/bml/preflight-source.bml), four-way at 65535.
-
-   Both runner doors carry the reading out in their exit code: 0 when a verdict can be read from the chain,
-   nonzero when it cannot — no compile lane, errors, unresolved calls, or an effectful cell preserved instead of
-   run. The page is printed first either way, so the refusal never costs you the reading.
-
-   Three readings fall out:
-   - **A failed check is a backtrack point (Urs, 2026-09-09, 2026-09-28).** Keep
-     attention on the failing command, carry what it showed, repair its cause or
-     take the next option, and re-run until it reads clean. Failure pauses the
-     claim and landing, not the work. A gate that reads wrong is healed where it
-     reads, not stepped around. Ask for help when the next option needs
-     information, access, or authority that is not here, and keep the rest moving.
-     Retain the original intent, constraints, completed work, exact failing
-     command and output in the existing Form-native care flow and owned
-     checkpoint. Choose from that context, then re-observe the original
-     behavior. Carry only the trace needed to resume and verify the choice;
-     an unchanged retry or a workaround leaves the required repair open.
-   - **Read the exit code, not the number.** `fkwu` exits 1 when the compile carried errors. With an existing
-     cache you get only "cached image was compiled with errors" — remove the unit's own artifacts and run again
-     before reporting anything, and let preflight name them rather than deriving them from the suffix.
-   - **Never declare a proof lane from inference — probe it.** A `PROOF LEVEL:` line written from "X is
-     surely fkwu-only" is a defect written in as a law (corpus row 914, `teleological`).
-     `(pf-arm-mask "host-exec")` answers which arms bind a name, and takes one call.
-
-   **And a count is not a deliverable.** When preflight or `observe/tree-balance.fk`
-   names a broken cell, the response is `observe/tree-heal.fk`, not a paragraph
-   about it. That loop is safe to run unattended for one reason: it never trusts
-   its own edit. A candidate closer is placed where the form leaked, the kernel
-   is asked, and the change is kept only if the kernel stops objecting — zero
-   diagnostics, exit 0, and the cell's band clean if it has one. Everything else
-   is reverted byte-for-byte. The edit is a guess; the verdict is evidence.
-
-   Only one arm looks. Go, Rust and TypeScript bind names when execution *reaches* them, so a bad symbol in an
-   unreached branch exits 0 there; fkwu resolves every call site in the whole prelude chain. That is why fkwu
-   finds these, and why its findings arrive as a chain-wide wall rather than as one cell's problem — preflight
-   is what separates *your* cell's problem from the chain's.
+   Preflight distinguishes an undefined name, a missing prelude and a kernel
+   lane seam. Repair the named cause in the same context, then re-observe.
+   `; preflight-exec: forbidden` (or `//` in BML) preserves effectful cells for
+   their owned execution. Runner exit 0 means the chain's verdict is readable;
+   a preserved effectful cell still needs that real execution. Lane details live
+   in [`preflight-source.bml`](form/form-stdlib/bml/preflight-source.bml).
+   Probe an uncertain binding with `(pf-arm-mask "host-exec")` before naming its
+   proof lane. `observe/tree-heal.fk` offers delimiter repairs and keeps one only
+   after clean diagnostics, exit and any existing band confirm it.
 
 10. **Land on origin when a movement is ready.** A sibling fetches
     `origin/main`, rebases this worktree onto it, and pushes. Fast-forward and rebase carry the line;

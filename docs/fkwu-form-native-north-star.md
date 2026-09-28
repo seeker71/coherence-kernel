@@ -35,7 +35,12 @@ unease and name the resources they need. A care organ listens, directs attention
 and brings available nourishment to the asking organ. That organ observes what
 arrived and what changed. The core interface makes this exchange visible.
 Missing, aging and unreadable signals remain unknown. Tests witness contracts;
-the living care loop follows signals as they arise.
+the living care loop follows signals as they arise. Guidance points attention
+toward the next useful choice. The receiving owner follows a direct backtrace
+to the operation, preserving intent, inputs, completed effects and findings.
+It applies available care, observes the result and learns from verified use.
+An external need retains that continuation until its relevant event arrives.
+Observation delivery can wait without delaying available local care.
 
 ```mermaid
 flowchart LR

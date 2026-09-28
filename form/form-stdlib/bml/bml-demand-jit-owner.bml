@@ -1,6 +1,6 @@
 //////////////////////////////////////////////////////////////////////
 //
-// bml-demand-jit-owner.bml -- production request/progress boundary.
+// bml-demand-jit-owner.bml -- production request/event/progress boundary.
 //
 // Request adopts the current executable state. Progress owns the effectful
 // JIT step and canonical Glass publication. Unpublished observations remain
@@ -89,7 +89,7 @@ section [form.bml] {
             let path = if ((String) bdj-step-cache-path(step) != "") then bdj-step-cache-path(step) else bdjo-cache-path(state);
             list(step, path, bdjo-cache-bytes(path, step));
         }
-        def bdjo-stage(owner, step) = bdjo-owner-queue(bdj-step-state(step), bdjo-first(owner), bdjo-first-ms(owner), list(bdjo-observe(bdjo-state(owner), step)), "telemetry-publication-pending");
+        def bdjo-stage(owner, step) = bdjo-owner-queue(bdj-step-state(step), bdjo-first(owner), bdjo-first-ms(owner), append(bdjo-publications(owner), list(bdjo-observe(bdjo-state(owner), step))), "telemetry-publication-pending");
         def bdjo-reading-snapshot(reading) {
             if (!((String) fgtm-read-state-status(reading) == "current")) then nothing()
             else if (!((Comparable) fgtm-field-present?(fgtm-read-state-value(reading)) == 1)) then nothing()
@@ -143,6 +143,19 @@ section [form.bml] {
             bdjo-after-publication(owner, step, publication, reading, epoch, expected);
         }
 
+        // Care acts when the event arrives, even while earlier telemetry waits.
+        // Its observation joins that ordered queue; delivery cannot undo care.
+        // Stale, unrelated and explicitly held responses leave the owner intact.
+        def bdjo-hear(owner, response) = bdjo-hear-at(owner, response, BDJGRoot());
+        def bdjo-hear-at(owner, response, telemetryRoot) {
+            let step = bdj-care-hear(bdjo-state(owner), response);
+            if nothing?(step) then bdjo-progress-result("event-unmatched", nothing(), nothing(), nothing(), 1, owner)
+            else {
+                let next = bdjo-stage(owner, step);
+                bdjo-publish-at(next, bdjo-awaiting(next), telemetryRoot);
+            };
+        }
+
         def bdjo-progress(owner) {
             if (!nothing?(bdjo-awaiting(owner))) then bdjo-publish(owner, bdjo-awaiting(owner))
             else if nothing?(bdjo-first(owner)) then bdjo-progress-result("idle", nothing(), nothing(), nothing(), 1, owner)
@@ -155,7 +168,8 @@ section [form.bml] {
         }
 
         // Test/diagnostic lens: only the telemetry root and explicit runtime
-        // identity vary. Production callers have only bdjo-progress above.
+        // identity vary. Production progress derives its own runtime identity;
+        // event care already owns the image and identity it will publish.
         def bdjo-progress-with-runtime-at(owner, telemetryRoot, runtimeIdentity) {
             if (!nothing?(bdjo-awaiting(owner))) then bdjo-publish-at(owner, bdjo-awaiting(owner), telemetryRoot)
             else if nothing?(bdjo-first(owner)) then bdjo-progress-result("idle", nothing(), nothing(), nothing(), 1, owner)
