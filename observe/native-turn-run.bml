@@ -16,10 +16,11 @@
 // process table (launchd is the host's schedule, anything else a session with a rented mind).
 // A test turn ({"test":1}) writes its rows to .hearth/native-turns/test-ledger.jsonl and always restores the
 // source, so a turn begun by a session can learn what the lane can do without closing a gap the nights must close.
-// {"publish_from":"<lane output>"} publishes a result already on disk instead of asking the lane (a test of the path).
+// {"publish_from":"<lane output>"} publishes a result already on disk instead of asking the lane (a test of the path);
+// {"candidate":"<file>"} publishes that file's text as the gap's first writable document (a test of one candidate).
 // stdin, optional: {"gap":"<id>","dry":1,"test":1,"model":"qwen38-q8","context":16384,"turns":32}; dry skips the lane.
 // preflight-exec: forbidden
-// preludes: form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml control/offer-ack-core.fk control/choice-lane-core.fk
+// preludes: form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml control/offer-ack-core.fk control/choice-lane-core.fk form-stdlib/bml/text-diff.bml
 section [form.bml] {
  class NativeTurn {
   def nt-queue() = "learn/native-turn-queue.jsonl";
@@ -44,10 +45,14 @@ section [form.bml] {
   def nt-band(path) {
    let made = fs_mkdir(nt-dir());
    let rc = trim(host-exec(mc-cat(list("./fkwu ", path, " > ", nt-dir(), "/band.out 2> ", nt-dir(), "/band.err; echo $?")), ""));
-   let t = trim(host-exec(mc-cat(list("tail -1 ", nt-dir(), "/band.out")), ""));
+   let t = nt-last-line(split-on(nt-read(mc-cat(list(nt-dir(), "/band.out"))), "\n"), "");
    if ((!((String) rc == "0")) || ((Comparable) str_len(t) == 0)) then nothing() else str_to_int(t);
   }
-  def nt-band-errors() = trim(host-exec(mc-cat(list("grep -F 'error' ", nt-dir(), "/band.err | grep -v '^form-organ' | head -6 | cut -c1-300")), ""));
+  def nt-read(path) = if (file_size(path) < 1) then "" else fhn-read(path);
+  def nt-last-line(lines, last) = if nil?(lines) then last else nt-last-line(tail(lines), if ((Comparable) str_len(trim(head(lines))) == 0) then last else trim(head(lines)));
+  def nt-starts?(s, p) = ((str_len(s) >= str_len(p)) && ((String) substring(s, 0, str_len(p)) == p));
+  def nt-error-lines(lines, n) = if (nil?(lines) || (n <= 0)) then list() else if ((str_find(head(lines), "error", 0) >= 0) && (!nt-starts?(head(lines), "form-organ"))) then cons(substring(head(lines), 0, if (str_len(head(lines)) > 300) then 300 else str_len(head(lines))), nt-error-lines(tail(lines), (n - 1))) else nt-error-lines(tail(lines), n);
+  def nt-band-errors() = trim(nt-join(nt-error-lines(split-on(nt-read(mc-cat(list(nt-dir(), "/band.err"))), "\n"), 6)));
   // who began this turn
   def nt-row-of(value) = if ((String) value_kind(value) == "int") then list() else value;
   def nt-self() = nt-row-of(host_process(host_pid()));
@@ -81,9 +86,14 @@ section [form.bml] {
   def nt-has(xs, x) = if nil?(xs) then 0 else if ((String) head(xs) == x) then 1 else nt-has(tail(xs), x);
   def nt-publish(docs, writable, n) = if nil?(docs) then n else nt-publish(tail(docs), writable, if ((Comparable) nt-has(writable, nt-str(head(docs), "path")) == 1) then nt-publish-one(head(docs), n) else n);
   def nt-publish-one(doc, n) { let w = write_file_text(nt-str(doc, "path"), nt-str(doc, "text")); (n + 1); }
+  // {"candidate":"<path>"}: the text at <path> stands as the lane's document for the gap's first writable file
+  def nt-candidate-result(gap, path) = json-node-object(list(fhn-s("status", "candidate"), json-node-pair("documents", json-node-array(list(json-node-object(list(fhn-s("path", head(nt-strs(gap, "writable"))), fhn-s("text", nt-read(path)))))))));
   def nt-docs-of(result) = if json-object-has?(result, "documents") then json-array-elements(json-object-get(result, "documents")) else list();
-  def nt-keep(paths, stamp) = if nil?(paths) then 0 else nt-keep-next(host-exec(mc-cat(list("cp ", nt-quote(head(paths)), " ", nt-quote(mc-cat(list(nt-dir(), "/", stamp, "-", nt-base(head(paths)), ".candidate"))), " && git checkout -- ", nt-quote(head(paths)))), ""), tail(paths), stamp);
-  def nt-keep-next(done, rest, stamp) = nt-keep(rest, stamp);
+  // the checkpoint is a value (oac-store): each writable file's text as it stood before the lane
+  def nt-texts(paths) = if nil?(paths) then list() else cons(nt-read(head(paths)), nt-texts(tail(paths)));
+  // keep the candidate beside the turn, then return each file to its checkpoint (oac-restore)
+  def nt-keep(paths, originals, stamp) = if nil?(paths) then 0 else nt-keep-next(write_file_text(mc-cat(list(nt-dir(), "/", stamp, "-", nt-base(head(paths)), ".candidate")), nt-read(head(paths))), write_file_text(head(paths), head(originals)), paths, originals, stamp);
+  def nt-keep-next(kept, restored, paths, originals, stamp) = (1 + nt-keep(tail(paths), tail(originals), stamp));
   def nt-run() {
    let line0 = read_line();
    let line = if nothing?(line0) then "" else trim(line0);
@@ -121,8 +131,9 @@ section [form.bml] {
   // a band reading as text: a band that printed no number reads nothing — the file did not compile or the band stopped
   def nt-reading-text(v) = if nothing?(v) then "nothing (the band printed no number: the source did not compile or the band stopped)" else int_to_str(v);
   def nt-reading(key, v) = if nothing?(v) then json-node-pair(key, json-node-null()) else fhn-n(key, v);
-  def nt-quoted(paths) = if nil?(paths) then "" else mc-cat(list(" ", nt-quote(head(paths)), nt-quoted(tail(paths))));
-  def nt-diff(paths) = trim(host-exec(mc-cat(list("git diff --unified=1 --", nt-quoted(paths), " | head -c 2400")), ""));
+  // the candidate's change against its checkpoint, read in Form (form-stdlib/bml/text-diff.bml)
+  def nt-diff(paths, originals) = if nil?(paths) then "" else mc-cat(list(nt-diff-one(head(paths), head(originals)), nt-diff(tail(paths), tail(originals))));
+  def nt-diff-one(path, original) { let d = td-diff(original, nt-read(path), 1, 2400); if ((String) d == "") then "" else mc-cat(list("--- ", path, "\n", d)); }
   def nt-finding(n, before, after, full, said, status, published, diff, errors) = mc-cat(list("Attempt ", int_to_str(n), ": the band read ", nt-reading-text(after), " of ", int_to_str(full), " (it began at ", nt-reading-text(before), "); the lane said ", trim(said), if ((String) status == "") then "" else mc-cat(list(" with status ", status)), if ((Comparable) published == 0) then "; it published no document." else mc-cat(list("; its candidate changed:\n", diff)), if ((Comparable) str_len(errors) == 0) then "" else mc-cat(list("\nThe band did not read; the compiler said:\n", errors))));
   // one option: ask the lane, publish, read the band; returns (list green row finding)
   def nt-attempt(gap, opts, id, full, band, before, coordinator, goal, n) {
@@ -133,15 +144,16 @@ section [form.bml] {
    let started = now_unix_ms();
    let dry = ((Comparable) nt-int(opts, "dry", 0) == 1);
    let outPath = if json-object-has?(opts, "publish_from") then nt-str(opts, "publish_from") else mc-cat(list(nt-dir(), "/", stamp, ".out"));
-   let said = if (dry || json-object-has?(opts, "publish_from")) then "not-run" else host-exec(mc-cat(list("./fkwu observe/form-cli-code-run.fk > ", nt-quote(outPath), " 2> ", nt-quote(mc-cat(list(outPath, ".err"))), "; echo lane-exit=$?")), mc-cat(list("@", reqPath, "\n")));
-   let result = if dry then json-node-object(list()) else nt-result-of(outPath);
+   let said = if (dry || (json-object-has?(opts, "publish_from") || json-object-has?(opts, "candidate"))) then "not-run" else host-exec(mc-cat(list("./fkwu observe/form-cli-code-run.fk > ", nt-quote(outPath), " 2> ", nt-quote(mc-cat(list(outPath, ".err"))), "; echo lane-exit=$?")), mc-cat(list("@", reqPath, "\n")));
+   let result = if dry then json-node-object(list()) else if json-object-has?(opts, "candidate") then nt-candidate-result(gap, nt-str(opts, "candidate")) else nt-result-of(outPath);
+   let originals = nt-texts(nt-strs(gap, "writable"));
    let published = nt-publish(nt-docs-of(result), nt-strs(gap, "writable"), 0);
    let after = nt-band(band);
    let errors = if nothing?(after) then nt-band-errors() else "";
    let green = (((Comparable) after == full) && (!((Comparable) before == full)));
    let test = ((Comparable) nt-int(opts, "test", 0) == 1);
-   let finding = if green then "" else nt-finding(n, before, after, full, said, nt-str(result, "status"), published, nt-diff(nt-strs(gap, "writable")), errors);
-   let kept = if (green && (!test)) then 0 else nt-keep(nt-strs(gap, "writable"), stamp);
+   let finding = if green then "" else nt-finding(n, before, after, full, said, nt-str(result, "status"), published, nt-diff(nt-strs(gap, "writable"), originals), errors);
+   let kept = if (green && (!test)) then 0 else nt-keep(nt-strs(gap, "writable"), originals, stamp);
    let row = json-node-object(list(fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", id), fhn-n("option", n), nt-reading("band_before", before), nt-reading("band_after", after), fhn-n("full", full), fhn-n("band_green", if green then 1 else 0), fhn-n("dry", if dry then 1 else 0), fhn-n("test", if test then 1 else 0), fhn-s("coordinated_by", if nt-keeper?(coordinator) then "host-schedule" else "session"), fhn-s("coordinator", coordinator), fhn-n("rented_mind", if nt-keeper?(coordinator) then 0 else 1), fhn-s("request", reqPath), fhn-s("lane", trim(said)), fhn-s("lane_status", nt-str(result, "status")), fhn-n("lane_check_runs", nt-int(result, "check_runs", -1)), fhn-n("lane_turns", nt-int(result, "turns", -1)), fhn-n("published", published), fhn-n("wall_ms", (now_unix_ms() - started))));
    let appended = fhn-append(if test then mc-cat(list(nt-dir(), "/test-ledger.jsonl")) else nt-ledger(), str_concat(json-emit(row), "\n"));
    let shown = print_str(mc-cat(list("[native-turn] ", json-emit(row), "\n")));
