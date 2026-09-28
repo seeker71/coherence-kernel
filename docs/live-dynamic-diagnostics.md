@@ -8,9 +8,9 @@ the next selected execution state and then observe that state again.
 ## The loop
 
 ```text
-execute → observe → outbound frame → adjudicate → inbound control
-   ↑                                                    ↓
-   └──────────── re-observe ← apply/actuate ←───────────┘
+execute → signal → local choice → act → observe → learn
+             ↑          │                 │
+             └──────────┴── next choice ──┘
 ```
 
 Every message in `observe/bidirectional-framebuffer-channel.fk` carries:
@@ -42,22 +42,12 @@ Current control actions are:
 The action vocabulary is extensible Form data. A consumer must implement the
 actuator for every action it admits and must re-observe the selected state.
 
-## When every future session uses it
+## Follow the live signal
 
-Use a bounded bidirectional diagnostic window whenever execution encounters:
-
-- `nothing`, no result, timeout, stall, or an unresolved call;
-- a result that differs from the prediction;
-- a regression, tamper rejection, or failed success vector;
-- a learning/model/state update whose effect is being claimed;
-- a choice between retry, alternate node, evidence request, revision, abstention,
-  or restoring/rehearsing established ground.
-
-Do not stop at an aggregate. Put the smallest causal boundary available into the
-outbound payload: per-row transitions, stage/resource counters, changed node ids,
-source coordinates, margins, or hashes. The inbound message must select a real
-next action. Then re-run and emit a second outbound observation. A logged event
-without an applied response is observation, not bidirectionality.
+A surprise, missing result or changed resource invites a local choice. Carry the
+smallest useful causal reading: the affected operation, source, observed state
+and available action. Apply the response and observe what actually changed.
+An aggregate can guide attention; the operation's own evidence guides repair.
 
 The loop stays with the execution that raised the signal. Its original inputs,
 resource owners, intent, completed effects and findings remain available to the
@@ -78,6 +68,16 @@ checks remain independent verification of the resulting behavior.
 For ordinary successful work with no meaningful branch or surprise, a new window
 is optional. The practice exists to increase diagnostic resolution, not to add
 ceremony to every command.
+
+The demand-JIT owner receives cache care directly through `bdjo-hear(owner,
+response)`. A response made with `oh-response(reading, "publish-retained-image")`
+selects that exact waiting operation. Publication and readback run immediately
+with its retained image and runtime identity, including while telemetry waits.
+A failed attempt backtracks locally and retains a fresh reading; an old response
+cannot replay it. Explicit holds remain owned by their release control. The
+ordered telemetry queue carries observations without delaying this care or
+restoring old execution state. This is an in-process event receiver; host
+filesystem push delivery remains a separate integration.
 
 ## Health belongs to the running organ
 
@@ -216,16 +216,11 @@ line, not the last).
 
 ## Integration pattern
 
-1. Clear only at the beginning of a bounded diagnostic window.
-2. Record the observation with source attribution.
-3. Emit an outbound envelope with a fresh correlation id.
-4. Adjudicate from observed fields; preserve `nothing` when evidence is absent.
-5. Validate direction, kind, and correlation before applying a response.
-6. For no response or mismatch, select the offered alternative node.
-7. Apply the action to execution—not merely to a report string.
-8. Re-observe the resulting state in the same window.
-9. Compare before/after at row or stage resolution before naming a cause.
-10. Store a receipt when the behavior becomes relied-on ground.
+Keep source attribution and a fresh correlation identity with the observation.
+The receiving owner selects from its offered actions, preserves absent or
+mismatched evidence, and observes the action's result in the same context.
+Retain a small receipt when that behavior becomes relied-on ground. Clear the
+framebuffer only when opening a new bounded window, preserving an active walk.
 
 ## Boundaries and safety
 

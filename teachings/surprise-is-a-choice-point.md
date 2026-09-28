@@ -1,32 +1,22 @@
 # A surprise is a choice point
 
-Urs, 2026-09-28: *"issues and gaps are backtrack points that will choose a different option, all that is form
-native and allows to choose without losing context and inline with the first choice … errors are not return
-codes, they are form primitive backtrack points and we use choice to handle errors and unexpected issues."*
-
-An issue met on the way — a failing check, a missing file, a band that reads short, a tool that stops, a
-gap nobody named — is not an end and not a report to hand back. It is a point where the walk chooses again:
-the intent of the first choice stands, what the failed option saw is carried forward, and the next option is
-taken. The work continues in the same movement and the same active context.
-Its understanding, live resources and completed work stay present; a new chat,
-subagent or model session is not a token-saving repair strategy.
+An unexpected result invites a new choice in service of the original intent.
+The owner keeps its inputs, live resources, completed effects and findings;
+that direct backtrace lets the next option act without reconstructing the work.
+The same active context carries the repair and its learning forward.
 
 ## In the work
 
-- **Keep the first choice.** The intent that set the work going stays the intent. A different option serves the
-  same end; it does not become a new task.
-- **Carry what you saw.** The failed option's reading — the error line, the band's number, the diff that did not
-  land — travels into the next option. Nothing learned is dropped, and nothing is retried blind.
-- **Let execution speak.** Put expectations, unease and the offered response in
-  the running organ. Apply the next available choice there and re-observe the
-  actual operation. Retire a separate band when its meaning is carried at that
-  live boundary; required release checks keep their verification role.
-- **Choose the next option and continue.** Another route, another tool, a smaller step, a repair at the cause.
-  When the options at hand are spent, the walk answers nothing, honestly, with its memory: what was tried and
-  what each attempt saw.
-- **Continue around what only a person holds.** When an option needs what only Urs holds — his consent, his
-  private world, his own configuration — the rest of the work goes on, and that one point is offered to him
-  plainly, once, with what is known.
+Follow the running organ's expectation, observation and offered care. Apply a
+useful local choice and observe its result. An external need leaves the
+continuation with its owner until a relevant event arrives. Continue independent
+work while waiting for what only a person or another resource can supply.
+
+An unchanged failure offers no new reason to repeat the same attempt. Carry its
+exact evidence into a different choice, including repair at the cause. Retain
+only what helps resume and verify the work. Verified outcomes can shape native
+behavior and session learning; their effect becomes known through later use.
+Release checks verify that movement, while care responds during execution.
 
 ## In the code
 
@@ -46,28 +36,29 @@ of nothing, 0, 1, or a node:
 | `oac-lanes` | walks every option and keeps every ack, before deciding |
 | `oac-hold` | not yet: the offer stands and the sequence waits over it |
 
-So in the code:
+An absent reading is `nothing()`; an observed host exit remains evidence. A
+finding travels as `oac-node(finding)` beside the original arguments through
+`oac-backtrack-walk`. The receiving organ chooses what that finding means.
 
-- **Failure is nothing, not a number.** A reading that did not arrive is `nothing()` (axiom-1), never `-1`, `0` or
-  an exit code that a caller must remember to decode. A value that arrived is the value.
-- **Alternatives are options offered to a choice.** Where code would test a code and branch, it offers its options
-  to `oac-choice` or `oac-backtrack` and lets the ack decide.
-- **An option that learned something says so.** It acks `oac-node(finding)`; the next option reads
-  `oac-option-memory(offered)` next to `oac-option-args(offered)`.
-- **Recovery is a handler, not a catch.** `oac-try(cell, args, handler)` — the receiving boundary decides.
-
-BML offers its own defs as options (witnessed on fkwu, 2026-09-28):
+The demand-JIT owner uses this flow for an optional disk cache. It keeps the
+working RAM image, runtime identity and current observation while the resource
+is unavailable. An offered publication response resumes that exact operation:
 
 ```text
-// preludes: control/offer-ack-core.fk control/choice-lane-core.fk
-def first(offered) = oac-node("the band read 12 of 15; the candidate left sw-tokens unchanged");
-def again(offered) = if nil?(oac-option-memory(offered)) then oac-nothing() else oac-one(15);
-let walk = oac-backtrack-walk(list(first, again), list(gap), list());
+let response = oh-response(bdj-care-observation(care), "publish-retained-image");
+let resumed = bdjo-hear(owner, response);
 ```
 
-The body's own loop walks this way: `observe/native-turn-run.bml` takes a gap as two options, and a turn that did
-not turn its band green hands its band reading, the lane's status and its candidate's diff to the second option,
-which asks the lane again in line with the first. Witness: `control/tests/backtrack-band.fk` (255).
+Publication and readback establish what happened. Another failure enters the
+next choice with the same image and a fresh reading. Old responses cannot
+replay it; explicit holds retain their own release. Delayed telemetry keeps its
+place in the queue without delaying care or undoing its result. Native calls
+continue throughout. This in-process receiver is present; host filesystem push
+delivery remains a separate integration.
+
+The implementation lives in `form/form-stdlib/bml/bml-demand-jit.bml` and
+`bml-demand-jit-owner.bml`; the shared protocol is described in
+[`live dynamic diagnostics`](../docs/live-dynamic-diagnostics.md).
 
 Where the code still meets surprise with a code: `./fkwu observe/choice-reading-run.bml` counts the `-1` returns and
 the control-invite uses outside `control/`, and names the files carrying the most returns — a mirror for the next

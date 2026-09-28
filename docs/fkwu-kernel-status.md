@@ -156,9 +156,16 @@ require their correlated release. A failed resumed write backtracks through
 Form's choice flow with the original image, identity and new observation intact;
 other ready care can proceed. The selected cache path and measured bytes travel
 with their publication, so resource changes cannot redirect delayed evidence.
-These are observations at owner progress, not filesystem push notifications.
-The current metadata carrier does not expose permission or free-space changes;
-the existing digest-bound control can offer those changed conditions.
+The owner also receives correlated organ responses through `bdjo-hear`.
+It attempts the selected waiting operation immediately, including while earlier
+telemetry waits, and queues the new observation in order. Old or unrelated
+responses leave the owner unchanged; a failed attempt creates a fresh reading.
+Resource observations at owner progress and this in-process event receiver are
+present; filesystem push delivery is not yet connected. The metadata carrier
+does not expose permission or free-space changes; a caller that observes those
+can offer the existing reading's `publish-retained-image` response. Publication
+and readback establish the actual outcome. Explicit holds keep their release
+control.
 The current boundary is lowerable scalar graphs; whole-unit source admission
 and the complete program-image call path remain distinct work.
 
