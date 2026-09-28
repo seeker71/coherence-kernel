@@ -1,0 +1,184 @@
+// Owned Darwin ARM64 event queues, emitted by Form in RAM. SDK kevent64_s
+// is 48 bytes; tokens name registrations and are never recycled by an owner.
+// Callbacks run in the receiving Form context after the complete batch is read.
+// preludes: form-stdlib/bml/native-pty-darwin.bml form-stdlib/organ-health.bml
+section [form.bml] {
+ class NativeEventsDarwin {
+  def nve-image() {
+   let rows = npd-cat(list(
+    npd-route(0,"pid"),npd-route(1,"queue"),npd-route(2,"events"),npd-route(3,"copy"),npd-route(4,"fcntl"),
+    list(fa-movz-x(0,22),npd-branch(14,"negate")),
+    list(npd-label("pid")),npd-sys(20),list(npd-label("queue")),npd-sys(362),
+    list(npd-label("events")),npd-shift3(),list(fa-add-x-imm(3,4,0),fa-add-x-imm(4,5,0),fa-add-x-imm(5,6,0),fa-add-x-imm(6,7,0)),npd-sys(369),
+    list(npd-label("fcntl")),npd-shift3(),npd-sys(92),
+    list(npd-label("copy"),fa-add-x-imm(0,3,0),npd-label("copy-loop"),fa-cmp-x(3,0),npd-branch(0,"return"),fa-ldrb(8,2,0),fa-strb(8,1,0),fa-add-x-imm(1,1,1),fa-add-x-imm(2,2,1),fa-sub-x-imm(3,3,1),npd-branch(14,"copy-loop")),
+    list(npd-label("syscall"),fa-movk-x-16(16,512),fa-svc(128),npd-branch(3,"return"),npd-label("negate"),fa-asm(3405774848,list(1,32,65536),list(0,31,0)),npd-label("return"),fa-ret())));
+   fa-image(npd-emit(rows,npd-labels(rows,0,list()),0));
+  }
+  def nve-active(owner) = record?(owner) && ((String) record_get(owner,"kind") == "native-event-owner") && ((Comparable) record_get(owner,"pid") == host_pid()) && record_get(owner,"active");
+  def nve-ready(owner) = nve-active(owner) && (record_get(owner,"queue") >= 0) && !nothing?(record_get(owner,"buffer"));
+  def nve-call(owner,args) {
+   if !nve-active(owner) then nothing() else {
+    record_set(owner,"calls",(record_get(owner,"calls") + 1));
+    jit_leaf_inram(record_get(owner,"request"),args);
+   };
+  }
+  def nve-note(owner,aspect,result) {
+   let flow = str_concat(int_to_str(record_get(owner,"pid")),str_concat(":",str_concat(int_to_str(owner),str_concat(":",int_to_str(record_get(owner,"id"))))));
+   let row = oh-reading("native-events",flow,aspect,json-node-string("available"),json-node-string(result),json-node-int(0),list(oh-need("host-event-resource",json-node-string(aspect))),list("observe-resource","release"),json-node-null());
+   record_set(owner,"reading",row); oh-frame(row); nothing();
+  }
+  def nve-open() {
+   let memory = npd-open();
+   let owner = record_new(0,"kind","native-event-owner","id",host_monotonic_ms(),"pid",host_pid(),"active",1,"memory",memory,"buffer",nothing(),"queue",-1,"next",0,"watches",list(),"calls",0,"waits",0,"delivered",0,"reading",nothing(),"code-live",0);
+   let image = nve-image();
+   let identity = intern_node(make_nodeid(31,2,0,188),cons(intern_trivial_string("native-events-darwin-arm64-v1"),cons(intern_trivial_int(owner),npd-nodes(image))));
+   record_set(owner,"identity",identity); record_set(owner,"request",list(0,identity,image));
+   let pid = nve-call(owner,list(0));
+   if ((Comparable) pid == host_pid()) then nve-open-queue(owner) else nve-note(owner,"native-admission","PID observation disagreed");
+   owner;
+  }
+  def nve-open-queue(owner) {
+   record_set(owner,"code-live",1);
+   let queue = nve-call(owner,list(1));
+   if (queue < 0) then nve-note(owner,"queue-admission",int_to_str(queue)) else {
+    record_set(owner,"queue",queue);
+    let flags = nve-call(owner,list(4,queue,2,1));
+    if ((Comparable) flags != 0) then nve-note(owner,"close-on-exec",int_to_str(flags)) else {
+     let buffer = npd-region(record_get(owner,"memory"),4096);
+     record_set(owner,"buffer",buffer);
+     if nothing?(buffer) then nve-note(owner,"event-memory","allocation unavailable") else 1;
+    };
+   };
+  }
+  def nve-uint(value,bytes) = if ((Comparable) bytes == 0) then "" else str_concat(byte_to_str((value % 256)),nve-uint((value / 256),(bytes - 1)));
+  def nve-wire(ident,filter,flags,notes,data,token) = str_concat(nve-uint(ident,8),str_concat(nve-uint((65536 + filter),2),str_concat(nve-uint(flags,2),str_concat(nve-uint(notes,4),str_concat(nve-uint(data,8),str_concat(nve-uint(token,8),nve-uint(0,16)))))));
+  def nve-copy(owner,offset,bytes) = nve-call(owner,list(3,npd-span(record_get(owner,"buffer"),offset,str_len(bytes)),bytes));
+  def nve-change(owner,watch,flags,notes,data) {
+   let wire = nve-wire(record_get(watch,"ident"),record_get(watch,"filter"),flags,notes,data,record_get(watch,"token"));
+   let copied = nve-copy(owner,16,wire);
+   if ((Comparable) copied != str_len(wire)) then nothing() else nve-call(owner,list(2,record_get(owner,"queue"),npd-span(record_get(owner,"buffer"),16,48),1,0,0,1,0));
+  }
+  def nve-watch(owner,ident,filter,owned,path,notes,data,flags) {
+   let token = (record_get(owner,"next") + 1); record_set(owner,"next",token);
+   let watch = record_new(0,"kind","native-event-watch","owner",owner,"token",token,"ident",ident,"filter",filter,"owned",owned,"path",path,"active",1,"registered",0);
+   record_set(owner,"watches",cons(watch,record_get(owner,"watches")));
+   let status = nve-change(owner,watch,flags,notes,data);
+   if (!nothing?(status) && ((Comparable) status == 0)) then {
+    record_set(watch,"registered",1); watch;
+   } else {
+    nve-note(owner,"registration",if nothing?(status) then "native result absent" else int_to_str(status));
+    nve-unwatch(owner,watch); nothing();
+   };
+  }
+  def nve-path(owner,path) {
+   if !nve-ready(owner) then nothing() else if (!((String) value_kind(path) == "string") || (str_find(path,byte_to_str(0),0) >= 0)) then nve-note(owner,"path","invalid path bytes") else {
+    let fd = npd-file-open(record_get(owner,"memory"),path,16809984);
+    if (nothing?(fd) || (fd < 0)) then nve-note(owner,"path-open",if nothing?(fd) then "native result absent" else int_to_str(fd))
+    else nve-watch(owner,fd,-4,1,path,127,0,33);
+   };
+  }
+  def nve-nonnegative(value) = ((String) value_kind(value) == "int") && (value >= 0);
+  def nve-timer(owner,millis) {
+   if !nve-ready(owner) then nothing() else if !nve-nonnegative(millis) then nve-note(owner,"timer","expected nonnegative milliseconds")
+   else nve-watch(owner,(record_get(owner,"next") + 1),-7,0,"",0,max2(1,millis),17);
+  }
+  // Read/write readiness borrows a live descriptor. The caller keeps it open
+  // until unwatch; the queue never closes borrowed descriptors.
+  def nve-readiness(owner,fd,write) {
+   if !nve-ready(owner) then nothing() else if (!nve-nonnegative(fd) || (fd > 2147483647) || !((String) value_kind(write) == "int") || !(((Comparable) write == 0) || ((Comparable) write == 1))) then nve-note(owner,"readiness","invalid descriptor or direction")
+   else if !nothing?(nve-find-ident(record_get(owner,"watches"),fd,if write then -2 else -1)) then nve-note(owner,"readiness","descriptor filter already owned")
+   else nve-watch(owner,fd,if write then -2 else -1,0,"",0,0,33);
+  }
+  def nve-find-ident(watches,ident,filter) = if nil?(watches) then nothing() else if (record_get(head(watches),"active") && ((Comparable) record_get(head(watches),"ident") == ident) && ((Comparable) record_get(head(watches),"filter") == filter)) then head(watches) else nve-find-ident(tail(watches),ident,filter);
+  def nve-owned(owner,watch) = record?(watch) && ((String) record_get(watch,"kind") == "native-event-watch") && ((Comparable) record_get(watch,"owner") == owner);
+  def nve-live(owner,watch) = nve-active(owner) && nve-owned(owner,watch) && record_get(watch,"active");
+  def nve-forget(watches,watch) = if nil?(watches) then list() else if ((Comparable) head(watches) == watch) then tail(watches) else cons(head(watches),nve-forget(tail(watches),watch));
+  def nve-unwatch(owner,watch) {
+   if !nve-owned(owner,watch) then 0 else if !record_get(watch,"active") then 1 else if !nve-active(owner) then 0 else {
+    let status = if record_get(watch,"owned") then npd-file-close(record_get(owner,"memory"),record_get(watch,"ident")) else if record_get(watch,"registered") then nve-change(owner,watch,2,0,0) else 0;
+    let released = !nothing?(status) && (((Comparable) status == 0) || (!record_get(watch,"owned") && ((Comparable) status == -2)));
+    if released then {
+     record_set(watch,"active",0); record_set(watch,"registered",0); record_set(owner,"watches",nve-forget(record_get(owner,"watches"),watch)); 1;
+    } else { nve-note(owner,"watch-release",if nothing?(status) then "native result absent" else int_to_str(status)); 0; };
+   };
+  }
+  def nve-reserve(owner,bytes) {
+   let old = record_get(owner,"buffer");
+   if (record_get(old,"bytes") >= bytes) then 1 else {
+    let next = npd-region(record_get(owner,"memory"),max2(bytes,(2 * record_get(old,"bytes"))));
+    if nothing?(next) then { nve-note(owner,"event-memory","growth unavailable"); 0; } else {
+     record_set(owner,"buffer",next);
+     let released = npd-region-close(old);
+     if ((Comparable) released != 0) then nve-note(owner,"event-memory-release",int_to_str(released))
+     else record_set(record_get(owner,"memory"),"regions",nve-forget(record_get(record_get(owner,"memory"),"regions"),old)); 1;
+    };
+   };
+  }
+  def nve-wait(owner,millis) {
+   if !nve-ready(owner) then nothing() else if !nve-nonnegative(millis) then nve-note(owner,"wait","expected nonnegative milliseconds") else {
+    let count = max2(1,len(record_get(owner,"watches")));
+    if !nve-reserve(owner,(64 + (48 * count))) then nothing() else nve-wait-ready(owner,millis,count);
+   };
+  }
+  def nve-wait-ready(owner,millis,count) {
+   let buffer = record_get(owner,"buffer");
+   nve-copy(owner,0,str_concat(nve-uint((millis / 1000),8),nve-uint(((millis % 1000) * 1000000),8)));
+   record_set(owner,"waits",(record_get(owner,"waits") + 1));
+   let got = nve-call(owner,list(2,record_get(owner,"queue"),0,0,npd-span(buffer,64,(48 * count)),count,0,npd-span(buffer,0,16)));
+   if nothing?(got) then nve-note(owner,"event-wait","native result absent") else if ((Comparable) got == -4) then list() else if (got < 0) then nve-note(owner,"event-wait",int_to_str(got)) else {
+    record_set(owner,"delivered",(record_get(owner,"delivered") + got));
+    nve-events(owner,buffer,0,got);
+   };
+  }
+  def nve-find(watches,token) = if nil?(watches) then nothing() else if ((Comparable) record_get(head(watches),"token") == token) then head(watches) else nve-find(tail(watches),token);
+  def nve-token(owner,buffer,offset) = npd-peek(buffer,offset,7) + (if (record_get(owner,"next") < 72057594037927936) then 0 else (npd-peek(buffer,(offset + 7),1) * 72057594037927936));
+  def nve-events(owner,buffer,at,count) {
+   if (at >= count) then list() else {
+    let offset = (64 + (48 * at));
+    let watch = nve-find(record_get(owner,"watches"),nve-token(owner,buffer,(offset + 24)));
+    let header = npd-peek(buffer,(offset + 10),6);
+    let flags = (header % 65536); let notes = (header / 65536);
+    let error = if ((Comparable) ((flags / 16384) % 2) == 1) then npd-peek(buffer,(offset + 16),4) else 0;
+    if (!nothing?(watch) && ((Comparable) record_get(watch,"filter") == -7)) then record_set(watch,"registered",0) else 0;
+    let rest = nve-events(owner,buffer,(at + 1),count);
+    if nothing?(watch) then rest else cons(list(watch,flags,notes,error),rest);
+   };
+  }
+  def nve-event-watch(event) = head(event);
+  def nve-event-flags(event) = nth(event,1);
+  def nve-event-notes(event) = nth(event,2);
+  def nve-event-error(event) = nth(event,3);
+  def nve-bit(value,bit) = ((Comparable) ((value / bit) % 2) == 1);
+  def nve-close-watches(owner,watches) {
+   if nil?(watches) then 1 else {
+    let first = nve-unwatch(owner,head(watches)); let rest = nve-close-watches(owner,tail(watches)); first && rest;
+   };
+  }
+  def nve-close-regions(regions) {
+   if nil?(regions) then 1 else {
+    let first = if record_get(head(regions),"active") then ((Comparable) npd-region-close(head(regions)) == 0) else 1;
+    let rest = nve-close-regions(tail(regions)); first && rest;
+   };
+  }
+  def nve-close(owner) {
+   if !nve-active(owner) then 0 else {
+    let watches = nve-close-watches(owner,record_get(owner,"watches"));
+    let queue = if !watches then 0 else if (record_get(owner,"queue") < 0) then 1 else ((Comparable) npd-file-close(record_get(owner,"memory"),record_get(owner,"queue")) == 0);
+    if queue then record_set(owner,"queue",-1) else if watches then nve-note(owner,"queue-release","close incomplete") else 0;
+    let regions = if (watches && queue) then nve-close-regions(record_get(record_get(owner,"memory"),"regions")) else 0;
+    let code = if regions then nve-release-code(owner) else 0;
+    let memory = if code then if npd-active(record_get(owner,"memory")) then npd-close(record_get(owner,"memory")) else 1 else 0;
+    if ((Comparable) memory == 1) then { record_set(owner,"active",0); 1; } else 0;
+   };
+  }
+  def nve-release-code(owner) {
+   let state = record_get(owner,"code-live");
+   if ((Comparable) state == 2) then 1 else {
+    let status = jit_leaf_inram(list(1,record_get(owner,"identity"),list()),0);
+    if (((Comparable) status == 1) || (((Comparable) state == 0) && ((Comparable) status == 0))) then { record_set(owner,"code-live",2); 1; } else 0;
+   };
+  }
+ }
+ 0;
+}

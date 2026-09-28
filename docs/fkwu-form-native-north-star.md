@@ -182,6 +182,15 @@ remain quiet. Explicit holds stay distinct from waiting. Repair observes the
 actual result before releasing care, and retains a new finding when another
 choice is needed.
 
+Native resource notifications connect that continuation to the host without a
+second process. A queue owns its registrations, readiness and timer events,
+working storage and final release. A quiet wait leaves filesystem metadata
+alone. Enrollment covers path arrival and replacement; a changed lease renews
+its deadline. Each host implementation supplies this lifecycle through Form's
+existing event and care language. The [Darwin event owner](native-resource-events.md)
+is the current working path; the broader scheduler and other hosts build from
+the same ownership contract.
+
 Bulk data stays in owned resident regions. A span carries allocation identity and generation, owner, offset, length, layout, access mode and completion dependencies. Crossings carry descriptors and batches. A zero-copy request preserves its alignment and lifetime contract or reports refusal.
 
 Device capacity is an admission ceiling. Each submitted resource view covers

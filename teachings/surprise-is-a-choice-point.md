@@ -53,8 +53,9 @@ Publication and readback establish what happened. Another failure enters the
 next choice with the same image and a fresh reading. Old responses cannot
 replay it; explicit holds retain their own release. Delayed telemetry keeps its
 place in the queue without delaying care or undoing its result. Native calls
-continue throughout. This in-process receiver is present; host filesystem push
-delivery remains a separate integration.
+continue throughout. The [native event owner](../docs/native-resource-events.md)
+connects host path notifications and lease timers to that receiver. Quiet waits
+leave care alone; a relevant event brings the same continuation forward.
 
 The implementation lives in `form/form-stdlib/bml/bml-demand-jit.bml` and
 `bml-demand-jit-owner.bml`; the shared protocol is described in
