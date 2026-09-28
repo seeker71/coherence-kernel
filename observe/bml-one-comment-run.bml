@@ -1,0 +1,71 @@
+// bml-one-comment-run.bml — inside a form.bml section BML speaks one comment: //.
+//
+// A section line whose first byte past its indentation is `;` is Form's comment carried into
+// BML. This door rewrites each such line's run of `;` as `//`, keeping the indentation and the
+// words, so the cursor and the compiler read the section alike. Outside a section `;` stays
+// Form's comment, and a line that begins inside a string literal is data and stays as it is.
+// stdin: paths separated by spaces, then optionally the word `write`; without it the door
+// only counts what it would rewrite.
+// preludes: form-stdlib/source-compiler.fk form-stdlib/meaning-codes.bml form-stdlib/bml/stdin-source.bml
+section [form.bml] {
+ class BmlOneComment {
+  def boc-words(s) {
+   let sp = str_find(s, " ", 0);
+   if (str_len(s) == 0) then list() else if (sp < 0) then list(s) else cons(fsc-sub(s, 0, sp), boc-words(trim(fsc-sub(s, (sp + 1), str_len(s)))));
+  }
+  def boc-byte(s, i) = str_byte_at(s, i);
+  def boc-line-end(s, i, end) = if (i >= end) then end else if eq(boc-byte(s, i), 10) then (i + 1) else boc-line-end(s, (i + 1), end);
+  def boc-indent-end(s, i, end) = if ((i < end) && (eq(boc-byte(s, i), 32) || eq(boc-byte(s, i), 9))) then boc-indent-end(s, (i + 1), end) else i;
+  def boc-semis-end(s, i, end) = if ((i < end) && eq(boc-byte(s, i), 59)) then boc-semis-end(s, (i + 1), end) else i;
+  // whether a string literal is still open at the end of a code line
+  def boc-scan(s, i, end, instr) {
+   if (i >= end) then instr
+   else if instr then (if eq(boc-byte(s, i), 92) then boc-scan(s, (i + 2), end, true) else if eq(boc-byte(s, i), 34) then boc-scan(s, (i + 1), end, false) else boc-scan(s, (i + 1), end, true))
+   else if eq(boc-byte(s, i), 34) then boc-scan(s, (i + 1), end, true)
+   else if (eq(boc-byte(s, i), 47) && ((i + 1) < end) && eq(boc-byte(s, (i + 1)), 47)) then false
+   else boc-scan(s, (i + 1), end, false);
+  }
+  // the rewritten lines of s[i, end) as reversed pieces, with the count of lines rewritten
+  def boc-span(s, i, end, instr, pieces, n) {
+   if (i >= end) then list(pieces, n) else boc-line(s, i, boc-line-end(s, i, end), end, instr, pieces, n);
+  }
+  def boc-line(s, i, le, end, instr, pieces, n) {
+   let ind = boc-indent-end(s, i, le);
+   let comment = (!instr) && (ind < le) && eq(boc-byte(s, ind), 59);
+   if comment then boc-span(s, le, end, false, cons(mc-cat(list(fsc-sub(s, i, ind), "//", fsc-sub(s, boc-semis-end(s, ind, le), le))), pieces), (n + 1))
+   else boc-span(s, le, end, boc-scan(s, i, le, instr), cons(fsc-sub(s, i, le), pieces), n);
+  }
+  // the whole source: every form.bml section body rewritten, everything else as it was
+  def boc-source(src, i, pieces, n) {
+   let pos = fsc-find-section-open(src, i);
+   if (pos < 0) then list(cons(fsc-sub(src, i, str_len(src)), pieces), n) else boc-section(src, i, pos, pieces, n);
+  }
+  def boc-section(src, i, pos, pieces, n) {
+   let dend = fsc-find-char-from(src, "]", (pos + 9));
+   let dialect = fsc-sub(src, (pos + 9), dend);
+   let brace = fsc-find-char-from(src, "{", dend);
+   let close = if fsc-high-level-form-dialect?(dialect) then fsc-bml-block-end(src, (brace + 1), 0) else fsc-section-end(src, (brace + 1));
+   let head = cons(fsc-sub(src, i, (brace + 1)), pieces);
+   let body = if str_eq(dialect, "form.bml") then boc-span(src, (brace + 1), close, false, head, n) else list(cons(fsc-sub(src, (brace + 1), close), head), n);
+   boc-source(src, close, nth(body, 0), nth(body, 1));
+  }
+  def boc-file(path, write) {
+   let src = read_file(path);
+   let got = boc-source(src, 0, list(), 0);
+   let out = str-join-reversed(nth(got, 0));
+   let n = nth(got, 1);
+   let wrote = if (write && (n > 0)) then write_file(path, out) else 0;
+   let kept = if (write && (n > 0)) then str_eq(read_file(path), out) else true;
+   print_str(mc-cat(list("[bml-one-comment] ", path, " lines=", int_to_str(n), if (write && (n > 0)) then (if kept then " written" else " WRITE-DIFFERS") else "")));
+   n;
+  }
+  def boc-files(paths, write) = if nil?(paths) then 0 else (boc-file(head(paths), write) + boc-files(tail(paths), write));
+  def boc-run() {
+   let words = boc-words(trim(stdin-text()));
+   let write = if nil?(words) then false else str_eq(nth(words, (len(words) - 1)), "write");
+   let paths = if write then take((len(words) - 1), words) else words;
+   boc-files(paths, write);
+  }
+ }
+ boc-run();
+}
