@@ -37,6 +37,17 @@ Found on the way and healed:
 - `cons` onto nothing stops on every arm (R143 released).
 - The prefix engine reads a keyword's name boundary and an exponent as the parser
   does (`bmf-prefix-state-band` 4194303).
+- fkwu's runtime moved, so validate asked the siblings, and a four-way sweep of the
+  54 bands this work touches found what main never asks: Go's source lens could not
+  reach `learn/homecoming-distillation-corpus.fk` or `control/offer-ack-core.fk`.
+  A kernel run from `form/` names an owner `form-stdlib/x.fk`, and no dependency
+  candidate climbed to the checkout's root. The candidates now end with that root
+  as every kernel's read-side doors find it, the first directory up holding `.git`;
+  every earlier candidate answers first, and the corpus-closure bands agree
+  four-way. Four bands whose subject is fkwu's own surface (fkwu children through
+  `host_spawn_at`, in-process machine-code leaves, the gift roster) now declare the
+  fourth-arm lane they always were. The 21 python-bmf bands answer exactly what
+  main answers.
 
 Pace, read beside a running sweep, so only the ratio counts: rule references go
 through an index built once instead of a walk of the rule list; `skip-ws` reads one
