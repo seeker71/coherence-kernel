@@ -82,6 +82,12 @@ waits perform no resource polling; registration changes preserve the owning
 continuation. Attribute events can resume a permission repair even when the
 existing size/mtime observation is unchanged.
 
+The same event owner now dispatches pipe readiness, child exit and cancellation
+timers alongside JIT care. Each subscription carries its receiving context.
+Quiet turns do not probe child status or rebuild readiness arrays. Failed writes
+retain the submitted bytes and accepted offset with their organ reading; process
+exit and fully drained streams remain separate completion observations.
+
 ## Health belongs to the running organ
 
 `form/form-stdlib/organ-health.bml` carries a shared event language. An organ

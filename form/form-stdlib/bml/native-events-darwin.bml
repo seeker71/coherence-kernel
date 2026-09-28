@@ -30,7 +30,7 @@ section [form.bml] {
   }
   def nve-open() {
    let memory = npd-open();
-   let owner = record_new(0,"kind","native-event-owner","id",host_monotonic_ms(),"pid",host_pid(),"active",1,"memory",memory,"buffer",nothing(),"queue",-1,"next",0,"watches",list(),"calls",0,"waits",0,"delivered",0,"reading",nothing(),"code-live",0);
+   let owner = record_new(0,"kind","native-event-owner","id",host_monotonic_ms(),"pid",host_pid(),"active",1,"memory",memory,"buffer",nothing(),"queue",-1,"next",0,"watches",list(),"calls",0,"waits",0,"delivered",0,"callbacks",0,"unhandled",list(),"reading",nothing(),"code-live",0);
    let image = nve-image();
    let identity = intern_node(make_nodeid(31,2,0,188),cons(intern_trivial_string("native-events-darwin-arm64-v1"),cons(intern_trivial_int(owner),npd-nodes(image))));
    record_set(owner,"identity",identity); record_set(owner,"request",list(0,identity,image));
@@ -83,12 +83,17 @@ section [form.bml] {
    if !nve-ready(owner) then nothing() else if !nve-nonnegative(millis) then nve-note(owner,"timer","expected nonnegative milliseconds")
    else nve-watch(owner,(record_get(owner,"next") + 1),-7,0,"",0,max2(1,millis),17);
   }
+  def nve-process(owner,pid) {
+   if !nve-ready(owner) then nothing() else if (!nve-nonnegative(pid) || (pid == 0) || (pid > 2147483647)) then nve-note(owner,"process","invalid process identity")
+   else if !nothing?(nve-find-ident(record_get(owner,"watches"),pid,-5)) then nve-note(owner,"process","process exit already owned")
+   else nve-watch(owner,pid,-5,0,"",2147483648,0,17);
+  }
   // Read/write readiness borrows a live descriptor. The caller keeps it open
   // until unwatch; the queue never closes borrowed descriptors.
   def nve-readiness(owner,fd,write) {
    if !nve-ready(owner) then nothing() else if (!nve-nonnegative(fd) || (fd > 2147483647) || !((String) value_kind(write) == "int") || !(((Comparable) write == 0) || ((Comparable) write == 1))) then nve-note(owner,"readiness","invalid descriptor or direction")
    else if !nothing?(nve-find-ident(record_get(owner,"watches"),fd,if write then -2 else -1)) then nve-note(owner,"readiness","descriptor filter already owned")
-   else nve-watch(owner,fd,if write then -2 else -1,0,"",0,0,33);
+   else nve-watch(owner,fd,if write then -2 else -1,0,"",0,0,1);
   }
   def nve-find-ident(watches,ident,filter) = if nil?(watches) then nothing() else if (record_get(head(watches),"active") && ((Comparable) record_get(head(watches),"ident") == ident) && ((Comparable) record_get(head(watches),"filter") == filter)) then head(watches) else nve-find-ident(tail(watches),ident,filter);
   def nve-owned(owner,watch) = record?(watch) && ((String) record_get(watch,"kind") == "native-event-watch") && ((Comparable) record_get(watch,"owner") == owner);
@@ -133,23 +138,51 @@ section [form.bml] {
   }
   def nve-find(watches,token) = if nil?(watches) then nothing() else if ((Comparable) record_get(head(watches),"token") == token) then head(watches) else nve-find(tail(watches),token);
   def nve-token(owner,buffer,offset) = npd-peek(buffer,offset,7) + (if (record_get(owner,"next") < 72057594037927936) then 0 else (npd-peek(buffer,(offset + 7),1) * 72057594037927936));
+  def nve-data(owner,buffer,offset) {
+   let high = npd-peek(buffer,(offset + 7),1); let low = npd-peek(buffer,offset,7);
+   if (high < 64) then (low + (high * 72057594037927936)) else if (high >= 192) then (low + ((high - 256) * 72057594037927936)) else nve-note(owner,"event-data","outside Form integer range");
+  }
   def nve-events(owner,buffer,at,count) {
    if (at >= count) then list() else {
     let offset = (64 + (48 * at));
     let watch = nve-find(record_get(owner,"watches"),nve-token(owner,buffer,(offset + 24)));
     let header = npd-peek(buffer,(offset + 10),6);
     let flags = (header % 65536); let notes = (header / 65536);
-    let error = if ((Comparable) ((flags / 16384) % 2) == 1) then npd-peek(buffer,(offset + 16),4) else 0;
-    if (!nothing?(watch) && ((Comparable) record_get(watch,"filter") == -7)) then record_set(watch,"registered",0) else 0;
+    let data = nve-data(owner,buffer,(offset + 16));
+    let error = if ((Comparable) ((flags / 16384) % 2) == 1) then data else 0;
+    if (!nothing?(watch) && (((Comparable) record_get(watch,"filter") == -7) || ((Comparable) record_get(watch,"filter") == -5))) then record_set(watch,"registered",0) else 0;
     let rest = nve-events(owner,buffer,(at + 1),count);
-    if nothing?(watch) then rest else cons(list(watch,flags,notes,error),rest);
+    if nothing?(watch) then rest else cons(list(watch,flags,notes,error,data),rest);
    };
   }
   def nve-event-watch(event) = head(event);
   def nve-event-flags(event) = nth(event,1);
   def nve-event-notes(event) = nth(event,2);
   def nve-event-error(event) = nth(event,3);
+  def nve-event-data(event) = nth(event,4);
   def nve-bit(value,bit) = ((Comparable) ((value / bit) % 2) == 1);
+  // A subscription carries its own receiving context. Wait reads the complete
+  // batch before any receiver changes registrations or releases resources.
+  def nve-bind(owner,watch,receiver,context) {
+   if !nve-live(owner,watch) then 0 else { record_set(watch,"receiver",receiver); record_set(watch,"context",context); 1; };
+  }
+  def nve-dispatch(owner,events) {
+   if nil?(events) then 1 else {
+    let event = head(events); let watch = nve-event-watch(event);
+    if !nve-live(owner,watch) then 0 else if record_has(watch,"receiver") then {
+     record_set(owner,"callbacks",(record_get(owner,"callbacks") + 1));
+     let receiver = record_get(watch,"receiver"); receiver(record_get(watch,"context"),event);
+    } else record_set(owner,"unhandled",cons(event,record_get(owner,"unhandled")));
+    nve-dispatch(owner,tail(events));
+   };
+  }
+  def nve-take(owner) {
+   let events = reverse(record_get(owner,"unhandled")); record_set(owner,"unhandled",list()); events;
+  }
+  def nve-turn(owner,millis) {
+   let events = nve-wait(owner,millis);
+   if nothing?(events) then nothing() else { nve-dispatch(owner,events); len(events); };
+  }
   def nve-close-watches(owner,watches) {
    if nil?(watches) then 1 else {
     let first = nve-unwatch(owner,head(watches)); let rest = nve-close-watches(owner,tail(watches)); first && rest;

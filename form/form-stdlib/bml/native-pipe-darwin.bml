@@ -1,12 +1,12 @@
-// Darwin ARM64 owned pipe descriptors and poll arrays, emitted by Form in RAM.
+// Darwin ARM64 owned pipes with persistent native event subscriptions in RAM.
 // CLOEXEC belongs to every original endpoint. Only parent's endpoints become
 // nonblocking; child stdio is duplicated by the existing argv spawn carrier.
-// preludes: form-stdlib/bml/native-pty-darwin.bml form-stdlib/bml/formbin-codec.bml form-stdlib/organ-health.bml
+// preludes: form-stdlib/bml/native-events-darwin.bml form-stdlib/bml/formbin-codec.bml
 section [form.bml] {
  class NativePipe {
   def npp-image() {
    let rows = npd-cat(list(
-    npd-route(0,"pid"),npd-route(1,"pipe"),npd-route(2,"fcntl"),npd-route(3,"write"),npd-route(4,"close"),npd-route(5,"poll"),npd-route(6,"store"),npd-route(7,"copy"),npd-route(8,"write-at"),
+    npd-route(0,"pid"),npd-route(1,"pipe"),npd-route(2,"fcntl"),npd-route(3,"write"),npd-route(4,"close"),npd-route(8,"write-at"),
     list(fa-movz-x(0,22),npd-branch(14,"negate")),
     list(npd-label("pid")),npd-sys(20),
     list(npd-label("pipe"),fa-add-x-imm(9,1,0),fa-movz-x(16,42),fa-movk-x-16(16,512),fa-svc(128),npd-branch(2,"negate"),fa-str-w(0,9,0),fa-str-w(1,9,4),fa-movz-x(0,0),npd-branch(14,"return")),
@@ -14,9 +14,6 @@ section [form.bml] {
     list(npd-label("write")),npd-shift3(),npd-sys(4),
     list(npd-label("write-at"),fa-add-x-r(2,2,4),fa-asm(3405774848,list(1,32,65536),list(3,3,4))),npd-shift3(),npd-sys(4),
     list(npd-label("close")),npd-shift1(),npd-sys(6),
-    list(npd-label("poll")),npd-shift3(),npd-sys(230),
-    list(npd-label("store"),fa-str-w(2,1,0),fa-movz-x(0,0),npd-branch(14,"return")),
-    list(npd-label("copy"),fa-add-x-imm(0,3,0),npd-label("copy-loop"),fa-cmp-x(3,0),npd-branch(0,"return"),fa-ldrb(8,2,0),fa-strb(8,1,0),fa-add-x-imm(1,1,1),fa-add-x-imm(2,2,1),fa-sub-x-imm(3,3,1),npd-branch(14,"copy-loop")),
     list(npd-label("syscall"),fa-movk-x-16(16,512),fa-svc(128),npd-branch(3,"return"),npd-label("negate"),fa-asm(3405774848,list(1,32,65536),list(0,31,0)),npd-label("return"),fa-ret())));
    fa-image(npd-emit(rows,npd-labels(rows,0,list()),0));
   }
@@ -27,75 +24,76 @@ section [form.bml] {
   def npp-called(owner,args) {
    record_set(owner,"calls",(record_get(owner,"calls") + 1)); jit_leaf_inram(record_get(owner,"request"),args);
   }
-  def npp-open() {
+  def npp-open() = npp-open-events(nve-open(),1);
+  def npp-open-with(events) = if !nve-ready(events) then nothing() else npp-open-events(events,0);
+  def npp-events(owner) = record_get(owner,"events");
+  def npp-open-events(events,owned) {
    let memory = npd-open(); let control = npd-region(memory,4096);
-   if nothing?(control) then npp-open-refused(memory) else npp-open-ready(memory,control);
+   if nothing?(control) then npp-open-refused(memory,events,owned) else npp-open-ready(memory,control,events,owned);
   }
-  def npp-open-refused(memory) {
-   let closed = npd-close(memory); print(list("pipe-memory-admission-refused","closed",closed)); form_error("native pipe control memory refused");
+  def npp-open-refused(memory,events,owned) {
+   let closed = npd-close(memory); let released = if owned then nve-close(events) else 1;
+   print(list("pipe-memory-admission-refused","closed",closed,"events-released",released)); form_error("native pipe control memory refused");
   }
-  def npp-open-ready(memory,control) {
-   let owner = record_new(0,"kind","native-pipe-owner","id",host_monotonic_ms(),"pid",host_pid(),"active",1,"memory",memory,"control",control,"ends",list(),"processes",list(),"code-state",0,"calls",0,"reads",0,"read-bytes",0,"writes",0,"write-bytes",0,"partial-writes",0,"would-block",0);
+  def npp-open-ready(memory,control,events,owned) {
+   let owner = record_new(0,"kind","native-pipe-owner","id",host_monotonic_ms(),"pid",host_pid(),"active",1,"memory",memory,"control",control,"events",events,"owns-events",owned,"ends",list(),"processes",list(),"code-state",0,"calls",0,"reads",0,"read-bytes",0,"writes",0,"write-bytes",0,"partial-writes",0,"would-block",0,"reaps",0);
    let image = npp-image(); let identity = intern_node(make_nodeid(31,2,0,188),cons(intern_trivial_string("native-pipe-darwin-arm64-v1"),cons(intern_trivial_int(owner),npd-nodes(image))));
    record_set(owner,"identity",identity); record_set(owner,"request",list(0,identity,image));
    let observed = npp-call(owner,list(0));
    if ((Comparable) observed == host_pid()) then record_set(owner,"code-state",1) else 0;
-   if (!((Comparable) observed == host_pid())) then npp-refuse(owner,"pipe native PID admission") else owner;
+   if (!((Comparable) observed == host_pid())) then npp-refuse(owner,"pipe native PID admission") else if !nve-ready(events) then npp-refuse(owner,"pipe event admission") else owner;
   }
   def npp-control(owner,at,bytes) = npd-span(record_get(owner,"control"),at,bytes);
   def npp-u32(owner,at) = npd-peek(record_get(owner,"control"),at,4);
-  def npp-store(owner,at,value) = npp-call(owner,list(6,npp-control(owner,at,4),value));
-  def npp-control-need(owner,bytes) {
-   let old = record_get(owner,"control");
-   if (bytes <= record_get(old,"bytes")) then 1 else npp-control-grow(owner,old,max2(bytes,(2 * record_get(old,"bytes"))));
-  }
-  def npp-control-grow(owner,old,bytes) {
-   let next = npd-region(record_get(owner,"memory"),bytes);
-   if nothing?(next) then npp-refuse(owner,"poll control allocation refused") else 0;
-   let released = npd-region-close(old); record_set(owner,"control",next);
-   if ((Comparable) released == 0) then 1 else npp-refuse(owner,"poll control release refused");
-  }
   def npp-u32-text(value,left) = if ((Comparable) left == 0) then "" else str_concat(byte_to_str((value % 256)),npp-u32-text((value / 256),(left - 1)));
-  def npp-poll-bytes(owner,entries,bins) {
-   if nil?(entries) then fbc-finish(bins,"") else npp-poll-byte-row(owner,head(entries),tail(entries),bins);
+  def npp-millis(value) = nve-nonnegative(value);
+  def npp-watch-end(owner,end) {
+   let prior = record_get(end,"watch");
+   if nve-live(npp-events(owner),prior) then prior else {
+    let watch = nve-readiness(npp-events(owner),record_get(end,"fd"),((String) record_get(end,"role") == "write"));
+    if nothing?(watch) then nothing() else { record_set(end,"watch",watch); nve-bind(npp-events(owner),watch,npp-end-event,end); watch; };
+   };
   }
-  def npp-poll-byte-row(owner,entry,rest,bins) {
-   let end = head(entry); let events = nth(entry,1);
-   if (!npp-live-end(owner,end)) then npp-refuse(owner,"poll endpoint ownership refused") else 0;
-   npp-poll-bytes(owner,rest,fbc-put(bins,str_concat(npp-u32-text(record_get(end,"fd"),4),npp-u32-text(events,4))));
+  def npp-unwatch-end(owner,end) {
+   let watch = record_get(end,"watch");
+   if nothing?(watch) then 1 else if nve-unwatch(npp-events(owner),watch) then { record_set(end,"watch",nothing()); 1; } else 0;
   }
-  def npp-poll(owner,entries,millis) {
-   if (!npp-active(owner)) then -9 else if (!(npp-millis(millis) && npp-poll-entries(owner,entries))) then -22 else npp-poll-admitted(owner,entries,millis);
+  def npp-end-event(end,event) {
+   let owner = record_get(end,"owner");
+   if !npp-live-end(owner,end) then 0 else {
+    record_set(end,"ready",event);
+    if !record_has(end,"job") then 0 else {
+     let job = record_get(end,"job");
+     if ((String) record_get(end,"role") == "write") then npp-write-step(owner,job)
+     else npp-read-progress(owner,job,record_get(end,"stream"),end,npp-read-event(owner,end,event));
+    };
+   };
   }
-  def npp-poll-entries(owner,entries) = if (!((String) value_kind(entries) == "list")) then 0 else if nil?(entries) then 1 else (npp-poll-entry(owner,head(entries)) && npp-poll-entries(owner,tail(entries)));
-  def npp-poll-entry(owner,entry) = if (!((String) value_kind(entry) == "list")) then 0 else if (!((Comparable) len(entry) == 2)) then 0 else if (!((String) value_kind(nth(entry,1)) == "int")) then 0 else if ((Comparable) nth(entry,1) == 1) then npp-role(owner,head(entry),"read") else if ((Comparable) nth(entry,1) == 4) then npp-role(owner,head(entry),"write") else 0;
-  def npp-millis(value) = (((String) value_kind(value) == "int") && ((value >= 0) && (value <= 2147483647)));
-  def npp-poll-admitted(owner,entries,millis) {
-   let bytes = npp-poll-bytes(owner,entries,list()); npp-control-need(owner,(1024 + str_len(bytes)));
-   let pointer = npp-control(owner,1024,str_len(bytes)); let copied = npp-call(owner,list(7,pointer,bytes));
-   if (!((Comparable) copied == str_len(bytes))) then npp-refuse(owner,"poll memory copy refused") else 0;
-   npp-call(owner,list(5,pointer,len(entries),millis));
-  }
-  def npp-revents(owner,index) = npd-peek(record_get(owner,"control"),(1030 + (index * 8)),2);
   def npp-ready(owner,end,events,millis) {
-   let status = npp-poll(owner,list(list(end,events)),millis);
-   if (status < 0) then status else npp-revents(owner,0);
+   if !npp-millis(millis) then -22 else if !(((events == 1) && npp-role(owner,end,"read")) || ((events == 4) && npp-role(owner,end,"write"))) then -9 else {
+    record_set(end,"ready",nothing());
+    if nothing?(npp-watch-end(owner,end)) then nothing() else {
+     let count = nve-turn(npp-events(owner),millis); let event = record_get(end,"ready");
+     if nothing?(count) then nothing() else if nothing?(event) then 0 else npp-event-flags(event,events);
+    };
+   };
   }
+  def npp-event-flags(event,ready) = ready + (if nve-bit(nve-event-flags(event),32768) then 16 else 0) + (if (nve-event-error(event) > 0) then 8 else 0);
   def npp-flag(flags,bit) = ((Comparable) ((flags / bit) % 2) == 1);
   def npp-available(owner,end) {
    let status = npd-ioctl(record_get(owner,"memory"),record_get(end,"fd"),1074030207,npp-control(owner,32,4));
    if ((Comparable) status == 0) then npp-u32(owner,32) else status;
   }
-  // EOF is established by zero queued bytes plus POLLHUP. file_read is used
+  // EOF is established by zero event-reported bytes plus EV_EOF. file_read is used
   // only for a positive measured queue; an empty result then means refusal.
   // That carrier does not expose the underlying errno, so this owner does not
   // invent one. Nonblocking read-side ownership excludes another reader.
-  def npp-read-ready(owner,end,flags) {
-   if (!npp-role(owner,end,"read")) then list("error",-9) else if npp-flag(flags,32) then list("error",-9) else npp-read-available(owner,end,flags,npp-available(owner,end));
+  def npp-read-event(owner,end,event) {
+   if (nve-event-error(event) > 0) then list("error",nve-event-error(event)) else if nothing?(nve-event-data(event)) then list("error","unavailable-read-extent") else npp-read-available(owner,end,npp-event-flags(event,1),nve-event-data(event));
   }
   def npp-read-available(owner,end,flags,available) {
    if (available < 0) then list("error",available) else if (available > 0) then npp-read-bytes(owner,end,file_read(record_get(end,"fd"),min2(available,65536)))
-   else if npp-flag(flags,16) then npp-read-eof(end) else if npp-flag(flags,8) then list("error","pipe-poll-error") else list("wait","");
+   else if npp-flag(flags,16) then npp-read-eof(end) else if npp-flag(flags,8) then list("error","pipe-event-error") else list("wait","");
   }
   def npp-read-eof(end) {
    record_set(end,"eof",1); list("eof","");
@@ -110,7 +108,8 @@ section [form.bml] {
    if (!npp-role(owner,end,"read")) then list("error",-9) else if (!npp-millis(millis)) then list("error",-22) else npp-read-admitted(owner,end,millis);
   }
   def npp-read-admitted(owner,end,millis) {
-   let flags = npp-ready(owner,end,1,millis); if (flags < 0) then list("error",flags) else npp-read-ready(owner,end,flags);
+   let flags = npp-ready(owner,end,1,millis); let event = record_get(end,"ready");
+   if nothing?(flags) then list("error","read-event-unavailable") else if (flags < 0) then list("error",flags) else if nothing?(event) then list("wait","") else npp-read-event(owner,end,event);
   }
   def npp-write(owner,end,bytes) = npp-write-at(owner,end,bytes,0);
   def npp-write-at(owner,end,bytes,offset) {
@@ -127,7 +126,7 @@ section [form.bml] {
    if (!(npp-active(owner) && (((String) value_kind(fd) == "int") && ((fd >= 0) && ((fd <= 2147483647) && (((String) role == "read") || ((String) role == "write"))))))) then nothing() else npp-end-admitted(owner,fd,role);
   }
   def npp-end-admitted(owner,fd,role) {
-   let end = record_new(0,"kind","native-pipe-end","owner",owner,"fd",fd,"role",role,"active",1,"eof",0,"borrowed",0);
+   let end = record_new(0,"kind","native-pipe-end","owner",owner,"fd",fd,"role",role,"active",1,"eof",0,"borrowed",0,"watch",nothing(),"ready",nothing());
    record_set(owner,"ends",cons(end,record_get(owner,"ends"))); end;
   }
   // Inherited stdio belongs to the enclosing worker lifetime. The pipe owner
@@ -157,13 +156,13 @@ section [form.bml] {
   }
   def npp-close-end(owner,end) {
    if (!npp-live-end(owner,end)) then if (record?(end) && (((Comparable) record_get(end,"owner") == owner) && ((Comparable) record_get(end,"active") == 0))) then 0 else -9
-   else npp-close-result(end,npp-call(owner,list(4,record_get(end,"fd"))));
+   else if !npp-unwatch-end(owner,end) then nothing() else npp-close-result(end,npp-call(owner,list(4,record_get(end,"fd"))));
   }
   def npp-close-result(end,status) {
    if ((Comparable) status == 0) then record_set(end,"active",0) else 0; status;
   }
   def npp-close-ends(owner,ends) {
-   if nil?(ends) then 1 else npp-close-rest(owner,tail(ends),if ((Comparable) record_get(head(ends),"borrowed") == 1) then 1 else ((Comparable) npp-close-end(owner,head(ends)) == 0));
+   if nil?(ends) then 1 else npp-close-rest(owner,tail(ends),if ((Comparable) record_get(head(ends),"borrowed") == 1) then npp-unwatch-end(owner,head(ends)) else ((Comparable) npp-close-end(owner,head(ends)) == 0));
   }
   def npp-close-rest(owner,rest,first) {
    let others = npp-close-ends(owner,rest); (first && others);
@@ -174,7 +173,8 @@ section [form.bml] {
   def npp-close-owned(owner) {
    let processes = npp-settle(owner,record_get(owner,"processes"));
    let endpoints = if processes then npp-close-ends(owner,record_get(owner,"ends")) else 0;
-   let control = if endpoints then npp-release-regions(record_get(record_get(owner,"memory"),"regions")) else 0;
+   let events = if endpoints then if record_get(owner,"owns-events") then if nve-active(npp-events(owner)) then nve-close(npp-events(owner)) else 1 else 1 else 0;
+   let control = if events then npp-release-regions(record_get(record_get(owner,"memory"),"regions")) else 0;
    let code = if (endpoints && control) then npp-release-code(owner) else 0;
    let memoryOwner = record_get(owner,"memory");
    let memory = if code then if npd-active(memoryOwner) then npd-close(memoryOwner) else 1 else 0;
@@ -213,10 +213,28 @@ section [form.bml] {
    if (!(((Comparable) a == 0) && (((Comparable) b == 0) && ((Comparable) c == 0)))) then npp-refuse(owner,"parent pipe nonblocking") else 0;
    let pid = host_spawn_at(argv,list(npp-fd-path(head(input)),npp-fd-path(nth(output,1)),npp-fd-path(nth(errors,1))));
    let ai = npp-close-end(owner,head(input)); let bo = npp-close-end(owner,nth(output,1)); let ce = npp-close-end(owner,nth(errors,1));
-   let job = record_new(0,"kind","native-pipe-process","owner",owner,"pid",pid,"input",parentIn,"stdout-end",parentOut,"stderr-end",parentErr,"pending","","sent",0,"finish",0,"stdout",list(),"stderr",list(),"reaped",if (pid > 0) then 0 else 1,"status",pid,"error","","closed",0);
+   let job = record_new(0,"kind","native-pipe-process","owner",owner,"pid",pid,"input",parentIn,"stdout-end",parentOut,"stderr-end",parentErr,"pending","","sent",0,"finish",0,"stdout",list(),"stderr",list(),"reaped",if (pid > 0) then 0 else 1,"status",pid,"error","","closed",0,"process-watch",nothing(),"cancel-watch",nothing(),"cancelled",0,"killed",0);
    record_set(owner,"processes",cons(job,record_get(owner,"processes")));
    if (!(((Comparable) ai == 0) && (((Comparable) bo == 0) && ((Comparable) ce == 0)))) then npp-refuse(owner,"child endpoint release") else 0;
-   if (pid < 1) then npp-spawn-refused(owner,job) else job;
+   if (pid < 1) then npp-spawn-refused(owner,job) else npp-spawn-watched(owner,job);
+  }
+  def npp-spawn-watched(owner,job) {
+   let input = record_get(job,"input"); let output = record_get(job,"stdout-end"); let errors = record_get(job,"stderr-end");
+   record_set(input,"job",job); record_set(output,"job",job); record_set(errors,"job",job);
+   record_set(output,"stream","stdout"); record_set(errors,"stream","stderr");
+   let a = npp-watch-end(owner,output); let b = npp-watch-end(owner,errors);
+   let process = nve-process(npp-events(owner),record_get(job,"pid"));
+   if !nothing?(process) then { record_set(job,"process-watch",process); nve-bind(npp-events(owner),process,npp-process-event,job); } else 0;
+   let reaped = npp-reap(owner,job);
+   if (nothing?(a) || nothing?(b) || (nothing?(process) && !reaped)) then npp-refuse(owner,"process subscriptions unavailable") else job;
+  }
+  def npp-process-event(job,event) {
+   let owner = record_get(job,"owner");
+   if !npp-process-live(owner,job) then 0 else if (nve-event-error(event) > 0) then npp-reap-error(job,nve-event-error(event)) else npp-reap(owner,job);
+  }
+  def npp-unwatch-job(owner,job,key) {
+   let watch = record_get(job,key);
+   if nothing?(watch) then 1 else if nve-unwatch(npp-events(owner),watch) then { record_set(job,key,nothing()); 1; } else 0;
   }
   def npp-spawn-refused(owner,job) {
    record_set(job,"error","spawn-refused");
@@ -226,10 +244,16 @@ section [form.bml] {
    if (!((String) value_kind(bytes) == "string")) then 0 else if (!npp-process-live(owner,job)) then 0 else if (((Comparable) record_get(job,"reaped") == 1) || (((Comparable) record_get(job,"finish") == 1) || (str_len(record_get(job,"pending")) > record_get(job,"sent")))) then 0 else npp-submitted(job,bytes);
   }
   def npp-submitted(job,bytes) {
-   record_set(job,"pending",bytes); record_set(job,"sent",0); 1;
+   record_set(job,"pending",bytes); record_set(job,"sent",0);
+   let owner = record_get(job,"owner"); let end = record_get(job,"input");
+   if (str_len(bytes) > 0) then if nothing?(npp-watch-end(owner,end)) then npp-refuse(owner,"input subscription unavailable") else 1
+   else if record_get(job,"finish") then ((Comparable) npp-close-end(owner,end) == 0) else npp-unwatch-end(owner,end);
   }
   def npp-half-close(owner,job) {
-   if (!npp-process-live(owner,job)) then 0 else record_set(job,"finish",1);
+   if (!npp-process-live(owner,job)) then 0 else {
+    record_set(job,"finish",1);
+    if (record_get(job,"sent") >= str_len(record_get(job,"pending"))) then ((Comparable) npp-close-end(owner,record_get(job,"input")) == 0) else 1;
+   };
   }
   def npp-take(owner,job,stream) {
    if (!npp-process-owned(owner,job)) then nothing() else if (!(((String) stream == "stdout") || ((String) stream == "stderr"))) then nothing() else npp-taken(job,stream,fbc-finish(record_get(job,stream),""));
@@ -239,7 +263,7 @@ section [form.bml] {
   }
   def npp-write-step(owner,job) {
    let end = record_get(job,"input"); let bytes = record_get(job,"pending"); let sent = record_get(job,"sent");
-   if (!npp-live-end(owner,end)) then 0 else if (sent < str_len(bytes)) then npp-write-progress(owner,job,npp-write-at(owner,end,bytes,sent)) else if ((Comparable) record_get(job,"finish") == 1) then npp-close-end(owner,end) else 0;
+   if (!npp-live-end(owner,end) || record_get(job,"cancelled")) then 0 else if (sent < str_len(bytes)) then npp-write-progress(owner,job,npp-write-at(owner,end,bytes,sent)) else if ((Comparable) record_get(job,"finish") == 1) then npp-close-end(owner,end) else 0;
   }
   def npp-write-progress(owner,job,status) {
    if (status > 0) then npp-write-accepted(job,(record_get(job,"sent") + status)) else if (((Comparable) status == -35) || ((Comparable) status == -4)) then 0 else npp-write-failed(owner,job,status);
@@ -248,73 +272,88 @@ section [form.bml] {
    if ((Comparable) sent == str_len(record_get(job,"pending"))) then npp-submitted(job,"") else record_set(job,"sent",sent);
   }
   def npp-write-failed(owner,job,status) {
-   record_set(job,"error",list("write",status)); record_set(job,"pending",""); record_set(job,"sent",0); npp-close-end(owner,record_get(job,"input"));
-  }
-  def npp-read-step(owner,job,stream) {
-   let end = record_get(job,str_concat(stream,"-end"));
-   if ((!npp-live-end(owner,end)) || ((Comparable) record_get(end,"eof") == 1)) then 0 else npp-read-progress(owner,job,stream,end,npp-read(owner,end,0));
+   record_set(job,"error",list("write",status)); npp-note(owner,job,"write",status); npp-close-end(owner,record_get(job,"input"));
   }
   def npp-read-progress(owner,job,stream,end,result) {
    let state = head(result); let value = nth(result,1);
-   if ((String) state == "bytes") then record_set(job,stream,fbc-put(record_get(job,stream),value)) else if ((String) state == "error") then record_set(job,"error",list(stream,value)) else if ((String) state == "eof") then npp-close-end(owner,end) else 0;
+   if ((String) state == "bytes") then record_set(job,stream,fbc-put(record_get(job,stream),value)) else if ((String) state == "error") then { record_set(job,"error",list(stream,value)); npp-note(owner,job,stream,value); } else if ((String) state == "eof") then npp-close-end(owner,end) else 0;
   }
   def npp-reap(owner,job) {
-   if ((Comparable) record_get(job,"reaped") == 1) then 1 else npp-reaped(owner,job,npd-wait(record_get(owner,"memory"),record_get(job,"pid"),record_get(owner,"control"),1));
+   if ((Comparable) record_get(job,"reaped") == 1) then 1 else {
+    record_set(owner,"reaps",(record_get(owner,"reaps") + 1));
+    npp-reaped(owner,job,npd-wait(record_get(owner,"memory"),record_get(job,"pid"),record_get(owner,"control"),1));
+   };
   }
   def npp-reaped(owner,job,result) {
    if ((Comparable) result == record_get(job,"pid")) then npp-reap-status(job,npp-u32(owner,512)) else if ((Comparable) result == 0) then 0 else npp-reap-error(job,result);
   }
   def npp-reap-status(job,status) {
-   record_set(job,"reaped",1); record_set(job,"status",status); 1;
+   record_set(job,"reaped",1); record_set(job,"status",status);
+   let owner = record_get(job,"owner"); let process = npp-unwatch-job(owner,job,"process-watch"); let timer = npp-unwatch-job(owner,job,"cancel-watch"); process && timer;
   }
   def npp-reap-error(job,status) {
-   record_set(job,"error",list("wait",status)); 0;
-  }
-  def npp-step-jobs(owner,jobs) {
-   if nil?(jobs) then 1 else npp-step-job(owner,head(jobs),tail(jobs));
-  }
-  def npp-step-job(owner,job,rest) {
-   npp-write-step(owner,job); npp-read-step(owner,job,"stdout"); npp-read-step(owner,job,"stderr"); npp-reap(owner,job); npp-step-jobs(owner,rest);
-  }
-  def npp-wait-entries(owner,jobs,entries) {
-   if nil?(jobs) then entries else npp-wait-job(owner,head(jobs),tail(jobs),entries);
-  }
-  def npp-wait-job(owner,job,rest,entries) {
-   let output = record_get(job,"stdout-end"); let errors = record_get(job,"stderr-end"); let input = record_get(job,"input");
-   let a = if npp-live-end(owner,output) then cons(list(output,1),entries) else entries;
-   let b = if npp-live-end(owner,errors) then cons(list(errors,1),a) else a;
-   let c = if (npp-live-end(owner,input) && (record_get(job,"sent") < str_len(record_get(job,"pending")))) then cons(list(input,4),b) else b;
-   npp-wait-entries(owner,rest,c);
+   record_set(job,"error",list("wait",status)); npp-note(record_get(job,"owner"),job,"child-reap",status); 0;
   }
   def npp-pump(owner,millis) {
    if (!npp-active(owner)) then -9 else if (!npp-millis(millis)) then -22 else npp-pump-admitted(owner,millis);
   }
   def npp-pump-admitted(owner,millis) {
-   let entries = npp-wait-entries(owner,record_get(owner,"processes"),list());
-   let status = if nil?(entries) then 0 else npp-poll(owner,entries,millis);
-   if (status < 0) then if ((Comparable) status == -4) then 0 else npp-refuse(owner,"process array poll") else npp-step-jobs(owner,record_get(owner,"processes"));
+   if nil?(record_get(npp-events(owner),"watches")) then 0 else nve-turn(npp-events(owner),millis);
   }
   def npp-done(owner,job) = (((Comparable) record_get(job,"reaped") == 1) && ((!npp-live-end(owner,record_get(job,"stdout-end"))) && (!npp-live-end(owner,record_get(job,"stderr-end")))));
-  def npp-close-job-ends(owner,job) = npp-close-ends(owner,list(record_get(job,"input"),record_get(job,"stdout-end"),record_get(job,"stderr-end")));
+  def npp-close-job-ends(owner,job) {
+   let ends = npp-close-ends(owner,list(record_get(job,"input"),record_get(job,"stdout-end"),record_get(job,"stderr-end")));
+   let process = if record_get(job,"reaped") then npp-unwatch-job(owner,job,"process-watch") else 0;
+   let timer = if process then npp-unwatch-job(owner,job,"cancel-watch") else 0; ends && process && timer;
+  }
   def npp-settle(owner,jobs) {
    if nil?(jobs) then 1 else npp-settle-rest(owner,tail(jobs),npp-stop(owner,head(jobs)));
   }
   def npp-settle-rest(owner,jobs,first) {
    let rest = npp-settle(owner,jobs); (first && rest);
   }
-  def npp-stop(owner,job) {
-   npp-close-end(owner,record_get(job,"input"));
-   if ((Comparable) record_get(job,"reaped") == 0) then npd-signal(record_get(owner,"memory"),record_get(job,"pid"),15) else 0;
-   npp-stop-wait(owner,job,host_monotonic_ms(),0);
+  field NppCancelGraceMs = 250;
+  field NppSettleMs = 3000;
+  // Cancellation starts an owned continuation. The grace timer and child-exit
+  // event advance it while the same queue continues serving its other owners.
+  def npp-cancel(owner,job,grace) {
+   if !(npp-process-live(owner,job) && npp-millis(grace)) then 0 else {
+    record_set(job,"finish",1); let input = npp-close-end(owner,record_get(job,"input"));
+    if record_get(job,"reaped") then ((Comparable) input == 0) else {
+     if !record_get(job,"cancelled") then {
+      record_set(job,"cancelled",1); record_set(job,"cancel-start",host_monotonic_ms()); record_set(job,"cancel-grace",grace);
+      let signal = npd-signal(record_get(owner,"memory"),record_get(job,"pid"),15); record_set(job,"cancel-signal",signal);
+      if (signal != 0) then npp-note(owner,job,"cancel-signal",signal) else 0;
+     } else 0;
+     if record_get(job,"killed") then 1 else npp-arm-cancel(owner,job);
+    };
+   };
   }
-  def npp-stop-wait(owner,job,start,killed) {
-   npp-read-step(owner,job,"stdout"); npp-read-step(owner,job,"stderr"); let reaped = npp-reap(owner,job);
-   if (reaped && npp-done(owner,job)) then npp-stop-closed(owner,job) else if ((host_monotonic_ms() - start) > 3000) then 0 else npp-stop-continue(owner,job,start,killed);
+  def npp-arm-cancel(owner,job) {
+   if nve-live(npp-events(owner),record_get(job,"cancel-watch")) then 1 else {
+    let remaining = max2(0,(record_get(job,"cancel-grace") - (host_monotonic_ms() - record_get(job,"cancel-start"))));
+    let timer = nve-timer(npp-events(owner),remaining); record_set(job,"cancel-watch",timer);
+    if nothing?(timer) then 0 else nve-bind(npp-events(owner),timer,npp-cancel-event,job);
+   };
   }
-  def npp-stop-continue(owner,job,start,killed) {
-   let next = if (((Comparable) record_get(job,"reaped") == 0) && (((Comparable) killed == 0) && ((host_monotonic_ms() - start) > 250))) then npd-signal(record_get(owner,"memory"),record_get(job,"pid"),9) else -1;
-   let entries = npp-wait-entries(owner,list(job),list()); if nil?(entries) then 0 else npp-poll(owner,entries,5);
-   npp-stop-wait(owner,job,start,if ((Comparable) next == 0) then 1 else killed);
+  def npp-cancel-event(job,event) {
+   let owner = record_get(job,"owner"); npp-unwatch-job(owner,job,"cancel-watch");
+   if npp-reap(owner,job) then 1 else {
+    let signal = npd-signal(record_get(owner,"memory"),record_get(job,"pid"),9);
+    record_set(job,"kill-signal",signal); record_set(job,"killed",((Comparable) signal == 0));
+    if ((Comparable) signal != 0) then { npp-note(owner,job,"kill-signal",signal); 0; } else 1;
+   };
+  }
+  def npp-stop(owner,job) = npp-stop-for(owner,job,NppCancelGraceMs(),NppSettleMs());
+  def npp-stop-for(owner,job,grace,observeMillis) {
+   if !(npp-process-live(owner,job) && npp-millis(observeMillis)) then 0 else if !npp-cancel(owner,job,grace) then 0 else npp-stop-wait(owner,job,host_monotonic_ms(),observeMillis);
+  }
+  def npp-stop-wait(owner,job,start,allowance) {
+   let remaining = (allowance - (host_monotonic_ms() - start));
+   if npp-done(owner,job) then npp-stop-closed(owner,job) else if (remaining <= 0) then 0 else {
+    let step = npp-pump(owner,remaining);
+    if nothing?(step) then 0 else npp-stop-wait(owner,job,start,allowance);
+   };
   }
   def npp-stop-closed(owner,job) {
    let closed = npp-close-job-ends(owner,job); record_set(job,"closed",closed); closed;
@@ -335,6 +374,12 @@ section [form.bml] {
   }
   def npp-close-borrowed-rest(rest,first) {
    let others = npp-close-borrowed-rows(rest); (first && others);
+  }
+  def npp-note(owner,job,aspect,value) {
+   let flow = str_concat(int_to_str(owner),str_concat(":",int_to_str(record_get(job,"pid"))));
+   let observed = if nothing?(value) then json-node-null() else if ((String) value_kind(value) == "string") then json-node-string(value) else json-node-int(value);
+   let row = oh-reading("native-pipe",flow,aspect,json-node-string("available"),observed,json-node-int(0),list(oh-need("owned-process-resource",json-node-string(aspect))),list("resume-owned-work","release"),json-node-null());
+   record_set(job,"reading",row); record_set(owner,"reading",row); oh-frame(row); nothing();
   }
   def npp-health(owner,row) = if record_has(owner,"diagnostic-path") then npp-health-at(record_get(owner,"diagnostic-path"),row) else oh-voice(row);
   def npp-health-at(path,row) {

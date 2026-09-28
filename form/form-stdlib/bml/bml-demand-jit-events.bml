@@ -4,8 +4,10 @@
 section [form.bml] {
  class BmlDemandJitEvents {
   def bdje-open(owner) = bdje-open-at(owner,BDJGRoot());
-  def bdje-open-at(owner,root) {
-   let engine = record_new(0,"kind","bml-demand-jit-events","pid",host_pid(),"active",1,"owner",owner,"events",nve-open(),"root",root,"bindings",list(),"last",nothing(),"actions",0);
+  def bdje-open-at(owner,root) = bdje-open-events(owner,root,nve-open(),1);
+  def bdje-open-with(owner,root,events) = if !nve-ready(events) then nothing() else bdje-open-events(owner,root,events,0);
+  def bdje-open-events(owner,root,events,owned) {
+   let engine = record_new(0,"kind","bml-demand-jit-events","pid",host_pid(),"active",1,"owner",owner,"events",events,"owns-events",owned,"root",root,"bindings",list(),"last",nothing(),"actions",0);
    bdje-sync(engine); engine;
   }
   def bdje-active(engine) = record?(engine) && ((String) record_get(engine,"kind") == "bml-demand-jit-events") && ((Comparable) record_get(engine,"pid") == host_pid()) && record_get(engine,"active");
@@ -55,7 +57,14 @@ section [form.bml] {
    let timer = if busy then nve-timer(events,max2(1,(deadline - now_unix_ms()))) else nothing();
    let binding = record_new(0,"id",bdje-care-id(care),"watches",if nothing?(timer) then watches else cons(timer,watches));
    record_set(engine,"bindings",cons(binding,record_get(engine,"bindings")));
+   bdje-bind(engine,record_get(binding,"watches"));
    if bdj-care-resource-changed?(care) then bdje-hear(engine,care) else 0;
+  }
+  def bdje-bind(engine,watches) {
+   if nil?(watches) then 1 else { nve-bind(bdje-events(engine),head(watches),bdje-resource-event,engine); bdje-bind(engine,tail(watches)); };
+  }
+  def bdje-resource-event(engine,event) {
+   if !bdje-active(engine) then 0 else { bdje-deliver(engine,event); bdje-sync(engine); };
   }
   def bdje-drop(engine,binding) {
    let closed = nve-close-watches(bdje-events(engine),record_get(binding,"watches"));
@@ -134,23 +143,24 @@ section [form.bml] {
     };
    };
   }
-  def bdje-deliver-all(engine,events) {
-   if nil?(events) then 1 else { bdje-deliver(engine,head(events)); bdje-deliver-all(engine,tail(events)); };
-  }
   def bdje-wait(engine,millis) {
    if !bdje-active(engine) then nothing() else {
     let before = record_get(engine,"actions"); bdje-sync(engine);
     if (record_get(engine,"actions") > before) then (record_get(engine,"actions") - before) else {
-     let events = nve-wait(bdje-events(engine),millis);
-     if nothing?(events) then nothing() else {
-      bdje-deliver-all(engine,events); bdje-sync(engine); (record_get(engine,"actions") - before);
+     let received = nve-turn(bdje-events(engine),millis);
+     if nothing?(received) then nothing() else {
+      bdje-sync(engine); (record_get(engine,"actions") - before);
      };
     };
    };
   }
+  def bdje-release-bindings(engine,bindings) {
+   if nil?(bindings) then 1 else { let first = bdje-drop(engine,head(bindings)); let rest = bdje-release-bindings(engine,tail(bindings)); first && rest; };
+  }
   def bdje-close(engine) {
    if !bdje-active(engine) then 0 else {
-    let closed = nve-close(bdje-events(engine));
+    let bindings = bdje-release-bindings(engine,record_get(engine,"bindings"));
+    let closed = if !bindings then 0 else if record_get(engine,"owns-events") then nve-close(bdje-events(engine)) else 1;
     if closed then { record_set(engine,"active",0); record_set(engine,"bindings",list()); } else 0; closed;
    };
   }
