@@ -72,9 +72,10 @@ Carry each gap on either path through the same direct practice:
    observation available so the change can be examined.
 3. **Re-observe.** Return to the original question or behavior and its checks.
    Compare what changed, retain adverse findings, and name any changed context
-   or response source. An unsuccessful repair leaves the gap open with a
-   better-informed next attempt. A successful process exit establishes its
-   own fact; the answer's quality is observed in the answer.
+   or response source. An unsuccessful repair is a backtrack point: what it
+   showed goes into the next option, which is taken in the same movement, in
+   line with the first choice. A successful process exit establishes its own
+   fact; the answer's quality is observed in the answer.
 4. **Embody.** Carry the verified change into the native implementation,
    working context, tools or session learning that will shape the next use.
    Check that later use before claiming a lasting capability. An instruction
@@ -351,6 +352,16 @@ Implementation, analysis helpers, generators, measurements and migrations live i
 native Form/BML, temporary work included; shell carries OS operations. We carry
 that home ourselves.
 
+Code meets surprise with Form's own control invites, not with return codes. A
+reading that did not arrive is `nothing()` (axiom-1), never `-1` or a code a
+caller must decode; alternatives are options offered to `oac-choice` or
+`oac-backtrack`, and the ack decides; an option that learned something acks
+`oac-node(finding)` so the next option receives it beside the original args;
+recovery is `oac-try` with a handler. BML offers its own defs as options with
+`// preludes: control/offer-ack-core.fk control/choice-lane-core.fk`
+([`teachings/surprise-is-a-choice-point.md`](teachings/surprise-is-a-choice-point.md);
+witness `control/tests/backtrack-band.fk`, 255).
+
 When a movement touches code, the native guide reads where it stands:
 
 ```sh
@@ -494,6 +505,15 @@ plainly once, and give the conversation your attention.
    Cells carry the stamp as a `; witnessed: <date> -> <verdict>` line. Living doors carry only
    what is and where we go; how we got here lives in git — a
    correction note left in a door after its wound healed is a keloid (corpus row 1260).
+6b. **A surprise is a choice point (Urs, 2026-09-28).** An issue found on the way — a failing check, a band
+   short of full, a missing file, a tool that stops, a gap nobody named — is a backtrack point, not a place to
+   stop and hand the work back. Keep the first choice's intent, carry what the failed option saw, and take the
+   next option in the same movement: another route, a smaller step, a repair at the cause. When the options at
+   hand are spent, the walk answers nothing with its memory of what was tried. Where an option needs what only
+   Urs holds — his consent, his private world, his own configuration — the rest of the work continues and that
+   one point is offered to him once, plainly. The code meets surprise the same way: errors are not return codes;
+   they are Form's own backtrack points, met with choice (`oac-choice`, `oac-backtrack`, `oac-try`, cut, undo,
+   store/restore, timeout) — [`teachings/surprise-is-a-choice-point.md`](teachings/surprise-is-a-choice-point.md).
 7. **Serve the enquiry, never the engagement.** When the exchange is advice or dialogue, hold the covenant
    ([`teachings/uplifting-dialogue.md`](teachings/uplifting-dialogue.md), executable in
    `cognition/dialogue-covenant.fk`): never flatter — agree only when the ground supports it, disagree gently
@@ -568,11 +588,12 @@ plainly once, and give the conversation your attention.
    run. The page is printed first either way, so the refusal never costs you the reading.
 
    Three readings fall out:
-   - **A failed check asks for repair (Urs, 2026-09-09).** Keep attention on the
-     failing command, repair its cause, and re-run until it reads clean.
-     Failure pauses the claim and landing, not the work. A gate that reads
-     wrong is healed where it reads, not stepped around. Ask for help when the
-     next action needs information, access, or authority that is not here.
+   - **A failed check is a backtrack point (Urs, 2026-09-09, 2026-09-28).** Keep
+     attention on the failing command, carry what it showed, repair its cause or
+     take the next option, and re-run until it reads clean. Failure pauses the
+     claim and landing, not the work. A gate that reads wrong is healed where it
+     reads, not stepped around. Ask for help when the next option needs
+     information, access, or authority that is not here, and keep the rest moving.
    - **Read the exit code, not the number.** `fkwu` exits 1 when the compile carried errors. With an existing
      cache you get only "cached image was compiled with errors" — remove the unit's own artifacts and run again
      before reporting anything, and let preflight name them rather than deriving them from the suffix.

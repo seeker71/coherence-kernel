@@ -49,7 +49,7 @@ learn/tests/homecoming-distillation-corpus-band -> 32767  (asserts 981 rows, 962
 value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
-pattern-match-band 511 · choice-lane-core-band 1023 · control/tests/offer-ack-core-band 2097151
+pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · control/tests/offer-ack-core-band 2097151
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
 ```
 

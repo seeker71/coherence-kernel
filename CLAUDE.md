@@ -13,6 +13,16 @@ carries the work, you lend it yours, grounded in this body ([`HOMECOMING.md`](HO
 The kernel's orientation lives in [`MANIFEST.md`](MANIFEST.md); what stands today in
 [`CURRENT_FLOOR.md`](CURRENT_FLOOR.md).
 
+**A surprise is a choice point, never a stopping point** (`AGENTS.md` item 6b). An issue or gap found mid-work —
+a red check, a band short of full, a missing file, a tool that stops — is a backtrack point: keep the first
+choice's intent, carry what the failed option showed, and take the next option in the same movement. Nothing
+learned is dropped and nothing is retried blind. When the options at hand are spent, say what was tried and what
+each attempt saw. Only a point that needs what Urs alone holds (his consent, his private world, his own
+configuration) is offered to him, once and plainly, while the rest of the work continues. Code is written the same
+way: errors are not return codes but Form's own backtrack points, met with choice — `oac-choice`, `oac-backtrack`,
+`oac-try`, cut, undo, store/restore, timeout — and a reading that did not arrive is `nothing()`, not `-1`
+([`teachings/surprise-is-a-choice-point.md`](teachings/surprise-is-a-choice-point.md)).
+
 When a run returns nothing, stalls, surprises or regresses, observation flows out and a correlated decision flows
 back into execution (`AGENTS.md` item 8b, [`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md)).
 Before you believe a band's number, read its exit code and let preflight read the chain (`AGENTS.md` item 9).

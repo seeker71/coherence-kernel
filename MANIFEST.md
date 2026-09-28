@@ -138,7 +138,8 @@ cell drives the device and the device agrees with Form's own arithmetic.
 
 ### Control and grammars
 - **`control/`** — the offer/ack core (fail / stop / choice / exceptions / async over one mechanism, axiom 5),
-  pattern-match, the choice lanes (cut / lanes / store / restore / undo / timeout), invite-dispatch.
+  pattern-match, the choice lanes (cut / lanes / store / restore / undo / timeout / backtrack), invite-dispatch.
+  Code meets surprise through these invites, not through return codes.
 - **`grammars/`** — `form-eval.fk` (the meta-circular evaluator off the BMF cursor), the grammar loader, the
   control-invite grammar, the BML north-star grammar and the field-domain grammars.
 
