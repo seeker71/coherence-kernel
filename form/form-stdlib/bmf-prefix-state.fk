@@ -8,7 +8,8 @@
 ; cursor; there is no lexical token stream or tokenizer pre-step.
 ;
 ; Supported pattern data: lit, run, ref, seq, alt, opt, cap, rep, sep, str,
-; char, num and chain (calls, members, indexes and postfix ++/--).  A grammar
+; char, num, chain (calls, members, indexes and postfix ++/--) and infix
+; (operands joined by the operators of a precedence table).  A grammar
 ; that offers another pattern receives `unsupported`, never a guessed verdict.
 ; Fuel and the separately offered materialization envelope are explicit. Empty
 ; input is a viable prefix, distinct from a complete parse and malformed input.
@@ -259,8 +260,12 @@
             (if (cur-eof? cc) (gsp-ok c fuel)
                 (do
                     (let byte (cur-peek cc))
+                    ;; a `<` that opens no generic call ends the chain, as the parser's
+                    ;; gm-call-suffix does, and is left to what follows (an operator)
                     (if (eq byte 60)
-                        (gsp-generic-call g exprp cc fuel)
+                        (do
+                            (let gen (gsp-generic-call g exprp cc fuel))
+                            (if (gsp-status? gen "no") (gsp-ok c (gsp-fuel gen)) gen))
                     (if (eq byte 40)
                         (gsp-args g exprp (cur-advance cc 1) (sub fuel 1))
                     (if (eq byte 46)
@@ -290,6 +295,37 @@
                 (gsp-chain-loop g exprp (gsp-cur first) (gsp-fuel first))
                 first)))
 
+    ;; infix: an operand, then while an operator holds, another operand. The
+    ;; shape of a prefix does not depend on precedence, so the table's order
+    ;; only decides which spelling is read (<= before <).
+    (defn gsp-infix-op (table c fuel)
+        (if (nil? table) (gsp-no c fuel "no-operator")
+            (do
+                (let one (gsp-lit (head (head table)) c fuel))
+                (if (gsp-status? one "no")
+                    (gsp-infix-op (tail table) c (gsp-fuel one))
+                    one))))
+    (defn gsp-infix-loop (g operand table c fuel)
+        (do
+            (let cc (skip-ws c))
+            (if (le fuel 0) (gsp-timeout cc)
+            (if (cur-eof? cc) (gsp-ok c fuel)
+                (do
+                    (let op (gsp-infix-op table cc fuel))
+                    (if (gsp-status? op "no") (gsp-ok c (gsp-fuel op))
+                    (if (not (gsp-status? op "ok")) op
+                        (do
+                            (let rhs (gsp-match g operand (gsp-cur op) (gsp-fuel op)))
+                            (if (gsp-status? rhs "ok")
+                                (gsp-infix-loop g operand table (gsp-cur rhs) (gsp-fuel rhs))
+                                rhs)))))))))
+    (defn gsp-infix (g operand table c fuel)
+        (do
+            (let first (gsp-match g operand c fuel))
+            (if (gsp-status? first "ok")
+                (gsp-infix-loop g operand table (gsp-cur first) (gsp-fuel first))
+                first)))
+
     (defn gsp-match-tag (g pat c fuel tag)
         (if (le fuel 0) (gsp-timeout c)
             (do
@@ -313,7 +349,9 @@
                 (if (str_eq tag "num") (gsp-num c left)
                 (if (str_eq tag "chain")
                     (gsp-chain g (nth pat 1) (nth pat 2) c left)
-                    (gsp-unsupported c left tag)))))))))))))))))
+                (if (str_eq tag "infix")
+                    (gsp-infix g (nth pat 1) (nth pat 2) c left)
+                    (gsp-unsupported c left tag))))))))))))))))))
     (defn gsp-match (g pat c fuel)
         (do
             (let tag (head pat))
