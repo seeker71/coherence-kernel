@@ -45,9 +45,11 @@ Every lane below speaks through this door.
   takes the open gap in [`learn/native-turn-queue.jsonl`](learn/native-turn-queue.jsonl)
   with the fewest attempts, runs its band, hands the goal to the native code lane
   ([`observe/form-cli-code-run.fk`](observe/form-cli-code-run.fk), local Qwen in
-  one session) and runs the band again. A green band keeps its edit for the
-  landing; any other candidate waits under `.hearth/native-turns` and the source
-  is restored. One row lands in
+  one session) and runs the band again. The turn is a backtrack walk: an attempt
+  that did not turn the band green keeps its candidate under `.hearth/native-turns`,
+  restores the source, and hands what it saw (the band's reading, the lane's status,
+  the candidate's diff) to a second attempt on the same goal. A green band keeps
+  its edit for the landing. Each attempt lands its own row in
   [`receipts/native-turn-ledger.jsonl`](receipts/native-turn-ledger.jsonl), naming
   who began the turn.
 - **The night** — launchd runs [`observe/scheduled-walk.bml`](observe/scheduled-walk.bml)
