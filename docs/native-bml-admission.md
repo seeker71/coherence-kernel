@@ -76,8 +76,11 @@ def first-reading(x) = choice { len(x); str_len(x); 0 };
 def label(name) = name ?? "unnamed";
 ```
 
-Intrinsic call names lower directly to existing Form owners. Their argument
-counts are checked after pipeline composition. Import the owning library through
+Intrinsic call names resolve to existing Form owners after lexical binding.
+Parameters, local values, captured functions and declared functions take
+precedence over an intrinsic alias, including bare `stop` and `fail`. Unbound
+bare `stop` and `fail` still mean absence. Intrinsic argument counts are checked
+after pipeline composition and name resolution. Import the owning library through
 `preludes:` as with other native calls.
 
 | Surface | Existing owner | Meaning |
@@ -167,16 +170,24 @@ Within BML, an adjacent `do(...)` call and a whitespace-separated
 
 ## Local lift
 
-A lift stays inside Form and admits every door the catalog offers whose body
-is Form and whose carrier is local. File and shared memory are two of those
-doors. `host:memory` is the adapter over `shm_offer` / `shm_receive`. HTTP,
-audio, video and speech are open on the same terms. A name that is not a door
-stays absent. Closing a catalog door is not part of the lift.
+`form/form-stdlib/form-lift.bml` supplies lifting guidance to the public
+native `code` controller whenever the supplied sources contain executable
+BML. The controller retains the original sources, writable paths, checks and
+checkpoint. Its tools read and edit resident document values in-process;
+filesystem loading/publication belongs to the caller, and live telemetry uses
+shared memory. No model-selected shell command, network tool or provider is
+admitted by this path. The host capability catalog remains a separate inventory.
 
-The executable face is `form/form-stdlib/form-lift.bml`. It names the word
-width, the flag width, and the present zero. `template
-LiftCrossing<Protocol, Carrier>` is the generic shape. A class owns admission.
-`|> filter` keeps a crossing when the body is Form and the door is local.
-`??` restores a named flag when a value is absent. The witness reads 144:
-six catalog doors, 129 named bits, six admissions, an absent unknown name,
-one restored absence, a full catalog, and file first.
+Use lexical lambdas and the existing sequence functions before introducing
+another walk. `table.bml` provides generic row operations and compatibility
+adapters for existing carried-argument callers. `tb-first(rows,predicate)`
+returns `nothing()` on a miss while preserving zero and empty matching values.
+Named accessors own tuple layouts; domain constants belong to their semantic
+owner. Classes group APIs. Templates describe parameters and members; instance
+accessors, interface checking and specialization are not implied.
+
+Run a defined lift through `code_entry: "direct"` with the actual callers and
+helper contracts supplied. Inspect the candidate, execute its behavior and read
+its frames before publishing. Compact source, preserved semantics and measured
+runtime cost are separate observations. [Native coding](form-native-coding.md)
+describes the request and checkpoint interface.
