@@ -424,7 +424,7 @@ export class Kernel {
     // str_len / str_byte_at / byte_to_str — the minimal string "narrow
     // waist": measure, decompose (one raw byte, 0-255), construct (the exact
     // dual). Everything else string-shaped is Form-native on top of these
-    // three plus str_concat; see receipts/2026-07-01-narrow-waist-string-cleanup.md.
+    // three plus str_concat.
     //
     // Byte scope: implemented via latin1 (each JS UTF-16 code unit 0-255 IS
     // the raw byte, losslessly, both directions — verified round-tripping byte
@@ -436,8 +436,8 @@ export class Kernel {
     // here — a real, bounded gap, not silently papered over. Every test this
     // walker actually needs to pass today is plain ASCII, where this is exact."
     //
-    // Named, not hidden — and then it stopped being bounded. str-byte-at-band
-    // and byte-waist-band both grew non-ASCII claims, and this walker read 15
+    // Named, not hidden — and then it stopped being bounded. The str_byte_at
+    // band and byte-waist-band both grew non-ASCII claims, and this walker read 15
     // and 20 where the other six evaluators read 511 and 63. The intake is
     // latin1 now (see main()), so the source bytes ARE the string's units and
     // the three natives below are exact over the whole range, not just ASCII.
@@ -1642,7 +1642,7 @@ function main(): void {
   // U+03BB) instead of 206 (the first UTF-8 byte). The comment beside those
   // natives named this gap and closed with "every test this walker actually
   // needs to pass today is plain ASCII" — which stopped being true the day
-  // str-byte-at-band grew non-ASCII claims: this walker read 15 where the other
+  // the str_byte_at band grew non-ASCII claims: this walker read 15 where the other
   // six evaluators read 511. Reading latin1 makes the source bytes the string's
   // units, which is what the natives already assumed.
   const src = loadSourceClosure(paths);

@@ -8,39 +8,36 @@ matching kernel outputs are the proof; there is no trusted prover.**
 
 ## Before you write — don't duplicate
 
-Grep first. Much already exists (`substrate-phase.fk` is a whole phase metabolism; the perception
-toolkit is a dozen recipes). A recipe that already lives wants your extension, not a sibling:
+Grep first. Much already exists (`substrate-phase.fk` is a whole phase metabolism; `nearest-shape.fk`,
+`feature-vector.fk` and `classifier-eval.fk` are the perception toolkit). A recipe that already lives
+wants your extension, not a sibling:
 
 ```
-grep -rl "<the-thing>" form/form-stdlib/ docs/coherence-substrate/
+git grep -a -l "<the-thing>" form/form-stdlib/ docs/
 ```
 
-## Blueprint names live in symbol sections
+## Blueprint names come from the registry
 
-Do not put Blueprint-name string literals directly in executable stdlib logic.
-For seedbank grammar, parser, emitter, converter, and encoder code, add the
-binding to `form/form-stdlib/seedbank/blueprint-symbol-sections.fk`, load that
-file before the consumer, then reference the binding:
+Do not put raw `(make_nodeid 1 2 99 N)` coordinates in executable stdlib logic. Load
+`form-stdlib/form-ontology-loader.fk` as a prelude and ask by name, binding the answer once at
+the top of the consumer:
 
 ```lisp
-; in blueprint-symbol-sections.fk
 (let JSON-OBJECT (bp "JSON-OBJECT"))
 
-; in executable code
 (intern_node JSON-OBJECT children)
 ```
 
-This keeps cell/blueprint/recipe names externally swappable and prevents quiet
-compile failures when a name changes in one place. The scanner reports total,
-inline, and sectioned `(bp "NAME")` refs; a passing check means every name
-resolves, while the inline count is the remaining cleanup ratchet.
+This keeps cell/blueprint/recipe names swappable and prevents quiet compile failures when a
+name changes in one place. A new name is a row in `form-stdlib/blueprint-registry.json`; see
+[`../user-blueprint-registry.md`](../user-blueprint-registry.md).
 
 ## New meaning — floor is BML + cached native
 
 This is the guide, executable: `form-cli-author-high`. **Floor:** high-grammar
 BML (`.bml`, `section [form.bml]`, `section [form.lift]`, BMF, field `.form`)
 **with** the optimal cached native speed compiler (fresh `.fkb` / `.dylib`).
-See `grammars/bml-native-north-star.form`.
+See `grammars/bml-native-north-star.form` at the repo root.
 
 The native `.bml.fkb` / `.bml.sym` pair is the cache; no source-shaped
 companion is authored or committed. Running the BML lane or
@@ -50,8 +47,7 @@ Existing `.fk` organs are welcome; `*-band.fk` witnesses; the C seed
 shrinks gladly.
 
 ```
-printf "author-high\nquit\n" | ./form/form-cli
-  author-high floor=high-bml-cached-native xtal=wrong-shape organs-welcome bands-witness seed-shrink
+printf "author-high\nquit\n" | ./fkwu form/form-stdlib/form-cli-repl.fk
 ```
 
 High-grammar authority and executable surface live together at
@@ -86,9 +82,9 @@ A **band** `form/form-stdlib/tests/<name>-band.fk` — proves it, returning a **
 Keep the band **self-contained** — prelude only your own recipe (+ `core.fk`). If your recipe
 composes others, list each in the prelude header and in the validate command, in dependency order.
 (`core.fk` is the right prelude for a *band*, because `validate.sh` loads `source-compiler` to lower it.
-A recipe meant for a **raw-eval / Layer-1 context** — a carrier, the flatten, `build-form-cli` — must not
-lean on `core.fk`'s helpers there; prelude `core-native.fk` instead. See the `unbound function` note in
-Troubleshooting for the full two-layer picture.)
+A recipe meant for a **raw-eval / Layer-1 context** — a carrier, the flatten — must not
+lean on `core.fk`'s helpers there; the flattener's standing prelude `fourth-shim.fk` carries the same
+helper names first-order. See the `unbound function` note in Troubleshooting for the full two-layer picture.)
 
 ## The primitive set — these and no others
 
@@ -110,34 +106,34 @@ plus `defn · let · do`. (Read `form/form-stdlib/core.fk` — it is the whole v
 ## The traps (each one cost a real debugging cycle)
 
 1. **`and` and `or` are BINARY. Never write `(and a b c)`.** Go and Rust silently **drop the third
-   argument** while TS folds it — a real divergence (239 vs 255 in `learned-primitive.fk`). Nest:
+   argument** while TS folds it — a real divergence (verdict 239 against 255 in one recipe). Nest:
    `(and (and a b) c)`. `validate.sh` catches it as a divergence, but nesting up front saves the round-trip.
 
 2. **No `sub`, `mul`, `div`, `lt`, `le`.** Express everything with `add` + comparisons + recursion:
    - `a < b` → `(gt b a)` · `a <= b` → `(ge b a)`
    - "decrease / difference" → **count with recursion**, don't subtract.
    - a mean/ratio that needs division → redesign as a **proven-count gate** (`(ge correct min)`),
-     the way `classifier-eval.fk` and `self-grounding-classifier.fk` do. Most perception logic is
+     the way `classifier-eval.fk` does. Most perception logic is
      counting, selection, and gating — which the primitive set covers exactly.
 
 3. **Float COMPUTE is deterministic; raw-float EQ is the trap.** A fractional float result agrees
    bit-for-bit across the Go/Rust/TS floor (proven); what's unreliable is `eq` on raw floats — and whole-number floats
    still display inconsistently (`3.0` vs `3`). So compute in float, then reduce to an INTEGER verdict —
    `(eq (round (mul r 100.0)) 40)` — and `eq` the integer. `round` is half-AWAY-from-zero on every kernel;
-   see `tests/float-conversions-band.fk`. Band SCORES still default to integers `0..100`; floats are the
+   see `tests/rounding-ops-band.fk`. Band SCORES still default to integers `0..100`; floats are the
    numeric/ML payload, not the verdict.
 
 4. **No `let` inside a `defn` body.** Use nested `defn`s or extra parameters. (`let` is fine only at
    the top level of the band's `(do ...)`.)
 
 5. **Loop via recursion** — there is no loop form. The max-select shape (pick the best candidate over
-   a list) is in `sequence-predictor.fk` / `recognition-router.fk`'s `rr-select-loop`; copy it.
+   a list) is in `nearest-shape.fk`'s `ns-best-loop`; copy it.
 
 6. **`(empty x)` is NOT "is x empty?".** `empty` constructs the absence value; `(empty anything)`
    returns `[]`, which `if` treats as **truthy** — so `(if (empty xs) A B)` **always** takes branch A.
    The failure is silent: 0 divergent, just a wrong verdict (a recursion that never recurses, a guard
    that never guards). Test emptiness with `(eq (len x) 0)` — the idiom every recipe uses
-   (`nearest-shape.fk`, `sequence-predictor.fk`). Cost a cycle in `learning-arc.fk` (verdict 88, not 127).
+   (`nearest-shape.fk`). It cost a cycle once (verdict 88, not 127).
 
 ## Prove it on all covered kernels
 
@@ -158,10 +154,9 @@ The authoring floor is four-kernel when the band can live in the fourth-friendly
 to `form/fourth-arm-bands.txt` and iterate until `validate.sh` proves the fourth arm. When the band
 uses an unsupported fourth-arm family, keep the 3-kernel result explicit in evidence as `3-kernel only`
 and name the blocker, such as host I/O, node/substrate operations, or multiline output. (Passing a
-named top-level recipe as a value and calling it — the semiring-generic dispatch in
-`geometric-learning.fk`, `gl-gstep edges x zero cfn wfn ctx` — DOES cross four-way; the fourth arm
-carries that higher-order shape. A very large composed table can still overflow the walker, which is a
-capacity wall, not an op-family wall — see `transformer-block-assembly`.)
+named top-level recipe as a value and calling it — semiring-generic dispatch — DOES cross four-way; the
+fourth arm carries that higher-order shape. A very large composed table can still overflow the walker,
+which is a capacity wall, not an op-family wall.)
 
 - `unbound function` → a misspelled name, a primitive that isn't in `core.fk` — **or the two-layer
   trap.** `core.fk`'s helpers (`nil? map filter foldl reverse range take drop any? all? …`) live in the
@@ -169,12 +164,12 @@ capacity wall, not an op-family wall — see `transformer-block-assembly`.)
   `validate.sh form-stdlib/core.fk …` gets them (the validate chain loads source-compiler). But a
   **raw-eval / Layer-1 context** — a carrier, the flatten, `build-form-cli`, any `(do …)` cat'd straight
   onto a kernel — runs before that lowering, so `nil?` is unbound *even though it is in core.fk*. There,
-  prelude `form-stdlib/core-native.fk` (the walker-side raw twin) — for the fkwu/fourth arm the raw base
-  is `form-stdlib/fourth-shim.fk`. Same helper set, three carriers, one proven shape.
+  prelude `form-stdlib/fourth-shim.fk` (the flattener's standing raw base). Same helper set, two carriers,
+  one proven shape.
 - `N divergent` (kernels print different numbers) → almost always a 3-arg `and`/`or`; nest it.
   A second cause: a **scientific-notation float literal** (`1.16e-05`). The three walkers parse it,
   but the fourth arm's pre-flattened table does not — write floats as plain decimals
-  (`0.000011682...`). This bit the q6k-dequant band (fourth = -5 vs three-way 11215).
+  (`0.000011682...`). This bit a q6k dequant band once (fourth = -5 vs three-way 11215).
 - wrong verdict, 0 divergent → a band claim is false; fix the recipe or the claim. **Never weaken a
   claim to make it pass** — the band is the truth, not the obstacle.
 
@@ -187,11 +182,12 @@ just-below-threshold value, an empty input — one expression each.
 
 ## When it proves
 
-Write the teaching `docs/coherence-substrate/<name>.form` (Lisp-comment voice, like
-`recognition-router.form`), add its INDEX row, and ship in one commit — edges land with the content.
-If you're a subagent in a workflow, return the contents instead and let the parent integrate.
+The recipe's leading comment block is its teaching (Lisp-comment voice, like `nearest-shape.fk`).
+Add the band to `form/fourth-arm-bands.txt` when it crosses four-way, and ship in one commit — edges
+land with the content. If you're a subagent in a workflow, return the contents instead and let the
+parent integrate.
 
 ---
-*Examples worth reading whole: `recognition-router.fk` (routing + consensus), `nearest-shape.fk`
-(a classifier from primitives), `perception-pipeline.fk` (composition), `substrate-phase.fk` (state
-without mutation). The whole `form/form-stdlib/tests/` directory is worked bands.*
+*Examples worth reading whole: `nearest-shape.fk` (a classifier from primitives), `feature-vector.fk`
+(binning and recursion over lists), `classifier-eval.fk` (a proven-count gate), `substrate-phase.fk`
+(state without mutation). The whole `form/form-stdlib/tests/` directory is worked bands.*

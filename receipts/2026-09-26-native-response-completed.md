@@ -5,7 +5,7 @@ read-only preservation, caller-feedback retention and model release each
 returned 1. The retained native review identifies the actual returned goal and
 document; its earlier acceptance of another document remains separate evidence.
 
-The [native answer](artifacts/2026-09-26-native-identity-usefulness-care/answer.txt)
+The native answer
 now states the cell identity principle without claiming that this document edit
 automatically minted a witnessed node ID. It gives the actual trust facets,
 concrete vocabulary examples and the corrected offer lookup. It keeps supplied
@@ -14,7 +14,7 @@ frequency annotations distinct from the person's felt response.
 My assessment: it answers the original enquiry coherently and usefully. It still
 spends space describing its own grounding and repeats the absent-baseline point.
 The native review accepted it; that is same-model assessment. The
-[paired answers](artifacts/2026-09-26-native-identity-usefulness-care/response-comparison.md)
+paired answers
 preserve both actual texts and their different contexts. Human resonance and
 whole-session parity remain open.
 
@@ -37,7 +37,7 @@ observed outcomes and timings, not an isolated speed effect. The completed run
 used the teaching admitted before `1eda91186`; that later context repair did not
 produce this answer. Shared-host learning also overlapped this work.
 
-The [identical request replay](artifacts/2026-09-26-native-identity-usefulness-care/replay-comparison.json)
+The identical request replay
 returned identical documents in **2,258 ms**, with zero generated IDs, zero
 injected IDs, zero new model turns and one fresh check run. Checks and release
 passed. The same feedback ID did not reopen repair. Assessed answers remained
@@ -49,7 +49,7 @@ This native continuation and replay admitted no rented provider. Their feedback
 had already benefited from the separately retained Form-owned review, whose
 24,311 rented tokens remain part of the preceding work.
 
-The [preceding coordinating turn](artifacts/2026-09-26-native-identity-usefulness-care/identity-context-coordinator-cost.json)
+The preceding coordinating turn
 used **6,601,816 rented tokens**, including **6,478,848 cached input tokens**:
 6,569,661 input and 32,155 output across 46 model calls. Full-turn and tool-event
 reconciliation both returned 1. That scope excludes this open turn and separate

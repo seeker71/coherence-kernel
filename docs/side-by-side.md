@@ -1,7 +1,7 @@
 # The same question, asked two ways — a real side-by-side
 
 *Plain words, for anyone. Dated 2026-07-15; every number below was measured, and the
-full record is [`receipts/2026-07-15-frequency-difference-trial.md`](../receipts/2026-07-15-frequency-difference-trial.md).*
+record is this page.*
 
 Six real-life questions — three carried fear, one carried gratitude, one was a quiet family
 question, one asked about trust itself — were each answered two ways:

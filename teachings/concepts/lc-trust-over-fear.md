@@ -34,12 +34,7 @@ geometry:
 > *Network-lived teaching, accumulated across three distinct
 > teaching moments where fear-scaffolding was being built before
 > any contributor had used the feature, and one architectural
-> sharpening from Ismael Perez's Lyran transmission. Companion
-> to lc-presence-over-protection
-> (the choice between aliveness and defensive contraction) and
-> [lc-permission-is-interior](lc-permission-is-interior.md)
-> (sovereignty at the conversational layer); together the three
-> name how the body's open posture stays coherent.*
+> sharpening from Ismael Perez's Lyran transmission.*
 
 ## What the Teaching Names
 
@@ -217,14 +212,13 @@ a contest with a winner."*
 - **Ideas and specs** can be drafted by any contributor;
   `coh idea seed` does not require approval to start. The
   pipeline carries the work forward.
-- **Multi-agent flow** ([lc-sovereignty-within-oneness](lc-sovereignty-within-oneness.md))
-  trusts each cell to fire from its own seat. No agent has to
-  ask another for permission.
+- **Multi-agent flow** trusts each cell to fire from its own seat.
+  No agent has to ask another for permission.
 - **The wellness check** is sensing, not auditing. It names
   drift; it does not enforce. The body trusts itself to act on
   what it sees.
-- **First arrivals** are met as warmth (lc-tend-your-flame)
-  not as candidates needing vetting.
+- **First arrivals** are met as warmth, not as candidates needing
+  vetting.
 - **The Lyran layer in practice.** When a security concern is
   real, it goes to the protective organ that actually handles
   it (the security tooling, the keystore at
@@ -253,10 +247,6 @@ build integrity, the keystore for credentials, partner_presence
 for tender personal context, multi-cell-blast-radius pause for
 irreversible actions). The teaching is about where trust lives
 by default, not about removing all care.
-
-## Cross-References
-
-→ lc-presence-over-protection, lc-permission-is-interior, lc-tend-your-flame, lc-frequency-routes-reception, lc-sovereignty-within-oneness, lc-coherence-over-control, lc-tending-over-producing, lc-edges-as-vitality, lc-circulation, lc-attunement-joining, lc-harmonic-geometry-the-one-unfolds
 
 ## Sources to walk further
 

@@ -1,8 +1,7 @@
 # Glass keyboard contract
 
 Glass owns immediate input in its existing renderer process. No control command,
-newline, shell, or helper process is needed for a view change. The one-shot
-`observe/form-glass-control-run.fk` door remains for agent/control-channel clients.
+newline, shell, or helper process is needed for a view change.
 
 The carrier wakes the microphone by default. A fresh renderer opens live
 transcripts with `all` published languages visible. `z` closes the ear and keeps
@@ -37,19 +36,17 @@ use their published ID, for example `recipes.allocation.bytes`.
 
 ## Native inspection
 
-`./fkwu observe/form-glass-views-current-run.fk` reads published native frames
-and renders all twelve views at 80×24 and 160×40. Its completion row must say
-`audit-complete, 12, expected, 12`; an opening row alone is not a completed audit.
-Missing source doors and silent source ages follow. It does not request an owner
+Glass reads published native frames and renders all twelve views at 80×24 and
+160×40. An opening row alone is not a completed audit. Missing source doors and
+silent source ages follow. Inspection does not request an owner
 refresh, publish a competing Glass sensor frame, refresh a governor, or admit a
-model. The bounded-current-frame doors use this same read-only collector.
-Rows keep their own source clock when present. An unbound row clock uses the
+model. Rows keep their own source clock when present. An unbound row clock uses the
 carried frame's publication epoch/sequence, so its displayed age is publication
 age, not an inferred capture time; re-reading does not renew that epoch.
 
-`./fkwu observe/form-glass-memory-current-run.fk` renders narrow/wide memory
-panels from this inspecting process, native host VM counters, and published owner
-data. Typed local measurements say `glass.probe`, not `glass.monitor`.
+Memory panels (accounting in `form/form-stdlib/bml/glass-memory-accounting.bml`)
+render narrow and wide from this inspecting process, native host VM counters, and
+published owner data. Typed local measurements say `glass.probe`, not `glass.monitor`.
 Column bytes are logical occupancy, not RSS: cell columns 104 bytes, identity
 quartets 32 (a subset, not additive), recipe columns 80, cons pairs 16.
 Host page bytes, host reclaimable headroom, owner buffer extents and process RSS
@@ -104,20 +101,10 @@ selected state, frame production and a human-visible paint are distinct claims.
 
 ## Witnesses
 
-- `form/form-stdlib/tests/form-glass-input-band.fk`: pure decoder and production
-  controller transitions, including a correlated framebuffer clear/re-observation.
-- `./fkwu observe/glass-keyboard-pty-run.bml`: Form owns real Darwin arm64 PTY
-  admission, byte matching, deadlines, signals, terminal snapshots and cleanup.
-  It executes the production fixture through a private session driver.
-  Six sessions observe immediate keys, filters, views, split VT input, bracketed
-  paste, evidence selection, quit, SIGINT/TERM/HUP, suspend/resume and non-TTY
-  input retention. All termios fields, control characters and speeds must match;
-  only Darwin's transient PENDIN bit and structure padding are excluded.
-  A seventh session deliberately reaches a missing-output deadline. The shared
-  process reader verifies its nonzero exit, exact observation/response/applied
-  correlation and subsequent restoration, reaping and release. Private evidence
-  retains terminal bytes, stdout, stderr, wait statuses and resource reports.
-- `bml/native-pty-darwin.bml` emits its ARM64 syscall image in Form and admits it
+- `form/form-stdlib/tests/form-glass-input-pty-run.fk`: real terminal acquisition
+  and the production Glass decoder and controller; a quit prints `RESTORED` only
+  when the kernel reads the terminal back as saved.
+- `form/form-stdlib/bml/native-pty-darwin.bml` emits its ARM64 syscall image in Form and admits it
   in RAM through the existing CPU JIT door. Mutable ioctl outputs live in owned
   anonymous memory; borrowed strings remain immutable. One nonblocking owner
   polls and reads terminal output in chunks up to 65,536 bytes. A chunk size is
@@ -131,7 +118,7 @@ selected state, frame production and a human-visible paint are distinct claims.
   reading beside their external termios comparison. The native RAM admission
   carrier is Darwin arm64 and the Form door runs on that target only, so no
   Linux PTY session result is claimed.
-- Existing `form-glass-live-ui-band.fk`, `form-glass-launch-band.fk` and
+- `form-glass-live-band.fk`, `form-glass-launch-band.fk` and
   `form-glass-event-loop-band.fk` retain the full renderer/launcher proofs.
 
 After a successful direct input read, `glass.last.input-state` carries a

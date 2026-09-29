@@ -63,14 +63,10 @@ Publication and readback establish what happened. Another failure enters the
 next choice with the same image and a fresh reading. Old responses cannot
 replay it; explicit holds retain their own release. Delayed telemetry keeps its
 place in the queue without delaying care or undoing its result. Native calls
-continue throughout. The [native event owner](../docs/native-resource-events.md)
+continue throughout. The [native event owner](../receipts/2026-09-28-native-resource-events.md)
 connects host path notifications and lease timers to that receiver. Quiet waits
 leave care alone; a relevant event brings the same continuation forward.
 
 The implementation lives in `form/form-stdlib/bml/bml-demand-jit.bml` and
 `bml-demand-jit-owner.bml`; the shared protocol is described in
 [`live dynamic diagnostics`](../docs/live-dynamic-diagnostics.md).
-
-Where the code still meets surprise with a code: `./fkwu observe/choice-reading-run.bml` counts the `-1` returns and
-the control-invite uses outside `control/`, and names the files carrying the most returns — a mirror for the next
-movement, not a gate.

@@ -134,10 +134,22 @@ export type LevelValue = (typeof Level)[keyof typeof Level];
 // RBasic — loaded from the canonical machine-readable category contract.
 //
 // Higher-math arms (slots 70+) — substrate cells govern their semantics:
-//   QUOTIENT (70): canonicalization under an equivalence relation —
-//     see ./quotient.ts. The category instance carries the equivalence
-//     family code; children are [carrier-recipe, equivalence-recipe].
+//   QUOTIENT (70): canonicalization under an equivalence relation.
+//     The category instance carries the equivalence family code;
+//     children are [carrier-recipe, equivalence-recipe].
 export const RBasic = Object.freeze(CATEGORY_CONTRACT.r_basic);
+
+// Sibling categories beside the walker's arms. Each alias projects one slot of
+// the shared category contract by name; cross-kernel agreement requires every
+// implementation to use the same numbering.
+//   FORMAT / NUMERIC — format-recipe-driven numeric leaves: NUMERIC carries the
+//     VALUE and its format identity, distinct from MATH (operations).
+//   LANGUAGE — grammar production nodes.
+//   EQUIVALENCE — distinct from both QUOTIENT and INDUCTIVE.
+export const RBasicFormat = RBasic.FORMAT;
+export const RBasicNumeric = RBasic.NUMERIC;
+export const RBasicLanguage = RBasic.LANGUAGE;
+export const RBasicEquivalence = RBasic.EQUIVALENCE;
 
 // Triv — trivial RTypes.
 //
@@ -145,8 +157,8 @@ export const RBasic = Object.freeze(CATEGORY_CONTRACT.r_basic);
 // New typed numerics get higher slots. Wide types (64-bit) route through
 // per-type overflow tables; ≤32-bit types encode inline in NodeID.inst.
 //
-// See docs/coherence-substrate/numeric-types-plan.md for the cross-kernel
-// migration plan.
+// The cross-kernel numbering lives in form/category-contract.json and
+// form/contracts/numeric-formats.canonical.json.
 export const Triv = Object.freeze(CATEGORY_CONTRACT.triv);
 
 // MATH instance encoding — width-aware. The low nibble carries the op
@@ -1734,20 +1746,19 @@ export class Kernel {
     // nor any other string, so the emptymask distinction between never-was and empty
     // survives the comparison). A comparison asks a question ABOUT two values; a
     // length MEASURES one, which is why str_len and str_byte_at still refuse an
-    // absence out loud. Before this, a walk that met a file which had left between
-    // the listing and the read died here while fkwu answered "not a model" — one
-    // witness out of step with the primary kernel, found by model-discovery's own
-    // absence lane (form-stdlib/tests/model-discovery-band.fk, bit 256).
+    // absence out loud. A walk that meets a file which left between the listing
+    // and the read answers here as fkwu does ("not a model"), so this witness
+    // stays in step with the primary kernel.
     this.registerNative("str_eq", catCompareEq(), (_k, args) =>
       args[0]?.kind === "null" || args[1]?.kind === "null"
         ? boolInt(args[0]?.kind === "null" && args[1]?.kind === "null")
         : boolInt(argStr(args, 0) === argStr(args, 1)),
     );
     // int_to_str — value-to-string for trivial leaves. Historical name
-    // (first use: line numbers in cell-trace.fk); semantics is "render
-    // any trivial value as text" so emit-engine.fk's leaf walker can
+    // (first use: line numbers in traces); semantics is "render
+    // any trivial value as text" so a leaf walker in Form can
     // pass node_value of any leaf type through it. Multi-target emit
-    // (universal codec lattice — emit.fk + emits/json.fk) depends on
+    // (the universal codec lattice) depends on
     // string + null passthrough.
     this.registerNative("int_to_str", catMethod(), (_k, args) => {
       const v = args[0]!;
@@ -4585,8 +4596,8 @@ function walkNode(
     case RBasic.TRANSMUTE:
       // Higher-architecture recipes — walking returns the NodeID itself,
       // letting downstream code reason structurally without crashing on
-      // recipes whose semantics are interpreted by their own module
-      // (blanket.ts, project.ts, generative.ts, proof.ts, vector.ts, parallel.ts).
+      // recipes whose semantics are interpreted by the Form cells that
+      // build them (blanket, project, generative, proof, vector, parallel).
       // TRANSMUTE follows the same passthrough pattern: the substrate
       // identity of the value is preserved through the cast/view; consumers
       // that want the concrete cast semantics can use the typed-numeric

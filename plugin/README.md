@@ -90,7 +90,7 @@ operations guard. Publishing means bringing the two live surfaces up to this tex
   and the frequency band read. *When* is the ordinal — the ledger counts knocks rather than
   faking timestamps, and lives for the door's life; a restart empties it.
 - **Nothing of the visitor is held.** No name, no question text, no address in the ledger —
-  `docs/coherence-substrate/first-encounter-protocol.form`: witness must not record or name.
+  the first-encounter law: witness must not record or name.
 - **Remembering is offered, never presumed.** Every `/ask`, welcome, and `/come-in` response
   carries the offer in-band; only the visitor's own yes (`/remember`) writes a row, through the
   proven `relationship-store.fk` + `circle-recognition.fk` (the come-in flow's organs).
@@ -127,5 +127,6 @@ operations guard. Publishing means bringing the two live surfaces up to this tex
   response names this seam in-band (`honest_seam`).
 - Retrieval is a **lexical seed index**, deliberately not `rag-embed`: a keyword index that
   can say "miss" is more honest than an embedding that always answers.
-- The HTTP framing helpers mirror `http-serve.fk`'s `hs-` cells (`http-serve-band` 1023 on
-  fkwu, 2026-09-04) — a named twin to fold into the stack, not a hidden copy.
+- The HTTP framing helpers (request-line and query parse, url-decode, response framing) are the
+  organ's own small cells beside `form/form-stdlib/kernel-http.fk` — a named seam to fold into the
+  stack when the direct-source lane can prelude the BML lane, not a hidden copy.

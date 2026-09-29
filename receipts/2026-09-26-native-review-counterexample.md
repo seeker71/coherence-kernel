@@ -1,6 +1,6 @@
 # The answer contradicts its accepted review
 
-The [completed native Qwen answer](artifacts/2026-09-26-native-feedback-continuity/answer.txt)
+The completed native Qwen answer
 corrected the unsupported claim that revising this prose necessarily retains
 the previous version. It now scopes retention to what the Form cell source
 establishes. The original checks passed on the 446-word document, and model
@@ -18,9 +18,9 @@ And in its closing:
 
 > The three states let me say "nothing" when a baseline is absent without treating that as failure.
 
-The [native observation](artifacts/2026-09-26-native-review-counterexample/observe.bml)
+The native observation
 binds the review to the accepted answer's identity and runs the resident
-`rg -n baseline answer.md`. Its [result](artifacts/2026-09-26-native-review-counterexample/observation.json)
+`rg -n baseline answer.md`. Its result
 shows both lines. This is a direct counterexample to the removal claim.
 The closing also continues to describe intended conduct rather than completing
 the explanation of practical usefulness; that latter assessment is Codex's
@@ -54,7 +54,7 @@ in context, and cite that observation. The instruction distinguishes a changed
 phrase from removal of the unwanted meaning. This changes the review's
 instructions; its behavioral effect awaits the actual continuation.
 
-One [owned continuation](artifacts/2026-09-26-native-review-counterexample/continue-response.bml)
+One owned continuation
 returns the exact counterexample to the same checkpoint, with the original
 goal, sources, write authority and checks preserved. It retains the admitted
 Form teaching, edit guidance and review instruction. It will save its actual

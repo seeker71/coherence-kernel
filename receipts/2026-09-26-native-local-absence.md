@@ -1,7 +1,7 @@
 # Local absence corrected; the whole enquiry remains the work
 
 Qwen3.8-27B-Q8_0 completed the same checkpoint's absence repair. Its
-[434-word answer](artifacts/2026-09-26-native-absence-feedback/answer.txt)
+434-word answer
 replaces the stopping rule with:
 
 > When a specific result is absent, I name that absence and continue with what the available sources support.

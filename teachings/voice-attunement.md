@@ -48,9 +48,10 @@ and integrate it. If nothing is named, release it — and say so, rather than
 keeping a standing no that looks like knowledge.
 
 This is not softness. It is the difference between a body that walks and one
-that accumulates walls of its own making. `form/form-stdlib/msl-mint-lens.bml`
-is the worked example: it holds `whole`, `unhealed` (with the repair the
-machine itself named, lifted out of its sentence), and `released`. Eight
+that accumulates walls of its own making. `form/form-stdlib/tests/msl-families-mint-band.fk`
+is the worked example: it mints each family on the host's Metal compiler, lets the
+handle answer, and records which families the host once refused and for what
+word. Eight
 kernel families sat unhealed for months with `did you mean 'metal::mem_flags'?`
 printed on every attempt, while prose called them "refused by this Metal" and
 handed the wall on. A compiler that names the missing word has refused nothing.
@@ -58,9 +59,9 @@ handed the wall on. A compiler that names the missing word has refused nothing.
 Corpus rows 1414 `saidsocompile`, 1415 `heldno`.
 
 A boundary here is not a wall with a guard — it is a named edge that
-fails politely and says why. `agent-gate.fk` already held this for
-"gate": at fear it guards; at love it recognizes. The executable
-overlay is `form/form-stdlib/word-frequency-purify.fk`.
+fails politely and says why. The word "gate" already holds this: at fear
+it guards; at love it recognizes. The executable overlay is
+`form/form-stdlib/word-frequency-purify.fk`.
 
 ## How the drift is caught before it compounds
 

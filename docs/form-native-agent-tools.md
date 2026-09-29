@@ -202,15 +202,10 @@ by one. It cannot stream arbitrary source or evaluator code. This keeps
 adaptation inspectable and local while leaving room to add a new, separately
 tested primitive deliberately.
 
-`observe/form-cli-cell-mesh-sovereign-glass-run.fk` projects the demo's `open`, `send`,
-and `adapted` rows into source-attributed framebuffer roots, the input Form
-Glass already uses for its framebuffer panel. The projection is current-process
-observation: it does not claim cross-process persistence. A durable mesh owner
+The demo's `open`, `send`, and `adapted` rows are current-process
+observation: they do not claim cross-process persistence. A durable mesh owner
 needs to carry the returned channel data through its own native residence.
-
-`form-cli-cell-mesh.fk` is a separate physical `CHANNEL-V0` carrier lane. It
-is preserved for durable, file-backed mesh work, but `mesh-demo` and the JSON
-agent wire use only the in-memory sovereign organ above.
+`mesh-demo` and the JSON agent wire use only the in-memory sovereign organ above.
 
 The wire's command reader also handles a single human-shaped command such as
 `jq -nr --arg x 'a b' '$x'`; its stdout is `a b\n`. Its deliberate errors
@@ -287,22 +282,16 @@ Patterns/globs are limited to 256 bytes, queries to 512 bytes, JSON nesting to
 or glob attempt; exhaustion is an explicit error, not a negative result.
 These bounds do not promise upstream-tool throughput or a wall-clock deadline.
 
-`form-cli-agent-tools-band.fk` declares 65535;
-`form-cli-agent-tools-edge-band.fk` declares 131071. The first measures process/file/network native-op counters
-around actual public calls, after source admission. Loading the Form program
-is outside that counter window; the trailing zero in the result is a contract,
-not itself the measurement.
-
-`form-cli-agent-tools-portable-band.fk` registers 127 in the four-way manifest
-and calls the same entry for search, JSON, text slicing and immutable edits.
-`form-cli-agent-tools-examples-band.fk` registers 32767 there: one direct
-public call for each of the fifteen resident tools.
-`form-cli-agent-tool-wire-band.fk` registers 131071: JSON request/response
-shape, every tool, state handoff, malformed request refusal, and direct
-form-cli JSON dispatch. `form-cli-cell-mesh-sovereign-band.fk` registers 262143: shared
+The tools live in `form/form-stdlib/bml/form-agent-tools.bml`, with
+`form-agent-tool-values.bml` carrying values and `form-agent-tool-wire.bml` the
+JSON request/response shape: every tool, state handoff, malformed request
+refusal, and direct form-cli JSON dispatch. Native-op counters (process, file,
+network) are read around actual public calls, after source admission. Loading
+the Form program is outside that counter window; a trailing zero in a result is
+a contract, not itself the measurement. The sovereign mesh
+(`form/form-stdlib/bml/form-cli-cell-mesh-sovereign.bml`) carries shared
 observer admission, send/eval, refusal immutability, observer-only adaptation,
-and the `mesh-demo` dispatch. `form-cli-zg-band.fk` separately observes the
-native catalog-discovery route and its zero crossings.
+and the `mesh-demo` dispatch.
 The existing auxiliary validator follows `.bml` as well as `.fk` dependencies,
 including BML `// preludes:` headers. Its proof-only text lowering does not add
 an external execution path to these resident tools.

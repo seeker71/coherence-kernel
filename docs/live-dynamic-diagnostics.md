@@ -76,7 +76,7 @@ with its retained image and runtime identity, including while telemetry waits.
 A failed attempt backtracks locally and retains a fresh reading; an old response
 cannot replay it. Explicit holds remain owned by their release control. The
 ordered telemetry queue carries observations without delaying this care or
-restoring old execution state. The [native resource event owner](native-resource-events.md)
+restoring old execution state. The [native resource event owner](../receipts/2026-09-28-native-resource-events.md)
 feeds Darwin vnode notifications and lease timers into this receiver. Quiet
 waits perform no resource polling; registration changes preserve the owning
 continuation. Attribute events can resume a permission repair even when the
@@ -92,7 +92,7 @@ receiver keeps its event, captured version, context and findings while the rest
 of the batch proceeds. Local options can complete its continuation immediately;
 otherwise its readiness rests until a correlated response arrives. Each attempt
 renews the observation, and explicit event release remains distinct from
-receiver completion. The [event owner](native-resource-events.md) carries this
+receiver completion. The [event owner](../receipts/2026-09-28-native-resource-events.md) carries this
 boundary for the existing pipe and JIT consumers.
 
 ## Health belongs to the running organ
@@ -164,8 +164,8 @@ that boundary; process release does not imply all output was interpreted.
 Native callers can resume with `fhn-retained-reader` and `fhn-drain-final`.
 The saved cursor reconstructs a partial line from the retained raw bytes.
 The final line is observed even without a newline, and a completed cursor
-does not replay it. The witness is
-`form/form-stdlib/tests/form-native-process-drain-band.bml`.
+does not replay it. The reader lives in
+`form/form-stdlib/bml/form-cli-heal-native-process.bml`.
 
 The native care organ receives unease at execution boundaries and routes
 attention and offered resources immediately. The core `care` command and Glass
@@ -247,8 +247,6 @@ not learning evidence.
 
 The integration trains the existing language learner and feeds its real per-row
 transition observations through two control rounds. It is intentionally slower.
-The witnessed vector is documented in
-`receipts/2026-07-22-bidirectional-framebuffer-channel.md`.
 
 ## The admission pulse: which door did this run enter through
 
@@ -303,23 +301,3 @@ framebuffer only when opening a new bounded window, preserving an active walk.
 - `cognition/native-cognition-cycle.fk` — full knowledge → inquiry → awareness →
   recognition → action → response → routing composition, including a
   representation-diverse recognition witness.
-- `cognition/native-self-orientation.fk` — derive floor and north-star invariants,
-  predict two movements, walk the first available movement, and re-orient from
-  the resulting live witness without clearing the parent diagnostic window.
-- `cognition/native-node-ontogenesis.fk` — derive a candidate node from live
-  unresolved evidence; build its blueprint, executable recipe, language-neutral
-  identity, names, and seven inquiry interfaces; validate, admit/defer/reject,
-  test held-out transfer, and re-orient from the changed recognition floor.
-- `cognition/tests/native-node-ontogenesis-band.fk` — end-to-end admission and
-  reversibility witness.
-- `cognition/native-three-round-walk.fk` — sequentially admit, defer, or reject
-  evidence-derived proposals while carrying explicit `[native, local, remote]`
-  routing vectors between rounds.
-- `cognition/tests/native-three-round-walk-band.fk` — three-round source and
-  adjudication replay.
-- `cognition/concept-crystallization-contract.fk` — an offered readiness profile
-  whose node may move among gas, water, and ice while retaining content identity;
-  exposes aliases, recipe, composition, lineage, inquiries, transfer, freshness,
-  axiom compatibility, and an abstaining frequency reading when unmeasured.
-- `cognition/tests/concept-crystallization-contract-band.fk` — ready/candidate
-  facets and gas/water/ice identity-stability witness.

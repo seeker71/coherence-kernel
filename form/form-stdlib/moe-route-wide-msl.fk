@@ -1,53 +1,44 @@
 ; moe-route-wide-msl.fk — the softmax router at 512 experts, as Metal the BODY emits.
 ;
-; A RECOMBINATION, not new arithmetic. Two proven routers already exist here and
-; each has half of what KAT-Coder-V2.5-Dev needs:
+; A RECOMBINATION, not new arithmetic. Two router shapes each hold half of what
+; KAT-Coder-V2.5-Dev needs:
 ;
-;   moe-msl.fk        mm-route-msl        the MATH — softmax with max-subtract,
-;                                         top-k keeping the earlier index on a tie,
-;                                         renormalize over the chosen only
-;                                         (llama.cpp's `norm_topk_prob` order).
-;                                         Radius: ne <= 64. Written for
-;                                         dolphin-mixtral, top-2 of 8.
-;   dsv4-router-msl.fk  form_dsv4_router  the SCALE — probs[256]/score[256]/
-;                                         taken[256]/pick[8] thread-local, one
-;                                         thread, serial argmax. But DS4's math:
-;                                         sqrt(softplus), a steering bias in the
-;                                         selection, an unbiased floored weight,
-;                                         and a wscale.
+;   the MATH   — softmax with max-subtract, top-k keeping the earlier index on a
+;                tie, renormalize over the chosen only (llama.cpp's
+;                `norm_topk_prob` order). A small-radius softmax router, top-2 of 8.
+;   the SCALE  — probs[256]/score[256]/taken[256]/pick[8] thread-local, one thread,
+;                serial argmax. DS4's router carries different math on that layout:
+;                sqrt(softplus), a steering bias in the selection, an unbiased
+;                floored weight, and a wscale.
 ;
 ; KAT-Coder routes 256 experts, 8 per token; Qwen3.8-Flash-Next routes 512
 ; experts, 10 per token. Both use plain softmax followed by top-k and selected
-; renormalization, so they want the first cell's arithmetic at the second cell's
+; renormalization, so they want the softmax arithmetic at the wide layout's
 ; width. Nothing between them is new; the smaller radii were never properties of
-; the routing meaning, only of earlier transcriptions' arrays. The BML-authored
-; qwen4exp-flash-next-router organ proves the recipe at 512/top-10 against a
-; closed-form ordering, while moe-route-radius.fk keeps the older 256/top-8
-; witness alive.
+; the routing meaning, only of the arrays the narrower transcriptions declared.
 ;
-; THE ORDER IS LOAD-BEARING AND THE TWO SIBLINGS DISAGREE ON IT. Read this before
-; touching the write loop. `dsv4-router` writes `ids[j] = pick[nused-1-j]` —
-; REVERSED — because `dsv4-topk` conses head-first, so its recipe consumes the
-; selection 2nd-best-first and the expert accumulation associates along that order
-; (receipts/2026-07-22-moe-on-the-gpu.md names this as its sharpest teaching: a
-; set-selection that looks order-free is secretly a fold-order commitment, and
-; writing the natural order there would still have passed the ids gate while the
-; drift hid inside the f32 envelope). `mm-topk` ends with `(reverse taken)` and so
-; returns BEST-FIRST. This kernel transcribes mm-route, therefore it writes
+; THE ORDER IS LOAD-BEARING AND THE TWO SHAPES DISAGREE ON IT. Read this before
+; touching the write loop. The DS4 router writes `ids[j] = pick[nused-1-j]` —
+; REVERSED — because its top-k conses head-first, so its recipe consumes the
+; selection 2nd-best-first and the expert accumulation associates along that order:
+; a set-selection that looks order-free is secretly a fold-order commitment, and
+; writing the natural order there would still pass an ids gate while the drift hid
+; inside the f32 envelope. The softmax top-k ends with `(reverse taken)` and so
+; returns BEST-FIRST. This kernel transcribes the softmax router, therefore it writes
 ; `ids[k] = pick[k]` — natural order — and a future reader who "fixes" it to match
-; dsv4 would be making it wrong in the direction that still looks right.
+; the DS4 order would be making it wrong in the direction that still looks right.
 ;
 ; NO BIAS. DS4's router admits a bias into the selection and withholds it from the
 ; weight (corpus row 867 `steerdrop`). Softmax routing has no such signal at all,
-; and the band falsifies its absence rather than trusting the reading.
+; so a band must falsify its absence rather than trust the reading.
 ;
-; SPINE: `fexp` only, from llama-decode-msl.fk's spine — the same one mm-route-msl
-; already leans on, so this cell stays in that appendix family and introduces no
-; second spine. It emits NO spine of its own and can never double-define anything.
+; SPINE: `fexp` only, from llama-decode-msl.fk's spine — this cell stays in that
+; appendix family and introduces no second spine. It emits NO spine of its own and
+; can never double-define anything.
 ;
 ; RADIUS: ne <= 512, nsel <= 10. Beyond either the kernel writes NOTHING and
 ; returns — a fixed-size array silently overrun is the aporon error with a stack
-; trace, so refusing is the rule (mm-route-msl's own words, kept).
+; trace, so refusing is the rule.
 ;
 ; preludes: form-stdlib/core.fk
 

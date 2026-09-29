@@ -371,7 +371,7 @@ function readLet(k: Kernel, s: ParseState): NodeID {
 //   inst = 2  → typed/parametric 4-child shape:
 //                 [name, params, body, fnmeta] where fnmeta carries the
 //                 type-parameter list, the per-arg type slots, and the
-//                 return-type slot.  See parametric.ts for the layout.
+//                 return-type slot.
 function readDefn(k: Kernel, s: ParseState): NodeID {
   const nameTok = consume(s);
   if (nameTok.kind !== "ident") throw new Error("defn: name must be identifier");

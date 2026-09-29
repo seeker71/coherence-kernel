@@ -35,28 +35,22 @@ streams remain private in the hearth; telemetry carries identities and counts.
 
 ### Withdrawing an unsupported teaching
 
-`form-run ./fkwu observe/native-session-withdrawal-run.bml` accepts one JSON
-stdin line with the original `session`, `event`, and a nonempty `reason`.
-It withdraws the latest completed, unpromoted lesson when no learning is pending.
-The learner's lock serializes the operation; a live maintenance owner prevents
-that lock from being mistaken for an abandoned worker.
+A lesson whose directory holds `withdrawal.json` is withdrawn
+(`nsm-withdrawn` in `form/form-stdlib/native-session-memory.bml`). The learner
+excludes it from pending training, source delivery and replay, and refuses to
+continue from a candidate whose withdrawal awaits completion. Original records,
+results and adapter bytes remain intact. `learned_rounds` retains cumulative
+work and `withdrawals` counts completed retirements in the session state; the
+serving adapter stays selected.
 
-The door verifies the retained parent adapter, optimizer, serving adapter and
-base seals, journals the withdrawal, and atomically restores the parent state.
-Original records, results and adapter bytes remain intact. `optimizer_step`
-reports the selected checkpoint; `learned_rounds` retains cumulative work and
-`withdrawals` records completed retirements. The serving adapter stays selected.
+Recalled experience labels the original attempt `withdrawn-teaching` and keeps
+its `original_outcome` beside a reference to the withdrawal
+(`nsx-withdrawal` in `form/form-stdlib/native-session-experience.bml`).
 
-The journal excludes the lesson from pending training, source delivery and
-replay. Recalled experience labels the original attempt `withdrawn-teaching`.
-If execution stops between journal and state publication, continuation refuses
-the withdrawn candidate; repeating the same request completes the publication.
-A completed repeat returns its original receipt without changing newer state.
-
-This selects a checkpoint from before the lesson; it does not claim arbitrary
-unlearning. Older lessons, promoted lessons and descendants in other homes need
-their own repair. The door refuses those cases. A replacement teaching uses a
-new event identity after the withdrawal has been observed.
+Withdrawal selects a checkpoint from before the lesson; it does not claim
+arbitrary unlearning. Older lessons, promoted lessons and descendants in other
+homes need their own repair. A replacement teaching uses a new event identity
+after the withdrawal has been observed.
 
 One supervisor serializes the learning queue and records the learner's actual
 exit and stderr. Before the learner starts, the supervisor admits the dynamic
@@ -76,9 +70,9 @@ supervisor publishes `worker.rc`, it retains the matching owner's exit and
 diagnostic and reports `failed-supervisor-exit`. Unknown wait results remain
 indeterminate. A later launch clears the current wait record while retaining
 the failed attempt's diagnostic; pending examples keep their original bytes.
-The [supervisor-exit observations](evidence/fkwu/session-supervisor-exit.json)
-exercise actual child refusal, matching-owner admission, unknown waits,
-successor replacement, existing terminal status and diagnostic retention.
+The supervisor's exit observations cover actual child refusal, matching-owner
+admission, unknown waits, successor replacement, existing terminal status and
+diagnostic retention.
 Each new training example
 gets one full-gradient round, including rehearsal of the last promoted example
 when it has a different prompt. The next round restores the candidate's adapter,
@@ -238,17 +232,17 @@ not receive prior answers; its resulting experience is retained afterward.
 An ordinary replay of a remembered evaluation case is practice, not unseen
 transfer evidence.
 
-`observe/form-cli-heal-experience-run.bml` recovers existing repair runs with
-JSON stdin `{}` (optional `root` and `home`). It admits no model and does not
-schedule a gradient for every recovered historical observation.
-`observe/native-session-experience-run.bml` accepts a JSON `query`, optional
-`skill` and `home`; its stdout names the private recall report. These doors do
+Recovering existing repair runs admits no model and does not schedule a
+gradient for every recovered historical observation. Recall
+(`nsx-recall(home, query, skill)` in
+`form/form-stdlib/native-session-experience.bml`) takes a `query`, an optional
+`skill` and a session home, and names the private recall report. Recall does
 not yet digest every full host-agent transcript, and lexical matching does not
 establish that every lesson in the recovered sessions has been understood.
 
-`./fkwu observe/native-session-evidence-run.bml` attends to current needs when
-the worker is idle. Optional stdin names a session home. The worker owns care
-while running. `.hearth/session-learning/evidence-current.json` exposes the
+`form/form-stdlib/native-session-evidence.bml` attends to current needs when
+the worker is idle. The worker owns care while running.
+`.hearth/session-learning/evidence-current.json` exposes the
 current requests; each training row retains `training-evidence.json`. Original
 observation, named response, delivered references, fresh resource observation,
 consumption and subsequent loss readings remain in the normal event flow.
@@ -280,48 +274,24 @@ The existing code and repair checks remain the decision at each such request.
 
 ## Learning for the Qwen answering model
 
-`observe/qwen-lora-learning-run.bml` accepts one JSON line on stdin. It captures
-completion features and trains an explicitly named Qwen output-head adapter
-inside `fkwu`, using the existing Metal carrier. It makes no provider call.
-The automatic session worker described above still selects Llama 3B.
+`form/form-stdlib/qwen-lora-head.fk` mints a Qwen-width rank-one output-head
+adapter (float32 safetensors A and B, width 5120) from the already-local corpus
+and admits it to the model through independent Metal buffers, so the GGUF
+mapping stays unwritten. `form/form-stdlib/qwen-lora-train.fk` fits one
+activation-space rank-one update from a normalized hidden state of the locally
+mapped Qwen model, solving the least-squares step in Form. Both run inside
+`fkwu` and make no provider call. The automatic session worker described above
+still selects Llama 3B.
 
-The request carries `model` (a registry key), a fresh `output_directory`,
-`profile` (`full` or `knowledge-query`), positive integer `context` and `epochs`,
-positive finite `learning_rate`, nonnegative finite `max_norm`, and `rows`.
-Each row carries a unique `id`, `prompt`, `completion`, and `split` of `train`
-or `validation`. Both splits are required; exact prompt overlap is refused.
-The caller establishes target correctness and meaningful separation. Distinct
-prompts alone do not establish unseen-concept generalization.
+The initial seed is not a quality or voice claim, and the fitted update is a
+real weight artifact change without being a language-quality claim: only a
+held-out generation evaluation decides quality. Validation targets never enter
+gradient updates, and a candidate stays **unpromoted** until independent
+evidence promotes it.
 
-One model admission serves the capture and training. Each example receives
-fresh conversation state; a refused renewal stops capture with its owner
-retained for release. Only completion tokens and their end marker receive
-supervision. The `full` profile teaches the answer channel. Validation targets
-never enter gradient updates. Cached normalized features allow repeated head
-updates without rerunning the transformer.
-
-The run retains the exact request, per-row target IDs and feature offsets,
-feature bytes and digest, baseline losses, per-epoch aggregate and per-row
-validation losses, checkpoints, release results, and candidate binding.
-The binding identifies the sealed base/tokenizer and exact adapter A/B bytes.
-Minimum aggregate validation loss, including the unchanged baseline, selects
-an **unpromoted candidate**. Answer quality remains unmeasured at this boundary.
-
-For an explicit later comparison, import `bml/qwen-lora-learning.bml` and call
-`qll-open-selected(root, prompt, context, profile)` with that retained run's
-directory. It verifies the binding and returns the normal owned model session;
-the caller must release that session even after refusal. The profile must match
-capture. Ordinary input and ownership failures return retained evidence. A
-kernel-level Metal or batch-helper exception remains a process-failure boundary;
-this BML layer has no exception/finally recovery. The runner emits its result
-before returning a nonzero exit on ordinary refusal.
-
-[Executable BML practice](native-bml-execution-learning.md) binds small native
-training targets to successful execution, freezes distinct transfer tests, and
-compares exact generated proposals before and after native session updates.
-
-Witnesses: `native-session-memory-band.fk`, `native-session-journal-band.fk`,
-`native-session-routing-band.fk`,
-`native-session-worker-band.fk` and `native-session-code-band.fk` under
-`form/form-stdlib/tests/`. The public two-worker, real-3B witness is
-`observe/native-session-homecoming-run.fk`; its input is a fresh evidence directory.
+The native session cells live in `form/form-stdlib/native-session-learning.bml`
+(learner), `native-session-memory.bml` (journal and state),
+`native-session-sources.bml`, `native-session-evidence.bml` and
+`native-session-experience.bml`, with `bml/native-session-code.bml` for the
+coding continuation. The worker door is `observe/native-session-learning-run.fk`,
+which the form-cli `session` verb drives.

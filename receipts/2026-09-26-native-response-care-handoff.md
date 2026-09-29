@@ -8,8 +8,8 @@ previous completed 434-word answer. It ended with status **attention**, at
 on the observed 507- and 498-word snapshots. Decreasing counts establish
 shortening, not completion or semantic quality.
 
-The [507-word working document](artifacts/2026-09-26-native-usefulness-feedback/checkpoint-answer-c5e6fa9751c5afcf02c7a56d0d2aa54b5d18808cf6f6c0e43ad5c03c375e0eb2.txt)
-and [498-word successor](artifacts/2026-09-26-native-usefulness-feedback/checkpoint-answer-fadb9d35b47f099ae965d6d4df95a2fa47ed9aeb125a11a041743d3dc7da9a50.txt)
+The 507-word working document
+and 498-word successor
 are unfinished caller-writable document snapshots, exported from a validated
 checkpoint under the original contract. They are not private reasoning or
 reply-file reads. The actual diff removes nine words from the opening and
@@ -19,12 +19,12 @@ early paragraphs; it leaves the identity paragraph and closing intact.
 
 One Form-owned provider call reviewed the 507-word candidate, the prior native
 answer, the separate 408-word arriving answer and retained source packet. Its
-[report](artifacts/2026-09-26-native-usefulness-feedback/provisional-review.json)
+report
 prefers the native draft for coverage and warmth, and identifies the unsupported
 application of cell identity and retention to editing this answer. Its structural
 checks do not establish those judgments. The report also contains findings based
 on omitted conversation and historical context. The
-[restored context](artifacts/2026-09-26-native-usefulness-feedback/review-context-restoration.md)
+restored context
 names that omission and supplies the actual sources; the report remains unchanged.
 No new provider judgment of the restored packet is claimed.
 
@@ -37,7 +37,7 @@ both full-turn and tool-event reconciliation passed. This open turn's coordinati
 cost remains additional. These distinct scopes support no total-cost or parity claim.
 
 The separately revised
-[416-word arriving answer](artifacts/2026-09-26-native-usefulness-feedback/arriving-answer-revised.md)
+416-word arriving answer
 now explicitly connects the axioms' observations and offers to interaction,
 uses the native trust definition, and keeps identity claims scoped to Form cells.
 It passes the unchanged original word and phrase checks. It was not supplied to
@@ -45,7 +45,7 @@ the native repair, and neither candidate is a gradient target.
 
 ## Native continuation owns the next handoff
 
-The [care cell](artifacts/2026-09-26-native-usefulness-feedback/continue-identity-care.bml)
+The care cell
 compiled, waited for the existing process, observed its exit and successful
 model release, then continued the same checkpoint. The actual handoff preserved
 the original read-only sources. One atomic claim prevents duplicate admission.
@@ -61,7 +61,7 @@ allocation repeatedly required full context renewal. Its public stages show
 throughput improvement remain to be observed. This admission receives the
 shared teaching landed in `9b562eddc`.
 
-The [completed comparison](artifacts/2026-09-26-native-usefulness-feedback/comparison.json)
+The completed comparison
 records ten additional native turns, twelve tool calls and six checks;
 9,889 generated IDs and 20,614 injected IDs in that admission. The last observed
 elapsed time was **4,688,647 ms** (about 78 minutes). Original checks failed;

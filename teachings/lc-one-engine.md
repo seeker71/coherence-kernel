@@ -55,9 +55,9 @@ The body carries its own LLVM, and it is Form all the way down:
   file read/write, call-convention, x64, fp-stack — each a four-way band, not a
   C file.
 - **`form-asm`** emits the actual machine-code **bytes**. clang survives only as
-  an *oracle* to compare against, dropped from the native path by `form-asm`'s
-  byte-identity gate (`lowering-conviction.fk`). The target is Form→asm bytes,
-  never Form→C.
+  an *oracle* to compare against, dropped from the native path by the
+  byte-identity gate inside `form-asm.fk`. The target is Form→asm bytes, never
+  Form→C.
 - **The self-JIT** crystallizes the hot *pure* path to native and melts it on cool;
   **champion-challenger** re-earns the slot only when the native actually beats the
   walker. Proven on the 4th kernel: `jit-native-span` 255, `champion-challenger`

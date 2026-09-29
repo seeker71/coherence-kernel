@@ -14,7 +14,7 @@ bytes are unchanged.
 
 ## Same checkpoint, observed again
 
-The [native observation](artifacts/2026-09-26-native-feedback-continuity/observe-admission.bml)
+The native observation
 validates the retained checkpoint against the original task contract. Complete
 text coverage uses JSON-escaped bytes. Reconstructing the preceding admission
 also reproduces its retained SHA-256 exactly.
@@ -54,7 +54,7 @@ improvement remain pending at this landing.
 The verified context teaching was retained as `7725de6e…`; its learner is the
 separate native Llama adapter, not a Qwen weight update.
 
-The [preceding coordinating turn](artifacts/2026-09-26-native-feedback-continuity/preceding-coordinator-cost.json)
+The preceding coordinating turn
 used **6,176,492 rented tokens**, including **5,860,608 cached input tokens**,
 across 46 model calls. Both full-turn and tool-event reconciliation passed.
 That scope excludes this open turn and separate provider processes; 27,188

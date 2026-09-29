@@ -10,8 +10,8 @@ changes only after verification.
 `heal guide` reads current Python detours and available native references;
 `heal guide|<proposed command>` guides a command without running it. The acting
 agent carries the native replacement and its checks. This includes temporary
-helpers. [Native authoring practice](native-authoring-guide.md) keeps that
-responsibility with us.
+helpers. The [native agent tools](form-native-agent-tools.md) are where that
+responsibility is carried.
 
 Inside form-cli:
 
@@ -28,11 +28,11 @@ authorizes one Codex CLI attempt after every native route has completed or
 reported its inability. The checker timeout defaults to 30 seconds and accepts
 1–120 seconds.
 
-The same native recipe has a stdin door:
+The same native recipe has a stdin door in the source-backed form-cli:
 
 ```sh
-form-run sh -c 'printf "%s\n" "lesson" | ./fkwu observe/form-cli-heal-run.fk'
-form-run sh -c 'printf "%s\n" "model/example.fk|model/tests/example-band.fk|255|30|local" | ./fkwu observe/form-cli-heal-run.fk'
+form-run sh -c 'printf "%s\n" "heal lesson" | ./fkwu form/form-stdlib/form-cli-repl.fk'
+form-run sh -c 'printf "%s\n" "heal model/example.fk|model/tests/example-band.fk|255|30|local" | ./fkwu form/form-stdlib/form-cli-repl.fk'
 ```
 
 Read the returned state: `healed`, `already-passes`,
@@ -292,23 +292,11 @@ Native policy bands check routing decisions. Process and snapshot witnesses
 use real children and disposable files; the curriculum uses real Form checks.
 These establish transport and refusal behavior, not model quality.
 
-Verification doors (preflight each FK band before reading its verdict):
+Verification doors (preflight each FK cell before reading its verdict):
 
 ```sh
-form-run sh -c 'printf "%s\n" form/form-stdlib/tests/form-cli-heal-policy-band.fk | ./fkwu observe/preflight-stdin-run.fk'
-form-run ./fkwu form/form-stdlib/tests/form-cli-heal-policy-band.fk
-form-run ./fkwu form/form-stdlib/tests/form-cli-heal-resources-band.fk
-form-run ./fkwu form/form-stdlib/tests/form-cli-heal-load-band.fk
-form-run ./fkwu form/form-stdlib/tests/form-cli-native-guide-band.fk
-form-run ./fkwu observe/form-cli-heal-native-io-witness.bml
-form-run ./fkwu form/form-stdlib/tests/form-cli-heal-eval-policy-band.fk
-form-run sh -c 'printf "%s\n" eval | ./fkwu observe/form-cli-heal-run.fk'
-form-run ./fkwu form/form-stdlib/tests/form-cli-heal-timing-band.fk
-form-run ./fkwu form/form-stdlib/tests/qwen-lora-finite-band.fk
-form-run ./fkwu form/native/metal/tests/qwen38-embedding-band.fk
-form-run ./fkwu observe/native-session-evidence-run.bml </dev/null
-form-run ./fkwu form/form-stdlib/tests/native-session-worker-band.fk
-form-run ./fkwu observe/native-session-homecoming-run.fk
+form-run sh -c 'printf "%s\n" observe/form-cli-heal-model-run.bml | ./fkwu observe/preflight-stdin-run.fk'
+form-run sh -c 'printf "%s\n" "heal eval" | ./fkwu form/form-stdlib/form-cli-repl.fk'
 ```
 
 Policy authority: `form/form-stdlib/bml/form-cli-heal-policy.bml`.
@@ -318,8 +306,6 @@ events during real execution. Read an event path with
 `./fkwu observe/form-cli-heal-process-run.bml`. The latter returns the actual
 status and current health/needs without a separate regression fixture.
 The shared protocol and resource requests live in `docs/live-dynamic-diagnostics.md`.
-The separate `form-cli-heal-native-learning-witness.bml` measures the
-activation-probe objective; it is not the production session learner.
 Native resource planning: `form/form-stdlib/bml/form-cli-heal-resources.bml`.
 Native model door: `observe/form-cli-heal-model-run.bml`.
 Evaluation curriculum: `form/form-stdlib/bml/form-cli-heal-eval-policy.bml`.

@@ -24,7 +24,7 @@
 //   - Undecidable    → Lazy (no eager option)
 // Honest default: Eager unless the equivalence declares heavy/undecidable.
 //
-// Cross-kernel: handler names match the TS, Python, and Rust arms exactly
+// Cross-kernel: handler names match the TS and Rust arms exactly
 // (integer-from-nat-pair, rational-from-int-pair, commutative-pair,
 // associative-left-fold). A Form program ingested into any kernel
 // canonicalizes identically. New built-in equivalences are a cross-
@@ -92,7 +92,7 @@ func strategyFor(d Decidability) CanonStrategy {
 // two equivalent inputs is the CanonicalizeFn's job; the kernel handles
 // the content-addressing.
 //
-// Signature mirrors TS/Python/Rust: `(kernel, raw_children) -> canonical`.
+// Signature mirrors TS/Rust: `(kernel, raw_children) -> canonical`.
 type CanonicalizeFn func(k *Kernel, raw []NodeID) []NodeID
 
 // ---------------------------------------------------------------------------
@@ -124,8 +124,7 @@ type EquivalenceRelation struct {
 //
 // Process-global so cross-Kernel testing (the QuotientLibrary builds
 // against any Kernel) sees the same handlers. The same shape lives in
-// the TS module-level Map, the Python module-level dict, and the Rust
-// OnceLock<Mutex<HashMap>>.
+// the TS module-level Map and the Rust OnceLock<Mutex<HashMap>>.
 //
 // New equivalences arrive in two halves: a substrate write (the recipe,
 // produced by MakeEquivalence) and a handler registration (the runtime,
@@ -445,7 +444,7 @@ func QuotientEqual(k *Kernel, a, b NodeID) bool {
 //
 // Each registers a handler under a stable name and constructs the
 // substrate-resident equivalence-recipe. The names are part of the
-// cross-kernel contract — TS / Python / Rust register the same handler
+// cross-kernel contract — TS / Rust register the same handler
 // names so a Form program ingested into any kernel canonicalizes
 // identically.
 // ---------------------------------------------------------------------------

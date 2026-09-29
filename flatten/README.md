@@ -7,5 +7,4 @@ then a regen, then its serialize arm in `form/form-stdlib/fkc-table-serialize.fk
 `host-effect-root-projection.fk` projects the host-effect grammar
 (`form/form-stdlib/host-effect-grammar.fk`, from `grammars/host-effect-vocabulary.bmf`) onto the same rows. The drift gate `op-manifest` (`gate/op-manifest.bml`) reads the rows.
 
-The op families the seed carries with no caller outside `flt-ops` are enumerated
-in `docs/penumbra-map.md`: each row wants a caller or a release.
+An op family the seed carries with no caller outside `flt-ops` wants a caller or a release.

@@ -2,7 +2,8 @@
 // inductive.rs — INDUCTIVE / CONSTRUCTOR / CHOICE_MATCH RBasic arms.
 //
 // Algebraic datatypes as content-addressed substrate cells. Mirrors the
-// canonical TS sibling (`form/form-kernel-ts/src/inductive.ts`). The shape:
+// Go sibling (`form/form-kernel-go/inductive.go`) and the TS arms in
+// `form/form-kernel-ts/src/kernel.ts`. The shape:
 //
 //   INDUCTIVE
 //     children:
@@ -648,9 +649,7 @@ pub fn list_length(v: &CtorOrNid) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — mirror the TS inductive.test.ts assertions one-for-one. Cross-
-// kernel: the same shape of assertions runs in TS, Python, Go, and Rust;
-// `cargo test --release` here is the Rust leg of the conformance.
+// Tests — `cargo test --release` here is the Rust leg of the conformance.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -879,27 +878,24 @@ mod tests {
 
     // ── Compose with QUOTIENT — the cross-arm contract ──────────────────
     //
-    // The QUOTIENT module is the sibling Rust port (#35). When both arms
-    // are linked into the same crate, Z := (Nat × Nat) / equiv expresses
-    // integers as a quotient of nat-pairs. We don't link quotient.rs from
-    // this branch — it lands in a separate breath — so this test stays
-    // behind a feature gate. The Python ref test (api/tests/test_inductive.py)
-    // covers the cross-arm composition end-to-end.
-    //
-    // When quotient.rs is present, uncomment:
-    //
-    //   #[test]
-    //   fn z_quotient_of_nat_pairs() {
-    //       use crate::quotient::*;
-    //       let mut k = Kernel::new();
-    //       let inds = install_builtin_inductives(&mut k);
-    //       let lib = build_quotient_library(&mut k);
-    //       // Pair Nat Nat carrier — placeholder; canonicalization runs
-    //       // on the raw int-pair children.
-    //       let nat = inds.get("Nat").unwrap().node_id;
-    //       let q = make_quotient_recipe(&mut k, nat, lib.equiv_integer_from_nat_pair.node_id);
-    //       let v31 = intern_quotient_value(&mut k, q, &[k.intern_trivial_int(3), k.intern_trivial_int(1)]);
-    //       let v53 = intern_quotient_value(&mut k, q, &[k.intern_trivial_int(5), k.intern_trivial_int(3)]);
-    //       assert_eq!(v31, v53, "Z = (Nat × Nat) / equiv canonicalizes (3,1) ≡ (5,3)");
-    //   }
+    // The QUOTIENT module (quotient.rs) is linked into the same crate, so
+    // Z := (Nat × Nat) / equiv expresses integers as a quotient of nat-pairs:
+    // the Nat inductive is the carrier and canonicalization runs on the raw
+    // int-pair children.
+    #[test]
+    fn z_quotient_of_nat_pairs() {
+        use crate::quotient::*;
+        let mut k = Kernel::new();
+        let inds = install_builtin_inductives(&mut k);
+        let lib = build_quotient_library(&mut k);
+        let nat = inds.get("Nat").unwrap().node_id;
+        let q = make_quotient_recipe(&mut k, nat, lib.equiv_integer_from_nat_pair.node_id);
+        let i3 = k.intern_trivial_int(3);
+        let i1 = k.intern_trivial_int(1);
+        let i5 = k.intern_trivial_int(5);
+        let i3b = k.intern_trivial_int(3);
+        let v31 = intern_quotient_value(&mut k, q, &[i3, i1]);
+        let v53 = intern_quotient_value(&mut k, q, &[i5, i3b]);
+        assert_eq!(v31, v53, "Z = (Nat × Nat) / equiv canonicalizes (3,1) ≡ (5,3)");
+    }
 }

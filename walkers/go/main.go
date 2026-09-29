@@ -32,8 +32,7 @@
 // string floor (measure/decompose/construct/join); substring, char_at,
 // int_to_str, and str_find are NOT natives here anymore — they're Form
 // composition in form-stdlib/core.fk over this floor, so there's one
-// definition, not a walker-native copy that can drift from it. See
-// receipts/2026-07-01-narrow-waist-string-cleanup.md.
+// definition, not a walker-native copy that can drift from it.
 //
 // Usage: walker file.fk [more.fk ...]   — prints the evaluated root value.
 package main
@@ -1351,8 +1350,7 @@ func (k *Kernel) registerNatives() {
 	// byte-indexed, -1-on-OOB convention they were never actually verified
 	// against) are RETIRED as Go natives: form-stdlib/core.fk now defines
 	// all four as Form composition over this floor, so there is exactly one
-	// definition, not two that can silently drift apart. See
-	// receipts/2026-07-01-narrow-waist-string-cleanup.md.
+	// definition, not two that can silently drift apart.
 	k.registerNative("str_byte_at", func(_ *Kernel, args []Value) Value {
 		s := args[0].Str
 		i := args[1].AsInt()

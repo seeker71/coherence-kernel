@@ -49,8 +49,9 @@ This body's covenant, through an arriving voice or its own native voice, is
 together with the reply floor above (`dc-reply-receivable?`, `dc-ends-open?`,
 `dc-one-teaching?`); `cognition/tests/dialogue-covenant-band.fk` witnesses it. Move *kinds*
 are assigned by the observer today; reading them off raw text natively is pending, as the
-full lexicon of `cognition/text-frequency.fk` is. The trials that taught the reply floor:
-`receipts/2026-07-15-door-verified-live.md`, `receipts/2026-07-15-frequency-difference-trial.md`.
+full lexicon of `cognition/text-frequency.fk` is. Two trials on 2026-07-15 (the door verified
+live, and the frequency difference measured with the door against without it) taught the
+reply floor.
 
 ## Where the covenant lives at the doors
 

@@ -7,8 +7,7 @@ import (
 	"testing"
 )
 
-// TestHostExecLaunchFailureAnswersNothing — the Go arm's twin of
-// form/form-stdlib/tests/host-exec-launch-honesty-band.fk: a host-exec whose
+// TestHostExecLaunchFailureAnswersNothing — a host-exec whose
 // sh never launched answers the null head-of-empty carries (nothing), never
 // ""; "" is reserved for a command that ran and spoke zero bytes, and a
 // process that ran and exited nonzero still answers its output. The starved

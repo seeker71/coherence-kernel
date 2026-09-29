@@ -14,8 +14,8 @@ surface; it only confirms a recipe computes the same value four ways on the
 
 ## The three
 
-- `go/main.go` (1,498 lines), `rust/src/main.rs` (1,315), `ts/main.ts` (1,644) —
-  counted 2026-09-12. Each keeps ONLY the independent parse + eval core.
+- `go/main.go` (1,548 lines), `rust/src/main.rs` (1,334), `ts/main.ts` (1,656) —
+  counted 2026-09-29. Each keeps ONLY the independent parse + eval core.
 
 Call heads read as fkwu reads them: a head fkwu reserves (its op rows, rewrite
 rows and control forms; `gate/reserved-heads.bml` writes the list beside each

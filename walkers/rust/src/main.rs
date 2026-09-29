@@ -30,8 +30,7 @@
 // byte_to_str constructs (the exact dual — one raw byte back to a length-1
 // string). Everything else string-shaped (substring, char_at, ord, int_to_str,
 // any encoding en/decode) is Form-native, composed from these three plus
-// str_concat — never a walker native again. See
-// receipts/2026-07-01-narrow-waist-string-cleanup.md.
+// str_concat — never a walker native again.
 //
 // CLI parity with the source path: `form-walker-rust a.fk b.fk ...` resolves
 // recursive bare imports, joins the resulting files with '\n', evaluates, and
@@ -1142,7 +1141,7 @@ fn call_native(name: &str, args: &[Value]) -> Option<Value> {
         // nth / len — pure list accessors in the cons/head/tail family. Faithful
         // to the full kernel's natives. They sit just past the named surface but
         // are the same pure list shape and are what a real manifest band
-        // (value-execution, verdict 7) folds over; kept minimal: no dict tag.
+        // (verdict 7) folds over; kept minimal: no dict tag.
         "nth" => Some(if let Value::List(xs) = &args[0] {
             let i = args[1].as_int();
             if i < 0 || (i as usize) >= xs.len() {

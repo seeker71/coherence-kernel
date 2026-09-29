@@ -4,11 +4,10 @@
 // Format-recipes are substrate cells with `storage-hint` and `arithmetic-hint`
 // children. Adding a new format is a substrate write, not a kernel patch.
 //
-// This module is the Rust mirror of `form/form-kernel-ts/src/formats.ts`
-// and `numeric.ts`. The canonical contract lives at
-// `form/contracts/numeric-formats.canonical.json`; every kernel reads
-// it on startup so content-addressing produces identical NodeIDs across
-// kernels for the same recipe structure.
+// This module is the Rust mirror of `form/form-kernel-go/formats.go`. The
+// canonical contract lives at `form/contracts/numeric-formats.canonical.json`;
+// every kernel reads it on startup so content-addressing produces identical
+// NodeIDs across kernels for the same recipe structure.
 //
 // See form/contracts/README.md for ownership and conformance.
 

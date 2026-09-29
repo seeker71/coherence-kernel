@@ -8,35 +8,29 @@ evidence; a model being installed or trained does not give it authority.
 
 The control plane is Form-owned:
 
-- `form/form-stdlib/native-model-control-plane.fk` owns the registry,
-  classification, schedule, canary, and promotion policy.
-- `form/form-stdlib/native-model-evidence.fk` owns normalization, tokenization,
-  SHA-256 identities, exact/F1/order-sensitive scores, deterministic rotation,
-  and train/audit overlap checks.
-- `form/form-stdlib/native-model-eval-form.fk` owns paired evaluation,
-  identity-stability checks, and promotion eligibility.
-- `form/form-stdlib/native-model-seal-form.fk` owns held-out isolation and
-  consent/license/provenance admission.
-- `form/form-stdlib/native-model-event-form.fk` owns the minimized event schema,
-  validation, hashing, JSON encoding, and atomic append.
-- `form/form-stdlib/native-model-ledger-form.fk` recomputes each event digest,
-  requires exact canonical JSON, rejects invalid rows, and owns final shares.
-- `form/form-stdlib/native-model-daily-form.fk` owns daily admission, training
-  closure, an equality-only byte-copy deployment check, and progress accounting.
-- `form/form-stdlib/native-model-live-loop.fk` owns occurrence classification
-  and owned/on-device/remote workload shares.
-- `form/form-stdlib/native-model-live-training.fk` holds the executable bounded
-  native training experiments.
-- `form/form-stdlib/native-model-checkpoint.fk` owns the exact f64 checkpoint
-  image, content/training-contract admission, atomic publication, reload
-  equivalence, and champion keep/revert.
-- `form/form-stdlib/native-model-session-world.fk` owns the fixed-shape
-  action-conditioned count state and future-session scoring.
-- `form/form-stdlib/native-model-session-grounding.fk` owns Form-native lexical
-  embedding, ranking, and replay scores for real completed session queries.
-- `form/form-stdlib/native-model-lineage-form.fk` owns canonical model-package
-  nodes, transformation edges, byte-copy equality, DAG identity, and drift
-  (`native-model-lineage-band.fk` 33554431).
+- `form/form-stdlib/native-model-control-plane.fk` owns the registry: which model
+  lanes exist, their class, execution surface, status, freshness and authority.
+  It carries route-selection rows only, no evaluation, promotion or job recipes.
+- `form/form-stdlib/native-model-evidence.fk` owns deterministic evaluation
+  evidence: normalization, tokenization, SHA-256 identities, exact/F1/order-sensitive
+  scores, deterministic rotation, and train/audit overlap checks.
+- `form/form-stdlib/native-model-native-hierarchy.fk` owns native-first routing.
+  Engine presence, artifact presence and observed execution stay separate: a large
+  model file beside a native executable is not a lane until that exact pairing has
+  answered.
+- `form/form-stdlib/native-model-route-table.bml` owns the ask-route names as data
+  (`native-model-route-table-band.fk` 255).
+- `form/form-stdlib/native-model-route-readiness.bml` holds the authority for which
+  model routes are usable now, and `native-model-dual-telemetry.bml` keeps the
+  truth-separated rows it reads.
+- `form/form-stdlib/native-model-tensor-ledger.bml` owns the tensor ownership
+  ledger (`native-model-tensor-ledger-band.fk` 65535).
+- `form/form-stdlib/native-model-token-flow.bml`, `native-model-owner-cadence.bml`
+  and `native-model-owner-request-flow.bml` make a resident model's request an
+  observable typed flow: live owner-process truth is kept apart from model truth.
+- `form/form-stdlib/native-model-glass.bml`, `native-model-memory-glass.bml` and
+  `native-model-resident-fleet.bml` own model routing, the semantic memory map and
+  retention/eviction for resident models.
 
 Model and learning changes use the bidirectional diagnostic membrane in
 `observe/bidirectional-framebuffer-channel.fk`: a model observation flows out with
@@ -52,37 +46,19 @@ Every local ask runs in the body. `form/form-stdlib/native-model-route-table.bml
 holds the route names as Form data — `form-metal` and `llama32.form-metal`, both
 carried by the native Metal door `observe/metal-ask-files-run.bml` with a 12-token
 default — and a name that would reach a model server is not a row: it comes back
-typed `unknown` (`native-model-route-table-band.fk` 255).
-`form/scripts/native_model_route.sh` reads `LOCAL_MODEL_ROUTE` and the `FORM_*`
-request values, writes one private request directory, and hands it to that door;
-an unknown name exits 2 with the known names. The door owns admission,
-generation, identity and publication in one `fkwu` process: the registered
-llama3.2:3b GGUF answers the physical witness `observe/metal-ask-live-run.bml`
-with 255, and a request it does not admit names its reason (`empty-prompt`,
-`model-not-admitted`) before any weights are opened. The body's
-larger voice is Qwen3.8-27B in the `fkwu` model session
-(`form/form-stdlib/bml/form-cli-native-voice.bml`).
+typed `unknown`. The door reads one request directory named on stdin (`prompt`,
+`model`, `blob`, `cap`, `stage`) and owns admission, generation, identity and
+publication in one `fkwu` process. A request it does not admit names its reason
+(`empty-prompt`, `model-not-admitted`, `model-file-absent`,
+`model-content-identity-mismatch`) before any weights are decoded.
+`observe/metal-ask-run.bml` is the same ask taking one JSON line on stdin, refusing
+an absent request before model admission. The body's larger voice is Qwen3.8-27B in
+the `fkwu` model session (`form/form-stdlib/bml/form-cli-native-voice.bml`).
 
-The presence lanes translate through the same door:
-`presence/fkwu-local-audio-loop.fk`, `presence/fkwu-many-voices-live.fk` and
-`presence/fkwu-production-audio-end-to-end.fk` write a request directory, run
-the door in a child `fkwu`, and read the first line of the published answer.
-
-## The host carriers
-
-The `form/scripts/native_model_*.sh` carriers — train, rag, route, checkpoint,
-session_world, session_grounding, real_flows, tally, daily — assemble a Form
-input, invoke `fkwu`, and keep the minimized result under the private state
-directory. None of them asks a model server. Direction: each carrier holds only
-what a host boundary is for — environment bytes, stdin, file metadata, process
-return codes, the clock — and every score, class, admission, authority and weight
-update lives in Form; what a carrier still decides comes home into a Form door.
-
-`native_model_real_flows.sh` carries two daily-comparable flows, the session world
-model and session grounding, fresh or from sealed child reports verified by
-SHA-256. `native_model_daily.sh` runs the integrity quartet, RAG, the bounded
-training and checkpoint witness, the real flows and the tally when invoked; no
-scheduler in this tree invokes it.
+`observe/native-model-dual-resident-live-run.fk` keeps Qwen3.8 Flash Next and
+Llama 3.2 3B open in one long-lived Form process: idle polls of the filesystem
+ingress never evict either context, and only an explicitly offered `quit` closes
+both.
 
 ## Classes do not blur
 
@@ -100,69 +76,39 @@ Execution location is separate: `native-recipe`, `local-process`, or
 `base.llama32-3b-metal` executes as a `native-recipe` and its class is
 `local-native`. Model weights are input data. Evaluation, training, teacher, and
 integration-probe calls are separate from accepted production finals and cannot
-inflate sovereignty. The registry collapses repeated speech windows and duplicate
-synthetic GGUF bands into families rather than inflating the count; the registry
-cell answers the current count (`native-model-control-plane-band.fk` 65535).
+inflate sovereignty. The registry cell answers the current count.
 
-The looped-transformer transfer is executable in
-`form/form-stdlib/nanbeige-looped-lane.fk`: 22 stored decoder layers, 44 layer
-applications, per-loop KV isolation, the borrowed Nanbeige challenger admitted only
-after pinned identity, forward parity, sealed quality improvement, and resource
-gates. `nanbeige-looped-transformer.fk` runs the native RMSNorm/RoPE/GQA/SwiGLU
-stack twice over the same layer-weight list; `nanbeige-package-admission.fk` and
-`nanbeige-gguf-admission.fk` own the pinned safetensors and Q4 identities
-(`form/scripts/nanbeige_gguf_verify.sh` hashes the GGUF for that admission); native
-bf16 tensor windows enter math through `safetensors-bf16-slice.fk`.
+## Local adaptation
 
-## What the bounded native training is
+Adaptation of a pretrained base runs in the body, on Metal, in Form:
 
-`native-model-live-training.fk` performs bounded weight training inside Form — a
-two-block transformer component on real EN→FR feature rows with a held-out set,
-and a small next-token neural LM — with every metric computed in Form. The learned
-state serializes exactly: `native-model-checkpoint.fk` writes the learned values as
-canonical IEEE-754 little-endian bytes bound to a content SHA-256 and the exact
-training contract, publishes by same-directory rename, reloads every weight
-bit-identically, and proves prediction/metric equivalence. A continuation that
-regresses the held-out loss is rejected and the incumbent stays active. The scope
-says it plainly: `not-useful-generative-llm` — the transformer width is two and the
-neural LM has one-token context.
+- `native-lora-dataset.bml` turns chat, prompt/completion and plain-text JSONL into
+  teacher-forced token rows; malformed rows stay in the denominator.
+- `native-lora-recompute.bml` runs whole-sequence reverse mode with layer input
+  checkpoints; `native-lora-train.bml` accumulates a token-weighted batch gradient
+  and updates the adapter each completed round, publishing parameters and Adam
+  moments together.
+- `native-lora-checkpoint.bml` publishes safetensors checkpoints by rename, and
+  `native-lora-progress.bml` keeps corpus traversal and Adam age as separate
+  identities in the generation they describe.
+- `native-lora-fuse.bml` bakes the low-rank delta into standalone 4-bit weights;
+  quantization error is measured per projection and never called lossless.
+- `native-lora-worker.bml` launches and supervises a run shell-free and keeps the
+  child's real exit status; the doors are `observe/native-lora-train-run.fk`,
+  `observe/native-lora-supervise-run.fk` and `observe/native-lora-fuse-run.fk`.
+  The adapters live under `form/form-stdlib/adapters/`.
 
-Local adaptation of a pretrained base runs in the body:
-`form/form-stdlib/native-lora-train.bml` and `native-lora-fuse.bml` write the
-adapters under `form/form-stdlib/adapters/`
-([`native-lora-training.md`](native-lora-training.md)). Falling validation loss
-does not establish task authority: the paired evaluator compares candidate and
-incumbent on fixed items with exact, token-F1, and order-sensitive scores,
-identity-stable and clean, and a tie cannot earn authority.
-
-## Daily metric contract
-
-Each daily witness records these separately:
-
-1. Integrity: fresh `fkwu`, the ground quartet, native-vs-rented `11111`, the
-   relevant native bands, and a deliberate unresolved-call failure on a
-   never-reused path.
-2. Registry: observed occurrences by class, with artifact hashes where available.
-3. Quality: paired exact, token F1, order-sensitive score, sample count, latency,
-   errors, evaluator identity, and data identity.
-4. Integration: explicit pass/fail results for real callable routes, including
-   deterministic and live native RAG separately.
-5. Work allocation: accepted production finals by class; non-final traffic is excluded.
-6. Progress: day-over-day native quality, owned-work share, local borrowed share,
-   remote share, and gate state.
-
-Until production routes append valid accepted-final events, owned-work share is
-**unmeasured**, never zero; the native route does not append events yet.
-Installed models and evaluation traffic do not supply the missing denominator. A
-forged incomplete row and a digest-mismatched edited row are rejected as invalid
-and cannot manufacture a share.
+Falling validation loss does not establish task authority: a candidate is compared
+with the incumbent on fixed items with exact, token-F1 and order-sensitive scores
+(`native-model-evidence.fk`), identity-stable and clean, and a tie cannot earn
+authority.
 
 ## Training and promotion gates
 
-A larger training job remains closed unless all of these are observed:
+A larger training job stays closed unless all of these are observed:
 
 - exact training rows and a separate held-out set;
-- zero forbidden overlap under the Form seal contract;
+- zero forbidden overlap between training rows and the held-out audit;
 - row-level provenance plus scoped consent and license receipts;
 - a fixed evaluator and content-addressed destination;
 - integrity, power, thermal, disk, and toolchain readiness;
@@ -175,48 +121,25 @@ training-validation or historical held-out diagnostics cannot be relabeled as
 promotion evidence. A tie cannot earn authority.
 
 The language datasets do not have complete row-level provenance/consent/license
-receipts, so a new large training run is closed. No scheduled task may
-manufacture those receipts or treat their absence as a tooling inconvenience.
+receipts, so a new large training run is closed. Nothing may manufacture those
+receipts or treat their absence as a tooling inconvenience.
 
-## Schedule
-
-Training is evidence-triggered, not a requirement to mutate weights every day.
-The bounded focus rotates — deduplicate/provenance/seal preparation; the
-Form-knowledge challenger and the translation challenger (closed until eligible
-rows and receipts exist); persisted Form-native checkpoint/KV/layer work; the
-action-conditioned local world model; consented speaker-disjoint speech work;
-a rotating sealed evaluation and rollback check (evaluation only, never training).
-The rotation is Form-owned policy until the daily carrier evaluates `nmfd-plan`
-from measured host, seal, evaluation, and lineage inputs and dispatches only an
-admitted job. A green day may contain no large-model weight mutation; that is
-correct when the larger gates are closed. None of these commands grants
-production authority by itself.
-
-The procedural transfer from fixed-budget autoresearch (Weco's AIDE², Karpathy's
-autoresearch) is exercised, not cited: immutable evaluation, bounded experiments,
-keep/revert, a lineage of failures and successes, comparisons above noise, compact
-typed memory, explicit reward-hacking checks. `prototype.autoresearch` stays a
-`policy-fixture` until it originates a novel proposal stream; harness improvement
-and model-weight improvement are separately measured loops.
+Until production routes append valid accepted-final events, owned-work share is
+**unmeasured**, never zero. Installed models and evaluation traffic do not supply
+the missing denominator.
 
 ## Present floor and direction
 
-Alive: Form-native bounded training, exact checkpoint/reload/keep-revert,
-Form-owned evidence and authority logic, a classified registry, native RAG as
-local memory, a real-session issued-tool replay, a bounded real-session grounding
-replay, the Form lineage DAG, native LoRA adapters, and a full real-GGUF token path
-on Metal behind the only ask route. Not alive: no persisted *useful* native
-language checkpoint from the bounded trainer, no production authority for any
-local adaptation, no complete language dataset authorization, and no measured
-majority-owned production workload. The grounding replay is not full-index recall
-and is too slow for a cheap daily loop; the issued-tool model predicts issued tool
-classes, not completed world state.
+Alive: the classified registry, Form-owned evidence logic, native-first routing,
+the typed model-flow membrane, native LoRA training and fusing on Metal, and a full
+real-GGUF token path on Metal behind the only ask route. Not alive: no production
+authority for any local adaptation, no complete language dataset authorization, and
+no measured majority-owned production workload.
 
 Direction: route one consented real accepted task through the native door with an
-appended accepted-final event so work share gains a denominator; bind the native
-adapters' base-to-adapter edges through `native-model-lineage-form.fk`; cache or
-compile the Form grounding embeddings and add a full-index shadow lane; bring
-native decode toward realtime so the presence lanes can translate live. The
-session-derived model next needs result mode, latency, process lifecycle, terminal
-state, and held-out calibration. Additional large-model training waits for
-authorized, non-overlapping rows.
+appended accepted-final event so work share gains a denominator; bring native
+decode toward realtime so a presence lane can translate live; keep each host
+carrier to what a host boundary is for — environment bytes, stdin, file metadata,
+process return codes, the clock — with every score, class, admission, authority and
+weight update in Form. Additional large-model training waits for authorized,
+non-overlapping rows.

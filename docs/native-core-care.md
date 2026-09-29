@@ -1,9 +1,9 @@
 # Native care from organ signals
 
-The [current source execution](evidence/fkwu/native-core-care.json) observes 13
+The current source execution observes 13
 resource scenarios, actual diagnostic care while children run, and two resident
 CLI reads that preserve open needs. The
-[installed CLI execution](evidence/fkwu/native-startup-care.json) reaches the
+installed CLI execution reaches the
 same care flow through its compiled default entry, without a source argument.
 Its two reads consume 44,397 event bytes and then zero, preserving three signals,
 two open needs and one supplied resource. The child exits zero with empty stderr;
@@ -15,7 +15,7 @@ field. The door does not set or enforce that configuration. Every other
 kernel must settle before reset. The Form admission predicate accepts only a
 singleton roster containing this process's positive integer PID. Empty readings,
 missing self, additional owners and malformed values refuse. The
-[pure admission observations](evidence/fkwu/field-reset-admission.json) exercise
+pure admission observations exercise
 that predicate without resetting a field. The registered-kernel roster remains
 bounded; it cannot prove complete host liveness. A refusal prints the observed
 roster and exits nonzero. Recovery
@@ -140,23 +140,20 @@ Its finite collection exercise does not constrain the reader's lifetime.
 Request parsing, discovery and explicit node-returning APIs still admit primary
 nodes. Reader records, the collector, boxed floats and framebuffer timestamp
 publication remain seed-backed. Three floating inputs in the
-[value-contract observation](evidence/fkwu/care-value-contract.json) create
+value-contract observation create
 three float boxes and no primary nodes. The same observation compares twelve
 protocol transitions and a real 44,397-byte organ exchange against the parent
 implementation. Complete native ownership and signaling when ordinary
 allocation cannot grow remain open.
 
-The [health command observation](evidence/fkwu/health-view-lifetime.json)
-alternates health-first and care-first consumption of actual local write/readback
+The health command observation alternates health-first and care-first consumption of actual local write/readback
 events through 32 cycles. Warmed explicit-source commands include request
 parsing and serialization in their measured intervals; event production and
 reply decoding are outside. Those intervals mint no primary nodes. Partial
 records share the same cursor; a held health view remains exact through actual
 collection. Initial admission is recorded separately. This workload does not
 establish allocation-free execution or the cost of changing discovery.
-Run `observe/form-health-view-witness.bml` with a new absolute evidence directory
-on stdin. The [projection comparison](evidence/fkwu/health-view-contract.json)
-preserves typed nested data, duplicate fields, source states, pain-first order,
+The projection comparison preserves typed nested data, duplicate fields, source states, pain-first order,
 request messages and custom node callbacks against the preceding implementation.
 
 Shrinking files reset the reader. A known publisher's renewed generation also
@@ -174,8 +171,7 @@ Truncation preserves the generation and accumulated invalid-record count while
 emitting a source-reset observation. Shared-append joins preserve pending bytes;
 a known shared writer renewing its generation still starts a fresh reading.
 
-The [changing-event observation](evidence/fkwu/care-changing-lifetime.json)
-executes local writes, observes their readback and carries fresh events through
+The changing-event observation executes local writes, observes their readback and carries fresh events through
 32 append/renewal cycles. It includes malformed and unfinished records,
 equal-size replacements, another live source, shared-writer joins, truncation
 and an old view held across actual collection. Its append and renewal intervals
@@ -186,8 +182,7 @@ generations. Framebuffer timestamps are measured in each admission diagnostic
 row, separately from event parsing. Per-stage costs
 include reading and serialization; declaration preparation and event production
 are outside those intervals. Heap slots include garbage and are not retained
-RAM or total allocation. Run `observe/form-care-changing-witness.bml` with a
-new absolute directory on stdin to retain another observation and its events.
+RAM or total allocation.
 
 The result keeps pain first and unknown health or open resource needs visible.
 Every projected organ includes its source state and observation age. Applied
@@ -216,7 +211,7 @@ remain distinct. See [healing](form-cli-healing.md) and
 The view's zero model/remote counts describe that read only. They are
 not global crossing totals. Full discovery of every organ, interpretation of
 every diagnostic, comprehensive resource-cost routing and measured outward
-gifts remain the [north star](fkwu-form-native-north-star.md). The active care
+gifts remain the north star. The active care
 callbacks run synchronously in their owning process. Cross-process declarations
 make their exchange visible; they do not grant the view remote actuators.
 
@@ -240,8 +235,8 @@ recovery; completion still depends on the original caller checks.
 Other malformed replies receive precise correction feedback. Repeated syntax
 failures are counted; rejected replies execute no tools. A later valid reply
 clears that syntax need. Ordinary valid replies emit no syntax-health rows.
-The [retained native coding failure](../receipts/2026-09-22-native-json-attention.md)
-shows an actual tool recovery and the remaining implementation refusal.
+A retained native coding failure showed an actual tool recovery and the
+remaining implementation refusal.
 
 ## Guarded edit care
 
@@ -262,34 +257,3 @@ stale identity returns `edit-sha256-mismatch` and preserves the document. This
 form avoids repeating the old source inside a whole-document replacement.
 The same role, writable-path, review and caller-verification checks still apply.
 It edits the resident document; publication remains the caller's responsibility.
-
-## Review context care
-
-When a review lacks a caller or ownership contract, the executing caller can
-offer selected source sections to
-[`frcc-prepare`](../form/form-stdlib/bml/form-cli-review-context-care.bml).
-It emits the coverage gap, calls `oc-hear`, supplies the declared sections and
-re-reads them before returning the packet. An unavailable or changed selection
-leaves the need open and returns `nothing`. The source packet stays outside the
-shared events; those events carry coverage and delivery metadata.
-
-The stdin door is:
-
-```sh
-form-run ./fkwu observe/form-cli-review-context-care-run.bml < review-context-request.json
-```
-
-The caller supplies one JSON object with nonempty string fields `flow`, `events`,
-`before_path`, `goal`, `packet_path`, and a nonempty `parts` array. Each part is
-`[path, opening_marker, following_closing_marker]`. Source selection includes
-the opening marker and stops before the closing marker. Paths belong to the
-caller; relative paths resolve from the current directory. Create the output
-directories first and choose a fresh packet path. The door writes that packet,
-checks its retained bytes and returns metadata. An unavailable packet or failed
-write exits nonzero. Callers must check the exit before consuming the output.
-
-The [actual ownership review request](../receipts/artifacts/2026-09-22-prefill-code-review/context-care-request.json)
-and [receipt](../receipts/2026-09-22-prefill-code-review.md) carry its first use.
-The caller selects what the review needs; the cell does not discover a complete
-call graph or judge the answer. This door invokes no model or remote service.
-Its supplied packet can serve the next model call or a retained-answer check.

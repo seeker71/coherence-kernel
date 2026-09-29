@@ -27,16 +27,10 @@ if [[ "${1:-}" == "--bench" ]]; then
 fi
 
 # --- THE SEAL: a verdict belongs to the tree it was read from ---------------
-# Laid 2026-08-17, from a run that was still going while the files under it
-# changed three times. It would have printed a number, and the number would have
-# been about a tree that no longer existed — green or red equally meaningless.
-# Nothing caught that; it was noticed by hand, from a timestamp, and only
-# because someone happened to wonder. Once is luck.
-#
-# This body already knew the shape: scripts/fourth-arm.sh seals its table to a
-# generation and voids it when the sources move underneath ("table index
-# generation changed"). That guard sat one level down from the run that needed
-# it. This is the same guard at the top.
+# A run that is still going while the files under it change would print a
+# number about a tree that no longer exists — green or red equally meaningless.
+# The run stamps the tree (HEAD plus the digest of its working status) when it
+# starts and again when it ends, and a stamp that moved voids the reading.
 #
 # A sweep here takes over an hour, so the window is wide and an edit inside it
 # is ordinary, not careless. What must never be ordinary is READING the result
@@ -190,9 +184,8 @@ if [[ $SIBLINGS -eq 1 ]]; then
 fi
 
 # The runtime walker (repo-root fkwu, runtime/fkwu-uni.c) carries the
-# resolver-driven the source door door that fkwu-only proof-level bands run on.
-# Distinct from the emitted fourth-arm walker (bootstrap uni.c): that one
-# walks pre-flattened tables; this one resolves `; preludes:` directives.
+# resolver-driven source door that the fourth arm and the fkwu-only
+# proof-level bands run on: it resolves `; preludes:` directives.
 FKWU_SRC=""
 build_fkwu_src() {
     local src="../runtime/fkwu-uni.c" bin="../fkwu"
@@ -216,11 +209,9 @@ build_fkwu_src() {
 build_fkwu_src || exit 1
 
 # ── FORM BALANCE, and the response to it ────────────────────────────────────
-# Cells whose forms do not close were found four times in one week, each by
-# accident, each only when something refused to run — and one of them had been
-# that way since its only commit while its header claimed a verdict. A class
-# found only by accident is a class mostly not found, so it is counted here
-# every run. The count is not the deliverable: `observe/tree-heal.fk` repairs
+# Cells whose forms do not close surface only when something refuses to run,
+# so they are counted here every run: a class found only by accident is a
+# class mostly not found. The count is not the deliverable: `observe/tree-heal.fk` repairs
 # them, and it is safe to run unattended because it never trusts its own edit —
 # a candidate closer is kept only when the kernel stops objecting, and reverted
 # byte-for-byte otherwise.
@@ -279,35 +270,21 @@ organ_steady() {
 
 # The fourth sibling is the repo-root fkwu source/JIT door. It resolves the
 # band's Form dependency graph and executes source directly; hot CPU/Metal/MLX
-# recipes may crystallize on demand, while flatten tables remain an explicit
-# maintenance/benchmark lane rather than a validation prerequisite.
-FORM_FOURTH_EXECUTION_MODE="${FORM_FOURTH_EXECUTION_MODE:-source}"
+# recipes may crystallize on demand.
 FORM_FOURTH_SOURCE_FKWU="${FORM_FOURTH_SOURCE_FKWU:-$FKWU_SRC}"
 # shellcheck source=scripts/fourth-arm.sh
 source scripts/fourth-arm.sh
 build_fourth
 
 # AXIOM-4: "passage not through the offered interface is breach, and breach is
-# observable." An absent fourth arm is a breach of the proof interface, and until
-# 2026-07-22 it was NOT observable: build_fourth printed one line to stderr,
-# returned with FKWU unset, and validate.sh went on to stamp ✓ on every band and
-# to OMIT the "fourth arm: N four-way" summary entirely. A whole leg of the proof
-# could vanish and the run still read as green.
-#
-# Witnessed on claude/deepseek-v4-flash-gguf-54a96c at 9f8a116e8, pristine
-# checkout: both committed fourth-arm artifacts were stale against their own
-# sources (binary stamp 695a9a0f39c157e6 vs wanted 52d0ef7b7c8a74cf; uni.c stamp
-# 6670bf9df67a1e28 vs wanted 2c1d416f79add09a), so the arm never ran — 1284 ok,
-# 41 divergent, zero four-way lines, and a checkmark on all of it. Regenerating
-# the bootstrap turned the arm back on and seven bands immediately disagreed.
-# They had not regressed; they had never been asked.
-#
-# fourth-arm.sh's own header already stated the law — "every declared fourth-arm
+# observable." An absent fourth arm is a breach of the proof interface and is
+# observable here: without this refusal validate.sh would stamp ✓ on every band
+# and omit the "fourth arm: N four-way" summary, so a whole leg of the proof
+# could vanish and the run still read as green. Every declared fourth-arm
 # workload is mandatory: preparation, execution, and agreement failures fail
-# validation instead of silently reducing the proof to three siblings" — and the
-# code did the opposite of the sentence written above it. This is that sentence,
-# executed. FORM_ALLOW_THREE_ARM=1 is the one door out, for a host that genuinely
-# cannot build fkwu (no clang); it must be asked for out loud, never assumed.
+# validation instead of silently reducing the proof to three siblings.
+# FORM_ALLOW_THREE_ARM=1 is the one door out, for a host that genuinely cannot
+# build fkwu (no cc); it must be asked for out loud, never assumed.
 if ! fourth_available; then
     if [[ "${FORM_ALLOW_THREE_ARM:-0}" == 1 ]]; then
         echo "  fourth arm ABSENT — proceeding three-arm by explicit FORM_ALLOW_THREE_ARM=1" >&2
@@ -360,12 +337,8 @@ cleanup() {
     fi
 }
 # bash REPLACES an EXIT trap; it does not chain. `trap cleanup EXIT` alone
-# silently disarmed the seal set above, and the seal is what tells a reader
-# that a verdict describes a tree that has since moved. Witnessed 2026-09-10:
-# a corpus-band run began at 09ad6b2e, HEAD moved to 60239a6f forty-one
-# minutes before it ended, and the run printed a clean verdict and exited 0.
-# It was noticed from a timestamp -- the same way the drift this seal was
-# built for was noticed, and the reason its own comment says "Once is luck."
+# would disarm the seal set above, and the seal is what tells a reader that a
+# verdict describes a tree that has since moved.
 #
 # So the handler that owns the EXIT slot carries both: the scratch dirs go,
 # and the seal keeps the last word on the exit status.
@@ -513,7 +486,7 @@ compiler_stamp=""
 # unit born in Form joins it by name.
 # Validation needs executable Form source on every arm: the compiler chain ends
 # in its explicit text lens, the same Recipe lowering expressed as source.
-# Including the lens in the content stamp also invalidates old cached drivers.
+# The lens is part of the content stamp, so a cached driver is keyed to it.
 compiler_chain=("form-stdlib/engine-constants.fk" "form-stdlib/compiler-objects.fk" "form-stdlib/form-ontology-bp.fk" "form-stdlib/form-ontology-source-categories.fk" "form-stdlib/form-ontology-loader.fk" "form-stdlib/line-grammar.fk" "form-stdlib/bmf-core.fk" "form-stdlib/bmf-grammar.fk" "form-stdlib/bml.fk" "form-stdlib/bml-source.fk" "form-stdlib/source-compiler.fk" "form-stdlib/grammars/form-bml.fk" "form-stdlib/grammars/form-lift.fk" "form-stdlib/form-bml-lower.fk" "form-stdlib/source-compiler-text-lens.fk")
 compiler_stamp="$(form_hash16 "${compiler_chain[@]}" "${FKWU_SRC:-}" "$GO_BIN")"
 
@@ -524,22 +497,22 @@ prepared_args=()
 # -- so by the time a file reaches prepared_args, every dependency it would
 # name is already present as its own separate, independently prepared entry.
 # The header is therefore pure redundancy for this pipeline, and since
-# 2026-09-03 Go/Rust/TS/fkwu all walk "; preludes:" directives themselves, a
-# LIVE header is actively dangerous: it re-names a dependency by its RAW path
-# even when that dependency was separately lowered+cached here under a
-# DIFFERENT path (SOURCE_CACHE_DIR/<hash>.fk) — reintroducing the exact raw,
-# un-lowered "section [form.bml]" text the lens below exists to strip, now
-# through a side door the kernels' new prelude walk opens right back up.
+# Go/Rust/TS/fkwu all walk "; preludes:" directives themselves, a LIVE header
+# is actively dangerous: it re-names a dependency by its RAW path even when
+# that dependency was separately lowered+cached here under a DIFFERENT path
+# (SOURCE_CACHE_DIR/<hash>.fk) — reintroducing the raw, un-lowered
+# "section [form.bml]" text the lens below exists to strip, through a side
+# door the kernels' prelude walk opens.
 # Stripping is a pure no-op for every reader in this tree: the header is
 # already just a comment line, inert to any Form parser; only the kernels'
-# new directive SCAN treats its text as meaningful, and only that scan is
-# what this suppresses.
+# directive SCAN treats its text as meaningful, and only that scan is what
+# this suppresses.
 # A line that opens inside a string literal is text, never a directive. A band may
 # carry another language's source in a string (seedbank python-exec's "import os"
-# lines at column 0), and the import rule cut those lines, their closing quotes and
-# parens with them. fk_scan carries the literal across lines: an escaped character
-# stays inside, and a ";" outside a string starts a comment. The prepared-copy keys
-# below end in "-q" so copies stripped by the old rule are not reused.
+# lines at column 0), and the import rule must not cut those lines, their closing
+# quotes and parens with them. fk_scan carries the literal across lines: an
+# escaped character stays inside, and a ";" outside a string starts a comment.
+# The prepared-copy keys below end in "-q", the mark of this rule.
 fk_in_string_awk='
     function fk_scan(line,   i, c, n) {
         n = length(line)
@@ -610,7 +583,7 @@ prepare_sources() {
     for src in "$@"; do
         if grep -Eq '^[[:space:]]*section \[' "$src"; then
             # "-bmlhead": a lowered file keeps only its ".bml" header names
-            # (fk_keep_bml_prelude_deps); copies cached under the old rule kept all.
+            # (fk_keep_bml_prelude_deps).
             key="$(form_hash16 "$src")-$compiler_stamp-bmlhead-q"
             cached="$SOURCE_CACHE_DIR/$key.fk"
             if [[ ! -s "$cached" ]]; then
@@ -688,9 +661,8 @@ run_siblings() {
     local go_out rs_out ts_out go_rc rs_rc ts_rc legs
     prepare_sources "$@"
     # Fourth leg: a manifest-covered band runs from source on runtime fkwu.
-    # There is no table/index preparation and no cold flatten build. A nonzero
-    # exit or source diagnostic is a failed fourth witness even when the last
-    # printed scalar happens to match (verdict-parity numbness).
+    # A nonzero exit or source diagnostic is a failed fourth witness even when
+    # the last printed scalar happens to match (verdict-parity numbness).
     local fourth_src="" fk_out="" fk_rc=0 fk_diags=0
     local fourth_stem=""
     if fourth_available; then
@@ -772,15 +744,11 @@ run_siblings() {
     printf '  evidence=%s exits go=%s rust=%s typescript=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc"
     if [[ "$go_rc" == 0 && "$rs_rc" == 0 && "$ts_rc" == 0 && "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]] \
         && { [[ -z "$fourth_stem" ]] || { [[ "$fk_rc" == 0 && "$fk_diags" == 0 && "$fk_out" == "$go_out" ]]; }; }; then
-        # REGISTERED-VERDICT GATE (2026-08-17). fourth-arm-bands.txt column 3 is
-        # the band's registered verdict, and until today NOTHING read it — every
-        # consumer parsed `stem kind _`, so the column was write-only and 114
-        # bands drifted from it silently, both directions, over months. This
-        # suite already proves the four arms AGREE; agreement was the only thing
-        # it proved, so a band that grew six checks kept passing while the
-        # registry still described the old six. Now an agreed verdict that
-        # differs from the registered one is a failure with its own word, so a
-        # band cannot change what it certifies without the change being seen.
+        # REGISTERED-VERDICT GATE. fourth-arm-bands.txt column 3 is the band's
+        # registered verdict. The four arms agreeing proves agreement and
+        # nothing more, so an agreed verdict that differs from the registered
+        # one is a failure with its own word: a band cannot change what it
+        # certifies without the change being seen.
         # The verdict compared is the LAST line of the agreed output — fks bands
         # answer one scalar, fkc bands may print above it — and only when the
         # registered column is numeric (the one teach-sema-code row is not a
@@ -1006,8 +974,8 @@ if [[ $# -gt 0 ]]; then
     # three walkers each open the absent path and emit a DIFFERENT file-not-found
     # string while fkwu emits nothing, so the verdict reads "kernels disagree —
     # investigate which is correct" — a phantom divergence that has cost real
-    # diagnostic effort (e.g. running `gelu-erf-band.fk` when the band is named
-    # `transformer-gelu-erf-band.fk`). Name the absent path plainly instead.
+    # diagnostic effort (running a band by a shortened name when its file
+    # carries a longer one). Name the absent path plainly instead.
     missing=()
     for f in "${explicit_args[@]}"; do
         [[ -f "$f" ]] || missing+=("$f")
@@ -1029,9 +997,6 @@ if [[ $# -gt 0 ]]; then
     done
     run_workload "$label" "${explicit_args[@]}"
 else
-    # Direct source/JIT mode has no global flatten phase. The call remains so
-    # an explicitly selected table-maintenance mode can warm its optional cache.
-    fourth_prepare_all
     # Pre-compile the one prelude every band shares so the pool's first
     # wave doesn't race N copies of the same compile (atomic mv converges
     # them, but each lost race re-pays the full source-compiler walk).
@@ -1043,8 +1008,8 @@ else
     # counts from the status files. A band's legs were already concurrent;
     # this makes the bands themselves concurrent — the suite's wall time is
     # sum(bands)/jobs instead of sum(bands). Caches stay safe under the
-    # fan-out: source-compile and fourth-table writes are content-keyed and
-    # atomic (mv), every leg owns a private TMPDIR.
+    # fan-out: source-compile and fourth-arm source-run writes are content-keyed
+    # and atomic (mv), every leg owns a private TMPDIR.
     SUITE_PAR="${VALIDATE_JOBS:-8}"
     suite_dir="$(mktemp -d "${TMPDIR:-/tmp}/form-suite.XXXXXX")"
     wl_labels=()
@@ -1062,7 +1027,7 @@ else
     done
     # --- form-stdlib/tests/*.{fk,form}: prepend stdlib preludes --------
     # Convention: core.fk is always prepended. If the test name matches
-    # an additional module (e.g. tests/parser.fk → parser.fk), that
+    # an additional module (tests/line-grammar.fk → line-grammar.fk), that
     # module is loaded between core.fk and the test.
     if [[ -d form-stdlib/tests ]]; then
         for f in form-stdlib/tests/*.fk form-stdlib/tests/*.form; do
@@ -1126,22 +1091,16 @@ if [[ $SIBLINGS -eq 0 ]]; then
     echo "  sibling kernels: not asked — no kernel source moved (FORM_VALIDATE_SIBLINGS=1 asks them)"
     echo "  fkwu lane: $fkwu_lane band(s) answered their pins; $unpinned ran clean with no pin to answer"
 elif [[ $fourth_ok -gt 0 ]]; then
-    echo "  fourth arm: $fourth_ok band(s) four-way (runtime fkwu source/JIT; no flatten gate)"
+    echo "  fourth arm: $fourth_ok band(s) four-way (runtime fkwu source/JIT)"
 elif [[ $((ok - fkwu_only)) -gt 0 ]]; then
     # The SECOND way a zero happens, and the one the fourth_available refusal
-    # above cannot see. That gate asks "can the arm be built at all" and exits 1
-    # when it cannot. This asks the different question: the arm built fine, and
-    # then fired for NOT ONE band in the run — because coverage is per-band
+    # above cannot see. That gate asks "is the arm present at all" and exits 1
+    # when it is not. This asks the different question: the arm is present, and
+    # fired for NOT ONE band in the run — because coverage is per-band
     # (fourth-arm-bands.txt), so a workload naming only unregistered bands gets
-    # a full set of ✓ marks with three kernels behind every one of them.
-    #
-    # Until now that printed nothing whatsoever: the summary line was inside
-    # `if fourth_ok > 0`, so zero was reported by silence. Witnessed 2026-07-25,
-    # from the other side of the same wound the block above documents — a band
-    # written that day claimed four-way in its own header while
-    # scripts/fourth-arm-gate.sh answered NO-FOURTH, and nothing in a plain
-    # validate.sh run would have said so. Say the zero out loud instead.
-    echo "  fourth arm: 0 band(s) — built, but no band in this run is covered;"
+    # a full set of ✓ marks with three kernels behind every one of them. The
+    # zero is said out loud, never left to silence.
+    echo "  fourth arm: 0 band(s) — present, but no band in this run is covered;"
     echo "              every ✓ above speaks for three kernels. Register the band in"
     echo "              fourth-arm-bands.txt. The source/JIT door itself is present."
 fi

@@ -13,7 +13,7 @@ and 635 words** as the optimized sliced path. Completion and release were 1;
 provider calls were 0; elapsed time was 475,372 ms. The 350–450-word requirement
 and source-fidelity findings remain unresolved.
 
-[The comparison](artifacts/2026-09-23-assessment-recovery/reference-comparison.json)
+The comparison
 does not support changing the optimized correction lane to fix this answer.
 The earlier source-specific correction did change generation, so this is not a
 claim that all feedback is ignored. The reference helper is retained alongside
@@ -52,8 +52,8 @@ provider calls. The peak estimated slice was **6,943,217,540 bytes**, excluding
 the resident model and complete KV allocation. This estimate and the old
 training admission estimate describe different memory scopes.
 
-[Before](artifacts/2026-09-23-assessment-recovery/learning-before.json) and
-[after](artifacts/2026-09-23-assessment-recovery/assessment-after.json) retain
+Before and
+after retain
 the failed worker state and actual completed assessment. Optimizer step stayed
 145: assessment does not train. The later prompt-only optimization uses the
 existing last-row head path where the supervision mask is zero; the timed run
@@ -86,7 +86,7 @@ The preceding completed coordinator turn consumed **7,927,281 rented tokens**:
 7,614,720 cached input, 244,560 uncached input, 42,061 output and 25,940
 unattributed tokens. Reasoning tokens are a subset of output. Its 56 model calls
 and 53 tool calls reconcile in the
-[cost record](artifacts/2026-09-23-assessment-recovery/preceding-turn-cost.json).
+cost record.
 Current open-turn cost is not substituted with that completed-turn reading.
 The separate output-only session meter read **5,355,604**; it excludes input.
 This is paid Codex implementation work, with native execution supplying the
@@ -100,6 +100,6 @@ through `observe/form-cli-session-home-embody-run.fk`, event
 `2026-09-23-assessment-memory-recovery`. The worker was launched on the repaired
 implementation. Retention alone does not establish a learned or promoted row;
 the queue's subsequent state must supply that observation.
-The [closing snapshot](artifacts/2026-09-23-assessment-recovery/learning-current.json)
+The closing snapshot
 has a live worker, five pending rows, optimizer step 145 and 146 prior learned
 rounds. The long row has not yet completed preparation in that snapshot.

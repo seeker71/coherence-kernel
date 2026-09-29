@@ -40,29 +40,24 @@ not claim native heap coverage or system memory headroom. `elapsed_ms` covers
 waiting for native rows and materializing them; `native_slice_ms` measures the
 native traversal itself, so those intervals overlap and must not be added.
 `control_us` includes the pipe exchange. `round_before_trace_us` excludes the
-JSON write. The witness's `elapsed_ms` covers the entire child execution,
-including evaluation after decoding; it is not decoder time. No model or LoRA
+JSON write. An `elapsed_ms` that spans a whole child execution includes
+evaluation after decoding; it is not decoder time. No model or LoRA
 is involved in this decoder, and these timings do not establish a hardware floor.
 
 The native process and its temporary input belong to the invocation. On return,
 the carrier closes/reaps its process and removes the temporary input. Native
 compiler/image freshness remains fkwu's responsibility.
 
-`heal guide|form binary: maximum node depth exceeded` names this implementation,
-`observe/formbin-depth-witness-run.fk` and this reference. A repair follows the
-real trace: find the last cursor/mode, compare elapsed time and selected quantum
+`heal guide|form binary: maximum node depth exceeded` names this implementation
+and this reference. A repair follows the real trace: find the last cursor/mode, compare elapsed time and selected quantum
 in consecutive rows, preserve the continuation, then witness the chosen path.
 GC count alone is insufficient evidence for shrinking work.
 
-Witnesses:
-
-- `form/form-stdlib/tests/formbin-depth-band.fk` (2047) — the pure traversal.
-- `form/form-stdlib/tests/formbin-codec-band.bml` and
-  `formbin-artifacts-band.bml` (16383 each) — the Form codec.
-- `./fkwu observe/formbin-depth-witness-run.fk` — authors a depth-4096 artifact,
-  runs the Go reader against the resident fkwu decode, requires output `42`,
-  copies its complete trace under `.hearth/formbin-depth-<pid>/`, and checks
-  string, float64 and int64 round trips.
+The traversal cell is `form/form-stdlib/bml/formbin-depth.bml`; the native
+decode door is `observe/formbin-depth-native-run.fk` over
+`observe/formbin-depth-native.bml`, and
+`gate/tests/kernel-conformance-band.fk` (511) reads every sibling artifact
+through the Form codec.
 
 Where it is going: the codec already lives in Form, so the Go reader's part
 shrinks toward carrying bytes for its own witness, and every reader of FORMBIN2

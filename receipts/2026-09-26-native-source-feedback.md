@@ -6,7 +6,7 @@ the earlier voice and the claim of an unidentified performed operation.
 The corrected `offer` mapping remains. The original four phrase checks and
 350–450-word range still pass; the read-only source documents remain identical.
 
-The [native answer](artifacts/2026-09-26-native-source-feedback/answer.txt)
+The native answer
 changes from 415 to **426 words**. Its review accepts the answer and explicitly
 addresses the two findings. Public terminal output, review, exact answer and
 the native comparison are retained beside it. The caller feedback ID and text

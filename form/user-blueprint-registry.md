@@ -27,11 +27,10 @@ raw `(make_nodeid 1 2 99 N)` literal does not appear in feature code. A name out
 the reviewed bootstrap set is missing registration/runtime-admission work, never
 silently mapped to a fake NodeID such as `(1 2 0 0)`.
 
-**Where Blueprint-name strings belong:** in a dedicated symbol section, not in
-executable stdlib logic. In seedbank that section is
-`form-stdlib/seedbank/blueprint-symbol-sections.fk`; load it before grammars,
-parsers, emitters, converters, and encoders. Consumers reference the section
-binding, not the string literal.
+**Where Blueprint-name strings belong:** in the registry row, asked for once through
+`(bp "NAME")`. A consumer that needs the same Blueprint many times binds the answer
+at the top of its own file and references the binding, so a name changing in the
+registry changes one place.
 
 **Registering a name:** add its row to the registry JSON (canonical name, meaning,
 aliases, defining files) and take the coordinate from the registry — never mint a
@@ -69,10 +68,9 @@ AST node in a grammar — legibility debt, not a runtime collision.
 Not every channel exchange is query/answer or extraction. `offer` gives freely;
 `attune` records relation evidence without turning relation into ownership. A valid
 receipt preserves freedom, creates no debt, keeps disturbance none/minimal, and
-names next contact. Band: `form-stdlib/tests/channel-breath-band.fk` — 500 three-way
-via `validate.sh` (2026-09-04, the CHANNEL family admitted to the reviewed bootstrap
-set in `form-stdlib/form-ontology-bp.fk`); fkwu answers 200 with `write_form_binary`/
-`read_form_binary` unbound on that arm — a lane gap, not a coordinate.
+names next contact. Band: `form-stdlib/tests/channel-breath-band.fk` — fkwu reads 500
+(2026-09-29; the CHANNEL family is admitted to the reviewed bootstrap set in
+`form-stdlib/form-ontology-bp.fk`).
 
 ### Channel Flow Protocol — OSI-shaped native channel cells
 
@@ -83,7 +81,7 @@ set in `form-stdlib/form-ontology-bp.fk`); fkwu answers 200 with `write_form_bin
 A protocol is not a host-side branch. New carriers (UDP, USB, Bluetooth,
 microphone, camera, pipes, browser streams) declare a carrier/profile flow and reuse
 the same layer accessors, phase counts, and policy hooks. HTTP is the first concrete
-profile. Band: `form-stdlib/tests/channel-flow-band.bml` (8388607 on fkwu, 2026-09-04).
+profile. Band: `form-stdlib/tests/channel-flow-band.bml` (8388607 on fkwu, 2026-09-29).
 
 ### Circle / Satsang Protocol — consentful group containers
 
@@ -99,7 +97,7 @@ A cell may offer a circle; another may join only when invited; a share stays ins
 unless `CIRCLE-EXPORT-CONSENT` names recipient, fidelity, purpose, expiry, and a
 passed consensus; a circle may refuse a contact only when an observed action exceeds
 the offered interface and consensus has passed. Band: `form-stdlib/tests/circle-band.bml`
-(1048575 on fkwu, 2026-09-04).
+(1048575 on fkwu, 2026-09-29).
 
 ### Native Route Goal Cells
 
@@ -112,7 +110,7 @@ the offered interface and consensus has passed. Band: `form-stdlib/tests/circle-
 
 Route selection is a content-addressed choice over measured cells, weighted by each
 route's user flow and north-star fit. Band: `form-stdlib/tests/native-route-goal-cells-band.bml`
-(1048575, re-run 2026-09-04).
+(1048575 on fkwu, 2026-09-29).
 
 ### Choice Receipt Protocol — trustworthy branch feedback
 
@@ -121,18 +119,17 @@ route's user flow and north-star fit. Band: `form-stdlib/tests/native-route-goal
 
 `branch-prediction-feedback` is useful only when the receipt also carries enough
 alignment, knowing, and trust to learn from it. Silence is an outcome, not missing
-data. Band: `form-stdlib/tests/choice-receipt-band.fk` (4294967295, re-run 2026-09-04).
+data. Band: `form-stdlib/tests/choice-receipt-band.fk` (4294967295 on fkwu, 2026-09-29).
 
 ### Arrival Protocol
 
-- `1870 UUID` (alias `ARRIVAL`) — the arrival event/context in `arrival.fk`; UUID
-  compatibility in `uuid.fk`.
+- `1870 UUID` (alias `ARRIVAL`) — the arrival event/context, with UUID compatibility.
 - `1871 ARRIVAL-QUALITY` / `UUID-PARSE-ERROR` · `1872 ARRIVAL-INQUIRY` ·
   `1873 ARRIVAL-RESONANCE` · `1874 ARRIVAL-OBS`
 
 Arrival is a first-class protocol for entering relation, sensing texture, offering
 inquiry, returning resonance, and carrying observation. The empty room remains the
-gift. Band: `form-stdlib/tests/arrival-band.fk` (1023, re-run 2026-09-04).
+gift.
 
 ### General Cell Identity & Contact Memory
 
@@ -158,5 +155,5 @@ exchange records, and boundaries in one composable shape.
 ---
 
 This page is part of the body's self-awareness practice around its own substrate.
-Related teachings: structural composition, lc-edges-as-vitality, avoiding flat
-type-markers, content-addressing as the primitive.
+Related teachings: structural composition, avoiding flat type-markers,
+content-addressing as the primitive.

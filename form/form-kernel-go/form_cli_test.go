@@ -1,10 +1,10 @@
 // form_cli_test.go — canonical standalone Form CLI proof from the Go suite.
 //
-// Form CLI has one authoring path: the committed table/C carrier and its
-// behavioral proof. The Go sibling used to carry three separate full-source
-// flatten/build copies (headless, REPL, combined), each retaining tens of GB
-// on a full run. That duplicated the maintainer path and proved less. This test
-// now crosses the canonical build once and runs the stronger identity, exact
+// Form CLI has one authoring path: build-form-cli.sh and its behavioral proof.
+// The native bootstrap that build reads (form-stdlib/bootstrap) is regenerable
+// output that git ignores; build-form-cli.sh regenerates it from source when
+// this checkout holds no current generation, which needs the repo-root fkwu.
+// This test crosses the canonical build once and runs the identity, exact
 // bytes, production-index, embedding, grounding, dual-HMAC, and replay proof.
 package main
 
@@ -29,6 +29,11 @@ func TestFkwuFormCliCanonicalCarrier(t *testing.T) {
 	formDir, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The build regenerates an absent or stale bootstrap from source, and the
+	// regeneration runs on the repo-root fkwu as a regular executable file.
+	if info, err := os.Stat(filepath.Join(formDir, "..", "fkwu")); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		t.Skip("repo-root fkwu absent — the form-cli bootstrap cannot regenerate, canonical carrier proof skipped")
 	}
 	proofBinary := filepath.Join(t.TempDir(), "form-cli")
 	build := exec.Command(bash, "build-form-cli.sh", proofBinary)

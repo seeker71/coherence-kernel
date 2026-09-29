@@ -13,7 +13,7 @@ Caller write permissions, repair checks and review still apply.
 
 ## Actual response changes, observed through the tool
 
-The [native observation](artifacts/2026-09-26-native-atomic-edit/observe.bml)
+The native observation
 uses the retained 443-word completed response and the actual 500-word turn-30
 candidate. It verifies both identities and derives their two changed
 paragraphs. One call reproduces the candidate byte for byte. A second-pair
@@ -30,7 +30,7 @@ These are payload bytes, not measured generation tokens or latency. The
 running Qwen admission predates this change. Future native selection of the
 new form remains to be observed. The original word-range check still refuses
 the reproduced 500-word draft against its 350–450 bounds; that adverse result
-is retained in [observation.json](artifacts/2026-09-26-native-atomic-edit/observation.json).
+was retained as observation.json.
 The tool improvement does not establish an answer-quality improvement.
 
 ## Verification and repair evidence

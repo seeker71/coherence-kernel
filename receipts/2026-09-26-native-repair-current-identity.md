@@ -23,7 +23,7 @@ exit, stdout and stderr. It preserves the complete historical evidence in
 continuity and the public result, and keeps the current failure's full evidence.
 Source documents, edit guards, task state and caller checks are unchanged.
 
-The [native observation](artifacts/2026-09-26-native-identity-usefulness-care/check-admission-history.bml)
+The native observation
 reconstructed admission against one frozen, validated real checkpoint at turn
 25. It did not admit a model or change the active model's context.
 

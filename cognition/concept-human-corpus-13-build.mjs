@@ -2,6 +2,12 @@
 // Rebuild the bounded 13-locale human sentence snapshot from pinned Tatoeba
 // detailed exports.  This script uses Node + the host bzip2 executable; Python
 // is neither required nor invoked.
+//
+// The tree holds this recipe and the source pins (fixtures/human-corpus-13/
+// ARCHIVES.tsv, concept-nl-semantic-13-source-manifest.txt); the snapshot,
+// its offsets and metadata cells below are the recipe's products, written by
+// a run and compared by --verify.  The OMW label table read at labelPath is a
+// tracked cell, pinned by hash in concept-nl-semantic-13-source-manifest.txt.
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
