@@ -34,6 +34,19 @@ repository-relative paths. A local lookup boundary keeps compilation within
 that snapshot. Missing bytes, malformed registry rows, NUL, absolute source
 dependencies and changed sources refuse admission.
 
+Source hashing selects the Form-emitted ARM64 CPU SHA program when its dynamic
+carrier is available. Other hosts use the portable Form algorithm. A selected
+native execution or release failure remains a refusal. Relocated build workers
+keep the caller's explicit carrier binding.
+
+The source owner publishes live framebuffer stages for discovery, closure and
+file hashing, snapshot writes, verification and startup emission. The build's
+`source-closure.log`, `source-install.log`, `source-verify.log` and `emission.log`
+carry those frames while it runs. Read durations with input units, dispatches,
+net arena movement and observed host calls; do not infer bandwidth from time
+alone. Compare unchanged output after a repair. The encoder shares its byte
+alphabet, and compiler admission reuses contracts with the same name registry.
+
 The existing native protocol carries the build:
 
 - `FCSC1` creates a sealed closure and snapshot from supplied identity roots.
