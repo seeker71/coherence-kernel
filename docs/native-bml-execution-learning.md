@@ -225,3 +225,9 @@ native JSON door is `observe/bml-compact-observe.bml`:
 A prepared reference is a sample. Another sample is owed when a later
 generation of the same contract does not execute to the retained reading.
 When every practice generation executes, the curriculum does not grow.
+
+The local lift is a separate face, `form/form-stdlib/form-lift.bml`. A model
+doing that work reads and writes source through `host:file` and publishes
+through `host:memory`. It names each literal, keeps one class and one
+template, and uses the compact operators already in this curriculum. It does
+not open HTTP, audio, video or speech. The witness reads 135.

@@ -164,3 +164,18 @@ names. Raw Form before and after sections remains passthrough source. The
 rule structure, actual closing-byte positions and raw-source preservation.
 Within BML, an adjacent `do(...)` call and a whitespace-separated
 `do (...) ... end` block retain their respective interpretations.
+
+## Local lift
+
+A lift stays inside Form. It crosses the membrane only through `host:file`
+and `host:memory`. The file door carries source bytes. The memory door is the
+shared-memory adapter over the existing `shm_offer` / `shm_receive` family.
+HTTP, audio, video and speech stay in the catalog and stay closed for a lift.
+
+The executable face is `form/form-stdlib/form-lift.bml`. It names the word
+width, the flag width, the present zero, and each protocol. `template
+LiftCrossing<Protocol, Carrier>` is the generic shape. A class owns admission.
+`|> filter` keeps a crossing only when the body is Form, the door is local,
+and the protocol is file or memory. `??` restores a named flag when a value
+is absent. The witness reads 135: two kept doors, 129 bits, both doors
+admitted, both closed doors refused, one restored absence, and file first.
