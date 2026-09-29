@@ -13,29 +13,23 @@
 section [form.bml] {
     def kh-render-request(method, path, host, body) {
         let blen = str_len(body);
-        let target = str_concat(str_concat(method, " "), path);
-        let request_line = str_concat(target, " HTTP/1.0\r\nHost: ");
-        let host_line = str_concat(str_concat(request_line, host), "\r\nConnection: close\r\n");
-        if (blen > 0) then
-            str_concat(
-                str_concat(
-                    str_concat(
-                        str_concat(host_line, "Content-Type: application/json\r\nContent-Length: "),
-                        int_to_str(blen)),
-                    "\r\n\r\n"),
-                body)
-        else
-            str_concat(host_line, "\r\n");
+        let target = (method ++ " ") ++ path;
+        let request_line = target ++ " HTTP/1.0\r\nHost: ";
+        let host_line = (request_line ++ host) ++ "\r\nConnection: close\r\n";
+        blen > 0 ?
+            (((host_line ++ "Content-Type: application/json\r\nContent-Length: ") ++ int_to_str(blen)) ++ "\r\n\r\n") ++ body
+        :
+            host_line ++ "\r\n";
     }
 
     def http-open(host, port) = socket_connect(host, str_to_int(port));
 
     def http-send-all-step(conn, bytes, from) {
         let n = socket_send(conn, substring(bytes, from, str_len(bytes)));
-        if (n <= 0) then from else http-send-all(conn, bytes, (from + n));
+        n <= 0 ? from : http-send-all(conn, bytes, from + n);
     }
 
-    def http-send-all(conn, bytes, from) = if (from >= str_len(bytes)) then from else http-send-all-step(conn, bytes, from);
+    def http-send-all(conn, bytes, from) = from >= str_len(bytes) ? from : http-send-all-step(conn, bytes, from);
 
     def http-send-on-socket(conn, method, path, host, body) {
         let req = kh-render-request(method, path, host, body);
@@ -45,39 +39,39 @@ section [form.bml] {
     def http-body-offset(msg) {
         let crlf = str_find(msg, "\r\n\r\n", 0);
         let lf = str_find(msg, "\n\n", 0);
-        if (crlf >= 0) then (crlf + 4) else if (lf >= 0) then (lf + 2) else -1;
+        crlf >= 0 ? (crlf + 4) : lf >= 0 ? (lf + 2) : -1;
     }
 
     def http-header-end-from(msg, start) {
         let crlf = str_find(msg, "\r\n", start);
-        if (crlf >= 0) then crlf else str_find(msg, "\n", start);
+        crlf >= 0 ? crlf : str_find(msg, "\n", start);
     }
 
     def http-content-length-from(msg, key, at) {
-        let start = (at + str_len(key));
+        let start = at + str_len(key);
         let stop = http-header-end-from(msg, start);
-        str_to_int(substring(msg, start, if (stop < 0) then str_len(msg) else stop));
+        str_to_int(substring(msg, start, stop < 0 ? str_len(msg) : stop));
     }
 
     def http-content-length(msg) {
         let key = "Content-Length: ";
         let at = str_find(msg, key, 0);
-        if (at < 0) then -1 else http-content-length-from(msg, key, at);
+        at < 0 ? -1 : http-content-length-from(msg, key, at);
     }
 
     def http-response-complete-at(msg, body-start) {
         let expected = http-content-length(msg);
-        if (expected < 0) then true else ((str_len(msg) - body-start) >= expected);
+        expected < 0 ? true : ((str_len(msg) - body-start) >= expected);
     }
 
     def http-response-complete?(msg) {
         let body-start = http-body-offset(msg);
-        if (body-start < 0) then false else http-response-complete-at(msg, body-start);
+        body-start < 0 ? false : http-response-complete-at(msg, body-start);
     }
 
     def http-recv-response-next(conn, acc, chunk) {
-        let next = str_concat(acc, chunk);
-        if http-response-complete?(next) then next else http-recv-response-into(conn, next);
+        let next = acc ++ chunk;
+        http-response-complete?(next) ? next : http-recv-response-into(conn, next);
     }
 
     // a recv that measured no byte for a REASON (dead handle, read error)
@@ -86,69 +80,69 @@ section [form.bml] {
     // "" stays the peer's orderly close: the accumulated reply is whole.
     def http-recv-response-into(conn, acc) {
         let chunk = socket_recv(conn, 65536);
-        if nothing?(chunk) then chunk else if ((Comparable) str_len(chunk) == 0) then acc else http-recv-response-next(conn, acc, chunk);
+        nothing?(chunk) ? chunk : (Comparable) str_len(chunk) == 0 ? acc : http-recv-response-next(conn, acc, chunk);
     }
 
     def http-recv-response(conn) = socket_recv(conn, 65536);
 
     def http-plain-request-connected(conn, req) {
         let sent = http-send-all(conn, req, 0);
-        let response = if (sent > 0) then http-recv-response(conn) else "";
+        let response = sent > 0 ? http-recv-response(conn) : "";
         socket_close(conn);
         response;
     }
 
     // a peer never reached answers nothing (2026-08-27); this boundary names
     // the absence, then "" keeps this cell's no-body meaning downstream.
-    def http-answer-or-empty(r) = if nothing?(r) then "" else r;
+    def http-answer-or-empty(r) = r ?? "";
 
     def http-plain-request-response-or-fallback(host, port, conn, req) {
         let response = http-plain-request-connected(conn, req);
-        if nothing?(response) then http-answer-or-empty(sock_request(host, port, req)) else if (str_len(response) > 0) then response else http-answer-or-empty(sock_request(host, port, req));
+        nothing?(response) ? http-answer-or-empty(sock_request(host, port, req)) : str_len(response) > 0 ? response : http-answer-or-empty(sock_request(host, port, req));
     }
 
     def http-plain-request(host, port, req) {
         let conn = http-open(host, port);
-        if (conn < 0) then http-answer-or-empty(sock_request(host, port, req)) else http-plain-request-response-or-fallback(host, port, conn, req);
+        conn < 0 ? http-answer-or-empty(sock_request(host, port, req)) : http-plain-request-response-or-fallback(host, port, conn, req);
     }
 
     def http-fetch(method, url, body) {
-        let https = ((Comparable) str_find(url, "https://", 0) == 0);
-        let after = substring(url, if https then 8 else 7, str_len(url));
+        let https = (Comparable) str_find(url, "https://", 0) == 0;
+        let after = substring(url, https ? 8 : 7, str_len(url));
         let slash = str_find(after, "/", 0);
-        let hostport = if ((Comparable) slash == -1) then after else substring(after, 0, slash);
-        let path = if ((Comparable) slash == -1) then "/" else substring(after, slash, str_len(after));
+        let hostport = (Comparable) slash == -1 ? after : substring(after, 0, slash);
+        let path = (Comparable) slash == -1 ? "/" : substring(after, slash, str_len(after));
         let colon = str_find(hostport, ":", 0);
-        let host = if ((Comparable) colon == -1) then hostport else substring(hostport, 0, colon);
-        let port = if ((Comparable) colon == -1) then if https then "443" else "80" else substring(hostport, (colon + 1), str_len(hostport));
+        let host = (Comparable) colon == -1 ? hostport : substring(hostport, 0, colon);
+        let port = (Comparable) colon == -1 ? (https ? "443" : "80") : substring(hostport, colon + 1, str_len(hostport));
         let req = kh-render-request(method, path, host, body);
-        if https then http-answer-or-empty(tls_request(host, port, req)) else http-plain-request(host, port, req);
+        https ? http-answer-or-empty(tls_request(host, port, req)) : http-plain-request(host, port, req);
     }
 
     def kh-msg-body-framed(msg, body-start, body-len) {
-        let body-end = if (body-len < 0) then str_len(msg) else (body-start + body-len);
+        let body-end = body-len < 0 ? str_len(msg) : (body-start + body-len);
         substring(msg, body-start, body-end);
     }
 
     def kh-msg-body(msg) {
         let body-start = http-body-offset(msg);
         let body-len = http-content-length(msg);
-        if (body-start < 0) then "" else kh-msg-body-framed(msg, body-start, body-len);
+        body-start < 0 ? "" : kh-msg-body-framed(msg, body-start, body-len);
     }
 
     def kh-msg-start-line(msg) {
         let nl = str_find(msg, "\r\n", 0);
-        if (nl > -1) then substring(msg, 0, nl) else msg;
+        nl > -1 ? substring(msg, 0, nl) : msg;
     }
 
     def kh-status-of-rest(rest) {
         let sp2 = str_find(rest, " ", 0);
-        str_to_int(if ((Comparable) sp2 == -1) then rest else substring(rest, 0, sp2));
+        str_to_int((Comparable) sp2 == -1 ? rest : substring(rest, 0, sp2));
     }
 
     def kh-status-of(response) {
         let line = kh-msg-start-line(response);
         let sp = str_find(line, " ", 0);
-        if ((Comparable) sp == -1) then 0 else kh-status-of-rest(substring(line, (sp + 1), str_len(line)));
+        (Comparable) sp == -1 ? 0 : kh-status-of-rest(substring(line, sp + 1, str_len(line)));
     }
 }
