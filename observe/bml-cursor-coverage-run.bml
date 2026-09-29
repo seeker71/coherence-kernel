@@ -1,16 +1,16 @@
 // bml-cursor-coverage-run.bml — how much of the body's BML the cursor reads whole, and where it stops.
 //
-// The source compiler reads a form.bml, form.route or form.action section statement by statement over
-// text; the cursor (grammars/form-bml.fk) reads it as one source with direct backtracking. This mirror
+// The cursor (grammars/form-bml.fk) is the one reader of a form.bml, form.route or form.action section: it
+// reads the body as one source with direct backtracking and the compiler lowers what it read. This mirror
 // walks every .bml and .fk under a root with the kernel's own source_inventory, finds each such section
 // with the compiler's own section finder, and asks the cursor to admit the body whole. An admitted body is
-// lowered and compared NodeID for NodeID with the compiler's recipes, both through the comparison
-// contract pass they share. A refused body is read again as far as its statements carry, and the
-// first word the cursor could not read is counted, so the next rule is chosen by what the body
-// actually writes. Each reader's own time over the admitted sections rides beside the counts
-// (wall-clock: read it on a quiet machine). A count is attention; the writer decides.
+// lowered and passed through the comparison contract pass; a body that reads and lowers is `read`. A
+// refused body is read again as far as its statements carry, and the first word the cursor could not
+// read is counted, so the next rule is chosen by what the body actually writes. The cursor's own time
+// over the admitted sections rides beside the counts (wall-clock: read it on a quiet machine). A count
+// is attention; the writer decides.
 // stdin: nothing, or one line: the root to walk (default "."), how many first words to show
-// (default 16), and `all` to print every section the cursor does not yet read as the compiler does.
+// (default 16), and `all` to print every section the cursor does not read and lower whole.
 // preludes: form-stdlib/source-compiler.fk form-stdlib/meaning-codes.bml form-stdlib/bml/stdin-source.bml
 section [form.bml] {
  class BmlCursorCoverage {
@@ -18,7 +18,7 @@ section [form.bml] {
   def bcc-read(path) = if (file_size(path) < 1) then "" else read_file(path);
   def bcc-path(root, rel) = if str_eq(root, ".") then rel else mc-cat(list(root, "/", rel));
 
-  // every section body the statement walker reads (form.bml, form.route, form.action), found the way the
+  // every section body the cursor reads (form.bml, form.route, form.action), found the way the
   // compiler finds it, in a .bml or a .fk that carries one
   def bcc-bodies(src, i) {
    let pos = fsc-find-section-open(src, i);
@@ -51,12 +51,13 @@ section [form.bml] {
   }
   def min2(a, b) = if (a < b) then a else b;
 
-  // one section's reading: (kind word snippet) — kind 2 parity, 1 admitted apart, 0 refused
+  // one section's reading: (kind word snippet cursor-ms) — kind 2 read whole, 1 admitted but stops
+  // in lowering, 0 refused
   def bcc-reading(body) {
    let t0 = host_monotonic_ms();
    let parsed = try g-parse-full(form-bml-section-grammar(), body) else intern_trivial_string("PARSE-FAIL");
    let t1 = host_monotonic_ms();
-   if bcc-failed?(parsed) then append(bcc-refusal(body), list(0, 0)) else bcc-admitted(body, parsed, (t1 - t0));
+   if bcc-failed?(parsed) then append(bcc-refusal(body), list(0)) else bcc-admitted(body, parsed, (t1 - t0));
   }
   def bcc-refusal(body) {
    let top = bcc-stop(body);
@@ -86,41 +87,20 @@ section [form.bml] {
    let p2 = if (brace < 0) then pos else bcc-rule-stop(rule, bcc-at(body, (brace + 1)));
    if (p2 > pos) then bcc-descend(body, p2, (depth + 1)) else pos;
   }
-  // both readings pass through the comparison-contract pass they share, where a contract's
-  // spelling (x: Number or x:Number) has become its meaning
+  // the cursor's lowering passes through the comparison-contract pass, where a contract's spelling
+  // (x: Number or x:Number) has become its meaning; a body that reaches its typed tree is read
   def bcc-typed(recipe) = head(fsc-bml-typed(recipe, list(), list()));
-  def bcc-typed-try(recipe) = try bcc-typed(recipe) else nothing;
-  def bcc-typed-or(recipe) = if nothing?(recipe) then nothing else bcc-typed-try(recipe);
-  // each reader's own time rides the reading: the cursor's parse and lowering, the
-  // statement walker's recipes (the contract pass they share is not either's)
+  def bcc-typed-or(parsed) = try bcc-typed(fbl-lower(parsed)) else nothing;
   def bcc-admitted(body, parsed, parse-ms) {
    let t0 = host_monotonic_ms();
-   let lowered = try fbl-lower(parsed) else nothing;
+   let typed = bcc-typed-or(parsed);
    let t1 = host_monotonic_ms();
-   let walked = try fsc-rec-do(fsc-form-bml-lines-recipes-loop(body, 0, list())) else nothing;
-   let t2 = host_monotonic_ms();
-   append(bcc-verdict(body, bcc-typed-or(lowered), bcc-typed-or(walked)), list((parse-ms + (t1 - t0)), (t2 - t1)));
+   append(bcc-verdict(body, typed), list((parse-ms + (t1 - t0))));
   }
-  def bcc-verdict(body, cursor, compiler) {
-   if nothing?(cursor) then list(1, "(cursor-stops)", bcc-snippet(body, fsc-bml-skip-trivia(body, 0, str_len(body))))
-   else if nothing?(compiler) then list(1, "(compiler-stops)", bcc-snippet(body, fsc-bml-skip-trivia(body, 0, str_len(body))))
-   else if node_eq(cursor, compiler) then list(2, "", "")
-   else bcc-apart(node_children(cursor), node_children(compiler), 0);
-  }
-  // the first statement where the two lowerings part, each emitted by the compiler's own printer
-  def bcc-emit(r) = bcc-clip(try fsc-source-emit-recipe(r) else "(unprintable)", 150);
-  def bcc-clip(s, n) = if (str_len(s) > n) then str_concat(fsc-sub(s, 0, n), "...") else s;
-  def bcc-apart(cs, ps, k) {
-   if (nil?(cs) && nil?(ps)) then list(1, "(apart)", "same statements, different root")
-   else if nil?(cs) then list(1, "(apart-cursor-short)", mc-cat(list(int_to_str(k), " compiler: ", bcc-emit(head(ps)))))
-   else if nil?(ps) then list(1, "(apart-compiler-short)", mc-cat(list(int_to_str(k), " cursor: ", bcc-emit(head(cs)))))
-   else if node_eq(head(cs), head(ps)) then bcc-apart(tail(cs), tail(ps), (k + 1))
-   else list(1, "(apart)", mc-cat(list(int_to_str(k), " cursor: ", bcc-emit(head(cs)), "\n      compiler: ", bcc-emit(head(ps)))));
-  }
+  def bcc-verdict(body, typed) = if nothing?(typed) then list(1, "(cursor-stops)", bcc-snippet(body, fsc-bml-skip-trivia(body, 0, str_len(body)))) else list(2, "", "");
 
-  // tallies: (files sections parity apart refused cursor-ms walker-ms) and
-  // (word count path snippet) rows
-  def bcc-tally(t, r) = list(nth(t, 0), (nth(t, 1) + 1), (nth(t, 2) + (if eq(nth(r, 0), 2) then 1 else 0)), (nth(t, 3) + (if eq(nth(r, 0), 1) then 1 else 0)), (nth(t, 4) + (if eq(nth(r, 0), 0) then 1 else 0)), (nth(t, 5) + nth(r, 3)), (nth(t, 6) + nth(r, 4)));
+  // tallies: (files sections read stops refused cursor-ms) and (word count path snippet) rows
+  def bcc-tally(t, r) = list(nth(t, 0), (nth(t, 1) + 1), (nth(t, 2) + (if eq(nth(r, 0), 2) then 1 else 0)), (nth(t, 3) + (if eq(nth(r, 0), 1) then 1 else 0)), (nth(t, 4) + (if eq(nth(r, 0), 0) then 1 else 0)), (nth(t, 5) + nth(r, 3)));
   def bcc-word-row(words, word, path, snippet) = if nil?(words) then list(list(word, 1, path, snippet)) else if str_eq(nth(head(words), 0), word) then cons(list(word, (nth(head(words), 1) + 1), nth(head(words), 2), nth(head(words), 3)), tail(words)) else cons(head(words), bcc-word-row(tail(words), word, path, snippet));
   def bcc-sections(v, path, bodies, t, words) = if nil?(bodies) then list(t, words) else bcc-section-then(v, path, bcc-reading(head(bodies)), tail(bodies), t, words);
   def bcc-section-then(v, path, r, rest, t, words) {
@@ -131,8 +111,8 @@ section [form.bml] {
   // a source whose sections the compiler's own finder cannot bound is one refused reading
   def bcc-file-then(v, root, path, rest, t, words) {
    let bodies = try bcc-bodies(bcc-read(path), 0) else nothing;
-   let t1 = list((nth(t, 0) + 1), nth(t, 1), nth(t, 2), nth(t, 3), nth(t, 4), nth(t, 5), nth(t, 6));
-   let got = if nothing?(bodies) then bcc-section-then(v, path, list(0, "(unbounded)", "the compiler's section finder stops here too", 0, 0), list(), t1, words) else bcc-sections(v, path, bodies, t1, words);
+   let t1 = list((nth(t, 0) + 1), nth(t, 1), nth(t, 2), nth(t, 3), nth(t, 4), nth(t, 5));
+   let got = if nothing?(bodies) then bcc-section-then(v, path, list(0, "(unbounded)", "the compiler's section finder stops here too", 0), list(), t1, words) else bcc-sections(v, path, bodies, t1, words);
    bcc-files(v, root, rest, head(got), nth(got, 1));
   }
 
@@ -150,9 +130,9 @@ section [form.bml] {
    let root = if nil?(words) then "." else head(words);
    let n = if (len(words) < 2) then 16 else str_to_int(nth(words, 1));
    let v = if (len(words) < 3) then false else str_eq(nth(words, 2), "all");
-   let got = bcc-files(v, root, append(source_inventory(root, ".bml", bcc-skips()), source_inventory(root, ".fk", bcc-skips())), list(0, 0, 0, 0, 0, 0, 0), list());
+   let got = bcc-files(v, root, append(source_inventory(root, ".bml", bcc-skips()), source_inventory(root, ".fk", bcc-skips())), list(0, 0, 0, 0, 0, 0), list());
    let t = head(got);
-   print_str(mc-cat(list("[bml-cursor-coverage] files=", int_to_str(nth(t, 0)), " sections=", int_to_str(nth(t, 1)), " parity=", int_to_str(nth(t, 2)), " apart=", int_to_str(nth(t, 3)), " refused=", int_to_str(nth(t, 4)), " cursor-ms=", int_to_str(nth(t, 5)), " walker-ms=", int_to_str(nth(t, 6)))));
+   print_str(mc-cat(list("[bml-cursor-coverage] files=", int_to_str(nth(t, 0)), " sections=", int_to_str(nth(t, 1)), " read=", int_to_str(nth(t, 2)), " stops=", int_to_str(nth(t, 3)), " refused=", int_to_str(nth(t, 4)), " cursor-ms=", int_to_str(nth(t, 5)))));
    print_str(mc-cat(list("[bml-cursor-coverage] first words the cursor does not read (count word first-path | there):", bcc-lines(bcc-top(nth(got, 1), list()), n))));
    nth(t, 2);
   }
