@@ -132,8 +132,57 @@ a care acknowledgment or cancellation has its own continuation outcome.
 [`native-repeat-witness.bml`](../observe/native-repeat-witness.bml) executes
 repetition, failed-then-repaired attempts, retained findings, cancellation,
 resource wakes, peer progress and physical release. BML bodies use this repeat
-door without explicit self-calls or yields. Arbitrary source loops still need
-compiler lowering to become cooperative; non-returning bodies are not preempted.
+door without explicit self-calls or yields.
+
+## Ordinary BML loops on the owned queue
+
+[`bml-repeat-lower.bml`](../form/form-stdlib/bml/bml-repeat-lower.bml) compiles a
+complete ordinary BML method into a repeat entry. For example:
+
+```bml
+int Sum(int n) {
+    int sum = 0;
+    for (int i = 0; i < n; i++) sum = sum + i;
+    return sum;
+}
+```
+
+`bcr-source(path)` reads the complete source and returns `[text, needs]`.
+`bcr-compile(node)` takes an already parsed method. A nonempty need withholds
+the entire emitted text and the compiler voices the cause. The emitted Form
+unit evaluates to a start function; compile it with the native event prelude
+through the existing source/cache lane, then call
+`start(events, context, options, args)`. It returns the owned repeat subscription.
+Compilation is an admission step; the running receiver neither parses source
+nor invokes a compiler or child process per pass.
+
+The existing BML reader, scope, expression and local-store lowering supply
+meaning. The cooperative compiler carries arguments and local values in an
+immutable `[step, locals...]` cursor. Every loop back-edge returns
+`nve-repeat-next`; generated steps never recursively re-enter a loop.
+`while`, `for`, nested loops, labelled and ordinary `break`/`continue`,
+conditions, lexical shadowing, parameter assignments and early returns retain
+their meaning. Branches and loop updates share compiled exits, so a branch
+never duplicates the remaining method into its own body. Registration performs no method body effects; cancellation
+before the first turn leaves the method unexecuted.
+
+An unchanged checkpoint enters the same live interruption and care flow.
+Care retains the original context and its prior findings and can offer changed
+input for the next turn. Cursor slots belong to the emitted method; keep its
+source and image with the continuation. A changed slot must represent an actual
+repaired input or choice. The owner remains responsible for release.
+
+[`bml-repeat-witness.bml`](../observe/bml-repeat-witness.bml) compiles real source
+and executes the generated receiver, including two independent 20,000-pass
+invocations, nested exits, local care, cancellation, host timer progress and
+physical release. Pure ready execution adds zero event-image calls. Captures
+retain compiler inputs, emitted code and process output.
+
+This entry admits local-value computation. Calls, shared mutable fields,
+`choose`/`fail`, snapshots and other effects still need their owned continuation
+lowering; admission names that need before executing anything. Ordinary
+synchronous BML remains on its existing compiler entry. Non-returning foreign
+work is not preempted.
 
 ## Interruption stays with its receiver
 
