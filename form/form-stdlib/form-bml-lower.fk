@@ -99,7 +99,37 @@
                     (append (fbl-langclass (node_children (head xs))) (fbl-lower-stmts (tail xs)))
                 (if (str_eq name "$bml-langroute")
                     (cons (fbl-langroute (node_children (head xs))) (fbl-lower-stmts (tail xs)))
-                    (cons (fbl-lower (head xs)) (fbl-lower-stmts (tail xs))))))))))))
+                (if (str_eq name "$bml-destructure")
+                    (append (fbl-destructure (node_children (head xs))) (fbl-lower-stmts (tail xs)))
+                (if (str_eq name "$bml-defer")
+                    (list (fbl-defer (fbl-lower (nth (node_children (head xs)) 1)) (fbl-lower-stmts (tail xs))))
+                    (cons (fbl-lower (head xs)) (fbl-lower-stmts (tail xs))))))))))))))
+    ;; let [a, _, c] = e;  one hold of e (a name is its own hold), then each name at its
+    ;; place (`_` binds nothing)
+    (defn fbl-destructure (kids)
+        (do (let names (tail (tail kids)))
+            (let source (fbl-lower (nth kids 1)))
+            (if (eq (fbl-is? (nth kids 1) "ident") 1)
+                (fbl-destructure-names (node_value (nth (node_children (nth kids 1)) 0)) names 0)
+                (do (let hold (str_concat "$each-" (node_value (head names))))
+                    (cons (fsc-rec-let hold source) (fbl-destructure-names hold names 0))))))
+    (defn fbl-destructure-names (hold names i)
+        (if (nil? names) (empty)
+            (if (str_eq (node_value (head names)) "_")
+                (fbl-destructure-names hold (tail names) (add i 1))
+                (cons (fsc-rec-let (node_value (head names))
+                        (fsc-rec-form-call "nth" (list (fsc-rec-ident hold) (intern_trivial_int i))))
+                      (fbl-destructure-names hold (tail names) (add i 1))))))
+    ;; defer e;  the statements after it run held by attempt, then e runs, then the hold
+    ;; answers: a value comes through, a stop stops again once the resource is back
+    (defn fbl-defer (dispose rest)
+        (fsc-rec-do (list
+            (fsc-rec-let "$defer" (fsc-bml-attempt
+                (fsc-rec-list-of (list (if (nil? rest) (fsc-rec-call "nothing" (empty)) (fsc-rec-do rest))))))
+            (fsc-bml-attempt dispose)
+            (fsc-rec-if3 (fsc-rec-form-call "nothing?" (list (fsc-rec-ident "$defer")))
+                         (fsc-rec-form-call "form_error" (list (fsc-rec-string "a block holding a defer stopped")))
+                         (fsc-rec-form-call "head" (list (fsc-rec-ident "$defer")))))))
     ;; The cursor reads a section whole: its statements' recipes, or the compiler's refusal naming
     ;; the file's line and the first word the cursor could not read there (first-line is the file
     ;; line the body begins on).
@@ -186,11 +216,16 @@
                 (value_str (node_value n)))
             (fsc-source-emit-recipe (fbl-lower n))))))
     (defn fbl-bml-texts (ns) (if (nil? ns) (empty) (cons (fbl-bml-text (head ns)) (fbl-bml-texts (tail ns)))))
-    ;; a match's arms, pattern then body, as the switch reads them
+    ;; a match's arms, pattern then body, as the switch reads them; an arm of several
+    ;; patterns is one pattern-body pair each, sharing the one lowered body
     (defn fbl-arms (arms)
         (if (nil? arms) (empty)
-            (cons (fbl-lower (nth (node_children (head arms)) 0))
-                (cons (fbl-lower (nth (node_children (head arms)) 1)) (fbl-arms (tail arms))))))
+            (do (let kids (node_children (head arms)))
+                (append (fbl-arm-pairs (fbl-lower (nth kids (sub (len kids) 1))) kids 0)
+                        (fbl-arms (tail arms))))))
+    (defn fbl-arm-pairs (body kids i)
+        (if (ge i (sub (len kids) 1)) (empty)
+            (cons (fbl-lower (nth kids i)) (cons body (fbl-arm-pairs body kids (add i 1))))))
     ;; a member's type as the compiler spells it: Offer<T>
     (defn fbl-type-text (t)
         (if (str_eq (fbl-call-name t) "$bml-gtype")
@@ -264,6 +299,8 @@
                              (fbl-lower (nth kids 2))))
         (if (not (str_eq (fbl-infix-name n) ""))
             (fbl-lower-infix (fbl-infix-name n) (fbl-lower-list (node_children n)))
+        (if (eq (fbl-is? n "UE-ACCESS-INDEX") 1)
+            (fsc-rec-form-call "nth" (fbl-lower-list (node_children n)))
         (if (fbl-is? n "fncall")
             (do (let kids (node_children n))
                 (let fname (fbl-call-name n))
@@ -276,6 +313,8 @@
                     (fsc-bml-lambda (fbl-names (node_children (nth kids 1))) (nth args 1))
                 (if (str_eq fname "$bml-pipe")
                     (fsc-bml-pipe (head args) (nth args 1))
+                (if (str_eq fname "$bml-join")
+                    (fsc-bml-call "str_concat" args)
                 (if (and (str_eq fname "empty") (nil? args))
                     (fsc-rec-call "empty" (empty))
                 ;; the recover point: the source compiler's own shape, via its own builders
@@ -287,7 +326,7 @@
                     (fbl-or-fold (head args) (tail args))
                 (if (str_eq fname "$bml-match")
                     (fsc-rec-match-switch (cons (fbl-lower (nth kids 1)) (fbl-arms (tail (tail kids)))))
-                (fsc-bml-call fname args))))))))))
+                (fsc-bml-call fname args)))))))))))
         (if (fbl-is? n "ident")
             (fsc-rec-ident (node_value (nth (node_children n) 0)))
             ;; literal leaves (trivial int / string / bool) are already
