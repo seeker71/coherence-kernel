@@ -207,7 +207,7 @@ form-stdlib/form-cli-recipe-exec-cursor.fk
 form-stdlib/form-recipe-exec-token-live.fk
 form-stdlib/form-cli-recipe-exec-session.fk
 form-stdlib/form-cli-resident-recipe-birth-exec-categories.fk
-form-stdlib/form-cli-resident-recipe-birth-exec.fk
+form-stdlib/bml/form-cli-microthought.bml
 form-stdlib/form-nodeid-mastery-cell-categories.fk
 form-stdlib/form-nodeid-mastery-cell-loop.fk
 form-stdlib/form-cli-repl.fk
