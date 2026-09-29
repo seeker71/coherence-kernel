@@ -37,23 +37,23 @@ seed, and it shrinks as its lanes lower into Form organs (`release-ledger.bml` R
 ## Body-wide witnesses
 
 ```text
-./fkwu gate/drift-gates-run.bml          -> drift-gates pass=PENDING full=PENDING refused=0
-./fkwu gate/structural-gate-run.fk       -> structural-gate-v3 [PENDING] then 1
+./fkwu gate/drift-gates-run.bml          -> drift-gates pass=16383 full=16383 refused=0
+./fkwu gate/structural-gate-run.fk       -> structural-gate-v3 [8, 0, 1, 0, 0, 0, 7] then 1
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> doors=9 links=107 broken=0 code=9107000
+./fkwu observe/door-link-health-run.bml  -> doors=9 links=109 broken=0 code=9109000
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/belief-stamps.bml         -> 70063002  (field stamped*10^6 + owed*10^3 + laws)
+./fkwu observe/belief-stamps.bml         -> 75068002  (field stamped*10^6 + owed*10^3 + laws)
 observe/tests/belief-rewitness-band      -> 63
-./fkwu form/form-stdlib/release-ledger.bml -> PENDING
-learn/tests/homecoming-distillation-corpus-band -> PENDING
+./fkwu form/form-stdlib/release-ledger.bml -> open=27 moving=0, then 27000000
+learn/tests/homecoming-distillation-corpus-band -> 32767
 value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
-pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · offer-ack-core-band PENDING
-control/tests/attempt-band PENDING · file-bytes-band 127 · form-bml-cursor-full-band 105  (each four-way)
+pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · offer-ack-core-band 32767
+control/tests/attempt-band 4095 · file-bytes-band 127 · form-bml-cursor-full-band 105  (each four-way)
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
 ```
 
