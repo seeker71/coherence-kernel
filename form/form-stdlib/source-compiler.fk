@@ -938,12 +938,13 @@
     ;; spelling, native operation and precedence; lowering retains evaluation
     ;; order, short circuit and numeric contracts. Equality is value equality.
     (defn fsc-bml-operators ()
-        (list (list "??" "??" 0) (list "||" "or" 1) (list "&&" "and" 2)
+        (list (list "??" "??" 0) (list "||" "or" 1) (list "|>" "pipe" 1) (list "&&" "and" 2)
               (list "==" "value_eq" 3) (list "!=" "value_ne" 3)
               (list "<=" "le" 4) (list ">=" "ge" 4)
               (list "<" "lt" 4) (list ">" "gt" 4)
-              (list "+" "add" 5) (list "-" "sub" 5)
-              (list "*" "mul" 6) (list "/" "div" 6) (list "%" "mod" 6)))
+              (list ".." "range" 5)
+              (list "+" "add" 6) (list "-" "sub" 6)
+              (list "*" "mul" 7) (list "/" "div" 7) (list "%" "mod" 7)))
     (defn fsc-bml-operator-at (s i rows)
         (if (nil? rows) (empty)
             (if (fsc-find-string-at? s (str_concat " " (str_concat (head (head rows)) " ")) i 0)
@@ -974,9 +975,13 @@
             (let args (list (fsc-compile-form-bml-expr-recipe left) (fsc-compile-form-bml-expr-recipe right)))
             (if (str_eq (head row) "??")
                 (fsc-bml-when-nothing "$or" (head args) (nth args 1))
+            (if (str_eq (head row) "..")
+                (fsc-rec-form-call "__bml_span" args)
+            (if (str_eq (head row) "|>")
+                (fsc-rec-form-call "__bml_map" (list (nth args 1) (head args)))
             (if (or (str_eq (head row) "==") (str_eq (head row) "!="))
                 (fsc-rec-call (str_concat "$bml" (head row)) args)
-                (fsc-rec-form-call (nth row 1) args)))))
+                (fsc-rec-form-call (nth row 1) args)))))))
 
     ;; ── the recover point and absence, lifted into BML ──────────────────
     ;; `x ?? y`, `try e else h` and `choose { e1; e2; ... }` lower to one shape:
@@ -1157,6 +1162,91 @@
         (and (fsc-prefix? expr (str_concat word " "))
             (nil? (fsc-bml-operator-at expr (str_len word) (fsc-bml-operators)))))
 
+    ;; A mark such as " ? " or " : ", skipping strings and grouped spans.
+    (defn fsc-bml-find-mark (s needle i)
+        (if (ge i (str_len s)) (sub 0 1)
+            (do
+                (let ch (char_at s i))
+                (if (str_eq ch "\"")
+                    (fsc-bml-find-mark s needle (fsc-bml-token-after s i (str_len s)))
+                (if (or (str_eq ch "(") (or (str_eq ch "{") (str_eq ch "[")))
+                    (do
+                        (let closer (if (str_eq ch "(") ")" (if (str_eq ch "{") "}" "]")))
+                        (let end (fsc-bml-span-end s (add i 1) (str_len s) (list closer) "group"))
+                        (fsc-bml-find-mark s needle (add end 1)))
+                (if (fsc-find-string-at? s needle i 0) i
+                    (fsc-bml-find-mark s needle (add i 1))))))))
+    ;; The colon that closes this `?`, counting nested ternaries.
+    (defn fsc-bml-find-colon (s i depth)
+        (if (ge i (str_len s)) (sub 0 1)
+            (do
+                (let ch (char_at s i))
+                (if (str_eq ch "\"")
+                    (fsc-bml-find-colon s (fsc-bml-token-after s i (str_len s)) depth)
+                (if (or (str_eq ch "(") (or (str_eq ch "{") (str_eq ch "[")))
+                    (do
+                        (let closer (if (str_eq ch "(") ")" (if (str_eq ch "{") "}" "]")))
+                        (let end (fsc-bml-span-end s (add i 1) (str_len s) (list closer) "group"))
+                        (fsc-bml-find-colon s (add end 1) depth))
+                (if (fsc-find-string-at? s " ? " i 0)
+                    (fsc-bml-find-colon s (add i 3) (add depth 1))
+                (if (fsc-find-string-at? s " : " i 0)
+                    (if (eq depth 0) i
+                        (fsc-bml-find-colon s (add i 3) (sub depth 1)))
+                    (fsc-bml-find-colon s (add i 1) depth))))))))
+    ;; (name => body) lifts to a top-level def. Match arms stay, they are not wrapped.
+    (defn fsc-bml-lambda-at (s i)
+        (if (not (str_eq (char_at s i) "(")) (empty)
+            (do
+                (let close (fsc-bml-span-end s (add i 1) (str_len s) (list ")") "group"))
+                (if (or (lt close 0) (ge close (str_len s))) (empty)
+                    (do
+                        (let arrow (fsc-bml-find-arrow s (add i 1) close))
+                        (if (lt arrow 0) (empty)
+                            (do
+                                (let name (fsc-trim (fsc-sub s (add i 1) arrow)))
+                                (let body (fsc-trim (fsc-sub s (add arrow 2) close)))
+                                (if (and (fsc-bml-expression-name? name) (gt (str_len body) 0))
+                                    (list close name body)
+                                    (empty)))))))))
+    ;; Copy a run up to the next string or parenthesis, one substring per run.
+    (defn fsc-bml-lift-plain-end (s i)
+        (if (ge i (str_len s)) i
+            (do
+                (let ch (char_at s i))
+                (if (or (str_eq ch "\"") (str_eq ch "(")) i
+                    (fsc-bml-lift-plain-end s (add i 1))))))
+    (defn fsc-bml-lift-go (s i n acc defs)
+        (if (ge i (str_len s)) (str_concat defs acc)
+            (do
+                (let ch (char_at s i))
+                (if (str_eq ch "\"")
+                    (do
+                        (let end (fsc-bml-token-after s i (str_len s)))
+                        (fsc-bml-lift-go s end n (str_concat acc (fsc-sub s i end)) defs))
+                (if (str_eq ch "(")
+                    (do
+                        (let found (fsc-bml-lambda-at s i))
+                        (if (nil? found)
+                            (fsc-bml-lift-go s (add i 1) n (str_concat acc "(") defs)
+                            (do
+                                (let gen (str_concat "bmllam" (int_to_str n)))
+                                (let line (str_concat "def " (str_concat gen (str_concat "(" (str_concat (nth found 1) (str_concat ") = " (str_concat (nth found 2) ";\n")))))))
+                                (fsc-bml-lift-go s (add (head found) 1) (add n 1) (str_concat acc gen) (str_concat defs line)))))
+                    (do
+                        (let end (fsc-bml-lift-plain-end s (add i 1)))
+                        (fsc-bml-lift-go s end n (str_concat acc (fsc-sub s i end)) defs)))))))
+    (defn fsc-bml-lam-count (s i n)
+        (do
+            (let at (str_find s "def bmllam" i))
+            (if (lt at 0) n (fsc-bml-lam-count s (add at 10) (add n 1)))))
+    (defn fsc-bml-lift-rec (s n)
+        (do
+            (let next (fsc-bml-lift-go s 0 n "" ""))
+            (if (str_eq next s) s (fsc-bml-lift-rec next (fsc-bml-lam-count next 0 1)))))
+    (defn fsc-bml-lift-lambdas (s)
+        (if (lt (str_find s "=>" 0) 0) s (fsc-bml-lift-rec s 1)))
+
     (defn fsc-compile-form-bml-expr-recipe (raw)
         (do
             (let expr (fsc-bml-normalize-ws (fsc-strip-semi raw)))
@@ -1174,6 +1264,17 @@
                 (fsc-compile-form-bml-choose-recipe expr)
             (if (fsc-bml-control-prefix? expr "match")
                 (fsc-compile-form-bml-match-recipe expr)
+            (do
+            (let qmark (fsc-bml-find-mark expr " ? " 0))
+            (if (ge qmark 0)
+                (do
+                    (let colon (fsc-bml-find-colon expr (add qmark 3) 0))
+                    (if (lt colon 0)
+                        (fsc-compiler-error-line "form.bml ? needs :" expr)
+                        (fsc-rec-if3
+                            (fsc-compile-form-bml-expr-recipe (fsc-sub expr 0 qmark))
+                            (fsc-compile-form-bml-expr-recipe (fsc-sub expr (add qmark 3) colon))
+                            (fsc-compile-form-bml-expr-recipe (fsc-sub expr (add colon 3) (str_len expr))))))
             (do
             (let infix (fsc-bml-infix-scan expr 0 (empty)))
             (if (not (nil? infix)) (fsc-compile-form-bml-infix expr infix)
@@ -1204,7 +1305,7 @@
                         (fsc-unescape-str (fsc-sub expr 1 (fsc-last-char-index expr))))
                     (fsc-compiler-error-line "unconsumed form.bml string suffix" expr))
                 (if (fsc-bml-expression-name? expr) (fsc-rec-ident expr)
-                    (fsc-compiler-error-line "unconsumed form.bml expression" expr))))))))))))))))))))))))
+                    (fsc-compiler-error-line "unconsumed form.bml expression" expr))))))))))))))))))))))))))
 
     (defn fsc-compile-form-bml-def-recipe (line)
         (do
@@ -1836,8 +1937,9 @@
 
     (defn fsc-compile-form-bml-section-recipe (body)
         (do
-            (fsc-bml-check-section-refs body)
-            (head (fsc-bml-typed (fsc-rec-do (fsc-form-bml-lines-recipes-loop body 0 (empty))) (empty) (empty)))))
+            (let text (fsc-bml-lift-lambdas body))
+            (fsc-bml-check-section-refs text)
+            (head (fsc-bml-typed (fsc-rec-do (fsc-form-bml-lines-recipes-loop text 0 (empty))) (empty) (empty)))))
 
     ;; Declared comparison contracts are compiler metadata, never runtime
     ;; wrappers. They choose an equality relationship, not a representation or
@@ -2407,10 +2509,18 @@
                 (str_concat "\n"
                     (fsc-source-emit-module-loop (tail recipes))))))
 
+    (defn fsc-bml-runtime (text)
+        (str_concat
+            (if (lt (str_find text "__bml_span" 0) 0) ""
+                "(defn __bml_span (lo hi) (if (gt lo hi) (empty) (cons lo (__bml_span (add lo 1) hi))))\n")
+            (if (lt (str_find text "__bml_map" 0) 0) ""
+                "(defn __bml_map (f xs) (if (nil? xs) (empty) (cons (f (head xs)) (__bml_map f (tail xs)))))\n")))
     (defn fsc-source-emit-module (recipe)
-        (if (node_eq (node_category recipe) fsc-rec-DO-CAT)
-            (fsc-source-emit-module-loop (node_children recipe))
-            (str_concat (fsc-source-emit-recipe recipe) "\n")))
+        (do
+            (let text (if (node_eq (node_category recipe) fsc-rec-DO-CAT)
+                (fsc-source-emit-module-loop (node_children recipe))
+                (str_concat (fsc-source-emit-recipe recipe) "\n")))
+            (str_concat (fsc-bml-runtime text) text)))
 
     ;; --- compile section as Form source ------------------------------
 
@@ -3604,8 +3714,9 @@
                             (fsc-strip-bml-comments (fsc-sub src i pos))
                             (str_concat
                             (if (fsc-bml-contract-dialect? dialect-name)
-                                (do (fsc-bml-check-section-refs body)
-                                    (let recipes (fsc-form-bml-lines-recipes-loop body 0 (empty)))
+                                (do (let text (if (str_eq dialect-name "form.bml") (fsc-bml-lift-lambdas body) body))
+                                    (fsc-bml-check-section-refs text)
+                                    (let recipes (fsc-form-bml-lines-recipes-loop text 0 (empty)))
                                     (fsc-source-emit-module (if (nothing? signatures) (fsc-bml-erased (fsc-rec-do recipes))
                                         (head (fsc-bml-typed-sequence recipes (empty) signatures (empty) "")))))
                                 (fsc-compile-section dialect-name body out-path))

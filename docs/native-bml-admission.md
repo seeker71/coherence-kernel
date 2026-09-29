@@ -40,7 +40,8 @@ A stop is a backtrack point, and BML names the choice in its own words.
 nothing, arithmetic over a non-number, a recursion past the walker's wall) or
 answers nothing, `h` answers. `choose { e1; e2; ... }` attempts each option in
 order; the first that lands wins, and none landing is nothing. `x ?? y` is `x`
-unless `x` is nothing; it binds loosest of the operators. Each lowers to
+unless `x` is nothing; it binds loosest of the infix operators. The ternary
+`c ? t : e` binds looser still, and lowers to the same three-way `if`. Each lowers to
 `(attempt ...)` and `nothing?` with the next option in the `if`'s branch, so an
 option that is not needed is never walked, and each caught stop is voiced as one
 organ-health line:
@@ -53,6 +54,35 @@ def label(name) = name ?? "unnamed";
 
 `form/form-stdlib/tests/bml-recover-surface-band.fk` reads 1023 on all four
 kernels.
+
+Compact expressions stay on that same admission. They are spaced, like the
+other operators, so a hyphenated name is never read as syntax.
+
+| form | reading |
+| --- | --- |
+| `c ? t : e` | `t` when `c` is present and nonzero, otherwise `e`. The else is itself a conditional, so `a ? b : c ? d : e` is `a ? b : (c ? d : e)`. |
+| `lo .. hi` | the inclusive integer list from `lo` through `hi`, empty when `lo` is greater than `hi` |
+| `xs \|> f` | `f` applied to each element of `xs`, order kept. `f` is a name, or a parenthesized `(n => expr)` |
+| `(n => expr)` | lifted to one top-level `def` before the section is read. A `match` arm is `pattern => body` and is not a lambda |
+
+`..` binds tighter than a comparison and looser than `+`. `|>` binds with `||`.
+Range and map lower to `__bml_span` and `__bml_map`, and those two definitions
+are supplied only when the lowered text names them. The cursor grammar and the
+source compiler lower `? :`, `..` and `|>` to the same recipe;
+`form/form-stdlib/tests/form-bml-cursor-full-band.fk` reads 105.
+
+`form/form-stdlib/host-membrane.bml` is the face that uses them together.
+The user side asks whether a door's body is already Form. The kernel side asks
+whether the named seed stage is still carried by the C checkout. An adapter is
+a door, a driver is that door's carrier contract, and the door list is the one
+catalog. `template Membrane<Protocol, Carrier>` is the generic shape. The
+witness reads 33: the doubled span `2 + 4 + 6`, a kept `5`, a recovered `3`,
+a chosen `4`, the file door, the checkout seed, and `nothing() ?? 7`.
+
+Verified practice for these forms lives in `learn/bml-compact-practice.bml`.
+Each reference is executed before it can be offered to session learning.
+Transfer rows stay out of the gradient. The door is
+`observe/bml-compact-observe.bml`.
 
 `==` and `!=` use exact value equality by default. Declared comparison contracts
 select another relationship without runtime wrappers:
