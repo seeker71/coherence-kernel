@@ -100,6 +100,19 @@
                 (if (str_eq name "$bml-langroute")
                     (cons (fbl-langroute (node_children (head xs))) (fbl-lower-stmts (tail xs)))
                     (cons (fbl-lower (head xs)) (fbl-lower-stmts (tail xs))))))))))))
+    ;; The cursor reads a section whole: its statements' recipes, or the compiler's refusal naming
+    ;; the file's line and the first word the cursor could not read there (first-line is the file
+    ;; line the body begins on).
+    (defn fbl-section-recipes (body first-line)
+        (do (let parsed (g-parse-full (form-bml-section-grammar) body))
+            (if (node_eq parsed (intern_trivial_string "PARSE-FAIL"))
+                (fbl-refuse (fbr-refusal body) first-line)
+                (node_children (fbl-lower parsed)))))
+    (defn fbl-refuse (r first-line)
+        (fsc-compiler-error-line "the cursor does not read this form.bml section"
+            (if (nothing? r) "at its end"
+                (str_concat "line " (str_concat (int_to_str (add first-line (sub (head r) 1)))
+                    (str_concat ": " (nth r 1)))))))
     ;; a route call: route_data(id, handler) names its id as text and its handler (with its
     ;; class inside a class body); route(args) carries each argument lowered
     (defn fbl-route-data? (call) (str_eq (node_value (nth (node_children call) 1)) "route_data"))
@@ -160,6 +173,19 @@
                         (list (fsc-rec-string (fbl-member-name (head ms)))
                               (fsc-rec-ident (fsc-bml-class-member-name class (fbl-member-name (head ms)))))))
                   (fbl-lang-members class (tail ms)))))
+    ;; a cursor tree written back as BML: names, calls with their arguments, numbers and
+    ;; strings; anything else as the recipe printer spells it
+    (defn fbl-bml-text (n)
+        (if (fbl-is? n "ident") (node_value (nth (node_children n) 0))
+        (if (and (fbl-is? n "fncall") (eq (fbl-is? (nth (node_children n) 0) "ident") 1))
+            (str_concat (fbl-bml-text (nth (node_children n) 0))
+                (str_concat "(" (str_concat (fbl-join (fbl-bml-texts (tail (node_children n))) ",") ")")))
+        (if (nil? (node_children n))
+            (if (str_eq (value_kind (node_value n)) "string")
+                (str_concat "\"" (str_concat (node_value n) "\""))
+                (value_str (node_value n)))
+            (fsc-source-emit-recipe (fbl-lower n))))))
+    (defn fbl-bml-texts (ns) (if (nil? ns) (empty) (cons (fbl-bml-text (head ns)) (fbl-bml-texts (tail ns)))))
     ;; a match's arms, pattern then body, as the switch reads them
     (defn fbl-arms (arms)
         (if (nil? arms) (empty)
@@ -253,7 +279,13 @@
                     (fbl-or-fold (head args) (tail args))
                 (if (str_eq fname "$bml-match")
                     (fsc-rec-match-switch (cons (fbl-lower (nth kids 1)) (fbl-arms (tail (tail kids)))))
-                    (fsc-rec-form-call fname args)))))))
+                ;; and / or are special forms of two: any other count is refused before the
+                ;; runner reads a malformed form, naming the call as BML writes it
+                (if (and (or (str_eq fname "and") (str_eq fname "or")) (not (eq (len args) 2)))
+                    (fsc-compiler-error-line
+                        (str_concat "form.bml boolean call requires 2 arguments; got " (int_to_str (len args)))
+                        (fbl-bml-text n))
+                    (fsc-rec-form-call fname args))))))))
         (if (fbl-is? n "ident")
             (fsc-rec-ident (node_value (nth (node_children n) 0)))
             ;; literal leaves (trivial int / string / bool) are already
