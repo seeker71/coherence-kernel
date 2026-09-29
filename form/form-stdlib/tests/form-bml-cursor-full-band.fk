@@ -22,11 +22,19 @@
         (ffc-require (ffc-failed? (g-parse-full (form-bml-grammar) text))
             (str_concat "cursor accepted incomplete or extra source: " text)))
     (defn ffc-id (name) (fsc-rec-ident name))
-    ;; the cursor lowers the text to the NodeID the source compiler builds from it
-    (defn ffc-parity (text)
-        (ffc-require (node_eq (fbl-lower (g-parse-full (form-bml-grammar) text))
-                              (fsc-compile-form-bml-def-recipe text))
-            (str_concat "cursor and source compiler lower differently: " text)))
+    ;; a fixture's golden is the recipe in Form's own spelling, the reading the line-by-line
+    ;; walker gave it when the cursor took over; a lambda's generated name is a NodeID, read
+    ;; here without it
+    (defn ffc-unnode (s)
+        (do (let at (str_find s "@" 0))
+            (if (lt at 0) s
+                (str_concat (substring s 0 at) (ffc-unnode (substring s (str_find s "-" at) (str_len s)))))))
+    (defn ffc-gold (text expected)
+        (do
+            (let parsed (g-parse-full (form-bml-grammar) text))
+            (ffc-require (not (ffc-failed? parsed)) (str_concat "cursor refused: " text))
+            (ffc-require (str_eq (fsc-source-emit-recipe (fbl-lower parsed)) expected)
+                (str_concat "cursor lowers differently than its golden: " text))))
     (defn ffc-call (name args) (fsc-rec-form-call name args))
 
     (defn ffc-identity () (fsc-rec-fndef "identity" (list "x") (ffc-id "x")))
@@ -113,38 +121,56 @@
                     (fsc-bml-when-nothing "$choose"
                         (fsc-bml-attempt (ffc-call "len" (list (ffc-id "x"))))
                         (fsc-bml-attempt (intern_trivial_int 99)))))
-            (ffc-require (node_eq (fbl-lower (g-parse-full (form-bml-grammar) "def f(x) = try len(x) else 7;"))
-                                  (fsc-compile-form-bml-def-recipe "def f(x) = try len(x) else 7;"))
-                "cursor and source compiler lower try differently")
-            (ffc-require (node_eq (fbl-lower (g-parse-full (form-bml-grammar) "def g(x) = choose { len(x); 99 };"))
-                                  (fsc-compile-form-bml-def-recipe "def g(x) = choose { len(x); 99 };"))
-                "cursor and source compiler lower choose differently")
             ;; the spaced operators, !, the comparison casts and ?? -- precedence,
-            ;; left association and the contract calls, NodeID for NodeID
-            (ffc-parity "def f(a, b) = a + b * 2;")
-            (ffc-parity "def g(a, b) = a - b - 1;")
-            (ffc-parity "def h(a, b) = (a < b) && !(a == b);")
-            (ffc-parity "def k(a) = a % 3 >= 1 || a != 0;")
-            (ffc-parity "def m(x) = ((Comparable) x == 3);")
-            (ffc-parity "def n(x, y, z) = x ?? y ?? z;")
-            (ffc-parity "def p(x) = x + 1 ?? 0;")
-            (ffc-parity "def choose-value(a,b,c) = a ? b ? 1 : 2 : c ? 3 : 4;")
-            (ffc-parity "def mapped(n,k) = 0 .. n + 1 |> map(x => x * k) |> filter(x => x != 0);")
-            (ffc-parity "def folded(xs) = xs |> foldl((total,x) => total + x,0);")
-            (ffc-parity "def equal-chain(a,b,c) = a == b == c;")
-            (ffc-parity "def recover(x) = try if x then try nothing catch 7 else 8 catch 9;")
-            (ffc-parity "def preserve-zero() = choice { nothing; 0; 9 };")
-            (ffc-parity "def recover-nested(x) = if x then try nothing catch 2 else 3;")
-            (ffc-parity "def immediate() = (x => x + 1)(2);")
-            (ffc-parity "def chained(f) = f(1)(2);")
-            (ffc-parity "def block-pipe() = { let x = 2; x; } |> add(3);")
-            (ffc-parity "def checkpoint(ack,before,now) = undo(ack,store(before),now);")
-            (ffc-parity "def continued(owner,step,context,options) = repeat(owner,step,context,0,options);")
-            (ffc-parity "def stopped() = try stop catch choice { fail; 0 };")
-            (ffc-parity "def coordinates(stop) = stop + 1;")
-            (ffc-parity "def callback(stop) = stop(4);")
-            (ffc-parity "def capture(fail) = () => fail;")
-            (ffc-parity "def boolean-stage(x) = x |> and(1);")
+            ;; left association and the contract calls
+            (ffc-gold "def f(a, b) = a + b * 2;"
+                "(defn f (a b) (add a (mul b 2)))")
+            (ffc-gold "def g(a, b) = a - b - 1;"
+                "(defn g (a b) (sub (sub a b) 1))")
+            (ffc-gold "def h(a, b) = (a < b) && !(a == b);"
+                "(defn h (a b) (and (lt a b) (not ($bml== a b))))")
+            (ffc-gold "def k(a) = a % 3 >= 1 || a != 0;"
+                "(defn k (a) (or (ge (mod a 3) 1) ($bml!= a 0)))")
+            (ffc-gold "def m(x) = ((Comparable) x == 3);"
+                "(defn m (x) ($bml== ($bml-as \"Comparable\" x) 3))")
+            (ffc-gold "def n(x, y, z) = x ?? y ?? z;"
+                "(defn n (x y z) (do (let $or (if (nothing? x) y x)) (if (nothing? $or) z $or)))")
+            (ffc-gold "def p(x) = x + 1 ?? 0;"
+                "(defn p (x) (do (let $or (add x 1)) (if (nothing? $or) 0 $or)))")
+            (ffc-gold "def choose-value(a,b,c) = a ? b ? 1 : 2 : c ? 3 : 4;"
+                "(defn choose-value (a b c) (if a (if b 1 2) (if c 3 4)))")
+            (ffc-gold "def mapped(n,k) = 0 .. n + 1 |> map(x => x * k) |> filter(x => x != 0);"
+                "(defn mapped (n k) (do (let $pipe (do (let $pipe (range 0 (add n 1))) (map ($bml-lambda (do \"x\") (mul x k)) $pipe))) (filter ($bml-lambda (do \"x\") ($bml!= x 0)) $pipe)))")
+            (ffc-gold "def folded(xs) = xs |> foldl((total,x) => total + x,0);"
+                "(defn folded (xs) (do (let $pipe xs) (foldl ($bml-lambda (do \"total\" \"x\") (add total x)) 0 $pipe)))")
+            (ffc-gold "def equal-chain(a,b,c) = a == b == c;"
+                "(defn equal-chain (a b c) ($bml== ($bml== a b) c))")
+            (ffc-gold "def recover(x) = try if x then try nothing catch 7 else 8 catch 9;"
+                "(defn recover (x) (do (let $try (attempt (if x (do (let $try (attempt (nothing))) (if (nothing? $try) 7 $try)) 8))) (if (nothing? $try) 9 $try)))")
+            (ffc-gold "def preserve-zero() = choice { nothing; 0; 9 };"
+                "(defn preserve-zero () (do (let $choose (attempt (nothing))) (if (nothing? $choose) (do (let $choose (attempt 0)) (if (nothing? $choose) (attempt 9) $choose)) $choose)))")
+            (ffc-gold "def recover-nested(x) = if x then try nothing catch 2 else 3;"
+                "(defn recover-nested (x) (if x (do (let $try (attempt (nothing))) (if (nothing? $try) 2 $try)) 3))")
+            (ffc-gold "def immediate() = (x => x + 1)(2);"
+                "(defn immediate () (do (let $callee ($bml-lambda (do \"x\") (add x 1))) ($callee 2)))")
+            (ffc-gold "def chained(f) = f(1)(2);"
+                "(defn chained (f) (do (let $callee (f 1)) ($callee 2)))")
+            (ffc-gold "def block-pipe() = { let x = 2; x; } |> add(3);"
+                "(defn block-pipe () (do (let $pipe (do (let x 2) x)) (add 3 $pipe)))")
+            (ffc-gold "def checkpoint(ack,before,now) = undo(ack,store(before),now);"
+                "(defn checkpoint (ack before now) (undo ack (store before) now))")
+            (ffc-gold "def continued(owner,step,context,options) = repeat(owner,step,context,0,options);"
+                "(defn continued (owner step context options) (repeat owner step context 0 options))")
+            (ffc-gold "def stopped() = try stop catch choice { fail; 0 };"
+                "(defn stopped () (do (let $try (attempt stop)) (if (nothing? $try) (do (let $choose (attempt fail)) (if (nothing? $choose) (attempt 0) $choose)) $try)))")
+            (ffc-gold "def coordinates(stop) = stop + 1;"
+                "(defn coordinates (stop) (add stop 1))")
+            (ffc-gold "def callback(stop) = stop(4);"
+                "(defn callback (stop) (stop 4))")
+            (ffc-gold "def capture(fail) = () => fail;"
+                "(defn capture (fail) ($bml-lambda (do) fail))")
+            (ffc-gold "def boolean-stage(x) = x |> and(1);"
+                "(defn boolean-stage (x) (do (let $pipe x) (and 1 $pipe)))")
             (ffc-refuse "def missing() = true ? 1;")
             (ffc-refuse "def missing() = (x) => ;")
             (ffc-refuse "def identity(x) = x; trailing")
@@ -159,40 +185,55 @@
             (ffc-refuse "def missing(xs) = xs[];")
             1))
 
-    ;; a whole section: the cursor and the source compiler lower it NodeID for NodeID,
-    ;; both through the comparison-contract pass they share
+    ;; a whole section: the cursor reads it whole and lowers it, through the comparison-contract
+    ;; pass, to its golden in Form's own spelling (lambda names lose their NodeID)
     (defn ffc-typed (recipe) (head (fsc-bml-typed recipe (empty) (empty))))
-    (defn ffc-section (text)
+    (defn ffc-gold-section (text expected)
         (do (let parsed (g-parse-full (form-bml-section-grammar) text))
             (ffc-require (not (ffc-failed? parsed)) (str_concat "cursor refused a section: " text))
-            (ffc-require (node_eq (ffc-typed (fbl-lower parsed))
-                                  (ffc-typed (fsc-rec-do (fsc-form-bml-lines-recipes-loop text 0 (empty)))))
-                (str_concat "cursor and source compiler lower a section differently: " text))))
+            (ffc-require (str_eq (ffc-unnode (fsc-source-emit-recipe (ffc-typed (fbl-lower parsed)))) expected)
+                (str_concat "cursor lowers a section differently than its golden: " text))))
     (defn ffc-sections ()
         (do
             ;; a generic class with attributes: fields, a thought, a typed field, methods
-            (ffc-section "class Kit<T> [public, reusable] {\n field base = 100;\n field cap: Number = 7;\n thought next = base() + 1;\n def scaled(x) = x * base();\n def twice(x): Number { let y: Number = x + x; y }\n}")
+            (ffc-gold-section "class Kit<T> [public, reusable] {\n field base = 100;\n field cap: Number = 7;\n thought next = base() + 1;\n def scaled(x) = x * base();\n def twice(x): Number { let y: Number = x + x; y }\n}"
+                "(do (defn base () 100) (defn cap () 7) (defn next () (add (base) 1)) (defn scaled (x) (mul x (base))) (defn twice (x) (do (let y (add x x)) y)) (defn Kit () (list \"abstraction\" \"Kit\" (list \"T\") (list \"scaled\" \"twice\") (list \"base\" \"cap\") (list) (list \"next\"))))")
             ;; a template with a generic member type, and a one-line template
-            (ffc-section "template Row<TCount> [public, reusable] {\n member n: TCount;\n member held: Offer<TCount>;\n}\ntemplate Tag<T>;")
+            (ffc-gold-section "template Row<TCount> [public, reusable] {\n member n: TCount;\n member held: Offer<TCount>;\n}\ntemplate Tag<T>;"
+                "(do (let Row (language-template-with-members \"Row\" (list \"TCount\") (list (language-template-member \"n\" \"TCount\") (language-template-member \"held\" \"Offer<TCount>\")))) (let Tag (language-template \"Tag\" (list \"T\"))))")
             ;; a language class over its template
-            (ffc-section "class JsonKit : Codec<Node, Text> {\n def encode(x) { x }\n def decode(t) { t }\n}")
+            (ffc-gold-section "class JsonKit : Codec<Node, Text> {\n def encode(x) { x }\n def decode(t) { t }\n}"
+                "(do (defn JsonKit_encode (x) (do x)) (defn JsonKit_decode (t) (do t)) (let JsonKit (language-class \"JsonKit\" Codec (list \"Node\" \"Text\") (list (language-class-member-method \"encode\" JsonKit_encode) (language-class-member-method \"decode\" JsonKit_decode)))))")
             ;; a route member in a language class, and a language class that is one route
-            (ffc-section "class HealthRoute : RouteCell<Req, Resp> {\n def handle(r) { r }\n route = route_data(runtime-data, handle);\n}\nclass PingRoute : RouteCell<Req, Resp> = route(\"ping\", \"GET\", \"/ping\", 1, \"api_ping\", \"Accept\", 5);")
+            (ffc-gold-section "class HealthRoute : RouteCell<Req, Resp> {\n def handle(r) { r }\n route = route_data(runtime-data, handle);\n}\nclass PingRoute : RouteCell<Req, Resp> = route(\"ping\", \"GET\", \"/ping\", 1, \"api_ping\", \"Accept\", 5);"
+                "(do (defn HealthRoute_handle (r) (do r)) (let HealthRoute (language-class \"HealthRoute\" RouteCell (list \"Req\" \"Resp\") (list (language-class-member-method \"handle\" HealthRoute_handle) (language-class-member-route \"route\" (kh-route-data-ref \"runtime-data\" HealthRoute_handle))))) (let PingRoute (language-route-class \"PingRoute\" RouteCell (list \"Req\" \"Resp\") \"ping\" \"GET\" \"/ping\" 1 \"api_ping\" \"Accept\" 5)))")
             ;; match, with _ as its default
-            (ffc-section "def pick(v) = match v { \"a\" => 1, \"_\" => 2, _ => 3 };")
+            (ffc-gold-section "def pick(v) = match v { \"a\" => 1, \"_\" => 2, _ => 3 };"
+                "(do (defn pick (v) (if (value_eq v \"a\") 1 (if (value_eq v \"_\") 2 3))))")
             ;; an import, a let, negative and exponent numbers, nothing as a call
-            (ffc-section "import Num;\nlet limit = -1.5e-3;\ndef f(x) = if nothing?(x) then nothing() else -9;\ndef g(x) = x < 1e-12;")
-            (ffc-section "def offer(a,b,c) = a + b + c; def call(store) = 2 |> store(3); let stop = 7; let fail = 8; stop + fail;")
+            (ffc-gold-section "import Num;\nlet limit = -1.5e-3;\ndef f(x) = if nothing?(x) then nothing() else -9;\ndef g(x) = x < 1e-12;"
+                "(do (let limit -0.0015) (defn f (x) (if (nothing? x) (nothing) -9)) (defn g (x) (lt x 0.000000000001)))")
+            (ffc-gold-section "def offer(a,b,c) = a + b + c; def call(store) = 2 |> store(3); let stop = 7; let fail = 8; stop + fail;"
+                "(do (defn offer (a b c) (add (add a b) c)) (defn call (store) (do (let $pipe 2) (store 3 $pipe))) (let stop 7) (let fail 8) (add stop fail))")
             ;; a def block followed by an empty statement, and a BML comment
-            (ffc-section "def g(a) { a };\n// done\ng(1);")
-            ;; Local helpers share the same typed lexical lowering in both readers.
-            (ffc-section "def scale(k) { def apply(x) = x * k; map(apply, list(1,2)); }")
-            (ffc-section "def scale(k) { def middle() { def apply(x) = x * k; apply; } middle(); }")
-            (ffc-section "def scale(k) { def first(x): Number = x * k; def next(x): Number = first(x) + 1; next(2); }")
-            (ffc-section "def nested(k) = bias => x => x * k + bias;\ndef a(k,p) = x => x * k;\ndef b(p,k) = x => x * k;")
-            (ffc-section "def selected(xs) = xs |> filter((x: String) => x == \"kept\");")
-            (ffc-section "def rows() = [[1,2],[3,4]]; def item(xs,i) = xs[i][0]; def empty-row() = []; def call(fs) = fs[0](2); def result() = rows()[1][0];")
-            (ffc-section "def collect(k) = [x => x * k, [\"[,]\", 1 ? [2] : [3]], (1 .. 4)[2]]; def selected(xs) = (xs |> map(x => [x,x + 1]))[0][1];")
+            (ffc-gold-section "def g(a) { a };\n// done\ng(1);"
+                "(do (defn g (a) (do a)) (g 1))")
+            ;; local helpers lower to the same typed lexical closure
+            (ffc-gold-section "def scale(k) { def apply(x) = x * k; map(apply, list(1,2)); }"
+                "(do (defn scale (k) (do (defn apply (x) (mul x k)) (let apply apply) (map apply (list 1 2)))))")
+            (ffc-gold-section "def scale(k) { def middle() { def apply(x) = x * k; apply; } middle(); }"
+                "(do (defn scale (k) (do (defn middle () (do (let k k) (do (defn apply (x) (mul x k)) (let apply apply) apply))) (let middle middle) (middle))))")
+            (ffc-gold-section "def scale(k) { def first(x): Number = x * k; def next(x): Number = first(x) + 1; next(2); }"
+                "(do (defn scale (k) (do (defn first (x) (mul x k)) (let first first) (defn next (x) (add (first x) 1)) (let next next) (next 2))))")
+            (ffc-gold-section "def nested(k) = bias => x => x * k + bias;\ndef a(k,p) = x => x * k;\ndef b(p,k) = x => x * k;"
+                "(do (defn nested (k) (do (defn $lambda--0 (bias) (do (let k k) (do (defn $lambda--1 (x) (add (mul x k) bias)) (let $lambda--1 $lambda--1) $lambda--1))) (let $lambda--0 $lambda--0) $lambda--0)) (defn a (k p) (do (defn $lambda--2 (x) (mul x k)) (let $lambda--2 $lambda--2) $lambda--2)) (defn b (p k) (do (defn $lambda--3 (x) (mul x k)) (let $lambda--3 $lambda--3) $lambda--3)))")
+            (ffc-gold-section "def selected(xs) = xs |> filter((x: String) => x == \"kept\");"
+                "(do (defn selected (xs) (do (let $pipe xs) (filter (do (defn $lambda--0 (x) (str_eq x \"kept\")) (let $lambda--0 $lambda--0) $lambda--0) $pipe))))")
+            ;; list literals and index chains: nth over nth, a callee read once, list() for [], range for ..
+            (ffc-gold-section "def rows() = [[1,2],[3,4]]; def item(xs,i) = xs[i][0]; def empty-row() = []; def call(fs) = fs[0](2); def result() = rows()[1][0];"
+                "(do (defn rows () (list (list 1 2) (list 3 4))) (defn item (xs i) (nth (nth xs i) 0)) (defn empty-row () (list)) (defn call (fs) (do (let $callee (nth fs 0)) ($callee 2))) (defn result () (nth (nth (rows) 1) 0)))")
+            (ffc-gold-section "def collect(k) = [x => x * k, [\"[,]\", 1 ? [2] : [3]], (1 .. 4)[2]]; def selected(xs) = (xs |> map(x => [x,x + 1]))[0][1];"
+                "(do (defn collect (k) (list (do (defn $lambda--0 (x) (mul x k)) (let $lambda--0 $lambda--0) $lambda--0) (list \"[,]\" (if 1 (list 2) (list 3))) (nth (range 1 4) 2))) (defn selected (xs) (nth (nth (do (let $pipe xs) (map (do (defn $lambda--1 (x) (list x (add x 1))) (let $lambda--1 $lambda--1) $lambda--1) $pipe)) 0) 1)))")
             1))
 
     (ffc-boundaries)

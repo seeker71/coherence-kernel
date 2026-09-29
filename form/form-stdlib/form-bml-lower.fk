@@ -1,10 +1,10 @@
 ; form-bml-lower.fk — lower the form.bml cursor AST (form-bml-grammar over the
 ; bmf-grammar engine) into the Form source compiler's executable recipe shape.
 ;
-; The whole point is node_eq parity: by rebuilding with source-compiler.fk's OWN
-; constructors (fsc-rec-fndef / fsc-rec-if3 / fsc-rec-form-call / fsc-rec-ident /
-; fsc-rec-call), content-addressing makes the result identical to
-; fsc-compile-form-bml-def-recipe — same category, same children, same NodeID.
+; This is the compiler's one reader of a form.bml section. It rebuilds the tree with
+; source-compiler.fk's OWN constructors (fsc-rec-fndef / fsc-rec-if3 / fsc-rec-form-call /
+; fsc-rec-ident / fsc-rec-call), so content-addressing makes a def lower to the very node
+; the flat Form spelling of it builds — same category, same children, same NodeID.
 ;
 ; fsc-rec-form-call does the primitive lookup (eq/add/len -> typed category node;
 ; user names -> FNCALL[ident...]), so the cursor path reproduces that split for free.
@@ -137,7 +137,43 @@
         (do (let parsed (g-parse-full (form-bml-section-grammar) body))
             (if (node_eq parsed (intern_trivial_string "PARSE-FAIL"))
                 (fbl-refuse (fbr-refusal body) first-line)
-                (node_children (fbl-lower parsed)))))
+                (do (fbl-check-refs (node_children parsed))
+                    (node_children (fbl-lower parsed))))))
+    ;; A `ref NAME = TARGET;` member names another abstraction: TARGET must be a class of this
+    ;; section or a declared `import NAME;`. An unresolved target is refused here, at the
+    ;; section, not met later as an unbound name. Method bodies still resolve at runtime.
+    (defn fbl-decl-names (stmts)
+        (if (nil? stmts) (empty)
+            (do (let name (fbl-call-name (head stmts)))
+                (if (or (str_eq name "$bml-class") (or (str_eq name "$bml-langclass")
+                        (or (str_eq name "$bml-langroute") (str_eq name "$bml-import"))))
+                    (cons (node_value (nth (node_children (head stmts)) 1)) (fbl-decl-names (tail stmts)))
+                    (fbl-decl-names (tail stmts))))))
+    (defn fbl-lead-name (e)
+        (if (eq (fbl-is? e "ident") 1) (node_value (nth (node_children e) 0))
+            (if (eq (fbl-is? e "fncall") 1) (fbl-lead-name (nth (node_children e) 0)) "")))
+    (defn fbl-ref-targets (stmts)
+        (if (nil? stmts) (empty)
+            (append (if (str_eq (fbl-call-name (head stmts)) "$bml-class")
+                        (fbl-member-targets (node_children (nth (node_children (head stmts)) 3)))
+                        (empty))
+                    (fbl-ref-targets (tail stmts)))))
+    (defn fbl-member-targets (ms)
+        (if (nil? ms) (empty)
+            (append (if (str_eq (fbl-member-kind (head ms)) "ref")
+                        (list (fbl-lead-name (nth (node_children (head ms)) 3)))
+                        (empty))
+                    (fbl-member-targets (tail ms)))))
+    (defn fbl-unresolved (known targets)
+        (if (nil? targets) (empty)
+            (if (eq (fsc-bml-member? known (head targets)) 1)
+                (fbl-unresolved known (tail targets))
+                (cons (head targets) (fbl-unresolved known (tail targets))))))
+    (defn fbl-check-refs (stmts)
+        (do (let unresolved (fbl-unresolved (fbl-decl-names stmts) (fbl-ref-targets stmts)))
+            (if (nil? unresolved) 0
+                (fsc-compiler-error (str_concat "unresolved ref target: "
+                    (str_concat (head unresolved) " — define it as a class in this section or declare `import <name>;`"))))))
     (defn fbl-refuse (r first-line)
         (fsc-compiler-error-line "the cursor does not read this form.bml section"
             (if (nothing? r) "at its end"
@@ -280,8 +316,6 @@
                         (fsc-rec-string-list (fbl-member-names ms "thought")))))))))
 
     (defn fbl-lower (n)
-        (if (fbl-is? n "UE-ACCESS-INDEX")
-            (fsc-rec-form-call "nth" (fbl-lower-list (node_children n)))
         (if (fbl-is? n "fndef")
             (do (let kids (node_children n))
                 (fsc-rec-fndef (fbl-bind-name (nth kids 0))

@@ -512,7 +512,8 @@ prepared_args=()
 # lines at column 0), and the import rule must not cut those lines, their closing
 # quotes and parens with them. fk_scan carries the literal across lines: an
 # escaped character stays inside, and a ";" outside a string starts a comment.
-# The prepared-copy keys below end in "-q", the mark of this rule.
+# A BML statement `import Name;` is source, kept whole; only a module directive is cut.
+# The prepared-copy keys below end in "-r", the mark of this rule.
 fk_in_string_awk='
     function fk_scan(line,   i, c, n) {
         n = length(line)
@@ -533,6 +534,7 @@ fk_strip_prelude_header() {
     awk "$fk_in_string_awk"'
         fk_in { print; fk_scan($0); next }
         /^;[[:space:]]*preludes:/ { next }
+        /^[[:space:]]*import[[:space:]]+[A-Za-z_][A-Za-z0-9_?!-]*[[:space:]]*;/ { print; fk_scan($0); next }
         /^[[:space:]]*import([[:space:]:]|")/ { next }
         /^;[[:space:]]*import([[:space:]:]|")/ { next }
         { print; fk_scan($0) }
@@ -571,6 +573,7 @@ fk_keep_bml_prelude_deps() {
             if (kept != "") print marker kept
             next
         }
+        /^[[:space:]]*import[[:space:]]+[A-Za-z_][A-Za-z0-9_?!-]*[[:space:]]*;/ { print; fk_scan($0); next }
         /^[[:space:]]*import([[:space:]:]|")/ { next }
         /^;[[:space:]]*import([[:space:]:]|")/ { next }
         { print; fk_scan($0) }
@@ -584,7 +587,7 @@ prepare_sources() {
         if grep -Eq '^[[:space:]]*section \[' "$src"; then
             # "-bmlhead": a lowered file keeps only its ".bml" header names
             # (fk_keep_bml_prelude_deps).
-            key="$(form_hash16 "$src")-$compiler_stamp-bmlhead-q"
+            key="$(form_hash16 "$src")-$compiler_stamp-bmlhead-r"
             cached="$SOURCE_CACHE_DIR/$key.fk"
             if [[ ! -s "$cached" ]]; then
                 safe="${src//\//__}"
@@ -626,7 +629,7 @@ prepare_sources() {
             # callers leave to the kernels' own directive walk to find and
             # lower: a cached copy keeps exactly those names and drops the
             # ".fk" ones, already their own prepared entries.
-            key="$(form_hash16 "$src")-bmlhead-q"
+            key="$(form_hash16 "$src")-bmlhead-r"
             plain="$SOURCE_CACHE_DIR/$key.fk"
             if [[ ! -s "$plain" ]]; then
                 stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.stripped.XXXXXX")"
@@ -635,7 +638,7 @@ prepare_sources() {
             fi
             prepared_args+=("$plain")
         else
-            key="$(form_hash16 "$src")-plain-q"
+            key="$(form_hash16 "$src")-plain-r"
             plain="$SOURCE_CACHE_DIR/$key.fk"
             if [[ ! -s "$plain" ]]; then
                 stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.stripped.XXXXXX")"
