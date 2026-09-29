@@ -98,8 +98,42 @@ the same correlated care door. Stale queue entries cannot replay it. Removing
 a subscription after proposing a next slice leaves that checkpoint held for
 care; it never enters the ready queue. Closing the owner retains unfinished work; nested turns, grants and self-care cannot consume
 the active slice. Slice grants bound the number of cooperative calls, not their
-wall time. Automatic loop lowering and interruption of non-yielding code remain
-separate work.
+wall time. Structured repetition uses the shared BMF decision below.
+
+## BMF repetition and local retry
+
+`nve-repeat(events, body, context, cursor, options)` offers a BML body one or
+more times on that queue. It returns the existing owned subscription. The body
+returns `nve-repeat-next(nextCursor)` for another pass, or an ordinary value
+to finish. Both zero and `nothing` are valid final values. The repeat has no
+fixed attempt limit; each turn's slice grant still controls how much work runs.
+
+BMF `Repeat` / `multi-match` and this BML path share
+[`bmf-repeat.bml`](../form/form-stdlib/bml/bmf-repeat.bml)'s decision:
+an advancing match offers another pass, a missing match ends repetition, and
+an unchanged checkpoint reports no progress. BMF retains its minimum, maximum,
+captures and cut semantics. An absent maximum means unbounded; zero means an
+empty allowance. BMF's synchronous matcher retains its tail-call driver.
+
+A stopped body unwinds into its existing local care options. After repairing
+the cause or choosing another path, an option returns
+`nve-repeat-again(offered, nextCursor)`. That acknowledgment proposes a queued
+retry. It never calls the body. The new cursor is admitted when the next slice
+starts; declined options and cancelled tickets cannot commit it. Original
+context, event, owner, completed effects and accumulated findings remain held.
+Use an immutable cursor naming the actual changed choice or resource observation;
+changing a counter alone does not establish a repair. An unchanged retry
+contributes a finding and rests in care when no other choice responds. Resource
+events can resume it through `nve-follow`.
+
+The subscription's `repeat` record exposes `cursor`, `attempts`, successful
+`passes`, `done` and the final `value`. `done` records a normal body completion;
+a care acknowledgment or cancellation has its own continuation outcome.
+[`native-repeat-witness.bml`](../observe/native-repeat-witness.bml) executes
+repetition, failed-then-repaired attempts, retained findings, cancellation,
+resource wakes, peer progress and physical release. BML bodies use this repeat
+door without explicit self-calls or yields. Arbitrary source loops still need
+compiler lowering to become cooperative; non-returning bodies are not preempted.
 
 ## Interruption stays with its receiver
 

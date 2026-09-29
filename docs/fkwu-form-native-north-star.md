@@ -206,8 +206,13 @@ signal their own need. Form work shares that owner's ready queue without host
 registration. Explicit checkpoint yields give peers their turn; caller-granted
 slices preserve findings, local care and correlated completion. Pure ready work
 needs no host wait, while a shared turn serves resource events before its ready
-slices. This cooperative boundary now executes; automatic loop lowering,
-non-yielding work and preemptive scheduling remain beyond it.
+slices. BML repetition shares BMF's advancing-checkpoint decision. A failed
+attempt unwinds into local care, which can queue a changed choice without
+recursive re-entry, losing context or repeating completed effects implicitly.
+Unchanged choices rest with their findings until relevant care or resource
+movement arrives. Structured repeat bodies need no explicit yield. Lowering
+arbitrary source loops and preempting non-returning work remain beyond this
+cooperative boundary.
 
 Bulk data stays in owned resident regions. A span carries allocation identity and generation, owner, offset, length, layout, access mode and completion dependencies. Crossings carry descriptors and batches. A zero-copy request preserves its alignment and lifetime contract or reports refusal.
 

@@ -1,7 +1,7 @@
 // Owned Darwin ARM64 event queues, emitted by Form in RAM. SDK kevent64_s
 // is 48 bytes; tokens name registrations and are never recycled by an owner.
 // Callbacks run in the receiving Form context after the complete batch is read.
-// preludes: form-stdlib/bml/native-pty-darwin.bml form-stdlib/bml/native-owner-clock.bml form-stdlib/organ-health.bml control/offer-ack-core.fk control/choice-lane-core.fk
+// preludes: form-stdlib/bml/bmf-repeat.bml form-stdlib/bml/native-pty-darwin.bml form-stdlib/bml/native-owner-clock.bml form-stdlib/organ-health.bml control/offer-ack-core.fk control/choice-lane-core.fk
 section [form.bml] {
  class NativeEventsDarwin {
   def nve-image() {
@@ -193,7 +193,7 @@ section [form.bml] {
   // unwinds only the offer. Care never implicitly repeats an effectful receiver.
   def nve-receive(args) {
    let binding = head(args); let receiver = head(binding);
-   receiver(nth(binding,1),nth(args,1)); oac-one(intern_trivial_int(1));
+   nve-repeat-enter(nth(args,1),binding); receiver(nth(binding,1),nth(args,1)); oac-one(intern_trivial_int(1));
   }
   def nve-pending(owner) = record_get(owner,"pending");
   def nve-care-reading(watch) {
@@ -374,6 +374,49 @@ section [form.bml] {
    if (nothing?(current) || !((Value) current == event) || !nve-live(owner,nve-event-watch(event))) then nve-note(owner,"yield","needs the currently receiving event") else {
     record_set(owner,"next-binding",list(receiver,context,options)); 1;
    };
+  }
+  // BMF Repeat's checkpoint rule, carried by the existing ready queue.
+  // A body returns a value to finish, or nve-repeat-next(cursor) to advance.
+  // Stops enter the same local care path; retry schedules after unwinding.
+  def nve-repeat(owner,receiver,context,cursor,options) {
+   let watch = nve-post(owner,nve-repeat-receive,context,options);
+   if nothing?(watch) then nothing() else {
+    record_set(watch,"repeat",record_new(0,"receiver",receiver,"context",context,"options",options,"cursor",cursor,"attempts",0,"passes",0,"done",0,"value",nothing())); watch;
+   };
+  }
+  def nve-repeat-next(cursor) = record_new(0,"kind","native-repeat-next","cursor",cursor);
+  def nve-repeat-next?(value) = if ((String) value_kind(value) == "record") then ((Value) record_get(value,"kind") == "native-repeat-next") else false;
+  def nve-repeat-enter(event,binding) {
+   if (len(binding) > 3) then record_set(record_get(nve-event-watch(event),"repeat"),"cursor",nth(binding,3)) else 0;
+  }
+  def nve-repeat-receive(context,event) {
+   let repeat = record_get(nve-event-watch(event),"repeat"); let receiver = record_get(repeat,"receiver");
+   record_set(repeat,"attempts",(record_get(repeat,"attempts") + 1));
+   let result = receiver(context,event);
+   if nve-repeat-next?(result) then {
+    let cursor = record_get(result,"cursor");
+    let action = bmr-action(nothing(),record_get(repeat,"passes"),1,!((Value) cursor == record_get(repeat,"cursor")));
+    if ((String) action == "next") then {
+     record_set(repeat,"passes",(record_get(repeat,"passes") + 1)); nve-repeat-yield(record_get(nve-event-watch(event),"owner"),event,cursor);
+    } else form_error("repeat needs a changed checkpoint");
+   } else {
+    record_set(repeat,"passes",(record_get(repeat,"passes") + 1)); record_set(repeat,"value",result); record_set(repeat,"done",1); result;
+   };
+  }
+  def nve-repeat-yield(owner,event,cursor) {
+   let repeat = record_get(nve-event-watch(event),"repeat");
+   let proposed = nve-yield(owner,event,nve-repeat-receive,record_get(repeat,"context"),record_get(repeat,"options"));
+   if nothing?(proposed) then 0 else {
+    // The cursor travels with the proposal. Declined care and cancellation
+    // cannot change the committed checkpoint; admission changes it once.
+    record_set(owner,"next-binding",append(record_get(owner,"next-binding"),list(cursor))); 1;
+   };
+  }
+  def nve-repeat-again(offered,cursor) {
+   let args = oac-option-args(offered); let owner = head(args); let event = nth(args,2);
+   let repeat = record_get(nve-event-watch(event),"repeat");
+   if nothing?(repeat) then oac-nothing() else if ((String) bmr-action(nothing(),record_get(repeat,"passes"),1,!((Value) cursor == record_get(repeat,"cursor"))) != "next") then oac-node(intern_trivial_string("repeat retry needs a changed checkpoint"))
+   else if nve-repeat-yield(owner,event,cursor) then oac-one(intern_trivial_int(1)) else oac-nothing();
   }
   def nve-registration-count(watches) = if nil?(watches) then 0 else record_get(head(watches),"registered") + nve-registration-count(tail(watches));
   def nve-retain(owner,event,binding,memory) {
