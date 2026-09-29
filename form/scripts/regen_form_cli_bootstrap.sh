@@ -12,6 +12,7 @@ CALLER_PWD="$PWD"
 cd "$FORM"
 # shellcheck source=scripts/form_cli_bootstrap_proof.sh
 source scripts/form_cli_bootstrap_proof.sh
+form_cli_bind_carrier "$FORM"
 
 # shellcheck source=scripts/form_cli_source_list.sh
 source scripts/form_cli_source_list.sh

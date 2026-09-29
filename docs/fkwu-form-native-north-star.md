@@ -27,11 +27,13 @@ proof engines and disposable caches have distinct purposes and measurements.
 
 Express each operation at the highest executable BML level that preserves its
 meaning: infix operators with visible precedence, comparison contracts on the
-binding, local functions that capture their context, and shared collection
-operations. Keep names and structure readable. A shorter spelling earns its
+binding, local functions and lambdas that capture their context, and pipelines
+over shared collection operations. Keep names and structure readable. A shorter spelling earns its
 place by removing repeated behavior, preserving effects and ownership, and
 running through the same native compiler. The sensor flow demonstrates this
 with local pixel readers, region folds, context matching and mesh fusion.
+Choice, checkpoints and repetition speak compactly while their existing Form
+owners keep effects, continuation context, care and release explicit.
 
 Form also owns inspections, generators, migrations and temporary helpers. A
 host process carries an explicit OS operation with owned input, complete output,
@@ -48,7 +50,11 @@ Missing, unreadable or aging signals remain unknown.
 
 The live framebuffer exposes operational decisions, timings, resource needs and
 causal links at these boundaries. Attention follows observed need and cost;
-fixed bands do not stand in for the executing organ. Keep private values with
+fixed bands do not stand in for the executing organ. Observe slow stages against
+bytes moved, useful work, native dispatch cost and available hardware capacity.
+Reuse unchanged compiler knowledge and resident programs; batch crossings and
+copy only what the operation needs. Compare cold admission with warm execution
+and verify the same result after a repair. Keep private values with
 their owner and make the diagnostic channel's own allocation and crossing cost
 visible. Trace enough to explain and improve the next choice without duplicating
 the computation or retaining an unbounded transcript.

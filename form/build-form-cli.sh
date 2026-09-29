@@ -11,6 +11,7 @@ FORM="$(cd -P "$(dirname "$0")" && pwd)"
 BODY="$(dirname "$FORM")"
 cd "$FORM"
 source scripts/form_cli_bootstrap_proof.sh
+form_cli_bind_carrier "$FORM"
 source scripts/form_cli_source_list.sh
 (cd "$BODY" && ./fkwu observe/native-node-word-verify.bml)
 form_cli_load_sources

@@ -5,6 +5,11 @@
 # closure door's framing; form_cli_verify_binary_identity asks the built
 # executable to answer that digest; form_cli_behavioral_proof exercises it.
 
+# Relocated build runners retain the caller's selected dynamic host resource.
+form_cli_bind_carrier() {
+    export FKWU_METAL_CARRIER="${FKWU_METAL_CARRIER:-$1/native/metal/fk-metal-carrier.dylib}"
+}
+
 form_cli_sha256_stream() {
     if command -v shasum >/dev/null 2>&1; then
         shasum -a 256 | awk '{print $1}'

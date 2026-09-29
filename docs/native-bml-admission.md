@@ -30,59 +30,71 @@ section [form.bml] {
 }
 ```
 
-Arithmetic, ordering and boolean operators lower to the existing native Form
+Arithmetic, ordering and boolean operators lower to existing native Form
 recipes, preserving evaluation order and short-circuit behavior. Binary operators
-are separated by whitespace so hyphenated Form names remain whole. Parentheses
-select grouping. `!` negates an expression.
+and conditional punctuation are separated by whitespace so hyphenated Form names
+remain whole. Parentheses select grouping. `!` negates an expression.
 
-A stop is a backtrack point, and BML names the choice in its own words.
-`try e else h` attempts `e`; when `e` stops (the length of nothing, a branch on
-nothing, arithmetic over a non-number, a recursion past the walker's wall) or
-answers nothing, `h` answers. `choose { e1; e2; ... }` attempts each option in
-order; the first that lands wins, and none landing is nothing. `x ?? y` is `x`
-unless `x` is nothing; it binds loosest of the infix operators. The ternary
-`c ? t : e` binds looser still, and lowers to the same three-way `if`. Each lowers to
-`(attempt ...)` and `nothing?` with the next option in the `if`'s branch, so an
-option that is not needed is never walked, and each caught stop is voiced as one
-organ-health line:
+The executable reader and cursor grammar share the operator table in
+`grammars/form-bml.fk`. From lowest to highest precedence: `|>`, `??`, `||`,
+`&&`, equality, ordering, `..`, addition/subtraction, multiplication/division/remainder.
+Binary operators associate left. Conditional expressions associate right, bind
+below these operators, and evaluate only the selected branch.
 
 ```bml
-def size(x) = try len(x) else 0;
-def first-reading(x) = choose { len(x); str_len(x); 0 };
+def magnitude(x) = x < 0 ? 0 - x : x;
+def weighted(scale) = 0 .. 8 |> map(x => x * scale) |> filter(x => x > 0);
+def total(values) = values |> foldl((sum,x) => sum + x,0);
+def matching(values) = values |> filter((text: String) => text == "ready");
+def affine(scale) = offset => x => scale * x + offset;
+affine(3)(2)(4);
+```
+
+`start .. end` calls the existing half-open `range`. `x => expression`,
+`(x,y) => expression`, and `() => expression` create lexical functions; a braced
+body can contain ordered statements and local definitions. Parameter comparison
+contracts and captured values travel with the function. A function can escape its
+owner and be called immediately or through a returned function. Lambda bodies
+associate right. Local named functions use the same capture lowering.
+
+`input |> stage(arguments)` evaluates input once, before the stage arguments,
+and supplies it as the last argument. A bare function or grouped lambda is also
+a stage. This composes existing `map`, `filter`, `foldl` and other Form functions
+without a separate collection runtime. Group a conditional or lambda when using
+it as a pipeline operand.
+
+`try e catch h` (also `try e else h`) attempts `e`; an absent answer or a
+caught runtime stop selects `h`. `choice { e1; e2; ... }` (also `choose`)
+attempts options in order and returns the first non-absent answer, including zero.
+`x ?? y` evaluates `y` only when `x` is absent; it does not add an attempt.
+Unselected branches remain unevaluated. Each caught runtime stop emits its
+existing organ-health signal.
+
+```bml
+def size(x) = try len(x) catch 0;
+def first-reading(x) = choice { len(x); str_len(x); 0 };
 def label(name) = name ?? "unnamed";
 ```
 
-`form/form-stdlib/tests/bml-recover-surface-band.fk` reads 1023 on all four
-kernels.
+Intrinsic call names lower directly to existing Form owners. Their argument
+counts are checked after pipeline composition. Import the owning library through
+`preludes:` as with other native calls.
 
-Compact expressions stay on that same admission. They are spaced, like the
-other operators, so a hyphenated name is never read as syntax.
+| Surface | Existing owner | Meaning |
+| --- | --- | --- |
+| `fail`, `stop`, `fail()`, `stop()` | canonical `nothing` | An absence signal interpreted by its receiving boundary; no imperative abort. |
+| `offer(recipe,args)`, `choice(alternatives,args)` | `control/offer-ack-core.fk` | One attempted offer, or the first non-absent offer. |
+| `cut(alternatives,args)` | `control/choice-lane-core.fk` | Offer only the first alternative. |
+| `store(memory)`, `restore(checkpoint)`, `undo(ack,checkpoint,memory)` | `control/choice-lane-core.fk` | Hold immutable memory; select the checkpoint on an absent acknowledgement. Host effects are not rolled back. |
+| `repeat(owner,receiver,context,cursor,options)` | `bml/native-events-darwin.bml` | Schedule a locally owned repeat on the existing event queue. |
+| `again(cursor)` | same event owner | Return a changed checkpoint for the next queued pass. |
+| `retry(offered,cursor)` | same event owner | Propose a changed checkpoint during local care, retaining context and findings. |
 
-| form | reading |
-| --- | --- |
-| `c ? t : e` | `t` when `c` is present and nonzero, otherwise `e`. The else is itself a conditional, so `a ? b : c ? d : e` is `a ? b : (c ? d : e)`. |
-| `lo .. hi` | the inclusive integer list from `lo` through `hi`, empty when `lo` is greater than `hi` |
-| `xs \|> f` | `f` applied to each element of `xs`, order kept. `f` is a name, or a parenthesized `(n => expr)` |
-| `(n => expr)` | lifted to one top-level `def` before the section is read. A `match` arm is `pattern => body` and is not a lambda |
-
-`..` binds tighter than a comparison and looser than `+`. `|>` binds with `||`.
-Range and map lower to `__bml_span` and `__bml_map`, and those two definitions
-are supplied only when the lowered text names them. The cursor grammar and the
-source compiler lower `? :`, `..` and `|>` to the same recipe;
-`form/form-stdlib/tests/form-bml-cursor-full-band.fk` reads 105.
-
-`form/form-stdlib/host-membrane.bml` is the face that uses them together.
-The user side asks whether a door's body is already Form. The kernel side asks
-whether the named seed stage is still carried by the C checkout. An adapter is
-a door, a driver is that door's carrier contract, and the door list is the one
-catalog. `template Membrane<Protocol, Carrier>` is the generic shape. The
-witness reads 33: the doubled span `2 + 4 + 6`, a kept `5`, a recovered `3`,
-a chosen `4`, the file door, the checkout seed, and `nothing() ?? 7`.
-
-Verified practice for these forms lives in `learn/bml-compact-practice.bml`.
-Each reference is executed before it can be offered to session learning.
-Transfer rows stay out of the gradient. The door is
-`observe/bml-compact-observe.bml`.
+A normal repeat result, including zero or nothing, completes the work. `again`
+yields to peer work. An unchanged checkpoint rests in care; a resource event can
+resume the original continuation. The owner retains cancellation and release.
+The [native repeat observation](../observe/native-repeat-witness.bml) exercises
+these expressions through actual queued work, recovery, resource wake and release.
 
 `==` and `!=` use exact value equality by default. Declared comparison contracts
 select another relationship without runtime wrappers:

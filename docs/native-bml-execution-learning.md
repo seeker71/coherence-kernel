@@ -210,7 +210,7 @@ generated code remain separate observations.
 ## Compact expressions
 
 `learn/bml-compact-practice.bml` is a third frozen curriculum. Its practice
-asks for the spaced ternary, an inclusive range mapped by name, the same map
+asks for the spaced ternary, a half-open range piped through `map`, the same map
 through a parenthesized lambda, `try`/`choose`, and `??`. Its transfer rows
 ask for a different bound, a different span, and a different fallback. Every
 reference is executed by `./fkwu` before preparation accepts the home. The

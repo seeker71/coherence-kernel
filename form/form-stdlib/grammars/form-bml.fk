@@ -3,7 +3,7 @@
 ; language classes over a template, with def / field / ref / thought members), templates,
 ; imports, defs (`= expr;` or `{ stmts }`, with comparison contracts on names, params and
 ; returns), lets and bare `expr;` statements. Expressions carry if / try / choose / match,
-; the ternary `? :`, the spaced operators (including `..` and `|>`), `!`, the comparison casts, `??`, call and member chains, and
+; the spaced operators, `!`, the comparison casts, `??`, call and member chains, and
 ; literals: numbers (negative, fractional, with an exponent), strings, true, false,
 ; empty and nothing (a value keyword followed by a call is the name being called).
 ;
@@ -21,6 +21,24 @@
 ; preludes: form-stdlib/core.fk form-stdlib/form-ontology-bp.fk form-stdlib/line-grammar.fk form-stdlib/bmf-core.fk form-stdlib/bmf-grammar.fk
 
 (do
+    ;; Shared by cursor parsing and source lowering. Operators associate left;
+    ;; conditional expressions and lambdas own their right-associative bodies.
+    (defn form-bml-operators ()
+        (list (list "|>" "$bml-pipe" 0 "call") (list "??" "$bml-or" 1 "call")
+              (list "||" "or" 2) (list "&&" "and" 3)
+              (list "==" "eq" 4) (list "!=" "ne" 4)
+              (list "<=" "le" 5) (list ">=" "ge" 5) (list "<" "lt" 5) (list ">" "gt" 5)
+              (list ".." "range" 6 "call")
+              (list "+" "add" 7) (list "-" "sub" 7)
+              (list "*" "mul" 8) (list "/" "div" 8) (list "%" "mod" 8)))
+
+    ;; Source spelling, existing Form owner, and complete argument count.
+    (defn form-bml-intrinsics ()
+        (list (list "fail" "nothing" 0) (list "stop" "nothing" 0)
+              (list "offer" "oac-offer" 2) (list "choice" "oac-choice" 2) (list "cut" "oac-cut" 2)
+              (list "store" "oac-store" 1) (list "restore" "oac-restore" 1) (list "undo" "oac-undo" 3)
+              (list "repeat" "nve-repeat" 5) (list "again" "nve-repeat-next" 1) (list "retry" "nve-repeat-again" 2)))
+
     (defn form-bml-rules () (list
 
         ;; -- whole section body: zero+ top statements -> do[ ... ] -------------
@@ -154,31 +172,28 @@
           (t-emit "do" (list (t-splices "body"))))
 
         ;; -- expr = if-then-else | postfix call-chain over a primary -----------
-        (rule3 "expr" (p-cap "v" (list "alt" (p-ref "ifx") (p-ref "tryx") (p-ref "choosex") (p-ref "matchx") (p-ref "condexpr"))) (t-splice "v"))
-        ;; c ? t : e binds looser than ?? and the infix ladder, and the else
-        ;; is itself a conditional, so a ? b : c ? d : e reads a ? b : (c ? d : e)
-        (rule3 "condexpr" (p-cap "v" (p-ternary (p-ref "orexpr") (p-ref "condexpr"))) (t-splice "v"))
+        (rule3 "expr" (p-cap "v" (list "alt" (p-ref "ifx") (p-ref "tryx") (p-ref "choosex") (p-ref "matchx") (p-ref "lambdax") (p-ref "conditional") (p-ref "orexpr"))) (t-splice "v"))
         ;; match s { pattern => body, ... }  ->  $bml-match[s, do[pattern, body], ...];
         ;; `_` is the ident _ the switch reads as its default
         (rule3 "matchx" (list "seq"
             (p-kw "match") (p-cap "s" (p-ref "orexpr"))
             (p-lit "{") (p-cap "arms" (p-sep (p-ref "arm") (p-lit ","))) (p-opt (p-lit ",")) (p-lit "}"))
           (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-match"))) (t-splice "s") (t-splices "arms"))))
-        (rule3 "arm" (list "seq" (p-cap "p" (p-ref "expr")) (p-lit "=>") (p-cap "b" (p-ref "expr")))
+        (rule3 "arm" (list "seq" (p-cap "p" (p-ref "orexpr")) (p-lit "=>") (p-cap "b" (p-ref "expr")))
           (t-emit "do" (list (t-splice "p") (t-splice "b"))))
-        ;; x ?? y ?? z binds loosest and folds left, as the source compiler splits at
-        ;; the last ??; an operand with no ?? after it is itself, no wrapper
-        (rule3 "orexpr" (list "seq" (p-cap "first" (p-ref "opexpr")) (p-cap "rest" (p-rep (p-ref "orrest"))))
-          (t-wrap-rest "first" "rest" "$bml-or"))
-        (rule3 "orrest" (list "seq" (p-lit "??") (p-cap "v" (p-ref "opexpr"))) (t-splice "v"))
-        ;; the spaced operators by the source compiler's own precedence, left-assoc
-        (rule3 "opexpr" (p-cap "v" (p-infix (p-ref "unary") (list
-            (list "||" "or" 1) (list "&&" "and" 2)
-            (list "==" "eq" 3) (list "!=" "ne" 3)
-            (list "<=" "le" 4) (list ">=" "ge" 4) (list "<" "lt" 4) (list ">" "gt" 4)
-            (list ".." "range" 5 "__bml_span") (list "|>" "pipe" 1 "__bml_map" "swap")
-            (list "+" "add" 6) (list "-" "sub" 6)
-            (list "*" "mul" 7) (list "/" "div" 7) (list "%" "mod" 7)))) (t-splice "v"))
+        (rule3 "lambdax" (p-cap "v" (list "alt" (p-ref "lambdaparams") (p-ref "lambdaname"))) (t-splice "v"))
+        (rule3 "lambdaparams" (list "seq" (p-lit "(") (p-cap "ps" (p-sep (p-ref "param") (p-lit ",")))
+            (p-lit ")") (p-lit "=>") (p-cap "body" (p-ref "expr")))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-lambda")))
+            (t-emit "do" (list (t-splices "ps"))) (t-splice "body"))))
+        (rule3 "lambdaname" (list "seq" (p-cap "p" (p-run "bmlname")) (p-lit "=>") (p-cap "body" (p-ref "expr")))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-lambda")))
+            (t-emit "do" (list (t-splice "p"))) (t-splice "body"))))
+        (rule3 "conditional" (list "seq" (p-cap "c" (p-ref "opexpr")) (p-lit "?")
+            (p-cap "yes" (p-ref "expr")) (p-lit ":") (p-cap "no" (p-ref "expr")))
+          (t-emit "if" (list (t-splice "c") (t-splice "yes") (t-splice "no"))))
+        (rule3 "orexpr" (p-cap "v" (p-ref "opexpr")) (t-splice "v"))
+        (rule3 "opexpr" (p-cap "v" (p-infix (p-ref "unary") (form-bml-operators))) (t-splice "v"))
         ;; !e, a comparison cast (Type) e, or a call chain
         (rule3 "unary" (p-cap "v" (list "alt" (p-ref "notx")
             (p-ref "castvalue") (p-ref "caststring") (p-ref "castnumber") (p-ref "castcomparable")
@@ -197,9 +212,9 @@
         ;; form-bml-lower turns the marked calls into the source compiler's own shape
         (rule3 "tryx" (list "seq"
             (p-kw "try")  (p-cap "b" (p-ref "expr"))
-            (p-kw "else") (p-cap "h" (p-ref "expr")))
+            (list "alt" (p-kw "else") (p-kw "catch")) (p-cap "h" (p-ref "expr")))
           (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-try"))) (t-splice "b") (t-splice "h"))))
-        (rule3 "choosex" (list "seq" (p-kw "choose") (p-cap "os" (p-ref "optionblock")))
+        (rule3 "choosex" (list "seq" (list "alt" (p-kw "choose") (p-kw "choice")) (p-cap "os" (p-ref "optionblock")))
           (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-choose"))) (t-splice "os"))))
         (rule3 "optionblock" (p-cap "v" (list "alt" (p-ref "optionsvalue") (p-ref "optionsterminated"))) (t-splice "v"))
         (rule3 "optionsvalue" (list "seq"
@@ -217,11 +232,13 @@
 
         ;; -- primary: keyword literals first, then numbers, names, strings, parens
         (rule3 "primary" (p-cap "v" (list "alt"
-            (p-ref "litempty") (p-ref "litnothing") (p-ref "littrue") (p-ref "litfalse")
+            (p-ref "litempty") (p-ref "litnothing") (p-ref "litfail") (p-ref "litstop") (p-ref "littrue") (p-ref "litfalse")
             (p-ref "litnum") (p-ref "litneg") (p-ref "litstr") (p-ref "ident") (p-ref "paren") (p-ref "blockexpr"))) (t-splice "v"))
         ;; a value keyword followed by a call is the name being called: nothing() is a call
         (rule3 "litempty" (p-kw-value "empty") (t-emit "fncall" (list (t-emit "ident" (list (t-const "empty"))))))
         (rule3 "litnothing" (p-kw-value "nothing") (t-emit "fncall" (list (t-emit "ident" (list (t-const "nothing"))))))
+        (rule3 "litfail" (p-kw-value "fail") (t-emit "fncall" (list (t-emit "ident" (list (t-const "fail"))))))
+        (rule3 "litstop" (p-kw-value "stop") (t-emit "fncall" (list (t-emit "ident" (list (t-const "stop"))))))
         (rule3 "littrue"  (p-kw-value "true")  (t-const-bool 1))
         (rule3 "litfalse" (p-kw-value "false") (t-const-bool 0))
         ;; -9 and -1.0 are numbers where an operand begins: a name may carry -, so this

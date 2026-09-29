@@ -11,7 +11,12 @@ public observation doors and source-bound evidence.
 BML lowers in memory and reuses native caches. Source admission still compiles a
 whole unit synchronously. [BML admission](native-bml-admission.md) owns statement,
 body and scope boundaries in Form and refuses incomplete interpretations.
-Compiler identity renews cache identity.
+Compiler identity renews cache identity. Dependency knowledge is reused within
+an admission when its name registry agrees. Native string scans skip unchanged
+spans. Source sealing selects the existing Form-emitted ARM64 SHA program when
+its dynamic carrier is available; native refusal remains visible. CLI closure,
+hashing, snapshot, verification and emission publish resource-attributed stages
+through the live framebuffer.
 
 The [CLI build](native-cli-assembly.md) seals its source closure and name registry,
 generates startup C privately and publishes an executable with adjacent
@@ -76,9 +81,12 @@ Executable `section [form.bml]` supports local expression and block functions.
 They retain lexical values, including through intervening functions, and can
 escape their owner or be called by a later sibling. The compiler binds the
 function value once and carries outer bindings through native Form frames.
-The C seed is unchanged. `map`, `filter`, `foldl` and `foldr` take these functions;
-comparison contracts belong on parameters or results, with infix operators in
-their bodies. The five sensor, scene and context organs use this surface.
+The C seed is unchanged. Lexical lambdas, lazy `? :`, half-open `..` and
+input-last `|>` compose `map`, `filter`, `foldl` and other native operations.
+Comparison contracts travel with lambda parameters. One operator table serves
+executable admission and cursor grammar. `try ... catch`, `choice`, checkpoint
+and queue-owned repeat expressions lower to existing Form owners. The offer and
+choice core and five sensor, scene and context organs use this surface.
 [`sensor-flow-run.bml`](../observe/sensor-flow-run.bml) observes their supplied
 samples, inventory, grouping, recognition and fusion through actual source.
 The shared live step emits a correlated framebuffer event with completion,
