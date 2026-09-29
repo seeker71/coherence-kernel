@@ -132,9 +132,9 @@ fourth_prepare_source_workload() {
     mkdir -p "$outdir"
     carrier_key="$(fourth_raw_hash16 "$FOURTH_SOURCE_FKWU")"
     key="$(fourth_hash16 "${srcs[@]}")-$carrier_key"
-    out="$outdir/w-v1-$key-$(basename "$band")"
+    out="$outdir/w-v2-$key-$(basename "$band")"
     if [[ ! -s "$out" ]]; then
-        tmp="$(mktemp "$outdir/.w-v1-$key.XXXXXX")"
+        tmp="$(mktemp "$outdir/.w-v2-$key.XXXXXX")"
         {
             printf '; generated direct-source workload; prepared source closure follows.\n'
             if [[ "$last" -gt 0 ]]; then
@@ -161,6 +161,7 @@ fourth_prepare_source_workload() {
             awk "$fourth_in_string_awk"'
                 fk_in { print; fk_scan($0); next }
                 /^;[[:space:]]*preludes:/ { next }
+                /^[[:space:]]*import[[:space:]]+[A-Za-z_][A-Za-z0-9_?!-]*[[:space:]]*;/ { print; fk_scan($0); next }
                 /^[[:space:]]*import([[:space:]:]|\")/ { next }
                 /^;[[:space:]]*import([[:space:]:]|\")/ { next }
                 { print; fk_scan($0) }
