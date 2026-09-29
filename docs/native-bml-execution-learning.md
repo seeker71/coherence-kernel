@@ -206,3 +206,22 @@ separate. A missing adapter fails before generation, and admitted tensors are
 checked again. This diagnostic emits no generated answer and performs no
 gradient update. Correct teacher-forced decisions and working independently
 generated code remain separate observations.
+
+## Compact expressions
+
+`learn/bml-compact-practice.bml` is a third frozen curriculum. Its practice
+asks for the spaced ternary, an inclusive range mapped by name, the same map
+through a parenthesized lambda, `try`/`choose`, and `??`. Its transfer rows
+ask for a different bound, a different span, and a different fallback. Every
+reference is executed by `./fkwu` before preparation accepts the home. The
+native JSON door is `observe/bml-compact-observe.bml`:
+
+- `prepare` takes a fresh `home` and executes every reference.
+- `enqueue` takes that `home`. Only practice rows whose execution matched are
+  offered, as `native-code` / `verified-answer`, with the execution directory
+  as evidence. Transfer rows are not offered. Drain through
+  `observe/form-cli-session-home-embody-run.fk`.
+
+A prepared reference is a sample. Another sample is owed when a later
+generation of the same contract does not execute to the retained reading.
+When every practice generation executes, the curriculum does not grow.
