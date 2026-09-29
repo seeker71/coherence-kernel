@@ -210,9 +210,14 @@ slices. BML repetition shares BMF's advancing-checkpoint decision. A failed
 attempt unwinds into local care, which can queue a changed choice without
 recursive re-entry, losing context or repeating completed effects implicitly.
 Unchanged choices rest with their findings until relevant care or resource
-movement arrives. Structured repeat bodies need no explicit yield. Lowering
-arbitrary source loops and preempting non-returning work remain beyond this
-cooperative boundary.
+movement arrives. Structured repeat bodies need no explicit yield. The owned
+BML compiler entry also lowers ordinary local-value methods: arguments, locals,
+nested loops, labelled exits and returns travel as immutable checkpoints on
+that queue. Branch continuations have one compiled home. Resource events and
+peer work progress between loop passes. Calls, shared mutations, source-level
+choice/snapshot effects and preemption of non-returning foreign work remain
+the next continuation boundaries. Their ownership and completed effects must
+travel with them before they enter this lane.
 
 Bulk data stays in owned resident regions. A span carries allocation identity and generation, owner, offset, length, layout, access mode and completion dependencies. Crossings carry descriptors and batches. A zero-copy request preserves its alignment and lifetime contract or reports refusal.
 

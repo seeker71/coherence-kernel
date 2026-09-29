@@ -1,0 +1,105 @@
+// Ordinary BML methods as owned repeat receivers. The existing reader, scope,
+// operators and local-store lowering remain authoritative. Each loop back-edge
+// returns its immutable locals to the event queue; no generated step calls itself.
+// preludes: form-stdlib/bml/bml-form-lower.bml
+section [form.bml] {
+ class BmlRepeatLower {
+  def bcr-fn(id) = str_concat("bcr-step-",int_to_str(id));
+  def bcr-cursor(vm,keys,id) = bfk-form(cons("list",cons(bfk-int(id),bfk-vm-vars(vm,keys))));
+  def bcr-jump(vm,target) = bfk-f1("nve-repeat-next",bcr-cursor(vm,nth(target,1),head(target)));
+  def bcr-state(cx,id,body) = bfk-add-def(cx,bfk-form(list("defn",bcr-fn(id),"(cursor)",body)));
+  def bcr-load(cx,keys) = bfk-untuple-keys(cx,"cursor",keys,1,empty,empty);
+  def bcr-target(loops,name) = if nil?(loops) then nothing() else if (((String) name == "") || ((String) head(head(loops)) == name)) then head(loops) else bcr-target(tail(loops),name);
+
+  // Only expressions whose entire meaning is in this immutable frame enter.
+  // Unknown nodes are refused here, never silently read as zero by a lower lane.
+  def bcr-expr?(node) {
+   let cat = node_category(node);
+   if (node_eq(cat,BML-AST-INT) || node_eq(cat,BML-AST-FLOAT) || node_eq(cat,BML-AST-STRING) || node_eq(cat,BML-AST-CHAR) || node_eq(cat,BML-AST-NAME)) then true
+   else if (node_eq(cat,BML-AST-ADD) || node_eq(cat,BML-AST-ARRAY)) then bcr-exprs?(node_children(node))
+   else if bml-ctl-known-op?(node) then bcr-exprs?(bml-call-args(node)) else false;
+  }
+  def bcr-exprs?(nodes) = if nil?(nodes) then true else bcr-expr?(head(nodes)) && bcr-exprs?(tail(nodes));
+  def bcr-value(cx,node,env,vm) = if bcr-expr?(node) then bfk-expr(cx,node,env,vm) else bfk-need(cx,"repeat/expression-needs-owned-continuation");
+  def bcr-local?(node,env) = if (bml-bnml-declare-node?(node) || bml-bnml-assign-node?(node)) then (!bml-hati-field-assign?(node,env)) && (!bml-hati-dotted-assign?(node,env)) && bcr-expr?(bml-bnml-value(node)) else if node_eq(node_category(node),BML-AST-CONST) then bcr-expr?(bml-local-const-value(node)) else bcr-expr?(node);
+  def bcr-plain(cx,node,env,vm) = bcr-promote(cx,bml-ctl-promoted(node,env),node,env,vm,empty);
+  def bcr-promote(cx,promos,node,env,vm,items) = if nil?(promos) then bfk-r-prefix(items,if bcr-local?(node,env) then bfk-stmt(cx,node,env,vm) else bfk-value-stmt(cx,bfk-need(cx,"repeat/statement-needs-owned-continuation"),vm)) else bcr-promoted(cx,promos,node,env,items,bfk-stmt(cx,head(promos),env,vm));
+  def bcr-promoted(cx,promos,node,env,items,r) = bcr-promote(cx,tail(promos),node,bml-ctl-env-after(head(promos),env),bfk-r-vm(r),append(items,bfk-r-items(r)));
+
+  // Continuations are compile-time data. The running program carries only a
+  // step identity and the locals that step reads, alongside the original context.
+  def bcr-rest(nodes,env,loops,kont) = list("rest",nodes,env,loops,kont);
+  def bcr-kont(cx,kont,vm) = if ((String) head(kont) == "done") then "0" else if ((String) head(kont) == "jump") then bcr-jump(vm,nth(kont,1)) else if ((String) head(kont) == "call") then bfk-f1(bcr-fn(head(nth(kont,1))),bcr-cursor(vm,nth(nth(kont,1),1),head(nth(kont,1)))) else bcr-seq(cx,nth(kont,1),nth(kont,2),vm,nth(kont,3),nth(kont,4));
+  // Shared exits give each branch continuation one compiled home. These calls
+  // form an acyclic graph; only queue checkpoints can return to a loop head.
+  def bcr-keys(keys,extra) = if nil?(extra) then keys else bcr-keys(bfk-with-key(keys,head(extra)),tail(extra));
+  def bcr-join(cx,kont,keys) {
+   let id = bfk-next-id(cx); let loaded = bcr-load(cx,keys);
+   bcr-state(cx,id,bfk-do(bfk-r-items(loaded),bcr-kont(cx,kont,bfk-r-vm(loaded))));
+   list("call",list(id,keys));
+  }
+  def bcr-if(cx,node,env,vm,loops,after) {
+   let join = bcr-join(cx,after,bcr-keys(bfk-vm-keys(vm,empty),bfk-out-keys(bml-ctl-env-after(node,env),vm)));
+   bfk-if(bfk-f2("ne",bcr-value(cx,bml-node-child(node,0),env,vm),"0"),bcr-seq(cx,bfk-stmts-of(bml-node-child(node,1)),env,vm,loops,join),bcr-seq(cx,bfk-stmts-of(bml-ctl-child-or-block(node,2)),env,vm,loops,join));
+  }
+  def bcr-seq(cx,nodes,env,vm,loops,kont) = if nil?(nodes) then bcr-kont(cx,kont,vm) else bcr-node(cx,head(nodes),tail(nodes),env,vm,loops,kont);
+  def bcr-node(cx,node,rest,env,vm,loops,kont) = bcr-node-promote(cx,bml-ctl-promoted(node,env),node,rest,env,vm,loops,kont,empty);
+  def bcr-node-promote(cx,promos,node,rest,env,vm,loops,kont,items) = if nil?(promos) then bfk-do(items,bcr-node-in(cx,node,rest,env,vm,loops,kont)) else bcr-node-promoted(cx,promos,node,rest,env,loops,kont,items,bfk-stmt(cx,head(promos),env,vm));
+  def bcr-node-promoted(cx,promos,node,rest,env,loops,kont,items,r) = bcr-node-promote(cx,tail(promos),node,rest,bml-ctl-env-after(head(promos),env),bfk-r-vm(r),loops,kont,append(items,bfk-r-items(r)));
+  def bcr-node-in(cx,node,rest,env,vm,loops,kont) {
+   let cat = node_category(node); let after = bcr-rest(rest,bml-ctl-env-after(node,env),loops,kont);
+   if node_eq(cat,BML-AST-BLOCK) then bcr-seq(cx,node_children(node),env,vm,loops,after)
+   else if node_eq(cat,BML-AST-IF) then bcr-if(cx,node,env,vm,loops,after)
+   else if bml-ctl-while-node?(node) then bcr-loop(cx,bml-ctl-while-parts(node),env,vm,loops,after)
+   else if node_eq(cat,BML-AST-FOR) then bcr-loop(cx,bml-ctl-for-parts(node),env,vm,loops,after)
+   else if node_eq(cat,BML-AST-RETURN) then bcr-value(cx,bml-node-child(node,0),env,vm)
+   else if (node_eq(cat,BML-AST-BREAK) || node_eq(cat,BML-AST-CONTINUE)) then bcr-transfer(cx,bcr-target(loops,bml-local-name(node)),node_eq(cat,BML-AST-BREAK),vm)
+   else bcr-then(cx,bcr-plain(cx,node,env,vm),after);
+  }
+  def bcr-then(cx,r,kont) = bfk-do(bfk-r-items(r),bcr-kont(cx,kont,bfk-r-vm(r)));
+  def bcr-transfer(cx,target,breaking,vm) = if nothing?(target) then bfk-need(cx,"repeat/unknown-loop-target") else bcr-kont(cx,nth(target,if breaking then 1 else 2),vm);
+
+  def bcr-loop(cx,parts,env,vm,loops,after) {
+   let initial = bcr-seed(cx,bml-ctl-loop-init(parts),env,vm);
+   let inside = bml-ctl-env-after(bml-ctl-loop-init(parts),env);
+   let keys = bfk-vm-keys(bfk-r-vm(initial),empty); let id = bfk-next-id(cx);
+   let loaded = bcr-load(cx,keys); let current = bfk-r-vm(loaded);
+   let again = list("jump",list(id,keys));
+   let step = bcr-join(cx,bcr-rest(bfk-stmts-of(bml-ctl-loop-update(parts)),inside,loops,again),keys);
+   let exit = bcr-join(cx,after,keys);
+   let nested = cons(list(bml-ctl-loop-label(parts),exit,step),loops);
+   let test = bfk-f2("ne",bcr-value(cx,bml-ctl-loop-test(parts),inside,current),"0");
+   let pass = bcr-seq(cx,bfk-stmts-of(bml-ctl-loop-body(parts)),inside,current,nested,step);
+   bcr-state(cx,id,bfk-do(bfk-r-items(loaded),bfk-if(test,pass,bcr-kont(cx,exit,current))));
+   record_set(cx,"steps",cons(id,record_get(cx,"steps")));
+   bfk-do(bfk-r-items(initial),bcr-jump(bfk-r-vm(initial),list(id,keys)));
+  }
+  def bcr-seed(cx,node,env,vm) = if node_eq(node_category(node),BML-AST-BLOCK) then bcr-seeds(cx,node_children(node),env,bfk-r(empty,vm,"0")) else bcr-plain(cx,node,env,vm);
+  def bcr-seeds(cx,nodes,env,r) = if nil?(nodes) then r else bcr-seeds(cx,tail(nodes),bml-ctl-env-after(head(nodes),env),bfk-r-prefix(bfk-r-items(r),bcr-plain(cx,head(nodes),env,bfk-r-vm(r))));
+
+  def bcr-dispatch(ids) = if nil?(ids) then "(form_error \"BML repeat checkpoint does not name a step\")" else bfk-if(bfk-f2("eq","(head cursor)",bfk-int(head(ids))),bfk-f1(bcr-fn(head(ids)),"cursor"),bcr-dispatch(tail(ids)));
+  def bcr-start(arity) = bfk-form(list("defn","bcr-start","(owner context options args)",bfk-if(bfk-f2("eq","(len args)",bfk-int(arity)),"(nve-repeat owner bcr-receive context (cons 0 args) options)","(form_error \"BML repeat argument count differs\")")));
+  def bcr-receiver(cx) = bfk-form(list("defn","bcr-receive","(context event)",bfk-do(list("(let cursor (record_get (record_get (nve-event-watch event) \"repeat\") \"cursor\"))"),bcr-dispatch(cons(0,record_get(cx,"steps"))))));
+  def bcr-arg-keys(n,i) = if (i >= n) then empty else cons(str_concat("@a",int_to_str(i)),bcr-arg-keys(n,(i + 1)));
+  def bcr-method(method) {
+   let cx = bfk-cx(); record_set(cx,"steps",empty);
+   let env = bml-hati-method-param-env(method,empty);
+   let params = bfk-params(len(bml-method-node-parameters(method)),0);
+   let keys = if ((Comparable) len(params) == 1) then list("@a") else bcr-arg-keys(len(params),0);
+   let loaded = bcr-load(cx,keys);
+   let body = bcr-seq(cx,bfk-stmts-of(bml-method-node-body(method)),env,bfk-r-vm(loaded),empty,list("done"));
+   bcr-state(cx,0,bfk-do(bfk-r-items(loaded),body));
+   let text = bfk-do(append(reverse-list(record_get(cx,"defs")),list(bcr-receiver(cx),bcr-start(len(params)))),"bcr-start");
+   list(if nil?(record_get(cx,"needs")) then text else "",record_get(cx,"needs"));
+  }
+  // A parsed, complete single method becomes a start function. The caller
+  // chooses its owner and context; scheduling and local care remain nve's.
+  def bcr-refuse(reason) = list("",list(bml-voice-then(bml-refusal-reading("repeat-lowering",reason),reason)));
+  def bcr-compile(node) = if node_eq(node_category(node),BML-AST-METHOD) then bcr-method(node) else if node_eq(node_category(node),BML-AST-BLOCK) then if ((Comparable) len(node_children(node)) == 1) then bcr-compile(head(node_children(node))) else bcr-refuse("repeat/one-method-required") else bcr-refuse("repeat/method-required");
+  def bcr-source(path) {
+   let parsed = bml-source-file-parse-executable(path);
+   if bml-source-exec-parse-ok?(parsed) then bcr-compile(bml-source-exec-parse-node(parsed)) else bcr-refuse("repeat/source-unread");
+  }
+ }
+ 0;
+}
