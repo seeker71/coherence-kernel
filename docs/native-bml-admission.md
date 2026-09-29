@@ -167,15 +167,16 @@ Within BML, an adjacent `do(...)` call and a whitespace-separated
 
 ## Local lift
 
-A lift stays inside Form. It crosses the membrane only through `host:file`
-and `host:memory`. The file door carries source bytes. The memory door is the
-shared-memory adapter over the existing `shm_offer` / `shm_receive` family.
-HTTP, audio, video and speech stay in the catalog and stay closed for a lift.
+A lift stays inside Form and admits every door the catalog offers whose body
+is Form and whose carrier is local. File and shared memory are two of those
+doors. `host:memory` is the adapter over `shm_offer` / `shm_receive`. HTTP,
+audio, video and speech are open on the same terms. A name that is not a door
+stays absent. Closing a catalog door is not part of the lift.
 
 The executable face is `form/form-stdlib/form-lift.bml`. It names the word
-width, the flag width, the present zero, and each protocol. `template
+width, the flag width, and the present zero. `template
 LiftCrossing<Protocol, Carrier>` is the generic shape. A class owns admission.
-`|> filter` keeps a crossing only when the body is Form, the door is local,
-and the protocol is file or memory. `??` restores a named flag when a value
-is absent. The witness reads 135: two kept doors, 129 bits, both doors
-admitted, both closed doors refused, one restored absence, and file first.
+`|> filter` keeps a crossing when the body is Form and the door is local.
+`??` restores a named flag when a value is absent. The witness reads 144:
+six catalog doors, 129 named bits, six admissions, an absent unknown name,
+one restored absence, a full catalog, and file first.
