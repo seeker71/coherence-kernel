@@ -1,6 +1,7 @@
 #!/usr/bin/env zsh
-# Regenerate the native startup, its sealed Form source identity and this
-# host's platform bundle (executable, .fkb, .sym) from one witnessed candidate.
+# Publish the sealed Form source identity and this host's native platform
+# bundle (executable, .fkb, .sym) from one witnessed candidate.
+# Form emits startup C privately during the build; it is never published.
 # Usage: regen_form_cli_bootstrap.sh [output-dir]   (default form-stdlib/bootstrap)
 # The dependency manifest always installs beside the sources it names.
 set -euo pipefail
@@ -143,6 +144,7 @@ source_identity_still_current || {
 FORM_CLI_NATIVE_BOOTSTRAP_DIR="$candidate_bootstrap" \
 FORM_CLI_FORCE_LINK=1 \
 FORM_FOURTH_SOURCE_FKWU="$FOURTH_SOURCE_FKWU" \
+FORM_CLI_NATIVE_EMISSION_DIR="$emission_dir" \
 FORM_CLI_NATIVE_SOURCE_SNAPSHOT="$seal_dir/body" \
 FORM_CLI_NATIVE_SOURCE_SEAL="$source_seal" \
 FORM_CLI_NATIVE_SOURCE_SEAL_SHA256="$source_seal_sha256" \
@@ -175,7 +177,6 @@ publish_file "$work_dir/form-cli.fkb" "$target.fkb"
 publish_file "$work_dir/form-cli.sym" "$target.sym"
 publish_file "$work_dir/form-cli.native.attestation" "$target.native.attestation"
 publish_file "$work_dir/form-cli" "$target"
-publish_file "$candidate_bootstrap/form-cli-native.c" "$OUT_DIR/form-cli-native.c"
 publish_file "$candidate_bootstrap/form-cli.source.sha256" "$OUT_DIR/form-cli.source.sha256"
 publish_file "$candidate_bootstrap/form-cli.native.attestation" "$OUT_DIR/form-cli.native.attestation"
 form_cli_native_verify_platform_attestation \

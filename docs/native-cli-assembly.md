@@ -1,122 +1,82 @@
 # Native CLI assembly
 
-The native CLI assembly uses the current native source runtime and a Form REPL image.
-`native-cli-startup.bml` emits the startup from that runtime's exact source,
-binds the generation digest, and preserves explicit source/image invocation.
-Default invocation loads `<executable>.fkb` and `<executable>.sym` beside the
-executable. The builder checks those three files as one platform artifact. Native
-`--compile-source` prepares the recipe without evaluating its root expression.
-Default startup reads the complete symbol record and requires the exact first
-three lines: `program-image-sym-lens-v1`, `compile-errors 0`, and `unrunnable 0`.
-Each line ends with LF. Missing or malformed fields, repeated diagnostic
-headers, NUL bytes, an incomplete final line, and read or close errors refuse
-before the image executes. Symbol and dependency row meaning remains with the
-native image compiler. Explicit source/image invocation keeps the source
-runtime's admission behavior.
-Build and installation attestations verify the exact executable, image and
-symbol bytes. Default launch checks the complete clean symbol record and the
-runtime's image compatibility; it does not read the platform attestation or
-hash the companions. A different compatible image and clean symbol pair can
-therefore execute beside the same binary. The embedded source digest and genesis
-identify the binary's build generation; they do not bind the bytes of replacement
-companions. Such replacement requires a new attested build before it qualifies
-as the published CLI artifact.
-The compiler's BML lowering remains in RAM; no lowered source twin is published.
-The [artifact evidence](evidence/fkwu/native-cli-artifact.json) records the
-14 artifact cases this contract answers: relocated default execution and
-restored companions pass; missing or malformed companions refuse; a different
-compatible recipe runs with the same binary and refuses the original
-installation attestation. The
-[installed resident care execution](evidence/fkwu/native-startup-care.json)
-shows the resident care organ running from such an installed set. The published
-generation holds 396 source files (the manifest and the 395 it names) under
-source stamp `da5ebd6434fecdbb`; its Darwin ARM64 executable is 8,190,296 bytes,
-the `.fkb` 42,307,765 and the `.sym` 3,553,616.
+Form owns source discovery, snapshots, startup generation and recipe compilation.
+The host carrier links and publishes the executable. A fresh checkout needs the
+C seed and the host C compiler; generated startup C is private build output.
 
-The identity roots include the program, its compiler, the source runtime,
-opcode and generated node-word headers, the Form node-word authority and its
-verification door, and the host build carriers (`build-form-cli.sh`,
-`regen_form_cli_bootstrap.sh`, `form_cli_source_list.sh`,
-`form_cli_bootstrap_proof.sh`). The platform name and the source stamp are
-computed in `form_cli_source_list.sh`; kernel validation's fourth-arm carrier
-and its flattener table are not part of this build. Both generated and ordinary
-copy installation run the repository runtime's node-word verification first;
-that door must remain reachable. The sealed copy includes the checked header.
-`native-table-sources.bml` follows
-the actual source declarations and holds the complete bytes of every row.
-`form-cli-source-closure.bml` computes the portable dependency manifest and its
-digest from those held bytes. Each digest row has the existing byte framing:
-`path:<relative>\nbytes:<count>\n<content>\n`; the generated manifest is first.
-Non-Form inputs participate in identity without being parsed as programs.
-The name registry `home-index.txt` is an identity root. Form carries every
-declared source home and its dependencies, including homes not yet called;
-the runtime resolves names from that exact copied registry. Comment and blank
-lines carry no mapping. Malformed rows, NUL bytes and non-source homes refuse
-admission. Absolute home paths refuse snapshot publication. The
-[registry observation](evidence/fkwu/native-home-registry.json) executes a
-function by name from a copied snapshot and retains the actual refusal cases.
+Run `form/scripts/regen_form_cli_bootstrap.sh [output-dir]` to seal the current
+source, generate startup bytes, build one candidate and publish that candidate
+with its `.fkb`, `.sym`, attestations and stamps. The default output directory is
+`form/form-stdlib/bootstrap`. The dependency manifest installs beside the sources
+it describes. Failed candidates retain their evidence when
+`FORM_CLI_RETAIN_WORKDIR=1`.
 
-The same held rows are written and read back in a private `body` snapshot with
-their repository-relative paths. Compilation uses this snapshot, including the
-BML compiler door and its dependencies. Absolute source dependency declarations
-refuse snapshot admission. A local read-lookup boundary prevents fallback into
-an enclosing checkout. The snapshot contains authored bytes, never lowered twins.
-The held, file-marked genesis archive is emitted as exact C byte data by Form.
+Run `form/build-form-cli.sh` to verify the published bundle and install
+`form/form-cli` as a relative link. An explicit output path receives a verified
+copy. With `FORM_CLI_FORCE_LINK=1`, Form generates startup from a checked snapshot
+and the carrier builds a new executable and recipe. Installation reads the
+attested bundle directly; generated C and historical CLI tables have no place
+in the published source tree.
 
-`FCSC1` supplies the Form base, a new private output directory, an optional
-carrier owner and identity roots as bounded lines. Empty carrier input uses the
-original native sources. The explicit substitution option remains available to
-the table compiler's separate proof path. Complete checked files carry the seal;
-stdout is not completion evidence. `FCSI1` installs the held manifest through a
-checked same-directory temporary file and rename. `FCSV1` checks the seal hash,
-all original and snapshot rows, the complete manifest, digest and genesis.
+## Source ownership
 
-`FCSE1` emits startup C from the sealed snapshot runtime and held genesis. Its
-output record binds the exact generated bytes. `FCEP1` copies those checked bytes
-into the candidate; `FCEV1` checks the candidate against that same record after
-the build. The publisher holds the common lock. Failed reads, writes, truncated
-metadata or changed sources refuse acceptance. Prior complete output stays in
-place until the corresponding checked publication step succeeds. This is a
-cooperative local build boundary, not protection against arbitrary concurrent
-filesystem replacement.
-If the initial lock owner-file write fails after creating a partial file, the
-publisher removes that owned file and directory before returning refusal;
-failure to release either is reported.
+`native-table-sources.bml` follows source declarations and retains each file's
+complete bytes. Identity roots include the program, compiler, source runtime,
+opcode and node-word headers, Form's node-word authority, host build carriers and
+`home-index.txt`. The registry carries every declared source home, including
+homes not yet called. Non-Form inputs participate in identity without being
+parsed as programs.
 
-The native bootstrap attestation binds source digest/stamp, startup C, author
-binary and runtime source. A platform attestation additionally binds the exact
-bootstrap attestation, platform, executable, image and symbols. Readers reject
-missing, duplicate, unknown, truncated and mismatched fields. The public stamp
-moves last, after the candidate's source/image checks and identity challenge.
+`form-cli-source-closure.bml` computes the portable manifest and SHA-256 digest.
+Each row contributes `path:<relative>\nbytes:<count>\n<content>\n`, with the
+generated manifest first. It writes and reads back an owned snapshot retaining
+repository-relative paths. A local lookup boundary keeps compilation within
+that snapshot. Missing bytes, malformed registry rows, NUL, absolute source
+dependencies and changed sources refuse admission.
 
-One door regenerates everything: `form/scripts/regen_form_cli_bootstrap.sh
-[output-dir]` seals the closure, emits the startup, builds one candidate and
-publishes both the bootstrap set and that same witnessed candidate as
-`form-cli-<platform>` with its `.fkb`, `.sym`, platform attestation and stamp;
-nothing is rebuilt for publication. The output directory defaults to
-`form/form-stdlib/bootstrap`; another directory receives the whole set for
-inspection, while the dependency manifest always installs beside its sources.
+The existing native protocol carries the build:
 
-`form/build-form-cli.sh` with no argument validates this host's published
-bundle without running a source compiler and makes `form/form-cli` a relative
-link to it. The executable resolves its own path, so the `.fkb` and `.sym`
-beside the bundle are the ones it loads, and the identity challenge runs through
-the link before the build reports success. Given a path, the builder copies the
-validated trio there; with `FORM_CLI_FORCE_LINK=1` it prepares a new image with
-the exact startup binary that will load it. The dependency manifest is derived
-evidence; source and compiler changes invalidate the generation. Historical
-table/C artifacts in the bootstrap directory and the `NTC2` compiler route
-remain independent proof surfaces, outside the CLI build and runtime.
+- `FCSC1` creates a sealed closure and snapshot from supplied identity roots.
+- `FCSI1` publishes the checked manifest; `FCSV1` verifies original and snapshot
+  bytes, manifest, digest and genesis.
+- `FCSE1` generates startup C from the sealed runtime and held genesis.
+- `FCEP1` copies those checked bytes into the private candidate; `FCEV1`
+  verifies the same emission after compilation.
 
-On this host the whole regeneration (closure, emission, one candidate, both
-publications) took 1,186 s wall, the default link install 4.5 s and the
-behavior proof through the link 2.0 s. These are single observations on a
-shared, loaded machine; they establish neither peak memory nor general
-throughput.
-A regeneration stops without publishing when any held source changes while it runs, and a
-published generation reads stale as soon as any of its sources changes; with
-several authors editing the closure, regenerate after their work lands.
-This is a whole-program bootstrap path. The runtime north star remains native
-module admission on demand, retained context ownership and live selection of
-verified replacements. See [native care](native-core-care.md) for the running
-interface's source and observation contracts.
+`native-cli-startup.bml` owns the startup template. Form emits the exact genesis
+archive into its private C input. BML lowering remains in RAM. Neither lowering
+nor startup generation adds a second source authority.
+
+The bootstrap attestation binds source digest and stamp, emitted startup,
+author binary and runtime source. The platform attestation additionally binds
+that attestation, platform, executable, image and symbols. Installation checks
+those identities and challenges the executable through its public CLI.
+Publication holds one owner lock, verifies the sources again, renames completed
+artifacts into place and publishes stamps last. Mixed generations fail their
+identity checks. This cooperative build boundary does not claim protection from
+arbitrary concurrent filesystem replacement.
+
+## Execution
+
+Default invocation resolves the executable's own location and loads its adjacent
+`.fkb` and `.sym`. The complete symbol record must start with exactly
+`program-image-sym-lens-v1`, `compile-errors 0` and `unrunnable 0`, each
+terminated by LF. Missing or repeated headers, NUL, an incomplete final line and
+read or close errors refuse before execution. Symbol and dependency meanings
+remain with the native image compiler.
+
+Explicit runtime arguments retain the source runner's behavior.
+`--compile-source PATH` prepares a recipe without evaluating its root.
+Default launch checks image compatibility and the clean symbol record; full
+artifact hashes are checked at build and installation. A different compatible
+recipe can run beside a binary, but it needs its own attestation before it
+qualifies as a published CLI artifact.
+
+The [artifact observation](evidence/fkwu/native-cli-artifact.json) covers relocated
+execution, companion refusal and compatible recipe substitution. The
+[installed care observation](evidence/fkwu/native-startup-care.json) exercises
+resident care through a compiled default entry. Those observations identify
+their own source generations.
+
+This remains whole-program compilation. The north star is Form-native admission
+on demand, retained ownership and live selection of verified replacements.

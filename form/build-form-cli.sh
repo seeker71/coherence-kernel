@@ -58,7 +58,6 @@ source_current() {
     [[ "$(form_cli_hash16 "${FORM_CLI_SRCS[@]}")" == "$want_stamp" \
         && "$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")" == "$want_sha" ]]
 }
-regular_copy "$BOOT/form-cli-native.c" "$W/startup.c"
 regular_copy "$BOOT/form-cli.native.attestation" "$W/bootstrap.attestation"
 regular_copy "$BODY/runtime/fkwu-uni.c" "$W/runtime-source.c"
 regular_copy "$BODY/runtime/fkwu-optable.h" "$W/fkwu-optable.h"
@@ -66,9 +65,6 @@ regular_copy "$BODY/runtime/fkwu-node-word.h" "$W/fkwu-node-word.h"
 [[ "$(cat "$BOOT/form-cli.source.sha256")" == "$want_sha" \
     && "$(cat "$BOOT/form-cli.stamp")" == "$want_stamp" ]] || {
     printf '%s\n' 'build: native CLI source generation is stale; regenerate bootstrap' >&2; exit 1;
-}
-form_cli_native_verify_attestation "$W/bootstrap.attestation" "$want_sha" "$want_stamp" "$W/startup.c" "$W/runtime-source.c" || {
-    printf '%s\n' 'build: native startup identity refused' >&2; exit 1;
 }
 
 candidate="$W/form-cli"
@@ -116,6 +112,20 @@ else
     (cd "$BODY" && "$W/source-fkwu" form/form-stdlib/bml/form-cli-source-closure.bml) < "$W/verify.request" > "$W/verify-before.log"
     cmp "$W/fkwu-optable.h" "$source_snapshot/runtime/fkwu-optable.h"
     cmp "$W/fkwu-node-word.h" "$source_snapshot/runtime/fkwu-node-word.h"
+    # Form emits startup bytes only for a new native executable. A published
+    # bundle is admitted by its platform attestation, without a source twin.
+    emission_dir="${FORM_CLI_NATIVE_EMISSION_DIR:-$W/native-entry}"
+    if [[ -z "${FORM_CLI_NATIVE_EMISSION_DIR:-}" ]]; then
+        printf '%s\n' FCSE1 "$source_seal" "$seal_sha" "$emission_dir" END > "$W/emission.request"
+        (cd "$BODY" && "$W/source-fkwu" form/form-stdlib/bml/form-cli-source-closure.bml) < "$W/emission.request" > "$W/emission.log"
+    fi
+    emission_sha="$(cat "$emission_dir/ready")"
+    form_cli_generation_hash_valid "$emission_sha"
+    printf '%s\n' FCEP1 "$emission_dir/emission.json" "$emission_sha" "$W/startup.c" END > "$W/emission-check.request"
+    (cd "$BODY" && "$W/source-fkwu" form/form-stdlib/bml/form-cli-source-closure.bml) < "$W/emission-check.request" > "$W/emission-check.log"
+    form_cli_native_verify_attestation "$W/bootstrap.attestation" "$want_sha" "$want_stamp" "$W/startup.c" "$W/runtime-source.c" || {
+        printf '%s\n' 'build: native startup identity refused' >&2; exit 1;
+    }
     args=(-O2 -I "$W" -o "$candidate" "$W/startup.c")
     if [[ "$slug" == windows-* ]]; then
         args+=(-lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp)

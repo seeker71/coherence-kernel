@@ -1,393 +1,140 @@
 # fkwu runtime status
 
-The [north star](fkwu-form-native-north-star.md) defines the complete Form-native runtime and OS. This page describes current execution. The [bootstrap inspection](fkwu-c-bootstrap-inspection.md) carries the function/global ownership census.
+Form runs through the C-seeded `fkwu` source runtime. The
+[north star](fkwu-form-native-north-star.md) describes the complete destination;
+the [bootstrap inspection](fkwu-c-bootstrap-inspection.md) owns the per-function
+and per-global census. Linked capability pages carry detailed contracts,
+public observation doors and source-bound evidence.
 
-The source runtime passes direct bootstrap (`42`, `55`, numeric lists), binary
-freshness (`31`) and native-body execution (`11111`). Signal-driven care runs in
-source and through the installed CLI's compiled default entry. The
-[source evidence](evidence/fkwu/native-core-care.json) contains 13 resource
-scenarios, real child diagnostics and retained resident reads. The
-[installed care evidence](evidence/fkwu/native-startup-care.json) binds its
-actual executable and companions. The
-[canonical CLI artifact](evidence/fkwu/native-cli-artifact.json) passes source
-generation, Darwin ARM64 publication, ordinary cached installation, the existing
-behavior proof and 14 artifact admission cases.
+## Running source and native work
 
-Each node identity is generated as [one native 64-bit word](native-node-word.md).
-Its structured format uses 6 package bits, 13 level bits, 12 type bits and 32
-instance bits with one format bit. Integer coordinates retain a signed 63-bit
-instance. Form owns the layout and generates its bootstrap header; source
-identity and freshness bind that header. The identity column is 8 bytes per
-cell; logical column accounting is 80 bytes per cell. The field and mapped
-readers use layout version 2. The [execution evidence](evidence/fkwu/native-node-word.json)
-includes exact boundaries, ordinary refusal, per-process storage and current
-operator, lexicon, interning, serialization and Glass consumers.
+BML lowers in memory and reuses native caches. Source admission still compiles a
+whole unit synchronously. [BML admission](native-bml-admission.md) owns statement,
+body and scope boundaries in Form and refuses incomplete interpretations.
+Compiler identity renews cache identity.
 
-[Native blueprint layout](native-blueprint-layout.md) gives Form-owned RAM runs
-shared field descriptors, arbitrary bit offsets, exact 64-bit raw projections
-and optional ML float interpretations. Form emits CPU pack/projection code and
-Metal projections from that same layout. A word-aligned primitive requests
-8 payload bytes; complex rows share metadata and need no per-row alignment.
-The adaptive word owner independently widens or shrinks immutable generations
-while retaining pinned readers. These local owners are separate from the
-primary shared field.
+The [CLI build](native-cli-assembly.md) seals its source closure and name registry,
+generates startup C privately and publishes an executable with adjacent
+`.fkb`, `.sym` and attestations. Installation verifies the bundle directly.
+The committed generated C copy and historical CLI table are retired.
+Default launch checks compatible images and clean symbols; full artifact hashes
+are a build and installation contract.
 
-The retained six-field layout sample uses 157,696 compact payload bytes versus
-786,432 aligned bytes, with warm CPU batches of 55 versus 43 ms and Metal
-batches of 408 versus 146 ms. Both produce exact results. These source-bound,
-host-load-dependent timings exclude GPU upload: denser storage alone does not
-establish faster execution. Selection still needs complete workload costs.
-
-The [native accessor](native-node-accessor.md) carries full raw-u64 fields
-between native functions without tagged returns. One 424-byte RAM image serves
-67 observed layouts and all 64 field widths. Immutable descriptors pin packed
-runs; retirement blocks new readers and final release unmaps the data. Owner
-close waits for native views and outputs, with released descriptors retained
-until that close. Unease reports current ownership and byte counts. These
-process-local leases do not establish atomic cross-process publication or
-collection of tagged references stored in raw memory.
-
-The [identity directory](native-identity-directory.md) serves sparse stable rows
-over adaptive segments through one 312-byte native image. Its witness covers
-65 residual widths, 69 generations and row 67,108,881 without allocating the
-intervening rows. Reader leases retain removed segments until final release;
-retired ranges cannot be reassigned. The native read-only importer takes 25
-published primary handles into one generation and preserves all 200 raw bytes
-after source mappings close. Non-field handles refuse before the importer opens
-primary-field objects. Ten [source-bound executions](evidence/fkwu/native-blueprint-layout.json)
-cover these boundaries and the CPU/Metal storage consumers. Directory
-publication is serialized; the C allocator and primary readers are unchanged.
-
-The [resident arena](native-identity-arena.md) generates 64-bit semantic words,
-maps and fills native chunks, serves pinned prefixes and freezes them into
-adaptive directory segments. Its 1,380-byte Form-emitted image stands before
-data allocation; its growth preference can change in RAM without readmission.
-The witness generates 70 coordinate rows, rejects 14 malformed batches before
-writes, and appends 4,113 raw words across three mappings. Measured native
-generation and the 4,096-row append each mint zero primary nodes. The repeated
-sample uses 33,104 requested arena bytes and 112 adaptive payload bytes; these
-are not RSS or bandwidth results. Readers and outputs hold retirement, every
-mapping releases, and frozen identities survive arena close. Owner-local rows
-do not replace primary tagged handles or canonical interning. Whole-arena
-release and serialized growth remain the current ownership boundary.
-
-The [native interner](native-identity-intern.md) adds exact-u64 canonical rows
-within a separate arena owner. Its 2,620-byte Form-emitted image resolves full
-keys, grows an owned index and reuses stable rows without per-key Form calls.
-The witness retains 1,030 unique rows through ten index mappings, duplicate
-replay, prefix reads and complete retirement. Hot insertion and replay mint
-zero primary nodes; Form pressure signals still mint metadata and report their
-observed cost separately. A logical endpoint exercises completed-prefix
-pressure without exhausting the field. Index buckets cost 16 bytes independently
-of eight-byte identities and adaptive frozen payloads. Primary tagged handles,
-other node kinds and collector ownership remain outside this interner.
-
-The shared field reuses identical NodeID coordinates; the allocation witness
-returns `7`. Its node columns still have a fixed 2^26-cell capacity and no live
-reclamation. Reset requires every other kernel to settle. The
-[Form admission predicate](evidence/fkwu/field-reset-admission.json) requires a
-singleton registered-kernel roster containing this process's PID; empty,
-missing-self and additional-owner readings refuse. The roster remains bounded
-and does not establish complete host liveness. No reset is exercised by those
-pure admission observations.
-Interning prevents duplicate identities from consuming fresh cells; it does
-not establish a bounded lifetime for changing diagnostic values.
-
-Health, care and Glass parse, retain and render changing observations through
-collector-visible Form JSON values. The shared parser selects constructors;
-one health reducer serves both value and node APIs. Current-state replacement
-releases obsolete references while held snapshots remain exact. Primary
-materialization is requested through the node-returning API.
-The current observation includes changing event consumption and serialization,
-with exact retained views across collection. Discovery, reader records, boxed
-floats, the collector and pressure-independent signaling remain seed work.
-Publisher renewal reuses the source's reader and clears obsolete mutable
-references. The [changing-event observation](evidence/fkwu/care-changing-lifetime.json)
-records no primary-node creation in its append, renewal and quiet intervals,
-alongside actual collection, preserved snapshots and independent source state.
-Admission diagnostics reuse the reader's identity and retain their separate
-framebuffer timestamp cost. The [value-contract observation](evidence/fkwu/care-value-contract.json)
-preserves typed/order-sensitive protocol semantics and the real retained organ
-exchange. Temporary values still allocate; three float inputs allocate three
-seed boxes. Ordinary `health` text emits the shared value projection directly;
-explicit node APIs and custom node callbacks preserve materialization.
-The [health command observation](evidence/fkwu/health-view-lifetime.json)
-alternates health and care over changing events for 32 cycles with no primary
-mints in warmed explicit-source command intervals, including serialization.
-A held health view survives collection exactly. Request parsing and discovery
-still use primary nodes; temporary values still allocate. No primary
-reclamation or complete native lifetime is established.
-Session-owned data paths are absolute to their selected home, so an absent local
-worker or state file stays absent even when an ancestor has its own session.
-
-## Runtime and native computation
-
-Form source and executable BML run through `fkwu`. BML lowers in memory; native artifacts are reusable caches. Source admission materializes a whole unit synchronously. The [native CLI builder](native-cli-assembly.md) emits startup around this source runtime and compiles the Form REPL into an adjacent `.fkb` image with its `.sym` record. Source snapshots and build/install attestations bind the three-file platform unit. Default launch accepts a clean, compatible recipe and symbol pair; it does not require the installation attestation. The table compiler remains an independent proof surface.
-
-The source snapshot holds the exact name registry and all its declared source
-homes. Form owns this dependency expansion; the snapshot runtime resolves names
-from those copied bytes. The [six-case observation](evidence/fkwu/native-home-registry.json)
-includes actual snapshot execution by name and malformed or nonportable registry
-refusals. Adding a declared home renews source identity without editing the seed.
-
-[Native BML admission](native-bml-admission.md) owns statement and balanced-body
-boundaries in Form. Inline and multiline class/function bodies preserve their
-statements; nested `do` expressions retain ordering, bindings and selected
-branches. Class descriptors and ref resolution follow the same lexical spans.
-Incomplete expressions and unconsumed suffixes refuse admission. The separate
-cursor grammar remains an explicit proof surface; executable `form.bml` has one
-source owner. Compiler dependency identity participates in BML cache renewal.
-The [32-case execution](evidence/fkwu/bml-admission.json) retains actual success
-and refusal statuses. A [direct cache renewal](evidence/fkwu/bml-cache-renewal.json)
-executes the complete body with the root binary and C source unchanged.
-
-The scalar BML demand JIT retains a challenged CPU page independently of its
-optional disk cache. Cache unease carries the original program, emitted bytes,
-compiler identity and correlated repair record. Calls remain native during
-cache or telemetry publication failure. Disk repair reuses those bytes without
-compilation or installation. Genuine carrier loss keeps its separate execution
-fault, including when older observations are still awaiting publication.
-Glass displays cache care without entering its execution-fault hold.
-The owner retains an organ-health reading alongside each exact image. Progress
-resumes publication when a source file or parent directory arrives, a lease is
-released or expires, or the relevant filesystem evidence changes. Unchanged
-waiting preserves the owner and emits no new Glass publication. Explicit holds
-require their correlated release. A failed resumed write backtracks through
-Form's choice flow with the original image, identity and new observation intact;
-other ready care can proceed. The selected cache path and measured bytes travel
-with their publication, so resource changes cannot redirect delayed evidence.
-The owner also receives correlated organ responses through `bdjo-hear`.
-It attempts the selected waiting operation immediately, including while earlier
-telemetry waits, and queues the new observation in order. Old or unrelated
-responses leave the owner unchanged; a failed attempt creates a fresh reading.
-The [native resource event owner](native-resource-events.md) now connects Darwin
-filesystem notifications and one-shot lease timers to that receiver. It watches
-surviving ancestors, handles path replacement, renews lease timers and resumes
-permission repairs through attribute events. Quiet waits avoid filesystem
-polling. Explicit holds withdraw their watches and keep their release control.
-The form-cli demand surface uses this event lifetime and closes its resources
-while preserving the caller's JIT owner. Volume free-space changes still need a
-resource observer's offered response; publication and readback establish the
-actual outcome. Held fault receipts retain their stage's measured duration.
-The current boundary is lowerable scalar graphs; whole-unit source admission
-and the complete program-image call path remain distinct work.
-
-Metal is loaded dynamically through a selected adapter. Form generates Metal source, identifies program/entry/target, and chooses RAM admission or an explicit compiled-archive mode. Shader source files and shader compiler subprocesses are unnecessary. Each executable linkage observation applies to its recorded artifact.
-
-Form owns BMP validation, the nine-field integer interpretation, policy thresholds, GPU source generation, captures, submissions and result eligibility. Several versions can use one captured input. Its 144-byte ARM64 frame fold reads each pixel once through three synchronous borrowed-string calls for a normal frame. Larger rectangles subdivide according to the integer result capacity. The interpreter is an explicitly requested equivalence reference.
-
-## Native authoring and inspection
-
-Form owns the following executing surfaces. Each linked page names its public door and current boundary.
-
-| Surface | Current execution |
+| Capability | Current execution and boundary |
 | --- | --- |
-| [Artifact codec and source lens](native-form-artifacts.md) | FORMBIN2 encoding, decoding, structural comparison, exact numeric payloads, adaptive-depth traversal and independent Go/Rust/TypeScript conformance |
-| [GPU source generation](native-gpu-source-generation.md) | Canonical PTX and GLSL templates become executable BML authorities; generation and publication preserve checked bytes |
-| [Metal asks](native-metal-ask.md) | Typed request admission, full model identity, tokenization, GPU work, owned CPU hashing, resource release and private atomic answer publication |
-| [Numerical references](native-dsv4-numeric-reference.md) | Independent Form hyperconnection and toy-forward mathematics compared with production computations and held anchors |
-| [Specimen compilation](native-python-compiler.md) | Form parses, lifts, dispatches and emits the supported Python grammar in the current process; complete source admission and owned publication preserve an existing output on refusal |
-| [Proof traces](native-kernel-trace.md) | Form compiles specimens, supervises independent Rust execution and renders its real dispatch trace |
-| [Routing proofs](../form/form-kernel-rust/README.md) | Form owns socket fixtures, concurrent clients, exact response checks and child settlement around the independent Rust server |
-| [Concept construction and audit](native-concept-source-audit.md) | Form owns canonical projection, all lexical candidate groups, attributed corpus reindexing, complete WordNet sense construction, binary indices, offsets, metadata, staged publication, stable IDs, aliases, provenance and exact held-byte hashing; portable and explicitly selected ARM64 policies agree |
-| [Terminal acceptance](glass-keyboard.md) | Form owns real Darwin ARM64 PTYs, immediate input checks, signals, exact termios restoration, deadlines and independently supervised resource release |
-| [Ordered CPU mathematics](native-fp64-matrix.md) | Form emits binary64 MXFP8 matrix code in RAM; repeated calls reuse owned output memory without boxing intermediate products or sums |
-| [Real-model numerical oracle](native-dsv4-oracle.md) | Form owns GGUF admission, independent quantized CPU arithmetic, complete layer and token histories, exact retained vectors and tensor-sized Metal view plans |
-| [DSV4 proof generation](native-dsv4-proof-emission.md) | Form owns shader composition, complete GGUF metadata, typed requests, checked output settlement and proof archive retention |
-| [RAM pipe workers](native-pipe-workers.md) | Form emits Darwin ARM64 pipe operations in RAM, uses persistent readiness and child-exit subscriptions, retains partial/failed writes, advances cancellation by its timer and settles EOF, reaping and physical release |
-| [Native resource events](native-resource-events.md) | Form emits Darwin ARM64 queue operations in RAM, shares one queue across pipe workers and JIT care, preserves captured receiver versions, and shares cooperative Form slices with resource notifications; BML repetition reuses BMF's checkpoint decision; the cooperative compiler lowers ordinary local-value methods, nested loops and labelled exits to immutable queue checkpoints; changed retries after interruption preserve original context, complete wake batches, findings, correlated completion and physical release while peers continue |
-| [Pinned Wiktionary sources](native-wiktionary-source.md) | Form reacquires the complete 111 retained revisions, binds page/revision/timestamp identities and reproduces their English hashes and selected meanings; actual acquisition and retained-response replay remain distinct |
+| [CPU contexts](native-core-care.md) | Independent function sets, retained source and CPU admissions; direct, indirect, recursive and lexical calls retain their selected context. Close confirms release before clearing roots. Seed value pools and metadata remain global. |
+| [BML demand JIT](native-resource-events.md) | Lowerable scalar graphs keep native CPU pages independently of optional disk caches. Cache and observation failures retain local care while execution continues. Whole-program demand admission is still ahead. |
+| [Resource events and repetition](native-resource-events.md) | Form-emitted Darwin ARM64 queue operations serve pipe workers, JIT care and cooperative slices. Captured receiver versions, changed checkpoints and wake batches survive interruption. Ordinary local-value BML loops lower to immutable continuations. Calls, shared mutation, source-level choice effects and non-returning foreign work remain separate continuation boundaries. |
+| [Pipe workers](native-pipe-workers.md) | Resident workers retain partial writes, readiness, child-exit observation, cancellation timers, EOF and confirmed release. Other hosts need their own observed carrier. |
+| [Metal programs](native-gpu-source-generation.md) | The runtime admits the adapter dynamically. Form-generated programs enter RAM; explicit archive capture/reuse is optional. Source, entry and target identity govern selection. |
+| Frame execution | Form owns BMP interpretation, policy, captures, CPU/GPU programs and output eligibility. Jobs retain buffers, versions and actual fences through timeout and cancellation. |
 
-The deterministic substantive build and its three downstream generators share
-one `fkwu` process through `observe/concept-substantive-build-run.bml`. Form
-publishes 21 checked artifacts from admitted evidence, including 111 stable-ID
-repairs and 1,443 attributed language cells. Current generated metadata and all
-10,000 rank/repair queries are executable witnesses. Fresh acquisition and
-translation retain their separate JavaScript responsibilities until a native
-acquisition receipt and proposed projection are admitted and observed.
+The Metal adapter uses one process-wide queue and open encoder. Operations settle
+the buffers they reference; explicit `metal_sync` waits for the whole queue.
+Separately mapped aliases are not unified into one dependency identity.
+Version retirement blocks new entry and retains native work leases through
+completion. Pipeline handles use 31 slot and 31 generation bits; buffer bindings
+retain their separate 16/16-bit encoding. Generations stop before wrapping.
 
-Three resident Form translation workers prepare and decode retained corpus
-bytes through RAM pipes. Typed request admission checks integer lexemes before
-conversion; Form owns query encoding, complete HTTP framing, ordered response
-segments, explicit row splitting and cell policy. The live provider attempt
-returned HTTP 429 on all five requests and published no translation. The
-[worker evidence](evidence/fkwu/native-pipe-translation.json) distinguishes
-retained-data execution from fresh acquisition. Native pinned-source acquisition
-reproduces the existing Wiktionary revision set; fresh selection, rights,
-translation and new-generation publication remain separate work.
+## Identity, storage and care
 
-[Native source inspection](native-source-inventory.md) captures source lists into owned files and checks child exit status, exact reads and NUL termination. `observe/carrier-mass.bml` counts source bytes in Form, including unknown-extension shebangs and paths containing spaces or newlines. It retains the complete source reading at `.hearth/carrier-mass-current.json`; weighted exclusions remain present in that evidence. The native authoring guide retains its separate Python inventory at `.hearth/native-authoring-current.json`. Neither lexical inventory establishes execution or native ownership by itself.
+| Owner | What is established |
+| --- | --- |
+| [Node word](native-node-word.md) | One native 64-bit execution identity, generated from Form's layout authority. The structured format uses 6 package, 13 level, 12 type and 32 instance bits plus one format bit; integer coordinates retain a signed 63-bit instance. |
+| [Blueprint layout](native-blueprint-layout.md) | Owned RAM runs, arbitrary bit offsets, exact raw-u64 projections and optional ML float interpretations. CPU and Metal consume the same layout. Adaptive immutable generations retain readers. Compact storage alone does not establish faster execution. |
+| [Native accessor](native-node-accessor.md) | Raw words cross native calls without tagged-return narrowing. Descriptors pin storage; retirement and final release follow leases. |
+| [Identity directory](native-identity-directory.md) | Sparse stable rows over adaptive segments and read-only primary-handle import. Publication is serialized; retired ranges cannot be reassigned. |
+| [Arena](native-identity-arena.md) | Native identity generation and append, pinned prefixes, adjustable RAM growth preference and adaptive freezing. |
+| [Interner](native-identity-intern.md) | Exact-u64 canonical rows and an owned growing index. Other node kinds, primary tagged handles and collector ownership remain outside it. |
 
-The current guide identifies no retained Python implementation. Terminal
-acceptance lives in `observe/glass-keyboard-pty-run.bml` and in the terminal
-door's own read-back ([glass keyboard](glass-keyboard.md)).
-The three large-model comparison callers use native Form references and
-generation. Their [source-bound evidence](evidence/fkwu/dsv4-oracle.json)
-records all 1,106 consumer checks passing at existing tolerances; the replaced
-Python oracle is removed.
-The [held-source re-observation](evidence/fkwu/dsv4-held-source-rewitness.json)
-checks all 81 recorded source rows and rejects a changed final hash without
-relabeling those numerical executions.
-Native terminal acceptance executes on Darwin ARM64; another native target still
-needs an observed admission and full behavior check. Shell orchestration,
-JavaScript builders, target-language specimens, proof siblings and platform
-carriers remain visible in the broader source reading. The checkout is not
-entirely Form-owned.
+These storage owners do not replace the primary shared field. Its node columns
+still have a fixed **2^26-cell capacity and no live reclamation**. The identity
+column is 8 bytes per cell; logical column accounting is 80 bytes. Reusing
+identical coordinates prevents duplicate allocation but does not bound changing
+diagnostic values. Reset requires all other kernels to settle; the admission
+predicate observes a singleton registered roster, not complete host liveness.
+A 64-bit identity does not remove this allocator boundary.
 
-The shared BML dependency reader distinguishes actual directives from quoted examples and multiline strings. Direct Form preparation selects semicolon-comment semantics explicitly. Form string emission represents semicolons through byte construction, preserving their value across the seed's dependency-reading boundary. BML-generated strings can carry dependency examples without importing them.
+[Native care](native-core-care.md) receives organ-emitted needs, supplies available
+resources and re-observes recovery. Current-state health, care and Glass use
+collector-visible JSON values with explicit primary-node materialization.
+Changing event consumption, quiet reads and retained snapshots have source-bound
+observations with no primary mints in the named warmed intervals. Temporary
+values still allocate; boxed floats, reader records, discovery and collection
+remain seed work. No primary reclamation or pressure-independent care lifetime
+is claimed.
 
-Semicolon-bearing string leaves require byte construction and balanced concatenation; ordinary string leaves remain literals. The balanced tree avoids copying each growing suffix but still performs construction work unless subsequently folded. Handwritten direct `.fk` source still passes through the seed's quote-insensitive dependency collector; the Form emitter repair applies to generated string leaves.
+Care and health share retained source cursors. Discovery reports the scope of
+its bounded shared-memory roster. The owner retains refusal, correlated response
+and fresh result; an applied response is not itself recovery. Session paths
+stay absolute to their selected home. Shared-field admission preserves local
+prefixes and shared tails, while field sharing remains seed-owned.
 
-Form owns six-place numeric display in `core.fk`, including fractional carry,
-large finite values, scientific notation and exact tagged integer extrema.
-The [display evidence](evidence/fkwu/float-display.json) checks 34 individual
-health observations and an actual failing child. Exact binary64 serialization
-uses its separate precise-JSON owner. A large plain-decimal BML source literal
-still refuses before execution; runtime string parsing does not establish that
-source-emission capability.
+## Native authoring and knowledge
 
-## Ownership boundary
+| Surface | Current owner |
+| --- | --- |
+| [Artifacts](native-form-artifacts.md) | FORMBIN2 codec, exact numeric payloads, structural comparison and traversal |
+| [Metal asks](native-metal-ask.md) | Typed admission, model identity, tokenization, GPU work, owned hashing and answer publication |
+| [Numerical references](native-dsv4-numeric-reference.md), [matrix code](native-fp64-matrix.md), [model oracle](native-dsv4-oracle.md) | Form arithmetic, RAM CPU emission and complete retained layer/token comparisons |
+| [Proof emission](native-dsv4-proof-emission.md), [kernel traces](native-kernel-trace.md) | Form-generated shaders/specimens, child supervision and retained exact results |
+| [Specimen compiler](native-python-compiler.md) | Form parses and emits the supported Python grammar; specimens are data |
+| [Concept construction](native-concept-source-audit.md) | Held source identities, candidate meanings, provenance, indices and checked publication |
+| [Pinned language sources](native-wiktionary-source.md) | Complete retained revision acquisition and attributed replay |
+| [Source inspection](native-source-inventory.md) | Captured inventories, child status, exact reads and NUL framing |
+| [Terminal acceptance](glass-keyboard.md) | Darwin ARM64 PTYs, immediate input, signals, termios restoration and release |
+| [Session learning](native-session-learning.md) | Retained verified outcomes and local training; retention does not establish better serving answers |
 
-[Native care](native-core-care.md) defines receipt of organ-emitted unease at execution
-boundaries and directs attention toward each declared resource need. Available
-native providers supply resources; the asking organ re-observes delivery and
-remaining needs. The process organ requests local diagnostic evidence while a
-child runs, and session memory supplies verified learning evidence. The core
-`care` view and Glass retain source readers and expose this current exchange,
-including uncertainty and observation age. Applied attention does not invent recovery.
-Care's direct value projection preserves the retained failed-child exchange.
-The actual resident CLI consumes its 44,397 bytes once; later care and health
-commands share the cursor. Changing observations use temporary Form values,
-and no memory bound is claimed.
-Discovery uses the existing bounded shared-memory roster and reports only its
-advertised scope. This is not a complete census of all organs or crossings.
+Fresh source selection, translation and changed corpus publication keep their
+own admission and observation boundaries. The retained translation-worker
+provider attempt returned HTTP 429 and published no translation.
+The native-authoring guide reports zero Python implementations and two existing
+voice invocation candidates. Shell orchestration, JavaScript builders, proof
+siblings and platform adapters remain; the checkout is not entirely Form-owned.
 
-Healing uses local routes by default; the explicit remote mode opens external
-admission after the existing local and checker gates. Attempt retention and
-frontier returns bind real local experience and execution evidence. They do
-not claim that a retained example has already improved the serving model.
+The shared dependency reader distinguishes directives from quoted examples.
+Generated Form strings preserve semicolons by byte construction. Handwritten
+direct `.fk` source still meets the seed's quote-insensitive collector.
+Form owns six-place numeric display; exact binary64 serialization has a separate
+owner, and large plain-decimal BML literals remain an admission boundary.
 
-Shared-field admission preserves a local list prefix and its already shared
-tail, including nested lists and scalar values. The
-[ownership witness](../observe/shared-field-ownership-witness.bml) uses fresh
-identities so a previously interned value cannot mask a first-admission defect.
-The [execution evidence](evidence/fkwu/shared-field-ownership.json) binds the
-seed transport to its source and independent observations. The field and its
-sharing implementation remain seed-owned; Form-owned contexts and sharing are
-the destination.
+Sensor organs execute BML at their existing paths. One
+[source-backed flow](../observe/sensor-flow-run.bml) checks supplied motion and
+scene samples, routed provenance/confidence, room fusion and exact membership.
+It exercises interpretation and routing, not physical sensor acquisition.
+Five witnesses containing copied implementations are retired. The release
+ledger retains pending work; completed entries live in Git.
 
-Each frame job retains its capture, program, policy, output and actual fence. Timeout retains that identity. Cancellation discards an eventual result while resources remain owned. Failed or indeterminate submissions do not publish results. Releases are recorded after carrier confirmation.
+## Observation and scope
 
-Buffer reads, writes and frees settle the work that actually references that buffer. An unrelated owner's pending fence keeps its identity and native pipeline lease. Enqueue validates every binding before opening an encoder. Explicit `metal_sync` remains the operation for a whole-queue wait.
+Run `form-run ./fkwu observe/frame-kernel-witness-run.fk` for the owned runtime
+execution and its printed process-evidence directory. The
+[lifetime transport door](../observe/native-lifetime-health-transport-run.bml)
+consumes that directory. [CPU](../observe/frame-cpu-benchmark-run.fk) and
+[Metal](../observe/frame-metal-benchmark-run.fk) observations separate admission,
+transfer, submission, wait, readback and cleanup.
 
-The adapter currently uses one process-wide queue and open encoder. Dependency identity follows the admitted buffer handle; separately mapped aliases of the same external storage are not unified into one dependency identity.
+Evidence applies to its recorded source and host. Use
+`observe/fkwu-current-identities-run.bml` to record current identities.
+The [retained runtime checks](evidence/fkwu/checks.json),
+[artifact cases](evidence/fkwu/native-cli-artifact.json) and
+[Glass observation](evidence/fkwu/glass-current-observation.json) carry their own
+generations. Synthetic samples and sub-clock timings do not establish peak
+bandwidth or general latency guarantees. Without a standing hearth, its eleven
+counsel lanes remain unobserved.
 
-Identical Metal source can share compiled content while each FMJ1 admission has its own generation-qualified handle. Form retires versions through descriptor mode 3 and holds a version lease for every owned job until output release. Submitted work retains the native pipeline object. Final retirement removes the admission and removes compiled content after its last admission; physical work leases remain until completion. Refused destruction keeps enough state for retry. Pipeline handles use 31 slot bits and 31 generation bits; buffer bindings retain their separate 16/16-bit encoding. Generations stop before wrapping.
+## Freestanding boundary and next work
 
-`form-runtime-context.bml` owns a function set, retained source, persistent run memory and independent CPU native admissions. Direct, indirect, recursive and lexical calls preserve the selected context's source. Closing blocks new entry, releases admissions and clears owned roots only after confirmed release; a refused release preserves the closing context. Other contexts continue to execute. CPU image slots grow with residents, and executable spans use their actual page-rounded size. Released admission identities cannot be resurrected.
+The [i386 guest](../os/hati-os/README.md) has BIOS boot, protected-mode entry,
+serial/VGA, PIT interrupts, preemptive tasks, a bitmap allocator and RAM
+filesystem. Form emits guest string leaves and packs the image. Tasks retain
+stacks for the boot lifetime. Paging, separate address spaces, privilege
+transitions, persistent storage, networking, multicore and remaining device/power
+contracts need their own implementations and execution.
 
-Context close and frame-version retirement publish bounded lifetime observations through `organ-health.bml`. The owner retains the current reading, preceding refusal, correlated retry response and applied result. The shared process flow receives typed health rows with opaque owner identity and resource state; captured bytes remain outside that channel. A fresh observation after the actual retry determines whether the release succeeded.
-
-Release-flow identity is retained on each owner and combines process birth with
-the observed record-constructor dispatch clock. It survives allocator compaction;
-tail forwarding can count a construction twice, so it is not an allocation total.
-Independent owners remain separate current observations, and one owner's
-correlated response cannot authorize another owner's retry.
-
-The shared append transport exposes file extent through `sbt-append` and confirmed bytes for the current write through `sbt-append-count`. Health events, process diagnostics and generated-text streaming use the byte-count door; carrier refusal remains a refusal.
-
-Metal micro-thoughts carry source-and-entry seals and independent admissions. `mj-thought-table` maps arbitrary string addresses to separate metadata records; `mj-thought-recall` reads their handles. Each record binds its owner and address. An explicit thought release retires its native handle; a later thought call can give that vacant address a new admission. A different program at the same live address refuses replacement. Scoped policy sets can coexist, expire, be re-witnessed and select different resident programs over observed outputs.
-
-Form owner identity is cooperative. Seed value pools, record metadata, parser and instrumentation still have process-global backing. Protected address spaces, independently destroyable seed contexts, preemptive Form scheduling and complete portable module ABI coverage remain north-star requirements. Host-unmap failure handling is checked in source; the current hardware bands do not inject a host `munmap` failure.
-
-Handle widths, device capabilities and observed allocation limits are explicit. Unavailable capabilities and refused zero-copy mappings produce visible refusal.
-
-## Reproducible observations
-
-`form-run ./fkwu observe/frame-kernel-witness-run.fk` runs 29 focused checks, records actual child status and compares exact result output. Typed organ-health rows travel through the shared process reader and are validated before separation from the result. The diagnostic deadline cell uses its final verdict line; complete output and correlated events stay in the printed process-evidence directory. Current rows live at [checks.json](evidence/fkwu/checks.json). This includes separate-process compiled-archive capture, required reuse, and missing/wrong/corrupt archive refusal.
-
-[Health transport](evidence/fkwu/health-transport.json) records actual context and frame release observations, shared-reader acceptance, correlated control actions and final owner health. To re-observe it, send the runtime witness's printed process-evidence directory as one stdin line to `form-run ./fkwu observe/native-lifetime-health-transport-run.bml`. The same door checks repeated appends and a real write refusal without changing the source observations.
-
-The [CPU benchmark](../observe/frame-cpu-benchmark-run.fk) and [GPU benchmark](../observe/frame-metal-benchmark-run.fk) expose admission and execution costs over synthetic captured bytes. Current [CPU](evidence/fkwu/cpu-benchmark.txt) and [Metal](evidence/fkwu/metal-benchmark.txt) samples retain the complete result rows and crossing counts. The fixture is 1,050,678 bytes; the CPU sample takes three native calls per fold, while the GPU sample includes upload, submission, wait, readback and cleanup.
-
-Doors that measure a cost in one process, by the body's own clocks:
-
-- `observe/mint-price-run.fk` — what a Metal pipeline costs this host to mint.
-- `observe/micro-thought-run.fk` — a micro-thought's cost to mint, find and run, against the walk it replaces.
-- `observe/kernel-length-run.fk` — each emitted kernel's statements and loops (ear, Q8_0, Q6_K), before any dispatch.
-- `observe/dense-enqueue-share-run.fk` — of one dense llama3.2:1b token's wall, the CPU's encode beside the GPU's run.
-- `observe/qwen38-prefill-time-run.bml` — one Qwen3.8-27B Q8_0 prefill of a 577-token span: first token, GPU busy, wall, dispatches.
-- `observe/qwen38-span-attn-probe.bml` — that lane's span-attention kernel dispatched alone over the same span.
-- `observe/line-grammar-search-floor-run.fk` — the allocating and healed line floors on the locale rows, side by side.
-
-[Identities](evidence/fkwu/identities.json) bind the sources and artifacts recorded
-in that observation. `observe/fkwu-current-identities-run.bml` regenerates them
-with Form's ARM64 SHA program. Each newer execution carries its own source
-identities; a recorded snapshot is not evidence for subsequently changed files.
-That retained snapshot's CLI answers `pong`, and its root and CLI linkage reads
-show libSystem only. The current canonical generation has its own
-[artifact evidence](evidence/fkwu/native-cli-artifact.json); that earlier linkage
-reading remains bound to its recorded executable. An explicitly unavailable Metal adapter returns the snapshot's
-absence verdict `31`.
-
-The [current bounded Glass observation](evidence/fkwu/glass-current-observation.json)
-records all 20 frames under 50 ms, with first/max 43 ms and warm maximum
-13 ms while the sensors stood. Missing indexed metrics retain their requested
-identity as unavailable rows; existing zero measurements remain measurements.
-This is one bounded execution, not a general latency guarantee. Without a
-standing hearth, the counsel's eleven unobserved lanes remain unobserved.
-
-The independent Form recipe walker interprets record construction, reads,
-mutation, presence, keys, blueprint and both record aliases through
-`native-recipe-record.bml`. Its [comparison](evidence/fkwu/native-recipe-record.json)
-preserves duplicate field order, aliases and explicit sharing between recipe
-runs. The flattener's unchanged verdict is `131071`. Setters require string
-keys and refuse another kind. Packet records retain their originating owner;
-raw native access to the wrapper is outside this representation contract.
-
-Each result applies to its recorded source and host. A zero-millisecond sample is below the clock's resolution; these fixture samples do not establish maximum hardware bandwidth. The [per-symbol census](evidence/fkwu/c-bootstrap-audit.json) is a lexical inventory with active-platform reconciliation, not a semantic proof of every function.
-
-## Freestanding boundary
-
-The i386 guest under [`os/hati-os`](../os/hati-os/README.md) supplies a BIOS boot chain, protected-mode entry, serial/VGA devices, PIT interrupts, preemptive task switching, a bitmap allocator and RAM filesystem. It uses an explicit i386 register-state and calling convention. Form-emitted guest behavior is exercised through the same boot path.
-
-Form emits the guest string-equality and length leaves used by the shell and RAM filesystem. The retained serial witness and QEMU halt status `99` validate against the rebuilt kernel bytes with verdict `1023`. The guest builder lives at `form/scripts/build_hati_os.sh`; Form owns emission and image packing. Current guest tasks retain their allocated stacks for the boot lifetime.
-
-Paging, separate address spaces, privilege transitions, persistent block I/O, networking, multicore startup and remaining device/power contracts require their own implementations and execution witnesses. Hosted execution does not establish freestanding ownership.
-
-Resource ownership includes names, metadata and event delivery: a native handle is usable only while its Form owner can retain, observe and release it. The checks above make that contract executable.
-
-## Next executable steps
-
-1. Move the retained care view's complete working lifetime onto native owned
-   storage. Connect its primary values, tagged handles, records and collector
-   roots before moving construction, reading, rendering and release. Preserve
-   its existing result while changing observations gain reclaimable lifetimes.
-   Changing event trees and projections already avoid primary admission on the
-   value path, including ordinary health text; generation renewal reuses the
-   reader. Retire seed ownership of boxed floats, records and
-   collection with measured caller transitions. The [north-star milestone](fkwu-form-native-north-star.md#next-completed-boundary)
-   names the actual caller transition and its acceptance conditions.
-2. In that same consumer, keep the minimal signal/response path available when
-   ordinary allocation cannot grow. Use an isolated constrained owner, retain
-   completed work, apply real care and observe recovery while another owner
-   continues. `fk_field_fill` and `fk_field_intern_node` remain the seed
-   boundary: a producer must settle or relinquish its claimed intern slot before
-   stopping. The current logical-row-end witness does not establish survival
-   of primary field exhaustion. No live shared-field reset is part of this test.
-3. Generalize the observed value/lifetime contract to primary node kinds and
-   CPU/device submissions. Prove live replacement with old readers and work
-   still held, single publication of selected effects, cancellation and final
-   release. Remove each old implementation after its callers move. Slot reuse
-   requires handle generations and native side-table ownership; concurrent
-   publication requires ordering and retained readers.
-4. Build Form-owned compilation on demand alongside the migration. Measure
-   cold admission, reuse, native emission and replacement separately, and keep
-   compiler policy and emitters replaceable without a seed edit.
-5. Carry the same ownership contract into the freestanding memory, interrupt
-   and scheduler path. Reclaim exited tasks and establish address-space,
-   wait/wake and device lifetimes before claiming complete OS ownership.
-
-The first two steps form one next runtime milestone. They are direction, not
-implemented primary cutover. Existing hosted owners and the freestanding guest
-retain the separate execution scopes described above.
+The next [runtime milestone](fkwu-form-native-north-star.md#next-completed-boundary)
+moves the retained care view's complete value, record and collector lifetime
+onto native ownership, including care under constrained allocation. Generalize
+that demonstrated caller transition to primary node kinds and CPU/device work;
+develop on-demand compilation alongside it. Then carry the ownership contract
+into freestanding memory, interrupts, scheduling and devices.
