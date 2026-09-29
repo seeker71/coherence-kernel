@@ -18,17 +18,47 @@ section [form.bml] {
   // Crystal scaffold IDs and the existing exact BPE cursor avoid scanning
   // the complete GGUF merge/vocabulary tables for each follow-up question.
   def fcmo-direct-segments(text,x) = cons(qtlc-id-segment(nth(x,6)),qtlc-chat-segments(text,x));
-  def fcmo-direct-tail-ids(path,text) {
-   let begin = q38oo-stage("model-direct-tokenizer-begin",8388625);
-   let crystal = qsx-load(path);
-   let ids = if ((Comparable) nth(crystal,0) == 1) then fcmo-direct-cursor-ids(qtlc-open(path,qsx-seal-line(path),fcmo-direct-segments(text,crystal))) else nothing();
-   let end = q38oo-stage(if nothing?(ids) then "model-direct-tokenizer-reference" else str_concat("model-direct-tokenizer-indexed-ids-",int_to_str(len(ids))),8388625);
-   ids;
-  }
   def fcmo-direct-cursor-ids(cursor) = if ((String) qtlc-status(cursor) == "open") then fcmo-direct-drained(qtlc-drain(cursor)) else nothing();
   // Tokenization precedes KV mutation. An unavailable/incomplete index leaves
   // the original reference encoder responsible for the entire tail.
   def fcmo-direct-drained(result) = if ((String) head(result) == "done") then nth(result,1) else nothing();
+  // Slots 15 and 16 belong to the adapter and sampler. The immutable model
+  // cursor epoch follows them and survives every stream-state transition.
+  def fcmo-owner(session) = len(session) > 17 ? nth(session,17) : nothing();
+  def fcmo-index(session) = nothing?(fcmo-owner(session)) ? list() : record_get(fcmo-owner(session),"index");
+  def fcmo-pad(session) = len(session) >= 17 ? session : fcmo-pad(append(session,list(list())));
+  def fcmo-with-index(session,index) {
+   let src = nth(session,4); let crystal = qsx-load(nth(session,3));
+   let close = head(crystal) == 1 ? nth(crystal,2) : q35-special-id(src,"<|im_end|>");
+   let owner = record_new(0,"index",index,"crystal",crystal,"close",close,"stops",list(gmt-u32(src,"tokenizer.ggml.eos_token_id"),close),"decode",reuse-open(nth(session,3),src,fcmo-decode-id,value => value_kind(value) == "string"));
+   append(take(17,fcmo-pad(session)),cons(owner,drop(18,session)));
+  }
+  def fcmo-decode-id(src,id) = tkz-decode-text(src,list(id));
+  def fcmo-stops(session) = nothing?(fcmo-owner(session)) ? list(gmt-u32(nth(session,4),"tokenizer.ggml.eos_token_id"),q35-special-id(nth(session,4),"<|im_end|>")) : record_get(fcmo-owner(session),"stops");
+  def fcmo-end-id(session) = nothing?(fcmo-owner(session)) ? q35-special-id(nth(session,4),"<|im_end|>") : record_get(fcmo-owner(session),"close");
+  def fcmo-token-text(session,id) = nothing?(fcmo-owner(session)) ? tkz-decode-text(nth(session,4),list(id)) : reuse-call(record_get(fcmo-owner(session),"decode"),id);
+  def fcmo-release-index(session) {
+   if nothing?(fcmo-owner(session)) then 1 else {
+    let decoded = reuse-release(record_get(fcmo-owner(session),"decode"));
+    let encoded = qtlc-release-index(fcmo-index(session));
+    record_set(fcmo-owner(session),"index",list()); record_set(fcmo-owner(session),"crystal",list(0));
+    record_set(fcmo-owner(session),"stops",list()); record_set(fcmo-owner(session),"close",-1);
+    decoded && encoded;
+   };
+  }
+  def fcmo-segment-ids(session,segments) {
+   let held = fcmo-index(session);
+   let index = nil?(held) ? qtf2r-open(nth(session,3),qsx-seal-line(nth(session,3))) : held;
+   let cursor = qtlc-open-index(index,segments);
+   let ids = fcmo-direct-cursor-ids(cursor);
+   if nil?(held) then qtlc-release-index(qtlc-index(cursor)) else 0;
+   ids;
+  }
+  def fcmo-text-ids(session,text) = fcmo-segment-ids(session,list(qtlc-text-segment(text)));
+  def fcmo-session-tail-ids(session,text) {
+   let crystal = nothing?(fcmo-owner(session)) ? qsx-load(nth(session,3)) : record_get(fcmo-owner(session),"crystal");
+   head(crystal) == 1 ? fcmo-segment-ids(session,fcmo-direct-segments(text,crystal)) : nothing();
+  }
   def fcmo-shape(result,pos,count) = (((Comparable) len(result) == 2) && ((head(result) >= 0) && ((Comparable) nth(result,1) == (pos + count))));
   def fcmo-settled(live) = (((Comparable) len(live) == 20) && (((Comparable) nth(live,5) == 0) && (((Comparable) nth(live,6) == 0) && ((Comparable) nth(live,14) == 0))));
   def fcmo-sliced?(ctx) = (q38-ctx-span(ctx) > 1);

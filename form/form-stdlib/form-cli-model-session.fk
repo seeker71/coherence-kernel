@@ -251,22 +251,22 @@
                                 (str_concat "model-session-prompt-positions-" (int_to_str prompt-count)) 8388625))
                             (let _reopen-begin (fcmg-live-stage
                                 "model-session-prompt-cursor-reopen-begin" 8388622))
-                            (let cursor (if (eq live-cursor 1)
-                                (fcmg-chat-cursor-profile
-                                    path prompt profile x)
-                                cursor0))
+                            (let cursor cursor0)
                             (let _reopen-complete (fcmg-live-stage
                                 "model-session-prompt-cursor-reopen-complete" 8388623))
                             (if (not (eq count-ok 1))
-                                (fcms-none (str_concat
-                                    "live-prompt-count-refused:"
-                                    (qtlc-reason (nth counted 1))))
+                                (do (qtlc-release-index (qtlc-index cursor))
+                                    (fcms-none (str_concat
+                                        "live-prompt-count-refused:"
+                                        (qtlc-reason (nth counted 1)))))
                             (if (le prompt-count 0)
-                                (fcms-none "initial-turn-encoded-no-ids")
+                                (do (qtlc-release-index (qtlc-index cursor))
+                                    (fcms-none "initial-turn-encoded-no-ids"))
                             (if (or (le maxpos prompt-count)
                                     (gt maxpos (gmt-u32 src
                                         (q38-key arch "context_length"))))
-                                (fcms-none "session-context-window-refused")
+                                (do (qtlc-release-index (qtlc-index cursor))
+                                    (fcms-none "session-context-window-refused"))
                                 (do
                                     (let _admit-begin (fcmg-live-stage
                                         "model-session-open-prefill-begin" 8388611))
@@ -274,7 +274,11 @@
                                         cursor ids live-cursor x iced))
                                     (let _admit-complete (fcmg-live-stage
                                         "model-session-open-prefill-complete" 8388612))
-                                    opened))))))))))
+                                    (if (eq live-cursor 1)
+                                        (if (fcms-resident? opened)
+                                            (fcmo-with-index opened (qtlc-index cursor))
+                                            (do (qtlc-release-index (qtlc-index cursor)) opened))
+                                        opened)))))))))))
 
     ; Decoder progress is observable without disclosing its token or text.
     ; Checkpoints arrive after 1, 2, 4, 8... local steps: O(log n) terminal
@@ -328,7 +332,7 @@
             (fcms-generation "" (empty) s)
         (if (not (nil? (fcsam-owner s))) (fcms-generate-sampled s n)
             (do
-                (let stops (fcmg-q35-stops (fcms-src s)))
+                (let stops (fcmo-stops s))
                 (let walked (fcms-walk s (fcms-pending s) (fcms-pos s)
                     n stops (empty) 1 1 0))
                 (let ids (nth walked 0))
@@ -340,7 +344,7 @@
     (defn fcms-generate-sampled (s n)
         (do
             (let walked (fcsam-run s (fcsam-owner s) (nth (nth (fcms-ctx s) 1) 28)
-                fcms-forward fcms-decode-pulse (fcms-pos s) n (fcmg-q35-stops (fcms-src s))))
+                fcms-forward fcms-decode-pulse (fcms-pos s) n (fcmo-stops s)))
             (let ids (head walked))
             (let owned (fcsam-with-owner s (nth walked 4)))
             (let next (fcms-with-stream owned (nth walked 2) (nth walked 1)
@@ -379,22 +383,22 @@
     (defn fcms-observation-ids (s text)
         (do
             (let src (fcms-src s))
-            (let stops (fcmg-q35-stops src))
+            (let stops (fcmo-stops s))
             (let pending (fcms-pending s))
             (let closed (fcms-crossing-prefix-ids pending
                 (if (ge pending 0) (q38-stop? pending stops) 0)
-                (q35-special-id src "<|im_end|>") 1))
+                (fcmo-end-id s) 1))
             (tkz-cat closed (fcms-tool-tail-ids src text))))
 
     (defn fcms-direct-answer-observation-ids (s text)
         (do
             (let src (fcms-src s))
-            (let stops (fcmg-q35-stops src))
+            (let stops (fcmo-stops s))
             (let pending (fcms-pending s))
             (let closed (fcms-crossing-prefix-ids pending
                 (if (ge pending 0) (q38-stop? pending stops) 0)
-                (q35-special-id src "<|im_end|>") 1))
-            (let indexed (fcmo-direct-tail-ids (fcms-path s) text))
+                (fcmo-end-id s) 1))
+            (let indexed (fcmo-session-tail-ids s text))
             (tkz-cat closed (if (nothing? indexed)
                 (fcms-direct-answer-tail-ids src text) indexed))))
 
@@ -402,7 +406,7 @@
         (do
             (let src (fcms-src s))
             (let closed (fcms-crossing-prefix-ids (fcms-pending s) 0
-                (q35-special-id src "<|im_end|>") 0))
+                (fcmo-end-id s) 0))
             (tkz-cat closed (fcms-tool-tail-ids src text))))
 
     ; A Form execution result may continue the current assistant stream as BML
@@ -414,19 +418,21 @@
         (do
             (let src (fcms-src s))
             (let pending (fcms-pending s))
-            (let stops (fcmg-q35-stops src))
+            (let stops (fcmo-stops s))
             (if (and (ge pending 0) (eq (q38-stop? pending stops) 1))
                 (fcms-observation-ids s text)
                 (do
                     (let prefix (if (ge pending 0)
                         (list pending) (empty)))
-                    (tkz-cat prefix (q35-encode src
-                        (str_concat "\n" (str_concat text "\n"))))))))
+                    (let encoded (fcmo-text-ids s
+                        (str_concat "\n" (str_concat text "\n"))))
+                    (if (nothing? encoded) (nothing)
+                        (tkz-cat prefix encoded))))))
 
     (defn fcms-observe-ids (s ids refusal-reason)
         (if (not (eq (fcms-live? s) 1)) s
-            (if (or (eq (len ids) 0)
-                    (gt (add (fcms-pos s) (len ids)) (fcms-maxpos s)))
+            (if (or (nothing? ids) (or (eq (len ids) 0)
+                    (gt (add (fcms-pos s) (len ids)) (fcms-maxpos s))))
                     (fcms-refuse s refusal-reason)
                 (do
                     (let ctx (fcms-ctx s))
@@ -470,9 +476,10 @@
 
     (defn fcms-release-ok? (s)
         (do
+            (let cursor-released (fcmo-release-index s))
             (let sampler-expected (fcsam-owned (fcsam-owner s)))
             (let sampler-closed (fcsam-close (fcsam-owner s)))
-            (let sampler-ok (eq sampler-closed sampler-expected))
+            (let sampler-ok (and cursor-released (eq sampler-closed sampler-expected)))
             (let adapter-expected (fcmd-owned (fcmd-carrier s)))
             (if (gt adapter-expected 0) (metal_sync) 0)
             (let adapter-closed (fcmd-close (fcmd-carrier s)))
