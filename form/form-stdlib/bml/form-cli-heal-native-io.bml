@@ -1,6 +1,6 @@
 // Form owns snapshot identity, admission and guarded replacement.
 // git/tar/cp carry filesystem operations; no interpreter owns repair meaning.
-// preludes: form-stdlib/bml/form-cli-heal-policy.bml form-stdlib/json.fk form-stdlib/qwen35-artifact-seal-reader.fk form-stdlib/spool-bell-transport.fk
+// preludes: form-stdlib/bml/form-cli-heal-policy.bml form-stdlib/bml/retry.bml form-stdlib/json.fk form-stdlib/qwen35-artifact-seal-reader.fk form-stdlib/spool-bell-transport.fk
 section [form.bml] {
  class FormCliHealNativeIO {
   def fhn-at(dir, leaf) = fh-cat([dir, "/", leaf]);
@@ -30,24 +30,25 @@ section [form.bml] {
    let wrote = write_file(path, str_concat("umask 077\n", source));
    if (wrote < 0) then 127 else fhn-command(["/bin/sh", path]);
   }
-  def fhn-hash(path) = if (file_size(path) < 0) then "absent" else qaf-string-hex(saj-file-digest-any-tail(path, file_size(path)));
-  def fhn-valid-hash(hash) = ((Comparable) str_len(hash) == 64);
-  def fhn-parts-valid(parts) = if nil?(parts) then 1 else if (((String) head(parts) == "..") || (((String) head(parts) == ".git") || (((String) head(parts) == ".form-heal") || ((String) head(parts) == "")))) then 0 else fhn-parts-valid(tail(parts));
-  def fhn-relative(path) = ((str_len(path) > 0) && ((!((Comparable) str_byte_at(path, 0) == 47)) && ((!fh-has(path, "\n")) && ((!fh-has(path, "\r")) && fhn-parts-valid(split-on(path, "/"))))));
-  def fhn-member(paths, path) = if nil?(paths) then 0 else if ((String) head(paths) == path) then 1 else fhn-member(tail(paths), path);
-  def fhn-clean-names(paths, seen) = if nil?(paths) then reverse(seen) else if (((String) head(paths) == "") || (file_size(head(paths)) < 0)) then fhn-clean-names(tail(paths), seen) else fhn-clean-names(tail(paths), cons(head(paths), seen));
-  def fhn-add-name(paths, path) = if fhn-member(paths, path) then paths else append(paths, [path]);
-  def fhn-names-valid(paths, root) = if nil?(paths) then 1 else (fhn-relative(head(paths)) && ((!fs_is_dir(fhn-at(root, head(paths)))) && fhn-names-valid(tail(paths), root)));
-  def fhn-lines(paths) = if nil?(paths) then "" else fh-cat([head(paths), "\n", fhn-lines(tail(paths))]);
-  def fhn-nuls(paths) = if nil?(paths) then "" else fh-cat([head(paths), byte_to_str(0), fhn-nuls(tail(paths))]);
-  def fhn-unique(parent, prefix, attempt) {
-   let path = fhn-at(parent, fh-cat([prefix, int_to_str(host_pid()), "-", int_to_str(host_monotonic_ms()), "-", int_to_str(attempt)]));
-   attempt >= 32 ? nothing() : (Comparable) host_dir_mkdir(path) == 1 ? fhn-private-dir(path) : fhn-unique(parent, prefix, attempt + 1);
+  def fhn-hash(path) = file_size(path) < 0 ? "absent" : qaf-string-hex(saj-file-digest-any-tail(path, file_size(path)));
+  def fhn-valid-hash(hash) = (Comparable) str_len(hash) == 64;
+  def fhn-parts-valid(parts) = nil?(parts) ? 1 : ((String) head(parts) == "..") || (((String) head(parts) == ".git") || (((String) head(parts) == ".form-heal") || ((String) head(parts) == ""))) ? 0 : fhn-parts-valid(tail(parts));
+  def fhn-relative(path) = (str_len(path) > 0) && ((!((Comparable) str_byte_at(path, 0) == 47)) && ((!fh-has(path, "\n")) && ((!fh-has(path, "\r")) && fhn-parts-valid(split-on(path, "/")))));
+  def fhn-member(paths, path) = nil?(paths) ? 0 : (String) head(paths) == path ? 1 : fhn-member(tail(paths), path);
+  def fhn-clean-names(paths, seen) = nil?(paths) ? reverse(seen) : ((String) head(paths) == "") || (file_size(head(paths)) < 0) ? fhn-clean-names(tail(paths), seen) : fhn-clean-names(tail(paths), cons(head(paths), seen));
+  def fhn-add-name(paths, path) = fhn-member(paths, path) ? paths : append(paths, [path]);
+  def fhn-names-valid(paths, root) = nil?(paths) ? 1 : (fhn-relative(head(paths)) && ((!fs_is_dir(fhn-at(root, head(paths)))) && fhn-names-valid(tail(paths), root)));
+  def fhn-lines(paths) = nil?(paths) ? "" : fh-cat([head(paths), "\n", fhn-lines(tail(paths))]);
+  def fhn-nuls(paths) = nil?(paths) ? "" : fh-cat([head(paths), byte_to_str(0), fhn-nuls(tail(paths))]);
+  def fhn-unique(parent, prefix) {
+   let made = retry-first(32, 0, i => fhn-mkdir-new(fhn-at(parent, fh-cat([prefix, int_to_str(host_pid()), "-", int_to_str(host_monotonic_ms()), "-", int_to_str(i)]))));
+   nothing?(made) ? nothing() : fhn-private-dir(made);
   }
+  def fhn-mkdir-new(path) = (Comparable) host_dir_mkdir(path) == 1 ? path : nothing();
   def fhn-private-dir(path) = (Comparable) fhn-command(["/bin/chmod", "700", path]) == 0 ? path : nothing();
   def fhn-root() = fhn-capture(["/bin/pwd", "-P"]);
   // Refuse managed symlinks, including ancestors, before reading through them.
-  def fhn-link-scan-script(root, names) = fh-cat(list("cd ", fh-quote(root), " || exit 1\nwhile IFS= read -r fh_item; do\n fh_probe=$fh_item\n while [ \"$fh_probe\" != . ]; do\n  [ ! -L \"$fh_probe\" ] || exit 1\n  case \"$fh_probe\" in */*) fh_probe=${fh_probe%/*};; *) fh_probe=.;; esac\n done\ndone < ", fh-quote(names), "\n"));
+  def fhn-link-scan-script(root, names) = fh-cat(["cd ", fh-quote(root), " || exit 1\nwhile IFS= read -r fh_item; do\n fh_probe=$fh_item\n while [ \"$fh_probe\" != . ]; do\n  [ ! -L \"$fh_probe\" ] || exit 1\n  case \"$fh_probe\" in */*) fh_probe=${fh_probe%/*};; *) fh_probe=.;; esac\n done\ndone < ", fh-quote(names), "\n"]);
   def fhn-no-links(job, root, names) = ((Comparable) fhn-shell(fhn-at(job, "links-check.sh"), fhn-link-scan-script(root, names)) == 0);
   def fhn-manifest(paths, root) = if nil?(paths) then [] else cons(fhn-s(head(paths), fhn-hash(fhn-at(root, head(paths)))), fhn-manifest(tail(paths), root));
   def fhn-manifest-valid(pairs) = if nil?(pairs) then 1 else (fhn-valid-hash(json-string-value(json-pair-value(head(pairs)))) && fhn-manifest-valid(tail(pairs)));
@@ -57,7 +58,7 @@ section [form.bml] {
    let root = fhn-root();
    let spool = fhn-at(root, ".form-heal");
    let made = fs_mkdir(spool);
-   let job = fhn-unique(spool, "attempt-native-", 0);
+   let job = fhn-unique(spool, "attempt-native-");
    nothing?(job) || (!(fhn-relative(target) && fhn-relative(band))) ? "refused:invalid-relative-source" : ((String) target == band) || (fhn-member(split-on(target, "/"), "tests") || (!(((String) fs-path-extension(target) == ".fk") || ((String) fs-path-extension(target) == ".bml")))) ? "refused:production-source-and-separate-checker-required" : fhn-prepare-files(job, root, target, band);
   }
   def fhn-prepare-files(job, root, target, band) {
