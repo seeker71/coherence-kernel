@@ -34,9 +34,10 @@ seed, and it shrinks as its lanes lower into Form organs (`release-ledger.bml` R
 ## Body-wide witnesses
 
 ```text
-./fkwu gate/drift-gates-run.bml          -> drift-gates pass=8191 full=8191 refused=0
-                                            (13 rows; kernel-conformance sits out while no kernel
-                                            source moved since origin/main)
+./fkwu gate/drift-gates-run.bml          -> drift-gates pass=31 full=31 refused=0
+                                            (5 of 14 rows: a landing runs the rows whose ground
+                                            moved; the nine kernel rows sit out while no kernel
+                                            ground moved since origin/main, 4.4 s)
 ./fkwu gate/structural-gate-run.fk       -> structural-gate-v3 [92, 0, 29, 0, 18, 0, 45] then 1
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
@@ -45,7 +46,7 @@ gate/tests/structural-gate-band          -> 16383
 ./fkwu observe/belief-stamps.bml         -> 534499010  (field stamped*10^6 + owed*10^3 + laws)
 observe/tests/belief-rewitness-band      -> 63
 ./fkwu form/form-stdlib/release-ledger.bml -> open=28 moving=0 released=115
-learn/tests/homecoming-distillation-corpus-band -> 32767  (asserts 984 rows, 965 admissible)
+learn/tests/homecoming-distillation-corpus-band -> 32767  (asserts 986 rows, 967 admissible)
 value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
