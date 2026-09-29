@@ -4,28 +4,43 @@
 ;       not read there: line 3, class
 ; PROOF LEVEL: FOURTH-ARM ONLY -- the witness compiles each source in an fkwu child (host_spawn_at) and
 ; reads its stdout and stderr, so its subject is fkwu's own source runner
-// The source compiler reads a form.bml section with the cursor (R144).
-// preludes: form-stdlib/core.fk
+// The source compiler reads a form.bml section with the cursor (R144). Each claim is a live reading
+// (form-stdlib/bml/live-band.bml); a claim that does not hold first takes a fresh scratch root, then
+// drops its children's cached images so they compile from source, and is observed again after each.
+// preludes: form-stdlib/core.fk form-stdlib/bml/live-band.bml
 section [form.bml] {
  class CursorReaderBand {
-  def fcrb-run(root, id, text) {
-   let base = str_concat(root, str_concat("/", int_to_str(id)));
+  def fcrb-root(ctx) = nth(ctx, 1);
+  def fcrb-fresh() {
+   let root = str_concat("/tmp/form-cursor-reader-", int_to_str(now_unix_ms()));
+   if ((Comparable) host_dir_mkdir(root) == 1) then list("reader", root) else nothing();
+  }
+  def fcrb-run(ctx, id, text) {
+   let base = str_concat(fcrb-root(ctx), str_concat("/", int_to_str(id)));
    let path = str_concat(base, ".bml");
    write_file(path, text);
    let pid = host_spawn_at(list("./fkwu", path), list("/dev/null", str_concat(base, ".stdout"), str_concat(base, ".stderr")));
    let status = if (pid <= 0) then -1 else host_wait(pid);
    list(status, read_file(str_concat(base, ".stdout")), read_file(str_concat(base, ".stderr")));
   }
-  def fcrb-runs(root) {
-   let r = fcrb-run(root, 1, "section [form.bml] {\ndef f(x) = x + 1;\nf(41);\n}\n");
+  def fcrb-runs(ctx) {
+   let r = fcrb-run(ctx, 1, "section [form.bml] {\ndef f(x) = x + 1;\nf(41);\n}\n");
    if (((Comparable) nth(r, 0) == 0) && ((String) nth(r, 1) == "42\n")) then 1 else 0;
   }
-  def fcrb-refuses(root) {
-   let r = fcrb-run(root, 2, "section [form.bml] {\ndef f(x) = x + 1;\nclass K { bogus }\nf(1);\n}\n");
-   if ((!((Comparable) nth(r, 0) == 0)) && (str_find(nth(r, 2), "the cursor does not read this form.bml section: line 3: class", 0) >= 0)) then 2 else 0;
+  def fcrb-refuses(ctx) {
+   let r = fcrb-run(ctx, 2, "section [form.bml] {\ndef f(x) = x + 1;\nclass K { bogus }\nf(1);\n}\n");
+   if ((!((Comparable) nth(r, 0) == 0)) && (str_find(nth(r, 2), "the cursor does not read this form.bml section: line 3: class", 0) >= 0)) then 1 else 0;
   }
+  // the repairs a child compile can take: a scratch root no earlier run touched, and children whose
+  // cached images are gone so they compile from their source
+  def fcrb-fresh-root(ctx) = fcrb-fresh();
+  def fcrb-drop-images(ctx) = if (fcrb-drop(fcrb-root(ctx), list("1.bml", "2.bml"), list(".fkb", ".sym", ".lowfk")) > 0) then ctx else nothing();
+  def fcrb-drop(root, names, kinds) = if nil?(names) then 0 else (fcrb-drop-kinds(str_concat(root, str_concat("/", head(names))), kinds) + fcrb-drop(root, tail(names), kinds));
+  def fcrb-drop-kinds(path, kinds) = if nil?(kinds) then 0 else ((if ((Comparable) host_path_remove(str_concat(path, head(kinds))) == 1) then 1 else 0) + fcrb-drop-kinds(path, tail(kinds)));
  }
- let root = str_concat("/tmp/form-cursor-reader-", int_to_str(now_unix_ms()));
- if (!((Comparable) host_dir_mkdir(root) == 1)) then form_error("cursor reader witness needs a fresh directory") else 0;
- (fcrb-runs(root) + fcrb-refuses(root));
+ let ctx = fcrb-fresh();
+ if nothing?(ctx) then form_error("cursor reader witness needs a fresh directory") else 0;
+ lb-run("form-bml-cursor-reader-band", ctx,
+  list(lb-claim("runs", 1, 1, fcrb-runs), lb-claim("refuses", 2, 1, fcrb-refuses)),
+  list(lb-repair("fresh-root", fcrb-fresh-root), lb-repair("drop-images", fcrb-drop-images)));
 }

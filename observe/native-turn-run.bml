@@ -54,6 +54,28 @@ section [form.bml] {
   def nt-starts?(s, p) = ((str_len(s) >= str_len(p)) && ((String) substring(s, 0, str_len(p)) == p));
   def nt-error-lines(lines, n) = if (nil?(lines) || (n <= 0)) then list() else if ((str_find(head(lines), "error", 0) >= 0) && (!nt-starts?(head(lines), "form-organ"))) then cons(substring(head(lines), 0, if (str_len(head(lines)) > 300) then 300 else str_len(head(lines))), nt-error-lines(tail(lines), (n - 1))) else nt-error-lines(tail(lines), n);
   def nt-band-errors() = trim(nt-join(nt-error-lines(split-on(nt-read(mc-cat(list(nt-dir(), "/band.err"))), "\n"), 6)));
+  // A live band (form-stdlib/bml/live-band.bml) speaks every claim as an organ-health reading on stderr.
+  // The claims whose last observation did not hold are the backtracking signal the next option hears:
+  // what each expected, what it observed, and the repairs the band already tried in its own run.
+  def nt-health-prefix() = "form-organ health ";
+  def nt-band-rows(lines) = if nil?(lines) then list() else if (nt-starts?(head(lines), nt-health-prefix()) && (str_find(head(lines), "\"organ\":\"band\"", 0) >= 0)) then cons(parse-json("band-reading", substring(head(lines), str_len(nt-health-prefix()), str_len(head(lines)))), nt-band-rows(tail(lines))) else nt-band-rows(tail(lines));
+  def nt-row-str(row, key) = if json-object-has?(row, key) then json-string-value(json-object-get(row, key)) else "";
+  def nt-observe?(row) = ((String) nt-row-str(row, "stage") == "observe");
+  def nt-aspects(rows, seen) = if nil?(rows) then reverse(seen) else nt-aspects(tail(rows), if (nt-observe?(head(rows)) && ((Comparable) nt-has(seen, nt-row-str(head(rows), "aspect")) == 0)) then cons(nt-row-str(head(rows), "aspect"), seen) else seen);
+  def nt-last-observed(rows, aspect, found) = if nil?(rows) then found else nt-last-observed(tail(rows), aspect, if (nt-observe?(head(rows)) && ((String) nt-row-str(head(rows), "aspect") == aspect)) then head(rows) else found);
+  def nt-tried(rows, aspect) = if nil?(rows) then list() else if (((String) nt-row-str(head(rows), "stage") == "applied") && ((String) nt-row-str(head(rows), "aspect") == aspect)) then cons(nt-row-str(head(rows), "selected"), nt-tried(tail(rows), aspect)) else nt-tried(tail(rows), aspect);
+  def nt-comma(xs) = if nil?(xs) then "" else if nil?(tail(xs)) then head(xs) else mc-cat(list(head(xs), ", ", nt-comma(tail(xs))));
+  def nt-claim-line(rows, aspect) {
+   let last = nt-last-observed(rows, aspect, json-node-object(list()));
+   let held = node_eq(json-object-get(last, "health"), json-node-int(1));
+   let tried = nt-tried(rows, aspect);
+   if held then "" else mc-cat(list("claim ", aspect, ": expected ", json-emit(json-object-get(last, "expected")), ", observed ", json-emit(json-object-get(last, "observed")), if nil?(tried) then "" else mc-cat(list("; the band already tried ", nt-comma(tried))), "\n"));
+  }
+  def nt-claim-lines(rows, aspects) = if nil?(aspects) then "" else str_concat(nt-claim-line(rows, head(aspects)), nt-claim-lines(rows, tail(aspects)));
+  def nt-band-claims() {
+   let rows = nt-band-rows(split-on(nt-read(mc-cat(list(nt-dir(), "/band.err"))), "\n"));
+   trim(nt-claim-lines(rows, nt-aspects(rows, list())));
+  }
   // who began this turn
   def nt-row-of(value) = if ((String) value_kind(value) == "int") then list() else value;
   def nt-self() = nt-row-of(host_process(host_pid()));
@@ -142,7 +164,7 @@ section [form.bml] {
   // the candidate's change against its checkpoint, read in Form (form-stdlib/bml/text-diff.bml)
   def nt-diff(paths, originals) = if nil?(paths) then "" else mc-cat(list(nt-diff-one(head(paths), head(originals)), nt-diff(tail(paths), tail(originals))));
   def nt-diff-one(path, original) { let d = td-diff(original, nt-read(path), 1, 2400); if ((String) d == "") then "" else mc-cat(list("--- ", path, "\n", d)); }
-  def nt-finding(n, before, after, full, said, status, published, diff, errors) = mc-cat(list("Attempt ", int_to_str(n), ": the band read ", nt-reading-text(after), " of ", int_to_str(full), " (it began at ", nt-reading-text(before), "); the lane said ", trim(said), if ((String) status == "") then "" else mc-cat(list(" with status ", status)), if ((Comparable) published == 0) then "; it published no document." else mc-cat(list("; its candidate changed:\n", diff)), if ((Comparable) str_len(errors) == 0) then "" else mc-cat(list("\nThe band did not read; the compiler said:\n", errors))));
+  def nt-finding(n, before, after, full, said, status, published, diff, errors, claims) = mc-cat(list("Attempt ", int_to_str(n), ": the band read ", nt-reading-text(after), " of ", int_to_str(full), " (it began at ", nt-reading-text(before), "); the lane said ", trim(said), if ((String) status == "") then "" else mc-cat(list(" with status ", status)), if ((Comparable) published == 0) then "; it published no document." else mc-cat(list("; its candidate changed:\n", diff)), if ((Comparable) str_len(errors) == 0) then "" else mc-cat(list("\nThe band did not read; the compiler said:\n", errors)), if ((Comparable) str_len(claims) == 0) then "" else mc-cat(list("\nThe band's claims that did not hold:\n", claims))));
   // one option: ask the lane, publish, read the band; returns (list green row finding)
   def nt-attempt(gap, opts, id, full, band, before, coordinator, goal, n) {
    let made = fs_mkdir(nt-dir());
@@ -160,7 +182,8 @@ section [form.bml] {
    let errors = if nothing?(after) then nt-band-errors() else "";
    let green = (((Comparable) after == full) && (!((Comparable) before == full)));
    let test = ((Comparable) nt-int(opts, "test", 0) == 1);
-   let finding = if green then "" else nt-finding(n, before, after, full, said, nt-str(result, "status"), published, nt-diff(nt-strs(gap, "writable"), originals), errors);
+   let claims = if green then "" else nt-band-claims();
+   let finding = if green then "" else nt-finding(n, before, after, full, said, nt-str(result, "status"), published, nt-diff(nt-strs(gap, "writable"), originals), errors, claims);
    let kept = if (green && (!test)) then 0 else nt-keep(nt-strs(gap, "writable"), originals, stamp);
    let row = json-node-object(list(fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", id), fhn-n("option", n), nt-reading("band_before", before), nt-reading("band_after", after), fhn-n("full", full), fhn-n("band_green", if green then 1 else 0), fhn-n("dry", if dry then 1 else 0), fhn-n("test", if test then 1 else 0), fhn-s("coordinated_by", if nt-keeper?(coordinator) then "host-schedule" else "session"), fhn-s("coordinator", coordinator), fhn-n("rented_mind", if nt-keeper?(coordinator) then 0 else 1), fhn-s("request", reqPath), fhn-s("lane", trim(said)), fhn-s("lane_status", nt-str(result, "status")), fhn-n("lane_check_runs", nt-int(result, "check_runs", -1)), fhn-n("lane_turns", nt-int(result, "turns", -1)), fhn-n("published", published), fhn-n("wall_ms", (now_unix_ms() - started))));
    let appended = fhn-append(if test then mc-cat(list(nt-dir(), "/test-ledger.jsonl")) else nt-ledger(), str_concat(json-emit(row), "\n"));

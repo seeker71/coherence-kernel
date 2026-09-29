@@ -185,6 +185,31 @@ It runs that real command through the process organ and returns its actual
 status, evidence directory and health readings. This is a general execution
 door, with no fixture list or expected verdict.
 
+## Bands speak as they run
+
+A band built on `form/form-stdlib/bml/live-band.bml` does not fold its claims in
+silence and leave the number to be read afterwards. Each claim is observed inside
+`attempt`, so a stop is an observation, and is spoken at once on stderr as an
+organ-health reading (organ `band`, the band as flow, the claim as aspect): what it
+expected, what it observed, its health, and the repairs it offers. stdout keeps the
+verdict, so the four kernels still compare one line.
+
+A claim that does not hold is a backtrack point. The band offers its repairs
+through `oac-backtrack-walk`: each acts on the claim's context and is spoken as
+applied, and the claim is observed again in the context it made, the walk carrying
+what every earlier repair saw. A repair that cannot act answers nothing and earns
+no retry. The verdict folds the claims that hold, first time or after a repair.
+Witness: `form/form-stdlib/tests/live-band-band.bml` (15, four-way).
+
+The runners hear it. The drift gates read each row as a claim and, before a row
+refuses, walk the repairs that renew derived state and never a tracked source:
+`fresh-images` drops the door's cached images, and `rebuild-fkwu` gives
+binary-freshness a binary built from today's runtime; the row then reads
+`pass after <repair>`. The body's own turn (`observe/native-turn-run.bml`) reads
+a live band's readings when an option falls short, and hands the next option each
+claim that did not hold, with what it expected, what it observed and which
+repairs the band already tried.
+
 ## Kernel protocol witness
 
 After the normal ground and freshness checks:
