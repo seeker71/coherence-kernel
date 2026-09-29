@@ -7,7 +7,13 @@
 // of the root itself are set aside, since they are the call sites that change when the root leaves, and the
 // sources that make them are named. A mention in a comment or a string counts as a use, so the set
 // under-reports on purpose: what it names can leave together.
-// stdin: one line: the unit's path, the root definition, and optionally the directory to search (default ".").
+// The root word `dead-tops` asks for the definitions nothing names: not another definition, not the unit's
+// own top-level text (its `(let NAME ...)` forms), not any other source. Run it to a fixed point, since a
+// cut can orphan what the cut definition alone named. Names built at run time are invisible to it, and only
+// .fk and .bml sources are read: a name a .c file, a doc or a band string spells is not seen, so compile
+// and run the bands after every cut.
+// stdin: one line: the unit's path, the root definition (or `dead-tops`), and optionally the directory to
+// search (default ".") and the word `cut`, which writes the unit back without the definitions that leave.
 // preludes: form-stdlib/meaning-codes.bml form-stdlib/bml/stdin-source.bml
 section [form.bml] {
  class DefnReach {
@@ -94,11 +100,49 @@ section [form.bml] {
   }
   def dr-mark(xs, tab) = if nil?(xs) then tab else dr-mark(tail(xs), record_set(tab, head(xs), 1));
   def dr-lines(xs) = if nil?(xs) then "" else mc-cat(list("\n  ", head(xs), dr-lines(tail(xs))));
+  // cut: the leaving definitions leave the unit, each with the comment lines directly above it and the
+  // blank lines that followed it
+  def dr-bol(s, i) = if (i <= 0) then 0 else if eq(str_byte_at(s, (i - 1)), 10) then i else dr-bol(s, (i - 1));
+  def dr-spaces-end(s, i) = if ((i < str_len(s)) && eq(str_byte_at(s, i), 32)) then dr-spaces-end(s, (i + 1)) else i;
+  def dr-comment-above(s, bol) {
+   let above = if (bol <= 0) then 0 else dr-bol(s, (bol - 1));
+   let first = dr-spaces-end(s, above);
+   if ((bol > 0) && (first < bol) && eq(str_byte_at(s, first), 59)) then dr-comment-above(s, above) else bol;
+  }
+  def dr-cut-start(s, at) {
+   let bol = dr-bol(s, at);
+   if (dr-spaces-end(s, bol) < at) then at else dr-comment-above(s, bol);
+  }
+  def dr-blank-through(s, i) {
+   let e = dr-spaces-end(s, i);
+   if ((e < str_len(s)) && eq(str_byte_at(s, e), 10)) then dr-blank-through(s, (e + 1)) else i;
+  }
+  def dr-cut-end(s, end) {
+   let e = dr-spaces-end(s, end);
+   if (e >= str_len(s)) then e else if eq(str_byte_at(s, e), 10) then dr-blank-through(s, (e + 1)) else end;
+  }
+  def dr-cut(s, defs, gone, pos, acc) {
+   if nil?(defs) then mc-cat(reverse(cons(substring(s, pos, str_len(s)), acc)))
+   else if dr-in?(gone, head(head(defs))) then dr-cut-one(s, tail(defs), gone, pos, acc, dr-cut-start(s, nth(head(defs), 1)), dr-cut-end(s, nth(head(defs), 2)))
+   else dr-cut(s, tail(defs), gone, pos, acc);
+  }
+  def dr-cut-one(s, rest, gone, pos, acc, from, to) = dr-cut(s, rest, gone, to, cons(substring(s, pos, from), acc));
+  // the root word `dead-tops` asks for the dead tops: definitions no other definition of the unit and no other source names
+  def dr-called(defs, edges, tab) = if nil?(defs) then tab else dr-called(tail(defs), edges, dr-mark(dr-without(dr-out(edges, head(head(defs))), dr-mark(list(head(head(defs))), record_new(0))), tab));
+  def dr-dead-tops(unit, searchRoot, defs, edges, top) {
+   let all = dr-names(defs);
+   let named = dr-mark(dr-named-in(top, all), head(dr-external(searchRoot, dr-sources(searchRoot), unit, all, "dead-tops", record_new(0), list())));
+   dr-unused(all, dr-called(defs, edges, record_new(0)), named);
+  }
+  def dr-unused(all, called, named) = if nil?(all) then list() else if (dr-in?(called, head(all)) || dr-in?(named, head(all))) then dr-unused(tail(all), called, named) else cons(head(all), dr-unused(tail(all), called, named));
+  // the unit's own text outside every defn: a top-level (let ...) or call that names a definition keeps it
+  def dr-outside-text(s, defs, pos, acc) = if nil?(defs) then mc-cat(reverse(cons(substring(s, pos, str_len(s)), acc))) else dr-outside-text(s, tail(defs), nth(head(defs), 2), cons(substring(s, pos, nth(head(defs), 1)), acc));
   def dr-run() {
    let args = dr-words(trim(stdin-text()));
    let unit = nth(args, 0);
    let rootName = nth(args, 1);
-   let searchRoot = if (len(args) > 2) then nth(args, 2) else ".";
+   let searchRoot = if ((len(args) > 2) && !str_eq(nth(args, 2), "cut")) then nth(args, 2) else ".";
+   let cutting = str_eq(nth(args, (len(args) - 1)), "cut");
    let s = read_file(unit);
    let defs = dr-defns(s, 0);
    let names = dr-index(defs, 0, record_new(0));
@@ -106,11 +150,15 @@ section [form.bml] {
    let reach = dr-reach(edges, list(rootName), "", record_new(0));
    let cands = dr-without(dr-members(dr-names(defs), reach), dr-mark(list(rootName), record_new(0)));
    let ext = dr-external(searchRoot, dr-sources(searchRoot), unit, cands, rootName, record_new(0), list());
-   let kept = dr-reach(edges, append(dr-outside(defs, reach), dr-members(cands, head(ext))), rootName, record_new(0));
-   let leaving = cons(rootName, dr-without(cands, kept));
+   let topNamed = dr-mark(dr-named-in(dr-outside-text(s, defs, 0, list()), dr-names(defs)), head(ext));
+   let kept = dr-reach(edges, append(dr-outside(defs, reach), dr-members(cands, topNamed)), rootName, record_new(0));
+   let leaving = if str_eq(rootName, "dead-tops") then dr-dead-tops(unit, searchRoot, defs, edges, dr-outside-text(s, defs, 0, list())) else cons(rootName, dr-without(cands, kept));
    print_str(mc-cat(list("[defn-reach] ", unit, " defns=", int_to_str(len(defs)), " root=", rootName, " reaches=", int_to_str((len(cands) + 1)), " leaves-with-it=", int_to_str(len(leaving)), " kept=", int_to_str((len(cands) + 1 - len(leaving))))));
    print_str(mc-cat(list("[defn-reach] sources that name the root (their call sites change first):", dr-lines(nth(ext, 1)))));
    print_str(mc-cat(list("[defn-reach] leaving with it:", dr-lines(leaving))));
+   let out = if cutting then dr-cut(s, defs, dr-mark(leaving, record_new(0)), 0, list()) else s;
+   let wrote = cutting ? write_file(unit, out) : 0;
+   if cutting then print_str(mc-cat(list("[defn-reach] cut: ", int_to_str(str_len(s)), " -> ", int_to_str(wrote), " bytes"))) else 0;
    len(leaving);
   }
  }
