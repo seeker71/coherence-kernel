@@ -610,7 +610,14 @@ plainly once, and give the conversation your attention.
    is the next reading of the same check after the repair. A current-turn
    share is not yet witnessed, so it is not named. Semantic outcome remains
    outside this meter.
-8b. **Use the framebuffer as a bidirectional diagnostic channel.** When a run returns `nothing`, times out,
+8b. **Use the framebuffer throughout execution.** Read live stage durations,
+   bytes moved, dispatches, allocations, cache reuse and membrane crossings.
+   A step taking more than a fraction of a second invites a local investigation:
+   distinguish required work from interpreter overhead, repeated discovery,
+   copying and re-admission. Prefer bulk native execution, bounded ownership
+   and reuse of unchanged inputs; re-observe the same operation and its result.
+   Hardware capacity guides the question; measured frames establish improvement.
+   **Use the framebuffer as a bidirectional diagnostic channel.** When a run returns `nothing`, times out,
    stalls, surprises you, regresses, rejects a proof, or changes model/state, do not leave the framebuffer as a
    passive log. Open a bounded exchange: emit the smallest useful observation, correlate an inbound control
    response, apply a real action (continue, branch, revise, abstain, request evidence, rehearse ground, or an
