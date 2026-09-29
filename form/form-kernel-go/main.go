@@ -1383,8 +1383,7 @@ func dictKeyEq(a, b Value) bool {
 // as_str and the TS kernel's argStr. Value's zero-valued Str field let every
 // string native silently read null (and any other kind) as "" — the numb
 // lane that let a malformed (read_file "") expr flatten "successfully" on Go
-// alone while Rust and TS died loudly
-// (receipts/2026-07-18-ts-kernel-deep-stack-aphonia-healed.md). The panic is
+// alone while Rust and TS died loudly. The panic is
 // recovered at the CLI boundary into fatal[type_contract_violation] with the
 // Form stack attributed. Natives that accept several kinds BY CONTRACT
 // (len, _get, _iter, _in, int_to_str) keep their explicit kind switches.
@@ -2095,22 +2094,20 @@ func (k *Kernel) registerNatives() {
 	// nor any other string, so the emptymask distinction between never-was and empty
 	// survives the comparison). A comparison asks a question ABOUT two values; a
 	// length MEASURES one, which is why str_len and str_byte_at still refuse an
-	// absence out loud. Before this, a walk that met a file which had left between
-	// the listing and the read died here while fkwu answered "not a model" — one
-	// witness out of step with the primary kernel, found by model-discovery's own
-	// absence lane (form-stdlib/tests/model-discovery-band.fk, bit 256).
+	// absence out loud. A walk that meets a file which left between the listing
+	// and the read answers here as fkwu does ("not a model"), so this witness
+	// stays in step with the primary kernel.
 	k.registerNative("str_eq", catCompare(RCompareEq), func(_ *Kernel, args []Value) Value {
 		if len(args) >= 2 && (args[0].Kind == VNull || args[1].Kind == VNull) {
 			return boolInt(args[0].Kind == VNull && args[1].Kind == VNull)
 		}
 		return boolInt(argStr(args, 0) == argStr(args, 1))
 	})
-	// int_to_str — value-to-string for trivial leaves. The historical
-	// name reflects its first use (line numbers in cell-trace.fk); its
-	// semantics is "render any trivial value as text" so emit-engine.fk
-	// can pass node_value of any leaf type through it. Multi-target
-	// emit (universal codec lattice — see emit.fk + emits/json.fk)
-	// depends on this passthrough for strings and bools.
+	// int_to_str — value-to-string for trivial leaves. The name reflects
+	// its first use (line numbers in traces); its semantics is "render
+	// any trivial value as text", so Form code can pass node_value of
+	// any leaf type through it. Multi-target emit (the universal codec
+	// lattice) depends on this passthrough for strings and bools.
 	k.registerNative("int_to_str", catMethod(), func(_ *Kernel, args []Value) Value {
 		v := args[0]
 		switch v.Kind {
@@ -2493,8 +2490,7 @@ func (k *Kernel) registerNatives() {
 	})
 	// `sum` composted from the kernel native list 2026-05-22 —
 	// core.fk's (defn sum (xs) (foldl plus 0 xs)) covers it via the
-	// existing foldl + plus primitives. First of 9 composable natives
-	// named in kernel-minimality-audit.md.
+	// existing foldl + plus primitives. First of 9 composable natives.
 	k.registerNative("abs", catMethod(), func(_ *Kernel, args []Value) Value {
 		if args[0].Kind == VFloat {
 			return Value{Kind: VFloat, Float: math.Abs(args[0].AsFloat())}
@@ -3389,7 +3385,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VInt, Int: int64(args[0].AsNid().Inst)}
 	})
 	// node_eq — compare two NodeIDs structurally. Sibling to Rust's node_eq.
-	// Form code (emit-engine.fk lookup-template) uses this for category
+	// Form code uses this for category
 	// dispatch — the kernel's `eq` (RCMP_EQ) coerces operands via as_int,
 	// which panics on NodeIDs; node_eq closes that gap.
 	k.registerNative("node_eq", catCompare(RCompareEq), func(k *Kernel, args []Value) Value {
@@ -3593,8 +3589,7 @@ func (k *Kernel) registerNatives() {
 	// write_file_bytes (which truncates), this seeks to end-of-file under the
 	// kernel's append lock so concurrent appends do not clobber, then returns
 	// the new total file size. Creates the file if absent. Foundation for
-	// cell-log-store.fk (the Bitcask-shape store) — see
-	// docs/coherence-substrate/cell-store-architecture.md.
+	// cell-log-store.fk (the Bitcask-shape store).
 	fileAppendBytesNative := func(_ *Kernel, args []Value) Value {
 		bytes := make([]byte, len(args[1].List))
 		for i, v := range args[1].List {
@@ -5153,7 +5148,7 @@ type formSourcePart struct {
 // an explicit empty prelude list, e.g. tests/now-unix-ms-band.fk) or ends in
 // ".fk"/".bml" — anything else silently STOPS the scan instead of erroring,
 // so a doc comment that merely mentions the word "preludes:" (this tree has
-// several, e.g. prelude-block-resolve.fk's own header) is never misread as a
+// several, in cell headers) is never misread as a
 // directive. Sibling parity with the fkwu C kernel; unlike fkwu, a ".bml"
 // dependency can't be lowered here yet, so the caller reports and skips it
 // rather than silently dropping the symbols it would have defined.

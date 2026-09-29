@@ -1,7 +1,8 @@
 // inductive.go — INDUCTIVE / CONSTRUCTOR / CHOICE arms: algebraic datatypes
-// as substrate cells. Mirrors the canonical sibling implementation:
+// as substrate cells. Mirrors the sibling implementations:
 //
-//   form/form-kernel-ts/src/inductive.ts   (TS reference)
+//   form/form-kernel-rust/src/inductive.rs
+//   form/form-kernel-ts/src/kernel.ts      (the INDUCTIVE / CONSTRUCTOR arms)
 //
 // An inductive type is a substrate recipe whose category is RBasicInductive
 // (slot 71). Its shape — defined here once, read everywhere by
@@ -45,7 +46,7 @@
 // identical (name, params, ctor-list) intern to the SAME NodeID. That's
 // what the substrate's promise of structural equivalence buys us here.
 //
-// Cross-kernel: TS / Python / Go / Rust at slots 71 / 72 / 35 with builtin
+// Cross-kernel: TS / Go / Rust at slots 71 / 72 / 35 with builtin
 // constructor names {zero, succ, nil, cons, none, some, ok, err, true,
 // false} and inductive names {Nat, Bool, Option, Result, List}. A Form
 // program that defines Nat in any kernel produces matching NodeIDs for
@@ -66,12 +67,13 @@ import (
 
 // ---------------------------------------------------------------------------
 // RBasic slot constants — part of the cross-kernel contract. Same numbers
-// in TS (kernel.ts), Python (category.py), and Rust. Do NOT renumber.
+// in TS (kernel.ts) and Rust, and in form/category-contract.json. Do NOT
+// renumber.
 // ---------------------------------------------------------------------------
 
 const (
 	// RBasicChoiceMatch — pattern-match arm with totality checking.
-	// Slot 35 mirrors TS RBasic.CHOICE and Python BCategoryT.CHOICE_MATCH.
+	// Slot 35 mirrors TS RBasic.CHOICE.
 	RBasicChoiceMatch uint32 = 35
 
 	// RBasicInductive — algebraic datatype definition. Slot 71.

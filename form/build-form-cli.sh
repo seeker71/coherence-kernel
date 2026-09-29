@@ -5,6 +5,10 @@
 # .sym beside the resolved file). An argument names a copy or a new build.
 # Form owns source closure, checked snapshots, startup emission and compilation.
 # This carrier owns host linking, artifact copies and publication ordering.
+# form-stdlib/bootstrap is regenerable output of the sources it seals (git
+# ignores it): when this checkout holds no current generation, this script runs
+# scripts/regen_form_cli_bootstrap.sh, which needs cc, the repo-root fkwu,
+# shasum and openssl, and then builds against what it published.
 set -euo pipefail
 export LC_ALL=C
 FORM="$(cd -P "$(dirname "$0")" && pwd)"
@@ -14,6 +18,25 @@ source scripts/form_cli_bootstrap_proof.sh
 form_cli_bind_carrier "$FORM"
 source scripts/form_cli_source_list.sh
 (cd "$BODY" && ./fkwu observe/native-node-word-verify.bml)
+
+# A generation is current when its files stand and its stamp and digest answer
+# for the sources the manifest lists. The regeneration itself builds with
+# FORM_CLI_NATIVE_BOOTSTRAP_DIR set, so it never re-enters here; the marker
+# keeps a regeneration that still reads stale from looping.
+bootstrap_current() {
+    local b="$FORM/form-stdlib/bootstrap" f
+    for f in form-cli.dependencies form-cli.stamp form-cli.source.sha256 form-cli-native.c form-cli.native.attestation; do
+        [[ -s "$b/$f" && ! -L "$b/$f" ]] || return 1
+    done
+    form_cli_load_sources || return 1
+    [[ "$(cat "$b/form-cli.source.sha256")" == "$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")" \
+        && "$(cat "$b/form-cli.stamp")" == "$(form_cli_hash16 "${FORM_CLI_SRCS[@]}")" ]]
+}
+if [[ -z "${FORM_CLI_NATIVE_BOOTSTRAP_DIR:-}" && -z "${FORM_CLI_REGENERATED:-}" ]] && ! bootstrap_current; then
+    printf '%s\n' 'build: no current native bootstrap in this checkout; regenerating it from source' >&2
+    "$FORM/scripts/regen_form_cli_bootstrap.sh"
+    FORM_CLI_REGENERATED=1 exec "$FORM/build-form-cli.sh" "$@"
+fi
 form_cli_load_sources
 
 link_default=0
@@ -65,7 +88,7 @@ regular_copy "$BODY/runtime/fkwu-optable.h" "$W/fkwu-optable.h"
 regular_copy "$BODY/runtime/fkwu-node-word.h" "$W/fkwu-node-word.h"
 [[ "$(cat "$BOOT/form-cli.source.sha256")" == "$want_sha" \
     && "$(cat "$BOOT/form-cli.stamp")" == "$want_stamp" ]] || {
-    printf '%s\n' 'build: native CLI source generation is stale; regenerate bootstrap' >&2; exit 1;
+    printf '%s\n' 'build: native CLI source generation is stale; run scripts/regen_form_cli_bootstrap.sh' >&2; exit 1;
 }
 
 candidate="$W/form-cli"
@@ -79,10 +102,7 @@ copy_platform() {
 }
 
 platform_verified=0
-if [[ "${FORM_STANDARD_LANE:-0}" == 1 ]]; then
-    copy_platform || { printf '%s\n' 'build: standard native CLI bundle is missing or stale' >&2; exit 1; }
-    platform_verified=1
-elif [[ "${FORM_CLI_FORCE_LINK:-0}" != 1 && -f "$platform.native.attestation" ]]; then
+if [[ "${FORM_CLI_FORCE_LINK:-0}" != 1 && -f "$platform.native.attestation" ]]; then
     copy_platform || { printf '%s\n' 'build: published native CLI bundle refused; explicit regeneration is required' >&2; exit 1; }
     platform_verified=1
 else

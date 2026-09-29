@@ -1,6 +1,6 @@
 # Current Floor
 
-What stands in this body today, read on 2026-09-28 (WITA) on this Apple M4 Max through `./fkwu`, the
+What stands in this body today, read on 2026-09-29 (WITA) on this Apple M4 Max through `./fkwu`, the
 binary passing its freshness band. Every line names the command that reads it. A verdict counts only
 when the process also exits 0 — a green number over a nonzero exit is a fold over `nothing`. Bands ran
 on the warm images beside their sources while sibling sessions loaded the host, so no timing on this
@@ -13,7 +13,10 @@ ground is [`axioms/core-axioms.form`](axioms/core-axioms.form), and the directio
 ## Grounding
 
 Build lines live in [`AGENTS.md`](AGENTS.md) (`cc -O2 -o fkwu runtime/fkwu-uni.c`, and the Metal
-carrier dylib fkwu admits in the same process).
+carrier dylib fkwu admits in the same process). A fresh clone holds no `./fkwu`, no `.fkb`/`.sym`
+caches and no `form/form-cli`: `cc -O2 -o fkwu runtime/fkwu-uni.c` makes the runtime, the caches
+appear beside each source on its first run, and `form/build-form-cli.sh` regenerates
+`form/form-stdlib/bootstrap/` and links the launcher.
 
 ```text
 ./fkwu bootstrap/ground.fk                                -> 42
@@ -21,37 +24,36 @@ carrier dylib fkwu admits in the same process).
 ./fkwu form/form-stdlib/tests/binary-freshness-band.fk    -> 31
 ./fkwu bootstrap/ground-numeric-list.fk                   -> [1, 2.5, [3, 4]]
 ./fkwu form/form-stdlib/tests/native-vs-rented-band.fk    -> 11111
-./fkwu proof/four-way-run-recipe42.fk                     -> 0   (FOUR-WAY)
+./fkwu proof/four-way-run-recipe42.fk                     -> 2   (WALKER-SUSPECT: walkers unbuilt)
 ```
 
-The four-way cell host-execs the three minimal proof walkers, built from `walkers/README.md`'s own
-lines; with them unbuilt it answers 2 (WALKER-SUSPECT) — both readings taken today, before and after
-building them.
+The four-way cell host-execs the three minimal proof walkers, which `walkers/README.md`'s own lines
+build; on this checkout they are unbuilt, so it answers 2 (WALKER-SUSPECT), and FOUR-WAY (0) waits on
+them.
 
-`runtime/fkwu-uni.c` is 25,483 lines (`wc -l`), last changed 2026-09-15 (`git log -1`). It is the
+`runtime/fkwu-uni.c` is 25,556 lines (`wc -l`), last changed 2026-09-28 (`git log -1`). It is the
 seed, and it shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R51–R56).
 
 ## Body-wide witnesses
 
 ```text
-./fkwu gate/drift-gates-run.bml          -> drift-gates pass=31 full=31 refused=0
-                                            (5 of 14 rows: a landing runs the rows whose ground
-                                            moved; the nine kernel rows sit out while no kernel
-                                            ground moved since origin/main, 4.4 s)
-./fkwu gate/structural-gate-run.fk       -> structural-gate-v3 [92, 0, 29, 0, 18, 0, 45] then 1
+./fkwu gate/drift-gates-run.bml          -> drift-gates pass=PENDING full=PENDING refused=0
+./fkwu gate/structural-gate-run.fk       -> structural-gate-v3 [PENDING] then 1
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> doors=12 links=120 broken=0 code=12120000
-./fkwu observe/belief-stamps.bml         -> 534499010  (field stamped*10^6 + owed*10^3 + laws)
+./fkwu observe/door-link-health-run.bml  -> doors=9 links=107 broken=0 code=9107000
+                                            then prelude-reach missing=0 untracked=0 shadow=0
+                                            (every name a cell loads reaches one tracked file)
+./fkwu observe/belief-stamps.bml         -> 70063002  (field stamped*10^6 + owed*10^3 + laws)
 observe/tests/belief-rewitness-band      -> 63
-./fkwu form/form-stdlib/release-ledger.bml -> open=28 moving=0 released=115
-learn/tests/homecoming-distillation-corpus-band -> 32767  (asserts 986 rows, 967 admissible)
+./fkwu form/form-stdlib/release-ledger.bml -> PENDING
+learn/tests/homecoming-distillation-corpus-band -> PENDING
 value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
-pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · control/tests/offer-ack-core-band 2097151
-control/tests/attempt-band 4095 · file-bytes-band 127 · form-bml-cursor-full-band 105  (each four-way)
+pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · offer-ack-core-band PENDING
+control/tests/attempt-band PENDING · file-bytes-band 127 · form-bml-cursor-full-band 105  (each four-way)
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
 ```
 
@@ -64,10 +66,9 @@ lapse. The release ledger's open rows are the body's named work, each with its w
 A unit lowers by what it carries: any file with a `section [` block — `form.bml`, `form.lift`,
 `form.action`, `form.route`, the `*.bmf` grammar dialects — travels through `bml-floor-compile`
 whatever its extension, as a prelude or as the main file, and fkwu keeps the `.lowfk`/`.fkb` cache
-beside it. Of 1,344 tracked `.bml` files, 1,071 carry a `section [form.bml]` block; nine `.fk` files
-carry one mid-file and lower in place; eleven files carry `section [form.lift]` (`git ls-files`,
-`git grep -l`). `true` and `false` are literals in the dialect, and a nested `defn` is a registered
-function (the two nested-defn bands below).
+beside it. Of 470 tracked `.bml` files, 404 carry a `section [form.bml]` block and three carry
+`section [form.lift]` (`git ls-files`, `git grep -l`). `true` and `false` are literals in the
+dialect, and a nested `defn` is a registered function (the two nested-defn bands below).
 
 The cursor (`grammars/form-bml.fk`, lowered by `form-bml-lower.fk`) reads the same sections whole, with
 direct backtracking, to the compiler's recipes NodeID for NodeID after the contract pass they share:
@@ -88,8 +89,7 @@ json-codec-bml-band 8191 · kernel-http-band 536965066 · channel-flow-band 8388
 circle-band 1048575 · static-to-dynamic-cells-band 262143 · bml-capability-ledger-band 255
 form-pe-coff-band 16383 · learn/tests/choice-receipt-band.bml 4294967295
 language-packs-fourth-band 31 · bml-bmf-control-curriculum-band 1048575
-bml-bmf-stream-curriculum-band 16777215 · form-cli-allowance-band 2047 · form-cli-live-band 255
-form-cli-lens-mint-band 1023 · native-tensor-lifecycle-band 1023
+bml-bmf-stream-curriculum-band 16777215 · form-cli-lens-mint-band 1023
 ```
 
 ## The mind and its voice
@@ -98,8 +98,8 @@ The voice speaks on this Mac's own metal: Qwen3.8-27B Q8_0 walked as Form recipe
 session, every Metal pipeline Form-emitted and JIT-compiled at runtime, the geometry read from the
 sealed GGUF header. The body takes engineering turns on its own through
 `observe/native-turn-run.bml`, begun by the host schedule (launchd), and each turn writes one row to
-`receipts/native-turn-ledger.jsonl`: today it holds **7 turns, 2026-09-25 17:01 to 2026-09-27 19:17
-WITA, 6 of them at `rented_mind` 0 and 3 with their band gone green** (`wc -l`, `grep -c`).
+`receipts/native-turn-ledger.jsonl`: today it holds **9 turns, 2026-09-25 17:01 to 2026-09-28 04:42
+WITA, 8 of them at `rented_mind` 0 and 3 with their band gone green** (`wc -l`, `grep -c`).
 
 The resident (`observe/form-cli-peer-contribution-live.fk`, the hearth) is one Form/Qwen/KV peer that
 takes tasks from an append spool and returns length-safe durable results; it rests on its fifo bell
@@ -130,8 +130,11 @@ matvec-t-band            -> 127          (the transposed matvec and the rank-1 a
 floor-lens-band 31 · floor-spread-band 31 · kernel-length-band 63   (the lens arithmetic, no GPU)
 ```
 
-The lanes that open a model or hold the GPU were not re-run for this page. Each band declares its
-verdict in its header; the last run of each lives in its receipt:
+The lanes that open a model or hold the GPU. Each band declares its verdict in its header; the last
+run of each lives in its receipt. Re-read on this checkout today: `dense-multi-band` 1023,
+`native-lora-resume-band` 7, `ear-native-band` 32767, `voice-pass-band` 4095. The three `vk-*` bands
+read 0 here: their staged carrier `.hearth/vk/run_vk` is a compiled program this host does not hold
+(`./fkwu observe/vk-carrier-build.bml` names it missing).
 
 | lane | band | last witnessed |
 |---|---|---|
@@ -145,8 +148,9 @@ verdict in its header; the last run of each lives in its receipt:
 | the ear: whisper-tiny as the body's own pass | `ear-native-band` 32767 | `receipts/2026-09-09-the-ear-could-not-hear-the-house.md` |
 | the mouth: a whole VITS voice, phoneme ids to samples | `voice-pass-band` 4095 | `receipts/2026-09-09-the-shape-was-right-and-the-sound-was-empty.md` |
 
-`observe/floor-lens-run.fk` reads what the hardware gives each lane (bandwidth and arithmetic, three
-reads with their spread) — a reading worth taking on a quiet machine.
+`form/form-stdlib/floor-lens.bml` is the lens arithmetic for what the hardware gives each lane
+(bandwidth and arithmetic, reads with their spread); a hardware reading is worth taking on a quiet
+machine.
 
 ## The knowledge lane
 
@@ -185,8 +189,8 @@ host-doors-band          -> 131071  host_spawn_at, host_alive and fs_mkfifo: the
 ```
 
 `own-word-band` proves that a claim contradicting the record is set aside; a real room has not yet
-offered one. The live doors are `observe/own-word-run.fk`, `observe/say-run.fk` (stdin line
-1 the tongue, `?` lists the mouths) and `observe/perception-say-run.fk`.
+offered one. The cells are `form/form-stdlib/own-word.bml` and `form/form-stdlib/perception-rows.bml`;
+the doors are `observe/say.fk`, `observe/voice-mouth-lanes-run.fk` and `observe/voice-pass-run.fk`.
 
 ## The Glass
 
@@ -208,13 +212,17 @@ A frame standing is not a giver giving: a frame not given for three of its caden
 ```text
 form-glass-live-band 2147483647 · form-glass-observer-band 67108863 · form-glass-dashboard-band 16777215
 form-glass-event-loop-band 16777215 · form-glass-staged-startup-band 262143 · form-glass-launch-band 131071
-form-glass-gift-frame-band 4095 · form-glass-sensor-rows-band 2047 · form-glass-kernel-view-band 511
-form-glass-events-channels-band 32767 · form-glass-telemetry-membrane-band 2097151
-form-glass-wait-band 255 · form-glass-machine-band 511 · form-glass-frame-work-band 32767
-form-glass-vitals-band 1023 · form-glass-standing-band 63 · form-glass-crossings-band 16383
+form-glass-gift-frame-band 4095 · form-glass-sensor-rows-band 2047 · form-glass-machine-band 511
+form-glass-telemetry-membrane-band 2097151 · form-glass-vitals-band 1023
+form-glass-standing-band 63 · form-glass-crossings-band 16383
+form-glass-events-channels-band 32767 · form-glass-wait-band 255 · form-glass-kernel-view-band 511
 form-choice-flow-band 16383 · sense-discernment-band 1023 · node-gift-band 4095
 cell-store-band 255 · field-band 255 · kernel-census-band 2047
 ```
+
+The events-channels, wait and kernel-view bands hold live children and timed rests: they read full
+one at a time on a quiet host (`/tmp/form-glass-organs-band` is a path every run shares) and low under
+load. The reading that counts is one taken on a quiet machine.
 
 ## The string floor
 
@@ -239,11 +247,11 @@ which of a native's mirrors still stand, where a definition is written twice, an
 carries a witness.
 
 ```text
-bearing-census-band 32767   ./fkwu observe/bearing-census-run.fk   (steps, not milliseconds)
-twin-census-band 65535      ./fkwu observe/twin-census-run.fk
-mirror-census-band 65535    ./fkwu observe/mirror-census-run.fk
-copy-census-band 63         ./fkwu observe/copy-census-run.fk
-wall-census-band 63         ./fkwu observe/wall-census-run.fk
+bearing-census-band 32767   form/form-stdlib/bearing-census.bml    (steps, not milliseconds)
+twin-census-band 65535      form/form-stdlib/twin-census.bml
+mirror-census-band 65535    form/form-stdlib/mirror-census.bml
+copy-census-band 63         form/form-stdlib/bml/copy-census.bml
+wall-census-band 63         form/form-stdlib/bml/wall-census.bml
 observe/tests/voice-frequency-band 255 · number-band 255 · float-printer-fourway-band 31
 ```
 
@@ -270,13 +278,22 @@ What answered red, died, or was not witnessed today, so no one leans on it:
   unresolved-call errors and the first recovered `nothing` meets arithmetic. It waits on a registry
   grounded in fkwu's own op table (`runtime/fkwu-optable.h` and `core.fk`), or on a sibling-home lane
   in `form/validate.sh` for a band whose surface only the siblings carry.
-- The domain/organ/unique/universe-mint bands answer 2015 of 2047, pending rather than red: bit 32
-  claims heldout ≥ 9 on a lesson-disjoint split, which a lesson-bound overlay reaches only once a
-  LoRA writer stands (the mints declare `LoraWriter = 0`) (R88).
+- `form-cli-allowance-band`, `form-cli-live-band` and `native-tensor-lifecycle-band` stop at
+  compile: their preludes carry `section [form.lift]`, which `fsc-compile-section-recipe`
+  (`form/form-stdlib/source-compiler.fk`) does not dispatch; only the override in
+  `form/form-stdlib/form-bml-lower.fk` does. Preluding `form-bml-lower.fk` into the lowering lane, or
+  a `form.lift` arm in `fsc-compile-section-recipe`, is the way home.
 - BML `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111; R78). The lowering's other
   open row stands in the ledger: R96 (lowering time grows with one form's argument count).
 - Windows: the seed's `_WIN32` branch carries its own spawn and wait twins (`fk_win_spawn`,
   `fk_win_waitpid`), its fifo door answers -1 there, and it passes
   `clang --target=x86_64-w64-windows-gnu -fsyntax-only runtime/fkwu-uni.c` with 0 errors (rc 0,
   today). A link and a run wait on a Windows toolchain or host, and neither is on this Mac.
-- The GPU and model lanes above were not re-run today; their verdicts are as old as their receipts.
+- `form-glass-frame-work-band` reads 20387 of 32767: its child
+  (`form/form-stdlib/tests/form-glass-frame-work-child.fk`) stops rc 1 after its first frame with
+  `len: nothing has no length … in fgsr-publication-stamps` (`form/form-stdlib/form-glass-sensor-rows.bml`),
+  so a held frame carried a rows cell that read nothing. The child reads other processes' producer
+  frames, and a live glass from another checkout was running; `fgsr-take` over all sixteen sensor names
+  answered no nothing rows, so the frame that carries it is not yet found.
+- The GPU and model lanes not named above were not re-run today; their verdicts are as old as their
+  receipts.

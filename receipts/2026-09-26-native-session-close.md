@@ -13,7 +13,7 @@ their shared-drain behavior. The C seed is unchanged.
 
 ## Same real command, observed again
 
-The [native observation cell](artifacts/2026-09-26-native-session-close/observe-cli-close.bml)
+The native observation cell
 retains the original public events and executes the same command sequence.
 
 | Observation | Before | After |

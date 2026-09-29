@@ -695,8 +695,7 @@ function runKernelCli(): void {
 // main-thread stack the OS grants. A --stack-size flag cannot grow the real
 // stack: a V8 limit set ABOVE it disables V8's overflow check and turns
 // deep recursion into a SILENT SIGSEGV — zero output, and rc=139 masks to
-// rc=0 through a pipeline (the aphonia family,
-// receipts/2026-07-17-regen-lane-aphonic-carrier.md). The honest carrier
+// rc=0 through a pipeline (the aphonia family). The honest carrier
 // mirrors the emitted C walker's stack door: FORM_KERNEL_STACK_MB names the
 // stack, the CLI re-enters itself on a worker thread whose V8 limit MATCHES
 // its real stack (Node derives both from resourceLimits.stackSizeMb), and

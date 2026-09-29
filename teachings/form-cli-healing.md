@@ -6,7 +6,7 @@ generators and migrations. `heal guide` reads current Python detours;
 the command. Use the reference where it fits, or build and observe the native
 equivalent, update callers, and remove the former implementation. Urs does not
 need to repeat this direction or approve it again. The practice lives in
-[the native authoring guide](../docs/native-authoring-guide.md).
+[the native agent tools](../docs/form-native-agent-tools.md).
 
 Start with the failing command, its process status, its expected result, and
 the exact current source. Freshness reads 31 after bootstrap. A green number

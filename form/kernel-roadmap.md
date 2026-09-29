@@ -53,29 +53,28 @@ kernel. A kernel grows only when something genuinely cannot be expressed in Form
   that construct and read recipes: `make_nodeid`, `intern_trivial_int` /
   `intern_trivial_string`, `intern_node`, `node_category` / `node_children` /
   `node_value`; a recipe is identity, observed and never walked
-  ([`form-stdlib/tests/substrate-write.fk`](form-stdlib/tests/substrate-write.fk)).
+  ([`form-stdlib/tests/nodeid-interning-band.fk`](form-stdlib/tests/nodeid-interning-band.fk),
+  [`nodeid-one-cell-band.fk`](form-stdlib/tests/nodeid-one-cell-band.fk)).
 - **Source-located errors and `trace`** — 1-based line/col on every bootstrap
   token, bounds-checked recipe reads pointing at the opening `(`, `(trace v)` /
   `(trace "label" v)` to stderr.
-- **The Form-side recursive-descent parser** —
-  [`form-stdlib/seedbank/parser.fk`](form-stdlib/seedbank/parser.fk): arithmetic,
-  parens, identifiers, function calls, comparisons, `if`/`then`/`else`, `defn`,
-  recursion, `let`. Content-addressing means `defn fact(n) = ...` and
-  `(defn fact (n) ...)` parse to the same NodeID — two surface syntaxes, one
-  substrate ([`form-stdlib/seedbank/tests/parser.fk`](form-stdlib/seedbank/tests/parser.fk)).
+- **The Form-side parser** —
+  [`form-stdlib/form-parse.fk`](form-stdlib/form-parse.fk): a cursor over the
+  source text, no pre-tokenizer, producing a runnable kernel program. Content-addressing
+  means two surface syntaxes for one program parse to the same NodeID — one
+  substrate.
 - **Grammar as data, parsing as engine** — the character-stream pattern engine
   [`form-stdlib/grammar-chars.fk`](form-stdlib/grammar-chars.fk) (primitives are
   data: char, char-range, string, any/eof/eol, not/peek, sequence/choice/star/opt,
   capture, cut/stop, rule), the BMF object engine
   [`form-stdlib/engine.fk`](form-stdlib/engine.fk) (rules match BMF source objects,
-  reduce through template closures, carry the inverse back out), and the dynamic
-  grammar registry [`form-stdlib/runtime-grammar.fk`](form-stdlib/runtime-grammar.fk)
-  (a new grammar is one registry row; both engines consult the same registry).
-  Production grammars live in [`form-stdlib/grammars/`](form-stdlib/grammars/) —
-  Python via BMF objects ([`python-bmf.fk`](form-stdlib/grammars/python-bmf.fk)
-  with its band family), and siblings for Go, Rust, TypeScript, image, audio,
-  video, document, natural language, and BML. The `lang-*.ts` host adapters under
-  `form-kernel-ts/` are not load-bearing for parsing.
+  reduce through template closures, carry the inverse back out), and the named
+  grammar registry [`form-stdlib/grammar-loader.fk`](form-stdlib/grammar-loader.fk)
+  (a new grammar is one registry row). Production grammars live in
+  [`form-stdlib/grammars/`](form-stdlib/grammars/) — Python via BMF objects
+  ([`python-bmf.fk`](form-stdlib/grammars/python-bmf.fk)), and siblings for Go, Rust,
+  TypeScript, Prolog, BML, Form-in-BML, Form-lift, the living equation and Sanskrit
+  roots.
 - **The persistence bridge** — [`form-stdlib/persistence.fk`](form-stdlib/persistence.fk):
   `cell-put` / `lookup-cell` / `store-cells` over `write_form_binary` /
   `read_form_binary`; a CELL recipe carries `(name, domain, blueprint, ctor)` with
@@ -85,13 +84,10 @@ kernel. A kernel grows only when something genuinely cannot be expressed in Form
 - **The current compiler path** — BMF cursor → layer grammar → semantic/data
   lowering → source compiler artifact lane, bridged by
   `form-stdlib/source-compiler-grammar-bridge.fk`
-  ([`../docs/coherence-substrate/current-language-artifact-path.md`](../docs/coherence-substrate/current-language-artifact-path.md)).
+  ([`form-stdlib/tests/source-compiler-grammar-bridge-band.fk`](form-stdlib/tests/source-compiler-grammar-bridge-band.fk)).
 
 ## The breaths still ahead
 
-- **Host-adapter compost.** Walk each `lang-*.ts` under `form-kernel-ts/` and name
-  what `*-bmf.fk` does not already cover; most composts, some pieces (editor
-  integration, IDE protocols, format detection) want different homes.
 - **Six-way cross-validation.** Same source × same registry × two engines
   (character + BMF) × the sibling kernels in one validation pass, any disagreement
   a single bug locus.
@@ -119,8 +115,7 @@ node --experimental-strip-types form-kernel-ts/src/main.ts form-samples/fact.fk 
 ```
 
 The Go and Rust binaries are build artifacts (`validate.sh` builds them when
-stale); the TS kernel runs from source under Node's strip-types
-([`kernel-comparison.md`](kernel-comparison.md), re-run 2026-09-04).
+stale); the TS kernel runs from source under Node's strip-types.
 
 When in doubt about whether to grow a kernel, the test is *"can this be expressed
 using kernel primitives Form already has?"* If yes, it is a Form breath. If no, the

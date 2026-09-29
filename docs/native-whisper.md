@@ -22,7 +22,7 @@ Digital silence can produce a confident neural hallucination. The input's actual
 
 `form-run ./fkwu observe/native-whisper-homecoming-run.fk` creates a fresh evidence directory under `.hearth` (or takes a new directory on stdin). The 511 witness covers the public word, two words across the 30-second boundary, digital silence, silence after speech, cancellation before admission, exact English/German/Persian stored-reference transcripts, and released buffers. Every recording has its own result JSON and stage events. Three multilingual WAVs and their stored reference texts are committed under `model/fixtures/whisper-native/`; their provenance is recorded there.
 
-Policy band: `form/form-stdlib/tests/native-whisper-policy-band.fk` (4095). Audio band: `form/form-stdlib/tests/native-wav-band.fk` (127). The tiny ear remains 32767. Numeric serialization is witnessed by `json-precise-band.fk` (3), including subnormals; small probabilities and learning rates are not rounded through the six-decimal display formatter.
+Policy band: `form/form-stdlib/tests/native-whisper-policy-band.fk` (4095). Shape band: `form/form-stdlib/tests/whisper-shape-band.fk` (127). WAV admission lives in `form/form-stdlib/native-wav.bml`. The tiny ear's band is `form/form-stdlib/tests/ear-native-band.fk` (32767). Numeric serialization lives in `form/form-stdlib/json-precise.bml`, including subnormals; small probabilities and learning rates are not rounded through the six-decimal display formatter.
 
 The former wrapper used a general reference decoder. This native route currently uses greedy decoding followed by categorical temperature retries, token repetition detection instead of zlib compression ratio, per-window mel normalization, and one encoding for language detection and transcription. It does not offer beam search, word-alignment timestamps, previous-window prompting, compressed audio inputs, or Whisper adapter training. These are not claimed by the result schema. Model and audio arithmetic are not claimed bit-identical to MLX.
 
@@ -34,9 +34,9 @@ STT latency is dominated by the encoder in the measured runs. The events expose 
 
 ## Measured on 2026-09-22, toward a live ear at SOTA
 
-`observe/stt-wer-fixtures-run.fk` measures a lane over a fixture manifest with `sw-wer-bounded`
-(the naive `sw-wer` recursion is exponential: a 40-token hypothesis never returns) and lands one
-row per run in `receipts/stt-wer-ledger.jsonl`. On the three stored references the native
+`observe/stt-wer.fk` measures a lane over the stored fixtures with `sw-wer-bounded`
+(the naive `sw-wer` recursion is exponential: a 40-token hypothesis never returns) and one
+row per run lands in `receipts/stt-wer-ledger.jsonl`. On the three stored references the native
 large-v3-turbo reads WER 0 / 0 / 0 at 1.0–1.5 s per four-second clip; whisper-tiny's raw greedy
 line repeats the sentence to its cap (raw WER 700 / 658) and hears Persian as noise (300).
 

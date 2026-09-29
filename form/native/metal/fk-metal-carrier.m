@@ -118,7 +118,7 @@
 // this string's layout, so per-dispatch shape belongs in it.
 //
 // threads_per_group MIRRORS THE ORACLE, which takes a per-dispatch cap independent
-// of the grid: metal_dsv4_stack.sh's enc(pipeline, n, cap) dispatches n threads with
+// of the grid: the reference Metal harness's enc(pipeline, n, cap) dispatches n threads with
 // min(maxTotalThreadsPerThreadgroup, cap) per group — enc(pQ80, rows*32, 256),
 // enc(pQ8aQuant, blocks*q8aThreads, 64), and so on. A kernel that does a group-wide
 // fold or stages through threadgroup memory partitions differently under a different
@@ -134,8 +134,8 @@
 //     through this door as compiled:  a*b + c = 973079552  ( == fma(a,b,c) )
 //     without contraction:            a*b + c = 973078528
 //
-// metal_dsv4_stack.sh builds every metallib with -ffp-contract=off, and
-// ds4-order-match.fk rests its whole bit-exactness claim on that. So a caller who
+// the reference harness builds every metallib with -ffp-contract=off, and
+// the order-match claim rests its whole bit-exactness on that. So a caller who
 // ports a kernel here unchanged gets plausible-but-divergent numbers with nothing
 // failing anywhere. The FIX BELONGS TO THE FORM CELL, not to this file: emit
 //

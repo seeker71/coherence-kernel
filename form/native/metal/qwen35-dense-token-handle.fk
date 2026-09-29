@@ -22,7 +22,7 @@
     ; The batched Q8_0 matmul rides along: one weight decode serving eight
     ; activation columns, so a prefill span is one dispatch per weight tensor
     ; instead of one per token. Stone 7 proved the shape on the K-quant lane in
-    ; July (metal_batched_prefill.sh, 5 gates); this lane never inherited it
+    ; July (the batched-prefill witness, 5 gates); this lane never inherited it
     ; because the generator hardcoded a 256-weight superblock and Q8_0's is 32.
     ; A source-offset copy to sit beside kth-copyoff-msl's destination-offset one,
     ; and an rmsnorm over a span of rows. The span form is ONE THREAD PER TOKEN.
@@ -141,7 +141,7 @@
             " (device float* S [[buffer(0)]], device const float* c [[buffer(1)]], device const float* alpha [[buffer(2)]], device const float* beta [[buffer(3)]], device float* o [[buffer(4)]], constant uint& nv [[buffer(5)]], constant uint& dv [[buffer(6)]], constant uint& dk [[buffer(7)]], constant uint& nk [[buffer(8)]], constant float& qscale [[buffer(9)]], constant uint& toff [[buffer(10)]], constant uint& goff [[buffer(11)]], constant uint& ooff [[buffer(12)]], uint gid [[thread_position_in_grid]]) { if (gid >= nv * dv) return; uint h = gid / dv; uint i = gid - h * dv; uint kh = h - (h / nk) * nk; device const float* q = c + toff + kh * dk; device const float* k = c + toff + nk * dk + kh * dk; float v = c[toff + 2u * nk * dk + h * dv + i]; uint r = (h * dv + i) * dk; float al = alpha[goff + h]; float pred = 0.0f; for (uint j = 0u; j < dk; ++j) { float sp = al * S[r + j]; S[r + j] = sp; pred = pred + sp * k[j]; } float err = v - pred; float bw = beta[goff + h] * err; float acc = 0.0f; for (uint j = 0u; j < dk; ++j) { float sn = S[r + j] + bw * k[j]; S[r + j] = sn; acc = acc + sn * (qscale * q[j]); } o[ooff + h * dv + i] = acc; }")))
     ; GQA decode with one 256-thread THREADGROUP per query head, replacing the
     ; one-thread-per-head dispatch for this walker only. Measured 2026-08-24
-    ; (layer-kind-probe): the full-attention block cost 2113 us of GPU per
+    ; (a per-layer-kind probe): the full-attention block cost 2113 us of GPU per
     ; token against ~450 us of weight traffic, and the serial kernel — 24
     ; threads for the whole layer on ~5120 ALUs — was the largest resident.
     ; Same buffers, same constants, same math; the reductions are simdgroup
@@ -167,7 +167,7 @@
     ; They are emitted and given pipelines unconditionally, and they are the
     ; default walk: the folded configuration reaches the dispatch floor with
     ; byte-identical output, and on 2026-09-11 it was decided on host time, the
-    ; GPU time staying unseparated from the looped walk's (qwen38-dispatch-model.fk).
+    ; GPU time staying unseparated from the looped walk's (the dispatch-count model).
     ; The looped offset kernels stay reachable through fold=0.
     (defn q38-conv-span-msl (fname)
         (str_concat "kernel void "
@@ -465,7 +465,7 @@
             ; pipeline 39: one 256-thread threadgroup per head (mode 1 makes the
             ; threads argument a GROUP count). The serial one-thread-per-head
             ; dispatch this replaces cost the block ~1.7 ms of its 2.1 ms
-            ; (2026-08-24, layer-kind-probe: 2113 -> 553 us per block).
+            ; (2026-08-24, per-layer-kind probe: 2113 -> 553 us per block).
             (if (nothing? scope)
               (metal_enqueue (nth ps (qlslc-cooperative-gqa-pipeline))
                 (q38-b16 (list (nth bs 22) (nth st 2) (nth st 3) (nth bs 26) (nth bs 27))
@@ -528,7 +528,7 @@
             (form_error "qwen prefill: unsupported matrix quantization")
         ; Q8_0 goes through the matrix unit (qmb-q80-mma): 32 x 32 tiles dispatched as threadgroups,
         ; within the lane's named bound of the batched sum and a tenth to a twentieth of its time on
-        ; this model's FFN (observe/qwen38-span-matmul-probe.bml, 2026-09-11)
+        ; this model's FFN (the span matmul probe, 2026-09-11)
         (if (eq (kth-tv-ty tv) 8)
             (metal_enqueue (nth ps (q38pq-mma-index))
                 (md-bind16 (list (kth-tv-h tv) xh yh)
@@ -603,7 +603,7 @@
             (q38-prefill-mvb-go ps bs geo lays sts embTv onormTv projTv ids pos)))
 
     ; ── layer-major prefill ────────────────────────────────────────────────
-    ; dsv4-decode-loop.fk transcribed the shape from ds4.c: prefill is
+    ; The shape is transcribed from ds4.c: prefill is
     ; LAYER-MAJOR — all prompt tokens pass through layer 0, then layer 1. Decode
     ; is token-major. They are two schedules over the same rows.
     ;
@@ -743,9 +743,9 @@
     ; in one process, ten interleaved passes of a 577-token prefill — its GPU time
     ; cannot be told apart from the looped walk's on this host, while the looped
     ; walk spends at least 1,951 ms of host time per prefill encoding 57,719
-    ; dispatches against the fold's at most 111 (qwen38-dispatch-model.fk;
-    ; qwen38-dispatch-model-band bit 2048). fold = 0 keeps the looped walk
-    ; reachable, and observe/qwen38-fold-ab-run.bml asks the question again.
+    ; dispatches against the fold's at most 111 (the dispatch-count model).
+    ; fold = 0 keeps the looped walk
+    ; reachable, and the fold A/B probe asks the question again.
     (defn q38-linear-attn-span-f (ps bs geo lay st ntok fold)
         (do
             (let bs2-pitch (qlslc-bs2-output-pitch geo))
@@ -816,7 +816,7 @@
 
     ; fold rides down to every linear layer's two recurrences, so one process
     ; can walk the same span both ways against the same open weights
-    ; (observe/qwen38-fold-ab-run.bml). The default below is fold 1.
+    ; (the fold A/B probe). The default below is fold 1.
     (defn q38-lm-layers-span-f (ps bs geo lays sts l nL n pos0 fold)
         (if (ge l nL) 1
             (do (if (kth-full? l (nth geo 22))
@@ -1221,7 +1221,7 @@
             ; was computed inline here while the consumers had already moved to
             ; the contract — two live derivations of one rule, which is the
             ; shape of the three pitch bugs this lane already paid for. Found by
-            ; qwen38-span-invariant-band, which asks that the old spelling be
+            ; a span-invariant check, which asks that the old spelling be
             ; gone rather than merely that the new one be present.
             (let _scratch-begin (q38oo-scratch-begin))
             (let convcap (qlslc-bs2-allocation-capacity geo))

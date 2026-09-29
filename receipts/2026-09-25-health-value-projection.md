@@ -14,9 +14,9 @@ nodes. The north star and current status name those remaining boundaries.
 
 ## Actual observations
 
-The [public lifetime witness](../observe/form-health-view-witness.bml) executes
+The public lifetime witness executes
 health-first and care-first reads of actual local write/readback events. The
-[retained report](../docs/evidence/fkwu/health-view-lifetime.json) measures 32
+retained report measures 32
 cycles. Warmed explicit-source health reads consumed 18,720 new event bytes and
 emitted 80,208 bytes in 70 ms; quiet health reads consumed zero new bytes and
 emitted 80,080 bytes in 32 ms. Both intervals created zero primary nodes, zero
@@ -32,7 +32,7 @@ strings while an older held health view stayed byte-exact. Temporary lists and
 strings still allocate; this does not prove complete reclamation or retained
 RAM bounds.
 
-The [projection comparison](../docs/evidence/fkwu/health-view-contract.json)
+The projection comparison
 compares three frozen cases against a namespace-only copy of the implementation
 at `d02faa1c6`. Only elapsed time is normalized. It preserves nested typed data,
 duplicate fields, metadata replacement, source ordering, pain-first attention,
@@ -40,7 +40,7 @@ six source-state cases, nine request messages and both custom node callback
 contracts. Populated and empty caught-up sources are separate cases of the same
 state. The real retained 44,397-byte exchange preserves its three current organs.
 
-The [resident observation](../docs/evidence/fkwu/health-view-resident.json)
+The resident observation
 runs actual `health`, `care`, `health`, `care` commands in one source-backed CLI.
 They consume 44,397/0/0/0 bytes. Needs, actual supplies and unresolved child failure
 remain present. CLI and public Glass exit zero with empty stderr. The private
@@ -48,7 +48,7 @@ home stays isolated, launches no learner, and releases owned processes,
 declarations and its source mount. This is local retained-event execution;
 it does not claim the original failing child recovered.
 
-The [care lifetime re-observation](../docs/evidence/fkwu/care-changing-lifetime.json)
+The care lifetime re-observation
 also passes after the common helper extraction: 32 append/renewal cycles,
 declared generations, shared writers, partial records, independent sources,
 truncation, indexed observations and exact held views through collection.
@@ -69,7 +69,7 @@ the production witness checks were preserved and passed.
 
 The first resident check stopped at `production CLI and Glass stderr are clean
 after explicit cache admission` (exit 1). The
-[diagnostic](artifacts/2026-09-25-health-value-projection/resident-cache-warning.txt)
+diagnostic
 records the CLI source-identity mismatch and its automatic cache rebuild.
 An unchanged repeat met the same clean-stderr assertion. The bounded framebuffer
 exchange correlates the revision with actual execution; it carries no private
@@ -80,7 +80,7 @@ temporary bootstrap witness was absent. Recreating it with the documented
 concatenation restored `11111`, exit zero. Ground returned `42`, recursion `55`,
 numeric lists `[1, 2.5, [3, 4]]` and freshness `31`.
 
-The [retained local helpers and reference](artifacts/2026-09-25-health-value-projection/README.md)
+The retained local helpers and reference
 document their replay inputs. Historical references are outside the production
 prelude chain. The public lifetime witness prepares its own evidence.
 

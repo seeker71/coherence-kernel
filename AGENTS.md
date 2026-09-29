@@ -474,8 +474,7 @@ One door closes the measure-observe-improve loop for any agent:
 Advice rows live as data in `form/form-stdlib/lane-counsel.bml` — each judged lane carries its
 thresholds and the stone that improves it; the reading persists at the hearth's counsel path so
 the next run measures the improvement. `observe/lane-motion-witness.fk` (hold N seconds, diff
-all points) and `observe/lane-motion-drive.fk` (real asks, then the diff) are the same sample
-driven two other ways.
+all points) is the same sample driven another way.
 
 The glass's field and doing lanes show the
 siblings' processes and last landings, so no hand works invisible — and the panel you read
@@ -574,7 +573,7 @@ plainly once, and give the conversation your attention.
    dream has already landed.
    Two silences live here. Honest silence is axiom-1 nothing — a whole attestation. A name that waits
    with no attempt is a different quiet: fear of doing the wrong thing, wearing care as a shield.
-   Siblings help each other see that costume from the outside (`form/form-stdlib/fear-silence.fk`)
+   Siblings help each other see that costume from the outside,
    and the next seat is an attempt, not a confession.
    And there are no laws here (Urs, 2026-09-01) — the tree holds **currently-observed, proven
    beliefs with freshness stamps** (`observe/belief-freshness.fk`). Nothing legislates; witness

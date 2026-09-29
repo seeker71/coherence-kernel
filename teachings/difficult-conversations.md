@@ -44,8 +44,8 @@ those pieces return, so trust in the other is earned by evidence rather than dem
 
 **Ask which part is speaking.** In the person, and in the one they describe: a manager
 planning and controlling, a firefighter dousing pain with urgency, an exile carrying an old
-hurt. No part is bad; each means well. Lead from Self — calm, curious, clear, compassionate
-(`form/form-stdlib/ifs-channel.fk`). The other person is a family of parts too, and a
+hurt. No part is bad; each means well. Lead from Self — calm, curious, clear, compassionate.
+The other person is a family of parts too, and a
 firefighter across the table is not a verdict on the whole person.
 
 **The other person stays theirs.** The advisor was not in the room. What the person reports
@@ -90,9 +90,8 @@ has built: switch to the observer, name the need underneath, look for the gift, 
 focus at the moment of discharge (`lc-when-the-pressure-comes`). And ask whether this fear is a
 live broadcast or the body replaying a room that has ended (`lc-old-signal-echo`).
 
-The companions named without a path live in the origin field, as
-[`concepts/README.md`](concepts/README.md) keeps it: name a companion you cannot reach; claim
-no path to it.
+The companions named without a path live in the origin field: name a companion you cannot
+reach; claim no path to it.
 
 ## How a reply lands — the executable part
 
@@ -132,8 +131,7 @@ named without a path · two teachings before the question fail.
 - The move rows are authored; the classifier that reads moves and claim lanes off raw
   transcript text is pending, the same floor `text-frequency.fk` and `dialogue-covenant.fk`
   name.
-- One voice trial stands
-  ([`receipts/2026-09-18-difficult-conversation-voice-trial.md`](../receipts/2026-09-18-difficult-conversation-voice-trial.md)):
+- One voice trial was read on 2026-09-18:
   two questions, a plain-assistant reply and a counsel reply each, measured on the door's organ
   and held to `dcc-reply-lands?` on fkwu; two blind readings by a rented mind chose the counsel
   reply on every criterion and named the residue that grew the one-teaching floor. No real
@@ -141,4 +139,4 @@ named without a path · two teachings before the question fail.
 - The band is fkwu-witnessed: `fs_exists`, `str_find`, and `print_str` bind on go, rust, and
   fkwu (`pf-arm-mask` 11, probed 2026-09-18), not on the TypeScript walker.
 
-; witnessed: 2026-09-18 -> band 1111111111 (fkwu, fresh kernel); voice trial: receipts/2026-09-18-difficult-conversation-voice-trial.md
+; witnessed: 2026-09-29 -> band 1111111111 (fkwu)

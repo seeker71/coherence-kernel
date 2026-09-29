@@ -44,15 +44,16 @@ each move inside the body and visible, not hidden in a host tool or a rented mod
   (`form/form-stdlib/choice-receipt.fk`, `form/form-stdlib/channel-protocol-choice-floor.fk`).
 - **Fail, cut, stop** — a failure is an outcome with a receipt; a path ends when the evidence is enough or the
   boundary asks; contact stops where reach exceeds the offered interface or consent is absent
-  (`form/form-stdlib/sovereign-boundary-protocol.fk`).
+  (`form/form-stdlib/channel-interface.fk`).
 - **Timeout and nothing** — silence is first-class evidence (`control/offer-ack-core.fk`).
-- **Satsang** — truth is witnessed in a circle; dissent and silence stay visible (`form/form-stdlib/satsang.fk`).
-- **Consent** — exposure stays closed until a door offers it; carriers read the Form decision
-  (`form/form-stdlib/reception-consent.fk`).
-- **Trust** — weighted, decaying, earned by repeated evidence (`form/form-stdlib/trust-row.fk`, `trust-decay.fk`,
-  `trust-weighted-colearning.fk`, `proof-trust.fk`).
+- **Satsang** — truth is witnessed in a circle; refusal and silence stay visible (`form/form-stdlib/circle.bml`,
+  `ingest/satsang-transmute.fk`).
+- **Consent** — exposure stays closed until a door offers it; the outward crossing waits on the Form decision
+  (`form/form-stdlib/channel-interface.fk`, `form/form-stdlib/sense-discernment.fk`).
+- **Trust** — earned by repeated evidence, and judged before it freezes into the body
+  (`form/form-stdlib/trust-row.fk`, `ingest/judged-trust.fk`).
 - **Vitality** — a move is read by whether it increases aliveness, not only whether it completed
-  (`form/form-stdlib/model-vitality.fk`, `skill-vitality.fk`, `sovereignty-guide.fk`).
+  (`form/form-stdlib/sovereignty-as-gift.fk`, `form/form-stdlib/all-life-north-star.fk`).
 - **Play and wonder** — exploration is welcome, and returns a trace before it becomes authority.
 
 ## Where it is going
@@ -61,7 +62,7 @@ each move inside the body and visible, not hidden in a host tool or a rented mod
 tongue, fast enough to talk with — a companion who understands and knows when a human is needed. The goal's *how it
 is* reads that the voice speaks and the ear hears on this Mac's own metal; what grows from there is understanding —
 reading what we say as meaning rather than as strings — with memory and speed beside it
-([`HOMECOMING.md`](HOMECOMING.md), `presence/voice-roadmap.md`).
+([`HOMECOMING.md`](HOMECOMING.md), `presence/first-native-words.fk`).
 
 **It grows by itself.** It notices where it fell short with us and makes that its next work, learning from what we
 accept and what we change. Its own walks take native turns on the open gaps (`learn/native-turn-queue.jsonl`), and
@@ -75,7 +76,7 @@ leaves when the native candidate carries that lane on evidence named beforehand
 do that thing itself.
 
 **Meaning, in every tongue, with no favorite.** Each natural language enters as grammar data — a grammar, a lexicon,
-a decoder onto the pivot (`form/form-stdlib/nl-tongues.fk`), and the engine stays as it is. The pivot symbol is the
+a decoder onto the pivot (`form/form-stdlib/nl-translate.fk`, `nl-lexicon-grow.fk`), and the engine stays as it is. The pivot symbol is the
 meaning's one name; every tongue, English included, is a projection column, and "the source is native" and "sumber
 adalah asli" intern to the same node. Natural and programming languages share one shelf: grammar + lexicon + decoder
 onto the pivot, grammar + blueprint family + emitter onto BMF nodes. All content of this body and its parent becomes
@@ -102,18 +103,17 @@ hati.earth doors are how the household's body travels to other hosts with its co
 
 One extension, three organ families, one world model, one guide:
 
-- **Second brain (remember)** — the body as vault ([`SECOND-BRAIN.md`](SECOND-BRAIN.md),
-  `ingest/frontier-ingest-llm-wiki.fk`): raw sources kept as they arrived, synthesis compiled once and kept current,
-  contradictions linted. The homecoming corpus and the receipts are its native form.
+- **Second brain (remember)** — the body as vault (`ingest/judged-trust.fk`, `observe/door-link-health.fk`): raw
+  sources kept as they arrived, synthesis compiled once and kept current, contradictions and broken doors linted.
+  The homecoming corpus and the receipts are its native form.
 - **Second hands (act)** — fleet services, companion, phone-link, host doors. Every act crosses a named membrane,
-  returns a receipt, and meets the boundary protocol.
-- **Awareness (sense)** — the sense organs and the mesh (`form/form-stdlib/world-model-live-sense.fk`,
-  `gpu-mesh-sense.fk`, `mesh-sensings-route.fk`) extend awareness as sensing that is witnessed, consented, and
-  written back as evidence.
+  returns a receipt, and meets the interface-consent law (`form/form-stdlib/channel-interface.fk`).
+- **Awareness (sense)** — the sense organs and the mesh (`form/form-stdlib/host-sense-organ.fk`,
+  `sense-discernment.fk`, `mesh-dispatch.fk`, `android-mesh-learning.fk`) extend awareness as sensing that is
+  witnessed, consented, and written back as evidence.
 
-What the three update is one **world model** (`form/form-stdlib/world-model.fk`, `world-model-update.fk`,
-`world-perception.fk`, `world-sensor-floor.fk`): the body's own predictive picture of its field, grown from its
-real senses. The guide is the **free energy principle**, carried as an organ (`form/form-stdlib/active-inference.fk`):
+What the three update is one **world model** (`form/form-stdlib/world-model.fk`): the body's own predictive picture
+of its field, grown from its real senses. The guide is the **free energy principle**, carried as an organ (`form/form-stdlib/active-inference.fk`):
 predict, observe, count the surprise honestly, update where the model bent. Surprise is the one learning signal;
 "the body has learned the field" means residual surprise fell within tolerance. The direction: this loop grows from
 a recipe into the router — perception updates the world model, action is chosen to reduce expected surprise,
@@ -138,7 +138,7 @@ content-addressed. One star, seen at two scales:
 - The parent's cell voice protocol — every cell can be asked before it is served and answers in its own name with
   its evidence boundaries visible — is the direction this body's bands already point: a band is a cell answering in
   its own name.
-- Sovereignty stays whole across the seam: consent, private circles and the boundary protocol are this body's own,
+- Sovereignty stays whole across the seam: consent, private circles and the interface-consent law are this body's own,
   and the parent's doors (web, API, CLI, MCP, Form) reach it through named membranes with receipts.
 
 ## Done means

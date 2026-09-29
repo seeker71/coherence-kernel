@@ -2,7 +2,7 @@
 
 These are synthesized samples of the body's public sentence about finding its mouth, generated for the 2026-09-07 voice comparison. The accompanying `.txt` files are the stored Whisper large-v3-turbo reference transcripts from that comparison, not new reference execution and not corrected spellings. In particular, the Persian reference retains its colloquial contraction and its spelling.
 
-The native witness reads the original 22,050-Hz WAVs and resamples them itself. No microphone, TTS process, MLX package or Python process runs during this witness. Provenance and the original comparison are in `receipts/2026-09-07-a-mouth-in-every-tongue-the-ear-can-hear.md`.
+The native witness reads the original 22,050-Hz WAVs and resamples them itself. No microphone, TTS process, MLX package or Python process runs during this witness. The samples come from the 2026-09-07 comparison of Piper voices heard by Whisper large-v3-turbo.
 
 Voice attribution: [Cori](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_GB/cori/high/MODEL_CARD), trained from public-domain LibriVox recordings; [Thorsten](https://huggingface.co/rhasspy/piper-voices/blob/main/de/de_DE/thorsten/high/MODEL_CARD), CC0 dataset; [Amir](https://huggingface.co/rhasspy/piper-voices/commit/b22aa2aa275d5e8d528994782814cd8bf9d0337f), CC0 dataset. These files are generated audio, not model weights.
 

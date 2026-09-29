@@ -7,9 +7,7 @@ Real `.fk` source files in Form's S-expression bootstrap syntax. The Go, Rust, a
 | [`fact.fk`](fact.fk) | Recursive factorial — `defn`, `if/else`, recursion | `3628800` |
 | [`fib.fk`](fib.fk) | Naive Fibonacci — double-recursion, the tree-walker's worst case | `6765` |
 | [`closure.fk`](closure.fk) | Closure captures defining frame, called later with different arg | `15` |
-| [`list-sum.fk`](list-sum.fk) | Native `list`/`head`/`tail`/`len` + recursion over a list | `15` |
-| [`string-walk.fk`](string-walk.fk) | Char-by-char string scan (`char_at`, `ord`) — shape Form-on-top's lexer will use | `5` |
-| [`native-kernel-dogfood.fk`](native-kernel-dogfood.fk) | Form-level contract that grammar/parser proof uses Go, Rust, or TypeScript kernels, not Python bridges | `1` |
+| [`float-artifact-roundtrip.fk`](float-artifact-roundtrip.fk) | A float survives the `.fkb` wire format, bare and nested in a composite recipe | `0.8125` |
 
 ```bash
 # Run any sample through a sibling kernel
@@ -36,10 +34,8 @@ The kernels read S-expression syntax that maps directly onto substrate recipes:
 
 Natives (a present native answers `(<name> ...)` on every kernel; a same-named `defn` stands in only where the native is absent): `print`, `list`, `cons`, `head`, `tail`, `len`, `nth`, `empty`, `str_len`, `substring`, `char_at`, `str_concat`, `str_eq`, `int_to_str`, `str_to_int`, `ord`, `read_file`, `read_file_bytes`.
 
-Binary fixtures live alongside the `.fk` samples: [`tiny.png`](tiny.png) is a 45-byte 1x1 PNG (signature + IHDR + IEND) that exercises `read_file_bytes` and `form/form-stdlib/grammars/png.fk`.
+Binary fixtures live alongside the `.fk` samples: [`tiny.png`](tiny.png) is a 45-byte 1x1 PNG (signature + IHDR + IEND) that exercises `read_file_bytes`.
 
 ## Cross-modal experiments
 
-See [`cross-modal/`](cross-modal/) for four small demos exploring how Form recipes carry semantic content across modalities — image-as-recipe (SVG), cross-language content-addressing (Python/TS/Form factorial NodeID convergence), recipe-as-compression (honest finding: ice is *larger* than water at small scale), and universal diff (structural NodeID diff vs textual diff).
-
-The Form-surface-syntax parser written in Form (next turn) will sugar these into the `1 + 2` / `if x then a else b` / `defn f(x) = ...` syntax the Python kernel currently accepts. The recipes produced are identical either way.
+See [`cross-modal/`](cross-modal/) for two small demos exploring how Form recipes carry semantic content across modalities — image-as-recipe (`01-image-as-recipe/gen-circles-254.svg`) and natural-language-to-recipe (`05-nl-to-recipe/nl-arithmetic-demo.fk`, where a character grammar reads four English sentences and each parsed recipe is `node_eq` to the hand-built one: NL and S-expression are two source tongues pointing at one substrate identity).

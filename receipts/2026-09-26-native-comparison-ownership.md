@@ -5,11 +5,11 @@ retained the 471-word failed result and continued its original checkpoint.
 This movement verified that owner PID 17711 is still live; its public decode
 checkpoints advanced. It has not returned a terminal answer.
 
-The [comparison door](../observe/form-cli-code-feedback-compare.bml) now accepts
+The comparison door now accepts
 an optional owner PID. It waits for that owner to exit and for the complete
 public execution record before comparing the returned answer with the preceding
 answer. It admits no model or provider. The
-[actual request](artifacts/2026-09-26-native-identity-usefulness-care/comparison-request.json)
+actual request
 is running against the existing owner. A timeout in the observing agent is not
 a restart. Missing terminal evidence remains an explicit error.
 
@@ -21,7 +21,7 @@ a retained review whose applicability to the returned document is unestablished.
 The old comparison and answer bytes remained unchanged. This establishes
 attribution of review evidence, not improved answer quality.
 
-The [preceding full coordinating turn](artifacts/2026-09-26-native-identity-usefulness-care/handoff-coordinator-cost.json)
+The preceding full coordinating turn
 cost **8,617,979 rented tokens**, including **8,200,320 cached input tokens**:
 8,504,565 input, 86,994 output and 26,420 unattributed tokens across 60 model
 calls. Full-turn and tool-event reconciliation both returned 1. Its separate

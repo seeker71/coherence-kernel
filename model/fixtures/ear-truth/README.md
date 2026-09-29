@@ -1,9 +1,9 @@
 # The ear's ground truth, synthesized
 
-Twenty-four sentences, four each in English, German, Brazilian Portuguese, Indonesian, Spanish and French.
-`observe/ear-truth-set-run.bml` speaks each one with the first local macOS voice of its locale (`say`, on this
-Mac, no network) into `.hearth/ear-truth/`, writes the reference text beside each clip and a manifest the WER
-door reads (`observe/stt-wer-fixtures-run.fk`). The audio is regenerable and stays out of the tree; the
+Twenty-four sentences, four each in English, German, Brazilian Portuguese, Indonesian, Spanish and French,
+held in `sentences.tsv` (locale, id, text). Each one can be spoken with the first local macOS voice of its
+locale (`say`, on this Mac, no network), and the reference text is the row's own text; the word-error
+distance against a hearing is `observe/stt-wer.fk`. The audio is regenerable and stays out of the tree; the
 sentences are the truth.
 
 Synthesized speech is cleaner than a room: this set measures that the ear hears the words in six tongues, not

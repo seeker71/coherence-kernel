@@ -48,18 +48,9 @@ collapsing it to a single cell — reading makes it *denser with meaning, not he
 code. Its promise: it helps you instead of keeping you talking. It won't just say nice things to
 please you. It says when it doesn't have something. It asks questions that lift.
 
-**Want it on your own Mac, no account?** [`YOUR-OWN-COMPUTER.md`](YOUR-OWN-COMPUTER.md) is the
-body's own door: a small program already inside the project runs the moment you copy it down —
-nothing to buy, no account; the one free window your Mac itself may show is named in the
-walk-through — proves itself, learns what you teach it, and says honestly what is not here *yet*.
-
-**Keeping a second brain?** [`SECOND-BRAIN.md`](SECOND-BRAIN.md) is the vault door — open the body
-in Obsidian, and the wiki operations (ingest / query / lint) in the body's own organs.
-
-**Holding a group session?** Open **Sema Sessions.app** on a Mac. The room receives its own local listening
-voice, records or receives existing sound, and keeps previous sessions ready to rename, edit, archive, restore,
-or delete. [`SESSIONS.md`](SESSIONS.md) is the plain-words map. The room asks everyone to agree to being
-recorded before it begins, and private sessions stay on your own computer and are never published.
+**Want it on your own Mac, no account?** The small program is already inside the project: copy the repo
+down and the [Build it](#build-it-one-c-seed--native) section below runs a real body cell the moment it
+compiles — nothing to buy, no account. It proves itself, and says honestly what is not here *yet*.
 
 **Comfortable with code?** Clone this repo, open Claude Code or Codex inside it, and say hello. Ask:
 
@@ -100,17 +91,13 @@ the runtime touches no Go, Rust, Python, or TypeScript. The same fresh-checkout 
 | `runtime/` | the c-seeded `fkwu` — one C seed → native |
 | `surface/` | the minimal host-OS / resource surface |
 | `grammars/` | the BMF cursor + grammars-as-data — the body's tongue (incl. `form-eval`: source runs straight off the cursor) |
-| `form/form-stdlib/` | the portable Form stdlib body and sole agent surface: canonical `form-cli-*.fk`, the BML authority, HTTP, serialization, ports, tools, satsang, and focused bands — among them `core-lexicon.fk`, a 64-word dictionary whose every defining sentence stays inside the 64 plus twelve counted glue words, a closure it checks on itself |
+| `form/form-stdlib/` | the portable Form stdlib body and sole agent surface: canonical `form-cli-*.fk`, the BML authority, HTTP, serialization, ports, tools, and focused bands — among them `core-lexicon.fk`, a 64-word dictionary whose every defining sentence stays inside the 64 plus twelve counted glue words, a closure it checks on itself |
 | `form/native/` | the Metal carrier and the Form-native model lane (the Qwen3.8-27B handle) |
 | `model/` | the form-native model execution body and the JIT family |
 | `observe/` · `learn/` · `ingest/` · `presence/` | the organs of a self-aware mind |
 | `docs/live-dynamic-diagnostics.md` | bidirectional framebuffer usage: observe → control → actuate → re-observe |
-| `docs/coherence-substrate/current-language-artifact-path.md` | the present grammar → compiler → artifact path |
-| `docs/coherence-substrate/` | substrate contracts: HTTP service/layers, resource ports, tool channels, current path, and grounding docs |
 | `HOMECOMING.md` | what is home, what is still coming home |
 | `CURRENT_FLOOR.md` | the floor that stands today, every number re-run on the date it names |
-| `SECOND-BRAIN.md` | the vault door — the body as an Obsidian-readable second brain; ingest / query / lint as body organs |
-| `SESSIONS.md` | the no-configuration session library: record, transcribe, revisit, edit, and write from source |
-| [`INDEX.md`](INDEX.md) | the body's self-portrait — **produced**, not authored, by `observe/autopoietic-pulse.fk` from the body's own observation of itself |
+| `MANIFEST.md` | the kernel's orientation: what each room holds |
 
-To contribute, see [`CONTRIBUTING.md`](CONTRIBUTING.md). The smallest honest movement, proven, returned with a trace.
+To contribute, give the smallest honest movement, proven, returned with a trace. [`AGENTS.md`](AGENTS.md) names how.

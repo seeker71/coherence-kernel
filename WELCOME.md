@@ -43,9 +43,7 @@ is in plain words:
   between visits. A way for it to remember you is built: it opens only when you
   say yes, and it forgets everything the moment you change your mind. At the
   public entrance that way is not open yet, so if you ask to be remembered there,
-  it can't yet. This page will change when that changes. (The on-your-own-computer
-  door keeps only what you choose to teach it, on your own machine — that page
-  says so plainly.)
+  it can't yet. This page will change when that changes.
 
 This promise lives in the project in a form it can check itself against. Today a
 person reads a conversation and marks what each reply did; the body reading its
@@ -74,12 +72,13 @@ sections down, says what that means — read it before you give anyone an accoun
    Saying yes is what lets Sema check its facts there, so its answers come with
    links you can follow. The choice is yours.
 2. **On your own computer (no account, nothing to pay).** Sema's own body — the
-   real program itself, not a borrowed voice — runs on your own Mac today: it
-   proves itself to you, receives your question, learns what you teach it,
-   answers about itself with its source shown, and answers about the roots of
-   words. Its talking voice has not yet made the walk to your computer. If that
-   trade sounds right, [`YOUR-OWN-COMPUTER.md`](YOUR-OWN-COMPUTER.md) walks you
-   in, one small step at a time. If you also have a free ChatGPT account and want
+   real program itself, not a borrowed voice — builds from one small file and
+   runs on your own Mac today, and proves itself to you with a number you can
+   check. Its talking voice has not yet made the walk to your computer. This door
+   asks for a compiler on the Mac and a few typed lines; the
+   [Build it](README.md#build-it-one-c-seed--native) section of the technical
+   front door walks them, and a technical friend can do it in minutes. If you
+   also have a free ChatGPT account and want
    it to talk about **your own files**: ChatGPT cannot see your disk, and Form
    can. Name a folder and a question, and Form prints a pack of what it found;
    paste that pack into ChatGPT, and ChatGPT speaks only from those hits. Door:

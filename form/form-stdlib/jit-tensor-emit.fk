@@ -34,11 +34,10 @@
   (str_concat fname
               " (w: *const f64, x: *const f64, y: *mut f64, rows: i64, cols: i64) { let r = rows as usize; let c = cols as usize; let mut i = 0usize; while i < r { let row = w.add(i * c); let mut acc = 0.0f64; let mut j = c; while j > 0 { j -= 1; acc = *row.add(j) * *x.add(j) + acc; } *y.add(i) = acc; i += 1; } }")))
 
-; jte-matvec-msl — RETIRED hand-spine; now the IR's tir-matvec-msl-fmt (Metal lane, one thread per
+; jte-matvec-msl — the IR's tir-matvec-msl-fmt (Metal lane, one thread per
 ; output row, the SAME downward two-rounding dot). Precision (f32/f16/bf16) is a TABLE row in the IR
-; (tir-msl-table-el over tir-msl-elem), not a copy of the emitter. The M4-Max bit-exact reference
-; (form-stdlib/tests/matvec-affine-metal-live-band.fk) still holds — the emitted MSL is byte-for-byte the old spine
-; (model/tests/tensor-ir-band.fk). jte-msl-elem stays as the lane's storage-type row (still used by
+; (tir-msl-table-el over tir-msl-elem), not a copy of the emitter. The emitted MSL is byte-for-byte
+; the hand spine's (model/tests/tensor-ir-band.fk). jte-msl-elem stays as the lane's storage-type row (still used by
 ; the block/affine-train MSL kernels below, which the IR does not yet carry).
 (defn jte-msl-elem (fmt) (if (str_eq fmt "f16") "half" (if (str_eq fmt "bf16") "bfloat" "float")))
 (defn jte-msl-acc (fmt) "float")
@@ -139,7 +138,7 @@
 ;     arithmetic body is the SAME shared IR spine as MSL, byte-for-byte (the proof that the per-ISA
 ;     difference is the only DATA). Compiled with nvcc --fmad=false the GPU result is the recipe's to
 ;     the last bit (cuda_matvec_audit.sh / cuda_affine_train_audit.sh — NEITHER SCRIPT NOR GPU is in this
-;     checkout, so the CUDA lane is emit-proven only here: jit-tensor-cuda-emit-band pins the text
+;     checkout, so the CUDA lane is emit-proven only here: the emitted text is pinned
 ;     four-way and nothing on this host has ever run it. Named as absent rather than cited as a gate.). The f32 ground and the
 ;     __half / __nv_bfloat16 lanes are TABLE rows (tir-cuda-elem), proven byte-identical to the old
 ;     spines across all three formats (model/tests/tensor-ir-band.fk). jte-cuda-elem stays as the
@@ -167,8 +166,7 @@
 ; `round` has exactly one home, jte-msl-round, prepended by jte-llama-helpers-floor; a second copy is a
 ; repeated `static inline` that Metal rejects outright. Unqualified, eight families compiled nowhere while
 ; every text band stayed green (corpus row 1414 saidsocompile). The gate is
-; form/form-stdlib/tests/msl-families-mint-band.fk; observe/msl-mint-run.fk shows each family whole,
-; unhealed with the compiler's own repair, or released.
+; form/form-stdlib/tests/msl-families-mint-band.fk.
 ;
 ; Threading without aliasing: each thread strides over hidden units (phases 1,3,5) or outputs (phases 2,4).
 ; The folds match the recipe — the two forward matvecs carry tb-dot's DOWNWARD right-fold; the dh1 column
@@ -225,8 +223,7 @@
 ; inside a 50-iteration Newton sqrt) and the residual highway (y = h + ffn, so the output-gradient gy = 2(y-t)
 ; flows straight to the FFN as gout). The FFN reads z, and the W1 update uses z, not the raw input. Same
 ; recipe-own exp/tanh (jte-mlp-helpers); same downward forward folds and forward dh1 column fold; same
-; barriered single-threadgroup phases plus phase 0 for the layernorm. Proven byte-stable by
-; tests/resid-train-emit-band.fk; trained live and capacity-searched on the M4 Max by form-stdlib/tests/resid-train-metal-live-band.fk.
+; barriered single-threadgroup phases plus phase 0 for the layernorm.
 
 (defn jte-resid-sig (fname el ac)
   (str_concat "kernel void " (str_concat fname (str_concat "(device " (str_concat el (str_concat "* w1 [[buffer(0)]], device " (str_concat el (str_concat "* b1 [[buffer(1)]], device " (str_concat el (str_concat "* w2 [[buffer(2)]], device " (str_concat el (str_concat "* b2 [[buffer(3)]], device const " (str_concat el (str_concat "* h [[buffer(4)]], device const " (str_concat el (str_concat "* t [[buffer(5)]], device " (str_concat ac (str_concat "* loss [[buffer(6)]], device " (str_concat ac (str_concat "* h1 [[buffer(7)]], device " (str_concat ac (str_concat "* a [[buffer(8)]], device " (str_concat ac (str_concat "* gy [[buffer(9)]], device " (str_concat ac (str_concat "* dh1 [[buffer(10)]], device " (str_concat ac (str_concat "* z [[buffer(11)]], constant uint& indim [[buffer(12)]], constant uint& hid [[buffer(13)]], constant uint& outd [[buffer(14)]], constant " (str_concat ac (str_concat "& lr [[buffer(15)]], constant " (str_concat ac "& eps [[buffer(16)]], uint tid [[thread_position_in_threadgroup]], uint tgs [[threads_per_threadgroup]]) { ")))))))))))))))))))))))))))))))
@@ -266,8 +263,7 @@
 ; architect's blocks, so this kernel runs the whole step in one thread, matching the recipe's folds serially:
 ; the q/score/value dots carry tb-dot's DOWNWARD fold, the att/datt/dq sums carry tb-weighted-acc / tbp-wt-gy-acc
 ; / tbp-attn-dq-acc's FORWARD fold, softmax carries tn-max-subtract + the recipe's own fexp. Same recipe-own
-; exp/tanh helpers as the FFN kernels. Proven byte-stable by tests/attn-train-emit-band.fk; trained live on the
-; M4 Max by form-stdlib/tests/attn-train-metal-live-band.fk. Parallelizing across keys and projection rows is the named follow-up;
+; exp/tanh helpers as the FFN kernels. Parallelizing across keys and projection rows is the named follow-up;
 ; this closes the type axis — attention now trains on the silicon alongside the FFN and residual blocks.
 
 (defn jte-attn-sig (fname el ac)
@@ -306,8 +302,7 @@
 ; The single-thread walk matches the recipe serially and bit-exactly; parallelizing across tokens and rows
 ; (one threadgroup per query, the matvec spine's per-row threads) is the named follow-up, as with the attn
 ; and ffn training kernels. fp32 lane first; format lanes (f16/bf16) parameterize the same spine when the
-; carrier learns the block ABI, exactly as the matvec spine already does. Proven byte-stable four-way by
-; tests/block-fwd-emit-band.fk.
+; carrier learns the block ABI, exactly as the matvec spine already does. Byte-stable four-way.
 
 (defn jte-blk-sig (fname)
   (str_concat "kernel void " (str_concat fname
@@ -353,7 +348,7 @@
 ; not LayerNorm: no mean-subtract, no bias, just a root-mean-square rescale × per-channel gain), RoPE
 ; on q/k (rope.fk: each adjacent pair rotated by θ = pos·base^(−hd/HD)), and SwiGLU (llama-numerics.fk:
 ; silu(Wg·n)·(Wu·n), not gelu). The projections are bias-free. llama-block.fk's lblk-block composes
-; them into the block (proven FOUR-WAY 4095 by tests/llama-block-band.fk); this emits that exact
+; them into the block; this emits that exact
 ; forward as one Metal kernel the M4 GPU runs, mirroring lblk-block's serial folds bit-for-bit:
 ;   n1 = RMSNorm1(x)
 ;   h  = x + Wo·attn( RoPE(Wq·n1), RoPE(Wk·n1), Wv·n1, scale )        (non-causal self-attention)
@@ -365,13 +360,13 @@
 ; Newton tn-sqrt; SiLU's sigmoid is the recipe's fexp; RoPE's sin/cos/pow are trig.fk's OWN Taylor
 ; recipes (fsin/fcos via range-reduce, fpow = fexp(e·fln b)), never Metal's transcendentals. So the
 ; transcendental floor is the body's, not the hardware's — the parity gate against an fp32 CPU mirror of
-; the SAME folds is honest end to end (form-stdlib/tests/llama-block-fwd-metal-live-band.fk), and the GPU output tracks the
+; the SAME folds is honest end to end, and the GPU output tracks the
 ; proven fp64 recipe within fp32 epsilon. Dims (S tokens, d model, dq query/key, dv value, hid FFN, HD
 ; head-dim) arrive as RUNTIME buffers, so the emitted MSL is one static string parameterized only by the
 ; kernel name — a layer stack is a sequence of these calls, weights as recipe DATA all the way down.
 ; Single-thread walk (gid==0) matches the recipe serially; parallelizing across tokens/rows is the named
 ; follow-up. fp32 lane first; the causal mask is an orthogonal follow-up (a per-query key-prefix, no
-; numeric change). Proven byte-stable four-way by tests/llama-block-fwd-emit-band.fk.
+; numeric change). The emitted text is byte-stable four-way.
 
 ; --- llama-specific MSL helpers: sin/cos/ln/pow as the recipe's OWN Taylor (fexp comes from jte-mlp-helpers) ---
 (defn jte-llama-helpers ()
@@ -447,7 +442,7 @@
 ;     to jte-llama-block-fwd-msl EXCEPT the attention mask — query at position s sees only keys/values 0..s
 ;     (the per-query key PREFIX of tb-attn-seq-causal: every "while (t < S)" of the non-causal attn becomes
 ;     "while (t < s + 1u)"). No numeric change to the per-pair dot/softmax (composes the same fexp/max-subtract
-;     fold), so it mirrors llama-block.fk's lblk-block-causal (proven FOUR-WAY 511 by tests/causal-attention-band.fk)
+;     fold), so it mirrors llama-block.fk's lblk-block-causal
 ;     serially and bit-for-bit. At the last token the prefix is the whole sequence so it equals the non-causal
 ;     block; the first token attends only to itself (softmax of a single score = 1.0). This is the block the
 ;     generation loop steps — it produces one token's next-state without leaking later positions. ---
@@ -469,8 +464,8 @@
 
 ; --- GROUPED-QUERY ATTENTION (GQA) over a sequence on the GPU. The attention real llama3.2:3b runs:
 ;     n query heads share nkv < n KV heads; query head h reads KV head (h / group), group = n / nkv,
-;     and k/v are projected to the SMALLER nkv*hd width. This emits tb-gqa-attn (gqa-attn.fk, four-way 7
-;     by tests/gqa-attn-band.fk) as ONE Metal kernel: for each query head h, attention runs INDEPENDENTLY
+;     and k/v are projected to the SMALLER nkv*hd width. This emits tb-gqa-attn (gqa-attn.fk)
+;     as ONE Metal kernel: for each query head h, attention runs INDEPENDENTLY
 ;     within head h's hd-wide q-slice against KV head (h/group)'s hd-wide k/v-slice, the per-head context
 ;     vectors concatenated position-wise back to n*hd. Every fold matches the recipe so it stays
 ;     bit-deterministic across kernels exactly as the single-head block does: each dot is tb-dot's downward
@@ -481,7 +476,7 @@
 ;     bias-free q/k/v projections and RoPE. Dims (S, n, nkv, hd) and scale arrive as runtime buffers, so the
 ;     emitted source is one static string parameterized only by the kernel name. The single-thread (gid==0)
 ;     serial walk matches the recipe fold order; parallelizing across query heads is the named follow-up.
-;     Compiles and runs on the M4 Max GPU (form-stdlib/tests/gqa-attn-metal-live-band.fk): GPU fp32 bit-exact vs a CPU
+;     Compiles and runs on the M4 Max GPU: GPU fp32 bit-exact vs a CPU
 ;     fp32 mirror of the same folds, tracking the proven fp64 recipe within fp32 epsilon. ---
 (defn jte-gqa-sig (fname)
   (str_concat "kernel void " (str_concat fname
@@ -500,8 +495,8 @@
 ;     the GQA generalization of jte-llama-block-fwd-causal-msl (#3376). That block's attention was SINGLE-head
 ;     (one dq-wide dot); this one runs proper GROUPED-QUERY multi-head attention — n_q query heads sharing
 ;     n_kv < n_q KV heads, query head h reading KV head (h / (n_q/n_kv)) — the attention real llama3.2:3b runs
-;     (24 query heads, 8 KV heads, head_dim 128). Composed from llama-gqa-block.fk's lgqa-block-causal (proven
-;     four-way 15 by tests/llama-gqa-block-causal-band.fk): n1=RMSNorm1(x) ; h = x + Wo*GQA-causal(RoPE(Wq*n1),
+;     (24 query heads, 8 KV heads, head_dim 128). Composed from llama-gqa-block.fk's lgqa-block-causal:
+;     n1=RMSNorm1(x) ; h = x + Wo*GQA-causal(RoPE(Wq*n1),
 ;     RoPE(Wk*n1), Wv*n1) ; n2=RMSNorm2(h) ; y = h + Wdown*SwiGLU(Wgate*n2, Wup*n2). The ONLY change from the
 ;     single-head causal block is the projection widths (k/v project to the SMALLER n_kv*HD = KVD) and the
 ;     attention loop (per query head h: dot the HD-wide q-slice at h*HD against KV head (h/grp)'s HD-wide
@@ -512,8 +507,8 @@
 ;     (never Metal's); RoPE is base-10000 (fpow=fexp*fln), the cfg10 special case of lgqa's rope-scaled (band
 ;     claim 1: lgqa-block-causal(cfg10) == lblk-block-causal bit-for-bit) — the llama3 theta-500000 rope-scaling
 ;     MSL is the named next stone. Dims (S, d, dq, KVD, hid, HD, nkv) arrive as runtime buffers, so the source is
-;     one static string parameterized only by the kernel name. Compiles + runs on the M4 Max GPU
-;     (form-stdlib/tests/gqa-llama-metal-live-band.fk): GPU fp32 bit-exact vs a CPU fp32 mirror of the same folds,
+;     one static string parameterized only by the kernel name. Compiles + runs on the M4 Max GPU:
+;     GPU fp32 bit-exact vs a CPU fp32 mirror of the same folds,
 ;     tracking the proven fp64 lgqa-block-causal within fp32 epsilon, on the real (n_q=2, n_kv=1) grouping. ---
 (defn jte-gqa-blk-sig (fname)
   (str_concat "kernel void " (str_concat fname
@@ -557,9 +552,9 @@
   (str_concat (jte-llama-blk-ffn) "}"))))))))))))
 
 ; --- the KV-CACHED DECODE STEP: the autoregressive generation inner loop on the GPU. One token per dispatch,
-;     over a PERSISTENT cache the host threads across dispatches. This is the GPU realization of kv-llama-block.fk's
-;     lblk-generate-causal (#3408, four-way 255), proven there BIT-IDENTICAL to the full causal recompute
-;     (lblk-block-causal, #3365). Each step p: RMSNorm1(x_p) -> project q/k/v from the SINGLE new token ->
+;     over a PERSISTENT cache the host threads across dispatches. This is the GPU realization of the KV-cached
+;     lblk-generate-causal recipe, BIT-IDENTICAL to the full causal recompute
+;     (llama-block.fk's lblk-block-causal). Each step p: RMSNorm1(x_p) -> project q/k/v from the SINGLE new token ->
 ;     RoPE q and k by position p -> APPEND the RoPE'd k_p / v_p into the running cache slot p -> attend the
 ;     query over the grown prefix cache[0..p] -> Wo/residual/RMSNorm2/SwiGLU/residual -> y_p. Only the NEW
 ;     token is projected each step; earlier positions' k/v are reused from the cache (O(n) per token, not the
@@ -569,8 +564,7 @@
 ;     jte-llama-block-fwd-causal-msl's whole-sequence output BIT-FOR-BIT on silicon. The new token's slot is p,
 ;     so the cache is passed device-writable; the host owns the persistent cacheK/cacheV buffers. Single-thread
 ;     (gid==0) serial walk matches the recipe; the transcendentals stay the recipe's OWN (Newton sqrt, fexp,
-;     trig Taylor). Proven byte-stable four-way by tests/llama-block-decode-emit-band.fk; run on the M4 GPU by
-;     form-stdlib/tests/llama-decode-step-metal-live-band.fk (the decode loop == the full causal kernel, bit-exact). ---
+;     trig Taylor). Run on the M4 GPU, the decode loop == the full causal kernel, bit-exact. ---
 (defn jte-llama-dec-sig (fname)
   (str_concat "kernel void " (str_concat fname
   "(device const float* wq [[buffer(0)]], device const float* wk [[buffer(1)]], device const float* wv [[buffer(2)]], device const float* wo [[buffer(3)]], device const float* g1 [[buffer(4)]], device const float* wg [[buffer(5)]], device const float* wu [[buffer(6)]], device const float* wd [[buffer(7)]], device const float* g2 [[buffer(8)]], device const float* x [[buffer(9)]], device float* ck [[buffer(10)]], device float* cv [[buffer(11)]], device float* y [[buffer(12)]], device float* sc [[buffer(13)]], constant uint& p [[buffer(14)]], constant uint& d [[buffer(15)]], constant uint& dq [[buffer(16)]], constant uint& dv [[buffer(17)]], constant uint& hid [[buffer(18)]], constant uint& HD [[buffer(19)]], constant float& scale [[buffer(20)]], constant float& eps [[buffer(21)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; ")))
@@ -627,8 +621,8 @@
 ;     (24 query heads sharing 8 KV heads) on the GPU. The GROUPED-QUERY generalization of
 ;     jte-llama-block-decode-step-msl (#3412, single-head/MHA decode): the cache stores the SMALLER n_kv*HD-wide
 ;     k/v per position, and query head h attends KV head (h / (n_q/n_kv)). The GPU realization of
-;     kv-gqa-llama-block.fk's lgqa-generate-causal (#3601, four-way 255), proven there BIT-IDENTICAL to the full
-;     causal GQA recompute (lgqa-block-causal, #3590, four-way 15). Each step p: RMSNorm1(x_p) -> project q (to
+;     the KV-cached lgqa-generate-causal recipe, BIT-IDENTICAL to the full
+;     causal GQA recompute (llama-gqa-block.fk's lgqa-block-causal). Each step p: RMSNorm1(x_p) -> project q (to
 ;     dq=n_q*HD) and k/v (to the SMALLER KVD=n_kv*HD) from the SINGLE new token -> RoPE q and the new key by
 ;     position p -> APPEND the RoPE'd k_p / v_p into cache slot p (KVD-wide) -> per query head, attend its
 ;     HD-wide q-slice over the grown prefix cache[0..p] of KV head (h/grp), context concatenated to dq -> Wo/
@@ -637,16 +631,14 @@
 ;     the front-to-back walk holds at step p is exactly the prefix the full causal GQA kernel's mask
 ;     (while t < s+1u) cuts at query p, with identical fold order — so looping this kernel reproduces
 ;     jte-gqa-llama-block-fwd-causal-msl's (#3590) whole-sequence output BIT-FOR-BIT on silicon
-;     (form-stdlib/tests/gqa-llama-metal-live-band.fk runs both kernels on the M4 Max GPU and gates the GQA
-;     decode loop == the full causal GQA recompute, bit-exact, both tracking the proven fp64 recipe within fp32
-;     eps). group=1 (n_kv=n_q) reduces to the single-head decode per head — core-abstraction-first, MHA is the
+;     (both kernels run on the M4 Max GPU: the GQA decode loop == the full causal GQA recompute, bit-exact,
+;     both tracking the proven fp64 recipe within fp32 eps). group=1 (n_kv=n_q) reduces to the single-head decode per head — core-abstraction-first, MHA is the
 ;     special case, no parallel path. RMSNorm1/RMSNorm2 + the SwiGLU FFN are jte-llama-dec-rms1/rms2/ffn VERBATIM
 ;     (those reference only oN1/oH/oN2/oG/oU/oACT, never the attention offsets); only the projection widths (k/v
 ;     to KVD), the RoPE width (KVD for the key), and the per-query-head grouped attention loop change. Every dot
 ;     is the downward right-fold through a named temporary (no fma contraction); softmax/SiLU is the recipe's OWN
 ;     fexp Taylor; RoPE is base-10000 (the cfg10 special case). Dims (p, d, dq, KVD, hid, HD, nkv) arrive as
-;     runtime buffers, so the source is one static string parameterized only by the kernel name. Proven byte-stable
-;     four-way by tests/gqa-llama-block-decode-emit-band.fk.
+;     runtime buffers, so the source is one static string parameterized only by the kernel name.
 ;     teaching: lc-cognitive-sovereignty
 (defn jte-gqa-dec-sig (fname)
   (str_concat "kernel void " (str_concat fname

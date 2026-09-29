@@ -13,8 +13,7 @@ commands should use this address directly.
 - `form-stdlib/` - Form stdlib, BMF engine, source compiler, language/media/natural-language grammars, and tests.
 - `form-samples/` - small runnable Form workloads.
 - `validate.sh` - sibling-kernel source and binary parity runner.
-- `kernel-roadmap.md` and `kernel-comparison.md` - current runtime roadmap and
-  performance notes.
+- `kernel-roadmap.md` - current runtime roadmap.
 
 ## Current Compiler Path
 
@@ -24,27 +23,18 @@ The active source path is BMF cursor -> layer grammar -> semantic/data lowering
 `form-definition-language` modules into `source-compiler-emission` only after
 scannerless grammar parse and lowering to the current top-level Form floor.
 
-The full present map is
-[`../docs/coherence-substrate/current-language-artifact-path.md`](../docs/coherence-substrate/current-language-artifact-path.md).
-
 ## Proof
 
 ```sh
 cd form
-../fkwu form-stdlib/tests/form-action-bmf-rulebook.fk                  # fkwu, Go, Rust, TS agree, 2026-09-15
+../fkwu form-stdlib/tests/source-compiler-grammar-bridge-band.fk        # fkwu reads 32767, 2026-09-29
 ./validate.sh form-stdlib/tests/source-compiler-grammar-bridge-band.fk  # three-way agreed, 2026-09-04
 ```
 
 A band is named alone: every kernel walks its `; preludes:` closure itself, so a
-hand-typed file list is not only unnecessary but wrong when it omits a prelude
-(the rulebook band's closure includes `json.fk`, `cache.fk`, and
-`form-ontology-bp.fk`; without them every arm dies on `FORM-CATEGORY-TABLE`).
-Neither band is registered in `fourth-arm-bands.txt`: the rulebook's fkwu reading
-matches Go, Rust, and TS run directly, and the bridge run speaks for three
-kernels. The rulebook checks the Form text its rewritten program emits through
-`fsc-source-emit-module`, the text fkwu compiles. The `--binary` lane refuses the rulebook workload today — all three
-kernels answer `form binary: maximum node depth exceeded` — so that artifact
-proof is owed, not claimed.
+hand-typed file list is not only unnecessary but wrong when it omits a prelude.
+The bridge band is not registered in `fourth-arm-bands.txt`; the bridge run speaks
+for three kernels.
 
 The kernel stays small: source sections, BMF rules, dialect migration,
 reverse emission, module bundling, locale/context lenses, and language/media

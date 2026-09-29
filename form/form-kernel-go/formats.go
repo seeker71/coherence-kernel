@@ -9,9 +9,6 @@
 // form/contracts/numeric-formats.canonical.json and read at
 // runtime by BuildFormatLibrary. Drift between contract and Go source is
 // prevented by reading the JSON instead of hardcoding the list.
-//
-// See docs/coherence-substrate/numeric-types-plan.md for the architecture
-// and form/kernel-ts-numeric-comparison.md for the perf arc.
 
 package main
 
@@ -282,7 +279,7 @@ type FormatLibrary struct {
 }
 
 // makeFormatRecipe — intern a format-recipe with children in the canonical
-// order. Mirrors makeFormatRecipe() in formats.ts; the child-vector shape
+// order. Mirrors intern_format() in formats.rs; the child-vector shape
 // determines the content-addressed NodeID.
 //
 // Children laid out as (per $intern_order_comment in the JSON):
@@ -637,7 +634,7 @@ func applyArith(fmt *FormatRecipe, op uint32, a, b NumValue) NumValue {
 func fmt2(f string, a ...any) string { return fmt.Sprintf(f, a...) }
 
 // narrowInt — sign-extend an int32 result truncated to `bits` width.
-// Mirror of narrowInt() in formats.ts.
+// Mirror of narrow_int() in formats.rs.
 func narrowInt(v int32, bits uint32) int32 {
 	if bits >= 32 {
 		return v

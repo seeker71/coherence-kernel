@@ -634,7 +634,7 @@ static long long fk_is_nothing(long long v) {
  * to ~2.5e17), so indices at-or-above FK_CLOSURE_IDX_BASE (a billion, far past any real fk_fn_count)
  * now name a row in a SEPARATE runtime table (fk_clo_target/capbase/capcount/capvals) instead of a
  * plain fk_fn[] entry: which function to run, and the values it captured at the moment its value
- * was built (form-stdlib/http-layer.fk's `layer-stamp` closing over its own `hn`/`hv` is the
+ * was built (a stamping layer closing over its own header name and value is the
  * standing example). fk_fnval_idx(v) still just extracts the raw encoded number; fk_fnval_target(v)
  * is the new door that tells a plain function apart from a closure instance and answers "which
  * fk_fn[] row do I actually jump to". */
@@ -2700,8 +2700,8 @@ static long long fk_cam_name(long long i) {
     return fk_sbuf(nm, fk_cstrlen(nm));
 }
 /* the VfW driver connect can block forever behind modern camera stacks (witnessed on this
- * cell: the "Microsoft WDM Image Capture" shim hangs on a MIPI camera — receipts/
- * 2026-07-01-windows-camera-carrier-probe.md). Probe on a worker thread and refuse
+ * cell: the "Microsoft WDM Image Capture" shim hangs on a MIPI camera).
+ * Probe on a worker thread and refuse
  * honestly after 3s; on timeout the probe struct and stuck thread are deliberately
  * abandoned (the named cost of a hung driver — never freed under its feet). */
 extern void *CreateThread(void *, unsigned long long, unsigned int (*)(void *), void *,
@@ -5228,7 +5228,7 @@ static void fk_nodes_init(void) {
 /* ── stone 3 (OBSERVE): the offer/ack observe hook ────────────────────────── Every reducer CALL is
  * an OFFER (axiom-5): a callee + its args, acknowledged by EXACTLY ONE of {nothing, 0, 1, node}.
  * This hook makes that offer/ack witnessable as a trace the observe organ reads — the live feed
- * runtime-witness.fk named as the one piece "that depends on the runtime emitting it" (a fire-event
+ * observe organ named as the one piece "that depends on the runtime emitting it" (a fire-event
  * per call). It composes the existing fk_arms tag-counter (which already witnesses every node
  * visit) by LIFTING it to the offer/ack altitude: one line per offer, carrying the callee, the
  * arg-count, and the FOUR-ARM ack-kind the call returned. Toggle: env FK_OBSERVE=1 (read once). OFF
@@ -5283,7 +5283,7 @@ static long long fk_offer_ack(long long callee, long long argn, long long v) {
  * SSID/signal (wlanapi), Bluetooth radio + paired count (bthprops), battery + memory load
  * (kernel32). Afferent reads, plain C, same pattern as the camera/mic carriers; each degrades to an
  * honest sentinel ("" / -1 / 0) if the API is absent. They stream into the mesh as readings: wifi
- * SSID -> WHERE (place), bt -> WHO/near, power+mem -> vitality (observe/host-sensors-mesh.fk). */
+ * SSID -> WHERE (place), bt -> WHO/near, power+mem -> vitality (the host-sensors mesh). */
 #if defined(_WIN32)
 extern unsigned int WlanOpenHandle(unsigned int, void *, unsigned int *, void **);
 extern unsigned int WlanCloseHandle(void *, void *);
@@ -9711,8 +9711,8 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
  * They exist because observe/form-glass-ear-live.fk stood its two lanes through
  * `sh -c` -- not to run a shell program, but only to say where the child's three
  * standard streams go. A lane born holding the parent's own terminal stdin sits
- * at its first read forever (receipts/2026-09-07-a-lane-born-mute.md, corpus row
- * 1339 mutebirth). The REASON was sound; the shell was furniture.
+ * at its first read forever (corpus row 1339 mutebirth).
+ * The REASON was sound; the shell was furniture.
  *
  *   host_spawn_at argv (list in out err)
  *       The missing sibling of host_spawn / host_spawn_quiet / host_wait /
@@ -12751,7 +12751,7 @@ static long long fk_walk(long long i, long long fp) {
          * (a) at the exact point the defn statement itself runs, reading its OWN parent's live
          * frame, or (b) at a direct-call site already verified to be in that same frame -- and
          * freeze them into a new closure-instance row (fk_clo_make) so they survive after this
-         * frame is gone (form-stdlib/model-service.fk's ms-predict-handler returning ms-handle,
+         * frame is gone (a model service's predict handler returning its request handle,
          * to be called much later on some future request, is the standing example). */
         long long base243 = fk_vsp;
         while (chain243 >= 0 && fk_node[chain243][0] == 242) {
@@ -16759,7 +16759,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* host_cwd: this process's working directory, as its own word.
          *
          * The body used to fork a process and read `pwd` back through
-         * host_capture to learn this -- observe/native-source-cache-witness.bml
+         * host_capture to learn this -- the source-cache witness
          * and gate/kernel-conformance.bml both did, and a witness that shells
          * out to ask where it is standing is not standing anywhere it can
          * describe. Urs, 2026-09-10: remove the external tools and the
@@ -18282,7 +18282,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
  * destination. Witnessed: fkwu --src run a .fk file. The op vocabulary itself is DATA, not C: there
  * is no per-op if-chain. The (name arity tag) rows and the comparison/boolean rewrites live in the
  * GENERATED runtime/fkwu-optable.h (from flt-ops, the same single source the flattener reads; regen
- * via flatten/gen-source-walker.sh). Adding a value op = a manifest row, never a C edit. Only the
+ * via flatten/gen-source-walker-table.fk). Adding a value op = a manifest row, never a C edit. Only the
  * control forms defn/do/let/if keep hand-written shape here — their eval semantics are special.
  * Every VALUE form is data: arity-0 ((empty)->18), arity-1/2/3 primitives, and the arity -1
  * VARIADIC sentinel ((list ..)->cons/19). */
@@ -19237,7 +19237,7 @@ static long long fk_rwtab_find(long long s, long long n) {
  * control forms, any rewrite row, any op row. A binding of that spelling (a defn
  * parameter, a let) is reachable in value position only; in call position the
  * primitive wins, on Go, Rust and TS as here. That trap returned a full-pass 255 on
- * a deliberately broken band (receipts/2026-07-22-ship-the-slot-map.md, defect 1),
+ * a deliberately broken band (the slot-map ship, 2026-07-22, defect 1),
  * so [shadowed-call] below says it out loud. */
 static int fk_reserved_text_head(const char *text, long long n) {
     if (fk_optname_eq(text, n, "defn") || fk_optname_eq(text, n, "do") ||
@@ -19878,7 +19878,7 @@ static long long fk_sparse(void) {
         }
 
         /* (let name val): canonical let is TWO-ARG — it binds name for the REST of its (do ...) and
-         * evaluates to val (observe/wav-sense.fk: "let is two-arg only; binds for the rest of its
+         * evaluates to val (the wav-sense cell: "let is two-arg only; binds for the rest of its
          * do; a three-arg (let n v body) drops body"; the Go/Rust/TS walkers agree). A well-formed
          * let always opens a do, so it is bound by fk_parse_do, which sees the rest; this fk_sparse
          * path is reached only by a BARE let in a raw value position (no do, hence no rest). The
@@ -19933,7 +19933,7 @@ static long long fk_sparse(void) {
          * scope reads as subtraction, not as the binding — the op/rewrite tables are
          * consulted before the local frame, and Go, Rust and TS answer the same way, so
          * this is not a divergence and fkwu does not refuse it. It is still the trap that
-         * cost Stone 13 hours (receipts/2026-07-22-ship-the-slot-map.md), so it is said
+         * cost Stone 13 hours (the slot-map ship, 2026-07-22), so it is said
          * out loud: a WARNING, counted and printed. */
         if (fk_bd_lookup(s, hn) >= 0 && fk_reserved_head(s, hn)) {
             fk_diag(FK_DIAG_WARN, s,
@@ -20083,14 +20083,14 @@ static long long fk_sparse(void) {
          * BEFORE the defn table, matching value position (which already reads bd first) and the
          * three siblings. Pre-heal the defn table won: (defn oac-offer (cell args) (cell args))
          * under a loaded (defn cell ...) invoked the GLOBAL constructor instead of the parameter
-         * (receipts/2026-07-17-jacobian-lens-and-the-cell-shadowing-heal.md) — every higher-order
+         * (the cell-shadowing heal, 2026-07-17) — every higher-order
          * param (map's f, filter's pred) was one same-named prelude defn away from silent
          * capture. A shadowed head lowers through the indirect-call arm below (tag 244). */
         long long hshadow = fk_bd_lookup(s, hn);
         if (hshadow < 0) {
             /* The call HEAD itself may be a captured free variable -- a parameter of the
-             * enclosing defn that HOLDS a fn (http-layer.fk's layer-wrap taking a `layer-fn`
-             * argument and its nested lw-handler later calling it is the standing example).
+             * enclosing defn that HOLDS a fn (a layer-wrap taking a `layer-fn`
+             * argument and its nested handler later calling it is the standing example).
              * fk_enc_capture captures it like any other free var, and it falls straight into the
              * ordinary "head is a bound name" indirect-call path just below -- its value is only
              * known at call time either way, capture or not. */
@@ -20438,7 +20438,7 @@ static long long fk_sparse(void) {
     }
     /* A name the IMMEDIATELY enclosing defn binds shadows every global of the same name, a
      * constant or a defn, so value position asks the enclosing frame before either table:
-     * model-service.fk's ms-handle reads its captured `model`, never a band's global `model`. */
+     * a model service's handle reads its captured `model`, never a band's global `model`. */
     long long vcap = fk_enc_capture(s, fk_spos - s);
     if (vcap >= 0) {
         return fk_smknode(110, fk_smklit(vcap), 0, 0);
@@ -20573,7 +20573,7 @@ static long long fk_parse_do(void) {
          * captures were read from, still can't be honored -- and still says
          * so loudly (the [unbound-name] / [closure-scope] diagnostics)
          * rather than silently reading whatever slot happened to be live
-         * there. model-service.fk's ms-handle reading ms-predict-handler's
+         * there. A model service's handle reading its predict handler's
          * `model` is the shape this now closes; a self-recursive capturing
          * closure is the shape it still declines.
          *
@@ -20583,7 +20583,7 @@ static long long fk_parse_do(void) {
          * "binds for the rest of its do" just above -- and un-registered
          * once that rest is parsed, so it cannot shadow a same-named
          * outer/top-level function beyond its own scope (the exact shape
-         * source-runner-do-defn-band.fk's `hidden`-inside-`local-probe`
+         * a `hidden` defn inside a `local-probe` defn
          * "defn-body trap" pins). fk_fn_lookup searches its table
          * most-recent-first, so a live inner registration wins over an
          * outer one of the same name while both are in scope. The form's
@@ -24306,7 +24306,7 @@ static int fk_src_ids_has(const unsigned long long *ids, long long n, unsigned l
     return 0;
 }
 /* EACH IMAGE ANSWERS FOR ITS OWN CLOSURE. A direct dep's image is its unit compiled standing
- * alone, carrying every unit its preludes reach, so images overlap: grammar-bnf.fkb carries
+ * alone, carrying every unit its preludes reach, so images overlap: a grammar unit's image carries
  * engine.fk and core.fk, which a band that preludes all three also images on their own. The
  * lane reads each image's identity from that closure (fk_src_standalone_unit); the root's table
  * holds only the units the root had not already collected, and its fold never equalled the
@@ -24953,8 +24953,8 @@ static int fk_run_feval(const char *path) {
      * bare top-level root never got one — its lets were handed slots in
      * fk_vs[fp+1..] while fk_vsp stayed at fp+1, so the FIRST nested call's
      * frame (pushed at fk_vsp) landed on top of the live top-level bindings
-     * and silently overwrote them (receipts/2026-07-01-node-children-last-
-     * writer-wins.md: the bare-top-level exposure). Thanks to the parse-time
+     * and silently overwrote them (the node-children last-writer-wins
+     * case: the bare-top-level exposure). Thanks to the parse-time
      * save/restore ported tonight (f99d3232), fk_maxslot at this point holds
      * exactly the ROOT scope's own slot count — so give the root the same
      * reservation every defn body already gets. */
@@ -24978,7 +24978,7 @@ static int fk_run_feval(const char *path) {
 /* STAGE argv's trailing token into fk_src, the buffer `input_byte` (tag 17) reads.
  *
  * fk_src_len was assigned NOWHERE but its initializer, so the staged-input buffer was
- * always empty and every input_byte returned 0. form-cli-main.fk's headless front door
+ * always empty and every input_byte returned 0. The form-cli headless front door
  * is exactly `fc-read` over input_byte, so the form-cli chain could not receive a command
  * from this seed at all — its header names the filler as fkwu's argv[3] "or the persistent
  * fkwu-server's per-request buffer (form-kernel-go/fkwu_bridge.go)", and that Go bridge

@@ -3,7 +3,7 @@
 ;
 ; WHY, AND THIS TIME THE MECHANISM WAS MEASURED BEFORE IT WAS BUILT. Stone 10 compiled the body's
 ; kernel, llama.cpp's kernel and two controlled variants into ONE process and ran them over the same
-; real llama3.2:3b Q6_K tensors on the same M4 Max (form/native/metal/metal_isa_diff.sh). Each variant
+; real llama3.2:3b Q6_K tensors on the same M4 Max. Each variant
 ; removes exactly one thing, so the two hypotheses that had been argued at altitude for two stones
 ; could finally be separated instead of debated:
 ;
@@ -33,8 +33,8 @@
 ;   Q6_K: ip = tid/8, il = tid mod 8, l0 = 4*il. The slot is the 16 positions
 ;         128*ip + l0 + l + {0, 32, 64, 96} for l in 0..3 — which is exactly one (h, l-quad) cell of
 ;         all four g sub-groups, so g is CONSTANT per accumulator and the four land in four
-;         INDEPENDENT float4 lanes. Verified position by position against q6k-dequant.fk's own
-;         decomposition in tests/qk-matvec-slot-band.fk — not asserted here.
+;         INDEPENDENT float4 lanes. To be checked position by position against q6k-dequant.fk's own
+;         decomposition — not asserted here.
 ;   Q4_K: cc = tid/4, ll = tid mod 4, l0 = 8*ll. The slot is the 8 qs bytes cc*32 + l0 + m (m in 0..7),
 ;         each feeding TWO weights (low nibble at 64*cc + l0 + m, high at +32) whose sub-block indices
 ;         are the constants 2*cc and 2*cc+1. So get_scale_min_k4 — a branch and four divisions in
@@ -98,10 +98,6 @@
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk
 ;
-; Proven by: form-stdlib/tests/qk-matvec-slot-band.fk (the map, position by position, against both
-;            quants' own decompositions) and form/native/metal/metal_first_token.sh (the GPU, the
-;            derived bound at gate 9b and the attestant's token ids at gate 11) and
-;            form/native/metal/metal_isa_diff.sh (the ratio against llama.cpp's own kernel).
 
 (do
     ; ================= the map, read back into Form =================
@@ -157,7 +153,7 @@
     ; q4k_f16 / q4k_sc / q4k_mn are already defined by the q6k/q4k units, and qml-msl-header leads the
     ; file. This is an APPENDIX, exactly as qk-matvec-lane.fk's is, and for the same reason.
 
-    ; ---- Q6_K. v3 of metal_isa_diff.sh, renamed and unchanged: ggml's thread map with the BODY's
+    ; ---- Q6_K. The ISA diff's third variant, unchanged: ggml's thread map with the BODY's
     ; arithmetic put back. Not one bitwise operator appears — q6k_mod and division throughout, which is
     ; precisely the thing the measurement said costs nothing once the map is right.
     (defn qsl-q6k-msl (fname)
@@ -175,7 +171,7 @@
                     " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 256u; uint rowbase = r * nb * 144u; int tid = int(lane) / 2; int ix = q4k_mod(int(lane), 2); int cc = tid / 4; int ll = q4k_mod(tid, 4); int l0 = 8 * ll; int j0 = 2 * cc; int q_offset = cc * 32 + l0; int y_offset = 64 * cc + l0; float sumf = 0.0f; for (uint i = uint(ix); i < nb; i += 2u) { uint b = rowbase + i * 144u; device const uchar* qs = qb + b + 16u + uint(q_offset); float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u])); int sc0 = q4k_sc(qb, b, j0); int mn0 = q4k_mn(qb, b, j0); int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1); device const float* yv = x + i * 256u + uint(y_offset); float2 sums = float2(0.0f); float2 xsum = float2(0.0f); for (int m = 0; m < 8; ++m) { int a = int(qs[m]); float xa = yv[m]; float xb = yv[m + 32]; sums[0] += xa * float(q4k_mod(a, 16)); sums[1] += xb * float(a / 16); xsum[0] += xa; xsum[1] += xb; } sumf += (d * float(sc0)) * sums[0] - (dmin * float(mn0)) * xsum[0] + (d * float(sc1)) * sums[1] - (dmin * float(mn1)) * xsum[1]; } float s = metal::simd_sum(sumf); if (lane == 0) y[r] = s; }")))
 
     ; ---- Q4_K, THE FOUR-WIDE MAP. 2026-07-28, and it exists because the map above was raced for the
-    ; first time and lost. metal_isa_diff.sh had only ever run Q6_K — 24.6% of llama3.2:3b's decode
+    ; first time and lost. The ISA diff had only ever run Q6_K — 24.6% of llama3.2:3b's decode
     ; MACs — so the kernel carrying the other 75.4% had no number at all. Given one (row 924,
     ; sliverproof) it came back 2.26x-2.60x off ggml across four real shapes while Q6_K sat at 1.05x.
     ;
@@ -212,7 +208,7 @@
         (str_concat fname
                     " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 256u; uint rowbase = r * nb * 144u; int ix = int(lane) / 8; int it = q4k_mod(int(lane), 8); int iq = it / 4; int ir = q4k_mod(it, 4); int qoff = 32 * iq + 8 * ir; int yoff = 64 * iq + 8 * ir; int j0 = 2 * iq; float sumf = 0.0f; for (uint i = uint(ix); i < nb; i += 4u) { uint b = rowbase + i * 144u; device const uchar* qs = qb + b + 16u + uint(qoff); device const float* yv = x + i * 256u + uint(yoff); float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u])); int sc0 = q4k_sc(qb, b, j0); int mn0 = q4k_mn(qb, b, j0); int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1); int sc2 = q4k_sc(qb, b, j0 + 4); int mn2 = q4k_mn(qb, b, j0 + 4); int sc3 = q4k_sc(qb, b, j0 + 5); int mn3 = q4k_mn(qb, b, j0 + 5); float4 sums = float4(0.0f); float4 xsum = float4(0.0f); for (int m = 0; m < 8; ++m) { int a1 = int(qs[m]); int a2 = int(qs[m + 64]); float x0 = yv[m]; float x1 = yv[m + 32]; float x2 = yv[m + 128]; float x3 = yv[m + 160]; sums[0] += x0 * float(q4k_mod(a1, 16)); sums[1] += x1 * float(a1 / 16); sums[2] += x2 * float(q4k_mod(a2, 16)); sums[3] += x3 * float(a2 / 16); xsum[0] += x0; xsum[1] += x1; xsum[2] += x2; xsum[3] += x3; } sumf += (d * float(sc0)) * sums[0] - (dmin * float(mn0)) * xsum[0] + (d * float(sc1)) * sums[1] - (dmin * float(mn1)) * xsum[1] + (d * float(sc2)) * sums[2] - (dmin * float(mn2)) * xsum[2] + (d * float(sc3)) * sums[3] - (dmin * float(mn3)) * xsum[3]; } float s = metal::simd_sum(sumf); if (lane == 0) y[r] = s; }")))
 
-    ; ---- Q4_K, THE COMPOSED STONE. 2026-08-18, measured in metal_isa_diff.sh before it was
+    ; ---- Q4_K, THE COMPOSED STONE. 2026-08-18, measured in the ISA diff before it was
     ; written here: slot4 stood at 1.54-1.64x of ggml, and three one-mechanism variants separated
     ; the residue — hardware-half d/dmin loads bought the most (1.28-1.30x alone), ggml's in-place
     ; uint16 nibble arithmetic second (1.42-1.46x alone), and naive two-row register blocking made
@@ -224,7 +220,7 @@
     ;   d/dmin arrive as HARDWARE half loads. The transcription law (q4k-msl.fk:31) existed so the
     ;   decode stays provable against fd-value; IEEE f16->f32 conversion is EXACT for every finite
     ;   f16, and q4k_f16 transcribes exactly that map, so hardware == transcription is an EQUALITY
-    ;   a band can gate on real bytes — tests/q4k-halfdecode-band.fk does, superblock by superblock.
+    ;   a band can gate on real bytes, superblock by superblock.
     ;   The nibbles ride ggml's in-place masks: (q & 0x0F00) keeps the high byte's low nibble at
     ;   256x its value and the 1/256 and 1/16 corrections are EXACT powers of two folded into the
     ;   scale multiply — an exact rescaling of the same products, so the split/slot bound family
@@ -235,7 +231,7 @@
                     " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 256u; uint rowbase = r * nb * 144u; int ix = int(lane) / 8; int it = q4k_mod(int(lane), 8); int iq = it / 4; int ir = q4k_mod(it, 4); int qoff = 32 * iq + 8 * ir; int yoff = 64 * iq + 8 * ir; int j0 = 2 * iq; float sumf = 0.0f; for (uint i = uint(ix); i < nb; i += 4u) { uint b = rowbase + i * 144u; device const uint16_t* q1 = (device const uint16_t*)(qb + b + 16u + uint(qoff)); device const uint16_t* q2 = (device const uint16_t*)(qb + b + 16u + uint(qoff) + 64u); device const float* yv = x + i * 256u + uint(yoff); device const half* dh = (device const half*)(qb + b); float d = float(dh[0]); float dmin = float(dh[1]); int sc0 = q4k_sc(qb, b, j0); int mn0 = q4k_mn(qb, b, j0); int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1); int sc2 = q4k_sc(qb, b, j0 + 4); int mn2 = q4k_mn(qb, b, j0 + 4); int sc3 = q4k_sc(qb, b, j0 + 5); int mn3 = q4k_mn(qb, b, j0 + 5); float4 acc1 = float4(0.0f); float4 acc2 = float4(0.0f); float4 xsum = float4(0.0f); for (short m = 0; m < 4; ++m) { float xa0 = yv[2*m]; float xa1 = yv[2*m + 1]; float xb0 = yv[2*m + 32]; float xb1 = yv[2*m + 33]; float xc0 = yv[2*m + 128]; float xc1 = yv[2*m + 129]; float xd0 = yv[2*m + 160]; float xd1 = yv[2*m + 161]; acc1[0] += xa0 * (q1[m] & 0x000F) + xa1 * (1.0f/256.0f) * (q1[m] & 0x0F00); acc1[1] += xb0 * (q1[m] & 0x00F0) + xb1 * (1.0f/256.0f) * (q1[m] & 0xF000); acc2[0] += xc0 * (q2[m] & 0x000F) + xc1 * (1.0f/256.0f) * (q2[m] & 0x0F00); acc2[1] += xd0 * (q2[m] & 0x00F0) + xd1 * (1.0f/256.0f) * (q2[m] & 0xF000); xsum[0] += xa0 + xa1; xsum[1] += xb0 + xb1; xsum[2] += xc0 + xc1; xsum[3] += xd0 + xd1; } sumf += (d * float(sc0)) * acc1[0] - (dmin * float(mn0)) * xsum[0] + (d * float(sc1)) * (1.0f/16.0f) * acc1[1] - (dmin * float(mn1)) * xsum[1] + (d * float(sc2)) * acc2[0] - (dmin * float(mn2)) * xsum[2] + (d * float(sc3)) * (1.0f/16.0f) * acc2[1] - (dmin * float(mn3)) * xsum[3]; } float s = metal::simd_sum(sumf); if (lane == 0) y[r] = s; }")))
 
     ; the half-decode equality probe: BOTH decodes of the same superblock header, side by side,
-    ; so tests/q4k-halfdecode-band.fk can gate hardware == transcription as an equality on real
+    ; so a band can gate hardware == transcription as an equality on real
     ; bytes. Writes pairs (hw, transcribed) for d and dmin of superblock sb.
     (defn qsl-halfdecode-msl (fname)
         (str_concat "kernel void "

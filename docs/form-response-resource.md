@@ -4,24 +4,21 @@ For native grounding followed directly by one explicitly offered provider
 response, use the separate [synthesis path](form-response-synthesis.md).
 The repair resource below retains its failed-local-report condition.
 
-`observe/form-cli-response-resource-run.bml` repairs a retained, failing
+`form/form-stdlib/bml/form-cli-response-resource.bml` repairs a retained, failing
 read-only report through one optional provider CLI process. The caller owns
 the question, source documents, assertions and provider permission. Ordinary
 native `code` remains local-only. Response sessions also remain native-only by
 default; a manifest can explicitly offer this resource with a small
-session-wide process allowance as described in
-[`form-response-comparison.md`](form-response-comparison.md).
+session-wide process allowance.
 
-Supply inline JSON or a request file on stdin:
+Supply inline JSON or a request file to the source-backed form-cli
+(`form-run ./fkwu form/form-stdlib/form-cli-repl.fk`):
 
 ```sh
-form-run ./fkwu observe/form-cli-response-resource-run.bml <<'FORM'
-@request.json
-FORM
+form-run sh -c 'printf "%s\n" "response-repair @request.json" | ./fkwu form/form-stdlib/form-cli-repl.fk'
 ```
 
-The source-backed form-cli exposes the same operation as
-`response-repair @request.json`; `response-repair help` describes it.
+`response-repair help` describes the request surface.
 File input uses the native reader and the same request-size and permission
 checks as inline input. It retains the identical request identity, so a file
 containing an already checked request reuses its answer and usage event.
@@ -101,6 +98,8 @@ stay null. With no completed turn, or a failed file read, prefix quantities also
 remain null. Do not add the prefix to a complete total from the same stream:
 these are two scopes over the same usage events, not separate spending.
 
-[App Server usage observation](form-provider-usage-observation.md) carries the
-native reader and transport probe for an interface that exposes usage updates
-during a task. Its integration into this execution resource remains open.
+`form/form-stdlib/bml/form-cli-provider-notification.bml` reads the exact
+position of usage updates from an interface that exposes them during a task, and
+`form/form-stdlib/bml/form-cli-provider-usage-replay.bml` executes proposed
+notification sequences through that reader. Its integration into this execution
+resource remains open.

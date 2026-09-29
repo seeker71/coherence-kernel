@@ -25,7 +25,7 @@
 //   - UNDECIDABLE      → LAZY (no eager option)
 // Honest default: EAGER unless the equivalence declares heavy/undecidable.
 //
-// Cross-kernel: handler names match the TS, Python, and Go arms exactly
+// Cross-kernel: handler names match the TS and Go arms exactly
 // (integer-from-nat-pair, rational-from-int-pair, commutative-pair,
 // associative-left-fold). A Form program ingested into any kernel
 // canonicalizes identically. New built-in equivalences are a cross-
@@ -105,7 +105,7 @@ fn strategy_for(d: Decidability) -> CanonStrategy {
 // Returning the same tuple-shape for any two equivalent inputs is the
 // canonicalize_fn's job; the kernel handles the content-addressing.
 //
-// Signature mirrors TS/Python/Go: `(kernel, raw_children) -> canonical`.
+// Signature mirrors TS/Go: `(kernel, raw_children) -> canonical`.
 // Send + Sync so the registry can live in a OnceLock<Mutex<...>>; in
 // practice the handlers we register are pure functions, so the bounds
 // are trivially satisfied.
@@ -142,7 +142,7 @@ pub struct EquivalenceRelation {
 //
 // Process-global so cross-Kernel testing (the QuotientLibrary builds
 // against any Kernel) sees the same handlers. The same shape lives in
-// the TS module-level Map and the Python module-level dict.
+// the TS module-level Map.
 //
 // New equivalences arrive in two halves: a substrate write (the recipe,
 // produced by `make_equivalence`) and a handler registration (the
@@ -450,7 +450,7 @@ pub fn quotient_equal(k: &mut Kernel, a: NodeID, b: NodeID) -> bool {
 //
 // Each registers a handler under a stable name and constructs the
 // substrate-resident equivalence-recipe. The names are part of the
-// cross-kernel contract — TS / Python / Go register the same handler
+// cross-kernel contract — TS / Go register the same handler
 // names so a Form program ingested into any kernel canonicalizes
 // identically.
 // ---------------------------------------------------------------------------
@@ -599,7 +599,7 @@ pub fn build_quotient_library(k: &mut Kernel) -> QuotientLibrary {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — mirror the TS quotient.test.ts assertions one-for-one.
+// Tests — `cargo test --release` here is the Rust leg of the conformance.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

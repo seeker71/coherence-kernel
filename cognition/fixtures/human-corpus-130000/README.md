@@ -1,9 +1,15 @@
 # Attributed human corpus projection toward 130,000
 
-These shards are a Form-native projection of the first eligible, attributed
-rows in thirteen exact Tatoeba `sentences_detailed` exports. The archive URLs,
-compressed hashes, retrieval stamp, license, projection hashes, row counts, and
-the measured native intake cost are retained in `SOURCE-MANIFEST.tsv`.
+This directory holds `SOURCE-MANIFEST.tsv`, the ledger of a Form-native
+projection of the first eligible, attributed rows in thirteen exact Tatoeba
+`sentences_detailed` exports. The archive URLs, compressed hashes, retrieval
+stamp, license, projection hashes, row counts, and the measured native intake
+cost are retained there. The shards themselves (`<locale>.tsv` and its
+`<locale>.u32le` index) are the products of
+`cognition/concept-human-corpus-130000-ingest.fk`, which reads a pinned archive
+(the same URLs and hashes as `../human-corpus-13/ARCHIVES.tsv`) decompressed on
+stdin and writes the projection and the index; the manifest's `projection_sha256`
+and `index_sha256` columns are what a regenerated shard must match.
 
 Every projected row carries the upstream sentence id, contributor name, added
 and modified timestamps, license, sentence page, exact upstream-row SHA-256,
@@ -16,8 +22,9 @@ language, positive sentence id, named contributor, and nonempty sentence; then
 retain the first 10,000 eligible rows in upstream order. It does not translate,
 paraphrase, prompt, balance, duplicate, or manufacture content.
 
-The actual total is **124,583**, not 130,000. Twelve lenses contain 10,000 rows.
-The complete pinned Swahili archive contains only 4,583 eligible rows, leaving
-an observed deficit of 5,417. No row was repeated or synthesized to hide that
-shortfall. `human-contributed-unreviewed` does not claim native-speaker status,
-review, factual correctness, parallel translation, or novel generation.
+The actual total is **124,583**, not 130,000 (`SOURCE-MANIFEST.tsv`: twelve
+locales at 10,000 plus Swahili at 4,583). The complete pinned Swahili archive
+contains only 4,583 eligible rows, leaving an observed deficit of 5,417. No row
+is repeated or synthesized to hide that shortfall.
+`human-contributed-unreviewed` does not claim native-speaker status, review,
+factual correctness, parallel translation, or novel generation.

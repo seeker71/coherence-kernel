@@ -39,7 +39,7 @@ receipt-alternatives). Each rung earns the next; no rung may be skipped by fakin
 **Update 2026-08-14 — two rungs moved, and one of them had moved six weeks ago without this page
 saying so.** The table above was stale. On 2026-07-02, the same day as the update below, a second
 receipt closed the two things that update named as next —
-[`native-generate-rope`](2026-07-02-native-generate-rope.md): RoPE at position > 0 (sin/cos as Form
+`native-generate-rope`: RoPE at position > 0 (sin/cos as Form
 Taylor, range-reduced) and the multi-token autoregressive loop, **7 tokens, token-for-token identical
 to an independent oracle runner** on the same checkpoint. That is rung 2 on real logits and rung
 **3a closed**, and this page went on saying "3a-full, 3b, 4, 5, 6 stand exactly as written" for six

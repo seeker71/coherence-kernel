@@ -1,7 +1,7 @@
-; mla-msl.fk — Multi-head Latent Attention (mla-attn.fk) lifted to Metal kernels the BODY emits.
+; mla-msl.fk — Multi-head Latent Attention lifted to Metal kernels the BODY emits.
 ;
-; WHY THIS EXISTS. Stone 22 proved the MLA recipe on the CPU (mla-attn.fk, band 63, against an
-; independent fp64 transcription of ds4.c). Stone 1 measured the pure CPU-recipe attention lane at
+; WHY THIS EXISTS. The MLA arithmetic is held to an independent fp64 transcription of ds4.c on the
+; CPU. Stone 1 measured the pure CPU-recipe attention lane at
 ; ~51 min/token for a 3B model at real width. DeepSeek-V4-Flash at real width on CPU recipes is
 ; infeasible. A real token needs MLA on the GPU. This file is that: the low-rank Q/KV projections, the
 ; two RMSNorms (embed-space and rank-space), the per-head unweighted RMSNorm, the trailing-nrot RoPE,
@@ -27,8 +27,8 @@
 ; reason. The projection/norm kernels are one-thread-per-output-row (matvec) or one-thread (the single
 ; embed-space norm), the ordinary GPU shapes, kept order-identical to the recipe.
 ;
-; NO `using namespace metal;`, ONE `#include <metal_stdlib>`. The same discipline q6k-msl.fk / mxfp4-msl.fk
-; keep: emitting a second `using namespace metal;` makes this body's own `round` ambiguous and the unit
+; NO `using namespace metal;`, ONE `#include <metal_stdlib>`. The same discipline q6k-msl.fk
+; keeps: emitting a second `using namespace metal;` makes this body's own `round` ambiguous and the unit
 ; stops compiling. This file makes ZERO metal:: library calls at all (every transcendental is
 ; transcribed), so nothing needs qualifying; the header is emitted once by mla-msl-unit.
 ;
@@ -41,7 +41,7 @@
 ;     but no gate here has SEEN the real dims. The attend kernel's per-head accumulator is a private
 ;     array capped at MLA_MAX_HD (512, = V4-Flash's head_dim); above that it is WRONG, not slow.
 ;   * NOT YaRN, NOT the E4M3 cache encoding, NOT the residual/MoE half of the layer, NOT a resident
-;     real weight tensor. Same gaps mla-attn.fk's radius names. This is the attention block's arithmetic,
+;     real weight tensor. Those are the gaps of the recipe it transcribes. This is the attention block's arithmetic,
 ;     on the GPU, once, at toy rank.
 ;   * mla_round is a range-reduce that is exact only while |x| stays within a few periods of 2*pi (it
 ;     rounds by truncation, no metal::rint). The demo's rope angles are pos*base^(-2k/nrot) with
@@ -52,22 +52,18 @@
 ;     rotation and its trig, but not the frequency table. That table is position-INDEPENDENT layout, so
 ;     computing it once on the host is the honest split, and it is stated here.
 ;
-; Kin: mla-attn.fk (the CPU recipe this equals — mla_dot mirrors tb-dot's right fold, the attend kernel
-; mirrors mla-attend-head's sink softmax), mxfp4-msl.fk / qk-matvec-slot.fk (the emit idiom, the slot
+; Kin: the CPU recipe these kernels equal (mla_dot mirrors tb-dot's right fold, the attend kernel
+; mirrors a sink softmax), q6k-msl.fk / qk-matvec-slot.fk (the emit idiom, the slot
 ; discipline, the read-back-into-Form gate, the no-header rule), trig.fk / transformer-numerics.fk (the
-; deterministic series this transcribes), mla-demo.fk (the shared toy fixture and the reference printers).
+; deterministic series this transcribes).
 ;
 ; preludes: form-stdlib/core.fk
 ;
-; Proven by: form-stdlib/tests/mla-msl-band.fk (the emitted text: one header, no using-namespace, one
-;            spine, every kernel present, the structural index maps against the recipe's slicing) and
-;            form/native/metal/metal_mla_gpu.sh (the GPU, Mac-only: every stage and the reassembled
-;            cache-row and block-output against the fp64 recipe at positions 0,1,2 within the f32 bound).
 
 (do
     ; ================= the structural index maps, read back into Form =================
-    ; The offsets the emitted kernels compute, in Form, so mla-msl-band.fk can falsify the TEXT's
-    ; indexing against mla-attn.fk's own slicing (tb-vslice h*hd, the tail at hd-nrot, the grouped
+    ; The offsets the emitted kernels compute, in Form, so a band can falsify the TEXT's
+    ; indexing against the recipe's own slicing (tb-vslice h*hd, the tail at hd-nrot, the grouped
     ; g*gdim) rather than trust that the C string got them right. A transposed offset that compiles and
     ; runs is the failure this guards (q6k-msl.fk's read-back lesson).
     (defn mlm-head-base (h hd) (mul h hd))              ; head h's slice start in an nh*hd vector
@@ -133,7 +129,7 @@
     (defn mla-rope-body ()
         "kernel void form_mla_rope_f32(device const float* v [[buffer(0)]], device float* out [[buffer(1)]], device const float* freqs [[buffer(2)]], constant uint& nh [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& nrot [[buffer(5)]], constant float& pos [[buffer(6)]], constant float& sign [[buffer(7)]], uint gid [[thread_position_in_grid]]) { if (gid >= nh * hd) return; uint h = gid / hd; uint j = gid - h * hd; uint base = h * hd; uint nnope = hd - nrot; if (j < nnope) { out[base + j] = v[base + j]; return; } uint r = j - nnope; uint npair = nrot / 2u; if (r >= 2u * npair) return; uint k = r / 2u; float a = pos * freqs[k]; float ca = mla_cos(a); float sa = sign * mla_sin(a); uint lo = base + nnope + 2u * k; float x0 = v[lo]; float x1 = v[lo + 1u]; if (r - k * 2u == 0u) { out[lo] = x0 * ca - x1 * sa; } else { out[lo + 1u] = x0 * sa + x1 * ca; } } ")
 
-    ; --- kernel: the single-latent-row attention with the per-head SINK (mla-attend-head / mla-attn-heads).
+    ; --- kernel: the single-latent-row attention with the per-head SINK (the CPU recipe's attend-head).
     ;     THE SLOT: one thread per head. K and V are the SAME row (rows[j*hd..]). The sink is a learned
     ;     logit that enters the softmax DENOMINATOR ONLY (no value of its own), so a row's weights sum to
     ;     LESS than 1. Two passes in the recipe's order: (1) max over (sink :: scores); (2) exp, the LEFT
@@ -144,7 +140,7 @@
 
     ; --- kernel: the SAME attention over TWO row arenas (ds4.c:12567 layer_attention_mixed_one). A
     ;     compressing layer attends over its raw sliding window AND the compressed rows the second cache
-    ;     holds (dsv4-compressor.fk), one softmax across the union with the sink still in the denominator
+    ;     holds, one softmax across the union with the sink still in the denominator
     ;     only. Two buffers rather than one concatenated arena because the raw arena's frontier sentinel
     ;     is a live falsifier — appending the compressed rows into it would overwrite the evidence.
     ;     ds4's mask argument is omitted here on purpose: indexer_allowed_decode_one (:12822) returns
@@ -165,7 +161,7 @@
     ; .w, .z, .y, .x, in that order, into the same accumulator — and takes the tail scalar when n is
     ; not a multiple of four, so it is mla_dot's answer for every n and every alignment. What changes
     ; is that a thread issues a quarter of the load instructions. This is the same reading that turned
-    ; the Q2_K expert kernel's thirty-six scalar loads into nine (ds4-order-match.fk).
+    ; the Q2_K expert kernel's thirty-six scalar loads into nine.
     ; association, but we CAN stop recomputing and stop serialising:
     ;   scores: one thread per (head, row) — each dot computed ONCE
     ;   stats : one thread per head — max, exp, running sum, denominator, all in the recipe order

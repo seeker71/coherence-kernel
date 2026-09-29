@@ -502,9 +502,9 @@ fn socket_drop(h: i64) -> bool {
 // Form-rendered SQL executed against a real Postgres. Handles are monotone
 // i64s; the kernel never reveals the PgConn to Form, only the
 // handle. -1 = error. Effectful, per-kernel reference impl — the SQL strings
-// are already three-way verified by db-schema.fk + emits/sql.fk; only
-// execution lives here. See docs/coherence-substrate/cell-store-architecture.md
-// (the DB is the production carrier; the FS log store is dev/test).
+// are already verified in Form; only
+// execution lives here (the DB is the production carrier; the FS log store is
+// dev/test).
 struct PgTable {
     handles: HashMap<i64, Arc<Mutex<PgConn>>>,
     next: i64,
@@ -2582,8 +2582,7 @@ impl Kernel {
     // string allocation, no comparison; lookup is a u32 compare downstream.
     //
     // Reads `self.by_id.get(&n)` directly, saving the children Vec clone
-    // per IDENT dispatch. Inspect retained dispatch traces through
-    // observe/kernel-trace-run.bml.
+    // per IDENT dispatch.
     fn ident_id(&self, n: NodeID) -> NameID {
         if n.level == LEVEL_TRIVIAL && n.ty == TRIV_STRING {
             return n.inst;
@@ -3963,10 +3962,9 @@ impl Kernel {
         // nor any other string, so the emptymask distinction between never-was and empty
         // survives the comparison). A comparison asks a question ABOUT two values; a
         // length MEASURES one, which is why str_len and str_byte_at still refuse an
-        // absence out loud. Before this, a walk that met a file which had left between
-        // the listing and the read died here while fkwu answered "not a model" — one
-        // witness out of step with the primary kernel, found by model-discovery's own
-        // absence lane (form-stdlib/tests/model-discovery-band.fk, bit 256).
+        // absence out loud. A walk that meets a file which left between the listing
+        // and the read answers here as fkwu does ("not a model"), so this witness
+        // stays in step with the primary kernel.
         self.register_native("str_eq", cat_compare(RCMP_EQ), |_, _, args| {
             if matches!(args[0], Value::Null) || matches!(args[1], Value::Null) {
                 return bool_int(matches!(args[0], Value::Null) && matches!(args[1], Value::Null));
@@ -3974,10 +3972,10 @@ impl Kernel {
             bool_int(args[0].as_bytes() == args[1].as_bytes())
         });
         // int_to_str — value-to-string for trivial leaves. Historical name
-        // (first use: line numbers in cell-trace.fk); semantics is "render
-        // any trivial value as text" so emit-engine.fk's leaf walker can
+        // (first use: line numbers in traces); semantics is "render
+        // any trivial value as text" so a leaf walker in Form can
         // pass node_value of any leaf type through it. Multi-target emit
-        // (universal codec lattice — emit.fk + emits/json.fk) depends on
+        // (the universal codec lattice) depends on
         // string + null passthrough.
         self.register_native("int_to_str", cat_method(), |_, _, args| match &args[0] {
             Value::Str(s) => Value::Str(s.clone()),
@@ -4293,8 +4291,7 @@ impl Kernel {
         // _dict_set returns a fresh dict so closures over the original keep
         // their view. This is enough surface to write a real endpoint
         // response shape; method-style .update / .pop / .items remain
-        // pending (named in PYTHON_PIPELINE_STATUS.md, not blocking #2059
-        // dict transmute work).
+        // pending (not blocking #2059 dict transmute work).
         fn is_dict(v: &Value) -> bool {
             if let Value::List(xs) = v {
                 if let Some(Value::Str(s)) = xs.first() {
@@ -5869,8 +5866,8 @@ impl Kernel {
         });
         // node_eq — compare two NodeIDs structurally without coercing to int.
         // The kernel's `eq` (RCMP_EQ) does as_int on both operands, which
-        // panics on NodeIDs. node_eq closes that gap so Form code (like
-        // emit-engine.fk's lookup-template) can dispatch on Recipe category
+        // panics on NodeIDs. node_eq closes that gap so Form code
+        // can dispatch on Recipe category
         // by direct NodeID equality. Sibling parity required across Go/TS.
         self.register_native("node_eq", cat_compare(RCMP_EQ), |_, _, args| {
             bool_int(args[0].as_nid() == args[1].as_nid())
@@ -7814,10 +7811,9 @@ fn run_source_traced(src: &str) -> (Value, Trace) {
 // CLI subcommands — query / trace / fetch
 // ---------------------------------------------------------------------------
 //
-// Parallels scripts/form_cli.py at the native binary altitude. The point
-// per lc-native-kernel-binary: end-to-end host-native kernel binaries that
-// can access I/O, binary form objects, substrate API, and network resources
-// — functionally equivalent to the Python runtime.
+// The native binary altitude. The point per lc-native-kernel-binary:
+// end-to-end host-native kernel binaries that can access I/O, binary form
+// objects, substrate API, and network resources.
 
 fn cli_help() {
     println!(
@@ -8881,7 +8877,7 @@ fn handle_request(
     // reads as the body needs — a body larger than one buffer is fully captured —
     // and carries any over-read bytes into `carry` for the next request on this
     // persistent connection). HTTP/1.1 keep-alive with Content-Length framing;
-    // chunked transfer remains a named breath (KERNEL_AS_ROUTER.md request row).
+    // chunked transfer remains a named breath.
     let (head, body_bytes) = match read_request(stream, carry) {
         RequestRead::Ok(h, b) => (h, b),
         RequestRead::LargerThanWeHold { observed, limit } => {
@@ -9419,7 +9415,7 @@ fn worker_loop(
     // every connection runs the Form serve pipeline directly — Form does parse,
     // route, dispatch, render; the kernel only opens the socket and walks it.
     let form_serve: Option<(Arc<Closure>, Value, Value)> = if form_mode {
-        // kh-serve-conn (http-socket.bml) is the STREAMING entry: it takes the
+        // kh-serve-conn (the manifest's Form socket door) is the STREAMING entry: it takes the
         // socket handle and owns the I/O. (kh-serve, the pure string-in/string-out
         // core, is what kh-serve-conn calls between the recv and send loops.)
         let kh_id = k.intern_string("kh-serve-conn").inst;
@@ -9438,7 +9434,7 @@ fn worker_loop(
             _ => {
                 eprintln!(
                     "serve --form: worker {} could not resolve kh-serve-conn as a closure \
-                     (the manifest must prelude http-socket.bml)",
+                     (the manifest must define kh-serve-conn)",
                     id
                 );
                 return;
@@ -10289,7 +10285,7 @@ fn serve_connection_form(
     );
     // STREAMING: the kernel does NOT pre-read a buffer. It registers the accepted
     // connection as a Form socket handle and hands that handle to the recipe;
-    // kh-serve-conn (http-socket.bml) owns ALL the I/O — loop-recv the request
+    // kh-serve-conn (the manifest's Form socket door) owns ALL the I/O — loop-recv the request
     // (socket_recv until framed), run kh-serve, loop-send the response
     // (socket_send until drained), close. The bytes flow through Form, not a Rust
     // buffer. kh-serve-conn(conn, routes, registry).
@@ -10341,10 +10337,10 @@ fn cli_serve(args: &[String]) -> i32 {
     // --host 0.0.0.0; isolation comes from Docker's `-p 127.0.0.1:<port>` host
     // binding, not from the in-container bind address.
     let mut host: String = "127.0.0.1".to_string();
-    // --form routes EVERY request through the Form HTTP stack (kh-serve in
-    // http-server.bml) instead of the Rust parse/route/render path: the manifest
-    // defines `routes` + `registry` + handlers and preludes kernel-http.fk /
-    // http-*.fk. The kernel only opens the socket and walks the recipe — the
+    // --form routes EVERY request through the Form HTTP stack (the manifest's
+    // kh-serve) instead of the Rust parse/route/render path: the manifest
+    // defines `routes` + `registry` + handlers + kh-serve-conn and preludes
+    // kernel-http.fk. The kernel only opens the socket and walks the recipe — the
     // 11.5K-line Rust HTTP and its fear-caps are out of this path entirely.
     let mut form_mode = false;
     let mut i = 0;
@@ -13479,8 +13475,7 @@ fn connect_upstream_with_timeout(host: &str, port: u16) -> Result<TcpStream, Fan
 // text/plain), or the native default `text/plain; charset=utf-8` when empty.
 // `relayed` is the upstream's other end-to-end headers (Set-Cookie,
 // Cache-Control, Location, ETag, X-*, …) on a fan-out, EMPTY for native/error
-// responses. Chunked transfer encoding remains a named-later breath
-// (KERNEL_AS_ROUTER.md HTTP-version row).
+// responses. Chunked transfer encoding remains a named-later breath.
 fn http_response(
     status: &str,
     body: &str,

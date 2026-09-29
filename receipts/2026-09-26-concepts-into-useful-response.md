@@ -1,7 +1,7 @@
 # Carry the concept into the useful response
 
 The remaining response gap is visible in the completed
-[434-word native answer](artifacts/2026-09-26-native-absence-feedback/answer.txt):
+434-word native answer:
 the sources are available, but their meanings do too little work in the answer.
 The trust paragraph concentrates on interfaces and safe action; the frequency
 paragraph explains arithmetic; the closing reports the model's conduct. The
@@ -29,7 +29,7 @@ repair 5. It remains live. No terminal result or accepted rewrite is claimed.
 The source change in this receipt does not rewrite its admitted teaching.
 
 The separately authored
-[408-word arriving-agent answer](artifacts/2026-09-26-native-usefulness-feedback/arriving-answer.md)
+408-word arriving-agent answer
 connects the six requested concepts to practical differences, including the
 actual codebook lookup that exposed the earlier translation mistake. It passes
 the same original word and phrase checks. Codex wrote it using the current

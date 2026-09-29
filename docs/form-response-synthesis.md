@@ -1,26 +1,20 @@
 # Native grounding with one provider synthesis
 
-`observe/form-cli-response-synthesis-run.bml` accepts a set of read-only
+`form/form-stdlib/bml/form-cli-response-synthesis.bml` accepts a set of read-only
 assessment tasks, checks their sources in Form, asks an explicitly offered
 provider for one complete response, and rechecks each returned report. This
 is a provider-assisted response path with zero local-model generation. It
 advances alongside the native-only response work.
 
-Pass a manifest path on stdin so the native file reader carries the complete
-packet beyond the interactive line limit:
+Pass a manifest path so the native file reader carries the complete packet
+beyond the interactive line limit. The source-backed form-cli
+(`form-run ./fkwu form/form-stdlib/form-cli-repl.fk`) exposes the path:
 
 ```sh
-form-run ./fkwu observe/form-cli-response-synthesis-run.bml <<'FORM_MANIFEST'
-@manifest.json
-FORM_MANIFEST
+form-run sh -c 'printf "%s\n" "synthesize @manifest.json" | ./fkwu form/form-stdlib/form-cli-repl.fk'
 ```
 
-Inline JSON remains available for short manifests. The source-backed form-cli
-exposes the same path:
-
-```text
-synthesize @manifest.json
-```
+Inline JSON remains available for short manifests.
 
 Use `synthesize help` for the request surface. A file carries the complete
 manifest beyond the interactive line limit; inline JSON is also accepted.
@@ -102,8 +96,8 @@ one provider synthesis and final checks took 92,060 ms, with 26,946 reported
 input-plus-output tokens. The context-equipped baseline took 258,074 ms and
 459,735 reported tokens. Their uncached input counts were 14,683 and 21,113.
 This is a sample observation, not proof of a global token minimum or native
-voice parity. The [receipt](../receipts/2026-09-17-bounded-provider-synthesis.md)
-retains the accounting, answer review and open quality boundaries.
+voice parity. The accounting, the answer review and the open quality boundaries
+belong to that run, and they stay open.
 
 A fresh three-task comparison retained the same original documents and checks
 for both routes. Its first synthesis took 29,609 ms and 24,082 input-plus-output
@@ -113,26 +107,18 @@ executed native counterexamples. Including that refinement, the synthesis path
 took 54,203 ms and 48,520 tokens, with 25,370 uncached input tokens versus the
 baseline's 15,613. Its initial speed advantage therefore did not survive the
 correction. These execution windows exclude coordinating work, whose separate
-cost is retained in the [fresh comparison receipt](../receipts/2026-09-19-fresh-matched-native-synthesis.md).
+cost was counted apart from them.
 Actual answer review still found a causal error; passing the original checks
 does not establish semantic parity or human resonance.
 
 ## Preserve source coverage while shrinking the packet
 
-The retained comparison has native preparation and evaluation doors:
-
-```sh
-form-run ./fkwu observe/form-cli-comparison-review-prepare.bml
-form-run ./fkwu observe/form-cli-comparison-review-run.bml
-```
-
-Preparation reads the committed comparison artifacts, keeps the original
-question, candidate and measurements, restores the antecedent of the identity
-seam, and supplies selected historical grounding that the candidate had seen.
-It separates the review instructions from the JSON document instead of nesting
-an encoded packet inside another encoded packet. Preparation calls no model.
-The second door explicitly uses the offered provider for this retained
-evaluation; its manifest claim prevents a second admission on replay.
+A review packet keeps the original question, candidate and measurements,
+restores the antecedent of the identity seam, and supplies selected historical
+grounding that the candidate had seen. It separates the review instructions
+from the JSON document instead of nesting an encoded packet inside another
+encoded packet. Preparation calls no model. The evaluation explicitly uses the
+offered provider; its manifest claim prevents a second admission on replay.
 
 The source checks establish preserved content and schema. They do not establish
 that every relevant source was selected. Historical grounding describes what
@@ -141,16 +127,12 @@ Keep an unsupported claim distinct from a contradiction, and retain the scope
 of partial excerpts. Expected report assertions stay outside the provider
 prompt.
 
-The [source restoration receipt](../receipts/2026-09-20-comparison-source-coverage.md)
-records both the improved answer and its cost: 21,069 provider tokens, 716 more
-than the prior review. Rewrapping saved 1,106 prompt bytes before adding the
-missing context. Those byte counts are not token measurements. Both retained
-answers replayed with zero new provider processes; count each usage event once.
+Byte counts saved by rewrapping a packet are not token measurements. A
+retained answer replays with zero new provider processes; count each usage
+event once.
 
-The matched local door is
-`form-run ./fkwu observe/form-cli-comparison-native-review-run.bml`.
-It reads the retained restored source directly, uses the same review instruction,
-and runs registry `qwen38-q8` in the current `fkwu` process with the
+The matched local review reads the same restored source, uses the same review
+instruction, and runs registry `qwen38-q8` in the current `fkwu` process with the
 `knowledge-query` profile, 12,288 positions and 2,048 generated-token allowance.
 It retains raw output even when completion or JSON parsing fails. Its separate
 claim directory prevents a duplicate generation; a repeated completed request
@@ -159,48 +141,38 @@ returns retained metadata with `native_model_calls_new=0` and the same
 training. Carrier envelopes differ from the provider run; the source and task
 are compared separately from answer quality.
 
-`observe/form-cli-comparison-fresh-run.bml` tests fresh local composition. It
-selects the original question and current evidence fields, omitting the old
-candidate and the grounding supplied only to review that candidate. The source
-band checks those omissions and preserves the selected values byte-equivalently
-through JSON encoding. Its retained packet must match before replay. This is a
-different task from review, so an observed improvement does not isolate which
-change caused it. The [fresh-answer receipt](../receipts/2026-09-20-fresh-native-comparison.md)
-records a smaller, faster answer that still mixes token scopes and overstates
-which workflow is necessary. It establishes no quality parity.
+A fresh-composition packet selects the original question and current evidence
+fields, omitting the old candidate and the grounding supplied only to review
+that candidate. Its source band checks those omissions and preserves the
+selected values byte-equivalently through JSON encoding, and the retained packet
+must match before replay. This is a different task from review, so an observed
+improvement does not isolate which change caused it. A fresh answer can be
+smaller and faster and still mix token scopes or overstate which workflow is
+necessary; it establishes no quality parity.
 
-`observe/form-cli-comparison-scoped-run.bml` keeps that fresh instruction and
-changes only the representation of route usage. Native `fsu-select` selects
+Native `fsu-select` (`form/form-stdlib/bml/form-cli-scoped-usage.bml`) selects
 consistent all-reported-model totals when available, otherwise the recorded
 quantity with its explicit scope. It preserves absent values as null and
 observed zero as zero. Invalid broader counters retain a reason alongside the
 narrower fallback. Crossing counts retain their own coverage, including unknown
-auxiliary-model calls. The scoped-usage band checks these boundaries against
-retained evidence and counterexamples. The paired answer is an evaluation;
-neither the representation nor its checks establish response quality.
-The [scoped-answer receipt](../receipts/2026-09-20-scoped-native-comparison.md)
-records that Qwen still chose historical figures from the prose excerpt.
-`observe/form-cli-comparison-scoped-audit.bml` checks the retained source bytes,
-unchanged instruction and non-usage evidence, and counts this attempt once in
-the seven-run native chain, including failed answers.
+auxiliary-model calls. Changing only the representation of usage leaves the
+instruction as it was; a model can still choose historical figures from a prose
+excerpt, so neither the representation nor its checks establish response
+quality. Replacing long historical commentary with selected verbatim sections
+lets each section identify its author-observation status while the full pinned
+source and omitted section names remain explicit. An attempt counts once in a
+native chain, including a failed answer, and a source selection is distinct
+from a training update. Actual quality remains a reading of the answer.
 
-`observe/form-cli-comparison-attributed-run.bml` keeps the same fresh instruction
-and current measurements, replacing the long historical commentary with selected
-verbatim sections. Each section identifies its author-observation status; the
-full pinned source and omitted section names remain explicit. The source band
-checks identity, exact excerpts, unchanged current evidence and JSON roundtrip.
-The paired audit counts the eighth native attempt and distinguishes this source
-selection from a training update. Actual quality remains a reading of the answer.
-`observe/form-cli-comparison-attributed-provider-run.bml` carries that retained
-source and the same instruction into one explicitly offered Form-owned provider
-process. Its pair audit verifies source bytes and instruction separately from
-the different carrier envelopes. The native answer is absent from the provider's
-input. Both completed answers replay without another model call. Their
-[paired observation](../receipts/2026-09-20-attributed-native-comparison.md)
-keeps measured costs and the remaining quality differences visible.
+The same packet can go to one explicitly offered Form-owned provider process.
+A pair audit verifies source bytes and instruction separately from the different
+carrier envelopes. The native answer is absent from the provider's input. Both
+completed answers replay without another model call, and their paired
+observation keeps measured costs and the remaining quality differences visible.
 
-The ordinary native comparison now uses the same `fsu-select` boundary in its
-route lines. It emits one token quantity with its basis, scope and source,
-preserving null breakdowns and the independent coverage of call counts. Original
-recorded figures remain in the source ledger. This source repair serves
-`fnc-compose` and its callers independently of the model experiment.
+The ordinary native comparison (`form/form-stdlib/bml/form-cli-native-compare.bml`)
+uses the same `fsu-select` boundary in its route lines. It emits one token
+quantity with its basis, scope and source, preserving null breakdowns and the
+independent coverage of call counts. Original recorded figures remain in the
+source ledger. This serves `fnc-compose` and its callers independently of the
+model experiment.
