@@ -1,0 +1,98 @@
+// band-cover-run.bml — which bands read an edited file.
+//
+// A band runs the files its `; preludes:` lines and imports name, and those files' own preludes in turn.
+// This door reads the same tokens through the body's own reader (prelude-reach's prch-* over
+// bml-source-dependencies and bml-source-resolve), turns each edge around, and walks from every named
+// file back up to the tests that load it. The walk covers what a prelude line or an import states. A unit
+// the runtime loads by name (form-stdlib/home-index.txt) is reported as `home-unit` with its names: the
+// bands that meet those names are the ones that mention them. A door another door spawns is no edge: a
+// file only a spawned door reads answers `bands=0` and counts as unread, so the drift gate is the check
+// that covers it.
+// stdin: nothing (the working tree's changes against HEAD, and new files), `since <rev>` (changes
+// against that revision), or one repo-relative path per line.
+// stdout: per source file `cover <file> reaches=<files> bands=<n>` and its bands (a band under form/
+// prints as validate.sh takes it, from form/), then `band-cover files=<f> bands=<union> unread=<k>`.
+// The answer is <k>, the source files no band and no home name reads; run from the repository root.
+// preludes: observe/prelude-reach.bml form-stdlib/bml/stdin-source.bml
+section [form.bml] {
+ class BandCover {
+  def bcv-has?(s, part) = str_find(s, part, 0) >= 0;
+  def bcv-ends?(s, tail) = (str_len(s) >= str_len(tail)) && str_eq(substring(s, str_len(s) - str_len(tail), str_len(s)), tail);
+  def bcv-source?(path) = bcv-ends?(path, ".fk") || bcv-ends?(path, ".bml") || bcv-ends?(path, ".form");
+  def bcv-band?(path) = bcv-source?(path) && bcv-has?(path, "tests/") && !bcv-has?(path, "fixture");
+  def bcv-hint(path) = str_eq(substring(path, 0, 5), "form/") ? substring(path, 5, str_len(path)) : path;
+
+  def bcv-add(rev, dep, owner) {
+   let held = record_get(rev, dep);
+   record_set(rev, dep, cons(owner, eq(held, 0) ? list() : held));
+  }
+  def bcv-dep(owner, token, rev) {
+   let hit = bml-source-resolve(owner, token);
+   nothing?(hit) ? rev : bcv-add(rev, prch-norm(hit), owner);
+  }
+  def bcv-deps(owner, tokens, rev) = nil?(tokens) ? rev : bcv-deps(owner, tail(tokens), bcv-dep(owner, head(tokens), rev));
+  def bcv-rows(rows, rev) {
+   nil?(rows) ? rev
+   : str_len(head(rows)) < 5 ? bcv-rows(tail(rows), rev)
+   : bcv-rows(tail(rows), bcv-deps(prch-owner(head(rows)), prch-tokens(prch-owner(head(rows)), prch-content(head(rows))), rev));
+  }
+
+  def bcv-owners(rev, path) {
+   let held = record_get(rev, path);
+   eq(held, 0) ? list() : held;
+  }
+  def bcv-reach(rev, frontier, seen, out) {
+   nil?(frontier) ? out
+   : !eq(record_get(seen, head(frontier)), 0) ? bcv-reach(rev, tail(frontier), seen, out)
+   : bcv-reach(rev, append(bcv-owners(rev, head(frontier)), tail(frontier)), record_set(seen, head(frontier), 1), cons(head(frontier), out));
+  }
+
+  def bcv-homes(lines, file, out) {
+   let unit = nil?(lines) ? nothing() : prch-home-unit(head(lines));
+   let hit = nothing?(unit) ? nothing() : bml-source-resolve("form/form-stdlib/home-index.txt", unit);
+   nil?(lines) ? reverse(out)
+   : !nothing?(hit) && str_eq(prch-norm(hit), file) ? bcv-homes(tail(lines), file, cons(bml-source-words(head(lines))[0], out))
+   : bcv-homes(tail(lines), file, out);
+  }
+
+  def bcv-join(xs) = nil?(xs) ? "" : nil?(tail(xs)) ? head(xs) : head(xs) ++ " " ++ bcv-join(tail(xs));
+  def bcv-show(bands) = nil?(bands) ? 0 : print_str("  " ++ bcv-hint(head(bands))) + bcv-show(tail(bands));
+
+  // one file: its bands, its home names, and whether anything reads it (list(bands, read))
+  def bcv-cover(rev, homes, file) {
+   let reached = bcv-reach(rev, list(file), record_new(0), list());
+   let bands = reverse(reached |> filter(p => bcv-band?(p)));
+   let names = bcv-homes(homes, file, list());
+   print_str("cover " ++ file ++ " reaches=" ++ int_to_str(len(reached) - 1) ++ " bands=" ++ int_to_str(len(bands)));
+   bcv-show(bands);
+   nil?(names) ? 0 : print_str("  home-unit " ++ bcv-join(names));
+   list(bands, !nil?(bands) || !nil?(names));
+  }
+  def bcv-union(bands, seen, out) {
+   nil?(bands) ? out
+   : !eq(record_get(seen, head(bands)), 0) ? bcv-union(tail(bands), seen, out)
+   : bcv-union(tail(bands), record_set(seen, head(bands), 1), cons(head(bands), out));
+  }
+  def bcv-walk(rev, homes, files, seen, out, unread) {
+   let got = nil?(files) ? nothing() : bcv-cover(rev, homes, head(files));
+   nil?(files) ? list(out, unread)
+   : bcv-walk(rev, homes, tail(files), seen, bcv-union(got[0], seen, out), unread + (got[1] ? 0 : 1));
+  }
+
+  def bcv-inputs(text) {
+   let lines = prch-lines(text) |> map(l => bml-source-trim(l));
+   nil?(lines) ? append(prch-lines(prch-git(list("diff", "--name-only", "HEAD"))), prch-lines(prch-git(list("ls-files", "--others", "--exclude-standard"))))
+   : str_eq(substring(head(lines), 0, 6), "since ") ? prch-lines(prch-git(list("diff", "--name-only", substring(head(lines), 6, str_len(head(lines))))))
+   : lines;
+  }
+  def bcv-run() {
+   let files = bcv-inputs(stdin-text()) |> filter(p => bcv-source?(p));
+   let rev = bcv-rows(prch-lines(prch-git(list("grep", "-a", "-n", "-E", prch-pattern(), "--", "*.fk", "*.bml"))), record_new(0));
+   let homes = prch-lines(prch-text(read_file("form/form-stdlib/home-index.txt")));
+   let got = bcv-walk(rev, homes, files, record_new(0), list(), 0);
+   print_str("band-cover files=" ++ int_to_str(len(files)) ++ " bands=" ++ int_to_str(len(got[0])) ++ " unread=" ++ int_to_str(got[1]));
+   got[1];
+  }
+ }
+ bcv-run();
+}
