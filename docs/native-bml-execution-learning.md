@@ -226,9 +226,11 @@ A prepared reference is a sample. Another sample is owed when a later
 generation of the same contract does not execute to the retained reading.
 When every practice generation executes, the curriculum does not grow.
 
-The local lift is a separate face, `form/form-stdlib/form-lift.bml`. A model
-doing that work names each literal, keeps one class and one template, and
-uses the compact operators already in this curriculum. It admits every
-catalog door whose body is Form and whose carrier is local. File and shared
-memory are available crossings. A name that is not a door stays absent.
-The witness reads 144.
+The native coding controller admits the shared lifting guidance from
+`form/form-stdlib/form-lift.bml` with BML source. It teaches lexical lambdas,
+stdlib reuse, named domain values, ownership and behavior-preserving edits.
+Its tools operate on resident source values; the caller owns filesystem
+publication and shared-memory telemetry carries progress. See
+[local lifting](native-bml-admission.md#local-lift) for the live interface and
+its abstraction boundaries. Verified source execution, rather than a syntax
+score or the model's own verdict, supplies a learning target.
