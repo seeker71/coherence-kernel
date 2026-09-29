@@ -144,29 +144,15 @@ surface. It does not select executable meaning through a comparison with another
 parser. Its witnesses require complete parsing and the expected recipe
 structure; a failed parse cannot certify a supported construct.
 
-The [execution witness](../observe/bml-statement-admission-run.bml) creates
-private compiler inputs, captures complete output and actual child status, and
-retains source and runtime identities. It observes ordered effects, results,
-nonselected branches, quoted punctuation, comments and actual refusal. Its
-diagnostic flow retains the observation and correlated response and action.
-Expected nonzero children are identified individually; an unexpected nonzero
-child or mismatched result prevents acceptance.
-
-Successful witness children have empty stderr. Deliberately refused children
-retain their actual nonzero status and diagnostic. The witness's own refusal
-retains three correlated observation, response and applied health rows through
-the shared process reader. The outer runner retains cache-renewal warnings
-separately from those child streams. Its report names the current case count,
-source identities and exact observations; a successful process exit alone does
-not establish those behaviors.
+The bands in `form/form-stdlib/tests/` run the compiler on private inputs and
+read the actual child status, so a successful process exit alone establishes
+nothing: a band names the effects, results and refusals it observed.
 
 Custom BMF sections keep their rule data, including bare `do` and `end` names.
 Their quote/comment/brace reader does not assign executable BML scope to those
-names. Raw Form before and after sections remains passthrough source. The
-[section observations](evidence/fkwu/bml-section-dialects.json) check emitted
-rule structure, actual closing-byte positions and raw-source preservation.
-Within BML, an adjacent `do(...)` call and a whitespace-separated
-`do (...) ... end` block retain their respective interpretations.
+names. Raw Form before and after sections remains passthrough source. Within
+BML, an adjacent `do(...)` call and a whitespace-separated `do (...) ... end`
+block retain their respective interpretations.
 
 ## Local lift
 

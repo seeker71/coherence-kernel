@@ -131,12 +131,6 @@ A definition check is `{kind:"definition",path,function,cases:[[input,expected],
 
 Embedding callers can use `fcac-run(model,goal,documents,writable,[checker,contract],context,turns)`. The callback receives `(contract,candidateDocuments)` and returns `[passed,observationString]`. `fcac-review` takes `[reportChecker,reportContract,sourceChecker,sourceContract]`; the report callback receives `(contract,[documents,report])`. Source-only `verify` needs the optional last pair. These lower-level calls are fresh/unmanaged; the JSON door supplies continuity. Callback behavior and effects belong to the caller.
 
-### Execute a proposed function during review
-
-`bml/form-cli-review-execution.bml` offers `fcre-prepare(source,name,arity,bindings)` and `fcre-run(prepared,args,bindings)`. Bindings are `[name,arity,callback]`; each callback receives its argument list and returns `[ok,value,observation]` (`fcre-ok`/`fcre-no`). Successful absence differs from failure. Preparation validates the complete single expression definition, every branch and exact bindings before execution. Literals, parameters, bound calls and lazy conditionals are supported; recursion, dynamic callees and extra definitions are outside this lane. Limits are 65,536 source bytes and expression depth 64. Callbacks own validation, purity, cost and resource effects.
-
-`fcre-trace-run` returns `[result,invokedBindingNames]`; `fcre-trace-detail` returns `[result,[name,evaluatedArgs,result]...]`. Traces record actual call order once, selected branches only, and stop on failed arguments. Callback internals are opaque. They emit no private values to the framebuffer. Run behavioral checking on every report submission, including repair.
-
 ### Search a small native repair before another model call
 
 `fcrs-search(source,name,arity,bindings,roles,checker,contract,budget)` in `form-cli-review-search.bml` replaces one call with a compatible caller binding forwarding the original parameters. Roles are caller data, not inferred types. It checks the original, then each candidate with the same contract. Result: `[unchanged|repaired|exhausted|refused,source,checkCount,observation]`; failure/exhaustion returns original source. Search itself makes no model, file or process call. Attribute native structural repair separately from generated code.
