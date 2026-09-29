@@ -72,6 +72,21 @@ prefixes and shared tails, while field sharing remains seed-owned.
 
 ## Native authoring and knowledge
 
+Executable `section [form.bml]` supports local expression and block functions.
+They retain lexical values, including through intervening functions, and can
+escape their owner or be called by a later sibling. The compiler binds the
+function value once and carries outer bindings through native Form frames.
+The C seed is unchanged. `map`, `filter`, `foldl` and `foldr` take these functions;
+comparison contracts belong on parameters or results, with infix operators in
+their bodies. The five sensor, scene and context organs use this surface.
+[`sensor-flow-run.bml`](../observe/sensor-flow-run.bml) observes their supplied
+samples, inventory, grouping, recognition and fusion through actual source.
+The shared live step emits a correlated framebuffer event with completion,
+surprise and measured operation time. Care events project resource names,
+attention, selected action and fresh-observation links. Owned values and evidence
+remain outside this public projection. Source-backed sensor fusion uses this
+path; physical acquisition and automatic device scheduling have separate scope.
+
 | Surface | Current owner |
 | --- | --- |
 | [Artifacts](native-form-artifacts.md) | FORMBIN2 codec, exact numeric payloads, structural comparison and traversal |
@@ -97,13 +112,6 @@ Generated Form strings preserve semicolons by byte construction. Handwritten
 direct `.fk` source still meets the seed's quote-insensitive collector.
 Form owns six-place numeric display; exact binary64 serialization has a separate
 owner, and large plain-decimal BML literals remain an admission boundary.
-
-Sensor organs execute BML at their existing paths. One
-[source-backed flow](../observe/sensor-flow-run.bml) checks supplied motion and
-scene samples, routed provenance/confidence, room fusion and exact membership.
-It exercises interpretation and routing, not physical sensor acquisition.
-Five witnesses containing copied implementations are retired. The release
-ledger retains pending work; completed entries live in Git.
 
 ## Observation and scope
 

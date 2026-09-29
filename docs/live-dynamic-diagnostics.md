@@ -132,7 +132,17 @@ an observation at that time, not a claim of continuous monitoring afterward.
 The native process runner consumes `form-organ health` events while its child
 runs, including a final line without a newline. It gathers available evidence
 when offered that action and leaves unsupported needs open. Original output
-bytes remain referenced; framebuffer events carry only opaque numeric data.
+bytes remain referenced. Organ framebuffer events carry the `organ-frame-v1`
+projection: correlation, organ/flow/aspect, stage, health, surprise, declared
+resource names, offers, selected action, attention and observation time. Live
+steps also carry their measured operation duration. Expected/observed values,
+need details, evidence and action results stay with the owning organ. Use public
+operational names for the projected fields; private samples and conversation
+content belong in owned evidence. The projection lets attention follow a need
+through provider selection and fresh observation without copying that content.
+Constructed JSON values do not automatically enter the framebuffer. Source
+parsing retains its separately attributed syntax nodes; that is a distinct
+source-observation path, not an organ event.
 Stage timing and choices retain their actual observations. The current JSON
 timing report projects the health of each organ/flow/aspect.
 
