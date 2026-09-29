@@ -1,18 +1,8 @@
-// live.bml — a running step observed as it runs: every step an event, every surprise a choice point met where it happens.
-//
-// A step runs inside attempt, so a stop is an observation and not an exit, and is spoken at once on stderr
-// as an organ-health reading (the flow, the step, what it answered, whether it held, what it offers). A step
-// that does not hold is a surprise, and what it observed chooses what happens next: each repair names the
-// need it meets, and the step is offered only the repairs that meet what it answered, so nothing is retried
-// blind. The offered repairs walk through the body's own oac-backtrack-walk: each acts on the step's context
-// and is spoken as applied, and the step runs again in the context the repair made, the walk carrying what
-// every earlier repair saw. A repair that cannot act answers nothing and earns no retry. A surprise no repair
-// meets is spoken with its need and handed back to the flow, whose own choice goes on.
-//
-// live-do(flow, step, ctx, run, holds, repairs): run(ctx) is the act, holds(value, ctx) its expectation.
-// Answers (held first-value repaired-by). live-repair(name, meets, act): meets(value, ctx) says whether the
-// repair meets what the step answered (live-stopped: it answered nothing), act(ctx) answers the context to
-// run again in, or nothing when it cannot act. A repair listed twice may act twice, each time only if met.
+// Execute, signal, choose care and re-observe in the same context.
+// live-do answers (held first-value repaired-by). A repair's meets(value,ctx)
+// selects it; act(ctx) supplies the next context or nothing when it cannot act.
+// The native choice walk retains each finding. stderr carries owned readings;
+// the framebuffer carries public operational metadata and correlation.
 // preludes: form-stdlib/organ-health.bml control/choice-lane-core.fk form-stdlib/meaning-codes.bml
 section [form.bml] {
  class Live {
@@ -20,30 +10,45 @@ section [form.bml] {
   def live-stopped(value, ctx) = nothing?(value);
   def live-call(f, ctx) = f(ctx);
   def live-call2(f, a, b) = f(a, b);
-  def live-names(xs) = if nil?(xs) then list() else cons(nth(head(xs), 0), live-names(tail(xs)));
-  def live-offered(repairs, value, ctx) = if nil?(repairs) then list() else if live-call2(nth(head(repairs), 1), value, ctx) then cons(head(repairs), live-offered(tail(repairs), value, ctx)) else live-offered(tail(repairs), value, ctx);
+  def live-names(xs) {
+   def name(repair) = head(repair);
+   map(name,xs);
+  }
+  def live-offered(repairs, value, ctx) {
+   def meets(repair) = live-call2(nth(repair,1),value,ctx);
+   filter(meets,repairs);
+  }
 
   // what a reading can carry of a Form value
-  def live-json(v) = if nothing?(v) then json-node-null() else if str_eq(value_kind(v), "int") then json-node-int(v) else if str_eq(value_kind(v), "string") then json-node-string(v) else json-node-string(value_str(v));
+  def live-json(v) {
+   let kind: String = value_kind(v);
+   if nothing?(v) then json-node-null() else if kind == "int" then json-node-int(v)
+   else if kind == "string" then json-node-string(v) else json-node-string(value_str(v));
+  }
   // a reading spoken the moment it is taken, on stderr, where whoever runs the flow hears it
   def live-say(row) {
+   oh-frame(row);
    let line = mc-cat(list("form-organ health ", json-emit-precise(row), "\n"));
    let wrote = sbt-append("/dev/stderr", line);
    row;
   }
-  def live-reading(flow, step, n, value, held, offers) = oh-reading-with-id(
-   mc-cat(list(flow, ":", step, ":", int_to_str(n), ":", int_to_str(now_unix_ms()))),
+  def live-reading(flow, step, n, value, held, offers, elapsed) {
+   let row = oh-reading(
    "live", flow, step, json-node-string("holds"), live-json(value), json-node-int(if held then 1 else 0),
    if held then list() else list(oh-need("step", json-node-string(step))),
    offers,
    json-node-object(list(oh-n("attempt", n))));
+   oh-set(oh-set(row,"surprise",json-node-int(if held then 0 else 1)),"elapsed_ms",json-node-int(elapsed));
+  }
 
   def live-try(run, ctx) = attempt(live-call(run, ctx));
   def live-do(flow, step, ctx, run, holds, repairs) {
+   let started = host_monotonic_ms();
    let value = live-try(run, ctx);
+   let elapsed = host_monotonic_ms() - started;
    let held = live-call2(holds, value, ctx);
    let offered = if held then list() else live-offered(repairs, value, ctx);
-   let reading = live-say(live-reading(flow, step, 1, value, held, live-names(offered)));
+   let reading = live-say(live-reading(flow, step, 1, value, held, live-names(offered),elapsed));
    if held then list(1, value, "") else live-walked(oac-backtrack-walk(live-options(len(offered)), list(flow, step, ctx, run, holds, offered, reading), list()), value);
   }
   def live-options(n) = if (n <= 0) then list() else cons(live-option, live-options((n - 1)));
@@ -61,9 +66,11 @@ section [form.bml] {
    else live-again(args, repair, next, (len(memory) + 2));
   }
   def live-again(args, repair, ctx, n) {
+   let started = host_monotonic_ms();
    let value = live-try(nth(args, 3), ctx);
+   let elapsed = host_monotonic_ms() - started;
    let held = live-call2(nth(args, 4), value, ctx);
-   let reading = live-say(live-reading(nth(args, 0), nth(args, 1), n, value, held, list()));
+   let reading = live-say(oh-set(live-reading(nth(args, 0), nth(args, 1), n, value, held, list(),elapsed),"care_of",oh-get(nth(args,6),"id")));
    if held then oac-one(intern_trivial_string(nth(repair, 0)))
    else oac-node(intern_trivial_string(mc-cat(list(nth(repair, 0), ": answered ", if nothing?(value) then "nothing" else value_str(value)))));
   }

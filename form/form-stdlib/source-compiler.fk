@@ -1435,36 +1435,43 @@
                                 (fsc-rec-string-list (bml-source-template-use-type-arguments template-use))
                                 (fsc-rec-list-of members))))))))
 
-    ;; A block-line returns a (possibly empty) list of recipes. Empty for
-    ;; comments; one recipe for let or bare expr.
+    ;; A local expression def uses the same recipe as a section def; its
+    ;; enclosing block supplies the lexical environment.
     (defn fsc-compile-form-bml-block-line-recipe (line)
         (do
             (let value (fsc-strip-semi line))
             (if (fsc-bml-comment-line? value) (empty)
+                (if (fsc-prefix? value "def ")
+                    (list (fsc-compile-form-bml-def-recipe value))
                 (if (fsc-prefix? value "let ")
                     (do
                     (let eq-pos (fsc-find-char-from value "=" 4))
                     (let name (fsc-trim (fsc-sub value 4 eq-pos)))
                     (let body (fsc-sub value (add eq-pos 1) (str_len value)))
                     (list (fsc-rec-let name (fsc-compile-form-bml-expr-recipe body))))
-                (list (fsc-compile-form-bml-expr-recipe value))))))
+                (list (fsc-compile-form-bml-expr-recipe value)))))))
 
     (defn fsc-bml-block-stmts-recipes-loop (body i end acc)
         (do
             (let p (fsc-bml-skip-trivia body i end))
             (if (ge p end) (fsc-rev acc)
                 (do
-                    (let line-end (fsc-line-end body p))
-                    (let line (fsc-trim (fsc-sub body p line-end)))
+                    (let line (fsc-bml-source-head body p end))
                     (if (fsc-bml-comment-line? line)
                         (fsc-bml-block-stmts-recipes-loop body
                             (fsc-line-next body p) end acc)
+                    (if (and (fsc-prefix? line "def ") (fsc-line-opens-block? line))
+                        (do
+                            (let start (fsc-bml-body-start body p end))
+                            (let stop (fsc-bml-block-end body start 0))
+                            (fsc-bml-block-stmts-recipes-loop body (add stop 1) end
+                                (cons (fsc-compile-form-bml-def-block-recipe body line start) acc)))
                     (do
                     (let stmt-end (fsc-bml-stmt-end body p end))
                     (let stmt (fsc-trim (fsc-sub body p stmt-end)))
                     (let line-recipes (fsc-compile-form-bml-block-line-recipe stmt))
                     (fsc-bml-block-stmts-recipes-loop body stmt-end end
-                        (fsc-rec-append-rev line-recipes acc))))))))
+                        (fsc-rec-append-rev line-recipes acc)))))))))
 
     (defn fsc-compile-form-bml-def-block-recipe (body line body-start)
         (do
@@ -2046,19 +2053,29 @@
     (defn fsc-bml-home-context (owner)
         (do (let resolution (bml-source-resolution (bml-source-candidates owner "form-stdlib/home-index.txt") (empty)))
             (fsc-bml-home-open (head resolution) (nth resolution 1))))
-    (defn fsc-bml-typed-list (recipes env signatures)
+    (defn fsc-bml-typed-list (recipes env signatures) (fsc-bml-typed-list-in recipes env signatures 0))
+    (defn fsc-bml-typed-list-in (recipes env signatures local)
         (if (nil? recipes) (empty)
-            (cons (fsc-bml-typed (head recipes) env signatures) (fsc-bml-typed-list (tail recipes) env signatures))))
+            (cons (fsc-bml-typed-in (head recipes) env signatures local) (fsc-bml-typed-list-in (tail recipes) env signatures local))))
     (defn fsc-bml-typed-nodes (rows)
         (if (nil? rows) (empty) (cons (head (head rows)) (fsc-bml-typed-nodes (tail rows)))))
     (defn fsc-bml-typed-sequence (recipes env signatures out result-type)
+        (fsc-bml-typed-sequence-in recipes env signatures out result-type 0))
+    (defn fsc-bml-typed-sequence-in (recipes env signatures out result-type local)
         (if (nil? recipes) (list (fsc-rec-do (fsc-rev out)) result-type)
             (do
                 (let recipe (head recipes))
-                (let row (fsc-bml-typed recipe env signatures))
-                (let next-env (if (node_eq (node_category recipe) fsc-rec-LET-CAT)
-                    (cons (list (head (fsc-bml-binding (fsc-bml-type-name recipe))) (nth row 1)) env) env))
-                (fsc-bml-typed-sequence (tail recipes) next-env signatures (cons (head row) out) (nth row 1)))))
+                (let row (fsc-bml-typed-in recipe env signatures local))
+                (let function (and local (node_eq (node_category recipe) fsc-rec-FNDEF-CAT)))
+                (let name (head (fsc-bml-binding (fsc-bml-type-name recipe))))
+                (let next-env (if function (cons (list name "" 1) env)
+                    (if (node_eq (node_category recipe) fsc-rec-LET-CAT)
+                        (cons (list name (nth row 1)) env) env)))
+                ;; Bind a local function once in its owner's frame. Sibling
+                ;; functions capture that value instead of re-reading its owner.
+                (let next-out (cons (head row) out))
+                (fsc-bml-typed-sequence-in (tail recipes) next-env signatures
+                    (if function (cons (fsc-rec-let name (fsc-rec-ident name)) next-out) next-out) (nth row 1) local))))
     (defn fsc-bml-comparison-contract (left right)
         (if (or (str_eq left "Value") (str_eq right "Value")) "Value"
         (if (str_eq left "") right
@@ -2074,8 +2091,34 @@
             (let numeric (or (str_eq kind "Number") (str_eq kind "Comparable")))
             (let positive (fsc-rec-form-call (if numeric "eq" (if (str_eq kind "String") "str_eq" "value_eq")) args))
             (list (if (str_eq name "$bml==") positive
-                (if numeric (fsc-rec-form-call "ne" args) (fsc-rec-form-call "not" (list positive)))) "")))
-    (defn fsc-bml-typed (recipe env signatures)
+                 (if numeric (fsc-rec-form-call "ne" args) (fsc-rec-form-call "not" (list positive)))) "")))
+    ;; A nested def reads its immediate enclosing frame. Carry an outer name
+    ;; through intervening functions when only a deeper function reads it.
+    ;; These are lexical lets; no runtime lookup or additional carrier operation.
+    (defn fsc-bml-nested-def? (recipe)
+        (or (node_eq (node_category recipe) fsc-rec-FNDEF-CAT) (fsc-bml-nested-defs? (node_children recipe))))
+    (defn fsc-bml-nested-defs? (recipes)
+        (if (nil? recipes) 0 (or (fsc-bml-nested-def? (head recipes)) (fsc-bml-nested-defs? (tail recipes)))))
+    (defn fsc-bml-descendant-use? (recipe name inside)
+        (do (let kids (node_children recipe)) (let cat (node_category recipe))
+            (if (node_eq cat fsc-rec-IDENT-CAT)
+                (and inside (str_eq (node_value (head kids)) name))
+            (if (node_eq cat fsc-rec-FNDEF-CAT)
+                (if (nil? (fsc-bml-type-find (fsc-bml-type-params (node_children (nth kids 1))) name))
+                    (fsc-bml-descendant-use? (nth kids 2) name 1) 0)
+                (fsc-bml-descendant-uses? kids name inside)))))
+    (defn fsc-bml-descendant-uses? (recipes name inside)
+        (if (nil? recipes) 0
+            (or (fsc-bml-descendant-use? (head recipes) name inside)
+                (fsc-bml-descendant-uses? (tail recipes) name inside))))
+    (defn fsc-bml-capture-bridges (recipe env bound)
+        (if (nil? env) (empty)
+            (do (let name (head (head env)))
+                (let rest (fsc-bml-capture-bridges recipe (tail env) (cons (head env) bound)))
+                (if (and (nil? (fsc-bml-type-find bound name)) (fsc-bml-descendant-use? recipe name 0))
+                    (cons (fsc-rec-let name (fsc-rec-ident name)) rest) rest))))
+    (defn fsc-bml-typed (recipe env signatures) (fsc-bml-typed-in recipe env signatures 0))
+    (defn fsc-bml-typed-in (recipe env signatures local)
         (do
             (let kids (node_children recipe))
             (let cat (node_category recipe))
@@ -2083,31 +2126,36 @@
             (if (node_eq cat fsc-rec-IDENT-CAT)
                 (list recipe (fsc-bml-type-of env (node_value (head kids))))
             (if (node_eq cat fsc-rec-DO-CAT)
-                (fsc-bml-typed-sequence kids env (fsc-bml-type-signatures kids signatures) (empty) "")
+                (fsc-bml-typed-sequence-in kids env (fsc-bml-type-signatures kids signatures) (empty) "" local)
             (if (node_eq cat fsc-rec-FNDEF-CAT)
                 (do
                     (let binding (fsc-bml-binding (node_value (head kids))))
                     (let params (fsc-bml-type-params (node_children (nth kids 1))))
-                    (let body (fsc-bml-typed (nth kids 2) (append params env) signatures))
-                    (list (fsc-rec-fndef (head binding) (fsc-bml-type-names params) (head body)) ""))
+                    (let body (fsc-bml-typed-in (nth kids 2) (append params env) signatures 1))
+                    (let bridges (if (fsc-bml-nested-def? (nth kids 2))
+                        (fsc-bml-capture-bridges (nth kids 2) env params) (empty)))
+                    (list (fsc-rec-fndef (head binding) (fsc-bml-type-names params)
+                        (if (nil? bridges) (head body) (fsc-rec-do (append bridges (list (head body)))))) ""))
             (if (node_eq cat fsc-rec-LET-CAT)
                 (do
                     (let binding (fsc-bml-binding (node_value (head kids))))
-                    (let value (fsc-bml-typed (nth kids 1) env signatures))
+                    (let value (fsc-bml-typed-in (nth kids 1) env signatures local))
                     (list (fsc-rec-let (head binding) (head value))
                         (if (str_eq (nth binding 1) "") (nth value 1) (nth binding 1))))
             (if (node_eq cat fsc-rec-FNCALL-CAT)
                 (do
                     (let name (fsc-bml-type-name (head kids)))
                     (if (str_eq name "$bml-as")
-                        (list (head (fsc-bml-typed (nth kids 2) env signatures)) (node_value (nth kids 1)))
+                        (list (head (fsc-bml-typed-in (nth kids 2) env signatures local)) (node_value (nth kids 1)))
                         (do
-                            (let rows (fsc-bml-typed-list (tail kids) env signatures))
+                            (let rows (fsc-bml-typed-list-in (tail kids) env signatures local))
                             (if (or (str_eq name "$bml==") (str_eq name "$bml!=")) (fsc-bml-typed-equality name rows)
                                 (list (fsc-rec-call name (fsc-bml-typed-nodes rows))
-                                    (if (nil? (fsc-bml-type-find env name)) (fsc-bml-type-of signatures name) ""))))))
+                                    (if (or (nil? (fsc-bml-type-find env name))
+                                            (gt (len (fsc-bml-type-find env name)) 2))
+                                        (fsc-bml-type-of signatures name) ""))))))
                 (do
-                    (let rows (fsc-bml-typed-list kids env signatures))
+                    (let rows (fsc-bml-typed-list-in kids env signatures local))
                     (list (intern_node cat (fsc-bml-typed-nodes rows))
                         (if (and (node_eq cat fsc-rec-IF3-CAT) (str_eq (nth (nth rows 1) 1) (nth (nth rows 2) 1)))
                             (nth (nth rows 1) 1) "")))))))))))

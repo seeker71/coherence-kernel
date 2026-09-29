@@ -25,6 +25,14 @@ ledgers. Keep current capability, current needs, direction and the smallest
 source-backed observation that can challenge a claim. Input corpora, independent
 proof engines and disposable caches have distinct purposes and measurements.
 
+Express each operation at the highest executable BML level that preserves its
+meaning: infix operators with visible precedence, comparison contracts on the
+binding, local functions that capture their context, and shared collection
+operations. Keep names and structure readable. A shorter spelling earns its
+place by removing repeated behavior, preserving effects and ownership, and
+running through the same native compiler. The sensor flow demonstrates this
+with local pixel readers, region folds, context matching and mesh fusion.
+
 Form also owns inspections, generators, migrations and temporary helpers. A
 host process carries an explicit OS operation with owned input, complete output,
 actual completion status and confirmed release. Foreign-language specimens are
@@ -37,6 +45,13 @@ A signal names its origin, scope, time, expectation, observation, outstanding
 need and retained continuation. A care organ directs attention and available
 resources to it. The asking organ observes what arrived and whether it helped.
 Missing, unreadable or aging signals remain unknown.
+
+The live framebuffer exposes operational decisions, timings, resource needs and
+causal links at these boundaries. Attention follows observed need and cost;
+fixed bands do not stand in for the executing organ. Keep private values with
+their owner and make the diagnostic channel's own allocation and crossing cost
+visible. Trace enough to explain and improve the next choice without duplicating
+the computation or retaining an unbounded transcript.
 
 The core interface exposes the live capability and ownership graph: admitted
 implementations, dependencies, outstanding work, crossings and needs. Birth,
