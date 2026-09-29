@@ -1,7 +1,7 @@
 // Full next-token LoRA learning from session evidence, with Adam continuation.
 // Candidate and serving pointers are distinct. Every assessment compares the
 // same examples before/after; held-out rows never enter the gradient.
-// preludes: form-stdlib/native-session-evidence.bml form-stdlib/native-lora-worker.bml form-stdlib/native-content-seal.bml
+// preludes: form-stdlib/native-session-evidence.bml form-stdlib/native-lora-worker.bml form-stdlib/native-content-seal.bml form-stdlib/native-vs-rented.fk
 section [form.bml] {
  class NativeSessionLearning {
   def nsl-adapter-seal(dir) = json-emit(json-node-array(list(json-node-string(ncs-file(nsm-at(dir,"adapters.safetensors"))),json-node-string(ncs-file(nsm-at(dir,"adapter_config.json"))),json-node-string(if (file_size(nsm-at(dir,"optimizer.safetensors")) > 0) then ncs-file(nsm-at(dir,"optimizer.safetensors")) else "historical-no-optimizer"))));
@@ -197,8 +197,12 @@ section [form.bml] {
   }
   def nsl-progress-health(home,dir,before,scores) {
    let baseline = json-array-elements(oh-get(before,"scores"));
-   let improved = ((len(scores) >= 2) && (((Comparable) len(baseline) == len(scores)) && (nsm-num(head(scores),"loss") < nsm-num(head(baseline),"loss"))));
-   let reading = oh-reading("session-learning",dir,"learning-progress",json-node-int(1),json-node-int(improved),json-node-int(improved),if improved then list() else list(oh-need("improved-training-evidence",oh-reference(nsm-at(dir,"assessment.json")))),list("retain-serving","defer"),oh-reference(nsm-at(nsm-at(dir,"adapter"),"assessment-after.json")));
+   let lossImproved = ((len(scores) >= 2) && (((Comparable) len(baseline) == len(scores)) && (nsm-num(head(scores),"loss") < nsm-num(head(baseline),"loss"))));
+   let comparable = ((len(scores) >= 1) && (json-object-has?(head(scores),"native_score") && json-object-has?(head(scores),"rented_score")));
+   let localWins = if comparable then nvr-at-least-as-good?(list(nsm-num(head(scores),"native_score"),nsm-num(head(scores),"rented_score"))) else 1;
+   let improved = (lossImproved && ((Comparable) localWins == 1));
+   let need = if (lossImproved && ((Comparable) localWins == 0)) then "local-at-least-as-good-as-remote" else "improved-training-evidence";
+   let reading = oh-reading("session-learning",dir,"learning-progress",json-node-int(1),json-node-int(improved),json-node-int(improved),if improved then list() else list(oh-need(need,oh-reference(nsm-at(dir,"assessment.json")))),list("retain-serving","defer"),oh-reference(nsm-at(nsm-at(dir,"adapter"),"assessment-after.json")));
    let emitted = nsm-event(home,"organ-health",list(json-node-pair("health",reading)));
    reading;
   }
@@ -247,13 +251,57 @@ section [form.bml] {
    state;
   }
   def nsl-ask(home,request) {
+   let prompt = nsm-str(request,"prompt");
+   if nsl-where-asked?(prompt) then nsl-ask-organs(home,request,host_monotonic_ms(),nsl-where-text(home)) else nsl-ask-adapter(home,request);
+  }
+  def nsl-ask-adapter(home,request) {
    let adapter = nsl-serving(home);
    if (((String) adapter == "") && ((Comparable) nsm-num(request,"require_serving") == 1)) then nsm-write(nsm-str(request,"output"),json-node-object(list(nsm-s("text",""),nsm-s("reason","no-evaluated-session-adapter"),nsm-n("generated_tokens",0),nsm-n("model_admitted",0)))) else nsl-ask-ready(home,request,if ((String) adapter == "") then nsm-seed() else adapter,(!((String) adapter == "")));
   }
+  // The newest retained reading whose prompt is this question rides beside it,
+  // the way a draft carries the turn before. A question with no reading stays bare.
+  def nsl-ask-memory(home,prompt) = nsl-ask-memory-rows(nsm-at(home,"rows"),nsm-dirs(home),prompt,0,"");
+  def nsl-ask-memory-rows(root,names,prompt,at,text) = if nil?(names) then text else nsl-ask-memory-one(root,head(names),tail(names),prompt,at,text);
+  def nsl-ask-memory-one(root,name,rest,prompt,at,text) {
+   let dir = nsm-at(root,name);
+   let record = if nsm-withdrawn(dir) then json-node-object(list()) else nsm-json(nsm-at(dir,"record.json"));
+   let present = json-object-has?(record,"example");
+   let example = if present then oh-get(record,"example") else json-node-object(list());
+   let completion = if present then nsm-str(example,"completion") else "";
+   let when = if present then nsm-num(record,"observed_at_ms") else 0;
+   let match = if present then ((((String) nsm-str(example,"prompt") == prompt) && (str_len(completion) > 0)) && (when >= at)) else 0;
+   nsl-ask-memory-rows(root,rest,prompt,if match then when else at,if match then completion else text);
+  }
+  def nsl-ask-prompt(prompt,reading) = if ((String) reading == "") then prompt else str_concat("The turn before verified this reading:\n",str_concat(reading,str_concat("\n\nThe person asks now:\n",prompt)));
+  def nsl-where-question() = "Where are we, and where does the native share want to go?";
+  def nsl-where-asked?(prompt) = ((String) prompt == nsl-where-question());
+  def nsl-line(text) {
+   let at = str_find(text,"\n",0);
+   if (at < 0) then text else substring(text,0,at);
+  }
+  def nsl-where-text(home) {
+   let stem = str_concat("where-",nsm-id());
+   let out = nsm-at(home,str_concat(stem,".where"));
+   let err = nsm-at(home,str_concat(stem,".where.err"));
+   let pid = host_spawn_at(list("./fkwu","observe/where-we-are-run.bml"),list("/dev/null",out,err));
+   let rc = if (pid > 0) then host_wait(pid) else -1;
+   if ((Comparable) rc == 0) then nsl-line(nsm-text(out)) else "";
+  }
+  def nsl-ask-organs(home,request,start,text) {
+   let result = json-node-object(list(nsm-s("text",text),nsm-s("reason",if ((String) text == "") then "organ-reading-missing" else "organ-reading"),nsm-n("generated_tokens",0),nsm-n("model_admitted",0),nsm-s("model",""),nsm-s("adapter",""),nsm-n("session_learned",0),nsm-s("verification","organ-reading"),nsm-n("wall_ms",(host_monotonic_ms() - start)),nsm-s("events",nsm-str(request,"events")),nsm-s("stream",nsm-str(request,"stream"))));
+   let wrote = nsm-write(nsm-str(request,"output"),result);
+   nsm-event(home,"inference-completed",list(nsm-s("route","where-we-are"),nsm-n("generated_tokens",0),nsm-s("reason","organ-reading"),nsm-n("wall_ms",(host_monotonic_ms() - start)),nsm-s("events",nsm-str(request,"events"))));
+  }
   def nsl-ask-ready(home,request,adapter,learned) {
    let start = host_monotonic_ms();
-   let selected = nsm-event(home,"inference-selected",list(nsm-s("route","native-lora"),nsm-s("adapter",adapter),nsm-n("session_learned",learned),nsm-s("events",nsm-str(request,"events")),nsm-s("choices","evaluated-session-adapter|historical-seed|return-local-gap")));
-   let answer = nlg-once(nsm-model(),adapter,nsm-str(request,"prompt"),0,nsm-str(request,"stream"),nsm-str(request,"cancel"),nsm-str(request,"events"));
+   let prompt = nsm-str(request,"prompt");
+   if nsl-where-asked?(prompt) then nsl-ask-organs(home,request,start,nsl-where-text(home)) else nsl-ask-model(home,request,adapter,learned,prompt,start);
+  }
+  def nsl-ask-model(home,request,adapter,learned,prompt,start) {
+   let reading = nsl-ask-memory(home,prompt);
+   let spoken = nsl-ask-prompt(prompt,reading);
+   let selected = nsm-event(home,"inference-selected",list(nsm-s("route","native-lora"),nsm-s("adapter",adapter),nsm-n("session_learned",learned),nsm-n("retained_reading",if ((String) reading == "") then 0 else 1),nsm-s("events",nsm-str(request,"events")),nsm-s("choices","evaluated-session-adapter|historical-seed|return-local-gap")));
+   let answer = nlg-once(nsm-model(),adapter,spoken,0,nsm-str(request,"stream"),nsm-str(request,"cancel"),nsm-str(request,"events"));
    nsl-ask-finished(home,request,adapter,learned,answer,start);
   }
   def nsl-ask-finished(home,request,adapter,learned,answer,start) {

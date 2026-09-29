@@ -201,6 +201,123 @@ section [form.bml] {
             fctg-refresh-unreconciled-msg();
         }
 
+        // An unbound host still has its own receipts. Read those, and the
+        // provider-usage lines in its own transcript. Absence of a Codex
+        // rollout is attention, not a withheld share.
+        def fctg-no-lead-slash(path) = if eq(str_byte_at(path, 0), 47) then substring(path, 1, str_len(path)) else path;
+        def fctg-cursor-root() = if str_eq(fctd-home(), "") then "" else fs-path-join(fs-path-join(fctd-home(), ".cursor/projects"), fctd-slug(fctg-no-lead-slash(fctd-here())));
+        def fctg-receipt-names(names, acc) = if eq(len(names), 0) then acc else if or(eq(fs-suffix?(head(names), ".log"), 1), eq(fs-suffix?(head(names), ".txt"), 1)) then fctg-receipt-names(tail(names), cons(head(names), acc)) else fctg-receipt-names(tail(names), acc);
+        def fctg-mark-value(s, mark) {
+            let p = str_find(s, mark, 0);
+            if lt(p, 0) then "" else fctg-mark-rest(s, add(p, str_len(mark)));
+        }
+        def fctg-mark-rest(s, a) {
+            let b = str_find(s, fctg-lf(), a);
+            fctel-trim-end(if lt(b, 0) then substring(s, a, str_len(s)) else substring(s, a, b));
+        }
+        def fctg-min-pos(cur, v) = if eq(v, 0) then cur else if or(eq(cur, 0), lt(v, cur)) then v else cur;
+        def fctg-max-pos(cur, v) = if gt(v, cur) then v else cur;
+        def fctg-span(dir, names, lo, hi) = if eq(len(names), 0) then list(lo, hi) else fctg-span-one(dir, names, lo, hi);
+        def fctg-span-one(dir, names, lo, hi) {
+            let s = read_file(fs-path-join(dir, head(names)));
+            let a = fctel-iso-ms(fctg-mark-value(s, "started_at: "));
+            let b = fctel-iso-ms(fctg-mark-value(s, "ended_at: "));
+            fctg-span(dir, tail(names), fctg-min-pos(lo, a), fctg-max-pos(hi, b));
+        }
+        def fctg-scan-nested(parent, names, current) = if eq(len(names), 0) then current else fctg-scan-nested-one(parent, names, current);
+        def fctg-scan-nested-one(parent, names, current) {
+            let sub = fs-path-join(parent, head(names));
+            let found = if eq(fs-is-dir?(sub), 1) then fctd-newest-in(sub) else fctd-newest-none();
+            let next = if eq(fctd-newest-some?(found), 1) then fctd-better(current, fctd-newest-path(found), fctd-newest-mtime(found)) else current;
+            fctg-scan-nested(parent, tail(names), next);
+        }
+        def fctg-count-usage(lines) = if eq(len(lines), 0) then 0 else add(frte-call-local-usage-line?(head(lines)), fctg-count-usage(tail(lines)));
+        def fctg-assistant-mark() = "{\"role\":\"assistant\"";
+        def fctg-transcript-bind() = ".form-cli-turn-cursor-transcript";
+        def fctg-provider-calls(path) {
+            let usage = fctg-count-usage(split-on(read_file(path), fctg-lf()));
+            if gt(usage, 0) then usage else fctg-count-file(path, fctg-assistant-mark());
+        }
+        def fctg-tool-mark() = "\"type\":\"tool_use\"";
+        def fctg-shell-mark() = "\"name\":\"Shell\"";
+        def fctg-text-mark() = "\"type\":\"text\"";
+        def fctg-lanes-zero() = list(0, 0, 0);
+        def fctg-lanes-add(acc, native, local, remote) = list(add(nth(acc, 0), native), add(nth(acc, 1), local), add(nth(acc, 2), remote));
+        def fctg-command-key() = "\"command\":\"";
+        def fctg-command-start(line, at) {
+            let p = str_find(line, fctg-command-key(), at);
+            if lt(p, 0) then -1 else add(p, str_len(fctg-command-key()));
+        }
+        def fctg-shell-native?(line, at) {
+            let a = fctg-command-start(line, at);
+            let end = add(a, 16384);
+            let stop = if lt(a, 0) then 0 else if lt(str_len(line), end) then str_len(line) else end;
+            let window = if lt(a, 0) then "" else substring(line, a, stop);
+            if lt(a, 0) then 0 else if lt(str_find(window, "fkwu", 0), 0) then 0 else 1;
+        }
+        def fctg-shells(line, from, native, local) {
+            let p = str_find(line, fctg-shell-mark(), from);
+            if lt(p, 0) then list(native, local)
+            else if eq(fctg-shell-native?(line, p), 1) then fctg-shells(line, add(p, str_len(fctg-shell-mark())), add(native, 1), local)
+            else fctg-shells(line, add(p, str_len(fctg-shell-mark())), native, add(local, 1));
+        }
+        def fctg-lane-line(line, acc) {
+            let tools = fctg-count-mark(line, fctg-tool-mark(), 0, 0);
+            let shells = fctg-shells(line, 0, 0, 0);
+            let native = nth(shells, 0);
+            let shellLocal = nth(shells, 1);
+            let other = sub(tools, add(native, shellLocal));
+            let local = add(if lt(other, 0) then 0 else other, shellLocal);
+            let speech = if and(ge(str_find(line, fctg-assistant-mark(), 0), 0), ge(str_find(line, fctg-text-mark(), 0), 0)) then 1 else 0;
+            fctg-lanes-add(acc, native, local, speech);
+        }
+        def fctg-lane-lines(lines, acc) = if eq(len(lines), 0) then acc else fctg-lane-lines(tail(lines), fctg-lane-line(head(lines), acc));
+        def fctg-transcript-lanes(path) {
+            let lines = split-on(read_file(path), fctg-lf());
+            let usage = fctg-count-usage(lines);
+            let lanes = fctg-lane-lines(lines, fctg-lanes-zero());
+            let remote = if gt(usage, 0) then usage else nth(lanes, 2);
+            list(nth(lanes, 0), nth(lanes, 1), remote);
+        }
+        def fctg-with-lanes(acc, native, local) = list(native, local, nth(acc, INativeFail()), nth(acc, ILocalFail()), nth(acc, IStdout()), nth(acc, IStderr()), nth(acc, IShown()));
+        def fctg-observed-foreign?() {
+            if le(file_size(fctel-observed-row-path()), 0) then 0
+            else fctg-observed-foreign-row(fctel-trim-end(read_file(fctel-observed-row-path())));
+        }
+        def fctg-observed-foreign-row(row) {
+            let e = fcte-parse(row);
+            if eq(fcte-valid?(e), 0) then 0 else if str_eq(fcte-source(e), fcte-source-kind-grok()) then 0 else 1;
+        }
+        def fctg-attend-write(acc, remote, started, ended) {
+            let row = fctg-row(fctd-slug(fctg-no-lead-slash(fctd-here())), TurnScope(), nth(acc, INative()), nth(acc, INativeFail()), nth(acc, ILocal()), nth(acc, ILocalFail()), remote, nth(acc, IStdout()), nth(acc, IStderr()), nth(acc, IShown()), 0, started, ended);
+            let wrote = write_file_text(fctel-observed-row-path(), row);
+            if eq(fcte-valid?(fcte-parse(row)), 1) then fctg-refresh-observed(row, acc, remote) else fctg-refresh-unreconciled(row);
+        }
+        def fctg-attend-term(root, term) {
+            let names = fctg-receipt-names(fs-list(term), fctg-names-none());
+            let acc = fctg-dir(term, names, fctg-zero());
+            let span0 = fctg-span(term, names, 0, 0);
+            let started = nth(span0, 0);
+            let ended0 = nth(span0, 1);
+            let ended = if ge(ended0, started) then ended0 else started;
+            let sessions = fs-path-join(root, "agent-transcripts");
+            let newest = if eq(fs-is-dir?(sessions), 0) then fctd-newest-none() else fctg-scan-nested(sessions, fs-list(sessions), fctd-newest-none());
+            let transcript = if eq(fctd-newest-some?(newest), 0) then "" else fctd-newest-path(newest);
+            let kept-transcript = if str_eq(transcript, "") then 0 else write_file_text(fctg-transcript-bind(), transcript);
+            let lanes = if str_eq(transcript, "") then fctg-lanes-zero() else fctg-transcript-lanes(transcript);
+            let laneSum = add(nth(lanes, 0), add(nth(lanes, 1), nth(lanes, 2)));
+            let counted = if gt(laneSum, 0) then fctg-with-lanes(acc, nth(lanes, 0), nth(lanes, 1)) else acc;
+            let remote = if gt(laneSum, 0) then nth(lanes, 2) else if str_eq(transcript, "") then 0 else fctg-provider-calls(transcript);
+            let commands = add(nth(counted, INative()), nth(counted, ILocal()));
+            if or(eq(started, 0), eq(commands, 0)) then str_concat("turn-evidence-refresh=attention reason=receipts-without-a-time", fctg-lf()) else fctg-attend-write(counted, remote, started, ended);
+        }
+        def fctg-attend-cursor() {
+            let root = fctg-cursor-root();
+            let term = fs-path-join(root, "terminals");
+            if or(str_eq(root, ""), eq(fs-is-dir?(term), 0)) then str_concat("turn-evidence-refresh=attention reason=no-session-receipts", fctg-lf()) else fctg-attend-term(root, term);
+        }
+        def fctg-attend-unbound() = if gt(host_file_size(fctel-binding-path()), 0) then "" else if eq(fctg-observed-foreign?(), 1) then "" else fctg-attend-cursor();
+
         def fctg-refresh-once(session) {
             let term = fs-path-join(session, TerminalName());
             let events = fs-path-join(session, EventsName());

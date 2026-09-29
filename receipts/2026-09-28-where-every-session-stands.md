@@ -61,6 +61,87 @@ Stamp 2026-09-28. Door ring: 12 doors, 127 links, 0 broken. Body-wide: 2,438
 pages, 1,587 resolved claims, 36 broken, 14 orphans. Receipts 4,182. Deepest
 corpus meaning-id 1,593.
 
+## The first reading of the drafts
+
+The same day, the last 50 drafts were read through `observe/draft-reading-run.bml`.
+19 accepted, 15 revised, 16 rejected. The check then read local share as
+**19 accepted of the last 50**. The fold stays 118/255; that bit lights at 25.
+The page is redrawn at `.hearth/drafts/index.html`.
+
+Accepted drafts heard the person and stayed in this body: BMA set aside, the
+python compiler set aside, a confusion answered, a private list taken back,
+one organism, intrinsics, the table left for a moving primitive. Rejected
+drafts brought in another stack, declined the frame, or invented a file.
+Revised drafts had the direction and a concrete miss.
+
+The walk bit and the rent-free week were left as they stood. They fill by
+nights and by who does the engineering. Local share was the gap a reading
+could move today.
+
+## The first repair
+
+`observe/prompt-draft-run.bml` grew a repair: packet 6 carries the reading's
+note and the previous draft, and writes the same id again. Six newest revised
+drafts were repaired on the body's own voice and read again.
+
+One accepted. The held push stayed with the 03:30 witness the turn had
+already named, and the rebase did not come back.
+
+Five did not. One was rejected: it left the walk, then invented a log file,
+a script, and a UI. Four were revised again. The confidence field became a
+cited/inferred tag schema, and the draft cut off. The lane settings left, and
+the draft cut off while planning to rewrite the receipt. The 3B/27B mix left,
+and a 40 GB limit and a memory leak arrived. Skip-when-unchanged was heard,
+then a kernel hash and a 1 ms reading were placed inside gpu-dispatch.
+
+The check after that reading: local share **20 accepted of the last 50**,
+fold still 118/255.
+
+## The second repair
+
+The four that were still revised, plus the next older one, were repaired
+again. The notes named the new miss.
+
+One accepted. Where the rented mind is guessing, the draft stayed with the
+`rented_mind` field and the training lane the turn had already named. The
+tag schema did not return.
+
+Three were rejected. The lane settings came back as a repetition threshold,
+a citation extractor, and a configuration file. The 3B mix stayed gone, and
+the leak, the profiling, and a 27 GB ceiling came back. Skip-when-unchanged
+stayed inside gpu-dispatch and added a kernel identifier.
+
+The glass draft was revised again. Generics and a signal API arrived. The
+glass is still absent.
+
+The check after that reading: local share **21 accepted of the last 50**,
+fold still 118/255.
+
+## Where the repairs stopped
+
+The rest of the revised drafts were repaired the same way and read again.
+Three more were accepted: the four stones of the lowering, the turn's own
+counts on the let gap, and the standing probe whose gaps are ops 201 and 109.
+The others were rejected when the named miss came back, or when a new file
+arrived.
+
+The check then read local share **24 accepted of the last 50**. The fold
+stayed 118/255. Rent-free week read 183 commits on main in 7 days. That
+commit count moved in the ledger window; this session did not land it.
+
+## The bit lit
+
+The revised pool was empty, so the next path was the person's own newest
+undrafted prompts, drafted by the body and read the same way. One invented a
+Python flow and was rejected. One scheduled work the turn had already closed
+and was repaired. The repair stayed with the mirror, with `oac-backtrack`
+already live, with the stale chip already withdrawn, and with backcarry still
+an offer. That reading was accepted.
+
+The check now reads local share **25 accepted of the last 50**. That bit is
+lit. The fold is **126/255**. Walk is still 5 of 7. The week still carries
+session rent, 8 of 16 crossings free, and 187 commits on main in 7 days.
+
 This checkout had been 65 commits behind origin, with two local nightly-walk
 commits in the older `movement=nightly` shape. Those two were not replayed:
 origin already carries the same nights as `scheduled` walks. A stashed pair of
