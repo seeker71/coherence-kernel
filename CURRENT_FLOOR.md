@@ -47,7 +47,7 @@ gate/tests/structural-gate-band          -> 16383
                                             (every name a cell loads reaches one tracked file)
 ./fkwu observe/belief-stamps.bml         -> 75068002  (field stamped*10^6 + owed*10^3 + laws)
 observe/tests/belief-rewitness-band      -> 63
-./fkwu form/form-stdlib/release-ledger.bml -> open=27 moving=0, then 27000000
+./fkwu form/form-stdlib/release-ledger.bml -> open=26 moving=0, then 26000000
 learn/tests/homecoming-distillation-corpus-band -> 32767
 value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
@@ -66,18 +66,19 @@ lapse. The release ledger's open rows are the body's named work, each with its w
 A unit lowers by what it carries: any file with a `section [` block — `form.bml`, `form.lift`,
 `form.action`, `form.route`, the `*.bmf` grammar dialects — travels through `bml-floor-compile`
 whatever its extension, as a prelude or as the main file, and fkwu keeps the `.lowfk`/`.fkb` cache
-beside it. Of 470 tracked `.bml` files, 404 carry a `section [form.bml]` block and three carry
+beside it. Of 507 tracked `.bml` files, 440 carry a `section [form.bml]` block and three carry
 `section [form.lift]` (`git ls-files`, `git grep -l`). `true` and `false` are literals in the
 dialect, and a nested `defn` is a registered function (the two nested-defn bands below).
 
-The cursor (`grammars/form-bml.fk`, lowered by `form-bml-lower.fk`) reads the same sections whole, with
-direct backtracking, to the compiler's recipes NodeID for NodeID after the contract pass they share:
+The cursor (`grammars/form-bml.fk`, lowered by `form-bml-lower.fk`) is the compiler's one reader of a
+`form.bml`, `form.route` or `form.action` section — the body, its imports' signature catalog and its
+refusals all come through it. It reads a section whole, with direct backtracking, and rebuilds it with
+the compiler's own constructors, so a def lowers to the very node its flat Form spelling builds:
 
 ```text
-./fkwu observe/bml-cursor-coverage-run.bml -> sections=1094 parity=1093 apart=0 refused=1
-                                              (the one refused is a receipt artifact whose section the
-                                              compiler's own finder cannot bound either; R144 is the
-                                              cursor becoming the one reader)
+./fkwu observe/bml-cursor-coverage-run.bml -> files=1348 sections=463 read=463 stops=0 refused=0
+                                              (463 = every `^section [form.bml|route|action]` line in
+                                              tracked files, `git grep -c`; cursor-ms=44136)
 form-bml-cursor-full-band 105 · bmf-prefix-state-band 4194303 · form-bml-prefix-choice-band 4194303
 ```
 
