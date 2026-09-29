@@ -38,6 +38,8 @@ its caller, leaving serialization one owner. The retained teaching now serialize
 as the expected 1,027-byte JSON line. The same retained row completed native
 Metal learning round 59 over four training rows and released all GPU buffers.
 The worker completed with zero pending; the serving adapter remains unchanged.
+The verified framebuffer teaching also completed round 60 with zero pending;
+its candidate is retained and the serving adapter remains unchanged.
 
 The live framebuffer found interpreted sealing work: hashing 190,440 held bytes
 took 1,409 ms and 183,354,271 dispatches. The selected Form-emitted CPU SHA path
@@ -56,6 +58,12 @@ The full 31,188,867-byte output matched the preceding encoder byte for byte.
 Dispatches fell from 889,765,846 to 726,244,522; a concurrent verification run
 took 19,394 ms. These are observed stages, not a peak-bandwidth or whole-build
 speed claim.
+
+The compact curriculum preserves all eight reference results; the existing
+prediction/code curriculum preserves six. Each generated child now imports only
+its JSON/core needs. The same six-check ternary example fell from 50,369 ms to
+4,067 ms; a range example fell from 37,245 ms to 3,798 ms. Supervision publishes
+actual child elapsed time and explicitly labels its own dispatch counters.
 
 The observer now handles mixed numeric/string payloads and counts native
 file, JIT and CPU/Metal carrier operations through their operation counters.
