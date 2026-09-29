@@ -185,30 +185,38 @@ It runs that real command through the process organ and returns its actual
 status, evidence directory and health readings. This is a general execution
 door, with no fixture list or expected verdict.
 
-## Bands speak as they run
+## Steps run live
 
-A band built on `form/form-stdlib/bml/live-band.bml` does not fold its claims in
-silence and leave the number to be read afterwards. Each claim is observed inside
-`attempt`, so a stop is an observation, and is spoken at once on stderr as an
-organ-health reading (organ `band`, the band as flow, the claim as aspect): what it
-expected, what it observed, its health, and the repairs it offers. stdout keeps the
-verdict, so the four kernels still compare one line.
+A running step meets its surprise where it happens, not in a band or a gate read
+afterwards. `form/form-stdlib/bml/live.bml` runs a step inside `attempt`, so a
+stop is an observation and not an exit, and speaks it at once on stderr as an
+organ-health reading (organ `live`, the flow, the step, what it answered, whether
+it held, what it offers). A step that does not hold is a choice point, and what it
+answered chooses what happens next: each repair names the need it meets, and the
+step is offered only the repairs that meet what it answered, so nothing is retried
+blind. The offered repairs walk through `oac-backtrack-walk`: each acts, is spoken
+as applied, and the step runs again in the context it made. A repair that cannot
+act earns no retry. A surprise no repair meets is spoken with its need and handed
+back to the flow.
 
-A claim that does not hold is a backtrack point. The band offers its repairs
-through `oac-backtrack-walk`: each acts on the claim's context and is spoken as
-applied, and the claim is observed again in the context it made, the walk carrying
-what every earlier repair saw. A repair that cannot act answers nothing and earns
-no retry. The verdict folds the claims that hold, first time or after a repair.
-Witness: `form/form-stdlib/tests/live-band-band.bml` (15, four-way).
+The flows run on it:
 
-The runners hear it. The drift gates read each row as a claim and, before a row
-refuses, walk the repairs that renew derived state and never a tracked source:
-`fresh-images` drops the door's cached images, and `rebuild-fkwu` gives
-binary-freshness a binary built from today's runtime; the row then reads
-`pass after <repair>`. The body's own turn (`observe/native-turn-run.bml`) reads
-a live band's readings when an option falls short, and hands the next option each
-claim that did not hold, with what it expected, what it observed and which
-repairs the band already tried.
+- The walk's carry (`form/form-stdlib/bml/host-walk.bml`, `hw-carry`): follow
+  main, read the gates, fast-forward main, each a live step. A fast-forward
+  refused because main moved meanwhile is met at once: the branch follows main
+  again, the gates read again, and the push goes again, twice at most. A push
+  refused for any other reason, or a rebase that conflicts (its files named),
+  meets no repair and holds.
+- The gates (`gate/drift-gates.bml`): a landing runs only the rows whose ground
+  moved since origin/main. Each kernel row names the paths it guards; a row whose
+  ground no path touches sits out, said on its own line and absent from the fold.
+  structural-gate, binary-freshness, ground, door-links and release-ledger guard
+  the whole tree and always run. A stale binary is the one need a gate's repair
+  meets (`rebuild-fkwu`). A gate that did not arrive reads nothing, not a code.
+- The body's own turn (`observe/native-turn-run.bml`) runs its band as a live
+  step against the gap's full: a band short of full needs code, and the repair
+  that meets it is the turn's own walk through the voice, which hears each step
+  of the band that did not hold.
 
 ## Kernel protocol witness
 
