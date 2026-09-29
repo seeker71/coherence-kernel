@@ -283,7 +283,10 @@ What answered red, died, or was not witnessed today, so no one leans on it:
 - `form/form-stdlib/tests/primitive-registry-band.fk` stops rc 1 in `sum-onto`: the registry names
   the Go sibling's native surface, and 84 of its calls (`field_*`, `substrate_*`, `register_jit`,
   `string_bytes`, `pow`, `min`, `max`, ...) have no binding on fkwu, so its compile carries 84
-  unresolved-call errors and the first recovered `nothing` meets arithmetic. It waits on a registry
+  unresolved-call errors and the first recovered `nothing` meets arithmetic. Measured probe by probe
+  on fkwu, of 169 lane-1 rows 115 answer their declared outside, 41 answer another value and 13 answer
+  `nothing`; `validate.sh` counts the 84 compile errors as diagnostics, so a total `prim-verified?`
+  alone would not turn it green. It waits on a registry
   grounded in fkwu's own op table (`runtime/fkwu-optable.h` and `core.fk`), or on a sibling-home lane
   in `form/validate.sh` for a band whose surface only the siblings carry.
 - `form-cli-allowance-band`, `form-cli-live-band` and `native-tensor-lifecycle-band` stop at
