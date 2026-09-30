@@ -2,13 +2,16 @@
 // Span-wide admitted scratch uses the existing sliced batched path. Narrow or
 // legacy contexts retain the per-position barrier path. A failed submission is
 // never retried on a mutated state. Intermediate predictions never enter KV.
-// preludes: form-stdlib/bml/form-cli-model-admission.bml native/metal/qwen35-dense-token-handle.fk form-stdlib/qwen35-tokenizer-live-cursor.fk form-stdlib/qwen35-tokenizer.fk
+import form-stdlib/bml/form-cli-model-admission.bml;
+import native/metal/qwen35-dense-token-handle.fk;
+import form-stdlib/qwen35-tokenizer-live-cursor.fk;
+import form-stdlib/qwen35-tokenizer.fk;
 section [form.bml] {
  class FormCliModelObservation {
   // The selected Qwen GGUF template renders tool messages as a user turn
   // containing tool_response markup. A bare ChatML tool role is not that wire
   // representation. Keep the observation bytes inside the model's envelope.
-  def fcmo-tool-content(text) = str_concat("<tool_response>\n",str_concat(text,"\n</tool_response>"));
+  def fcmo-tool-content(text) = ("<tool_response>\n" + (text + "\n</tool_response>"));
   def fcmo-tool-tail-ids(src,text) = fcmo-direct-reference-ids(src,fcmo-tool-content(text));
   // Each direct answer keeps the ordinary CLI's explicit no-thinking chat
   // template. A bare assistant opening silently re-enabled reasoning after
@@ -21,7 +24,7 @@ section [form.bml] {
   def fcmo-direct-cursor-ids(cursor) = if ((String) qtlc-status(cursor) == "open") then fcmo-direct-drained(qtlc-drain(cursor)) else nothing();
   // Tokenization precedes KV mutation. An unavailable/incomplete index leaves
   // the original reference encoder responsible for the entire tail.
-  def fcmo-direct-drained(result) = if ((String) head(result) == "done") then result[1] else nothing();
+  def fcmo-direct-drained(result) = if ((String) result[0] == "done") then result[1] else nothing();
   // Slots 15 and 16 belong to the adapter and sampler. The immutable model
   // cursor epoch follows them and survives every stream-state transition.
   def fcmo-owner(session) = len(session) > 17 ? session[17] : nothing();
@@ -29,7 +32,7 @@ section [form.bml] {
   def fcmo-pad(session) = len(session) >= 17 ? session : fcmo-pad(append(session,[[]]));
   def fcmo-with-index(session,index) {
    let src = session[4]; let crystal = qsx-load(session[3]);
-   let close = head(crystal) == 1 ? crystal[2] : q35-special-id(src,"<|im_end|>");
+   let close = crystal[0] == 1 ? crystal[2] : q35-special-id(src,"<|im_end|>");
    let owner = record_new(0,"index",index,"crystal",crystal,"close",close,"stops",[gmt-u32(src,"tokenizer.ggml.eos_token_id"),close],"decode",reuse-open(session[3],src,fcmo-decode-id,value => value_kind(value) == "string"));
    append(take(17,fcmo-pad(session)),cons(owner,drop(18,session)));
   }
@@ -57,9 +60,9 @@ section [form.bml] {
   def fcmo-text-ids(session,text) = fcmo-segment-ids(session,[qtlc-text-segment(text)]);
   def fcmo-session-tail-ids(session,text) {
    let crystal = nothing?(fcmo-owner(session)) ? qsx-load(session[3]) : record_get(fcmo-owner(session),"crystal");
-   head(crystal) == 1 ? fcmo-segment-ids(session,fcmo-direct-segments(text,crystal)) : nothing();
+   crystal[0] == 1 ? fcmo-segment-ids(session,fcmo-direct-segments(text,crystal)) : nothing();
   }
-  def fcmo-shape(result,pos,count) = (((Comparable) len(result) == 2) && ((head(result) >= 0) && ((Comparable) result[1] == (pos + count))));
+  def fcmo-shape(result,pos,count) = (((Comparable) len(result) == 2) && ((result[0] >= 0) && ((Comparable) result[1] == (pos + count))));
   def fcmo-settled(live) = (((Comparable) len(live) == 20) && (((Comparable) live[5] == 0) && (((Comparable) live[6] == 0) && ((Comparable) live[14] == 0))));
   def fcmo-sliced?(ctx) = (q38-ctx-span(ctx) > 1);
   def fcmo-span(ctx,count) = if (fcmo-sliced?(ctx) && (q38-ctx-span(ctx) < fcma-span(count))) then q38-ctx-span(ctx) else fcma-span(count);
@@ -78,17 +81,17 @@ section [form.bml] {
    else fcmo-walk(step,ctx,sts,drop(count,ids),result[1],span);
   }
   def fcmo-checked-step(step,ctx,sts,ids,pos) {
-   let begin = q38oo-stage(str_concat("model-observation-positions-",str_concat(int_to_str(pos),"-begin")),8388625);
+   let begin = q38oo-stage(("model-observation-positions-" + (pos.str() + "-begin")),8388625);
    let result = step(ctx,sts,ids,pos);
-   let good = (fcmo-shape(result,pos,len(ids)) && ((head(result) < ctx[2][19]) && fcmo-settled(metal_live())));
-   let observed = q38oo-stage(str_concat("model-observation-positions-",str_concat(int_to_str(if good then result[1] else pos),if good then "-ready" else "-refused")),8388625);
+   let good = (fcmo-shape(result,pos,len(ids)) && ((result[0] < ctx[2][19]) && fcmo-settled(metal_live())));
+   let observed = q38oo-stage(("model-observation-positions-" + ((String) (if good then result[1] else pos).str() + (if good then "-ready" else "-refused"))),8388625);
    if good then result else [-1,pos];
   }
   def fcmo-native-step(ctx,sts,ids,pos) = fcmo-checked-step(fcmo-step,ctx,sts,ids,pos);
   def fcmo-barrier-step(ctx,sts,ids,pos) = fcmo-checked-step(fcmo-barrier,ctx,sts,ids,pos);
   def fcmo-prefill(ctx,sts,ids,pos) {
    let span = fcmo-span(ctx,len(ids));
-   let selected = q38oo-stage(str_concat("model-observation-route-",str_concat(if fcmo-sliced?(ctx) then "sliced-span-" else "barrier-span-",int_to_str(span))),8388625);
+   let selected = q38oo-stage(("model-observation-route-" + ((String) (if fcmo-sliced?(ctx) then "sliced-span-" else "barrier-span-") + span.str())),8388625);
    fcmo-walk(fcmo-native-step,ctx,sts,ids,pos,span);
   }
   // Retained reference for live equivalence and timing observations.

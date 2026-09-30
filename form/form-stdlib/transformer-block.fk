@@ -11,7 +11,8 @@
 // trained on it arrives. Proven three-way against the PyTorch fp64 reference by
 // tests/transformer-block-band.fk.
 //
-// preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk
+import form-stdlib/core.fk;
+import form-stdlib/transformer-numerics.fk;
 //
 // The four names this unit does not define itself are exactly the M3 numerics it composes:
 // tn-layernorm, tn-gelu, tn-scale, tn-softmax. Dependency-first FULL closure — preludes are
@@ -22,36 +23,36 @@
 // a NUMB verdict rather than an error.
 // --- vector / matrix walk ---
 section [form.bml] {
-    def tb-dot(a, b) = (Comparable) len(a) == 0 ? 0.0 : head(a) * head(b) + tb-dot(tail(a), tail(b));
-    def tb-matvec(rows, x) = (Comparable) len(rows) == 0 ? empty() : cons(tb-dot(head(rows), x), tb-matvec(tail(rows), x));
-    def tb-vec-add(a, b) = (Comparable) len(a) == 0 ? empty() : cons(head(a) + head(b), tb-vec-add(tail(a), tail(b)));
-    def tb-vec-mul(a, b) = (Comparable) len(a) == 0 ? empty() : cons(head(a) * head(b), tb-vec-mul(tail(a), tail(b)));
+    def tb-dot(a, b) = (Comparable) len(a) == 0 ? 0.0 : a[0] * b[0] + tb-dot(a[1:], b[1:]);
+    def tb-matvec(rows, x) = (Comparable) len(rows) == 0 ? empty() : cons(tb-dot(rows[0], x), tb-matvec(rows[1:], x));
+    def tb-vec-add(a, b) = (Comparable) len(a) == 0 ? empty() : cons(a[0] + b[0], tb-vec-add(a[1:], b[1:]));
+    def tb-vec-mul(a, b) = (Comparable) len(a) == 0 ? empty() : cons(a[0] * b[0], tb-vec-mul(a[1:], b[1:]));
     def tb-zeros(n) = (Comparable) n == 0 ? empty() : cons(0.0, tb-zeros(n - 1));
     def tb-affine(w, b, x) = tb-vec-add(tb-matvec(w, x), b);
     // --- sequence walks (a sequence is a list of position-vectors) ---
-    def tb-ln-seq(xs, eps, gamma, beta) = (Comparable) len(xs) == 0 ? empty() : cons(tb-vec-add(tb-vec-mul(tn-layernorm(head(xs), eps), gamma), beta), tb-ln-seq(tail(xs), eps, gamma, beta));
-    def tb-proj-seq(w, b, xs) = (Comparable) len(xs) == 0 ? empty() : cons(tb-affine(w, b, head(xs)), tb-proj-seq(w, b, tail(xs)));
-    def tb-add-seq(as, bs) = (Comparable) len(as) == 0 ? empty() : cons(tb-vec-add(head(as), head(bs)), tb-add-seq(tail(as), tail(bs)));
-    def tb-gelu-map(xs) = (Comparable) len(xs) == 0 ? empty() : cons(tn-gelu(head(xs)), tb-gelu-map(tail(xs)));
+    def tb-ln-seq(xs, eps, gamma, beta) = (Comparable) len(xs) == 0 ? empty() : cons(tb-vec-add(tb-vec-mul(tn-layernorm(xs[0], eps), gamma), beta), tb-ln-seq(xs[1:], eps, gamma, beta));
+    def tb-proj-seq(w, b, xs) = (Comparable) len(xs) == 0 ? empty() : cons(tb-affine(w, b, xs[0]), tb-proj-seq(w, b, xs[1:]));
+    def tb-add-seq(as, bs) = (Comparable) len(as) == 0 ? empty() : cons(tb-vec-add(as[0], bs[0]), tb-add-seq(as[1:], bs[1:]));
+    def tb-gelu-map(xs) = (Comparable) len(xs) == 0 ? empty() : cons(tn-gelu(xs[0]), tb-gelu-map(xs[1:]));
     // --- attention: scores, softmax over keys, weighted sum of values ---
-    def tb-scores(q, ks, scale) = (Comparable) len(ks) == 0 ? empty() : cons(tb-dot(q, head(ks)) * scale, tb-scores(q, tail(ks), scale));
-    def tb-weighted-acc(alphas, vs, acc) = (Comparable) len(alphas) == 0 ? acc : tb-weighted-acc(tail(alphas), tail(vs), tb-vec-add(acc, tn-scale(head(vs), head(alphas))));
-    def tb-attend-one(q, ks, vs, scale) = tb-weighted-acc(tn-softmax(tb-scores(q, ks, scale)), vs, tb-zeros(len(head(vs))));
-    def tb-attn-seq(qs, ks, vs, scale) = (Comparable) len(qs) == 0 ? empty() : cons(tb-attend-one(head(qs), ks, vs, scale), tb-attn-seq(tail(qs), ks, vs, scale));
+    def tb-scores(q, ks, scale) = (Comparable) len(ks) == 0 ? empty() : cons(tb-dot(q, ks[0]) * scale, tb-scores(q, ks[1:], scale));
+    def tb-weighted-acc(alphas, vs, acc) = (Comparable) len(alphas) == 0 ? acc : tb-weighted-acc(alphas[1:], vs[1:], tb-vec-add(acc, tn-scale(vs[0], alphas[0])));
+    def tb-attend-one(q, ks, vs, scale) = tb-weighted-acc(tn-softmax(tb-scores(q, ks, scale)), vs, tb-zeros(len(vs[0])));
+    def tb-attn-seq(qs, ks, vs, scale) = (Comparable) len(qs) == 0 ? empty() : cons(tb-attend-one(qs[0], ks, vs, scale), tb-attn-seq(qs[1:], ks, vs, scale));
     // --- causal attention: the autoregressive mask. Query at position i sees only keys/values 0..i —
     //     a per-query key PREFIX. tb-take cuts the visibility window; the count starts at 1 so the first
     //     query sees one key (itself), the last sees the whole sequence (the mask is a no-op at the end).
     //     softmax normalizes over the visible keys only — no numeric change to the per-pair dot/softmax,
     //     so it composes tb-attend-one verbatim. This is what a decoder block needs to generate one token
     //     at a time without attending to the future. ---
-    def tb-take(xs, n) = (Comparable) n == 0 ? empty() : cons(head(xs), tb-take(tail(xs), n - 1));
-    def tb-attn-causal-i(qs, ks, vs, scale, i) = (Comparable) len(qs) == 0 ? empty() : cons(tb-attend-one(head(qs), tb-take(ks, i), tb-take(vs, i), scale), tb-attn-causal-i(tail(qs), ks, vs, scale, i + 1));
+    def tb-take(xs, n) = (Comparable) n == 0 ? empty() : cons(xs[0], tb-take(xs[1:], n - 1));
+    def tb-attn-causal-i(qs, ks, vs, scale, i) = (Comparable) len(qs) == 0 ? empty() : cons(tb-attend-one(qs[0], tb-take(ks, i), tb-take(vs, i), scale), tb-attn-causal-i(qs[1:], ks, vs, scale, i + 1));
     def tb-attn-seq-causal(qs, ks, vs, scale) = tb-attn-causal-i(qs, ks, vs, scale, 1);
     // --- the two pre-LN residual sub-blocks, then the whole block ---
     def tb-attn-sub(lns, wq, bq, wk, bk, wv, bv, wo, bo, scale) = tb-proj-seq(wo, bo, tb-attn-seq(tb-proj-seq(wq, bq, lns), tb-proj-seq(wk, bk, lns), tb-proj-seq(wv, bv, lns), scale));
     def tb-attn-block(xs, eps, g1, be1, wq, bq, wk, bk, wv, bv, wo, bo, scale) = tb-add-seq(xs, tb-attn-sub(tb-ln-seq(xs, eps, g1, be1), wq, bq, wk, bk, wv, bv, wo, bo, scale));
     def tb-ffn(w1, c1, w2, c2, x) = tb-affine(w2, c2, tb-gelu-map(tb-affine(w1, c1, x)));
-    def tb-ffn-seq(w1, c1, w2, c2, xs) = (Comparable) len(xs) == 0 ? empty() : cons(tb-ffn(w1, c1, w2, c2, head(xs)), tb-ffn-seq(w1, c1, w2, c2, tail(xs)));
+    def tb-ffn-seq(w1, c1, w2, c2, xs) = (Comparable) len(xs) == 0 ? empty() : cons(tb-ffn(w1, c1, w2, c2, xs[0]), tb-ffn-seq(w1, c1, w2, c2, xs[1:]));
     def tb-ffn-block(xs, eps, g2, be2, w1, c1, w2, c2) = tb-add-seq(xs, tb-ffn-seq(w1, c1, w2, c2, tb-ln-seq(xs, eps, g2, be2)));
     def tb-block(xs, eps, g1, be1, wq, bq, wk, bk, wv, bv, wo, bo, scale, g2, be2, w1, c1, w2, c2) = tb-ffn-block(tb-attn-block(xs, eps, g1, be1, wq, bq, wk, bk, wv, bv, wo, bo, scale), eps, g2, be2, w1, c1, w2, c2);
 }

@@ -1,7 +1,8 @@
 // Session-owned, seeded sampling of Qwen's actual output logits.
 // The device selects exact top-k after presence penalties; Form owns the
 // temperature, nucleus filter and MINSTD draw. Model weights stay read-only.
-// preludes: form-stdlib/bml/form-cli-model-adapter.bml form-stdlib/sampling.fk
+import form-stdlib/bml/form-cli-model-adapter.bml;
+import form-stdlib/sampling.fk;
 section [form.bml] {
  class FormCliModelSampling {
   field SessionSlot = 16;
@@ -14,7 +15,7 @@ section [form.bml] {
   def fcsam-temperature() = Temperature();
   def fcsam-top-p() = TopP();
   def fcsam-presence() = Presence();
-  def fcsam-msl() = str_concat("#define FCSAM_K ",str_concat(int_to_str(TopK()),str_concat("\n",fcsam-kernels())));
+  def fcsam-msl() = ("#define FCSAM_K " + (TopK().str() + ("\n" + fcsam-kernels())));
   def fcsam-kernels() = "#include <metal_stdlib>\nusing namespace metal;
 inline void fcsam_insert(thread float* v,thread uint* ids,uint k,float x,uint id) {
  if(!isfinite(x))return;
@@ -34,7 +35,7 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
 }
 ";
   def fcsam-seed-valid(seed) = if (!((String) value_kind(seed) == "int")) then 0 else ((seed > 0) && (seed < 2147483647));
-  def fcsam-positive(xs) = if nil?(xs) then 1 else ((head(xs) > 0) && fcsam-positive(tail(xs)));
+  def fcsam-positive(xs) = if nil?(xs) then 1 else ((xs[0] > 0) && fcsam-positive(xs[1:]));
   // [vocabulary, pipelines, owned buffers, initial seed, current RNG, draws,
   //  aggregate diagnostics]. Diagnostics contain no token IDs or text.
   // Even partial admission owns its positive buffer handles until close.
@@ -47,7 +48,7 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
   };
   def fcsam-live(owner) = if (len(owner) < 6) then 0 else (fcsam-positive(owner[1]) && fcsam-positive(owner[2]));
   def fcsam-owned(owner) = if (len(owner) < 6) then 0 else fcsam-count(owner[2]);
-  def fcsam-count(xs) = if nil?(xs) then 0 else ((if (head(xs) > 0) then 1 else 0) + fcsam-count(tail(xs)));
+  def fcsam-count(xs) = if nil?(xs) then 0 else ((if (xs[0] > 0) then 1 else 0) + fcsam-count(xs[1:]));
   def fcsam-close(owner) = if (len(owner) < 6) then 0 else { metal_sync(); q38-free-handles(owner[2]); };
   def fcsam-owner(session) = if (len(session) > SessionSlot()) then session[SessionSlot()] else [];
   def fcsam-with-owner(session,owner) {
@@ -56,26 +57,26 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
   }
   def fcsam-reset(owner) = if (!fcsam-live(owner)) then 0 else {
    metal_sync();
-   metal_enqueue(owner[1][2],md-bind([owner[2][4]],[head(owner)]),head(owner));
+   metal_enqueue(owner[1][2],md-bind([owner[2][4]],[owner[0]]),owner[0]);
   };
-  def fcsam-mark(owner,id) = if ((id < 0) || (id >= head(owner))) then 0 else ((Comparable) metal_buf_write(owner[2][4],(id * 4),md-le32(1)) == 4);
+  def fcsam-mark(owner,id) = if ((id < 0) || (id >= owner[0])) then 0 else ((Comparable) metal_buf_write(owner[2][4],(id * 4),md-le32(1)) == 4);
   def fcsam-ids(bytes,i,n,out) = if (i >= n) then reverse(out) else fcsam-ids(bytes,(i + 1),n,cons(kth-u32at(bytes,i),out));
   // Exact top-k, descending logit, lowest token ID first on ties. Nonfinite
   // logits do not become candidates; fewer than k finite logits fail closed.
   def fcsam-candidates(owner,logits,penalty) = if (!fcsam-live(owner)) then [] else {
    let b = owner[2]; let p = owner[1];
    metal_sync(); metal_batch_concurrent();
-   let parts = metal_enqueue(head(p),q38-b16([logits,b[4],head(b),b[1]],[head(owner),Partitions(),TopK(),md-f32-bits(penalty)],0,0),Partitions());
-   let merged = if ((Comparable) parts == 1) then metal_enqueue(p[1],q38-b16([head(b),b[1],b[2],b[3]],[Partitions(),TopK()],0,1),1) else 0;
+   let parts = metal_enqueue(p[0],q38-b16([logits,b[4],b[0],b[1]],[owner[0],Partitions(),TopK(),md-f32-bits(penalty)],0,0),Partitions());
+   let merged = if ((Comparable) parts == 1) then metal_enqueue(p[1],q38-b16([b[0],b[1],b[2],b[3]],[Partitions(),TopK()],0,1),1) else 0;
    let values = if ((Comparable) merged == 1) then metal_buf_read(b[2],0,(TopK() * 4)) else "";
    let ids = if ((Comparable) merged == 1) then metal_buf_read(b[3],0,(TopK() * 4)) else "";
-   if (!(((Comparable) str_len(ids) == (TopK() * 4)) && (((Comparable) str_len(values) == (TopK() * 4)) && qlt-finite-bytes?(values,0,TopK())))) then [] else [qlt-f32s(values,TopK()),fcsam-ids(ids,0,TopK(),[])];
+   if (!(((Comparable) len(ids) == (TopK() * 4)) && (((Comparable) len(values) == (TopK() * 4)) && qlt-finite-bytes?(values,0,TopK())))) then [] else [qlt-f32s(values,TopK()),fcsam-ids(ids,0,TopK(),[])];
   };
   // Top-p keeps the smallest sorted prefix reaching its threshold. Ties keep
   // their stable order, so the explicit top-k cap is never widened by a tie.
   def fcsam-prefix(probs,total,limit,out) = if nil?(probs) then reverse(out) else {
-   let next = (total + head(probs)); let kept = cons(head(probs),out);
-   if (next >= limit) then reverse(kept) else fcsam-prefix(tail(probs),next,limit,kept);
+   let next = (total + probs[0]); let kept = cons(probs[0],out);
+   if (next >= limit) then reverse(kept) else fcsam-prefix(probs[1:],next,limit,kept);
   };
   def fcsam-probs(logits) = smp-renorm(fcsam-prefix(smp-softmax(smp-temperature(logits,Temperature())),0.0,TopP(),[]));
   // Cumulative over draws, including stop tokens. The peak is conditional on
@@ -83,16 +84,16 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
   def fcsam-stats(owner) = if (len(owner) > 6) then owner[6] else [0,0,0,0.0];
   def fcsam-observe(owner,pick,nucleus,peak) {
    let prior = fcsam-stats(owner);
-   [(head(prior) + (if (pick > 0) then 1 else 0)),(prior[1] + (if ((Comparable) nucleus == 1) then 1 else 0)),(prior[2] + nucleus),(prior[3] + peak)];
+   [(prior[0] + (if (pick > 0) then 1 else 0)),(prior[1] + (if ((Comparable) nucleus == 1) then 1 else 0)),(prior[2] + nucleus),(prior[3] + peak)];
   }
   def fcsam-draw(owner,logits) {
    let candidates = fcsam-candidates(owner,logits,Presence());
    if nil?(candidates) then [-1,owner] else {
     let state = smp-minstd(owner[4]);
-    let probabilities = smp-softmax(smp-temperature(head(candidates),Temperature()));
+    let probabilities = smp-softmax(smp-temperature(candidates[0],Temperature()));
     let nucleus = fcsam-prefix(probabilities,0.0,TopP(),[]);
     let pick = smp-sample(smp-renorm(nucleus),smp-uniform(state));
-    let stats = fcsam-observe(owner,pick,len(nucleus),head(probabilities));
+    let stats = fcsam-observe(owner,pick,len(nucleus),probabilities[0]);
     [candidates[1][pick],append(take(4,owner),[state,(owner[5] + 1),stats])];
    };
   }
@@ -101,7 +102,7 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
   // [ids,pending,position,stopped,owner,reason]. The caller supplies its existing
   // forward and progress functions; sampling never replays a prompt or state.
   def fcsam-walk(session,owner,logits,step,pulse,pos,left,stops,out,untilPulse,width,completed) {
-   let chosen = fcsam-draw(owner,logits); let id = head(chosen); let next = chosen[1];
+   let chosen = fcsam-draw(owner,logits); let id = chosen[0]; let next = chosen[1];
    if (id < 0) then [out,-1,pos,0,next,"sampling-candidates-unavailable"]
    else if q38-stop?(id,stops) then [out,id,pos,1,next,""]
    else if (!fcsam-mark(next,id)) then [out,-1,pos,0,next,"sampling-presence-write-failed"]

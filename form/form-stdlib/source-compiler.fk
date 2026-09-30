@@ -362,7 +362,11 @@
                 (fsc-bml-skip-trivia s (add i 1) end)
                 (if (fsc-bml-comment-at? s i)
                     (fsc-bml-skip-trivia s (fsc-line-next s i) end)
-                    i))))
+                (if (fsc-find-string-at? s "/*" i 0)
+                    (do (let close (str_find s "*/" (add i 2)))
+                        (if (or (lt close 0) (ge (add close 1) end))
+                            (fsc-compiler-error "unterminated form.bml block comment")
+                            (fsc-bml-skip-trivia s (add close 2) end))) i)))))
 
     (defn fsc-bml-punctuation? (ch)
         (or (str_eq ch "(") (or (str_eq ch ")")
@@ -376,7 +380,7 @@
             (if (or (fsc-space? (char_at s i))
                     (or (fsc-bml-punctuation? (char_at s i))
                         (or (str_eq (char_at s i) "\"")
-                            (fsc-find-string-at? s "//" i 0)))) i
+                            (or (fsc-find-string-at? s "//" i 0) (fsc-find-string-at? s "/*" i 0))))) i
                 (fsc-bml-token-end s (add i 1) end))))
 
     (defn fsc-bml-token-after (s i end)
@@ -476,15 +480,15 @@
             (do
                 (let ch (char_at s i))
                 (if (or (str_eq ch "\"") (or (fsc-space? ch)
-                        (fsc-find-string-at? s "//" i 0))) i
+                        (or (fsc-find-string-at? s "//" i 0) (fsc-find-string-at? s "/*" i 0)))) i
                     (fsc-bml-nw-plain-end s (add i 1))))))
 
     (defn fsc-bml-normalize-ws-loop (s i saw-space acc)
         (if (ge i (str_len s)) acc
             (do
                 (let ch (char_at s i))
-                (if (fsc-find-string-at? s "//" i 0)
-                    (fsc-bml-normalize-ws-loop s (fsc-line-next s i) true
+                (if (or (fsc-find-string-at? s "//" i 0) (fsc-find-string-at? s "/*" i 0))
+                    (fsc-bml-normalize-ws-loop s (fsc-bml-skip-trivia s i (str_len s)) true
                         (if saw-space acc (str_concat acc " ")))
                 (if (str_eq ch "\"")
                     (do
@@ -894,6 +898,29 @@
         (if (node_eq (node_category callee) fsc-rec-IDENT-CAT)
             (fsc-bml-call (fsc-bml-type-name callee) args)
             (fsc-rec-do (list (fsc-rec-let "$callee" callee) (fsc-rec-call "$callee" args)))))
+    (defn fsc-bml-index (value index)
+        (if (node_eq index (intern_trivial_int 0))
+            (fsc-rec-call "bml-value-first" (list value))
+            (fsc-rec-call "bml-value-index" (list value index))))
+    (defn fsc-bml-slice (value first last)
+        (if (and (node_eq first (intern_trivial_int 1)) (node_eq last (fsc-rec-call "nothing" (empty))))
+            (fsc-rec-call "bml-value-tail" (list value))
+            (fsc-rec-call "bml-value-slice" (list value first last))))
+    (defn fsc-bml-member-call (value member args)
+        (if (and (str_eq member "str") (nil? args))
+            (fsc-rec-form-call "value_str" (list value))
+            (fsc-compiler-error-line "unknown value member or member arity" member)))
+    (defn fsc-bml-index-text (value text)
+        ;; The same cursor rule owns brackets in both source readers. Preserve
+        ;; its operand recipe separately; it is evaluated once by the caller.
+        (do (let cursor (cursor-str (str_concat text "]")))
+            (let receiver (intern_node (bmf-bp "ident") (list (intern_trivial_string "$receiver"))))
+            (let parsed (gm-chain-index (form-bml-grammar) (p-ref "expr") receiver (gc-empty) cursor (skip-ws cursor)))
+            (if (or (not (g-ok? parsed)) (not (cur-eof? (skip-ws (g-cur parsed)))))
+                (fsc-compiler-error-line "invalid form.bml index or slice" text)
+                (do (let lowered (fbl-lower (g-val parsed)))
+                    (let kids (node_children lowered))
+                    (fsc-rec-call (fsc-bml-type-name (head kids)) (cons value (tail (tail kids))))))))
     (defn fsc-bml-postfix (expr at callee)
         (do (let p (fsc-bml-skip-trivia expr at (str_len expr)))
             (if (eq p (str_len expr)) callee
@@ -907,18 +934,29 @@
                         (let index (fsc-trim (fsc-sub expr (add p 1) close)))
                         (if (str_eq index "") (fsc-compiler-error-line "form.bml index needs an expression" expr) 0)
                         (fsc-bml-postfix expr (add close 1)
-                            (fsc-rec-form-call "nth" (list callee (fsc-compile-form-bml-expr-recipe index)))))
-                    (fsc-compiler-error-line "unconsumed form.bml call suffix" expr))))))
+                            (fsc-bml-index-text callee index)))
+                (if (fsc-find-string-at? expr ".str" p 0)
+                    (do (let open (fsc-bml-skip-trivia expr (add p 4) (str_len expr)))
+                        (if (not (str_eq (char_at expr open) "("))
+                            (fsc-compiler-error-line "form.bml .str requires a call" expr) 0)
+                        (let close (fsc-bml-span-end expr (add open 1) (str_len expr) (list ")") "group"))
+                        (let args (fsc-bml-args-recipes-loop (fsc-sub expr (add open 1) close) 0 (empty)))
+                        (fsc-bml-postfix expr (add close 1) (fsc-bml-member-call callee "str" args)))
+                    (fsc-compiler-error-line "unconsumed form.bml call suffix" expr)))))))
     (defn fsc-compile-form-bml-call-recipe (expr open)
         (do
             (let close (fsc-bml-span-end expr (add open 1) (str_len expr) (list ")") "group"))
             (let name (fsc-trim (fsc-sub expr 0 open)))
-            (if (fsc-bml-expression-name? name) 0
+            (if (or (fsc-bml-expression-name? name)
+                    (and (ge (str_len name) 4) (str_eq (fsc-sub name (sub (str_len name) 4) (str_len name)) ".str"))) 0
                 (fsc-compiler-error-line "form.bml call requires one complete expression" expr))
             (let args (fsc-sub expr (add open 1) close))
             (let arg-recipes (if (eq (str_len (fsc-trim args)) 0) (empty)
                                  (fsc-bml-args-recipes-loop args 0 (empty))))
-            (fsc-bml-postfix expr (add close 1) (fsc-bml-call name arg-recipes))))
+            (fsc-bml-postfix expr (add close 1)
+                (if (and (ge (str_len name) 4) (str_eq (fsc-sub name (sub (str_len name) 4) (str_len name)) ".str"))
+                    (fsc-bml-member-call (fsc-compile-form-bml-expr-recipe (fsc-sub name 0 (sub (str_len name) 4))) "str" arg-recipes)
+                    (fsc-bml-call name arg-recipes)))))
 
     (defn fsc-bml-find-top-then (s)
         (fsc-bml-branch-token s 0 "then" 0))
@@ -1006,7 +1044,8 @@
                 (fsc-bml-when-nothing "$or" (head args) (nth args 1))
             (if (or (str_eq (head row) "==") (str_eq (head row) "!="))
                 (fsc-rec-call (str_concat "$bml" (head row)) args)
-                (fsc-rec-form-call (nth row 1) args))))))
+                (if (str_eq (head row) "+") (fsc-rec-call "bml-value-add" args)
+                    (fsc-rec-form-call (nth row 1) args)))))))
 
     ;; A pipeline owns its input once, before the stage's arguments. Library
     ;; functions and native operations receive it as their final argument.
@@ -1095,11 +1134,11 @@
         (fsc-bml-expand-in recipe (record_new 0) (str_concat "$lambda-" (value_str (fsc-bml-erased recipe)))))
 
     ;; ── the recover point and absence, lifted into BML ──────────────────
-    ;; `x ?? y`, `try e else h` and `choose { e1; e2; ... }` lower to one shape:
+    ;; `x ?? y`, `try e else h` and `choice { e1; e2; ... }` lower to one shape:
     ;; hold the first value, and only when it is nothing walk the next. The next
     ;; recipe is a branch of the if, so an option not needed is never walked.
     ;;   (do (let <hold> first) (if (nothing? <hold>) next <hold>))
-    ;; `try` and `choose` hold (attempt e): a stop inside e unwinds to it and reads
+    ;; `try` and `choice` hold (attempt e): a stop inside e unwinds to it and reads
     ;; as nothing, so the next option answers; `??` holds x itself.
     (defn fsc-bml-when-nothing (hold first next)
         (fsc-rec-do (list
@@ -1123,7 +1162,7 @@
                 (fsc-bml-attempt (fsc-compile-form-bml-expr-recipe body-text))
                 (fsc-compile-form-bml-expr-recipe handler-text))))))
 
-    ;; every option of a choose is attempted in order; none landing is nothing
+    ;; Every choice option is attempted in order; none landing is nothing.
     (defn fsc-bml-choose-chain (options)
         (if (nil? options) (fsc-rec-call "nothing" (empty))
             (if (nil? (tail options)) (fsc-bml-attempt (head options))
@@ -1133,10 +1172,10 @@
         (do
             (let p (fsc-bml-skip-trivia expr 6 (str_len expr)))
             (if (str_eq (char_at expr p) "{") 0
-                (fsc-compiler-error-line "form.bml choose needs a { option; ... } body" expr))
+                (fsc-compiler-error-line "form.bml choice needs a { option; ... } body" expr))
             (let close (fsc-bml-span-end expr (add p 1) (str_len expr) (list "}") "group"))
             (if (eq (add close 1) (str_len expr)) 0
-                (fsc-compiler-error-line "unconsumed form.bml choose suffix" expr))
+                (fsc-compiler-error-line "unconsumed form.bml choice suffix" expr))
             (fsc-bml-choose-chain (fsc-bml-block-stmts-recipes-loop expr (add p 1) close (empty)))))
 
     (defn fsc-bml-find-top-brace-loop (s i depth quoted)
@@ -1286,8 +1325,7 @@
                 (fsc-compile-form-bml-if-recipe expr)
             (if (fsc-bml-control-prefix? expr "try")
                 (fsc-compile-form-bml-try-recipe expr)
-            (if (or (or (fsc-bml-control-prefix? expr "choose") (fsc-prefix? expr "choose{"))
-                    (or (fsc-bml-control-prefix? expr "choice") (fsc-prefix? expr "choice{")))
+            (if (or (fsc-bml-control-prefix? expr "choice") (fsc-prefix? expr "choice{"))
                 (fsc-compile-form-bml-choose-recipe expr)
             (if (fsc-bml-control-prefix? expr "match")
                 (fsc-compile-form-bml-match-recipe expr)
@@ -1322,7 +1360,7 @@
                         (fsc-compiler-error "form.bml list needs an expression after ','") 0)
                     (fsc-bml-postfix expr (add close 1)
                         (fsc-rec-form-call "list" (fsc-bml-args-recipes-loop items 0 (empty)))))
-            (if (and (lt suffix (str_len expr)) (str_eq (char_at expr suffix) "["))
+            (if (and (lt suffix (str_len expr)) (or (str_eq (char_at expr suffix) "[") (fsc-find-string-at? expr ".str" suffix 0)))
                 (fsc-bml-postfix expr suffix (fsc-compile-form-bml-expr-recipe (fsc-sub expr 0 first-end)))
             (if (and (ge open 0) (not (str_eq (char_at expr 0) "\"")))
                 (fsc-compile-form-bml-call-recipe expr open)
@@ -2237,6 +2275,29 @@
             (let positive (fsc-rec-form-call (if numeric "eq" (if (str_eq kind "String") "str_eq" "value_eq")) args))
             (list (if (str_eq name "$bml==") positive
                  (if numeric (fsc-rec-form-call "ne" args) (fsc-rec-form-call "not" (list positive)))) "")))
+    (defn fsc-bml-value-contract (row)
+        (if (not (str_eq (nth row 1) "")) (nth row 1)
+            (if (fsc-source-leaf? (head row))
+                (if (eq (node_type (head row)) 2) "String"
+                    (if (or (eq (node_type (head row)) 1) (or (eq (node_type (head row)) 5) (eq (node_type (head row)) 7))) "Number" ""))
+                (do (let value (head row))
+                    (let op (if (node_eq (node_category value) fsc-rec-FNCALL-CAT)
+                        (fsc-bml-type-name (head (node_children value)))
+                        (fsc-source-primitive-name (node_category value))))
+                    (if (or (str_eq op "str_concat") (str_eq op "value_str")) "String"
+                        (if (or (str_eq op "len") (or (str_eq op "str_len")
+                            (or (str_eq op "add") (or (str_eq op "sub") (or (str_eq op "mul") (or (str_eq op "div") (str_eq op "mod"))))))) "Number" ""))))))
+    (defn fsc-bml-typed-add (rows)
+        (if (ne (len rows) 2) (fsc-compiler-error "form.bml + requires two operands")
+            (do (let left (fsc-bml-value-contract (head rows)))
+                (let right (fsc-bml-value-contract (nth rows 1)))
+                (let text (or (str_eq left "String") (str_eq right "String")))
+                (let numeric (or (or (str_eq left "Number") (str_eq left "Comparable"))
+                                  (or (str_eq right "Number") (str_eq right "Comparable"))))
+                (list (if text (fsc-rec-form-call "str_concat" (fsc-bml-typed-nodes rows))
+                          (if numeric (fsc-rec-form-call "add" (fsc-bml-typed-nodes rows))
+                              (fsc-rec-call "bml-value-add" (fsc-bml-typed-nodes rows))))
+                      (if text "String" (if numeric "Number" ""))))))
     ;; A nested def reads its immediate enclosing frame. Carry an outer name
     ;; through intervening functions when only a deeper function reads it.
     ;; These are lexical lets; no runtime lookup or additional carrier operation.
@@ -2307,11 +2368,12 @@
                         (list (head (fsc-bml-typed-in (nth kids 2) env signatures local)) (node_value (nth kids 1)))
                         (do
                             (let rows (fsc-bml-typed-list-in (tail kids) env signatures local))
+                            (if (str_eq name "bml-value-add") (fsc-bml-typed-add rows)
                             (if (or (str_eq name "$bml==") (str_eq name "$bml!=")) (fsc-bml-typed-equality name rows)
                                 (list (fsc-bml-resolved-call name (fsc-bml-typed-nodes rows) env signatures)
                                     (if (or (nil? (fsc-bml-type-find env name))
                                             (gt (len (fsc-bml-type-find env name)) 2))
-                                        (fsc-bml-type-of signatures name) ""))))))
+                                        (fsc-bml-type-of signatures name) "")))))))
                 (do
                     (let rows (fsc-bml-typed-list-in kids env signatures local))
                     (list (intern_node cat (fsc-bml-typed-nodes rows))
@@ -2380,32 +2442,14 @@
     ;; A trivial float leaf (node_type 7) carries an f64, not its source text.
     ;; int_to_str over that value answered "" (its digit walk hands a float to
     ;; byte_to_str), so every decimal literal in a .bml lowered to an EMPTY
-    ;; argument: `list("x", 1.0, 0.5)` became `(list "x"  )` and answered 1
-    ;; (ledger R76, witnessed 2026-09-04). The float's executable text is the
-    ;; shortest decimal that READS BACK to the same f64 through str_to_float
-    ;; (the reader the lowered text meets), always with a digit after the dot
-    ;; so it stays a float literal: 1.0 -> "1.0", never "1". A value no width
-    ;; up to 17 fractional digits reads back is refused by name.
-    (defn fsc-float-text-at (af digits)
-        (do
-            (let scale (fstr-pow10 digits))
-            (let scaled (float_to_int (add 0.5 (mul af scale))))
-            (str_concat (int_to_str (div scaled scale))
-                (str_concat "." (fstr-pad-left (int_to_str (mod scaled scale)) digits)))))
-
-    (defn fsc-float-text-loop (value af neg digits)
-        (if (gt digits 17)
-            (fsc-compiler-error "float literal has no decimal text that reads back to its own value within 17 fractional digits")
-            (do
-                (let body (fsc-float-text-at af digits))
-                (let text (if neg (str_concat "-" body) body))
-                (if (eq (str_to_float text) value) text
-                    (fsc-float-text-loop value af neg (add digits 1))))))
-
+    ;; Native value rendering already owns shortest round-tripping float text,
+    ;; including exponents and subnormals. Keep an integral float a float.
     (defn fsc-source-emit-float (value)
-        (do
-            (let neg (lt value 0))
-            (fsc-float-text-loop value (if neg (sub 0 value) value) neg 1)))
+        (do (let text (value_str value))
+            (if (not (eq (str_to_float text) value))
+                (fsc-compiler-error "float rendering does not read back to its value")
+                (if (or (ge (str_find text "." 0) 0) (ge (str_find text "e" 0) 0)) text
+                    (str_concat text ".0")))))
 
     ;; Leaf text by node_type: 1 int, 5 int64, 2 string, 3 bool, 7 float. Any
     ;; other leaf refuses by name -- an unknown leaf rendered through int_to_str

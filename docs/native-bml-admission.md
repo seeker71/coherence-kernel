@@ -53,13 +53,21 @@ def x-coordinate(point) = point[0];
 def operation(ops,index,input) = ops[index](input);
 ```
 
-`[a,b]` and `[]` construct native lists. `rows[index]` lowers directly to
-`nth(rows,index)`; indexes are zero-based and retain the primitive's absence
-and validation behavior. Nested literals and chained indexes work with calls,
-grouped expressions and lexical functions. Elements, receiver and index execute
-in their written order, once each. These forms add no collection runtime or
-temporary bindings. A comma separates complete elements; an empty element,
-trailing comma or empty index has no executable meaning.
+`[a,b]` and `[]` construct native lists. `xs[0]` selects the first element,
+`xs[-1]` the last; out-of-range indexes answer nothing. `xs[start:end]` is
+half-open, with omitted bounds and negative offsets measured from the end.
+`xs[1:]` is the remaining sequence. Bounds clamp to the sequence and a reversed
+slice is empty. Lists and strings share this surface; string lengths, indexes
+and slices address bytes, as the underlying Form string primitives do.
+Receivers, bounds and elements execute once in written order. Empty elements,
+trailing commas, empty indexes and stepped slices are not admitted.
+
+`len(value)` reads string bytes or list elements. `+` adds numbers, joins strings
+or concatenates lists. `.str()` uses native value rendering, including lists
+and shortest round-tripping floats. The compiler selects direct arithmetic or
+string operations when operand contracts establish them; otherwise the shared
+Form value operators dispatch by kind. `xs[1:]` has a separate native leaf so
+the common list remainder does not carry optional bounds through its hot path.
 
 `start .. end` calls the existing half-open `range`. `x => expression`,
 `(x,y) => expression`, and `() => expression` create lexical functions; a braced
@@ -75,7 +83,7 @@ without a separate collection runtime. Group a conditional or lambda when using
 it as a pipeline operand.
 
 `try e catch h` (also `try e else h`) attempts `e`; an absent answer or a
-caught runtime stop selects `h`. `choice { e1; e2; ... }` (also `choose`)
+caught runtime stop selects `h`. `choice { e1; e2; ... }`
 attempts options in order and returns the first non-absent answer, including zero.
 `x ?? y` evaluates `y` only when `x` is absent; it does not add an attempt.
 Unselected branches remain unevaluated. Each caught runtime stop emits its
@@ -83,7 +91,7 @@ existing organ-health signal.
 
 ```bml
 def size(x) = try len(x) catch 0;
-def first-reading(x) = choice { len(x); str_len(x); 0 };
+def first-reading(primary,secondary) = choice { primary(); secondary(); fail };
 def label(name) = name ?? "unnamed";
 ```
 
@@ -98,8 +106,8 @@ Intrinsic call names resolve to existing Form owners after lexical binding.
 Parameters, local values, captured functions and declared functions take
 precedence over an intrinsic alias, including bare `stop` and `fail`. Unbound
 bare `stop` and `fail` still mean absence. Intrinsic argument counts are checked
-after pipeline composition and name resolution. Import the owning library through
-`preludes:` as with other native calls.
+after pipeline composition and name resolution. Import an owning library with
+`import control/offer-ack-core.fk;` outside the executable section.
 
 | Surface | Existing owner | Meaning |
 | --- | --- | --- |
@@ -141,9 +149,11 @@ Dependencies and selected function homes are read from the same emitted Form
 surface. Native primitive names in call position retain their built-in meaning;
 the same names in value position can select a declared function home. Registry
 selection belongs to the entry unit and travels through its dependency graph.
-Comment directives start with `preludes:` or `import`; quoted source and ordinary
-prose do not introduce dependencies. Raw Form imports remain active beside BML
-sections, including imports of `.fk` files that themselves carry BML sections.
+Module imports live outside executable sections, in dependency order. The loader
+also reads existing `preludes:` and comment import directives; quoted source and
+ordinary prose do not introduce dependencies. Imports can name `.fk` files that
+themselves carry BML sections. An `import Name;` inside a section declares a
+language abstraction and is distinct from a module dependency.
 
 The executable door lowers through `bml-floor-compile.fk` in a RAM pipe. Form
 owns the source manifest for the optional `.lowfk` memo: the exact owner and

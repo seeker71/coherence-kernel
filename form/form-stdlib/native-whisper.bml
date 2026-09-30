@@ -1,12 +1,14 @@
 // The actual Whisper checkpoint, mapped into the existing native ear kernels.
 // No weight conversion or tensor copies: F16 spans stay in their shared file pages.
-// preludes: form-stdlib/ear-native.fk form-stdlib/native-affine-metal.bml form-stdlib/model-registry.bml
+import form-stdlib/ear-native.fk;
+import form-stdlib/native-affine-metal.bml;
+import form-stdlib/model-registry.bml;
 section [form.bml] {
  class NativeWhisper {
   def nws-base() = mr-path(mr-find("whisper-large-v3-turbo-safetensors"));
   def nws-tokenizer() = enw-tokenizer-path();
   def nws-layer-shape(st,i) = if ((Comparable) i == 11) then [eng-F(st),eng-D(st)] else if ((Comparable) i == 13) then [eng-D(st),eng-F(st)] else if ((Comparable) i == 12) then [eng-F(st)] else if (((Comparable) i == 2) || (((Comparable) i == 4) || (((Comparable) i == 5) || (((Comparable) i == 7) || (((Comparable) i == 17) || (((Comparable) i == 19) || (((Comparable) i == 20) || ((Comparable) i == 22)))))))) then [eng-D(st),eng-D(st)] else [eng-D(st)];
-  def nws-layer-rows(st,prefix,names,i) = if nil?(names) then [] else cons([str_concat(prefix,str_concat(".",head(names))),nws-layer-shape(st,i)],nws-layer-rows(st,prefix,tail(names),(i + 1)));
+  def nws-layer-rows(st,prefix,names,i) = if nil?(names) then [] else cons([(prefix + ("." + names[0])),nws-layer-shape(st,i)],nws-layer-rows(st,prefix,names[1:],(i + 1)));
   def nws-layers(st,side,names,l,count) = if (l >= count) then [] else append(nws-layer-rows(st,enw-blk(side,l),names,0),nws-layers(st,side,names,(l + 1),count));
   def nws-required(st) {
    let d = eng-D(st);
@@ -14,14 +16,14 @@ section [form.bml] {
    append(common,append(nws-layers(st,"encoder",enw-enc-names(),0,eng-enc-layers(st)),nws-layers(st,"decoder",enw-dec-names(),0,eng-dec-layers(st))));
   }
   def nws-check(index,required) {
-   if nil?(required) then 1 else nws-check-row(index,required,sti-find(index,head(head(required))));
+   if nil?(required) then 1 else nws-check-row(index,required,sti-find(index,required[0][0]));
   }
   def nws-check-row(index,required,row) {
-   if nil?(row) then form_error(str_concat("native Whisper tensor absent: ",head(head(required)))) else if (!(((String) row[1] == "F16") && (((Value) row[2] == head(required)[1]) && ((Comparable) (row[3] % 2) == 0)))) then form_error(str_concat("native Whisper tensor shape/dtype/alignment refused: ",head(row))) else nws-check(index,tail(required));
+   if nil?(row) then form_error(("native Whisper tensor absent: " + required[0][0])) else if (!(((String) row[1] == "F16") && (((Value) row[2] == required[0][1]) && ((Comparable) (row[3] % 2) == 0)))) then form_error(("native Whisper tensor shape/dtype/alignment refused: " + row[0])) else nws-check(index,required[1:]);
   }
-  def nws-map(index,required) = if nil?(required) then [] else cons([head(head(required)),head(sti-map(index,head(head(required))))],nws-map(index,tail(required)));
+  def nws-map(index,required) = if nil?(required) then [] else cons([required[0][0],sti-map(index,required[0][0])[0]],nws-map(index,required[1:]));
   def nws-open(base,tokpath) {
-   let geometry = eng-config(str_concat(base,"/config.json")); let stub = eng-state(geometry); let path = str_concat(base,"/weights.safetensors");
+   let geometry = eng-config((base + "/config.json")); let stub = eng-state(geometry); let path = (base + "/weights.safetensors");
    let index = sti-open(path); let required = nws-required(stub); let checked = nws-check(index,required);
    let ps = enw-pipes-for(stub); let hs = nws-map(index,required);
    enw-open-ready(path,index[2],hs,ps,tokpath,geometry);
@@ -32,11 +34,11 @@ section [form.bml] {
   // synced, and those are asked again — at most four rounds, the last one loud. On 2026-09-23 a
   // second open in one process left 150 of 586 weights alive after one pass and none after two.
   def nws-free-weights(hs) = nws-free-rounds(hs,0);
-  def nws-free-rounds(hs,round) = if nil?(hs) then 1 else if (round >= 4) then form_error(str_concat("native Whisper weights not released after four rounds: ",int_to_str(len(hs)))) else nws-free-rounds(nws-free-left(nws-free-synced(hs,round),[]),(round + 1));
+  def nws-free-rounds(hs,round) = if nil?(hs) then 1 else if (round >= 4) then form_error(("native Whisper weights not released after four rounds: " + len(hs).str())) else nws-free-rounds(nws-free-left(nws-free-synced(hs,round),[]),(round + 1));
   def nws-free-synced(hs,round) = if ((Comparable) round == 0) then hs else nws-free-after(nam-sync(),hs);
   def nws-free-after(rc,hs) = hs;
-  def nws-free-left(hs,left) = if nil?(hs) then reverse(left) else nws-free-left(tail(hs),if (metal_buf_free(head(hs)[1]) > 0) then left else cons(head(hs),left));
-  def nws-free-buffers(bs,i) = if nil?(bs) then 1 else nws-free-buffers-next(nam-free(if ((i >= 17) && (i <= 20)) then head(bs) else [head(bs)]),tail(bs),(i + 1));
+  def nws-free-left(hs,left) = if nil?(hs) then reverse(left) else nws-free-left(hs[1:],if (metal_buf_free(hs[0][1]) > 0) then left else cons(hs[0],left));
+  def nws-free-buffers(bs,i) = if nil?(bs) then 1 else nws-free-buffers-next(nam-free(if ((i >= 17) && (i <= 20)) then bs[0] else [bs[0]]),bs[1:],(i + 1));
   def nws-free-buffers-next(rc,bs,i) = nws-free-buffers(bs,i);
   def nws-close(st) {
    let done = nam-sync(); let weights = nws-free-weights(enw-hs(st)); let buffers = nws-free-buffers(st[4],0);

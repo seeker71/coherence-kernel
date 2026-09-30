@@ -28,7 +28,13 @@
 // expression per emitted expression, so a band can falsify the transcription against
 // weight-load.fk's independently written reference without a GPU.
 //
-// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q4k-dequant.fk form-stdlib/q4k-msl.fk
+import form-stdlib/core.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/equireach.fk;
+import form-stdlib/format-arith.fk;
+import form-stdlib/f16-decode.fk;
+import form-stdlib/q4k-dequant.fk;
+import form-stdlib/q4k-msl.fk;
 //
 section [form.bml] {
     // ================= the transcription, read back into Form =================
@@ -84,11 +90,11 @@ section [form.bml] {
     // scales live at the same +4 offset as Q4_K's so those helpers apply verbatim
     def q5m-msl-weight() = "static inline float q5k_w(device const uchar* qb, uint idx) { uint blk = idx / 256u; int i = int(idx - blk * 256u); uint b = blk * 176u; int c = i / 64; int within = q4k_mod(i, 64); int hf = within / 32; int l = q4k_mod(within, 32); int j = 2 * c + hf; int qbyte = int(qb[b + 48u + uint(c * 32 + l)]); int nib = (hf == 0) ? q4k_mod(qbyte, 16) : qbyte / 16; int hb = q5k_bit(int(qb[b + 16u + uint(l)]), j); float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u])); return (d * float(q4k_sc(qb, b, j))) * float(nib + 16 * hb) - dmin * float(q4k_mn(qb, b, j)); } ";
     def q50-msl-weight() = "static inline float q50_w(device const uchar* qb, uint idx) { uint blk = idx / 32u; uint i = idx - blk * 32u; uint b = blk * 22u; uint half_ = i / 16u; uint j = i - half_ * 16u; int qbyte = int(qb[b + 6u + j]); int nib = (half_ == 0u) ? q4k_mod(qbyte, 16) : qbyte / 16; uint qh = uint(qb[b + 2u]) + 256u * uint(qb[b + 3u]) + 65536u * uint(qb[b + 4u]) + 16777216u * uint(qb[b + 5u]); int hb = int(q50_bit(qh, i)); float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); return d * float(nib + 16 * hb - 16); } ";
-    def q5m-dequant-body(fname, wfn) = str_concat("kernel void ", str_concat(fname, str_concat(" (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = ", str_concat(wfn, "(qb, off + i); }"))));
+    def q5m-dequant-body(fname, wfn) = ("kernel void " + (fname + (" (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = " + (wfn + "(qb, off + i); }"))));
     // the fused matvec — j counts DOWN, accumulate p + acc: tb-dot's right fold, the family's one
     // op order, so a Q5 row is judged the same way a Q4/Q6/Q8 row is
-    def q5m-matvec-body(fname, wfn) = str_concat("kernel void ", str_concat(fname, str_concat(" (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = ", str_concat(wfn, "(qb, uint(i) * cols + j) * float(x[j]); acc = p + acc; } y[i] = acc; }"))));
+    def q5m-matvec-body(fname, wfn) = ("kernel void " + (fname + (" (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = " + (wfn + "(qb, uint(i) * cols + j) * float(x[j]); acc = p + acc; } y[i] = acc; }"))));
     // the appendix: everything Q5, for a unit that already carries the q4k helpers
-    def q5m-msl-appendix(kdname, kmname, zdname, zmname) = str_concat(q5m-msl-bits(), str_concat(q5m-msl-weight(), str_concat(q50-msl-weight(), str_concat(q5m-dequant-body(kdname, "q5k_w"), str_concat(q5m-matvec-body(kmname, "q5k_w"), str_concat(q5m-dequant-body(zdname, "q50_w"), q5m-matvec-body(zmname, "q50_w")))))));
+    def q5m-msl-appendix(kdname, kmname, zdname, zmname) = (q5m-msl-bits() + (q5m-msl-weight() + (q50-msl-weight() + (q5m-dequant-body(kdname, "q5k_w") + (q5m-matvec-body(kmname, "q5k_w") + ((String) q5m-dequant-body(zdname, "q50_w") + q5m-matvec-body(zmname, "q50_w")))))));
     0;
 }

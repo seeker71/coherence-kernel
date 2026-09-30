@@ -29,23 +29,23 @@
 // width answers nothing rather than folding over what it was given: a
 // silent partial in a gradient is a wrong direction that still descends
 // somewhere, which is worse than a stop.
-// preludes: form/form-stdlib/core.fk
+import form/form-stdlib/core.fk;
 //////////////////////////////////////////////////////////////////////
 section [form.bml] {
     class FormLoraBackwardVec {
         // ---- vector arithmetic, all consuming walks (no nth in a hot loop) ----
-        def lbw-revonto(xs, acc) = if nil?(xs) then acc else lbw-revonto(tail(xs), cons(head(xs), acc));
+        def lbw-revonto(xs, acc) = if nil?(xs) then acc else lbw-revonto(xs[1:], cons(xs[0], acc));
         def lbw-zeros(n, acc) = if (n <= 0) then acc else lbw-zeros((n - 1), cons(0.0, acc));
-        def lbw-scale-go(xs, k, acc) = if nil?(xs) then reverse(acc) else lbw-scale-go(tail(xs), k, cons((head(xs) * k), acc));
+        def lbw-scale-go(xs, k, acc) = if nil?(xs) then reverse(acc) else lbw-scale-go(xs[1:], k, cons((xs[0] * k), acc));
         def lbw-scale(xs, k) = lbw-scale-go(xs, k, []);
-        def lbw-dot-go(xs, ys, acc) = if (nil?(xs) || nil?(ys)) then acc else lbw-dot-go(tail(xs), tail(ys), (acc + (head(xs) * head(ys))));
+        def lbw-dot-go(xs, ys, acc) = if (nil?(xs) || nil?(ys)) then acc else lbw-dot-go(xs[1:], ys[1:], (acc + (xs[0] * ys[0])));
         def lbw-dot(xs, ys) = if ((Comparable) len(xs) == len(ys)) then lbw-dot-go(xs, ys, 0.0) else nothing();
         // ys scaled by k added onto xs, elementwise
-        def lbw-axpy-go(xs, ys, k, acc) = if (nil?(xs) || nil?(ys)) then reverse(acc) else lbw-axpy-go(tail(xs), tail(ys), k, cons((head(xs) + (head(ys) * k)), acc));
+        def lbw-axpy-go(xs, ys, k, acc) = if (nil?(xs) || nil?(ys)) then reverse(acc) else lbw-axpy-go(xs[1:], ys[1:], k, cons((xs[0] + (ys[0] * k)), acc));
         def lbw-axpy(xs, ys, k) = if ((Comparable) len(xs) == len(ys)) then lbw-axpy-go(xs, ys, k, []) else nothing();
-        def lbw-sub-go(xs, ys, acc) = if (nil?(xs) || nil?(ys)) then reverse(acc) else lbw-sub-go(tail(xs), tail(ys), cons((head(xs) - head(ys)), acc));
+        def lbw-sub-go(xs, ys, acc) = if (nil?(xs) || nil?(ys)) then reverse(acc) else lbw-sub-go(xs[1:], ys[1:], cons((xs[0] - ys[0]), acc));
         def lbw-sub(xs, ys) = if ((Comparable) len(xs) == len(ys)) then lbw-sub-go(xs, ys, []) else nothing();
-        def lbw-maxabs-go(xs, m) = if nil?(xs) then m else lbw-maxabs-go(tail(xs), if (abs(head(xs)) > m) then abs(head(xs)) else m);
+        def lbw-maxabs-go(xs, m) = if nil?(xs) then m else lbw-maxabs-go(xs[1:], if (abs(xs[0]) > m) then abs(xs[0]) else m);
         def lbw-maxabs(xs) = lbw-maxabs-go(xs, 0.0);
         // how far two gradients stand apart, relative to the larger of them:
         // the number a finite-difference check is read by
@@ -66,10 +66,10 @@ section [form.bml] {
         def lbw-mv-go(m, rows, cols, x, acc) = if (rows <= 0) then reverse(acc) else lbw-mv-go(drop(cols, m), (rows - 1), cols, x, cons(lbw-dot-go(take(cols, m), x, 0.0), acc));
         def lbw-mv(m, rows, cols, x) = if (((Comparable) len(x) == cols) && ((Comparable) len(m) == (rows * cols))) then lbw-mv-go(m, rows, cols, x, []) else nothing();
         // z[j] = sum_i M[i][j] g[i] — the transposed walk, accumulated a row at a time
-        def lbw-tmv-go(m, rows, cols, g, acc) = if (rows <= 0) then acc else lbw-tmv-go(drop(cols, m), (rows - 1), cols, tail(g), lbw-axpy-go(acc, take(cols, m), head(g), []));
+        def lbw-tmv-go(m, rows, cols, g, acc) = if (rows <= 0) then acc else lbw-tmv-go(drop(cols, m), (rows - 1), cols, g[1:], lbw-axpy-go(acc, take(cols, m), g[0], []));
         def lbw-tmv(m, rows, cols, g) = if (((Comparable) len(g) == rows) && ((Comparable) len(m) == (rows * cols))) then lbw-tmv-go(m, rows, cols, g, lbw-zeros(cols, [])) else nothing();
         // O[i][j] = g[i] x[j] — the rank-one outer product a weight gradient is
-        def lbw-outer-go(g, x, acc) = if nil?(g) then reverse(acc) else lbw-outer-go(tail(g), x, lbw-revonto(lbw-scale(x, head(g)), acc));
+        def lbw-outer-go(g, x, acc) = if nil?(g) then reverse(acc) else lbw-outer-go(g[1:], x, lbw-revonto(lbw-scale(x, g[0]), acc));
         def lbw-outer(g, x) = lbw-outer-go(g, x, []);
     }
     0;
@@ -78,17 +78,17 @@ section [form.bml] {
     class FormLoraBackwardHead {
         // softmax cross-entropy over a logit vector, and its gradient.
         // The max comes off first so exp never overflows.
-        def lbw-max-go(xs, m) = if nil?(xs) then m else lbw-max-go(tail(xs), if (head(xs) > m) then head(xs) else m);
-        def lbw-max(xs) = if nil?(xs) then nothing() else lbw-max-go(tail(xs), head(xs));
-        def lbw-sumexp-go(xs, m, acc) = if nil?(xs) then acc else lbw-sumexp-go(tail(xs), m, (acc + math_exp((head(xs) - m))));
+        def lbw-max-go(xs, m) = if nil?(xs) then m else lbw-max-go(xs[1:], if (xs[0] > m) then xs[0] else m);
+        def lbw-max(xs) = if nil?(xs) then nothing() else lbw-max-go(xs[1:], xs[0]);
+        def lbw-sumexp-go(xs, m, acc) = if nil?(xs) then acc else lbw-sumexp-go(xs[1:], m, (acc + math_exp((xs[0] - m))));
         def lbw-lse(xs) = lbw-lse-of(xs, lbw-max(xs));
         def lbw-lse-of(xs, m) = if nothing?(m) then nothing() else (m + math_log(lbw-sumexp-go(xs, m, 0.0)));
-        def lbw-softmax-go(xs, lse, acc) = if nil?(xs) then reverse(acc) else lbw-softmax-go(tail(xs), lse, cons(math_exp((head(xs) - lse)), acc));
+        def lbw-softmax-go(xs, lse, acc) = if nil?(xs) then reverse(acc) else lbw-softmax-go(xs[1:], lse, cons(math_exp((xs[0] - lse)), acc));
         def lbw-softmax(xs) = lbw-softmax-go(xs, lbw-lse(xs), []);
         // the loss: -log p[target] written as logsumexp minus the target logit
         def lbw-ce(z, t) = if ((t < 0) || (t >= len(z))) then nothing() else (lbw-lse(z) - z[t]);
         // its gradient: p minus the one-hot at the target
-        def lbw-dce-go(p, t, i, acc) = if nil?(p) then reverse(acc) else lbw-dce-go(tail(p), t, (i + 1), cons(if ((Comparable) i == t) then (head(p) - 1.0) else head(p), acc));
+        def lbw-dce-go(p, t, i, acc) = if nil?(p) then reverse(acc) else lbw-dce-go(p[1:], t, (i + 1), cons(if ((Comparable) i == t) then (p[0] - 1.0) else p[0], acc));
         def lbw-dce(z, t) = if ((t < 0) || (t >= len(z))) then nothing() else lbw-dce-go(lbw-softmax(z), t, 0, []);
     }
     0;
@@ -143,7 +143,7 @@ section [form.bml] {
         // loss recomputed both times, the difference over 2 eps. Form holds
         // no first-class functions, so which parameter is bumped is named
         // rather than passed: A, B, or the input.
-        def lbw-bump-go(xs, i, eps, k, acc) = if nil?(xs) then reverse(acc) else lbw-bump-go(tail(xs), i, eps, (k + 1), cons(if ((Comparable) k == i) then (head(xs) + eps) else head(xs), acc));
+        def lbw-bump-go(xs, i, eps, k, acc) = if nil?(xs) then reverse(acc) else lbw-bump-go(xs[1:], i, eps, (k + 1), cons(if ((Comparable) k == i) then (xs[0] + eps) else xs[0], acc));
         def lbw-bump(xs, i, eps) = lbw-bump-go(xs, i, eps, 0, []);
         def lbw-fd-of(lplus, lminus, eps) = if (nothing?(lplus) || nothing?(lminus)) then nothing() else ((lplus - lminus) / (2.0 * eps));
         def lbw-fd-a(z0, a, b, rank, din, dout, x, scale, t, i, eps) = lbw-fd-of(lbw-loss(z0, lbw-bump(a, i, eps), b, rank, din, dout, x, scale, t), lbw-loss(z0, lbw-bump(a, i, (0.0 - eps)), b, rank, din, dout, x, scale, t), eps);
