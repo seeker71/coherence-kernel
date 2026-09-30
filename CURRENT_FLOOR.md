@@ -66,7 +66,7 @@ lapse. The release ledger's open rows are the body's named work, each with its w
 A unit lowers by what it carries: any file with a `section [` block — `form.bml`, `form.lift`,
 `form.action`, `form.route`, the `*.bmf` grammar dialects — travels through `bml-floor-compile`
 whatever its extension, as a prelude or as the main file, and fkwu keeps the `.lowfk`/`.fkb` cache
-beside it. Of 507 tracked `.bml` files, 440 carry a `section [form.bml]` block and three carry
+beside it. Of 520 tracked `.bml` files, 453 carry a `section [form.bml]` block and three carry
 `section [form.lift]` (`git ls-files`, `git grep -l`). `true` and `false` are literals in the
 dialect, and a nested `defn` is a registered function (the two nested-defn bands below).
 
@@ -76,9 +76,10 @@ refusals all come through it. It reads a section whole, with direct backtracking
 the compiler's own constructors, so a def lowers to the very node its flat Form spelling builds:
 
 ```text
-./fkwu observe/bml-cursor-coverage-run.bml -> files=1348 sections=463 read=463 stops=0 refused=0
-                                              (463 = every `^section [form.bml|route|action]` line in
-                                              tracked files, `git grep -c`; cursor-ms=44136)
+./fkwu observe/bml-cursor-coverage-run.bml -> files=1358 sections=990 read=990 stops=0 refused=0
+                                              (990 = every `^section [form.bml|route|action]` line in tracked
+                                              `.bml` and `.fk` files, `git grep -h`; cursor-ms=59064)
+                                              a section it refuses is named by line, word and wanted rule
 form-bml-cursor-full-band 105 · bmf-prefix-state-band 4194303 · form-bml-prefix-choice-band 4194303
 ```
 
