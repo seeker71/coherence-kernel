@@ -1,0 +1,124 @@
+// bml-list-lift-run.bml — a hand-walked list becomes a map or a filter: the recursion over head and tail is core's own.
+//
+//   def f(xs) = nil?(xs) ? list() : cons(g(head(xs)), f(tail(xs)));      g a plain hyphenated def
+//   ->  def f(xs) = xs |> map(g);
+//   def f(k, ps) = nil?(ps) ? list() : cons(h(k, head(ps)), f(k, tail(ps)));
+//   ->  def f(k, ps) = ps |> map(p => h(k, p));
+//   def f(xs) = nil?(xs) ? list() : c(head(xs)) ? cons(head(xs), f(tail(xs))) : f(tail(xs));
+//   ->  def f(xs) = xs |> filter(x => c(x));
+//
+// stdin, one line: `check` or `apply`, then paths. One def per line, exactly this shape; every other shape stays as
+// written. A section is rewritten only while it still lowers; the bands that cover the file decide the rest.
+// preludes: form-stdlib/bml/bml-compact-rewrite.bml
+section [form.bml] {
+ class BmlListLift {
+  def bll-name-at?(s, w, at) {
+   let end = at + str_len(w);
+   (at < 0) ? false
+   : (!bcr-before-name?(bcr-byte(s, (at - 1))) && !bcr-name?(bcr-byte(s, end))) ? true
+   : bll-name-at?(s, w, str_find(s, w, (at + 1)));
+  }
+  def bll-has-name?(s, w) = bll-name-at?(s, w, str_find(s, w, 0));
+  def bll-subst-at(s, w, to, from, scan, pieces) {
+   let at = str_find(s, w, scan);
+   let end = at + str_len(w);
+   (at < 0) ? str-join-reversed(cons(fsc-sub(s, from, str_len(s)), pieces))
+   : (!bcr-before-name?(bcr-byte(s, (at - 1))) && !bcr-name?(bcr-byte(s, end))) ? bll-subst-at(s, w, to, end, end, cons(to, cons(fsc-sub(s, from, at), pieces)))
+   : bll-subst-at(s, w, to, from, (at + 1), pieces);
+  }
+  def bll-subst(s, w, to) = bll-subst-at(s, w, to, 0, 0, list());
+  def bll-nospace-go(s, i, acc) = (i >= str_len(s)) ? str-join-reversed(acc) : bll-nospace-go(s, (i + 1), (str_byte_at(s, i) == 32) ? acc : cons(fsc-sub(s, i, (i + 1)), acc));
+  def bll-nospace(s) = bll-nospace-go(s, 0, list());
+  def bll-contract?(s, i) {
+   let at = str_find(s, "(", i);
+   (at < 0) ? false : (bcr-byte(s, (at + 1)) >= 65 && bcr-byte(s, (at + 1)) <= 90) ? true : bll-contract?(s, (at + 1));
+  }
+  def bll-keyword?(w) = str_find(" def let store offer cut repeat stop fail undo again retry defer using match choice choose try else catch class section restore ", " " ++ w ++ " ", 0) >= 0;
+  def bll-singular(xs) = (str_len(xs) > 1 && str_byte_at(xs, (str_len(xs) - 1)) == 115 && !bll-keyword?(fsc-sub(xs, 0, (str_len(xs) - 1)))) ? fsc-sub(xs, 0, (str_len(xs) - 1)) : "it";
+  def bll-var(xs, expr) {
+   let c = bll-singular(xs);
+   !bll-has-name?(expr, c) ? c : !bll-has-name?(expr, "it") ? "it" : "";
+  }
+  def bll-pointfree(expr, xs) {
+   let tailer = "(head(" ++ xs ++ "))";
+   let p = str_find(expr, tailer, 0);
+   let g = (p > 0) ? fsc-sub(expr, 0, p) : "";
+   (p > 0 && (p + str_len(tailer)) == str_len(expr) && bcr-plain(g) != "" && str_find(g, "-", 0) > 0 && str_find(g, "_", 0) < 0) ? g : "";
+  }
+
+  def bll-lift(line) {
+   let t = trim(line);
+   let lp = str_find(t, "(", 0);
+   let k = str_find(t, ") = nil?(", 0);
+   let name = fsc-sub(t, 4, lp);
+   let params = fsc-sub(t, (lp + 1), k);
+   let xs = fsc-sub(t, (k + 9), str_find(t, ")", (k + 9)));
+   let xe = k + 9 + str_len(xs);
+   let lit = ") ? list() : cons(";
+   let cs = xe + str_len(lit);
+   let sk = bcr-skel(t);
+   let cc = bcr-close-any(sk, (cs - 1), str_len(t));
+   let commas = bcr-commas(sk, cs, cc, 0, list());
+   let expr = trim(fsc-sub(t, cs, commas[0]));
+   let rec = trim(fsc-sub(t, (commas[0] + 1), cc));
+   let want = name ++ "(" ++ bll-subst(bll-nospace(params), xs, "tail(" ++ xs ++ ")") ++ ")";
+   let hd = "head(" ++ xs ++ ")";
+   let v = bll-var(xs, expr);
+   let e2 = bll-subst(expr, hd, v);
+   let pf = bll-pointfree(expr, xs);
+   let ok = str_find(t, "def ", 0) == 0 && lp > 4 && k > lp && str_find(t, lit, xe) == xe && len(commas) == 1
+    && str_eq(bll-nospace(rec), bll-nospace(want)) && str_eq(fsc-sub(t, (cc + 1), (cc + 2)), ";")
+    && str_find(expr, hd, 0) >= 0 && v != "" && !bll-has-name?(e2, xs) && !bll-has-name?(expr, name) && !bll-contract?(t, 0);
+   ok ? (fsc-sub(line, 0, str_find(line, "def ", 0)) ++ "def " ++ name ++ "(" ++ params ++ ") = " ++ xs ++ " |> map(" ++ ((pf != "") ? pf : (v ++ " => " ++ e2)) ++ ");" ++ fsc-sub(t, (cc + 2), str_len(t))) : nothing();
+  }
+  def bll-lift-filter(line) {
+   let t = trim(line);
+   let lp = str_find(t, "(", 0);
+   let k = str_find(t, ") = nil?(", 0);
+   let name = fsc-sub(t, 4, lp);
+   let params = fsc-sub(t, (lp + 1), k);
+   let xs = fsc-sub(t, (k + 9), str_find(t, ")", (k + 9)));
+   let xe = k + 9 + str_len(xs);
+   let lit = ") ? list() : ";
+   let cs = xe + str_len(lit);
+   let key = " ? cons(head(" ++ xs ++ "),";
+   let q = str_find(t, key, cs);
+   let cond = trim(fsc-sub(t, cs, q));
+   let sk = bcr-skel(t);
+   let cc = bcr-close-any(sk, (q + 7), str_len(t));
+   let commas = bcr-commas(sk, (q + 8), cc, 0, list());
+   let rec1 = trim(fsc-sub(t, (commas[0] + 1), cc));
+   let colon = str_find(t, ":", (cc + 1));
+   let semi = str_find(sk, ";", colon);
+   let rec2 = trim(fsc-sub(t, (colon + 1), semi));
+   let want = name ++ "(" ++ bll-subst(bll-nospace(params), xs, "tail(" ++ xs ++ ")") ++ ")";
+   let hd = "head(" ++ xs ++ ")";
+   let v = bll-var(xs, cond);
+   let e2 = bll-subst(cond, hd, v);
+   let pf = bll-pointfree(cond, xs);
+   let ok = str_find(t, "def ", 0) == 0 && lp > 4 && k > lp && str_find(t, lit, xe) == xe && q >= cs && len(commas) == 1
+    && str_eq(trim(fsc-sub(t, (q + 8), commas[0])), hd) && str_eq(trim(fsc-sub(t, (cc + 1), colon)), "") && semi > colon
+    && str_eq(bll-nospace(rec1), bll-nospace(want)) && str_eq(bll-nospace(rec2), bll-nospace(want))
+    && cond != "" && str_find(cond, " ? ", 0) < 0 && str_find(cond, hd, 0) >= 0 && v != "" && !bll-has-name?(e2, xs)
+    && !bll-has-name?(cond, name) && !bll-contract?(cond, 0);
+   ok ? (fsc-sub(line, 0, str_find(line, "def ", 0)) ++ "def " ++ name ++ "(" ++ params ++ ") = " ++ xs ++ " |> filter(" ++ ((pf != "") ? pf : (v ++ " => " ++ e2)) ++ ");" ++ fsc-sub(t, (semi + 1), str_len(t))) : nothing();
+  }
+  def bll-code?(sk, pos, line) = bcr-byte(sk, (pos + str_find(line, "def ", 0))) == 100;
+  def bll-line(sk, pos, line) = (str_find(line, "nil?(", 0) < 0 || !bll-code?(sk, pos, line)) ? nothing() : (attempt(bll-lift(line)) ?? attempt(bll-lift-filter(line)));
+  def bll-lines(s, sk, pos, pieces) {
+   let nl = str_find(s, "\n", pos);
+   let line = fsc-sub(s, pos, (nl < 0) ? str_len(s) : nl);
+   let done = cons((bll-line(sk, pos, line) ?? line) ++ ((nl < 0) ? "" : "\n"), pieces);
+   (nl < 0) ? str-join-reversed(done) : bll-lines(s, sk, (nl + 1), done);
+  }
+  def bll-body(body) {
+   let out = bll-lines(body, bcr-skel(body), 0, list());
+   str_eq(out, body) ? list(body, "same") : bcr-stop?(bcr-reading(out)) ? list(body, "stop") : list(out, "whole");
+  }
+  def bll-run() {
+   let words = bcr-words(trim(stdin-text()));
+   bcr-files(tail(words), str_eq(words[0], "apply"), bll-body);
+  }
+ }
+ bll-run();
+}
