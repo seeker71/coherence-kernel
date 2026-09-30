@@ -1,219 +1,154 @@
-; q6k-msl.fk — Q6_K dequant as a Metal kernel the BODY emits, so the QUANTIZED bytes are what lives
-; on the GPU and the dequant happens there.
-;
-; WHY THIS EXISTS, and it is a measurement and not a preference. Stone 2 made the byte source
-; equireach and then reported Form dequant at 18 460 weights/s, from which one tensor
-; (blk.0.ffn_down.weight, 8192x3072 = 25 165 824 weights) projects to ~23 min and llama3.2:3b's
-; ~3.2G weights to ~48 h. Stone 3 re-measured that rate at two sizes instead of one and found it is
-; not a rate at all — it is a curve, and the curve is the OUTPUT carrier, not the arithmetic:
-;
-;   n weights           65 536        262 144        ratio for 4x n
-;   ewl-weights (list)   4.98 s        39.5 s        7.9x   <- superlinear: the cons/reverse list
-;   fold, no list        0.70 s         1.50 s       2.1x   <- linear: the same dequant arithmetic
-;                                                              (1 048 576 -> 6.45 s, 162k w/s)
-;
-; So Stone 1's teaching repeats one level out. Stone 1: the blocker was the INPUT carrier (the byte
-; list), not the arithmetic. Stone 3: the blocker is the OUTPUT carrier (the weight list), not the
-; arithmetic. The honest projections for one 25.2M-weight tensor are ~10.4 h through the list and
-; ~154 s through the fold — and BOTH are per-run costs no inference lane can pay. That is what sends
-; the dequant to the GPU: not that Form is slow at it, but that the whole shape of "dequantize into a
-; buffer, then upload the buffer" is wrong when the quantized bytes are 1/4 the size and the arithmetic
-; is 8 integer ops per weight.
-;
-; WHAT IS EMITTED (both kernels, one shared helper spine; every character authored here):
-;   q6m-dequant-msl  qb[] (raw Q6_K bytes, 210 per 256 weights) -> w[] f32, one thread per weight.
-;   q6m-matvec-msl   qb[] x[] -> y[], the FUSED kernel: the resident buffer is the QUANTIZED tensor
-;                    and each weight is dequantized inside the dot. 4x less device memory, and no f32
-;                    tensor is ever materialized anywhere — not in Form, not on the host, not on the GPU.
-;
-; BIT-EXACTNESS IS CLAIMABLE HERE, and the reason is arithmetic, not luck. w = (d * sc) * q with d an
-; f16 value (11-bit significand), sc a signed int8 (<= 8 bits) and q in [-32,31] (<= 6 bits). d*sc needs
-; <= 19 bits and is exact in f32; (d*sc)*q needs <= 25 bits, so it rounds ONCE. Form computes the same
-; product in fp64 (53 bits, exact) and the carrier rounds it once to f32. One rounding on each side of
-; the same exact real number is the same f32. So the audit gate is equality, not an epsilon — and the
-; association is left-to-right on both sides ((d*sc)*q in ewl-at, (d*sc)*q here) because that is what
-; makes the sentence above true.
-;
-; NO HEADER, ON PURPOSE. The emitted source has no `#include <metal_stdlib>`: the f16 super-scale is
-; decoded by ARITHMETIC (q6k_f16 below is fd-value at eb=5, mb=10 transcribed line for line), not by
-; `as_type<half>`, which lives in that header. The body already owns the f16 decode as a recipe; reaching
-; for the library's bitcast would have moved a meaning out of the body for one line of convenience.
-;
-; THE RADIUS THIS CELL SPEAKS FOR. The emitted text is a TRANSCRIPTION of q6k-dequant.fk's decomposition
-; into MSL, and a transcription can be wrong in a way no amount of GPU running would reveal if the
-; reference were transcribed the same way. So q6m-flat-at below is the same transcription read back into
-; Form — flat index, block stride, literal byte offsets, exactly as the emitted C computes them — and
-; it is held equal to equireach-gguf.fk's independently-written `ewl-flat-at` at all 512 weights of the
-; committed two-superblock fixture, which is where the block stride actually gets crossed. That
-; comparison speaks for the transcription. It does NOT speak for the MSL compiler or the GPU; those are
-; witnessed on real llama3.2:3b weights, against Form, not here.
-;
-; Kin: q6k-dequant.fk (q6k-mod / q6k-s8 / q6k-pow4 and the index decomposition — the one Q6_K spine;
-; this cell is a third reach into it, not a third meaning), equireach-gguf.fk (ewl-flat-at — the CPU
-; twin these kernels must equal), f16-decode.fk (fd-value at (5,10) — the recipe q6k_f16 transcribes),
-; jit-tensor-emit.fk / tensor-ir.fk (jte-matvec-msl — the f32 matvec whose signature and right-fold op
-; order q6m-matvec-msl mirrors so the two are comparable row for row).
-;
-; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk
-;
-
-(do
-    ; ================= the transcription, read back into Form =================
-    ; This is what the emitted C computes, written in Form with the same flat index, the same block
-    ; stride and the same literal byte offsets. It exists so the band can falsify the transcription
-    ; against a reference that was written independently (ewl-flat-at).
-
-    (defn q6m-stride () 210)                       ; bytes per Q6_K superblock
-    (defn q6m-block-n () 256)                      ; weights per superblock
-    (defn q6m-blk (idx) (div idx (q6m-block-n)))   ; which superblock a flat weight index falls in
-    (defn q6m-i   (idx) (q6k-mod idx (q6m-block-n)))
-
-    ; the super-scale, decoded by arithmetic from the two little-endian f16 bytes at +208
-    (defn q6m-d (src b) (fd-f16 (add (eqr-at src (add b 208)) (mul 256 (eqr-at src (add b 209))))))
-
-    ; the three field byte reads, at the offsets the emitted C indexes
-    (defn q6m-ql (src b i) (eqr-at src (add b (add (mul (q6k-h i) 64) (add (q6k-l i) (mul (q6k-mod (q6k-g i) 2) 32))))))
-    (defn q6m-qh (src b i) (eqr-at src (add b (add 128 (add (mul (q6k-h i) 32) (q6k-l i))))))
-    (defn q6m-scb (src b i) (eqr-at src (add b (add 192 (add (mul (q6k-h i) 8) (add (q6k-is i) (mul 2 (q6k-g i))))))))
-
-    (defn q6m-nib (src b i)
-        (if (eq (div (q6k-g i) 2) 0)
-            (q6k-mod (q6m-ql src b i) 16)
-            (div (q6m-ql src b i) 16)))
-    (defn q6m-hi (src b i) (q6k-mod (div (q6m-qh src b i) (q6k-pow4 (q6k-g i))) 4))
-    (defn q6m-q  (src b i) (sub (add (q6m-nib src b i) (mul (q6m-hi src b i) 16)) 32))
-    (defn q6m-sc (src b i) (q6k-s8 (q6m-scb src b i)))
-
-    ; one weight at FLAT index idx of a tensor whose first superblock starts at `base` — the association
-    ; is (d * sc) * q, which is the sentence the bit-exactness claim rests on
-    (defn q6m-flat-at (src base idx)
-        (do
-            (let b (add base (mul (q6m-stride) (q6m-blk idx))))
-            (let i (q6m-i idx))
-            (mul (mul (q6m-d src b) (q6m-sc src b i)) (q6m-q src b i))))
-
-    ; ================= the emitted MSL =================
-    ; Composed the way the other MSL spines in the body are: str_concat over named fragments, one
-    ; fragment per meaning, so a diff of the emitted text points at a recipe and not at a blob.
-
-    ; integer identities — the same ones q6k-dequant.fk names: x&15 = mod x 16, x>>4 = div x 16,
-    ; (qh>>2g)&3 = mod (div qh 4^g) 4. No bitwise operator appears, on either side.
-    (defn q6m-msl-int ()
-        "static inline int q6k_mod(int a, int n) { return a - (a / n) * n; } static inline int q6k_s8(int b) { return b < 128 ? b : b - 256; } static inline int q6k_pow4(int g) { return g == 0 ? 1 : (g == 1 ? 4 : (g == 2 ? 16 : 64)); } ")
-
-    ; fd-value at (eb 5, mb 10), transcribed: field extraction by division, the power of two by a loop
-    ; of exact multiplications, the subnormal arm kept. No metal_stdlib, no bitcast.
-    (defn q6m-msl-f16 ()
-        "static inline float q6k_pow2(int e) { float a = 1.0f; int k = 0; if (e >= 0) { while (k < e) { a = a * 2.0f; k = k + 1; } } else { while (k < -e) { a = a * 0.5f; k = k + 1; } } return a; } static inline float q6k_f16(int bits) { int mant = q6k_mod(bits, 1024); int ex = q6k_mod(bits / 1024, 32); int sgn = bits / 32768; float frac = float(mant) / 1024.0f; float mag = (ex == 0) ? q6k_pow2(-14) * frac : q6k_pow2(ex - 15) * (1.0f + frac); return (sgn == 1) ? -mag : mag; } ")
-
-    ; the weight itself, at a flat index into the quantized tensor — q6m-flat-at, in C
-    (defn q6m-msl-weight ()
-        "static inline float q6k_w(device const uchar* qb, uint idx) { uint blk = idx / 256u; int i = int(idx - blk * 256u); uint b = blk * 210u; int h = i / 128; int wi = i - h * 128; int l = q6k_mod(wi, 32); int g = wi / 32; int is = l / 16; int qlb = int(qb[b + uint(h * 64 + l + q6k_mod(g, 2) * 32)]); int nib = (g / 2 == 0) ? q6k_mod(qlb, 16) : qlb / 16; int qhb = int(qb[b + 128u + uint(h * 32 + l)]); int hi = q6k_mod(qhb / q6k_pow4(g), 4); int q = nib + hi * 16 - 32; int sc = q6k_s8(int(qb[b + 192u + uint(h * 8 + is + 2 * g)])); float d = q6k_f16(int(qb[b + 208u]) + 256 * int(qb[b + 209u])); return (d * float(sc)) * float(q); } ")
-
-    (defn q6m-msl-helpers () (str_concat (q6m-msl-int) (str_concat (q6m-msl-f16) (q6m-msl-weight))))
-
-    ; --- kernel 1: dequant a range of the resident quantized tensor into f32. One thread per weight.
-    ; `off` is a flat WEIGHT offset, so a caller can dequant a tile at either end of a 25.2M-weight
-    ; tensor without moving the resident bytes. ---
-    (defn q6m-dequant-body (fname)
-        (str_concat "kernel void "
-        (str_concat fname
-            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = q6k_w(qb, off + i); }")))
-
-    ; --- kernel 2: the FUSED matvec. The resident buffer is the quantized tensor; nothing is
-    ; materialized. j counts DOWN and the accumulate is `p + acc` — tb-dot's right fold, the same op
-    ; order jte-matvec-msl emits, so the two kernels are comparable row for row and the f32 reference
-    ; in the carrier is the lane's own conversion chain. ---
-    (defn q6m-matvec-body (fname)
-        (str_concat "kernel void "
-        (str_concat fname
-            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = q6k_w(qb, uint(i) * cols + j) * float(x[j]); acc = p + acc; } y[i] = acc; }")))
-
-    ; --- each kernel as a SELF-CONTAINED translation unit (spine + body), and the two of them as ONE
-    ; unit with the spine emitted once. The second form is what a carrier compiles: C has no `inline`
-    ; forgiveness for a repeated `static inline` definition in one file, and the Metal front end says so
-    ; loudly ("redefinition of 'q6k_mod'"). The self-contained forms stay because a caller that wants
-    ; only one kernel should not have to know what the other one needs. ---
-    (defn q6m-dequant-msl (fname) (str_concat (q6m-msl-helpers) (q6m-dequant-body fname)))
-    (defn q6m-matvec-msl  (fname) (str_concat (q6m-msl-helpers) (q6m-matvec-body  fname)))
-    (defn q6m-msl-unit (dname mname)
-        (str_concat (q6m-msl-helpers)
-        (str_concat (q6m-dequant-body dname) (q6m-matvec-body mname))))
-
-    ; --- kernel 3: THE COOPERATIVE TWIN of the matvec, sixteen rows a group — q8-0-msl.fk's tg4 shape
-    ; (the double-buffered pv[2][16][129], sixteen folding lanes, 64 prefetching loaders) carried to the
-    ; 256-weight superblock. A step is 128 columns, one HALF (h) of a superblock, and loader (row, g) — the
-    ; 64 loaders are sixteen rows x the four sub-groups — holds that half's bytes for its sub-group in
-    ; registers a whole step before the products are needed: the 32 ql bytes at h*64 + (g mod 2)*32, the
-    ; 32 qh bytes at 128 + h*32, the two scales at 192 + h*8 + 2g and the super-scale, 34 ushorts. The
-    ; stage computes every product exactly as q6k_w does — the same nib / hi / q / sc integers, d by
-    ; q6k_f16 (the attestant's own decode, not as_type<half>), ((d * sc) * q) * x — and the sixteen lanes
-    ; of simdgroup 0 fold j counting down, `p + acc`: the same association, the same rounding, bit for bit
-    ; the attestant. Dispatch: mode 1, groups = ceil(rows / 16), 96 threads; cols a multiple of 256.
-    ; Emitted AFTER the unit (needs <metal_stdlib> for the barrier; the unit is header-free by design). ---
-    (defn q6m-tg4-fold (k acc)
-        (if (lt k 0) acc
-            (q6m-tg4-fold (sub k 1) (str_concat acc (str_concat "acc = pv[ci & 1u][lane][" (str_concat (int_to_str k) "u] + acc; "))))))
-    ; the register load of step `ls` for loader (row, sub): ushort reads, every offset even (210 is).
-    ; THE SUPER-SCALE AND THE TWO SUB-SCALES ARE FOLDED HERE, not per weight: `d * sc` is one float
-    ; per sixteen weights and the stage multiplied it out sixty-four times a step. gs0 and gs1 hold
-    ; exactly the floats `(d * float(sc))` the stage used to recompute, so `(gs * q) * x` is the same
-    ; three-operand expression in the same order — bit for bit, one fewer multiply a weight.
-    (defn q6m-tg4-load (step)
-        (str_concat "{ uint ls = "
-        (str_concat step
-                    "; uint lh = ls & 1u; device const ushort* hp = (device const ushort*)(qb + (row * nbk + ls / 2u) * 210u); for (uint q = 0u; q < 16u; q += 1u) { hb[q] = hp[lh * 32u + (sub & 1u) * 16u + q]; hb[16u + q] = hp[64u + lh * 16u + q]; } ushort scw = hp[96u + lh * 4u + sub]; float dd = q6k_f16(int(hp[104u])); gs0 = dd * float(q6k_s8(int(scw & 0xFFu))); gs1 = dd * float(q6k_s8(int(scw >> 8))); } ")))
-    ; the stage of step `cs` from the registers: q6k_w's integers and products, two weights a ushort.
-    ; The high two bits arrive by SHIFT, not by an integer division whose divisor the compiler cannot
-    ; see: q6k_mod(qh / 4^g, 4) is (qh >> 2g) & 3 for a byte, exactly — and a variable-divisor uint
-    ; division was the one expensive op left in the loader's inner line, paid once a weight.
-    (defn q6m-tg4-stage ()
-        "for (uint e = 0u; e < 32u; e += 2u) { ushort two = hb[e / 2u]; ushort twh = hb[16u + e / 2u]; int la = int(two & 0xFFu); int lb = int(two >> 8); uint ua = uint(twh & 0xFFu); uint ub = uint(twh >> 8); int n0 = lo ? q6k_mod(la, 16) : la / 16; int n1 = lo ? q6k_mod(lb, 16) : lb / 16; int q0 = n0 + int((ua >> psh) & 3u) * 16 - 32; int q1 = n1 + int((ub >> psh) & 3u) * 16 - 32; float dsc = (e < 16u) ? gs0 : gs1; uint j = cs * 128u + sub * 32u + e; pv[cs & 1u][lane][sub * 32u + e] = (dsc * float(q0)) * float(x[j]); pv[cs & 1u][lane][sub * 32u + e + 1u] = (dsc * float(q1)) * float(x[j + 1u]); } ")
-    (defn q6m-tg4-kernel (fname sig prefix epilogue)
-        (str_concat "kernel void "
-        (str_concat fname
-        (str_concat sig
-        (str_concat " { threadgroup float pv[2][16][129]; uint nbk = cols / 256u; uint ns = cols / 128u; uint u = (t >= 32u) ? (t - 32u) : 0u; uint lane = (t < 32u) ? t : (u & 15u); uint sub = u / 16u; uint psh = sub * 2u; bool lo = (sub / 2u == 0u); float gs0 = 0.0f; float gs1 = 0.0f; "
-        (str_concat prefix
-        (str_concat " bool fold = (t < 32u) && (lane < 16u) && (row < rows); bool load = (t >= 32u) && (row < rows); ushort hb[32]; if (load) "
-        (str_concat (q6m-tg4-load "ns - 1u")
-        (str_concat "if (load) { uint cs = ns - 1u; "
-        (str_concat (q6m-tg4-stage)
-        (str_concat "if (ns > 1u) "
-        (str_concat (q6m-tg4-load "ns - 2u")
-        (str_concat "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float acc = 0.0f; uint ci = ns; while (ci > 0u) { ci -= 1u; if (load && ci > 0u) { uint cs = ci - 1u; "
-        (str_concat (q6m-tg4-stage)
-        (str_concat "if (cs > 0u) "
-        (str_concat (q6m-tg4-load "cs - 1u")
-        (str_concat "} if (fold) { "
-        (str_concat (q6m-tg4-fold 127 "")
-        (str_concat "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (fold) { "
-        (str_concat epilogue " } }"))))))))))))))))))))
-    (defn q6m-matvec-tg4-body (fname)
-        (q6m-tg4-kernel fname
-            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
-            "uint row = gi * 16u + lane;"
-            "y[row] = acc;"))
-
-    ; --- kernel 4: the same fold, landing at a ROW OFFSET in the destination. This is what the copy
-    ; kernel did afterwards — `d[doff + i] = s[i]` — said once, in the epilogue that already holds the
-    ; value: a k or v projection writes straight into its cache at the position's row and no second
-    ; dispatch moves it. The fold is q6m-tg4-kernel's, unchanged. ---
-    (defn q6m-matvec-tg4-off-body (fname)
-        (q6m-tg4-kernel fname
-            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& yoff [[buffer(5)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
-            "uint row = gi * 16u + lane;"
-            "y[yoff + row] = acc;"))
-
-    ; --- kernel 5: the same fold with the residual add in its epilogue — q8-0-msl.fk's tg4-add carried
-    ; to the superblock. form_add_f32 computes y = a + b with a the residual stream and b the
-    ; projection; `y[row] = r[row] + acc` is that add, the same two operands in the same order, and the
-    ; projection never lands in a buffer of its own. In place on r: each row is read and written by its
-    ; own lane alone. ---
-    (defn q6m-matvec-tg4-add-body (fname)
-        (q6m-tg4-kernel fname
-            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const float* r [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
-            "uint row = gi * 16u + lane;"
-            "y[row] = r[row] + acc;"))
-
-    0)
+// q6k-msl.fk — Q6_K dequant as a Metal kernel the BODY emits, so the QUANTIZED bytes are what lives
+// on the GPU and the dequant happens there.
+//
+// WHY THIS EXISTS, and it is a measurement and not a preference. Stone 2 made the byte source
+// equireach and then reported Form dequant at 18 460 weights/s, from which one tensor
+// (blk.0.ffn_down.weight, 8192x3072 = 25 165 824 weights) projects to ~23 min and llama3.2:3b's
+// ~3.2G weights to ~48 h. Stone 3 re-measured that rate at two sizes instead of one and found it is
+// not a rate at all — it is a curve, and the curve is the OUTPUT carrier, not the arithmetic:
+//
+//   n weights           65 536        262 144        ratio for 4x n
+//   ewl-weights (list)   4.98 s        39.5 s        7.9x   <- superlinear: the cons/reverse list
+//   fold, no list        0.70 s         1.50 s       2.1x   <- linear: the same dequant arithmetic
+//                                                              (1 048 576 -> 6.45 s, 162k w/s)
+//
+// So Stone 1's teaching repeats one level out. Stone 1: the blocker was the INPUT carrier (the byte
+// list), not the arithmetic. Stone 3: the blocker is the OUTPUT carrier (the weight list), not the
+// arithmetic. The honest projections for one 25.2M-weight tensor are ~10.4 h through the list and
+// ~154 s through the fold — and BOTH are per-run costs no inference lane can pay. That is what sends
+// the dequant to the GPU: not that Form is slow at it, but that the whole shape of "dequantize into a
+// buffer, then upload the buffer" is wrong when the quantized bytes are 1/4 the size and the arithmetic
+// is 8 integer ops per weight.
+//
+// WHAT IS EMITTED (both kernels, one shared helper spine; every character authored here):
+//   q6m-dequant-msl  qb[] (raw Q6_K bytes, 210 per 256 weights) -> w[] f32, one thread per weight.
+//   q6m-matvec-msl   qb[] x[] -> y[], the FUSED kernel: the resident buffer is the QUANTIZED tensor
+//                    and each weight is dequantized inside the dot. 4x less device memory, and no f32
+//                    tensor is ever materialized anywhere — not in Form, not on the host, not on the GPU.
+//
+// BIT-EXACTNESS IS CLAIMABLE HERE, and the reason is arithmetic, not luck. w = (d * sc) * q with d an
+// f16 value (11-bit significand), sc a signed int8 (<= 8 bits) and q in [-32,31] (<= 6 bits). d*sc needs
+// <= 19 bits and is exact in f32; (d*sc)*q needs <= 25 bits, so it rounds ONCE. Form computes the same
+// product in fp64 (53 bits, exact) and the carrier rounds it once to f32. One rounding on each side of
+// the same exact real number is the same f32. So the audit gate is equality, not an epsilon — and the
+// association is left-to-right on both sides ((d*sc)*q in ewl-at, (d*sc)*q here) because that is what
+// makes the sentence above true.
+//
+// NO HEADER, ON PURPOSE. The emitted source has no `#include <metal_stdlib>`: the f16 super-scale is
+// decoded by ARITHMETIC (q6k_f16 below is fd-value at eb=5, mb=10 transcribed line for line), not by
+// `as_type<half>`, which lives in that header. The body already owns the f16 decode as a recipe; reaching
+// for the library's bitcast would have moved a meaning out of the body for one line of convenience.
+//
+// THE RADIUS THIS CELL SPEAKS FOR. The emitted text is a TRANSCRIPTION of q6k-dequant.fk's decomposition
+// into MSL, and a transcription can be wrong in a way no amount of GPU running would reveal if the
+// reference were transcribed the same way. So q6m-flat-at below is the same transcription read back into
+// Form — flat index, block stride, literal byte offsets, exactly as the emitted C computes them — and
+// it is held equal to equireach-gguf.fk's independently-written `ewl-flat-at` at all 512 weights of the
+// committed two-superblock fixture, which is where the block stride actually gets crossed. That
+// comparison speaks for the transcription. It does NOT speak for the MSL compiler or the GPU; those are
+// witnessed on real llama3.2:3b weights, against Form, not here.
+//
+// Kin: q6k-dequant.fk (q6k-mod / q6k-s8 / q6k-pow4 and the index decomposition — the one Q6_K spine;
+// this cell is a third reach into it, not a third meaning), equireach-gguf.fk (ewl-flat-at — the CPU
+// twin these kernels must equal), f16-decode.fk (fd-value at (5,10) — the recipe q6k_f16 transcribes),
+// jit-tensor-emit.fk / tensor-ir.fk (jte-matvec-msl — the f32 matvec whose signature and right-fold op
+// order q6m-matvec-msl mirrors so the two are comparable row for row).
+//
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk
+//
+section [form.bml] {
+    // ================= the transcription, read back into Form =================
+    // This is what the emitted C computes, written in Form with the same flat index, the same block
+    // stride and the same literal byte offsets. It exists so the band can falsify the transcription
+    // against a reference that was written independently (ewl-flat-at).
+    def q6m-stride() = 210;
+    // bytes per Q6_K superblock
+    def q6m-block-n() = 256;
+    // weights per superblock
+    def q6m-blk(idx) = idx / q6m-block-n();
+    // which superblock a flat weight index falls in
+    def q6m-i(idx) = q6k-mod(idx, q6m-block-n());
+    // the super-scale, decoded by arithmetic from the two little-endian f16 bytes at +208
+    def q6m-d(src, b) = fd-f16(eqr-at(src, b + 208) + 256 * eqr-at(src, b + 209));
+    // the three field byte reads, at the offsets the emitted C indexes
+    def q6m-ql(src, b, i) = eqr-at(src, b + (q6k-h(i) * 64 + (q6k-l(i) + q6k-mod(q6k-g(i), 2) * 32)));
+    def q6m-qh(src, b, i) = eqr-at(src, b + (128 + (q6k-h(i) * 32 + q6k-l(i))));
+    def q6m-scb(src, b, i) = eqr-at(src, b + (192 + (q6k-h(i) * 8 + (q6k-is(i) + 2 * q6k-g(i)))));
+    def q6m-nib(src, b, i) = (Comparable) (q6k-g(i) / 2) == 0 ? q6k-mod(q6m-ql(src, b, i), 16) : q6m-ql(src, b, i) / 16;
+    def q6m-hi(src, b, i) = q6k-mod(q6m-qh(src, b, i) / q6k-pow4(q6k-g(i)), 4);
+    def q6m-q(src, b, i) = q6m-nib(src, b, i) + q6m-hi(src, b, i) * 16 - 32;
+    def q6m-sc(src, b, i) = q6k-s8(q6m-scb(src, b, i));
+    // one weight at FLAT index idx of a tensor whose first superblock starts at `base` — the association
+    // is (d * sc) * q, which is the sentence the bit-exactness claim rests on
+    def q6m-flat-at(src, base, idx) = {
+        let b = base + q6m-stride() * q6m-blk(idx);
+        let i = q6m-i(idx);
+        q6m-d(src, b) * q6m-sc(src, b, i) * q6m-q(src, b, i);
+    };
+    // ================= the emitted MSL =================
+    // Composed the way the other MSL spines in the body are: str_concat over named fragments, one
+    // fragment per meaning, so a diff of the emitted text points at a recipe and not at a blob.
+    // integer identities — the same ones q6k-dequant.fk names: x&15 = mod x 16, x>>4 = div x 16,
+    // (qh>>2g)&3 = mod (div qh 4^g) 4. No bitwise operator appears, on either side.
+    def q6m-msl-int() = "static inline int q6k_mod(int a, int n) { return a - (a / n) * n; } static inline int q6k_s8(int b) { return b < 128 ? b : b - 256; } static inline int q6k_pow4(int g) { return g == 0 ? 1 : (g == 1 ? 4 : (g == 2 ? 16 : 64)); } ";
+    // fd-value at (eb 5, mb 10), transcribed: field extraction by division, the power of two by a loop
+    // of exact multiplications, the subnormal arm kept. No metal_stdlib, no bitcast.
+    def q6m-msl-f16() = "static inline float q6k_pow2(int e) { float a = 1.0f; int k = 0; if (e >= 0) { while (k < e) { a = a * 2.0f; k = k + 1; } } else { while (k < -e) { a = a * 0.5f; k = k + 1; } } return a; } static inline float q6k_f16(int bits) { int mant = q6k_mod(bits, 1024); int ex = q6k_mod(bits / 1024, 32); int sgn = bits / 32768; float frac = float(mant) / 1024.0f; float mag = (ex == 0) ? q6k_pow2(-14) * frac : q6k_pow2(ex - 15) * (1.0f + frac); return (sgn == 1) ? -mag : mag; } ";
+    // the weight itself, at a flat index into the quantized tensor — q6m-flat-at, in C
+    def q6m-msl-weight() = "static inline float q6k_w(device const uchar* qb, uint idx) { uint blk = idx / 256u; int i = int(idx - blk * 256u); uint b = blk * 210u; int h = i / 128; int wi = i - h * 128; int l = q6k_mod(wi, 32); int g = wi / 32; int is = l / 16; int qlb = int(qb[b + uint(h * 64 + l + q6k_mod(g, 2) * 32)]); int nib = (g / 2 == 0) ? q6k_mod(qlb, 16) : qlb / 16; int qhb = int(qb[b + 128u + uint(h * 32 + l)]); int hi = q6k_mod(qhb / q6k_pow4(g), 4); int q = nib + hi * 16 - 32; int sc = q6k_s8(int(qb[b + 192u + uint(h * 8 + is + 2 * g)])); float d = q6k_f16(int(qb[b + 208u]) + 256 * int(qb[b + 209u])); return (d * float(sc)) * float(q); } ";
+    def q6m-msl-helpers() = str_concat(q6m-msl-int(), str_concat(q6m-msl-f16(), q6m-msl-weight()));
+    // --- kernel 1: dequant a range of the resident quantized tensor into f32. One thread per weight.
+    // `off` is a flat WEIGHT offset, so a caller can dequant a tile at either end of a 25.2M-weight
+    // tensor without moving the resident bytes. ---
+    def q6m-dequant-body(fname) = str_concat("kernel void ", str_concat(fname, " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = q6k_w(qb, off + i); }"));
+    // --- kernel 2: the FUSED matvec. The resident buffer is the quantized tensor; nothing is
+    // materialized. j counts DOWN and the accumulate is `p + acc` — tb-dot's right fold, the same op
+    // order jte-matvec-msl emits, so the two kernels are comparable row for row and the f32 reference
+    // in the carrier is the lane's own conversion chain. ---
+    def q6m-matvec-body(fname) = str_concat("kernel void ", str_concat(fname, " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = q6k_w(qb, uint(i) * cols + j) * float(x[j]); acc = p + acc; } y[i] = acc; }"));
+    // --- each kernel as a SELF-CONTAINED translation unit (spine + body), and the two of them as ONE
+    // unit with the spine emitted once. The second form is what a carrier compiles: C has no `inline`
+    // forgiveness for a repeated `static inline` definition in one file, and the Metal front end says so
+    // loudly ("redefinition of 'q6k_mod'"). The self-contained forms stay because a caller that wants
+    // only one kernel should not have to know what the other one needs. ---
+    def q6m-dequant-msl(fname) = str_concat(q6m-msl-helpers(), q6m-dequant-body(fname));
+    def q6m-matvec-msl(fname) = str_concat(q6m-msl-helpers(), q6m-matvec-body(fname));
+    def q6m-msl-unit(dname, mname) = str_concat(q6m-msl-helpers(), str_concat(q6m-dequant-body(dname), q6m-matvec-body(mname)));
+    // --- kernel 3: THE COOPERATIVE TWIN of the matvec, sixteen rows a group — q8-0-msl.fk's tg4 shape
+    // (the double-buffered pv[2][16][129], sixteen folding lanes, 64 prefetching loaders) carried to the
+    // 256-weight superblock. A step is 128 columns, one HALF (h) of a superblock, and loader (row, g) — the
+    // 64 loaders are sixteen rows x the four sub-groups — holds that half's bytes for its sub-group in
+    // registers a whole step before the products are needed: the 32 ql bytes at h*64 + (g mod 2)*32, the
+    // 32 qh bytes at 128 + h*32, the two scales at 192 + h*8 + 2g and the super-scale, 34 ushorts. The
+    // stage computes every product exactly as q6k_w does — the same nib / hi / q / sc integers, d by
+    // q6k_f16 (the attestant's own decode, not as_type<half>), ((d * sc) * q) * x — and the sixteen lanes
+    // of simdgroup 0 fold j counting down, `p + acc`: the same association, the same rounding, bit for bit
+    // the attestant. Dispatch: mode 1, groups = ceil(rows / 16), 96 threads; cols a multiple of 256.
+    // Emitted AFTER the unit (needs <metal_stdlib> for the barrier; the unit is header-free by design). ---
+    def q6m-tg4-fold(k, acc) = k < 0 ? acc : q6m-tg4-fold(k - 1, str_concat(acc, str_concat("acc = pv[ci & 1u][lane][", str_concat(int_to_str(k), "u] + acc; "))));
+    // the register load of step `ls` for loader (row, sub): ushort reads, every offset even (210 is).
+    // THE SUPER-SCALE AND THE TWO SUB-SCALES ARE FOLDED HERE, not per weight: `d * sc` is one float
+    // per sixteen weights and the stage multiplied it out sixty-four times a step. gs0 and gs1 hold
+    // exactly the floats `(d * float(sc))` the stage used to recompute, so `(gs * q) * x` is the same
+    // three-operand expression in the same order — bit for bit, one fewer multiply a weight.
+    def q6m-tg4-load(step) = str_concat("{ uint ls = ", str_concat(step, "; uint lh = ls & 1u; device const ushort* hp = (device const ushort*)(qb + (row * nbk + ls / 2u) * 210u); for (uint q = 0u; q < 16u; q += 1u) { hb[q] = hp[lh * 32u + (sub & 1u) * 16u + q]; hb[16u + q] = hp[64u + lh * 16u + q]; } ushort scw = hp[96u + lh * 4u + sub]; float dd = q6k_f16(int(hp[104u])); gs0 = dd * float(q6k_s8(int(scw & 0xFFu))); gs1 = dd * float(q6k_s8(int(scw >> 8))); } "));
+    // the stage of step `cs` from the registers: q6k_w's integers and products, two weights a ushort.
+    // The high two bits arrive by SHIFT, not by an integer division whose divisor the compiler cannot
+    // see: q6k_mod(qh / 4^g, 4) is (qh >> 2g) & 3 for a byte, exactly — and a variable-divisor uint
+    // division was the one expensive op left in the loader's inner line, paid once a weight.
+    def q6m-tg4-stage() = "for (uint e = 0u; e < 32u; e += 2u) { ushort two = hb[e / 2u]; ushort twh = hb[16u + e / 2u]; int la = int(two & 0xFFu); int lb = int(two >> 8); uint ua = uint(twh & 0xFFu); uint ub = uint(twh >> 8); int n0 = lo ? q6k_mod(la, 16) : la / 16; int n1 = lo ? q6k_mod(lb, 16) : lb / 16; int q0 = n0 + int((ua >> psh) & 3u) * 16 - 32; int q1 = n1 + int((ub >> psh) & 3u) * 16 - 32; float dsc = (e < 16u) ? gs0 : gs1; uint j = cs * 128u + sub * 32u + e; pv[cs & 1u][lane][sub * 32u + e] = (dsc * float(q0)) * float(x[j]); pv[cs & 1u][lane][sub * 32u + e + 1u] = (dsc * float(q1)) * float(x[j + 1u]); } ";
+    def q6m-tg4-kernel(fname, sig, prefix, epilogue) = str_concat("kernel void ", str_concat(fname, str_concat(sig, str_concat(" { threadgroup float pv[2][16][129]; uint nbk = cols / 256u; uint ns = cols / 128u; uint u = (t >= 32u) ? (t - 32u) : 0u; uint lane = (t < 32u) ? t : (u & 15u); uint sub = u / 16u; uint psh = sub * 2u; bool lo = (sub / 2u == 0u); float gs0 = 0.0f; float gs1 = 0.0f; ", str_concat(prefix, str_concat(" bool fold = (t < 32u) && (lane < 16u) && (row < rows); bool load = (t >= 32u) && (row < rows); ushort hb[32]; if (load) ", str_concat(q6m-tg4-load("ns - 1u"), str_concat("if (load) { uint cs = ns - 1u; ", str_concat(q6m-tg4-stage(), str_concat("if (ns > 1u) ", str_concat(q6m-tg4-load("ns - 2u"), str_concat("} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float acc = 0.0f; uint ci = ns; while (ci > 0u) { ci -= 1u; if (load && ci > 0u) { uint cs = ci - 1u; ", str_concat(q6m-tg4-stage(), str_concat("if (cs > 0u) ", str_concat(q6m-tg4-load("cs - 1u"), str_concat("} if (fold) { ", str_concat(q6m-tg4-fold(127, ""), str_concat("} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (fold) { ", str_concat(epilogue, " } }")))))))))))))))))));
+    def q6m-matvec-tg4-body(fname) = q6m-tg4-kernel(fname, " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])", "uint row = gi * 16u + lane;", "y[row] = acc;");
+    // --- kernel 4: the same fold, landing at a ROW OFFSET in the destination. This is what the copy
+    // kernel did afterwards — `d[doff + i] = s[i]` — said once, in the epilogue that already holds the
+    // value: a k or v projection writes straight into its cache at the position's row and no second
+    // dispatch moves it. The fold is q6m-tg4-kernel's, unchanged. ---
+    def q6m-matvec-tg4-off-body(fname) = q6m-tg4-kernel(fname, " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& yoff [[buffer(5)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])", "uint row = gi * 16u + lane;", "y[yoff + row] = acc;");
+    // --- kernel 5: the same fold with the residual add in its epilogue — q8-0-msl.fk's tg4-add carried
+    // to the superblock. form_add_f32 computes y = a + b with a the residual stream and b the
+    // projection; `y[row] = r[row] + acc` is that add, the same two operands in the same order, and the
+    // projection never lands in a buffer of its own. In place on r: each row is read and written by its
+    // own lane alone. ---
+    def q6m-matvec-tg4-add-body(fname) = q6m-tg4-kernel(fname, " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const float* r [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])", "uint row = gi * 16u + lane;", "y[row] = r[row] + acc;");
+    0;
+}

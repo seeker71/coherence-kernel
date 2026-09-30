@@ -8,9 +8,9 @@ An evaluated session LoRA may offer a proposal before Qwen unless the request na
 
 ## Native surface lifting
 
-`form/form-stdlib/bml/form-source-lift.bml` provides `form-source-lift(source, owner)` for Form source. It returns `[equivalent, candidate, definitionCount, lowered]`. The cursor preserves grouping and comparison contracts while emitting BML definitions, blocks, lazy conditionals and infix operators. Its proof compares the lowered trees, decoding string escapes and the runtime's boolean spellings. Compiler-added construction or local binding, and bindings shadowing boolean literals, produce `equivalent = 0`; that candidate is not ready for publication. Malformed source follows the compiler's diagnostic path.
+`form/form-stdlib/bml/form-source-lift.bml` provides `form-source-lift(source, owner)` for Form source. It returns `[equivalent, candidate, definitionCount, lowered]`. The cursor preserves grouping and comparison contracts while emitting BML definitions, blocks, lazy conditionals and infix operators. Its proof compares the lowered trees, decoding string escapes, the runtime's boolean spellings and closed literal string construction. This includes the compiler's semicolon encoding; calls with variables or effects retain their structure. Only the single module wrapper is removed, so nested blocks retain scope. Added local bindings or shadowed literal/constructor names produce `equivalent = 0`; that candidate is not ready for publication. Malformed source follows the compiler's diagnostic path.
 
-This deterministic step uses no model tokens and writes no files. Keep the original source, check it is still current before publishing, and observe affected callers. Keep the compiler's bootstrap closure in its bootable source form. Structural lifting does not establish that every algorithm or abstraction is optimal.
+Imports remain loader directives outside the executable section, and admission also compares ordered dependencies. This deterministic step uses no model tokens and writes no files. Keep the original source, check it is still current before publishing, and observe affected callers. Keep the compiler's bootstrap closure in its bootable source form. Structural lifting does not establish that every algorithm or abstraction is optimal.
 
 ## Call without knowing Form syntax
 

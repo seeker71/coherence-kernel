@@ -1,174 +1,99 @@
-; form-freq-check.fk — the decision HEAD of the fear-frequency check (NOT the model).
-;
-; preludes: form-stdlib/core.fk
-;
-; Read this honestly: detecting fear frequency is NOT cheap. A frontier model
-; produces fear-framing nuancedly — subtly enough that a human catches it about
-; every other reply — so a detector must UNDERSTAND THE MEANING of what it reads.
-; That is a real model: transformer-class, ~100M+ parameters, slightly simpler
-; than the transmuter (detect < generate) but the same kind of thing. It is the
-; form-native transformer built from transformer-block.fk / language-model.fk and
-; trained from the captured corpus.
-;
-; THIS file is only the last, cheap piece: the classification HEAD + gate that runs
-; AFTER the model. The model reads the response and emits a learned semantic
-; SIGNATURE (embedding); this head measures that signature against the fear/clear
-; centroids and decides pass | transmute. The decision is cheap; the understanding
-; that produced the signature is the ~100M+ model, not this. The 3-dim vectors in
-; the band are illustrative of the head's arithmetic, not the real embedding space.
-;
-; Why a head at all: the synchronous reply path is voice (prevent) -> model+head
-; (sense) -> transmute (only when fear). The head keeps the gate decision a tiny,
-; four-way-provable cell; the heavy semantic work lives in the model it serves.
-;
-
-; squared distance between two equal-length vectors — here the model's learned
-; semantic embedding vs a centroid (NOT a hand feature).
-; (sub) may go negative; squaring restores sign — monomorphic recursion (fourth-arm safe).
-(defn fc-dist2 (a b)
-    (if (eq (len a) 0)
-        0
-        (add (mul (sub (head a) (head b)) (sub (head a) (head b)))
-             (fc-dist2 (tail a) (tail b)))))
-
-; fear-score 0..100: how much closer the model's signature sits to the fear
-; centroid than the clear centroid. 100 = on the fear centroid, 0 = on the clear
-; centroid. (squared distances; the ratio is monotone in the real distance.)
-; A nearest-centroid head is one valid choice; a small learned linear head over
-; the same embedding is another — either way the embedding is the ~100M+ model's.
-(defn fc-fear-score (signature fear-centroid clear-centroid)
-    (if (eq (add (fc-dist2 signature fear-centroid) (fc-dist2 signature clear-centroid)) 0)
-        0
-        (div (mul (fc-dist2 signature clear-centroid) 100)
-             (add (fc-dist2 signature fear-centroid) (fc-dist2 signature clear-centroid)))))
-
-; the gate: only above the threshold does fear warrant the expensive transmute.
-; below threshold the reply PASSES untouched — the cheap, common path.
-(defn fc-gate (fear-score threshold)
-    (if (ge fear-score threshold) "transmute" "pass"))
-
-; clean? = 1 when the reply may pass without transmutation.
-(defn fc-clean? (fear-score threshold)
-    (if (ge fear-score threshold) 0 1))
-
-; the head in one call: given the model's signature, decide pass | transmute.
-; (the model that produced `signature` is the heavy part — see the header.)
-(defn fc-check (signature fear-centroid clear-centroid threshold)
-    (fc-gate (fc-fear-score signature fear-centroid clear-centroid) threshold))
-
-; ── executable frequency reading contract ───────────────────────────────────
-; A boolean cannot represent the honest runtime state. The general semantic
-; model may read clear or fear, but it may also be unavailable / uncalibrated /
-; too close to its decision boundary. Keep that third state all the way to the
-; trust row: 0 fear, 1 clear, 2 unknown.
-(defn fc-state-fear    () 0)
-(defn fc-state-clear   () 1)
-(defn fc-state-unknown () 2)
-
-; Sources are intentionally distinct. Only semantic-model is the general
-; automatic sense. Human gold is a direct semantic reading. Certified Form is
-; limited to deterministic, content-bound excerpts; it must not be presented as
-; general sensing. Unmeasured means no frequency assertion was made.
-(defn fc-source-none       () 0)
-(defn fc-source-semantic   () 1)
-(defn fc-source-human-gold () 2)
-(defn fc-source-certified  () 3)
-
-; reading = (state source fear-score confidence valid)
-(defn fc-reading (state source fear-score confidence valid)
-    (list state source fear-score confidence valid))
-(defn fc-reading-state      (r) (nth r 0))
-(defn fc-reading-source     (r) (nth r 1))
-(defn fc-reading-fear-score (r) (nth r 2))
-(defn fc-reading-confidence (r) (nth r 3))
-(defn fc-reading-valid      (r) (nth r 4))
-
-(defn fc-source-name (source)
-    (if (eq source (fc-source-semantic)) "semantic-model"
-        (if (eq source (fc-source-human-gold)) "human-gold"
-            (if (eq source (fc-source-certified)) "certified-form" "unmeasured"))))
-(defn fc-reading-source-name (r) (fc-source-name (fc-reading-source r)))
-
-(defn fc-unmeasured-reading ()
-    (fc-reading (fc-state-unknown) (fc-source-none) 0 0 0))
-(defn fc-unknown-reading (source)
-    (fc-reading (fc-state-unknown) source 0 0 0))
-
-; A reading is measured only when its producer is named, validity is explicit,
-; and the state is an actual clear/fear decision. Unknown never passes by default.
-(defn fc-reading-measured? (r)
-    (if (and (eq (fc-reading-valid r) 1)
-             (and (gt (fc-reading-source r) (fc-source-none))
-                  (if (eq (fc-reading-state r) (fc-state-clear)) 1
-                      (if (eq (fc-reading-state r) (fc-state-fear)) 1 0)))) 1 0))
-
-; Trust signal consumed by trust-row: 0 no, 1 yes, 2 unknown.
-(defn fc-trust-signal (r)
-    (if (eq (fc-reading-measured? r) 0) (fc-state-unknown)
-        (if (eq (fc-reading-state r) (fc-state-clear)) 1 0)))
-
-; The semantic head abstains unless all vectors have the same non-zero shape,
-; the centroids are distinct, the model/centroid pair is certified calibrated,
-; and the signature is far enough from the boundary. Confidence is the normalized
-; distance margin: 100 on a centroid, 0 at an exact tie.
-(defn fc-abs (n) (if (lt n 0) (mul n -1) n))
-(defn fc-signature-shape? (signature fear-centroid clear-centroid)
-    (if (and (gt (len signature) 0)
-             (and (eq (len signature) (len fear-centroid))
-                  (eq (len signature) (len clear-centroid)))) 1 0))
-(defn fc-centroids-distinct? (fear-centroid clear-centroid)
-    (if (gt (fc-dist2 fear-centroid clear-centroid) 0) 1 0))
-(defn fc-separation-confidence (signature fear-centroid clear-centroid)
-    (if (eq (add (fc-dist2 signature fear-centroid)
-                 (fc-dist2 signature clear-centroid)) 0)
-        0
-        (div (mul (fc-abs (sub (fc-dist2 signature fear-centroid)
-                               (fc-dist2 signature clear-centroid))) 100)
-             (add (fc-dist2 signature fear-centroid)
-                  (fc-dist2 signature clear-centroid)))))
-
-; General automatic frequency sense. `calibrated` certifies the actual semantic
-; model + centroids, not merely that some vector was supplied. Low-margin outputs
-; abstain instead of being mislabeled clear.
-(defn fc-semantic-reading (signature fear-centroid clear-centroid threshold confidence-floor calibrated)
-    (if (and (eq calibrated 1)
-             (and (eq (fc-signature-shape? signature fear-centroid clear-centroid) 1)
-                  (and (eq (fc-centroids-distinct? fear-centroid clear-centroid) 1)
-                       (ge (fc-separation-confidence signature fear-centroid clear-centroid)
-                           confidence-floor))))
-        (fc-reading
-            (if (ge (fc-fear-score signature fear-centroid clear-centroid) threshold)
-                (fc-state-fear) (fc-state-clear))
-            (fc-source-semantic)
-            (fc-fear-score signature fear-centroid clear-centroid)
-            (fc-separation-confidence signature fear-centroid clear-centroid)
-            1)
-        (fc-unknown-reading (fc-source-semantic))))
-
-; Direct human reading. The carrier must validate the human-gold witness before
-; setting witnessed=1. verdict is 1 clear / 0 fear; any other value abstains.
-(defn fc-human-reading (verdict witnessed)
-    (if (and (eq witnessed 1)
-             (if (eq verdict (fc-state-clear)) 1
-                 (if (eq verdict (fc-state-fear)) 1 0)))
-        (fc-reading verdict (fc-source-human-gold)
-            (if (eq verdict (fc-state-clear)) 0 100) 100 1)
-        (fc-unknown-reading (fc-source-human-gold))))
-
-; Deterministic Form certification is deliberately narrow: it can clear a known,
-; content-bound excerpt only when both the certificate and exact answer binding
-; validate. It does not claim to understand arbitrary prose.
-(defn fc-certified-form-reading (certificate-valid answer-bound)
-    (if (and (eq certificate-valid 1) (eq answer-bound 1))
-        (fc-reading (fc-state-clear) (fc-source-certified) 0 100 1)
-        (fc-unknown-reading (fc-source-certified))))
-
-; One broad carrier across all currently honest sources. Human gold outranks the
-; learned model; the general model outranks deterministic certification. A lower
-; source is consulted only when every stronger source abstained.
-(defn fc-effective-reading (semantic human-gold certified)
-    (if (eq (fc-reading-measured? human-gold) 1) human-gold
-        (if (eq (fc-reading-measured? semantic) 1) semantic
-            (if (eq (fc-reading-measured? certified) 1) certified
-                (fc-unmeasured-reading)))))
-0
+// form-freq-check.fk — the decision HEAD of the fear-frequency check (NOT the model).
+//
+// preludes: form-stdlib/core.fk
+//
+// Read this honestly: detecting fear frequency is NOT cheap. A frontier model
+// produces fear-framing nuancedly — subtly enough that a human catches it about
+// every other reply — so a detector must UNDERSTAND THE MEANING of what it reads.
+// That is a real model: transformer-class, ~100M+ parameters, slightly simpler
+// than the transmuter (detect < generate) but the same kind of thing. It is the
+// form-native transformer built from transformer-block.fk / language-model.fk and
+// trained from the captured corpus.
+//
+// THIS file is only the last, cheap piece: the classification HEAD + gate that runs
+// AFTER the model. The model reads the response and emits a learned semantic
+// SIGNATURE (embedding); this head measures that signature against the fear/clear
+// centroids and decides pass | transmute. The decision is cheap; the understanding
+// that produced the signature is the ~100M+ model, not this. The 3-dim vectors in
+// the band are illustrative of the head's arithmetic, not the real embedding space.
+//
+// Why a head at all: the synchronous reply path is voice (prevent) -> model+head
+// (sense) -> transmute (only when fear). The head keeps the gate decision a tiny,
+// four-way-provable cell; the heavy semantic work lives in the model it serves.
+//
+// squared distance between two equal-length vectors — here the model's learned
+// semantic embedding vs a centroid (NOT a hand feature).
+// (sub) may go negative; squaring restores sign — monomorphic recursion (fourth-arm safe).
+section [form.bml] {
+    def fc-dist2(a, b) = (Comparable) len(a) == 0 ? 0 : (head(a) - head(b)) * (head(a) - head(b)) + fc-dist2(tail(a), tail(b));
+    // fear-score 0..100: how much closer the model's signature sits to the fear
+    // centroid than the clear centroid. 100 = on the fear centroid, 0 = on the clear
+    // centroid. (squared distances; the ratio is monotone in the real distance.)
+    // A nearest-centroid head is one valid choice; a small learned linear head over
+    // the same embedding is another — either way the embedding is the ~100M+ model's.
+    def fc-fear-score(signature, fear-centroid, clear-centroid) = (Comparable) (fc-dist2(signature, fear-centroid) + fc-dist2(signature, clear-centroid)) == 0 ? 0 : fc-dist2(signature, clear-centroid) * 100 / (fc-dist2(signature, fear-centroid) + fc-dist2(signature, clear-centroid));
+    // the gate: only above the threshold does fear warrant the expensive transmute.
+    // below threshold the reply PASSES untouched — the cheap, common path.
+    def fc-gate(fear-score, threshold) = fear-score >= threshold ? "transmute" : "pass";
+    // clean? = 1 when the reply may pass without transmutation.
+    def fc-clean?(fear-score, threshold) = fear-score >= threshold ? 0 : 1;
+    // the head in one call: given the model's signature, decide pass | transmute.
+    // (the model that produced `signature` is the heavy part — see the header.)
+    def fc-check(signature, fear-centroid, clear-centroid, threshold) = fc-gate(fc-fear-score(signature, fear-centroid, clear-centroid), threshold);
+    // ── executable frequency reading contract ───────────────────────────────────
+    // A boolean cannot represent the honest runtime state. The general semantic
+    // model may read clear or fear, but it may also be unavailable / uncalibrated /
+    // too close to its decision boundary. Keep that third state all the way to the
+    // trust row: 0 fear, 1 clear, 2 unknown.
+    def fc-state-fear() = 0;
+    def fc-state-clear() = 1;
+    def fc-state-unknown() = 2;
+    // Sources are intentionally distinct. Only semantic-model is the general
+    // automatic sense. Human gold is a direct semantic reading. Certified Form is
+    // limited to deterministic, content-bound excerpts; it must not be presented as
+    // general sensing. Unmeasured means no frequency assertion was made.
+    def fc-source-none() = 0;
+    def fc-source-semantic() = 1;
+    def fc-source-human-gold() = 2;
+    def fc-source-certified() = 3;
+    // reading = (state source fear-score confidence valid)
+    def fc-reading(state, source, fear-score, confidence, valid) = list(state, source, fear-score, confidence, valid);
+    def fc-reading-state(r) = nth(r, 0);
+    def fc-reading-source(r) = nth(r, 1);
+    def fc-reading-fear-score(r) = nth(r, 2);
+    def fc-reading-confidence(r) = nth(r, 3);
+    def fc-reading-valid(r) = nth(r, 4);
+    def fc-source-name(source) = (Comparable) source == fc-source-semantic() ? "semantic-model" : (Comparable) source == fc-source-human-gold() ? "human-gold" : (Comparable) source == fc-source-certified() ? "certified-form" : "unmeasured";
+    def fc-reading-source-name(r) = fc-source-name(fc-reading-source(r));
+    def fc-unmeasured-reading() = fc-reading(fc-state-unknown(), fc-source-none(), 0, 0, 0);
+    def fc-unknown-reading(source) = fc-reading(fc-state-unknown(), source, 0, 0, 0);
+    // A reading is measured only when its producer is named, validity is explicit,
+    // and the state is an actual clear/fear decision. Unknown never passes by default.
+    def fc-reading-measured?(r) = (Comparable) fc-reading-valid(r) == 1 && (fc-reading-source(r) > fc-source-none() && ((Comparable) fc-reading-state(r) == fc-state-clear() ? 1 : (Comparable) fc-reading-state(r) == fc-state-fear() ? 1 : 0)) ? 1 : 0;
+    // Trust signal consumed by trust-row: 0 no, 1 yes, 2 unknown.
+    def fc-trust-signal(r) = (Comparable) fc-reading-measured?(r) == 0 ? fc-state-unknown() : (Comparable) fc-reading-state(r) == fc-state-clear() ? 1 : 0;
+    // The semantic head abstains unless all vectors have the same non-zero shape,
+    // the centroids are distinct, the model/centroid pair is certified calibrated,
+    // and the signature is far enough from the boundary. Confidence is the normalized
+    // distance margin: 100 on a centroid, 0 at an exact tie.
+    def fc-abs(n) = n < 0 ? n * -1 : n;
+    def fc-signature-shape?(signature, fear-centroid, clear-centroid) = len(signature) > 0 && ((Comparable) len(signature) == len(fear-centroid) && (Comparable) len(signature) == len(clear-centroid)) ? 1 : 0;
+    def fc-centroids-distinct?(fear-centroid, clear-centroid) = fc-dist2(fear-centroid, clear-centroid) > 0 ? 1 : 0;
+    def fc-separation-confidence(signature, fear-centroid, clear-centroid) = (Comparable) (fc-dist2(signature, fear-centroid) + fc-dist2(signature, clear-centroid)) == 0 ? 0 : fc-abs(fc-dist2(signature, fear-centroid) - fc-dist2(signature, clear-centroid)) * 100 / (fc-dist2(signature, fear-centroid) + fc-dist2(signature, clear-centroid));
+    // General automatic frequency sense. `calibrated` certifies the actual semantic
+    // model + centroids, not merely that some vector was supplied. Low-margin outputs
+    // abstain instead of being mislabeled clear.
+    def fc-semantic-reading(signature, fear-centroid, clear-centroid, threshold, confidence-floor, calibrated) = (Comparable) calibrated == 1 && ((Comparable) fc-signature-shape?(signature, fear-centroid, clear-centroid) == 1 && ((Comparable) fc-centroids-distinct?(fear-centroid, clear-centroid) == 1 && fc-separation-confidence(signature, fear-centroid, clear-centroid) >= confidence-floor)) ? fc-reading(fc-fear-score(signature, fear-centroid, clear-centroid) >= threshold ? fc-state-fear() : fc-state-clear(), fc-source-semantic(), fc-fear-score(signature, fear-centroid, clear-centroid), fc-separation-confidence(signature, fear-centroid, clear-centroid), 1) : fc-unknown-reading(fc-source-semantic());
+    // Direct human reading. The carrier must validate the human-gold witness before
+    // setting witnessed=1. verdict is 1 clear / 0 fear; any other value abstains.
+    def fc-human-reading(verdict, witnessed) = (Comparable) witnessed == 1 && ((Comparable) verdict == fc-state-clear() ? 1 : (Comparable) verdict == fc-state-fear() ? 1 : 0) ? fc-reading(verdict, fc-source-human-gold(), (Comparable) verdict == fc-state-clear() ? 0 : 100, 100, 1) : fc-unknown-reading(fc-source-human-gold());
+    // Deterministic Form certification is deliberately narrow: it can clear a known,
+    // content-bound excerpt only when both the certificate and exact answer binding
+    // validate. It does not claim to understand arbitrary prose.
+    def fc-certified-form-reading(certificate-valid, answer-bound) = (Comparable) certificate-valid == 1 && (Comparable) answer-bound == 1 ? fc-reading(fc-state-clear(), fc-source-certified(), 0, 100, 1) : fc-unknown-reading(fc-source-certified());
+    // One broad carrier across all currently honest sources. Human gold outranks the
+    // learned model; the general model outranks deterministic certification. A lower
+    // source is consulted only when every stronger source abstained.
+    def fc-effective-reading(semantic, human-gold, certified) = (Comparable) fc-reading-measured?(human-gold) == 1 ? human-gold : (Comparable) fc-reading-measured?(semantic) == 1 ? semantic : (Comparable) fc-reading-measured?(certified) == 1 ? certified : fc-unmeasured-reading();
+    0;
+}

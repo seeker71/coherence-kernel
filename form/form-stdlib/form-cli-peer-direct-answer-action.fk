@@ -1,170 +1,92 @@
-; form-cli-peer-direct-answer-action.fk -- a caller-born direct-answer effect
-; for a resident Form peer. It enters the existing Qwen/KV session through its
-; compact direct-user observation, not the generic task-observation wrapper,
-; and does not create a recipe cursor, source lookup, HTTP request, or second
-; model residence.
-;
-; Policy may select this effect only when the successor was born with it.  The
-; action owns neither the task identity nor the model: its caller provides both
-; and durable egress remains outside this cell.
-;
-; preludes: form-stdlib/bml/form-cli-embodied-goal-grammar.bml form-stdlib/form-cli-peer-agent.fk form-stdlib/bml/form-cli-peer-direct-answer-health.bml
-; Proven by: form-stdlib/tests/form-cli-peer-direct-answer-action-band.fk
-
-(do
-    ; result = session response elapsed signal reason generated-tokens.
-    ; A value is text from a terminal model turn. `partial` retains unfinished
-    ; text; `nothing` is a terminal empty turn; `choice` is a malformed request.
-    (defn fcpdaa-version () "form-cli-peer-direct-answer-v1")
-    (defn fcpdaa-observation-lane () "direct-user")
-    (defn fcpdaa-observation-lane-for (task-text)
-        (fcpdag-lane task-text))
-    (defn fcpdaa-result
-        (session response elapsed-ms signal reason generated-tokens)
-        (list (fcpdaa-version) session response elapsed-ms signal reason
-              generated-tokens))
-    (defn fcpdaa-session (r) (nth r 1))
-    (defn fcpdaa-response (r) (nth r 2))
-    (defn fcpdaa-elapsed-ms (r) (nth r 3))
-    (defn fcpdaa-signal (r) (nth r 4))
-    (defn fcpdaa-reason (r) (nth r 5))
-    (defn fcpdaa-generated-tokens (r) (nth r 6))
-    (defn fcpdaa-result? (r)
-        (if (nothing? r) 0
-            (if (not (eq (len r) 7)) 0
-                (str_eq (nth r 0) (fcpdaa-version)))))
-    (defn fcpdaa-kind? (kind) (str_eq kind "direct-answer"))
-    (defn fcpdaa-task-shape? (kind text)
-        (if (eq (fcpdaa-kind? kind) 0) 0
-            (if (or (nothing? text) (le (str_len text) 0)) 0 1)))
-    (defn fcpdaa-refused (session reason)
-        (fcpdaa-result session "" 0 "choice" reason 0))
-    (defn fcpdaa-unavailable (session)
-        (fcpdaa-result session "" 0 "nothing" "model-session-not-live" 0))
-    ; Qwen's explicit control words are not answers.  Preserve the generated
-    ; bytes for observation while carrying a typed failure into the local retry
-    ; grammar; neither control word authorizes a provider crossing.
-    (defn fcpdaa-control-response? (response)
-        (fcpdag-terminal-control? response))
-    ; A stopped generation has no reusable pending stream. Retrying into it is
-    ; neither learning nor recovery; retain the typed local signal instead.
-    (defn fcpdaa-retryable? (direct)
-        (if (eq (fcms-live? (fcpdaa-session direct)) 0) 0
-            (if (eq (fcms-stopped? (fcpdaa-session direct)) 1) 0
-                (if (or (str_eq (fcpdaa-signal direct) "failure")
-                        (str_eq (fcpdaa-signal direct) "nothing")) 1 0))))
-    (defn fcpdaa-remaining-capacity (session)
-        (if (eq (fcms-live? session) 0) 0
-            (if (le (fcms-maxpos session) (fcms-pos session)) 0
-                (sub (fcms-maxpos session) (fcms-pos session)))))
-    (defn fcpdaa-finish (session generated elapsed-ms)
-        (do
-            (let raw-response (fcms-generation-text generated))
-            (let response (fcpdag-answer-surface raw-response))
-            (let tokens (len (fcms-generation-ids generated)))
-            (let next (fcms-generation-session generated))
-            (let health (fcpdah-observe next tokens))
-            (if (eq (fcpdag-failure-control? raw-response) 1)
-                (fcpdaa-result next response elapsed-ms "failure"
-                    "direct-answer-model-control" tokens)
-            (if (and (eq (fcpdag-stop-control? raw-response) 1)
-                     (eq (fcpdag-answer-shaped? raw-response) 0))
-                (fcpdaa-result next response elapsed-ms "nothing"
-                    "direct-answer-empty-or-stop" tokens)
-            (if (str_eq (fcpdah-state next) "interrupted")
-                (fcpdaa-result next response elapsed-ms "failure"
-                    "direct-answer-generation-interrupted" tokens)
-            (if (str_eq (fcpdah-state next) "partial")
-                (fcpdaa-result next response elapsed-ms "partial"
-                    "direct-answer-generation-incomplete" tokens)
-            (if (eq (str_len response) 0)
-                (fcpdaa-result next response elapsed-ms "nothing"
-                    "direct-answer-empty-or-stop" tokens)
-                (fcpdaa-result next response elapsed-ms "value"
-                        "direct-answer-generated" tokens))))))))
-    ; The event carries no question or response bytes.  The controller's
-    ; before/after Metal counters remain the physical execution receipt.
-    (defn fcpdaa-stage-category ()
-        (intern_trivial_string "form-cli-peer-direct-answer-stage-v1"))
-    (defn fcpdaa-stage-node (phase status generated stamp)
-        (intern_node_at (fcpdaa-stage-category)
-            (list (intern_trivial_string "direct-answer")
-                  (intern_trivial_string phase)
-                  (intern_trivial_string status)
-                  (intern_trivial_int generated)
-                  (intern_trivial_int stamp))
-            "form-cli-peer-direct-answer-action.fk" 56 1))
-    (defn fcpdaa-stage-line (phase status generated stamp)
-        (str_concat "form-peer stage route=direct-answer phase="
-        (str_concat phase (str_concat " status="
-        (str_concat status (str_concat " generated="
-        (str_concat (int_to_str generated) (str_concat " stamp-ms="
-            (str_concat (int_to_str stamp) "\n")))))))))
-    (defn fcpdaa-stage-write (phase status generated)
-        (do
-            (let stamp (now_unix_ms))
-            (let event (fcpdaa-stage-node phase status generated stamp))
-            (print_str (fcpdaa-stage-line phase status generated stamp))
-            event))
-    (defn fcpdaa-lifecycle (direct)
-        (if (str_eq (fcpdaa-signal direct) "partial") "generate,partial"
-        (if (str_eq (fcpdaa-signal direct) "choice") "choice,release"
-            (if (str_eq (fcpdaa-signal direct) "nothing") "nothing,release"
-                (if (str_eq (fcpdaa-signal direct) "failure") "failure,release"
-                    "generate,release")))))
-    ; Control-plane evidence only: no task or response bytes cross this field.
-    ; It keeps the next native generation boundary observable when a model
-    ; produces a control token or a forward refusal.
-    (defn fcpdaa-tool-status (direct)
-        (do
-            (let session (fcpdaa-session direct))
-            (str_concat (fcpdaa-signal direct)
-            (str_concat ";tokens=" (str_concat
-                (int_to_str (fcpdaa-generated-tokens direct))
-            (str_concat ";pos=" (str_concat (int_to_str (fcms-pos session))
-            (str_concat ";pending=" (str_concat (int_to_str (fcms-pending session))
-            (str_concat ";stopped=" (str_concat (int_to_str (fcms-stopped? session))
-            (str_concat ";observations="
-                (int_to_str (fcms-observations session))))))))))))))
-    (defn fcpdaa-peer (direct)
-        (fcpa-result-full (fcpdaa-session direct) direct
-            (fcpdaa-response direct) (fcpdaa-elapsed-ms direct) 0
-            "direct-answer" 0 (fcpdaa-tool-status direct)
-            "form-native-metal-jit" 0 (nothing) 0 0
-            (fcpdaa-lifecycle direct) 0))
-    (defn fcpdaa-run (session task-kind task-text max-generated)
-        (if (eq (fcpdaa-task-shape? task-kind task-text) 0)
-            (fcpdaa-refused session "direct-answer-requires-nonempty-direct-answer-task")
-            (if (eq (fcms-live? session) 0)
-                (fcpdaa-unavailable session)
-                (do
-                    (let started (now_unix_ms))
-                    (let observe-begin (fcpdaa-stage-write "observe" "begin" 0))
-                    ; BML may lower a recognized whole intent into a smaller,
-                    ; explicit answer grammar. Unknown text remains byte-for-
-                    ; byte direct-user input; neither path acquires remote
-                    ; authority or adds the generic task-observation wrapper.
-                    (let observed (fcms-observe-direct-answer session
-                        (fcpdag-observation task-text)))
-                    (if (eq (fcms-live? observed) 0)
-                        (do
-                            (let refused (fcpdaa-result observed ""
-                                (sub (now_unix_ms) started) "nothing"
-                                (fcms-reason observed) 0))
-                            (let end (fcpdaa-stage-write "observe"
-                                (fcpdaa-signal refused) 0))
-                            refused)
-                        (do
-                            (let observe-end (fcpdaa-stage-write "observe"
-                                "value" 0))
-                            (let begin (fcpdaa-stage-write "run" "begin" 0))
-                            (let available (fcpdaa-remaining-capacity observed))
-                            (let cap (if (le max-generated available)
-                                max-generated available))
-                            (let generated (fcms-generate observed cap))
-                            (let direct (fcpdaa-finish
-                                observed generated (sub (now_unix_ms) started)))
-                            (let end (fcpdaa-stage-write "run" (fcpdaa-signal direct)
-                                (fcpdaa-generated-tokens direct)))
-                            direct))))))
-    0)
+// form-cli-peer-direct-answer-action.fk -- a caller-born direct-answer effect
+// for a resident Form peer. It enters the existing Qwen/KV session through its
+// compact direct-user observation, not the generic task-observation wrapper,
+// and does not create a recipe cursor, source lookup, HTTP request, or second
+// model residence.
+//
+// Policy may select this effect only when the successor was born with it.  The
+// action owns neither the task identity nor the model: its caller provides both
+// and durable egress remains outside this cell.
+//
+// preludes: form-stdlib/bml/form-cli-embodied-goal-grammar.bml form-stdlib/form-cli-peer-agent.fk form-stdlib/bml/form-cli-peer-direct-answer-health.bml
+// Proven by: form-stdlib/tests/form-cli-peer-direct-answer-action-band.fk
+section [form.bml] {
+    // result = session response elapsed signal reason generated-tokens.
+    // A value is text from a terminal model turn. `partial` retains unfinished
+    // text; `nothing` is a terminal empty turn; `choice` is a malformed request.
+    def fcpdaa-version() = "form-cli-peer-direct-answer-v1";
+    def fcpdaa-observation-lane() = "direct-user";
+    def fcpdaa-observation-lane-for(task-text) = fcpdag-lane(task-text);
+    def fcpdaa-result(session, response, elapsed-ms, signal, reason, generated-tokens) = list(fcpdaa-version(), session, response, elapsed-ms, signal, reason, generated-tokens);
+    def fcpdaa-session(r) = nth(r, 1);
+    def fcpdaa-response(r) = nth(r, 2);
+    def fcpdaa-elapsed-ms(r) = nth(r, 3);
+    def fcpdaa-signal(r) = nth(r, 4);
+    def fcpdaa-reason(r) = nth(r, 5);
+    def fcpdaa-generated-tokens(r) = nth(r, 6);
+    def fcpdaa-result?(r) = nothing?(r) ? 0 : !((Comparable) len(r) == 7) ? 0 : (String) nth(r, 0) == fcpdaa-version();
+    def fcpdaa-kind?(kind) = (String) kind == "direct-answer";
+    def fcpdaa-task-shape?(kind, text) = (Comparable) fcpdaa-kind?(kind) == 0 ? 0 : nothing?(text) || str_len(text) <= 0 ? 0 : 1;
+    def fcpdaa-refused(session, reason) = fcpdaa-result(session, "", 0, "choice", reason, 0);
+    def fcpdaa-unavailable(session) = fcpdaa-result(session, "", 0, "nothing", "model-session-not-live", 0);
+    // Qwen's explicit control words are not answers.  Preserve the generated
+    // bytes for observation while carrying a typed failure into the local retry
+    // grammar; neither control word authorizes a provider crossing.
+    def fcpdaa-control-response?(response) = fcpdag-terminal-control?(response);
+    // A stopped generation has no reusable pending stream. Retrying into it is
+    // neither learning nor recovery; retain the typed local signal instead.
+    def fcpdaa-retryable?(direct) = (Comparable) fcms-live?(fcpdaa-session(direct)) == 0 ? 0 : (Comparable) fcms-stopped?(fcpdaa-session(direct)) == 1 ? 0 : (String) fcpdaa-signal(direct) == "failure" || (String) fcpdaa-signal(direct) == "nothing" ? 1 : 0;
+    def fcpdaa-remaining-capacity(session) = (Comparable) fcms-live?(session) == 0 ? 0 : fcms-maxpos(session) <= fcms-pos(session) ? 0 : fcms-maxpos(session) - fcms-pos(session);
+    def fcpdaa-finish(session, generated, elapsed-ms) = {
+        let raw-response = fcms-generation-text(generated);
+        let response = fcpdag-answer-surface(raw-response);
+        let tokens = len(fcms-generation-ids(generated));
+        let next = fcms-generation-session(generated);
+        let health = fcpdah-observe(next, tokens);
+        (Comparable) fcpdag-failure-control?(raw-response) == 1 ? fcpdaa-result(next, response, elapsed-ms, "failure", "direct-answer-model-control", tokens) : (Comparable) fcpdag-stop-control?(raw-response) == 1 && (Comparable) fcpdag-answer-shaped?(raw-response) == 0 ? fcpdaa-result(next, response, elapsed-ms, "nothing", "direct-answer-empty-or-stop", tokens) : (String) fcpdah-state(next) == "interrupted" ? fcpdaa-result(next, response, elapsed-ms, "failure", "direct-answer-generation-interrupted", tokens) : (String) fcpdah-state(next) == "partial" ? fcpdaa-result(next, response, elapsed-ms, "partial", "direct-answer-generation-incomplete", tokens) : (Comparable) str_len(response) == 0 ? fcpdaa-result(next, response, elapsed-ms, "nothing", "direct-answer-empty-or-stop", tokens) : fcpdaa-result(next, response, elapsed-ms, "value", "direct-answer-generated", tokens);
+    };
+    // The event carries no question or response bytes.  The controller's
+    // before/after Metal counters remain the physical execution receipt.
+    def fcpdaa-stage-category() = intern_trivial_string("form-cli-peer-direct-answer-stage-v1");
+    def fcpdaa-stage-node(phase, status, generated, stamp) = intern_node_at(fcpdaa-stage-category(), list(intern_trivial_string("direct-answer"), intern_trivial_string(phase), intern_trivial_string(status), intern_trivial_int(generated), intern_trivial_int(stamp)), "form-cli-peer-direct-answer-action.fk", 56, 1);
+    def fcpdaa-stage-line(phase, status, generated, stamp) = str_concat("form-peer stage route=direct-answer phase=", str_concat(phase, str_concat(" status=", str_concat(status, str_concat(" generated=", str_concat(int_to_str(generated), str_concat(" stamp-ms=", str_concat(int_to_str(stamp), "\n"))))))));
+    def fcpdaa-stage-write(phase, status, generated) = {
+        let stamp = now_unix_ms();
+        let event = fcpdaa-stage-node(phase, status, generated, stamp);
+        print_str(fcpdaa-stage-line(phase, status, generated, stamp));
+        event;
+    };
+    def fcpdaa-lifecycle(direct) = (String) fcpdaa-signal(direct) == "partial" ? "generate,partial" : (String) fcpdaa-signal(direct) == "choice" ? "choice,release" : (String) fcpdaa-signal(direct) == "nothing" ? "nothing,release" : (String) fcpdaa-signal(direct) == "failure" ? "failure,release" : "generate,release";
+    // Control-plane evidence only: no task or response bytes cross this field.
+    // It keeps the next native generation boundary observable when a model
+    // produces a control token or a forward refusal.
+    def fcpdaa-tool-status(direct) = {
+        let session = fcpdaa-session(direct);
+        str_concat(fcpdaa-signal(direct), str_concat(";tokens=", str_concat(int_to_str(fcpdaa-generated-tokens(direct)), str_concat(";pos=", str_concat(int_to_str(fcms-pos(session)), str_concat(";pending=", str_concat(int_to_str(fcms-pending(session)), str_concat(";stopped=", str_concat(int_to_str(fcms-stopped?(session)), str_concat(";observations=", int_to_str(fcms-observations(session))))))))))));
+    };
+    def fcpdaa-peer(direct) = fcpa-result-full(fcpdaa-session(direct), direct, fcpdaa-response(direct), fcpdaa-elapsed-ms(direct), 0, "direct-answer", 0, fcpdaa-tool-status(direct), "form-native-metal-jit", 0, nothing(), 0, 0, fcpdaa-lifecycle(direct), 0);
+    def fcpdaa-run(session, task-kind, task-text, max-generated) = (Comparable) fcpdaa-task-shape?(task-kind, task-text) == 0 ? fcpdaa-refused(session, "direct-answer-requires-nonempty-direct-answer-task") : (Comparable) fcms-live?(session) == 0 ? fcpdaa-unavailable(session) : {
+        let started = now_unix_ms();
+        let observe-begin = fcpdaa-stage-write("observe", "begin", 0);
+        // BML may lower a recognized whole intent into a smaller,
+        // explicit answer grammar. Unknown text remains byte-for-
+        // byte direct-user input; neither path acquires remote
+        // authority or adds the generic task-observation wrapper.
+        let observed = fcms-observe-direct-answer(session, fcpdag-observation(task-text));
+        (Comparable) fcms-live?(observed) == 0 ? {
+            let refused = fcpdaa-result(observed, "", now_unix_ms() - started, "nothing", fcms-reason(observed), 0);
+            let end = fcpdaa-stage-write("observe", fcpdaa-signal(refused), 0);
+            refused;
+        } : {
+            let observe-end = fcpdaa-stage-write("observe", "value", 0);
+            let begin = fcpdaa-stage-write("run", "begin", 0);
+            let available = fcpdaa-remaining-capacity(observed);
+            let cap = max-generated <= available ? max-generated : available;
+            let generated = fcms-generate(observed, cap);
+            let direct = fcpdaa-finish(observed, generated, now_unix_ms() - started);
+            let end = fcpdaa-stage-write("run", fcpdaa-signal(direct), fcpdaa-generated-tokens(direct));
+            direct;
+        };
+    };
+    0;
+}

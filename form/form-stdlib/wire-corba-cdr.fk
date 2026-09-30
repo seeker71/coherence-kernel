@@ -1,312 +1,243 @@
-; wire-corba-cdr.fk — the CORBA CDR dialect of the wire-serialization lane.
-;
-; Same north star and same registry mechanism as cell-serialize.fk (JSON) —
-; see wire-registry.fk's header for why a registry is necessary at all
-; (`bp` is one-way). This file supplies the CDR-specific
-; part: a binary octet encoding, not text.
-;
-; Honest scope, named up front, not discovered later: this is CDR's real
-; PRIMITIVE encoding rules — octet, unsigned long / long (4-byte aligned,
-; big-endian / "byte order flag 0"), and CDR string (length-prefixed,
-; NUL-terminated) — applied to a SELF-DESCRIBING structure, because this
-; kernel has no IDL compiler to generate static struct layouts or
-; TypeCodes from. What's real CDR: alignment, byte order, the string
-; encoding. What's a pragmatic substitute, not a full ORB: no TypeCode
-; octets, no GIOP request/reply framing, no IIOP transport — a composite
-; node is tagged with its Blueprint NAME (a CDR string) as a stand-in for
-; a repository ID, the same shape the JSON and XML dialects already use.
-; CDR's binary "double" IS implemented (`cdr-put-double`/`cdr-get-double`
-; below) — real IEEE754 bit layout (1 sign bit, 11-bit biased exponent,
-; 52-bit mantissa, 8-byte aligned big-endian), not a decimal-text
-; substitute. Built from plain Form arithmetic (`div`/`mod`/`mul` on
-; 64-bit-range ints, `float_to_int`, float comparison) since no native op
-; reinterprets a float's raw bits directly — normalizing into [1,2) and
-; packing the exponent/mantissa by hand, the same thing hardware does in
-; silicon. Named scope limit, not silently assumed away: no NaN, no
-; +/-Infinity, no denormals, no negative zero — this handles the finite,
-; normal doubles this kernel's `intern_trivial_float`/`float_to_str`
-; already round-trip through decimal text; the exotic IEEE754 special
-; values would each need their own real investigation.
-;
-; Node shape on the wire: one tag octet, then its payload.
-;   tag 0 = composite:  name (CDR string) + child count (CDR ulong) + children
-;   tag 1 = int leaf:    value (CDR long, 32-bit two's complement)
-;   tag 2 = string leaf: value (CDR string)
-;   tag 3 = null leaf:   no payload
-;   tag 4 = float leaf:  value (CDR double, real IEEE754 bits)
-;
-; A CDR buffer is a list of octets (ints 0-255), the shape read_file_bytes
-; answers on every kernel. A Form string does not carry octets the same way
-; on every kernel: byte_to_str of 128 or more is one byte on fkwu and a
-; two-byte UTF-8 code point on Go, Rust and TS, so a string buffer shifts
-; there at its first high octet (a negative long is enough). A CDR string's
-; octets are its str_byte_at bytes; decoding rebuilds the string octet by
-; octet with byte_to_str, exact for ASCII on every kernel and for any octet
-; on fkwu.
-;
-; Alignment is tracked by THREADING the growing buffer through every
-; encode call and padding relative to its OWN current length before
-; writing an aligned primitive — not returned as independent chunks a
-; caller concatenates, the way JSON/XML text does. Binary alignment is
-; inherently position-dependent in a way text concatenation isn't, so
-; encode here is written in the same tail-recursive-with-accumulator shape
-; decode already needs (mode 1 folds an accumulator `buf`, not mode 0
-; alone) — see the `cdr-emit` comment below for why that shape, not just
-; wx-emit's simpler style, was used throughout.
-;
-; Every recursive function here is ONE self-recursive function keyed on a
-; `mode` argument, rather than two `defn`s calling each other — the wire
-; lane's uniform convention; see wire-registry.fk's header for the story
-; (originally believed a hard runtime constraint, later found to be a
-; stale-local-binary artifact — receipts/2026-07-01-stale-binary-root-cause.md).
-;
-; preludes: form-stdlib/core.fk form-stdlib/wire-registry.fk
-
-(do
-    ; --- low-level octet buffer helpers ---------------------------------
-
-    (defn cdr-zeros (k) (if (eq k 0) (empty) (cons 0 (cdr-zeros (sub k 1)))))
-
-    (defn cdr-pad (buf n)
-        (do
-            (let rem (mod (len buf) n))
-            (if (eq rem 0) buf (append buf (cdr-zeros (sub n rem))))))
-
-    (defn cdr-put-octet (buf v) (append buf (list v)))
-
-    ; unsigned 32-bit, big-endian ("byte order flag 0" — CORBA's network
-    ; byte order convention, the same one GIOP defaults to).
-    (defn cdr-put-ulong (buf v)
-        (append (cdr-pad buf 4)
-            (list (mod (div v 16777216) 256) (mod (div v 65536) 256)
-                  (mod (div v 256) 256) (mod v 256))))
-
-    ; signed 32-bit: two's complement of the unsigned encoding above.
-    (defn cdr-put-long (buf v) (cdr-put-ulong buf (if (lt v 0) (add v 4294967296) v)))
-
-    ; CDR string: ulong length (INCLUDES the NUL terminator) + octets + NUL.
-    (defn cdr-str-octets (s i)
-        (if (ge i (str_len s)) (list 0) (cons (str_byte_at s i) (cdr-str-octets s (add i 1)))))
-    (defn cdr-put-string (buf s)
-        (append (cdr-put-ulong buf (add (str_len s) 1)) (cdr-str-octets s 0)))
-
-    ; --- IEEE754 double: decompose/reassemble sign+exponent+mantissa ----
-
-    ; Normalize af (already known positive) into [1,2), tracking the power
-    ; of 2 that took it there — self-recursive only, converges in a
-    ; handful of steps for any realistic double.
-    (defn cdr-f64-normalize (af exp)
-        (if (ge af 2.0) (cdr-f64-normalize (div af 2.0) (add exp 1))
-            (if (lt af 1.0) (cdr-f64-normalize (mul af 2.0) (sub exp 1))
-                (list af exp))))
-
-    ; v * 2^exp (exp can be negative) — self-recursive only.
-    (defn cdr-f64-scale (v exp)
-        (if (eq exp 0) v
-            (if (gt exp 0) (cdr-f64-scale (mul v 2.0) (sub exp 1))
-                (cdr-f64-scale (div v 2.0) (add exp 1)))))
-
-    ; f -> (list sign biased-exponent mantissa), the three IEEE754 double
-    ; fields still as plain ints, not yet packed into 8 bytes.
-    (defn cdr-f64-decompose (f)
-        (if (eq f 0.0) (list 0 0 0)
-            (do
-                (let sign (if (lt f 0.0) 1 0))
-                (let af (if (lt f 0.0) (sub 0.0 f) f))
-                (let norm (cdr-f64-normalize af 0))
-                (let naf (head norm))
-                (let exp (head (tail norm)))
-                (let frac (sub naf 1.0))
-                (let mantissa (float_to_int (mul frac 4503599627370496.0)))   ; frac * 2^52
-                (list sign (add exp 1023) mantissa))))
-
-    ; (sign biased-exponent mantissa) -> f, the reverse of decompose.
-    (defn cdr-f64-recompose (sign biased-exp mantissa)
-        (if (and (eq biased-exp 0) (eq mantissa 0)) 0.0
-            (do
-                (let frac (div mantissa 4503599627370496.0))
-                (let significand (add 1.0 frac))
-                (let magnitude (cdr-f64-scale significand (sub biased-exp 1023)))
-                (if (eq sign 1) (sub 0.0 magnitude) magnitude))))
-
-    ; sign(1) + biased-exponent(11) + mantissa(52) = 64 bits, packed as 8
-    ; big-endian bytes: byte0 = sign(1) + exponent-high(7); byte1 =
-    ; exponent-low(4) + mantissa-high(4); bytes 2-7 = mantissa's remaining
-    ; 48 bits, 6 bytes' worth, plain big-endian.
-    (defn cdr-put-double (buf f)
-        (do
-            (let b (cdr-pad buf 8))
-            (let parts (cdr-f64-decompose f))
-            (let sign (nth parts 0))
-            (let biased-exp (nth parts 1))
-            (let mantissa (nth parts 2))
-            (let byte0 (add (mul sign 128) (div biased-exp 16)))
-            (let byte1 (add (mul (mod biased-exp 16) 16) (div mantissa 281474976710656)))
-            (let rest48 (mod mantissa 281474976710656))
-            (append b
-                (list byte0 byte1
-                      (mod (div rest48 1099511627776) 256) (mod (div rest48 4294967296) 256)
-                      (mod (div rest48 16777216) 256) (mod (div rest48 65536) 256)
-                      (mod (div rest48 256) 256) (mod rest48 256)))))
-
-    ; NOTE: cdr-get-double's own body lives further down, right after
-    ; cdr-align/cdr-get-string — it needs cdr-align, which isn't defined
-    ; until the decode section (see the comment there for why a forward
-    ; reference here is a real, hard-fails bug, not a style nit).
-
-    ; --- encode: cell node -> CDR octet buffer --------------------------
-
-    ; mode 0: x is a single cell node, folded onto `buf`. mode 1: x is a
-    ; list of sibling nodes, folded onto `buf` in order. Both thread `buf`
-    ; through as an explicit accumulator and every recursive call is a
-    ; TAIL call — required here (not just a style choice copied from
-    ; cser-parse/wx-parse): the composite branch's own child count must be
-    ; known before its children are written, and each child's alignment
-    ; depends on the exact byte length everything before it produced, so
-    ; there's no safe way to compute a child "in isolation" and combine it
-    ; with a sibling's result afterward the way wx-emit's plain string
-    ; concatenation could — this needs the same tail-recursive-with-
-    ; accumulator shape wx-parse's mode 1/2 required for the identical
-    ; underlying reason (see its own header comment for the full story).
-    (defn cdr-emit (mode x registry buf)
-        (if (eq mode 0)
-            (if (wr-null? x) (cdr-put-octet buf 3)
-            (if (eq (node_level x) 1)
-                (do
-                    (let ty (node_type x))
-                    ; no `ty=4` branch: no native op ever produces a trivial
-                    ; (node_level 1) value with a "null" node_type — see
-                    ; wire-registry.fk's header. `wr-null?` above already
-                    ; caught the real null case (a WIRE-NULL composite).
-                    (if (eq ty 1) (cdr-put-long (cdr-put-octet buf 1) (node_value x))
-                    (if (eq ty 2) (cdr-put-string (cdr-put-octet buf 2) (node_value x))
-                    (if (eq ty 7) (cdr-put-double (cdr-put-octet buf 4) (node_value x))
-                    ; tag 5 = bool: one octet payload, 1/0. Real CDR has a
-                    ; boolean primitive (one octet); this is it. node_value
-                    ; returns the boolean for bool nodes, so a CDR bool
-                    ; marshals as a bool and never falls through to null.
-                    (if (eq ty 3) (cdr-put-octet (cdr-put-octet buf 5) (if (node_value x) 1 0))
-                        (cdr-put-octet buf 3))))))   ; an unrecognized leaf type: null rather than a silently wrong guess
-                (do
-                    (let name (head (wr-find-name (node_category x) registry)))
-                    (let b1 (cdr-put-string (cdr-put-octet buf 0) name))
-                    (let b2 (cdr-put-ulong b1 (len (node_children x))))
-                    (cdr-emit 1 (node_children x) registry b2))))
-            (if (eq (len x) 0) buf
-                (cdr-emit 1 (tail x) registry (cdr-emit 0 (head x) registry buf)))))
-
-    (defn cdr-emit-node (node registry) (cdr-emit 0 node registry (empty)))
-
-    (defn cell-to-cdr (node registry) (cdr-emit-node node registry))
-
-    ; --- decode: CDR octet buffer -> the original cell node -------------
-
-    (defn cdr-align (i n) (mul (div (add i (sub n 1)) n) n))
-
-    (defn cdr-get-octet (buf i) (list (nth buf i) (add i 1)))
-
-    (defn cdr-get-ulong (buf i)
-        (do
-            (let i2 (cdr-align i 4))
-            (let v (add (mul (nth buf i2) 16777216)
-                    (add (mul (nth buf (add i2 1)) 65536)
-                        (add (mul (nth buf (add i2 2)) 256)
-                            (nth buf (add i2 3))))))
-            (list v (add i2 4))))
-
-    (defn cdr-get-long (buf i)
-        (do
-            (let r (cdr-get-ulong buf i))
-            (let v (head r))
-            (list (if (ge v 2147483648) (sub v 4294967296) v) (head (tail r)))))
-
-    ; k octets from the front of xs, rebuilt as a string
-    (defn cdr-octets-str (xs k acc)
-        (if (eq k 0) acc (cdr-octets-str (tail xs) (sub k 1) (str_concat acc (byte_to_str (head xs))))))
-
-    (defn cdr-get-string (buf i)
-        (do
-            (let r (cdr-get-ulong buf i))
-            (let n (head r))              ; includes the NUL terminator
-            (let content-start (head (tail r)))
-            (list (cdr-octets-str (drop content-start buf) (sub n 1) "")
-                (add content-start n))))
-
-    (defn cdr-get-double (buf i)
-        (do
-            (let i2 (cdr-align i 8))
-            (let b0 (nth buf i2))
-            (let b1 (nth buf (add i2 1)))
-            (let b2 (nth buf (add i2 2)))
-            (let b3 (nth buf (add i2 3)))
-            (let b4 (nth buf (add i2 4)))
-            (let b5 (nth buf (add i2 5)))
-            (let b6 (nth buf (add i2 6)))
-            (let b7 (nth buf (add i2 7)))
-            (let sign (div b0 128))
-            (let biased-exp (add (mul (mod b0 128) 16) (div b1 16)))
-            (let rest48
-                (add (mul b2 1099511627776)
-                    (add (mul b3 4294967296)
-                        (add (mul b4 16777216)
-                            (add (mul b5 65536)
-                                (add (mul b6 256) b7))))))
-            (let mantissa (add (mul (mod b1 16) 281474976710656) rest48))
-            (list (cdr-f64-recompose sign biased-exp mantissa) (add i2 8))))
-
-    (defn cdr-pv (p) (head p))
-    (defn cdr-pi (p) (head (tail p)))
-
-    ; mode 0: parse one node at position i. mode 1: parse `count` sibling
-    ; nodes starting at i, tail-recursive over an accumulator (count-bounded,
-    ; not delimiter-bounded the way JSON/XML's close-bracket detection is —
-    ; CDR carries an explicit child count instead of a textual terminator).
-    ; Same "one self-recursive function, never two mutually-recursive
-    ; `defn`s" constraint as every other dialect.
-    (defn cdr-parse (mode buf i registry count acc)
-        (if (eq mode 0)
-            (do
-                (let tag-r (cdr-get-octet buf i))
-                (let tag (cdr-pv tag-r))
-                (let after-tag (cdr-pi tag-r))
-                (if (eq tag 0)
-                    (do
-                        (let name-r (cdr-get-string buf after-tag))
-                        (let count-r (cdr-get-ulong buf (cdr-pi name-r)))
-                        (let kids (cdr-parse 1 buf (cdr-pi count-r) registry (cdr-pv count-r) (empty)))
-                        (list (intern_node (head (wr-find-bp (cdr-pv name-r) registry)) (cdr-pv kids)) (cdr-pi kids)))
-                (if (eq tag 1)
-                    (do
-                        (let v (cdr-get-long buf after-tag))
-                        (list (intern_trivial_int (cdr-pv v)) (cdr-pi v)))
-                (if (eq tag 2)
-                    (do
-                        (let v (cdr-get-string buf after-tag))
-                        (list (intern_trivial_string (cdr-pv v)) (cdr-pi v)))
-                (if (eq tag 4)
-                    (do
-                        (let v (cdr-get-double buf after-tag))
-                        ; `intern_trivial_float` only accepts decimal text
-                        ; (confirmed directly: it silently produces a wrong
-                        ; value given a raw float) — the wire bytes are real
-                        ; IEEE754, but reconstructing a Form value from them
-                        ; still goes through the same text-based native
-                        ; every other float construction in this codebase
-                        ; does.
-                        (list (intern_trivial_float (float_to_str (cdr-pv v))) (cdr-pi v)))
-                (if (eq tag 5)   ; bool: one octet payload, 1/0
-                    (do
-                        (let v (cdr-get-octet buf after-tag))
-                        (list (intern_trivial_bool (eq (cdr-pv v) 1)) (cdr-pi v)))
-                    (list (wr-make-null) after-tag)))))))   ; tag 3 (null): a real, distinct value (wire-registry.fk's WIRE-NULL), not int 0
-        ; mode 1
-        (if (eq count 0)
-            (list (wr-reverse acc) i)
-            (do
-                (let nxt (cdr-parse 0 buf i registry 0 (empty)))
-                (cdr-parse 1 buf (cdr-pi nxt) registry (sub count 1) (cons (cdr-pv nxt) acc))))))
-
-    (defn cdr-parse-node (buf i registry) (cdr-parse 0 buf i registry 0 (empty)))
-
-    (defn cdr-to-cell (buf registry) (cdr-pv (cdr-parse-node buf 0 registry)))
-)
+// wire-corba-cdr.fk — the CORBA CDR dialect of the wire-serialization lane.
+//
+// Same north star and same registry mechanism as cell-serialize.fk (JSON) —
+// see wire-registry.fk's header for why a registry is necessary at all
+// (`bp` is one-way). This file supplies the CDR-specific
+// part: a binary octet encoding, not text.
+//
+// Honest scope, named up front, not discovered later: this is CDR's real
+// PRIMITIVE encoding rules — octet, unsigned long / long (4-byte aligned,
+// big-endian / "byte order flag 0"), and CDR string (length-prefixed,
+// NUL-terminated) — applied to a SELF-DESCRIBING structure, because this
+// kernel has no IDL compiler to generate static struct layouts or
+// TypeCodes from. What's real CDR: alignment, byte order, the string
+// encoding. What's a pragmatic substitute, not a full ORB: no TypeCode
+// octets, no GIOP request/reply framing, no IIOP transport — a composite
+// node is tagged with its Blueprint NAME (a CDR string) as a stand-in for
+// a repository ID, the same shape the JSON and XML dialects already use.
+// CDR's binary "double" IS implemented (`cdr-put-double`/`cdr-get-double`
+// below) — real IEEE754 bit layout (1 sign bit, 11-bit biased exponent,
+// 52-bit mantissa, 8-byte aligned big-endian), not a decimal-text
+// substitute. Built from plain Form arithmetic (`div`/`mod`/`mul` on
+// 64-bit-range ints, `float_to_int`, float comparison) since no native op
+// reinterprets a float's raw bits directly — normalizing into [1,2) and
+// packing the exponent/mantissa by hand, the same thing hardware does in
+// silicon. Named scope limit, not silently assumed away: no NaN, no
+// +/-Infinity, no denormals, no negative zero — this handles the finite,
+// normal doubles this kernel's `intern_trivial_float`/`float_to_str`
+// already round-trip through decimal text; the exotic IEEE754 special
+// values would each need their own real investigation.
+//
+// Node shape on the wire: one tag octet, then its payload.
+//   tag 0 = composite:  name (CDR string) + child count (CDR ulong) + children
+//   tag 1 = int leaf:    value (CDR long, 32-bit two's complement)
+//   tag 2 = string leaf: value (CDR string)
+//   tag 3 = null leaf:   no payload
+//   tag 4 = float leaf:  value (CDR double, real IEEE754 bits)
+//
+// A CDR buffer is a list of octets (ints 0-255), the shape read_file_bytes
+// answers on every kernel. A Form string does not carry octets the same way
+// on every kernel: byte_to_str of 128 or more is one byte on fkwu and a
+// two-byte UTF-8 code point on Go, Rust and TS, so a string buffer shifts
+// there at its first high octet (a negative long is enough). A CDR string's
+// octets are its str_byte_at bytes; decoding rebuilds the string octet by
+// octet with byte_to_str, exact for ASCII on every kernel and for any octet
+// on fkwu.
+//
+// Alignment is tracked by THREADING the growing buffer through every
+// encode call and padding relative to its OWN current length before
+// writing an aligned primitive — not returned as independent chunks a
+// caller concatenates, the way JSON/XML text does. Binary alignment is
+// inherently position-dependent in a way text concatenation isn't, so
+// encode here is written in the same tail-recursive-with-accumulator shape
+// decode already needs (mode 1 folds an accumulator `buf`, not mode 0
+// alone) — see the `cdr-emit` comment below for why that shape, not just
+// wx-emit's simpler style, was used throughout.
+//
+// Every recursive function here is ONE self-recursive function keyed on a
+// `mode` argument, rather than two `defn`s calling each other — the wire
+// lane's uniform convention; see wire-registry.fk's header for the story
+// (originally believed a hard runtime constraint, later found to be a
+// stale-local-binary artifact — receipts/2026-07-01-stale-binary-root-cause.md).
+//
+// preludes: form-stdlib/core.fk form-stdlib/wire-registry.fk
+section [form.bml] {
+    // --- low-level octet buffer helpers ---------------------------------
+    def cdr-zeros(k) = (Comparable) k == 0 ? empty() : cons(0, cdr-zeros(k - 1));
+    def cdr-pad(buf, n) = {
+        let rem = len(buf) % n;
+        (Comparable) rem == 0 ? buf : append(buf, cdr-zeros(n - rem));
+    };
+    def cdr-put-octet(buf, v) = append(buf, list(v));
+    // unsigned 32-bit, big-endian ("byte order flag 0" — CORBA's network
+    // byte order convention, the same one GIOP defaults to).
+    def cdr-put-ulong(buf, v) = append(cdr-pad(buf, 4), list(v / 16777216 % 256, v / 65536 % 256, v / 256 % 256, v % 256));
+    // signed 32-bit: two's complement of the unsigned encoding above.
+    def cdr-put-long(buf, v) = cdr-put-ulong(buf, v < 0 ? v + 4294967296 : v);
+    // CDR string: ulong length (INCLUDES the NUL terminator) + octets + NUL.
+    def cdr-str-octets(s, i) = i >= str_len(s) ? list(0) : cons(str_byte_at(s, i), cdr-str-octets(s, i + 1));
+    def cdr-put-string(buf, s) = append(cdr-put-ulong(buf, str_len(s) + 1), cdr-str-octets(s, 0));
+    // --- IEEE754 double: decompose/reassemble sign+exponent+mantissa ----
+    // Normalize af (already known positive) into [1,2), tracking the power
+    // of 2 that took it there — self-recursive only, converges in a
+    // handful of steps for any realistic double.
+    def cdr-f64-normalize(af, exp) = af >= 2.0 ? cdr-f64-normalize(af / 2.0, exp + 1) : af < 1.0 ? cdr-f64-normalize(af * 2.0, exp - 1) : list(af, exp);
+    // v * 2^exp (exp can be negative) — self-recursive only.
+    def cdr-f64-scale(v, exp) = (Comparable) exp == 0 ? v : exp > 0 ? cdr-f64-scale(v * 2.0, exp - 1) : cdr-f64-scale(v / 2.0, exp + 1);
+    // f -> (list sign biased-exponent mantissa), the three IEEE754 double
+    // fields still as plain ints, not yet packed into 8 bytes.
+    def cdr-f64-decompose(f) = (Comparable) f == 0.0 ? list(0, 0, 0) : {
+        let sign = f < 0.0 ? 1 : 0;
+        let af = f < 0.0 ? 0.0 - f : f;
+        let norm = cdr-f64-normalize(af, 0);
+        let naf = head(norm);
+        let exp = head(tail(norm));
+        let frac = naf - 1.0;
+        let mantissa = float_to_int(frac * 4503599627370496.0);
+        // frac * 2^52
+        list(sign, exp + 1023, mantissa);
+    };
+    // (sign biased-exponent mantissa) -> f, the reverse of decompose.
+    def cdr-f64-recompose(sign, biased-exp, mantissa) = (Comparable) biased-exp == 0 && (Comparable) mantissa == 0 ? 0.0 : {
+        let frac = mantissa / 4503599627370496.0;
+        let significand = 1.0 + frac;
+        let magnitude = cdr-f64-scale(significand, biased-exp - 1023);
+        (Comparable) sign == 1 ? 0.0 - magnitude : magnitude;
+    };
+    // sign(1) + biased-exponent(11) + mantissa(52) = 64 bits, packed as 8
+    // big-endian bytes: byte0 = sign(1) + exponent-high(7); byte1 =
+    // exponent-low(4) + mantissa-high(4); bytes 2-7 = mantissa's remaining
+    // 48 bits, 6 bytes' worth, plain big-endian.
+    def cdr-put-double(buf, f) = {
+        let b = cdr-pad(buf, 8);
+        let parts = cdr-f64-decompose(f);
+        let sign = nth(parts, 0);
+        let biased-exp = nth(parts, 1);
+        let mantissa = nth(parts, 2);
+        let byte0 = sign * 128 + biased-exp / 16;
+        let byte1 = biased-exp % 16 * 16 + mantissa / 281474976710656;
+        let rest48 = mantissa % 281474976710656;
+        append(b, list(byte0, byte1, rest48 / 1099511627776 % 256, rest48 / 4294967296 % 256, rest48 / 16777216 % 256, rest48 / 65536 % 256, rest48 / 256 % 256, rest48 % 256));
+    };
+    // NOTE: cdr-get-double's own body lives further down, right after
+    // cdr-align/cdr-get-string — it needs cdr-align, which isn't defined
+    // until the decode section (see the comment there for why a forward
+    // reference here is a real, hard-fails bug, not a style nit).
+    // --- encode: cell node -> CDR octet buffer --------------------------
+    // mode 0: x is a single cell node, folded onto `buf`. mode 1: x is a
+    // list of sibling nodes, folded onto `buf` in order. Both thread `buf`
+    // through as an explicit accumulator and every recursive call is a
+    // TAIL call — required here (not just a style choice copied from
+    // cser-parse/wx-parse): the composite branch's own child count must be
+    // known before its children are written, and each child's alignment
+    // depends on the exact byte length everything before it produced, so
+    // there's no safe way to compute a child "in isolation" and combine it
+    // with a sibling's result afterward the way wx-emit's plain string
+    // concatenation could — this needs the same tail-recursive-with-
+    // accumulator shape wx-parse's mode 1/2 required for the identical
+    // underlying reason (see its own header comment for the full story).
+    def cdr-emit(mode, x, registry, buf) = (Comparable) mode == 0 ? wr-null?(x) ? cdr-put-octet(buf, 3) : (Comparable) node_level(x) == 1 ? {
+        let ty = node_type(x);
+        // no `ty=4` branch: no native op ever produces a trivial
+        // (node_level 1) value with a "null" node_type — see
+        // wire-registry.fk's header. `wr-null?` above already
+        // caught the real null case (a WIRE-NULL composite).
+        (Comparable) ty == 1 ? cdr-put-long(cdr-put-octet(buf, 1), node_value(x)) : (Comparable) ty == 2 ? cdr-put-string(cdr-put-octet(buf, 2), node_value(x)) : (Comparable) ty == 7 ? cdr-put-double(cdr-put-octet(buf, 4), node_value(x)) :         // tag 5 = bool: one octet payload, 1/0. Real CDR has a
+        // boolean primitive (one octet); this is it. node_value
+        // returns the boolean for bool nodes, so a CDR bool
+        // marshals as a bool and never falls through to null.
+(Comparable) ty == 3 ? cdr-put-octet(cdr-put-octet(buf, 5), node_value(x) ? 1 : 0) : cdr-put-octet(buf, 3);
+    } :     // an unrecognized leaf type: null rather than a silently wrong guess
+{
+        let name = head(wr-find-name(node_category(x), registry));
+        let b1 = cdr-put-string(cdr-put-octet(buf, 0), name);
+        let b2 = cdr-put-ulong(b1, len(node_children(x)));
+        cdr-emit(1, node_children(x), registry, b2);
+    } : (Comparable) len(x) == 0 ? buf : cdr-emit(1, tail(x), registry, cdr-emit(0, head(x), registry, buf));
+    def cdr-emit-node(node, registry) = cdr-emit(0, node, registry, empty());
+    def cell-to-cdr(node, registry) = cdr-emit-node(node, registry);
+    // --- decode: CDR octet buffer -> the original cell node -------------
+    def cdr-align(i, n) = (i + (n - 1)) / n * n;
+    def cdr-get-octet(buf, i) = list(nth(buf, i), i + 1);
+    def cdr-get-ulong(buf, i) = {
+        let i2 = cdr-align(i, 4);
+        let v = nth(buf, i2) * 16777216 + (nth(buf, i2 + 1) * 65536 + (nth(buf, i2 + 2) * 256 + nth(buf, i2 + 3)));
+        list(v, i2 + 4);
+    };
+    def cdr-get-long(buf, i) = {
+        let r = cdr-get-ulong(buf, i);
+        let v = head(r);
+        list(v >= 2147483648 ? v - 4294967296 : v, head(tail(r)));
+    };
+    // k octets from the front of xs, rebuilt as a string
+    def cdr-octets-str(xs, k, acc) = (Comparable) k == 0 ? acc : cdr-octets-str(tail(xs), k - 1, str_concat(acc, byte_to_str(head(xs))));
+    def cdr-get-string(buf, i) = {
+        let r = cdr-get-ulong(buf, i);
+        let n = head(r);
+        // includes the NUL terminator
+        let content-start = head(tail(r));
+        list(cdr-octets-str(drop(content-start, buf), n - 1, ""), content-start + n);
+    };
+    def cdr-get-double(buf, i) = {
+        let i2 = cdr-align(i, 8);
+        let b0 = nth(buf, i2);
+        let b1 = nth(buf, i2 + 1);
+        let b2 = nth(buf, i2 + 2);
+        let b3 = nth(buf, i2 + 3);
+        let b4 = nth(buf, i2 + 4);
+        let b5 = nth(buf, i2 + 5);
+        let b6 = nth(buf, i2 + 6);
+        let b7 = nth(buf, i2 + 7);
+        let sign = b0 / 128;
+        let biased-exp = b0 % 128 * 16 + b1 / 16;
+        let rest48 = b2 * 1099511627776 + (b3 * 4294967296 + (b4 * 16777216 + (b5 * 65536 + (b6 * 256 + b7))));
+        let mantissa = b1 % 16 * 281474976710656 + rest48;
+        list(cdr-f64-recompose(sign, biased-exp, mantissa), i2 + 8);
+    };
+    def cdr-pv(p) = head(p);
+    def cdr-pi(p) = head(tail(p));
+    // mode 0: parse one node at position i. mode 1: parse `count` sibling
+    // nodes starting at i, tail-recursive over an accumulator (count-bounded,
+    // not delimiter-bounded the way JSON/XML's close-bracket detection is —
+    // CDR carries an explicit child count instead of a textual terminator).
+    // Same "one self-recursive function, never two mutually-recursive
+    // `defn`s" constraint as every other dialect.
+    def cdr-parse(mode, buf, i, registry, count, acc) = (Comparable) mode == 0 ? {
+        let tag-r = cdr-get-octet(buf, i);
+        let tag = cdr-pv(tag-r);
+        let after-tag = cdr-pi(tag-r);
+        (Comparable) tag == 0 ? {
+            let name-r = cdr-get-string(buf, after-tag);
+            let count-r = cdr-get-ulong(buf, cdr-pi(name-r));
+            let kids = cdr-parse(1, buf, cdr-pi(count-r), registry, cdr-pv(count-r), empty());
+            list(intern_node(head(wr-find-bp(cdr-pv(name-r), registry)), cdr-pv(kids)), cdr-pi(kids));
+        } : (Comparable) tag == 1 ? {
+            let v = cdr-get-long(buf, after-tag);
+            list(intern_trivial_int(cdr-pv(v)), cdr-pi(v));
+        } : (Comparable) tag == 2 ? {
+            let v = cdr-get-string(buf, after-tag);
+            list(intern_trivial_string(cdr-pv(v)), cdr-pi(v));
+        } : (Comparable) tag == 4 ? {
+            let v = cdr-get-double(buf, after-tag);
+            // `intern_trivial_float` only accepts decimal text
+            // (confirmed directly: it silently produces a wrong
+            // value given a raw float) — the wire bytes are real
+            // IEEE754, but reconstructing a Form value from them
+            // still goes through the same text-based native
+            // every other float construction in this codebase
+            // does.
+            list(intern_trivial_float(float_to_str(cdr-pv(v))), cdr-pi(v));
+        } : (Comparable) tag == 5 ?         // bool: one octet payload, 1/0
+{
+            let v = cdr-get-octet(buf, after-tag);
+            list(intern_trivial_bool((Comparable) cdr-pv(v) == 1), cdr-pi(v));
+        } : list(wr-make-null(), after-tag);
+    } :     // tag 3 (null): a real, distinct value (wire-registry.fk's WIRE-NULL), not int 0
+    // mode 1
+(Comparable) count == 0 ? list(wr-reverse(acc), i) : {
+        let nxt = cdr-parse(0, buf, i, registry, 0, empty());
+        cdr-parse(1, buf, cdr-pi(nxt), registry, count - 1, cons(cdr-pv(nxt), acc));
+    };
+    def cdr-parse-node(buf, i, registry) = cdr-parse(0, buf, i, registry, 0, empty());
+    def cdr-to-cell(buf, registry) = cdr-pv(cdr-parse-node(buf, 0, registry));
+}

@@ -1,193 +1,127 @@
-; metal-door.fk — the body's side of the HANDLE door, so a Form cell can hold a decode loop.
-;
-; WHAT WAS MISSING. fk-metal-carrier.m landed eight primitives (metal_pipeline, metal_buf_alloc,
-; metal_buf_from_file, metal_buf_write, metal_enqueue, metal_sync, metal_buf_read, metal_status)
-; and stated their contract in bytes: the binding argument to metal_enqueue is a little-endian
-; u32 stream, and a constant is four raw bytes that Metal hands to `setBytes`. Nothing in the body
-; could WRITE those bytes. Every existing Metal lane wrote them from Swift, which is why every
-; existing Metal lane has a host holding its loop. This cell is the missing half — after it, the
-; only thing crossing to the host is the model file's bytes.
-;
-; THE THREE THINGS IT ADDS, and why each is not decoration:
-;
-;   md-le32     an int -> its four little-endian bytes, as a Form string. `byte_to_str` gives one
-;               byte and `str_concat` is binary, so this is four calls, and it is exact for the
-;               whole u32 range because Form's ints are 62-bit tagged words, not floats.
-;
-;   md-f32-bits a float -> the u32 IEEE-754 binary32 word that Metal will read back as that float.
-;               Three of the kernels this door has to drive take a `constant float&` — RMSNorm's
-;               eps, RoPE's freq_base, attention's 1/sqrt(head_dim) — and a `setBytes` constant is
-;               four bytes with no type. Without this the body could dispatch every matvec in a
-;               model and still not say what epsilon to normalize with.
-;               It is built out of format-arith.fk's own pieces rather than a second float
-;               decomposition: fq-exponent finds e with a/2^e in [1,2), fq-pow2 scales by an exact
-;               power of two, and fq-rne is ROUND-TO-NEAREST-EVEN, which is the rounding binary32
-;               actually uses. Halving and doubling are exact in binary floating point, and
-;               (m - 1) * 2^23 is exact for m in [1,2), so the ONLY rounding in the whole path is
-;               the one fq-rne performs, in the place the IEEE format performs it.
-;               RADIUS, ASKED NOT ASSUMED: normals only. A magnitude whose exponent falls outside
-;               [-126, 127] is REFUSED with -1 rather than encoded to a subnormal or an infinity
-;               that would dispatch and produce a plausible wrong number. Zero is 0 (and -0 is
-;               returned as +0: the sign of a zero epsilon changes no kernel here, and inventing a
-;               distinction the caller cannot use would be the more dishonest choice).
-;
-;   md-bind     the binding string the carrier's header specifies, built from two lists:
-;                   u32 n_buf | u32 handle[n_buf] | u32 n_const | u32 value[n_const]
-;               Buffers bind at buffer(0 .. n_buf-1); constants at buffer(n_buf ..). The layout is
-;               the CELL's to decide — the carrier knows nothing about what a weight is — so the
-;               cell that decides it is the cell that writes it.
-;
-; THE CANARY IS NOT OPTIONAL. Every primitive in this door but one answers an integer, and an
-; unbound name under axiom 5 recovers to `nothing` and answers 0. A door whose dynamic carrier was
-; not admitted, a door that refused, and a typo all answer 0. md-door-live? reads metal_status —
-; the one primitive that SPEAKS — and demands to see `metal_carrier=dynamic`, `metal_loaded=true`,
-; and `metal_door=handle` before any caller believes a handle.
-;
-; md-status-has? is a substring test over the status text and nothing more. It is written here
-; rather than borrowed so that the canary itself has no dependency that could go numb.
-;
-; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/bml/integer-power.bml
-;
-
-(do
-    ; ---- bytes ------------------------------------------------------------------------------
-    ; A small integer power, for md-byte-at's 256^k. `mul` on ints is exact here (256^3 is far
-    ; inside the tagged-word range) and this avoids reaching for a float pow and rounding back.
-    ; DEFINED BEFORE ITS CALLER, and that is not style: a forward reference in this body binds
-    ; numb-empty on the flattening arm, so a name used above its definition answers nothing and
-    ; the fold that reads it prints a plausible zero.
-    (defn fq-pow-int (b n) (fip-pow b n))
-
-    ; One byte of v at byte position k, little-endian. `div` on two ints is integer division
-    ; (probed, not assumed: (div 7 2) is 3), so this is a shift by 8k without a shift op.
-    (defn md-byte-at (v k) (mod (div v (fq-pow-int 256 k)) 256))
-
-    (defn md-le32 (v)
-        (str_concat (byte_to_str (md-byte-at v 0))
-        (str_concat (byte_to_str (md-byte-at v 1))
-        (str_concat (byte_to_str (md-byte-at v 2))
-                    (byte_to_str (md-byte-at v 3))))))
-
-    ; ---- binary32 ---------------------------------------------------------------------------
-    ; The mantissa field for a POSITIVE normal a: scale into [1,2) by an exact power of two, take
-    ; the fraction, and round it to 23 bits the way the format rounds — nearest, ties to even.
-    (defn md-f32-mant (a e) (float_to_int (fq-rne (mul (sub (div a (fq-pow2 e)) 1.0) 8388608.0))))
-
-    ; A mantissa that rounded all the way up to 2^23 is the value 2.0 in disguise: it belongs one
-    ; exponent higher with a zero fraction. Handled rather than clamped, because clamping here
-    ; would silently return the largest float BELOW the answer.
-    (defn md-f32-word (e m)
-        (if (eq m 8388608)
-            (md-f32-word (add e 1) 0)
-            (if (lt e (sub 0 126)) (sub 0 1)
-            (if (gt e 127) (sub 0 1)
-                (add (mul (add e 127) 8388608) m)))))
-
-    (defn md-f32-pos (a) (md-f32-word (fq-exponent a) (md-f32-mant a (fq-exponent a))))
-
-    ; The sign bit, kept separate so a refusal survives it: -1 must stay -1 and not become
-    ; 2147483647, which is a perfectly well-formed float word and would dispatch.
-    (defn md-f32-neg (b) (if (lt b 0) b (add b 2147483648)))
-
-    (defn md-f32-bits (x)
-        (if (eq x 0.0) 0
-        (if (lt x 0.0)
-            (md-f32-neg (md-f32-pos (sub 0.0 x)))
-            (md-f32-pos x))))
-
-    ; ---- binary16 ---------------------------------------------------------------------------
-    ; The same ladder at half the width: 10 explicit mantissa bits, exponent bias 15. The body has
-    ; emitted f16 kernels since the IR's elem/acc split (tir-msl-elem "half"), and until now the door
-    ; could only hand them f32 — so the f16 lane could be minted and timed but never fed, and what a
-    ; kernel does with `half` weights is exactly what an f32 test cannot say. Mirrors md-f32-* line for
-    ; line rather than reworking it, including the two refusals that matter: a mantissa that rounded up
-    ; to 2^10 is 2.0 in disguise and belongs one exponent higher, and a value outside [2^-14, 2^15)
-    ; returns -1 rather than the nearest representable — the door refuses instead of quietly answering
-    ; with a different number, because a silently clamped weight is a kernel that trains on a lie.
-    ; SUBNORMALS ARE NOT HANDLED: below 2^-14 this refuses. Half's subnormal range is real and a model
-    ; that needs it needs a wider door; naming that is cheaper than a wrong bit pattern.
-    (defn md-f16-mant (a e) (float_to_int (fq-rne (mul (sub (div a (fq-pow2 e)) 1.0) 1024.0))))
-
-    (defn md-f16-word (e m)
-        (if (eq m 1024)
-            (md-f16-word (add e 1) 0)
-            (if (lt e (sub 0 14)) (sub 0 1)
-            (if (gt e 15) (sub 0 1)
-                (add (mul (add e 15) 1024) m)))))
-
-    (defn md-f16-pos (a) (md-f16-word (fq-exponent a) (md-f16-mant a (fq-exponent a))))
-    (defn md-f16-neg (b) (if (lt b 0) b (add b 32768)))
-
-    (defn md-f16-bits (x)
-        (if (eq x 0.0) 0
-        (if (lt x 0.0)
-            (md-f16-neg (md-f16-pos (sub 0.0 x)))
-            (md-f16-pos x))))
-
-    (defn md-le16 (v)
-        (str_concat (byte_to_str (md-byte-at v 0))
-                    (byte_to_str (md-byte-at v 1))))
-
-    ; a whole vector of halves, in the layout a `device const half*` reads
-    (defn md-f16s (xs)
-        (if (eq (len xs) 0) ""
-            (str_concat (md-le16 (md-f16-bits (head xs))) (md-f16s (tail xs)))))
-
-    ; ---- bfloat16 ---------------------------------------------------------------------------
-    ; bfloat is the top half of an f32 word: the same 8-bit exponent, 7 explicit mantissa bits. So no
-    ; third ladder — the f32 word rounds to its top sixteen bits, to nearest, ties to even. Until this,
-    ; the bf16 lane of every family could be minted and never fed, the same gap md-f16-bits closed.
-    ; RADIUS: one rounding for any value that is already an f32; a value that is not rounds to f32
-    ; first, and two roundings can differ from one at a tie. A refused f32 word (-1) stays refused.
-    (defn md-bf16-round (b)
-        (do (let hi (div b 65536))
-            (let lo (sub b (mul hi 65536)))
-            (if (gt lo 32768) (add hi 1)
-                (if (lt lo 32768) hi
-                    (if (eq (mod hi 2) 1) (add hi 1) hi)))))
-
-    (defn md-bf16-bits (x)
-        (do (let b (md-f32-bits x))
-            (if (lt b 0) b (md-bf16-round b))))
-
-    (defn md-bf16-chunks (xs acc)
-        (if (eq (len xs) 0) acc
-            (md-bf16-chunks (tail xs) (cons (md-le16 (md-bf16-bits (head xs))) acc))))
-    (defn md-bf16s (xs)
-        (str-join-reversed (md-bf16-chunks xs (empty))))
-
-    ; ---- the binding string -----------------------------------------------------------------
-    ; chunks consed as they come, joined once: an accumulator copies itself per element
-    (defn md-le32-chunks (xs acc)
-        (if (eq (len xs) 0) acc
-            (md-le32-chunks (tail xs) (cons (md-le32 (head xs)) acc))))
-    (defn md-le32-list (xs acc)
-        (str_concat acc (str-join-reversed (md-le32-chunks xs (empty)))))
-
-    (defn md-bind (bufs consts)
-        (str_concat (md-le32 (len bufs))
-        (str_concat (md-le32-list bufs "")
-        (str_concat (md-le32 (len consts))
-                    (md-le32-list consts "")))))
-
-    ; The base+16 tail (door's second growth, 2026-08-04): threads_per_group, threadgroup_bytes,
-    ; dispatch_mode (1 = the op's threads argument is the GROUP COUNT, tpg exact and refused past
-    ; the pipeline ceiling), barrier_before (1 = memoryBarrier before this dispatch; legal only in
-    ; a concurrent batch, refused loudly in a serial one). The tail arrives whole or not at all —
-    ; the carrier accepts exactly base, base+8, base+16 and nothing between.
-    (defn md-bind16 (bufs consts tpg tgmem mode barrier)
-        (str_concat (md-bind bufs consts)
-        (str_concat (md-le32 tpg)
-        (str_concat (md-le32 tgmem)
-        (str_concat (md-le32 mode)
-                    (md-le32 barrier))))))
-
-    ; ---- the canary -------------------------------------------------------------------------
-    (defn md-status-has? (needle) (ge (str_find (metal_status) needle 0) 0))
-
-    (defn md-door-live?
-        ()
-        (if (md-status-has? "metal_loaded=true")
-            (if (md-status-has? "metal_carrier=dynamic") (md-status-has? "metal_door=handle") false)
-            false))
-    0)
+// metal-door.fk — the body's side of the HANDLE door, so a Form cell can hold a decode loop.
+//
+// WHAT WAS MISSING. fk-metal-carrier.m landed eight primitives (metal_pipeline, metal_buf_alloc,
+// metal_buf_from_file, metal_buf_write, metal_enqueue, metal_sync, metal_buf_read, metal_status)
+// and stated their contract in bytes: the binding argument to metal_enqueue is a little-endian
+// u32 stream, and a constant is four raw bytes that Metal hands to `setBytes`. Nothing in the body
+// could WRITE those bytes. Every existing Metal lane wrote them from Swift, which is why every
+// existing Metal lane has a host holding its loop. This cell is the missing half — after it, the
+// only thing crossing to the host is the model file's bytes.
+//
+// THE THREE THINGS IT ADDS, and why each is not decoration:
+//
+//   md-le32     an int -> its four little-endian bytes, as a Form string. `byte_to_str` gives one
+//               byte and `str_concat` is binary, so this is four calls, and it is exact for the
+//               whole u32 range because Form's ints are 62-bit tagged words, not floats.
+//
+//   md-f32-bits a float -> the u32 IEEE-754 binary32 word that Metal will read back as that float.
+//               Three of the kernels this door has to drive take a `constant float&` — RMSNorm's
+//               eps, RoPE's freq_base, attention's 1/sqrt(head_dim) — and a `setBytes` constant is
+//               four bytes with no type. Without this the body could dispatch every matvec in a
+//               model and still not say what epsilon to normalize with.
+//               It is built out of format-arith.fk's own pieces rather than a second float
+//               decomposition: fq-exponent finds e with a/2^e in [1,2), fq-pow2 scales by an exact
+//               power of two, and fq-rne is ROUND-TO-NEAREST-EVEN, which is the rounding binary32
+//               actually uses. Halving and doubling are exact in binary floating point, and
+//               (m - 1) * 2^23 is exact for m in [1,2), so the ONLY rounding in the whole path is
+//               the one fq-rne performs, in the place the IEEE format performs it.
+//               RADIUS, ASKED NOT ASSUMED: normals only. A magnitude whose exponent falls outside
+//               [-126, 127] is REFUSED with -1 rather than encoded to a subnormal or an infinity
+//               that would dispatch and produce a plausible wrong number. Zero is 0 (and -0 is
+//               returned as +0: the sign of a zero epsilon changes no kernel here, and inventing a
+//               distinction the caller cannot use would be the more dishonest choice).
+//
+//   md-bind     the binding string the carrier's header specifies, built from two lists:
+//                   u32 n_buf | u32 handle[n_buf] | u32 n_const | u32 value[n_const]
+//               Buffers bind at buffer(0 .. n_buf-1); constants at buffer(n_buf ..). The layout is
+//               the CELL's to decide — the carrier knows nothing about what a weight is — so the
+//               cell that decides it is the cell that writes it.
+//
+// THE CANARY IS NOT OPTIONAL. Every primitive in this door but one answers an integer, and an
+// unbound name under axiom 5 recovers to `nothing` and answers 0. A door whose dynamic carrier was
+// not admitted, a door that refused, and a typo all answer 0. md-door-live? reads metal_status —
+// the one primitive that SPEAKS — and demands to see `metal_carrier=dynamic`, `metal_loaded=true`,
+// and `metal_door=handle` before any caller believes a handle.
+//
+// md-status-has? is a substring test over the status text and nothing more. It is written here
+// rather than borrowed so that the canary itself has no dependency that could go numb.
+//
+// preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/bml/integer-power.bml
+//
+section [form.bml] {
+    // ---- bytes ------------------------------------------------------------------------------
+    // A small integer power, for md-byte-at's 256^k. `mul` on ints is exact here (256^3 is far
+    // inside the tagged-word range) and this avoids reaching for a float pow and rounding back.
+    // DEFINED BEFORE ITS CALLER, and that is not style: a forward reference in this body binds
+    // numb-empty on the flattening arm, so a name used above its definition answers nothing and
+    // the fold that reads it prints a plausible zero.
+    def fq-pow-int(b, n) = fip-pow(b, n);
+    // One byte of v at byte position k, little-endian. `div` on two ints is integer division
+    // (probed, not assumed: (div 7 2) is 3), so this is a shift by 8k without a shift op.
+    def md-byte-at(v, k) = v / fq-pow-int(256, k) % 256;
+    def md-le32(v) = str_concat(byte_to_str(md-byte-at(v, 0)), str_concat(byte_to_str(md-byte-at(v, 1)), str_concat(byte_to_str(md-byte-at(v, 2)), byte_to_str(md-byte-at(v, 3)))));
+    // ---- binary32 ---------------------------------------------------------------------------
+    // The mantissa field for a POSITIVE normal a: scale into [1,2) by an exact power of two, take
+    // the fraction, and round it to 23 bits the way the format rounds — nearest, ties to even.
+    def md-f32-mant(a, e) = float_to_int(fq-rne((a / fq-pow2(e) - 1.0) * 8388608.0));
+    // A mantissa that rounded all the way up to 2^23 is the value 2.0 in disguise: it belongs one
+    // exponent higher with a zero fraction. Handled rather than clamped, because clamping here
+    // would silently return the largest float BELOW the answer.
+    def md-f32-word(e, m) = (Comparable) m == 8388608 ? md-f32-word(e + 1, 0) : e < 0 - 126 ? 0 - 1 : e > 127 ? 0 - 1 : (e + 127) * 8388608 + m;
+    def md-f32-pos(a) = md-f32-word(fq-exponent(a), md-f32-mant(a, fq-exponent(a)));
+    // The sign bit, kept separate so a refusal survives it: -1 must stay -1 and not become
+    // 2147483647, which is a perfectly well-formed float word and would dispatch.
+    def md-f32-neg(b) = b < 0 ? b : b + 2147483648;
+    def md-f32-bits(x) = (Comparable) x == 0.0 ? 0 : x < 0.0 ? md-f32-neg(md-f32-pos(0.0 - x)) : md-f32-pos(x);
+    // ---- binary16 ---------------------------------------------------------------------------
+    // The same ladder at half the width: 10 explicit mantissa bits, exponent bias 15. The body has
+    // emitted f16 kernels since the IR's elem/acc split (tir-msl-elem "half"), and until now the door
+    // could only hand them f32 — so the f16 lane could be minted and timed but never fed, and what a
+    // kernel does with `half` weights is exactly what an f32 test cannot say. Mirrors md-f32-* line for
+    // line rather than reworking it, including the two refusals that matter: a mantissa that rounded up
+    // to 2^10 is 2.0 in disguise and belongs one exponent higher, and a value outside [2^-14, 2^15)
+    // returns -1 rather than the nearest representable — the door refuses instead of quietly answering
+    // with a different number, because a silently clamped weight is a kernel that trains on a lie.
+    // SUBNORMALS ARE NOT HANDLED: below 2^-14 this refuses. Half's subnormal range is real and a model
+    // that needs it needs a wider door; naming that is cheaper than a wrong bit pattern.
+    def md-f16-mant(a, e) = float_to_int(fq-rne((a / fq-pow2(e) - 1.0) * 1024.0));
+    def md-f16-word(e, m) = (Comparable) m == 1024 ? md-f16-word(e + 1, 0) : e < 0 - 14 ? 0 - 1 : e > 15 ? 0 - 1 : (e + 15) * 1024 + m;
+    def md-f16-pos(a) = md-f16-word(fq-exponent(a), md-f16-mant(a, fq-exponent(a)));
+    def md-f16-neg(b) = b < 0 ? b : b + 32768;
+    def md-f16-bits(x) = (Comparable) x == 0.0 ? 0 : x < 0.0 ? md-f16-neg(md-f16-pos(0.0 - x)) : md-f16-pos(x);
+    def md-le16(v) = str_concat(byte_to_str(md-byte-at(v, 0)), byte_to_str(md-byte-at(v, 1)));
+    // a whole vector of halves, in the layout a `device const half*` reads
+    def md-f16s(xs) = (Comparable) len(xs) == 0 ? "" : str_concat(md-le16(md-f16-bits(head(xs))), md-f16s(tail(xs)));
+    // ---- bfloat16 ---------------------------------------------------------------------------
+    // bfloat is the top half of an f32 word: the same 8-bit exponent, 7 explicit mantissa bits. So no
+    // third ladder — the f32 word rounds to its top sixteen bits, to nearest, ties to even. Until this,
+    // the bf16 lane of every family could be minted and never fed, the same gap md-f16-bits closed.
+    // RADIUS: one rounding for any value that is already an f32; a value that is not rounds to f32
+    // first, and two roundings can differ from one at a tie. A refused f32 word (-1) stays refused.
+    def md-bf16-round(b) = {
+        let hi = b / 65536;
+        let lo = b - hi * 65536;
+        lo > 32768 ? hi + 1 : lo < 32768 ? hi : (Comparable) (hi % 2) == 1 ? hi + 1 : hi;
+    };
+    def md-bf16-bits(x) = {
+        let b = md-f32-bits(x);
+        b < 0 ? b : md-bf16-round(b);
+    };
+    def md-bf16-chunks(xs, acc) = (Comparable) len(xs) == 0 ? acc : md-bf16-chunks(tail(xs), cons(md-le16(md-bf16-bits(head(xs))), acc));
+    def md-bf16s(xs) = str-join-reversed(md-bf16-chunks(xs, empty()));
+    // ---- the binding string -----------------------------------------------------------------
+    // chunks consed as they come, joined once: an accumulator copies itself per element
+    def md-le32-chunks(xs, acc) = (Comparable) len(xs) == 0 ? acc : md-le32-chunks(tail(xs), cons(md-le32(head(xs)), acc));
+    def md-le32-list(xs, acc) = str_concat(acc, str-join-reversed(md-le32-chunks(xs, empty())));
+    def md-bind(bufs, consts) = str_concat(md-le32(len(bufs)), str_concat(md-le32-list(bufs, ""), str_concat(md-le32(len(consts)), md-le32-list(consts, ""))));
+    // The base+16 tail (door's second growth, 2026-08-04): threads_per_group, threadgroup_bytes,
+    // dispatch_mode (1 = the op's threads argument is the GROUP COUNT, tpg exact and refused past
+    // the pipeline ceiling), barrier_before (1 = memoryBarrier before this dispatch; legal only in
+    // a concurrent batch, refused loudly in a serial one). The tail arrives whole or not at all —
+    // the carrier accepts exactly base, base+8, base+16 and nothing between.
+    def md-bind16(bufs, consts, tpg, tgmem, mode, barrier) = str_concat(md-bind(bufs, consts), str_concat(md-le32(tpg), str_concat(md-le32(tgmem), str_concat(md-le32(mode), md-le32(barrier)))));
+    // ---- the canary -------------------------------------------------------------------------
+    def md-status-has?(needle) = str_find(metal_status(), needle, 0) >= 0;
+    def md-door-live?() = md-status-has?("metal_loaded=true") ? md-status-has?("metal_carrier=dynamic") ? md-status-has?("metal_door=handle") : false : false;
+    0;
+}

@@ -34,9 +34,34 @@ section [form.bml] {
   let clean = trim(line);
   str_len(clean) > 0 ? str_concat(indent,str_concat("//",str_concat(substring(clean,1,str_len(clean)),"\n"))) : "";
  },split-on(text,"\n")));
- def fsl-root(nodes) = foldr((n,out) => ((String) fsl-op(n) == "do") ? append(fsl-root(tail(fsl-kids(n))),out) : cons(n,out),list(),nodes);
- def fsl-shape(n) = fsl-string?(n) ? list("$string",fsc-unescape-str(substring(fsl-word(n),1,str_len(fsl-word(n)) - 1))) : list(fsl-word(n) == "true" ? "1" : fsl-word(n) == "false" ? "0" : fsl-word(n),map(fsl-shape,fsl-kids(n)));
- def fsl-shapes(nodes) = map(fsl-shape,fsl-root(nodes));
+ // Remove the single module wrapper only. Nested top-level blocks keep scope.
+ def fsl-root(nodes) = len(nodes) == 1 && (String) fsl-op(head(nodes)) == "do" ? tail(fsl-kids(head(nodes))) : nodes;
+ // Imports belong to the loader, outside the executable section. Preserve
+ // their spelling and order; the dependency comparison also checks comments.
+ def fsl-import?(nodes) = len(nodes) >= 2 && (String) fsl-word(head(nodes)) == "import" && nil?(fsl-kids(nth(nodes,1))) && str_find(nth(nth(nodes,1),2),"\n",0) < 0;
+ def fsl-module(nodes,imports,body) = nil?(nodes) ? list(reverse(imports),reverse(body)) :
+  fsl-import?(nodes) ? fsl-module(tail(tail(nodes)),cons(nth(nodes,1),cons(head(nodes),imports)),body) : fsl-module(tail(nodes),imports,cons(head(nodes),body));
+ def fsl-import-text(nodes) = nil?(nodes) ? "" : str-join(list(fsl-comments(nth(head(nodes),2),""),"import ",fsl-word(nth(nodes,1)),"\n",fsl-import-text(tail(tail(nodes)))));
+ // The compiler spells a quoted semicolon as byte_to_str(59), joined to
+ // neighboring literal spans. Only closed string construction can normalize;
+ // calls with variables or effects retain their complete structure.
+ def fsl-constant-string(n) {
+  let kids = fsl-kids(n); let op = fsl-op(n);
+  if fsl-string?(n) then fsc-unescape-str(substring(fsl-word(n),1,str_len(fsl-word(n)) - 1))
+  else if op == "byte_to_str" && len(kids) == 2 && (String) fsl-word(nth(kids,1)) == "59" then ";"
+  else if op == "str_concat" && len(kids) == 3 then {
+   let left = fsl-constant-string(nth(kids,1)); let right = fsl-constant-string(nth(kids,2));
+   nothing?(left) || nothing?(right) ? nothing() : str_concat(left,right);
+  } else nothing();
+ }
+ def fsl-shape(n) {
+  let text = fsl-constant-string(n);
+  !nothing?(text) ? list("$string",text) : list(fsl-word(n) == "true" ? "1" : fsl-word(n) == "false" ? "0" : fsl-word(n),map(fsl-shape,fsl-kids(n)));
+ }
+ def fsl-shapes(nodes) {
+  let module = fsl-module(nodes,list(),list());
+  append(map(fsl-shape,head(module)),map(fsl-shape,fsl-root(nth(module,1))));
+ }
  def fsl-definitions(nodes) = foldl((count,n) => count + (((String) fsl-op(n) == "defn") ? 1 : 0) + fsl-definitions(fsl-kids(n)),0,nodes);
  // One operator description owns spelling, precedence and comparison contract.
  let fsl-call-rule = list("",8,"");
@@ -70,7 +95,8 @@ section [form.bml] {
   str-join(list(fsl-comments(nth(n,2),indent),indent,text,";\n"));
  }
  def fsl-statements(nodes,indent) = str-join(map(n => fsl-statement(n,indent),nodes));
- def fsl-literal-name?(n) = (String) fsl-word(n) == "true" || (String) fsl-word(n) == "false";
+ def fsl-literal-names() = list("true","false","str_concat","byte_to_str");
+ def fsl-literal-name?(n) = any?(name => (String) fsl-word(n) == name,fsl-literal-names());
  def fsl-literal-bindings?(nodes) = any?(n => {
   let kids = fsl-kids(n); let op = fsl-op(n);
   (op == "let" && fsl-literal-name?(nth(kids,1))) ||
@@ -78,15 +104,17 @@ section [form.bml] {
  },nodes);
  def form-source-lift(source,owner) {
   let parsed = fsl-parse(source); let first = head(parsed);
-  let body = nil?(parsed) ? list() : fsl-root(cons(list(fsl-word(first),fsl-kids(first),"",nth(first,3)),tail(parsed)));
-  let candidate = str-join(list(fsl-comments(nil?(parsed) ? source : nth(first,2),""),"section [form.bml] {\n",fsl-statements(body,"    "),"}\n"));
+  let module = fsl-module(nil?(parsed) ? list() : cons(list(fsl-word(first),fsl-kids(first),"",nth(first,3)),tail(parsed)),list(),list());
+  let candidate = str-join(list(fsl-comments(nil?(parsed) ? source : nth(first,2),""),fsl-import-text(head(module)),"section [form.bml] {\n",fsl-statements(fsl-root(nth(module,1)),"    "),"}\n"));
   // The lift preserves names and dependencies. Read their contracts from the
   // original Form directly, without lowering the candidate once for discovery
   // and again for execution. The comparison below still owns admission.
   let homes = fsc-bml-home-context(owner);
   let catalog = fsc-bml-file-signatures(owner,source,list(owner),list(),nth(homes,1),head(homes));
   let lowered = form-source-compile-loop(candidate,owner,0,nth(catalog,1));
-  let same = !fsl-literal-bindings?(parsed) && (Value) fsl-shapes(parsed) == fsl-shapes(fsl-parse(lowered));
+  let shadowed = any?(signature => any?(name => (String) head(signature) == name,fsl-literal-names()),nth(catalog,1));
+  let dependencies = (Value) bml-source-dependencies(source,1) == bml-source-dependencies(candidate,0);
+  let same = dependencies && !shadowed && !fsl-literal-bindings?(parsed) && (Value) fsl-shapes(parsed) == fsl-shapes(fsl-parse(lowered));
   list(same,candidate,fsl-definitions(parsed),lowered);
  }
 }

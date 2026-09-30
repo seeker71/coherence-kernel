@@ -1,321 +1,234 @@
-; qk-matmul-batch.fk — the quantized matVEC made a matMUL: one weight decode serving TB activation
-; columns at once, so a prompt is one dispatch per weight tensor instead of one dispatch per token.
-;
-; WHY, AND THE MEASUREMENT CHOSE IT AND THEN CORRECTED IT TWICE. Stone 7 was sent at PREFILL. The
-; carrier ran the full 28-layer forward once per PROMPT token, so a P-token prompt loaded all 2.0 GB of
-; weights P times and used each weight once. Measured on the lane path before this cell: prefill 0.461 s
-; for 6 tokens = 76.8 ms/token, against decode's 81.9 ms/token — the same cost per token, which is
-; exactly what token-at-a-time looks like from outside. 13.0 prefill tok/s against an external
-; ollama oracle's 640.94 on this machine and model: 49.3x behind, the largest single gap in the program.
-;
-; The lever this cell reaches for is the one Stone 5's refutation NAMES. Stone 5 measured that this
-; body's inner loop is bound by PER-WEIGHT ALU — the f16 super-scale decode and the index
-; decomposition — and NOT by loading the activation. That is precisely why llama.cpp's `nr0` register
-; blocking made it monotonically SLOWER (row 835, boundborrow): nr0 amortizes the ACTIVATION load
-; across nr0 weight rows, and the activation load was never the cost. Batching is the mirror image:
-; it amortizes the WEIGHT DECODE across TB activation columns, and the weight decode is measured to be
-; the cost. Same machine, same kernel spine, opposite lever, opposite result.
-;
-; THE FIRST CORRECTION, and it is the surprising one. Batching does NOT scale with P. Measured on the
-; real blob, one resident buffer, best of 3, against P sequential lane matvecs in one command buffer:
-;
-;   shape                 P=1     P=6     P=32    P=128   P=512     best TB
-;   Q4_K 3072x3072       0.92x   2.05x   3.34x   4.12x   3.91x        8
-;   Q4_K 8192x3072       0.92x   2.15x   3.53x   3.88x   3.99x        8
-;   Q6_K 3072x8192       0.98x   2.48x   4.26x   4.77x   4.62x        8
-;   Q6_K 128256x3072     0.97x   3.61x   4.96x   5.19x   4.97x       16
-;
-; It PLATEAUS at ~4-5x and goes no further, and the plateau is not a mystery — it measures the split
-; of the inner loop. Write D for the amortizable per-weight work (decode) and L for the per-token work
-; that batching cannot remove (the activation load and the multiply-add). Per token, before: D + L.
-; After, at tile TB: D/TB + L. At TB = 8 the observed 4x gives D + L = 4*(D/8 + L), i.e. D = 6L. So
-; the CEILING of this lever, at TB -> infinity, is (D+L)/L = 7x — not P, and never was. The number
-; that says "the weight decode is 6/7 of the inner loop" was not available before this cell; it is now,
-; and it prices every future stone that attacks the decode itself.
-;
-; THE SECOND CORRECTION, and it refuted my own hypothesis inside this stone. At TB = 8 the tile's
-; activation loads x[t*cols + j] are `cols` floats apart — 12 KB of stride between the loads of one
-; tile. That looked like the obvious reason the plateau sits at 4 and not 7, so a COLUMN-MAJOR twin was
-; built (xc[j*ntok + t], the same tile's loads contiguous) and measured against the row-major one at
-; identical arithmetic:
-;
-;   shape                P=6     P=32    P=128   P=512      (col-major / row-major, >1 = col wins)
-;   Q4_K 3072x3072      2.01x   0.90x   0.88x   0.53x
-;   Q4_K 8192x3072      1.20x   0.94x   0.93x   0.69x
-;   Q6_K 3072x8192      1.12x   0.95x   0.94x   0.79x
-;   Q6_K 128256x3072    1.06x   0.94x   0.93x   0.69x
-;
-; Column-major is SLOWER everywhere the batch is big enough to matter, and worst exactly where the
-; stride argument predicted it would be best. The strided load is not the plateau. Row-major stays —
-; which is also the layout the rest of the pipeline already has, so the win costs no transpose. Recorded
-; here rather than deleted, because a refuted hypothesis with its numbers is the only thing that stops
-; the next stone re-running it.
-;
-; WHAT THIS CELL DOES NOT NEED, and it is the best property it has: NO EPSILON. Within a lane the fold
-; for token t is `pr + acc` over exactly the same columns in exactly the same k-DOWN order as
-; qk-matvec-lane.fk's kernel, and the cross-lane reduction is the same metal::simd_sum over the same 32
-; partials. Nothing is reassociated by tiling — the tile index only decides WHICH accumulator a product
-; lands in, never in what order any one accumulator is folded. The batched result is therefore
-; BIT-IDENTICAL to P separate lane matvecs, not merely inside a bound. Measured that way and not
-; asserted: every shape, every P in {1,6,32,128,512}, every TB in {1,2,4,8,16} — zero differing floats
-; out of P*rows. qk-matvec-split.fk's derived bound at parts = 32 continues to cover this cell's
-; distance from the ATTESTANT, unchanged and with no new derivation, for the same reason
-; qk-matvec-lane.fk gave: any association of 32 terms has depth at most 31 < 32.
-;
-; THE RENTED ORACLE, READ AND THEN MEASURED AGAINST. llama.cpp's ggml-metal (MIT) carries
-; `kernel_mul_mm` — the batched matmul this stone is about, and the kernel behind the oracle's 640.94
-; prefill tok/s. It was read for SHAPE only; no MSL was pasted. Its shape is a 64x32 output tile with
-; NK = 32, the quantized weights DEQUANTIZED INTO THREADGROUP MEMORY and the product taken by
-; `simdgroup_multiply_accumulate` over `simdgroup_float8x8` hardware matrix tiles. Two of its choices
-; are not available to this cell at this cell's numeric contract, and saying so is the whole content of
-; renting rather than copying:
-;   * IT STAGES THE WEIGHTS AS half. The staged type is f16 (simdgroup_half8x8 dominates the unit), so
-;     every dequantized weight is rounded to f16 before it is multiplied. That is not a reassociation —
-;     it is a precision reduction, a strictly larger error class than any association bound, and it
-;     would give up Stone 3's standing claim outright (the GPU dequant
-;     equals Form's BIT FOR BIT, one rounding each side).
-;   * ITS ACCUMULATION IS A HARDWARE MATRIX UNIT whose association Metal does not specify anywhere.
-;     The 32-term argument that lets simd_sum in without a new derivation does not reach an 8x8x8
-;     matrix-multiply-accumulate: its internal tree is over a different term count and is not bounded
-;     by anything this program has derived.
-;
-; AND ITS CENTRAL LEVER WAS MEASURED IN OUR REGIME BEFORE BEING BELIEVED, which is exactly what row 835
-; asks. mul_mm's whole point is a tile far wider than 8 — 32 columns at once. The rentable version of
-; that for a REGISTER-tiled kernel is simply a larger TB. Swept on real tensors at P = 256, best of 3:
-;
-;   TB               1       2       4       8      16      32      64
-;   Q4_K 3072x3072  1.00x   1.84x   2.97x   4.17x   3.22x   2.74x   2.42x
-;   Q6_K 3072x8192  1.00x   1.88x   3.27x   4.99x   4.15x   2.80x   1.98x
-;
-; The lever REVERSES past 8, monotonically, at both shapes — the same sign of failure `nr0` showed
-; Stone 5, for the same kind of reason: past 8 accumulators the register pressure costs more than the
-; extra amortization buys. mul_mm can hold 32 because it does NOT hold 32 accumulators per thread; it
-; holds eight MATRIX registers and puts the weights in threadgroup memory. Take the tile width without
-; the matrix units and the f16 staging and it goes backwards. So TB = 8 is chosen by this table, and
-; the reference's number is recorded as the reference's, correct for its constraints and not for ours.
-;
-; WHY THIS CELL EMITS EXACTLY ONE NEW KERNEL PAIR, and nothing else. A batched prefill also needs
-; RMSNorm, RoPE and GQA attention over P positions. It would have been natural to write batched twins
-; of all three — and that is a SECOND COPY of three transcriptions that can drift from
-; llama-decode-msl.fk's, silently, with the drifted one being whichever nobody re-derives. It is not
-; needed. Those three ops are INDEPENDENT ACROSS TOKENS, so the carrier dispatches the EXISTING decode
-; kernels once per token into ONE concurrent encoder with no barrier between them: same kernel, same
-; binary, bit-exact by construction rather than by argument, and the P dispatches overlap instead of
-; serializing. SwiGLU and the residual add are elementwise, so the existing kernels run ONCE over
-; P*n contiguous elements with no change at all. The only thing that had to become batched is the thing
-; the measurement said was the cost.
-;
-; THE ATTESTANT STAYS, UNTOUCHED (row 825). q6k-msl.fk, q4k-msl.fk, qk-matvec-split.fk,
-; qk-matvec-lane.fk and llama-decode-msl.fk are not edited by this stone — not one character. This cell
-; is an APPENDIX that calls qk-matvec-lane.fk's q6k_inv/q6k_wi/q4k_inv/q4k_wi spine, so it must be
-; emitted into the same translation unit and AFTER qml-msl-appendix.
-;
-; THE RADIUS THIS CELL SPEAKS FOR.
-;   * A SIMD width of exactly 32 and a threadgroup that is a multiple of 32 — qk-matvec-lane.fk's
-;     radius, inherited whole. On a device where threadExecutionWidth != 32 this kernel is WRONG, not
-;     slow, and the carrier must read it and refuse (row 826, aporon).
-;   * The output layout is y[t*rows + r]: token-major, each token's result contiguous in `rows`. That
-;     is what makes the k/v projections land straight in the pooled KV cache with no copy — the cache's
-;     per-position stride IS nkv*head_dim, which IS `rows` for those two tensors. It is an identity the
-;     carrier depends on, so it is stated here rather than discovered later.
-;   * The activation layout is x[t*cols + j]: token-major, matching. Column-major was measured and
-;     rejected above.
-;   * TB is 8, a literal in the emitted text, chosen by the sweep above. It is not a free parameter the
-;     carrier can pass: a dynamically-indexed accumulator array would spill to local memory and lose
-;     the entire point. `ntok` need NOT be a multiple of 8 — the tail tile's inactive lanes are guarded
-;     and contribute nothing.
-;   * ntok >= 1, cols >= 1, rows >= 1. Nothing here speaks for f16/bf16 or for any quant other than the
-;     Q6_K / Q4_K whose decomposition qk-matvec-lane.fk transcribes.
-;   * It speaks for the ARITHMETIC of a batch. It says nothing about batch > 1 as a SERVING feature:
-;     that additionally needs per-sequence KV cache regions and a per-sequence position, and is
-;     deliberately not built here.
-;
-; Kin: qk-matvec-lane.fk (q6k_inv/q6k_wi/q4k_inv/q4k_wi — the hoisted decomposition this cell reuses
-; verbatim, and the per-token association it must reproduce exactly), qk-matvec-split.fk (qms-bound-coeff
-; — the epsilon that still covers this cell unchanged), q6k-msl.fk / q4k-msl.fk (THE ATTESTANT),
-; llama-decode-msl.fk (the per-token ops the carrier dispatches P times instead of rewriting).
-;
-; preludes: form-stdlib/core.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk
-;
-
-(do
-    ; ================= the transcription, read back into Form =================
-
-    ; the accumulator tile. Named so the radius has a symbol to point at and the band can state what
-    ; it speaks for; a literal in the emitted text for the reason the radius gives.
-    (defn qmb-tile () 8)
-
-    ; how many tiles a batch of `ntok` tokens is cut into, and which tokens tile `p` carries.
-    (defn qmb-ntile (ntok) (div (add ntok (sub (qmb-tile) 1)) (qmb-tile)))
-    (defn qmb-t0 (p) (mul p (qmb-tile)))
-    ; the tail tile is short; `if (t < ntok)` in the kernel is this count, and the band checks the cover
-    ; rather than trusting that a guard and a count agree.
-    (defn qmb-tile-n (p ntok)
-        (if (ge (qmb-t0 p) ntok) 0
-            (if (ge (add (qmb-t0 p) (qmb-tile)) ntok) (sub ntok (qmb-t0 p)) (qmb-tile))))
-
-    ; THE COVER over tokens. Every token of the batch is carried by exactly one (tile, slot).
-    (defn qmb-count-loop (p ntok acc)
-        (if (ge p (qmb-ntile ntok)) acc (qmb-count-loop (add p 1) ntok (add acc (qmb-tile-n p ntok)))))
-    (defn qmb-cover-count (ntok) (qmb-count-loop 0 ntok 0))
-
-    ; THE GRID. One SIMD group per (row, tile); the kernel recovers both from gid/32 the same way.
-    (defn qmb-groups (rows ntok) (mul rows (qmb-ntile ntok)))
-    (defn qmb-row-of  (g ntok) (div g (qmb-ntile ntok)))
-    (defn qmb-tile-of (g ntok) (sub g (mul (qmb-row-of g ntok) (qmb-ntile ntok))))
-
-    ; THE IDENTITY THIS CELL LIVES OR DIES BY. Token t's sum inside the batched kernel is the lane
-    ; kernel's sum for that token — same lanes, same k-down chain, same 32-partial reduction. Tiling
-    ; chooses an ACCUMULATOR, never an order. Expressed here as the same call, so the band can watch
-    ; the two agree on fixtures instead of being told a paragraph.
-    (defn qmb-token-sum (xs cols) (qml-lane-sum xs cols))
-
-    ; the bound's coefficient, unchanged from the lane kernel and therefore from the split kernel at
-    ; parts = 32. "No new derivation" is a checkable equality, not a claim.
-    (defn qmb-bound-coeff (cols) (qml-bound-coeff cols))
-
-    ; ================= the emitted MSL =================
-    ; No helper spine and no header of its own: q6k_inv / q6k_wi / q4k_inv / q4k_wi come from
-    ; qk-matvec-lane.fk's appendix and <metal_stdlib> leads the unit already. That is exactly why this
-    ; is an APPENDIX TO AN APPENDIX and must be emitted after qml-msl-appendix.
-
-    ; the eight accumulators, declared and cleared. A literal bound, so the compiler unrolls and keeps
-    ; them in registers — the whole win is that these are registers and not local memory.
-    (defn qmb-decl ()
-        "float acc[8]; for (uint i = 0; i < 8u; ++i) { acc[i] = 0.0f; } uint curblk = 4294967295u; uint b = 0u; float2 inv = float2(0.0f, 0.0f); ")
-
-    ; the per-weight inner step: decode the weight ONCE, then spend it on all eight tokens of the tile.
-    ; `pfx` is q6k / q4k and `stride` is that quant's superblock byte stride as a literal — the same two
-    ; parameters qml-step takes, reaching into the same two functions.
-    ; The 256 was a literal because the two quants this cell was written for both
-    ; use a 256-weight superblock. Q8_0 does not — its block is 32 weights in 34
-    ; bytes — so a generator that hardcodes 256 is generic over the DECODE and
-    ; not over the BLOCK, and the Qwen lane could never instantiate it. `blockn`
-    ; is now the third thing that varies, alongside pfx and stride.
-    (defn qmb-step-n (pfx stride blockn)
-        (str_concat "uint idx = r * cols + j; uint blk = idx / "
-        (str_concat blockn
-        (str_concat "u; if (blk != curblk) { curblk = blk; b = blk * "
-        (str_concat stride
-        (str_concat "u; inv = "
-        (str_concat pfx
-        (str_concat "_inv(qb, b); } float w = "
-        (str_concat pfx
-        (str_concat "_wi(qb, b, int(idx - blk * "
-        (str_concat blockn
-                    "u), inv); for (uint i = 0; i < 8u; ++i) { uint t = t0 + i; if (t < ntok) { float pr = w * float(x[t * cols + j]); acc[i] = pr + acc[i]; } } }")))))))))))
-
-    ; the K-quant arity, byte-identical to what it always emitted
-    (defn qmb-step (pfx stride) (qmb-step-n pfx stride "256"))
-
-    ; THE BATCHED KERNEL. One SIMD group per (row, tile of 8 tokens). Grid is rows * ceil(ntok/8) * 32
-    ; and the threadgroup MUST be a multiple of 32. k counts DOWN so every accumulator keeps tb-dot's
-    ; right-fold direction, which is what makes this bit-identical to the lane kernel per token.
-    (defn qmb-batch-msl-n (fname pfx stride blockn)
-        (str_concat "kernel void "
-        (str_concat fname
-        (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant uint& ystride [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint g = gid / 32u; uint ntile = (ntok + 7u) / 8u; uint r = g / ntile; uint tile = g - r * ntile; if (r >= rows) return; uint t0 = tile * 8u; "
-        (str_concat (qmb-decl)
-        (str_concat "uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0) { k -= 1; uint j = lane + k * 32u; "
-        (str_concat (qmb-step-n pfx stride blockn)
-                    " for (uint i = 0; i < 8u; ++i) { float s = metal::simd_sum(acc[i]); uint t = t0 + i; if (lane == 0 && t < ntok) { y[t * ystride + r] = s; } } }")))))))
-
-    (defn qmb-batch-msl (fname pfx stride) (qmb-batch-msl-n fname pfx stride "256"))
-
-    ; ── Q8_0, the quant the Qwen lane actually runs ────────────────────────
-    ; The decode is read straight off q8-0-msl.fk's own lane kernel so the two
-    ; agree by construction rather than by hope: a 2-byte f16 scale at b, then 32
-    ; signed bytes. Scale per weight, exactly as q6k_wi and q4k_wi apply theirs.
-    ; Bit-exactness against the Q8_0 LANE kernel is a GPU claim and is not made
-    ; here — it is the harness's gate B2, and it needs a run.
-    (defn qmb-q80-helpers ()
-        (str_concat "static inline float2 q8_0_inv(device const uchar* qb, uint b) { "
-        (str_concat "ushort h = (ushort)qb[b] | ((ushort)qb[b + 1u] << 8); "
-        (str_concat "return float2(float(as_type<half>(h)), 0.0f); } "
-        (str_concat "static inline float q8_0_wi(device const uchar* qb, uint b, int i, float2 inv) { "
-                    "return inv.x * float((char)qb[b + 2u + (uint)i]); } ")))))
-
-    (defn qmb-q80-block () "32")
-    (defn qmb-q80-stride () "34")
-    (defn qmb-q80-batch ()
-        (str_concat (qmb-q80-helpers)
-            (qmb-batch-msl-n "form_q8_0_matmul_batch_f32" "q8_0"
-                (qmb-q80-stride) (qmb-q80-block))))
-
-    ; ── the shared-activation twin ─────────────────────────────────────────
-    ; The batched kernel above re-reads a tile's activations once per weight row: for a 17408 x 5120
-    ; FFN tensor at 577 tokens, 17408 row-walks over the same x. Timed alone on the Qwen lane
-    ; (2026-09-11) it ran at 146 to 458 GFLOPS against the
-    ; 25.77 TFLOPS the floor lens read. This twin hands a threadgroup G rows and stages the tile of x
-    ; in threadgroup memory one KC-wide chunk at a time, so each activation is read once per G rows.
-    ; Every (row, token) sum is walked in the batched kernel's own order — the chunks count down and
-    ; the lane's steps inside a chunk count down, so j = lane + 32k descends exactly as before — the
-    ; weight is decoded by the same helpers and simd_sum closes the same 32 partial sums. It answers
-    ; the batched kernel's bytes, not an epsilon of them. No helpers of its own:
-    ; it follows qmb-q80-batch in the unit. Grid: ceil(rows / G) * ntile * 32G, group 32G.
-    (defn qmb-batch-tg-msl-n (fname pfx stride blockn T G KC)
-        (str_concat "kernel void "
-        (str_concat fname
-        (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant uint& ystride [[buffer(6)]], uint gid [[thread_position_in_grid]]) { "
-        (str_concat (str_concat "threadgroup float xs[" (str_concat (int_to_str (mul T KC)) "]; "))
-        (str_concat (str_concat "uint gs = " (str_concat (int_to_str (mul 32 G)) "u; uint tid = gid % gs; uint grp = gid / gs; uint sg = tid / 32u; uint lane = tid % 32u; "))
-        (str_concat (str_concat "uint ntile = (ntok + " (str_concat (int_to_str (sub T 1)) (str_concat "u) / " (str_concat (int_to_str T) "u; uint rg = grp / ntile; uint tile = grp - rg * ntile; "))))
-        (str_concat (str_concat "uint r = rg * " (str_concat (int_to_str G) (str_concat "u + sg; uint t0 = tile * " (str_concat (int_to_str T) "u; bool live = r < rows; "))))
-        (str_concat (str_concat "float acc[" (str_concat (int_to_str T) (str_concat "]; for (uint i = 0; i < " (str_concat (int_to_str T) "u; ++i) { acc[i] = 0.0f; } uint curblk = 4294967295u; uint b = 0u; float2 inv = float2(0.0f, 0.0f); "))))
-        (str_concat (str_concat "uint c = (cols + " (str_concat (int_to_str (sub KC 1)) (str_concat "u) / " (str_concat (int_to_str KC) (str_concat "u; while (c > 0u) { c -= 1u; uint kc = c * " (str_concat (int_to_str KC) "u; "))))))
-        (str_concat "threadgroup_barrier(metal::mem_flags::mem_threadgroup); "
-        (str_concat (str_concat "for (uint q = tid; q < " (str_concat (int_to_str (mul T KC)) (str_concat "u; q += gs) { uint ti = q / " (str_concat (int_to_str KC) (str_concat "u; uint jj = q - ti * " (str_concat (int_to_str KC) "u; uint tq = t0 + ti; uint jq = kc + jj; xs[q] = (tq < ntok && jq < cols) ? x[tq * cols + jq] : 0.0f; } "))))))
-        (str_concat "threadgroup_barrier(metal::mem_flags::mem_threadgroup); "
-        (str_concat (str_concat "if (live) { uint m = " (str_concat (int_to_str (div KC 32)) "u; while (m > 0u) { m -= 1u; uint j = kc + lane + m * 32u; if (j < cols) { "))
-        (str_concat (str_concat "uint idx = r * cols + j; uint blk = idx / " (str_concat blockn (str_concat "u; if (blk != curblk) { curblk = blk; b = blk * " (str_concat stride (str_concat "u; inv = " (str_concat pfx (str_concat "_inv(qb, b); } float w = " (str_concat pfx (str_concat "_wi(qb, b, int(idx - blk * " (str_concat blockn "u), inv); "))))))))))
-        (str_concat (str_concat "for (uint i = 0; i < " (str_concat (int_to_str T) (str_concat "u; ++i) { uint t = t0 + i; if (t < ntok) { float pr = w * xs[i * " (str_concat (int_to_str KC) "u + (j - kc)]; acc[i] = pr + acc[i]; } } } } } } "))))
-                    (str_concat (str_concat "for (uint i = 0; i < " (str_concat (int_to_str T) "u; ++i) { float s = metal::simd_sum(acc[i]); uint t = t0 + i; if (live && lane == 0 && t < ntok) { y[t * ystride + r] = s; } } }")) "")))))))))))))))))
-
-    ; the Q8_0 instance the Qwen lane dispatches: eight tokens a tile (the batched kernel's own
-    ; tile, so the token tiling and every sum are unchanged), eight rows a group, 256-wide chunks
-    (defn qmb-q80-tg-t () 8)
-    (defn qmb-q80-tg-g () 8)
-    (defn qmb-q80-batch-tg ()
-        (qmb-batch-tg-msl-n "form_q8_0_matmul_batch_tg_f32" "q8_0"
-            (qmb-q80-stride) (qmb-q80-block) (qmb-q80-tg-t) (qmb-q80-tg-g) 256))
-    (defn qmb-tg-groups (rows ntok) (mul (div (add rows (sub (qmb-q80-tg-g) 1)) (qmb-q80-tg-g)) (qmb-ntile ntok)))
-
-    ; ── the matrix-unit twin ───────────────────────────────────────────────
-    ; The shared-activation twin kept every byte and did not move the time: gate and up ran as long
-    ; as before, because the batched kernel spends its time in scalar multiply-adds, one weight at a
-    ; time, and staging the activations changes none of them. This one spends it where the hardware
-    ; is: simdgroup_multiply_accumulate over 8x8 tiles, the unit llama-bench reports on this M4 Max
-    ; ("simdgroup matrix mul. = true") and ear-msl.fk's ear_gemm_f already uses. Its shape is that
-    ; kernel's: a 32-token x 32-row output tile, 256 threads as 8 simdgroups each owning an 8x16 block
-    ; through two accumulators, K walked 32 at a time — and a Q8_0 block IS 32 weights, so each step
-    ; dequantizes one block per row into threadgroup memory (d * q as float: 19 bits, which half would
-    ; round) beside the 32 x 32 activations, and the tile lands through the same memory for a bounded
-    ; write. The hardware chooses the association, so this answers to an epsilon, and it is the one
-    ; the lane already names: any association of `cols` terms is bounded by qmb-bound-coeff(cols) * u *
-    ; sum|term| (q8-0-matmul-mma-band). Dispatched as threadgroups: ceil(ntok/32) * ceil(rows/32), 256.
-    (defn qmb-q80-mma ()
-        (str_concat "kernel void form_q8_0_matmul_mma_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant uint& ystride [[buffer(6)]], uint gr [[threadgroup_position_in_grid]], uint lt [[thread_index_in_threadgroup]]) { "
-        (str_concat "threadgroup float xs[1024]; threadgroup float ws[1024]; "
-        (str_concat "uint tilesN = (rows + 31u) / 32u; uint tgx = gr % tilesN; uint tgy = gr / tilesN; uint n0 = tgx * 32u; uint t0 = tgy * 32u; "
-        (str_concat "uint sg = lt / 32u; uint r4 = sg / 2u; uint c2 = sg - r4 * 2u; "
-        (str_concat "metal::simdgroup_float8x8 acc0 = metal::simdgroup_float8x8(0.0f); metal::simdgroup_float8x8 acc1 = metal::simdgroup_float8x8(0.0f); "
-        (str_concat "uint xr = lt / 8u; uint xc = (lt % 8u) * 4u; uint xt = t0 + xr; uint wn = lt / 8u; uint wc = (lt % 8u) * 4u; uint wrow = n0 + wn; "
-        (str_concat "for (uint k0 = 0u; k0 < cols; k0 += 32u) { "
-        (str_concat "for (uint j = 0u; j < 4u; j++) { xs[xr * 32u + xc + j] = (xt < ntok) ? x[xt * cols + k0 + xc + j] : 0.0f; } "
-        (str_concat "float d = 0.0f; uint b = 0u; if (wrow < rows) { b = ((wrow * cols + k0) / 32u) * 34u; ushort h = (ushort)qb[b] | ((ushort)qb[b + 1u] << 8); d = float(as_type<half>(h)); } "
-        (str_concat "for (uint j = 0u; j < 4u; j++) { ws[(wc + j) * 32u + wn] = (wrow < rows) ? d * float((char)qb[b + 2u + wc + j]) : 0.0f; } "
-        (str_concat "threadgroup_barrier(metal::mem_flags::mem_threadgroup); "
-        (str_concat "for (uint kb = 0u; kb < 4u; kb++) { metal::simdgroup_float8x8 a; metal::simdgroup_float8x8 b0m; metal::simdgroup_float8x8 b1m; "
-        (str_concat "metal::simdgroup_load(a, xs + (r4 * 8u) * 32u + kb * 8u, 32); metal::simdgroup_load(b0m, ws + (kb * 8u) * 32u + c2 * 16u, 32); metal::simdgroup_load(b1m, ws + (kb * 8u) * 32u + c2 * 16u + 8u, 32); "
-        (str_concat "metal::simdgroup_multiply_accumulate(acc0, a, b0m, acc0); metal::simdgroup_multiply_accumulate(acc1, a, b1m, acc1); } "
-        (str_concat "threadgroup_barrier(metal::mem_flags::mem_threadgroup); } "
-        (str_concat "metal::simdgroup_store(acc0, xs + (r4 * 8u) * 32u + c2 * 16u, 32); metal::simdgroup_store(acc1, xs + (r4 * 8u) * 32u + c2 * 16u + 8u, 32); "
-        (str_concat "threadgroup_barrier(metal::mem_flags::mem_threadgroup); "
-                    "uint tx = lt % 16u; uint ty = lt / 16u; for (uint i = 0u; i < 2u; i++) { uint t = t0 + ty * 2u + i; if (t >= ntok) { continue; } for (uint j = 0u; j < 2u; j++) { uint n = n0 + tx * 2u + j; if (n >= rows) { continue; } y[t * ystride + n] = xs[(ty * 2u + i) * 32u + tx * 2u + j]; } } }"))))))))))))))))))
-    (defn qmb-mma-groups (rows ntok) (mul (div (add ntok 31) 32) (div (add rows 31) 32)))
-
-    (defn qmb-msl-appendix ()
-        (str_concat (qmb-batch-msl "form_q6k_matmul_batch_f32" "q6k" "210")
-                    (qmb-batch-msl "form_q4k_matmul_batch_f32" "q4k" "144")))
-
-    0)
+// qk-matmul-batch.fk — the quantized matVEC made a matMUL: one weight decode serving TB activation
+// columns at once, so a prompt is one dispatch per weight tensor instead of one dispatch per token.
+//
+// WHY, AND THE MEASUREMENT CHOSE IT AND THEN CORRECTED IT TWICE. Stone 7 was sent at PREFILL. The
+// carrier ran the full 28-layer forward once per PROMPT token, so a P-token prompt loaded all 2.0 GB of
+// weights P times and used each weight once. Measured on the lane path before this cell: prefill 0.461 s
+// for 6 tokens = 76.8 ms/token, against decode's 81.9 ms/token — the same cost per token, which is
+// exactly what token-at-a-time looks like from outside. 13.0 prefill tok/s against an external
+// ollama oracle's 640.94 on this machine and model: 49.3x behind, the largest single gap in the program.
+//
+// The lever this cell reaches for is the one Stone 5's refutation NAMES. Stone 5 measured that this
+// body's inner loop is bound by PER-WEIGHT ALU — the f16 super-scale decode and the index
+// decomposition — and NOT by loading the activation. That is precisely why llama.cpp's `nr0` register
+// blocking made it monotonically SLOWER (row 835, boundborrow): nr0 amortizes the ACTIVATION load
+// across nr0 weight rows, and the activation load was never the cost. Batching is the mirror image:
+// it amortizes the WEIGHT DECODE across TB activation columns, and the weight decode is measured to be
+// the cost. Same machine, same kernel spine, opposite lever, opposite result.
+//
+// THE FIRST CORRECTION, and it is the surprising one. Batching does NOT scale with P. Measured on the
+// real blob, one resident buffer, best of 3, against P sequential lane matvecs in one command buffer:
+//
+//   shape                 P=1     P=6     P=32    P=128   P=512     best TB
+//   Q4_K 3072x3072       0.92x   2.05x   3.34x   4.12x   3.91x        8
+//   Q4_K 8192x3072       0.92x   2.15x   3.53x   3.88x   3.99x        8
+//   Q6_K 3072x8192       0.98x   2.48x   4.26x   4.77x   4.62x        8
+//   Q6_K 128256x3072     0.97x   3.61x   4.96x   5.19x   4.97x       16
+//
+// It PLATEAUS at ~4-5x and goes no further, and the plateau is not a mystery — it measures the split
+// of the inner loop. Write D for the amortizable per-weight work (decode) and L for the per-token work
+// that batching cannot remove (the activation load and the multiply-add). Per token, before: D + L.
+// After, at tile TB: D/TB + L. At TB = 8 the observed 4x gives D + L = 4*(D/8 + L), i.e. D = 6L. So
+// the CEILING of this lever, at TB -> infinity, is (D+L)/L = 7x — not P, and never was. The number
+// that says "the weight decode is 6/7 of the inner loop" was not available before this cell; it is now,
+// and it prices every future stone that attacks the decode itself.
+//
+// THE SECOND CORRECTION, and it refuted my own hypothesis inside this stone. At TB = 8 the tile's
+// activation loads x[t*cols + j] are `cols` floats apart — 12 KB of stride between the loads of one
+// tile. That looked like the obvious reason the plateau sits at 4 and not 7, so a COLUMN-MAJOR twin was
+// built (xc[j*ntok + t], the same tile's loads contiguous) and measured against the row-major one at
+// identical arithmetic:
+//
+//   shape                P=6     P=32    P=128   P=512      (col-major / row-major, >1 = col wins)
+//   Q4_K 3072x3072      2.01x   0.90x   0.88x   0.53x
+//   Q4_K 8192x3072      1.20x   0.94x   0.93x   0.69x
+//   Q6_K 3072x8192      1.12x   0.95x   0.94x   0.79x
+//   Q6_K 128256x3072    1.06x   0.94x   0.93x   0.69x
+//
+// Column-major is SLOWER everywhere the batch is big enough to matter, and worst exactly where the
+// stride argument predicted it would be best. The strided load is not the plateau. Row-major stays —
+// which is also the layout the rest of the pipeline already has, so the win costs no transpose. Recorded
+// here rather than deleted, because a refuted hypothesis with its numbers is the only thing that stops
+// the next stone re-running it.
+//
+// WHAT THIS CELL DOES NOT NEED, and it is the best property it has: NO EPSILON. Within a lane the fold
+// for token t is `pr + acc` over exactly the same columns in exactly the same k-DOWN order as
+// qk-matvec-lane.fk's kernel, and the cross-lane reduction is the same metal::simd_sum over the same 32
+// partials. Nothing is reassociated by tiling — the tile index only decides WHICH accumulator a product
+// lands in, never in what order any one accumulator is folded. The batched result is therefore
+// BIT-IDENTICAL to P separate lane matvecs, not merely inside a bound. Measured that way and not
+// asserted: every shape, every P in {1,6,32,128,512}, every TB in {1,2,4,8,16} — zero differing floats
+// out of P*rows. qk-matvec-split.fk's derived bound at parts = 32 continues to cover this cell's
+// distance from the ATTESTANT, unchanged and with no new derivation, for the same reason
+// qk-matvec-lane.fk gave: any association of 32 terms has depth at most 31 < 32.
+//
+// THE RENTED ORACLE, READ AND THEN MEASURED AGAINST. llama.cpp's ggml-metal (MIT) carries
+// `kernel_mul_mm` — the batched matmul this stone is about, and the kernel behind the oracle's 640.94
+// prefill tok/s. It was read for SHAPE only; no MSL was pasted. Its shape is a 64x32 output tile with
+// NK = 32, the quantized weights DEQUANTIZED INTO THREADGROUP MEMORY and the product taken by
+// `simdgroup_multiply_accumulate` over `simdgroup_float8x8` hardware matrix tiles. Two of its choices
+// are not available to this cell at this cell's numeric contract, and saying so is the whole content of
+// renting rather than copying:
+//   * IT STAGES THE WEIGHTS AS half. The staged type is f16 (simdgroup_half8x8 dominates the unit), so
+//     every dequantized weight is rounded to f16 before it is multiplied. That is not a reassociation —
+//     it is a precision reduction, a strictly larger error class than any association bound, and it
+//     would give up Stone 3's standing claim outright (the GPU dequant
+//     equals Form's BIT FOR BIT, one rounding each side).
+//   * ITS ACCUMULATION IS A HARDWARE MATRIX UNIT whose association Metal does not specify anywhere.
+//     The 32-term argument that lets simd_sum in without a new derivation does not reach an 8x8x8
+//     matrix-multiply-accumulate: its internal tree is over a different term count and is not bounded
+//     by anything this program has derived.
+//
+// AND ITS CENTRAL LEVER WAS MEASURED IN OUR REGIME BEFORE BEING BELIEVED, which is exactly what row 835
+// asks. mul_mm's whole point is a tile far wider than 8 — 32 columns at once. The rentable version of
+// that for a REGISTER-tiled kernel is simply a larger TB. Swept on real tensors at P = 256, best of 3:
+//
+//   TB               1       2       4       8      16      32      64
+//   Q4_K 3072x3072  1.00x   1.84x   2.97x   4.17x   3.22x   2.74x   2.42x
+//   Q6_K 3072x8192  1.00x   1.88x   3.27x   4.99x   4.15x   2.80x   1.98x
+//
+// The lever REVERSES past 8, monotonically, at both shapes — the same sign of failure `nr0` showed
+// Stone 5, for the same kind of reason: past 8 accumulators the register pressure costs more than the
+// extra amortization buys. mul_mm can hold 32 because it does NOT hold 32 accumulators per thread; it
+// holds eight MATRIX registers and puts the weights in threadgroup memory. Take the tile width without
+// the matrix units and the f16 staging and it goes backwards. So TB = 8 is chosen by this table, and
+// the reference's number is recorded as the reference's, correct for its constraints and not for ours.
+//
+// WHY THIS CELL EMITS EXACTLY ONE NEW KERNEL PAIR, and nothing else. A batched prefill also needs
+// RMSNorm, RoPE and GQA attention over P positions. It would have been natural to write batched twins
+// of all three — and that is a SECOND COPY of three transcriptions that can drift from
+// llama-decode-msl.fk's, silently, with the drifted one being whichever nobody re-derives. It is not
+// needed. Those three ops are INDEPENDENT ACROSS TOKENS, so the carrier dispatches the EXISTING decode
+// kernels once per token into ONE concurrent encoder with no barrier between them: same kernel, same
+// binary, bit-exact by construction rather than by argument, and the P dispatches overlap instead of
+// serializing. SwiGLU and the residual add are elementwise, so the existing kernels run ONCE over
+// P*n contiguous elements with no change at all. The only thing that had to become batched is the thing
+// the measurement said was the cost.
+//
+// THE ATTESTANT STAYS, UNTOUCHED (row 825). q6k-msl.fk, q4k-msl.fk, qk-matvec-split.fk,
+// qk-matvec-lane.fk and llama-decode-msl.fk are not edited by this stone — not one character. This cell
+// is an APPENDIX that calls qk-matvec-lane.fk's q6k_inv/q6k_wi/q4k_inv/q4k_wi spine, so it must be
+// emitted into the same translation unit and AFTER qml-msl-appendix.
+//
+// THE RADIUS THIS CELL SPEAKS FOR.
+//   * A SIMD width of exactly 32 and a threadgroup that is a multiple of 32 — qk-matvec-lane.fk's
+//     radius, inherited whole. On a device where threadExecutionWidth != 32 this kernel is WRONG, not
+//     slow, and the carrier must read it and refuse (row 826, aporon).
+//   * The output layout is y[t*rows + r]: token-major, each token's result contiguous in `rows`. That
+//     is what makes the k/v projections land straight in the pooled KV cache with no copy — the cache's
+//     per-position stride IS nkv*head_dim, which IS `rows` for those two tensors. It is an identity the
+//     carrier depends on, so it is stated here rather than discovered later.
+//   * The activation layout is x[t*cols + j]: token-major, matching. Column-major was measured and
+//     rejected above.
+//   * TB is 8, a literal in the emitted text, chosen by the sweep above. It is not a free parameter the
+//     carrier can pass: a dynamically-indexed accumulator array would spill to local memory and lose
+//     the entire point. `ntok` need NOT be a multiple of 8 — the tail tile's inactive lanes are guarded
+//     and contribute nothing.
+//   * ntok >= 1, cols >= 1, rows >= 1. Nothing here speaks for f16/bf16 or for any quant other than the
+//     Q6_K / Q4_K whose decomposition qk-matvec-lane.fk transcribes.
+//   * It speaks for the ARITHMETIC of a batch. It says nothing about batch > 1 as a SERVING feature:
+//     that additionally needs per-sequence KV cache regions and a per-sequence position, and is
+//     deliberately not built here.
+//
+// Kin: qk-matvec-lane.fk (q6k_inv/q6k_wi/q4k_inv/q4k_wi — the hoisted decomposition this cell reuses
+// verbatim, and the per-token association it must reproduce exactly), qk-matvec-split.fk (qms-bound-coeff
+// — the epsilon that still covers this cell unchanged), q6k-msl.fk / q4k-msl.fk (THE ATTESTANT),
+// llama-decode-msl.fk (the per-token ops the carrier dispatches P times instead of rewriting).
+//
+// preludes: form-stdlib/core.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk
+//
+section [form.bml] {
+    // ================= the transcription, read back into Form =================
+    // the accumulator tile. Named so the radius has a symbol to point at and the band can state what
+    // it speaks for; a literal in the emitted text for the reason the radius gives.
+    def qmb-tile() = 8;
+    // how many tiles a batch of `ntok` tokens is cut into, and which tokens tile `p` carries.
+    def qmb-ntile(ntok) = (ntok + (qmb-tile() - 1)) / qmb-tile();
+    def qmb-t0(p) = p * qmb-tile();
+    // the tail tile is short; `if (t < ntok)` in the kernel is this count, and the band checks the cover
+    // rather than trusting that a guard and a count agree.
+    def qmb-tile-n(p, ntok) = qmb-t0(p) >= ntok ? 0 : qmb-t0(p) + qmb-tile() >= ntok ? ntok - qmb-t0(p) : qmb-tile();
+    // THE COVER over tokens. Every token of the batch is carried by exactly one (tile, slot).
+    def qmb-count-loop(p, ntok, acc) = p >= qmb-ntile(ntok) ? acc : qmb-count-loop(p + 1, ntok, acc + qmb-tile-n(p, ntok));
+    def qmb-cover-count(ntok) = qmb-count-loop(0, ntok, 0);
+    // THE GRID. One SIMD group per (row, tile); the kernel recovers both from gid/32 the same way.
+    def qmb-groups(rows, ntok) = rows * qmb-ntile(ntok);
+    def qmb-row-of(g, ntok) = g / qmb-ntile(ntok);
+    def qmb-tile-of(g, ntok) = g - qmb-row-of(g, ntok) * qmb-ntile(ntok);
+    // THE IDENTITY THIS CELL LIVES OR DIES BY. Token t's sum inside the batched kernel is the lane
+    // kernel's sum for that token — same lanes, same k-down chain, same 32-partial reduction. Tiling
+    // chooses an ACCUMULATOR, never an order. Expressed here as the same call, so the band can watch
+    // the two agree on fixtures instead of being told a paragraph.
+    def qmb-token-sum(xs, cols) = qml-lane-sum(xs, cols);
+    // the bound's coefficient, unchanged from the lane kernel and therefore from the split kernel at
+    // parts = 32. "No new derivation" is a checkable equality, not a claim.
+    def qmb-bound-coeff(cols) = qml-bound-coeff(cols);
+    // ================= the emitted MSL =================
+    // No helper spine and no header of its own: q6k_inv / q6k_wi / q4k_inv / q4k_wi come from
+    // qk-matvec-lane.fk's appendix and <metal_stdlib> leads the unit already. That is exactly why this
+    // is an APPENDIX TO AN APPENDIX and must be emitted after qml-msl-appendix.
+    // the eight accumulators, declared and cleared. A literal bound, so the compiler unrolls and keeps
+    // them in registers — the whole win is that these are registers and not local memory.
+    def qmb-decl() = "float acc[8]; for (uint i = 0; i < 8u; ++i) { acc[i] = 0.0f; } uint curblk = 4294967295u; uint b = 0u; float2 inv = float2(0.0f, 0.0f); ";
+    // the per-weight inner step: decode the weight ONCE, then spend it on all eight tokens of the tile.
+    // `pfx` is q6k / q4k and `stride` is that quant's superblock byte stride as a literal — the same two
+    // parameters qml-step takes, reaching into the same two functions.
+    // The 256 was a literal because the two quants this cell was written for both
+    // use a 256-weight superblock. Q8_0 does not — its block is 32 weights in 34
+    // bytes — so a generator that hardcodes 256 is generic over the DECODE and
+    // not over the BLOCK, and the Qwen lane could never instantiate it. `blockn`
+    // is now the third thing that varies, alongside pfx and stride.
+    def qmb-step-n(pfx, stride, blockn) = str_concat("uint idx = r * cols + j; uint blk = idx / ", str_concat(blockn, str_concat("u; if (blk != curblk) { curblk = blk; b = blk * ", str_concat(stride, str_concat("u; inv = ", str_concat(pfx, str_concat("_inv(qb, b); } float w = ", str_concat(pfx, str_concat("_wi(qb, b, int(idx - blk * ", str_concat(blockn, "u), inv); for (uint i = 0; i < 8u; ++i) { uint t = t0 + i; if (t < ntok) { float pr = w * float(x[t * cols + j]); acc[i] = pr + acc[i]; } } }"))))))))));
+    // the K-quant arity, byte-identical to what it always emitted
+    def qmb-step(pfx, stride) = qmb-step-n(pfx, stride, "256");
+    // THE BATCHED KERNEL. One SIMD group per (row, tile of 8 tokens). Grid is rows * ceil(ntok/8) * 32
+    // and the threadgroup MUST be a multiple of 32. k counts DOWN so every accumulator keeps tb-dot's
+    // right-fold direction, which is what makes this bit-identical to the lane kernel per token.
+    def qmb-batch-msl-n(fname, pfx, stride, blockn) = str_concat("kernel void ", str_concat(fname, str_concat(" (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant uint& ystride [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint g = gid / 32u; uint ntile = (ntok + 7u) / 8u; uint r = g / ntile; uint tile = g - r * ntile; if (r >= rows) return; uint t0 = tile * 8u; ", str_concat(qmb-decl(), str_concat("uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0) { k -= 1; uint j = lane + k * 32u; ", str_concat(qmb-step-n(pfx, stride, blockn), " for (uint i = 0; i < 8u; ++i) { float s = metal::simd_sum(acc[i]); uint t = t0 + i; if (lane == 0 && t < ntok) { y[t * ystride + r] = s; } } }"))))));
+    def qmb-batch-msl(fname, pfx, stride) = qmb-batch-msl-n(fname, pfx, stride, "256");
+    // ── Q8_0, the quant the Qwen lane actually runs ────────────────────────
+    // The decode is read straight off q8-0-msl.fk's own lane kernel so the two
+    // agree by construction rather than by hope: a 2-byte f16 scale at b, then 32
+    // signed bytes. Scale per weight, exactly as q6k_wi and q4k_wi apply theirs.
+    // Bit-exactness against the Q8_0 LANE kernel is a GPU claim and is not made
+    // here — it is the harness's gate B2, and it needs a run.
+    def qmb-q80-helpers() = str_concat("static inline float2 q8_0_inv(device const uchar* qb, uint b) { ", str_concat("ushort h = (ushort)qb[b] | ((ushort)qb[b + 1u] << 8); ", str_concat("return float2(float(as_type<half>(h)), 0.0f); } ", str_concat("static inline float q8_0_wi(device const uchar* qb, uint b, int i, float2 inv) { ", "return inv.x * float((char)qb[b + 2u + (uint)i]); } "))));
+    def qmb-q80-block() = "32";
+    def qmb-q80-stride() = "34";
+    def qmb-q80-batch() = str_concat(qmb-q80-helpers(), qmb-batch-msl-n("form_q8_0_matmul_batch_f32", "q8_0", qmb-q80-stride(), qmb-q80-block()));
+    // ── the shared-activation twin ─────────────────────────────────────────
+    // The batched kernel above re-reads a tile's activations once per weight row: for a 17408 x 5120
+    // FFN tensor at 577 tokens, 17408 row-walks over the same x. Timed alone on the Qwen lane
+    // (2026-09-11) it ran at 146 to 458 GFLOPS against the
+    // 25.77 TFLOPS the floor lens read. This twin hands a threadgroup G rows and stages the tile of x
+    // in threadgroup memory one KC-wide chunk at a time, so each activation is read once per G rows.
+    // Every (row, token) sum is walked in the batched kernel's own order — the chunks count down and
+    // the lane's steps inside a chunk count down, so j = lane + 32k descends exactly as before — the
+    // weight is decoded by the same helpers and simd_sum closes the same 32 partial sums. It answers
+    // the batched kernel's bytes, not an epsilon of them. No helpers of its own:
+    // it follows qmb-q80-batch in the unit. Grid: ceil(rows / G) * ntile * 32G, group 32G.
+    def qmb-batch-tg-msl-n(fname, pfx, stride, blockn, T, G, KC) = str_concat("kernel void ", str_concat(fname, str_concat(" (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant uint& ystride [[buffer(6)]], uint gid [[thread_position_in_grid]]) { ", str_concat(str_concat("threadgroup float xs[", str_concat(int_to_str(T * KC), "]; ")), str_concat(str_concat("uint gs = ", str_concat(int_to_str(32 * G), "u; uint tid = gid % gs; uint grp = gid / gs; uint sg = tid / 32u; uint lane = tid % 32u; ")), str_concat(str_concat("uint ntile = (ntok + ", str_concat(int_to_str(T - 1), str_concat("u) / ", str_concat(int_to_str(T), "u; uint rg = grp / ntile; uint tile = grp - rg * ntile; ")))), str_concat(str_concat("uint r = rg * ", str_concat(int_to_str(G), str_concat("u + sg; uint t0 = tile * ", str_concat(int_to_str(T), "u; bool live = r < rows; ")))), str_concat(str_concat("float acc[", str_concat(int_to_str(T), str_concat("]; for (uint i = 0; i < ", str_concat(int_to_str(T), "u; ++i) { acc[i] = 0.0f; } uint curblk = 4294967295u; uint b = 0u; float2 inv = float2(0.0f, 0.0f); ")))), str_concat(str_concat("uint c = (cols + ", str_concat(int_to_str(KC - 1), str_concat("u) / ", str_concat(int_to_str(KC), str_concat("u; while (c > 0u) { c -= 1u; uint kc = c * ", str_concat(int_to_str(KC), "u; ")))))), str_concat("threadgroup_barrier(metal::mem_flags::mem_threadgroup); ", str_concat(str_concat("for (uint q = tid; q < ", str_concat(int_to_str(T * KC), str_concat("u; q += gs) { uint ti = q / ", str_concat(int_to_str(KC), str_concat("u; uint jj = q - ti * ", str_concat(int_to_str(KC), "u; uint tq = t0 + ti; uint jq = kc + jj; xs[q] = (tq < ntok && jq < cols) ? x[tq * cols + jq] : 0.0f; } ")))))), str_concat("threadgroup_barrier(metal::mem_flags::mem_threadgroup); ", str_concat(str_concat("if (live) { uint m = ", str_concat(int_to_str(KC / 32), "u; while (m > 0u) { m -= 1u; uint j = kc + lane + m * 32u; if (j < cols) { ")), str_concat(str_concat("uint idx = r * cols + j; uint blk = idx / ", str_concat(blockn, str_concat("u; if (blk != curblk) { curblk = blk; b = blk * ", str_concat(stride, str_concat("u; inv = ", str_concat(pfx, str_concat("_inv(qb, b); } float w = ", str_concat(pfx, str_concat("_wi(qb, b, int(idx - blk * ", str_concat(blockn, "u), inv); ")))))))))), str_concat(str_concat("for (uint i = 0; i < ", str_concat(int_to_str(T), str_concat("u; ++i) { uint t = t0 + i; if (t < ntok) { float pr = w * xs[i * ", str_concat(int_to_str(KC), "u + (j - kc)]; acc[i] = pr + acc[i]; } } } } } } ")))), str_concat(str_concat("for (uint i = 0; i < ", str_concat(int_to_str(T), "u; ++i) { float s = metal::simd_sum(acc[i]); uint t = t0 + i; if (live && lane == 0 && t < ntok) { y[t * ystride + r] = s; } } }")), ""))))))))))))))));
+    // the Q8_0 instance the Qwen lane dispatches: eight tokens a tile (the batched kernel's own
+    // tile, so the token tiling and every sum are unchanged), eight rows a group, 256-wide chunks
+    def qmb-q80-tg-t() = 8;
+    def qmb-q80-tg-g() = 8;
+    def qmb-q80-batch-tg() = qmb-batch-tg-msl-n("form_q8_0_matmul_batch_tg_f32", "q8_0", qmb-q80-stride(), qmb-q80-block(), qmb-q80-tg-t(), qmb-q80-tg-g(), 256);
+    def qmb-tg-groups(rows, ntok) = (rows + (qmb-q80-tg-g() - 1)) / qmb-q80-tg-g() * qmb-ntile(ntok);
+    // ── the matrix-unit twin ───────────────────────────────────────────────
+    // The shared-activation twin kept every byte and did not move the time: gate and up ran as long
+    // as before, because the batched kernel spends its time in scalar multiply-adds, one weight at a
+    // time, and staging the activations changes none of them. This one spends it where the hardware
+    // is: simdgroup_multiply_accumulate over 8x8 tiles, the unit llama-bench reports on this M4 Max
+    // ("simdgroup matrix mul. = true") and ear-msl.fk's ear_gemm_f already uses. Its shape is that
+    // kernel's: a 32-token x 32-row output tile, 256 threads as 8 simdgroups each owning an 8x16 block
+    // through two accumulators, K walked 32 at a time — and a Q8_0 block IS 32 weights, so each step
+    // dequantizes one block per row into threadgroup memory (d * q as float: 19 bits, which half would
+    // round) beside the 32 x 32 activations, and the tile lands through the same memory for a bounded
+    // write. The hardware chooses the association, so this answers to an epsilon, and it is the one
+    // the lane already names: any association of `cols` terms is bounded by qmb-bound-coeff(cols) * u *
+    // sum|term| (q8-0-matmul-mma-band). Dispatched as threadgroups: ceil(ntok/32) * ceil(rows/32), 256.
+    def qmb-q80-mma() = str_concat("kernel void form_q8_0_matmul_mma_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant uint& ystride [[buffer(6)]], uint gr [[threadgroup_position_in_grid]], uint lt [[thread_index_in_threadgroup]]) { ", str_concat("threadgroup float xs[1024]; threadgroup float ws[1024]; ", str_concat("uint tilesN = (rows + 31u) / 32u; uint tgx = gr % tilesN; uint tgy = gr / tilesN; uint n0 = tgx * 32u; uint t0 = tgy * 32u; ", str_concat("uint sg = lt / 32u; uint r4 = sg / 2u; uint c2 = sg - r4 * 2u; ", str_concat("metal::simdgroup_float8x8 acc0 = metal::simdgroup_float8x8(0.0f); metal::simdgroup_float8x8 acc1 = metal::simdgroup_float8x8(0.0f); ", str_concat("uint xr = lt / 8u; uint xc = (lt % 8u) * 4u; uint xt = t0 + xr; uint wn = lt / 8u; uint wc = (lt % 8u) * 4u; uint wrow = n0 + wn; ", str_concat("for (uint k0 = 0u; k0 < cols; k0 += 32u) { ", str_concat("for (uint j = 0u; j < 4u; j++) { xs[xr * 32u + xc + j] = (xt < ntok) ? x[xt * cols + k0 + xc + j] : 0.0f; } ", str_concat("float d = 0.0f; uint b = 0u; if (wrow < rows) { b = ((wrow * cols + k0) / 32u) * 34u; ushort h = (ushort)qb[b] | ((ushort)qb[b + 1u] << 8); d = float(as_type<half>(h)); } ", str_concat("for (uint j = 0u; j < 4u; j++) { ws[(wc + j) * 32u + wn] = (wrow < rows) ? d * float((char)qb[b + 2u + wc + j]) : 0.0f; } ", str_concat("threadgroup_barrier(metal::mem_flags::mem_threadgroup); ", str_concat("for (uint kb = 0u; kb < 4u; kb++) { metal::simdgroup_float8x8 a; metal::simdgroup_float8x8 b0m; metal::simdgroup_float8x8 b1m; ", str_concat("metal::simdgroup_load(a, xs + (r4 * 8u) * 32u + kb * 8u, 32); metal::simdgroup_load(b0m, ws + (kb * 8u) * 32u + c2 * 16u, 32); metal::simdgroup_load(b1m, ws + (kb * 8u) * 32u + c2 * 16u + 8u, 32); ", str_concat("metal::simdgroup_multiply_accumulate(acc0, a, b0m, acc0); metal::simdgroup_multiply_accumulate(acc1, a, b1m, acc1); } ", str_concat("threadgroup_barrier(metal::mem_flags::mem_threadgroup); } ", str_concat("metal::simdgroup_store(acc0, xs + (r4 * 8u) * 32u + c2 * 16u, 32); metal::simdgroup_store(acc1, xs + (r4 * 8u) * 32u + c2 * 16u + 8u, 32); ", str_concat("threadgroup_barrier(metal::mem_flags::mem_threadgroup); ", "uint tx = lt % 16u; uint ty = lt / 16u; for (uint i = 0u; i < 2u; i++) { uint t = t0 + ty * 2u + i; if (t >= ntok) { continue; } for (uint j = 0u; j < 2u; j++) { uint n = n0 + tx * 2u + j; if (n >= rows) { continue; } y[t * ystride + n] = xs[(ty * 2u + i) * 32u + tx * 2u + j]; } } }")))))))))))))))));
+    def qmb-mma-groups(rows, ntok) = (ntok + 31) / 32 * ((rows + 31) / 32);
+    def qmb-msl-appendix() = str_concat(qmb-batch-msl("form_q6k_matmul_batch_f32", "q6k", "210"), qmb-batch-msl("form_q4k_matmul_batch_f32", "q4k", "144"));
+    0;
+}

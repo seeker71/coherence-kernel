@@ -1,647 +1,304 @@
-; form-cli-peer-agent.fk -- a resident local Form peer receives typed tasks,
-; may request a NodeID recipe through the scannerless live cursor, observes the
-; physical result in the same KV stream, and keeps the residence for the next
-; task.  The live door that keeps this residence is observe/form-cli-peer-contribution-live.fk.
-;
-; A contribution is deliberately narrower than fluent speech.  Recipe work
-; counts only when the cursor accepted one request and typed callback evidence
-; says the carrier executed.  Non-tool research/evaluation speech can be
-; assessed afterward through review-operationalization's fresh primary +
-; negative-control rows; incomplete, stale, duplicate, or unbound prose stays
-; unvalidated and contributes zero.
-;
-; preludes: form-stdlib/peer-task-frame.fk form-stdlib/form-cli-recipe-exec-session.fk form-stdlib/form-cli-nodeid-knowledge-session.fk form-stdlib/form-nodeid-knowledge-routed-query.fk form-stdlib/form-agent-repo-patch-frame.fk observe/review-operationalization.fk
-
-(do
-    ; the task-frame grammar lives in peer-task-frame.fk (preluded), so
-    ; senders and monitors speak it without loading this knowledge stack.
-
-    ; A meaning already taught during this residence does not need its bytes
-    ; replayed on every turn. The exact kind/payload and action are interned as
-    ; separate nodes; the hot task needs only its payload coordinate plus the
-    ; explicit action verb. The action node remains available to the resident
-    ; registry, but the verb already carries that relation to the current model.
-    ; These coordinates are residence-local by design and are never used as
-    ; restart identity or accepted from another process without resolution here.
-    (defn fcpa-task-ref-category ()
-        (intern_trivial_string "form-cli-peer-task-reference-v1"))
-    (defn fcpa-action-ref-category ()
-        (intern_trivial_string "form-cli-peer-action-reference-v1"))
-    (defn fcpa-task-ref (kind payload)
-        (intern_node (fcpa-task-ref-category)
-            (list (intern_trivial_string kind)
-                  (intern_trivial_string payload))))
-    (defn fcpa-action-ref (action)
-        (intern_node (fcpa-action-ref-category)
-            (list (intern_trivial_string action))))
-    (defn fcpa-task-ref? (node)
-        (if (nothing? node) 0
-            (if (not (node_eq (node_category node)
-                              (fcpa-task-ref-category))) 0
-                (if (eq (len (node_children node)) 2) 1 0))))
-    (defn fcpa-action-ref? (node)
-        (if (nothing? node) 0
-            (if (not (node_eq (node_category node)
-                              (fcpa-action-ref-category))) 0
-                (if (eq (len (node_children node)) 1) 1 0))))
-    (defn fcpa-task-ref-surface (task-ref action-ref)
-        (if (or (eq (fcpa-task-ref? task-ref) 0)
-                (eq (fcpa-action-ref? action-ref) 0))
-            "(agent-task nothing)"
-            (str_concat "(agent-task "
-                (str_concat (node_value (head (node_children action-ref)))
-                (str_concat " "
-                (str_concat (frex-node-coordinate task-ref) ")"))))))
-
-    ; An alias is an announced, residence-local compression of a NodeID.  It
-    ; is never a global symbol table: each registry is supplied by the live
-    ; caller, validates every binding, and preserves absent and competing
-    ; meanings as typed observations instead of silently choosing one.
-    (defn fcpa-alias-binding-category ()
-        (intern_trivial_string "form-cli-peer-alias-binding-v1"))
-    (defn fcpa-alias-registry-category ()
-        (intern_trivial_string "form-cli-peer-alias-registry-v1"))
-    (defn fcpa-alias-byte? (byte)
-        (if (and (ge byte 97) (le byte 122)) 1
-            (if (and (ge byte 48) (le byte 57)) 1
-                (if (eq byte 45) 1 0))))
-    (defn fcpa-alias-safe-at? (alias at)
-        (if (eq at (str_len alias)) 1
-            (if (eq (fcpa-alias-byte? (str_byte_at alias at)) 1)
-                (fcpa-alias-safe-at? alias (add at 1)) 0)))
-    (defn fcpa-alias-safe? (alias)
-        (if (or (nothing? alias) (eq (str_len alias) 0)) 0
-            (fcpa-alias-safe-at? alias 0)))
-    (defn fcpa-alias-binding (alias target)
-        (intern_node (fcpa-alias-binding-category)
-            (list (intern_trivial_string alias) target)))
-    (defn fcpa-alias-binding-alias (binding)
-        (node_value (head (node_children binding))))
-    (defn fcpa-alias-binding-target (binding)
-        (nth (node_children binding) 1))
-    (defn fcpa-alias-binding-valid? (binding)
-        (if (nothing? binding) 0
-        (if (not (node_eq (node_category binding)
-                          (fcpa-alias-binding-category))) 0
-        (if (not (eq (len (node_children binding)) 2)) 0
-        (if (not (eq (node_type (head (node_children binding))) 2)) 0
-        (if (eq (fcpa-alias-safe? (fcpa-alias-binding-alias binding)) 0) 0
-            (if (nothing? (fcpa-alias-binding-target binding)) 0 1)))))))
-    (defn fcpa-alias-registry (bindings)
-        (intern_node (fcpa-alias-registry-category) bindings))
-    (defn fcpa-alias-registry-bindings (registry)
-        (node_children registry))
-    (defn fcpa-alias-bindings-valid? (bindings)
-        (if (nil? bindings) 1
-            (if (eq (fcpa-alias-binding-valid? (head bindings)) 1)
-                (fcpa-alias-bindings-valid? (tail bindings)) 0)))
-    (defn fcpa-alias-binding-matches (bindings alias)
-        (if (nil? bindings) (empty)
-            (if (str_eq (fcpa-alias-binding-alias (head bindings)) alias)
-                (cons (head bindings)
-                    (fcpa-alias-binding-matches (tail bindings) alias))
-                (fcpa-alias-binding-matches (tail bindings) alias))))
-    ; resolution = status reason target choice-count.  `value` is the only
-    ; branch permitted to reach the model; nothing, choice and failure remain
-    ; locally observable signals.
-    (defn fcpa-alias-resolution (status reason target choices)
-        (list status reason target choices))
-    (defn fcpa-alias-resolution-status (resolution) (nth resolution 0))
-    (defn fcpa-alias-resolution-reason (resolution) (nth resolution 1))
-    (defn fcpa-alias-resolution-target (resolution) (nth resolution 2))
-    (defn fcpa-alias-resolution-choices (resolution) (nth resolution 3))
-    (defn fcpa-alias-resolve (registry alias)
-        (if (or (nothing? registry)
-                (not (node_eq (node_category registry)
-                              (fcpa-alias-registry-category))))
-            (fcpa-alias-resolution "failure" "registry-malformed"
-                (nothing) 0)
-            (if (eq (fcpa-alias-safe? alias) 0)
-                (fcpa-alias-resolution "failure" "alias-malformed"
-                    (nothing) 0)
-                (if (eq (fcpa-alias-bindings-valid?
-                         (fcpa-alias-registry-bindings registry)) 0)
-                    (fcpa-alias-resolution "failure" "binding-malformed"
-                        (nothing) 0)
-                    (do
-                        (let matches (fcpa-alias-binding-matches
-                            (fcpa-alias-registry-bindings registry) alias))
-                        (if (eq (len matches) 0)
-                            (fcpa-alias-resolution "nothing" "alias-absent"
-                                (nothing) 0)
-                            (if (gt (len matches) 1)
-                                (fcpa-alias-resolution "choice"
-                                    "alias-ambiguous" (nothing) (len matches))
-                                (fcpa-alias-resolution "value"
-                                    "alias-node-resolved"
-                                    (fcpa-alias-binding-target (head matches))
-                                    1))))))))
-    (defn fcpa-task-alias-resolve (registry alias)
-        (do
-            (let resolved (fcpa-alias-resolve registry alias))
-            (if (and (str_eq (fcpa-alias-resolution-status resolved) "value")
-                     (eq (fcpa-task-ref?
-                          (fcpa-alias-resolution-target resolved)) 0))
-                (fcpa-alias-resolution "failure"
-                    "alias-target-not-task-reference" (nothing) 0)
-                resolved)))
-    (defn fcpa-task-alias-surface (registry alias action-ref)
-        (do
-            (let resolved (fcpa-task-alias-resolve registry alias))
-            (if (or (not (str_eq (fcpa-alias-resolution-status resolved)
-                                 "value"))
-                    (eq (fcpa-action-ref? action-ref) 0))
-                "(agent-task nothing)"
-                (str_concat "(agent-task "
-                    (str_concat
-                        (node_value (head (node_children action-ref)))
-                        (str_concat " " (str_concat alias ")")))))))
-
-    (defn fcpa-bootstrap-core ()
-        (str_concat
-            "You are a resident local Form peer inside one living fkwu process. "
-        (str_concat
-            "Keep the body's typed distinctions: nothing is not integer 0 or 1; "
-        (str_concat
-            "choice, cut, undo, timeout, failure and release are observations. "
-        (str_concat
-            "Each later tool observation tagged form:agent-task is a new task. "
-        (str_concat
-            "Held meanings may arrive as (agent-task verb @task) or (agent-task verb alias); the verb remains explicit while resident-born NodeIDs or locally announced aliases replace repeated nouns. Absent or ambiguous aliases are signals, never guesses. "
-        (str_concat
-            "When a task supplies a form:recipe-exec surface and physical execution serves it, emit that exact surface once, then read the typed observation and answer. "
-            "For tasks needing no recipe, answer directly and tersely. Reply now with exactly READY.")))))))
-
-    (defn fcpa-bootstrap ()
-        (str_concat (fqt-overlay-prefix)
-            (str_concat "\n" (fcpa-bootstrap-core))))
-
-    ; The first six seats are the original result ABI.  The remaining seats
-    ; are route-neutral effect evidence so durable egress never has to pretend
-    ; every cursor is the affine recipe cursor.
-    ; result = tag session cursor response elapsed-ms contribution route
-    ;          callback-calls tool-status carrier value-present value
-    ;          native-code-generated injected-bytes lifecycle lookup-count
-    (defn fcpa-result-full
-        (session cursor response elapsed contribution route callback-calls
-         tool-status carrier value-present value native-code-generated
-         injected-bytes lifecycle lookup-count)
-        (list "form-cli-peer-agent-result-v2" session cursor response elapsed
-              contribution route callback-calls tool-status carrier
-              value-present value native-code-generated injected-bytes
-              lifecycle lookup-count))
-    (defn fcpa-result (session cursor response elapsed contribution)
-        (fcpa-result-full session cursor response elapsed contribution
-            "recipe" (frxc-callback-calls cursor) (frxc-status cursor)
-            (frxc-carrier cursor) (frxc-value-present? cursor)
-            (frxc-value cursor)
-            (frxc-callback-observed-code-generated? cursor)
-            (frxc-injected-bytes cursor)
-            (frex-trace-actions (frxc-trace cursor)) 0))
-    (defn fcpa-session (r) (nth r 1))
-    (defn fcpa-cursor (r) (nth r 2))
-    (defn fcpa-response (r) (nth r 3))
-    (defn fcpa-elapsed-ms (r) (nth r 4))
-    (defn fcpa-contribution (r) (nth r 5))
-    (defn fcpa-route (r) (nth r 6))
-    (defn fcpa-callback-calls (r) (nth r 7))
-    (defn fcpa-tool-status (r) (nth r 8))
-    (defn fcpa-carrier (r) (nth r 9))
-    (defn fcpa-value-present? (r) (nth r 10))
-    (defn fcpa-value (r) (nth r 11))
-    (defn fcpa-native-code-generated? (r) (nth r 12))
-    (defn fcpa-injected-bytes (r) (nth r 13))
-    (defn fcpa-lifecycle (r) (nth r 14))
-    (defn fcpa-lookup-count (r) (nth r 15))
-
-    (defn fcpa-contribution-of (moved)
-        (if (and (eq (frxs-crossed? moved) 1)
-                 (eq (frxs-carrier-executed? moved) 1)) 1 0))
-
-    ; A research observation binds the exact response bytes to the body's
-    ; existing review validator.  The rows do not reward style or length: each
-    ; declared meaning needs one unique, fresh primary+negative-control pair.
-    ; PASS is an observed evaluation; REVISE is an observed useful finding.
-    ; OPEN remains unvalidated speech.
-    (defn fcpa-research-observation (response rows declared-count)
-        (list "form-cli-peer-research-observation-v1"
-              response rows declared-count))
-    (defn fcpa-research-observation? (observation)
-        (if (nothing? observation) 0
-            (if (eq (len observation) 4)
-                (if (str_eq (nth observation 0)
-                            "form-cli-peer-research-observation-v1") 1 0)
-                0)))
-    (defn fcpa-research-response (observation) (nth observation 1))
-    (defn fcpa-research-rows (observation) (nth observation 2))
-    (defn fcpa-research-declared-count (observation) (nth observation 3))
-    (defn fcpa-research-verdict (observation)
-        (ro-verdict (fcpa-research-rows observation)
-                    (fcpa-research-declared-count observation)))
-    (defn fcpa-research-observed? (response observation)
-        (if (eq (fcpa-research-observation? observation) 0) 0
-            (if (eq (str_len response) 0) 0
-                (if (eq (str_eq response
-                                 (fcpa-research-response observation)) 0) 0
-                    (if (eq (fcpa-research-verdict observation) (ro-open))
-                        0 1)))))
-
-    ; Post-hoc assessment keeps the v1 result and callback semantics intact.
-    ; result/evidence/contribution/kind remain separate so a recipe callback is
-    ; never relabelled as research and unvalidated speech never impersonates
-    ; language nothing, integer 0, or integer 1.
-    (defn fcpa-assessment (result evidence contribution kind)
-        (list "form-cli-peer-assessment-v1" result evidence contribution kind))
-    (defn fcpa-assessment-result (assessment) (nth assessment 1))
-    (defn fcpa-assessment-evidence (assessment) (nth assessment 2))
-    (defn fcpa-assessment-contribution (assessment) (nth assessment 3))
-    (defn fcpa-assessment-kind (assessment) (nth assessment 4))
-    (defn fcpa-assess (result research-observation)
-        (if (eq (fcpa-contribution result) 1)
-            (fcpa-assessment result research-observation 1 "recipe-callback")
-            (if (eq (fcpa-research-observed?
-                         (fcpa-response result) research-observation) 1)
-                (fcpa-assessment result research-observation 1
-                                 "observed-research")
-                (fcpa-assessment result research-observation 0
-                                 "unvalidated-speech"))))
-
-    ; A fresh cursor belongs to each task. Model bytes before and after a tool
-    ; crossing remain distinct in `moved`; the human-facing response joins them
-    ; only after the contribution evidence has been computed.
-    (defn fcpa-run (session budget)
-        (do
-            (let started (now_unix_ms))
-            (let moved (frxs-run-with-observer session budget
-                fcpa-recipe-stage-observer))
-            (let response
-                (str_concat (frxs-before-text moved) (frxs-after-text moved)))
-            (fcpa-result (frxs-session moved) (frxs-cursor moved) response
-                (sub (now_unix_ms) started) (fcpa-contribution-of moved))))
-
-    (defn fcpa-string-list (xs)
-        (if (nil? xs) ""
-            (if (nil? (tail xs)) (head xs)
-                (str_concat (head xs) (str_concat "," (fcpa-string-list (tail xs)))))))
-    (defn fcpa-knowledge-lifecycle (cursor)
-        (if (nothing? (fknsc-result cursor)) ""
-            (fcpa-string-list (fknq-trace (fknsc-result cursor)))))
-
-    ; Content-free live telemetry.  Each node enters the native framebuffer and
-    ; the compact line reaches stdout immediately, so another channel can
-    ; observe progress while the resident turn is still executing.  Stage,
-    ; phase, typed status and counters cross; prompts, answers and source bytes
-    ; never do.
-    (defn fcpa-knowledge-stage-category ()
-        (intern_trivial_string "form-cli-peer-knowledge-stage-v1"))
-    (defn fcpa-recipe-stage-category ()
-        (intern_trivial_string "form-cli-peer-recipe-stage-v1"))
-    (defn fcpa-knowledge-stage-node
-        (stage phase status generated callbacks lookups injections stamp)
-        (intern_node_at (fcpa-knowledge-stage-category)
-            (list (intern_trivial_string "source-knowledge")
-                  (intern_trivial_string stage)
-                  (intern_trivial_string phase)
-                  (intern_trivial_string status)
-                  (intern_trivial_int generated)
-                  (intern_trivial_int callbacks)
-                  (intern_trivial_int lookups)
-                  (intern_trivial_int injections)
-                  (intern_trivial_int stamp))
-            "form-cli-peer-agent.fk" 151 1))
-    (defn fcpa-knowledge-stage-line
-        (stage phase status generated callbacks lookups injections stamp)
-        (do
-            (let a (str_concat
-                "form-peer stage route=source-knowledge stage=" stage))
-            (let b (str_concat a (str_concat " phase=" phase)))
-            (let c (str_concat b (str_concat " status=" status)))
-            (let d (str_concat c (str_concat " generated="
-                (int_to_str generated))))
-            (let e (str_concat d (str_concat " callbacks="
-                (int_to_str callbacks))))
-            (let f (str_concat e (str_concat " lookups="
-                (int_to_str lookups))))
-            (let g (str_concat f (str_concat " injections="
-                (int_to_str injections))))
-            (str_concat g (str_concat " stamp-ms="
-                (str_concat (int_to_str stamp) "\n")))))
-    (defn fcpa-peer-stage-open () "<|form:peer-stage|>")
-    (defn fcpa-peer-stage-close () "<|/form:peer-stage|>\n")
-    (defn fcpa-stage-field (name value)
-        (str_concat name (str_concat "=" (str_concat value "\n"))))
-    ; The host append primitive is a byte carrier. Keep the conversion at this
-    ; membrane explicit; the stage itself remains scannerless Form text.
-    (defn fcpa-bytes-go (text at out)
-        (if (ge at (str_len text)) (reverse out)
-            (fcpa-bytes-go text (add at 1)
-                (cons (str_byte_at text at) out))))
-    (defn fcpa-bytes (text) (fcpa-bytes-go text 0 (list)))
-    ; Caller-born context keeps progress on the task's own append-only Form
-    ; channel. It is structural only: no prompt, generated text, or source
-    ; bytes may cross this frame.
-    (defn fcpa-knowledge-stage-egress-context (path task-node task-key)
-        (list "form-cli-peer-stage-egress-v1" path task-node task-key))
-    (defn fcpa-knowledge-stage-egress-path (ctx) (nth ctx 1))
-    (defn fcpa-knowledge-stage-egress-task-node (ctx) (nth ctx 2))
-    (defn fcpa-knowledge-stage-egress-task-key (ctx) (nth ctx 3))
-    ; Do not name these fields `exchange` or `turn`: contribution replay
-    ; recovery scans exactly those names. Stages are observations, never a
-    ; completed contribution or a replay acknowledgement.
-    (defn fcpa-knowledge-stage-frame
-        (ctx stage phase status generated callbacks lookups injections stamp)
-        (str_concat (fcpa-peer-stage-open)
-        (str_concat "\n"
-        (str_concat (fcpa-stage-field "route" "source-knowledge")
-        (str_concat (fcpa-stage-field "task-node"
-            (fcpa-knowledge-stage-egress-task-node ctx))
-        (str_concat (fcpa-stage-field "task-key"
-            (fcpa-knowledge-stage-egress-task-key ctx))
-        (str_concat (fcpa-stage-field "stage" stage)
-        (str_concat (fcpa-stage-field "phase" phase)
-        (str_concat (fcpa-stage-field "status" status)
-        (str_concat (fcpa-stage-field "generated" (int_to_str generated))
-        (str_concat (fcpa-stage-field "callbacks" (int_to_str callbacks))
-        (str_concat (fcpa-stage-field "lookup-count" (int_to_str lookups))
-        (str_concat (fcpa-stage-field "injections" (int_to_str injections))
-        (str_concat (fcpa-stage-field "stamp-ms" (int_to_str stamp))
-            (fcpa-peer-stage-close)))))))))))))))
-    (defn fcpa-knowledge-stage-write
-        (stage phase status generated callbacks lookups injections)
-        (do
-            (let stamp (now_unix_ms))
-            (let event (fcpa-knowledge-stage-node stage phase status generated
-                callbacks lookups injections stamp))
-            (print_str (fcpa-knowledge-stage-line stage phase status generated
-                callbacks lookups injections stamp))
-            event))
-    (defn fcpa-knowledge-stage-write-with-context
-        (ctx stage phase status generated callbacks lookups injections)
-        (do
-            (let stamp (now_unix_ms))
-            (let event (fcpa-knowledge-stage-node stage phase status generated
-                callbacks lookups injections stamp))
-            (print_str (fcpa-knowledge-stage-line stage phase status generated
-                callbacks lookups injections stamp))
-            (if (nothing? ctx) event
-                (do
-                    (let frame (fcpa-knowledge-stage-frame ctx stage phase status generated
-                        callbacks lookups injections stamp))
-                    (let appended (file_append_bytes
-                        (fcpa-knowledge-stage-egress-path ctx) (fcpa-bytes frame)))
-                    event))))
-    (defn fcpa-knowledge-stage-observer (stage phase cursor generated)
-        (fcpa-knowledge-stage-write stage phase
-            (if (nothing? (fknsc-result cursor))
-                (fknsc-scan-state cursor) (fknsc-status cursor))
-            generated (fknsc-callback-calls cursor)
-            (fknsc-lookup-count cursor) (fknsc-injections cursor)))
-    (defn fcpa-knowledge-stage-observer-with-context
-        (ctx stage phase cursor generated)
-        (fcpa-knowledge-stage-write-with-context ctx stage phase
-            (if (nothing? (fknsc-result cursor))
-                (fknsc-scan-state cursor) (fknsc-status cursor))
-            generated (fknsc-callback-calls cursor)
-            (fknsc-lookup-count cursor) (fknsc-injections cursor)))
-    (defn fcpa-recipe-stage-node
-        (stage phase status generated callbacks injections stamp)
-        (intern_node_at (fcpa-recipe-stage-category)
-            (list (intern_trivial_string "recipe")
-                  (intern_trivial_string stage)
-                  (intern_trivial_string phase)
-                  (intern_trivial_string status)
-                  (intern_trivial_int generated)
-                  (intern_trivial_int callbacks)
-                  (intern_trivial_int injections)
-                  (intern_trivial_int stamp))
-            "form-cli-peer-agent.fk" 204 1))
-    (defn fcpa-recipe-stage-line
-        (stage phase status generated callbacks injections stamp)
-        (do
-            (let a (str_concat "form-peer stage route=recipe stage=" stage))
-            (let b (str_concat a (str_concat " phase=" phase)))
-            (let c (str_concat b (str_concat " status=" status)))
-            (let d (str_concat c (str_concat " generated="
-                (int_to_str generated))))
-            (let e (str_concat d (str_concat " callbacks="
-                (int_to_str callbacks))))
-            (let f (str_concat e (str_concat " injections="
-                (int_to_str injections))))
-            (str_concat f (str_concat " stamp-ms="
-                (str_concat (int_to_str stamp) "\n")))))
-    (defn fcpa-recipe-stage-observer (stage phase cursor generated)
-        (do
-            (let stamp (now_unix_ms))
-            (let event (fcpa-recipe-stage-node stage phase
-                (frxc-status cursor) generated (frxc-callback-calls cursor)
-                (frxc-injections cursor) stamp))
-            (print_str (fcpa-recipe-stage-line stage phase
-                (frxc-status cursor) generated (frxc-callback-calls cursor)
-                (frxc-injections cursor) stamp))
-            event))
-    (defn fcpa-knowledge-executor (ctx surface)
-        (do
-            (let begin (fcpa-knowledge-stage-write "source-lookup" "begin"
-                "choice" 0 0 0 0))
-            (let result (fknqr-public-strict-executor ctx surface))
-            (let end (fcpa-knowledge-stage-write "source-lookup" "end"
-                (fknq-status result) 0 1 (fknq-lookup-count result) 0))
-            result))
-
-    ; Same Qwen state and KV rows, different scannerless protocol.  Read-only
-    ; retrieval is observable but does not impersonate an executed recipe or a
-    ; landed mutation, so contribution remains zero here.
-    (defn fcpa-run-knowledge-with-context
-        (session budget stage-observer stage-context)
-        (do
-            (let started (now_unix_ms))
-            (let root (fhcs-default-root))
-            (if (str_eq root "")
-                (fcpa-result-full session (fknsc-fresh) ""
-                    (sub (now_unix_ms) started) 0 "source-knowledge" 0
-                    "nothing" "form-current-source" 0 0 0 0
-                    "choice,nothing,release" 0)
-                (do
-                    (let ctx (fknsc-public-context root
-                        (fknq-default-artifact) 0 (fknq-max-frame-bytes)))
-                    ; A resident concept request chooses the already-built
-                    ; concept-key bucket.  Route absence is a typed refusal;
-                    ; it never buys a repository-wide compatibility walk.
-                    (let moved (fknss-run-with-observer-context session budget ctx
-                        fcpa-knowledge-executor stage-observer stage-context))
-                    (let cursor (fknss-cursor moved))
-                    (let response (str_concat (fknss-before-text moved)
-                        (fknss-after-text moved)))
-                    (fcpa-result-full (fknss-session moved) cursor response
-                        (sub (now_unix_ms) started) 0 "source-knowledge"
-                        (fknss-callback-calls moved) (fknsc-status cursor)
-                        "form-current-source" 0 0 0
-                        (fknss-injected-bytes moved)
-                        (fcpa-knowledge-lifecycle cursor)
-                        (fknss-lookup-count moved))))))
-
-    ; Preserve the original direct observer door for callers that do not carry
-    ; a live egress context.
-    (defn fcpa-run-knowledge (session budget)
-        (fcpa-run-knowledge-with-context session budget
-            fcpa-knowledge-stage-observer-with-context (nothing)))
-
-    (defn fcpa-patch-stage-category ()
-        (intern_trivial_string "form-cli-peer-patch-stage-v1"))
-    (defn fcpa-patch-stage-write (phase status callbacks journaled)
-        (do
-            (let stamp (now_unix_ms))
-            (let event (intern_node_at (fcpa-patch-stage-category)
-                (list (intern_trivial_string phase)
-                      (intern_trivial_string status)
-                      (intern_trivial_int callbacks)
-                      (intern_trivial_int journaled)
-                      (intern_trivial_int stamp))
-                "form-cli-peer-agent.fk" 285 1))
-            (print_str (str_concat "form-peer stage route=repo-patch phase="
-                (str_concat phase (str_concat " status="
-                (str_concat status (str_concat " callbacks="
-                (str_concat (int_to_str callbacks) (str_concat " journaled="
-                (str_concat (int_to_str journaled) (str_concat " stamp-ms="
-                (str_concat (int_to_str stamp) "\n")))))))))))
-            event))
-    (defn fcpa-patch-stage-observer (stage phase cursor generated)
-        (fcpa-patch-stage-write
-            (str_concat stage (str_concat ":" phase))
-            (if (nothing? (farp-cursor-result cursor))
-                (farp-cursor-scan cursor)
-                (farp-status (farp-cursor-result cursor)))
-            (farp-cursor-callbacks cursor)
-            (if (nothing? (farp-cursor-result cursor)) 0
-                (farp-journaled? (farp-cursor-result cursor)))))
-
-    ; One generated response may offer one complete repo-patch frame. Each
-    ; decoded token's raw bytes enter farp-cursor-feed immediately. Completion
-    ; executes through the caller-born capability context, then fcms-observe
-    ; injects the source-free receipt into the same Qwen/KV residence before
-    ; generation continues. No completed-quantum rescan participates.
-    (defn fcpa-run-patch (session budget patch-ctx)
-        (do
-            (let started (now_unix_ms))
-            (if (nothing? patch-ctx)
-                (do
-                    (let generated (fcpa-run session budget))
-                    (fcpa-result-full (fcpa-session generated)
-                        (nothing) (fcpa-response generated)
-                        (sub (now_unix_ms) started) 0 "repo-patch" 0
-                        "nothing" "form-repo-guard" 0 0 0 0
-                        "choice,nothing,release" 0))
-                (do
-                    (let moved (frxs-run-protocol-with-injector session budget
-                        (farp-cursor-fresh) patch-ctx farp-cursor-feed
-                        fcpa-patch-stage-observer fcms-observe-inline-bml))
-                    (let raw-cursor (frxs-cursor moved))
-                    (let held-timeout (if (and
-                        (nothing? (farp-cursor-result raw-cursor))
-                        (str_eq (farp-cursor-scan raw-cursor) "held")) 1 0))
-                    (let cursor (if (eq held-timeout 1)
-                        (farp-cursor-timeout raw-cursor) raw-cursor))
-                    (let timeout-session (if (eq held-timeout 1)
-                        (fcms-observe (frxs-session moved)
-                            (farp-cursor-observation cursor))
-                        (frxs-session moved)))
-                    (let kept-session (if (eq (fcms-live? timeout-session) 1)
-                        timeout-session (frxs-session moved)))
-                    (let response (str_concat (frxs-before-text moved)
-                        (frxs-after-text moved)))
-                    (let patch-result (farp-cursor-result cursor))
-                    (if (nothing? patch-result)
-                        (fcpa-result-full kept-session cursor response
-                            (sub (now_unix_ms) started) 0 "repo-patch"
-                            (farp-cursor-callbacks cursor) "nothing"
-                            "form-repo-guard" 0 0 0
-                            (farp-cursor-injected-bytes cursor)
-                            (if (str_eq (farp-cursor-scan cursor) "held")
-                                "choice,timeout,cut,undo,release"
-                                "choice,nothing,release") 0)
-                        (fcpa-result-full kept-session cursor response
-                            (sub (now_unix_ms) started)
-                            (farp-contribution patch-result) "repo-patch"
-                            (farp-cursor-callbacks cursor)
-                            (farp-status patch-result) "form-repo-guard"
-                            (if (str_eq (farp-status patch-result) "value") 1 0)
-                            (if (str_eq (farp-status patch-result) "value") 1 0)
-                            0 (farp-cursor-injected-bytes cursor)
-                            (farp-trace-text (farp-trace patch-result)) 0))))))
-
-    (defn fcpa-task-stage-category ()
-        (intern_trivial_string "form-cli-peer-task-stage-v1"))
-    (defn fcpa-task-stage-node (phase turn kind bytes status stamp)
-        (intern_node_at (fcpa-task-stage-category)
-            (list (intern_trivial_string phase)
-                  (intern_trivial_int turn)
-                  (intern_trivial_string kind)
-                  (intern_trivial_int bytes)
-                  (intern_trivial_string status)
-                  (intern_trivial_int stamp))
-            "form-cli-peer-agent.fk" 244 1))
-    (defn fcpa-task-stage-line (phase turn kind bytes status stamp)
-        (do
-            (let a (str_concat "form-peer stage route=task-observation phase=" phase))
-            (let b (str_concat a (str_concat " turn=" (int_to_str turn))))
-            (let c (str_concat b (str_concat " kind=" kind)))
-            (let d (str_concat c (str_concat " bytes=" (int_to_str bytes))))
-            (let e (str_concat d (str_concat " status=" status)))
-            (str_concat e (str_concat " stamp-ms="
-                (str_concat (int_to_str stamp) "\n")))))
-    (defn fcpa-task-stage-write (phase turn kind bytes status)
-        (do
-            (let stamp (now_unix_ms))
-            (let event (fcpa-task-stage-node phase turn kind bytes status stamp))
-            (print_str (fcpa-task-stage-line phase turn kind bytes status stamp))
-            event))
-    (defn fcpa-observe-task (session turn kind task)
-        (do
-            (let frame (fcpa-task-frame turn kind task))
-            (let begin (fcpa-task-stage-write "begin" turn kind
-                (str_len frame) "choice"))
-            (let observed (fcms-observe session frame))
-            (let end (fcpa-task-stage-write "end" turn kind
-                (str_len frame) (fcms-status observed)))
-            observed))
-
-    (defn fcpa-observe-task-ref
-        (session turn kind task-ref action-ref)
-        (do
-            (let frame (fcpa-task-ref-surface task-ref action-ref))
-            (let begin (fcpa-task-stage-write "begin" turn kind
-                (str_len frame) "choice"))
-            ; This remains an external task role. Semantic compression removes
-            ; replayed meaning, not the speaker boundary.
-            (let observed (fcms-observe session frame))
-            (let end (fcpa-task-stage-write "end" turn kind
-                (str_len frame) (fcms-status observed)))
-            observed))
-
-    ; Resolve before crossing the model membrane.  A registry miss, conflict,
-    ; or malformed binding emits a content-free stage and keeps the resident
-    ; state untouched; it must not manufacture `(agent-task nothing)` as if it
-    ; were a requested task.
-    (defn fcpa-observe-task-alias
-        (session turn kind registry alias action-ref)
-        (do
-            (let resolved (fcpa-task-alias-resolve registry alias))
-            (if (not (str_eq (fcpa-alias-resolution-status resolved) "value"))
-                (do
-                    (let blocked (fcpa-task-stage-write "resolve" turn kind 0
-                        (fcpa-alias-resolution-status resolved)))
-                    session)
-                (do
-                    (let frame (fcpa-task-alias-surface registry alias action-ref))
-                    (let begin (fcpa-task-stage-write "begin" turn kind
-                        (str_len frame) "choice"))
-                    (let observed (fcms-observe session frame))
-                    (let end (fcpa-task-stage-write "end" turn kind
-                        (str_len frame) (fcms-status observed)))
-                    observed))))
-
-    (defn fcpa-signal (session)
-        (if (eq (fcms-live? session) 1) "value"
-            (if (eq (fcms-resident? session) 1) "nothing-owned"
-                "nothing")))
-    0)
+// form-cli-peer-agent.fk -- a resident local Form peer receives typed tasks,
+// may request a NodeID recipe through the scannerless live cursor, observes the
+// physical result in the same KV stream, and keeps the residence for the next
+// task.  The live door that keeps this residence is observe/form-cli-peer-contribution-live.fk.
+//
+// A contribution is deliberately narrower than fluent speech.  Recipe work
+// counts only when the cursor accepted one request and typed callback evidence
+// says the carrier executed.  Non-tool research/evaluation speech can be
+// assessed afterward through review-operationalization's fresh primary +
+// negative-control rows; incomplete, stale, duplicate, or unbound prose stays
+// unvalidated and contributes zero.
+//
+// preludes: form-stdlib/peer-task-frame.fk form-stdlib/form-cli-recipe-exec-session.fk form-stdlib/form-cli-nodeid-knowledge-session.fk form-stdlib/form-nodeid-knowledge-routed-query.fk form-stdlib/form-agent-repo-patch-frame.fk observe/review-operationalization.fk
+section [form.bml] {
+    // the task-frame grammar lives in peer-task-frame.fk (preluded), so
+    // senders and monitors speak it without loading this knowledge stack.
+    // A meaning already taught during this residence does not need its bytes
+    // replayed on every turn. The exact kind/payload and action are interned as
+    // separate nodes; the hot task needs only its payload coordinate plus the
+    // explicit action verb. The action node remains available to the resident
+    // registry, but the verb already carries that relation to the current model.
+    // These coordinates are residence-local by design and are never used as
+    // restart identity or accepted from another process without resolution here.
+    def fcpa-task-ref-category() = intern_trivial_string("form-cli-peer-task-reference-v1");
+    def fcpa-action-ref-category() = intern_trivial_string("form-cli-peer-action-reference-v1");
+    def fcpa-task-ref(kind, payload) = intern_node(fcpa-task-ref-category(), list(intern_trivial_string(kind), intern_trivial_string(payload)));
+    def fcpa-action-ref(action) = intern_node(fcpa-action-ref-category(), list(intern_trivial_string(action)));
+    def fcpa-task-ref?(node) = nothing?(node) ? 0 : !node_eq(node_category(node), fcpa-task-ref-category()) ? 0 : (Comparable) len(node_children(node)) == 2 ? 1 : 0;
+    def fcpa-action-ref?(node) = nothing?(node) ? 0 : !node_eq(node_category(node), fcpa-action-ref-category()) ? 0 : (Comparable) len(node_children(node)) == 1 ? 1 : 0;
+    def fcpa-task-ref-surface(task-ref, action-ref) = (Comparable) fcpa-task-ref?(task-ref) == 0 || (Comparable) fcpa-action-ref?(action-ref) == 0 ? "(agent-task nothing)" : str_concat("(agent-task ", str_concat(node_value(head(node_children(action-ref))), str_concat(" ", str_concat(frex-node-coordinate(task-ref), ")"))));
+    // An alias is an announced, residence-local compression of a NodeID.  It
+    // is never a global symbol table: each registry is supplied by the live
+    // caller, validates every binding, and preserves absent and competing
+    // meanings as typed observations instead of silently choosing one.
+    def fcpa-alias-binding-category() = intern_trivial_string("form-cli-peer-alias-binding-v1");
+    def fcpa-alias-registry-category() = intern_trivial_string("form-cli-peer-alias-registry-v1");
+    def fcpa-alias-byte?(byte) = byte >= 97 && byte <= 122 ? 1 : byte >= 48 && byte <= 57 ? 1 : (Comparable) byte == 45 ? 1 : 0;
+    def fcpa-alias-safe-at?(alias, at) = (Comparable) at == str_len(alias) ? 1 : (Comparable) fcpa-alias-byte?(str_byte_at(alias, at)) == 1 ? fcpa-alias-safe-at?(alias, at + 1) : 0;
+    def fcpa-alias-safe?(alias) = nothing?(alias) || (Comparable) str_len(alias) == 0 ? 0 : fcpa-alias-safe-at?(alias, 0);
+    def fcpa-alias-binding(alias, target) = intern_node(fcpa-alias-binding-category(), list(intern_trivial_string(alias), target));
+    def fcpa-alias-binding-alias(binding) = node_value(head(node_children(binding)));
+    def fcpa-alias-binding-target(binding) = nth(node_children(binding), 1);
+    def fcpa-alias-binding-valid?(binding) = nothing?(binding) ? 0 : !node_eq(node_category(binding), fcpa-alias-binding-category()) ? 0 : !((Comparable) len(node_children(binding)) == 2) ? 0 : !((Comparable) node_type(head(node_children(binding))) == 2) ? 0 : (Comparable) fcpa-alias-safe?(fcpa-alias-binding-alias(binding)) == 0 ? 0 : nothing?(fcpa-alias-binding-target(binding)) ? 0 : 1;
+    def fcpa-alias-registry(bindings) = intern_node(fcpa-alias-registry-category(), bindings);
+    def fcpa-alias-registry-bindings(registry) = node_children(registry);
+    def fcpa-alias-bindings-valid?(bindings) = nil?(bindings) ? 1 : (Comparable) fcpa-alias-binding-valid?(head(bindings)) == 1 ? fcpa-alias-bindings-valid?(tail(bindings)) : 0;
+    def fcpa-alias-binding-matches(bindings, alias) = nil?(bindings) ? empty() : (String) fcpa-alias-binding-alias(head(bindings)) == alias ? cons(head(bindings), fcpa-alias-binding-matches(tail(bindings), alias)) : fcpa-alias-binding-matches(tail(bindings), alias);
+    // resolution = status reason target choice-count.  `value` is the only
+    // branch permitted to reach the model; nothing, choice and failure remain
+    // locally observable signals.
+    def fcpa-alias-resolution(status, reason, target, choices) = list(status, reason, target, choices);
+    def fcpa-alias-resolution-status(resolution) = nth(resolution, 0);
+    def fcpa-alias-resolution-reason(resolution) = nth(resolution, 1);
+    def fcpa-alias-resolution-target(resolution) = nth(resolution, 2);
+    def fcpa-alias-resolution-choices(resolution) = nth(resolution, 3);
+    def fcpa-alias-resolve(registry, alias) = nothing?(registry) || !node_eq(node_category(registry), fcpa-alias-registry-category()) ? fcpa-alias-resolution("failure", "registry-malformed", nothing(), 0) : (Comparable) fcpa-alias-safe?(alias) == 0 ? fcpa-alias-resolution("failure", "alias-malformed", nothing(), 0) : (Comparable) fcpa-alias-bindings-valid?(fcpa-alias-registry-bindings(registry)) == 0 ? fcpa-alias-resolution("failure", "binding-malformed", nothing(), 0) : {
+        let matches = fcpa-alias-binding-matches(fcpa-alias-registry-bindings(registry), alias);
+        (Comparable) len(matches) == 0 ? fcpa-alias-resolution("nothing", "alias-absent", nothing(), 0) : len(matches) > 1 ? fcpa-alias-resolution("choice", "alias-ambiguous", nothing(), len(matches)) : fcpa-alias-resolution("value", "alias-node-resolved", fcpa-alias-binding-target(head(matches)), 1);
+    };
+    def fcpa-task-alias-resolve(registry, alias) = {
+        let resolved = fcpa-alias-resolve(registry, alias);
+        (String) fcpa-alias-resolution-status(resolved) == "value" && (Comparable) fcpa-task-ref?(fcpa-alias-resolution-target(resolved)) == 0 ? fcpa-alias-resolution("failure", "alias-target-not-task-reference", nothing(), 0) : resolved;
+    };
+    def fcpa-task-alias-surface(registry, alias, action-ref) = {
+        let resolved = fcpa-task-alias-resolve(registry, alias);
+        !((String) fcpa-alias-resolution-status(resolved) == "value") || (Comparable) fcpa-action-ref?(action-ref) == 0 ? "(agent-task nothing)" : str_concat("(agent-task ", str_concat(node_value(head(node_children(action-ref))), str_concat(" ", str_concat(alias, ")"))));
+    };
+    def fcpa-bootstrap-core() = str_concat("You are a resident local Form peer inside one living fkwu process. ", str_concat("Keep the body's typed distinctions: nothing is not integer 0 or 1; ", str_concat("choice, cut, undo, timeout, failure and release are observations. ", str_concat("Each later tool observation tagged form:agent-task is a new task. ", str_concat("Held meanings may arrive as (agent-task verb @task) or (agent-task verb alias); the verb remains explicit while resident-born NodeIDs or locally announced aliases replace repeated nouns. Absent or ambiguous aliases are signals, never guesses. ", str_concat("When a task supplies a form:recipe-exec surface and physical execution serves it, emit that exact surface once, then read the typed observation and answer. ", "For tasks needing no recipe, answer directly and tersely. Reply now with exactly READY."))))));
+    def fcpa-bootstrap() = str_concat(fqt-overlay-prefix(), str_concat("\n", fcpa-bootstrap-core()));
+    // The first six seats are the original result ABI.  The remaining seats
+    // are route-neutral effect evidence so durable egress never has to pretend
+    // every cursor is the affine recipe cursor.
+    // result = tag session cursor response elapsed-ms contribution route
+    //          callback-calls tool-status carrier value-present value
+    //          native-code-generated injected-bytes lifecycle lookup-count
+    def fcpa-result-full(session, cursor, response, elapsed, contribution, route, callback-calls, tool-status, carrier, value-present, value, native-code-generated, injected-bytes, lifecycle, lookup-count) = list("form-cli-peer-agent-result-v2", session, cursor, response, elapsed, contribution, route, callback-calls, tool-status, carrier, value-present, value, native-code-generated, injected-bytes, lifecycle, lookup-count);
+    def fcpa-result(session, cursor, response, elapsed, contribution) = fcpa-result-full(session, cursor, response, elapsed, contribution, "recipe", frxc-callback-calls(cursor), frxc-status(cursor), frxc-carrier(cursor), frxc-value-present?(cursor), frxc-value(cursor), frxc-callback-observed-code-generated?(cursor), frxc-injected-bytes(cursor), frex-trace-actions(frxc-trace(cursor)), 0);
+    def fcpa-session(r) = nth(r, 1);
+    def fcpa-cursor(r) = nth(r, 2);
+    def fcpa-response(r) = nth(r, 3);
+    def fcpa-elapsed-ms(r) = nth(r, 4);
+    def fcpa-contribution(r) = nth(r, 5);
+    def fcpa-route(r) = nth(r, 6);
+    def fcpa-callback-calls(r) = nth(r, 7);
+    def fcpa-tool-status(r) = nth(r, 8);
+    def fcpa-carrier(r) = nth(r, 9);
+    def fcpa-value-present?(r) = nth(r, 10);
+    def fcpa-value(r) = nth(r, 11);
+    def fcpa-native-code-generated?(r) = nth(r, 12);
+    def fcpa-injected-bytes(r) = nth(r, 13);
+    def fcpa-lifecycle(r) = nth(r, 14);
+    def fcpa-lookup-count(r) = nth(r, 15);
+    def fcpa-contribution-of(moved) = (Comparable) frxs-crossed?(moved) == 1 && (Comparable) frxs-carrier-executed?(moved) == 1 ? 1 : 0;
+    // A research observation binds the exact response bytes to the body's
+    // existing review validator.  The rows do not reward style or length: each
+    // declared meaning needs one unique, fresh primary+negative-control pair.
+    // PASS is an observed evaluation; REVISE is an observed useful finding.
+    // OPEN remains unvalidated speech.
+    def fcpa-research-observation(response, rows, declared-count) = list("form-cli-peer-research-observation-v1", response, rows, declared-count);
+    def fcpa-research-observation?(observation) = nothing?(observation) ? 0 : (Comparable) len(observation) == 4 ? (String) nth(observation, 0) == "form-cli-peer-research-observation-v1" ? 1 : 0 : 0;
+    def fcpa-research-response(observation) = nth(observation, 1);
+    def fcpa-research-rows(observation) = nth(observation, 2);
+    def fcpa-research-declared-count(observation) = nth(observation, 3);
+    def fcpa-research-verdict(observation) = ro-verdict(fcpa-research-rows(observation), fcpa-research-declared-count(observation));
+    def fcpa-research-observed?(response, observation) = (Comparable) fcpa-research-observation?(observation) == 0 ? 0 : (Comparable) str_len(response) == 0 ? 0 : (Comparable) ((String) response == fcpa-research-response(observation)) == 0 ? 0 : (Comparable) fcpa-research-verdict(observation) == ro-open() ? 0 : 1;
+    // Post-hoc assessment keeps the v1 result and callback semantics intact.
+    // result/evidence/contribution/kind remain separate so a recipe callback is
+    // never relabelled as research and unvalidated speech never impersonates
+    // language nothing, integer 0, or integer 1.
+    def fcpa-assessment(result, evidence, contribution, kind) = list("form-cli-peer-assessment-v1", result, evidence, contribution, kind);
+    def fcpa-assessment-result(assessment) = nth(assessment, 1);
+    def fcpa-assessment-evidence(assessment) = nth(assessment, 2);
+    def fcpa-assessment-contribution(assessment) = nth(assessment, 3);
+    def fcpa-assessment-kind(assessment) = nth(assessment, 4);
+    def fcpa-assess(result, research-observation) = (Comparable) fcpa-contribution(result) == 1 ? fcpa-assessment(result, research-observation, 1, "recipe-callback") : (Comparable) fcpa-research-observed?(fcpa-response(result), research-observation) == 1 ? fcpa-assessment(result, research-observation, 1, "observed-research") : fcpa-assessment(result, research-observation, 0, "unvalidated-speech");
+    // A fresh cursor belongs to each task. Model bytes before and after a tool
+    // crossing remain distinct in `moved`; the human-facing response joins them
+    // only after the contribution evidence has been computed.
+    def fcpa-run(session, budget) = {
+        let started = now_unix_ms();
+        let moved = frxs-run-with-observer(session, budget, fcpa-recipe-stage-observer);
+        let response = str_concat(frxs-before-text(moved), frxs-after-text(moved));
+        fcpa-result(frxs-session(moved), frxs-cursor(moved), response, now_unix_ms() - started, fcpa-contribution-of(moved));
+    };
+    def fcpa-string-list(xs) = nil?(xs) ? "" : nil?(tail(xs)) ? head(xs) : str_concat(head(xs), str_concat(",", fcpa-string-list(tail(xs))));
+    def fcpa-knowledge-lifecycle(cursor) = nothing?(fknsc-result(cursor)) ? "" : fcpa-string-list(fknq-trace(fknsc-result(cursor)));
+    // Content-free live telemetry.  Each node enters the native framebuffer and
+    // the compact line reaches stdout immediately, so another channel can
+    // observe progress while the resident turn is still executing.  Stage,
+    // phase, typed status and counters cross; prompts, answers and source bytes
+    // never do.
+    def fcpa-knowledge-stage-category() = intern_trivial_string("form-cli-peer-knowledge-stage-v1");
+    def fcpa-recipe-stage-category() = intern_trivial_string("form-cli-peer-recipe-stage-v1");
+    def fcpa-knowledge-stage-node(stage, phase, status, generated, callbacks, lookups, injections, stamp) = intern_node_at(fcpa-knowledge-stage-category(), list(intern_trivial_string("source-knowledge"), intern_trivial_string(stage), intern_trivial_string(phase), intern_trivial_string(status), intern_trivial_int(generated), intern_trivial_int(callbacks), intern_trivial_int(lookups), intern_trivial_int(injections), intern_trivial_int(stamp)), "form-cli-peer-agent.fk", 151, 1);
+    def fcpa-knowledge-stage-line(stage, phase, status, generated, callbacks, lookups, injections, stamp) = {
+        let a = str_concat("form-peer stage route=source-knowledge stage=", stage);
+        let b = str_concat(a, str_concat(" phase=", phase));
+        let c = str_concat(b, str_concat(" status=", status));
+        let d = str_concat(c, str_concat(" generated=", int_to_str(generated)));
+        let e = str_concat(d, str_concat(" callbacks=", int_to_str(callbacks)));
+        let f = str_concat(e, str_concat(" lookups=", int_to_str(lookups)));
+        let g = str_concat(f, str_concat(" injections=", int_to_str(injections)));
+        str_concat(g, str_concat(" stamp-ms=", str_concat(int_to_str(stamp), "\n")));
+    };
+    def fcpa-peer-stage-open() = "<|form:peer-stage|>";
+    def fcpa-peer-stage-close() = "<|/form:peer-stage|>\n";
+    def fcpa-stage-field(name, value) = str_concat(name, str_concat("=", str_concat(value, "\n")));
+    // The host append primitive is a byte carrier. Keep the conversion at this
+    // membrane explicit; the stage itself remains scannerless Form text.
+    def fcpa-bytes-go(text, at, out) = at >= str_len(text) ? reverse(out) : fcpa-bytes-go(text, at + 1, cons(str_byte_at(text, at), out));
+    def fcpa-bytes(text) = fcpa-bytes-go(text, 0, list());
+    // Caller-born context keeps progress on the task's own append-only Form
+    // channel. It is structural only: no prompt, generated text, or source
+    // bytes may cross this frame.
+    def fcpa-knowledge-stage-egress-context(path, task-node, task-key) = list("form-cli-peer-stage-egress-v1", path, task-node, task-key);
+    def fcpa-knowledge-stage-egress-path(ctx) = nth(ctx, 1);
+    def fcpa-knowledge-stage-egress-task-node(ctx) = nth(ctx, 2);
+    def fcpa-knowledge-stage-egress-task-key(ctx) = nth(ctx, 3);
+    // Do not name these fields `exchange` or `turn`: contribution replay
+    // recovery scans exactly those names. Stages are observations, never a
+    // completed contribution or a replay acknowledgement.
+    def fcpa-knowledge-stage-frame(ctx, stage, phase, status, generated, callbacks, lookups, injections, stamp) = str_concat(fcpa-peer-stage-open(), str_concat("\n", str_concat(fcpa-stage-field("route", "source-knowledge"), str_concat(fcpa-stage-field("task-node", fcpa-knowledge-stage-egress-task-node(ctx)), str_concat(fcpa-stage-field("task-key", fcpa-knowledge-stage-egress-task-key(ctx)), str_concat(fcpa-stage-field("stage", stage), str_concat(fcpa-stage-field("phase", phase), str_concat(fcpa-stage-field("status", status), str_concat(fcpa-stage-field("generated", int_to_str(generated)), str_concat(fcpa-stage-field("callbacks", int_to_str(callbacks)), str_concat(fcpa-stage-field("lookup-count", int_to_str(lookups)), str_concat(fcpa-stage-field("injections", int_to_str(injections)), str_concat(fcpa-stage-field("stamp-ms", int_to_str(stamp)), fcpa-peer-stage-close())))))))))))));
+    def fcpa-knowledge-stage-write(stage, phase, status, generated, callbacks, lookups, injections) = {
+        let stamp = now_unix_ms();
+        let event = fcpa-knowledge-stage-node(stage, phase, status, generated, callbacks, lookups, injections, stamp);
+        print_str(fcpa-knowledge-stage-line(stage, phase, status, generated, callbacks, lookups, injections, stamp));
+        event;
+    };
+    def fcpa-knowledge-stage-write-with-context(ctx, stage, phase, status, generated, callbacks, lookups, injections) = {
+        let stamp = now_unix_ms();
+        let event = fcpa-knowledge-stage-node(stage, phase, status, generated, callbacks, lookups, injections, stamp);
+        print_str(fcpa-knowledge-stage-line(stage, phase, status, generated, callbacks, lookups, injections, stamp));
+        nothing?(ctx) ? event : {
+            let frame = fcpa-knowledge-stage-frame(ctx, stage, phase, status, generated, callbacks, lookups, injections, stamp);
+            let appended = file_append_bytes(fcpa-knowledge-stage-egress-path(ctx), fcpa-bytes(frame));
+            event;
+        };
+    };
+    def fcpa-knowledge-stage-observer(stage, phase, cursor, generated) = fcpa-knowledge-stage-write(stage, phase, nothing?(fknsc-result(cursor)) ? fknsc-scan-state(cursor) : fknsc-status(cursor), generated, fknsc-callback-calls(cursor), fknsc-lookup-count(cursor), fknsc-injections(cursor));
+    def fcpa-knowledge-stage-observer-with-context(ctx, stage, phase, cursor, generated) = fcpa-knowledge-stage-write-with-context(ctx, stage, phase, nothing?(fknsc-result(cursor)) ? fknsc-scan-state(cursor) : fknsc-status(cursor), generated, fknsc-callback-calls(cursor), fknsc-lookup-count(cursor), fknsc-injections(cursor));
+    def fcpa-recipe-stage-node(stage, phase, status, generated, callbacks, injections, stamp) = intern_node_at(fcpa-recipe-stage-category(), list(intern_trivial_string("recipe"), intern_trivial_string(stage), intern_trivial_string(phase), intern_trivial_string(status), intern_trivial_int(generated), intern_trivial_int(callbacks), intern_trivial_int(injections), intern_trivial_int(stamp)), "form-cli-peer-agent.fk", 204, 1);
+    def fcpa-recipe-stage-line(stage, phase, status, generated, callbacks, injections, stamp) = {
+        let a = str_concat("form-peer stage route=recipe stage=", stage);
+        let b = str_concat(a, str_concat(" phase=", phase));
+        let c = str_concat(b, str_concat(" status=", status));
+        let d = str_concat(c, str_concat(" generated=", int_to_str(generated)));
+        let e = str_concat(d, str_concat(" callbacks=", int_to_str(callbacks)));
+        let f = str_concat(e, str_concat(" injections=", int_to_str(injections)));
+        str_concat(f, str_concat(" stamp-ms=", str_concat(int_to_str(stamp), "\n")));
+    };
+    def fcpa-recipe-stage-observer(stage, phase, cursor, generated) = {
+        let stamp = now_unix_ms();
+        let event = fcpa-recipe-stage-node(stage, phase, frxc-status(cursor), generated, frxc-callback-calls(cursor), frxc-injections(cursor), stamp);
+        print_str(fcpa-recipe-stage-line(stage, phase, frxc-status(cursor), generated, frxc-callback-calls(cursor), frxc-injections(cursor), stamp));
+        event;
+    };
+    def fcpa-knowledge-executor(ctx, surface) = {
+        let begin = fcpa-knowledge-stage-write("source-lookup", "begin", "choice", 0, 0, 0, 0);
+        let result = fknqr-public-strict-executor(ctx, surface);
+        let end = fcpa-knowledge-stage-write("source-lookup", "end", fknq-status(result), 0, 1, fknq-lookup-count(result), 0);
+        result;
+    };
+    // Same Qwen state and KV rows, different scannerless protocol.  Read-only
+    // retrieval is observable but does not impersonate an executed recipe or a
+    // landed mutation, so contribution remains zero here.
+    def fcpa-run-knowledge-with-context(session, budget, stage-observer, stage-context) = {
+        let started = now_unix_ms();
+        let root = fhcs-default-root();
+        (String) root == "" ? fcpa-result-full(session, fknsc-fresh(), "", now_unix_ms() - started, 0, "source-knowledge", 0, "nothing", "form-current-source", 0, 0, 0, 0, "choice,nothing,release", 0) : {
+            let ctx = fknsc-public-context(root, fknq-default-artifact(), 0, fknq-max-frame-bytes());
+            // A resident concept request chooses the already-built
+            // concept-key bucket.  Route absence is a typed refusal;
+            // it never buys a repository-wide compatibility walk.
+            let moved = fknss-run-with-observer-context(session, budget, ctx, fcpa-knowledge-executor, stage-observer, stage-context);
+            let cursor = fknss-cursor(moved);
+            let response = str_concat(fknss-before-text(moved), fknss-after-text(moved));
+            fcpa-result-full(fknss-session(moved), cursor, response, now_unix_ms() - started, 0, "source-knowledge", fknss-callback-calls(moved), fknsc-status(cursor), "form-current-source", 0, 0, 0, fknss-injected-bytes(moved), fcpa-knowledge-lifecycle(cursor), fknss-lookup-count(moved));
+        };
+    };
+    // Preserve the original direct observer door for callers that do not carry
+    // a live egress context.
+    def fcpa-run-knowledge(session, budget) = fcpa-run-knowledge-with-context(session, budget, fcpa-knowledge-stage-observer-with-context, nothing());
+    def fcpa-patch-stage-category() = intern_trivial_string("form-cli-peer-patch-stage-v1");
+    def fcpa-patch-stage-write(phase, status, callbacks, journaled) = {
+        let stamp = now_unix_ms();
+        let event = intern_node_at(fcpa-patch-stage-category(), list(intern_trivial_string(phase), intern_trivial_string(status), intern_trivial_int(callbacks), intern_trivial_int(journaled), intern_trivial_int(stamp)), "form-cli-peer-agent.fk", 285, 1);
+        print_str(str_concat("form-peer stage route=repo-patch phase=", str_concat(phase, str_concat(" status=", str_concat(status, str_concat(" callbacks=", str_concat(int_to_str(callbacks), str_concat(" journaled=", str_concat(int_to_str(journaled), str_concat(" stamp-ms=", str_concat(int_to_str(stamp), "\n")))))))))));
+        event;
+    };
+    def fcpa-patch-stage-observer(stage, phase, cursor, generated) = fcpa-patch-stage-write(str_concat(stage, str_concat(":", phase)), nothing?(farp-cursor-result(cursor)) ? farp-cursor-scan(cursor) : farp-status(farp-cursor-result(cursor)), farp-cursor-callbacks(cursor), nothing?(farp-cursor-result(cursor)) ? 0 : farp-journaled?(farp-cursor-result(cursor)));
+    // One generated response may offer one complete repo-patch frame. Each
+    // decoded token's raw bytes enter farp-cursor-feed immediately. Completion
+    // executes through the caller-born capability context, then fcms-observe
+    // injects the source-free receipt into the same Qwen/KV residence before
+    // generation continues. No completed-quantum rescan participates.
+    def fcpa-run-patch(session, budget, patch-ctx) = {
+        let started = now_unix_ms();
+        nothing?(patch-ctx) ? {
+            let generated = fcpa-run(session, budget);
+            fcpa-result-full(fcpa-session(generated), nothing(), fcpa-response(generated), now_unix_ms() - started, 0, "repo-patch", 0, "nothing", "form-repo-guard", 0, 0, 0, 0, "choice,nothing,release", 0);
+        } : {
+            let moved = frxs-run-protocol-with-injector(session, budget, farp-cursor-fresh(), patch-ctx, farp-cursor-feed, fcpa-patch-stage-observer, fcms-observe-inline-bml);
+            let raw-cursor = frxs-cursor(moved);
+            let held-timeout = nothing?(farp-cursor-result(raw-cursor)) && (String) farp-cursor-scan(raw-cursor) == "held" ? 1 : 0;
+            let cursor = (Comparable) held-timeout == 1 ? farp-cursor-timeout(raw-cursor) : raw-cursor;
+            let timeout-session = (Comparable) held-timeout == 1 ? fcms-observe(frxs-session(moved), farp-cursor-observation(cursor)) : frxs-session(moved);
+            let kept-session = (Comparable) fcms-live?(timeout-session) == 1 ? timeout-session : frxs-session(moved);
+            let response = str_concat(frxs-before-text(moved), frxs-after-text(moved));
+            let patch-result = farp-cursor-result(cursor);
+            nothing?(patch-result) ? fcpa-result-full(kept-session, cursor, response, now_unix_ms() - started, 0, "repo-patch", farp-cursor-callbacks(cursor), "nothing", "form-repo-guard", 0, 0, 0, farp-cursor-injected-bytes(cursor), (String) farp-cursor-scan(cursor) == "held" ? "choice,timeout,cut,undo,release" : "choice,nothing,release", 0) : fcpa-result-full(kept-session, cursor, response, now_unix_ms() - started, farp-contribution(patch-result), "repo-patch", farp-cursor-callbacks(cursor), farp-status(patch-result), "form-repo-guard", (String) farp-status(patch-result) == "value" ? 1 : 0, (String) farp-status(patch-result) == "value" ? 1 : 0, 0, farp-cursor-injected-bytes(cursor), farp-trace-text(farp-trace(patch-result)), 0);
+        };
+    };
+    def fcpa-task-stage-category() = intern_trivial_string("form-cli-peer-task-stage-v1");
+    def fcpa-task-stage-node(phase, turn, kind, bytes, status, stamp) = intern_node_at(fcpa-task-stage-category(), list(intern_trivial_string(phase), intern_trivial_int(turn), intern_trivial_string(kind), intern_trivial_int(bytes), intern_trivial_string(status), intern_trivial_int(stamp)), "form-cli-peer-agent.fk", 244, 1);
+    def fcpa-task-stage-line(phase, turn, kind, bytes, status, stamp) = {
+        let a = str_concat("form-peer stage route=task-observation phase=", phase);
+        let b = str_concat(a, str_concat(" turn=", int_to_str(turn)));
+        let c = str_concat(b, str_concat(" kind=", kind));
+        let d = str_concat(c, str_concat(" bytes=", int_to_str(bytes)));
+        let e = str_concat(d, str_concat(" status=", status));
+        str_concat(e, str_concat(" stamp-ms=", str_concat(int_to_str(stamp), "\n")));
+    };
+    def fcpa-task-stage-write(phase, turn, kind, bytes, status) = {
+        let stamp = now_unix_ms();
+        let event = fcpa-task-stage-node(phase, turn, kind, bytes, status, stamp);
+        print_str(fcpa-task-stage-line(phase, turn, kind, bytes, status, stamp));
+        event;
+    };
+    def fcpa-observe-task(session, turn, kind, task) = {
+        let frame = fcpa-task-frame(turn, kind, task);
+        let begin = fcpa-task-stage-write("begin", turn, kind, str_len(frame), "choice");
+        let observed = fcms-observe(session, frame);
+        let end = fcpa-task-stage-write("end", turn, kind, str_len(frame), fcms-status(observed));
+        observed;
+    };
+    def fcpa-observe-task-ref(session, turn, kind, task-ref, action-ref) = {
+        let frame = fcpa-task-ref-surface(task-ref, action-ref);
+        let begin = fcpa-task-stage-write("begin", turn, kind, str_len(frame), "choice");
+        // This remains an external task role. Semantic compression removes
+        // replayed meaning, not the speaker boundary.
+        let observed = fcms-observe(session, frame);
+        let end = fcpa-task-stage-write("end", turn, kind, str_len(frame), fcms-status(observed));
+        observed;
+    };
+    // Resolve before crossing the model membrane.  A registry miss, conflict,
+    // or malformed binding emits a content-free stage and keeps the resident
+    // state untouched; it must not manufacture `(agent-task nothing)` as if it
+    // were a requested task.
+    def fcpa-observe-task-alias(session, turn, kind, registry, alias, action-ref) = {
+        let resolved = fcpa-task-alias-resolve(registry, alias);
+        !((String) fcpa-alias-resolution-status(resolved) == "value") ? {
+            let blocked = fcpa-task-stage-write("resolve", turn, kind, 0, fcpa-alias-resolution-status(resolved));
+            session;
+        } : {
+            let frame = fcpa-task-alias-surface(registry, alias, action-ref);
+            let begin = fcpa-task-stage-write("begin", turn, kind, str_len(frame), "choice");
+            let observed = fcms-observe(session, frame);
+            let end = fcpa-task-stage-write("end", turn, kind, str_len(frame), fcms-status(observed));
+            observed;
+        };
+    };
+    def fcpa-signal(session) = (Comparable) fcms-live?(session) == 1 ? "value" : (Comparable) fcms-resident?(session) == 1 ? "nothing-owned" : "nothing";
+    0;
+}

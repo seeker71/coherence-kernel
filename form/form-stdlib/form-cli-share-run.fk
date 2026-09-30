@@ -1,224 +1,94 @@
-; form-cli-share-run.fk — measured completed-turn share, path, walk, answer.
-;
-; preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
-; preludes: form-stdlib/form-cli-local-law.fk form-stdlib/form-cli-router.fk
-; preludes: form-stdlib/form-cli-turn-evidence.fk
-; preludes: form-stdlib/form-cli-turn-evidence-live.fk
-; preludes: form-stdlib/form-cli-turn-evidence-grok.bml
-; preludes: form-stdlib/bml/form-cli-turn-evidence-cursor.bml
-; preludes: form-stdlib/bml/form-cli-share-health.bml
-; preludes: form-stdlib/form-glass-telemetry-membrane.bml
-; preludes: form-stdlib/bml/form-cli-share-glass.bml
-; preludes: form-stdlib/bml/form-cli-token-glass.bml
-
-(defn fctes-join (parts)
-    (if (eq (len parts) 0) ""
-        (str_concat (head parts) (fctes-join (tail parts)))))
-
-(defn fctes-flag (bit) (if (eq bit 1) "1" "0"))
-
-; A remote count with an empty token total is a speech boundary. Provider
-; usage is carried when the call count matches and the provider's own total
-; is present, or when that lane is empty.
-(defn fctes-usage-carried? (e)
-    (if (and (eq (fcte-model-calls e) (fcte-remote-events e))
-             (or (gt (fcte-total-tokens e) 0) (eq (fcte-remote-events e) 0)))
-        1 0))
-
-(defn fctes-tokens-reconciled? (e)
-    (if (and (eq (fcte-token-valid? e) 1) (eq (fctes-usage-carried? e) 1)) 1 0))
-
-(defn fctes-observed (e)
-    (do
-        (let share (fcte-boundary-share e))
-        (fctes-join (list
-            (fctes-join (list "turn=" (fcte-turn-id e)
-                " thread=" (fcte-thread-id e)
-                " model=" (fcte-model-provider e) "/" (fcte-model e)
-                " duration-ms=" (int_to_str (fcte-duration-ms e))
-                " ttft-ms=" (int_to_str (fcte-ttft-ms e))
-                " final-output-bytes=" (int_to_str (fcte-final-output-bytes e)) "\n"))
-            (fctes-join (list "events native=" (int_to_str (fcte-native-commands e))
-                " local=" (int_to_str (fcte-local-events e))
-                " remote=" (int_to_str (fcte-remote-events e))
-                " total=" (int_to_str (fcte-total-events e)) "\n"))
-            (fctes-join (list "share native=" (int_to_str (nth share 0))
-                " local=" (int_to_str (nth share 1))
-                " remote=" (int_to_str (nth share 2))
-                " sum=" (int_to_str (sum share)) "\n"))
-            (fctes-join (list "remote provider-usage-events="
-                (int_to_str (fcte-model-calls e))
-                " token-volume=not-used-for-share\n"))
-            (fctes-join (list "remote tokens input="
-                (int_to_str (fcte-input-tokens e))
-                " cached-input=" (int_to_str (fcte-cached-input-tokens e))
-                " uncached-input=" (int_to_str (fcte-uncached-input-tokens e))
-                " cache-write-input=" (int_to_str (fcte-cache-write-input-tokens e))
-                " output=" (int_to_str (fcte-output-tokens e))
-                " reasoning-output=" (int_to_str (fcte-reasoning-output-tokens e))
-                " unattributed=" (int_to_str (fcte-unattributed-tokens e))
-                " total=" (int_to_str (fcte-total-tokens e)) "\n"))
-            (fctes-join (list "local tool-calls=" (int_to_str (fcte-tool-calls e))
-                " tool-outputs=" (int_to_str (fcte-tool-outputs e))
-                " serialized-tool-output-span-bytes=" (int_to_str (fcte-tool-output-bytes e))
-                " form-commands=" (int_to_str (fcte-form-commands e))
-                " form-failures=" (int_to_str (fcte-form-failures e))
-                " patch-events=" (int_to_str (fcte-patch-events e))
-                " tool-wall-time=not-used-for-share\n"))
-            (fctes-join (list "native fkwu-commands=" (int_to_str (fcte-native-commands e))
-                " fkwu-failures=" (int_to_str (fcte-native-failures e))
-                " form-stdout-bytes=" (int_to_str (fcte-form-stdout-bytes e))
-                " form-stderr-bytes=" (int_to_str (fcte-form-stderr-bytes e))
-                " form-shown-bytes=" (int_to_str (fcte-form-shown-bytes e)) "\n"))
-            (fctes-join (list "coverage source-bound=1 carrier-identity=1 carrier-timestamps=1 source-coordinates=1 carrier-size="
-                (int_to_str (fcte-carrier-size e)) " start-byte="
-                (int_to_str (fcte-start-at e)) " complete-byte="
-                (int_to_str (fcte-complete-at e))
-                " turn-complete=1 provider-call-usage=" (fctes-flag (fctes-usage-carried? e))
-                " provider-token-total-reconciled=" (fctes-flag (fctes-tokens-reconciled? e))
-                " attribution-gap-explicit=1 tools-reconciled=1 form-receipt-window=512-tail-bytes bytes-reconciled=1 lanes-reconciled=1\n"))
-            "measurement-health=observed semantic-contribution=not-measured\n"))))
-
-; An active task has no settled share. Its most recent provider call may still
-; be measured; the result is pressure, never a percentage or completed claim.
-; The source is the explicit binding where one stands, and otherwise the agent
-; transcript this body discovers for its own working tree, so the reading exists
-; on a host where nobody has written a binding by hand. The line names which
-; source answered, so a reader never has to guess where a count came from.
-(defn fctes-token-absent-reason (reading)
-    (if (str_eq (fctel-token-reading-path reading) "")
-        (fctd-discovered-reason)
-        "no-completed-provider-call-in-native-tail"))
-
-(defn fctes-active-provider-tokens (reading)
-    (do
-        (let path (fctel-token-reading-path reading))
-        (let state (fctel-token-reading-state reading))
-        (if (str_eq path "")
-            (str_concat "remote-token-pressure=unavailable reason="
-                (str_concat (fctes-token-absent-reason reading) "\n"))
-            (do
-                (if (eq (nth state 6) 0)
-                    (if (str_eq (fctel-token-reading-kind reading) "cursor-session-transcript")
-                        "remote-token-pressure=attention reason=provider-usage-not-in-transcript\n"
-                        "remote-token-pressure=unavailable reason=no-completed-provider-call-in-native-tail\n")
-                    (fctes-join (list
-                        "remote-token-pressure kind=last-completed-provider-call scope=open-task source="
-                        (fctel-token-reading-kind reading) "\n"
-                        "remote tokens input=" (int_to_str (nth state 1))
-                        " cached-input=" (int_to_str (nth state 2))
-                        " uncached-input=" (int_to_str (sub (nth state 1) (nth state 2)))
-                        " cache-write-input=" (int_to_str (nth state 3))
-                        " output=" (int_to_str (nth state 4))
-                        " reasoning-output=" (int_to_str (nth state 5))
-                        " total=" (int_to_str (nth state 6)) "\n")))))))
-
-(defn fctes-route ()
-    (fctes-join (list
-        "form-cli path: native then local then remote\n"
-        "form-cli walk hit=1 ready=1 -> lane=" (int_to_str (fcr-walk 1 1)) " (0 native)\n"
-        "form-cli walk hit=0 ready=1 -> lane=" (int_to_str (fcr-walk 0 1)) " (1 local)\n"
-        "form-cli walk hit=0 ready=0 -> lane=" (int_to_str (fcr-walk 0 0)) " (2 remote)\n")))
-
-; The live collector's one-slice discovery is a continuation, so a cache read
-; must not turn "not in this slice" into "stale".  The high-BML cursor walks
-; byte coordinates only and returns the actual nearest terminal turn.
-(defn fctes-codex-source-reconciled? (e path)
-    (fctec-codex-source-reconciled? e path))
-
-(defn fctes-unmeasured-clear-validation ()
-    (do
-        (write_file_text (fctel-latest-validation-path) "")
-        (fcte-parse "unmeasured")))
-
-; A row that has been physically disproved as latest is expired from the
-; current-value cache. Keeping it there made every later invocation rescan the
-; same append tail before advancing the new turn's durable cursor.
-(defn fctes-unmeasured-expire-stale ()
-    (do
-        (fctec-expire-current-stale)
-        (fcte-parse "unmeasured")))
-
-(defn fctes-cached-evidence ()
-    (if (le (file_size (fctel-observed-row-path)) 0)
-        (fctes-unmeasured-clear-validation)
-        (do
-            (let row (fctel-trim-end (read_file (fctel-observed-row-path))))
-            (let evidence (fcte-parse row))
-            (if (eq (fcte-valid? evidence) 0)
-                (fctes-unmeasured-clear-validation)
-                (if (str_eq (fcte-source evidence) (fcte-source-kind-grok))
-                    evidence
-                (if (not (str_eq (fcte-source evidence) (fcte-source-kind)))
-                    (fctes-unmeasured-clear-validation)
-                    (do
-                        (let path (fctel-bound-path))
-                        (if (str_eq path "")
-                            (fctes-unmeasured-clear-validation)
-                            (if (eq (fctes-codex-source-reconciled?
-                                evidence path) 0)
-                                (fctes-unmeasured-clear-validation)
-                                (do
-                                    (let latest (fctec-advance-latest
-                                        evidence path))
-                                    (if (eq (fctec-latest? latest) 1)
-                                        evidence
-                                        (if (eq (fctec-latest-progress? latest) 1)
-                                            (fcte-parse "unmeasured")
-                                            (fctes-unmeasured-expire-stale)))))))))))))
-
-(do
-    (let grok-session (fctg-bound-session))
-    (let grok-refreshed (if (eq (str_len grok-session) 0)
-        (fctg-attend-unbound)
-        (fctg-refresh-once grok-session)))
-    (let refresh-start-ms (now_unix_ms))
-    (let observed-row-before (gt (file_size (fctel-observed-row-path)) 0))
-    (let before (fctes-cached-evidence))
-    (let stale-expired (and observed-row-before
-        (eq (file_size (fctel-observed-row-path)) 0)))
-    ; A share read also advances one bounded native continuation when the
-    ; previous completed turn has not settled yet.  Re-entry is durable; an
-    ; observed row pays no refresh work.
-    (let validating (gt (file_size (fctel-latest-validation-path)) 0))
-    (let action (fctec-invocation-action (fcte-valid? before)
-        validating stale-expired))
-    (let refresh (if (str_eq action "advance")
-        (fctec-refresh-bound) (fctec-invocation-status action)))
-    ; One invocation owns one evidence movement. A refresh that finishes a
-    ; candidate does not immediately spend a second slice validating it; the
-    ; following invocation reads and validates that durable row.
-    (let evidence before)
-    ; The attention clock closes only after the atomic Glass snapshot write,
-    ; so it covers the whole evidence movement visible to another process.
-    (let share-published (fcsg-publish-evidence (now_unix_ms) evidence))
-    ; One traversal answers both the printed line and the glass, so the reading
-    ; a reader sees on the frame is the reading the receipt names.
-    (let token-reading (fctel-token-reading))
-    (let tokens-published (fctg-publish (now_unix_ms)
-        (fctel-token-reading-state token-reading)
-        (fctel-token-reading-kind token-reading)
-        (fctes-token-absent-reason token-reading)))
-    (let refresh-ms (sub (now_unix_ms) refresh-start-ms))
-    (print_str (fctes-join (list
-        "measurement-refresh=" refresh "\n"
-        "measurement-refresh-ms=" (int_to_str refresh-ms)
-        " normal-slice-bytes=" (int_to_str (fctec-processing-bytes))
-        " whole-row-cap-bytes=" (int_to_str (fctr-row-limit (fctec-processing-bytes)))
-        " attention-ms=" (int_to_str (fctec-attention-ms))
-        " measurement-attention=" (fctec-attention-state refresh-ms) "\n"
-        "glass-share=" (fcsg-publish-status share-published) "\n"
-        "glass-tokens=" (fctg-publish-status tokens-published) "\n"
-        "form-cli share kind=" (fcte-kind-name evidence)
-        " scope=" (if (eq (fcte-valid? evidence) 1)
-            (if (str_eq (fcte-source evidence) (fcte-source-kind-grok))
-                "grok-session-form-receipts" "previous-completed-turn")
-            "unmeasured")
-        " basis=observed-boundary-event-counts-v1\n"
-        (if (eq (fcte-valid? evidence) 1) (fctes-observed evidence)
-            (fctes-join (list (fcsh-after-refresh refresh)
-                "semantic-contribution=not-measured\n")))
-        (fctes-active-provider-tokens token-reading)
-        (fctes-route)
-        (fcl-spoken-answer))))
-    0)
+// form-cli-share-run.fk — measured completed-turn share, path, walk, answer.
+//
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
+// preludes: form-stdlib/form-cli-local-law.fk form-stdlib/form-cli-router.fk
+// preludes: form-stdlib/form-cli-turn-evidence.fk
+// preludes: form-stdlib/form-cli-turn-evidence-live.fk
+// preludes: form-stdlib/form-cli-turn-evidence-grok.bml
+// preludes: form-stdlib/bml/form-cli-turn-evidence-cursor.bml
+// preludes: form-stdlib/bml/form-cli-share-health.bml
+// preludes: form-stdlib/form-glass-telemetry-membrane.bml
+// preludes: form-stdlib/bml/form-cli-share-glass.bml
+// preludes: form-stdlib/bml/form-cli-token-glass.bml
+section [form.bml] {
+    def fctes-join(parts) = (Comparable) len(parts) == 0 ? "" : str_concat(head(parts), fctes-join(tail(parts)));
+    def fctes-flag(bit) = (Comparable) bit == 1 ? "1" : "0";
+    // A remote count with an empty token total is a speech boundary. Provider
+    // usage is carried when the call count matches and the provider's own total
+    // is present, or when that lane is empty.
+    def fctes-usage-carried?(e) = (Comparable) fcte-model-calls(e) == fcte-remote-events(e) && (fcte-total-tokens(e) > 0 || (Comparable) fcte-remote-events(e) == 0) ? 1 : 0;
+    def fctes-tokens-reconciled?(e) = (Comparable) fcte-token-valid?(e) == 1 && (Comparable) fctes-usage-carried?(e) == 1 ? 1 : 0;
+    def fctes-observed(e) = {
+        let share = fcte-boundary-share(e);
+        fctes-join(list(fctes-join(list("turn=", fcte-turn-id(e), " thread=", fcte-thread-id(e), " model=", fcte-model-provider(e), "/", fcte-model(e), " duration-ms=", int_to_str(fcte-duration-ms(e)), " ttft-ms=", int_to_str(fcte-ttft-ms(e)), " final-output-bytes=", int_to_str(fcte-final-output-bytes(e)), "\n")), fctes-join(list("events native=", int_to_str(fcte-native-commands(e)), " local=", int_to_str(fcte-local-events(e)), " remote=", int_to_str(fcte-remote-events(e)), " total=", int_to_str(fcte-total-events(e)), "\n")), fctes-join(list("share native=", int_to_str(nth(share, 0)), " local=", int_to_str(nth(share, 1)), " remote=", int_to_str(nth(share, 2)), " sum=", int_to_str(sum(share)), "\n")), fctes-join(list("remote provider-usage-events=", int_to_str(fcte-model-calls(e)), " token-volume=not-used-for-share\n")), fctes-join(list("remote tokens input=", int_to_str(fcte-input-tokens(e)), " cached-input=", int_to_str(fcte-cached-input-tokens(e)), " uncached-input=", int_to_str(fcte-uncached-input-tokens(e)), " cache-write-input=", int_to_str(fcte-cache-write-input-tokens(e)), " output=", int_to_str(fcte-output-tokens(e)), " reasoning-output=", int_to_str(fcte-reasoning-output-tokens(e)), " unattributed=", int_to_str(fcte-unattributed-tokens(e)), " total=", int_to_str(fcte-total-tokens(e)), "\n")), fctes-join(list("local tool-calls=", int_to_str(fcte-tool-calls(e)), " tool-outputs=", int_to_str(fcte-tool-outputs(e)), " serialized-tool-output-span-bytes=", int_to_str(fcte-tool-output-bytes(e)), " form-commands=", int_to_str(fcte-form-commands(e)), " form-failures=", int_to_str(fcte-form-failures(e)), " patch-events=", int_to_str(fcte-patch-events(e)), " tool-wall-time=not-used-for-share\n")), fctes-join(list("native fkwu-commands=", int_to_str(fcte-native-commands(e)), " fkwu-failures=", int_to_str(fcte-native-failures(e)), " form-stdout-bytes=", int_to_str(fcte-form-stdout-bytes(e)), " form-stderr-bytes=", int_to_str(fcte-form-stderr-bytes(e)), " form-shown-bytes=", int_to_str(fcte-form-shown-bytes(e)), "\n")), fctes-join(list("coverage source-bound=1 carrier-identity=1 carrier-timestamps=1 source-coordinates=1 carrier-size=", int_to_str(fcte-carrier-size(e)), " start-byte=", int_to_str(fcte-start-at(e)), " complete-byte=", int_to_str(fcte-complete-at(e)), " turn-complete=1 provider-call-usage=", fctes-flag(fctes-usage-carried?(e)), " provider-token-total-reconciled=", fctes-flag(fctes-tokens-reconciled?(e)), " attribution-gap-explicit=1 tools-reconciled=1 form-receipt-window=512-tail-bytes bytes-reconciled=1 lanes-reconciled=1\n")), "measurement-health=observed semantic-contribution=not-measured\n"));
+    };
+    // An active task has no settled share. Its most recent provider call may still
+    // be measured; the result is pressure, never a percentage or completed claim.
+    // The source is the explicit binding where one stands, and otherwise the agent
+    // transcript this body discovers for its own working tree, so the reading exists
+    // on a host where nobody has written a binding by hand. The line names which
+    // source answered, so a reader never has to guess where a count came from.
+    def fctes-token-absent-reason(reading) = (String) fctel-token-reading-path(reading) == "" ? fctd-discovered-reason() : "no-completed-provider-call-in-native-tail";
+    def fctes-active-provider-tokens(reading) = {
+        let path = fctel-token-reading-path(reading);
+        let state = fctel-token-reading-state(reading);
+        (String) path == "" ? str_concat("remote-token-pressure=unavailable reason=", str_concat(fctes-token-absent-reason(reading), "\n")) : {
+            (Comparable) nth(state, 6) == 0 ? (String) fctel-token-reading-kind(reading) == "cursor-session-transcript" ? "remote-token-pressure=attention reason=provider-usage-not-in-transcript\n" : "remote-token-pressure=unavailable reason=no-completed-provider-call-in-native-tail\n" : fctes-join(list("remote-token-pressure kind=last-completed-provider-call scope=open-task source=", fctel-token-reading-kind(reading), "\n", "remote tokens input=", int_to_str(nth(state, 1)), " cached-input=", int_to_str(nth(state, 2)), " uncached-input=", int_to_str(nth(state, 1) - nth(state, 2)), " cache-write-input=", int_to_str(nth(state, 3)), " output=", int_to_str(nth(state, 4)), " reasoning-output=", int_to_str(nth(state, 5)), " total=", int_to_str(nth(state, 6)), "\n"));
+        };
+    };
+    def fctes-route() = fctes-join(list("form-cli path: native then local then remote\n", "form-cli walk hit=1 ready=1 -> lane=", int_to_str(fcr-walk(1, 1)), " (0 native)\n", "form-cli walk hit=0 ready=1 -> lane=", int_to_str(fcr-walk(0, 1)), " (1 local)\n", "form-cli walk hit=0 ready=0 -> lane=", int_to_str(fcr-walk(0, 0)), " (2 remote)\n"));
+    // The live collector's one-slice discovery is a continuation, so a cache read
+    // must not turn "not in this slice" into "stale".  The high-BML cursor walks
+    // byte coordinates only and returns the actual nearest terminal turn.
+    def fctes-codex-source-reconciled?(e, path) = fctec-codex-source-reconciled?(e, path);
+    def fctes-unmeasured-clear-validation() = {
+        write_file_text(fctel-latest-validation-path(), "");
+        fcte-parse("unmeasured");
+    };
+    // A row that has been physically disproved as latest is expired from the
+    // current-value cache. Keeping it there made every later invocation rescan the
+    // same append tail before advancing the new turn's durable cursor.
+    def fctes-unmeasured-expire-stale() = {
+        fctec-expire-current-stale();
+        fcte-parse("unmeasured");
+    };
+    def fctes-cached-evidence() = file_size(fctel-observed-row-path()) <= 0 ? fctes-unmeasured-clear-validation() : {
+        let row = fctel-trim-end(read_file(fctel-observed-row-path()));
+        let evidence = fcte-parse(row);
+        (Comparable) fcte-valid?(evidence) == 0 ? fctes-unmeasured-clear-validation() : (String) fcte-source(evidence) == fcte-source-kind-grok() ? evidence : !((String) fcte-source(evidence) == fcte-source-kind()) ? fctes-unmeasured-clear-validation() : {
+            let path = fctel-bound-path();
+            (String) path == "" ? fctes-unmeasured-clear-validation() : (Comparable) fctes-codex-source-reconciled?(evidence, path) == 0 ? fctes-unmeasured-clear-validation() : {
+                let latest = fctec-advance-latest(evidence, path);
+                (Comparable) fctec-latest?(latest) == 1 ? evidence : (Comparable) fctec-latest-progress?(latest) == 1 ? fcte-parse("unmeasured") : fctes-unmeasured-expire-stale();
+            };
+        };
+    };
+    {
+        let grok-session = fctg-bound-session();
+        let grok-refreshed = (Comparable) str_len(grok-session) == 0 ? fctg-attend-unbound() : fctg-refresh-once(grok-session);
+        let refresh-start-ms = now_unix_ms();
+        let observed-row-before = file_size(fctel-observed-row-path()) > 0;
+        let before = fctes-cached-evidence();
+        let stale-expired = observed-row-before && (Comparable) file_size(fctel-observed-row-path()) == 0;
+        // A share read also advances one bounded native continuation when the
+        // previous completed turn has not settled yet.  Re-entry is durable; an
+        // observed row pays no refresh work.
+        let validating = file_size(fctel-latest-validation-path()) > 0;
+        let action = fctec-invocation-action(fcte-valid?(before), validating, stale-expired);
+        let refresh = (String) action == "advance" ? fctec-refresh-bound() : fctec-invocation-status(action);
+        // One invocation owns one evidence movement. A refresh that finishes a
+        // candidate does not immediately spend a second slice validating it; the
+        // following invocation reads and validates that durable row.
+        let evidence = before;
+        // The attention clock closes only after the atomic Glass snapshot write,
+        // so it covers the whole evidence movement visible to another process.
+        let share-published = fcsg-publish-evidence(now_unix_ms(), evidence);
+        // One traversal answers both the printed line and the glass, so the reading
+        // a reader sees on the frame is the reading the receipt names.
+        let token-reading = fctel-token-reading();
+        let tokens-published = fctg-publish(now_unix_ms(), fctel-token-reading-state(token-reading), fctel-token-reading-kind(token-reading), fctes-token-absent-reason(token-reading));
+        let refresh-ms = now_unix_ms() - refresh-start-ms;
+        print_str(fctes-join(list("measurement-refresh=", refresh, "\n", "measurement-refresh-ms=", int_to_str(refresh-ms), " normal-slice-bytes=", int_to_str(fctec-processing-bytes()), " whole-row-cap-bytes=", int_to_str(fctr-row-limit(fctec-processing-bytes())), " attention-ms=", int_to_str(fctec-attention-ms()), " measurement-attention=", fctec-attention-state(refresh-ms), "\n", "glass-share=", fcsg-publish-status(share-published), "\n", "glass-tokens=", fctg-publish-status(tokens-published), "\n", "form-cli share kind=", fcte-kind-name(evidence), " scope=", (Comparable) fcte-valid?(evidence) == 1 ? (String) fcte-source(evidence) == fcte-source-kind-grok() ? "grok-session-form-receipts" : "previous-completed-turn" : "unmeasured", " basis=observed-boundary-event-counts-v1\n", (Comparable) fcte-valid?(evidence) == 1 ? fctes-observed(evidence) : fctes-join(list(fcsh-after-refresh(refresh), "semantic-contribution=not-measured\n")), fctes-active-provider-tokens(token-reading), fctes-route(), fcl-spoken-answer())));
+        0;
+    };
+}

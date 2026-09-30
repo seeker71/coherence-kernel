@@ -1,321 +1,209 @@
-; form-cli-ask.fk - the form-cli ASK verb, native on the fkwu walker.
-;
-; preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/storage-port.fk
-; preludes: form-stdlib/form-cli-router.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
-; preludes: form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
-; preludes: form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk
-; preludes: form-stdlib/rag-ask.fk
-; ask-native-lane carries already-rendered receipt text and calls no `acr-*`
-; symbol; cost arithmetic remains independently loadable at its own door.
-;
-; preludes: form-stdlib/ask-native-lane.fk
-;
-; The local answer starts with the body: the one-shot CLI stages the question, then fkwu reads the
-; staged query and healed RAG JSONL index directly. It does not call Ollama, localhost:11434,
-; http-fetch, host-exec, or a shell.
-;
-; THE MODEL LANE IS WIRED. Real llama3.2:3b tokens come from real weights, full width, through
-; kernels the body emitted, and the verb answers through them. The refusal to pretend a host LLM is
-; the local oracle survives verbatim in `fca-grounded-answer` as a NAMED lane rather than as the
-; only one.
-;
-; THREE LANES, AND THE VERB ALWAYS SAYS WHICH ONE SPOKE.
-;   form-token-eval    a bounded numeric TOKEN recipe, selected by a witnessed
-;                      joint NL/PL surface and executed by Form.  The receipt
-;                      separates execution-lane, semantic-origin, and content
-;                      grade: local execution never launders where meaning came
-;                      from.  Unknown or malformed recipes do not preempt RAG.
-;   metal-gguf-native   real llama3.2:3b prose, generated form-native off the resident quantized blob
-;                       (ask-native-lane.fk; generation observe/metal-ask-run.bml). Every answer
-;                       carries the model, the blob, the question it is bound to, and a cost receipt
-;                       in which every cost appears DECLARED (a bound derived from the model's own
-;                       shape, before the run) and MEASURED, with the measured value as a fraction of
-;                       its bound.
-;   fkwu-rag-grounded   the attributed grounded cell out of the healed local index. NOT a degraded
-;                       mode and NOT deleted: when the question wants provenance rather than prose, a
-;                       grounded `@p.l.t.i` cell is the better answer, and when the model lane is
-;                       unavailable it is the honest one.
-; The lanes are never blended and never guessed at. `fca-lane-of` reports the lane that WILL answer
-; before it answers, and every returned body carries `local-lane:` on its own line. A caller that
-; mistook a 3-billion-parameter generation for a retrieved cell, or the reverse, would be misled about
-; the only thing that matters here, so the fallback is announced with its REASON attached
-; (`native-lane:absent`, `...:question-not-bound`, ...) rather than taken silently.
-;
-; THE RADIUS THIS FILE SPEAKS FOR (corpus row 826, aporon). It speaks for CHOOSING between the two
-; lanes and for attributing what it returns. It does not speak for the arithmetic behind either — the
-; native lane's tokens come from form/native/metal/llama-token-handle.fk, the grounded lane's
-; provenance by rag-ask.fk — and it deliberately does not speak for the model lane being FRESH beyond
-; question identity: see ask-native-lane.fk's named BLOB-SHA256 gap.
-;
-; Kin: ask-native-lane.fk (anl-* — the native lane door and its question binding), ask-cost-receipt.fk
-; (acr-* — declared/measured costs), rag-ask.fk (ra-* — the grounded lane), form-cli-ask-gate.fk
-; (fca-ask-result — the posterior sufficiency gate this feeds), form-cli.fk (the verb table).
-;
-; Proven by: form-stdlib/tests/ask-cost-receipt-band.fk
-
-(do
-    ; ── Form-neutral TOKEN execution route ─────────────────────────────────────────────────────
-    ; TOKEN identity is numeric and content-addressed.  Natural-language and
-    ; programming-language spellings live only in evidence rows.  Every
-    ; admitted surface names one JOINT recipe (operation + two integer
-    ; bindings); co-occurring keywords are not enough to enter this lane.
-    (defn fctr-token-category () (make_nodeid 31 2 0 41))
-    (defn fctr-op-add () 1)
-    (defn fctr-op-eq () 2)
-    (defn fctr-op-and () 3)
-    (defn fctr-op-registered? (op)
-        (if (or (eq op (fctr-op-add))
-                (or (eq op (fctr-op-eq)) (eq op (fctr-op-and)))) 1 0))
-    (defn fctr-token (op)
-        (if (eq (fctr-op-registered? op) 1)
-            (intern_node (fctr-token-category) (list (intern_trivial_int op)))
-            (nothing)))
-    (defn fctr-token-op (token)
-        (if (nothing? token) 0 (node_value (head (node_children token)))))
-    (defn fctr-token-valid? (token)
-        (if (nothing? token) 0
-        (if (not (node_eq (node_category token) (fctr-token-category))) 0
-        (if (not (eq (len (node_children token)) 1)) 0
-            (fctr-op-registered? (fctr-token-op token))))))
-    (defn fctr-token-numeric (token)
-        (if (eq (fctr-token-valid? token) 1)
-            (list 1 (fctr-token-op token)) (nothing)))
-    (defn fctr-token-from-numeric (encoded)
-        (if (not (eq (len encoded) 2)) (nothing)
-            (if (not (eq (nth encoded 0) 1)) (nothing)
-                (fctr-token (nth encoded 1)))))
-
-    ; A surface row is evidence, never TOKEN identity:
-    ; (locale joint-prefix token semantic-origin evidence-cell).
-    (defn fctr-surface (locale prefix token origin evidence)
-        (list locale prefix token origin evidence))
-    (defn fctr-s-locale (row) (nth row 0))
-    (defn fctr-s-prefix (row) (nth row 1))
-    (defn fctr-s-token (row) (nth row 2))
-    (defn fctr-s-origin (row) (nth row 3))
-    (defn fctr-s-evidence (row) (nth row 4))
-    (defn fctr-surfaces ()
-        (list
-            (fctr-surface "en" "token add" (fctr-token (fctr-op-add)) "authored-form" "surface/en/token-add")
-            (fctr-surface "en" "TOKEN add" (fctr-token (fctr-op-add)) "authored-form" "surface/en/TOKEN-add")
-            (fctr-surface "en" "token equal" (fctr-token (fctr-op-eq)) "authored-form" "surface/en/token-equal")
-            (fctr-surface "en" "token and" (fctr-token (fctr-op-and)) "authored-form" "surface/en/token-and")
-            (fctr-surface "de" "token addiere" (fctr-token (fctr-op-add)) "authored-form" "surface/de/token-addiere")
-            (fctr-surface "de" "token gleich" (fctr-token (fctr-op-eq)) "authored-form" "surface/de/token-gleich")
-            (fctr-surface "de" "token und" (fctr-token (fctr-op-and)) "authored-form" "surface/de/token-und")
-            (fctr-surface "zh" "令牌 加" (fctr-token (fctr-op-add)) "authored-form" "surface/zh/token-add")
-            (fctr-surface "zh" "令牌 等于" (fctr-token (fctr-op-eq)) "authored-form" "surface/zh/token-equal")
-            (fctr-surface "zh" "令牌 与" (fctr-token (fctr-op-and)) "authored-form" "surface/zh/token-and")
-            (fctr-surface "ja" "トークン 加算" (fctr-token (fctr-op-add)) "authored-form" "surface/ja/token-add")
-            (fctr-surface "ja" "トークン 等値" (fctr-token (fctr-op-eq)) "authored-form" "surface/ja/token-equal")
-            (fctr-surface "ja" "トークン 論理積" (fctr-token (fctr-op-and)) "authored-form" "surface/ja/token-and")
-            (fctr-surface "form" "token-add" (fctr-token (fctr-op-add)) "authored-form" "surface/form/token-add")
-            (fctr-surface "form" "token-eq" (fctr-token (fctr-op-eq)) "authored-form" "surface/form/token-eq")
-            (fctr-surface "form" "token-and" (fctr-token (fctr-op-and)) "authored-form" "surface/form/token-and")))
-
-    ; A prefix is admitted only as the whole joint recipe head, followed by
-    ; exactly two canonical integer arguments.  Quotation, negation, incidental
-    ; mention, partial unknowns, and extra arguments therefore decline.
-    (defn fctr-prefix? (query prefix)
-        (if (eq (str_find query (str_concat prefix " ") 0) 0) 1 0))
-    (defn fctr-find-surface-loop (query rows)
-        (if (eq (len rows) 0) (nothing)
-            (if (eq (fctr-prefix? query (fctr-s-prefix (head rows))) 1)
-                (head rows)
-                (fctr-find-surface-loop query (tail rows)))))
-    (defn fctr-find-surface (query)
-        (fctr-find-surface-loop query (fctr-surfaces)))
-    (defn fctr-arg-text (query surface)
-        (substring query (add (str_len (fctr-s-prefix surface)) 1) (str_len query)))
-    (defn fctr-int-text? (text)
-        (if (str_eq text (int_to_str (str_to_int text))) 1 0))
-    (defn fctr-args (query surface)
-        (do (let parts (split-on (fctr-arg-text query surface) " "))
-            (if (not (eq (len parts) 2)) (nothing)
-            (if (or (eq (fctr-int-text? (nth parts 0)) 0)
-                    (eq (fctr-int-text? (nth parts 1)) 0)) (nothing)
-                (list (str_to_int (nth parts 0)) (str_to_int (nth parts 1)))))))
-
-    ; Registry rows bind the semantic TOKEN to content-addressed blueprint and
-    ; constructor nodes.  The sealed-suite digest is an acceptance identity,
-    ; not a timestamp.  Reconstructing either node differently invalidates the
-    ; row before execution.
-    (defn fctr-blueprint-category () (make_nodeid 31 2 0 42))
-    (defn fctr-constructor-category () (make_nodeid 31 2 0 43))
-    (defn fctr-suite-seal () "57067634dbf0ae40ed5f0ba78d7a29140874e49876c98fa6ae3b35b921fb7cec")
-    (defn fctr-blueprint (token)
-        (intern_node (fctr-blueprint-category)
-            (list token (intern_trivial_int 2) (intern_trivial_int 1))))
-    (defn fctr-constructor (token)
-        (intern_node (fctr-constructor-category)
-            (list token (intern_trivial_int (fctr-token-op token)))))
-    ; registry = (token blueprint ctor arg-schema result-schema fuel seal source origin)
-    (defn fctr-registry-row (token blueprint ctor seal origin)
-        (list token blueprint ctor "int,int" "int" 1 seal
-            "form/form-stdlib/form-cli-ask.fk" origin))
-    (defn fctr-registry (token origin)
-        (fctr-registry-row token (fctr-blueprint token) (fctr-constructor token)
-            (fctr-suite-seal) origin))
-    (defn fctr-r-token (row) (nth row 0))
-    (defn fctr-r-blueprint (row) (nth row 1))
-    (defn fctr-r-constructor (row) (nth row 2))
-    (defn fctr-r-arg-schema (row) (nth row 3))
-    (defn fctr-r-result-schema (row) (nth row 4))
-    (defn fctr-r-fuel (row) (nth row 5))
-    (defn fctr-r-seal (row) (nth row 6))
-    (defn fctr-r-source (row) (nth row 7))
-    (defn fctr-r-origin (row) (nth row 8))
-    (defn fctr-registry-valid? (row)
-        (do (let token (fctr-r-token row))
-            (if (eq (fctr-token-valid? token) 0) 0
-            (if (not (node_eq (fctr-r-blueprint row) (fctr-blueprint token))) 0
-            (if (not (node_eq (fctr-r-constructor row) (fctr-constructor token))) 0
-            (if (not (str_eq (fctr-r-arg-schema row) "int,int")) 0
-            (if (not (str_eq (fctr-r-result-schema row) "int")) 0
-            (if (not (eq (fctr-r-fuel row) 1)) 0
-            (if (not (str_eq (fctr-r-seal row) (fctr-suite-seal))) 0
-            (if (not (str_eq (fctr-r-origin row) "authored-form")) 0 1))))))))))
-
-    ; Substrate witness through the already-loaded storage port.  The memory
-    ; carrier is pure and local; the exact same binding shape can later move to
-    ; file or database carriers without changing the TOKEN evaluator.
-    (defn fctr-cell-name (token)
-        (str_concat "token-" (int_to_str (fctr-token-op token))))
-    (defn fctr-cell-key (token)
-        (str_concat "form-token-eval/" (fctr-cell-name token)))
-    (defn fctr-cell-value (row)
-        (str_concat (fctr-node-key (fctr-r-blueprint row))
-            (str_concat " " (fctr-node-key (fctr-r-constructor row)))))
-    (defn fctr-substrate-valid? (row)
-        (if (eq (fctr-registry-valid? row) 0) 0
-            (do (let carrier (carrier-memory))
-                (let s0 (storage-open carrier ""))
-                (let s1 (storage-put carrier s0
-                    (fctr-cell-key (fctr-r-token row)) (fctr-cell-value row)))
-                (let got (storage-get carrier s1 (fctr-cell-key (fctr-r-token row))))
-                (if (and (eq (storage-found? got) 1)
-                         (str_eq (storage-value got) (fctr-cell-value row))) 1 0))))
-
-    ; The larger substrate's stable-key shape is reproduced here because form-cli already loads the
-    ; storage port but not that larger module.  NodeID is the
-    ; content address; the storage binding is therefore blueprint/constructor
-    ; identity, not a path-shaped claim.
-    (defn fctr-node-key (node)
-        (str_concat (int_to_str (node_pkg node))
-        (str_concat "." (str_concat (int_to_str (node_level node))
-        (str_concat "." (str_concat (int_to_str (node_type node))
-        (str_concat "." (int_to_str (node_inst node)))))))))
-    (defn fctr-eval (token args)
-        (if (or (eq (fctr-token-valid? token) 0) (not (eq (len args) 2))) (nothing)
-            (do (let op (fctr-token-op token))
-                (let a (nth args 0))
-                (let b (nth args 1))
-                (if (eq op (fctr-op-add)) (add a b)
-                (if (eq op (fctr-op-eq)) (if (eq a b) 1 0)
-                (if (eq op (fctr-op-and)) (if (and (not (eq a 0)) (not (eq b 0))) 1 0)
-                    (nothing)))))))
-    (defn fctr-lane-name () "form-token-eval")
-    (defn fctr-join (parts)
-        (if (eq (len parts) 0) ""
-            (str_concat (head parts) (fctr-join (tail parts)))))
-    (defn fctr-receipt (surface registry result)
-        (fctr-join (list
-            "execution-lane=form-token-eval\n"
-            "semantic-origin=" (fctr-r-origin registry)
-            "\ncontent-grade=derived\nexecution-kind=token-recipe\ntoken-coordinate="
-            (int_to_str (fctr-token-op (fctr-r-token registry)))
-            "\nresult=" (int_to_str result)
-            "\nlocale=" (fctr-s-locale surface)
-            "\nevidence=" (fctr-s-evidence surface)
-            "\nblueprint=" (fctr-node-key (fctr-r-blueprint registry))
-            "\nconstructor=" (fctr-node-key (fctr-r-constructor registry))
-            "\nacceptance-seal=" (fctr-r-seal registry)
-            "\nsubstrate-binding=observed\nvalidator=fkwu\nlocal-lane:form-token-eval\nsynthesis-lane:form-token-eval")))
-
-    ; route = (hit answer result token surface registry).  A miss carries no
-    ; invented lane and falls through unchanged to the incumbent walk.
-    (defn fctr-route (question)
-        (do (let surface (fctr-find-surface question))
-            (if (nothing? surface) (list 0 "" -999 (nothing) (nothing) (nothing))
-                (do (let args (fctr-args question surface))
-                    (if (nothing? args) (list 0 "" -999 (nothing) (nothing) (nothing))
-                        (do (let token (fctr-s-token surface))
-                            (let registry (fctr-registry token (fctr-s-origin surface)))
-                            (if (eq (fctr-substrate-valid? registry) 0)
-                                (list 0 "" -999 token surface registry)
-                                (do (let result (fctr-eval token args))
-                                    (if (nothing? result)
-                                        (list 0 "" -999 token surface registry)
-                                        (list 1 (fctr-receipt surface registry result)
-                                            result token surface registry))))))))))
-    (defn fctr-hit? (route) (nth route 0))
-    (defn fctr-answer (route) (nth route 1))
-    (defn fctr-result (route) (nth route 2))
-    (defn fctr-route-token (route) (nth route 3))
-    (defn fctr-route-surface (route) (nth route 4))
-    (defn fctr-route-registry (route) (nth route 5))
-
-    ; The lane that WILL answer this question, asked before answering it. A caller can route on this
-    ; without paying for the answer, and a test can assert the routing without a GPU on the host.
-    (defn fca-native-lane () (anl-lane-name))
-    (defn fca-rag-lane () (anl-fallback-lane-name))
-    (defn fca-token-lane () (fctr-lane-name))
-    (defn fca-incumbent-lane-of (question)
-        (do (let grounded (ra-grounded question))
-            (if (str_eq grounded "grounded:miss")
-                (if (eq (anl-ready? question) 1) (fca-native-lane) "quiet")
-                (fca-rag-lane))))
-    (defn fca-lane-of (question)
-        (do (let token-route (fctr-route question))
-            (if (eq (fctr-hit? token-route) 1) (fca-token-lane)
-                (fca-incumbent-lane-of question))))
-    ; kept: callers and receipts that predate the model lane ask for "the local lane" with no question
-    ; in hand. The grounded lane is the answer to that, because it is the one that is always there.
-    (defn fca-local-lane () (fca-rag-lane))
-
-    ; ── the grounded lane, unchanged in meaning and now NAMED as one lane among two ───────────────
-    ; THE MISS CARRIES ITS LANE TOO. Until 2026-07-22 the grounded-miss branch returned a bare
-    ; bracketed sentence with no `local-lane:` on it — the one shape in this whole file that answered
-    ; without saying who answered. It looked harmless because a miss is not prose and could not be
-    ; mistaken for a generation. It was not harmless: a caller that routes on `local-lane:` reads a
-    ; miss as an answer from NO lane, which is the one thing that never happens here, and the ask
-    ; verb's whole discipline is that the lane is never absent from what it hands back.
-    (defn fca-grounded-answer-of (grounded)
-        (if (str_eq grounded "grounded:miss")
-            "[ask: local fkwu RAG index has no grounded hit]\nlocal-lane:fkwu-rag-grounded\nsynthesis-lane:fkwu-rag-grounded"
-            (str_concat grounded
-                "\nlocal-lane:fkwu-rag-grounded\nsynthesis-lane:fkwu-rag-grounded")))
-    (defn fca-grounded-answer (question)
-        (fca-grounded-answer-of (ra-grounded question)))
-
-    ; A fallback that does not say it fell back is a fallback that lies by omission. When the native
-    ; lane declines, its reason travels with the grounded answer.
-    (defn fca-fallback-answer (question)
-        (str_concat (fca-grounded-answer question)
-            (str_concat "\ndeclined:" (anl-refusal question))))
-
-    ; ── the verb ─────────────────────────────────────────────────────────────────────────────────
-    (defn fca-quiet-answer (question)
-        "[ask: native and local lanes are quiet]\nlocal-lane:quiet\nsynthesis-lane:quiet")
-
-    (defn fca-incumbent-ask (question)
-        (do (let grounded (ra-grounded question))
-            (if (str_eq grounded "grounded:miss")
-                (if (eq (anl-ready? question) 1)
-                    (anl-answer question)
-                    (fca-quiet-answer question))
-                (fca-grounded-answer-of grounded))))
-    (defn fca-ask (question)
-        (do (let token-route (fctr-route question))
-            (if (eq (fctr-hit? token-route) 1) (fctr-answer token-route)
-                (fca-incumbent-ask question))))
-
-    ; `model` names WHICH model was asked for. The native lane carries exactly one model — the blob
-    ; the carrier mapped — so a request for a different one must not be answered by it wearing that
-    ; name. Asking for the model the lane actually holds routes natively; anything else is grounded.
-    (defn fca-ask-model (model question)
-        (if (str_eq model (anl-model))
-            (fca-ask question)
-            (fca-fallback-answer question)))
-
-    0)
+// form-cli-ask.fk - the form-cli ASK verb, native on the fkwu walker.
+//
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/storage-port.fk
+// preludes: form-stdlib/form-cli-router.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
+// preludes: form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
+// preludes: form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk
+// preludes: form-stdlib/rag-ask.fk
+// ask-native-lane carries already-rendered receipt text and calls no `acr-*`
+// symbol; cost arithmetic remains independently loadable at its own door.
+//
+// preludes: form-stdlib/ask-native-lane.fk
+//
+// The local answer starts with the body: the one-shot CLI stages the question, then fkwu reads the
+// staged query and healed RAG JSONL index directly. It does not call Ollama, localhost:11434,
+// http-fetch, host-exec, or a shell.
+//
+// THE MODEL LANE IS WIRED. Real llama3.2:3b tokens come from real weights, full width, through
+// kernels the body emitted, and the verb answers through them. The refusal to pretend a host LLM is
+// the local oracle survives verbatim in `fca-grounded-answer` as a NAMED lane rather than as the
+// only one.
+//
+// THREE LANES, AND THE VERB ALWAYS SAYS WHICH ONE SPOKE.
+//   form-token-eval    a bounded numeric TOKEN recipe, selected by a witnessed
+//                      joint NL/PL surface and executed by Form.  The receipt
+//                      separates execution-lane, semantic-origin, and content
+//                      grade: local execution never launders where meaning came
+//                      from.  Unknown or malformed recipes do not preempt RAG.
+//   metal-gguf-native   real llama3.2:3b prose, generated form-native off the resident quantized blob
+//                       (ask-native-lane.fk; generation observe/metal-ask-run.bml). Every answer
+//                       carries the model, the blob, the question it is bound to, and a cost receipt
+//                       in which every cost appears DECLARED (a bound derived from the model's own
+//                       shape, before the run) and MEASURED, with the measured value as a fraction of
+//                       its bound.
+//   fkwu-rag-grounded   the attributed grounded cell out of the healed local index. NOT a degraded
+//                       mode and NOT deleted: when the question wants provenance rather than prose, a
+//                       grounded `@p.l.t.i` cell is the better answer, and when the model lane is
+//                       unavailable it is the honest one.
+// The lanes are never blended and never guessed at. `fca-lane-of` reports the lane that WILL answer
+// before it answers, and every returned body carries `local-lane:` on its own line. A caller that
+// mistook a 3-billion-parameter generation for a retrieved cell, or the reverse, would be misled about
+// the only thing that matters here, so the fallback is announced with its REASON attached
+// (`native-lane:absent`, `...:question-not-bound`, ...) rather than taken silently.
+//
+// THE RADIUS THIS FILE SPEAKS FOR (corpus row 826, aporon). It speaks for CHOOSING between the two
+// lanes and for attributing what it returns. It does not speak for the arithmetic behind either — the
+// native lane's tokens come from form/native/metal/llama-token-handle.fk, the grounded lane's
+// provenance by rag-ask.fk — and it deliberately does not speak for the model lane being FRESH beyond
+// question identity: see ask-native-lane.fk's named BLOB-SHA256 gap.
+//
+// Kin: ask-native-lane.fk (anl-* — the native lane door and its question binding), ask-cost-receipt.fk
+// (acr-* — declared/measured costs), rag-ask.fk (ra-* — the grounded lane), form-cli-ask-gate.fk
+// (fca-ask-result — the posterior sufficiency gate this feeds), form-cli.fk (the verb table).
+//
+// Proven by: form-stdlib/tests/ask-cost-receipt-band.fk
+section [form.bml] {
+    // ── Form-neutral TOKEN execution route ─────────────────────────────────────────────────────
+    // TOKEN identity is numeric and content-addressed.  Natural-language and
+    // programming-language spellings live only in evidence rows.  Every
+    // admitted surface names one JOINT recipe (operation + two integer
+    // bindings); co-occurring keywords are not enough to enter this lane.
+    def fctr-token-category() = make_nodeid(31, 2, 0, 41);
+    def fctr-op-add() = 1;
+    def fctr-op-eq() = 2;
+    def fctr-op-and() = 3;
+    def fctr-op-registered?(op) = (Comparable) op == fctr-op-add() || ((Comparable) op == fctr-op-eq() || (Comparable) op == fctr-op-and()) ? 1 : 0;
+    def fctr-token(op) = (Comparable) fctr-op-registered?(op) == 1 ? intern_node(fctr-token-category(), list(intern_trivial_int(op))) : nothing();
+    def fctr-token-op(token) = nothing?(token) ? 0 : node_value(head(node_children(token)));
+    def fctr-token-valid?(token) = nothing?(token) ? 0 : !node_eq(node_category(token), fctr-token-category()) ? 0 : !((Comparable) len(node_children(token)) == 1) ? 0 : fctr-op-registered?(fctr-token-op(token));
+    def fctr-token-numeric(token) = (Comparable) fctr-token-valid?(token) == 1 ? list(1, fctr-token-op(token)) : nothing();
+    def fctr-token-from-numeric(encoded) = !((Comparable) len(encoded) == 2) ? nothing() : !((Comparable) nth(encoded, 0) == 1) ? nothing() : fctr-token(nth(encoded, 1));
+    // A surface row is evidence, never TOKEN identity:
+    // (locale joint-prefix token semantic-origin evidence-cell).
+    def fctr-surface(locale, prefix, token, origin, evidence) = list(locale, prefix, token, origin, evidence);
+    def fctr-s-locale(row) = nth(row, 0);
+    def fctr-s-prefix(row) = nth(row, 1);
+    def fctr-s-token(row) = nth(row, 2);
+    def fctr-s-origin(row) = nth(row, 3);
+    def fctr-s-evidence(row) = nth(row, 4);
+    def fctr-surfaces() = list(fctr-surface("en", "token add", fctr-token(fctr-op-add()), "authored-form", "surface/en/token-add"), fctr-surface("en", "TOKEN add", fctr-token(fctr-op-add()), "authored-form", "surface/en/TOKEN-add"), fctr-surface("en", "token equal", fctr-token(fctr-op-eq()), "authored-form", "surface/en/token-equal"), fctr-surface("en", "token and", fctr-token(fctr-op-and()), "authored-form", "surface/en/token-and"), fctr-surface("de", "token addiere", fctr-token(fctr-op-add()), "authored-form", "surface/de/token-addiere"), fctr-surface("de", "token gleich", fctr-token(fctr-op-eq()), "authored-form", "surface/de/token-gleich"), fctr-surface("de", "token und", fctr-token(fctr-op-and()), "authored-form", "surface/de/token-und"), fctr-surface("zh", "令牌 加", fctr-token(fctr-op-add()), "authored-form", "surface/zh/token-add"), fctr-surface("zh", "令牌 等于", fctr-token(fctr-op-eq()), "authored-form", "surface/zh/token-equal"), fctr-surface("zh", "令牌 与", fctr-token(fctr-op-and()), "authored-form", "surface/zh/token-and"), fctr-surface("ja", "トークン 加算", fctr-token(fctr-op-add()), "authored-form", "surface/ja/token-add"), fctr-surface("ja", "トークン 等値", fctr-token(fctr-op-eq()), "authored-form", "surface/ja/token-equal"), fctr-surface("ja", "トークン 論理積", fctr-token(fctr-op-and()), "authored-form", "surface/ja/token-and"), fctr-surface("form", "token-add", fctr-token(fctr-op-add()), "authored-form", "surface/form/token-add"), fctr-surface("form", "token-eq", fctr-token(fctr-op-eq()), "authored-form", "surface/form/token-eq"), fctr-surface("form", "token-and", fctr-token(fctr-op-and()), "authored-form", "surface/form/token-and"));
+    // A prefix is admitted only as the whole joint recipe head, followed by
+    // exactly two canonical integer arguments.  Quotation, negation, incidental
+    // mention, partial unknowns, and extra arguments therefore decline.
+    def fctr-prefix?(query, prefix) = (Comparable) str_find(query, str_concat(prefix, " "), 0) == 0 ? 1 : 0;
+    def fctr-find-surface-loop(query, rows) = (Comparable) len(rows) == 0 ? nothing() : (Comparable) fctr-prefix?(query, fctr-s-prefix(head(rows))) == 1 ? head(rows) : fctr-find-surface-loop(query, tail(rows));
+    def fctr-find-surface(query) = fctr-find-surface-loop(query, fctr-surfaces());
+    def fctr-arg-text(query, surface) = substring(query, str_len(fctr-s-prefix(surface)) + 1, str_len(query));
+    def fctr-int-text?(text) = (String) text == int_to_str(str_to_int(text)) ? 1 : 0;
+    def fctr-args(query, surface) = {
+        let parts = split-on(fctr-arg-text(query, surface), " ");
+        !((Comparable) len(parts) == 2) ? nothing() : (Comparable) fctr-int-text?(nth(parts, 0)) == 0 || (Comparable) fctr-int-text?(nth(parts, 1)) == 0 ? nothing() : list(str_to_int(nth(parts, 0)), str_to_int(nth(parts, 1)));
+    };
+    // Registry rows bind the semantic TOKEN to content-addressed blueprint and
+    // constructor nodes.  The sealed-suite digest is an acceptance identity,
+    // not a timestamp.  Reconstructing either node differently invalidates the
+    // row before execution.
+    def fctr-blueprint-category() = make_nodeid(31, 2, 0, 42);
+    def fctr-constructor-category() = make_nodeid(31, 2, 0, 43);
+    def fctr-suite-seal() = "57067634dbf0ae40ed5f0ba78d7a29140874e49876c98fa6ae3b35b921fb7cec";
+    def fctr-blueprint(token) = intern_node(fctr-blueprint-category(), list(token, intern_trivial_int(2), intern_trivial_int(1)));
+    def fctr-constructor(token) = intern_node(fctr-constructor-category(), list(token, intern_trivial_int(fctr-token-op(token))));
+    // registry = (token blueprint ctor arg-schema result-schema fuel seal source origin)
+    def fctr-registry-row(token, blueprint, ctor, seal, origin) = list(token, blueprint, ctor, "int,int", "int", 1, seal, "form/form-stdlib/form-cli-ask.fk", origin);
+    def fctr-registry(token, origin) = fctr-registry-row(token, fctr-blueprint(token), fctr-constructor(token), fctr-suite-seal(), origin);
+    def fctr-r-token(row) = nth(row, 0);
+    def fctr-r-blueprint(row) = nth(row, 1);
+    def fctr-r-constructor(row) = nth(row, 2);
+    def fctr-r-arg-schema(row) = nth(row, 3);
+    def fctr-r-result-schema(row) = nth(row, 4);
+    def fctr-r-fuel(row) = nth(row, 5);
+    def fctr-r-seal(row) = nth(row, 6);
+    def fctr-r-source(row) = nth(row, 7);
+    def fctr-r-origin(row) = nth(row, 8);
+    def fctr-registry-valid?(row) = {
+        let token = fctr-r-token(row);
+        (Comparable) fctr-token-valid?(token) == 0 ? 0 : !node_eq(fctr-r-blueprint(row), fctr-blueprint(token)) ? 0 : !node_eq(fctr-r-constructor(row), fctr-constructor(token)) ? 0 : !((String) fctr-r-arg-schema(row) == "int,int") ? 0 : !((String) fctr-r-result-schema(row) == "int") ? 0 : !((Comparable) fctr-r-fuel(row) == 1) ? 0 : !((String) fctr-r-seal(row) == fctr-suite-seal()) ? 0 : !((String) fctr-r-origin(row) == "authored-form") ? 0 : 1;
+    };
+    // Substrate witness through the already-loaded storage port.  The memory
+    // carrier is pure and local; the exact same binding shape can later move to
+    // file or database carriers without changing the TOKEN evaluator.
+    def fctr-cell-name(token) = str_concat("token-", int_to_str(fctr-token-op(token)));
+    def fctr-cell-key(token) = str_concat("form-token-eval/", fctr-cell-name(token));
+    def fctr-cell-value(row) = str_concat(fctr-node-key(fctr-r-blueprint(row)), str_concat(" ", fctr-node-key(fctr-r-constructor(row))));
+    def fctr-substrate-valid?(row) = (Comparable) fctr-registry-valid?(row) == 0 ? 0 : {
+        let carrier = carrier-memory();
+        let s0 = storage-open(carrier, "");
+        let s1 = storage-put(carrier, s0, fctr-cell-key(fctr-r-token(row)), fctr-cell-value(row));
+        let got = storage-get(carrier, s1, fctr-cell-key(fctr-r-token(row)));
+        (Comparable) storage-found?(got) == 1 && (String) storage-value(got) == fctr-cell-value(row) ? 1 : 0;
+    };
+    // The larger substrate's stable-key shape is reproduced here because form-cli already loads the
+    // storage port but not that larger module.  NodeID is the
+    // content address; the storage binding is therefore blueprint/constructor
+    // identity, not a path-shaped claim.
+    def fctr-node-key(node) = str_concat(int_to_str(node_pkg(node)), str_concat(".", str_concat(int_to_str(node_level(node)), str_concat(".", str_concat(int_to_str(node_type(node)), str_concat(".", int_to_str(node_inst(node))))))));
+    def fctr-eval(token, args) = (Comparable) fctr-token-valid?(token) == 0 || !((Comparable) len(args) == 2) ? nothing() : {
+        let op = fctr-token-op(token);
+        let a = nth(args, 0);
+        let b = nth(args, 1);
+        (Comparable) op == fctr-op-add() ? a + b : (Comparable) op == fctr-op-eq() ? (Comparable) a == b ? 1 : 0 : (Comparable) op == fctr-op-and() ? !((Comparable) a == 0) && !((Comparable) b == 0) ? 1 : 0 : nothing();
+    };
+    def fctr-lane-name() = "form-token-eval";
+    def fctr-join(parts) = (Comparable) len(parts) == 0 ? "" : str_concat(head(parts), fctr-join(tail(parts)));
+    def fctr-receipt(surface, registry, result) = fctr-join(list("execution-lane=form-token-eval\n", "semantic-origin=", fctr-r-origin(registry), "\ncontent-grade=derived\nexecution-kind=token-recipe\ntoken-coordinate=", int_to_str(fctr-token-op(fctr-r-token(registry))), "\nresult=", int_to_str(result), "\nlocale=", fctr-s-locale(surface), "\nevidence=", fctr-s-evidence(surface), "\nblueprint=", fctr-node-key(fctr-r-blueprint(registry)), "\nconstructor=", fctr-node-key(fctr-r-constructor(registry)), "\nacceptance-seal=", fctr-r-seal(registry), "\nsubstrate-binding=observed\nvalidator=fkwu\nlocal-lane:form-token-eval\nsynthesis-lane:form-token-eval"));
+    // route = (hit answer result token surface registry).  A miss carries no
+    // invented lane and falls through unchanged to the incumbent walk.
+    def fctr-route(question) = {
+        let surface = fctr-find-surface(question);
+        nothing?(surface) ? list(0, "", -999, nothing(), nothing(), nothing()) : {
+            let args = fctr-args(question, surface);
+            nothing?(args) ? list(0, "", -999, nothing(), nothing(), nothing()) : {
+                let token = fctr-s-token(surface);
+                let registry = fctr-registry(token, fctr-s-origin(surface));
+                (Comparable) fctr-substrate-valid?(registry) == 0 ? list(0, "", -999, token, surface, registry) : {
+                    let result = fctr-eval(token, args);
+                    nothing?(result) ? list(0, "", -999, token, surface, registry) : list(1, fctr-receipt(surface, registry, result), result, token, surface, registry);
+                };
+            };
+        };
+    };
+    def fctr-hit?(route) = nth(route, 0);
+    def fctr-answer(route) = nth(route, 1);
+    def fctr-result(route) = nth(route, 2);
+    def fctr-route-token(route) = nth(route, 3);
+    def fctr-route-surface(route) = nth(route, 4);
+    def fctr-route-registry(route) = nth(route, 5);
+    // The lane that WILL answer this question, asked before answering it. A caller can route on this
+    // without paying for the answer, and a test can assert the routing without a GPU on the host.
+    def fca-native-lane() = anl-lane-name();
+    def fca-rag-lane() = anl-fallback-lane-name();
+    def fca-token-lane() = fctr-lane-name();
+    def fca-incumbent-lane-of(question) = {
+        let grounded = ra-grounded(question);
+        (String) grounded == "grounded:miss" ? (Comparable) anl-ready?(question) == 1 ? fca-native-lane() : "quiet" : fca-rag-lane();
+    };
+    def fca-lane-of(question) = {
+        let token-route = fctr-route(question);
+        (Comparable) fctr-hit?(token-route) == 1 ? fca-token-lane() : fca-incumbent-lane-of(question);
+    };
+    // kept: callers and receipts that predate the model lane ask for "the local lane" with no question
+    // in hand. The grounded lane is the answer to that, because it is the one that is always there.
+    def fca-local-lane() = fca-rag-lane();
+    // ── the grounded lane, unchanged in meaning and now NAMED as one lane among two ───────────────
+    // THE MISS CARRIES ITS LANE TOO. Until 2026-07-22 the grounded-miss branch returned a bare
+    // bracketed sentence with no `local-lane:` on it — the one shape in this whole file that answered
+    // without saying who answered. It looked harmless because a miss is not prose and could not be
+    // mistaken for a generation. It was not harmless: a caller that routes on `local-lane:` reads a
+    // miss as an answer from NO lane, which is the one thing that never happens here, and the ask
+    // verb's whole discipline is that the lane is never absent from what it hands back.
+    def fca-grounded-answer-of(grounded) = (String) grounded == "grounded:miss" ? "[ask: local fkwu RAG index has no grounded hit]\nlocal-lane:fkwu-rag-grounded\nsynthesis-lane:fkwu-rag-grounded" : str_concat(grounded, "\nlocal-lane:fkwu-rag-grounded\nsynthesis-lane:fkwu-rag-grounded");
+    def fca-grounded-answer(question) = fca-grounded-answer-of(ra-grounded(question));
+    // A fallback that does not say it fell back is a fallback that lies by omission. When the native
+    // lane declines, its reason travels with the grounded answer.
+    def fca-fallback-answer(question) = str_concat(fca-grounded-answer(question), str_concat("\ndeclined:", anl-refusal(question)));
+    // ── the verb ─────────────────────────────────────────────────────────────────────────────────
+    def fca-quiet-answer(question) = "[ask: native and local lanes are quiet]\nlocal-lane:quiet\nsynthesis-lane:quiet";
+    def fca-incumbent-ask(question) = {
+        let grounded = ra-grounded(question);
+        (String) grounded == "grounded:miss" ? (Comparable) anl-ready?(question) == 1 ? anl-answer(question) : fca-quiet-answer(question) : fca-grounded-answer-of(grounded);
+    };
+    def fca-ask(question) = {
+        let token-route = fctr-route(question);
+        (Comparable) fctr-hit?(token-route) == 1 ? fctr-answer(token-route) : fca-incumbent-ask(question);
+    };
+    // `model` names WHICH model was asked for. The native lane carries exactly one model — the blob
+    // the carrier mapped — so a request for a different one must not be answered by it wearing that
+    // name. Asking for the model the lane actually holds routes natively; anything else is grounded.
+    def fca-ask-model(model, question) = (String) model == anl-model() ? fca-ask(question) : fca-fallback-answer(question);
+    0;
+}
