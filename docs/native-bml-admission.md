@@ -69,6 +69,11 @@ it as a pipeline operand.
 
 `let [a, _, c] = expr;` binds the named positions of a list and skips `_`.
 
+`match x { 1 | 2 => "small", 3 => "three", _ => "other" }` compares the subject by
+value in source order; `|` joins patterns, and `_` answers when no arm does, wherever
+it stands. A match with no matching arm and no `_` answers `nothing()`, so
+`try kind(n) else "none"` and `kind(n) ?? "none"` reach their alternative.
+
 `try e catch h` (also `try e else h`) attempts `e`; an absent answer or a
 caught runtime stop selects `h`. `choice { e1; e2; ... }` (also `choose`)
 attempts options in order and returns the first non-absent answer, including zero;
