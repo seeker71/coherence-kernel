@@ -157,10 +157,12 @@ Source admission still compiles a whole unit synchronously. On-demand
 specialization and complete portable native emission remain
 [north-star work](fkwu-form-native-north-star.md).
 
-The separate cursor grammar in `grammars/form-bml.fk` is an explicit proof
-surface. It does not select executable meaning through a comparison with another
-parser. Its witnesses require complete parsing and the expected recipe
-structure; a failed parse cannot certify a supported construct.
+The cursor grammar in `grammars/form-bml.fk` supplies expression recognition for
+native BML surface lifting and an explicit proof surface. Executable admission
+still owns compilation. Cursor witnesses require complete parsing and the
+expected recipe structure; a failed parse cannot certify a supported construct.
+The lifter retains original byte spans around recognized calls and verifies the
+candidate with compiler recipes.
 
 The bands in `form/form-stdlib/tests/` run the compiler on private inputs and
 read the actual child status, so a successful process exit alone establishes
