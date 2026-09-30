@@ -1,660 +1,318 @@
-; form-cli-peer-contribution-turnwheel.fk — the resident Form peer joins the
-; append-only scannerless turnwheel without surrendering its model/KV residence.
-;
-; A model result is staged as data before egress.  The exact response bytes and
-; their byte count are appended in one physical call; only an observed append
-; promotes the returned session and marks the task NodeID seen.  A failed append
-; keeps the stage, so the next turn retries persistence without regenerating.
-;
-; The physical live door may wait on spool-bell-transport between turns.  This
-; cell itself neither opens a model nor waits: callers supply an already-live
-; session.  CPU/file work and native Metal model work therefore remain distinct
-; observable stages, while an external MLX trainer may continue independently.
-;
-; preludes: form-stdlib/form-cli-peer-policy-route.fk form-stdlib/form-cli-peer-source-symbol-action.fk form-stdlib/bml/form-cli-peer-source-roots.bml form-stdlib/bml/form-cli-peer-hearth-telemetry-action.bml form-stdlib/bml/form-cli-peer-direct-answer-bridge.bml form-stdlib/bml/form-cli-peer-provider-receipt.bml form-stdlib/bml/form-cli-peer-token-receipt-ledger.bml form-stdlib/form-cli-peer-heldout-direct-learning.fk form-stdlib/receipt-texture.bml
-; Proven by: form-stdlib/tests/form-cli-peer-contribution-turnwheel-band.fk
-
-(do
-    (defn fcpct-output-open () "<|form:peer-contribution|>")
-    (defn fcpct-response-open () "<|form:response|>\n")
-    (defn fcpct-output-close () "\n<|/form:peer-contribution|>")
-    ; This names the caller-owned effect surface loaded at live birth. It is
-    ; deliberately distinct from a hot-swappable policy epoch: policy may
-    ; select this action, but cannot add it to an older resident image.
-    (defn fcpct-source-action-capability ()
-        "form-cli-peer-source-action-v1")
-    (defn fcpct-direct-answer-action-capability ()
-        "form-cli-peer-direct-answer-v1")
-    (defn fcpct-hearth-telemetry-action-capability ()
-        (fcphta-version))
-    (defn fcpct-provider-receipt-action-capability ()
-        (fcprr-version))
-
-    ; The response is length-carried rather than line-carried. Newlines and
-    ; marker-looking bytes inside model speech are ordinary payload bytes.
-    (defn fcpct-output-frame
-        (task candidate signal contribution elapsed response peer)
-        (str_concat (fcpct-output-open)
-        (str_concat (fcpat-field "task-node"
-                        (fcpat-node-text (fcpsi-task-node task)))
-        (str_concat (fcpat-field "candidate-node"
-                        (fcpat-node-text (fcpsi-candidate-node candidate)))
-        (str_concat (fcpat-field "exchange"
-                        (int_to_str (fcpsi-task-exchange task)))
-        (str_concat (fcpat-field "turn"
-                        (int_to_str (fcpsi-task-turn task)))
-        (str_concat (fcpat-field "signal" signal)
-        (str_concat (fcpat-field "contribution" (int_to_str contribution))
-        (str_concat (fcpat-field "elapsed-ms" (int_to_str elapsed))
-        (str_concat (fcpat-field "route" (fcpa-route peer))
-        (str_concat (fcpat-field "callback-calls"
-                        (int_to_str (fcpa-callback-calls peer)))
-        (str_concat (fcpat-field "tool-status" (fcpa-tool-status peer))
-        (str_concat (fcpat-field "carrier" (fcpa-carrier peer))
-        (str_concat (fcpat-field "value-present"
-                        (int_to_str (fcpa-value-present? peer)))
-        (str_concat (fcpat-field "value"
-                        (if (eq (fcpa-value-present? peer) 1)
-                            (int_to_str (fcpa-value peer)) ""))
-        (str_concat (fcpat-field "native-code-generated"
-                        (int_to_str (fcpa-native-code-generated? peer)))
-        (str_concat (fcpat-field "injected-bytes"
-                        (int_to_str (fcpa-injected-bytes peer)))
-        (str_concat (fcpat-field "lookup-count"
-                        (int_to_str (fcpa-lookup-count peer)))
-        (str_concat (fcpat-field "lifecycle"
-                        (fcpa-lifecycle peer))
-        (str_concat (fcpat-field "response-bytes"
-                        (int_to_str (str_len response)))
-        (str_concat "\n" (str_concat (fcpct-response-open)
-        (str_concat response (fcpct-output-close))))))))))))))))))))))))
-
-    (defn fcpct-output-response (frame)
-        (do
-            (let key "\nresponse-bytes=")
-            (let key-at (str_find frame key 0))
-            (if (lt key-at 0) (nothing)
-                (do
-                    (let n-start (add key-at (str_len key)))
-                    (let n-end (str_find frame "\n" n-start))
-                    (let body-mark (str_find frame (fcpct-response-open) n-end))
-                    (if (or (lt n-end 0) (lt body-mark 0)) (nothing)
-                        (do
-                            (let count (str_to_int
-                                (substring frame n-start n-end)))
-                            (let body-start
-                                (add body-mark (str_len (fcpct-response-open))))
-                            (let body-end (add body-start count))
-                            (if (or (lt count 0) (gt body-end (str_len frame)))
-                                (nothing)
-                                (substring frame body-start body-end))))))))
-
-    ; A source-world terminal is content-free durable evidence. The structured
-    ; ap-msg remains in the peer cursor; this frame records its admission in
-    ; the same append as the ordinary contribution receipt, without copying
-    ; source or answer bytes into egress.
-    (defn fcpct-field-rows (rows)
-        (if (nil? rows) ""
-            (str_concat (fcpat-field (nth (head rows) 0)
-                (nth (head rows) 1)) (fcpct-field-rows (tail rows)))))
-    (defn fcpct-source-direct? (peer)
-        (if (not (str_eq (fcpa-route peer) "source-knowledge")) 0
-            (if (nothing? (fcpa-cursor peer)) 0
-                (fcpdsa-result? (fcpa-cursor peer)))))
-    (defn fcpct-source-direct (peer) (fcpa-cursor peer))
-    (defn fcpct-source-raw (peer)
-        (fcpdsa-result-value (fcpct-source-direct peer)))
-    (defn fcpct-source-hit? (peer)
-        (do
-            (let raw (fcpct-source-raw peer))
-            (if (nothing? raw) 0
-                (if (str_eq (fknq-status raw) "hit") 1 0))))
-    (defn fcpct-source-world-yes (peer)
-        (if (nothing? (fcpdsa-world-message
-                (fcpct-source-direct peer))) 0 1))
-    (defn fcpct-source-receipt? (peer)
-        (fcaip-receipt? (fcpdsa-answer-receipt
-            (fcpct-source-direct peer))))
-    (defn fcpct-source-phase-text (peer index)
-        (if (eq (fcpct-source-receipt? peer) 1)
-            (int_to_str (fcaip-phase (fcpdsa-answer-receipt
-                (fcpct-source-direct peer)) index)) ""))
-    (defn fcpct-source-node-text (raw)
-        (if (nothing? raw) "" (fcpat-node-text raw)))
-    (defn fcpct-source-world-frame (task peer)
-        (if (not (eq (fcpct-source-direct? peer) 1)) ""
-            (do
-                (let direct (fcpct-source-direct peer))
-                (let raw (fcpdsa-result-value direct))
-                (let hit (fcpct-source-hit? peer))
-                (let request (if (eq hit 1)
-                    (fcpct-source-node-text (fknq-request raw)) ""))
-                (let source (if (eq hit 1)
-                    (fcpct-source-node-text (fknq-source-original-of raw)) ""))
-                (let entry (if (eq hit 1)
-                    (fcpct-source-node-text (fknq-entry-original-of raw)) ""))
-                (let path (if (eq hit 1) (fknq-source-path raw) ""))
-                (let source-id (if (eq hit 1)
-                    (fknq-current-source-id-of raw) ""))
-                (let answer-bytes (if (eq hit 1)
-                    (str_len (fknq-answer raw)) 0))
-                (str_concat "<|form:source-world|>"
-                (str_concat (fcpct-field-rows (list
-                    (list "source-action" (fcpct-source-action-capability))
-                    (list "task-node" (fcpat-node-text (fcpsi-task-node task)))
-                    (list "task-key" (fcpct-task-key task))
-                    (list "call-id" (fcpct-task-key task))
-                    (list "provenance" "resident-peer")
-                    (list "request-node" request)
-                    (list "source-node" source)
-                    (list "entry-node" entry)
-                    (list "source-path" path)
-                    (list "current-source-id" source-id)
-                    (list "answer-bytes" (int_to_str answer-bytes))
-                    (list "lookup-count" (int_to_str (fcpdsa-lookup-count direct)))
-                    (list "model-executed" (if (nothing? raw) "0"
-                        (int_to_str (fknq-model-executed? raw))))
-                    (list "scannerless" (if (nothing? raw) "0"
-                        (int_to_str (fknq-scannerless? raw))))
-                    (list "pif-recipe" (pise-request-canonical-key
-                        (rpicr-recipe-identity)))
-                    (list "pif-load" (fcpct-source-phase-text peer 0))
-                    (list "pif-call" (fcpct-source-phase-text peer 1))
-                    (list "pif-return" (fcpct-source-phase-text peer 2))
-                    (list "pif-fault" (fcpct-source-phase-text peer 3))
-                    (list "pif-timeout" (fcpct-source-phase-text peer 4))
-                    (list "pif-release" (fcpct-source-phase-text peer 5))
-                    (list "resident-value" (if (eq (fcpdsa-value-present? direct) 1)
-                        (int_to_str (fcpdsa-value direct)) ""))
-                    (list "world-admitted" (int_to_str (fcpct-source-world-yes peer)))
-                    (list "knowledge-contribution" (int_to_str
-                        (fcpdsa-knowledge-contribution direct)))
-                    (list "mutation-contribution" (int_to_str
-                        (fcpdsa-mutation-contribution direct)))))
-                    "\n<|/form:source-world|>")))))
-
-    (defn fcpct-node-from-text (text)
-        (do
-            (let start (if (and (gt (str_len text) 0)
-                                (eq (str_byte_at text 0) 64)) 1 0))
-            (let a (str_find text "." start))
-            (let b (if (lt a 0) -1 (str_find text "." (add a 1))))
-            (let c (if (lt b 0) -1 (str_find text "." (add b 1))))
-            (if (or (lt a 0) (or (lt b 0) (lt c 0))) (nothing)
-                (make_nodeid
-                    (str_to_int (substring text start a))
-                    (str_to_int (substring text (add a 1) b))
-                    (str_to_int (substring text (add b 1) c))
-                    (str_to_int (substring text (add c 1) (str_len text)))))))
-
-    ; Startup recovery is one bounded sequential scan of durable egress. The
-    ; hot path thereafter uses structural NodeIDs already held in memory.
-    (defn fcpct-recovery-nodes-go (text at out)
-        (do
-            (let key "\ntask-node=")
-            (let found (str_find text key at))
-            (if (lt found 0) (reverse out)
-                (do
-                    (let start (add found (str_len key)))
-                    (let stop (str_find text "\n" start))
-                    (if (lt stop 0) (reverse out)
-                        (do
-                            (let node (fcpct-node-from-text
-                                (substring text start stop)))
-                            (fcpct-recovery-nodes-go text (add stop 1)
-                                (if (nothing? node) out (cons node out)))))))))
-    (defn fcpct-recovery-nodes (text)
-        (if (nothing? text) (list) (fcpct-recovery-nodes-go text 0 (list))))
-
-    ; Cross-residence replay identity comes from the protocol, not from an
-    ; intern table's visible instance coordinate. Within one endpoint,
-    ; exchange+turn is stable while intern order may evolve after hot swaps.
-    (defn fcpct-task-key (task)
-        (str_concat (int_to_str (fcpsi-task-exchange task))
-            (str_concat "/" (int_to_str (fcpsi-task-turn task)))))
-    (defn fcpct-key-seen? (keys key)
-        (if (eq (len keys) 0) 0
-            (if (str_eq (head keys) key) 1
-                (fcpct-key-seen? (tail keys) key))))
-    (defn fcpct-recovery-keys-go (text at out)
-        (do
-            (let exchange-key "\nexchange=")
-            (let turn-key "\nturn=")
-            (let exchange-at (str_find text exchange-key at))
-            (if (lt exchange-at 0) (reverse out)
-                (do
-                    (let exchange-start
-                        (add exchange-at (str_len exchange-key)))
-                    (let exchange-end (str_find text "\n" exchange-start))
-                    (let turn-at (if (lt exchange-end 0) -1
-                        (str_find text turn-key exchange-end)))
-                    (let turn-start (if (lt turn-at 0) -1
-                        (add turn-at (str_len turn-key))))
-                    (let turn-end (if (lt turn-start 0) -1
-                        (str_find text "\n" turn-start)))
-                    (if (or (lt exchange-end 0)
-                            (or (lt turn-start 0) (lt turn-end 0)))
-                        (reverse out)
-                        (fcpct-recovery-keys-go text (add turn-end 1)
-                            (cons (str_concat
-                                (substring text exchange-start exchange-end)
-                                (str_concat "/"
-                                    (substring text turn-start turn-end)))
-                                out)))))))
-    (defn fcpct-recovery-keys-from (text)
-        (if (nothing? text) (list)
-            (fcpct-recovery-keys-go text 0 (list))))
-
-    ; stage = exact task, peer result/new session, candidate, in-memory ack,
-    ; and exact bytes waiting for one append.
-    (defn fcpct-stage (task peer candidate ack frame)
-        (list "form-cli-peer-contribution-stage-v1"
-              task peer candidate ack frame))
-    (defn fcpct-stage-task (s) (nth s 1))
-    (defn fcpct-stage-peer (s) (nth s 2))
-    (defn fcpct-stage-candidate (s) (nth s 3))
-    (defn fcpct-stage-ack (s) (nth s 4))
-    (defn fcpct-stage-frame (s) (nth s 5))
-    (defn fcpct-stage-with-frame (s frame)
-        (fcpct-stage (fcpct-stage-task s) (fcpct-stage-peer s)
-            (fcpct-stage-candidate s) (fcpct-stage-ack s) frame))
-
-    ; These receipts are typed action outputs, never a parse of answer bytes.
-    ; The local direct receipt and a later provider receipt have to share their
-    ; BML-owned NodeID before the ledger can expose a ratio.
-    (defn fcpct-token-receipt (task peer)
-        (if (str_eq (fcpa-route peer) (fcpdab-route))
-            (fcpdab-local-token-receipt task peer)
-        (if (str_eq (fcpa-route peer) (fcprr-route))
-            (fcprr-receipt-of (fcpa-cursor peer))
-            (nothing))))
-    (defn fcpct-token-comparison-frame (ledger task peer)
-        (do
-            (let receipt (fcpct-token-receipt task peer))
-            (if (nothing? receipt) ""
-                (fcptrl-frame (fcptrl-comparison ledger receipt)))))
-    (defn fcpct-token-receipt-frame (task peer)
-        (fcptrl-receipt-frame (fcpct-token-receipt task peer)))
-
-    ; The turn's own choice receipt (receipt-texture.bml's Next stone).
-    ; Everything below is either read straight off the completed crossing
-    ; (fcpa-value-present?, fcpa-route, fcpa-elapsed-ms, fcpa-tool-status) or
-    ; is a fixed structural name for this organ; nothing is a guess standing
-    ; in for a measurement. Outcome is binary — success when a value was
-    ; structurally observed, silence otherwise — because value-present? is
-    ; the only measured signal at this boundary; the turnwheel has no
-    ; separate structural signal for a failed crossing, so it never mints a
-    ; "fail" outcome it did not observe. Certainty, and the branch-feedback/
-    ; alignment/knowing/trust value quad, are judgments no organ measures
-    ; here (R11's own report named certainty and alignment together as what
-    ; wiring here would otherwise fabricate); they stand at their honest
-    ; floor, 0, which cr-score-valid? accepts as "not yet known" without
-    ; reading as a scored, plausible-looking number.
-    (defn fcpct-choice-outcome (peer)
-        (if (eq (fcpa-value-present? peer) 1)
-            (cr-outcome-success) (cr-outcome-silence)))
-    (defn fcpct-choice-knowing (outcome)
-        (if (str_eq outcome (cr-outcome-success)) "meaning" "benefit-of-silence"))
-    (defn fcpct-choice-trace (outcome)
-        (if (str_eq outcome (cr-outcome-success))
-            (cr-choice-trace 1 1 0 0) (cr-choice-trace 1 0 0 1)))
-    (defn fcpct-choice-selected-path (peer outcome)
-        (if (str_eq outcome (cr-outcome-silence)) "none" (fcpa-route peer)))
-    (defn fcpct-choice-cost (peer)
-        (if (lt (fcpa-elapsed-ms peer) 0) 0 (fcpa-elapsed-ms peer)))
-    (defn fcpct-choice-organ () "form-cli-peer-contribution-turnwheel.fk")
-    (defn fcpct-choice-organ-path ()
-        "form/form-stdlib/form-cli-peer-contribution-turnwheel.fk")
-    (defn fcpct-choice-value ()
-        (cr-choice-value (cr-kind-core-alignment) 0 0 0 0))
-    (defn fcpct-choice-receipt (task peer now)
-        (do
-            (let outcome (fcpct-choice-outcome peer))
-            (cr-choice-receipt (fcpsi-task-text task) (fcpa-route peer) "TURN"
-                (list) (fcpct-choice-selected-path peer outcome) outcome 0
-                (fcpct-choice-value) (fcpa-tool-status peer)
-                (fcpct-choice-organ) (fcpct-choice-organ-path) now
-                (fcpct-choice-cost peer) (fcpct-choice-trace outcome))))
-    ; Pairs the receipt with the share receipt-texture.bml's own adapter
-    ; already reads off fcpct-token-receipt. A route the token ledger never
-    ; receipted (recipe, source-knowledge, policy) has no measured share, so
-    ; rtex-share-of-token-receipt answers nothing and texture-of folds to
-    ; nothing, unposted — never a fabricated entry standing in for one.
-    (defn fcpct-choice-texture (task peer now)
-        (texture-of (fcpct-choice-receipt task peer now)
-            (rtex-share-of-token-receipt (fcpct-token-receipt task peer)
-                (fcpct-choice-knowing (fcpct-choice-outcome peer)))))
-
-    (defn fcpct-make-stage (transport task peer candidate-result ledger)
-        (do
-            (let candidate (fcpsi-result-value candidate-result))
-            (let signal (fcpsi-result-signal candidate-result))
-            (let contribution (fcpa-contribution peer))
-            (let response (fcpa-response peer))
-            ; The caller receives the direct result before it can be made
-            ; durable.  A sealed held-out prompt is evaluated here, once, and
-            ; its redacted learning evidence becomes part of this same staged
-            ; append.  Any append refusal therefore holds the exact evidence
-            ; beside the exact answer/session and never asks the model again.
-            (let heldout-frame (fcphtl-frame task peer))
-            (let ack (fcpat-task-ack transport task "agent" signal 1
-                (fcpsi-candidate-node candidate)
-                (fcpsi-candidate-state candidate) ""))
-            (fcpct-stage task peer candidate ack
-                (str_concat heldout-frame
-                    (str_concat (fcpdab-token-frame task peer)
-                        (str_concat (fcpct-token-receipt-frame task peer)
-                            (str_concat (fcpct-token-comparison-frame ledger task peer)
-                                (str_concat (fcpct-source-world-frame task peer)
-                                    (fcpct-output-frame task candidate signal contribution
-                                        (fcpa-elapsed-ms peer) response peer)))))))))
-
-    ; state = transport, currently committed session, optional durable-output
-    ; stage, completed count, executed-recipe contribution count, and stable
-    ; protocol replay keys recovered from durable egress, plus optional
-    ; caller-born patch and source contexts. Their authority exists only in
-    ; resident memory; neither is accepted from task bytes or policy images.
-    (defn fcpct-state
-        (transport session staged completed contributions recovery-keys patch-ctx source-ctx token-ledger)
-        (list "form-cli-peer-contribution-turnwheel-v4" transport session
-              staged completed contributions recovery-keys patch-ctx source-ctx token-ledger))
-    (defn fcpct-transport (s) (nth s 1))
-    (defn fcpct-session (s) (nth s 2))
-    (defn fcpct-staged (s) (nth s 3))
-    (defn fcpct-completed (s) (nth s 4))
-    (defn fcpct-contributions (s) (nth s 5))
-    (defn fcpct-recovery-keys (s) (nth s 6))
-    (defn fcpct-patch-context (s) (nth s 7))
-    (defn fcpct-source-context (s) (nth s 8))
-    (defn fcpct-token-ledger (s) (nth s 9))
-    (defn fcpct-new (transport session)
-        (fcpct-state transport session (nothing) 0 0 (list) (nothing) (nothing)
-            (fcptrl-empty)))
-    (defn fcpct-new-with-patch (transport session patch-ctx)
-        (fcpct-state transport session (nothing) 0 0 (list) patch-ctx (nothing)
-            (fcptrl-empty)))
-    (defn fcpct-new-with-source (transport session source-ctx)
-        (fcpct-state transport session (nothing) 0 0 (list) (nothing) source-ctx
-            (fcptrl-empty)))
-    ; Keep the strict-query context ABI in its first four seats. The fifth
-    ; seat is an already-computed definition index, born with the residence;
-    ; neither task bytes nor a policy image can nominate its directories,
-    ; epoch, or contents.
-    (defn fcpct-source-context-with-index
-        (root artifact local-ready frame-budget source-index)
-        (list root artifact local-ready frame-budget source-index))
-    (defn fcpct-source-context-index (source-ctx)
-        (if (or (nothing? source-ctx) (lt (len source-ctx) 5))
-            (nothing) (nth source-ctx 4)))
-    (defn fcpct-transport-meaning-epoch (transport)
-        (do
-            (let host (ritj-host (fcpat-join transport)))
-            (let shared (wt-sctx (le-w (fcrt-lw host))))
-            (jonb-epoch (fcrt-shared-registry shared))))
-    ; One live birth resolves this context once. The selected policy action may
-    ; choose the fixed source effect, but cannot choose any member of it. The
-    ; definition scan is a cold birth observation; later queries remain inside
-    ; this retained value until the meaning epoch changes.
-    (defn fcpct-live-source-context (meaning-epoch)
-        (do
-            (let root (fhcs-default-root))
-            (let artifact (fknq-default-artifact))
-            (if (str_eq root "") (nothing)
-                (fcpct-source-context-with-index root artifact 0
-                    (fknq-max-frame-bytes)
-                    (sof-snapshot-build meaning-epoch
-                        (fcpsr-resident-source-roots root))))))
-    (defn fcpct-live-new (transport session)
-        (fcpct-new-with-source transport session
-            (fcpct-live-source-context
-                (fcpct-transport-meaning-epoch transport))))
-    (defn fcpct-with (s transport session staged completed contributions)
-        (fcpct-state transport session staged completed contributions
-            (fcpct-recovery-keys s) (fcpct-patch-context s)
-            (fcpct-source-context s) (fcpct-token-ledger s)))
-    (defn fcpct-with-token-ledger (s ledger)
-        (fcpct-state (fcpct-transport s) (fcpct-session s) (fcpct-staged s)
-            (fcpct-completed s) (fcpct-contributions s) (fcpct-recovery-keys s)
-            (fcpct-patch-context s) (fcpct-source-context s) ledger))
-    (defn fcpct-with-recovery-keys (s keys)
-        (fcpct-state (fcpct-transport s) (fcpct-session s)
-            (fcpct-staged s) (fcpct-completed s) (fcpct-contributions s)
-            keys (fcpct-patch-context s) (fcpct-source-context s)
-            (fcpct-token-ledger s)))
-    (defn fcpct-recover (s durable-egress)
-        (fcpct-with-token-ledger
-            (fcpct-with-recovery-keys s
-                (fcpct-recovery-keys-from durable-egress))
-            (fcptrl-recover durable-egress)))
-    (defn fcpct-task-durable? (s task)
-        (fcpct-key-seen? (fcpct-recovery-keys s) (fcpct-task-key task)))
-
-    (defn fcpct-result (state signal present value reason)
-        (list "form-cli-peer-contribution-result-v1"
-              state signal present value reason))
-    (defn fcpct-result-state (r) (nth r 1))
-    (defn fcpct-result-signal (r) (nth r 2))
-    (defn fcpct-result-present? (r) (nth r 3))
-    (defn fcpct-result-value (r) (nth r 4))
-    (defn fcpct-result-reason (r) (nth r 5))
-
-    (defn fcpct-transport-with-peer-pending (transport peer pending)
-        (fcpat-with transport (fcpat-join transport) peer
-            (fcpat-reader-row transport) pending (fcpat-acks transport)
-            (fcpat-events transport) (fcpat-released? transport)))
-
-    ; Append is the commit point. Session promotion and seen admission occur
-    ; only after the durable carrier accepted the whole length-framed result.
-    (defn fcpct-persist-staged (s)
-        (if (nothing? (fcpct-staged s))
-            (fcpct-result s "nothing" 0 (nothing) "no-staged-result")
-            (do
-                (let staged (fcpct-staged s))
-                (let transport (fcpct-transport s))
-                (let task (fcpct-stage-task staged))
-                (let ack (fcpct-stage-ack staged))
-                (let total (file_append_bytes (fcpat-egress transport)
-                    (fcpat-bytes (str_concat (fcpct-stage-frame staged) "\n"))))
-                (if (lt total 0)
-                    (do
-                        (let failed (fcpat-observe transport
-                            (fcpsi-task-exchange task) "agent-egress"
-                            "failure" total))
-                        (fcpct-result
-                            (fcpct-with s failed (fcpct-session s) staged
-                                (fcpct-completed s) (fcpct-contributions s))
-                            "failure" 0 (nothing) "egress-append-refused"))
-                    (do
-                        (let t1 (fcpat-with transport
-                            (fcpat-join transport) (fcpat-peer transport)
-                            (fcpat-reader-row transport) (fcpat-pending transport)
-                            (append (fcpat-acks transport) (list ack))
-                            (fcpat-events transport) (fcpat-released? transport)))
-                        (let t2 (fcpat-with-seen t1
-                            (cons (fcpsi-task-node task) (fcpat-seen t1))))
-                        (let t3 (fcpat-observe t2 (fcpsi-task-exchange task)
-                            "agent-egress" (fcpat-ack-signal ack) total))
-                        (let peer (fcpct-stage-peer staged))
-                        (let contribution (fcpa-contribution peer))
-                        (let next0 (fcpct-with s t3 (fcpa-session peer) (nothing)
-                            (add (fcpct-completed s) 1)
-                            (add (fcpct-contributions s) contribution)))
-                        (let receipt (fcpct-token-receipt task peer))
-                        (let next1 (fcpct-with-token-ledger next0
-                            (fcptrl-admit (fcpct-token-ledger s) receipt)))
-                        (let next (fcpct-with-recovery-keys next1
-                            (cons (fcpct-task-key task)
-                                (fcpct-recovery-keys next1))))
-                        (fcpct-result next (fcpat-ack-signal ack) 1
-                            (fcpct-stage-candidate staged)
-                            "durable-before-seen"))))))
-
-    ; Pure staging seam used by the band and by alternative model carriers.
-    (defn fcpct-stage-peer-result (s task peer candidate-result peer-state)
-        (do
-            (let transport (fcpct-transport s))
-            (let t2 (fcpct-transport-with-peer-pending transport peer-state
-                (tail (fcpat-pending transport))))
-            (fcpct-with s t2 (fcpct-session s)
-                (fcpct-make-stage t2 task peer candidate-result
-                    (fcpct-token-ledger s))
-                (fcpct-completed s) (fcpct-contributions s))))
-
-    ; A policy transition is a real durable event but never a generated model
-    ; answer or recipe contribution. It keeps the same session value and uses
-    ; the ordinary candidate/append transaction so a failed egress cannot make
-    ; the task seen. The content-free policy frame precedes the result frame.
-    (defn fcpct-policy-peer (session response)
-        (fcpa-result-full session (nothing) response 0 0 "policy" 0 "hit"
-            "form-jit-policy" 0 (nothing) 0 0 "choice,cut,release" 0))
-    (defn fcpct-policy-response (phase selection)
-        (str_concat "policy "
-            (str_concat phase
-                (str_concat ": "
-                    (str_concat (fcpr-selection-signal selection)
-                        (str_concat " / "
-                            (fcpr-selection-reason selection)))))))
-    (defn fcpct-stage-with-policy-frame (s task selection phase)
-        (do
-            (let staged (fcpct-staged s))
-            (fcpct-with s (fcpct-transport s) (fcpct-session s)
-                (fcpct-stage-with-frame staged
-                    (str_concat (fcpr-frame task selection phase)
-                        (fcpct-stage-frame staged)))
-                (fcpct-completed s) (fcpct-contributions s))))
-    (defn fcpct-stage-policy-result (s task selection phase)
-        (do
-            (let transport (fcpct-transport s))
-            (let response (fcpct-policy-response phase selection))
-            (let peer (fcpct-policy-peer (fcpct-session s) response))
-            (let candidate (fcpsi-peer-result (fcpat-peer transport)
-                (fcpsi-task-node task) response 0 (nothing)))
-            (fcpct-stage-with-policy-frame
-                (fcpct-stage-peer-result s task peer candidate
-                    (fcpsi-result-state candidate)) task selection phase)))
-
-    ; The only effectful model crossing: an already-live session enters and the
-    ; returned session remains staged until its result is durable.
-    (defn fcpct-run-head-peer (s budget now)
-        (do
-            (let transport (fcpct-transport s))
-            (if (eq (len (fcpat-pending transport)) 0)
-                (fcpct-result s "nothing" 0 (nothing) "no-complete-task")
-                (do
-                    (let task (head (fcpat-pending transport)))
-                    (if (or (eq (fcpat-task-seen? transport task) 1)
-                            (eq (fcpct-task-durable? s task) 1))
-                        (do
-                            (let t2 (fcpct-transport-with-peer-pending transport
-                                (fcpat-peer transport) (tail (fcpat-pending transport))))
-                            (fcpct-result (fcpct-with s t2 (fcpct-session s)
-                                (fcpct-staged s) (fcpct-completed s)
-                                (fcpct-contributions s))
-                                "deduplicated" 1 (fcpsi-task-node task)
-                                "durable-task-node-seen"))
-                        (if (str_eq (fcpsi-task-kind task) "publish")
-                            (do
-                                (let published (fcpr-publish transport task now))
-                                (let s1 (fcpct-with s
-                                    (fcpr-selection-transport published)
-                                    (fcpct-session s) (fcpct-staged s)
-                                    (fcpct-completed s) (fcpct-contributions s)))
-                                (fcpct-persist-staged
-                                    (fcpct-stage-policy-result s1 task published
-                                        "publish")))
-                            (do
-                                (let selected (fcpr-select transport task))
-                                (let s1 (fcpct-with s
-                                    (fcpr-selection-transport selected)
-                                    (fcpct-session s) (fcpct-staged s)
-                                    (fcpct-completed s) (fcpct-contributions s)))
-                                (if (nothing? (fcpr-selection-action selected))
-                                    (fcpct-persist-staged
-                                        (fcpct-stage-policy-result s1 task selected
-                                            "select"))
-                                    (do
-                                        (let transport1 (fcpct-transport s1))
-                                        ; Direct source work branches before the
-                                        ; model-facing observer. Policy chooses
-                                        ; the action only; source authority and
-                                        ; call identity are born by this state.
-                                        (let ran (if (str_eq
-                                                (fcpr-selection-action selected)
-                                                "source-knowledge")
-                                            (fcpdsa-run-peer
-                                                (fcpat-peer transport1)
-                                                (fcpct-session s1)
-                                                (fcpsi-task-node task)
-                                                (fcpct-source-context s1)
-                                                (fcpct-task-key task)
-                                                "resident-peer")
-                                            (if (str_eq
-                                                    (fcpr-selection-action selected)
-                                                    "source-symbol")
-                                                (fcpssa-run-peer
-                                                    (fcpat-peer transport1)
-                                                    (fcpct-session s1)
-                                                    (fcpsi-task-node task)
-                                                    (fcpct-source-context s1)
-                                                    (fcpct-transport-meaning-epoch
-                                                        transport1))
-                                            (if (str_eq
-                                                    (fcpr-selection-action selected)
-                                                    "hearth-telemetry")
-                                                (fcphta-run-peer
-                                                    (fcpat-peer transport1)
-                                                    (fcpct-session s1)
-                                                    (fcpsi-task-node task))
-                                            (if (str_eq
-                                                    (fcpr-selection-action selected)
-                                                    "provider-receipt")
-                                                (fcprr-run-peer
-                                                    (fcpat-peer transport1)
-                                                    (fcpct-session s1)
-                                                    (fcpsi-task-node task))
-                                            (if (str_eq
-                                                    (fcpr-selection-action selected)
-                                                    (fcpdab-route))
-                                                (fcpdab-run-peer
-                                                    (fcpat-peer transport1)
-                                                    (fcpct-session s1)
-                                                    (fcpsi-task-node task) budget)
-                                            (do
-                                                (let stage-context
-                                                    (fcpa-knowledge-stage-egress-context
-                                                        (fcpat-egress transport1)
-                                                        (fcpat-node-text
-                                                            (fcpsi-task-node task))
-                                                        (fcpct-task-key task)))
-                                                (fcpsi-run-peer-with-action-with-patch-with-stage-context
-                                                    (fcpat-peer transport1)
-                                                    (fcpct-session s1)
-                                                    (fcpsi-task-node task) budget
-                                                    (fcpct-patch-context s1)
-                                                    (fcpr-selection-action selected)
-                                                    fcpa-knowledge-stage-observer-with-context
-                                                    stage-context))))))))
-                                        (let peer (nth ran 1))
-                                        (let candidate-result (nth ran 2))
-                                        (let staged (fcpct-stage-peer-result s1 task peer
-                                            candidate-result (nth ran 0)))
-                                        (fcpct-persist-staged
-                                            (fcpct-stage-with-policy-frame staged task
-                                                selected "select")))))))))))
-
-    ; One shared revolution: retry durable output first; otherwise admit one
-    ; bounded byte delta and actuate at most one complete task.
-    (defn fcpct-turn (s now budget)
-        (if (not (nothing? (fcpct-staged s))) (fcpct-persist-staged s)
-            (do
-                (let read (fcpat-reader-step (fcpct-transport s) now))
-                (let s1 (fcpct-with s (fcpat-result-state read)
-                    (fcpct-session s) (nothing) (fcpct-completed s)
-                    (fcpct-contributions s)))
-                (if (eq (len (fcpat-pending (fcpct-transport s1))) 0)
-                    (fcpct-result s1 (fcpat-result-signal read)
-                        (fcpat-result-present? read) (fcpat-result-value read)
-                        "reader-quantum")
-                    (fcpct-run-head-peer s1 budget now)))))
-
-    0)
+// form-cli-peer-contribution-turnwheel.fk — the resident Form peer joins the
+// append-only scannerless turnwheel without surrendering its model/KV residence.
+//
+// A model result is staged as data before egress.  The exact response bytes and
+// their byte count are appended in one physical call; only an observed append
+// promotes the returned session and marks the task NodeID seen.  A failed append
+// keeps the stage, so the next turn retries persistence without regenerating.
+//
+// The physical live door may wait on spool-bell-transport between turns.  This
+// cell itself neither opens a model nor waits: callers supply an already-live
+// session.  CPU/file work and native Metal model work therefore remain distinct
+// observable stages, while an external MLX trainer may continue independently.
+//
+// preludes: form-stdlib/form-cli-peer-policy-route.fk form-stdlib/form-cli-peer-source-symbol-action.fk form-stdlib/bml/form-cli-peer-source-roots.bml form-stdlib/bml/form-cli-peer-hearth-telemetry-action.bml form-stdlib/bml/form-cli-peer-direct-answer-bridge.bml form-stdlib/bml/form-cli-peer-provider-receipt.bml form-stdlib/bml/form-cli-peer-token-receipt-ledger.bml form-stdlib/form-cli-peer-heldout-direct-learning.fk form-stdlib/receipt-texture.bml
+// Proven by: form-stdlib/tests/form-cli-peer-contribution-turnwheel-band.fk
+section [form.bml] {
+    def fcpct-output-open() = "<|form:peer-contribution|>";
+    def fcpct-response-open() = "<|form:response|>\n";
+    def fcpct-output-close() = "\n<|/form:peer-contribution|>";
+    // This names the caller-owned effect surface loaded at live birth. It is
+    // deliberately distinct from a hot-swappable policy epoch: policy may
+    // select this action, but cannot add it to an older resident image.
+    def fcpct-source-action-capability() = "form-cli-peer-source-action-v1";
+    def fcpct-direct-answer-action-capability() = "form-cli-peer-direct-answer-v1";
+    def fcpct-hearth-telemetry-action-capability() = fcphta-version();
+    def fcpct-provider-receipt-action-capability() = fcprr-version();
+    // The response is length-carried rather than line-carried. Newlines and
+    // marker-looking bytes inside model speech are ordinary payload bytes.
+    def fcpct-output-frame(task, candidate, signal, contribution, elapsed, response, peer) = str_concat(fcpct-output-open(), str_concat(fcpat-field("task-node", fcpat-node-text(fcpsi-task-node(task))), str_concat(fcpat-field("candidate-node", fcpat-node-text(fcpsi-candidate-node(candidate))), str_concat(fcpat-field("exchange", int_to_str(fcpsi-task-exchange(task))), str_concat(fcpat-field("turn", int_to_str(fcpsi-task-turn(task))), str_concat(fcpat-field("signal", signal), str_concat(fcpat-field("contribution", int_to_str(contribution)), str_concat(fcpat-field("elapsed-ms", int_to_str(elapsed)), str_concat(fcpat-field("route", fcpa-route(peer)), str_concat(fcpat-field("callback-calls", int_to_str(fcpa-callback-calls(peer))), str_concat(fcpat-field("tool-status", fcpa-tool-status(peer)), str_concat(fcpat-field("carrier", fcpa-carrier(peer)), str_concat(fcpat-field("value-present", int_to_str(fcpa-value-present?(peer))), str_concat(fcpat-field("value", (Comparable) fcpa-value-present?(peer) == 1 ? int_to_str(fcpa-value(peer)) : ""), str_concat(fcpat-field("native-code-generated", int_to_str(fcpa-native-code-generated?(peer))), str_concat(fcpat-field("injected-bytes", int_to_str(fcpa-injected-bytes(peer))), str_concat(fcpat-field("lookup-count", int_to_str(fcpa-lookup-count(peer))), str_concat(fcpat-field("lifecycle", fcpa-lifecycle(peer)), str_concat(fcpat-field("response-bytes", int_to_str(str_len(response))), str_concat("\n", str_concat(fcpct-response-open(), str_concat(response, fcpct-output-close()))))))))))))))))))))));
+    def fcpct-output-response(frame) = {
+        let key = "\nresponse-bytes=";
+        let key-at = str_find(frame, key, 0);
+        key-at < 0 ? nothing() : {
+            let n-start = key-at + str_len(key);
+            let n-end = str_find(frame, "\n", n-start);
+            let body-mark = str_find(frame, fcpct-response-open(), n-end);
+            n-end < 0 || body-mark < 0 ? nothing() : {
+                let count = str_to_int(substring(frame, n-start, n-end));
+                let body-start = body-mark + str_len(fcpct-response-open());
+                let body-end = body-start + count;
+                count < 0 || body-end > str_len(frame) ? nothing() : substring(frame, body-start, body-end);
+            };
+        };
+    };
+    // A source-world terminal is content-free durable evidence. The structured
+    // ap-msg remains in the peer cursor; this frame records its admission in
+    // the same append as the ordinary contribution receipt, without copying
+    // source or answer bytes into egress.
+    def fcpct-field-rows(rows) = nil?(rows) ? "" : str_concat(fcpat-field(nth(head(rows), 0), nth(head(rows), 1)), fcpct-field-rows(tail(rows)));
+    def fcpct-source-direct?(peer) = !((String) fcpa-route(peer) == "source-knowledge") ? 0 : nothing?(fcpa-cursor(peer)) ? 0 : fcpdsa-result?(fcpa-cursor(peer));
+    def fcpct-source-direct(peer) = fcpa-cursor(peer);
+    def fcpct-source-raw(peer) = fcpdsa-result-value(fcpct-source-direct(peer));
+    def fcpct-source-hit?(peer) = {
+        let raw = fcpct-source-raw(peer);
+        nothing?(raw) ? 0 : (String) fknq-status(raw) == "hit" ? 1 : 0;
+    };
+    def fcpct-source-world-yes(peer) = nothing?(fcpdsa-world-message(fcpct-source-direct(peer))) ? 0 : 1;
+    def fcpct-source-receipt?(peer) = fcaip-receipt?(fcpdsa-answer-receipt(fcpct-source-direct(peer)));
+    def fcpct-source-phase-text(peer, index) = (Comparable) fcpct-source-receipt?(peer) == 1 ? int_to_str(fcaip-phase(fcpdsa-answer-receipt(fcpct-source-direct(peer)), index)) : "";
+    def fcpct-source-node-text(raw) = nothing?(raw) ? "" : fcpat-node-text(raw);
+    def fcpct-source-world-frame(task, peer) = !((Comparable) fcpct-source-direct?(peer) == 1) ? "" : {
+        let direct = fcpct-source-direct(peer);
+        let raw = fcpdsa-result-value(direct);
+        let hit = fcpct-source-hit?(peer);
+        let request = (Comparable) hit == 1 ? fcpct-source-node-text(fknq-request(raw)) : "";
+        let source = (Comparable) hit == 1 ? fcpct-source-node-text(fknq-source-original-of(raw)) : "";
+        let entry = (Comparable) hit == 1 ? fcpct-source-node-text(fknq-entry-original-of(raw)) : "";
+        let path = (Comparable) hit == 1 ? fknq-source-path(raw) : "";
+        let source-id = (Comparable) hit == 1 ? fknq-current-source-id-of(raw) : "";
+        let answer-bytes = (Comparable) hit == 1 ? str_len(fknq-answer(raw)) : 0;
+        str_concat("<|form:source-world|>", str_concat(fcpct-field-rows(list(list("source-action", fcpct-source-action-capability()), list("task-node", fcpat-node-text(fcpsi-task-node(task))), list("task-key", fcpct-task-key(task)), list("call-id", fcpct-task-key(task)), list("provenance", "resident-peer"), list("request-node", request), list("source-node", source), list("entry-node", entry), list("source-path", path), list("current-source-id", source-id), list("answer-bytes", int_to_str(answer-bytes)), list("lookup-count", int_to_str(fcpdsa-lookup-count(direct))), list("model-executed", nothing?(raw) ? "0" : int_to_str(fknq-model-executed?(raw))), list("scannerless", nothing?(raw) ? "0" : int_to_str(fknq-scannerless?(raw))), list("pif-recipe", pise-request-canonical-key(rpicr-recipe-identity())), list("pif-load", fcpct-source-phase-text(peer, 0)), list("pif-call", fcpct-source-phase-text(peer, 1)), list("pif-return", fcpct-source-phase-text(peer, 2)), list("pif-fault", fcpct-source-phase-text(peer, 3)), list("pif-timeout", fcpct-source-phase-text(peer, 4)), list("pif-release", fcpct-source-phase-text(peer, 5)), list("resident-value", (Comparable) fcpdsa-value-present?(direct) == 1 ? int_to_str(fcpdsa-value(direct)) : ""), list("world-admitted", int_to_str(fcpct-source-world-yes(peer))), list("knowledge-contribution", int_to_str(fcpdsa-knowledge-contribution(direct))), list("mutation-contribution", int_to_str(fcpdsa-mutation-contribution(direct))))), "\n<|/form:source-world|>"));
+    };
+    def fcpct-node-from-text(text) = {
+        let start = str_len(text) > 0 && (Comparable) str_byte_at(text, 0) == 64 ? 1 : 0;
+        let a = str_find(text, ".", start);
+        let b = a < 0 ? -1 : str_find(text, ".", a + 1);
+        let c = b < 0 ? -1 : str_find(text, ".", b + 1);
+        a < 0 || (b < 0 || c < 0) ? nothing() : make_nodeid(str_to_int(substring(text, start, a)), str_to_int(substring(text, a + 1, b)), str_to_int(substring(text, b + 1, c)), str_to_int(substring(text, c + 1, str_len(text))));
+    };
+    // Startup recovery is one bounded sequential scan of durable egress. The
+    // hot path thereafter uses structural NodeIDs already held in memory.
+    def fcpct-recovery-nodes-go(text, at, out) = {
+        let key = "\ntask-node=";
+        let found = str_find(text, key, at);
+        found < 0 ? reverse(out) : {
+            let start = found + str_len(key);
+            let stop = str_find(text, "\n", start);
+            stop < 0 ? reverse(out) : {
+                let node = fcpct-node-from-text(substring(text, start, stop));
+                fcpct-recovery-nodes-go(text, stop + 1, nothing?(node) ? out : cons(node, out));
+            };
+        };
+    };
+    def fcpct-recovery-nodes(text) = nothing?(text) ? list() : fcpct-recovery-nodes-go(text, 0, list());
+    // Cross-residence replay identity comes from the protocol, not from an
+    // intern table's visible instance coordinate. Within one endpoint,
+    // exchange+turn is stable while intern order may evolve after hot swaps.
+    def fcpct-task-key(task) = str_concat(int_to_str(fcpsi-task-exchange(task)), str_concat("/", int_to_str(fcpsi-task-turn(task))));
+    def fcpct-key-seen?(keys, key) = (Comparable) len(keys) == 0 ? 0 : (String) head(keys) == key ? 1 : fcpct-key-seen?(tail(keys), key);
+    def fcpct-recovery-keys-go(text, at, out) = {
+        let exchange-key = "\nexchange=";
+        let turn-key = "\nturn=";
+        let exchange-at = str_find(text, exchange-key, at);
+        exchange-at < 0 ? reverse(out) : {
+            let exchange-start = exchange-at + str_len(exchange-key);
+            let exchange-end = str_find(text, "\n", exchange-start);
+            let turn-at = exchange-end < 0 ? -1 : str_find(text, turn-key, exchange-end);
+            let turn-start = turn-at < 0 ? -1 : turn-at + str_len(turn-key);
+            let turn-end = turn-start < 0 ? -1 : str_find(text, "\n", turn-start);
+            exchange-end < 0 || (turn-start < 0 || turn-end < 0) ? reverse(out) : fcpct-recovery-keys-go(text, turn-end + 1, cons(str_concat(substring(text, exchange-start, exchange-end), str_concat("/", substring(text, turn-start, turn-end))), out));
+        };
+    };
+    def fcpct-recovery-keys-from(text) = nothing?(text) ? list() : fcpct-recovery-keys-go(text, 0, list());
+    // stage = exact task, peer result/new session, candidate, in-memory ack,
+    // and exact bytes waiting for one append.
+    def fcpct-stage(task, peer, candidate, ack, frame) = list("form-cli-peer-contribution-stage-v1", task, peer, candidate, ack, frame);
+    def fcpct-stage-task(s) = nth(s, 1);
+    def fcpct-stage-peer(s) = nth(s, 2);
+    def fcpct-stage-candidate(s) = nth(s, 3);
+    def fcpct-stage-ack(s) = nth(s, 4);
+    def fcpct-stage-frame(s) = nth(s, 5);
+    def fcpct-stage-with-frame(s, frame) = fcpct-stage(fcpct-stage-task(s), fcpct-stage-peer(s), fcpct-stage-candidate(s), fcpct-stage-ack(s), frame);
+    // These receipts are typed action outputs, never a parse of answer bytes.
+    // The local direct receipt and a later provider receipt have to share their
+    // BML-owned NodeID before the ledger can expose a ratio.
+    def fcpct-token-receipt(task, peer) = (String) fcpa-route(peer) == fcpdab-route() ? fcpdab-local-token-receipt(task, peer) : (String) fcpa-route(peer) == fcprr-route() ? fcprr-receipt-of(fcpa-cursor(peer)) : nothing();
+    def fcpct-token-comparison-frame(ledger, task, peer) = {
+        let receipt = fcpct-token-receipt(task, peer);
+        nothing?(receipt) ? "" : fcptrl-frame(fcptrl-comparison(ledger, receipt));
+    };
+    def fcpct-token-receipt-frame(task, peer) = fcptrl-receipt-frame(fcpct-token-receipt(task, peer));
+    // The turn's own choice receipt (receipt-texture.bml's Next stone).
+    // Everything below is either read straight off the completed crossing
+    // (fcpa-value-present?, fcpa-route, fcpa-elapsed-ms, fcpa-tool-status) or
+    // is a fixed structural name for this organ; nothing is a guess standing
+    // in for a measurement. Outcome is binary — success when a value was
+    // structurally observed, silence otherwise — because value-present? is
+    // the only measured signal at this boundary; the turnwheel has no
+    // separate structural signal for a failed crossing, so it never mints a
+    // "fail" outcome it did not observe. Certainty, and the branch-feedback/
+    // alignment/knowing/trust value quad, are judgments no organ measures
+    // here (R11's own report named certainty and alignment together as what
+    // wiring here would otherwise fabricate); they stand at their honest
+    // floor, 0, which cr-score-valid? accepts as "not yet known" without
+    // reading as a scored, plausible-looking number.
+    def fcpct-choice-outcome(peer) = (Comparable) fcpa-value-present?(peer) == 1 ? cr-outcome-success() : cr-outcome-silence();
+    def fcpct-choice-knowing(outcome) = (String) outcome == cr-outcome-success() ? "meaning" : "benefit-of-silence";
+    def fcpct-choice-trace(outcome) = (String) outcome == cr-outcome-success() ? cr-choice-trace(1, 1, 0, 0) : cr-choice-trace(1, 0, 0, 1);
+    def fcpct-choice-selected-path(peer, outcome) = (String) outcome == cr-outcome-silence() ? "none" : fcpa-route(peer);
+    def fcpct-choice-cost(peer) = fcpa-elapsed-ms(peer) < 0 ? 0 : fcpa-elapsed-ms(peer);
+    def fcpct-choice-organ() = "form-cli-peer-contribution-turnwheel.fk";
+    def fcpct-choice-organ-path() = "form/form-stdlib/form-cli-peer-contribution-turnwheel.fk";
+    def fcpct-choice-value() = cr-choice-value(cr-kind-core-alignment(), 0, 0, 0, 0);
+    def fcpct-choice-receipt(task, peer, now) = {
+        let outcome = fcpct-choice-outcome(peer);
+        cr-choice-receipt(fcpsi-task-text(task), fcpa-route(peer), "TURN", list(), fcpct-choice-selected-path(peer, outcome), outcome, 0, fcpct-choice-value(), fcpa-tool-status(peer), fcpct-choice-organ(), fcpct-choice-organ-path(), now, fcpct-choice-cost(peer), fcpct-choice-trace(outcome));
+    };
+    // Pairs the receipt with the share receipt-texture.bml's own adapter
+    // already reads off fcpct-token-receipt. A route the token ledger never
+    // receipted (recipe, source-knowledge, policy) has no measured share, so
+    // rtex-share-of-token-receipt answers nothing and texture-of folds to
+    // nothing, unposted — never a fabricated entry standing in for one.
+    def fcpct-choice-texture(task, peer, now) = texture-of(fcpct-choice-receipt(task, peer, now), rtex-share-of-token-receipt(fcpct-token-receipt(task, peer), fcpct-choice-knowing(fcpct-choice-outcome(peer))));
+    def fcpct-make-stage(transport, task, peer, candidate-result, ledger) = {
+        let candidate = fcpsi-result-value(candidate-result);
+        let signal = fcpsi-result-signal(candidate-result);
+        let contribution = fcpa-contribution(peer);
+        let response = fcpa-response(peer);
+        // The caller receives the direct result before it can be made
+        // durable.  A sealed held-out prompt is evaluated here, once, and
+        // its redacted learning evidence becomes part of this same staged
+        // append.  Any append refusal therefore holds the exact evidence
+        // beside the exact answer/session and never asks the model again.
+        let heldout-frame = fcphtl-frame(task, peer);
+        let ack = fcpat-task-ack(transport, task, "agent", signal, 1, fcpsi-candidate-node(candidate), fcpsi-candidate-state(candidate), "");
+        fcpct-stage(task, peer, candidate, ack, str_concat(heldout-frame, str_concat(fcpdab-token-frame(task, peer), str_concat(fcpct-token-receipt-frame(task, peer), str_concat(fcpct-token-comparison-frame(ledger, task, peer), str_concat(fcpct-source-world-frame(task, peer), fcpct-output-frame(task, candidate, signal, contribution, fcpa-elapsed-ms(peer), response, peer)))))));
+    };
+    // state = transport, currently committed session, optional durable-output
+    // stage, completed count, executed-recipe contribution count, and stable
+    // protocol replay keys recovered from durable egress, plus optional
+    // caller-born patch and source contexts. Their authority exists only in
+    // resident memory; neither is accepted from task bytes or policy images.
+    def fcpct-state(transport, session, staged, completed, contributions, recovery-keys, patch-ctx, source-ctx, token-ledger) = list("form-cli-peer-contribution-turnwheel-v4", transport, session, staged, completed, contributions, recovery-keys, patch-ctx, source-ctx, token-ledger);
+    def fcpct-transport(s) = nth(s, 1);
+    def fcpct-session(s) = nth(s, 2);
+    def fcpct-staged(s) = nth(s, 3);
+    def fcpct-completed(s) = nth(s, 4);
+    def fcpct-contributions(s) = nth(s, 5);
+    def fcpct-recovery-keys(s) = nth(s, 6);
+    def fcpct-patch-context(s) = nth(s, 7);
+    def fcpct-source-context(s) = nth(s, 8);
+    def fcpct-token-ledger(s) = nth(s, 9);
+    def fcpct-new(transport, session) = fcpct-state(transport, session, nothing(), 0, 0, list(), nothing(), nothing(), fcptrl-empty());
+    def fcpct-new-with-patch(transport, session, patch-ctx) = fcpct-state(transport, session, nothing(), 0, 0, list(), patch-ctx, nothing(), fcptrl-empty());
+    def fcpct-new-with-source(transport, session, source-ctx) = fcpct-state(transport, session, nothing(), 0, 0, list(), nothing(), source-ctx, fcptrl-empty());
+    // Keep the strict-query context ABI in its first four seats. The fifth
+    // seat is an already-computed definition index, born with the residence;
+    // neither task bytes nor a policy image can nominate its directories,
+    // epoch, or contents.
+    def fcpct-source-context-with-index(root, artifact, local-ready, frame-budget, source-index) = list(root, artifact, local-ready, frame-budget, source-index);
+    def fcpct-source-context-index(source-ctx) = nothing?(source-ctx) || len(source-ctx) < 5 ? nothing() : nth(source-ctx, 4);
+    def fcpct-transport-meaning-epoch(transport) = {
+        let host = ritj-host(fcpat-join(transport));
+        let shared = wt-sctx(le-w(fcrt-lw(host)));
+        jonb-epoch(fcrt-shared-registry(shared));
+    };
+    // One live birth resolves this context once. The selected policy action may
+    // choose the fixed source effect, but cannot choose any member of it. The
+    // definition scan is a cold birth observation; later queries remain inside
+    // this retained value until the meaning epoch changes.
+    def fcpct-live-source-context(meaning-epoch) = {
+        let root = fhcs-default-root();
+        let artifact = fknq-default-artifact();
+        (String) root == "" ? nothing() : fcpct-source-context-with-index(root, artifact, 0, fknq-max-frame-bytes(), sof-snapshot-build(meaning-epoch, fcpsr-resident-source-roots(root)));
+    };
+    def fcpct-live-new(transport, session) = fcpct-new-with-source(transport, session, fcpct-live-source-context(fcpct-transport-meaning-epoch(transport)));
+    def fcpct-with(s, transport, session, staged, completed, contributions) = fcpct-state(transport, session, staged, completed, contributions, fcpct-recovery-keys(s), fcpct-patch-context(s), fcpct-source-context(s), fcpct-token-ledger(s));
+    def fcpct-with-token-ledger(s, ledger) = fcpct-state(fcpct-transport(s), fcpct-session(s), fcpct-staged(s), fcpct-completed(s), fcpct-contributions(s), fcpct-recovery-keys(s), fcpct-patch-context(s), fcpct-source-context(s), ledger);
+    def fcpct-with-recovery-keys(s, keys) = fcpct-state(fcpct-transport(s), fcpct-session(s), fcpct-staged(s), fcpct-completed(s), fcpct-contributions(s), keys, fcpct-patch-context(s), fcpct-source-context(s), fcpct-token-ledger(s));
+    def fcpct-recover(s, durable-egress) = fcpct-with-token-ledger(fcpct-with-recovery-keys(s, fcpct-recovery-keys-from(durable-egress)), fcptrl-recover(durable-egress));
+    def fcpct-task-durable?(s, task) = fcpct-key-seen?(fcpct-recovery-keys(s), fcpct-task-key(task));
+    def fcpct-result(state, signal, present, value, reason) = list("form-cli-peer-contribution-result-v1", state, signal, present, value, reason);
+    def fcpct-result-state(r) = nth(r, 1);
+    def fcpct-result-signal(r) = nth(r, 2);
+    def fcpct-result-present?(r) = nth(r, 3);
+    def fcpct-result-value(r) = nth(r, 4);
+    def fcpct-result-reason(r) = nth(r, 5);
+    def fcpct-transport-with-peer-pending(transport, peer, pending) = fcpat-with(transport, fcpat-join(transport), peer, fcpat-reader-row(transport), pending, fcpat-acks(transport), fcpat-events(transport), fcpat-released?(transport));
+    // Append is the commit point. Session promotion and seen admission occur
+    // only after the durable carrier accepted the whole length-framed result.
+    def fcpct-persist-staged(s) = nothing?(fcpct-staged(s)) ? fcpct-result(s, "nothing", 0, nothing(), "no-staged-result") : {
+        let staged = fcpct-staged(s);
+        let transport = fcpct-transport(s);
+        let task = fcpct-stage-task(staged);
+        let ack = fcpct-stage-ack(staged);
+        let total = file_append_bytes(fcpat-egress(transport), fcpat-bytes(str_concat(fcpct-stage-frame(staged), "\n")));
+        total < 0 ? {
+            let failed = fcpat-observe(transport, fcpsi-task-exchange(task), "agent-egress", "failure", total);
+            fcpct-result(fcpct-with(s, failed, fcpct-session(s), staged, fcpct-completed(s), fcpct-contributions(s)), "failure", 0, nothing(), "egress-append-refused");
+        } : {
+            let t1 = fcpat-with(transport, fcpat-join(transport), fcpat-peer(transport), fcpat-reader-row(transport), fcpat-pending(transport), append(fcpat-acks(transport), list(ack)), fcpat-events(transport), fcpat-released?(transport));
+            let t2 = fcpat-with-seen(t1, cons(fcpsi-task-node(task), fcpat-seen(t1)));
+            let t3 = fcpat-observe(t2, fcpsi-task-exchange(task), "agent-egress", fcpat-ack-signal(ack), total);
+            let peer = fcpct-stage-peer(staged);
+            let contribution = fcpa-contribution(peer);
+            let next0 = fcpct-with(s, t3, fcpa-session(peer), nothing(), fcpct-completed(s) + 1, fcpct-contributions(s) + contribution);
+            let receipt = fcpct-token-receipt(task, peer);
+            let next1 = fcpct-with-token-ledger(next0, fcptrl-admit(fcpct-token-ledger(s), receipt));
+            let next = fcpct-with-recovery-keys(next1, cons(fcpct-task-key(task), fcpct-recovery-keys(next1)));
+            fcpct-result(next, fcpat-ack-signal(ack), 1, fcpct-stage-candidate(staged), "durable-before-seen");
+        };
+    };
+    // Pure staging seam used by the band and by alternative model carriers.
+    def fcpct-stage-peer-result(s, task, peer, candidate-result, peer-state) = {
+        let transport = fcpct-transport(s);
+        let t2 = fcpct-transport-with-peer-pending(transport, peer-state, tail(fcpat-pending(transport)));
+        fcpct-with(s, t2, fcpct-session(s), fcpct-make-stage(t2, task, peer, candidate-result, fcpct-token-ledger(s)), fcpct-completed(s), fcpct-contributions(s));
+    };
+    // A policy transition is a real durable event but never a generated model
+    // answer or recipe contribution. It keeps the same session value and uses
+    // the ordinary candidate/append transaction so a failed egress cannot make
+    // the task seen. The content-free policy frame precedes the result frame.
+    def fcpct-policy-peer(session, response) = fcpa-result-full(session, nothing(), response, 0, 0, "policy", 0, "hit", "form-jit-policy", 0, nothing(), 0, 0, "choice,cut,release", 0);
+    def fcpct-policy-response(phase, selection) = str_concat("policy ", str_concat(phase, str_concat(": ", str_concat(fcpr-selection-signal(selection), str_concat(" / ", fcpr-selection-reason(selection))))));
+    def fcpct-stage-with-policy-frame(s, task, selection, phase) = {
+        let staged = fcpct-staged(s);
+        fcpct-with(s, fcpct-transport(s), fcpct-session(s), fcpct-stage-with-frame(staged, str_concat(fcpr-frame(task, selection, phase), fcpct-stage-frame(staged))), fcpct-completed(s), fcpct-contributions(s));
+    };
+    def fcpct-stage-policy-result(s, task, selection, phase) = {
+        let transport = fcpct-transport(s);
+        let response = fcpct-policy-response(phase, selection);
+        let peer = fcpct-policy-peer(fcpct-session(s), response);
+        let candidate = fcpsi-peer-result(fcpat-peer(transport), fcpsi-task-node(task), response, 0, nothing());
+        fcpct-stage-with-policy-frame(fcpct-stage-peer-result(s, task, peer, candidate, fcpsi-result-state(candidate)), task, selection, phase);
+    };
+    // The only effectful model crossing: an already-live session enters and the
+    // returned session remains staged until its result is durable.
+    def fcpct-run-head-peer(s, budget, now) = {
+        let transport = fcpct-transport(s);
+        (Comparable) len(fcpat-pending(transport)) == 0 ? fcpct-result(s, "nothing", 0, nothing(), "no-complete-task") : {
+            let task = head(fcpat-pending(transport));
+            (Comparable) fcpat-task-seen?(transport, task) == 1 || (Comparable) fcpct-task-durable?(s, task) == 1 ? {
+                let t2 = fcpct-transport-with-peer-pending(transport, fcpat-peer(transport), tail(fcpat-pending(transport)));
+                fcpct-result(fcpct-with(s, t2, fcpct-session(s), fcpct-staged(s), fcpct-completed(s), fcpct-contributions(s)), "deduplicated", 1, fcpsi-task-node(task), "durable-task-node-seen");
+            } : (String) fcpsi-task-kind(task) == "publish" ? {
+                let published = fcpr-publish(transport, task, now);
+                let s1 = fcpct-with(s, fcpr-selection-transport(published), fcpct-session(s), fcpct-staged(s), fcpct-completed(s), fcpct-contributions(s));
+                fcpct-persist-staged(fcpct-stage-policy-result(s1, task, published, "publish"));
+            } : {
+                let selected = fcpr-select(transport, task);
+                let s1 = fcpct-with(s, fcpr-selection-transport(selected), fcpct-session(s), fcpct-staged(s), fcpct-completed(s), fcpct-contributions(s));
+                nothing?(fcpr-selection-action(selected)) ? fcpct-persist-staged(fcpct-stage-policy-result(s1, task, selected, "select")) : {
+                    let transport1 = fcpct-transport(s1);
+                    // Direct source work branches before the
+                    // model-facing observer. Policy chooses
+                    // the action only; source authority and
+                    // call identity are born by this state.
+                    let ran = (String) fcpr-selection-action(selected) == "source-knowledge" ? fcpdsa-run-peer(fcpat-peer(transport1), fcpct-session(s1), fcpsi-task-node(task), fcpct-source-context(s1), fcpct-task-key(task), "resident-peer") : (String) fcpr-selection-action(selected) == "source-symbol" ? fcpssa-run-peer(fcpat-peer(transport1), fcpct-session(s1), fcpsi-task-node(task), fcpct-source-context(s1), fcpct-transport-meaning-epoch(transport1)) : (String) fcpr-selection-action(selected) == "hearth-telemetry" ? fcphta-run-peer(fcpat-peer(transport1), fcpct-session(s1), fcpsi-task-node(task)) : (String) fcpr-selection-action(selected) == "provider-receipt" ? fcprr-run-peer(fcpat-peer(transport1), fcpct-session(s1), fcpsi-task-node(task)) : (String) fcpr-selection-action(selected) == fcpdab-route() ? fcpdab-run-peer(fcpat-peer(transport1), fcpct-session(s1), fcpsi-task-node(task), budget) : {
+                        let stage-context = fcpa-knowledge-stage-egress-context(fcpat-egress(transport1), fcpat-node-text(fcpsi-task-node(task)), fcpct-task-key(task));
+                        fcpsi-run-peer-with-action-with-patch-with-stage-context(fcpat-peer(transport1), fcpct-session(s1), fcpsi-task-node(task), budget, fcpct-patch-context(s1), fcpr-selection-action(selected), fcpa-knowledge-stage-observer-with-context, stage-context);
+                    };
+                    let peer = nth(ran, 1);
+                    let candidate-result = nth(ran, 2);
+                    let staged = fcpct-stage-peer-result(s1, task, peer, candidate-result, nth(ran, 0));
+                    fcpct-persist-staged(fcpct-stage-with-policy-frame(staged, task, selected, "select"));
+                };
+            };
+        };
+    };
+    // One shared revolution: retry durable output first; otherwise admit one
+    // bounded byte delta and actuate at most one complete task.
+    def fcpct-turn(s, now, budget) = !nothing?(fcpct-staged(s)) ? fcpct-persist-staged(s) : {
+        let read = fcpat-reader-step(fcpct-transport(s), now);
+        let s1 = fcpct-with(s, fcpat-result-state(read), fcpct-session(s), nothing(), fcpct-completed(s), fcpct-contributions(s));
+        (Comparable) len(fcpat-pending(fcpct-transport(s1))) == 0 ? fcpct-result(s1, fcpat-result-signal(read), fcpat-result-present?(read), fcpat-result-value(read), "reader-quantum") : fcpct-run-head-peer(s1, budget, now);
+    };
+    0;
+}
