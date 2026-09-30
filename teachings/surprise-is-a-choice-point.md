@@ -35,7 +35,7 @@ of nothing, 0, 1, or a node:
 | `oac-store` / `oac-restore` / `oac-undo` | a checkpoint is a value; undo returns to it when the current ack is nothing |
 | `oac-timeout-walk` | bounds a walk; running out reads as nothing, counted |
 | `oac-lanes` | walks every option and keeps every ack, before deciding |
-| `oac-hold` | not yet: the offer stands and the sequence waits over it |
+| `oac-hold` | offers one recipe again with ripened arguments under a patience bound; the recipe answers an ack, and running out of patience reads as nothing |
 
 An absent reading is `nothing()`; an observed host exit remains evidence. A
 finding travels as `oac-node(finding)` beside the original arguments through
