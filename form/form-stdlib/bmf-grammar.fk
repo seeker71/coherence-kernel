@@ -76,24 +76,42 @@
                 (if (and (gt (len r) 3) (gt (len g) 4))
                     (g-match-rule-memo g name r c)
                     (g-match-rule-run g r c)))))
+    ;; Every primitive skips the space before it, so the primitives a rule tries one after
+    ;; another at one place would each cross the same comment. The rule crosses it once
+    ;; and hands them the cursor past it; a reading that took nothing returns the cursor
+    ;; it was given, so no space is consumed that was not read.
     (defn g-match-rule-run (g r c)
-        (do (let m (g-match g (r3-pat r) c (gc-empty)))
+        (do (let cs (skip-ws c))
+            (let m (g-match g (r3-pat r) cs (gc-empty)))
             (if (g-ok? m)
-                (list "rok" (g-build (r3-tpl r) (g-caps m)) (g-cur m))
+                (list "rok" (g-build (r3-tpl r) (g-caps m))
+                    (if (eq (cur-pos (g-cur m)) (cur-pos cs)) c (g-cur m)))
                 (list "rno"))))
     ;; A rule marked "memo" (rule3m) is read once at each place of a source the whole-source
     ;; door armed: its reading there does not depend on how it was reached, so a retry from
     ;; the same place -- an alternative, a longer form, a block read again as its other kind --
     ;; takes the reading it already has. A source then costs its length, not its nesting.
+    ;; A record's read and write cost grows with its size (17 us at 10k keys, 244 us at
+    ;; 160k), and a megabyte of source holds hundreds of thousands of readings -- one
+    ;; record made the parse quadratic. The memo is a record of records, one per 4096
+    ;; bytes of source, so every read and write meets a few hundred keys at most.
     (defn g-match-rule-memo (g name r c)
-        (do (let memo (nth g 4))
-            (let key (str_concat name (str_concat "@" (int_to_str (cur-pos c)))))
-            (let hit (record_get memo key))
+        (do (let pos (cur-pos c))
+            (let shard (g-memo-shard (nth g 4) (int_to_str (div pos 4096))))
+            (let key (str_concat name (str_concat "@" (int_to_str pos))))
+            (let hit (record_get shard key))
             (if (eq hit 0)
                 (do (let rr (g-match-rule-run g r c))
-                    (record_set memo key rr)
+                    (record_set shard key rr)
                     rr)
                 hit)))
+    (defn g-memo-shard (memo k)
+        (do (let s (record_get memo k))
+            (if (eq s 0)
+                (do (let fresh (record_new 0))
+                    (record_set memo k fresh)
+                    fresh)
+                s)))
     (defn g-armed (g)
         (list "G" (g-start g) (g-rules g)
               (if (nil? (tail (tail (tail g)))) (g-index (g-rules g) (record_new 0)) (nth g 3))
@@ -120,8 +138,23 @@
             (if (str_eq tag "infix") (gm-infix g pat c caps)
             (if (str_eq tag "chain") (gm-chain g pat c caps)
             (if (str_eq tag "ternary") (gm-ternary g pat c caps)
-                (g-no))))))))))))
-                ))))))
+            (if (str_eq tag "leaf") (gm-leaf g pat c caps)
+                (g-no)))))))))))
+                ))))))))
+
+    ;; A leaf: a pattern whose reading is the whole operand when one of the follow bytes
+    ;; comes next -- a string or a number standing before , ] ) has no operator, call or
+    ;; ternary after it, so the chain of rules that would find that out is spared. Any
+    ;; other follower leaves the reading to the alternatives after it.
+    (defn gm-leaf (g pat c caps)
+        (do (let m (g-match g (nth pat 1) c caps))
+            (if (and (g-ok? m) (gm-follows? (nth pat 2) (cur-peek (skip-ws (g-cur m)))))
+                m
+                (g-no))))
+    (defn gm-follows? (set b) (gm-follows-at? set b 0 (str_len set)))
+    (defn gm-follows-at? (set b i n)
+        (if (ge i n) 0
+            (if (eq (str_byte_at set i) b) 1 (gm-follows-at? set b (add i 1) n))))
 
     ;; a keyword: the literal, where the next char cannot continue a name -- so `empty`
     ;; is a keyword and `emptyRows` / `empty?(x)` are names that begin with one. It is a
@@ -131,7 +164,7 @@
     ;; follows it, so `nothing()` reads as the call it is.
     (defn gm-kw (pat c caps)
         (do (let cc (skip-ws c))
-            (let m (match-pat (list "lit" (nth pat 1)) cc (caps-empty)))
+            (let m (if (gm-lit-starts? (nth pat 1) cc) (match-pat (list "lit" (nth pat 1)) cc (caps-empty)) (m-no)))
             (if (m-ok? m)
                 (if (cur-eof? (m-cur m))
                     (g-ok (unit) caps (m-cur m))
@@ -142,9 +175,14 @@
                             (g-ok (unit) caps (m-cur m)))))
                 (g-no))))
 
+    ;; a literal can only match where its first byte stands: one byte read spares the
+    ;; whole match for every alternative that cannot begin here
+    (defn gm-lit-starts? (s cc)
+        (or (eq (str_len s) 0) (eq (str_byte_at s 0) (cur-peek cc))))
+
     (defn gm-core (pat c caps valued)
         (do (let cc (skip-ws c))
-            (let m (match-pat pat cc (caps-empty)))
+            (let m (if (and (str_eq (head pat) "lit") (not (gm-lit-starts? (nth pat 1) cc))) (m-no) (match-pat pat cc (caps-empty))))
             (if (m-ok? m)
                 (if (eq valued 1)
                     (g-ok (intern_trivial_string (cur-slice cc (cur-pos (m-cur m)))) caps (m-cur m))
@@ -233,11 +271,13 @@
                 (intern_node (bmf-bp "ident") (list (intern_trivial_string (head op)))) lhs rhs))
             (intern_node (bmf-bp (head op)) (list lhs rhs))))
     (defn infix-peek-op (g table c caps)
+        (infix-peek-op-at g table c caps (skip-ws c)))
+    (defn infix-peek-op-at (g table c caps cc)
         (if (nil? table) (empty)
             (do (let e (head table))
-                (let m (g-match g (p-lit (head e)) c caps))
+                (let m (if (gm-lit-starts? (head e) cc) (g-match g (p-lit (head e)) c caps) (g-no)))
                 (if (g-ok? m) (list (nth e 1) (nth e 2) (g-cur m) (if (gt (len e) 3) (nth e 3) "") (if (gt (len e) 4) 1 0))
-                    (infix-peek-op g (tail table) c caps)))))
+                    (infix-peek-op-at g (tail table) c caps cc)))))
 
     ;; A pure chain (a fourth element on the pattern, as gm-kw's third) is the functional
     ;; dialect's: an index `[` must touch the term it indexes, and `++` is never a postfix
@@ -314,10 +354,10 @@
         (do (let m (g-match g exprp c caps))
             (if (g-ok? m)
                 (do (let cc (skip-ws (g-cur m)))
-                    (let acc2 (append acc (list (g-val m))))
+                    (let acc2 (cons (g-val m) acc))
                     (if (eq (cur-peek cc) 44) (gm-args-loop g exprp (cur-advance cc 1) caps acc2)
-                    (if (eq (cur-peek cc) 41) (list acc2 (cur-advance cc 1))
-                        (list acc2 (g-cur m)))))
+                    (if (eq (cur-peek cc) 41) (list (reverse acc2) (cur-advance cc 1))
+                        (list (reverse acc2) (g-cur m)))))
                 (list (empty) c))))
 
     (defn gm-ternary (g pat c caps)
@@ -365,9 +405,9 @@
         (do (let m (g-match g inner c caps))
             (if (g-ok? m)
                 (if (gt (cur-pos (g-cur m)) (cur-pos c))
-                    (gm-rep-loop g inner (g-cur m) (g-caps m) (append acc (list (g-val m))))
-                    (g-ok (nlist acc) caps c))
-                (g-ok (nlist acc) caps c))))
+                    (gm-rep-loop g inner (g-cur m) (g-caps m) (cons (g-val m) acc))
+                    (g-ok (nlist (reverse acc)) caps c))
+                (g-ok (nlist (reverse acc)) caps c))))
 
     (defn gm-sep (g pat c caps)
         (do (let m (g-match g (nth pat 1) c caps))
@@ -379,9 +419,9 @@
             (if (g-ok? ms)
                 (do (let mi (g-match g inner (g-cur ms) (g-caps ms)))
                     (if (g-ok? mi)
-                        (gm-sep-loop g inner sepp (g-cur mi) (g-caps mi) (append acc (list (g-val mi))))
-                        (g-ok (nlist acc) caps c)))
-                (g-ok (nlist acc) caps c))))
+                        (gm-sep-loop g inner sepp (g-cur mi) (g-caps mi) (cons (g-val mi) acc))
+                        (g-ok (nlist (reverse acc)) caps c)))
+                (g-ok (nlist (reverse acc)) caps c))))
 
     (defn g-build (tpl caps)
         (do (let tag (head tpl))
@@ -453,6 +493,7 @@
     (defn p-infix (operand table) (list "infix" operand table))
     (defn p-chain (base exprp) (list "chain" base exprp))
     (defn p-chain-pure (base exprp) (list "chain" base exprp "pure"))
+    (defn p-leaf (p follow) (list "leaf" p follow))
     (defn p-ternary (cond branch) (list "ternary" cond branch))
     (defn p-ternary-as (cond branch op) (list "ternary" cond branch op))
     (defn t-emit (op kids) (list "emit" op kids))
