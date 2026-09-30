@@ -95,8 +95,10 @@ bml-bmf-stream-curriculum-band 16777215 · form-cli-lens-mint-band 1023
 Native source lifting is available through `form-source-lift(source, owner)` in
 `form/form-stdlib/bml/form-source-lift.bml`. It checks BML candidates against the
 original lowered tree before publication, preserving nested scope and literal
-bytes. Its contract witness is `form/form-stdlib/tests/form-source-lift-band.bml`
-(18 accepted cases, 3 declined shadowing/binding changes). [Native coding](docs/form-native-coding.md#native-surface-lifting)
+bytes. Existing BML is scanned through the BMF cursor and expression grammar;
+surface-only migrations can compare exact recipes before imported type resolution.
+Its contract witness is `form/form-stdlib/tests/form-source-lift-band.bml`
+(24 accepted cases, 3 declined shadowing/binding changes, preserved comparison metadata). [Native coding](docs/form-native-coding.md#native-surface-lifting)
 describes the callable surface and its scope.
 
 ## The mind and its voice

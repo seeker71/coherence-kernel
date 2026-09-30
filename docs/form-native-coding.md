@@ -8,7 +8,21 @@ An evaluated session LoRA may offer a proposal before Qwen unless the request na
 
 ## Native surface lifting
 
-`form/form-stdlib/bml/form-source-lift.bml` provides `form-source-lift(source, owner)` for Form source. It returns `[equivalent, candidate, definitionCount, lowered]`. The cursor preserves grouping and comparison contracts while emitting BML definitions, blocks, lazy conditionals, list literals, indexing, ranges and infix operators. Repeated exact-value comparisons of one atomic subject become `match` arms. Operator spelling and precedence come from the grammar's shared table. Its proof compares the lowered trees, decoding string escapes, the runtime's boolean spellings and closed literal string construction. This includes the compiler's semicolon encoding; calls with variables or effects retain their structure. Only the single module wrapper is removed, so nested blocks retain scope. Added local bindings or shadowed literal/constructor names produce `equivalent = 0`; that candidate is not ready for publication. Malformed source follows the compiler's diagnostic path.
+`form/form-stdlib/bml/form-source-lift.bml` provides `form-source-lift(source, owner)` for Form and executable BML. It returns `[equivalent, candidate, definitionCount, lowered]`. Form lifting preserves grouping and comparison contracts while emitting BML definitions, blocks, lazy conditionals, list literals, indexing, ranges and infix operators. Repeated exact-value comparisons of one atomic subject become `match` arms. Operator spelling and precedence come from the grammar's shared table. Its proof compares the lowered trees, decoding string escapes, the runtime's boolean spellings and closed literal string construction. This includes the compiler's semicolon encoding; calls with variables or effects retain their structure. Only the single module wrapper is removed, so nested blocks retain scope. Added local bindings or shadowed literal/constructor names produce `equivalent = 0`; that candidate is not ready for publication. Malformed source follows the compiler's diagnostic path.
+
+Existing BML travels through the BMF cursor and its expression grammar. Complete
+`list`, `nth` and `range` calls become list literals, indexes and ranges without
+flattening authored classes or functions. Quoted bytes, comments and declarations
+retain their places. The cursor carries the source position; failed matches leave
+it available for the next choice without constructing a token table.
+
+`form-bml-surface-equivalent?(source, candidate)` compares exact compiler recipes
+before type resolution, including declared comparison metadata and lexical
+bindings, together with the surrounding source. Identical recipes receive the
+same imported context, so a surface migration can prove its change without
+re-reading an unchanged dependency graph. This narrow proof does not produce a
+compiled image; ordinary source admission still resolves imports and validates
+execution.
 
 Imports remain loader directives outside the executable section, and admission also compares ordered dependencies. This deterministic step uses no model tokens and writes no files. Keep the original source, check it is still current before publishing, and observe affected callers. Keep the compiler's bootstrap closure in its bootable source form. Structural lifting does not establish that every algorithm or abstraction is optimal.
 
