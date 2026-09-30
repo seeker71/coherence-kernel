@@ -63,27 +63,53 @@ section [form.bml] {
   append(map(fsl-shape,head(module)),map(fsl-shape,fsl-root(nth(module,1))));
  }
  def fsl-definitions(nodes) = foldl((count,n) => count + (((String) fsl-op(n) == "defn") ? 1 : 0) + fsl-definitions(fsl-kids(n)),0,nodes);
- // One operator description owns spelling, precedence and comparison contract.
- let fsl-call-rule = list("",8,"");
- let fsl-operators = record_new(0,
-  "add",list("+",5,""),"sub",list("-",5,""),"mul",list("*",6,""),"div",list("/",6,""),"mod",list("%",6,""),
-  "lt",list("<",4,""),"le",list("<=",4,""),"gt",list(">",4,""),"ge",list(">=",4,""),
-  "eq",list("==",4,"(Comparable) "),"ne",list("!=",4,"(Comparable) "),
-  "str_eq",list("==",4,"(String) "),"value_eq",list("==",4,"(Value) "),
-  "and",list("&&",3,""),"or",list("||",2,""),"if",list("",1,""),"not",list("",7,""));
+ // Grammar owns operator spelling and precedence; the lift retains the source
+ // comparison contract. Conditional priority is below every binary operator.
+ let fsl-call-priority = foldl((p,row) => max2(p,row[2] + 3),0,form-bml-operators());
+ let fsl-call-rule = ["",fsl-call-priority,""];
+ let fsl-operators = foldl((table,row) => record_set(table,row[1],
+  [row[0],row[2] + 1,(row[1] == "eq" || row[1] == "ne") ? "(Comparable) " : ""]),
+  record_new(0,"if",["",0,""],"not",["",fsl-call-priority - 1,""]),form-bml-operators());
+ record_set(fsl-operators,"str_eq",["==",record_get(fsl-operators,"eq")[1],"(String) "]);
+ record_set(fsl-operators,"value_eq",["==",record_get(fsl-operators,"eq")[1],"(Value) "]);
  def fsl-rule(op) = record_has(fsl-operators,op) ? record_get(fsl-operators,op) : fsl-call-rule;
  def fsl-args(nodes,indent) = str-join-with(map(n => fsl-expr(n,indent),nodes),", ");
  def fsl-expr(n,indent) = fsl-render(n,indent,0);
  def fsl-string?(n) = str_byte_at(fsl-word(n),0) == 34;
+ def fsl-case?(n,subject) {
+  let kids = fsl-kids(n);
+  if fsl-op(n) != "if" || len(kids) != 4 then false else {
+   let test = fsl-kids(kids[1]);
+   fsl-op(kids[1]) == "value_eq" && len(test) == 3 &&
+    fsl-shape(test[1]) == fsl-shape(subject) && fsl-word(test[2]) != "_";
+  };
+ }
+ def fsl-match-subject(n) {
+  let kids = fsl-kids(n);
+  if fsl-op(n) != "if" || len(kids) != 4 then nothing() else {
+   let test = fsl-kids(kids[1]); let subject = test[1];
+   fsl-op(kids[1]) == "value_eq" && len(test) == 3 && nil?(fsl-kids(subject)) &&
+    fsl-case?(n,subject) && fsl-case?(kids[3],subject) ? subject : nothing();
+  };
+ }
+ def fsl-match-arms(n,subject,indent) = fsl-case?(n,subject) ? {
+  let kids = fsl-kids(n); let test = fsl-kids(kids[1]);
+  str-join([fsl-comments(n[2],indent),fsl-comments(kids[1][2],indent),indent,
+   fsl-expr(test[2],indent)," => ",fsl-expr(kids[2],indent),",\n",fsl-match-arms(kids[3],subject,indent)]);
+ } : str-join([indent,"_ => ",fsl-expr(n,indent),"\n"]);
  def fsl-render(n,indent,parent) {
   let op = fsl-op(n); let kids = fsl-kids(n); let args = nil?(kids) ? list() : tail(kids);
   let rule = fsl-rule(op); let infix = head(rule); let priority = nth(rule,1);
+  let subject = fsl-match-subject(n);
   let text = if nil?(kids) then fsl-word(n) else
    if (op == "do") then str-join(list("{\n",fsl-statements(args,str_concat(indent,"    ")),indent,"}")) else
-   if ((op == "if") && len(args) == 3) then str-join(list(fsl-render(head(args),indent,2)," ? ",fsl-render(nth(args,1),indent,0)," : ",fsl-render(nth(args,2),indent,1))) else
+   if !nothing?(subject) then str-join(["match ",fsl-expr(subject,indent)," {\n",fsl-match-arms([fsl-word(n),kids,"",n[3]],subject,str_concat(indent,"    ")),indent,"}"]) else
+   if ((op == "if") && len(args) == 3) then str-join(list(fsl-render(head(args),indent,1)," ? ",fsl-render(nth(args,1),indent,0)," : ",fsl-render(nth(args,2),indent,0))) else
+   if op == "list" then str-join(["[",fsl-args(args,indent),"]"]) else
+   if op == "nth" && len(args) == 2 then str-join([fsl-render(args[0],indent,fsl-call-priority),"[",fsl-expr(args[1],indent),"]"]) else
    if ((infix != "") && len(args) == 2) then {
     let contract = nth(rule,2);
-    str-join(list(contract,fsl-render(head(args),indent,contract != "" ? 8 : priority == 4 ? priority + 1 : priority)," ",infix," ",fsl-render(nth(args,1),indent,priority + 1)));
+    str-join(list(contract,fsl-render(head(args),indent,contract != "" ? fsl-call-priority : priority)," ",infix," ",fsl-render(nth(args,1),indent,priority + 1)));
    } else if ((op == "not") && len(args) == 1) then str_concat("!",fsl-render(head(args),indent,priority))
    else str-join(list(fsl-expr(head(kids),indent),"(",fsl-args(args,indent),")"));
   str_concat(fsl-comments(nth(n,2),indent),priority < parent ? str-join(list("(",text,")")) : text);

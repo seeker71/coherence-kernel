@@ -48,7 +48,18 @@ def total(values) = values |> foldl((sum,x) => sum + x,0);
 def matching(values) = values |> filter((text: String) => text == "ready");
 def affine(scale) = offset => x => scale * x + offset;
 affine(3)(2)(4);
+def point(x,y) = [x,y];
+def x-coordinate(point) = point[0];
+def operation(ops,index,input) = ops[index](input);
 ```
+
+`[a,b]` and `[]` construct native lists. `rows[index]` lowers directly to
+`nth(rows,index)`; indexes are zero-based and retain the primitive's absence
+and validation behavior. Nested literals and chained indexes work with calls,
+grouped expressions and lexical functions. Elements, receiver and index execute
+in their written order, once each. These forms add no collection runtime or
+temporary bindings. A comma separates complete elements; an empty element,
+trailing comma or empty index has no executable meaning.
 
 `start .. end` calls the existing half-open `range`. `x => expression`,
 `(x,y) => expression`, and `() => expression` create lexical functions; a braced
@@ -75,6 +86,13 @@ def size(x) = try len(x) catch 0;
 def first-reading(x) = choice { len(x); str_len(x); 0 };
 def label(name) = name ?? "unnamed";
 ```
+
+`match value { pattern => expression, _ => otherwise }` expresses ordered
+exact-value dispatch. It preserves integer/float distinctions, evaluates a
+computed subject once, and executes only the selected body. Patterns are values,
+not destructuring declarations or type tests. Use a named accessor for a tuple's
+meaning; use indexing inside that accessor. Comparison contracts still belong
+on comparisons that require String or numeric promotion.
 
 Intrinsic call names resolve to existing Form owners after lexical binding.
 Parameters, local values, captured functions and declared functions take
@@ -171,6 +189,19 @@ returns `nothing()` on a miss while preserving zero and empty matching values.
 Named accessors own tuple layouts; domain constants belong to their semantic
 owner. Classes group APIs. Templates describe parameters and members; instance
 accessors, interface checking and specialization are not implied.
+
+Choose the smallest pattern that states the operation:
+
+| Intent | Native expression |
+| --- | --- |
+| Construct or read a row | `[key,value]`, `row[1]` inside a named accessor |
+| Select one value | `condition ? yes : no`; `match` for exact-value alternatives |
+| Supply an absent answer | `reading ?? other`; zero and empty lists remain answers |
+| Transform a sequence | `rows |> filter(keep) |> map(project)` |
+| Accumulate in order | `rows |> foldl((state,row) => next(state,row),initial)` |
+| Retain local context | `scale => value => scale * value` |
+| Recover or choose | `try work catch care`; `choice { first; second; }` |
+| Continue owned asynchronous work | `repeat`, `again`, `retry` with the existing event owner |
 
 Run a defined lift through `code_entry: "direct"` with the actual callers and
 helper contracts supplied. Inspect the candidate, execute its behavior and read
