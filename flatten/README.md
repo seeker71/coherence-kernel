@@ -1,10 +1,14 @@
 # flatten/ — the op manifest
 
-`form-flatten.fk` owns `flt-ops` — the hand-maintained single source of truth for
-the native op rows. `gen-source-walker-table.fk` and `gen-source-walker.fk`
-generate `runtime/fkwu-optable.h` from it. Adding a value op is a `flt-ops` row,
-then a regen, then its serialize arm in `form/form-stdlib/fkc-table-serialize.fk`.
-`host-effect-root-projection.fk` projects the host-effect grammar
-(`form/form-stdlib/host-effect-grammar.fk`, from `grammars/host-effect-vocabulary.bmf`) onto the same rows. The drift gate `op-manifest` (`gate/op-manifest.bml`) reads the rows.
+`form-flatten.fk` contains the BML `flt-ops` table: native operation names,
+arities and bootstrap tags. Run `./fkwu flatten/gen-source-walker-table.fk`
+to import that table and the native rewrite rules and emit
+`runtime/fkwu-optable.h` directly.
+
+Adding a value operation updates its manifest row, this table and the matching
+serializer arm in `form/form-stdlib/fkc-table-serialize.fk`, then regenerates
+the header. The `op-manifest` drift check reads the compiler-normalized source.
+Executable flattening lives in `form/form-stdlib/form-flatten.fk`; host-effect
+meaning lives in `form/form-stdlib/host-effect-grammar.fk`.
 
 An op family the seed carries with no caller outside `flt-ops` wants a caller or a release.
