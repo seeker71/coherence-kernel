@@ -1,178 +1,99 @@
-; form-cli-recipe-exec-session.fk — one resident local-Qwen context can emit a
-; NodeID recipe request, cross a raw-byte cursor, receive a typed physical
-; observation, and continue without rebuilding its transcript or KV state.
-;
-; This is the joined loop. Each predicted model ID is decoded to its byte chunk
-; and offered directly to frxc-feed. BPE remains the transformer's embedding
-; boundary; it is not a grammar pre-pass. The scannerless cursor alone decides
-; whether those bytes form a recipe request. When a frame completes, its generic
-; callback generates and executes Metal exactly once. The physically flagged
-; observation then enters a caller-selected injection function. The ordinary
-; lane uses fcms-observe and its tool-role crossing; compact execution BML may
-; use fcms-observe-inline-bml. Both consume the pending generated ID once and
-; continue on the same q38 state and KV rows.
-;
-; Model bytes before the crossing, model bytes after it, and injected Form bytes
-; are three separate values and ledgers. The local model requests execution; it
-; does not execute Form or native code inside logits. A cursor permits only one
-; crossing. Another micro-thought opens another cursor in the same residence.
-;
-; This cell defines the movement but performs no top-level model or Metal work.
-; The live run is separate. It changes no C seed, uses no flattening and has no
-; operations table.
-;
-; preludes: form-stdlib/form-cli-model-session.fk
-; preludes: form-stdlib/form-cli-recipe-exec-cursor.fk
-; preludes: form-stdlib/form-recipe-exec-token-live.fk
-;
-; Pure shape proven by: form-stdlib/tests/form-cli-recipe-exec-session-band.fk
-
-(do
-    ; result = tag session cursor before-text after-text injected-text
-    ;              before-ids after-ids
-    (defn frxs-result (session cursor before after injected before-ids after-ids)
-        (list "form-cli-recipe-exec-session-v1" session cursor before after
-              injected before-ids after-ids))
-    (defn frxs-session (r) (nth r 1))
-    (defn frxs-cursor (r) (nth r 2))
-    (defn frxs-before-text (r) (nth r 3))
-    (defn frxs-after-text (r) (nth r 4))
-    (defn frxs-injected-text (r) (nth r 5))
-    (defn frxs-before-ids (r) (nth r 6))
-    (defn frxs-after-ids (r) (nth r 7))
-    (defn frxs-model-bytes (r)
-        (add (str_len (frxs-before-text r)) (str_len (frxs-after-text r))))
-    (defn frxs-injected-bytes (r) (str_len (frxs-injected-text r)))
-    (defn frxs-crossed? (r)
-        (if (eq (frxc-injections (frxs-cursor r)) 1) 1 0))
-    (defn frxs-callback-calls (r)
-        (frxc-callback-calls (frxs-cursor r)))
-    (defn frxs-carrier-executed? (r)
-        (frxc-callback-observed-executed? (frxs-cursor r)))
-    (defn frxs-native-code-generated? (r)
-        (frxc-callback-observed-code-generated? (frxs-cursor r)))
-    (defn frxs-model-executed-form? (r) 0)
-
-    (defn frxs-with-generated (s pos pending stopped added)
-        (fcms-with-stream s pos pending stopped
-            (add (fcms-generated-ids s) added)
-            (fcms-injected-ids s) (fcms-observations s)))
-    (defn frxs-fail (s reason pos pending stopped added)
-        (fcms-refuse (frxs-with-generated s pos pending stopped added) reason))
-    (defn frxs-forward (s id pos)
-        (fcms-forward s id pos))
-
-    (defn frxs-finish (s c before after injected before-ids after-ids)
-        (frxs-result s c before after injected before-ids after-ids))
-
-    ; A live caller may offer a content-free observer function.  The default is
-    ; silent, preserving this session as a reusable organ rather than imposing
-    ; a global diagnostic mode.
-    (defn frxs-observe-none (stage phase cursor generated) 0)
-    (defn frxs-recipe-feed (ctx cursor chunk)
-        (frxc-feed ctx frexl-cursor-executor cursor chunk))
-
-    (defn frxs-walk
-        (s c id pos left stops phase before after injected before-ids after-ids
-         observer feed-ctx feedf injectf)
-        (if (le left 0)
-            (frxs-finish s c before after injected before-ids after-ids)
-        (if (lt id 0)
-            (frxs-finish (frxs-fail s "model-forward-refused" pos -1 1 0)
-                c before after injected before-ids after-ids)
-        (if (eq (q38-stop? id stops) 1)
-            (frxs-finish (frxs-with-generated s pos id 1 0)
-                c before after injected before-ids after-ids)
-        (if (ge pos (fcms-maxpos s))
-            (frxs-finish (frxs-fail s "session-position-refused" pos id 0 0)
-                c before after injected before-ids after-ids)
-            (do
-                (let generated (add (len before-ids) (len after-ids)))
-                (let pulse (if (eq (mod generated 8) 0) 1 0))
-                (let progress (if (eq pulse 1)
-                    (observer "model-stream" "progress" c generated) 0))
-                (let decode-begin (if pulse (observer "model-codec" "begin" c generated) 0))
-                (let chunk (fcmo-token-text s id))
-                (let decode-end (if pulse (observer "model-codec" "end" c generated) 0))
-                (let transfer (feedf feed-ctx c chunk))
-                (let c2 (nth transfer 0))
-                (let model-delta (nth transfer 1))
-                (let injection-delta (nth transfer 2))
-                (let before2 (if (eq phase 0)
-                    (str_concat before model-delta) before))
-                (let after2 (if (eq phase 0)
-                    after (str_concat after model-delta)))
-                (let before-ids2 (if (eq phase 0)
-                    (append before-ids (list id)) before-ids))
-                (let after-ids2 (if (eq phase 0)
-                    after-ids (append after-ids (list id))))
-                (let spoken (frxs-with-generated s pos id 0 1))
-                (if (gt (str_len injection-delta) 0)
-                    (do
-                        ; spoken still holds this just-decoded ID as pending.
-                        ; injectf consumes it exactly once before the typed
-                        ; observation and returns the resumed reply prediction.
-                        (let injection-begin (observer "observation-inject"
-                            "begin" c2 generated))
-                        (let resumed (injectf spoken injection-delta))
-                        (let injection-end (observer "observation-inject"
-                            "end" c2 generated))
-                        (if (not (eq (fcms-live? resumed) 1))
-                            (frxs-finish resumed c2 before2 after2
-                                (str_concat injected injection-delta)
-                                before-ids2 after-ids2)
-                            (frxs-walk resumed c2 (fcms-pending resumed)
-                                (fcms-pos resumed) (sub left 1) stops 1
-                                before2 after2
-                                (str_concat injected injection-delta)
-                                before-ids2 after-ids2 observer feed-ctx feedf
-                                injectf)))
-                (if (eq left 1)
-                    (frxs-finish spoken c2 before2 after2 injected
-                        before-ids2 after-ids2)
-                    (do
-                        (let forward-begin (if (eq pulse 1)
-                            (observer "model-forward" "begin" c2 generated) 0))
-                        (let next-id (frxs-forward spoken id pos))
-                        (let forward-end (if (eq pulse 1)
-                            (observer "model-forward" "end" c2 generated) 0))
-                        (let next (frxs-with-generated spoken (add pos 1)
-                            next-id
-                            (if (or (lt next-id 0)
-                                    (eq (q38-stop? next-id stops) 1)) 1 0)
-                            0))
-                        (frxs-walk next c2 next-id (add pos 1) (sub left 1)
-                            stops phase before2 after2 injected
-                            before-ids2 after-ids2 observer feed-ctx feedf
-                            injectf))))))))))
-
-    (defn frxs-run-protocol-with-injector
-        (session max-generated cursor feed-ctx feedf observer injectf)
-        (if (or (not (eq (fcms-live? session) 1))
-                (le max-generated 0))
-            (frxs-result session cursor "" "" "" (empty) (empty))
-            (do
-                (let begin (observer "run" "begin" cursor 0))
-                (let result (frxs-walk session cursor
-                    (fcms-pending session) (fcms-pos session) max-generated
-                    (fcmo-stops session) 0
-                    "" "" "" (empty) (empty) observer feed-ctx feedf injectf))
-                (let generated (add (len (frxs-before-ids result))
-                    (len (frxs-after-ids result))))
-                (let end (observer "run" "end" (frxs-cursor result)
-                    generated))
-                result)))
-
-    (defn frxs-run-protocol-with-observer
-        (session max-generated cursor feed-ctx feedf observer)
-        (frxs-run-protocol-with-injector session max-generated cursor
-            feed-ctx feedf observer fcms-observe))
-
-    (defn frxs-run-with-observer (session max-generated observer)
-        (frxs-run-protocol-with-observer session max-generated (frxc-fresh)
-            0 frxs-recipe-feed observer))
-
-    (defn frxs-run (session max-generated)
-        (frxs-run-with-observer session max-generated frxs-observe-none))
-
-    0)
+// form-cli-recipe-exec-session.fk — one resident local-Qwen context can emit a
+// NodeID recipe request, cross a raw-byte cursor, receive a typed physical
+// observation, and continue without rebuilding its transcript or KV state.
+//
+// This is the joined loop. Each predicted model ID is decoded to its byte chunk
+// and offered directly to frxc-feed. BPE remains the transformer's embedding
+// boundary; it is not a grammar pre-pass. The scannerless cursor alone decides
+// whether those bytes form a recipe request. When a frame completes, its generic
+// callback generates and executes Metal exactly once. The physically flagged
+// observation then enters a caller-selected injection function. The ordinary
+// lane uses fcms-observe and its tool-role crossing; compact execution BML may
+// use fcms-observe-inline-bml. Both consume the pending generated ID once and
+// continue on the same q38 state and KV rows.
+//
+// Model bytes before the crossing, model bytes after it, and injected Form bytes
+// are three separate values and ledgers. The local model requests execution; it
+// does not execute Form or native code inside logits. A cursor permits only one
+// crossing. Another micro-thought opens another cursor in the same residence.
+//
+// This cell defines the movement but performs no top-level model or Metal work.
+// The live run is separate. It changes no C seed, uses no flattening and has no
+// operations table.
+//
+// preludes: form-stdlib/form-cli-model-session.fk
+// preludes: form-stdlib/form-cli-recipe-exec-cursor.fk
+// preludes: form-stdlib/form-recipe-exec-token-live.fk
+//
+// Pure shape proven by: form-stdlib/tests/form-cli-recipe-exec-session-band.fk
+section [form.bml] {
+    // result = tag session cursor before-text after-text injected-text
+    //              before-ids after-ids
+    def frxs-result(session, cursor, before, after, injected, before-ids, after-ids) = list("form-cli-recipe-exec-session-v1", session, cursor, before, after, injected, before-ids, after-ids);
+    def frxs-session(r) = nth(r, 1);
+    def frxs-cursor(r) = nth(r, 2);
+    def frxs-before-text(r) = nth(r, 3);
+    def frxs-after-text(r) = nth(r, 4);
+    def frxs-injected-text(r) = nth(r, 5);
+    def frxs-before-ids(r) = nth(r, 6);
+    def frxs-after-ids(r) = nth(r, 7);
+    def frxs-model-bytes(r) = str_len(frxs-before-text(r)) + str_len(frxs-after-text(r));
+    def frxs-injected-bytes(r) = str_len(frxs-injected-text(r));
+    def frxs-crossed?(r) = (Comparable) frxc-injections(frxs-cursor(r)) == 1 ? 1 : 0;
+    def frxs-callback-calls(r) = frxc-callback-calls(frxs-cursor(r));
+    def frxs-carrier-executed?(r) = frxc-callback-observed-executed?(frxs-cursor(r));
+    def frxs-native-code-generated?(r) = frxc-callback-observed-code-generated?(frxs-cursor(r));
+    def frxs-model-executed-form?(r) = 0;
+    def frxs-with-generated(s, pos, pending, stopped, added) = fcms-with-stream(s, pos, pending, stopped, fcms-generated-ids(s) + added, fcms-injected-ids(s), fcms-observations(s));
+    def frxs-fail(s, reason, pos, pending, stopped, added) = fcms-refuse(frxs-with-generated(s, pos, pending, stopped, added), reason);
+    def frxs-forward(s, id, pos) = fcms-forward(s, id, pos);
+    def frxs-finish(s, c, before, after, injected, before-ids, after-ids) = frxs-result(s, c, before, after, injected, before-ids, after-ids);
+    // A live caller may offer a content-free observer function.  The default is
+    // silent, preserving this session as a reusable organ rather than imposing
+    // a global diagnostic mode.
+    def frxs-observe-none(stage, phase, cursor, generated) = 0;
+    def frxs-recipe-feed(ctx, cursor, chunk) = frxc-feed(ctx, frexl-cursor-executor, cursor, chunk);
+    def frxs-walk(s, c, id, pos, left, stops, phase, before, after, injected, before-ids, after-ids, observer, feed-ctx, feedf, injectf) = left <= 0 ? frxs-finish(s, c, before, after, injected, before-ids, after-ids) : id < 0 ? frxs-finish(frxs-fail(s, "model-forward-refused", pos, -1, 1, 0), c, before, after, injected, before-ids, after-ids) : (Comparable) q38-stop?(id, stops) == 1 ? frxs-finish(frxs-with-generated(s, pos, id, 1, 0), c, before, after, injected, before-ids, after-ids) : pos >= fcms-maxpos(s) ? frxs-finish(frxs-fail(s, "session-position-refused", pos, id, 0, 0), c, before, after, injected, before-ids, after-ids) : {
+        let generated = len(before-ids) + len(after-ids);
+        let pulse = (Comparable) (generated % 8) == 0 ? 1 : 0;
+        let progress = (Comparable) pulse == 1 ? observer("model-stream", "progress", c, generated) : 0;
+        let decode-begin = pulse ? observer("model-codec", "begin", c, generated) : 0;
+        let chunk = fcmo-token-text(s, id);
+        let decode-end = pulse ? observer("model-codec", "end", c, generated) : 0;
+        let transfer = feedf(feed-ctx, c, chunk);
+        let c2 = nth(transfer, 0);
+        let model-delta = nth(transfer, 1);
+        let injection-delta = nth(transfer, 2);
+        let before2 = (Comparable) phase == 0 ? str_concat(before, model-delta) : before;
+        let after2 = (Comparable) phase == 0 ? after : str_concat(after, model-delta);
+        let before-ids2 = (Comparable) phase == 0 ? append(before-ids, list(id)) : before-ids;
+        let after-ids2 = (Comparable) phase == 0 ? after-ids : append(after-ids, list(id));
+        let spoken = frxs-with-generated(s, pos, id, 0, 1);
+        str_len(injection-delta) > 0 ? {
+            // spoken still holds this just-decoded ID as pending.
+            // injectf consumes it exactly once before the typed
+            // observation and returns the resumed reply prediction.
+            let injection-begin = observer("observation-inject", "begin", c2, generated);
+            let resumed = injectf(spoken, injection-delta);
+            let injection-end = observer("observation-inject", "end", c2, generated);
+            !((Comparable) fcms-live?(resumed) == 1) ? frxs-finish(resumed, c2, before2, after2, str_concat(injected, injection-delta), before-ids2, after-ids2) : frxs-walk(resumed, c2, fcms-pending(resumed), fcms-pos(resumed), left - 1, stops, 1, before2, after2, str_concat(injected, injection-delta), before-ids2, after-ids2, observer, feed-ctx, feedf, injectf);
+        } : (Comparable) left == 1 ? frxs-finish(spoken, c2, before2, after2, injected, before-ids2, after-ids2) : {
+            let forward-begin = (Comparable) pulse == 1 ? observer("model-forward", "begin", c2, generated) : 0;
+            let next-id = frxs-forward(spoken, id, pos);
+            let forward-end = (Comparable) pulse == 1 ? observer("model-forward", "end", c2, generated) : 0;
+            let next = frxs-with-generated(spoken, pos + 1, next-id, next-id < 0 || (Comparable) q38-stop?(next-id, stops) == 1 ? 1 : 0, 0);
+            frxs-walk(next, c2, next-id, pos + 1, left - 1, stops, phase, before2, after2, injected, before-ids2, after-ids2, observer, feed-ctx, feedf, injectf);
+        };
+    };
+    def frxs-run-protocol-with-injector(session, max-generated, cursor, feed-ctx, feedf, observer, injectf) = !((Comparable) fcms-live?(session) == 1) || max-generated <= 0 ? frxs-result(session, cursor, "", "", "", empty(), empty()) : {
+        let begin = observer("run", "begin", cursor, 0);
+        let result = frxs-walk(session, cursor, fcms-pending(session), fcms-pos(session), max-generated, fcmo-stops(session), 0, "", "", "", empty(), empty(), observer, feed-ctx, feedf, injectf);
+        let generated = len(frxs-before-ids(result)) + len(frxs-after-ids(result));
+        let end = observer("run", "end", frxs-cursor(result), generated);
+        result;
+    };
+    def frxs-run-protocol-with-observer(session, max-generated, cursor, feed-ctx, feedf, observer) = frxs-run-protocol-with-injector(session, max-generated, cursor, feed-ctx, feedf, observer, fcms-observe);
+    def frxs-run-with-observer(session, max-generated, observer) = frxs-run-protocol-with-observer(session, max-generated, frxc-fresh(), 0, frxs-recipe-feed, observer);
+    def frxs-run(session, max-generated) = frxs-run-with-observer(session, max-generated, frxs-observe-none);
+    0;
+}

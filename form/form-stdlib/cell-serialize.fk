@@ -1,266 +1,183 @@
-; cell-serialize.fk — the JSON dialect of the wire-serialization lane.
-;
-; North star: values + structural type (Blueprint) + content-addressed identity
-; round-trip through JSON, not just values. The mechanism is exactly axiom-3
-; ("a cell's identity is computed from its present composition; same
-; composition is the same cell") — nothing here manufactures or looks up an
-; identity; encoding faithfully carries the Blueprint NAME + children through
-; JSON text, and decoding calls the SAME (bp name) + intern_node the original
-; construction used. Same name, same children -> same NodeID, for free.
-;
-; This file is JSON's dialect codec ONLY — the registry (how a Blueprint name
-; is looked up / recovered, since `bp` is one-way) and the shared list helper
-; live in wire-registry.fk, preluded below, and are shared verbatim by every
-; other dialect (wire-corba-cdr.fk, and any further one) — including `WIRE-NULL`,
-; the universal null value (see wire-registry.fk's header for why that's
-; there rather than a trivial leaf: no native op ever produces a trivial
-; value with a "null" node_type). See wire-registry.fk's own header for why
-; a registry is necessary at all. What's dialect-specific here: leaves
-; (node_level = 1 -- trivial int/string/float) encode as their natural
-; JSON literal; `null` is its own case (see `cser-emit`/`cser-parse`);
-; composites (built via intern_node, at their category's level) encode as a JSON
-; object carrying the Blueprint name and children explicitly:
-; {"bp":"<name>","c":[...]}.
-;
-; The text layer here is self-contained, NOT built on form-stdlib/json.fk,
-; despite the obvious overlap (JSON text in, JSON text out): this file's
-; registry encoding ({"bp":...,"c":[...]}) is its own narrow format, not
-; general JSON document processing, and owning its minimal reader/writer
-; keeps it provable in isolation rather than inheriting a 500-line
-; dependency.
-;
-; A methodology note earned the hard way while building this, worth keeping:
-; an early debugging pass here chased what looked like a severe recursive-
-; evaluator corruption bug for a long time. It wasn't one — two mundane
-; mistakes in throwaway probe scripts (uninterned list literals; a dropped
-; core.fk prelude) explained everything that early pass found. BUT a second
-; pass, done properly (defn-wrapped, correctly preluded, run directly
-; against this file's own band test rather than a re-derivation), found
-; this file's original `cser-emit-node` / `cser-emit-children` /
-; `cser-emit-node`-again recursion WAS genuinely broken — the
-; originally-claimed "verdict 63, eq(original, reconstructed) true" was
-; wrong when it was written and shipped in this file's earlier receipt.
-; The diagnosis at the time — "mutual recursion between two top-level
-; `defn`s never resolves on fkwu", confirmed then by an is-even/
-; is-odd repro — was later found to be an artifact of a STALE local
-; ./fkwu binary predating the current runtime source; a fresh build
-; resolves forward and mutual references fine (receipts/2026-07-01-stale-
-; binary-root-cause.md). The mode-keyed single-function shape below is
-; KEPT — it runs correctly on both binary generations and every other
-; wire dialect follows it as the lane's uniform convention — but it is a
-; convention now, not a requirement.
-;
-; preludes: form-stdlib/core.fk form-stdlib/wire-registry.fk
-
-(do
-    ; --- string escaping (JSON mandates escaping '"' and '\\'; control
-    ; chars get the standard short forms or \u00XX) ----------------------
-    (defn cser-hex-digit (n) (if (lt n 10) (byte_to_str (add 48 n)) (byte_to_str (add 87 n))))
-    (defn cser-u00 (cp) (str_concat "\\u00" (str_concat (cser-hex-digit (div cp 16)) (cser-hex-digit (mod cp 16)))))
-    (defn cser-escape-char (cp)
-        (if (eq cp 34) "\\\""
-        (if (eq cp 92) "\\\\"
-        (if (eq cp 8)  "\\b"
-        (if (eq cp 9)  "\\t"
-        (if (eq cp 10) "\\n"
-        (if (eq cp 12) "\\f"
-        (if (eq cp 13) "\\r"
-        (if (lt cp 32) (cser-u00 cp)
-            (byte_to_str cp))))))))))
-    (defn cser-escape-loop (s i acc)
-        (if (ge i (str_len s)) acc
-            (cser-escape-loop s (add i 1) (str_concat acc (cser-escape-char (str_byte_at s i))))))
-    (defn cser-escape (s) (cser-escape-loop s 0 ""))
-
-    ; --- string unescaping (mirrors json.fk's pure codepoint helpers —
-    ; those are NOT part of json.fk's broken mutual-recursion parser/
-    ; emitter, they're plain non-cyclic functions, safe to reuse directly).
-    ; Full \uXXXX support including surrogate pairs, not just the \u00XX
-    ; control-char range `cser-escape` itself ever emits — a real external
-    ; JSON string this reader consumes can carry any \uXXXX escape. ------
-    (defn cser-hex-value-cp (cp)
-        (if (and (ge cp 48) (le cp 57)) (sub cp 48)
-        (if (and (ge cp 65) (le cp 70)) (add 10 (sub cp 65))
-        (if (and (ge cp 97) (le cp 102)) (add 10 (sub cp 97))
-            0))))
-    (defn cser-hex4 (s i)
-        (add (mul (cser-hex-value-cp (str_byte_at s i)) 4096)
-            (add (mul (cser-hex-value-cp (str_byte_at s (add i 1))) 256)
-                (add (mul (cser-hex-value-cp (str_byte_at s (add i 2))) 16)
-                    (cser-hex-value-cp (str_byte_at s (add i 3)))))))
-    (defn cser-high-surrogate? (cp) (and (ge cp 55296) (le cp 56319)))
-    (defn cser-low-surrogate? (cp) (and (ge cp 56320) (le cp 57343)))
-    (defn cser-surrogate-pair-cp (hi lo) (add 65536 (add (mul (sub hi 55296) 1024) (sub lo 56320))))
-    (defn cser-codepoint-to-utf8 (cp)
-        (if (lt cp 128) (byte_to_str cp)
-        (if (lt cp 2048)
-            (str_concat (byte_to_str (add 192 (div cp 64))) (byte_to_str (add 128 (mod cp 64))))
-        (if (lt cp 65536)
-            (str_concat (byte_to_str (add 224 (div cp 4096)))
-                (str_concat (byte_to_str (add 128 (mod (div cp 64) 64))) (byte_to_str (add 128 (mod cp 64)))))
-            (str_concat (byte_to_str (add 240 (div cp 262144)))
-                (str_concat (byte_to_str (add 128 (mod (div cp 4096) 64)))
-                    (str_concat (byte_to_str (add 128 (mod (div cp 64) 64))) (byte_to_str (add 128 (mod cp 64))))))))))
-    (defn cser-unescape-basic-cp (cp)
-        (if (eq cp 34) "\""
-        (if (eq cp 47) "/"
-        (if (eq cp 92) "\\"
-        (if (eq cp 98) (byte_to_str 8)
-        (if (eq cp 102) (byte_to_str 12)
-        (if (eq cp 110) (byte_to_str 10)
-        (if (eq cp 114) (byte_to_str 13)
-        (if (eq cp 116) (byte_to_str 9)
-            (byte_to_str cp))))))))))
-    (defn cser-unescape-loop (s i n acc)
-        (if (ge i n) acc
-            (if (eq (str_byte_at s i) 92)
-                (do
-                    (let esc-cp (str_byte_at s (add i 1)))
-                    (if (and (eq esc-cp 117) (le (add i 5) n))
-                        (do
-                            (let cp (cser-hex4 s (add i 2)))
-                            (if (and (cser-high-surrogate? cp)
-                                    (and (le (add i 11) n)
-                                        (and (eq (str_byte_at s (add i 6)) 92) (eq (str_byte_at s (add i 7)) 117))))
-                                (do
-                                    (let lo (cser-hex4 s (add i 8)))
-                                    (if (cser-low-surrogate? lo)
-                                        (cser-unescape-loop s (add i 12) n (str_concat acc (cser-codepoint-to-utf8 (cser-surrogate-pair-cp cp lo))))
-                                        (cser-unescape-loop s (add i 6) n (str_concat acc (cser-codepoint-to-utf8 cp)))))
-                                (cser-unescape-loop s (add i 6) n (str_concat acc (cser-codepoint-to-utf8 cp)))))
-                        (cser-unescape-loop s (add i 2) n (str_concat acc (cser-unescape-basic-cp esc-cp)))))
-                (cser-unescape-loop s (add i 1) n (str_concat acc (byte_to_str (str_byte_at s i)))))))
-    (defn cser-unescape (s) (cser-unescape-loop s 0 (str_len s) ""))
-
-    ; --- encode: cell node -> JSON text, directly (no intermediate tree) ---
-    (defn cser-emit-str (s) (str_concat "\"" (str_concat s "\"")))
-
-    (defn cser-emit-leaf (node)
-        (do
-            (let ty (node_type node))
-            (if (eq ty 1) (int_to_str (node_value node))
-            (if (eq ty 2) (cser-emit-str (cser-escape (node_value node)))
-            ; ty 3 = trivial bool -> JSON true/false. node_value returns the
-            ; boolean, so a bool round-trips through this dialect rather than
-            ; falling through to "null".
-            (if (eq ty 3) (if (node_value node) "true" "false")
-            (if (eq ty 7) (float_to_str (node_value node))
-                "null"))))))   ; an unrecognized leaf type: null rather than a silently wrong guess
-
-    ; mode 0: x is a single cell node. mode 1: x is a list of sibling nodes
-    ; (a "," -joined run) still needing emission — the only two states the
-    ; old cser-emit-node/cser-emit-children pair ever needed, now one
-    ; self-recursive function instead of two mutually-recursive ones.
-    (defn cser-emit (mode x registry)
-        (if (eq mode 0)
-            (if (wr-null? x) "null"
-            (if (eq (node_level x) 1)
-                (cser-emit-leaf x)
-                (str_concat "{\"bp\":"
-                    (str_concat (cser-emit-str (head (wr-find-name (node_category x) registry)))
-                        (str_concat ",\"c\":["
-                            (str_concat (cser-emit 1 (node_children x) registry) "]}"))))))
-            (if (eq (len x) 0) ""
-                (if (eq (len (tail x)) 0)
-                    (cser-emit 0 (head x) registry)
-                    (str_concat (cser-emit 0 (head x) registry)
-                        (str_concat "," (cser-emit 1 (tail x) registry)))))))
-
-    (defn cser-emit-node (node registry) (cser-emit 0 node registry))
-
-    (defn cell-to-json (node registry) (cser-emit-node node registry))
-
-    ; --- decode: JSON text -> the original cell node, identity intact ---
-    ; A narrow, self-contained reader for exactly what cser-emit-node writes
-    ; (int/string/float/null leaves; nested {"bp":"...","c":[...]} objects) —
-    ; not a general JSON parser. String escaping (quotes, backslashes,
-    ; control chars, \uXXXX including surrogate pairs) IS handled — see
-    ; cser-escape/cser-unescape above.
-
-    (defn cser-ws? (c) (or (eq c 32) (or (eq c 10) (eq c 9))))
-    (defn cser-skip-ws (s i)
-        (if (ge i (str_len s)) i
-            (if (cser-ws? (str_byte_at s i)) (cser-skip-ws s (add i 1)) i)))
-
-    (defn cser-digit? (c) (and (ge c 48) (le c 57)))
-    (defn cser-numchar? (c) (or (cser-digit? c) (or (eq c 45) (eq c 46))))
-    (defn cser-scan-num-end (s i)
-        (if (ge i (str_len s)) i
-            (if (cser-numchar? (str_byte_at s i)) (cser-scan-num-end s (add i 1)) i)))
-    (defn cser-has-dot? (s i end)
-        (if (ge i end) false
-            (if (eq (str_byte_at s i) 46) true (cser-has-dot? s (add i 1) end))))
-
-    (defn cser-scan-str-end (s i)
-        (if (eq (str_byte_at s i) 34) i
-            (if (eq (str_byte_at s i) 92) (cser-scan-str-end s (add i 2)) (cser-scan-str-end s (add i 1)))))
-
-    ; parse-node / parse-array-elements return (list value next-index) — a
-    ; plain 2-element list, not json.fk's pair shape (this file no longer
-    ; depends on json.fk at all).
-    (defn cser-pv (p) (head p))
-    (defn cser-pi (p) (head (tail p)))
-
-    ; A single self-recursive function over three modes, not three
-    ; mutually-recursive `defn`s — same reason and same fix shape as
-    ; `cser-emit` above. mode 0: parse one value at position i. mode 1:
-    ; parse the first array element (or close on an empty array). mode 2:
-    ; parse the next array element given `acc` collected so far (or close).
-    ; Every recursive call site below is `(cser-parse ...)` — this function
-    ; calling itself — never a call out to a sibling `defn`, which is the
-    ; part `fkwu` actually supports.
-    (defn cser-parse (mode s i registry acc)
-        (if (eq mode 0)
-            (do
-                (let i2 (cser-skip-ws s i))
-                (let c (str_byte_at s i2))
-                (if (eq c 123)   ; '{' -- the only object shape this reader knows: {"bp":"...","c":[...]}
-                    (do
-                        (let after-brace (add i2 1))
-                        (let after-bpkey (add after-brace 6))    ; skip `"bp":"`
-                        (let name-end (cser-scan-str-end s after-bpkey))
-                        (let name (substring s after-bpkey name-end))
-                        (let after-name (add name-end 1))         ; skip closing quote of name
-                        (let after-comma (add after-name 1))      ; skip ','
-                        (let after-ckey (add after-comma 5))      ; skip `"c":[`
-                        (let kids (cser-parse 1 s after-ckey registry (empty)))
-                        (let after-close (add (cser-pi kids) 1))  ; skip the object's own closing '}'
-                        (list (intern_node (head (wr-find-bp name registry)) (cser-pv kids)) after-close))
-                (if (eq c 34)   ; '"' -- a plain string leaf
-                    (do
-                        (let str-end (cser-scan-str-end s (add i2 1)))
-                        (list (intern_trivial_string (cser-unescape (substring s (add i2 1) str-end))) (add str-end 1)))
-                (if (eq c 110)  ; 'n' -- null
-                    (list (wr-make-null) (add i2 4))   ; a real, distinct value (wire-registry.fk's WIRE-NULL), not int 0 — see its header for why
-                (if (eq c 116)  ; 't' -- true
-                    (list (intern_trivial_bool true) (add i2 4))
-                (if (eq c 102)  ; 'f' -- false
-                    (list (intern_trivial_bool false) (add i2 5))
-                (do   ; a number: int or float, decided by the presence of '.'
-                    (let num-end (cser-scan-num-end s i2))
-                    (let text (substring s i2 num-end))
-                    (if (cser-has-dot? s i2 num-end)
-                        (list (intern_trivial_float text) num-end)
-                        (list (intern_trivial_int (str_to_int text)) num-end)))))))))
-        (if (eq mode 1)
-            (do
-                (let i2 (cser-skip-ws s i))
-                (if (eq (str_byte_at s i2) 93)   ; ']'
-                    (list (empty) (add i2 1))
-                    (do
-                        (let first (cser-parse 0 s i2 registry (empty)))
-                        (cser-parse 2 s (cser-pi first) registry (list (cser-pv first))))))
-            ; mode 2
-            (do
-                (let i2 (cser-skip-ws s i))
-                (if (eq (str_byte_at s i2) 93)   ; ']'
-                    (list (wr-reverse acc) (add i2 1))
-                    (do
-                        (let i3 (add i2 1))   ; skip ','
-                        (let nxt (cser-parse 0 s (cser-skip-ws s i3) registry (empty)))
-                        (cser-parse 2 s (cser-pi nxt) registry (cons (cser-pv nxt) acc))))))))
-
-    (defn cser-parse-node (s i registry) (cser-parse 0 s i registry (empty)))
-
-    (defn json-to-cell (text registry) (cser-pv (cser-parse-node text 0 registry)))
-)
+// cell-serialize.fk — the JSON dialect of the wire-serialization lane.
+//
+// North star: values + structural type (Blueprint) + content-addressed identity
+// round-trip through JSON, not just values. The mechanism is exactly axiom-3
+// ("a cell's identity is computed from its present composition; same
+// composition is the same cell") — nothing here manufactures or looks up an
+// identity; encoding faithfully carries the Blueprint NAME + children through
+// JSON text, and decoding calls the SAME (bp name) + intern_node the original
+// construction used. Same name, same children -> same NodeID, for free.
+//
+// This file is JSON's dialect codec ONLY — the registry (how a Blueprint name
+// is looked up / recovered, since `bp` is one-way) and the shared list helper
+// live in wire-registry.fk, preluded below, and are shared verbatim by every
+// other dialect (wire-corba-cdr.fk, and any further one) — including `WIRE-NULL`,
+// the universal null value (see wire-registry.fk's header for why that's
+// there rather than a trivial leaf: no native op ever produces a trivial
+// value with a "null" node_type). See wire-registry.fk's own header for why
+// a registry is necessary at all. What's dialect-specific here: leaves
+// (node_level = 1 -- trivial int/string/float) encode as their natural
+// JSON literal; `null` is its own case (see `cser-emit`/`cser-parse`);
+// composites (built via intern_node, at their category's level) encode as a JSON
+// object carrying the Blueprint name and children explicitly:
+// {"bp":"<name>","c":[...]}.
+//
+// The text layer here is self-contained, NOT built on form-stdlib/json.fk,
+// despite the obvious overlap (JSON text in, JSON text out): this file's
+// registry encoding ({"bp":...,"c":[...]}) is its own narrow format, not
+// general JSON document processing, and owning its minimal reader/writer
+// keeps it provable in isolation rather than inheriting a 500-line
+// dependency.
+//
+// A methodology note earned the hard way while building this, worth keeping:
+// an early debugging pass here chased what looked like a severe recursive-
+// evaluator corruption bug for a long time. It wasn't one — two mundane
+// mistakes in throwaway probe scripts (uninterned list literals; a dropped
+// core.fk prelude) explained everything that early pass found. BUT a second
+// pass, done properly (defn-wrapped, correctly preluded, run directly
+// against this file's own band test rather than a re-derivation), found
+// this file's original `cser-emit-node` / `cser-emit-children` /
+// `cser-emit-node`-again recursion WAS genuinely broken — the
+// originally-claimed "verdict 63, eq(original, reconstructed) true" was
+// wrong when it was written and shipped in this file's earlier receipt.
+// The diagnosis at the time — "mutual recursion between two top-level
+// `defn`s never resolves on fkwu", confirmed then by an is-even/
+// is-odd repro — was later found to be an artifact of a STALE local
+// ./fkwu binary predating the current runtime source; a fresh build
+// resolves forward and mutual references fine (receipts/2026-07-01-stale-
+// binary-root-cause.md). The mode-keyed single-function shape below is
+// KEPT — it runs correctly on both binary generations and every other
+// wire dialect follows it as the lane's uniform convention — but it is a
+// convention now, not a requirement.
+//
+// preludes: form-stdlib/core.fk form-stdlib/wire-registry.fk
+section [form.bml] {
+    // --- string escaping (JSON mandates escaping '"' and '\\'; control
+    // chars get the standard short forms or \u00XX) ----------------------
+    def cser-hex-digit(n) = n < 10 ? byte_to_str(48 + n) : byte_to_str(87 + n);
+    def cser-u00(cp) = str_concat("\\u00", str_concat(cser-hex-digit(cp / 16), cser-hex-digit(cp % 16)));
+    def cser-escape-char(cp) = (Comparable) cp == 34 ? "\\\"" : (Comparable) cp == 92 ? "\\\\" : (Comparable) cp == 8 ? "\\b" : (Comparable) cp == 9 ? "\\t" : (Comparable) cp == 10 ? "\\n" : (Comparable) cp == 12 ? "\\f" : (Comparable) cp == 13 ? "\\r" : cp < 32 ? cser-u00(cp) : byte_to_str(cp);
+    def cser-escape-loop(s, i, acc) = i >= str_len(s) ? acc : cser-escape-loop(s, i + 1, str_concat(acc, cser-escape-char(str_byte_at(s, i))));
+    def cser-escape(s) = cser-escape-loop(s, 0, "");
+    // --- string unescaping (mirrors json.fk's pure codepoint helpers —
+    // those are NOT part of json.fk's broken mutual-recursion parser/
+    // emitter, they're plain non-cyclic functions, safe to reuse directly).
+    // Full \uXXXX support including surrogate pairs, not just the \u00XX
+    // control-char range `cser-escape` itself ever emits — a real external
+    // JSON string this reader consumes can carry any \uXXXX escape. ------
+    def cser-hex-value-cp(cp) = cp >= 48 && cp <= 57 ? cp - 48 : cp >= 65 && cp <= 70 ? 10 + (cp - 65) : cp >= 97 && cp <= 102 ? 10 + (cp - 97) : 0;
+    def cser-hex4(s, i) = cser-hex-value-cp(str_byte_at(s, i)) * 4096 + (cser-hex-value-cp(str_byte_at(s, i + 1)) * 256 + (cser-hex-value-cp(str_byte_at(s, i + 2)) * 16 + cser-hex-value-cp(str_byte_at(s, i + 3))));
+    def cser-high-surrogate?(cp) = cp >= 55296 && cp <= 56319;
+    def cser-low-surrogate?(cp) = cp >= 56320 && cp <= 57343;
+    def cser-surrogate-pair-cp(hi, lo) = 65536 + ((hi - 55296) * 1024 + (lo - 56320));
+    def cser-codepoint-to-utf8(cp) = cp < 128 ? byte_to_str(cp) : cp < 2048 ? str_concat(byte_to_str(192 + cp / 64), byte_to_str(128 + cp % 64)) : cp < 65536 ? str_concat(byte_to_str(224 + cp / 4096), str_concat(byte_to_str(128 + cp / 64 % 64), byte_to_str(128 + cp % 64))) : str_concat(byte_to_str(240 + cp / 262144), str_concat(byte_to_str(128 + cp / 4096 % 64), str_concat(byte_to_str(128 + cp / 64 % 64), byte_to_str(128 + cp % 64))));
+    def cser-unescape-basic-cp(cp) = (Comparable) cp == 34 ? "\"" : (Comparable) cp == 47 ? "/" : (Comparable) cp == 92 ? "\\" : (Comparable) cp == 98 ? byte_to_str(8) : (Comparable) cp == 102 ? byte_to_str(12) : (Comparable) cp == 110 ? byte_to_str(10) : (Comparable) cp == 114 ? byte_to_str(13) : (Comparable) cp == 116 ? byte_to_str(9) : byte_to_str(cp);
+    def cser-unescape-loop(s, i, n, acc) = i >= n ? acc : (Comparable) str_byte_at(s, i) == 92 ? {
+        let esc-cp = str_byte_at(s, i + 1);
+        (Comparable) esc-cp == 117 && i + 5 <= n ? {
+            let cp = cser-hex4(s, i + 2);
+            cser-high-surrogate?(cp) && (i + 11 <= n && ((Comparable) str_byte_at(s, i + 6) == 92 && (Comparable) str_byte_at(s, i + 7) == 117)) ? {
+                let lo = cser-hex4(s, i + 8);
+                cser-low-surrogate?(lo) ? cser-unescape-loop(s, i + 12, n, str_concat(acc, cser-codepoint-to-utf8(cser-surrogate-pair-cp(cp, lo)))) : cser-unescape-loop(s, i + 6, n, str_concat(acc, cser-codepoint-to-utf8(cp)));
+            } : cser-unescape-loop(s, i + 6, n, str_concat(acc, cser-codepoint-to-utf8(cp)));
+        } : cser-unescape-loop(s, i + 2, n, str_concat(acc, cser-unescape-basic-cp(esc-cp)));
+    } : cser-unescape-loop(s, i + 1, n, str_concat(acc, byte_to_str(str_byte_at(s, i))));
+    def cser-unescape(s) = cser-unescape-loop(s, 0, str_len(s), "");
+    // --- encode: cell node -> JSON text, directly (no intermediate tree) ---
+    def cser-emit-str(s) = str_concat("\"", str_concat(s, "\""));
+    def cser-emit-leaf(node) = {
+        let ty = node_type(node);
+        (Comparable) ty == 1 ? int_to_str(node_value(node)) : (Comparable) ty == 2 ? cser-emit-str(cser-escape(node_value(node))) :         // ty 3 = trivial bool -> JSON true/false. node_value returns the
+        // boolean, so a bool round-trips through this dialect rather than
+        // falling through to "null".
+(Comparable) ty == 3 ? node_value(node) ? "true" : "false" : (Comparable) ty == 7 ? float_to_str(node_value(node)) : "null";
+    };
+    // an unrecognized leaf type: null rather than a silently wrong guess
+    // mode 0: x is a single cell node. mode 1: x is a list of sibling nodes
+    // (a "," -joined run) still needing emission — the only two states the
+    // old cser-emit-node/cser-emit-children pair ever needed, now one
+    // self-recursive function instead of two mutually-recursive ones.
+    def cser-emit(mode, x, registry) = (Comparable) mode == 0 ? wr-null?(x) ? "null" : (Comparable) node_level(x) == 1 ? cser-emit-leaf(x) : str_concat("{\"bp\":", str_concat(cser-emit-str(head(wr-find-name(node_category(x), registry))), str_concat(",\"c\":[", str_concat(cser-emit(1, node_children(x), registry), "]}")))) : (Comparable) len(x) == 0 ? "" : (Comparable) len(tail(x)) == 0 ? cser-emit(0, head(x), registry) : str_concat(cser-emit(0, head(x), registry), str_concat(",", cser-emit(1, tail(x), registry)));
+    def cser-emit-node(node, registry) = cser-emit(0, node, registry);
+    def cell-to-json(node, registry) = cser-emit-node(node, registry);
+    // --- decode: JSON text -> the original cell node, identity intact ---
+    // A narrow, self-contained reader for exactly what cser-emit-node writes
+    // (int/string/float/null leaves; nested {"bp":"...","c":[...]} objects) —
+    // not a general JSON parser. String escaping (quotes, backslashes,
+    // control chars, \uXXXX including surrogate pairs) IS handled — see
+    // cser-escape/cser-unescape above.
+    def cser-ws?(c) = (Comparable) c == 32 || ((Comparable) c == 10 || (Comparable) c == 9);
+    def cser-skip-ws(s, i) = i >= str_len(s) ? i : cser-ws?(str_byte_at(s, i)) ? cser-skip-ws(s, i + 1) : i;
+    def cser-digit?(c) = c >= 48 && c <= 57;
+    def cser-numchar?(c) = cser-digit?(c) || ((Comparable) c == 45 || (Comparable) c == 46);
+    def cser-scan-num-end(s, i) = i >= str_len(s) ? i : cser-numchar?(str_byte_at(s, i)) ? cser-scan-num-end(s, i + 1) : i;
+    def cser-has-dot?(s, i, end) = i >= end ? false : (Comparable) str_byte_at(s, i) == 46 ? true : cser-has-dot?(s, i + 1, end);
+    def cser-scan-str-end(s, i) = (Comparable) str_byte_at(s, i) == 34 ? i : (Comparable) str_byte_at(s, i) == 92 ? cser-scan-str-end(s, i + 2) : cser-scan-str-end(s, i + 1);
+    // parse-node / parse-array-elements return (list value next-index) — a
+    // plain 2-element list, not json.fk's pair shape (this file no longer
+    // depends on json.fk at all).
+    def cser-pv(p) = head(p);
+    def cser-pi(p) = head(tail(p));
+    // A single self-recursive function over three modes, not three
+    // mutually-recursive `defn`s — same reason and same fix shape as
+    // `cser-emit` above. mode 0: parse one value at position i. mode 1:
+    // parse the first array element (or close on an empty array). mode 2:
+    // parse the next array element given `acc` collected so far (or close).
+    // Every recursive call site below is `(cser-parse ...)` — this function
+    // calling itself — never a call out to a sibling `defn`, which is the
+    // part `fkwu` actually supports.
+    def cser-parse(mode, s, i, registry, acc) = (Comparable) mode == 0 ? {
+        let i2 = cser-skip-ws(s, i);
+        let c = str_byte_at(s, i2);
+        (Comparable) c == 123 ?         // '{' -- the only object shape this reader knows: {"bp":"...","c":[...]}
+{
+            let after-brace = i2 + 1;
+            let after-bpkey = after-brace + 6;
+            // skip `"bp":"`
+            let name-end = cser-scan-str-end(s, after-bpkey);
+            let name = substring(s, after-bpkey, name-end);
+            let after-name = name-end + 1;
+            // skip closing quote of name
+            let after-comma = after-name + 1;
+            // skip ','
+            let after-ckey = after-comma + 5;
+            // skip `"c":[`
+            let kids = cser-parse(1, s, after-ckey, registry, empty());
+            let after-close = cser-pi(kids) + 1;
+            // skip the object's own closing '}'
+            list(intern_node(head(wr-find-bp(name, registry)), cser-pv(kids)), after-close);
+        } : (Comparable) c == 34 ?         // '"' -- a plain string leaf
+{
+            let str-end = cser-scan-str-end(s, i2 + 1);
+            list(intern_trivial_string(cser-unescape(substring(s, i2 + 1, str-end))), str-end + 1);
+        } : (Comparable) c == 110 ?         // 'n' -- null
+list(wr-make-null(), i2 + 4) :         // a real, distinct value (wire-registry.fk's WIRE-NULL), not int 0 — see its header for why
+(Comparable) c == 116 ?         // 't' -- true
+list(intern_trivial_bool(true), i2 + 4) : (Comparable) c == 102 ?         // 'f' -- false
+list(intern_trivial_bool(false), i2 + 5) : {
+            // a number: int or float, decided by the presence of '.'
+            let num-end = cser-scan-num-end(s, i2);
+            let text = substring(s, i2, num-end);
+            cser-has-dot?(s, i2, num-end) ? list(intern_trivial_float(text), num-end) : list(intern_trivial_int(str_to_int(text)), num-end);
+        };
+    } : (Comparable) mode == 1 ? {
+        let i2 = cser-skip-ws(s, i);
+        (Comparable) str_byte_at(s, i2) == 93 ?         // ']'
+list(empty(), i2 + 1) : {
+            let first = cser-parse(0, s, i2, registry, empty());
+            cser-parse(2, s, cser-pi(first), registry, list(cser-pv(first)));
+        };
+    } :     // mode 2
+{
+        let i2 = cser-skip-ws(s, i);
+        (Comparable) str_byte_at(s, i2) == 93 ?         // ']'
+list(wr-reverse(acc), i2 + 1) : {
+            let i3 = i2 + 1;
+            // skip ','
+            let nxt = cser-parse(0, s, cser-skip-ws(s, i3), registry, empty());
+            cser-parse(2, s, cser-pi(nxt), registry, cons(cser-pv(nxt), acc));
+        };
+    };
+    def cser-parse-node(s, i, registry) = cser-parse(0, s, i, registry, empty());
+    def json-to-cell(text, registry) = cser-pv(cser-parse-node(text, 0, registry));
+}

@@ -1,85 +1,70 @@
-; wire-registry.fk — the dialect-agnostic core of the wire-serialization lane.
-;
-; A cell's identity is content-addressed (axiom-3): same Blueprint + same
-; children -> same NodeID, always, for free. Every wire dialect (JSON, XML,
-; CORBA CDR, whatever comes next) rides on exactly that fact and needs
-; nothing dialect-specific to do it. What every dialect *does* need, and
-; what lives here so it's written once:
-;
-; - A REGISTRY. `bp` is one-way — `(bp "FOO")` is deterministic (same name
-;   always yields the same value) but no native op recovers the string
-;   "FOO" back from that value. So no dialect can discover a cell's
-;   Blueprint name by introspecting an arbitrary node; the caller supplies
-;   a registry — the list of (name, blueprint) pairs it built the structure
-;   from — and encoding does a linear `node_eq` scan to find which
-;   registered name matches a node's `node_category`. Decoding reverses the
-;   lookup by name to get back the same blueprint, then calls the same
-;   `intern_node` the original construction used — same name, same
-;   children, same NodeID, by axiom-3, not by anything a dialect does
-;   specially.
-; - List-accumulation helpers (`wr-reverse`) that every dialect's
-;   self-recursive "collect the children into a list" step needs.
-; - A universal NULL representation (`WIRE-NULL`/`wr-null?`/`wr-make-null`).
-;   No native op in this kernel ever produces a trivial (node_level 1)
-;   value with a "null" node_type — confirmed directly:
-;   `(node_type (intern_trivial_int 1))` -> 1, `..._string` -> 2,
-;   `..._bool` -> 3, `..._float` -> 7; nothing produces 4 or 6. Every
-;   dialect's leaf-emit code used to carry a dead `(if (eq ty 4) "null" ...)`
-;   branch inherited from json.fk's design that NOTHING could ever reach.
-;   The honest fix isn't a fake trivial value — it's a real, distinct,
-;   content-addressed composite: `(intern_node (WIRE-NULL) (empty))`. Same
-;   mechanism as every other Blueprint (axiom-3: same name, no children ->
-;   same NodeID, always), just a well-known one every dialect recognizes
-;   directly rather than requiring the caller to register it — null isn't
-;   a document-specific Blueprint the way "OUTER"/"INNER" are, it's part of
-;   the wire model itself, the same way JSON's `null` keyword or XML's
-;   empty-element convention are baked into their grammars, not schema.
-;
-; What's deliberately NOT here: any notion of "how does a leaf/composite
-; look as text or bytes" — that's 100% dialect-specific and lives in each
-; dialect's own file (cell-serialize.fk for JSON, wire-corba-cdr.fk for
-; CORBA CDR, and one file per further dialect).
-;
-; Every recursive function in every dialect built on this file is a SINGLE
-; self-recursive function keyed on a `mode` argument, rather than two
-; `defn`s calling each other. fkwu's two-pass defn prescan handles forward
-; and mutual references fine, so the shape is a working, uniform convention
-; across the wire lane, not a requirement.
-;
-; preludes: form-stdlib/core.fk
-
-(do
-    ; --- the registry: a list of (name-string blueprint) pairs ---
-    (defn wr-entry (name blueprint) (list name blueprint))
-    (defn wr-entry-name (e) (head e))
-    (defn wr-entry-bp   (e) (head (tail e)))
-
-    (defn wr-find-name (cat registry)
-        (if (eq (len registry) 0) (empty)
-            (if (node_eq cat (wr-entry-bp (head registry)))
-                (list (wr-entry-name (head registry)))
-                (wr-find-name cat (tail registry)))))
-
-    (defn wr-find-bp (name registry)
-        (if (eq (len registry) 0) (empty)
-            (if (str_eq name (wr-entry-name (head registry)))
-                (list (wr-entry-bp (head registry)))
-                (wr-find-bp name (tail registry)))))
-
-    ; `head` directly on the lookup result (no `if`/`len` gate first): still
-    ; fails loudly on an unregistered Blueprint, via this codebase's own
-    ; established crash convention (core.fk's `assert`, `(head (empty))`) —
-    ; a `len`-check-then-`head` would say the same thing in more code.
-
-    ; --- shared list-accumulation helper --------------------------------
-    (defn wr-reverse-onto (xs acc) (if (eq (len xs) 0) acc (wr-reverse-onto (tail xs) (cons (head xs) acc))))
-    (defn wr-reverse (xs) (wr-reverse-onto xs (empty)))
-
-    ; --- the universal null value ----------------------------------------
-    ; minted where the registry places it: 1/2/99/1776
-    (defn WIRE-NULL () (make_nodeid 1 2 99 1776))
-    (defn wr-make-null () (intern_node (WIRE-NULL) (empty)))
-    ; a composite's node_level is its category's level, so null is asked as "not a trivial"
-    (defn wr-null? (node)
-        (if (eq (node_level node) 1) false (node_eq (node_category node) (WIRE-NULL))))
-)
+// wire-registry.fk — the dialect-agnostic core of the wire-serialization lane.
+//
+// A cell's identity is content-addressed (axiom-3): same Blueprint + same
+// children -> same NodeID, always, for free. Every wire dialect (JSON, XML,
+// CORBA CDR, whatever comes next) rides on exactly that fact and needs
+// nothing dialect-specific to do it. What every dialect *does* need, and
+// what lives here so it's written once:
+//
+// - A REGISTRY. `bp` is one-way — `(bp "FOO")` is deterministic (same name
+//   always yields the same value) but no native op recovers the string
+//   "FOO" back from that value. So no dialect can discover a cell's
+//   Blueprint name by introspecting an arbitrary node; the caller supplies
+//   a registry — the list of (name, blueprint) pairs it built the structure
+//   from — and encoding does a linear `node_eq` scan to find which
+//   registered name matches a node's `node_category`. Decoding reverses the
+//   lookup by name to get back the same blueprint, then calls the same
+//   `intern_node` the original construction used — same name, same
+//   children, same NodeID, by axiom-3, not by anything a dialect does
+//   specially.
+// - List-accumulation helpers (`wr-reverse`) that every dialect's
+//   self-recursive "collect the children into a list" step needs.
+// - A universal NULL representation (`WIRE-NULL`/`wr-null?`/`wr-make-null`).
+//   No native op in this kernel ever produces a trivial (node_level 1)
+//   value with a "null" node_type — confirmed directly:
+//   `(node_type (intern_trivial_int 1))` -> 1, `..._string` -> 2,
+//   `..._bool` -> 3, `..._float` -> 7; nothing produces 4 or 6. Every
+//   dialect's leaf-emit code used to carry a dead `(if (eq ty 4) "null" ...)`
+//   branch inherited from json.fk's design that NOTHING could ever reach.
+//   The honest fix isn't a fake trivial value — it's a real, distinct,
+//   content-addressed composite: `(intern_node (WIRE-NULL) (empty))`. Same
+//   mechanism as every other Blueprint (axiom-3: same name, no children ->
+//   same NodeID, always), just a well-known one every dialect recognizes
+//   directly rather than requiring the caller to register it — null isn't
+//   a document-specific Blueprint the way "OUTER"/"INNER" are, it's part of
+//   the wire model itself, the same way JSON's `null` keyword or XML's
+//   empty-element convention are baked into their grammars, not schema.
+//
+// What's deliberately NOT here: any notion of "how does a leaf/composite
+// look as text or bytes" — that's 100% dialect-specific and lives in each
+// dialect's own file (cell-serialize.fk for JSON, wire-corba-cdr.fk for
+// CORBA CDR, and one file per further dialect).
+//
+// Every recursive function in every dialect built on this file is a SINGLE
+// self-recursive function keyed on a `mode` argument, rather than two
+// `defn`s calling each other. fkwu's two-pass defn prescan handles forward
+// and mutual references fine, so the shape is a working, uniform convention
+// across the wire lane, not a requirement.
+//
+// preludes: form-stdlib/core.fk
+section [form.bml] {
+    // --- the registry: a list of (name-string blueprint) pairs ---
+    def wr-entry(name, blueprint) = list(name, blueprint);
+    def wr-entry-name(e) = head(e);
+    def wr-entry-bp(e) = head(tail(e));
+    def wr-find-name(cat, registry) = (Comparable) len(registry) == 0 ? empty() : node_eq(cat, wr-entry-bp(head(registry))) ? list(wr-entry-name(head(registry))) : wr-find-name(cat, tail(registry));
+    def wr-find-bp(name, registry) = (Comparable) len(registry) == 0 ? empty() : (String) name == wr-entry-name(head(registry)) ? list(wr-entry-bp(head(registry))) : wr-find-bp(name, tail(registry));
+    // `head` directly on the lookup result (no `if`/`len` gate first): still
+    // fails loudly on an unregistered Blueprint, via this codebase's own
+    // established crash convention (core.fk's `assert`, `(head (empty))`) —
+    // a `len`-check-then-`head` would say the same thing in more code.
+    // --- shared list-accumulation helper --------------------------------
+    def wr-reverse-onto(xs, acc) = (Comparable) len(xs) == 0 ? acc : wr-reverse-onto(tail(xs), cons(head(xs), acc));
+    def wr-reverse(xs) = wr-reverse-onto(xs, empty());
+    // --- the universal null value ----------------------------------------
+    // minted where the registry places it: 1/2/99/1776
+    def WIRE-NULL() = make_nodeid(1, 2, 99, 1776);
+    def wr-make-null() = intern_node(WIRE-NULL(), empty());
+    // a composite's node_level is its category's level, so null is asked as "not a trivial"
+    def wr-null?(node) = (Comparable) node_level(node) == 1 ? false : node_eq(node_category(node), WIRE-NULL());
+}

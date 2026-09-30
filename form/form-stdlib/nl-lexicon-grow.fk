@@ -1,114 +1,81 @@
-; nl-lexicon-grow.fk — the Form-native PROJECTOR: grow the translation pivot's
-; lexicon from the parallel locale corpus, ALL in Form (no bash, no python).
-;
-;   read_file(en.json) + read_file(id.json)      ; host carrier (a Form builtin)
-;     -> parse-json                              ; json.fk, Form
-;     -> jlg-walk (parallel object walk)         ; this cell, Form
-;     -> jlg-keep? (single-word, all-letters)    ; string-case.fk, Form
-;     -> jlg-rows (neutral symbol c<i> + phase)  ; this cell, Form
-;   read_file(nl-lexicon-data.fk), or nothing the first time ; host carrier
-;     -> jlg-carry-m-rows (every m<mid> row, byte-for-byte)  ; this cell, Form
-;   jlg-emit-cell (fresh c<i> rows + carried m<mid> rows)    ; this cell, Form
-;     -> write_file_text(nl-lexicon-data.fk)     ; host carrier (a Form builtin)
-;
-; read_file / write_file_text are host builtins reached from Form — carrier-not-debt
-; (host-kernel.form: using the host carrier IS having the resource), never a shell
-; logic layer. The PURE projections (json text -> rows string; existing file text
-; -> carried m-rows; both -> the emitted cell) are proven four-way by
-; tests/nl-lexicon-grow-band.fk; the runner (scripts/grow_nl_lexicon.fk, still not
-; built) would wrap them in the three file builtins named above.
-;
-; jlg-emit-cell takes the CURRENT nl-lexicon-data.fk's text (or nothing, first
-; run) alongside the fresh c<i> rows, carries every m<mid> row forward
-; byte-for-byte via jlg-carry-m-rows, and only then emits the whole file — so a
-; regeneration never silently drops a hand-minted or pivot-minted pivot row. The
-; append half of pivot minting (mint the row, read this file, carry its m-rows,
-; write the row back) is safe to build on top of it — a separate, deliberate
-; next step, not built here.
-;
-; preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/string-case.fk
-
-(do
-    ;; --- parallel walk: en-obj + id-obj -> flat list of (en-str id-str) leaf pairs ---
-    ;; a string leaf has no children; an object's children are JSON-PAIR nodes.
-    (defn jlg-leaf? (v) (eq (len (node_children v)) 0))
-    ;; a JSON-PAIR has exactly 2 children and its first (the key) is a string leaf;
-    ;; an OBJECT is a non-leaf whose first child is a pair; an ARRAY (children are bare
-    ;; values, not pairs) and everything else are skipped — only object string-leaves grow.
-    (defn jlg-pair? (x) (and (eq (len (node_children x)) 2) (jlg-leaf? (head (node_children x)))))
-    (defn jlg-obj? (x) (if (jlg-leaf? x) false (jlg-pair? (head (node_children x)))))
-    (defn jlg-dispatch (env idv acc)
-        (if (and (jlg-leaf? env) (jlg-leaf? idv))
-            (cons (list (json-string-value env) (json-string-value idv)) acc)
-            (if (and (jlg-obj? env) (jlg-obj? idv))
-                (jlg-walk (json-object-pairs env) idv acc)
-                acc)))
-    (defn jlg-one (p id-obj acc)
-        (if (jlg-pair? p)
-            (jlg-dispatch (json-pair-value p) (json-object-get id-obj (json-pair-key p)) acc)
-            acc))
-    (defn jlg-walk (en-pairs id-obj acc)
-        (if (eq (len en-pairs) 0) acc
-            (jlg-walk (tail en-pairs) id-obj (jlg-one (head en-pairs) id-obj acc))))
-
-    ;; --- filter: single word, all letters, len >= 2 (string-case gives the letter test) ---
-    (defn jlg-letter? (ch) (or (ge (sc-idx (sc-upper) ch 0) 0) (ge (sc-idx (sc-lower) ch 0) 0)))
-    (defn jlg-allalpha (s i) (if (ge i (str_len s)) 1 (if (jlg-letter? (substring s i (add i 1))) (jlg-allalpha s (add i 1)) 0)))
-    (defn jlg-word? (s) (if (lt (str_len s) 2) 0 (jlg-allalpha s 0)))
-    (defn jlg-keep? (pr) (and (eq (jlg-word? (head pr)) 1) (eq (jlg-word? (head (tail pr))) 1)))
-
-    ;; --- emit a row: (list "c<i>" "water" "<en-lc>" "<id-lc>") source line ---
-    (defn jlg-q () "\"")
-    (defn jlg-qs (s) (str_concat (jlg-q) (str_concat s (jlg-q))))
-    (defn jlg-row (i en id)
-        (str_concat "            (list "
-            (str_concat (jlg-qs (str_concat "c" (int_to_str i)))
-            (str_concat " " (str_concat (jlg-qs "water")
-            (str_concat " " (str_concat (jlg-qs (str-lower en))
-            (str_concat " " (str_concat (jlg-qs (str-lower id)) ")\n")))))))))
-    ;; fold kept pairs into the rows source, assigning sequential symbols, capped
-    (defn jlg-rows (pairs i cap acc)
-        (if (eq (len pairs) 0) acc
-            (if (ge i cap) acc
-                (if (eq (jlg-keep? (head pairs)) 1)
-                    (jlg-rows (tail pairs) (add i 1) cap
-                        (str_concat acc (jlg-row i (head (head pairs)) (head (tail (head pairs))))))
-                    (jlg-rows (tail pairs) i cap acc)))))
-
-    ;; --- grow-rows: en/id json TEXT -> the corpus rows source string (PURE, four-way) ---
-    (defn grow-rows (en-text id-text cap)
-        (jlg-rows
-            (jlg-walk (json-object-pairs (parse-json "en" en-text)) (parse-json "id" id-text) (empty))
-            0 cap ""))
-
-    ;; --- carry forward every m<mid> row already living in an existing file's
-    ;; text, byte-for-byte, so a regeneration can never silently drop one.
-    ;; PURE: text in, text out — no disk touched here. read_file/write_file_text
-    ;; stay host-builtin calls made by whoever hands this function real bytes
-    ;; (the still-unbuilt runner, or a proof cell that read them itself).
-    (defn jlg-line-start (text i)
-        (if (le i 0) 0
-            (if (eq (str_byte_at text (sub i 1)) (str_byte_at "\n" 0)) i
-                (jlg-line-start text (sub i 1)))))
-    (defn jlg-line-end (text i tlen)
-        (do (let nlpos (str_find text "\n" i))
-            (if (lt nlpos 0) tlen (add nlpos 1))))
-    (defn jlg-carry-loop (text from tlen acc)
-        (do (let mpos (str_find text "(list \"m" from))
-            (if (lt mpos 0) acc
-                (do (let lstart (jlg-line-start text mpos))
-                    (let lend (jlg-line-end text mpos tlen))
-                    (jlg-carry-loop text lend tlen (str_concat acc (substring text lstart lend)))))))
-    ;; existing-text is read_file's answer for nl-lexicon-data.fk: `nothing` the
-    ;; first time the file doesn't yet exist, its live text every time after.
-    (defn jlg-carry-m-rows (existing-text)
-        (if (nothing? existing-text) ""
-            (jlg-carry-loop existing-text 0 (str_len existing-text) "")))
-
-    ;; --- wrap the rows as a loadable cell defining nlt-corpus-lexicon; carries
-    ;; every m<mid> row from `existing-text` forward alongside the fresh c<i>
-    ;; rows, so a regeneration never drops a hand- or pivot-mint-minted row.
-    (defn jlg-emit-cell (rows existing-text)
-        (str_concat "; nl-lexicon-data.fk — GENERATED by the Form projector nl-lexicon-grow.fk\n; (run via scripts/grow_nl_lexicon.fk). The pivot's corpus lexicon, projected from\n; web/messages/* in Form: rows of (symbol phase en id), neutral symbol, phase water.\n;\n; preludes: form-stdlib/core.fk\n\n(do\n    (defn nlt-corpus-lexicon ()\n        (list\n"
-            (str_concat rows (str_concat (jlg-carry-m-rows existing-text) "        ))\n    0)\n"))))
-    0)
+// nl-lexicon-grow.fk — the Form-native PROJECTOR: grow the translation pivot's
+// lexicon from the parallel locale corpus, ALL in Form (no bash, no python).
+//
+//   read_file(en.json) + read_file(id.json)      ; host carrier (a Form builtin)
+//     -> parse-json                              ; json.fk, Form
+//     -> jlg-walk (parallel object walk)         ; this cell, Form
+//     -> jlg-keep? (single-word, all-letters)    ; string-case.fk, Form
+//     -> jlg-rows (neutral symbol c<i> + phase)  ; this cell, Form
+//   read_file(nl-lexicon-data.fk), or nothing the first time ; host carrier
+//     -> jlg-carry-m-rows (every m<mid> row, byte-for-byte)  ; this cell, Form
+//   jlg-emit-cell (fresh c<i> rows + carried m<mid> rows)    ; this cell, Form
+//     -> write_file_text(nl-lexicon-data.fk)     ; host carrier (a Form builtin)
+//
+// read_file / write_file_text are host builtins reached from Form — carrier-not-debt
+// (host-kernel.form: using the host carrier IS having the resource), never a shell
+// logic layer. The PURE projections (json text -> rows string; existing file text
+// -> carried m-rows; both -> the emitted cell) are proven four-way by
+// tests/nl-lexicon-grow-band.fk; the runner (scripts/grow_nl_lexicon.fk, still not
+// built) would wrap them in the three file builtins named above.
+//
+// jlg-emit-cell takes the CURRENT nl-lexicon-data.fk's text (or nothing, first
+// run) alongside the fresh c<i> rows, carries every m<mid> row forward
+// byte-for-byte via jlg-carry-m-rows, and only then emits the whole file — so a
+// regeneration never silently drops a hand-minted or pivot-minted pivot row. The
+// append half of pivot minting (mint the row, read this file, carry its m-rows,
+// write the row back) is safe to build on top of it — a separate, deliberate
+// next step, not built here.
+//
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/string-case.fk
+section [form.bml] {
+    //; --- parallel walk: en-obj + id-obj -> flat list of (en-str id-str) leaf pairs ---
+    //; a string leaf has no children; an object's children are JSON-PAIR nodes.
+    def jlg-leaf?(v) = (Comparable) len(node_children(v)) == 0;
+    //; a JSON-PAIR has exactly 2 children and its first (the key) is a string leaf;
+    //; an OBJECT is a non-leaf whose first child is a pair; an ARRAY (children are bare
+    //; values, not pairs) and everything else are skipped — only object string-leaves grow.
+    def jlg-pair?(x) = (Comparable) len(node_children(x)) == 2 && jlg-leaf?(head(node_children(x)));
+    def jlg-obj?(x) = jlg-leaf?(x) ? false : jlg-pair?(head(node_children(x)));
+    def jlg-dispatch(env, idv, acc) = jlg-leaf?(env) && jlg-leaf?(idv) ? cons(list(json-string-value(env), json-string-value(idv)), acc) : jlg-obj?(env) && jlg-obj?(idv) ? jlg-walk(json-object-pairs(env), idv, acc) : acc;
+    def jlg-one(p, id-obj, acc) = jlg-pair?(p) ? jlg-dispatch(json-pair-value(p), json-object-get(id-obj, json-pair-key(p)), acc) : acc;
+    def jlg-walk(en-pairs, id-obj, acc) = (Comparable) len(en-pairs) == 0 ? acc : jlg-walk(tail(en-pairs), id-obj, jlg-one(head(en-pairs), id-obj, acc));
+    //; --- filter: single word, all letters, len >= 2 (string-case gives the letter test) ---
+    def jlg-letter?(ch) = sc-idx(sc-upper(), ch, 0) >= 0 || sc-idx(sc-lower(), ch, 0) >= 0;
+    def jlg-allalpha(s, i) = i >= str_len(s) ? 1 : jlg-letter?(substring(s, i, i + 1)) ? jlg-allalpha(s, i + 1) : 0;
+    def jlg-word?(s) = str_len(s) < 2 ? 0 : jlg-allalpha(s, 0);
+    def jlg-keep?(pr) = (Comparable) jlg-word?(head(pr)) == 1 && (Comparable) jlg-word?(head(tail(pr))) == 1;
+    //; --- emit a row: (list "c<i>" "water" "<en-lc>" "<id-lc>") source line ---
+    def jlg-q() = "\"";
+    def jlg-qs(s) = str_concat(jlg-q(), str_concat(s, jlg-q()));
+    def jlg-row(i, en, id) = str_concat("            (list ", str_concat(jlg-qs(str_concat("c", int_to_str(i))), str_concat(" ", str_concat(jlg-qs("water"), str_concat(" ", str_concat(jlg-qs(str-lower(en)), str_concat(" ", str_concat(jlg-qs(str-lower(id)), ")\n"))))))));
+    //; fold kept pairs into the rows source, assigning sequential symbols, capped
+    def jlg-rows(pairs, i, cap, acc) = (Comparable) len(pairs) == 0 ? acc : i >= cap ? acc : (Comparable) jlg-keep?(head(pairs)) == 1 ? jlg-rows(tail(pairs), i + 1, cap, str_concat(acc, jlg-row(i, head(head(pairs)), head(tail(head(pairs)))))) : jlg-rows(tail(pairs), i, cap, acc);
+    //; --- grow-rows: en/id json TEXT -> the corpus rows source string (PURE, four-way) ---
+    def grow-rows(en-text, id-text, cap) = jlg-rows(jlg-walk(json-object-pairs(parse-json("en", en-text)), parse-json("id", id-text), empty()), 0, cap, "");
+    //; --- carry forward every m<mid> row already living in an existing file's
+    //; text, byte-for-byte, so a regeneration can never silently drop one.
+    //; PURE: text in, text out — no disk touched here. read_file/write_file_text
+    //; stay host-builtin calls made by whoever hands this function real bytes
+    //; (the still-unbuilt runner, or a proof cell that read them itself).
+    def jlg-line-start(text, i) = i <= 0 ? 0 : (Comparable) str_byte_at(text, i - 1) == str_byte_at("\n", 0) ? i : jlg-line-start(text, i - 1);
+    def jlg-line-end(text, i, tlen) = {
+        let nlpos = str_find(text, "\n", i);
+        nlpos < 0 ? tlen : nlpos + 1;
+    };
+    def jlg-carry-loop(text, from, tlen, acc) = {
+        let mpos = str_find(text, "(list \"m", from);
+        mpos < 0 ? acc : {
+            let lstart = jlg-line-start(text, mpos);
+            let lend = jlg-line-end(text, mpos, tlen);
+            jlg-carry-loop(text, lend, tlen, str_concat(acc, substring(text, lstart, lend)));
+        };
+    };
+    //; existing-text is read_file's answer for nl-lexicon-data.fk: `nothing` the
+    //; first time the file doesn't yet exist, its live text every time after.
+    def jlg-carry-m-rows(existing-text) = nothing?(existing-text) ? "" : jlg-carry-loop(existing-text, 0, str_len(existing-text), "");
+    //; --- wrap the rows as a loadable cell defining nlt-corpus-lexicon; carries
+    //; every m<mid> row from `existing-text` forward alongside the fresh c<i>
+    //; rows, so a regeneration never drops a hand- or pivot-mint-minted row.
+    def jlg-emit-cell(rows, existing-text) = str_concat("; nl-lexicon-data.fk — GENERATED by the Form projector nl-lexicon-grow.fk\n; (run via scripts/grow_nl_lexicon.fk). The pivot's corpus lexicon, projected from\n; web/messages/* in Form: rows of (symbol phase en id), neutral symbol, phase water.\n;\n; preludes: form-stdlib/core.fk\n\n(do\n    (defn nlt-corpus-lexicon ()\n        (list\n", str_concat(rows, str_concat(jlg-carry-m-rows(existing-text), "        ))\n    0)\n")));
+    0;
+}

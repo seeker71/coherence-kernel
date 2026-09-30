@@ -1,55 +1,50 @@
-; moe-route-wide-msl.fk — the softmax router at 512 experts, as Metal the BODY emits.
-;
-; A RECOMBINATION, not new arithmetic. Two router shapes each hold half of what
-; KAT-Coder-V2.5-Dev needs:
-;
-;   the MATH   — softmax with max-subtract, top-k keeping the earlier index on a
-;                tie, renormalize over the chosen only (llama.cpp's
-;                `norm_topk_prob` order). A small-radius softmax router, top-2 of 8.
-;   the SCALE  — probs[256]/score[256]/taken[256]/pick[8] thread-local, one thread,
-;                serial argmax. DS4's router carries different math on that layout:
-;                sqrt(softplus), a steering bias in the selection, an unbiased
-;                floored weight, and a wscale.
-;
-; KAT-Coder routes 256 experts, 8 per token; Qwen3.8-Flash-Next routes 512
-; experts, 10 per token. Both use plain softmax followed by top-k and selected
-; renormalization, so they want the softmax arithmetic at the wide layout's
-; width. Nothing between them is new; the smaller radii were never properties of
-; the routing meaning, only of the arrays the narrower transcriptions declared.
-;
-; THE ORDER IS LOAD-BEARING AND THE TWO SHAPES DISAGREE ON IT. Read this before
-; touching the write loop. The DS4 router writes `ids[j] = pick[nused-1-j]` —
-; REVERSED — because its top-k conses head-first, so its recipe consumes the
-; selection 2nd-best-first and the expert accumulation associates along that order:
-; a set-selection that looks order-free is secretly a fold-order commitment, and
-; writing the natural order there would still pass an ids gate while the drift hid
-; inside the f32 envelope. The softmax top-k ends with `(reverse taken)` and so
-; returns BEST-FIRST. This kernel transcribes the softmax router, therefore it writes
-; `ids[k] = pick[k]` — natural order — and a future reader who "fixes" it to match
-; the DS4 order would be making it wrong in the direction that still looks right.
-;
-; NO BIAS. DS4's router admits a bias into the selection and withholds it from the
-; weight (corpus row 867 `steerdrop`). Softmax routing has no such signal at all,
-; so a band must falsify its absence rather than trust the reading.
-;
-; SPINE: `fexp` only, from llama-decode-msl.fk's spine — this cell stays in that
-; appendix family and introduces no second spine. It emits NO spine of its own and
-; can never double-define anything.
-;
-; RADIUS: ne <= 512, nsel <= 10. Beyond either the kernel writes NOTHING and
-; returns — a fixed-size array silently overrun is the aporon error with a stack
-; trace, so refusing is the rule.
-;
-; preludes: form-stdlib/core.fk
-
-(do
-    (defn mrw-ne-cap () 512)
-    (defn mrw-nsel-cap () 10)
-
-    (defn mrw-route-msl (fname)
-        (str_concat "kernel void "
-        (str_concat fname
-            " (device const float* logits [[buffer(0)]], device uint* ids [[buffer(1)]], device float* wts [[buffer(2)]], constant uint& ne [[buffer(3)]], constant uint& nsel [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; if (ne > 512u) return; if (nsel > 10u) return; if (nsel > ne) return; float p[512]; float taken[512]; uint pick[10]; float mx = logits[0]; for (uint i = 1u; i < ne; ++i) { if (logits[i] > mx) { mx = logits[i]; } } float s = 0.0f; for (uint i = 0u; i < ne; ++i) { float e = fexp(logits[i] - mx); p[i] = e; taken[i] = 0.0f; s = s + e; } float inv = 1.0f / s; for (uint i = 0u; i < ne; ++i) { p[i] = p[i] * inv; } float wsum = 0.0f; for (uint k = 0u; k < nsel; ++k) { uint best = ne; float bv = -1.0e30f; for (uint i = 0u; i < ne; ++i) { if (taken[i] == 0.0f) { if (p[i] > bv) { bv = p[i]; best = i; } } } taken[best] = 1.0f; pick[k] = best; wsum = wsum + bv; } float winv = 1.0f / wsum; for (uint k = 0u; k < nsel; ++k) { ids[k] = pick[k]; wts[k] = p[pick[k]] * winv; } }")))
-
-    (defn mrw-msl-appendix () (mrw-route-msl "form_moe_route_wide_f32"))
-    0)
+// moe-route-wide-msl.fk — the softmax router at 512 experts, as Metal the BODY emits.
+//
+// A RECOMBINATION, not new arithmetic. Two router shapes each hold half of what
+// KAT-Coder-V2.5-Dev needs:
+//
+//   the MATH   — softmax with max-subtract, top-k keeping the earlier index on a
+//                tie, renormalize over the chosen only (llama.cpp's
+//                `norm_topk_prob` order). A small-radius softmax router, top-2 of 8.
+//   the SCALE  — probs[256]/score[256]/taken[256]/pick[8] thread-local, one thread,
+//                serial argmax. DS4's router carries different math on that layout:
+//                sqrt(softplus), a steering bias in the selection, an unbiased
+//                floored weight, and a wscale.
+//
+// KAT-Coder routes 256 experts, 8 per token; Qwen3.8-Flash-Next routes 512
+// experts, 10 per token. Both use plain softmax followed by top-k and selected
+// renormalization, so they want the softmax arithmetic at the wide layout's
+// width. Nothing between them is new; the smaller radii were never properties of
+// the routing meaning, only of the arrays the narrower transcriptions declared.
+//
+// THE ORDER IS LOAD-BEARING AND THE TWO SHAPES DISAGREE ON IT. Read this before
+// touching the write loop. The DS4 router writes `ids[j] = pick[nused-1-j]` —
+// REVERSED — because its top-k conses head-first, so its recipe consumes the
+// selection 2nd-best-first and the expert accumulation associates along that order:
+// a set-selection that looks order-free is secretly a fold-order commitment, and
+// writing the natural order there would still pass an ids gate while the drift hid
+// inside the f32 envelope. The softmax top-k ends with `(reverse taken)` and so
+// returns BEST-FIRST. This kernel transcribes the softmax router, therefore it writes
+// `ids[k] = pick[k]` — natural order — and a future reader who "fixes" it to match
+// the DS4 order would be making it wrong in the direction that still looks right.
+//
+// NO BIAS. DS4's router admits a bias into the selection and withholds it from the
+// weight (corpus row 867 `steerdrop`). Softmax routing has no such signal at all,
+// so a band must falsify its absence rather than trust the reading.
+//
+// SPINE: `fexp` only, from llama-decode-msl.fk's spine — this cell stays in that
+// appendix family and introduces no second spine. It emits NO spine of its own and
+// can never double-define anything.
+//
+// RADIUS: ne <= 512, nsel <= 10. Beyond either the kernel writes NOTHING and
+// returns — a fixed-size array silently overrun is the aporon error with a stack
+// trace, so refusing is the rule.
+//
+// preludes: form-stdlib/core.fk
+section [form.bml] {
+    def mrw-ne-cap() = 512;
+    def mrw-nsel-cap() = 10;
+    def mrw-route-msl(fname) = str_concat("kernel void ", str_concat(fname, " (device const float* logits [[buffer(0)]], device uint* ids [[buffer(1)]], device float* wts [[buffer(2)]], constant uint& ne [[buffer(3)]], constant uint& nsel [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; if (ne > 512u) return; if (nsel > 10u) return; if (nsel > ne) return; float p[512]; float taken[512]; uint pick[10]; float mx = logits[0]; for (uint i = 1u; i < ne; ++i) { if (logits[i] > mx) { mx = logits[i]; } } float s = 0.0f; for (uint i = 0u; i < ne; ++i) { float e = fexp(logits[i] - mx); p[i] = e; taken[i] = 0.0f; s = s + e; } float inv = 1.0f / s; for (uint i = 0u; i < ne; ++i) { p[i] = p[i] * inv; } float wsum = 0.0f; for (uint k = 0u; k < nsel; ++k) { uint best = ne; float bv = -1.0e30f; for (uint i = 0u; i < ne; ++i) { if (taken[i] == 0.0f) { if (p[i] > bv) { bv = p[i]; best = i; } } } taken[best] = 1.0f; pick[k] = best; wsum = wsum + bv; } float winv = 1.0f / wsum; for (uint k = 0u; k < nsel; ++k) { ids[k] = pick[k]; wts[k] = p[pick[k]] * winv; } }"));
+    def mrw-msl-appendix() = mrw-route-msl("form_moe_route_wide_f32");
+    0;
+}

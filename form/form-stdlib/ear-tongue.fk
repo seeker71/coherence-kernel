@@ -1,301 +1,363 @@
-; ear-tongue.fk — the two tongues not heard, offered by the body's own generation lane: llama3.2
-; (the registry's llama32-1b blob) through dense-token-handle, form-native on this metal. A
-; completion-shaped prompt, greedy, cut at the first line break. Slower than a rented model and
-; weaker in Persian; named, not hidden. Nothing leaves this Mac.
-;
-; The lane holds what a line must not pay again: the file's bos/eos ids (a header walk each), the
-; vocabulary as fixed-width record buckets (a token is one file read and a byte walk, no
-; substring), the decoded pieces behind an id index (a word is two slices), and the KV cache of
-; the last prompt — a new line prefills only past the tokens it shares with what the cache holds,
-; and the head runs once, on the last prompt token.
-; preludes: native/metal/dense-token-handle.fk native/metal/dense-multi.fk form-stdlib/model-registry.bml form-stdlib/spool-bell-transport.fk form-stdlib/form-fs.fk form-stdlib/line-grammar.fk form-stdlib/bml/transcript-languages.bml
-(do
-    ; the tongues a line can be offered in: whisper's codes, the names the prompt speaks
-    (defn et-name-rows () (tln-rows))
-    (defn et-name-of (rows code) (if (eq (len rows) 0) "" (if (str_eq (head (head rows)) code) (nth (head rows) 1) (et-name-of (tail rows) code))))
-    (defn et-names (code) (do (let n (et-name-of (et-name-rows) code)) (if (str_eq code "pt") "Brazilian Portuguese" (if (eq (str_len n) 0) "English" n))))
-    (defn et-known? (code) (gt (str_len (et-name-of (et-name-rows) code)) 0))
-    ; the lane's own model, and any other the registry names — the tongues ride the 1B because
-    ; `dense-multi` can batch it, and the honest question of whether a tongue belongs on a bigger
-    ; model is asked by opening that model here rather than by argument
-    (defn et-open-of (name) (dth-open (mr-path (mr-find name)) 256 (sub 0 1)))
-    (defn et-open () (et-open-of "llama32-1b"))
-    (defn et-prompt (text from to) (str_concat (et-names from) (str_concat ": " (str_concat text (str_concat (byte_to_str 10) (str_concat (et-names to) ": "))))))
-    (defn et-cut1 (s stop) (do (let at (str_find s stop 0)) (if (lt at 0) s (substring s 0 at))))
-    (defn et-cut (s) (trim (et-cut1 (et-cut1 s (byte_to_str 10)) "<|")))
-    (defn et-text (t) (if (nothing? t) "" t))
-    ; the live lane's loop marker (" …") stays on the frame and off the prompt — the 1B answers a
-    ; marked line in English
-    (defn et-unmark (text) (if (and (gt (str_len text) 4) (and (eq (str_byte_at text (sub (str_len text) 4)) 32) (eq (str_byte_at text (sub (str_len text) 3)) 226))) (substring text 0 (sub (str_len text) 4)) text))
-    ; whisper marks what is not speech in brackets or parentheses — "[Music]", "(mouse clicking)":
-    ; such a line is shown in every tongue as it is and not offered through the lane. The mark has to
-    ; be the WHOLE line: `[INAUDIBLE] Like Jill, actually, will go over her. [INAUDIBLE]` opens and
-    ; closes with a bracket and carries a real sentence between them, and it stood untranslated in a
-    ; real room because the first and last bytes were all this asked. So the opening bracket's own
-    ; close must be the line's last byte — a close before the end means the line went on speaking
-    ; after the mark.
-    (defn et-close-at (text a) (str_find text (byte_to_str (if (eq a 91) 93 41)) 0))
-    (defn et-tag? (text0)
-        (do (let text (et-unmark text0))
-            (if (lt (str_len text) 2) 0
-                (do (let a (str_byte_at text 0))
-                    (if (or (eq a 91) (eq a 40)) (if (eq (et-close-at text a) (sub (str_len text) 1)) 1 0) 0)))))
-    0)
-; ---- the vocabulary rendered once to a file: line = "<piece>\t<id>\n" in id order, a leading line break ----
-(do
-    (defn et-vocab-path (src) (str_concat ".hearth/vocab-" (str_concat (int_to_str (gmt-vocab-n src)) ".txt")))
-    (defn et-piece (src at L k acc) (if (ge k L) acc (et-piece src at L (add k 1) (str_concat acc (byte_to_str (gmt-token-byte src at k))))))
-    (defn et-render (src at id n acc) (if (ge id n) acc (do (let L (gmt-token-len src at)) (et-render src (gmt-token-next src at) (add id 1) n (str_concat acc (str_concat (byte_to_str 10) (str_concat (et-piece src at L 0 "") (str_concat (byte_to_str 9) (int_to_str id)))))))))
-    (defn et-render-chunks (src at id n acc) (if (ge id n) acc (do (let stop (if (gt (add id 4096) n) n (add id 4096))) (let chunk (et-render src at id stop "")) (let w (sbt-append (et-vocab-path src) chunk)) (et-render-chunks src (et-skip src at (sub stop id)) stop n (add acc 1)))))
-    (defn et-skip (src at n) (if (eq n 0) at (et-skip src (gmt-token-next src at) (sub n 1))))
-    (defn et-vocab (src) (do (let p (et-vocab-path src)) (if (gt (file_size p) 0) (et-text (read_file p)) (do (let n (et-render-chunks src (gmt-tokens-first src) 0 (gmt-vocab-n src) 0)) (let tail (sbt-append p (byte_to_str 10))) (et-text (read_file p))))))
-    0)
-; ---- the index: record buckets for the tokenizer, an id-indexed piece file for the detokenizer ----
-; bucket <dir>/<key>: 28-byte records (len, 24 piece bytes, id as three little-endian bytes) in id order,
-; keyed by the first four bytes of the piece (fewer when the piece is shorter); pieces past 24 bytes are
-; not indexed — the longest match the lane offers is 24 bytes, stated. pieces file: every piece decoded
-; through the byte alphabet, concatenated; pidx: per id, offset and length as two little-endian u32.
-(do
-    (defn et-rdir (src) (str_concat ".hearth/vocab-" (str_concat (int_to_str (gmt-vocab-n src)) "-r28")))
-    (defn et-ppath (src) (str_concat ".hearth/vocab-" (str_concat (int_to_str (gmt-vocab-n src)) ".pieces")))
-    (defn et-ipath (src) (str_concat ".hearth/vocab-" (str_concat (int_to_str (gmt-vocab-n src)) ".pidx")))
-    (defn et-rpath (dir key) (str_concat dir (str_concat "/" (int_to_str key))))
-    (defn et-rkey-go (s i end acc) (if (ge i end) acc (et-rkey-go s (add i 1) end (add (mul acc 256) (add 1 (str_byte_at s i))))))
-    (defn et-rkey (s i k) (et-rkey-go s i (add i k) 0))
-    (defn et-le32 (n) (str_concat (byte_to_str (mod n 256)) (str_concat (byte_to_str (mod (div n 256) 256)) (str_concat (byte_to_str (mod (div n 65536) 256)) (byte_to_str (div n 16777216))))))
-    (defn et-le32-of (s o) (add (str_byte_at s o) (add (mul 256 (str_byte_at s (add o 1))) (add (mul 65536 (str_byte_at s (add o 2))) (mul 16777216 (str_byte_at s (add o 3)))))))
-    (defn et-pad (n acc) (if (le n 0) acc (et-pad (sub n 1) (str_concat acc (byte_to_str 0)))))
-    (defn et-record (piece id) (str_concat (byte_to_str (str_len piece)) (str_concat piece (str_concat (et-pad (sub 24 (str_len piece)) "") (str_concat (byte_to_str (mod id 256)) (str_concat (byte_to_str (mod (div id 256) 256)) (byte_to_str (div id 65536))))))))
-    ; a stored piece to the bytes it means — l3d-piece-go's walk over a string instead of the file
-    (defn et-cp2 (b0 b1) (if (or (lt b1 128) (ge b1 192)) (sub 0 1) (add (mul (sub b0 192) 64) (sub b1 128))))
-    (defn et-decode (raw j n acc)
-        (if (ge j n) acc
-            (do (let b0 (str_byte_at raw j))
-                (let w (l3d-width b0))
-                (if (lt w 0) acc
-                    (do (let c (if (eq w 1) b0 (if (ge (add j 1) n) (sub 0 1) (et-cp2 b0 (str_byte_at raw (add j 1))))))
-                        (let b (if (lt c 0) (sub 0 1) (l3d-uni-byte c)))
-                        (if (lt b 0) acc (et-decode raw (add j w) n (str_concat acc (byte_to_str b)))))))))
-    ; one walk over the rendered vocabulary: each line lands its record and its decoded piece; the piece
-    ; and index files are appended in chunks of 4096 ids, the offset carried across chunks
-    (defn et-flush (ppath ipath pacc iacc) (do (let a (sbt-append ppath pacc)) (let b (sbt-append ipath iacc)) 1))
-    (defn et-land (dir ppath ipath piece id pacc iacc off cnt)
-        (do (let w (if (and (gt (str_len piece) 0) (le (str_len piece) 24)) (sbt-append (et-rpath dir (et-rkey piece 0 (if (gt (str_len piece) 4) 4 (str_len piece)))) (et-record piece id)) 0))
-            (let d (et-decode piece 0 (str_len piece) ""))
-            (let pacc1 (str_concat pacc d))
-            (let iacc1 (str_concat iacc (str_concat (et-le32 off) (et-le32 (str_len d)))))
-            (if (eq (mod (add cnt 1) 4096) 0)
-                (do (let f (et-flush ppath ipath pacc1 iacc1)) (list "" "" (add off (str_len d)) (add cnt 1)))
-                (list pacc1 iacc1 (add off (str_len d)) (add cnt 1)))))
-    (defn et-bwalk (dir ppath ipath t i n piece id pacc iacc off cnt)
-        (if (ge i n) (do (let f (et-flush ppath ipath pacc iacc)) cnt)
-            (do (let b (str_byte_at t i))
-                (if (eq b 10)
-                    (if (lt id 0) (et-bwalk dir ppath ipath t (add i 1) n "" (sub 0 1) pacc iacc off cnt)
-                        (do (let s (et-land dir ppath ipath piece id pacc iacc off cnt))
-                            (et-bwalk dir ppath ipath t (add i 1) n "" (sub 0 1) (nth s 0) (nth s 1) (nth s 2) (nth s 3))))
-                    (if (eq b 9) (et-bwalk dir ppath ipath t (add i 1) n piece 0 pacc iacc off cnt)
-                        (if (ge id 0) (et-bwalk dir ppath ipath t (add i 1) n piece (add (mul id 10) (sub b 48)) pacc iacc off cnt)
-                            (et-bwalk dir ppath ipath t (add i 1) n (str_concat piece (byte_to_str b)) id pacc iacc off cnt)))))))
-    (defn et-index-ready? (src) (ge (file_size (str_concat (et-rdir src) "/ready")) 0))
-    ; the index lives under .hearth, and `fs-mkdir` makes ONE directory: in a checkout where no
-    ; hearth stands yet — a fresh clone, an agent's worktree — the bucket directory could not be
-    ; made, every append fell on the floor, and the lane came up with an empty vocabulary. It did
-    ; not say so: the tokenizer answered `(bos)`, every tongue answered "", and the band's equality
-    ; bits agreed "" with "" and read 3904 of 4095 with five bits dark and five vacuously lit. So
-    ; the hearth is made first, and a build that still did not land says so out loud.
-    (defn et-build-index (src)
-        (if (et-index-ready? src) 1
-            (do (let dir (et-rdir src))
-                (let hearth (fs-mkdir ".hearth"))
-                (let gone (fs-remove-tree dir))
-                (let g1 (fs-remove-file (et-ppath src)))
-                (let g2 (fs-remove-file (et-ipath src)))
-                (let mk (fs-mkdir dir))
-                (let t (et-vocab src))
-                (let n (et-bwalk dir (et-ppath src) (et-ipath src) t 0 (str_len t) "" (sub 0 1) "" "" 0 0))
-                (let r (write_file_text (str_concat dir "/ready") (int_to_str n)))
-                (if (et-index-ready? src) 1
-                    (do (print_str (str_concat "ear-tongue: the vocabulary index did not land under " dir)) 0)))))
-    ; ---- the tokenizer: at each position the longest indexed piece, the lowest id on a tie ----
-    (defn et-req (t o text i L k) (if (ge k L) 1 (if (eq (str_byte_at t (add o k)) (str_byte_at text (add i k))) (et-req t o text i L (add k 1)) 0)))
-    (defn et-rid (t o) (add (str_byte_at t o) (add (mul 256 (str_byte_at t (add o 1))) (mul 65536 (str_byte_at t (add o 2))))))
-    (defn et-rwalk (t r nrec text i rem bestL bestId)
-        (if (ge r nrec) (list bestId bestL)
-            (do (let o (mul r 28))
-                (let L (str_byte_at t o))
-                (if (and (gt L bestL) (and (le L rem) (eq (et-req t (add o 1) text i L 0) 1)))
-                    (et-rwalk t (add r 1) nrec text i rem L (et-rid t (add o 25)))
-                    (et-rwalk t (add r 1) nrec text i rem bestL bestId)))))
-    (defn et-rmatch (dir text i rem k)
-        (if (le k 0) (list (sub 0 1) 0)
-            (do (let t (et-text (read_file (et-rpath dir (et-rkey text i k)))))
-                (let m (if (eq (str_len t) 0) (list (sub 0 1) 0) (et-rwalk t 0 (div (str_len t) 28) text i rem 0 (sub 0 1))))
-                (if (lt (head m) 0) (et-rmatch dir text i rem (sub k 1)) m))))
-    (defn et-rids (dir text i n acc)
-        (if (ge i n) (reverse acc)
-            (do (let m (et-rmatch dir text i (sub n i) (if (gt (sub n i) 4) 4 (sub n i))))
-                (if (lt (head m) 0) (reverse acc) (et-rids dir text (add i (nth m 1)) n (cons (head m) acc))))))
-    (defn et-encode (dir bos text) (do (let surface (dtk-gpt2-map text)) (cons bos (et-rids dir surface 0 (str_len surface) (list)))))
-    ; ---- the detokenizer: id -> (offset length) -> the piece ----
-    (defn et-piece-of (ppath ipath n id)
-        (if (or (lt id 0) (ge id n)) ""
-            (do (let e (et-text (read_file_slice ipath (mul id 8) 8)))
-                (if (lt (str_len e) 8) ""
-                    (do (let L (et-le32-of e 4))
-                        (if (le L 0) "" (et-text (read_file_slice ppath (et-le32-of e 0) L))))))))
-    (defn et-detok (ppath ipath n ids acc) (if (eq (len ids) 0) acc (et-detok ppath ipath n (tail ids) (str_concat acc (et-piece-of ppath ipath n (head ids))))))
-    0)
-; ---- the lane: (st bos eos loaded dir ppath ipath n) — loaded is what the KV cache holds, position by position ----
-(do
-    (defn et-lane-open () (et-lane-open-of "llama32-1b"))
-    (defn et-lane-open-of (name)
-        (do (let st (et-open-of name))
-            (let src (nth st 10))
-            (let built (et-build-index src))
-            (list st (gmt-u32 src "tokenizer.ggml.bos_token_id") (gmt-u32 src "tokenizer.ggml.eos_token_id") (list) (et-rdir src) (et-ppath src) (et-ipath src) (gmt-vocab-n src))))
-    (defn et-lane-st (lane) (nth lane 0))
-    (defn et-lane-with-loaded (lane loaded) (list (nth lane 0) (nth lane 1) (nth lane 2) loaded (nth lane 4) (nth lane 5) (nth lane 6) (nth lane 7)))
-    (defn et-common (a b n) (if (or (eq (len a) 0) (eq (len b) 0)) n (if (eq (head a) (head b)) (et-common (tail a) (tail b) (add n 1)) n)))
-    (defn et-drop (xs n) (if (le n 0) xs (et-drop (tail xs) (sub n 1))))
-    ; the prompt's tokens from position pos on: embed and the layers for each, the head only on the last
-    (defn et-prefill-from (st ids pos)
-        (if (eq (len ids) 1)
-            (dth-forward (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) (head ids) pos)
-            (do (dth-dq (nth st 0) (nth st 6) (nth (nth st 1) 0) (mul (head ids) (nth (nth st 2) 0)) (nth (nth st 2) 0))
-                (dth-passes (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 7) pos 0 (nth (nth st 2) 16))
-                (et-prefill-from st (tail ids) (add pos 1)))))
-    ; the ends of a line: the file's end-of-sequence, llama3's end of turn, or the line break the prompt asked for
-    (defn et-ends? (eos id) (or (eq id eos) (or (eq id 128009) (or (eq id 128001) (or (eq id 198) (eq id 271))))))
-    (defn et-gen-go (st eos id pos n acc) (if (or (le n 0) (et-ends? eos id)) (reverse acc) (do (let nid (dth-forward (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) id pos)) (et-gen-go st eos nid (add pos 1) (sub n 1) (cons id acc)))))
-    ; one line through the lane: (text lane). The cache holds 256 positions; a prompt that leaves no room answers ""
-    (defn et-say (lane text from to maxnew)
-        (do (let st (et-lane-st lane))
-            (let ids (et-encode (nth lane 4) (nth lane 1) (et-prompt text from to)))
-            (let room (sub 250 (len ids)))
-            (if (le room 0) (list "" lane)
-                (do (let m0 (et-common ids (nth lane 3) 0))
-                    (let m (if (ge m0 (len ids)) (sub (len ids) 1) m0))
-                    (let first (et-prefill-from st (et-drop ids m) m))
-                    (let gen (et-gen-go st (nth lane 2) first (len ids) (if (gt maxnew room) room maxnew) (list)))
-                    (list (et-cut (et-detok (nth lane 5) (nth lane 6) (nth lane 7) gen "")) (et-lane-with-loaded lane (append ids gen)))))))
-    ; ---- the streaming step: a line said while it grows ----
-    ; The prompt's ids, then the ids already committed for this tongue, prefilled only past what the
-    ; cache holds (the source prefix and, for the first tongue of a round, nothing more); up to maxnew
-    ; new ids generated after them. Answers (ids lane): the committed ids followed by the new ones, the
-    ; end id excluded. A prompt that leaves no room answers an empty list.
-    (defn et-say-ids (lane text from to forced maxnew)
-        (do (let st (et-lane-st lane))
-            (let ids (append (et-encode (nth lane 4) (nth lane 1) (et-prompt text from to)) forced))
-            (let room (sub 250 (len ids)))
-            (if (le room 0) (list (list) lane)
-                (do (let m0 (et-common ids (nth lane 3) 0))
-                    (let m (if (ge m0 (len ids)) (sub (len ids) 1) m0))
-                    (let first (et-prefill-from st (et-drop ids m) m))
-                    (let gen (et-gen-go st (nth lane 2) first (len ids) (if (gt maxnew room) room maxnew) (list)))
-                    (list (append forced gen) (et-lane-with-loaded lane (append ids gen)))))))
-    (defn et-take (xs n) (if (or (le n 0) (eq (len xs) 0)) (list) (cons (head xs) (et-take (tail xs) (sub n 1)))))
-    ; ---- a rendering that has begun to repeat itself ----
-    ; Greedy decoding falls into cycles, and the streaming commitment amplifies one: two consecutive
-    ; renderings of a growing line agree on the repetition, so the repetition is committed, forced on
-    ; the next round, and grown again — the commitment only grows, so a loop entered is a loop kept.
-    ; Witnessed in a real room, 2026-09-08: Persian said `... به عنوان someone` around thirty times
-    ; inside one closed line, and an earlier hour saw `BODY BODY BODY` and `k k k k`. A cap on new
-    ; ids bounds the rate at which a loop grows and never its total.
-    ; So a rendering is cut where its own cycle begins: a tail that is three copies of the same block
-    ; (a block of 1 to 8 ids, the shortest such block winning) is walked back to the block's first
-    ; copy, that copy is kept, and everything after it is dropped. Three copies rather than two
-    ; because a real sentence repeats a word or a pair — "no, no" — and does not say it three times.
-    ; The healthy case costs the scan alone: at most 24 walks over the tail and no answer.
-    (defn et-heads-eq (a b p) (if (le p 0) 1 (if (or (eq (len a) 0) (eq (len b) 0)) 0 (if (eq (head a) (head b)) (et-heads-eq (tail a) (tail b) (sub p 1)) 0))))
-    (defn et-cycle? (ids n p)
-        (if (lt n (mul 3 p)) 0
-            (if (and (eq (et-heads-eq (et-drop ids (sub n p)) (et-drop ids (sub n (mul 2 p))) p) 1)
-                     (eq (et-heads-eq (et-drop ids (sub n (mul 2 p))) (et-drop ids (sub n (mul 3 p))) p) 1)) 1 0)))
-    (defn et-loop-p (ids n p) (if (gt p 8) 0 (if (eq (et-cycle? ids n p) 1) p (et-loop-p ids n (add p 1)))))
-    ; the start of the first copy of the block that ends at `at`
-    (defn et-loop-back (ids p at)
-        (if (lt (sub at p) 0) at
-            (if (eq (et-heads-eq (et-drop ids (sub at p)) (et-drop ids at) p) 1) (et-loop-back ids p (sub at p)) at)))
-    (defn et-loopcut (ids)
-        (do (let n (len ids))
-            (let p (et-loop-p ids n 1))
-            (if (eq p 0) ids (et-take ids (add (et-loop-back ids p (sub n p)) p)))))
-    (defn et-looped? (ids) (if (lt (len (et-loopcut ids)) (len ids)) 1 0))
-    ; local agreement: what two consecutive renderings of a growing source agree on is committed and
-    ; forced on the next; both begin with what was committed before, so the commitment only grows.
-    ; (committed prev) -> (ids agreed lane): ids is this rendering, agreed the prefix it shares with prev.
-    (defn et-say-step (lane text from to committed prev maxnew)
-        (do (let r (et-say-ids lane text from to committed maxnew))
-            (list (head r) (et-take (head r) (et-common (head r) prev 0)) (nth r 1))))
-    (defn et-ids-text (lane ids) (et-cut (et-detok (nth lane 5) (nth lane 6) (nth lane 7) ids "")))
-    ; a rendering the cut has already reached has ENDED, whatever the model's own end ids say. The
-    ; prompt asks for one line, and `et-cut` takes the answer at the first line break or the file's
-    ; own `<|` marker — but a line break arrives inside a PIECE far more often than as one of the
-    ; four ids `et-ends?` knows, and a round that does not notice goes on writing a second paragraph
-    ; nobody will ever read. Measured on a real sentence, 2026-09-08: Indonesian's words were final
-    ; at 563 ms and its round ran to 898, so 208 ms of a 898 ms line — and the whole wait between the
-    ; last tongue's words and the frame — was spent generating what the cut then threw away.
-    (defn et-ids-cut? (lane ids)
-        (do (let raw (et-detok (nth lane 5) (nth lane 6) (nth lane 7) ids ""))
-            (if (or (ge (str_find raw (byte_to_str 10) 0) 0) (ge (str_find raw "<|" 0) 0)) 1 0)))
-    0)
-; ---- the batched lane: the tongues as M sequences in one decode step (dense-multi), each its own KV bank ----
-; A round feeds every sequence its prompt (only past what its bank holds) and then its own answers, in
-; lock-step, until each has ended or generated maxnew; the round is resumable in chunks of k steps so a
-; caller can show the renderings while they grow. Refused at open outside dense-multi's radius
-; (et-mlane-ok? false) — the caller then offers the tongues one after another through et-say-step.
-(do
-    (defn et-nils (m) (if (le m 0) (list) (cons (list) (et-nils (sub m 1)))))
-    ; (st bos eos loadeds dir ppath ipath n M): loadeds is what each bank holds, position by position
-    (defn et-mlane-open (m)
-        (do (let st (dm-open (mr-path (mr-find "llama32-1b")) 256 m))
-            (let src (nth st 10))
-            (let built (et-build-index src))
-            (list st (gmt-u32 src "tokenizer.ggml.bos_token_id") (gmt-u32 src "tokenizer.ggml.eos_token_id") (et-nils m) (et-rdir src) (et-ppath src) (et-ipath src) (gmt-vocab-n src) m)))
-    (defn et-mlane-ok? (ml) (dm-ok? (nth ml 0)))
-    (defn et-mlane-with-loaded (ml loadeds) (list (nth ml 0) (nth ml 1) (nth ml 2) loadeds (nth ml 4) (nth ml 5) (nth ml 6) (nth ml 7) (nth ml 8)))
-    ; a sequence in a round: (ids c rem gen ended last) — ids the prompt then the forced prefix, c the first
-    ; position its bank does not hold, rem the ids it feeds from c on, gen what it generated (no end id),
-    ; ended whether an end id came, last the id it feeds next. Empty ids, or more than the bank's room: it sits
-    ; out (feeds bos at 0, its bank forgotten).
-    (defn et-mseq (ids loaded bos)
-        (if (or (eq (len ids) 0) (gt (len ids) 250)) (list (list) 0 0 (list) 1 bos)
-            (do (let c0 (et-common ids loaded 0)) (let c (if (ge c0 (len ids)) (sub (len ids) 1) c0)) (list ids c (sub (len ids) c) (list) 0 bos))))
-    (defn et-mseqs (idss loadeds bos) (if (eq (len idss) 0) (list) (cons (et-mseq (head idss) (head loadeds) bos) (et-mseqs (tail idss) (tail loadeds) bos))))
-    (defn et-mfeed (seqs s) (if (eq (len seqs) 0) (list) (cons (do (let q (head seqs)) (if (lt s (nth q 2)) (nth (nth q 0) (add (nth q 1) s)) (nth q 5))) (et-mfeed (tail seqs) s))))
-    (defn et-mposs (seqs s) (if (eq (len seqs) 0) (list) (cons (do (let q (head seqs)) (if (eq (len (nth q 0)) 0) 0 (add (nth q 1) s))) (et-mposs (tail seqs) s))))
-    ; the answers of step s: from the step that fed a sequence's last prompt id on, its answer is generated
-    (defn et-mtake (seqs outs s eos maxnew)
-        (if (eq (len seqs) 0) (list)
-            (cons (do (let q (head seqs)) (let o (head outs))
-                      (if (and (ge s (sub (nth q 2) 1)) (and (eq (nth q 4) 0) (and (gt (len (nth q 0)) 0) (lt (len (nth q 3)) maxnew))))
-                          (if (et-ends? eos o) (list (nth q 0) (nth q 1) (nth q 2) (nth q 3) 1 o) (list (nth q 0) (nth q 1) (nth q 2) (append (nth q 3) (list o)) 0 o))
-                          (list (nth q 0) (nth q 1) (nth q 2) (nth q 3) (nth q 4) o)))
-                  (et-mtake (tail seqs) (tail outs) s eos maxnew))))
-    ; after s steps a sequence is done when its prompt is fed and it ended or has maxnew
-    (defn et-mdone? (seqs s maxnew) (if (eq (len seqs) 0) 1 (do (let q (head seqs)) (if (and (ge s (nth q 2)) (or (eq (nth q 4) 1) (ge (len (nth q 3)) maxnew))) (et-mdone? (tail seqs) s maxnew) 0))))
-    ; up to k more steps of a round: (seqs s done)
-    (defn et-mround-go (ml seqs s k maxnew)
-        (if (eq (et-mdone? seqs s maxnew) 1) (list seqs s 1)
-            (if (le k 0) (list seqs s 0)
-                (do (let outs (dm-step (nth ml 0) (et-mfeed seqs s) (et-mposs seqs s)))
-                    (et-mround-go ml (et-mtake seqs outs s (nth ml 2) maxnew) (add s 1) (sub k 1) maxnew)))))
-    (defn et-mround-open (ml idss) (et-mseqs idss (nth ml 3) (nth ml 1)))
-    (defn et-mgens (seqs) (if (eq (len seqs) 0) (list) (cons (nth (head seqs) 3) (et-mgens (tail seqs)))))
-    ; whether each sequence stopped at an end id rather than at the caller's cap. A tongue that
-    ; ended has said the whole of its answer to this prompt: greedy decoding is one answer to one
-    ; prompt, so the same prompt fed again answers the same ids and the same end. A caller that
-    ; keeps this bit does not pay for a line the lane has already finished saying.
-    ; A sequence that SAT OUT — no ids, or a prompt past the bank's room — carries the same born
-    ; `ended` bit as one that reached an end id, and it must not be read as an answer: it says 0.
-    (defn et-mends (seqs) (if (eq (len seqs) 0) (list) (cons (do (let q (head seqs)) (if (eq (len (nth q 0)) 0) 0 (nth q 4))) (et-mends (tail seqs)))))
-    ; what each bank holds after S steps: the ids, then the generated ids that were fed (S - rem of them at
-    ; most); a sequence that sat out keeps what it held (bos at position 0 is what every bank holds there)
-    (defn et-mloaded (seqs S olds) (if (eq (len seqs) 0) (list) (cons (do (let q (head seqs)) (if (eq (len (nth q 0)) 0) (head olds) (append (nth q 0) (et-take (nth q 3) (sub S (nth q 2)))))) (et-mloaded (tail seqs) S (tail olds)))))
-    (defn et-mround-close (ml seqs S) (et-mlane-with-loaded ml (et-mloaded seqs S (nth ml 3))))
-    ; a whole round at once: (gens ml) — gens[m] the forced prefix is NOT included; the caller keeps it
-    (defn et-mround (ml idss maxnew)
-        (do (let r (et-mround-go ml (et-mround-open ml idss) 0 100000 maxnew))
-            (list (et-mgens (head r)) (et-mround-close ml (head r) (nth r 1)))))
-    0)
+// ear-tongue.fk — the two tongues not heard, offered by the body's own generation lane: llama3.2
+// (the registry's llama32-1b blob) through dense-token-handle, form-native on this metal. A
+// completion-shaped prompt, greedy, cut at the first line break. Slower than a rented model and
+// weaker in Persian; named, not hidden. Nothing leaves this Mac.
+//
+// The lane holds what a line must not pay again: the file's bos/eos ids (a header walk each), the
+// vocabulary as fixed-width record buckets (a token is one file read and a byte walk, no
+// substring), the decoded pieces behind an id index (a word is two slices), and the KV cache of
+// the last prompt — a new line prefills only past the tokens it shares with what the cache holds,
+// and the head runs once, on the last prompt token.
+// preludes: native/metal/dense-token-handle.fk native/metal/dense-multi.fk form-stdlib/model-registry.bml form-stdlib/spool-bell-transport.fk form-stdlib/form-fs.fk form-stdlib/line-grammar.fk form-stdlib/bml/transcript-languages.bml
+section [form.bml] {
+    {
+        // the tongues a line can be offered in: whisper's codes, the names the prompt speaks
+        def et-name-rows() = tln-rows();
+        def et-name-of(rows, code) = (Comparable) len(rows) == 0 ? "" : (String) head(head(rows)) == code ? nth(head(rows), 1) : et-name-of(tail(rows), code);
+        def et-names(code) = {
+            let n = et-name-of(et-name-rows(), code);
+            (String) code == "pt" ? "Brazilian Portuguese" : (Comparable) str_len(n) == 0 ? "English" : n;
+        };
+        def et-known?(code) = str_len(et-name-of(et-name-rows(), code)) > 0;
+        // the lane's own model, and any other the registry names — the tongues ride the 1B because
+        // `dense-multi` can batch it, and the honest question of whether a tongue belongs on a bigger
+        // model is asked by opening that model here rather than by argument
+        def et-open-of(name) = dth-open(mr-path(mr-find(name)), 256, 0 - 1);
+        def et-open() = et-open-of("llama32-1b");
+        def et-prompt(text, from, to) = str_concat(et-names(from), str_concat(": ", str_concat(text, str_concat(byte_to_str(10), str_concat(et-names(to), ": ")))));
+        def et-cut1(s, stop) = {
+            let at = str_find(s, stop, 0);
+            at < 0 ? s : substring(s, 0, at);
+        };
+        def et-cut(s) = trim(et-cut1(et-cut1(s, byte_to_str(10)), "<|"));
+        def et-text(t) = nothing?(t) ? "" : t;
+        // the live lane's loop marker (" …") stays on the frame and off the prompt — the 1B answers a
+        // marked line in English
+        def et-unmark(text) = str_len(text) > 4 && ((Comparable) str_byte_at(text, str_len(text) - 4) == 32 && (Comparable) str_byte_at(text, str_len(text) - 3) == 226) ? substring(text, 0, str_len(text) - 4) : text;
+        // whisper marks what is not speech in brackets or parentheses — "[Music]", "(mouse clicking)":
+        // such a line is shown in every tongue as it is and not offered through the lane. The mark has to
+        // be the WHOLE line: `[INAUDIBLE] Like Jill, actually, will go over her. [INAUDIBLE]` opens and
+        // closes with a bracket and carries a real sentence between them, and it stood untranslated in a
+        // real room because the first and last bytes were all this asked. So the opening bracket's own
+        // close must be the line's last byte — a close before the end means the line went on speaking
+        // after the mark.
+        def et-close-at(text, a) = str_find(text, byte_to_str((Comparable) a == 91 ? 93 : 41), 0);
+        def et-tag?(text0) = {
+            let text = et-unmark(text0);
+            str_len(text) < 2 ? 0 : {
+                let a = str_byte_at(text, 0);
+                (Comparable) a == 91 || (Comparable) a == 40 ? (Comparable) et-close-at(text, a) == str_len(text) - 1 ? 1 : 0 : 0;
+            };
+        };
+        0;
+    };
+    // ---- the vocabulary rendered once to a file: line = "<piece>\t<id>\n" in id order, a leading line break ----
+    {
+        def et-vocab-path(src) = str_concat(".hearth/vocab-", str_concat(int_to_str(gmt-vocab-n(src)), ".txt"));
+        def et-piece(src, at, L, k, acc) = k >= L ? acc : et-piece(src, at, L, k + 1, str_concat(acc, byte_to_str(gmt-token-byte(src, at, k))));
+        def et-render(src, at, id, n, acc) = id >= n ? acc : {
+            let L = gmt-token-len(src, at);
+            et-render(src, gmt-token-next(src, at), id + 1, n, str_concat(acc, str_concat(byte_to_str(10), str_concat(et-piece(src, at, L, 0, ""), str_concat(byte_to_str(9), int_to_str(id))))));
+        };
+        def et-render-chunks(src, at, id, n, acc) = id >= n ? acc : {
+            let stop = id + 4096 > n ? n : id + 4096;
+            let chunk = et-render(src, at, id, stop, "");
+            let w = sbt-append(et-vocab-path(src), chunk);
+            et-render-chunks(src, et-skip(src, at, stop - id), stop, n, acc + 1);
+        };
+        def et-skip(src, at, n) = (Comparable) n == 0 ? at : et-skip(src, gmt-token-next(src, at), n - 1);
+        def et-vocab(src) = {
+            let p = et-vocab-path(src);
+            file_size(p) > 0 ? et-text(read_file(p)) : {
+                let n = et-render-chunks(src, gmt-tokens-first(src), 0, gmt-vocab-n(src), 0);
+                let tail = sbt-append(p, byte_to_str(10));
+                et-text(read_file(p));
+            };
+        };
+        0;
+    };
+    // ---- the index: record buckets for the tokenizer, an id-indexed piece file for the detokenizer ----
+    // bucket <dir>/<key>: 28-byte records (len, 24 piece bytes, id as three little-endian bytes) in id order,
+    // keyed by the first four bytes of the piece (fewer when the piece is shorter); pieces past 24 bytes are
+    // not indexed — the longest match the lane offers is 24 bytes, stated. pieces file: every piece decoded
+    // through the byte alphabet, concatenated; pidx: per id, offset and length as two little-endian u32.
+    {
+        def et-rdir(src) = str_concat(".hearth/vocab-", str_concat(int_to_str(gmt-vocab-n(src)), "-r28"));
+        def et-ppath(src) = str_concat(".hearth/vocab-", str_concat(int_to_str(gmt-vocab-n(src)), ".pieces"));
+        def et-ipath(src) = str_concat(".hearth/vocab-", str_concat(int_to_str(gmt-vocab-n(src)), ".pidx"));
+        def et-rpath(dir, key) = str_concat(dir, str_concat("/", int_to_str(key)));
+        def et-rkey-go(s, i, end, acc) = i >= end ? acc : et-rkey-go(s, i + 1, end, acc * 256 + (1 + str_byte_at(s, i)));
+        def et-rkey(s, i, k) = et-rkey-go(s, i, i + k, 0);
+        def et-le32(n) = str_concat(byte_to_str(n % 256), str_concat(byte_to_str(n / 256 % 256), str_concat(byte_to_str(n / 65536 % 256), byte_to_str(n / 16777216))));
+        def et-le32-of(s, o) = str_byte_at(s, o) + (256 * str_byte_at(s, o + 1) + (65536 * str_byte_at(s, o + 2) + 16777216 * str_byte_at(s, o + 3)));
+        def et-pad(n, acc) = n <= 0 ? acc : et-pad(n - 1, str_concat(acc, byte_to_str(0)));
+        def et-record(piece, id) = str_concat(byte_to_str(str_len(piece)), str_concat(piece, str_concat(et-pad(24 - str_len(piece), ""), str_concat(byte_to_str(id % 256), str_concat(byte_to_str(id / 256 % 256), byte_to_str(id / 65536))))));
+        // a stored piece to the bytes it means — l3d-piece-go's walk over a string instead of the file
+        def et-cp2(b0, b1) = b1 < 128 || b1 >= 192 ? 0 - 1 : (b0 - 192) * 64 + (b1 - 128);
+        def et-decode(raw, j, n, acc) = j >= n ? acc : {
+            let b0 = str_byte_at(raw, j);
+            let w = l3d-width(b0);
+            w < 0 ? acc : {
+                let c = (Comparable) w == 1 ? b0 : j + 1 >= n ? 0 - 1 : et-cp2(b0, str_byte_at(raw, j + 1));
+                let b = c < 0 ? 0 - 1 : l3d-uni-byte(c);
+                b < 0 ? acc : et-decode(raw, j + w, n, str_concat(acc, byte_to_str(b)));
+            };
+        };
+        // one walk over the rendered vocabulary: each line lands its record and its decoded piece; the piece
+        // and index files are appended in chunks of 4096 ids, the offset carried across chunks
+        def et-flush(ppath, ipath, pacc, iacc) = {
+            let a = sbt-append(ppath, pacc);
+            let b = sbt-append(ipath, iacc);
+            1;
+        };
+        def et-land(dir, ppath, ipath, piece, id, pacc, iacc, off, cnt) = {
+            let w = str_len(piece) > 0 && str_len(piece) <= 24 ? sbt-append(et-rpath(dir, et-rkey(piece, 0, str_len(piece) > 4 ? 4 : str_len(piece))), et-record(piece, id)) : 0;
+            let d = et-decode(piece, 0, str_len(piece), "");
+            let pacc1 = str_concat(pacc, d);
+            let iacc1 = str_concat(iacc, str_concat(et-le32(off), et-le32(str_len(d))));
+            (Comparable) ((cnt + 1) % 4096) == 0 ? {
+                let f = et-flush(ppath, ipath, pacc1, iacc1);
+                list("", "", off + str_len(d), cnt + 1);
+            } : list(pacc1, iacc1, off + str_len(d), cnt + 1);
+        };
+        def et-bwalk(dir, ppath, ipath, t, i, n, piece, id, pacc, iacc, off, cnt) = i >= n ? {
+            let f = et-flush(ppath, ipath, pacc, iacc);
+            cnt;
+        } : {
+            let b = str_byte_at(t, i);
+            (Comparable) b == 10 ? id < 0 ? et-bwalk(dir, ppath, ipath, t, i + 1, n, "", 0 - 1, pacc, iacc, off, cnt) : {
+                let s = et-land(dir, ppath, ipath, piece, id, pacc, iacc, off, cnt);
+                et-bwalk(dir, ppath, ipath, t, i + 1, n, "", 0 - 1, nth(s, 0), nth(s, 1), nth(s, 2), nth(s, 3));
+            } : (Comparable) b == 9 ? et-bwalk(dir, ppath, ipath, t, i + 1, n, piece, 0, pacc, iacc, off, cnt) : id >= 0 ? et-bwalk(dir, ppath, ipath, t, i + 1, n, piece, id * 10 + (b - 48), pacc, iacc, off, cnt) : et-bwalk(dir, ppath, ipath, t, i + 1, n, str_concat(piece, byte_to_str(b)), id, pacc, iacc, off, cnt);
+        };
+        def et-index-ready?(src) = file_size(str_concat(et-rdir(src), "/ready")) >= 0;
+        // the index lives under .hearth, and `fs-mkdir` makes ONE directory: in a checkout where no
+        // hearth stands yet — a fresh clone, an agent's worktree — the bucket directory could not be
+        // made, every append fell on the floor, and the lane came up with an empty vocabulary. It did
+        // not say so: the tokenizer answered `(bos)`, every tongue answered "", and the band's equality
+        // bits agreed "" with "" and read 3904 of 4095 with five bits dark and five vacuously lit. So
+        // the hearth is made first, and a build that still did not land says so out loud.
+        def et-build-index(src) = et-index-ready?(src) ? 1 : {
+            let dir = et-rdir(src);
+            let hearth = fs-mkdir(".hearth");
+            let gone = fs-remove-tree(dir);
+            let g1 = fs-remove-file(et-ppath(src));
+            let g2 = fs-remove-file(et-ipath(src));
+            let mk = fs-mkdir(dir);
+            let t = et-vocab(src);
+            let n = et-bwalk(dir, et-ppath(src), et-ipath(src), t, 0, str_len(t), "", 0 - 1, "", "", 0, 0);
+            let r = write_file_text(str_concat(dir, "/ready"), int_to_str(n));
+            et-index-ready?(src) ? 1 : {
+                print_str(str_concat("ear-tongue: the vocabulary index did not land under ", dir));
+                0;
+            };
+        };
+        // ---- the tokenizer: at each position the longest indexed piece, the lowest id on a tie ----
+        def et-req(t, o, text, i, L, k) = k >= L ? 1 : (Comparable) str_byte_at(t, o + k) == str_byte_at(text, i + k) ? et-req(t, o, text, i, L, k + 1) : 0;
+        def et-rid(t, o) = str_byte_at(t, o) + (256 * str_byte_at(t, o + 1) + 65536 * str_byte_at(t, o + 2));
+        def et-rwalk(t, r, nrec, text, i, rem, bestL, bestId) = r >= nrec ? list(bestId, bestL) : {
+            let o = r * 28;
+            let L = str_byte_at(t, o);
+            L > bestL && (L <= rem && (Comparable) et-req(t, o + 1, text, i, L, 0) == 1) ? et-rwalk(t, r + 1, nrec, text, i, rem, L, et-rid(t, o + 25)) : et-rwalk(t, r + 1, nrec, text, i, rem, bestL, bestId);
+        };
+        def et-rmatch(dir, text, i, rem, k) = k <= 0 ? list(0 - 1, 0) : {
+            let t = et-text(read_file(et-rpath(dir, et-rkey(text, i, k))));
+            let m = (Comparable) str_len(t) == 0 ? list(0 - 1, 0) : et-rwalk(t, 0, str_len(t) / 28, text, i, rem, 0, 0 - 1);
+            head(m) < 0 ? et-rmatch(dir, text, i, rem, k - 1) : m;
+        };
+        def et-rids(dir, text, i, n, acc) = i >= n ? reverse(acc) : {
+            let m = et-rmatch(dir, text, i, n - i, n - i > 4 ? 4 : n - i);
+            head(m) < 0 ? reverse(acc) : et-rids(dir, text, i + nth(m, 1), n, cons(head(m), acc));
+        };
+        def et-encode(dir, bos, text) = {
+            let surface = dtk-gpt2-map(text);
+            cons(bos, et-rids(dir, surface, 0, str_len(surface), list()));
+        };
+        // ---- the detokenizer: id -> (offset length) -> the piece ----
+        def et-piece-of(ppath, ipath, n, id) = id < 0 || id >= n ? "" : {
+            let e = et-text(read_file_slice(ipath, id * 8, 8));
+            str_len(e) < 8 ? "" : {
+                let L = et-le32-of(e, 4);
+                L <= 0 ? "" : et-text(read_file_slice(ppath, et-le32-of(e, 0), L));
+            };
+        };
+        def et-detok(ppath, ipath, n, ids, acc) = (Comparable) len(ids) == 0 ? acc : et-detok(ppath, ipath, n, tail(ids), str_concat(acc, et-piece-of(ppath, ipath, n, head(ids))));
+        0;
+    };
+    // ---- the lane: (st bos eos loaded dir ppath ipath n) — loaded is what the KV cache holds, position by position ----
+    {
+        def et-lane-open() = et-lane-open-of("llama32-1b");
+        def et-lane-open-of(name) = {
+            let st = et-open-of(name);
+            let src = nth(st, 10);
+            let built = et-build-index(src);
+            list(st, gmt-u32(src, "tokenizer.ggml.bos_token_id"), gmt-u32(src, "tokenizer.ggml.eos_token_id"), list(), et-rdir(src), et-ppath(src), et-ipath(src), gmt-vocab-n(src));
+        };
+        def et-lane-st(lane) = nth(lane, 0);
+        def et-lane-with-loaded(lane, loaded) = list(nth(lane, 0), nth(lane, 1), nth(lane, 2), loaded, nth(lane, 4), nth(lane, 5), nth(lane, 6), nth(lane, 7));
+        def et-common(a, b, n) = (Comparable) len(a) == 0 || (Comparable) len(b) == 0 ? n : (Comparable) head(a) == head(b) ? et-common(tail(a), tail(b), n + 1) : n;
+        def et-drop(xs, n) = n <= 0 ? xs : et-drop(tail(xs), n - 1);
+        // the prompt's tokens from position pos on: embed and the layers for each, the head only on the last
+        def et-prefill-from(st, ids, pos) = (Comparable) len(ids) == 1 ? dth-forward(nth(st, 0), nth(st, 1), nth(st, 2), nth(st, 3), nth(st, 4), nth(st, 5), nth(st, 6), nth(st, 7), nth(st, 8), head(ids), pos) : {
+            dth-dq(nth(st, 0), nth(st, 6), nth(nth(st, 1), 0), head(ids) * nth(nth(st, 2), 0), nth(nth(st, 2), 0));
+            dth-passes(nth(st, 0), nth(st, 1), nth(st, 2), nth(st, 3), nth(st, 4), nth(st, 5), nth(st, 7), pos, 0, nth(nth(st, 2), 16));
+            et-prefill-from(st, tail(ids), pos + 1);
+        };
+        // the ends of a line: the file's end-of-sequence, llama3's end of turn, or the line break the prompt asked for
+        def et-ends?(eos, id) = (Comparable) id == eos || ((Comparable) id == 128009 || ((Comparable) id == 128001 || ((Comparable) id == 198 || (Comparable) id == 271)));
+        def et-gen-go(st, eos, id, pos, n, acc) = n <= 0 || et-ends?(eos, id) ? reverse(acc) : {
+            let nid = dth-forward(nth(st, 0), nth(st, 1), nth(st, 2), nth(st, 3), nth(st, 4), nth(st, 5), nth(st, 6), nth(st, 7), nth(st, 8), id, pos);
+            et-gen-go(st, eos, nid, pos + 1, n - 1, cons(id, acc));
+        };
+        // one line through the lane: (text lane). The cache holds 256 positions; a prompt that leaves no room answers ""
+        def et-say(lane, text, from, to, maxnew) = {
+            let st = et-lane-st(lane);
+            let ids = et-encode(nth(lane, 4), nth(lane, 1), et-prompt(text, from, to));
+            let room = 250 - len(ids);
+            room <= 0 ? list("", lane) : {
+                let m0 = et-common(ids, nth(lane, 3), 0);
+                let m = m0 >= len(ids) ? len(ids) - 1 : m0;
+                let first = et-prefill-from(st, et-drop(ids, m), m);
+                let gen = et-gen-go(st, nth(lane, 2), first, len(ids), maxnew > room ? room : maxnew, list());
+                list(et-cut(et-detok(nth(lane, 5), nth(lane, 6), nth(lane, 7), gen, "")), et-lane-with-loaded(lane, append(ids, gen)));
+            };
+        };
+        // ---- the streaming step: a line said while it grows ----
+        // The prompt's ids, then the ids already committed for this tongue, prefilled only past what the
+        // cache holds (the source prefix and, for the first tongue of a round, nothing more); up to maxnew
+        // new ids generated after them. Answers (ids lane): the committed ids followed by the new ones, the
+        // end id excluded. A prompt that leaves no room answers an empty list.
+        def et-say-ids(lane, text, from, to, forced, maxnew) = {
+            let st = et-lane-st(lane);
+            let ids = append(et-encode(nth(lane, 4), nth(lane, 1), et-prompt(text, from, to)), forced);
+            let room = 250 - len(ids);
+            room <= 0 ? list(list(), lane) : {
+                let m0 = et-common(ids, nth(lane, 3), 0);
+                let m = m0 >= len(ids) ? len(ids) - 1 : m0;
+                let first = et-prefill-from(st, et-drop(ids, m), m);
+                let gen = et-gen-go(st, nth(lane, 2), first, len(ids), maxnew > room ? room : maxnew, list());
+                list(append(forced, gen), et-lane-with-loaded(lane, append(ids, gen)));
+            };
+        };
+        def et-take(xs, n) = n <= 0 || (Comparable) len(xs) == 0 ? list() : cons(head(xs), et-take(tail(xs), n - 1));
+        // ---- a rendering that has begun to repeat itself ----
+        // Greedy decoding falls into cycles, and the streaming commitment amplifies one: two consecutive
+        // renderings of a growing line agree on the repetition, so the repetition is committed, forced on
+        // the next round, and grown again — the commitment only grows, so a loop entered is a loop kept.
+        // Witnessed in a real room, 2026-09-08: Persian said `... به عنوان someone` around thirty times
+        // inside one closed line, and an earlier hour saw `BODY BODY BODY` and `k k k k`. A cap on new
+        // ids bounds the rate at which a loop grows and never its total.
+        // So a rendering is cut where its own cycle begins: a tail that is three copies of the same block
+        // (a block of 1 to 8 ids, the shortest such block winning) is walked back to the block's first
+        // copy, that copy is kept, and everything after it is dropped. Three copies rather than two
+        // because a real sentence repeats a word or a pair — "no, no" — and does not say it three times.
+        // The healthy case costs the scan alone: at most 24 walks over the tail and no answer.
+        def et-heads-eq(a, b, p) = p <= 0 ? 1 : (Comparable) len(a) == 0 || (Comparable) len(b) == 0 ? 0 : (Comparable) head(a) == head(b) ? et-heads-eq(tail(a), tail(b), p - 1) : 0;
+        def et-cycle?(ids, n, p) = n < 3 * p ? 0 : (Comparable) et-heads-eq(et-drop(ids, n - p), et-drop(ids, n - 2 * p), p) == 1 && (Comparable) et-heads-eq(et-drop(ids, n - 2 * p), et-drop(ids, n - 3 * p), p) == 1 ? 1 : 0;
+        def et-loop-p(ids, n, p) = p > 8 ? 0 : (Comparable) et-cycle?(ids, n, p) == 1 ? p : et-loop-p(ids, n, p + 1);
+        // the start of the first copy of the block that ends at `at`
+        def et-loop-back(ids, p, at) = at - p < 0 ? at : (Comparable) et-heads-eq(et-drop(ids, at - p), et-drop(ids, at), p) == 1 ? et-loop-back(ids, p, at - p) : at;
+        def et-loopcut(ids) = {
+            let n = len(ids);
+            let p = et-loop-p(ids, n, 1);
+            (Comparable) p == 0 ? ids : et-take(ids, et-loop-back(ids, p, n - p) + p);
+        };
+        def et-looped?(ids) = len(et-loopcut(ids)) < len(ids) ? 1 : 0;
+        // local agreement: what two consecutive renderings of a growing source agree on is committed and
+        // forced on the next; both begin with what was committed before, so the commitment only grows.
+        // (committed prev) -> (ids agreed lane): ids is this rendering, agreed the prefix it shares with prev.
+        def et-say-step(lane, text, from, to, committed, prev, maxnew) = {
+            let r = et-say-ids(lane, text, from, to, committed, maxnew);
+            list(head(r), et-take(head(r), et-common(head(r), prev, 0)), nth(r, 1));
+        };
+        def et-ids-text(lane, ids) = et-cut(et-detok(nth(lane, 5), nth(lane, 6), nth(lane, 7), ids, ""));
+        // a rendering the cut has already reached has ENDED, whatever the model's own end ids say. The
+        // prompt asks for one line, and `et-cut` takes the answer at the first line break or the file's
+        // own `<|` marker — but a line break arrives inside a PIECE far more often than as one of the
+        // four ids `et-ends?` knows, and a round that does not notice goes on writing a second paragraph
+        // nobody will ever read. Measured on a real sentence, 2026-09-08: Indonesian's words were final
+        // at 563 ms and its round ran to 898, so 208 ms of a 898 ms line — and the whole wait between the
+        // last tongue's words and the frame — was spent generating what the cut then threw away.
+        def et-ids-cut?(lane, ids) = {
+            let raw = et-detok(nth(lane, 5), nth(lane, 6), nth(lane, 7), ids, "");
+            str_find(raw, byte_to_str(10), 0) >= 0 || str_find(raw, "<|", 0) >= 0 ? 1 : 0;
+        };
+        0;
+    };
+    // ---- the batched lane: the tongues as M sequences in one decode step (dense-multi), each its own KV bank ----
+    // A round feeds every sequence its prompt (only past what its bank holds) and then its own answers, in
+    // lock-step, until each has ended or generated maxnew; the round is resumable in chunks of k steps so a
+    // caller can show the renderings while they grow. Refused at open outside dense-multi's radius
+    // (et-mlane-ok? false) — the caller then offers the tongues one after another through et-say-step.
+    {
+        def et-nils(m) = m <= 0 ? list() : cons(list(), et-nils(m - 1));
+        // (st bos eos loadeds dir ppath ipath n M): loadeds is what each bank holds, position by position
+        def et-mlane-open(m) = {
+            let st = dm-open(mr-path(mr-find("llama32-1b")), 256, m);
+            let src = nth(st, 10);
+            let built = et-build-index(src);
+            list(st, gmt-u32(src, "tokenizer.ggml.bos_token_id"), gmt-u32(src, "tokenizer.ggml.eos_token_id"), et-nils(m), et-rdir(src), et-ppath(src), et-ipath(src), gmt-vocab-n(src), m);
+        };
+        def et-mlane-ok?(ml) = dm-ok?(nth(ml, 0));
+        def et-mlane-with-loaded(ml, loadeds) = list(nth(ml, 0), nth(ml, 1), nth(ml, 2), loadeds, nth(ml, 4), nth(ml, 5), nth(ml, 6), nth(ml, 7), nth(ml, 8));
+        // a sequence in a round: (ids c rem gen ended last) — ids the prompt then the forced prefix, c the first
+        // position its bank does not hold, rem the ids it feeds from c on, gen what it generated (no end id),
+        // ended whether an end id came, last the id it feeds next. Empty ids, or more than the bank's room: it sits
+        // out (feeds bos at 0, its bank forgotten).
+        def et-mseq(ids, loaded, bos) = (Comparable) len(ids) == 0 || len(ids) > 250 ? list(list(), 0, 0, list(), 1, bos) : {
+            let c0 = et-common(ids, loaded, 0);
+            let c = c0 >= len(ids) ? len(ids) - 1 : c0;
+            list(ids, c, len(ids) - c, list(), 0, bos);
+        };
+        def et-mseqs(idss, loadeds, bos) = (Comparable) len(idss) == 0 ? list() : cons(et-mseq(head(idss), head(loadeds), bos), et-mseqs(tail(idss), tail(loadeds), bos));
+        def et-mfeed(seqs, s) = (Comparable) len(seqs) == 0 ? list() : cons({
+            let q = head(seqs);
+            s < nth(q, 2) ? nth(nth(q, 0), nth(q, 1) + s) : nth(q, 5);
+        }, et-mfeed(tail(seqs), s));
+        def et-mposs(seqs, s) = (Comparable) len(seqs) == 0 ? list() : cons({
+            let q = head(seqs);
+            (Comparable) len(nth(q, 0)) == 0 ? 0 : nth(q, 1) + s;
+        }, et-mposs(tail(seqs), s));
+        // the answers of step s: from the step that fed a sequence's last prompt id on, its answer is generated
+        def et-mtake(seqs, outs, s, eos, maxnew) = (Comparable) len(seqs) == 0 ? list() : cons({
+            let q = head(seqs);
+            let o = head(outs);
+            s >= nth(q, 2) - 1 && ((Comparable) nth(q, 4) == 0 && (len(nth(q, 0)) > 0 && len(nth(q, 3)) < maxnew)) ? et-ends?(eos, o) ? list(nth(q, 0), nth(q, 1), nth(q, 2), nth(q, 3), 1, o) : list(nth(q, 0), nth(q, 1), nth(q, 2), append(nth(q, 3), list(o)), 0, o) : list(nth(q, 0), nth(q, 1), nth(q, 2), nth(q, 3), nth(q, 4), o);
+        }, et-mtake(tail(seqs), tail(outs), s, eos, maxnew));
+        // after s steps a sequence is done when its prompt is fed and it ended or has maxnew
+        def et-mdone?(seqs, s, maxnew) = (Comparable) len(seqs) == 0 ? 1 : {
+            let q = head(seqs);
+            s >= nth(q, 2) && ((Comparable) nth(q, 4) == 1 || len(nth(q, 3)) >= maxnew) ? et-mdone?(tail(seqs), s, maxnew) : 0;
+        };
+        // up to k more steps of a round: (seqs s done)
+        def et-mround-go(ml, seqs, s, k, maxnew) = (Comparable) et-mdone?(seqs, s, maxnew) == 1 ? list(seqs, s, 1) : k <= 0 ? list(seqs, s, 0) : {
+            let outs = dm-step(nth(ml, 0), et-mfeed(seqs, s), et-mposs(seqs, s));
+            et-mround-go(ml, et-mtake(seqs, outs, s, nth(ml, 2), maxnew), s + 1, k - 1, maxnew);
+        };
+        def et-mround-open(ml, idss) = et-mseqs(idss, nth(ml, 3), nth(ml, 1));
+        def et-mgens(seqs) = (Comparable) len(seqs) == 0 ? list() : cons(nth(head(seqs), 3), et-mgens(tail(seqs)));
+        // whether each sequence stopped at an end id rather than at the caller's cap. A tongue that
+        // ended has said the whole of its answer to this prompt: greedy decoding is one answer to one
+        // prompt, so the same prompt fed again answers the same ids and the same end. A caller that
+        // keeps this bit does not pay for a line the lane has already finished saying.
+        // A sequence that SAT OUT — no ids, or a prompt past the bank's room — carries the same born
+        // `ended` bit as one that reached an end id, and it must not be read as an answer: it says 0.
+        def et-mends(seqs) = (Comparable) len(seqs) == 0 ? list() : cons({
+            let q = head(seqs);
+            (Comparable) len(nth(q, 0)) == 0 ? 0 : nth(q, 4);
+        }, et-mends(tail(seqs)));
+        // what each bank holds after S steps: the ids, then the generated ids that were fed (S - rem of them at
+        // most); a sequence that sat out keeps what it held (bos at position 0 is what every bank holds there)
+        def et-mloaded(seqs, S, olds) = (Comparable) len(seqs) == 0 ? list() : cons({
+            let q = head(seqs);
+            (Comparable) len(nth(q, 0)) == 0 ? head(olds) : append(nth(q, 0), et-take(nth(q, 3), S - nth(q, 2)));
+        }, et-mloaded(tail(seqs), S, tail(olds)));
+        def et-mround-close(ml, seqs, S) = et-mlane-with-loaded(ml, et-mloaded(seqs, S, nth(ml, 3)));
+        // a whole round at once: (gens ml) — gens[m] the forced prefix is NOT included; the caller keeps it
+        def et-mround(ml, idss, maxnew) = {
+            let r = et-mround-go(ml, et-mround-open(ml, idss), 0, 100000, maxnew);
+            list(et-mgens(head(r)), et-mround-close(ml, head(r), nth(r, 1)));
+        };
+        0;
+    };
+}

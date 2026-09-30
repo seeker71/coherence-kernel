@@ -1,154 +1,99 @@
-; rag-retrieve.fk — native ranking for neural-distance and semantic-overlap vectors.
-;
-; preludes: form-stdlib/core.fk
-;
-; The offline oracle (form-cli tier 1: a local LLM) can reason but is blind to the
-; body — it cannot recall the 994 recipes / specs / concepts / substrate cells it
-; lives inside. This recipe is the retrieval that gives it memory: an INDEX of
-; (id, embedding) entries — each embedding the quantized vector (ints 0..1000) a
-; local embedder produced for one doc — is ranked against a query embedding by L1
-; distance, and the nearest ids name the docs to ground the oracle's answer in.
-;
-; The vectors are DATA. The local embedder (nomic-embed-text via ollama) is the
-; only host-IO — a bootstrap carrier, air-gap-clean once the model is pulled. The
-; RANKING is this recipe: pure list arithmetic (abs, L1 sum, min-walk), so it runs
-; on all four kernels — the same nearest answer on Go, Rust, TS, and fkwu. The
-; content-addressed view (two identical embeddings intern to one NodeID) is a
-; separate lane; this lane is the ranking, kept four-way.
-;
-; Two honest lanes share the entry shape. Quantized neural vectors use L1
-; nearest. form-semantic-v2 vectors are sparse dual-hash code pairs. Semantic
-; overlap adds two only when BOTH independent codes for a query feature occur in
-; the document; a single collision contributes nothing. Equal overlap prefers
-; the smaller sparse document mass (len), then the first replay-stable entry.
-;
-
-(do
-    ; an index entry: (id vector-ints [source-path]). Grounded entries carry the
-    ; source lens as the third field while identity remains the NodeID in field 0.
-    (defn rag-entry (id vec) (list id vec))
-    (defn rag-grounded-entry (node-id source-path vec) (list node-id vec source-path))
-    (defn rag-grounded-binding-entry (node-id content-node-id source-path key answer-key answer-hex vec admitted)
-        (list node-id vec source-path content-node-id key answer-key answer-hex admitted))
-    (defn rag-id  (e) (nth e 0))
-    (defn rag-vec (e) (nth e 1))
-    (defn rag-source-path (e) (if (gt (len e) 2) (nth e 2) ""))
-    (defn rag-content-node-id (e) (if (gt (len e) 3) (nth e 3) ""))
-    (defn rag-key (e) (if (gt (len e) 4) (nth e 4) ""))
-    (defn rag-answer-key (e) (if (gt (len e) 5) (nth e 5) ""))
-    (defn rag-answer-hex (e) (if (gt (len e) 6) (nth e 6) ""))
-    (defn rag-admitted? (e) (if (gt (len e) 7) (nth e 7) 0))
-    (defn rag-persisted-source-sha256 (e) (if (gt (len e) 8) (nth e 8) ""))
-
-    ; --- L1 distance between two quantized vectors (pure arithmetic) ---
-    (defn rag-abs (n) (if (lt n 0) (sub 0 n) n))
-    (defn rag-l1 (a b)
-        (if (eq (len a) 0) 0
-            (if (eq (len b) 0) 0
-                (add (rag-abs (sub (head a) (head b)))
-                     (rag-l1 (tail a) (tail b))))))
-
-    ; distance from a query vector to an entry
-    (defn rag-dist (qvec e) (rag-l1 qvec (rag-vec e)))
-
-    ; --- NEAREST: the entry whose vector is L1-closest to the query ---
-    ; mirror nearest-shape's min-walk; ties keep the FIRST entry (oldest wins).
-    (defn rag-nearest-loop (qvec entries best best-d)
-        (if (eq (len entries) 0) best
-            (if (eq (len best) 0)
-                (rag-nearest-loop qvec (tail entries)
-                                  (head entries) (rag-dist qvec (head entries)))
-                (if (lt (rag-dist qvec (head entries)) best-d)
-                    (rag-nearest-loop qvec (tail entries)
-                                      (head entries) (rag-dist qvec (head entries)))
-                    (rag-nearest-loop qvec (tail entries) best best-d)))))
-    (defn rag-nearest (qvec entries) (rag-nearest-loop qvec entries (empty) 0))
-    (defn rag-nearest-id (qvec entries) (rag-id (rag-nearest qvec entries)))
-
-    ; --- TOP-K: greedy nearest, remove, repeat. Returns ids, nearest-first. ---
-    (defn rag-remove (id entries)
-        (if (eq (len entries) 0) (empty)
-            (if (str_eq (rag-id (head entries)) id)
-                (tail entries)
-                (cons (head entries) (rag-remove id (tail entries))))))
-
-    (defn rag-rev-loop (in out)
-        (if (eq (len in) 0) out (rag-rev-loop (tail in) (cons (head in) out))))
-
-    (defn rag-topk-loop (qvec entries k acc)
-        (if (eq k 0) acc
-            (if (eq (len entries) 0) acc
-                (do (let nid (rag-nearest-id qvec entries))
-                    (rag-topk-loop qvec (rag-remove nid entries) (sub k 1) (cons nid acc))))))
-    ; nearest-first: the loop conses nearest-last, so reverse once at the end.
-    (defn rag-topk (qvec entries k) (rag-rev-loop (rag-topk-loop qvec entries k (empty)) (empty)))
-
-    ; --- SEMANTIC OVERLAP: pair-atomic coverage over sparse exact codes. ---
-    (defn rag-min (a b) (if (lt a b) a b))
-    (defn rag-sum-loop (xs acc)
-        (if (eq (len xs) 0) acc
-            (rag-sum-loop (tail xs) (add acc (head xs)))))
-    (defn rag-sum (xs) (rag-sum-loop xs 0))
-    (defn rag-pair-in? (code-a code-b codes)
-        (if (lt (len codes) 2) 0
-            (if (and (eq code-a (head codes))
-                     (eq code-b (head (tail codes)))) 1
-                (rag-pair-in? code-a code-b (tail (tail codes))))))
-    (defn rag-overlap (query-codes doc-codes)
-        (if (lt (len query-codes) 2) 0
-            (do
-                (let code-a (head query-codes))
-                (let code-b (head (tail query-codes)))
-                (add
-                    (if (eq (rag-pair-in? code-a code-b doc-codes) 1) 2 0)
-                    (rag-overlap (tail (tail query-codes)) doc-codes)))))
-    (defn rag-overlap-score (qvec entry)
-        (rag-overlap qvec (rag-vec entry)))
-
-    ; Higher overlap wins. Equal overlap chooses the smaller sparse document
-    ; (less unrelated mass); a complete tie keeps the existing/first entry.
-    (defn rag-overlap-better? (qvec candidate best)
-        (do
-            (let cs (rag-overlap-score qvec candidate))
-            (let bs (rag-overlap-score qvec best))
-            (if (gt cs bs) 1
-                (if (eq cs bs)
-                    (if (lt (len (rag-vec candidate)) (len (rag-vec best))) 1 0)
-                    0))))
-    (defn rag-best-overlap-loop (qvec entries best)
-        (if (eq (len entries) 0) best
-            (if (eq (len best) 0)
-                (rag-best-overlap-loop qvec (tail entries) (head entries))
-                (if (eq (rag-overlap-better? qvec (head entries) best) 1)
-                    (rag-best-overlap-loop qvec (tail entries) (head entries))
-                    (rag-best-overlap-loop qvec (tail entries) best)))))
-    (defn rag-best-overlap (qvec entries)
-        (rag-best-overlap-loop qvec entries (empty)))
-    (defn rag-best-overlap-id (qvec entries)
-        (if (eq (len entries) 0) "" (rag-id (rag-best-overlap qvec entries))))
-
-    (defn rag-topk-overlap-loop (qvec entries k acc)
-        (if (or (eq k 0) (eq (len entries) 0)) acc
-            (do (let best (rag-best-overlap qvec entries))
-                (rag-topk-overlap-loop qvec
-                    (rag-remove (rag-id best) entries)
-                    (sub k 1)
-                    (cons best acc)))))
-    ; Returns entries, not only ids, because grounding must retain source-path and
-    ; admission evidence for the selected row.
-    (defn rag-topk-overlap (qvec entries k)
-        (rag-rev-loop (rag-topk-overlap-loop qvec entries k (empty)) (empty)))
-
-    (defn rag-runner-overlap-score (qvec entries)
-        (do (let top (rag-topk-overlap qvec entries 2))
-            (if (lt (len top) 2) 0 (rag-overlap-score qvec (nth top 1)))))
-    ; Independent top-vs-runner confidence, 0..100. Coverage is NOT reused as
-    ; confidence: a tie is 0 even when both candidates cover the whole query.
-    (defn rag-overlap-confidence (qvec entries)
-        (if (eq (len entries) 0) 0
-            (do
-                (let best-score (rag-overlap-score qvec (rag-best-overlap qvec entries)))
-                (let runner-score (rag-runner-overlap-score qvec entries))
-                (if (eq best-score 0) 0
-                    (div (mul (sub best-score runner-score) 100) best-score)))))
-    0)
+// rag-retrieve.fk — native ranking for neural-distance and semantic-overlap vectors.
+//
+// preludes: form-stdlib/core.fk
+//
+// The offline oracle (form-cli tier 1: a local LLM) can reason but is blind to the
+// body — it cannot recall the 994 recipes / specs / concepts / substrate cells it
+// lives inside. This recipe is the retrieval that gives it memory: an INDEX of
+// (id, embedding) entries — each embedding the quantized vector (ints 0..1000) a
+// local embedder produced for one doc — is ranked against a query embedding by L1
+// distance, and the nearest ids name the docs to ground the oracle's answer in.
+//
+// The vectors are DATA. The local embedder (nomic-embed-text via ollama) is the
+// only host-IO — a bootstrap carrier, air-gap-clean once the model is pulled. The
+// RANKING is this recipe: pure list arithmetic (abs, L1 sum, min-walk), so it runs
+// on all four kernels — the same nearest answer on Go, Rust, TS, and fkwu. The
+// content-addressed view (two identical embeddings intern to one NodeID) is a
+// separate lane; this lane is the ranking, kept four-way.
+//
+// Two honest lanes share the entry shape. Quantized neural vectors use L1
+// nearest. form-semantic-v2 vectors are sparse dual-hash code pairs. Semantic
+// overlap adds two only when BOTH independent codes for a query feature occur in
+// the document; a single collision contributes nothing. Equal overlap prefers
+// the smaller sparse document mass (len), then the first replay-stable entry.
+//
+section [form.bml] {
+    // an index entry: (id vector-ints [source-path]). Grounded entries carry the
+    // source lens as the third field while identity remains the NodeID in field 0.
+    def rag-entry(id, vec) = list(id, vec);
+    def rag-grounded-entry(node-id, source-path, vec) = list(node-id, vec, source-path);
+    def rag-grounded-binding-entry(node-id, content-node-id, source-path, key, answer-key, answer-hex, vec, admitted) = list(node-id, vec, source-path, content-node-id, key, answer-key, answer-hex, admitted);
+    def rag-id(e) = nth(e, 0);
+    def rag-vec(e) = nth(e, 1);
+    def rag-source-path(e) = len(e) > 2 ? nth(e, 2) : "";
+    def rag-content-node-id(e) = len(e) > 3 ? nth(e, 3) : "";
+    def rag-key(e) = len(e) > 4 ? nth(e, 4) : "";
+    def rag-answer-key(e) = len(e) > 5 ? nth(e, 5) : "";
+    def rag-answer-hex(e) = len(e) > 6 ? nth(e, 6) : "";
+    def rag-admitted?(e) = len(e) > 7 ? nth(e, 7) : 0;
+    def rag-persisted-source-sha256(e) = len(e) > 8 ? nth(e, 8) : "";
+    // --- L1 distance between two quantized vectors (pure arithmetic) ---
+    def rag-abs(n) = n < 0 ? 0 - n : n;
+    def rag-l1(a, b) = (Comparable) len(a) == 0 ? 0 : (Comparable) len(b) == 0 ? 0 : rag-abs(head(a) - head(b)) + rag-l1(tail(a), tail(b));
+    // distance from a query vector to an entry
+    def rag-dist(qvec, e) = rag-l1(qvec, rag-vec(e));
+    // --- NEAREST: the entry whose vector is L1-closest to the query ---
+    // mirror nearest-shape's min-walk; ties keep the FIRST entry (oldest wins).
+    def rag-nearest-loop(qvec, entries, best, best-d) = (Comparable) len(entries) == 0 ? best : (Comparable) len(best) == 0 ? rag-nearest-loop(qvec, tail(entries), head(entries), rag-dist(qvec, head(entries))) : rag-dist(qvec, head(entries)) < best-d ? rag-nearest-loop(qvec, tail(entries), head(entries), rag-dist(qvec, head(entries))) : rag-nearest-loop(qvec, tail(entries), best, best-d);
+    def rag-nearest(qvec, entries) = rag-nearest-loop(qvec, entries, empty(), 0);
+    def rag-nearest-id(qvec, entries) = rag-id(rag-nearest(qvec, entries));
+    // --- TOP-K: greedy nearest, remove, repeat. Returns ids, nearest-first. ---
+    def rag-remove(id, entries) = (Comparable) len(entries) == 0 ? empty() : (String) rag-id(head(entries)) == id ? tail(entries) : cons(head(entries), rag-remove(id, tail(entries)));
+    def rag-rev-loop(in, out) = (Comparable) len(in) == 0 ? out : rag-rev-loop(tail(in), cons(head(in), out));
+    def rag-topk-loop(qvec, entries, k, acc) = (Comparable) k == 0 ? acc : (Comparable) len(entries) == 0 ? acc : {
+        let nid = rag-nearest-id(qvec, entries);
+        rag-topk-loop(qvec, rag-remove(nid, entries), k - 1, cons(nid, acc));
+    };
+    // nearest-first: the loop conses nearest-last, so reverse once at the end.
+    def rag-topk(qvec, entries, k) = rag-rev-loop(rag-topk-loop(qvec, entries, k, empty()), empty());
+    // --- SEMANTIC OVERLAP: pair-atomic coverage over sparse exact codes. ---
+    def rag-min(a, b) = a < b ? a : b;
+    def rag-sum-loop(xs, acc) = (Comparable) len(xs) == 0 ? acc : rag-sum-loop(tail(xs), acc + head(xs));
+    def rag-sum(xs) = rag-sum-loop(xs, 0);
+    def rag-pair-in?(code-a, code-b, codes) = len(codes) < 2 ? 0 : (Comparable) code-a == head(codes) && (Comparable) code-b == head(tail(codes)) ? 1 : rag-pair-in?(code-a, code-b, tail(tail(codes)));
+    def rag-overlap(query-codes, doc-codes) = len(query-codes) < 2 ? 0 : {
+        let code-a = head(query-codes);
+        let code-b = head(tail(query-codes));
+        ((Comparable) rag-pair-in?(code-a, code-b, doc-codes) == 1 ? 2 : 0) + rag-overlap(tail(tail(query-codes)), doc-codes);
+    };
+    def rag-overlap-score(qvec, entry) = rag-overlap(qvec, rag-vec(entry));
+    // Higher overlap wins. Equal overlap chooses the smaller sparse document
+    // (less unrelated mass); a complete tie keeps the existing/first entry.
+    def rag-overlap-better?(qvec, candidate, best) = {
+        let cs = rag-overlap-score(qvec, candidate);
+        let bs = rag-overlap-score(qvec, best);
+        cs > bs ? 1 : (Comparable) cs == bs ? len(rag-vec(candidate)) < len(rag-vec(best)) ? 1 : 0 : 0;
+    };
+    def rag-best-overlap-loop(qvec, entries, best) = (Comparable) len(entries) == 0 ? best : (Comparable) len(best) == 0 ? rag-best-overlap-loop(qvec, tail(entries), head(entries)) : (Comparable) rag-overlap-better?(qvec, head(entries), best) == 1 ? rag-best-overlap-loop(qvec, tail(entries), head(entries)) : rag-best-overlap-loop(qvec, tail(entries), best);
+    def rag-best-overlap(qvec, entries) = rag-best-overlap-loop(qvec, entries, empty());
+    def rag-best-overlap-id(qvec, entries) = (Comparable) len(entries) == 0 ? "" : rag-id(rag-best-overlap(qvec, entries));
+    def rag-topk-overlap-loop(qvec, entries, k, acc) = (Comparable) k == 0 || (Comparable) len(entries) == 0 ? acc : {
+        let best = rag-best-overlap(qvec, entries);
+        rag-topk-overlap-loop(qvec, rag-remove(rag-id(best), entries), k - 1, cons(best, acc));
+    };
+    // Returns entries, not only ids, because grounding must retain source-path and
+    // admission evidence for the selected row.
+    def rag-topk-overlap(qvec, entries, k) = rag-rev-loop(rag-topk-overlap-loop(qvec, entries, k, empty()), empty());
+    def rag-runner-overlap-score(qvec, entries) = {
+        let top = rag-topk-overlap(qvec, entries, 2);
+        len(top) < 2 ? 0 : rag-overlap-score(qvec, nth(top, 1));
+    };
+    // Independent top-vs-runner confidence, 0..100. Coverage is NOT reused as
+    // confidence: a tie is 0 even when both candidates cover the whole query.
+    def rag-overlap-confidence(qvec, entries) = (Comparable) len(entries) == 0 ? 0 : {
+        let best-score = rag-overlap-score(qvec, rag-best-overlap(qvec, entries));
+        let runner-score = rag-runner-overlap-score(qvec, entries);
+        (Comparable) best-score == 0 ? 0 : (best-score - runner-score) * 100 / best-score;
+    };
+    0;
+}

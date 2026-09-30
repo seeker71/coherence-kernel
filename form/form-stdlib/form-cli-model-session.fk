@@ -1,495 +1,322 @@
-; form-cli-model-session.fk — one resident Qwen context across executable
-; Form observations, without re-encoding model output the body already holds.
-;
-; A Qwen transformer consumes integer embedding IDs. That boundary remains the
-; model's physical shape. What this cell removes is the avoidable round trip:
-;
-;   generated ids -> decoded bytes -> whole transcript -> generated ids again
-;
-; The initial user turn is encoded once. Generation then returns both decoded
-; text and the exact IDs that produced it while retaining the same q38 stream
-; state and KV rows. A Form observation encodes only its newly born bytes plus
-; the small ChatML role crossing, prefills those IDs at the current position,
-; and resumes from the first predicted reply ID. BML/BMF still consumes the
-; decoded bytes directly through its own cursor; no tokenizer pre-step shapes
-; that grammar.
-;
-; The final generated ID is deliberately held pending. q38-forward consumes an
-; ID at a position and predicts the next one, so the newest prediction has not
-; entered KV yet. Before an observation is injected, that pending ID is placed
-; exactly once. If it is already a stop ID, it supplies the assistant close;
-; otherwise the close ID is appended after it. This is the same seed boundary
-; whose earlier omission the live heed cursor exposed.
-;
-; This cell owns stream state, not weights: the surrounding q38 context and the
-; per-conversation state are both explicit and both released. No persistence,
-; model weight update, or remote call is implied.
-;
-; preludes: form-stdlib/form-cli-model-generate.fk form-stdlib/model-registry.bml form-stdlib/bml/form-cli-model-admission.bml form-stdlib/bml/form-cli-model-observation.bml form-stdlib/bml/form-cli-model-adapter.bml
-; preludes: form-stdlib/bml/form-cli-model-sampling.bml
-
-(do
-    ; session = tag status reason path src ctx sts maxpos pos pending
-    ;           stopped prompt-ids generated-ids injected-ids observation-count
-    (defn fcms-session (status reason path src ctx sts maxpos pos pending stopped
-                        prompt-ids generated-ids injected-ids observations)
-        (list "form-cli-model-session-v1" status reason path src ctx sts maxpos
-              pos pending stopped prompt-ids generated-ids injected-ids observations))
-    (defn fcms-status (s) (nth s 1))
-    (defn fcms-reason (s) (nth s 2))
-    (defn fcms-path (s) (nth s 3))
-    (defn fcms-src (s) (nth s 4))
-    (defn fcms-ctx (s) (nth s 5))
-    (defn fcms-sts (s) (nth s 6))
-    (defn fcms-maxpos (s) (nth s 7))
-    (defn fcms-pos (s) (nth s 8))
-    (defn fcms-pending (s) (nth s 9))
-    (defn fcms-stopped? (s) (nth s 10))
-    (defn fcms-prompt-ids (s) (nth s 11))
-    (defn fcms-generated-ids (s) (nth s 12))
-    (defn fcms-injected-ids (s) (nth s 13))
-    (defn fcms-observations (s) (nth s 14))
-    (defn fcms-live? (s) (if (str_eq (fcms-status s) "live") 1 0))
-    (defn fcms-pending? (s) (if (ge (fcms-pending s) 0) 1 0))
-    ; Status and ownership are deliberately separate. A context-window refusal
-    ; can make the conversational operation `nothing` while the already-opened
-    ; context and stream state still need their physical release.
-    (defn fcms-resident? (s)
-        (if (and (gt (len (fcms-ctx s)) 0) (gt (len (fcms-sts s)) 0)) 1 0))
-
-    (defn fcms-none (reason)
-        (fcms-session "nothing" reason "" "" (empty) (empty) 0 0 -1 0
-                      0 0 0 0))
-    (defn fcms-with-stream (s pos pending stopped generated injected observations)
-        (fcmd-inherit s (fcms-session (fcms-status s) (fcms-reason s) (fcms-path s)
-            (fcms-src s) (fcms-ctx s) (fcms-sts s) (fcms-maxpos s)
-            pos pending stopped (fcms-prompt-ids s) generated injected observations)))
-    (defn fcms-refuse (s reason)
-        (fcmd-inherit s (fcms-session "nothing" reason (fcms-path s)
-            (fcms-src s) (fcms-ctx s) (fcms-sts s) (fcms-maxpos s)
-            (fcms-pos s) (fcms-pending s) (fcms-stopped? s)
-            (fcms-prompt-ids s) (fcms-generated-ids s)
-            (fcms-injected-ids s) (fcms-observations s))))
-    (defn fcms-forward (s id pos)
-        (fcmd-forward (fcms-ctx s) (fcms-sts s) (fcmd-carrier s) id pos))
-    (defn fcms-refresh-head (s)
-        (do
-            (let pending (fcmd-pending (fcms-ctx s) (fcmd-carrier s) (fcms-pending s)))
-            (let next (fcms-with-stream s (fcms-pos s) pending 0
-                (fcms-generated-ids s) (fcms-injected-ids s) (fcms-observations s)))
-            (if (lt pending 0) (fcms-refuse next "adapter-head-refused") next)))
-    (defn fcms-attach-adapter (s path)
-        (if (not (fcms-live? s)) s
-            (if (not (nil? (fcmd-carrier s))) (fcms-refuse s "adapter-already-attached")
-            (if (or (gt (fcms-generated-ids s) 0) (gt (fcms-observations s) 0))
-                (fcms-refuse s "adapter-admission-requires-fresh-session")
-                (do
-                    (let admitted (fcmd-admit (fcms-ctx s) path))
-                    (let owned (fcmd-with-carrier s (nth admitted 2)))
-                    (if (eq (head admitted) 1) (fcms-refresh-head owned)
-                        (fcms-refuse owned (nth admitted 1))))))))
-    (defn fcms-open-adapted (path prompt maxpos profile adapter-path)
-        (fcms-attach-adapter (fcms-open-with-profile path prompt maxpos profile) adapter-path))
-
-    ; The API names what is and is not encoded. A live observation can report
-    ; these strings without reproducing model or user content.
-    (defn fcms-initial-encode-scope () "initial-user-turn-once")
-    (defn fcms-resume-encode-scope () "new-observation-bytes-and-role-crossing-only")
-    (defn fcms-inline-bml-encode-scope ()
-        "pending-generated-id-then-new-bml-bytes-no-role-replay")
-    (defn fcms-generated-id-policy () "carry-original-generated-ids-and-kv")
-    (defn fcms-model-executed-form? () 0)
-    (defn fcms-rejection-pending-policy ()
-        "discard-uncommitted-pending-id-before-typed-observation")
-
-    ; The living peer does not receive a made-up context width.  Its ceiling is
-    ; read from the selected sealed GGUF, the same source that the carrier will
-    ; open.  Absence is a typed local refusal, never an occasion to use remote.
-    (defn fcms-artifact-context-capacity-from-src (src)
-        (do
-            (let arch (fcmg-arch src))
-            (if (str_eq arch "") 0
-                (gmt-u32 src (q38-key arch "context_length")))))
-    (defn fcms-open-resident-agent (path prompt)
-        (if (str_eq path "") (fcms-none "model-path-absent")
-            (do
-                (let src (fcmg-src path))
-                (let capacity (fcms-artifact-context-capacity-from-src src))
-                (if (le capacity 0)
-                    (fcms-none "artifact-declared-context-absent")
-                    (fcms-open path prompt capacity)))))
-
-    (defn fcms-open-context
-        (path src maxpos prompt-count cursor ids live-cursor x iced)
-        (do
-            (let span (fcma-span prompt-count))
-            (let _span (q38oo-stage (str_concat "model-session-prefill-span-" (int_to_str span)) 8388624))
-            (let _open-begin (q38oo-stage "model-session-context-open-begin" 8388620))
-            (let ctx (if (eq iced 1)
-                (qsx-open-span path maxpos x span) (q38-open-span path maxpos span)))
-            (let _open-ready (q38oo-stage "model-session-context-open-ready" 8388620))
-            (if (not (eq (q38-context-ok? ctx) 1))
-                (do
-                    (let closed (if (lt (len ctx) 10) 0
-                        (q38-close ctx (empty))))
-                    (fcms-none "model-context-open-refused"))
-                (do
-                    (let _state-begin (q38oo-stage "model-session-state-begin" 8388621))
-                    (let sts (q38-new-state (nth ctx 2)))
-                    (let _state-ready (q38oo-stage "model-session-state-ready" 8388621))
-                    (if (not (eq (q38-state-ok? sts) 1))
-                        (do
-                            (let state-closed (q38-free-state sts))
-                            (let context-closed (q38-close ctx (empty)))
-                            (fcms-none "model-stream-state-refused"))
-                        (if (eq live-cursor 1)
-                            (do
-                                (let _prefill-begin (q38oo-stage "model-session-prefill-begin" 8388622))
-                                (let pf (fcmg-live-prefill-span ctx sts cursor))
-                                (let _prefill-ready (q38oo-stage
-                                    (if (str_eq (nth pf 1) "ok") "model-session-prefill-ready"
-                                        "model-session-prefill-refused") 8388622))
-                                (if (not (str_eq (nth pf 1) "ok"))
-                                    (fcms-session "nothing" (nth pf 5)
-                                        path src ctx sts maxpos (nth pf 3)
-                                        -1 0 prompt-count 0 0 0)
-                                    (fcms-session "live" "opened-live-cursor"
-                                        path src ctx sts maxpos (nth pf 3)
-                                        (nth pf 2) 0 prompt-count 0 0 0)))
-                            (do
-                                (let _prefill-begin (q38oo-stage "model-session-prefill-begin" 8388622))
-                                (let pf (q38-prefill-span-sliced
-                                    (nth ctx 0) (nth ctx 1) (nth ctx 2)
-                                    (nth ctx 3) sts (nth ctx 4) (nth ctx 5)
-                                    (nth ctx 6) ids 0 span))
-                                (let complete (and (ge (nth pf 0) 0) (eq (nth pf 1) prompt-count)))
-                                (let _prefill-ready (q38oo-stage
-                                    (if complete "model-session-prefill-ready"
-                                        "model-session-prefill-refused") 8388622))
-                                (fcms-session (if complete "live" "nothing")
-                                    (if complete "opened-scanner-fallback" "model-prefill-refused")
-                                    path src ctx sts maxpos (nth pf 1) (nth pf 0) 0
-                                    prompt-count 0 0 0))))))))
-
-    ; The PROFILE names which chat shape wraps the prompt: "full" arms
-    ; the teach-layer control grammar (its <FAIL> is a typed decline, not
-    ; model failure); "knowledge-query" is the plain chat segments with
-    ; no control overlay — the shape for probes and comparisons that
-    ; want the model's own words. fcms-open keeps "full", the served
-    ; default; fcms-open-with-profile is the same door with the shape
-    ; chosen by the caller as data.
-    (defn fcms-open (path prompt maxpos)
-        (fcms-open-with-profile path prompt maxpos "full"))
-    (defn fcms-open-with-profile (path prompt maxpos profile)
-        (fcms-open-sized path prompt maxpos profile 0))
-    ; Allocate from the counted prompt plus the caller's output/observation
-    ; reserve. Artifact capacity is still checked before model admission.
-    (defn fcms-open-reserved (path prompt reserve profile)
-        (if (le reserve 0) (fcms-none "session-output-reserve-refused")
-            (fcms-open-sized path prompt 0 profile reserve)))
-    (defn fcms-open-sized (path prompt requested-maxpos profile reserve)
-        (do
-            (let _seal-begin (fcmg-live-stage "model-session-seal-begin" 8388609))
-            (let verdict (qaf-seal-verdict path))
-            (let _seal-complete (fcmg-live-stage "model-session-seal-complete" 8388610))
-            (if (not (eq verdict 1))
-                (fcms-none (fcmg-seal-refusal verdict))
-                (do
-                    (let _header-begin (fcmg-live-stage
-                        "model-session-header-begin" 8388614))
-                    (let src (fcmg-src path))
-                    (let _header-complete (fcmg-live-stage
-                        "model-session-header-complete" 8388615))
-                    (let arch (fcmg-arch src))
-                    ; admission by the lane table, never a literal: an arch
-                    ; whose lane is not yet wired into this door refuses
-                    ; TYPED, naming the lane that would serve it.
-                    (if (not (eq (mr-wired? arch) 1))
-                        (fcms-none (str_concat "lane-unwired:"
-                            (str_concat (mr-lane-for arch)
-                                (str_concat ":" arch))))
-                        (do
-                            (let _crystal-begin (fcmg-live-stage
-                                "model-session-tokenizer-crystal-begin" 8388616))
-                            (let x (qsx-load path))
-                            (let _crystal-complete (fcmg-live-stage
-                                "model-session-tokenizer-crystal-complete" 8388617))
-                            (let iced (if (eq (nth x 0) 1) 1 0))
-                            (let _cursor-begin (fcmg-live-stage
-                                "model-session-prompt-cursor-begin" 8388618))
-                            (let cursor0 (if (eq iced 1)
-                                (fcmg-chat-cursor-profile
-                                    path prompt profile x)
-                                (qtlc-open-index
-                                    (list "absent" "crystal-absent" ""
-                                        0 0 0 0 0 0 0) (empty))))
-                            (let live-cursor
-                                (if (str_eq (qtlc-status cursor0) "open")
-                                    1 0))
-                            ; Exact count without a retained prompt-ID list.
-                            ; The immutable cursor is then reopened for prefill.
-                            (let counted (if (eq live-cursor 1)
-                                (qtlc-count cursor0)
-                                (list "fallback" cursor0)))
-                            (let count-ok (if (eq live-cursor 1)
-                                (if (str_eq (nth counted 0) "done") 1 0) 1))
-                            (let _cursor-complete (fcmg-live-stage
-                                "model-session-prompt-cursor-complete" 8388619))
-                            (let ids (if (eq live-cursor 1) (empty)
-                                (fcmg-chat-ids-profile src prompt profile)))
-                            (let _count-begin (fcmg-live-stage
-                                "model-session-prompt-count-begin" 8388620))
-                            (let prompt-count (if (eq live-cursor 1)
-                                (qtlc-token-count (nth counted 1))
-                                (len ids)))
-                            (let maxpos (if (gt reserve 0)
-                                (add prompt-count reserve) requested-maxpos))
-                            (let _count-complete (fcmg-live-stage
-                                "model-session-prompt-count-complete" 8388621))
-                            (let _positions (q38oo-stage
-                                (str_concat "model-session-prompt-positions-" (int_to_str prompt-count)) 8388625))
-                            (let _reopen-begin (fcmg-live-stage
-                                "model-session-prompt-cursor-reopen-begin" 8388622))
-                            (let cursor cursor0)
-                            (let _reopen-complete (fcmg-live-stage
-                                "model-session-prompt-cursor-reopen-complete" 8388623))
-                            (if (not (eq count-ok 1))
-                                (do (qtlc-release-index (qtlc-index cursor))
-                                    (fcms-none (str_concat
-                                        "live-prompt-count-refused:"
-                                        (qtlc-reason (nth counted 1)))))
-                            (if (le prompt-count 0)
-                                (do (qtlc-release-index (qtlc-index cursor))
-                                    (fcms-none "initial-turn-encoded-no-ids"))
-                            (if (or (le maxpos prompt-count)
-                                    (gt maxpos (gmt-u32 src
-                                        (q38-key arch "context_length"))))
-                                (do (qtlc-release-index (qtlc-index cursor))
-                                    (fcms-none "session-context-window-refused"))
-                                (do
-                                    (let _admit-begin (fcmg-live-stage
-                                        "model-session-open-prefill-begin" 8388611))
-                                    (let opened (fcms-open-context path src maxpos prompt-count
-                                        cursor ids live-cursor x iced))
-                                    (let _admit-complete (fcmg-live-stage
-                                        "model-session-open-prefill-complete" 8388612))
-                                    (if (eq live-cursor 1)
-                                        (if (fcms-resident? opened)
-                                            (fcmo-with-index opened (qtlc-index cursor))
-                                            (do (qtlc-release-index (qtlc-index cursor)) opened))
-                                        opened)))))))))))
-
-    ; Decoder progress is observable without disclosing its token or text.
-    ; Checkpoints arrive after 1, 2, 4, 8... local steps: O(log n) terminal
-    ; frames retain liveness for an unbounded turn without turning a long
-    ; answer into a second token stream.
-    (defn fcms-decode-checkpoint? (steps-to-checkpoint)
-        (if (le steps-to-checkpoint 1) 1 0))
-    (defn fcms-decode-next-left (steps-to-checkpoint checkpoint-width)
-        (if (eq (fcms-decode-checkpoint? steps-to-checkpoint) 1)
-            checkpoint-width
-            (sub steps-to-checkpoint 1)))
-    (defn fcms-decode-next-width (steps-to-checkpoint checkpoint-width)
-        (if (eq (fcms-decode-checkpoint? steps-to-checkpoint) 1)
-            (mul checkpoint-width 2)
-            checkpoint-width))
-    (defn fcms-decode-pulse (completed-steps)
-        (fcmg-live-stage (str_concat "model-session-decode-checkpoint-"
-            (int_to_str completed-steps)) 8388613))
-
-    ; result = (ids pending pos stopped). Returned ids are model speech only;
-    ; the stop/control prediction is retained separately for the next crossing.
-    (defn fcms-walk (s id pos left stops out steps-to-checkpoint checkpoint-width completed-steps)
-        (if (lt id 0) (list out -1 pos 1)
-        (if (eq (q38-stop? id stops) 1) (list out id pos 1)
-        (if (le left 0) (list out id pos 0)
-            (do
-                (let out2 (append out (list id)))
-                (let completed2 (add completed-steps 1))
-                (let pulse (if (eq (fcms-decode-checkpoint? steps-to-checkpoint) 1)
-                    (fcms-decode-pulse completed2) 0))
-                (let next-left (fcms-decode-next-left steps-to-checkpoint checkpoint-width))
-                (let next-width (fcms-decode-next-width steps-to-checkpoint checkpoint-width))
-                (if (eq left 1) (list out2 id pos 0)
-                    (do
-                        (let nid (fcms-forward s id pos))
-                        (if (lt nid 0) (list out2 -1 (add pos 1) 1)
-                        (if (eq (q38-stop? nid stops) 1)
-                            (list out2 nid (add pos 1) 1)
-                            (fcms-walk s nid (add pos 1) (sub left 1)
-                                stops out2 next-left next-width completed2))))))))))
-
-    ; generation = tag text ids updated-session. No generated text is needed to
-    ; resume; the bytes are exposed only for the Form/BMF boundary that asks.
-    (defn fcms-generation (text ids session)
-        (list "form-cli-model-session-generation-v1" text ids session))
-    (defn fcms-generation-text (g) (nth g 1))
-    (defn fcms-generation-ids (g) (nth g 2))
-    (defn fcms-generation-session (g) (nth g 3))
-    (defn fcms-generate (s n)
-        (if (or (not (eq (fcms-live? s) 1)) (le n 0))
-            (fcms-generation "" (empty) s)
-        (if (not (nil? (fcsam-owner s))) (fcms-generate-sampled s n)
-            (do
-                (let stops (fcmo-stops s))
-                (let walked (fcms-walk s (fcms-pending s) (fcms-pos s)
-                    n stops (empty) 1 1 0))
-                (let ids (nth walked 0))
-                (let next (fcms-with-stream s (nth walked 2) (nth walked 1)
-                    (nth walked 3) (add (fcms-generated-ids s) (len ids))
-                    (fcms-injected-ids s) (fcms-observations s)))
-                (fcms-generation (ftdb-text (fcms-src s) ids) ids next)))))
-
-    (defn fcms-generate-sampled (s n)
-        (do
-            (let walked (fcsam-run s (fcsam-owner s) (nth (nth (fcms-ctx s) 1) 28)
-                fcms-forward fcms-decode-pulse (fcms-pos s) n (fcmo-stops s)))
-            (let ids (head walked))
-            (let owned (fcsam-with-owner s (nth walked 4)))
-            (let next (fcms-with-stream owned (nth walked 2) (nth walked 1)
-                (nth walked 3) (add (fcms-generated-ids s) (len ids))
-                (fcms-injected-ids s) (fcms-observations s)))
-            (fcms-generation (ftdb-text (fcms-src s) ids) ids
-                (if (str_eq (nth walked 5) "") next (fcms-refuse next (nth walked 5))))))
-
-    ; The tail begins after an assistant close. It contains only newly born
-    ; role/observation bytes and the fresh assistant opening.
-    (defn fcms-tool-tail-ids (src text)
-        (fcmo-tool-tail-ids src text))
-
-    ; Direct questions are not tool observations.  Preserve the completed
-    ; assistant token and enter the ordinary no-thinking user/assistant template.
-    ; Recipe/source effects retain fcms-tool-tail-ids above.
-    (defn fcms-direct-user-role () "user")
-    (defn fcms-direct-answer-tail-ids (src text)
-        (fcmo-direct-reference-ids src text))
-
-    ; The ordinary observation crossing commits the pending model token exactly
-    ; once.  A rejection crossing does the opposite: that pending prediction
-    ; has not entered KV, so it is discarded and only the assistant close is
-    ; placed at its position.  Keeping this as one pure helper makes token 0/1
-    ; testable without opening a model.
-    (defn fcms-crossing-prefix-ids
-        (pending pending-is-stop close-id retain-pending)
-        (if (eq retain-pending 0) (list close-id)
-            (do
-                (let prefix (if (ge pending 0) (list pending) (empty)))
-                (let close-needed
-                    (if (and (ge pending 0) (eq pending-is-stop 1)) 0 1))
-                (if (eq close-needed 1)
-                    (tkz-cat prefix (list close-id)) prefix))))
-
-    (defn fcms-observation-ids (s text)
-        (do
-            (let src (fcms-src s))
-            (let stops (fcmo-stops s))
-            (let pending (fcms-pending s))
-            (let closed (fcms-crossing-prefix-ids pending
-                (if (ge pending 0) (q38-stop? pending stops) 0)
-                (fcmo-end-id s) 1))
-            (tkz-cat closed (fcms-tool-tail-ids src text))))
-
-    (defn fcms-direct-answer-observation-ids (s text)
-        (do
-            (let src (fcms-src s))
-            (let stops (fcmo-stops s))
-            (let pending (fcms-pending s))
-            (let closed (fcms-crossing-prefix-ids pending
-                (if (ge pending 0) (q38-stop? pending stops) 0)
-                (fcmo-end-id s) 1))
-            (let indexed (fcmo-session-tail-ids s text))
-            (tkz-cat closed (if (nothing? indexed)
-                (fcms-direct-answer-tail-ids src text) indexed))))
-
-    (defn fcms-rejection-observation-ids (s text)
-        (do
-            (let src (fcms-src s))
-            (let closed (fcms-crossing-prefix-ids (fcms-pending s) 0
-                (fcmo-end-id s) 0))
-            (tkz-cat closed (fcms-tool-tail-ids src text))))
-
-    ; A Form execution result may continue the current assistant stream as BML
-    ; instead of opening another ChatML tool/assistant pair. The pending model
-    ; ID is still committed exactly once. If it is already an assistant stop,
-    ; the ordinary role crossing remains the honest shape; bytes cannot be
-    ; appended inside a turn that has already ended.
-    (defn fcms-inline-bml-observation-ids (s text)
-        (do
-            (let src (fcms-src s))
-            (let pending (fcms-pending s))
-            (let stops (fcmo-stops s))
-            (if (and (ge pending 0) (eq (q38-stop? pending stops) 1))
-                (fcms-observation-ids s text)
-                (do
-                    (let prefix (if (ge pending 0)
-                        (list pending) (empty)))
-                    (let encoded (fcmo-text-ids s
-                        (str_concat "\n" (str_concat text "\n"))))
-                    (if (nothing? encoded) (nothing)
-                        (tkz-cat prefix encoded))))))
-
-    (defn fcms-observe-ids (s ids refusal-reason)
-        (if (not (eq (fcms-live? s) 1)) s
-            (if (or (nothing? ids) (or (eq (len ids) 0)
-                    (gt (add (fcms-pos s) (len ids)) (fcms-maxpos s))))
-                    (fcms-refuse s refusal-reason)
-                (do
-                    (let ctx (fcms-ctx s))
-                    ; All IDs retain their order and the same stream state.
-                    ; Submission width, unlike observation length, is bounded.
-                    (let pf (fcmo-prefill ctx (fcms-sts s) ids (fcms-pos s)))
-                    (if (not (fcmo-shape pf (fcms-pos s) (len ids)))
-                        ; No retry may resume this state: a completed prefix or
-                        ; a partially executed failing submission can be present.
-                        ; Counters retain the last completed observation, not a
-                        ; claim that physical KV was rolled back. Keep ownership
-                        ; so the original context can still be released.
-                        (fcms-refuse s "observation-prefill-refused")
-                        (fcms-refresh-head (fcms-with-stream s (nth pf 1) (nth pf 0) 0
-                            (fcms-generated-ids s)
-                            (add (fcms-injected-ids s) (len ids))
-                            (add (fcms-observations s) 1))))))))
-
-    ; Injects one typed Form observation into the SAME q38 state. It returns a
-    ; session whose pending ID is the first prediction after the observation.
-    (defn fcms-observe (s text)
-        (fcms-observe-ids s (fcms-observation-ids s text)
-            "observation-context-window-refused"))
-
-    (defn fcms-observe-direct-answer (s text)
-        (fcms-observe-ids s (fcms-direct-answer-observation-ids s text)
-            "direct-answer-context-window-refused"))
-
-    ; Form-native execution-token shape: compact BML enters the same generated
-    ; stream without paying a second role template. It remains a named choice,
-    ; not a replacement for ordinary tool-role observations.
-    (defn fcms-observe-inline-bml (s text)
-        (fcms-observe-ids s (fcms-inline-bml-observation-ids s text)
-            "inline-bml-observation-context-window-refused"))
-
-    ; Grammar/execution rejection enters at the pending token's exact position.
-    ; The rejected prediction is not included in ids and never reaches q38-forward.
-    (defn fcms-observe-rejection (s text)
-        (fcms-observe-ids s (fcms-rejection-observation-ids s text)
-            "rejection-observation-context-window-refused"))
-
-    (defn fcms-release-ok? (s)
-        (do
-            (let cursor-released (fcmo-release-index s))
-            (let sampler-expected (fcsam-owned (fcsam-owner s)))
-            (let sampler-closed (fcsam-close (fcsam-owner s)))
-            (let sampler-ok (and cursor-released (eq sampler-closed sampler-expected)))
-            (let adapter-expected (fcmd-owned (fcmd-carrier s)))
-            (if (gt adapter-expected 0) (metal_sync) 0)
-            (let adapter-closed (fcmd-close (fcmd-carrier s)))
-            (let adapter-ok (and sampler-ok (eq adapter-closed adapter-expected)))
-            (if (eq (fcms-resident? s) 0) adapter-ok
-              (do
-                (let state-expected (q38-state-handle-count (fcms-sts s)))
-                (let state-closed (q38-free-state (fcms-sts s)))
-                (let context-expected (q38-close-expected (fcms-ctx s) (empty)))
-                (let context-closed (q38-close (fcms-ctx s) (empty)))
-                (if (and adapter-ok (and (eq state-closed state-expected)
-                         (eq context-closed context-expected))) 1 0)))))
-
-    0)
+// form-cli-model-session.fk — one resident Qwen context across executable
+// Form observations, without re-encoding model output the body already holds.
+//
+// A Qwen transformer consumes integer embedding IDs. That boundary remains the
+// model's physical shape. What this cell removes is the avoidable round trip:
+//
+//   generated ids -> decoded bytes -> whole transcript -> generated ids again
+//
+// The initial user turn is encoded once. Generation then returns both decoded
+// text and the exact IDs that produced it while retaining the same q38 stream
+// state and KV rows. A Form observation encodes only its newly born bytes plus
+// the small ChatML role crossing, prefills those IDs at the current position,
+// and resumes from the first predicted reply ID. BML/BMF still consumes the
+// decoded bytes directly through its own cursor; no tokenizer pre-step shapes
+// that grammar.
+//
+// The final generated ID is deliberately held pending. q38-forward consumes an
+// ID at a position and predicts the next one, so the newest prediction has not
+// entered KV yet. Before an observation is injected, that pending ID is placed
+// exactly once. If it is already a stop ID, it supplies the assistant close;
+// otherwise the close ID is appended after it. This is the same seed boundary
+// whose earlier omission the live heed cursor exposed.
+//
+// This cell owns stream state, not weights: the surrounding q38 context and the
+// per-conversation state are both explicit and both released. No persistence,
+// model weight update, or remote call is implied.
+//
+// preludes: form-stdlib/form-cli-model-generate.fk form-stdlib/model-registry.bml form-stdlib/bml/form-cli-model-admission.bml form-stdlib/bml/form-cli-model-observation.bml form-stdlib/bml/form-cli-model-adapter.bml
+// preludes: form-stdlib/bml/form-cli-model-sampling.bml
+section [form.bml] {
+    // session = tag status reason path src ctx sts maxpos pos pending
+    //           stopped prompt-ids generated-ids injected-ids observation-count
+    def fcms-session(status, reason, path, src, ctx, sts, maxpos, pos, pending, stopped, prompt-ids, generated-ids, injected-ids, observations) = list("form-cli-model-session-v1", status, reason, path, src, ctx, sts, maxpos, pos, pending, stopped, prompt-ids, generated-ids, injected-ids, observations);
+    def fcms-status(s) = nth(s, 1);
+    def fcms-reason(s) = nth(s, 2);
+    def fcms-path(s) = nth(s, 3);
+    def fcms-src(s) = nth(s, 4);
+    def fcms-ctx(s) = nth(s, 5);
+    def fcms-sts(s) = nth(s, 6);
+    def fcms-maxpos(s) = nth(s, 7);
+    def fcms-pos(s) = nth(s, 8);
+    def fcms-pending(s) = nth(s, 9);
+    def fcms-stopped?(s) = nth(s, 10);
+    def fcms-prompt-ids(s) = nth(s, 11);
+    def fcms-generated-ids(s) = nth(s, 12);
+    def fcms-injected-ids(s) = nth(s, 13);
+    def fcms-observations(s) = nth(s, 14);
+    def fcms-live?(s) = (String) fcms-status(s) == "live" ? 1 : 0;
+    def fcms-pending?(s) = fcms-pending(s) >= 0 ? 1 : 0;
+    // Status and ownership are deliberately separate. A context-window refusal
+    // can make the conversational operation `nothing` while the already-opened
+    // context and stream state still need their physical release.
+    def fcms-resident?(s) = len(fcms-ctx(s)) > 0 && len(fcms-sts(s)) > 0 ? 1 : 0;
+    def fcms-none(reason) = fcms-session("nothing", reason, "", "", empty(), empty(), 0, 0, -1, 0, 0, 0, 0, 0);
+    def fcms-with-stream(s, pos, pending, stopped, generated, injected, observations) = fcmd-inherit(s, fcms-session(fcms-status(s), fcms-reason(s), fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), pos, pending, stopped, fcms-prompt-ids(s), generated, injected, observations));
+    def fcms-refuse(s, reason) = fcmd-inherit(s, fcms-session("nothing", reason, fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    def fcms-forward(s, id, pos) = fcmd-forward(fcms-ctx(s), fcms-sts(s), fcmd-carrier(s), id, pos);
+    def fcms-refresh-head(s) = {
+        let pending = fcmd-pending(fcms-ctx(s), fcmd-carrier(s), fcms-pending(s));
+        let next = fcms-with-stream(s, fcms-pos(s), pending, 0, fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s));
+        pending < 0 ? fcms-refuse(next, "adapter-head-refused") : next;
+    };
+    def fcms-attach-adapter(s, path) = !fcms-live?(s) ? s : !nil?(fcmd-carrier(s)) ? fcms-refuse(s, "adapter-already-attached") : fcms-generated-ids(s) > 0 || fcms-observations(s) > 0 ? fcms-refuse(s, "adapter-admission-requires-fresh-session") : {
+        let admitted = fcmd-admit(fcms-ctx(s), path);
+        let owned = fcmd-with-carrier(s, nth(admitted, 2));
+        (Comparable) head(admitted) == 1 ? fcms-refresh-head(owned) : fcms-refuse(owned, nth(admitted, 1));
+    };
+    def fcms-open-adapted(path, prompt, maxpos, profile, adapter-path) = fcms-attach-adapter(fcms-open-with-profile(path, prompt, maxpos, profile), adapter-path);
+    // The API names what is and is not encoded. A live observation can report
+    // these strings without reproducing model or user content.
+    def fcms-initial-encode-scope() = "initial-user-turn-once";
+    def fcms-resume-encode-scope() = "new-observation-bytes-and-role-crossing-only";
+    def fcms-inline-bml-encode-scope() = "pending-generated-id-then-new-bml-bytes-no-role-replay";
+    def fcms-generated-id-policy() = "carry-original-generated-ids-and-kv";
+    def fcms-model-executed-form?() = 0;
+    def fcms-rejection-pending-policy() = "discard-uncommitted-pending-id-before-typed-observation";
+    // The living peer does not receive a made-up context width.  Its ceiling is
+    // read from the selected sealed GGUF, the same source that the carrier will
+    // open.  Absence is a typed local refusal, never an occasion to use remote.
+    def fcms-artifact-context-capacity-from-src(src) = {
+        let arch = fcmg-arch(src);
+        (String) arch == "" ? 0 : gmt-u32(src, q38-key(arch, "context_length"));
+    };
+    def fcms-open-resident-agent(path, prompt) = (String) path == "" ? fcms-none("model-path-absent") : {
+        let src = fcmg-src(path);
+        let capacity = fcms-artifact-context-capacity-from-src(src);
+        capacity <= 0 ? fcms-none("artifact-declared-context-absent") : fcms-open(path, prompt, capacity);
+    };
+    def fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) = {
+        let span = fcma-span(prompt-count);
+        let _span = q38oo-stage(str_concat("model-session-prefill-span-", int_to_str(span)), 8388624);
+        let _open-begin = q38oo-stage("model-session-context-open-begin", 8388620);
+        let ctx = (Comparable) iced == 1 ? qsx-open-span(path, maxpos, x, span) : q38-open-span(path, maxpos, span);
+        let _open-ready = q38oo-stage("model-session-context-open-ready", 8388620);
+        !((Comparable) q38-context-ok?(ctx) == 1) ? {
+            let closed = len(ctx) < 10 ? 0 : q38-close(ctx, empty());
+            fcms-none("model-context-open-refused");
+        } : {
+            let _state-begin = q38oo-stage("model-session-state-begin", 8388621);
+            let sts = q38-new-state(nth(ctx, 2));
+            let _state-ready = q38oo-stage("model-session-state-ready", 8388621);
+            !((Comparable) q38-state-ok?(sts) == 1) ? {
+                let state-closed = q38-free-state(sts);
+                let context-closed = q38-close(ctx, empty());
+                fcms-none("model-stream-state-refused");
+            } : (Comparable) live-cursor == 1 ? {
+                let _prefill-begin = q38oo-stage("model-session-prefill-begin", 8388622);
+                let pf = fcmg-live-prefill-span(ctx, sts, cursor);
+                let _prefill-ready = q38oo-stage((String) nth(pf, 1) == "ok" ? "model-session-prefill-ready" : "model-session-prefill-refused", 8388622);
+                !((String) nth(pf, 1) == "ok") ? fcms-session("nothing", nth(pf, 5), path, src, ctx, sts, maxpos, nth(pf, 3), -1, 0, prompt-count, 0, 0, 0) : fcms-session("live", "opened-live-cursor", path, src, ctx, sts, maxpos, nth(pf, 3), nth(pf, 2), 0, prompt-count, 0, 0, 0);
+            } : {
+                let _prefill-begin = q38oo-stage("model-session-prefill-begin", 8388622);
+                let pf = q38-prefill-span-sliced(nth(ctx, 0), nth(ctx, 1), nth(ctx, 2), nth(ctx, 3), sts, nth(ctx, 4), nth(ctx, 5), nth(ctx, 6), ids, 0, span);
+                let complete = nth(pf, 0) >= 0 && (Comparable) nth(pf, 1) == prompt-count;
+                let _prefill-ready = q38oo-stage(complete ? "model-session-prefill-ready" : "model-session-prefill-refused", 8388622);
+                fcms-session(complete ? "live" : "nothing", complete ? "opened-scanner-fallback" : "model-prefill-refused", path, src, ctx, sts, maxpos, nth(pf, 1), nth(pf, 0), 0, prompt-count, 0, 0, 0);
+            };
+        };
+    };
+    // The PROFILE names which chat shape wraps the prompt: "full" arms
+    // the teach-layer control grammar (its <FAIL> is a typed decline, not
+    // model failure); "knowledge-query" is the plain chat segments with
+    // no control overlay — the shape for probes and comparisons that
+    // want the model's own words. fcms-open keeps "full", the served
+    // default; fcms-open-with-profile is the same door with the shape
+    // chosen by the caller as data.
+    def fcms-open(path, prompt, maxpos) = fcms-open-with-profile(path, prompt, maxpos, "full");
+    def fcms-open-with-profile(path, prompt, maxpos, profile) = fcms-open-sized(path, prompt, maxpos, profile, 0);
+    // Allocate from the counted prompt plus the caller's output/observation
+    // reserve. Artifact capacity is still checked before model admission.
+    def fcms-open-reserved(path, prompt, reserve, profile) = reserve <= 0 ? fcms-none("session-output-reserve-refused") : fcms-open-sized(path, prompt, 0, profile, reserve);
+    def fcms-open-sized(path, prompt, requested-maxpos, profile, reserve) = {
+        let _seal-begin = fcmg-live-stage("model-session-seal-begin", 8388609);
+        let verdict = qaf-seal-verdict(path);
+        let _seal-complete = fcmg-live-stage("model-session-seal-complete", 8388610);
+        !((Comparable) verdict == 1) ? fcms-none(fcmg-seal-refusal(verdict)) : {
+            let _header-begin = fcmg-live-stage("model-session-header-begin", 8388614);
+            let src = fcmg-src(path);
+            let _header-complete = fcmg-live-stage("model-session-header-complete", 8388615);
+            let arch = fcmg-arch(src);
+            // admission by the lane table, never a literal: an arch
+            // whose lane is not yet wired into this door refuses
+            // TYPED, naming the lane that would serve it.
+            !((Comparable) mr-wired?(arch) == 1) ? fcms-none(str_concat("lane-unwired:", str_concat(mr-lane-for(arch), str_concat(":", arch)))) : {
+                let _crystal-begin = fcmg-live-stage("model-session-tokenizer-crystal-begin", 8388616);
+                let x = qsx-load(path);
+                let _crystal-complete = fcmg-live-stage("model-session-tokenizer-crystal-complete", 8388617);
+                let iced = (Comparable) nth(x, 0) == 1 ? 1 : 0;
+                let _cursor-begin = fcmg-live-stage("model-session-prompt-cursor-begin", 8388618);
+                let cursor0 = (Comparable) iced == 1 ? fcmg-chat-cursor-profile(path, prompt, profile, x) : qtlc-open-index(list("absent", "crystal-absent", "", 0, 0, 0, 0, 0, 0, 0), empty());
+                let live-cursor = (String) qtlc-status(cursor0) == "open" ? 1 : 0;
+                // Exact count without a retained prompt-ID list.
+                // The immutable cursor is then reopened for prefill.
+                let counted = (Comparable) live-cursor == 1 ? qtlc-count(cursor0) : list("fallback", cursor0);
+                let count-ok = (Comparable) live-cursor == 1 ? (String) nth(counted, 0) == "done" ? 1 : 0 : 1;
+                let _cursor-complete = fcmg-live-stage("model-session-prompt-cursor-complete", 8388619);
+                let ids = (Comparable) live-cursor == 1 ? empty() : fcmg-chat-ids-profile(src, prompt, profile);
+                let _count-begin = fcmg-live-stage("model-session-prompt-count-begin", 8388620);
+                let prompt-count = (Comparable) live-cursor == 1 ? qtlc-token-count(nth(counted, 1)) : len(ids);
+                let maxpos = reserve > 0 ? prompt-count + reserve : requested-maxpos;
+                let _count-complete = fcmg-live-stage("model-session-prompt-count-complete", 8388621);
+                let _positions = q38oo-stage(str_concat("model-session-prompt-positions-", int_to_str(prompt-count)), 8388625);
+                let _reopen-begin = fcmg-live-stage("model-session-prompt-cursor-reopen-begin", 8388622);
+                let cursor = cursor0;
+                let _reopen-complete = fcmg-live-stage("model-session-prompt-cursor-reopen-complete", 8388623);
+                !((Comparable) count-ok == 1) ? {
+                    qtlc-release-index(qtlc-index(cursor));
+                    fcms-none(str_concat("live-prompt-count-refused:", qtlc-reason(nth(counted, 1))));
+                } : prompt-count <= 0 ? {
+                    qtlc-release-index(qtlc-index(cursor));
+                    fcms-none("initial-turn-encoded-no-ids");
+                } : maxpos <= prompt-count || maxpos > gmt-u32(src, q38-key(arch, "context_length")) ? {
+                    qtlc-release-index(qtlc-index(cursor));
+                    fcms-none("session-context-window-refused");
+                } : {
+                    let _admit-begin = fcmg-live-stage("model-session-open-prefill-begin", 8388611);
+                    let opened = fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced);
+                    let _admit-complete = fcmg-live-stage("model-session-open-prefill-complete", 8388612);
+                    (Comparable) live-cursor == 1 ? fcms-resident?(opened) ? fcmo-with-index(opened, qtlc-index(cursor)) : {
+                        qtlc-release-index(qtlc-index(cursor));
+                        opened;
+                    } : opened;
+                };
+            };
+        };
+    };
+    // Decoder progress is observable without disclosing its token or text.
+    // Checkpoints arrive after 1, 2, 4, 8... local steps: O(log n) terminal
+    // frames retain liveness for an unbounded turn without turning a long
+    // answer into a second token stream.
+    def fcms-decode-checkpoint?(steps-to-checkpoint) = steps-to-checkpoint <= 1 ? 1 : 0;
+    def fcms-decode-next-left(steps-to-checkpoint, checkpoint-width) = (Comparable) fcms-decode-checkpoint?(steps-to-checkpoint) == 1 ? checkpoint-width : steps-to-checkpoint - 1;
+    def fcms-decode-next-width(steps-to-checkpoint, checkpoint-width) = (Comparable) fcms-decode-checkpoint?(steps-to-checkpoint) == 1 ? checkpoint-width * 2 : checkpoint-width;
+    def fcms-decode-pulse(completed-steps) = fcmg-live-stage(str_concat("model-session-decode-checkpoint-", int_to_str(completed-steps)), 8388613);
+    // result = (ids pending pos stopped). Returned ids are model speech only;
+    // the stop/control prediction is retained separately for the next crossing.
+    def fcms-walk(s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = id < 0 ? list(out, -1, pos, 1) : (Comparable) q38-stop?(id, stops) == 1 ? list(out, id, pos, 1) : left <= 0 ? list(out, id, pos, 0) : {
+        let out2 = append(out, list(id));
+        let completed2 = completed-steps + 1;
+        let pulse = (Comparable) fcms-decode-checkpoint?(steps-to-checkpoint) == 1 ? fcms-decode-pulse(completed2) : 0;
+        let next-left = fcms-decode-next-left(steps-to-checkpoint, checkpoint-width);
+        let next-width = fcms-decode-next-width(steps-to-checkpoint, checkpoint-width);
+        (Comparable) left == 1 ? list(out2, id, pos, 0) : {
+            let nid = fcms-forward(s, id, pos);
+            nid < 0 ? list(out2, -1, pos + 1, 1) : (Comparable) q38-stop?(nid, stops) == 1 ? list(out2, nid, pos + 1, 1) : fcms-walk(s, nid, pos + 1, left - 1, stops, out2, next-left, next-width, completed2);
+        };
+    };
+    // generation = tag text ids updated-session. No generated text is needed to
+    // resume; the bytes are exposed only for the Form/BMF boundary that asks.
+    def fcms-generation(text, ids, session) = list("form-cli-model-session-generation-v1", text, ids, session);
+    def fcms-generation-text(g) = nth(g, 1);
+    def fcms-generation-ids(g) = nth(g, 2);
+    def fcms-generation-session(g) = nth(g, 3);
+    def fcms-generate(s, n) = !((Comparable) fcms-live?(s) == 1) || n <= 0 ? fcms-generation("", empty(), s) : !nil?(fcsam-owner(s)) ? fcms-generate-sampled(s, n) : {
+        let stops = fcmo-stops(s);
+        let walked = fcms-walk(s, fcms-pending(s), fcms-pos(s), n, stops, empty(), 1, 1, 0);
+        let ids = nth(walked, 0);
+        let next = fcms-with-stream(s, nth(walked, 2), nth(walked, 1), nth(walked, 3), fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
+        fcms-generation(ftdb-text(fcms-src(s), ids), ids, next);
+    };
+    def fcms-generate-sampled(s, n) = {
+        let walked = fcsam-run(s, fcsam-owner(s), nth(nth(fcms-ctx(s), 1), 28), fcms-forward, fcms-decode-pulse, fcms-pos(s), n, fcmo-stops(s));
+        let ids = head(walked);
+        let owned = fcsam-with-owner(s, nth(walked, 4));
+        let next = fcms-with-stream(owned, nth(walked, 2), nth(walked, 1), nth(walked, 3), fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
+        fcms-generation(ftdb-text(fcms-src(s), ids), ids, (String) nth(walked, 5) == "" ? next : fcms-refuse(next, nth(walked, 5)));
+    };
+    // The tail begins after an assistant close. It contains only newly born
+    // role/observation bytes and the fresh assistant opening.
+    def fcms-tool-tail-ids(src, text) = fcmo-tool-tail-ids(src, text);
+    // Direct questions are not tool observations.  Preserve the completed
+    // assistant token and enter the ordinary no-thinking user/assistant template.
+    // Recipe/source effects retain fcms-tool-tail-ids above.
+    def fcms-direct-user-role() = "user";
+    def fcms-direct-answer-tail-ids(src, text) = fcmo-direct-reference-ids(src, text);
+    // The ordinary observation crossing commits the pending model token exactly
+    // once.  A rejection crossing does the opposite: that pending prediction
+    // has not entered KV, so it is discarded and only the assistant close is
+    // placed at its position.  Keeping this as one pure helper makes token 0/1
+    // testable without opening a model.
+    def fcms-crossing-prefix-ids(pending, pending-is-stop, close-id, retain-pending) = (Comparable) retain-pending == 0 ? list(close-id) : {
+        let prefix = pending >= 0 ? list(pending) : empty();
+        let close-needed = pending >= 0 && (Comparable) pending-is-stop == 1 ? 0 : 1;
+        (Comparable) close-needed == 1 ? tkz-cat(prefix, list(close-id)) : prefix;
+    };
+    def fcms-observation-ids(s, text) = {
+        let src = fcms-src(s);
+        let stops = fcmo-stops(s);
+        let pending = fcms-pending(s);
+        let closed = fcms-crossing-prefix-ids(pending, pending >= 0 ? q38-stop?(pending, stops) : 0, fcmo-end-id(s), 1);
+        tkz-cat(closed, fcms-tool-tail-ids(src, text));
+    };
+    def fcms-direct-answer-observation-ids(s, text) = {
+        let src = fcms-src(s);
+        let stops = fcmo-stops(s);
+        let pending = fcms-pending(s);
+        let closed = fcms-crossing-prefix-ids(pending, pending >= 0 ? q38-stop?(pending, stops) : 0, fcmo-end-id(s), 1);
+        let indexed = fcmo-session-tail-ids(s, text);
+        tkz-cat(closed, nothing?(indexed) ? fcms-direct-answer-tail-ids(src, text) : indexed);
+    };
+    def fcms-rejection-observation-ids(s, text) = {
+        let src = fcms-src(s);
+        let closed = fcms-crossing-prefix-ids(fcms-pending(s), 0, fcmo-end-id(s), 0);
+        tkz-cat(closed, fcms-tool-tail-ids(src, text));
+    };
+    // A Form execution result may continue the current assistant stream as BML
+    // instead of opening another ChatML tool/assistant pair. The pending model
+    // ID is still committed exactly once. If it is already an assistant stop,
+    // the ordinary role crossing remains the honest shape; bytes cannot be
+    // appended inside a turn that has already ended.
+    def fcms-inline-bml-observation-ids(s, text) = {
+        let src = fcms-src(s);
+        let pending = fcms-pending(s);
+        let stops = fcmo-stops(s);
+        pending >= 0 && (Comparable) q38-stop?(pending, stops) == 1 ? fcms-observation-ids(s, text) : {
+            let prefix = pending >= 0 ? list(pending) : empty();
+            let encoded = fcmo-text-ids(s, str_concat("\n", str_concat(text, "\n")));
+            nothing?(encoded) ? nothing() : tkz-cat(prefix, encoded);
+        };
+    };
+    def fcms-observe-ids(s, ids, refusal-reason) = !((Comparable) fcms-live?(s) == 1) ? s : nothing?(ids) || ((Comparable) len(ids) == 0 || fcms-pos(s) + len(ids) > fcms-maxpos(s)) ? fcms-refuse(s, refusal-reason) : {
+        let ctx = fcms-ctx(s);
+        // All IDs retain their order and the same stream state.
+        // Submission width, unlike observation length, is bounded.
+        let pf = fcmo-prefill(ctx, fcms-sts(s), ids, fcms-pos(s));
+        !fcmo-shape(pf, fcms-pos(s), len(ids)) ?         // No retry may resume this state: a completed prefix or
+        // a partially executed failing submission can be present.
+        // Counters retain the last completed observation, not a
+        // claim that physical KV was rolled back. Keep ownership
+        // so the original context can still be released.
+fcms-refuse(s, "observation-prefill-refused") : fcms-refresh-head(fcms-with-stream(s, nth(pf, 1), nth(pf, 0), 0, fcms-generated-ids(s), fcms-injected-ids(s) + len(ids), fcms-observations(s) + 1));
+    };
+    // Injects one typed Form observation into the SAME q38 state. It returns a
+    // session whose pending ID is the first prediction after the observation.
+    def fcms-observe(s, text) = fcms-observe-ids(s, fcms-observation-ids(s, text), "observation-context-window-refused");
+    def fcms-observe-direct-answer(s, text) = fcms-observe-ids(s, fcms-direct-answer-observation-ids(s, text), "direct-answer-context-window-refused");
+    // Form-native execution-token shape: compact BML enters the same generated
+    // stream without paying a second role template. It remains a named choice,
+    // not a replacement for ordinary tool-role observations.
+    def fcms-observe-inline-bml(s, text) = fcms-observe-ids(s, fcms-inline-bml-observation-ids(s, text), "inline-bml-observation-context-window-refused");
+    // Grammar/execution rejection enters at the pending token's exact position.
+    // The rejected prediction is not included in ids and never reaches q38-forward.
+    def fcms-observe-rejection(s, text) = fcms-observe-ids(s, fcms-rejection-observation-ids(s, text), "rejection-observation-context-window-refused");
+    def fcms-release-ok?(s) = {
+        let cursor-released = fcmo-release-index(s);
+        let sampler-expected = fcsam-owned(fcsam-owner(s));
+        let sampler-closed = fcsam-close(fcsam-owner(s));
+        let sampler-ok = cursor-released && (Comparable) sampler-closed == sampler-expected;
+        let adapter-expected = fcmd-owned(fcmd-carrier(s));
+        adapter-expected > 0 ? metal_sync() : 0;
+        let adapter-closed = fcmd-close(fcmd-carrier(s));
+        let adapter-ok = sampler-ok && (Comparable) adapter-closed == adapter-expected;
+        (Comparable) fcms-resident?(s) == 0 ? adapter-ok : {
+            let state-expected = q38-state-handle-count(fcms-sts(s));
+            let state-closed = q38-free-state(fcms-sts(s));
+            let context-expected = q38-close-expected(fcms-ctx(s), empty());
+            let context-closed = q38-close(fcms-ctx(s), empty());
+            adapter-ok && ((Comparable) state-closed == state-expected && (Comparable) context-closed == context-expected) ? 1 : 0;
+        };
+    };
+    0;
+}
