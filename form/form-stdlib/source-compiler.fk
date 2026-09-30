@@ -784,22 +784,6 @@
                     (fsc-form-signature-span source stop end (cons (list (fsc-sub source start stop) "") out)))
                 (fsc-form-signature-span source
                     (fsc-form-signature-next source (add i 1) end (list "\"" ";" "//" "(defn")) end out)))))))
-    (defn fsc-bml-source-signatures (source i out)
-        (do
-            (let pos (fsc-find-section-open source i))
-            (let prefix (fsc-form-signature-span source i (if (lt pos 0) (str_len source) pos) out))
-            (if (lt pos 0) prefix
-                (do
-                    (let dialect-end (fsc-find-char-from source "]" (add pos 9)))
-                    (let dialect (fsc-sub source (add pos 9) dialect-end))
-                    (let open (fsc-find-char-from source "{" dialect-end))
-                    (let close (if (fsc-high-level-form-dialect? dialect)
-                        (fsc-bml-block-end source (add open 1) 0) (fsc-section-end source (add open 1))))
-                    (fsc-bml-source-signatures source (fsc-section-after source close)
-                        (if (fsc-bml-contract-dialect? dialect)
-                            (fsc-bml-type-signatures
-                                (fbl-section-recipes (fsc-sub source (add open 1) close) (fbr-line-at source (add open 1))) prefix)
-                            prefix))))))
     (defn fsc-bml-contract-dialect? (name)
         (or (str_eq name "form.bml") (or (str_eq name "form.route") (str_eq name "form.action"))))
     (defn fsc-bml-dependency-signatures (owner tokens seen signatures observations homes)
@@ -817,11 +801,14 @@
             (do
                 (let started (host_monotonic_ms))
                 (let current (cons (list "F" (bml-source-absolute path) (bml-source-fingerprint source)) observations))
-                (let surface (if (and (lt (fsc-find-section-open source 0) 0)
-                                      (not (str_eq (substring path (sub (str_len path) 4) (str_len path)) ".bml"))) source
-                    (str_concat (bml-source-prelude-prefix source) (form-source-compile-loop source path 0 (nothing)))))
+                (let walked (if (and (lt (fsc-find-section-open source 0) 0)
+                                      (not (str_eq (substring path (sub (str_len path) 4) (str_len path)) ".bml")))
+                    (list source (fsc-form-signature-span source 0 (str_len source) (empty)))
+                    (do (let read (fsc-bml-walk source path 0 (nothing) (empty)))
+                        (list (str_concat (bml-source-prelude-prefix source) (head read)) (nth read 1)))))
+                (let surface (head walked))
                 (let dependencies (bml-source-dependencies surface 1))
-                (let exports (fsc-bml-source-signatures source 0 (empty)))
+                (let exports (nth walked 1))
                 (fb_record (intern_node (intern_trivial_string "bml-discovery-ms")
                     (list (intern_trivial_string path) (intern_trivial_int (sub (host_monotonic_ms) started)))) path 0)
                 (let imported (fsc-bml-dependency-signatures path dependencies seen signatures current homes))
@@ -1912,10 +1899,15 @@
             (let p (fsc-section-after-spaces src start))
             (if (str_eq (char_at src p) "\n") (add p 1) start)))
 
-    (defn form-source-compile-loop (src out-path i signatures)
+    ;; One walk over the sections: each is read once by the cursor. Returns
+    ;; (lowered-text signatures). Without a catalog (discovery) the same parse
+    ;; also yields the exported contracts, threaded through `found`.
+    (defn fsc-bml-walk (src out-path i signatures found)
         (do
             (let pos (fsc-find-section-open src i))
-            (if (lt pos 0) (fsc-strip-bml-comments (fsc-sub src i (str_len src)))
+            (let prefix (if (nothing? signatures)
+                (fsc-form-signature-span src i (if (lt pos 0) (str_len src) pos) found) found))
+            (if (lt pos 0) (list (fsc-strip-bml-comments (fsc-sub src i (str_len src))) prefix)
                 (do
                     (let dialect-start (add pos 9))
                     (let dialect-end (fsc-find-char-from src "]" dialect-start))
@@ -1925,15 +1917,20 @@
                         (fsc-bml-block-end src (add open 1) 0)
                         (fsc-section-end src (add open 1))))
                     (let body (fsc-sub src (add open 1) close))
-                        (str_concat
-                            (fsc-strip-bml-comments (fsc-sub src i pos))
-                            (str_concat
-                            (if (fsc-bml-contract-dialect? dialect-name)
-                                (do (let recipes (fbl-section-recipes body (fbr-line-at src (add open 1))))
-                                    (fsc-source-emit-module (if (nothing? signatures) (fsc-bml-erased (fsc-bml-expand (fsc-rec-do recipes)))
-                                        (head (fsc-bml-typed-sequence recipes (empty) signatures (empty) "")))))
-                                (fsc-compile-section dialect-name body out-path))
-                            (form-source-compile-loop src out-path (fsc-section-after src close) signatures)))))))
+                    (let contract (fsc-bml-contract-dialect? dialect-name))
+                    (let recipes (if contract (fbl-section-recipes body (fbr-line-at src (add open 1))) (empty)))
+                    (let emitted (if contract
+                        (fsc-source-emit-module (if (nothing? signatures) (fsc-bml-erased (fsc-bml-expand (fsc-rec-do recipes)))
+                            (head (fsc-bml-typed-sequence recipes (empty) signatures (empty) ""))))
+                        (fsc-compile-section dialect-name body out-path)))
+                    (let rest (fsc-bml-walk src out-path (fsc-section-after src close) signatures
+                        (if (and contract (nothing? signatures)) (fsc-bml-type-signatures recipes prefix) prefix)))
+                    (list (str_concat (fsc-strip-bml-comments (fsc-sub src i pos))
+                            (str_concat emitted (head rest)))
+                        (nth rest 1))))))
+
+    (defn form-source-compile-loop (src out-path i signatures)
+        (head (fsc-bml-walk src out-path i signatures (empty))))
 
     (defn form-source-compile-text (src out-path)
         (do (let owner out-path)
