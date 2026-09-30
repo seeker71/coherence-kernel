@@ -55,7 +55,10 @@
 // q6k-msl.fk (q6k_f16 — the f16-by-arithmetic this transcribes), f16-decode.fk (fd-value at (5,10)),
 // qk-matvec-lane.fk (qml-msl-header — the body's one metal_stdlib).
 //
-// preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/iq2xxs-dequant.fk
+import form-stdlib/core.fk;
+import form-stdlib/format-arith.fk;
+import form-stdlib/f16-decode.fk;
+import form-stdlib/iq2xxs-dequant.fk;
 //
 section [form.bml] {
     // ================= the transcription, read back into Form =================
@@ -105,10 +108,10 @@ section [form.bml] {
     // ================= the constant array literals =================
     // join a list of ints into "a,b,c" — the head-wise fold, O(n), so a 2048-entry table builds without an
     // O(n^2) nth walk. Built from the SAME lists the carver decodes: the device grid IS the carver's grid.
-    def iq2m-join-tail(xs) = nil?(xs) ? "" : str_concat(",", str_concat(int_to_str(head(xs)), iq2m-join-tail(tail(xs))));
-    def iq2m-join(xs) = nil?(xs) ? "" : str_concat(int_to_str(head(xs)), iq2m-join-tail(tail(xs)));
-    def iq2m-msl-grid() = str_concat("constant uchar iq2_grid[2048] = { ", str_concat(iq2m-join(iq2-grid()), " };\n"));
-    def iq2m-msl-ksigns() = str_concat("constant uchar iq2_ksigns[128] = { ", str_concat(iq2m-join(iq2-ksigns()), " };\n"));
+    def iq2m-join-tail(xs) = nil?(xs) ? "" : ("," + (xs[0].str() + iq2m-join-tail(xs[1:])));
+    def iq2m-join(xs) = nil?(xs) ? "" : (xs[0].str() + iq2m-join-tail(xs[1:]));
+    def iq2m-msl-grid() = ("constant uchar iq2_grid[2048] = { " + (iq2m-join(iq2-grid()) + " };\n"));
+    def iq2m-msl-ksigns() = ("constant uchar iq2_ksigns[128] = { " + (iq2m-join(iq2-ksigns()) + " };\n"));
     // ================= the emitted MSL =================
     // One fragment per meaning, composed by str_concat, so a diff of the emitted text points at a recipe.
     // --- the spine: integer mod, integer 2^k, float 2^e, and f16-by-arithmetic (fd-value at (5,10)). No
@@ -120,13 +123,13 @@ section [form.bml] {
     // The 7-bit sign fields of aux1 are read by div/mod, NOT `>>`/`&`, so this is the mirror's twin. ---
     def iq2m-msl-weight() = "static inline float iq2_w(device const uchar* qb, uint idx) { uint blk = idx / 256u; uint within = idx - blk * 256u; uint off = blk * 66u; int hbits = int(qb[off]) + 256 * int(qb[off + 1u]); float d = iq2_f16(hbits); uint ib32 = within / 32u; uint rem = within - ib32 * 32u; uint l = rem / 8u; uint j = rem - l * 8u; uint gbase = off + 2u + 8u * ib32; int gidx = int(qb[gbase + l]); uint aux1 = uint(qb[gbase + 4u]) + 256u * uint(qb[gbase + 5u]) + 65536u * uint(qb[gbase + 6u]) + 16777216u * uint(qb[gbase + 7u]); int scalecode = int(qb[gbase + 7u]) / 16; float scale = 0.125f * d * float(2 * scalecode + 1); uint signidx = (aux1 / iq2_upow2(7u * l)) % 128u; int signs = int(iq2_ksigns[signidx]); int sbit = iq2_mod(signs / int(iq2_upow2(j)), 2); float sgn = (sbit == 1) ? -1.0f : 1.0f; int mag = int(iq2_grid[uint(gidx) * 8u + j]); return (scale * sgn) * float(mag); } ";
     // the two tables plus the spine plus the weight fn — everything the dequant kernel needs, once.
-    def iq2m-msl-helpers() = str_concat(iq2m-msl-grid(), str_concat(iq2m-msl-ksigns(), str_concat(iq2m-msl-spine(), iq2m-msl-weight())));
+    def iq2m-msl-helpers() = (iq2m-msl-grid() + (iq2m-msl-ksigns() + ((String) iq2m-msl-spine() + iq2m-msl-weight())));
     // --- the kernel: dequant a range into f32, one thread per weight. `off` is a flat ELEMENT offset, so a
     // caller can dequant a tile anywhere in a slice without moving the resident bytes — the aporon
     // discipline, made reachable. `qb` is bound at the block-0 byte base by the carrier. ---
-    def iq2m-dequant-body(fname) = str_concat("kernel void ", str_concat(fname, " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& cnt [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= cnt) return; w[i] = iq2_w(qb, off + i); }"));
+    def iq2m-dequant-body(fname) = ("kernel void " + (fname + " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& cnt [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= cnt) return; w[i] = iq2_w(qb, off + i); }"));
     // each kernel self-contained (tables + spine + body); a unit that also needs a header reaches for
     // qml-msl-header in the assembling cell, exactly once.
-    def iq2m-dequant-msl(fname) = str_concat(iq2m-msl-helpers(), iq2m-dequant-body(fname));
+    def iq2m-dequant-msl(fname) = ((String) iq2m-msl-helpers() + iq2m-dequant-body(fname));
     0;
 }

@@ -1,9 +1,9 @@
 // Reverse-mode LoRA gradients through the actual affine-quantized base model.
 // Base weights are immutable. Every admitted A/B pair has its own gradient and Adam state.
-// preludes: form-stdlib/native-llama-metal.bml
+import form-stdlib/native-llama-metal.bml;
 section [form.bml] {
  class NativeLlamaBackward {
-  def nlb-msl() = str_concat("#include <metal_stdlib>\nusing namespace metal;\n", "
+  def nlb-msl() = ("#include <metal_stdlib>\nusing namespace metal;\n" + "
 kernel void nlb_ce(device const float* z [[buffer(0)]],device const uint* targets [[buffer(1)]],device float* dz [[buffer(2)]],device float* loss [[buffer(3)]],device const float* mask [[buffer(4)]],constant uint& v [[buffer(5)]],constant uint& t [[buffer(6)]],constant float& weight [[buffer(7)]],constant float& divisor [[buffer(8)]],uint row [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {if(row>=t)return;float m=-INFINITY;for(uint i=lane;i<v;i+=32)m=max(m,z[row*v+i]);m=simd_max(m);float sum=0;for(uint i=lane;i<v;i+=32)sum+=exp(z[row*v+i]-m);sum=simd_sum(sum);for(uint i=lane;i<v;i+=32)dz[row*v+i]=(exp(z[row*v+i]-m)/sum-float(i==targets[row]))*weight*mask[row]/divisor;if(lane==0)loss[row]=(m+log(sum)-z[row*v+targets[row]])*mask[row]/divisor;}
 kernel void nlb_rms(device const float* x [[buffer(0)]],device const float* gain [[buffer(1)]],device const float* inv [[buffer(2)]],device const float* dy [[buffer(3)]],device float* dx [[buffer(4)]],constant uint& d [[buffer(5)]],constant uint& t [[buffer(6)]],uint row [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]){if(row>=t)return;float s=0;for(uint i=lane;i<d;i+=32)s+=dy[row*d+i]*gain[i]*x[row*d+i];s=simd_sum(s)/float(d);float r=inv[row];for(uint i=lane;i<d;i+=32)dx[row*d+i]=r*dy[row*d+i]*gain[i]-x[row*d+i]*r*r*r*s;}
 kernel void nlb_swiglu(device const float* g [[buffer(0)]],device const float* u [[buffer(1)]],device const float* dy [[buffer(2)]],device float* dg [[buffer(3)]],device float* du [[buffer(4)]],constant uint& n [[buffer(5)]],uint i [[thread_position_in_grid]]){if(i>=n)return;float s=1/(1+exp(-g[i]));dg[i]=dy[i]*u[i]*(s+g[i]*s*(1-s));du[i]=dy[i]*g[i]*s;}
@@ -16,11 +16,11 @@ kernel void nlb_adam(device float* p [[buffer(0)]],device const float* g [[buffe
   def nlb-run(name, handles, values, count, grouped) {
    let p = nam-held-pipe(metal_pipeline(nlb-msl(),name));
    let rc = metal_enqueue(p,if grouped then md-bind16(handles,values,32,0,1,0) else md-bind(handles,values),count);
-   if (rc < 0) then form_error(str_concat("native backward dispatch refused: ",name)) else rc;
+   if (rc < 0) then form_error(("native backward dispatch refused: " + name)) else rc;
   }
   def nlb-projections(l) = [l[1],l[2],l[3],l[4],l[6],l[7],l[8]];
-  def nlb-pairs-in(ps) = if nil?(ps) then [] else if nil?(head(ps)[1]) then nlb-pairs-in(tail(ps)) else cons(head(ps)[1],nlb-pairs-in(tail(ps)));
-  def nlb-pairs(layers) = if nil?(layers) then [] else append(nlb-pairs-in(nlb-projections(head(layers))),nlb-pairs(tail(layers)));
+  def nlb-pairs-in(ps) = if nil?(ps) then [] else if nil?(ps[0][1]) then nlb-pairs-in(ps[1:]) else cons(ps[0][1],nlb-pairs-in(ps[1:]));
+  def nlb-pairs(layers) = if nil?(layers) then [] else append(nlb-pairs-in(nlb-projections(layers[0])),nlb-pairs(layers[1:]));
   // Optimizer row: pair, dA,dB,mA,vA,mB,vB. All owners start at numeric zero.
   def nlb-state-row(pair) {
    let na = (pair[3] * pair[4]); let nb = (pair[4] * pair[5]);
@@ -30,23 +30,23 @@ kernel void nlb_adam(device float* p [[buffer(0)]],device const float* g [[buffe
    let mb = nam-zero(row[5],nb); let vb = nam-zero(row[6],nb);
    row;
   }
-  def nlb-state-rows(pairs) = if nil?(pairs) then [] else cons(nlb-state-row(head(pairs)),nlb-state-rows(tail(pairs)));
+  def nlb-state-rows(pairs) = if nil?(pairs) then [] else cons(nlb-state-row(pairs[0]),nlb-state-rows(pairs[1:]));
   def nlb-state(model) = nlb-state-rows(nlb-pairs(model[1]));
   def nlb-clear(state) {
-   if nil?(state) then 1 else nlb-clear-row(head(state),tail(state));
+   if nil?(state) then 1 else nlb-clear-row(state[0],state[1:]);
   }
   def nlb-clear-row(row,rest) {
-   let p = head(row);
+   let p = row[0];
    let a = nam-zero(row[1],(p[3] * p[4]));
    let b = nam-zero(row[2],(p[4] * p[5]));
    nlb-clear(rest);
   }
-  def nlb-state-handles(state) = if nil?(state) then [] else append(tail(head(state)),nlb-state-handles(tail(state)));
+  def nlb-state-handles(state) = if nil?(state) then [] else append(state[0][1:],nlb-state-handles(state[1:]));
   def nlb-state-close(state) = nam-free(nlb-state-handles(state));
-  def nlb-find(state,pair) = if nil?(state) then form_error("native LoRA gradient owner absent") else if ((Comparable) head(head(state))[1] == pair[1]) then head(state) else nlb-find(tail(state),pair);
+  def nlb-find(state,pair) = if nil?(state) then form_error("native LoRA gradient owner absent") else if ((Comparable) state[0][0][1] == pair[1]) then state[0] else nlb-find(state[1:],pair);
   // Linear reverse includes the frozen quantized transpose AND both low-rank factors.
   def nlb-linear(p,x,dy,t,state) {
-   let view = head(p); let pair = p[1];
+   let view = p[0]; let pair = p[1];
    let dx = nam-alloc((t * view[4]));
    let base = nam-linear(view,dy,dx,t,1);
    if nil?(pair) then [dx,[dx]] else nlb-linear-pair(pair,x,dy,dx,t,nlb-find(state,pair));
@@ -68,47 +68,47 @@ kernel void nlb_adam(device float* p [[buffer(0)]],device const float* g [[buffe
    let d = g[0]; let ff = g[1]; let kd = (g[3] * g[4]);
    let down = nlb-linear(l[8],b[9],dy,t,state);
    let dg = nam-alloc((t * ff)); let du = nam-alloc((t * ff));
-   let sw = nlb-run("nlb_swiglu",[b[7],b[8],head(down),dg,du],[(t * ff)],(t * ff),0);
+   let sw = nlb-run("nlb_swiglu",[b[7],b[8],down[0],dg,du],[(t * ff)],(t * ff),0);
    let gate = nlb-linear(l[6],b[6],dg,t,state);
    let up = nlb-linear(l[7],b[6],du,t,state);
-   let join = nam-add(head(gate),head(up),head(gate),(t * d),1.0);
+   let join = nam-add(gate[0],up[0],gate[0],(t * d),1.0);
    let dh = nam-alloc((t * d)); let dres = nam-alloc((t * d));
-   let norm = nlb-rms(b[5],l[5],b[12],head(gate),dh,d,t);
+   let norm = nlb-rms(b[5],l[5],b[12],gate[0],dh,d,t);
    let residual = nam-add(dh,dy,dh,(t * d),1.0);
    let output = nlb-linear(l[4],b[4],dh,t,state);
    let dp = nam-alloc((t * (t * g[2])));
    let dq = nam-alloc((t * d)); let dk = nam-alloc((t * kd)); let dv = nam-alloc((t * kd));
-   let dp0 = nlb-run("nlb_dp",[head(output),b[3],dp],[t,g[2],g[3],g[4]],(t * (t * g[2])),0);
+   let dp0 = nlb-run("nlb_dp",[output[0],b[3],dp],[t,g[2],g[3],g[4]],(t * (t * g[2])),0);
    let ds = nlb-run("nlb_softmax",[b[13],dp],[t,g[2],g[4]],(t * g[2]),1);
    let qrev = nlb-run("nlb_dq",[dp,b[2],dq],[t,g[2],g[3],g[4]],(t * d),0);
-   let kvrev = nlb-run("nlb_dkv",[b[13],dp,b[1],head(output),dk,dv],[t,g[2],g[3],g[4]],(t * kd),0);
+   let kvrev = nlb-run("nlb_dkv",[b[13],dp,b[1],output[0],dk,dv],[t,g[2],g[3],g[4]],(t * kd),0);
    let rq = nll-rope(dq,g,g[2],t,0,1); let rk = nll-rope(dk,g,g[3],t,0,1);
    let q = nlb-linear(l[1],b[0],dq,t,state);
    let k = nlb-linear(l[2],b[0],dk,t,state);
    let v = nlb-linear(l[3],b[0],dv,t,state);
-   let qk = nam-add(head(q),head(k),head(q),(t * d),1.0);
-   let qkv = nam-add(head(q),head(v),head(q),(t * d),1.0);
-   let norm1 = nlb-rms(x,l[0],b[11],head(q),dres,d,t);
+   let qk = nam-add(q[0],k[0],q[0],(t * d),1.0);
+   let qkv = nam-add(q[0],v[0],q[0],(t * d),1.0);
+   let norm1 = nlb-rms(x,l[0],b[11],q[0],dres,d,t);
    let end = nam-add(dres,dh,dres,(t * d),1.0);
    [dres,append([dg,du,dh,dres,dp,dq,dk,dv],append(down[1],append(gate[1],append(up[1],append(output[1],append(q[1],append(k[1],v[1])))))))];
   }
-  def nlb-first(blocks,i) = if nil?(blocks) then i else if (nll-rank-layer(head(blocks)[3]) > 0) then i else nlb-first(tail(blocks),(i + 1));
-  def nlb-blocks(g,blocks,dy,t,state,owned) = if nil?(blocks) then owned else nlb-blocks-next(g,tail(blocks),t,state,owned,nlb-block(g,head(blocks),dy,t,state));
-  def nlb-blocks-next(g,blocks,t,state,owned,r) = nlb-blocks(g,blocks,head(r),t,state,append(r[1],owned));
+  def nlb-first(blocks,i) = if nil?(blocks) then i else if (nll-rank-layer(blocks[0][3]) > 0) then i else nlb-first(blocks[1:],(i + 1));
+  def nlb-blocks(g,blocks,dy,t,state,owned) = if nil?(blocks) then owned else nlb-blocks-next(g,blocks[1:],t,state,owned,nlb-block(g,blocks[0],dy,t,state));
+  def nlb-blocks-next(g,blocks,t,state,owned,r) = nlb-blocks(g,blocks,r[0],t,state,append(r[1],owned));
   def nlb-loss-parts(model,r,targets,weight) {
    nlb-loss-masked-parts(model,r,targets,nlb-ones(len(targets)),weight);
   }
   def nlb-ones(n) = if (n <= 0) then [] else cons(1.0,nlb-ones((n - 1)));
-  def nlb-mask-valid(xs) = if nil?(xs) then 1 else ((((Comparable) head(xs) == 0.0) || ((Comparable) head(xs) == 1.0)) && nlb-mask-valid(tail(xs)));
+  def nlb-mask-valid(xs) = if nil?(xs) then 1 else ((((Comparable) xs[0] == 0.0) || ((Comparable) xs[0] == 1.0)) && nlb-mask-valid(xs[1:]));
   def nlb-loss-masked-parts(model,r,targets,mask,weight) {
-   let g = head(model); let t = len(targets);
+   let g = model[0]; let t = len(targets);
    if (!(((Comparable) t == r[7]) && (nll-ids-valid(targets,g[5]) && (((Comparable) len(mask) == t) && (nlb-mask-valid(mask) && (sum(mask) > 0.0)))))) then form_error("native LoRA loss target/mask shape refused") else nlb-loss-admitted(g,r,targets,mask,weight,t);
   }
   def nlb-loss-admitted(g,r,targets,mask,weight,t) {
    let labels = nam-write(nam-alloc(t),md-le32-list(targets,""));
    let mb = nam-buffer(mask);
    let dz = nam-alloc((t * g[5])); let loss = nam-alloc(t);
-   let ce = nlb-run("nlb_ce",[head(r),labels,dz,loss,mb],[g[5],t,md-f32-bits(weight),md-f32-bits(sum(mask))],t,1);
+   let ce = nlb-run("nlb_ce",[r[0],labels,dz,loss,mb],[g[5],t,md-f32-bits(weight),md-f32-bits(sum(mask))],t,1);
    [dz,loss,[labels,dz,loss,mb]];
   }
   def nlb-loss(model,r,targets) {
@@ -120,15 +120,15 @@ kernel void nlb_adam(device float* p [[buffer(0)]],device const float* g [[buffe
    let released = nam-free(p[2]);
    loss;
   }
-  def nlb-finite-loss(h,n) = if (head(nam-stats(h,n)) > 0) then form_error("native LoRA loss is non-finite") else sum(nam-read(h,n));
+  def nlb-finite-loss(h,n) = if (nam-stats(h,n)[0] > 0) then form_error("native LoRA loss is non-finite") else sum(nam-read(h,n));
   def nlb-backward(model,r,targets,state,weight) {
    nlb-backward-masked(model,r,targets,nlb-ones(len(targets)),state,weight);
   }
   def nlb-backward-masked(model,r,targets,mask,state,weight) {
-   let g = head(model); let t = len(targets);
+   let g = model[0]; let t = len(targets);
    let ce = nlb-loss-masked-parts(model,r,targets,mask,weight);
    let dn = nam-alloc((t * g[0])); let dh = nam-alloc((t * g[0]));
-   let headBack = nam-linear(model[2],head(ce),dn,t,1);
+   let headBack = nam-linear(model[2],ce[0],dn,t,1);
    let rms = nlb-rms(r[3],model[3],r[4],dn,dh,g[0],t);
    let blocks = r[1];
    let owned = nlb-blocks(g,reverse(drop(nlb-first(blocks,0),blocks)),dh,t,state,append([dn,dh],ce[2]));
@@ -138,32 +138,32 @@ kernel void nlb_adam(device float* p [[buffer(0)]],device const float* g [[buffe
    loss;
   }
   def nlb-adam-one(p,g,m,v,n,lr,step,clip) = nlb-run("nlb_adam",[p,g,m,v],[n,md-f32-bits(lr),md-f32-bits(0.9),md-f32-bits(0.999),md-f32-bits((1.0 - math_pow(0.9,step))),md-f32-bits((1.0 - math_pow(0.999,step))),md-f32-bits(0.00000001),md-f32-bits(clip)],n,0);
-  def nlb-adam(state,lr,step,clip) = if ((step <= 0) || ((lr <= 0.0) || ((clip <= 0.0) || (clip > 1.0)))) then form_error("native Adam step/learning-rate/clip refused") else if nil?(state) then 1 else nlb-adam-row(head(state),tail(state),lr,step,clip);
+  def nlb-adam(state,lr,step,clip) = if ((step <= 0) || ((lr <= 0.0) || ((clip <= 0.0) || (clip > 1.0)))) then form_error("native Adam step/learning-rate/clip refused") else if nil?(state) then 1 else nlb-adam-row(state[0],state[1:],lr,step,clip);
   def nlb-adam-row(row,rest,lr,step,clip) {
-   let p = head(row);
+   let p = row[0];
    let a = nlb-adam-one(p[1],row[1],row[3],row[4],(p[3] * p[4]),lr,step,clip);
    let b = nlb-adam-one(p[2],row[2],row[5],row[6],(p[4] * p[5]),lr,step,clip);
    nlb-adam(rest,lr,step,clip);
   }
   def nlb-health(state,which,bad,squared) {
-   if nil?(state) then [bad,squared] else nlb-health-row(head(state),tail(state),which,bad,squared);
+   if nil?(state) then [bad,squared] else nlb-health-row(state[0],state[1:],which,bad,squared);
   }
   def nlb-health-row(row,rest,which,bad,squared) {
-   let p = head(row);
+   let p = row[0];
    let a = nam-stats(if which then row[1] else p[1],(p[3] * p[4]));
    let b = nam-stats(if which then row[2] else p[2],(p[4] * p[5]));
-   nlb-health(rest,which,(bad + (head(a) + head(b))),(squared + (a[1] + b[1])));
+   nlb-health(rest,which,(bad + (a[0] + b[0])),(squared + (a[1] + b[1])));
   }
   def nlb-safe-step(state,lr,step,maxNorm) {
    let health = nlb-health(state,1,0,0.0);
    let norm = math_sqrt(health[1]);
    let clip = if ((maxNorm > 0.0) && (norm > maxNorm)) then (maxNorm / norm) else 1.0;
-   if (head(health) > 0) then form_error("native LoRA non-finite gradient; weights unchanged") else nlb-step-admitted(state,lr,step,norm,clip);
+   if (health[0] > 0) then form_error("native LoRA non-finite gradient; weights unchanged") else nlb-step-admitted(state,lr,step,norm,clip);
   }
   def nlb-step-admitted(state,lr,step,norm,clip) {
    let update = nlb-adam(state,lr,step,clip); let done = nam-sync();
    let health = nlb-health(state,0,0,0.0);
-   if (head(health) > 0) then form_error("native LoRA non-finite update; checkpoint withheld") else [step,norm,clip,len(state)];
+   if (health[0] > 0) then form_error("native LoRA non-finite update; checkpoint withheld") else [step,norm,clip,len(state)];
   }
  }
  0;

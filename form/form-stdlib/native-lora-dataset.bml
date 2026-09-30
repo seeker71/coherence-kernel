@@ -1,21 +1,22 @@
 // Chat, prompt/completion and plain-text JSONL become teacher-forced token rows.
 // Prompt masking supervises the final assistant response, including its end marker.
 // Rows retain their line number; malformed data never vanishes from the denominator.
-// preludes: form-stdlib/native-llama-tokenizer.bml form-stdlib/native-llama-backward.bml
+import form-stdlib/native-llama-tokenizer.bml;
+import form-stdlib/native-llama-backward.bml;
 section [form.bml] {
  class NativeLoraDataset {
   def nld-string(o,k) {
    let value = json-object-get(o,k);
-   if (!((Comparable) node_type(value) == 2)) then form_error(str_concat("native training requires a string: ",k)) else node_value(value);
+   if (!((Comparable) node_type(value) == 2)) then form_error(("native training requires a string: " + k)) else node_value(value);
   }
   def nld-message(role,text) = json-node-object([json-node-pair("role",json-node-string(role)),json-node-pair("content",json-node-string(text))]);
-  def nld-system(t,text) = append([nlt-special(t,"<|begin_of_text|>")],append(nlt-header(t,"system"),append(nlt-encode(t,str_concat("Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n",trim(text))),[nlt-special(t,"<|eot_id|>")])));
-  def nld-messages(t,messages) = if nil?(messages) then [] else append(nld-one(t,head(messages)),nld-messages(t,tail(messages)));
+  def nld-system(t,text) = append([nlt-special(t,"<|begin_of_text|>")],append(nlt-header(t,"system"),append(nlt-encode(t,("Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n" + trim(text))),[nlt-special(t,"<|eot_id|>")])));
+  def nld-messages(t,messages) = if nil?(messages) then [] else append(nld-one(t,messages[0]),nld-messages(t,messages[1:]));
   def nld-one(t,m) {
    let role = nld-string(m,"role");
    if (json-object-has?(m,"tool_calls") || (!(((String) role == "user") || ((String) role == "assistant")))) then form_error("native training chat role/tool payload requires a matching template") else nlt-message(t,role,nld-string(m,"content"));
   }
-  def nld-chat(t,messages) = if nil?(messages) then nld-system(t,"") else if ((String) nld-string(head(messages),"role") == "system") then append(nld-system(t,nld-string(head(messages),"content")),nld-messages(t,tail(messages))) else append(nld-system(t,""),nld-messages(t,messages));
+  def nld-chat(t,messages) = if nil?(messages) then nld-system(t,"") else if ((String) nld-string(messages[0],"role") == "system") then append(nld-system(t,nld-string(messages[0],"content")),nld-messages(t,messages[1:])) else append(nld-system(t,""),nld-messages(t,messages));
   def nld-chat-row(t,messages,masked,line) {
    if nil?(messages) then form_error("native training chat is empty") else nld-chat-ready(t,messages,masked,line);
   }
@@ -28,23 +29,23 @@ section [form.bml] {
    else if json-object-has?(row,"messages") then nld-chat-row(t,json-array-elements(json-object-get(row,"messages")),masked,line)
    else if json-object-has?(row,"prompt") then nld-chat-row(t,[nld-message("user",nld-string(row,"prompt")),nld-message("assistant",nld-string(row,"completion"))],masked,line)
    else if json-object-has?(row,"text") then nld-sample(append([nlt-special(t,"<|begin_of_text|>")],append(nlt-encode(t,nld-string(row,"text")),[nlt-special(t,"<|eot_id|>")])),0,line)
-   else form_error(str_concat("native training row has no supported text field at line ",int_to_str(line)));
+   else form_error(("native training row has no supported text field at line " + line.str()));
   }
   def nld-mask(n,offset,i) = if (i >= n) then [] else cons(if ((i + 1) >= offset) then 1.0 else 0.0,nld-mask(n,offset,(i + 1)));
   // Sample: input ids, target ids, target mask, supervised count, source line.
   def nld-sample(tokens,offset,line) {
    let n = (len(tokens) - 1); let mask = nld-mask(n,offset,0);
-   if ((n <= 0) || (sum(mask) <= 0)) then form_error(str_concat("native training has no supervised targets at line ",int_to_str(line))) else [take(n,tokens),tail(tokens),mask,sum(mask),line];
+   if ((n <= 0) || (sum(mask) <= 0)) then form_error(("native training has no supervised targets at line " + line.str())) else [take(n,tokens),tokens[1:],mask,sum(mask),line];
   }
   def nld-lines(text) = nld-nonempty(split-on(text,"\n"),1);
-  def nld-nonempty(lines,i) = if nil?(lines) then [] else if ((Comparable) str_len(trim(head(lines))) == 0) then nld-nonempty(tail(lines),(i + 1)) else cons([head(lines),i],nld-nonempty(tail(lines),(i + 1)));
+  def nld-nonempty(lines,i) = if nil?(lines) then [] else if ((Comparable) len(trim(lines[0])) == 0) then nld-nonempty(lines[1:],(i + 1)) else cons([lines[0],i],nld-nonempty(lines[1:],(i + 1)));
   def nld-file(path) {
    let text = read_file(path);
-   if nothing?(text) then form_error(str_concat("native training data absent: ",path)) else nld-lines(text);
+   if nothing?(text) then form_error(("native training data absent: " + path)) else nld-lines(text);
   }
-  def nld-prepare(t,rows,masked) = if nil?(rows) then [] else cons(nld-row(t,parse-json("native-training-row",head(head(rows))),masked,head(rows)[1]),nld-prepare(t,tail(rows),masked));
-  def nld-weight(rows) = if nil?(rows) then 0.0 else (head(rows)[3] + nld-weight(tail(rows)));
-  def nld-tokens(rows) = if nil?(rows) then 0 else (len(head(head(rows))) + nld-tokens(tail(rows)));
+  def nld-prepare(t,rows,masked) = if nil?(rows) then [] else cons(nld-row(t,parse-json("native-training-row",rows[0][0]),masked,rows[0][1]),nld-prepare(t,rows[1:],masked));
+  def nld-weight(rows) = if nil?(rows) then 0.0 else (rows[0][3] + nld-weight(rows[1:]));
+  def nld-tokens(rows) = if nil?(rows) then 0 else (len(rows[0][0]) + nld-tokens(rows[1:]));
  }
  0;
 }

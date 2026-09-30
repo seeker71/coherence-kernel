@@ -1,9 +1,11 @@
 // Native execution of the local affine-quantized Llama checkpoint and its LoRA pairs.
 // Geometry, quantization, rotary scaling and adapter shapes are read from the files.
-// preludes: form-stdlib/native-affine-metal.bml form-stdlib/model-registry.bml form-stdlib/native-adapter-generation.bml
+import form-stdlib/native-affine-metal.bml;
+import form-stdlib/model-registry.bml;
+import form-stdlib/native-adapter-generation.bml;
 section [form.bml] {
  class NativeLlamaMetal {
-  def nll-msl() = str_concat("#include <metal_stdlib>\nusing namespace metal;\n", "
+  def nll-msl() = ("#include <metal_stdlib>\nusing namespace metal;\n" + "
 kernel void nll_rope(device float* x [[buffer(0)]],device const float* freq [[buffer(1)]],constant uint& heads [[buffer(2)]],constant uint& hd [[buffer(3)]],constant uint& tokens [[buffer(4)]],constant uint& offset [[buffer(5)]],constant uint& inverse [[buffer(6)]],uint i [[thread_position_in_grid]]) {uint hw=hd/2;if(i>=tokens*heads*hw)return;uint j=i%hw;uint h=i/hw;uint at=h*hd+j;float angle=float(offset+h/heads)*freq[j]*(inverse?-1.0f:1.0f);float c=cos(angle),s=sin(angle),a=x[at],b=x[at+hw];x[at]=a*c-b*s;x[at+hw]=a*s+b*c;}
 kernel void nll_store(device const float* x [[buffer(0)]],device float* y [[buffer(1)]],constant uint& n [[buffer(2)]],constant uint& offset [[buffer(3)]],uint i [[thread_position_in_grid]]){if(i<n)y[offset+i]=x[i];}
 kernel void nll_last(device const float* x [[buffer(0)]],device float* y [[buffer(1)]],constant uint& n [[buffer(2)]],constant uint& offset [[buffer(3)]],uint i [[thread_position_in_grid]]){if(i<n)y[i]=x[offset+i];}
@@ -16,9 +18,9 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
   def nll-run(name, handles, values, count, grouped) {
    let p = nam-held-pipe(metal_pipeline(nll-msl(), name));
    let rc = metal_enqueue(p, if grouped then md-bind16(handles, values, 32, 0, 1, 0) else md-bind(handles, values), count);
-   if (rc < 0) then form_error(str_concat("native Llama dispatch refused: ", name)) else rc;
+   if (rc < 0) then form_error(("native Llama dispatch refused: " + name)) else rc;
   }
-  def nll-config(dir) = parse-json(str_concat(dir, "/config.json"), read_file(str_concat(dir, "/config.json")));
+  def nll-config(dir) = parse-json((dir + "/config.json"), read_file((dir + "/config.json")));
   def nll-get(c, key) = sti-value(c, key);
   def nll-freq(c, i, dim) {
    let raw = (1.0 / math_pow(nll-get(c, "rope_theta"), ((2.0 * i) / (dim + 0.0))));
@@ -42,18 +44,18 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
    let d = nll-get(c, "head_dim");
    if (!(((String) nll-get(c, "model_type") == "llama") && (((Comparable) nll-get(quant, "bits") == 4) && ((nll-get(quant, "group_size") > 0) && (((Comparable) (nll-get(quant, "group_size") % 8) == 0) && (((Comparable) nll-get(c, "tie_word_embeddings") == 1) && ((Comparable) nll-get(c, "hidden_size") == (nll-get(c, "num_attention_heads") * d)))))))) then form_error("native Llama configuration not admitted") else [nll-get(c, "hidden_size"), nll-get(c, "intermediate_size"), nll-get(c, "num_attention_heads"), nll-get(c, "num_key_value_heads"), d, nll-get(c, "vocab_size"), nll-get(c, "num_hidden_layers"), nll-get(c, "rms_norm_eps"), nll-get(quant, "group_size"), nll-get(c, "max_position_embeddings"), nam-buffer(nll-freqs(c, 0, d))];
   }
-  def nll-prefix(i, suffix) = str_concat("model.layers.", str_concat(int_to_str(i), str_concat(".", suffix)));
+  def nll-prefix(i, suffix) = ("model.layers." + (i.str() + ("." + suffix)));
   // Pair: prefix, A(input,rank), B(rank,output), input,rank,output,scale.
   // Mutable owners copy only adapter values, leaving the immutable checkpoint mapped.
   def nll-pair(index, config, prefix, din, dout) {
-   let a = sti-find(index, str_concat(prefix, ".lora_a"));
-   let b = sti-find(index, str_concat(prefix, ".lora_b"));
+   let a = sti-find(index, (prefix + ".lora_a"));
+   let b = sti-find(index, (prefix + ".lora_b"));
    if (nil?(a) && nil?(b)) then [] else if (nil?(a) || nil?(b)) then form_error("native LoRA pair incomplete") else nll-pair-shaped(index, config, prefix, a, b, din, dout);
   }
   def nll-pair-shaped(index, config, prefix, a, b, din, dout) {
    let sa = a[2]; let sb = b[2];
    let params = json-object-get(config, "lora_parameters");
-   if (!(((Comparable) len(sa) == 2) && (((Comparable) len(sb) == 2) && (((Comparable) head(sa) == din) && (((Comparable) sb[1] == dout) && (((Comparable) sa[1] == head(sb)) && (((Comparable) nll-get(params, "dropout") == 0.0) && (nll-get(params, "scale") > 0.0)))))))) then form_error("native LoRA shape/dropout/scale not admitted") else [prefix, nam-floats(sti-map-row(index, a)), nam-floats(sti-map-row(index, b)), din, sa[1], dout, nll-get(params, "scale")];
+   if (!(((Comparable) len(sa) == 2) && (((Comparable) len(sb) == 2) && (((Comparable) sa[0] == din) && (((Comparable) sb[1] == dout) && (((Comparable) sa[1] == sb[0]) && (((Comparable) nll-get(params, "dropout") == 0.0) && (nll-get(params, "scale") > 0.0)))))))) then form_error("native LoRA shape/dropout/scale not admitted") else [prefix, nam-floats(sti-map-row(index, a)), nam-floats(sti-map-row(index, b)), din, sa[1], dout, nll-get(params, "scale")];
   }
   // Projection = shared affine view and optional mutable low-rank pair.
   def nll-projection(base, adapter, ac, prefix, group) {
@@ -61,39 +63,39 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
    [view, if nil?(adapter) then [] else nll-pair(adapter, ac, prefix, view[4], view[3])];
   }
   def nll-layer(base, adapter, ac, i, group) = [
-   nam-floats(sti-map(base, str_concat(nll-prefix(i, "input_layernorm"), ".weight"))),
+   nam-floats(sti-map(base, (nll-prefix(i, "input_layernorm") + ".weight"))),
    nll-projection(base, adapter, ac, nll-prefix(i, "self_attn.q_proj"), group),
    nll-projection(base, adapter, ac, nll-prefix(i, "self_attn.k_proj"), group),
    nll-projection(base, adapter, ac, nll-prefix(i, "self_attn.v_proj"), group),
    nll-projection(base, adapter, ac, nll-prefix(i, "self_attn.o_proj"), group),
-   nam-floats(sti-map(base, str_concat(nll-prefix(i, "post_attention_layernorm"), ".weight"))),
+   nam-floats(sti-map(base, (nll-prefix(i, "post_attention_layernorm") + ".weight"))),
    nll-projection(base, adapter, ac, nll-prefix(i, "mlp.gate_proj"), group),
    nll-projection(base, adapter, ac, nll-prefix(i, "mlp.up_proj"), group),
    nll-projection(base, adapter, ac, nll-prefix(i, "mlp.down_proj"), group)];
   def nll-layers(base, adapter, ac, i, n, group) = if (i >= n) then [] else cons(nll-layer(base, adapter, ac, i, group), nll-layers(base, adapter, ac, (i + 1), n, group));
   // Model = geo, layers, embedding, final norm, source directory, adapter config.
-  def nll-open(dir, adapterPath) = nll-open-dir(dir,if ((Comparable) str_len(adapterPath) == 0) then "" else nag-resolve(adapterPath));
+  def nll-open(dir, adapterPath) = nll-open-dir(dir,if ((Comparable) len(adapterPath) == 0) then "" else nag-resolve(adapterPath));
   // The historical repository spelling resolves only to the registry's pinned local snapshot.
   def nll-base-match(identity,dir) = (((String) identity == dir) || (((String) identity == "mlx-community/Llama-3.2-3B-Instruct-4bit") && ((String) dir == mr-path(mr-find("llama32-3b-mlx-4bit")))));
   def nll-open-dir(dir, adapterDir) {
    let cfg = nll-config(dir);
    let geo = nll-geo(cfg);
-   let base = sti-open(str_concat(dir, "/model.safetensors"));
-   let ac = if ((Comparable) str_len(adapterDir) == 0) then [] else parse-json(str_concat(adapterDir, "/adapter_config.json"), read_file(str_concat(adapterDir, "/adapter_config.json")));
+   let base = sti-open((dir + "/model.safetensors"));
+   let ac = if ((Comparable) len(adapterDir) == 0) then [] else parse-json((adapterDir + "/adapter_config.json"), read_file((adapterDir + "/adapter_config.json")));
    if ((!nil?(ac)) && (!nll-base-match(nll-get(ac,"model"),dir))) then form_error("native LoRA base identity mismatch") else nll-open-matched(dir,adapterDir,geo,base,ac);
   }
   def nll-open-matched(dir,adapterDir,geo,base,ac) {
    let checked = nll-check-metadata(base,geo);
-   let adapter = if ((Comparable) str_len(adapterDir) == 0) then [] else sti-open(str_concat(adapterDir, "/adapters.safetensors"));
+   let adapter = if ((Comparable) len(adapterDir) == 0) then [] else sti-open((adapterDir + "/adapters.safetensors"));
    let layers = nll-layers(base, adapter, ac, 0, geo[6], geo[8]);
    if ((!nil?(adapter)) && (!((Comparable) len(adapter[2]) == (2 * nll-pair-count(layers))))) then form_error("native LoRA contains unconsumed tensors") else [geo, layers, nam-view(base, "model.embed_tokens", geo[8]), nam-floats(sti-map(base, "model.norm.weight")), dir, ac, adapterDir];
   }
   def nll-adapter(model) = if (len(model) > 6) then model[6] else "";
-  def nll-expect(index,key,shape) = if ((Value) sti-find(index,key)[2] == shape) then 1 else form_error(str_concat("native Llama tensor geometry mismatch: ",key));
+  def nll-expect(index,key,shape) = if ((Value) sti-find(index,key)[2] == shape) then 1 else form_error(("native Llama tensor geometry mismatch: " + key));
   def nll-expect-affine(index,key,rows,cols,group) {
-   let w = nll-expect(index,str_concat(key,".weight"),[rows,(cols / 8)]);
-   let s = nll-expect(index,str_concat(key,".scales"),[rows,(cols / group)]);
-   nll-expect(index,str_concat(key,".biases"),[rows,(cols / group)]);
+   let w = nll-expect(index,(key + ".weight"),[rows,(cols / 8)]);
+   let s = nll-expect(index,(key + ".scales"),[rows,(cols / group)]);
+   nll-expect(index,(key + ".biases"),[rows,(cols / group)]);
   }
   def nll-check-metadata(index,g) {
    let d = g[0]; let ff = g[1]; let nk = g[3]; let group = g[8];
@@ -122,14 +124,14 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
   }
   def nll-pair-count-proj(p) = if nil?(p[1]) then 0 else 1;
   def nll-pair-count-layer(l) = (nll-pair-count-proj(l[1]) + (nll-pair-count-proj(l[2]) + (nll-pair-count-proj(l[3]) + (nll-pair-count-proj(l[4]) + (nll-pair-count-proj(l[6]) + (nll-pair-count-proj(l[7]) + nll-pair-count-proj(l[8])))))));
-  def nll-pair-count(layers) = if nil?(layers) then 0 else (nll-pair-count-layer(head(layers)) + nll-pair-count(tail(layers)));
-  def nll-projection-handles(p) = append(take(3, head(p)), if nil?(p[1]) then [] else [p[1][1], p[1][2]]);
+  def nll-pair-count(layers) = if nil?(layers) then 0 else (nll-pair-count-layer(layers[0]) + nll-pair-count(layers[1:]));
+  def nll-projection-handles(p) = append(take(3, p[0]), if nil?(p[1]) then [] else [p[1][1], p[1][2]]);
   def nll-layer-handles(l) = append([l[0], l[5]], append(nll-projection-handles(l[1]), append(nll-projection-handles(l[2]), append(nll-projection-handles(l[3]), append(nll-projection-handles(l[4]), append(nll-projection-handles(l[6]), append(nll-projection-handles(l[7]), nll-projection-handles(l[8]))))))));
-  def nll-all-handles(layers) = if nil?(layers) then [] else append(nll-layer-handles(head(layers)), nll-all-handles(tail(layers)));
-  def nll-close(model) = nam-free(append([head(model)[10], model[3]], append(take(3, model[2]), nll-all-handles(model[1]))));
+  def nll-all-handles(layers) = if nil?(layers) then [] else append(nll-layer-handles(layers[0]), nll-all-handles(layers[1:]));
+  def nll-close(model) = nam-free(append([model[0][10], model[3]], append(take(3, model[2]), nll-all-handles(model[1]))));
   def nll-caches(n, bytes) = if (n <= 0) then [] else cons(nam-alloc(bytes), nll-caches((n - 1), bytes));
   def nll-context(model, positions) {
-   let g = head(model);
+   let g = model[0];
    if ((positions <= 0) || (positions > g[9])) then form_error("native Llama context exceeds model positions") else [positions, nll-caches(g[6], (positions * (g[3] * g[4]))), nll-caches(g[6], (positions * (g[3] * g[4])))];
   }
   def nll-context-close(ctx) = nam-free(append(ctx[1], ctx[2]));
@@ -137,7 +139,7 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
   def nll-store(x, cache, count, offset) = nll-run("nll_store", [x, cache], [count, offset], count, 0);
   def nll-last(x, y, count, offset) = nll-run("nll_last", [x, y], [count, offset], count, 0);
   def nll-linear(p, x, y, t, scratch) {
-   let view = head(p); let pair = p[1];
+   let view = p[0]; let pair = p[1];
    let base = nam-linear(view, x, y, t, 0);
    if nil?(pair) then base else nll-linear-pair(pair, x, y, t, scratch);
   }
@@ -148,7 +150,7 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
   def nll-proj-rank(p) = if nil?(p[1]) then 0 else p[1][4];
   def nll-max(a, b) = if (a > b) then a else b;
   def nll-rank-layer(l) = nll-max(nll-proj-rank(l[1]), nll-max(nll-proj-rank(l[2]), nll-max(nll-proj-rank(l[3]), nll-max(nll-proj-rank(l[4]), nll-max(nll-proj-rank(l[6]), nll-max(nll-proj-rank(l[7]), nll-proj-rank(l[8])))))));
-  def nll-rank(layers) = if nil?(layers) then 1 else nll-max(nll-rank-layer(head(layers)), nll-rank(tail(layers)));
+  def nll-rank(layers) = if nil?(layers) then 1 else nll-max(nll-rank-layer(layers[0]), nll-rank(layers[1:]));
   // Owned layer activation list: normalized input,Q,K,V,attention,residual,
   // normalized residual,gate,up,SwiGLU,output,inverse norms,probabilities.
   def nll-buffers(g, t, pos) = [nam-alloc((t * g[0])),nam-alloc((t * g[0])),nam-alloc((t * (g[3] * g[4]))),nam-alloc((t * (g[3] * g[4]))),nam-alloc((t * g[0])),nam-alloc((t * g[0])),nam-alloc((t * g[0])),nam-alloc((t * g[1])),nam-alloc((t * g[1])),nam-alloc((t * g[1])),nam-alloc((t * g[0])),nam-alloc(t),nam-alloc(t),nam-alloc((t * (g[2] * (pos + t))))];
@@ -174,9 +176,9 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
    let end = nam-add(b[5],b[10],b[10],(t * d),1.0);
    [b[10],b,x,l];
   }
-  def nll-blocks(g,layers,x,ks,vs,t,pos,scratch,acc) = if nil?(layers) then [x,reverse(acc)] else nll-blocks-next(g,tail(layers),tail(ks),tail(vs),t,pos,scratch,acc,nll-block(g,head(layers),x,head(ks),head(vs),t,pos,scratch));
-  def nll-blocks-next(g,layers,ks,vs,t,pos,scratch,acc,block) = nll-blocks(g,layers,head(block),ks,vs,t,pos,scratch,cons(block,acc));
-  def nll-ids-valid(ids,vocab) = if nil?(ids) then 1 else if ((head(ids) >= 0) && (head(ids) < vocab)) then nll-ids-valid(tail(ids),vocab) else 0;
+  def nll-blocks(g,layers,x,ks,vs,t,pos,scratch,acc) = if nil?(layers) then [x,reverse(acc)] else nll-blocks-next(g,layers[1:],ks[1:],vs[1:],t,pos,scratch,acc,nll-block(g,layers[0],x,ks[0],vs[0],t,pos,scratch));
+  def nll-blocks-next(g,layers,ks,vs,t,pos,scratch,acc,block) = nll-blocks(g,layers,block[0],ks,vs,t,pos,scratch,cons(block,acc));
+  def nll-ids-valid(ids,vocab) = if nil?(ids) then 1 else if ((ids[0] >= 0) && (ids[0] < vocab)) then nll-ids-valid(ids[1:],vocab) else 0;
   // Forward result: logits, block tape, normalized head, head input, inverse,
   // non-layer owned buffers, token count, number of logit rows.
   def nll-forward(model,ctx,ids,pos,training) {
@@ -186,8 +188,8 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
   // Its retained KV is read-only history; backward still requires a whole row.
   def nll-forward-evaluation(model,ctx,ids,pos) = nll-forward-rows(model,ctx,ids,pos,1);
   def nll-forward-rows(model,ctx,ids,pos,allRows) {
-   let g = head(model); let t = len(ids);
-   if (((Comparable) t == 0) || ((!nll-ids-valid(ids,g[5])) || ((pos < 0) || ((pos + t) > head(ctx))))) then form_error("native Llama token/context admission refused") else nll-forward-admitted(model,ctx,ids,pos,allRows,g,t);
+   let g = model[0]; let t = len(ids);
+   if (((Comparable) t == 0) || ((!nll-ids-valid(ids,g[5])) || ((pos < 0) || ((pos + t) > ctx[0])))) then form_error("native Llama token/context admission refused") else nll-forward-admitted(model,ctx,ids,pos,allRows,g,t);
   }
   def nll-forward-admitted(model,ctx,ids,pos,allRows,g,t) {
    let ib = nam-write(nam-alloc(t),md-le32-list(ids,""));
@@ -200,13 +202,13 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
    let hn = nam-alloc((ht * g[0]));
    let inv = nam-alloc(ht);
    let logits = nam-alloc((ht * g[5]));
-   let copied = nll-last(head(blocks),hx,(ht * g[0]),if allRows then 0 else ((t - 1) * g[0]));
+   let copied = nll-last(blocks[0],hx,(ht * g[0]),if allRows then 0 else ((t - 1) * g[0]));
    let norm = nam-rms(hx,model[3],hn,inv,g[0],ht,g[7]);
    let out = nam-linear(model[2],hn,logits,ht,0);
    let done = nam-sync();
    [logits,blocks[1],hn,hx,inv,[ib,x,scratch,hx,hn,inv,logits],t,ht];
   }
-  def nll-forward-handles(blocks) = if nil?(blocks) then [] else append(head(blocks)[1],nll-forward-handles(tail(blocks)));
+  def nll-forward-handles(blocks) = if nil?(blocks) then [] else append(blocks[0][1],nll-forward-handles(blocks[1:]));
   def nll-forward-close(r) = nam-free(append(r[5],nll-forward-handles(r[1])));
   def nll-select(logits,vocab) {
    let out = nam-alloc(1);

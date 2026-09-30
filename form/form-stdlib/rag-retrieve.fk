@@ -1,6 +1,6 @@
 // rag-retrieve.fk — native ranking for neural-distance and semantic-overlap vectors.
 //
-// preludes: form-stdlib/core.fk
+import form-stdlib/core.fk;
 //
 // The offline oracle (form-cli tier 1: a local LLM) can reason but is blind to the
 // body — it cannot recall the 994 recipes / specs / concepts / substrate cells it
@@ -39,17 +39,17 @@ section [form.bml] {
     def rag-persisted-source-sha256(e) = len(e) > 8 ? e[8] : "";
     // --- L1 distance between two quantized vectors (pure arithmetic) ---
     def rag-abs(n) = n < 0 ? 0 - n : n;
-    def rag-l1(a, b) = (Comparable) len(a) == 0 ? 0 : (Comparable) len(b) == 0 ? 0 : rag-abs(head(a) - head(b)) + rag-l1(tail(a), tail(b));
+    def rag-l1(a, b) = (Comparable) len(a) == 0 ? 0 : (Comparable) len(b) == 0 ? 0 : rag-abs(a[0] - b[0]) + rag-l1(a[1:], b[1:]);
     // distance from a query vector to an entry
     def rag-dist(qvec, e) = rag-l1(qvec, rag-vec(e));
     // --- NEAREST: the entry whose vector is L1-closest to the query ---
     // mirror nearest-shape's min-walk; ties keep the FIRST entry (oldest wins).
-    def rag-nearest-loop(qvec, entries, best, best-d) = (Comparable) len(entries) == 0 ? best : (Comparable) len(best) == 0 ? rag-nearest-loop(qvec, tail(entries), head(entries), rag-dist(qvec, head(entries))) : rag-dist(qvec, head(entries)) < best-d ? rag-nearest-loop(qvec, tail(entries), head(entries), rag-dist(qvec, head(entries))) : rag-nearest-loop(qvec, tail(entries), best, best-d);
+    def rag-nearest-loop(qvec, entries, best, best-d) = (Comparable) len(entries) == 0 ? best : (Comparable) len(best) == 0 ? rag-nearest-loop(qvec, entries[1:], entries[0], rag-dist(qvec, entries[0])) : rag-dist(qvec, entries[0]) < best-d ? rag-nearest-loop(qvec, entries[1:], entries[0], rag-dist(qvec, entries[0])) : rag-nearest-loop(qvec, entries[1:], best, best-d);
     def rag-nearest(qvec, entries) = rag-nearest-loop(qvec, entries, empty(), 0);
     def rag-nearest-id(qvec, entries) = rag-id(rag-nearest(qvec, entries));
     // --- TOP-K: greedy nearest, remove, repeat. Returns ids, nearest-first. ---
-    def rag-remove(id, entries) = (Comparable) len(entries) == 0 ? empty() : (String) rag-id(head(entries)) == id ? tail(entries) : cons(head(entries), rag-remove(id, tail(entries)));
-    def rag-rev-loop(in, out) = (Comparable) len(in) == 0 ? out : rag-rev-loop(tail(in), cons(head(in), out));
+    def rag-remove(id, entries) = (Comparable) len(entries) == 0 ? empty() : (String) rag-id(entries[0]) == id ? entries[1:] : cons(entries[0], rag-remove(id, entries[1:]));
+    def rag-rev-loop(in, out) = (Comparable) len(in) == 0 ? out : rag-rev-loop(in[1:], cons(in[0], out));
     def rag-topk-loop(qvec, entries, k, acc) = (Comparable) k == 0 ? acc : (Comparable) len(entries) == 0 ? acc : {
         let nid = rag-nearest-id(qvec, entries);
         rag-topk-loop(qvec, rag-remove(nid, entries), k - 1, cons(nid, acc));
@@ -58,13 +58,13 @@ section [form.bml] {
     def rag-topk(qvec, entries, k) = rag-rev-loop(rag-topk-loop(qvec, entries, k, empty()), empty());
     // --- SEMANTIC OVERLAP: pair-atomic coverage over sparse exact codes. ---
     def rag-min(a, b) = a < b ? a : b;
-    def rag-sum-loop(xs, acc) = (Comparable) len(xs) == 0 ? acc : rag-sum-loop(tail(xs), acc + head(xs));
+    def rag-sum-loop(xs, acc) = (Comparable) len(xs) == 0 ? acc : rag-sum-loop(xs[1:], acc + xs[0]);
     def rag-sum(xs) = rag-sum-loop(xs, 0);
-    def rag-pair-in?(code-a, code-b, codes) = len(codes) < 2 ? 0 : (Comparable) code-a == head(codes) && (Comparable) code-b == head(tail(codes)) ? 1 : rag-pair-in?(code-a, code-b, tail(tail(codes)));
+    def rag-pair-in?(code-a, code-b, codes) = len(codes) < 2 ? 0 : (Comparable) code-a == codes[0] && (Comparable) code-b == codes[1:][0] ? 1 : rag-pair-in?(code-a, code-b, codes[1:][1:]);
     def rag-overlap(query-codes, doc-codes) = len(query-codes) < 2 ? 0 : {
-        let code-a = head(query-codes);
-        let code-b = head(tail(query-codes));
-        ((Comparable) rag-pair-in?(code-a, code-b, doc-codes) == 1 ? 2 : 0) + rag-overlap(tail(tail(query-codes)), doc-codes);
+        let code-a = query-codes[0];
+        let code-b = query-codes[1:][0];
+        ((Comparable) rag-pair-in?(code-a, code-b, doc-codes) == 1 ? 2 : 0) + rag-overlap(query-codes[1:][1:], doc-codes);
     };
     def rag-overlap-score(qvec, entry) = rag-overlap(qvec, rag-vec(entry));
     // Higher overlap wins. Equal overlap chooses the smaller sparse document
@@ -74,7 +74,7 @@ section [form.bml] {
         let bs = rag-overlap-score(qvec, best);
         cs > bs ? 1 : (Comparable) cs == bs ? len(rag-vec(candidate)) < len(rag-vec(best)) ? 1 : 0 : 0;
     };
-    def rag-best-overlap-loop(qvec, entries, best) = (Comparable) len(entries) == 0 ? best : (Comparable) len(best) == 0 ? rag-best-overlap-loop(qvec, tail(entries), head(entries)) : (Comparable) rag-overlap-better?(qvec, head(entries), best) == 1 ? rag-best-overlap-loop(qvec, tail(entries), head(entries)) : rag-best-overlap-loop(qvec, tail(entries), best);
+    def rag-best-overlap-loop(qvec, entries, best) = (Comparable) len(entries) == 0 ? best : (Comparable) len(best) == 0 ? rag-best-overlap-loop(qvec, entries[1:], entries[0]) : (Comparable) rag-overlap-better?(qvec, entries[0], best) == 1 ? rag-best-overlap-loop(qvec, entries[1:], entries[0]) : rag-best-overlap-loop(qvec, entries[1:], best);
     def rag-best-overlap(qvec, entries) = rag-best-overlap-loop(qvec, entries, empty());
     def rag-best-overlap-id(qvec, entries) = (Comparable) len(entries) == 0 ? "" : rag-id(rag-best-overlap(qvec, entries));
     def rag-topk-overlap-loop(qvec, entries, k, acc) = (Comparable) k == 0 || (Comparable) len(entries) == 0 ? acc : {

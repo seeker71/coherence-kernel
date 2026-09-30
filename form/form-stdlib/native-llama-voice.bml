@@ -9,13 +9,16 @@
 // drops an unfinished last sentence. Admission that would refuse for want>maxpos clamps to
 // maxpos when the prompt itself fits.
 // Partial output always carries its actual stopping reason.
-// preludes: form-stdlib/native-llama-metal.bml form-stdlib/native-llama-tokenizer.bml form-stdlib/spool-bell-transport.fk form-stdlib/form-fs.fk
+import form-stdlib/native-llama-metal.bml;
+import form-stdlib/native-llama-tokenizer.bml;
+import form-stdlib/spool-bell-transport.fk;
+import form-stdlib/form-fs.fk;
 section [form.bml] {
  class NativeLlamaVoice {
   def nlg-event(path,stage,count,start,live,model) {
    let now = host_monotonic_ms(); let current = metal_live();
    let event = json-node-object([json-node-pair("stage",json-node-string(stage)),json-node-pair("tokens",json-node-int(count)),json-node-pair("wall_ms",json-node-int((now - start))),json-node-pair("gpu_busy_us",json-node-int((current[11] - live[11]))),json-node-pair("dispatches",json-node-int((current[7] - live[7]))),json-node-pair("buffers_created",json-node-int((current[16] - live[16]))),json-node-pair("new_pipelines",json-node-int((current[3] - live[3]))),json-node-pair("live_buffers",json-node-int(current[2])),json-node-pair("device_bytes",json-node-int(current[18])),json-node-pair("model",json-node-string(model[4])),json-node-pair("adapter",json-node-string(nll-adapter(model))),json-node-pair("lora_pairs",json-node-int(nll-pair-count(model[1]))),json-node-pair("lora_rank",json-node-int(if ((Comparable) nll-pair-count(model[1]) == 0) then 0 else nll-rank(model[1])))]);
-   if ((Comparable) str_len(path) == 0) then 0 else sbt-append(path,str_concat(json-emit(event),"\n"));
+   if ((Comparable) len(path) == 0) then 0 else sbt-append(path,(json-emit(event) + "\n"));
   }
   def nlg-open(dir,adapter) = nlg-open-at(dir,adapter,"");
   def nlg-open-at(dir,adapter,events) {
@@ -25,24 +28,24 @@ section [form.bml] {
    let indexed = nlg-event(events,"tokenizer-index",0,t0,lg,model);
    [model,tk];
   }
-  def nlg-close(session) = nll-close(head(session));
+  def nlg-close(session) = nll-close(session[0]);
   def nlg-min(a,b) = if (a < b) then a else b;
   def nlg-max(a,b) = if (a > b) then a else b;
   def nlg-room(bytes) {
    let live = metal_live();
    ((live[19] > 0) && ((live[18] + bytes) <= live[19]));
   }
-  def nlg-cache-bytes(model,positions) = (8 * (positions * (head(model)[6] * (head(model)[3] * head(model)[4]))));
+  def nlg-cache-bytes(model,positions) = (8 * (positions * (model[0][6] * (model[0][3] * model[0][4]))));
   def nlg-copy-cache(old,new,n,width) {
-   if nil?(old) then 1 else nlg-copy-cache-next(old,new,n,width,nam-copy(head(old),head(new),(n * width)));
+   if nil?(old) then 1 else nlg-copy-cache-next(old,new,n,width,nam-copy(old[0],new[0],(n * width)));
   }
-  def nlg-copy-cache-next(old,new,n,width,rc) = nlg-copy-cache(tail(old),tail(new),n,width);
+  def nlg-copy-cache-next(old,new,n,width,rc) = nlg-copy-cache(old[1:],new[1:],n,width);
   def nlg-grow(model,ctx,used) {
-   let size = nlg-min(head(model)[9],(head(ctx) * 2));
-   if ((size <= head(ctx)) || (!nlg-room(nlg-cache-bytes(model,size)))) then nothing() else nlg-grow-admitted(model,ctx,used,size);
+   let size = nlg-min(model[0][9],(ctx[0] * 2));
+   if ((size <= ctx[0]) || (!nlg-room(nlg-cache-bytes(model,size)))) then nothing() else nlg-grow-admitted(model,ctx,used,size);
   }
   def nlg-grow-admitted(model,ctx,used,size) {
-   let next = nll-context(model,size); let width = (head(model)[3] * head(model)[4]);
+   let next = nll-context(model,size); let width = (model[0][3] * model[0][4]);
    let k = nlg-copy-cache(ctx[1],next[1],used,width);
    let v = nlg-copy-cache(ctx[2],next[2],used,width);
    let done = nam-sync(); let released = nll-context-close(ctx);
@@ -51,7 +54,7 @@ section [form.bml] {
   def nlg-forward-next(model,ctx,ids,pos,events,stage) {
    let t0 = host_monotonic_ms(); let live = metal_live();
    let r = nll-forward(model,ctx,ids,pos,0);
-   let selected = nll-select(head(r),head(model)[5]);
+   let selected = nll-select(r[0],model[0][5]);
    let event = nlg-event(events,stage,len(ids),t0,live,model);
    let released = nll-forward-close(r);
    selected;
@@ -59,10 +62,10 @@ section [form.bml] {
   def nlg-forward-choice(model,ctx,ids,pos,events,stage) {
    let t0 = host_monotonic_ms(); let live = metal_live();
    let r = nll-forward(model,ctx,ids,pos,0);
-   let vocab = head(model)[5];
-   let best = nll-select(head(r),vocab);
-   let second = nll-select-except(head(r),vocab,best);
-   let third = nll-select-except2(head(r),vocab,best,second);
+   let vocab = model[0][5];
+   let best = nll-select(r[0],vocab);
+   let second = nll-select-except(r[0],vocab,best);
+   let third = nll-select-except2(r[0],vocab,best,second);
    let event = nlg-event(events,stage,len(ids),t0,live,model);
    let released = nll-forward-close(r);
    [best,second,third];
@@ -82,14 +85,14 @@ section [form.bml] {
   }
   def nlg-pick-candidates(tk,acc,ids,rank,missing) {
    if nil?(ids) then [if missing then -2 else -1,if missing then "tokenizer-candidates-absent" else "adapted-repeat"]
-   else if nlg-eos(tk,head(ids)) then [head(ids),if rank then "adapted-choice" else ""]
-   else if (!nlt-known-id(tk,head(ids))) then nlg-pick-candidates(tk,acc,tail(ids),(rank + 1),1)
-   else if nlg-stuck(acc,nlt-decode-id(tk,head(ids))) then nlg-pick-candidates(tk,acc,tail(ids),(rank + 1),missing)
-   else [head(ids),if rank then "adapted-choice" else ""];
+   else if nlg-eos(tk,ids[0]) then [ids[0],if rank then "adapted-choice" else ""]
+   else if (!nlt-known-id(tk,ids[0])) then nlg-pick-candidates(tk,acc,ids[1:],(rank + 1),1)
+   else if nlg-stuck(acc,nlt-decode-id(tk,ids[0])) then nlg-pick-candidates(tk,acc,ids[1:],(rank + 1),missing)
+   else [ids[0],if rank then "adapted-choice" else ""];
   }
   // Conservative byte estimate for the actual forward tape, including attention scores.
   def nlg-forward-bytes(model,t,pos) {
-   let g = head(model); let d = g[0]; let kd = (g[3] * g[4]);
+   let g = model[0]; let d = g[0]; let kd = (g[3] * g[4]);
    let layer = ((t * (((7 * d) + (2 * kd)) + ((3 * g[1]) + 2))) + (t * (g[2] * (pos + t))));
    (4 * ((g[6] * layer) + ((t * (d + nll-rank(model[1]))) + (g[5] + (2 * d)))));
   }
@@ -118,7 +121,7 @@ section [form.bml] {
   def nlg-eos(t,id) = (((Comparable) id == nlt-special(t,"<|eot_id|>")) || ((Comparable) id == nlt-special(t,"<|end_of_text|>")));
   // Result: text, reason (empty only on EOS), emitted count, final context, event file.
   def nlg-result(text,why,n,ctx,events) = [if ((String) why == "adapted-repeat") then nlg-complete(text) else text,why,n,ctx,events];
-  def nlg-stream(stream,text) = if ((Comparable) str_len(stream) == 0) then 0 else sbt-append(stream,text);
+  def nlg-stream(stream,text) = if ((Comparable) len(stream) == 0) then 0 else sbt-append(stream,text);
   def nlg-want-capacity(prompt-n,limit) = (prompt-n + (if (limit > 0) then limit else 16));
   def nlg-admit-capacity(want,maxpos) = if (want > maxpos) then maxpos else want;
   def nlg-floor-capacity(prompt-n) = (prompt-n + 1);
@@ -126,7 +129,7 @@ section [form.bml] {
    let floor = nlg-floor-capacity(prompt-n);
    if (capacity <= floor) then floor else nlg-max(floor,(capacity / 2));
   }
-  def nlg-drop(xs,n) = if ((n <= 0) || nil?(xs)) then xs else nlg-drop(tail(xs),(n - 1));
+  def nlg-drop(xs,n) = if ((n <= 0) || nil?(xs)) then xs else nlg-drop(xs[1:],(n - 1));
   def nlg-take-last(xs,n) {
    let d = (len(xs) - n);
    if (d <= 0) then xs else nlg-drop(xs,d);
@@ -169,18 +172,18 @@ section [form.bml] {
    else if nlg-repeat-at(s,period,end) then 1 else nlg-repeat-periods(s,(period + 1),end);
   }
   def nlg-looping(acc) {
-   let end = str_len(acc);
+   let end = len(acc);
    if (end < nlg-repeat-min-bytes()) then 0 else nlg-looping-tail(nlg-fold(substring(acc,nlg-max(0,(end - nlg-repeat-window())),end)));
   }
-  def nlg-looping-tail(s) = nlg-repeat-periods(s,1,str_len(s));
+  def nlg-looping-tail(s) = nlg-repeat-periods(s,1,len(s));
   def nlg-lower-byte(b) = if ((b >= 65) && (b <= 90)) then (b + 32) else b;
   // Copies of one loop can differ only where a line wraps. Fold case and every
   // whitespace run to one space before reading the period; words are copied whole.
-  def nlg-fold(s) = nlg-fold-from(s,0,str_len(s),"",0);
-  def nlg-fold-from(s,i,n,acc,gap) = if (i >= n) then acc else if nlg-repeat-space(str_byte_at(s,i)) then nlg-fold-from(s,(i + 1),n,if gap then acc else str_concat(acc," "),1) else nlg-fold-word(s,i,nlg-word-end(s,i,n),n,acc);
-  def nlg-fold-word(s,i,j,n,acc) = nlg-fold-from(s,j,n,str_concat(acc,nlg-lower-run(substring(s,i,j),0,"")),0);
+  def nlg-fold(s) = nlg-fold-from(s,0,len(s),"",0);
+  def nlg-fold-from(s,i,n,acc,gap) = if (i >= n) then acc else if nlg-repeat-space(str_byte_at(s,i)) then nlg-fold-from(s,(i + 1),n,if gap then acc else (acc + " "),1) else nlg-fold-word(s,i,nlg-word-end(s,i,n),n,acc);
+  def nlg-fold-word(s,i,j,n,acc) = nlg-fold-from(s,j,n,((String) acc + nlg-lower-run(substring(s,i,j),0,"")),0);
   def nlg-word-end(s,i,n) = if (i >= n) then i else if nlg-repeat-space(str_byte_at(s,i)) then i else nlg-word-end(s,(i + 1),n);
-  def nlg-lower-run(w,i,acc) = if (i >= str_len(w)) then acc else nlg-lower-run(w,(i + 1),str_concat(acc,byte_to_str(nlg-lower-byte(str_byte_at(w,i)))));
+  def nlg-lower-run(w,i,acc) = if (i >= len(w)) then acc else nlg-lower-run(w,(i + 1),((String) acc + byte_to_str(nlg-lower-byte(str_byte_at(w,i)))));
   // A loop can also run at paragraph length, beyond the window above: an adapted
   // choice can bend a short loop into a long one. At a sentence end, each earlier
   // copy of the folded tail proposes a period; two whole copies of one are a loop.
@@ -193,10 +196,10 @@ section [form.bml] {
   def nlg-long-max() = 4096;
   def nlg-long-probe() = 48;
   def nlg-boundary(t) = ((str_find(t,".",0) >= 0) || ((str_find(t,"\n",0) >= 0) || ((str_find(t,"?",0) >= 0) || (str_find(t,"!",0) >= 0))));
-  def nlg-long-stuck(acc,added) = if nlg-boundary(added) then nlg-long-looping(nlg-fold(str_concat(substring(acc,nlg-max(0,(str_len(acc) - (3 * nlg-long-max()))),str_len(acc)),added))) else 0;
-  def nlg-long-looping(s) = if (str_len(s) < (2 * nlg-long-min())) then 0 else nlg-long-scan(s,str_len(s),substring(s,(str_len(s) - nlg-long-probe()),str_len(s)),0);
+  def nlg-long-stuck(acc,added) = if nlg-boundary(added) then nlg-long-looping(nlg-fold(((String) substring(acc,nlg-max(0,(len(acc) - (3 * nlg-long-max()))),len(acc)) + added))) else 0;
+  def nlg-long-looping(s) = if (len(s) < (2 * nlg-long-min())) then 0 else nlg-long-scan(s,len(s),substring(s,(len(s) - nlg-long-probe()),len(s)),0);
   def nlg-long-scan(s,end,probe,from) = nlg-long-at(s,end,probe,str_find(s,probe,from));
-  def nlg-long-at(s,end,probe,at) = if (at < 0) then 0 else nlg-long-period(s,end,probe,at,((end - str_len(probe)) - at));
+  def nlg-long-at(s,end,probe,at) = if (at < 0) then 0 else nlg-long-period(s,end,probe,at,((end - len(probe)) - at));
   def nlg-long-period(s,end,probe,at,p) = if (p < nlg-long-min()) then 0 else if ((p <= nlg-long-max()) && ((2 * p) <= end)) then if nlg-repeat-equal(s,p,(end - (2 * p)),end) then 1 else nlg-long-scan(s,end,probe,(at + 1)) else nlg-long-scan(s,end,probe,(at + 1));
   def nlg-last-sep(acc,from,best) {
    let p = str_find(acc,". ",from);
@@ -207,13 +210,13 @@ section [form.bml] {
    if (sep < 0) then acc else if (str_find(acc,".",(sep + 2)) >= 0) then acc else substring(acc,0,(sep + 1));
   }
   def nlg-stuck(acc,added) {
-   let room = (nlg-repeat-window() - str_len(added));
-   let short = if (room <= 0) then nlg-looping(added) else nlg-looping(str_concat(substring(acc,nlg-max(0,(str_len(acc) - room)),str_len(acc)),added));
+   let room = (nlg-repeat-window() - len(added));
+   let short = if (room <= 0) then nlg-looping(added) else nlg-looping(((String) substring(acc,nlg-max(0,(len(acc) - room)),len(acc)) + added));
    if ((Comparable) short == 1) then 1 else nlg-long-stuck(acc,added);
   }
   def nlg-adapt-token(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids) {
    if ((Comparable) nlg-stuck(acc,"") == 1) then nlg-result(acc,"adapted-repeat",n,ctx,events)
-   else nlg-adapt-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,nlg-grown-limit(limit,head(model)[9],pos));
+   else nlg-adapt-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,nlg-grown-limit(limit,model[0][9],pos));
   }
   def nlg-adapt-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,grown) {
    if (grown <= limit) then nlg-result(acc,"token-limit",n,ctx,events)
@@ -222,37 +225,37 @@ section [form.bml] {
   def nlg-adapt-continue(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,logged) = nlg-decode(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids);
   def nlg-adapt-emitted(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids) {
    if ((Comparable) nlg-stuck(acc,"") == 1) then nlg-result(acc,"adapted-repeat",n,ctx,events)
-   else nlg-adapt-emitted-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,nlg-grown-limit(limit,head(model)[9],pos));
+   else nlg-adapt-emitted-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,nlg-grown-limit(limit,model[0][9],pos));
   }
   def nlg-adapt-emitted-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,grown) {
    if (grown <= limit) then nlg-result(acc,"token-limit",n,ctx,events)
    else nlg-adapt-emitted-go(model,tk,ctx,id,pos,n,grown,acc,stream,cancel,events,ids,nlg-event(events,"adapt-token-limit",n,host_monotonic_ms(),metal_live(),model));
   }
-  def nlg-adapt-emitted-go(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,logged) = if (pos >= head(ctx)) then nlg-grew(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,nlg-grow(model,ctx,pos)) else nlg-feed(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids);
+  def nlg-adapt-emitted-go(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,logged) = if (pos >= ctx[0]) then nlg-grew(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,nlg-grow(model,ctx,pos)) else nlg-feed(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids);
   def nlg-decode(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids) {
-   if ((id < 0) || (id >= head(model)[5])) then nlg-result(acc,"non-finite-logits",n,ctx,events)
+   if ((id < 0) || (id >= model[0][5])) then nlg-result(acc,"non-finite-logits",n,ctx,events)
    else if nlg-eos(tk,id) then nlg-result(acc,"",n,ctx,events)
-   else if (!nlt-known-id(tk,id)) then nlg-result(acc,str_concat("tokenizer-id-absent:",int_to_str(id)),n,ctx,events)
+   else if (!nlt-known-id(tk,id)) then nlg-result(acc,("tokenizer-id-absent:" + id.str()),n,ctx,events)
    else if ((limit > 0) && (n >= limit)) then nlg-adapt-token(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids)
-   else if ((str_len(cancel) > 0) && (file_size(cancel) > 0)) then nlg-result(acc,"cancelled",n,ctx,events)
+   else if ((len(cancel) > 0) && (file_size(cancel) > 0)) then nlg-result(acc,"cancelled",n,ctx,events)
    else nlg-emit(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids);
   }
   def nlg-emit(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids) {
    let text = nlt-decode-id(tk,id); let sent = nlg-stream(stream,text);
-   let all = str_concat(acc,text); let count = (n + 1); let held = nlg-remember(ids,id);
+   let all = ((String) acc + text); let count = (n + 1); let held = nlg-remember(ids,id);
    if ((Comparable) nlg-stuck(acc,text) == 1) then nlg-result(all,"adapted-repeat",count,ctx,events)
    else if ((limit > 0) && (count >= limit)) then nlg-adapt-emitted(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events,held)
-   else if (pos >= head(ctx)) then nlg-grew(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events,held,nlg-grow(model,ctx,pos))
+   else if (pos >= ctx[0]) then nlg-grew(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events,held,nlg-grow(model,ctx,pos))
    else nlg-feed(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events,held);
   }
-  def nlg-grew(model,tk,old,id,pos,n,limit,acc,stream,cancel,events,ids,next) = if nothing?(next) then nlg-press(model,tk,old,id,pos,n,limit,acc,stream,cancel,events,ids,if (pos >= head(model)[9]) then "model-position-limit" else "memory-pressure") else nlg-feed(model,tk,next,id,pos,n,limit,acc,stream,cancel,events,ids);
+  def nlg-grew(model,tk,old,id,pos,n,limit,acc,stream,cancel,events,ids,next) = if nothing?(next) then nlg-press(model,tk,old,id,pos,n,limit,acc,stream,cancel,events,ids,if (pos >= model[0][9]) then "model-position-limit" else "memory-pressure") else nlg-feed(model,tk,next,id,pos,n,limit,acc,stream,cancel,events,ids);
   def nlg-feed(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids) = if (!nlg-room(nlg-forward-bytes(model,1,pos))) then nlg-press(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,"memory-pressure") else nlg-chosen(model,tk,ctx,nlg-forward-choice(model,ctx,[id],pos,events,"decode"),(pos + 1),n,limit,acc,stream,cancel,events,ids);
   def nlg-press(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,why) {
    let keep = nlg-take-last(ids,nlg-slide-n(ids));
    if (len(keep) >= len(ids)) then nlg-result(acc,why,n,ctx,events) else nlg-slide(model,tk,ctx,keep,n,limit,acc,stream,cancel,events);
   }
   def nlg-slide(model,tk,old,keep,n,limit,acc,stream,cancel,events) {
-   let cap = nlg-admit-capacity(nlg-want-capacity(len(keep),if (limit > 0) then nlg-max(1,(limit - n)) else 16),head(model)[9]);
+   let cap = nlg-admit-capacity(nlg-want-capacity(len(keep),if (limit > 0) then nlg-max(1,(limit - n)) else 16),model[0][9]);
    if (!nlg-room(nlg-cache-bytes(model,cap))) then nlg-result(acc,"memory-pressure",n,old,events) else nlg-slide-go(model,tk,old,keep,n,limit,acc,stream,cancel,events,cap);
   }
   def nlg-slide-go(model,tk,old,keep,n,limit,acc,stream,cancel,events,cap) {
@@ -263,30 +266,30 @@ section [form.bml] {
   def nlg-slide-admitted(model,tk,keep,n,limit,acc,stream,cancel,events,cap) {
    let ctx = nll-context(model,cap);
    let pre = nlg-prefill(model,ctx,keep,0,events);
-   if (str_len(pre[2]) > 0) then nlg-result(acc,pre[2],n,ctx,events) else nlg-chosen(model,tk,ctx,head(pre),pre[1],n,limit,acc,stream,cancel,events,keep);
+   if (len(pre[2]) > 0) then nlg-result(acc,pre[2],n,ctx,events) else nlg-chosen(model,tk,ctx,pre[0],pre[1],n,limit,acc,stream,cancel,events,keep);
   }
   def nlg-chosen(model,tk,ctx,choice,pos,n,limit,acc,stream,cancel,events,ids) {
-   let picked = nlg-pick-id(tk,acc,head(choice),choice[1],choice[2]);
-   if (head(picked) < 0) then nlg-result(acc,picked[1],n,ctx,events)
-   else nlg-chosen-go(model,tk,ctx,head(picked),pos,n,limit,acc,stream,cancel,events,ids,picked[1]);
+   let picked = nlg-pick-id(tk,acc,choice[0],choice[1],choice[2]);
+   if (picked[0] < 0) then nlg-result(acc,picked[1],n,ctx,events)
+   else nlg-chosen-go(model,tk,ctx,picked[0],pos,n,limit,acc,stream,cancel,events,ids,picked[1]);
   }
   def nlg-chosen-go(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,why) {
    let logged = if ((String) why == "adapted-choice") then nlg-event(events,"adapt-choice",n,host_monotonic_ms(),metal_live(),model) else 0;
    nlg-decode(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids);
   }
   def nlg-finish-event(model,result,events,start) {
-   let event = json-node-object([json-node-pair("stage",json-node-string("finished")),json-node-pair("wall_ms",json-node-int((host_monotonic_ms() - start))),json-node-pair("tokens_emitted",json-node-int(result[2])),json-node-pair("bytes_emitted",json-node-int(str_len(head(result)))),json-node-pair("reason",json-node-string(if ((Comparable) str_len(result[1]) == 0) then "eos" else result[1])),json-node-pair("model",json-node-string(model[4])),json-node-pair("adapter",json-node-string(nll-adapter(model)))]);
-   if ((Comparable) str_len(events) == 0) then 0 else sbt-append(events,str_concat(json-emit(event),"\n"));
+   let event = json-node-object([json-node-pair("stage",json-node-string("finished")),json-node-pair("wall_ms",json-node-int((host_monotonic_ms() - start))),json-node-pair("tokens_emitted",json-node-int(result[2])),json-node-pair("bytes_emitted",json-node-int(len(result[0]))),json-node-pair("reason",json-node-string(if ((Comparable) len(result[1]) == 0) then "eos" else result[1])),json-node-pair("model",json-node-string(model[4])),json-node-pair("adapter",json-node-string(nll-adapter(model)))]);
+   if ((Comparable) len(events) == 0) then 0 else sbt-append(events,(json-emit(event) + "\n"));
   }
   def nlg-ask(session,prompt,limit,stream,cancel,events) {
    let start = host_monotonic_ms();
    let result = nlg-ask-inner(session,prompt,limit,stream,cancel,events);
-   let finished = nlg-finish-event(head(session),result,events,start);
+   let finished = nlg-finish-event(session[0],result,events,start);
    result;
   }
   def nlg-ask-inner(session,prompt,limit,stream,cancel,events) {
-   let model = head(session); let tk = session[1];
-   let ids = nlt-chat(tk,prompt); let maxpos = head(model)[9];
+   let model = session[0]; let tk = session[1];
+   let ids = nlt-chat(tk,prompt); let maxpos = model[0][9];
    if ((limit < 0) || (len(ids) > maxpos)) then ["","context-admission-refused",0,events] else nlg-ask-fit(model,tk,ids,nlg-admit-capacity(nlg-want-capacity(len(ids),limit),maxpos),limit,stream,cancel,events);
   }
   def nlg-ask-fit(model,tk,ids,capacity,limit,stream,cancel,events) {
@@ -298,9 +301,9 @@ section [form.bml] {
   def nlg-ask-admitted(model,tk,ids,capacity,limit,stream,cancel,events) {
    let ctx = nll-context(model,capacity);
    let pre = nlg-prefill(model,ctx,ids,0,events);
-   let result = if (str_len(pre[2]) > 0) then nlg-result("",pre[2],0,ctx,events) else nlg-chosen(model,tk,ctx,head(pre),pre[1],0,limit,"",stream,cancel,events,ids);
+   let result = if (len(pre[2]) > 0) then nlg-result("",pre[2],0,ctx,events) else nlg-chosen(model,tk,ctx,pre[0],pre[1],0,limit,"",stream,cancel,events,ids);
    let released = nll-context-close(result[3]);
-   [head(result),result[1],result[2],events];
+   [result[0],result[1],result[2],events];
   }
   def nlg-once(dir,adapter,prompt,limit,stream,cancel,events) {
    let session = nlg-open-at(dir,adapter,events);

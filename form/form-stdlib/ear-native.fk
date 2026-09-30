@@ -13,19 +13,25 @@
 // tile, and the cross attention is a chunk pass plus a fold instead of six lonely threadgroups. Each
 // costs a launch and saves far more than a launch. The four cross gemms share ONE ln_post reading
 // because they all read the same rows.
-// preludes: form/form-stdlib/ear-npz.fk form/form-stdlib/ear-msl.fk form/form-stdlib/metal-door.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/base64.fk form-stdlib/ear-geometry.bml form/form-stdlib/bml/transcript-languages.bml
+import form/form-stdlib/ear-npz.fk;
+import form/form-stdlib/ear-msl.fk;
+import form/form-stdlib/metal-door.fk;
+import form/form-stdlib/str-byte-at.fk;
+import form/form-stdlib/base64.fk;
+import form-stdlib/ear-geometry.bml;
+import form/form-stdlib/bml/transcript-languages.bml;
 section [form.bml] {
     {
-        def enw-held(h) = h <= 0 ? form_error(str_concat("native ear allocation refused: ", metal_status())) : h;
+        def enw-held(h) = h <= 0 ? form_error(("native ear allocation refused: " + metal_status())) : h;
         def enw-alloc(n) = enw-held(metal_buf_alloc(n));
         def enw-enqueue(p, b, n) = enw-enqueued(metal_enqueue(p, b, n));
         def enw-sync() = enw-enqueued(metal_sync());
         def enw-write(h, off, bytes) = enw-enqueued(metal_buf_write(h, off, bytes));
         def enw-tokenizer-path() = "model/tokenizers/whisper/multilingual.tiktoken";
         def enw-token-ranks(lines, i) = nil?(lines) ? (Comparable) i == 50257 ? 1 : form_error("native ear tokenizer rank count refused") : {
-            let line = head(lines);
+            let line = lines[0];
             let at = str_find(line, " ", 0);
-            at <= 0 || !((String) substring(line, at + 1, str_len(line)) == int_to_str(i)) ? form_error("native ear tokenizer ranks are not contiguous") : enw-token-ranks(tail(lines), i + 1);
+            at <= 0 || !((String) substring(line, at + 1, len(line)) == i.str()) ? form_error("native ear tokenizer ranks are not contiguous") : enw-token-ranks(lines[1:], i + 1);
         };
         def enw-token-lines(path) = {
             let text = read_file(path);
@@ -72,12 +78,12 @@ section [form.bml] {
         def enw-pi-softp() = 15;
         // the cross window cut into chunks of 64 keys: the group count both halves of the split attention agree on
         def enw-xchunks(Tk) = (Tk + 63) / 64;
-        def enw-pipe-held(p, name) = p <= 0 ? form_error(str_concat("native ear pipeline refused: ", str_concat(name, str_concat("\n", metal_status())))) : p;
-        def enw-pipes-go(msl, names) = (Comparable) len(names) == 0 ? [] : cons(enw-pipe-held(metal_pipeline(msl, head(names)), head(names)), enw-pipes-go(msl, tail(names)));
+        def enw-pipe-held(p, name) = p <= 0 ? form_error(("native ear pipeline refused: " + (name + ("\n" + metal_status())))) : p;
+        def enw-pipes-go(msl, names) = (Comparable) len(names) == 0 ? [] : cons(enw-pipe-held(metal_pipeline(msl, names[0]), names[0]), enw-pipes-go(msl, names[1:]));
         def enw-pipes() = enw-pipes-for(eng-state(eng-tiny()));
         def enw-pipes-for(st) = enw-pipes-go(em-unit-for(eng-mels(st), eng-F(st)), em-names());
         def enw-p(st, i) = st[3][i];
-        def enw-enqueued(rc) = rc < 0 ? form_error(str_concat("native ear dispatch refused: ", metal_status())) : rc;
+        def enw-enqueued(rc) = rc < 0 ? form_error(("native ear dispatch refused: " + metal_status())) : rc;
         def enw-go(st, pi, bind, threads) = enw-enqueued(enw-enqueue(enw-p(st, pi), bind, threads));
         // ---- weights: the file mapped once at offset 0 (aligned), every member copied on the device into its own aligned buffer; (name handle) rows ----
         def enw-copy(ps, whole, row) = {
@@ -85,16 +91,16 @@ section [form.bml] {
             let c = enw-enqueue(ps[enw-pi-copy()], md-bind([whole, h], [en-off(row), en-bytes(row)]), en-bytes(row));
             h;
         };
-        def enw-map(ps, whole, rows) = (Comparable) len(rows) == 0 ? [] : cons([head(head(rows)), enw-copy(ps, whole, head(rows))], enw-map(ps, whole, tail(rows)));
-        def enw-h(hs, name) = (Comparable) len(hs) == 0 ? 0 : (String) head(head(hs)) == name ? head(hs)[1] : enw-h(tail(hs), name);
-        def enw-cat(xs) = (Comparable) len(xs) == 0 ? "" : str_concat(head(xs), enw-cat(tail(xs)));
+        def enw-map(ps, whole, rows) = (Comparable) len(rows) == 0 ? [] : cons([rows[0][0], enw-copy(ps, whole, rows[0])], enw-map(ps, whole, rows[1:]));
+        def enw-h(hs, name) = (Comparable) len(hs) == 0 ? 0 : (String) hs[0][0] == name ? hs[0][1] : enw-h(hs[1:], name);
+        def enw-cat(xs) = (Comparable) len(xs) == 0 ? "" : ((String) xs[0] + enw-cat(xs[1:]));
         def enw-w(hs, prefix, leaf) = enw-h(hs, enw-cat([prefix, ".", leaf]));
-        def enw-blk(side, l) = enw-cat([side, ".blocks.", int_to_str(l)]);
+        def enw-blk(side, l) = enw-cat([side, ".blocks.", l.str()]);
         // ---- activations ----
         def enw-f32(n) = enw-alloc(4 * n);
         def enw-per-layer(st, n, l) = l >= eng-dec-layers(st) ? [] : cons(enw-f32(n), enw-per-layer(st, n, l + 1));
-        def enw-zeros(s, n) = str_len(s) >= n ? substring(s, 0, n) : enw-zeros(str_concat(s, s), n);
-        def enw-bufs(st) = list(enw-alloc(960000),         // 0 pcm (30 s s16)
+        def enw-zeros(s, n) = len(s) >= n ? substring(s, 0, n) : enw-zeros(((String) s + s), n);
+        def enw-bufs(st) = [enw-alloc(960000),         // 0 pcm (30 s s16)
 enw-f32(eng-TF(st) * eng-mels(st)),         // 1 mel
 enw-f32(eng-mels(st) * 201),         // 2 filt
 enw-f32(eng-TF(st) * eng-D(st)),         // 3 ht (conv1 out)
@@ -123,7 +129,7 @@ enw-alloc(1024),         // 25 the argmax's first-stage (value, index) pairs
 enw-f32(eng-H(st) * (enw-xchunks(eng-TE(st)) * 66)),         // 26 the cross attention's per-chunk (m, l, acc[64]) partials
 enw-f32(2 * eng-TE(st)),         // 27 each row's layernorm (mean, rsqrt), read by every tile
 enw-f32(2 * em-argmax-G()),         // 28 the softmax fold's per-group (max, sum-of-exp) partials
-enw-f32(2));
+enw-f32(2)];
         // 29 the decoded line's (sum of log-probabilities, token count)
         def enw-b(st, i) = st[4][i];
         def enw-bl(st, i, l) = st[4][i][l];
@@ -133,7 +139,7 @@ enw-f32(2));
         // ---- layer tables: every handle a layer needs, resolved once at open, in a fixed order ----
         def enw-enc-names() = ["attn_ln.weight", "attn_ln.bias", "attn.query.weight", "attn.query.bias", "attn.key.weight", "attn.value.weight", "attn.value.bias", "attn.out.weight", "attn.out.bias", "mlp_ln.weight", "mlp_ln.bias", "mlp1.weight", "mlp1.bias", "mlp2.weight", "mlp2.bias"];
         def enw-dec-names() = append(enw-enc-names(), ["cross_attn_ln.weight", "cross_attn_ln.bias", "cross_attn.query.weight", "cross_attn.query.bias", "cross_attn.key.weight", "cross_attn.value.weight", "cross_attn.value.bias", "cross_attn.out.weight", "cross_attn.out.bias"]);
-        def enw-table(hs, prefix, names) = (Comparable) len(names) == 0 ? [] : cons(enw-w(hs, prefix, head(names)), enw-table(hs, prefix, tail(names)));
+        def enw-table(hs, prefix, names) = (Comparable) len(names) == 0 ? [] : cons(enw-w(hs, prefix, names[0]), enw-table(hs, prefix, names[1:]));
         def enw-tables(st, hs, side, names, l) = l >= ((String) side == "encoder" ? eng-enc-layers(st) : eng-dec-layers(st)) ? [] : cons(enw-table(hs, enw-blk(side, l), names), enw-tables(st, hs, side, names, l + 1));
         def enw-lt(st, side, l) = st[(String) side == "encoder" ? 6 : 7][l];
         def enw-hs(st) = st[2];
@@ -210,7 +216,7 @@ enw-f32(2));
         // the rest: melnorm, conv1, conv2, positions, ln+logits (row 0; the prefill's last row), the three argmax windows (tongue, text, text-or-timestamp)
         // an argmax is a PAIR of binds now — the fold over G groups, then the fold over their G answers
         def enw-argmax-bind(st, lo, hi, lo2, hi2) = [md-bind16([enw-b(st, 15), enw-b(st, 16), enw-b(st, 25), enw-b(st, 29)], [lo, hi, lo2, hi2, 0, em-argmax-G()], 256, 0, 1, 0), md-bind16([enw-b(st, 15), enw-b(st, 16), enw-b(st, 25), enw-b(st, 29)], [lo, hi, lo2, hi2, 1, em-argmax-G()], 256, 0, 1, 0)];
-        def enw-argmax-go(st, pair) = enw-go(st, enw-pi-argmax(), head(pair), em-argmax-G()) + enw-go(st, enw-pi-argmax(), pair[1], 1);
+        def enw-argmax-go(st, pair) = enw-go(st, enw-pi-argmax(), pair[0], em-argmax-G()) + enw-go(st, enw-pi-argmax(), pair[1], 1);
         // the group count the mv kernel's own row rule asks for: eight simdgroups, each taking em-mv-rows(N) outputs
         def enw-mv-groups(n) = {
             let per = 8 * em-mv-rows(n);
@@ -359,7 +365,7 @@ enw-f32(2));
         };
         def enw-encode(st, pcm) = {
             let w0 = enw-write(enw-b(st, 0), 0, pcm);
-            enw-encode-at(st, str_len(pcm));
+            enw-encode-at(st, len(pcm));
         };
         // ---- the same encode over a window that is still in pieces ----
         // A LIVE LANE HOLDS ITS WINDOW AS THE MIC'S OWN CHUNKS, AND JOINING THEM WAS THE COST OF HEARING.
@@ -371,11 +377,11 @@ enw-f32(2));
         // The pieces are laid at the END of the window, zeros in front while fewer than `want` bytes have
         // arrived, which is what a caller's own front-padding meant; a window longer than `want` is cut
         // from the front, oldest first. Same answer, same shape, same Te.
-        def enw-parts-len(xs) = (Comparable) len(xs) == 0 ? 0 : str_len(head(xs)) + enw-parts-len(tail(xs));
-        def enw-parts-drop(xs, n) = n <= 0 || (Comparable) len(xs) == 0 ? xs : n >= str_len(head(xs)) ? enw-parts-drop(tail(xs), n - str_len(head(xs))) : cons(substring(head(xs), n, str_len(head(xs))), tail(xs));
+        def enw-parts-len(xs) = (Comparable) len(xs) == 0 ? 0 : len(xs[0]) + enw-parts-len(xs[1:]);
+        def enw-parts-drop(xs, n) = n <= 0 || (Comparable) len(xs) == 0 ? xs : n >= len(xs[0]) ? enw-parts-drop(xs[1:], n - len(xs[0])) : cons(substring(xs[0], n, len(xs[0])), xs[1:]);
         def enw-parts-write(st, xs, off) = (Comparable) len(xs) == 0 ? off : {
-            let w = enw-write(enw-b(st, 0), off, head(xs));
-            enw-parts-write(st, tail(xs), off + str_len(head(xs)));
+            let w = enw-write(enw-b(st, 0), off, xs[0]);
+            enw-parts-write(st, xs[1:], off + len(xs[0]));
         };
         // AND THE SILENCE IN FRONT COST MORE THAN THE JOIN. enw-zeros ends in a substring, and substring
         // is not a native here — core.fk halves it down to single bytes and concatenates back, so 192000
@@ -383,11 +389,11 @@ enw-f32(2));
         // built the same string and 0.50 ms for one 128k+128k str_concat. A doubled block never cut is
         // free, so the front is filled with whole 4096-byte blocks of silence. The last block is allowed
         // to run PAST the padding into the window: the audio is written after it and covers the overshoot.
-        def enw-dbl(s, n) = str_len(s) >= n ? s : enw-dbl(str_concat(s, s), n);
+        def enw-dbl(s, n) = len(s) >= n ? s : enw-dbl(((String) s + s), n);
         def enw-zblock() = enw-dbl(byte_to_str(0), 4096);
         def enw-zfill(st, off, pad, z) = off >= pad ? off : {
             let w = enw-write(enw-b(st, 0), off, z);
-            enw-zfill(st, off + str_len(z), pad, z);
+            enw-zfill(st, off + len(z), pad, z);
         };
         def enw-encode-parts(st, parts, want) = enw-encode-parts-gain(st, parts, want, 1000);
         def enw-encode-parts-gain(st, parts, want, gain) = {
@@ -437,9 +443,9 @@ enw-f32(2));
         // a loop of period one, two or three repeated three times is the model going round: stop paying for it
         def enw-looping?(id, acc) = len(acc) < 5 ? 0 : (Comparable) id == acc[0] && (Comparable) id == acc[1] ? 1 : (Comparable) id == acc[1] && ((Comparable) acc[0] == acc[2] && (Comparable) acc[1] == acc[3]) ? 1 : (Comparable) id == acc[2] && ((Comparable) acc[0] == acc[3] && (Comparable) acc[1] == acc[4]) ? 1 : 0;
         // the last twelve tokens carrying four or fewer distinct ids is the model going round: stop paying for it
-        def enw-member?(xs, x) = (Comparable) len(xs) == 0 ? 0 : (Comparable) head(xs) == x ? 1 : enw-member?(tail(xs), x);
-        def enw-distinct(xs, seen) = (Comparable) len(xs) == 0 ? len(seen) : enw-distinct(tail(xs), (Comparable) enw-member?(seen, head(xs)) == 1 ? seen : cons(head(xs), seen));
-        def enw-take(xs, n) = (Comparable) n == 0 || (Comparable) len(xs) == 0 ? [] : cons(head(xs), enw-take(tail(xs), n - 1));
+        def enw-member?(xs, x) = (Comparable) len(xs) == 0 ? 0 : (Comparable) xs[0] == x ? 1 : enw-member?(xs[1:], x);
+        def enw-distinct(xs, seen) = (Comparable) len(xs) == 0 ? len(seen) : enw-distinct(xs[1:], (Comparable) enw-member?(seen, xs[0]) == 1 ? seen : cons(xs[0], seen));
+        def enw-take(xs, n) = (Comparable) n == 0 || (Comparable) len(xs) == 0 ? [] : cons(xs[0], enw-take(xs[1:], n - 1));
         def enw-round?(nid, acc) = len(acc) < 11 ? 0 : enw-distinct(cons(nid, enw-take(acc, 11)), []) <= 4 ? 1 : 0;
         // the ends of a line are the world's: end-of-text, the decoder's clock past the window (its clock runs ahead, so 1.5x + 1 s), going round, or more tokens than the audio could carry (cap from the seconds since the cut)
         def enw-greedy2(st, id, pos, Te, cap, acc) = {
@@ -465,7 +471,7 @@ enw-f32(2));
         };
         // ---- greedy line: prompt sot, lang, transcribe, notimestamps; then text until eot or cap ----
         def enw-greedy(st, pos, Te, cap, acc) = {
-            let id = enw-step(st, (Comparable) len(acc) == 0 ? eng-notimestamps(st) : head(acc), pos, Te, 0, enw-eot() + 1);
+            let id = enw-step(st, (Comparable) len(acc) == 0 ? eng-notimestamps(st) : acc[0], pos, Te, 0, enw-eot() + 1);
             (Comparable) id == enw-eot() || len(acc) >= cap ? reverse(acc) : enw-greedy(st, pos + 1, Te, cap, cons(id, acc));
         };
         // returns (lang-token ids nospeech-prob tongue-prob avg-logprob)
@@ -479,13 +485,13 @@ enw-f32(2));
             append([lang, ids], append(d, [enw-avg-logprob(st)]));
         };
         // ---- words: rank -> base64 line -> bytes ----
-        def enw-bytes-str(xs) = (Comparable) len(xs) == 0 ? "" : str_concat(byte_to_str(head(xs)), enw-bytes-str(tail(xs)));
+        def enw-bytes-str(xs) = (Comparable) len(xs) == 0 ? "" : ((String) byte_to_str(xs[0]) + enw-bytes-str(xs[1:]));
         def enw-tok(st, id) = id >= enw-eot() ? "" : {
             let line = st[5][id];
             let sp = str_find(line, " ", 0);
             sp < 0 ? "" : enw-bytes-str(base64-decode(substring(line, 0, sp)));
         };
-        def enw-text(st, ids) = (Comparable) len(ids) == 0 ? "" : str_concat(enw-tok(st, head(ids)), enw-text(st, tail(ids)));
+        def enw-text(st, ids) = (Comparable) len(ids) == 0 ? "" : ((String) enw-tok(st, ids[0]) + enw-text(st, ids[1:]));
         // the words, or the silence the model itself asked for. A caller that wants the doubted line anyway reads enw-text.
         def enw-heard(st, r) = (Comparable) enw-doubted?(r) == 1 ? "" : enw-text(st, r[1]);
         // the language token's own name is the code the reference uses (en, fa, pt, ...): the tiktoken has no line for it, so a small table
@@ -499,7 +505,7 @@ enw-f32(2));
     // ---- the batched prefill: T tokens through the decoder in one pass, the argmax of the last row ----
     // the row kernels the encoder uses, from pos: k/v land in their caches from pos, own attention is causal from pos, cross attention reads the encoded window
     {
-        def enw-ids-bytes(ids, acc) = (Comparable) len(ids) == 0 ? acc : enw-ids-bytes(tail(ids), str_concat(acc, md-le32(head(ids))));
+        def enw-ids-bytes(ids, acc) = (Comparable) len(ids) == 0 ? acc : enw-ids-bytes(ids[1:], ((String) acc + md-le32(ids[0])));
         def enw-pre-layer(st, l, T) = {
             let D = eng-D(st);
             let r64 = enw-t32(T);
@@ -546,15 +552,15 @@ enw-f32(2));
         // its source cannot disagree with anything (corpus row 1416 heardshort).
         def enw-lang-logit(b, tok) = enw-f32-of(b, 4 * (tok - enw-lang-lo()));
         def enw-offered() = tln-default-toks();
-        def enw-has?(toks, t) = (Comparable) len(toks) == 0 ? 0 : (Comparable) head(toks) == t ? 1 : enw-has?(tail(toks), t);
+        def enw-has?(toks, t) = (Comparable) len(toks) == 0 ? 0 : (Comparable) toks[0] == t ? 1 : enw-has?(toks[1:], t);
         def enw-best-of(b, toks, best, bv) = (Comparable) len(toks) == 0 ? [best, bv] : {
-            let v = enw-lang-logit(b, head(toks));
-            v > bv ? enw-best-of(b, tail(toks), head(toks), v) : enw-best-of(b, tail(toks), best, bv);
+            let v = enw-lang-logit(b, toks[0]);
+            v > bv ? enw-best-of(b, toks[1:], toks[0], v) : enw-best-of(b, toks[1:], best, bv);
         };
         def enw-lang-pick2(st, top, toks) = (Comparable) enw-has?(toks, top) == 1 ? top : {
             let b = en-text(metal_buf_read(enw-b(st, 15), 4 * enw-lang-lo(), 4 * eng-languages(st)));
-            let best = enw-best-of(b, toks, (Comparable) len(toks) == 0 ? 50259 : head(toks), -99999.0);
-            best[1] + 3.0 >= enw-lang-logit(b, top) ? head(best) : top;
+            let best = enw-best-of(b, toks, (Comparable) len(toks) == 0 ? 50259 : toks[0], -99999.0);
+            best[1] + 3.0 >= enw-lang-logit(b, top) ? best[0] : top;
         };
         def enw-lang-pick(st, top) = enw-lang-pick2(st, top, enw-offered());
         def enw-transcribe-from2(st, Te, tick, cap, lang, prefix) = {
