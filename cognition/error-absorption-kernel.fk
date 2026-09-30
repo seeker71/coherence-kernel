@@ -1,139 +1,71 @@
-; error-absorption-kernel.fk — receive one error, derive one low-rank update,
-; and ask an untouched lesson whether anything transferred.
-;
-; Four surfaces belong to the target lesson family: two train, one error-
-; teaching, one sealed. The error and sealed surfaces never enter base fit.
-; The update is not sample-byte seeding: A is the error surface's Form feature
-; vector and B carries positive credit to the expected class and negative
-; credit away from the observed class. lora-modality.fk applies B·(A·x).
-;
-; The error receipt is retained after the update. A corrected teaching surface
-; alone is memorization; the sealed surface must also move before this cell
-; reports transfer. Executable nothing/0/1 behavior remains a separate axis.
-;
-; preludes: form-stdlib/core.fk form-stdlib/form-cli-qwen-teach-layer.fk
-; preludes: form-stdlib/lora-modality.fk cognition/error-loving-attention.fk
-; Pure proof: cognition/tests/error-absorption-kernel-band.fk
-
-(do
-    (defn eak-absent () "absent")
-    (defn eak-negative () "negative")
-    (defn eak-positive () "positive")
-    (defn eak-names () (list (eak-absent) (eak-negative) (eak-positive)))
-
-    ; Only these six rows enter base fit.
-    (defn eak-train-rows ()
-        (list
-            (list "train" (eak-absent)
-                "no observation arrived and unknown alternatives remain open")
-            (list "train" (eak-absent)
-                "timeout leaves untried lanes unknown so evidence is requested")
-            (list "train" (eak-negative)
-                "present disagreement is a real value that guides a turn")
-            (list "train" (eak-negative)
-                "an observed mismatch remains evidence rather than absence")
-            (list "train" (eak-positive)
-                "fresh observation agrees and confirms the expected result")
-            (list "train" (eak-positive)
-                "reconciled evidence confirms the witnessed outcome")))
-
-    ; Neither row enters base fit. They share lesson meaning, not text.
-    (defn eak-error-row ()
-        (list "error-teaching" (eak-negative)
-            "a measured divergence arrived as evidence and asks the path to turn"))
-    (defn eak-sealed-row ()
-        (list "sealed" (eak-negative)
-            "the arriving difference stays present and steers another observable lane"))
-
-    (defn eak-row-class (row) (nth row 1))
-    (defn eak-row-surface (row) (nth row 2))
-    (defn eak-target-index () 1)
-
-    (defn eak-times-1000-loop (v)
-        (if (eq (len v) 0) (list)
-            (cons (mul (head v) 1000) (eak-times-1000-loop (tail v)))))
-    (defn eak-times-1000-matrix (rows)
-        (if (eq (len rows) 0) (list)
-            (cons (eak-times-1000-loop (head rows))
-                  (eak-times-1000-matrix (tail rows)))))
-    (defn eak-feature (surface)
-        (eak-times-1000-loop (fqt-features surface)))
-    (defn eak-base-models ()
-        (eak-times-1000-matrix (fqt-fit (eak-train-rows) (eak-names))))
-
-    (defn eak-argmax-loop (values i best-i best-value)
-        (if (eq (len values) 0) best-i
-            (if (gt (head values) best-value)
-                (eak-argmax-loop (tail values) (add i 1) i (head values))
-                (eak-argmax-loop (tail values) (add i 1) best-i best-value))))
-    (defn eak-argmax (values)
-        (if (eq (len values) 0) (nothing)
-            (eak-argmax-loop (tail values) 1 0 (head values))))
-
-    (defn eak-base-logits (surface)
-        (lm-matvec (eak-base-models) (eak-feature surface)))
-    (defn eak-base-prediction (surface)
-        (eak-argmax (eak-base-logits surface)))
-
-    ; B is one class-space vector. The expected class receives credit; the
-    ; mistaken class releases the same amount. The error remains in receipt.
-    (defn eak-b-loop (i n observed)
-        (if (eq i n) (list)
-            (cons
-                (if (eq i (eak-target-index)) 1000
-                    (if (eq i observed) (sub 0 1000) 0))
-                (eak-b-loop (add i 1) n observed))))
-    (defn eak-b (observed)
-        (eak-b-loop 0 (len (eak-names)) observed))
-    (defn eak-a ()
-        (eak-feature (eak-row-surface (eak-error-row))))
-
-    (defn eak-adapted-logits (surface)
-        (do
-            (let observed
-                (eak-base-prediction (eak-row-surface (eak-error-row))))
-            (lm-forward (eak-base-models)
-                (list (eak-b observed))
-                (list (eak-a))
-                (eak-feature surface))))
-    (defn eak-adapted-prediction (surface)
-        (eak-argmax (eak-adapted-logits surface)))
-
-    (defn eak-error-receipt ()
-        (do
-            (let row (eak-error-row))
-            (list "error-received-v1"
-                  (eak-row-class row)
-                  (eak-target-index)
-                  (eak-base-prediction (eak-row-surface row))
-                  (eak-row-surface row))))
-
-    ; The behavior door distinguishes absence, present negative, and present
-    ; positive without asking the classifier to stand in for execution.
-    (defn eak-behavior (value)
-        (if (nothing? value) (eak-absent)
-            (if (eq value 0) (eak-negative)
-                (if (eq value 1) (eak-positive) (nothing)))))
-
-    ; [train error sealed receipt
-    ;  base-error base-sealed adapted-error adapted-sealed
-    ;  error-corrected sealed-transfer behavior-distinction attention]
-    (defn eak-observe ()
-        (do
-            (let er (eak-error-row))
-            (let sr (eak-sealed-row))
-            (let ep (eak-base-prediction (eak-row-surface er)))
-            (let sp (eak-base-prediction (eak-row-surface sr)))
-            (let ea (eak-adapted-prediction (eak-row-surface er)))
-            (let sa (eak-adapted-prediction (eak-row-surface sr)))
-            (let signal (ela-signal "error" (eak-target-index) ep
-                                    "error-absorption/error-teaching"))
-            (list (len (eak-train-rows)) 1 1 (eak-error-receipt)
-                  ep sp ea sa
-                  (if (eq ea (eak-target-index)) 1 0)
-                  (if (eq sa (eak-target-index)) 1 0)
-                  (if (and (str_eq (eak-behavior (nothing)) (eak-absent))
-                      (and (str_eq (eak-behavior 0) (eak-negative))
-                           (str_eq (eak-behavior 1) (eak-positive)))) 1 0)
-                  (ela-health signal))))
-    0)
+// error-absorption-kernel.fk — receive one error, derive one low-rank update,
+// and ask an untouched lesson whether anything transferred.
+//
+// Four surfaces belong to the target lesson family: two train, one error-
+// teaching, one sealed. The error and sealed surfaces never enter base fit.
+// The update is not sample-byte seeding: A is the error surface's Form feature
+// vector and B carries positive credit to the expected class and negative
+// credit away from the observed class. lora-modality.fk applies B·(A·x).
+//
+// The error receipt is retained after the update. A corrected teaching surface
+// alone is memorization; the sealed surface must also move before this cell
+// reports transfer. Executable nothing/0/1 behavior remains a separate axis.
+//
+import form-stdlib/core.fk;
+import form-stdlib/form-cli-qwen-teach-layer.fk;
+import form-stdlib/lora-modality.fk;
+import cognition/error-loving-attention.fk;
+// Pure proof: cognition/tests/error-absorption-kernel-band.fk
+section [form.bml] {
+    def eak-absent() = "absent";
+    def eak-negative() = "negative";
+    def eak-positive() = "positive";
+    def eak-names() = [eak-absent(), eak-negative(), eak-positive()];
+    // Only these six rows enter base fit.
+    def eak-train-rows() = [["train", eak-absent(), "no observation arrived and unknown alternatives remain open"], ["train", eak-absent(), "timeout leaves untried lanes unknown so evidence is requested"], ["train", eak-negative(), "present disagreement is a real value that guides a turn"], ["train", eak-negative(), "an observed mismatch remains evidence rather than absence"], ["train", eak-positive(), "fresh observation agrees and confirms the expected result"], ["train", eak-positive(), "reconciled evidence confirms the witnessed outcome"]];
+    // Neither row enters base fit. They share lesson meaning, not text.
+    def eak-error-row() = ["error-teaching", eak-negative(), "a measured divergence arrived as evidence and asks the path to turn"];
+    def eak-sealed-row() = ["sealed", eak-negative(), "the arriving difference stays present and steers another observable lane"];
+    def eak-row-class(row) = row[1];
+    def eak-row-surface(row) = row[2];
+    def eak-target-index() = 1;
+    def eak-times-1000-loop(v) = (Comparable) len(v) == 0 ? [] : cons(v[0] * 1000, eak-times-1000-loop(v[1:]));
+    def eak-times-1000-matrix(rows) = (Comparable) len(rows) == 0 ? [] : cons(eak-times-1000-loop(rows[0]), eak-times-1000-matrix(rows[1:]));
+    def eak-feature(surface) = eak-times-1000-loop(fqt-features(surface));
+    def eak-base-models() = eak-times-1000-matrix(fqt-fit(eak-train-rows(), eak-names()));
+    def eak-argmax-loop(values, i, best-i, best-value) = (Comparable) len(values) == 0 ? best-i : values[0] > best-value ? eak-argmax-loop(values[1:], (Number) i + (Number) 1, i, values[0]) : eak-argmax-loop(values[1:], (Number) i + (Number) 1, best-i, best-value);
+    def eak-argmax(values) = (Comparable) len(values) == 0 ? nothing() : eak-argmax-loop(values[1:], 1, 0, values[0]);
+    def eak-base-logits(surface) = lm-matvec(eak-base-models(), eak-feature(surface));
+    def eak-base-prediction(surface) = eak-argmax(eak-base-logits(surface));
+    // B is one class-space vector. The expected class receives credit; the
+    // mistaken class releases the same amount. The error remains in receipt.
+    def eak-b-loop(i, n, observed) = (Comparable) i == n ? [] : cons((Comparable) i == eak-target-index() ? 1000 : (Comparable) i == observed ? 0 - 1000 : 0, eak-b-loop((Number) i + (Number) 1, n, observed));
+    def eak-b(observed) = eak-b-loop(0, len(eak-names()), observed);
+    def eak-a() = eak-feature(eak-row-surface(eak-error-row()));
+    def eak-adapted-logits(surface) = {
+        let observed = eak-base-prediction(eak-row-surface(eak-error-row()));
+        lm-forward(eak-base-models(), [eak-b(observed)], [eak-a()], eak-feature(surface));
+    };
+    def eak-adapted-prediction(surface) = eak-argmax(eak-adapted-logits(surface));
+    def eak-error-receipt() = {
+        let row = eak-error-row();
+        ["error-received-v1", eak-row-class(row), eak-target-index(), eak-base-prediction(eak-row-surface(row)), eak-row-surface(row)];
+    };
+    // The behavior door distinguishes absence, present negative, and present
+    // positive without asking the classifier to stand in for execution.
+    def eak-behavior(value) = nothing?(value) ? eak-absent() : (Comparable) value == 0 ? eak-negative() : (Comparable) value == 1 ? eak-positive() : nothing();
+    // [train error sealed receipt
+    //  base-error base-sealed adapted-error adapted-sealed
+    //  error-corrected sealed-transfer behavior-distinction attention]
+    def eak-observe() = {
+        let er = eak-error-row();
+        let sr = eak-sealed-row();
+        let ep = eak-base-prediction(eak-row-surface(er));
+        let sp = eak-base-prediction(eak-row-surface(sr));
+        let ea = eak-adapted-prediction(eak-row-surface(er));
+        let sa = eak-adapted-prediction(eak-row-surface(sr));
+        let signal = ela-signal("error", eak-target-index(), ep, "error-absorption/error-teaching");
+        [len(eak-train-rows()), 1, 1, eak-error-receipt(), ep, sp, ea, sa, (Comparable) ea == eak-target-index() ? 1 : 0, (Comparable) sa == eak-target-index() ? 1 : 0, (String) eak-behavior(nothing()) == eak-absent() && ((String) eak-behavior(0) == eak-negative() && (String) eak-behavior(1) == eak-positive()) ? 1 : 0, ela-health(signal)];
+    };
+    0;
+}

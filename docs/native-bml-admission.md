@@ -104,8 +104,9 @@ on comparisons that require String or numeric promotion.
 
 Intrinsic call names resolve to existing Form owners after lexical binding.
 Parameters, local values, captured functions and declared functions take
-precedence over an intrinsic alias, including bare `stop` and `fail`. Unbound
-bare `stop` and `fail` still mean absence. Intrinsic argument counts are checked
+precedence over an intrinsic alias, including bare `empty`, `nothing`, `stop`
+and `fail`. Unbound `empty` supplies an empty list; the other three supply
+absence. Intrinsic argument counts are checked
 after pipeline composition and name resolution. Import an owning library with
 `import control/offer-ack-core.fk;` outside the executable section.
 
@@ -185,6 +186,20 @@ BML, an adjacent `do(...)` call and a whitespace-separated `do (...) ... end`
 block retain their respective interpretations.
 
 ## Local lift
+
+`bml/form-source-lift.bml` converts parenthesized Form into executable BML,
+then compacts calls through the shared cursor grammar. Admission compares the
+lowered recipe, binding scope, dependency order and value contracts. Numeric
+spellings compare by represented value and type; loss of a zero's sign refuses
+the lift.
+Locally bound renderers retain their calls instead of becoming `.str()`.
+
+A `.fk` suffix does not identify the authoring language: the loader admits BML
+sections at existing `.fk` entry paths too. Keep a live entry path while moving
+its implementation. The source-only BML compiler still needs its low-level
+bootstrap dependency chain; converting that chain requires a self-hosting
+bootstrap that works without pre-existing caches. Proof inputs and generated
+Form belong to their generators or contracts, rather than a filename rewrite.
 
 `form/form-stdlib/form-lift.bml` supplies lifting guidance to the public
 native `code` controller whenever the supplied sources contain executable

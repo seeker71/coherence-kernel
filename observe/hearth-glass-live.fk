@@ -1,81 +1,72 @@
-; hearth-glass-live.fk — the living glass: each tick (hearth-glass-tick-s,
-; a hearth row handed to the rest door), take ONE sample
-; of every data point (lane-motion's snap), append normalized events to
-; the ledger, and fold a lane list through the generic terminal
-; graphics engine. Every lane wears the age of its own source; motion
-; and stillness both show as what they are. On its own source change
-; the glass ends quietly and its supervisor loop reborns it warm —
-; the ledger keeps the event, the panel just repaints.
-; stdin line 1: number of ticks.
-; preludes: form-stdlib/hearth.bml form-stdlib/hearth-glass.bml form-stdlib/lane-motion.bml form-stdlib/hearth-glass-door.bml form-stdlib/spool-bell-transport.fk
-(do
-    (defn hgl-ledger-add (kind detail)
-        (sbt-append (hearth-ledger) (gl-ledger-line kind (now_unix_ms) detail)))
-    (defn hgl-int (s name) (fmv-field s name))
-    (defn hgl-word (s name) (gl-word-field s name))
-    (defn hgl-age (path nowms) (sub nowms (mul (file_mtime path) 1000)))
-    (defn hgl-board-mend (living)
-        (do (let w (write_file_text (hearth-board)
-                (hearth-board-text living (hearth-capabilities))))
-            (let e (hgl-ledger-add "board-mended" (str_concat "pid=" (int_to_str living))))
-            living))
-    (defn hgl-board-heal ()
-        (do (let living (hearth-resident-pid))
-            (if (gt living 0) (hgl-board-mend living) 0)))
-    (defn hgl-current-alive (s living)
-        (do (let pid0 (hgl-int s "pid"))
-            (let alive0 (hgl-int s "alive"))
-            (let board-caps (gl-line-field (hearth-board-read) "capabilities"))
-            (let mended (if (eq (hearth-board-current? pid0 living board-caps) 1) 0 (hgl-board-heal)))
-            (if (gt living 0) 1 (if (gt mended 0) 1 alive0))))
-    (defn hgl-record-state (state prev-task prev-reply prev-pf prev-alive)
-        (do (let kv (hgd-tick-state-kv state))
-            (let e5 (if (str_eq kv "") 0 (hgl-ledger-add "kv" kv)))
-            (let e1 (if (gt (hgd-tick-state-pf state) prev-pf) (hgl-ledger-add "prefill" (str_concat "count=" (int_to_str (hgd-tick-state-pf state)))) 0))
-            (let e2 (if (gt (hgd-tick-state-taskb state) prev-task) (hgl-ledger-add "request" (str_concat "task-bytes=" (int_to_str (hgd-tick-state-taskb state)))) 0))
-            (let e3 (if (gt (hgd-tick-state-replyb state) prev-reply) (hgl-ledger-add "reply" (str_concat "elapsed-ms=" (int_to_str (hgd-tick-state-lastms state)))) 0))
-            (let e4 (if (eq (hgd-tick-state-alive state) 0) (if (eq prev-alive 1) (hgl-ledger-add "restart-needed" "pid-down") 0) 0))
-            0))
-    (defn hgl-sources ()
-        (str_concat (read_file "observe/hearth-glass-live.fk")
-        (str_concat (read_file "form/form-stdlib/hearth-glass.bml")
-        (str_concat (read_file "form/form-stdlib/hearth.bml")
-        (str_concat (read_file "form/form-stdlib/lane-motion.bml")
-        (str_concat (read_file "form/form-stdlib/hearth-glass-door.bml")
-                    (read_file "form/form-stdlib/term-graphics.bml")))))))
-    ; LIVE BREATH: one actual tick earns one frame, even if the sampled
-    ; sources are held. Tick and age are themselves present observations;
-    ; hiding them made a healthy field indistinguishable from a stalled
-    ; observer. The costly probes (census find, sibling pgrep, last-land
-    ; git, resident pgrep) still breathe only every 10 ticks; spool reads
-    ; stay per-tick so motion is never missed.
-    (defn hgl-slow ()
-        (list (lms-census) (lms-siblings) (lms-lastland)
-              ; Observe process images, not command-line mentions: a shell
-              ; feeding birth bytes mentions fkwu but does not execute it.
-              (host-exec "ps -axo pid=,etime=,command= | awk '$3 ~ /(^|\\/)fkwu$/ {printf \"%s+%s %s; \", $1, $2, $NF}' | head -c 190" "")
-              (hearth-resident-pid)))
-    (defn hgl-tick (n tick prev-task prev-reply prev-pf prev-cp spark birth-src prev-alive slow0)
-        (if (not (str_eq (hgl-sources) birth-src))
-            (do (let e (hgl-ledger-add "glass-reborn" "source-changed"))
-                0)
-        (if (gt tick n) 0
-            (do
-                (let slow (if (eq (mod tick 10) 1) (hgl-slow) slow0))
-                (let s (lms-sample (nth slow 0) (nth slow 1) (nth slow 2)))
-                (let nowms (now_unix_ms))
-                (let alive (hgl-current-alive s (nth slow 4)))
-                (let state (hgd-tick-state s prev-task prev-reply prev-pf prev-cp spark alive))
-                (let events (hgl-record-state state prev-task prev-reply prev-pf prev-alive))
-                (let put (if (eq (hgd-frame-on-tick? tick) 1)
-                    (print_str (tg-frame (hgd-lanes s tick (hgd-tick-state-spark state) (hgd-tick-state-kv state) (nth slow 3) nowms
-                        (hgl-age (hearth-board) nowms) (hgl-age (hearth-task) nowms)
-                        (hgl-age (hearth-reply) nowms) (hgl-age (hearth-out) nowms))))
-                    0))
-                (let held (hearth-rest-s (hearth-glass-tick-s)))
-                (hgl-tick n (add tick 1) (hgd-tick-state-taskb state) (hgd-tick-state-replyb state)
-                    (hgd-tick-state-pf state) (hgd-tick-state-cp state) (hgd-tick-state-spark state)
-                    birth-src (hgd-tick-state-alive state) slow)))))
-    (let n (str_to_int (read_line)))
-    (let born (hgl-ledger-add "glass-on" (str_concat "ticks=" (int_to_str n))))
-    (hgl-tick n 1 0 0 0 0 (list 0) (hgl-sources) 1 (hgl-slow)))
+// hearth-glass-live.fk — the living glass: each tick (hearth-glass-tick-s,
+// a hearth row handed to the rest door), take ONE sample
+// of every data point (lane-motion's snap), append normalized events to
+// the ledger, and fold a lane list through the generic terminal
+// graphics engine. Every lane wears the age of its own source; motion
+// and stillness both show as what they are. On its own source change
+// the glass ends quietly and its supervisor loop reborns it warm —
+// the ledger keeps the event, the panel just repaints.
+// stdin line 1: number of ticks.
+import form-stdlib/hearth.bml;
+import form-stdlib/hearth-glass.bml;
+import form-stdlib/lane-motion.bml;
+import form-stdlib/hearth-glass-door.bml;
+import form-stdlib/spool-bell-transport.fk;
+section [form.bml] {
+    def hgl-ledger-add(kind, detail) = sbt-append(hearth-ledger(), gl-ledger-line(kind, now_unix_ms(), detail));
+    def hgl-int(s, name) = fmv-field(s, name);
+    def hgl-word(s, name) = gl-word-field(s, name);
+    def hgl-age(path, nowms) = nowms - file_mtime(path) * 1000;
+    def hgl-board-mend(living) = {
+        let w = write_file_text(hearth-board(), hearth-board-text(living, hearth-capabilities()));
+        let e = hgl-ledger-add("board-mended", ("pid=" + living.str()));
+        living;
+    };
+    def hgl-board-heal() = {
+        let living = hearth-resident-pid();
+        living > 0 ? hgl-board-mend(living) : 0;
+    };
+    def hgl-current-alive(s, living) = {
+        let pid0 = hgl-int(s, "pid");
+        let alive0 = hgl-int(s, "alive");
+        let board-caps = gl-line-field(hearth-board-read(), "capabilities");
+        let mended = (Comparable) hearth-board-current?(pid0, living, board-caps) == 1 ? 0 : hgl-board-heal();
+        living > 0 ? 1 : mended > 0 ? 1 : alive0;
+    };
+    def hgl-record-state(state, prev-task, prev-reply, prev-pf, prev-alive) = {
+        let kv = hgd-tick-state-kv(state);
+        let e5 = (String) kv == "" ? 0 : hgl-ledger-add("kv", kv);
+        let e1 = hgd-tick-state-pf(state) > prev-pf ? hgl-ledger-add("prefill", ("count=" + hgd-tick-state-pf(state).str())) : 0;
+        let e2 = hgd-tick-state-taskb(state) > prev-task ? hgl-ledger-add("request", ("task-bytes=" + hgd-tick-state-taskb(state).str())) : 0;
+        let e3 = hgd-tick-state-replyb(state) > prev-reply ? hgl-ledger-add("reply", ("elapsed-ms=" + hgd-tick-state-lastms(state).str())) : 0;
+        let e4 = (Comparable) hgd-tick-state-alive(state) == 0 ? (Comparable) prev-alive == 1 ? hgl-ledger-add("restart-needed", "pid-down") : 0 : 0;
+        0;
+    };
+    def hgl-sources() = (read_file("observe/hearth-glass-live.fk") + (read_file("form/form-stdlib/hearth-glass.bml") + (read_file("form/form-stdlib/hearth.bml") + (read_file("form/form-stdlib/lane-motion.bml") + ((String) read_file("form/form-stdlib/hearth-glass-door.bml") + read_file("form/form-stdlib/term-graphics.bml"))))));
+    // LIVE BREATH: one actual tick earns one frame, even if the sampled
+    // sources are held. Tick and age are themselves present observations;
+    // hiding them made a healthy field indistinguishable from a stalled
+    // observer. The costly probes (census find, sibling pgrep, last-land
+    // git, resident pgrep) still breathe only every 10 ticks; spool reads
+    // stay per-tick so motion is never missed.
+    def hgl-slow() = [lms-census(), lms-siblings(), lms-lastland(),     // Observe process images, not command-line mentions: a shell
+    // feeding birth bytes mentions fkwu but does not execute it.
+host-exec("ps -axo pid=,etime=,command= | awk '$3 ~ /(^|\\/)fkwu$/ {printf \"%s+%s %s; \", $1, $2, $NF}' | head -c 190", ""), hearth-resident-pid()];
+    def hgl-tick(n, tick, prev-task, prev-reply, prev-pf, prev-cp, spark, birth-src, prev-alive, slow0) = !((String) hgl-sources() == birth-src) ? {
+        let e = hgl-ledger-add("glass-reborn", "source-changed");
+        0;
+    } : tick > n ? 0 : {
+        let slow = (Comparable) (tick % 10) == 1 ? hgl-slow() : slow0;
+        let s = lms-sample(slow[0], slow[1], slow[2]);
+        let nowms = now_unix_ms();
+        let alive = hgl-current-alive(s, slow[4]);
+        let state = hgd-tick-state(s, prev-task, prev-reply, prev-pf, prev-cp, spark, alive);
+        let events = hgl-record-state(state, prev-task, prev-reply, prev-pf, prev-alive);
+        let put = (Comparable) hgd-frame-on-tick?(tick) == 1 ? print_str(tg-frame(hgd-lanes(s, tick, hgd-tick-state-spark(state), hgd-tick-state-kv(state), slow[3], nowms, hgl-age(hearth-board(), nowms), hgl-age(hearth-task(), nowms), hgl-age(hearth-reply(), nowms), hgl-age(hearth-out(), nowms)))) : 0;
+        let held = hearth-rest-s(hearth-glass-tick-s());
+        hgl-tick(n, (Number) tick + (Number) 1, hgd-tick-state-taskb(state), hgd-tick-state-replyb(state), hgd-tick-state-pf(state), hgd-tick-state-cp(state), hgd-tick-state-spark(state), birth-src, hgd-tick-state-alive(state), slow);
+    };
+    let n = str_to_int(read_line());
+    let born = hgl-ledger-add("glass-on", ("ticks=" + n.str()));
+    hgl-tick(n, 1, 0, 0, 0, 0, [0], hgl-sources(), 1, hgl-slow());
+}

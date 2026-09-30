@@ -1,272 +1,207 @@
-; form-cli-peer-contribution-live.fk — one resident Form/Qwen/KV peer receives
-; scannerless tasks from an append spool and returns length-safe durable results.
-;
-; Startup stdin, one line each:
-;   sealed qwen35 GGUF, task spool, reply spool, fifo bell, channel identity,
-;   context positions, generation quantum, byte quantum, event capacity,
-;   external Form tensor reservation observation (0 or 1).
-; After startup stdin is irrelevant. Clients append complete or partial
-; fcpa-task-frame bytes to the task spool and ring the fifo. The resident blocks
-; on the bell at idle: no polling core and no HTTP/server/model membrane.
-;
-; CPU carries file deltas, scannerless BMF cursors, recovery and diagnostics.
-; Native Metal carries Qwen and any emitted recipe kernels. Form tensor may train in
-; another process concurrently; its reservation is supplied because this
-; fkwu's metal_status/tensor_status counters cannot witness another process.
-;
-; Effectful. A `release` byte written to the bell closes model/state handles.
-; preflight-exec: forbidden
-; preludes: form-stdlib/form-cli-peer-contribution-turnwheel.fk form-stdlib/spool-bell-transport.fk form-stdlib/bml/form-cli-peer-contribution-live-birth.bml form-stdlib/bml/form-cli-peer-recycle.bml
-
-(do
-    (defn fcpctl-line (name value)
-        (print_str (str_concat "form-peer "
-            (str_concat name (str_concat "=" (str_concat value "\n"))))))
-    (defn fcpctl-int (name value) (fcpctl-line name (int_to_str value)))
-    (defn fcpctl-read-int (fallback)
-        (do
-            (let line (read_line))
-            (if (or (nothing? line) (str_eq line "")) fallback
-                (str_to_int line))))
-
-    (defn fcpctl-bootstrap (recipe)
-        (str_concat (fcpa-bootstrap)
-            (str_concat " This residence has one currently born executable recipe: "
-            (str_concat (frex-surface recipe 5 "auto")
-                (str_concat " It computes signed i32 y=(3*x)+7. When a task asks for its physical value, emit that exact surface once and attend to the typed observation."
-                " For a source-concept or source-nodeid task, emit the exact form:knowledge-query surface supplied by that task once, then attend to the typed current-source observation in this same residence. For a direct-answer task, answer its task field directly and precisely in ordinary text; do not wrap it in a recipe or source-query surface.")))))
-
-    (defn fcpctl-host (resident)
-        ; The peer action policy is present from birth and runs through the
-        ; same NodeID/JIT route as later arrivals. Its identity image preserves
-        ; the source task intent; a publish task can replace it without opening
-        ; another Qwen context, KV state, or restarting this transport. The
-        ; policy host borrows the already-opened model context; it owns no row.
-        (fcrt-policy-host-from-session resident 0 1
-            (fcpr-default-route 1) 8))
-    (defn fcpctl-organ (channel capacity)
-        (rai-organ (list (rai-channel channel capacity capacity 0)) capacity))
-    (defn fcpctl-transport
-        (resident channel task-path reply-path byte-quantum capacity)
-        (do
-            (let organ (fcpctl-organ channel capacity))
-            (let join (nth (ritj-ready
-                (ritj-new (fcpctl-host resident) organ channel capacity) 1) 0))
-            (fcpat-new join (fcpsi-new organ capacity)
-                (fcpat-reader "resident-form-peer" channel task-path
-                    (ritj-ready-exchange join) "wait" -1 byte-quantum 0)
-                reply-path capacity 8)))
-
-    (defn fcpctl-status-int (status name)
-        (do
-            (let key (str_concat name "="))
-            (let at (str_find status key 0))
-            (if (lt at 0) 0
-                (do
-                    (let start (add at (str_len key)))
-                    (let stop (str_find status "\n" start))
-                    (if (lt stop 0) 0
-                        (str_to_int (substring status start stop)))))))
-
-    (defn fcpctl-observed-turn (state budget tensor-reservation turn)
-        (do
-            (let started-ms (now_unix_ms))
-            (let metal-before (metal_status))
-            (let result (fcpct-turn state (now_unix_ms) budget))
-            (let metal-after (metal_status))
-            (let wall (sub (now_unix_ms) started-ms))
-            (let gpu-us (sub
-                (fcpctl-status-int metal-after "gpu_busy_us_total")
-                (fcpctl-status-int metal-before "gpu_busy_us_total")))
-            (let cpu-jit-us (sub
-                (fcpctl-status-int metal-after "cpu_jit_busy_us_total")
-                (fcpctl-status-int metal-before "cpu_jit_busy_us_total")))
-            (fcpctl-int "turn" turn)
-            (fcpctl-line "signal" (fcpct-result-signal result))
-            (fcpctl-int "wall-ms" wall)
-            (fcpctl-int "gpu-busy-us" gpu-us)
-            (fcpctl-int "cpu-jit-busy-us" cpu-jit-us)
-            (fcpctl-int "tensor-external-reservation" tensor-reservation)
-            (fcpctl-int "completed"
-                (fcpct-completed (fcpct-result-state result)))
-            (fcpctl-int "contributions"
-                (fcpct-contributions (fcpct-result-state result)))
-            (fcpctl-int "session-pos"
-                (fcms-pos (fcpct-session (fcpct-result-state result))))
-            (fcpctl-int "session-pending"
-                (fcms-pending (fcpct-session (fcpct-result-state result))))
-            (fcpctl-int "session-stopped"
-                (fcms-stopped? (fcpct-session (fcpct-result-state result))))
-            (fcpctl-int "session-observations"
-                (fcms-observations (fcpct-session (fcpct-result-state result))))
-            result))
-
-    ; Drain all work already made present by this bell. A failed durable write
-    ; returns to the bell boundary with its stage intact; another wake retries
-    ; the exact bytes without another model turn.
-    ; Per-turn context recycling: the floor is the position right after
-    ; bootstrap admission, with the linear layers' recurrent conv/delta
-    ; bytes copied aside on the device (q38-state-mark). After every
-    ; COMPLETED turn -- staged continuations keep their ground -- the
-    ; recurrent bytes are restored and the session returns to the floor
-    ; position and pending-token/stop boundary, so shared context stops
-    ; accumulating across turns. Cross-turn memory lives in
-    ; the durable spools, where it always lived.
-    (defn fcpctl-floor (state)
-        (do
-            (let sess (fcpct-session state))
-            (let ctx (fcms-ctx sess))
-            (let spare (q38-spare-state (nth ctx 2)))
-            (let m (q38-state-mark (nth ctx 0) (fcms-sts sess) spare (nth ctx 2)))
-            (fcpctl-int "recycle-floor-pos" (fcms-pos sess))
-            (fcpctl-int "recycle-floor-pending" (fcms-pending sess))
-            (fcpctl-int "recycle-floor-stopped" (fcms-stopped? sess))
-            (fcpctl-int "recycle-marked-lanes" m)
-            (fcprc-floor sess spare)))
-    (defn fcpctl-recycle (state floor)
-        (do
-            (let sess (fcpct-session state))
-            (let ctx (fcms-ctx sess))
-            (let r (q38-state-restore (nth ctx 0) (fcms-sts sess) (nth floor 0) (nth ctx 2)))
-            (let restored (fcprc-restore-stream sess floor))
-            (let observed (oh-voice (fcprc-reading restored floor)))
-            (fcpctl-int "recycled-to-pos" (nth floor 1))
-            (fcpct-with state (fcpct-transport state)
-                restored
-                (fcpct-staged state) (fcpct-completed state)
-                (fcpct-contributions state))))
-    (defn fcpctl-recycle-if-grown (state floor)
-        (if (nothing? (fcpct-staged state))
-            (if (gt (fcms-pos (fcpct-session state)) (nth floor 1))
-                (fcpctl-recycle state floor)
-                state)
-            state))
-
-    (defn fcpctl-drain (state budget tensor-reservation turn floor)
-        (do
-            (let result (fcpctl-observed-turn state budget tensor-reservation turn))
-            (let next (fcpctl-recycle-if-grown (fcpct-result-state result) floor))
-            (if (str_eq (fcpct-result-signal result) "failure") next
-            (if (not (nothing? (fcpct-staged next)))
-                (fcpctl-drain next budget tensor-reservation (add turn 1) floor)
-            (if (gt (len (fcpat-pending (fcpct-transport next))) 0)
-                (fcpctl-drain next budget tensor-reservation (add turn 1) floor)
-            (if (not (str_eq (fcpct-result-signal result) "nothing"))
-                (fcpctl-drain next budget tensor-reservation (add turn 1) floor)
-                next))))))
-
-    (defn fcpctl-loop (state bell budget tensor-reservation turn floor)
-        (do
-            (fcpctl-line "ready" "1")
-            (let wake (sbt-bell-wait bell))
-            (if (or (nothing? wake) (str_eq wake "release"))
-                (do
-                    (let unregistered (fcpclb-unregister))
-                    (fcpctl-int "recycle-spare-release-count" (q38-free-spare (nth floor 0)))
-                    (let released (fcms-release-ok? (fcpct-session state)))
-                    (let release-frame (fcpclb-record-release released))
-                    (fcpctl-int "accepted-contributions"
-                        (fcpct-contributions state))
-                    (fcpctl-int "release-ok" released)
-                    released)
-                (do
-                    (let next (fcpctl-drain state budget tensor-reservation turn floor))
-                    (fcpctl-loop next bell budget tensor-reservation
-                        (add turn 1) floor)))))
-
-    ; an empty model line resolves from the registry by ROLE — the birth
-    ; is data-driven; a handed-in path stays an explicit override.
-    (let model-path0 (read_line))
-    (let model-path (if (or (nothing? model-path0) (str_eq model-path0 ""))
-        (mr-path (mr-for-role "answer")) model-path0))
-    (let task-path (read_line))
-    (let reply-path (read_line))
-    (let bell (read_line))
-    (let channel (read_line))
-    (let maxpos (fcpctl-read-int 4096))
-    (let budget (fcpctl-read-int 160))
-    (let byte-quantum (fcpctl-read-int 1048576))
-    (let capacity (fcpctl-read-int 64))
-    (let tensor-reservation (fcpctl-read-int 0))
-    ; Birth and announce capabilities before model admission. A coordinate from
-    ; another process is never borrowed as if it were this residence's NodeID.
-    (let recipe (frex-recipe))
-    (let recipe-surface (frex-surface recipe 5 "auto"))
-    (let started (now_unix_ms))
-    ; The caller's patience, handed BEFORE admission: every command-buffer wait
-    ; in this residence answers within it as a typed frame (metal_status
-    ; wait_frame=completed|error|timeout|released) instead of holding the
-    ; walker. The number is one Form row, hearth-metal-deadline-ms, and this
-    ; line prints before the model opens, so a reader of a hung birth can tell
-    ; "not started" from "stuck in admission" and how long stuck can last.
-    (let patience-before (metal_deadline (hearth-metal-deadline-ms)))
-    (fcpctl-int "admission-deadline-ms" (hearth-metal-deadline-ms))
-    (fcpctl-int "admission-deadline-stood-ms" patience-before)
-    (let opened (if (or (nothing? model-path) (str_eq model-path ""))
-        (fcms-none "model-path-absent")
-        (fcms-open model-path (fcpctl-bootstrap recipe) maxpos)))
-    (if (not (eq (fcms-live? opened) 1))
-        (do
-            (fcpctl-line "signal" (fcpa-signal opened))
-            (fcpctl-line "reason" (fcms-reason opened))
-            (fcpctl-int "release-ok" (fcms-release-ok? opened))
-            0)
-        (do
-            (let boot (fcms-generate opened 24))
-            (let resident (fcms-generation-session boot))
-            (let native-program-started (now_unix_ms))
-            (let transport (fcpctl-transport resident channel task-path reply-path
-                byte-quantum capacity))
-            (let native-program-ms (sub (now_unix_ms) native-program-started))
-            (let source-context-started (now_unix_ms))
-            (let durable (read_file reply-path))
-            (let state (fcpct-recover (fcpct-live-new transport resident) durable))
-            (let source-context-ms-raw
-                (sub (now_unix_ms) source-context-started))
-            (let source-context-ms
-                (if (nothing? (fcpct-source-context state))
-                    (nothing)
-                    source-context-ms-raw))
-            ; BIRTH CANARY: a compile that lost defns to the collection
-            ; numbness recovers them to `nothing` (axiom-5) — a resident
-            ; born that way once served degraded for hours announcing
-            ; ready. The canary asks one such defn for its voice; absence
-            ; is a typed step-down, never a ready.
-            (let canary (fcpclb-cache-state))
-            (if (nothing? canary)
-                (do (fcpctl-line "signal" "birth-degraded")
-                    (fcpctl-line "reason" "birth-canary-voiceless: fcpclb defns recovered to nothing; fix the unit and rebirth")
-                    (fcpctl-int "release-ok" (fcms-release-ok? resident))
-                    0)
-            (do
-            (let birth (fcpclb-birth canary source-context-ms
-                native-program-ms (sub (now_unix_ms) started)))
-            (let birth-frame (fcpclb-record-birth birth))
-            (let birth-report (fcpclb-report birth))
-            (let prefill-ms (sub (now_unix_ms) started))
-            (let prefill-frame (fcpclb-record-prefill prefill-ms))
-            (let prefill-report (fcpclb-report-prefill prefill-ms))
-            (fcpctl-line "source-action-capability"
-                (fcpct-source-action-capability))
-            (fcpctl-line "direct-answer-action-capability"
-                (fcpct-direct-answer-action-capability))
-            (fcpctl-line "hearth-telemetry-action-capability"
-                (fcpct-hearth-telemetry-action-capability))
-            (fcpctl-int "source-context-present"
-                (if (nothing? (fcpct-source-context state)) 0 1))
-            (fcpctl-int "policy-shares-model-context"
-                (fcrt-policy-host-shares-session?
-                    (ritj-host (fcpat-join transport)) resident))
-            (fcpctl-line "bootstrap" (fcms-generation-text boot))
-            (fcpctl-line "recipe-surface" recipe-surface)
-            (fcpctl-int "recovered-task-keys"
-                (len (fcpct-recovery-keys state)))
-            (let floor (fcpctl-floor state))
-            (let registered (fcpclb-register task-path reply-path bell))
-            (if registered
-                (fcpctl-loop state bell budget tensor-reservation 1 floor)
-                (do
-                    (fcpctl-line "signal" "discovery-unavailable")
-                    (fcpctl-int "recycle-spare-release-count" (q38-free-spare (nth floor 0)))
-                    (fcpctl-int "release-ok" (fcms-release-ok? resident))
-                    (form_error "ready resident could not publish its hearth board"))))))))
+// form-cli-peer-contribution-live.fk — one resident Form/Qwen/KV peer receives
+// scannerless tasks from an append spool and returns length-safe durable results.
+//
+// Startup stdin, one line each:
+//   sealed qwen35 GGUF, task spool, reply spool, fifo bell, channel identity,
+//   context positions, generation quantum, byte quantum, event capacity,
+//   external Form tensor reservation observation (0 or 1).
+// After startup stdin is irrelevant. Clients append complete or partial
+// fcpa-task-frame bytes to the task spool and ring the fifo. The resident blocks
+// on the bell at idle: no polling core and no HTTP/server/model membrane.
+//
+// CPU carries file deltas, scannerless BMF cursors, recovery and diagnostics.
+// Native Metal carries Qwen and any emitted recipe kernels. Form tensor may train in
+// another process concurrently; its reservation is supplied because this
+// fkwu's metal_status/tensor_status counters cannot witness another process.
+//
+// Effectful. A `release` byte written to the bell closes model/state handles.
+// preflight-exec: forbidden
+import form-stdlib/form-cli-peer-contribution-turnwheel.fk;
+import form-stdlib/spool-bell-transport.fk;
+import form-stdlib/bml/form-cli-peer-contribution-live-birth.bml;
+import form-stdlib/bml/form-cli-peer-recycle.bml;
+section [form.bml] {
+    def fcpctl-line(name, value) = print_str(("form-peer " + (name + ("=" + (value + "\n")))));
+    def fcpctl-int(name, value) = fcpctl-line(name, value.str());
+    def fcpctl-read-int(fallback) = {
+        let line = read_line();
+        nothing?(line) || (String) line == "" ? fallback : str_to_int(line);
+    };
+    def fcpctl-bootstrap(recipe) = (fcpa-bootstrap() + (" This residence has one currently born executable recipe: " + (frex-surface(recipe, 5, "auto") + (" It computes signed i32 y=(3*x)+7. When a task asks for its physical value, emit that exact surface once and attend to the typed observation." + " For a source-concept or source-nodeid task, emit the exact form:knowledge-query surface supplied by that task once, then attend to the typed current-source observation in this same residence. For a direct-answer task, answer its task field directly and precisely in ordinary text; do not wrap it in a recipe or source-query surface."))));
+    def fcpctl-host(resident) =     // The peer action policy is present from birth and runs through the
+    // same NodeID/JIT route as later arrivals. Its identity image preserves
+    // the source task intent; a publish task can replace it without opening
+    // another Qwen context, KV state, or restarting this transport. The
+    // policy host borrows the already-opened model context; it owns no row.
+fcrt-policy-host-from-session(resident, 0, 1, fcpr-default-route(1), 8);
+    def fcpctl-organ(channel, capacity) = rai-organ([rai-channel(channel, capacity, capacity, 0)], capacity);
+    def fcpctl-transport(resident, channel, task-path, reply-path, byte-quantum, capacity) = {
+        let organ = fcpctl-organ(channel, capacity);
+        let join = ritj-ready(ritj-new(fcpctl-host(resident), organ, channel, capacity), 1)[0];
+        fcpat-new(join, fcpsi-new(organ, capacity), fcpat-reader("resident-form-peer", channel, task-path, ritj-ready-exchange(join), "wait", -1, byte-quantum, 0), reply-path, capacity, 8);
+    };
+    def fcpctl-status-int(status, name) = {
+        let key = (name + "=");
+        let at = str_find(status, key, 0);
+        at < 0 ? 0 : {
+            let start = (Number) at + (Number) len(key);
+            let stop = str_find(status, "\n", start);
+            stop < 0 ? 0 : str_to_int(substring(status, start, stop));
+        };
+    };
+    def fcpctl-observed-turn(state, budget, tensor-reservation, turn) = {
+        let started-ms = now_unix_ms();
+        let metal-before = metal_status();
+        let result = fcpct-turn(state, now_unix_ms(), budget);
+        let metal-after = metal_status();
+        let wall = now_unix_ms() - started-ms;
+        let gpu-us = fcpctl-status-int(metal-after, "gpu_busy_us_total") - fcpctl-status-int(metal-before, "gpu_busy_us_total");
+        let cpu-jit-us = fcpctl-status-int(metal-after, "cpu_jit_busy_us_total") - fcpctl-status-int(metal-before, "cpu_jit_busy_us_total");
+        fcpctl-int("turn", turn);
+        fcpctl-line("signal", fcpct-result-signal(result));
+        fcpctl-int("wall-ms", wall);
+        fcpctl-int("gpu-busy-us", gpu-us);
+        fcpctl-int("cpu-jit-busy-us", cpu-jit-us);
+        fcpctl-int("tensor-external-reservation", tensor-reservation);
+        fcpctl-int("completed", fcpct-completed(fcpct-result-state(result)));
+        fcpctl-int("contributions", fcpct-contributions(fcpct-result-state(result)));
+        fcpctl-int("session-pos", fcms-pos(fcpct-session(fcpct-result-state(result))));
+        fcpctl-int("session-pending", fcms-pending(fcpct-session(fcpct-result-state(result))));
+        fcpctl-int("session-stopped", fcms-stopped?(fcpct-session(fcpct-result-state(result))));
+        fcpctl-int("session-observations", fcms-observations(fcpct-session(fcpct-result-state(result))));
+        result;
+    };
+    // Drain all work already made present by this bell. A failed durable write
+    // returns to the bell boundary with its stage intact; another wake retries
+    // the exact bytes without another model turn.
+    // Per-turn context recycling: the floor is the position right after
+    // bootstrap admission, with the linear layers' recurrent conv/delta
+    // bytes copied aside on the device (q38-state-mark). After every
+    // COMPLETED turn -- staged continuations keep their ground -- the
+    // recurrent bytes are restored and the session returns to the floor
+    // position and pending-token/stop boundary, so shared context stops
+    // accumulating across turns. Cross-turn memory lives in
+    // the durable spools, where it always lived.
+    def fcpctl-floor(state) = {
+        let sess = fcpct-session(state);
+        let ctx = fcms-ctx(sess);
+        let spare = q38-spare-state(ctx[2]);
+        let m = q38-state-mark(ctx[0], fcms-sts(sess), spare, ctx[2]);
+        fcpctl-int("recycle-floor-pos", fcms-pos(sess));
+        fcpctl-int("recycle-floor-pending", fcms-pending(sess));
+        fcpctl-int("recycle-floor-stopped", fcms-stopped?(sess));
+        fcpctl-int("recycle-marked-lanes", m);
+        fcprc-floor(sess, spare);
+    };
+    def fcpctl-recycle(state, floor) = {
+        let sess = fcpct-session(state);
+        let ctx = fcms-ctx(sess);
+        let r = q38-state-restore(ctx[0], fcms-sts(sess), floor[0], ctx[2]);
+        let restored = fcprc-restore-stream(sess, floor);
+        let observed = oh-voice(fcprc-reading(restored, floor));
+        fcpctl-int("recycled-to-pos", floor[1]);
+        fcpct-with(state, fcpct-transport(state), restored, fcpct-staged(state), fcpct-completed(state), fcpct-contributions(state));
+    };
+    def fcpctl-recycle-if-grown(state, floor) = nothing?(fcpct-staged(state)) ? fcms-pos(fcpct-session(state)) > floor[1] ? fcpctl-recycle(state, floor) : state : state;
+    def fcpctl-drain(state, budget, tensor-reservation, turn, floor) = {
+        let result = fcpctl-observed-turn(state, budget, tensor-reservation, turn);
+        let next = fcpctl-recycle-if-grown(fcpct-result-state(result), floor);
+        (String) fcpct-result-signal(result) == "failure" ? next : !nothing?(fcpct-staged(next)) ? fcpctl-drain(next, budget, tensor-reservation, (Number) turn + (Number) 1, floor) : len(fcpat-pending(fcpct-transport(next))) > 0 ? fcpctl-drain(next, budget, tensor-reservation, (Number) turn + (Number) 1, floor) : !((String) fcpct-result-signal(result) == "nothing") ? fcpctl-drain(next, budget, tensor-reservation, (Number) turn + (Number) 1, floor) : next;
+    };
+    def fcpctl-loop(state, bell, budget, tensor-reservation, turn, floor) = {
+        fcpctl-line("ready", "1");
+        let wake = sbt-bell-wait(bell);
+        nothing?(wake) || (String) wake == "release" ? {
+            let unregistered = fcpclb-unregister();
+            fcpctl-int("recycle-spare-release-count", q38-free-spare(floor[0]));
+            let released = fcms-release-ok?(fcpct-session(state));
+            let release-frame = fcpclb-record-release(released);
+            fcpctl-int("accepted-contributions", fcpct-contributions(state));
+            fcpctl-int("release-ok", released);
+            released;
+        } : {
+            let next = fcpctl-drain(state, budget, tensor-reservation, turn, floor);
+            fcpctl-loop(next, bell, budget, tensor-reservation, (Number) turn + (Number) 1, floor);
+        };
+    };
+    // an empty model line resolves from the registry by ROLE — the birth
+    // is data-driven; a handed-in path stays an explicit override.
+    let model-path0 = read_line();
+    let model-path = nothing?(model-path0) || (String) model-path0 == "" ? mr-path(mr-for-role("answer")) : model-path0;
+    let task-path = read_line();
+    let reply-path = read_line();
+    let bell = read_line();
+    let channel = read_line();
+    let maxpos = fcpctl-read-int(4096);
+    let budget = fcpctl-read-int(160);
+    let byte-quantum = fcpctl-read-int(1048576);
+    let capacity = fcpctl-read-int(64);
+    let tensor-reservation = fcpctl-read-int(0);
+    // Birth and announce capabilities before model admission. A coordinate from
+    // another process is never borrowed as if it were this residence's NodeID.
+    let recipe = frex-recipe();
+    let recipe-surface = frex-surface(recipe, 5, "auto");
+    let started = now_unix_ms();
+    // The caller's patience, handed BEFORE admission: every command-buffer wait
+    // in this residence answers within it as a typed frame (metal_status
+    // wait_frame=completed|error|timeout|released) instead of holding the
+    // walker. The number is one Form row, hearth-metal-deadline-ms, and this
+    // line prints before the model opens, so a reader of a hung birth can tell
+    // "not started" from "stuck in admission" and how long stuck can last.
+    let patience-before = metal_deadline(hearth-metal-deadline-ms());
+    fcpctl-int("admission-deadline-ms", hearth-metal-deadline-ms());
+    fcpctl-int("admission-deadline-stood-ms", patience-before);
+    let opened = nothing?(model-path) || (String) model-path == "" ? fcms-none("model-path-absent") : fcms-open(model-path, fcpctl-bootstrap(recipe), maxpos);
+    !((Comparable) fcms-live?(opened) == 1) ? {
+        fcpctl-line("signal", fcpa-signal(opened));
+        fcpctl-line("reason", fcms-reason(opened));
+        fcpctl-int("release-ok", fcms-release-ok?(opened));
+        0;
+    } : {
+        let boot = fcms-generate(opened, 24);
+        let resident = fcms-generation-session(boot);
+        let native-program-started = now_unix_ms();
+        let transport = fcpctl-transport(resident, channel, task-path, reply-path, byte-quantum, capacity);
+        let native-program-ms = now_unix_ms() - native-program-started;
+        let source-context-started = now_unix_ms();
+        let durable = read_file(reply-path);
+        let state = fcpct-recover(fcpct-live-new(transport, resident), durable);
+        let source-context-ms-raw = now_unix_ms() - source-context-started;
+        let source-context-ms = nothing?(fcpct-source-context(state)) ? nothing() : source-context-ms-raw;
+        // BIRTH CANARY: a compile that lost defns to the collection
+        // numbness recovers them to `nothing` (axiom-5) — a resident
+        // born that way once served degraded for hours announcing
+        // ready. The canary asks one such defn for its voice; absence
+        // is a typed step-down, never a ready.
+        let canary = fcpclb-cache-state();
+        nothing?(canary) ? {
+            fcpctl-line("signal", "birth-degraded");
+            fcpctl-line("reason", "birth-canary-voiceless: fcpclb defns recovered to nothing; fix the unit and rebirth");
+            fcpctl-int("release-ok", fcms-release-ok?(resident));
+            0;
+        } : {
+            let birth = fcpclb-birth(canary, source-context-ms, native-program-ms, now_unix_ms() - started);
+            let birth-frame = fcpclb-record-birth(birth);
+            let birth-report = fcpclb-report(birth);
+            let prefill-ms = now_unix_ms() - started;
+            let prefill-frame = fcpclb-record-prefill(prefill-ms);
+            let prefill-report = fcpclb-report-prefill(prefill-ms);
+            fcpctl-line("source-action-capability", fcpct-source-action-capability());
+            fcpctl-line("direct-answer-action-capability", fcpct-direct-answer-action-capability());
+            fcpctl-line("hearth-telemetry-action-capability", fcpct-hearth-telemetry-action-capability());
+            fcpctl-int("source-context-present", nothing?(fcpct-source-context(state)) ? 0 : 1);
+            fcpctl-int("policy-shares-model-context", fcrt-policy-host-shares-session?(ritj-host(fcpat-join(transport)), resident));
+            fcpctl-line("bootstrap", fcms-generation-text(boot));
+            fcpctl-line("recipe-surface", recipe-surface);
+            fcpctl-int("recovered-task-keys", len(fcpct-recovery-keys(state)));
+            let floor = fcpctl-floor(state);
+            let registered = fcpclb-register(task-path, reply-path, bell);
+            registered ? fcpctl-loop(state, bell, budget, tensor-reservation, 1, floor) : {
+                fcpctl-line("signal", "discovery-unavailable");
+                fcpctl-int("recycle-spare-release-count", q38-free-spare(floor[0]));
+                fcpctl-int("release-ok", fcms-release-ok?(resident));
+                form_error("ready resident could not publish its hearth board");
+            };
+        };
+    };
+}

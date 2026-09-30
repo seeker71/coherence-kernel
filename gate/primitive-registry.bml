@@ -1,6 +1,7 @@
 // Native Form lens for registry, implementation and band-count agreement.
 // Historical implementation comparisons live in git.
 // preludes: form-stdlib/core.fk form-stdlib/table.bml gate/lens-text.bml
+import form-stdlib/bml/form-source-lift.bml;
 section [form.bml] {
     class FormPrimitiveRegistryGate {
         thought primitive-registry-pattern = list("registry-is-the-body-main-go-the-surface", "cells-read-as-the-script-reads-them", "lane-1-needs-three-kernels", "pins-equal-counts", "membrane-crossed-once-on-the-red-path", "twin-voice-byte-for-byte");
@@ -149,62 +150,27 @@ section [form.bml] {
         def prg-e-expected(e) = nth(e, 3);
         def prg-e-mode(e) = nth(e, 4);
         def prg-e-verify?(e) = nth(e, 5);
-        def prg-defined-verifiers(text) = prg-defined-go(text, 0, list());
-        def prg-defined-go(text, from, acc) {
-            let i = str_find(text, "(defn", from);
-            if (i < 0) then reverse(acc) else prg-defined-go(text, (i + 1), prg-defined-at(text, (i + 5), lx-skip-ws(text, (i + 5)), acc));
+        // Read normalized Form structure, so punctuation inside strings and
+        // compiler-emitted constant string composition cannot change a row.
+        def prg-forms(nodes,op) = foldl((out,node) => append(out,
+            fsl-op(node) == op ? [node] : prg-forms(fsl-kids(node),op)),[],nodes);
+        def prg-entries(text) {
+            let nodes = fsl-parse(text);
+            let defined = map(node => fsl-word(fsl-kids(node)[1]),prg-forms(nodes,"defn"));
+            let rows = map(node => prg-entry-node(fsl-kids(node)[1:],defined),prg-forms(nodes,"prim"));
+            all?(row => !nothing?(row),rows) ? ["ok",rows] : ["refused","registry entry needs three constant strings, a verifier, an integer expectation and lane 0 or 1"];
         }
-        def prg-defined-at(text, j, k, acc) {
-            let e = prg-span-verifier(text, k);
-            if ((Comparable) k == j) then acc else if ((Comparable) lx-at?(text, k, "pv-") == 0) then acc else if ((Comparable) lx-ws-at?(text, e) == 0) then acc else cons(substring(text, k, e), acc);
+        def prg-entry-node(args,defined) {
+            if len(args) != 6 then fail else {
+                let strings = map(fsl-constant-string,take(3,args));
+                let expected = fsl-word(args[4]); let mode = fsl-word(args[5]);
+                if any?(value => nothing?(value),strings) || !fsc-int?(expected) || (mode != "0" && mode != "1") then fail else {
+                    let verifier = fsl-word(args[3]);
+                    let verified = nil?(fsl-kids(args[3])) && substring(verifier,0,3) == "pv-" ? lx-str-in?(defined,verifier) : verifier != "" || !nil?(fsl-kids(args[3]));
+                    append(strings,[str_to_int(expected),str_to_int(mode),verified]);
+                };
+            };
         }
-        // [^\s()]+
-        def prg-span-verifier(s, i) = if ((i >= str_len(s)) || (((Comparable) lx-ws-at?(s, i) == 1) || (((Comparable) str_byte_at(s, i) == 40) || ((Comparable) str_byte_at(s, i) == 41)))) then i else prg-span-verifier(s, (i + 1));
-        def prg-entries(text) = prg-entries-go(text, prg-defined-verifiers(text), 0, list());
-        def prg-entries-go(text, defined, from, acc) {
-            let i = str_find(text, "(prim \"", from);
-            if (i < 0) then list("ok", reverse(acc)) else prg-entry-at(text, defined, i, lx-sblock-from(text, i), acc);
-        }
-        def prg-entry-at(text, defined, start, cell, acc) {
-            let head = prg-cell-head(cell);
-            let tail = prg-cell-tail(cell);
-            if (((Comparable) len(head) == 0) || ((Comparable) len(tail) == 0)) then list("refused", str_concat("unparseable registry cell at offset ", str_concat(int_to_str(start), str_concat(": ", str_concat(lx-head-bytes(cell, 80), "...")))))
-            else prg-entries-go(text, defined, (start + str_len(cell)), cons(prg-entry(head, tail, prg-verifier-ok?(lx-strip(substring(cell, nth(head, 3), nth(tail, 2))), defined)), acc));
-        }
-        // (prim "name" "token" "spec" -> list(name, token, spec, end)
-        def prg-cell-head(cell) {
-            let n = prg-quoted(cell, 6);
-            if ((Comparable) len(n) == 0) then list() else prg-cell-head-token(cell, n, prg-quoted(cell, (nth(n, 1) + 1)));
-        }
-        def prg-cell-head-token(cell, n, t) {
-            if ((Comparable) len(t) == 0) then list() else if ((Comparable) lx-at?(cell, nth(n, 1), " ") == 0) then list() else prg-cell-head-spec(cell, n, t, prg-quoted-or-empty(cell, (nth(t, 1) + 1)));
-        }
-        def prg-cell-head-spec(cell, n, t, s) = if ((Comparable) len(s) == 0) then list() else if ((Comparable) lx-at?(cell, nth(t, 1), " ") == 0) then list() else list(nth(n, 0), nth(t, 0), nth(s, 0), nth(s, 1));
-        // "..." allowing the empty string
-        def prg-quoted-or-empty(text, i) {
-            if ((Comparable) lx-at?(text, i, "\"") == 0) then list() else prg-quoted-or-empty-end(text, (i + 1), str_find(text, "\"", (i + 1)));
-        }
-        def prg-quoted-or-empty-end(text, a, b) = if (b < 0) then list() else list(substring(text, a, b), (b + 1));
-        // \s+(-?\d+)\s+([01])\)$ read from the end -> list(expected, mode, start-of-tail)
-        def prg-cell-tail(cell) {
-            let n = str_len(cell);
-            if (n < 6) then list() else if ((Comparable) lx-at?(cell, (n - 1), ")") == 0) then list() else prg-cell-tail-mode(cell, (n - 2));
-        }
-        def prg-cell-tail-mode(cell, m) {
-            if (!(((Comparable) str_byte_at(cell, m) == 48) || ((Comparable) str_byte_at(cell, m) == 49))) then list()
-            else if ((Comparable) lx-ws-at?(cell, (m - 1)) == 0) then list()
-            else prg-cell-tail-expected(cell, m, prg-ws-back(cell, (m - 1)));
-        }
-        // the index of the first byte of the blank run ending at i
-        def prg-ws-back(cell, i) = if ((i > 0) && ((Comparable) lx-ws-at?(cell, (i - 1)) == 1)) then prg-ws-back(cell, (i - 1)) else i;
-        def prg-digits-back(cell, i) = if ((i > 0) && ((Comparable) lx-digit-at?(cell, (i - 1)) == 1)) then prg-digits-back(cell, (i - 1)) else i;
-        def prg-cell-tail-expected(cell, m, w) {
-            let d = prg-digits-back(cell, w);
-            if ((Comparable) d == w) then list() else prg-cell-tail-sign(cell, m, w, if ((d > 0) && ((Comparable) str_byte_at(cell, (d - 1)) == 45)) then (d - 1) else d);
-        }
-        def prg-cell-tail-sign(cell, m, w, d) = if ((Comparable) lx-ws-at?(cell, (d - 1)) == 0) then list() else list(str_to_int(substring(cell, d, w)), (str_byte_at(cell, m) - 48), prg-ws-back(cell, d));
-        def prg-verifier-ok?(v, defined) = if ((Comparable) str_len(v) == 0) then 0 else if (((Comparable) lx-at?(v, 0, "pv-") == 1) && ((Comparable) prg-span-verifier(v, 0) == str_len(v))) then lx-str-in?(defined, v) else 1;
-        def prg-entry(head, tail, verify?) = list(nth(head, 0), nth(head, 1), nth(head, 2), nth(tail, 0), nth(tail, 1), verify?);
 
         // ---- the band's pins: list("ok", total, verified, lane1, lane0) or list("refused", message) ----
         def prg-pin(text, needle) {
@@ -308,7 +274,7 @@ section [form.bml] {
             if ((String) nth(read, 0) == "missing") then prg-refusal(str_concat("missing input: ", nth(read, 1))) else prg-analysis-texts(root, nth(read, 1));
         }
         def prg-analysis-texts(root, texts) {
-            let entries = prg-entries(nth(texts, 3));
+            let entries = prg-entries(form-source-compile-text(texts[3],root + prg-registry()));
             let pins = prg-pins(nth(texts, 4));
             if ((String) nth(entries, 0) == "refused") then prg-refusal(nth(entries, 1))
             else if ((String) nth(pins, 0) == "refused") then prg-refusal(nth(pins, 1))
@@ -326,7 +292,7 @@ section [form.bml] {
             if ((String) nth(read, 0) == "missing") then list() else prg-report-texts(root, nth(read, 1));
         }
         def prg-report-texts(root, texts) {
-            let entries = prg-entries(nth(texts, 3));
+            let entries = prg-entries(form-source-compile-text(texts[3],root + prg-registry()));
             if ((String) nth(entries, 0) == "refused") then list() else prg-report(root, prg-go-natives(nth(texts, 0)), prg-rs-names(nth(texts, 1)), prg-ts-names(nth(texts, 2)), nth(entries, 1));
         }
 

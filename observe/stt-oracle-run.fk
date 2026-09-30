@@ -1,66 +1,95 @@
-; Native Form/Metal Whisper transcribes the handed WAV or captured room.
-; A standing resident translates fa<->en; completed pairs become training rows.
-; The JSON sidecar and stage events retain actual timing, choices and token flow.
-; stdin line 1: seconds (blank -> 5); line 2: language hint fa|en (blank -> auto);
-; line 3: a WAV path (blank -> the ear). The ear's stream lane hangs before its
-; first frame when this process was spawned from a terminal (rc 124, 2026-09-05);
-; from a bundle principal it streams. A handed WAV is the lane any ear can feed.
-; preflight-exec: forbidden
-; preludes: form/form-stdlib/hearth.bml form/form-stdlib/lane-motion.bml form/form-stdlib/voice-school.bml form/form-stdlib/lora-adapter.bml form-stdlib/native-whisper-transcribe.bml
-(do
-    (defn so-say (k v) (print_str (str_concat "stt " (str_concat k (str_concat "=" (str_concat v "\n"))))))
-    (defn so-trim (s) (if (nothing? s) "" (trim s)))
-    (defn so-text (t) (if (nothing? t) "" t))
-    ; WAV: 44-byte header the body writes, then the samples
-    (defn so-header (nbytes) (append (list 82 73 70 70) (append (ln-u32-bytes (add 36 nbytes)) (append (list 87 65 86 69 102 109 116 32) (append (ln-u32-bytes 16) (append (list 1 0 1 0) (append (ln-u32-bytes 16000) (append (ln-u32-bytes 32000) (append (list 2 0 16 0 100 97 116 97) (ln-u32-bytes nbytes))))))))))
-    (defn so-write-wav (path pcm) (nag-write path (str_concat (enw-bytes-str (so-header (str_len pcm))) pcm)))
-    (defn so-reply (rsp turn) (do (let at (str_find rsp (str_concat "turn=" (str_concat (int_to_str turn) "\n")) 0)) (let m (if (lt at 0) (sub 0 1) (str_find rsp (lms-mark-response) at))) (let body (if (lt m 0) "" (substring rsp (add m (str_len (lms-mark-response))) (str_len rsp)))) (let t (str_find body "</think>" 0)) (let said (if (lt t 0) body (substring body (add t 8) (str_len body)))) (let e (str_find said "<|" 0)) (trim (if (lt e 0) said (substring said 0 e)))))
-    (defn so-wait (turn waited) (if (or (gt (str_len (so-reply (so-text (read_file (hearth-reply))) turn)) 0) (ge waited (hearth-review-wait-s))) waited (do (let r (hearth-rest-s (hearth-review-tick-s))) (so-wait turn (add waited (hearth-review-tick-s))))))
-    (defn so-translate (lang text) (if (or (eq (hearth-standing) 0) (eq (str_len text) 0)) "" (do (let turn (add (lms-max-turn (read_file (hearth-task))) 1)) (let sent (hearth-send turn (hearth-kind-answer) (vs-cat (list "/no_think Translate to " (if (str_eq lang "fa") "English" "Persian") ", one line only, no notes: " text)))) (let w (so-wait turn 0)) (so-reply (so-text (read_file (hearth-reply))) turn))))
-    (defn so-words (s i n inword) (if (ge i (str_len s)) (add n inword) (if (eq (str_byte_at s i) 32) (so-words s (add i 1) (add n inword) 0) (so-words s (add i 1) n 1))))
-    ; the ear's stream lane retains its frames (capture only measures): start, read 30 ms frames until full, stop
-    (defn so-frames (want acc tries) (if (or (ge (str_len acc) want) (ge tries 400)) acc (do (let f (sense_mic_stream_read 960 200)) (if (nothing? f) (so-frames want acc (add tries 1)) (so-frames want (str_concat acc f) (add tries 1))))))
-    (defn so-capture (ms) (do (let s (sense_mic_stream_start)) (let pcm (so-frames (mul ms 32) "" 0)) (let e (sense_mic_stream_stop)) pcm))
-    (let seconds (str_to_int (do (let l (so-trim (read_line))) (if (eq (str_len l) 0) "5" l))))
-    (let hint (so-trim (read_line)))
-    ; a WAV handed in (line 3) skips the ear: any ear, a phone, a file, can feed the lane
-    (let given (so-trim (read_line)))
-    (let epoch (now_unix_ms))
-    (let t0 (now_unix_ms))
-    (let pcm (if (gt (str_len given) 0) "" (so-text (so-capture (mul seconds 1000)))))
-    (let captured (sub (now_unix_ms) t0))
-    (let dir ".form-lora-voice-native/stt")
-    (let parent (fs-mkdir ".form-lora-voice-native"))
-    (let mk (fs-mkdir dir))
-    (let stem (vs-cat (list dir "/" (int_to_str epoch) "-" (int_to_str (host_pid)))))
-    (let wav (if (gt (str_len given) 0) given (vs-cat (list dir "/" (int_to_str epoch) ".wav"))))
-    (let bytes (if (gt (str_len given) 0) (file_size wav) (so-write-wav wav pcm)))
-    (let t1 (now_unix_ms))
-    (let events (str_concat stem ".events.jsonl"))
-    (let out (nwt-transcribe (nws-base) wav hint (str_concat stem ".stream") (str_concat stem ".cancel") events))
-    (let oracle-ms (sub (now_unix_ms) t1))
-    (let status (node_value (json-object-get out "status")))
-    (let complete (str_eq status "completed"))
-    (let lang (node_value (json-object-get out "language")))
-    (let text (node_value (json-object-get out "text")))
-    (let db (node_value (json-object-get out "dbfs")))
-    (let segments (len (json-array-elements (json-object-get out "segments"))))
-    (let t2 (now_unix_ms))
-    (let other (if (and complete (or (str_eq lang "fa") (str_eq lang "en"))) (so-translate lang text) ""))
-    (let translate-ms (sub (now_unix_ms) t2))
-    (let sidecar (nag-write (str_concat stem ".txt") (vs-cat (list "status=" status "\nlanguage=" lang "\ntext=" text "\ntranslation=" other "\ndbfs=" (float-precise-str db) "\nevents=" events "\n"))))
-    (let receipt (nag-write (str_concat stem ".json") (json-emit-precise out)))
-    (let row (if (or (eq (str_len text) 0) (eq (str_len other) 0)) 0 (sbt-append ".form-lora-voice-native/stt.jsonl" (lv-row (vs-cat (list "Translate this " (if (str_eq lang "fa") "Persian" "English") " speech to " (if (str_eq lang "fa") "English" "Persian") ": " text)) other))))
-    (so-say "audio" (vs-cat (list "source=" (if (gt (str_len given) 0) "handed-wav" "microphone") " bytes=" (int_to_str (file_size wav)) " capture-ms=" (int_to_str captured) " dbfs=" (float-precise-str db))))
-    (so-say "native" (vs-cat (list "status=" status " language=" lang " latency-ms=" (int_to_str oracle-ms) " words=" (int_to_str (so-words text 0 0 0)) " segments=" (int_to_str segments))))
-    (so-say "text" text)
-    (so-say "translation" (if (eq (str_len other) 0) "nothing (no standing resident or empty text)" (vs-cat (list other " ms=" (int_to_str translate-ms)))))
-    (so-say "material" (vs-cat (list wav " + sidecar" (if (eq row 0) "" " + training row"))))
-    (so-say "receipt" (str_concat stem ".json"))
-    (so-say "events" events)
-    (let published (fgtm-publish-snapshot (hearth-telemetry-root) "voice.stt" epoch (list
-        (vs-sample "stt.latency" (vs-cat (list "native-" (if (eq (str_len lang) 0) "none" lang))) oracle-ms status epoch)
-        (vs-sample "stt.level" "dbfs-below-zero" (sub 0 db) (if (lt db (sub 0 50)) "idle" "active") epoch)
-        (vs-sample "stt.words" (if (eq (str_len other) 0) "untranslated" "translated") (so-words text 0 0 0) status epoch))))
-    (so-say "glass" (nth published 1))
-    (if complete 0 (form_error (str_concat "native STT incomplete; inspect " (str_concat stem ".json")))))
+// Native Form/Metal Whisper transcribes the handed WAV or captured room.
+// A standing resident translates fa<->en; completed pairs become training rows.
+// The JSON sidecar and stage events retain actual timing, choices and token flow.
+// stdin line 1: seconds (blank -> 5); line 2: language hint fa|en (blank -> auto);
+// line 3: a WAV path (blank -> the ear). The ear's stream lane hangs before its
+// first frame when this process was spawned from a terminal (rc 124, 2026-09-05);
+// from a bundle principal it streams. A handed WAV is the lane any ear can feed.
+// preflight-exec: forbidden
+import form/form-stdlib/hearth.bml;
+import form/form-stdlib/lane-motion.bml;
+import form/form-stdlib/voice-school.bml;
+import form/form-stdlib/lora-adapter.bml;
+import form-stdlib/native-whisper-transcribe.bml;
+section [form.bml] {
+    def so-say(k, v) = print_str(("stt " + (k + ("=" + (v + "\n")))));
+    def so-trim(s) = nothing?(s) ? "" : trim(s);
+    def so-text(t) = nothing?(t) ? "" : t;
+    // WAV: 44-byte header the body writes, then the samples
+    def so-header(nbytes) = append([82, 73, 70, 70], append(ln-u32-bytes((Number) 36 + (Number) nbytes), append([87, 65, 86, 69, 102, 109, 116, 32], append(ln-u32-bytes(16), append([1, 0, 1, 0], append(ln-u32-bytes(16000), append(ln-u32-bytes(32000), append([2, 0, 16, 0, 100, 97, 116, 97], ln-u32-bytes(nbytes)))))))));
+    def so-write-wav(path, pcm) = nag-write(path, ((String) enw-bytes-str(so-header(len(pcm))) + pcm));
+    def so-reply(rsp, turn) = {
+        let at = str_find(rsp, ("turn=" + (turn.str() + "\n")), 0);
+        let m = at < 0 ? 0 - 1 : str_find(rsp, lms-mark-response(), at);
+        let body = m < 0 ? "" : substring(rsp, (Number) m + (Number) len(lms-mark-response()), len(rsp));
+        let t = str_find(body, "</think>", 0);
+        let said = t < 0 ? body : substring(body, (Number) t + (Number) 8, len(body));
+        let e = str_find(said, "<|", 0);
+        trim(e < 0 ? said : substring(said, 0, e));
+    };
+    def so-wait(turn, waited) = len(so-reply(so-text(read_file(hearth-reply())), turn)) > 0 || waited >= hearth-review-wait-s() ? waited : {
+        let r = hearth-rest-s(hearth-review-tick-s());
+        so-wait(turn, (Number) waited + (Number) hearth-review-tick-s());
+    };
+    def so-translate(lang, text) = (Comparable) hearth-standing() == 0 || (Comparable) len(text) == 0 ? "" : {
+        let turn = (Number) lms-max-turn(read_file(hearth-task())) + (Number) 1;
+        let sent = hearth-send(turn, hearth-kind-answer(), vs-cat(["/no_think Translate to ", (String) lang == "fa" ? "English" : "Persian", ", one line only, no notes: ", text]));
+        let w = so-wait(turn, 0);
+        so-reply(so-text(read_file(hearth-reply())), turn);
+    };
+    def so-words(s, i, n, inword) = i >= len(s) ? (Number) n + (Number) inword : (Comparable) str_byte_at(s, i) == 32 ? so-words(s, (Number) i + (Number) 1, (Number) n + (Number) inword, 0) : so-words(s, (Number) i + (Number) 1, n, 1);
+    // the ear's stream lane retains its frames (capture only measures): start, read 30 ms frames until full, stop
+    def so-frames(want, acc, tries) = len(acc) >= want || tries >= 400 ? acc : {
+        let f = sense_mic_stream_read(960, 200);
+        nothing?(f) ? so-frames(want, acc, (Number) tries + (Number) 1) : so-frames(want, ((String) acc + f), (Number) tries + (Number) 1);
+    };
+    def so-capture(ms) = {
+        let s = sense_mic_stream_start();
+        let pcm = so-frames(ms * 32, "", 0);
+        let e = sense_mic_stream_stop();
+        pcm;
+    };
+    let seconds = str_to_int({
+        let l = so-trim(read_line());
+        (Comparable) len(l) == 0 ? "5" : l;
+    });
+    let hint = so-trim(read_line());
+    // a WAV handed in (line 3) skips the ear: any ear, a phone, a file, can feed the lane
+    let given = so-trim(read_line());
+    let epoch = now_unix_ms();
+    let t0 = now_unix_ms();
+    let pcm = len(given) > 0 ? "" : so-text(so-capture(seconds * 1000));
+    let captured = now_unix_ms() - t0;
+    let dir = ".form-lora-voice-native/stt";
+    let parent = fs-mkdir(".form-lora-voice-native");
+    let mk = fs-mkdir(dir);
+    let stem = vs-cat([dir, "/", epoch.str(), "-", host_pid().str()]);
+    let wav = len(given) > 0 ? given : vs-cat([dir, "/", epoch.str(), ".wav"]);
+    let bytes = len(given) > 0 ? file_size(wav) : so-write-wav(wav, pcm);
+    let t1 = now_unix_ms();
+    let events = (stem + ".events.jsonl");
+    let out = nwt-transcribe(nws-base(), wav, hint, (stem + ".stream"), (stem + ".cancel"), events);
+    let oracle-ms = now_unix_ms() - t1;
+    let status = node_value(json-object-get(out, "status"));
+    let complete = (String) status == "completed";
+    let lang = node_value(json-object-get(out, "language"));
+    let text = node_value(json-object-get(out, "text"));
+    let db = node_value(json-object-get(out, "dbfs"));
+    let segments = len(json-array-elements(json-object-get(out, "segments")));
+    let t2 = now_unix_ms();
+    let other = complete && ((String) lang == "fa" || (String) lang == "en") ? so-translate(lang, text) : "";
+    let translate-ms = now_unix_ms() - t2;
+    let sidecar = nag-write((stem + ".txt"), vs-cat(["status=", status, "\nlanguage=", lang, "\ntext=", text, "\ntranslation=", other, "\ndbfs=", float-precise-str(db), "\nevents=", events, "\n"]));
+    let receipt = nag-write((stem + ".json"), json-emit-precise(out));
+    let row = (Comparable) len(text) == 0 || (Comparable) len(other) == 0 ? 0 : sbt-append(".form-lora-voice-native/stt.jsonl", lv-row(vs-cat(["Translate this ", (String) lang == "fa" ? "Persian" : "English", " speech to ", (String) lang == "fa" ? "English" : "Persian", ": ", text]), other));
+    so-say("audio", vs-cat(["source=", len(given) > 0 ? "handed-wav" : "microphone", " bytes=", file_size(wav).str(), " capture-ms=", captured.str(), " dbfs=", float-precise-str(db)]));
+    so-say("native", vs-cat(["status=", status, " language=", lang, " latency-ms=", oracle-ms.str(), " words=", so-words(text, 0, 0, 0).str(), " segments=", segments.str()]));
+    so-say("text", text);
+    so-say("translation", (Comparable) len(other) == 0 ? "nothing (no standing resident or empty text)" : vs-cat([other, " ms=", translate-ms.str()]));
+    so-say("material", vs-cat([wav, " + sidecar", (Comparable) row == 0 ? "" : " + training row"]));
+    so-say("receipt", (stem + ".json"));
+    so-say("events", events);
+    let published = fgtm-publish-snapshot(hearth-telemetry-root(), "voice.stt", epoch, [vs-sample("stt.latency", vs-cat(["native-", (Comparable) len(lang) == 0 ? "none" : lang]), oracle-ms, status, epoch), vs-sample("stt.level", "dbfs-below-zero", 0 - db, db < 0 - 50 ? "idle" : "active", epoch), vs-sample("stt.words", (Comparable) len(other) == 0 ? "untranslated" : "translated", so-words(text, 0, 0, 0), status, epoch)]);
+    so-say("glass", published[1]);
+    complete ? 0 : form_error(("native STT incomplete; inspect " + (stem + ".json")));
+}

@@ -536,9 +536,9 @@ plainly once, and give the conversation your attention.
    does not end the movement. It returns to the choice already open, and the next option
    is taken in the same breath. Three things make that option a real one. It is Form-native:
    a door, a cell, or a reading this body already runs, not another stack. It keeps the
-   context: the readings, the notes, the files, and the aim stay, the way `choose` keeps
+   context: the readings, the notes, the files, and the aim stay, the way `choice` keeps
    one snapshot while fail walks to another path
-   (`form/form-stdlib/bml/bml-lang.bml`; choose over the same snapshot in
+   (`form/form-stdlib/bml/bml-lang.bml`; choice over the same snapshot in
    `form/form-stdlib/grammars/bml.fk`). It stays inline with the first choice: same aim,
    another way, not a new errand. Walk that path, read what it shows, and if it too is a
    gap, backtrack again. The movement ends when the aim is met, or when no Form-native
