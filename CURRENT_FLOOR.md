@@ -92,6 +92,13 @@ language-packs-fourth-band 31 · bml-bmf-control-curriculum-band 1048575
 bml-bmf-stream-curriculum-band 16777215 · form-cli-lens-mint-band 1023
 ```
 
+Native source lifting is available through `form-source-lift(source, owner)` in
+`form/form-stdlib/bml/form-source-lift.bml`. It checks BML candidates against the
+original lowered tree before publication; its contract witness is
+`form/form-stdlib/tests/form-source-lift-band.bml` (8 accepted cases, 3 declined
+construction/binding changes). [Native coding](docs/form-native-coding.md#native-surface-lifting)
+describes the callable surface and its scope.
+
 ## The mind and its voice
 
 The voice speaks on this Mac's own metal: Qwen3.8-27B Q8_0 walked as Form recipe-data in the fkwu

@@ -6,6 +6,12 @@ The north star is compact, behavior-preserving native refactoring with retained 
 
 An evaluated session LoRA may offer a proposal before Qwen unless the request names a model, selects evaluation or requests review. The original checks decide whether it suffices. The optional learner uses native workers. Explicit `model` and `weight_training: 0` keep ongoing quality assessment on the selected local model with checkpoints and no answer gradients. [Session learning](native-session-learning.md), [healing](form-cli-healing.md), [provider repair](form-response-resource.md) and [provider synthesis](form-response-synthesis.md) describe their separate interfaces; provider paths are not implicit `code` behavior.
 
+## Native surface lifting
+
+`form/form-stdlib/bml/form-source-lift.bml` provides `form-source-lift(source, owner)` for Form source. It returns `[equivalent, candidate, definitionCount, lowered]`. The cursor preserves grouping and comparison contracts while emitting BML definitions, blocks, lazy conditionals and infix operators. Its proof compares the lowered trees, decoding string escapes and the runtime's boolean spellings. Compiler-added construction or local binding, and bindings shadowing boolean literals, produce `equivalent = 0`; that candidate is not ready for publication. Malformed source follows the compiler's diagnostic path.
+
+This deterministic step uses no model tokens and writes no files. Keep the original source, check it is still current before publishing, and observe affected callers. Keep the compiler's bootstrap closure in its bootable source form. Structural lifting does not establish that every algorithm or abstraction is optimal.
+
 ## Call without knowing Form syntax
 
 Use `code <JSON>` or `code @request.json` in the source-backed form-cli. The standalone door is `form-run ./fkwu observe/form-cli-code-run.fk`, with the JSON or `@request.json` on stdin. Use the file form for a large packet: the host line reader admits at most 8,191 bytes per line. Documents are resident values, not filesystem permissions. Results return candidate values; the caller checks stale source and publishes them.

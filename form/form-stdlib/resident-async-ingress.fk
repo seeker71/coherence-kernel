@@ -1,533 +1,315 @@
-; resident-async-ingress.fk — cooperative many-channel ingress for one living
-; resident Form process.
-;
-; This organ does not claim kernel threads or nonblocking sockets.  The current
-; fkwu socket_accept/socket_recv and read_line doors wait.  Instead the resident
-; flow calls rai-poll-file once between bounded token/JIT/recipe quanta.  A poll
-; is one file_size metadata read; only newly appended bytes cross through
-; read_file_slice.  Thus an idle channel costs O(1), movement costs O(delta), no
-; digest is paid for bookkeeping, and model/KV residence never restarts.
-;
-; Channels are ordinary dynamic Form data addressed by caller-supplied NodeID
-; values.  There is no fixed function/operation table.  capacity and gas are
-; explicit live resource choices, not compiler-seat limits.  Inspection is a
-; pure projection: looking at state/gas/water consumes no gas and changes no
-; channel.  gas is remaining admitted ingress work; water is queued movement.
-;
-; One append-only file can carry one logical channel.  The current physical
-; contract is one writer per channel: that writer appends framed BMF/BML bytes;
-; the recipient gets exactly the new byte suffix. Parsing those scannerless
-; frames remains the receiving recipe's work. File truncation is a visible
-; rotation signal, never silently read as the old stream. Socket and stdin
-; carriers can enqueue through the same rai-offer door when their caller
-; already has bytes; this organ deliberately never calls their blocking reads.
-;
-; Correlated framebuffer control uses the same envelope shape as the canonical
-; bidirectional channel without importing its blueprint-only recording helper.
-; A stale/mismatched control resolves to the outbound alternative action.  0 continues; 3/8 cut the named
-; channel; 7 defers without consuming its queue; all other admitted actions are
-; preserved as an observed no-op for the higher recipe to interpret.
-;
-; Signals stay distinct:
-;   nothing       no channel / no queued movement
-;   accepted=0    observed backpressure or a closed channel
-;   accepted=1    bytes entered water
-;   value         one envelope yielded
-;   timeout       expired envelope released without becoming value
-;   cut/release   explicit channel transitions
-;
-; preludes: form-stdlib/core.fk form-stdlib/substrate-phase.fk form-stdlib/form-eval-full.fk
-;
-
-(do
-    ; Envelope: channel, sequence, exchange, kind, payload, alternative,
-    ; deadline-ms.  A negative deadline means no wall-clock deadline.
-    (defn rai-envelope (channel sequence exchange kind payload alternative deadline)
-        (list channel sequence exchange kind payload alternative deadline))
-    (defn rai-env-channel (e) (nth e 0))
-    (defn rai-env-sequence (e) (nth e 1))
-    (defn rai-env-exchange (e) (nth e 2))
-    (defn rai-env-kind (e) (nth e 3))
-    (defn rai-env-payload (e) (nth e 4))
-    (defn rai-env-alternative (e) (nth e 5))
-    (defn rai-env-deadline (e) (nth e 6))
-
-    ; Channel: identity, state, capacity, gas, byte-cursor, queue, accepted,
-    ; backpressured, cuts, timeouts, releases, last-exchange.
-    (defn rai-channel (identity capacity gas byte-cursor)
-        (list identity "open" capacity gas byte-cursor (list) 0 0 0 0 0 (nothing)))
-    (defn rai-channel-id (c) (nth c 0))
-    (defn rai-channel-state (c) (nth c 1))
-    (defn rai-channel-capacity (c) (nth c 2))
-    (defn rai-channel-gas (c) (nth c 3))
-    (defn rai-channel-cursor (c) (nth c 4))
-    (defn rai-channel-water (c) (nth c 5))
-    (defn rai-channel-accepted (c) (nth c 6))
-    (defn rai-channel-backpressure (c) (nth c 7))
-    (defn rai-channel-cuts (c) (nth c 8))
-    (defn rai-channel-timeouts (c) (nth c 9))
-    (defn rai-channel-releases (c) (nth c 10))
-    (defn rai-channel-last-exchange (c) (nth c 11))
-    (defn rai-channel-with (c state gas cursor water accepted backpressure cuts timeouts releases last-exchange)
-        (list (rai-channel-id c) state (rai-channel-capacity c) gas cursor water
-              accepted backpressure cuts timeouts releases last-exchange))
-
-    ; A small phase projection over live movement.  Empty/open is gas, flowing
-    ; is water, full/backpressured is ice.  Closure stays explicit in state and
-    ; projects gas because it carries no queued movement.
-    (defn rai-channel-phase (c)
-        (if (not (str_eq (rai-channel-state c) "open")) (st-gas)
-            (if (eq (len (rai-channel-water c)) 0) (st-gas)
-                (if (ge (len (rai-channel-water c)) (rai-channel-capacity c))
-                    (st-ice) (st-water)))))
-
-    ; Organ: dynamic channels, next round-robin seat, logical tick, bounded
-    ; event rows, observation capacity, next sequence.
-    (defn rai-organ (channels event-capacity)
-        (list channels 0 0 (list) event-capacity 1))
-    (defn rai-channels (o) (nth o 0))
-    (defn rai-next (o) (nth o 1))
-    (defn rai-tick (o) (nth o 2))
-    (defn rai-events (o) (nth o 3))
-    (defn rai-event-capacity (o) (nth o 4))
-    (defn rai-next-sequence (o) (nth o 5))
-    (defn rai-organ-with (o channels next tick events sequence)
-        (list channels next tick events (rai-event-capacity o) sequence))
-
-    ; NodeID identities cross this membrane in their canonical text form.
-    (defn rai-id-eq? (a b) (if (str_eq a b) 1 0))
-    (defn rai-find-channel (channels identity)
-        (if (eq (len channels) 0) (nothing)
-            (if (eq (rai-id-eq? (rai-channel-id (head channels)) identity) 1)
-                (head channels) (rai-find-channel (tail channels) identity))))
-    (defn rai-replace-channel (channels identity replacement)
-        (if (eq (len channels) 0) (list)
-            (if (eq (rai-id-eq? (rai-channel-id (head channels)) identity) 1)
-                (cons replacement (tail channels))
-                (cons (head channels)
-                    (rai-replace-channel (tail channels) identity replacement)))))
-
-    (defn rai-drop-first (xs)
-        (if (eq (len xs) 0) (list) (tail xs)))
-    (defn rai-bounded-events (events capacity)
-        (if (le capacity 0) (list)
-            (if (le (len events) capacity) events
-                (rai-bounded-events (rai-drop-first events) capacity))))
-    (defn rai-event (o channel exchange kind signal)
-        (do (let c (rai-find-channel (rai-channels o) channel))
-            (if (nothing? c)
-                (list (rai-tick o) channel exchange kind signal "absent" 0 0 (st-gas))
-                (list (rai-tick o) channel exchange kind signal
-                    (rai-channel-state c) (rai-channel-gas c)
-                    (len (rai-channel-water c)) (rai-channel-phase c)))))
-    (defn rai-observe-event (o event)
-        (rai-organ-with o (rai-channels o) (rai-next o) (rai-tick o)
-            (rai-bounded-events
-                (append (rai-events o) (list event)) (rai-event-capacity o))
-            (rai-next-sequence o)))
-
-    ; Pure, free inspection.  Calling it does not advance tick, gas, cursor,
-    ; queue, counters, or the bounded event window.
-    (defn rai-inspect-channel (o identity)
-        (do (let c (rai-find-channel (rai-channels o) identity))
-            (if (nothing? c) (nothing)
-                (list "resident-async-channel"
-                    (rai-channel-id c)
-                    (rai-channel-state c)
-                    "phase" (rai-channel-phase c)
-                    "gas" (rai-channel-gas c)
-                    "water" (len (rai-channel-water c))
-                    "capacity" (rai-channel-capacity c)
-                    "byte-cursor" (rai-channel-cursor c)
-                    "accepted" (rai-channel-accepted c)
-                    "backpressure" (rai-channel-backpressure c)
-                    "cuts" (rai-channel-cuts c)
-                    "timeouts" (rai-channel-timeouts c)
-                    "releases" (rai-channel-releases c)
-                    "last-exchange" (rai-channel-last-exchange c)))))
-    (defn rai-inspection-cost () 0)
-
-    ; Offer returns [organ, accepted, signal].  Missing is nothing, a closed or
-    ; full channel is observed 0, and admitted water is observed 1.
-    (defn rai-offer (o envelope)
-        (do (let identity (rai-env-channel envelope))
-            (let c (rai-find-channel (rai-channels o) identity))
-            (if (nothing? c) (list o (nothing) "nothing")
-                (if (or (not (str_eq (rai-channel-state c) "open"))
-                        (or (le (rai-channel-gas c) 0)
-                            (ge (len (rai-channel-water c))
-                                (rai-channel-capacity c))))
-                    (do (let c2 (rai-channel-with c (rai-channel-state c)
-                            (rai-channel-gas c) (rai-channel-cursor c)
-                            (rai-channel-water c) (rai-channel-accepted c)
-                            (add (rai-channel-backpressure c) 1)
-                            (rai-channel-cuts c) (rai-channel-timeouts c)
-                            (rai-channel-releases c)
-                            (rai-env-exchange envelope)))
-                        (let o2 (rai-organ-with o
-                            (rai-replace-channel (rai-channels o) identity c2)
-                            (rai-next o) (add (rai-tick o) 1) (rai-events o)
-                            (rai-next-sequence o)))
-                        (let o3 (rai-observe-event o2
-                            (rai-event o2 identity (rai-env-exchange envelope)
-                                (rai-env-kind envelope) "backpressure")))
-                        (list o3 0 "backpressure"))
-                    (do (let c2 (rai-channel-with c "open"
-                            (sub (rai-channel-gas c) 1) (rai-channel-cursor c)
-                            (append (rai-channel-water c) (list envelope))
-                            (add (rai-channel-accepted c) 1)
-                            (rai-channel-backpressure c) (rai-channel-cuts c)
-                            (rai-channel-timeouts c) (rai-channel-releases c)
-                            (rai-env-exchange envelope)))
-                        (let o2 (rai-organ-with o
-                            (rai-replace-channel (rai-channels o) identity c2)
-                            (rai-next o) (add (rai-tick o) 1) (rai-events o)
-                            (add (rai-next-sequence o) 1)))
-                        (let o3 (rai-observe-event o2
-                            (rai-event o2 identity (rai-env-exchange envelope)
-                                (rai-env-kind envelope) "accepted")))
-                        (list o3 1 "accepted"))))))
-
-    ; Immediate channel movements.  Cut drops queued water but can be refilled;
-    ; release closes the channel and drops queued water.
-    (defn rai-cut-channel (o identity exchange)
-        (do (let c (rai-find-channel (rai-channels o) identity))
-            (if (nothing? c) o
-                (do (let c2 (rai-channel-with c "open" (rai-channel-gas c)
-                        (rai-channel-cursor c) (list) (rai-channel-accepted c)
-                        (rai-channel-backpressure c) (add (rai-channel-cuts c) 1)
-                        (rai-channel-timeouts c) (rai-channel-releases c) exchange))
-                    (let o2 (rai-organ-with o
-                        (rai-replace-channel (rai-channels o) identity c2)
-                        (rai-next o) (add (rai-tick o) 1) (rai-events o)
-                        (rai-next-sequence o)))
-                    (rai-observe-event o2 (rai-event o2 identity exchange "cut" "cut"))))))
-    (defn rai-release-channel (o identity exchange)
-        (do (let c (rai-find-channel (rai-channels o) identity))
-            (if (nothing? c) o
-                (do (let c2 (rai-channel-with c "released" (rai-channel-gas c)
-                        (rai-channel-cursor c) (list) (rai-channel-accepted c)
-                        (rai-channel-backpressure c) (rai-channel-cuts c)
-                        (rai-channel-timeouts c) (add (rai-channel-releases c) 1) exchange))
-                    (let o2 (rai-organ-with o
-                        (rai-replace-channel (rai-channels o) identity c2)
-                        (rai-next o) (add (rai-tick o) 1) (rai-events o)
-                        (rai-next-sequence o)))
-                    (rai-observe-event o2
-                        (rai-event o2 identity exchange "release" "release"))))))
-    (defn rai-refuel-channel (o identity gas)
-        (do (let c (rai-find-channel (rai-channels o) identity))
-            (if (nothing? c) o
-                (rai-organ-with o
-                    (rai-replace-channel (rai-channels o) identity
-                        (rai-channel-with c (rai-channel-state c) gas
-                            (rai-channel-cursor c) (rai-channel-water c)
-                            (rai-channel-accepted c) (rai-channel-backpressure c)
-                            (rai-channel-cuts c) (rai-channel-timeouts c)
-                            (rai-channel-releases c) (rai-channel-last-exchange c)))
-                    (rai-next o) (rai-tick o) (rai-events o)
-                    (rai-next-sequence o)))))
-
-    ; One round-robin cooperative yield.  At most one envelope moves, so the
-    ; resident flow chooses the observation cadence between compute quanta.
-    ; Returns [organ, envelope-or-nothing, signal].
-    (defn rai-step-channel (c now)
-        (if (eq (len (rai-channel-water c)) 0) (list c (nothing) "nothing")
-            (do (let e (head (rai-channel-water c)))
-                (let rest (tail (rai-channel-water c)))
-                (if (and (ge (rai-env-deadline e) 0)
-                         (ge now (rai-env-deadline e)))
-                    (list (rai-channel-with c "open" (rai-channel-gas c)
-                            (rai-channel-cursor c) rest (rai-channel-accepted c)
-                            (rai-channel-backpressure c) (rai-channel-cuts c)
-                            (add (rai-channel-timeouts c) 1)
-                            (rai-channel-releases c) (rai-env-exchange e))
-                        e "timeout")
-                    (if (str_eq (rai-env-kind e) "cut")
-                        (list (rai-channel-with c "open" (rai-channel-gas c)
-                                (rai-channel-cursor c) (list) (rai-channel-accepted c)
-                                (rai-channel-backpressure c)
-                                (add (rai-channel-cuts c) 1)
-                                (rai-channel-timeouts c) (rai-channel-releases c)
-                                (rai-env-exchange e)) e "cut")
-                        (if (str_eq (rai-env-kind e) "release")
-                            (list (rai-channel-with c "released" (rai-channel-gas c)
-                                    (rai-channel-cursor c) (list) (rai-channel-accepted c)
-                                    (rai-channel-backpressure c) (rai-channel-cuts c)
-                                    (rai-channel-timeouts c)
-                                    (add (rai-channel-releases c) 1)
-                                    (rai-env-exchange e)) e "release")
-                            (list (rai-channel-with c "open" (rai-channel-gas c)
-                                    (rai-channel-cursor c) rest (rai-channel-accepted c)
-                                    (rai-channel-backpressure c) (rai-channel-cuts c)
-                                    (rai-channel-timeouts c) (rai-channel-releases c)
-                                    (rai-env-exchange e)) e "value")))))))
-    (defn rai-yield-go (o now attempts index)
-        (if (or (le attempts 0) (eq (len (rai-channels o)) 0))
-            (list o (nothing) "nothing")
-            (do (let count (len (rai-channels o)))
-                (let seat (mod index count))
-                (let c (nth (rai-channels o) seat))
-                (let moved (rai-step-channel c now))
-                (let c2 (nth moved 0))
-                (let e (nth moved 1))
-                (let signal (nth moved 2))
-                (if (nothing? e)
-                    (rai-yield-go o now (sub attempts 1) (add seat 1))
-                    (do (let o2 (rai-organ-with o
-                            (rai-replace-channel (rai-channels o) (rai-channel-id c) c2)
-                            (mod (add seat 1) count) (add (rai-tick o) 1)
-                            (rai-events o) (rai-next-sequence o)))
-                        (let o3 (rai-observe-event o2
-                            (rai-event o2 (rai-channel-id c)
-                                (rai-env-exchange e) (rai-env-kind e) signal)))
-                        (list o3 e signal))))))
-    (defn rai-yield (o now)
-        (rai-yield-go o now (len (rai-channels o)) (rai-next o)))
-
-    ; O(1) idle stat + O(delta) append-only byte crossing.  Missing file is
-    ; nothing.  Shrink is a visible rotation and resets the byte cursor to 0;
-    ; it does not fabricate old bytes as a new request.
-    ; Returns [organ, accepted-or-nothing, signal, delta-bytes].
-    (defn rai-channel-with-cursor (o identity cursor)
-        (do (let c (rai-find-channel (rai-channels o) identity))
-            (if (nothing? c) o
-                (rai-organ-with o
-                    (rai-replace-channel (rai-channels o) identity
-                        (rai-channel-with c (rai-channel-state c)
-                            (rai-channel-gas c) cursor (rai-channel-water c)
-                            (rai-channel-accepted c) (rai-channel-backpressure c)
-                            (rai-channel-cuts c) (rai-channel-timeouts c)
-                            (rai-channel-releases c) (rai-channel-last-exchange c)))
-                    (rai-next o) (rai-tick o) (rai-events o)
-                    (rai-next-sequence o)))))
-    ; Admission owns the file cursor commit. The observed file size is only an
-    ; upper bound: a concurrent append or short host read may return fewer
-    ; bytes. Positive partial reads enter water as ordinary deltas and advance
-    ; only by their actual byte count. Backpressure, closure, exhausted gas,
-    ; empty short reads and malformed over-reads leave the cursor unchanged.
-    ; Returns [organ, accepted-or-nothing, signal, actual-read-bytes].
-    (defn rai-poll-admit
-        (o identity observed-size exchange kind bytes alternative deadline)
-        (do
-            (let c (rai-find-channel (rai-channels o) identity))
-            (if (nothing? c) (list o (nothing) "nothing" 0)
-                (do
-                    (let cursor (rai-channel-cursor c))
-                    (let available (sub observed-size cursor))
-                    (let received (str_len bytes))
-                    (if (le available 0)
-                        (list o (nothing) "nothing" 0)
-                    (if (gt received available)
-                        (do
-                            (let o2 (rai-observe-event o
-                                (rai-event o identity exchange kind
-                                    "read-beyond-observed-size")))
-                            (list o2 0 "failure" 0))
-                    (if (eq received 0)
-                        (do
-                            (let o2 (rai-observe-event o
-                                (rai-event o identity exchange kind
-                                    "short-read")))
-                            (list o2 0 "short-read" 0))
-                        (do
-                            (let offered (rai-offer o
-                                (rai-envelope identity (rai-next-sequence o)
-                                    exchange kind bytes alternative deadline)))
-                            (if (not (eq (nth offered 1) 1))
-                                (list (nth offered 0) (nth offered 1)
-                                    (nth offered 2) received)
-                                (do
-                                    (let committed (rai-channel-with-cursor
-                                        (nth offered 0) identity
-                                        (add cursor received)))
-                                    (let observed (if (lt received available)
-                                        (rai-observe-event committed
-                                            (rai-event committed identity exchange
-                                                kind "short-read"))
-                                        committed))
-                                    (list observed 1 (nth offered 2)
-                                        received)))))))))))
-    (defn rai-poll-file (o identity path exchange kind alternative deadline)
-        (do (let c (rai-find-channel (rai-channels o) identity))
-            (if (nothing? c) (list o (nothing) "nothing" 0)
-                (do (let size (file_size path))
-                    (if (lt size 0) (list o (nothing) "nothing" 0)
-                        (if (lt size (rai-channel-cursor c))
-                            (do (let reset (rai-channel-with-cursor o identity 0))
-                                (let reset2 (rai-observe-event reset
-                                    (rai-event reset identity exchange kind "rotated")))
-                                (list reset2 0 "rotated" 0))
-                            (if (eq size (rai-channel-cursor c))
-                                (list o (nothing) "nothing" 0)
-                                (do (let delta (sub size (rai-channel-cursor c)))
-                                    (let bytes (read_file_slice path
-                                        (rai-channel-cursor c) delta))
-                                    (rai-poll-admit o identity size exchange kind
-                                        bytes alternative deadline)))))))))
-
-    ; Correlated framebuffer observation/control.  Shape is
-    ; [direction,exchange,kind,payload,alternative], matching the canonical
-    ; channel.  The payload carries measurements/actions, never task bytes.
-    (defn rai-control-message (direction exchange kind payload alternative)
-        (list direction exchange kind payload alternative))
-    (defn rai-control-direction (m) (nth m 0))
-    (defn rai-control-exchange (m) (nth m 1))
-    (defn rai-control-kind (m) (nth m 2))
-    (defn rai-control-payload (m) (nth m 3))
-    (defn rai-control-alternative (m) (nth m 4))
-    (defn rai-control (outbound action)
-        (if (or (nothing? outbound)
-                (not (eq (rai-control-direction outbound) 0)))
-            (nothing)
-            (rai-control-message 1 (rai-control-exchange outbound) 1 action
-                (rai-control-alternative outbound))))
-    (defn rai-control-action (outbound inbound)
-        (if (or (nothing? inbound)
-                (or (not (eq (rai-control-direction inbound) 1))
-                    (or (not (eq (rai-control-kind inbound) 1))
-                        (not (eq (rai-control-exchange outbound)
-                                 (rai-control-exchange inbound))))))
-            (rai-control-alternative outbound)
-            (rai-control-payload inbound)))
-    (defn rai-control-outbound (o identity exchange alternative-action)
-        (do (let view (rai-inspect-channel o identity))
-            (if (nothing? view) (nothing)
-                (rai-control-message 0 exchange 0
-                    (list (nth view 8) (nth view 6)) alternative-action))))
-    (defn rai-control-apply (o identity outbound inbound)
-        (if (nothing? outbound) o
-            (do (let action (rai-control-action outbound inbound))
-                (if (or (eq action 3) (eq action 8))
-                    (rai-cut-channel o identity (rai-control-exchange outbound))
-                    o))))
-
-    ; Optional attributed carrier event.  The bounded structural event window
-    ; is primary; this projects one opaque sequence into the kernel framebuffer.
-    (defn rai-record-framebuffer (o identity step)
-        (do (let c (rai-find-channel (rai-channels o) identity))
-            (if (nothing? c) (nothing)
-                (fb_record (intern_trivial_int (rai-tick o))
-                    "resident-async-ingress.fk" step))))
-
-    ; ── state-threaded scannerless recipe life ─────────────────────────────
-    ; A definition is not imported into the resident source/prelude.  It
-    ; arrives as bytes after the session exists and is parsed by fef-expr into
-    ; a dynamic environment binding.  We add the defining source, stable
-    ; NodeID and observed version to that binding; invocation then evaluates
-    ; the stored body source rather than looking for an fk_fn seat.
-    ;
-    ; Extended binding: name, kind, params, retained-body-source,
-    ; defining-source, nodeid, version.  Its first four fields intentionally
-    ; remain fef-compatible.  Recursive and cross-source calls therefore use
-    ; the existing full Form tree walker and its state-threaded environment.
-    (defn rai-binding-source (b) (nth b 4))
-    (defn rai-binding-nodeid (b) (nth b 5))
-    (defn rai-binding-version (b) (nth b 6))
-    (defn rai-extend-binding (b source nodeid version)
-        (list (fef-bname b) (fef-bkind b) (fef-ba b) (fef-bb b)
-              source nodeid version))
-    (defn rai-lookup-binding (name env)
-        (if (eq (len env) 0) (nothing)
-            (if (str_eq (fef-bname (head env)) name) (head env)
-                (rai-lookup-binding name (tail env)))))
-
-    ; Session: environment, current version, bounded correlation events.
-    (defn rai-session () (list (fef-empty-env) 0 (list)))
-    (defn rai-session-env (s) (nth s 0))
-    (defn rai-session-version (s) (nth s 1))
-    (defn rai-session-events (s) (nth s 2))
-    (defn rai-session-with (env version events) (list env version events))
-    (defn rai-session-event (exchange nodeid version movement symbol value signal)
-        (list exchange nodeid version movement symbol value signal))
-    (defn rai-session-observe (s event)
-        (rai-session-with (rai-session-env s) (rai-session-version s)
-            (append (rai-session-events s) (list event))))
-
-    (defn rai-source-defn? (source)
-        (do (let p (fef-skip source 0))
-            (if (ge p (str_len source)) 0
-                (if (not (eq (str_byte_at source p) 40)) 0
-                    (do (let n (fef-skip source (add p 1)))
-                        (if (str_eq (substring source n (fef-sym-end source n))
-                                "defn") 1 0))))))
-    (defn rai-source-call-name (source)
-        (do (let p (fef-skip source 0))
-            (if (or (ge p (str_len source))
-                    (not (eq (str_byte_at source p) 40))) ""
-                (do (let n (fef-skip source (add p 1)))
-                    (substring source n (fef-sym-end source n))))))
-
-    ; Result: session, value-or-nothing, signal, nodeid, version, exchange,
-    ; symbol.  Definitions return observed 0 as their value; failure returns
-    ; first-class nothing rather than borrowing 0.
-    (defn rai-session-result (session value signal nodeid version exchange symbol)
-        (list session value signal nodeid version exchange symbol))
-    (defn rai-session-result-session (r) (nth r 0))
-    (defn rai-session-result-value (r) (nth r 1))
-    (defn rai-session-result-signal (r) (nth r 2))
-    (defn rai-session-result-nodeid (r) (nth r 3))
-    (defn rai-session-result-version (r) (nth r 4))
-    (defn rai-session-result-exchange (r) (nth r 5))
-    (defn rai-session-result-symbol (r) (nth r 6))
-
-    (defn rai-session-define (session nodeid source exchange)
-        (if (eq (rai-source-defn? source) 0)
-            (rai-session-result session (nothing) "malformed" nodeid
-                (rai-session-version session) exchange "")
-            (do (let parsed (fef-expr source 0 (rai-session-env session)))
-                (let raw (head (fef-e parsed)))
-                (let version (add (rai-session-version session) 1))
-                (let binding (rai-extend-binding raw source nodeid version))
-                (let next (rai-session-with
-                    (cons binding (tail (fef-e parsed))) version
-                    (rai-session-events session)))
-                (let event (rai-session-event exchange nodeid version
-                    "define" (fef-bname binding) 0 "defined"))
-                (rai-session-result (rai-session-observe next event) 0 "defined"
-                    nodeid version exchange (fef-bname binding)))))
-
-    (defn rai-session-eval-source (session source)
-        (fef-eval-state source (rai-session-env session)))
-    (defn rai-session-invoke (session nodeid source exchange)
-        (do (let symbol (rai-source-call-name source))
-            (let binding (rai-lookup-binding symbol (rai-session-env session)))
-            (if (nothing? binding)
-                (rai-session-result session (nothing) "nothing" nodeid
-                    (rai-session-version session) exchange symbol)
-                (if (not (str_eq (rai-binding-nodeid binding) nodeid))
-                    (rai-session-result session (nothing) "nodeid-mismatch" nodeid
-                        (rai-binding-version binding) exchange symbol)
-                    (do (let evaluated (rai-session-eval-source session source))
-                        (let value (fef-v evaluated))
-                        (let event (rai-session-event exchange nodeid
-                            (rai-binding-version binding) "invoke" symbol value "value"))
-                        (let carried (rai-session-with (fef-e evaluated)
-                            (rai-session-version session) (rai-session-events session)))
-                        (let next (rai-session-observe carried event))
-                        (rai-session-result next value "value" nodeid
-                            (rai-binding-version binding) exchange symbol))))))
-
-    ; A yielded ingress envelope selects definition or invocation.  The stable
-    ; recipe NodeID travels in alternative; the source bytes travel in payload.
-    (defn rai-session-step (session envelope)
-        (if (nothing? envelope)
-            (rai-session-result session (nothing) "nothing" ""
-                (rai-session-version session) 0 "")
-            (if (str_eq (rai-env-kind envelope) "recipe")
-                (rai-session-define session (rai-env-alternative envelope)
-                    (rai-env-payload envelope) (rai-env-exchange envelope))
-                (if (str_eq (rai-env-kind envelope) "invoke")
-                    (rai-session-invoke session (rai-env-alternative envelope)
-                        (rai-env-payload envelope) (rai-env-exchange envelope))
-                    (rai-session-result session (nothing) "nothing"
-                        (rai-env-alternative envelope)
-                        (rai-session-version session)
-                        (rai-env-exchange envelope) "")))))
-
-    (defn rai-string-bytes-go (s i out)
-        (if (ge i (str_len s)) (reverse out)
-            (rai-string-bytes-go s (add i 1)
-                (cons (str_byte_at s i) out))))
-    (defn rai-string-bytes (s) (rai-string-bytes-go s 0 (list)))
-    0)
+// resident-async-ingress.fk — cooperative many-channel ingress for one living
+// resident Form process.
+//
+// This organ does not claim kernel threads or nonblocking sockets.  The current
+// fkwu socket_accept/socket_recv and read_line doors wait.  Instead the resident
+// flow calls rai-poll-file once between bounded token/JIT/recipe quanta.  A poll
+// is one file_size metadata read; only newly appended bytes cross through
+// read_file_slice.  Thus an idle channel costs O(1), movement costs O(delta), no
+// digest is paid for bookkeeping, and model/KV residence never restarts.
+//
+// Channels are ordinary dynamic Form data addressed by caller-supplied NodeID
+// values.  There is no fixed function/operation table.  capacity and gas are
+// explicit live resource choices, not compiler-seat limits.  Inspection is a
+// pure projection: looking at state/gas/water consumes no gas and changes no
+// channel.  gas is remaining admitted ingress work; water is queued movement.
+//
+// One append-only file can carry one logical channel.  The current physical
+// contract is one writer per channel: that writer appends framed BMF/BML bytes;
+// the recipient gets exactly the new byte suffix. Parsing those scannerless
+// frames remains the receiving recipe's work. File truncation is a visible
+// rotation signal, never silently read as the old stream. Socket and stdin
+// carriers can enqueue through the same rai-offer door when their caller
+// already has bytes; this organ deliberately never calls their blocking reads.
+//
+// Correlated framebuffer control uses the same envelope shape as the canonical
+// bidirectional channel without importing its blueprint-only recording helper.
+// A stale/mismatched control resolves to the outbound alternative action.  0 continues; 3/8 cut the named
+// channel; 7 defers without consuming its queue; all other admitted actions are
+// preserved as an observed no-op for the higher recipe to interpret.
+//
+// Signals stay distinct:
+//   nothing       no channel / no queued movement
+//   accepted=0    observed backpressure or a closed channel
+//   accepted=1    bytes entered water
+//   value         one envelope yielded
+//   timeout       expired envelope released without becoming value
+//   cut/release   explicit channel transitions
+//
+// preludes: form-stdlib/core.fk form-stdlib/substrate-phase.fk form-stdlib/form-eval-full.fk
+//
+section [form.bml] {
+    // Envelope: channel, sequence, exchange, kind, payload, alternative,
+    // deadline-ms.  A negative deadline means no wall-clock deadline.
+    def rai-envelope(channel, sequence, exchange, kind, payload, alternative, deadline) = list(channel, sequence, exchange, kind, payload, alternative, deadline);
+    def rai-env-channel(e) = nth(e, 0);
+    def rai-env-sequence(e) = nth(e, 1);
+    def rai-env-exchange(e) = nth(e, 2);
+    def rai-env-kind(e) = nth(e, 3);
+    def rai-env-payload(e) = nth(e, 4);
+    def rai-env-alternative(e) = nth(e, 5);
+    def rai-env-deadline(e) = nth(e, 6);
+    // Channel: identity, state, capacity, gas, byte-cursor, queue, accepted,
+    // backpressured, cuts, timeouts, releases, last-exchange.
+    def rai-channel(identity, capacity, gas, byte-cursor) = list(identity, "open", capacity, gas, byte-cursor, list(), 0, 0, 0, 0, 0, nothing());
+    def rai-channel-id(c) = nth(c, 0);
+    def rai-channel-state(c) = nth(c, 1);
+    def rai-channel-capacity(c) = nth(c, 2);
+    def rai-channel-gas(c) = nth(c, 3);
+    def rai-channel-cursor(c) = nth(c, 4);
+    def rai-channel-water(c) = nth(c, 5);
+    def rai-channel-accepted(c) = nth(c, 6);
+    def rai-channel-backpressure(c) = nth(c, 7);
+    def rai-channel-cuts(c) = nth(c, 8);
+    def rai-channel-timeouts(c) = nth(c, 9);
+    def rai-channel-releases(c) = nth(c, 10);
+    def rai-channel-last-exchange(c) = nth(c, 11);
+    def rai-channel-with(c, state, gas, cursor, water, accepted, backpressure, cuts, timeouts, releases, last-exchange) = list(rai-channel-id(c), state, rai-channel-capacity(c), gas, cursor, water, accepted, backpressure, cuts, timeouts, releases, last-exchange);
+    // A small phase projection over live movement.  Empty/open is gas, flowing
+    // is water, full/backpressured is ice.  Closure stays explicit in state and
+    // projects gas because it carries no queued movement.
+    def rai-channel-phase(c) = !((String) rai-channel-state(c) == "open") ? st-gas() : (Comparable) len(rai-channel-water(c)) == 0 ? st-gas() : len(rai-channel-water(c)) >= rai-channel-capacity(c) ? st-ice() : st-water();
+    // Organ: dynamic channels, next round-robin seat, logical tick, bounded
+    // event rows, observation capacity, next sequence.
+    def rai-organ(channels, event-capacity) = list(channels, 0, 0, list(), event-capacity, 1);
+    def rai-channels(o) = nth(o, 0);
+    def rai-next(o) = nth(o, 1);
+    def rai-tick(o) = nth(o, 2);
+    def rai-events(o) = nth(o, 3);
+    def rai-event-capacity(o) = nth(o, 4);
+    def rai-next-sequence(o) = nth(o, 5);
+    def rai-organ-with(o, channels, next, tick, events, sequence) = list(channels, next, tick, events, rai-event-capacity(o), sequence);
+    // NodeID identities cross this membrane in their canonical text form.
+    def rai-id-eq?(a, b) = (String) a == b ? 1 : 0;
+    def rai-find-channel(channels, identity) = (Comparable) len(channels) == 0 ? nothing() : (Comparable) rai-id-eq?(rai-channel-id(head(channels)), identity) == 1 ? head(channels) : rai-find-channel(tail(channels), identity);
+    def rai-replace-channel(channels, identity, replacement) = (Comparable) len(channels) == 0 ? list() : (Comparable) rai-id-eq?(rai-channel-id(head(channels)), identity) == 1 ? cons(replacement, tail(channels)) : cons(head(channels), rai-replace-channel(tail(channels), identity, replacement));
+    def rai-drop-first(xs) = (Comparable) len(xs) == 0 ? list() : tail(xs);
+    def rai-bounded-events(events, capacity) = capacity <= 0 ? list() : len(events) <= capacity ? events : rai-bounded-events(rai-drop-first(events), capacity);
+    def rai-event(o, channel, exchange, kind, signal) = {
+        let c = rai-find-channel(rai-channels(o), channel);
+        nothing?(c) ? list(rai-tick(o), channel, exchange, kind, signal, "absent", 0, 0, st-gas()) : list(rai-tick(o), channel, exchange, kind, signal, rai-channel-state(c), rai-channel-gas(c), len(rai-channel-water(c)), rai-channel-phase(c));
+    };
+    def rai-observe-event(o, event) = rai-organ-with(o, rai-channels(o), rai-next(o), rai-tick(o), rai-bounded-events(append(rai-events(o), list(event)), rai-event-capacity(o)), rai-next-sequence(o));
+    // Pure, free inspection.  Calling it does not advance tick, gas, cursor,
+    // queue, counters, or the bounded event window.
+    def rai-inspect-channel(o, identity) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? nothing() : list("resident-async-channel", rai-channel-id(c), rai-channel-state(c), "phase", rai-channel-phase(c), "gas", rai-channel-gas(c), "water", len(rai-channel-water(c)), "capacity", rai-channel-capacity(c), "byte-cursor", rai-channel-cursor(c), "accepted", rai-channel-accepted(c), "backpressure", rai-channel-backpressure(c), "cuts", rai-channel-cuts(c), "timeouts", rai-channel-timeouts(c), "releases", rai-channel-releases(c), "last-exchange", rai-channel-last-exchange(c));
+    };
+    def rai-inspection-cost() = 0;
+    // Offer returns [organ, accepted, signal].  Missing is nothing, a closed or
+    // full channel is observed 0, and admitted water is observed 1.
+    def rai-offer(o, envelope) = {
+        let identity = rai-env-channel(envelope);
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? list(o, nothing(), "nothing") : !((String) rai-channel-state(c) == "open") || (rai-channel-gas(c) <= 0 || len(rai-channel-water(c)) >= rai-channel-capacity(c)) ? {
+            let c2 = rai-channel-with(c, rai-channel-state(c), rai-channel-gas(c), rai-channel-cursor(c), rai-channel-water(c), rai-channel-accepted(c), rai-channel-backpressure(c) + 1, rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c), rai-env-exchange(envelope));
+            let o2 = rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, c2), rai-next(o), rai-tick(o) + 1, rai-events(o), rai-next-sequence(o));
+            let o3 = rai-observe-event(o2, rai-event(o2, identity, rai-env-exchange(envelope), rai-env-kind(envelope), "backpressure"));
+            list(o3, 0, "backpressure");
+        } : {
+            let c2 = rai-channel-with(c, "open", rai-channel-gas(c) - 1, rai-channel-cursor(c), append(rai-channel-water(c), list(envelope)), rai-channel-accepted(c) + 1, rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c), rai-env-exchange(envelope));
+            let o2 = rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, c2), rai-next(o), rai-tick(o) + 1, rai-events(o), rai-next-sequence(o) + 1);
+            let o3 = rai-observe-event(o2, rai-event(o2, identity, rai-env-exchange(envelope), rai-env-kind(envelope), "accepted"));
+            list(o3, 1, "accepted");
+        };
+    };
+    // Immediate channel movements.  Cut drops queued water but can be refilled;
+    // release closes the channel and drops queued water.
+    def rai-cut-channel(o, identity, exchange) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? o : {
+            let c2 = rai-channel-with(c, "open", rai-channel-gas(c), rai-channel-cursor(c), list(), rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c) + 1, rai-channel-timeouts(c), rai-channel-releases(c), exchange);
+            let o2 = rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, c2), rai-next(o), rai-tick(o) + 1, rai-events(o), rai-next-sequence(o));
+            rai-observe-event(o2, rai-event(o2, identity, exchange, "cut", "cut"));
+        };
+    };
+    def rai-release-channel(o, identity, exchange) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? o : {
+            let c2 = rai-channel-with(c, "released", rai-channel-gas(c), rai-channel-cursor(c), list(), rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c) + 1, exchange);
+            let o2 = rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, c2), rai-next(o), rai-tick(o) + 1, rai-events(o), rai-next-sequence(o));
+            rai-observe-event(o2, rai-event(o2, identity, exchange, "release", "release"));
+        };
+    };
+    def rai-refuel-channel(o, identity, gas) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? o : rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, rai-channel-with(c, rai-channel-state(c), gas, rai-channel-cursor(c), rai-channel-water(c), rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c), rai-channel-last-exchange(c))), rai-next(o), rai-tick(o), rai-events(o), rai-next-sequence(o));
+    };
+    // One round-robin cooperative yield.  At most one envelope moves, so the
+    // resident flow chooses the observation cadence between compute quanta.
+    // Returns [organ, envelope-or-nothing, signal].
+    def rai-step-channel(c, now) = (Comparable) len(rai-channel-water(c)) == 0 ? list(c, nothing(), "nothing") : {
+        let e = head(rai-channel-water(c));
+        let rest = tail(rai-channel-water(c));
+        rai-env-deadline(e) >= 0 && now >= rai-env-deadline(e) ? list(rai-channel-with(c, "open", rai-channel-gas(c), rai-channel-cursor(c), rest, rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c) + 1, rai-channel-releases(c), rai-env-exchange(e)), e, "timeout") : (String) rai-env-kind(e) == "cut" ? list(rai-channel-with(c, "open", rai-channel-gas(c), rai-channel-cursor(c), list(), rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c) + 1, rai-channel-timeouts(c), rai-channel-releases(c), rai-env-exchange(e)), e, "cut") : (String) rai-env-kind(e) == "release" ? list(rai-channel-with(c, "released", rai-channel-gas(c), rai-channel-cursor(c), list(), rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c) + 1, rai-env-exchange(e)), e, "release") : list(rai-channel-with(c, "open", rai-channel-gas(c), rai-channel-cursor(c), rest, rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c), rai-env-exchange(e)), e, "value");
+    };
+    def rai-yield-go(o, now, attempts, index) = attempts <= 0 || (Comparable) len(rai-channels(o)) == 0 ? list(o, nothing(), "nothing") : {
+        let count = len(rai-channels(o));
+        let seat = index % count;
+        let c = nth(rai-channels(o), seat);
+        let moved = rai-step-channel(c, now);
+        let c2 = nth(moved, 0);
+        let e = nth(moved, 1);
+        let signal = nth(moved, 2);
+        nothing?(e) ? rai-yield-go(o, now, attempts - 1, seat + 1) : {
+            let o2 = rai-organ-with(o, rai-replace-channel(rai-channels(o), rai-channel-id(c), c2), (seat + 1) % count, rai-tick(o) + 1, rai-events(o), rai-next-sequence(o));
+            let o3 = rai-observe-event(o2, rai-event(o2, rai-channel-id(c), rai-env-exchange(e), rai-env-kind(e), signal));
+            list(o3, e, signal);
+        };
+    };
+    def rai-yield(o, now) = rai-yield-go(o, now, len(rai-channels(o)), rai-next(o));
+    // O(1) idle stat + O(delta) append-only byte crossing.  Missing file is
+    // nothing.  Shrink is a visible rotation and resets the byte cursor to 0;
+    // it does not fabricate old bytes as a new request.
+    // Returns [organ, accepted-or-nothing, signal, delta-bytes].
+    def rai-channel-with-cursor(o, identity, cursor) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? o : rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, rai-channel-with(c, rai-channel-state(c), rai-channel-gas(c), cursor, rai-channel-water(c), rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c), rai-channel-last-exchange(c))), rai-next(o), rai-tick(o), rai-events(o), rai-next-sequence(o));
+    };
+    // Admission owns the file cursor commit. The observed file size is only an
+    // upper bound: a concurrent append or short host read may return fewer
+    // bytes. Positive partial reads enter water as ordinary deltas and advance
+    // only by their actual byte count. Backpressure, closure, exhausted gas,
+    // empty short reads and malformed over-reads leave the cursor unchanged.
+    // Returns [organ, accepted-or-nothing, signal, actual-read-bytes].
+    def rai-poll-admit(o, identity, observed-size, exchange, kind, bytes, alternative, deadline) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? list(o, nothing(), "nothing", 0) : {
+            let cursor = rai-channel-cursor(c);
+            let available = observed-size - cursor;
+            let received = str_len(bytes);
+            available <= 0 ? list(o, nothing(), "nothing", 0) : received > available ? {
+                let o2 = rai-observe-event(o, rai-event(o, identity, exchange, kind, "read-beyond-observed-size"));
+                list(o2, 0, "failure", 0);
+            } : (Comparable) received == 0 ? {
+                let o2 = rai-observe-event(o, rai-event(o, identity, exchange, kind, "short-read"));
+                list(o2, 0, "short-read", 0);
+            } : {
+                let offered = rai-offer(o, rai-envelope(identity, rai-next-sequence(o), exchange, kind, bytes, alternative, deadline));
+                !((Comparable) nth(offered, 1) == 1) ? list(nth(offered, 0), nth(offered, 1), nth(offered, 2), received) : {
+                    let committed = rai-channel-with-cursor(nth(offered, 0), identity, cursor + received);
+                    let observed = received < available ? rai-observe-event(committed, rai-event(committed, identity, exchange, kind, "short-read")) : committed;
+                    list(observed, 1, nth(offered, 2), received);
+                };
+            };
+        };
+    };
+    def rai-poll-file(o, identity, path, exchange, kind, alternative, deadline) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? list(o, nothing(), "nothing", 0) : {
+            let size = file_size(path);
+            size < 0 ? list(o, nothing(), "nothing", 0) : size < rai-channel-cursor(c) ? {
+                let reset = rai-channel-with-cursor(o, identity, 0);
+                let reset2 = rai-observe-event(reset, rai-event(reset, identity, exchange, kind, "rotated"));
+                list(reset2, 0, "rotated", 0);
+            } : (Comparable) size == rai-channel-cursor(c) ? list(o, nothing(), "nothing", 0) : {
+                let delta = size - rai-channel-cursor(c);
+                let bytes = read_file_slice(path, rai-channel-cursor(c), delta);
+                rai-poll-admit(o, identity, size, exchange, kind, bytes, alternative, deadline);
+            };
+        };
+    };
+    // Correlated framebuffer observation/control.  Shape is
+    // [direction,exchange,kind,payload,alternative], matching the canonical
+    // channel.  The payload carries measurements/actions, never task bytes.
+    def rai-control-message(direction, exchange, kind, payload, alternative) = list(direction, exchange, kind, payload, alternative);
+    def rai-control-direction(m) = nth(m, 0);
+    def rai-control-exchange(m) = nth(m, 1);
+    def rai-control-kind(m) = nth(m, 2);
+    def rai-control-payload(m) = nth(m, 3);
+    def rai-control-alternative(m) = nth(m, 4);
+    def rai-control(outbound, action) = nothing?(outbound) || !((Comparable) rai-control-direction(outbound) == 0) ? nothing() : rai-control-message(1, rai-control-exchange(outbound), 1, action, rai-control-alternative(outbound));
+    def rai-control-action(outbound, inbound) = nothing?(inbound) || (!((Comparable) rai-control-direction(inbound) == 1) || (!((Comparable) rai-control-kind(inbound) == 1) || !((Comparable) rai-control-exchange(outbound) == rai-control-exchange(inbound)))) ? rai-control-alternative(outbound) : rai-control-payload(inbound);
+    def rai-control-outbound(o, identity, exchange, alternative-action) = {
+        let view = rai-inspect-channel(o, identity);
+        nothing?(view) ? nothing() : rai-control-message(0, exchange, 0, list(nth(view, 8), nth(view, 6)), alternative-action);
+    };
+    def rai-control-apply(o, identity, outbound, inbound) = nothing?(outbound) ? o : {
+        let action = rai-control-action(outbound, inbound);
+        (Comparable) action == 3 || (Comparable) action == 8 ? rai-cut-channel(o, identity, rai-control-exchange(outbound)) : o;
+    };
+    // Optional attributed carrier event.  The bounded structural event window
+    // is primary; this projects one opaque sequence into the kernel framebuffer.
+    def rai-record-framebuffer(o, identity, step) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? nothing() : fb_record(intern_trivial_int(rai-tick(o)), "resident-async-ingress.fk", step);
+    };
+    // ── state-threaded scannerless recipe life ─────────────────────────────
+    // A definition is not imported into the resident source/prelude.  It
+    // arrives as bytes after the session exists and is parsed by fef-expr into
+    // a dynamic environment binding.  We add the defining source, stable
+    // NodeID and observed version to that binding; invocation then evaluates
+    // the stored body source rather than looking for an fk_fn seat.
+    //
+    // Extended binding: name, kind, params, retained-body-source,
+    // defining-source, nodeid, version.  Its first four fields intentionally
+    // remain fef-compatible.  Recursive and cross-source calls therefore use
+    // the existing full Form tree walker and its state-threaded environment.
+    def rai-binding-source(b) = nth(b, 4);
+    def rai-binding-nodeid(b) = nth(b, 5);
+    def rai-binding-version(b) = nth(b, 6);
+    def rai-extend-binding(b, source, nodeid, version) = list(fef-bname(b), fef-bkind(b), fef-ba(b), fef-bb(b), source, nodeid, version);
+    def rai-lookup-binding(name, env) = (Comparable) len(env) == 0 ? nothing() : (String) fef-bname(head(env)) == name ? head(env) : rai-lookup-binding(name, tail(env));
+    // Session: environment, current version, bounded correlation events.
+    def rai-session() = list(fef-empty-env(), 0, list());
+    def rai-session-env(s) = nth(s, 0);
+    def rai-session-version(s) = nth(s, 1);
+    def rai-session-events(s) = nth(s, 2);
+    def rai-session-with(env, version, events) = list(env, version, events);
+    def rai-session-event(exchange, nodeid, version, movement, symbol, value, signal) = list(exchange, nodeid, version, movement, symbol, value, signal);
+    def rai-session-observe(s, event) = rai-session-with(rai-session-env(s), rai-session-version(s), append(rai-session-events(s), list(event)));
+    def rai-source-defn?(source) = {
+        let p = fef-skip(source, 0);
+        p >= str_len(source) ? 0 : !((Comparable) str_byte_at(source, p) == 40) ? 0 : {
+            let n = fef-skip(source, p + 1);
+            (String) substring(source, n, fef-sym-end(source, n)) == "defn" ? 1 : 0;
+        };
+    };
+    def rai-source-call-name(source) = {
+        let p = fef-skip(source, 0);
+        p >= str_len(source) || !((Comparable) str_byte_at(source, p) == 40) ? "" : {
+            let n = fef-skip(source, p + 1);
+            substring(source, n, fef-sym-end(source, n));
+        };
+    };
+    // Result: session, value-or-nothing, signal, nodeid, version, exchange,
+    // symbol.  Definitions return observed 0 as their value; failure returns
+    // first-class nothing rather than borrowing 0.
+    def rai-session-result(session, value, signal, nodeid, version, exchange, symbol) = list(session, value, signal, nodeid, version, exchange, symbol);
+    def rai-session-result-session(r) = nth(r, 0);
+    def rai-session-result-value(r) = nth(r, 1);
+    def rai-session-result-signal(r) = nth(r, 2);
+    def rai-session-result-nodeid(r) = nth(r, 3);
+    def rai-session-result-version(r) = nth(r, 4);
+    def rai-session-result-exchange(r) = nth(r, 5);
+    def rai-session-result-symbol(r) = nth(r, 6);
+    def rai-session-define(session, nodeid, source, exchange) = (Comparable) rai-source-defn?(source) == 0 ? rai-session-result(session, nothing(), "malformed", nodeid, rai-session-version(session), exchange, "") : {
+        let parsed = fef-expr(source, 0, rai-session-env(session));
+        let raw = head(fef-e(parsed));
+        let version = rai-session-version(session) + 1;
+        let binding = rai-extend-binding(raw, source, nodeid, version);
+        let next = rai-session-with(cons(binding, tail(fef-e(parsed))), version, rai-session-events(session));
+        let event = rai-session-event(exchange, nodeid, version, "define", fef-bname(binding), 0, "defined");
+        rai-session-result(rai-session-observe(next, event), 0, "defined", nodeid, version, exchange, fef-bname(binding));
+    };
+    def rai-session-eval-source(session, source) = fef-eval-state(source, rai-session-env(session));
+    def rai-session-invoke(session, nodeid, source, exchange) = {
+        let symbol = rai-source-call-name(source);
+        let binding = rai-lookup-binding(symbol, rai-session-env(session));
+        nothing?(binding) ? rai-session-result(session, nothing(), "nothing", nodeid, rai-session-version(session), exchange, symbol) : !((String) rai-binding-nodeid(binding) == nodeid) ? rai-session-result(session, nothing(), "nodeid-mismatch", nodeid, rai-binding-version(binding), exchange, symbol) : {
+            let evaluated = rai-session-eval-source(session, source);
+            let value = fef-v(evaluated);
+            let event = rai-session-event(exchange, nodeid, rai-binding-version(binding), "invoke", symbol, value, "value");
+            let carried = rai-session-with(fef-e(evaluated), rai-session-version(session), rai-session-events(session));
+            let next = rai-session-observe(carried, event);
+            rai-session-result(next, value, "value", nodeid, rai-binding-version(binding), exchange, symbol);
+        };
+    };
+    // A yielded ingress envelope selects definition or invocation.  The stable
+    // recipe NodeID travels in alternative; the source bytes travel in payload.
+    def rai-session-step(session, envelope) = nothing?(envelope) ? rai-session-result(session, nothing(), "nothing", "", rai-session-version(session), 0, "") : (String) rai-env-kind(envelope) == "recipe" ? rai-session-define(session, rai-env-alternative(envelope), rai-env-payload(envelope), rai-env-exchange(envelope)) : (String) rai-env-kind(envelope) == "invoke" ? rai-session-invoke(session, rai-env-alternative(envelope), rai-env-payload(envelope), rai-env-exchange(envelope)) : rai-session-result(session, nothing(), "nothing", rai-env-alternative(envelope), rai-session-version(session), rai-env-exchange(envelope), "");
+    def rai-string-bytes-go(s, i, out) = i >= str_len(s) ? reverse(out) : rai-string-bytes-go(s, i + 1, cons(str_byte_at(s, i), out));
+    def rai-string-bytes(s) = rai-string-bytes-go(s, 0, list());
+    0;
+}
