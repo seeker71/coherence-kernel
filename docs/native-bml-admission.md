@@ -5,6 +5,14 @@ Form owns executable `section [form.bml]` admission in
 declaration headers and balanced bodies from their original source positions.
 Line breaks do not define scope. Strings retain their escaped punctuation;
 comments do not contribute delimiters or executable statements.
+Whitespace, identifier runs and quoted spans use the existing native scanner
+operations. Lambda and conditional discovery first checks for their marker;
+the lexical reader resolves scope when a marker is present.
+Normalization collects spans and joins them as a balanced tree; it does not
+copy the whole accumulated prefix for each token. The bootstrap core owns this
+same joining implementation behind BML's `StringJoin` interface, so source-only
+admission and ordinary modules share it. Source emission uses it for argument
+and parameter lists too.
 
 Function and class bodies may share a line. The next declaration or expression
 starts after the matching closing brace, including a suffix on that same line.
@@ -163,6 +171,10 @@ candidates. The checkout carrier checks the packet, publishes it atomically and
 rejects incomplete or changed observations. The native `.fkb` image retains its
 own dependency identity checks. Changing an erased source annotation can change
 the emitted caller and therefore invalidates the lowering memo.
+Each source discovery publishes a `bml-discovery-ms` framebuffer cell carrying
+the source path and elapsed milliseconds. This measures local fingerprinting,
+lowering, dependency directives and exported contracts, excluding recursive
+dependency admission and function-home selection.
 
 Source admission still compiles a whole unit synchronously. On-demand
 specialization and complete portable native emission remain
