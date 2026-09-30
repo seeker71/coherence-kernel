@@ -1,298 +1,184 @@
-; form-eval-full.fk — the source tree-walk extended to full Form, on the BMF cursor: Form source string -> value,
-; evaluated AS it is read, with NO flatten table. This extends form-eval.fk's recursive-descent-over-cursor shape
-; (each node returns its VALUE) from the core grammar to the constructs a real program needs: (do e1 e2 ...)
-; sequencing, (let name value body), (defn name (params) body) + user function calls, and the ops mul and eq.
-;
-; The new ingredient is an ENVIRONMENT threaded alongside (value, end-pos): a list of bindings.
-;   var binding   = (name 0 value 0)              ; a let/param name resolves to a value
-;   defn binding  = (name 1 params body-source)     ; body is resident data across source fragments
-; A symbol reference looks itself up; a call binds the defn's params to the argument values in a fresh env over
-; the defn's binding (so recursion sees itself), then evaluates the retained body source. State threads as
-; (value, end-pos, env). Self-contained over core (head/tail only — no nth/neq; (not (eq ..)) for inequality).
-;
-; Four-way by tests/form-eval-full-band.fk.
-;
-; preludes: form-stdlib/core.fk
-
-(do
-    ; --- result tuple (value, pos, env) accessors ---
-    (defn fef-v (r) (head r))
-    (defn fef-p (r) (head (tail r)))
-    (defn fef-e (r) (head (tail (tail r))))
-    (defn fef-res (v p e) (list v p e))
-
-    ; --- character / lexing helpers (mirror form-eval) ---
-    (defn fef-at (s pos) (ord (char_at s pos)))
-    (defn fef-len (s) (str_len s))
-    (defn fef-isdigit (c) (and (ge c 48) (ge 57 c)))
-    (defn fef-isws (c) (if (eq c 32) 1 (if (eq c 10) 1 (if (eq c 13) 1 (if (eq c 9) 1 0)))))
-    (defn fef-isdelim (c) (if (eq (fef-isws c) 1) 1 (if (eq c 40) 1 (if (eq c 41) 1 0))))
-    (defn fef-skip (s pos)
-        (if (ge pos (fef-len s)) pos
-            (if (eq (fef-isws (fef-at s pos)) 1) (fef-skip s (add pos 1)) pos)))
-    (defn fef-digits (s pos acc)
-        (if (ge pos (fef-len s)) (list acc pos)
-            (if (fef-isdigit (fef-at s pos))
-                (fef-digits s (add pos 1) (add (mul acc 10) (sub (fef-at s pos) 48)))
-                (list acc pos))))
-    (defn fef-sym-end (s pos)
-        (if (ge pos (fef-len s)) pos
-            (if (eq (fef-isdelim (fef-at s pos)) 1) pos (fef-sym-end s (add pos 1)))))
-    ; advance past a closing paren (and any leading ws)
-    (defn fef-close (s pos)
-        (if (ge (fef-skip s pos) (fef-len s)) (fef-skip s pos) (add (fef-skip s pos) 1)))
-
-    ; --- list helpers portable across all four arms (no `empty`/`nil?` builtin reliance) ---
-    (defn fef-empty () (tail (list 0)))
-    (defn fef-null (xs) (eq (len xs) 0))
-
-    ; --- environment: a list of (name kind a b) bindings ---
-    (defn fef-bind-var (name value env) (cons (list name 0 value 0) env))
-    (defn fef-bind-fn (name prms body-source env)
-        (cons (list name 1 prms body-source) env))
-    (defn fef-bname (b) (head b))
-    (defn fef-bkind (b) (head (tail b)))
-    (defn fef-ba (b) (head (tail (tail b))))
-    (defn fef-bb (b) (head (tail (tail (tail b)))))
-    ; lookup: return the binding whose name matches; assumes presence (witness binds before use)
-    (defn fef-lookup (name env)
-        (if (str_eq (fef-bname (head env)) name) (head env) (fef-lookup name (tail env))))
-
-    ; --- the evaluator: fef-expr s pos env -> (value pos env) ---
-    (defn fef-expr (s pos env) (fef-expr2 s (fef-skip s pos) env))
-    (defn fef-expr2 (s pos env)
-        (if (eq (fef-at s pos) 40)
-            (fef-list s (add pos 1) env)
-            (fef-atom s pos env)))
-    ; atom: a digit-led token is an integer literal; a keyword literal (true/false/nothing) is its
-    ; value; anything else is a symbol reference (var lookup). The literal keywords are DATA too — one
-    ; (name value) table, so a new literal is a row, not an if-branch.
-    (defn fef-atom (s pos env)
-        (if (eq (fef-isdigit (fef-at s pos)) 1)
-            (fef-num s pos env)
-            (fef-sym-or-lit s pos env)))
-    (defn fef-num (s pos env) (fef-num2 (fef-digits s pos 0) env))
-    (defn fef-num2 (dp env) (fef-res (head dp) (head (tail dp)) env))
-    ; literal-keyword table: (name value). `nothing` was the absence-as-zero floor here — a value the
-    ; reducer could carry, at the cost that eval "nothing", eval "false" and eval "0" all answered 0.
-    ; The stone this comment used to name was placed 2026-08-26: the table now carries a FIRST-CLASS
-    ; nothing, and the reducer carries it fine. The band case that read (if (eq nothing 0) 42 0) -> 42
-    ; and called itself "the nothing == 0 floor" now reads (if (eq nothing 0) 0 42) -> 42.
-    ; Placing it uncovered a second: int_to_str sent the absence down its NEGATIVE branch and rendered
-    ; -4499999999999999999. core.fk now renders it as the word.
-    (defn fef-littable ()
-        (list (list "true" 1) (list "false" 0) (list "nothing" (nothing))))
-    (defn fef-litrow (name rows)
-        (if (eq (len rows) 0) (fef-empty)
-            (if (str_eq (head (head rows)) name) (head rows)
-                (fef-litrow name (tail rows)))))
-    (defn fef-sym-or-lit (s pos env)
-        (fef-sol2 (substring s pos (fef-sym-end s pos)) (fef-sym-end s pos) env))
-    (defn fef-sol2 (name endpos env)
-        (fef-sol3 name endpos env (fef-litrow name (fef-littable))))
-    ; a matched literal returns its table value; otherwise resolve the name as a variable.
-    (defn fef-sol3 (name endpos env row)
-        (if (fef-null row)
-            (fef-res (fef-ba (fef-lookup name env)) endpos env)
-            (fef-res (head (tail row)) endpos env)))
-    ; (kept for compatibility: the bare symref path, now reached only through fef-sol3's else)
-    (defn fef-symref (s pos env)
-        (fef-symref2 (substring s pos (fef-sym-end s pos)) (fef-sym-end s pos) env))
-    (defn fef-symref2 (name endpos env)
-        (fef-res (fef-ba (fef-lookup name env)) endpos env))
-
-    ; --- the op table: DATA, not a hand-written if-chain (HIGH-GRAMMAR LIFT) -----------------------
-    ; Each row is (name tag arity). One table drives BOTH the dispatch test (is this symbol an op?)
-    ; and the application (what does the op compute?), exactly as flt-ops is one tag->action map.
-    ; Adding an arithmetic/compare/logic op is now a ROW, never two parallel if-branches. tags are
-    ; stable small ints; fef-apply-tag is the single switch (one branch per primitive, the irreducible
-    ; floor — a primitive's action cannot itself be data without an eval-native apply, which is the
-    ; next stone). arity: 2 = binary (eval a, eval b); 1 = unary (eval a only).
-    (defn fef-optable ()
-        (list
-            (list "add" 1  2) (list "sub" 2  2) (list "mul" 3  2) (list "div" 4  2)
-            (list "mod" 5  2) (list "le"  6  2) (list "lt"  7  2) (list "gt"  8  2)
-            (list "ge"  9  2) (list "eq"  10 2) (list "ne"  11 2) (list "and" 12 2)
-            (list "or"  13 2) (list "not" 14 1)))
-    (defn fef-row-name  (r) (head r))
-    (defn fef-row-tag   (r) (head (tail r)))
-    (defn fef-row-arity (r) (head (tail (tail r))))
-    ; walk the table for a name -> its row, or the empty list if it is not an op.
-    (defn fef-oprow (name rows)
-        (if (eq (len rows) 0) (fef-empty)
-            (if (str_eq (fef-row-name (head rows)) name) (head rows)
-                (fef-oprow name (tail rows)))))
-    ; convenience reads over the table — keep callers from re-walking it three times.
-    (defn fef-optag (name) (fef-optag2 (fef-oprow name (fef-optable))))
-    (defn fef-optag2 (row) (if (fef-null row) 0 (fef-row-tag row)))
-    (defn fef-oparity (name) (fef-oparity2 (fef-oprow name (fef-optable))))
-    (defn fef-oparity2 (row) (if (fef-null row) 0 (fef-row-arity row)))
-    (defn fef-isbinop (k) (if (eq (fef-oparity k) 2) 1 0))
-    (defn fef-isunop (k)  (if (eq (fef-oparity k) 1) 1 0))
-    ; apply by TAG — the single primitive switch. b is ignored for unary ops.
-    (defn fef-apply-tag (tag a b)
-        (if (eq tag 1) (add a b)
-        (if (eq tag 2) (sub a b)
-        (if (eq tag 3) (mul a b)
-        (if (eq tag 4) (div a b)
-        (if (eq tag 5) (mod a b)
-        (if (eq tag 6) (if (le a b) 1 0)
-        (if (eq tag 7) (if (lt a b) 1 0)
-        (if (eq tag 8) (if (gt a b) 1 0)
-        (if (eq tag 9) (if (ge a b) 1 0)
-        (if (eq tag 10) (if (eq a b) 1 0)
-        (if (eq tag 11) (if (eq a b) 0 1)
-        (if (eq tag 12) (if (and a b) 1 0)
-        (if (eq tag 13) (if (or a b) 1 0)
-        (if (eq tag 14) (if (not a) 1 0) 0)))))))))))))))
-    (defn fef-apply (op a b) (fef-apply-tag (fef-optag op) a b))
-
-    ; --- list head: dispatch on the operator/keyword symbol ---
-    ; The CONTROL forms (if/do/let/defn) stay a small keyword cond — they are not value ops, they
-    ; thread env and source position in ways a uniform (eval-args, apply) table cannot express. The
-    ; VALUE ops route through the data table above. Anything else is a user call.
-    (defn fef-list (s pos env) (fef-key s pos (fef-sym-end s pos) env))
-    (defn fef-key (s a b env) (fef-bykey (substring s a b) s b env))
-    (defn fef-bykey (k s pos env)
-        (if (str_eq k "if") (fef-if s pos env)
-            (if (str_eq k "do") (fef-do s pos env)
-                (if (str_eq k "let") (fef-let s pos env)
-                    (if (str_eq k "defn") (fef-defn s pos env)
-                        (if (eq (fef-isbinop k) 1) (fef-bin k s pos env)
-                            (if (eq (fef-isunop k) 1) (fef-un k s pos env)
-                                (fef-call k s pos env))))))))
-
-    ; --- binary ops: eval a, eval b, apply via the table tag, close ---
-    (defn fef-bin (op s pos env) (fef-bin-a op s (fef-expr s pos env)))
-    (defn fef-bin-a (op s ar) (fef-bin-b op s (fef-v ar) (fef-expr s (fef-p ar) (fef-e ar))))
-    (defn fef-bin-b (op s a br)
-        (fef-res (fef-apply op a (fef-v br)) (fef-close s (fef-p br)) (fef-e br)))
-    ; --- unary ops: eval a, apply (b unused), close ---
-    (defn fef-un (op s pos env) (fef-un-a op s (fef-expr s pos env)))
-    (defn fef-un-a (op s ar)
-        (fef-res (fef-apply op (fef-v ar) 0) (fef-close s (fef-p ar)) (fef-e ar)))
-
-    ; --- if: evaluate only the selected arm; scan past the other arm without evaluating it ---
-    ; Selection is load-bearing for recursive resident recipes: evaluating the unchosen recursive
-    ; arm makes a base case recurse forever.  fef-skip-expr is the same scannerless cursor walk used
-    ; to retain defn bodies; it advances over nested source without resolving symbols or changing env.
-    ; The selected arm alone supplies both the value and the continuing environment.
-    (defn fef-if (s pos env) (fef-if-c s (fef-expr s pos env)))
-    (defn fef-if-c (s cr)
-        (fef-if-select s (fef-v cr) (fef-p cr) (fef-e cr)))
-    (defn fef-if-select (s c thenpos env)
-        (if (eq c 0)
-            (fef-if-else s env (fef-skip-expr s thenpos))
-            (fef-if-then s (fef-expr s thenpos env))))
-    ; true: the selected result ends at the else source; scan that source, then close the if.
-    (defn fef-if-then (s tr)
-        (fef-res (fef-v tr)
-            (fef-close s (fef-skip-expr s (fef-p tr)))
-            (fef-e tr)))
-    ; false: then source was already scanned; evaluate else and close the if.
-    (defn fef-if-else (s env elsepos)
-        (fef-if-else-fin s (fef-expr s elsepos env)))
-    (defn fef-if-else-fin (s er)
-        (fef-res (fef-v er) (fef-close s (fef-p er)) (fef-e er)))
-
-    ; --- do: evaluate each sub-expr in sequence, threading env, until the close paren ---
-    (defn fef-do (s pos env) (fef-do-loop s (fef-skip s pos) env 0))
-    (defn fef-do-loop (s pos env last)
-        (if (eq (fef-at s (fef-skip s pos)) 41)
-            (fef-res last (add (fef-skip s pos) 1) env)
-            (fef-do-step s (fef-expr s pos env))))
-    (defn fef-do-step (s r) (fef-do-loop s (fef-p r) (fef-e r) (fef-v r)))
-
-    ; --- let: (let name value body) -> bind name=eval(value), eval body in extended env, close ---
-    (defn fef-let (s pos env) (fef-let-name s (fef-skip s pos) env))
-    (defn fef-let-name (s pos env)
-        (fef-let-val (substring s pos (fef-sym-end s pos)) s (fef-sym-end s pos) env))
-    (defn fef-let-val (name s pos env) (fef-let-body name s (fef-expr s pos env)))
-    ; vr = result of evaluating the value expr. bind name in vr's env, evaluate body, close the let.
-    ; the env returned threads vr's env forward (drops nothing the witness depends on; the let binding
-    ; only needs to be visible to the body, which has already been evaluated by the time we return).
-    (defn fef-let-body (name s vr)
-        (fef-let-fin s (fef-expr s (fef-p vr) (fef-bind-var name (fef-v vr) (fef-e vr)))))
-    (defn fef-let-fin (s br) (fef-res (fef-v br) (fef-close s (fef-p br)) (fef-e br)))
-
-    ; --- defn: (defn name (params) body) -> bind fn, return 0, value irrelevant; skip body source ---
-    (defn fef-defn (s pos env) (fef-defn-name s (fef-skip s pos) env))
-    (defn fef-defn-name (s pos env)
-        (fef-defn-params (substring s pos (fef-sym-end s pos)) s (fef-skip s (fef-sym-end s pos)) env))
-    ; pos is at the '(' of the param list. parse param names, then body starts after ')'
-    (defn fef-defn-params (name s pos env)
-        (fef-defn-body name s (fef-params s (add pos 1) (fef-empty)) env))
-    ; fef-params: collect symbol names until ')' -> (list-of-names end-pos-after-close)
-    (defn fef-params (s pos acc)
-        (if (eq (fef-at s (fef-skip s pos)) 41)
-            (list acc (add (fef-skip s pos) 1))
-            (fef-params s (fef-sym-end s (fef-skip s pos))
-                (fef-snoc acc (substring s (fef-skip s pos) (fef-sym-end s (fef-skip s pos)))))))
-    ; append to end of list (preserve param order) — head/tail only
-    (defn fef-snoc (xs x) (if (fef-null xs) (list x) (cons (head xs) (fef-snoc (tail xs) x))))
-    ; Body source is copied into the immutable binding rather than retaining a
-    ; coordinate into the current input line.  That lets the environment cross
-    ; cursor/line boundaries: later lines can call this recipe without keeping
-    ; the defining source buffer as an implicit global.
-    (defn fef-defn-body (name s pr env)
-        (fef-defn-fin name (head pr) (head (tail pr)) s env))
-    (defn fef-defn-fin (name prms bodypos s env)
-        (do
-            (let bodyend (fef-skip-expr s bodypos))
-            (let body-source (substring s bodypos bodyend))
-            (fef-res 0 (fef-close s bodyend)
-                (fef-bind-fn name prms body-source env))))
-    ; skip one expression's source without evaluating (to find where the defn body ends)
-    (defn fef-skip-expr (s pos) (fef-skip-expr2 s (fef-skip s pos)))
-    (defn fef-skip-expr2 (s pos)
-        (if (eq (fef-at s pos) 40)
-            (fef-skip-rest s (add pos 1))
-            (fef-skip-atom s pos)))
-    (defn fef-skip-atom (s pos)
-        (if (eq (fef-isdigit (fef-at s pos)) 1) (head (tail (fef-digits s pos 0))) (fef-sym-end s pos)))
-    ; inside a paren: skip sub-exprs until the matching ')'
-    (defn fef-skip-rest (s pos)
-        (if (eq (fef-at s (fef-skip s pos)) 41)
-            (add (fef-skip s pos) 1)
-            (fef-skip-rest s (fef-skip-expr s pos))))
-
-    ; --- user call: (name arg1 arg2 ...) ---
-    ; A call runs in two passes. Pass 1 (fef-args): walk the arg source in the CALLER env, evaluating each argument
-    ; to a value, collecting (values-list, pos-after-last-arg). Pass 2 (fef-call-run): zip the defn's param names
-    ; with those values into a fresh body env, evaluate the retained body source, then close the call.
-    ; NOTE: a parameter literally named `params` makes the Go and Rust walkers register the recipe with one fewer
-    ; arg (they read `params` as a rest/varargs marker) → a false arity divergence while fkwu/TS agree. Hence `prms`.
-    (defn fef-call (k s pos env) (fef-call-go (fef-lookup k env) s pos env))
-    (defn fef-call-go (b s pos env)
-        (fef-call-run b s (fef-args s pos env (fef-empty)) env))
-    ; fef-args: evaluate arguments until the call's ')'; returns (reversed-values-list, pos-after-close).
-    ; we stop at the close paren; values accumulate reversed (cons), restored to order in the bind zip.
-    (defn fef-args (s pos env acc)
-        (if (eq (fef-at s (fef-skip s pos)) 41)
-            (list acc (add (fef-skip s pos) 1))
-            (fef-args-step s env acc (fef-expr s pos env))))
-    (defn fef-args-step (s env acc ar)
-        (fef-args s (fef-p ar) env (cons (fef-v ar) acc)))
-    ; ar-res = (reversed-values, end-pos). bind params (in source order) to values, eval body, return value + pos.
-    (defn fef-call-run (b s ar-res env)
-        (fef-res
-            (fef-v (fef-expr (fef-bb b) 0
-                (fef-zip (fef-ba b) (fef-rev (head ar-res)) env)))
-            (head (tail ar-res)) env))
-    ; zip param-names (in order) with value-list (in order) onto env
-    (defn fef-zip (prms values env)
-        (if (fef-null prms) env
-            (fef-zip (tail prms) (tail values)
-                (fef-bind-var (head prms) (head values) env))))
-    ; reverse a list (head/tail only)
-    (defn fef-rev (xs) (fef-rev2 xs (fef-empty)))
-    (defn fef-rev2 (xs acc) (if (fef-null xs) acc (fef-rev2 (tail xs) (cons (head xs) acc))))
-
-    ; --- top entries ---
-    ; fef-eval-state is the resident door: callers retain fef-e(result) and
-    ; feed it to the next scannerless source fragment. fef-eval preserves the
-    ; historical one-shot surface for every existing caller and proof band.
-    (defn fef-empty-env () (list (list "" 0 0 0)))
-    (defn fef-eval-state (s env) (fef-expr s 0 env))
-    (defn fef-eval (s) (fef-v (fef-eval-state s (fef-empty-env))))
-)
+// form-eval-full.fk — the source tree-walk extended to full Form, on the BMF cursor: Form source string -> value,
+// evaluated AS it is read, with NO flatten table. This extends form-eval.fk's recursive-descent-over-cursor shape
+// (each node returns its VALUE) from the core grammar to the constructs a real program needs: (do e1 e2 ...)
+// sequencing, (let name value body), (defn name (params) body) + user function calls, and the ops mul and eq.
+//
+// The new ingredient is an ENVIRONMENT threaded alongside (value, end-pos): a list of bindings.
+//   var binding   = (name 0 value 0)              ; a let/param name resolves to a value
+//   defn binding  = (name 1 params body-source)     ; body is resident data across source fragments
+// A symbol reference looks itself up; a call binds the defn's params to the argument values in a fresh env over
+// the defn's binding (so recursion sees itself), then evaluates the retained body source. State threads as
+// (value, end-pos, env). Self-contained over core (head/tail only — no nth/neq; (not (eq ..)) for inequality).
+//
+// Four-way by tests/form-eval-full-band.fk.
+//
+import form-stdlib/core.fk;
+section [form.bml] {
+    // --- result tuple (value, pos, env) accessors ---
+    def fef-v(r) = r[0];
+    def fef-p(r) = r[1:][0];
+    def fef-e(r) = r[1:][1:][0];
+    def fef-res(v, p, e) = [v, p, e];
+    // --- character / lexing helpers (mirror form-eval) ---
+    def fef-at(s, pos) = ord(char_at(s, pos));
+    def fef-len(s) = len(s);
+    def fef-isdigit(c) = c >= 48 && 57 >= c;
+    def fef-isws(c) = (Comparable) c == 32 ? 1 : (Comparable) c == 10 ? 1 : (Comparable) c == 13 ? 1 : (Comparable) c == 9 ? 1 : 0;
+    def fef-isdelim(c) = (Comparable) fef-isws(c) == 1 ? 1 : (Comparable) c == 40 ? 1 : (Comparable) c == 41 ? 1 : 0;
+    def fef-skip(s, pos) = pos >= fef-len(s) ? pos : (Comparable) fef-isws(fef-at(s, pos)) == 1 ? fef-skip(s, (Number) pos + (Number) 1) : pos;
+    def fef-digits(s, pos, acc) = pos >= fef-len(s) ? [acc, pos] : fef-isdigit(fef-at(s, pos)) ? fef-digits(s, (Number) pos + (Number) 1, (Number) (acc * 10) + (Number) (fef-at(s, pos) - 48)) : [acc, pos];
+    def fef-sym-end(s, pos) = pos >= fef-len(s) ? pos : (Comparable) fef-isdelim(fef-at(s, pos)) == 1 ? pos : fef-sym-end(s, (Number) pos + (Number) 1);
+    // advance past a closing paren (and any leading ws)
+    def fef-close(s, pos) = fef-skip(s, pos) >= fef-len(s) ? fef-skip(s, pos) : (Number) fef-skip(s, pos) + (Number) 1;
+    // --- list helpers portable across all four arms (no `empty`/`nil?` builtin reliance) ---
+    def fef-empty() = [0][1:];
+    def fef-null(xs) = (Comparable) len(xs) == 0;
+    // --- environment: a list of (name kind a b) bindings ---
+    def fef-bind-var(name, value, env) = cons([name, 0, value, 0], env);
+    def fef-bind-fn(name, prms, body-source, env) = cons([name, 1, prms, body-source], env);
+    def fef-bname(b) = b[0];
+    def fef-bkind(b) = b[1:][0];
+    def fef-ba(b) = b[1:][1:][0];
+    def fef-bb(b) = b[1:][1:][1:][0];
+    // lookup: return the binding whose name matches; assumes presence (witness binds before use)
+    def fef-lookup(name, env) = (String) fef-bname(env[0]) == name ? env[0] : fef-lookup(name, env[1:]);
+    // --- the evaluator: fef-expr s pos env -> (value pos env) ---
+    def fef-expr(s, pos, env) = fef-expr2(s, fef-skip(s, pos), env);
+    def fef-expr2(s, pos, env) = (Comparable) fef-at(s, pos) == 40 ? fef-list(s, (Number) pos + (Number) 1, env) : fef-atom(s, pos, env);
+    // atom: a digit-led token is an integer literal; a keyword literal (true/false/nothing) is its
+    // value; anything else is a symbol reference (var lookup). The literal keywords are DATA too — one
+    // (name value) table, so a new literal is a row, not an if-branch.
+    def fef-atom(s, pos, env) = (Comparable) fef-isdigit(fef-at(s, pos)) == 1 ? fef-num(s, pos, env) : fef-sym-or-lit(s, pos, env);
+    def fef-num(s, pos, env) = fef-num2(fef-digits(s, pos, 0), env);
+    def fef-num2(dp, env) = fef-res(dp[0], dp[1:][0], env);
+    // literal-keyword table: (name value). `nothing` was the absence-as-zero floor here — a value the
+    // reducer could carry, at the cost that eval "nothing", eval "false" and eval "0" all answered 0.
+    // The stone this comment used to name was placed 2026-08-26: the table now carries a FIRST-CLASS
+    // nothing, and the reducer carries it fine. The band case that read (if (eq nothing 0) 42 0) -> 42
+    // and called itself "the nothing == 0 floor" now reads (if (eq nothing 0) 0 42) -> 42.
+    // Placing it uncovered a second: int_to_str sent the absence down its NEGATIVE branch and rendered
+    // -4499999999999999999. core.fk now renders it as the word.
+    def fef-littable() = [["true", 1], ["false", 0], ["nothing", nothing()]];
+    def fef-litrow(name, rows) = (Comparable) len(rows) == 0 ? fef-empty() : (String) rows[0][0] == name ? rows[0] : fef-litrow(name, rows[1:]);
+    def fef-sym-or-lit(s, pos, env) = fef-sol2(substring(s, pos, fef-sym-end(s, pos)), fef-sym-end(s, pos), env);
+    def fef-sol2(name, endpos, env) = fef-sol3(name, endpos, env, fef-litrow(name, fef-littable()));
+    // a matched literal returns its table value; otherwise resolve the name as a variable.
+    def fef-sol3(name, endpos, env, row) = fef-null(row) ? fef-res(fef-ba(fef-lookup(name, env)), endpos, env) : fef-res(row[1:][0], endpos, env);
+    // (kept for compatibility: the bare symref path, now reached only through fef-sol3's else)
+    def fef-symref(s, pos, env) = fef-symref2(substring(s, pos, fef-sym-end(s, pos)), fef-sym-end(s, pos), env);
+    def fef-symref2(name, endpos, env) = fef-res(fef-ba(fef-lookup(name, env)), endpos, env);
+    // --- the op table: DATA, not a hand-written if-chain (HIGH-GRAMMAR LIFT) -----------------------
+    // Each row is (name tag arity). One table drives BOTH the dispatch test (is this symbol an op?)
+    // and the application (what does the op compute?), exactly as flt-ops is one tag->action map.
+    // Adding an arithmetic/compare/logic op is now a ROW, never two parallel if-branches. tags are
+    // stable small ints; fef-apply-tag is the single switch (one branch per primitive, the irreducible
+    // floor — a primitive's action cannot itself be data without an eval-native apply, which is the
+    // next stone). arity: 2 = binary (eval a, eval b); 1 = unary (eval a only).
+    def fef-optable() = [["add", 1, 2], ["sub", 2, 2], ["mul", 3, 2], ["div", 4, 2], ["mod", 5, 2], ["le", 6, 2], ["lt", 7, 2], ["gt", 8, 2], ["ge", 9, 2], ["eq", 10, 2], ["ne", 11, 2], ["and", 12, 2], ["or", 13, 2], ["not", 14, 1]];
+    def fef-row-name(r) = r[0];
+    def fef-row-tag(r) = r[1:][0];
+    def fef-row-arity(r) = r[1:][1:][0];
+    // walk the table for a name -> its row, or the empty list if it is not an op.
+    def fef-oprow(name, rows) = (Comparable) len(rows) == 0 ? fef-empty() : (String) fef-row-name(rows[0]) == name ? rows[0] : fef-oprow(name, rows[1:]);
+    // convenience reads over the table — keep callers from re-walking it three times.
+    def fef-optag(name) = fef-optag2(fef-oprow(name, fef-optable()));
+    def fef-optag2(row) = fef-null(row) ? 0 : fef-row-tag(row);
+    def fef-oparity(name) = fef-oparity2(fef-oprow(name, fef-optable()));
+    def fef-oparity2(row) = fef-null(row) ? 0 : fef-row-arity(row);
+    def fef-isbinop(k) = (Comparable) fef-oparity(k) == 2 ? 1 : 0;
+    def fef-isunop(k) = (Comparable) fef-oparity(k) == 1 ? 1 : 0;
+    // apply by TAG — the single primitive switch. b is ignored for unary ops.
+    def fef-apply-tag(tag, a, b) = (Comparable) tag == 1 ? (Number) a + (Number) b : (Comparable) tag == 2 ? a - b : (Comparable) tag == 3 ? a * b : (Comparable) tag == 4 ? a / b : (Comparable) tag == 5 ? a % b : (Comparable) tag == 6 ? a <= b ? 1 : 0 : (Comparable) tag == 7 ? a < b ? 1 : 0 : (Comparable) tag == 8 ? a > b ? 1 : 0 : (Comparable) tag == 9 ? a >= b ? 1 : 0 : (Comparable) tag == 10 ? (Comparable) a == b ? 1 : 0 : (Comparable) tag == 11 ? (Comparable) a == b ? 0 : 1 : (Comparable) tag == 12 ? a && b ? 1 : 0 : (Comparable) tag == 13 ? a || b ? 1 : 0 : (Comparable) tag == 14 ? !a ? 1 : 0 : 0;
+    def fef-apply(op, a, b) = fef-apply-tag(fef-optag(op), a, b);
+    // --- list head: dispatch on the operator/keyword symbol ---
+    // The CONTROL forms (if/do/let/defn) stay a small keyword cond — they are not value ops, they
+    // thread env and source position in ways a uniform (eval-args, apply) table cannot express. The
+    // VALUE ops route through the data table above. Anything else is a user call.
+    def fef-list(s, pos, env) = fef-key(s, pos, fef-sym-end(s, pos), env);
+    def fef-key(s, a, b, env) = fef-bykey(substring(s, a, b), s, b, env);
+    def fef-bykey(k, s, pos, env) = (String) k == "if" ? fef-if(s, pos, env) : (String) k == "do" ? fef-do(s, pos, env) : (String) k == "let" ? fef-let(s, pos, env) : (String) k == "defn" ? fef-defn(s, pos, env) : (Comparable) fef-isbinop(k) == 1 ? fef-bin(k, s, pos, env) : (Comparable) fef-isunop(k) == 1 ? fef-un(k, s, pos, env) : fef-call(k, s, pos, env);
+    // --- binary ops: eval a, eval b, apply via the table tag, close ---
+    def fef-bin(op, s, pos, env) = fef-bin-a(op, s, fef-expr(s, pos, env));
+    def fef-bin-a(op, s, ar) = fef-bin-b(op, s, fef-v(ar), fef-expr(s, fef-p(ar), fef-e(ar)));
+    def fef-bin-b(op, s, a, br) = fef-res(fef-apply(op, a, fef-v(br)), fef-close(s, fef-p(br)), fef-e(br));
+    // --- unary ops: eval a, apply (b unused), close ---
+    def fef-un(op, s, pos, env) = fef-un-a(op, s, fef-expr(s, pos, env));
+    def fef-un-a(op, s, ar) = fef-res(fef-apply(op, fef-v(ar), 0), fef-close(s, fef-p(ar)), fef-e(ar));
+    // --- if: evaluate only the selected arm; scan past the other arm without evaluating it ---
+    // Selection is load-bearing for recursive resident recipes: evaluating the unchosen recursive
+    // arm makes a base case recurse forever.  fef-skip-expr is the same scannerless cursor walk used
+    // to retain defn bodies; it advances over nested source without resolving symbols or changing env.
+    // The selected arm alone supplies both the value and the continuing environment.
+    def fef-if(s, pos, env) = fef-if-c(s, fef-expr(s, pos, env));
+    def fef-if-c(s, cr) = fef-if-select(s, fef-v(cr), fef-p(cr), fef-e(cr));
+    def fef-if-select(s, c, thenpos, env) = (Comparable) c == 0 ? fef-if-else(s, env, fef-skip-expr(s, thenpos)) : fef-if-then(s, fef-expr(s, thenpos, env));
+    // true: the selected result ends at the else source; scan that source, then close the if.
+    def fef-if-then(s, tr) = fef-res(fef-v(tr), fef-close(s, fef-skip-expr(s, fef-p(tr))), fef-e(tr));
+    // false: then source was already scanned; evaluate else and close the if.
+    def fef-if-else(s, env, elsepos) = fef-if-else-fin(s, fef-expr(s, elsepos, env));
+    def fef-if-else-fin(s, er) = fef-res(fef-v(er), fef-close(s, fef-p(er)), fef-e(er));
+    // --- do: evaluate each sub-expr in sequence, threading env, until the close paren ---
+    def fef-do(s, pos, env) = fef-do-loop(s, fef-skip(s, pos), env, 0);
+    def fef-do-loop(s, pos, env, last) = (Comparable) fef-at(s, fef-skip(s, pos)) == 41 ? fef-res(last, (Number) fef-skip(s, pos) + (Number) 1, env) : fef-do-step(s, fef-expr(s, pos, env));
+    def fef-do-step(s, r) = fef-do-loop(s, fef-p(r), fef-e(r), fef-v(r));
+    // --- let: (let name value body) -> bind name=eval(value), eval body in extended env, close ---
+    def fef-let(s, pos, env) = fef-let-name(s, fef-skip(s, pos), env);
+    def fef-let-name(s, pos, env) = fef-let-val(substring(s, pos, fef-sym-end(s, pos)), s, fef-sym-end(s, pos), env);
+    def fef-let-val(name, s, pos, env) = fef-let-body(name, s, fef-expr(s, pos, env));
+    // vr = result of evaluating the value expr. bind name in vr's env, evaluate body, close the let.
+    // the env returned threads vr's env forward (drops nothing the witness depends on; the let binding
+    // only needs to be visible to the body, which has already been evaluated by the time we return).
+    def fef-let-body(name, s, vr) = fef-let-fin(s, fef-expr(s, fef-p(vr), fef-bind-var(name, fef-v(vr), fef-e(vr))));
+    def fef-let-fin(s, br) = fef-res(fef-v(br), fef-close(s, fef-p(br)), fef-e(br));
+    // --- defn: (defn name (params) body) -> bind fn, return 0, value irrelevant; skip body source ---
+    def fef-defn(s, pos, env) = fef-defn-name(s, fef-skip(s, pos), env);
+    def fef-defn-name(s, pos, env) = fef-defn-params(substring(s, pos, fef-sym-end(s, pos)), s, fef-skip(s, fef-sym-end(s, pos)), env);
+    // pos is at the '(' of the param list. parse param names, then body starts after ')'
+    def fef-defn-params(name, s, pos, env) = fef-defn-body(name, s, fef-params(s, (Number) pos + (Number) 1, fef-empty()), env);
+    // fef-params: collect symbol names until ')' -> (list-of-names end-pos-after-close)
+    def fef-params(s, pos, acc) = (Comparable) fef-at(s, fef-skip(s, pos)) == 41 ? [acc, (Number) fef-skip(s, pos) + (Number) 1] : fef-params(s, fef-sym-end(s, fef-skip(s, pos)), fef-snoc(acc, substring(s, fef-skip(s, pos), fef-sym-end(s, fef-skip(s, pos)))));
+    // append to end of list (preserve param order) — head/tail only
+    def fef-snoc(xs, x) = fef-null(xs) ? [x] : cons(xs[0], fef-snoc(xs[1:], x));
+    // Body source is copied into the immutable binding rather than retaining a
+    // coordinate into the current input line.  That lets the environment cross
+    // cursor/line boundaries: later lines can call this recipe without keeping
+    // the defining source buffer as an implicit global.
+    def fef-defn-body(name, s, pr, env) = fef-defn-fin(name, pr[0], pr[1:][0], s, env);
+    def fef-defn-fin(name, prms, bodypos, s, env) = {
+        let bodyend = fef-skip-expr(s, bodypos);
+        let body-source = substring(s, bodypos, bodyend);
+        fef-res(0, fef-close(s, bodyend), fef-bind-fn(name, prms, body-source, env));
+    };
+    // skip one expression's source without evaluating (to find where the defn body ends)
+    def fef-skip-expr(s, pos) = fef-skip-expr2(s, fef-skip(s, pos));
+    def fef-skip-expr2(s, pos) = (Comparable) fef-at(s, pos) == 40 ? fef-skip-rest(s, (Number) pos + (Number) 1) : fef-skip-atom(s, pos);
+    def fef-skip-atom(s, pos) = (Comparable) fef-isdigit(fef-at(s, pos)) == 1 ? fef-digits(s, pos, 0)[1:][0] : fef-sym-end(s, pos);
+    // inside a paren: skip sub-exprs until the matching ')'
+    def fef-skip-rest(s, pos) = (Comparable) fef-at(s, fef-skip(s, pos)) == 41 ? (Number) fef-skip(s, pos) + (Number) 1 : fef-skip-rest(s, fef-skip-expr(s, pos));
+    // --- user call: (name arg1 arg2 ...) ---
+    // A call runs in two passes. Pass 1 (fef-args): walk the arg source in the CALLER env, evaluating each argument
+    // to a value, collecting (values-list, pos-after-last-arg). Pass 2 (fef-call-run): zip the defn's param names
+    // with those values into a fresh body env, evaluate the retained body source, then close the call.
+    // NOTE: a parameter literally named `params` makes the Go and Rust walkers register the recipe with one fewer
+    // arg (they read `params` as a rest/varargs marker) → a false arity divergence while fkwu/TS agree. Hence `prms`.
+    def fef-call(k, s, pos, env) = fef-call-go(fef-lookup(k, env), s, pos, env);
+    def fef-call-go(b, s, pos, env) = fef-call-run(b, s, fef-args(s, pos, env, fef-empty()), env);
+    // fef-args: evaluate arguments until the call's ')'; returns (reversed-values-list, pos-after-close).
+    // we stop at the close paren; values accumulate reversed (cons), restored to order in the bind zip.
+    def fef-args(s, pos, env, acc) = (Comparable) fef-at(s, fef-skip(s, pos)) == 41 ? [acc, (Number) fef-skip(s, pos) + (Number) 1] : fef-args-step(s, env, acc, fef-expr(s, pos, env));
+    def fef-args-step(s, env, acc, ar) = fef-args(s, fef-p(ar), env, cons(fef-v(ar), acc));
+    // ar-res = (reversed-values, end-pos). bind params (in source order) to values, eval body, return value + pos.
+    def fef-call-run(b, s, ar-res, env) = fef-res(fef-v(fef-expr(fef-bb(b), 0, fef-zip(fef-ba(b), fef-rev(ar-res[0]), env))), ar-res[1:][0], env);
+    // zip param-names (in order) with value-list (in order) onto env
+    def fef-zip(prms, values, env) = fef-null(prms) ? env : fef-zip(prms[1:], values[1:], fef-bind-var(prms[0], values[0], env));
+    // reverse a list (head/tail only)
+    def fef-rev(xs) = fef-rev2(xs, fef-empty());
+    def fef-rev2(xs, acc) = fef-null(xs) ? acc : fef-rev2(xs[1:], cons(xs[0], acc));
+    // --- top entries ---
+    // fef-eval-state is the resident door: callers retain fef-e(result) and
+    // feed it to the next scannerless source fragment. fef-eval preserves the
+    // historical one-shot surface for every existing caller and proof band.
+    def fef-empty-env() = [["", 0, 0, 0]];
+    def fef-eval-state(s, env) = fef-expr(s, 0, env);
+    def fef-eval(s) = fef-v(fef-eval-state(s, fef-empty-env()));
+}

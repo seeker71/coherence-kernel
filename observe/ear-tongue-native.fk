@@ -1,277 +1,296 @@
-; ear-tongue-native.fk — the ear's tongue lane, the body's own: draining the segment spool, it takes
-; each line the live lane hands it — the live line while it grows, the closed line when it ends —
-; and offers the tongues not heard through the native llama lane (ear-tongue). The tongues ride
-; one batched decode (dense-multi: every tongue its own sequence and KV bank, one pass over the
-; weights a step) when the file sits inside that lane's radius, and go one after another otherwise.
-; A line is said from what its previous rendering committed (local agreement: the prefix two
-; consecutive renderings share is forced, only the tail is generated), a saying frame whenever a
-; rendering changed — every few steps of a batched round, after every tongue of a serial one;
-; between rounds the lane looks for a newer live line and takes it; a closed line is said the
-; same way to its end — from the whole previous rendering when the text is the one already
-; rendered, greedy decoding being one answer to one prompt — and lands a said frame, then the
-; renderings start over. A closed line equal to the last one said lands its frame again without
-; paying; a line that is only whisper's mark for what is not speech ("[Music]") is shown as it is.
-; Off the live path by being its own process. The lane's state (the index, the file's end ids,
-; what each KV bank holds) is opened once and carried line to line.
-;
-; The three things the closed line does not wait for, each of them a measured number:
-;   - the lane forks nothing; a 20 ms native idle wait checks owner and deadline;
-;   - a live round is abandoned the chunk after the line it renders has closed, so a closed line
-;     waits at most one chunk for a round already in flight and not a whole round;
-;   - a line every tongue has already finished saying lands its frame from what is in hand.
-; `ear.said` — closed line to tongues — was 1464 ms and 650 ms on the two lines of one feed and is
-; 557 ms and 0 ms on the same feed (measured with the ear-tongue feed and said probes).
-; stdin: run seconds; tongues, whisper codes (blank -> "en pt fa id"); optional owner lease.
-; preflight-exec: forbidden
-; preludes: form/form-stdlib/ear-tongue.fk form/form-stdlib/spool-bell-transport.fk form/form-stdlib/hearth.bml form/form-stdlib/line-grammar.fk form/form-stdlib/bml/ear-worker-life.bml form/form-stdlib/bml/ear-translation-flow.bml
-(do
-    (defn tl-spool () ".hearth/ear.spool")
-    (defn tl-segs () ".hearth/ear.spool.segments")
-    ; new ids a live round may generate past the committed prefix; a closed line runs to its end
-    (defn tl-live-new () 12)
-    (defn tl-closed-new () 32)
-    ; a batched round shows its renderings every this many steps
-    (defn tl-chunk () 4)
-    (defn tl-text (t) (if (nothing? t) "" t))
-    (defn tl-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (tl-cat (tail xs)))))
-    (defn tl-nl () (byte_to_str 10))
-    ; The spool is authoritative. No detached ring or timer process owns its liveness.
-    (defn tl-kv (k v) (tl-cat (list k "=" v (tl-nl))))
-    (defn tl-known? (l) (et-known? l))
-    (defn tl-from (lang) (if (tl-known? lang) lang "en"))
-    (defn tl-join (codes) (if (eq (len codes) 0) "" (if (eq (len (tail codes)) 0) (head codes) (str_concat (head codes) (str_concat " " (tl-join (tail codes)))))))
-    ; ---- the renderings: one state a tongue, (code committed prev text source ended doneT), under
-    ; the segment they belong to. `ended` says the last rendering stopped at its own end id and not
-    ; at the round's cap — that tongue has nothing left to say about that source. `doneT` is the
-    ; clock at which that happened, 0 while the tongue is still forming.
-    (defn tl-fresh (codes) (if (eq (len codes) 0) (list) (cons (list (head codes) (list) (list) "" "" 0 0) (tl-fresh (tail codes)))))
-    (defn tl-ts-get (ts code) (if (eq (len ts) 0) (list code (list) (list) "" "" 0 0) (if (str_eq (head (head ts)) code) (head ts) (tl-ts-get (tail ts) code))))
-    (defn tl-ts-put (ts s) (if (eq (len ts) 0) (list s) (if (str_eq (head (head ts)) (head s)) (cons s (tail ts)) (cons (head ts) (tl-ts-put (tail ts) s)))))
-    (defn tl-ts-text (ts code) (nth (tl-ts-get ts code) 3))
-    (defn tl-ts-fields (ts) (if (eq (len ts) 0) "" (str_concat (tl-kv (str_concat "t_" (head (head ts))) (nth (head ts) 3)) (tl-ts-fields (tail ts)))))
-    ; when each tongue arrived, as ms from the line's end. `saidms` is the frame's own clock and so
-    ; belongs to the SLOWEST tongue; this is each tongue's own. A tongue already complete when the
-    ; line closed says 0, a tongue still forming says nothing at all rather than a number.
-    (defn tl-d-of (s tend) (if (le (nth s 6) 0) "" (int_to_str (if (lt (nth s 6) tend) 0 (sub (nth s 6) tend)))))
-    (defn tl-ds-fields (ts tend)
-        (if (eq (len ts) 0) ""
-            (str_concat (do (let d (tl-d-of (head ts) tend)) (if (eq (str_len d) 0) "" (tl-kv (str_concat "d_" (head (head ts))) d)))
-                        (tl-ds-fields (tail ts) tend))))
-    ; a frame of renderings: said when the line closed, saying while it grows; saidms from the line's last sample
-    (defn tl-emit (kind heard lang tend codes ts deadline)
-        (if (not (ewl-running? deadline)) 0
-        (sbt-append (tl-spool) (tl-cat (list "<|ear:frame|>" (tl-nl) (tl-kv "t" (int_to_str (now_unix_ms))) (tl-kv "kind" kind) (tl-kv "heard" heard) (tl-kv "lang" lang) (tl-kv "nsp" "0") (tl-kv "heardms" "0") (tl-kv "tend" (int_to_str tend)) (tl-kv "en" (tl-ts-text ts "en")) (tl-kv "fa" (tl-ts-text ts "fa")) (tl-kv "pt" (tl-ts-text ts "pt")) (tl-kv "tongues" (tl-join codes)) (tl-ts-fields ts) (tl-ds-fields ts tend) (tl-kv "saidms" (int_to_str (sub (now_unix_ms) tend))) "<|/ear:frame|>" (tl-nl))))))
-    ; what a tongue forces this round: what was committed, or the whole previous rendering when the source
-    ; is the one it already rendered (a closed line paying only what the live cap left)
-    (defn tl-forced (s text) (etf-forced (nth s 4) text (nth s 1) (nth s 2)))
-    ; ---- the serial path: one tongue over the line as it stands: (lane ts changed). The heard tongue is its
-    ; own text; a source already rendered costs nothing while the line grows. ----
-    ; the clock a tongue's rendering stopped at: kept while it is still the same source, taken now
-    ; when this is the round that ended it, and 0 while it is still forming
-    (defn tl-done-t (held ended) (if (and (eq ended 1) (le held 0)) (now_unix_ms) held))
-    (defn tl-held (s text) (if (str_eq text (nth s 4)) (nth s 6) 0))
-    (defn tl-step (lane ts code lang text maxnew final)
-        (do (let s (tl-ts-get ts code))
-            (if (str_eq code lang)
-                (list lane (tl-ts-put ts (list code (list) (list) text text 1 (tl-done-t (tl-held s text) 1))) (if (str_eq text (nth s 3)) 0 1))
-                (if (and (str_eq text (nth s 4)) (eq final 0)) (list lane ts 0)
-                    (do (let forced (tl-forced s text))
-                        (let r0 (et-say-step lane (et-unmark text) (tl-from lang) code forced (nth s 2) maxnew))
-                        ; a rendering that has begun to repeat itself is cut at its own cycle, and a
-                        ; tongue so cut has nothing more to say about this source
-                        (let ids (et-loopcut (head r0)))
-                        (let looped (if (lt (len ids) (len (head r0))) 1 0))
-                        (let txt (et-ids-text (nth r0 2) ids))
-                        ; fewer new ids than the cap allowed means the lane stopped at an end id
-                        (let ended (if (or (eq looped 1) (lt (sub (len (head r0)) (len forced)) maxnew)) 1 0))
-                        ; a source already rendered does not commit again — see tm-agree
-                        (let commit (if (str_eq text (nth s 4)) (nth s 1) (et-take ids (et-common ids (nth r0 1) 0))))
-                        (list (nth r0 2) (tl-ts-put ts (list code commit ids txt text ended (tl-done-t (tl-held s text) ended))) (if (str_eq txt (nth s 3)) 0 1)))))))
-    ; ---- the batched path: every tongue in one round, each its own sequence; the heard tongue sits out ----
-    (defn tm-idss (ml ts codes lang text)
-        (if (eq (len codes) 0) (list)
-            (cons (if (str_eq (head codes) lang) (list) (append (et-encode (nth ml 4) (nth ml 1) (et-prompt (et-unmark text) (tl-from lang) (head codes))) (tl-forced (tl-ts-get ts (head codes)) text)))
-                  (tm-idss ml ts (tail codes) lang text))))
-    (defn tm-forceds (ts codes text) (if (eq (len codes) 0) (list) (cons (tl-forced (tl-ts-get ts (head codes)) text) (tm-forceds ts (tail codes) text))))
-    ; the renderings as they stand: the heard tongue its text, the others forced ++ generated, each
-    ; cut at its own cycle; (ts changed). A tongue that reached its end id — or was cut — carries the
-    ; clock it did so, so a frame says not only what every tongue holds but when each of them
-    ; arrived. The frame is due when a rendering changed OR when a tongue newly arrived, so a tongue
-    ; that finishes without adding a word still reaches the glass at the chunk it finished in.
-    ; A tongue is done three ways, and only the first was ever read: the model's own end id, a
-    ; rendering cut at its own cycle, and a rendering the line-cut has already reached. All three
-    ; stamp the tongue's arrival, and a round every tongue is done with ends at that chunk instead
-    ; of running on for a sequence that will add nothing a reader ever sees.
-    (defn tm-done? (ml heardt ids forceds gens end) (if (eq heardt 1) 1 (if (lt (len ids) (add (len forceds) (len gens))) 1 (if (eq end 1) 1 (et-ids-cut? ml ids)))))
-    (defn tm-texts (ml ts codes lang text forceds gens ends changed alldone)
-        (if (eq (len codes) 0) (list ts changed alldone)
-            (do (let s (tl-ts-get ts (head codes)))
-                (let heardt (if (str_eq (head codes) lang) 1 0))
-                (let ids (if (eq heardt 1) (list) (et-loopcut (append (head forceds) (head gens)))))
-                (let txt (if (eq heardt 1) text (et-ids-text ml ids)))
-                (let e (tm-done? ml heardt ids (head forceds) (head gens) (head ends)))
-                (let d (tl-done-t (nth s 6) e))
-                (tm-texts ml (tl-ts-put ts (list (head codes) (nth s 1) (nth s 2) txt (nth s 4) e d)) (tail codes) lang text (tail forceds) (tail gens) (tail ends) (if (and (str_eq txt (nth s 3)) (eq d (nth s 6))) changed 1) (if (eq e 1) alldone 0)))))
-    ; the round's end: local agreement per tongue — committed is what this rendering shares with the
-    ; previous — and the round's own word on whether that tongue reached its end id.
-    ;
-    ; Agreement is between renderings of DIFFERENT sources: two readings of a growing line agreeing
-    ; on a prefix is evidence that the prefix does not depend on what is still being heard. Two
-    ; renderings of the SAME source agree on everything — greedy decoding is one answer to one
-    ; prompt — so committing there commits a whole translation of a half-heard line, and since
-    ; commitment only grows, the rest of the line is then forced to continue past a full stop. A
-    ; round on a source already rendered leaves `committed` where it stands and lengthens only the
-    ; rendering, which is what the closed line will be forced from.
-    (defn tm-agree (ml ts codes lang text forceds gens ends)
-        (if (eq (len codes) 0) ts
-            (do (let s (tl-ts-get ts (head codes)))
-                (let ids (et-loopcut (append (head forceds) (head gens))))
-                (let same (str_eq text (nth s 4)))
-                ; the commitment never reaches past the cut: a cycle committed is a cycle forced
-                (let commit (if same (et-take (nth s 1) (et-common (nth s 1) ids 0)) (et-take ids (et-common ids (nth s 2) 0))))
-                (let e (tm-done? ml (if (str_eq (head codes) lang) 1 0) ids (head forceds) (head gens) (head ends)))
-                (tm-agree ml (tl-ts-put ts (if (str_eq (head codes) lang) (list (head codes) (list) (list) text text 1 (nth s 6)) (list (head codes) commit ids (nth s 3) text e (nth s 6)))) (tail codes) lang text (tail forceds) (tail gens) (tail ends)))))
-    ; the round in chunks, a saying frame whenever a rendering changed: (ml ts)
-    ; A live round is abandoned the chunk after the line it renders has closed: the closed line is
-    ; the one the room is waiting for, and a rendering of the live text is worth nothing once the
-    ; text is final. `mark` is where the lane's reading of the segments stands; a mark below zero
-    ; means never look (the closed line's own round runs to its end).
-    (defn tm-closed-waits? (mark) (if (lt mark 0) 0 (if (eq (head (tl-peek mark)) 2) 1 0)))
-    (defn tm-round-go (ml ts codes lang text forceds seqs s maxnew tend mark deadline)
-        (if (not (ewl-running? deadline)) (list (et-mround-close ml seqs s) ts)
-        (do (let r (et-mround-go ml seqs s (tl-chunk) maxnew))
-            (let tx (tm-texts ml ts codes lang text forceds (et-mgens (head r)) (et-mends (head r)) 0 1))
-            (let e (if (eq (nth tx 1) 1) (tl-emit "saying" text lang tend codes (head tx) deadline) 0))
-            ; the round ends at the chunk every tongue is done in — the frame no longer waits on a
-            ; sequence whose remaining tokens the cut will discard
-            (if (or (eq (nth tx 2) 1) (or (eq (nth r 2) 1) (eq (tm-closed-waits? mark) 1)))
-                (list (et-mround-close ml (head r) (nth r 1)) (tm-agree ml (head tx) codes lang text forceds (et-mgens (head r)) (et-mends (head r))))
-                (tm-round-go ml (head tx) codes lang text forceds (head r) (nth r 1) maxnew tend mark deadline)))))
-    ; a round's arrivals belong to the source it renders: a tongue whose stamp was taken against an
-    ; earlier text starts this round unarrived, and one still rendering the same text keeps the clock
-    ; it already reached, so a chunk never re-stamps what already landed
-    (defn tm-reset (ts codes text)
-        (if (eq (len codes) 0) ts
-            (do (let s (tl-ts-get ts (head codes)))
-                (tm-reset (if (str_eq text (nth s 4)) ts (tl-ts-put ts (list (head codes) (nth s 1) (nth s 2) (nth s 3) (nth s 4) (nth s 5) 0))) (tail codes) text))))
-    (defn tm-round (ml ts codes lang text maxnew tend mark deadline)
-        (tm-round-go ml (tm-reset ts codes text) codes lang text (tm-forceds ts codes text) (et-mround-open ml (tm-idss ml ts codes lang text)) 0 maxnew tend mark deadline))
-    ; ---- the segment lines: "live\t<seg>\t<tend>\t<lang>\t<text>" while a line grows, "<tend>\t<lang>\t<text>" when it closed ----
-    (defn tl-live? (line) (and (gt (str_len line) 5) (and (eq (str_byte_at line 0) 108) (and (eq (str_byte_at line 1) 105) (eq (str_byte_at line 4) 9)))))
-    (defn tl-cols (line i acc) (do (let a (str_find line (byte_to_str 9) i)) (if (lt a 0) (reverse (cons (substring line i (str_len line)) acc)) (tl-cols line (add a 1) (cons (substring line i a) acc)))))
-    ; a live line as (seg tend lang text); a closed line as (tend lang text)
-    (defn tl-live-of (line) (do (let c (tl-cols line 0 (list))) (list (str_to_int (nth c 1)) (str_to_int (nth c 2)) (nth c 3) (nth c 4))))
-    (defn tl-closed-of (line) (do (let c (tl-cols line 0 (list))) (list (str_to_int (nth c 0)) (nth c 1) (nth c 2))))
-    ; what waits past the mark without taking it: (0) nothing, (1 mark' live) the newest live line, (2) a closed line or the end
-    (defn tl-newest-live (lines best) (if (eq (len lines) 0) best (if (eq (str_len (head lines)) 0) (tl-newest-live (tail lines) best) (if (tl-live? (head lines)) (tl-newest-live (tail lines) (tl-live-of (head lines))) (list 2)))))
-    (defn tl-peek (mark)
-        (do (let sz (file_size (tl-segs)))
-            (if (le sz mark) (list 0)
-                (do (let b (tl-newest-live (split-on (tl-text (read_file_slice (tl-segs) mark (sub sz mark))) (tl-nl)) (list)))
-                    (if (eq (len b) 0) (list 0) (if (eq (len b) 1) (list 2) (list 1 sz b)))))))
-    ; ---- the lane is (mode state): mode 1 the batched lane, 0 the serial one ----
-    (defn tl-mode (lane) (head lane))
-    (defn tl-st (lane) (nth lane 1))
-    (defn tl-with (lane st) (list (head lane) st))
-    ; The lane does NOT spend its idle time finishing the line it already has, and the room where
-    ; that was tried is worth keeping: a round says at most `tl-live-new` ids past what was
-    ; committed, and running past that cap on a half-heard line made the 1B run away — Indonesian
-    ; went `Benda ini melihat kaca k k k k …` to the bank's whole room, Portuguese stopped at a
-    ; comma, and the closed line was then forced from the runaway. The cap is not a time budget; it
-    ; is what keeps a rendering of a line that is still arriving from finishing a sentence the room
-    ; has not spoken. Measured 524 ms -> 1079 ms said, and the tongues themselves worse.
-    ; the live line through every tongue, again while it keeps changing: (lane seg ts mark)
-    (defn tl-cycle (lane codes seg ts src mark queue dirty deadline)
-        (if (not (ewl-running? deadline)) (list lane seg ts mark)
-            (if (eq (len queue) 0) (if (eq dirty 1) (tl-cycle lane codes seg ts src mark codes 0 deadline) (list lane seg ts mark))
-                (do (let s (if (eq (tl-mode lane) 1)
-                               (do (let r (tm-round (tl-st lane) ts codes (nth src 2) (nth src 3) (tl-live-new) (nth src 1) mark deadline)) (list (tl-with lane (head r)) (nth r 1) 0))
-                               (do (let r (tl-step (tl-st lane) ts (head queue) (nth src 2) (nth src 3) (tl-live-new) 0)) (list (tl-with lane (head r)) (nth r 1) (nth r 2)))))
-                    (let e (if (eq (nth s 2) 1) (tl-emit "saying" (nth src 3) (nth src 2) (nth src 1) codes (nth s 1) deadline) 0))
-                    (let rest (if (eq (tl-mode lane) 1) (list) (tail queue)))
-                    (let p (tl-peek mark))
-                    (if (eq (head p) 2) (list (head s) seg (nth s 1) mark)
-                        (if (eq (head p) 1)
-                            (if (eq (head (nth p 2)) seg)
-                                (tl-cycle (head s) codes seg (nth s 1) (nth p 2) (nth p 1) rest 1 deadline)
-                                (tl-cycle (head s) codes (head (nth p 2)) (tl-fresh codes) (nth p 2) (nth p 1) codes 0 deadline))
-                            (tl-cycle (head s) codes seg (nth s 1) src mark rest dirty deadline)))))))
-    ; A line the live renderings already finished is already said. Every tongue's standing rendering
-    ; is of THIS source and stopped at its own end id, so the closed round would feed the same prompt
-    ; and the same forced ids and be answered the same end at once — greedy decoding is one answer to
-    ; one prompt. The frame lands from what is already in hand.
-    (defn tl-all-said? (ts codes text)
-        (if (eq (len codes) 0) 1
-            (do (let s (tl-ts-get ts (head codes)))
-                (if (and (str_eq text (nth s 4)) (eq (nth s 5) 1)) (tl-all-said? ts (tail codes) text) 0))))
-    ; the closed line through every tongue from what the live renderings hold, then the said frame: (lane ts-said)
-    (defn tl-closed-go (lane codes ts tend lang text queue deadline)
-        (if (eq (tl-all-said? ts codes text) 1)
-            (do (let e (tl-emit "said" text lang tend codes ts deadline)) (list lane ts))
-            (if (eq (tl-mode lane) 1)
-                (do (let r (tm-round (tl-st lane) ts codes lang text (tl-closed-new) tend (sub 0 1) deadline))
-                    (let e (tl-emit "said" text lang tend codes (nth r 1) deadline))
-                    (list (tl-with lane (head r)) (nth r 1)))
-                (if (or (eq (len queue) 0) (not (ewl-running? deadline))) (do (let e (tl-emit "said" text lang tend codes ts deadline)) (list lane ts))
-                    (do (let s (tl-step (tl-st lane) ts (head queue) lang text (tl-closed-new) 1))
-                        (let e (if (eq (nth s 2) 1) (tl-emit "saying" text lang tend codes (nth s 1) deadline) 0))
-                        (tl-closed-go (tl-with lane (head s)) codes (nth s 1) tend lang text (tail queue) deadline))))))
-    ; the last line said, (lang text ts): the same line closed again lands its frame without paying
-    (defn tl-same-said? (last lang text) (and (gt (len last) 0) (and (str_eq (head last) lang) (str_eq (nth last 1) text))))
-    ; a line that is only whisper's mark for what is not speech is shown as it is, never offered
-    ; through the lane: the rule and the room it was corrected in live in `et-tag?`
-    (defn tl-tag-ts (codes text) (if (eq (len codes) 0) (list) (cons (list (head codes) (list) (list) text text 1 (now_unix_ms)) (tl-tag-ts (tail codes) text))))
-    ; the lines past the mark in order: a closed line is said (the live lines before it are behind it), the
-    ; newest live line after the last closed one is cycled: (done lane seg ts mark last)
-    (defn tl-lines (lane codes seg ts lines pend mark deadline last)
-        (if (not (ewl-running? deadline)) (list 1 lane seg ts mark last)
-        (if (eq (len lines) 0)
-            (if (or (eq (len pend) 0) (eq (et-tag? (nth pend 3)) 1)) (list 0 lane seg ts mark last)
-                (do (let seg1 (head pend))
-                    (let r (tl-cycle lane codes seg1 (if (eq seg1 seg) ts (tl-fresh codes)) pend mark codes 0 deadline))
-                    (list 0 (head r) (nth r 1) (nth r 2) (nth r 3) last)))
-            (if (eq (str_len (head lines)) 0) (tl-lines lane codes seg ts (tail lines) pend mark deadline last)
-                (if (str_eq (head lines) "done") (list 1 lane seg ts mark last)
-                    (if (tl-live? (head lines)) (tl-lines lane codes seg ts (tail lines) (tl-live-of (head lines)) mark deadline last)
-                        (do (let c (tl-closed-of (head lines)))
-                            (if (tl-same-said? last (nth c 1) (nth c 2))
-                                (do (let e (tl-emit "said" (nth c 2) (nth c 1) (head c) codes (nth last 2) deadline))
-                                    (tl-lines lane codes (sub 0 1) (tl-fresh codes) (tail lines) (list) mark deadline last))
-                                (if (eq (et-tag? (nth c 2)) 1)
-                                    (do (let tts (tl-tag-ts codes (nth c 2)))
-                                        (let e (tl-emit "said" (nth c 2) (nth c 1) (head c) codes tts deadline))
-                                        (tl-lines lane codes (sub 0 1) (tl-fresh codes) (tail lines) (list) mark deadline (list (nth c 1) (nth c 2) tts)))
-                                    (do (let r (tl-closed-go lane codes ts (head c) (nth c 1) (nth c 2) codes deadline))
-                                        (tl-lines (head r) codes (sub 0 1) (tl-fresh codes) (tail lines) (list) mark deadline (list (nth c 1) (nth c 2) (nth r 1)))))))))))))
-    (defn tl-loop (lane codes seg ts mark deadline last)
-        (if (or (not (ewl-running? deadline)) (ge (file_size ".hearth/ear.spool.stop") 0)) 0
-            (do (let sz (file_size (tl-segs)))
-                (if (le sz mark)
-                    (do (let woke (ewl-rest)) (tl-loop lane codes seg ts mark deadline last))
-                    (do (let text (tl-text (read_file_slice (tl-segs) mark (sub sz mark))))
-                        (let r (tl-lines lane codes seg ts (split-on text (tl-nl)) (list) sz deadline last))
-                        (if (eq (head r) 1) 0 (tl-loop (nth r 1) codes (nth r 2) (nth r 3) (nth r 4) deadline (nth r 5))))))))
-    ; a door feeds these; a sensor stands the lane with no stdin at all, and it stands until it is stopped
-    (defn tl-first-line () (do (let l (read_line)) (if (nothing? l) "" (trim l))))
-    ; a sensor has no stdin to hand the tongues through, so the marker that wants the ear carries
-    ; them: .hearth/ear.wanted is the same text a door would have typed. stdin still wins when a
-    ; door feeds it; the fixed four are the floor when neither speaks.
-    (defn tl-wanted () (if (lt (file_size ".hearth/ear.wanted") 0) "" (trim (tl-text (read_file ".hearth/ear.wanted")))))
-    (defn tl-codes-text (l) (if (gt (str_len l) 0) l (tl-codes-marker (tl-wanted))))
-    (defn tl-codes-marker (w) (if (gt (str_len w) 0) w "en pt fa id"))
-    (defn tl-start (secs codes owner) (do
-    ; the mark is taken before the lane opens: a line the live lane hands over while the model loads is not lost
-    (let mark (if (lt (file_size (tl-segs)) 0) 0 (file_size (tl-segs))))
-    (let t0 (now_unix_ms))
-    ; No detached bell or timer: the native wait checks both deadline and owner.
-    ; the batched lane, one sequence a tongue; the serial lane when the file sits outside its radius
-    (let ml (et-mlane-open (len codes)))
-    (let lane (if (et-mlane-ok? ml) (list 1 ml) (list 0 (et-lane-open))))
-    (let opened (print_str (tl-cat (list "tongue lane open at " (int_to_str (now_unix_ms)) " after " (int_to_str (sub (now_unix_ms) t0)) " ms, mark " (int_to_str mark) (if (eq (tl-mode lane) 1) ", batched" ", serial")))))
-    (let finished (tl-loop lane codes (sub 0 1) (tl-fresh codes) mark (ewl-session (add (now_unix_ms) (mul 1000 (add secs 60))) owner) (list)))
-    (print "ear tongue: stopped")
-    0))
-    (let secs (do (let l (tl-first-line)) (if (eq (str_len l) 0) 86400 (str_to_int l))))
-    (let codes (split-on (tl-codes-text (tl-first-line)) " "))
-    (let owner (tl-first-line))
-    (if (ewl-owned? owner) (tl-start secs codes owner) (print "ear tongue: owner retired before admission")))
+// ear-tongue-native.fk — the ear's tongue lane, the body's own: draining the segment spool, it takes
+// each line the live lane hands it — the live line while it grows, the closed line when it ends —
+// and offers the tongues not heard through the native llama lane (ear-tongue). The tongues ride
+// one batched decode (dense-multi: every tongue its own sequence and KV bank, one pass over the
+// weights a step) when the file sits inside that lane's radius, and go one after another otherwise.
+// A line is said from what its previous rendering committed (local agreement: the prefix two
+// consecutive renderings share is forced, only the tail is generated), a saying frame whenever a
+// rendering changed — every few steps of a batched round, after every tongue of a serial one;
+// between rounds the lane looks for a newer live line and takes it; a closed line is said the
+// same way to its end — from the whole previous rendering when the text is the one already
+// rendered, greedy decoding being one answer to one prompt — and lands a said frame, then the
+// renderings start over. A closed line equal to the last one said lands its frame again without
+// paying; a line that is only whisper's mark for what is not speech ("[Music]") is shown as it is.
+// Off the live path by being its own process. The lane's state (the index, the file's end ids,
+// what each KV bank holds) is opened once and carried line to line.
+//
+// The three things the closed line does not wait for, each of them a measured number:
+//   - the lane forks nothing; a 20 ms native idle wait checks owner and deadline;
+//   - a live round is abandoned the chunk after the line it renders has closed, so a closed line
+//     waits at most one chunk for a round already in flight and not a whole round;
+//   - a line every tongue has already finished saying lands its frame from what is in hand.
+// `ear.said` — closed line to tongues — was 1464 ms and 650 ms on the two lines of one feed and is
+// 557 ms and 0 ms on the same feed (measured with the ear-tongue feed and said probes).
+// stdin: run seconds; tongues, whisper codes (blank -> "en pt fa id"); optional owner lease.
+// preflight-exec: forbidden
+import form/form-stdlib/ear-tongue.fk;
+import form/form-stdlib/spool-bell-transport.fk;
+import form/form-stdlib/hearth.bml;
+import form/form-stdlib/line-grammar.fk;
+import form/form-stdlib/bml/ear-worker-life.bml;
+import form/form-stdlib/bml/ear-translation-flow.bml;
+section [form.bml] {
+    def tl-spool() = ".hearth/ear.spool";
+    def tl-segs() = ".hearth/ear.spool.segments";
+    // new ids a live round may generate past the committed prefix; a closed line runs to its end
+    def tl-live-new() = 12;
+    def tl-closed-new() = 32;
+    // a batched round shows its renderings every this many steps
+    def tl-chunk() = 4;
+    def tl-text(t) = nothing?(t) ? "" : t;
+    def tl-cat(xs) = (Comparable) len(xs) == 0 ? "" : ((String) xs[0] + tl-cat(xs[1:]));
+    def tl-nl() = byte_to_str(10);
+    // The spool is authoritative. No detached ring or timer process owns its liveness.
+    def tl-kv(k, v) = tl-cat([k, "=", v, tl-nl()]);
+    def tl-known?(l) = et-known?(l);
+    def tl-from(lang) = tl-known?(lang) ? lang : "en";
+    def tl-join(codes) = (Comparable) len(codes) == 0 ? "" : (Comparable) len(codes[1:]) == 0 ? codes[0] : (codes[0] + (" " + tl-join(codes[1:])));
+    // ---- the renderings: one state a tongue, (code committed prev text source ended doneT), under
+    // the segment they belong to. `ended` says the last rendering stopped at its own end id and not
+    // at the round's cap — that tongue has nothing left to say about that source. `doneT` is the
+    // clock at which that happened, 0 while the tongue is still forming.
+    def tl-fresh(codes) = (Comparable) len(codes) == 0 ? [] : cons([codes[0], [], [], "", "", 0, 0], tl-fresh(codes[1:]));
+    def tl-ts-get(ts, code) = (Comparable) len(ts) == 0 ? [code, [], [], "", "", 0, 0] : (String) ts[0][0] == code ? ts[0] : tl-ts-get(ts[1:], code);
+    def tl-ts-put(ts, s) = (Comparable) len(ts) == 0 ? [s] : (String) ts[0][0] == s[0] ? cons(s, ts[1:]) : cons(ts[0], tl-ts-put(ts[1:], s));
+    def tl-ts-text(ts, code) = tl-ts-get(ts, code)[3];
+    def tl-ts-fields(ts) = (Comparable) len(ts) == 0 ? "" : ((String) tl-kv(("t_" + ts[0][0]), ts[0][3]) + tl-ts-fields(ts[1:]));
+    // when each tongue arrived, as ms from the line's end. `saidms` is the frame's own clock and so
+    // belongs to the SLOWEST tongue; this is each tongue's own. A tongue already complete when the
+    // line closed says 0, a tongue still forming says nothing at all rather than a number.
+    def tl-d-of(s, tend) = s[6] <= 0 ? "" : (s[6] < tend ? 0 : s[6] - tend).str();
+    def tl-ds-fields(ts, tend) = (Comparable) len(ts) == 0 ? "" : ((String) {
+        let d = tl-d-of(ts[0], tend);
+        (Comparable) len(d) == 0 ? "" : tl-kv(("d_" + ts[0][0]), d);
+    } + tl-ds-fields(ts[1:], tend));
+    // a frame of renderings: said when the line closed, saying while it grows; saidms from the line's last sample
+    def tl-emit(kind, heard, lang, tend, codes, ts, deadline) = !ewl-running?(deadline) ? 0 : sbt-append(tl-spool(), tl-cat(["<|ear:frame|>", tl-nl(), tl-kv("t", now_unix_ms().str()), tl-kv("kind", kind), tl-kv("heard", heard), tl-kv("lang", lang), tl-kv("nsp", "0"), tl-kv("heardms", "0"), tl-kv("tend", tend.str()), tl-kv("en", tl-ts-text(ts, "en")), tl-kv("fa", tl-ts-text(ts, "fa")), tl-kv("pt", tl-ts-text(ts, "pt")), tl-kv("tongues", tl-join(codes)), tl-ts-fields(ts), tl-ds-fields(ts, tend), tl-kv("saidms", (now_unix_ms() - tend).str()), "<|/ear:frame|>", tl-nl()]));
+    // what a tongue forces this round: what was committed, or the whole previous rendering when the source
+    // is the one it already rendered (a closed line paying only what the live cap left)
+    def tl-forced(s, text) = etf-forced(s[4], text, s[1], s[2]);
+    // ---- the serial path: one tongue over the line as it stands: (lane ts changed). The heard tongue is its
+    // own text; a source already rendered costs nothing while the line grows. ----
+    // the clock a tongue's rendering stopped at: kept while it is still the same source, taken now
+    // when this is the round that ended it, and 0 while it is still forming
+    def tl-done-t(held, ended) = (Comparable) ended == 1 && held <= 0 ? now_unix_ms() : held;
+    def tl-held(s, text) = (String) text == s[4] ? s[6] : 0;
+    def tl-step(lane, ts, code, lang, text, maxnew, final) = {
+        let s = tl-ts-get(ts, code);
+        (String) code == lang ? [lane, tl-ts-put(ts, [code, [], [], text, text, 1, tl-done-t(tl-held(s, text), 1)]), (String) text == s[3] ? 0 : 1] : (String) text == s[4] && (Comparable) final == 0 ? [lane, ts, 0] : {
+            let forced = tl-forced(s, text);
+            let r0 = et-say-step(lane, et-unmark(text), tl-from(lang), code, forced, s[2], maxnew);
+            // a rendering that has begun to repeat itself is cut at its own cycle, and a
+            // tongue so cut has nothing more to say about this source
+            let ids = et-loopcut(r0[0]);
+            let looped = len(ids) < len(r0[0]) ? 1 : 0;
+            let txt = et-ids-text(r0[2], ids);
+            // fewer new ids than the cap allowed means the lane stopped at an end id
+            let ended = (Comparable) looped == 1 || len(r0[0]) - len(forced) < maxnew ? 1 : 0;
+            // a source already rendered does not commit again — see tm-agree
+            let commit = (String) text == s[4] ? s[1] : et-take(ids, et-common(ids, r0[1], 0));
+            [r0[2], tl-ts-put(ts, [code, commit, ids, txt, text, ended, tl-done-t(tl-held(s, text), ended)]), (String) txt == s[3] ? 0 : 1];
+        };
+    };
+    // ---- the batched path: every tongue in one round, each its own sequence; the heard tongue sits out ----
+    def tm-idss(ml, ts, codes, lang, text) = (Comparable) len(codes) == 0 ? [] : cons((String) codes[0] == lang ? [] : append(et-encode(ml[4], ml[1], et-prompt(et-unmark(text), tl-from(lang), codes[0])), tl-forced(tl-ts-get(ts, codes[0]), text)), tm-idss(ml, ts, codes[1:], lang, text));
+    def tm-forceds(ts, codes, text) = (Comparable) len(codes) == 0 ? [] : cons(tl-forced(tl-ts-get(ts, codes[0]), text), tm-forceds(ts, codes[1:], text));
+    // the renderings as they stand: the heard tongue its text, the others forced ++ generated, each
+    // cut at its own cycle; (ts changed). A tongue that reached its end id — or was cut — carries the
+    // clock it did so, so a frame says not only what every tongue holds but when each of them
+    // arrived. The frame is due when a rendering changed OR when a tongue newly arrived, so a tongue
+    // that finishes without adding a word still reaches the glass at the chunk it finished in.
+    // A tongue is done three ways, and only the first was ever read: the model's own end id, a
+    // rendering cut at its own cycle, and a rendering the line-cut has already reached. All three
+    // stamp the tongue's arrival, and a round every tongue is done with ends at that chunk instead
+    // of running on for a sequence that will add nothing a reader ever sees.
+    def tm-done?(ml, heardt, ids, forceds, gens, end) = (Comparable) heardt == 1 ? 1 : len(ids) < (Number) len(forceds) + (Number) len(gens) ? 1 : (Comparable) end == 1 ? 1 : et-ids-cut?(ml, ids);
+    def tm-texts(ml, ts, codes, lang, text, forceds, gens, ends, changed, alldone) = (Comparable) len(codes) == 0 ? [ts, changed, alldone] : {
+        let s = tl-ts-get(ts, codes[0]);
+        let heardt = (String) codes[0] == lang ? 1 : 0;
+        let ids = (Comparable) heardt == 1 ? [] : et-loopcut(append(forceds[0], gens[0]));
+        let txt = (Comparable) heardt == 1 ? text : et-ids-text(ml, ids);
+        let e = tm-done?(ml, heardt, ids, forceds[0], gens[0], ends[0]);
+        let d = tl-done-t(s[6], e);
+        tm-texts(ml, tl-ts-put(ts, [codes[0], s[1], s[2], txt, s[4], e, d]), codes[1:], lang, text, forceds[1:], gens[1:], ends[1:], (String) txt == s[3] && (Comparable) d == s[6] ? changed : 1, (Comparable) e == 1 ? alldone : 0);
+    };
+    // the round's end: local agreement per tongue — committed is what this rendering shares with the
+    // previous — and the round's own word on whether that tongue reached its end id.
+    //
+    // Agreement is between renderings of DIFFERENT sources: two readings of a growing line agreeing
+    // on a prefix is evidence that the prefix does not depend on what is still being heard. Two
+    // renderings of the SAME source agree on everything — greedy decoding is one answer to one
+    // prompt — so committing there commits a whole translation of a half-heard line, and since
+    // commitment only grows, the rest of the line is then forced to continue past a full stop. A
+    // round on a source already rendered leaves `committed` where it stands and lengthens only the
+    // rendering, which is what the closed line will be forced from.
+    def tm-agree(ml, ts, codes, lang, text, forceds, gens, ends) = (Comparable) len(codes) == 0 ? ts : {
+        let s = tl-ts-get(ts, codes[0]);
+        let ids = et-loopcut(append(forceds[0], gens[0]));
+        let same = (String) text == s[4];
+        // the commitment never reaches past the cut: a cycle committed is a cycle forced
+        let commit = same ? et-take(s[1], et-common(s[1], ids, 0)) : et-take(ids, et-common(ids, s[2], 0));
+        let e = tm-done?(ml, (String) codes[0] == lang ? 1 : 0, ids, forceds[0], gens[0], ends[0]);
+        tm-agree(ml, tl-ts-put(ts, (String) codes[0] == lang ? [codes[0], [], [], text, text, 1, s[6]] : [codes[0], commit, ids, s[3], text, e, s[6]]), codes[1:], lang, text, forceds[1:], gens[1:], ends[1:]);
+    };
+    // the round in chunks, a saying frame whenever a rendering changed: (ml ts)
+    // A live round is abandoned the chunk after the line it renders has closed: the closed line is
+    // the one the room is waiting for, and a rendering of the live text is worth nothing once the
+    // text is final. `mark` is where the lane's reading of the segments stands; a mark below zero
+    // means never look (the closed line's own round runs to its end).
+    def tm-closed-waits?(mark) = mark < 0 ? 0 : (Comparable) tl-peek(mark)[0] == 2 ? 1 : 0;
+    def tm-round-go(ml, ts, codes, lang, text, forceds, seqs, s, maxnew, tend, mark, deadline) = !ewl-running?(deadline) ? [et-mround-close(ml, seqs, s), ts] : {
+        let r = et-mround-go(ml, seqs, s, tl-chunk(), maxnew);
+        let tx = tm-texts(ml, ts, codes, lang, text, forceds, et-mgens(r[0]), et-mends(r[0]), 0, 1);
+        let e = (Comparable) tx[1] == 1 ? tl-emit("saying", text, lang, tend, codes, tx[0], deadline) : 0;
+        // the round ends at the chunk every tongue is done in — the frame no longer waits on a
+        // sequence whose remaining tokens the cut will discard
+        (Comparable) tx[2] == 1 || ((Comparable) r[2] == 1 || (Comparable) tm-closed-waits?(mark) == 1) ? [et-mround-close(ml, r[0], r[1]), tm-agree(ml, tx[0], codes, lang, text, forceds, et-mgens(r[0]), et-mends(r[0]))] : tm-round-go(ml, tx[0], codes, lang, text, forceds, r[0], r[1], maxnew, tend, mark, deadline);
+    };
+    // a round's arrivals belong to the source it renders: a tongue whose stamp was taken against an
+    // earlier text starts this round unarrived, and one still rendering the same text keeps the clock
+    // it already reached, so a chunk never re-stamps what already landed
+    def tm-reset(ts, codes, text) = (Comparable) len(codes) == 0 ? ts : {
+        let s = tl-ts-get(ts, codes[0]);
+        tm-reset((String) text == s[4] ? ts : tl-ts-put(ts, [codes[0], s[1], s[2], s[3], s[4], s[5], 0]), codes[1:], text);
+    };
+    def tm-round(ml, ts, codes, lang, text, maxnew, tend, mark, deadline) = tm-round-go(ml, tm-reset(ts, codes, text), codes, lang, text, tm-forceds(ts, codes, text), et-mround-open(ml, tm-idss(ml, ts, codes, lang, text)), 0, maxnew, tend, mark, deadline);
+    // ---- the segment lines: "live\t<seg>\t<tend>\t<lang>\t<text>" while a line grows, "<tend>\t<lang>\t<text>" when it closed ----
+    def tl-live?(line) = len(line) > 5 && ((Comparable) str_byte_at(line, 0) == 108 && ((Comparable) str_byte_at(line, 1) == 105 && (Comparable) str_byte_at(line, 4) == 9));
+    def tl-cols(line, i, acc) = {
+        let a = str_find(line, byte_to_str(9), i);
+        a < 0 ? reverse(cons(substring(line, i, len(line)), acc)) : tl-cols(line, (Number) a + (Number) 1, cons(substring(line, i, a), acc));
+    };
+    // a live line as (seg tend lang text); a closed line as (tend lang text)
+    def tl-live-of(line) = {
+        let c = tl-cols(line, 0, []);
+        [str_to_int(c[1]), str_to_int(c[2]), c[3], c[4]];
+    };
+    def tl-closed-of(line) = {
+        let c = tl-cols(line, 0, []);
+        [str_to_int(c[0]), c[1], c[2]];
+    };
+    // what waits past the mark without taking it: (0) nothing, (1 mark' live) the newest live line, (2) a closed line or the end
+    def tl-newest-live(lines, best) = (Comparable) len(lines) == 0 ? best : (Comparable) len(lines[0]) == 0 ? tl-newest-live(lines[1:], best) : tl-live?(lines[0]) ? tl-newest-live(lines[1:], tl-live-of(lines[0])) : [2];
+    def tl-peek(mark) = {
+        let sz = file_size(tl-segs());
+        sz <= mark ? [0] : {
+            let b = tl-newest-live(split-on(tl-text(read_file_slice(tl-segs(), mark, sz - mark)), tl-nl()), []);
+            (Comparable) len(b) == 0 ? [0] : (Comparable) len(b) == 1 ? [2] : [1, sz, b];
+        };
+    };
+    // ---- the lane is (mode state): mode 1 the batched lane, 0 the serial one ----
+    def tl-mode(lane) = lane[0];
+    def tl-st(lane) = lane[1];
+    def tl-with(lane, st) = [lane[0], st];
+    // The lane does NOT spend its idle time finishing the line it already has, and the room where
+    // that was tried is worth keeping: a round says at most `tl-live-new` ids past what was
+    // committed, and running past that cap on a half-heard line made the 1B run away — Indonesian
+    // went `Benda ini melihat kaca k k k k …` to the bank's whole room, Portuguese stopped at a
+    // comma, and the closed line was then forced from the runaway. The cap is not a time budget; it
+    // is what keeps a rendering of a line that is still arriving from finishing a sentence the room
+    // has not spoken. Measured 524 ms -> 1079 ms said, and the tongues themselves worse.
+    // the live line through every tongue, again while it keeps changing: (lane seg ts mark)
+    def tl-cycle(lane, codes, seg, ts, src, mark, queue, dirty, deadline) = !ewl-running?(deadline) ? [lane, seg, ts, mark] : (Comparable) len(queue) == 0 ? (Comparable) dirty == 1 ? tl-cycle(lane, codes, seg, ts, src, mark, codes, 0, deadline) : [lane, seg, ts, mark] : {
+        let s = (Comparable) tl-mode(lane) == 1 ? {
+            let r = tm-round(tl-st(lane), ts, codes, src[2], src[3], tl-live-new(), src[1], mark, deadline);
+            [tl-with(lane, r[0]), r[1], 0];
+        } : {
+            let r = tl-step(tl-st(lane), ts, queue[0], src[2], src[3], tl-live-new(), 0);
+            [tl-with(lane, r[0]), r[1], r[2]];
+        };
+        let e = (Comparable) s[2] == 1 ? tl-emit("saying", src[3], src[2], src[1], codes, s[1], deadline) : 0;
+        let rest = (Comparable) tl-mode(lane) == 1 ? [] : queue[1:];
+        let p = tl-peek(mark);
+        (Comparable) p[0] == 2 ? [s[0], seg, s[1], mark] : (Comparable) p[0] == 1 ? (Comparable) p[2][0] == seg ? tl-cycle(s[0], codes, seg, s[1], p[2], p[1], rest, 1, deadline) : tl-cycle(s[0], codes, p[2][0], tl-fresh(codes), p[2], p[1], codes, 0, deadline) : tl-cycle(s[0], codes, seg, s[1], src, mark, rest, dirty, deadline);
+    };
+    // A line the live renderings already finished is already said. Every tongue's standing rendering
+    // is of THIS source and stopped at its own end id, so the closed round would feed the same prompt
+    // and the same forced ids and be answered the same end at once — greedy decoding is one answer to
+    // one prompt. The frame lands from what is already in hand.
+    def tl-all-said?(ts, codes, text) = (Comparable) len(codes) == 0 ? 1 : {
+        let s = tl-ts-get(ts, codes[0]);
+        (String) text == s[4] && (Comparable) s[5] == 1 ? tl-all-said?(ts, codes[1:], text) : 0;
+    };
+    // the closed line through every tongue from what the live renderings hold, then the said frame: (lane ts-said)
+    def tl-closed-go(lane, codes, ts, tend, lang, text, queue, deadline) = (Comparable) tl-all-said?(ts, codes, text) == 1 ? {
+        let e = tl-emit("said", text, lang, tend, codes, ts, deadline);
+        [lane, ts];
+    } : (Comparable) tl-mode(lane) == 1 ? {
+        let r = tm-round(tl-st(lane), ts, codes, lang, text, tl-closed-new(), tend, 0 - 1, deadline);
+        let e = tl-emit("said", text, lang, tend, codes, r[1], deadline);
+        [tl-with(lane, r[0]), r[1]];
+    } : (Comparable) len(queue) == 0 || !ewl-running?(deadline) ? {
+        let e = tl-emit("said", text, lang, tend, codes, ts, deadline);
+        [lane, ts];
+    } : {
+        let s = tl-step(tl-st(lane), ts, queue[0], lang, text, tl-closed-new(), 1);
+        let e = (Comparable) s[2] == 1 ? tl-emit("saying", text, lang, tend, codes, s[1], deadline) : 0;
+        tl-closed-go(tl-with(lane, s[0]), codes, s[1], tend, lang, text, queue[1:], deadline);
+    };
+    // the last line said, (lang text ts): the same line closed again lands its frame without paying
+    def tl-same-said?(last, lang, text) = len(last) > 0 && ((String) last[0] == lang && (String) last[1] == text);
+    // a line that is only whisper's mark for what is not speech is shown as it is, never offered
+    // through the lane: the rule and the room it was corrected in live in `et-tag?`
+    def tl-tag-ts(codes, text) = (Comparable) len(codes) == 0 ? [] : cons([codes[0], [], [], text, text, 1, now_unix_ms()], tl-tag-ts(codes[1:], text));
+    // the lines past the mark in order: a closed line is said (the live lines before it are behind it), the
+    // newest live line after the last closed one is cycled: (done lane seg ts mark last)
+    def tl-lines(lane, codes, seg, ts, lines, pend, mark, deadline, last) = !ewl-running?(deadline) ? [1, lane, seg, ts, mark, last] : (Comparable) len(lines) == 0 ? (Comparable) len(pend) == 0 || (Comparable) et-tag?(pend[3]) == 1 ? [0, lane, seg, ts, mark, last] : {
+        let seg1 = pend[0];
+        let r = tl-cycle(lane, codes, seg1, (Comparable) seg1 == seg ? ts : tl-fresh(codes), pend, mark, codes, 0, deadline);
+        [0, r[0], r[1], r[2], r[3], last];
+    } : (Comparable) len(lines[0]) == 0 ? tl-lines(lane, codes, seg, ts, lines[1:], pend, mark, deadline, last) : (String) lines[0] == "done" ? [1, lane, seg, ts, mark, last] : tl-live?(lines[0]) ? tl-lines(lane, codes, seg, ts, lines[1:], tl-live-of(lines[0]), mark, deadline, last) : {
+        let c = tl-closed-of(lines[0]);
+        tl-same-said?(last, c[1], c[2]) ? {
+            let e = tl-emit("said", c[2], c[1], c[0], codes, last[2], deadline);
+            tl-lines(lane, codes, 0 - 1, tl-fresh(codes), lines[1:], [], mark, deadline, last);
+        } : (Comparable) et-tag?(c[2]) == 1 ? {
+            let tts = tl-tag-ts(codes, c[2]);
+            let e = tl-emit("said", c[2], c[1], c[0], codes, tts, deadline);
+            tl-lines(lane, codes, 0 - 1, tl-fresh(codes), lines[1:], [], mark, deadline, [c[1], c[2], tts]);
+        } : {
+            let r = tl-closed-go(lane, codes, ts, c[0], c[1], c[2], codes, deadline);
+            tl-lines(r[0], codes, 0 - 1, tl-fresh(codes), lines[1:], [], mark, deadline, [c[1], c[2], r[1]]);
+        };
+    };
+    def tl-loop(lane, codes, seg, ts, mark, deadline, last) = !ewl-running?(deadline) || file_size(".hearth/ear.spool.stop") >= 0 ? 0 : {
+        let sz = file_size(tl-segs());
+        sz <= mark ? {
+            let woke = ewl-rest();
+            tl-loop(lane, codes, seg, ts, mark, deadline, last);
+        } : {
+            let text = tl-text(read_file_slice(tl-segs(), mark, sz - mark));
+            let r = tl-lines(lane, codes, seg, ts, split-on(text, tl-nl()), [], sz, deadline, last);
+            (Comparable) r[0] == 1 ? 0 : tl-loop(r[1], codes, r[2], r[3], r[4], deadline, r[5]);
+        };
+    };
+    // a door feeds these; a sensor stands the lane with no stdin at all, and it stands until it is stopped
+    def tl-first-line() = {
+        let l = read_line();
+        nothing?(l) ? "" : trim(l);
+    };
+    // a sensor has no stdin to hand the tongues through, so the marker that wants the ear carries
+    // them: .hearth/ear.wanted is the same text a door would have typed. stdin still wins when a
+    // door feeds it; the fixed four are the floor when neither speaks.
+    def tl-wanted() = file_size(".hearth/ear.wanted") < 0 ? "" : trim(tl-text(read_file(".hearth/ear.wanted")));
+    def tl-codes-text(l) = len(l) > 0 ? l : tl-codes-marker(tl-wanted());
+    def tl-codes-marker(w) = len(w) > 0 ? w : "en pt fa id";
+    def tl-start(secs, codes, owner) = {
+        // the mark is taken before the lane opens: a line the live lane hands over while the model loads is not lost
+        let mark = file_size(tl-segs()) < 0 ? 0 : file_size(tl-segs());
+        let t0 = now_unix_ms();
+        // No detached bell or timer: the native wait checks both deadline and owner.
+        // the batched lane, one sequence a tongue; the serial lane when the file sits outside its radius
+        let ml = et-mlane-open(len(codes));
+        let lane = et-mlane-ok?(ml) ? [1, ml] : [0, et-lane-open()];
+        let opened = print_str(tl-cat(["tongue lane open at ", now_unix_ms().str(), " after ", (now_unix_ms() - t0).str(), " ms, mark ", mark.str(), (Comparable) tl-mode(lane) == 1 ? ", batched" : ", serial"]));
+        let finished = tl-loop(lane, codes, 0 - 1, tl-fresh(codes), mark, ewl-session((Number) now_unix_ms() + (Number) (1000 * ((Number) secs + (Number) 60)), owner), []);
+        print("ear tongue: stopped");
+        0;
+    };
+    let secs = {
+        let l = tl-first-line();
+        (Comparable) len(l) == 0 ? 86400 : str_to_int(l);
+    };
+    let codes = split-on(tl-codes-text(tl-first-line()), " ");
+    let owner = tl-first-line();
+    ewl-owned?(owner) ? tl-start(secs, codes, owner) : print("ear tongue: owner retired before admission");
+}
