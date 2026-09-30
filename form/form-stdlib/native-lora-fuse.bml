@@ -8,7 +8,7 @@ import form-stdlib/native-fused-generation.bml;
 import form-stdlib/json-precise.bml;
 section [form.bml] {
  class NativeLoraFuse {
-  def nlfu-msl() = ("#include <metal_stdlib>\nusing namespace metal;\n" + (nam-linear-msl() + "
+  def nlfu-msl() = "#include <metal_stdlib>\nusing namespace metal;\n" + (nam-linear-msl() + "
 kernel void nlfu_quant(device const uchar* w [[buffer(0)]],device const uchar* s [[buffer(1)]],device const uchar* b [[buffer(2)]],device const float* a [[buffer(3)]],device const float* z [[buffer(4)]],device uint* qw [[buffer(5)]],device float* qs [[buffer(6)]],device float* qb [[buffer(7)]],device float* errors [[buffer(8)]],constant uint& rows [[buffer(9)]],constant uint& cols [[buffer(10)]],constant uint& group [[buffer(11)]],constant uint& ty [[buffer(12)]],constant uint& rank [[buffer(13)]],constant float& scale [[buffer(14)]],threadgroup float* values [[threadgroup(0)]],uint g [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
  if(g>=rows*cols/group)return;uint offset=g*group,r=offset/cols,c0=offset%cols;float low=INFINITY,high=-INFINITY;uint bad=0;
  for(uint j=lane;j<group;j+=32){float delta=0;for(uint k=0;k<rank;k++)delta+=a[(c0+j)*rank+k]*z[k*rows+r];float v=nam_w(w,s,b,offset+j,group,ty)+scale*delta;values[j]=v;bad+=uint(!isfinite(v));low=min(low,v);high=max(high,v);}
@@ -17,65 +17,65 @@ kernel void nlfu_quant(device const uchar* w [[buffer(0)]],device const uchar* s
  for(uint j=lane;j<group/8;j+=32){uint word=0;for(uint k=0;k<8;k++){uint q=uint(clamp(rint((values[j*8+k]-low)/step),0.0f,15.0f));word|=q<<(4*k);}qw[g*(group/8)+j]=word;}
  if(lane==0){qs[g]=step;qb[g]=low;errors[g]=bad?NAN:error;}
 }
-"));
+");
   def nlfu-projection(projection,events) {
    let v = projection[0]; let p = projection[1]; let rows = v[3]; let cols = v[4]; let group = v[5];
-   let count = ((rows * cols) / group); let qw = nam-alloc(((rows * cols) / 8)); let qs = nam-alloc(count); let qb = nam-alloc(count); let error = nam-alloc(count);
+   let count = (rows * cols) / group; let qw = nam-alloc((rows * cols) / 8); let qs = nam-alloc(count); let qb = nam-alloc(count); let error = nam-alloc(count);
    let pipe = nam-held-pipe(metal_pipeline(nlfu-msl(),"nlfu_quant"));
-   let rc = metal_enqueue(pipe,md-bind16(append(take(3,v),[p[1],p[2],qw,qs,qb,error]),[rows,cols,group,v[6],p[4],md-f32-bits(p[6])],32,(group * 4),1,0),count);
-   if (rc < 0) then form_error("native fusion quantization dispatch refused") else nlfu-projection-done(p,qw,qs,qb,error,rows,cols,group,count,events);
+   let rc = metal_enqueue(pipe,md-bind16(append(take(3,v),[p[1],p[2],qw,qs,qb,error]),[rows,cols,group,v[6],p[4],md-f32-bits(p[6])],32,group * 4,1,0),count);
+   rc < 0 ? form_error("native fusion quantization dispatch refused") : nlfu-projection-done(p,qw,qs,qb,error,rows,cols,group,count,events);
   }
   def nlfu-projection-done(p,qw,qs,qb,error,rows,cols,group,count,events) {
    let measured = nam-stats(error,count); let scales = nam-stats(qs,count); let biases = nam-stats(qb,count);
-   let bound = ((0.5 * scales[2]) + (0.000001 * (biases[2] + (15.0 * scales[2]))));
-   if (((measured[0] + (scales[0] + biases[0])) > 0) || (measured[2] > bound)) then form_error("native fusion non-finite result or quantization error bound refused") else nlfu-projection-checked(p,qw,qs,qb,error,rows,cols,group,measured,bound,events);
+   let bound = (0.5 * scales[2]) + (0.000001 * (biases[2] + (15.0 * scales[2])));
+   ((measured[0] + (scales[0] + biases[0])) > 0) || (measured[2] > bound) ? form_error("native fusion non-finite result or quantization error bound refused") : nlfu-projection-checked(p,qw,qs,qb,error,rows,cols,group,measured,bound,events);
   }
   def nlfu-projection-checked(p,qw,qs,qb,error,rows,cols,group,measured,bound,events) {
    let released = nam-free([error]);
    let event = json-emit-precise(json-node-object([json-node-pair("projection",json-node-string(p[0])),json-node-pair("rank",json-node-int(p[4])),json-node-pair("max_abs_weight_error",json-precise-float(measured[2])),json-node-pair("allowed_weight_error",json-precise-float(bound))]));
-   let logged = if ((Comparable) len(events) == 0) then 0 else sbt-append(events,(event + "\n"));
-   [[(p[0] + ".weight"),qw,[rows,(cols / 8)],"U32"],[(p[0] + ".scales"),qs,[rows,(cols / group)],"F32"],[(p[0] + ".biases"),qb,[rows,(cols / group)],"F32"]];
+   let logged = (Comparable) len(events) == 0 ? 0 : sbt-append(events,event + "\n");
+   [[p[0] + ".weight",qw,[rows,cols / 8],"U32"],[p[0] + ".scales",qs,[rows,cols / group],"F32"],[p[0] + ".biases",qb,[rows,cols / group],"F32"]];
   }
   def nlfu-layer(layer) = [layer[1],layer[2],layer[3],layer[4],layer[6],layer[7],layer[8]];
-  def nlfu-layers(layers,events) = if nil?(layers) then [] else append(nlfu-projections(nlfu-layer(layers[0]),events),nlfu-layers(layers[1:],events));
-  def nlfu-projections(projections,events) = if nil?(projections) then [] else append(if nil?(projections[0][1]) then [] else nlfu-projection(projections[0],events),nlfu-projections(projections[1:],events));
-  def nlfu-find(rows,name) = if nil?(rows) then [] else if ((String) rows[0][0] == name) then rows[0] else nlfu-find(rows[1:],name);
+  def nlfu-layers(layers,events) = nil?(layers) ? [] : append(nlfu-projections(nlfu-layer(layers[0]),events),nlfu-layers(layers[1:],events));
+  def nlfu-projections(projections,events) = nil?(projections) ? [] : append(nil?(projections[0][1]) ? [] : nlfu-projection(projections[0],events),nlfu-projections(projections[1:],events));
+  def nlfu-find(rows,name) = nil?(rows) ? [] : (String) rows[0][0] == name ? rows[0] : nlfu-find(rows[1:],name);
   def nlfu-rows(index,rows,fused) = rows |> map(row => nlfu-row(index,row,nlfu-find(fused,row[0])));
-  def nlfu-row(index,row,replacement) = if (!nil?(replacement)) then replacement else [row[0],sti-map-row(index,row)[0],row[2],row[1]];
-  def nlfu-free-rows(rows) = if nil?(rows) then 1 else nlfu-free-next(nam-free([rows[0][1]]),rows[1:]);
+  def nlfu-row(index,row,replacement) = !nil?(replacement) ? replacement : [row[0],sti-map-row(index,row)[0],row[2],row[1]];
+  def nlfu-free-rows(rows) = nil?(rows) ? 1 : nlfu-free-next(nam-free([rows[0][1]]),rows[1:]);
   def nlfu-free-next(rc,rows) = nlfu-free-rows(rows);
   def nlfu-weight-map(rows) = rows |> map(row => json-node-pair(row[0],json-node-string("model.safetensors")));
   def nlfu-metadata(base,adapter,dir,rows,pairs) {
    let config = nll-config(base);
    let origin = json-node-object([json-node-pair("owner",json-node-string("Form-native-Metal")),json-node-pair("base",json-node-string(base)),json-node-pair("adapter",json-node-string(nag-resolve(adapter))),json-node-pair("pairs_baked",json-node-int(pairs)),json-node-pair("quantization",json-node-string("affine 4-bit; per-group nearest-even rounding; F32 scales and biases"))]);
-   let c = nag-write((dir + "/config.json"),json-emit-precise(json-node-object(append(json-object-pairs(config),[json-node-pair("native_fusion",origin)]))));
+   let c = nag-write(dir + "/config.json",json-emit-precise(json-node-object(append(json-object-pairs(config),[json-node-pair("native_fusion",origin)]))));
    let index = json-node-object([json-node-pair("metadata",json-node-object([json-node-pair("total_size",json-node-int(nlc-total(rows)))])),json-node-pair("weight_map",json-node-object(nlfu-weight-map(rows)))]);
-   let i = nag-write((dir + "/model.safetensors.index.json"),json-emit-precise(index));
-   let t = nag-write((dir + "/tokenizer.json"),read_file((base + "/tokenizer.json")));
-   let tc = read_file((base + "/tokenizer_config.json")); let tcw = nag-write((dir + "/tokenizer_config.json"),tc);
-   nag-write((dir + "/chat_template.jinja"),nlt-value(parse-json("native-fusion-tokenizer",tc),"chat_template"));
+   let i = nag-write(dir + "/model.safetensors.index.json",json-emit-precise(index));
+   let t = nag-write(dir + "/tokenizer.json",read_file(base + "/tokenizer.json"));
+   let tc = read_file(base + "/tokenizer_config.json"); let tcw = nag-write(dir + "/tokenizer_config.json",tc);
+   nag-write(dir + "/chat_template.jinja",nlt-value(parse-json("native-fusion-tokenizer",tc),"chat_template"));
   }
   def nlfu-run(base,adapter,out) {
-   if fs-exists?(out) then form_error("native fusion output already exists; choose a new generation") else nlfu-run-new(base,nag-resolve(adapter),out);
+   fs-exists?(out) ? form_error("native fusion output already exists; choose a new generation") : nlfu-run-new(base,nag-resolve(adapter),out);
   }
   def nlfu-run-new(base,adapter,out) {
-   let candidate = (out + (".candidate-" + host_pid().str())); let made = fs-mkdir(candidate); let start = host_monotonic_ms();
-   let inputs = nag-write((candidate + "/fusion-inputs.json"),nlfu-inputs(base,adapter));
+   let candidate = out + (".candidate-" + host_pid().str()); let made = fs-mkdir(candidate); let start = host_monotonic_ms();
+   let inputs = nag-write(candidate + "/fusion-inputs.json",nlfu-inputs(base,adapter));
    let model = nll-open(base,adapter); let pairs = nll-pair-count(model[1]);
-   if ((Comparable) pairs == 0) then form_error("native fusion requires an admitted adapter") else nlfu-run-model(base,adapter,out,candidate,start,model,pairs);
+   (Comparable) pairs == 0 ? form_error("native fusion requires an admitted adapter") : nlfu-run-model(base,adapter,out,candidate,start,model,pairs);
   }
   def nlfu-run-model(base,adapter,out,candidate,start,model,pairs) {
-   let events = (candidate + "/fusion-errors.jsonl");
+   let events = candidate + "/fusion-errors.jsonl";
    let fused = nlfu-layers(model[1],events); let merged = host_monotonic_ms();
-   let index = sti-open((base + "/model.safetensors")); let rows = nlfu-rows(index,index[2],fused);
-   let saved = nlc-save((candidate + "/model.safetensors"),rows,base,0);
+   let index = sti-open(base + "/model.safetensors"); let rows = nlfu-rows(index,index[2],fused);
+   let saved = nlc-save(candidate + "/model.safetensors",rows,base,0);
    let metadata = nlfu-metadata(base,adapter,candidate,rows,pairs);
    let released = nlfu-free-rows(rows); let closed = nll-close(model);
    let sync = nlc-sync-host(host_spawn_at(["/bin/sync"],["/dev/null","/dev/null","/dev/null"]));
-   let result = ["Form-native-Metal",out,pairs,saved[1],len(rows),(merged - start),(host_monotonic_ms() - merged),metal_live()[2]];
-   let receipt = nag-write((candidate + "/fusion-receipt.json"),json-emit-precise(json-node-object([json-node-pair("owner",json-node-string(result[0])),json-node-pair("pairs_baked",json-node-int(pairs)),json-node-pair("model_bytes",json-node-int(saved[1])),json-node-pair("tensors",json-node-int(len(rows))),json-node-pair("merge_ms",json-node-int(result[5])),json-node-pair("save_ms",json-node-int(result[6])),json-node-pair("retained_buffers",json-node-int(result[7]))])));
-   let outputs = nag-write((candidate + "/fusion-outputs.json"),nlfu-outputs(candidate));
-   if (!((String) read_file((candidate + "/fusion-inputs.json")) == nlfu-inputs(base,adapter))) then form_error("native fusion inputs changed during the run; candidate withheld") else if (!((Comparable) fs-rename(candidate,out) == 0)) then form_error("native fusion directory publication failed") else result;
+   let result = ["Form-native-Metal",out,pairs,saved[1],len(rows),merged - start,host_monotonic_ms() - merged,metal_live()[2]];
+   let receipt = nag-write(candidate + "/fusion-receipt.json",json-emit-precise(json-node-object([json-node-pair("owner",json-node-string(result[0])),json-node-pair("pairs_baked",json-node-int(pairs)),json-node-pair("model_bytes",json-node-int(saved[1])),json-node-pair("tensors",json-node-int(len(rows))),json-node-pair("merge_ms",json-node-int(result[5])),json-node-pair("save_ms",json-node-int(result[6])),json-node-pair("retained_buffers",json-node-int(result[7]))])));
+   let outputs = nag-write(candidate + "/fusion-outputs.json",nlfu-outputs(candidate));
+   !((String) read_file(candidate + "/fusion-inputs.json") == nlfu-inputs(base,adapter)) ? form_error("native fusion inputs changed during the run; candidate withheld") : !((Comparable) fs-rename(candidate,out) == 0) ? form_error("native fusion directory publication failed") : result;
   }
   def nlfu-seals(paths) = paths |> map(path => json-node-string(ncs-file(path)));
   def nlfu-code() = ["form/form-stdlib/native-lora-fuse.bml","form/form-stdlib/native-lora-checkpoint.bml","form/form-stdlib/native-affine-metal.bml","form/form-stdlib/native-llama-metal.bml","form/form-stdlib/safetensors-index.bml","form/form-stdlib/native-content-seal.bml","form/form-stdlib/json-precise.bml","form/form-stdlib/json.fk"];
@@ -84,23 +84,23 @@ kernel void nlfu_quant(device const uchar* w [[buffer(0)]],device const uchar* s
   def nlfu-outputs(out) = json-emit-precise(json-node-array(nlfu-seals(nfg-paths(out,nfg-names()))));
   def nlfu-current(base,adapter,root) {
    let out = nfg-resolve(root); let resolved = nag-resolve(adapter);
-   if (!nfg-complete(out)) then 0 else if (!nfg-present(nlfu-input-paths(base,resolved))) then 0 else (((String) read_file((out + "/fusion-inputs.json")) == nlfu-inputs(base,resolved)) && ((String) read_file((out + "/fusion-outputs.json")) == nlfu-outputs(out)));
+   !nfg-complete(out) ? 0 : !nfg-present(nlfu-input-paths(base,resolved)) ? 0 : (((String) read_file(out + "/fusion-inputs.json") == nlfu-inputs(base,resolved)) && ((String) read_file(out + "/fusion-outputs.json") == nlfu-outputs(out)));
   }
   def nlfu-ensure(base,adapter,root) {
-   if nlfu-current(base,adapter,root) then ["reused-content-current",nfg-resolve(root)] else nlfu-ensure-new(base,adapter,root);
+   nlfu-current(base,adapter,root) ? ["reused-content-current",nfg-resolve(root)] : nlfu-ensure-new(base,adapter,root);
   }
   def nlfu-ensure-new(base,adapter,root) {
-   let generation = (root + (".native-" + (now_unix_ms().str() + ("-" + host_pid().str()))));
+   let generation = root + (".native-" + (now_unix_ms().str() + ("-" + host_pid().str())));
    let result = nlfu-run(base,adapter,generation);
-   let published = if nlfu-current(base,adapter,generation) then nfg-publish(root,generation) else form_error("native fusion source generation changed; publication withheld");
+   let published = nlfu-current(base,adapter,generation) ? nfg-publish(root,generation) : form_error("native fusion source generation changed; publication withheld");
    ["fused-and-published",published,result];
   }
   def nlfu-worker(base,adapter,root) {
-   let logdir = (root + (".fusion-run-" + (now_unix_ms().str() + ("-" + host_pid().str())))); let made = fs-mkdir(logdir);
-   let request = (logdir + "/request"); let wrote = nag-write(request,(base + ("\n" + (adapter + ("\n" + (root + "\n"))))));
-   let pid = host_spawn_at(["./fkwu","observe/native-lora-fuse-run.fk"],[request,(logdir + "/stdout.log"),(logdir + "/stderr.log")]);
-   let rc = if (pid <= 0) then pid else host_wait(pid); let exitfile = nag-write((logdir + "/exit"),rc.str());
-   ((if ((Comparable) rc == 0) then "status=returned\nreason=native-fusion-complete\nexit=" else "status=failure\nreason=native-fusion-child-failed\nexit=") + (rc.str() + ("\nlog=" + (logdir + ("\noutput=" + ((if ((Comparable) rc == 0) then nfg-resolve(root) else "") + "\n"))))));
+   let logdir = root + (".fusion-run-" + (now_unix_ms().str() + ("-" + host_pid().str()))); let made = fs-mkdir(logdir);
+   let request = logdir + "/request"; let wrote = nag-write(request,base + ("\n" + (adapter + ("\n" + (root + "\n")))));
+   let pid = host_spawn_at(["./fkwu","observe/native-lora-fuse-run.fk"],[request,logdir + "/stdout.log",logdir + "/stderr.log"]);
+   let rc = pid <= 0 ? pid : host_wait(pid); let exitfile = nag-write(logdir + "/exit",rc.str());
+   ((Comparable) rc == 0 ? "status=returned\nreason=native-fusion-complete\nexit=" : "status=failure\nreason=native-fusion-child-failed\nexit=") + (rc.str() + ("\nlog=" + (logdir + ("\noutput=" + (((Comparable) rc == 0 ? nfg-resolve(root) : "") + "\n")))));
   }
  }
  0;
