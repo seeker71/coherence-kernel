@@ -209,11 +209,21 @@ generated code remain separate observations.
 
 ## Compact expressions
 
-`learn/bml-compact-practice.bml` is a third frozen curriculum. Its practice
-asks for the spaced ternary, a half-open range piped through `map`, the same map
-through a parenthesized lambda, `try`/`choose`, and `??`. Its transfer rows
-ask for a different bound, a different span, and a different fallback. Every
-reference is executed by `./fkwu` before preparation accepts the home. The
+`learn/bml-compact-practice.bml` is a third frozen curriculum for the compact
+surface. Its 20 practice rows ask for the ternary, a half-open range piped
+through `map` with a named function and a lambda, `try`/`choice`, `??`, `++`,
+`xs[i]`, `match`, `let [..]`, unspaced operators, `filter` and `foldl`
+pipelines, `retry-first`, `wait-until`, two `defer` rows on the stop path
+(one through a `Disposable<Int>` class), and the control patterns of
+[Control patterns](native-bml-admission.md): an arrival gate under `choice`,
+`undo` over a checkpoint, `store`/`restore` under `try`, and a `cut` that
+offers only the head lane. Its 25 transfer rows ask for different
+bounds, spans, fallbacks, shapes and handles, and stay out of the gradient.
+The two effect rows grade the first stdout line, which is the last-registered
+`defer` running when the body stops. Every reference is executed by `./fkwu`
+before preparation accepts the home; `bep-wrap` supplies the `retry.bml`,
+`disposable.bml` and control (`offer-ack-core.fk`, `choice-lane-core.fk`)
+preludes to references and generations alike. The
 native JSON door is `observe/bml-compact-observe.bml`:
 
 - `prepare` takes a fresh `home` and executes every reference.
