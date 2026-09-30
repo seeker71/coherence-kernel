@@ -847,7 +847,6 @@ var bpTable = map[string][4]uint32{
 	"fact": {1, 2, 99, 32},
 	"fncall": {1, 2, 32, 1},
 	"fndef": {1, 2, 31, 1},
-	"fsc-rec-false": {1, 1, 3, 0},
 	"fsc-rec-true": {1, 1, 3, 1},
 	"fsh-bp": {1, 2, 99, 31415},
 	"ge": {1, 2, 13, 6},
