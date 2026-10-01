@@ -1,0 +1,183 @@
+; PROOF LEVEL: FOURTH-ARM ONLY — the stage bus lives in fkwu's shared memory; siblings answer nothing
+; Verdict 2047
+;
+; fb-bus-band.fk -- the stage bus, float_leaf modes 29 open (cons stage key) -> idx, 30 close (cons open word) or
+; (cons open (list word amount digest)) -> idx, 31 tail (cons cursor skip) -> (next lapped holes now_us row ...),
+; 32 name id -> text, over /fg-bus1: one ring every kernel on this host appends to. A row is
+; (idx pid t_us stage key phase depth link dur outcome amount body digest); phase 1 open, 2 close, 3 unwound, 4 died.
+;
+;   1   open answers an int
+;   2   an open held 10 ms, then closed, tails back as exactly that pair for this pid: link = the open, dur >= 10000 us
+;   4   name of the stage id is the stage
+;   8   a stage that is not a string, or an open that is not a pair, answers nothing and nothing stops
+;   16  two opens in a loop give two open rows
+;   32  mode 33 still answers nothing; modes 26/27 still write and read bytes
+;   64  an inner open left standing closes as phase 3 (unwound, link = it) before its outer's phase 2
+;   128 eight writer kernels x 5000 open/close pairs, drained every 50 ms: rows + lapped = 80000, no holes, and every
+;       close resolves to its pid's open (same stage and key, dur = t_close - t_open)
+;   256 an attempt that stops inside an open unwinds it as phase 3, its outcome naming the stop
+;   512 a close of an open no longer standing, of a non-int, or with a non-string word answers nothing; tail and name
+;       of the wrong kind answer nothing
+;   1024 a writer killed by a signal with an open standing is buried (kernel_page_bury, or a roster sweep first) and
+;       its open gets exactly one phase-4 close in its name, outcome "lastbreath"
+(do
+    (defn bb-bit (ok v) (if ok v 0))
+    (defn bb-open (stage key) (float_leaf 29 (cons stage key)))
+    (defn bb-head () (nth (float_leaf 31 (cons (sub 0 1) 0)) 0))
+    (defn bb-rows (t) (tail (tail (tail (tail t)))))
+    (defn bb-none (l) (if (nothing? l) 1 (eq l (list))))
+    (defn bb-mine-from (rows pid)
+        (if (bb-none rows) (list)
+            (if (eq (nth (head rows) 1) pid) (cons (head rows) (bb-mine-from (tail rows) pid)) (bb-mine-from (tail rows) pid))))
+    (defn bb-mine (cur) (bb-mine-from (bb-rows (float_leaf 31 (cons cur 0))) (host_pid)))
+    (defn bb-has (l x) (if (eq l (list)) 0 (if (eq (head l) x) 1 (bb-has (tail l) x))))
+    (defn bb-get (opens pid) (if (eq opens (list)) (nothing) (if (eq (head (head opens)) pid) (tail (head opens)) (bb-get (tail opens) pid))))
+    (defn bb-drop (opens pid) (if (eq opens (list)) (list) (if (eq (head (head opens)) pid) (tail opens) (cons (head opens) (bb-drop (tail opens) pid)))))
+    (defn bb-resolves (o r)
+        (if (nothing? o) 0
+            (and (eq (nth o 0) (nth r 7))
+                 (and (eq (nth o 3) (nth r 3))
+                      (and (eq (nth o 4) (nth r 4)) (eq (nth r 8) (sub (nth r 2) (nth o 2))))))))
+    ; acc: (opens rows bad unresolved lapped holes)
+    (defn bb-scan (rows pids acc)
+        (if (bb-none rows) acc
+            (do (let r (head rows))
+                (let opens (nth acc 0))
+                (let pid (nth r 1))
+                (let phase (nth r 5))
+                (bb-scan (tail rows) pids
+                    (if (eq (bb-has pids pid) 0) acc
+                        (if (eq phase 1)
+                            (list (cons (cons pid r) (bb-drop opens pid)) (add (nth acc 1) 1) (nth acc 2) (nth acc 3) (nth acc 4) (nth acc 5))
+                            (list opens (add (nth acc 1) 1) (add (nth acc 2) (if (eq phase 2) 0 1))
+                                  (add (nth acc 3) (if (eq (bb-resolves (bb-get opens pid) r) 1) 0 1)) (nth acc 4) (nth acc 5))))))))
+    ; read from cur until the tail stops moving: answers (cur acc)
+    (defn bb-drain (cur pids acc)
+        (do (let t (float_leaf 31 (cons cur 0)))
+            (let a (bb-scan (bb-rows t) pids acc))
+            (let a2 (list (nth a 0) (nth a 1) (nth a 2) (nth a 3) (add (nth a 4) (nth t 1)) (add (nth a 5) (nth t 2))))
+            (if (eq (nth t 0) cur) (list cur a2) (bb-drain (nth t 0) pids a2))))
+    (defn bb-any-alive (pids) (if (eq pids (list)) 0 (if (eq (host_alive (head pids)) 1) 1 (bb-any-alive (tail pids)))))
+    (defn bb-watch (d pids k)
+        (if (or (eq (bb-any-alive pids) 0) (gt k 600))
+            (bb-drain (nth d 0) pids (nth d 1))
+            (do (host_sleep_ms 50) (bb-watch (bb-drain (nth d 0) pids (nth d 1)) pids (add k 1)))))
+    (defn bb-wpath (k) (str_concat (temp_dir) (str_concat "/fb-bus-writer-" (str_concat (value_str (host_pid)) (str_concat "-" (str_concat (value_str k) ".fk"))))))
+    (defn bb-spawn (k exe src)
+        (if (ge k 8) (list)
+            (do (write_file (bb-wpath k) src)
+                (let pid (host_spawn_at (list exe (bb-wpath k)) (list "/dev/null" "/dev/null" "/dev/null")))
+                (cons pid (bb-spawn (add k 1) exe src)))))
+    (defn bb-reap (pids) (if (eq pids (list)) 0 (do (host_wait (head pids)) (bb-reap (tail pids)))))
+    (defn bb-clean (k)
+        (if (ge k 8) 0
+            (do (fs_remove (bb-wpath k))
+                (fs_remove (str_concat (bb-wpath k) "b"))
+                (fs_remove (str_concat (substring (bb-wpath k) 0 (sub (str_len (bb-wpath k)) 3)) ".sym"))
+                (bb-clean (add k 1)))))
+    (defn bb-twice (i) (if (ge i 2) 0 (do (float_leaf 30 (cons (bb-open "fb-bus-loop" i) "ok")) (bb-twice (add i 1)))))
+    (defn bb-count-phase (rows ph) (if (bb-none rows) 0 (add (if (eq (nth (head rows) 5) ph) 1 0) (bb-count-phase (tail rows) ph))))
+    (defn bb-of (rows pid) (if (bb-none rows) (list) (if (eq (nth (head rows) 1) pid) (cons (head rows) (bb-of (tail rows) pid)) (bb-of (tail rows) pid))))
+    ; the rows of pid from cur, once at least n of them stand (or k polls of 10 ms pass)
+    (defn bb-await (cur pid n k)
+        (do (let rows (bb-of (bb-rows (float_leaf 31 (cons cur 0))) pid))
+            (if (or (ge (len rows) n) (le k 0)) rows (do (host_sleep_ms 10) (bb-await cur pid n (sub k 1))))))
+
+    (defn bb-run () (do
+    ; 1, 2, 4 -- one open held ten milliseconds
+    (let c1 (bb-head))
+    (let o1 (bb-open "fb-bus-band" "ten-ms"))
+    (let z1 (host_sleep_ms 10))
+    (let x1 (float_leaf 30 (cons o1 "ok")))
+    (let m1 (bb-mine c1))
+    (let b1 (bb-bit (str_eq (value_kind o1) "int") 1))
+    (let b2 (bb-bit (and (eq (len m1) 2)
+                         (and (and (eq (nth (nth m1 0) 0) o1) (eq (nth (nth m1 0) 5) 1))
+                              (and (and (eq (nth (nth m1 1) 0) x1) (eq (nth (nth m1 1) 5) 2))
+                                   (and (eq (nth (nth m1 1) 7) o1) (ge (nth (nth m1 1) 8) 10000))))) 2))
+    (let n3 (if (eq (len m1) 2) (float_leaf 32 (nth (nth m1 0) 3)) (nothing)))
+    (let b3 (bb-bit (and (not (nothing? n3)) (str_eq n3 "fb-bus-band")) 4))
+
+    ; 8 -- the wrong kinds answer nothing, and the band goes on
+    (let b4 (bb-bit (and (nothing? (bb-open 5 "k")) (and (nothing? (float_leaf 29 "fb-bus-band")) (nothing? (bb-open (list) 1)))) 8))
+
+    ; 16 -- two opens in a loop
+    (let c5 (bb-head))
+    (let z5 (bb-twice 0))
+    (let m5 (bb-mine c5))
+    (let b5 (bb-bit (and (eq (len m5) 4) (eq (bb-count-phase m5 1) 2)) 16))
+
+    ; 32 -- the neighbours on the door
+    (let bp (str_concat (temp_dir) (str_concat "/fb-bus-bytes-" (value_str (host_pid)))))
+    (let w6 (write_file_bytes bp (list 1 2 255)))
+    (let r6 (read_file_bytes bp))
+    (let rm6 (fs_remove bp))
+    (let b6 (bb-bit (and (nothing? (float_leaf 33 0)) (and (eq w6 3) (eq r6 (list 1 2 255)))) 32))
+
+    ; 64 -- an inner open left standing
+    (let c7 (bb-head))
+    (let oa (bb-open "fb-bus-outer" "a"))
+    (let ob (bb-open "fb-bus-inner" "b"))
+    (let xa (float_leaf 30 (cons oa "ok")))
+    (let m7 (bb-mine c7))
+    (let b7 (bb-bit (and (eq (len m7) 4)
+                         (and (and (eq (nth (nth m7 1) 7) oa) (eq (nth (nth m7 1) 6) 1))
+                              (and (and (eq (nth (nth m7 2) 5) 3) (eq (nth (nth m7 2) 7) ob))
+                                   (and (eq (nth (nth m7 3) 5) 2) (and (eq (nth (nth m7 3) 7) oa) (eq (nth (nth m7 3) 0) xa)))))) 64))
+
+    ; 256 -- an attempt that stops inside an open
+    (let c9 (bb-head))
+    (let a9 (attempt (do (bb-open "fb-bus-attempt" "x") (len (nothing)))))
+    (let m9 (bb-mine c9))
+    (let n9 (if (eq (len m9) 2) (float_leaf 32 (nth (nth m9 1) 9)) (nothing)))
+    (let b9 (bb-bit (and (nothing? a9)
+                         (and (eq (len m9) 2)
+                              (and (and (eq (nth (nth m9 1) 5) 3) (eq (nth (nth m9 1) 7) (nth (nth m9 0) 0)))
+                                   (and (not (nothing? n9)) (ge (str_find n9 "nothing has no length" 0) 0))))) 256))
+
+    ; 512 -- closes and reads of the wrong kind
+    (let ox (bb-open "fb-bus-refuse" "x"))
+    (let r10 (and (nothing? (float_leaf 30 (cons o1 "ok")))
+                  (and (nothing? (float_leaf 30 (cons "x" "ok")))
+                       (and (nothing? (float_leaf 30 (cons ox 5)))
+                            (and (nothing? (float_leaf 31 "x")) (nothing? (float_leaf 32 "x")))))))
+    (let b10 (bb-bit (and r10 (not (nothing? (float_leaf 30 (cons ox (list "ok" 3 "digest")))))) 512))
+
+    ; 1024 -- a writer killed with an open standing
+    (let exe (nth (host_process (host_pid)) 2))
+    (let lpath (str_concat (temp_dir) (str_concat "/fb-bus-lastbreath-" (str_concat (value_str (host_pid)) ".fk"))))
+    (let lw (write_file lpath "(do (float_leaf 29 (cons \"fb-bus-lastbreath\" 1)) (host_sleep_ms 20000) 0)"))
+    (let c11 (bb-head))
+    (let lp (host_spawn_at (list exe lpath) (list "/dev/null" "/dev/null" "/dev/null")))
+    (let l1 (bb-await c11 lp 1 500))
+    (let lk (host_kill lp))
+    (let lr (host_wait lp))
+    (let lb (kernel_page_bury lp))
+    (let l2 (bb-await c11 lp 2 100))
+    (let lc (do (fs_remove lpath) (fs_remove (str_concat lpath "b")) (fs_remove (str_concat (substring lpath 0 (sub (str_len lpath) 3)) ".sym"))))
+    (let b11 (bb-bit (and (eq (len l2) 2)
+                          (and (and (eq (nth (nth l2 0) 5) 1) (eq (nth (nth l2 1) 5) 4))
+                               (and (eq (nth (nth l2 1) 7) (nth (nth l2 0) 0)) (str_eq (value_str (float_leaf 32 (nth (nth l2 1) 9))) "lastbreath")))) 1024))
+
+    ; 128 -- eight writer kernels, the band draining every 50 ms
+    (let wsrc "(do (defn w (i n) (if (ge i n) 0 (do (float_leaf 30 (cons (float_leaf 29 (cons \"fb-bus-writer\" i)) \"ok\")) (if (eq (mod i 100) 99) (host_sleep_ms 2) 0) (w (add i 1) n)))) (w 0 5000) 0)")
+    (let c8 (bb-head))
+    (let pids (bb-spawn 0 exe wsrc))
+    (let d8 (bb-watch (list c8 (list (list) 0 0 0 0 0)) pids 0))
+    (let reaped (bb-reap pids))
+    (let cleaned (bb-clean 0))
+    (let a8 (nth d8 1))
+    (let lapped (nth a8 4))
+    (let b8 (bb-bit (and (eq (add (nth a8 1) lapped) 80000)
+                         (and (eq (nth a8 5) 0)
+                              (and (eq (nth a8 2) 0) (if (eq lapped 0) (eq (nth a8 3) 0) (le (nth a8 3) lapped))))) 128))
+
+    (let verdict (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 (add b8 (add b9 (add b10 b11)))))))))))
+    (print (list "fb-bus-band" verdict "rows" (nth a8 1) "lapped" lapped "holes" (nth a8 5) "unresolved" (nth a8 3)
+                 "odd-phase" (nth a8 2) "lastbreath-buried-here" lb))
+    verdict))
+
+    ; a binary that carries no bus answers nothing at the tail door: the band says so and scores nothing
+    (if (nothing? (float_leaf 31 (cons (sub 0 1) 0)))
+        (do (print (list "fb-bus-band" 0 "this binary carries no stage bus")) 0)
+        (bb-run)))
