@@ -38,8 +38,8 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
 
 ```text
 ./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (18 rows; a row whose ground did not
-                                            move since origin/main sits out and leaves the fold; 2026-10-01 on the gates
-                                            branch: 6 of 17 rows ran, pass=63 full=63 refused=0)
+                                            move since origin/main sits out and leaves the fold; 2026-10-02 with the
+                                            kernel-laws row: 7 of 18 rows ran, pass=127 full=127 refused=0)
 ./fkwu gate/structural-gate-run.fk       -> structural-gate-v3 [8, 0, 1, 0, 0, 0, 7] then 1
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)

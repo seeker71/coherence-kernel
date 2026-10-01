@@ -5,26 +5,29 @@
 //   a request itself: {"id","title","problem","needs","where","files","evidence"}; or
 //   {"request":"<id>"} or {"next":1}: a request read from learn/local-requests.jsonl, the file the feeder door
 //   (observe/findings-to-requests-run.bml) writes; {"requests":"<path>"} reads another file. next takes the first
-//   pending request that no queue row names, whose walks have not spent their options (as many refused rows as
-//   attempts; a walk that ended held resumes) and no review refuted, one Form source under form/, observe/, gate/ or
-//   learn/ first, then one file of any kind, then any.
+//   pending request that no queue row names, whose walks have not spent its attempts (an option is spent once its
+//   voice opens; a walk that ended held resumes with the options left) and no review refuted, one Form source
+//   under form/, observe/, gate/ or learn/ first, then one file of any kind, then any.
 // A request the queue already carries (a row whose "request" is its id) is planned once: the door says which gap
 // carries it and opens no model. {"queue":"<path>"} reads and lands in another queue (default
 // learn/native-turn-queue.jsonl).
 // Beside either, optional: "attempts" (6), "voices" (else the registry's plan chain, each voice whose weights are on
 // disk), "context" (16384), "max_reply_tokens" (3072), "deadline_ms" (600000, one band run), "until_ms" (the
-// caller's window on the host's monotonic clock: no voice opens after it, and the walk ends held), "dry":1 prints the
-// first packet the voice would read and opens no model. A request an earlier walk left refused resumes from the
-// options its ledger rows keep (their findings and replies); "fresh":1 starts it clean.
+// caller's window on the host's monotonic clock: no voice opens once the time left cannot hold the median option
+// the ledger measured, and the walk ends held), "dry":1 prints the first packet the voice would read and opens no
+// model. A request an earlier walk left refused resumes from the options its ledger rows keep (their findings and
+// replies), with the attempts it has left; "fresh":1 starts it clean.
 // One model on the one GPU: before each option's voice opens, the door reads the host's processes (flp-gpu-holders)
-// and waits while a GPU door runs: the walk's doors, the session learning's, the LoRA lanes' or a planner that began
-// first, in this checkout or another, other than this process and those it runs under. It looks once a minute for at most
-// "yield_ms" (7200000); a GPU still held then opens no model, and the walk ends held with no row for that option.
+// and waits while a GPU door runs: a walk's doors (not its coordinators, which open no model), the session
+// learning's, the LoRA lanes' or a planner that began first, in this checkout or another, other than this process
+// and those it runs under. It looks once a minute for at most "yield_ms" (7200000), and never past the latest
+// moment the window holds an option; a GPU still held then opens no model, and the walk ends held with no row for
+// that option.
 // The voice speaks in this process (form-stdlib/bml/form-cli-native-voice.bml: registry weights on this Mac), one
 // reply at a time, and the band runs begin only after its session is released. No prompt leaves the machine by
 // construction: the voice is in-process, and a declined walk's guide packet (fcgp-packet-at) is a file no door here
-// sends. Each packet and reply is kept under .hearth/local-plans, each option's row lands in
-// .hearth/local-plans/ledger.jsonl, and a verified plan lands its band at its path and one row at the end of the
+// sends. Each packet and reply is kept under .hearth/local-plans, each option whose voice opened is marked in
+// .hearth/local-plans/began.jsonl, each option's row lands in .hearth/local-plans/ledger.jsonl, and a verified plan lands its band at its path and one row at the end of the
 // queue, where the night's walk takes it. A physical run: it needs the local GPU and a quiet machine.
 // preflight-exec: forbidden
 import form-stdlib/bml/form-cli-local-plan.bml;
@@ -38,16 +41,25 @@ section [form.bml] {
   def lpr-request?(doc) = fcgp-present?(doc, "title") || (fcgp-present?(doc, "problem") || fcgp-present?(doc, "needs"));
   def lpr-source(opts) = if fcgp-present?(opts, "requests") then fcgp-str(opts, "requests") else flp-requests();
   def lpr-queue(opts) = if fcgp-present?(opts, "queue") then fcgp-str(opts, "queue") else flp-queue();
-  // next: a pending request no queue row names, no plan option has tried and no review refuted; one Form source
+  // next: a pending request no queue row names, whose options are not spent and no review refuted; one Form source
   // first (a band measures Form definitions), then one file of any kind, then any
   def lpr-pending?(r) = (!fcgp-present?(r, "status")) || ((String) fcgp-str(r, "status") == "pending");
   def lpr-refuted?(r) = (String) fcgp-str(r, "verdict") == "refuted";
-  // tried: [the request of each refused option row the ledger keeps, the walk's attempts]. A request is tried once
-  // its walks spent their options (as many refused rows as attempts); a walk that ended held (the GPU stayed another
-  // door's, or the caller's window closed) spent fewer, so next takes it again and it resumes from the rows it left
-  def lpr-tried(attempts) = [map(r => flp-text(r, "request"), filter(r => ((String) flp-text(r, "verdict") == "refused"), flp-queue-rows(flp-dir() ++ "/ledger.jsonl"))), attempts];
+  // An option is spent once its voice opens: the door marks it in .hearth/local-plans/began.jsonl before the voice
+  // speaks, so an option that ended the planner before its ledger row was written counts too. tried: [the request of
+  // each began mark, the request of each refused ledger row (the walks before the marks), the walk's attempts]. A
+  // request is tried once its spent options reach attempts; a walk that ended held (the GPU stayed another door's,
+  // or the window could not hold an option) spent fewer, so next takes it again with the options it has left
+  def lpr-began-path() = flp-dir() ++ "/began.jsonl";
+  def lpr-requests-in(path, keep) = map(r => flp-text(r, "request"), filter(keep, flp-queue-rows(path)));
+  def lpr-tried(attempts) = [lpr-requests-in(lpr-began-path(), r => true), lpr-requests-in(flp-dir() ++ "/ledger.jsonl", r => ((String) flp-text(r, "verdict") == "refused")), attempts];
   def lpr-count(xs, x) = foldl((n, y) => if ((String) y == x) then (n + 1) else n, 0, xs);
-  def lpr-spent?(tried, id) = lpr-count(tried[0], id) >= tried[1];
+  def lpr-most(a, b) = if (a > b) then a else b;
+  def lpr-spent(tried, id) = lpr-most(lpr-count(tried[0], id), lpr-count(tried[1], id));
+  def lpr-spent?(tried, id) = lpr-spent(tried, id) >= tried[2];
+  // a walk takes the options its request has left; a request asked for by id whose options were spent takes
+  // attempts afresh
+  def lpr-left(attempts, spent) = if (spent < attempts) then (attempts - spent) else attempts;
   def lpr-open?(r, queue, tried) = ((Comparable) len(flp-req-id(r)) > 0) && (lpr-pending?(r) && ((!lpr-refuted?(r)) && (nothing?(flp-request-row(queue, flp-req-id(r))) && (!lpr-spent?(tried, flp-req-id(r))))));
   def lpr-one?(r) = (Comparable) len(flp-req-files(r)) == 1;
   def lpr-form-source?(r) = lpr-one?(r) && (flp-under-roots?(flp-req-files(r)[0]) && ((flp-ends?(flp-req-files(r)[0], ".fk") || flp-ends?(flp-req-files(r)[0], ".bml")) && (!flp-band-like?(flp-req-files(r)[0]))));
@@ -68,13 +80,21 @@ section [form.bml] {
    lpr-yield(until, began, named);
   }
   // the voice: it opens only once the GPU is free and while the caller's window ("until_ms" on the host's monotonic
-  // clock; nothing when no window was given) is open; the packet is kept before it is read and the reply after, so
-  // a review reads every step; a GPU still held or a window closed answers "held" and the walk ends with no row
-  def lpr-bound(t, until) = if nothing?(until) then t else if (until < t) then until else t;
-  def lpr-closed?(until) = (!nothing?(until)) && (host_monotonic_ms() >= until);
-  def lpr-ask(dir, id, packet, name, n, context, limit, yieldMs, until) {
-   let gpu = if lpr-closed?(until) then [false, "[local-plan:window] the caller's window has closed; no model opens"] else lpr-yield(lpr-bound((host_monotonic_ms() + yieldMs), until), host_monotonic_ms(), "");
+  // clock; nothing when no window was given) still holds an option: the median option the ledger measured
+  // (hw-option-floor-of over .hearth/local-plans/ledger.jsonl; half an hour before any is measured). The GPU wait
+  // ends by the window's end less that floor. The packet is kept before it is read and the reply after, so a review
+  // reads every step; a GPU still held or a window that cannot hold an option answers "held", and the walk ends
+  // with no row
+  def lpr-floor() = hw-option-floor-at(flp-dir() ++ "/ledger.jsonl");
+  def lpr-latest(until, floor) = until - floor[0];
+  def lpr-bound(t, until, floor) = if nothing?(until) then t else if (lpr-latest(until, floor) < t) then lpr-latest(until, floor) else t;
+  def lpr-closed?(until, floor) = (!nothing?(until)) && (host_monotonic_ms() > lpr-latest(until, floor));
+  def lpr-window-line(until, floor) = mc-cat(["[local-plan:window] ", hw-minutes(hw-left(until, host_monotonic_ms())), " left cannot hold an option of ", hw-minutes(floor[0]), " (", floor[1], "); no model opens"]);
+  def lpr-began(rid, name, n) = fhn-append(lpr-began-path(), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", rid), fhn-n("option", n), fhn-s("voice", name)])) ++ "\n");
+  def lpr-ask(dir, id, rid, packet, name, n, context, limit, yieldMs, until, floor) {
+   let gpu = if lpr-closed?(until, floor) then [false, lpr-window-line(until, floor)] else lpr-yield(lpr-bound((host_monotonic_ms() + yieldMs), until, floor), host_monotonic_ms(), "");
    let waited = if ((Comparable) len(gpu[1]) > 0) then print_str(gpu[1]) else 0;
+   let marked = if gpu[0] then lpr-began(rid, name, n) else 0;
    if gpu[0] then lpr-spoken(dir, id, packet, name, n, context, limit) else ["held", gpu[1], 0, 0, ""];
   }
   def lpr-spoken(dir, id, packet, name, n, context, limit) {
@@ -86,16 +106,19 @@ section [form.bml] {
    let said = print_str(mc-cat(["[local-plan:voice] ", name, " option ", n.str(), " ", v[0], " prompt_ids=", v[2].str(), " generated_ids=", v[3].str(), " reply=", stem, ".reply.txt"]));
    [v[0], text, v[2], v[3], stem ++ ".reply.txt"];
   }
-  def lpr-voice(dir, id, context, limit, yieldMs, until) = (packet, name, n) => lpr-ask(dir, id, packet, name, n, context, limit, yieldMs, until);
+  def lpr-voice(dir, id, rid, context, limit, yieldMs, until, floor) = (packet, name, n) => lpr-ask(dir, id, rid, packet, name, n, context, limit, yieldMs, until, floor);
   def lpr-read(path) = if ((String) path == "") then "" else fhn-read(path);
   // an earlier walk of this request left its refused options in the ledger; the walk resumes from them unless
   // {"fresh":1} asks for a clean start
   def lpr-memory(req, opts) = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then [] else flp-memory-of(flp-queue-rows(flp-dir() ++ "/ledger.jsonl"), flp-req-id(req), p => lpr-read(p));
   def lpr-walk(req, opts, voices, queue) {
    let made = flp-mkdirs(flp-dir());
-   let ctx = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), lpr-int(opts, "context", 16384), lpr-int(opts, "max_reply_tokens", 3072), lpr-int(opts, "yield_ms", 7200000), fcgp-num(opts, "until_ms")), voices, lpr-int(opts, "attempts", flp-attempts()), queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
+   let attempts = lpr-int(opts, "attempts", flp-attempts());
    let memory = lpr-memory(req, opts);
-   let resumed = if nil?(memory) then 0 else print_str(mc-cat(["[local-plan] resuming ", flp-req-id(req), " after ", len(memory).str(), " refused option(s) the ledger keeps"]));
+   let spent = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then 0 else lpr-spent(lpr-tried(attempts), flp-req-id(req));
+   let left = lpr-left(attempts, spent);
+   let ctx = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), flp-req-id(req), lpr-int(opts, "context", 16384), lpr-int(opts, "max_reply_tokens", 3072), lpr-int(opts, "yield_ms", 7200000), fcgp-num(opts, "until_ms"), lpr-floor()), voices, left, queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
+   let resumed = if ((spent == 0) && nil?(memory)) then 0 else print_str(mc-cat(["[local-plan] resuming ", flp-req-id(req), ": ", spent.str(), " option(s) spent, ", len(memory).str(), " refused row(s) the ledger keeps, ", left.str(), " option(s) left"]));
    let r = flp-walk-from(req, ctx, memory);
    print_str("[local-plan:result] " ++ flp-result-line(req, r));
   }
