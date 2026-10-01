@@ -1744,9 +1744,12 @@ export class Kernel {
     // Substrate write surface — all attributed as WITNESS.
     // make_nodeid — one range law with fkwu's native node word
     // (form-stdlib/bml/native-node-word.bml): pkg < 2^6, level < 2^13, type < 2^12,
-    // 0 <= inst < 2^32; the 1.1.1 trivial-int lane takes any 63-bit int and is that
-    // int's own leaf. Outside it the door stops, so no two coordinates ever collapse
-    // onto one identity.
+    // 0 <= inst < 2^32; the 1.1.1 trivial-int lane takes any 63-bit int and answers
+    // what intern_trivial_int answers for it. Outside it the door stops, so no two
+    // coordinates ever collapse onto one identity. Not yet one identity with fkwu: an
+    // int past int32 is fkwu's @1.1.1.N, and this kernel's INT64 leaf @1.1.5.k (k an
+    // index in its own table), so node_type, node_inst and value_str of such a leaf
+    // differ from fkwu's.
     this.registerNative("make_nodeid", (k, args) => {
       const pkg = argInt(args, 0);
       const level = argInt(args, 1);
