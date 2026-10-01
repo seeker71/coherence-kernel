@@ -12,7 +12,12 @@ The goal it walks now is [`docs/local-agent-goal.form`](docs/local-agent-goal.fo
 That door holds two readings, *how it is* and *how it shall look*; it is a direction, read fresh, not a scoreboard.
 The measure of the walk, in Urs's words: **the north star is the minimum rental token spent on the path to full
 sovereignty.** Rent is every rented token, the coordinating mind's included; a rented token is well spent on a step
-that removes future rent ([`docs/rent-to-zero-goal.form`](docs/rent-to-zero-goal.form)).
+that removes future rent ([`docs/rent-to-zero-goal.form`](docs/rent-to-zero-goal.form)). The accounting (Urs,
+2026-10-01): the highest goal is the local end-to-end success rate and its quality; local tokens carry no
+penalty and are to grow; a remote review of locally done work is free; a remote guide is light and comes only after
+the local guide has failed more than once; the remote tokens that do the work go to zero. Every session opens and
+closes with `./fkwu observe/local-flow-review.bml`, and measures itself at its close through
+`observe/session-rent-run.bml`.
 
 How the body is built and where each organ lives: [`MANIFEST.md`](MANIFEST.md). What stands today:
 [`CURRENT_FLOOR.md`](CURRENT_FLOOR.md).

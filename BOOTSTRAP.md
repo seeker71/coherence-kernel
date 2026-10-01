@@ -94,9 +94,10 @@ So, from here on:
 and before trusting a cell you did not just write:
 
 ```sh
-echo path/to/cell.fk > /tmp/preflight-target
-./fkwu observe/preflight-run.fk
+echo path/to/cell.fk | ./fkwu observe/preflight-stdin-run.fk
 ```
+
+The path arrives on stdin, so parallel agents never replace one another's target.
 
 Preflight forces a fresh compile — a warm cache replaces the error with a tally
 that has no name and no line — checks paren balance without running anything,
