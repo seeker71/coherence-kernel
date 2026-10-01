@@ -549,13 +549,21 @@ run_siblings_binary() {
 # judged. A nonzero exit or a diagnostic on stderr fails the band as it fails
 # the fourth leg, even when the last line matches its pin (an answer printed
 # before a stop is no verdict), and a failure keeps its streams.
+#
+# The band's own TMPDIR is a private directory under the host's temp root, not
+# under the legs dir: a band that opens a Unix socket there (tsx's IPC pipe in
+# kernel-conformance, a glass frame socket) needs a path inside the host's
+# 104-byte socket limit, and a checkout under .claude/worktrees/<name>/ puts
+# the legs dir past it on its own.
 run_fkwu_lane() {
     local label="$1" lane="$2"; shift 2
-    local band="${*: -1}" legs rc diags answered head_pin reg_pin stem why=""
+    local band="${*: -1}" legs lane_tmp rc diags answered head_pin reg_pin stem why=""
     fk_workload_root "$@"
     mkdir -p "$HEARTH"
     legs="$(mktemp -d "$HEARTH/validation-legs.XXXXXX")"
-    ( set +e; cd .. && TMPDIR="$legs" "$FOURTH_SOURCE_FKWU" "$workload_unit" > "$legs/fk" 2> "$legs/fk.err"; printf '%s\n' "$?" > "$legs/fk.rc" )
+    lane_tmp="$(mktemp -d "${TMPDIR:-/tmp}/fk-lane.XXXXXX")"
+    ( set +e; cd .. && TMPDIR="$lane_tmp" "$FOURTH_SOURCE_FKWU" "$workload_unit" > "$legs/fk" 2> "$legs/fk.err"; printf '%s\n' "$?" > "$legs/fk.rc" )
+    rm -rf "$lane_tmp"
     rc="$(cat "$legs/fk.rc" 2>/dev/null || echo 1)"
     diags="$(fk_diag_count "$legs/fk.err")"
     answered="$(organ_steady "$legs/fk")"
