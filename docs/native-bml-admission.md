@@ -235,7 +235,7 @@ line counts both.
 
 Source admission still compiles a whole unit synchronously. On-demand
 specialization and complete portable native emission remain
-[north-star work](fkwu-form-native-north-star.md).
+[north-star work](../NORTH_STAR.md).
 
 The cursor grammar in `grammars/form-bml.fk` supplies expression recognition for
 native BML surface lifting and an explicit proof surface. Executable admission

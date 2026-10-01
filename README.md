@@ -70,14 +70,13 @@ cc -O2 -o fkwu runtime/fkwu-uni.c
 gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp
 
 # verify it runs a real body cell
-( cat form/form-stdlib/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > nvr.fk
-./fkwu nvr.fk             # -> 11111   (bit-identical to the four-way proof walkers)
+./fkwu form/form-stdlib/tests/native-vs-rented-band.fk   # -> 11111   (the same answer on all four kernels)
 ```
 
 The first run may add a line or two starting `fkwu: warning:` while the kernel lays down its caches —
 one may mention `.dylib ... not installed`, a speed shortcut the body notes and skips. That is the
 body settling in, not a failure; the `11111` on the last line is the answer. Run it again and it
-answers alone. (`nvr.fk` is already gitignored.)
+answers alone.
 
 That is the whole bootstrap: one C file compiles to the kernel, and the kernel runs the Form body. The build of
 the runtime touches no Go, Rust, Python, or TypeScript. The same fresh-checkout grounding path is summarized in

@@ -108,12 +108,11 @@ does). `AGENTS.md` item 9 carries the practice.
 ## Verify Real Grounding
 
 ```sh
-( cat form/form-stdlib/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > nvr.fk
-./fkwu nvr.fk
+./fkwu form/form-stdlib/tests/native-vs-rented-band.fk
 ```
 
-(`nvr.fk` lands in the checkout and is already gitignored; a shared `/tmp` path
-would let two readers on one machine silently overwrite each other's cell.)
+(The band's `; preludes:` head loads `native-vs-rented.fk`; fkwu walks it with no file
+written beside it.)
 
 Expected output:
 
