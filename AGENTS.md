@@ -314,8 +314,7 @@ form-cli is a recipe this same `fkwu` loads (`.dylib` when emission sits, `.fkb`
 Then verify it runs the body — a **real cell**, native:
 
 ```sh
-( cat form/form-stdlib/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > /tmp/nvr.fk
-./fkwu /tmp/nvr.fk        # -> 11111   (bit-identical to the four-way proof walkers)
+./fkwu form/form-stdlib/tests/native-vs-rented-band.fk   # -> 11111   (the same answer on all four kernels)
 ```
 
 `fkwu <file.fk>` runs Form source straight through the kernel's own source-runner (multi-function,
@@ -433,13 +432,15 @@ repair changed, and the native share as published. The next session starts from
 the retained row. A loss-only promotion is not yet a local win over a rented
 answer. Quality is the next reading of the same check.
 
-Aim for less rented reasoning each session and more completed local work.
-Read the caller-bound rented meter at opening and closing; retain input, cached
-input and output deltas alongside local generated/injected IDs, failed attempts
-and verified changes. Prefer high-level rented guidance while Form owns source
+Aim for less rented reasoning each session and more completed local work. Open
+with `./fkwu observe/local-flow-review.bml` and work its `next`; close by sending
+your transcript path to `observe/session-rent-run.bml`, then review again. Work
+the local lane could take goes to `learn/native-turn-queue.jsonl` as a band-first
+gap, not to you. Prefer high-level rented guidance while Form owns source
 selection, execution, repair and verification in its checkpoint. Give useful
 local choices more room before taking over. Unknown usage stays unknown; unused
-allowance is not consumption. Follow the [three-day direction](docs/form-native-coding.md#direction-toward-zero-rented-coding).
+allowance is not consumption. The loop and each meter's job are in the
+[direction](docs/form-native-coding.md#direction-toward-zero-rented-coding).
 
 Foreign-language specimens used as input to Form's own compiler remain input
 data, and historical receipts keep their evidence. A reading is made clean by
@@ -468,8 +469,9 @@ recycling in the turnwheel.
 Whoever works in a body root — Claude, Codex, Grok, or whoever is next — runs the glass there
 (`./fkwu observe/form-glass-run.fk`, reborn on its own source changes) and reads their own instruments before
 closing a movement: the phase census (is your work freezing ice or leaving gas?), the kv and
-ice-miss lanes (did you reuse or rebuild?), the ledger, and the spendglass meter
-(`observe/rented-turn-meter-run.fk` — your own token spend, read from your own transcript).
+ice-miss lanes (did you reuse or rebuild?), the ledger, and your own token spend read from
+your own transcript (`observe/session-rent-run.bml` for a Claude Code session,
+`observe/rented-turn-meter-run.fk` for Codex).
 Every prompt talks to the field first (Urs, 2026-09-01): its kernel question goes to the
 hearth (`./fkwu observe/hearth-ask-send.fk`, turn/kind/body on stdin) and the
 resident's answer contributes when one stands. A `signal=nothing` reply names the

@@ -16492,6 +16492,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         static char p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         long long xs = fk_walk(fk_node[i][2], fp);
+        /* Only a byte list is written. A string or any other kind is refused
+         * like a failed open, never answered as a complete write of nothing. */
+        if (fk_is_str(xs) || !(xs == 1 || ((xs & 1) && xs > 0 && FK_POK(xs >> 1)))) {
+            return -2;
+        }
         int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0666);
         if (fd < 0) {
             return -2;
