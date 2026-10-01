@@ -242,11 +242,18 @@ section [form.bml] {
  def fsl-surface-sections(source,start) {
   let grammar = form-bml-grammar();
   str-join(fsl-surface-parts(source,start,body => {
-   let names = filter(name => str_find(body,name,0) >= 0,["int_to_str","empty","not"]);
-   let bindings = nil?(names) ? [] : fsl-bound-calls(fsc-rec-do(fsc-form-bml-lines-recipes-loop(body,0,[])),names);
+   let names = filter(name => str_find(body,name,0) >= 0,append(["int_to_str","empty","not"],map(row => row[0],fsl-operator-providers)));
+   let recipe = nil?(names) ? nothing : fsc-rec-do(fsc-form-bml-lines-recipes-loop(body,0,[]));
+   let bindings = nil?(names) ? [] : append(fsl-bound-calls(recipe,names),
+    foldl((words,row) => fsl-binding?(recipe,row[0]) ? append(row[1],words) : words,[],fsl-operator-providers));
    fsl-surface-walk(grammar,cursor-str(body),"",[],bindings);
   }));
  }
+ // A provider must reach its primitive floor. Lifting that floor through the
+ // operator it implements would turn semantic aliases into recursive calls.
+ let fsl-operator-providers = [["bml-value-first",["head","nth"]],
+  ["bml-value-index",["nth"]],["bml-value-tail",["tail"]],
+  ["bml-value-slice",["tail"]],["bml-value-add",["add","str_concat"]]];
  // Module imports retain dependency order and loader spelling. Quoted source
  // specimens are data, even when one of their lines resembles a directive.
  def fsl-import-lines(lines,quoted,continued) = nil?(lines) ? [] : {
@@ -271,27 +278,28 @@ section [form.bml] {
    any?(child => fsl-binding?(child,name),kids);
  }
  def fsl-bound-calls(recipe,names) = filter(name => fsl-binding?(recipe,name),names);
- def fsl-semantic-recipe(recipe) = fsl-semantic-recipe-in(recipe,fsl-bound-calls(recipe,["int_to_str","empty","not"]));
+ def fsl-semantic-recipe(recipe) = fsl-semantic-recipe-in(recipe,fsl-bound-calls(recipe,append(["int_to_str","empty","not"],map(row => row[0],fsl-operator-providers))));
  def fsl-semantic-recipe-in(recipe,bindings) {
   let kids = node_children(recipe); let category = node_category(recipe);
   let call = node_eq(category,fsc-rec-FNCALL-CAT);
   let name = call ? fsc-bml-type-name(kids[0]) : fsc-source-primitive-name(category);
   let args = map(child => fsl-semantic-recipe-in(child,bindings),call ? kids[1:] : kids);
+  let bound = any?(word => word == name,bindings);
   if nil?(kids) then recipe
   else if name == "str_len" then fsc-rec-form-call("len",args)
-  else if name == "int_to_str" && !any?(word => word == name,bindings) then fsc-rec-form-call("value_str",args)
-  else if name == "empty" && nil?(args) && !any?(word => word == name,bindings) then fsc-rec-call("list",[])
-  else if name == "not" && !any?(word => word == name,bindings) then fsc-rec-form-call("not",args)
-  else if name == "bml-value-tail" then fsc-rec-form-call("tail",args)
-  else if name == "bml-value-first" then fsc-rec-form-call("head",args)
-  else if name == "bml-value-slice" && len(args) == 3 && node_eq(args[1],intern_trivial_int(1)) &&
+  else if name == "int_to_str" && !bound then fsc-rec-form-call("value_str",args)
+  else if name == "empty" && nil?(args) && !bound then fsc-rec-call("list",[])
+  else if name == "not" && !bound then fsc-rec-form-call("not",args)
+  else if name == "bml-value-tail" && !bound then fsc-rec-form-call("tail",args)
+  else if name == "bml-value-first" && !bound then fsc-rec-form-call("head",args)
+  else if name == "bml-value-slice" && !bound && len(args) == 3 && node_eq(args[1],intern_trivial_int(1)) &&
    node_eq(args[2],fsc-rec-call("nothing",[])) then fsc-rec-form-call("tail",[args[0]])
   else if name == "nth" && len(args) == 2 && node_eq(args[1],intern_trivial_int(0)) then fsc-rec-form-call("head",[args[0]])
-  else if name == "bml-value-index" && len(args) == 2 && fsc-source-leaf?(args[1]) && node_type(args[1]) == 1 && node_value(args[1]) >= 0 then
+  else if name == "bml-value-index" && !bound && len(args) == 2 && fsc-source-leaf?(args[1]) && node_type(args[1]) == 1 && node_value(args[1]) >= 0 then
    node_value(args[1]) == 0 ? fsc-rec-form-call("head",[args[0]]) : fsc-rec-form-call("nth",args)
-  else if name == "bml-value-add" && len(args) == 2 && any?(fsl-text?,args) then
+  else if name == "bml-value-add" && !bound && len(args) == 2 && any?(fsl-text?,args) then
    fsc-rec-form-call("str_concat",map(arg => fsl-add-contract(arg) == "String" ? node_children(arg)[2] : arg,args))
-  else if name == "bml-value-add" && len(args) == 2 && fsl-add-contract(args[0]) == "Number" && fsl-add-contract(args[1]) == "Number" then
+  else if name == "bml-value-add" && !bound && len(args) == 2 && fsl-add-contract(args[0]) == "Number" && fsl-add-contract(args[1]) == "Number" then
    fsc-rec-form-call("add",map(arg => node_children(arg)[2],args))
   else if (name == "$bml==" || name == "$bml!=") && any?(arg => fsl-add-contract(arg) != "",args) then
    fsc-bml-typed-equality(name,map(arg => fsl-add-contract(arg) == "" ? [arg,""] : [node_children(arg)[2],fsl-add-contract(arg)],args))[0]

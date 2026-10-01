@@ -34,6 +34,8 @@ execution.
 The lifter turns unshadowed `empty()` into `[]` and `not(value)` into `!value`,
 retaining local constructors and bindings. Identical source bytes discharge
 the identity comparison directly; changed candidates still carry the proof.
+Operator providers retain the primitive operations they implement, so lifting
+an operator cannot introduce a call back through its own implementation.
 The lifter uses `form-bml-semantic-equivalent?` for the extended surface. It
 additionally normalizes the admitted string-length, standard value-rendering,
 list-first/remainder and explicitly contracted operator forms. This comparison

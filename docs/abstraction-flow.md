@@ -16,7 +16,7 @@ The disjoint function levels describe authored syntax, not engineering quality:
 | --- | --- |
 | host-c | C function body following a top-level parameter group |
 | form | Raw Form `defn` |
-| bml-primitive-spelling | BML body still calling an arithmetic, comparison, string or list operation with an available higher-level spelling |
+| bml-primitive-spelling | BML body still calling an arithmetic, comparison, string or list operation with an available higher-level spelling, including `empty()` and `value_eq()` |
 | bml-expression | BML body without those spellings or the constructs below |
 | bml-composed | BML using a lambda, choice, match, try/catch, repeat/retry, iteration or intrinsic control, without those primitive spellings |
 
