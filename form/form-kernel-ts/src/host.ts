@@ -109,6 +109,10 @@ export interface KernelHost {
   readonly workingDirectory?: () => string;
   // The home directory ($HOME), where the kernel config's own layer stands; "" when unset.
   readonly homeDirectory?: () => string;
+  // host-exec's carrier: the command's bytes run under `sh -c`; a non-empty input is its
+  // stdin (an empty one leaves stdin inherited); the answer is its stdout's bytes, while its
+  // stderr passes through; null when the process never launched.
+  readonly runProcess?: (command: Uint8Array, input: Uint8Array) => Uint8Array | null;
   readonly httpGet?: (request: KernelHttpRequest) => KernelHttpResult;
   readonly socketCall?: (operation: KernelSocketOperation) => number | string;
   readonly pgCall?: (operation: KernelPgOperation) => KernelPgAnswer;

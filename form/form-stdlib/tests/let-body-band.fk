@@ -1,0 +1,103 @@
+; let-body-band.fk -- (let NAME VALUE BODY) binds NAME over BODY alone and answers BODY, on
+; every kernel. The local voice writes this shape naturally (sort.fk's sort-with halves its list
+; under (let h (div (len xs) 2) ...)); a kernel that drops BODY answers VALUE, and one whose
+; reader refuses the shape answers nothing at all. Prelude-free: each kernel answers from its
+; own reader and walker alone.
+;
+; Verdict 127 (7 bits):
+;   1    in a value position -- an if arm, an argument, a list element -- the let answers its
+;        body; the two-form (let NAME VALUE) there still answers its value
+;   2    nested: a body that is itself a let-body, a value that is a let-body, and a value that
+;        reads the name it is about to shadow
+;   4    NAME leaves with BODY: a shadowed parameter, a shadowed do-let and a shadowed unit
+;        constant each read their own value again right after the body
+;   8    BODY sees its scope: a do inside the body binds beside NAME, and a nested defn made
+;        in the body captures NAME
+;   16   BODY is in tail position: a loop of 20000 tail calls through a let-body ends, and a
+;        let-body as an if condition and inside and/or answers its body's truth
+;   32   sort.fk's own shape: a merge sort that halves under (let h (div (len xs) 2) ...)
+;        sorts 64 integers
+;   64   WARM: the bit-1 defns asked again after 30000 calls, past fkwu's JIT threshold --
+;        the hot let-body answers what the cold one answered
+;
+; In a do's statement position fkwu reads only the two-form let (it binds the rest of the
+; do); a three-form let there is a source error on fkwu, so no row here writes it.
+;
+; PROOF LEVEL: FOUR-WAY -- every row is the same answer on fkwu, go, rust and ts.
+;
+; WATCHED FAILING, 2026-10-01: the go and rust kernels built from fb6581e7a dropped BODY and
+; answered VALUE, reading 0; the ts kernel built from fb6581e7a refused the file ("let:
+; expected )") and printed nothing. A kernel that let NAME leak past BODY would darken bit 4.
+(do
+    (let lbb-k 3)
+    (defn lbb-bit (ok n) (if ok n 0))
+    (defn lbb-nil? (xs) (eq (len xs) 0))
+    (defn lbb-sum (xs acc) (if (lbb-nil? xs) acc (lbb-sum (tail xs) (add acc (head xs)))))
+    (defn lbb-same? (xs ys)
+        (if (lbb-nil? xs) (lbb-nil? ys)
+            (if (lbb-nil? ys) 0
+                (and (eq (head xs) (head ys)) (lbb-same? (tail xs) (tail ys))))))
+
+    ; bit 1: value positions
+    (defn lbb-arm (a) (if (gt a 0) (let h (mul a 2) (add h 1)) 0))
+    (defn lbb-arg (a) (add 100 (let h (mul a 3) (add h 1))))
+    (defn lbb-elem (a) (list (let h (add a 1) h) a))
+    (defn lbb-two (a) (add 1 (let q (mul a 4))))
+
+    ; bit 2: nesting
+    (defn lbb-chain (a) (let h (add a 1) (let g (mul h 2) (add g h))))
+    (defn lbb-inval (a) (let a2 (let b 2 (mul b b)) (add a2 a)))
+    (defn lbb-self (a) (let a (add a 1) (let a (mul a 2) a)))
+
+    ; bit 4: the name leaves with the body
+    (defn lbb-param (a) (add (let a 10 (add a 1)) a))
+    (defn lbb-dolet (a) (do (let k 1) (add (let k 100 (add k 1)) (add k a))))
+    (defn lbb-unit (a) (add (let lbb-k (mul a 2) (add lbb-k 1)) lbb-k))
+
+    ; bit 8: the body's scope
+    (defn lbb-map (f xs) (if (lbb-nil? xs) (list) (cons (f (head xs)) (lbb-map f (tail xs)))))
+    (defn lbb-inner-do (a) (let h 2 (do (let g 3) (add h (add g a)))))
+    (defn lbb-capture (a) (let h (mul a 10) (do (defn lbb-addh (x) (add x h)) (lbb-map lbb-addh (list 1 2 3)))))
+
+    ; bit 16: tail position and truth
+    (defn lbb-count (n acc) (if (eq n 0) acc (let m (sub n 1) (lbb-count m (add acc 1)))))
+    (defn lbb-cond (a) (if (let c a (eq c 0)) 1 2))
+    (defn lbb-logic (a) (and (let t a (gt t 0)) (or (let f 0 (eq f 1)) (let u 1 (eq u 1)))))
+
+    ; bit 32: sort.fk's sort-with shape
+    (defn lbb-take (xs n) (if (or (lbb-nil? xs) (eq n 0)) (list) (cons (head xs) (lbb-take (tail xs) (sub n 1)))))
+    (defn lbb-drop (xs n) (if (or (lbb-nil? xs) (eq n 0)) xs (lbb-drop (tail xs) (sub n 1))))
+    (defn lbb-merge (xs ys)
+        (if (lbb-nil? xs) ys
+            (if (lbb-nil? ys) xs
+                (if (le (head xs) (head ys))
+                    (cons (head xs) (lbb-merge (tail xs) ys))
+                    (cons (head ys) (lbb-merge xs (tail ys)))))))
+    (defn lbb-sort (xs)
+        (if (or (lbb-nil? xs) (lbb-nil? (tail xs)))
+            xs
+            (let h (div (len xs) 2)
+                (lbb-merge (lbb-sort (lbb-take xs h)) (lbb-sort (lbb-drop xs h))))))
+    (defn lbb-down (n acc) (if (eq n 0) acc (lbb-down (sub n 1) (cons (sub 65 n) acc))))
+    (defn lbb-up (n acc) (if (eq n 0) acc (lbb-up (sub n 1) (cons n acc))))
+
+    ; bit 64: the bit-1 defns hot
+    (defn lbb-warm (n acc)
+        (if (eq n 0) acc
+            (lbb-warm (sub n 1) (add acc (add (lbb-arm n) (add (lbb-arg n) (lbb-two n)))))))
+
+    (defn let-body-band ()
+        (do
+            (let warm (lbb-warm 30000 0))
+            (lbb-sum (list
+                (lbb-bit (and (eq (lbb-arm 5) 11) (and (eq (lbb-arm -1) 0) (and (eq (lbb-arg 2) 107)
+                    (and (lbb-same? (lbb-elem 9) (list 10 9)) (eq (lbb-two 2) 9))))) 1)
+                (lbb-bit (and (eq (lbb-chain 4) 15) (and (eq (lbb-inval 1) 5) (eq (lbb-self 5) 12))) 2)
+                (lbb-bit (and (eq (lbb-param 5) 16) (and (eq (lbb-dolet 7) 109) (eq (lbb-unit 4) 12))) 4)
+                (lbb-bit (and (eq (lbb-inner-do 1) 6) (lbb-same? (lbb-capture 2) (list 21 22 23))) 8)
+                (lbb-bit (and (eq (lbb-count 20000 0) 20000)
+                    (and (eq (lbb-cond 0) 1) (and (eq (lbb-cond 1) 2) (lbb-logic 1)))) 16)
+                (lbb-bit (lbb-same? (lbb-sort (lbb-down 64 (list))) (lbb-up 64 (list))) 32)
+                (lbb-bit (and (eq warm 4053225000) (and (eq (lbb-arm 5) 11) (and (eq (lbb-arg 2) 107) (eq (lbb-two 2) 9)))) 64))
+                0)))
+    (let-body-band))

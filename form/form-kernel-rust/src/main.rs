@@ -119,7 +119,7 @@ fn crash_trace_context() -> &'static Mutex<CrashTraceContext> {
 thread_local! {
     static THREAD_CRASH_TRACE_CONTEXT: RefCell<Option<CrashTraceContext>> = const { RefCell::new(None) };
     static THREAD_LAST_CRASH_TRACE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-    static FORM_CALL_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static FORM_CALL_STACK: RefCell<Vec<Arc<str>>> = const { RefCell::new(Vec::new()) };
     // The walker's stack, as fkwu measures its own: where this thread's walks began and
     // how many bytes below that a walk may reach before it stops (eval too deep).
     static WALK_BASE: Cell<usize> = const { Cell::new(0) };
@@ -180,11 +180,14 @@ fn attempt(k: &mut Kernel, a: &mut Arena, x: NodeID, env: FrameId) -> Value {
 // hook runs BEFORE unwinding, so a fatal reads the frames that were live at
 // the crash; unwinding then pops them, which keeps the stack honest across
 // the serve worker's per-request catch_unwind. Closure labels carry source
-// attribution ("name@file:line:col") when the body recipe has it.
+// attribution ("name@file:line:col") when the body recipe has it. A label is
+// built once per closure or native and shared after (Kernel::closure_label,
+// Kernel::native_label): a push is a refcount, never a format.
 struct FormStackFrame;
 
 impl FormStackFrame {
-    fn push(label: String) -> FormStackFrame {
+    fn push(label: impl Into<Arc<str>>) -> FormStackFrame {
+        let label = label.into();
         FORM_CALL_STACK.with(|s| s.borrow_mut().push(label));
         FormStackFrame
     }
@@ -192,7 +195,7 @@ impl FormStackFrame {
     // Tail call: the caller's frame is complete (its body ended in this
     // call), so the new label REPLACES the top instead of stacking — the
     // same collapse a tail-call-optimized host stack performs.
-    fn replace_top(self, label: String) -> FormStackFrame {
+    fn replace_top(self, label: Arc<str>) -> FormStackFrame {
         FORM_CALL_STACK.with(|s| {
             let mut stack = s.borrow_mut();
             stack.pop();
@@ -211,7 +214,7 @@ impl Drop for FormStackFrame {
 }
 
 fn form_stack_snapshot() -> Vec<String> {
-    FORM_CALL_STACK.with(|s| s.borrow().iter().rev().cloned().collect())
+    FORM_CALL_STACK.with(|s| s.borrow().iter().rev().map(|l| l.to_string()).collect())
 }
 
 fn form_stack_display(max: usize) -> String {
@@ -1582,11 +1585,54 @@ fn form_kernel_stack_bytes() -> usize {
     }
 }
 
+// Children are shared: walking a node takes its children as a refcount, not a copy.
 #[derive(Clone, Debug)]
 struct Recipe {
     category: NodeID,
-    children: Vec<NodeID>,
+    children: Arc<[NodeID]>,
 }
+
+// FastHash — the walker's own hash for the intern and name tables, keyed by small
+// fixed words (NodeIDs, NameIDs) read on every node: a multiply-rotate fold, where
+// the standard SipHash spent a fifth of a numeric band's time hashing. Tables keyed
+// by outside input keep the standard hasher.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct FastHash(u64);
+
+impl std::hash::Hasher for FastHash {
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.add(*b as u64);
+        }
+    }
+    fn write_u8(&mut self, n: u8) {
+        self.add(n as u64);
+    }
+    fn write_u16(&mut self, n: u16) {
+        self.add(n as u64);
+    }
+    fn write_u32(&mut self, n: u32) {
+        self.add(n as u64);
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.add(n);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.add(n as u64);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+impl FastHash {
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<FastHash>>;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ShapeKey {
@@ -1612,6 +1658,9 @@ struct NativeEntry {
     name: NameID,
     category: NodeID,
     func: NativeFn,
+    // fkwu reserves this head: it answers as the native under any local
+    // binding of its spelling. Read once at registration, not per call.
+    reserved: bool,
 }
 
 // NameID — interned identifier handle. The same u32 used to encode a name
@@ -1629,14 +1678,14 @@ type FrameId = u32;
 // table, native dispatch. Mutates only at parse/intern time. Held as
 // `&Kernel` by the walker so children() can return borrowed slices.
 pub(crate) struct Kernel {
-    by_shape: HashMap<ShapeKey, NodeID>,
-    by_id: HashMap<NodeID, Recipe>,
+    by_shape: FastMap<ShapeKey, NodeID>,
+    by_id: FastMap<NodeID, Recipe>,
     // Source attribution side-map: NodeID → (file_name_id, line, col).
     // Populated by `intern_node_at` for Recipes emitted from parser actions
     // that carry source-location context. `node_source` reads back.
     // The satsang-load-bearing surface: every cell's state is traceable
     // back to the source line of the recipe that authored it.
-    source_attr: HashMap<NodeID, (NameID, u32, u32)>,
+    source_attr: FastMap<NodeID, (NameID, u32, u32)>,
     // The nodes intern_node_at and fb_record recorded, in recording order.
     // framebuffer-events walks these, as Go and TS walk framebufferRoots, so
     // an observer reads the same events in the same order on every kernel.
@@ -1661,7 +1710,7 @@ pub(crate) struct Kernel {
     i64s: Vec<i64>,
     i64_idx: HashMap<i64, u32>,
     next_inst: u32,
-    natives: HashMap<NameID, NativeEntry>,
+    natives: FastMap<NameID, NativeEntry>,
     // methods — the blueprint method table (BML/NUMS reference: methods live
     // on the blueprint/type, shared by all instances, name-dispatched). Keyed
     // by (blueprint NodeID, method-name NameID) → the method's Closure. A
@@ -1673,15 +1722,19 @@ pub(crate) struct Kernel {
     // keyed by the substrate identity of the scrutinee value. The cache key is
     // the match recipe's own content-addressed NodeID, so repeated evaluation
     // pays the table build once and then dispatches by O(1) lookup.
-    switch_tables: HashMap<NodeID, SwitchTable>,
+    switch_tables: FastMap<NodeID, SwitchTable>,
     // unit_roots -- the unit roots the reader built, by how walk_unit reads
     // them: UNIT_DO for a source whose one form is a (do ...), UNIT_WRAPPER for
     // the implicit do that holds several top-level forms.
-    unit_roots: HashMap<NodeID, u8>,
+    unit_roots: FastMap<NodeID, u8>,
     // unit_view -- the unit version: a later unit let that rebinds a name
     // raises it, and a closure defined at the unit level reads the unit as of
     // its own.
     unit_view: u64,
+    // The Form-stack labels, each built once: a native's name, and a closure's
+    // "name@file:line:col" keyed by its name and body.
+    native_labels: FastMap<NameID, Arc<str>>,
+    closure_labels: FastMap<(NameID, NodeID), Arc<str>>,
     // Optional tracing — None for hot-path runs, Some for `trace` subcommand.
     // Hooked at the top of walk() to record per-arm dispatch counts and
     // choice success/failure rates. Per lc-native-kernel-binary's
@@ -2105,9 +2158,9 @@ impl Arena {
 impl Kernel {
     pub(crate) fn new() -> Self {
         let mut k = Self {
-            by_shape: HashMap::new(),
-            by_id: HashMap::new(),
-            source_attr: HashMap::new(),
+            by_shape: FastMap::default(),
+            by_id: FastMap::default(),
+            source_attr: FastMap::default(),
             framebuffer_roots: Vec::new(),
             reading_files: Vec::new(),
             import_seq: 1,
@@ -2118,15 +2171,44 @@ impl Kernel {
             i64s: Vec::new(),
             i64_idx: HashMap::new(),
             next_inst: 1,
-            natives: HashMap::new(),
+            natives: FastMap::default(),
             methods: HashMap::new(),
-            switch_tables: HashMap::new(),
-            unit_roots: HashMap::new(),
+            switch_tables: FastMap::default(),
+            unit_roots: FastMap::default(),
             unit_view: 1,
+            native_labels: FastMap::default(),
+            closure_labels: FastMap::default(),
             trace: None,
         };
         k.register_natives();
         k
+    }
+
+    // native_label -- the Form-stack label of a native: its name, built once.
+    fn native_label(&mut self, name: NameID) -> Arc<str> {
+        if let Some(l) = self.native_labels.get(&name) {
+            return l.clone();
+        }
+        let l: Arc<str> = Arc::from(self.name_str(name));
+        self.native_labels.insert(name, l.clone());
+        l
+    }
+
+    // closure_label -- the Form-stack label of a closure: "name@file:line:col"
+    // when its body carries source attribution, else its name; built once.
+    fn closure_label(&mut self, name: NameID, body: NodeID) -> Arc<str> {
+        if let Some(l) = self.closure_labels.get(&(name, body)) {
+            return l.clone();
+        }
+        let fn_name = self.name_str(name).to_string();
+        let l: Arc<str> = match self.source_attr.get(&body).copied() {
+            Some((file_id, line, col)) => {
+                Arc::from(format!("{}@{}:{}:{}", fn_name, self.name_str(file_id), line, col))
+            }
+            None => Arc::from(fn_name),
+        };
+        self.closure_labels.insert((name, body), l.clone());
+        l
     }
 
     // intern — content-addressed insertion. Same shape ⇒ same NodeID.
@@ -2146,7 +2228,7 @@ impl Kernel {
         };
         self.next_inst += 1;
         self.by_shape.insert(key, nid);
-        self.by_id.insert(nid, Recipe { category, children });
+        self.by_id.insert(nid, Recipe { category, children: children.into() });
         nid
     }
 
@@ -2302,14 +2384,13 @@ impl Kernel {
         self.by_id.get(&n).map(|r| r.category).unwrap_or(n)
     }
 
-    // Owned children — clones the children vec. The slice version went
-    // away when substrate-write natives required `&mut Kernel`; future
-    // breath restores zero-copy via Cow<'_, [NodeID]>.
-    pub(crate) fn children(&self, n: NodeID) -> Vec<NodeID> {
+    // Shared children — a refcount on the recipe's own slice, never a copy, so
+    // the walker holds them across `&mut Kernel` natives without allocating.
+    pub(crate) fn children(&self, n: NodeID) -> Arc<[NodeID]> {
         self.by_id
             .get(&n)
             .map(|r| r.children.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(|| Arc::from(Vec::new()))
     }
 
     pub(crate) fn trivial_value(&self, n: NodeID) -> Value {
@@ -2445,13 +2526,74 @@ impl PartialEq<&str> for Bstr {
     }
 }
 
+// ListRef — a list value: a view of shared cells from `start` on, so tail is a
+// new view, not a copy (a list walk by tail is linear, not quadratic). `end` is a
+// pair's tail word: a list made by cons onto a word that is not a list, as fkwu's
+// cons makes one. List readers (len, nth, print, value_str) end before it and
+// read [h]; tail, eq and value_eq see it. Every view of one cell buffer shares its
+// bottom, so the word rides along.
+#[derive(Clone, Debug)]
+pub(crate) struct ListRef {
+    cells: Arc<Vec<Value>>,
+    start: usize,
+    end: Option<Arc<Value>>,
+}
+
+impl ListRef {
+    pub(crate) fn new(cells: Vec<Value>) -> ListRef {
+        ListRef { cells: Arc::new(cells), start: 0, end: None }
+    }
+    // cons: the head before these cells, the same tail word below them
+    fn consed(head: Value, rest: &ListRef) -> ListRef {
+        let mut out = Vec::with_capacity(rest.len() + 1);
+        out.push(head);
+        out.extend(rest.iter().cloned());
+        ListRef { cells: Arc::new(out), start: 0, end: rest.end.clone() }
+    }
+    // a pair: one cell above a word that is not a list
+    fn pair(head: Value, word: Value) -> ListRef {
+        ListRef { cells: Arc::new(vec![head]), start: 0, end: Some(Arc::new(word)) }
+    }
+    // tail: the cells after the first, or the pair's word after its last cell
+    fn rest(&self) -> Value {
+        if self.is_empty() {
+            return Value::List(ListRef::new(Vec::new()));
+        }
+        if self.len() == 1 {
+            if let Some(w) = &self.end {
+                return (**w).clone();
+            }
+        }
+        Value::List(ListRef { cells: self.cells.clone(), start: self.start + 1, end: self.end.clone() })
+    }
+    fn ptr_eq(a: &ListRef, b: &ListRef) -> bool {
+        Arc::ptr_eq(&a.cells, &b.cells) && a.start == b.start
+    }
+    fn end_word(&self) -> Option<&Value> {
+        self.end.as_deref()
+    }
+}
+
+impl std::ops::Deref for ListRef {
+    type Target = [Value];
+    fn deref(&self) -> &[Value] {
+        &self.cells[self.start..]
+    }
+}
+
+impl From<Vec<Value>> for ListRef {
+    fn from(cells: Vec<Value>) -> ListRef {
+        ListRef::new(cells)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Value {
     Null,
     Int(i64),
     Float(f64),
     Str(Bstr),
-    List(Arc<Vec<Value>>),
+    List(ListRef),
     Closure(Arc<Closure>),
     Nid(NodeID),
     // Record — a mutable struct/object with identity. The first mutable Value
@@ -2828,6 +2970,7 @@ impl Kernel {
                 name: id,
                 category,
                 func: f,
+                reserved: reserved_heads::fkwu_reserved(name),
             },
         );
     }
@@ -3042,7 +3185,7 @@ impl Kernel {
         self.register_native("record_keys", cat_access(), |k, _, args| match &args[0] {
             Value::Record(r) => {
                 let names: Vec<NameID> = r.lock().unwrap().fields.iter().map(|(n, _)| *n).collect();
-                Value::List(Arc::new(
+                Value::List(ListRef::new(
                     names
                         .into_iter()
                         .map(|n| Value::Str(k.strs[n as usize].clone().into()))
@@ -3285,16 +3428,18 @@ impl Kernel {
         self.register_native("list", cat_list_nat(), |_, _, args| {
             Value::List(args.to_vec().into())
         });
+        // cons onto a word that is not a list makes a pair, as fkwu's cons does (see
+        // ListRef): form-eval's env is a cons chain ended by 0, the stage bus carries
+        // (cons stage key).
         self.register_native("cons", cat_list_nat(), |_, _, args| {
             // nothing is not a list: consing onto it is a stop, as on fkwu
             if matches!(args[1], Value::Null) {
                 panic!("cons: nothing is not a list -- ask nothing? before consing");
             }
-            let mut out = vec![args[0].clone()];
-            if let Value::List(rest) = &args[1] {
-                out.extend(rest.iter().cloned());
+            match &args[1] {
+                Value::List(rest) => Value::List(ListRef::consed(args[0].clone(), rest)),
+                word => Value::List(ListRef::pair(args[0].clone(), word.clone())),
             }
-            Value::List(out.into())
         });
         self.register_native("head", cat_list_nat(), |_, _, args| {
             if let Value::List(xs) = &args[0] {
@@ -3303,13 +3448,10 @@ impl Kernel {
                 Value::Null
             }
         });
+        // tail is a view, not a copy; the tail of a pair's last cell is its word
         self.register_native("tail", cat_list_nat(), |_, _, args| {
             if let Value::List(xs) = &args[0] {
-                Value::List(if xs.is_empty() {
-                    vec![].into()
-                } else {
-                    xs[1..].to_vec().into()
-                })
+                xs.rest()
             } else {
                 Value::Null
             }
@@ -3457,8 +3599,13 @@ impl Kernel {
         // Rounds the exact decimal value of the double half-to-even at n
         // fractional places (n >= 0), matching CPython bit-for-bit. Sibling-
         // parity with the Go + TS kernels. See round_ndigits_decimal above.
+        // A negative n stops by name, as on fkwu: ndigits counts places.
         self.register_native("round_ndigits", cat_method(), |_, _, args| {
-            Value::Float(round_ndigits_decimal(args[0].as_float(), args[1].as_int()))
+            let n = args[1].as_int();
+            if n < 0 {
+                panic!("round_ndigits: ndigits is a count of places, an int at or above 0");
+            }
+            Value::Float(round_ndigits_decimal(args[0].as_float(), n))
         });
         let read_file_text_native: NativeFn =
             // the file's own bytes, binary included (Bstr)
@@ -3471,7 +3618,7 @@ impl Kernel {
         // Byte-level host file read — returns a list of ints (0-255), one per byte.
         self.register_native("read_file_bytes", cat_call(), |_, _, args| {
             match fs::read(resolve_kernel_host_path(args[0].as_str())) {
-                Ok(bytes) => Value::List(Arc::new(
+                Ok(bytes) => Value::List(ListRef::new(
                     bytes.into_iter().map(|b| Value::Int(b as i64)).collect(),
                 )),
                 Err(_) => Value::Null,
@@ -3512,7 +3659,7 @@ impl Kernel {
             let mut buf = vec![0u8; n as usize];
             match fs::OpenOptions::new().read(true).open("/dev/urandom") {
                 Ok(mut f) => match f.read_exact(&mut buf) {
-                    Ok(_) => Value::List(Arc::new(
+                    Ok(_) => Value::List(ListRef::new(
                         buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
                     )),
                     Err(_) => Value::Null,
@@ -3569,7 +3716,7 @@ impl Kernel {
         //   structure in any kernel.
         self.register_native("recipe_to_bytes", cat_witness(), |k, _, args| {
             let bytes = serialize_artifact(k, args[0].as_nid());
-            Value::List(Arc::new(
+            Value::List(ListRef::new(
                 bytes.into_iter().map(|b| Value::Int(b as i64)).collect(),
             ))
         });
@@ -3719,7 +3866,7 @@ impl Kernel {
                         .map(|e| e.file_name().to_string_lossy().to_string())
                         .collect();
                     names.sort();
-                    Value::List(Arc::new(
+                    Value::List(ListRef::new(
                         names.into_iter().map(|s| Value::Str(s.into())).collect(),
                     ))
                 }
@@ -4192,7 +4339,7 @@ impl Kernel {
         });
         self.register_native("node_children", cat_witness(), |k, _, args| {
             let kids = k.children(args[0].as_nid());
-            Value::List(Arc::new(kids.into_iter().map(Value::Nid).collect()))
+            Value::List(ListRef::new(kids.iter().copied().map(Value::Nid).collect()))
         });
         self.register_native("node_value", cat_witness(), |k, _, args| {
             k.trivial_value(args[0].as_nid())
@@ -4252,7 +4399,7 @@ impl Kernel {
         // pays the cost of walking + filtering this list when it wants to
         // analyze hot-spots or flow.
         self.register_native("framebuffer-events", cat_witness(), |k, _, _| {
-            Value::List(Arc::new(
+            Value::List(ListRef::new(
                 k.framebuffer_roots
                     .iter()
                     .filter(|nid| k.source_attr.contains_key(nid))
@@ -4270,12 +4417,13 @@ impl Kernel {
             Value::Null
         });
         // write_file_bytes path byte-list → bytes written | -1; a second argument that is not a
-        // list answers nothing and leaves the file as it stood.
+        // list of ints answers -1 and leaves the file as it stood, as fkwu (fk_byte_list_ok),
+        // Go and TS answer.
         self.register_native("write_file_bytes", cat_call(), |_, _, args| {
             let path = args[0].as_str().to_string();
-            let bytes: Vec<u8> = match &args[1] {
-                Value::List(xs) => xs.iter().map(|v| v.as_int() as u8).collect(),
-                _ => return Value::Null,
+            let bytes: Vec<u8> = match byte_list_of(&args[1]) {
+                Some(bytes) => bytes,
+                None => return Value::Int(-1),
             };
             match fs::write(&path, &bytes) {
                 Ok(_) => Value::Int(bytes.len() as i64),
@@ -4288,9 +4436,9 @@ impl Kernel {
         // file and returns the new total size. Creates the file if absent.
         let file_append_bytes_native: NativeFn = |_, _, args| {
             let path = args[0].as_str().to_string();
-            let bytes: Vec<u8> = match &args[1] {
-                Value::List(xs) => xs.iter().map(|v| v.as_int() as u8).collect(),
-                _ => return Value::Int(-1),
+            let bytes: Vec<u8> = match byte_list_of(&args[1]) {
+                Some(bytes) => bytes,
+                None => return Value::Int(-1),
             };
             let mut f = match fs::OpenOptions::new().append(true).create(true).open(&path) {
                 Ok(f) => f,
@@ -4324,6 +4472,7 @@ impl Kernel {
         self.register_native("host_file_write_text", cat_call(), write_file_text_native);
         self.register_native("write_file", cat_call(), write_file_text_native);
         self.register_native("write_file_text", cat_call(), write_file_text_native);
+        self.register_native("host-exec", cat_method(), |_, _, args| host_exec_native(args));
 
         // `now_unix_ms` — current wall-clock as a millisecond unix timestamp.
         // External effect (reads the host clock) so it's cat_call. Sibling
@@ -4386,13 +4535,13 @@ impl Kernel {
         self.register_native("kernel_live", cat_witness(), |_, _, args| {
             match (args.first(), host_birth_unix_ms()) {
                 (Some(Value::Int(pid)), Some(birth)) if *pid == std::process::id() as i64 => {
-                    Value::List(Arc::new(vec![
+                    Value::List(ListRef::new(vec![
                         Value::Int(KERNEL_LIVE_MAGIC),
                         Value::Int(*pid),
                         Value::Int(birth),
                     ]))
                 }
-                _ => Value::List(Arc::new(Vec::new())),
+                _ => Value::List(ListRef::new(Vec::new())),
             }
         });
         // print_str s writes the string's bytes and one newline to stdout, flushed, and answers
@@ -4470,6 +4619,70 @@ fn bool_int(b: bool) -> Value {
     Value::Int(b as i64)
 }
 
+// byte_list_of — the bytes a byte writer writes: a list whose every cell is an int,
+// each masked to its low byte (all four kernels mask). Anything else is no byte list,
+// and the writer answers -1 before it touches the file, as fkwu's fk_byte_list_ok refuses.
+fn byte_list_of(v: &Value) -> Option<Vec<u8>> {
+    match v {
+        Value::List(xs) => xs
+            .iter()
+            .map(|x| match x {
+                Value::Int(n) => Some(*n as u8),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    }
+}
+
+// host_exec_native — (host-exec cmd input), fkwu's fk_host_exec: cmd runs under
+// `sh -c`; a non-empty input is the child's stdin and an empty one leaves stdin
+// inherited; the answer is the child's stdout, while its stderr passes through to
+// this kernel's own; a nonzero exit still answers what the command spoke. A launch
+// that never happened answers nothing, never "": "" means the command ran and spoke
+// zero bytes. Output is a host effect, receipt-validated, not an identity floor.
+fn host_exec_native(args: &[Value]) -> Value {
+    use std::process::{Command, Stdio};
+    let cmd: Vec<u8> = match args.first() {
+        Some(Value::Str(s)) => s.to_vec(),
+        _ => panic!("host-exec: a command is a string"),
+    };
+    let input: Vec<u8> = match args.get(1) {
+        Some(Value::Str(s)) => s.to_vec(),
+        _ => Vec::new(),
+    };
+    #[cfg(unix)]
+    let program = {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(&cmd).to_os_string()
+    };
+    #[cfg(not(unix))]
+    let program = String::from_utf8_lossy(&cmd).to_string();
+    let mut command = Command::new("/bin/sh");
+    command.arg("-c").arg(program).stdout(Stdio::piped()).stderr(Stdio::inherit());
+    command.stdin(if input.is_empty() { Stdio::inherit() } else { Stdio::piped() });
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => return Value::Null,
+    };
+    // stdin is fed on its own thread, so a child that speaks before it reads
+    // never meets a full pipe on both sides
+    let feeder = child.stdin.take().map(|mut sink| {
+        thread::spawn(move || {
+            let _ = sink.write_all(&input);
+        })
+    });
+    let mut out = Vec::new();
+    if let Some(mut source) = child.stdout.take() {
+        let _ = source.read_to_end(&mut out);
+    }
+    if let Some(f) = feeder {
+        let _ = f.join();
+    }
+    let _ = child.wait();
+    Value::Str(out.into())
+}
+
 // value_equal — content identity (axiom-3: same composition is the same cell).
 // value_eq answers it, and eq/ne answer it wherever a non-number takes part.
 // Numbers keep their kind: an int never equals a float here, and a NaN is the
@@ -4485,8 +4698,14 @@ fn value_equal(a: &Value, b: &Value) -> bool {
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::Nid(x), Value::Nid(y)) => x == y,
         (Value::List(xs), Value::List(ys)) => {
-            Arc::ptr_eq(xs, ys)
-                || (xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| value_equal(x, y)))
+            // a pair meets only a pair with the same tail word, as on fkwu
+            let ends = match (xs.end_word(), ys.end_word()) {
+                (None, None) => true,
+                (Some(x), Some(y)) => value_equal(x, y),
+                _ => false,
+            };
+            ends && (ListRef::ptr_eq(xs, ys)
+                || (xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| value_equal(x, y))))
         }
         (Value::Record(x), Value::Record(y)) => Arc::ptr_eq(x, y),
         (Value::Closure(x), Value::Closure(y)) => Arc::ptr_eq(x, y),
@@ -4938,9 +5157,11 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                 // (a parameter, a let) is nearer than the native unless fkwu reserves
                 // the head: the one call-position reading every arm gives. Copy the
                 // entry out so the natives-map borrow releases before we call &mut k.
-                let ne_opt = k.natives.get(&name).copied().filter(|_| {
-                    reserved_heads::fkwu_reserved(k.name_str(name)) || !a.has_local(env, name)
-                });
+                let ne_opt = k
+                    .natives
+                    .get(&name)
+                    .copied()
+                    .filter(|ne| ne.reserved || !a.has_local(env, name));
                 if let Some(ne) = ne_opt {
                     let mut args = Vec::with_capacity(kids.len() - 1);
                     for arg in &kids[1..] {
@@ -4956,11 +5177,13 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                             t.record(ne.category.ty, ne.category.inst);
                         }
                     }
-                    let native_name = k.name_str(ne.name).to_string();
-                    if let Some(t) = &mut k.trace {
-                        t.record_native(&native_name);
+                    if k.trace.is_some() {
+                        let native_name = k.name_str(ne.name).to_string();
+                        if let Some(t) = &mut k.trace {
+                            t.record_native(&native_name);
+                        }
                     }
-                    let _form_frame = FormStackFrame::push(native_name);
+                    let _form_frame = FormStackFrame::push(k.native_label(ne.name));
                     return (ne.func)(k, a, &args);
                 }
                 let callee = a
@@ -4996,16 +5219,13 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                 for (p, arg) in cl2.params.iter().zip(args) {
                     a.bind(call_frame, *p, arg);
                 }
-                let fn_name = k.name_str(cl.name).to_string();
-                if let Some(t) = &mut k.trace {
-                    t.record_fn(&fn_name);
-                }
-                let frame_label = match k.source_attr.get(&cl2.body).copied() {
-                    Some((file_id, line, col)) => {
-                        format!("{}@{}:{}:{}", fn_name, k.name_str(file_id), line, col)
+                if k.trace.is_some() {
+                    let fn_name = k.name_str(cl.name).to_string();
+                    if let Some(t) = &mut k.trace {
+                        t.record_fn(&fn_name);
                     }
-                    None => fn_name.clone(),
-                };
+                }
+                let frame_label = k.closure_label(cl.name, cl2.body);
                 form_frame = Some(match form_frame.take() {
                     Some(f) => f.replace_top(frame_label),
                     None => FormStackFrame::push(frame_label),
@@ -5016,7 +5236,7 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
             }
             RB_LIST => {
                 let mut out = Vec::with_capacity(kids.len());
-                for c in &kids {
+                for c in kids.iter() {
                     out.push(walk(k, a, *c, env));
                 }
                 Value::List(out.into())
@@ -5465,6 +5685,15 @@ fn build_verb(k: &mut Kernel, verb: &str, args: Vec<NodeID>) -> NodeID {
         "let" => {
             // (let <ident> <value>) — args[0] is an Identifier recipe wrapping
             // a string trivial. Repackage as the bare string trivial.
+            // (let <ident> <value> <body>) binds the name over its body alone and
+            // answers the body, as fkwu reads it: it is the do (do (let n v) body),
+            // whose own scope ends with the body, so the name leaves with it.
+            if args.len() < 2 || args.len() > 3 {
+                panic!(
+                    "parse error: let takes (let name value) or (let name value body), got {} forms",
+                    args.len()
+                );
+            }
             let name_id = k.ident_id(args[0]);
             let name_trivial = NodeID {
                 pkg: 1,
@@ -5472,7 +5701,12 @@ fn build_verb(k: &mut Kernel, verb: &str, args: Vec<NodeID>) -> NodeID {
                 ty: TRIV_STRING,
                 inst: name_id,
             };
-            k.intern(cat_block(RBLK_LET), vec![name_trivial, args[1]])
+            let bind = k.intern(cat_block(RBLK_LET), vec![name_trivial, args[1]]);
+            if args.len() == 3 {
+                k.intern(cat_block(RBLK_DO), vec![bind, args[2]])
+            } else {
+                bind
+            }
         }
         "if" => {
             if args.len() == 2 {
@@ -5664,9 +5898,12 @@ fn decimal_prefix_float(s: &[u8]) -> f64 {
     let int_end = digits_from(i);
     let mut seen = int_end > i;
     i = int_end;
+    // one dot: taken after integer digits even when no fraction digit follows
+    // ("5.e3" is 5000, as fkwu's fk_decimal_prefix reads it), and before
+    // fraction digits when there were none (".5")
     if i < s.len() && s[i] == b'.' {
         let frac_end = digits_from(i + 1);
-        if frac_end > i + 1 {
+        if seen || frac_end > i + 1 {
             seen = true;
             i = frac_end;
         }
@@ -7165,7 +7402,7 @@ fn handle_request(
                 .iter()
                 .map(|(k, v)| (k.clone(), Value::Str(v.clone().into()))),
         );
-        let q_alist = Value::List(Arc::new(
+        let q_alist = Value::List(ListRef::new(
             handler_data
                 .iter()
                 .map(|(k, v)| Value::List(vec![Value::Str(k.clone().into()), v.clone()].into()))
@@ -8672,13 +8909,13 @@ fn router_http_request_parts_value(
             Value::Int(KH_TAG_REQUEST),
             Value::Str(method.to_string().into()),
             Value::Str(path.to_string().into()),
-            Value::List(Arc::new(
+            Value::List(ListRef::new(
                 headers
                     .iter()
                     .map(|(name, value)| router_http_header_value(name, value))
                     .collect(),
             )),
-            Value::List(Arc::new(
+            Value::List(ListRef::new(
                 query
                     .iter()
                     .map(|(name, value)| router_http_field_value(name, value))
@@ -8781,7 +9018,7 @@ fn router_http_request_value_with_router_context(
 }
 
 fn router_string_list_value(items: &[&str]) -> Value {
-    Value::List(Arc::new(
+    Value::List(ListRef::new(
         items
             .iter()
             .map(|item| Value::Str((*item).to_string().into()))
@@ -8808,7 +9045,7 @@ fn router_channel_policy_value(policy: &ChannelPolicy) -> Value {
             Value::Str(policy.carrier.to_string().into()),
             Value::Str(policy.protocol.to_string().into()),
             router_string_list_value(policy.allowed_methods),
-            Value::List(Arc::new(
+            Value::List(ListRef::new(
                 policy
                     .method_bridges
                     .iter()
@@ -8898,7 +9135,7 @@ fn router_route_candidate_value(candidate: &RouteCandidateValue) -> Value {
             Value::Int(KH_TAG_ROUTE_CANDIDATE),
             router_http_route_value(candidate),
             router_http_request_value(candidate),
-            Value::List(Arc::new(
+            Value::List(ListRef::new(
                 candidate
                     .pressure_matrix
                     .iter()
@@ -8918,7 +9155,7 @@ fn router_route_decision_signature_value(decision: &RouteDecisionValue) -> Value
             Value::Int(KH_TAG_ROUTE_DECISION_SIGNATURE),
             Value::Str(decision.candidate.route_name.clone().into()),
             Value::Str(decision.candidate.route_handler_name.clone().into()),
-            Value::List(Arc::new(
+            Value::List(ListRef::new(
                 decision
                     .candidate
                     .pressure_matrix
@@ -8936,7 +9173,7 @@ fn router_route_decision_signature_value(decision: &RouteDecisionValue) -> Value
 }
 
 fn router_route_choice_decision_signatures_value(choice: &RouteChoice<'_>) -> Value {
-    Value::List(Arc::new(
+    Value::List(ListRef::new(
         choice
             .decisions
             .iter()
@@ -8958,7 +9195,7 @@ fn router_route_choice_signature_value(choice: &RouteChoice<'_>) -> Value {
 }
 
 fn router_route_candidate_matrix_value(candidate: &RouteCandidateValue) -> Value {
-    Value::List(Arc::new(
+    Value::List(ListRef::new(
         candidate
             .pressure_matrix
             .iter()
@@ -8980,7 +9217,7 @@ fn router_route_decision_value(decision: &RouteDecisionValue) -> Value {
 }
 
 fn router_route_choice_candidates_value(choice: &RouteChoice<'_>) -> Value {
-    Value::List(Arc::new(
+    Value::List(ListRef::new(
         choice
             .decisions
             .iter()
@@ -8990,7 +9227,7 @@ fn router_route_choice_candidates_value(choice: &RouteChoice<'_>) -> Value {
 }
 
 fn router_route_choice_decisions_value(choice: &RouteChoice<'_>) -> Value {
-    Value::List(Arc::new(
+    Value::List(ListRef::new(
         choice
             .decisions
             .iter()
@@ -9004,7 +9241,7 @@ fn router_route_choice_value(choice: &RouteChoice<'_>) -> Value {
         .selected
         .as_ref()
         .map(|selection| router_route_candidate_value(&selection.candidate))
-        .unwrap_or_else(|| Value::List(Arc::new(Vec::new())));
+        .unwrap_or_else(|| Value::List(ListRef::new(Vec::new())));
     Value::List(
         vec![
             Value::Int(KH_TAG_ROUTE_CHOICE),
@@ -9021,7 +9258,7 @@ fn router_observation_value(metrics: &RouterMetricsSnapshot) -> Value {
     router_dict_value(vec![
         (
             "fanout_path_counts",
-            Value::List(Arc::new(
+            Value::List(ListRef::new(
                 metrics
                     .fanout_path_counts
                     .iter()
@@ -9840,21 +10077,21 @@ mod route_spec_tests {
 
     #[test]
     fn kernel_http_response_result_carries_status_headers_and_body() {
-        let result = Value::List(Arc::new(vec![
+        let result = Value::List(ListRef::new(vec![
             Value::Int(KH_TAG_RESPONSE),
             Value::Int(418),
-            Value::List(Arc::new(vec![
-                Value::List(Arc::new(vec![
+            Value::List(ListRef::new(vec![
+                Value::List(ListRef::new(vec![
                     Value::Int(KH_TAG_HEADER),
                     Value::Str("Content-Type".into()),
                     Value::Str("application/problem+json".into()),
                 ])),
-                Value::List(Arc::new(vec![
+                Value::List(ListRef::new(vec![
                     Value::Int(KH_TAG_HEADER),
                     Value::Str("X-Kernel-Response".into()),
                     Value::Str("native".into()),
                 ])),
-                Value::List(Arc::new(vec![
+                Value::List(ListRef::new(vec![
                     Value::Int(KH_TAG_HEADER),
                     Value::Str("Content-Length".into()),
                     Value::Str("999".into()),
@@ -9875,7 +10112,7 @@ mod route_spec_tests {
 
     #[test]
     fn status_response_tag_stays_compatible() {
-        let result = Value::List(Arc::new(vec![
+        let result = Value::List(ListRef::new(vec![
             Value::Str("__http_status__".into()),
             Value::Int(422),
             Value::Str("{\"detail\":\"invalid\"}".into()),
@@ -11702,7 +11939,7 @@ struct FormBinaryStringTable {
 fn collect_artifact_strings(k: &Kernel, nid: NodeID, table: &mut FormBinaryStringTable) {
     if let Some(recipe) = k.by_id.get(&nid) {
         collect_artifact_strings(k, recipe.category, table);
-        for &c in &recipe.children {
+        for &c in recipe.children.iter() {
             collect_artifact_strings(k, c, table);
         }
     } else if nid.level == LEVEL_TRIVIAL && nid.ty == TRIV_STRING {
@@ -11729,7 +11966,7 @@ fn serialize_nid_with_strings(
         push_u32(bytes, FORM_BINARY_COMPOSITE);
         serialize_nid_with_strings(k, recipe.category, bytes, table);
         push_u32(bytes, recipe.children.len() as u32);
-        for &c in &recipe.children {
+        for &c in recipe.children.iter() {
             serialize_nid_with_strings(k, c, bytes, table);
         }
     } else if nid.level == LEVEL_TRIVIAL && nid.ty == TRIV_FLOAT64 {
@@ -11953,4 +12190,112 @@ fn deserialize_nid_with_strings_v1(
         p = np;
     }
     Ok((k.intern(category, children), p))
+}
+
+// The laws the siblings carry as fkwu reads them, asked of this kernel's own
+// reader and walker: a let with a body, cons onto a word, the decimal prefix,
+// host-exec's stdout, byte writers and round_ndigits.
+#[cfg(test)]
+mod sibling_law_tests {
+    use super::*;
+
+    // eval -- the value src walks to, or None when the walk stopped.
+    fn eval(src: &str) -> Option<Value> {
+        let src = src.to_string();
+        std::panic::catch_unwind(move || {
+            let mut k = Kernel::new();
+            let root = read_root_from_source(&mut k, &src);
+            execute_root(&mut k, root)
+        })
+        .ok()
+    }
+
+    fn int(src: &str) -> i64 {
+        match eval(src) {
+            Some(Value::Int(n)) => n,
+            other => panic!("{}: got {:?}, want an int", src, other),
+        }
+    }
+
+    fn text(src: &str) -> String {
+        match eval(src) {
+            Some(Value::Str(s)) => s.text().to_string(),
+            other => panic!("{}: got {:?}, want a string", src, other),
+        }
+    }
+
+    #[test]
+    fn let_with_a_body_binds_over_the_body_alone() {
+        assert_eq!(int("(add 1 (let h 4 (mul h h)))"), 17);
+        assert_eq!(int("(do (defn f (a) (add (let a 10 (add a 1)) a)) (f 5))"), 16);
+        assert_eq!(int("(do (defn g (a) (let a (add a 1) (let a (mul a 2) a))) (g 5))"), 12);
+        assert_eq!(
+            int("(do (defn c (n acc) (if (eq n 0) acc (let m (sub n 1) (c m (add acc 1))))) (c 5000 0))"),
+            5000
+        );
+        assert_eq!(int("(add 1 (let q 4))"), 5);
+        assert!(eval("(add 1 (let q 4 5 6))").is_none(), "a four-form let is no let");
+    }
+
+    #[test]
+    fn cons_onto_a_word_is_a_pair() {
+        assert_eq!(int("(tail (cons 7 60))"), 60);
+        assert_eq!(int("(len (cons 7 60))"), 1);
+        assert_eq!(int("(nth (cons 7 60) 0)"), 7);
+        assert_eq!(text("(value_str (cons 1 (cons 2 0)))"), "[1, 2]");
+        assert_eq!(int("(tail (tail (cons 1 (cons 2 0))))"), 0);
+        assert_eq!(int("(eq (cons 7 60) (list 7))"), 0);
+        assert_eq!(int("(value_eq (cons 7 60) (cons 7 60))"), 1);
+        assert_eq!(int("(value_eq (cons 7 60) (cons 7 61))"), 0);
+        assert_eq!(text("(tail (cons 7 \"s\"))"), "s");
+        assert!(eval("(cons 7 (nothing))").is_none(), "nothing is no tail");
+        // tail is a view of the same cells, and its own list
+        assert_eq!(int("(value_eq (tail (tail (list 1 2 3))) (list 3))"), 1);
+        assert_eq!(int("(len (tail (list)))"), 0);
+    }
+
+    #[test]
+    fn decimal_prefix_takes_a_dot_after_digits() {
+        assert_eq!(decimal_prefix_float(b"5.e3"), 5000.0);
+        assert_eq!(decimal_prefix_float(b"-7.E-1"), -0.7);
+        assert_eq!(decimal_prefix_float(b"5."), 5.0);
+        assert_eq!(decimal_prefix_float(b".5e1"), 5.0);
+        assert_eq!(decimal_prefix_float(b"."), 0.0);
+        assert_eq!(decimal_prefix_float(b"-.e3"), 0.0);
+    }
+
+    #[test]
+    fn host_exec_answers_stdout() {
+        assert_eq!(
+            text("(host-exec \"printf out; echo host-exec-stderr-passes-through >&2\" \"\")"),
+            "out"
+        );
+        assert_eq!(text("(host-exec \"cat\" \"hello\")"), "hello");
+        assert_eq!(text("(host-exec \"exit 3\" \"\")"), "");
+    }
+
+    #[test]
+    fn byte_writers_refuse_a_non_byte_list() {
+        let dir = env::temp_dir().join(format!("form-rust-bytes-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("bytes");
+        fs::write(&path, "precious").unwrap();
+        let p = path.to_string_lossy().to_string();
+        assert_eq!(int(&format!("(write_file_bytes \"{}\" \"abc\")", p)), -1);
+        assert_eq!(int(&format!("(write_file_bytes \"{}\" (list 65 1.5))", p)), -1);
+        assert_eq!(int(&format!("(file_append_bytes \"{}\" (list 1.5))", p)), -1);
+        assert_eq!(fs::read(&path).unwrap(), b"precious");
+        assert_eq!(int(&format!("(write_file_bytes \"{}\" (list 65 322))", p)), 2);
+        assert_eq!(fs::read(&path).unwrap(), b"AB");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn round_ndigits_counts_places() {
+        assert!(eval("(round_ndigits 1.25 -1)").is_none(), "a negative count stops");
+        match eval("(round_ndigits 2.675 2)") {
+            Some(Value::Float(f)) => assert_eq!(f, 2.67),
+            other => panic!("round_ndigits 2.675 2: {:?}", other),
+        }
+    }
 }

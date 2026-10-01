@@ -19,6 +19,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { randomBytes as nodeRandomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -645,6 +646,15 @@ export function createNodeKernelHost(options: NodeKernelHostOptions = {}): Kerne
     tempDirectory:
       options.tempDirectory ??
       (() => tmpdir().replace(/\/+$/, "") || "/tmp"),
+    runProcess: (command, input) => {
+      const run = spawnSync("/bin/sh", ["-c", UTF8_DECODER.decode(command)], {
+        input: input.length > 0 ? input : undefined,
+        stdio: [input.length > 0 ? "pipe" : "inherit", "pipe", "inherit"],
+        maxBuffer: Number.MAX_SAFE_INTEGER,
+      });
+      if (run.stdout === null || run.stdout === undefined) return null;
+      return Uint8Array.from(run.stdout);
+    },
     httpGet: (request) => workers.httpGet(request),
     socketCall: (operation) => workers.socketCall(operation),
     pgCall: (operation) => workers.pgCall(operation),

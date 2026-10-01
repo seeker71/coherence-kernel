@@ -204,9 +204,12 @@ type Value struct {
 	Float float64
 	Str   string
 	List  []Value
-	Cl    *Closure
-	Nid   NodeID
-	Rec   *Record
+	// Tail — a pair's tail word: a list made by cons onto a word that is not a
+	// list (fkwu's pair). List readers end before it; tail, eq and value_eq see it.
+	Tail *Value
+	Cl   *Closure
+	Nid  NodeID
+	Rec  *Record
 }
 
 // String — the print rendering, fkwu's tag 239: nothing prints as "nothing",
