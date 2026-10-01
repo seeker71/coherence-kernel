@@ -16,10 +16,13 @@ or implicit host fallback belongs to this execution path. Unsupported syntax is
 an error even when the input is empty. Native pipelines pass result values,
 not shell commands.
 
-The acceptance corpus covers real-shaped source and config documents,
-empty inputs, no matches, missing versus null JSON values, malformed queries,
-ambiguous edits, and immutable state across successive native calls. Tests
-call the actual form-cli entry, not only catalog descriptions or helper functions.
+`form/form-stdlib/tests/form-agent-tools-band.bml` is the running witness. It
+sends every copyable command below as one JSON request to `fat-wire-call`, the
+function form-cli's text face hands a raw JSON object to (`fc-tool-wire` in
+`form/form-stdlib/form-cli.fk`), and reads the response back through the wire's
+own JSON reader: the fifteen tool rows, the edit → write → read handoff, a
+pipeline through held input, a pipe refused as `shell-syntax-not-supported`
+with the corpus unchanged, and `jq --arg` (`; Verdict 524287`).
 
 ## Agent wire — the normal calling boundary
 
@@ -111,7 +114,7 @@ In-process clients use `fc-tool-call` with their own resident source documents.
 
 Start every JSON request with a document corpus the caller already holds. The
 corpus in this example is deliberately small so an agent can paste it into the
-wire and see the same result as the executable example band.
+wire and see the same result as `form/form-stdlib/tests/form-agent-tools-band.bml`.
 
 ```json
 [
@@ -121,28 +124,28 @@ wire and see the same result as the executable example band.
 ]
 ```
 
-Each row is the value of JSON `command`. Add the displayed held text as JSON
-`input`; omit paths to operate on it, or supply resident paths to select
-documents. The parser supports quoted argv values but rejects pipes,
+Each row is the value of JSON `command`. Where the row shows held text, send
+it as JSON `input`; a command without paths operates on it, and resident paths
+select documents. The parser supports quoted argv values but rejects pipes,
 redirection, semicolons, expansions and executable lookup.
 
-| Tool | JSON `command` | Expected `stdout` |
-| --- | --- | --- |
-| `rg` | `rg -nF 'alpha 1'` | `alpha.txt:1:alpha 1\n` |
-| `jq` | `jq -r .name package.json` | `demo\n` |
-| `read` | `read alpha.txt` | `alpha 1\nbeta 2\n` |
-| `cat` | `cat alpha.txt table.txt` | concatenated document text |
-| `head` | `head -n 1 alpha.txt` | `alpha 1\n` |
-| `tail` | `tail -n 1 alpha.txt` | `beta 2\n` |
-| `wc` | `wc -lwc` | `1 2 8\n` |
-| `sort` | `sort -nu` | `2\n10\n` |
-| `uniq` | `uniq -c` | `2 a\n1 b\n` |
-| `tr` | `tr -d '\n'` | `onetwo` |
-| `cut` | `cut -d : -f 2` | `right\ndown\n` |
-| `awk` | `awk '{print $2}'` | `two\nfour\n` |
-| `sed` | `sed -n 2p alpha.txt` | `beta 2\n` |
-| `edit` | `edit alpha.txt 'beta 2' 'gamma 3'` | `edited\n`; retain response `documents` |
-| `write` | `write notes.md` | `created\n`; retain response `documents` |
+| Tool | JSON `command` | JSON `input` | Expected `stdout` |
+| --- | --- | --- | --- |
+| `rg` | `rg -nF 'alpha 1'` | | `alpha.txt:1:alpha 1\n` |
+| `jq` | `jq -r .name package.json` | | `demo\n` |
+| `read` | `read alpha.txt` | | `alpha 1\nbeta 2\n` |
+| `cat` | `cat alpha.txt table.txt` | | `alpha 1\nbeta 2\nleft:right\nup:down\n` |
+| `head` | `head -n 1 alpha.txt` | | `alpha 1\n` |
+| `tail` | `tail -n 1 alpha.txt` | | `beta 2\n` |
+| `wc` | `wc -lwc` | `one two\n` | `1 2 8\n` |
+| `sort` | `sort -nu` | `10\n2\n2\n` | `2\n10\n` |
+| `uniq` | `uniq -c` | `a\na\nb\n` | `2 a\n1 b\n` |
+| `tr` | `tr -d '\n'` | `one\ntwo\n` | `onetwo` |
+| `cut` | `cut -d : -f 2` | `left:right\nup:down\n` | `right\ndown\n` |
+| `awk` | `awk '{print $2}'` | `one two\nthree four\n` | `two\nfour\n` |
+| `sed` | `sed -n 2p alpha.txt` | | `beta 2\n` |
+| `edit` | `edit alpha.txt 'beta 2' 'gamma 3'` | | `edited\n`; retain response `documents` |
+| `write` | `write notes.md` | `held note\n` | `created\n`; retain response `documents` |
 
 `edit` and `write` return a new resident corpus; they do not mutate a hidden
 session. Keep the response `documents` explicitly before the next call:
