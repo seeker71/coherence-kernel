@@ -165,6 +165,38 @@ Each generated reply consumes `turns`, including tool reads and retained no-acti
 
 This applies the distinction between truncated tool-call recovery and execution in [Hermes's truncation controller](https://github.com/NousResearch/hermes-agent/blob/main/agent/turn_truncation.py), and the focus on meaningful repeated outcomes in [OpenClaw's loop detection](https://docs.openclaw.ai/tools/loop-detection). Form uses its own owned state, live signals and caller allowances. [OpenClaw's agent loop](https://docs.openclaw.ai/concepts/agent-loop) also separates finished tool results from an unfinished continuation; Form's checkpoints preserve completed actions before admitting feedback. These are native BML flows in the existing process.
 
+### The local lane's stages
+
+Each stage below is a BML organ with its own band; none of the bands opens a model.
+
+- **Rung 0, the check witness** (`form-cli-check-witness.bml`, called by `form-cli-code-request.bml`): every
+  caller check meets a witness before any model opens. A check no candidate could meet (a dialect the tool
+  does not speak, a read-only document it would have to change) is refused at rung 0 with reason
+  `caller-check-unmeetable`, zero generated IDs and the blocking check named; a check the original fails but a
+  candidate could meet reads open and is never refused. `form-cli-check-witness-band` 1023.
+- **The edit ladder** (the `edit` tool in `form-agent-tools.bml`): an old text that drifted (a whitespace run,
+  for one) lands where exactly one place matches and names its rung; two places are refused; a miss carries
+  the nearest resident line window. `form-agent-edit-ladder-band` 8191.
+- **The turn guard** (`form-cli-code-turn-guard.bml`, read by `form-cli-code-policy.bml`): the lane reads its
+  own tool turns as a stillstreak. At 2 the observation names the repeat, at 3 a replan is required, at 4 the
+  attempt ends with the candidate retained. `form-cli-code-turn-guard-band` 131071.
+- **Swerve** (`form-cli-code-swerve.bml`, stepped by `form-cli-code-live.bml`): a reply whose content was
+  already decoded decodes again seeded from that content, the lane's phases speak on the stage bus, and the
+  last replies are kept for the deliverable. `form-cli-code-swerve-band` 4095.
+- **The circle** (`form-cli-code-circle.bml`): the local satsang for code. Candidates are published over a toy
+  copy of the gap and their band runs in a `./fkwu` child under a deadline; voices other than the writer's
+  judge, execution vetoes consensus, refusals are evidence, and exactly one pointing comes back when nothing
+  passes. `form-cli-code-circle-band` 1048575.
+- **Lesson review** (`form-cli-code-lesson-review.bml`): a lesson learned under one contract is recalled for
+  another of the same family, a local lesson-review voice speaks after every rung, and every rung packet
+  becomes a verified or failed corpus row. `form-cli-code-lesson-review-band` 1048575. The circle and lesson
+  review stand with their bands; today only lesson review calls the circle, and no lane stage calls either.
+- **The remote guide** (`form-cli-guide-packet.bml`, read by `local-flow-reading.bml`, `session-rent.bml` and
+  the review doors): one light remote guide is earned only from rung rows that show distinct failed swerves,
+  saturation and a second local guide, the last rungs repeating earlier outcomes; a green rung never earns
+  it. A row without digests reads swervecount 0 and is never saturated, so the rows the walk's ledger holds
+  today, which carry no ladder fields, earn nothing. `form-cli-guide-packet-band` 16383.
+
 ### Checkpoints, resume and feedback
 
 `observe/native-turn-run.bml` offers six local attempts by default; stdin
