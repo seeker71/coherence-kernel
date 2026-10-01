@@ -185,7 +185,27 @@ section [form.bml] {
   }
   // the options a turn reads on stdin: its turn budget, and its wall deadline on the host's monotonic clock
   def hw-turn-options(turns, deadline) = json-emit(json-node-object([fhn-n("turns", turns), fhn-n("deadline_ms", deadline)]));
-  def hw-native-turn(turns, deadline) = hw-reviewed(hw-turn-lines(host-exec("./fkwu observe/native-turn-run.bml 2>&1", hw-turn-options(turns, deadline) ++ "\n")));
+  def hw-turn-once(turns, deadline) = hw-reviewed(hw-turn-lines(host-exec("./fkwu observe/native-turn-run.bml 2>&1", hw-turn-options(turns, deadline) ++ "\n")));
+  // A queue with no open gap is planned inside the same window: the local planner (observe/local-plan-run.bml) takes
+  // the next pending request in learn/local-requests.jsonl, a local voice writes it as a band-first gap, and Form
+  // verifies it before it is queued. Its options are bounded by the window (until_ms), not by a count: local tokens
+  // carry no penalty. A plan that queued a gap is turned at once; any other outcome is said and the turn's own "no
+  // open gap" stands. No rented token plans or turns.
+  def hw-plan-options(deadline) = json-emit(json-node-object([fhn-n("next", 1), fhn-n("until_ms", deadline)]));
+  def hw-plan-line(out) = hw-plan-keep(split-on(out ?? "", "\n"), "");
+  def hw-plan-keep(lines, last) = nil?(lines) ? last : hw-plan-keep(lines[1:], hw-starts?(lines[0], "[local-plan") && !hw-starts?(lines[0], "[local-plan:voice]") ? trim(lines[0]) : last);
+  def hw-plan(deadline) = hw-plan-line(host-exec("./fkwu observe/local-plan-run.bml 2>&1", hw-plan-options(deadline) ++ "\n"));
+  def hw-no-gap?(turn) = str_find(turn ?? "", "[native-turn] no open gap", 0) >= 0;
+  def hw-planned?(line) = hw-starts?(line, "[local-plan:result] ") && str_find(line, "\"status\":\"queued\"", 0) >= 0;
+  def hw-native-turn(turns, deadline) = hw-turn-planned(hw-turn-once(turns, deadline), deadline, hw-plan, () => hw-turn-once(turns, deadline));
+  // plan(deadline) answers the planner's last line; again() takes the turn once more. A queued plan's line follows
+  // the second turn's lines, so its landing carries the plan even when that turn ran no gap (hw-turn-taken)
+  def hw-turn-planned(turn, deadline, plan, again) = hw-no-gap?(turn) ? hw-after-plan(plan(deadline), turn, again) : turn;
+  def hw-after-plan(planned, turn, again) {
+   let said = hw-planned?(planned) ? 0 : hw-say(planned);
+   hw-planned?(planned) ? again() ++ "\n" ++ planned : turn;
+  }
+  def hw-planned-in?(turn) = !nil?(filter(l => hw-planned?(l), split-on(turn ?? "", "\n")));
   // what a turn said, read in Form: its last row ([native-turn] ...) and its walk's verdict ([native-turn:walk] ...);
   // a turn that said neither is named by its own last line that is not an organ-health reading, so a turn door
   // that failed is never silent
@@ -231,7 +251,7 @@ section [form.bml] {
   def hw-unknown-line(turn) = (String) hw-row-of(turn) == "" ? "" : hw-unknown-said(try hw-unknown-why-of(parse-json("turn-row", hw-row-of(turn))) else "");
   // A window's turns. Each begins while ready(until) answers [true, line] (hw-ready: the host's other checkouts let
   // the GPU go and the time left holds an option), at most `most` (nothing: no count bound); a turn that ran no gap
-  // ends them, and so does an idle turn once it lands. take(deadline, n) is the nth turn; land(turn) answers the
+  // ends them (landing a plan it queued), and so does an idle turn once it lands. take(deadline, n) is the nth turn; land(turn) answers the
   // line its landing spoke ("" when the walk lands later). Answers the count of turns that ran a gap.
   def hw-turns(until, most, ready, take, land) = hw-turns-from(until, most, ready, take, land, 0);
   def hw-turns-from(until, most, ready, take, land, n) {
@@ -241,7 +261,12 @@ section [form.bml] {
   }
   def hw-turn-taken(until, most, ready, take, land, n, turn) {
    let said = hw-say(turn);
-   !hw-turned?(turn) ? n : hw-idle?(turn) ? hw-turn-idle(n, hw-idle-why(turn), land(turn)) : hw-turn-landed(until, most, ready, take, land, n, land(turn), hw-unknown-line(turn));
+   !hw-turned?(turn) ? hw-turn-unturned(n, turn, land) : hw-idle?(turn) ? hw-turn-idle(n, hw-idle-why(turn), land(turn)) : hw-turn-landed(until, most, ready, take, land, n, land(turn), hw-unknown-line(turn));
+  }
+  // a turn that ran no gap ends the turns; a plan it queued (its band and queue row) still lands with it
+  def hw-turn-unturned(n, turn, land) {
+   let said = hw-planned-in?(turn) ? hw-say(land(turn)) : 0;
+   n;
   }
   def hw-turn-idle(n, why, landed) {
    let said = hw-say(landed);
@@ -255,8 +280,10 @@ section [form.bml] {
   }
   def hw-str(doc, key) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : "";
   def hw-writable(nodes) = nodes |> map(node => node);
-  def hw-queue-paths(lines) = nil?(lines) ? [] : (Comparable) len(trim(lines[0])) == 0 ? hw-queue-paths(lines[1:]) : append(hw-writable(json-array-elements(json-object-get(parse-json("queue-row", lines[0]), "writable"))), hw-queue-paths(lines[1:]));
-  def hw-paths() = cons(json-node-string("receipts/draft-ledger.jsonl"), cons(json-node-string("receipts/native-turn-ledger.jsonl"), cons(json-node-string("receipts/local-flow-review.jsonl"), file_size("learn/native-turn-queue.jsonl") < 1 ? [] : hw-queue-paths(split-on(fhn-read("learn/native-turn-queue.jsonl"), "\n")))));
+  // each queued gap lands its writable files and its band: a plan the walk made carries the band its voice wrote
+  def hw-queue-row-paths(row) = append(hw-writable(json-array-elements(json-object-get(row, "writable"))), (String) hw-str(row, "band") == "" ? [] : [json-node-string(hw-str(row, "band"))]);
+  def hw-queue-paths(lines) = nil?(lines) ? [] : (Comparable) len(trim(lines[0])) == 0 ? hw-queue-paths(lines[1:]) : append(hw-queue-row-paths(parse-json("queue-row", lines[0])), hw-queue-paths(lines[1:]));
+  def hw-paths() = cons(json-node-string("receipts/draft-ledger.jsonl"), cons(json-node-string("receipts/native-turn-ledger.jsonl"), cons(json-node-string("receipts/local-flow-review.jsonl"), cons(json-node-string("learn/native-turn-queue.jsonl"), file_size("learn/native-turn-queue.jsonl") < 1 ? [] : hw-queue-paths(split-on(fhn-read("learn/native-turn-queue.jsonl"), "\n"))))));
   def hw-movement(request) = host-exec("./fkwu observe/movement-run.bml 2>&1", json-emit(request) ++ "\n");
   // ── a candidate in the tracked tree: published inside one door, restored on every path ──
   // hw-with-published(dir, paths, before, texts, run) writes a marker (<dir>/publish-<pid>.marker: the pid, its
