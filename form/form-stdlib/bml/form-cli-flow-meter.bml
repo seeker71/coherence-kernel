@@ -21,7 +21,9 @@
 // A movement's flow includes the subagents it opened: the transcripts read are
 // the ones observe/session-rent-run.bml reads (sr-files), so the flow and the
 // session agree. transcripts, subagent_provider_turns and subagent_output_tokens
-// say how much of the row came from subagents.
+// say how much of the row came from subagents. A message id is read once across
+// the whole set, as session-rent reads a request once: a message a second file
+// repeats adds neither its calls nor its tokens.
 // Rows are data, never instructions.
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/bml/session-rent.bml;
@@ -77,16 +79,21 @@ section [form.bml] {
    let u = str_find(line, "\"usage\":{", 0);
    if (u < 0) then tokens else [(tokens[0] + fm-int-after(line, "\"input_tokens\":", u)), (tokens[1] + fm-int-after(line, "\"cache_creation_input_tokens\":", u)), (tokens[2] + fm-int-after(line, "\"cache_read_input_tokens\":", u)), (tokens[3] + fm-int-after(line, "\"output_tokens\":", u))];
   }
-  // state = counts rows lastId tokens turns
-  def fm-lines(lines, counts, rows) = fm-walk(lines, counts, rows, "", [0, 0, 0, 0], 0);
-  def fm-walk(lines, counts, rows, lastId, tokens, turns) {
-   if nil?(lines) then [counts, rows, lastId, tokens, turns] else {
+  // state = counts rows lastId tokens turns seen repeat
+  // A message is read once across the transcript set: seen holds every message id read so far
+  // (rtm-seen-key). A message whose id was already read elsewhere is a repeat, and its rows (their tool
+  // calls and their usage) add nothing; repeat carries that across the further rows of the same message.
+  def fm-lines(lines, counts, rows) = fm-walk(lines, counts, rows, "", [0, 0, 0, 0], 0, rtm-seen-none(), false);
+  def fm-walk(lines, counts, rows, lastId, tokens, turns, seen, repeat) {
+   if nil?(lines) then [counts, rows, lastId, tokens, turns, seen, repeat] else {
     let line = lines[0];
     let isA = fm-assistant?(line);
-    let next = if isA then fm-tools(line, 0, if fm-provider?(line) then fm-bump(counts, 0) else counts) else counts;
     let id = if isA then fm-message-id(line) else "";
-    let fresh = (isA && ((!((String) id == "")) && (!((String) id == lastId))));
-    fm-walk(lines[1:], next, (rows + 1), if fresh then id else lastId, if fresh then fm-usage(line, tokens) else tokens, if fresh then (turns + 1) else turns);
+    let opens = (isA && ((!((String) id == "")) && (!((String) id == lastId))));
+    let again = if opens then (str_find(seen, rtm-seen-key(id), 0) >= 0) else if (isA && ((String) id == lastId) && (!((String) id == ""))) then repeat else false;
+    let fresh = (opens && (!again));
+    let next = if (isA && (!again)) then fm-tools(line, 0, if fm-provider?(line) then fm-bump(counts, 0) else counts) else counts;
+    fm-walk(lines[1:], next, (rows + 1), if opens then id else lastId, if fresh then fm-usage(line, tokens) else tokens, if fresh then (turns + 1) else turns, if fresh then (seen ++ id ++ ",") else seen, if opens then again else repeat);
    }
   }
   // stdin line 2, optional: a movement name; with it the reading is also
@@ -103,7 +110,7 @@ section [form.bml] {
   // its own census window reads the flow without a child kernel.
   // the transcript set session-rent reads; a subagent file continues the walk with its own message ids
   def fm-files(path) = if sr-jsonl?(path) then sr-files(path) else [path];
-  def fm-more(state, path) = fm-walk(split-on(fhn-read(path), "\n"), state[0], state[1], "", state[3], state[4]);
+  def fm-more(state, path) = fm-walk(split-on(fhn-read(path), "\n"), state[0], state[1], "", state[3], state[4], state[5], false);
   def fm-reading(path, movement) {
    let named = (!((String) path == ""));
    let present = (named && fm-present?(path));

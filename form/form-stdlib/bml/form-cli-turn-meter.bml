@@ -16,6 +16,8 @@
 // every subagent transcript beside it). Each subagent transcript belongs to the
 // turn whose asking opened at or before its first timestamp, and its share is
 // shown apart in that turn's row, so the turns sum to the session's own reading.
+// A message id is counted once across the whole set, as session-rent counts a
+// request once across it: a message a second file repeats adds nothing.
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/bml/session-rent.bml;
 section [form.bml] {
@@ -54,18 +56,28 @@ section [form.bml] {
   def ftm-stamp-digits(s, i, acc) = if ((i >= len(s)) || ((Comparable) str_byte_at(s, i) == 34)) then acc else ftm-stamp-digits(s, (i + 1), if ftm-digit?(str_byte_at(s, i)) then ((acc * 10) + (str_byte_at(s, i) - 48)) else acc);
   def ftm-spoken?(turn) = (turn[1] > 0);
   def ftm-close(turns, turn) = if ftm-spoken?(turn) then cons(turn, turns) else turns;
-  def ftm-walk(lines, turns, turn, lastId) {
-   if nil?(lines) then ftm-close(turns, turn) else ftm-walk-line(lines[1:], turns, turn, lastId, lines[0]);
+  // A message is counted once across the whole transcript set: seen holds every message id read so far
+  // (rtm-seen-key), so a message another file repeats is not counted again; lastId passes the further rows
+  // of one message without a search.
+  def ftm-fresh?(id, lastId, seen) = if (((String) id == "") || ((String) id == lastId)) then false else (str_find(seen, rtm-seen-key(id), 0) < 0);
+  def ftm-last(id, lastId) = if ((String) id == "") then lastId else id;
+  def ftm-walk(lines, turns, turn, lastId, seen) {
+   if nil?(lines) then [ftm-close(turns, turn), seen] else ftm-walk-line(lines[1:], turns, turn, lastId, seen, lines[0]);
   }
-  def ftm-walk-line(rest, turns, turn, lastId, line) {
-   if ftm-asking?(line) then ftm-walk(rest, ftm-close(turns, turn), ftm-open-at(ftm-opening(line), ftm-stamp(line)), lastId)
-   else if (!ftm-assistant?(line)) then ftm-walk(rest, turns, turn, lastId)
-   else ftm-walk-fresh(rest, turns, turn, lastId, line, ftm-message-id(line));
+  def ftm-walk-line(rest, turns, turn, lastId, seen, line) {
+   if ftm-asking?(line) then ftm-walk(rest, ftm-close(turns, turn), ftm-open-at(ftm-opening(line), ftm-stamp(line)), lastId, seen)
+   else if (!ftm-assistant?(line)) then ftm-walk(rest, turns, turn, lastId, seen)
+   else ftm-walk-fresh(rest, turns, turn, lastId, seen, line, ftm-message-id(line));
   }
-  def ftm-walk-fresh(rest, turns, turn, lastId, line, id) {
-   if (((String) id == "") || ((String) id == lastId)) then ftm-walk(rest, turns, turn, lastId) else ftm-walk(rest, turns, ftm-add(turn, line), id);
+  def ftm-walk-fresh(rest, turns, turn, lastId, seen, line, id) {
+   if ftm-fresh?(id, lastId, seen) then ftm-walk(rest, turns, ftm-add(turn, line), id, seen ++ id ++ ",") else ftm-walk(rest, turns, turn, ftm-last(id, lastId), seen);
   }
-  def ftm-turns(text) = ftm-reverse(ftm-walk(split-on(text, "\n"), [], ftm-open(""), ""), []);
+  // [turns, seen]: one transcript's turns in order, and the message ids read so far
+  def ftm-turns-seen(text, seen) {
+   let walked = ftm-walk(split-on(text, "\n"), [], ftm-open(""), "", seen);
+   [ftm-reverse(walked[0], []), walked[1]];
+  }
+  def ftm-turns(text) = ftm-turns-seen(text, rtm-seen-none())[0];
   def ftm-reverse(xs, acc) = if nil?(xs) then acc else ftm-reverse(xs[1:], cons(xs[0], acc));
   def ftm-uncached(turn) = ((turn[2] + turn[3]) + turn[5]);
   def ftm-total(turn) = (ftm-uncached(turn) + turn[4]);
@@ -86,18 +98,19 @@ section [form.bml] {
   def ftm-sum(turns, f) = if nil?(turns) then 0 else (f(turns[0]) + ftm-sum(turns[1:], f));
   // ── subagents: one transcript read as one share, credited to the turn that opened it ──
   def ftm-first-stamp(lines) = if nil?(lines) then 0 else if (ftm-stamp(lines[0]) > 0) then ftm-stamp(lines[0]) else ftm-first-stamp(lines[1:]);
-  def ftm-sub-walk(lines, turn, lastId) {
-   if nil?(lines) then turn else ftm-sub-line(lines[1:], turn, lastId, lines[0]);
+  def ftm-sub-walk(lines, turn, lastId, seen) {
+   if nil?(lines) then [turn, seen] else ftm-sub-line(lines[1:], turn, lastId, seen, lines[0]);
   }
-  def ftm-sub-line(rest, turn, lastId, line) {
-   if (!ftm-assistant?(line)) then ftm-sub-walk(rest, turn, lastId) else ftm-sub-fresh(rest, turn, lastId, line, ftm-message-id(line));
+  def ftm-sub-line(rest, turn, lastId, seen, line) {
+   if (!ftm-assistant?(line)) then ftm-sub-walk(rest, turn, lastId, seen) else ftm-sub-fresh(rest, turn, lastId, seen, line, ftm-message-id(line));
   }
-  def ftm-sub-fresh(rest, turn, lastId, line, id) {
-   if (((String) id == "") || ((String) id == lastId)) then ftm-sub-walk(rest, turn, lastId) else ftm-sub-walk(rest, ftm-add(turn, line), id);
+  def ftm-sub-fresh(rest, turn, lastId, seen, line, id) {
+   if ftm-fresh?(id, lastId, seen) then ftm-sub-walk(rest, ftm-add(turn, line), id, seen ++ id ++ ",") else ftm-sub-walk(rest, turn, ftm-last(id, lastId), seen);
   }
-  def ftm-sub(path) {
+  // [share, seen]: one subagent transcript read as one share, its messages counted once across the set
+  def ftm-sub(path, seen) {
    let lines = split-on(if (file_size(path) > 0) then fhn-read(path) else "", "\n");
-   ftm-sub-walk(lines, ftm-open-at(path, ftm-first-stamp(lines)), "");
+   ftm-sub-walk(lines, ftm-open-at(path, ftm-first-stamp(lines)), "", seen);
   }
   def ftm-credit(turn, sub) = [turn[0], (turn[1] + sub[1]), (turn[2] + sub[2]), (turn[3] + sub[3]), (turn[4] + sub[4]), (turn[5] + sub[5]), turn[6], (turn[7] + sub[1]), (turn[8] + sub[5]), (turn[9] + 1)];
   // the last asking at or before the subagent's first timestamp; the first turn when none is
@@ -106,7 +119,8 @@ section [form.bml] {
   def ftm-with-sub(turns, sub) = if nil?(turns) then [ftm-credit(ftm-open-at("(subagents before any asking)", 0), sub)] else ftm-credit-at(turns, ftm-owner(turns, sub[6], 0, 0), sub, 0);
   // the transcript set session-rent reads: the transcript and every subagent transcript beside it
   def ftm-files(path) = if (((String) path == "") || (file_size(path) < 1)) then [] else if sr-jsonl?(path) then sr-files(path) else [path];
-  def ftm-turns-of(files) = foldl((turns, sub) => ftm-with-sub(turns, ftm-sub(sub)), ftm-turns(if nil?(files) then "" else fhn-read(files[0])), if nil?(files) then [] else files[1:]);
+  def ftm-take-sub(state, read) = [ftm-with-sub(state[0], read[0]), read[1]];
+  def ftm-turns-of(files) = foldl((state, sub) => ftm-take-sub(state, ftm-sub(sub, state[1])), ftm-turns-seen(if nil?(files) then "" else fhn-read(files[0]), rtm-seen-none()), if nil?(files) then [] else files[1:])[0];
   def ftm-turns-at(path) = ftm-turns-of(ftm-files(path));
   def ftm-reading(path) {
    let files = ftm-files(path);
