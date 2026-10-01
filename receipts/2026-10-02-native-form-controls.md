@@ -18,21 +18,29 @@ counts cover both carriers and survive owned release.
 | Compatible Qwen learning | 117 verified targets; 109 injected observation tokens excluded from gradients; 14 accepted updates |
 | Mean control loss | 0.0006955954 → 0.0006598448 over two rounds |
 | Independent input-4 enquiry | Base and adapted both executed and answered 18; 79 generated and 56 injected IDs each; no observed quality gain |
-| Public adapted generation | Repaired a missing lambda locally, executed the returned address in Form, answered 11; 182 initial + 21 final generated IDs, 305 injected IDs, complete/release 1 |
+| Public adapted generation | Repaired a missing lambda locally, executed the returned address in Form, answered 11; 182 initial + 21 final generated IDs, 297 injected IDs, complete/release 1 |
+| Oversized Metal observation | 128 values completed on GPU; delivery and owner both reported absence; excluded from learning targets and final context; subsequent Form evaluation returned 395 |
 | Local execution and learning | Provider calls 0; learning shared one admitted model across independent streams |
 | Shared grammar / node verbs / layer LoRA / layer Metal / traces / evaluation | 255 / 255 / 16383 / 15 / 63 / 2047 |
-| Selected landing checks | 2047/2047, refused 0; native CLI build passed |
+| Selected landing checks | Integration 2047/2047; delivery repair 63/63; refused 0; native CLI builds passed |
 
 Verified controls require an actual successful KV observation injection.
 Observation counts read the session's numeric counter; generated IDs remain a
 separate list. A source-backed public run exposed both the counter omission and
 the model's own successful repair. Original failed readings remain private.
+Canonical result delivery determines whether a value arrived. Completed GPU
+work remains owned evidence when the observation envelope refuses its readout.
+Generic Form results retain their actual `source_observation`, with JSON `null`
+for an unavailable typed numeric reading.
 
-The final control window took 50 ms and 284,534 entries: 206 Form, 8 BML primitive,
-328 BML expression and 28 composed BML functions were used. There were 21
+The final delivery window took 78 ms and 873,057 entries: 193 Form, 8 BML primitive,
+266 BML expression and 18 composed BML functions were used. There were 20
 ambiguous functions and zero stale attributions; host-C call counts are unmeasured.
-Compilation took 13,665 ms; admission plus execution took 39,636 ms. These are
+Compilation took 14,157 ms; admission plus execution took 43,332 ms. These are
 distinct costs, with changed-source comparisons rather than an identical-input A/B.
+The refreshed native guide retains current authored function/line counts and
+these separate compilation/execution windows. Compiler attention points to the
+BMF cursor; delivery attention points to precise number rendering.
 
 The native evidence reader preserves reduced current state and unfinished input
 in a streaming JSONL checkpoint. Its 1,295-row observation retained 72,486,084
@@ -45,28 +53,32 @@ its live restore frame carried 1 ms and 274 checkpoint bytes. Selected learning
 targets keep their full checks. The obsolete 78,013,158-byte binary cache is gone.
 
 The arriving agent authored these changes and teacher controls using rented
-implementation reasoning. From 2026-10-01 14:48:40.360Z through 17:34:52.780Z,
-the native transcript meter observed 45,011,311 input tokens (43,705,728 cached)
-and 312,044 output tokens (182,506 reasoning). This is not relabeled as optional
+implementation reasoning. From 2026-10-01 14:48:40.360Z through 17:53:58.047Z,
+the native transcript meter observed 47,621,038 input tokens (46,262,272 cached)
+and 343,885 output tokens (207,028 reasoning). This is not relabeled as optional
 review or zero rented coding. Unrelated local-flow verification remains unknown.
 
 The verified integration teaching is retained under session
 `codex-fkwu-native-control-2026-10-01`, event `verified-integrated-form-controls-v2`,
 row `5857c4924cf6dca8d6b5eaf27beedcf67c1784e1f49834e2ae9001b1e017f70f`.
-Retention and an automatic worker's outcome are separate observations.
+The automatic worker completed with optimizer step 87 and pending 0. Serving
+generation 4 and promotions 2 remained unchanged; completion is not promotion.
 
-Private evidence: `.hearth/integrated-public-generate-final.log`,
-`.hearth/response-sessions/generation/57551-1790876048475`,
+Private evidence: `.hearth/integrated-public-delivery-final.log`,
+`.hearth/response-sessions/generation/1199-1790877067902`,
 `.hearth/qwen-integrated-form-control.safetensors.report.json`,
 `.hearth/integrated-qwen-learning-corrected.log`,
 `.hearth/integrated-control-flow-final.log`,
+`.hearth/delivery-control-flow-final.log`,
 `.hearth/integrated-form-control-final-meters.log`,
 `.hearth/integrated-reader-live-frame.log`,
-`.hearth/integrated-drift-gates-final.log`, `.hearth/integrated-rent-final.log`,
+`.hearth/integrated-drift-gates-final.log`, `.hearth/delivery-drift-gates-final.log`,
+`.hearth/observation-room-original.log`, `.hearth/observation-room-final.log`,
+`.hearth/delivery-rent-final.log`,
 `.hearth/integrated-session-homecoming.log` and the original reader observations.
 The sealed CLI source is
-`d3952e121dc3c7e74ab36c2cd1ffd6426614c382ac543af996e1ac6083bbdbd5`,
-stamp `2e59bb94cb5f8d48`.
+`f572fc7256cc2eb9676b8bf4777eff50c7e8c9df5935e5f81d7ebb223ebb7398`,
+stamp `2c0b7f5522cc1e6b`.
 
 The north star remains Form-owned effects, learning and resource lifetimes,
 reusable native programs, local completion and transparent costs. General

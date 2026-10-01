@@ -45,6 +45,11 @@ BML cursor and evaluator. `bml;x => x * x + 1` births a pure Form function;
 owned execution doors and are refused by this pure evaluator. All carriers use
 the same RESULT shapes and observation envelope. Precise float rendering keeps
 small nonzero constants and observed values intact at the compiler boundary.
+When a result exceeds the available observation envelope, its delivered RESULT
+and owner status both report absence. Completed hardware work and its readout
+remain private evidence; an undelivered value enters neither learning targets
+nor the final answer context. Generic Form results retain their canonical
+`source_observation`; an unavailable typed numeric reading is JSON `null`.
 
 The same reasoning cursor accepts
 `<|form:nodeid-knowledge-query|>concept=exact-key<|/form:nodeid-knowledge-query|>`.
