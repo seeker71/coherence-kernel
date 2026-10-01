@@ -8,22 +8,28 @@
 ;        openings are the bytes form-recipe-birth-token, form-recipe-exec-token and
 ;        form-knowledge-query-token already read
 ;     2  ftg-scan answers the complete controls of known verbs in order with their offsets; a runtime
-;        marker (stage) and an unclosed trailing control are not controls
+;        marker (stage) and an unclosed trailing control are not controls; ftg-scan-any also finds
+;        the marker, and an unclosed opening does not hide a later control
 ;     4  the stream window holds a control split across chunks until it closes, refuses a second
 ;        control in one chunk and a control that outgrows the reserve
-;     8  the interceptor answers each closed control once, in stream order, records its frame, and
-;        answers nothing to prose
+;     8  the interceptor answers each closed control once, in stream order, records its frame with
+;        an injected flag that stays 0 until an injection is asked, and answers nothing to prose;
+;        its decode checkpoints fall at the counts fcms-generate's walk publishes (1, 2, 4, 8, ...)
 ;    16  ftg-observe runs every verb and answers the four RESULT shapes; an unknown verb and a
 ;        model-written observation answer nothing, and the stream goes on
 ;    32  microthought carries the grammar: an affine birth stays on its own path, eval, a BML
-;        recipe and its run answer in the same feed, Metal admission is asked only for addresses the
-;        owner admitted, and the teaching names every verb's opening
+;        recipe and its run answer in the same feed; a choice that mixes an owner-held affine address
+;        with a token-held or unknown one tries each in order on the carrier that holds it, with no
+;        Metal touched here (the affine alternative overflows first); frames, injections and
+;        injected flags pair by index, a too-long control included; the teaching names every verb
 ;    64  the envelope wraps a RESULT once and leaves a source observation as it came; result kind
-;        and body read back
-;   128  the quantum hook's reading: only controls whose close falls after the head are fresh; a
-;        payload written inside a JSON string is read as the string's value; a crossing ledger row
-;        keeps Form's RESULT apart from the voice's controls, with no observation envelope; the
-;        voice walk's progress pulses at powers of two, as fcms-generate's checkpoints do
+;        and body read back; the ledger keeps a source observation's body and names its envelope
+;   128  the quantum hook's reading: only controls whose close falls after the head are fresh; an
+;        unknown verb is an item Form answers, and a close whose opening the window cut answers
+;        nothing=control-exceeds-window; a payload written inside a JSON string is read as the
+;        string's value; a crossing ledger row keeps Form's RESULT bodies apart from the voice's
+;        controls with no opening among them and a flag per crossing; the stdout line carries no
+;        control bytes
 section [form.bml] {
  class FormTokenGrammarBand {
   def ftgb-claim(ok, bit) = ok ? bit : 0;
@@ -36,7 +42,9 @@ section [form.bml] {
   def ftgb-scan() {
    let text = "Think. <|form:eval|>6 * 7<|/form:eval|> then <|form:stage|>x<|/form:stage|> and <|form:node-make|>pair;1,2<|/form:node-make|> tail <|form:eval|>open";
    let found = ftg-scan(text);
-   (len(found) == 2) && (found[0] == ["eval", "6 * 7", 7, 39]) && (found[1][0] == "node-make") && (found[1][1] == "pair;1,2") && (substring(text, found[1][2], found[1][3]) == ftg-render("node-make", "pair;1,2")) && nil?(ftg-scan("plain prose, no control"));
+   let any = ftg-scan-any(text);
+   let after = ftg-scan("<|form:node-get|>open <|form:eval|>1 + 1<|/form:eval|>");
+   (len(found) == 2) && (found[0] == ["eval", "6 * 7", 7, 39]) && (found[1][0] == "node-make") && (found[1][1] == "pair;1,2") && (substring(text, found[1][2], found[1][3]) == ftg-render("node-make", "pair;1,2")) && nil?(ftg-scan("plain prose, no control")) && (map(c => c[0], any) == ["eval", "stage", "node-make"]) && (len(after) == 1) && (after[0][1] == "1 + 1");
   }
   def ftgb-window() {
    let a = ftg-window("", "Think <|fo", 256);
@@ -51,8 +59,17 @@ section [form.bml] {
    let chunks = ["Let me ", "<|", "form:", "eval", "|>", "6 * 7", "<|/form:", "eval|>", " and ", "<|form:eval|>", "len(", "\"abc\")", "<|/form:eval|>", " done."];
    let outs = map(c => ftg-feed(icpt, 0, c)[2], chunks);
    let quiet = map(c => ftg-feed(ftg-intercept(256), 0, c)[2], ["no ", "control ", "here"]);
-   (outs == ["", "", "", "", "", "", "", "value=42;", "", "", "", "", "value=3;", ""]) && (record_get(icpt, "crossings") == 2) && (reverse(record_get(icpt, "frames")) == ["<|form:eval|>6 * 7<|/form:eval|>", "<|form:eval|>len(\"abc\")<|/form:eval|>"]) && (quiet == ["", "", ""]);
+   let pulsing = ftg-pulsing(ftg-intercept(256));
+   let counts = filter(n => ftgb-checkpoint-at(pulsing, n), range(1, 33));
+   (outs == ["", "", "", "", "", "", "", "value=42;", "", "", "", "", "value=3;", ""]) && (record_get(icpt, "crossings") == 2) && (reverse(record_get(icpt, "frames")) == ["<|form:eval|>6 * 7<|/form:eval|>", "<|form:eval|>len(\"abc\")<|/form:eval|>"]) && (record_get(icpt, "injected") == [0, 0]) && (record_get(icpt, "fed") == 14) && !ftg-checkpoint?(icpt) && (quiet == ["", "", ""]) && (counts == ftgb-schedule(32, 1, 1, 0, [])) && (counts == [1, 2, 4, 8, 16, 32]);
   }
+  def ftgb-checkpoint-at(icpt, n) {
+   record_set(icpt, "fed", n);
+   ftg-checkpoint?(icpt);
+  }
+  // the completed-step counts at which fcms-walk publishes a decode checkpoint, read from its own
+  // checkpoint rule (form-cli-model-session.fk), started as fcms-generate starts it
+  def ftgb-schedule(k, left, width, done, out) = done >= k ? reverse(out) : ftgb-schedule(k, fcms-decode-next-left(left, width), fcms-decode-next-width(left, width), done + 1, fcms-decode-checkpoint?(left) == 1 ? cons(done + 1, out) : out);
   def ftgb-observe() {
    let s = ftg-session-fresh();
    let made = ftg-observe-with(s, "node-make", "pair;3,4");
@@ -69,18 +86,35 @@ section [form.bml] {
    let value = feed(["<|form:eval|>6 * 7<|/form:eval|>"]);
    let born = feed(["<|form:recipe-birth|>bml;x => x + 100<|/form:recipe-birth|>"]);
    let ran = feed(["<|form:recipe-exec|>" ++ ftg-result-body(born[0]) ++ ";input=5;carrier=auto<|/form:recipe-exec|>"]);
+   let wide = ftg-result-body(feed(["<|form:recipe-birth|>affine-i32;mul=2147483647;add=0<|/form:recipe-birth|>"])[0]);
+   let bml = ftg-result-body(born[0]);
+   let mixed = feed(["<|form:choice|>" ++ wide ++ ", " ++ bml ++ ";input=1000;carrier=auto<|/form:choice|>"]);
+   let unknownFirst = feed(["<|form:choice|>@0.2.0.1," ++ wide ++ ";input=1000;carrier=auto<|/form:choice|>"]);
+   let long = feed(["<|form:eval|>" ++ str-join(map(i => "1 + ", range(0, 160))) ++ "1"]);
    let teaching = fmc-teaching();
    let taught = all?(v => str_find(teaching, ftg-open(v), 0) >= 0, ftg-stream-verbs());
-   let routed = fmc-metal?(owner, "recipe-exec", affine ++ ";input=5;carrier=metal") && !fmc-metal?(owner, "recipe-exec", ftg-result-body(born[0]) ++ ";input=5;carrier=metal") && fmc-metal?(owner, "recipe-birth", "affine-i32;mul=1;add=0") && !fmc-metal?(owner, "eval", "1");
-   (ftg-result-kind(birth[2]) == "recipe") && (value == ["value=42;"]) && (ran == ["value=105;"]) && (record_get(owner, "crossings") == 4) && (len(record_get(owner, "frames")) == 4) && (record_get(owner, "executions") == 0) && taught && routed;
+   let routed = fmc-metal?(owner, "recipe-exec", affine ++ ";input=5;carrier=metal") && !fmc-metal?(owner, "recipe-exec", bml ++ ";input=5;carrier=metal") && fmc-metal?(owner, "recipe-birth", "affine-i32;mul=1;add=0") && !fmc-metal?(owner, "eval", "1") && fmc-metal?(owner, "choice", "@0.2.0.1," ++ affine ++ ";input=5;carrier=auto");
+   let n = record_get(owner, "crossings");
+   let paired = (len(record_get(owner, "frames")) == n) && (len(record_get(owner, "injections")) == n) && (record_get(owner, "injected") == map(i => 0, range(0, n))) && (record_get(owner, "frames")[0] == "") && (record_get(owner, "injections")[0] == "nothing=control-exceeds-observation-reserve;");
+   (ftg-result-kind(birth[2]) == "recipe") && (value == ["value=42;"]) && (ran == ["value=105;"]) && (mixed == ["value=1100;"]) && (unknownFirst == ["nothing=signed-i32-overflow;"]) && (long == ["nothing=control-exceeds-observation-reserve;"]) && (n == 8) && paired && (record_get(owner, "executions") == 0) && (record_get(owner, "admissions") == 0) && taught && routed;
   }
-  def ftgb-envelope() = (ftg-envelope("value=1;") == "<|form:observation|>value=1;<|/form:observation|>") && (ftg-envelope("<|form:knowledge-observation|>x<|/form:knowledge-observation|>") == "<|form:knowledge-observation|>x<|/form:knowledge-observation|>") && (ftg-result-kind("recipe=@1.2.3.4;") == "recipe") && (ftg-result-body("recipe=@1.2.3.4;") == "@1.2.3.4") && (ftg-result-body("nothing=depth-budget;") == "depth-budget");
+  def ftgb-source() = "<|form:nodeid-knowledge-observation|>\nstatus=hit\nanswer:a &lt;b<|/form:nodeid-knowledge-observation|>";
+  def ftgb-envelope() = (ftg-envelope("value=1;") == "<|form:observation|>value=1;<|/form:observation|>") && (ftg-envelope("<|form:knowledge-observation|>x<|/form:knowledge-observation|>") == "<|form:knowledge-observation|>x<|/form:knowledge-observation|>") && (ftg-result-kind("recipe=@1.2.3.4;") == "recipe") && (ftg-result-body("recipe=@1.2.3.4;") == "@1.2.3.4") && (ftg-result-body("nothing=depth-budget;") == "depth-budget") && (ftg-ledger-result(ftgb-source()) == "\nstatus=hit\nanswer:a &lt;b") && (ftg-source-kind(ftgb-source()) == "nodeid-knowledge-observation") && (ftg-ledger-result("value=4;") == "value=4;") && (ftg-source-kind("value=4;") == "observation");
   def ftgb-quantum() {
    let head = "reply <|form:eval|>1 + 1<|/form:eval|> then ";
    let text = head ++ "<|form:eval|>2 + 2<|/form:eval|> more";
    let fresh = ftg-fresh-controls(head, text);
-   let row = ftg-crossing-row("code", ["<|form:eval|>2 + 2<|/form:eval|>"], ["value=4;"], 1);
-   (len(fresh) == 1) && (fresh[0][1] == "2 + 2") && nil?(ftg-fresh-controls(text, text)) && (len(ftg-fresh-controls("", text)) == 2) && (ftg-json-unescape("len(\\\"abc\\\")") == "len(\"abc\")") && (str_find(json-emit(row), ftg-observation-open(), 0) < 0) && (str_find(json-emit(row), "\"results\":[\"value=4;\"]", 0) >= 0) && all?(n => ftg-power-of-two?(n), [1, 8, 16, 1024]) && !any?(n => ftg-power-of-two?(n), [0, 12, 24, 1023]) && (ftg-pulse("model-codec", "begin", 0, 8) == 0);
+   let row = json-emit(ftg-crossing-row("code", ["<|form:eval|>2 + 2<|/form:eval|>", "<|form:nodeid-knowledge-query|>concept=x<|/form:nodeid-knowledge-query|>"], ["value=4;", ftgb-source()], [1]));
+   let resultsAt = str_find(row, "\"results\":", 0);
+   let unknown = ftg-quantum-items(head, head ++ "<|form:frob|>x<|/form:frob|>", 0);
+   let cut = ftg-quantum-items("", "2 + 2<|/form:eval|> more", 1);
+   let items = append(unknown, cut);
+   let results = map(c => len(c[3]) > 0 ? c[3] : ftg-observe-with(ftg-session-fresh(), c[0], c[1]), items);
+   let line = json-emit(ftg-crossing-line("code", items, results, 1));
+   let shapes = (len(fresh) == 1) && (fresh[0][1] == "2 + 2") && nil?(ftg-fresh-controls(text, text)) && (len(ftg-fresh-controls("", text)) == 2) && (ftg-json-unescape("len(\\\"abc\\\")") == "len(\"abc\")");
+   let ledger = (resultsAt > 0) && (str_find(row, "<|", resultsAt) < 0) && (str_find(row, "\"results\":[\"value=4;\",", 0) >= 0) && (str_find(row, "\"sources\":[\"observation\",\"nodeid-knowledge-observation\"]", 0) >= 0) && (str_find(row, "\"injected\":[1,0]", 0) >= 0);
+   let answered = (results == ["nothing=unknown-verb:frob;", "nothing=control-exceeds-window;"]) && (map(c => c[2], items) == ["<|form:frob|>x<|/form:frob|>", "<|/form:eval|>"]) && nil?(ftg-quantum-items("", "2 + 2<|/form:eval|> more", 0)) && (str_find(line, "<|", 0) < 0) && (str_find(line, "\"verbs\":[\"frob\",\"eval\"]", 0) >= 0);
+   shapes && ledger && answered;
   }
   def ftgb-run() {
    let c1 = ftgb-claim(ftgb-table(), 1);
