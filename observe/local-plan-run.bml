@@ -3,20 +3,27 @@
 //
 // stdin, one JSON line:
 //   a request itself: {"id","title","problem","needs","where","files","evidence"}; or
-//   {"request":"<id>"} or {"next":1}: a request read from learn/local-requests.jsonl ({"requests":"<path>"} reads
-//   another file); next takes the first pending request that no queue row names and no plan option has tried,
-//   one Form source under form/, observe/, gate/ or learn/ first, then one file of any kind, then any.
+//   {"request":"<id>"} or {"next":1}: a request read from learn/local-requests.jsonl, the file the feeder door
+//   (observe/findings-to-requests-run.bml, on claude/impl-d-feeder until it lands) writes; until then {"next":1}
+//   finds none there, and {"requests":"<path>"} reads another file. next takes the first pending request that no queue row names, no plan option has tried and no review
+//   refuted, one Form source under form/, observe/, gate/ or learn/ first, then one file of any kind, then any.
+// A request the queue already carries (a row whose "request" is its id) is planned once: the door says which gap
+// carries it and opens no model. {"queue":"<path>"} reads and lands in another queue (default
+// learn/native-turn-queue.jsonl).
 // Beside either, optional: "attempts" (6), "voices" (else the registry's plan chain, each voice whose weights are on
 // disk), "context" (16384), "max_reply_tokens" (3072), "deadline_ms" (600000, one band run), "dry":1 prints the
 // first packet the voice would read and opens no model. A request an earlier walk left refused resumes from the
-// options its ledger rows keep (their findings and replies); "fresh":1 starts it clean. Before the voice opens, the
-// door waits while a walk door (host-walk.bml's hw-walk-doors) runs in another checkout, once a minute for at most
-// "yield_ms" (7200000), and then opens no model.
-// The voice speaks in this process (form-stdlib/bml/form-cli-native-voice.bml), one reply at a time, and the band runs
-// begin only after its session is released. Each packet and reply is kept under .hearth/local-plans, each option's
-// row lands in .hearth/local-plans/ledger.jsonl, and a verified plan lands its band at its path and one row at the
-// end of learn/native-turn-queue.jsonl, where the night's walk takes it. A physical run: it needs the local GPU and a
-// quiet machine.
+// options its ledger rows keep (their findings and replies); "fresh":1 starts it clean.
+// One model on the one GPU: before each option's voice opens, the door reads the host's processes (flp-gpu-holders)
+// and waits while a GPU door runs: the walk's doors, the session learning's, the LoRA lanes' or another planner's,
+// in this checkout or another, other than this process and those it runs under. It looks once a minute for at most
+// "yield_ms" (7200000); a GPU still held then opens no model, and the walk ends held with no row for that option.
+// The voice speaks in this process (form-stdlib/bml/form-cli-native-voice.bml: registry weights on this Mac), one
+// reply at a time, and the band runs begin only after its session is released. No prompt leaves the machine by
+// construction: the voice is in-process, and a declined walk's guide packet (fcgp-packet-at) is a file no door here
+// sends. Each packet and reply is kept under .hearth/local-plans, each option's row lands in
+// .hearth/local-plans/ledger.jsonl, and a verified plan lands its band at its path and one row at the end of the
+// queue, where the night's walk takes it. A physical run: it needs the local GPU and a quiet machine.
 // preflight-exec: forbidden
 import form-stdlib/bml/form-cli-local-plan.bml;
 import form-stdlib/bml/form-cli-native-voice.bml;
@@ -27,13 +34,14 @@ section [form.bml] {
  class LocalPlanRun {
   def lpr-int(doc, key, d) = fcgp-num(doc, key) ?? d;
   def lpr-request?(doc) = fcgp-present?(doc, "title") || (fcgp-present?(doc, "problem") || fcgp-present?(doc, "needs"));
-  def lpr-planned?(id, queue) = any?(r => ((String) flp-text(r, "request") == id), flp-queue-rows(queue));
   def lpr-source(opts) = if fcgp-present?(opts, "requests") then fcgp-str(opts, "requests") else flp-requests();
-  // next: a pending request no queue row names and no plan option has tried; one Form source first (a band
-  // measures Form definitions), then one file of any kind, then any
+  def lpr-queue(opts) = if fcgp-present?(opts, "queue") then fcgp-str(opts, "queue") else flp-queue();
+  // next: a pending request no queue row names, no plan option has tried and no review refuted; one Form source
+  // first (a band measures Form definitions), then one file of any kind, then any
   def lpr-pending?(r) = (!fcgp-present?(r, "status")) || ((String) fcgp-str(r, "status") == "pending");
+  def lpr-refuted?(r) = (String) fcgp-str(r, "verdict") == "refuted";
   def lpr-tried() = map(r => flp-text(r, "request"), flp-queue-rows(flp-dir() ++ "/ledger.jsonl"));
-  def lpr-open?(r, queue, tried) = ((Comparable) len(flp-req-id(r)) > 0) && (lpr-pending?(r) && ((!lpr-planned?(flp-req-id(r), queue)) && (!flp-has?(tried, flp-req-id(r)))));
+  def lpr-open?(r, queue, tried) = ((Comparable) len(flp-req-id(r)) > 0) && (lpr-pending?(r) && ((!lpr-refuted?(r)) && (nothing?(flp-request-row(queue, flp-req-id(r))) && (!flp-has?(tried, flp-req-id(r))))));
   def lpr-one?(r) = (Comparable) len(flp-req-files(r)) == 1;
   def lpr-form-source?(r) = lpr-one?(r) && (flp-under-roots?(flp-req-files(r)[0]) && ((flp-ends?(flp-req-files(r)[0], ".fk") || flp-ends?(flp-req-files(r)[0], ".bml")) && (!flp-band-like?(flp-req-files(r)[0]))));
   def lpr-next(rows, queue, tried) = flp-first(rows, r => (lpr-open?(r, queue, tried) && lpr-form-source?(r))) ?? (flp-first(rows, r => (lpr-open?(r, queue, tried) && lpr-one?(r))) ?? flp-first(rows, r => lpr-open?(r, queue, tried)));
@@ -43,8 +51,23 @@ section [form.bml] {
    if lpr-request?(opts) then opts else if ((Comparable) len(want) > 0) then flp-first(rows, r => ((String) flp-req-id(r) == want)) else lpr-next(rows, queue, lpr-tried());
   }
   def lpr-voices(opts) = if fcgp-present?(opts, "voices") then flp-strs(opts, "voices") else filter(n => ((Comparable) mr-file?(mr-path(mr-find(n))) == 1), mr-chain-names("plan"));
-  // the voice: the packet is kept before it is read and the reply after, so a review reads every step
-  def lpr-ask(dir, id, packet, name, n, context, limit) {
+  // one model on the GPU at a time: [granted, what was said]; the door looks once a minute for at most yield_ms
+  def lpr-yield(until, began, named) {
+   let others = flp-gpu-holders();
+   if nil?(others) then [true, if ((String) named == "") then "" else mc-cat(["[local-plan:yield] waited ", hw-minutes((host_monotonic_ms() - began)), " for ", named, " to end: one model on the GPU at a time"])] else if (host_monotonic_ms() > until) then [false, mc-cat(["[local-plan:yield] ", flp-holder-names(others), " still holds the GPU; no model opens"])] else lpr-yield-rest(until, began, if ((String) named == "") then flp-holder-names(others) else named);
+  }
+  def lpr-yield-rest(until, began, named) {
+   let rested = host_sleep_ms(hw-yield-poll-ms());
+   lpr-yield(until, began, named);
+  }
+  // the voice: it opens only once the GPU is free; the packet is kept before it is read and the reply after, so a
+  // review reads every step; a GPU still held answers "held" and the walk ends
+  def lpr-ask(dir, id, packet, name, n, context, limit, yieldMs) {
+   let gpu = lpr-yield((host_monotonic_ms() + yieldMs), host_monotonic_ms(), "");
+   let waited = if ((Comparable) len(gpu[1]) > 0) then print_str(gpu[1]) else 0;
+   if gpu[0] then lpr-spoken(dir, id, packet, name, n, context, limit) else ["held", gpu[1], 0, 0, ""];
+  }
+  def lpr-spoken(dir, id, packet, name, n, context, limit) {
    let stem = mc-cat([dir, "/", id, "-", n.str(), "-", now_unix_ms().str()]);
    let kept = write_file_text(stem ++ ".packet.txt", packet);
    let v = fcnv-ask(packet, json-node-object([fhn-s("model", name), fhn-n("context", context), fhn-n("max_reply_tokens", limit)]));
@@ -53,29 +76,14 @@ section [form.bml] {
    let said = print_str(mc-cat(["[local-plan:voice] ", name, " option ", n.str(), " ", v[0], " prompt_ids=", v[2].str(), " generated_ids=", v[3].str(), " reply=", stem, ".reply.txt"]));
    [v[0], text, v[2], v[3], stem ++ ".reply.txt"];
   }
-  def lpr-voice(dir, id, context, limit) = (packet, name, n) => lpr-ask(dir, id, packet, name, n, context, limit);
+  def lpr-voice(dir, id, context, limit, yieldMs) = (packet, name, n) => lpr-ask(dir, id, packet, name, n, context, limit, yieldMs);
   def lpr-read(path) = if ((String) path == "") then "" else fhn-read(path);
   // an earlier walk of this request left its refused options in the ledger; the walk resumes from them unless
   // {"fresh":1} asks for a clean start
   def lpr-memory(req, opts) = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then [] else flp-memory-of(flp-queue-rows(flp-dir() ++ "/ledger.jsonl"), flp-req-id(req), p => lpr-read(p));
-  // one model on the GPU at a time: the voice opens only while no walk door (hw-walk-doors) runs in another
-  // checkout; the door looks once a minute for at most yield_ms, then opens no model and says who held it
-  def lpr-yield(until, began, named) {
-   let others = hw-elsewhere(hw-here());
-   if nil?(others) then [true, if ((String) named == "") then "" else mc-cat(["[local-plan:yield] waited ", hw-minutes((host_monotonic_ms() - began)), " for ", named, " to end: one model on the GPU at a time"])] else if (host_monotonic_ms() > until) then [false, mc-cat(["[local-plan:yield] ", hw-walk-names(others), " still holds the GPU; no model opens"])] else lpr-yield-rest(until, began, if ((String) named == "") then hw-walk-names(others) else named);
-  }
-  def lpr-yield-rest(until, began, named) {
-   let rested = host_sleep_ms(hw-yield-poll-ms());
-   lpr-yield(until, began, named);
-  }
-  def lpr-plan(req, opts, voices, queue) {
-   let gpu = lpr-yield((host_monotonic_ms() + lpr-int(opts, "yield_ms", 7200000)), host_monotonic_ms(), "");
-   let waited = if ((Comparable) len(gpu[1]) > 0) then print_str(gpu[1]) else 0;
-   if gpu[0] then lpr-walk(req, opts, voices, queue) else 0;
-  }
   def lpr-walk(req, opts, voices, queue) {
    let made = flp-mkdirs(flp-dir());
-   let ctx = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), lpr-int(opts, "context", 16384), lpr-int(opts, "max_reply_tokens", 3072)), voices, lpr-int(opts, "attempts", flp-attempts()), queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
+   let ctx = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), lpr-int(opts, "context", 16384), lpr-int(opts, "max_reply_tokens", 3072), lpr-int(opts, "yield_ms", 7200000)), voices, lpr-int(opts, "attempts", flp-attempts()), queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
    let memory = lpr-memory(req, opts);
    let resumed = if nil?(memory) then 0 else print_str(mc-cat(["[local-plan] resuming ", flp-req-id(req), " after ", len(memory).str(), " refused option(s) the ledger keeps"]));
    let r = flp-walk-from(req, ctx, memory);
@@ -84,10 +92,11 @@ section [form.bml] {
   def lpr-run() {
    let line = trim(stdin-text());
    let opts = if fcgp-object-line?(line) then parse-json("local-plan-options", line) else json-node-object([]);
-   let queue = flp-queue();
+   let queue = lpr-queue(opts);
    let req = lpr-pick(opts, queue);
+   let queued = if nothing?(req) then nothing() else flp-request-row(queue, flp-req-id(req));
    let voices = lpr-voices(opts);
-   if nothing?(req) then print_str(mc-cat(["[local-plan] no request to plan in ", lpr-source(opts)])) else if nil?(voices) then print_str("[local-plan] no plan voice has its weights on disk") else if ((Comparable) lpr-int(opts, "dry", 0) == 1) then lpr-dry(req, voices, queue) else lpr-plan(req, opts, voices, queue);
+   if nothing?(req) then print_str(mc-cat(["[local-plan] no request to plan in ", lpr-source(opts)])) else if (!nothing?(queued)) then print_str(mc-cat(["[local-plan] request ", flp-req-id(req), " is already queued as ", flp-text(queued, "id"), " in ", queue, "; a request is planned once, and no model opens"])) else if nil?(voices) then print_str("[local-plan] no plan voice has its weights on disk") else if ((Comparable) lpr-int(opts, "dry", 0) == 1) then lpr-dry(req, voices, queue) else lpr-walk(req, opts, voices, queue);
   }
   def lpr-dry(req, voices, queue) {
    let said = print_str(mc-cat(["[local-plan:dry] request ", flp-req-id(req), " voices ", flp-join(voices, ","), "; the first packet:"]));
