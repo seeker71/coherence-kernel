@@ -1054,33 +1054,39 @@ export class Kernel {
     this.registerNative("input_byte", () => ({ kind: "int", int: 0 }));
     // List ops: cons, head, tail, nth and len run on SharedList in constant time.
     this.registerNative("list", (_k, args) => new SharedList(args.reverse(), args.length));
+    // cons onto a word that is not a list makes a pair, as fkwu's cons does (see
+    // SharedList.end): form-eval's env is a cons chain ended by 0, the stage bus
+    // carries (cons stage key).
     this.registerNative("cons", (k, args) => {
       const head = args[0] ?? { kind: "null" };
       // nothing is not a list: consing onto it is a stop, as on fkwu
       if (args[1]?.kind === "null") throw new Error("cons: nothing is not a list -- ask nothing? before consing");
       const xs = args[1];
-      if (xs?.kind !== "list") throw new Error(`cons: expected list, got ${xs?.kind ?? "absent"}`);
+      if (xs === undefined) throw new Error("cons: expected a tail, got none");
+      if (xs.kind !== "list") return new SharedList([head], 1, xs);
       const tail = sharedList(k, xs);
       // the longest view of a buffer grows it in place; any other view copies its own cells
       if (tail.buf.length === tail.n) {
         tail.buf.push(head);
-        return new SharedList(tail.buf, tail.n + 1);
+        return new SharedList(tail.buf, tail.n + 1, tail.end);
       }
       k.noteListCopy(tail.n);
       const buf = tail.buf.slice(0, tail.n);
       buf.push(head);
-      return new SharedList(buf, tail.n + 1);
+      return new SharedList(buf, tail.n + 1, tail.end);
     });
-    // A receiver that is not a list answers null, as nth does; the tail of a list is a list.
+    // A receiver that is not a list answers null, as nth does.
     this.registerNative("head", (_k, args) => {
       const xs = args[0];
       return xs?.kind === "list" ? listAt(xs, 0) : { kind: "null" };
     });
+    // The tail of a pair's last cell is the pair's tail word.
     this.registerNative("tail", (k, args) => {
       const xs = args[0];
       if (xs?.kind !== "list") return { kind: "null" };
       const shared = sharedList(k, xs);
-      return new SharedList(shared.buf, Math.max(0, shared.n - 1));
+      if (shared.n === 1 && shared.end !== undefined) return shared.end;
+      return new SharedList(shared.buf, Math.max(0, shared.n - 1), shared.end);
     });
     // len is the honest cell count: a list's cells, a string's bytes.
     this.registerNative("len", (_k, args) => {
@@ -1212,10 +1218,16 @@ export class Kernel {
     // math.pow — always returns float, matching CPython's behaviour.
     // (CPython's `math.pow(2, 3)` returns `8.0`, not `8`. The built-in
     // `pow()` would return int for int arguments; we don't expose that.)
+    // math_pow keeps IEEE 754-2008's pow (9.2.1), as fkwu, Go and Rust do, where
+    // ECMAScript's Math.pow parts from it: 1 to any power is 1, NaN included, and
+    // -1 to an infinite power is 1.
     this.registerNative("math_pow", (_k, args) => {
+      const x = argFloat(args, 0);
+      const y = argFloat(args, 1);
+      const ieeeOne = x === 1 || (x === -1 && (y === Infinity || y === -Infinity));
       return {
         kind: "f64",
-        float: Math.pow(argFloat(args, 0), argFloat(args, 1)),
+        float: ieeeOne ? 1 : Math.pow(x, y),
       };
     });
     this.registerNative("math_log", (_k, args) => {
@@ -1229,10 +1241,13 @@ export class Kernel {
     // the exact decimal value of the double half-to-even at n fractional
     // places (n >= 0), matching CPython bit-for-bit. Sibling-parity with the
     // Rust + Go kernels. See roundNdigitsDecimal above.
+    // A negative n stops by name, as on fkwu: ndigits counts places.
     this.registerNative("round_ndigits", (_k, args) => {
+      const n = argInt(args, 1);
+      if (n < 0) throw new Error("round_ndigits: ndigits is a count of places, an int at or above 0");
       return {
         kind: "f64",
-        float: roundNdigitsDecimal(argFloat(args, 0), argInt(args, 1)),
+        float: roundNdigitsDecimal(argFloat(args, 0), n),
       };
     });
     // File I/O
@@ -2006,6 +2021,20 @@ export class Kernel {
       const dir = this.host.workingDirectory?.();
       return dir === undefined ? { kind: "null" } : { kind: "str", str: dir };
     });
+    // host-exec — (host-exec cmd input), fkwu's fk_host_exec: cmd runs under `sh -c`; a
+    // non-empty input is its stdin and an empty one leaves stdin inherited; the answer is its
+    // stdout, while its stderr passes through; a nonzero exit still answers what it spoke. A
+    // launch that never happened answers nothing, never "": "" means it ran and spoke zero
+    // bytes. A host with no process carrier stops here, by name.
+    this.registerNative("host-exec", (_k, args) => {
+      const run = this.host.runProcess;
+      if (run === undefined) throw new Error("host-exec: this host carries no process door");
+      // a string the kernel made as JS text (a unit above 255) crosses as its UTF-8
+      const bytes = (s: string): Uint8Array => (isWide(s) ? new TextEncoder().encode(s) : bstrToBytes(s));
+      const input = args[1]?.kind === "str" ? bytes(args[1].str) : new Uint8Array(0);
+      const out = run(bytes(argStr(args, 0)), input);
+      return out === null ? { kind: "null" } : { kind: "str", str: bytesToBstr(out) };
+    });
     // kernel_stat, kernel_live, print_str — the doors fkwu carries as tags 127, 163 and 115.
     //
     // kernel_stat key reads fkwu's self-measurement key space. Key 164 is fkwu's arm counter for
@@ -2512,9 +2541,13 @@ function valueKindName(v: Value): string {
 export class SharedList {
   readonly kind = "list" as const;
   private forward: Value[] | undefined;
+  // end — a pair's tail word, below buf[0]: a list made by cons onto a word that is
+  // not a list (fkwu's pair). Every view of one buffer shares its bottom, so the word
+  // rides along; list readers end before it, and tail, eq and value_eq see it.
   constructor(
     readonly buf: Value[],
     readonly n: number,
+    readonly end?: Value,
   ) {}
   get list(): Value[] {
     if (this.forward === undefined) {
@@ -3306,6 +3339,11 @@ function valueEqual(a: Value, b: Value): boolean {
       const bl = b as { kind: "list"; list: Value[] };
       const n = listLength(a);
       if (n !== listLength(bl)) return false;
+      // a pair meets only a pair with the same tail word, as on fkwu
+      const ae = a instanceof SharedList ? a.end : undefined;
+      const be = bl instanceof SharedList ? bl.end : undefined;
+      if ((ae === undefined) !== (be === undefined)) return false;
+      if (ae !== undefined && be !== undefined && !valueEqual(ae, be)) return false;
       if (a instanceof SharedList && bl instanceof SharedList && a.buf === bl.buf) return true;
       for (let i = 0; i < n; i++) if (!valueEqual(listAt(a, i), listAt(bl, i))) return false;
       return true;

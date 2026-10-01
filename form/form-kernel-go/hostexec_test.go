@@ -63,6 +63,22 @@ func TestHostExecLaunchFailureAnswersNothing(t *testing.T) {
 	}
 }
 
+// TestHostExecAnswersStdout — host-exec answers what the child wrote to its
+// stdout, as fkwu's fk_host_exec does; its stderr passes through to the
+// kernel's own and never joins the answer, and a non-empty input is its stdin.
+func TestHostExecAnswersStdout(t *testing.T) {
+	k := NewKernel()
+	call := func(cmd, input string) Value {
+		return k.natives[k.internName("host-exec")].Fn(k, []Value{{Kind: VStr, Str: cmd}, {Kind: VStr, Str: input}})
+	}
+	if v := call("printf out; echo host-exec-stderr-passes-through >&2", ""); v.Kind != VStr || v.Str != "out" {
+		t.Fatalf("the answer is stdout alone: kind=%v str=%q", v.Kind, v.Str)
+	}
+	if v := call("cat", "hello"); v.Kind != VStr || v.Str != "hello" {
+		t.Fatalf("a non-empty input is the child's stdin: kind=%v str=%q", v.Kind, v.Str)
+	}
+}
+
 // TestReadFileAbsentAnswersNothing — a file that never was answers nothing,
 // never "": "" means the file exists and holds zero bytes.
 func TestReadFileAbsentAnswersNothing(t *testing.T) {

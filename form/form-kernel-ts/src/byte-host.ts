@@ -105,6 +105,8 @@ export function byteHost(host: KernelHost): KernelHost {
     monotonicMs: host.monotonicMs,
     workingDirectory: opt(host.workingDirectory, (g) => () => t(g())),
     homeDirectory: opt(host.homeDirectory, (g) => () => t(g())),
+    // a command, its input and its output cross as bytes
+    runProcess: host.runProcess,
     httpGet: opt(host.httpGet, (g) => (request: KernelHttpRequest): KernelHttpResult => {
       const headers: Record<string, readonly string[]> = {};
       for (const [k, vs] of Object.entries(request.headers)) headers[p(k)] = vs.map(p);

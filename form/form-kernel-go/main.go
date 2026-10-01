@@ -1612,14 +1612,21 @@ func (k *Kernel) registerNatives() {
 	// go-build, plugin load), so this exposes an existing capability, not a new class.
 	k.registerNative("host-exec", catMethod(), func(_ *Kernel, args []Value) Value {
 		cmd := exec.Command("sh", "-c", argStr(args, 0))
-		// Optional second arg = the process's stdin, piped in-memory: no temp file,
+		// A non-empty second arg = the process's stdin, piped in-memory: no temp file,
 		// no writable filesystem. The bytes go kernel -> subprocess directly, so a
 		// question never spills to disk and a host with no writable /tmp (Android)
-		// still escalates. One-arg callers are unchanged.
-		if len(args) > 1 {
+		// still escalates. An empty or absent one leaves stdin inherited, as fkwu's
+		// fk_host_exec leaves it.
+		if len(args) > 1 && argStr(args, 1) != "" {
 			cmd.Stdin = strings.NewReader(argStr(args, 1))
+		} else {
+			cmd.Stdin = os.Stdin
 		}
-		out, err := cmd.CombinedOutput()
+		// The answer is the child's stdout; its stderr passes through to this
+		// kernel's own, as on fkwu (a merged stream answered words fkwu never
+		// hands back).
+		cmd.Stderr = os.Stderr
+		out, err := cmd.Output()
 		// Launch failure (fork starvation — sh never ran) answers the axiom-1
 		// nothing (the same null head-of-empty carries), never "": "" means the
 		// command RAN and spoke zero bytes. An *exec.ExitError is a process that
@@ -1664,7 +1671,12 @@ func (k *Kernel) registerNatives() {
 	})
 	// record_get — (record_get rec "field") → value, or 0 when the record
 	// carries no such field: fkwu's answer, which the body reads as eq(v, 0).
+	// record_get and record_set on a value that is not a record stop by name, as
+	// Rust and TS stop (fkwu: "only a record has fields"); record_has answers 0.
 	k.registerNative("record_get", catAccess(), func(k *Kernel, args []Value) Value {
+		if args[0].Kind != VRecord {
+			panic("record_get: not a record -- only a record has fields; ask record? first")
+		}
 		v, ok := args[0].Rec.Get(k.internName(argStr(args, 1)))
 		if !ok {
 			return Value{Kind: VInt, Int: 0}
@@ -1674,11 +1686,18 @@ func (k *Kernel) registerNatives() {
 	// record_set — (record_set rec "field" value) → the record (mutated in
 	// place; shared identity means all holders see it). BML's `self.x = v`.
 	k.registerNative("record_set", catMethod(), func(k *Kernel, args []Value) Value {
+		if args[0].Kind != VRecord {
+			panic("record_set: not a record -- only a record has fields; ask record? first")
+		}
 		args[0].Rec.Set(k.internName(argStr(args, 1)), args[2])
 		return args[0]
 	})
-	// record_has — (record_has rec "field") → bool.
+	// record_has — (record_has rec "field") → bool; a value that is not a record
+	// has no field, so it answers 0, as Rust and TS answer.
 	k.registerNative("record_has", catAccess(), func(k *Kernel, args []Value) Value {
+		if args[0].Kind != VRecord {
+			return boolInt(false)
+		}
 		_, ok := args[0].Rec.Get(k.internName(argStr(args, 1)))
 		return boolInt(ok)
 	})
@@ -1898,15 +1917,24 @@ func (k *Kernel) registerNatives() {
 		copy(out, args)
 		return Value{Kind: VList, List: out}
 	})
+	// cons onto a word that is not a list makes a pair, as fkwu's cons does: the
+	// pair keeps its tail word, list readers (len, nth, print, value_str) end at
+	// it and read [h], and tail, eq and value_eq see the word. The body leans on
+	// it: form-eval's env is a cons chain ended by 0, the stage bus carries
+	// (cons stage key).
 	k.registerNative("cons", catListNat(), func(_ *Kernel, args []Value) Value {
 		// nothing is not a list: consing onto it is a stop, as on fkwu
 		if args[1].Kind == VNull {
 			panic("cons: nothing is not a list -- ask nothing? before consing")
 		}
+		if args[1].Kind != VList {
+			word := args[1]
+			return Value{Kind: VList, List: []Value{args[0]}, Tail: &word}
+		}
 		out := make([]Value, 0, len(args[1].List)+1)
 		out = append(out, args[0])
 		out = append(out, args[1].List...)
-		return Value{Kind: VList, List: out}
+		return Value{Kind: VList, List: out, Tail: args[1].Tail}
 	})
 	k.registerNative("head", catListNat(), func(_ *Kernel, args []Value) Value {
 		if len(args[0].List) == 0 {
@@ -1915,6 +1943,7 @@ func (k *Kernel) registerNatives() {
 		return args[0].List[0]
 	})
 	// A receiver that is not a list has no tail and answers null, as head and nth answer.
+	// The tail of a pair's last cell is the pair's tail word.
 	k.registerNative("tail", catListNat(), func(_ *Kernel, args []Value) Value {
 		if args[0].Kind != VList {
 			return Value{Kind: VNull}
@@ -1922,7 +1951,10 @@ func (k *Kernel) registerNatives() {
 		if len(args[0].List) == 0 {
 			return Value{Kind: VList, List: []Value{}}
 		}
-		return Value{Kind: VList, List: args[0].List[1:]}
+		if len(args[0].List) == 1 && args[0].Tail != nil {
+			return *args[0].Tail
+		}
+		return Value{Kind: VList, List: args[0].List[1:], Tail: args[0].Tail}
 	})
 	// len counts cells: a "__dict__" row's marker is a cell like any other.
 	k.registerNative("len", catAccess(), func(_ *Kernel, args []Value) Value {
@@ -1992,9 +2024,14 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VFloat, Float: math.Exp(args[0].AsFloat())}
 	})
 	// round_ndigits(x, n) — CPython round(x, n) exactly: the double's exact decimal
-	// value rounded half-to-even at n places (roundNdigitsDecimal).
+	// value rounded half-to-even at n places (roundNdigitsDecimal). A negative n
+	// stops by name, as on fkwu: ndigits counts places.
 	k.registerNative("round_ndigits", catMethod(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VFloat, Float: roundNdigitsDecimal(args[0].AsFloat(), args[1].AsInt())}
+		n := args[1].AsInt()
+		if n < 0 {
+			panic("round_ndigits: ndigits is a count of places, an int at or above 0")
+		}
+		return Value{Kind: VFloat, Float: roundNdigitsDecimal(args[0].AsFloat(), n)}
 	})
 
 	// ── Float construction + introspection — sibling-parity with the
@@ -2674,11 +2711,13 @@ func (k *Kernel) registerNatives() {
 		k.framebufferRoots = nil
 		return Value{Kind: VNull}
 	})
-	// write_file_bytes — sibling of read_file_bytes; writes a byte list.
+	// write_file_bytes — sibling of read_file_bytes; writes a byte list. A
+	// second argument that is not a list of ints answers -1 and leaves the
+	// file as it stood, as fkwu (fk_byte_list_ok) and TS answer.
 	k.registerNative("write_file_bytes", catCall(), func(_ *Kernel, args []Value) Value {
-		bytes := make([]byte, len(args[1].List))
-		for i, v := range args[1].List {
-			bytes[i] = byte(v.Int)
+		bytes, ok := byteListOf(args[1])
+		if !ok {
+			return Value{Kind: VInt, Int: -1}
 		}
 		err := os.WriteFile(argStr(args, 0), bytes, 0644)
 		if err != nil {
@@ -2693,9 +2732,9 @@ func (k *Kernel) registerNatives() {
 	// the new total file size. Creates the file if absent. Foundation for
 	// cell-log-store.fk (the Bitcask-shape store).
 	fileAppendBytesNative := func(_ *Kernel, args []Value) Value {
-		bytes := make([]byte, len(args[1].List))
-		for i, v := range args[1].List {
-			bytes[i] = byte(v.Int)
+		bytes, ok := byteListOf(args[1])
+		if !ok {
+			return Value{Kind: VInt, Int: -1}
 		}
 		f, err := os.OpenFile(argStr(args, 0), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
@@ -3397,6 +3436,24 @@ func (k *Kernel) switchKeyFromValue(v Value) (NodeID, bool) {
 	}
 }
 
+// byteListOf — the bytes a byte writer writes: a list whose every cell is an int,
+// each masked to its low byte (all four kernels mask). Anything else is no byte
+// list (ok false), and the writer answers -1 before it touches the file, as
+// fkwu's fk_byte_list_ok refuses.
+func byteListOf(v Value) ([]byte, bool) {
+	if v.Kind != VList {
+		return nil, false
+	}
+	bytes := make([]byte, len(v.List))
+	for i, x := range v.List {
+		if x.Kind != VInt {
+			return nil, false
+		}
+		bytes[i] = byte(x.Int)
+	}
+	return bytes, true
+}
+
 // valueEqual — content identity (axiom-3: same composition is the same cell).
 // value_eq answers it, and eq/ne answer it wherever a non-number takes part.
 // Numbers keep their kind: an int never equals a float here, and a NaN is the
@@ -3421,6 +3478,10 @@ func valueEqual(a, b Value) bool {
 		return a.Nid == b.Nid
 	case VList:
 		if len(a.List) != len(b.List) {
+			return false
+		}
+		// a pair meets only a pair with the same tail word, as on fkwu
+		if (a.Tail == nil) != (b.Tail == nil) || (a.Tail != nil && !valueEqual(*a.Tail, *b.Tail)) {
 			return false
 		}
 		if len(a.List) == 0 || &a.List[0] == &b.List[0] {
@@ -3839,9 +3900,19 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 	case "let":
 		// (let <ident> <value>) — repackage the identifier wrapper as the
 		// bare string trivial so the walker reads NameID directly from `inst`.
+		// (let <ident> <value> <body>) binds the name over its body alone and
+		// answers the body, as fkwu reads it: it is the do (do (let n v) body),
+		// whose own scope ends with the body, so the name leaves with it.
+		if len(args) < 2 || len(args) > 3 {
+			panic(fmt.Sprintf("parse error: let takes (let name value) or (let name value body), got %d forms", len(args)))
+		}
 		nameID := k.identID(args[0])
 		nameTrivial := NodeID{Pkg: 1, Level: LevelTrivial, Type: TrivString, Inst: uint32(nameID)}
-		return k.intern(catBlock(RBlockLet), []NodeID{nameTrivial, args[1]})
+		bind := k.intern(catBlock(RBlockLet), []NodeID{nameTrivial, args[1]})
+		if len(args) == 3 {
+			return k.intern(catBlock(RBlockDo), []NodeID{bind, args[2]})
+		}
+		return bind
 	case "if":
 		if len(args) == 2 {
 			return k.intern(catCond(RCondIfThen), args)

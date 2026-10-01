@@ -320,22 +320,33 @@ function readChildrenUntilRparen(k: Kernel, s: ParseState): NodeID[] {
 
 // (let <name> <value>) — interns name as a bare string trivial so the
 // walker reads NameID directly from the inst slot (no IDENT recipe).
+// (let <name> <value> <body>) binds the name over its body alone and answers
+// the body, as fkwu reads it: it is the do (do (let n v) body), whose own
+// scope ends with the body, so the name leaves with it.
 function readLet(k: Kernel, s: ParseState): NodeID {
   const nameTok = consume(s);
   if (nameTok.kind !== "ident")
     throw new Error("let: name must be identifier");
   const value = readOne(k, s);
+  const after = peek(s);
+  const body = after !== undefined && after.kind !== "rparen" ? readOne(k, s) : undefined;
   const close = consume(s);
-  if (close.kind !== "rparen") throw new Error("let: expected )");
+  if (close.kind !== "rparen")
+    throw new Error("let: takes (let name value) or (let name value body), expected )");
   const nameTrivial: NodeID = {
     pkg: 1,
     level: Level.TRIVIAL,
     type: Triv.STRING,
     inst: k.internName(nameTok.text),
   };
-  return k.intern(
+  const bind = k.intern(
     { pkg: 1, level: Level.BASIC, type: RBasic.BLOCK, inst: RBlock.LET },
     [nameTrivial, value],
+  );
+  if (body === undefined) return bind;
+  return k.intern(
+    { pkg: 1, level: Level.BASIC, type: RBasic.BLOCK, inst: RBlock.DO },
+    [bind, body],
   );
 }
 

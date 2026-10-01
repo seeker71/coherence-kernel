@@ -250,3 +250,65 @@ func TestReleasedNativesAreGone(t *testing.T) {
 		t.Errorf("sum without its core.fk home answered %v; the home must carry it", v)
 	}
 }
+
+// (let NAME VALUE BODY) binds NAME over BODY alone and answers BODY, as fkwu
+// reads it; the name leaves with the body.
+func TestLetWithABody(t *testing.T) {
+	wantInt(t, "(add 1 (let h 4 (mul h h)))", 17)
+	wantInt(t, "(do (defn f (a) (add (let a 10 (add a 1)) a)) (f 5))", 16)
+	wantInt(t, "(do (defn g (a) (let a (add a 1) (let a (mul a 2) a))) (g 5))", 12)
+	wantInt(t, "(do (defn c (n acc) (if (eq n 0) acc (let m (sub n 1) (c m (add acc 1))))) (c 5000 0))", 5000)
+	wantInt(t, "(add 1 (let q 4))", 5)
+	wantStop(t, "(add 1 (let q 4 5 6))")
+}
+
+// cons onto a word that is not a list makes a pair, as fkwu's cons does: list
+// readers end at the tail word and read [h]; tail, eq and value_eq see it.
+func TestConsOntoAWordIsAPair(t *testing.T) {
+	wantInt(t, "(tail (cons 7 60))", 60)
+	wantInt(t, "(len (cons 7 60))", 1)
+	wantInt(t, "(nth (cons 7 60) 0)", 7)
+	wantStr(t, "(value_str (cons 1 (cons 2 0)))", "[1, 2]")
+	wantInt(t, "(tail (tail (cons 1 (cons 2 0))))", 0)
+	wantInt(t, "(eq (cons 7 60) (list 7))", 0)
+	wantInt(t, "(value_eq (cons 7 60) (cons 7 60))", 1)
+	wantInt(t, "(value_eq (cons 7 60) (cons 7 61))", 0)
+	wantStr(t, `(tail (cons 7 "s"))`, "s")
+	wantStop(t, "(cons 7 (nothing))")
+}
+
+// record_has asks whether a value has a field: a value that is not a record has
+// none. record_get and record_set on it stop by name.
+func TestRecordDoorsOnANonRecord(t *testing.T) {
+	wantInt(t, `(record_has 0 "a")`, 0)
+	wantInt(t, `(record_has (list) "a")`, 0)
+	wantInt(t, `(record_has (record_new 0 "a" 1) "a")`, 1)
+	wantStop(t, `(record_get 0 "a")`)
+	wantStop(t, `(record_set 0 "a" 1)`)
+}
+
+// A byte writer takes a list of ints: a string, a number or a list holding a
+// non-int answers -1 and leaves the file as it stood, as fkwu and TS answer.
+func TestByteWritersRefuseANonByteList(t *testing.T) {
+	path := t.TempDir() + "/bytes"
+	if err := os.WriteFile(path, []byte("precious"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	wantInt(t, `(write_file_bytes "`+path+`" "abc")`, -1)
+	wantInt(t, `(write_file_bytes "`+path+`" (list 65 1.5))`, -1)
+	wantInt(t, `(file_append_bytes "`+path+`" (list 1.5))`, -1)
+	wantInt(t, `(file_append_bytes "`+path+`" 7)`, -1)
+	if got, _ := os.ReadFile(path); string(got) != "precious" {
+		t.Errorf("a refused write touched the file: %q", got)
+	}
+	wantInt(t, `(write_file_bytes "`+path+`" (list 65 322))`, 2)
+	if got, _ := os.ReadFile(path); string(got) != "AB" {
+		t.Errorf("an int writes its low byte: %q", got)
+	}
+}
+
+// round_ndigits counts places: a negative count stops by name, as on fkwu.
+func TestRoundNdigitsCountsPlaces(t *testing.T) {
+	wantStop(t, "(round_ndigits 1.25 -1)")
+	wantFloat(t, "(round_ndigits 2.675 2)", 2.67)
+}
