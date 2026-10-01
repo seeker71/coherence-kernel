@@ -1,8 +1,24 @@
 // Coding continuations reuse the sealed tokenizer index, not vocabulary scans.
 // Existing fcms pending-ID and KV ownership contracts remain authoritative.
+//
+// The lane's phases speak on the stage bus (/fg-bus1: float_leaf 29 opens (cons stage key), 30 closes
+// (cons open (list word amount digest))): code.prefill for the bootstrap and every observation, with the
+// IDs it injected; code.decode, code.tool and code.check are spoken by form-cli-code-swerve.bml. Every
+// stage name's organ is "code", so stage-vitality.bml folds their costs, overstays and retreads live. A
+// kernel without the bus answers nothing; the lane goes on unchanged.
 import form-stdlib/form-cli-model-session.fk;
 section [form.bml] {
  class FormCliCodeSession {
+  def fcacs-stage-open(stage, key) = float_leaf(29, cons(stage, key));
+  def fcacs-stage-close(open, word, amount, digest) = nothing?(open) ? nothing() : float_leaf(30, cons(open, [word, amount, digest]));
+  def fcacs-stage-word(s) = fcms-live?(s) ? "ok" : fcms-reason(s);
+  // Admission and the bootstrap prefill are one native call; their stage carries the prompt's IDs.
+  def fcacs-open-staged(path, prompt, context, profile) {
+   let open = fcacs-stage-open("code.prefill", "bootstrap");
+   let session = fcms-open-with-profile(path, prompt, context, profile);
+   let closed = fcacs-stage-close(open, fcacs-stage-word(session), fcms-prompt-ids(session), 0);
+   session;
+  }
   def fcacs-stops(s, crystal) = [gmt-u32(fcms-src(s), "tokenizer.ggml.eos_token_id"), crystal[2]];
   def fcacs-segments(pending, stopped, text, crystal) = [qtlc-id-segment(fcms-crossing-prefix-ids(pending, stopped, crystal[2], 1)), qtlc-id-segment(crystal[6]), qtlc-id-segment([crystal[1]]), qtlc-text-segment("tool\n"), qtlc-text-segment(text), qtlc-id-segment([crystal[2]]), qtlc-id-segment(crystal[6]), qtlc-id-segment([crystal[1]]), qtlc-id-segment(crystal[7]), qtlc-id-segment([crystal[3]]), qtlc-id-segment(crystal[8]), qtlc-id-segment([crystal[4]]), qtlc-id-segment(crystal[8])];
   def fcacs-segments-profile(pending,stopped,text,crystal,reasoning) {
@@ -15,20 +31,34 @@ section [form.bml] {
   def fcacs-observe(s, text) = fcacs-observe-profile(s,text,0);
   def fcacs-observe-profile(s,text,reasoning) {
    let crystal = qsx-load(fcms-path(s));
-   if (!((Comparable) crystal[0] == 1)) then fcacs-refuse(s, "coding-tokenizer-crystal-unavailable") else fcacs-observed(s, fcacs-ids-profile(s,text,crystal,reasoning));
+   let open = fcacs-stage-open("code.prefill", "observation");
+   let after = if (!((Comparable) crystal[0] == 1)) then fcacs-refuse(s, "coding-tokenizer-crystal-unavailable") else fcacs-observed(s, fcacs-ids-profile(s,text,crystal,reasoning));
+   let closed = fcacs-stage-close(open, fcacs-stage-word(after), (fcms-injected-ids(after) - fcms-injected-ids(s)), 0);
+   after;
   }
   def fcacs-observed(s, walked) = if (!((String) walked[0] == "done")) then fcacs-refuse(s, "coding-tokenizer-index-refused") else if nil?(walked[2]) then fcacs-refuse(s,"coding-observation-empty") else fcms-observe-ids(s, reverse(walked[2]), "coding-observation-context-capacity");
   def fcacs-next(s, stops) {
    let pending = fcms-forward(s,fcms-pending(s),fcms-pos(s));
    fcms-with-stream(s, (fcms-pos(s) + 1), pending, if (pending < 0) then 1 else q38-stop?(pending, stops), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s));
   }
-  def fcacs-quantum(s, stops, width) {
+  // A session that owns a sampler draws each quantum from the head's own logits (form-cli-model-sampling.bml);
+  // its presence set was cleared once when the reply began, never per quantum. Otherwise greedy argmax.
+  def fcacs-quantum(s, stops, width) = if nil?(fcsam-owner(s)) then fcacs-greedy-quantum(s, stops, width) else fcacs-sampled-quantum(s, stops, width);
+  def fcacs-greedy-quantum(s, stops, width) {
    // The coding owner publishes one real progress frame per quantum. Avoid
    // restarting the generic 1/2/4/8 pulse series for every coding chunk.
    let walked = fcms-walk(s, fcms-pending(s), fcms-pos(s), width, stops, [], (width + 1), 1, 0);
    let ids = walked[0];
    fcms-generation("", ids, fcms-with-stream(s, walked[2], walked[1], walked[3], (fcms-generated-ids(s) + len(ids)), fcms-injected-ids(s), fcms-observations(s)));
   }
+  // The pending argmax is not committed: the draw replaces it from the same logits, and the last drawn ID
+  // stays pending at the quantum's end for fcacs-next to forward, as the greedy walk leaves its own.
+  def fcacs-sampled-quantum(s, stops, width) = if (width <= 0) then fcms-generation("", [], s) else {
+   let walked = fcsam-walk(s, fcsam-owner(s), fcms-ctx(s)[1][28], fcms-forward, fcms-decode-pulse, fcms-pos(s), width, stops, [], (width + 1), 1, 0);
+   let ids = walked[0];
+   let next = fcms-with-stream(fcsam-with-owner(s, walked[4]), walked[2], walked[1], walked[3], (fcms-generated-ids(s) + len(ids)), fcms-injected-ids(s), fcms-observations(s));
+   fcms-generation("", ids, if ((String) walked[5] == "") then next else fcms-refuse(next, walked[5]));
+  };
  }
  0;
 }
