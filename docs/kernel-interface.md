@@ -48,7 +48,8 @@ Go, Rust and TS (law 10).
 
 ### Laws the core pins
 
-1. Integers are 63-bit two's complement, `[-2^62, 2^62)`, on every kernel.
+1. Integers are 63-bit two's complement, `[-2^62, 2^62)`, on every kernel, and in a
+   defn the JIT has taken as in one it has not.
 2. Integer `div`/`mod` by zero stops; `attempt` recovers it to `nothing`.
 3. An order refusal (`lt` on a non-number) stops; `attempt` recovers it.
 4. `math_sqrt` is correctly rounded (IEEE `fsqrt`): the walker, the JIT and the
@@ -57,26 +58,43 @@ Go, Rust and TS (law 10).
 6. `float_to_int` on NaN, out-of-range or a non-number stops.
 7. `str_to_float` reads one grammar: leading whitespace, the longest decimal prefix,
    no hex, no `inf`/`nan`.
-8. `str_byte_at` out of range answers `-1`; `str_find` on a non-string stops.
+8. `str_byte_at` out of range answers `-1`; `str_find` on a non-string stops; an
+   index that is not an int stops (`str_find`, `str_byte_at`, `substring`, `nth`).
 9. A value renders one way everywhere (`value_str`), records included.
 10. `bp` has one meaning: the BML resolution in `form-ontology-bp.fk`.
 
-One prelude-free probe, each row under `attempt`, read on all four arms (2026-10-01):
+`form/form-stdlib/tests/kernel-laws-band.fk` asks laws 1–9 of all four arms, each row
+under `attempt`, prelude-free; its head names every bit. Read with
+`cd form && FORM_VALIDATE_SIBLINGS=1 ./validate.sh form-stdlib/tests/kernel-laws-band.fk`
+(2026-10-01: `2147483647` on fkwu, Go, Rust and TS):
 
-| law | Go, Rust, TS | fkwu |
+| law | stands | band bits |
 |---|---|---|
-| 1, 3, 4 | hold | holds |
-| 2 | holds | holds cold; once the JIT has taken the defn (20000 calls), `div` by zero answers 0 |
-| 5 | holds | `mod 1e19 3.0` answers -512, `mod 7.5 0.0` answers 7.5 (siblings: 1, NaN) |
-| 6 | holds | NaN answers 0, `1e300` answers -1, `"x"` answers a raw word |
-| 7 | holds | `"0x10"` reads 16, `"inf"` Infinity, `"nan"` NaN |
-| 8 | holds | `str_byte_at` holds; `str_find` on an int answers -1 |
-| 9 | `value_str` holds; `print` of a record: Go `<record @0 #0fields>`, Rust and TS `<record>` | `value_str` holds; `print` of a record answers its raw word |
-| 10 | a native `bp` answers a NodeID, and an unknown name stops | tag 45 answers its own argument, a string |
+| 1 | four-way; on fkwu cold and hot, since the JIT's int lane wraps every add, sub, mul, div and mod to 63 bits | 1, 2, 134217728 |
+| 2 | four-way; on fkwu cold and hot | 4, 8 |
+| 3, 4, 5 | four-way | 16; 32; 64, 128, 256 |
+| 6 | four-way; on fkwu cold and hot, over ints and over floats | 512–4096, 33554432 |
+| 7 | four-way on the band's rows | 8192–65536 |
+| 8 | four-way | 131072, 262144, 524288 |
+| 9 | four-way: `value_str` and `print` give `<record>` for a record and `<closure>` for a closure | 1073741824 |
+| 10 | open: fkwu's tag 45 answers its own argument, a string; Go, Rust and TS carry a native `bp` that answers a NodeID and stops on an unknown name; no arm runs the BML `bp` | — |
 
-On every arm `print` renders a `nothing` inside a list as `nothing`, and `value_str` renders it as
-`null`. No arm runs the BML `bp` in `form-ontology-bp.fk`, so law 10 holds nowhere. No band pins laws
-5–10 yet; where the kernels are going is one four-way law band that does.
+The band also pins `fs_list` and `host_dir_list` (a path that is no directory answers
+`nothing`, an empty directory `[]`), `record_has` of a record, `record_get` and
+`record_set` stopping on a value that is no record, `read_file_slice` at a negative
+offset answering `nothing`, and `make_nodeid` stopping outside its layout.
+
+Rows the kernels do not yet share stay out of the verdict, and the band's head names
+each one with every arm's answer: `record_has` of a value that is no record (Go stops,
+the others answer 0); a 1.1.1 int past int32 (fkwu keeps it on the 1.1.1 lane, the
+siblings make an INT64 node); `write_file_bytes` of something that is no byte list;
+`round_ndigits` with ndigits below 0 (TS answers CPython's value, the others stop);
+`str_to_float` of `"5.e3"` (Rust reads 5, the others 5000); `math_pow` of -1 to an
+infinity (TS NaN, the others 1); `cons` onto a non-list; and `math_exp`, `math_log` and
+`math_pow` off their exact cases, where the arms part by an ulp on some rows.
+
+On every arm `print` renders a `nothing` inside a list as `nothing`, and `value_str`
+renders it as `null`.
 
 ## Host doors
 
@@ -107,7 +125,10 @@ names `0.0.0.0` because its container is reached over the Docker network.
 (`no-such-path exists refused too-long deadline argv fork exec unavailable too-many`)
 the caller reads with `host_why(verb)`. No negative codes, no `""` or `[]` standing
 for absence, no `0` standing for refusal, and no door that ends the process: callers
-backtrack with `??`, `attempt` or `oac-choice`.
+backtrack with `??`, `attempt` or `oac-choice`. Today's `fs_list` and `host_dir_list`
+keep this on all four arms: a path that is no directory answers `nothing`, an empty
+directory `[]`. A lister reads them as `fs_list(d) ?? []`, since a `nil?` walk handed
+`nothing` never ends; the stdlib word `fs-list` (`form-fs.fk`) is that reading.
 
 **Handles.** One table per kernel; a handle is an index and a generation, so a stale
 handle answers `nothing` and can never reach another resource. Close is idempotent; a
@@ -140,9 +161,13 @@ and answers `need=<organ> <wane>ms/s <finding> <stage> <key>`, or `need=none`.
 `form/form-stdlib/tests/stage-vitality-band.bml` witnesses the fold and
 `form/form-stdlib/tests/fb-bus-band.fk` the ring.
 
-No flow speaks on the ring yet: outside `fb-bus-band.fk` nothing calls `float_leaf` 29
-or 30, so the door reads silence as `need=none` (coverage 0/17 on 2026-10-01). The
-glass view of the findings (`stv-glass-row`, `stv-rows`) has no caller.
+The coding lane is the first flow that speaks on the ring: `fcacs-stage-open` and
+`fcacs-stage-close` (`form/form-stdlib/bml/form-cli-code-session.bml`, over `float_leaf`
+29 and 30) open and close `code.prefill`, and `form-cli-code-swerve.bml` opens and
+closes `code.decode`, `code.tool` and `code.check`, so the door lists `code` among its
+organs once the lane has run. Coverage counts only the pids alive when the door reads,
+and a lane between turns reads `need=none`. The glass view of the findings
+(`stv-glass-row`, `stv-rows`) has no caller outside `stage-vitality.bml`.
 
 `observe/body-vitals-live.fk` is a different watch: it folds each glass surface's
 stamps into that surface's own rhythm and publishes the `vitals` frame.
@@ -152,13 +177,15 @@ stamps into that surface's own rhythm and publishes the `vitals` frame.
 1. Release kernel-side lowering; siblings read fkwu's closure. *(stands)*
 2. fkwu defects that broke a law: `math_sqrt`, order and divide-by-zero stops,
    `kernel_stat`'s unknown key. *(stands)*
-3. The stage ring, its phases, the vitality fold and its text door. *(stand)* Flows
-   that speak on the ring and the glass view of the findings are open.
+3. The stage ring, its phases, the vitality fold and its text door. *(stand)* The
+   coding lane speaks on the ring *(stands)*; the other flows and the glass view of the
+   findings are open.
 4. Release sibling natives that shadow homes or have no caller *(stands, except
    `bp`)*; one op table generates every name list.
 5. The host door table; migrate callers family by family; release the off-table
    names. Every door call timed and counted per verb on the live page (calls,
    nothings, bytes in and out, open handles, a log2 *dwell* histogram of time spent in
    the world) is not built yet.
-6. One four-way law band pinning laws 1–10; fkwu brought to law 2 on its JIT path
-   and to laws 5–8, `print` to law 9 on fkwu and Go, and every arm to law 10.
+6. One four-way law band, `kernel-laws-band.fk`, pinning laws 1–9, laws 1, 2 and 6
+   hot as cold. *(stands)* Law 10 is open: every arm runs the BML `bp`. The rows the
+   band's head names as not yet shared each come to one meaning.
