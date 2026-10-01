@@ -50,3 +50,64 @@ section [form.bml] {
     def qlh-ensure(path) = (Comparable) qlh-whole?(path) == 1 ? file_size(path) : qlh-write(path, qlh-source());
     0;
 }
+//
+// THE NEXT STONE — layer LoRA on Qwen3.8, rank r, on the residual writers.
+//
+// Where it enters: the three projections that write the residual stream — ssm_out in each
+// Gated DeltaNet block (layer slot 13, input bs[9] of width ssm.inner_size), attn_output in
+// each full-attention block (slot 10, input bs[26] of width heads x head_dim) and ffn_down in
+// every block (slot 4, input bs[16] of width feed_forward_length). Each writes its output
+// (bs[10], bs[17]) before the residual add, so a delta there steers every later layer and the
+// head while the block's own recurrent state and KV rows, computed before it, stay exactly
+// the base model's: q38-state-mark/restore and KV rewind remain valid per position.
+//
+//     y = W x + scale * B (A x)        A: [din, rank]  B: [rank, dout]   (lora_a / lora_b)
+//
+// Two kernels per projection: the dot (one simd group per (token, k): u = A^T x) and the add
+// (one thread per output element: y += scale * B^T u). Both take a token count, so the
+// decode (ntok 1) and the batched span prefill (ntok n, pitch din / dout) share them.
+//
+// A record carries its own compiled pipelines, so q38-pipes keeps every identity it has:
+//   [slot, dot-pipe, add-pipe, A, B, u, din, rank, dout, scale-bits, ntok-capacity]
+// An adapted layer table is the opened one with each layer's record list appended (linear
+// 14 -> 15 entries, full 11 -> 12); close and the ok?-checks keep reading ctx[3], the
+// original. The hook inside qwen35-dense-token-handle.fk that enqueues a record after its
+// projection is the one edit that file needs; it is named in this stone's handoff.
+section [form.bml] {
+    def qlh-rr-dot-msl(fname) = "kernel void " + (fname + " (device const float* x [[buffer(0)]], device const float* a [[buffer(1)]], device float* u [[buffer(2)]], constant uint& din [[buffer(3)]], constant uint& rank [[buffer(4)]], constant uint& ntok [[buffer(5)]], uint g [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { if (g >= rank * ntok) return; uint t = g / rank; uint k = g - t * rank; float acc = 0.0f; for (uint i = lane; i < din; i += 32u) { acc = acc + a[i * rank + k] * x[t * din + i]; } acc = metal::simd_sum(acc); if (lane == 0u) u[t * rank + k] = acc; }");
+    def qlh-rr-add-msl(fname) = "kernel void " + (fname + " (device float* y [[buffer(0)]], device const float* b [[buffer(1)]], device const float* u [[buffer(2)]], constant uint& dout [[buffer(3)]], constant uint& rank [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant float& scale [[buffer(6)]], uint gid [[thread_position_in_grid]]) { if (gid >= dout * ntok) return; uint t = gid / dout; uint j = gid - t * dout; float acc = 0.0f; for (uint k = 0u; k < rank; ++k) { acc = acc + u[t * rank + k] * b[k * dout + j]; } y[gid] = y[gid] + scale * acc; }");
+    // No `using namespace metal;`: the body's own arithmetic names stay unambiguous.
+    def qlh-rr-msl() = "#include <metal_stdlib>\n#pragma clang fp contract(off)\n" + (qlh-rr-dot-msl("form_qwen_lora_rr_dot_f32") + qlh-rr-add-msl("form_qwen_lora_rr_add_f32"));
+    // the layer slots: [slot index in the layer table, tensor suffix]
+    def qlh-rr-slots() = [[13, "ssm_out"], [10, "attn_output"], [4, "ffn_down"]];
+    def qlh-rr-name(layer, suffix, part) = "blk." + (layer.str() + ("." + (suffix + (".weight.lora_" + part))));
+    // A record from A and B as f32 bytes. Anything short or refused answers [] and frees what it took.
+    def qlh-rr-open(slot, a-bytes, b-bytes, din, rank, dout, scale, ntok) = (din > 0 && rank > 0 && dout > 0 && ntok > 0 && (Comparable) len(a-bytes) == din * rank * 4 && (Comparable) len(b-bytes) == rank * dout * 4) ? {
+        let msl = qlh-rr-msl();
+        let dot = metal_pipeline(msl, "form_qwen_lora_rr_dot_f32");
+        let add = metal_pipeline(msl, "form_qwen_lora_rr_add_f32");
+        let ah = metal_buf_alloc(din * rank * 4);
+        let bh = metal_buf_alloc(rank * dout * 4);
+        let uh = metal_buf_alloc(rank * ntok * 4);
+        let held = dot > 0 && add > 0 && ah > 0 && bh > 0 && uh > 0 && (Comparable) metal_buf_write(ah, 0, a-bytes) == din * rank * 4 && (Comparable) metal_buf_write(bh, 0, b-bytes) == rank * dout * 4;
+        held ? [slot, dot, add, ah, bh, uh, din, rank, dout, md-f32-bits(scale), ntok] : {
+            let freed = sum([q38-free-handle(ah), q38-free-handle(bh), q38-free-handle(uh)]);
+            [];
+        };
+    } : [];
+    def qlh-rr-valid?(rec) = (Comparable) len(rec) == 11 && rec[1] > 0 && rec[2] > 0 && rec[3] > 0 && rec[4] > 0 && rec[5] > 0 ? 1 : 0;
+    def qlh-rr-close(rec) = (Comparable) len(rec) == 11 ? sum([q38-free-handle(rec[3]), q38-free-handle(rec[4]), q38-free-handle(rec[5])]) : 0;
+    // The enqueue a hook makes: x [ntok, din] -> y [ntok, dout] += scale * B^T (A^T x).
+    // The dot dispatch is one 32-thread simd group per (token, k): mode 1 counts groups.
+    def qlh-rr-apply(rec, xh, yh, ntok) = (Comparable) qlh-rr-valid?(rec) == 1 && ntok <= rec[10] ? {
+        metal_enqueue(rec[1], md-bind16([xh, rec[3], rec[5]], [rec[6], rec[7], ntok], 32, 0, 1, 1), rec[7] * ntok);
+        metal_enqueue(rec[2], md-bind16([yh, rec[4], rec[5]], [rec[8], rec[7], ntok, rec[9]], 256, 0, 0, 1), rec[8] * ntok);
+        1;
+    } : 0;
+    // an adapted layer table: each layer's record list appended (records-by-layer[l] may be [])
+    def qlh-rr-lays(lays, records) = (Comparable) len(lays) == 0 ? empty() : cons(append(lays[0], [records[0]]), qlh-rr-lays(lays[1:], records[1:]));
+    // the record list a hook reads from an adapted layer (linear 15 entries, full 12)
+    def qlh-rr-of(lay) = (Comparable) len(lay) == 15 ? lay[14] : (Comparable) len(lay) == 12 ? lay[11] : empty();
+    def qlh-rr-slot-apply(lay, slot, xh, yh, ntok) = foldl((acc, rec) => acc + ((Comparable) rec[0] == slot ? qlh-rr-apply(rec, xh, yh, ntok) : 0), 0, qlh-rr-of(lay));
+    0;
+}

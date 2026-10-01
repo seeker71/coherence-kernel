@@ -1,0 +1,187 @@
+// form-token-lora.bml — the voice learns Form's in-stream controls by LoRA.
+//
+// A trace row (learn/form-token-traces.jsonl, the shared contract) holds a prompt and the
+// stream the voice and Form wrote together: the voice's prose, its
+// <|form:VERB|>PAYLOAD<|/form:VERB|> controls, and Form's
+// <|form:observation|>RESULT<|/form:observation|> answers. Accepted shapes:
+//   {"prompt": P, "completion": C}  or  {"prompt": P, "stream": C}
+//   {"messages": [{"role":"system"?}, ..., {"role":"user"}, {"role":"assistant","content":C}]}
+// with an optional "system". Extra keys (verbs, results, timings) are carried, never needed.
+//
+// Each row is read into ordered spans. Prose and controls are the voice's to predict
+// (supervise 1). An observation is what Form injected, so the voice reads it as context and
+// is never taught to predict it (supervise 0) — native-lora-dataset.bml's segment rows carry
+// that mark into the loss mask token by token. A stream that breaks the grammar (an
+// unclosed control, a stray close, a control Form never answered, an answer without a
+// control) is refused with its reason and kept in the census: it never vanishes from the
+// denominator, and it is never taught.
+//
+// The same spans give the Qwen head its sites (ftlr-sites): every point in a completion where
+// the voice chooses what comes next, labelled 1 where it opened a control. qwen-lora-train.fk
+// fits the rank-one head adapter toward the control opening at exactly those points.
+import form-stdlib/native-lora-dataset.bml;
+import form-stdlib/spool-bell-transport.fk;
+section [form.bml] {
+ class FormTokenLora {
+  def ftlr-open-mark() = "<|form:";
+  def ftlr-close-mark() = "<|/form:";
+  def ftlr-observation() = "observation";
+  def ftlr-ledger() = "receipts/form-token-lora.jsonl";
+  def ftlr-s(k,v) = json-node-pair(k,json-node-string(v));
+  def ftlr-n(k,v) = json-node-pair(k,json-node-int(v));
+  def ftlr-cat(parts) = foldl((acc, p) => acc ++ p, "", parts);
+  // ---- the stream read into spans: [role, verb, text] ----
+  // ["ok", spans] or ["refused", reason]. role is prose, control or observation.
+  def ftlr-spans(text) = ftlr-spans-from(text,0,[]);
+  def ftlr-spans-from(text,i,acc) {
+   let at = str_find(text,ftlr-open-mark(),i);
+   let stray = str_find(text,ftlr-close-mark(),i);
+   if ((stray >= 0) && ((at < 0) || (stray < at))) then ["refused","stray-close"] else if (at < 0) then ["ok",reverse(ftlr-prose(text,i,len(text),acc))] else ftlr-span-open(text,at,str_find(text,"|>",at + len(ftlr-open-mark())),ftlr-prose(text,i,at,acc));
+  }
+  def ftlr-prose(text,i,j,acc) = if (j > i) then cons(["prose","",substring(text,i,j)],acc) else acc;
+  def ftlr-span-open(text,at,end,acc) {
+   let verb = if (end < 0) then "" else substring(text,at + len(ftlr-open-mark()),end);
+   if ((end < 0) || (((Comparable) len(verb) == 0) || (len(verb) > 40))) then ["refused","unterminated-open"] else ftlr-span-close(text,at,verb,str_find(text,ftlr-close-mark() ++ verb ++ "|>",end + 2),acc);
+  }
+  def ftlr-span-close(text,at,verb,close,acc) {
+   let stop = close + (len(ftlr-close-mark()) + (len(verb) + 2));
+   let role = if ((String) verb == ftlr-observation()) then "observation" else "control";
+   if (close < 0) then ["refused","unclosed:" ++ verb] else ftlr-spans-from(text,stop,cons([role,verb,substring(text,at,stop)],acc));
+  }
+  // Form answers every control in stream, and answers nothing else: a control is followed
+  // (past blank prose) by its observation, and an observation follows a control.
+  def ftlr-blank?(s) = (Comparable) len(trim(s)) == 0;
+  def ftlr-answered(spans,pending) {
+   if nil?(spans) then (if pending then "control-unanswered" else "") else ftlr-answered-at(spans[0],spans[1:],pending);
+  }
+  def ftlr-answered-at(span,rest,pending) {
+   let role = span[0];
+   if ((String) role == "control") then (if pending then "control-unanswered" else ftlr-answered(rest,1))
+   else if ((String) role == "observation") then (if pending then ftlr-answered(rest,0) else "observation-without-control")
+   else if (pending && (!ftlr-blank?(span[2]))) then "control-unanswered"
+   else ftlr-answered(rest,pending);
+  }
+  def ftlr-count(spans,role) = len(filter(s => (String) s[0] == role, spans));
+  // ---- a trace row: [prompt, system, completion] or [] ----
+  def ftlr-text(o,k) {
+   let v = if json-object-has?(o,k) then json-object-get(o,k) else nothing();
+   if nothing?(v) then nothing() else if ((Comparable) node_type(v) == 2) then node_value(v) else nothing();
+  }
+  def ftlr-first-text(o,keys) = if nil?(keys) then nothing() else (ftlr-text(o,keys[0]) ?? ftlr-first-text(o,keys[1:]));
+  def ftlr-row-texts(row) {
+   let prompt = ftlr-text(row,"prompt");
+   let completion = ftlr-first-text(row,["completion","stream"]);
+   let system = ftlr-text(row,"system") ?? "";
+   if ((!nothing?(prompt)) && (!nothing?(completion))) then [prompt,system,completion] else if json-object-has?(row,"messages") then ftlr-message-texts(json-array-elements(json-object-get(row,"messages"))) else [];
+  }
+  def ftlr-message-texts(ms) {
+   let n = len(ms);
+   if (n < 2) then [] else ftlr-message-pair(ms[n - 2],ms[n - 1],if ((String) (ftlr-text(ms[0],"role") ?? "") == "system") then (ftlr-text(ms[0],"content") ?? "") else "");
+  }
+  def ftlr-message-pair(user,assistant,system) {
+   let u = ftlr-text(user,"content");
+   let a = ftlr-text(assistant,"content");
+   if (((String) (ftlr-text(user,"role") ?? "") == "user") && (((String) (ftlr-text(assistant,"role") ?? "") == "assistant") && ((!nothing?(u)) && (!nothing?(a))))) then [u,system,a] else [];
+  }
+  // ---- the native LoRA lane's segment row ----
+  // The voice yields at a control's close and takes the stream back after the observation's
+  // close: blank prose between the two is Form's seam, read and never taught, like the answer.
+  def ftlr-seams(spans,pending) = if nil?(spans) then [] else ftlr-seam-at(spans[0],spans[1:],pending);
+  def ftlr-seam-at(span,rest,pending) {
+   let role = span[0];
+   let marked = if (pending && ((String) role == "prose")) then ["seam","",span[2]] else span;
+   cons(marked,ftlr-seams(rest,if ((String) role == "control") then 1 else if ((String) role == "observation") then 0 else pending));
+  }
+  def ftlr-supervise(span) = if (((String) span[0] == "observation") || ((String) span[0] == "seam")) then 0 else 1;
+  def ftlr-segment-node(span) = json-node-object([ftlr-s("role",span[0]),ftlr-s("verb",span[1]),ftlr-s("text",span[2]),ftlr-n("supervise",ftlr-supervise(span))]);
+  def ftlr-train-row(texts,spans,line) = json-node-object([ftlr-s("schema","form-token-lora-row-v1"),ftlr-n("source_line",line),ftlr-s("system",texts[1]),ftlr-s("prompt",texts[0]),json-node-pair("segments",json-node-array(spans |> map(ftlr-segment-node)))]);
+  // one trace line ([text, number]) -> ["ok", row, spans, number] | ["refused", reason, number]
+  // The JSON reader is lenient, so wholeness is read from where it stopped: one object, ending
+  // in its own brace, with nothing but blank after it.
+  def ftlr-whole-object(text) {
+   let parsed = try json-parse-value(text,0,"form-token-trace") else nothing();
+   let t = trim(text);
+   if nothing?(parsed) then nothing() else if ((json-pair-pos(parsed) > len(text)) || ((!ftlr-blank?(substring(text,json-pair-pos(parsed),len(text)))) || ((!((Comparable) node_category(json-pair-r(parsed)) == JSON-OBJECT())) || (!((String) substring(t,len(t) - 1,len(t)) == "}"))))) then nothing() else json-pair-r(parsed);
+  }
+  def ftlr-read-line(entry) {
+   let row = ftlr-whole-object(entry[0]);
+   if nothing?(row) then ["refused","json",entry[1]] else ftlr-read-row(row,entry[1]);
+  }
+  def ftlr-read-row(row,line) {
+   let texts = ftlr-row-texts(row);
+   if nil?(texts) then ["refused","no-prompt-and-completion",line] else ftlr-read-texts(texts,ftlr-spans(trim(texts[2])),line);
+  }
+  def ftlr-read-texts(texts,read,line) {
+   let reason = if ((String) read[0] == "ok") then ftlr-answered(read[1],0) else read[1];
+   if (!((Comparable) len(reason) == 0)) then ["refused",reason,line] else if ((Comparable) ftlr-count(read[1],"control") == 0) then ["refused","no-control",line] else ftlr-admitted(texts,ftlr-seams(read[1],0),line);
+  }
+  def ftlr-admitted(texts,spans,line) = ["ok",ftlr-train-row(texts,spans,line),spans,line];
+  // ---- the census: what was read, taught, refused and why ----
+  def ftlr-bump(counts,key) = if nil?(counts) then [[key,1]] else if ((String) counts[0][0] == key) then cons([key,counts[0][1] + 1],counts[1:]) else cons(counts[0],ftlr-bump(counts[1:],key));
+  def ftlr-bump-all(counts,keys) = foldl((acc, k) => ftlr-bump(acc,k), counts, keys);
+  def ftlr-ok?(r) = (String) r[0] == "ok";
+  def ftlr-verbs(read) = foldl((acc, r) => ftlr-bump-all(acc,map(s => s[1], filter(s => (String) s[0] == "control", r[2]))), [], filter(r => ftlr-ok?(r), read));
+  def ftlr-reasons(read) = foldl((acc, r) => ftlr-bump(acc,r[1]), [], filter(r => !ftlr-ok?(r), read));
+  def ftlr-observations(read) = foldl((acc, r) => acc + ftlr-count(r[2],"observation"), 0, filter(r => ftlr-ok?(r), read));
+  def ftlr-counts-node(counts) = json-node-object(counts |> map(c => ftlr-n(c[0],c[1])));
+  // Held-out rows: every fifth admitted row; with fewer than five, the last one alone.
+  def ftlr-valid?(i,n) = if (n >= 5) then ((Comparable) (i % 5) == 4) else ((Comparable) i == (n - 1));
+  def ftlr-split(rows,i,n,train,valid) = if nil?(rows) then [reverse(train),reverse(valid)] else if ftlr-valid?(i,n) then ftlr-split(rows[1:],i + 1,n,train,cons(rows[0],valid)) else ftlr-split(rows[1:],i + 1,n,cons(rows[0],train),valid);
+  def ftlr-jsonl(rows) = foldl((acc, r) => acc ++ json-emit(r[1]) ++ "\n", "", rows);
+  // census: [lines, admitted, refused, reasons, verbs, observations, train, valid, ready]
+  def ftlr-census(read,split) {
+   let ok = filter(r => ftlr-ok?(r), read);
+   let ready = if ((len(split[0]) > 0) && (len(split[1]) > 0)) then 1 else 0;
+   [len(read),len(ok),len(read) - len(ok),ftlr-reasons(read),ftlr-verbs(read),ftlr-observations(read),len(split[0]),len(split[1]),ready];
+  }
+  def ftlr-census-node(c,traces,data) = json-node-object([ftlr-s("schema","form-token-lora-census-v1"),ftlr-s("traces",traces),ftlr-s("data",data),ftlr-n("lines",c[0]),ftlr-n("admitted",c[1]),ftlr-n("refused",c[2]),json-node-pair("refusals",ftlr-counts-node(c[3])),json-node-pair("controls",ftlr-counts-node(c[4])),ftlr-n("observations_masked",c[5]),ftlr-n("train_rows",c[6]),ftlr-n("valid_rows",c[7]),ftlr-n("ready",c[8])]);
+  def ftlr-census-line(c) = ftlr-cat(["[form-token-lora] lines ",c[0].str(),", admitted ",c[1].str(),", refused ",c[2].str(),", train ",c[6].str(),", valid ",c[7].str(),", observations masked ",c[5].str(),", ready ",c[8].str()]);
+  // Traces -> data/train.jsonl, data/valid.jsonl and data/census.json. Both row files are
+  // written whole (a rerun replaces them); the census answers even when no row is ready.
+  def ftlr-convert(traces,data) {
+   let read = ftlr-read-traces(traces);
+   let ok = filter(r => ftlr-ok?(r), read);
+   let split = ftlr-split(ok,0,len(ok),[],[]);
+   let census = ftlr-census(read,split);
+   let made = fs_mkdir(data);
+   let wt = write_file_text(data ++ "/train.jsonl",ftlr-jsonl(split[0]));
+   let wv = write_file_text(data ++ "/valid.jsonl",ftlr-jsonl(split[1]));
+   let wc = write_file_text(data ++ "/census.json",json-emit(ftlr-census-node(census,traces,data)) ++ "\n");
+   census;
+  }
+  // ---- token-level reading of one segment row through a tokenizer ----
+  // [input tokens, supervised targets, observation targets masked, control targets supervised,
+  //  seam targets masked]
+  def ftlr-role-marks(t,spans) = foldl((acc, s) => append(acc,nld-repeat(len(nlt-encode(t,s[2])),s[0])), [], spans);
+  def ftlr-mask-reading(t,row) {
+   let sample = nld-row(t,row,1,1);
+   let spans = json-array-elements(json-object-get(row,"segments")) |> map(s => [nld-string(s,"role"),"",nld-string(s,"text")]);
+   let roles = ftlr-role-marks(t,spans);
+   let tail = drop(len(sample[1]) - (len(roles) + 1),sample[2]);
+   [len(sample[0]),sample[3],ftlr-marked(roles,tail,"observation",0.0),ftlr-marked(roles,tail,"control",1.0),ftlr-marked(roles,tail,"seam",0.0)];
+  }
+  // how many targets of a role carry the expected mark (a mismatch makes the count fall short)
+  def ftlr-marked(roles,mask,role,want) = if (nil?(roles) || nil?(mask)) then 0 else ((if (((String) roles[0] == role) && ((Comparable) mask[0] == want)) then 1 else 0) + ftlr-marked(roles[1:],mask[1:],role,want));
+  def ftlr-role-total(t,spans,role) = foldl((acc, s) => acc + (if ((String) s[0] == role) then len(nlt-encode(t,s[2])) else 0), 0, spans);
+  // ---- sites for the Qwen head: [prompt, system, prefix texts, label, verb] ----
+  // A site is a boundary where the voice chooses what comes next: not right after a control
+  // (Form answers there) and not before an observation (Form's turn). Label 1 where the voice
+  // opened a control. The prefix stays a list of span texts so each is encoded on its own.
+  def ftlr-sites(texts,spans) = ftlr-sites-at(texts,[],"",spans,[]);
+  def ftlr-sites-at(texts,prefix,before,rest,acc) {
+   let site = ftlr-site(texts,prefix,before,rest);
+   let next = if nil?(site) then acc else cons(site,acc);
+   if nil?(rest) then reverse(next) else ftlr-sites-at(texts,append(prefix,[rest[0][2]]),rest[0][0],rest[1:],next);
+  }
+  def ftlr-site(texts,prefix,before,rest) {
+   let after = if nil?(rest) then "" else rest[0][0];
+   if (((String) before == "control") || ((String) after == "observation")) then [] else [texts[0],texts[1],prefix,if ((String) after == "control") then 1 else 0,if ((String) after == "control") then rest[0][1] else ""];
+  }
+  def ftlr-row-sites(r) = ftlr-sites([nld-string(r[1],"prompt"),nld-string(r[1],"system")],r[2]);
+  def ftlr-read-traces(traces) = map(ftlr-read-line, nld-lines(read_file(traces) ?? ""));
+  def ftlr-trace-sites(traces) = foldl((acc, r) => append(acc,ftlr-row-sites(r)), [], filter(r => ftlr-ok?(r), ftlr-read-traces(traces)));
+  def ftlr-ledger-row(c,traces,data,extra) = ftlr-append(ftlr-ledger(),json-emit(json-node-object(append([ftlr-n("at_unix_ms",now_unix_ms()),ftlr-s("traces",traces),ftlr-s("data",data),ftlr-n("lines",c[0]),ftlr-n("admitted",c[1]),ftlr-n("refused",c[2]),ftlr-n("observations_masked",c[5]),json-node-pair("controls",ftlr-counts-node(c[4]))],extra))) ++ "\n");
+  def ftlr-append(path,text) = if ((Comparable) sbt-append-count(path,text) == len(text)) then "appended" else "refused:short-append";
+ }
+ 0;
+}
