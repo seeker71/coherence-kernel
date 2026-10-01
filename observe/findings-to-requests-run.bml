@@ -1,0 +1,88 @@
+// findings-to-requests-run.bml — a review's findings become local work requests, with no model and no rented token.
+//
+// Each stdin line is a path to a findings JSON document, or one JSON object:
+//   {"path":"<findings.json>","origin":"<label>","ledger":"<jsonl>"}   feed one document; origin defaults to its
+//                                                                     file name, ledger to learn/local-requests.jsonl
+//   {"closures":"<closures.json>","ledger":"<jsonl>"}                 close the rows whose witness Form reads in the tree
+//   {"check":1,"ledger":"<jsonl>"}                                     read every closed row's witness again
+// A document is read whole by form-stdlib/bml/findings-requests.bml; each request it gives that the ledger does not
+// already hold is appended. A closures document is {"closures":[{"id","witness":{"path","needle","present"},
+// "reviewed","commit","note"}],"reviewed":{"<document>":"<commit>"}}: a row closes only when its witness holds in
+// the tree, did not already hold in the tree the review read (git show <reviewed>:<path>; a closure naming none
+// takes its document's from the map), and its commit stands under HEAD; a closure that names no commit takes the
+// newest commit whose change moved the needle (git log -S). git is asked by argv only.
+// One line answers each input: a feed's read, refuted, verdicts, joined, requests, new and present; a closing's
+// closed and refused; a check's pending, closed, holding and the ids whose witness no longer holds.
+// preflight-exec: forbidden
+import form-stdlib/bml/findings-requests.bml;
+import form-stdlib/bml/form-agent-json-query.bml;
+import form-stdlib/bml/stdin-source.bml;
+section [form.bml] {
+ class FindingsToRequestsRun {
+  def ftr-say(words) = print_str("findings-requests: " ++ words);
+  def ftr-n(key, v) = " " ++ key ++ "=" ++ v.str();
+  def ftr-object?(line) = ((Comparable) len(line) > 0) && ((Comparable) str_byte_at(line, 0) == 123) && faj-valid(line);
+  def ftr-opts(line) = if ftr-object?(line) then parse-json("findings-requests-options", line) else json-node-object([fhn-s("path", line)]);
+  def ftr-ledger(opts) = if frq-some?(frq-text(opts, "ledger")) then frq-text(opts, "ledger") else frq-ledger();
+  def ftr-run() {
+   let lines = filter(l => frq-some?(l), map(trim, split-on(stdin-text(), "\n")));
+   if nil?(lines) then ftr-say("signal=nothing reason=path-required") else ftr-each(lines, 0);
+  }
+  def ftr-each(lines, n) = if nil?(lines) then n else ftr-each(lines[1:], (n + ftr-one(ftr-opts(lines[0]))));
+  def ftr-one(opts) = if frq-some?(frq-text(opts, "closures")) then ftr-close(ftr-ledger(opts), frq-text(opts, "closures")) else if ((Comparable) frq-int(opts, "check", 0) == 1) then ftr-check(ftr-ledger(opts)) else ftr-feed(ftr-ledger(opts), frq-text(opts, "path"), frq-text(opts, "origin"));
+  // ── feed ──
+  def ftr-feed(ledger, path, origin) {
+   let text = read_file(path) ?? "";
+   let label = if frq-some?(origin) then origin else frq-label-of(path);
+   if (!faj-valid(text)) then ftr-refuse(path, "not-a-json-document") else ftr-fed(path, label, frq-feed(ledger, parse-json(label, text), label));
+  }
+  def ftr-refuse(path, why) {
+   ftr-say(path ++ " signal=nothing reason=" ++ why);
+   0;
+  }
+  def ftr-fed(path, label, r) {
+   ftr-say(label ++ ftr-n("read", r[2]) ++ ftr-n("refuted", r[3]) ++ ftr-n("verdicts", r[4]) ++ ftr-n("joined", r[5]) ++ ftr-n("requests", r[0]) ++ ftr-n("new", r[1]) ++ ftr-n("present", (r[0] - r[1])) ++ ftr-n("appended", r[6]));
+   1;
+  }
+  // ── close: the witness is read here, and the commit is asked of git by argv ──
+  def ftr-hex-byte?(b) = ((b >= 48) && (b <= 57)) || ((b >= 97) && (b <= 102));
+  def ftr-hex-run?(c, i) = if (i >= len(c)) then true else if ftr-hex-byte?(str_byte_at(c, i)) then ftr-hex-run?(c, (i + 1)) else false;
+  def ftr-hex?(c) = if ((len(c) < 7) || (len(c) > 40)) then false else ftr-hex-run?(c, 0);
+  def ftr-under-head?(c) = if ftr-hex?(c) then ((Comparable) fhn-command(["git", "merge-base", "--is-ancestor", c, "HEAD"]) == 0) else false;
+  def ftr-moved-needle(w) = fhn-capture(["git", "log", "-1", "--format=%h", "-S", frq-text(w, "needle"), "--", frq-text(w, "path")]);
+  def ftr-commit-of(c) {
+   let named = frq-text(c, "commit");
+   let found = if frq-some?(named) then named else ftr-moved-needle(frq-get(c, "witness"));
+   if ftr-under-head?(found) then found else "";
+  }
+  // the witness file as the review read it; a path that was not there reads "", a review no closure names nothing
+  def ftr-earlier-of(c) {
+   let reviewed = frq-text(c, "reviewed");
+   let spec = reviewed ++ ":" ++ frq-text(frq-get(c, "witness"), "path");
+   let there = if ftr-hex?(reviewed) then ((Comparable) fhn-command(["git", "cat-file", "-e", spec]) == 0) else false;
+   let out = if there then host_capture(["git", "show", spec]) else nothing();
+   if (!ftr-hex?(reviewed)) then nothing() else if there then (out ?? "") else "";
+  }
+  def ftr-close(ledger, path) {
+   let text = read_file(path) ?? "";
+   if (!faj-valid(text)) then ftr-refuse(path, "not-a-json-document") else ftr-closing(ledger, path, parse-json("closures", text));
+  }
+  def ftr-closing(ledger, path, doc) {
+   let closures = frq-nodes(doc, "closures");
+   let r = frq-close(frq-rows(ledger), closures, frq-get(doc, "reviewed"), ftr-commit-of, ftr-earlier-of);
+   let saved = if ((Comparable) r[1] > 0) then frq-save(ledger, r[0]) else 0;
+   ftr-say(frq-label-of(path) ++ ftr-n("closures", len(closures)) ++ ftr-n("closed", r[1]) ++ ftr-n("refused_witness", r[2]) ++ ftr-n("refused_stood_before", r[5]) ++ ftr-n("refused_commit", r[3]) ++ ftr-n("unknown", r[4]) ++ ftr-n("saved", saved));
+   1;
+  }
+  // ── check ──
+  def ftr-check(ledger) {
+   let rows = frq-rows(ledger);
+   let closed = filter(r => (String) frq-text(r, "status") == "closed", rows);
+   let broken = filter(r => !frq-witness-holds?(frq-get(r, "witness")), closed);
+   let whole = filter(r => frq-whole?(r), rows);
+   ftr-say("check" ++ ftr-n("rows", len(rows)) ++ ftr-n("whole", len(whole)) ++ ftr-n("pending", (len(rows) - len(closed))) ++ ftr-n("closed", len(closed)) ++ ftr-n("holding", (len(closed) - len(broken))) ++ " reopen=" ++ str-join-with(frq-ids(broken), ","));
+   1;
+  }
+ }
+ ftr-run();
+}
