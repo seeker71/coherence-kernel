@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -41,6 +43,23 @@ func wantStop(t *testing.T, src string) {
 	t.Helper()
 	if v, stopped := evalForm(src); !stopped {
 		t.Errorf("%s: answered %v, want a stop", src, v)
+	}
+}
+
+// wantStopBy asks that src stop by the named reason: a stop from elsewhere (a
+// slice bound, a nil dereference) is no stop by name.
+func wantStopBy(t *testing.T, src string, reason string) {
+	t.Helper()
+	var stop any
+	v := func() (v Value) {
+		defer func() { stop = recover() }()
+		k := NewKernel()
+		return k.walkUnit(readRootFromSource(k, src), NewFrame(nil))
+	}()
+	if stop == nil {
+		t.Errorf("%s: answered %v, want a stop by %q", src, v, reason)
+	} else if text := fmt.Sprint(stop); !strings.Contains(text, reason) {
+		t.Errorf("%s: stopped by %q, want a stop by %q", src, text, reason)
 	}
 }
 
@@ -278,13 +297,13 @@ func TestConsOntoAWordIsAPair(t *testing.T) {
 }
 
 // record_has asks whether a value has a field: a value that is not a record has
-// none. record_get and record_set on it stop by name.
+// none. record_get and record_set on it stop by name, never by a nil dereference.
 func TestRecordDoorsOnANonRecord(t *testing.T) {
 	wantInt(t, `(record_has 0 "a")`, 0)
 	wantInt(t, `(record_has (list) "a")`, 0)
 	wantInt(t, `(record_has (record_new 0 "a" 1) "a")`, 1)
-	wantStop(t, `(record_get 0 "a")`)
-	wantStop(t, `(record_set 0 "a" 1)`)
+	wantStopBy(t, `(record_get 0 "a")`, "record_get: not a record")
+	wantStopBy(t, `(record_set 0 "a" 1)`, "record_set: not a record")
 }
 
 // A byte writer takes a list of ints: a string, a number or a list holding a
@@ -307,8 +326,9 @@ func TestByteWritersRefuseANonByteList(t *testing.T) {
 	}
 }
 
-// round_ndigits counts places: a negative count stops by name, as on fkwu.
+// round_ndigits counts places: a negative count stops by name, as on fkwu, and
+// never through a slice bound (the stop it took before the guard).
 func TestRoundNdigitsCountsPlaces(t *testing.T) {
-	wantStop(t, "(round_ndigits 1.25 -1)")
+	wantStopBy(t, "(round_ndigits 1.25 -1)", "round_ndigits: ndigits is a count of places")
 	wantFloat(t, "(round_ndigits 2.675 2)", 2.67)
 }
