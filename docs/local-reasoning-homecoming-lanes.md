@@ -81,6 +81,15 @@ separates model codec, model forward, recipe birth, Metal admission, execution,
 observation injection and release. Observed execution establishes what ran;
 the returned answer must still be read for accuracy and usefulness.
 
+Held Form recipes call other held recipes with `recipe("actual-coordinate")`.
+The response's `form_recipe_usage` reports dispatch calls, returned calls and
+inclusive elapsed milliseconds for each addressed Form recipe, including nested
+calls. The same dispatch publishes `form-recipe-usage` to the live framebuffer.
+These counters survive release without retaining executable closures. A returned
+call can carry absence; it is not a success count. Millisecond readings can round
+to zero, and parent and child times overlap. Metal admission and execution keep
+their separate stages; this census does not measure every host function.
+
 ## BMF, model IDs and repeat reuse
 
 Form/BML/BMF grammar consumes bytes directly. It has no Qwen tokenizer stage.
