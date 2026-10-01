@@ -8,7 +8,9 @@
 // receipts/voice-admission.jsonl: voice, role, passed (complete, released, and the returned document is the
 // expected one), the lane's status and reason, generated and injected IDs, turns, wall ms and the artifact's
 // mtime. mr-session-ready? (form-stdlib/model-registry.bml) reads 1 only for a passing row newer than the
-// artifact.
+// artifact. Before any lane runs, the GGUF header names the architecture: a voice no wired lane takes, or
+// one whose sidecars are not sealed, gets a row with passed 0, lane not-run and its gap, read from the header
+// alone (no model opened, no GPU).
 // stdin, one JSON line: {"voice":"qwen38-q4","role":"write-code","context":8192,"turns":8,"deadline_ms":1800000}
 // {"dry":1} writes the request, prints it and its check, and opens no model; no row lands.
 // A physical check: it needs the local GPU and a quiet machine.
@@ -52,7 +54,25 @@ section [form.bml] {
   def va-returned(result) = foldl((found, d) => if ((String) va-str(d, "path", "") == va-doc()) then va-str(d, "text", "") else found, "", if json-object-has?(result, "documents") then json-array-elements(json-object-get(result, "documents")) else []);
   def va-passed?(result) = ((String) va-str(result, "status", "") == "complete") && ((Comparable) va-int(result, "release_ok", 0) == 1) && ((String) va-returned(result) == va-after());
   def va-maybe(key, doc, field) = if json-object-has?(doc, field) then json-node-pair(key, json-object-get(doc, field)) else json-node-pair(key, json-node-null());
+  // The architecture is read from the GGUF header alone (mr-arch). A voice whose architecture no wired lane
+  // takes, or whose seal, codec index or crystal is missing, is not run: its row is the gap, written with
+  // passed 0 and no model opened.
+  def va-gap(r) {
+   let arch = mr-arch(r);
+   if ((Comparable) mr-wired?(arch) == 0) then mc-cat(["architecture ", if ((String) arch == "") then "unread" else arch, " rides lane ", mr-lane-for(arch), ", which is not wired"]) else if ((Comparable) mr-sides-ready?(r) == 0) then mc-cat(["sidecars not sealed: ", mr-readiness(r)]) else "";
+  }
+  def va-gap-row(voice, role, r, gap) = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("voice", voice), fhn-s("role", role), fhn-n("passed", 0), fhn-s("task", "guarded-edit-then-done"), fhn-s("lane", "not-run"), fhn-s("status", "refused"), fhn-s("reason", if ((Comparable) mr-wired?(mr-arch(r)) == 0) then "architecture-not-wired" else "sidecars-not-sealed"), fhn-s("gap", gap), fhn-s("arch", mr-arch(r)), fhn-s("arch_lane", mr-lane-for(mr-arch(r))), fhn-n("wired", mr-wired?(mr-arch(r))), fhn-s("readiness", mr-readiness(r)), fhn-n("artifact_mtime_s", file_mtime(mr-path(r)))]);
+  def va-refuse(voice, role, opts, r, gap) {
+   let dry = (Comparable) va-int(opts, "dry", 0) == 1;
+   let appended = if dry then "dry" else fhn-append(mr-admission-path(), json-emit(va-gap-row(voice, role, r, gap)) + "\n");
+   print_str(mc-cat(["[voice-admission] ", voice, " for ", role, " is not run: ", gap, if dry then "; dry, no row written" else if ((String) appended == "appended") then mc-cat(["; the gap is its row in ", mr-admission-path()]) else mc-cat(["; row not written: ", appended])]));
+  }
   def va-admit(voice, role, opts) {
+   let r = mr-find(voice);
+   let gap = va-gap(r);
+   if ((Comparable) len(gap) > 0) then va-refuse(voice, role, opts, r, gap) else va-admit-ready(voice, role, opts);
+  }
+  def va-admit-ready(voice, role, opts) {
    let made = fs_mkdir(".hearth");
    let dir = fs_mkdir(va-dir());
    let stamp = mc-cat([voice, "-", role, "-", now_unix_ms().str()]);
