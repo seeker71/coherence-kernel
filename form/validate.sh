@@ -12,7 +12,8 @@
 # the siblings read. fkwu alone resolves and lowers; the siblings only walk.
 #
 # Run from form/.
-#   ./validate.sh            # validate all samples
+#   ./validate.sh            # validate every band the body keeps (the sweep)
+#   ./validate.sh --list     # name the sweep's workloads, run nothing
 #   ./validate.sh path.fk    # validate one file
 #   ./validate.sh prelude.fk test.fk  # validate one workload
 #   ./validate.sh --binary  # compile every workload, execute artifacts
@@ -28,6 +29,62 @@ exec < /dev/null
 if [[ "${1:-}" == "--bench" ]]; then
     cd ..
     exec ./fkwu observe/native-jit-witness-run.fk
+fi
+
+# --- the sweep's workloads ---------------------------------------------------
+# Every band the body keeps, enumerated in one place (`./validate.sh --list`
+# prints each workload's label and files, and runs nothing):
+#   form-samples/*.fk — each a self-contained file;
+#   form-stdlib/tests/*.fk and *-band.bml — core.fk, then the band. fkwu follows
+#     each band's own preludes and imports; a band named after a module
+#     (tests/line-grammar.fk → line-grammar.fk) loads that module between. A
+#     -child, -fixture or -run file is a door its band spawns or reads (the
+#     string-op-stops children exit 1 by design): its band carries it, and it is
+#     never swept alone;
+#   every tracked or new *-band.fk / *-band.bml in another home's tests/
+#     (observe, cognition, control, gate, grammars, learn, model, plugin,
+#     form/native/metal) — run alone, by its own path, as its head says.
+wl_labels=()
+wl_args=()
+add_workload() {
+    local label="$1"; shift
+    wl_labels+=("$label")
+    local joined="" a
+    for a in "$@"; do joined="$joined$a"$'\x1f'; done
+    wl_args+=("$joined")
+}
+suite_enumerate() {
+    local f base module
+    for f in form-samples/*.fk; do
+        [[ -e "$f" ]] && add_workload "$(basename "$f")" "$f"
+    done
+    for f in form-stdlib/tests/*.fk form-stdlib/tests/*-band.bml; do
+        [[ -e "$f" ]] || continue
+        base="$(basename "$f")"
+        base="${base%.*}"
+        case "$base" in
+            *-child|*-fixture|*-run) continue ;;
+        esac
+        module="form-stdlib/${base}.fk"
+        if [[ -f "$module" && "$module" != "$f" ]]; then
+            add_workload "stdlib/$(basename "$f")" "form-stdlib/core.fk" "$module" "$f"
+        else
+            add_workload "stdlib/$(basename "$f")" "form-stdlib/core.fk" "$f"
+        fi
+    done
+    while IFS= read -r f; do
+        [[ -f "../$f" ]] && add_workload "$f" "../$f"
+    done < <(cd .. && git ls-files --cached --others --exclude-standard -- '*/tests/*-band.fk' '*/tests/*-band.bml' 2>/dev/null \
+                 | grep -v '^form/form-stdlib/tests/' | grep -v '^\.' | sort -u)
+}
+if [[ "${1:-}" == "--list" ]]; then
+    suite_enumerate
+    i=0
+    while [[ $i -lt ${#wl_labels[@]} ]]; do
+        printf '%s\t%s\n' "${wl_labels[$i]}" "$(printf '%s' "${wl_args[$i]}" | tr '\037' ' ')"
+        i=$((i + 1))
+    done
+    exit 0
 fi
 
 # --- THE SEAL: a verdict belongs to the tree it was read from ---------------
@@ -143,8 +200,9 @@ build_rs() {
 
 build_ts() {
     # Bundle the TS kernel once (esbuild, cached by source mtimes) so each band
-    # runs via plain `node` (~60ms) instead of npx tsx (~1.5s). With 455 bands
-    # that is the difference between seconds and 11+ minutes of startup tax.
+    # runs via plain `node` (~60ms) instead of npx tsx (~1.5s). Over the sweep's
+    # few hundred workloads (`./validate.sh --list | wc -l`) that is seconds
+    # against minutes of startup tax.
     local bundle="$TS_DIR/dist/main.mjs"
     local stale=0
     if [[ ! -f "$bundle" ]]; then stale=1; else
@@ -205,9 +263,11 @@ build_fkwu_src() {
 build_fkwu_src || exit 1
 
 # A band may declare its proof level in its comment head:
-#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu (the source door),
-#     compared against the first "Verdict <n>" its head declares. Loud
-#     pass/fail — a wrong home-arm answer is a real failure, never skipped.
+#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs alone by its own path on the runtime
+#     fkwu (the source door) and is judged as the fkwu lane judges every band:
+#     its exit, its stderr, the first "Verdict <n>" its head declares and its
+#     manifest row. Loud pass/fail — a wrong home-arm answer is a real failure,
+#     never skipped.
 #   ; PROOF LEVEL: FKWU-STAGED ...       → needs a host carrier. A band that
 #     names it (`; STAGED CARRIER: <path from the repo root>`) runs on the
 #     fkwu-only lane, verdict and diagnostics held as above, whenever that
@@ -294,20 +354,30 @@ WORKLOAD_DIR="form-stdlib/.cache/workloads"
 # Legs dirs live at the repo root's .hearth; a passing band removes its own.
 HEARTH="${PWD%/*}/.hearth"
 
-# fk_workload_root FILE... — sets workload_root to the workload's root: one `; preludes:` line
-# naming its files in order, each spelled from the repo root, so fkwu meets every unit under
-# the one spelling its .lowfk memos carry. Keyed by its text and written once, so fkwu's .fkb
-# identity check beside it reuses the image across runs and rebuilds when a closure file moves.
+# fk_unit FILE — one workload file spelled from the repo root, where fkwu runs.
+fk_unit() {
+    local f="${1#./}"
+    case "$f" in
+        /*|[A-Za-z]:*) printf '%s\n' "$f" ;;
+        ../*) printf '%s\n' "${f#../}" ;;
+        *) printf 'form/%s\n' "$f" ;;
+    esac
+}
+
+# fk_workload_root FILE... — sets workload_unit to what fkwu runs, spelled from the repo root.
+# One file runs as itself, by the path its own head names (`./fkwu <band>`). Several files run
+# through a root: one `; preludes:` line naming them in order, each spelled from the repo root, so
+# fkwu meets every unit under the one spelling its .lowfk memos carry. The root is keyed by its
+# text and written once, so fkwu's .fkb identity check beside it reuses the image across runs and
+# rebuilds when a closure file moves.
 fk_workload_root() {
-    local text="; preludes:" f stem key tmp
+    local text="; preludes:" f stem key tmp workload_root
+    if [[ $# -eq 1 ]]; then
+        workload_unit="$(fk_unit "$1")"
+        return 0
+    fi
     for f in "$@"; do
-        f="${f#./}"
-        case "$f" in
-            /*|[A-Za-z]:*) ;;
-            ../*) f="${f#../}" ;;
-            *) f="form/$f" ;;
-        esac
-        text="$text $f"
+        text="$text $(fk_unit "$f")"
     done
     key="$(printf '%s\n' "$text" | form_hash16)" || return 1
     stem="$(basename "${*: -1}")"
@@ -318,6 +388,7 @@ fk_workload_root() {
         printf '%s\n' "$text" > "$tmp"
         mv -f "$tmp" "$workload_root"
     fi
+    workload_unit="form/$workload_root"
 }
 
 # fk_workload_closure LEGS LABEL — fkwu writes the root's closure to LEGS/closure.fk from the
@@ -325,10 +396,10 @@ fk_workload_root() {
 # fkwu did not hand over.
 fk_workload_closure() {
     local legs="$1" label="$2" rc=0 line
-    ( cd .. && "$FOURTH_SOURCE_FKWU" --closure "form/$workload_root" "$legs/closure.fk" ) \
+    ( cd .. && "$FOURTH_SOURCE_FKWU" --closure "$workload_unit" "$legs/closure.fk" ) \
         > "$legs/closure.out" 2> "$legs/closure.err" || rc=$?
     [[ $rc -eq 0 && -s "$legs/closure.fk" ]] && return 0
-    printf "  ✗  %-30s  fkwu --closure refused form/%s (exit %s)\n" "$label" "$workload_root" "$rc"
+    printf "  ✗  %-30s  fkwu --closure refused %s (exit %s)\n" "$label" "$workload_unit" "$rc"
     while IFS= read -r line; do printf '      %s\n' "$line"; done < <(head -n 20 "$legs/closure.err")
     printf '      evidence=%s\n' "$legs"
     fail=$((fail + 1))
@@ -379,7 +450,7 @@ run_siblings() {
     (
         set +e
         mkdir -p "$legs/tmp-fk"
-        cd .. && TMPDIR="$legs/tmp-fk" "$FOURTH_SOURCE_FKWU" "form/$workload_root" > "$legs/fk" 2> "$legs/fk.err"
+        cd .. && TMPDIR="$legs/tmp-fk" "$FOURTH_SOURCE_FKWU" "$workload_unit" > "$legs/fk" 2> "$legs/fk.err"
         printf '%s\n' "$?" > "$legs/fk.rc"
     ) &
     wait
@@ -469,19 +540,22 @@ run_siblings_binary() {
     fi
 }
 
-# --- run_fkwu_lane: no kernel source moved, so no sibling is asked ---------
-# fkwu walks the workload root, and the band's last line answers its pins: the
+# --- run_fkwu_lane: fkwu alone answers -------------------------------------
+# Taken when no kernel source moved (no sibling is asked), and by a band that
+# declares FOURTH-ARM ONLY (lane "fourth": the band runs alone, by its own path).
+# fkwu walks the workload, and the band's last line answers its pins: the
 # Verdict its head declares and its fourth-arm-bands.txt row, whichever it
 # carries. A band with neither runs clean or fails; its answer is shown, not
 # judged. A nonzero exit or a diagnostic on stderr fails the band as it fails
-# the fourth leg, and a failure keeps its streams.
+# the fourth leg, even when the last line matches its pin (an answer printed
+# before a stop is no verdict), and a failure keeps its streams.
 run_fkwu_lane() {
-    local label="$1"; shift
+    local label="$1" lane="$2"; shift 2
     local band="${*: -1}" legs rc diags answered head_pin reg_pin stem why=""
     fk_workload_root "$@"
     mkdir -p "$HEARTH"
     legs="$(mktemp -d "$HEARTH/validation-legs.XXXXXX")"
-    ( set +e; cd .. && TMPDIR="$legs" "$FOURTH_SOURCE_FKWU" "form/$workload_root" > "$legs/fk" 2> "$legs/fk.err"; printf '%s\n' "$?" > "$legs/fk.rc" )
+    ( set +e; cd .. && TMPDIR="$legs" "$FOURTH_SOURCE_FKWU" "$workload_unit" > "$legs/fk" 2> "$legs/fk.err"; printf '%s\n' "$?" > "$legs/fk.rc" )
     rc="$(cat "$legs/fk.rc" 2>/dev/null || echo 1)"
     diags="$(fk_diag_count "$legs/fk.err")"
     answered="$(organ_steady "$legs/fk")"
@@ -497,13 +571,21 @@ run_fkwu_lane() {
     elif [[ -n "$reg_pin" && "$answered" != "$reg_pin" ]]; then why="answered ${answered:-<nothing>}, the manifest registers $reg_pin"
     fi
     if [[ -n "$why" ]]; then
-        printf "  ✗  %-30s  fkwu lane: %s\n      evidence=%s\n" "$label" "$why" "$legs"
+        if [[ "$lane" == fourth ]]; then
+            printf "  ✗  %-30s  fkwu-only lane: %s\n      evidence=%s\n" "$label" "$why" "$legs"
+        else
+            printf "  ✗  %-30s  fkwu lane: %s\n      evidence=%s\n" "$label" "$why" "$legs"
+        fi
         if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
         fail=$((fail + 1))
         return
     fi
     rm -rf "$legs"
-    if [[ -n "$head_pin" || -n "$reg_pin" ]]; then
+    if [[ "$lane" == fourth ]]; then
+        printf "  ✓  %-30s  → %s (fkwu-only lane)\n" "$label" "$answered"
+        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok fkwu-only" > "$SUITE_STATUS_FILE"; fi
+        ok=$((ok + 1)); fkwu_only=$((fkwu_only + 1))
+    elif [[ -n "$head_pin" || -n "$reg_pin" ]]; then
         printf "  ✓  %-30s  → %s (fkwu, its pin)\n" "$label" "$answered"
         if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok fkwu-lane" > "$SUITE_STATUS_FILE"; fi
         ok=$((ok + 1)); fkwu_lane=$((fkwu_lane + 1))
@@ -517,7 +599,7 @@ run_fkwu_lane() {
 run_workload() {
     local label="$1"; shift
     if [[ $binary_mode -eq 0 ]]; then
-        local band="${*: -1}" level declared answered
+        local band="${*: -1}" level declared
         level="$(fk_band_proof_level "$band")"
         if [[ "$level" == "FKWU-STAGED" ]]; then
             local carrier
@@ -536,30 +618,10 @@ run_workload() {
             fi
             # Verdict equality alone cannot witness: an image with numb
             # unresolved calls can answer the right number (verdict-parity
-            # numbness — nothing==nothing stays green). Demand the verdict
-            # AND zero axiom-5 diagnostics on stderr.
-            local lane_out lane_diags
-            lane_out="$(mktemp "${TMPDIR:-/tmp}/form-fkwu-lane.XXXXXX")"
-            answered="$( (cd .. && "$FOURTH_SOURCE_FKWU" "form/$band") 2>"$lane_out" | tail -1 || true)"
-            lane_diags="$(fk_diag_count "$lane_out")"
-            rm -f "$lane_out"
-            if [[ "${lane_diags:-0}" -gt 0 ]]; then
-                printf "  ✗  %-30s  fkwu-only lane: %s diagnostic line(s) on stderr — verdict %s untrusted\n" \
-                    "$label" "$lane_diags" "${answered:-<nothing>}"
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-                fail=$((fail + 1))
-                return
-            fi
-            if [[ "$answered" == "$declared" ]]; then
-                printf "  ✓  %-30s  → %s (fkwu-only lane)\n" "$label" "$answered"
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok fkwu-only" > "$SUITE_STATUS_FILE"; fi
-                ok=$((ok + 1)); fkwu_only=$((fkwu_only + 1))
-            else
-                printf "  ✗  %-30s  fkwu-only lane: declared Verdict %s, fkwu answered %s\n" \
-                    "$label" "$declared" "${answered:-<nothing>}"
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-                fail=$((fail + 1))
-            fi
+            # numbness — nothing==nothing stays green), and a band can print
+            # its verdict and then stop. The lane demands exit 0, zero axiom-5
+            # diagnostics on stderr, and the verdict against both pins.
+            run_fkwu_lane "$label" fourth "$band"
             return
         elif [[ "$level" == "FKWU-STAGED" ]]; then
             local door
@@ -574,7 +636,7 @@ run_workload() {
             return
         fi
         if [[ $SIBLINGS -eq 0 ]]; then
-            run_fkwu_lane "$label" "$@"
+            run_fkwu_lane "$label" pin "$@"
             return
         fi
     fi
@@ -631,38 +693,7 @@ else
     # its legs dir and every leg a private TMPDIR.
     SUITE_PAR="${VALIDATE_JOBS:-8}"
     suite_dir="$(mktemp -d "${TMPDIR:-/tmp}/form-suite.XXXXXX")"
-    wl_labels=()
-    wl_args=()
-    add_workload() {
-        local label="$1"; shift
-        wl_labels+=("$label")
-        local joined="" a
-        for a in "$@"; do joined="$joined$a"$'\x1f'; done
-        wl_args+=("$joined")
-    }
-    # --- form-samples/*.fk: self-contained files ------------------------
-    for f in form-samples/*.fk; do
-        add_workload "$(basename "$f")" "$f"
-    done
-    # --- form-stdlib/tests/*.{fk,form}: core.fk, then the band -----------
-    # fkwu follows each band's own preludes and imports. A band named after a
-    # module (tests/line-grammar.fk → line-grammar.fk) loads that module
-    # between core.fk and the test.
-    if [[ -d form-stdlib/tests ]]; then
-        for f in form-stdlib/tests/*.fk form-stdlib/tests/*.form; do
-            if [[ ! -e "$f" ]]; then
-                continue
-            fi
-            base="$(basename "$f")"
-            base="${base%.*}"
-            module="form-stdlib/${base}.fk"
-            if [[ -f "$module" && "$module" != "$f" ]]; then
-                add_workload "stdlib/$(basename "$f")" "form-stdlib/core.fk" "$module" "$f"
-            else
-                add_workload "stdlib/$(basename "$f")" "form-stdlib/core.fk" "$f"
-            fi
-        done
-    fi
+    suite_enumerate
     run_one_indexed() {
         local idx="$1"
         local IFS=$'\x1f'
