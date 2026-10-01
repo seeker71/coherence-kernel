@@ -31,7 +31,8 @@ cd form
 ./validate.sh form-stdlib/tests/source-compiler-grammar-bridge-band.fk  # three-way agreed, 2026-09-04
 ```
 
-A band is named alone: every kernel walks its `; preludes:` closure itself, so a
+A band is named alone: fkwu resolves its `; preludes:` closure and the siblings read
+that closure as plain Form (`./fkwu --closure <unit> <out>` from the repo root), so a
 hand-typed file list is not only unnecessary but wrong when it omits a prelude.
 The bridge band is not registered in `fourth-arm-bands.txt`; the bridge run speaks
 for three kernels.

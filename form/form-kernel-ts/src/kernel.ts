@@ -2537,24 +2537,6 @@ export class Kernel {
       }
       return { kind: "int", int: s };
     });
-    // write_form_binary — emit a Recipe to .fkb in the full artifact
-    // format (string table + tree). Sibling to read_form_binary.
-    this.registerNative("write_form_binary", catCall(), (k, args) => {
-      const path = argStr(args, 0);
-      const nid = argNodeID(args, 1);
-      const bytes = serializeRecipeArtifact(k, nid);
-      try {
-        const write = this.host.writeBinaryFile;
-        if (write === undefined) return { kind: "int", int: -1 };
-        write(path, bytes);
-        // `kind: "int"` carries a JS Number — BigInt poisons downstream
-        // arithmetic with "Cannot mix BigInt and other types" when
-        // callers do plain int math on the byte count.
-        return { kind: "int", int: bytes.length };
-      } catch {
-        return { kind: "int", int: -1 };
-      }
-    });
     this.registerNative("read_form_binary", catCall(), (k, args) => {
       try {
         const read = this.host.readBinaryFile;

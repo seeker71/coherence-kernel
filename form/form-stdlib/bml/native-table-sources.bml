@@ -2,7 +2,10 @@
 // relative dependencies; an explicit read path can carry a source override.
 // Dependencies absent from the explicit order enter once, before their user.
 // Explicit modules retain their supplied order, including repeated overrides.
-import form-stdlib/bml/native-source-prepare.bml;
+import form-stdlib/source-compiler.fk;
+import form-stdlib/source-compiler-text-lens.fk;
+import form-stdlib/form-fs.fk;
+import gate/lens-text.bml;
 import form-stdlib/bml-source.fk;
 import form-stdlib/bml/string-join.bml;
 section [form.bml] {
@@ -27,27 +30,23 @@ section [form.bml] {
    (size < 0) || (nothing?(source) || (!((Comparable) len(source) == size))) ? nts-refuse("incomplete-read", path)
    : !((Comparable) file_size(path) == size) ? nts-refuse("changed-extent", path) : source;
   }
-  def nts-token-char(s, at) = at >= len(s) ? 0 : bml-source-space?(char_at(s, at)) || ((String) char_at(s, at) == ",") ? 0 : 1;
-  def nts-token-end(s, at) = nts-token-char(s, at) ? nts-token-end(s, at + 1) : at;
-  def nts-token-start(s, at) = at >= len(s) ? at : nts-token-char(s, at) ? at : nts-token-start(s, at + 1);
-  def nts-token-path?(token) = ((String) fs-path-extension(token) == ".fk") || ((String) fs-path-extension(token) == ".bml");
-  def nts-tokens(s, at, held) {
-   let start = nts-token-start(s, at);
-   let end = nts-token-end(s, start);
-   let token = substring(s, start, end);
-   (Comparable) start == len(s) ? [reverse(held), 0]
-   : (String) token == "\\" ? [reverse(held), 1]
-   : !nts-token-path?(token) ? [reverse(held), 0]
-   : nts-tokens(s, end, cons(token, held));
+  // fkwu's own reader names the edges in every spelling it reads; plain Form
+  // drops its bare import lines and keeps their line breaks, as fkwu does.
+  def nts-declarations(source, semi) = [bml-source-dependencies(source, semi), semi ? nts-body(source, 0, 0, []) : source];
+  def nts-bare-import?(line) {
+   let stripped = bml-source-trim(line);
+   let imported = (String) substring(stripped, 0, 1) == ";" ? nothing() : bml-source-import-line(stripped);
+   nothing?(imported) ? 0 : bml-source-path-token?(imported);
   }
-  def nts-import(line) {
-   let stripped = bml-source-strip-semi(line);
-   !((String) substring(stripped, 0, 7) == "import ") ? nothing()
-   : json-string-value(parse-json("native-table-import", bml-source-trim(substring(stripped, 7, len(stripped)))));
+  def nts-body(source, at, quoted, text) {
+   at >= len(source) ? nts-text(reverse(text)) : {
+    let found = str_find(source, "\n", at);
+    let end = found < 0 ? len(source) : found;
+    let line = substring(source, at, end);
+    let kept = quoted ? line : nts-bare-import?(line) ? "" : line;
+    nts-body(source, end + 1, bml-source-quote-state(line, 0, quoted, 1), cons((String) kept + (found < 0 ? "" : "\n"), text));
+   };
   }
-  // The shared quote-state reader keeps directive-looking multiline string
-  // data out of the dependency graph. Direct Form uses semicolon comments.
-  def nts-declarations(source, semi) = nts-lines(source, 0, 0, 0, semi, [], []);
   // A sealed source runtime resolves names from this exact registry. Carry
   // every declared home and its dependencies, including homes not yet called.
   def nts-home-index?(owner) {
@@ -59,35 +58,17 @@ section [form.bml] {
    nil?(lines) ? reverse(held) : {
     let line = lx-strip(lines[0]);
     ((Comparable) len(line) == 0) || lx-at?(line, 0, "#") ? nts-home-lines(lines[1:], held)
-    : nts-home-row(lines[1:], held, nsp-words(line));
+    : nts-home-row(lines[1:], held, bml-source-words(line));
    }
   }
   def nts-home-row(rest, held, words) =
    !((Comparable) len(words) == 2) ? nts-refuse("home-index-row", nts-text(words))
-   : !nts-token-path?(words[1]) ? nts-refuse("home-index-unit", words[1])
+   : !bml-source-path-token?(words[1]) ? nts-refuse("home-index-unit", words[1])
    : nts-home-lines(rest, cons(words[1], held));
   def nts-source-declarations(owner, source) =
    nts-home-index?(owner) ? [nts-home-declarations(source), source]
-   : nts-token-path?(owner) ? nts-declarations(source, fsc-find-section-open(source, 0) < 0)
+   : bml-source-path-token?(owner) ? nts-declarations(source, fsc-find-section-open(source, 0) < 0)
    : [[], source];
-  def nts-lines(source, at, quoted, continued, semi, deps, text) {
-   at >= len(source) ? (continued ? nts-refuse("unfinished-prelude-continuation", "") : [reverse(deps), nts-text(reverse(text))])
-   : nts-line(source, at, str_find(source, "\n", at), quoted, continued, semi, deps, text);
-  }
-  def nts-line(source, at, found, quoted, continued, semi, deps, text) {
-   let end = found < 0 ? len(source) : found;
-   let line = substring(source, at, end);
-   let stripped = bml-source-trim(line);
-   let payload = quoted ? nothing() : continued ? ((String) substring(stripped, 0, 1) == ";" ? substring(stripped, 1, len(stripped)) : nts-refuse("prelude-continuation-comment", "")) : bml-source-prelude-line(line);
-   let tokens = nothing?(payload) ? [[], 0] : nts-tokens(payload, 0, []);
-   let imported = quoted ? nothing() : nts-import(stripped);
-   let pathImport = nothing?(imported) ? 0 : nts-token-path?(imported);
-   let nextQuoted = (!quoted) && ((String) substring(stripped, 0, 1) == ";") ? 0 : bml-source-quote-state(line, 0, quoted, semi);
-   let bodyLine = semi && pathImport ? "" : line;
-   nts-lines(source, end + 1, nextQuoted, tokens[1], semi,
-    append(reverse(tokens[0]), pathImport ? cons(imported, deps) : deps),
-    cons((String) bodyLine + (found < 0 ? "" : "\n"), text));
-  }
   def nts-open(modules, entry) {
    let state = record_new(0, "explicit", record_new(0), "seen", record_new(0), "rows", [], "lower", 1);
    nts-explicit(state, append(modules, [entry]));
@@ -103,7 +84,7 @@ section [form.bml] {
   }
   def nts-deps(state, owner, deps) {
    nil?(deps) ? 1 : {
-    let resolved = nsp-resolve(owner, deps[0]);
+    let resolved = bml-source-resolve(owner, deps[0]);
     let path = nothing?(resolved) ? nts-refuse("missing-dependency", owner + (" -> " + deps[0])) : nts-absolute(resolved);
     record_has(record_get(state, "explicit"), path) ? 1 : nts-add(state, path, path, 0);
     nts-deps(state, owner, deps[1:]);
@@ -116,8 +97,7 @@ section [form.bml] {
    (!force) && record_has(seen, owner) ? 1 : {
     record_set(seen, owner, 1);
     let source = nts-read(path);
-    let form = nts-token-path?(owner);
-    let high = form ? (fsc-find-section-open(source, 0) >= 0) : 0;
+    let high = bml-source-path-token?(owner) ? (fsc-find-section-open(source, 0) >= 0) : 0;
     let declaration = nts-source-declarations(owner, source);
     nts-deps(state, owner, declaration[0]);
     let lowered = high && record_get(state, "lower") ? form-source-compile-text(source, owner) : declaration[1];

@@ -20,17 +20,15 @@
 //   • make_nodeid — a NodeID value, identity-by-content (the eq law of the
 //     fkwu tag-102 heal)
 //
-// Run:  node --import tsx walkers/ts/main.ts core.fk band.fk
-//   or: tsx walkers/ts/main.ts file.fk ...
-// Files are concatenated (preludes first); the joined source evaluates to one
-// value, rendered bare (no quotes) for byte-comparison across kernels.
+// Run:  node --experimental-strip-types walkers/ts/main.ts file.fk ...
+// The plain Form files are joined in argv order; the joined source evaluates
+// to one value, rendered bare (no quotes) for byte-comparison across kernels.
 //
 // Dropped vs the full kernel: JIT/wasm/asm, server, host-io/file/socket/metal,
 // GGUF/model, formats, generated tables, the higher-architecture recipe
 // modules (blanket/project/generative/proof/vector/parallel/…), and all tests.
 
-import { readFileSync, existsSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
 import { FKWU_RESERVED_HEADS } from "./reserved-heads.ts";
 
 // ===========================================================================
@@ -426,23 +424,9 @@ export class Kernel {
     // dual). Everything else string-shaped is Form-native on top of these
     // three plus str_concat.
     //
-    // Byte scope: implemented via latin1 (each JS UTF-16 code unit 0-255 IS
-    // the raw byte, losslessly, both directions — verified round-tripping byte
-    // 233 through byte_to_str then str_byte_at).
-    //
-    // This paragraph used to continue: "Source string literals are read as
-    // proper UTF-8 (readFileSync(p, "utf8")), so any literal outside the
-    // Latin-1 range ... will NOT byte-count identically to fkwu's raw-byte view
-    // here — a real, bounded gap, not silently papered over. Every test this
-    // walker actually needs to pass today is plain ASCII, where this is exact."
-    //
-    // Named, not hidden — and then it stopped being bounded. The str_byte_at
-    // band and byte-waist-band both grew non-ASCII claims, and this walker read 15
-    // and 20 where the other six evaluators read 511 and 63. The intake is
-    // latin1 now (see main()), so the source bytes ARE the string's units and
-    // the three natives below are exact over the whole range, not just ASCII.
-    // Measured after: (str_len "λ") 2, (str_byte_at "λ" 0) 206, and the emoji
-    // 🌊 four bytes rather than two UTF-16 surrogate halves.
+    // Byte scope: latin1 throughout — each JS UTF-16 code unit 0-255 is one raw
+    // byte, both directions, and main() reads source latin1, so a literal's
+    // units are its source bytes: (str_len "λ") is 2, (str_byte_at "λ" 0) 206.
     this.registerNative("str_len", catAccess(), (_k, args) => ({
       kind: "int",
       int: Buffer.from(argStr(args, 0), "latin1").length,
@@ -1558,75 +1542,14 @@ function invokeClosure(
 }
 
 // ===========================================================================
-// CLI — read recursive imports, evaluate, render one value.
+// CLI — read the plain Form files named on argv, join them with one newline,
+// evaluate, render one value.
 // ===========================================================================
-
-function importPath(line: string): string | null {
-  let source = line.trim();
-  if (source.endsWith(";")) source = source.slice(0, -1).trim();
-  if (!source.startsWith('import "') || !source.endsWith('"')) return null;
-  const path = source.slice(8, -1);
-  return path.length > 0 ? path : null;
-}
-
-function resolveImport(owner: string, imported: string): string {
-  const candidates = isAbsolute(imported)
-    ? [imported]
-    : [
-        join(dirname(owner), imported),
-        imported,
-        ...(imported.startsWith("form/") ? [imported.slice(5)] : []),
-      ];
-  if (!isAbsolute(imported)) {
-    let directory = dirname(owner);
-    while (true) {
-      candidates.push(join(directory, imported));
-      candidates.push(join(directory, "form", imported));
-      const parent = dirname(directory);
-      if (parent === directory) break;
-      directory = parent;
-    }
-  }
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-  throw new Error(
-    "import \"" + imported + "\" from " + owner + ": file not found",
-  );
-}
-
-function loadSourceFile(
-  path: string,
-  seen: Set<string>,
-  parts: string[],
-): void {
-  const canonical = realpathSync(path);
-  if (seen.has(canonical)) return;
-  seen.add(canonical);
-  const source = readFileSync(canonical, "latin1");
-  const body: string[] = [];
-  for (const line of source.split("\n")) {
-    const imported = importPath(line);
-    if (imported !== null) {
-      loadSourceFile(resolveImport(canonical, imported), seen, parts);
-    } else {
-      body.push(line);
-    }
-  }
-  parts.push(body.join("\n"));
-}
-
-function loadSourceClosure(paths: string[]): string {
-  const seen = new Set<string>();
-  const parts: string[] = [];
-  for (const path of paths) loadSourceFile(path, seen, parts);
-  return parts.join("\n");
-}
 
 function main(): void {
   const paths = process.argv.slice(2);
   if (paths.length === 0) {
-    console.error("usage: node --import tsx main.ts <file.fk> [<file.fk> ...]");
+    console.error("usage: node --experimental-strip-types main.ts <file.fk> [<file.fk> ...]");
     process.exit(2);
   }
   const missing = paths.filter((p) => !existsSync(p));
@@ -1634,18 +1557,8 @@ function main(): void {
     for (const p of missing) console.error(`input file not found: ${p}`);
     process.exit(2);
   }
-  // "latin1", not "utf8" — REPAIRED 2026-07-26. The three string natives above
-  // are latin1 throughout: each JS UTF-16 code unit 0-255 IS one raw byte, both
-  // directions. Reading source as utf8 broke that on the way in — a literal
-  // outside Latin-1 arrived as codepoints, so `(str_len "λ")` was 1 here and 2
-  // on every other arm, and `(str_byte_at "λ" 0)` was 187 (the low byte of
-  // U+03BB) instead of 206 (the first UTF-8 byte). The comment beside those
-  // natives named this gap and closed with "every test this walker actually
-  // needs to pass today is plain ASCII" — which stopped being true the day
-  // the str_byte_at band grew non-ASCII claims: this walker read 15 where the other
-  // six evaluators read 511. Reading latin1 makes the source bytes the string's
-  // units, which is what the natives already assumed.
-  const src = loadSourceClosure(paths);
+  // latin1 makes each source byte one string unit, the view the byte natives read.
+  const src = paths.map((p) => readFileSync(p, "latin1")).join("\n");
   const k = new Kernel();
   const frame = new Frame(null);
   const node = readAll(k, src);

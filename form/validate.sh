@@ -7,6 +7,10 @@
 # built or started; FORM_VALIDATE_SIBLINGS=1 asks them anyway. Any divergence
 # is a bug in one of them or a spec corner nobody documented — worth knowing.
 #
+# One input for every arm: a workload is a root naming its files, fkwu walks
+# that root, and `fkwu --closure` writes the same closure as one plain-Form file
+# the siblings read. fkwu alone resolves and lowers; the siblings only walk.
+#
 # Run from form/.
 #   ./validate.sh            # validate all samples
 #   ./validate.sh path.fk    # validate one file
@@ -107,24 +111,16 @@ TS_DIR="form-kernel-ts"
 GO_BIN="$GO_DIR/bin-go"
 RS_BIN="$RS_DIR/target/release/form-kernel-rust"
 
-# The bytes a cache key folds: each file present, and a line naming each one absent. A key
-# over a file a fresh checkout has not built yet (bin-go when no kernel source moved) is still
-# a key; `cat` over it failed the pipeline and set -e ended the run without a word.
-form_cat_present() {
-    local f
-    for f in "$@"; do
-        if [[ -f "$f" ]]; then cat "$f"; else printf 'absent:%s\n' "$f"; fi
-    done
-}
+# The cache key of the text on stdin.
 form_hash16() {
     if command -v shasum >/dev/null 2>&1 && printf test | shasum >/dev/null 2>&1; then
-        form_cat_present "$@" |shasum | cut -c1-16
+        shasum | cut -c1-16
     elif command -v sha1sum >/dev/null 2>&1 && printf test | sha1sum >/dev/null 2>&1; then
-        form_cat_present "$@" |sha1sum | cut -c1-16
+        sha1sum | cut -c1-16
     elif command -v sha256sum >/dev/null 2>&1 && printf test | sha256sum >/dev/null 2>&1; then
-        form_cat_present "$@" |sha256sum | cut -c1-16
+        sha256sum | cut -c1-16
     elif command -v cksum >/dev/null 2>&1 && printf test | cksum >/dev/null 2>&1; then
-        form_cat_present "$@" |cksum | cut -c1-16
+        cksum | cut -c1-16
     else
         echo "validate.sh: need shasum, sha1sum, sha256sum, or cksum for cache keys" >&2
         return 1
@@ -183,9 +179,9 @@ if [[ $SIBLINGS -eq 1 ]]; then
     wait
 fi
 
-# The runtime walker (repo-root fkwu, runtime/fkwu-uni.c) carries the
-# resolver-driven source door that the fourth arm and the fkwu-only
-# proof-level bands run on: it resolves `; preludes:` directives.
+# The runtime (repo-root fkwu, runtime/fkwu-uni.c) is the one reader of every
+# workload: it resolves and lowers the closure, walks it as the fourth arm and
+# the fkwu lanes, and writes it as plain Form for the siblings.
 FKWU_SRC=""
 build_fkwu_src() {
     local src="../runtime/fkwu-uni.c" bin="../fkwu"
@@ -207,30 +203,6 @@ build_fkwu_src() {
     [[ -x "$bin" ]] && FKWU_SRC="$bin"
 }
 build_fkwu_src || exit 1
-
-# ── FORM BALANCE, and the response to it ────────────────────────────────────
-# Cells whose forms do not close surface only when something refuses to run,
-# so they are counted here every run: a class found only by accident is a
-# class mostly not found. The count is not the deliverable: `observe/tree-heal.fk` repairs
-# them, and it is safe to run unattended because it never trusts its own edit —
-# a candidate closer is kept only when the kernel stops objecting, and reverted
-# byte-for-byte otherwise.
-#
-#   echo '(do (write_file "/tmp/heal.txt" (th-report)) 1)' > /tmp/heal.fk   # see tree-heal.fk USE
-#
-fk_form_balance() {
-    [[ -n "$FKWU_SRC" ]] || return 0
-    local drv="${TMPDIR:-/tmp}/fk-balance-$$.fk"
-    printf '; preludes: form-stdlib/core.fk observe/tree-balance.fk\n(do (int_to_str (tb-unbalanced-n)))\n' > "$drv"
-    local n
-    n="$( (cd .. && "$FKWU_SRC" "${drv}") 2>/dev/null | tail -1 )"
-    rm -f "$drv" "${drv%.fk}.fkb" "${drv%.fk}.sym"
-    if [[ "$n" == "0" ]]; then
-        echo "  form balance: every cell closes"
-    else
-        echo "  form balance: ${n} cell(s) do not close — observe/tree-heal.fk repairs them (gated)"
-    fi
-}
 
 # A band may declare its proof level in its comment head:
 #   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu (the source door),
@@ -268,34 +240,25 @@ organ_steady() {
     sed -E '/^form-organ health \{/{s/"id":"[^"]*",//;s/"flow":"[^"]*",//;s/,"observed_at_ms":[0-9]+//;s/,"at_ms":[0-9]+//;s/,"care_of":"[^"]*"//g;s/,"supply_elapsed_ms":[0-9]+//g;s/"pid":[0-9]+,?//g;}' "$1" 2>/dev/null || true
 }
 
-# The fourth sibling is the repo-root fkwu source/JIT door. It resolves the
-# band's Form dependency graph and executes source directly; hot CPU/Metal/MLX
-# recipes may crystallize on demand.
+# The fourth sibling is the repo-root fkwu source/JIT door. It walks the
+# workload root directly; hot CPU/Metal/MLX recipes may crystallize on demand.
+# Held absolute: it runs from the repo root.
 FORM_FOURTH_SOURCE_FKWU="${FORM_FOURTH_SOURCE_FKWU:-$FKWU_SRC}"
+case "$FORM_FOURTH_SOURCE_FKWU" in
+    ""|/*|[A-Za-z]:*) ;;
+    *) FORM_FOURTH_SOURCE_FKWU="$PWD/$FORM_FOURTH_SOURCE_FKWU" ;;
+esac
 # shellcheck source=scripts/fourth-arm.sh
 source scripts/fourth-arm.sh
 build_fourth
 
 # AXIOM-4: "passage not through the offered interface is breach, and breach is
-# observable." An absent fourth arm is a breach of the proof interface and is
-# observable here: without this refusal validate.sh would stamp ✓ on every band
-# and omit the "fourth arm: N four-way" summary, so a whole leg of the proof
-# could vanish and the run still read as green. Every declared fourth-arm
-# workload is mandatory: preparation, execution, and agreement failures fail
-# validation instead of silently reducing the proof to three siblings.
-# FORM_ALLOW_THREE_ARM=1 is the one door out, for a host that genuinely cannot
-# build fkwu (no cc); it must be asked for out loud, never assumed.
+# observable." fkwu writes the closure every sibling reads, so without it no arm
+# has an input: the run refuses here rather than fail every band one by one.
 if ! fourth_available; then
-    if [[ "${FORM_ALLOW_THREE_ARM:-0}" == 1 ]]; then
-        echo "  fourth arm ABSENT — proceeding three-arm by explicit FORM_ALLOW_THREE_ARM=1" >&2
-        echo "  every ✓ below speaks for three kernels, not four" >&2
-    else
-        echo "validate.sh: the fourth arm is ABSENT — refusing to report a three-arm run as green." >&2
-        echo "  A ✓ here would mean 'three kernels agreed', not 'four kernels agreed', and nothing" >&2
-        echo "  in the output would say which. See the reason build_fourth printed above." >&2
-        echo "  Heal the repo-root fkwu source/JIT door, or say so out loud: FORM_ALLOW_THREE_ARM=1" >&2
-        exit 1
-    fi
+    echo "validate.sh: the runtime fkwu is ABSENT — it walks every workload and writes the" >&2
+    echo "  closure the siblings read, so no arm can run. See the reason build_fourth printed above." >&2
+    exit 1
 fi
 
 # The TS kernel carries its deep Form recursion on a worker thread whose V8
@@ -327,328 +290,85 @@ run_ts() {
     fi
 }
 
-source_compile_dir="$(mktemp -d "${TMPDIR:-/tmp}/form-source.XXXXXX")"
-mkdir -p form-stdlib/.cache
-artifact=""
-cleanup() {
-    rm -rf "$source_compile_dir"
-    if [[ -n "$artifact" ]]; then
-        rm -f "$artifact"
-    fi
-}
-# bash REPLACES an EXIT trap; it does not chain. `trap cleanup EXIT` alone
-# would disarm the seal set above, and the seal is what tells a reader that a
-# verdict describes a tree that has since moved.
-#
-# So the handler that owns the EXIT slot carries both: the scratch dirs go,
-# and the seal keeps the last word on the exit status.
-_validate_exit() {
-    local rc=$?
-    cleanup
-    _validate_seal "$rc"
-}
-trap _validate_exit EXIT
+WORKLOAD_DIR="form-stdlib/.cache/workloads"
+# Legs dirs live at the repo root's .hearth; a passing band removes its own.
+HEARTH="${PWD%/*}/.hearth"
 
-fk_declared_deps() {
-    local file="$1"
-    awk '
-        function emit(tok) {
-            gsub(/^[ \t,;"]+|[ \t,;"]+$/, "", tok)
-            if (tok ~ /\.(fk|bml)$/) print tok
-        }
-        /^;[ \t]*import([ \t:]|")/ {
-            s = $0
-            sub(/^;[ \t]*import[ \t:]*/, "", s)
-            if (match(s, /"[^"]+\.fk"/)) {
-                emit(substr(s, RSTART + 1, RLENGTH - 2))
-            } else {
-                n = split(s, a, /[ \t,;]+/)
-                if (n >= 1) emit(a[1])
-            }
-        }
-        /^[ \t]*import([ \t:]|")/ {
-            s = $0
-            sub(/^[ \t]*import[ \t:]*/, "", s)
-            if (match(s, /"[^"]+\.fk"/)) {
-                emit(substr(s, RSTART + 1, RLENGTH - 2))
-            } else {
-                n = split(s, a, /[ \t,;]+/)
-                if (n >= 1) emit(a[1])
-            }
-        }
-        /^(;|\/\/)[ \t]*preludes:/ {
-            s = $0
-            sub(/^(;|\/\/)[ \t]*preludes:[ \t]*/, "", s)
-            gsub(/,/, " ", s)
-            n = split(s, a, /[ \t]+/)
-            for (i = 1; i <= n; i++) {
-                low = tolower(a[i])
-                if (a[i] == "\\" || low == "none" || low == "(none)") continue
-                emit(a[i])
-            }
-        }
-    ' "$file" 2>/dev/null || true
-}
-
-fk_resolve_dep_path() {
-    local owner="$1"
-    local token="$2"
-    local dir cand
-    case "$token" in
-        /*|[A-Za-z]:*) printf "%s\n" "$token"; return ;;
-    esac
-    dir="$(dirname "$owner")"
-    cand="$dir/$token"
-    if [[ -f "$cand" ]]; then
-        printf "%s\n" "$cand"
-    elif [[ -f "$token" ]]; then
-        printf "%s\n" "$token"
-    elif [[ "$token" == form/* && -f "${token#form/}" ]]; then
-        printf "%s\n" "${token#form/}"
-    elif [[ -f "../$token" ]]; then
-        # repo-root-anchored preludes (learn/…, observe/…) — the same door
-        # the runtime resolver learned in #270; validate runs with cwd=form/.
-        # Tried only after every form/-shaped rescue has failed, so no
-        # currently-resolving token changes meaning. (Twice-found the same
-        # night by independent lineages — the wound was that real.)
-        printf "%s\n" "../$token"
-    else
-        printf "%s\n" "$cand"
-    fi
-}
-
-fk_expand_seen=()
-fk_expand_added=()
-fk_import_expanded=()
-
-fk_seen_contains() {
-    local needle="$1" x
-    [[ ${#fk_expand_seen[@]} -eq 0 ]] && return 1
-    for x in "${fk_expand_seen[@]}"; do
-        [[ "$x" == "$needle" ]] && return 0
-    done
-    return 1
-}
-
-fk_added_contains() {
-    local needle="$1" x
-    [[ ${#fk_expand_added[@]} -eq 0 ]] && return 1
-    for x in "${fk_expand_added[@]}"; do
-        [[ "$x" == "$needle" ]] && return 0
-    done
-    return 1
-}
-
-fk_add_expanded_dep() {
-    local dep="$1"
-    if ! fk_added_contains "$dep"; then
-        fk_import_expanded+=("$dep")
-        fk_expand_added+=("$dep")
-    fi
-}
-
-fk_expand_file_deps() {
-    local file="$1" token dep
-    fk_seen_contains "$file" && return
-    fk_expand_seen+=("$file")
-    if [[ ! -f "$file" ]]; then
-        echo "validate.sh: declared Form dependency not found: $file" >&2
-        return 1
-    fi
-    while IFS= read -r token; do
-        [[ -n "$token" ]] || continue
-        dep="$(fk_resolve_dep_path "$file" "$token")"
-        fk_expand_file_deps "$dep"
-        fk_add_expanded_dep "$dep"
-    done < <(fk_declared_deps "$file")
-}
-
-fk_expand_declared_deps() {
-    local f
-    fk_expand_seen=()
-    fk_expand_added=()
-    fk_import_expanded=()
+# fk_workload_root FILE... — sets workload_root to the workload's root: one `; preludes:` line
+# naming its files in order, each spelled from the repo root, so fkwu meets every unit under
+# the one spelling its .lowfk memos carry. Keyed by its text and written once, so fkwu's .fkb
+# identity check beside it reuses the image across runs and rebuilds when a closure file moves.
+fk_workload_root() {
+    local text="; preludes:" f stem key tmp
     for f in "$@"; do
-        fk_expand_file_deps "$f"
+        f="${f#./}"
+        case "$f" in
+            /*|[A-Za-z]:*) ;;
+            ../*) f="${f#../}" ;;
+            *) f="form/$f" ;;
+        esac
+        text="$text $f"
     done
+    key="$(printf '%s\n' "$text" | form_hash16)" || return 1
+    stem="$(basename "${*: -1}")"
+    workload_root="$WORKLOAD_DIR/$key-${stem%.*}.fk"
+    if [[ ! -s "$workload_root" ]]; then
+        mkdir -p "$WORKLOAD_DIR"
+        tmp="$(mktemp "$WORKLOAD_DIR/.$key.XXXXXX")"
+        printf '%s\n' "$text" > "$tmp"
+        mv -f "$tmp" "$workload_root"
+    fi
 }
 
-# Source-compiled preludes are cached by CONTENT (file + compiler chain): the
-# same unchanged core.fk compiles once, not once per band. Without this cache
-# every validate invocation re-ran the full BML source-compiler (~12s) on
-# identical input — 455 bands paid ~90 serial minutes for the same artifact.
-SOURCE_CACHE_DIR="form-stdlib/.cache/source-compiled"
-mkdir -p "$SOURCE_CACHE_DIR"
-compiler_stamp=""
-# The source-lens closure: this list is the local host-I/O carrier for lowering,
-# and fkwu receives only the resulting dependency-complete Form source below.
-# The kernels resolve `; preludes:` themselves; this mirror is hand-held, so a
-# unit born in Form joins it by name.
-# Validation needs executable Form source on every arm: the compiler chain ends
-# in its explicit text lens, the same Recipe lowering expressed as source.
-# The lens is part of the content stamp, so a cached driver is keyed to it.
-compiler_chain=("form-stdlib/engine-constants.fk" "form-stdlib/compiler-objects.fk" "form-stdlib/form-ontology-bp.fk" "form-stdlib/form-ontology-source-categories.fk" "form-stdlib/form-ontology-loader.fk" "form-stdlib/line-grammar.fk" "form-stdlib/bmf-core.fk" "form-stdlib/bmf-grammar.fk" "form-stdlib/bml.fk" "form-stdlib/bml-source.fk" "form-stdlib/source-compiler.fk" "form-stdlib/grammars/form-bml.fk" "form-stdlib/grammars/form-lift.fk" "form-stdlib/form-bml-lower.fk" "form-stdlib/source-compiler-text-lens.fk")
-compiler_stamp="$(form_hash16 "${compiler_chain[@]}" "${FKWU_SRC:-}" "$GO_BIN")"
-
-prepared_args=()
-# Strips a source's own "; preludes:"/"import" header lines. prepare_sources
-# feeds every arm an EXPLICIT, already-ordered file list (typed by the caller,
-# or auto-expanded by fk_expand_declared_deps for every explicit file below)
-# -- so by the time a file reaches prepared_args, every dependency it would
-# name is already present as its own separate, independently prepared entry.
-# The header is therefore pure redundancy for this pipeline, and since
-# Go/Rust/TS/fkwu all walk "; preludes:" directives themselves, a LIVE header
-# is actively dangerous: it re-names a dependency by its RAW path even when
-# that dependency was separately lowered+cached here under a DIFFERENT path
-# (SOURCE_CACHE_DIR/<hash>.fk) — reintroducing the raw, un-lowered
-# "section [form.bml]" text the lens below exists to strip, through a side
-# door the kernels' prelude walk opens.
-# Stripping is a pure no-op for every reader in this tree: the header is
-# already just a comment line, inert to any Form parser; only the kernels'
-# directive SCAN treats its text as meaningful, and only that scan is what
-# this suppresses.
-# A line that opens inside a string literal is text, never a directive. A band may
-# carry another language's source in a string (seedbank python-exec's "import os"
-# lines at column 0), and the import rule must not cut those lines, their closing
-# quotes and parens with them. fk_scan carries the literal across lines: an
-# escaped character stays inside, and a ";" outside a string starts a comment.
-# A BML statement `import Name;` is source, kept whole; only a module directive is cut.
-# The prepared-copy keys below end in "-r", the mark of this rule.
-fk_in_string_awk='
-    function fk_scan(line,   i, c, n) {
-        n = length(line)
-        for (i = 1; i <= n; i++) {
-            c = substr(line, i, 1)
-            if (fk_in) {
-                if (c == "\\") { i++; continue }
-                if (c == "\"") fk_in = 0
-            } else {
-                if (c == ";") break
-                if (c == "\"") fk_in = 1
-            }
-        }
-    }
-'
-fk_strip_prelude_header() {
-    local src_file="$1" dest_file="$2"
-    awk "$fk_in_string_awk"'
-        fk_in { print; fk_scan($0); next }
-        /^;[[:space:]]*preludes:/ { next }
-        /^[[:space:]]*import[[:space:]]+[A-Za-z_][A-Za-z0-9_?!-]*[[:space:]]*;/ { print; fk_scan($0); next }
-        /^[[:space:]]*import([[:space:]:]|")/ { next }
-        /^;[[:space:]]*import([[:space:]:]|")/ { next }
-        { print; fk_scan($0) }
-    ' "$src_file" > "$dest_file"
+# fk_workload_closure LEGS LABEL — fkwu writes the root's closure to LEGS/closure.fk from the
+# repo root. A refusal prints the door's own words and the band fails: no sibling reads anything
+# fkwu did not hand over.
+fk_workload_closure() {
+    local legs="$1" label="$2" rc=0 line
+    ( cd .. && "$FOURTH_SOURCE_FKWU" --closure "form/$workload_root" "$legs/closure.fk" ) \
+        > "$legs/closure.out" 2> "$legs/closure.err" || rc=$?
+    [[ $rc -eq 0 && -s "$legs/closure.fk" ]] && return 0
+    printf "  ✗  %-30s  fkwu --closure refused form/%s (exit %s)\n" "$label" "$workload_root" "$rc"
+    while IFS= read -r line; do printf '      %s\n' "$line"; done < <(head -n 20 "$legs/closure.err")
+    printf '      evidence=%s\n' "$legs"
+    fail=$((fail + 1))
+    if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+    return 1
 }
 
-# True when $1's own "preludes:" directive (";"-led for .fk, "//"-led for
-# .bml) names a ".bml" dependency. A lowered .bml keeps only ";" lines:
-# form-source-compile-file drops every "//" line, its preludes directive with
-# it, so explicit mode expands each file's declared chain before lowering. A
-# lowered file that still names a ".bml" (a ";"-led header) keeps exactly
-# those names for the kernels' own recursive BML lowering.
-fk_prelude_has_bml_dep() {
-    grep -Eq '^(;|//)[[:space:]]*preludes:.*\.bml([[:space:]]|,|$)' "$1"
-}
-
-# Rewrites a header that names ".bml" dependencies down to exactly those. Every
-# ".fk" dependency it names is already its own prepared entry, and naming it
-# again by raw path is the side door fk_strip_prelude_header closes: a raw
-# section-bearing prelude (compiler.fk's "section [bmf.bmf]") reached the
-# siblings that way and stopped them. The ".bml" names stay for the kernels' own
-# directive walk to lower. Tokens split the way fk_declared_deps splits them.
-fk_keep_bml_prelude_deps() {
-    local src_file="$1" dest_file="$2"
-    awk "$fk_in_string_awk"'
-        fk_in { print; fk_scan($0); next }
-        match($0, /^(;+|\/\/)[[:space:]]*preludes:/) {
-            marker = substr($0, 1, RLENGTH)
-            n = split(substr($0, RLENGTH + 1), a, /[ \t,;]+/)
-            kept = ""
-            for (i = 1; i <= n; i++) {
-                tok = a[i]
-                gsub(/^[ \t,;"]+|[ \t,;"]+$/, "", tok)
-                if (tok ~ /\.bml$/) kept = kept " " tok
-            }
-            if (kept != "") print marker kept
-            next
-        }
-        /^[[:space:]]*import[[:space:]]+[A-Za-z_][A-Za-z0-9_?!-]*[[:space:]]*;/ { print; fk_scan($0); next }
-        /^[[:space:]]*import([[:space:]:]|")/ { next }
-        /^;[[:space:]]*import([[:space:]:]|")/ { next }
-        { print; fk_scan($0) }
-    ' "$src_file" > "$dest_file"
-}
-
-prepare_sources() {
-    prepared_args=()
-    local src out safe driver key cached plain stripped
-    for src in "$@"; do
-        if grep -Eq '^[[:space:]]*section \[' "$src"; then
-            # "-bmlhead": a lowered file keeps only its ".bml" header names
-            # (fk_keep_bml_prelude_deps).
-            key="$(form_hash16 "$src")-$compiler_stamp-bmlhead-r"
-            cached="$SOURCE_CACHE_DIR/$key.fk"
-            if [[ ! -s "$cached" ]]; then
-                safe="${src//\//__}"
-                # The compiler remains Form source, but its full chain declares
-                # three host-I/O calls that are valid on the proof siblings and
-                # absent on fkwu. Run the explicit text lens on that valid local
-                # lane, then hand the resulting pure Form source to every arm.
-                # This preserves the seam instead of suppressing fkwu compiler
-                # diagnostics; the fourth witness below executes the prepared
-                # closure itself on fkwu with zero unresolved calls.
-                out="$(mktemp "$SOURCE_CACHE_DIR/.${key}.XXXXXX")"
-                driver="$(mktemp "$source_compile_dir/compile-${safe}.XXXXXX")"
-                printf '(do (form-source-compile-file "%s" "%s"))\n' "$src" "$out" > "$driver"
-                if "$GO_BIN" "${compiler_chain[@]}" "$driver" >/dev/null && [[ -s "$out" ]]; then
-                    if fk_prelude_has_bml_dep "$out"; then
-                        stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.bmlhead.XXXXXX")"
-                        fk_keep_bml_prelude_deps "$out" "$stripped"
-                        mv -f "$stripped" "$cached"
-                    else
-                        stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.stripped.XXXXXX")"
-                        fk_strip_prelude_header "$out" "$stripped"
-                        mv -f "$stripped" "$cached"
-                    fi
-                fi
-                rm -f "$out" "$driver"
-            fi
-            if [[ -s "$cached" ]]; then
-                prepared_args+=("$cached")
-            else
-                # No silent raw fallback: a raw section-bearing source cannot
-                # agree on any arm, so handing it forward only moves the failure
-                # somewhere quieter. Refusing HERE names the real seam.
-                echo "validate.sh: source lens failed for $src on the declared sibling host-I/O lane" >&2
-                echo "  a section-bearing source cannot run raw; fix the lens, not the band" >&2
-                exit 1
-            fi
-        elif fk_prelude_has_bml_dep "$src"; then
-            # Its header names a ".bml" dependency, which explicit multi-file
-            # callers leave to the kernels' own directive walk to find and
-            # lower: a cached copy keeps exactly those names and drops the
-            # ".fk" ones, already their own prepared entries.
-            key="$(form_hash16 "$src")-bmlhead-r"
-            plain="$SOURCE_CACHE_DIR/$key.fk"
-            if [[ ! -s "$plain" ]]; then
-                stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.stripped.XXXXXX")"
-                fk_keep_bml_prelude_deps "$src" "$stripped"
-                mv -f "$stripped" "$plain"
-            fi
-            prepared_args+=("$plain")
-        else
-            key="$(form_hash16 "$src")-plain-r"
-            plain="$SOURCE_CACHE_DIR/$key.fk"
-            if [[ ! -s "$plain" ]]; then
-                stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.stripped.XXXXXX")"
-                fk_strip_prelude_header "$src" "$stripped"
-                mv -f "$stripped" "$plain"
-            fi
-            prepared_args+=("$plain")
+# fk_leg_closure LEGS LEG — a per-leg copy of a closure that names "/tmp/, rooted in the leg's
+# own TMPDIR. Only the lines that name it are rewritten: bash 3.2 expands a whole multi-MB text
+# in quadratic time.
+fk_leg_closure() {
+    local src="$1/closure.fk" out="$1/closure-$2.fk" to="\"$1/tmp-$2/" hit n line prev=0
+    : > "$out"
+    while IFS= read -r hit; do
+        n="${hit%%:*}"
+        line="${hit#*:}"
+        if [[ $n -gt $((prev + 1)) ]]; then
+            head -n "$((n - 1))" "$src" | tail -n "+$((prev + 1))" >> "$out"
         fi
-    done
+        printf '%s\n' "${line//\"\/tmp\//$to}" >> "$out"
+        prev="$n"
+    done < <(grep -n -F '"/tmp/' "$src")
+    tail -n "+$((prev + 1))" "$src" >> "$out"
 }
+
+# fk_run_leg LEGS LEG COMMAND... — one sibling over the closure, its streams and exit in LEGS.
+# Each leg owns its TMPDIR: bands reach scratch space through the `temp_dir` native and by
+# literal "/tmp/ paths, so concurrent legs and concurrent runs never share a scratch path.
+fk_run_leg() (
+    set +e
+    legs="$1" leg="$2" input="$1/closure.fk"
+    shift 2
+    mkdir -p "$legs/tmp-$leg"
+    if grep -q -F '"/tmp/' "$input"; then
+        fk_leg_closure "$legs" "$leg"
+        input="$legs/closure-$leg.fk"
+    fi
+    TMPDIR="$legs/tmp-$leg" "$@" "$input" > "$legs/$leg" 2> "$legs/$leg.err"
+    printf '%s\n' "$?" > "$legs/$leg.rc"
+)
 
 binary_mode=0
 if [[ "${1:-}" == "--binary" ]]; then
@@ -657,158 +377,121 @@ if [[ "${1:-}" == "--binary" ]]; then
 fi
 
 # --- run_siblings: feed one Form workload through all kernels, compare ---
-# A "workload" can be multiple .fk files loaded sequentially (e.g. stdlib
-# prelude + test file). Every kernel receives the same file list.
+# A workload is one or more files (e.g. core.fk then a band). Every sibling
+# reads the one closure fkwu hands over; a manifest-covered band also runs its
+# root on fkwu, the fourth leg.
 run_siblings() {
     local label="$1"; shift
     local go_out rs_out ts_out go_rc rs_rc ts_rc legs
-    prepare_sources "$@"
-    # Fourth leg: a manifest-covered band runs from source on runtime fkwu.
     # A nonzero exit or source diagnostic is a failed fourth witness even when
     # the last printed scalar happens to match (verdict-parity numbness).
-    local fourth_src="" fk_out="" fk_rc=0 fk_diags=0
-    local fourth_stem=""
-    if fourth_available; then
-        fourth_stem="$(fourth_band_stem "${*: -1}" || true)"
-    fi
-    # The three kernels run CONCURRENTLY: a band's wall time is max(leg), not
-    # sum — on compiler-heavy bands the Go+Rust legs ride inside the TS leg's
-    # shadow for free. Compare result stdout. Stderr is a distinct diagnostic
-    # channel: timing and resource receipts belong to each physical carrier.
-    # Every exit status and both streams remain available in the evidence dir.
-    #
-    # Each leg gets its OWN TMPDIR under the legs dir: bands reach scratch
-    # space through the `temp_dir` native, so concurrent sibling legs (and
-    # concurrent validate runs) never share a scratch path.
-    mkdir -p ../.hearth
-    legs="$(mktemp -d "$PWD/../.hearth/validation-legs.XXXXXX")"
-    prepare_leg_args() {
-        local leg="$1"
-        local root="$legs/tmp-$leg"
-        local outdir="$legs/src-$leg"
-        local src out
-        mkdir -p "$root" "$outdir"
-        leg_args=()
-        for src in "${prepared_args[@]}"; do
-            if grep -q '"/tmp/' "$src"; then
-                out="$outdir/$(basename "$src")"
-                sed "s#\"/tmp/#\"$root/#g" "$src" > "$out"
-                leg_args+=("$out")
-            else
-                leg_args+=("$src")
-            fi
-        done
-    }
-    prepare_leg_args go
-    go_args=("${leg_args[@]}")
-    prepare_leg_args rs
-    rs_args=("${leg_args[@]}")
-    prepare_leg_args ts
-    ts_args=("${leg_args[@]}")
-    ( set +e; TMPDIR="$legs/tmp-go" "$GO_BIN" "${go_args[@]}" > "$legs/go" 2> "$legs/go.err"; printf '%s\n' "$?" > "$legs/go.rc" ) &
-    ( set +e; TMPDIR="$legs/tmp-rs" "$RS_BIN" "${rs_args[@]}" > "$legs/rs" 2> "$legs/rs.err"; printf '%s\n' "$?" > "$legs/rs.rc" ) &
-    ( set +e; TMPDIR="$legs/tmp-ts" run_ts "${ts_args[@]}" > "$legs/ts" 2> "$legs/ts.err"; printf '%s\n' "$?" > "$legs/ts.rc" ) &
+    local fourth_stem fk_out="" fk_rc=0 fk_diags=0 reg_want="" reg_have
+    fourth_stem="$(fourth_band_stem "${*: -1}" || true)"
+    fk_workload_root "$@"
+    mkdir -p "$HEARTH"
+    legs="$(mktemp -d "$HEARTH/validation-legs.XXXXXX")"
+    fk_workload_closure "$legs" "$label" || return 0
+    # The legs run CONCURRENTLY: a band's wall time is max(leg), not sum. Compare
+    # result stdout. Stderr is a distinct diagnostic channel: timing and resource
+    # receipts belong to each physical carrier.
+    fk_run_leg "$legs" go "$GO_BIN" &
+    fk_run_leg "$legs" rs "$RS_BIN" &
+    fk_run_leg "$legs" ts run_ts &
     if [[ -n "$fourth_stem" ]]; then
-        fourth_src="$(fourth_prepare_source_workload "$FOURTH_SOURCE_RUN_DIR" "${prepared_args[@]}")"
-        if [[ -z "$fourth_src" ]]; then
-            echo "validate.sh: $fourth_stem is declared in $FOURTH_MANIFEST but its source closure" >&2
-            echo "  did not prepare. Refusing to run it three-arm under a four-arm declaration." >&2
-            echo "  evidence=$legs" >&2
-            exit 1
-        fi
         (
             set +e
-            # fkwu's in-memory BML lowering door is rooted at the body root
-            # (`form/form-stdlib/bml-floor-compile.fk`). validate.sh itself
-            # lives one level below that root. Run only the existing fourth
-            # carrier from the body root so a nested BML prelude resolves the
-            # same way as direct source execution; the workload path is already
-            # absolute and each leg keeps its invocation-owned TMPDIR.
-            (
-                fourth_source_fkwu="$FOURTH_SOURCE_FKWU"
-                case "$fourth_source_fkwu" in
-                    /*|[A-Za-z]:*) ;;
-                    *) fourth_source_fkwu="$PWD/$fourth_source_fkwu" ;;
-                esac
-                cd ..
-                TMPDIR="$legs/tmp-fk" "$fourth_source_fkwu" "$fourth_src"
-            ) > "$legs/fk" 2> "$legs/fk.err"
+            mkdir -p "$legs/tmp-fk"
+            cd .. && TMPDIR="$legs/tmp-fk" "$FOURTH_SOURCE_FKWU" "form/$workload_root" > "$legs/fk" 2> "$legs/fk.err"
             printf '%s\n' "$?" > "$legs/fk.rc"
         ) &
     fi
     wait
     go_out=$(organ_steady "$legs/go"); rs_out=$(organ_steady "$legs/rs"); ts_out=$(organ_steady "$legs/ts")
-    go_rc=$(cat "$legs/go.rc"); rs_rc=$(cat "$legs/rs.rc"); ts_rc=$(cat "$legs/ts.rc")
+    go_rc=$(cat "$legs/go.rc" 2>/dev/null || echo 1)
+    rs_rc=$(cat "$legs/rs.rc" 2>/dev/null || echo 1)
+    ts_rc=$(cat "$legs/ts.rc" 2>/dev/null || echo 1)
     if [[ -n "$fourth_stem" ]]; then
         fk_out=$(organ_steady "$legs/fk")
         fk_rc=$(cat "$legs/fk.rc" 2>/dev/null || echo 1)
         fk_diags=$(fk_diag_count "$legs/fk.err")
-    fi
-    printf '  evidence=%s exits go=%s rust=%s typescript=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc"
-    if [[ "$go_rc" == 0 && "$rs_rc" == 0 && "$ts_rc" == 0 && "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]] \
-        && { [[ -z "$fourth_stem" ]] || { [[ "$fk_rc" == 0 && "$fk_diags" == 0 && "$fk_out" == "$go_out" ]]; }; }; then
         # REGISTERED-VERDICT GATE. fourth-arm-bands.txt column 3 is the band's
         # registered verdict. The four arms agreeing proves agreement and
         # nothing more, so an agreed verdict that differs from the registered
         # one is a failure with its own word: a band cannot change what it
-        # certifies without the change being seen.
-        # The verdict compared is the LAST line of the agreed output — fks bands
-        # answer one scalar, fkc bands may print above it — and only when the
-        # registered column is numeric (the one teach-sema-code row is not a
-        # band row and never reaches here).
-        local reg_stem reg_want reg_have
-        reg_stem="$(fourth_band_stem "${*: -1}" || true)"
-        reg_want=""
-        if [[ -n "$reg_stem" ]]; then
-            reg_want="$(awk -v b="$reg_stem" '!/^#/ && $1==b{print $3; exit}' "$FOURTH_MANIFEST")"
+        # certifies without the change being seen. The verdict compared is the
+        # LAST line of the agreed output, and only when the column is numeric.
+        reg_want="$(awk -v b="$fourth_stem" '!/^#/ && $1==b{print $3; exit}' "$FOURTH_MANIFEST")"
+    fi
+    if [[ "$go_rc" == 0 && "$rs_rc" == 0 && "$ts_rc" == 0 && "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]] \
+        && { [[ -z "$fourth_stem" ]] || { [[ "$fk_rc" == 0 && "$fk_diags" == 0 && "$fk_out" == "$go_out" ]]; }; }; then
+        reg_have="${go_out##*$'\n'}"
+        if [[ "$reg_want" =~ ^[0-9]+$ && "$reg_have" != "$reg_want" ]]; then
+            printf "  ✗  %-30s  → %s agreed on every arm, but the manifest registers %s — REGISTERED-VERDICT DRIFT\n      evidence=%s\n" \
+                "$label" "$reg_have" "$reg_want" "$legs"
+            fail=$((fail + 1))
+            if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+            return 0
         fi
-        if [[ "$reg_want" =~ ^[0-9]+$ ]]; then
-            reg_have="${go_out##*$'\n'}"
-            if [[ "$reg_have" != "$reg_want" ]]; then
-                printf "  ✗  %-30s  → %s agreed on every arm, but the manifest registers %s — REGISTERED-VERDICT DRIFT\n" \
-                    "$label" "$reg_have" "$reg_want"
-                fail=$((fail + 1))
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-                return
-            fi
+        local head_pin
+        head_pin="$(fk_band_declared_verdict "${*: -1}")"
+        if [[ -n "$head_pin" && "$reg_have" != "$head_pin" ]]; then
+            printf "  ✗  %-30s  → %s agreed on every arm, but its head pins Verdict %s — DECLARED-VERDICT DRIFT\n      evidence=%s\n" \
+                "$label" "$reg_have" "$head_pin" "$legs"
+            fail=$((fail + 1))
+            if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+            return 0
         fi
+        rm -rf "$legs"
         printf "  ✓  %-30s  → %s\n" "$label" "$go_out"
         ok=$((ok + 1))
         if [[ -n "$fourth_stem" ]]; then fourth_ok=$((fourth_ok + 1)); fi
         if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then
             if [[ -n "$fourth_stem" ]]; then echo "ok fourth" > "$SUITE_STATUS_FILE"; else echo "ok" > "$SUITE_STATUS_FILE"; fi
         fi
-    elif [[ -n "$fourth_stem" ]]; then
+        return 0
+    fi
+    printf '  evidence=%s exits go=%s rust=%s typescript=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc"
+    if [[ -n "$fourth_stem" ]]; then
         printf "  ✗  %-30s\n      go         = %s\n      rust       = %s\n      typescript = %s\n      fourth-src = %s\n      fourth-rc  = %s  diagnostics=%s\n" \
             "$label" "$go_out" "$rs_out" "$ts_out" "$fk_out" "$fk_rc" "$fk_diags"
-        fail=$((fail + 1))
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
     else
         printf "  ✗  %-30s\n      go         = %s\n      rust       = %s\n      typescript = %s\n" \
             "$label" "$go_out" "$rs_out" "$ts_out"
-        fail=$((fail + 1))
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
     fi
+    fail=$((fail + 1))
+    if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
 }
 
+# --- run_siblings_binary: Go emits the closure as one binary artifact, and
+# all three siblings execute that artifact.
 run_siblings_binary() {
     local label="$1"; shift
-    local artifact="$1"; shift
     local go_out rs_out ts_out go_rc rs_rc ts_rc legs
-    mkdir -p ../.hearth
-    legs="$(mktemp -d "$PWD/../.hearth/validation-binary.XXXXXX")"
-    ( set +e; "$GO_BIN" --binary "$artifact" > "$legs/go" 2> "$legs/go.err"; printf '%s\n' "$?" > "$legs/go.rc" ) &
-    ( set +e; "$RS_BIN" --binary "$artifact" > "$legs/rs" 2> "$legs/rs.err"; printf '%s\n' "$?" > "$legs/rs.rc" ) &
-    ( set +e; run_ts --binary "$artifact" > "$legs/ts" 2> "$legs/ts.err"; printf '%s\n' "$?" > "$legs/ts.rc" ) &
+    fk_workload_root "$@"
+    mkdir -p "$HEARTH"
+    legs="$(mktemp -d "$HEARTH/validation-binary.XXXXXX")"
+    fk_workload_closure "$legs" "$label" || return 0
+    if ! "$GO_BIN" --emit-binary "$legs/artifact" "$legs/closure.fk" > "$legs/emit" 2> "$legs/emit.err"; then
+        printf "  ✗  %-30s  go --emit-binary refused the closure\n      evidence=%s\n" "$label" "$legs"
+        fail=$((fail + 1))
+        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+        return 0
+    fi
+    ( set +e; "$GO_BIN" --binary "$legs/artifact" > "$legs/go" 2> "$legs/go.err"; printf '%s\n' "$?" > "$legs/go.rc" ) &
+    ( set +e; "$RS_BIN" --binary "$legs/artifact" > "$legs/rs" 2> "$legs/rs.err"; printf '%s\n' "$?" > "$legs/rs.rc" ) &
+    ( set +e; run_ts --binary "$legs/artifact" > "$legs/ts" 2> "$legs/ts.err"; printf '%s\n' "$?" > "$legs/ts.rc" ) &
     wait
     go_out=$(organ_steady "$legs/go"); rs_out=$(organ_steady "$legs/rs"); ts_out=$(organ_steady "$legs/ts")
-    go_rc=$(cat "$legs/go.rc"); rs_rc=$(cat "$legs/rs.rc"); ts_rc=$(cat "$legs/ts.rc")
-    printf '  evidence=%s exits go=%s rust=%s typescript=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc"
+    go_rc=$(cat "$legs/go.rc" 2>/dev/null || echo 1)
+    rs_rc=$(cat "$legs/rs.rc" 2>/dev/null || echo 1)
+    ts_rc=$(cat "$legs/ts.rc" 2>/dev/null || echo 1)
     if [[ "$go_rc" == 0 && "$rs_rc" == 0 && "$ts_rc" == 0 && "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]]; then
+        rm -rf "$legs"
         printf "  ✓  %-30s  → %s\n" "$label" "$go_out"
         ok=$((ok + 1))
         if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok" > "$SUITE_STATUS_FILE"; fi
     else
+        printf '  evidence=%s exits go=%s rust=%s typescript=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc"
         printf "  ✗  %-30s\n      go         = %s\n      rust       = %s\n      typescript = %s\n" \
             "$label" "$go_out" "$rs_out" "$ts_out"
         fail=$((fail + 1))
@@ -817,26 +500,18 @@ run_siblings_binary() {
 }
 
 # --- run_fkwu_lane: no kernel source moved, so no sibling is asked ---------
-# The workload's closure runs on fkwu from source, and the band's last line
-# answers its pins: the Verdict its head declares and its fourth-arm-bands.txt
-# row, whichever it carries. A band with neither runs clean or fails; its
-# answer is shown, not judged. A nonzero exit or a diagnostic on stderr fails
-# the band as it fails the fourth leg, and a failure keeps its streams.
+# fkwu walks the workload root, and the band's last line answers its pins: the
+# Verdict its head declares and its fourth-arm-bands.txt row, whichever it
+# carries. A band with neither runs clean or fails; its answer is shown, not
+# judged. A nonzero exit or a diagnostic on stderr fails the band as it fails
+# the fourth leg, and a failure keeps its streams.
 run_fkwu_lane() {
     local label="$1"; shift
-    local band="${*: -1}" src legs fk rc diags answered head_pin reg_pin stem why=""
-    src="$(fourth_prepare_source_workload "$FOURTH_SOURCE_RUN_DIR" "$@")" || src=""
-    if [[ -z "$src" ]]; then
-        printf "  ✗  %-30s  fkwu lane: the workload's source closure did not prepare\n" "$label"
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-        fail=$((fail + 1))
-        return
-    fi
-    mkdir -p ../.hearth
-    legs="$(mktemp -d "$PWD/../.hearth/validation-legs.XXXXXX")"
-    fk="$FOURTH_SOURCE_FKWU"
-    case "$fk" in /*|[A-Za-z]:*) ;; *) fk="$PWD/$fk" ;; esac
-    ( set +e; cd .. && TMPDIR="$legs" "$fk" "$src" > "$legs/fk" 2> "$legs/fk.err"; printf '%s\n' "$?" > "$legs/fk.rc" )
+    local band="${*: -1}" legs rc diags answered head_pin reg_pin stem why=""
+    fk_workload_root "$@"
+    mkdir -p "$HEARTH"
+    legs="$(mktemp -d "$HEARTH/validation-legs.XXXXXX")"
+    ( set +e; cd .. && TMPDIR="$legs" "$FOURTH_SOURCE_FKWU" "form/$workload_root" > "$legs/fk" 2> "$legs/fk.err"; printf '%s\n' "$?" > "$legs/fk.rc" )
     rc="$(cat "$legs/fk.rc" 2>/dev/null || echo 1)"
     diags="$(fk_diag_count "$legs/fk.err")"
     answered="$(organ_steady "$legs/fk")"
@@ -871,7 +546,6 @@ run_fkwu_lane() {
 
 run_workload() {
     local label="$1"; shift
-    local bin_artifact
     if [[ $binary_mode -eq 0 ]]; then
         local band="${*: -1}" level declared answered
         level="$(fk_band_proof_level "$band")"
@@ -884,12 +558,6 @@ run_workload() {
         fi
         if [[ "$level" == "FOURTH-ARM" ]]; then
             declared="$(fk_band_declared_verdict "$band")"
-            if [[ -z "$FKWU_SRC" ]]; then
-                printf "  ⧗  %-30s  fkwu-only lane — runtime fkwu unavailable; not witnessed this run\n" "$label"
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "staged" > "$SUITE_STATUS_FILE"; fi
-                staged=$((staged + 1))
-                return
-            fi
             if [[ -z "$declared" ]]; then
                 printf "  ✗  %-30s  declares FOURTH-ARM ONLY but pins no Verdict in its head\n" "$label"
                 if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
@@ -902,7 +570,7 @@ run_workload() {
             # AND zero axiom-5 diagnostics on stderr.
             local lane_out lane_diags
             lane_out="$(mktemp "${TMPDIR:-/tmp}/form-fkwu-lane.XXXXXX")"
-            answered="$( (cd .. && ./fkwu "form/$band") 2>"$lane_out" | tail -1 || true)"
+            answered="$( (cd .. && "$FOURTH_SOURCE_FKWU" "form/$band") 2>"$lane_out" | tail -1 || true)"
             lane_diags="$(fk_diag_count "$lane_out")"
             rm -f "$lane_out"
             if [[ "${lane_diags:-0}" -gt 0 ]]; then
@@ -941,11 +609,7 @@ run_workload() {
         fi
     fi
     if [[ $binary_mode -eq 1 ]]; then
-        bin_artifact="$(mktemp "${TMPDIR:-/tmp}/form-kernel.XXXXXX")"
-        prepare_sources "$@"
-        "$GO_BIN" --emit-binary "$bin_artifact" "${prepared_args[@]}"
-        run_siblings_binary "binary/$label" "$bin_artifact"
-        rm -f "$bin_artifact"
+        run_siblings_binary "binary/$label" "$@"
     else
         run_siblings "$label" "$@"
     fi
@@ -961,24 +625,11 @@ staged=0
 
 # --- explicit mode: validate one file list as one workload --------------
 if [[ $# -gt 0 ]]; then
+    # The root names exactly the files typed; fkwu resolves each one's closure.
     explicit_args=("$@")
-    # Band files honor their declared imports like the full stdlib/tests sweep:
-    # every file's chain expands into one list, each dependency once, and the
-    # files follow in the order given (one that is another's dependency is
-    # already in the list).
-    fk_expand_declared_deps "$@"
-    if [[ ${#fk_import_expanded[@]} -gt 0 ]]; then
-        explicit_args=(form-stdlib/core.fk "${fk_import_expanded[@]}")
-        for f in "$@"; do
-            fk_added_contains "$f" || explicit_args+=("$f")
-        done
-    fi
-    # A missing input file is not a kernel divergence. Without this guard the
-    # three walkers each open the absent path and emit a DIFFERENT file-not-found
-    # string while fkwu emits nothing, so the verdict reads "kernels disagree —
-    # investigate which is correct" — a phantom divergence that has cost real
-    # diagnostic effort (running a band by a shortened name when its file
-    # carries a longer one). Name the absent path plainly instead.
+    # A missing input file is not a kernel divergence: name the absent path
+    # plainly (running a band by a shortened name when its file carries a
+    # longer one is the usual cause) instead of failing the band.
     missing=()
     for f in "${explicit_args[@]}"; do
         [[ -f "$f" ]] || missing+=("$f")
@@ -1000,19 +651,14 @@ if [[ $# -gt 0 ]]; then
     done
     run_workload "$label" "${explicit_args[@]}"
 else
-    # Pre-compile the one prelude every band shares so the pool's first
-    # wave doesn't race N copies of the same compile (atomic mv converges
-    # them, but each lost race re-pays the full source-compiler walk).
-    if [[ $SIBLINGS -eq 1 ]]; then prepare_sources form-stdlib/core.fk; fi
-
     # The suite fans out ACROSS bands: each workload is one job in a pool
     # (VALIDATE_JOBS wide, default 8), writing an ordered result block plus
     # a status file; the aggregation prints blocks in collection order and
     # counts from the status files. A band's legs were already concurrent;
     # this makes the bands themselves concurrent — the suite's wall time is
-    # sum(bands)/jobs instead of sum(bands). Caches stay safe under the
-    # fan-out: source-compile and fourth-arm source-run writes are content-keyed
-    # and atomic (mv), every leg owns a private TMPDIR.
+    # sum(bands)/jobs instead of sum(bands). The fan-out shares nothing it
+    # writes: workload roots are content-keyed and land by mv, every band owns
+    # its legs dir and every leg a private TMPDIR.
     SUITE_PAR="${VALIDATE_JOBS:-8}"
     suite_dir="$(mktemp -d "${TMPDIR:-/tmp}/form-suite.XXXXXX")"
     wl_labels=()
@@ -1028,10 +674,10 @@ else
     for f in form-samples/*.fk; do
         add_workload "$(basename "$f")" "$f"
     done
-    # --- form-stdlib/tests/*.{fk,form}: prepend stdlib preludes --------
-    # Convention: core.fk is always prepended. If the test name matches
-    # an additional module (tests/line-grammar.fk → line-grammar.fk), that
-    # module is loaded between core.fk and the test.
+    # --- form-stdlib/tests/*.{fk,form}: core.fk, then the band -----------
+    # fkwu follows each band's own preludes and imports. A band named after a
+    # module (tests/line-grammar.fk → line-grammar.fk) loads that module
+    # between core.fk and the test.
     if [[ -d form-stdlib/tests ]]; then
         for f in form-stdlib/tests/*.fk form-stdlib/tests/*.form; do
             if [[ ! -e "$f" ]]; then
@@ -1040,16 +686,7 @@ else
             base="$(basename "$f")"
             base="${base%.*}"
             module="form-stdlib/${base}.fk"
-            # A test file may declare extra imports via header lines:
-            #   ; import "form-stdlib/engine.fk"
-            # Legacy `; preludes:` headers are still expanded by the same path.
-            # When present, those modules load between core.fk and the test
-            # (in the order declared). The same-name convention still works
-            # — modules referenced by the header replace the auto-prepend.
-            fk_expand_declared_deps "$f"
-            if [[ ${#fk_import_expanded[@]} -gt 0 ]]; then
-                add_workload "stdlib/$(basename "$f")" "form-stdlib/core.fk" "${fk_import_expanded[@]}" "$f"
-            elif [[ -f "$module" && "$module" != "$f" ]]; then
+            if [[ -f "$module" && "$module" != "$f" ]]; then
                 add_workload "stdlib/$(basename "$f")" "form-stdlib/core.fk" "$module" "$f"
             else
                 add_workload "stdlib/$(basename "$f")" "form-stdlib/core.fk" "$f"
@@ -1093,12 +730,14 @@ echo ""
 if [[ $SIBLINGS -eq 0 ]]; then
     echo "  sibling kernels: not asked — no kernel source moved (FORM_VALIDATE_SIBLINGS=1 asks them)"
     echo "  fkwu lane: $fkwu_lane band(s) answered their pins; $unpinned ran clean with no pin to answer"
+elif [[ $binary_mode -eq 1 ]]; then
+    echo "  binary mode: three siblings over Go's artifact of each closure; fkwu walks no root here"
 elif [[ $fourth_ok -gt 0 ]]; then
     echo "  fourth arm: $fourth_ok band(s) four-way (runtime fkwu source/JIT)"
 elif [[ $((ok - fkwu_only)) -gt 0 ]]; then
-    # The SECOND way a zero happens, and the one the fourth_available refusal
-    # above cannot see. That gate asks "is the arm present at all" and exits 1
-    # when it is not. This asks the different question: the arm is present, and
+    # The zero the fourth_available refusal above cannot see. That gate asks
+    # "is the arm present at all" and exits 1 when it is not. This asks the
+    # different question: the arm is present, and
     # fired for NOT ONE band in the run — because coverage is per-band
     # (fourth-arm-bands.txt), so a workload naming only unregistered bands gets
     # a full set of ✓ marks with three kernels behind every one of them. The

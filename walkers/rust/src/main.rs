@@ -32,14 +32,13 @@
 // any encoding en/decode) is Form-native, composed from these three plus
 // str_concat — never a walker native again.
 //
-// CLI parity with the source path: `form-walker-rust a.fk b.fk ...` resolves
-// recursive bare imports, joins the resulting files with '\n', evaluates, and
-// prints the final value's display. `--expr "<src>"` evaluates one expression.
+// CLI: `form-walker-rust a.fk b.fk ...` reads the plain Form files in argv
+// order, joins them with '\n', evaluates, and prints the final value's display.
+// `--expr "<src>"` evaluates one expression.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1221,88 +1220,10 @@ fn run_source(src: &str) -> Value {
     walk(&root, &env)
 }
 
-fn import_path(line: &str) -> Option<&str> {
-    let mut source = line.trim();
-    if let Some(without_semicolon) = source.strip_suffix(';') {
-        source = without_semicolon.trim();
-    }
-    source
-        .strip_prefix("import \"")
-        .and_then(|rest| rest.strip_suffix('"'))
-        .filter(|path| !path.is_empty())
-}
-
-fn resolve_import(owner: &Path, imported: &str) -> Result<PathBuf, String> {
-    let import_path = Path::new(imported);
-    let mut candidates = Vec::new();
-    if import_path.is_absolute() {
-        candidates.push(import_path.to_path_buf());
-    } else {
-        candidates.push(
-            owner
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(import_path),
-        );
-        candidates.push(import_path.to_path_buf());
-        if let Some(stripped) = imported.strip_prefix("form/") {
-            candidates.push(PathBuf::from(stripped));
-        }
-        let mut directory = owner.parent().unwrap_or_else(|| Path::new("."));
-        loop {
-            candidates.push(directory.join(import_path));
-            candidates.push(directory.join("form").join(import_path));
-            let Some(parent) = directory.parent() else {
-                break;
-            };
-            if parent == directory {
-                break;
-            }
-            directory = parent;
-        }
-    }
-    for candidate in candidates {
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "import {:?} from {}: file not found",
-        imported,
-        owner.display()
-    ))
-}
-
-fn load_source_file(
-    path: &Path,
-    seen: &mut HashSet<PathBuf>,
-    parts: &mut Vec<String>,
-) -> Result<(), String> {
-    let canonical =
-        fs::canonicalize(path).map_err(|error| format!("read {}: {}", path.display(), error))?;
-    if !seen.insert(canonical.clone()) {
-        return Ok(());
-    }
-    let source = fs::read_to_string(&canonical)
-        .map_err(|error| format!("read {}: {}", path.display(), error))?;
-    let mut body = Vec::new();
-    for line in source.split('\n') {
-        if let Some(imported) = import_path(line) {
-            let dependency = resolve_import(&canonical, imported)?;
-            load_source_file(&dependency, seen, parts)?;
-        } else {
-            body.push(line);
-        }
-    }
-    parts.push(body.join("\n"));
-    Ok(())
-}
-
-fn load_source_closure(paths: &[String]) -> Result<String, String> {
-    let mut seen = HashSet::new();
+fn read_sources(paths: &[String]) -> Result<String, String> {
     let mut parts = Vec::with_capacity(paths.len());
     for path in paths {
-        load_source_file(Path::new(path), &mut seen, &mut parts)?;
+        parts.push(fs::read_to_string(path).map_err(|error| format!("read {}: {}", path, error))?);
     }
     Ok(parts.join("\n"))
 }
@@ -1321,7 +1242,7 @@ fn main() {
         }
         args[1].clone()
     } else {
-        match load_source_closure(&args) {
+        match read_sources(&args) {
             Ok(source) => source,
             Err(error) => {
                 eprintln!("{}", error);

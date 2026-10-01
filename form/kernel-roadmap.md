@@ -14,14 +14,14 @@ feedback loop, the safety net. It runs the structural gate first, walks
 `form-stdlib/tests/*.fk` with `form-stdlib/core.fk` as prelude, and honors a band's
 `; PROOF LEVEL:` line (a fourth-arm-only band runs on its home arm or reports pending).
 
-Each sibling resolves a band's `; preludes:` directives itself — recursive,
-deduplicated, honoring the `none` sentinel — and lowers a `.bml` prelude in-process
-through `source-compiler.fk`'s compiler chain, keeping each lowering under a key over
-the BML's path and bytes, the compiler's loaded closure and the sibling's own
-executable. So `./validate.sh band.fk` is the whole invocation; no hand-typed closure. A
-section-bearing `.fk` is lowered by `validate.sh`'s source lens before any arm
-reads it; that lowering is the seam a `.fk` carrying `section [form.bml]` still
-needs on the sibling lane, and fkwu reads such a file raw.
+fkwu resolves a band's closure — `; preludes:` (recursive, deduplicated, honoring the
+`none` sentinel), `import` in every spelling, and the names `form-stdlib/home-index.txt`
+lists — and lowers every `.bml` and section-bearing `.fk` in it through its own memo'd
+floor. `./fkwu --closure <unit> <out>`, run from the repo root, writes that closure as
+one plain-Form file. A sibling reads the plain Form files it is handed, in order, and
+nothing else: it follows no directive, opens no index and lowers nothing. So
+`./validate.sh band.fk` is the whole invocation; no hand-typed closure
+([`../docs/kernel-interface.md`](../docs/kernel-interface.md)).
 
 ```bash
 ./validate.sh             # all samples
