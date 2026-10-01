@@ -60,7 +60,8 @@ Every lane below speaks through this door.
   and lands on main.
 - **The day** — launchd runs [`observe/day-turn.bml`](observe/day-turn.bml) at
   12:30 and 19:00 ([`docs/launchd/earth.hati.day-turn.plist`](docs/launchd/earth.hati.day-turn.plist)):
-  one native turn, landed through the movement door.
+  native turns while a gap is open and its window has time, each landed through
+  the movement door.
 - **Lessons** — [`observe/session-pairs-run.bml`](observe/session-pairs-run.bml)
   turns each rented turn into a chat row the native trainer reads;
   [`observe/lora-lift-run.bml`](observe/lora-lift-run.bml) trains a child adapter
@@ -99,15 +100,18 @@ Every lane below speaks through this door.
 
 ## What is still coming home
 
-- **Our reading.** Every one of the 134 draft rows reads `pending`. Learning from
-  what we accept and what we change begins there.
+- **Our reading.** Our readings land beside the drafts in
+  [`receipts/draft-ledger.jsonl`](receipts/draft-ledger.jsonl): accepted, revised
+  or rejected, and most rows still `pending`. A revised reading's note feeds the
+  redraft (`repair` in [`observe/prompt-draft-run.bml`](observe/prompt-draft-run.bml)).
+  Learning from what we accept and what we change grows from there.
 - **Talking speed.** A draft takes minutes; a conversation asks for seconds.
 - **The companion's ear.** The companion answers a line handed to it; no door
   calls it yet, so what the ear hears does not reach it.
-- **The open gap.** The queue holds one gap, `wer-zero-width-joiners`
-  ([`observe/tests/stt-wer-zwnj-band.fk`](observe/tests/stt-wer-zwnj-band.fk),
-  full 15). Its one attempt read 12 → −1; the candidate waits under
-  `.hearth/native-turns`.
+- **The open gaps.** The band-first gaps the lane works are the rows of
+  [`learn/native-turn-queue.jsonl`](learn/native-turn-queue.jsonl), each naming
+  its band; each attempt's candidate waits under `.hearth/native-turns`, and
+  `./fkwu observe/local-flow-review.bml` reads where each gap stands.
 - **The grown generation.** The child adapter stands where its ledger row names
   it; the LoRA lane still wears `llama-3.2-3b-voice`, and serving moves by a
   separate, witnessed decision. No schedule runs the lessons doors yet.
@@ -130,6 +134,15 @@ Form's context and tools through the
 ([`form/form-stdlib/bml/form-cli-enrich.bml`](form/form-stdlib/bml/form-cli-enrich.bml)).
 Each answer is attributed to what produced it, and each path keeps its own
 evidence.
+
+Each rented session opens and closes with the same review,
+`./fkwu observe/local-flow-review.bml`, and closes by measuring itself through
+`observe/session-rent-run.bml`. The highest goal is the local end-to-end success
+rate and its quality: local tokens carry no penalty and are welcome to grow, a
+remote review of locally done work is free, a remote guide stays light and comes
+only after the local guide has failed more than once, and the remote tokens that
+do the work go to zero
+([`docs/rent-to-zero-goal.form`](docs/rent-to-zero-goal.form)).
 
 ---
 

@@ -36,7 +36,12 @@ sits. Where the body is going lives in [`NORTH_STAR.md`](NORTH_STAR.md); what st
 - Private tissue: memory, lineage, partner and personal context.
 
 This repo is **public-able by construction**: there is no private part to excise. That serves the "commons no one
-owns" north star directly.
+owns" north star directly. The person's places are read, never spelled: `hearth-home-root` (the main worktree,
+from this checkout's own `.git`) and `hearth-person-home` (`HEARTH_PERSON_HOME` in the untracked `fkwu.conf`,
+nothing when unset) in `form/form-stdlib/hearth.bml`. Organs that still spell the person's home directory are the
+open part of this: `git grep -l` for it over `*.bml` and `*.fk`, outside `receipts/` and the distillation corpus, read
+12 on 2026-10-01 (the model registry, a tokenizer, the ask-lane router, voice, ear and glass organs, three bands
+and `learn/train-loop-local-paths.fk`), and they move onto those rows.
 
 ## Architecture
 
@@ -165,7 +170,9 @@ cell drives the device and the device agrees with Form's own arithmetic.
 - **`ingest/`** — judged trust, satsang-transmute, and the name → build → observe loop.
 - **`plugin/`** — the rented-mind door: the body offered over fkwu-native HTTP — `/ask` grounded and attuned,
   `/trace` handing over any cell's change graph. The public door is `hati.earth/sema`.
-- **`host/launchd/`** — the rows by which this Mac starts the body's own walks, with `fkwu` as the program.
+- **`docs/launchd/`** — the rows by which this Mac starts the body's own walks, with `fkwu` as the program: the
+  night (`observe/scheduled-walk.bml`, 03:30) and the day (`observe/day-turn.bml`, 12:30 and 19:00), both from the
+  walk checkout. `host/launchd/` still holds a second 03:30 row, `observe/movement-run.bml` in the live checkout.
 - **Hati-OS** — the fourth kernel's walker, emitter and host-target catalog (`form/form-stdlib/hati-os-kernel.fk`,
   `hati-os-kernel-emit.fk`, `hati-os-targets.fk`).
 - **`Sema Ear.app`** — the Mac launcher for the ear; `Sema Ear Glass.command` opens the live ear glass

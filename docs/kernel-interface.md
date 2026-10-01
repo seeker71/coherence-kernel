@@ -42,8 +42,9 @@ add_u32 bnot_u32 method_define method_has method_invoke recipe_to_bytes
 bytes_to_recipe`) stays native until a warm BML home matches it; then it becomes one
 `home-index.txt` row. Everything else lives in a Form or BML home that fkwu links by
 name and hands the siblings inside the closure. A sibling native that shadows a home
-(`char_at ord int_to_str str_to_int sum abs range intern_node_at bp …`) is released,
-so every kernel runs the body's own meaning.
+(`char_at ord int_to_str str_to_int sum abs range intern_node_at …`) is released,
+so every kernel runs the body's own meaning. `bp` is the one shadow still native on
+Go, Rust and TS (law 10).
 
 ### Laws the core pins
 
@@ -60,7 +61,22 @@ so every kernel runs the body's own meaning.
 9. A value renders one way everywhere (`value_str`), records included.
 10. `bp` has one meaning: the BML resolution in `form-ontology-bp.fk`.
 
-Laws 2–4 stand in fkwu; the rest are where the kernels are going.
+One prelude-free probe, each row under `attempt`, read on all four arms (2026-10-01):
+
+| law | Go, Rust, TS | fkwu |
+|---|---|---|
+| 1, 3, 4 | hold | holds |
+| 2 | holds | holds cold; once the JIT has taken the defn (20000 calls), `div` by zero answers 0 |
+| 5 | holds | `mod 1e19 3.0` answers -512, `mod 7.5 0.0` answers 7.5 (siblings: 1, NaN) |
+| 6 | holds | NaN answers 0, `1e300` answers -1, `"x"` answers a raw word |
+| 7 | holds | `"0x10"` reads 16, `"inf"` Infinity, `"nan"` NaN |
+| 8 | holds | `str_byte_at` holds; `str_find` on an int answers -1 |
+| 9 | `value_str` holds; `print` of a record: Go `<record @0 #0fields>`, Rust and TS `<record>` | `value_str` holds; `print` of a record answers its raw word |
+| 10 | a native `bp` answers a NodeID, and an unknown name stops | tag 45 answers its own argument, a string |
+
+On every arm `print` renders a `nothing` inside a list as `nothing`, and `value_str` renders it as
+`null`. No arm runs the BML `bp` in `form-ontology-bp.fk`, so law 10 holds nowhere. No band pins laws
+5–10 yet; where the kernels are going is one four-way law band that does.
 
 ## Host doors
 
@@ -101,33 +117,48 @@ Raw descriptors never cross into Form. Children are reaped by the kernel, and
 
 ## Vitality
 
-Every host door call is timed (`mono-ns` before and after) and counted per verb on the
-live page: calls, nothings, bytes in and out, open handles, and a log2 *dwell*
-histogram (time spent in the world before the body moves again). Every flow stage
-speaks an open and a close (`organ-frame-v1` with `phase`, `pid` and a `key` that
-hashes the stage's public arguments, never their content) into an event ring other
-kernels can read.
+**The ring.** Every kernel on the host appends its stage opens and closes to one
+shared-memory ring, `/fg-bus1` (`runtime/fkwu-uni.c`, the stage bus: 65536 slots and an
+interned name table). `float_leaf` 29 opens a stage and 30 closes it; 31 reads rows from
+a cursor and 32 answers the text of an interned id. A row is 13 ints: `idx pid t_us
+stage key phase depth link dur outcome amount body digest`. Phase 1 opens, 2 closes, 3
+closes unwound and 4 says the stage died; a close's link is its open.
 
-One vitality fold, run by `observe/body-vitals-live.fk`, keeps per stage key a count,
-the open set, a log2 histogram of elapsed time and a learned p95, and finds:
+**The fold.** `form/form-stdlib/bml/stage-vitality.bml` folds the rows without calling a
+door. Each stage key learns its own bound (its p95, then the stage's, from a log2
+histogram), and the fold finds seven kinds: **overstay** (an open past its bound),
+**stall**, **died**, **lockstep** (one stage and key open in several pids of one body),
+**contention** (the same across bodies), **retread** (the same close again with nothing
+differing between) and **loop** (a period repeated whole in one pid). Each finding's
+stake, in microseconds of body time, accrues to its organ (the stage name's prefix
+before `.`). An organ's wane is that stake per second over the window, and the highest
+wane is the body's need.
 
-- **overstay** — an open stage older than its own p95;
-- **recurrence** — the same key and outcome three or more times with nothing changed
-  between;
-- **loop** — two whole copies of one period in a flow's stage sequence;
-- **lockstep** — one stage and key open in several kernels at once.
+**The door.** `./fkwu observe/fb-findings-run.bml </dev/null` prints the bus reading,
+the ranked findings, the organs by wane and the coverage (pids that spoke / pids alive),
+and answers `need=<organ> <wane>ms/s <finding> <stage> <key>`, or `need=none`.
+`form/form-stdlib/tests/stage-vitality-band.bml` witnesses the fold and
+`form/form-stdlib/tests/fb-bus-band.fk` the ring.
 
-The glass ranks findings by volume × departure and draws each as a rate sparkline, a
-histogram strip with p50/p95 ticks and an open-age bar, so attention goes where the
-body is waiting rather than working.
+No flow speaks on the ring yet: outside `fb-bus-band.fk` nothing calls `float_leaf` 29
+or 30, so the door reads silence as `need=none` (coverage 0/17 on 2026-10-01). The
+glass view of the findings (`stv-glass-row`, `stv-rows`) has no caller.
+
+`observe/body-vitals-live.fk` is a different watch: it folds each glass surface's
+stamps into that surface's own rhythm and publishes the `vitals` frame.
 
 ## Order
 
 1. Release kernel-side lowering; siblings read fkwu's closure. *(stands)*
 2. fkwu defects that broke a law: `math_sqrt`, order and divide-by-zero stops,
    `kernel_stat`'s unknown key. *(stands)*
-3. The event ring on the live page, open/close phases, the vitality fold and its view.
-4. Release sibling natives that shadow homes or have no caller; one op table
-   generates every name list.
-5. The host door table with dwell; migrate callers family by family; release the
-   off-table names.
+3. The stage ring, its phases, the vitality fold and its text door. *(stand)* Flows
+   that speak on the ring and the glass view of the findings are open.
+4. Release sibling natives that shadow homes or have no caller *(stands, except
+   `bp`)*; one op table generates every name list.
+5. The host door table; migrate callers family by family; release the off-table
+   names. Every door call timed and counted per verb on the live page (calls,
+   nothings, bytes in and out, open handles, a log2 *dwell* histogram of time spent in
+   the world) is not built yet.
+6. One four-way law band pinning laws 1–10; fkwu brought to law 2 on its JIT path
+   and to laws 5–8, `print` to law 9 on fkwu and Go, and every arm to law 10.

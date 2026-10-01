@@ -1,6 +1,6 @@
 # form-samples
 
-Real `.fk` source files in Form's S-expression bootstrap syntax. The Go, Rust, and TypeScript kernels ([`../form-kernel-go/`](../form-kernel-go/), [`../form-kernel-rust/`](../form-kernel-rust/), and [`../form-kernel-ts/`](../form-kernel-ts/)) read these files end-to-end and produce identical results.
+Real `.fk` source files in Form's S-expression bootstrap syntax. `fkwu`, the runtime, and the Go, Rust, and TypeScript proof siblings ([`../form-kernel-go/`](../form-kernel-go/), [`../form-kernel-rust/`](../form-kernel-rust/), and [`../form-kernel-ts/`](../form-kernel-ts/)) read these files end-to-end and produce identical results.
 
 | Sample | What it exercises | Expected output |
 |---|---|---|
@@ -10,10 +10,12 @@ Real `.fk` source files in Form's S-expression bootstrap syntax. The Go, Rust, a
 | [`float-artifact-roundtrip.fk`](float-artifact-roundtrip.fk) | A float survives the `.fkb` wire format, bare and nested in a composite recipe | `0.8125` |
 
 ```bash
-# Run any sample through a sibling kernel
-./form-kernel-go      form-samples/fact.fk   # → 3628800
-./form-kernel-rust    form-samples/fact.fk   # → 3628800
-npx --yes tsx form-kernel-ts/src/main.ts form-samples/fact.fk
+# From form/: the three siblings, once built
+./form-kernel-go/bin-go                            form-samples/fact.fk   # → 3628800
+./form-kernel-rust/target/release/form-kernel-rust form-samples/fact.fk   # → 3628800
+node form-kernel-ts/dist/main.mjs                  form-samples/fact.fk   # → 3628800
+# From the repo root: the runtime
+./fkwu form/form-samples/fact.fk                                          # → 3628800
 ```
 
 ## S-expression verb vocabulary (bootstrap)
@@ -32,7 +34,7 @@ The kernels read S-expression syntax that maps directly onto substrate recipes:
 | `(defn <name> (params...) <body>)` | FNDEF | |
 | `(<name> <args>...)` | FNCALL | shorthand for both user fns and natives |
 
-Natives (a present native answers `(<name> ...)` on every kernel; a same-named `defn` stands in only where the native is absent): `print`, `list`, `cons`, `head`, `tail`, `len`, `nth`, `empty`, `str_len`, `substring`, `char_at`, `str_concat`, `str_eq`, `int_to_str`, `str_to_int`, `ord`, `read_file`, `read_file_bytes`.
+A native answers `(<name> ...)` on every kernel: the pure core in [`../../docs/kernel-interface.md`](../../docs/kernel-interface.md) (`list`, `cons`, `head`, `tail`, `len`, `nth`, `empty`, `str_len`, `str_concat`, `str_eq`, ...), measured natives such as `substring`, and doors such as `print`, `read_file` and `read_file_bytes`. `char_at`, `int_to_str`, `str_to_int` and `ord` are not natives: they live in `form-stdlib/core.fk`, and a file that calls them names it with `; preludes: form-stdlib/core.fk`.
 
 Binary fixtures live alongside the `.fk` samples: [`tiny.png`](tiny.png) is a 45-byte 1x1 PNG (signature + IHDR + IEND) that exercises `read_file_bytes`.
 

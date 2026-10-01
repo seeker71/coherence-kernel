@@ -25,13 +25,14 @@ below one quarter of the target doubles it; otherwise it continues. Actual GC
 activity requests attention, but only measured delay requests smaller slices.
 The continuation survives each choice. There is no aggregate duration timeout.
 
-Each decode prints its actual `formbin-depth-*.jsonl` evidence path to stderr.
-Every slice row carries cursor, node count, current/peak depth, native PID, native
-slice milliseconds, carrier elapsed time, control microseconds, offered and
-selected actions, next quantum/watermark, and whether the action was applied.
-An initial lifecycle row makes startup visible before admission. The first slice
-includes setup and temporary-input preparation time; a final lifecycle row
-records completion or the actual error. The framebuffer exchange correlates the
+A decode that does not complete keeps its `formbin-depth-*.jsonl` trace and names
+it on stderr; a completed decode removes it. Every slice row carries cursor, node
+count, current/peak depth, native PID, native slice milliseconds, carrier elapsed
+time, control microseconds, offered and selected actions, next quantum/watermark,
+and whether the action was applied. An initial lifecycle row makes startup visible
+before admission. The first slice includes setup and temporary-input preparation
+time; the kept trace ends with a lifecycle row naming the error, or `interrupted`
+when the decode stopped without one. The framebuffer exchange correlates the
 outgoing observation with native control; JSON rows retain every round even when
 attributed framebuffer nodes share an identity.
 

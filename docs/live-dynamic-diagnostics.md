@@ -266,10 +266,11 @@ door decision rather than by source bytes, and the only witness was a static
 conf toggle printing to stderr — unreadable by the program and uncorrelatable
 in a diagnostic window. When a run surprises, put `(kernel_stat 15)` through
 `(kernel_stat 18)` into the outbound payload before bisecting bytes.
-`observe/tests/import-carry-band.fk` is the regression band for this pulse: 63
-through the import-lane door cold and the cached door warm (re-run 2026-09-04; it
-prints its verdict and then the `.bml` floor's trailing `0`, so read the first
-line, not the last).
+`observe/tests/import-carry-band.fk` is the regression band for this pulse. It
+prints one line: 63 through the import-lane door cold and the cached door warm.
+The first run after a different fkwu build wrote the fixture unit's image reads
+15: stderr names the foreign `.fkb`, the import lane steps aside, and bits 16 and
+32 (the pulse) do not hold. The next run reads 63 (both re-run 2026-10-01).
 
 ## Integration pattern
 

@@ -1,7 +1,8 @@
 # Current Floor
 
 What stands in this body today, read on 2026-09-29 (WITA) on this Apple M4 Max through `./fkwu`, the
-binary passing its freshness band. Every line names the command that reads it. A verdict counts only
+binary passing its freshness band; the lines that had moved were re-read on 2026-10-01 and say so. Every
+line names the command that reads it. A verdict counts only
 when the process also exits 0 — a green number over a nonzero exit is a fold over `nothing`. Bands ran
 on the warm images beside their sources while sibling sessions loaded the host, so no timing on this
 page was taken today; a number that comes from an earlier run names its receipt.
@@ -24,15 +25,14 @@ appear beside each source on its first run, and `form/build-form-cli.sh` regener
 ./fkwu form/form-stdlib/tests/binary-freshness-band.fk    -> 31
 ./fkwu bootstrap/ground-numeric-list.fk                   -> [1, 2.5, [3, 4]]
 ./fkwu form/form-stdlib/tests/native-vs-rented-band.fk    -> 11111
-./fkwu proof/four-way-run-recipe42.fk                     -> 2   (WALKER-SUSPECT: walkers unbuilt)
+./fkwu proof/four-way-run-recipe42.fk                     -> 0 FOUR-WAY with the walkers built, 2 WALKER-SUSPECT while they are not
 ```
 
 The four-way cell host-execs the three minimal proof walkers, which `walkers/README.md`'s own lines
-build; on this checkout they are unbuilt, so it answers 2 (WALKER-SUSPECT), and FOUR-WAY (0) waits on
-them.
+build; a fresh checkout holds them unbuilt and reads 2 (re-run 2026-10-01 on such a checkout).
 
-`runtime/fkwu-uni.c` is 25,556 lines (`wc -l`), last changed 2026-09-28 (`git log -1`). It is the
-seed, and it shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R51–R56).
+`runtime/fkwu-uni.c` is the seed (`wc -l` and `git log -1` read its size and its last change), and it
+shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R51–R56).
 
 ## Body-wide witnesses
 
@@ -42,10 +42,10 @@ seed, and it shrinks as its lanes lower into Form organs (`release-ledger.bml` R
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> docs=35 claims=684 broken=0 (each broken claim named on its own line)
+./fkwu observe/door-link-health-run.bml  -> docs=35 claims=709 broken=0 (each broken claim named on its own line; 2026-10-01)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/belief-stamps.bml         -> 75068002  (field stamped*10^6 + owed*10^3 + laws)
+./fkwu observe/belief-stamps.bml         -> 74069000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
 observe/tests/belief-rewitness-band      -> 63
 ./fkwu form/form-stdlib/release-ledger.bml -> open=26 moving=0, then 26000000
 learn/tests/homecoming-distillation-corpus-band -> 32767
@@ -53,8 +53,11 @@ value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
 pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · offer-ack-core-band 32767
-control/tests/attempt-band 4095 · file-bytes-band 127 · form-bml-cursor-full-band 105  (each four-way)
+control/tests/attempt-band 4095 · file-bytes-band 127   (no PROOF LEVEL line: four-way when the siblings run)
+form-bml-cursor-full-band 105   (FOURTH-ARM ONLY)
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
+form/form-stdlib/tests/primitive-registry-band.fk 47   (2026-10-01, rc 0)
+form/form-stdlib/tests/form-agent-tools-band.bml 524287 (2026-10-01: the resident agent tools over their JSON wire)
 ```
 
 Every tracked cell's `witnessed:` stamp is read into the belief lens, oldest first; the re-witness door
@@ -66,8 +69,8 @@ lapse. The release ledger's open rows are the body's named work, each with its w
 A unit lowers by what it carries: any file with a `section [` block — `form.bml`, `form.lift`,
 `form.action`, `form.route`, the `*.bmf` grammar dialects — travels through `bml-floor-compile`
 whatever its extension, as a prelude or as the main file, and fkwu keeps the `.lowfk`/`.fkb` cache
-beside it. Of 520 tracked `.bml` files, 453 carry a `section [form.bml]` block and three carry
-`section [form.lift]` (`git ls-files`, `git grep -l`). `true` and `false` are literals in the
+beside it. Of 529 tracked `.bml` files, 463 carry a `section [form.bml]` block and three carry
+`section [form.lift]` (`git ls-files`, `command grep -a -l`; 2026-10-01). `true` and `false` are literals in the
 dialect, and a nested `defn` is a registered function (the two nested-defn bands below).
 
 The cursor (`grammars/form-bml.fk`, lowered by `form-bml-lower.fk`) is the compiler's one reader of a
@@ -76,12 +79,16 @@ refusals all come through it. It reads a section whole, with direct backtracking
 the compiler's own constructors, so a def lowers to the very node its flat Form spelling builds:
 
 ```text
-./fkwu observe/bml-cursor-coverage-run.bml -> files=1358 sections=990 read=990 stops=0 refused=0
-                                              (990 = every `^section [form.bml|route|action]` line in tracked
-                                              `.bml` and `.fk` files, `git grep -h`; cursor-ms=59064)
+./fkwu observe/bml-cursor-coverage-run.bml -> files=1372 sections=1017 read=1017 stops=0 refused=0
+                                              (1017 = every `^section [form.bml|route|action]` line in tracked
+                                              `.bml` and `.fk` files; 2026-10-01)
                                               a section it refuses is named by line, word and wanted rule
-form-bml-cursor-full-band 105 · bmf-prefix-state-band 4194303 · form-bml-prefix-choice-band 4194303
+form-bml-cursor-full-band 105
 ```
+
+The five grammar packs (`form/form-stdlib/grammars/{go,prolog,python,rust,typescript}-bmf.fk`) carry their
+`import` lines above their `section [form.bml]`: the cursor reads `import` as a top-level statement,
+never inside a section.
 
 ```text
 bml-band 268435455 · bml-generics-band 16777215 · native-route-goal-cells-band.bml 1048575
@@ -90,7 +97,7 @@ bml-float-literal-band 2047 · bml-form-size-band 127 · cell-channel-band 4095
 json-codec-bml-band 8191 · kernel-http-band 536965066 · channel-flow-band 8388607
 circle-band 1048575 · static-to-dynamic-cells-band 262143 · bml-capability-ledger-band 255
 form-pe-coff-band 16383 · learn/tests/choice-receipt-band.bml 4294967295
-language-packs-fourth-band 31 · bml-bmf-control-curriculum-band 1048575
+language-packs-fourth-band 31 (2026-10-01) · bml-bmf-control-curriculum-band 1048575
 bml-bmf-stream-curriculum-band 16777215 · form-cli-lens-mint-band 1023
 ```
 
@@ -100,7 +107,7 @@ original lowered tree before publication, preserving nested scope and literal
 bytes. Existing BML is scanned through the BMF cursor and expression grammar;
 surface-only migrations can compare exact recipes before imported type resolution.
 Its contract witness is `form/form-stdlib/tests/form-source-lift-band.bml`
-(24 accepted cases, 3 declined shadowing/binding changes, preserved comparison metadata). [Native coding](docs/form-native-coding.md#native-surface-lifting)
+(35 accepted cases, 3 declined shadowing/binding changes, preserved comparison metadata; 2026-10-01). [Native coding](docs/form-native-coding.md#native-surface-lifting)
 describes the callable surface and its scope.
 
 ## The mind and its voice
@@ -108,9 +115,10 @@ describes the callable surface and its scope.
 The voice speaks on this Mac's own metal: Qwen3.8-27B Q8_0 walked as Form recipe-data in the fkwu
 session, every Metal pipeline Form-emitted and JIT-compiled at runtime, the geometry read from the
 sealed GGUF header. The body takes engineering turns on its own through
-`observe/native-turn-run.bml`, begun by the host schedule (launchd), and each turn writes one row to
-`receipts/native-turn-ledger.jsonl`: today it holds **9 turns, 2026-09-25 17:01 to 2026-09-28 04:42
-WITA, 8 of them at `rented_mind` 0 and 3 with their band gone green** (`wc -l`, `grep -c`).
+`observe/native-turn-run.bml`, begun by launchd or by a session as each row's `coordinated_by` records,
+and each option writes one row to `receipts/native-turn-ledger.jsonl`. `./fkwu
+observe/local-flow-review.bml` reads that ledger live: the options, the gaps gone green and the gaps
+still open.
 
 The resident (`observe/form-cli-peer-contribution-live.fk`, the hearth) is one Form/Qwen/KV peer that
 takes tasks from an append spool and returns length-safe durable results; it rests on its fifo bell
@@ -283,20 +291,12 @@ blueprint-authority-band 65535
 
 What answered red, died, or was not witnessed today, so no one leans on it:
 
-- `form/form-stdlib/tests/primitive-registry-band.fk` stops rc 1 in `sum-onto`: the registry names
-  the Go sibling's native surface, and 84 of its calls (`field_*`, `substrate_*`, `register_jit`,
-  `string_bytes`, `pow`, `min`, `max`, ...) have no binding on fkwu, so its compile carries 84
-  unresolved-call errors and the first recovered `nothing` meets arithmetic. Measured probe by probe
-  on fkwu, of 169 lane-1 rows 115 answer their declared outside, 41 answer another value and 13 answer
-  `nothing`; `validate.sh` counts the 84 compile errors as diagnostics, so a total `prim-verified?`
-  alone would not turn it green. It waits on a registry
-  grounded in fkwu's own op table (`runtime/fkwu-optable.h` and `core.fk`), or on a sibling-home lane
-  in `form/validate.sh` for a band whose surface only the siblings carry.
-- `form-cli-allowance-band`, `form-cli-live-band` and `native-tensor-lifecycle-band` stop at
-  compile: their preludes carry `section [form.lift]`, which `fsc-compile-section-recipe`
-  (`form/form-stdlib/source-compiler.fk`) does not dispatch; only the override in
-  `form/form-stdlib/form-bml-lower.fk` does. Preluding `form-bml-lower.fk` into the lowering lane, or
-  a `form.lift` arm in `fsc-compile-section-recipe`, is the way home.
+- The queue's two open gaps read red until the local lane writes their definitions:
+  `closure-lines-band` 28 rc 1 and `sort-band` 0 rc 1, each pinned `; Verdict 31` (2026-10-01; their
+  compiles name `cl-unit-at` and `sort-ints` as unresolved).
+- `form-cli-allowance-band`, `form-cli-live-band` and `native-tensor-lifecycle-band` compile
+  (`./fkwu --check`, rc 0, 2026-10-01): their `section [form.lift]` preludes now lower. Each reaches
+  the Metal door, so their verdicts (pinned 2047, 255 and 1023) wait on a GPU the voice is not holding.
 - BML `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111; R78). The lowering's other
   open row stands in the ledger: R96 (lowering time grows with one form's argument count).
 - Windows: the seed's `_WIN32` branch carries its own spawn and wait twins (`fk_win_spawn`,
