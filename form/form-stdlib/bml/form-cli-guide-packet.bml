@@ -28,6 +28,7 @@
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/bml/form-agent-json-query.bml;
 import form-stdlib/meaning-codes.bml;
+import form-stdlib/string-case.fk;
 section [form.bml] {
  class FormCliGuidePacket {
   // ── instruments ──
@@ -121,10 +122,42 @@ section [form.bml] {
   }
   def fcgp-packet(gap, rows, question) = fcgp-packet-at(fcgp-dir(), gap, rows, question, now_unix_ms());
   // ── admission: the answer is feedback or a pointing, never documents ──
-  def fcgp-document-keys() = ["documents", "edits", "candidate", "files", "patch", "diff"];
-  def fcgp-writing-tools() = ["edit", "write", "apply_patch"];
-  def fcgp-carries-documents?(obj) = any?(k => fcgp-present?(obj, k), fcgp-document-keys()) || fcgp-member?(fcgp-writing-tools(), fcgp-str(obj, "tool"));
-  def fcgp-reply-object(t) = if fcgp-object-line?(t) then parse-json("guide-reply", t) else nothing();
+  // A reply carries documents when any JSON value in it holds a document key or names a writing tool, case
+  // folded: the whole reply, a fenced block, an array, or an object nested anywhere inside one. A unified diff
+  // (a '+++ ' line followed by an '@@' line) or a patch envelope carries documents with no JSON at all.
+  def fcgp-document-keys() = ["documents", "edits", "candidate", "files", "patch", "diff", "old_string", "new_string"];
+  def fcgp-writing-tools() = ["edit", "write", "multiedit", "notebookedit", "apply_patch"];
+  def fcgp-tool-keys() = ["tool", "name", "tool_name"];
+  def fcgp-writing-tool?(obj) = any?(k => fcgp-member?(fcgp-writing-tools(), str-lower(fcgp-str(obj, k))), fcgp-tool-keys());
+  def fcgp-carries-documents?(obj) = any?(k => fcgp-present?(obj, k), fcgp-document-keys()) || fcgp-writing-tool?(obj);
+  def fcgp-object?(n) = node_eq(node_category(n), JSON-OBJECT());
+  def fcgp-array?(n) = node_eq(node_category(n), JSON-ARRAY());
+  def fcgp-node-carries?(n) = if fcgp-object?(n) then (fcgp-carries-documents?(n) || any?(p => fcgp-node-carries?(json-pair-value(p)), json-object-pairs(n))) else if fcgp-array?(n) then any?(e => fcgp-node-carries?(e), json-array-elements(n)) else false;
+  // every JSON value the reply holds: each balanced {..} or [..] span that parses, read left to right; a
+  // span that does not parse is passed by one byte, so prose braces never hide the JSON after them
+  def fcgp-open-at(t, i) {
+   let a = str_find(t, "{", i);
+   let b = str_find(t, "[", i);
+   if (a < 0) then b else if (b < 0) then a else min2(a, b);
+  }
+  def fcgp-span-end(t, i, depth, quoted) = if (i >= len(t)) then (0 - 1) else fcgp-span-byte(t, i, depth, quoted, str_byte_at(t, i));
+  def fcgp-span-byte(t, i, depth, quoted, b) = if quoted then fcgp-span-end(t, (i + (if ((Comparable) b == 92) then 2 else 1)), depth, !((Comparable) b == 34)) else if ((Comparable) b == 34) then fcgp-span-end(t, (i + 1), depth, true) else if (((Comparable) b == 123) || ((Comparable) b == 91)) then fcgp-span-end(t, (i + 1), (depth + 1), false) else if (((Comparable) b == 125) || ((Comparable) b == 93)) then (if (depth <= 1) then (i + 1) else fcgp-span-end(t, (i + 1), (depth - 1), false)) else fcgp-span-end(t, (i + 1), depth, false);
+  def fcgp-values(t, i, acc) {
+   let o = fcgp-open-at(t, i);
+   if (o < 0) then reverse(acc) else fcgp-values-span(t, o, fcgp-span-end(t, o, 0, false), acc);
+  }
+  def fcgp-values-span(t, o, e, acc) = if ((e > o) && faj-valid(substring(t, o, e))) then fcgp-values(t, e, cons(parse-json("guide-reply", substring(t, o, e)), acc)) else fcgp-values(t, (o + 1), acc);
+  def fcgp-starts?(s, mark) = (Comparable) str_find(s, mark, 0) == 0;
+  def fcgp-diff-in?(lines) = if (nil?(lines) || nil?(lines[1:])) then false else if (fcgp-starts?(trim(lines[0]), "+++ ") && fcgp-starts?(trim(lines[1]), "@@")) then true else fcgp-diff-in?(lines[1:]);
+  def fcgp-patch?(t) = fcgp-diff-in?(split-on(t, "\n")) || (str_find(t, "*** Begin Patch", 0) >= 0);
+  def fcgp-reply-carries?(t) = fcgp-patch?(t) || any?(n => fcgp-node-carries?(n), fcgp-values(t, 0, []));
+  // the reply's own object: the whole reply, or the one fenced block the reply is, when that is an object
+  def fcgp-after-line(s) {
+   let nl = str_find(s, "\n", 0);
+   if (nl < 0) then s else substring(s, (nl + 1), len(s));
+  }
+  def fcgp-unfenced(t) = if (fcgp-starts?(t, "```") && (len(t) >= 6) && ((String) substring(t, (len(t) - 3), len(t)) == "```")) then trim(fcgp-after-line(substring(t, 3, (len(t) - 3)))) else t;
+  def fcgp-reply-object(t) = if fcgp-object-line?(fcgp-unfenced(t)) then parse-json("guide-reply", fcgp-unfenced(t)) else nothing();
   def fcgp-answer-kind(obj) = if nothing?(obj) then "feedback" else if fcgp-present?(obj, "pointing") then "pointing" else "feedback";
   def fcgp-answer-text(obj, t) = if nothing?(obj) then t else if fcgp-present?(obj, "pointing") then fcgp-str(obj, "pointing") else fcgp-str(obj, "feedback");
   def fcgp-verdict(status, reason, kind, id, text) = json-node-object([fhn-s("status", status), fhn-s("reason", reason), fhn-s("kind", kind), json-node-pair("feedback", if ((String) status == "admitted") then json-node-object([fhn-s("id", id), fhn-s("text", text)]) else json-node-null())]);
@@ -132,7 +165,7 @@ section [form.bml] {
    let t = trim(reply);
    let obj = fcgp-reply-object(t);
    let text = trim(fcgp-answer-text(obj, t));
-   if ((!nothing?(obj)) && fcgp-carries-documents?(obj)) then fcgp-verdict("refused", "guide-carried-documents", "", id, "") else if ((Comparable) len(text) == 0) then fcgp-verdict("refused", "guide-answer-empty", "", id, "") else fcgp-verdict("admitted", "", fcgp-answer-kind(obj), id, text);
+   if fcgp-reply-carries?(t) then fcgp-verdict("refused", "guide-carried-documents", "", id, "") else if ((Comparable) len(text) == 0) then fcgp-verdict("refused", "guide-answer-empty", "", id, "") else fcgp-verdict("admitted", "", fcgp-answer-kind(obj), id, text);
   }
   // ── guide-carried-code: a run of the reply longer than N bytes inside the candidate's added lines ──
   def fcgp-plus-line?(line) = if ((Comparable) len(line) == 0) then false else (((Comparable) str_byte_at(line, 0) == 43) && (!((Comparable) str_find(line, "+++ ", 0) == 0)));
@@ -146,13 +179,17 @@ section [form.bml] {
   def fcgp-review-row(gap, option, session, reviewer, verdict, tokens) = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", gap), fcgp-maybe("option", option), fhn-s("session", session), fhn-s("reviewer", reviewer), fhn-s("verdict", verdict), fcgp-maybe("tokens", tokens), fhn-s("remote_dependence", "optional-review")]);
   def fcgp-record(path, row) = fhn-append(path, json-emit(row) + "\n");
   // ── remote dependence: the strongest the rows and ledgers witness; "" when nothing says ──
+  // A rung whose dependence is unknown may hide anything below required-work, so only required-work is
+  // named over it; anything weaker reads "".
   def fcgp-rank(d) = if ((String) d == "required-work") then 4 else if ((String) d == "required-guide") then 3 else if ((String) d == "optional-review") then 2 else if ((String) d == "none") then 1 else 0;
   def fcgp-word(rank) = if (rank == 4) then "required-work" else if (rank == 3) then "required-guide" else if (rank == 2) then "optional-review" else if (rank == 1) then "none" else "";
   def fcgp-dependence(rows, guides, reviews) {
    let fromRows = foldl((acc, r) => max2(acc, fcgp-rank(fcgp-str(r, "remote_dependence"))), 0, rows);
+   let unknown = any?(r => (Comparable) fcgp-rank(fcgp-str(r, "remote_dependence")) == 0, rows);
    let fromGuides = if any?(g => (Comparable) (fcgp-num(g, "guide_carried_code") ?? 0) == 1, guides) then 4 else if nil?(guides) then 0 else 3;
    let fromReviews = if nil?(reviews) then 0 else 2;
-   fcgp-word(max2(fromRows, max2(fromGuides, fromReviews)));
+   let best = max2(fromRows, max2(fromGuides, fromReviews));
+   if (unknown && (best < 4)) then "" else fcgp-word(best);
   }
   // ── the columns ──
   // the remote tokens a rung's work required: its own reading, else zero by construction when its chain
