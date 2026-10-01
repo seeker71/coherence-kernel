@@ -1,5 +1,10 @@
 # Qwen coding inside Form
 
+Native substrate lookup, retrieval, calculation and executable recipes lead
+the task flow. An observed native answer takes precedence over model prose;
+local models contribute where the substrate does not yet carry the task.
+Form's choices, care, checkpoints, original checks and release own both paths.
+
 `code` edits caller-supplied source values through local Qwen and Form tools. Token IDs, KV state and tool observations remain in the native process; filesystem loading/publication belongs to the caller and telemetry uses shared memory. The controller offers no model-selected shell, network or provider call. Metal is admitted dynamically. Source bootstrap still lowers cold BML through a native compiler process; warm images reuse that work.
 
 The north star is compact, behavior-preserving native refactoring with retained context, reusable compiled abstractions and locally verified learning. `form-lift.bml` supplies the current engineering guidance at BML admission: lexical lambdas, stdlib reuse, named domain values, explicit ownership and live observations. Classes group APIs; templates describe parameters and members, without implying instance accessors, interface checking or specialization. See [BML admission](native-bml-admission.md#local-lift).
@@ -152,7 +157,13 @@ Closing the last task runs source checks before review; acceptance with a nonemp
 
 `reasoning_tokens` plus `reasoning_answer_tokens` applies that flow to every reply. Before generation, Form reserves the current final-stage task handoff as well as both allowances. Only complete final output reaches tools/checks. Reasoning and partial output stay in private evidence, outside the framebuffer. Metadata reports actual stage counts and completion separately from response quality.
 
-Each generated reply consumes `turns`, including tool reads. The model sees remaining replies and the minimum completion protocol. Exhausting a token ceiling preserves the candidate and unfinished bytes without executing them. When a completed action leaves insufficient room for feedback or the next full reply, Form can renew the stream on the same admitted weights, retaining completed work and counters. Partial generation, failed admission and exhausted turns do not select renewal. The returned session owns release even after failure; incomplete release remains a distinct outcome.
+Each generated reply consumes `turns`, including tool reads and retained no-action attempts. The model sees remaining replies and the minimum completion protocol. An unfinished local reply at a generation boundary retains its exact private bytes, preserves completed effects and enters the existing repair flow with a request for one smaller complete JSON action. The caller's reply ceiling stays unchanged. Feedback uses the same stream while room remains; a full context can renew on the same admitted weights, retaining the task and counters. Failed prediction, admission, evidence retention and partial prefill do not select this retry. Exhausted turns settle release with the candidate retained. The returned session owns release even after failure; incomplete release remains a distinct outcome.
+
+### Local retry and changed choices
+
+`form-cli-code-live.bml` owns reply completion; `form-cli-code-policy.bml` owns repair and replanning. A truncated reply never reaches tool admission. Its failure travels with the original goal, current candidate, checks and private evidence path. The same cause, role and reply ceiling remain the same counterexample even when the private path or generated count changes. A checked candidate first retries its review role with a shorter response; retained native identities need not be copied into prose. An unchanged failure after that changed instruction requires a new plan. A stopped reply re-observes completion through the framebuffer; JSON validity and task quality retain their separate checks.
+
+This applies the distinction between truncated tool-call recovery and execution in [Hermes's truncation controller](https://github.com/NousResearch/hermes-agent/blob/main/agent/turn_truncation.py), and the focus on meaningful repeated outcomes in [OpenClaw's loop detection](https://docs.openclaw.ai/tools/loop-detection). Form uses its own owned state, live signals and caller allowances. [OpenClaw's agent loop](https://docs.openclaw.ai/concepts/agent-loop) also separates finished tool results from an unfinished continuation; Form's checkpoints preserve completed actions before admitting feedback. These are native BML flows in the existing process.
 
 ### Checkpoints, resume and feedback
 
@@ -175,99 +186,73 @@ remains null until transcript usage is supplied. Remote access is unchanged.
 
 ### Direction toward zero rented coding
 
-`fl-session-rent()` carries the caller's session guide. Native coding and review
-admit `fl-local-work()` for task evidence, retained repair, changed choices and
-local review. The caller reports session accounting beside the local work.
+The goal is verified local completion and quality with zero required remote
+prompts and tokens. Native substrate lookup, retrieval, calculation and
+executable recipes lead. An observed native answer takes precedence over model
+prose; local models contribute what the substrate cannot yet complete. Form
+owns tools, choices, care, original checks, checkpoints and release throughout.
 
-This is a guide, not a schedule. The highest goal is local end-to-end success
-and quality: form-cli carrying any query, any task, and any frequency-aligned
-review and flow without requiring a remote prompt for the work, so anyone can
-use it without a provider. Increase local token use. Local tokens never carry
-a penalty. Minimize the remote prompts and remote tokens the work itself
-required. A review of each step may use remote tokens, and that review is free,
-because it is not the work. Prefer a local guide. A remote guide is light, and
-it waits until the local guide has failed more than once. Remote access remains
-available.
+Local tokens never have a penalty. Encourage useful local guidance, review,
+repair, prompt A/B on the same tasks and checks, multiple perspectives and
+changed attempts. Prefer a local guide; after repeated local guidance failures,
+carry the retained finding into light remote guidance. Available local models
+may serve different tasks; this guidance does not supply automatic routing.
 
-Before any remote prompt that does the work, stay on the local path. Try
-another prompt, another approach, a repair, a local review, and feedback among
-local prompts. A satsang of local readings can inquire, point, and answer one
-another. Shifting the assemblage point changes which local lane is visible.
-Different local models carry different tasks. The native lifter, the owned
-coding checkpoint, and the original checks stay in that loop. Prove a candidate
-exists before a remote admission that does the work. That prompt is for one
-decision the local attempts did not complete, and it carries the retained
-failure, with its usage attributed. A remote review of a step stays free. A
-remote guide stays light, and it follows a local guide that has failed more
-than once.
+Optional remote review may accompany each independently successful step. It
+does not count toward required-remote dependence, while its actual spending
+stays visible. Remote implementation, diagnosis, guidance or acceptance needed
+for success is required assistance. Classify by dependence rather than timing.
+Keep local-only evidence distinct when a remote suggestion changes a candidate;
+re-observe that candidate locally. Missing attribution remains unknown.
 
-**The loop.** Work reaches the local path in four steps, each a door the body
-runs:
+`fl-session-rent()` carries the caller's guide; coding and review admit
+`fl-local-work()`. The native lifter and authoring tools operate before model
+admission where their observed capability serves the task. The coding
+checkpoint retains original goals, source identity, checks and completed
+effects while changed local choices repair failures.
 
-1. **Offer.** A task becomes a band-first gap in `learn/native-turn-queue.jsonl`:
-   a band proven reachable by a reference solution held outside the tree, total
-   over any candidate, and a goal that names each definition to add.
-2. **Turn.** `observe/native-turn-run.bml` hands the gap to the local lane
-   (local Qwen, no rented fallback), publishes its candidate, reads the band
-   within ten minutes, and writes one row per option to
-   `receipts/native-turn-ledger.jsonl` with the option's local generated and
-   injected IDs. launchd runs it from the walk checkout through
-   `observe/day-turn.bml` (12:30 and 19:00, turning while a gap is open and its
-   window has time) and `observe/scheduled-walk.bml` (03:30).
-3. **Review.** `observe/local-flow-review.bml` follows every turn and opens every
-   session. It reads the queue and both ledgers, names each open gap's state and
-   one next local repair (`split`, `lane`, `speed`, `queue` or `turn`), and
-   appends its row to `receipts/local-flow-review.jsonl`, which lands with the
-   turn.
-4. **Measure.** At a rented session's close, `observe/session-rent-run.bml`
-   (stdin: the transcript path) appends the session's rented tokens, subagents
-   included, beside its local tokens to `receipts/session-rent-ledger.jsonl`.
+The existing task loop offers work through `learn/native-turn-queue.jsonl`.
+`observe/native-turn-run.bml` runs the original checks, offers the task to the
+native coding lane, publishes a released candidate against unchanged source,
+and observes its checks again. An unsuccessful choice retains its finding and
+candidate before restoring source; the next choice resumes the same contract.
+The current scheduled doors are `observe/day-turn.bml` and
+`observe/scheduled-walk.bml`.
 
-A rented session opens with the review, works its `next`, and spends a remote
-prompt on the work only where the local path has not completed the task:
-writing a band-first gap, healing the lane, or one decision a retained failure
-names. Work the lane could take goes to the queue. Before that prompt, the
-local lane may try another prompt, another approach, a repair, a local review,
-feedback among its own prompts, or another local model. Review of each step
-may use remote tokens, and that review is free. A guide is local first. A
-remote guide is light, and it waits until the local guide has failed more than
-once. The session closes with the meter and the review.
+Each option records local generated/injected IDs, attempts, checks, release and
+elapsed time in `receipts/native-turn-ledger.jsonl`. `local_verified` requires
+actual native coding, complete status, observed release and a passing changed
+candidate. Dry, test, supplied-candidate and `publish_from` observations cannot
+establish local coding success. A legacy green band remains its own observation
+and does not become verified local completion.
 
-Compare similar work by the remote prompts and remote tokens the work required,
-with verified completion kept. Increase local token use. Local tokens never
-carry a penalty. A remote review of a step is free. Record it. It is not the
-work, so requiring no remote tokens for the work still holds. When the local
-path misses, the retained failure chooses the next local repair in the same
-context. Expand the task set only as that evidence holds. Zero is a movement
-whose work did not require a remote prompt. It is witnessed by these readings,
-not by a date. More local tokens are welcome.
+`execution_required_remote_prompts` and `execution_required_remote_tokens`
+describe the provider-free native coding invocation only. Caller/coordinator
+guidance, arbitrary band execution and the whole task are outside that scope.
+Whole-task `required_remote_*` and `optional_remote_review_*` remain null until
+attributed. Coordinator identity does not measure usage.
 
-Each meter has one job. A Claude Code session is read whole by
-`observe/session-rent-run.bml`: its transcript and every subagent transcript
-beside it, one count per `requestId` (input, cache write, cache read, output),
-next to the local voice's drafts for the same session. A Codex transcript goes to
+Open and close a session with `observe/local-flow-review.bml`. It reads current
+work and ledgers, reports verified local completion separately from green bands
+and unmeasured verification, and follows unresolved work with `split`, `lane`,
+`queue` or `turn`. Throughput remains diagnostic; it does not select the next
+repair. Local token share does not judge success.
+
+A Claude Code transcript goes to `observe/session-rent-run.bml`, one count per
+`requestId` including its subagents. Codex uses
 `observe/rented-turn-meter-run.fk` at opening and closing: cumulative input,
-cached input, output, reasoning output and total tokens, with the delta since the
-preceding reading; a first reading, different transcript or decreasing counters
-starts a baseline with a null delta. Which asking inside a Claude transcript was
-expensive is `observe/turn-meter-run.bml`; a movement's calls are
-`observe/flow-meter-run.bml`. Absent or incomplete usage is never zero. Cached
-input is part of input, and reasoning output is part of output, so neither is
-added twice.
+cached input, output, reasoning and total, with the comparable delta. A first
+reading, different transcript or decreasing counters starts a baseline.
+Cached input belongs to input; reasoning belongs to output. Neither is added
+twice. Absent or incomplete usage is never zero.
 
-Pair those readings with the native coding result's generated/injected IDs,
-attempts, checks, release and the functions/lines actually changed. Include
-coordination and unsuccessful attempts in the record. Compare similar work by
-how many remote prompts the work required, and how many remote tokens those
-prompts used. Mark a remote call as review when it read a step and did not do
-the work; that call stays in the row and carries no penalty. Mark a remote
-call as a light guide when a local guide has already failed more than once.
-Increase local token use. Local tokens never carry a penalty. More local
-attempts are welcome. When the local path misses, the retained failure chooses
-the next local repair in the same context.
-
-The lane has closed gaps written as band-first gaps and spent eight options
-without progress on one too large for it; the review names such a gap `split`.
+Compare comparable tasks using actual quality, verified completion, required
+remote prompts/tokens and the functions/lines changed. Retain unsuccessful
+attempts and optional review spending beside them. Generated and injected local
+IDs and live phase time guide resources without penalizing local use. The next
+movement follows the unresolved cause in its retained context. Zero is observed
+when the scoped work succeeds without required remote assistance; remote access
+remains available.
 
 Ordinary JSON jobs save native binary checkpoints under `.hearth/code-memory/` after completed transitions. Resume uses the same original request and returned checkpoint ID; `turns` adds replies and `context` sizes the admission. Candidate documents, tasks, findings and failed checks survive. Incomplete output never becomes an action. A complete candidate is rechecked before reuse, with zero new model/tool counts and its earlier provenance retained. Exact original goal/documents/writable/checks select that lesson; changed contracts do not. Review recall supplies guidance rather than presenting an old report as new work.
 
