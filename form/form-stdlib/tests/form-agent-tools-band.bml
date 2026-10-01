@@ -1,0 +1,73 @@
+; form-agent-tools-band.bml — the copyable commands of docs/form-native-agent-tools.md, sent as JSON.
+;
+; preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/form-agent-tool-wire.bml
+;
+; Every request is the JSON an agent pastes into form-cli's text face. It goes to fat-wire-call, the
+; function that face hands a raw JSON object to (fc-tool-wire in form/form-stdlib/form-cli.fk), over
+; the doc's three-document corpus, and the response is read back through the wire's own JSON reader.
+; A row holds when the response carries the wire schema, the exit, an empty stderr, the doc's stdout
+; and no host crossing.
+;
+; Verdict 524287 when every claim lands:
+;   1 rg · 2 jq · 4 read · 8 cat · 16 head · 32 tail · 64 wc · 128 sort · 256 uniq · 512 tr
+;   1024 cut · 2048 awk · 4096 sed · 8192 edit · 16384 write   the table's fifteen rows, one each
+;   32768   the handoff: edit, then write with the edit's documents, then read with the write's: the
+;           read answers the held note and the edited text stands in the returned corpus
+;   65536   a pipeline: the rg response's stdout is the next request's input to head -n 1
+;   131072  a pipe spelled in the command is a structured refusal (exit 2,
+;           shell-syntax-not-supported), and the corpus comes back unchanged
+;   262144  jq -nr --arg x 'a b' '$x' answers a b
+section [form.bml] {
+ class FormAgentToolsBand {
+  def fatb-bit(ok, bit) = ok ? bit : 0;
+  def fatb-docs() = [["source:alpha", "alpha.txt", "alpha 1\nbeta 2\n"], ["source:table", "table.txt", "left:right\nup:down\n"], ["source:package", "package.json", "{\"name\":\"demo\",\"version\":1}"]];
+  def fatb-doc-json(d) = "{\"id\":" + json-quote-string(d[0]) + ",\"path\":" + json-quote-string(d[1]) + ",\"text\":" + json-quote-string(d[2]) + "}";
+  def fatb-docs-json(docs) = "[" + foldl((acc, d) => acc == "" ? fatb-doc-json(d) : acc + "," + fatb-doc-json(d), "", docs) + "]";
+  def fatb-request(command, input, docs-json) = "{\"command\":" + json-quote-string(command) + ",\"input\":" + json-quote-string(input) + ",\"documents\":" + docs-json + "}";
+  def fatb-send(command, input, docs-json) = faj-json("form-agent-tools-band", fat-wire-call(fatb-request(command, input, docs-json)));
+  def fatb-field(r, key) = node_value(json-object-get(r, key));
+  def fatb-docs-of(r) = json-emit(json-object-get(r, "documents"));
+  def fatb-text-of(r, path) {
+   let hits = filter(d => fatb-field(d, "path") == path, node_children(json-object-get(r, "documents")));
+   nil?(hits) ? nothing() : fatb-field(hits[0], "text");
+  }
+  def fatb-held?(r, exit, stdout) = fatb-field(r, "schema") == "form-agent-tool-wire-v1" && fatb-field(r, "exit") == exit && fatb-field(r, "stderr") == "" && fatb-field(r, "stdout") == stdout && fatb-field(r, "crossings") == 0;
+  def fatb-row(command, input, stdout) = fatb-held?(fatb-send(command, input, fatb-docs-json(fatb-docs())), 0, stdout);
+  def fatb-edit() = fatb-send("edit alpha.txt 'beta 2' 'gamma 3'", "", fatb-docs-json(fatb-docs()));
+  def fatb-edited?() = fatb-held?(fatb-edit(), 0, "edited\n") && fatb-text-of(fatb-edit(), "alpha.txt") == "alpha 1\ngamma 3\n";
+  def fatb-handoff() {
+   let written = fatb-send("write notes.md", "held note\n", fatb-docs-of(fatb-edit()));
+   let read = fatb-send("read notes.md", "", fatb-docs-of(written));
+   fatb-held?(written, 0, "created\n") && fatb-held?(read, 0, "held note\n") && fatb-text-of(read, "alpha.txt") == "alpha 1\ngamma 3\n";
+  }
+  def fatb-pipeline() {
+   let found = fatb-send("rg -nF 'alpha 1'", "", fatb-docs-json(fatb-docs()));
+   let first = fatb-send("head -n 1", fatb-field(found, "stdout"), fatb-docs-of(found));
+   fatb-held?(first, 0, "alpha.txt:1:alpha 1\n");
+  }
+  def fatb-refusal() {
+   let r = fatb-send("rg alpha | head -n 1", "", fatb-docs-json(fatb-docs()));
+   fatb-field(r, "exit") == 2 && fatb-field(r, "stdout") == "" && str_find(fatb-field(r, "stderr"), "shell-syntax-not-supported", 0) >= 0
+   && fatb-text-of(r, "alpha.txt") == "alpha 1\nbeta 2\n";
+  }
+ }
+ fatb-bit(fatb-row("rg -nF 'alpha 1'", "", "alpha.txt:1:alpha 1\n"), 1)
+ + fatb-bit(fatb-row("jq -r .name package.json", "", "demo\n"), 2)
+ + fatb-bit(fatb-row("read alpha.txt", "", "alpha 1\nbeta 2\n"), 4)
+ + fatb-bit(fatb-row("cat alpha.txt table.txt", "", "alpha 1\nbeta 2\nleft:right\nup:down\n"), 8)
+ + fatb-bit(fatb-row("head -n 1 alpha.txt", "", "alpha 1\n"), 16)
+ + fatb-bit(fatb-row("tail -n 1 alpha.txt", "", "beta 2\n"), 32)
+ + fatb-bit(fatb-row("wc -lwc", "one two\n", "1 2 8\n"), 64)
+ + fatb-bit(fatb-row("sort -nu", "10\n2\n2\n", "2\n10\n"), 128)
+ + fatb-bit(fatb-row("uniq -c", "a\na\nb\n", "2 a\n1 b\n"), 256)
+ + fatb-bit(fatb-row("tr -d '\\n'", "one\ntwo\n", "onetwo"), 512)
+ + fatb-bit(fatb-row("cut -d : -f 2", "left:right\nup:down\n", "right\ndown\n"), 1024)
+ + fatb-bit(fatb-row("awk '{print $2}'", "one two\nthree four\n", "two\nfour\n"), 2048)
+ + fatb-bit(fatb-row("sed -n 2p alpha.txt", "", "beta 2\n"), 4096)
+ + fatb-bit(fatb-edited?(), 8192)
+ + fatb-bit(fatb-row("write notes.md", "held note\n", "created\n"), 16384)
+ + fatb-bit(fatb-handoff(), 32768)
+ + fatb-bit(fatb-pipeline(), 65536)
+ + fatb-bit(fatb-refusal(), 131072)
+ + fatb-bit(fatb-row("jq -nr --arg x 'a b' '$x'", "", "a b\n"), 262144);
+}
