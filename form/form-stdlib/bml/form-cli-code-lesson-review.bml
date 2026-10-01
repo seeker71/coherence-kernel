@@ -9,22 +9,30 @@
 //   no failure as method   a rung that did not verify may teach only kind=avoid.
 // The same call turns the rung into one corpus row for the native LoRA lane (native-session-code.bml):
 // verified when the band read full and the circle accepted, otherwise a failed row that teaches by
-// contrast only. Cold family lessons move to cold/.
+// contrast only. Cold family lessons move to cold/. fclr-close-rung is the ladder's one call: the circle's
+// round first (form-cli-code-circle.bml), then the review and the row with the circle's acceptance.
+// Everything after the rung is a side channel: a stop inside it answers a refused reading, never ends
+// the ladder's attempt.
 //
 // A voice is [name, model, act]; act(prompt) answers [reply, local generated IDs]. A band scripts it;
-// fclr-qwen-voice hands in a local model through the native review lane.
+// fclr-qwen-voice hands in a local model through the native review lane. Missing IDs stay unknown,
+// never zero.
 import form-stdlib/bml/native-session-code.bml;
 import form-stdlib/bml/form-cli-code-live.bml;
+import form-stdlib/bml/form-cli-code-circle.bml;
 section [form.bml] {
  class FormCliCodeLessonReview {
   // ── one rung, as the ladder hands it over ──
   def fclr-rung(id, packet, reading, full, accepted, finding) = [id, packet, reading, full, accepted, finding];
+  // docs: the documents the ladder executed for the rung, when they may differ from the packet's
+  def fclr-rung-with(id, packet, reading, full, accepted, finding, docs) = [id, packet, reading, full, accepted, finding, docs];
   def fclr-rung-id(r) = r[0];
   def fclr-rung-packet(r) = r[1];
   def fclr-rung-reading(r) = r[2];
   def fclr-rung-full(r) = r[3];
   def fclr-rung-accepted(r) = r[4];
   def fclr-rung-finding(r) = r[5];
+  def fclr-rung-docs(r) = len(r) > 6 ? r[6] : nothing();
   def fclr-rung-state(r) = fcam-state-from(fclr-rung-packet(r));
   def fclr-rung-verified?(r) = nsc-rung-verified(fclr-rung-reading(r), fclr-rung-full(r), fclr-rung-accepted(r));
   def fclr-voice(name, model, act) = [name, model, act];
@@ -81,10 +89,16 @@ section [form.bml] {
    json-node-pair("patches", json-node-int(nothing?(fclr-prior-lesson(prior)) ? 0 : (fcam-family-int(fclr-prior-lesson(prior), "patches") + 1))),
    json-node-pair("prior_digest", json-node-string(fclr-prior-digest(prior))),
    json-node-pair("written_ms", json-node-int(now_unix_ms()))]);
+  // Read before write, twice: the voice read prior, and a model call can take minutes. At write time the
+  // record is read again; when its lesson moved meanwhile the new lesson is refused (lesson-moved), and
+  // only the lesson field is merged, so repairs, recall hits and times another writer left stay.
   def fclr-write(root, family, prior, lesson, verified) {
-   let node = fclr-lesson-node(lesson, verified, prior);
-   let put = fcam-family-put(root, family, fcam-family-merge(prior, family, [["lesson", node], ["written_ms", json-node-int(now_unix_ms())]]));
-   !put ? ["refused:write-refused", ""] : [nothing?(fclr-prior-lesson(prior)) ? "written" : "patched", fcap-string(node, "digest")];
+   let current = fcam-family-read(root, family);
+   if !((String) fclr-prior-digest(current) == fclr-prior-digest(prior)) then ["refused:lesson-moved", ""] else {
+    let node = fclr-lesson-node(lesson, verified, current);
+    let put = fcam-family-put(root, family, fcam-family-merge(current, family, [["lesson", node]]));
+    !put ? ["refused:write-refused", ""] : [nothing?(fclr-prior-lesson(current)) ? "written" : "patched", fcap-string(node, "digest")];
+   };
   }
 
   // ── what the voice reads ──
@@ -101,40 +115,68 @@ section [form.bml] {
    json-node-pair("family_lesson", nothing?(fclr-prior-lesson(prior)) ? json-node-null() : fclr-prior-lesson(prior)),
    json-node-pair("instruction", json-node-string(fclr-instruction()))]));
 
-  // ── one review: [status, digest, local IDs, family] ──
+  // ── one review: [status, digest, local IDs or nothing, family] ──
+  // The voice's answer travels wrapped (try answers its else branch for a stop and for nothing alike), so
+  // a voice that stopped, one that answered nothing and one that answered no [reply, IDs] read apart, and
+  // each leaves its IDs unknown.
   def fclr-review(root, rung, voice) {
    let state = fclr-rung-state(rung);
    let family = fcam-family-key(state);
    let prior = fcam-family-read(root, family);
    let verified = fclr-rung-verified?(rung);
-   let reply = try fclr-call(voice[2], fclr-prompt(rung, state, prior)) else nothing();
-   let decided = nothing?(reply) ? ["refused:voice-stopped", nothing()] : fclr-decide(reply[0], verified, prior);
+   let heard = try [fclr-call(voice[2], fclr-prompt(rung, state, prior))] else nothing();
+   let reply = nothing?(heard) ? nothing() : heard[0];
+   let decided = nothing?(heard) ? ["refused:voice-stopped", nothing()] : nothing?(reply) ? ["refused:voice-answered-nothing", nothing()] : !fclr-reply?(reply) ? ["refused:reply-shape", nothing()] : fclr-decide(reply[0], verified, prior);
    let written = nothing?(decided[1]) ? [decided[0], ""] : fclr-write(root, family, prior, decided[1], verified);
-   [written[0], written[1], nothing?(reply) ? 0 : reply[1], family];
+   [written[0], written[1], fclr-reply-ids(reply), family];
   }
+  def fclr-reply?(reply) = nothing?(reply) ? false : (((String) value_kind(reply) == "list") && ((len(reply) >= 2) && ((String) value_kind(reply[0]) == "string")));
+  def fclr-reply-ids(reply) = !fclr-reply?(reply) ? nothing() : ((String) value_kind(reply[1]) == "int") ? reply[1] : nothing();
   def fclr-status(r) = r[0];
   def fclr-lesson-digest(r) = r[1];
   def fclr-ids(r) = r[2];
   def fclr-family(r) = r[3];
   // ── after every rung: the lesson review, the corpus row, the cold sweep ──
   // A rung whose lane left no continuity packet (fcam-read answered nothing) has nothing to review or
-  // teach; the sweep still runs.
+  // teach; the sweep still runs. Each step is held by try: a stop (a corpus row id reused with other
+  // evidence, a private directory that cannot be made) answers a refused reading in its place.
   def fclr-packet?(packet) = !nothing?(packet) && (fat-wire-object?(packet) && ((String) fcap-string(packet, "schema") == "form-code-continuity-v1"));
-  def fclr-after-rung(root, home, rung, voice, kick) = fclr-packet?(fclr-rung-packet(rung)) ? fclr-after-packet(root, home, rung, voice, kick) : [["refused:packet-absent", "", 0, ""], ["", "no-packet"], fcam-family-sweep(root, now_unix_ms())];
+  def fclr-sweep(root) = try fcam-family-sweep(root, now_unix_ms()) else 0;
+  def fclr-after-rung(root, home, rung, voice, kick) = fclr-packet?(fclr-rung-packet(rung)) ? fclr-after-packet(root, home, rung, voice, kick) : [["refused:packet-absent", "", 0, ""], ["", "no-packet"], fclr-sweep(root)];
   def fclr-after-packet(root, home, rung, voice, kick) {
-   let review = fclr-review(root, rung, voice);
-   let ex = nsc-rung-example(fclr-rung-id(rung), fclr-rung-packet(rung), fclr-rung-reading(rung), fclr-rung-full(rung), fclr-rung-accepted(rung), fclr-rung-finding(rung));
-   let row = nsc-rung-observe(home, ex, kick);
-   let swept = fcam-family-sweep(root, now_unix_ms());
+   let review = try fclr-review(root, rung, voice) else ["refused:review-stopped", "", nothing(), ""];
+   let row = try nsc-rung-observe(home, fclr-example(rung), kick) else ["", "refused:corpus-row-stopped"];
+   let swept = fclr-sweep(root);
    [review, row, swept];
   }
+  def fclr-example(rung) = nothing?(fclr-rung-docs(rung)) ? nsc-rung-example(fclr-rung-id(rung), fclr-rung-packet(rung), fclr-rung-reading(rung), fclr-rung-full(rung), fclr-rung-accepted(rung), fclr-rung-finding(rung)) : nsc-rung-example-docs(fclr-rung-id(rung), fclr-rung-packet(rung), fclr-rung-docs(rung), fclr-rung-reading(rung), fclr-rung-full(rung), fclr-rung-accepted(rung), fclr-rung-finding(rung));
   def fclr-row(r) = json-node-object([
    json-node-pair("lesson_review", json-node-string(fclr-status(r[0]))),
    json-node-pair("lesson_digest", json-node-string(fclr-lesson-digest(r[0]))),
-   json-node-pair("lesson_review_ids", json-node-int(fclr-ids(r[0]))),
+   json-node-pair("lesson_review_ids", nothing?(fclr-ids(r[0])) ? json-node-null() : json-node-int(fclr-ids(r[0]))),
    json-node-pair("family", json-node-string(fclr-family(r[0]))),
    json-node-pair("corpus_row", json-node-string((String) value_kind(r[1][0]) == "string" ? r[1][0] : "")),
+   json-node-pair("corpus_status", json-node-string((String) value_kind(r[1][1]) == "string" ? r[1][1] : "")),
    json-node-pair("cold_moved", json-node-int(r[2]))]);
+
+  // ── the ladder's close of one rung: the circle first, then the review and the row ──
+  // Call it after the rung's own candidate returned to its checkpoint and before anything lands, so the
+  // circle's publish window reads the tree as the lane read it. The round runs first; the rung's row is
+  // written after it, accepted only when the circle accepted this rung's own candidate and every restore
+  // held, so verified means band full and circle accept, never the band alone. The row's documents are
+  // the candidate the circle executed. checkpoint is the lane's checkpoint_id under root (the code
+  // memory); an id that is not one reads as no packet. Answers [round, [review, row, swept]].
+  def fclr-packet-of(root, checkpoint) = fclr-string?(checkpoint) && fcam-id-valid(checkpoint) ? fcam-read(fcam-path(root, checkpoint, "checkpoint")) : nothing();
+  def fclr-string?(v) = nothing?(v) ? false : ((String) value_kind(v) == "string");
+  def fclr-cand-docs(cands, candId) = nil?(filter(c => (String) fccc-cand-id(c) == candId, cands)) ? nothing() : fccc-cand-docs(filter(c => (String) fccc-cand-id(c) == candId, cands)[0]);
+  def fclr-close-accepted?(closed, candId) = fccc-restored(closed[0]) && ((String) fccc-accepted-id(closed[0]) == candId);
+  def fclr-close-finding(finding, r) = (String) fccc-pointing-text(r) == "" ? finding : (finding ++ "\nThe circle's pointing: " ++ fccc-pointing-text(r));
+  def fclr-close-rung(root, home, gap, cands, opts, candId, checkpoint, reading, finding, voice, kick) {
+   let r = fccc-circle-rung(gap, cands, opts);
+   let accepted = fccc-restored(r) && ((String) fccc-accepted-id(r) == candId);
+   let rung = fclr-rung-with(candId, fclr-packet-of(root, checkpoint), reading, fccc-gap-full(gap), accepted ? 1 : 0, fclr-close-finding(finding, r), fclr-cand-docs(cands, candId));
+   [r, fclr-after-rung(root, home, rung, voice, kick)];
+  }
 
   // ── a local model as the lesson voice: one direct read-only review over the prompt ──
   // The report is the lesson JSON; the same audits run inside the lane, so the voice repairs its own
@@ -167,7 +209,7 @@ section [form.bml] {
    let s = fcam-with(fcap-open-direct-code("Add (defn cl-unit-at (text line) ...) inside the (do ...) before the final 0.", docs, ["closure-lines.fk"]), [root, "physical-check", fcam-scope("Add (defn cl-unit-at (text line) ...) inside the (do ...) before the final 0.", docs, ["closure-lines.fk"], "[{\"tool\":\"balance\",\"arguments\":[\"closure-lines.fk\"],\"stdout\":\"0 0\\n\"}]"), 0]);
    let rung = fclr-rung("physical-check", fcam-packet(s, "checkpoint"), 28, 31, 0, "The band read 28 of 31: a stub answered nothing for every line, so the three nothing claims held and the two unit claims did not.");
    let r = fclr-review(root, rung, fclr-qwen-voice("lesson-voice", model, 16384, 6));
-   print_str(json-emit(fclr-row([r, [""], 0])));
+   print_str(json-emit(fclr-row([r, ["", "physical-check:no-row"], 0])));
    r;
   }
  }

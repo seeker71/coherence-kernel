@@ -5,6 +5,7 @@ import form-stdlib/bml/form-cli-code-policy.bml;
 import form-stdlib/hearth.bml;
 import form-stdlib/form-fs.fk;
 import form-stdlib/sha256.fk;
+import form-stdlib/organ-health.bml;
 section [form.bml] {
  class FormCliCodeMemory {
   def fcam-pack(v) = (String) value_kind(v) == "list" ? json-node-array(fcam-pack-list(v)) : (String) value_kind(v) == "string" ? json-node-string(v) : (String) value_kind(v) == "int" ? json-node-int(v) : json-node-null();
@@ -42,8 +43,16 @@ section [form.bml] {
    moved >= 0;
   }
   def fcam-save(s) = !fcam-managed(s) ? 1 : (String) fcap-stage(s) == "attention" ? 1 : fcam-write(fcam-path(fcam-root(s), fcam-id(s), "checkpoint"), fcam-packet(s, "checkpoint"));
-  // A completed repair is learned twice: under its exact contract, and as its family's repairs.
-  def fcam-learn(s) = !fcam-managed(s) ? 1 : !((String) fcap-stage(s) == "complete") ? 1 : nil?(fcap-reflections(s)) ? 1 : (fcam-write(fcam-path(fcam-root(s), fcam-hash(fcam-contract(s)), "lesson"), fcam-packet(s, "lesson")) && fcam-family-learn(s));
+  // A completed repair is learned twice: under its exact contract, and as its family's repairs. Only the
+  // exact lesson answers. The family record is guidance, so a family write that did not land speaks as a
+  // native-coding reading and never demotes the candidate.
+  def fcam-learn(s) = !fcam-managed(s) ? 1 : !((String) fcap-stage(s) == "complete") ? 1 : nil?(fcap-reflections(s)) ? 1 : fcam-learned(s, fcam-write(fcam-path(fcam-root(s), fcam-hash(fcam-contract(s)), "lesson"), fcam-packet(s, "lesson")));
+  def fcam-learned(s, exact) {
+   let family = try fcam-family-learn(s) else false;
+   let heard = family ? 0 : oh-voice(fcam-family-unwritten(s));
+   exact;
+  }
+  def fcam-family-unwritten(s) = oh-reading("native-coding", fcam-id(s), "family-record-write", json-node-int(1), json-node-int(0), json-node-int(0), [oh-need("family-record-write", json-node-string("family " ++ fcam-family-key(s) ++ ": its record was not written; the exact lesson stands"))], ["learn-on-next-completion"], json-node-string("family " ++ fcam-family-key(s)));
   // ── the family: the sorted writable paths and the sorted kinds of the caller's checks ──
   // An exact contract (goal, documents, writable, checks) may hand back its verified candidate. A family
   // hands back guidance only, never a candidate, the way review recall does: another contract over the
@@ -68,8 +77,12 @@ section [form.bml] {
   // read before write: every writer folds its fields into the record it read, never over it
   def fcam-family-merge(prior, family, sets) = foldl((n, kv) => fcam-family-with(n, kv[0], kv[1]), nothing?(prior) ? fcam-family-base(family) : prior, sets);
   def fcam-family-put(root, family, record) = fcam-write(fcam-family-path(root, family), record);
-  // a family repair keeps its diagnosis, change and route; another contract's evidence bytes stay behind
-  def fcam-family-repairs(rows) = rows |> map(row => json-node-object([json-node-pair("diagnosis", json-node-string(row[2])), json-node-pair("change", json-node-string(row[3])), json-node-pair("next", json-node-string(row[4]))]));
+  // a cut that never splits a UTF-8 sequence: it backs off over continuation bytes
+  def fcam-cut(s, n) = len(s) <= n ? s : substring(s, 0, fcam-boundary(s, n));
+  def fcam-boundary(s, i) = ((i > 0) && ((str_byte_at(s, i) >= 128) && (str_byte_at(s, i) < 192))) ? fcam-boundary(s, i - 1) : i;
+  // A family repair keeps its diagnosis, change and route, each cut to a brief size (another contract's
+  // words enter this one's brief); another contract's evidence bytes stay behind.
+  def fcam-family-repairs(rows) = rows |> map(row => json-node-object([json-node-pair("diagnosis", json-node-string(fcam-cut(row[2], 300))), json-node-pair("change", json-node-string(fcam-cut(row[3], 300))), json-node-pair("next", json-node-string(fcam-cut(row[4], 80)))]));
   def fcam-family-learn(s) = fcap-reviewing(s) ? 1 : fcam-family-put(fcam-root(s), fcam-family-key(s), fcam-family-merge(fcam-family-read(fcam-root(s), fcam-family-key(s)), fcam-family-key(s), [["repairs", json-node-array(fcam-family-repairs(fat-take(reverse(fcap-reflections(s)), 3)))], ["repairs_contract", json-node-string(fcam-hash(fcam-contract(s)))], ["written_ms", json-node-int(now_unix_ms())]]));
   def fcam-family-technique(lesson) = nothing?(lesson) ? "" : (" Technique: " ++ fcap-string(lesson, "rule") ++ "; why: " ++ fcap-string(lesson, "why") ++ ".");
   def fcam-family-repairs-text(rows) = nil?(rows) ? "" : (" Repairs that completed a contract of this family: " ++ json-emit(json-node-array(rows)));
@@ -85,12 +98,16 @@ section [form.bml] {
    fcam-with(recalled, [fcam-root(s), fcam-id(s), fcam-contract(s), 1]);
   };
   // A family record with no recall and no write for thirty days is cold: it moves to cold/, where nothing
-  // recalls it and nothing learned is lost (.hearth is outside git).
-  def fcam-family-last(n) = max2(fcam-family-int(n, "written_ms"), fcam-family-int(n, "last_recalled_ms"));
+  // recalls it and nothing learned is lost (.hearth is outside git). Its last write is the record's or its
+  // lesson's, whichever is later. The cold name carries the sweep time, so a family that cools again
+  // never replaces its earlier cold record.
+  def fcam-family-last(n) = max2(max2(fcam-family-int(n, "written_ms"), fcam-family-int(n, "last_recalled_ms")), nothing?(fcam-family-lesson(n)) ? 0 : fcam-family-int(fcam-family-lesson(n), "written_ms"));
   def fcam-family-cool(root, now, name) = !fcam-ends?(name, ".family.fkb") ? 0 : fcam-family-cool-read(root, now, name, fcam-read(root ++ "/" ++ name));
+  def fcam-family-cold-name(name, now) = substring(name, 0, len(name) - len(".family.fkb")) ++ "-" ++ now.str() ++ ".family.fkb";
   def fcam-family-cool-read(root, now, name, n) = (nothing?(n) || !fat-wire-object?(n)) ? 0 : ((now - fcam-family-last(n)) <= fcam-family-cold-ms()) ? 0 : {
    let made = fs-mkdir(root ++ "/cold");
-   let moved = fs-rename(root ++ "/" ++ name, root ++ "/cold/" ++ name);
+   let target = root ++ "/cold/" ++ fcam-family-cold-name(name, now);
+   let moved = fs-exists?(target) ? -1 : fs-rename(root ++ "/" ++ name, target);
    moved >= 0 ? 1 : 0;
   };
   def fcam-family-sweep(root, now) = !fs-is-dir?(root) ? 0 : foldl((moved, name) => moved + fcam-family-cool(root, now, name), 0, fs-list(root));
