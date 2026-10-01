@@ -147,8 +147,11 @@ type Value struct {
 	Float float64
 	Str   string
 	List  []Value
-	Cl    *Closure
-	Nid   NodeID
+	// Tail — a pair's tail word, as the kernels keep it: a list made by cons onto
+	// a word that is not a list. List readers end before it; tail and value_eq see it.
+	Tail *Value
+	Cl   *Closure
+	Nid  NodeID
 }
 
 func (v Value) String() string {
@@ -657,6 +660,14 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 			if cat.Inst == RBlockLet {
 				name := k.identID(kids[0])
 				v := k.walk(kids[1], env)
+				if len(kids) == 3 {
+					// (let name value body): the name binds over the body alone,
+					// in its own frame, and the body answers (in tail position).
+					env = NewFrame(env)
+					env.Bind(name, v)
+					n = kids[2]
+					continue
+				}
 				env.Bind(name, v)
 				return v
 			}
@@ -868,6 +879,10 @@ func valueEqual(a, b Value) bool {
 		return a.Nid == b.Nid
 	case VList:
 		if len(a.List) != len(b.List) {
+			return false
+		}
+		// a pair meets only a pair with the same tail word
+		if (a.Tail == nil) != (b.Tail == nil) || (a.Tail != nil && !valueEqual(*a.Tail, *b.Tail)) {
 			return false
 		}
 		if len(a.List) == 0 || &a.List[0] == &b.List[0] {
@@ -1184,9 +1199,14 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 	case "do":
 		return k.intern(catBlock(RBlockDo), args)
 	case "let":
+		// (let name value) binds the rest of its do; (let name value body)
+		// binds the name over its body alone and answers the body, as fkwu reads it.
+		if len(args) < 2 || len(args) > 3 {
+			panic(fmt.Sprintf("parse error: let takes (let name value) or (let name value body), got %d forms", len(args)))
+		}
 		nameID := k.identID(args[0])
 		nameTrivial := NodeID{Pkg: 1, Level: LevelTrivial, Type: TrivString, Inst: uint32(nameID)}
-		return k.intern(catBlock(RBlockLet), []NodeID{nameTrivial, args[1]})
+		return k.intern(catBlock(RBlockLet), append([]NodeID{nameTrivial}, args[1:]...))
 	case "if":
 		if len(args) == 2 {
 			return k.intern(catCond(RCondIfThen), args)
@@ -1312,11 +1332,20 @@ func (k *Kernel) registerNatives() {
 		copy(out, args)
 		return Value{Kind: VList, List: out}
 	})
+	// cons onto a word that is not a list makes a pair, as the kernels make one;
+	// consing onto nothing stops.
 	k.registerNative("cons", func(_ *Kernel, args []Value) Value {
+		if args[1].Kind == VNull {
+			panic("cons: nothing is not a list -- ask nothing? before consing")
+		}
+		if args[1].Kind != VList {
+			word := args[1]
+			return Value{Kind: VList, List: []Value{args[0]}, Tail: &word}
+		}
 		out := make([]Value, 0, len(args[1].List)+1)
 		out = append(out, args[0])
 		out = append(out, args[1].List...)
-		return Value{Kind: VList, List: out}
+		return Value{Kind: VList, List: out, Tail: args[1].Tail}
 	})
 	k.registerNative("head", func(_ *Kernel, args []Value) Value {
 		if len(args[0].List) == 0 {
@@ -1328,7 +1357,10 @@ func (k *Kernel) registerNatives() {
 		if len(args[0].List) == 0 {
 			return Value{Kind: VList, List: []Value{}}
 		}
-		return Value{Kind: VList, List: args[0].List[1:]}
+		if len(args[0].List) == 1 && args[0].Tail != nil {
+			return *args[0].Tail
+		}
+		return Value{Kind: VList, List: args[0].List[1:], Tail: args[0].Tail}
 	})
 	k.registerNative("nth", func(_ *Kernel, args []Value) Value {
 		if args[0].Kind != VList {

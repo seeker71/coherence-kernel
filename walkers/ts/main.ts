@@ -441,19 +441,31 @@ export class Kernel {
       kind: "list",
       list: args.slice(),
     }));
+    // cons onto a word that is not a list makes a pair, as the kernels make one:
+    // the list keeps the word as its end; list readers end before it, and tail and
+    // value_eq see it. Consing onto nothing stops.
     this.registerNative("cons", catListNat(), (_k, args) => {
       const head = args[0] ?? { kind: "null" };
-      const tail = argList(args, 1);
-      return { kind: "list", list: [head, ...tail] };
+      const rest = args[1];
+      if (rest === undefined || rest.kind === "null") {
+        throw new Error("cons: nothing is not a list -- ask nothing? before consing");
+      }
+      if (rest.kind !== "list") return { kind: "list", list: [head], end: rest };
+      return { kind: "list", list: [head, ...rest.list], end: rest.end };
     });
     this.registerNative("head", catListNat(), (_k, args) => {
       const lst = argList(args, 0);
       return lst[0] ?? { kind: "null" };
     });
-    this.registerNative("tail", catListNat(), (_k, args) => ({
-      kind: "list",
-      list: argList(args, 0).slice(1),
-    }));
+    this.registerNative("tail", catListNat(), (_k, args) => {
+      const v = args[0];
+      if (v?.kind === "list" && v.list.length === 1 && v.end !== undefined) return v.end;
+      return {
+        kind: "list",
+        list: argList(args, 0).slice(1),
+        end: v?.kind === "list" ? v.end : undefined,
+      };
+    });
     this.registerNative("len", catAccess(), (_k, args) => {
       const v = args[0];
       if (v?.kind === "list") return { kind: "int", int: v.list.length };
@@ -561,7 +573,8 @@ export type Value =
   | { kind: "f32"; float: number }
   | { kind: "f64"; float: number }
   | { kind: "str"; str: string }
-  | { kind: "list"; list: Value[] }
+  // end: a pair's tail word (cons onto a word that is not a list)
+  | { kind: "list"; list: Value[]; end?: Value }
   | { kind: "closure"; closure: Closure }
   | { kind: "nodeid"; nodeid: NodeID };
 
@@ -860,13 +873,17 @@ function readChildrenUntilRparen(k: Kernel, s: ParseState): NodeID[] {
   }
 }
 
-// (let <name> <value>)
+// (let <name> <value>), or (let <name> <value> <body>): the name bound over the
+// body alone, the body answering, as fkwu reads it.
 function readLet(k: Kernel, s: ParseState): NodeID {
   const nameTok = consume(s);
   if (nameTok.kind !== "ident") throw new Error("let: name must be identifier");
   const value = readOne(k, s);
+  const after = peek(s);
+  const body = after !== undefined && after.kind !== "rparen" ? readOne(k, s) : undefined;
   const close = consume(s);
-  if (close.kind !== "rparen") throw new Error("let: expected )");
+  if (close.kind !== "rparen")
+    throw new Error("let: takes (let name value) or (let name value body), expected )");
   const nameTrivial: NodeID = {
     pkg: 1,
     level: Level.TRIVIAL,
@@ -875,7 +892,7 @@ function readLet(k: Kernel, s: ParseState): NodeID {
   };
   return k.intern(
     { pkg: 1, level: Level.BASIC, type: RBasic.BLOCK, inst: RBlock.LET },
-    [nameTrivial, value],
+    body === undefined ? [nameTrivial, value] : [nameTrivial, value, body],
   );
 }
 
@@ -1386,7 +1403,11 @@ function valueEqual(a: Value, b: Value): boolean {
     case "str":
       return a.str === (b as { str: string }).str;
     case "list": {
-      const bl = (b as { list: Value[] }).list;
+      const bv = b as { list: Value[]; end?: Value };
+      const bl = bv.list;
+      // a pair meets only a pair with the same tail word
+      if ((a.end === undefined) !== (bv.end === undefined)) return false;
+      if (a.end !== undefined && bv.end !== undefined && !valueEqual(a.end, bv.end)) return false;
       return (
         a.list === bl ||
         (a.list.length === bl.length && a.list.every((item, idx) => valueEqual(item, bl[idx]!)))
@@ -1491,12 +1512,19 @@ function walkBlock(
   frame: Frame,
 ): Value {
   if (op === RBlock.LET) {
-    if (kids.length !== 2) throw new Error("let: need 2 args (name, value)");
+    if (kids.length !== 2 && kids.length !== 3) {
+      throw new Error("let: need 2 or 3 args (name, value, body)");
+    }
     const name = kids[0]!;
     if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
       throw new Error("let: name must be a string trivial");
     }
     const value = walk(k, kids[1]!, frame);
+    if (kids.length === 3) {
+      const scope = new Frame(frame);
+      scope.bind(name.inst, value);
+      return walk(k, kids[2]!, scope);
+    }
     frame.bind(name.inst, value);
     return value;
   }
