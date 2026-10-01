@@ -215,7 +215,10 @@ Form belong to their generators or contracts, rather than a filename rewrite.
 
 `form/form-stdlib/form-lift.bml` supplies lifting guidance to the public
 native `code` controller whenever the supplied sources contain executable
-BML. The controller retains the original sources, writable paths, checks and
+BML. The same module's session-rent guidance is admitted on every local code
+session: measure the previous turn, keep drafting on the local member, and
+spend a provider turn only after a retained native failure. The four dates
+in that guidance are the path to a scheduled walk with `rented_mind` 0. The controller retains the original sources, writable paths, checks and
 checkpoint. Its tools read and edit resident document values in-process;
 filesystem loading/publication belongs to the caller, and live telemetry uses
 shared memory. No model-selected shell command, network tool or provider is
