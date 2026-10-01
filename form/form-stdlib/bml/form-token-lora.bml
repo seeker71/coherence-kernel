@@ -4,9 +4,12 @@
 // stream the voice and Form wrote together: the voice's prose, its
 // <|form:VERB|>PAYLOAD<|/form:VERB|> controls, and Form's
 // <|form:observation|>RESULT<|/form:observation|> answers. Accepted shapes:
-//   {"prompt": P, "completion": C}  or  {"prompt": P, "stream": C}
+//   {"prompt": P, "stream": C}  or  {"prompt": P, "completion": C}
 //   {"messages": [{"role":"system"?}, ..., {"role":"user"}, {"role":"assistant","content":C}]}
-// with an optional "system". Extra keys (verbs, results, timings) are carried, never needed.
+// with an optional "system". When a row carries both, the stream is read: it is the whole reply
+// with Form's observations in place, where the corpus's completion is only the first control the
+// voice authors. "split", "id" and "family" are carried when present (a split marked heldout is
+// never taught); other keys (verbs, results, timings) are carried, never needed.
 //
 // Each row is read into ordered spans. Prose and controls are the voice's to predict
 // (supervise 1). An observation is what Form injected, so the voice reads it as context and
@@ -104,16 +107,20 @@ section [form.bml] {
   def ftlr-contract-reason(spans) = ftlr-or(ftlr-spans-reason(spans),ftlr-answered(spans,0));
   def ftlr-count(spans,role) = len(filter(s => (String) s[0] == role, spans));
   // ---- Form asked again ----
-  // A replayer takes a row's controls in order, [[verb, payload], ...], and answers a list of the
-  // same length: each Form's RESULT text, or nothing() where it cannot answer the same way twice.
-  def ftlr-no-replay(pairs) = map(p => nothing(), pairs);
+  // A replayer takes a row's controls in order, [[verb, payload], ...], and the RESULTs recorded for
+  // them, and answers a list of the same length: each Form's RESULT text, or nothing() where it
+  // cannot answer the same way twice. The recorded RESULTs are what a replayer needs to read a
+  // moved coordinate back (a composite's cell moves when the host field is reset): it maps each
+  // recorded coordinate to the one Form answers now, carries the map into the next control, and
+  // answers in the recorded coordinates, so the comparison stays byte for byte.
+  def ftlr-no-replay(pairs,recorded) = map(p => nothing(), pairs);
   def ftlr-pairs(spans) = map(s => [s[1],ftlr-inner(s)], filter(s => (String) s[0] == "control", spans));
   def ftlr-recorded(spans) = map(s => ftlr-inner(s), filter(s => (String) s[0] == "observation", spans));
   // [replayed, unverified], or nothing() when an answer differs from the recorded one. A replayer
   // that answers no list of the right length has replayed nothing.
   def ftlr-replay-check(spans,replay) {
    let pairs = ftlr-pairs(spans);
-   let answers = replay(pairs);
+   let answers = replay(pairs,ftlr-recorded(spans));
    if (!((String) value_kind(answers) == "list")) then [0,len(pairs)] else if (!((Comparable) len(answers) == len(pairs))) then [0,len(pairs)] else ftlr-replay-tally(answers,ftlr-recorded(spans),0,0);
   }
   def ftlr-replay-tally(answers,recorded,v,u) = if nil?(answers) then [v,u] else if nothing?(answers[0]) then ftlr-replay-tally(answers[1:],recorded[1:],v,u + 1) else if ((String) answers[0] == recorded[0]) then ftlr-replay-tally(answers[1:],recorded[1:],v + 1,u) else nothing();
@@ -125,7 +132,7 @@ section [form.bml] {
   def ftlr-first-text(o,keys) = if nil?(keys) then nothing() else (ftlr-text(o,keys[0]) ?? ftlr-first-text(o,keys[1:]));
   def ftlr-row-texts(row) {
    let prompt = ftlr-text(row,"prompt");
-   let completion = ftlr-first-text(row,["completion","stream"]);
+   let completion = ftlr-first-text(row,["stream","completion"]);
    let system = ftlr-text(row,"system") ?? "";
    if ((!nothing?(prompt)) && (!nothing?(completion))) then [prompt,system,completion] else if json-object-has?(row,"messages") then ftlr-message-texts(json-array-elements(json-object-get(row,"messages"))) else [];
   }
@@ -149,8 +156,10 @@ section [form.bml] {
   }
   def ftlr-supervise(span) = if (((String) span[0] == "observation") || ((String) span[0] == "seam")) then 0 else 1;
   def ftlr-segment-node(span) = json-node-object([ftlr-s("role",span[0]),ftlr-s("verb",span[1]),ftlr-s("text",span[2]),ftlr-n("supervise",ftlr-supervise(span))]);
-  def ftlr-train-row(texts,spans,line,check) = json-node-object([ftlr-s("schema","form-token-lora-row-v1"),ftlr-n("source_line",line),ftlr-s("system",texts[1]),ftlr-s("prompt",texts[0]),ftlr-n("observations_replayed",check[0]),ftlr-n("observations_unverified",check[1]),json-node-pair("segments",json-node-array(spans |> map(ftlr-segment-node)))]);
-  // one trace line ([text, number]) -> ["ok", row, spans, number, replayed, unverified]
+  // texts: [prompt, system, completion, split, id, family]; the last three are "" when the trace has none
+  def ftlr-train-row(texts,spans,line,check) = json-node-object([ftlr-s("schema","form-token-lora-row-v1"),ftlr-n("source_line",line),ftlr-s("id",ftlr-texts-at(texts,4)),ftlr-s("family",ftlr-texts-at(texts,5)),ftlr-s("system",texts[1]),ftlr-s("prompt",texts[0]),ftlr-n("observations_replayed",check[0]),ftlr-n("observations_unverified",check[1]),json-node-pair("segments",json-node-array(spans |> map(ftlr-segment-node)))]);
+  def ftlr-texts-at(texts,k) = if (len(texts) > k) then texts[k] else "";
+  // one trace line ([text, number]) -> ["ok", row, spans, number, replayed, unverified, split]
   //                                   | ["refused", reason, number]
   // The JSON reader is lenient, so wholeness is read from where it stopped: one object, ending
   // in its own brace, with nothing but blank after it.
@@ -166,14 +175,14 @@ section [form.bml] {
   }
   def ftlr-read-row(row,line,replay) {
    let texts = ftlr-row-texts(row);
-   if nil?(texts) then ["refused","no-prompt-and-completion",line] else ftlr-read-texts(texts,ftlr-spans(trim(texts[2])),line,replay);
+   if nil?(texts) then ["refused","no-prompt-and-completion",line] else ftlr-read-texts(append(texts,[ftlr-text(row,"split") ?? "",ftlr-text(row,"id") ?? "",ftlr-text(row,"family") ?? ""]),ftlr-spans(trim(texts[2])),line,replay);
   }
   def ftlr-read-texts(texts,read,line,replay) {
    let reason = if ((String) read[0] == "ok") then ftlr-contract-reason(read[1]) else read[1];
    if (!((Comparable) len(reason) == 0)) then ["refused",reason,line] else if ((Comparable) ftlr-count(read[1],"control") == 0) then ["refused","no-control",line] else ftlr-replayed(texts,read[1],line,ftlr-replay-check(read[1],replay));
   }
   def ftlr-replayed(texts,spans,line,check) = if nothing?(check) then ["refused","observation-mismatch",line] else ftlr-admitted(texts,ftlr-seams(spans,0),line,check);
-  def ftlr-admitted(texts,spans,line,check) = ["ok",ftlr-train-row(texts,spans,line,check),spans,line,check[0],check[1]];
+  def ftlr-admitted(texts,spans,line,check) = ["ok",ftlr-train-row(texts,spans,line,check),spans,line,check[0],check[1],ftlr-texts-at(texts,3)];
   // ---- the census: what was read, taught, refused and why ----
   def ftlr-bump(counts,key) = if nil?(counts) then [[key,1]] else if ((String) counts[0][0] == key) then cons([key,counts[0][1] + 1],counts[1:]) else cons(counts[0],ftlr-bump(counts[1:],key));
   def ftlr-bump-all(counts,keys) = foldl((acc, k) => ftlr-bump(acc,k), counts, keys);
@@ -183,9 +192,27 @@ section [form.bml] {
   def ftlr-observations(read) = foldl((acc, r) => acc + ftlr-count(r[2],"observation"), 0, filter(r => ftlr-ok?(r), read));
   def ftlr-sum-at(read,k) = foldl((acc, r) => acc + r[k], 0, filter(r => ftlr-ok?(r), read));
   def ftlr-counts-node(counts) = json-node-object(counts |> map(c => ftlr-n(c[0],c[1])));
-  // Held-out rows: every fifth admitted row; with fewer than five, the last one alone.
+  // Held-out rows: when the traces name their split, a row marked heldout (held-out, test, eval)
+  // is held out and never taught, and every other row is taught; with no split named, every fifth
+  // admitted row, and with fewer than five, the last one alone.
   def ftlr-valid?(i,n) = if (n >= 5) then ((Comparable) (i % 5) == 4) else ((Comparable) i == (n - 1));
+  def ftlr-heldout-names() = ["heldout","held-out","test","eval"];
+  def ftlr-heldout?(r) = any?(k => (String) k == r[6], ftlr-heldout-names());
+  def ftlr-named-split?(rows) = any?(r => (Comparable) len(r[6]) > 0, rows);
+  def ftlr-split-rows(rows) = if ftlr-named-split?(rows) then [ftlr-interleave(filter(r => !ftlr-heldout?(r), rows)),filter(r => ftlr-heldout?(r), rows)] else ftlr-split(rows,0,len(rows),[],[]);
   def ftlr-split(rows,i,n,train,valid) = if nil?(rows) then [reverse(train),reverse(valid)] else if ftlr-valid?(i,n) then ftlr-split(rows[1:],i + 1,n,train,cons(rows[0],valid)) else ftlr-split(rows[1:],i + 1,n,cons(rows[0],train),valid);
+  // A corpus written family by family would teach one family a whole stretch of rounds: the
+  // trainer takes rows in file order, a batch at a time. The taught rows go out in a stride
+  // through the list (a stride coprime with its length visits every row once), so neighbouring
+  // rows come from far apart and a run shorter than one pass still meets every family.
+  def ftlr-gcd(a,b) = if ((Comparable) b == 0) then a else ftlr-gcd(b,a % b);
+  def ftlr-strides() = [97,89,83,79,73,71,67,61,59,53,47,43,41,37,31,29,23,19,17,13,11,7,5,3];
+  def ftlr-stride(n) = foldl((found, k) => if (((Comparable) found == 1) && ((k < n) && ((Comparable) ftlr-gcd(n,k) == 1))) then k else found, 1, ftlr-strides());
+  def ftlr-interleave(rows) {
+   let n = len(rows);
+   let k = ftlr-stride(n);
+   map(j => rows[(j * k) % n], range(0,n));
+  }
   def ftlr-jsonl(rows) = foldl((acc, r) => acc ++ json-emit(r[1]) ++ "\n", "", rows);
   // census: [lines, admitted, refused, reasons, verbs, observations, train, valid, ready,
   //          writes short, replayer, observations replayed, observations unverified]
@@ -220,7 +247,7 @@ section [form.bml] {
   def ftlr-convert-with(traces,data,replayer,replay) {
    let read = ftlr-read-traces-with(traces,replay);
    let ok = filter(r => ftlr-ok?(r), read);
-   let split = ftlr-split(ok,0,len(ok),[],[]);
+   let split = ftlr-split-rows(ok);
    let dir = ftlr-mkdirs(data);
    let wt = ftlr-write(data ++ "/train.jsonl",ftlr-jsonl(split[0]));
    let wv = ftlr-write(data ++ "/valid.jsonl",ftlr-jsonl(split[1]));

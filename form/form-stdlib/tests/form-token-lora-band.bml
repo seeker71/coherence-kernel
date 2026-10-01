@@ -10,7 +10,7 @@
 ; Qwen head's opening fit is solved on a small synthetic head and its adapter is written as
 ; safetensors by Form and read back.
 ;
-; Verdict 16383 when every claim lands:
+; Verdict 32767 when every claim lands:
 ;   1    a stream reads into prose, control, observation, prose spans, the verb and the answer exact
 ;   2    the eleven refusals carry their reasons: control-unanswered, no-control, json,
 ;        observation-without-control, unknown-verb:shell, off-contract-result (an answer that is
@@ -53,6 +53,12 @@
 ;   8192 the control IDs: the bare opening, the eight contract verbs in order, nothing outside;
 ;        after the bare opening, a contract verb passes, an "observation" or any other verb is
 ;        answered in place with nothing=observations-come-from-form; or nothing=unknown-verb:V;
+;  16384 a corpus that names its split, written the trace corpus's way (a completion holding only the first
+;        control, a stream holding the whole reply): every row is read from its stream and admitted; the
+;        rows marked heldout are held out and never taught, the rest are taught in a stride through the
+;        list (four rows go out t0, t5, t3, t2), so a short run still meets every family; the first
+;        taught row reaches the trainer's door with supervised targets; a stride is the first of the
+;        listed primes below the length and coprime with it, 1 when none is
 section [form.bml] {
  class FormTokenLoraBand {
   def ftlb-bit(ok, bit) = ok ? bit : 0;
@@ -94,7 +100,7 @@ section [form.bml] {
   def ftlb-c11() = "<|form:eval|>6*7<|/form:eval|><|form:observation|>value=41;<|/form:observation|> It is 41.";
   // Form asked again, as a fixture: two evals answer, every other control cannot be asked twice
   def ftlb-answer(p) = (String) p[0] == "eval" && (String) p[1] == "6*7" ? "value=42;" : (String) p[0] == "eval" && (String) p[1] == "1+1" ? "value=2;" : nothing();
-  def ftlb-replay(pairs) = map(p => ftlb-answer(p), pairs);
+  def ftlb-replay(pairs, recorded) = map(p => ftlb-answer(p), pairs);
   def ftlb-root() = temp_dir() ++ "/form-token-lora-band-" ++ host_pid().str();
   def ftlb-roles(spans) = map(s => s[0], spans);
   // ---- bit 1 ----
@@ -286,6 +292,23 @@ section [form.bml] {
    && (String) lbw-of-after-open("observation") == "<|form:observation|>nothing=observations-come-from-form;<|/form:observation|>"
    && (String) lbw-of-after-open("shell") == "<|form:observation|>nothing=unknown-verb:shell;<|/form:observation|>";
   }
+  // ---- bit 16384: a corpus that names its split, written the way the trace corpus writes it ----
+  def ftlb-split-names() = ["train", "heldout", "train", "train", "heldout", "train"];
+  def ftlb-split-line(i) = ftlb-o([ftlr-s("id", "t" ++ i.str()), ftlr-s("family", "f" ++ (i % 2).str()), ftlr-s("split", ftlb-split-names()[i]), ftlr-s("prompt", "q" ++ i.str()), ftlr-s("completion", "<|form:eval|>" ++ i.str() ++ "+1<|/form:eval|>"), ftlr-s("stream", "<|form:eval|>" ++ i.str() ++ "+1<|/form:eval|>\n<|form:observation|>value=" ++ (i + 1).str() ++ ";<|/form:observation|>\n" ++ (i + 1).str())]);
+  def ftlb-ids(path) = map(l => nld-string(parse-json("row", l[0]), "id"), nld-lines(read_file(path) ?? ""));
+  def ftlb-named-split(root) {
+   let traces = root ++ "/named.jsonl";
+   let wrote = write_file_text(traces, foldl((acc, i) => acc ++ ftlb-split-line(i) ++ "\n", "", [0, 1, 2, 3, 4, 5]));
+   let c = ftlr-convert(traces, root ++ "/named");
+   let first = nld-row(ftlb-tk(), parse-json("row", nld-lines(read_file(root ++ "/named/train.jsonl") ?? "")[0][0]), 1, 1);
+   let shown = print(["named-split", ftlr-census-line(c), ftlb-ids(root ++ "/named/train.jsonl"), ftlb-ids(root ++ "/named/valid.jsonl")]);
+   (Comparable) c[1] == 6 && (Comparable) c[6] == 4 && (Comparable) c[7] == 2 && (Comparable) c[5] == 6
+   && (Value) ftlb-ids(root ++ "/named/valid.jsonl") == ["t1", "t4"]
+   && (Value) ftlb-ids(root ++ "/named/train.jsonl") == ["t0", "t5", "t3", "t2"]
+   && (Comparable) first[3] > 0.0
+   && (Value) map(n => ftlr-stride(n), [1, 4, 6, 97, 514, 9409]) == [1, 3, 5, 89, 97, 89]
+   && (Value) ftlr-interleave([1, 2, 3, 4, 5]) == [1, 4, 2, 5, 3];
+  }
  }
  let root = ftlb-root();
  let made = fs_mkdir(root);
@@ -309,7 +332,8 @@ section [form.bml] {
   + ftlb-bit(ftlb-segment-marks(tk), 1024)
   + ftlb-bit(ftlb-writes(traces, root), 2048)
   + ftlb-bit(ftlb-knowing(), 4096)
-  + ftlb-bit(ftlb-control-ids(), 8192);
+  + ftlb-bit(ftlb-control-ids(), 8192)
+  + ftlb-bit(ftlb-named-split(root), 16384);
  let shown = print(["form-token-lora-band", ftlr-census-line(census), "verdict", verdict]);
  let cleared = fs-remove-tree(root);
  verdict;

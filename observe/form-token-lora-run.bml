@@ -1,21 +1,30 @@
 // form-token-lora-run.bml — teach the local voices Form's in-stream controls, and read what they learned.
 //
 // stdin, optional, one JSON line (default {"lane":"census"}):
-//   {"lane":"census"|"llama"|"qwen"|"kernels", "traces":"learn/form-token-traces.jsonl",
-//    "steps":2, "batch":1, "learning_rate":0.0001, "parent":"form/form-stdlib/adapters/llama-3.2-3b-voice-native",
+//   {"lane":"census"|"llama"|"qwen"|"kernels", "traces":"learn/form-token-traces.jsonl", "replay":1,
+//    "steps":2, "batch":1, "learning_rate":0.0001, "save_every":25,
+//    "parent":"form/form-stdlib/adapters/llama-3.2-3b-voice-native",
+//    "export":"form/form-stdlib/adapters/llama-3.2-3b-form-tokens",
 //    "model":"qwen38-q8", "target":"text"|"control-id", "max_sites":24, "span":512, "ridge":0.001, "margin":1.0,
 //    "refine_rounds":3, "rivals":8}
 //
 // census  reads the traces through form-token-lora.bml into .hearth/form-token-lora/data-<ms>:
 //         train.jsonl, valid.jsonl, census.json. Model-free. A row off the contract is refused
-//         with its reason; no replayer stands in this door yet, so every admitted answer is
-//         counted in observations_unverified, never trusted silently.
+//         with its reason. Form is asked again before a row is taught: each row's controls run in
+//         a fresh token session with moved coordinates carried both ways, and a row Form no longer
+//         answers the same way is refused observation-mismatch ("replay":0 counts every answer
+//         unverified instead). A corpus that names its split keeps its heldout rows out of
+//         training; the taught rows go to the trainer in a stride, every family early.
 // llama   does the census, then trains the native Llama-3.2-3B voice lane (native-lora-train.bml,
 //         in this process, no crossing) from the parent adapter for `steps` rounds into a fresh
-//         output directory. Observation spans are masked out of the loss; prose and controls are
-//         taught. The trainer scores the held-out rows before and after (validation) and grades
-//         each held-out row (assessment-before/after.json); this door reads both back. It trains
-//         only when every file it hands the trainer read back whole.
+//         output directory, a generation every `save_every` rounds and after the last. Observation
+//         spans are masked out of the loss; prose and controls are taught. The trainer scores the
+//         held-out rows before and after (validation) and grades each held-out row
+//         (assessment-before/after.json); this door reads both back, with the round losses as
+//         the curve and the held-out loss per family. The last generation's adapter is exported
+//         through the checkpoint door into `export`, the directory the lora arm of
+//         observe/form-token-eval-run.bml wears. It trains only when every file it hands the
+//         trainer read back whole.
 // qwen    reads the sites (every point in a traced completion where the voice chose what came
 //         next), prefills each on the local Qwen3.8, fits the rank-one head adapter toward the
 //         control opening on the kept trace rows (qwen-lora-train.fk qlt-opening-fit), admits it
@@ -30,9 +39,12 @@
 //
 // Every lane appends one row to receipts/form-token-lora.jsonl: the census, the lane's reading,
 // rent 0. Serving is not changed here: an adapter moves into a lane only by a separate,
-// witnessed decision. The llama and qwen lanes hold the GPU; run them on a quiet one.
+// witnessed decision. The llama and qwen lanes hold the GPU: while another door holds a model
+// (form-token-eval.bml fte-held) they name it and open nothing.
 // preflight-exec: forbidden
 import form-stdlib/bml/form-token-lora.bml;
+import form-stdlib/bml/form-token-eval.bml;
+import form-stdlib/bml/form-token-grammar.bml;
 import form-stdlib/native-lora-train.bml;
 import form-stdlib/qwen-lora-train.fk;
 import form-stdlib/model-registry.bml;
@@ -62,10 +74,18 @@ section [form.bml] {
    let m2 = fs_mkdir(ftlrr-root());
    ftlrr-root() ++ "/data-" ++ now_unix_ms().str();
   }
+  // Form asked again before a row is taught: each row's controls run in a fresh token session
+  // (form-token-grammar.bml), coordinates carried both ways (form-token-eval.bml fte-replay); a row
+  // whose observation Form no longer answers the same way is refused observation-mismatch.
+  // "replay":0 reads the rows unverified, as the census did before the grammar landed.
+  def ftlrr-replay(pairs, recorded) {
+   let session = ftg-session-fresh();
+   fte-replay((v, x) => ftg-observe-with(session, v, x), pairs, recorded);
+  }
   def ftlrr-census(opts) {
    let traces = ftlrr-str(opts, "traces", "learn/form-token-traces.jsonl");
    let data = ftlrr-data();
-   let c = ftlr-convert(traces, data);
+   let c = (Comparable) ftlrr-num(opts, "replay", 1) == 0 ? ftlr-convert(traces, data) : ftlr-convert-with(traces, data, "form-token-grammar", ftlrr-replay);
    let shown = print_str(ftlr-census-line(c));
    [traces, data, c];
   }
@@ -80,13 +100,21 @@ section [form.bml] {
   }
   def ftlrr-assessment(data) = "[" ++ foldl((acc, l) => (Comparable) len(acc) == 0 ? l : acc ++ "," ++ l, "", ftlrr-lines(data ++ "/valid.jsonl")) ++ "]\n";
   def ftlrr-llama-assessed(opts, held, short) = (Comparable) len(short) > 0 ? ftlr-ledger-row(held[2], held[0], held[1], [ftlr-s("lane", "llama"), ftlr-s("result", "not-ready: " ++ short)]) : ftlrr-llama-ready(opts, held);
+  // The run trains from the parent into its own run directory (a generation per round, through
+  // native-lora-checkpoint.bml), and the last generation's adapter is exported through the same
+  // door into `export` (form/form-stdlib/adapters/llama-3.2-3b-form-tokens by default), the
+  // directory a voice wears. The row reads the curve (each round's batch loss: the first, the
+  // means of the first and last tenth, the last), the held-out loss before and after, and the
+  // held-out rows' loss per family, before and after.
+  def ftlrr-export-default() = "form/form-stdlib/adapters/llama-3.2-3b-form-tokens";
   def ftlrr-llama-ready(opts, held) {
    let data = held[1];
    let parent = ftlrr-str(opts, "parent", "form/form-stdlib/adapters/llama-3.2-3b-voice-native");
    let steps = ftlrr-num(opts, "steps", 2);
    let assessment = data ++ "/assessment.json";
    let out = ftlrr-root() ++ "/llama-" ++ now_unix_ms().str();
-   let request = ftlrr-with(ntr-request(mr-path(mr-find("llama32-3b-mlx-4bit")), parent, data, out, steps, ftlrr-num(opts, "batch", 1), ftlrr-num(opts, "learning_rate", 0.0001), 1, ftlrr-layers(parent)), "assessment", json-node-string(assessment));
+   let served = ftlrr-str(opts, "export", ftlrr-export-default());
+   let request = ftlrr-with(ftlrr-with(ftlrr-with(ntr-request(mr-path(mr-find("llama32-3b-mlx-4bit")), parent, data, out, steps, ftlrr-num(opts, "batch", 1), ftlrr-num(opts, "learning_rate", 0.0001), 1, ftlrr-layers(parent)), "assessment", json-node-string(assessment)), "export", json-node-string(served)), "save_every", json-node-int(ftlrr-num(opts, "save_every", 25)));
    let started = now_unix_ms();
    let result = ntr-run(request);
    let events = ftlrr-validations(out);
@@ -94,14 +122,43 @@ section [form.bml] {
    let after = len(events) < 2 ? -1.0 : ftlrr-loss(reverse(events)[0]);
    let graded-before = ftlrr-mean-loss(out ++ "/assessment-before.json");
    let graded-after = ftlrr-mean-loss(out ++ "/assessment-after.json");
-   ftlr-ledger-row(held[2], held[0], data, [ftlr-s("lane", "llama"), ftlr-s("parent", parent), ftlr-s("child", nag-resolve(out)), ftlr-n("steps", steps), ftlr-n("optimizer_step", result[0]), ftlr-s("reason", result[2]), ftlr-n("valid_loss_before_milli", ftlrr-milli(before)), ftlr-n("valid_loss_after_milli", ftlrr-milli(after)), ftlr-n("held_out_row_loss_before_milli", ftlrr-milli(graded-before)), ftlr-n("held_out_row_loss_after_milli", ftlrr-milli(graded-after)), ftlr-n("better", (before > 0.0) && ((after > 0.0) && (after < before)) ? 1 : 0), ftlr-n("rent_tokens", 0), ftlr-n("wall_ms", now_unix_ms() - started)]);
+   let curve = ftlrr-curve(ftlrr-round-losses(out));
+   let families = ftlrr-family-losses(data ++ "/valid.jsonl", out ++ "/assessment-before.json", out ++ "/assessment-after.json");
+   let shown = print(["form-token-lora-llama", "curve", curve, "families", families]);
+   ftlr-ledger-row(held[2], held[0], data, [ftlr-s("lane", "llama"), ftlr-s("parent", parent), ftlr-s("child", nag-resolve(out)), ftlr-s("export", served), ftlr-n("exported_bytes", file_size(served ++ "/adapters.safetensors")), ftlr-n("steps", steps), ftlr-n("batch", ftlrr-num(opts, "batch", 1)), ftlr-n("learning_rate_micro", float_to_int(ftlrr-num(opts, "learning_rate", 0.0001) * 1000000.0)), ftlr-n("optimizer_step", result[0]), ftlr-s("reason", result[2]), ftlr-n("valid_loss_before_milli", ftlrr-milli(before)), ftlr-n("valid_loss_after_milli", ftlrr-milli(after)), ftlr-n("held_out_row_loss_before_milli", ftlrr-milli(graded-before)), ftlr-n("held_out_row_loss_after_milli", ftlrr-milli(graded-after)), ftlr-n("better", (before > 0.0) && ((after > 0.0) && (after < before)) ? 1 : 0), json-node-pair("curve_milli", ftlrr-curve-node(curve)), json-node-pair("held_out_families_milli", ftlrr-families-node(families)), ftlr-n("rent_tokens", 0), ftlr-n("wall_ms", now_unix_ms() - started)]);
   }
+  // ---- the curve and the families ----
+  def ftlrr-round-losses(out) = map(e => ftlrr-loss(e), filter(e => (String) ftlrr-stage(e) == "round", map(x => parse-json("training-event", x), ftlrr-lines(out ++ "/training-events.jsonl"))));
+  def ftlrr-mean(xs) = nil?(xs) ? -1.0 : foldl((acc, x) => acc + x, 0.0, xs) / (len(xs) + 0.0);
+  def ftlrr-tenth(n) = n < 10 ? 1 : n / 10;
+  // [rounds, first, mean of the first tenth, mean of the last tenth, last]
+  def ftlrr-curve(losses) = nil?(losses) ? [0, -1.0, -1.0, -1.0, -1.0] : [len(losses), losses[0], ftlrr-mean(take(ftlrr-tenth(len(losses)), losses)), ftlrr-mean(take(ftlrr-tenth(len(losses)), reverse(losses))), reverse(losses)[0]];
+  def ftlrr-curve-node(c) = json-node-object([ftlr-n("rounds", c[0]), ftlr-n("first", ftlrr-milli(c[1])), ftlr-n("first_tenth_mean", ftlrr-milli(c[2])), ftlr-n("last_tenth_mean", ftlrr-milli(c[3])), ftlr-n("last", ftlrr-milli(c[4]))]);
+  // [[family, rows, mean loss before, mean loss after]] over the held-out rows, in order of first appearance
+  def ftlrr-json-rows(path) {
+   let text = read_file(path);
+   nothing?(text) ? [] : json-array-elements(parse-json(path, text));
+  }
+  def ftlrr-family-of(line) = ftlr-text(parse-json("valid-row", line), "family") ?? "";
+  def ftlrr-row-loss(rows, i) = i < len(rows) ? node_value(json-object-get(rows[i], "loss")) : -1.0;
+  def ftlrr-family-losses(valid, beforePath, afterPath) {
+   let fams = map(l => ftlrr-family-of(l), ftlrr-lines(valid));
+   let b = ftlrr-json-rows(beforePath);
+   let a = ftlrr-json-rows(afterPath);
+   let idx = range(0, len(fams));
+   let names = foldl((acc, f) => any?(x => (String) x == f, acc) ? acc : append(acc, [f]), [], fams);
+   map(f => ftlrr-family-row(f, filter(i => (String) fams[i] == f, idx), b, a), names);
+  }
+  def ftlrr-family-row(f, is, b, a) = [f, len(is), ftlrr-mean(map(i => ftlrr-row-loss(b, i), is)), ftlrr-mean(map(i => ftlrr-row-loss(a, i), is))];
+  def ftlrr-families-node(fs) = json-node-object(map(f => json-node-pair((String) f[0] == "" ? "unnamed" : f[0], json-node-array([json-node-int(f[1]), json-node-int(ftlrr-milli(f[2])), json-node-int(ftlrr-milli(f[3]))])), fs));
   // ---- qwen: the rank-one head toward the control opening ----
-  // Balanced sites: up to half the cap from the openings, the rest from the other choices.
+  // Balanced sites: up to half the cap from the openings, the rest from the other choices, each
+  // taken in a stride through the corpus (form-token-lora.bml ftlr-interleave), so a corpus
+  // written family by family gives the fit every family, not the first one's rows.
   def ftlrr-take(xs, n) = (n <= 0) || nil?(xs) ? [] : cons(xs[0], ftlrr-take(xs[1:], n - 1));
   def ftlrr-cap(sites, cap) {
-   let pos = filter(s => (Comparable) s[3] == 1, sites);
-   let neg = filter(s => (Comparable) s[3] == 0, sites);
+   let pos = ftlr-interleave(filter(s => (Comparable) s[3] == 1, sites));
+   let neg = ftlr-interleave(filter(s => (Comparable) s[3] == 0, sites));
    let p = ftlrr-take(pos, cap / 2);
    append(p, ftlrr-take(neg, cap - len(p)));
   }
@@ -140,10 +197,14 @@ section [form.bml] {
    let held = ftlrr-census(opts);
    ftlr-ledger-row(held[2], held[0], held[1], [ftlr-s("lane", "census")]);
   }
+  // A lane that opens a model first reads the host: while another door holds one
+  // (form-token-eval.bml fte-held), it names them, opens nothing and writes no row.
+  def ftlrr-model-lane?(lane) = ((String) lane == "llama") || ((String) lane == "qwen");
   def ftlrr-run() {
    let opts = ftlrr-opts();
    let lane = ftlrr-str(opts, "lane", "census");
-   let landed = (String) lane == "llama" ? ftlrr-llama(opts) : (String) lane == "qwen" ? ftlrr-qwen(opts) : (String) lane == "kernels" ? ftlrr-kernels(opts) : ftlrr-census-lane(opts);
+   let held = ftlrr-model-lane?(lane) ? fte-held() : [];
+   let landed = !nil?(held) ? fte-held-text(held) :(String) lane == "llama" ? ftlrr-llama(opts) : (String) lane == "qwen" ? ftlrr-qwen(opts) : (String) lane == "kernels" ? ftlrr-kernels(opts) : ftlrr-census-lane(opts);
    print_str("[form-token-lora] " ++ lane ++ " " ++ landed);
   }
  }

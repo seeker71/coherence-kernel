@@ -20,10 +20,15 @@
 //                           is read once: the coding lane's replies from their own files, its transcripts for their
 //                           IDs and markers. Teaching corpora are counted as taught, never as generated.
 //                           observe/form-token-census.bml prints it.
-//   the evaluation (fte-*)  each held-out question asked twice, without Form-token teaching and with it; the answer
-//                           judged exact, with the controls emitted, the observations returned and the answer that
-//                           is one of them, the refusals, the forged words, the replies cut short, the local IDs per
-//                           correct answer and each question's own microthought owner released.
+//   the evaluation (fte-*)  each held-out question asked in arms: plain (no Form), taught (Form-token teaching in the
+//                           prompt) and lora (the question alone, the teaching in the voice's weights). Form answers
+//                           in the voice's own stream (fte-stream: the observation enters the same KV the moment a
+//                           control closes) or, for a voice asked whole turns, at turn level (fte-reply). The answer
+//                           is judged exact against the corpus answer read in the reply's own coordinates, with the
+//                           controls emitted, the observations returned and the answer that is one of them, the
+//                           refusals, the forged words, the replies cut short, the local IDs per correct answer, per
+//                           family, and each question's own Form released. fte-replay asks Form again with moved
+//                           coordinates carried both ways (the LoRA corpus's replayer).
 //                           observe/form-token-eval-run.bml asks a local voice.
 // A reading that did not arrive is nothing, never 0: a rate over no generated IDs and IDs per correct answer over
 // no correct answer read null.
@@ -355,7 +360,10 @@ section [form.bml] {
   // no placeholder brackets here: a voice taught by examples echoes them around its answer
   def fte-instruction() = "End your reply with one line that begins with Answer: and holds only the exact answer.";
   def fte-teaching() = mc-cat(["You run inside Form, a runtime that can compute and look things up for you while you answer. ", "To ask it, write one control and stop: Form writes its observation into your reply as ", ftcn-control(ftcn-observation(), "RESULT"), ", where RESULT is value=<value>; or recipe=@<address>; or node=@<address>; or nothing=<reason>;. ", "Controls: ", ftcn-control("eval", "17 * 23 + 4"), " evaluates a pure expression (arithmetic, comparisons, strings, lists). ", ftcn-control("knowledge-query", "words naming the concept"), " looks the concept up in the body's grounded rows. ", ftcn-control("node-get", "@p.l.t.i"), " reads a node: its kind, value and children. ", ftcn-control("node-make", "category;@child,@child"), " makes a node and answers its address. ", ftcn-control("node-select", "predicate;@a,@b"), " answers the first node the predicate holds for. ", ftcn-control("recipe-birth", "affine-i32;mul=3;add=7"), " makes a recipe and answers recipe=@address; ", ftcn-control("recipe-exec", "@address;input=5;carrier=metal"), " runs it with that exact address and answers value=<value>;. ", ftcn-control("choice", "@first,@second;input=5;carrier=metal"), " tries recipes in order until one answers a value. ", "Use an observation's value in your answer; a control alone proves nothing, and nothing=<reason> is not an answer."]);
-  def fte-prompt(arm, question) = (String) arm == "plain" ? mc-cat(["Question: ", question, "\n", fte-instruction()]) : mc-cat([fte-teaching(), "\n\nQuestion: ", question, "\n", fte-instruction()]);
+  // The lora arm is taught by its weights, not its prompt: it is asked the question alone, the way the trace rows
+  // it learned from ask it (learn/form-token-traces.jsonl prompt), and its answer is the line after Form's last
+  // observation.
+  def fte-prompt(arm, question) = (String) arm == "plain" ? mc-cat(["Question: ", question, "\n", fte-instruction()]) : (String) arm == "lora" ? question : mc-cat([fte-teaching(), "\n\nQuestion: ", question, "\n", fte-instruction()]);
   def fte-continue(prompt, stream) = mc-cat([prompt, "\n\nYour reply so far, with Form's observation:\n", stream, "\n\nContinue your reply from Form's observation."]);
   // ── Form's answer kept to the contract: failure=<reason>; (microthought's word) reads nothing=<reason>;, and a
   //    result outside the four reads nothing=result-outside-contract; ──
@@ -435,32 +443,151 @@ section [form.bml] {
   def fte-fold(js) = foldl((a, j) => [a[0] + 1, a[1] + j[0], a[2] + j[1], a[3] + j[2], a[4] + j[3], a[5] + j[4], a[6] + j[5], a[7] + j[6], a[8] + j[7], a[9] + j[8], a[10] + j[9], a[11] + j[10], a[12] + j[11]], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], js);
   def fte-per-correct(s) = s[1] <= 0 ? nothing() : s[7] / s[1];
   // each held-out row asked in each arm: [[arm, fold, [[id, judgement, answer, stream, stop, cut tails]...]], ...]
-  def fte-arm(rows, arm, ask, observer, crossings) {
-   let judged = map(r => fte-judged(r, fte-reply(ask, observer, arm, fte-question(r), crossings)), rows);
+  def fte-arm(rows, arm, ask, observer, crossings) = fte-arm-by(rows, arm, (a, q) => fte-reply(ask, observer, a, q, crossings));
+  // reply(arm, question) answers one reply in the shape above
+  def fte-arm-by(rows, arm, reply) {
+   let judged = map(r => fte-judged(r, reply(arm, fte-question(r))), rows);
    [arm, fte-fold(map(j => j[1], judged)), judged];
   }
-  def fte-judged(row, reply) = [fte-id(row), fte-judge(fte-expected(row), reply), fte-answer(reply[0], ftcn-answer-from(ftcn-controls(reply[0]))), reply[0], reply[2], fte-cuts(reply)];
+  // the same, asking no question once the clock passes deadline (unix ms; nothing: no deadline): an arm
+  // reads only the questions it asked, and the rows it never reached are no answers of its own
+  def fte-arm-until(rows, arm, reply, deadline) {
+   let judged = fte-judged-until(rows, arm, reply, deadline, []);
+   [arm, fte-fold(map(j => j[1], judged)), judged];
+  }
+  def fte-judged-until(rows, arm, reply, deadline, acc) = nil?(rows) || (!nothing?(deadline) && (now_unix_ms() > deadline)) ? reverse(acc) : fte-judged-until(rows[1:], arm, reply, deadline, cons(fte-judged(rows[0], reply(arm, fte-question(rows[0]))), acc));
+  // [id, judgement, answer, stream, stop, cut tails, family, expected here]
+  def fte-judged(row, reply) {
+   let expected = fte-expected-here(row, reply);
+   [fte-id(row), fte-judge(expected, reply), fte-answer(reply[0], ftcn-answer-from(ftcn-controls(reply[0]))), reply[0], reply[2], fte-cuts(reply), fte-field(row, ["family"]), expected];
+  }
   def fte-evaluate(rows, arms, ask, observer, crossings) = map(arm => fte-arm(rows, arm, ask, observer, crossings), arms);
+  // ── the expected answer, Form-checked in this reply's own coordinates ──
+  // A node or recipe address is a cell in the host field: the corpus recorded the run that wrote it, and
+  // this reply's Form answered its own. Each recorded observation's coordinates map to the ones Form
+  // answered here, observation by observation in order (the corpus's replay maps them the same way,
+  // form-token-traces.bml ftr-replay), and the expected answer is read through that map. A row with no
+  // recorded observations, or a reply Form never answered, keeps its answer as written.
+  def fte-recorded(row) = fcgp-present?(row, "observations") ? map(o => json-string-value(o), json-array-elements(json-object-get(row, "observations"))) : [];
+  def fte-coord-byte?(b) = ftcn-digit?(b) || ((Comparable) b == 46);
+  def fte-coord-end(t, i) = (i < len(t)) && fte-coord-byte?(str_byte_at(t, i)) ? fte-coord-end(t, i + 1) : i;
+  def fte-coords(t) = fte-coords-from(t, 0, []);
+  def fte-coords-from(t, from, out) {
+   let at = str_find(t, "@", from);
+   let end = at < 0 ? 0 : fte-coord-end(t, at + 1);
+   at < 0 ? reverse(out) : fte-coords-from(t, end, end > (at + 1) ? cons(substring(t, at, end), out) : out);
+  }
+  def fte-mapped(pairs, c) = foldl((found, p) => nothing?(found) && ((String) p[0] == c) ? p[1] : found, nothing(), pairs);
+  def fte-aligned(pairs, recorded, fresh) = nil?(recorded) || nil?(fresh) ? pairs : fte-aligned(nothing?(fte-mapped(pairs, recorded[0])) ? append(pairs, [[recorded[0], fresh[0]]]) : pairs, recorded[1:], fresh[1:]);
+  def fte-table(pairs, recorded, fresh) = nil?(recorded) || nil?(fresh) ? pairs : fte-table(fte-aligned(pairs, fte-coords(recorded[0]), fte-coords(fresh[0])), recorded[1:], fresh[1:]);
+  def fte-subst(t, pairs) = fte-subst-from(t, 0, pairs, "");
+  def fte-subst-from(t, from, pairs, out) {
+   let at = str_find(t, "@", from);
+   let end = at < 0 ? 0 : fte-coord-end(t, at + 1);
+   let c = at < 0 ? "" : substring(t, at, end);
+   at < 0 ? mc-cat([out, substring(t, from, len(t))]) : fte-subst-from(t, end, pairs, mc-cat([out, substring(t, from, at), fte-mapped(pairs, c) ?? c]));
+  }
+  // Form asked again, in order, the coordinates carried both ways: each control runs with the recorded
+  // coordinates in its payload read as the ones this run answered, and each RESULT comes back in the recorded
+  // coordinates, so it reads byte for byte against the recorded one (form-token-lora.bml's replayer contract).
+  // observe(verb, payload) is Form for one row.
+  def fte-replay(observe, pairs, recorded) = fte-replay-at(observe, pairs, recorded, [], []);
+  def fte-replay-at(observe, pairs, recorded, table, out) = nil?(pairs) ? reverse(out) : fte-replay-one(observe, pairs, recorded, table, out, observe(pairs[0][0], fte-subst(pairs[0][1], table)));
+  def fte-replay-one(observe, pairs, recorded, table, out, fresh) {
+   let next = nil?(recorded) ? table : fte-aligned(table, fte-coords(recorded[0]), fte-coords(fresh));
+   fte-replay-at(observe, pairs[1:], nil?(recorded) ? [] : recorded[1:], next, cons(fte-subst(fresh, map(p => [p[1], p[0]], next)), out));
+  }
+  def fte-answered(reply) = map(it => it[2], filter(it => (Comparable) len(it[2]) > 0, ftcn-controls(reply[0])));
+  def fte-expected-here(row, reply) = fte-subst(fte-expected(row), fte-table([], fte-recorded(row), fte-answered(reply)));
+  // ── the in-stream walk: Form answers a control the moment the voice closes it, in the same stream ──
+  // voice is [begin(prompt) -> state, pick(state, text so far) -> [id, text, stop], feed(state, ids) -> state,
+  // encode(text) -> ids, end(state) -> released]. stop is "" while the voice goes on, else why it stopped
+  // ("eos", a memory or capacity reason). After each ID the voice writes, the text since the last
+  // observation is read; when it holds a closed control, the voice's ID goes into its stream, then Form's seam
+  // (a newline, unless the voice wrote one) and Form's observation, each encoded on its own as the trained
+  // segment rows encode them, and the voice predicts on from there: one stream, no re-asking. observe is
+  // nothing() for a voice Form does not answer (the plain arm), and at most `crossings` controls are answered.
+  // [stream, voice IDs, stop, crossings, cut tails (none: nothing is cut), IDs Form injected]
+  def fte-stream(voice, observe, prompt, limit, crossings) {
+   let s = voice[0](prompt);
+   let r = fte-stream-go(voice, observe, s, "", "", 0, limit, crossings, 0, 0);
+   let ended = voice[4](r[6]);
+   take(6, r);
+  }
+  def fte-stream-go(voice, observe, s, seg, stream, n, limit, left, made, injected) {
+   let picked = voice[1](s, mc-cat([stream, seg]));
+   if !((String) picked[2] == "") then fte-stream-end(stream, seg, n, picked[2], made, injected, s)
+   else if n >= limit then fte-stream-end(stream, seg, n, "token-limit", made, injected, s)
+   else fte-stream-step(voice, observe, s, mc-cat([seg, picked[1]]), stream, n + 1, limit, left, made, injected, picked[0]);
+  }
+  def fte-stream-end(stream, seg, n, stop, made, injected, s) = [mc-cat([stream, fte-unforge(seg)]), n, stop, made, [], injected, s];
+  def fte-stream-step(voice, observe, s, seg, stream, n, limit, left, made, injected, id) {
+   let found = (left <= 0) || nothing?(observe) ? nothing() : fte-first-control(seg);
+   if nothing?(found) then fte-stream-go(voice, observe, voice[2](s, [id]), seg, stream, n, limit, left, made, injected)
+   else fte-stream-cross(voice, observe, s, seg, stream, n, limit, left, made, injected, id, found);
+  }
+  def fte-ends-newline?(t) = (len(t) > 0) && ((Comparable) str_byte_at(t, len(t) - 1) == 10);
+  def fte-stream-cross(voice, observe, s, seg, stream, n, limit, left, made, injected, id, found) {
+   let envelope = ftcn-control(ftcn-observation(), fte-contract(observe(found[0], found[1])));
+   let seam = fte-ends-newline?(seg) ? "" : byte_to_str(10);
+   let ids = append((String) seam == "" ? [] : voice[3](seam), voice[3](envelope));
+   fte-stream-go(voice, observe, voice[2](s, cons(id, ids)), "", mc-cat([stream, fte-unforge(seg), seam, envelope]), n, limit, left - 1, made + 1, injected + len(ids));
+  }
+  // One arm's reply over the walk: walk(prompt, observe, crossings) answers fte-stream's shape. The plain arm
+  // opens no Form; every other arm opens its own observer for the question and releases it after.
+  // [stream, voice IDs, stop, crossings, cut tails, owner released, IDs Form injected]
+  def fte-stream-reply(walk, observer, arm, question, crossings) {
+   let prompt = fte-prompt(arm, question);
+   if (String) arm == "plain" then fte-stream-shaped(walk(prompt, nothing(), 0), nothing()) else fte-stream-taught(walk, observer(), prompt, crossings);
+  }
+  def fte-stream-taught(walk, form, prompt, crossings) {
+   let r = walk(prompt, form[0], crossings);
+   let released = form[1]();
+   fte-stream-shaped(r, released ? 1 : 0);
+  }
+  def fte-stream-shaped(r, released) = [r[0], r[1], r[2], r[3], r[4], released, r[5]];
+  def fte-injected(reply) = len(reply) > 6 ? reply[6] : 0;
+  // ── per family: [family, questions, exact, controls, observations, used, refusals, forged, IDs] ──
+  def fte-family-names(judged) = foldl((acc, q) => ftcn-member?(q[6], acc) ? acc : append(acc, [q[6]]), [], judged);
+  def fte-families(a) = map(f => fte-family-fold(f, filter(q => (String) q[6] == f, a[2])), fte-family-names(a[2]));
+  def fte-family-fold(f, qs) = [f, len(qs), fte-sum-at(qs, 0), fte-sum-at(qs, 1), fte-sum-at(qs, 2), fte-sum-at(qs, 3), fte-sum-at(qs, 4), fte-sum-at(qs, 8), fte-sum-at(qs, 6)];
+  def fte-sum-at(qs, k) = foldl((acc, q) => acc + q[1][k], 0, qs);
+  def fte-family-line(arm, f) = mc-cat(["[form-token-eval] ", arm, " ", (String) f[0] == "" ? "unnamed" : f[0], ": exact ", f[2].str(), " of ", f[1].str(), ", controls ", f[3].str(), ", observations ", f[4].str(), " (", f[5].str(), " used), refusals ", f[6].str(), ", forged ", f[7].str(), ", IDs ", f[8].str()]);
+  def fte-family-node(f) = json-node-object([fhn-s("family", (String) f[0] == "" ? "unnamed" : f[0]), fhn-n("questions", f[1]), fhn-n("exact", f[2]), fhn-n("controls", f[3]), fhn-n("observations", f[4]), fhn-n("used", f[5]), fhn-n("refusals", f[6]), fhn-n("forged", f[7]), fhn-n("ids", f[8])]);
+  // the rows family by family in turn: the first of each family, then the second of each, and on, so an
+  // evaluation cut short by its deadline has still asked every family
+  def fte-round-robin(rows) {
+   let names = foldl((acc, r) => ftcn-member?(fte-field(r, ["family"]), acc) ? acc : append(acc, [fte-field(r, ["family"])]), [], rows);
+   fte-turns(map(f => filter(r => (String) fte-field(r, ["family"]) == f, rows), names), []);
+  }
+  def fte-turns(groups, out) = nil?(groups) ? reverse(out) : fte-turns(filter(g => !nil?(g), map(g => g[1:], groups)), foldl((acc, g) => cons(g[0], acc), out, groups));
+  // the first k held-out rows of each family, in corpus order
+  def fte-per-family(rows, k) =fte-per-family-at(rows, k, [], []);
+  def fte-per-family-at(rows, k, counts, out) = nil?(rows) ? reverse(out) : fte-per-family-one(rows[0], rows[1:], k, counts, out, fte-count-of(counts, fte-field(rows[0], ["family"])));
+  def fte-count-of(counts, f) = foldl((n, c) => (String) c[0] == f ? c[1] : n, 0, counts);
+  def fte-count-up(counts, f) = any?(c => (String) c[0] == f, counts) ? map(c => (String) c[0] == f ? [c[0], c[1] + 1] : c, counts) : cons([f, 1], counts);
+  def fte-per-family-one(row, rest, k, counts, out, seen) = seen >= k ? fte-per-family-at(rest, k, counts, out) : fte-per-family-at(rest, k, fte-count-up(counts, fte-field(row, ["family"])), cons(row, out));
   // ── the lines and the row ──
   def fte-show(v) = nothing?(v) ? "null" : v.str();
   def fte-line(a) = mc-cat(["[form-token-eval] ", a[0], ": ", a[1][0].str(), " question(s), exact ", a[1][1].str(), ", controls ", a[1][2].str(), ", observations ", a[1][3].str(), " (", a[1][4].str(), " used in the answer), refusals ", a[1][5].str(), ", silent ", a[1][6].str(), ", local IDs ", a[1][7].str(), " (", nothing?(fte-per-correct(a[1])) ? "no correct answer" : mc-cat([fte-per-correct(a[1]).str(), " per correct answer"]), "), crossings ", a[1][8].str(), ", forged ", a[1][9].str(), ", truncated ", a[1][10].str(), ", owners released clean ", a[1][12].str(), " of ", a[1][11].str()]);
   // the taught arm read against the plain one: exact answers, IDs per correct answer, Form's part in them
   def fte-compare-line(plain, taught) = mc-cat(["[form-token-eval] taught against plain: exact ", taught[1][1].str(), " against ", plain[1][1].str(), " of ", taught[1][0].str(), "; IDs per correct answer ", fte-show(fte-per-correct(taught[1])), " against ", fte-show(fte-per-correct(plain[1])), "; the taught voice wrote ", taught[1][2].str(), " control(s), Form answered ", taught[1][3].str(), " (", taught[1][5].str(), " refused) and ", taught[1][4].str(), " carried into an answer"]);
   def fte-question-line(a, q) = mc-cat(["[form-token-eval] ", a[0], " ", q[0], ": ", q[1][0] == 1 ? "exact" : "not exact", ", answer '", substring(q[2], 0, min2(len(q[2]), 80)), "', controls ", q[1][1].str(), ", observations ", q[1][2].str(), ", forged ", q[1][8].str(), ", IDs ", q[1][6].str(), ", stop ", q[4]]);
-  def fte-question-node(q) = json-node-object([fhn-s("id", q[0]), fhn-n("exact", q[1][0]), fhn-s("answer", q[2]), fhn-n("controls", q[1][1]), fhn-n("observations", q[1][2]), fhn-n("used", q[1][3]), fhn-n("refusals", q[1][4]), fhn-n("forged", q[1][8]), fhn-n("ids", q[1][6]), fhn-n("crossings", q[1][7]), fhn-s("stop", q[4]), fhn-n("truncated", q[1][9]), fhn-s("stream", q[3]), json-node-pair("cut", json-node-array(map(c => json-node-string(c), q[5])))]);
-  def fte-arm-node(a) = json-node-object([fhn-s("arm", a[0]), fhn-n("questions", a[1][0]), fhn-n("exact", a[1][1]), fhn-n("controls", a[1][2]), fhn-n("observations", a[1][3]), fhn-n("observations_used", a[1][4]), fhn-n("refusals", a[1][5]), fhn-n("silent", a[1][6]), fhn-n("local_ids", a[1][7]), fcgp-maybe("ids_per_correct", fte-per-correct(a[1])), fhn-n("crossings", a[1][8]), fhn-n("forged", a[1][9]), fhn-n("truncated", a[1][10]), fhn-n("owners", a[1][11]), fhn-n("owners_released", a[1][12]), json-node-pair("questions_judged", json-node-array(map(q => fte-question-node(q), a[2])))]);
+  def fte-question-node(q) = json-node-object([fhn-s("id", q[0]), fhn-s("family", len(q) > 6 ? q[6] : ""), fhn-s("expected", len(q) > 7 ? q[7] : ""), fhn-n("exact", q[1][0]), fhn-s("answer", q[2]), fhn-n("controls", q[1][1]), fhn-n("observations", q[1][2]), fhn-n("used", q[1][3]), fhn-n("refusals", q[1][4]), fhn-n("forged", q[1][8]), fhn-n("ids", q[1][6]), fhn-n("crossings", q[1][7]), fhn-s("stop", q[4]), fhn-n("truncated", q[1][9]), fhn-s("stream", q[3]), json-node-pair("cut", json-node-array(map(c => json-node-string(c), q[5])))]);
+  def fte-arm-node(a) = json-node-object([fhn-s("arm", a[0]), fhn-n("questions", a[1][0]), fhn-n("exact", a[1][1]), fhn-n("controls", a[1][2]), fhn-n("observations", a[1][3]), fhn-n("observations_used", a[1][4]), fhn-n("refusals", a[1][5]), fhn-n("silent", a[1][6]), fhn-n("local_ids", a[1][7]), fcgp-maybe("ids_per_correct", fte-per-correct(a[1])), fhn-n("crossings", a[1][8]), fhn-n("forged", a[1][9]), fhn-n("truncated", a[1][10]), fhn-n("owners", a[1][11]), fhn-n("owners_released", a[1][12]), json-node-pair("families", json-node-array(map(f => fte-family-node(f), fte-families(a)))), json-node-pair("questions_judged", json-node-array(map(q => fte-question-node(q), a[2])))]);
   def fte-row(at, source, voice, adapter, physical, crossing, arms) = json-node-object([fhn-n("at_unix_ms", at), fhn-s("source", source), fhn-s("voice", voice), fhn-s("adapter", adapter), fhn-n("physical", physical), fhn-s("crossing", crossing), json-node-pair("arms", json-node-array(map(a => fte-arm-node(a), arms)))]);
   // ── the review's column (form-stdlib/bml/local-flow-reading.bml prints it): the latest evaluation row ──
   def fte-arm-of(row, name) = foldl((found, a) => (String) fcgp-str(a, "arm") == name ? a : found, json-node-object([]), fcgp-present?(row, "arms") ? json-array-elements(json-object-get(row, "arms")) : []);
   def fte-review-of(row) {
    let p = fte-arm-of(row, "plain");
    let t = fte-arm-of(row, "taught");
-   mc-cat(["[local-flow-review] form-token eval (", fcgp-str(row, "source"), ", ", (Comparable) (fcgp-num(row, "physical") ?? 0) == 1 ? mc-cat(["voice ", fcgp-str(row, "voice")]) : "scripted", "): taught exact ", fte-show(fcgp-num(t, "exact")), " against plain ", fte-show(fcgp-num(p, "exact")), " of ", fte-show(fcgp-num(t, "questions")), "; IDs per correct answer ", fte-show(fcgp-num(t, "ids_per_correct")), " against ", fte-show(fcgp-num(p, "ids_per_correct")), "; taught controls ", fte-show(fcgp-num(t, "controls")), ", observations ", fte-show(fcgp-num(t, "observations")), ", refusals ", fte-show(fcgp-num(t, "refusals"))]);
+   let l = fte-arm-of(row, "lora");
+   mc-cat(["[local-flow-review] form-token eval (", fcgp-str(row, "source"), ", ", (Comparable) (fcgp-num(row, "physical") ?? 0) == 1 ? mc-cat(["voice ", fcgp-str(row, "voice")]) : "scripted", "): taught exact ", fte-show(fcgp-num(t, "exact")), " against plain ", fte-show(fcgp-num(p, "exact")), " of ", fte-show(fcgp-num(t, "questions")), "; IDs per correct answer ", fte-show(fcgp-num(t, "ids_per_correct")), " against ", fte-show(fcgp-num(p, "ids_per_correct")), "; taught controls ", fte-show(fcgp-num(t, "controls")), ", observations ", fte-show(fcgp-num(t, "observations")), ", refusals ", fte-show(fcgp-num(t, "refusals")), fcgp-present?(l, "arm") ? mc-cat(["; lora exact ", fte-show(fcgp-num(l, "exact")), " of ", fte-show(fcgp-num(l, "questions")), ", controls ", fte-show(fcgp-num(l, "controls")), ", observations ", fte-show(fcgp-num(l, "observations")), ", forged ", fte-show(fcgp-num(l, "forged")), ", IDs per correct answer ", fte-show(fcgp-num(l, "ids_per_correct"))]) : ""]);
   }
   def fte-review-line(rows) = nil?(rows) ? "[local-flow-review] form-token eval: no row yet (observe/form-token-eval-run.bml)" : fte-review-of(rows[-1]);
   // ── the GPU gate: what another process holds, read from its argv. A door that holds a model, named in any
   //    word of an fkwu's argv, or a form-cli verb that asks a local model; "" when it holds none ──
-  def fte-holder-doors() = ["form-cli-code-run", "native-turn-run", "day-turn", "scheduled-walk", "native-lora", "form-token-eval-run"];
+  def fte-holder-doors() = ["form-cli-code-run", "native-turn-run", "day-turn", "scheduled-walk", "native-lora", "native-session-learning", "local-plan-run", "form-token-lora-run", "form-token-eval-run"];
   def fte-model-verbs() = ["generate", "code", "ask", "query", "task", "review", "flow", "serve", "chat"];
   def fte-door-in(word) = foldl((found, h) => ((String) found == "") && (str_find(word, h, 0) >= 0) ? h : found, "", fte-holder-doors());
   def fte-words(argv) = (String) value_kind(argv) != "list" ? [] : filter(w => (String) value_kind(w) == "string", argv);
@@ -470,6 +597,15 @@ section [form.bml] {
    let door = foldl((found, w) => (String) found == "" ? fte-door-in(w) : found, "", words);
    (String) door == "" && cli ? fte-cli-verb(words) : door;
   }
+  // the other processes on this host that hold a model: [pid, what it holds] for each (this process never)
+  def fte-holder(row, cli) = (String) value_kind(row) != "list" ? [0, ""] : len(row) < 5 ? [0, ""] : (Comparable) row[0] == host_pid() ? [0, ""] : [row[0], fte-holding(row[4], cli)];
+  def fte-process-rows(name) {
+   let pids = host_processes(name);
+   (String) value_kind(pids) != "list" ? [] : map(p => host_process(p[0]), pids);
+  }
+  def fte-held() = filter(h => !((String) h[1] == ""), append(map(r => fte-holder(r, false), fte-process-rows("fkwu*")), map(r => fte-holder(r, true), fte-process-rows("form-cli*"))));
+  def fte-held-text(held) = mc-cat(["the GPU is held by ", str-join-with(map(h => mc-cat([h[1], " (pid ", h[0].str(), ")"]), held), ", "), ": the physical run waits for a quiet GPU"]);
+  def fte-held-line(door, held) = mc-cat(["[", door, "] ", fte-held-text(held)]);
  }
  0;
 }
