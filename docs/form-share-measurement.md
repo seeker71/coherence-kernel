@@ -4,12 +4,13 @@ Run `./fkwu form/form-stdlib/form-cli-share-run.fk`. It publishes share and
 token-pressure frames to Glass. A call advances one bounded evidence slice;
 repeat while health is `Measuring`. The open turn has no settled share.
 
-If health names `no-bound-rollout`, run
-`./fkwu form/form-stdlib/form-cli-turn-evidence-bind.fk` and provide the exact
-current task's rollout path as one stdin line. Check its session metadata
-against the task ID, provider, and checkout first. Do not bind another task
-merely because its file is newest. Binding and counters remain private,
-gitignored checkout state; never copy prompts or answers into a receipt.
+If health names `no-bound-rollout`, write the exact current task's rollout path
+as one line to `.form-cli-turn-rollout` at the checkout root; the live reader
+(`fctel-bound-path` in `form/form-stdlib/form-cli-turn-evidence-live.fk`) reads
+it from there. Check its session metadata against the task ID, provider, and
+checkout first. Do not bind another task merely because its file is newest.
+Binding and counters remain private, gitignored checkout state; never copy
+prompts or answers into a receipt.
 
 The local collector understands legacy string results and structured text
 blocks from custom calls. For structured executor results it decodes each
@@ -24,8 +25,7 @@ cursor. The meter's own new output therefore cannot keep a small tail forever
 one generation behind.
 
 Share and token pressure own distinct publisher symbols, even when compiled
-together. `form-cli-share-token-coexist-band.fk` (255) checks both identities,
-distinct shared-memory names, and rejection of a swapped publisher frame.
+together, with distinct shared-memory names.
 
 `turn-evidence-v4` retains the prior 39-field row layout and records the
 structured-output-aware measurement. Earlier rows remain readable historical
@@ -50,8 +50,6 @@ matching source coordinates, completed call identities, and retained failures.
 For example, one observed turn yielded `native=56 local=127 remote=58`, or
 `23/53/24` by event count. That is a historical example, never a default value.
 
-Regressions: `form-cli-tool-output-evidence-band.fk` (65535),
-`form-cli-turn-evidence-cursor-band.fk` (33554431),
-`form-cli-turn-evidence-live-band.fk` (33555454), and
-`form-cli-turn-evidence-band.fk` (65535), all under
-`form/form-stdlib/tests/` and run on `fkwu` after preflight.
+No band holds the collector today; its regression bands left in the 2026-09-29
+cut. A change to the collector is witnessed by a live run against a bound
+rollout until a band returns.

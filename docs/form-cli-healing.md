@@ -152,7 +152,7 @@ existing batched prefill implementation. The scratch width and slice width
 come from the same BML admission policy. The cached model path carries that
 width too; its ordinary one-position context interface remains available.
 
-`timing-report.json` and `timing-report.md` contain the measured intervals and
+The run's `timing-report.{json,md}` contain the measured intervals and
 policy choices. The BML timing authority checks ordered, non-overlapping
 intervals and requires their sum to equal the process duration. These are
 elapsed times between parent-observed events, including waits and transport

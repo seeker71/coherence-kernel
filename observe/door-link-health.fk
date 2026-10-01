@@ -1,86 +1,122 @@
-// door-link-health.fk — the door ring's lint organ. Every markdown link a
-// door names is a CLAIM that a cell answers at that path; this organ
-// re-witnesses those claims (axiom-4: observation makes a claim real;
-// observe/belief-freshness.fk: witness ages, links age with it). It is the
-// body's own form of the "lint" operation in Karpathy's llm-wiki pattern
-// (gist 442a6bf5..., 2026-04-04): where his lint hunts contradictions and
-// orphan pages, this first floor hunts BROKEN DOORS — links whose target no
-// cell answers.
+// door-link-health.fk — the claim lint. Every path a living document names is a CLAIM that a
+// tracked cell answers there: a markdown link target, or a code span that is one path word ending
+// in a kind the body tracks. This organ re-witnesses those claims (axiom-4: observation makes a
+// claim real) and names each one no cell answers, so a cut or a move that leaves a document
+// pointing at nothing is seen at the gate it lands through, not by the next reader.
 //
-// Two layers, the native-edit.fk seam split:
-//   - scan layer (dlh-skip? / dlh-strip-anchor / dlh-scan): pure string
-//     walking on find-from/substring, the body's one string engine —
-//     four-way-ABLE, not yet four-way-run (floor named).
-//   - door layer (dlh-check-door / dlh-lint / dlh-field-code): fkwu-carrier
-//     (read_file), run from the repo root; observe/door-link-health-run.bml
-//     is its runnable door and gate/drift-gates.bml carries it as a row.
+// Living documents: the root door ring and every tracked docs/*.md and docs/*.form. Receipts are
+// dated history and are not read.
 //
-//   - reach layer (dlh-reach): the same claim for dependencies. Every token a
-//     cell loads by name answers at a tracked path, and the disk and the
-//     index pick the same file for it (observe/prelude-reach.bml).
+// Resolution, in order: the claim as a tracked path or directory; joined to the document's own
+// directory; under form/ (documents name form-stdlib/... as the kernels read it); under
+// form/form-stdlib/ (bml/..., grammars/..., tests/...); and, for a claim with no slash, any tracked
+// file of that name. Not claims: external ("://", "mailto:"), in-page ("#..."), directories
+// ("--/"), absolute paths, a link target with neither "." nor "/", runtime state (any leading "."),
+// the section tag form.bml, a run's own output (a .json/.jsonl/.txt span with no slash, or any span
+// whose first directory no tracked tree holds), and spans holding a space, a glob, a placeholder or
+// code punctuation (* < > { } $ | ( ) , = ' " @).
 //
-// Scope floor (named, next shells): lints the top-level door ring only —
-// targets there are repo-root-relative. Nested doors (a receipt linking a
-// receipt) need dir-relative path joining; targets inside code fences are
-// scanned like any text; ":line" suffixes are not stripped (only "#anchor"s).
-//
-// skip rule: external ("://", "mailto:"), in-page ("#..."), directory ("--/")
-// and empty targets are not checkable path-claims here — in neither column.
-//
-// fold: doors*10^6 + links*10^3 + broken — injective while links<=999 and
-// broken<=999 (the hdc-field-code discipline: positional decimal, digit-wide).
+// Layers:
+//   - scan (dlh-link-claims / dlh-span-claims): pure string walking over find-from/substring.
+//   - claim (dlh-answered? / dlh-check-doc): one lookup per claim in a record of tracked paths and
+//     directories and one of tracked names, built once from `git ls-files` (prch-git).
+//   - reach (dlh-reach): the same claim for dependencies (observe/prelude-reach.bml).
 //
 import form-stdlib/core.fk;
 import form/form-stdlib/line-grammar.fk;
 import observe/prelude-reach.bml;
-// witnessed: 2026-09-29 -> self-check 31; door ring 9107000 (9 doors, 107
-//   links, 0 broken).
 section [form.bml] {
-    // the door ring — the entry documents whose links this floor re-witnesses
-    def dlh-doors() = ["AGENTS.md", "BOOTSTRAP.md", "CLAUDE.md", "CURRENT_FLOOR.md", "HOMECOMING.md", "MANIFEST.md", "NORTH_STAR.md", "README.md", "WELCOME.md"];
+    def dlh-root-doors() = ["AGENTS.md", "BOOTSTRAP.md", "CLAUDE.md", "CURRENT_FLOOR.md", "HOMECOMING.md", "MANIFEST.md", "NORTH_STAR.md", "README.md", "WELCOME.md"];
+    def dlh-kinds() = [".bml", ".fk", ".md", ".form", ".jsonl", ".json", ".c", ".h", ".sh", ".txt", ".html", ".go", ".rs", ".ts", ".mjs", ".plist", ".spool"];
     // ── scan layer (pure strings over find-from/substring) ─────────────────
+    def dlh-ends?(s, k) = len(s) > len(k) ? (String) substring(s, len(s) - len(k), len(s)) == k : 0;
+    def dlh-has?(s, needle) = find-from(s, needle, 0) >= 0;
     def dlh-ends-slash?(t) = (Comparable) len(t) == 0 ? 0 : (String) substring(t, len(t) - 1, len(t)) == "/" ? 1 : 0;
-    def dlh-skip?(t) = (Comparable) len(t) == 0 ? 1 : find-from(t, "://", 0) >= 0 ? 1 : (String) substring(t, 0, 1) == "#" ? 1 : (Comparable) find-from(t, "mailto:", 0) == 0 ? 1 : dlh-ends-slash?(t);
+    def dlh-skip?(t) = (Comparable) len(t) == 0 ? 1 : find-from(t, "://", 0) >= 0 ? 1 : (String) substring(t, 0, 1) == "#" ? 1 : (String) substring(t, 0, 1) == "/" ? 1 : (Comparable) find-from(t, "mailto:", 0) == 0 ? 1 : !(dlh-has?(t, ".") || dlh-has?(t, "/")) ? 1 : dlh-ends-slash?(t);
     def dlh-strip-anchor(t) = {
         let k = find-from(t, "#", 0);
         k < 0 ? t : substring(t, 0, k);
     };
-    // a path-claim is answered when a cell answers at that path. A missing
-    // file answers nothing (2026-08-27); a present-but-empty cell answers "".
-    // Both read as not-answering here, and the absence is named before measured.
-    def dlh-exists?(p) = {
-        let s = read_file(p);
-        nothing?(s) ? 0 : len(s) > 0 ? 1 : 0;
-    };
-    // walk `text` from `from`, counting checkable link targets and the broken
-    // among them; returns (list found broken)
-    def dlh-scan(text, from, found, broken) = {
+    // bytes that make a span code or a pattern rather than one path word
+    def dlh-loud-byte?(b) = any?(c => (Comparable) c == b, [32, 9, 10, 42, 60, 62, 123, 125, 36, 124, 40, 41, 44, 61, 39, 34, 64]);
+    def dlh-word?(s, i) = i >= len(s) ? 1 : dlh-loud-byte?(str_byte_at(s, i)) ? 0 : dlh-word?(s, i + 1);
+    // a run's output named by its file: data kinds with no directory
+    def dlh-output?(t) = !dlh-has?(t, "/") && (dlh-ends?(t, ".json") || (dlh-ends?(t, ".jsonl") || dlh-ends?(t, ".txt")));
+    def dlh-span-shape?(t) = (len(t) > 0) && (len(t) < 200) ? (dlh-word?(t, 0) ? (any?(k => dlh-ends?(t, k), dlh-kinds()) ? ((Comparable) str_byte_at(t, 0) != 46 ? !dlh-has?(t, "://") : 0) : 0) : 0) : 0;
+    def dlh-span-claim?(t) = dlh-span-shape?(t) ? !((String) t == "form.bml" || dlh-output?(t)) : 0;
+    // link targets, anchors stripped, in source order
+    def dlh-link-claims(text, from, acc) = {
         let i = find-from(text, "](", from);
-        i < 0 ? [found, broken] : {
-            let s = (Number) i + (Number) 2;
-            let j = find-from(text, ")", s);
-            j < 0 ? [found, broken] : {
-                let t = substring(text, s, j);
-                (Comparable) dlh-skip?(t) == 1 ? dlh-scan(text, (Number) j + (Number) 1, found, broken) : dlh-scan(text, (Number) j + (Number) 1, (Number) found + (Number) 1, (Number) broken + (Number) (1 - dlh-exists?(dlh-strip-anchor(t))));
-            };
-        };
+        i < 0 ? reverse(acc) : dlh-link-at(text, i + 2, find-from(text, ")", i + 2), acc);
     };
-    // ── door layer (fkwu-carrier; run from the repo root) ──────────────────
-    def dlh-check-door(p) = dlh-scan(read_file(p), 0, 0, 0);
-    def dlh-lint-loop(ds, found, broken) = (Comparable) len(ds) == 0 ? [found, broken] : {
-        let r = dlh-check-door(ds[0]);
-        dlh-lint-loop(ds[1:], (Number) found + (Number) r[0], (Number) broken + (Number) r[1]);
+    def dlh-link-at(text, s, j, acc) = j < 0 ? reverse(acc) : dlh-link-claims(text, j + 1, (Comparable) dlh-skip?(substring(text, s, j)) == 1 ? acc : cons(dlh-strip-anchor(substring(text, s, j)), acc));
+    // code spans that are one path word of a tracked kind, in source order
+    def dlh-span-claims(text, from, acc) = {
+        let i = find-from(text, "`", from);
+        i < 0 ? reverse(acc) : dlh-span-at(text, i + 1, find-from(text, "`", i + 1), acc);
     };
-    def dlh-lint() = dlh-lint-loop(dlh-doors(), 0, 0);
-    def dlh-field-code() = {
-        let r = dlh-lint();
-        (Number) (len(dlh-doors()) * 1000000) + (Number) ((Number) (r[0] * 1000) + (Number) r[1]);
+    def dlh-span-at(text, s, j, acc) = j < 0 ? reverse(acc) : dlh-span-claims(text, j + 1, dlh-span-claim?(substring(text, s, j)) ? cons(substring(text, s, j), acc) : acc);
+    def dlh-claims(text) = append(dlh-link-claims(text, 0, []), dlh-span-claims(text, 0, []));
+    // ── claim layer (the tracked world, read once) ─────────────────────────
+    def dlh-dir-at(p, i) = i < 0 ? "" : (Comparable) str_byte_at(p, i) == 47 ? substring(p, 0, i + 1) : dlh-dir-at(p, i - 1);
+    def dlh-dir(p) = dlh-dir-at(p, len(p) - 1);
+    def dlh-base(p) = substring(p, len(dlh-dir(p)), len(p));
+    def dlh-fill-dirs(paths, p, i) = i <= 0 ? 0 : (Comparable) str_byte_at(p, i) == 47 ? dlh-fill-dir(paths, p, i) : dlh-fill-dirs(paths, p, i - 1);
+    def dlh-fill-dir(paths, p, i) = {
+        record_set(paths, substring(p, 0, i), 1);
+        dlh-fill-dirs(paths, p, i - 1);
+    };
+    def dlh-fill(xs, paths, names) = nil?(xs) ? 0 : {
+        record_set(paths, xs[0], 1);
+        dlh-fill-dirs(paths, xs[0], len(xs[0]) - 1);
+        record_set(names, dlh-base(xs[0]), 1);
+        dlh-fill(xs[1:], paths, names);
+    };
+    // [paths-and-dirs, names, tracked]
+    def dlh-world() = {
+        let tracked = prch-lines(prch-git(["ls-files"]));
+        let paths = record_new(0);
+        let names = record_new(0);
+        dlh-fill(tracked, paths, names);
+        [paths, names, tracked];
+    };
+    def dlh-tracked?(world, p) = (Comparable) record_has(world[0], p) == 1;
+    def dlh-homes(doc) = ["", dlh-dir(doc), "form/", "form/form-stdlib/"];
+    def dlh-home-hit?(world, doc, t) = any?(h => dlh-tracked?(world, prch-norm(h ++ t)), dlh-homes(doc));
+    // a slashed span whose first directory no home holds names a run's own layout, not the tree
+    def dlh-first-dir(t) = substring(t, 0, find-from(t, "/", 0));
+    def dlh-rooted?(world, doc, t) = !dlh-has?(t, "/") || any?(h => dlh-tracked?(world, prch-norm(h ++ dlh-first-dir(t))), dlh-homes(doc));
+    def dlh-answered?(world, doc, t) = dlh-home-hit?(world, doc, t) || (!dlh-has?(t, "/") && (Comparable) record_has(world[1], t) == 1);
+    def dlh-living?(p) = any?(d => (String) d == p, dlh-root-doors()) || ((Comparable) find-from(p, "docs/", 0) == 0 && (dlh-ends?(p, ".md") || dlh-ends?(p, ".form")));
+    def dlh-docs(world) = filter(p => dlh-living?(p), world[2]);
+    def dlh-say-broken(doc, xs) = nil?(xs) ? 0 : {
+        print("door-link-broken " ++ doc ++ " " ++ xs[0]);
+        dlh-say-broken(doc, xs[1:]);
+    };
+    // one document: [claims, broken], each broken claim named on its own line
+    def dlh-check-doc(world, doc) = {
+        let text = read_file(doc) ?? "";
+        let claims = append(dlh-link-claims(text, 0, []), filter(t => dlh-rooted?(world, doc, t), dlh-span-claims(text, 0, [])));
+        let broken = filter(t => !dlh-answered?(world, doc, t), claims);
+        dlh-say-broken(doc, broken);
+        [len(claims), len(broken)];
+    };
+    def dlh-lint-loop(world, ds, found, broken) = nil?(ds) ? [found, broken] : {
+        let r = dlh-check-doc(world, ds[0]);
+        dlh-lint-loop(world, ds[1:], found + r[0], broken + r[1]);
+    };
+    // [documents, claims, broken]
+    def dlh-lint() = {
+        let world = dlh-world();
+        let docs = dlh-docs(world);
+        let r = dlh-lint-loop(world, docs, 0, 0);
+        [len(docs), r[0], r[1]];
     };
     // the reach row: prints its own summary row and answers missing + untracked
     // + shadow, so 0 means every loaded name reaches one tracked file
     def dlh-reach() = prch-report();
-    // ── self-check (c3/c5 stand on live root files — fkwu-carrier, honest) ──
+    // ── self-check over the scan layer ─────────────────────────────────────
     def dlhk(ok, bit) = ok ? bit : 0;
-    def door-link-health-check() = (Number) dlhk((Comparable) dlh-scan("no links here", 0, 0, 0)[0] == 0, 1) + (Number) ((Number) dlhk((Comparable) dlh-scan("[a](https://x.y/) [b](#top) [c](mailto:u@h) [d](docs/)", 0, 0, 0)[0] == 0, 2) + (Number) ((Number) dlhk((Comparable) dlh-scan("[a](README.md)", 0, 0, 0)[1] == 0, 4) + (Number) ((Number) dlhk((Comparable) dlh-scan("[a](door-that-never-was.md)", 0, 0, 0)[1] == 1, 8) + (Number) dlhk((Comparable) dlh-scan("[a](AGENTS.md#the-honest-seam)", 0, 0, 0)[1] == 0, 16))));
+    def door-link-health-check() = dlhk(len(dlh-claims("no links here")) == 0, 1) + (dlhk(len(dlh-claims("[a](https://x.y/) [b](#top) [c](mailto:u@h) [d](docs/) [e](/abs.md)")) == 0, 2) + (dlhk((String) dlh-claims("[a](AGENTS.md#seam) `observe/x.bml` `x.fk`")[0] == "AGENTS.md", 4) + (dlhk(len(dlh-claims("`a b.fk` `<file>.fk` `(f x.fk)` `.hearth/x.json` `*.bml` `name`")) == 0, 8) + dlhk(len(dlh-claims("[a](AGENTS.md#seam) `observe/x.bml` `x.fk`")) == 3, 16))));
     0;
 }
