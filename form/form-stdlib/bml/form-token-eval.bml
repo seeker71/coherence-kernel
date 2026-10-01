@@ -202,12 +202,12 @@ section [form.bml] {
    let found = filter(p => file_size(p) > 0, paths);
    ftcn-store(name, len(found), map(p => ftcn-read(p), found), nothing(), false, "taught, not generated");
   }
-  // [stores, voice tally, generated IDs, corpus tally]
+  // [stores, voice tally, generated IDs, corpus tally, root]
   def ftcn-census(root) {
    let stores = [ftcn-replies(root), ftcn-lanes(root), ftcn-drafts(root), ftcn-generations(root), ftcn-evaluations(root), ftcn-corpus("lora corpus", [root ++ ".form-lora-voice-native/distill.jsonl"]), ftcn-corpus("form-token traces", [root ++ "learn/form-token-traces.jsonl"])];
    let voice = foldl((t, s) => s[4] ? ftcn-merge(t, s[2]) : t, record_new(0), stores);
    let corpus = foldl((t, s) => s[4] ? t : ftcn-merge(t, s[2]), record_new(0), stores);
-   [stores, voice, foldl((acc, s) => acc + (s[3] ?? 0), 0, stores), corpus];
+   [stores, voice, foldl((acc, s) => acc + (s[3] ?? 0), 0, stores), corpus, root];
   }
   // ── the lines ──
   def ftcn-outcomes(t, suffix) = mc-cat(["success ", ftcn-get(t, "success:" ++ suffix).str(), ", nothing ", ftcn-get(t, "nothing:" ++ suffix).str(), ", other ", ftcn-get(t, "other:" ++ suffix).str()]);
@@ -231,7 +231,7 @@ section [form.bml] {
   def ftcn-store-authored(c, name) = foldl((acc, s) => (String) s[0] == name ? ftcn-authored(s[2]) : acc, 0, c[0]);
   def ftcn-row(c, at) {
    let t = c[1];
-   json-node-object([fhn-n("at_unix_ms", at), fhn-n("files", foldl((acc, s) => acc + s[1], 0, c[0])), fhn-n("model_authored", ftcn-authored(t)), fhn-n("runtime_markers", ftcn-runtime(t)), fhn-n("observations", ftcn-observed(t)), fhn-n("code_lane_model_authored", ftcn-store-authored(c, "code-lane replies")), fhn-n("lane_transcript_model_authored", ftcn-store-authored(c, "lane transcripts")), fhn-n("generated_ids", c[2]), fcgp-maybe("per_k_ids_hundredths", ftcn-per-k(ftcn-authored(t), c[2])), fhn-n("observations_success", ftcn-sum(t, "success:")), fhn-n("observations_nothing", ftcn-sum(t, "nothing:")), fhn-n("observations_other", ftcn-sum(t, "other:")), fhn-n("answers_with_observation", ftcn-get(t, "answers")), fhn-n("answers_citing", ftcn-get(t, "citing")), json-node-pair("kinds", ftcn-kinds-node(t, ftcn-kinds(), true)), json-node-pair("other_kinds", ftcn-counts-node(t, ftcn-others(t), "authored:")), json-node-pair("runtime_kinds", ftcn-counts-node(t, ftcn-runtime-keys(t), "runtime:")), fhn-n("corpus_controls", ftcn-authored(c[3])), json-node-pair("corpus_kinds", ftcn-kinds-node(c[3], ftcn-kinds(), false))]);
+   json-node-object([fhn-n("at_unix_ms", at), fhn-s("root", c[4]), fhn-n("files", foldl((acc, s) => acc + s[1], 0, c[0])), fhn-n("model_authored", ftcn-authored(t)), fhn-n("runtime_markers", ftcn-runtime(t)), fhn-n("observations", ftcn-observed(t)), fhn-n("code_lane_model_authored", ftcn-store-authored(c, "code-lane replies")), fhn-n("lane_transcript_model_authored", ftcn-store-authored(c, "lane transcripts")), fhn-n("generated_ids", c[2]), fcgp-maybe("per_k_ids_hundredths", ftcn-per-k(ftcn-authored(t), c[2])), fhn-n("observations_success", ftcn-sum(t, "success:")), fhn-n("observations_nothing", ftcn-sum(t, "nothing:")), fhn-n("observations_other", ftcn-sum(t, "other:")), fhn-n("answers_with_observation", ftcn-get(t, "answers")), fhn-n("answers_citing", ftcn-get(t, "citing")), json-node-pair("kinds", ftcn-kinds-node(t, ftcn-kinds(), true)), json-node-pair("other_kinds", ftcn-counts-node(t, ftcn-others(t), "authored:")), json-node-pair("runtime_kinds", ftcn-counts-node(t, ftcn-runtime-keys(t), "runtime:")), fhn-n("corpus_controls", ftcn-authored(c[3])), json-node-pair("corpus_kinds", ftcn-kinds-node(c[3], ftcn-kinds(), false))]);
   }
   // ── the review's column (form-stdlib/bml/local-flow-reading.bml prints it): the latest census row, read as
   //    written; a field an older row does not carry reads null ──
@@ -287,14 +287,19 @@ section [form.bml] {
    let closed = filter(e => ftcn-model?(e[0]) && e[4], ftcn-scan(text));
    nil?(closed) ? nothing() : closed[0];
   }
+  // An observation envelope the voice writes itself is no observation: in the stream it is renamed
+  // forged-observation, its bytes kept, so it reads as the voice's own words and never as Form's answer.
+  def fte-forged() = "forged-observation";
+  def fte-swap(text, from, to) = str-join-with(split-on(text, from), to);
+  def fte-unforge(text) = fte-swap(fte-swap(text, ftcn-open(ftcn-observation()), ftcn-open(fte-forged())), ftcn-close(ftcn-observation()), ftcn-close(fte-forged()));
   def fte-reply(ask, observe, arm, question, crossings) {
    let prompt = fte-prompt(arm, question);
    let first = ask(prompt);
-   (String) arm == "plain" ? [first[0], first[1], first[2], 0] : fte-cross(ask, observe, prompt, "", first, first[1], crossings, 0);
+   (String) arm == "plain" ? [fte-unforge(first[0]), first[1], first[2], 0] : fte-cross(ask, observe, prompt, "", first, first[1], crossings, 0);
   }
   def fte-cross(ask, observe, prompt, stream, reply, ids, left, made) {
    let found = fte-first-control(reply[0]);
-   if (nothing?(found) || (left <= 0)) then [mc-cat([stream, reply[0]]), ids, reply[2], made] else fte-crossed(ask, observe, prompt, mc-cat([stream, substring(reply[0], 0, found[3]), ftcn-control(ftcn-observation(), observe(found[0], found[1]))]), ids, left, made);
+   if (nothing?(found) || (left <= 0)) then [mc-cat([stream, fte-unforge(reply[0])]), ids, reply[2], made] else fte-crossed(ask, observe, prompt, mc-cat([stream, fte-unforge(substring(reply[0], 0, found[3])), ftcn-control(ftcn-observation(), observe(found[0], found[1]))]), ids, left, made);
   }
   def fte-crossed(ask, observe, prompt, stream, ids, left, made) {
    let next = ask(fte-continue(prompt, stream));
@@ -313,18 +318,19 @@ section [form.bml] {
   def fte-strip-start(s) = (len(s) > 0) && fte-wrap?(str_byte_at(s, 0)) ? fte-strip-start(substring(s, 1, len(s))) : s;
   def fte-norm(s) = fte-strip-start(fte-strip-end(str-lower(trim(s))));
   def fte-exact?(answer, expected) = !((String) fte-norm(answer) == "") && ((String) fte-norm(answer) == fte-norm(expected));
-  // one reply judged: [exact, controls, observations, used in the answer, refusals, silent, IDs, crossings]
+  // one reply judged: [exact, controls, observations, used in the answer, refusals, silent, IDs, crossings, forged]
   def fte-judge(expected, reply) {
    let items = ftcn-controls(reply[0]);
    let answer = fte-answer(reply[0], ftcn-answer-from(items));
-   let controls = len(filter(it => !((String) it[0] == ""), items));
+   let controls = len(filter(it => !((String) it[0] == "") && !((String) it[0] == fte-forged()), items));
    let observed = len(filter(it => !((String) it[2] == ""), items));
    let used = len(filter(it => ftcn-cited?(answer, it), items));
    let refused = len(filter(it => (String) ftcn-class(it[2]) == "nothing", items));
-   [fte-exact?(answer, expected) ? 1 : 0, controls, observed, used, refused, (String) answer == "" ? 1 : 0, reply[1], reply[3]];
+   let forged = len(filter(it => (String) it[0] == fte-forged(), items));
+   [fte-exact?(answer, expected) ? 1 : 0, controls, observed, used, refused, (String) answer == "" ? 1 : 0, reply[1], reply[3], forged];
   }
-  // an arm folded: [questions, exact, controls, observations, used, refusals, silent, IDs, crossings]
-  def fte-fold(js) = foldl((a, j) => [a[0] + 1, a[1] + j[0], a[2] + j[1], a[3] + j[2], a[4] + j[3], a[5] + j[4], a[6] + j[5], a[7] + j[6], a[8] + j[7]], [0, 0, 0, 0, 0, 0, 0, 0, 0], js);
+  // an arm folded: [questions, exact, controls, observations, used, refusals, silent, IDs, crossings, forged]
+  def fte-fold(js) = foldl((a, j) => [a[0] + 1, a[1] + j[0], a[2] + j[1], a[3] + j[2], a[4] + j[3], a[5] + j[4], a[6] + j[5], a[7] + j[6], a[8] + j[7], a[9] + j[8]], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], js);
   def fte-per-correct(s) = s[1] <= 0 ? nothing() : s[7] / s[1];
   // each held-out row asked in each arm: [[arm, fold, [[id, judgement, answer]...]], ...]
   def fte-arm(rows, arm, ask, observe, crossings) {
@@ -335,11 +341,11 @@ section [form.bml] {
   def fte-evaluate(rows, arms, ask, observe, crossings) = map(arm => fte-arm(rows, arm, ask, observe, crossings), arms);
   // ── the lines and the row ──
   def fte-show(v) = nothing?(v) ? "null" : v.str();
-  def fte-line(a) = mc-cat(["[form-token-eval] ", a[0], ": ", a[1][0].str(), " question(s), exact ", a[1][1].str(), ", controls ", a[1][2].str(), ", observations ", a[1][3].str(), " (", a[1][4].str(), " used in the answer), refusals ", a[1][5].str(), ", silent ", a[1][6].str(), ", local IDs ", a[1][7].str(), " (", nothing?(fte-per-correct(a[1])) ? "no correct answer" : mc-cat([fte-per-correct(a[1]).str(), " per correct answer"]), "), crossings ", a[1][8].str()]);
+  def fte-line(a) = mc-cat(["[form-token-eval] ", a[0], ": ", a[1][0].str(), " question(s), exact ", a[1][1].str(), ", controls ", a[1][2].str(), ", observations ", a[1][3].str(), " (", a[1][4].str(), " used in the answer), refusals ", a[1][5].str(), ", silent ", a[1][6].str(), ", local IDs ", a[1][7].str(), " (", nothing?(fte-per-correct(a[1])) ? "no correct answer" : mc-cat([fte-per-correct(a[1]).str(), " per correct answer"]), "), crossings ", a[1][8].str(), ", forged observations ", a[1][9].str()]);
   // the taught arm read against the plain one: exact answers, IDs per correct answer, Form's part in them
   def fte-compare-line(plain, taught) = mc-cat(["[form-token-eval] taught against plain: exact ", taught[1][1].str(), " against ", plain[1][1].str(), " of ", taught[1][0].str(), "; IDs per correct answer ", fte-show(fte-per-correct(taught[1])), " against ", fte-show(fte-per-correct(plain[1])), "; the taught voice wrote ", taught[1][2].str(), " control(s), Form answered ", taught[1][3].str(), " (", taught[1][5].str(), " refused) and ", taught[1][4].str(), " carried into an answer"]);
-  def fte-question-line(a, q) = mc-cat(["[form-token-eval] ", a[0], " ", q[0], ": ", q[1][0] == 1 ? "exact" : "not exact", ", answer '", substring(q[2], 0, min2(len(q[2]), 80)), "', controls ", q[1][1].str(), ", observations ", q[1][2].str(), ", IDs ", q[1][6].str()]);
-  def fte-arm-node(a) = json-node-object([fhn-s("arm", a[0]), fhn-n("questions", a[1][0]), fhn-n("exact", a[1][1]), fhn-n("controls", a[1][2]), fhn-n("observations", a[1][3]), fhn-n("observations_used", a[1][4]), fhn-n("refusals", a[1][5]), fhn-n("silent", a[1][6]), fhn-n("local_ids", a[1][7]), fcgp-maybe("ids_per_correct", fte-per-correct(a[1])), fhn-n("crossings", a[1][8]), json-node-pair("questions_judged", json-node-array(map(q => json-node-object([fhn-s("id", q[0]), fhn-n("exact", q[1][0]), fhn-s("answer", q[2]), fhn-n("controls", q[1][1]), fhn-n("observations", q[1][2]), fhn-n("refusals", q[1][4]), fhn-n("ids", q[1][6]), fhn-n("crossings", q[1][7]), fhn-s("stream", q[3])]), a[2])))]);
+  def fte-question-line(a, q) = mc-cat(["[form-token-eval] ", a[0], " ", q[0], ": ", q[1][0] == 1 ? "exact" : "not exact", ", answer '", substring(q[2], 0, min2(len(q[2]), 80)), "', controls ", q[1][1].str(), ", observations ", q[1][2].str(), ", forged ", q[1][8].str(), ", IDs ", q[1][6].str()]);
+  def fte-arm-node(a) = json-node-object([fhn-s("arm", a[0]), fhn-n("questions", a[1][0]), fhn-n("exact", a[1][1]), fhn-n("controls", a[1][2]), fhn-n("observations", a[1][3]), fhn-n("observations_used", a[1][4]), fhn-n("refusals", a[1][5]), fhn-n("silent", a[1][6]), fhn-n("local_ids", a[1][7]), fcgp-maybe("ids_per_correct", fte-per-correct(a[1])), fhn-n("crossings", a[1][8]), fhn-n("forged", a[1][9]), json-node-pair("questions_judged", json-node-array(map(q => json-node-object([fhn-s("id", q[0]), fhn-n("exact", q[1][0]), fhn-s("answer", q[2]), fhn-n("controls", q[1][1]), fhn-n("observations", q[1][2]), fhn-n("refusals", q[1][4]), fhn-n("forged", q[1][8]), fhn-n("ids", q[1][6]), fhn-n("crossings", q[1][7]), fhn-s("stream", q[3])]), a[2])))]);
   def fte-row(at, source, voice, adapter, physical, crossing, arms) = json-node-object([fhn-n("at_unix_ms", at), fhn-s("source", source), fhn-s("voice", voice), fhn-s("adapter", adapter), fhn-n("physical", physical), fhn-s("crossing", crossing), json-node-pair("arms", json-node-array(map(a => fte-arm-node(a), arms)))]);
   // ── the review's column (form-stdlib/bml/local-flow-reading.bml prints it): the latest evaluation row ──
   def fte-arm-of(row, name) = foldl((found, a) => (String) fcgp-str(a, "arm") == name ? a : found, json-node-object([]), fcgp-present?(row, "arms") ? json-array-elements(json-object-get(row, "arms")) : []);
