@@ -40,23 +40,39 @@ section [form.bml] {
    let n = len(tokens) - 1; let mask = nld-mask(n,offset,0);
    (n <= 0) || (sum(mask) <= 0) ? form_error("native training has no supervised targets at line " + line.str()) : [take(n,tokens),tokens[1:],mask,sum(mask),line];
   }
-  // Segment rows: {"system"?, "prompt", "segments":[{"text", "supervise":0|1, ...}]}.
+  // Segment rows: {"system"?, "prompt", "segments":[{"text", "role"?, "supervise"?:0|1, ...}]}.
   // The prompt frames the turn exactly as a chat row does; each span is encoded on
   // its own, the way Form appends an injected span to the stream, so a span's
   // tokens never merge across its boundary and its mark covers exactly them.
   // marks[i] says whether token i is a target; the first token is context only.
+  // The role decides before any flag: an observation (Form's answer) or a seam (the
+  // blank where the voice yields to Form) is never a target, whatever a writer marked.
+  // A prose or control span is a target unless marked 0. Any other span must carry its
+  // mark as 0 or 1, or the row stops with its line: a mark is never guessed.
   def nld-repeat(n,x) = n <= 0 ? [] : cons(x,nld-repeat(n - 1,x));
-  def nld-segment-mark(s) = json-object-has?(s,"supervise") ? ((Comparable) node_value(json-object-get(s,"supervise")) == 1 ? 1.0 : 0.0) : 1.0;
-  def nld-segment-span(t,s) {
+  def nld-segment-role(s) = !json-object-has?(s,"role") ? "" : (Comparable) node_type(json-object-get(s,"role")) == 2 ? node_value(json-object-get(s,"role")) : "";
+  def nld-segment-flag(s,line) {
+   let v = node_value(json-object-get(s,"supervise"));
+   !((String) value_kind(v) == "int") ? nld-segment-bad-flag(line) : (Comparable) v == 1 ? 1.0 : (Comparable) v == 0 ? 0.0 : nld-segment-bad-flag(line);
+  }
+  def nld-segment-bad-flag(line) = form_error("native training segment supervise must be 0 or 1 at line " + line.str());
+  def nld-segment-mark(s,line) {
+   let role = nld-segment-role(s);
+   (String) role == "observation" || (String) role == "seam" ? 0.0
+   : json-object-has?(s,"supervise") ? nld-segment-flag(s,line)
+   : (String) role == "prose" || (String) role == "control" ? 1.0
+   : form_error("native training segment has no supervise mark and no known role at line " + line.str());
+  }
+  def nld-segment-span(t,s,line) {
    let ids = nlt-encode(t,nld-string(s,"text"));
-   [ids,nld-repeat(len(ids),nld-segment-mark(s))];
+   [ids,nld-repeat(len(ids),nld-segment-mark(s,line))];
   }
   def nld-spans-ids(spans) = nil?(spans) ? [] : append(spans[0][0],nld-spans-ids(spans[1:]));
   def nld-spans-marks(spans) = nil?(spans) ? [] : append(spans[0][1],nld-spans-marks(spans[1:]));
   def nld-segment-prefix(t,row) = append(nld-system(t,json-object-has?(row,"system") ? nld-string(row,"system") : ""),append(nlt-message(t,"user",nld-string(row,"prompt")),nlt-header(t,"assistant")));
   def nld-segment-row(t,row,masked,line) {
    let segments = json-array-elements(json-object-get(row,"segments"));
-   nil?(segments) ? form_error("native training segment row is empty at line " + line.str()) : nld-segment-ready(t,nld-segment-prefix(t,row),segments |> map(s => nld-segment-span(t,s)),masked,line);
+   nil?(segments) ? form_error("native training segment row is empty at line " + line.str()) : nld-segment-ready(t,nld-segment-prefix(t,row),segments |> map(s => nld-segment-span(t,s,line)),masked,line);
   }
   def nld-segment-ready(t,prefix,spans,masked,line) {
    let tokens = append(prefix,append(nld-spans-ids(spans),[nlt-special(t,"<|eot_id|>")]));
