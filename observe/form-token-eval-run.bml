@@ -1,0 +1,76 @@
+// form-token-eval-run.bml — does Form-token teaching make the local voice answer better? Asked, not claimed.
+//
+// Each held-out question of learn/form-token-traces.jsonl (the fixtures in form-stdlib/bml/form-token-eval.bml
+// until the corpus holds held-out rows) is asked twice of the local voice (Llama-3.2-3B, the voice lane the native
+// LoRA trainer teaches; an adapter may be worn): once plain, once after the Form-token teaching, with the same
+// question and the same answer line. The taught arm crosses at turn level: the first control the voice closes is
+// answered by Form and the voice is asked again with its reply so far, at most `crossings` times. Form answers
+// recipe-birth, recipe-exec and choice today through the microthought owner (form-stdlib/bml/form-cli-microthought.bml:
+// signed-i32 affine recipes on Metal JIT); every other verb answers nothing=<verb>-awaits-form-token-grammar; and the
+// voice reads that refusal and goes on.
+// Before the voice opens, the door reads the host's fkwu processes: while a door that holds a model runs
+// (form-cli-code-run, native-turn-run, day-turn, scheduled-walk, native-lora) it names that door and asks nothing.
+// Prints a line per question and per arm and the comparison, and appends one row to receipts/form-token-eval.jsonl.
+// form-stdlib/tests/form-token-eval-band.bml proves the comparison model-free over scripted voices.
+// stdin, optional: {"questions":2,"limit":160,"crossings":3,"adapter":"","traces":"learn/form-token-traces.jsonl"}
+// preflight-exec: forbidden
+import form-stdlib/bml/form-token-eval.bml;
+import form-stdlib/model-registry.bml;
+import form-stdlib/native-llama-voice.bml;
+import form-stdlib/bml/form-cli-microthought.bml;
+section [form.bml] {
+ class FormTokenEvalRun {
+  def ftev-voice() = "llama32-3b-mlx-4bit";
+  def ftev-holders() = ["form-cli-code-run", "native-turn-run", "day-turn", "scheduled-walk", "native-lora"];
+  def ftev-options() {
+   let line = read_line();
+   let text = nothing?(line) ? "" : trim(line);
+   fcgp-object-line?(text) ? parse-json("eval-options", text) : json-node-object([]);
+  }
+  def ftev-num(o, key, fallback) = fcgp-num(o, key) ?? fallback;
+  def ftev-str(o, key, fallback) = (String) fcgp-str(o, key) == "" ? fallback : fcgp-str(o, key);
+  // the doors in other processes that hold a model: [pid, door] for each
+  def ftev-door(argv) = (String) value_kind(argv) != "list" ? "" : len(argv) < 2 ? "" : (String) value_kind(argv[1]) != "string" ? "" : foldl((found, h) => ((String) found == "") && (str_find(argv[1], h, 0) >= 0) ? argv[1] : found, "", ftev-holders());
+  def ftev-holder(row) = (String) value_kind(row) != "list" ? [0, ""] : len(row) < 5 ? [0, ""] : (Comparable) row[0] == host_pid() ? [0, ""] : [row[0], ftev-door(row[4])];
+  def ftev-held() {
+   let pids = host_processes("fkwu*");
+   let rows = (String) value_kind(pids) != "list" ? [] : map(p => host_process(p[0]), pids);
+   filter(h => !((String) h[1] == ""), map(r => ftev-holder(r), rows));
+  }
+  // Form's answer: the microthought owner for the recipe verbs, a named refusal for the rest
+  def ftev-recipe-verbs() = ["recipe-birth", "recipe-exec", "choice"];
+  def ftev-observe(owner, verb, payload) = ftcn-member?(verb, ftev-recipe-verbs()) ? fmc-render(fmc-action(owner, verb, ftcn-control(verb, payload), payload)) : mc-cat(["nothing=", verb, "-awaits-form-token-grammar;"]);
+  // the voice: [text, generated IDs, stop reason]
+  def ftev-ask(session, limit, prompt) {
+   let r = nlg-ask(session, prompt, limit, "", "", "");
+   [r[0], r[2], (String) r[1] == "" ? "eos" : r[1]];
+  }
+  def ftev-wait(held) {
+   print_str(mc-cat(["[form-token-eval] the GPU is held by ", str-join-with(map(h => mc-cat([h[1], " (pid ", h[0].str(), ")"]), held), ", "), ": the physical run waits for a quiet GPU; form-stdlib/tests/form-token-eval-band.bml reads the comparison model-free"]));
+   0;
+  }
+  def ftev-ask-all(o) {
+   let source = fte-rows(ftev-str(o, "traces", fte-traces()));
+   let rows = take(ftev-num(o, "questions", 2), source[1]);
+   let adapter = ftev-str(o, "adapter", "");
+   let limit = ftev-num(o, "limit", 160);
+   let session = nlg-open(mr-path(mr-find(ftev-voice())), adapter);
+   let owner = fmc-open-with-knowledge(4096, nothing(), nothing());
+   let arms = fte-evaluate(rows, fte-arms(), p => ftev-ask(session, limit, p), (v, x) => ftev-observe(owner, v, x), ftev-num(o, "crossings", 3));
+   let released = fmc-release(owner);
+   let closed = nlg-close(session);
+   let questions = map(a => map(q => print_str(fte-question-line(a, q)), a[2]), arms);
+   let lines = map(a => print_str(fte-line(a)), arms);
+   print_str(fte-compare-line(arms[0], arms[1]));
+   print_str(mc-cat(["[form-token-eval] ", source[0], ", voice ", ftev-voice(), (String) adapter == "" ? "" : mc-cat([" wearing ", adapter]), ", crossing turn-level; the microthought owner released ", released ? "clean" : "incomplete"]));
+   let appended = fhn-append(fte-ledger(), json-emit(fte-row(now_unix_ms(), source[0], ftev-voice(), adapter, 1, "turn-level", arms)) + "\n");
+   arms[1][1][1];
+  }
+  def ftev-run() {
+   let o = ftev-options();
+   let held = ftev-held();
+   nil?(held) ? ftev-ask-all(o) : ftev-wait(held);
+  }
+ }
+ ftev-run();
+}

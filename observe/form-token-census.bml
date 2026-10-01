@@ -1,78 +1,22 @@
-// form-token-census.bml — how many Form tokens the local voice writes, by kind and by store.
+// form-token-census.bml — how many Form tokens the local voice writes, by kind, by store and per 1,000 IDs.
 //
-// Reads the stores where the voice's own output lives, in the checkout it runs in:
-// .hearth/code-memory/replies (every coding-lane reply), .hearth/native-turns/*.out (each
-// option's lane transcript), receipts/draft-ledger.jsonl (drafts) and
-// .form-lora-voice-native/distill.jsonl (the LoRA corpus). Counts every <|form:KIND|> opening.
-// The runtime's own markers (stage, resident-stage, peer-stage, token-receipt) are counted apart
-// from the kinds a model authors: recipe-birth, recipe-exec, choice, knowledge-query,
-// nodeid-knowledge-query, node, and any kind not named runtime. Observations Form returned in
-// stream are counted by their words (recipe=@ and value=).
-// Prints one line per store and a total, and appends the total to receipts/form-token-census.jsonl,
-// so growth in recipe creation, evaluation and node work is a reading, not a claim.
-// stdin, optional: the root that holds the stores (default: this checkout), so a census can read
-// the walk checkout where the voice writes while its row lands where the census runs.
+// Reads the stores where the voice's own output lives, under the root it is given: .hearth/code-memory/replies
+// (every coding-lane reply), .hearth/native-turns/*.out (each option's lane transcript, whose form-code counters
+// carry the IDs the lane generated), the drafts receipts/draft-ledger.jsonl names that lie under .hearth/drafts
+// (with the IDs each row records), and .hearth/response-sessions/generation (each generate --reasoning reply, its
+// controls and Form's injections woven back from microthought.json). The teaching corpora
+// (.form-lora-voice-native/distill.jsonl, learn/form-token-traces.jsonl) are counted as taught, never as generated.
+// Per kind (recipe-birth, recipe-exec, choice, eval, knowledge-query, node-get, node-make, node-select) it prints
+// the controls the voice authored and their rate per 1,000 generated IDs, the observations Form returned (success:
+// value, recipe, node; nothing=; other), the model kinds outside the eight, the answers that cite an observation,
+// and the runtime markers apart. The total line comes last. One row lands in receipts/form-token-census.jsonl, so
+// growth in recipe creation, evaluation and node work is a reading, not a claim. The reading lives in
+// form-stdlib/bml/form-token-eval.bml (ftcn-*); form-stdlib/tests/form-token-census-band.bml proves it.
+// stdin, optional: the root that holds the stores (default: this checkout), so a census can read the walk
+// checkout where the voice writes while its row lands where the census runs:
+//   print -r -- /Users/ursmuff/source/coherence-kernel-walk | ./fkwu observe/form-token-census.bml
 // preflight-exec: forbidden
-import form-stdlib/bml/form-cli-heal-native-report.bml;
-import form-stdlib/meaning-codes.bml;
-import form-stdlib/bml/string-join.bml;
+import form-stdlib/bml/form-token-eval.bml;
 section [form.bml] {
- class FormTokenCensus {
-  def fct-ledger() = "receipts/form-token-census.jsonl";
-  def fct-runtime-kinds() = ["stage", "resident-stage", "peer-stage", "token-receipt"];
-  def fct-runtime?(kind) = any?(k => (String) k == kind, fct-runtime-kinds());
-  def fct-ends?(s, t) = len(s) >= len(t) ? (String) substring(s, len(s) - len(t), len(s)) == t : 0;
-  // a directory's files, or none when it is absent (fs_list answers [] or nothing there)
-  def fct-names(dir) = (Comparable) fs_is_dir(dir) != 1 ? [] : (fs_list(dir) ?? []);
-  def fct-files(dir, suffix) = filter(p => fct-ends?(p, suffix), map(n => dir ++ "/" ++ n, fct-names(dir)));
-  def fct-read(path) = (Comparable) file_size(path) < 1 ? "" : fhn-read(path);
-  // count every <|form:KIND|> opening into the record, kind by kind
-  def fct-scan(text, from, kinds) {
-   let i = str_find(text, "<|form:", from);
-   if (i < 0) then kinds else fct-scan-at(text, i, str_find(text, "|>", i + 7), kinds);
-  }
-  def fct-scan-at(text, i, end, kinds) {
-   let kind = end < 0 ? "" : substring(text, i + 7, end);
-   let counted = (end < 0) || (len(kind) == 0) || (len(kind) > 40) ? 0 : record_set(kinds, kind, (record_get(kinds, kind) ?? 0) + 1);
-   fct-scan(text, end < 0 ? len(text) : end + 2, kinds);
-  }
-  def fct-occurs(text, needle, from, n) {
-   let i = str_find(text, needle, from);
-   if (i < 0) then n else fct-occurs(text, needle, i + len(needle), n + 1);
-  }
-  def fct-sum(kinds, keys, runtime) = foldl((acc, k) => acc + ((fct-runtime?(k) == runtime) ? (record_get(kinds, k) ?? 0) : 0), 0, keys);
-  def fct-voice(kinds, keys) = str-join-with(map(k => k ++ ":" ++ (record_get(kinds, k) ?? 0).str(), filter(k => !fct-runtime?(k), keys)), ",");
-  // one store: [name, files, model-authored, runtime, observations, kinds-record]
-  def fct-store(name, paths) {
-   let kinds = record_new(0);
-   let texts = map(p => fct-read(p), paths);
-   map(t => fct-scan(t, 0, kinds), texts);
-   let observed = foldl((acc, t) => acc + (fct-occurs(t, "recipe=@", 0, 0) + fct-occurs(t, "value=", 0, 0)), 0, texts);
-   let keys = record_keys(kinds);
-   [name, len(paths), fct-sum(kinds, keys, 0), fct-sum(kinds, keys, 1), observed, kinds];
-  }
-  def fct-line(s) = mc-cat(["[form-token-census] ", s[0], ": files ", s[1].str(), ", model-authored ", s[2].str(), ", runtime markers ", s[3].str(), ", observations ", s[4].str(), (s[2] > 0) ? mc-cat([" (", fct-voice(s[5], record_keys(s[5])), ")"]) : ""]);
-  def fct-root() {
-   let line = read_line();
-   (nothing?(line) || (String) trim(line) == "") ? "" : trim(line) ++ "/";
-  }
-  def fct-run() {
-   let root = fct-root();
-   let stores = [
-    fct-store("code-lane replies", fct-files(root ++ ".hearth/code-memory/replies", "")),
-    fct-store("lane transcripts", fct-files(root ++ ".hearth/native-turns", ".out")),
-    fct-store("drafts", [root ++ "receipts/draft-ledger.jsonl"]),
-    fct-store("lora corpus", [root ++ ".form-lora-voice-native/distill.jsonl"])];
-   map(s => print_str(fct-line(s)), stores);
-   let model = foldl((acc, s) => acc + s[2], 0, stores);
-   let runtime = foldl((acc, s) => acc + s[3], 0, stores);
-   let observed = foldl((acc, s) => acc + s[4], 0, stores);
-   let files = foldl((acc, s) => acc + s[1], 0, stores);
-   print_str(mc-cat(["[form-token-census] total: ", files.str(), " files, model-authored ", model.str(), ", runtime markers ", runtime.str(), ", observations ", observed.str()]));
-   let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-n("files", files), fhn-n("model_authored", model), fhn-n("runtime_markers", runtime), fhn-n("observations", observed), fhn-n("code_lane_model_authored", stores[0][2]), fhn-n("lane_transcript_model_authored", stores[1][2])]);
-   fhn-append(fct-ledger(), json-emit(row) + "\n");
-   model;
-  }
- }
- fct-run();
+ ftcn-run(ftcn-root());
 }
