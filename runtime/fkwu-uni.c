@@ -258,14 +258,16 @@ extern long long write(long long, const void *, unsigned long);
  * violation would otherwise silently corrupt memory rather than fail. It is NOT
  * for ordinary bounds checks; those keep the file's existing house style of a
  * silent safe-default return (`if (idx < 1 || idx > cap) return 0;`). Writes the
- * message to fd 2 the same way fk_mw/fk_mc already do, then exits nonzero -- no
+ * message to fd 2 with the raw write(), then exits nonzero -- no
  * stdio, no FILE-pointer/stderr symbol (those aren't portable across this file's
  * three platforms), just the raw write() this seed already leans on elsewhere. */
+static void fk_bus_unwind(long long depth, long long phase, const char *why);
 static void fk_die(const char *msg) {
     long long n = 0;
     while (msg[n]) {
         n = n + 1;
     }
+    fk_bus_unwind(0, 4, msg);
     write(2, msg, n);
     write(2, "\n", 1);
     exit(1);
@@ -460,7 +462,6 @@ static long long *fk_fn_inram;  /* per-defn FOLDED calls: a body that ran as thi
 static const char *fk_hot_unit_of(long long so);
 static void fk_live_open(void);
 static void fk_live_note_defn(long long j);
-static long long fk_live_ticks;
 #ifdef __APPLE__
 extern unsigned int mach_host_self(void);
 extern int host_statistics(unsigned int host, int flavor, int *info, unsigned int *count);
@@ -550,7 +551,7 @@ static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
  * lists). FK_AST_NODE_CAP_INIT (defined near fk_node[][4] itself, further down) is the
  * PARSED PROGRAM's syntax tree, filled once per expression during parsing via
  * fk_smknode. */
-#define FK_NODE_CAP_INIT 262144         /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots, nhash_memo, inram slot/generation/released: birth capacity only -- the table DOUBLES on demand (fk_nodes_grow), so there is no node wall. Handles are indices into column arrays; doubling the columns keeps every handle valid, and the intern index grows with them (held at 4x the node cap, rebuilt from fk_nhash_memo). History: 65536->262144 (2026-07-02) when a full table made every guard silently return handle 0; then a loud die at the wall; growth since 2026-09-02. A runaway consumer now shows as monotone kernel_stat 19/20 (live cap / doublings) instead of a refusal -- probe whether the fill POSITION moves, same discipline as ever. 262144*104B ~= 27MB at birth. */
+#define FK_NODE_CAP_INIT 262144         /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, nhash_memo, inram slot/generation/released: birth capacity only -- the table DOUBLES on demand (fk_nodes_grow), so there is no node wall. Handles are indices into column arrays; doubling the columns keeps every handle valid, and the intern index grows with them (held at 4x the node cap, rebuilt from fk_nhash_memo). History: 65536->262144 (2026-07-02) when a full table made every guard silently return handle 0; then a loud die at the wall; growth since 2026-09-02. A runaway consumer now shows as monotone kernel_stat 19/20 (live cap / doublings) instead of a refusal -- probe whether the fill POSITION moves, same discipline as ever. 262144*93B ~= 24MB at birth. */
 static long long fk_node_cap;           /* live capacity; fk_nodes_init/fk_nodes_grow own it */
 static long long fk_node_grows;         /* doublings this run -- kernel_stat 20 */
 #define FK_RECORD_CAP_INIT 256          /* fk_rkey/rval/rcnt/rbp: record-table birth size; rows grow on demand (fk_record_reserve). Record VALUES and blueprints are melt roots since 2026-09-02 -- a record holding a heap list used to dangle across a compaction. */
@@ -1545,7 +1546,8 @@ static long long *fk_nsfile;
 static long long *fk_nsline;
 static long long *fk_nscol;
 static long long *fk_nsattr;
-static long long *fk_fbroots;
+#define FK_FB_RING 2048 /* the framebuffer keeps the newest roots: a buffer, not a ledger -- framebuffer-events answers at most this many, oldest first */
+static long long fk_fbroots[FK_FB_RING];
 static long long fk_fbn;
 /* the four framebuffer counters the sibling table-walker lane already defines
  * (form/form-stdlib/fkc-table-serialize.fk, kernel_stat keys 11..14). The seed
@@ -1557,7 +1559,6 @@ static long long fk_fbrejected;  /* fb_record calls whose value was not a live c
 static long long fk_fbentered;   /* fb_record calls entered (kernel_stat 12) */
 static long long fk_fbaccepted;  /* fb_record calls accepted (kernel_stat 13) */
 static long long fk_fblastidx;   /* the last node index fb_record saw, accepted or not (kernel_stat 14) */
-#define FK_FB_RING 2048 /* the framebuffer keeps the newest roots: a buffer, not a ledger -- framebuffer-events answers at most this many, oldest first */
 static void **fk_gift_base;      /* gift frames: mapped bases (0 = released) */
 static long long *fk_gift_size;  /* gift frames: mapped sizes */
 static long long fk_gift_count;
@@ -5102,7 +5103,6 @@ static void fk_nodes_grow(void) {
     if (fk_field_on) {
         long long oc = fk_node_cap;
         long long nc = oc * 2;
-        fk_fbroots = (long long *)fk_nodes_grow_col(fk_fbroots, oc, nc, 8);
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
         fk_inram_node_slot = (unsigned long long *)fk_nodes_grow_col(fk_inram_node_slot, oc, nc, sizeof(*fk_inram_node_slot));
         fk_inram_node_generation = (unsigned int *)fk_nodes_grow_col(fk_inram_node_generation, oc, nc, 4);
@@ -5125,7 +5125,6 @@ static void fk_nodes_grow(void) {
     fk_nsline = (long long *)fk_store_grow('l', (void **)&fk_nsline, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
     fk_nscol = (long long *)fk_store_grow('o', (void **)&fk_nscol, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
     fk_nsattr = (long long *)fk_store_grow('a', (void **)&fk_nsattr, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
-    fk_fbroots = (long long *)fk_nodes_grow_col(fk_fbroots, oc, nc, 8);
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
     fk_inram_node_slot = (unsigned long long *)fk_nodes_grow_col(fk_inram_node_slot, oc, nc, sizeof(*fk_inram_node_slot));
     fk_inram_node_generation = (unsigned int *)fk_nodes_grow_col(fk_inram_node_generation, oc, nc, 4);
@@ -5170,16 +5169,13 @@ static void fk_nodes_init(void) {
     fk_vs_grow(FK_VALUE_STACK_CAP_INIT);
     fk_mem_reserve(FK_MEM_CELL_CAP_INIT);
     if (fk_field_open()) {
-        fk_fbroots = (long long *)calloc(FK_NODE_CAP_INIT, 8);
-        fk_intern_tab = (long long *)calloc(FK_INTERN_HASH_CAP_INIT, 8);
+        /* every intern door asks the field's own index first, so no private intern index is taken (stat 62 reads 0 of it) */
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
         fk_inram_node_slot = (unsigned long long *)calloc(FK_NODE_CAP_INIT, sizeof(*fk_inram_node_slot));
         fk_inram_node_generation = (unsigned int *)calloc(FK_NODE_CAP_INIT, 4);
         fk_inram_node_released = (unsigned char *)calloc(FK_NODE_CAP_INIT, 1);
 #endif
-        if (fk_fbroots == 0 || fk_intern_tab == 0) { fk_die("fk_nodes_init: out of memory for the private node columns"); }
         fk_node_cap = FK_NODE_CAP_INIT;
-        fk_intern_hash_cap = FK_INTERN_HASH_CAP_INIT;
         return;
     }
     fk_nkind = (long long *)fk_store_take('k', FK_STORE_NODE_CELLS * 8);
@@ -5206,11 +5202,10 @@ static void fk_nodes_init(void) {
         fk_nsattr = (long long *)calloc(FK_NODE_CAP_INIT, 8);
     }
     fk_nhash_memo = (long long *)calloc(FK_NODE_CAP_INIT, 8);
-    fk_fbroots = (long long *)calloc(FK_NODE_CAP_INIT, 8);
     fk_intern_tab = (long long *)calloc(FK_INTERN_HASH_CAP_INIT, 8);
     if (fk_nkind == 0 || fk_ncat == 0 || fk_nkids == 0 || fk_nval == 0 ||
         fk_nid == 0 || fk_nhash_memo == 0 || fk_nsfile == 0 || fk_nsline == 0 ||
-        fk_nscol == 0 || fk_nsattr == 0 || fk_fbroots == 0 || fk_intern_tab == 0) {
+        fk_nscol == 0 || fk_nsattr == 0 || fk_intern_tab == 0) {
         fk_die("fk_nodes_init: out of memory for the value-node table");
     }
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
@@ -5820,89 +5815,7 @@ static long long fk_row_pair(long long relsv, long long loc) {
     row = fk_list_push(row, relsv);
     return row;
 }
-/* Heap-grown: the old static 512 silently dropped a directory's 513th entry —
- * a partial listing wearing a whole one's skin (the silent-partial family;
- * healed 2026-08-27). Growth is the capability answer, never a quiet cap. */
-static long long *fk_ls_buf = 0;
-static long long fk_ls_cap = 0;
-static long long fk_ls_n = 0;
-static void fk_ls_reset(void) {
-    fk_ls_n = 0;
-}
-static void fk_ls_add(long long sv) {
-    if (fk_ls_n >= fk_ls_cap) {
-        fk_ls_cap = fk_ls_cap == 0 ? 512 : fk_ls_cap * 2;
-        fk_ls_buf = realloc(fk_ls_buf, fk_ls_cap * 8);
-        if (fk_ls_buf == 0) {
-            fk_die("fk_ls_add: out of memory growing directory listing");
-        }
-    }
-    fk_ls_buf[fk_ls_n] = sv;
-    fk_ls_n = fk_ls_n + 1;
-}
-static int fk_sv_less(long long a, long long b) {
-    long long aa = fk_stri(a);
-    long long bb = fk_stri(b);
-    if (aa < 0 || bb < 0 || !FK_SOK(aa) || !FK_SOK(bb)) {
-        return 0;
-    }
-    long long la = FK_SLEN(aa);
-    long long lb = FK_SLEN(bb);
-    long long j = 0;
-    while (j < la && j < lb) {
-        unsigned char ca = (unsigned char)FK_SBYTES(aa)[j];
-        unsigned char cb = (unsigned char)FK_SBYTES(bb)[j];
-        if (ca < cb) {
-            return 1;
-        }
-        if (ca > cb) {
-            return 0;
-        }
-        j = j + 1;
-    }
-    return la < lb;
-}
 #ifndef _WIN32
-static long long fk_fs_list_path(const char *p) {
-    fk_ls_reset();
-    DIR *d = opendir(p);
-    if (d) {
-        struct dirent *e;
-        while ((e = readdir(d)) != 0) {
-            if (e->d_name[0] == FK_CH_DOT &&
-                (e->d_name[1] == 0 || (e->d_name[1] == FK_CH_DOT && e->d_name[2] == 0))) {
-                continue;
-            }
-            long long nl = 0;
-            while (e->d_name[nl] != 0) {
-                nl = nl + 1;
-            }
-            fk_ls_add(fk_sbuf(e->d_name, nl));
-        }
-        closedir(d);
-    }
-    long long i = 0;
-    long long j = 0;
-    while (j < fk_ls_n) {
-        i = 0;
-        while (i + 1 < fk_ls_n) {
-            if (fk_sv_less(fk_ls_buf[i + 1], fk_ls_buf[i])) {
-                long long t = fk_ls_buf[i];
-                fk_ls_buf[i] = fk_ls_buf[i + 1];
-                fk_ls_buf[i + 1] = t;
-            }
-            i = i + 1;
-        }
-        j = j + 1;
-    }
-    long long out = 1;
-    i = fk_ls_n;
-    while (i > 0) {
-        i = i - 1;
-        out = fk_list_push(out, fk_ls_buf[i]);
-    }
-    return out;
-}
 /* fk_rmtree and fk_inv_walk build child paths RECURSIVELY (the built path
  * becomes the next call's `dir`) into FK_PATH_CAP buffers, so the join checks
  * that dir + '/' + d_name fits and hard-stops when it does not. A truncating
@@ -6022,10 +5935,6 @@ static void fk_inv_walk(const char *root, const char *dir, const char *suf, long
     closedir(d);
 }
 #else
-static long long fk_fs_list_path(const char *p) {
-    (void)p;
-    return 1;
-}
 static int fk_rmdir_tree(char *p) {
     return rmdir(p);
 }
@@ -7076,32 +6985,6 @@ static long long fk_cuda_matvec_f32(long long wv, long long xv) {
     return 1;
 }
 #endif
-static int fk_sock_getaddrinfo(const char *h, const char *p, const struct addrinfo *i,
-                               struct addrinfo **r) {
-    fk_sock_boot();
-    return getaddrinfo(h, p, i, r);
-}
-static int fk_sock_socket(int af, int ty, int pr) {
-    fk_sock_boot();
-    fk_os_socket_t s = socket(af, ty, pr);
-    if (!fk_os_socket_ok(s)) {
-        return -1;
-    }
-    return (int)s;
-}
-static int fk_sock_connect(int fd, const void *a, unsigned int n) {
-    fk_sock_boot();
-    return connect((fk_os_socket_t)(unsigned int)fd, a, n);
-}
-static int fk_sock_close(int fd) {
-    return fk_os_close_socket((fk_os_socket_t)(unsigned int)fd);
-}
-static long long fk_sock_read(int fd, void *buf, unsigned long n) {
-    return fk_os_recv_socket((fk_os_socket_t)(unsigned int)fd, buf, n);
-}
-static long long fk_sock_write(int fd, const void *buf, unsigned long n) {
-    return fk_os_send_socket((fk_os_socket_t)(unsigned int)fd, buf, n);
-}
 struct timeval {
     long tv_sec;
     int tv_usec;
@@ -8495,27 +8378,6 @@ static long long *fk_fw;
 static long long *fk_nh;
 static long long *fk_nt;
 static long long fk_nhp;
-static void fk_mw(long long v) {
-    char b[32];
-    long long n = 0;
-    if (v == 0) {
-        b[0] = 48;
-        n = 1;
-    }
-    while (v > 0) {
-        b[n] = 48 + v % 10;
-        v = v / 10;
-        n = n + 1;
-    }
-    while (n > 0) {
-        n = n - 1;
-        write(2, b + n, 1);
-    }
-}
-static void fk_mc(long long c) {
-    char b = c;
-    write(2, &b, 1);
-}
 /* The melt's two walks go along a list's tail in a loop and into its head by recursion, as fk_smark does: a list
  * of any length costs one frame per level of nesting, never one per cell. Walking the tail by recursion, a live
  * list of a few million cells ran the evaluation thread off its stack in the middle of a melt. */
@@ -9133,32 +8995,8 @@ static long long fk_read_all_dynamic(int fd, long long expected) {
         }
     }
 }
-static long long fk_pos;
 extern int open(const char *, int, ...);
 extern long long read(int, void *, unsigned long);
-static long long fk_next() {
-    long long sg = 1;
-    while (fk_buf[fk_pos] != 0) {
-        if (fk_buf[fk_pos] == FK_CH_DASH && fk_buf[fk_pos + 1] >= FK_CH_DIGIT0 &&
-            fk_buf[fk_pos + 1] <= FK_CH_DIGIT9) {
-            sg = 0 - 1;
-            fk_pos = fk_pos + 1;
-            break;
-        }
-        if (fk_buf[fk_pos] >= FK_CH_DIGIT0) {
-            if (fk_buf[fk_pos] <= FK_CH_DIGIT9) {
-                break;
-            }
-        }
-        fk_pos = fk_pos + 1;
-    }
-    long long v = 0;
-    while (fk_buf[fk_pos] >= FK_CH_DIGIT0 && fk_buf[fk_pos] <= FK_CH_DIGIT9) {
-        v = v * 10 + (fk_buf[fk_pos] - FK_CH_DIGIT0);
-        fk_pos = fk_pos + 1;
-    }
-    return sg * v;
-}
 static void fk_psv(long long v) {
     long long sa = fk_stri(v);
     if (sa >= 0 && FK_SOK(sa)) {
@@ -13775,8 +13613,31 @@ static void *fk_store_grow(char letter, void **pp, long long old_bytes, long lon
     if (zero) { long long k = old_bytes; while (k < new_bytes) { q[k] = 0; k = k + 1; } }
     return q;
 }
-/* offer (writable = 1: create, size to want+16 bytes, map read-write) or
- * receive (writable = 0: attach read-only; absent answers nothing). */
+/* map a shm object: writable creates it and sizes it to want+16 bytes (at least 4096) read-write, else it attaches
+ * read-only; 0 when absent. An internal read maps and unmaps through this alone, so it never takes a gift slot. */
+static char *fk_shm_map(const char *gname, long long want, int writable, long long *size) {
+#if defined(_WIN32) || !defined(FK_HAVE_MMAN_HEADER)
+    (void)gname; (void)want; (void)writable; (void)size;
+    return 0;
+#else
+    int gfd = shm_open(gname, writable ? (O_CREAT | O_RDWR) : O_RDONLY, 0600);
+    if (gfd < 0) { return 0; }
+    struct stat gst;
+    long long cap = fstat(gfd, &gst) == 0 ? (long long)gst.st_size : 0;
+    long long need = want + 16 < 4096 ? 4096 : want + 16;
+    if (writable && cap < need) {
+        /* a creator racing this one may size the object first, and it sizes once: the size is read back, not assumed */
+        ftruncate(gfd, need);
+        if (fstat(gfd, &gst) == 0) { cap = (long long)gst.st_size; }
+    }
+    void *base = cap < 16 ? MAP_FAILED : mmap(0, (size_t)cap, writable ? (PROT_READ | PROT_WRITE) : PROT_READ, MAP_SHARED, gfd, 0);
+    close(gfd);
+    if (base == MAP_FAILED) { return 0; }
+    *size = cap;
+    return (char *)base;
+#endif
+}
+/* offer (writable = 1) or receive (writable = 0) a gift frame: fk_shm_map, held in the gift table */
 static long long fk_gift_open(const char *gname, long long want, int writable) {
 #if defined(_WIN32) || !defined(FK_HAVE_MMAN_HEADER)
     (void)gname; (void)want; (void)writable;
@@ -13786,38 +13647,9 @@ static long long fk_gift_open(const char *gname, long long want, int writable) {
     if (gname[0] != '/' || fk_path_len(gname) > 31) {
         fk_die("fkwu: shm gift name must begin with '/' and hold at most 31 bytes (the POSIX shm bound on this host)");
     }
-    int gfd = shm_open(gname, writable ? (O_CREAT | O_RDWR) : O_RDONLY, 0600);
-    if (gfd < 0) {
-        return fk_nothing;
-    }
-    struct stat gst;
-    if (fstat(gfd, &gst) != 0) {
-        close(gfd);
-        return fk_nothing;
-    }
-    long long cap = (long long)gst.st_size;
-    if (writable) {
-        long long need = want + 16;
-        if (need < 4096) {
-            need = 4096;
-        }
-        if (cap < need) {
-            if (ftruncate(gfd, need) != 0 && cap == 0) {
-                close(gfd);
-                return fk_nothing;
-            }
-            if (fstat(gfd, &gst) == 0) {
-                cap = (long long)gst.st_size;
-            }
-        }
-    }
-    if (cap < 16) {
-        close(gfd);
-        return fk_nothing;
-    }
-    void *base = mmap(0, (size_t)cap, writable ? (PROT_READ | PROT_WRITE) : PROT_READ, MAP_SHARED, gfd, 0);
-    close(gfd);
-    if (base == MAP_FAILED) {
+    long long cap = 0;
+    char *base = fk_shm_map(gname, want, writable, &cap);
+    if (base == 0) {
         return fk_nothing;
     }
     if (fk_gift_count == fk_gift_cap) {
@@ -14242,7 +14074,6 @@ static long long fk_cross_decode(const char *b, long long n, long long *pos, lon
 #define FK_LIVE_MAGIC 0x464B4C4956LL
 #define FK_LIVE_WORDS 35
 static volatile long long *fk_live_page;
-static long long fk_live_ticks;
 static void fk_live_pid_name(long long pid, char *out) {
     char digits[24];
     long long n = 0;
@@ -14336,9 +14167,12 @@ static void fk_live_note_defn(long long j) {
 static volatile long long *fk_roster_slots;
 static long long fk_roster_k = -1;
 static long long fk_roster_ticks;
-/* a kernel's shared objects once it has ended: its live page, its store columns, its program surface */
+/* a kernel's shared objects once it has ended: its live page, its store columns, its program surface, and the stage
+ * bus opens another kernel left standing (fk_bus_lastbreath) */
+static void fk_bus_lastbreath(long long pid);
 static void fk_live_bury(long long pid) {
     char dn[32]; fk_live_pid_name(pid, dn); shm_unlink(dn); fk_store_unlink_pid(pid); fk_prog_unlink_pid(pid);
+    if (pid != (long long)getpid()) { fk_bus_lastbreath(pid); }
 }
 static long long fk_live_read_words(const char *name, long long *out, long long count);
 /* Whether a page is an ended kernel's, so it may be buried. The host hands a pid out again within minutes
@@ -14394,13 +14228,17 @@ static void fk_live_roster_leave(long long pid) {
     if (fk_roster_slots != 0 && fk_roster_k >= 0) { __sync_bool_compare_and_swap(&fk_roster_slots[fk_roster_k], pid, 0); }
     fk_roster_k = -1;
 }
-static void fk_live_roster_register(long long pid) {
+static volatile long long *fk_roster_map(void) {
     if (fk_roster_slots == 0) {
         long long gh = fk_gift_open("/fg-kernels", 4096, 1);
-        if (gh == fk_nothing) { return; }
+        if (gh == fk_nothing) { return 0; }
         fk_roster_slots = (volatile long long *)fk_gift_base[gh >> 1] + 2;
     }
-    volatile long long *slots = fk_roster_slots;
+    return fk_roster_slots;
+}
+static void fk_live_roster_register(long long pid) {
+    volatile long long *slots = fk_roster_map();
+    if (slots == 0) { return; }
     if (fk_roster_k >= 0 && slots[fk_roster_k] == pid) { return; }
     fk_roster_k = -1;
     long long k = 0;
@@ -14508,15 +14346,22 @@ static void fk_live_note(int final) {
 static void fk_live_publish(int final) { fk_live_note(final); }
 /* read-only mapping of another kernel's page or the roster: the words, then unmap */
 static long long fk_live_read_words(const char *name, long long *out, long long count) {
-    long long gh = fk_gift_open(name, 0, 0);
-    if (gh == fk_nothing) { return -1; }
-    if (count < 0 || count > (fk_gift_size[gh >> 1] - 16) / 8) { fk_gift_close(gh >> 1); return -1; }
-    volatile long long *w = (volatile long long *)fk_gift_base[gh >> 1] + 2;
-    long long k = 0;
-    while (k < count) { out[k] = w[k]; k = k + 1; }
-    fk_gift_close(gh >> 1);
-    return count;
+    long long sz = 0, k = 0;
+    char *b = fk_shm_map(name, 0, 0, &sz);
+    if (b == 0) { return -1; }
+    int fits = count >= 0 && count <= (sz - 16) / 8;
+    while (fits && k < count) { out[k] = ((volatile long long *)b)[2 + k]; k = k + 1; }
+    munmap(b, (size_t)sz);
+    return fits ? count : -1;
 }
+/* a kernel's live page: its own where it is mapped, another's as a read-only view fk_live_view_end releases */
+static char *fk_live_view(long long pid, long long *sz) {
+    char nm[32];
+    if (pid == (long long)getpid() && fk_live_page != 0) { *sz = FK_LIVE_PAGE_BYTES + 16; return (char *)fk_live_page; }
+    fk_live_pid_name(pid, nm);
+    return fk_shm_map(nm, 0, 0, sz);
+}
+static void fk_live_view_end(char *b, long long sz) { if (b != (char *)fk_live_page) { munmap(b, (size_t)sz); } }
 /* ---- the publisher roster: names of every gift frame that carries a snapshot, 511 slots of 128 bytes (a name is root, a bar, publisher; up to 119 bytes) ---- */
 #define FK_ROSTER_SLOTS 511
 /* A slot's timestamp is when this name last SPOKE, refreshed on every register,
@@ -14533,9 +14378,10 @@ static long long fk_live_read_words(const char *name, long long *out, long long 
  * lastSpokeMs), and a reader tells the living from the standing without opening
  * a single frame. The BOUND stays the reader's; only the fact is published. */
 static long long fk_roster_register(const char *name) {
-    long long gh = fk_gift_open("/fg-roster", 65536, 1);
-    if (gh == fk_nothing) { return -1; }
-    char *base = (char *)fk_gift_base[gh >> 1] + 64;
+    long long sz = 0;
+    char *map = fk_shm_map("/fg-roster", 65536, 1, &sz);
+    if (map == 0 || sz < 64 + FK_ROSTER_SLOTS * 128) { if (map != 0) { munmap(map, (size_t)sz); } return -1; }
+    char *base = map + 64;
     long long k = 0, free_slot = -1, found = -1, oldest = -1;
     long long oldest_at = 0;
     while (k < FK_ROSTER_SLOTS) {
@@ -14557,15 +14403,16 @@ static long long fk_roster_register(const char *name) {
         found = free_slot;
     }
     if (found >= 0) { *(long long *)(base + found * 128 + 120) = fk_live_now_ms(); }
-    fk_gift_close(gh >> 1);
+    munmap(map, (size_t)sz);
     return found;
 }
 static long long fk_roster_names(void) {
-    long long gh = fk_gift_open("/fg-roster", 0, 0);
-    if (gh == fk_nothing) { return 1; }
-    char *base = (char *)fk_gift_base[gh >> 1] + 64;
+    long long sz = 0;
+    char *map = fk_shm_map("/fg-roster", 0, 0, &sz);
+    if (map == 0) { return 1; }
+    char *base = map + 64;
     long long l = 1;
-    long long k = FK_ROSTER_SLOTS - 1;
+    long long k = sz < 64 + FK_ROSTER_SLOTS * 128 ? -1 : FK_ROSTER_SLOTS - 1;
     while (k >= 0) {
         char *slot = base + k * 128;
         if (slot[0] != 0) {
@@ -14575,13 +14422,12 @@ static long long fk_roster_names(void) {
         }
         k = k - 1;
     }
-    fk_gift_close(gh >> 1);
+    munmap(map, (size_t)sz);
     return l;
 }
 /* the hottest defns of this process: top-n by heat, then one pass over the program text for line and column */
-static long long fk_hot_pick_by(long long *ledger, long long want, long long *picked_j, long long *picked_h, long long *line_of, long long *col_of);
-static long long fk_hot_pick(long long want, long long *picked_j, long long *picked_h, long long *line_of, long long *col_of) { return fk_hot_pick_by(fk_fn_heat, want, picked_j, picked_h, line_of, col_of); }
-static long long fk_hot_pick_by(long long *ledger, long long want, long long *picked_j, long long *picked_h, long long *line_of, long long *col_of) {
+static long long fk_hot_pick(long long want, long long *picked_j, long long *picked_h, long long *line_of, long long *col_of) {
+    long long *ledger = fk_fn_heat;
     long long np = 0;
     long long j = 0;
     while (j < fk_fntop) {
@@ -14644,7 +14490,7 @@ static const char *fk_hot_unit_of(long long so) {
 #define FK_CELL_MAPS 16
 #define FK_CELL_BIG (1LL << 61)
 #define FK_CELL_BASE 9000000000000000000LL
-struct fk_cell_map_s { long long pid; void *base[24]; long long size[24]; volatile long long *live; long long live_size; };
+struct fk_cell_map_s { long long pid; void *base[24]; long long size[24]; };
 static struct fk_cell_map_s fk_cell_maps[FK_CELL_MAPS];
 static int fk_cell_letter(char c) { int k = 0; while (fk_store_letters[k]) { if (fk_store_letters[k] == c) { return k; } k = k + 1; } return -1; }
 static long long fk_cell_enc(long long raw) { if (raw <= -7000000000000000000LL) { return ((0 - (raw + FK_CELL_BASE)) - FK_CELL_BIG) << 1; } return raw << 1; }
@@ -14679,18 +14525,6 @@ static long long fk_cell_map_open(long long pid) {
         }
         k = k + 1;
     }
-    char ln[32];
-    fk_live_pid_name(pid, ln);
-    m->live = 0; m->live_size = 0;
-    int lfd = shm_open(ln, O_RDONLY, 0600);
-    if (lfd >= 0) {
-        struct stat lst;
-        if (fstat(lfd, &lst) == 0 && lst.st_size >= 4096) {
-            void *lp = mmap(0, (size_t)lst.st_size, PROT_READ, MAP_SHARED, lfd, 0);
-            if (lp != MAP_FAILED) { m->live = (volatile long long *)lp; m->live_size = (long long)lst.st_size; }
-        }
-        close(lfd);
-    }
     if (mapped == 0) { m->pid = 0; return -1; }
     return s;
 #else
@@ -14704,7 +14538,6 @@ static void fk_cell_map_close(long long s) {
     struct fk_cell_map_s *m = &fk_cell_maps[s];
     long long k = 0;
     while (k < 24) { if (m->base[k] != 0) { munmap(m->base[k], (size_t)m->size[k]); m->base[k] = 0; } k = k + 1; }
-    if (m->live != 0) { munmap((void *)m->live, (size_t)m->live_size); m->live = 0; }
     m->pid = 0;
 #else
     (void)s;
@@ -14803,64 +14636,31 @@ static long long fk_cell_value(long long s, long long raw) {
     }
     return fk_nothing;
 }
-/* a hot row as a cell: (heat name unit line col boxes unboxes) -- the defn's own source pointer and both float ledgers */
-static long long fk_hot_row_cell(long long sj, long long heat, long long line, long long col) {
-    long long so = fk_fnsym_s[sj];
-    long long fx = fk_fnidx[sj];
-    const char *unit = fk_hot_unit_of(so);
-    long long boxes = (fk_fn_fbox != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_fbox[fx] : 0;
-    long long unboxes = (fk_fn_unbox != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_unbox[fx] : 0;
-    long long native = (fk_fn_native != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_native[fx] : 0;
-    long long mints = (fk_fn_mint != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_mint[fx] : 0;
-    long long folds = (fk_fn_inram != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_inram[fx] : 0;
-    return fk_cons_val(heat << 1, fk_cons_val(fk_sbuf(fk_srctext + so, fk_fnsym_n[sj]), fk_cons_val(fk_sbuf(unit, fk_cstrlen(unit)), fk_cons_val(line << 1, fk_cons_val(col << 1, fk_cons_val(boxes << 1, fk_cons_val(unboxes << 1, fk_cons_val(native << 1, fk_cons_val(mints << 1, fk_cons_val(folds << 1, 1))))))))));
+/* a kernel's page: header words plus what the reader derives from the arms (dispatches, hottest, distinct) */
+static long long fk_live_read_page(long long pid, long long *out) {
+    long long sz = 0, k = 0;
+    char *b = fk_live_view(pid, &sz);
+    if (b == 0) { return -1; }
+    while (k < FK_LIVE_WORDS) { out[k] = ((volatile long long *)b)[2 + k]; k = k + 1; }
+    if (sz >= FK_LIVE_ARMS_OFF + FK_OPCODE_ARM_CAP * 8 && out[28] == FK_LIVE_VERSION) {
+        long long *arms = (long long *)(b + FK_LIVE_ARMS_OFF);
+        long long sum = 0, distinct = 0, hot = 0, hotc = 0, u = 1;
+        while (u < FK_OPCODE_ARM_CAP) { long long a = arms[u]; if (a > 0) { sum = sum + a; distinct = distinct + 1; if (a > hotc) { hotc = a; hot = u; } } u = u + 1; }
+        out[4] = sum; out[16] = hot; out[17] = hotc; out[20] = distinct;
+    }
+    fk_live_view_end(b, sz);
+    return FK_LIVE_WORDS;
 }
-/* The rank arrays were sixty-four wide on the stack, and a want past that was
- * silently cut to sixty-four -- ask for nine hundred, receive sixty-four, with
- * nothing said. This body closed that family (silent partials GROW, walls
- * refuse loudly), and this door was still in it. Witnessed 2026-09-09: a glass
- * carrying 3248 recipes and three to seven MILLION dispatches a frame could
- * only ever show its top sixty-four, whose rates summed to under a fortieth of
- * the frame, so the question "where does the frame go" had no door.
- * The honest bound is how many recipes there ARE: you cannot rank more defns
- * than exist. Clamping to that says nothing false, and the arrays are taken
- * from the heap at the size actually asked for. */
-static long long fk_hot_rows_by(long long *ledger, long long want) {
-    if (want <= 0) { return 1; }
-    if (want > fk_fntop) { want = fk_fntop; }
-    if (want <= 0) { return 1; }
-    long long *pj = (long long *)malloc((size_t)want * 8), *ph = (long long *)malloc((size_t)want * 8);
-    long long *ln = (long long *)malloc((size_t)want * 8), *cl = (long long *)malloc((size_t)want * 8);
-    if (pj == 0 || ph == 0 || ln == 0 || cl == 0) { free(pj); free(ph); free(ln); free(cl); return 1; }
-    long long np = fk_hot_pick_by(ledger, want, pj, ph, ln, cl);
-    long long l = 1;
-    long long q = np - 1;
-    while (q >= 0) { l = fk_cons_val(fk_hot_row_cell(pj[q], ph[q], ln[q], cl[q]), l); q = q - 1; }
-    free(pj); free(ph); free(ln); free(cl);
-    return l;
-}
-/* another kernel's page: header words plus what the reader derives from the arms (dispatches, hottest, distinct) */
 /* kernel_roster_adopt pid: a pid the host runs, whose live page says it is a living kernel and which
  * holds no roster slot, is given one. A binary that claims its slot with a plain store loses kernels
  * started in the same instant as a sibling and has no tick that puts them back: they run, their pages
  * are current, and no organ that asks the roster can see them. 1 adopted, 0 it already holds a slot,
  * -1 the pid is gone or has no page that says alive, -2 the roster is full or cannot be opened.
  * kernel_roster_forget pid empties every slot that holds pid: 1 one did, 0 none. */
-static long long fk_live_read_page(const char *name, long long *out);
-static volatile long long *fk_roster_map(void) {
-    if (fk_roster_slots == 0) {
-        long long gh = fk_gift_open("/fg-kernels", 4096, 1);
-        if (gh == fk_nothing) { return 0; }
-        fk_roster_slots = (volatile long long *)fk_gift_base[gh >> 1] + 2;
-    }
-    return fk_roster_slots;
-}
 static long long fk_roster_adopt(long long pid) {
     if (pid <= 0 || !fk_pid_ours(pid)) { return -1; }
-    char nm[32];
     long long w[FK_LIVE_WORDS];
-    fk_live_pid_name(pid, nm);
-    if (fk_live_read_page(nm, w) != FK_LIVE_WORDS || w[0] != FK_LIVE_MAGIC || w[19] != 1) { return -1; }
+    if (fk_live_read_page(pid, w) != FK_LIVE_WORDS || w[0] != FK_LIVE_MAGIC || w[19] != 1) { return -1; }
     volatile long long *slots = fk_roster_map();
     if (slots == 0) { return -2; }
     long long k = 0;
@@ -14898,37 +14698,16 @@ static long long fk_page_bury(long long pid) {
     fk_roster_forget(pid);
     return 1;
 }
-static long long fk_live_read_page(const char *name, long long *out) {
-    long long gh = fk_gift_open(name, 0, 0);
-    if (gh == fk_nothing) { return -1; }
-    long long sz = fk_gift_size[gh >> 1];
-    volatile long long *w = (volatile long long *)fk_gift_base[gh >> 1] + 2;
-    long long k = 0;
-    while (k < FK_LIVE_WORDS) { out[k] = w[k]; k = k + 1; }
-    if (sz >= FK_LIVE_ARMS_OFF + FK_OPCODE_ARM_CAP * 8 && out[28] == FK_LIVE_VERSION) {
-        long long *arms = (long long *)((char *)fk_gift_base[gh >> 1] + FK_LIVE_ARMS_OFF);
-        long long sum = 0, distinct = 0, hot = 0, hotc = 0, u = 1;
-        while (u < FK_OPCODE_ARM_CAP) { long long a = arms[u]; if (a > 0) { sum = sum + a; distinct = distinct + 1; if (a > hotc) { hotc = a; hot = u; } } u = u + 1; }
-        out[4] = sum; out[16] = hot; out[17] = hotc; out[20] = distinct;
-    }
-    fk_gift_close(gh >> 1);
-    return FK_LIVE_WORDS;
-}
-/* the hottest defns of ANY kernel by one of its page ledgers: (heat name unit line col boxes unboxes) cells */
-/* Same heal as fk_hot_rows_by: the wall was sixty-four and it cut in silence.
- * Here the honest bound lives in the page itself -- w[29], how many defns that
- * kernel carries -- so the clamp waits until the page is mapped and then says
- * only what is true. */
+/* the hottest defns of ANY kernel by one of its page ledgers: (heat name unit line col boxes unboxes) cells.
+ * The honest bound lives in the page itself -- w[29], how many defns that kernel carries -- so the clamp waits
+ * until the page is mapped and then says only what is true. */
 static long long fk_page_rows(long long pid, int ledger, long long want) {
     if (want <= 0) { return 1; }
-    char name[32];
-    fk_live_pid_name(pid, name);
-    long long gh = fk_gift_open(name, 0, 0);
-    if (gh == fk_nothing) { return 1; }
-    char *base = (char *)fk_gift_base[gh >> 1];
-    long long sz = fk_gift_size[gh >> 1];
+    long long sz = 0;
+    char *base = fk_live_view(pid, &sz);
+    if (base == 0) { return 1; }
     volatile long long *w = (volatile long long *)base + 2;
-    if (sz < FK_LIVE_INRAM_OFF + FK_LIVE_FNS * 8 || w[28] != FK_LIVE_VERSION) { fk_gift_close(gh >> 1); return 1; }
+    if (sz < FK_LIVE_INRAM_OFF + FK_LIVE_FNS * 8 || w[28] != FK_LIVE_VERSION) { fk_live_view_end(base, sz); return 1; }
     long long *heat = (long long *)(base + FK_LIVE_HEAT_OFF), *fbox = (long long *)(base + FK_LIVE_FBOX_OFF), *unbox = (long long *)(base + FK_LIVE_UNBOX_OFF), *meta = (long long *)(base + FK_LIVE_META_OFF), *native = (long long *)(base + FK_LIVE_NATIVE_OFF);
     char *blob = base + FK_LIVE_BLOB_OFF;
     long long *mintl = (long long *)(base + FK_LIVE_MINT_OFF);
@@ -14936,9 +14715,9 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     long long *led = ledger == 1 ? fbox : (ledger == 2 ? mintl : (ledger == 3 ? inraml : heat));
     long long count = w[29] < FK_LIVE_FNS ? w[29] : FK_LIVE_FNS;
     if (want > count) { want = count; }
-    if (want <= 0) { fk_gift_close(gh >> 1); return 1; }
+    if (want <= 0) { fk_live_view_end(base, sz); return 1; }
     long long *pj = (long long *)malloc((size_t)want * 8), *ph = (long long *)malloc((size_t)want * 8);
-    if (pj == 0 || ph == 0) { free(pj); free(ph); fk_gift_close(gh >> 1); return 1; }
+    if (pj == 0 || ph == 0) { free(pj); free(ph); fk_live_view_end(base, sz); return 1; }
     long long np = 0, fx = 0;
     while (fx < count) {
         long long h = led[fx];
@@ -14961,7 +14740,7 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
         q = q - 1;
     }
     free(pj); free(ph);
-    fk_gift_close(gh >> 1);
+    fk_live_view_end(base, sz);
     return l;
 }
 /* ---- the float-NodeID surface (tags 195 / 201) ---- */
@@ -15855,6 +15634,181 @@ static long long fk_rest_arm(long long a) {
     while (k >= 0) { long long s = __atomic_load_n(wp[k], __ATOMIC_ACQUIRE); seqs = fk_cons_val(((s & 1) ? s - 1 : s) << 1, seqs); k = k - 1; }
     return fk_cons_val(((ns + 500000) / 1000000) << 1, fk_cons_val(woke << 1, fk_cons_val((ns / 1000) << 1, fk_cons_val(seqs, 1))));
 }
+/* ---- the stage bus: /fg-bus1, one ring every kernel on this host appends its stage opens and closes to ----
+ * Shaped as a gift frame (bytes 0-15: seq, len 0), so host_sleep_ms watches it: every record adds 2 to its seq.
+ * Words at +16: 0 magic 1 layout (1) 2 slots 3 head (the next idx) 4 names cap 5 names used 6 created mono-us
+ * 7 clock (1: CLOCK_MONOTONIC us) 8 names missed. Record idx, 16 words at 4096 + (idx & 65535) * 128: 0 seq (idx + 1,
+ * published last) 1 pid 2 t_us 3 stage 4 key 5 phase (1 open 2 close 3 unwound 4 died) | depth << 8 6 link (a close:
+ * its open; an open: its parent open or -1) 7 dur_us 8 outcome 9 amount 10 body (the cwd's id) 11 digest. Names at
+ * 4096 + 8 MiB: 16384 entries of 128 bytes -- 0 id, 1 len | published << 61 | truncated << 62, 112 bytes of text.
+ * An id is fnv1a & (2^62 - 1). A binary that finds another layout here has no bus; a new layout takes a new name. */
+#define FK_BUS_MAGIC 0x4642555331LL
+#define FK_BUS_SLOTS 65536LL
+#define FK_BUS_NAMES 16384LL
+#define FK_BUS_NAME_OFF (4096 + (8LL << 20))
+#define FK_BUS_BYTES (FK_BUS_NAME_OFF + (2LL << 20))
+#define FK_BUS_W(k) (((volatile long long *)fk_bus)[2 + (k)])
+static char *fk_bus;
+static int fk_bus_tried;
+static long long fk_bus_pid, fk_bus_body, fk_bus_depth;
+static struct { long long sv, gen, id; } fk_bus_ncache[256];
+static struct { long long idx, stage, key, t; } fk_bus_stack[64];
+static volatile long long *fk_bus_rec(long long idx) { return (volatile long long *)(fk_bus + 4096) + (idx & (FK_BUS_SLOTS - 1)) * 16; }
+static volatile long long *fk_bus_entry(long long id, long long k) { return (volatile long long *)(fk_bus + FK_BUS_NAME_OFF) + ((id + k) & (FK_BUS_NAMES - 1)) * 16; }
+static long long fk_bus_us(void) { return fk_mono_ns() / 1000; }
+/* the id of n bytes, named in the table at first sight; a table with no room in 32 probes still answers the id */
+static long long fk_bus_name(const char *p, long long n) {
+    long long id = (long long)(fk_bytes_fnv1a(p, n) & ((1ULL << 62) - 1)), k = 0;
+    if (id == 0) { id = 1; }
+    while (k < 32) {
+        volatile long long *e = fk_bus_entry(id, k);
+        long long cur = 0, j = 0, m = n < 112 ? n : 112;
+        if (__atomic_compare_exchange_n(&e[0], &cur, id, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            while (j < m) { ((char *)(e + 2))[j] = p[j]; j = j + 1; }
+            __atomic_store_n(&e[1], n | (1LL << 61) | (n > 112 ? 1LL << 62 : 0), __ATOMIC_RELEASE);
+            __atomic_fetch_add(&FK_BUS_W(5), 1, __ATOMIC_RELAXED);
+            return id;
+        }
+        if (cur == id) { return id; }
+        k = k + 1;
+    }
+    __atomic_fetch_add(&FK_BUS_W(8), 1, __ATOMIC_RELAXED);
+    return id;
+}
+/* mapped once and held, as the field's columns are: an internal mapping, not a gift frame (kernel_stat 41) */
+static int fk_bus_on(void) {
+    if (fk_bus != 0 || fk_bus_tried) { return fk_bus != 0; }
+    fk_bus_tried = 1;
+    long long size = 0, zero = 0;
+    fk_bus = fk_shm_map("/fg-bus1", FK_BUS_BYTES - 16, 1, &size);
+    if (fk_bus == 0) { return 0; }
+    if (size >= FK_BUS_BYTES && __atomic_load_n(&FK_BUS_W(0), __ATOMIC_ACQUIRE) == 0) {
+        FK_BUS_W(1) = 1; FK_BUS_W(2) = FK_BUS_SLOTS; FK_BUS_W(4) = FK_BUS_NAMES; FK_BUS_W(7) = 1;
+        __atomic_compare_exchange_n(&FK_BUS_W(6), &zero, fk_bus_us(), 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        zero = 0;
+        __atomic_compare_exchange_n(&FK_BUS_W(0), &zero, FK_BUS_MAGIC, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+    if (size < FK_BUS_BYTES || __atomic_load_n(&FK_BUS_W(0), __ATOMIC_ACQUIRE) != FK_BUS_MAGIC || FK_BUS_W(1) != 1 || FK_BUS_W(2) != FK_BUS_SLOTS || FK_BUS_W(4) != FK_BUS_NAMES) {
+        munmap(fk_bus, (size_t)size);
+        fk_bus = 0;
+        return 0;
+    }
+    char cwd[FK_PATH_CAP];
+    fk_bus_pid = (long long)getpid();
+    fk_bus_body = getcwd(cwd, sizeof(cwd)) != 0 ? fk_bus_name(cwd, fk_cstrlen(cwd)) : 0;
+    return 1;
+}
+/* one record from r[1..11] (pid and body this kernel's when r[1] is 0): claimed, cleared, filled, published, then
+ * the frame's seq moves by 2 */
+static long long fk_bus_put(long long *r) {
+    long long idx = __atomic_fetch_add(&FK_BUS_W(3), 1, __ATOMIC_ACQ_REL), k = 1;
+    volatile long long *s = fk_bus_rec(idx);
+    __atomic_store_n(&s[0], 0, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    if (r[1] == 0) { r[1] = fk_bus_pid; r[10] = fk_bus_body; }
+    while (k < 12) { s[k] = r[k]; k = k + 1; }
+    __atomic_store_n(&s[0], idx + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add((volatile long long *)fk_bus, 2, __ATOMIC_RELEASE);
+    return idx;
+}
+/* the open standing at depth d closes: phase 2 its own close, 3 unwound past it, 4 the process died with it standing */
+static long long fk_bus_close_at(long long d, long long phase, long long outcome, long long amount, long long digest) {
+    long long r[12] = { 0 };
+    r[2] = fk_bus_us(); r[3] = fk_bus_stack[d].stage; r[4] = fk_bus_stack[d].key; r[5] = phase | (d << 8);
+    r[6] = fk_bus_stack[d].idx; r[7] = r[2] - fk_bus_stack[d].t; r[8] = outcome; r[9] = amount; r[11] = digest;
+    fk_bus_depth = d;
+    return fk_bus_put(r);
+}
+/* every open standing at depth or deeper closes, innermost first, its outcome the id of why: an attempt unwinding,
+ * a close skipping past (phase 3), the process dying (4) or ending (3, "exit") */
+static void fk_bus_unwind(long long depth, long long phase, const char *why) {
+    long long o = fk_bus_depth > depth && why != 0 ? fk_bus_name(why, fk_cstrlen(why)) : 0;
+    while (fk_bus_depth > depth) { fk_bus_close_at(fk_bus_depth - 1, phase, o, 0, 0); }
+}
+/* a kernel ended by a signal never unwinds, so whoever buries it closes its opens still standing in the ring: a
+ * phase-4 close in its name, outcome "lastbreath". Walking back, every close of that pid pairs with the nearest open
+ * before it, so an open met with no close pending still stands; a second burial finds them closed. */
+static void fk_bus_lastbreath(long long pid) {
+    long long head = fk_bus_on() ? __atomic_load_n(&FK_BUS_W(3), __ATOMIC_ACQUIRE) : 0, idx = head, pending = 0, o = 0;
+    while (idx > 0 && idx > head - FK_BUS_SLOTS) {
+        volatile long long *s = fk_bus_rec(idx = idx - 1);
+        if (__atomic_load_n(&s[0], __ATOMIC_ACQUIRE) != idx + 1 || s[1] != pid) { continue; }
+        if ((s[5] & 255) != 1 || pending > 0) { pending = pending + ((s[5] & 255) != 1 ? 1 : -1); continue; }
+        long long r[12] = { 0, pid, fk_bus_us(), s[3], s[4], 4 | (s[5] & ~255LL), idx, 0, 0, 0, s[10], 0 };
+        r[7] = r[2] - s[2];
+        r[8] = o != 0 ? o : (o = fk_bus_name("lastbreath", 10));
+        fk_bus_put(r);
+    }
+}
+/* an int is itself; a string is its id, named (named = 1, cached per string word and melt) or its bare fnv */
+static int fk_bus_word(long long v, int named, long long *out) {
+    long long si = fk_stri(v), c = si & 255;
+    if ((v & 1) == 0) { *out = v >> 1; return 1; }
+    if (si < 0) { return 0; }
+    if (!named) { *out = (long long)(fk_bytes_fnv1a(FK_SBYTES(si), FK_SLEN(si)) & ((1ULL << 62) - 1)); return 1; }
+    if (fk_bus_ncache[c].sv != v || fk_bus_ncache[c].gen != fk_melt_gen) {
+        fk_bus_ncache[c].sv = v; fk_bus_ncache[c].gen = fk_melt_gen; fk_bus_ncache[c].id = fk_bus_name(FK_SBYTES(si), FK_SLEN(si));
+    }
+    *out = fk_bus_ncache[c].id;
+    return 1;
+}
+/* float_leaf modes 29-32: 29 open (cons stage key) -> idx; 30 close (cons open-idx word) or (cons open-idx (list word
+ * amount digest)) -> idx, opens left standing above it unwound first; 31 tail (cons cursor skip) -> (next lapped holes
+ * now_us row ...), at most 4096 rows (idx pid t_us stage key phase depth link dur outcome amount body digest) read from
+ * max(cursor, head - 65536), a cursor below 0 answering (head 0 0 now_us); an unpublished slot ends the walk unless
+ * idx <= skip or it trails the head by over 1024 (a hole, stepped over); 32 name id -> its text. Off the bus, or an
+ * argument of the wrong kind, answers nothing. */
+static long long fk_bus_door(long long mode, long long x) {
+    long long r[12] = { 0 }, p = x >> 1, k = 0;
+    if (!fk_bus_on()) { return fk_nothing; }
+    while (mode == 32 && (x & 1) == 0 && k < 32) {
+        volatile long long *e = fk_bus_entry(p, k);
+        long long id = __atomic_load_n(&e[0], __ATOMIC_ACQUIRE), ln = __atomic_load_n(&e[1], __ATOMIC_ACQUIRE), n = ln & ((1LL << 61) - 1);
+        if (id == 0 || (id == p && ln == 0)) { break; }
+        if (id == p) { return fk_sbuf((const char *)(e + 2), n < 112 ? n : 112); }
+        k = k + 1;
+    }
+    if (mode == 32 || (x & 1) == 0 || p < 1 || !FK_POK(p)) { return fk_nothing; }
+    long long h = FK_HH(p), t = FK_HT(p);
+    if (mode == 29) {
+        if (fk_bus_depth >= 64 || fk_stri(h) < 0 || !fk_bus_word(h, 1, &r[3]) || !fk_bus_word(t, 1, &r[4])) { return fk_nothing; }
+        r[2] = fk_bus_us(); r[5] = 1 | (fk_bus_depth << 8); r[6] = fk_bus_depth > 0 ? fk_bus_stack[fk_bus_depth - 1].idx : -1;
+        k = fk_bus_put(r);
+        fk_bus_stack[fk_bus_depth].idx = k; fk_bus_stack[fk_bus_depth].stage = r[3]; fk_bus_stack[fk_bus_depth].key = r[4]; fk_bus_stack[fk_bus_depth].t = r[2];
+        fk_bus_depth = fk_bus_depth + 1;
+        return k << 1;
+    }
+    if (mode == 30) {
+        long long e[3] = { t, 0, 0 }, q = t >> 1, d = fk_bus_depth - 1;
+        while ((t & 1) != 0 && k < 3 && q >= 1 && FK_POK(q)) { e[k] = FK_HH(q); q = FK_HT(q) >> 1; k = k + 1; }
+        while (d >= 0 && fk_bus_stack[d].idx != (h >> 1)) { d = d - 1; }
+        if ((h & 1) != 0 || d < 0 || fk_stri(e[0]) < 0 || !fk_bus_word(e[0], 1, &r[8]) || (e[1] & 1) != 0 || !fk_bus_word(e[2], 0, &r[11])) { return fk_nothing; }
+        fk_bus_unwind(d + 1, 3, 0);
+        return fk_bus_close_at(d, 2, r[8], e[1] >> 1, r[11]) << 1;
+    }
+    if (mode != 31 || (h & 1) != 0 || (t & 1) != 0) { return fk_nothing; }
+    long long head = __atomic_load_n(&FK_BUS_W(3), __ATOMIC_ACQUIRE), now = fk_bus_us(), cur = h >> 1, skip = t >> 1;
+    long long idx = cur < head - FK_BUS_SLOTS ? head - FK_BUS_SLOTS : cur, lapped = idx - cur, holes = 0, rows = 0, first = 1, last = 0;
+    if (cur < 0) { idx = head; lapped = 0; }
+    while (idx < head && rows < 4096) {
+        volatile long long *s = fk_bus_rec(idx);
+        long long s1 = __atomic_load_n(&s[0], __ATOMIC_ACQUIRE), row = 1;
+        for (k = 1; k < 12; k = k + 1) { r[k] = s[k]; }
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (s1 == idx + 1 && __atomic_load_n(&s[0], __ATOMIC_RELAXED) == s1) {
+            long long v[13] = { idx, r[1], r[2], r[3], r[4], r[5] & 255, r[5] >> 8, r[6], r[7], r[8], r[9], r[10], r[11] };
+            for (k = 12; k >= 0; k = k - 1) { row = fk_cons_val(v[k] << 1, row); }
+            row = fk_cons_val(row, 1);
+            if (last == 0) { first = row; } else { fk_ht[last] = row; }
+            last = row >> 1;
+            rows = rows + 1;
+        } else if (s1 >= idx + 1 || idx + FK_BUS_SLOTS < __atomic_load_n(&FK_BUS_W(3), __ATOMIC_ACQUIRE)) { lapped = lapped + 1; }
+        else if (idx <= skip || head - idx > 1024) { holes = holes + 1; }
+        else { break; }
+        idx = idx + 1;
+    }
+    return fk_cons_val(idx << 1, fk_cons_val(lapped << 1, fk_cons_val(holes << 1, fk_cons_val(now << 1, first))));
+}
 /* ---- reading another kernel's program surface (kernel_ast, tag 32) ---- */
 static void *fk_prog_map(char letter, long long pid, long long *size) {
 #if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
@@ -16455,7 +16409,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* modes 20-22: kernel_roster_adopt, kernel_roster_forget, kernel_page_bury -- see fk_roster_adopt;
          * mode 23: host_process -- see fk_host_process; mode 24: kernel_page_ended -- see fk_page_bury;
          * mode 25: value_str -- see fk_value_str; modes 26-27: read_file_bytes,
-         * write_file_bytes -- the raw byte file doors, see fk_fb_door. */
+         * write_file_bytes -- the raw byte file doors, see fk_fb_door; modes 29-32: the stage
+         * bus (open, close, tail, name) -- see fk_bus_door; any other mode answers nothing. */
+        if ((fm201 >> 1) >= 29 && (fm201 >> 1) <= 32) { return fk_bus_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) >= 26) { return fk_fb_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) == 25) { return fk_value_str(fx201); }
         if ((fm201 >> 1) >= 17) { return fk_host_door(fm201 >> 1, fx201); }
@@ -16826,30 +16782,24 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* kernel_live_pids: every registered kernel whose page says alive and whose pid still answers. A pid this kernel
          * may not signal still answers: under a sandbox that denies signals to other processes every living kernel answers
          * EPERM, and only a pid the host no longer runs (or holds as a corpse) has left. */
-        long long slots162[256];
-        if (fk_live_read_words("/fg-kernels", slots162, 256) < 0) { return 1; }
+        volatile long long *slots162 = fk_roster_map();
+        if (slots162 == 0) { return 1; }
         long long l162 = 1;
         long long k162 = 255;
         while (k162 >= 0) {
             long long pid162 = slots162[k162];
-            if (pid162 > 0 && !fk_pid_gone(pid162)) {
-                char nm162[32];
-                long long w162[FK_LIVE_WORDS];
-                fk_live_pid_name(pid162, nm162);
-                if (fk_live_read_page(nm162, w162) == FK_LIVE_WORDS && w162[0] == FK_LIVE_MAGIC && w162[19] == 1) { l162 = fk_cons_val(pid162 << 1, l162); }
-            }
+            long long w162[FK_LIVE_WORDS];
+            if (pid162 > 0 && !fk_pid_gone(pid162) && fk_live_read_page(pid162, w162) == FK_LIVE_WORDS && w162[0] == FK_LIVE_MAGIC && w162[19] == 1) { l162 = fk_cons_val(pid162 << 1, l162); }
             k162 = k162 - 1;
         }
         return l162;
     }
     if (t == 163) {
-        /* kernel_live pid: the 21 words of that kernel's page, read where they live */
+        /* kernel_live pid: the words of that kernel's page; its own is read where it is mapped */
         long long pid163 = fk_walk(fk_node[i][1], fp) >> 1;
-        char nm163[32];
         long long w163[FK_LIVE_WORDS];
-        fk_live_pid_name(pid163, nm163);
         if (pid163 == (long long)getpid()) { fk_live_note(0); }
-        if (fk_live_read_page(nm163, w163) != FK_LIVE_WORDS || w163[0] != FK_LIVE_MAGIC) { return 1; }
+        if (fk_live_read_page(pid163, w163) != FK_LIVE_WORDS || w163[0] != FK_LIVE_MAGIC) { return 1; }
         long long l163 = 1;
         long long k163 = FK_LIVE_WORDS - 1;
         while (k163 >= 0) { l163 = fk_cons_val(w163[k163] << 1, l163); k163 = k163 - 1; }
@@ -18079,16 +18029,14 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return (fk_np * (9 * 8 + sizeof(fk_node_id))) << 1;
         }
         if (ks_k == 62) {
-            /* the RAM this kernel holds privately over that tissue whatever its
-             * home: the root ring and hash memo (8 bytes a node each), the inram
-             * slot/generation/released columns (6, only where the arm64 JIT
-             * witness stands), and the intern index. A body whose every node is
-             * ice still pays this in gas to reach it. */
+            /* the RAM this kernel holds privately over that tissue whatever its home: the fixed root ring, the
+             * hash memo and intern index (none in the field, whose own columns carry them), and the inram
+             * slot/generation/released columns (13 bytes a node, only where the arm64 JIT witness stands) */
+            long long pb62 = (long long)sizeof(fk_fbroots) + (fk_field_on ? 0 : fk_node_cap * 8) + fk_intern_hash_cap * 8;
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
-            return ((fk_node_cap * 22) + (fk_intern_hash_cap * 8)) << 1;
-#else
-            return ((fk_node_cap * 16) + (fk_intern_hash_cap * 8)) << 1;
+            pb62 = pb62 + fk_node_cap * (long long)(sizeof(*fk_inram_node_slot) + sizeof(*fk_inram_node_generation) + sizeof(*fk_inram_node_released));
 #endif
+            return pb62 << 1;
         }
         if (ks_k == 63) { return sizeof(fk_node_id) << 1; }
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
@@ -18178,7 +18126,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return ns_c;
     }
     if (t == 131) {
-        long long fc_i = 1;
+        /* in the field the attribution column is every kernel's on this host, so a clear forgets only this kernel's root ring */
+        long long fc_i = fk_field_on ? fk_np + 1 : 1;
         while (fc_i <= fk_np) {
             fk_nsattr[fc_i] = 0;
             fc_i = fc_i + 1;
@@ -18625,22 +18574,22 @@ static const char *fk_stop_where(const char *msg, char *buf, long long cap) {
     buf[n] = 0;
     return buf;
 }
+static char fk_stop_said[1024];
 static void fk_stop(const char *msg) {
-    static char where[1024];
-    fk_stop_where(msg, where, (long long)sizeof(where));
+    fk_stop_where(msg, fk_stop_said, (long long)sizeof(fk_stop_said));
 #if defined(FK_HAVE_SETJMP)
     if (fk_rp_top != 0) {
-        fk_stop_voice(where);
+        fk_stop_voice(fk_stop_said);
         FK_LONGJMP(*fk_rp_top);
     }
 #endif
-    fk_die(where);
+    fk_die(fk_stop_said);
 }
 static long long fk_attempt(long long node, long long fp) {
 #if defined(FK_HAVE_SETJMP)
     jmp_buf here;
     jmp_buf *outer = fk_rp_top;
-    long long vsp0 = fk_vsp;
+    long long vsp0 = fk_vsp, bus0 = fk_bus_depth;
     long long cur0 = fk_cur_fn;
     int warm0 = fk_f64_warm_depth;
     int env0 = fk_f64_env_depth;
@@ -18652,6 +18601,7 @@ static long long fk_attempt(long long node, long long fp) {
     }
     fk_rp_top = outer;
     fk_vsp = vsp0;
+    fk_bus_unwind(bus0, 3, fk_stop_said);
     fk_cur_fn = cur0;
     fk_f64_warm_depth = warm0;
     fk_f64_env_depth = env0;
@@ -19170,6 +19120,7 @@ static void fk_heat_report(void) {
         return;
     }
     fk_heat_reported = 1;
+    fk_bus_unwind(0, 3, "exit");
     fk_live_publish(1);
     if (fk_store_shared) { fk_store_unlink_pid((long long)getpid()); }
     int placed = fk_heat_write();
@@ -19209,7 +19160,7 @@ static int fk_sym_eq(long long s, long long n, const char *w) {
     }
     return i == n;
 }
-static long long fk_arg_s, fk_arg_n, fk_fname_s, fk_fname_n;
+static long long fk_fname_n;
 /* stone 2: the defn's single arg + fn name (offset,len in srctext) */
 static int fk_sym_eq2(long long s1, long long n1, long long s2, long long n2) {
     if (n1 != n2) {
@@ -19839,7 +19790,6 @@ static long long fk_sparse(void) {
             fk_sskip();
             long long ns2 = fk_spos;
             fk_spos = fk_sym_end(fk_spos);
-            fk_fname_s = ns2;
             fk_fname_n = fk_spos - ns2;
             fk_sskip();
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_LPAREN) {
@@ -21130,7 +21080,6 @@ static void fk_parse_top(void) {
                 fk_live_note_defn(fk_fntop);
                 fk_fntop = fk_fntop + 1;
             }
-            fk_fname_s = ns2;
             fk_fname_n = nlen2;
             fk_sskip();
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_LPAREN) {
@@ -21537,17 +21486,6 @@ static int fk_src_dep_index(const char *path) {
         i = i + 1;
     }
     return -1;
-}
-static int fk_path_is_abs(const char *path) {
-    if (path[0] == FK_CH_SLASH) {
-        return 1;
-    }
-    if (((path[0] >= FK_CH_UPPER_A && path[0] <= FK_CH_UPPER_Z) ||
-         (path[0] >= FK_CH_LOWER_A && path[0] <= FK_CH_LOWER_Z)) &&
-        path[1] == FK_CH_COLON) {
-        return 1;
-    }
-    return 0;
 }
 static long long fk_path_dir_len(const char *path) {
     long long i = 0;
@@ -23874,7 +23812,6 @@ static long long fk_src_sym_recorded_unrunnable(const char *sym_path) {
 }
 static void fk_src_reset_compile_state(void) {
     fk_fn_reserve(1);
-    fk_arg_n = 0;
     fk_fname_n = 0;
     fk_fn_count = 1;
     fk_node_count = 0;
@@ -24952,7 +24889,6 @@ static int fk_run_feval(const char *path) {
     fk_spos = 0;
 
     /* same parse+walk pipeline as fk_run_src */
-    fk_arg_n = 0;
     fk_fname_n = 0;
     fk_node_count = 0;
     fk_bd_top = 0;
