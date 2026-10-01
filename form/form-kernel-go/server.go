@@ -642,18 +642,42 @@ func dbCellToForm(v any) Value {
 	}
 }
 
+// formValueString — value_str, the one rendering fkwu's fk_valstr_word writes:
+// nothing is "" on its own and "null" as a list item; a closure and a record
+// name their kind only.
 func formValueString(v Value) string {
+	var b strings.Builder
+	writeValueString(&b, v, false)
+	return b.String()
+}
+
+func writeValueString(b *strings.Builder, v Value, item bool) {
 	switch v.Kind {
-	case VStr:
-		return v.Str
-	case VInt:
-		return strconv.FormatInt(v.Int, 10)
-	case VFloat:
-		return formatFloatJS(v.Float)
 	case VNull:
-		return ""
+		if item {
+			b.WriteString("null")
+		}
+	case VStr:
+		b.WriteString(v.Str)
+	case VInt:
+		b.WriteString(strconv.FormatInt(v.Int, 10))
+	case VFloat:
+		b.WriteString(formatFloatJS(v.Float))
+	case VClosure:
+		b.WriteString("<closure>")
+	case VRecord:
+		b.WriteString("<record>")
+	case VList:
+		b.WriteByte('[')
+		for i, x := range v.List {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			writeValueString(b, x, true)
+		}
+		b.WriteByte(']')
 	default:
-		return v.String()
+		b.WriteString(v.String())
 	}
 }
 

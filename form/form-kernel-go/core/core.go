@@ -209,10 +209,12 @@ type Value struct {
 	Rec   *Record
 }
 
+// String — the print rendering, fkwu's tag 239: nothing prints as "nothing",
+// at the top and as a list item.
 func (v Value) String() string {
 	switch v.Kind {
 	case VNull:
-		return "null"
+		return "nothing"
 	case VInt:
 		return strconv.FormatInt(v.Int, 10)
 	case VFloat:

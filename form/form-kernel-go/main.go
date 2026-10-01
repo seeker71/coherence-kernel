@@ -553,25 +553,15 @@ type Kernel struct {
 	// Int64 overflow table — the sibling of `f64s` for integers wider than the
 	// 32-bit inst slot. `i64Idx` is keyed by the value itself (integers are
 	// already canonical) so the same literal interns to the same NodeID.
-	i64s       []int64
-	i64Idx     map[int64]uint32
-	natives    map[NameID]NativeEntry
-	envNatives map[NameID]EnvAwareNativeEntry
+	i64s    []int64
+	i64Idx  map[int64]uint32
+	natives map[NameID]NativeEntry
 	// methods — the blueprint method table (BML/NUMS reference: methods live
 	// on the blueprint/type, shared by all instances, name-dispatched). Keyed
 	// by (blueprint, method-name) → the method's Closure.
 	methods map[methodKey]*Closure
-	// jitAliases: Form-function-name → native-name redirect. When a
-	// function call's name is in this map, the walker substitutes the
-	// aliased name before native lookup. Lets a Form recipe DEFINE an
-	// algorithm as canonical truth; a `register_jit` call makes its
-	// calls dispatch to a kernel-resident optimized native. Removing
-	// the entry falls back to walking the Form recipe.
-	jitAliases map[NameID]NameID
-	// SourceAttr — NodeID → (file_name_id, line, col). Populated by
-	// intern_node_at; read by node_source. The satsang-load-bearing
-	// surface: every cell's state traceable to the source line that
-	// authored it. The practice of self-knowing.
+	// sourceAttr — NodeID → (file_name_id, line, col), written by fb_record and
+	// the reader, read by node_source.
 	sourceAttr map[NodeID]sourceLoc
 	// formStack — the Form-level call chain currently live (closure and
 	// native names, innermost last; closure labels carry file:line:col
@@ -660,9 +650,7 @@ func NewKernel() *Kernel {
 		f64Idx:       make(map[uint64]uint32),
 		i64Idx:       make(map[int64]uint32),
 		natives:      make(map[NameID]NativeEntry),
-		envNatives:   make(map[NameID]EnvAwareNativeEntry),
 		methods:      make(map[methodKey]*Closure),
-		jitAliases:   make(map[NameID]NameID),
 		switchTables: make(map[NodeID]*switchTable),
 	}
 	k.registerNatives()
@@ -1029,48 +1017,8 @@ func (k *Kernel) framebufferEvents() []map[string]interface{} {
 	return rows
 }
 
-func (k *Kernel) substrateMark() []Value {
-	return []Value{
-		{Kind: VInt, Int: int64(k.next)},
-		{Kind: VInt, Int: int64(len(k.strs))},
-		{Kind: VInt, Int: int64(len(k.byID))},
-	}
-}
-
-func (k *Kernel) substrateCounts() []Value {
-	return []Value{
-		{Kind: VInt, Int: int64(len(k.byID))},
-		{Kind: VInt, Int: int64(len(k.strs))},
-	}
-}
-
-func (k *Kernel) substrateRelease(mark []Value) int64 {
-	if len(mark) < 2 {
-		return 0
-	}
-	nextMark := uint32(mark[0].Int)
-	strMark := int(mark[1].Int)
-	if nextMark == 0 || strMark < 0 || strMark > len(k.strs) {
-		return 0
-	}
-	var released int64
-	for nid, recipe := range k.byID {
-		if nid.Pkg == 0 && nid.Inst >= nextMark {
-			delete(k.byID, nid)
-			delete(k.byHash, hashRecipe(recipe))
-			delete(k.sourceAttr, nid)
-			delete(k.switchTables, nid)
-			released++
-		}
-	}
-	for i := strMark; i < len(k.strs); i++ {
-		delete(k.strIdx, k.strs[i])
-	}
-	k.strs = k.strs[:strMark]
-	k.next = nextMark
-	return released
-}
-
+// The serve worker's per-request sweep: nodes and trailing strings no live
+// value, frame or program root reaches.
 func markStringNode(n NodeID, liveStrings map[NameID]bool) {
 	if n.Pkg == 1 && n.Level == LevelTrivial && n.Type == TrivString {
 		liveStrings[NameID(n.Inst)] = true
@@ -1128,7 +1076,7 @@ func (k *Kernel) markFrame(frame *Frame, liveNodes map[NodeID]bool, liveStrings 
 	}
 }
 
-func (k *Kernel) substrateGC(roots []Value, stack *Frame) []Value {
+func (k *Kernel) substrateGC(roots []Value, stack *Frame) {
 	liveNodes := make(map[NodeID]bool)
 	liveStrings := make(map[NameID]bool)
 	liveFrames := make(map[*Frame]bool)
@@ -1144,32 +1092,23 @@ func (k *Kernel) substrateGC(roots []Value, stack *Frame) []Value {
 	for _, root := range roots {
 		k.markValue(root, liveNodes, liveStrings, liveFrames)
 	}
-	if stack != nil {
-		k.markFrame(stack, liveNodes, liveStrings, liveFrames)
-	}
-	var freed int64
+	k.markFrame(stack, liveNodes, liveStrings, liveFrames)
 	for nid, recipe := range k.byID {
 		if nid.Pkg == 0 && !liveNodes[nid] {
 			delete(k.byID, nid)
 			delete(k.byHash, hashRecipe(recipe))
 			delete(k.sourceAttr, nid)
 			delete(k.switchTables, nid)
-			freed++
 		}
 	}
-	pruned := 0
-	if stack != nil {
-		for len(k.strs) > 0 {
-			idx := NameID(len(k.strs) - 1)
-			if liveStrings[idx] {
-				break
-			}
-			delete(k.strIdx, k.strs[idx])
-			k.strs = k.strs[:len(k.strs)-1]
-			pruned++
+	for len(k.strs) > 0 {
+		idx := NameID(len(k.strs) - 1)
+		if liveStrings[idx] {
+			break
 		}
+		delete(k.strIdx, k.strs[idx])
+		k.strs = k.strs[:len(k.strs)-1]
 	}
-	return []Value{{Kind: VInt, Int: freed}, {Kind: VInt, Int: int64(pruned)}}
 }
 
 // category — the recipe row answers first. A composite sits at its
@@ -1309,8 +1248,7 @@ func (k *Kernel) formFrameLabel(name NameID, body NodeID) string {
 // Values — runtime tagged values
 // ---------------------------------------------------------------------------
 
-// Record — a mutable struct/object. Blueprint tags its type (class /
-// method-table NodeID); Fields is an ordered name→value map.
+// isDictValue — a "__dict__"-tagged pair list, the row shape pg_query_rows answers.
 func isDictValue(v Value) bool {
 	return v.Kind == VList &&
 		len(v.List) > 0 &&
@@ -1318,74 +1256,96 @@ func isDictValue(v Value) bool {
 		v.List[0].Str == "__dict__"
 }
 
-// foldExtremum — the shared body of the `min` / `max` natives. One list
-// argument folds over its elements; anything else folds over the arguments
-// themselves, so `(max a b)` compares instead of returning `a`. Every element
-// reads through AsInt, the same integer lane Rust's as_int and TS's
-// listElemInt use. `name` only spells the empty-list panic.
-func foldExtremum(args []Value, name string, wantMax bool) int64 {
-	xs := args
-	if len(args) == 1 && args[0].Kind == VList {
-		xs = args[0].List
-		if len(xs) == 0 {
-			panic(name + ": empty list")
-		}
-	}
-	best := xs[0].AsInt()
-	for i := 1; i < len(xs); i++ {
-		x := xs[i].AsInt()
-		if (wantMax && x > best) || (!wantMax && x < best) {
-			best = x
-		}
-	}
-	return best
-}
-
-// leadingInt — str_to_int's reading, the one core.fk's str_to_int gives fkwu:
-// leading space, tab, LF and CR skipped, one leading "-" negates, and the digits
-// run to the first non-digit. Text with no digits reads 0; the fold wraps at 64
-// bits like every int64 fold.
-func leadingInt(s string) int64 {
-	i := 0
-	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
-		i++
-	}
-	neg := i < len(s) && s[i] == '-'
-	if neg {
-		i++
-	}
-	var n int64
-	for ; i < len(s) && s[i] >= '0' && s[i] <= '9'; i++ {
-		n = n*10 + int64(s[i]-'0')
-	}
-	if neg {
-		return -n
-	}
-	return n
-}
-
-func dictKeyEq(a, b Value) bool {
-	if a.Kind == VStr && b.Kind == VStr {
-		return a.Str == b.Str
-	}
-	if a.Kind == VInt && b.Kind == VInt {
-		return a.Int == b.Int
+func scanClassMatch(c byte, class int64) bool {
+	alpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	digit := c >= '0' && c <= '9'
+	switch class {
+	case 0:
+		return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+	case 1:
+		return digit
+	case 2:
+		return alpha
+	case 3:
+		return alpha || digit || c == '_' || c == '-'
+	case 4:
+		return c != '"' && c != '\\'
+	case 5:
+		return c != '\n'
+	case 6:
+		return c >= 0x20 && c != '"' && c != '\\'
 	}
 	return false
 }
 
-// Value — runtime tagged union. List and Closure carry pointers; the rest
-// are inline. Kept as a flat struct so the walker's hot path is allocation-
-// free for ints and bools.
+// An integer is 63-bit two's complement, [-2^62, 2^62), on every kernel: fkwu
+// tags its words, so its arithmetic wraps there and so does this kernel's.
+const intLimit63 = float64(1 << 62)
 
-// argStr — the string lane's checked accessor, sibling to the Rust kernel's
-// as_str and the TS kernel's argStr. Value's zero-valued Str field let every
-// string native silently read null (and any other kind) as "" — the numb
-// lane that let a malformed (read_file "") expr flatten "successfully" on Go
-// alone while Rust and TS died loudly. The panic is
-// recovered at the CLI boundary into fatal[type_contract_violation] with the
-// Form stack attributed. Natives that accept several kinds BY CONTRACT
-// (len, _get, _iter, _in, int_to_str) keep their explicit kind switches.
+func wrap63(n int64) int64 { return (n << 1) >> 1 }
+
+// intLiteral reads an integer literal the way fkwu's reader does: the digits
+// fold in a wrapping word, then the value wraps to 63 bits.
+func intLiteral(s string) int64 {
+	neg := len(s) > 0 && s[0] == '-'
+	var u uint64
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			u = u*10 + uint64(s[i]-'0')
+		}
+	}
+	n := int64(u)
+	if neg {
+		n = -n
+	}
+	return wrap63(n)
+}
+
+// decimalPrefixFloat — str_to_float's one grammar: leading whitespace skipped,
+// then the longest decimal prefix (sign, digits, one dot, an exponent that has
+// digits). No hex, no inf, no nan; text with no digits reads 0.0.
+func decimalPrefixFloat(s string) float64 {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || (s[i] >= '\t' && s[i] <= '\r')) {
+		i++
+	}
+	start := i
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	digits := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+		digits++
+	}
+	if i < len(s) && s[i] == '.' {
+		i++
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+			digits++
+		}
+	}
+	if digits == 0 {
+		return 0
+	}
+	end := i
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		j := i + 1
+		if j < len(s) && (s[j] == '+' || s[j] == '-') {
+			j++
+		}
+		if j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+				j++
+			}
+			end = j
+		}
+	}
+	f, _ := strconv.ParseFloat(s[start:end], 64)
+	return f
+}
+
+// argStr — the string lane's checked accessor: any other kind stops, named.
 func argStr(args []Value, i int) string {
 	if i >= len(args) || args[i].Kind != VStr {
 		got := "absent"
@@ -1419,11 +1379,6 @@ func valueKindName(v Value) string {
 		return "unknown"
 	}
 }
-
-// asFloat — coerce a Value to float64 for IEEE 754 arithmetic. VFloat
-// passes through; VInt widens by Go's standard conversion. Other
-// kinds panic — float arithmetic on a string or list is a Form-author
-// bug, not a kernel fallback. Mirrors Rust's Value::as_float.
 
 // roundNdigitsDecimal — CPython `round(x, n)` for a finite double, n >= 0.
 //
@@ -1555,14 +1510,6 @@ func composeScaledDecimal(kept string, n int, neg bool) string {
 	return body
 }
 
-// formatFloatJS — render a float the way JavaScript's String(number) does,
-// so the Go kernel's output is byte-identical to the TS kernel's. (The
-// Rust kernel uses Python-style formatting which adds a trailing ".0" to
-// integer-valued floats; that's a known divergence between Rust and TS.
-// This Go kernel follows TS — the bootstrap reference — and a future
-// breath will harmonize Rust's render to match.) Specials follow the JS
-// surface: NaN → "NaN", +Inf → "Infinity", -Inf → "-Infinity".
-
 type choiceFailSignal struct{}
 type choiceStopSignal struct{}
 
@@ -1573,45 +1520,18 @@ type methodKey struct {
 }
 
 // ---------------------------------------------------------------------------
-// Frame — scope primitive
-// ---------------------------------------------------------------------------
-
-// Frame — scope primitive. Bindings as a small ordered slice; the common
-// case (function call with 1-3 args) beats a hash map at this size and
-// keeps the data layout cache-friendly. Linear scan is the right shape
-// for n < ~16.
-
-// NewCallFrame — pre-sized for a function call with `arity` params.
-// Avoids append-grow during parameter binding in the hot recursion path.
-
-// ---------------------------------------------------------------------------
 // Native functions — what Form-on-top reaches for at the leaves
 // ---------------------------------------------------------------------------
 
 type NativeFn func(k *Kernel, args []Value) Value
 
-// EnvAwareNativeFn — natives that need access to the caller's env to do
-// in-scope work. Separate registry to avoid changing the existing
-// NativeFn signature across ~60 sites.
-type EnvAwareNativeFn func(k *Kernel, env *Frame, args []Value) Value
-
-type EnvAwareNativeEntry struct {
-	Name     NameID
-	Category NodeID
-	Fn       EnvAwareNativeFn
-}
-
 // registerNative — central registration point. The string name is
 // interned once into a NameID; runtime dispatch is u32-keyed. Each
 // native carries the Form category it expresses (Blueprint attribution).
+// The names are the rows of form/form-stdlib/primitive-registry.fk.
 func (k *Kernel) registerNative(name string, category NodeID, fn NativeFn) {
 	id := k.internName(name)
 	k.natives[id] = NativeEntry{Name: id, Category: category, Fn: fn}
-}
-
-func (k *Kernel) registerEnvNative(name string, category NodeID, fn EnvAwareNativeFn) {
-	id := k.internName(name)
-	k.envNatives[id] = EnvAwareNativeEntry{Name: id, Category: category, Fn: fn}
 }
 
 func (k *Kernel) registerNatives() {
@@ -1624,6 +1544,7 @@ func (k *Kernel) registerNatives() {
 	//   catWitness   — substrate self-attestation (intern, walk, lookup)
 	//   catUndefined — honest "no Form category settled yet"
 
+	// print answers 0, as fkwu's tag 239 does.
 	k.registerNative("print", catCall(), func(_ *Kernel, args []Value) Value {
 		for i, a := range args {
 			if i > 0 {
@@ -1632,7 +1553,7 @@ func (k *Kernel) registerNatives() {
 			fmt.Print(a.String())
 		}
 		fmt.Println()
-		return Value{Kind: VNull}
+		return Value{Kind: VInt, Int: 0}
 	})
 	// String ops
 	k.registerNative("str_len", catAccess(), func(_ *Kernel, args []Value) Value {
@@ -1680,15 +1601,6 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VStr, Str: s[a:b]}
 	})
-	k.registerNative("char_at", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := argStr(args, 0)
-		i := args[1].AsInt()
-		// core.fk's recipe on fkwu, (substring s i (add i 1)): one byte, clamped
-		if i < 0 || i >= int64(len(s)) {
-			return Value{Kind: VStr, Str: ""}
-		}
-		return Value{Kind: VStr, Str: s[i : i+1]}
-	})
 	k.registerNative("str_concat", catMethod(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VStr, Str: argStr(args, 0) + argStr(args, 1)}
 	})
@@ -1720,43 +1632,8 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VStr, Str: string(out)}
 	})
-	k.registerNative("host-read", catMethod(), func(_ *Kernel, args []Value) Value {
-		b, err := os.ReadFile(argStr(args, 0))
-		// A file that never was answers nothing, never "" — "" means the file
-		// EXISTS and holds zero bytes. This kernel's own read_file already
-		// answered VNull here; host-read was the lone masked read organ left
-		// (2026-08-27). Callers name the absence with nothing? before measuring.
-		if err != nil {
-			return Value{Kind: VNull}
-		}
-		return Value{Kind: VStr, Str: string(b)}
-	})
-	k.registerNative("host-write", catMethod(), func(_ *Kernel, args []Value) Value {
-		if err := os.WriteFile(argStr(args, 0), []byte(argStr(args, 1)), 0o644); err != nil {
-			return Value{Kind: VStr, Str: "error"}
-		}
-		return Value{Kind: VStr, Str: "ok"}
-	})
 	k.registerNative("form_error", catWitness(), func(_ *Kernel, args []Value) Value {
 		panic(argStr(args, 0))
-	})
-	k.registerNative("form-error", catWitness(), func(_ *Kernel, args []Value) Value {
-		panic(argStr(args, 0))
-	})
-	// pow — integer exponentiation in native code (no Form recursion).
-	// (pow base exp) → base**exp. Negative exponents return 0 (Python's
-	// int**-n is a float; floats on this path are a later breath).
-	k.registerNative("pow", catMethod(), func(_ *Kernel, args []Value) Value {
-		base := args[0].AsInt()
-		exp := args[1].AsInt()
-		if exp < 0 {
-			return Value{Kind: VInt, Int: 0}
-		}
-		result := int64(1)
-		for i := int64(0); i < exp; i++ {
-			result *= base
-		}
-		return Value{Kind: VInt, Int: result}
 	})
 	// --- struct/object primitive (BML reference, rung 2) -------------------
 	// A Record is the kernel's first MUTABLE value: a struct/object with
@@ -1928,165 +1805,24 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VInt, Int: int64(from + idx)}
 	})
-	k.registerNative("str_line_at", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := argStr(args, 0)
-		idx := int(args[1].AsInt())
-		// Out of range answers nothing (2026-08-27): a line that ISN'T is not
-		// an empty line — "" had made a past-end read indistinguishable from a
-		// blank line, so scans stopped early and dropped rows. Siblings
-		// str_byte_at/char_at die loud here; the null carries the absence.
-		if idx < 0 || idx > len(s) {
-			return Value{Kind: VNull}
-		}
-		start := idx
-		for start > 0 && s[start-1] != '\n' {
-			start--
-		}
-		end := idx
-		for end < len(s) && s[end] != '\n' {
-			end++
-		}
-		if end > start && s[end-1] == '\r' {
-			end--
-		}
-		return Value{Kind: VStr, Str: s[start:end]}
-	})
-	k.registerNative("str_ascii_prefix", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := argStr(args, 0)
-		end := 0
-		for end < len(s) && s[end] < utf8.RuneSelf {
-			end++
-		}
-		return Value{Kind: VStr, Str: s[:end]}
-	})
-	// scan_run — return the end-index where a contiguous run of bytes
-	// matching `class_code` ends (exclusive). Generic per-byte loop in
-	// Go avoids the walker dispatch a pure-Form recursion would pay
-	// per character — closing the per-byte parser-throughput gap that
-	// makes Form unviable as a universal runtime translator otherwise.
-	// Class codes (sibling-parity across Go/Rust/TS):
-	//   0  whitespace          space, tab, lf, cr
-	//   1  ascii-digit         '0'-'9'
-	//   2  ascii-alpha         'a'-'z', 'A'-'Z'
-	//   3  identifier-char     alpha + digit + '_' + '-'
-	//   4  non-quote-non-escape   anything except '"' and '\\'
-	//   5  non-newline         anything except '\n'
-	//   6  json-string-safe    byte >= 0x20 and not '"' or '\\'
-	// Used by json.fk's skip-ws / scan-string / scan-number, BMF
-	// tokenizers, CSV scanners, future YAML/TOML parsers — not
-	// JSON-special. A new class adds one branch to a small switch.
+	// scan_run s from class — the end index (exclusive) of the run of bytes from
+	// max(from,0) that match the class, fkwu's fk_scan_run: 0 whitespace (space tab
+	// lf cr), 1 digit, 2 ascii alpha, 3 identifier (alpha digit _ -), 4 not '"' or
+	// '\\', 5 not lf, 6 json-safe (>= 0x20, not '"' or '\\'). A non-string or an
+	// unknown class matches no byte.
 	k.registerNative("scan_run", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := argStr(args, 0)
-		from := int(args[1].AsInt())
-		class := int(args[2].AsInt())
+		from := args[1].AsInt()
 		if from < 0 {
 			from = 0
 		}
-		n := len(s)
-		end := from
-		switch class {
-		case 0: // whitespace
-			for end < n {
-				c := s[end]
-				if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
-					break
-				}
-				end++
-			}
-		case 1: // ascii digit
-			for end < n && s[end] >= '0' && s[end] <= '9' {
-				end++
-			}
-		case 2: // ascii alpha
-			for end < n {
-				c := s[end]
-				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-					break
-				}
-				end++
-			}
-		case 3: // identifier char
-			for end < n {
-				c := s[end]
-				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-					(c >= '0' && c <= '9') || c == '_' || c == '-') {
-					break
-				}
-				end++
-			}
-		case 4: // non-quote-non-escape
-			for end < n && s[end] != '"' && s[end] != '\\' {
-				end++
-			}
-		case 5: // non-newline
-			for end < n && s[end] != '\n' {
-				end++
-			}
-		case 6: // json-string-safe
-			for end < n && s[end] >= 0x20 && s[end] != '"' && s[end] != '\\' {
-				end++
-			}
-		default:
-			panic(fmt.Sprintf("scan_run: unknown class_code %d (valid: 0-6)", class))
+		if args[0].Kind != VStr {
+			return Value{Kind: VInt, Int: from}
 		}
-		return Value{Kind: VInt, Int: int64(end)}
-	})
-	// string_bytes exposes the exact UTF-8 carrier bytes, including embedded
-	// NULs, as integer leaves. It is the whole-string twin of str_byte_at.
-	k.registerNative("string_bytes", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := []byte(argStr(args, 0))
-		out := make([]Value, len(s))
-		for i, b := range s {
-			out[i] = Value{Kind: VInt, Int: int64(b)}
+		s, class, end := args[0].Str, args[2].AsInt(), from
+		for end < int64(len(s)) && scanClassMatch(s[end], class) {
+			end++
 		}
-		return Value{Kind: VList, List: out}
-	})
-	// string_byte_fold keeps the input in the host string pool and invokes a
-	// Form step with each raw UTF-8 byte as an int. The host loop gives streaming
-	// SHA/HMAC a stack bound independent of message length.
-	k.registerNative("string_byte_fold", catCall(), func(k *Kernel, args []Value) Value {
-		s := argStr(args, 0)
-		acc := args[1]
-		fnVal := args[2]
-		if fnVal.Kind != VClosure {
-			panic("string_byte_fold: third arg must be a closure")
-		}
-		cl := fnVal.Cl
-		if len(cl.Params) != 2 {
-			panic(fmt.Sprintf("string_byte_fold: step closure wants 2 params (acc byte), got %d", len(cl.Params)))
-		}
-		for i := 0; i < len(s); i++ {
-			call := NewCallFrame(cl.Env, len(cl.Params))
-			call.Bind(cl.Params[0], acc)
-			call.Bind(cl.Params[1], Value{Kind: VInt, Int: int64(s[i])})
-			acc = k.walk(cl.Body, call)
-		}
-		return acc
-	})
-	// form_table_text serializes the compiler's reverse-built roots and rows in
-	// one linear host loop. It is the canonical universal-walker image format;
-	// keeping the loop here makes source/compiler depth independent of table size.
-	k.registerNative("form_table_text", catMethod(), func(_ *Kernel, args []Value) Value {
-		roots := args[0].List
-		rows := args[1].List
-		var out strings.Builder
-		writeInt := func(v int64) {
-			if out.Len() > 0 {
-				out.WriteByte(' ')
-			}
-			out.WriteString(strconv.FormatInt(v, 10))
-		}
-		writeInt(int64(len(roots)))
-		for i := len(roots) - 1; i >= 0; i-- {
-			writeInt(roots[i].Int)
-		}
-		writeInt(int64(len(rows)))
-		for i := len(rows) - 1; i >= 0; i-- {
-			for _, field := range rows[i].List {
-				writeInt(field.Int)
-			}
-		}
-		return Value{Kind: VStr, Str: out.String()}
+		return Value{Kind: VInt, Int: end}
 	})
 	// str_eq OBSERVES the axiom-1 absence instead of refusing it, mirroring the fkwu
 	// arm exactly (probed 2026-09-04: nothing equals nothing, and equals neither ""
@@ -2101,23 +1837,6 @@ func (k *Kernel) registerNatives() {
 			return boolInt(args[0].Kind == VNull && args[1].Kind == VNull)
 		}
 		return boolInt(argStr(args, 0) == argStr(args, 1))
-	})
-	// int_to_str — value-to-string for trivial leaves. The name reflects
-	// its first use (line numbers in traces); its semantics is "render
-	// any trivial value as text", so Form code can pass node_value of
-	// any leaf type through it. Multi-target emit (the universal codec
-	// lattice) depends on this passthrough for strings and bools.
-	k.registerNative("int_to_str", catMethod(), func(_ *Kernel, args []Value) Value {
-		v := args[0]
-		switch v.Kind {
-		case VStr:
-			return Value{Kind: VStr, Str: v.Str}
-		case VNull:
-			return Value{Kind: VStr, Str: "null"}
-		case VFloat:
-			return Value{Kind: VStr, Str: formatFloatJS(v.Float)}
-		}
-		return Value{Kind: VStr, Str: strconv.FormatInt(v.Int, 10)}
 	})
 	k.registerNative("value_str", catMethod(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VStr, Str: formValueString(args[0])}
@@ -2136,45 +1855,33 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VInt, Int: 0}
 	})
+	// value-kind stays while core.fk, formbin-codec.bml and sha256-owned-bytes.bml call it
+	// and fkwu carries it as a rewrite row.
 	k.registerNative("value-kind", catWitness(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VStr, Str: valueKindName(args[0])}
 	})
-	k.registerNative("str_to_int", catMethod(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VInt, Int: leadingInt(argStr(args, 0))}
-	})
 	k.registerNative("str_to_float", catMethod(), func(_ *Kernel, args []Value) Value {
-		f, _ := strconv.ParseFloat(argStr(args, 0), 64)
-		return Value{Kind: VFloat, Float: f}
+		return Value{Kind: VFloat, Float: decimalPrefixFloat(argStr(args, 0))}
 	})
-	// float_to_int — truncate a float toward zero, exactly Python's int() on a
-	// float. Total: a non-number -> 0. Sibling parity with the Rust kernel's
-	// float_to_int (Go int64(f) truncates toward zero for both signs).
 	k.registerNative("float_to_int", catMethod(), func(_ *Kernel, args []Value) Value {
 		switch args[0].Kind {
 		case VFloat:
-			return Value{Kind: VInt, Int: int64(args[0].Float)}
+			f := args[0].Float
+			if f != f || f < -intLimit63 || f >= intLimit63 {
+				panic(fmt.Sprintf("float_to_int: %s has no integer -- an int is 63-bit", formatFloatJS(f)))
+			}
+			return Value{Kind: VInt, Int: int64(f)}
 		case VInt:
-			return Value{Kind: VInt, Int: args[0].Int}
+			return args[0]
 		}
-		return Value{Kind: VInt, Int: 0}
+		panic("float_to_int: only a number reads as an integer -- ask value_kind first")
 	})
-	k.registerNative("ord", catAccess(), func(_ *Kernel, args []Value) Value {
-		if len(argStr(args, 0)) == 0 {
-			return Value{Kind: VInt, Int: -1}
-		}
-		return Value{Kind: VInt, Int: int64(argStr(args, 0)[0])}
-	})
-	// str_byte_at: the i-th raw BYTE of the string (0-255), byte-exact. A string
-	// is a UTF-8 byte sequence; char_at is rune-aware (returns "" inside a
-	// multibyte char), so ord(char_at) drops continuation bytes. The string-pool
-	// serializer (fks-lit-sp) must emit exact bytes so the emitted walker prints
-	// any locale's script, not just ASCII — this is that byte door, matching the
-	// walker's own byte-indexed char_at arm (tag 28).
+	// str_byte_at: the i-th raw byte of the string (0-255); an index outside it answers -1.
 	k.registerNative("str_byte_at", catAccess(), func(_ *Kernel, args []Value) Value {
 		s := argStr(args, 0)
 		i := args[1].AsInt()
 		if i < 0 || i >= int64(len(s)) {
-			panic(fmt.Sprintf("str_byte_at: bounds out of range index=%d len=%d", i, len(s)))
+			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: int64(s[i])}
 	})
@@ -2222,44 +1929,7 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VList, List: args[0].List[1:]}
 	})
-	// sum — total a list; promote to float if any element is a float (matches
-	// Rust/TS sum + Python). Go previously lacked this native while Rust/TS/fkwu
-	// carried it, so recipes calling (sum xs) diverged go-only. Parity fix.
-	k.registerNative("sum", catMethod(), func(_ *Kernel, args []Value) Value {
-		xs := args[0].List
-		anyFloat := false
-		for _, v := range xs {
-			if v.Kind == VFloat {
-				anyFloat = true
-				break
-			}
-		}
-		if anyFloat {
-			total := 0.0
-			for _, v := range xs {
-				if v.Kind == VFloat {
-					total += v.Float
-				} else {
-					total += float64(v.Int)
-				}
-			}
-			return Value{Kind: VFloat, Float: total}
-		}
-		var total int64
-		for _, v := range xs {
-			total += v.Int
-		}
-		return Value{Kind: VInt, Int: total}
-	})
-	// len is HONEST cell count. Dicts ride on VList tagged with the string
-	// "__dict__", but the tag is in-band: any plain list may carry that
-	// string as pooled DATA (the flatten string pool does, at the cell where
-	// "__dict__" was interned). A marker-sniffing len makes such a list lie
-	// about its length — flt-append's (eq (len xs) 0) base case then REPLACES
-	// the ["__dict__"] tail instead of appending past it, silently dropping
-	// the literal from the pool (the (24 -1 0 0) orphan-slit wound,
-	// 2026-07-17). Python's len(d) pair-count semantics live in _len, with
-	// the rest of the python-adapter's polymorphic underscore family.
+	// len counts cells: a "__dict__" row's marker is a cell like any other.
 	k.registerNative("len", catAccess(), func(_ *Kernel, args []Value) Value {
 		switch args[0].Kind {
 		case VList:
@@ -2269,21 +1939,6 @@ func (k *Kernel) registerNatives() {
 		case VNull:
 			// nothing is not an empty collection: its length is a stop, as on fkwu
 			panic("len: nothing has no length -- ask nothing? before measuring")
-		}
-		return Value{Kind: VInt, Int: 0}
-	})
-	// _len — the python-adapter's polymorphic length: dict PAIRS, list
-	// elements, string bytes. Python's `len(x)` lowers here (the kernel `len`
-	// stays an honest cell count; see the note above).
-	k.registerNative("_len", catAccess(), func(_ *Kernel, args []Value) Value {
-		if isDictValue(args[0]) {
-			return Value{Kind: VInt, Int: int64((len(args[0].List) - 1) / 2)}
-		}
-		switch args[0].Kind {
-		case VList:
-			return Value{Kind: VInt, Int: int64(len(args[0].List))}
-		case VStr:
-			return Value{Kind: VInt, Int: int64(len(args[0].Str))}
 		}
 		return Value{Kind: VInt, Int: 0}
 	})
@@ -2300,261 +1955,34 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("empty", catListNat(), func(_ *Kernel, _ []Value) Value {
 		return Value{Kind: VList, List: []Value{}}
 	})
-	// _list_append — functional list extension: (_list_append xs x) → a NEW
-	// list = xs ++ [x]. Sibling-parity with Rust + TS. The Python adapter
-	// lowers the accumulator idiom `result.append(x)` to
-	// (let result (_list_append result x)), rebinding the name to the grown
-	// list each pass — what unblocks list-returning routes (softmax, vectors).
-	// A non-list receiver yields a single-element list, matching an append
-	// onto an empty accumulator.
-	k.registerNative("_list_append", catListNat(), func(_ *Kernel, args []Value) Value {
-		var xs []Value
-		if args[0].Kind == VList {
-			xs = append(xs, args[0].List...)
-		}
-		xs = append(xs, args[1])
-		return Value{Kind: VList, List: xs}
-	})
-	k.registerNative("_dict_new", catListNat(), func(_ *Kernel, args []Value) Value {
-		out := make([]Value, 0, len(args)+1)
-		out = append(out, Value{Kind: VStr, Str: "__dict__"})
-		out = append(out, args...)
-		return Value{Kind: VList, List: out}
-	})
-	k.registerNative("_dict_get", catAccess(), func(_ *Kernel, args []Value) Value {
-		if !isDictValue(args[0]) {
-			return Value{Kind: VNull}
-		}
-		xs := args[0].List
-		for i := 1; i+1 < len(xs); i += 2 {
-			if dictKeyEq(xs[i], args[1]) {
-				return xs[i+1]
-			}
-		}
-		return Value{Kind: VNull}
-	})
-	k.registerNative("_dict_set", catMethod(), func(_ *Kernel, args []Value) Value {
-		if !isDictValue(args[0]) {
-			return args[0]
-		}
-		out := append([]Value{}, args[0].List...)
-		for i := 1; i+1 < len(out); i += 2 {
-			if dictKeyEq(out[i], args[1]) {
-				out[i+1] = args[2]
-				return Value{Kind: VList, List: out}
-			}
-		}
-		out = append(out, args[1], args[2])
-		return Value{Kind: VList, List: out}
-	})
-	k.registerNative("_dict_has", catCompare(RCompareEq), func(_ *Kernel, args []Value) Value {
-		if !isDictValue(args[0]) {
-			return boolInt(false)
-		}
-		xs := args[0].List
-		for i := 1; i+1 < len(xs); i += 2 {
-			if dictKeyEq(xs[i], args[1]) {
-				return boolInt(true)
-			}
-		}
-		return boolInt(false)
-	})
-	k.registerNative("_dict_keys", catAccess(), func(_ *Kernel, args []Value) Value {
-		if !isDictValue(args[0]) {
-			return Value{Kind: VList, List: []Value{}}
-		}
-		xs := args[0].List
-		out := make([]Value, 0, (len(xs)-1)/2)
-		for i := 1; i+1 < len(xs); i += 2 {
-			out = append(out, xs[i])
-		}
-		return Value{Kind: VList, List: out}
-	})
-	k.registerNative("_dict_values", catAccess(), func(_ *Kernel, args []Value) Value {
-		if !isDictValue(args[0]) {
-			return Value{Kind: VList, List: []Value{}}
-		}
-		xs := args[0].List
-		out := make([]Value, 0, (len(xs)-1)/2)
-		for i := 1; i+1 < len(xs); i += 2 {
-			out = append(out, xs[i+1])
-		}
-		return Value{Kind: VList, List: out}
-	})
-	k.registerNative("_get", catAccess(), func(k *Kernel, args []Value) Value {
-		if len(args) < 2 {
-			return Value{Kind: VNull}
-		}
-		if args[0].Kind == VRecord && args[1].Kind == VStr {
-			v, _ := args[0].Rec.Get(k.internName(args[1].Str))
-			return v
-		}
-		if isDictValue(args[0]) {
-			xs := args[0].List
+	// _get target key — fkwu's tag 106 (fk_get_value): a "__dict__" row answers the value
+	// under a string key; a list answers the element at an int index, a negative index
+	// reading the head; every miss and every other target answers 0.
+	k.registerNative("_get", catAccess(), func(_ *Kernel, args []Value) Value {
+		target, key := args[0], args[1]
+		if isDictValue(target) {
+			xs := target.List
 			for i := 1; i+1 < len(xs); i += 2 {
-				if dictKeyEq(xs[i], args[1]) {
+				if key.Kind == VStr && xs[i].Kind == VStr && xs[i].Str == key.Str {
 					return xs[i+1]
 				}
 			}
-			return Value{Kind: VNull}
+			return Value{Kind: VInt, Int: 0}
 		}
-		if args[0].Kind == VList && args[1].Kind == VStr {
-			xs := args[0].List
-			for i := 0; i+1 < len(xs); i += 2 {
-				if xs[i].Kind == VStr && xs[i].Str == args[1].Str {
-					return xs[i+1]
-				}
+		if target.Kind == VList && key.Kind == VInt {
+			i := key.Int
+			if i < 0 {
+				i = 0
 			}
-			panic(fmt.Sprintf("_get: no field '%s' on record", args[1].Str))
-		}
-		if args[0].Kind == VList {
-			i := args[1].AsInt()
-			if i < 0 || int(i) >= len(args[0].List) {
-				return Value{Kind: VNull}
+			if i < int64(len(target.List)) {
+				return target.List[i]
 			}
-			return args[0].List[i]
 		}
-		if args[0].Kind == VStr {
-			i := args[1].AsInt()
-			if i < 0 || int(i) >= len(args[0].Str) {
-				return Value{Kind: VStr, Str: ""}
-			}
-			return Value{Kind: VStr, Str: string(args[0].Str[i])}
-		}
-		return Value{Kind: VNull}
+		return Value{Kind: VInt, Int: 0}
 	})
-	k.registerNative("_iter", catListNat(), func(_ *Kernel, args []Value) Value {
-		if len(args) == 0 {
-			return Value{Kind: VList, List: []Value{}}
-		}
-		if isDictValue(args[0]) {
-			xs := args[0].List
-			out := make([]Value, 0, (len(xs)-1)/2)
-			for i := 1; i+1 < len(xs); i += 2 {
-				out = append(out, xs[i])
-			}
-			return Value{Kind: VList, List: out}
-		}
-		if args[0].Kind == VList {
-			return args[0]
-		}
-		if args[0].Kind == VStr {
-			out := make([]Value, 0, len(args[0].Str))
-			for i := 0; i < len(args[0].Str); i++ {
-				out = append(out, Value{Kind: VStr, Str: string(args[0].Str[i])})
-			}
-			return Value{Kind: VList, List: out}
-		}
-		return Value{Kind: VList, List: []Value{}}
-	})
-	k.registerNative("_in", catCompare(RCompareEq), func(_ *Kernel, args []Value) Value {
-		if isDictValue(args[1]) {
-			xs := args[1].List
-			for i := 1; i+1 < len(xs); i += 2 {
-				if dictKeyEq(xs[i], args[0]) {
-					return boolInt(true)
-				}
-			}
-			return boolInt(false)
-		}
-		if args[1].Kind == VList {
-			for _, v := range args[1].List {
-				if dictKeyEq(v, args[0]) {
-					return boolInt(true)
-				}
-			}
-			return boolInt(false)
-		}
-		if args[1].Kind == VStr && args[0].Kind == VStr {
-			return boolInt(strings.Contains(args[1].Str, args[0].Str))
-		}
-		return boolInt(false)
-	})
-	// Common Python builtins. Sibling-parity with Rust + TS kernels, and
-	// variadic the way CPython is: one list argument folds over its
-	// elements, two or more arguments fold over the arguments themselves.
-	// Both shapes read every element through AsInt (ints and bools widen,
-	// floats truncate) — a raw `.Int` read on a float element silently
-	// scored it 0, which is how `(max (list 1 9.5))` answered 1 here while
-	// Rust and TS both answered 9. The multi-argument shape used to fall
-	// through to `args[0]` unexamined: `(min 7 3)` answered 7, with no
-	// diagnostic, on all three kernels at once — an agreed wrong answer,
-	// the one shape the sibling comparison cannot see. Honest error
-	// messages on empty lists.
-	k.registerNative("min", catMethod(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VInt, Int: foldExtremum(args, "min", false)}
-	})
-	k.registerNative("max", catMethod(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VInt, Int: foldExtremum(args, "max", true)}
-	})
-	// `sum` composted from the kernel native list 2026-05-22 —
-	// core.fk's (defn sum (xs) (foldl plus 0 xs)) covers it via the
-	// existing foldl + plus primitives. First of 9 composable natives.
-	k.registerNative("abs", catMethod(), func(_ *Kernel, args []Value) Value {
-		if args[0].Kind == VFloat {
-			return Value{Kind: VFloat, Float: math.Abs(args[0].AsFloat())}
-		}
-		n := args[0].AsInt()
-		if n < 0 {
-			n = -n
-		}
-		return Value{Kind: VInt, Int: n}
-	})
-	// Polymorphic `+` for Python: int+int=add, str+str=concat,
-	// list+list=concat, with float promotion on numeric mixes.
-	// Sibling-parity with Rust + TS kernels.
-	k.registerNative("_plus", catMethod(), func(_ *Kernel, args []Value) Value {
-		a, b := args[0], args[1]
-		if a.Kind == VInt && b.Kind == VInt {
-			return Value{Kind: VInt, Int: a.Int + b.Int}
-		}
-		// Float promotion — matches Python: int+float, float+int, float+float
-		// all return float. Mirrors Rust's _plus dispatch.
-		if (a.Kind == VFloat || a.Kind == VInt) && (b.Kind == VFloat || b.Kind == VInt) {
-			if a.Kind == VFloat || b.Kind == VFloat {
-				return Value{Kind: VFloat, Float: a.AsFloat() + b.AsFloat()}
-			}
-		}
-		if a.Kind == VStr && b.Kind == VStr {
-			return Value{Kind: VStr, Str: a.Str + b.Str}
-		}
-		if a.Kind == VStr && b.Kind == VInt {
-			return Value{Kind: VStr, Str: a.Str + strconv.FormatInt(b.Int, 10)}
-		}
-		if a.Kind == VInt && b.Kind == VStr {
-			return Value{Kind: VStr, Str: strconv.FormatInt(a.Int, 10) + b.Str}
-		}
-		if a.Kind == VStr && b.Kind == VFloat {
-			return Value{Kind: VStr, Str: a.Str + formatFloatJS(b.Float)}
-		}
-		if a.Kind == VFloat && b.Kind == VStr {
-			return Value{Kind: VStr, Str: formatFloatJS(a.Float) + b.Str}
-		}
-		if a.Kind == VList && b.Kind == VList {
-			out := append([]Value{}, a.List...)
-			out = append(out, b.List...)
-			return Value{Kind: VList, List: out}
-		}
-		panic("_plus: unsupported operand types")
-	})
-	// range(n) / range(a,b) / range(a,b,s) — eager list of integers.
-	// Matches CPython semantics for `for i in range(N):`.
-	// Sibling-parity with the Rust + TS kernels.
-	// `range` composted 2026-05-22 — core.fk has (defn range (start end) ...).
-	// Sibling-parity with Rust kernel removal.
-
-	// ── Python `math` module — a tight kernel-native shape ─────
-	// The Python adapter rewrites `math.sqrt(x)` → `(math_sqrt x)`,
-	// `math.pi` → `(math_pi)`, etc. at parse time, so imports compile
-	// to nothing at runtime. Sibling-parity with the Rust + TS kernels;
-	// the entries are tight (sqrt, pi, floor, ceil, pow) and follow
-	// CPython's return-type convention: sqrt/pi/pow → float; floor/ceil
-	// → int (CPython 3 behaviour).
+	// The float natives; math.Sqrt is IEEE fsqrt, correctly rounded as on fkwu.
 	k.registerNative("math_sqrt", catMethod(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VFloat, Float: math.Sqrt(args[0].AsFloat())}
-	})
-	k.registerNative("math_acos", catMethod(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VFloat, Float: math.Acos(args[0].AsFloat())}
 	})
 	k.registerNative("math_pi", catMethod(), func(_ *Kernel, _ []Value) Value {
 		return Value{Kind: VFloat, Float: math.Pi}
@@ -2568,11 +1996,8 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("math_exp", catMethod(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VFloat, Float: math.Exp(args[0].AsFloat())}
 	})
-	// round_ndigits(x, n) — CPython `round(x, n)` for floats, EXACTLY.
-	// The Python adapter lowers `round(x, n)` → `(round_ndigits x n)`. Rounds
-	// the exact decimal value of the double half-to-even at n fractional
-	// places (n >= 0), matching CPython bit-for-bit. Sibling-parity with the
-	// Rust + TS kernels. See roundNdigitsDecimal above.
+	// round_ndigits(x, n) — CPython round(x, n) exactly: the double's exact decimal
+	// value rounded half-to-even at n places (roundNdigitsDecimal).
 	k.registerNative("round_ndigits", catMethod(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VFloat, Float: roundNdigitsDecimal(args[0].AsFloat(), args[1].AsInt())}
 	})
@@ -2589,6 +2014,11 @@ func (k *Kernel) registerNatives() {
 	// identity rather than the value.
 	k.registerNative("make_float32", catWitness(), func(k *Kernel, args []Value) Value {
 		return Value{Kind: VNodeID, Nid: k.internTrivialFloat32(float32(args[0].AsFloat()))}
+	})
+	// float_leaf mode x — fkwu's multiplexed door (tag 201); its stage-bus modes have no
+	// sibling carrier, so every mode answers nothing here.
+	k.registerNative("float_leaf", catWitness(), func(_ *Kernel, _ []Value) Value {
+		return Value{Kind: VNull}
 	})
 	k.registerNative("make_float64", catWitness(), func(k *Kernel, args []Value) Value {
 		return Value{Kind: VNodeID, Nid: k.internTrivialFloat64(args[0].AsFloat())}
@@ -2720,39 +2150,6 @@ func (k *Kernel) registerNatives() {
 		b := uint32(args[1].AsInt())
 		return Value{Kind: VInt, Int: int64(a + b)}
 	})
-	// SHA-256 lives in form-stdlib/sha256.fk. This proof interpreter walks
-	// composite operations; Form running on fkwu owns native compilation.
-	// register_jit form-name-str native-name-str → 1 on bind, 0 if
-	// native-name has no registered native (refuse silent miss).
-	// Inserts (form-name → native-name) into k.jitAliases. After this,
-	// every (form-name ...) call goes through the aliased native instead
-	// of walking the Form definition. Form recipes are canonical truth;
-	// register_jit binds an existing primitive alias; it performs no
-	// compilation. Removing the entry restores the Form walk.
-	k.registerNative("register_jit", catWitness(), func(k *Kernel, args []Value) Value {
-		formName := argStr(args, 0)
-		nativeName := argStr(args, 1)
-		nativeID := k.internName(nativeName)
-		_, hasN := k.natives[nativeID]
-		_, hasE := k.envNatives[nativeID]
-		if !hasN && !hasE {
-			return Value{Kind: VInt, Int: 0}
-		}
-		formID := k.internName(formName)
-		k.jitAliases[formID] = nativeID
-		return Value{Kind: VInt, Int: 1}
-	})
-	// unregister_jit form-name-str → 1 if removed, 0 if no alias was
-	// bound. Restores the Form-recipe walk path for that name.
-	k.registerNative("unregister_jit", catWitness(), func(k *Kernel, args []Value) Value {
-		formName := argStr(args, 0)
-		formID := k.internName(formName)
-		if _, ok := k.jitAliases[formID]; ok {
-			delete(k.jitAliases, formID)
-			return Value{Kind: VInt, Int: 1}
-		}
-		return Value{Kind: VInt, Int: 0}
-	})
 	// recipe_to_bytes nid → list-of-bytes (or null on error).
 	//   Serializes a Recipe subtree to the .fkb wire format as a byte
 	//   list — usable over any byte channel without a file detour.
@@ -2779,52 +2176,12 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VNodeID, Nid: root}
 	})
-	// jit_aliased? form-name-str → 1 if a JIT alias is currently bound
-	// for this name, else 0. Lets Form code introspect dispatch routing.
-	k.registerNative("jit_aliased?", catCompare(RCompareEq), func(k *Kernel, args []Value) Value {
-		formName := argStr(args, 0)
-		formID := k.internName(formName)
-		if _, ok := k.jitAliases[formID]; ok {
-			return Value{Kind: VInt, Int: 1}
-		}
-		return Value{Kind: VInt, Int: 0}
-	})
 	// jit_leaf_inram (image, arg) — run a Form-emitted arm64 leaf image
 	// (lo-compile-fn's output) in-process via MAP_JIT. Form owns emission;
 	// this carrier is available on darwin/arm64+cgo.
 	k.registerInRAMJIT()
-	// seeded_bytes(seed, count) — deterministic LCG byte stream.
-	// Same (seed, count) → byte-identical output across Go / Rust / TS.
-	// glibc rand(): state = (state * 1103515245 + 12345) & 0x7FFFFFFF
-	k.registerNative("seeded_bytes", catCall(), func(_ *Kernel, args []Value) Value {
-		seed := uint32(args[0].AsInt())
-		count := int(args[1].AsInt())
-		if count <= 0 {
-			return Value{Kind: VList, List: []Value{}}
-		}
-		state := seed
-		out := make([]Value, count)
-		for i := 0; i < count; i++ {
-			state = (state*1103515245 + 12345) & 0x7FFFFFFF
-			out[i] = Value{Kind: VInt, Int: int64(state & 0xFF)}
-		}
-		return Value{Kind: VList, List: out}
-	})
-	// sum_bytes_list(list) — fast O(n) compiled sum.
-	k.registerNative("sum_bytes_list", catCall(), func(_ *Kernel, args []Value) Value {
-		var s int64 = 0
-		if args[0].Kind == VList {
-			for _, v := range args[0].List {
-				s += v.Int
-			}
-		}
-		return Value{Kind: VInt, Int: s}
-	})
-	// write_form_binary — emit a Recipe to .fkb on disk in the full
-	// artifact format (string table + tree). Sibling to read_form_binary.
-	// Use when source-compile output needs to cross kernel invocations:
-	// serialize-recipe alone drops string indices, which break under
-	// fresh string tables on load. This format embeds the strings.
+	// write_form_binary — a recipe to a .fkb artifact on disk (string table +
+	// tree), so it crosses kernel invocations; read_form_binary reads it back.
 	k.registerNative("write_form_binary", catCall(), func(k *Kernel, args []Value) Value {
 		path := argStr(args, 0)
 		nid := args[1].AsNid()
@@ -2867,22 +2224,6 @@ func (k *Kernel) registerNatives() {
 	}
 	k.registerNative("host_file_mtime", catCall(), fileMtimeNative)
 	k.registerNative("file_mtime", catCall(), fileMtimeNative)
-	k.registerNative("file_byte_at", catCall(), func(_ *Kernel, args []Value) Value {
-		if args[1].AsInt() < 0 {
-			return Value{Kind: VInt, Int: -1}
-		}
-		f, err := os.Open(resolveKernelHostPath(argStr(args, 0)))
-		if err != nil {
-			return Value{Kind: VInt, Int: -1}
-		}
-		defer f.Close()
-		buf := []byte{0}
-		n, err := f.ReadAt(buf, args[1].AsInt())
-		if err != nil || n == 0 {
-			return Value{Kind: VInt, Int: -1}
-		}
-		return Value{Kind: VInt, Int: int64(buf[0])}
-	})
 	readFileSliceNative := func(_ *Kernel, args []Value) Value {
 		offset := args[1].AsInt()
 		length := args[2].AsInt()
@@ -3145,15 +2486,10 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VNodeID, Nid: NodeID{Pkg: 1, Level: LevelTrivial, Type: TrivBool, Inst: inst}}
 	})
-	// intern_trivial_float — content-address an IEEE-754 f64 into the overflow
-	// table and return its trivial NodeID. The string argument is the float's
-	// source text (e.g. "0.5"); a parse failure lands on +0.0 so the witness is
-	// total like str_to_int. Sibling of intern_trivial_int / intern_trivial_string;
-	// exposes the existing internTrivialFloat64 to Form code so the python-bmf
-	// float-literal lift can build a PY-BMF-FLOAT leaf.
+	// intern_trivial_float — a float's source text, read by str_to_float's one
+	// grammar, as a trivial NodeID in the f64 overflow table.
 	k.registerNative("intern_trivial_float", catWitness(), func(k *Kernel, args []Value) Value {
-		f, _ := strconv.ParseFloat(argStr(args, 0), 64)
-		return Value{Kind: VNodeID, Nid: k.internTrivialFloat64(f)}
+		return Value{Kind: VNodeID, Nid: k.internTrivialFloat64(decimalPrefixFloat(argStr(args, 0)))}
 	})
 
 	// float_value — decode a TrivFloat* NodeID back to a VFloat so it can be
@@ -3179,103 +2515,6 @@ func (k *Kernel) registerNatives() {
 		}
 	})
 
-	// print_float — forces a clean numeric print of a VFloat or TrivFloat* value.
-	// This is a small diagnostic + reporting helper so the kernel can "report"
-	// actual numbers from geometry / numeric workloads on host-supplied data.
-	k.registerNative("print_float", catMethod(), func(k *Kernel, args []Value) Value {
-		if len(args) != 1 {
-			panic("print_float expects 1 argument")
-		}
-		v := args[0]
-		var f float64
-		if v.Kind == VFloat {
-			f = v.Float
-		} else if v.Kind == VNodeID {
-			if v.Nid.Type == TrivFloat32 {
-				f = float64(k.decodeFloat32(v.Nid.Inst))
-			} else if v.Nid.Type == TrivFloat64 {
-				f = k.decodeFloat64(v.Nid.Inst)
-			} else {
-				panic("print_float expects a float value or float NodeID")
-			}
-		} else {
-			panic("print_float expects a float value or float NodeID")
-		}
-		fmt.Printf("%.10g\n", f)
-		return Value{Kind: VNull}
-	})
-
-	// pair_angle — the angle between two vectors from their cosine, clamped for
-	// math_acos. dot_product, magnitude and vector_cosine live in Form
-	// (form-stdlib/bml/vector-ops.bml); this native keeps its own cosine.
-	k.registerNative("pair_angle", catMethod(), func(_ *Kernel, args []Value) Value {
-		if len(args) != 2 {
-			panic("pair_angle expects 2 arguments")
-		}
-		a := args[0].List
-		b := args[1].List
-		if len(a) != len(b) {
-			panic("pair_angle requires equal length vectors")
-		}
-		var dot, na, nb float64
-		for i := range a {
-			fa := a[i].AsFloat()
-			fb := b[i].AsFloat()
-			dot += fa * fb
-			na += fa * fa
-			nb += fb * fb
-		}
-		c := 0.0
-		if na != 0 && nb != 0 {
-			c = dot / (math.Sqrt(na) * math.Sqrt(nb))
-		}
-		if c > 1.0 {
-			c = 1.0
-		}
-		if c < -1.0 {
-			c = -1.0
-		}
-		return Value{Kind: VFloat, Float: math.Acos(c)}
-	})
-
-	// dominant_band_delta — mirrors the recipelib helper for richer thruline
-	// readout. Returns a two-element list [band_index, max_abs_delta] so the
-	// kernel driver can surface the same band-tension information as the
-	// Form-declared recipe path. Placed with the other geometry natives.
-	k.registerNative("dominant_band_delta", catMethod(), func(_ *Kernel, args []Value) Value {
-		if len(args) != 2 {
-			panic("dominant_band_delta expects 2 arguments")
-		}
-		a := args[0].List
-		b := args[1].List
-		n := len(a)
-		if len(b) < n {
-			n = len(b)
-		}
-		if n == 0 {
-			return Value{Kind: VList, List: []Value{
-				{Kind: VFloat, Float: 0},
-				{Kind: VFloat, Float: 0},
-			}}
-		}
-		maxDelta := 0.0
-		maxIdx := 0
-		for i := 0; i < n; i++ {
-			d := a[i].AsFloat() - b[i].AsFloat()
-			if d < 0 {
-				d = -d
-			}
-			if d > maxDelta {
-				maxDelta = d
-				maxIdx = i
-			}
-		}
-		return Value{Kind: VList, List: []Value{
-			{Kind: VFloat, Float: float64(maxIdx)},
-			{Kind: VFloat, Float: maxDelta},
-		}}
-	})
-
 	k.registerNative("intern_node", catWitness(), func(k *Kernel, args []Value) Value {
 		if len(args) != 2 {
 			panic(fmt.Sprintf("intern_node: expected 2 args, got %d", len(args)))
@@ -3295,67 +2534,6 @@ func (k *Kernel) registerNatives() {
 			kids[i] = c.Nid
 		}
 		return Value{Kind: VNodeID, Nid: k.intern(cat, kids)}
-	})
-	fieldNode := func(nativeName string, categoryType uint32, categoryInst uint32) NativeFn {
-		return func(k *Kernel, args []Value) Value {
-			if len(args) != 1 || args[0].Kind != VList {
-				panic(fmt.Sprintf("%s: expected one list of NodeIDs", nativeName))
-			}
-			kids := make([]NodeID, len(args[0].List))
-			for i, c := range args[0].List {
-				if c.Kind != VNodeID {
-					panic(fmt.Sprintf("%s: children must be nodeids", nativeName))
-				}
-				kids[i] = c.Nid
-			}
-			return Value{
-				Kind: VNodeID,
-				Nid:  k.intern(NodeID{Pkg: 1, Level: LevelBasic, Type: categoryType, Inst: categoryInst}, kids),
-			}
-		}
-	}
-	fieldConstructors := []struct {
-		name         string
-		categoryType uint32
-		categoryInst uint32
-	}{
-		{"field_blueprint", RBasicField, 1},
-		{"field_cell", RBasicField, 2},
-		{"field_carrier", RBasicCarrier, 1},
-		{"field_topology", RBasicTopology, 1},
-		{"field_fiber", RBasicFiber, 1},
-		{"field_region", RBasicRegion, 1},
-		{"field_boundary", RBasicBoundary, 1},
-		{"field_neighborhood", RBasicNeighborhood, 1},
-		{"field_match", RBasicMatchField, 1},
-		{"field_delta", RBasicDelta, 1},
-		{"field_resolve", RBasicResolve, 1},
-		{"field_commit", RBasicCommit, 1},
-		{"field_step", RBasicStep, 1},
-		{"field_lift", RBasicLift, 1},
-		{"field_sample", RBasicSample, 1},
-		{"field_observe", RBasicObserve, 1},
-		{"field_intervene", RBasicIntervene, 1},
-		{"field_residual", RBasicResidual, 1},
-		{"field_receipt", RBasicReceipt, 1},
-		{"field_cost", RBasicCost, 1},
-		{"field_consent", RBasicConsent, 1},
-		{"field_evidence", RBasicEvidence, 1},
-	}
-	for _, c := range fieldConstructors {
-		k.registerNative(c.name, catFieldPrimitive(c.categoryType), fieldNode(c.name, c.categoryType, c.categoryInst))
-	}
-	k.registerNative("substrate_mark", catWitness(), func(k *Kernel, _ []Value) Value {
-		return Value{Kind: VList, List: k.substrateMark()}
-	})
-	k.registerNative("substrate_counts", catWitness(), func(k *Kernel, _ []Value) Value {
-		return Value{Kind: VList, List: k.substrateCounts()}
-	})
-	k.registerNative("substrate_release", catWitness(), func(k *Kernel, args []Value) Value {
-		return Value{Kind: VInt, Int: k.substrateRelease(args[0].List)}
-	})
-	k.registerNative("substrate_gc", catWitness(), func(k *Kernel, args []Value) Value {
-		return Value{Kind: VList, List: k.substrateGC(args[0].List, nil)}
 	})
 	k.registerNative("node_category", catWitness(), func(k *Kernel, args []Value) Value {
 		return Value{Kind: VNodeID, Nid: k.category(args[0].AsNid())}
@@ -3383,60 +2561,15 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("node_inst", catWitness(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VInt, Int: int64(args[0].AsNid().Inst)}
 	})
-	// node_eq — compare two NodeIDs structurally. Sibling to Rust's node_eq.
-	// Form code uses this for category
-	// dispatch — the kernel's `eq` (RCMP_EQ) coerces operands via as_int,
-	// which panics on NodeIDs; node_eq closes that gap.
-	k.registerNative("node_eq", catCompare(RCompareEq), func(k *Kernel, args []Value) Value {
-		// Strict — sibling parity with Rust's `as_nid` and TS's `argNodeID`.
-		// Both panic on non-NodeID args; Go's previous lenience (reading
-		// `args[N].Nid` directly on a VStr returns the zero NodeID, making
-		// two strings compare equal — a latent false positive) is the bug.
-		if args[0].Kind != VNodeID || args[1].Kind != VNodeID {
-			panic(fmt.Sprintf("node_eq: expected NodeID args, got %v and %v", args[0].Kind, args[1].Kind))
-		}
-		return boolInt(args[0].Nid == args[1].Nid)
-	})
-	// value_eq — polymorphic equality across all Value kinds. Answers
-	// 1 when both args have the same kind AND compare equal within
-	// that kind. Cross-kind answers 0 (str ≠ nodeid even if they
-	// share text). Use this when a Form-side function holds tagged
-	// values that may be either strings or NodeIDs (e.g. domain/lens
-	// in bmf-symbol-context can be either typed-constant NodeIDs or
-	// string literals). Avoids the str_eq/node_eq fork that previously
-	// forced callers to know which type they held.
-	k.registerNative("value_eq", catCompare(RCompareEq), func(k *Kernel, args []Value) Value {
+	// value_eq — content identity (valueEqual). node_eq is fkwu's second spelling of
+	// the same tag 80, so it shares the meaning.
+	valueEqNative := func(_ *Kernel, args []Value) Value {
 		return boolInt(valueEqual(args[0], args[1]))
-	})
-	// intern_node_at — intern composite + record source attribution.
-	// Engine.fk's parser actions call this so every emitted Recipe carries
-	// (file, line, col) provenance. The satsang teaching: every cell's
-	// state is traceable back to the recipe lines that authored it.
-	// Args: (category, children, file_string, line_int, col_int)
-	k.registerNative("intern_node_at", catWitness(), func(k *Kernel, args []Value) Value {
-		cat := args[0].AsNid()
-		kidsV := args[1].List
-		kids := make([]NodeID, len(kidsV))
-		for i, c := range kidsV {
-			kids[i] = c.AsNid()
-		}
-		nid := k.intern(cat, kids)
-		fileNid := k.internString(argStr(args, 2))
-		fileID := NameID(fileNid.Inst)
-		line := uint32(args[3].AsInt())
-		col := uint32(args[4].AsInt())
-		k.sourceAttr[nid] = sourceLoc{FileID: fileID, Line: line, Col: col}
-		k.activeRoots = append(k.activeRoots, nid)
-		k.framebufferRoots = append(k.framebufferRoots, nid)
-		return Value{Kind: VNodeID, Nid: nid}
-	})
-	// fb_record — native provenance primitive (tag 128). core.fk's Form
-	// intern_node_at lowers to (fb_record (intern_node cat kids) file
-	// (line<<16|col)); fkwu (fourth-shim) and TS carry it natively, Go/Rust
-	// previously did not, so any recipe interning composites under core.fk's
-	// definition hit "unbound fb_record". Records attribution for an
-	// already-interned node and returns it — parity with the other arms.
-	// Args: (nid, file_string, packed_line_col=line<<16|col)
+	}
+	k.registerNative("value_eq", catCompare(RCompareEq), valueEqNative)
+	k.registerNative("node_eq", catCompare(RCompareEq), valueEqNative)
+	// fb_record (nid, file, line<<16|col) records a node's source attribution and
+	// answers the node; core.fk's intern_node_at lowers onto it.
 	k.registerNative("fb_record", catWitness(), func(k *Kernel, args []Value) Value {
 		nid := args[0].AsNid()
 		fileNid := k.internString(argStr(args, 1))
@@ -3445,7 +2578,6 @@ func (k *Kernel) registerNatives() {
 		line := uint32(packed >> 16)
 		col := uint32(packed & 0xFFFF)
 		k.sourceAttr[nid] = sourceLoc{FileID: fileID, Line: line, Col: col}
-		k.activeRoots = append(k.activeRoots, nid)
 		k.framebufferRoots = append(k.framebufferRoots, nid)
 		return Value{Kind: VNodeID, Nid: nid}
 	})
@@ -3463,10 +2595,8 @@ func (k *Kernel) registerNatives() {
 			{Kind: VInt, Int: int64(loc.Col)},
 		}}
 	})
-	// framebuffer-events — return all NodeIDs with source attribution.
-	// The source_attr side-map IS the framebuffer. Observer-side
-	// tracing: emitter pays one hashmap insert per intern_node_at;
-	// observer pays the cost of walking this list when it analyzes.
+	// framebuffer-events — every NodeID holding source attribution: the emitter
+	// pays one map insert per fb_record, the observer walks this list.
 	k.registerNative("framebuffer-events", catWitness(), func(k *Kernel, _ []Value) Value {
 		out := make([]Value, 0, len(k.framebufferRoots))
 		for _, nid := range k.framebufferRoots {
@@ -3529,47 +2659,12 @@ func (k *Kernel) registerNatives() {
 		k.observeRuntime = false
 		return Value{Kind: VNull}
 	})
-	k.registerNative("framebuffer-observe-active?", catCompare(RCompareEq), func(k *Kernel, _ []Value) Value {
-		return boolInt(k.observationActive())
-	})
 	// framebuffer-clear — reset the framebuffer for bounded windows.
 	k.registerNative("framebuffer-clear", catWitness(), func(k *Kernel, _ []Value) Value {
 		k.sourceAttr = make(map[NodeID]sourceLoc)
 		k.observeSeq = 0
 		k.framebufferRoots = nil
 		return Value{Kind: VNull}
-	})
-	// serialize-recipe — walk a Recipe tree, emit a flat byte list as
-	// Value::Int per byte. Format per node: 5 big-endian u32s
-	// (pkg, level, ty, inst, children_count) + recursive children.
-	// Trivials: children_count=0, NodeID encoded directly.
-	// Composites: (pkg, level, ty, inst) is the CATEGORY; the composite
-	// NodeID is reconstructed at deserialize via intern.
-	k.registerNative("serialize-recipe", catWitness(), func(k *Kernel, args []Value) Value {
-		bytes := []byte{}
-		bytes = serializeNid(k, args[0].AsNid(), bytes)
-		out := make([]Value, len(bytes))
-		for i, b := range bytes {
-			out[i] = Value{Kind: VInt, Int: int64(b)}
-		}
-		return Value{Kind: VList, List: out}
-	})
-	// deserialize-recipe — read byte list back into a Recipe tree.
-	// Composites re-intern so the resulting NodeIDs match the original
-	// identities by content-addressing.
-	k.registerNative("deserialize-recipe", catWitness(), func(k *Kernel, args []Value) Value {
-		bytes := make([]byte, len(args[0].List))
-		for i, v := range args[0].List {
-			bytes[i] = byte(v.Int)
-		}
-		if len(bytes) > formBinaryMaxBytes {
-			return Value{Kind: VNull}
-		}
-		nid, end, err := deserializeNid(k, bytes, 0, k.nextImportScope(), &formBinaryDecodeBudget{}, 0)
-		if err != nil || end != len(bytes) {
-			return Value{Kind: VNull}
-		}
-		return Value{Kind: VNodeID, Nid: nid}
 	})
 	// write_file_bytes — sibling of read_file_bytes; writes a byte list.
 	k.registerNative("write_file_bytes", catCall(), func(_ *Kernel, args []Value) Value {
@@ -3625,17 +2720,6 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("write_file_text", catCall(), writeFileTextNative)
 
 	k.registerHostIONatives()
-
-	// --- Debug / inspection -----------------------------------------------
-	// `trace` — print-and-return. No Form category claimed; debug surface.
-	k.registerNative("trace", catUndefined(), func(_ *Kernel, args []Value) Value {
-		if len(args) >= 2 {
-			fmt.Fprintf(os.Stderr, "[trace %s] %s\n", args[0].Str, args[1].String())
-			return args[1]
-		}
-		fmt.Fprintf(os.Stderr, "[trace] %s\n", args[0].String())
-		return args[0]
-	})
 
 	// `now_unix_ms` — current wall-clock as a millisecond unix timestamp.
 	// External effect (reads the host clock) so it's catCall. Sibling
@@ -3925,20 +3009,21 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 				case RMathDivide:
 					return Value{Kind: VFloat, Float: l / r}
 				case RMathModulo:
-					return Value{Kind: VFloat, Float: l - math.Floor(l/r)*r}
+					// truncated, the sign of the dividend, as integer mod is
+					return Value{Kind: VFloat, Float: math.Mod(l, r)}
 				}
 			}
 			a := lv.AsInt()
 			b := rv.AsInt()
 			switch cat.Inst {
 			case RMathPlus:
-				return Value{Kind: VInt, Int: a + b}
+				return Value{Kind: VInt, Int: wrap63(a + b)}
 			case RMathMinus:
-				return Value{Kind: VInt, Int: a - b}
+				return Value{Kind: VInt, Int: wrap63(a - b)}
 			case RMathMultiply:
-				return Value{Kind: VInt, Int: a * b}
+				return Value{Kind: VInt, Int: wrap63(a * b)}
 			case RMathDivide:
-				return Value{Kind: VInt, Int: a / b}
+				return Value{Kind: VInt, Int: wrap63(a / b)}
 			case RMathModulo:
 				return Value{Kind: VInt, Int: a % b}
 			}
@@ -4145,45 +3230,15 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 
 		case RBasicFnCall:
 			rawName := k.identID(kids[0])
-			// JIT alias: if a Form function-name is JIT-registered, swap to
-			// the aliased native-name before native lookup. Form recipes are
-			// the canonical truth; `register_jit form-name native-name` opts
-			// calls into a kernel-resident optimized native.
-			name := rawName
-			if aliased, ok := k.jitAliases[rawName]; ok {
-				name = aliased
-			}
 			// (attempt x): x is walked under a recover point, never before — fkwu's mode 28.
 			if len(kids) == 2 && k.nameStr(rawName) == "attempt" {
 				return k.attempt(kids[1], env)
-			}
-			// Env-aware natives first — they need the caller env. Checked
-			// before plain natives so a name registered both ways prefers
-			// env-aware.
-			if ne, ok := k.envNatives[name]; ok {
-				if _, hasUserBinding := env.Lookup(name); !hasUserBinding {
-					args := make([]Value, len(kids)-1)
-					for i := 1; i < len(kids); i++ {
-						args[i-1] = k.walk(kids[i], env)
-					}
-					if k.Trace != nil && ne.Category.Type != RBasicUndefined {
-						k.Trace.record(ne.Category.Type, ne.Category.Inst)
-					}
-					if k.Trace != nil {
-						k.Trace.recordNative(k.nameStr(ne.Name))
-					}
-					k.observeNamedDispatch("observe/go/native-dispatch", ne.Name)
-					k.formStack = append(k.formStack, formFrame{name: ne.Name})
-					v := ne.Fn(k, env, args)
-					k.formStack = k.formStack[:len(k.formStack)-1]
-					return v
-				}
 			}
 			// A present native answers its name, as on fkwu and TS: a Form definition of the
 			// same name is a fallback for a kernel without the native, never an override of one.
 			// A local binding of the name (a parameter, a let) is nearer than the native
 			// unless fkwu reserves the head: the one call-position reading every arm gives.
-			if ne, ok := k.natives[name]; ok && (fkwuReservedHeads[k.nameStr(rawName)] || !env.HasLocal(rawName)) {
+			if ne, ok := k.natives[rawName]; ok && (fkwuReservedHeads[k.nameStr(rawName)] || !env.HasLocal(rawName)) {
 				args := make([]Value, len(kids)-1)
 				for i := 1; i < len(kids); i++ {
 					args[i-1] = k.walk(kids[i], env)
@@ -4200,8 +3255,6 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 				k.formStack = k.formStack[:len(k.formStack)-1]
 				return v
 			}
-			// Closure lookup uses the original function name so user code stays
-			// canonical when no native or alias resolved above.
 			v, ok := env.Lookup(rawName)
 			if !ok {
 				panic(fmt.Sprintf("walk: unbound function %q", k.nameStr(rawName)))
@@ -4633,8 +3686,7 @@ func (k *Kernel) readSexpr(toks []sexpToken, i int) (NodeID, int) {
 	t := toks[i]
 	switch t.kind {
 	case "INT":
-		n, _ := strconv.ParseInt(t.value, 10, 64)
-		return k.internTrivialInt(n), i + 1
+		return k.internTrivialInt(intLiteral(t.value)), i + 1
 	case "FLOAT":
 		f, err := strconv.ParseFloat(t.value, 64)
 		if err != nil {
@@ -4861,14 +3913,11 @@ func catFnCall() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicF
 // native expresses; the walker records them in the trace when the native
 // fires. Mirrors Rust kernel's cat_call / cat_witness / cat_access /
 // cat_method / cat_list_nat / cat_undefined.
-func catCall() NodeID    { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCall, Inst: 1} }
-func catWitness() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicWitness, Inst: 1} }
-func catAccess() NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicAccess, Inst: 1} }
-func catMethod() NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMethod, Inst: 1} }
-func catListNat() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicList, Inst: 1} }
-func catFieldPrimitive(categoryType uint32) NodeID {
-	return NodeID{Pkg: 1, Level: LevelBasic, Type: categoryType, Inst: 1}
-}
+func catCall() NodeID      { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCall, Inst: 1} }
+func catWitness() NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicWitness, Inst: 1} }
+func catAccess() NodeID    { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicAccess, Inst: 1} }
+func catMethod() NodeID    { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMethod, Inst: 1} }
+func catListNat() NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicList, Inst: 1} }
 func catReceipt() NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicReceipt, Inst: 1} }
 func catUndefined() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicUndefined, Inst: 0} }
 
@@ -5233,11 +4282,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "form-kernel-go: %v\n", err)
 			os.Exit(1)
 		}
-		k.activeRoots = []NodeID{root}
-		env := NewFrame(nil)
-		result := k.walkUnit(root, env)
-		k.substrateGC([]Value{{Kind: VNodeID, Nid: root}, result}, env)
-		fmt.Println(result.String())
+		fmt.Println(k.walkUnit(root, NewFrame(nil)).String())
 		return
 	}
 
@@ -5276,11 +4321,7 @@ func main() {
 		}
 		return
 	}
-	k.activeRoots = []NodeID{root}
-	env := NewFrame(nil)
-	result := k.walkUnit(root, env)
-	k.substrateGC([]Value{result}, env)
-	fmt.Println(result.String())
+	fmt.Println(k.walkUnit(root, NewFrame(nil)).String())
 }
 
 // cliTrace — run with arm-dispatch tracing enabled. Emits a JSON report
@@ -5312,11 +4353,8 @@ func cliTrace(args []string) int {
 	k := NewKernel()
 	k.Trace = newTrace()
 	root := k.readFormRoot(src, lineMap)
-	k.activeRoots = []NodeID{root}
-	env := NewFrame(nil)
 	start := time.Now()
-	result := k.walkUnit(root, env)
-	k.substrateGC([]Value{result}, env)
+	result := k.walkUnit(root, NewFrame(nil))
 	elapsed := time.Since(start)
 
 	report := map[string]interface{}{
@@ -5546,34 +4584,6 @@ func readI64LE(bytes []byte, pos int) (int64, int, error) {
 	return int64(u), pos + 8, nil
 }
 
-func serializeNid(k *Kernel, nid NodeID, bytes []byte) []byte {
-	if r, ok := k.byID[nid]; ok {
-		bytes = pushU32(bytes, formBinaryComposite)
-		bytes = serializeNid(k, r.Category, bytes)
-		bytes = pushU32(bytes, uint32(len(r.Children)))
-		for _, c := range r.Children {
-			bytes = serializeNid(k, c, bytes)
-		}
-		return bytes
-	}
-	if nid.Level == LevelTrivial && nid.Type == TrivFloat64 {
-		bytes = pushU32(bytes, formBinaryFloat64)
-		bytes = pushF64LE(bytes, k.decodeFloat64(nid.Inst))
-		return bytes
-	}
-	if nid.Level == LevelTrivial && nid.Type == TrivInt64 {
-		bytes = pushU32(bytes, formBinaryInt64)
-		bytes = pushI64LE(bytes, k.decodeInt64(nid.Inst))
-		return bytes
-	}
-	bytes = pushU32(bytes, formBinaryLeaf)
-	bytes = pushU32(bytes, nid.Pkg)
-	bytes = pushU32(bytes, nid.Level)
-	bytes = pushU32(bytes, nid.Type)
-	bytes = pushU32(bytes, nid.Inst)
-	return bytes
-}
-
 type formBinaryStringTable struct {
 	strings []string
 	indexes map[uint32]uint32
@@ -5632,69 +4642,6 @@ func serializeNidWithStrings(k *Kernel, nid NodeID, bytes []byte, table *formBin
 		bytes = pushU32(bytes, nid.Inst)
 	}
 	return bytes
-}
-
-func deserializeNid(k *Kernel, bytes []byte, pos int, scope uint32, budget *formBinaryDecodeBudget, depth int) (NodeID, int, error) {
-	if err := budget.enter(depth); err != nil {
-		return NodeID{}, pos, err
-	}
-	tag, pos, err := readU32(bytes, pos)
-	if err != nil {
-		return NodeID{}, pos, err
-	}
-	switch tag {
-	case formBinaryFloat64:
-		value, next, err := readF64LE(bytes, pos)
-		if err != nil {
-			return NodeID{}, pos, err
-		}
-		return k.internTrivialFloat64(value), next, nil
-	case formBinaryInt64:
-		value, next, err := readI64LE(bytes, pos)
-		if err != nil {
-			return NodeID{}, pos, err
-		}
-		return k.internTrivialInt(value), next, nil
-	case formBinaryLeaf:
-		var pkg, level, ty, inst uint32
-		if pkg, pos, err = readU32(bytes, pos); err != nil {
-			return NodeID{}, pos, err
-		}
-		if level, pos, err = readU32(bytes, pos); err != nil {
-			return NodeID{}, pos, err
-		}
-		if ty, pos, err = readU32(bytes, pos); err != nil {
-			return NodeID{}, pos, err
-		}
-		if inst, pos, err = readU32(bytes, pos); err != nil {
-			return NodeID{}, pos, err
-		}
-		return k.remapImportedLeaf(scope, NodeID{Pkg: pkg, Level: level, Type: ty, Inst: inst}), pos, nil
-	case formBinaryComposite:
-		category, next, err := deserializeNid(k, bytes, pos, scope, budget, depth+1)
-		if err != nil {
-			return NodeID{}, pos, err
-		}
-		count, next, err := readU32(bytes, next)
-		if err != nil {
-			return NodeID{}, pos, err
-		}
-		if count > formBinaryMaxChildren {
-			return NodeID{}, pos, fmt.Errorf("form binary: maximum child count exceeded")
-		}
-		children := make([]NodeID, int(count))
-		for i := uint32(0); i < count; i++ {
-			var c NodeID
-			c, next, err = deserializeNid(k, bytes, next, scope, budget, depth+1)
-			if err != nil {
-				return NodeID{}, pos, err
-			}
-			children[i] = c
-		}
-		return k.intern(category, children), next, nil
-	default:
-		return NodeID{}, pos, fmt.Errorf("form binary: unknown node tag %d", tag)
-	}
 }
 
 func deserializeNidWithStringsV1(k *Kernel, bytes []byte, pos int, stringsTable []string, scope uint32, budget *formBinaryDecodeBudget, depth int) (NodeID, int, error) {
