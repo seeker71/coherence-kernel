@@ -7,7 +7,35 @@
 // decided-through-byte trails rollout-bytes while a row is still being written;
 // the next reading starts there and counts that row once, whole.
 import form-stdlib/form-cli-movement.bml;
+import form-stdlib/bml/form-agent-json-query.bml;
 section [form.bml] {
+    def rtmr-keys() = ["input_tokens","cached_input_tokens","output_tokens","reasoning_output_tokens","total_tokens"];
+    def rtmr-usage(path) {
+        let size = file_size(path); let start = max2(0,size - rtm-chunk());
+        let lines = split-on(read_file_slice(path,start,size - start),"\n");
+        let complete = take(len(lines) - 1,lines);
+        let rows = filter(line => str_find(line,"\"total_token_usage\"",0) >= 0 && faj-valid(line),start > 0 ? complete[1:] : complete);
+        nil?(rows) ? nothing() : {
+            let row = parse-json(path,rows[-1]);
+            let usage = json-object-get(json-object-get(json-object-get(row,"payload"),"info"),"total_token_usage");
+            let valid = foldl((held,key) => held && json-object-has?(usage,key) && value_kind(json-int-value(json-object-get(usage,key))) == "int" && json-int-value(json-object-get(usage,key)) >= 0,true,rtmr-keys());
+            valid ? [json-string-value(json-object-get(row,"timestamp")),usage] : nothing();
+        };
+    }
+    def rtmr-delta(prior,path,usage) {
+        let before = json-object-get(prior,"counters");
+        let same = json-string-value(json-object-get(prior,"transcript")) == path;
+        let forward = same && foldl((held,key) => held && json-object-has?(before,key) && json-int-value(json-object-get(usage,key)) >= json-int-value(json-object-get(before,key)),true,rtmr-keys());
+        forward ? json-node-object(map(key => json-node-pair(key,json-node-int(json-int-value(json-object-get(usage,key)) - json-int-value(json-object-get(before,key)))),rtmr-keys())) : json-node-null();
+    }
+    def rtmr-usage-measure(path,statePath) {
+        let reading = rtmr-usage(path);
+        if nothing?(reading) then print_str("rented-usage=unavailable; no complete cumulative usage row in transcript tail\n") else {
+            let prior = file_size(statePath) > 0 ? read_form_binary(statePath) : json-node-object([]);
+            let report = json-node-object([json-node-pair("schema",json-node-string("rented-session-usage-v1")),json-node-pair("transcript",json-node-string(path)),json-node-pair("through",json-node-string(reading[0])),json-node-pair("counters",reading[1]),json-node-pair("since_previous_reading",rtmr-delta(prior,path,reading[1]))]);
+            write_form_binary(statePath,report) > 0 ? print_str(json-emit(report) + "\n") : form_error("rented usage reading could not be retained");
+        };
+    }
     def rtmr-state-path() = ".form-cli-rented-turn-meter-state";
     def rtmr-measure(path) = {
         let size = file_size(path);
@@ -22,6 +50,8 @@ section [form.bml] {
         print(("\nscanned-from-byte=" + start.str()));
         print(("\ndecided-through-byte=" + read[1].str()));
         print(("\nrollout-bytes=" + size.str()));
+        fs_mkdir(".hearth");
+        rtmr-usage-measure(path,".hearth/rented-session-usage.fkb");
         0;
     };
     let path = read_line();
