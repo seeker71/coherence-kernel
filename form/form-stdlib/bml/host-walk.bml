@@ -208,19 +208,27 @@ section [form.bml] {
   }
   // a turn line carries its row; a queue with no open gap, a gap already full and a silent turn answer without one
   def hw-turned?(line) = hw-starts?(line, "[native-turn] {") && str_find(line, "\"gap\":", 0) >= 0;
-  // the row a turn's lines carry ("" when none), and why the turn was idle ("" when it was not): its last option
-  // generated no local IDs and left the band where the turn found it (a rung-0 refusal, a lane that never launched,
-  // an option the deadline stopped), or its row does not read, so what it spent is unknown and another turn could
-  // only repeat it
+  // the row a turn's lines carry ("" when none), and why the turn was idle ("" when it was not). A turn is idle when
+  // its last option left the band where the turn found it and spent nothing: its lane generated a known 0 local IDs
+  // (a rung-0 refusal is one), or wrote no count because it was refused at rung 0 or never launched. A row that does
+  // not read is idle too: what it spent is unknown and another turn could only repeat it. A lane that crashed or
+  // met the deadline writes no count (local_generated_ids null): its spend is unknown, never read as 0, so it is
+  // not idle and the window goes on (hw-unknown-line names it).
   def hw-row-of(turn) = hw-row-in(split-on(turn ?? "", "\n"));
   def hw-row-in(lines) = nil?(lines) ? "" : hw-starts?(lines[0], "[native-turn] {") ? substring(lines[0], 14, len(lines[0])) : hw-row-in(lines[1:]);
   def hw-row-node(row, key) = json-object-has?(row, key) ? json-object-get(row, key) : json-node-null();
   def hw-row-int(row, key) = node_eq(hw-row-node(row, key), json-node-null()) ? nothing() : json-int-value(hw-row-node(row, key));
-  def hw-idle-row?(row) = ((Comparable) (hw-row-int(row, "local_generated_ids") ?? 0) == 0) && ((String) json-emit(hw-row-node(row, "band_before")) == json-emit(hw-row-node(row, "band_after")));
+  def hw-row-str(row, key) = node_eq(hw-row-node(row, key), json-node-null()) ? "" : json-string-value(hw-row-node(row, key));
+  def hw-band-unmoved?(row) = (String) json-emit(hw-row-node(row, "band_before")) == json-emit(hw-row-node(row, "band_after"));
+  def hw-spent-none-why(row) = !nothing?(hw-row-int(row, "local_generated_ids")) ? ((Comparable) hw-row-int(row, "local_generated_ids") == 0 ? "it generated no local IDs and moved no band" : "") : (String) hw-row-str(row, "lane_reason") == "caller-check-unmeetable" ? "its lane refused at rung 0 and it moved no band" : (String) hw-row-str(row, "lane") == "lane-launch-unavailable" ? "its lane never launched and it moved no band" : "";
   def hw-unread-why() = "its row did not read";
-  def hw-idle-why-of(row) = !json-object-has?(row, "gap") ? hw-unread-why() : hw-idle-row?(row) ? "it generated no local IDs and moved no band" : "";
+  def hw-idle-why-of(row) = !json-object-has?(row, "gap") ? hw-unread-why() : hw-band-unmoved?(row) ? hw-spent-none-why(row) : "";
   def hw-idle-why(turn) = (String) hw-row-of(turn) == "" ? "" : (try hw-idle-why-of(parse-json("turn-row", hw-row-of(turn))) else hw-unread-why());
   def hw-idle?(turn) = (String) hw-idle-why(turn) != "";
+  // a turn that moved no band and whose lane wrote no count, for no reason that reads idle: its spend is unknown
+  def hw-unknown-why-of(row) = json-object-has?(row, "gap") && hw-band-unmoved?(row) && nothing?(hw-row-int(row, "local_generated_ids")) && ((String) hw-spent-none-why(row) == "") ? "its spend is unknown (lane " ++ hw-row-str(row, "lane") ++ " wrote no local ID count)" : "";
+  def hw-unknown-said(why) = (String) why == "" ? "" : "[walk-window] " ++ why ++ ": not read as idle, the window goes on";
+  def hw-unknown-line(turn) = (String) hw-row-of(turn) == "" ? "" : hw-unknown-said(try hw-unknown-why-of(parse-json("turn-row", hw-row-of(turn))) else "");
   // A window's turns. Each begins while ready(until) answers [true, line] (hw-ready: the host's other checkouts let
   // the GPU go and the time left holds an option), at most `most` (nothing: no count bound); a turn that ran no gap
   // ends them, and so does an idle turn once it lands. take(deadline, n) is the nth turn; land(turn) answers the
@@ -233,15 +241,16 @@ section [form.bml] {
   }
   def hw-turn-taken(until, most, ready, take, land, n, turn) {
    let said = hw-say(turn);
-   !hw-turned?(turn) ? n : hw-idle?(turn) ? hw-turn-idle(n, hw-idle-why(turn), land(turn)) : hw-turn-landed(until, most, ready, take, land, n, land(turn));
+   !hw-turned?(turn) ? n : hw-idle?(turn) ? hw-turn-idle(n, hw-idle-why(turn), land(turn)) : hw-turn-landed(until, most, ready, take, land, n, land(turn), hw-unknown-line(turn));
   }
   def hw-turn-idle(n, why, landed) {
    let said = hw-say(landed);
    let told = print_str("[walk-window] the turn was idle (" ++ why ++ "): this window takes no more turns");
    n + 1;
   }
-  def hw-turn-landed(until, most, ready, take, land, n, landed) {
+  def hw-turn-landed(until, most, ready, take, land, n, landed, unknown) {
    let said = hw-say(landed);
+   let told = hw-say(unknown);
    hw-turns-from(until, most, ready, take, land, n + 1);
   }
   def hw-str(doc, key) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : "";
@@ -292,6 +301,16 @@ section [form.bml] {
    let cleared = restored ? host_path_remove(marker) : 0;
    [answer, restored, ""];
   }
+  // A publish's checkpoint is the tree as it stands, absence included: each path's bytes, or nothing where no file
+  // stands, so a writable path the lane creates publishes and is absent again after the window (hw-put removes it).
+  def hw-tree(paths) = paths |> map(p => read_file(p));
+  // the texts a publish writes: the candidate's where it names one, the checkpoint's elsewhere; an absent path the
+  // candidate does not name stays absent
+  def hw-over(cand, before) = nil?(cand) ? [] : cons(cand[0] ?? before[0], hw-over(cand[1:], before[1:]));
+  // what a publish window says of the band, [ran, reading]: the band ran under the candidate only when something
+  // was published and the door did not refuse it, and then it reads run's first answer (nothing when the run
+  // stopped). A refused or empty publish ran no band: the reading stays where it was before.
+  def hw-band-after(window, published, before) = (published > 0) && ((String) window[2] == "") ? [true, nothing?(window[0]) ? nothing() : window[0][0]] : [false, before];
   // A marker whose publisher no longer holds (or names this very process, which has published nothing yet) is a
   // publish whose restore never ran. Each path is read: its checkpoint bytes need nothing, the publish's own bytes
   // return to the checkpoint, any other bytes are a later writer's and stay, and so does the marker. A marker that
