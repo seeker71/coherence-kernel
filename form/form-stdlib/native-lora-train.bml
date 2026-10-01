@@ -51,6 +51,21 @@ section [form.bml] {
    let sync = nlc-sync-host(host_spawn_at(["/bin/sync"],["/dev/null","/dev/null","/dev/null"]));
    nag-publish(out,gen);
   }
+  // A finished run's adapter leaves the run directory through the same checkpoint door the
+  // generations use (nlc-save: one GPU copy, byte-verified, published by rename) into a serving
+  // directory the request names as "export". Its configuration carries the lineage and how far
+  // it trained, but no native_step and no Adam state: a later run that starts from it starts
+  // fresh moments, as from any served adapter.
+  def ntr-export-config(model,r,step) = json-node-object([ntr-text("model",model[4]),ntr-text("fine_tune_type","lora"),ntr-int("num_layers",ntr-get(r,"layers")),json-node-pair("lora_parameters",json-object-get(model[5],"lora_parameters")),ntr-text("optimizer","adam"),ntr-real("learning_rate",ntr-get(r,"learning_rate")),ntr-int("batch_size",ntr-get(r,"batch")),ntr-int("mask_prompt",ntr-get(r,"mask_prompt")),ntr-int("trained_native_steps",step),ntr-text("parent",ntr-get(r,"adapter")),ntr-text("run",ntr-get(r,"output")),ntr-text("data",ntr-get(r,"data")),ntr-text("owner","Form-native-Metal")]);
+  def ntr-export(model,r,step) {
+   if (!json-object-has?(r,"export")) then 0 else {
+    let dest = ntr-get(r,"export");
+    let made = fs-mkdir(dest);
+    let a =nlc-save((dest + "/adapters.safetensors"),nlc-adapter-rows(nlb-pairs(model[1])),model[4],step);
+    let c = nag-write((dest + "/adapter_config.json"),json-emit-precise(ntr-export-config(model,r,step)));
+    ntr-event(ntr-get(r,"output"),"exported",[ntr-text("adapter",dest),ntr-int("optimizer_step",step),ntr-int("adapter_bytes",a[1]),ntr-int("adapter_tensors",a[2]),ntr-int("verified_rows",a[4])]);
+   };
+  }
   def ntr-resume(model,state,adapter) {
    let config = model[5];
    if (!json-object-has?(config,"native_step")) then [0,"new Adam state; historical adapter has no optimizer checkpoint"] else ntr-resume-native(state,nag-resolve(adapter),ntr-get(config,"native_step"),config);
@@ -197,6 +212,11 @@ section [form.bml] {
    ntr-batch(model,state,rest,total,out,(loss + (value * weight)));
   }
   def ntr-cycle-rows(rows,cursor,batch) = take(batch,append(drop(cursor,rows),rows));
+  // A generation (adapter, Adam moments, progress) is published every save_every optimizer steps
+  // and always after the last round: a long run keeps its resume points without writing one per
+  // round. Without save_every, every round publishes, as before.
+  def ntr-save-every(r) = if json-object-has?(r,"save_every") then nlg-max(1,ntr-get(r,"save_every")) else 1;
+  def ntr-saving?(r,round,step) = ((round + 1) >= ntr-get(r,"steps")) || ((Comparable) ((step + 1) % ntr-save-every(r)) == 0);
   def ntr-round(model,tk,state,rows,r,round,step) {
    let out = ntr-get(r,"output"); let steps = ntr-get(r,"steps");
    if (round >= steps) then [step,round,"completed"] else if (file_size((out + "/cancel")) > 0) then [step,round,"cancelled"] else ntr-round-ready(model,tk,state,rows,r,round,step);
@@ -220,8 +240,9 @@ section [form.bml] {
    let updated = host_monotonic_ms();
    let nextProgress = nlp-advance(progress,len(prepared));
    let nextRequest = nlp-request(r,nextProgress);
-   let checkpoint = ntr-save(model,state,nextRequest,(step + 1));
-   let coverage = ntr-progress-observe(out,checkpoint,nextProgress,(step + 1));
+   let saving = ntr-saving?(r,round,step);
+   let checkpoint = if saving then ntr-save(model,state,nextRequest,(step + 1)) else "";
+   let coverage = if saving then ntr-progress-observe(out,checkpoint,nextProgress,(step + 1)) else 1;
    let end = host_monotonic_ms(); let live = metal_live();
    let event = ntr-event(out,"round",[ntr-int("round",(round + 1)),ntr-int("optimizer_step",(step + 1)),ntr-int("rows",len(prepared)),ntr-int("input_tokens",nld-tokens(prepared)),ntr-real("supervised_tokens",nld-weight(prepared)),ntr-real("loss",loss),ntr-real("gradient_norm",update[1]),ntr-real("gradient_clip",update[2]),ntr-int("lora_pairs_updated",update[3]),ntr-int("tokenize_ms",(tokensAt - start)),ntr-int("training_ms",(beforeUpdate - tokensAt)),ntr-int("update_ms",(updated - beforeUpdate)),ntr-int("checkpoint_ms",(end - updated)),ntr-int("wall_ms",(end - start)),ntr-int("device_bytes",live[18]),ntr-text("checkpoint",checkpoint),ntr-text("selected","whole-row sequence microbatches; token-weighted gradient; Adam; atomic generation")]);
    ntr-round(model,tk,state,rows,nextRequest,(round + 1),(step + 1));
@@ -264,6 +285,7 @@ section [form.bml] {
    let result = ntr-round(model,tk,state,rows,ready,0,resumed[0]);
    let validation = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,result[0]);
    let assessedAfter = ntr-assessment(model,tk,r,"after");
+   let exported = ntr-export(model,r,result[0]);
    let done = nam-sync(); let closeState = nlb-state-close(state); let closeModel = nlg-close(session);
    let final = ntr-event(out,"finished",[ntr-int("optimizer_step",result[0]),ntr-int("rounds_completed",result[1]),ntr-text("reason",result[2]),ntr-int("wall_ms",(host_monotonic_ms() - start)),ntr-int("retained_buffers",metal_live()[2])]);
    result;
