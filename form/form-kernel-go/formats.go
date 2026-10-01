@@ -437,10 +437,9 @@ type NumValue struct {
 	Big  *big.Int
 }
 
-func NV_F(f float64) NumValue          { return NumValue{Kind: NumF64, F: f} }
-func NV_I(i int64) NumValue            { return NumValue{Kind: NumI64, I: i} }
-func NV_Big(b *big.Int) NumValue       { return NumValue{Kind: NumBig, Big: b} }
-func NV_BigFromInt64(i int64) NumValue { return NumValue{Kind: NumBig, Big: big.NewInt(i)} }
+func NV_F(f float64) NumValue    { return NumValue{Kind: NumF64, F: f} }
+func NV_I(i int64) NumValue      { return NumValue{Kind: NumI64, I: i} }
+func NV_Big(b *big.Int) NumValue { return NumValue{Kind: NumBig, Big: b} }
 
 func (v NumValue) AsFloat() float64 {
 	switch v.Kind {
@@ -901,38 +900,4 @@ func compileHandler(fr *FormatRecipe, op uint32) NumHandler {
 	return func(a, b NumValue) NumValue {
 		return applyArith(fr, op, a, b)
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Overflow routing for values that don't fit NodeID.Inst (uint32)
-// ---------------------------------------------------------------------------
-//
-// The substrate's NodeID.Inst is a uint32 — fine for int32 and most
-// CPU-native ints. For 64-bit integers (i64/u64) and arbitrary floats
-// (fp64), we route through the existing intern-string mechanism: format
-// the value as a deterministic canonical string and intern it, then
-// store the resulting NodeID alongside the format-recipe handle as a
-// child trivial.
-//
-// This keeps the Go kernel's existing trivial-slot vocabulary unchanged
-// while still letting numeric values participate in content-addressing.
-
-func internOverflowFloat64(k *Kernel, v float64) NodeID {
-	// Canonicalize NaN and -0 before stringifying so equivalent values
-	// share a NodeID.
-	if math.IsNaN(v) {
-		return k.internString("f64:NaN")
-	}
-	if v == 0 {
-		v = 0 // collapse -0 → +0
-	}
-	return k.internString("f64:" + strconv.FormatFloat(v, 'b', -1, 64))
-}
-
-func internOverflowInt64(k *Kernel, v int64) NodeID {
-	return k.internString("i64:" + strconv.FormatInt(v, 10))
-}
-
-func internOverflowBig(k *Kernel, v *big.Int) NodeID {
-	return k.internString("big:" + v.String())
 }

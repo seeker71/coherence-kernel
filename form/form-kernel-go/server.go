@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -13,8 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
-	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -831,7 +828,7 @@ type goRoute struct {
 
 type goServeProgram struct {
 	source   string
-	artifact []byte
+	lineMap  []formFilePart
 	upstream *url.URL
 	client   *http.Client
 	pool     sync.Pool
@@ -844,414 +841,8 @@ type goServeWorker struct {
 	program *goServeProgram
 }
 
-type sourcePart struct {
-	label  string
-	source string
-}
-
-var sourceCompileMu sync.Mutex
-var sourceCompileArtifactCache = map[[sha256.Size]byte][]byte{}
-
-var sourceCompilePreludes = []string{
-	"form-ontology-loader.fk",
-	"line-grammar.fk",
-	"bmf-core.fk",
-	"bmf-grammar.fk",
-	"bml.fk",
-	"bml-source.fk",
-	"source-compiler.fk",
-}
-
-var sourceRouteLanguagePreludes = []string{
-	"form-ontology-loader.fk",
-	"line-grammar.fk",
-	"bmf-core.fk",
-	"bmf-grammar.fk",
-	"bml.fk",
-	"bml-source.fk",
-	"source-compiler.fk",
-	"json.fk",
-	"core.fk",
-	"sha256.fk",
-	"choice-receipt.fk",
-	"branch-choice-order.fk",
-	"kernel-http.fk",
-	"bml-route-choice-runtime.fk",
-	"language-model.fk",
-}
-
-func joinSourceParts(parts []sourcePart) string {
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		out = append(out, part.source)
-	}
-	return strings.Join(out, "\n")
-}
-
-func manifestHasSourceSections(src string) bool {
-	for _, line := range strings.Split(src, "\n") {
-		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "section [") {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeFormStdlibDir(stdlibDir string) (string, error) {
-	stdlibAbs, err := filepath.Abs(stdlibDir)
-	if err != nil {
-		return "", fmt.Errorf("--stdlib %s: %w", stdlibDir, err)
-	}
-	if real, err := filepath.EvalSymlinks(stdlibAbs); err == nil {
-		stdlibAbs = real
-	}
-	if filepath.Base(stdlibAbs) != "form-stdlib" {
-		return "", fmt.Errorf("--stdlib must point at a directory named form-stdlib; got %s", stdlibAbs)
-	}
-	return stdlibAbs, nil
-}
-
-func defaultFormStdlibDir() (string, error) {
-	root, err := findRepoRoot()
-	if err != nil {
-		return "", err
-	}
-	return normalizeFormStdlibDir(filepath.Join(root, "form", "form-stdlib"))
-}
-
-func sourceCompileServeProgram(parts []sourcePart, stdlibDir string) ([]byte, error) {
-	sourceCompileMu.Lock()
-	defer sourceCompileMu.Unlock()
-
-	stdlibAbs, err := normalizeFormStdlibDir(stdlibDir)
-	if err != nil {
-		return nil, err
-	}
-	// Source compilation is content-addressed. The canonical application is
-	// intentionally loaded by multiple workers/tests; reparsing its complete
-	// compiler prelude each time retained multi-GB heaps before Go's collector
-	// could recover them. Hash exact prelude + application bytes and reuse only
-	// the immutable FORMBIN2 artifact. Any source-byte change is a cache miss.
-	paths := make([]string, 0, len(sourceRouteLanguagePreludes))
-	for _, name := range sourceRouteLanguagePreludes {
-		paths = append(paths, filepath.Join(stdlibAbs, name))
-	}
-	loaded, err := loadFormSourceClosure(paths)
-	if err != nil {
-		return nil, fmt.Errorf("route-language dependency closure: %w", err)
-	}
-	hasher := sha256.New()
-	writeHashPart := func(label, source string) {
-		_, _ = fmt.Fprintf(hasher, "%d:%s%d:", len(label), label, len(source))
-		_, _ = hasher.Write([]byte(source))
-	}
-	writeHashPart("stdlib", stdlibAbs)
-	for _, part := range loaded {
-		writeHashPart(part.path, part.source)
-	}
-	for _, part := range parts {
-		writeHashPart(part.label, part.source)
-	}
-	var cacheKey [sha256.Size]byte
-	copy(cacheKey[:], hasher.Sum(nil))
-	if artifact, ok := sourceCompileArtifactCache[cacheKey]; ok {
-		return bytes.Clone(artifact), nil
-	}
-	stdlibParent := filepath.Dir(stdlibAbs)
-	prevCwd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("read cwd: %w", err)
-	}
-	if err := os.Chdir(stdlibParent); err != nil {
-		return nil, fmt.Errorf("chdir %s: %w", stdlibParent, err)
-	}
-	defer func() { _ = os.Chdir(prevCwd) }()
-
-	k := NewKernel()
-	roots := []NodeID{}
-	for _, prelude := range loaded {
-		if err := compileRouteSourceIntoRecipe(k, &roots, prelude.path, prelude.source, stdlibAbs); err != nil {
-			return nil, err
-		}
-	}
-	for _, part := range parts {
-		if err := compileRouteSourceIntoRecipe(k, &roots, part.label, part.source, stdlibAbs); err != nil {
-			return nil, err
-		}
-	}
-	if len(roots) == 0 {
-		return nil, errors.New("source manifest produced no recipe roots")
-	}
-	root := roots[0]
-	if len(roots) > 1 {
-		root = k.intern(catBlock(RBlockDo), roots)
-	}
-	artifact := serializeArtifact(k, root)
-	sourceCompileArtifactCache[cacheKey] = bytes.Clone(artifact)
-	// The compiler graph is intentionally much larger than the portable
-	// artifact. It is dead at this boundary; return its pages to the host now so
-	// a long-lived router does not carry a ~1.5 GiB bootstrap heap after startup.
-	// Subsequent workers load the cached immutable artifact and never repay it.
-	k = nil
-	roots = nil
-	runtime.GC()
-	debug.FreeOSMemory()
-	return artifact, nil
-}
-
-func sourceCompileDriver(stdlibAbs, body string) (string, error) {
-	paths := make([]string, 0, len(sourceCompilePreludes))
-	for _, name := range sourceCompilePreludes {
-		paths = append(paths, filepath.Join(stdlibAbs, name))
-	}
-	loaded, err := loadFormSourceClosure(paths)
-	if err != nil {
-		return "", fmt.Errorf("source-compile dependency closure: %w", err)
-	}
-	parts := make([]string, 0, len(loaded)+1)
-	for _, part := range loaded {
-		parts = append(parts, part.source)
-	}
-	parts = append(parts, body)
-	return strings.Join(parts, "\n"), nil
-}
-
-func compileSourceSectionToRecipeNode(dialectName, body, stdlibAbs string) (outKernel *Kernel, outRoot NodeID, outErr error) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			outKernel = nil
-			outRoot = NodeID{}
-			outErr = fmt.Errorf("source compiler panic: %v", recovered)
-		}
-	}()
-	driverBody := fmt.Sprintf(
-		"(fsc-compile-section-recipe %s %s)",
-		sexpStringLiteral(dialectName),
-		sexpStringLiteral(body),
-	)
-	driverSource, err := sourceCompileDriver(stdlibAbs, driverBody)
-	if err != nil {
-		return nil, NodeID{}, err
-	}
-	k := NewKernel()
-	root := readRootFromSource(k, driverSource)
-	env := NewFrame(nil)
-	k.activeRoots = []NodeID{root}
-	value := k.walkUnit(root, env)
-	if value.Kind != VNodeID {
-		return nil, NodeID{}, errors.New("source compiler did not return a recipe NodeID")
-	}
-	return k, value.Nid, nil
-}
-
-func importRecipeLeaf(dst, src *Kernel, nid NodeID) NodeID {
-	if nid.Level != LevelTrivial {
-		return nid
-	}
-	switch nid.Type {
-	case TrivInt:
-		return dst.internTrivialInt(int64(int32(nid.Inst)))
-	case TrivString:
-		return dst.internString(src.nameStr(NameID(nid.Inst)))
-	case TrivBool, TrivNull:
-		return nid
-	case TrivFloat32:
-		return dst.internTrivialFloat32(src.decodeFloat32(nid.Inst))
-	case TrivFloat64:
-		return dst.internTrivialFloat64(src.decodeFloat64(nid.Inst))
-	default:
-		return nid
-	}
-}
-
-func importRecipeNode(dst, src *Kernel, nid NodeID, memo map[NodeID]NodeID) NodeID {
-	if imported, ok := memo[nid]; ok {
-		return imported
-	}
-	var imported NodeID
-	if recipe, ok := src.byID[nid]; ok {
-		category := importRecipeNode(dst, src, recipe.Category, memo)
-		children := make([]NodeID, len(recipe.Children))
-		for i, child := range recipe.Children {
-			children[i] = importRecipeNode(dst, src, child, memo)
-		}
-		imported = dst.intern(category, children)
-	} else {
-		imported = importRecipeLeaf(dst, src, nid)
-	}
-	memo[nid] = imported
-	importSourceAttribution(dst, src, nid, imported)
-	return imported
-}
-
-func importRecipeFrom(dst, src *Kernel, root NodeID) NodeID {
-	return importRecipeNode(dst, src, root, map[NodeID]NodeID{})
-}
-
-func importSourceAttribution(dst, src *Kernel, srcNid, dstNid NodeID) {
-	loc, ok := src.sourceAttr[srcNid]
-	if !ok {
-		return
-	}
-	file := ""
-	if int(loc.FileID) < len(src.strs) {
-		file = src.strs[loc.FileID]
-	}
-	fileNid := dst.internString(file)
-	dst.sourceAttr[dstNid] = sourceLoc{
-		FileID: NameID(fileNid.Inst),
-		Line:   loc.Line,
-		Col:    loc.Col,
-	}
-	dst.framebufferRoots = append(dst.framebufferRoots, dstNid)
-}
-
-func sourceLineNext(src string, i int) int {
-	if off := strings.IndexByte(src[i:], '\n'); off >= 0 {
-		return i + off + 1
-	}
-	return len(src)
-}
-
-func sourceLineEnd(src string, i int) int {
-	if off := strings.IndexByte(src[i:], '\n'); off >= 0 {
-		return i + off
-	}
-	return len(src)
-}
-
-func findSectionFrom(src string, i int) int {
-	for i < len(src) {
-		end := sourceLineEnd(src, i)
-		line := src[i:end]
-		trimmed := strings.TrimLeft(line, " \t")
-		if strings.HasPrefix(trimmed, "section [") {
-			return i + len(line) - len(trimmed)
-		}
-		i = sourceLineNext(src, i)
-	}
-	return -1
-}
-
-func findSectionClose(src string, bodyStart int) (int, error) {
-	depth := 0
-	for i := bodyStart; i < len(src); {
-		end := sourceLineEnd(src, i)
-		line := strings.TrimSpace(src[i:end])
-		if line == "}" {
-			if depth == 0 {
-				return i, nil
-			}
-			depth--
-		} else if strings.HasSuffix(line, "{") {
-			depth++
-		}
-		i = sourceLineNext(src, i)
-	}
-	return -1, errors.New("source-compile: unterminated section block")
-}
-
-func countTopLevelTokens(toks []sexpToken) int {
-	depth := 0
-	count := 0
-	for _, t := range toks {
-		switch t.kind {
-		case "LPAREN":
-			if depth == 0 {
-				count++
-			}
-			depth++
-		case "RPAREN":
-			depth--
-		default:
-			if depth == 0 {
-				count++
-			}
-		}
-	}
-	return count
-}
-
-func parseRawRouteSegment(k *Kernel, roots *[]NodeID, src string) {
-	toks := tokenizeSexp(src)
-	if len(toks) == 0 {
-		return
-	}
-	var root NodeID
-	if countTopLevelTokens(toks) == 1 {
-		var next int
-		root, next = k.readSexpr(toks, 0)
-		_ = next
-	} else {
-		root = readRootFromSource(k, fmt.Sprintf("(do %s)", src))
-		k.markUnitRoot(root, true)
-	}
-	*roots = append(*roots, root)
-}
-
-func compileRouteSourceIntoRecipe(k *Kernel, roots *[]NodeID, sourceLabel, src, stdlibAbs string) error {
-	cursor := 0
-	for {
-		sectionPos := findSectionFrom(src, cursor)
-		if sectionPos < 0 {
-			break
-		}
-		parseRawRouteSegment(k, roots, src[cursor:sectionPos])
-		dialectStart := sectionPos + len("section [")
-		dialectRelEnd := strings.IndexByte(src[dialectStart:], ']')
-		if dialectRelEnd < 0 {
-			return fmt.Errorf("source-compile: %s section missing ]", sourceLabel)
-		}
-		dialectEnd := dialectStart + dialectRelEnd
-		openRel := strings.IndexByte(src[dialectEnd:], '{')
-		if openRel < 0 {
-			return fmt.Errorf("source-compile: %s section missing {", sourceLabel)
-		}
-		open := dialectEnd + openRel
-		close, err := findSectionClose(src, open+1)
-		if err != nil {
-			return fmt.Errorf("%s: %w", sourceLabel, err)
-		}
-		dialectName := strings.TrimSpace(src[dialectStart:dialectEnd])
-		body := src[open+1 : close]
-		sectionKernel, sectionRoot, err := compileSourceSectionToRecipeNode(dialectName, body, stdlibAbs)
-		if err != nil {
-			return fmt.Errorf("source-compile: %s [%s]: %w", sourceLabel, dialectName, err)
-		}
-		*roots = append(*roots, importRecipeFrom(k, sectionKernel, sectionRoot))
-		cursor = sourceLineNext(src, close)
-	}
-	parseRawRouteSegment(k, roots, src[cursor:])
-	return nil
-}
-
-func sexpStringLiteral(s string) string {
-	var b strings.Builder
-	b.Grow(len(s) + 2)
-	b.WriteByte('"')
-	for _, ch := range s {
-		switch ch {
-		case '\\':
-			b.WriteString("\\\\")
-		case '"':
-			b.WriteString("\\\"")
-		case '\n':
-			b.WriteString("\\n")
-		case '\t':
-			b.WriteString("\\t")
-		case '\r':
-			b.WriteString("\\r")
-		default:
-			b.WriteRune(ch)
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
-}
-
 func cliServe(args []string) int {
 	port := 18080
-	stdlibDir := "form-stdlib"
 	var upstream *url.URL
 	files := []string{}
 	for i := 0; i < len(args); i++ {
@@ -1275,13 +866,6 @@ func cliServe(args []string) int {
 				return 2
 			}
 			goKernelConfigPath = args[i]
-		case "--stdlib":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "serve --stdlib requires a directory")
-				return 2
-			}
-			stdlibDir = args[i]
 		case "--upstream":
 			i++
 			if i >= len(args) {
@@ -1299,34 +883,21 @@ func cliServe(args []string) int {
 		}
 	}
 	if len(files) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: form-kernel-go serve --port 18080 [--config path] [--upstream https://api.example] <route-prelude.fk...>")
+		fmt.Fprintln(os.Stderr, "usage: form-kernel-go serve --port 18080 [--config path] [--upstream https://api.example] <routes.fk...>")
 		return 2
 	}
-	parts := make([]sourcePart, 0, len(files))
-	for _, path := range files {
-		bytes, err := os.ReadFile(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "read %s: %v\n", path, err)
-			return 1
-		}
-		parts = append(parts, sourcePart{label: path, source: string(bytes)})
+	source, lineMap, err := readFormFiles(files)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
 	program := &goServeProgram{
-		source:   joinSourceParts(parts),
+		source:   source,
+		lineMap:  lineMap,
 		upstream: upstream,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-	}
-	if manifestHasSourceSections(program.source) {
-		artifact, err := sourceCompileServeProgram(parts, stdlibDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "serve source compile: %v\n", err)
-			return 1
-		}
-		program.source = ""
-		program.artifact = artifact
-		fmt.Fprintf(os.Stderr, "form-kernel-go serve: source manifest compiled via %s to Form recipe object\n", stdlibDir)
 	}
 	program.pool.New = func() any {
 		worker, err := buildGoServeWorker(program)
@@ -1359,16 +930,7 @@ func cliServe(args []string) int {
 
 func buildGoServeWorker(program *goServeProgram) (*goServeWorker, error) {
 	k := NewKernel()
-	var root NodeID
-	if len(program.artifact) > 0 {
-		imported, err := deserializeArtifact(k, program.artifact)
-		if err != nil {
-			return nil, err
-		}
-		root = imported
-	} else {
-		root = readRootFromSource(k, program.source)
-	}
+	root := k.readFormRoot(program.source, program.lineMap)
 	env := NewFrame(nil)
 	k.activeRoots = []NodeID{root}
 	_ = k.walkUnit(root, env)
@@ -1619,13 +1181,7 @@ func (wkr *goServeWorker) crashSource() (string, string) {
 	if wkr == nil || wkr.program == nil {
 		return "", "form-kernel-go serve"
 	}
-	if wkr.program.source != "" {
-		return wkr.program.source, "go serve source manifest"
-	}
-	if len(wkr.program.artifact) > 0 {
-		return fmt.Sprintf("<compiled route artifact: %d bytes>", len(wkr.program.artifact)), "go serve compiled route artifact"
-	}
-	return "", "go serve route manifest"
+	return wkr.program.source, "go serve source manifest"
 }
 
 func (wkr *goServeWorker) fanout(w http.ResponseWriter, r *http.Request) {
