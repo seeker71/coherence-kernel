@@ -433,6 +433,14 @@ repair changed, and the native share as published. The next session starts from
 the retained row. A loss-only promotion is not yet a local win over a rented
 answer. Quality is the next reading of the same check.
 
+Aim for less rented reasoning each session and more completed local work.
+Read the caller-bound rented meter at opening and closing; retain input, cached
+input and output deltas alongside local generated/injected IDs, failed attempts
+and verified changes. Prefer high-level rented guidance while Form owns source
+selection, execution, repair and verification in its checkpoint. Give useful
+local choices more room before taking over. Unknown usage stays unknown; unused
+allowance is not consumption. Follow the [three-day direction](docs/form-native-coding.md#direction-toward-zero-rented-coding).
+
 Foreign-language specimens used as input to Form's own compiler remain input
 data, and historical receipts keep their evidence. A reading is made clean by
 moving the implementation home, with its checks intact. The full current inventory lives at the path the guide
