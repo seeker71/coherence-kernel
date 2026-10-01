@@ -1,0 +1,163 @@
+; host-walk-band.bml — the walk's window, its lock and its turns, with no model and no git.
+;
+; Verdict 32767 = 1 options | 2 claims | 4 refuses | 8 takes-gone | 16 takes-reused | 32 one-taker | 64 unowned
+;   | 128 releases | 256 floor | 512 unmeasured | 1024 room | 2048 turn-lines | 4096 turns | 8192 elsewhere
+;   | 16384 yield
+;
+; A turn reads {"turns":24,"deadline_ms":<the window's end on host_monotonic_ms>} on stdin. One walk holds a
+; checkout's lock: a fresh claim holds it, a living holder refuses a later start and is named, a gone holder (a
+; pid that ended, or a pid the host handed out again after the stamp) is taken over by one start only, a lock that
+; names no holder yet refuses for its first minute, and only the holder releases it. The window's option is the
+; median real option of recorded ledger rows (form-stdlib/tests/fixtures/host-walk-ledger.jsonl: ten rows of the
+; walk checkout's receipts/native-turn-ledger.jsonl, one of them dry), copied under temp_dir and read back from
+; there; with none measured it is half an hour. A turn's lines keep its last row and its walk's verdict, and a turn
+; that printed neither is named by its last line that is not an organ-health reading. The turns
+; loop hands each turn the window's end, stops at a turn that ran no gap, at its count bound, and when the window is
+; not ready. Walk doors in other checkouts are read from host_process rows, never this checkout's own, and the
+; yield neither waits when none walks nor when the window holds no option.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- host_alive, host_process and host_processes are fkwu doors; the reference
+; kernels only reserve their names (form-kernel-go/reserved_heads.go), so their walk of this band has no holder to
+; read. The band writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/bml/host-walk.bml
+section [form.bml] {
+ class HostWalkBand {
+  def hwb-root(ctx) = ctx[1];
+  def hwb-fixture() = "form/form-stdlib/tests/fixtures/host-walk-ledger.jsonl";
+  def hwb-fresh() {
+   let root = temp_dir() ++ "/host-walk-band-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? ["host-walk", root] : nothing();
+  }
+  def hwb-lock(ctx, id) = hwb-root(ctx) ++ "/" ++ id ++ ".lock";
+  def hwb-has?(s, part) = str_find(s, part, 0) >= 0;
+  def hwb-bit(held) = held ? 1 : 0;
+  def hwb-self() = host_pid();
+  // a pid that ended: a child spawned and waited
+  def hwb-gone-pid() {
+   let pid = host_spawn_at(["/usr/bin/true"], ["/dev/null", "/dev/null", "/dev/null"]);
+   let ended = pid > 0 ? host_wait(pid) : -1;
+   (Comparable) host_alive(pid) == 0 ? pid : nothing();
+  }
+  def hwb-placed(ctx, id, text) {
+   let lock = hwb-lock(ctx, id);
+   let made = host_dir_mkdir(lock);
+   let wrote = write_file_text(hw-owner-path(lock), text);
+   lock;
+  }
+  def hwb-options(ctx) {
+   let doc = parse-json("turn-options", hw-turn-options(24, 987654321));
+   hwb-bit(((Comparable) json-int-value(json-object-get(doc, "turns")) == 24) && ((Comparable) json-int-value(json-object-get(doc, "deadline_ms")) == 987654321));
+  }
+  def hwb-claims(ctx) {
+   let lock = hwb-lock(ctx, "fresh");
+   let claim = hw-claim-at(lock, "scheduled-walk", hwb-self(), now_unix_ms());
+   let owner = hw-owner(lock);
+   hwb-bit(((Comparable) claim[0] == 1) && hwb-has?(claim[1], "scheduled-walk holds this checkout, pid " ++ hwb-self().str()) && ((Comparable) hw-field(owner, "pid=") == hwb-self()) && ((String) hw-owner-door(owner) == "scheduled-walk"));
+  }
+  def hwb-refuses(ctx) {
+   let lock = hwb-lock(ctx, "held");
+   let first = hw-claim-at(lock, "scheduled-walk", hwb-self(), now_unix_ms());
+   let before = hw-owner(lock);
+   let second = hw-claim-at(lock, "day-turn", 1, now_unix_ms());
+   hwb-bit(((Comparable) first[0] == 1) && ((Comparable) second[0] == 0) && hwb-has?(second[1], "day-turn does not start: scheduled-walk (pid " ++ hwb-self().str() ++ ")") && hwb-has?(second[1], "one walk at a time") && ((String) hw-owner(lock) == before));
+  }
+  def hwb-takes-gone(ctx) {
+   let gone = hwb-gone-pid();
+   let lock = nothing?(gone) ? "" : hwb-placed(ctx, "gone", hw-owner-text("scheduled-walk", gone, now_unix_ms()));
+   let claim = nothing?(gone) ? [0, ""] : hw-claim-at(lock, "day-turn", hwb-self(), now_unix_ms());
+   hwb-bit(((Comparable) claim[0] == 1) && hwb-has?(claim[1], "taken over from scheduled-walk pid " ++ gone.str() ++ ", gone") && ((Comparable) hw-field(hw-owner(lock), "pid=") == hwb-self()));
+  }
+  def hwb-takes-reused(ctx) {
+   let lock = hwb-placed(ctx, "reused", hw-owner-text("scheduled-walk", hwb-self(), 1000));
+   let claim = hw-claim-at(lock, "day-turn", hwb-self(), now_unix_ms());
+   hwb-bit(((Comparable) claim[0] == 1) && hwb-has?(claim[1], "taken over from scheduled-walk pid " ++ hwb-self().str()) && ((String) hw-owner-door(hw-owner(lock)) == "day-turn"));
+  }
+  def hwb-one-taker(ctx) {
+   let gone = hwb-gone-pid();
+   let text = nothing?(gone) ? "" : hw-owner-text("scheduled-walk", gone, now_unix_ms());
+   let lock = hwb-placed(ctx, "taken", text);
+   let mark = nothing?(gone) ? 0 : host_dir_mkdir(lock ++ "/took-" ++ gone.str());
+   let claim = hw-claim-at(lock, "day-turn", hwb-self(), now_unix_ms());
+   hwb-bit(((Comparable) mark == 1) && ((Comparable) claim[0] == 0) && hwb-has?(claim[1], "another start is taking over the lock") && ((String) hw-owner(lock) == text));
+  }
+  def hwb-unowned(ctx) {
+   let lock = hwb-lock(ctx, "unowned");
+   let made = host_dir_mkdir(lock);
+   let claim = hw-claim-at(lock, "day-turn", hwb-self(), now_unix_ms());
+   hwb-bit(((Comparable) made == 1) && ((Comparable) claim[0] == 0) && hwb-has?(claim[1], "has not named itself yet") && ((String) hw-owner(lock) == ""));
+  }
+  def hwb-releases(ctx) {
+   let lock = hwb-lock(ctx, "release");
+   let claim = hw-claim-at(lock, "day-turn", hwb-self(), now_unix_ms());
+   let kept = hw-release-at(lock, 1);
+   let stood = host_path_is_dir(lock);
+   let released = hw-release-at(lock, hwb-self());
+   hwb-bit(((Comparable) claim[0] == 1) && hwb-has?(kept, "[walk-lock] kept") && ((Comparable) stood == 1) && ((String) released == "[walk-lock] released") && ((Comparable) host_path_is_dir(lock) == 0));
+  }
+  // the recorded rows cross the file carrier: copied under temp_dir and read back from there
+  def hwb-floor(ctx) {
+   let path = hwb-root(ctx) ++ "/native-turn-ledger.jsonl";
+   let wrote = write_file_text(path, read_file(hwb-fixture()) ?? "");
+   let floor = hw-option-floor-at(path);
+   hwb-bit(((Comparable) floor[0] == 1412860) && ((String) floor[1] == "the median of 9 measured"));
+  }
+  def hwb-unmeasured(ctx) {
+   let dry = hwb-root(ctx) ++ "/dry-ledger.jsonl";
+   let wrote = write_file_text(dry, split-on(read_file(hwb-fixture()) ?? "", "\n")[0] ++ "\n");
+   let none = hw-option-floor-at(hwb-root(ctx) ++ "/no-ledger.jsonl");
+   let onlyDry = hw-option-floor-at(dry);
+   hwb-bit(((Comparable) none[0] == 1800000) && ((String) none[1] == "no option measured yet") && ((Comparable) onlyDry[0] == 1800000));
+  }
+  def hwb-room(ctx) {
+   let floor = [1412860, "the median of 9 measured"];
+   let holds = hw-room-at(5000000 + 1412860, 5000000, floor);
+   let short = hw-room-at(5000000 + 1412859, 5000000, floor);
+   let past = hw-room-at(4000000, 5000000, floor);
+   hwb-bit(holds[0] && (!short[0]) && hwb-has?(short[1], "23 min left cannot hold an option of 23 min (the median of 9 measured): no turn starts") && (!past[0]) && hwb-has?(past[1], "[walk-window] 0 min left"));
+  }
+  def hwb-rows() = split-on(read_file(hwb-fixture()) ?? "", "\n");
+  def hwb-walk-line() = "[native-turn:walk] closure-unit-line declined after 3 option(s); findings carried forward: 3";
+  def hwb-turn-out() {
+   let rows = hwb-rows();
+   "form-organ health {\"organ\":\"live\",\"flow\":\"native-turn\"}\n[native-turn] " ++ rows[8] ++ "\nform-organ health {\"organ\":\"live\"}\n[native-turn] " ++ rows[9] ++ "\n" ++ hwb-walk-line() ++ "\n";
+  }
+  def hwb-turn-lines(ctx) {
+   let kept = hw-turn-lines(hwb-turn-out());
+   let none = hw-turn-lines("[native-turn] no open gap\n");
+   let silent = hw-turn-lines("fkwu: error: observe/native-turn-run.bml: no such unit\nform-organ health {\"organ\":\"fkwu-compiler\"}\n\n");
+   hwb-bit(((String) kept == "[native-turn] " ++ hwb-rows()[9] ++ "\n" ++ hwb-walk-line()) && hw-turned?(kept) && ((String) none == "[native-turn] no open gap") && (!hw-turned?(none)) && ((String) silent == "[native-turn:silent] the turn printed no row; its last line: fkwu: error: observe/native-turn-run.bml: no such unit") && (!hw-turned?(silent)) && ((String) hw-turn-lines(nothing()) == ""));
+  }
+  // a scripted turn: it ran a gap only when it was handed the window's end, twice, and then found none open
+  def hwb-take(until) = (deadline, n) => (Comparable) deadline != until ? "[native-turn] handed the wrong deadline" : n < 2 ? "[native-turn] " ++ hwb-rows()[8] : "[native-turn] no open gap";
+  def hwb-ready(until) = [true, "[walk-window] scripted: the window holds an option"];
+  def hwb-closed(until) = [false, "[walk-window] scripted: no turn starts"];
+  def hwb-turns(ctx) {
+   let until = 77777;
+   let all = hw-turns(until, nothing(), hwb-ready, hwb-take(until), turn => "[landed] " ++ len(turn).str());
+   let bounded = hw-turns(until, 1, hwb-ready, hwb-take(until), turn => "");
+   let closed = hw-turns(until, nothing(), hwb-closed, hwb-take(until), turn => "");
+   let wrong = hw-turns(until, nothing(), hwb-ready, hwb-take(until + 1), turn => "");
+   hwb-bit(((Comparable) all == 2) && ((Comparable) bounded == 1) && ((Comparable) closed == 0) && ((Comparable) wrong == 0));
+  }
+  def hwb-proc(pid, cwd, argv) = [pid, 1, "/x/fkwu", cwd, argv, 1000, 0];
+  def hwb-elsewhere(ctx) {
+   let rows = [hwb-proc(11, "/elsewhere", ["./fkwu", "observe/movement-run.bml"]), hwb-proc(12, "/here", ["./fkwu", "observe/native-turn-run.bml"]), hwb-proc(13, "/elsewhere", ["./fkwu", "observe/ear-live-native.fk"]), 3, [14, 1, "/x/fkwu", "/elsewhere"], hwb-proc(15, "", ["./fkwu", "observe/day-turn.bml"]), hwb-proc(16, "/walk", ["/walk/fkwu", "/walk/observe/scheduled-walk.bml"])];
+   let found = hw-elsewhere-of(rows, "/here");
+   let live = hw-elsewhere(hw-here());
+   hwb-bit(((Comparable) len(found) == 2) && ((Comparable) found[0][0] == 11) && ((Comparable) found[1][0] == 16) && ((String) hw-walk-names([found[0]]) == "observe/movement-run.bml (pid 11) in /elsewhere") && ((Comparable) len(hw-elsewhere-of(live, hw-here())) == len(live)) && ((Comparable) len(hw-elsewhere-of(live, "")) == len(live)));
+  }
+  def hwb-yield(ctx) {
+   let floor = [1412860, "the median of 9 measured"];
+   let began = host_monotonic_ms();
+   let quiet = hw-yield-with(began + 9000000, here => [], floor);
+   let walking = hw-yield-with(began, here => [hwb-proc(11, "/elsewhere", ["./fkwu", "observe/movement-run.bml"])], floor);
+   let spent = host_monotonic_ms() - began;
+   hwb-bit(((String) quiet == "") && ((String) walking == "[walk-yield] observe/movement-run.bml (pid 11) in /elsewhere still walks, and the window no longer holds an option") && (spent < hw-yield-poll-ms()));
+  }
+ }
+ let ctx = hwb-fresh();
+ nothing?(ctx) ? form_error("host-walk band needs a fresh directory under temp_dir") : 0;
+ let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield]]);
+ host_dir_rmdir(hwb-root(ctx));
+ verdict;
+}
