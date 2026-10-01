@@ -318,20 +318,68 @@ section [form.bml] {
   let after = form-source-compile-loop(candidate,owner,0,catalog[1]);
   [same,candidate,fsl-definitions(fsl-parse(after)),after];
  }
- def form-source-lift(source,owner) = fsc-find-section-open(source,0) >= 0 ? form-bml-source-lift(source,owner) : fsl-form-source-lift(source,owner);
+ // Mixed modules retain their authored dialects. Opaque section leaves let
+ // the Form reader own the surrounding scope without parsing grammar data.
+ def fsl-section-spans(source,start,sections,pieces) {
+  let at = fsc-find-section-open(source,start);
+  if at < 0 then [str-join(reverse(cons(substring(source,start,len(source)),pieces))),reverse(sections)] else {
+   let dialect-end = fsc-find-char-from(source,"]",at + 9);
+   let open = fsc-find-char-from(source,"{",dialect-end);
+   let dialect = substring(source,at + 9,dialect-end);
+   let close = fsc-high-level-form-dialect?(dialect) ? fsc-bml-block-end(source,open + 1,0) : fsc-section-end(source,open + 1);
+   let after = fsc-section-after(source,close);
+   let marker = "$fsl-section-" + (at.str() + "$");
+   str_find(source,marker,0) >= 0 ? form_error("lift: section identity already present") : 0;
+   fsl-section-spans(source,after,cons([marker,substring(source,at,after)],sections),
+    cons("\n",cons(marker,cons(substring(source,start,at),pieces))));
+  };
+ }
+ def fsl-mixed-flush(pending) = nil?(pending) ? "" : str-join(["section [form.bml] {\n",str-join(reverse(pending)),"}\n"]);
+ def fsl-mixed-body(nodes,sections,pending,out) = nil?(nodes) ? str-join(reverse(cons(fsl-mixed-flush(pending),out))) : {
+  let n = nodes[0]; let op = fsl-op(n);
+  let section = nil?(fsl-kids(n)) && record_has(sections,fsl-word(n));
+  if section || op == "do" then {
+   let body = section ? record_get(sections,fsl-word(n)) : str-join(["(do\n",fsl-mixed-body(fsl-kids(n)[1:],sections,[],[]),")\n"]);
+   fsl-mixed-body(nodes[1:],sections,[],cons(str-join([fsl-comments(n[2],""),body,"\n"]),cons(fsl-mixed-flush(pending),out)));
+  } else fsl-mixed-body(nodes[1:],sections,cons(fsl-statement(n,"    "),pending),out);
+ };
+ def fsl-sections-only?(nodes,sections) = all?(n =>
+  nil?(fsl-kids(n)) && record_has(sections,fsl-word(n)) ||
+  fsl-op(n) == "do" && fsl-sections-only?(fsl-kids(n)[1:],sections),nodes);
+ def fsl-mixed-source-lift(source,owner) {
+  let spans = fsl-section-spans(source,0,[],[]);
+  let parsed = fsl-parse(fsc-strip-bml-comments(spans[0]));
+  let module = fsl-module(parsed,[],[]); let nodes = fsl-root(module[1]);
+  let sections = foldl((r,row) => record_set(r,row[0],row[1]),record_new(0),spans[1]);
+  if fsl-sections-only?(nodes,sections) then form-bml-source-lift(source,owner) else {
+   let candidate = trim(form-bml-import-lift(fsl-import-text(module[0]) + fsl-mixed-body(nodes,sections,[],[]))) + "\n";
+   fsl-verify-form(source,candidate,owner,parsed);
+  };
+ }
+ def form-source-lift(source,owner) = fsc-find-section-open(source,0) >= 0 ? fsl-mixed-source-lift(source,owner) : fsl-form-source-lift(source,owner);
  def fsl-form-source-lift(source,owner) {
   let parsed = fsl-parse(source); let first = parsed[0];
   let module = fsl-module(nil?(parsed) ? [] : cons([fsl-word(first),fsl-kids(first),"",first[3]],parsed[1:]),[],[]);
   let candidate = str-join([fsl-comments(nil?(parsed) ? source : first[2],""),fsl-import-text(module[0]),"section [form.bml] {\n",fsl-statements(fsl-root(module[1]),"    "),"}\n"]);
+  fsl-verify-form(source,candidate,owner,parsed);
+ }
+ def fsl-verify-form(source,candidate,owner,parsed) {
   // The lift preserves names and dependencies. Read their contracts from the
   // original Form directly, without lowering the candidate once for discovery
   // and again for execution. The comparison below still owns admission.
   let homes = fsc-bml-home-context(owner);
   let catalog = fsc-bml-file-signatures(owner,source,[owner],[],homes[1],homes[0]);
+  let before = form-source-compile-loop(source,owner,0,catalog[1]);
   let lowered = form-source-compile-loop(candidate,owner,0,catalog[1]);
   let shadowed = any?(signature => any?(name => (String) signature[0] == name,fsl-literal-names()),catalog[1]);
   let dependencies = (Value) bml-source-dependencies(source,1) == bml-source-dependencies(candidate,0);
-  let same = dependencies && !shadowed && !fsl-literal-bindings?(parsed) && (Value) fsl-shapes(parsed) == fsl-shapes(fsl-parse(lowered));
-  [same,candidate,fsl-definitions(parsed),lowered];
+  // Loader dependencies were compared above; their comment/import spelling
+  // is separate from the executable module whose scope must stay identical.
+  let original = fsl-parse(before);
+  let same = dependencies && !shadowed && !fsl-literal-bindings?(parsed) &&
+   (Value) fsl-shapes(fsl-module(original,[],[])[1]) == fsl-shapes(fsl-module(fsl-parse(lowered),[],[])[1]);
+  let refined = same ? fsl-surface-sections(candidate,0) : candidate;
+  [same && form-bml-semantic-equivalent?(candidate,refined),refined,fsl-definitions(original),
+   refined == candidate ? lowered : form-source-compile-loop(refined,owner,0,catalog[1])];
  }
 }
