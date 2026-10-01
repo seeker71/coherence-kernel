@@ -1275,19 +1275,9 @@ fn call_native(name: &str, args: &[Value]) -> Option<Value> {
             Value::Null
         }),
         "len" => Some(match &args[0] {
-            Value::List(xs) => {
-                // Dict-aware: a "__dict__"-tagged list reports pair count,
-                // matching the full kernel's len. A plain list reports its
-                // length.
-                if let Some(Value::Str(s)) = xs.first() {
-                    if &**s == "__dict__" {
-                        return Some(Value::Int(((xs.len() - 1) / 2) as i64));
-                    }
-                }
-                Value::Int(xs.len() as i64)
-            }
-            // a pair's cells end before its word
-            Value::Pair(xs, _) => Value::Int(xs.len() as i64),
+            // len counts cells, as every kernel counts them: a "__dict__" row's
+            // marker is a cell like any other; a pair's cells end before its word
+            Value::List(xs) | Value::Pair(xs, _) => Value::Int(xs.len() as i64),
             Value::Str(s) => Value::Int(s.len() as i64),
             _ => Value::Int(0),
         }),
