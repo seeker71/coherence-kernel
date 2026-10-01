@@ -56,7 +56,8 @@ add_workload() {
 suite_enumerate() {
     local f base module
     for f in form-samples/*.fk; do
-        [[ -e "$f" ]] && add_workload "$(basename "$f")" "$f"
+        [[ -e "$f" ]] || continue
+        add_workload "$(basename "$f")" "$f"
     done
     for f in form-stdlib/tests/*.fk form-stdlib/tests/*-band.bml; do
         [[ -e "$f" ]] || continue
@@ -72,16 +73,67 @@ suite_enumerate() {
             add_workload "stdlib/$(basename "$f")" "form-stdlib/core.fk" "$f"
         fi
     done
+    # a tracked band deleted in the working tree is skipped, never a stop: the enumeration
+    # answers 0 whatever its last path was
     while IFS= read -r f; do
-        [[ -f "../$f" ]] && add_workload "$f" "../$f"
+        [[ -f "../$f" ]] || continue
+        add_workload "$f" "../$f"
     done < <(cd .. && git ls-files --cached --others --exclude-standard -- '*/tests/*-band.fk' '*/tests/*-band.bml' 2>/dev/null \
                  | grep -v '^form/form-stdlib/tests/' | grep -v '^\.' | sort -u)
+    return 0
 }
+
+# A band may declare its proof level in its comment head:
+#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs alone by its own path on the runtime
+#     fkwu (the source door) and is judged as the fkwu lane judges every band:
+#     its exit, its stderr, the first Verdict its head declares and its
+#     manifest row. Loud pass/fail — a wrong home-arm answer is a real failure,
+#     never skipped. A band whose closure calls a door no sibling kernel carries
+#     (host_spawn, host-exec, a kernel_stat key only fkwu counts) declares it and
+#     names that door, or every kernel-change run reads it as a divergence.
+#   ; PROOF LEVEL: FKWU-STAGED ...       → needs a host carrier. A band that
+#     names it (`; STAGED CARRIER: <path from the repo root>`) runs on the
+#     fkwu-only lane, verdict and diagnostics held as above, whenever that
+#     carrier stands; otherwise it is reported ⧗ pending — visible every run,
+#     never green.
+fk_band_proof_level() {
+    sed -n 's/^; PROOF LEVEL: \([A-Z-]*\).*/\1/p' "$1" 2>/dev/null | head -1
+}
+fk_band_staged_carrier() {
+    sed -n 's/^; STAGED CARRIER: \([^ ]*\).*/\1/p' "$1" 2>/dev/null | head -1
+}
+# the door that builds a staged band's carrier (`; STAGED CARRIER DOOR: <command>`), named
+# in the pending line so the next reader knows how to make the carrier present
+fk_band_staged_door() {
+    sed -n 's/^; STAGED CARRIER DOOR: \(.*\)$/\1/p' "$1" 2>/dev/null | head -1
+}
+# The head pin: the first `Verdict <n>` on a `; ` line of the band's comment head, which ends at
+# its first code line. One spelling, so a head reads one way: `Verdict: 131 (P1) + 12*42 (P2) =
+# 635` (form-eval-full-band) is prose about a sum, and a reader that took the colon spelling too
+# would pin it 131 against its registered 635.
+fk_band_declared_verdict() {
+    awk '/^;/ { if (match($0, /Verdict [0-9]+/)) { print substr($0, RSTART + 8, RLENGTH - 8); exit } } !/^;/ && NF { exit }' "$1" 2>/dev/null
+}
+
+# `./validate.sh --list` names each workload, its files, the proof level its head declares
+# (four-way when it declares none: the lane a kernel change asks of it), its head pin and its
+# manifest row. A band with neither pin is swept but judged by its exit alone.
 if [[ "${1:-}" == "--list" ]]; then
+    # shellcheck source=scripts/fourth-arm.sh
+    source scripts/fourth-arm.sh
     suite_enumerate
     i=0
     while [[ $i -lt ${#wl_labels[@]} ]]; do
-        printf '%s\t%s\n' "${wl_labels[$i]}" "$(printf '%s' "${wl_args[$i]}" | tr '\037' ' ')"
+        list_files="$(printf '%s' "${wl_args[$i]}" | tr '\037' ' ')"
+        list_files="${list_files% }"
+        list_band="${list_files##* }"
+        list_level="$(fk_band_proof_level "$list_band")"
+        list_pin="$(fk_band_declared_verdict "$list_band")"
+        list_stem="$(fourth_band_stem "$list_band" || true)"
+        list_row=""
+        if [[ -n "$list_stem" ]]; then list_row="$(awk -v b="$list_stem" '!/^#/ && $1==b{print $3; exit}' "$FOURTH_MANIFEST")"; fi
+        printf '%s\t%s\tlevel=%s\tpin=%s\trow=%s\n' "${wl_labels[$i]}" "$list_files" \
+            "${list_level:-four-way}" "${list_pin:--}" "${list_row:--}"
         i=$((i + 1))
     done
     exit 0
@@ -262,31 +314,6 @@ build_fkwu_src() {
 }
 build_fkwu_src || exit 1
 
-# A band may declare its proof level in its comment head:
-#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs alone by its own path on the runtime
-#     fkwu (the source door) and is judged as the fkwu lane judges every band:
-#     its exit, its stderr, the first "Verdict <n>" its head declares and its
-#     manifest row. Loud pass/fail — a wrong home-arm answer is a real failure,
-#     never skipped.
-#   ; PROOF LEVEL: FKWU-STAGED ...       → needs a host carrier. A band that
-#     names it (`; STAGED CARRIER: <path from the repo root>`) runs on the
-#     fkwu-only lane, verdict and diagnostics held as above, whenever that
-#     carrier stands; otherwise it is reported ⧗ pending — visible every run,
-#     never green.
-fk_band_proof_level() {
-    sed -n 's/^; PROOF LEVEL: \([A-Z-]*\).*/\1/p' "$1" 2>/dev/null | head -1
-}
-fk_band_staged_carrier() {
-    sed -n 's/^; STAGED CARRIER: \([^ ]*\).*/\1/p' "$1" 2>/dev/null | head -1
-}
-# the door that builds a staged band's carrier (`; STAGED CARRIER DOOR: <command>`), named
-# in the pending line so the next reader knows how to make the carrier present
-fk_band_staged_door() {
-    sed -n 's/^; STAGED CARRIER DOOR: \(.*\)$/\1/p' "$1" 2>/dev/null | head -1
-}
-fk_band_declared_verdict() {
-    awk '/^;/ { if (match($0, /Verdict [0-9]+/)) { print substr($0, RSTART + 8, RLENGTH - 8); exit } } !/^;/ && NF { exit }' "$1" 2>/dev/null
-}
 # A diagnostic is an error line on fkwu's stderr, or its word that the cached image it ran was
 # compiled with errors: a warm cache answers the verdict, and must not answer it clean.
 fk_diag_count() {
@@ -407,6 +434,19 @@ fk_workload_closure() {
     return 1
 }
 
+# fk_release_fifos DIR — a leg's scratch is the band's to the end of the leg, and no longer. A
+# band may leave a reader waiting in open() on a fifo there, for a writer it deferred (the
+# cell-channel band's bell: `cat b.bell &`, then a ring through tools/ftimeout). Once the band has
+# ended and its scratch is removed, that writer can no longer reach the fifo and the reader waits
+# forever, an orphan of the run. So when a leg ends, every fifo in its scratch is opened
+# read-write for an instant: that open never blocks, and a waiting reader reads end of file.
+fk_release_fifos() (
+    while IFS= read -r p; do
+        { exec 9<>"$p"; } 2>/dev/null && exec 9>&-
+    done < <(find "$1" -type p 2>/dev/null)
+    exit 0
+)
+
 # fk_run_leg LEGS LEG COMMAND... — one sibling over the closure, its streams and exit in LEGS.
 # Every leg reads the one closure fkwu handed over, byte for byte; each owns its TMPDIR, the
 # scratch bands reach through the `temp_dir` native, so concurrent legs never share a path.
@@ -417,6 +457,7 @@ fk_run_leg() (
     mkdir -p "$legs/tmp-$leg"
     TMPDIR="$legs/tmp-$leg" "$@" "$legs/closure.fk" > "$legs/$leg" 2> "$legs/$leg.err"
     printf '%s\n' "$?" > "$legs/$leg.rc"
+    fk_release_fifos "$legs/tmp-$leg"
 )
 
 binary_mode=0
@@ -452,6 +493,7 @@ run_siblings() {
         mkdir -p "$legs/tmp-fk"
         cd .. && TMPDIR="$legs/tmp-fk" "$FOURTH_SOURCE_FKWU" "$workload_unit" > "$legs/fk" 2> "$legs/fk.err"
         printf '%s\n' "$?" > "$legs/fk.rc"
+        fk_release_fifos "$legs/tmp-fk"
     ) &
     wait
     go_out=$(organ_steady "$legs/go"); rs_out=$(organ_steady "$legs/rs"); ts_out=$(organ_steady "$legs/ts")
@@ -563,6 +605,7 @@ run_fkwu_lane() {
     legs="$(mktemp -d "$HEARTH/validation-legs.XXXXXX")"
     lane_tmp="$(mktemp -d "${TMPDIR:-/tmp}/fk-lane.XXXXXX")"
     ( set +e; cd .. && TMPDIR="$lane_tmp" "$FOURTH_SOURCE_FKWU" "$workload_unit" > "$legs/fk" 2> "$legs/fk.err"; printf '%s\n' "$?" > "$legs/fk.rc" )
+    fk_release_fifos "$lane_tmp"
     rm -rf "$lane_tmp"
     rc="$(cat "$legs/fk.rc" 2>/dev/null || echo 1)"
     diags="$(fk_diag_count "$legs/fk.err")"
