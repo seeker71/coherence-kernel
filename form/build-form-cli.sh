@@ -6,9 +6,13 @@
 # Form owns source closure, checked snapshots, startup emission and compilation.
 # This carrier owns host linking, artifact copies and publication ordering.
 # form-stdlib/bootstrap is regenerable output of the sources it seals (git
-# ignores it): when this checkout holds no current generation, this script runs
-# scripts/regen_form_cli_bootstrap.sh, which needs cc, the repo-root fkwu,
-# shasum and openssl, and then builds against what it published.
+# ignores it): when this checkout holds no current generation, the install (no
+# argument) runs scripts/regen_form_cli_bootstrap.sh, which needs cc, the
+# repo-root fkwu, shasum and openssl, and then builds against what it published.
+# A copy (an argument) never republishes this checkout's bundle or its form-cli
+# link: with no current generation here, it regenerates inside a private copy
+# of the body (its tracked and new files, and the runtime fkwu), builds there,
+# keeps only the copy it was asked for, and removes the private body.
 set -euo pipefail
 export LC_ALL=C
 FORM="$(cd -P "$(dirname "$0")" && pwd)"
@@ -19,20 +23,47 @@ form_cli_bind_carrier "$FORM"
 source scripts/form_cli_source_list.sh
 (cd "$BODY" && ./fkwu observe/native-node-word-verify.bml)
 
-# A generation is current when its files stand and its stamp and digest answer
-# for the sources the manifest lists. The regeneration itself builds with
-# FORM_CLI_NATIVE_BOOTSTRAP_DIR set, so it never re-enters here; the marker
-# keeps a regeneration that still reads stale from looping.
+# A generation is current when the files the regeneration publishes stand and
+# its stamp and digest answer for the sources the manifest lists. (Startup C is
+# emitted privately during each build and never published, so it is no part of
+# a generation.) The regeneration itself builds with FORM_CLI_NATIVE_BOOTSTRAP_DIR
+# set, so it never re-enters here; the marker keeps a regeneration that still
+# reads stale from looping.
 bootstrap_current() {
     local b="$FORM/form-stdlib/bootstrap" f
-    for f in form-cli.dependencies form-cli.stamp form-cli.source.sha256 form-cli-native.c form-cli.native.attestation; do
+    for f in form-cli.dependencies form-cli.stamp form-cli.source.sha256 form-cli.native.attestation; do
         [[ -s "$b/$f" && ! -L "$b/$f" ]] || return 1
     done
     form_cli_load_sources || return 1
     [[ "$(cat "$b/form-cli.source.sha256")" == "$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")" \
         && "$(cat "$b/form-cli.stamp")" == "$(form_cli_hash16 "${FORM_CLI_SRCS[@]}")" ]]
 }
+# private_body_build OUT — the copy build for a checkout with no current generation.
+# The body's tracked and new files and its runtime fkwu are copied into a private
+# directory with its own lookup boundary (.git), the build runs there (regenerating
+# that copy's bootstrap), only OUT is written, and the private body is removed.
+private_body_build() {
+    local out="$1" body rc=0 f
+    local -a files
+    [[ "$out" == /* ]] || out="$FORM/$out"
+    body="$(mktemp -d)"
+    # zsh runs a function's EXIT trap when the function returns; the path is fixed now
+    trap "rm -rf -- '$body'" EXIT
+    for f in ${(0)"$(cd "$BODY" && git ls-files -z --cached --others --exclude-standard)"}; do
+        [[ -n "$f" ]] && [[ -e "$BODY/$f" || -L "$BODY/$f" ]] && files+=("$f")
+    done
+    (cd "$BODY" && tar -cf - -- "${files[@]}") | (cd "$body" && tar -xf -)
+    cp "$BODY/fkwu" "$body/fkwu"
+    printf '%s\n' 'private body lookup boundary' > "$body/.git"
+    (cd "$body/form" && FORM_CLI_PRIVATE_BODY=1 ./build-form-cli.sh "$out") || rc=$?
+    return $rc
+}
 if [[ -z "${FORM_CLI_NATIVE_BOOTSTRAP_DIR:-}" && -z "${FORM_CLI_REGENERATED:-}" ]] && ! bootstrap_current; then
+    if [[ $# -gt 0 && -z "${FORM_CLI_PRIVATE_BODY:-}" ]]; then
+        printf '%s\n' 'build: no current native bootstrap in this checkout; building the copy in a private body, leaving this checkout'"'"'s bundle untouched' >&2
+        private_body_build "$1"
+        exit $?
+    fi
     printf '%s\n' 'build: no current native bootstrap in this checkout; regenerating it from source' >&2
     "$FORM/scripts/regen_form_cli_bootstrap.sh"
     FORM_CLI_REGENERATED=1 exec "$FORM/build-form-cli.sh" "$@"
