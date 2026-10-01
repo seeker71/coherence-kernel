@@ -1,8 +1,10 @@
-// Chat, prompt/completion and plain-text JSONL become teacher-forced token rows.
+// Chat, prompt/completion, segment and plain-text JSONL become teacher-forced token rows.
 // Prompt masking supervises the final assistant response, including its end marker.
+// A segment row holds the response as ordered spans, each with its own supervise
+// mark: a span Form injected into the stream (an observation it answered) is read
+// as context and never taught as a prediction.
 // Rows retain their line number; malformed data never vanishes from the denominator.
 import form-stdlib/native-llama-tokenizer.bml;
-import form-stdlib/native-llama-backward.bml;
 section [form.bml] {
  class NativeLoraDataset {
   def nld-string(o,k) {
@@ -26,6 +28,7 @@ section [form.bml] {
   }
   def nld-row(t,row,masked,line) {
    json-object-has?(row,"tools") && (!((Comparable) node_category(json-object-get(row,"tools")) == JSON-NULL())) ? form_error("native training tools require a matching tool template")
+   : json-object-has?(row,"segments") ? nld-segment-row(t,row,masked,line)
    : json-object-has?(row,"messages") ? nld-chat-row(t,json-array-elements(json-object-get(row,"messages")),masked,line)
    : json-object-has?(row,"prompt") ? nld-chat-row(t,[nld-message("user",nld-string(row,"prompt")),nld-message("assistant",nld-string(row,"completion"))],masked,line)
    : json-object-has?(row,"text") ? nld-sample(append([nlt-special(t,"<|begin_of_text|>")],append(nlt-encode(t,nld-string(row,"text")),[nlt-special(t,"<|eot_id|>")])),0,line)
@@ -36,6 +39,33 @@ section [form.bml] {
   def nld-sample(tokens,offset,line) {
    let n = len(tokens) - 1; let mask = nld-mask(n,offset,0);
    (n <= 0) || (sum(mask) <= 0) ? form_error("native training has no supervised targets at line " + line.str()) : [take(n,tokens),tokens[1:],mask,sum(mask),line];
+  }
+  // Segment rows: {"system"?, "prompt", "segments":[{"text", "supervise":0|1, ...}]}.
+  // The prompt frames the turn exactly as a chat row does; each span is encoded on
+  // its own, the way Form appends an injected span to the stream, so a span's
+  // tokens never merge across its boundary and its mark covers exactly them.
+  // marks[i] says whether token i is a target; the first token is context only.
+  def nld-repeat(n,x) = n <= 0 ? [] : cons(x,nld-repeat(n - 1,x));
+  def nld-segment-mark(s) = json-object-has?(s,"supervise") ? ((Comparable) node_value(json-object-get(s,"supervise")) == 1 ? 1.0 : 0.0) : 1.0;
+  def nld-segment-span(t,s) {
+   let ids = nlt-encode(t,nld-string(s,"text"));
+   [ids,nld-repeat(len(ids),nld-segment-mark(s))];
+  }
+  def nld-spans-ids(spans) = nil?(spans) ? [] : append(spans[0][0],nld-spans-ids(spans[1:]));
+  def nld-spans-marks(spans) = nil?(spans) ? [] : append(spans[0][1],nld-spans-marks(spans[1:]));
+  def nld-segment-prefix(t,row) = append(nld-system(t,json-object-has?(row,"system") ? nld-string(row,"system") : ""),append(nlt-message(t,"user",nld-string(row,"prompt")),nlt-header(t,"assistant")));
+  def nld-segment-row(t,row,masked,line) {
+   let segments = json-array-elements(json-object-get(row,"segments"));
+   nil?(segments) ? form_error("native training segment row is empty at line " + line.str()) : nld-segment-ready(t,nld-segment-prefix(t,row),segments |> map(s => nld-segment-span(t,s)),masked,line);
+  }
+  def nld-segment-ready(t,prefix,spans,masked,line) {
+   let tokens = append(prefix,append(nld-spans-ids(spans),[nlt-special(t,"<|eot_id|>")]));
+   let marks = append(nld-repeat(len(prefix),masked ? 0.0 : 1.0),append(nld-spans-marks(spans),[1.0]));
+   nld-sample-marked(tokens,marks,line);
+  }
+  def nld-sample-marked(tokens,marks,line) {
+   let n = len(tokens) - 1; let mask = marks[1:];
+   (n <= 0) || (!((Comparable) len(marks) == len(tokens))) || (sum(mask) <= 0) ? form_error("native training has no supervised targets at line " + line.str()) : [take(n,tokens),tokens[1:],mask,sum(mask),line];
   }
   def nld-lines(text) = nld-nonempty(split-on(text,"\n"),1);
   def nld-nonempty(lines,i) = nil?(lines) ? [] : (Comparable) len(trim(lines[0])) == 0 ? nld-nonempty(lines[1:],i + 1) : cons([lines[0],i],nld-nonempty(lines[1:],i + 1));

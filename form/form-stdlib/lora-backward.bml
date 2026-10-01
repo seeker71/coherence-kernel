@@ -159,3 +159,89 @@ section [form.bml] {
     }
     0;
 }
+//////////////////////////////////////////////////////////////////////
+// THE OPENING FIT. A rank-one head adapter h' = h + B (A·h) can learn one
+// decision: open a Form control here. The sites are hidden states h_i —
+// the output-normalized activation the head reads — with labels y_i: 1
+// where the voice opened a control, 0 where it chose otherwise.
+//
+//   A detects: the ridge least-squares direction with A·h_i ≈ y_i, solved
+//   in the sites' own span (the dual form, n x n, never width x width):
+//       K = H H^T + lambda I,   K c = y,   A = sum_i c_i h_i
+//   B emits: w * gain / |w|^2, where w is the head's row for the opening
+//   token, so w·B = gain.
+//
+// The opening logit then moves by gain * (A·h): the gain where a control
+// opens, about nothing where none does. Every other logit j moves by
+// gain * (A·h) * (w_j·w) / |w|^2 — the tokens that share the opening's
+// direction move with it, which is why the effect is read back, never
+// assumed. K is symmetric positive definite, so elimination needs no pivot.
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraOpeningFit {
+        def lbw-of-gram-row(hs, h) = map(g => lbw-dot-go(g, h, 0.0), hs);
+        def lbw-of-gram(hs) = map(h => lbw-of-gram-row(hs, h), hs);
+        def lbw-of-diag-go(k, i, acc) = if nil?(k) then acc else lbw-of-diag-go(k[1:], (i + 1), (acc + k[0][i]));
+        def lbw-of-ridge-go(k, lambda, i, acc) = if nil?(k) then reverse(acc) else lbw-of-ridge-go(k[1:], lambda, (i + 1), cons(lbw-bump(k[0], i, lambda), acc));
+        def lbw-of-ridge(k, ridge) = lbw-of-ridge-go(k, (ridge * (lbw-of-diag-go(k, 0, 0.0) / (len(k) + 0.0))), 0, []);
+        def lbw-of-aug(k, y) = if nil?(k) then [] else cons(append(k[0], [y[0]]), lbw-of-aug(k[1:], y[1:]));
+        def lbw-of-reduce(r, p) = lbw-axpy(r, p, (0.0 - (r[0] / p[0])))[1:];
+        def lbw-of-eliminate(rows) = if nil?(rows) then [] else cons(rows[0], lbw-of-eliminate(map(r => lbw-of-reduce(r, rows[0]), rows[1:])));
+        def lbw-of-back-row(r, rest) = cons(((r[(len(r) - 1)] - lbw-dot-go(take(len(rest), r[1:]), rest, 0.0)) / r[0]), rest);
+        def lbw-of-back(tri) = if nil?(tri) then [] else lbw-of-back-row(tri[0], lbw-of-back(tri[1:]));
+        def lbw-of-solve(k, y) = lbw-of-back(lbw-of-eliminate(lbw-of-aug(k, y)));
+        def lbw-of-combine(hs, c, acc) = if nil?(hs) then acc else lbw-of-combine(hs[1:], c[1:], lbw-axpy-go(acc, hs[0], c[0], []));
+        // A: the detector, ridge relative to the mean squared norm of the sites
+        def lbw-of-detector(hs, ys, ridge) = if nil?(hs) then [] else lbw-of-combine(hs, lbw-of-solve(lbw-of-ridge(lbw-of-gram(hs), ridge), ys), lbw-zeros(len(hs[0]), []));
+        // B: the emitter along the opening token's head row
+        def lbw-of-emitter(w, gain) = if (lbw-dot-go(w, w, 0.0) <= 0.0) then nothing() else lbw-scale(w, (gain / lbw-dot-go(w, w, 0.0)));
+        def lbw-of-scores(a, hs) = map(h => lbw-dot-go(a, h, 0.0), hs);
+        // The gain: the least lift that puts the opening above the base winner by `margin`
+        // at every opening site, read from that site's base gap (winner minus opening logit)
+        // and its detector score s. A site whose score is not positive cannot be lifted by
+        // any gain and is left to the reading, never forced.
+        def lbw-of-gain(gaps, scores, ys, margin, best) = if nil?(gaps) then best else lbw-of-gain(gaps[1:], scores[1:], ys[1:], margin, if ((ys[0] > 0.5) && (scores[0] > 0.0)) then (if (((gaps[0] + margin) / scores[0]) > best) then ((gaps[0] + margin) / scores[0]) else best) else best);
+        // [A, B, scores, gain] for sites hs, labels ys, base gaps, the opening row w
+        def lbw-of-fit(hs, ys, gaps, w, ridge, margin) {
+            let a = lbw-of-detector(hs, ys, ridge);
+            let scores = lbw-of-scores(a, hs);
+            let gain = lbw-of-gain(gaps, scores, ys, margin, 0.0);
+            [a, lbw-of-emitter(w, gain), scores, gain];
+        }
+        // the adapted activation the head reads: h + B (alpha A·h)
+        def lbw-of-adapt(h, a, b, alpha) = lbw-axpy-go(h, b, (alpha * lbw-dot-go(a, h, 0.0)), []);
+        def lbw-of-argmax-go(xs, i, best, value) = if nil?(xs) then best else if (xs[0] > value) then lbw-of-argmax-go(xs[1:], (i + 1), i, xs[0]) else lbw-of-argmax-go(xs[1:], (i + 1), best, value);
+        def lbw-of-argmax(xs) = if nil?(xs) then (0 - 1) else lbw-of-argmax-go(xs[1:], 1, 0, xs[0]);
+        // the winner's gap over the opening: how far the opening logit stands below the top
+        def lbw-of-gap(z, o) = (lbw-max(z) - z[o]);
+        // ---- the selective emitter ----
+        // Along w alone, B lifts every token whose head row leans on w: a rival j moves by
+        // (w_j·w)/|w|^2 of the opening's lift, and a rival whose row is longer than w's along
+        // it outruns the opening. The head's view of B (W·B, one matvec) names the rivals;
+        // taking their directions out of w leaves w·B = gain and c·B = 0 for every rival c.
+        // Modified Gram-Schmidt; a row already in the span drops out.
+        def lbw-of-residual(v, basis) = foldl((r, q) => lbw-axpy-go(r, q, (0.0 - lbw-dot-go(r, q, 0.0)), []), v, basis);
+        def lbw-of-basis-add(r, scale, acc) = if (lbw-dot-go(r, r, 0.0) <= (0.000000000001 * scale)) then acc else cons(lbw-scale(r, (1.0 / math_sqrt(lbw-dot-go(r, r, 0.0)))), acc);
+        def lbw-of-basis(rows, acc) = if nil?(rows) then acc else lbw-of-basis(rows[1:], lbw-of-basis-add(lbw-of-residual(rows[0], acc), lbw-dot-go(rows[0], rows[0], 0.0), acc));
+        def lbw-of-selective(w, rivals, gain) {
+            let r = lbw-of-residual(w, lbw-of-basis(rivals, []));
+            let wr = lbw-dot-go(w, r, 0.0);
+            if (wr <= 0.0) then nothing() else lbw-scale(r, (gain / wr));
+        }
+        // the k tokens other than o that the view lifts most, each [id, lift], lifts above floor only.
+        // A rival matters once its lift passes the margin: the base winner is beaten by exactly
+        // the margin, so any lift beyond it at a winner gives the opening back.
+        def lbw-of-insert-go(top, v, j) = if nil?(top) then [[j, v]] else if (v > top[0][1]) then cons([j, v], top) else cons(top[0], lbw-of-insert-go(top[1:], v, j));
+        def lbw-of-keeps?(top, v, k) = if (len(top) < k) then 1 else if (v > top[(len(top) - 1)][1]) then 1 else 0;
+        def lbw-of-rivals-go(xs, i, o, k, floor, top) = if nil?(xs) then top else lbw-of-rivals-go(xs[1:], (i + 1), o, k, floor, if (((Comparable) i == o) || ((xs[0] <= floor) || (!lbw-of-keeps?(top, xs[0], k)))) then top else take(k, lbw-of-insert-go(top, xs[0], i)));
+        def lbw-of-rivals(view, o, k, floor) = lbw-of-rivals-go(view, 0, o, k, floor, []);
+        // Rounds of: name the rivals B lifts (rivals-of(B) -> [[id, lift]]), fetch their rows
+        // (row-of(id)), take every rival direction so far out of w. The head may be Form's own
+        // list (a band) or the device's (one matvec and k argmax folds per round); the
+        // arithmetic is the same. Answers [B, [[id, row], ...]]; stops early when no new rival.
+        def lbw-of-refine(w, gain, b, rows, rounds, rivals-of, row-of) = if ((rounds <= 0) || nothing?(b)) then [b, rows] else lbw-of-refine-with(w, gain, b, rows, rounds, rivals-of, row-of, filter(r => !any?(q => (Comparable) q[0] == r[0], rows), rivals-of(b)));
+        def lbw-of-refine-with(w, gain, b, rows, rounds, rivals-of, row-of, fresh) = if nil?(fresh) then [b, rows] else lbw-of-refine-next(w, gain, rounds, rivals-of, row-of, append(rows, map(r => [r[0], row-of(r[0])], fresh)));
+        def lbw-of-refine-next(w, gain, rounds, rivals-of, row-of, rows) = lbw-of-refine(w, gain, lbw-of-selective(w, map(r => r[1], rows), gain), rows, (rounds - 1), rivals-of, row-of);
+    }
+    0;
+}
