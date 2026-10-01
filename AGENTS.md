@@ -350,7 +350,7 @@ where the lane carries you) **with the optimal cached native speed compiler** (f
 A unit lowers by what it carries: any file with a `section [` block on a line of its own travels
 through that lane whatever its extension, so a lowered twin committed beside its source would be a
 second truth, and none is. Existing Form organs stay welcome; bands witness. The mirror is `observe/authoring-altitude-run.fk` (BML picture:
-`form/form-stdlib/bml/form-cli-author-altitude.bml`).
+`form/form-stdlib/bml/abstraction-flow.bml`).
 
 ```sh
 ./fkwu form/form-stdlib/tests/form-cli-author-high-band.fk   # -> 4095
@@ -398,6 +398,14 @@ When a movement touches code, the native guide reads where it stands:
 ```sh
 form-run ./fkwu observe/native-authoring-guide-run.fk
 ```
+
+This also refreshes authored function/line counts and joins retained execution
+windows to current source fingerprints. Use
+`observe/abstraction-flow-run.bml` for an improvement round: stdin names the
+actual source to compile and execute, then optionally its input file. The door
+retains separate compilation and execution counters, elapsed time and discovery
+frames, and refreshes the guide afterward. Follow measured cost and use; missing
+or stale attribution stays unknown. [Scope and reading](docs/abstraction-flow.md).
 
 It reads current source, names implementations still outside Form and their
 callers, and links available Form references and witnesses. `form-cli` exposes the same
