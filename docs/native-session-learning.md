@@ -296,13 +296,14 @@ The existing code and repair checks remain the decision at each such request.
 `form/form-stdlib/bml/qwen-form-learning.bml` captures teacher-forced model IDs and normalized
 hidden states while the native cursor executes a supplied sequence of Form controls.
 Recipe birth and execution share their original owner and observation context.
-Only a completed, verified sequence supplies targets. Runtime observations enter
+Only a completed sequence with observed KV injection supplies targets. Runtime observations enter
 the same KV stream but stay outside gradients. `form/form-stdlib/bml/qwen-head-learning.bml`
 learns both vectors of the rank-one residual `h + (A·h) B` through the frozen
 Qwen output projection. Native RAM Metal computes stable cross-entropy and
 the transposed projection gradient for Q8_0 or float32 weights. Local `choice`
 tries smaller steps when loss does not descend. Owned buffers and pipelines
-retain partial admission and release outcomes.
+retain partial admission and release outcomes. Observation-token meters read
+the session's actual numeric counters; generated model IDs remain a separate list.
 
 `form/form-stdlib/qwen-lora-head.fk` writes measured float32 safetensors A and B
 at Qwen width 5120 and admits them through independent buffers; the GGUF
@@ -312,7 +313,7 @@ seed or artificial target. The automatic session worker still selects Llama 3B.
 `form-run ./fkwu observe/qwen-form-learning-run.bml` accepts one JSON request:
 
 ```json
-{"model":"qwen38-q8","adapter":".hearth/candidate.safetensors","examples":[{"prompt":"Keep 7 in a native integer cell.","controls":["<|form:node|>{\"op\":\"create\",\"value\":7}<|/form:node|>"]}],"heldout":[{"prompt":"Create a native integer cell containing forty-three and acknowledge the observation."}],"rounds":3,"rate":0.25,"attempts":10,"tokens":96,"reserve":1024}
+{"model":"qwen38-q8","adapter":".hearth/candidate.safetensors","examples":[{"prompt":"Keep 7 in a native value node.","controls":["<|form:node-make|>value;7<|/form:node-make|>"]}],"heldout":[{"prompt":"Create a native value node containing forty-three and acknowledge the observation."}],"rounds":3,"rate":0.25,"attempts":10,"tokens":96,"reserve":1024}
 ```
 
 The door admits one model, renews independent conversation states for examples

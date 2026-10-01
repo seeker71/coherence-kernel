@@ -28,15 +28,16 @@ Every lane below speaks through this door.
 
 **Executable thoughts and compatible learning.** The source-backed CLI's
 reasoning stream retrieves current source, creates/reads/selects native nodes,
-and maps pure numeric BML recipes through RAM Metal. Native observations return
+evaluates pure BML, runs Form functions and maps numeric f32 recipes through
+RAM Metal. One grammar and ordered choice carry both execution paths. Native observations return
 to the same decoding context; the control hook remains available in the final
 stage. The [current reasoning surface](docs/local-reasoning-homecoming-lanes.md)
 names those operations and their ownership. The native
 [Qwen learning door](docs/native-session-learning.md#learning-for-the-qwen-answering-model)
 learns from verified controls and compares independent base/adapted answers
 with one model admission. Candidates are explicitly selected with
-`generate --adapter PATH`. Both models completed the observed held-out node
-creation; lower training loss does not yet establish improved answer quality.
+`generate --adapter PATH`. Base and adapted Qwen completed the observed held-out
+recipe execution; lower training loss does not yet establish improved answer quality.
 
 **The lanes that run.**
 

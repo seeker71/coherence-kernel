@@ -220,19 +220,21 @@ the index from the listing. Ordinary generation allows 2,048 generated tokens;
 with a separately reserved answer stage. It retains both stages privately and
 reports their tokens, completion and release; read the final answer to assess
 its quality. This mode answers from supplied context and owns a session per
-call. Reasoning generation can create/read/select native nodes, birth pure
-numeric BML or signed-i32 affine recipes, choose among addresses and execute
-RAM-JIT Metal through the scannerless Form cursor in
+call. One Form control grammar carries pure BML evaluation, source lookup,
+native node creation/read/selection and recipe birth/execution. Pure BML
+functions run in Form; numeric f32 and signed-i32 affine recipes run in RAM-JIT
+Metal. Ordered choice can mix their addresses through the scannerless cursor in
 that same KV stream. The reserved final stage receives the actual execution
 results; private evidence keeps model output and Form observations separate.
 The same reasoning cursor accepts explicit concept requests through
 `nodeid-knowledge-query` and injects attributed current source observations.
-Native node controls resolve actual immutable content and return its coordinates,
-category and children. Automatic source lookup is not bound to this mode.
+Native node creation returns its actual coordinate; reads return kind, value and
+children, including content created by another owner. Automatic source lookup is not bound to this mode.
 `generate --adapter PATH` explicitly selects a compatible learned Qwen head.
 `observe/qwen-form-learning-run.bml` captures verified controls, learns both
 rank-one vectors locally and retains independent decoded A/B evidence with one
-model admission. Runtime observations never become gradient targets. Read the
+model admission. Successful observation injection is part of verification;
+runtime observations never become gradient targets. Read the
 held-out answers: lower training loss alone does not establish a quality gain.
 Both options may be combined in either order.
 Use `generate --tokens 2048 --reasoning 512 --words 350:450 --prompt-file PATH`
