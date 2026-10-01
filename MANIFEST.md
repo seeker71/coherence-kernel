@@ -38,7 +38,7 @@ sits. Where the body is going lives in [`NORTH_STAR.md`](NORTH_STAR.md); what st
 This repo is **public-able by construction**: there is no private part to excise. That serves the "commons no one
 owns" north star directly. The person's places are read, never spelled: `hearth-home-root` (the main worktree,
 from this checkout's own `.git`) and `hearth-person-home` (`HEARTH_PERSON_HOME` in the untracked `fkwu.conf`,
-nothing when unset) in `form/form-stdlib/hearth.bml`. Organs that still spell the person's home directory are the
+nothing when unset, so a door that needs it says so or stops with that reason) in `form/form-stdlib/hearth.bml`. Organs that still spell the person's home directory are the
 open part of this: `git grep -l` for it over `*.bml` and `*.fk`, outside `receipts/` and the distillation corpus, read
 12 on 2026-10-01 (the model registry, a tokenizer, the ask-lane router, voice, ear and glass organs, three bands
 and `learn/train-loop-local-paths.fk`), and they move onto those rows.

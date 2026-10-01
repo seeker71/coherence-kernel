@@ -69,8 +69,9 @@ lapse. The release ledger's open rows are the body's named work, each with its w
 A unit lowers by what it carries: any file with a `section [` block — `form.bml`, `form.lift`,
 `form.action`, `form.route`, the `*.bmf` grammar dialects — travels through `bml-floor-compile`
 whatever its extension, as a prelude or as the main file, and fkwu keeps the `.lowfk`/`.fkb` cache
-beside it. Of 529 tracked `.bml` files, 463 carry a `section [form.bml]` block and three carry
-`section [form.lift]` (`git ls-files`, `command grep -a -l`; 2026-10-01). `true` and `false` are literals in the
+beside it. Of 530 tracked `.bml` files, 464 carry a `section [form.bml]` block and three carry
+`section [form.lift]` (`git ls-files '*.bml' | xargs command grep -a -l '^section \[form.bml\]' | wc -l`,
+read on the tree that carries this line, 2026-10-01; the counts grow with each new unit). `true` and `false` are literals in the
 dialect, and a nested `defn` is a registered function (the two nested-defn bands below).
 
 The cursor (`grammars/form-bml.fk`, lowered by `form-bml-lower.fk`) is the compiler's one reader of a
@@ -79,9 +80,10 @@ refusals all come through it. It reads a section whole, with direct backtracking
 the compiler's own constructors, so a def lowers to the very node its flat Form spelling builds:
 
 ```text
-./fkwu observe/bml-cursor-coverage-run.bml -> files=1372 sections=1017 read=1017 stops=0 refused=0
-                                              (1017 = every `^section [form.bml|route|action]` line in tracked
-                                              `.bml` and `.fk` files; 2026-10-01)
+./fkwu observe/bml-cursor-coverage-run.bml -> files=1373 sections=1018 read=1018 stops=0 refused=0
+                                              (read = sections: every `^section [form.bml|route|action]` line in
+                                              tracked `.bml` and `.fk` files; the counts grow with each new
+                                              unit; read on the tree that carries this line, 2026-10-01)
                                               a section it refuses is named by line, word and wanted rule
 form-bml-cursor-full-band 105
 ```
@@ -292,8 +294,13 @@ blueprint-authority-band 65535
 What answered red, died, or was not witnessed today, so no one leans on it:
 
 - The queue's two open gaps read red until the local lane writes their definitions:
-  `closure-lines-band` 28 rc 1 and `sort-band` 0 rc 1, each pinned `; Verdict 31` (2026-10-01; their
-  compiles name `cl-unit-at` and `sort-ints` as unresolved).
+  `closure-lines-band` 28 rc 1 and `sort-band` 0 rc 1, each pinned `; Verdict 31` (2026-10-01;
+  `./fkwu --check` names the definitions the lane is to write: `cl-unit-at`; `sort-ints`, `sort-by`,
+  `sort-strs`).
+- `form-source-lift` over a mixed module whose first plain form carries a `; preludes:` header writes the
+  lifted `import` inside the first section, and its own verification compile stops: `the cursor does not
+  read this form.bml section: line 3: import (wanted: topstmt)` (2026-10-01). The five grammar packs it
+  lifted carry their imports above the section by hand; `form-source-lift-band` holds no such case yet.
 - `form-cli-allowance-band`, `form-cli-live-band` and `native-tensor-lifecycle-band` compile
   (`./fkwu --check`, rc 0, 2026-10-01): their `section [form.lift]` preludes now lower. Each reaches
   the Metal door, so their verdicts (pinned 2047, 255 and 1023) wait on a GPU the voice is not holding.

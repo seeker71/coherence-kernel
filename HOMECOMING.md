@@ -63,7 +63,8 @@ Every lane below speaks through this door.
   native turns while a gap is open and its window has time, each landed through
   the movement door.
 - **Lessons** — [`observe/session-pairs-run.bml`](observe/session-pairs-run.bml)
-  turns each rented turn into a chat row the native trainer reads;
+  turns each rented turn into a chat row the native trainer reads (the
+  transcripts are found under `HEARTH_PERSON_HOME` in `fkwu.conf`);
   [`observe/lora-lift-run.bml`](observe/lora-lift-run.bml) trains a child adapter
   from them and records its held-out loss beside the parent's in
   [`receipts/lora-promotion-ledger.jsonl`](receipts/lora-promotion-ledger.jsonl).
