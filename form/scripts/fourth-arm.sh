@@ -36,29 +36,16 @@ build_fourth() {
 # output would be compared against it — a false divergence. Anchoring to the
 # tests/ path keeps the stem the contract for the real band only.
 fourth_band_stem() {
-    local band="$1" stem hit home="tests"
-    if [[ "$band" == form-stdlib/seedbank/tests/* || "$band" == */form-stdlib/seedbank/tests/* ]]; then
-        home="seedbank"
-    elif [[ "$band" != form-stdlib/tests/* && "$band" != */form-stdlib/tests/* ]]; then
+    local band="$1" stem hit
+    if [[ "$band" != form-stdlib/tests/* && "$band" != */form-stdlib/tests/* ]]; then
         return 0
     fi
     stem="$(basename "$band")"
     stem="${stem%.fk}"
     stem="${stem%.bml}"
     [[ -f "$FOURTH_MANIFEST" ]] || return 0
-    # A seedbank test (form-stdlib/seedbank/tests/<stem>.fk) is a band home too, under its
-    # exact name and only when no form-stdlib/tests band claims the stem: tests/ resolves
-    # first, so one stem names one file from either side.
-    if [[ "$home" == seedbank ]]; then
-        if [[ -f "form-stdlib/tests/${stem}-band.fk" || -f "form-stdlib/tests/${stem}.fk" ]]; then
-            return 0
-        fi
-        awk -v b="$stem" '$1==b{print $1; exit}' "$FOURTH_MANIFEST"
-        return 0
-    fi
-    # Exact name FIRST, stripped second. Rows whose registered name KEEPS the
-    # -band suffix (form-cli-band, form-cli-repl-control-band) are reached by
-    # their exact file name; every other row is reached by the name without it.
+    # Exact name first, then the name without -band: a row may name the file
+    # whole (tests/<stem>.fk) or the band it proves (tests/<stem>-band.fk).
     hit="$(awk -v b="$stem" '$1==b{print $1; exit}' "$FOURTH_MANIFEST")"
     if [[ -n "$hit" ]]; then printf '%s\n' "$hit"; return 0; fi
     stem="${stem%-band}"
