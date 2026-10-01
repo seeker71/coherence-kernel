@@ -71,8 +71,6 @@ section [form.bml] {
    let fresh = oh-reading(oh-str(reading,"organ"),oh-str(reading,"flow"),oh-str(reading,"aspect"),json-node-int(1),json-node-int(len(rows) > 0),json-node-int(len(rows) > 0),nil?(rows) ? json-array-elements(oh-get(reading,"needs")) : [],oh-values(json-array-elements(oh-get(reading,"offers"))),evidence);
    oh-set(fresh,"care_of",json-node-string(oh-str(reading,"id")));
   }
-  def nse-need(row) = nse-find-need(json-array-elements(oh-get(row,"needs")));
-  def nse-find-need(needs) = nil?(needs) ? json-node-null() : oh-has(nse-resources(),oh-str(needs[0],"resource")) ? needs[0] : nse-find-need(needs[1:]);
   def nse-reader(home) = ohs-open(nsm-at(home,"events.jsonl"),"session-learning-evidence");
   def nse-attend(home) { let reader = nse-reader(home); let result = nse-attend-reader(home,reader); ohs-close(reader); result; }
   // The serialized learner owns this reader across rounds. Each update sees
@@ -89,7 +87,7 @@ section [form.bml] {
    let readStarted = host_monotonic_ms();
    let read = ohs-update(reader,extent > 0 ? extent : 1);
    let readMs = host_monotonic_ms() - readStarted;
-   let current = jv-materialize-items(ohv-age(record_get(reader,"current"),now_unix_ms()));
+   let current = ohv-age(record_get(reader,"current"),now_unix_ms());
    let rows = nse-attend-rows(home,dir,sources,held,revision,current,[]);
    let result = nsm-atomic(nsm-at(home,"evidence-current.json"),json-node-object([nsm-s("candidate_row",dir),nsm-s("revision",revision),json-node-pair("requests",json-node-array(rows))]));
    nsm-event(home,"evidence-reader",[nsm-s("reader",record_get(reader,"identity")),nsm-s("state",record_get(reader,"state")),nsm-n("source_bytes",record_get(reader,"extent")),nsm-n("read_bytes",record_get(reader,"read_bytes")),nsm-n("offset",record_get(reader,"offset")),nsm-n("pending_bytes",len(record_get(reader,"pending"))),nsm-n("invalid_records",record_get(reader,"invalid_records")),nsm-n("current_rows",len(current)),nsm-n("read_ms",readMs),nsm-n("attend_ms",host_monotonic_ms() - started)]);
@@ -97,12 +95,18 @@ section [form.bml] {
   }
   def nse-attend-rows(home,dir,sources,held,revision,rows,done) = nil?(rows) ? done : nse-attend-row(home,dir,sources,held,revision,rows[0],rows[1:],done);
   def nse-attend-row(home,dir,sources,held,revision,row,rest,done) {
-   let need = nse-need(row);
-   let relevant = ((String) oh-str(row,"organ") == "session-learning") && (((String) oh-str(row,"flow") == dir) && (oh-pain(row) && oh-text(oh-get(need,"detail"),"row_sha256")));
-   let key = nsm-str(oh-get(need,"detail"),"row_sha256");
-   !relevant ? nse-attend-rows(home,dir,sources,held,revision,rest,done) : nse-attend-rows(home,dir,sources,held,revision,rest,nse-append-request(done,nse-request(home,dir,sources,held,revision,row,key)));
+   let relevant = ohv-str(row,"organ") == "session-learning" && ohv-str(row,"flow") == dir && ohv-pain(row);
+   let needs = relevant ? (jv-items(jv-get(row,"needs")) |> filter(need => oh-has(nse-resources(),ohv-str(need,"resource")))) : [];
+   let key = nil?(needs) ? "" : ohv-str(jv-get(needs[0],"detail"),"row_sha256");
+   if key == "" then nse-attend-rows(home,dir,sources,held,revision,rest,done) else {
+    let requestKey = nsm-hash(dir + key);
+    // Repeated signals share one current need. Select before materializing a
+    // delivery or reading its retained catalog; historical payloads stay views.
+    let seen = any?(request => nsm-str(request,"request_key") == requestKey,done);
+    let pain = seen ? json-node-null() : jv-materialize(jv-object([jv-s("id",ohv-str(row,"id")),jv-pair("evidence",jv-get(row,"evidence"))]));
+    nse-attend-rows(home,dir,sources,held,revision,rest,seen ? done : append(done,[nse-request(home,dir,sources,held,revision,pain,key)]));
+   };
   }
-  def nse-append-request(done,row) = nil?(done) ? [row] : (String) nsm-str(done[0],"request_key") == nsm-str(row,"request_key") ? done : cons(done[0],nse-append-request(done[1:],row));
   def nse-request(home,dir,sources,held,revision,pain,key) {
    let requestKey = nsm-hash((String) dir + key); let path = nsm-at(nsm-at(home,"evidence-requests"),requestKey + ".json");
    let prior = nsm-json(path);

@@ -170,6 +170,14 @@ new verified example wakes the worker, which also revisits the last candidate's
 open needs. Each serialized drain retains one native event reader across its
 rounds. The first attendance reads the existing history; subsequent attendances
 consume newly appended complete records and retain the current observations.
+Attention selects the candidate's live needs directly from retained JSON views.
+Each distinct need reads its retained delivery once per attendance; repeated
+signals share that request. Historical delivery payloads stay views, and only
+the selected observation identity and evidence enter care.
+Each source-catalog reading observes a home's shared configuration and assessment
+once, alongside each row's own record, withdrawal and assessment. Delivery still
+rechecks those references. The shared JSON codec joins escaped spans in balanced
+passes, preserving source bytes without repeatedly copying the growing prefix.
 Each read uses the file extent observed at entry, leaving later appends for the
 next attendance. Incomplete records and admission diagnostics remain with the
 reader. The `evidence-reader` event records source extent, consumed bytes,
