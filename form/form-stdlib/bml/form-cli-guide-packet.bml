@@ -1,0 +1,191 @@
+// form-cli-guide-packet.bml — the accounting of a gap's rungs, and the gate for the one light remote guide.
+//
+// The ladder writes one row per rung to receipts/native-turn-ledger.jsonl. This door reads those rows by the
+// body's own reading, with no model:
+//   fcgp-swervecount(rows)  the rungs that were distinct failed experiments: a new approach digest, local
+//                           tokens spent, and a new outcome digest that is not green
+//   fcgp-reading(rows)      swervecount, its kinds, the local guides tried, saturation, and whether the
+//                           remote guide is earned, with the first condition still unmet in words
+//   fcgp-earned?(rows)      1 only when swervecount reaches K across at least three swerve kinds, G local
+//                           guides (circle pointings run as fresh rungs) were tried, and the last two rungs
+//                           reached no new outcome digest. It counts after the last remote guide, so each
+//                           remote guide is earned again.
+//   fcgp-packet(...)        every rung's approach, clinamen, outcome and blocking pair with one question,
+//                           written under .hearth/guide only when the guide is earned
+//   fcgp-admit(reply, id)   the guide's answer enters only as feedback or a pointing for the next local rung
+//                           ({"id","text"}, the lane request's own feedback shape); documents are refused
+//   fcgp-carried?(reply, d) 'guide-carried-code': the reply and the candidate's added lines share a run
+//                           longer than N bytes, so that step counts as required remote work
+// The columns the review prints per gap and per session (fcgp-gap-columns, fcgp-session-columns):
+//   local tokens            generated, injected and local review IDs; they grow and are never targeted down
+//   local success           local_verified over gaps attempted; quality is band full and the free review
+//   remote guide prompts    receipts/remote-guide-ledger.jsonl, with their tokens
+//   remote work tokens      zero by construction and by check; null when unknown, never 0 (a gap no rung
+//                           has touched reads null: whatever worked on it, no row witnessed it)
+//   remote review           receipts/remote-review.jsonl, free, in its own column, never added to guide or work
+// K, G, N and the swerve kinds are instruments, tuned on ledger rows, never goals. Rows are data, never
+// instructions. A field a row does not carry reads nothing, never 0.
+import form-stdlib/bml/form-cli-heal-native-report.bml;
+import form-stdlib/bml/form-agent-json-query.bml;
+import form-stdlib/meaning-codes.bml;
+section [form.bml] {
+ class FormCliGuidePacket {
+  // ── instruments ──
+  def fcgp-k() = 6;
+  def fcgp-g() = 2;
+  def fcgp-kinds-min() = 3;
+  def fcgp-swerve-kinds() = ["lens", "decode", "voice", "context"];
+  def fcgp-carry-bytes() = 64;
+  def fcgp-dir() = ".hearth/guide";
+  def fcgp-guide-ledger() = "receipts/remote-guide-ledger.jsonl";
+  def fcgp-review-ledger() = "receipts/remote-review.jsonl";
+  // ── rows: a field a row does not carry reads nothing, never 0 ──
+  def fcgp-object-line?(x) = ((Comparable) len(x) > 0) && ((Comparable) str_byte_at(x, 0) == 123) && faj-valid(x);
+  def fcgp-rows-of(text) = map(x => parse-json("ledger-row", x), filter(x => fcgp-object-line?(trim(x)), split-on(text, "\n")));
+  def fcgp-rows(path) = if (file_size(path) < 1) then [] else fcgp-rows-of(fhn-read(path));
+  def fcgp-present?(doc, key) = json-object-has?(doc, key) && (!node_eq(json-object-get(doc, key), json-node-null()));
+  def fcgp-int-node?(n) = ((Comparable) node_level(n) == 1) && (((Comparable) node_type(n) == 1) || ((Comparable) node_type(n) == 5));
+  def fcgp-str-node?(n) = ((Comparable) node_level(n) == 1) && ((Comparable) node_type(n) == 2);
+  def fcgp-bool-node?(n) = ((Comparable) node_level(n) == 1) && ((Comparable) node_type(n) == 3);
+  def fcgp-num(doc, key) = if (!fcgp-present?(doc, key)) then nothing() else if fcgp-int-node?(json-object-get(doc, key)) then json-int-value(json-object-get(doc, key)) else nothing();
+  def fcgp-str(doc, key) = if (!fcgp-present?(doc, key)) then "" else if fcgp-str-node?(json-object-get(doc, key)) then json-string-value(json-object-get(doc, key)) else "";
+  def fcgp-obj(doc, key) = if fcgp-present?(doc, key) then json-object-get(doc, key) else json-node-object([]);
+  def fcgp-node(doc, key) = if json-object-has?(doc, key) then json-object-get(doc, key) else json-node-null();
+  def fcgp-truthy?(doc, key) = if (!fcgp-present?(doc, key)) then false else fcgp-truthy-node?(json-object-get(doc, key));
+  def fcgp-truthy-node?(n) = if fcgp-int-node?(n) then !((Comparable) json-int-value(n) == 0) else if fcgp-str-node?(n) then ((Comparable) len(json-string-value(n)) > 0) else if fcgp-bool-node?(n) then (json-int-value(n) == true) else false;
+  // a sum that stays nothing when any term is nothing: unknown is never zero
+  def fcgp-plus(a, b) = if (nothing?(a) || nothing?(b)) then nothing() else (a + b);
+  def fcgp-strict(xs) = foldl((acc, x) => fcgp-plus(acc, x), 0, xs);
+  def fcgp-known(rows, key) = foldl((acc, r) => acc + (fcgp-num(r, key) ?? 0), 0, rows);
+  def fcgp-maybe(key, v) = if nothing?(v) then json-node-pair(key, json-node-null()) else fhn-n(key, v);
+  def fcgp-show(v) = if nothing?(v) then "null" else v.str();
+  def fcgp-member?(xs, x) = (Comparable) fhn-member(xs, x) == 1;
+  def fcgp-seen(xs, x) = if (((Comparable) len(x) == 0) || fcgp-member?(xs, x)) then xs else cons(x, xs);
+  def fcgp-of(rows, key, value) = filter(r => (String) fcgp-str(r, key) == value, rows);
+  // ── the gate: swervecount, local guides and saturation ──
+  def fcgp-spent?(row) = ((fcgp-num(row, "local_generated_ids") ?? 0) + (fcgp-num(row, "local_injected_ids") ?? 0)) > 0;
+  def fcgp-green?(row) = (Comparable) (fcgp-num(row, "band_green") ?? 0) == 1;
+  def fcgp-remote-guide?(row) = (String) fcgp-str(row, "rung") == "remote-guide";
+  // a circle pointing run as a fresh rung: the local guide
+  def fcgp-local-guide?(row) = ((String) fcgp-str(row, "rung") == "local-guide") && fcgp-spent?(row) && (!fcgp-truthy?(fcgp-obj(row, "approach"), "resume"));
+  // a distinct failed experiment: an approach no earlier rung had, local tokens spent, and an outcome no
+  // earlier rung reached that is not green; a missing digest is unknown and never a swerve
+  def fcgp-swerve?(row, approaches, outcomes) {
+   let a = fcgp-str(row, "approach_digest");
+   let o = fcgp-str(row, "outcome_digest");
+   ((Comparable) len(a) > 0) && ((Comparable) len(o) > 0) && (!fcgp-member?(approaches, a)) && (!fcgp-member?(outcomes, o)) && fcgp-spent?(row) && (!fcgp-green?(row));
+  }
+  def fcgp-flag(row, outcomes) {
+   let o = fcgp-str(row, "outcome_digest");
+   if ((Comparable) len(o) == 0) then "unknown" else if fcgp-member?(outcomes, o) then "repeat" else "new";
+  }
+  // state: swervecount, swerve kinds, approaches seen, outcomes seen, local guides, flags of the rungs that
+  // ran (newest first). Seen digests carry across a remote guide; the counts start again after it.
+  def fcgp-step(state, row) {
+   let a = fcgp-str(row, "approach_digest");
+   let o = fcgp-str(row, "outcome_digest");
+   let guide = fcgp-remote-guide?(row);
+   let swerve = (!guide) && fcgp-swerve?(row, state[2], state[3]);
+   let kind = fcgp-str(row, "rung");
+   let kinds = if (swerve && fcgp-member?(fcgp-swerve-kinds(), kind)) then fcgp-seen(state[1], kind) else state[1];
+   let flags = if fcgp-spent?(row) then cons(fcgp-flag(row, state[3]), state[5]) else state[5];
+   let guides = if fcgp-local-guide?(row) then (state[4] + 1) else state[4];
+   if guide then [0, [], fcgp-seen(state[2], a), fcgp-seen(state[3], o), 0, []] else [if swerve then (state[0] + 1) else state[0], kinds, fcgp-seen(state[2], a), fcgp-seen(state[3], o), guides, flags];
+  }
+  def fcgp-fold(rows) = foldl((state, row) => fcgp-step(state, row), [0, [], [], [], 0, []], rows);
+  def fcgp-swervecount(rows) = fcgp-fold(rows)[0];
+  def fcgp-saturated-flags?(flags) = ((Comparable) len(flags) >= 2) && ((String) flags[0] == "repeat") && ((String) flags[1] == "repeat");
+  def fcgp-why(green, s, saturated) = if green then "the gap reads green: the local path carried it" else if (s[0] < fcgp-k()) then mc-cat(["swervecount ", s[0].str(), " of ", fcgp-k().str()]) else if (len(s[1]) < fcgp-kinds-min()) then mc-cat([len(s[1]).str(), " swerve kind(s) of ", fcgp-kinds-min().str()]) else if (s[4] < fcgp-g()) then mc-cat([s[4].str(), " local guide(s) of ", fcgp-g().str()]) else if (!saturated) then "the last two rungs did not both repeat an earlier outcome" else "earned";
+  def fcgp-reading(rows) {
+   let s = fcgp-fold(rows);
+   let saturated = fcgp-saturated-flags?(s[5]);
+   let why = fcgp-why(any?(r => fcgp-green?(r), rows), s, saturated);
+   json-node-object([fhn-n("swervecount", s[0]), fhn-n("k", fcgp-k()), json-node-pair("swerve_kinds", json-node-array(map(x => json-node-string(x), reverse(s[1])))), fhn-n("local_guides", s[4]), fhn-n("g", fcgp-g()), fhn-n("saturated", if saturated then 1 else 0), fhn-n("earned", if ((String) why == "earned") then 1 else 0), fhn-s("why", why)]);
+  }
+  def fcgp-earned?(rows) = (Comparable) (fcgp-num(fcgp-reading(rows), "earned") ?? 0) == 1;
+  // ── the packet: written only when the guide is earned ──
+  def fcgp-rung-node(row) = json-node-object([fhn-s("rung", fcgp-str(row, "rung")), json-node-pair("option", fcgp-node(row, "option")), json-node-pair("approach", fcgp-node(row, "approach")), fhn-s("approach_digest", fcgp-str(row, "approach_digest")), json-node-pair("clinamen", fcgp-node(row, "clinamen")), fhn-s("outcome_digest", fcgp-str(row, "outcome_digest")), json-node-pair("blocking_check", fcgp-node(row, "blocking_check")), fhn-s("lane_status", fcgp-str(row, "lane_status")), json-node-pair("band_after", fcgp-node(row, "band_after")), json-node-pair("finding", fcgp-node(row, "finding"))]);
+  def fcgp-refusals(rows) = foldl((acc, r) => if fcgp-present?(r, "refusals") then append(acc, json-array-elements(json-object-get(r, "refusals"))) else acc, [], rows);
+  def fcgp-packet-node(gap, rows, question) = json-node-object([fhn-s("schema", "form-guide-packet-v1"), fhn-s("gap", fcgp-str(gap, "id")), fhn-s("goal", fcgp-str(gap, "goal")), json-node-pair("checks", fcgp-node(gap, "checks")), json-node-pair("rungs", json-node-array(map(r => fcgp-rung-node(r), rows))), json-node-pair("refusals", json-node-array(fcgp-refusals(rows))), fhn-s("question", question), fhn-s("answer_as", "feedback or a pointing for the next local rung; never documents"), json-node-pair("reading", fcgp-reading(rows))]);
+  // answers [path, reading]; the path is "" when the guide is not earned, no question was given, or the
+  // packet could not be written, and the reading's why says which
+  def fcgp-refused(reading, why) = json-node-object(append(filter(p => !((String) json-pair-key(p) == "why"), json-object-pairs(reading)), [fhn-s("why", why)]));
+  def fcgp-packet-at(dir, gap, rows, question, stamp) {
+   let reading = fcgp-reading(rows);
+   if (!((Comparable) (fcgp-num(reading, "earned") ?? 0) == 1)) then ["", reading] else if ((Comparable) len(trim(question)) == 0) then ["", fcgp-refused(reading, "one question is required")] else fcgp-packet-write(dir, mc-cat([dir, "/", fcgp-str(gap, "id"), "-", stamp.str(), ".json"]), fcgp-packet-node(gap, rows, question), reading);
+  }
+  def fcgp-packet-write(dir, path, packet, reading) {
+   let made = fs_mkdir(dir);
+   let wrote = write_file_text(path, json-emit(packet));
+   if (wrote < 0) then ["", fcgp-refused(reading, "packet-write-refused")] else [path, reading];
+  }
+  def fcgp-packet(gap, rows, question) = fcgp-packet-at(fcgp-dir(), gap, rows, question, now_unix_ms());
+  // ── admission: the answer is feedback or a pointing, never documents ──
+  def fcgp-document-keys() = ["documents", "edits", "candidate", "files", "patch", "diff"];
+  def fcgp-writing-tools() = ["edit", "write", "apply_patch"];
+  def fcgp-carries-documents?(obj) = any?(k => fcgp-present?(obj, k), fcgp-document-keys()) || fcgp-member?(fcgp-writing-tools(), fcgp-str(obj, "tool"));
+  def fcgp-reply-object(t) = if fcgp-object-line?(t) then parse-json("guide-reply", t) else nothing();
+  def fcgp-answer-kind(obj) = if nothing?(obj) then "feedback" else if fcgp-present?(obj, "pointing") then "pointing" else "feedback";
+  def fcgp-answer-text(obj, t) = if nothing?(obj) then t else if fcgp-present?(obj, "pointing") then fcgp-str(obj, "pointing") else fcgp-str(obj, "feedback");
+  def fcgp-verdict(status, reason, kind, id, text) = json-node-object([fhn-s("status", status), fhn-s("reason", reason), fhn-s("kind", kind), json-node-pair("feedback", if ((String) status == "admitted") then json-node-object([fhn-s("id", id), fhn-s("text", text)]) else json-node-null())]);
+  def fcgp-admit(reply, id) {
+   let t = trim(reply);
+   let obj = fcgp-reply-object(t);
+   let text = trim(fcgp-answer-text(obj, t));
+   if ((!nothing?(obj)) && fcgp-carries-documents?(obj)) then fcgp-verdict("refused", "guide-carried-documents", "", id, "") else if ((Comparable) len(text) == 0) then fcgp-verdict("refused", "guide-answer-empty", "", id, "") else fcgp-verdict("admitted", "", fcgp-answer-kind(obj), id, text);
+  }
+  // ── guide-carried-code: a run of the reply longer than N bytes inside the candidate's added lines ──
+  def fcgp-plus-line?(line) = if ((Comparable) len(line) == 0) then false else (((Comparable) str_byte_at(line, 0) == 43) && (!((Comparable) str_find(line, "+++ ", 0) == 0)));
+  def fcgp-added(diff) = foldl((acc, line) => mc-cat([acc, substring(line, 1, len(line)), "\n"]), "", filter(line => fcgp-plus-line?(line), split-on(diff, "\n")));
+  def fcgp-window-hit?(reply, w) = ((Comparable) len(trim(w)) > 0) && (str_find(reply, w, 0) >= 0);
+  def fcgp-run-at(reply, added, n, i) = if ((i + n) > len(added)) then (0 - 1) else if fcgp-window-hit?(reply, substring(added, i, i + n)) then i else fcgp-run-at(reply, added, n, i + 1);
+  def fcgp-carried-at(reply, diff) = fcgp-run-at(reply, fcgp-added(diff), fcgp-carry-bytes() + 1, 0);
+  def fcgp-carried?(reply, diff) = fcgp-carried-at(reply, diff) >= 0;
+  // ── the guide and review ledgers ──
+  def fcgp-guide-row(gap, session, packet, admitted, carried, promptTokens, outputTokens) = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", gap), fhn-s("session", session), fhn-s("packet", packet), fhn-s("admitted", fcgp-str(admitted, "status")), fhn-s("kind", fcgp-str(admitted, "kind")), fhn-n("guide_carried_code", if carried then 1 else 0), fhn-s("remote_dependence", if carried then "required-work" else "required-guide"), fcgp-maybe("prompt_tokens", promptTokens), fcgp-maybe("output_tokens", outputTokens)]);
+  def fcgp-review-row(gap, option, session, reviewer, verdict, tokens) = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", gap), fcgp-maybe("option", option), fhn-s("session", session), fhn-s("reviewer", reviewer), fhn-s("verdict", verdict), fcgp-maybe("tokens", tokens), fhn-s("remote_dependence", "optional-review")]);
+  def fcgp-record(path, row) = fhn-append(path, json-emit(row) + "\n");
+  // ── remote dependence: the strongest the rows and ledgers witness; "" when nothing says ──
+  def fcgp-rank(d) = if ((String) d == "required-work") then 4 else if ((String) d == "required-guide") then 3 else if ((String) d == "optional-review") then 2 else if ((String) d == "none") then 1 else 0;
+  def fcgp-word(rank) = if (rank == 4) then "required-work" else if (rank == 3) then "required-guide" else if (rank == 2) then "optional-review" else if (rank == 1) then "none" else "";
+  def fcgp-dependence(rows, guides, reviews) {
+   let fromRows = foldl((acc, r) => max2(acc, fcgp-rank(fcgp-str(r, "remote_dependence"))), 0, rows);
+   let fromGuides = if any?(g => (Comparable) (fcgp-num(g, "guide_carried_code") ?? 0) == 1, guides) then 4 else if nil?(guides) then 0 else 3;
+   let fromReviews = if nil?(reviews) then 0 else 2;
+   fcgp-word(max2(fromRows, max2(fromGuides, fromReviews)));
+  }
+  // ── the columns ──
+  // the remote tokens a rung's work required: its own reading, else zero by construction when its chain
+  // holds no remote suggestion, else unknown
+  def fcgp-row-work(row) = if (!nothing?(fcgp-num(row, "required_remote_tokens"))) then fcgp-num(row, "required_remote_tokens") else if (fcgp-rank(fcgp-str(row, "remote_dependence")) == 1 || fcgp-rank(fcgp-str(row, "remote_dependence")) == 2) then 0 else nothing();
+  def fcgp-guide-tokens(g) = fcgp-plus(fcgp-num(g, "prompt_tokens"), fcgp-num(g, "output_tokens"));
+  def fcgp-work-tokens(rows, guides) = fcgp-plus(fcgp-strict(map(r => fcgp-row-work(r), rows)), fcgp-strict(map(g => fcgp-guide-tokens(g), filter(g => (Comparable) (fcgp-num(g, "guide_carried_code") ?? 0) == 1, guides))));
+  // local_verified for one gap: 1 when a row reads it, 0 when rows read it and none holds, nothing unread
+  def fcgp-verified(rows) = if any?(r => (Comparable) (fcgp-num(r, "local_verified") ?? 0) == 1, rows) then 1 else if any?(r => !nothing?(fcgp-num(r, "local_verified")), rows) then 0 else nothing();
+  def fcgp-gap-columns(rows, guides, reviews) = json-node-object([
+   fhn-n("options", len(rows)),
+   fhn-n("local_generated_ids", fcgp-known(rows, "local_generated_ids")),
+   fhn-n("local_injected_ids", fcgp-known(rows, "local_injected_ids")),
+   fhn-n("local_review_ids", fcgp-known(rows, "local_review_ids")),
+   fhn-n("band_full", if any?(r => fcgp-green?(r), rows) then 1 else 0),
+   fcgp-maybe("local_verified", fcgp-verified(rows)),
+   fhn-n("remote_guide_prompts", max2(len(guides), len(filter(r => fcgp-remote-guide?(r), rows)))),
+   fcgp-maybe("remote_guide_tokens", fcgp-strict(map(g => fcgp-guide-tokens(g), guides))),
+   fcgp-maybe("execution_required_remote_prompts", if nil?(rows) then nothing() else fcgp-strict(map(r => fcgp-num(r, "execution_required_remote_prompts"), rows))),
+   fcgp-maybe("required_remote_tokens", if nil?(rows) then nothing() else fcgp-work-tokens(rows, guides)),
+   fhn-n("remote_review_rows", len(reviews)),
+   fcgp-maybe("remote_review_tokens", fcgp-strict(map(v => fcgp-num(v, "tokens"), reviews))),
+   fhn-n("remote_review_accept", len(fcgp-of(reviews, "verdict", "accept"))),
+   fhn-n("remote_review_reject", len(fcgp-of(reviews, "verdict", "reject"))),
+   fhn-s("remote_dependence", fcgp-dependence(rows, guides, reviews))]);
+  // gaps attempted and verified across rows: [attempted, verified, unread]
+  def fcgp-gap-ids(rows) = reverse(foldl((acc, r) => fcgp-seen(acc, fcgp-str(r, "gap")), [], rows));
+  def fcgp-success(rows) = foldl((acc, id) => fcgp-success-step(acc, fcgp-verified(fcgp-of(rows, "gap", id))), [0, 0, 0], fcgp-gap-ids(rows));
+  def fcgp-success-step(acc, v) = [acc[0] + 1, acc[1] + (if ((Comparable) (v ?? 0) == 1) then 1 else 0), acc[2] + (if nothing?(v) then 1 else 0)];
+  def fcgp-session-columns(session, rent, rows, guides, reviews) {
+   let local = fcgp-obj(rent, "local");
+   let s = fcgp-success(rows);
+   json-node-object([fhn-s("session", session), fcgp-maybe("draft_generated_ids", fcgp-num(local, "generated")), fhn-n("lane_options", len(rows)), fhn-n("lane_generated_ids", fcgp-known(rows, "local_generated_ids")), fhn-n("lane_injected_ids", fcgp-known(rows, "local_injected_ids")), fhn-n("gaps_attempted", s[0]), fhn-n("gaps_local_verified", s[1]), fhn-n("gaps_unread", s[2]), fhn-n("remote_guide_prompts", len(guides)), fcgp-maybe("remote_guide_tokens", fcgp-strict(map(g => fcgp-guide-tokens(g), guides))), fcgp-maybe("required_remote_tokens", if nil?(rows) then nothing() else fcgp-work-tokens(rows, guides)), fhn-n("remote_review_rows", len(reviews)), fcgp-maybe("remote_review_tokens", fcgp-strict(map(v => fcgp-num(v, "tokens"), reviews)))]);
+  }
+ }
+}
