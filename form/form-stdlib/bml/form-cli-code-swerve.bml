@@ -1,0 +1,210 @@
+// form-cli-code-swerve.bml — the coding lane meets a repeat by changing what it does next.
+//
+// A reply decodes greedy when its observation is new. When the same content was already decoded (in
+// this attempt, or by any earlier rung of the same contract), the reply decodes seeded instead:
+// a greedy decode of content it has already seen would replay the same bytes. Content is what the model
+// is shown about the work (stage, mode, the note's counterexample, the failure evidence, the pending
+// tasks, the documents and the replan flag); the counters and reply budget that change every turn are
+// left out, since they left greedy output identical. The seed is 1 + (the first 7 hex digits of
+// sha256(content + count)) mod 2147483646, count the earlier decodes of that content, so a replay gives
+// the same seed and each further repeat a new one. The sampler is the session's own
+// (form-cli-model-sampling.bml), opened for that one reply, its presence set cleared once, and closed
+// and detached when the reply ends; the session's release still closes whatever it owns.
+//
+// At the reply boundary, fcsw-step reads the call before the policy does (the turn guard's name and
+// argument repair) and the turn after it (the stillstreak window): at 2 the observation names the
+// repeat and carries the edit ladder's nearest_span, at 3 the policy's own no-progress route asks for a
+// new plan, at 4 the attempt ends with its candidate retained. Each crossing speaks an organ-health
+// reading 'tool-progress'. Every reply's decode, tool call and check opens and closes a stage on the bus.
+//
+// The record lives in coding memory slot 25 and survives moves, renewal and checkpoints:
+// [window repairs decodes greedy seeded seeds stillstreak-max crossings seed-refusals]. A managed run also
+// appends each decode to <code-memory>/<contract hash>.swerve, so a fresh rung of the same contract knows
+// what was already decoded; an evaluation run writes no file. The form-code line carries greedy_replies,
+// seeded_replies and seeds.
+import form-stdlib/bml/form-cli-code-memory.bml;
+import form-stdlib/bml/form-cli-code-session.bml;
+import form-stdlib/bml/form-cli-code-turn-guard.bml;
+import form-stdlib/organ-health.bml;
+import form-stdlib/spool-bell-transport.fk;
+section [form.bml] {
+ class FormCliCodeSwerve {
+  field SwerveSlot = 25;
+  field SwerveKeep = 64;
+  field SwerveSeedsKept = 32;
+  field SwerveCrossingsKept = 16;
+  def fcsw-put(xs, i, v) = append(take(i, xs), cons(v, drop(i + 1, xs)));
+  def fcsw-last(n, xs) = drop(max2(0, len(xs) - n), xs);
+
+  // ── the record ──────────────────────────────────────────────────────────
+  def fcsw-empty() = [[], [], [], 0, 0, [], 0, [], 0];
+  def fcsw-slot(s) = len(fcap-memory(s)) > SwerveSlot() ? fcap-memory(s)[SwerveSlot()] : fcsw-empty();
+  // slots 23 and 24 keep their own defaults when an earlier writer never reached them
+  def fcsw-padded(s) = len(fcap-memory(s)) >= SwerveSlot() ? s : fcsw-pad(fcap-with-reasoning(s, fcap-reasoning(s)));
+  def fcsw-pad(p) = fcap-with-memory(p, append(fat-take(fcap-memory(p), 23), [fcap-source-repair-open(p), fcap-caller-feedback(p)]));
+  def fcsw-with-slot(s, slot) {
+   let p = fcsw-padded(s);
+   fcap-with-memory(p, append(fat-take(fcap-memory(p), SwerveSlot()), [slot]));
+  }
+  def fcsw-with-note(s, note) = fcap-inherit(s, fcap-state(fcap-stage(s), s[1], s[2], fcap-docs(s), s[4], s[5], s[6], s[7], note, fcap-turns(s), fcap-calls(s), s[11]));
+  def fcsw-flow(s) = fcam-managed(s) ? fcam-id(s) : "code." ++ host_pid().str();
+
+  // ── the decode ──────────────────────────────────────────────────────────
+  def fcsw-pending(s) = filter(x => value_kind(x) == "string", s[5]);
+  def fcsw-content(s) = fctg-sha(json-emit(json-node-array([json-node-string(fcap-stage(s)), json-node-string(fcap-mode(s)), json-node-string(fcap-counterexample(fcap-note(s))),
+   json-node-string(fctg-sha(fcap-evidence(s))), json-node-array(fctg-strings(fcsw-pending(s))), json-node-string(fctg-docs-digest(fcap-docs(s))), json-node-int(fcap-repeat(s) ? 1 : 0)])));
+  def fcsw-path(s) = fcam-root(s) ++ "/" ++ fcam-hash(fcam-contract(s)) ++ ".swerve";
+  def fcsw-disk(s) = split-on(read_file(fcsw-path(s)) ?? "", "\n") |> filter(line => len(line) > 0);
+  def fcsw-count(s, content) = fcam-managed(s) ? len(filter(line => fat-starts(line, content), fcsw-disk(s))) : len(filter(d => d[0] == content, fcsw-slot(s)[2]));
+  def fcsw-hex(t, i, n, acc) = i >= n ? acc : fcsw-hex(t, i + 1, n, acc * 16 + str_find("0123456789abcdef", substring(t, i, i + 1), 0));
+  def fcsw-seed(content, count) = 1 + fcsw-hex(fctg-sha(content ++ count.str()), 0, 7, 0) % 2147483646;
+  // [content count seed]: seed 0 decodes greedy
+  def fcsw-decision(s) {
+   let content = fcsw-content(s);
+   let count = fcsw-count(s, content);
+   [content, count, count > 0 ? fcsw-seed(content, count) : 0];
+  }
+  def fcsw-append(path, text) = (Comparable) sbt-append-count(path, text) == len(text) ? 1 : 0;
+  def fcsw-record(s, content, seed, refused) {
+   let slot = fcsw-slot(s);
+   let written = fcam-managed(s) ? fcsw-append(fcsw-path(s), content ++ " " ++ seed.str() ++ "\n") : 0;
+   fcsw-with-slot(s, [slot[0], slot[1], fcsw-last(SwerveKeep(), append(slot[2], [[content, seed]])), slot[3] + (seed > 0 ? 0 : 1), slot[4] + (seed > 0 ? 1 : 0),
+    seed > 0 ? fcsw-last(SwerveSeedsKept(), append(slot[5], [seed])) : slot[5], slot[6], slot[7], slot[8] + refused]);
+  }
+  def fcsw-sampler(session, seed) = fcsam-open(fcms-ctx(session)[2][19], seed);
+  // the reply's sampler closes before the session goes on; an incomplete close refuses the session
+  def fcsw-release(session) {
+   let owner = fcsam-owner(session);
+   let expected = fcsam-owned(owner);
+   let closed = fcsam-close(owner);
+   let detached = fcsam-with-owner(session, []);
+   (Comparable) closed == expected ? detached : fcms-refuse(detached, "sampling-release-incomplete");
+  }
+  // One reply: decide, admit the sampler when the content repeats, decode through the caller's decode,
+  // release, and hand the generation and the recorded state to the caller's continuation. A sampler that
+  // cannot be admitted is closed (a partial admission owns its handles) and the reply decodes greedy.
+  def fcsw-reply(session, state, checker, turns, started, stops, decode, generated) {
+   let decided = fcsw-decision(state);
+   let owner = decided[2] > 0 ? fcsw-sampler(session, decided[2]) : [];
+   let admitted = decided[2] > 0 && fcsam-live(owner);
+   let reset = admitted ? fcsam-reset(owner) : 0;
+   let sampled = admitted && (Comparable) reset == 1;
+   let refused = decided[2] > 0 && !sampled ? fcsam-close(owner) : 0;
+   let ready = sampled ? fcsam-with-owner(session, owner) : session;
+   let recorded = fcsw-record(state, decided[0], sampled ? decided[2] : 0, decided[2] > 0 && !sampled ? 1 : 0);
+   let open = fcacs-stage-open("code.decode", sampled ? "seeded" : "greedy");
+   let generation = decode(ready, recorded, started, stops, []);
+   let after = fcms-generation-session(generation);
+   let released = sampled ? fcsw-release(after) : after;
+   let closed = fcacs-stage-close(open, fcms-stopped?(after) ? "ok" : "unstopped", len(fcms-generation-ids(generation)), decided[0]);
+   generated(fcms-generation(fcms-generation-text(generation), fcms-generation-ids(generation), released), recorded, checker, turns, started);
+  }
+
+  // ── the reply boundary ──────────────────────────────────────────────────
+  def fcsw-tool-names() = append(fat-tools(), ["verify", "repair-bml", "rehearse-bml", "lift-bml"]);
+  def fcsw-step(state, raw, checker) = fcap-done(state) ? fcap-step(state, raw, checker) : fcsw-repaired(state, raw, checker, fctg-repair(raw, fcsw-tool-names()));
+  def fcsw-repaired(state, raw, checker, repair) = repair[2] != "" ? fcap-revise(state, repair[2]) : fcsw-stepped(state, repair[0], checker, repair[1]);
+  def fcsw-tool-in(text) {
+   let obj = faj-valid(text) ? parse-json("swerve-call", text) : json-node-object([]);
+   fat-wire-object?(obj) && json-object-has?(obj, "tool") && fat-wire-string?(json-object-get(obj, "tool")) ? node_value(json-object-get(obj, "tool")) : "";
+  }
+  def fcsw-word(err) = err == "" ? "ok" : str_find(err, ":", 0) > 0 ? substring(err, 0, str_find(err, ":", 0)) : err;
+  def fcsw-signature(s) = fcap-tool-history(s)[0];
+  def fcsw-stepped(state, text, checker, rows) {
+   let tool = fcsw-tool-in(text);
+   let open = tool == "" ? nothing() : fcacs-stage-open("code.tool", tool);
+   let next = fcap-step(state, text, fcsw-staged-checker(checker));
+   let observed = fcap-calls(next) > fcap-calls(state) && len(fcsw-signature(next)) == 6;
+   let entry = observed ? fctg-entry(fcsw-signature(next)[0], fcsw-signature(next)[1], fcsw-signature(next)[2], fcsw-signature(next)[3], fcsw-signature(next)[4], fcsw-signature(next)[5], fcap-docs(next)) : [];
+   let closed = fcacs-stage-close(open, observed ? fcsw-word(fcsw-signature(next)[5]) : "refused", observed ? len(fcsw-signature(next)[4]) : 0, observed ? entry[1] : 0);
+   let guarded = observed ? fcsw-guard(next, entry) : next;
+   nil?(rows) ? guarded : fcsw-noted-repairs(guarded, rows);
+  }
+  def fcsw-guard(next, entry) {
+   let slot = fcsw-slot(next);
+   let prior = fctg-stillstreak(slot[0]);
+   let window = fctg-push(slot[0], entry);
+   let streak = fctg-stillstreak(window);
+   let tracked = fcsw-with-slot(next, fcsw-put(fcsw-put(slot, 0, window), 6, max2(slot[6], streak)));
+   let action = fctg-action(prior, streak);
+   action == "" ? tracked : fcsw-crossed(tracked, streak, action);
+  }
+  def fcsw-crossed(s, streak, action) {
+   let detail = json-node-object([oh-n("stillstreak", streak), oh-s("action", action), oh-n("turn", fcap-turns(s)), oh-s("scope", "native tool calls whose call and result already stood since the last document change; 2 swerves, 3 replans, 4 ends the attempt with its candidate retained")]);
+   let reading = oh-reading("native-coding", fcsw-flow(s), "tool-progress", json-node-int(1), json-node-int(0), json-node-int(0), [oh-need("changed-approach", detail)], ["swerve", "replan", "end"], detail);
+   let said = oh-voice(reading);
+   let acted = action == "swerve" ? fcsw-swerved(s, streak) : action == "replan" ? fcap-no-progress(s) : fcap-terminal(s, "stillstreak;candidate-retained");
+   let applied = oh-voice(oh-applied(reading, action, json-node-object([oh-s("stage", fcap-stage(acted)), oh-s("reason", fcap-done(acted) ? fcap-note(acted) : "")])));
+   let slot = fcsw-slot(acted);
+   fcsw-with-slot(acted, fcsw-put(slot, 7, fcsw-last(SwerveCrossingsKept(), append(slot[7], [[fcap-turns(acted), streak, action]]))));
+  }
+  def fcsw-swerved(s, streak) = fcsw-with-note(s, fctg-swerve-note(streak, fcsw-signature(s)[0], fcsw-nearest(s)) ++ fcap-note(s));
+  // the edit ladder's nearest_span, from the note's or the retained failure's guard evidence
+  def fcsw-nearest(s) {
+   let near = fcsw-nearest-in(fcap-note(s));
+   nothing?(near) ? fcsw-nearest-in(fcap-evidence(s)) : near;
+  }
+  def fcsw-nearest-in(text) {
+   let at = str_find(text, "{", 0);
+   let raw = at < 0 ? "" : substring(text, at, len(text));
+   let obj = faj-valid(raw) ? parse-json("swerve-evidence", raw) : json-node-object([]);
+   let guard = fat-wire-object?(obj) && json-object-has?(obj, "guard_evidence") ? json-object-get(obj, "guard_evidence") : json-node-object([]);
+   fat-wire-object?(guard) && json-object-has?(guard, "nearest_span") ? json-object-get(guard, "nearest_span") : nothing();
+  }
+  def fcsw-noted-repairs(s, rows) {
+   let slot = fcsw-slot(s);
+   let kept = fcsw-with-slot(s, fcsw-put(slot, 1, fcsw-last(SwerveKeep(), append(slot[1], rows))));
+   let observation = faj-valid(fcap-note(kept)) ? parse-json("tool-observation", fcap-note(kept)) : json-node-string(fcap-note(kept));
+   fcap-done(kept) ? kept : fcsw-with-note(kept, json-emit(json-node-object([json-node-pair("native_tool_repairs", json-node-array(rows |> map(r => parse-json("tool-repair", r)))), json-node-pair("observation", observation)])));
+  }
+  // checks open and close their own stages; the caller's callbacks are called exactly as before
+  def fcsw-staged-checker(checker) = len(checker) >= 4 ? append([fcsw-check-stage(checker[0], "caller"), checker[1], fcsw-check-stage(checker[2], "source"), checker[3]], drop(4, checker))
+   : len(checker) >= 2 ? append([fcsw-check-stage(checker[0], "source"), checker[1]], drop(2, checker)) : checker;
+  def fcsw-check-stage(callback, key) = (contract, subject) => fcsw-checked(callback, contract, subject, key);
+  def fcsw-checked(callback, contract, subject, key) {
+   let open = fcacs-stage-open("code.check", key);
+   let result = callback(contract, subject);
+   let closed = fcacs-stage-close(open, fcsw-check-word(result), 1, fcsw-check-digest(result));
+   result;
+  }
+  def fcsw-check-word(result) = !fcap-check-shape?(result) ? "malformed" : (Value) result[0] == 1 ? "ok" : "refused";
+  def fcsw-check-digest(result) = fcap-check-shape?(result) ? fctg-sha(node_value(fctg-assertion-core(json-node-string(result[1])))) : 0;
+
+  // ── what the lane says ──────────────────────────────────────────────────
+  def fcsw-telemetry-pairs(s) {
+   let slot = fcsw-slot(s);
+   [json-node-pair("greedy_replies", json-node-int(slot[3])), json-node-pair("seeded_replies", json-node-int(slot[4])), json-node-pair("seeds", json-node-array(slot[5] |> map(json-node-int))),
+    json-node-pair("seed_refusals", json-node-int(slot[8])), json-node-pair("stillstreak", json-node-int(fctg-stillstreak(slot[0]))), json-node-pair("stillstreak_max", json-node-int(slot[6])),
+    json-node-pair("tool_repairs", json-node-int(len(slot[1])))];
+  }
+  // the deliverable reserve: when the replies left are no more than the completion protocol needs
+  def fcsw-reserve?(s, remaining, minimum) = !fcap-reviewing(s) && !fcap-done(s) && remaining > 0 && remaining <= minimum;
+  def fcsw-finish-now() = "Finish now: the remaining replies equal the minimum completion protocol. Return task=done for the implemented task, then the review verdict with concrete findings; a further read or verify leaves no reply for the deliverable. All caller checks still apply.";
+  def fcsw-coding-instruction(s, remaining, minimum, ordinary) = fcsw-reserve?(s, remaining, minimum) ? fcsw-finish-now() : ordinary;
+
+  // ── the physical check (local GPU, quiet machine) ───────────────────────
+  // One fixture prompt decodes one quantum of n IDs three times on fresh sessions: greedy, seeded, seeded
+  // again with the same seed. Each run answers [ids owned-during owned-after released pending-held].
+  def fcsw-physical(model, prompt, n, seed) {
+   let path = mr-path(mr-find(model));
+   [fcsw-physical-run(path, prompt, n, 0), fcsw-physical-run(path, prompt, n, seed), fcsw-physical-run(path, prompt, n, seed)];
+  }
+  def fcsw-physical-run(path, prompt, n, seed) {
+   let session = fcms-open-with-profile(path, prompt, 4096, "knowledge-query");
+   let owner = seed > 0 && fcms-live?(session) ? fcsw-sampler(session, seed) : [];
+   let admitted = seed > 0 && fcsam-live(owner);
+   let reset = admitted ? fcsam-reset(owner) : 0;
+   let sampled = admitted && (Comparable) reset == 1;
+   let refused = seed > 0 && !sampled ? fcsam-close(owner) : 0;
+   let ready = sampled ? fcsam-with-owner(session, owner) : session;
+   let generation = fcms-live?(ready) ? fcacs-quantum(ready, fcacs-stops(ready, qsx-load(fcms-path(ready))), n) : fcms-generation("", [], ready);
+   let after = fcms-generation-session(generation);
+   let owned = fcsam-owned(fcsam-owner(after));
+   let released = sampled ? fcsw-release(after) : after;
+   let ownedAfter = fcsam-owned(fcsam-owner(released));
+   let pending = fcms-pending(after) >= 0 ? 1 : 0;
+   [fcms-generation-ids(generation), owned, ownedAfter, fcms-release-ok?(released), pending];
+  }
+ }
+ 0;
+}
