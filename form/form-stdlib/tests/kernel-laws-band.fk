@@ -3,7 +3,7 @@
 ; kernel. Prelude-free: each kernel answers from its own natives alone, and each
 ; row asks through attempt, so a stop reads as a bit and never ends the band.
 ;
-; Verdict 67108863 (26 bits):
+; Verdict 2147483647 (31 bits):
 ;   1         law 1: integers wrap at 63 bits -- add and mul past 2^62
 ;   2         law 1: div of -2^62 by -1 wraps; literals past 2^62 wrap as read
 ;   4         law 2: integer div and mod by zero stop, cold
@@ -29,8 +29,9 @@
 ;   65536     law 7: a non-string stops
 ;   131072    law 8: str_byte_at outside the string answers -1
 ;   262144    law 8: str_find on a non-string haystack or needle stops
-;   524288    an index that is not an int (nothing) stops: str_find, str_byte_at,
-;             substring
+;   524288    an index that is not an int stops: str_find, str_byte_at and substring
+;             over nothing, nth over a float, a string or nothing; nth past the end
+;             answers nothing and does not stop
 ;   1048576   math_log: 0 is -Infinity, a negative NaN, Infinity itself, NaN itself,
 ;             1 is 0, a subnormal its own logarithm
 ;   2097152   math_exp: Infinity, -Infinity, 1e300, -1e300, NaN, 0, 1, past the
@@ -43,28 +44,51 @@
 ;             passes an int through exactly, hot as cold -- 2^53 + 1 and
 ;             2^62 - 904 answer themselves -- and the same leaf asked with a
 ;             float still truncates, and with NaN still stops
+;   67108864  fs_list and host_dir_list: a directory that is not there and a path
+;             that is a file answer nothing -- an answer, not a stop; an empty
+;             directory answers [] and one with entries a list
+;   134217728 law 1 WARM: integers wrap at 63 bits once the JIT has taken the defns
+;             -- a hash (mod (add (mul h P) c) M) over 40 rows past 2^62, one row,
+;             and lt over add, sub, div and mul at the edge answer, hot, what they
+;             answer cold
+;   268435456 record_has of a record answers 1 or 0; record_get and record_set of a
+;             value that is no record stop
+;   536870912 read_file_slice at a negative offset answers nothing, and does not
+;             stop; make_nodeid past the 32-bit inst or below 0 stops
+;   1073741824 law 9: value_str of a record is <record> and of a closure <closure>.
+;             The band prints both before its verdict, and validate.sh compares the
+;             four outputs whole, so print is pinned with them
 ;
 ; A warm twin proves only the operand kinds it was warmed with: fkwu's leaf
 ; admits float_to_int over an int and over a float, so each kind has its twin
-; (bits 4096 and 33554432), and integer div and mod have theirs (bit 8).
+; (bits 4096 and 33554432), integer div and mod have theirs (bit 8), and the
+; int lane's add, sub, mul, div and mod have theirs (bit 134217728).
 ;
 ; PROOF LEVEL: FOUR-WAY -- every row is the same answer on fkwu, go, rust and ts.
-; Rows the kernels do not yet share stay out of this verdict until they do:
-; read_file_slice at a negative offset (go answers ""), print of a record or a
-; closure (go writes its blueprint and field count), make_nodeid outside the
-; 64-bit layout (go and rust cast, ts keeps the number, fkwu stops), a byte list
-; holding a non-int (go writes it), fs_list of a directory that is not there
-; (fkwu answers [], the siblings nothing -- fkwu answers nothing in the landing
-; that heals the callers measuring len(fs_list(path)) on a missing path),
-; math_pow of -1 to an infinity (ts answers NaN, the others 1), cons onto a
-; non-list (ts stops; go and rust read the pair as a one-element list on every
-; reader; fkwu keeps the pair's tail word: print, value_str, len and nth end at
-; it and read [h], while value_eq, eq and tail see the word, so (cons 7 60) is
-; not value_eq to (list 7) and its tail is 60), and math_exp, math_log and
-; math_pow off their exact cases: on a 400-row grid fkwu answers go's bits on
-; every row, while among the siblings exp and log alone part go from rust on 98
-; rows and go from ts on 16, and with pow in the row on 288 to 291 -- those
-; three doors carry no bit law yet.
+; Rows the kernels do not yet share stay out of this verdict until they do. Read
+; on the four kernels on 2026-10-01:
+;   record_has of a value that is no record: fkwu, rust and ts answer 0, go stops
+;     (a nil record read) -- the row joins bit 268435456 when go asks the kind first
+;   a 1.1.1 int past int32 (make_nodeid 1 1 1 5000000000, intern_trivial_int
+;     2147483648): fkwu keeps it on the 1.1.1 lane (@1.1.1.5000000000, node_inst
+;     2147483648); go, rust and ts make an INT64 node (@1.1.5.k, inst a counter)
+;   write_file_bytes of a byte list holding a non-int: go writes it (2), rust
+;     answers nothing, fkwu and ts -1; of a string: rust nothing, the others -1
+;   round_ndigits with ndigits below 0: ts answers CPython's value (0 for 1.25,
+;     -1), the others stop
+;   str_to_float of digits, a bare dot and an exponent ("5.e3", "-7.E-1"): rust
+;     stops at the dot (5, -7), the others read 5000 and -0.7
+;   math_pow of -1 to an infinity: ts answers NaN, the others 1
+;   cons onto a non-list: ts stops; go and rust read the pair as a one-element
+;     list on every reader; fkwu keeps the pair's tail word: print, value_str, len
+;     and nth end at it and read [h], while value_eq, eq and tail see the word, so
+;     (cons 7 60) is not value_eq to (list 7) and its tail is 60
+;   math_exp, math_log and math_pow off their exact cases carry no bit law yet. On
+;     a 600-row grid (200 rows a door: exp over [-712, 705], log over (0, 174],
+;     pow of bases in [0.37, 34.8] to exponents in [-7.3, 7.2]) fkwu parts from go
+;     on 2 log rows (log 0.6697 and 0.6993, one ulp each, where fkwu answers
+;     rust's bits), rust from go on 22 exp, 16 log and 96 pow rows, and ts from go
+;     on 4 exp, 3 log and 96 pow rows
 ;
 ; WATCHED FAILING, 2026-10-01: the fkwu built from the tree before these laws
 ; landed never returns from this band -- math_exp of Infinity doubled its way
@@ -86,6 +110,10 @@
     (defn kl-v (v) (if (nothing? v) "STOP" (value_str v)))
     (defn kl-is (v want) (str_eq (kl-v v) want))
     (defn kl-stop (v) (nothing? v))
+    ; a door that may answer nothing is asked through kl-after or kl-kind, so a stop
+    ; (attempt answers nothing) and an answer of nothing read apart
+    (defn kl-after (v k) k)
+    (defn kl-kind (v) (if (nothing? v) "nothing" (value_kind v)))
     (defn kl-inf () (div 1.0 0.0))
     (defn kl-ninf () (sub 0.0 (div 1.0 0.0)))
     (defn kl-nan () (div 0.0 0.0))
@@ -103,11 +131,32 @@
     (defn kl-warmi (n acc)
         (if (eq n 0) acc
             (kl-warmi (sub n 1) (add acc (kl-fii n)))))
+    ; law 1's twin: the int lane's add, sub, mul, div and mod, warmed with ints below
+    ; 2^62 and then asked past it
+    (defn kl-hm (h c) (mod (add (mul h 1099511628211) c) 1000000007))
+    (defn kl-lta (a b) (lt (add a b) 0))
+    (defn kl-lts (a b) (lt (sub a b) 0))
+    (defn kl-ltd (a b) (lt (div a b) 0))
+    (defn kl-ltm (a b) (lt (mul a b) 0))
+    (defn kl-hrows (i n acc) (if (eq i n) acc (kl-hrows (add i 1) n (add acc (kl-hm (mul i 4000000000123) i)))))
+    (defn kl-warm1 (n acc)
+        (if (eq n 0) acc
+            (kl-warm1 (sub n 1) (add acc (add (kl-hm n 7) (add (add (kl-lta n 1) (kl-lts n 1)) (add (kl-ltd n 3) (kl-ltm n 2))))))))
 
     (defn kernel-laws-band ()
         (do
             (let warm (kl-warm 30000 0))
             (let warmi (kl-warmi 30000 0))
+            (let warm1 (kl-warm1 30000 0))
+            ; an empty directory of the band's own, under the leg's temp directory
+            (let kd (str_concat (host_temp_dir) "/kernel-laws-empty-dir"))
+            (let kd0 (attempt (host_dir_rmdir kd)))
+            (let kd1 (attempt (host_dir_mkdir kd)))
+            (let kd-list (attempt (fs_list kd)))
+            (let kd2 (attempt (host_dir_rmdir kd)))
+            (let rec (record_new 0 "a" 5))
+            (print rec)
+            (print kl-after)
             (kl-sum (list
                 (kl-bit (kl-all (list
                     (eq (add 4611686018427387903 1) -4611686018427387904)
@@ -210,7 +259,12 @@
                     (kl-stop (attempt (str_find "abc" "c" (nothing))))
                     (kl-stop (attempt (str_byte_at "abc" (nothing))))
                     (kl-stop (attempt (substring "abc" (nothing) 2)))
-                    (kl-stop (attempt (substring "abc" 0 (nothing)))))) 524288)
+                    (kl-stop (attempt (substring "abc" 0 (nothing))))
+                    (kl-stop (attempt (kl-after (nth (list 4 5 6) 1.9) 1)))
+                    (kl-stop (attempt (kl-after (nth (list 4 5 6) "1") 1)))
+                    (kl-stop (attempt (kl-after (nth (list 1) (nothing)) 1)))
+                    (kl-is (attempt (kl-after (nth (list 4 5 6) 9) "answered")) "answered")
+                    (kl-is (attempt (nth (list 4 5 6) 1)) "5"))) 524288)
                 (kl-bit (kl-all (list
                     (kl-is (attempt (math_log 0.0)) "-Infinity")
                     (kl-is (attempt (math_log (sub 0.0 1.0))) "NaN")
@@ -257,6 +311,33 @@
                     (kl-is (attempt (kl-fii 4611686018427387000)) "4611686018427387000")
                     (kl-is (attempt (kl-fii (sub 0 9007199254740993))) "-9007199254740993")
                     (kl-is (attempt (kl-fii 7.75)) "7")
-                    (kl-stop (attempt (kl-fii (kl-nan)))))) 33554432)) 0)))
+                    (kl-stop (attempt (kl-fii (kl-nan)))))) 33554432)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (kl-kind (fs_list "/nonexistent-kernel-laws-dir"))) "nothing")
+                    (kl-is (attempt (kl-kind (host_dir_list "/nonexistent-kernel-laws-dir"))) "nothing")
+                    (kl-is (attempt (kl-kind (fs_list "/etc/hosts"))) "nothing")
+                    (kl-is kd-list "[]")
+                    (kl-is (attempt (kl-kind (fs_list "/"))) "list"))) 67108864)
+                (kl-bit (kl-all (list
+                    (eq warm1 15006796426707)
+                    (eq (kl-hrows 0 40 0) -1418481993)
+                    (eq (kl-hm 4000000000123 1) 971020102)
+                    (eq (kl-lta 4611686018427387903 1) 1)
+                    (eq (kl-lts -4611686018427387904 1) 0)
+                    (eq (kl-ltd -4611686018427387904 -1) 1)
+                    (eq (kl-ltm 3037000500 3037000500) 0))) 134217728)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (record_has rec "a")) "1")
+                    (kl-is (attempt (record_has rec "b")) "0")
+                    (kl-stop (attempt (kl-after (record_get 0 "a") 1)))
+                    (kl-stop (attempt (kl-after (record_set 0 "a" 1) 1))))) 268435456)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (kl-kind (read_file_slice "/etc/hosts" -1 4))) "nothing")
+                    (kl-stop (attempt (kl-after (make_nodeid 1 2 12 4294967296) 1)))
+                    (kl-stop (attempt (kl-after (make_nodeid 1 2 12 -1) 1)))
+                    (kl-is (attempt (make_nodeid 1 2 12 7)) "@1.2.12.7"))) 536870912)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (value_str rec)) "<record>")
+                    (kl-is (attempt (value_str kl-after)) "<closure>"))) 1073741824)) 0)))
 
     (kernel-laws-band))

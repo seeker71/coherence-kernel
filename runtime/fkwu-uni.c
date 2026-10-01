@@ -11874,6 +11874,12 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
         unsigned int op = p->kind == 9 ? 0x8B000000U : (p->kind == 10 ? 0xCB000000U : (p->kind == 11 ? 0x9B007C00U : 0x9AC00C00U)); /* ADD SUB MADD(xzr) SDIV */
         if (!fk_f64_put(words, wn, op | (xb << 16) | (xa << 5) | (unsigned int)rd)) { return -1; }
+        /* law 1, hot as cold: the walker's int is a tagged word, so its sum, difference, product and quotient
+         * wrap at 63 bits; the untagged 64-bit register here keeps the wrap only after LSL #1 then ASR #1.
+         * Without the pair a hot (mod (add (mul h P) c) M) answered other rows than its cold self, and
+         * (lt (add 2^62-1 1) 0) answered 0 hot where it answers 1 cold (kernel-laws-band bit 134217728) */
+        if (!fk_f64_put(words, wn, 0xD37FF800U | ((unsigned int)rd << 5) | (unsigned int)rd)) { return -1; } /* LSL Xd, Xd, #1 */
+        if (!fk_f64_put(words, wn, 0x9341FC00U | ((unsigned int)rd << 5) | (unsigned int)rd)) { return -1; } /* ASR Xd, Xd, #1 */
         return 100 + rd;
     }
     if (p->kind == 15) {
@@ -11884,6 +11890,10 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
         if (!fk_f64_put(words, wn, 0x9AC00C00U | (xb << 16) | (xa << 5) | 9U)) { return -1; }                              /* SDIV X9, Xa, Xb */
         if (!fk_f64_put(words, wn, 0x9B008000U | (xb << 16) | (xa << 10) | (9U << 5) | (unsigned int)rd)) { return -1; } /* MSUB Xd, X9, Xb, Xa */
+        /* the remainder of two 63-bit words is one already; the pair keeps the lane's rule local -- every int op
+         * leaves a 63-bit word -- so no reader has to know which ops could have carried past 2^62 */
+        if (!fk_f64_put(words, wn, 0xD37FF800U | ((unsigned int)rd << 5) | (unsigned int)rd)) { return -1; } /* LSL Xd, Xd, #1 */
+        if (!fk_f64_put(words, wn, 0x9341FC00U | ((unsigned int)rd << 5) | (unsigned int)rd)) { return -1; } /* ASR Xd, Xd, #1 */
         return 100 + rd;
     }
     if (ra >= 100 || rb >= 100 || *ntemp >= 16) { return -1; }
@@ -13067,8 +13077,14 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 23) {
         long long x23 = fk_walk(fk_node[i][1], fp);
         fk_vp(x23);
-        long long k23 = fk_walk(fk_node[i][2], fp) >> 1;
+        long long w23 = fk_walk(fk_node[i][2], fp);
         fk_vsp = fk_vsp - 1;
+        /* an index is an int, as str_byte_at's is: a float, a string or nothing read through >> 1 was a
+         * large negative number and answered nothing, where go, rust and ts stop */
+        if ((w23 & 1) != 0) {
+            fk_stop("fkwu: nth: an index is an int -- ask value_kind first");
+        }
+        long long k23 = w23 >> 1;
         long long l23 = fk_vs[fk_vsp];
         long long p = (l23 & 1) ? l23 >> 1 : 0;
         while (p >= 1 && FK_POK(p) && k23 > 0) {
@@ -17527,8 +17543,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 67) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
         long long key = fk_stri(fk_walk(fk_node[i][2], fp));
+        /* record_has asks whether this value has this field: a value that is no record has none, so it
+         * answers 0, as Rust and TS answer; go still stops there, so kernel-laws-band names the row
+         * among those not yet shared. record_get and record_set keep their stop (bit 268435456) --
+         * they need a record to read or write */
         if (r < 1 || r > fk_rp) {
-            fk_stop("fkwu: record_has: only a record has fields -- ask record? first");
+            return 0;
         }
         long long j = 0;
         while (j < fk_rcnt[r]) {
@@ -17644,11 +17664,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_host_resolve(fkl_p);
         void *fkl_d = opendir(fkl_p);
         if (fkl_d == 0) {
-            /* a directory that is not there lists as [] here, where the siblings answer nothing. Callers
-             * still measure len(fs_list(path)) and walk it with nil? on paths that may be missing (the
-             * knowledge census's fki-dir?, model-discovery's md-find root, form-fs); the door answers
-             * nothing in the same landing that heals them, never before */
-            return 1;
+            /* a directory that is not there, or a path that is no directory, answers nothing, as Go,
+             * Rust and TS answer; an empty directory answers [] (kernel-laws-band bit 67108864). A
+             * caller that may meet a missing path reads the listing as fs_list(d) ?? []: the tail of
+             * nothing is nothing, so a nil? walk handed nothing never ends */
+            return fk_nothing;
         }
         static char fkl_nb[1048576];
         static long long fkl_no[16384];
@@ -17741,7 +17761,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         return fkl_out;
 #else
-        return 1;
+        /* a host with no directory reader lists no directory */
+        return fk_nothing;
 #endif
     }
     if (t == 133) {
