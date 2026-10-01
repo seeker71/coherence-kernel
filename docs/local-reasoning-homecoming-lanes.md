@@ -2,9 +2,11 @@
 
 `generate --reasoning N --tokens M <enquiry>` in the source-backed form-cli owns
 one local Qwen session. During its initial stage, decoded model bytes enter the
-scannerless Form cursor. A recipe-birth control creates a numeric BML or affine
-signed-i32 Form node; an execution control addresses it; an ordered choice can continue
-from an unavailable address to an available recipe. Form emits Metal in RAM,
+scannerless Form cursor. One control grammar carries pure BML evaluation, source
+lookup, native nodes and recipes. A recipe-birth control creates a pure BML
+function, numeric f32 expression or affine signed-i32 Form node. An execution
+control addresses it; ordered choice continues through unavailable or refused
+alternatives in the same context, including mixed Form and Metal recipes. Form emits Metal in RAM,
 admits one pipeline per recipe identity, and reuses that pipeline for later
 inputs. Zero and one are ordinary observed values.
 
@@ -17,24 +19,32 @@ the observed result is `[9,2,4,5]`. Scalar inputs reuse the same program.
 Unsupported or effectful expressions return absence. Nonfinite inputs and
 results supply no numeric answer.
 
-`<|form:node|>JSON<|/form:node|>` operates directly on native immutable content:
+Native node verbs operate directly on immutable field content:
 
-```json
-{"op":"create","value":42}
-{"op":"create","category":"@31.2.0.72","children":[42,"text",{"node":"@address"}]}
-{"op":"read","node":"@address"}
-{"op":"select","node":"@address","index":-1}
+```text
+<|form:node-make|>pair;3,4<|/form:node-make|>
+<|form:node-get|>@address<|/form:node-get|>
+<|form:node-select|>kids(n)[0] == 3;@first,@next<|/form:node-select|>
 ```
 
-Creation returns the actual coordinate, category and children. Reads resolve
-native content, including content created by another owner. Selection returns
-the actual child; negative indices count from the end. Missing content and
-out-of-range indices remain absence. The response releases its lookup references;
+Creation returns `node=@address;`; copy that actual coordinate in the next
+control. Reads return `value=[kind, value, [children]];`, including content created
+by another owner. Selection returns the first candidate whose pure BML predicate
+holds. BML indexing selects a child; `[-1]` means the last child and `[1:]` means
+the remaining list. Missing content and out-of-range indices remain absence.
+The response releases its lookup references;
 interned substrate content remains available. Integer and boolean coordinates
 carry their complete literal meaning. Other coordinates resolve actual stored
 payloads; they do not invent missing content or composite children.
 Native composite, string and float64 coordinates index their storage slot;
 a missing or mismatched slot returns absence without scanning the field.
+
+`<|form:eval|>17 * 23 + 4<|/form:eval|>` returns `value=395;` through Form's own
+BML cursor and evaluator. `bml;x => x * x + 1` births a pure Form function;
+`carrier=form` executes it over the supplied value. Host effects need their
+owned execution doors and are refused by this pure evaluator. All carriers use
+the same RESULT shapes and observation envelope. Precise float rendering keeps
+small nonzero constants and observed values intact at the compiler boundary.
 
 The same reasoning cursor accepts
 `<|form:nodeid-knowledge-query|>concept=exact-key<|/form:nodeid-knowledge-query|>`.
@@ -59,7 +69,9 @@ The implementation is [the microthought owner](../form/form-stdlib/bml/form-cli-
 [the generic stream hook](../form/form-stdlib/form-cli-recipe-exec-session.fk),
 and [the public reasoning controller](../form/form-stdlib/bml/form-cli-generate-reasoning.bml).
 Private generation evidence retains original IDs and text, requested controls,
-Form observations, final answer and release outcomes. The live framebuffer
+Form observations, final answer and release outcomes. Successful recipe execution
+counts include both Form and Metal; JIT admission/reuse counts identify the Metal
+work. Observation token counts are independent of model-generated tokens. The live framebuffer
 separates model codec, model forward, recipe birth, Metal admission, execution,
 observation injection and release. Observed execution establishes what ran;
 the returned answer must still be read for accuracy and usefulness.
@@ -113,7 +125,8 @@ program while observing each new effect. Live frames should explain where time,
 memory and crossings go and direct care to the actual cost.
 
 Today the reasoning stream can retrieve current source, create/read/select native
-nodes and execute pure numeric BML expressions over scalars or arrays in RAM Metal.
+nodes, evaluate pure BML, compose pure Form functions and execute numeric BML
+expressions over scalars or arrays in RAM Metal.
 Effectful general BML recipes, CPU/Metal parity, dedicated learned Form IDs,
 broader model quality and fully owned reclaimable native storage remain substantive work. Fixed pretrained
 Qwen weights still require their model-specific ID mapping. Native training
