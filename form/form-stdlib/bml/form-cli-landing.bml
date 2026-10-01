@@ -7,8 +7,9 @@
 //    "restart":"origin/main" (optional), "main":1 (optional: the landed commit also fast-forwards main)}
 // The witness runs first, its output is shown, and its exit is read: a named
 // witness that does not exit 0, or whose launch vanished, lands nothing. The
-// drift gates run next as a child fkwu; a refused gate lands nothing. Then host git adds the named
-// paths, commits with exactly subject, blank line, body, and pushes the
+// drift gates run next as a child fkwu; a refused gate lands nothing. Then host git adds each named
+// path that is present, or tracked and gone (a path that is neither is named and left unstaged, since
+// one unmatched pathspec would stage nothing), commits with exactly subject, blank line, body, and pushes the
 // current branch to its own name on origin; the push answers with its own
 // exit, so a commit that did not reach origin reads held, never landed. Every crossing to a child process
 // happens inside this call's census window and is printed at the end, so what
@@ -29,6 +30,14 @@ section [form.bml] {
   def ld-paths(doc) = json-object-has?(doc, "paths") ? oh-values(json-array-elements(json-object-get(doc, "paths"))) : [];
   def ld-quote(s) = "'" ++ str-join-with(split-on(s, "'"), "'\\''") ++ "'";
   def ld-quoted(paths) = paths |> map(ld-quote);
+  // git add stages nothing at all when one named path matches no file (fatal: pathspec did not match), so a path is
+  // added when it is present, or tracked and gone (its removal is staged); any other is named and left unstaged
+  def ld-has?(xs, x) = nil?(xs) ? false : ((String) xs[0] == x) || ld-has?(xs[1:], x);
+  def ld-absent(paths) = filter(p => file_size(p) < 0, paths);
+  def ld-tracked(absent) = nil?(absent) ? [] : filter(p => (Comparable) len(p) > 0, split-on(trim(host-exec("git ls-files -- " ++ str-join-with(ld-quoted(absent), " ") ++ " 2>/dev/null", "") ?? ""), "\n"));
+  def ld-addable(paths) = append(filter(p => file_size(p) >= 0, paths), ld-tracked(ld-absent(paths)));
+  def ld-unstaged(paths, addable) = filter(p => !ld-has?(addable, p), ld-absent(paths));
+  def ld-unstaged-line(left) = nil?(left) ? "" : "[paths] neither present nor tracked, left unstaged: " ++ str-join-with(left, " ") ++ "\n";
   def ld-tail(text, n) = len(text) <= n ? text : substring(text, len(text) - n, len(text));
   def ld-planes(planes, rows) = nil?(planes) ? "" : "  " ++ planes[0] ++ "=" ++ fmrc-delta-plane-total(rows, planes[0]).str() ++ "\n" ++ ld-planes(planes[1:], rows);
   def ld-plane-names() = ["stdio", "filesystem", "local-process", "network-address-unknown", "mesh"];
@@ -141,7 +150,8 @@ section [form.bml] {
    let spool = fs_mkdir(".form-heal");
    let saved0 = write_file_text(ld-message-path(), subject ++ "\n\n" ++ ld-str(request, "body") ++ "\n");
    let saved = saved0 ?? 0;
-   let added = ready ? host-exec("git add " ++ str-join-with(ld-quoted(paths), " ") ++ " 2>&1", "") : "";
+   let addable = ready ? ld-addable(paths) : [];
+   let added = ready ? ld-unstaged-line(ld-unstaged(paths, addable)) ++ (nil?(addable) ? "" : host-exec("git add " ++ str-join-with(ld-quoted(addable), " ") ++ " 2>&1", "") ?? "") : "";
    let committed0 = ready ? host-exec("out=$(git -c user.name=Claude -c user.email=noreply@anthropic.com commit -q -F " ++ ld-message-path() ++ " 2>&1); code=$?; printf '[commit] exit=%s %s\\n' \"$code\" \"$(git log --oneline -1)\"", "") : "";
    let committed = committed0 ?? "";
    let commitOk = str_find(committed, "[commit] exit=0", 0) >= 0;

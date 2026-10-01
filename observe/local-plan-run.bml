@@ -4,14 +4,16 @@
 // stdin, one JSON line:
 //   a request itself: {"id","title","problem","needs","where","files","evidence"}; or
 //   {"request":"<id>"} or {"next":1}: a request read from learn/local-requests.jsonl, the file the feeder door
-//   (observe/findings-to-requests-run.bml, on claude/impl-d-feeder until it lands) writes; until then {"next":1}
-//   finds none there, and {"requests":"<path>"} reads another file. next takes the first pending request that no queue row names, no plan option has tried and no review
-//   refuted, one Form source under form/, observe/, gate/ or learn/ first, then one file of any kind, then any.
+//   (observe/findings-to-requests-run.bml) writes; {"requests":"<path>"} reads another file. next takes the first
+//   pending request that no queue row names, whose walks have not spent their options (as many refused rows as
+//   attempts; a walk that ended held resumes) and no review refuted, one Form source under form/, observe/, gate/ or
+//   learn/ first, then one file of any kind, then any.
 // A request the queue already carries (a row whose "request" is its id) is planned once: the door says which gap
 // carries it and opens no model. {"queue":"<path>"} reads and lands in another queue (default
 // learn/native-turn-queue.jsonl).
 // Beside either, optional: "attempts" (6), "voices" (else the registry's plan chain, each voice whose weights are on
-// disk), "context" (16384), "max_reply_tokens" (3072), "deadline_ms" (600000, one band run), "dry":1 prints the
+// disk), "context" (16384), "max_reply_tokens" (3072), "deadline_ms" (600000, one band run), "until_ms" (the
+// caller's window on the host's monotonic clock: no voice opens after it, and the walk ends held), "dry":1 prints the
 // first packet the voice would read and opens no model. A request an earlier walk left refused resumes from the
 // options its ledger rows keep (their findings and replies); "fresh":1 starts it clean.
 // One model on the one GPU: before each option's voice opens, the door reads the host's processes (flp-gpu-holders)
@@ -40,15 +42,20 @@ section [form.bml] {
   // first (a band measures Form definitions), then one file of any kind, then any
   def lpr-pending?(r) = (!fcgp-present?(r, "status")) || ((String) fcgp-str(r, "status") == "pending");
   def lpr-refuted?(r) = (String) fcgp-str(r, "verdict") == "refuted";
-  def lpr-tried() = map(r => flp-text(r, "request"), flp-queue-rows(flp-dir() ++ "/ledger.jsonl"));
-  def lpr-open?(r, queue, tried) = ((Comparable) len(flp-req-id(r)) > 0) && (lpr-pending?(r) && ((!lpr-refuted?(r)) && (nothing?(flp-request-row(queue, flp-req-id(r))) && (!flp-has?(tried, flp-req-id(r))))));
+  // tried: [the request of each refused option row the ledger keeps, the walk's attempts]. A request is tried once
+  // its walks spent their options (as many refused rows as attempts); a walk that ended held (the GPU stayed another
+  // door's, or the caller's window closed) spent fewer, so next takes it again and it resumes from the rows it left
+  def lpr-tried(attempts) = [map(r => flp-text(r, "request"), filter(r => ((String) flp-text(r, "verdict") == "refused"), flp-queue-rows(flp-dir() ++ "/ledger.jsonl"))), attempts];
+  def lpr-count(xs, x) = foldl((n, y) => if ((String) y == x) then (n + 1) else n, 0, xs);
+  def lpr-spent?(tried, id) = lpr-count(tried[0], id) >= tried[1];
+  def lpr-open?(r, queue, tried) = ((Comparable) len(flp-req-id(r)) > 0) && (lpr-pending?(r) && ((!lpr-refuted?(r)) && (nothing?(flp-request-row(queue, flp-req-id(r))) && (!lpr-spent?(tried, flp-req-id(r))))));
   def lpr-one?(r) = (Comparable) len(flp-req-files(r)) == 1;
   def lpr-form-source?(r) = lpr-one?(r) && (flp-under-roots?(flp-req-files(r)[0]) && ((flp-ends?(flp-req-files(r)[0], ".fk") || flp-ends?(flp-req-files(r)[0], ".bml")) && (!flp-band-like?(flp-req-files(r)[0]))));
   def lpr-next(rows, queue, tried) = flp-first(rows, r => (lpr-open?(r, queue, tried) && lpr-form-source?(r))) ?? (flp-first(rows, r => (lpr-open?(r, queue, tried) && lpr-one?(r))) ?? flp-first(rows, r => lpr-open?(r, queue, tried)));
   def lpr-pick(opts, queue) {
    let rows = flp-queue-rows(lpr-source(opts));
    let want = fcgp-str(opts, "request");
-   if lpr-request?(opts) then opts else if ((Comparable) len(want) > 0) then flp-first(rows, r => ((String) flp-req-id(r) == want)) else lpr-next(rows, queue, lpr-tried());
+   if lpr-request?(opts) then opts else if ((Comparable) len(want) > 0) then flp-first(rows, r => ((String) flp-req-id(r) == want)) else lpr-next(rows, queue, lpr-tried(lpr-int(opts, "attempts", flp-attempts())));
   }
   def lpr-voices(opts) = if fcgp-present?(opts, "voices") then flp-strs(opts, "voices") else filter(n => ((Comparable) mr-file?(mr-path(mr-find(n))) == 1), mr-chain-names("plan"));
   // one model on the GPU at a time: [granted, what was said]; the door looks once a minute for at most yield_ms
@@ -60,10 +67,13 @@ section [form.bml] {
    let rested = host_sleep_ms(hw-yield-poll-ms());
    lpr-yield(until, began, named);
   }
-  // the voice: it opens only once the GPU is free; the packet is kept before it is read and the reply after, so a
-  // review reads every step; a GPU still held answers "held" and the walk ends
-  def lpr-ask(dir, id, packet, name, n, context, limit, yieldMs) {
-   let gpu = lpr-yield((host_monotonic_ms() + yieldMs), host_monotonic_ms(), "");
+  // the voice: it opens only once the GPU is free and while the caller's window ("until_ms" on the host's monotonic
+  // clock; nothing when no window was given) is open; the packet is kept before it is read and the reply after, so
+  // a review reads every step; a GPU still held or a window closed answers "held" and the walk ends with no row
+  def lpr-bound(t, until) = if nothing?(until) then t else if (until < t) then until else t;
+  def lpr-closed?(until) = (!nothing?(until)) && (host_monotonic_ms() >= until);
+  def lpr-ask(dir, id, packet, name, n, context, limit, yieldMs, until) {
+   let gpu = if lpr-closed?(until) then [false, "[local-plan:window] the caller's window has closed; no model opens"] else lpr-yield(lpr-bound((host_monotonic_ms() + yieldMs), until), host_monotonic_ms(), "");
    let waited = if ((Comparable) len(gpu[1]) > 0) then print_str(gpu[1]) else 0;
    if gpu[0] then lpr-spoken(dir, id, packet, name, n, context, limit) else ["held", gpu[1], 0, 0, ""];
   }
@@ -76,14 +86,14 @@ section [form.bml] {
    let said = print_str(mc-cat(["[local-plan:voice] ", name, " option ", n.str(), " ", v[0], " prompt_ids=", v[2].str(), " generated_ids=", v[3].str(), " reply=", stem, ".reply.txt"]));
    [v[0], text, v[2], v[3], stem ++ ".reply.txt"];
   }
-  def lpr-voice(dir, id, context, limit, yieldMs) = (packet, name, n) => lpr-ask(dir, id, packet, name, n, context, limit, yieldMs);
+  def lpr-voice(dir, id, context, limit, yieldMs, until) = (packet, name, n) => lpr-ask(dir, id, packet, name, n, context, limit, yieldMs, until);
   def lpr-read(path) = if ((String) path == "") then "" else fhn-read(path);
   // an earlier walk of this request left its refused options in the ledger; the walk resumes from them unless
   // {"fresh":1} asks for a clean start
   def lpr-memory(req, opts) = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then [] else flp-memory-of(flp-queue-rows(flp-dir() ++ "/ledger.jsonl"), flp-req-id(req), p => lpr-read(p));
   def lpr-walk(req, opts, voices, queue) {
    let made = flp-mkdirs(flp-dir());
-   let ctx = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), lpr-int(opts, "context", 16384), lpr-int(opts, "max_reply_tokens", 3072), lpr-int(opts, "yield_ms", 7200000)), voices, lpr-int(opts, "attempts", flp-attempts()), queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
+   let ctx = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), lpr-int(opts, "context", 16384), lpr-int(opts, "max_reply_tokens", 3072), lpr-int(opts, "yield_ms", 7200000), fcgp-num(opts, "until_ms")), voices, lpr-int(opts, "attempts", flp-attempts()), queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
    let memory = lpr-memory(req, opts);
    let resumed = if nil?(memory) then 0 else print_str(mc-cat(["[local-plan] resuming ", flp-req-id(req), " after ", len(memory).str(), " refused option(s) the ledger keeps"]));
    let r = flp-walk-from(req, ctx, memory);

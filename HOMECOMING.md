@@ -75,6 +75,12 @@ recipe execution; lower training loss does not yet establish improved answer qua
   12:30 and 19:00 ([`docs/launchd/earth.hati.day-turn.plist`](docs/launchd/earth.hati.day-turn.plist)):
   native turns while a gap is open and its window has time, each landed through
   the movement door.
+- **Planning** — when no gap is open, either walk asks the local planner
+  ([`observe/local-plan-run.bml`](observe/local-plan-run.bml)) for one within its
+  window. The planner takes the next pending request in
+  [`learn/local-requests.jsonl`](learn/local-requests.jsonl), a local voice writes
+  it as a band-first gap, and Form verifies the gap before it joins the queue. A
+  queued gap is turned at once.
 - **Lessons** — [`observe/session-pairs-run.bml`](observe/session-pairs-run.bml)
   turns each rented turn into a chat row the native trainer reads (the
   transcripts are found under `HEARTH_PERSON_HOME` in `fkwu.conf`);
