@@ -429,7 +429,7 @@ export class Kernel {
     this.registerNative("str_byte_at", catAccess(), (_k, args) => {
       const buf = Buffer.from(argStr(args, 0), "latin1");
       const i = argInt(args, 1);
-      const v = i < 0 || i >= buf.length ? -1 : buf[i]; // -1 OOB: matches fkwu exactly (verified)
+      const v = i < 0 || i >= buf.length ? -1 : buf[i]!; // -1 OOB: matches fkwu exactly (verified)
       return { kind: "int", int: v };
     });
     this.registerNative("byte_to_str", catMethod(), (_k, args) => ({
@@ -1080,52 +1080,89 @@ function buildVerb(k: Kernel, verb: string, args: NodeID[]): NodeID {
 // Walker — recipe → value   (the pure dispatch, verbatim from kernel.ts)
 // ===========================================================================
 
+// A tail position -- an if's taken arm, a do's last form, a let's body, a
+// closure's body -- is the next turn of walk's loop rather than a deeper JS
+// frame, so a tail-recursive recipe runs at any depth, as on the Go walker and
+// the kernels.
 export function walk(k: Kernel, node: NodeID, frame: Frame): Value {
-  if (node.level === Level.TRIVIAL) {
-    return k.trivialValue(node);
-  }
-  const cat = k.category(node);
-  const kids = k.children(node);
+  for (;;) {
+    if (node.level === Level.TRIVIAL) {
+      return k.trivialValue(node);
+    }
+    const cat = k.category(node);
+    const kids = k.children(node);
 
-  switch (cat.type) {
-    case RBasic.IDENT: {
-      const id = k.identID(node);
-      const v = frame.lookup(id);
-      if (v !== undefined) return v;
-      const nat = k.natives.get(id);
-      if (nat !== undefined) {
-        return {
-          kind: "closure",
-          closure: { name: id, params: [], body: node, env: frame } as Closure,
-        };
+    switch (cat.type) {
+      case RBasic.IDENT: {
+        const id = k.identID(node);
+        const v = frame.lookup(id);
+        if (v !== undefined) return v;
+        const nat = k.natives.get(id);
+        if (nat !== undefined) {
+          return {
+            kind: "closure",
+            closure: { name: id, params: [], body: node, env: frame } as Closure,
+          };
+        }
+        throw new Error(`unbound identifier: ${k.nameStr(id)}`);
       }
-      throw new Error(`unbound identifier: ${k.nameStr(id)}`);
+      case RBasic.MATH:
+        return walkMath(k, cat.inst, kids, frame);
+      case RBasic.COMPARE:
+        return walkCompare(k, cat.inst, kids, frame);
+      case RBasic.LOGIC:
+        return walkLogic(k, cat.inst, kids, frame);
+      case RBasic.COND: {
+        const arm = condArm(k, cat.inst, kids, frame);
+        if (arm === null) return { kind: "null" };
+        node = arm;
+        continue;
+      }
+      case RBasic.BLOCK: {
+        if (cat.inst === RBlock.LET) {
+          const step = walkLet(k, kids, frame);
+          if (step.done) return step.value;
+          node = step.body;
+          frame = step.frame;
+          continue;
+        }
+        // a do binds its lets and defns for the rest of itself only (walkUnit
+        // reads the unit's root do flat); its last form answers
+        if (kids.length === 0) return { kind: "null" };
+        frame = new Frame(frame);
+        for (let i = 0; i < kids.length - 1; i++) {
+          walk(k, kids[i]!, frame);
+        }
+        node = kids[kids.length - 1]!;
+        continue;
+      }
+      case RBasic.FNDEF:
+        return walkFnDef(k, kids, frame);
+      case RBasic.FNCALL: {
+        const step = walkFnCall(k, kids, frame);
+        if (step.done) return step.value;
+        node = step.body;
+        frame = step.frame;
+        continue;
+      }
+      case RBasic.LIST: {
+        const items = kids.map((c) => walk(k, c, frame));
+        return { kind: "list", list: items };
+      }
+      case RBasic.ALIAS:
+        if (kids.length >= 2) return { kind: "nodeid", nodeid: kids[1]! };
+        return { kind: "nodeid", nodeid: node };
+      default:
+        throw new Error(`walk: unsupported RBasic type ${cat.type}`);
     }
-    case RBasic.MATH:
-      return walkMath(k, cat.inst, kids, frame);
-    case RBasic.COMPARE:
-      return walkCompare(k, cat.inst, kids, frame);
-    case RBasic.LOGIC:
-      return walkLogic(k, cat.inst, kids, frame);
-    case RBasic.COND:
-      return walkCond(k, cat.inst, kids, frame);
-    case RBasic.BLOCK:
-      return walkBlock(k, cat.inst, kids, frame);
-    case RBasic.FNDEF:
-      return walkFnDef(k, kids, frame);
-    case RBasic.FNCALL:
-      return walkFnCall(k, kids, frame);
-    case RBasic.LIST: {
-      const items = kids.map((c) => walk(k, c, frame));
-      return { kind: "list", list: items };
-    }
-    case RBasic.ALIAS:
-      if (kids.length >= 2) return { kind: "nodeid", nodeid: kids[1]! };
-      return { kind: "nodeid", nodeid: node };
-    default:
-      throw new Error(`walk: unsupported RBasic type ${cat.type}`);
   }
 }
+
+// Step -- a form either answered, or hands walk the body to walk next, in the
+// frame that body reads.
+type Step =
+  | { done: true; value: Value }
+  | { done: false; body: NodeID; frame: Frame };
 
 function expectInt(v: Value, op: string): number {
   if (v.kind === "i64" || v.kind === "u64") return Number(v.bigint);
@@ -1489,51 +1526,42 @@ function walkLogic(
   return boolInt(op === RLogic.AND);
 }
 
-function walkCond(
+// condArm -- the arm an if takes, or null when a one-armed if's test fails.
+function condArm(
   k: Kernel,
   op: number,
   kids: readonly NodeID[],
   frame: Frame,
-): Value {
+): NodeID | null {
   if (op === RCond.IF_THEN) {
     if (kids.length !== 2) throw new Error("if: need 2 args");
-    const c = walk(k, kids[0]!, frame);
-    return truthy(c) ? walk(k, kids[1]!, frame) : { kind: "null" };
+    return truthy(walk(k, kids[0]!, frame)) ? kids[1]! : null;
   }
   if (kids.length !== 3) throw new Error("if/else: need 3 args");
-  const c = walk(k, kids[0]!, frame);
-  return truthy(c) ? walk(k, kids[1]!, frame) : walk(k, kids[2]!, frame);
+  return truthy(walk(k, kids[0]!, frame)) ? kids[1]! : kids[2]!;
 }
 
-function walkBlock(
-  k: Kernel,
-  op: number,
-  kids: readonly NodeID[],
-  frame: Frame,
-): Value {
-  if (op === RBlock.LET) {
-    if (kids.length !== 2 && kids.length !== 3) {
-      throw new Error("let: need 2 or 3 args (name, value, body)");
-    }
-    const name = kids[0]!;
-    if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
-      throw new Error("let: name must be a string trivial");
-    }
-    const value = walk(k, kids[1]!, frame);
-    if (kids.length === 3) {
-      const scope = new Frame(frame);
-      scope.bind(name.inst, value);
-      return walk(k, kids[2]!, scope);
-    }
-    frame.bind(name.inst, value);
-    return value;
+// walkLet -- (let name value) binds in this frame and answers the value;
+// (let name value body) binds the name in its own frame over the body alone.
+function walkLet(k: Kernel, kids: readonly NodeID[], frame: Frame): Step {
+  if (kids.length !== 2 && kids.length !== 3) {
+    throw new Error("let: need 2 or 3 args (name, value, body)");
   }
-  // a do binds its lets and defns for the rest of itself only (walkUnit reads the
-  // unit's root do flat)
-  return walkFlat(k, kids, new Frame(frame));
+  const name = kids[0]!;
+  if (name.level !== Level.TRIVIAL || name.type !== Triv.STRING) {
+    throw new Error("let: name must be a string trivial");
+  }
+  const value = walk(k, kids[1]!, frame);
+  if (kids.length === 3) {
+    const scope = new Frame(frame);
+    scope.bind(name.inst, value);
+    return { done: false, body: kids[2]!, frame: scope };
+  }
+  frame.bind(name.inst, value);
+  return { done: true, value };
 }
 
-// walkFlat — a do's forms in one scope, the last one's value answering.
+// walkFlat — the root do's forms in the unit's one scope, the last one's value answering.
 function walkFlat(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
   let result: Value = { kind: "null" };
   for (const c of kids) {
@@ -1579,8 +1607,9 @@ function walkFnDef(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
   return value;
 }
 
-// FNCALL children: [callee, arg0, arg1, ...]
-function walkFnCall(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
+// FNCALL children: [callee, arg0, arg1, ...]. A native answers; a closure hands
+// walk its body in the call's frame.
+function walkFnCall(k: Kernel, kids: readonly NodeID[], frame: Frame): Step {
   if (kids.length < 1) throw new Error("call: need callee");
   const calleeNode = kids[0]!;
 
@@ -1603,7 +1632,7 @@ function walkFnCall(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
       for (let i = 1; i < kids.length; i++) {
         args.push(walk(k, kids[i]!, frame));
       }
-      return ne.fn(k, args);
+      return { done: true, value: ne.fn(k, args) };
     }
     // Closure via frame
     const v = (reserved ? frame.root() : frame).lookup(rawName);
@@ -1623,12 +1652,14 @@ function walkFnCall(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
   return invokeClosure(k, calleeVal.closure, kids, frame);
 }
 
+// invokeClosure -- the arguments walk in the caller's frame and bind in a fresh
+// frame over the closure's own; its body is the call's tail.
 function invokeClosure(
   k: Kernel,
   closure: Closure,
   kids: readonly NodeID[],
   frame: Frame,
-): Value {
+): Step {
   if (kids.length - 1 !== closure.params.length) {
     throw new Error(
       `call: arity mismatch (expected ${closure.params.length}, got ${kids.length - 1})`,
@@ -1639,7 +1670,7 @@ function invokeClosure(
     const v = walk(k, kids[i + 1]!, frame);
     callFrame.bind(closure.params[i]!, v);
   }
-  return walk(k, closure.body, callFrame);
+  return { done: false, body: closure.body, frame: callFrame };
 }
 
 // ===========================================================================

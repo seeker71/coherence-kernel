@@ -36,8 +36,10 @@ first.
 Surface covered: integer + int64 + float + string literals, and true/false as the
 ints 1/0 (axiom-1); `add sub mul
 div mod`; `eq ne lt le gt ge`; `if let do`, a three-form `(let name value body)`
-binding the name over its body alone, as fkwu reads it; `defn` + user calls (tail-call
-optimized); `and or not`; `head tail cons list nth empty len`; `str_concat
+binding the name over its body alone, as fkwu reads it; `defn` + user calls, tail-call
+optimized on all three (an if's taken arm, a do's last form, a let's body and a closure's
+body are the next turn of the walk's loop, so a tail-recursive recipe runs at any depth);
+`and or not`; `head tail cons list nth empty len`; `str_concat
 str_eq str_len str_find substring char_at int_to_str`; `value_eq`; plus the BMF
 s-expression lexer and the content-addressed intern. The
 string floor is the narrow waist (`str_len` / `str_byte_at` / `byte_to_str` /
