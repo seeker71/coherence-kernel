@@ -93,7 +93,7 @@ Use `code <JSON>` or `code @request.json` in the source-backed form-cli. The sta
 
 Tool checks are `{tool,arguments,input?,stdout,exit?}`. They require exact stdout, empty diagnostics and the requested exit (default 0, otherwise a canonical nonnegative integer). For example `{"tool":"rg","arguments":["-F","obsolete claim","answer.md"],"stdout":"","exit":1}` expects a normal no-match. Missing source remains a failure. Failed assertions retain actual output/status and checked source identities; source text stays in the resident catalog.
 
-Word checks are exactly `{kind:"word-range",path,minimum,maximum}` for a document, or `field` instead of `path` for a top-level report string. Inclusive nonnegative bounds use the shared ASCII-whitespace counter, including headings. Missing text differs from empty text. Failure supplies observed count and repair direction; count agreement does not establish content quality. Report checks take the report on stdin, have no document access and accept no `input` override. The additional `{kind:"provider-usage-sequences"}` report assertion is documented in [usage observation](form-provider-usage-observation.md).
+Word checks are exactly `{kind:"word-range",path,minimum,maximum}` for a document, or `field` instead of `path` for a top-level report string. Inclusive nonnegative bounds use the shared ASCII-whitespace counter, including headings. Missing text differs from empty text. Failure supplies observed count and repair direction; count agreement does not establish content quality. Report checks take the report on stdin, have no document access and accept no `input` override. The additional `{kind:"provider-usage-sequences"}` report assertion takes no other field; `form/form-stdlib/bml/form-cli-code-request.bml` (`fcaq-replay-check`) owns its meaning.
 
 ### Direct implementation entry
 
@@ -185,6 +185,34 @@ checkpoint, the original checks, and the retained failures. Prove a candidate
 exists before model admission. Rented help is high-level guidance for one
 unresolved decision, carrying that failure, with its usage attributed.
 
+**The loop.** Work reaches the local path in four steps, each a door the body
+runs:
+
+1. **Offer.** A task becomes a band-first gap in `learn/native-turn-queue.jsonl`:
+   a band proven reachable by a reference solution held outside the tree, total
+   over any candidate, and a goal that names each definition to add.
+2. **Turn.** `observe/native-turn-run.bml` hands the gap to the local lane
+   (local Qwen, no rented fallback), publishes its candidate, reads the band
+   within ten minutes, and writes one row per option to
+   `receipts/native-turn-ledger.jsonl` with the option's local generated and
+   injected IDs. launchd runs it from the walk checkout through
+   `observe/day-turn.bml` (12:30 and 19:00, turning while a gap is open and its
+   window has time) and `observe/scheduled-walk.bml` (03:30).
+3. **Review.** `observe/local-flow-review.bml` follows every turn and opens every
+   session. It reads the queue and both ledgers, names each open gap's state and
+   one next local repair (`split`, `lane`, `speed`, `queue` or `turn`), and
+   appends its row to `receipts/local-flow-review.jsonl`, which lands with the
+   turn.
+4. **Measure.** At a rented session's close, `observe/session-rent-run.bml`
+   (stdin: the transcript path) appends the session's rented tokens, subagents
+   included, beside its local tokens to `receipts/session-rent-ledger.jsonl`.
+
+A rented session opens with the review, works its `next`, and spends rented
+tokens only where the local path cannot yet go: writing a band-first gap,
+healing the lane, or one decision a retained failure names. Work the lane could
+take goes to the queue, not to the rented mind. The session closes with the
+meter and the review.
+
 After the measurement below, review the local flow against the last comparable
 session. Local tokens should be higher and rented tokens lower. Name the query,
 task, or frequency the local path could not yet carry, and the local door that
@@ -194,22 +222,18 @@ chooses the next local repair in the same context. Expand the task set only as
 that evidence holds. Zero is a movement whose answer, review and landing show
 no rented-token growth. It is witnessed by these readings, not by a date.
 
-At session opening and closing, send the exact provider transcript path to
-`observe/rented-turn-meter-run.fk`. Its existing output-token meter remains;
-Codex transcripts additionally report cumulative input, cached input, output,
-reasoning output and total tokens, with the delta since the preceding reading.
-The report names its observed timestamp. A first reading, different transcript
-or decreasing counters starts a baseline with a null delta; absent or incomplete
-usage is never zero. Cached input is part of input, and reasoning output is part
-of output, so neither is added twice. A Claude Code session is read whole by
+Each meter has one job. A Claude Code session is read whole by
 `observe/session-rent-run.bml`: its transcript and every subagent transcript
 beside it, one count per `requestId` (input, cache write, cache read, output),
-next to the local voice's drafts for the same session, one row in
-`receipts/session-rent-ledger.jsonl`. Its first row (2026-10-01, a 20,000-request
-coordinating session) reads input 40,000, cache read 2,719,951,909, output
-3,927,684 rented against 2,239 tokens the local voice generated: 569 ppm local.
-Other provider formats retain the existing output measurement until their
-cumulative counters are supported.
+next to the local voice's drafts for the same session. A Codex transcript goes to
+`observe/rented-turn-meter-run.fk` at opening and closing: cumulative input,
+cached input, output, reasoning output and total tokens, with the delta since the
+preceding reading; a first reading, different transcript or decreasing counters
+starts a baseline with a null delta. Which asking inside a Claude transcript was
+expensive is `observe/turn-meter-run.bml`; a movement's calls are
+`observe/flow-meter-run.bml`. Absent or incomplete usage is never zero. Cached
+input is part of input, and reasoning output is part of output, so neither is
+added twice.
 
 Pair those readings with the native coding result's generated/injected IDs,
 attempts, checks, release and the functions/lines actually changed. Include
@@ -219,13 +243,8 @@ allowance enables useful work; consuming tokens by itself is no improvement.
 When the comparison misses, the retained failure chooses the next local repair
 in the same context.
 
-Routine work reaches the local lane as band-first gaps in
-`learn/native-turn-queue.jsonl`: a band proven reachable by a reference solution
-held outside the tree and total over any candidate, and a goal that names each
-definition to add. The lane has closed gaps written that way and spent eight
-turns without progress on one too large for it. A band answers within ten
-minutes or reads nothing (`observe/native-turn-run.bml`), and a day turn keeps
-taking turns while a gap is open and its window has time (`observe/day-turn.bml`).
+The lane has closed gaps written as band-first gaps and spent eight options
+without progress on one too large for it; the review names such a gap `split`.
 
 Ordinary JSON jobs save native binary checkpoints under `.hearth/code-memory/` after completed transitions. Resume uses the same original request and returned checkpoint ID; `turns` adds replies and `context` sizes the admission. Candidate documents, tasks, findings and failed checks survive. Incomplete output never becomes an action. A complete candidate is rechecked before reuse, with zero new model/tool counts and its earlier provenance retained. Exact original goal/documents/writable/checks select that lesson; changed contracts do not. Review recall supplies guidance rather than presenting an old report as new work.
 
@@ -251,41 +270,15 @@ A definition check is `{kind:"definition",path,function,cases:[[input,expected],
 
 Embedding callers can use `fcac-run(model,goal,documents,writable,[checker,contract],context,turns)`. The callback receives `(contract,candidateDocuments)` and returns `[passed,observationString]`. `fcac-review` takes `[reportChecker,reportContract,sourceChecker,sourceContract]`; the report callback receives `(contract,[documents,report])`. Source-only `verify` needs the optional last pair. These lower-level calls are fresh/unmanaged; the JSON door supplies continuity. Callback behavior and effects belong to the caller.
 
-### Search a small native repair before another model call
-
-`fcrs-search(source,name,arity,bindings,roles,checker,contract,budget)` in `form-cli-review-search.bml` replaces one call with a compatible caller binding forwarding the original parameters. Roles are caller data, not inferred types. It checks the original, then each candidate with the same contract. Result: `[unchanged|repaired|exhausted|refused,source,checkCount,observation]`; failure/exhaustion returns original source. Search itself makes no model, file or process call. Attribute native structural repair separately from generated code.
-
 ### Attach native repair to the review loop
 
 Append `[nativeRepair,repairContract]` to the four-entry review checker. On a valid failed report check, Form calls it once with `(contract,[documents,report,failure])`. Return `[available,proposedReport,method,observation]`, optionally followed by `"review"`. A changed nonempty proposal reruns the complete original checker. Failure returns to ordinary repair without recursively invoking the hook. The optional continuation keeps the task in review after a passing proposal so the same resident can complete its explanation. Update every claim affected by the repaired code.
 
 `native_repairs` retains paired before/after reports and actual checks; `report_source` names authorship. A completed context observation permits later references, while fresh contexts receive the full pair. The hook cannot be installed by model JSON, does not run for coding or passing reports, and grants no additional model turns. Callback checks/effects remain caller-owned and separately counted.
 
-## Complete text review with explicit edits
-
-These native helpers keep review evidence distinct from its judgment:
-
-| Helper source under `bml/` | Interface and scope |
-|---|---|
-| `form-cli-review-followup.bml` | `fcrf-admit(model,state,checker,context,turns,feedback)` admits one follow-up after a completed review in the same live context, retaining first and final reports under the same total budget/checker; final release is owned |
-| `form-cli-review-bindings.bml` | `fcrb-check(draft,report,sourceDocs)` checks each finding's exact `draft_field/draft_quote`, `source_path/source_quote`, explanation and applied/unresolved status. Applied replacement quotes must appear in changed text; explicit delete requires an empty replacement and disappearance of the original. Returns `[passed,observation,applied,unresolved]`; provenance does not prove entailment |
-| `form-cli-review-spans.bml` | `fcrs-spans(text)` produces exact byte spans using ASCII punctuation/whitespace. `fcrs-complete?` checks partition; `fcrs-ids-complete?` checks one ordered integer index per row. This is participation, not sentence parsing or semantic coverage |
-| `form-cli-quote-evidence.bml` | `fcqe-restore(source,quote,maxBytes)` restores only a unique ASCII-whitespace-normalized quotation to original byte offsets. `fcqe-blockquote-restore` explicitly reads single-level Markdown quote markers. Changed/ambiguous words remain unavailable. `fcqe-lines(source,first,last,maxBytes)` selects one-based inclusive physical lines with exact bytes |
-| `form-cli-review-source-lines.bml` | `fcrl-propose(docs,report,maxBytes)` resolves findings with `source_path` and `source_lines:[first,last]`, leaving explicit conflicting quotes unchanged. Bind `fcrl-repair([docs,maxBytes],subject)` explicitly and use `fcrl-check` to check coordinates plus original evidence links. Selection is all-or-nothing; it does not establish relevance |
-
-`form-cli-review-edits.bml` supplies `fcre-packet(reportText,fields)` → `[ok,packet,diagnostic]` and `fcre-apply(reportText,fields,message)` → `[ok,candidate,diagnostic]`. Select unique existing top-level string fields. The message carries the packet's exact base hash and one ordered decision for each span: `{id,status,action,reason,text?}`. Status is supported/inference/unsupported/style/action-gap; action is keep/replace/remove. Replacement must be nonempty and different; only replacement carries text. Joining adds no punctuation. Stale/missing/repeated decisions preserve the original. Retain packet, decisions and candidate, then rerun original checks and read the whole answer.
-
-### Explicit Qwen adapter sessions
+## Explicit Qwen adapter sessions
 
 `fcms-open-adapted(modelPath,prompt,context,profile,adapterPath)` or immediate `fcms-attach-adapter(session,path)` attaches a rank-one head adapter before generation/observation. Always use the returned owner, including on refusal; inspect `fcms-live?`/`fcms-reason` and finish with `fcms-release-ok?`. Renewal transfers ownership and must not double-release the old stream. `fcmd-carrier`, `fcmd-path`, `fcmd-digest` and `fcmd-owned` expose admission evidence. The 5,120-wide finite float32 A/B contract and tensor-byte digest do not establish training-base compatibility or answer improvement. JSON coding does not select this adapter automatically.
-
-### Full-vocabulary Qwen head learning
-
-`qwen-lora-full-loss.bml` provides `qlfg-open(rows,cols)`, `qlfg-live`, `qlfg-loss(owner,logits,target)` and `qlfg-gradient(owner,projection,logits,target)` → `[ok,loss,hiddenGradient]`. It computes full-vocabulary cross-entropy and `W^T(softmax-onehot)` using the immutable packed Q8_0 projection. Caller-owned handles, geometry and whole blocks must agree. `qlfg-owned` reports scratch buffers; `qlfg-close` synchronizes/releases once, including partial admission. Invalid/nonfinite results remain absent. This neither updates nor publishes an adapter by itself.
-
-### Cached head batches
-
-`qwen-lora-head-batch.bml` reuses frozen normalized features `[float32Bytes,target]`. `qlhb-gradients(ctx,lossOwner,adapter,samples)` returns token count, mean loss and mean A/B gradients; `qlhb-loss` omits gradients. `qlhb-optimizer(adapter)` borrows A/B and owns six buffers; `qlhb-step(state,batch,rate,step,maxNorm)` performs checked/clipped Adam updates. Release optimizer buffers with `nlb-state-close` (success flag); adapter/loss owners remain separate. Refresh the session head before generation because these calls overwrite scratch. Caller-owned masks, training/validation separation and held-out answers establish learning quality.
 
 ## Observe
 

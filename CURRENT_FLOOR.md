@@ -37,12 +37,12 @@ seed, and it shrinks as its lanes lower into Form organs (`release-ledger.bml` R
 ## Body-wide witnesses
 
 ```text
-./fkwu gate/drift-gates-run.bml          -> drift-gates pass=16383 full=16383 refused=0
+./fkwu gate/drift-gates-run.bml          -> drift-gates pass=32767 full=32767 refused=0 (15 rows; a row whose ground did not move sits out)
 ./fkwu gate/structural-gate-run.fk       -> structural-gate-v3 [8, 0, 1, 0, 0, 0, 7] then 1
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> doors=9 links=109 broken=0 code=9109000
+./fkwu observe/door-link-health-run.bml  -> docs=35 claims=684 broken=0 (each broken claim named on its own line)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
 ./fkwu observe/belief-stamps.bml         -> 75068002  (field stamped*10^6 + owed*10^3 + laws)
