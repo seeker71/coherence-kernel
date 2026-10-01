@@ -1,0 +1,718 @@
+// form-token-verbs.bml — what Form runs when a model's stream closes a control.
+//
+// Every verb answers RESULT text, one of value=<v>; recipe=@<p.l.t.i>; node=@<p.l.t.i>; or
+// nothing=<reason>;. A refusal is an answer: the stream that asked continues.
+//
+// eval reads its payload with the body's own BML cursor (g-parse-full over form-bml-grammar,
+// lowered by fbl-lower) and walks the lowered recipe in a sandbox. Only the operations named in
+// ftv-builtins and the fourteen primitive categories exist there, so a host door, a file, a
+// process or Metal is refused by construction (not-pure:<name>), never by a filter over text.
+// Steps, wall time, call depth and value size are budgets; a spent budget answers its name.
+// knowledge-query reads the enrich resources (form-cli-enrich.bml) and this checkout's receipts.
+// node-get, node-make and node-select hold the nodes a session touched: on fkwu a coordinate
+// rebuilt with make_nodeid does not return its interned cell (form-recipe-exec-token.fk), so the
+// session is the index. recipe-birth takes the affine signed-i32 grammar of
+// form-recipe-birth-token.fk or a BML function (bml;x => ...); recipe-exec and choice run them in
+// Form. Metal stays with the microthought owner (form-cli-microthought.bml).
+import form-stdlib/core.fk;
+import form-stdlib/line-grammar.fk;
+import form-stdlib/source-compiler.fk;
+import control/offer-ack-core.fk;
+import form-stdlib/bml/form-cli-enrich.bml;
+import form-stdlib/form-recipe-birth-token.fk;
+import form-stdlib/form-recipe-exec-token.fk;
+import form-stdlib/bml/value-operators.bml;
+section [form.bml] {
+ let FTV-DO = form-cat-node("do");
+ let FTV-LET = form-cat-node("let");
+ let FTV-IF = form-cat-node("if");
+ let FTV-FNCALL = form-cat-node("fncall");
+ let FTV-IDENT = form-cat-node("ident");
+ let FTV-FNDEF = form-cat-node("fndef");
+ let FTV-PARSE-FAIL = intern_trivial_string("PARSE-FAIL");
+ let FTV-CATEGORY-ROOT = make_nodeid(31, 2, 0, 224);
+ let FTV-BML-RECIPE = make_nodeid(31, 2, 0, 225);
+ let FTV-OPENINGS = record_new(0);
+ class FormTokenVerbs {
+  def ftv-step-budget() = 20000;
+  def ftv-wall-budget() = 2000;
+  def ftv-depth-budget() = 200;
+  def ftv-max-payload() = 512;
+  def ftv-max-list() = 4096;
+  def ftv-max-text() = 65536;
+  def ftv-max-render() = 1024;
+  def ftv-max-row() = 160;
+  // A session holds what one stream touched: nodes by coordinate, recipes, BML closures,
+  // the receipt listing once read, and its budgets. root prefixes the receipts directory;
+  // receipt openings are shared by the process (FTV-OPENINGS).
+  def ftv-session() = ftv-session-at("");
+  def ftv-session-at(root) = record_new(0, "nodes", record_new(0), "recipes", record_new(0), "closures", record_new(0), "root", root, "steps", ftv-step-budget(), "wall-ms", ftv-wall-budget(), "calls", 0, "refusals", 0, "receipts", nothing(), "mc", nothing(), "events", []);
+  def ftv-starts?(s, p) = len(s) >= len(p) ? substring(s, 0, len(p)) == p : 0;
+  def ftv-ends?(s, t) = len(s) >= len(t) ? substring(s, len(s) - len(t), len(s)) == t : 0;
+  def ftv-join(parts, sep) = nil?(parts) ? "" : nil?(parts[1:]) ? parts[0] : parts[0] ++ sep ++ ftv-join(parts[1:], sep);
+  def ftv-last-index(s, needle) = ftv-last-from(s, needle, 0, -1);
+  def ftv-last-from(s, needle, from, last) {
+   let at = str_find(s, needle, from);
+   at < 0 ? last : ftv-last-from(s, needle, at + 1, at);
+  }
+  def ftv-cap(text) = len(text) > ftv-max-row() ? substring(text, 0, ftv-max-row()) : text;
+
+  // ── RESULT text ──────────────────────────────────────────────────────
+  def ftv-value-result(text) = len(text) > ftv-max-render() ? ftv-nothing("value-exceeds-observation") : "value=" ++ text ++ ";";
+  def ftv-node-result(node) = "node=" ++ ftv-coord(node) ++ ";";
+  def ftv-recipe-result(node) = "recipe=" ++ ftv-coord(node) ++ ";";
+  def ftv-nothing(reason) = "nothing=" ++ reason ++ ";";
+
+  // ── nodes a session holds ────────────────────────────────────────────
+  def ftv-coord(node) = frex-node-coordinate(node);
+  def ftv-hold(session, node) {
+   record_set(record_get(session, "nodes"), ftv-coord(node), node);
+   node;
+  }
+  def ftv-held(session, coord) {
+   let nodes = record_get(session, "nodes");
+   record_has(nodes, coord) ? record_get(nodes, coord) : ftv-trivial-at(coord);
+  }
+  // integer and boolean leaves carry their value in the coordinate, so they need no holding
+  def ftv-trivial-at(coord) {
+   let parts = frex-coordinate-parts(coord);
+   if nothing?(parts) then nothing()
+   else if (parts[0] == 1) && (parts[1] == 1) && (parts[2] == 1) then ftv-same(coord, intern_trivial_int(parts[3]))
+   else if (parts[0] == 1) && (parts[1] == 1) && (parts[2] == 3) && (parts[3] <= 1) then ftv-same(coord, intern_trivial_bool(parts[3]))
+   else nothing();
+  }
+  def ftv-same(coord, node) = ftv-coord(node) == coord ? node : nothing();
+  def ftv-leaf?(node) = (node_level(node) == 1) && nil?(node_children(node));
+  def ftv-kind(node) {
+   let t = node_type(node);
+   if ftv-leaf?(node) then (t == 1 ? "int" : t == 2 ? "string" : t == 3 ? "bool" : t == 7 ? "float" : "leaf")
+   else ftv-category-name(node_category(node));
+  }
+  def ftv-category-name(cat) = nil?(node_children(cat)) ? ftv-coord(cat) : node_eq(node_category(cat), FTV-CATEGORY-ROOT) ? node_value(node_children(cat)[0]) : ftv-coord(cat);
+  def ftv-node-show(session, node) = ftv-leaf?(node) ? node_value(node) : ftv-coord(ftv-hold(session, node));
+
+  // ── showing a value ──────────────────────────────────────────────────
+  def ftv-show(session, v) {
+   let kind = value_kind(v);
+   if kind == "null" then "nothing"
+   else if kind == "list" then "[" ++ ftv-join(map(x => ftv-show(session, x), v), ", ") ++ "]"
+   else if kind == "node_id" then ftv-coord(ftv-hold(session, v))
+   else if kind == "record" then "function"
+   else if kind == "string" then v
+   else value_str(v);
+  }
+  def ftv-render(session, v) {
+   let kind = value_kind(v);
+   if kind == "null" then ftv-nothing("absent-value")
+   else if kind == "node_id" then ftv-node-result(ftv-hold(session, v))
+   else ftv-value-result(ftv-show(session, v));
+  }
+
+  // ── the eval sandbox: budgets ────────────────────────────────────────
+  def ftv-ctx(session, steps, wall) = record_new(0, "session", session, "left", steps, "deadline", host_monotonic_ms() + wall, "refused", "", "depth", 0, "spent", 0);
+  def ftv-ctx-of(session) = ftv-ctx(session, record_get(session, "steps"), record_get(session, "wall-ms"));
+  def ftv-refused?(ctx) = len(record_get(ctx, "refused")) > 0;
+  def ftv-refuse(ctx, why) {
+   if ftv-refused?(ctx) then 0 else record_set(ctx, "refused", why);
+   nothing();
+  }
+  def ftv-step(ctx) {
+   let left = record_get(ctx, "left") - 1;
+   record_set(ctx, "left", left);
+   record_set(ctx, "spent", record_get(ctx, "spent") + 1);
+   if left < 0 then ftv-refuse(ctx, "step-budget") else if (left % 64) == 0 then ftv-clock(ctx) else 0;
+   !ftv-refused?(ctx);
+  }
+  def ftv-clock(ctx) = host_monotonic_ms() > record_get(ctx, "deadline") ? ftv-refuse(ctx, "wall-budget") : 0;
+  // budgets and purity stay refused inside try; evaluation errors may be recovered by try/attempt
+  def ftv-recoverable?(why) = !(ftv-starts?(why, "step-budget") || ftv-starts?(why, "wall-budget") || ftv-starts?(why, "depth-budget") || ftv-starts?(why, "size-budget") || ftv-starts?(why, "not-pure"));
+  // A stop inside the walk is a backtrack point. try answers its catch arm when the attempt
+  // answers nothing, so the attempt answers a one-element list and nothing stays a value.
+  def ftv-guarded(ctx, thunk) {
+   let held = try [thunk()] catch ftv-refuse(ctx, "eval-stopped");
+   nothing?(held) ? nothing() : held[0];
+  }
+  def ftv-sized(ctx, v) {
+   let kind = value_kind(v);
+   if (kind == "string") && (len(v) > ftv-max-text()) then ftv-refuse(ctx, "size-budget")
+   else if (kind == "list") && (len(v) > ftv-max-list()) then ftv-refuse(ctx, "size-budget")
+   else v;
+  }
+
+  // ── the eval sandbox: walking a lowered recipe ───────────────────────
+  def ftv-ev(ctx, node, env) = ftv-step(ctx) ? ftv-ev-node(ctx, node, env) : nothing();
+  def ftv-ev-node(ctx, node, env) = ftv-leaf?(node) ? ftv-leaf(ctx, node) : ftv-ev-cat(ctx, node_category(node), node_children(node), env);
+  def ftv-leaf(ctx, node) {
+   let t = node_type(node);
+   if (t == 1) || (t == 2) || (t == 3) || (t == 5) || (t == 7) then node_value(node) else ftv-refuse(ctx, "leaf-kind");
+  }
+  def ftv-ev-cat(ctx, cat, kids, env) {
+   if node_eq(cat, FTV-DO) then ftv-do(ctx, kids, env, nothing())
+   else if node_eq(cat, FTV-IDENT) then ftv-ident(ctx, node_value(kids[0]), env)
+   else if node_eq(cat, FTV-IF) then ftv-if(ctx, kids, env)
+   else if node_eq(cat, FTV-FNCALL) then ftv-call(ctx, ftv-callee(kids[0]), kids[1:], env)
+   else if node_eq(cat, FTV-LET) then ftv-ev(ctx, kids[1], env)
+   else if node_eq(cat, FTV-FNDEF) then ftv-def-closure(kids, env)
+   else ftv-prim(ctx, fsc-source-primitive-name(cat), kids, env);
+  }
+  def ftv-callee(ident) = node_eq(node_category(ident), FTV-IDENT) ? node_value(node_children(ident)[0]) : "";
+  def ftv-truthy?(v) {
+   let kind = value_kind(v);
+   if kind == "null" then 0 else if kind == "int" then v != 0 else if kind == "float" then v != 0.0 else 1;
+  }
+  def ftv-bool(v) = ftv-truthy?(v) ? 1 : 0;
+  def ftv-if(ctx, kids, env) {
+   let c = ftv-ev(ctx, kids[0], env);
+   if ftv-refused?(ctx) then nothing() else if ftv-truthy?(c) then ftv-ev(ctx, kids[1], env) else if len(kids) > 2 then ftv-ev(ctx, kids[2], env) else nothing();
+  }
+  def ftv-do(ctx, kids, env, last) {
+   if nil?(kids) then last
+   else if ftv-refused?(ctx) then nothing()
+   else if node_eq(node_category(kids[0]), FTV-LET) then ftv-do-let(ctx, kids, env)
+   else if node_eq(node_category(kids[0]), FTV-FNDEF) then ftv-do-def(ctx, kids, env)
+   else ftv-do(ctx, kids[1:], env, ftv-ev(ctx, kids[0], env));
+  }
+  def ftv-do-let(ctx, kids, env) {
+   let parts = node_children(kids[0]);
+   let value = ftv-ev(ctx, parts[1], env);
+   ftv-do(ctx, kids[1:], cons([node_value(parts[0]), value], env), value);
+  }
+  def ftv-do-def(ctx, kids, env) {
+   let closure = ftv-def-closure(node_children(kids[0]), env);
+   ftv-do(ctx, kids[1:], cons([record_get(closure, "name"), closure], env), closure);
+  }
+  def ftv-closure(params, body, env, name) = record_new(0, "ftv", "closure", "params", params, "body", body, "env", env, "name", name);
+  def ftv-closure?(v) = value_kind(v) == "record" ? record_get(v, "ftv") == "closure" : 0;
+  def ftv-function?(v) = value_kind(v) == "record";
+  def ftv-def-closure(parts, env) = ftv-closure(map(p => node_value(p), node_children(parts[1])), parts[2], env, node_value(parts[0]));
+  def ftv-lambda(args, env) = ftv-closure(map(p => node_value(p), node_children(args[0])), args[1], env, "");
+  def ftv-lookup(env, name) = nil?(env) ? nothing() : env[0][0] == name ? env[0] : ftv-lookup(env[1:], name);
+  def ftv-ident(ctx, name, env) {
+   let hit = ftv-lookup(env, name);
+   if !nothing?(hit) then hit[1]
+   else if name == "nothing" then nothing()
+   else if ftv-builtin?(name) then record_new(0, "ftv", "builtin", "name", name)
+   else if ftv-negated?(name) then ftv-negate(ctx, ftv-ident(ctx, substring(name, 1, len(name)), env))
+   else ftv-refuse(ctx, "unknown-name:" ++ name);
+  }
+  def ftv-negated?(name) = len(name) > 1 ? substring(name, 0, 1) == "-" : 0;
+  def ftv-negate(ctx, v) = ftv-num?(v) ? 0 - v : ftv-refuse(ctx, "kind:negate");
+
+  // ── the fourteen primitive categories ────────────────────────────────
+  def ftv-int?(v) = value_kind(v) == "int";
+  def ftv-num?(v) = (value_kind(v) == "int") || (value_kind(v) == "float");
+  def ftv-str?(v) = value_kind(v) == "string";
+  def ftv-list?(v) = value_kind(v) == "list";
+  def ftv-node?(v) = value_kind(v) == "node_id";
+  def ftv-prim(ctx, op, kids, env) {
+   if op == "" then ftv-refuse(ctx, "unknown-form")
+   else if op == "and" then ftv-and(ctx, kids, env)
+   else if op == "or" then ftv-or(ctx, kids, env)
+   else if op == "not" then ftv-not(ctx, kids, env)
+   else if len(kids) != 2 then ftv-refuse(ctx, "arity:" ++ op)
+   else ftv-binary-of(ctx, op, ftv-ev(ctx, kids[0], env), kids[1], env);
+  }
+  def ftv-binary-of(ctx, op, a, right, env) {
+   let b = ftv-ev(ctx, right, env);
+   ftv-refused?(ctx) ? nothing() : ftv-binary(ctx, op, a, b);
+  }
+  def ftv-and(ctx, kids, env) {
+   let a = ftv-ev(ctx, kids[0], env);
+   if ftv-refused?(ctx) then nothing() else if ftv-truthy?(a) then ftv-bool(ftv-ev(ctx, kids[1], env)) else 0;
+  }
+  def ftv-or(ctx, kids, env) {
+   let a = ftv-ev(ctx, kids[0], env);
+   if ftv-refused?(ctx) then nothing() else if ftv-truthy?(a) then 1 else ftv-bool(ftv-ev(ctx, kids[1], env));
+  }
+  def ftv-not(ctx, kids, env) {
+   let a = ftv-ev(ctx, kids[0], env);
+   ftv-refused?(ctx) ? nothing() : (ftv-truthy?(a) ? 0 : 1);
+  }
+  def ftv-binary(ctx, op, a, b) {
+   if op == "eq" then ftv-eq(a, b)
+   else if op == "ne" then 1 - ftv-eq(a, b)
+   else if !(ftv-num?(a) && ftv-num?(b)) then ftv-refuse(ctx, "kind:" ++ op)
+   else if op == "add" then a + b
+   else if op == "sub" then a - b
+   else if op == "mul" then a * b
+   else if op == "div" then ftv-div(ctx, a, b)
+   else if op == "mod" then ftv-mod(ctx, a, b)
+   else if op == "lt" then (a < b ? 1 : 0)
+   else if op == "le" then (a <= b ? 1 : 0)
+   else if op == "gt" then (a > b ? 1 : 0)
+   else if op == "ge" then (a >= b ? 1 : 0)
+   else ftv-refuse(ctx, "unknown-op:" ++ op);
+  }
+  def ftv-zero?(b) = ftv-int?(b) ? b == 0 : b == 0.0;
+  def ftv-div(ctx, a, b) = ftv-zero?(b) ? ftv-refuse(ctx, "division-by-zero") : a / b;
+  def ftv-mod(ctx, a, b) = !(ftv-int?(a) && ftv-int?(b)) ? ftv-refuse(ctx, "kind:mod") : b == 0 ? ftv-refuse(ctx, "division-by-zero") : a % b;
+  // the kernel's == keeps int and float apart; a number compares as a number
+  def ftv-eq(a, b) {
+   let ka = value_kind(a);
+   let kb = value_kind(b);
+   if ftv-num?(a) && ftv-num?(b) then ((a + 0.0) == (b + 0.0) ? 1 : 0)
+   else if ka != kb then 0
+   else if ka == "null" then 1
+   else if ka == "string" then (a == b ? 1 : 0)
+   else if ka == "list" then ftv-eq-list(a, b)
+   else if ka == "node_id" then node_eq(a, b)
+   else 0;
+  }
+  def ftv-eq-list(a, b) = nil?(a) ? (nil?(b) ? 1 : 0) : nil?(b) ? 0 : ftv-eq(a[0], b[0]) == 1 ? ftv-eq-list(a[1:], b[1:]) : 0;
+
+  // ── calls: lambdas, local defs, the pure builtins ────────────────────
+  def ftv-call(ctx, name, args, env) {
+   let hit = ftv-lookup(env, name);
+   if name == "$bml-lambda" then ftv-lambda(args, env)
+   else if !nothing?(hit) then ftv-apply-args(ctx, hit[1], args, env)
+   else if name == "attempt" then ftv-attempt(ctx, args, env)
+   else if ftv-builtin?(name) then ftv-builtin-args(ctx, name, args, env)
+   else ftv-refuse(ctx, "not-pure:" ++ name);
+  }
+  def ftv-args(ctx, args, env, out) = nil?(args) ? reverse(out) : ftv-refused?(ctx) ? reverse(out) : ftv-args(ctx, args[1:], env, cons(ftv-ev(ctx, args[0], env), out));
+  def ftv-apply-args(ctx, f, args, env) {
+   let vals = ftv-args(ctx, args, env, []);
+   ftv-refused?(ctx) ? nothing() : ftv-apply(ctx, f, vals);
+  }
+  def ftv-builtin-args(ctx, name, args, env) {
+   let vals = ftv-args(ctx, args, env, []);
+   ftv-refused?(ctx) ? nothing() : ftv-sized(ctx, ftv-builtin(ctx, name, vals));
+  }
+  def ftv-attempt(ctx, args, env) {
+   let value = ftv-ev(ctx, args[0], env);
+   if ftv-refused?(ctx) && ftv-recoverable?(record_get(ctx, "refused")) then ftv-recover(ctx) else value;
+  }
+  def ftv-recover(ctx) {
+   record_set(ctx, "refused", "");
+   nothing();
+  }
+  def ftv-apply(ctx, f, vals) {
+   if !ftv-function?(f) then ftv-refuse(ctx, "not-a-function")
+   else if record_get(f, "ftv") == "builtin" then ftv-sized(ctx, ftv-builtin(ctx, record_get(f, "name"), vals))
+   else if record_get(f, "ftv") == "recipe" then ftv-recipe-apply(ctx, record_get(f, "address"), vals)
+   else if len(vals) != len(record_get(f, "params")) then ftv-refuse(ctx, "arity:" ++ ftv-fn-name(f))
+   else if record_get(ctx, "depth") >= ftv-depth-budget() then ftv-refuse(ctx, "depth-budget")
+   else ftv-enter(ctx, f, vals);
+  }
+  def ftv-enter(ctx, f, vals) {
+   record_set(ctx, "depth", record_get(ctx, "depth") + 1);
+   let bound = ftv-bind(record_get(f, "params"), vals, ftv-self(f));
+   let value = ftv-ev(ctx, record_get(f, "body"), bound);
+   record_set(ctx, "depth", record_get(ctx, "depth") - 1);
+   value;
+  }
+  def ftv-self(f) = record_get(f, "name") == "" ? record_get(f, "env") : cons([record_get(f, "name"), f], record_get(f, "env"));
+  def ftv-bind(params, vals, env) = nil?(params) ? env : ftv-bind(params[1:], vals[1:], cons([params[0], vals[0]], env));
+  def ftv-fn-name(f) = record_get(f, "name") == "" ? "lambda" : record_get(f, "name");
+  def ftv-builtins() = ["bml-value-add", "str_concat", "$bml!=", "$bml==","list", "range", "len", "abs", "min", "max", "pow", "sqrt", "exp", "log", "round", "floor", "value_str", "str", "str_to_int", "int_to_str", "substring", "str_find", "trim", "split-on", "head", "tail", "nth", "cons", "append", "reverse", "take", "drop", "sum", "count", "contains?", "map", "filter", "foldl", "any?", "all?", "nothing?", "nil?", "value_kind", "bml-value-first", "bml-value-index", "bml-value-tail", "bml-value-slice", "node_value", "node_children", "node_category", "node_type", "node_level", "node_eq", "kind", "kids", "recipe"];
+  def ftv-builtin?(name) = any?(b => b == name, ftv-builtins());
+  def ftv-builtin(ctx, name, vals) {
+   let n = len(vals);
+   if any?(b => b == name, ["map", "filter", "foldl", "any?", "all?", "count"]) then ftv-b-high(ctx, name, vals, n)
+   else if any?(b => b == name, ["abs", "min", "max", "pow", "sqrt", "exp", "log", "round", "floor"]) then ftv-b-num(ctx, name, vals, n)
+   else if any?(b => b == name, ["str_concat", "value_str", "str", "str_to_int", "int_to_str", "substring", "str_find", "trim", "split-on"]) then ftv-b-text(ctx, name, vals, n)
+   else if any?(b => b == name, ["node_value", "node_children", "node_category", "node_type", "node_level", "node_eq", "kind", "kids"]) then ftv-b-node(ctx, name, vals, n)
+   else if any?(b => b == name, ["bml-value-add", "$bml!=", "$bml==", "nothing?","nil?", "value_kind", "recipe"]) then ftv-b-misc(ctx, name, vals, n)
+   else ftv-b-list(ctx, name, vals, n);
+  }
+  def ftv-arity(ctx, name, n, want) = n == want ? 1 : ftv-bad(ctx, "arity:" ++ name);
+  def ftv-bad(ctx, why) {
+   ftv-refuse(ctx, why);
+   0;
+  }
+  def ftv-b-num(ctx, name, vals, n) {
+   let a = n > 0 ? vals[0] : nothing();
+   if (n == 2) && ((name == "min") || (name == "max")) then ftv-min-max(ctx, name, vals)
+   else if (n == 1) && ((name == "min") || (name == "max")) && ftv-list?(a) then ftv-min-max-list(ctx, name, a)
+   else if (n == 2) && (name == "pow") then (ftv-num?(a) && ftv-num?(vals[1]) ? math_pow(a, vals[1]) : ftv-refuse(ctx, "kind:pow"))
+   else if (n == 2) && (name == "round") then (ftv-num?(a) && ftv-int?(vals[1]) ? round_ndigits(a, vals[1]) : ftv-refuse(ctx, "kind:round"))
+   else if n != 1 then ftv-refuse(ctx, "arity:" ++ name)
+   else if !ftv-num?(a) then ftv-refuse(ctx, "kind:" ++ name)
+   else if name == "abs" then (a < 0 ? 0 - a : a)
+   else if name == "sqrt" then (a < 0 ? ftv-refuse(ctx, "domain:sqrt") : math_sqrt(a))
+   else if name == "exp" then math_exp(a)
+   else if name == "log" then (a <= 0 ? ftv-refuse(ctx, "domain:log") : math_log(a))
+   else if name == "round" then round_ndigits(a, 0)
+   else if name == "floor" then (ftv-int?(a) ? a : float_to_int(a))
+   else ftv-refuse(ctx, "unknown-op:" ++ name);
+  }
+  def ftv-min-max(ctx, name, vals) = !(ftv-num?(vals[0]) && ftv-num?(vals[1])) ? ftv-refuse(ctx, "kind:" ++ name) : name == "min" ? (vals[0] <= vals[1] ? vals[0] : vals[1]) : (vals[0] >= vals[1] ? vals[0] : vals[1]);
+  def ftv-min-max-list(ctx, name, xs) = nil?(xs) ? ftv-refuse(ctx, "empty:" ++ name) : !all?(x => ftv-num?(x), xs) ? ftv-refuse(ctx, "kind:" ++ name) : foldl((m, x) => name == "min" ? (x < m ? x : m) : (x > m ? x : m), xs[0], xs[1:]);
+  def ftv-b-text(ctx, name, vals, n) {
+   let a = n > 0 ? vals[0] : nothing();
+   if (name == "value_str") || (name == "str") then (ftv-arity(ctx, name, n, 1) ? ftv-show(record_get(ctx, "session"), a) : nothing())
+   else if name == "str_concat" then (ftv-arity(ctx, name, n, 2) ? (ftv-str?(a) && ftv-str?(vals[1]) ? a ++ vals[1] : ftv-refuse(ctx, "kind:str_concat")) : nothing())
+   else if name == "str_to_int" then (ftv-arity(ctx, name, n, 1) ? (ftv-str?(a) ? str_to_int(a) : ftv-refuse(ctx, "kind:str_to_int")) : nothing())
+   else if name == "int_to_str" then (ftv-arity(ctx, name, n, 1) ? (ftv-int?(a) ? a.str() : ftv-refuse(ctx, "kind:int_to_str")) : nothing())
+   else if name == "trim" then (ftv-arity(ctx, name, n, 1) ? (ftv-str?(a) ? trim(a) : ftv-refuse(ctx, "kind:trim")) : nothing())
+   else if name == "split-on" then (ftv-arity(ctx, name, n, 2) ? (ftv-str?(a) && ftv-str?(vals[1]) && (len(vals[1]) > 0) ? split-on(a, vals[1]) : ftv-refuse(ctx, "kind:split-on")) : nothing())
+   else if name == "substring" then (ftv-arity(ctx, name, n, 3) ? ftv-substring(ctx, a, vals[1], vals[2]) : nothing())
+   else (ftv-arity(ctx, name, n, 3) ? ftv-str-find(ctx, a, vals[1], vals[2]) : nothing());
+  }
+  def ftv-substring(ctx, s, a, b) = !(ftv-str?(s) && ftv-int?(a) && ftv-int?(b)) ? ftv-refuse(ctx, "kind:substring") : (a < 0) || (b < a) || (b > len(s)) ? ftv-refuse(ctx, "index:substring") : substring(s, a, b);
+  def ftv-str-find(ctx, s, t, from) = !(ftv-str?(s) && ftv-str?(t) && ftv-int?(from)) ? ftv-refuse(ctx, "kind:str_find") : (from < 0) || (from > len(s)) ? ftv-refuse(ctx, "index:str_find") : str_find(s, t, from);
+  def ftv-b-list(ctx, name, vals, n) {
+   let a = n > 0 ? vals[0] : nothing();
+   if name == "list" then vals
+   else if name == "range" then (ftv-arity(ctx, name, n, 2) ? ftv-range(ctx, a, vals[1]) : nothing())
+   else if name == "len" then (ftv-arity(ctx, name, n, 1) ? (ftv-str?(a) || ftv-list?(a) ? len(a) : ftv-refuse(ctx, "kind:len")) : nothing())
+   else if (name == "head") || (name == "bml-value-first") then (ftv-arity(ctx, name, n, 1) ? ftv-first(ctx, name, a) : nothing())
+   else if (name == "tail") || (name == "bml-value-tail") then (ftv-arity(ctx, name, n, 1) ? ftv-rest(ctx, name, a) : nothing())
+   else if (name == "nth") || (name == "bml-value-index") then (ftv-arity(ctx, name, n, 2) ? ftv-index(ctx, name, a, vals[1]) : nothing())
+   else if name == "bml-value-slice" then (ftv-arity(ctx, name, n, 3) ? ftv-slice(ctx, a, vals[1], vals[2]) : nothing())
+   else if name == "cons" then (ftv-arity(ctx, name, n, 2) ? (ftv-list?(vals[1]) ? cons(a, vals[1]) : ftv-refuse(ctx, "kind:cons")) : nothing())
+   else if name == "append" then (ftv-arity(ctx, name, n, 2) ? (ftv-list?(a) && ftv-list?(vals[1]) ? append(a, vals[1]) : ftv-refuse(ctx, "kind:append")) : nothing())
+   else if name == "reverse" then (ftv-arity(ctx, name, n, 1) ? (ftv-list?(a) ? reverse(a) : ftv-refuse(ctx, "kind:reverse")) : nothing())
+   else if (name == "take") || (name == "drop") then (ftv-arity(ctx, name, n, 2) ? ftv-take-drop(ctx, name, a, vals[1]) : nothing())
+   else if name == "sum" then (ftv-arity(ctx, name, n, 1) ? ftv-sum(ctx, a) : nothing())
+   else if name == "contains?" then (ftv-arity(ctx, name, n, 2) ? (ftv-list?(a) ? (any?(x => ftv-eq(x, vals[1]) == 1, a) ? 1 : 0) : ftv-refuse(ctx, "kind:contains?")) : nothing())
+   else ftv-refuse(ctx, "unknown-op:" ++ name);
+  }
+  def ftv-range(ctx, a, b) = !(ftv-int?(a) && ftv-int?(b)) ? ftv-refuse(ctx, "kind:range") : (b - a) > ftv-max-list() ? ftv-refuse(ctx, "size-budget") : b <= a ? [] : range(a, b);
+  def ftv-first(ctx, name, a) = ftv-list?(a) ? (nil?(a) ? nothing() : a[0]) : ftv-str?(a) ? (len(a) == 0 ? nothing() : substring(a, 0, 1)) : ftv-refuse(ctx, "kind:" ++ name);
+  def ftv-rest(ctx, name, a) = ftv-list?(a) ? (nil?(a) ? [] : a[1:]) : ftv-str?(a) ? (len(a) == 0 ? "" : substring(a, 1, len(a))) : ftv-refuse(ctx, "kind:" ++ name);
+  def ftv-index(ctx, name, a, i) = !ftv-int?(i) ? ftv-refuse(ctx, "kind:" ++ name) : (ftv-list?(a) || ftv-str?(a)) ? bml-value-index(a, i) : ftv-refuse(ctx, "kind:" ++ name);
+  def ftv-slice(ctx, a, first, last) = !(ftv-list?(a) || ftv-str?(a)) ? ftv-refuse(ctx, "kind:slice") : !(nothing?(first) || ftv-int?(first)) ? ftv-refuse(ctx, "kind:slice") : !(nothing?(last) || ftv-int?(last)) ? ftv-refuse(ctx, "kind:slice") : bml-value-slice(a, first, last);
+  def ftv-take-drop(ctx, name, k, xs) = !(ftv-int?(k) && ftv-list?(xs)) ? ftv-refuse(ctx, "kind:" ++ name) : k < 0 ? ftv-refuse(ctx, "index:" ++ name) : name == "take" ? take(k, xs) : drop(k, xs);
+  def ftv-sum(ctx, xs) = !ftv-list?(xs) ? ftv-refuse(ctx, "kind:sum") : !all?(x => ftv-num?(x), xs) ? ftv-refuse(ctx, "kind:sum") : foldl((s, x) => s + x, 0, xs);
+  def ftv-b-high(ctx, name, vals, n) {
+   let f = n > 0 ? vals[0] : nothing();
+   if (name == "foldl") && (n == 3) then (ftv-function?(f) && ftv-list?(vals[2]) ? ftv-foldl(ctx, f, vals[1], vals[2]) : ftv-refuse(ctx, "kind:foldl"))
+   else if n != 2 then ftv-refuse(ctx, "arity:" ++ name)
+   else if !(ftv-function?(f) && ftv-list?(vals[1])) then ftv-refuse(ctx, "kind:" ++ name)
+   else if name == "map" then ftv-map(ctx, f, vals[1], [])
+   else if name == "filter" then ftv-filter(ctx, f, vals[1], [])
+   else if name == "any?" then ftv-any(ctx, f, vals[1])
+   else if name == "all?" then ftv-all(ctx, f, vals[1])
+   else len(ftv-filter(ctx, f, vals[1], []));
+  }
+  def ftv-map(ctx, f, xs, out) = nil?(xs) ? reverse(out) : ftv-refused?(ctx) ? [] : ftv-map(ctx, f, xs[1:], cons(ftv-apply(ctx, f, [xs[0]]), out));
+  def ftv-filter(ctx, f, xs, out) = nil?(xs) ? reverse(out) : ftv-refused?(ctx) ? [] : ftv-filter(ctx, f, xs[1:], ftv-truthy?(ftv-apply(ctx, f, [xs[0]])) ? cons(xs[0], out) : out);
+  def ftv-foldl(ctx, f, acc, xs) = nil?(xs) ? acc : ftv-refused?(ctx) ? nothing() : ftv-foldl(ctx, f, ftv-apply(ctx, f, [acc, xs[0]]), xs[1:]);
+  def ftv-any(ctx, f, xs) = nil?(xs) ? 0 : ftv-refused?(ctx) ? nothing() : ftv-truthy?(ftv-apply(ctx, f, [xs[0]])) ? 1 : ftv-any(ctx, f, xs[1:]);
+  def ftv-all(ctx, f, xs) = nil?(xs) ? 1 : ftv-refused?(ctx) ? nothing() : ftv-truthy?(ftv-apply(ctx, f, [xs[0]])) ? ftv-all(ctx, f, xs[1:]) : 0;
+  def ftv-b-node(ctx, name, vals, n) {
+   let a = n > 0 ? vals[0] : nothing();
+   let session = record_get(ctx, "session");
+   if name == "node_eq" then (ftv-arity(ctx, name, n, 2) ? (ftv-node?(a) && ftv-node?(vals[1]) ? node_eq(a, vals[1]) : ftv-refuse(ctx, "kind:node_eq")) : nothing())
+   else if n != 1 then ftv-refuse(ctx, "arity:" ++ name)
+   else if !ftv-node?(a) then ftv-refuse(ctx, "kind:" ++ name)
+   else if name == "node_value" then (ftv-leaf?(a) ? node_value(a) : ftv-coord(node_category(a)))
+   else if name == "node_children" then map(k => ftv-hold(session, k), node_children(a))
+   else if name == "node_category" then ftv-hold(session, node_category(a))
+   else if name == "node_type" then node_type(a)
+   else if name == "node_level" then node_level(a)
+   else if name == "kind" then ftv-kind(a)
+   else map(k => ftv-leaf?(k) ? node_value(k) : ftv-hold(session, k), node_children(a));
+  }
+  def ftv-b-misc(ctx, name, vals, n) {
+   let a = n > 0 ? vals[0] : nothing();
+   if name == "bml-value-add" then (ftv-arity(ctx, name, n, 2) ? ftv-add(ctx, a, vals[1]) : nothing())
+   else if name == "$bml!=" then (ftv-arity(ctx, name, n, 2) ? 1 - ftv-eq(a, vals[1]) : nothing())
+   else if name == "$bml==" then (ftv-arity(ctx, name, n, 2) ? ftv-eq(a, vals[1]) : nothing())
+   else if name == "nothing?" then (ftv-arity(ctx, name, n, 1) ? (nothing?(a) ? 1 : 0) : nothing())
+   else if name == "nil?" then (ftv-arity(ctx, name, n, 1) ? (nothing?(a) ? 1 : ftv-list?(a) ? (nil?(a) ? 1 : 0) : 0) : nothing())
+   else if name == "value_kind" then (ftv-arity(ctx, name, n, 1) ? value_kind(a) : nothing())
+   else (ftv-arity(ctx, name, n, 1) ? ftv-recipe-value(ctx, a) : nothing());
+  }
+  def ftv-add(ctx, a, b) {
+   if ftv-num?(a) && ftv-num?(b) then a + b
+   else if ftv-str?(a) && ftv-str?(b) then a ++ b
+   else if ftv-list?(a) && ftv-list?(b) then append(a, b)
+   else ftv-refuse(ctx, "kind:add");
+  }
+
+  // ── eval ─────────────────────────────────────────────────────────────
+  // The payload becomes the body of one definition the cursor reads whole; anything else the
+  // reader or lowering makes of it is refused before a step is walked.
+  def ftv-parse-expr(payload) = try ftv-parse-lowered(payload) catch nothing();
+  def ftv-parse-lowered(payload) {
+   let parsed = g-parse-full(form-bml-grammar(), "def ftv-expr() = { " ++ payload ++ " };");
+   if node_eq(parsed, FTV-PARSE-FAIL) then nothing() else ftv-expr-body(fbl-lower(parsed));
+  }
+  def ftv-expr-body(lowered) {
+   let kids = node_children(lowered);
+   if !node_eq(node_category(lowered), FTV-FNDEF) then nothing() else if len(kids) != 3 then nothing() else if node_value(kids[0]) != "ftv-expr" then nothing() else kids[2];
+  }
+  def ftv-guard(payload, limit) = len(payload) > limit ? "payload-budget" : str_find(payload, "<|", 0) >= 0 ? "nested-control" : "";
+  def ftv-eval(session, payload) = ftv-eval-bound(session, payload, record_get(session, "steps"), record_get(session, "wall-ms"));
+  def ftv-eval-bound(session, payload, steps, wall) {
+   let guard = ftv-guard(payload, ftv-max-payload());
+   let body = len(guard) > 0 ? nothing() : ftv-parse-expr(payload);
+   if len(guard) > 0 then ftv-nothing(guard)
+   else if nothing?(body) then ftv-nothing("parse-refused")
+   else ftv-run(session, body, [], steps, wall);
+  }
+  def ftv-run(session, body, env, steps, wall) {
+   let ctx = ftv-ctx(session, steps, wall);
+   let value = ftv-guarded(ctx, () => ftv-ev(ctx, body, env));
+   ftv-settle(ctx, value);
+  }
+  def ftv-settle(ctx, value) = ftv-refused?(ctx) ? ftv-nothing(record_get(ctx, "refused")) : ftv-render(record_get(ctx, "session"), value);
+
+  // ── knowledge-query: the enrich resources and this checkout's receipts ──
+  def ftv-stopwords() = ["the", "and", "for", "what", "which", "who", "how", "does", "this", "that", "with", "from", "about", "body", "form", "receipt", "receipts", "tell", "tells", "say", "says", "speak", "speaks", "are", "was", "its", "mean", "means", "meaning", "word", "words", "field", "own", "give", "show", "find", "where", "when", "why", "into", "our", "you", "your", "can", "has", "have", "not"];
+  def ftv-word-byte?(b) = ((b >= 97) && (b <= 122)) || ((b >= 65) && (b <= 90)) || ((b >= 48) && (b <= 57)) || (b == 45) || (b == 95);
+  def ftv-words(text) = ftv-words-at(text, 0, len(text), 0, []);
+  def ftv-words-at(text, i, n, start, out) {
+   if i >= n then reverse(ftv-word-close(text, start, i, out))
+   else if ftv-word-byte?(str_byte_at(text, i)) then ftv-words-at(text, i + 1, n, start, out)
+   else ftv-words-at(text, i + 1, n, i + 1, ftv-word-close(text, start, i, out));
+  }
+  def ftv-word-close(text, start, i, out) = i > start ? cons(substring(text, start, i), out) : out;
+  def ftv-lower-byte(b) = (b >= 65) && (b <= 90) ? b + 32 : b;
+  // halves join once per level, so a long opening costs n log n copies, not n squared
+  def ftv-lower(text) = ftv-lower-span(text, 0, len(text));
+  def ftv-lower-span(text, a, b) = (b - a) <= 16 ? ftv-lower-at(text, a, b, "") : ftv-lower-span(text, a, (a + b) / 2) ++ ftv-lower-span(text, (a + b) / 2, b);
+  def ftv-lower-at(text, i, n, out) = i >= n ? out : ftv-lower-at(text, i + 1, n, out ++ byte_to_str(ftv-lower-byte(str_byte_at(text, i))));
+  def ftv-distinct(xs, out) = nil?(xs) ? reverse(out) : any?(x => x == xs[0], out) ? ftv-distinct(xs[1:], out) : ftv-distinct(xs[1:], cons(xs[0], out));
+  def ftv-terms(payload) = ftv-distinct(filter(w => (len(w) >= 3) && !any?(s => s == ftv-lower(w), ftv-stopwords()), ftv-words(payload)), []);
+  def ftv-mc(session) {
+   let held = record_get(session, "mc");
+   if !nothing?(held) then held else ftv-mc-hold(session, mc-table());
+  }
+  def ftv-mc-hold(session, table) {
+   record_set(session, "mc", table);
+   table;
+  }
+  def ftv-enrich-row(session, w) {
+   let seed = fwf-find(w);
+   let senses = rwfd-find-all(w);
+   if !nil?(seed) then ftv-cap(w ++ ": " ++ fce-join(fwf-desc(seed)) ++ " [cognition/form-neutral-word-field.fk]")
+   else if !nil?(senses) then ftv-cap(w ++ ": " ++ fce-join(rwfd-desc(senses[0])) ++ " [cognition/response-word-field-dictionary.fk]")
+   else if mc-member?(mc-meanings(), w) then ftv-cap(w ++ ": " ++ trim(mc-line(mc-codes-in(ftv-mc(session), w))) ++ " [form/form-stdlib/meaning-codes.bml]")
+   else "";
+  }
+  def ftv-enrich-rows(session, terms) = take(2, filter(r => len(r) > 0, map(w => ftv-enrich-row(session, w), terms)));
+  def ftv-receipt-dir(session) = record_get(session, "root") ++ "receipts";
+  def ftv-receipt-names(session) {
+   let held = record_get(session, "receipts");
+   if !nothing?(held) then held else ftv-receipts-hold(session, filter(n => ftv-ends?(n, ".md"), (fs_is_dir(ftv-receipt-dir(session)) == 1) ? (fs_list(ftv-receipt-dir(session)) ?? []) : []));
+  }
+  def ftv-receipts-hold(session, names) {
+   record_set(session, "receipts", names);
+   names;
+  }
+  // [lowered opening, title] per receipt path, read once per process: receipts are written
+  // whole and kept, so an opening read once stays the opening
+  def ftv-opening(session, name) {
+   let path = ftv-receipt-dir(session) ++ "/" ++ name;
+   if record_has(FTV-OPENINGS, path) then record_get(FTV-OPENINGS, path) else ftv-opening-hold(path, name, read_file(path) ?? "");
+  }
+  def ftv-opening-hold(path, name, text) {
+   let opening = substring(text, 0, len(text) < 600 ? len(text) : 600);
+   let row = [ftv-lower(opening), ftv-title(name, opening)];
+   record_set(FTV-OPENINGS, path, row);
+   row;
+  }
+  def ftv-title(name, opening) {
+   let at = str_find(opening, "# ", 0);
+   let eol = at < 0 ? -1 : str_find(opening, byte_to_str(10), at);
+   at < 0 ? name : trim(substring(opening, at + 2, eol < 0 ? len(opening) : eol));
+  }
+  def ftv-date(name) = len(name) < 10 ? 0 : (str_to_int(substring(name, 0, 4)) * 10000) + (str_to_int(substring(name, 5, 7)) * 100) + str_to_int(substring(name, 8, 10));
+  def ftv-hits(text, terms) = len(filter(t => str_find(text, t, 0) >= 0, terms));
+  // [score, name]: a term in the name weighs ten of one in the opening; ties go to the newer receipt
+  def ftv-receipt-score(session, name, terms) = [(ftv-hits(ftv-lower(name), terms) * 10) + ftv-hits(ftv-opening(session, name)[0], terms), name];
+  def ftv-better?(a, b) = a[0] != b[0] ? a[0] > b[0] : ftv-date(a[1]) != ftv-date(b[1]) ? ftv-date(a[1]) > ftv-date(b[1]) : ftv-text-after?(a[1], b[1]);
+  def ftv-text-after?(a, b) = ftv-text-after-at(a, b, 0);
+  def ftv-text-after-at(a, b, i) = i >= len(a) ? 0 : i >= len(b) ? 1 : str_byte_at(a, i) != str_byte_at(b, i) ? str_byte_at(a, i) > str_byte_at(b, i) : ftv-text-after-at(a, b, i + 1);
+  def ftv-best(rows, best) = nil?(rows) ? best : ftv-best(rows[1:], nothing?(best) ? rows[0] : ftv-better?(rows[0], best) ? rows[0] : best);
+  def ftv-top(rows, k) {
+   let best = ftv-best(rows, nothing());
+   if (k <= 0) || nothing?(best) then [] else cons(best, ftv-top(filter(r => r[1] != best[1], rows), k - 1));
+  }
+  def ftv-receipt-rows(session, terms) {
+   let lowered = map(t => ftv-lower(t), terms);
+   let scored = filter(r => r[0] > 0, map(name => ftv-receipt-score(session, name, lowered), ftv-receipt-names(session)));
+   map(r => ftv-cap("receipts/" ++ r[1] ++ ": " ++ ftv-opening(session, r[1])[1]), ftv-top(scored, 3));
+  }
+  def ftv-knowledge(session, payload) {
+   let guard = ftv-guard(payload, 256);
+   let terms = len(guard) > 0 ? [] : take(6, ftv-terms(payload));
+   if len(guard) > 0 then ftv-nothing(guard)
+   else if nil?(terms) then ftv-nothing("no-terms")
+   else ftv-knowledge-rows(append(ftv-enrich-rows(session, terms), ftv-receipt-rows(session, terms)));
+  }
+  def ftv-knowledge-rows(rows) = nil?(rows) ? ftv-nothing("no-grounded-row") : ftv-value-result(ftv-join(rows, " | "));
+
+  // ── node-get, node-make, node-select ─────────────────────────────────
+  def ftv-node-get(session, payload) {
+   let coord = trim(payload);
+   let node = ftv-held(session, coord);
+   if nothing?(node) then ftv-nothing("unregistered-node") else ftv-value-result(ftv-show(session, [ftv-kind(node), ftv-leaf?(node) ? node_value(node) : ftv-coord(node_category(node)), map(k => ftv-node-show(session, k), node_children(node))]));
+  }
+  // items split on commas outside double quotes
+  def ftv-items(text) = ftv-items-at(text, 0, len(text), 0, 0, []);
+  def ftv-items-at(text, i, n, start, quoted, out) {
+   if i >= n then reverse(ftv-item-close(text, start, i, out))
+   else if str_byte_at(text, i) == 92 then ftv-items-at(text, i + 2, n, start, quoted, out)
+   else if str_byte_at(text, i) == 34 then ftv-items-at(text, i + 1, n, start, 1 - quoted, out)
+   else if (str_byte_at(text, i) == 44) && (quoted == 0) then ftv-items-at(text, i + 1, n, i + 1, quoted, ftv-item-close(text, start, i, out))
+   else ftv-items-at(text, i + 1, n, start, quoted, out);
+  }
+  def ftv-item-close(text, start, i, out) = len(trim(substring(text, start, i < len(text) ? i : len(text)))) > 0 ? cons(trim(substring(text, start, i < len(text) ? i : len(text))), out) : out;
+  def ftv-int-text?(t) = (len(t) > 0) && (len(t) <= 19) && (str_to_int(t).str() == t);
+  def ftv-float-text?(t) = (len(t) > 2) && (str_find(t, ".", 0) > 0) && ftv-int-text?(substring(t, 0, str_find(t, ".", 0))) && ftv-digits?(substring(t, str_find(t, ".", 0) + 1, len(t)));
+  def ftv-digits?(t) = (len(t) > 0) && all?(b => (b >= 48) && (b <= 57), map(i => str_byte_at(t, i), range(0, len(t))));
+  def ftv-quoted?(t) = (len(t) >= 2) && (str_byte_at(t, 0) == 34) && (str_byte_at(t, len(t) - 1) == 34);
+  def ftv-unquote(t) = ftv-unesc(t, 1, len(t) - 1, "");
+  def ftv-unesc(t, i, n, out) = i >= n ? out : str_byte_at(t, i) == 92 ? ftv-unesc(t, i + 2, n, out ++ (i + 1 < n ? substring(t, i + 1, i + 2) : "")) : ftv-unesc(t, i + 1, n, out ++ substring(t, i, i + 1));
+  def ftv-child(session, item) {
+   if ftv-starts?(item, "@") then ftv-held(session, item)
+   else if ftv-int-text?(item) then intern_trivial_int(str_to_int(item))
+   else if ftv-float-text?(item) then intern_trivial_float(item)
+   else if ftv-quoted?(item) then intern_trivial_string(ftv-unquote(item))
+   else if item == "true" then intern_trivial_bool(1)
+   else if item == "false" then intern_trivial_bool(0)
+   else nothing();
+  }
+  def ftv-name?(t) = (len(t) > 0) && (len(t) <= 32) && (str_byte_at(t, 0) >= 97) && (str_byte_at(t, 0) <= 122) && all?(b => ((b >= 97) && (b <= 122)) || ((b >= 48) && (b <= 57)) || (b == 45), map(i => str_byte_at(t, i), range(0, len(t))));
+  def ftv-category(session, text) = ftv-starts?(text, "@") ? ftv-held(session, text) : ftv-name?(text) ? ftv-hold(session, intern_node(FTV-CATEGORY-ROOT, [intern_trivial_string(text)])) : nothing();
+  def ftv-node-make(session, payload) {
+   let semi = str_find(payload, ";", 0);
+   let catText = semi < 0 ? trim(payload) : trim(substring(payload, 0, semi));
+   let items = semi < 0 ? [] : ftv-items(substring(payload, semi + 1, len(payload)));
+   let cat = ftv-category(session, catText);
+   let kids = map(item => ftv-child(session, item), items);
+   if str_find(payload, "<|", 0) >= 0 then ftv-nothing("nested-control")
+   else if nothing?(cat) then ftv-nothing("category")
+   else if len(items) > 16 then ftv-nothing("child-budget")
+   else if any?(k => nothing?(k), kids) then ftv-nothing("child")
+   else ftv-node-made(session, intern_node(cat, map(k => ftv-hold(session, k), kids)));
+  }
+  def ftv-node-made(session, node) = ftv-node-result(ftv-hold(session, node));
+  def ftv-node-select(session, payload) {
+   let cut = ftv-last-index(payload, ";");
+   let guard = ftv-guard(payload, ftv-max-payload());
+   let body = (cut < 1) || (len(guard) > 0) ? nothing() : ftv-parse-expr(substring(payload, 0, cut));
+   let coords = cut < 1 ? [] : ftv-items(substring(payload, cut + 1, len(payload)));
+   let nodes = map(c => ftv-held(session, c), coords);
+   if len(guard) > 0 then ftv-nothing(guard)
+   else if cut < 1 then ftv-nothing("select-fields")
+   else if nothing?(body) then ftv-nothing("parse-refused")
+   else if nil?(coords) then ftv-nothing("no-candidates")
+   else if len(coords) > 16 then ftv-nothing("candidate-budget")
+   else if any?(k => nothing?(k), nodes) then ftv-nothing("unregistered-node")
+   else ftv-select(session, body, nodes);
+  }
+  // one alternative per candidate, offered in order through the choice lane; a candidate whose
+  // predicate does not hold fails, and the lane backtracks to the next
+  def ftv-select(session, body, nodes) {
+   let seen = record_new(0, "why", "");
+   let alts = map(node => args => ftv-holds?(session, body, node, seen) ? node : fail, nodes);
+   let picked = try oac-choice(alts, 0) catch nothing();
+   if !nothing?(picked) then ftv-node-made(session, picked)
+   else if len(record_get(seen, "why")) > 0 then ftv-nothing(record_get(seen, "why"))
+   else ftv-nothing("no-candidate-holds");
+  }
+  def ftv-holds?(session, body, node, seen) {
+   let ctx = ftv-ctx-of(session);
+   let value = ftv-guarded(ctx, () => ftv-ev(ctx, body, [["n", node]]));
+   if ftv-refused?(ctx) then ftv-note(seen, record_get(ctx, "refused")) else ftv-truthy?(value);
+  }
+  def ftv-note(seen, why) {
+   if ftv-recoverable?(why) then 0 else record_set(seen, "why", why);
+   0;
+  }
+
+  // ── recipe-birth, recipe-exec, choice in Form ─────────────────────────
+  def ftv-recipe-birth(session, payload) {
+   if str_find(payload, "<|", 0) >= 0 then ftv-nothing("nested-control")
+   else if ftv-starts?(payload, "affine-i32;") then ftv-birth-affine(session, payload)
+   else if ftv-starts?(payload, "bml;") then ftv-birth-bml(session, substring(payload, 4, len(payload)))
+   else ftv-nothing("recipe-kind");
+  }
+  def ftv-birth-affine(session, payload) {
+   let born = frbt-parse-stream(frbt-open() ++ payload ++ frbt-close());
+   if frbt-result-status(born) == "ready" then ftv-recipe-hold(session, frbt-result-recipe(born)) else ftv-nothing(frbt-result-reason(born));
+  }
+  def ftv-recipe-hold(session, recipe) {
+   record_set(record_get(session, "recipes"), ftv-coord(recipe), recipe);
+   ftv-recipe-result(ftv-hold(session, recipe));
+  }
+  def ftv-birth-bml(session, source) {
+   let body = len(source) > ftv-max-payload() ? nothing() : ftv-parse-expr(source);
+   let ctx = ftv-ctx-of(session);
+   let made = nothing?(body) ? nothing() : ftv-guarded(ctx, () => ftv-ev(ctx, body, []));
+   if nothing?(body) then ftv-nothing("parse-refused")
+   else if ftv-refused?(ctx) then ftv-nothing(record_get(ctx, "refused"))
+   else if !ftv-closure?(made) then ftv-nothing("recipe-not-a-function")
+   else if len(record_get(made, "params")) != 1 then ftv-nothing("recipe-arity")
+   else ftv-bml-hold(session, trim(source), made);
+  }
+  def ftv-bml-hold(session, source, closure) {
+   let recipe = intern_node(FTV-BML-RECIPE, [intern_trivial_string("bml-recipe-v1"), intern_trivial_string(source)]);
+   record_set(record_get(session, "closures"), ftv-coord(recipe), closure);
+   ftv-recipe-hold(session, recipe);
+  }
+  def ftv-bml-recipe?(recipe) = node_eq(node_category(recipe), FTV-BML-RECIPE);
+  // [address, input text, carrier]: the input runs from input= to the last ;carrier=
+  def ftv-exec-fields(payload) {
+   let semi = str_find(payload, ";input=", 0);
+   let car = ftv-last-index(payload, ";carrier=");
+   if (semi < 1) || (car < semi + 7) then nothing() else [trim(substring(payload, 0, semi)), substring(payload, semi + 7, car), substring(payload, car + 9, len(payload))];
+  }
+  def ftv-recipe-exec(session, payload) {
+   let fields = str_find(payload, "<|", 0) >= 0 ? nothing() : ftv-exec-fields(payload);
+   if nothing?(fields) then ftv-nothing("request-fields") else ftv-exec(session, fields[0], fields[1], fields[2]);
+  }
+  def ftv-exec(session, address, input, carrier) {
+   let recipes = record_get(session, "recipes");
+   if !record_has(recipes, address) then ftv-nothing("unknown-recipe")
+   else if carrier == "metal" then ftv-nothing("carrier-unavailable")
+   else if !((carrier == "auto") || (carrier == "cpu") || (carrier == "form")) then ftv-nothing("carrier-choice")
+   else if ftv-bml-recipe?(record_get(recipes, address)) then ftv-exec-bml(session, address, input)
+   else ftv-exec-affine(record_get(recipes, address), input);
+  }
+  def ftv-affine(recipe, x) = (x * frbt-recipe-mul(recipe)) + frbt-recipe-add(recipe);
+  def ftv-exec-affine(recipe, input) {
+   let x = frex-input-text?(input) == 1 ? str_to_int(input) : 0;
+   if frex-input-text?(input) != 1 then ftv-nothing("input-integer")
+   else if (frbt-i32?(x) != 1) || (frbt-i32?(ftv-affine(recipe, x)) != 1) then ftv-nothing("signed-i32-overflow")
+   else ftv-value-result(ftv-affine(recipe, x).str());
+  }
+  def ftv-exec-bml(session, address, input) {
+   let body = ftv-parse-expr(input);
+   let ctx = ftv-ctx-of(session);
+   let value = nothing?(body) ? nothing() : ftv-guarded(ctx, () => ftv-apply-input(ctx, address, body));
+   nothing?(body) ? ftv-nothing("input-parse-refused") : ftv-settle(ctx, value);
+  }
+  def ftv-apply-input(ctx, address, body) {
+   let arg = ftv-ev(ctx, body, []);
+   ftv-refused?(ctx) ? nothing() : ftv-recipe-apply(ctx, address, [arg]);
+  }
+  // recipe(address) inside eval: a function value that runs the held recipe in the same budget
+  def ftv-recipe-value(ctx, address) = !ftv-str?(address) ? ftv-refuse(ctx, "kind:recipe") : record_has(record_get(record_get(ctx, "session"), "recipes"), address) ? record_new(0, "ftv", "recipe", "address", address) : ftv-refuse(ctx, "unknown-recipe");
+  def ftv-recipe-apply(ctx, address, vals) {
+   let session = record_get(ctx, "session");
+   let recipe = record_get(record_get(session, "recipes"), address);
+   if len(vals) != 1 then ftv-refuse(ctx, "arity:recipe")
+   else if ftv-bml-recipe?(recipe) then ftv-apply(ctx, record_get(record_get(session, "closures"), address), vals)
+   else if !ftv-int?(vals[0]) then ftv-refuse(ctx, "input-integer")
+   else if (frbt-i32?(vals[0]) != 1) || (frbt-i32?(ftv-affine(recipe, vals[0])) != 1) then ftv-refuse(ctx, "signed-i32-overflow")
+   else ftv-affine(recipe, vals[0]);
+  }
+  def ftv-choice(session, payload) {
+   let semi = str_find(payload, ";", 0);
+   let addresses = semi < 1 ? [] : map(a => trim(a), split-on(substring(payload, 0, semi), ","));
+   if semi < 1 then ftv-nothing("request-fields")
+   else if len(addresses) > 8 then ftv-nothing("choice-budget")
+   else ftv-choose(session, addresses, substring(payload, semi, len(payload)));
+  }
+  // each address is an alternative offered in order; one that answers no value fails, and the
+  // lane moves to the next; when none answers, the last answer is the observation
+  def ftv-choose(session, addresses, rest) {
+   let last = record_new(0, "result", ftv-nothing("no-alternative"));
+   let alts = map(address => args => ftv-alternative(session, address, rest, last), addresses);
+   let picked = try oac-choice(alts, 0) catch nothing();
+   nothing?(picked) ? record_get(last, "result") : picked;
+  }
+  def ftv-alternative(session, address, rest, last) {
+   let result = ftv-recipe-exec(session, address ++ rest);
+   record_set(last, "result", result);
+   ftv-starts?(result, "value=") ? result : fail;
+  }
+ }
+ 0;
+}

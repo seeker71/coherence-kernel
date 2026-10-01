@@ -1,0 +1,75 @@
+; form-token-traces-band.bml — the training traces Form wrote are read back and run again.
+; preludes: form-stdlib/bml/form-token-traces.bml
+; Verdict 63
+;
+; learn/form-token-traces.jsonl is read through the carrier from the repository root.
+;     1  at least 500 rows; every row carries question, controls, observations, answer, prompt,
+;        completion and stream, verified=1, replayed=1 and zero rented tokens
+;     2  all fifteen families and all eight verbs are present; each family marks a held-out split,
+;        one row in eight
+;     4  every eval, node and recipe row, replayed in a fresh session with each recorded coordinate
+;        mapped to the one the fresh run answers, reproduces its observations byte for byte
+;     8  knowledge rows stay grounded: a receipt answer is a receipt file whose name carries the term
+;        asked; a sense answer is the authored row the observation opens with
+;    16  the writer's own check refuses a case whose oracle disagrees and keeps one that agrees; a
+;        replay maps coordinates that moved (recorded @0.2.0.1 and @0.2.0.2) and refuses a changed
+;        observation
+;    32  completion is the first control and carries no observation; stream interleaves each control
+;        with its observation and ends with the answer
+section [form.bml] {
+ class FormTokenTracesBand {
+  def ftrb-claim(ok, bit) = ok ? bit : 0;
+  def ftrb-text(doc, key) = json-string-value(json-object-get(doc, key));
+  def ftrb-strings(doc, key) = map(n => json-string-value(n), json-array-elements(json-object-get(doc, key)));
+  def ftrb-rows() = map(line => parse-json("form-token-traces", line), filter(line => len(trim(line)) > 0, split-on(read_file(ftr-corpus()) ?? "", byte_to_str(10))));
+  def ftrb-has(doc, key) = json-object-has?(doc, key);
+  def ftrb-shape(doc) = all?(k => ftrb-has(doc, k), ["id", "family", "verb", "verbs", "split", "question", "controls", "observations", "answer", "prompt", "completion", "stream", "verified", "replayed", "rented_tokens"]) && (json-int-value(json-object-get(doc, "verified")) == 1) && (json-int-value(json-object-get(doc, "replayed")) == 1) && (json-int-value(json-object-get(doc, "rented_tokens")) == 0) && (len(ftrb-strings(doc, "controls")) == len(ftrb-strings(doc, "observations")));
+  def ftrb-families() = ["eval-arith", "eval-compare", "eval-text", "eval-lists", "eval-recursion", "eval-float", "eval-refusal", "knowledge-receipts", "knowledge-enrich", "node-make", "node-get", "node-select", "recipe-affine", "recipe-choice", "recipe-bml"];
+  def ftrb-of(rows, family) = filter(r => ftrb-text(r, "family") == family, rows);
+  def ftrb-heldout(rows) = len(filter(r => ftrb-text(r, "split") == "heldout", rows));
+  def ftrb-split-ok(rows) = (ftrb-heldout(rows) >= 1) && (ftrb-heldout(rows) == (len(rows) / 8));
+  def ftrb-coverage(rows) {
+   let verbs = foldl((acc, r) => append(acc, ftrb-strings(r, "verbs")), [], rows);
+   all?(f => ftrb-split-ok(ftrb-of(rows, f)), ftrb-families()) && all?(v => any?(x => x == v, verbs), ftg-verbs());
+  }
+  def ftrb-knowledge?(r) = ftv-starts?(ftrb-text(r, "family"), "knowledge-");
+  def ftrb-replays(rows) = all?(r => ftr-replay(ftrb-strings(r, "controls"), ftrb-strings(r, "observations")) == 1, filter(r => !ftrb-knowledge?(r), rows));
+  def ftrb-term(question) = substring(question, len("Which receipt in this body speaks of "), len(question) - 1);
+  def ftrb-word(question) = substring(question, len("What does "), str_find(question, " mean in", 0));
+  def ftrb-grounded(rows) {
+   let receipts = ftrb-of(rows, "knowledge-receipts");
+   let senses = ftrb-of(rows, "knowledge-enrich");
+   let receiptOk = all?(r => (file_size(ftrb-text(r, "answer")) > 0) && (str_find(ftv-lower(ftrb-text(r, "answer")), ftrb-term(ftrb-text(r, "question")), 0) >= 0), receipts);
+   let senseOk = all?(r => ftv-starts?(ftrb-strings(r, "observations")[0], ftg-observation-open() ++ "value=" ++ ftrb-word(ftrb-text(r, "question")) ++ ": " ++ ftrb-text(r, "answer") ++ " ["), senses);
+   (len(receipts) > 0) && (len(senses) > 0) && receiptOk && senseOk;
+  }
+  def ftrb-check() {
+   let good = ftr-eval("eval-arith", "What is 6 * 7?", "6 * 7", 42);
+   let bad = ftr-eval("eval-arith", "What is 6 * 7?", "6 * 7", 43);
+   let wrongVerb = ftr-one("eval-arith", "What is 6 * 7?", "eval", "6 * 8", obs => ftg-result-body(obs[0]), obs => obs[0] == "value=42;");
+   let make = "<|form:node-make|>pair;5,6<|/form:node-make|>";
+   let moved = ["<|form:observation|>node=@0.2.0.1;<|/form:observation|>", "<|form:observation|>value=[pair, @0.2.0.2, [5, 6]];<|/form:observation|>"];
+   let tampered = ["<|form:observation|>node=@0.2.0.1;<|/form:observation|>", "<|form:observation|>value=[pair, @0.2.0.2, [5, 7]];<|/form:observation|>"];
+   let controls = [make, "<|form:node-get|>@0.2.0.1<|/form:node-get|>"];
+   ftr-verify(good)[2] && !ftr-verify(bad)[2] && !ftr-verify(wrongVerb)[2] && (ftr-replay(controls, moved) == 1) && (ftr-replay(controls, tampered) == 0) && (ftr-replay(["<|form:eval|>6 * 7<|/form:eval|>"], ["<|form:observation|>value=43;<|/form:observation|>"]) == 0);
+  }
+  def ftrb-stream(r) {
+   let controls = ftrb-strings(r, "controls");
+   let obs = ftrb-strings(r, "observations");
+   (ftrb-text(r, "prompt") == ftrb-text(r, "question")) && (ftrb-text(r, "completion") == controls[0]) && (str_find(ftrb-text(r, "completion"), ftg-observation-open(), 0) < 0) && (ftrb-text(r, "stream") == ftrb-interleave(controls, obs, ftrb-text(r, "answer")));
+  }
+  def ftrb-interleave(controls, obs, answer) = nil?(controls) ? answer : controls[0] ++ byte_to_str(10) ++ obs[0] ++ byte_to_str(10) ++ ftrb-interleave(controls[1:], obs[1:], answer);
+  def ftrb-run() {
+   let rows = ftrb-rows();
+   let c1 = ftrb-claim((len(rows) >= 500) && all?(r => ftrb-shape(r), rows), 1);
+   let c2 = ftrb-claim(ftrb-coverage(rows), 2);
+   let c3 = ftrb-claim(ftrb-replays(rows), 4);
+   let c4 = ftrb-claim(ftrb-grounded(rows), 8);
+   let c5 = ftrb-claim(ftrb-check(), 16);
+   let c6 = ftrb-claim(all?(r => ftrb-stream(r), rows), 32);
+   print_str("form-token-traces-band rows " ++ len(rows).str() ++ " claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c3.str() ++ " " ++ c4.str() ++ " " ++ c5.str() ++ " " ++ c6.str());
+   c1 + c2 + c3 + c4 + c5 + c6;
+  }
+ }
+ ftrb-run();
+}
