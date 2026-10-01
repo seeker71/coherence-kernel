@@ -336,37 +336,15 @@ fk_workload_closure() {
     return 1
 }
 
-# fk_leg_closure LEGS LEG — a per-leg copy of a closure that names "/tmp/, rooted in the leg's
-# own TMPDIR. Only the lines that name it are rewritten: bash 3.2 expands a whole multi-MB text
-# in quadratic time.
-fk_leg_closure() {
-    local src="$1/closure.fk" out="$1/closure-$2.fk" to="\"$1/tmp-$2/" hit n line prev=0
-    : > "$out"
-    while IFS= read -r hit; do
-        n="${hit%%:*}"
-        line="${hit#*:}"
-        if [[ $n -gt $((prev + 1)) ]]; then
-            head -n "$((n - 1))" "$src" | tail -n "+$((prev + 1))" >> "$out"
-        fi
-        printf '%s\n' "${line//\"\/tmp\//$to}" >> "$out"
-        prev="$n"
-    done < <(grep -n -F '"/tmp/' "$src")
-    tail -n "+$((prev + 1))" "$src" >> "$out"
-}
-
 # fk_run_leg LEGS LEG COMMAND... — one sibling over the closure, its streams and exit in LEGS.
-# Each leg owns its TMPDIR: bands reach scratch space through the `temp_dir` native and by
-# literal "/tmp/ paths, so concurrent legs and concurrent runs never share a scratch path.
+# Every leg reads the one closure fkwu handed over, byte for byte; each owns its TMPDIR, the
+# scratch bands reach through the `temp_dir` native, so concurrent legs never share a path.
 fk_run_leg() (
     set +e
-    legs="$1" leg="$2" input="$1/closure.fk"
+    legs="$1" leg="$2"
     shift 2
     mkdir -p "$legs/tmp-$leg"
-    if grep -q -F '"/tmp/' "$input"; then
-        fk_leg_closure "$legs" "$leg"
-        input="$legs/closure-$leg.fk"
-    fi
-    TMPDIR="$legs/tmp-$leg" "$@" "$input" > "$legs/$leg" 2> "$legs/$leg.err"
+    TMPDIR="$legs/tmp-$leg" "$@" "$legs/closure.fk" > "$legs/$leg" 2> "$legs/$leg.err"
     printf '%s\n' "$?" > "$legs/$leg.rc"
 )
 
