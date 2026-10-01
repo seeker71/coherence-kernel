@@ -224,7 +224,9 @@ call. Reasoning generation can birth signed-i32 affine recipes, choose among
 addresses and execute RAM-JIT Metal through the scannerless Form cursor in
 that same KV stream. The reserved final stage receives the actual execution
 results; private evidence keeps model output and Form observations separate.
-Automatic lookup is not bound to this mode.
+The same reasoning cursor accepts explicit concept requests through
+`nodeid-knowledge-query` and injects attributed current source observations.
+Automatic lookup and arbitrary graph mutation are not bound to this mode.
 Both options may be combined in either order.
 Use `generate --tokens 2048 --reasoning 512 --words 350:450 --prompt-file PATH`
 when the enquiry and source context need a complete file; choose allowances and
