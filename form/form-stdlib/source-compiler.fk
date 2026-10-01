@@ -796,20 +796,29 @@
                         (let next (if (fsc-bml-member? seen path) (list seen signatures (nth resolution 1))
                             (fsc-bml-file-signatures-walk path (fsc-bml-read-source path) (cons path seen) signatures (nth resolution 1) homes discovery)))
                         (fsc-bml-dependency-signatures owner (tail tokens) (head next) (nth next 1) (nth next 2) homes discovery))))))
+    ;; A file's own facts -- fingerprint, exports, dependency tokens, selected
+    ;; home tokens -- are decided by its bytes and the home rows alone, so one
+    ;; process-wide map serves every unit a lowering child lowers and every
+    ;; batch a lift runs. Where a token resolves, what is absent and the order
+    ;; of `seen` stay live per owner.
+    (let FSC-BML-READINGS (record_new 0))
+    (let FSC-BML-READING-COUNTS (record_new 0))
+    (defn fsc-bml-reading-bump (key)
+        (record_set FSC-BML-READING-COUNTS key
+            (add (if (record_has FSC-BML-READING-COUNTS key) (record_get FSC-BML-READING-COUNTS key) 0) 1)))
+    (defn fsc-bml-reading-counts ()
+        (list (if (record_has FSC-BML-READING-COUNTS "read") (record_get FSC-BML-READING-COUNTS "read") 0)
+              (if (record_has FSC-BML-READING-COUNTS "reused") (record_get FSC-BML-READING-COUNTS "reused") 0)))
     (defn fsc-bml-file-signatures (path source seen signatures observations homes)
-        (fsc-bml-file-signatures-in path source seen signatures observations homes (record_new 0)))
-    ;; One owned discovery map may serve a batch. Re-read dependencies and match
-    ;; exact source and home bindings before reusing local facts. Resolution,
-    ;; ordered contracts and observations are still rebuilt for each owner.
+        (fsc-bml-file-signatures-in path source seen signatures observations homes FSC-BML-READINGS))
     (defn fsc-bml-file-facts (path source homes discovery)
         (do
             (let prior (record_get discovery path))
             (if (and (record_has discovery path) (str_eq source (head prior)))
+                (do (fsc-bml-reading-bump "reused") prior)
                 (do
-                    (fb_record (intern_node (intern_trivial_string "bml-discovery-reuse")
-                        (list (intern_trivial_string path))) path 0)
-                    prior)
-                (do
+                    (fsc-bml-reading-bump "read")
+                    (let started (host_monotonic_ms))
                     (let walked (if (and (lt (fsc-find-section-open source 0) 0)
                                           (not (str_eq (substring path (sub (str_len path) 4) (str_len path)) ".bml")))
                         (list source (fsc-form-signature-span source 0 (str_len source) (empty)))
@@ -819,6 +828,8 @@
                     (let facts (list source (bml-source-fingerprint source)
                         (bml-source-dependencies surface 1) (nth walked 1)
                         (fsc-bml-selected-homes surface homes)))
+                    (fb_record (intern_node (intern_trivial_string "bml-discovery-ms")
+                        (list (intern_trivial_string path) (intern_trivial_int (sub (host_monotonic_ms) started)))) path 0)
                     (record_set discovery path facts)
                     facts))))
     (defn fsc-bml-file-signatures-in (path source seen signatures observations homes discovery)
@@ -831,11 +842,8 @@
     (defn fsc-bml-file-signatures-walk (path source seen signatures observations homes discovery)
         (if (nothing? source) (fsc-compiler-error-line "BML contract source unreadable" path)
             (do
-                (let started (host_monotonic_ms))
                 (let facts (fsc-bml-file-facts path source homes discovery))
                 (let current (cons (list "F" (bml-source-absolute path) (nth facts 1)) observations))
-                (fb_record (intern_node (intern_trivial_string "bml-discovery-ms")
-                    (list (intern_trivial_string path) (intern_trivial_int (sub (host_monotonic_ms) started)))) path 0)
                 (let imported (fsc-bml-dependency-signatures path (nth facts 2) seen signatures current homes discovery))
                 (let linked (fsc-bml-dependency-signatures path (nth facts 4)
                     (head imported) (nth imported 1) (nth imported 2) homes discovery))

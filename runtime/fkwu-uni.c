@@ -21890,6 +21890,7 @@ static int fk_src_prelude_bml_token(const char *text, long long start, long long
            text[start + n - 2] == 'm' && text[start + n - 1] == 'l';
 }
 static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len);
+static void fk_bml_child_close(void);
 static int fk_unit_lowers(const char *path);
 static int fk_src_collect_dep(const char *owner_path, long long owner_idx, const char *tok,
                               long long tn);
@@ -23736,11 +23737,13 @@ static int fk_run_loaded_program_image(long long arg) {
     }
     fk_vs[0] = arg << 1;
     fk_vsp = 1;
+    fk_bml_child_close();
     fk_pv_root(fk_walk(fk_fn[0], 0));
     return 0;
 }
 typedef long long (*fk_dylib_main_v1_fn)(long long);
 static int fk_run_dylib_artifact(const char *dylib_path, long long arg, int hard_error) {
+    fk_bml_child_close();
     void *h = dlopen(dylib_path, 2);
     if (h == 0) {
         if (hard_error) {
@@ -24818,6 +24821,7 @@ static int fk_run_src(const char *path, long long arg) {
         fk_heat_report();
         return 1;
     }
+    fk_bml_child_close();
     fk_pv_root(fk_walk(fk_fn[0], 0));
     fk_heat_report();
     return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
@@ -25014,6 +25018,7 @@ static int fk_run_feval(const char *path) {
         fk_heat_report();
         return 1;
     }
+    fk_bml_child_close();
     long long rv = fk_walk(fk_fn[0], 0);
     fk_pv(rv);
     /* print the meta-eval result by value-kind (int / float / nothing) */
@@ -25247,15 +25252,40 @@ static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len) {
     free(packet);
     return body;
 }
-static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len) {
-#if defined(_WIN32)
-    fk_diag_path("error", bml_path,
-                 "bml lowering via self-spawn is not wired on this platform yet");
-    return 0;
-#else
+/* The runner's lowering child: opened on the first memo miss and kept for
+ * every later unit, so the floor compiler reads each file of a closure once
+ * per runner, not once per unit. It closes before the program walks. */
+static long long fk_bml_child_pid = -1;
+static int fk_bml_child_in = -1;
+static int fk_bml_child_out = -1;
+static void fk_bml_child_close(void) {
+#if !defined(_WIN32)
+    if (fk_bml_child_pid < 0) {
+        return;
+    }
+    close(fk_bml_child_in);
+    char sink[4096];
+    while (read(fk_bml_child_out, sink, sizeof(sink)) > 0) {
+    }
+    close(fk_bml_child_out);
+    int st = 0;
+    waitpid((int)fk_bml_child_pid, &st, 0);
+    fk_bml_child_pid = -1;
+    fk_bml_child_in = -1;
+    fk_bml_child_out = -1;
+#endif
+}
+#if !defined(_WIN32)
+static int fk_bml_child_open(const char *bml_path) {
     int in_fds[2];
     int out_fds[2];
-    if (pipe(in_fds) != 0 || pipe(out_fds) != 0) {
+    if (pipe(in_fds) != 0) {
+        fk_diag_path("error", bml_path, "bml lowering could not open pipes");
+        return 0;
+    }
+    if (pipe(out_fds) != 0) {
+        close(in_fds[0]);
+        close(in_fds[1]);
         fk_diag_path("error", bml_path, "bml lowering could not open pipes");
         return 0;
     }
@@ -25284,84 +25314,96 @@ static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len) {
     }
     close(in_fds[0]);
     close(out_fds[1]);
-    {
-        char line[FK_PATH_CAP * 2 + 32];
-        int m = sprintf(line, "%s\n@memo\n%s\n", bml_path, fk_home_path);
-        long long off = 0;
-        while (off < m) {
-            long long put = write(in_fds[1], line + off, (unsigned long)(m - off));
-            if (put <= 0) {
-                break;
-            }
-            off = off + put;
-        }
+    fk_bml_child_pid = pid;
+    fk_bml_child_in = in_fds[1];
+    fk_bml_child_out = out_fds[0];
+    return 1;
+}
+/* One request to the child and its answer, read up to the reply terminator
+ * (the sentinel and print_str's newline). Answers the owned buffer and the
+ * sentinel offset, or 0 when the child ended without a closed reply. */
+static char *fk_bml_child_ask(const char *bml_path, long long *got_out, long long *at_out) {
+    char line[FK_PATH_CAP * 2 + 32];
+    int m = sprintf(line, "%s\n@memo\n%s\n", bml_path, fk_home_path);
+    long long off = 0;
+    void (*old_pipe)(int) = signal(SIGPIPE, SIG_IGN);
+    while (off < m) {
+        long long put = write(fk_bml_child_in, line + off, (unsigned long)(m - off));
+        if (put < 0 && errno == EINTR) continue;
+        if (put <= 0) break;
+        off = off + put;
     }
-    close(in_fds[1]);
+    signal(SIGPIPE, old_pipe);
+    const char *term = "\n@bml-floor-lowered\n\n";
+    long long tn = 21;
     long long cap = 65536;
     long long got = 0;
+    long long scan = 0;
     char *buf = malloc((unsigned long)cap);
     if (buf == 0) {
         fk_die("fk_bml_lower_to_mem: out of memory");
     }
     for (;;) {
+        while (scan + tn <= got) {
+            if (buf[scan] == '\n' && memcmp(buf + scan, term, (unsigned long)tn) == 0) {
+                buf[got] = 0;
+                *got_out = got;
+                *at_out = scan;
+                return buf;
+            }
+            scan = scan + 1;
+        }
         if (got + 4096 >= cap) {
             cap = cap * 2;
-            char *grown = malloc((unsigned long)cap);
+            char *grown = realloc(buf, (unsigned long)cap);
             if (grown == 0) {
                 fk_die("fk_bml_lower_to_mem: out of memory growing");
             }
-            long long i = 0;
-            while (i < got) {
-                grown[i] = buf[i];
-                i = i + 1;
-            }
-            free(buf);
             buf = grown;
         }
-        long long r = read(out_fds[0], buf + got, 4096);
+        long long r = read(fk_bml_child_out, buf + got, 4096);
+        if (r < 0 && errno == EINTR) continue;
         if (r <= 0) {
-            break;
+            buf[got] = 0;
+            *got_out = got;
+            *at_out = -1;
+            return buf;
         }
         got = got + r;
     }
-    close(out_fds[0]);
-    {
-        int st = 0;
-        waitpid((int)pid, &st, 0);
-        if (st != 0) {
-            free(buf);
+}
+#endif
+static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len) {
+#if defined(_WIN32)
+    fk_diag_path("error", bml_path,
+                 "bml lowering via self-spawn is not wired on this platform yet");
+    return 0;
+#else
+    int attempt = 0;
+    while (attempt < 2) {
+        if (fk_bml_child_pid < 0 && !fk_bml_child_open(bml_path)) {
+            return 0;
+        }
+        long long got = 0, at = -1;
+        char *buf = fk_bml_child_ask(bml_path, &got, &at);
+        if (at >= 0) {
+            buf[at] = '\n';
+            buf[at + 1] = 0;
+            *out_len = at + 1;
+            return buf;
+        }
+        int stale = got >= 16 && memcmp(buf, "@bml-floor-stale", 16) == 0;
+        free(buf);
+        fk_bml_child_close();
+        if (!stale) {
             fk_diag_path("error", bml_path,
                     "bml lowering child failed; run form/form-stdlib/bml-floor-compile.fk by hand to see its diagnostics");
             return 0;
         }
+        attempt = attempt + 1;
     }
-    buf[got] = 0;
-    {
-        const char *sentinel = "\n@bml-floor-lowered\n";
-        long long sn = 20;
-        long long at = -1;
-        long long i = 0;
-        while (i + sn <= got) {
-            long long j = 0;
-            while (j < sn && buf[i + j] == sentinel[j]) {
-                j = j + 1;
-            }
-            if (j == sn) {
-                at = i;
-                break;
-            }
-            i = i + 1;
-        }
-        if (at < 0) {
-            free(buf);
-            fk_diag_path("error", bml_path, "bml lowering returned no sentinel-closed text");
-            return 0;
-        }
-        buf[at] = '\n';
-        buf[at + 1] = 0;
-        *out_len = at + 1;
-    }
-    return buf;
+    fk_diag_path("error", bml_path, "bml lowering child found its compiler changed twice in a row");
+    return 0;
 #endif
 }
 /* run a .bml as itself, filelessly: warm runs load <x>.bml.fkb through the
@@ -25369,9 +25411,10 @@ static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len) {
  * from a fresh in-memory lowering every run, so a same-second edit, an
  * edited prelude beneath an untouched .bml, or a foreign writer's bytes
  * all refuse the warm image honestly instead of replaying it (mtime gates
- * once cost a 14-minute stale window under a live edit storm, 2026-08-31;
- * the lowering itself is milliseconds and buys byte-true trust). The
- * native cache is the ONLY artifact this lane ever writes. */
+ * once cost a 14-minute stale window under a live edit storm, 2026-08-31).
+ * A warm lowering is a memo read; a cold one costs each distinct file of the
+ * closure once per runner, through the one lowering child. The native cache
+ * is the ONLY artifact this lane ever writes. */
 static int fk_run_bml(const char *path, long long arg) {
     char fkb_path[4300];
     char sym_path[4300];
@@ -25438,6 +25481,7 @@ static int fk_run_bml(const char *path, long long arg) {
         fk_heat_report();
         return 1;
     }
+    fk_bml_child_close();
     fk_pv_root(fk_walk(fk_fn[0], 0));
     fk_heat_report();
     return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
@@ -25473,6 +25517,7 @@ static int fk_run_closure(const char *path, const char *out) {
     } else if (!fk_src_load_unit(path, hash, FK_SRC_HASH_CAP, &unit_mtime)) {
         return 2;
     }
+    fk_bml_child_close();
     if (fk_path_len(out) >= FK_PATH_CAP) {
         fk_diag_path("error", out, "closure output path exceeds buffer");
         return 2;
