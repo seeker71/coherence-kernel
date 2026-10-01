@@ -90,6 +90,12 @@ call can carry absence; it is not a success count. Millisecond readings can roun
 to zero, and parent and child times overlap. Metal admission and execution keep
 their separate stages; this census does not measure every host function.
 
+The [training-cost library](../receipts/native-training-plan.md) witnesses
+intercalling recipes in a real decoding stream: two ridge fits, three budget
+inputs, an independent linear solve and a five-input RAM Metal map. Its retained
+program also replays without a model. Numerical completion, prose completion
+and release remain separate observations.
+
 ## BMF, model IDs and repeat reuse
 
 Form/BML/BMF grammar consumes bytes directly. It has no Qwen tokenizer stage.
