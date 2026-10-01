@@ -1,8 +1,9 @@
 // form-kernel-go — vertical-slice host for Form-on-top.
 //
-// Executes Form recipe trees and binary artifacts. The CLI still carries a
-// source-to-recipe adapter for current tests; the kernel path is the
-// substrate, walker, host primitives, and binary artifact loader.
+// Executes Form recipe trees and binary artifacts. It reads plain Form files
+// named on argv, joined in order, and walks them as one unit; it follows no
+// directive and lowers nothing — fkwu prepares a unit's whole closure
+// ("./fkwu --closure <unit> <out>" from the repo root).
 //
 //   • Substrate          — NodeID + content-addressed intern table
 //   • Walker             — all 22 RBasic dispatch arms
@@ -12,15 +13,13 @@
 //
 // Parsers and grammars belong in Form artifacts above this layer.
 //
-// Usage:  form-kernel-go <file.fk>
+// Usage:  form-kernel-go <file.fk> [more.fk ...]
 //         form-kernel-go --bench
 //         form-kernel-go --expr "(add 2 3)"
 
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"form-kernel-go/core"
@@ -4854,12 +4853,6 @@ func catCond(inst uint32) NodeID {
 func catBlock(inst uint32) NodeID {
 	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicBlock, Inst: inst}
 }
-func catMatch(inst uint32) NodeID {
-	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMatch, Inst: inst}
-}
-func catChoice(inst uint32) NodeID {
-	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicChoice, Inst: inst}
-}
 func catIdent() NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicIdent, Inst: 1} }
 func catFnDef() NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicFnDef, Inst: 1} }
 func catFnCall() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicFnCall, Inst: 1} }
@@ -4868,19 +4861,15 @@ func catFnCall() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicF
 // native expresses; the walker records them in the trace when the native
 // fires. Mirrors Rust kernel's cat_call / cat_witness / cat_access /
 // cat_method / cat_list_nat / cat_undefined.
-func catCall() NodeID      { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCall, Inst: 1} }
-func catWitness() NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicWitness, Inst: 1} }
-func catAccess() NodeID    { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicAccess, Inst: 1} }
-func catMethod() NodeID    { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMethod, Inst: 1} }
-func catListNat() NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicList, Inst: 1} }
-func catTransmute() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicTransmute, Inst: 1} }
+func catCall() NodeID    { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCall, Inst: 1} }
+func catWitness() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicWitness, Inst: 1} }
+func catAccess() NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicAccess, Inst: 1} }
+func catMethod() NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMethod, Inst: 1} }
+func catListNat() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicList, Inst: 1} }
 func catFieldPrimitive(categoryType uint32) NodeID {
 	return NodeID{Pkg: 1, Level: LevelBasic, Type: categoryType, Inst: 1}
 }
-func catField() NodeID     { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicField, Inst: 1} }
-func catDelta() NodeID     { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicDelta, Inst: 1} }
 func catReceipt() NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicReceipt, Inst: 1} }
-func catResidual() NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicResidual, Inst: 1} }
 func catUndefined() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicUndefined, Inst: 0} }
 
 // ---------------------------------------------------------------------------
@@ -4981,7 +4970,21 @@ type kernelCrashDiagnosis struct {
 
 func diagnoseKernelPanic(message string) kernelCrashDiagnosis {
 	lower := strings.ToLower(message)
+	// Reader and name failures come first: their messages quote the offending
+	// token, which may itself read "string" or "index".
 	switch {
+	case strings.HasPrefix(lower, "parse error"):
+		return kernelCrashDiagnosis{
+			fatalKind:       "source_compile_failure",
+			likelyRootCause: "the input is not plain Form: unbalanced text, or a raw BML/section-bearing unit the kernel does not lower",
+			avoidance:       "prepare the unit with \"./fkwu --closure <unit> <out>\" from the repo root, then repair the reported source coordinate",
+		}
+	case strings.Contains(lower, "unbound"):
+		return kernelCrashDiagnosis{
+			fatalKind:       "name_resolution_error",
+			likelyRootCause: "a recipe or route manifest referenced a name its defining unit never brought: the kernel follows no prelude, import or home-index link, or the input is not plain Form",
+			avoidance:       "hand the kernel a unit's whole closure: prepare it with \"./fkwu --closure <unit> <out>\" from the repo root",
+		}
 	case strings.Contains(lower, "as_str") ||
 		strings.Contains(lower, "argstr") ||
 		strings.Contains(lower, "expected string") ||
@@ -5000,12 +5003,6 @@ func diagnoseKernelPanic(message string) kernelCrashDiagnosis {
 			likelyRootCause: "a Form/native recipe passed a value with the wrong primitive kind to a typed host boundary",
 			avoidance:       "validate the value kind before the native call, or route through an explicit conversion recipe",
 		}
-	case strings.Contains(lower, "unbound"):
-		return kernelCrashDiagnosis{
-			fatalKind:       "name_resolution_error",
-			likelyRootCause: "a recipe or route manifest referenced a name that was not bound in the loaded source/prelude set",
-			avoidance:       "run the route/source check gate and include the defining prelude before serving the manifest",
-		}
 	case strings.Contains(lower, "arity") ||
 		strings.Contains(lower, "wants") ||
 		strings.Contains(lower, "argument"):
@@ -5021,13 +5018,6 @@ func diagnoseKernelPanic(message string) kernelCrashDiagnosis {
 			fatalKind:       "bounds_violation",
 			likelyRootCause: "a recipe indexed outside the observed collection/string bounds",
 			avoidance:       "check length/bounds before indexing or use a boundary-aware recipe that returns an explicit error value",
-		}
-	case strings.Contains(lower, "source-compile") ||
-		strings.Contains(lower, "parse error"):
-		return kernelCrashDiagnosis{
-			fatalKind:       "source_compile_failure",
-			likelyRootCause: "source text could not be lowered into a valid Form recipe before execution",
-			avoidance:       "run the source compiler/check command and repair the reported source coordinate before serving",
 		}
 	default:
 		return kernelCrashDiagnosis{
@@ -5135,524 +5125,53 @@ func writeKernelCrashTraceWithContext(args []string, src string, recovered any, 
 	return path
 }
 
-type formSourcePart struct {
-	path   string
-	source string
+// formFilePart is one argv file's place in the joined source: the global line
+// its first line lands on.
+type formFilePart struct {
+	path      string
+	startLine uint32
 }
 
-// formPreludeDeps scans one source line for a "; preludes: a.fk b.fk ..."
-// directive the way fkwu's own fk_src_collect_preludes does: find the
-// literal "preludes:" token after a comment marker, then walk
-// whitespace/comma-separated tokens until one doesn't look like a real
-// dependency. A token counts only when it is the "none" sentinel (declares
-// an explicit empty prelude list, e.g. tests/now-unix-ms-band.fk) or ends in
-// ".fk"/".bml" — anything else silently STOPS the scan instead of erroring,
-// so a doc comment that merely mentions the word "preludes:" (this tree has
-// several, in cell headers) is never misread as a
-// directive. Sibling parity with the fkwu C kernel; unlike fkwu, a ".bml"
-// dependency can't be lowered here yet, so the caller reports and skips it
-// rather than silently dropping the symbols it would have defined.
-func formPreludeDeps(line string) (deps []string, bmlDeps []string) {
-	// ".fk" comments are ";"-led; ".bml" comments are "//"-led (confirmed:
-	// bml-demand-jit-glass.bml declares "// preludes: ..."), and
-	// form-source-compile-file's lowering preserves a .bml's original
-	// comment lines verbatim, so the lowered text this scanner sees still
-	// carries "//", not ";". Recognize whichever marker starts first.
-	semi := strings.IndexByte(line, ';')
-	slashes := strings.Index(line, "//")
-	var start int
-	switch {
-	case semi < 0 && slashes < 0:
-		return nil, nil
-	case semi < 0:
-		start = slashes + 2
-	case slashes < 0:
-		start = semi + 1
-	case semi < slashes:
-		start = semi + 1
-	default:
-		start = slashes + 2
-	}
-	comment := line[start:]
-	const needle = "preludes:"
-	idx := strings.Index(comment, needle)
-	if idx < 0 {
-		return nil, nil
-	}
-	rest := comment[idx+len(needle):]
-	for {
-		rest = strings.TrimLeft(rest, " \t,")
-		if rest == "" {
-			return deps, bmlDeps
-		}
-		end := strings.IndexAny(rest, " \t,")
-		var tok string
-		if end < 0 {
-			tok, rest = rest, ""
-		} else {
-			tok, rest = rest[:end], rest[end:]
-		}
-		if strings.EqualFold(tok, "none") || strings.EqualFold(tok, "(none)") {
-			return deps, bmlDeps
-		}
-		switch {
-		case strings.HasSuffix(tok, ".fk"):
-			deps = append(deps, tok)
-		case strings.HasSuffix(tok, ".bml"):
-			bmlDeps = append(bmlDeps, tok)
-		default:
-			return deps, bmlDeps
-		}
-	}
-}
-
-func formImportPath(line string) (string, bool) {
-	source := strings.TrimSpace(line)
-	if strings.HasSuffix(source, ";") {
-		source = strings.TrimSpace(strings.TrimSuffix(source, ";"))
-	}
-	if !strings.HasPrefix(source, "import \"") || !strings.HasSuffix(source, "\"") {
-		return "", false
-	}
-	path := strings.TrimSuffix(strings.TrimPrefix(source, "import \""), "\"")
-	return path, path != ""
-}
-
-func resolveFormImport(ownerPath, imported string) (string, error) {
-	var candidates []string
-	if filepath.IsAbs(imported) {
-		candidates = append(candidates, imported)
-	} else {
-		candidates = append(candidates,
-			filepath.Join(filepath.Dir(ownerPath), imported),
-			imported,
-		)
-		if strings.HasPrefix(imported, "form/") {
-			candidates = append(candidates, strings.TrimPrefix(imported, "form/"))
-		}
-		for directory := filepath.Dir(ownerPath); ; {
-			candidates = append(candidates,
-				filepath.Join(directory, imported),
-				filepath.Join(directory, "form", imported),
-			)
-			parent := filepath.Dir(directory)
-			if parent == directory {
-				break
-			}
-			directory = parent
-		}
-	}
-	for _, candidate := range candidates {
-		info, err := os.Stat(candidate)
-		if err == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("import %q from %s: file not found", imported, ownerPath)
-}
-
-// Roots of the Form compiler used by this proof sibling. Their declared
-// dependency closure is loaded for each lowering. The body's native fkwu
-// source door admits its own compiler independently of this proof carrier.
-var formBmlSourceCompileChain = []string{
-	"form-stdlib/engine-constants.fk",
-	"form-stdlib/compiler-objects.fk",
-	"form-stdlib/form-ontology-bp.fk",
-	"form-stdlib/form-ontology-source-categories.fk",
-	"form-stdlib/form-ontology-loader.fk",
-	"form-stdlib/line-grammar.fk",
-	"form-stdlib/bmf-core.fk",
-	"form-stdlib/bmf-grammar.fk",
-	"form-stdlib/bml.fk",
-	"form-stdlib/bml-source.fk",
-	"form-stdlib/source-compiler.fk",
-	"form-stdlib/grammars/form-bml.fk",
-	"form-stdlib/grammars/form-lift.fk",
-	"form-stdlib/form-bml-lower.fk",
-	"form-stdlib/source-compiler-text-lens.fk",
-}
-
-// lowerBmlSource runs the current Form compiler in a separate proof kernel and
-// keeps the lowering under a key over everything that decides it: the BML's
-// path and bytes, every source in the compiler's loaded closure, and this
-// kernel's own executable. Any change among them is a miss. The directory keeps
-// one lowering per path for this kernel, so a new key replaces the old entry
-// rather than settling beside it.
-func lowerBmlSource(bmlAbsPath string) (string, error) {
-	body, err := os.ReadFile(bmlAbsPath)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", bmlAbsPath, err)
-	}
-	chainPaths := make([]string, len(formBmlSourceCompileChain))
-	for i, rel := range formBmlSourceCompileChain {
-		resolved, err := resolveFormImport(bmlAbsPath, rel)
-		if err != nil {
-			return "", fmt.Errorf("resolve BML compiler chain %s (needed to lower %s): %w", rel, bmlAbsPath, err)
-		}
-		chainPaths[i] = resolved
-	}
-	loaded, err := loadFormSourceClosure(chainPaths)
-	if err != nil {
-		return "", fmt.Errorf("load BML source-compiler chain for %s: %w", bmlAbsPath, err)
-	}
-	hasher := sha256.New()
-	writeHashPart := func(label, source string) {
-		_, _ = fmt.Fprintf(hasher, "%d:%s%d:", len(label), label, len(source))
-		_, _ = hasher.Write([]byte(source))
-	}
-	if exe, err := os.Executable(); err == nil {
-		if st, err := os.Stat(exe); err == nil {
-			writeHashPart("kernel", fmt.Sprintf("%s %d %d", exe, st.Size(), st.ModTime().UnixNano()))
-		}
-	}
-	writeHashPart(bmlAbsPath, string(body))
-	for _, part := range loaded {
-		writeHashPart(part.path, part.source)
-	}
-	pathSum := sha256.Sum256([]byte(bmlAbsPath))
-	prefix := "go-" + hex.EncodeToString(pathSum[:])[:12] + "-"
-	name := prefix + hex.EncodeToString(hasher.Sum(nil))[:32] + ".fk"
-	cacheDir := filepath.Join(filepath.Dir(chainPaths[0]), ".cache", "kernel-bml-lowered")
-	cachePath := filepath.Join(cacheDir, name)
-	if cached, err := os.ReadFile(cachePath); err == nil && len(cached) > 0 {
-		return string(cached), nil
-	}
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		return "", fmt.Errorf("create BML lowering cache dir: %w", err)
-	}
-
-	outPath := filepath.Join(cacheDir, fmt.Sprintf(".out-%s-%d.fk", strings.TrimSuffix(name, ".fk"), os.Getpid()))
-	defer os.Remove(outPath)
-	compilerParts := make([]string, 0, len(loaded)+1)
-	for _, part := range loaded {
-		compilerParts = append(compilerParts, part.source)
-	}
-	compilerParts = append(compilerParts, fmt.Sprintf("(do (form-source-compile-file %q %q))\n", bmlAbsPath, outPath))
-	lowerKernel := NewKernel()
-	root := readRootFromSource(lowerKernel, strings.Join(compilerParts, "\n"))
-	lowerKernel.activeRoots = []NodeID{root}
-	lowerKernel.walkUnit(root, NewFrame(nil))
-
-	lowered, err := os.ReadFile(outPath)
-	if err != nil || len(lowered) == 0 {
-		return "", fmt.Errorf("form-source-compile-file produced no output for %s", bmlAbsPath)
-	}
-	if os.Rename(outPath, cachePath) == nil {
-		if entries, err := os.ReadDir(cacheDir); err == nil {
-			for _, entry := range entries {
-				if entry.Name() != name && strings.HasPrefix(entry.Name(), prefix) {
-					_ = os.Remove(filepath.Join(cacheDir, entry.Name()))
-				}
-			}
-		}
-	}
-	return string(lowered), nil
-}
-
-func loadFormSourceFile(path string, seen map[string]bool, parts *[]formSourcePart) error {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("resolve %s: %w", path, err)
-	}
-	absolute = filepath.Clean(absolute)
-	if seen[absolute] {
-		return nil
-	}
-	body, err := os.ReadFile(absolute)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-	seen[absolute] = true
-	return loadFormSourceText(path, absolute, string(body), seen, parts)
-}
-
-// loadFormSourceBmlPrelude mirrors loadFormSourceFile for a ".bml"
-// dependency: same dedup-by-absolute-path, same recursive directive
-// handling on the result -- just sourced from lowerBmlSource's in-memory
-// text instead of a byte-identical read of the path on disk.
-func loadFormSourceBmlPrelude(path string, seen map[string]bool, parts *[]formSourcePart) error {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("resolve %s: %w", path, err)
-	}
-	absolute = filepath.Clean(absolute)
-	if seen[absolute] {
-		return nil
-	}
-	seen[absolute] = true
-
-	// form-source-compile-file's lowering does NOT preserve a .bml file's
-	// own "// preludes:"/import header the way ";"-comment .fk lowering
-	// preserves its header (verified: the lowered text opens straight on
-	// defns, no comment survives) -- so THIS source's own directives have
-	// to be found and recursed on the RAW file, before lowering discards
-	// them, rather than by scanning the lowered output the way every other
-	// dependency kind is scanned.
-	rawBody, err := os.ReadFile(absolute)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", absolute, err)
-	}
-	for _, line := range strings.Split(string(rawBody), "\n") {
-		if imported, ok := formImportPath(line); ok {
-			dependency, err := resolveFormImport(absolute, imported)
-			if err != nil {
-				return err
-			}
-			if err := loadFormSourceFile(dependency, seen, parts); err != nil {
-				return err
-			}
-			continue
-		}
-		fkDeps, bmlDeps := formPreludeDeps(line)
-		for _, tok := range fkDeps {
-			dependency, err := resolveFormImport(absolute, tok)
-			if err != nil {
-				return err
-			}
-			if err := loadFormSourceFile(dependency, seen, parts); err != nil {
-				return err
-			}
-		}
-		for _, tok := range bmlDeps {
-			dependency, err := resolveFormImport(absolute, tok)
-			if err != nil {
-				return err
-			}
-			if err := loadFormSourceBmlPrelude(dependency, seen, parts); err != nil {
-				return err
-			}
-		}
-	}
-
-	lowered, err := lowerBmlSource(absolute)
-	if err != nil {
-		return err
-	}
-	// The lowered text carries no directives of its own to (re-)scan, but
-	// running it through loadFormSourceText anyway keeps this path exactly
-	// as defensive as every other loader -- a directive that DID somehow
-	// survive lowering would still be honored, not silently ignored.
-	return loadFormSourceText(path, absolute, lowered, seen, parts)
-}
-
-// formLineEndsInString reports whether a Form string literal is still open at the
-// end of line, given whether one was open at its start: an escape takes the next
-// byte, and a ; outside a string comments out the rest of the line.
-func formLineEndsInString(line string, in bool) bool {
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		if in {
-			if c == '\\' {
-				i++
-			} else if c == '"' {
-				in = false
-			}
-			continue
-		}
-		if c == ';' {
-			return false
-		}
-		if c == '"' {
-			in = true
-		}
-	}
-	return in
-}
-
-// loadFormSourceText walks one source's lines for import/prelude directives
-// (recursing into each dependency) and appends the remaining body as one
-// formSourcePart. Shared by the on-disk (.fk) and lowered-in-memory (.bml)
-// loading paths so both get identical directive handling.
-func loadFormSourceText(displayPath, absolute, text string, seen map[string]bool, parts *[]formSourcePart) error {
-	lines := strings.Split(text, "\n")
-	inString := false
-	for _, line := range lines {
-		// a line that begins inside a string literal is data, as the reader sees it
-		if !inString && strings.HasPrefix(strings.TrimSpace(line), "section [") {
-			return fmt.Errorf(
-				"%s: carries a raw \"section [form.bml]\" block -- this kernel runs plain Form, "+
-					"not BML, so it can't parse that block directly. It must be lowered through "+
-					"form-stdlib/source-compiler.fk first (validate.sh's prepare_sources does this "+
-					"automatically; see form-stdlib/AUTHORING.md's \"two-layer trap\")", displayPath)
-		}
-		inString = formLineEndsInString(line, inString)
-	}
-	source := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if imported, ok := formImportPath(line); ok {
-			dependency, err := resolveFormImport(absolute, imported)
-			if err != nil {
-				return err
-			}
-			if err := loadFormSourceFile(dependency, seen, parts); err != nil {
-				return err
-			}
-			continue
-		}
-		if fkDeps, bmlDeps := formPreludeDeps(line); len(fkDeps) > 0 || len(bmlDeps) > 0 {
-			for _, tok := range fkDeps {
-				dependency, err := resolveFormImport(absolute, tok)
-				if err != nil {
-					return err
-				}
-				if err := loadFormSourceFile(dependency, seen, parts); err != nil {
-					return err
-				}
-			}
-			for _, tok := range bmlDeps {
-				dependency, err := resolveFormImport(absolute, tok)
-				if err != nil {
-					return err
-				}
-				if err := loadFormSourceBmlPrelude(dependency, seen, parts); err != nil {
-					return err
-				}
-			}
-		}
-		source = append(source, line)
-	}
-	for _, tok := range homeLinks(text, homeIndexFor(absolute)) {
-		dependency, err := resolveFormImport(absolute, tok)
-		if err != nil {
-			return err
-		}
-		if strings.HasSuffix(tok, ".bml") {
-			err = loadFormSourceBmlPrelude(dependency, seen, parts)
-		} else {
-			err = loadFormSourceFile(dependency, seen, parts)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	*parts = append(*parts, formSourcePart{path: displayPath, source: strings.Join(source, "\n")})
-	return nil
-}
-
-// Link by name, the rule every kernel reads from form-stdlib/home-index.txt: a source that
-// calls a name the index lists, and defines no such name itself, loads the name's home unit
-// as if it had preluded it. Comments and string literals are skipped, so a word in prose
-// links nothing.
-var homeIndexCache = map[string][][2]string{}
-
-func homeIndexFor(owner string) [][2]string {
-	path, err := resolveFormImport(owner, "form-stdlib/home-index.txt")
-	if err != nil {
-		return nil
-	}
-	if rows, ok := homeIndexCache[path]; ok {
-		return rows
-	}
-	var rows [][2]string
-	if body, err := os.ReadFile(path); err == nil {
-		for _, line := range strings.Split(string(body), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 2 || strings.HasPrefix(fields[0], "#") {
-				continue
-			}
-			rows = append(rows, [2]string{fields[0], fields[1]})
-		}
-	}
-	homeIndexCache[path] = rows
-	return rows
-}
-
-func homeSymByte(c byte) bool {
-	switch c {
-	case ' ', '\t', '\n', '\r', '(', ')', '"', ';', ',', '[', ']', '{', '}', '\'', '`', '=', ':':
-		return false
-	}
-	return true
-}
-
-func homeLinks(text string, rows [][2]string) []string {
-	if len(rows) == 0 {
-		return nil
-	}
-	used := make([]bool, len(rows))
-	defined := make([]bool, len(rows))
-	prev := ""
-	callHead := false
-	for i := 0; i < len(text); {
-		c := text[i]
-		if c == ';' || (c == '/' && i+1 < len(text) && text[i+1] == '/') {
-			for i < len(text) && text[i] != '\n' {
-				i++
-			}
-			continue
-		}
-		if c == '"' {
-			callHead = false
-			i++
-			for i < len(text) && text[i] != '"' {
-				if text[i] == '\\' {
-					i++
-				}
-				i++
-			}
-			i++
-			continue
-		}
-		if !homeSymByte(c) {
-			if c == '(' {
-				callHead = true
-			} else if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
-				callHead = false
-			}
-			i++
-			continue
-		}
-		s := i
-		for i < len(text) && homeSymByte(text[i]) {
-			i++
-		}
-		tok := text[s:i]
-		for h, row := range rows {
-			if row[0] == tok {
-				if prev == "defn" || prev == "def" {
-					defined[h] = true
-				} else if !callHead || !fkwuReservedHeads[tok] {
-					used[h] = true
-				}
-			}
-		}
-		prev = tok
-		callHead = false
-	}
-	var units []string
-	for h, row := range rows {
-		if used[h] && !defined[h] {
-			units = append(units, row[1])
-		}
-	}
-	return units
-}
-
-func loadFormSourceClosure(paths []string) ([]formSourcePart, error) {
-	parts := make([]formSourcePart, 0, len(paths))
-	seen := make(map[string]bool)
+// readFormFiles reads plain Form files in argv order as bytes and joins them
+// with one newline. A kernel follows no directive and lowers nothing: whoever
+// hands a unit over prepares it ("./fkwu --closure <unit> <out>").
+func readFormFiles(paths []string) (string, []formFilePart, error) {
+	parts := make([]string, 0, len(paths))
+	lineMap := make([]formFilePart, 0, len(paths))
+	nextLine := uint32(1)
 	for _, path := range paths {
-		if err := loadFormSourceFile(path, seen, &parts); err != nil {
-			return nil, err
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", nil, fmt.Errorf("read %s: %v", path, err)
 		}
+		text := string(b)
+		lineMap = append(lineMap, formFilePart{path: path, startLine: nextLine})
+		// +1 for the join newline that opens the next file's first line
+		nextLine += uint32(strings.Count(text, "\n")) + 1
+		parts = append(parts, text)
 	}
-	return parts, nil
+	return strings.Join(parts, "\n"), lineMap, nil
+}
+
+// readFormRoot reads src as one unit, attributing each form to its file's line.
+func (k *Kernel) readFormRoot(src string, lineMap []formFilePart) NodeID {
+	for _, part := range lineMap {
+		k.readingFiles = append(k.readingFiles, readingPart{FileID: k.internName(part.path), StartLine: part.startLine})
+	}
+	root := readRootFromSource(k, src)
+	k.readingFiles = nil
+	return root
 }
 
 func main() {
 	args := os.Args[1:]
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: form-kernel-go <file.fk> [more.fk ...] | --binary file.fkb | --emit-binary out.fkb file.fk... | --expr \"...\" | --bench | --numeric-bench | trace ... | serve --port 18080 <route-prelude.fk...>")
+		fmt.Fprintln(os.Stderr, "usage: form-kernel-go <file.fk> [more.fk ...] | --binary file.fkb | --emit-binary out.fkb file.fk... | --expr \"...\" | --bench | --numeric-bench | trace ... | serve --port 18080 <routes.fk...>")
 		os.Exit(2)
 	}
 
 	var src string
 	var crashK *Kernel
-	type lineMapPart struct {
-		path      string
-		startLine uint32
-	}
-	var lineMapParts []lineMapPart
 
 	// Catch parse-time and walk-time panics and convert them to clean error
 	// output. The trace file keeps the host stack and source excerpt for
@@ -5722,51 +5241,34 @@ func main() {
 		return
 	}
 
-	if args[0] == "--emit-binary" {
+	files := args
+	switch args[0] {
+	case "--emit-binary":
 		if len(args) < 3 {
 			fmt.Fprintln(os.Stderr, "--emit-binary requires an output path and one or more .fk files")
 			os.Exit(2)
 		}
-		var parts []string
-		for _, path := range args[2:] {
-			b, err := os.ReadFile(path)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "read %s: %v\n", path, err)
-				os.Exit(1)
-			}
-			parts = append(parts, string(b))
-		}
-		src = strings.Join(parts, "\n")
-	} else if args[0] == "--expr" {
+		files = args[2:]
+	case "--expr":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "--expr requires an argument")
 			os.Exit(2)
 		}
-		src = args[1]
-	} else {
-		loaded, err := loadFormSourceClosure(args)
+		src, files = args[1], nil
+	}
+	var lineMap []formFilePart
+	if files != nil {
+		joined, parts, err := readFormFiles(files)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		parts := make([]string, 0, len(loaded))
-		nextLine := uint32(1)
-		for _, part := range loaded {
-			lineMapParts = append(lineMapParts, lineMapPart{path: part.path, startLine: nextLine})
-			// +1 for the join newline between parts.
-			nextLine += uint32(strings.Count(part.source, "\n")) + 1
-			parts = append(parts, part.source)
-		}
-		src = strings.Join(parts, "\n")
+		src, lineMap = joined, parts
 	}
 
 	k := NewKernel()
 	crashK = k
-	for _, part := range lineMapParts {
-		k.readingFiles = append(k.readingFiles, readingPart{FileID: k.internName(part.path), StartLine: part.startLine})
-	}
-	root := readRootFromSource(k, src)
-	k.readingFiles = nil
+	root := k.readFormRoot(src, lineMap)
 	if args[0] == "--emit-binary" {
 		if err := os.WriteFile(args[1], serializeArtifact(k, root), 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "write %s: %v\n", args[1], err)
@@ -5791,6 +5293,7 @@ func cliTrace(args []string) int {
 		return 2
 	}
 	var src string
+	var lineMap []formFilePart
 	if args[0] == "--expr" {
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "--expr requires an argument")
@@ -5798,44 +5301,17 @@ func cliTrace(args []string) int {
 		}
 		src = args[1]
 	} else {
-		var parts []string
-		for _, path := range args {
-			b, err := os.ReadFile(path)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "read %s: %v\n", path, err)
-				return 1
-			}
-			parts = append(parts, string(b))
+		joined, parts, err := readFormFiles(args)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
 		}
-		src = strings.Join(parts, "\n")
+		src, lineMap = joined, parts
 	}
 
 	k := NewKernel()
 	k.Trace = newTrace()
-	toks := tokenizeSexp(src)
-	wrapped := "(do " + src + ")"
-	if len(toks) > 0 && toks[0].kind == "LPAREN" {
-		depth := 0
-		topLevelCount := 0
-		for _, t := range toks {
-			if t.kind == "LPAREN" {
-				if depth == 0 {
-					topLevelCount++
-				}
-				depth++
-			} else if t.kind == "RPAREN" {
-				depth--
-			} else if depth == 0 {
-				topLevelCount++
-			}
-		}
-		if topLevelCount == 1 {
-			wrapped = src
-		}
-	}
-	toks = tokenizeSexp(wrapped)
-	root, _ := k.readSexpr(toks, 0)
-	k.markUnitRoot(root, wrapped != src)
+	root := k.readFormRoot(src, lineMap)
 	k.activeRoots = []NodeID{root}
 	env := NewFrame(nil)
 	start := time.Now()

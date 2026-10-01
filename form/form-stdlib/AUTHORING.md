@@ -79,12 +79,11 @@ A **band** `form/form-stdlib/tests/<name>-band.fk` — proves it, returning a **
     (add c0 c1))            ; verdict 3 when both claims land
 ```
 
-Keep the band **self-contained** — prelude only your own recipe (+ `core.fk`). If your recipe
-composes others, list each in the prelude header and in the validate command, in dependency order.
-(`core.fk` is the right prelude for a *band*, because `validate.sh` loads `source-compiler` to lower it.
-A recipe meant for a **raw-eval / Layer-1 context** — a carrier, the flatten — must not
-lean on `core.fk`'s helpers there; the flattener's standing prelude `fourth-shim.fk` carries the same
-helper names first-order. See the `unbound function` note in Troubleshooting for the full two-layer picture.)
+Keep the band **self-contained** — prelude only your own recipe (+ `core.fk`); a recipe that
+composes others preludes them in its own header. `core.fk` is plain Form, so its helpers (`nil? map
+filter foldl reverse range take drop any? all? …`) are bound wherever a unit's closure reaches it.
+fkwu resolves and lowers that closure; `./fkwu --closure <band> <out>`, run from the repo root,
+writes it as one plain-Form file, and that file is all a proof sibling reads.
 
 ## The primitive set — these and no others
 
@@ -137,18 +136,17 @@ plus `defn · let · do`. (Read `form/form-stdlib/core.fk` — it is the whole v
 
 ## Prove it on all covered kernels
 
-From the repo's `form/` directory, list **every** file explicitly — `core.fk`, your recipe, any
-recipes it composes, then the band:
+From the repo's `form/` directory, name the band alone; its `; preludes:` header carries the rest:
 
 ```
 cd form
-./validate.sh form-stdlib/core.fk form-stdlib/<name>.fk form-stdlib/tests/<name>-band.fk
+./validate.sh form-stdlib/tests/<name>-band.fk
 ```
 
 Success is `✓ ... → <verdict>` **and** `1 ok, 0 divergent`. Iterate until you see your intended
 verdict with zero divergence. `validate.sh` always runs Go, Rust, and TypeScript. When the band's
-stem is listed in `form/fourth-arm-bands.txt`, it also runs on the emitted universal walker `fkwu`
-and prints `fourth arm: ... four-way (fkwu + pre-flattened tables)`.
+stem is listed in `form/fourth-arm-bands.txt`, it also runs on `fkwu` and prints
+`fourth arm: N band(s) four-way (runtime fkwu source/JIT)`.
 
 The authoring floor is four-kernel when the band can live in the fourth-friendly subset: add the band
 to `form/fourth-arm-bands.txt` and iterate until `validate.sh` proves the fourth arm. When the band
@@ -158,18 +156,10 @@ named top-level recipe as a value and calling it — semiring-generic dispatch �
 fourth arm carries that higher-order shape. A very large composed table can still overflow the walker,
 which is a capacity wall, not an op-family wall.)
 
-- `unbound function` → a misspelled name, a primitive that isn't in `core.fk` — **or the two-layer
-  trap.** `core.fk`'s helpers (`nil? map filter foldl reverse range take drop any? all? …`) live in the
-  `section [form.bml]` dialect that only exists *after* `source-compiler.fk` lowers it. A band run with
-  `validate.sh form-stdlib/core.fk …` gets them (the validate chain loads source-compiler). But a
-  **raw-eval / Layer-1 context** — a carrier, the flatten, `build-form-cli`, any `(do …)` cat'd straight
-  onto a kernel — runs before that lowering, so `nil?` is unbound *even though it is in core.fk*. There,
-  prelude `form-stdlib/fourth-shim.fk` (the flattener's standing raw base). Same helper set, two carriers,
-  one proven shape.
+- `unbound function` → a misspelled name, a primitive that isn't in `core.fk`, or a prelude the
+  unit's header does not name. A sibling handed a bare file instead of its closure meets the same
+  word: hand it `./fkwu --closure <unit> <out>`.
 - `N divergent` (kernels print different numbers) → almost always a 3-arg `and`/`or`; nest it.
-  A second cause: a **scientific-notation float literal** (`1.16e-05`). The three walkers parse it,
-  but the fourth arm's pre-flattened table does not — write floats as plain decimals
-  (`0.000011682...`). This bit a q6k dequant band once (fourth = -5 vs three-way 11215).
 - wrong verdict, 0 divergent → a band claim is false; fix the recipe or the claim. **Never weaken a
   claim to make it pass** — the band is the truth, not the obstacle.
 

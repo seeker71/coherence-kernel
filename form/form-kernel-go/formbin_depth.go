@@ -15,6 +15,23 @@ import (
 	"time"
 )
 
+const formbinDepthDoor = "observe/formbin-depth-native-run.fk"
+
+// formbinDepthRoot walks up from dir to the checkout that holds the depth door
+// and the fkwu that runs it.
+func formbinDepthRoot(dir string) (string, bool) {
+	for {
+		if info, err := os.Stat(filepath.Join(dir, formbinDepthDoor)); err == nil && !info.IsDir() {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
 func formbinPipeLine(reader *bufio.Reader) (string, error) {
 	line, err := reader.ReadString('\n')
 	return strings.TrimSuffix(line, "\n"), err
@@ -59,19 +76,19 @@ func deserializeFormbinDepth(k *Kernel, body []byte, start int, table []string, 
 	if err := encoder.Encode(map[string]any{"schema": "formbin-depth-attention-v2", "phase": "starting", "engine": "fkwu", "cursor": start, "input_bytes": len(body), "started_unix_ms": started.UnixMilli()}); err != nil {
 		return NodeID{}, start, err
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return NodeID{}, start, err
+	root, found := "", false
+	if cwd, err := os.Getwd(); err == nil {
+		root, found = formbinDepthRoot(cwd)
 	}
-	door, err := resolveFormImport(filepath.Join(cwd, ".formbin-reader"), "observe/formbin-depth-native-run.fk")
-	if err != nil {
-		if executable, e := os.Executable(); e == nil {
-			door, err = resolveFormImport(executable, "observe/formbin-depth-native-run.fk")
+	if !found {
+		if executable, err := os.Executable(); err == nil {
+			root, found = formbinDepthRoot(filepath.Dir(executable))
 		}
 	}
-	if err != nil {
-		return NodeID{}, start, err
+	if !found {
+		return NodeID{}, start, fmt.Errorf("form binary: %s not found above the working directory or the kernel", formbinDepthDoor)
 	}
+	door := filepath.Join(root, formbinDepthDoor)
 	input, err := os.CreateTemp("", "formbin-native-*.fkb")
 	if err != nil {
 		return NodeID{}, start, err
@@ -85,7 +102,6 @@ func deserializeFormbinDepth(k *Kernel, body []byte, start int, table []string, 
 		return NodeID{}, start, err
 	}
 	sourceReady := time.Now()
-	root := filepath.Dir(filepath.Dir(door))
 	command := exec.Command(filepath.Join(root, "fkwu"), door)
 	command.Dir = root
 	command.Stderr = os.Stderr

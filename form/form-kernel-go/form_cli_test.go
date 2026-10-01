@@ -17,7 +17,9 @@ import (
 )
 
 func TestFkwuFormCliCanonicalCarrier(t *testing.T) {
-	_ = requireClang(t)
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not available — native proof skipped")
+	}
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skip("bash not available — canonical carrier proof skipped")
