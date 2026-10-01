@@ -356,8 +356,9 @@ fi
 
 # --- run_siblings: feed one Form workload through all kernels, compare ---
 # A workload is one or more files (e.g. core.fk then a band). Every sibling
-# reads the one closure fkwu hands over; a manifest-covered band also runs its
-# root on fkwu, the fourth leg.
+# reads the one closure fkwu hands over, and fkwu walks the root itself: the
+# only runtime is a leg of every comparison. A manifest row adds its registered
+# verdict to the band it names.
 run_siblings() {
     local label="$1"; shift
     local go_out rs_out ts_out go_rc rs_rc ts_rc legs
@@ -375,33 +376,31 @@ run_siblings() {
     fk_run_leg "$legs" go "$GO_BIN" &
     fk_run_leg "$legs" rs "$RS_BIN" &
     fk_run_leg "$legs" ts run_ts &
-    if [[ -n "$fourth_stem" ]]; then
-        (
-            set +e
-            mkdir -p "$legs/tmp-fk"
-            cd .. && TMPDIR="$legs/tmp-fk" "$FOURTH_SOURCE_FKWU" "form/$workload_root" > "$legs/fk" 2> "$legs/fk.err"
-            printf '%s\n' "$?" > "$legs/fk.rc"
-        ) &
-    fi
+    (
+        set +e
+        mkdir -p "$legs/tmp-fk"
+        cd .. && TMPDIR="$legs/tmp-fk" "$FOURTH_SOURCE_FKWU" "form/$workload_root" > "$legs/fk" 2> "$legs/fk.err"
+        printf '%s\n' "$?" > "$legs/fk.rc"
+    ) &
     wait
     go_out=$(organ_steady "$legs/go"); rs_out=$(organ_steady "$legs/rs"); ts_out=$(organ_steady "$legs/ts")
     go_rc=$(cat "$legs/go.rc" 2>/dev/null || echo 1)
     rs_rc=$(cat "$legs/rs.rc" 2>/dev/null || echo 1)
     ts_rc=$(cat "$legs/ts.rc" 2>/dev/null || echo 1)
+    fk_out=$(organ_steady "$legs/fk")
+    fk_rc=$(cat "$legs/fk.rc" 2>/dev/null || echo 1)
+    fk_diags=$(fk_diag_count "$legs/fk.err")
+    # REGISTERED-VERDICT GATE. fourth-arm-bands.txt column 3 is the band's
+    # registered verdict. The four arms agreeing proves agreement and
+    # nothing more, so an agreed verdict that differs from the registered
+    # one is a failure with its own word: a band cannot change what it
+    # certifies without the change being seen. The verdict compared is the
+    # LAST line of the agreed output, and only when the column is numeric.
     if [[ -n "$fourth_stem" ]]; then
-        fk_out=$(organ_steady "$legs/fk")
-        fk_rc=$(cat "$legs/fk.rc" 2>/dev/null || echo 1)
-        fk_diags=$(fk_diag_count "$legs/fk.err")
-        # REGISTERED-VERDICT GATE. fourth-arm-bands.txt column 3 is the band's
-        # registered verdict. The four arms agreeing proves agreement and
-        # nothing more, so an agreed verdict that differs from the registered
-        # one is a failure with its own word: a band cannot change what it
-        # certifies without the change being seen. The verdict compared is the
-        # LAST line of the agreed output, and only when the column is numeric.
         reg_want="$(awk -v b="$fourth_stem" '!/^#/ && $1==b{print $3; exit}' "$FOURTH_MANIFEST")"
     fi
     if [[ "$go_rc" == 0 && "$rs_rc" == 0 && "$ts_rc" == 0 && "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]] \
-        && { [[ -z "$fourth_stem" ]] || { [[ "$fk_rc" == 0 && "$fk_diags" == 0 && "$fk_out" == "$go_out" ]]; }; }; then
+        && [[ "$fk_rc" == 0 && "$fk_diags" == 0 && "$fk_out" == "$go_out" ]]; then
         reg_have="${go_out##*$'\n'}"
         if [[ "$reg_want" =~ ^[0-9]+$ && "$reg_have" != "$reg_want" ]]; then
             printf "  ✗  %-30s  → %s agreed on every arm, but the manifest registers %s — REGISTERED-VERDICT DRIFT\n      evidence=%s\n" \
@@ -422,20 +421,13 @@ run_siblings() {
         rm -rf "$legs"
         printf "  ✓  %-30s  → %s\n" "$label" "$go_out"
         ok=$((ok + 1))
-        if [[ -n "$fourth_stem" ]]; then fourth_ok=$((fourth_ok + 1)); fi
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then
-            if [[ -n "$fourth_stem" ]]; then echo "ok fourth" > "$SUITE_STATUS_FILE"; else echo "ok" > "$SUITE_STATUS_FILE"; fi
-        fi
+        fourth_ok=$((fourth_ok + 1))
+        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok fourth" > "$SUITE_STATUS_FILE"; fi
         return 0
     fi
-    printf '  evidence=%s exits go=%s rust=%s typescript=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc"
-    if [[ -n "$fourth_stem" ]]; then
-        printf "  ✗  %-30s\n      go         = %s\n      rust       = %s\n      typescript = %s\n      fourth-src = %s\n      fourth-rc  = %s  diagnostics=%s\n" \
-            "$label" "$go_out" "$rs_out" "$ts_out" "$fk_out" "$fk_rc" "$fk_diags"
-    else
-        printf "  ✗  %-30s\n      go         = %s\n      rust       = %s\n      typescript = %s\n" \
-            "$label" "$go_out" "$rs_out" "$ts_out"
-    fi
+    printf '  evidence=%s exits go=%s rust=%s typescript=%s fkwu=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc" "$fk_rc"
+    printf "  ✗  %-30s\n      go         = %s\n      rust       = %s\n      typescript = %s\n      fkwu       = %s\n      fkwu-rc    = %s  diagnostics=%s\n" \
+        "$label" "$go_out" "$rs_out" "$ts_out" "$fk_out" "$fk_rc" "$fk_diags"
     fail=$((fail + 1))
     if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
 }
@@ -712,17 +704,6 @@ elif [[ $binary_mode -eq 1 ]]; then
     echo "  binary mode: three siblings over Go's artifact of each closure; fkwu walks no root here"
 elif [[ $fourth_ok -gt 0 ]]; then
     echo "  fourth arm: $fourth_ok band(s) four-way (runtime fkwu source/JIT)"
-elif [[ $((ok - fkwu_only)) -gt 0 ]]; then
-    # The zero the fourth_available refusal above cannot see. That gate asks
-    # "is the arm present at all" and exits 1 when it is not. This asks the
-    # different question: the arm is present, and
-    # fired for NOT ONE band in the run — because coverage is per-band
-    # (fourth-arm-bands.txt), so a workload naming only unregistered bands gets
-    # a full set of ✓ marks with three kernels behind every one of them. The
-    # zero is said out loud, never left to silence.
-    echo "  fourth arm: 0 band(s) — present, but no band in this run is covered;"
-    echo "              every ✓ above speaks for three kernels. Register the band in"
-    echo "              fourth-arm-bands.txt. The source/JIT door itself is present."
 fi
 if [[ $fkwu_only -gt 0 ]]; then
     echo "  fkwu-only lanes: $fkwu_only band(s) at declared proof level (runtime fkwu)"

@@ -5,8 +5,9 @@
 # repo-root fkwu: it walks the workload root validate.sh writes, the same
 # closure the three siblings read as plain Form, and lets the same binary's
 # Form-native CPU/Metal/MLX JIT doors crystallize only what execution asks
-# for. Every manifest workload is mandatory: execution, diagnostics, and
-# agreement are checked, never silently reduced to three siblings.
+# for. fkwu is a leg of every workload: execution, diagnostics, and agreement
+# are checked, never reduced to three siblings. A manifest row adds the
+# verdict its band is registered to certify.
 
 FOURTH_MANIFEST="fourth-arm-bands.txt"
 FOURTH_SOURCE_FKWU="${FORM_FOURTH_SOURCE_FKWU:-}"
@@ -27,8 +28,8 @@ build_fourth() {
     fi
 }
 
-# fourth_band_stem — manifest stem for a band file path, or empty. The fourth
-# arm only applies to a CANONICAL band — the workload's last file living under
+# fourth_band_stem — manifest stem for a band file path, or empty. A registered
+# verdict only applies to a CANONICAL band — the workload's last file living under
 # form-stdlib/tests/. A same-named sample elsewhere (e.g. a cross-modal demo
 # whose basename collides with a manifest stem) never resolves, because the
 # registered band is form-stdlib/tests/<stem>-band.fk and the sample's own
