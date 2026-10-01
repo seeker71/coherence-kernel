@@ -175,15 +175,24 @@ remains null until transcript usage is supplied. Remote access is unchanged.
 
 ### Direction toward zero rented coding
 
-The target is three consecutive supported engineering sessions completed with
-zero additional rented tokens by **October 4, 2026**. This is a target to verify,
-not a claim of general offline coding capability. Remote access remains available.
+This is a guide, not a schedule. The goal is form-cli carrying any query, any
+task, and any frequency-aligned review and flow with zero rented tokens, so
+anyone can use it without a provider. Each session maximizes local tokens and
+minimizes rented tokens. Remote access remains available.
 
-| Day | Local work and evidence |
-|---|---|
-| October 1–2 | Use the native lifter and local coding checkpoint for routine source transformations. Prove a candidate exists before model admission. Keep original checks, execute the candidate and retain failed attempts. |
-| October 2–3 | Let the same native workflow select the next supported task, repair it, verify it and prepare its landing. Spend local replies on changed approaches and missing evidence. Rented contributions should name goals, contracts or one unresolved decision, with their usage attributed. |
-| October 3–4 | Run three consecutive supported jobs through selection, repair, verification and landing with zero rented-token growth during each complete job. Count failed jobs and required human/frontier interventions. Expand the task set only as this evidence holds. |
+The work stays on the local path: the native lifter, the owned coding
+checkpoint, the original checks, and the retained failures. Prove a candidate
+exists before model admission. Rented help is high-level guidance for one
+unresolved decision, carrying that failure, with its usage attributed.
+
+After the measurement below, review the local flow against the last comparable
+session. Local tokens should be higher and rented tokens lower. Name the query,
+task, or frequency the local path could not yet carry, and the local door that
+would carry it next. A rented token is justified only when that review shows it
+removed a later rented turn. When the comparison misses, the retained failure
+chooses the next local repair in the same context. Expand the task set only as
+that evidence holds. Zero is a movement whose answer, review and landing show
+no rented-token growth. It is witnessed by these readings, not by a date.
 
 At session opening and closing, send the exact provider transcript path to
 `observe/rented-turn-meter-run.fk`. Its existing output-token meter remains;
@@ -205,10 +214,10 @@ cumulative counters are supported.
 Pair those readings with the native coding result's generated/injected IDs,
 attempts, checks, release and the functions/lines actually changed. Include
 coordination and unsuccessful attempts in session cost. Compare similar work:
-aim to halve rented uncached input plus output in each next comparable session,
-while maintaining verified completion. More local allowance enables useful
-work; consuming tokens by itself is no improvement. When a target is missed,
-use the retained failure to choose the next local repair in the same context.
+local tokens higher, rented tokens lower, verified completion kept. More local
+allowance enables useful work; consuming tokens by itself is no improvement.
+When the comparison misses, the retained failure chooses the next local repair
+in the same context.
 
 Routine work reaches the local lane as band-first gaps in
 `learn/native-turn-queue.jsonl`: a band proven reachable by a reference solution
