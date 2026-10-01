@@ -1029,8 +1029,8 @@ export class Kernel {
       const b = argInt(args, 0);
       return { kind: "str", str: b >= 0 && b <= 255 ? String.fromCharCode(b) : "" };
     });
-    // input_byte — this kernel stages no input: every byte is unavailable.
-    this.registerNative("input_byte", () => ({ kind: "null" }));
+    // input_byte — this kernel stages no input: every index is outside it and reads 0.
+    this.registerNative("input_byte", () => ({ kind: "int", int: 0 }));
     // List ops: cons, head, tail, nth and len run on SharedList in constant time.
     this.registerNative("list", (_k, args) => new SharedList(args.reverse(), args.length));
     this.registerNative("cons", (k, args) => {
@@ -1076,18 +1076,6 @@ export class Kernel {
       return xs?.kind === "list" ? listAt(xs, argInt(args, 1)) : { kind: "null" };
     });
     this.registerNative("empty", () => new SharedList([], 0));
-    // _list_append — functional list extension: (_list_append xs x) → a NEW
-    // list = xs ++ [x]. Sibling-parity with Rust + Go. The Python adapter
-    // lowers the accumulator idiom `result.append(x)` to
-    // (let result (_list_append result x)), rebinding the name to the grown
-    // list each pass — what unblocks list-returning routes (softmax, vectors).
-    // A non-list receiver yields a single-element list, matching an append
-    // onto an empty accumulator.
-    this.registerNative("_list_append", (_k, args) => {
-      const base = args[0]?.kind === "list" ? args[0].list : [];
-      const x = args[1] ?? { kind: "null" };
-      return { kind: "list", list: [...base, x] };
-    });
     // _get — polymorphic subscript over a "__dict__"-tagged pair list (dict[k]), a record
     // alist (string key), a list index or a string byte.
     this.registerNative("_get", (_k, args) => {
@@ -1194,31 +1182,8 @@ export class Kernel {
         ],
       };
     });
-    // Polymorphic `+` for Python: int+int=add, str+str=concat,
-    // str+int / int+str = concat-via-stringify, list+list=concat.
-    this.registerNative("_plus", (_k, args) => {
-      const a = args[0];
-      const b = args[1];
-      if (a?.kind === "int" && b?.kind === "int") return { kind: "int", int: a.int + b.int };
-      // Float promotion — matches Python (int+float→float, float+int→float,
-      // float+float→float) and the Rust + Go _plus dispatch exactly. Any
-      // float operand forces an f64 result; mixed int/float reads the int
-      // through argFloat-style widening. Sibling-parity float arm.
-      if (
-        (a?.kind === "f64" || a?.kind === "int") &&
-        (b?.kind === "f64" || b?.kind === "int") &&
-        (a?.kind === "f64" || b?.kind === "f64")
-      ) {
-        const af = a.kind === "f64" ? a.float : a.int;
-        const bf = b.kind === "f64" ? b.float : b.int;
-        return { kind: "f64", float: af + bf };
-      }
-      if (a?.kind === "str" && b?.kind === "str") return { kind: "str", str: a.str + b.str };
-      if (a?.kind === "str" && b?.kind === "int") return { kind: "str", str: a.str + String(b.int) };
-      if (a?.kind === "int" && b?.kind === "str") return { kind: "str", str: String(a.int) + b.str };
-      if (a?.kind === "list" && b?.kind === "list") return { kind: "list", list: [...a.list, ...b.list] };
-      throw new Error(`_plus: unsupported operand types`);
-    });
+    // math_pi — the circle constant; fkwu answers it as a float_leaf rewrite row.
+    this.registerNative("math_pi", () => ({ kind: "f64", float: Math.PI }));
     // math_sqrt is IEEE fsqrt, correctly rounded (law 4); the rest are the host's libm.
     this.registerNative("math_sqrt", (_k, args) => {
       return { kind: "f64", float: Math.sqrt(argFloat(args, 0)) };

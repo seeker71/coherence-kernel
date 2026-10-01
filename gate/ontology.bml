@@ -10,6 +10,8 @@ section [form.bml] {
         def ong-go() = "form/form-kernel-go/main.go";
         def ong-rust() = "form/form-kernel-rust/src/main.rs";
         def ong-ts() = "form/form-kernel-ts/src/reader.ts";
+        def ong-ts-kernel() = "form/form-kernel-ts/src/kernel.ts";
+        def ong-contract() = "form/category-contract.json";
         def ong-kernels() = ["form-kernel-go", "form-kernel-rust", "form-kernel-ts"];
         def ong-none() = 0 - 1;
         def ong-when(cond, msg) = cond ? [msg] : [];
@@ -67,12 +69,12 @@ section [form.bml] {
         }
 
         // ---- locating the dispatch function: the "{" of its body, or -1 ----
-        // Go: func (...) buildVerb(...) ... then the brace; Rust: fn build_verb(...) ... then the brace; TypeScript: function buildVerb(...): NodeID then the brace.
+        // Go: func (...) buildVerb(...) ... then the brace; Rust: fn build_verb(...) ... then the brace.
+        // TypeScript reads its verbs from the VERBS table instead (ong-ts-table).
         // (A comment line may not END with an open brace: the BML section scanner reads lines, comments included, and counts one.)
         def ong-fn-open(text, kind) {
             (String) kind == "go" ? ong-open-after(text, ong-go-head(text, 0))
-            : (String) kind == "rust" ? ong-open-after(text, ong-word-head(text, "fn", "build_verb", 0))
-            : ong-ts-open(text, ong-word-head(text, "function", "buildVerb", 0));
+            : ong-open-after(text, ong-word-head(text, "fn", "build_verb", 0));
         }
         // func\s+\([^)]*\)\s+buildVerb : the "func" whose parenthesised receiver is followed by the name
         def ong-go-head(text, from) {
@@ -105,30 +107,15 @@ section [form.bml] {
         }
         def ong-open-paren(text, p) = p < 0 ? (0 - 1) : ong-open-brace(text, str_find(text, ")", p));
         def ong-open-brace(text, c) = c < 0 ? (0 - 1) : str_find(text, "{", c);
-        // TypeScript: \([^)]*\)\s*:\s*NodeID\s* and then the open brace
-        def ong-ts-open(text, after) {
-            after < 0 ? (0 - 1) : ong-ts-open-paren(text, str_find(text, "(", after));
-        }
-        def ong-ts-open-paren(text, p) = p < 0 ? (0 - 1) : ong-ts-open-colon(text, str_find(text, ")", p));
-        def ong-ts-open-colon(text, c) {
-            c < 0 ? (0 - 1) : ong-ts-open-type(text, lx-skip-ws(text, c + 1));
-        }
-        def ong-ts-open-type(text, k) {
-            (Comparable) lx-at?(text, k, ":") == 0 ? (0 - 1) : ong-ts-open-nodeid(text, lx-skip-ws(text, k + 1));
-        }
-        def ong-ts-open-nodeid(text, k) {
-            (Comparable) lx-at?(text, k, "NodeID") == 0 ? (0 - 1) : ong-ts-open-final(text, lx-skip-ws(text, k + 6));
-        }
-        def ong-ts-open-final(text, k) = (Comparable) lx-at?(text, k, "{") == 1 ? k : (0 - 1);
-        // the body: Go/Rust keep the "{" (the script slices from it); TypeScript starts after it
+        // the body, from its "{" (the script slices from it)
         def ong-body(text, kind) {
             let open = ong-fn-open(text, kind);
-            open < 0 ? ["refused", (String) kind == "ts" ? "buildVerb not found in TS reader.ts" : "buildVerb/build_verb function not found"] : ong-body-at(text, kind, open, ong-brace-end(text, open, 0));
+            open < 0 ? ["refused", "buildVerb/build_verb function not found"] : ong-body-at(open, ong-brace-end(text, open, 0), text);
         }
-        def ong-body-at(text, kind, open, close) = close < 0 ? ["refused", "unmatched brace"] : ["ok", substring(text, (String) kind == "ts" ? (open + 1) : open, close)];
+        def ong-body-at(open, close, text) = close < 0 ? ["refused", "unmatched brace"] : ["ok", substring(text, open, close)];
 
         // ---- case positions inside a body: rows (pos, name) in order ----
-        // Go / TypeScript: case\s+"name"\s*:
+        // Go: case\s+"name"\s*:
         def ong-cases(body) = ong-cases-go(body, 0, []);
         def ong-cases-go(body, from, acc) {
             let i = str_find(body, "case", from);
@@ -240,108 +227,77 @@ section [form.bml] {
             : [label, ong-const-value(consts, substring(chunk, a, j))];
         }
 
-        // ---- TypeScript enums: \benum\s+(\w+)\s*\{([^}]*)\} with members (\w+)\s*=\s*(\d+) -> rows (Enum.Member, value) ----
-        def ong-enums(text) = ong-enums-go(text, 0, []);
-        def ong-enums-go(text, from, acc) {
-            let i = str_find(text, "enum", from);
-            i < 0 ? acc : ong-enums-go(text, i + 1, ong-enum-at(text, i, lx-skip-ws(text, i + 4), acc));
-        }
-        def ong-enum-at(text, i, k, acc) {
-            let j = ong-span-word(text, k);
-            (Comparable) lx-boundary-before?(text, i) == 0 ? acc
-            : (Comparable) k == (i + 4) ? acc
-            : (Comparable) j == k ? acc
-            : ong-enum-open(text, substring(text, k, j), lx-skip-ws(text, j), acc);
-        }
-        def ong-enum-open(text, name, o, acc) {
-            (Comparable) lx-at?(text, o, "{") == 0 ? acc : ong-enum-body(text, name, o + 1, str_find(text, "}", o + 1), acc);
-        }
-        def ong-enum-body(text, name, a, b, acc) = b < 0 ? acc : append(acc, ong-enum-members(substring(text, a, b), name, 0, []));
-        def ong-enum-members(body, name, from, acc) {
-            let i = str_find(body, "=", from);
-            i < 0 ? reverse(acc) : ong-enum-members(body, name, i + 1, ong-enum-member-at(body, name, i, acc));
-        }
-        def ong-enum-member-at(body, name, i, acc) {
-            let e = ong-ws-back(body, i);
-            let s = ong-word-back(body, e);
-            let d = lx-skip-ws(body, i + 1);
-            let de = lx-digits-end(body, d);
-            ((Comparable) s == e) || ((Comparable) de == d) ? acc : cons([name ++ "." ++ substring(body, s, e), lx-int-span(body, d, de)], acc);
-        }
         def ong-ws-back(s, i) = (i > 0) && ((Comparable) lx-ws-at?(s, i - 1) == 1) ? ong-ws-back(s, i - 1) : i;
-        def ong-word-back(s, i) = (i > 0) && ((Comparable) lx-word-at?(s, i - 1) == 1) ? ong-word-back(s, i - 1) : i;
 
-        // ---- TypeScript chunk: first RBasic.X; inst: R.Y through the enums, or a literal; mathInst( skips ----
+        // ---- TypeScript: the VERBS table, one ["verb", RBasic.X, R.Y | digits] row per verb ----
+        def ong-ts-table(text, enums) {
+            let i = str_find(text, "const VERBS", 0);
+            i < 0 ? ["refused", "VERBS table not found in TS reader.ts"] : ["ok", ong-ts-rows(text, enums, i, str_find(text, "] as const", i), [])];
+        }
+        // kernel.ts names each enum from the contract: export const R = Object.freeze(CATEGORY_CONTRACT.instances.key) -> rows (R.Member, value)
+        def ong-ts-freeze() = "= Object.freeze(CATEGORY_CONTRACT.instances.";
+        def ong-ts-enums(text, instances) = ong-ts-enums-go(text, instances, 0, []);
+        def ong-ts-enums-go(text, instances, from, acc) {
+            let i = str_find(text, "export const ", from);
+            i < 0 ? acc : ong-ts-enum-at(text, instances, i + 13, ong-span-word(text, i + 13), acc);
+        }
+        def ong-ts-enum-at(text, instances, a, b, acc) {
+            let k = lx-skip-ws(text, b) + len(ong-ts-freeze());
+            (Comparable) lx-at?(text, lx-skip-ws(text, b), ong-ts-freeze()) == 0 ? ong-ts-enums-go(text, instances, b, acc)
+            : ong-ts-enums-go(text, instances, b, append(acc, ong-ts-members(substring(text, a, b), json-object-pairs(json-object-get(instances, substring(text, k, ong-span-word(text, k)))))));
+        }
+        def ong-ts-members(name, pairs) = tb-map(pairs, pair => [name ++ "." ++ json-pair-key(pair), node_value(json-pair-value(pair))]);
+        def ong-ts-rows(text, enums, from, end, out) {
+            let i = str_find(text, "[\"", from);
+            (i < 0) || (i >= end) ? out : ong-ts-row(text, enums, i, end, str_find(text, "]", i), out);
+        }
+        def ong-ts-row(text, enums, i, end, close, out) {
+            let chunk = substring(text, i, close);
+            let label = ong-ts-label(chunk);
+            let q = ong-quoted(chunk, 1);
+            ((Comparable) len(q) == 0) || ((Comparable) len(label) == 0) ? ong-ts-rows(text, enums, close, end, out)
+            : ong-ts-rows(text, enums, close, end, ong-assign(out, [q[0]], label, ong-ts-row-inst(chunk, enums)));
+        }
+        // the label RBasic.X names, or "" when it names none
         def ong-ts-label(chunk) {
             let i = str_find(chunk, "RBasic.", 0);
-            i < 0 ? "" : ong-ts-label-at(chunk, i + 7, ong-span-word(chunk, i + 7));
+            i < 0 ? "" : ong-map-get(ong-rbasic-map(), substring(chunk, i + 7, ong-span-word(chunk, i + 7)));
         }
-        // "" when no RBasic.X stands; "?" when it stands but names no label (the script clears and continues)
-        def ong-ts-label-at(chunk, a, j) {
-            let label = ong-map-get(ong-rbasic-map(), substring(chunk, a, j));
-            (Comparable) len(label) == 0 ? "?" : label;
+        // the third field: an enum member through the enums, digits, or none
+        def ong-ts-row-inst(chunk, enums) {
+            let c = str_find(chunk, ",", str_find(chunk, ",", 0) + 1);
+            c < 0 ? ong-none() : ong-ts-inst-value(chunk, enums, lx-skip-ws(chunk, c + 1));
         }
-        def ong-ts-inst(chunk, enums) {
-            let i = str_find(chunk, "inst", 0);
-            i < 0 ? ong-none() : ong-ts-inst-at(chunk, enums, i, lx-skip-ws(chunk, i + 4));
+        def ong-ts-inst-value(chunk, enums, v) {
+            (Comparable) lx-digit-at?(chunk, v) == 1 ? lx-int-span(chunk, v, lx-digits-end(chunk, v))
+            : (Comparable) lx-at?(chunk, v, "R") == 0 ? ong-none()
+            : ong-ts-inst-enum(chunk, enums, v, ong-span-word(chunk, v + 1));
         }
-        def ong-ts-inst-at(chunk, enums, i, k) {
-            (Comparable) lx-at?(chunk, k, ":") == 0 ? ong-ts-inst-next(chunk, enums, i)
-            : ong-ts-inst-value(chunk, enums, i, lx-skip-ws(chunk, k + 1));
+        def ong-ts-inst-enum(chunk, enums, v, j) {
+            (Comparable) lx-at?(chunk, j, ".") == 0 ? ong-none()
+            : ong-const-value(enums, substring(chunk, v, j) ++ "." ++ substring(chunk, j + 1, ong-span-word(chunk, j + 1)));
         }
-        def ong-ts-inst-next(chunk, enums, i) {
-            let n = str_find(chunk, "inst", i + 1);
-            n < 0 ? ong-none() : ong-ts-inst-at(chunk, enums, n, lx-skip-ws(chunk, n + 4));
-        }
-        def ong-ts-inst-value(chunk, enums, i, v) {
-            (Comparable) lx-at?(chunk, v, "R") == 1 ? ong-ts-inst-enum(chunk, enums, i, v, ong-span-word(chunk, v + 1))
-            : (Comparable) lx-digit-at?(chunk, v) == 1 ? lx-int-span(chunk, v, lx-digits-end(chunk, v))
-            : ong-ts-inst-next(chunk, enums, i);
-        }
-        def ong-ts-inst-enum(chunk, enums, i, v, j) {
-            (Comparable) lx-at?(chunk, j, ".") == 0 ? ong-ts-inst-next(chunk, enums, i)
-            : ong-ts-inst-member(chunk, enums, i, substring(chunk, v, j), j + 1, ong-span-word(chunk, j + 1));
-        }
-        def ong-ts-inst-member(chunk, enums, i, enumname, a, b) = (Comparable) b == a ? ong-ts-inst-next(chunk, enums, i) : ong-const-value(enums, enumname ++ "." ++ substring(chunk, a, b));
 
         // ---- walking the chunks: out rows (name label inst), pending names fall through to the next reading ----
         def ong-chunk(body, positions, k) = substring(body, positions[k][0], (k + 1) < len(positions) ? positions[k + 1][0] : len(body));
-        def ong-walk(body, positions, kind, consts, enums, k, pending, out) {
+        def ong-walk(body, positions, kind, consts, k, pending, out) {
             k >= len(positions) ? out
-            : ong-walk-step(body, positions, kind, consts, enums, k, pending, out, ong-chunk(body, positions, k), positions[k][1]);
+            : ong-walk-cat(body, positions, kind, consts, k, pending, out, positions[k][1], ong-cat-call(ong-chunk(body, positions, k), kind, consts));
         }
-        def ong-walk-step(body, positions, kind, consts, enums, k, pending, out, chunk, name) {
-            (String) kind == "ts" ? ong-walk-ts(body, positions, kind, consts, enums, k, pending, out, chunk, name, ong-ts-label(chunk))
-            : ong-walk-cat(body, positions, kind, consts, enums, k, pending, out, name, ong-cat-call(chunk, kind, consts));
-        }
-        def ong-walk-cat(body, positions, kind, consts, enums, k, pending, out, name, call) {
-            (Comparable) len(call) == 0 ? ong-walk(body, positions, kind, consts, enums, k + 1, append(pending, [name]), out)
-            : ong-walk(body, positions, kind, consts, enums, k + 1, [], ong-assign(out, append(pending, [name]), call[0], call[1]));
-        }
-        def ong-walk-ts(body, positions, kind, consts, enums, k, pending, out, chunk, name, label) {
-            (Comparable) len(label) == 0 ? ong-walk(body, positions, kind, consts, enums, k + 1, append(pending, [name]), out)
-            : (String) label == "?" ? ong-walk(body, positions, kind, consts, enums, k + 1, [], out)
-            : str_find(chunk, "mathInst", 0) >= 0 ? ong-walk-ts-math(body, positions, kind, consts, enums, k, pending, out, chunk, name, label, str_find(chunk, "mathInst", 0))
-            : ong-walk(body, positions, kind, consts, enums, k + 1, [], ong-assign(out, append(pending, [name]), label, ong-ts-inst(chunk, enums)));
-        }
-        // mathInst\s*\( : the script skips the chunk (and drops its pending names) only when the paren follows
-        def ong-walk-ts-math(body, positions, kind, consts, enums, k, pending, out, chunk, name, label, m) {
-            (Comparable) lx-at?(chunk, lx-skip-ws(chunk, m + 8), "(") == 1 ? ong-walk(body, positions, kind, consts, enums, k + 1, [], out)
-            : ong-walk(body, positions, kind, consts, enums, k + 1, [], ong-assign(out, append(pending, [name]), label, ong-ts-inst(chunk, enums)));
+        def ong-walk-cat(body, positions, kind, consts, k, pending, out, name, call) {
+            (Comparable) len(call) == 0 ? ong-walk(body, positions, kind, consts, k + 1, append(pending, [name]), out)
+            : ong-walk(body, positions, kind, consts, k + 1, [], ong-assign(out, append(pending, [name]), call[0], call[1]));
         }
         // dict assignment: a known name keeps its seat and takes the new reading; a new name joins at the end
         def ong-assign(out, names, label, inst) = (Comparable) len(names) == 0 ? out : ong-assign(ong-put(out, [names[0], label, inst]), names[1:], label, inst);
         def ong-put(out, r) = (Comparable) len(tb-find2(out, ong-r-named?, r[0])) == 0 ? append(out, [r]) : ong-replace(out, r);
         def ong-replace(out, r) = (Comparable) len(out) == 0 ? [] : (String) out[0][0] == r[0] ? cons(r, out[1:]) : cons(out[0], ong-replace(out[1:], r));
         // one kernel's dispatch: list("ok", rows) or list("refused", message)
-        def ong-dispatch(text, kind) {
-            let body = ong-body(text, kind);
-            (String) body[0] == "refused" ? body : ["ok", ong-dispatch-in(body[1], text, kind)];
-        }
+        def ong-dispatch(text, kind) = ong-dispatch-body(ong-body(text, kind), text, kind);
+        def ong-dispatch-body(body, text, kind) = (String) body[0] == "refused" ? body : ["ok", ong-dispatch-in(body[1], text, kind)];
         def ong-dispatch-in(body, text, kind) {
-            (String) kind == "rust" ? ong-walk(body, ong-arms(body), kind, ong-consts(text, kind), [], 0, [], [])
-            : (String) kind == "go" ? ong-walk(body, ong-cases(body), kind, ong-consts(text, kind), [], 0, [], [])
-            : ong-walk(body, ong-cases(body), kind, [], ong-enums(text), 0, [], []);
+            (String) kind == "rust" ? ong-walk(body, ong-arms(body), kind, ong-consts(text, kind), 0, [], [])
+            : ong-walk(body, ong-cases(body), kind, ong-consts(text, kind), 0, [], []);
         }
         def ong-k-name(k) = k[0];
         def ong-k-rows(k) = k[1];
@@ -375,7 +331,7 @@ section [form.bml] {
         }
         def ong-cat-kernels(r, accept, kernels) = (Comparable) len(kernels) == 0 ? [] : append(ong-when((Comparable) ong-handled?(ong-k-text(kernels[0]), accept) == 0, "category " ++ ong-py(ong-r-name(r)) ++ " (type=" ++ ong-r-type(r).str() ++ " inst=" ++ ong-r-inst(r).str() ++ ") in ontology expects one of " ++ lx-py-str-list(accept) ++ " as a verb handler in " ++ ong-k-name(kernels[0]) ++ " but none found"), ong-cat-kernels(r, accept, kernels[1:]));
         def ong-handled?(text, accept) = (Comparable) len(accept) == 0 ? 0 : (Comparable) ong-handler?(text, accept[0], 0) == 1 ? 1 : ong-handled?(text, accept[1:]);
-        // case\s+"x"\s*[:=]  |  "x"\s*=>  |  verb\s*===\s*"x"  — at any "x" in the text
+        // case\s+"x"\s*[:=]  |  "x"\s*=>  |  verb\s*===\s*"x"  |  ["x",  (a table row) — at any "x" in the text
         def ong-handler?(text, x, from) {
             let i = str_find(text, "\"" ++ x ++ "\"", from);
             i < 0 ? 0 : (Comparable) ong-handler-at?(text, x, i) == 1 ? 1 : ong-handler?(text, x, i + 1);
@@ -384,6 +340,7 @@ section [form.bml] {
             let after = lx-skip-ws(text, i + (len(x) + 2));
             ((Comparable) ong-case-before?(text, i) == 1) && (((Comparable) lx-at?(text, after, ":") == 1) || ((Comparable) lx-at?(text, after, "=") == 1)) ? 1
             : (Comparable) lx-at?(text, after, "=>") == 1 ? 1
+            : (i > 0) && (((Comparable) lx-at?(text, i - 1, "[") == 1) && ((Comparable) lx-at?(text, after, ",") == 1)) ? 1
             : ong-verb-before?(text, i);
         }
         def ong-case-before?(text, i) {
@@ -403,11 +360,15 @@ section [form.bml] {
             let go = read_file(root ++ ong-go());
             let rust = read_file(root ++ ong-rust());
             let ts = read_file(root ++ ong-ts());
+            let tskernel = read_file(root ++ ong-ts-kernel());
+            let contract = read_file(root ++ ong-contract());
             nothing?(json) ? ong-missing(root, ong-json())
             : nothing?(go) ? ong-missing(root, ong-go())
             : nothing?(rust) ? ong-missing(root, ong-rust())
             : nothing?(ts) ? ong-missing(root, ong-ts())
-            : ong-analysis-texts(parse-json(ong-json(), json), ong-dispatch(go, "go"), ong-dispatch(rust, "rust"), ong-dispatch(ts, "ts"), go, rust, ts);
+            : nothing?(tskernel) ? ong-missing(root, ong-ts-kernel())
+            : nothing?(contract) ? ong-missing(root, ong-contract())
+            : ong-analysis-texts(parse-json(ong-json(), json), ong-dispatch(go, "go"), ong-dispatch(rust, "rust"), ong-ts-table(ts, ong-ts-enums(tskernel, json-object-get(parse-json(ong-contract(), contract), "instances"))), go, rust, ts);
         }
         def ong-analysis-texts(root, go, rust, ts, gotext, rusttext, tstext) {
             (String) go[0] == "refused" ? [go[1]]
