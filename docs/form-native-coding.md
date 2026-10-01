@@ -175,6 +175,10 @@ remains null until transcript usage is supplied. Remote access is unchanged.
 
 ### Direction toward zero rented coding
 
+`fl-session-rent()` carries the caller's session guide. Native coding and review
+admit `fl-local-work()` for task evidence, retained repair, changed choices and
+local review. The caller reports session accounting beside the local work.
+
 This is a guide, not a schedule. The goal is form-cli carrying any query, any
 task, and any frequency-aligned review and flow with zero rented tokens, so
 anyone can use it without a provider. Each session maximizes local tokens and
