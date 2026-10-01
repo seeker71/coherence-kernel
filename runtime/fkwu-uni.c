@@ -418,7 +418,12 @@ static int fk_field_open(void);
 #define FK_POK(p) ((p) >= FK_PAIR_BASE ? ((p) - FK_PAIR_BASE < fk_field_pp()) : ((p) <= fk_hp))
 /* the next pair of a LIST walk: a tail that is a list word (odd) continues; any other tail -- the int a
  * door's pair carries, (cons 1 5) -- ends the walk at 0, never read as a pair index. Without it print
- * walked (cons 7 60) into another list's cells and (cons 1 2) into a list that never ended. */
+ * walked (cons 7 60) into another list's cells and (cons 1 2) into a list that never ended.
+ * The cons law as fkwu keeps it: a pair keeps its tail word; every list walk ends at it (this macro);
+ * tail answers it, and fk_veq, fk_deep_hash and the melt see it as the word it is -- so (cons 7 60)
+ * prints [7] and is not value_eq to (list 7). A door that takes (cons x n) reads its carried int with
+ * FK_HT itself (fk_spk_door's rate, the stage bus's (cons cur skip)); no walk reads a tail word as a
+ * pair index. */
 #define FK_HNEXT(p) ((FK_HT(p) & 1) ? (FK_HT(p) >> 1) : 0)
 #define FK_SO(si) ((si) >= FK_STR_BASE ? fk_fso[(si) - FK_STR_BASE] : fk_so[(si)])
 #define FK_SLEN(si) ((si) >= FK_STR_BASE ? fk_fsl[(si) - FK_STR_BASE] : fk_sl[(si)])
@@ -5728,7 +5733,7 @@ static int fk_skip_entry(long long skipv, const char *name) {
         if (nb[0] != 0 && fk_name_eq(nb, name)) {
             return 1;
         }
-        q = FK_HT(q) >> 1;
+        q = FK_HNEXT(q);
     }
     return 0;
 }
@@ -7329,10 +7334,10 @@ static long long fk_http_append_request_headers(char *req, long long rn, long lo
         if ((row & 1) != 0) {
             long long rp = row >> 1;
             if (rp >= 1 && FK_POK(rp) && ((FK_HH(rp) >> 1) == 43001)) {
-                long long np = FK_HT(rp) >> 1;
+                long long np = FK_HNEXT(rp);
                 if (np >= 1 && FK_POK(np)) {
                     long long namev = FK_HH(np);
-                    long long vp = FK_HT(np) >> 1;
+                    long long vp = FK_HNEXT(np);
                     if (vp >= 1 && FK_POK(vp)) {
                         long long valuev = FK_HH(vp);
                         long long ns = fk_stri(namev);
@@ -7359,7 +7364,7 @@ static long long fk_http_append_request_headers(char *req, long long rn, long lo
                 }
             }
         }
-        q = FK_HT(q) >> 1;
+        q = FK_HNEXT(q);
     }
     return rn;
 }
@@ -7717,18 +7722,18 @@ static long long fk_is_dict_value(long long v) {
 }
 static long long fk_get_value(long long target, long long key) {
     if (fk_is_dict_value(target)) {
-        long long p = FK_HT(target >> 1) >> 1;
+        long long p = FK_HNEXT(target >> 1);
         long long ks = fk_stri(key);
         while (p >= 1 && FK_POK(p)) {
             long long k = FK_HH(p);
-            long long vp = FK_HT(p) >> 1;
+            long long vp = FK_HNEXT(p);
             if (vp < 1 || !FK_POK(vp)) {
                 return 0;
             }
             if (fk_is_str(k) && fk_is_str(key) && fk_keyeq(fk_stri(k), ks)) {
                 return FK_HH(vp);
             }
-            p = FK_HT(vp) >> 1;
+            p = FK_HNEXT(vp);
         }
         return 0;
     }
@@ -7736,7 +7741,7 @@ static long long fk_get_value(long long target, long long key) {
         long long want = key >> 1;
         long long p = target >> 1;
         while (p >= 1 && FK_POK(p) && want > 0) {
-            p = FK_HT(p) >> 1;
+            p = FK_HNEXT(p);
             want = want - 1;
         }
         if (p >= 1 && FK_POK(p)) {
@@ -9694,7 +9699,7 @@ static long long fk_walk_body(long long i, long long fp) {
                 return 0;
             }
             long long f44 = FK_HH(p44) >> 1;
-            long long p44t = FK_HT(p44) >> 1;
+            long long p44t = FK_HNEXT(p44);
             if (p44t < 1 || !FK_POK(p44t)) {
                 fk_vsp = fp;
                 return 0;
@@ -9715,7 +9720,7 @@ static long long fk_walk_body(long long i, long long fp) {
                 fk_hh[fk_hp] = FK_HH(cc44);
                 fk_ht[fk_hp] = rev44;
                 rev44 = (fk_hp << 1) | 1;
-                cc44 = FK_HT(cc44) >> 1;
+                cc44 = FK_HNEXT(cc44);
             }
             long long comb44 = args44;
             long long rr44 = rev44 >> 1;
@@ -9727,7 +9732,7 @@ static long long fk_walk_body(long long i, long long fp) {
                 fk_hh[fk_hp] = FK_HH(rr44);
                 fk_ht[fk_hp] = comb44;
                 comb44 = (fk_hp << 1) | 1;
-                rr44 = FK_HT(rr44) >> 1;
+                rr44 = FK_HNEXT(rr44);
             }
             long long carg44 = 1;
             if (a44 == 0) {
@@ -9772,7 +9777,7 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
             fk_cstr(FK_HH(p155), ab155[n155], 1024);
             av155[n155] = ab155[n155];
             n155 = n155 + 1;
-            p155 = FK_HT(p155) >> 1;
+            p155 = FK_HNEXT(p155);
         }
         av155[n155] = 0;
         if (n155 == 0) { return fk_nothing; }
@@ -10129,7 +10134,7 @@ static long long fk_host_door(long long mode, long long x) {
         fk_cstr(FK_HH(p17), ab17[n17], 1024);
         av17[n17] = ab17[n17];
         n17 = n17 + 1;
-        p17 = FK_HT(p17) >> 1;
+        p17 = FK_HNEXT(p17);
     }
     av17[n17] = 0;
     if (n17 == 0 || av17[0][0] == 0) { return (0 - 1) * 2; }
@@ -10143,7 +10148,7 @@ static long long fk_host_door(long long mode, long long x) {
     while (k17 < 3 && q17 >= 1 && FK_POK(q17)) {
         if (fk_is_str(FK_HH(q17))) { fk_cstr(FK_HH(q17), rp17[k17], FK_PATH_CAP); }
         k17 = k17 + 1;
-        q17 = FK_HT(q17) >> 1;
+        q17 = FK_HNEXT(q17);
     }
 
     int rfd17[3];
@@ -10582,14 +10587,15 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         }
     }
     if (t == 54) {
-        /* float_to_int: one FCVTZS over the operand as a double (an int operand through SCVTF first, as fk_num reads
-         * it), kind 36. Law 6 rides the leaf: a NaN, or a whole part outside [-2^62, 2^62), leaves for the overflow
-         * block, and the walker's arm answers -- it stops, as the law says */
+        /* float_to_int: an int operand IS the answer -- the walker's arm passes it through exactly, so the leaf
+         * does too (no SCVTF, which would round 2^53 + 1 to 2^53 and a hot defn would answer another int than its
+         * cold self). A float operand is one FCVTZS, kind 36. Law 6 rides the leaf: a NaN, or a whole part outside
+         * [-2^62, 2^62), leaves for the overflow block, and the walker's arm answers -- it stops, as the law says */
         int a = 0;
         int ta = fk_f64_admit(fk_node[i][1], arity, types, &a);
         if (ta == 5 && !fk_f64_word_resolve(&a, &ta, 2)) { return 0; }
         if (ta != 1 && ta != 2) { if (ta != 0) { fk_f64_refuse_tag = t; } return 0; }
-        if (ta == 1) { a = fk_f64_cvt(a); if (a < 0) { return 0; } }
+        if (ta == 1) { *out = a; return 1; }
         *out = fk_f64_push(36, a, 0, 0.0, 0);
         return *out < 0 ? 0 : 1;
     }
@@ -13085,7 +13091,7 @@ static long long fk_walk(long long i, long long fp) {
             return 0;
         }
         long long f44 = FK_HH(p44) >> 1;
-        long long p44t = FK_HT(p44) >> 1;
+        long long p44t = FK_HNEXT(p44);
         if (p44t < 1 || !FK_POK(p44t)) {
             fk_vsp = fk_vsp - 2;
             return 0;
@@ -13105,7 +13111,7 @@ static long long fk_walk(long long i, long long fp) {
             fk_hh[fk_hp] = FK_HH(cc44);
             fk_ht[fk_hp] = rev44;
             rev44 = (fk_hp << 1) | 1;
-            cc44 = FK_HT(cc44) >> 1;
+            cc44 = FK_HNEXT(cc44);
         }
         long long comb44 = args44;
         long long rr44 = rev44 >> 1;
@@ -13117,7 +13123,7 @@ static long long fk_walk(long long i, long long fp) {
             fk_hh[fk_hp] = FK_HH(rr44);
             fk_ht[fk_hp] = comb44;
             comb44 = (fk_hp << 1) | 1;
-            rr44 = FK_HT(rr44) >> 1;
+            rr44 = FK_HNEXT(rr44);
         }
         long long carg44 = 1;
         if (a44 == 0) {
@@ -13625,7 +13631,7 @@ static long long fk_field_share_value(long long v) {
     long long p = v >> 1;
     if (p < 1 || p >= FK_PAIR_BASE) { return v; }
     long long n = 0, q = p;
-    while (q >= 1 && q <= fk_hp) { n = n + 1; q = FK_HT(q) >> 1; }
+    while (q >= 1 && q <= fk_hp) { n = n + 1; q = FK_HNEXT(q); }
     if (n == 0) { return v; }
     long long base = fk_field_claim(3, n);
     if (base + n > FK_FIELD_PAIRS) { return v; }
@@ -15228,7 +15234,7 @@ static void fk_fb_collect(long long v) {
         if (fk_nkind[ni] == 2) {
             fk_fb_collect(fk_ncat[ni]);
             long long q = fk_nkids[ni] >> 1;
-            while (q >= 1 && FK_POK(q)) { fk_fb_collect(FK_HH(q)); q = FK_HT(q) >> 1; }
+            while (q >= 1 && FK_POK(q)) { fk_fb_collect(FK_HH(q)); q = FK_HNEXT(q); }
             return;
         }
         if (fk_nkind[ni] == 1 && fk_nid_get(fk_nid[ni], 2) == 2) { fk_fb_str_index(fk_nval[ni], 1); }
@@ -15284,10 +15290,10 @@ static void fk_fb_emit(long long v) {
             fk_fb_emit(fk_ncat[ni]);
             long long count = 0;
             long long q = fk_nkids[ni] >> 1;
-            while (q >= 1 && FK_POK(q)) { count = count + 1; q = FK_HT(q) >> 1; }
+            while (q >= 1 && FK_POK(q)) { count = count + 1; q = FK_HNEXT(q); }
             fk_fb_u32(count);
             q = fk_nkids[ni] >> 1;
-            while (q >= 1 && FK_POK(q)) { fk_fb_emit(FK_HH(q)); q = FK_HT(q) >> 1; }
+            while (q >= 1 && FK_POK(q)) { fk_fb_emit(FK_HH(q)); q = FK_HNEXT(q); }
             return;
         }
         if (fk_nkind[ni] == 1) {
@@ -15928,14 +15934,14 @@ static long long fk_rest_arm(long long a) {
         if (!(p >= 1 && FK_POK(p))) { return fk_nothing; }
         if (fk_is_str(FK_HH(p))) {
             char kind[32]; fk_cstr(FK_HH(p), kind, 32);
-            long long q = FK_HT(p) >> 1;
+            long long q = FK_HNEXT(p);
             if (fk_cstr_eq(kind, "terminal-input") && q >= 1 && FK_POK(q)
                 && (FK_HH(q) & 1) == 0) { return fk_tty_door(FK_HH(q) >> 1); }
             return fk_nothing;
         }
         list_mode = 1;
         ms = FK_HH(p) >> 1;
-        p = FK_HT(p) >> 1;
+        p = FK_HNEXT(p);
         while (p >= 1 && FK_POK(p) && nw < 64) {
             long long w = FK_HH(p), gh = -1, seq0 = -1;
             if (w != fk_nothing && (w & 1) == 0) { gh = w >> 1; }
@@ -15943,7 +15949,7 @@ static long long fk_rest_arm(long long a) {
                 long long q = w >> 1;
                 if (q >= 1 && FK_POK(q)) {
                     gh = FK_HH(q) >> 1;
-                    long long r = FK_HT(q) >> 1;
+                    long long r = FK_HNEXT(q);
                     if (r >= 1 && FK_POK(r)) { seq0 = FK_HH(r) >> 1; }
                 }
             }
@@ -15953,7 +15959,7 @@ static long long fk_rest_arm(long long a) {
                 ws[nw] = seq0 >= 0 ? seq0 : cur;
                 nw = nw + 1;
             }
-            p = FK_HT(p) >> 1;
+            p = FK_HNEXT(p);
         }
     }
     long long t0 = fk_mono_ns(), now = t0, deadline = t0 + (ms > 0 ? ms : 0) * 1000000LL, slack = 0;
@@ -16129,7 +16135,7 @@ static long long fk_bus_door(long long mode, long long x) {
     }
     if (mode == 30) {
         long long e[3] = { t, 0, 0 }, q = t >> 1, d = fk_bus_depth - 1;
-        while ((t & 1) != 0 && k < 3 && q >= 1 && FK_POK(q)) { e[k] = FK_HH(q); q = FK_HT(q) >> 1; k = k + 1; }
+        while ((t & 1) != 0 && k < 3 && q >= 1 && FK_POK(q)) { e[k] = FK_HH(q); q = FK_HNEXT(q); k = k + 1; }
         while (d >= 0 && fk_bus_stack[d].idx != (h >> 1)) { d = d - 1; }
         if ((h & 1) != 0 || d < 0 || fk_stri(e[0]) < 0 || !fk_bus_word(e[0], 1, &r[8]) || (e[1] & 1) != 0 || !fk_bus_word(e[2], 0, &r[11])) { return fk_nothing; }
         fk_bus_unwind(d + 1, 3, 0);
@@ -16199,10 +16205,10 @@ static long long fk_prog_read(long long pid, long long spec) {
         long long p = spec >> 1;
         char mode[16];
         mode[0] = 0;
-        if (p >= 1 && FK_POK(p)) { fk_cstr(FK_HH(p), mode, 16); p = FK_HT(p) >> 1; }
+        if (p >= 1 && FK_POK(p)) { fk_cstr(FK_HH(p), mode, 16); p = FK_HNEXT(p); }
         if (fk_cstr_eq(mode, "src") && p >= 1 && FK_POK(p)) {
             long long off = FK_HH(p) >> 1, len = -1;
-            long long q = FK_HT(p) >> 1;
+            long long q = FK_HNEXT(p);
             if (q >= 1 && FK_POK(q)) { len = FK_HH(q) >> 1; }
             if (off >= 0 && len >= 0 && off + len <= D[3] && D[7] == 1) {
                 long long ssz = 0;
@@ -17461,7 +17467,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             long long ep64 = e64 >> 1;
             if (ep64 >= 1 && FK_POK(ep64)) {
                 long long k64 = fk_stri(FK_HH(ep64));
-                long long tp64 = FK_HT(ep64) >> 1;
+                long long tp64 = FK_HNEXT(ep64);
                 long long v64 = 0;
                 if (tp64 >= 1 && FK_POK(tp64)) {
                     v64 = FK_HH(tp64);
@@ -17475,7 +17481,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                     fk_rcnt[fk_rp] = fk_rcnt[fk_rp] + 1;
                 }
             }
-            q64 = FK_HT(q64) >> 1;
+            q64 = FK_HNEXT(q64);
         }
         return fk_rbox(fk_rp);
     }
@@ -17636,9 +17642,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_host_resolve(fkl_p);
         void *fkl_d = opendir(fkl_p);
         if (fkl_d == 0) {
-            /* a directory that is not there (or a path that is no directory) answers nothing, as the
-             * siblings answer: the empty list is an empty directory, never an absence */
-            return fk_nothing;
+            /* a directory that is not there lists as [] here, where the siblings answer nothing. Callers
+             * still measure len(fs_list(path)) and walk it with nil? on paths that may be missing (the
+             * knowledge census's fki-dir?, model-discovery's md-find root, form-fs); the door answers
+             * nothing in the same landing that heals them, never before */
+            return 1;
         }
         static char fkl_nb[1048576];
         static long long fkl_no[16384];
@@ -17731,7 +17739,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         return fkl_out;
 #else
-        return fk_nothing; /* no directory reader on this host: nothing was measured */
+        return 1;
 #endif
     }
     if (t == 133) {
