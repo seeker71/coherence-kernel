@@ -27,7 +27,49 @@ section [form.bml] {
    record_set(owner,"invalid_records",0); record_set(owner,"extent",0);
    owner;
   }
-  def ohs-path(owner) = record_get(owner,"path");
+   def ohs-path(owner) = record_get(owner,"path");
+   def ohs-chunk-bytes() = 65536;
+   // The publisher's append-only generation remains the authority. A native
+   // checkpoint keeps its reduced current state and unfinished record together.
+   // JSONL values stay in the reclaimable view lane; binary node admission is
+   // neither needed nor allowed to impose an artifact-size ceiling here.
+   // Source anchors must still match. Rewriting earlier bytes is a publisher
+   // generation change, just as it is for an already open append-only reader.
+   def ohs-anchor(path,offset,tail) = read_file_slice(path,tail ? max2(0,offset - ohs-chunk-bytes()) : 0,min2(offset,ohs-chunk-bytes()));
+   def ohs-checkpoint(owner,path) {
+    ohs-publish-current(owner); let offset = record_get(owner,"offset");
+    let head = ohs-anchor(ohs-path(owner),offset,0); let tail = ohs-anchor(ohs-path(owner),offset,1);
+    if nothing?(head) || nothing?(tail) || file_size(ohs-path(owner)) < offset then nothing else {
+     let rows = record_get(owner,"current");
+     let stage = path + ".writing-" + host_pid().str();
+     let header = jv-object([jv-s("schema","organ-health-checkpoint-v1"),jv-s("source",ohs-path(owner)),jv-s("generation",record_get(owner,"generation")),jv-n("offset",offset),jv-s("pending",record_get(owner,"pending")),jv-n("invalid_records",record_get(owner,"invalid_records")),jv-s("head",head),jv-s("tail",tail),jv-n("current_count",len(rows))]);
+     let text = jv-emit-text(cons(jv-emit(header) + "\n",rows |> map(row=>jv-emit(row) + "\n")));
+     let wrote = write_file(stage,text);
+     wrote >= 0 && file_size(stage) == len(text) && fs-rename(stage,path) == 0 ? len(text) : { fs_remove(stage); nothing; };
+    };
+   }
+   def ohs-open-cached(path,generation,checkpoint) {
+    let owner = ohs-open(path,generation);
+    file_size(checkpoint) > 0 ? ohs-restore(owner,checkpoint) : owner;
+   }
+   def ohs-cache-row(owner,row) {
+    if value_kind(record_get(owner,"checkpoint")) != "list" then record_set(owner,"checkpoint",row)
+    else if ohv-valid(row) then { record_set(owner,"checkpoint_rows",record_get(owner,"checkpoint_rows") + 1); ohs-index-row(owner,row); } else ohs-invalid(owner,"complete checkpoint observation",jv-null());
+   }
+   def ohs-restore(owner,path) {
+    let cache = ohs-open(path,"checkpoint"); record_set(cache,"cache_admission",1);
+    ohs-update(cache,file_size(path)); let held = record_get(cache,"checkpoint");
+    let header = value_kind(held) == "list" ? held : jv-null();
+    let offset = jv-value(jv-get(header,"offset")); let invalid = jv-value(jv-get(header,"invalid_records"));
+    let shape = ohv-str(header,"schema") == "organ-health-checkpoint-v1" && jv-kind(jv-get(header,"pending")) == 3 && value_kind(invalid) == "int" && invalid >= 0 && jv-kind(jv-get(header,"head")) == 3 && jv-kind(jv-get(header,"tail")) == 3;
+    let complete = record_get(cache,"invalid_records") == 0 && record_get(cache,"state") == "caught-up" && jv-kind(jv-get(header,"current_count")) == 4 && jv-value(jv-get(header,"current_count")) == record_get(cache,"checkpoint_rows") && record_get(cache,"checkpoint_rows") == record_get(cache,"current_count");
+    let same = shape && complete && ohv-str(header,"source") == ohs-path(owner) && ohv-str(header,"generation") == record_get(owner,"generation") && value_kind(offset) == "int" && offset >= 0 && file_size(ohs-path(owner)) >= offset;
+    if same && ohv-str(header,"head") == ohs-anchor(ohs-path(owner),offset,0) && ohv-str(header,"tail") == ohs-anchor(ohs-path(owner),offset,1) then {
+     record_set(owner,"offset",offset); record_set(owner,"pending",ohv-str(header,"pending")); record_set(owner,"invalid_records",invalid);
+     ohs-index-rows(owner,record_get(cache,"current")); ohs-publish-current(owner); record_set(owner,"state","checkpoint-restored");
+    } else 0;
+    ohs-close(cache); owner;
+   }
   def ohs-smaller(a,b) = if (a <= b) then a else b;
   def ohs-identity(owner) {
    record_set(owner,"diagnostic_sequence",(record_get(owner,"diagnostic_sequence") + 1));
@@ -94,7 +136,7 @@ section [form.bml] {
   }
   def ohs-read(owner,budget,extent) {
    let offset = record_get(owner,"offset");
-   if (offset >= extent) then ohs-settled(owner,"caught-up") else if (budget <= 0) then ohs-settled(owner,"backlog") else ohs-chunk(owner,budget,extent,read_file_slice(ohs-path(owner),offset,ohs-smaller(65536,ohs-smaller(budget,(extent - offset)))));
+    if (offset >= extent) then ohs-settled(owner,"caught-up") else if (budget <= 0) then ohs-settled(owner,"backlog") else ohs-chunk(owner,budget,extent,read_file_slice(ohs-path(owner),offset,ohs-smaller(ohs-chunk-bytes(),ohs-smaller(budget,(extent - offset)))));
   }
   def ohs-chunk(owner,budget,extent,chunk) {
    if (nothing?(chunk) || ((Comparable) len(chunk) == 0)) then ohs-unavailable(owner,"read-refused") else ohs-chunk-read(owner,budget,extent,chunk);
@@ -117,8 +159,10 @@ section [form.bml] {
    ohs-diagnostic(owner,"event-admission",expected,observed);
   }
   def ohs-row(owner,record) {
-   let row = ohv-extract(record);
-   if ((Comparable) jv-kind(row) == 8) then 0 else if (!ohv-valid(row)) then ohs-invalid(owner,"complete organ observation",jv-null()) else ohs-current(owner,row);
+   if record_get(owner,"cache_admission") then ohs-cache-row(owner,record) else {
+    let row = ohv-extract(record);
+    if ((Comparable) jv-kind(row) == 8) then 0 else if (!ohv-valid(row)) then ohs-invalid(owner,"complete organ observation",jv-null()) else ohs-current(owner,row);
+   };
   }
   def ohs-settled(owner,state) {
    record_set(owner,"state",if (((String) state == "caught-up") && (len(record_get(owner,"pending")) > 0)) then "awaiting-complete-record" else state);

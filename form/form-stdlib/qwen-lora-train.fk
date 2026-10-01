@@ -1,10 +1,5 @@
-// qwen-lora-train.fk — one local activation-space rank-one fitting step.
-//
-// The trainer reads a normalized hidden state from the locally mapped Qwen
-// model, derives a corpus target already held by the body, and solves the
-// one-example rank-one least-squares update entirely in Form.  It is a real
-// weight artifact update, but deliberately not a language-quality claim: a
-// held-out generation evaluation still decides that question.
+// Shared finite float codec for Qwen adapters. Native cross-entropy learning
+// lives in bml/qwen-head-learning.bml; artifact admission carries no synthetic target.
 //
 import form-stdlib/qwen-lora-head.fk;
 import form-stdlib/model-registry.bml;
@@ -13,46 +8,9 @@ import form-stdlib/lora-backward.bml;
 section [form.bml] {
     def qlt-dot-go(xs, ys, acc) = (Comparable) len(xs) == 0 ? acc : qlt-dot-go(xs[1:], ys[1:], acc + xs[0] * ys[0]);
     def qlt-dot(xs, ys) = qlt-dot-go(xs, ys, 0.0);
-    def qlt-scale-go(xs, k, acc) = (Comparable) len(xs) == 0 ? reverse(acc) : qlt-scale-go(xs[1:], k, cons(xs[0] * k, acc));
-    def qlt-scale(xs, k) = qlt-scale-go(xs, k, empty());
-    def qlt-sqerr-go(target, b, s, acc) = (Comparable) len(target) == 0 ? acc : {
-        let d = b[0] * s - target[0];
-        qlt-sqerr-go(target[1:], b[1:], s, acc + d * d);
-    };
-    def qlt-loss(target, b, s) = qlt-sqerr-go(target, b, s, 0.0);
-    // With A=h/n, s=A·h.  For nonzero s, B=target/s is the exact least-squares
-    // minimizer over B for this observed state: B*(A·h)=target.
-    def qlt-fit(h, target) = {
-        let a = qlt-scale(h, 1.0 / (len(h) + 0.0));
-        let s = qlt-dot(a, h);
-        let b = (Comparable) s == 0.0 ? qlt-scale(target, 0.0) : qlt-scale(target, 1.0 / s);
-        [a, b, s];
-    };
     def qlt-f32s-go(raw, i, n, acc) = i >= n ? reverse(acc) : qlt-f32s-go(raw, i + 1, n, cons(ln-f32-decode(ln-u32-le(raw, i * 4)), acc));
-    def qlt-finite-bytes?(raw, i, n) = i >= n ? 1 : (Comparable) (ln-u32-le(raw, i * 4) / 8388608 % 256) == 255 ? 0 : qlt-finite-bytes?(raw, i + 1, n);
+    def qlt-finite-bytes?(raw, i, n) = qlh-finite-bytes?(raw,i,n);
     def qlt-f32s(raw, n) = (Comparable) len(raw) == n * 4 && qlt-finite-bytes?(raw, 0, n) ? qlt-f32s-go(raw, 0, n, empty()) : empty();
-    // This is the one device-to-Form observation: a local Metal buffer becomes
-    // a Form value so the new adapter remains auditable and writable by Form.
-    def qlt-local-hidden(path, token) = {
-        let ctx = q38-open(path, 2);
-        len(ctx) < 10 ? empty() : {
-            let ps = ctx[0];
-            let bs = ctx[1];
-            let geo = ctx[2];
-            let sts = q38-new-state(geo);
-            let ran = q38-forward-state(ps, bs, geo, ctx[3], sts, ctx[4], token, 0);
-            let normed = q38-rms(ps, bs[0], ctx[5], bs[1], geo[0], geo[6], 1);
-            let raw = metal_buf_read(bs[1], 0, geo[0] * 4);
-            let closed = q38-close(ctx, sts);
-            (Comparable) ran == 1 && ((Comparable) normed == 1 && closed > 0) ? qlt-f32s(raw, geo[0]) : empty();
-        };
-    };
-    def qlt-target() = qlh-values(qlh-source(), 1);
-    def qlt-write-fit(path, hidden) = {
-        let fit = qlt-fit(hidden, qlt-target());
-        qlh-write-vectors(path, fit[0], fit[1]);
-        fit;
-    };
     0;
 }
 //

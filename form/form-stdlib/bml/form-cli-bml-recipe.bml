@@ -1,0 +1,63 @@
+// Same BMF cursor and expression grammar as executable BML. A numeric thought
+// becomes a content-addressed expression and one RAM Metal kernel. One dispatch
+// maps the expression over every supplied input; it is not an affine template.
+import form-stdlib/source-compiler.fk;
+import form-stdlib/form-bml-lower.fk;
+import form-stdlib/lora-adapter.bml;
+import form-stdlib/form-recipe-exec-token-live.fk;
+import form-stdlib/organ-health.bml;
+section [form.bml] {
+ class FormCliBmlRecipe {
+  def fmr-category() = bp("form-model-bml-f32-recipe-v1");
+  def fmr-word-bytes() = 4;
+  def fmr-kernel() = "form_bml_thought";
+  def fmr-number?(node) = node_pkg(node) == 1 && node_level(node) == 1 && (node_type(node) == 1 || node_type(node) == 7);
+  def fmr-operators() = [["add","+",2],["sub","-",2],["mul","*",2],["div","/",2],["mod","fmod",2],["lt","<",2],["le","<=",2],["gt",">",2],["ge",">=",2],["eq","==",2],["ne","!=",2],["and","&&",2],["or","||",2],["not","!",1],["math_sqrt","sqrt",1],["math_exp","exp",1],["math_log","log",1],["math_pow","pow",2],["abs","abs",1],["min2","min",2],["max2","max",2]];
+  def fmr-op(name) { let rows = fmr-operators() |> filter(row=>row[0] == name); nil?(rows) ? nothing : rows[0]; }
+  def fmr-emit(node) {
+   let kids = node_children(node); let infix = fbl-infix-name(node); let name = len(infix) > 0 ? infix : fbl-call-name(node);
+   if fmr-number?(node) then "float(" + node_value(node).str() + ")"
+   else if fbl-is?(node,"ident") then len(kids) == 1 && node_value(kids[0]) == "x" ? "x" : nothing
+   else if fbl-is?(node,"if") && len(kids) == 3 then {
+    let parts = kids |> map(fmr-emit);
+    any?(part=>nothing?(part),parts) ? nothing : "(" + parts[0] + " ? " + parts[1] + " : " + parts[2] + ")";
+   } else {
+    let args = len(infix) > 0 ? kids : kids[1:]; let operator = fmr-op(name); let parts = args |> map(fmr-emit);
+    if nothing?(operator) || len(args) != operator[2] || any?(part=>nothing?(part),parts) then nothing
+    else if operator[2] == 1 then operator[1] == "!" ? "(!" + parts[0] + ")" : operator[1] + "(" + parts[0] + ")"
+    else if oh-has(["fmod","pow","min","max"],operator[1]) then operator[1] + "(" + parts[0] + "," + parts[1] + ")"
+    else "(" + parts[0] + " " + operator[1] + " " + parts[1] + ")";
+   };
+  }
+  def fmr-parse(expression) {
+   let ast = g-parse-full(grammar("expr",form-bml-rules()),expression);
+   let code = node_eq(ast,intern_trivial_string("PARSE-FAIL")) ? nothing : fmr-emit(ast);
+   nothing?(code) ? nothing : intern_node(fmr-category(),[ast,intern_trivial_string(code)]);
+  }
+  def fmr-recipe?(recipe) = node_eq(node_category(recipe),fmr-category());
+  def fmr-msl(recipe) = "#include <metal_stdlib>\nusing namespace metal;\nkernel void " + fmr-kernel() + "(device const float *inputs [[buffer(0)]],device float *outputs [[buffer(1)]],uint gid [[thread_position_in_grid]]) { float x=inputs[gid]; outputs[gid]=" + node_value(node_children(recipe)[1]) + "; }";
+  def fmr-inputs(text) {
+   let value = parse-json("form-bml-recipe-input",text);
+   let vector = node_eq(node_category(value),JSON-ARRAY()); let nodes = vector ? node_children(value) : [value];
+   nil?(nodes) || !all?(node=>fmr-number?(node) && ln-f32-finite?(node_value(node) + 0.0),nodes) ? nothing : [nodes |> map(node=>node_value(node) + 0.0),vector];
+  }
+  def fmr-buffers(owner,count) {
+   let held = record_get(owner,"vectors");
+   if held[2] >= count then held else {
+    let released = fmr-free(owner);
+    if !released then nothing else {
+     let a = metal_buf_alloc(count * fmr-word-bytes()); let b = a > 0 ? metal_buf_alloc(count * fmr-word-bytes()) : 0;
+     let fresh = [a,b,a > 0 && b > 0 ? count : 0]; record_set(owner,"vectors",fresh);
+     a > 0 && b > 0 ? fresh : nothing;
+    };
+   };
+  }
+  def fmr-free(owner) {
+   let buffers = record_get(owner,"vectors");
+   let left = buffers[0:2] |> map(handle=>handle <= 0 || metal_buf_free(handle) == 1 ? 0 : handle);
+   record_set(owner,"vectors",append(left,[0])); all?(handle=>handle == 0,left);
+  }
+  def fmr-read(raw,index,count,acc) = index >= count ? reverse(acc) : fmr-read(raw,index + 1,count,cons(ln-f32-decode(ln-u32-le(raw,index * fmr-word-bytes())),acc));
+ }
+ 0;
+}
