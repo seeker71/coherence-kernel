@@ -1,0 +1,141 @@
+// Rung 0 of the local coding lane: every caller check meets a witness before
+// any model opens. A witness is the cheapest documents a sound check must
+// accept, and each check is run on its witness by the same native tools the
+// lane verifies with (fat-call):
+//  - rg-literal-count: rg in -c, -l or -q mode with one literal pattern over
+//    one writable path. That path holds exactly the pattern lines the check
+//    expects; nothing else moves such an output, so a failure is the check's.
+//  - expected-text: head or tail with a plain count, read or cat, over one
+//    writable path. They print bytes of that path alone, so the expected
+//    stdout, placed as the path's text, must come back unchanged.
+//  - word-range-target: a writable document holding the minimum word count.
+//  - fixed: the check reads no writable document, only read-only documents
+//    or its own input. No candidate can change what it reads.
+//  - original: the check reads a writable document as the caller gave it. A
+//    failure there is the work itself, never a refusal.
+// A constructed or fixed witness that fails makes the check unmeetable. It
+// returns to its author with its exact pair (caller-check-unmeetable) and no
+// local token is spent on it. shape_only marks a pair that differs only by a
+// path prefix, trailing whitespace or a trailing newline: a dialect, not a
+// value. Every lane result also carries blocking_check, the first caller
+// check that refuses its delivered documents, or null when none does.
+import form-stdlib/bml/form-cli-code-definition.bml;
+import form-stdlib/bml/form-cli-answer-length.bml;
+section [form.bml] {
+ class FormCliCheckWitness {
+  def fccw-mode(obj) = if json-object-has?(obj,"mode") then fcap-string(obj,"mode") else "code";
+  def fccw-exit(row) = if json-object-has?(row,"exit") then json-int-value(json-object-get(row,"exit")) else 0;
+  def fccw-word?(row) = ((String) fcap-string(row,"kind") == "word-range");
+  def fccw-definition?(row) = ((String) fcap-string(row,"kind") == "definition");
+  def fccw-args(row) = if json-object-has?(row,"arguments") then fcap-array(row,"arguments") else [];
+  // A check run on documents: [holds, expected, actual, exit expected, exit actual, stderr].
+  def fccw-eval(row,docs) = if fccw-word?(row) then fccw-eval-words(row,docs) else if fccw-definition?(row) then fccw-eval-definition(row,docs) else fccw-eval-tool(row,fat-call(docs,fcap-string(row,"tool"),fccw-args(row),fcap-string(row,"input")));
+  def fccw-eval-tool(row,result) = [(((Comparable) fat-exit(result) == fccw-exit(row)) && (((String) fat-error(result) == "") && ((String) fat-out(result) == fcap-string(row,"stdout")))),fcap-string(row,"stdout"),fat-out(result),fccw-exit(row),fat-exit(result),fat-error(result)];
+  def fccw-bounds(row) = [json-int-value(json-object-get(row,"minimum")),json-int-value(json-object-get(row,"maximum"))];
+  def fccw-eval-words(row,docs) {
+   let doc = fat-find-doc(docs,fcap-string(row,"path"));
+   let b = fccw-bounds(row);
+   let expected = (b[0].str() + (".." + (b[1].str() + " words")));
+   if nil?(doc) then [0,expected,"",0,2,("word-range-source-absent: " + fcap-string(row,"path"))] else [fal-within(fal-count(doc[2]),b[0],b[1]),expected,(fal-count(doc[2]).str() + " words"),0,0,""];
+  }
+  def fccw-eval-definition(row,docs) {
+   let r = fcad-check(row,docs);
+   let held = ((Comparable) r[0] == 1);
+   [held,"native-definition-cases-passed",r[1],0,if held then 0 else 2,""];
+  }
+  // What a check can reach: a writable path, or the id of a document at one.
+  def fccw-writable-names(docs,writable) = if nil?(docs) then writable else if fat-has(writable,docs[0][1]) then cons(docs[0][0],fccw-writable-names(docs[1:],writable)) else fccw-writable-names(docs[1:],writable);
+  def fccw-covers(arg,name) = (((String) arg == name) || (((String) arg == ".") || fat-starts(name,(arg + "/"))));
+  def fccw-any-covers(args,name) = if nil?(args) then 0 else if fccw-covers(args[0],name) then 1 else fccw-any-covers(args[1:],name);
+  def fccw-reads-writable(args,names) = if nil?(names) then 0 else if fccw-any-covers(args,names[0]) then 1 else fccw-reads-writable(args,names[1:]);
+  def fccw-by-reach(reads,docs) = if reads then ["original",docs] else ["fixed",docs];
+  // The pattern is its own line: -F, or bytes no regex reads as an operator.
+  def fccw-literal-at(p,i) = if (i >= len(p)) then 1 else if (str_find("\\.^$|?*+()[]{}",byte_to_str(str_byte_at(p,i)),0) >= 0) then 0 else fccw-literal-at(p,(i + 1));
+  def fccw-literal(p,fixed) = if (len(p) == 0) then 0 else if (str_find(p,byte_to_str(10),0) >= 0) then 0 else if fixed then 1 else fccw-literal-at(p,0);
+  def fccw-plain(options) = if far-get(options,"invert",0) then 0 else if far-get(options,"word",0) then 0 else if (far-get(options,"max",-1) >= 0) then 0 else nil?(far-get(options,"globs",[]));
+  def fccw-countable(options,input,writable) {
+   let patterns = far-get(options,"patterns",[]);
+   let paths = far-get(options,"paths",[]);
+   if (!fat-has(["count","names","quiet"],far-get(options,"mode","lines"))) then 0 else if (len(input) > 0) then 0 else if (!((Comparable) len(patterns) == 1)) then 0 else if (!((Comparable) len(paths) == 1)) then 0 else if (!fat-has(writable,paths[0])) then 0 else if (!fccw-plain(options)) then 0 else fccw-literal(patterns[0],far-get(options,"fixed",0));
+  }
+  def fccw-last-colon(s,i) = if (i < 0) then -1 else if ((Comparable) str_byte_at(s,i) == 58) then i else fccw-last-colon(s,(i - 1));
+  def fccw-trailing-number(s) {
+   let t = fat-trim(s);
+   let digits = substring(t,(fccw-last-colon(t,(len(t) - 1)) + 1),len(t));
+   if fat-natural(digits) then str_to_int(digits) else 1;
+  }
+  // How many pattern lines the check's own expectation asks for.
+  def fccw-wanted(row,mode) = if ((String) mode == "quiet") then if ((Comparable) fccw-exit(row) == 0) then 1 else 0 else if ((String) fcap-string(row,"stdout") == "") then 0 else if ((String) mode == "names") then 1 else fccw-trailing-number(fcap-string(row,"stdout"));
+  def fccw-repeat(line,n,out) = if (n <= 0) then out else fccw-repeat(line,(n - 1),(out + line));
+  def fccw-with-text(docs,path,text) = if nil?(docs) then [] else if ((String) docs[0][1] == path) then cons([docs[0][0],path,text],fccw-with-text(docs[1:],path,text)) else cons(docs[0],fccw-with-text(docs[1:],path,text));
+  def fccw-placed(docs,path,text) = if nil?(fat-find-doc(docs,path)) then append(docs,[[path,path,text]]) else fccw-with-text(docs,path,text);
+  def fccw-count-witness(row,docs,options) {
+   let path = far-get(options,"paths",[])[0];
+   let line = (far-get(options,"patterns",[])[0] + "\n");
+   let wanted = fccw-wanted(row,far-get(options,"mode","lines"));
+   if ((wanted * len(line)) > FatMaxBytes()) then ["original",docs] else ["rg-literal-count",fccw-placed(docs,path,fccw-repeat(line,wanted,""))];
+  }
+  def fccw-rg-witness(row,docs,writable,parsed) {
+   let options = parsed[0];
+   let paths = far-get(options,"paths",[]);
+   let input = fcap-string(row,"input");
+   let reads = if ((len(input) > 0) || fat-has(paths,"-")) then 0 else if nil?(paths) then (!nil?(writable)) else fccw-reads-writable(paths,fccw-writable-names(docs,writable));
+   if (!((String) parsed[1] == "")) then ["fixed",docs] else if fccw-countable(options,input,writable) then fccw-count-witness(row,docs,options) else fccw-by-reach(reads,docs);
+  }
+  // [plain, paths]: head and tail take only -n N or -c N with a natural N.
+  def fccw-window-paths(args) = if nil?(args) then [1,[]] else if (!fat-has(["-n","-c"],args[0])) then [1,args] else if (len(args) < 2) then [0,[]] else if fat-natural(args[1]) then fccw-window-paths(fat-drop(args,2)) else [0,[]];
+  def fccw-text-paths(row) = if fat-has(["head","tail"],fcap-string(row,"tool")) then fccw-window-paths(fccw-args(row)) else [1,fccw-args(row)];
+  def fccw-text-witness(row,docs,writable) {
+   let found = fccw-text-paths(row);
+   let paths = found[1];
+   let reads = fccw-reads-writable(fccw-args(row),fccw-writable-names(docs,writable));
+   if (!found[0]) then fccw-by-reach(reads,docs) else if (len(fcap-string(row,"input")) > 0) then fccw-by-reach(reads,docs) else if (!((Comparable) fccw-exit(row) == 0)) then fccw-by-reach(reads,docs) else if (!((Comparable) len(paths) == 1)) then fccw-by-reach(reads,docs) else if (!fat-has(writable,paths[0])) then fccw-by-reach(reads,docs) else ["expected-text",fccw-placed(docs,paths[0],fcap-string(row,"stdout"))];
+  }
+  def fccw-word-witness(row,docs,writable) {
+   let path = fcap-string(row,"path");
+   let lower = fccw-bounds(row)[0];
+   if (!fat-has(writable,path)) then ["fixed",docs] else if ((lower * 2) > FatMaxBytes()) then ["original",docs] else ["word-range-target",fccw-placed(docs,path,fccw-repeat("w ",lower,""))];
+  }
+  // [witness kind, documents] for one caller check.
+  def fccw-witness(row,docs,writable) = if fccw-word?(row) then fccw-word-witness(row,docs,writable) else if fccw-definition?(row) then fccw-by-reach(fccw-reads-writable([fcap-string(row,"path")],fccw-writable-names(docs,writable)),docs) else if ((String) fcap-string(row,"tool") == "rg") then fccw-rg-witness(row,docs,writable,far-parse(fccw-args(row),[],0)) else if fat-has(["head","tail","read","cat"],fcap-string(row,"tool")) then fccw-text-witness(row,docs,writable) else fccw-by-reach(fccw-reads-writable(fccw-args(row),fccw-writable-names(docs,writable)),docs);
+  def fccw-strip-prefix(line,paths) = if nil?(paths) then line else if ((len(paths[0]) > 0) && fat-starts(line,(paths[0] + ":"))) then substring(line,(len(paths[0]) + 1),len(line)) else fccw-strip-prefix(line,paths[1:]);
+  // Indentation is a value; only a line's trailing whitespace and the text's
+  // trailing newlines are dialect.
+  def fccw-rtrim(s) = substring(s,0,fat-rtrim(s,len(s)));
+  def fccw-shape-lines(lines,paths) = if nil?(lines) then [] else cons(fccw-rtrim(fccw-strip-prefix(lines[0],paths)),fccw-shape-lines(lines[1:],paths));
+  def fccw-shape(text,paths) = fccw-rtrim(fat-join(fccw-shape-lines(split-on(text,"\n"),paths),"\n"));
+  def fccw-row-paths(row) = cons(fcap-string(row,"path"),fccw-args(row));
+  def fccw-shape-only(seen,paths) = if seen[0] then 0 else if (!((Comparable) seen[3] == seen[4])) then 0 else if (!((String) seen[5] == "")) then 0 else ((String) fccw-shape(seen[1],paths) == fccw-shape(seen[2],paths));
+  // [verdict, witness kind, row, expected, actual, exit expected, exit actual, stderr, shape only]
+  def fccw-record(verdict,kind,row,seen) = [verdict,kind,row,seen[1],seen[2],seen[3],seen[4],seen[5],if fccw-shape-only(seen,fccw-row-paths(row)) then 1 else 0];
+  def fccw-rehearse-row(row,docs,writable) {
+   let witness = fccw-witness(row,docs,writable);
+   let seen = fccw-eval(row,witness[1]);
+   fccw-record(if seen[0] then "meetable" else if ((String) witness[0] == "original") then "open" else "unmeetable",witness[0],row,seen);
+  }
+  def fccw-rehearse-rows(rows,docs,writable) = if nil?(rows) then [] else cons(fccw-rehearse-row(rows[0],docs,writable),fccw-rehearse-rows(rows[1:],docs,writable));
+  // The source checks of a request, rehearsed in order. Review report checks
+  // read the report the model writes; no witness stands in for it.
+  def fccw-rehearse(obj,docs) = fccw-rehearse-rows(node_children(json-object-get(obj,"checks")),docs,fcap-array(obj,"writable"));
+  def fccw-unmeetable(records) = if nil?(records) then [] else if ((String) records[0][0] == "unmeetable") then records[0] else fccw-unmeetable(records[1:]);
+  def fccw-refused?(records) = (!nil?(fccw-unmeetable(records)));
+  def fccw-count(records,verdict) = if nil?(records) then 0 else if ((String) records[0][0] == verdict) then (1 + fccw-count(records[1:],verdict)) else fccw-count(records[1:],verdict);
+  def fccw-record-node(r) = json-node-object([oh-s("verdict",r[0]),oh-s("witness_kind",r[1]),json-node-pair("row",r[2]),oh-s("expected",r[3]),oh-s("actual",r[4]),oh-n("exit_expected",r[5]),oh-n("exit_actual",r[6]),oh-s("stderr",r[7]),oh-n("shape_only",r[8])]);
+  def fccw-record-nodes(records) = if nil?(records) then [] else cons(fccw-record-node(records[0]),fccw-record-nodes(records[1:]));
+  // The first caller source check that refuses the delivered documents.
+  def fccw-blocking(obj,docs) = fccw-first-failing(node_children(json-object-get(obj,"checks")),docs);
+  def fccw-first-failing(rows,docs) = if nil?(rows) then json-node-null() else fccw-failing-next(rows,docs,fccw-eval(rows[0],docs));
+  def fccw-failing-next(rows,docs,seen) = if seen[0] then fccw-first-failing(rows[1:],docs) else fccw-record-node(fccw-record("refuses","delivered",rows[0],seen));
+  def fccw-contract-reading(first,records) {
+   let detail = json-node-object([oh-n("unmeetable",fccw-count(records,"unmeetable")),oh-n("rehearsed",len(records)),json-node-pair("blocking_check",fccw-record-node(first)),oh-s("scope","each caller check against its witness before any model opens; an unmeetable check returns to its author")]);
+   oh-reading("native-coding",("code." + host_pid().str()),"caller-contract",json-node-int(1),json-node-int(0),json-node-int(0),[oh-need("meetable-caller-check",detail)],["return-check-to-author"],detail);
+  }
+  // The lane's result shape with nothing spent: no model, checkpoint or recall.
+  def fccw-refusal(obj,docs,records) {
+   let first = fccw-unmeetable(records);
+   let said = oh-voice(fccw-contract-reading(first,records));
+   json-node-object([oh-s("schema","form-native-code-v1"),oh-s("mode",fccw-mode(obj)),oh-s("report",""),oh-s("status","attention"),oh-s("reason","caller-check-unmeetable"),oh-n("turns",0),oh-n("tool_calls",0),oh-n("completed_tasks",0),oh-n("repair_attempts",0),oh-n("check_runs",0),json-node-pair("repair_notes",json-node-array([])),oh-s("learning_basis","caller-contract-rehearsal;not-weight-training"),oh-s("checkpoint_id",""),oh-n("lessons_recalled",0),oh-n("release_ok",1),oh-n("generated_ids",0),oh-n("injected_ids",0),oh-n("observations",0),json-node-pair("documents",fat-wire-documents-node(docs)),oh-s("persistence","rung-0-refusal;no-model-opened;no-checkpoint-or-recall"),json-node-pair("blocking_check",fccw-record-node(first)),json-node-pair("check_rehearsal",json-node-array(fccw-record-nodes(records)))]);
+  }
+ }
+ 0;
+}
