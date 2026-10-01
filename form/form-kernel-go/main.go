@@ -2492,8 +2492,11 @@ func (k *Kernel) registerNatives() {
 	// make_nodeid — one range law with fkwu's native node word
 	// (form-stdlib/bml/native-node-word.bml): pkg < 2^6, level < 2^13,
 	// type < 2^12, 0 <= inst < 2^32, all >= 0; the 1.1.1 trivial-int lane takes
-	// any 63-bit int and is that int's own leaf. Outside it the door stops, so
-	// no two coordinates ever collapse onto one identity.
+	// any 63-bit int and answers what intern_trivial_int answers for it. Outside
+	// it the door stops, so no two coordinates ever collapse onto one identity.
+	// Not yet one identity with fkwu: an int past int32 is fkwu's @1.1.1.N, and
+	// this kernel's INT64 leaf @1.1.5.k (k an index in its own table), so
+	// node_type, node_inst and value_str of such a leaf differ from fkwu's.
 	k.registerNative("make_nodeid", catWitness(), func(k *Kernel, args []Value) Value {
 		p, l, t, i := args[0].AsInt(), args[1].AsInt(), args[2].AsInt(), args[3].AsInt()
 		if p == 1 && l == 1 && t == 1 {
