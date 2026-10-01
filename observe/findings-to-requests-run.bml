@@ -3,16 +3,18 @@
 // Each stdin line is a path to a findings JSON document, or one JSON object:
 //   {"path":"<findings.json>","origin":"<label>","ledger":"<jsonl>"}   feed one document; origin defaults to its
 //                                                                     file name, ledger to learn/local-requests.jsonl
-//   {"closures":"<closures.json>","ledger":"<jsonl>"}                 close the rows whose witness Form reads in the tree
-//   {"check":1,"ledger":"<jsonl>"}                                     read every closed row's witness again
+//   {"closures":"<closures.json>","ledger":"<jsonl>"}                 close the rows whose witness the gate reads
+//   {"check":1,"ledger":"<jsonl>"}                                     read every closed row through the gate again
 // A document is read whole by form-stdlib/bml/findings-requests.bml; each request it gives that the ledger does not
-// already hold is appended. A closures document is {"closures":[{"id","witness":{"path","needle","present"},
-// "reviewed","commit","note"}],"reviewed":{"<document>":"<commit>"}}: a row closes only when its witness holds in
-// the tree, did not already hold in the tree the review read (git show <reviewed>:<path>; a closure naming none
-// takes its document's from the map), and its commit stands under HEAD; a closure that names no commit takes the
-// newest commit whose change moved the needle (git log -S). git is asked by argv only.
-// One line answers each input: a feed's read, refuted, verdicts, joined, requests, new and present; a closing's
-// closed and refused; a check's pending, closed, holding and the ids whose witness no longer holds.
+// already hold is appended, its seen derived from the document's own commit lists (git asked for each list's tip).
+// After each feed, the answers of every document fed on this stdin (done[] and deferred[]) stand on the rows they
+// answer, so a survey fed after its waves is answered too; feeding a document again adds no row and re-applies its
+// answers. A closures document is {"closures":[{"id","witness":{"path","needle","present","band","bit"},"commit",
+// "reviewed","note"}],"reviewed":{"<document>":"<commit>"}}; the library's gate closes a row only on what git and
+// fkwu answer by argv (the seentip, the witness at HEAD and at the seentip, the line it stands on, the band's bit,
+// the pickaxe commit). A check reads every closed row through the same gate and names each that no longer holds.
+// One line answers each input: a feed's read, refuted, verdicts, joined, requests, new, present, appended, the
+// answers it added and the ledger's statuses; a closing's outcomes; a check's statuses, holding and reopen.
 // preflight-exec: forbidden
 import form-stdlib/bml/findings-requests.bml;
 import form-stdlib/bml/form-agent-json-query.bml;
@@ -26,61 +28,55 @@ section [form.bml] {
   def ftr-ledger(opts) = if frq-some?(frq-text(opts, "ledger")) then frq-text(opts, "ledger") else frq-ledger();
   def ftr-run() {
    let lines = filter(l => frq-some?(l), map(trim, split-on(stdin-text(), "\n")));
-   if nil?(lines) then ftr-say("signal=nothing reason=path-required") else ftr-each(lines, 0);
+   let n = if nil?(lines) then ftr-say("signal=nothing reason=path-required") else ftr-each(lines, [], 0);
+   let gone = frq-git-done();
+   n;
   }
-  def ftr-each(lines, n) = if nil?(lines) then n else ftr-each(lines[1:], (n + ftr-one(ftr-opts(lines[0]))));
-  def ftr-one(opts) = if frq-some?(frq-text(opts, "closures")) then ftr-close(ftr-ledger(opts), frq-text(opts, "closures")) else if ((Comparable) frq-int(opts, "check", 0) == 1) then ftr-check(ftr-ledger(opts)) else ftr-feed(ftr-ledger(opts), frq-text(opts, "path"), frq-text(opts, "origin"));
+  // fed: [ledger, records] for each document fed on this stdin
+  def ftr-each(lines, fed, n) = if nil?(lines) then n else ftr-next(lines[1:], ftr-one(ftr-opts(lines[0]), fed), n);
+  def ftr-next(lines, r, n) = ftr-each(lines, r[1], (n + r[0]));
+  def ftr-one(opts, fed) = if frq-some?(frq-text(opts, "closures")) then [ftr-close(ftr-ledger(opts), frq-text(opts, "closures")), fed] else if ((Comparable) frq-int(opts, "check", 0) == 1) then [ftr-check(ftr-ledger(opts)), fed] else ftr-feed(ftr-ledger(opts), frq-text(opts, "path"), frq-text(opts, "origin"), fed);
+  def ftr-statuses(rows) {
+   let c = frq-status-counts(rows);
+   ftr-n("pending", c[0]) ++ ftr-n("context", c[1]) ++ ftr-n("answered", c[2]) ++ ftr-n("handed", c[3]) ++ ftr-n("no_action", c[4]) ++ ftr-n("closed", c[5]);
+  }
   // ── feed ──
-  def ftr-feed(ledger, path, origin) {
+  def ftr-feed(ledger, path, origin, fed) {
    let text = read_file(path) ?? "";
    let label = if frq-some?(origin) then origin else frq-label-of(path);
-   if (!faj-valid(text)) then ftr-refuse(path, "not-a-json-document") else ftr-fed(path, label, frq-feed(ledger, parse-json(label, text), label));
+   if (!faj-valid(text)) then [ftr-refuse(path, "not-a-json-document"), fed] else ftr-feed-doc(ledger, path, label, parse-json(label, text), fed);
+  }
+  def ftr-feed-doc(ledger, path, label, doc, fed) {
+   let r = frq-feed(ledger, doc, label, frq-git-tip);
+   let now = append(fed, [[ledger, frq-answers(doc, label)]]);
+   let answered = frq-answer-ledger(ledger, frq-flat(map(f => f[1], filter(f => (String) f[0] == ledger, now))));
+   ftr-say(label ++ ftr-n("read", r[2]) ++ ftr-n("refuted", r[3]) ++ ftr-n("verdicts", r[4]) ++ ftr-n("joined", r[5]) ++ ftr-n("requests", r[0]) ++ ftr-n("new", r[1]) ++ ftr-n("present", (r[0] - r[1])) ++ ftr-n("appended", r[6]) ++ ftr-n("answers", answered[0]) ++ ftr-statuses(answered[2]));
+   [1, now];
   }
   def ftr-refuse(path, why) {
    ftr-say(path ++ " signal=nothing reason=" ++ why);
    0;
   }
-  def ftr-fed(path, label, r) {
-   ftr-say(label ++ ftr-n("read", r[2]) ++ ftr-n("refuted", r[3]) ++ ftr-n("verdicts", r[4]) ++ ftr-n("joined", r[5]) ++ ftr-n("requests", r[0]) ++ ftr-n("new", r[1]) ++ ftr-n("present", (r[0] - r[1])) ++ ftr-n("appended", r[6]));
-   1;
-  }
-  // ── close: the witness is read here, and the commit is asked of git by argv ──
-  def ftr-hex-byte?(b) = ((b >= 48) && (b <= 57)) || ((b >= 97) && (b <= 102));
-  def ftr-hex-run?(c, i) = if (i >= len(c)) then true else if ftr-hex-byte?(str_byte_at(c, i)) then ftr-hex-run?(c, (i + 1)) else false;
-  def ftr-hex?(c) = if ((len(c) < 7) || (len(c) > 40)) then false else ftr-hex-run?(c, 0);
-  def ftr-under-head?(c) = if ftr-hex?(c) then ((Comparable) fhn-command(["git", "merge-base", "--is-ancestor", c, "HEAD"]) == 0) else false;
-  def ftr-moved-needle(w) = fhn-capture(["git", "log", "-1", "--format=%h", "-S", frq-text(w, "needle"), "--", frq-text(w, "path")]);
-  def ftr-commit-of(c) {
-   let named = frq-text(c, "commit");
-   let found = if frq-some?(named) then named else ftr-moved-needle(frq-get(c, "witness"));
-   if ftr-under-head?(found) then found else "";
-  }
-  // the witness file as the review read it; a path that was not there reads "", a review no closure names nothing
-  def ftr-earlier-of(c) {
-   let reviewed = frq-text(c, "reviewed");
-   let spec = reviewed ++ ":" ++ frq-text(frq-get(c, "witness"), "path");
-   let there = if ftr-hex?(reviewed) then ((Comparable) fhn-command(["git", "cat-file", "-e", spec]) == 0) else false;
-   let out = if there then host_capture(["git", "show", spec]) else nothing();
-   if (!ftr-hex?(reviewed)) then nothing() else if there then (out ?? "") else "";
-  }
+  // ── close ──
   def ftr-close(ledger, path) {
    let text = read_file(path) ?? "";
    if (!faj-valid(text)) then ftr-refuse(path, "not-a-json-document") else ftr-closing(ledger, path, parse-json("closures", text));
   }
+  def ftr-outcome(key, outcomes, want) = ftr-n(key, frq-count(outcomes, want));
   def ftr-closing(ledger, path, doc) {
    let closures = frq-nodes(doc, "closures");
-   let r = frq-close(frq-rows(ledger), closures, frq-get(doc, "reviewed"), ftr-commit-of, ftr-earlier-of);
-   let saved = if ((Comparable) r[1] > 0) then frq-save(ledger, r[0]) else 0;
-   ftr-say(frq-label-of(path) ++ ftr-n("closures", len(closures)) ++ ftr-n("closed", r[1]) ++ ftr-n("refused_witness", r[2]) ++ ftr-n("refused_stood_before", r[5]) ++ ftr-n("refused_commit", r[3]) ++ ftr-n("unknown", r[4]) ++ ftr-n("saved", saved));
+   let r = frq-close(frq-rows(ledger), closures, frq-get(doc, "reviewed"), frq-git());
+   let os = r[1];
+   let saved = if ((Comparable) frq-count(os, "closed") > 0) then frq-save(ledger, r[0]) else 0;
+   ftr-say(frq-label-of(path) ++ ftr-n("closures", len(closures)) ++ ftr-outcome("closed", os, "closed") ++ ftr-outcome("refused_path", os, "refused:path") ++ ftr-outcome("refused_unseen", os, "refused:unseen") ++ ftr-outcome("refused_witness", os, "refused:witness") ++ ftr-outcome("refused_stood_before", os, "refused:stood-before") ++ ftr-outcome("refused_comment", os, "refused:comment") ++ ftr-outcome("refused_band", os, "refused:band") ++ ftr-outcome("refused_commit", os, "refused:commit") ++ ftr-outcome("refused_inside_review", os, "refused:inside-review") ++ ftr-outcome("already", os, "already") ++ ftr-n("unknown", r[2]) ++ ftr-n("saved", saved));
    1;
   }
   // ── check ──
   def ftr-check(ledger) {
    let rows = frq-rows(ledger);
-   let closed = filter(r => (String) frq-text(r, "status") == "closed", rows);
-   let broken = filter(r => !frq-witness-holds?(frq-get(r, "witness")), closed);
-   let whole = filter(r => frq-whole?(r), rows);
-   ftr-say("check" ++ ftr-n("rows", len(rows)) ++ ftr-n("whole", len(whole)) ++ ftr-n("pending", (len(rows) - len(closed))) ++ ftr-n("closed", len(closed)) ++ ftr-n("holding", (len(closed) - len(broken))) ++ " reopen=" ++ str-join-with(frq-ids(broken), ","));
+   let read = frq-recheck(rows, frq-git());
+   let broken = filter(x => !((String) x[1] == "closed"), read);
+   ftr-say("check" ++ ftr-n("rows", len(rows)) ++ ftr-n("whole", len(filter(frq-whole?, rows))) ++ ftr-statuses(rows) ++ ftr-n("holding", (len(read) - len(broken))) ++ " reopen=" ++ str-join-with(map(x => x[0] ++ ":" ++ x[1], broken), ","));
    1;
   }
  }
