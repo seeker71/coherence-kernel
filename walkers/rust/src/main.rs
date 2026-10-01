@@ -899,11 +899,91 @@ fn env_bind(env: &Env, name: String, v: Value) {
 // Evaluator — faithful to the full kernel's `walk`. Same arm semantics: width
 // promotion (float on either operand → float result), comparisons/logic
 // returning 0/1 ints, if/let/do, defn-as-closure, fncall (native first, then
-// user closure). The full kernel does TCO via a loop; recursion here is fine
-// for the witness's pure-op surface and keeps the dispatch legible.
+// user closure). A tail position -- an if's taken arm, a do's last form, a
+// let's body, a closure's body -- is the next turn of walk's loop rather than a
+// deeper Rust frame, so a tail-recursive recipe runs at any depth, as on the
+// Go walker and the kernels; every other form answers through walk_form.
 // ---------------------------------------------------------------------------
 fn walk(n: &Rc<Node>, env: &Env) -> Value {
-    match &**n {
+    let mut n = n.clone();
+    let mut env = env.clone();
+    loop {
+        let node = n.clone();
+        match &*node {
+            Node::If(c, t, e) => {
+                if walk(c, &env).as_bool() {
+                    n = t.clone();
+                } else if let Some(else_n) = e {
+                    n = else_n.clone();
+                } else {
+                    return Value::Null;
+                }
+            }
+            // a do binds its lets and defns for the rest of itself only (walk_unit
+            // reads the unit's root do flat); its last form answers
+            Node::Block(kids) => {
+                if kids.is_empty() {
+                    return Value::Null;
+                }
+                env = new_frame(Some(env.clone()));
+                let last = kids.len() - 1;
+                for c in &kids[..last] {
+                    walk(c, &env);
+                }
+                n = kids[last].clone();
+            }
+            Node::LetIn(name, value, body) => {
+                let v = walk(value, &env);
+                let scope = new_frame(Some(env.clone()));
+                env_bind(&scope, name.clone(), v);
+                env = scope;
+                n = body.clone();
+            }
+            Node::Fncall(name, args) => {
+                // fkwu's reserved heads answer as the primitive, or as the global recipe
+                // where this walker has no native; any other head reads the nearest local
+                // binding first, then the native, then the global. Args are evaluated
+                // once, in the CALLER's env, for whichever path answers.
+                let vals: Vec<Value> = args.iter().map(|a| walk(a, &env)).collect();
+                let reserved = reserved_heads::fkwu_reserved(name);
+                if reserved || !env_has_local(&env, name) {
+                    if let Some(v) = call_native(name, &vals) {
+                        return v;
+                    }
+                }
+                let scope = if reserved { env_root(&env) } else { env.clone() };
+                let callee = env_lookup(&scope, name)
+                    .unwrap_or_else(|| panic!("unbound function: {}", name));
+                let cl = match callee {
+                    Value::Closure(c) => c,
+                    _ => panic!("not callable: {}", name),
+                };
+                if vals.len() != cl.params.len() {
+                    panic!(
+                        "{} wants {} args, got {}",
+                        name,
+                        cl.params.len(),
+                        vals.len()
+                    );
+                }
+                // Bind in a fresh call frame chained to the closure's definition env;
+                // the body is the call's tail.
+                let call_frame = new_frame(Some(cl.env.clone()));
+                for (p, v) in cl.params.iter().zip(vals) {
+                    env_bind(&call_frame, p.clone(), v);
+                }
+                env = call_frame;
+                n = cl.body.clone();
+            }
+            other => return walk_form(other, &env),
+        }
+    }
+}
+
+// walk_form -- a form that answers where it stands: literals, names, math,
+// comparison, logic, a bodiless let and a defn. walk keeps the tail forms.
+fn walk_form(n: &Node, env: &Env) -> Value {
+    match n {
         Node::Int(v) => Value::Int(*v),
         Node::Float(v) => Value::Float(*v),
         Node::Str(s) => Value::Str(Rc::from(s.as_str())),
@@ -1008,34 +1088,10 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
             LOG_NOT => bool_int(!walk(&args[0], env).as_bool()),
             _ => unreachable!(),
         },
-        Node::If(c, t, e) => {
-            if walk(c, env).as_bool() {
-                walk(t, env)
-            } else if let Some(else_n) = e {
-                walk(else_n, env)
-            } else {
-                Value::Null
-            }
-        }
-        // a do binds its lets and defns for the rest of itself only (walk_unit
-        // reads the unit's root do flat)
-        Node::Block(kids) => {
-            if kids.is_empty() {
-                return Value::Null;
-            }
-            let scope = new_frame(Some(env.clone()));
-            walk_flat(kids, &scope)
-        }
         Node::Let(name, value) => {
             let v = walk(value, env);
             env_bind(env, name.clone(), v.clone());
             v
-        }
-        Node::LetIn(name, value, body) => {
-            let v = walk(value, env);
-            let scope = new_frame(Some(env.clone()));
-            env_bind(&scope, name.clone(), v);
-            walk(body, &scope)
         }
         Node::Fndef(name, params, body) => {
             let cl = Rc::new(Closure {
@@ -1046,39 +1102,8 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
             env_bind(env, name.clone(), Value::Closure(cl.clone()));
             Value::Closure(cl)
         }
-        Node::Fncall(name, args) => {
-            // fkwu's reserved heads answer as the primitive, or as the global recipe
-            // where this walker has no native; any other head reads the nearest local
-            // binding first, then the native, then the global. Args are evaluated
-            // once, in the CALLER's env, for whichever path answers.
-            let vals: Vec<Value> = args.iter().map(|a| walk(a, env)).collect();
-            let reserved = reserved_heads::fkwu_reserved(name);
-            if reserved || !env_has_local(env, name) {
-                if let Some(v) = call_native(name, &vals) {
-                    return v;
-                }
-            }
-            let scope = if reserved { env_root(env) } else { env.clone() };
-            let callee =
-                env_lookup(&scope, name).unwrap_or_else(|| panic!("unbound function: {}", name));
-            let cl = match callee {
-                Value::Closure(c) => c,
-                _ => panic!("not callable: {}", name),
-            };
-            if vals.len() != cl.params.len() {
-                panic!(
-                    "{} wants {} args, got {}",
-                    name,
-                    cl.params.len(),
-                    vals.len()
-                );
-            }
-            // Bind in a fresh call frame chained to the closure's definition env.
-            let call_frame = new_frame(Some(cl.env.clone()));
-            for (p, v) in cl.params.iter().zip(vals) {
-                env_bind(&call_frame, p.clone(), v);
-            }
-            walk(&cl.body, &call_frame)
+        Node::If(..) | Node::Block(_) | Node::LetIn(..) | Node::Fncall(..) => {
+            unreachable!("walk keeps the tail forms")
         }
     }
 }
