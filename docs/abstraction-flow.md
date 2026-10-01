@@ -3,6 +3,8 @@
 The native authoring guide and `observe/authoring-altitude-run.fk` refresh a
 working-tree census of tracked and unignored `.fk`, `.bml`, `.c` and `.h` files.
 The BMF cursor reads named definitions, skipping quoted specimens and comments.
+Mixed modules resume their enclosing syntax after each section; executable BML
+sections contribute definitions while other dialects remain grammar data.
 Each file has its content fingerprint, physical line count and definition spans.
 Exact cached source bytes reuse the parsed spans; changed bytes are fingerprinted
 and scanned again. Deleted files leave the census. These disposable local caches
