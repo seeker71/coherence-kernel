@@ -1855,11 +1855,6 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VInt, Int: 0}
 	})
-	// value-kind stays while core.fk, formbin-codec.bml and sha256-owned-bytes.bml call it
-	// and fkwu carries it as a rewrite row.
-	k.registerNative("value-kind", catWitness(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VStr, Str: valueKindName(args[0])}
-	})
 	k.registerNative("str_to_float", catMethod(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VFloat, Float: decimalPrefixFloat(argStr(args, 0))}
 	})
@@ -2224,11 +2219,17 @@ func (k *Kernel) registerNatives() {
 	}
 	k.registerNative("host_file_mtime", catCall(), fileMtimeNative)
 	k.registerNative("file_mtime", catCall(), fileMtimeNative)
+	// read_file_slice path off len — the slice's own bytes; "" when len asks for
+	// none, and nothing when no byte was measured (a missing file, a negative
+	// offset, a read error), in the order fkwu, Rust and TS read them.
 	readFileSliceNative := func(_ *Kernel, args []Value) Value {
 		offset := args[1].AsInt()
 		length := args[2].AsInt()
-		if offset < 0 || length <= 0 {
+		if length <= 0 {
 			return Value{Kind: VStr, Str: ""}
+		}
+		if offset < 0 {
+			return Value{Kind: VNull}
 		}
 		f, err := os.Open(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil {
@@ -2451,13 +2452,20 @@ func (k *Kernel) registerNatives() {
 	// structure. Form code holds NodeIDs as values (VNodeID) and uses
 	// these natives to construct recipes.
 
-	k.registerNative("make_nodeid", catWitness(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VNodeID, Nid: NodeID{
-			Pkg:   uint32(args[0].AsInt()),
-			Level: uint32(args[1].AsInt()),
-			Type:  uint32(args[2].AsInt()),
-			Inst:  uint32(args[3].AsInt()),
-		}}
+	// make_nodeid — one range law with fkwu's native node word
+	// (form-stdlib/bml/native-node-word.bml): pkg < 2^6, level < 2^13,
+	// type < 2^12, 0 <= inst < 2^32, all >= 0; the 1.1.1 trivial-int lane takes
+	// any 63-bit int and is that int's own leaf. Outside it the door stops, so
+	// no two coordinates ever collapse onto one identity.
+	k.registerNative("make_nodeid", catWitness(), func(k *Kernel, args []Value) Value {
+		p, l, t, i := args[0].AsInt(), args[1].AsInt(), args[2].AsInt(), args[3].AsInt()
+		if p == 1 && l == 1 && t == 1 {
+			return Value{Kind: VNodeID, Nid: k.internTrivialInt(i)}
+		}
+		if p < 0 || p >= 1<<6 || l < 0 || l >= 1<<13 || t < 0 || t >= 1<<12 || i < 0 || i >= 1<<32 {
+			panic("make_nodeid: coordinate is outside the native 64-bit node identity layout")
+		}
+		return Value{Kind: VNodeID, Nid: NodeID{Pkg: uint32(p), Level: uint32(l), Type: uint32(t), Inst: uint32(i)}}
 	})
 	k.registerNative("bp", catWitness(), func(_ *Kernel, args []Value) Value {
 		if c, ok := bpTable[argStr(args, 0)]; ok {
@@ -2559,7 +2567,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VInt, Int: int64(args[0].AsNid().Type)}
 	})
 	k.registerNative("node_inst", catWitness(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VInt, Int: int64(args[0].AsNid().Inst)}
+		return Value{Kind: VInt, Int: core.NidInst(args[0].AsNid())}
 	})
 	// value_eq — content identity (valueEqual). node_eq is fkwu's second spelling of
 	// the same tag 80, so it shares the meaning.
@@ -3604,8 +3612,10 @@ func tokenizeSexp(src string) []sexpToken {
 				i++
 			}
 			isFloat := false
-			// Fractional part: `.` followed by at least one digit.
-			if i < len(src) && src[i] == '.' && i+1 < len(src) && src[i+1] >= '0' && src[i+1] <= '9' {
+			// Fractional part: a `.` after the digits makes a float, with or
+			// without fraction digits (`1.` reads 1.0), as fkwu's number leaf
+			// and the TS reader read it.
+			if i < len(src) && src[i] == '.' {
 				isFloat = true
 				i++ // consume '.'
 				for i < len(src) && src[i] >= '0' && src[i] <= '9' {
@@ -3664,7 +3674,9 @@ func unescapeStr(s string) string {
 			case '"':
 				out = append(out, '"')
 			default:
-				out = append(out, s[i+1])
+				// Any other backslash stands for itself, as fkwu's fk_smkstr
+				// reads it: "a\qb" is four bytes.
+				out = append(out, '\\', s[i+1])
 			}
 			i++
 			continue
@@ -4041,7 +4053,7 @@ func diagnoseKernelPanic(message string) kernelCrashDiagnosis {
 		return kernelCrashDiagnosis{
 			fatalKind:       "type_contract_violation",
 			likelyRootCause: "a Form/native recipe passed a non-string value to a string-only primitive",
-			avoidance:       "guard with value_kind/value-kind, convert with value_str, or use null-safe JSON constructors before calling string primitives",
+			avoidance:       "guard with value_kind, convert with value_str, or use null-safe JSON constructors before calling string primitives",
 		}
 	case strings.Contains(lower, "as_int") ||
 		strings.Contains(lower, "argint") ||
