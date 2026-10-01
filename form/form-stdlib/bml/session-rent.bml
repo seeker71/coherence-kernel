@@ -1,0 +1,74 @@
+// session-rent.bml — one rented session's spend beside the local tokens that served it.
+// Rented: every billed request in the session's transcript and its subagents' transcripts,
+// read once per requestId (input, cache write, cache read, output). Local: the voice's drafts
+// for the same session (receipts/draft-ledger.jsonl, keyed by session id). The share is the
+// walk's measure: local / (local + rented output), in parts per million.
+import form-stdlib/form-cli-movement.bml;
+import form-stdlib/form-fs.fk;
+section [form.bml] {
+    def sr-fields() = ["input_tokens","cache_creation_input_tokens","cache_read_input_tokens","output_tokens"];
+    def sr-field(text, usageAt, rowEnd, name) {
+        let mark = rtm-mark(name);
+        let at = str_find(text, mark, usageAt);
+        (at < 0) || (at >= rowEnd) ? 0 : max2(0, fmv-field-int(text, at + len(mark), 0, 0));
+    }
+    def sr-add(acc, text, usageAt, rowEnd) = [acc[0] + sr-field(text, usageAt, rowEnd, "input_tokens"),
+        acc[1] + sr-field(text, usageAt, rowEnd, "cache_creation_input_tokens"),
+        acc[2] + sr-field(text, usageAt, rowEnd, "cache_read_input_tokens"),
+        acc[3] + sr-field(text, usageAt, rowEnd, "output_tokens"), acc[4] + 1];
+    // rtm-scan-go's walk, summing four fields per fresh request instead of one
+    def sr-scan-go(text, from, acc, seen) {
+        let usageAt = str_find(text, rtm-usage-mark(), from);
+        let rowEnd = usageAt < 0 ? 0 - 1 : str_find(text, "\n", usageAt);
+        let reqId = rowEnd < 0 ? "" : rtm-row-request(text, usageAt, rowEnd);
+        let fresh = (String) reqId != "" && str_find(seen, rtm-seen-key(reqId), 0) < 0;
+        usageAt < 0 ? [acc, rtm-rest-at(text, from), seen] :
+         rowEnd < 0 ? [acc, usageAt, seen] :
+         sr-scan-go(text, rowEnd + 1, fresh ? sr-add(acc, text, usageAt, rowEnd) : acc, fresh ? seen ++ reqId ++ "," : seen);
+    }
+    def sr-file-go(path, size, off, acc, seen, chunk) {
+        let slice = off >= size ? "" : read_file_slice(path, off, min2(chunk, size - off));
+        let scanned = sr-scan-go(slice, 0, acc, seen);
+        let resumeAt = scanned[1];
+        let more = (off + len(slice)) < size && len(slice) > 0;
+        more && (Comparable) resumeAt == 0 ? sr-file-go(path, size, off, acc, seen, chunk * 2) :
+         more && resumeAt > 0 ? sr-file-go(path, size, off + resumeAt, scanned[0], scanned[2], chunk) :
+         [scanned[0], scanned[2]];
+    }
+    def sr-jsonl?(name) = len(name) > 6 && (String) substring(name, len(name) - 6, len(name)) == ".jsonl";
+    // every transcript under a directory, depth first
+    def sr-tree(dir) = (Comparable) fs_is_dir(dir) != 1 ? [] :
+        fs_list(dir) |> map(name => dir ++ "/" ++ name) |> sr-tree-rows;
+    def sr-tree-rows(paths) = nil?(paths) ? [] :
+        append((Comparable) fs_is_dir(paths[0]) == 1 ? sr-tree(paths[0]) : sr-jsonl?(paths[0]) ? [paths[0]] : [], sr-tree-rows(paths[1:]));
+    def sr-files(main) = cons(main, sr-tree(substring(main, 0, len(main) - 6) ++ "/subagents"));
+    def sr-rented(files, acc, seen) = nil?(files) ? acc : {
+        let read = sr-file-go(files[0], file_size(files[0]), 0, acc, seen, rtm-chunk());
+        sr-rented(files[1:], read[0], read[1]);
+    };
+    // local: the voice's drafts written for this session
+    def sr-local(session, rows, drafts, generated) = nil?(rows) ? [drafts, generated] : {
+        let row = rows[0];
+        let mine = str_find(row, "\"session\":\"" ++ session ++ "\"", 0) >= 0;
+        let at = str_find(row, "\"generated\":", 0);
+        let g = mine && at >= 0 ? max2(0, fmv-field-int(row, at + 12, 0, 0)) : 0;
+        sr-local(session, rows[1:], mine ? drafts + 1 : drafts, generated + g);
+    };
+    def sr-session(main) {
+        let base = substring(main, fs-last-slash(main) + 1, len(main));
+        substring(base, 0, len(base) - 6);
+    }
+    def sr-row(main, draftLedger) {
+        let files = sr-files(main);
+        let rented = sr-rented(files, [0, 0, 0, 0, 0], rtm-seen-none());
+        let session = sr-session(main);
+        let local = sr-local(session, file_size(draftLedger) < 1 ? [] : split-on(read_file(draftLedger), "\n"), 0, 0);
+        let share = (local[1] + rented[3]) == 0 ? 0 : (local[1] * 1000000) / (local[1] + rented[3]);
+        str-join(["{\"at_unix_ms\":", int_to_str(now_unix_ms()), ",\"session\":\"", session,
+            "\",\"rented\":{\"requests\":", int_to_str(rented[4]), ",\"input\":", int_to_str(rented[0]),
+            ",\"cache_write\":", int_to_str(rented[1]), ",\"cache_read\":", int_to_str(rented[2]),
+            ",\"output\":", int_to_str(rented[3]), ",\"transcripts\":", int_to_str(len(files)),
+            "},\"local\":{\"drafts\":", int_to_str(local[0]), ",\"generated\":", int_to_str(local[1]),
+            "},\"local_share_ppm\":", int_to_str(share), "}"]);
+    }
+}
