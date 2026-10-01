@@ -63,7 +63,7 @@ section [form.bml] {
   // an id names a file: a byte outside a-z A-Z 0-9 - _ . reads as -
   def ftw-id-byte(b) = ((b >= 97) && (b <= 122)) || ((b >= 65) && (b <= 90)) || ((b >= 48) && (b <= 57)) || (b == 45) || (b == 95) || (b == 46) ? b : 45;
   def ftw-safe(id) = str-join(map(i => byte_to_str(ftw-id-byte(str_byte_at(id, i))), range(0, len(id))));
-  def ftw-make(root, lineage, request) = record_new(0, "root", root, "lineage", lineage, "request", request, "reply", ftw-fresh-id("rp-"), "stores", record_new(0), "checked", record_new(0), "ordinal", 0, "touched", "", "decoded", record_new(0));
+  def ftw-make(root, lineage, request) = record_new(0, "root", root, "lineage", lineage, "request", request, "reply", ftw-fresh-id("rp-"), "stores", record_new(0), "checked", record_new(0), "missed", record_new(0), "ordinal", 0, "touched", "", "decoded", record_new(0));
   // A workspace under root (a directory; "" keeps it in memory). The caller passes the request's
   // lineage id; a request with none starts its own lineage, keyed by its own id.
   def ftw-open(root, lineage, request) {
@@ -106,7 +106,7 @@ section [form.bml] {
   // first under n:<name> and under a:<the address the value was spoken as>, so a lookup reads only
   // the cells of its own name.
   def ftw-held-empty() = ["", [], record_new(0)];
-  def ftw-held(ws, key) = ftw-in-memory?(ws, key) ? (ftw-get(record_get(ws, "stores"), key) ?? ftw-held-empty()) : ftw-file-held(ws, key, ftw-store-path(ws, key));
+  def ftw-held(ws, key) = ftw-in-memory?(ws, key) ? (ftw-get(record_get(ws, "stores"), key) ?? ftw-hold-store(ws, key, ftw-held-empty())) : ftw-file-held(ws, key, ftw-store-path(ws, key));
   def ftw-cells(ws, key) = ftw-held(ws, key)[1];
   def ftw-index(ws, key) = ftw-held(ws, key)[2];
   def ftw-indexed(ws, key, entry) = ftw-get(ftw-index(ws, key), entry) ?? [];
@@ -153,6 +153,7 @@ section [form.bml] {
   // every directory of path, one level at a time
   def ftw-mkdirs(path) = foldl((made, part) => ftw-mkdir-step(made, part), "", split-on(path, "/"));
   def ftw-store-write(ws, key, cell) {
+   record_set(ws, "missed", record_new(0));
    if ftw-in-memory?(ws, key) then ftw-hold-store(ws, key, ftw-held-add(ftw-held(ws, key), "", cell)) else ftw-file-write(ws, key, cell);
    cell;
   }
@@ -207,11 +208,23 @@ section [form.bml] {
   def ftw-resolve(ws, name) = ftw-resolve-in(ws, ftw-scopes(), name);
   def ftw-resolve-in(ws, scopes, name) = nil?(scopes) ? nothing() : ftw-resolve-at(ws, scopes, name, ftw-find(ws, scopes[0], name));
   def ftw-resolve-at(ws, scopes, name, hit) = nothing?(hit) ? ftw-resolve-in(ws, scopes[1:], name) : [hit, scopes[0]];
-  // [value, kind, scope] for a name the chain holds, or nothing; the lookup marks its touch
+  // [value, kind, scope] for a name the chain holds, or nothing; the lookup marks its touch. A name
+  // no store's index holds (a walker word the voice never made) is answered from the three
+  // indexes alone.
   def ftw-lookup(ws, name) {
-   let hit = ftw-resolve(ws, name);
+   let hit = ftw-missed?(ws, name) ? nothing() : ftw-held-anywhere?(ws, "n:" ++ name) ? ftw-resolve(ws, name) : ftw-miss(ws, name);
    if nothing?(hit) then nothing() else ftw-lookup-hit(ws, hit[0], hit[1]);
   }
+  // a miss is remembered as long as a file's stamp is (ftw-check-ms), and forgotten at every write
+  def ftw-missed?(ws, name) {
+   let at = ftw-get(record_get(ws, "missed"), name);
+   !nothing?(at) && ((host_monotonic_ms() - at) < ftw-check-ms());
+  }
+  def ftw-miss(ws, name) {
+   record_set(record_get(ws, "missed"), name, host_monotonic_ms());
+   nothing();
+  }
+  def ftw-held-anywhere?(ws, entry) = record_has(ftw-index(ws, "local"), entry) || record_has(ftw-index(ws, ftw-store-key(ws, "lineage")), entry) || record_has(ftw-index(ws, "global"), entry);
   def ftw-lookup-hit(ws, cell, scope) {
    ftw-touch-cell(ws, cell);
    [ftw-decoded(ws, cell-ctor(cell)), ftw-cell-kind(cell), scope];
