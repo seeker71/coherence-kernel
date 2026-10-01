@@ -1,0 +1,169 @@
+// form-agent-edit-ladder.bml — where an edit's old text lands when its exact bytes are not in the document.
+//
+// A local voice re-types the span it means to replace, and a re-typed span drifts: one more space of
+// indent, a trailing blank, a typographic quote. The ladder reads that span against the resident bytes
+// rung by rung, strictest first, and lands only where exactly one place matches at a rung:
+//   exact                 the bytes themselves (form-agent-tools.bml keeps this rung and its counts)
+//   line-trimmed          trailing spaces, tabs and CRs at each line's end are not read
+//   whitespace-run        line-trimmed, and every run of spaces and tabs inside a line reads as one space
+//   indentation-relative  whole lines; each side's common leading indent is set aside, the bodies and the
+//                         indents beyond it must agree, and the new text takes the resident's indent
+//   typographic           whitespace-run, with curly quotes, en and em dashes as ASCII and NBSP as a space
+// Two places at a rung refuse (ambiguous, with the count); no place at any rung is not-found, and the
+// caller's evidence then carries nearest_span: the resident line window closest to the old text, in the
+// resident's own bytes and offsets. Strings are bytes four-way; no rung decodes text.
+import form-stdlib/core.fk;
+import form-stdlib/native-edit.fk;
+import form-stdlib/bml/form-agent-tool-values.bml;
+import form-stdlib/bml/string-join.bml;
+section [form.bml] {
+ class FormAgentEditLadder {
+  field FaelLf = 10;
+  field FaelSpace = 32;
+  def fael-rungs() = ["exact", "line-trimmed", "whitespace-run", "indentation-relative", "typographic"];
+  def fael-rung-name(r) = fael-rungs()[r - 1];
+
+  // a whitespace unit's width at i: space, tab and CR on every rung, NBSP (C2 A0) on the typographic rung
+  def fael-ws-width(t, i, n, rung) {
+   let b = str_byte_at(t, i);
+   b == 32 || b == 9 || b == 13 ? 1 : rung == 5 && b == 194 && i + 1 < n && str_byte_at(t, i + 1) == 160 ? 2 : 0;
+  }
+  def fael-run-end(t, i, n, rung) = i >= n ? i : fael-ws-width(t, i, n, rung) == 0 ? i : fael-run-end(t, i + fael-ws-width(t, i, n, rung), n, rung);
+  // a typographic unit at i: [width ascii-byte], [0 0] when there is none; curly quotes, en and em dashes
+  def fael-typo(t, i, n) {
+   let b1 = i + 2 < n && str_byte_at(t, i) == 226 && str_byte_at(t, i + 1) == 128 ? str_byte_at(t, i + 2) : 0;
+   b1 == 152 || b1 == 153 ? [3, 39] : b1 == 156 || b1 == 157 ? [3, 34] : b1 == 147 || b1 == 148 ? [3, 45] : [0, 0];
+  }
+
+  // [normalized segments]: segments [norm-index orig-start orig-end emitted], one per unit the rung
+  // rewrote, in order; every other byte is itself. A run stripped at a line's end emits nothing.
+  def fael-norm(t, rung) = fael-norm-go(t, 0, len(t), rung, 0, 0, [], []);
+  def fael-flush(t, plain, i, parts) = i > plain ? cons(substring(t, plain, i), parts) : parts;
+  def fael-norm-go(t, i, n, rung, plain, nlen, parts, segs) = i >= n ? [str-join(reverse(fael-flush(t, plain, n, parts))), reverse(segs)]
+   : rung == 5 && fael-typo(t, i, n)[0] > 0 ? fael-norm-typo(t, i, n, rung, plain, nlen, parts, segs, fael-typo(t, i, n))
+   : fael-ws-width(t, i, n, rung) > 0 ? fael-norm-run(t, i, fael-run-end(t, i, n, rung), n, rung, plain, nlen, parts, segs)
+   : fael-norm-go(t, i + 1, n, rung, plain, nlen, parts, segs);
+  def fael-norm-typo(t, i, n, rung, plain, nlen, parts, segs, typo) {
+   let flushed = fael-flush(t, plain, i, parts);
+   let at = nlen + (i - plain);
+   fael-norm-go(t, i + typo[0], n, rung, i + typo[0], at + 1, cons(byte_to_str(typo[1]), flushed), cons([at, i, i + typo[0], 1], segs));
+  }
+  def fael-norm-run(t, i, j, n, rung, plain, nlen, parts, segs) {
+   let trailing = j >= n || str_byte_at(t, j) == FaelLf();
+   let single = j == i + 1 && str_byte_at(t, i) == FaelSpace();
+   let at = nlen + (i - plain);
+   trailing ? fael-norm-go(t, j, n, rung, j, at, fael-flush(t, plain, i, parts), cons([at, i, j, 0], segs))
+   : rung == 2 || single ? fael-norm-go(t, j, n, rung, plain, nlen, parts, segs)
+   : fael-norm-go(t, j, n, rung, j, at + 1, cons(" ", fael-flush(t, plain, i, parts)), cons([at, i, j, 1], segs));
+  }
+  // the original [start end) of the normalized byte at q
+  def fael-orig(segs, q) = fael-orig-go(segs, q, 0);
+  def fael-orig-go(segs, q, delta) = nil?(segs) ? [q + delta, q + delta + 1]
+   : segs[0][0] < q || (segs[0][0] == q && segs[0][3] == 0) ? fael-orig-go(segs[1:], q, delta + (segs[0][2] - segs[0][1]) - segs[0][3])
+   : segs[0][0] == q ? [segs[0][1], segs[0][2]]
+   : [q + delta, q + delta + 1];
+  // a normalized rung: [count text-after]; the text changes only when exactly one place matches
+  def fael-normal(t, old, new, rung) {
+   let doc = fael-norm(t, rung);
+   let want = fael-norm(old, rung)[0];
+   let count = len(want) == 0 ? 0 : ne-count(doc[0], want);
+   count == 1 ? [1, fael-splice(t, new, fael-span(doc[1], find-from(doc[0], want, 0), len(want)))] : [count, t];
+  }
+  def fael-span(segs, at, n) = [fael-orig(segs, at)[0], fael-orig(segs, at + n - 1)[1]];
+  def fael-splice(t, new, span) = str-join([substring(t, 0, span[0]), new, substring(t, span[1], len(t))]);
+
+  // lines: [lead body] per line, the lead its spaces and tabs, the body the rest without trailing blanks
+  def fael-lead-end(s, i) = i < len(s) && (str_byte_at(s, i) == 32 || str_byte_at(s, i) == 9) ? fael-lead-end(s, i + 1) : i;
+  def fael-tail-end(s, n, from) = n > from && (str_byte_at(s, n - 1) == 32 || str_byte_at(s, n - 1) == 9 || str_byte_at(s, n - 1) == 13) ? fael-tail-end(s, n - 1, from) : n;
+  def fael-record(line) {
+   let lead = fael-lead-end(line, 0);
+   [substring(line, 0, lead), substring(line, lead, fael-tail-end(line, len(line), lead))];
+  }
+  def fael-records(lines) = lines |> map(fael-record);
+  def fael-starts(lines, at, out) = nil?(lines) ? reverse(out) : fael-starts(lines[1:], at + len(lines[0]) + 1, cons(at, out));
+  // the old text's lines, one final LF set aside: [lines lf]
+  def fael-old-lines(old) {
+   let lf = len(old) > 0 && str_byte_at(old, len(old) - 1) == FaelLf();
+   [split-on(lf ? substring(old, 0, len(old) - 1) : old, "\n"), lf ? 1 : 0];
+  }
+  def fael-blank?(rec) = len(rec[1]) == 0;
+  // the shortest lead among the records that carry a body; nothing when every record is blank
+  def fael-min-lead(recs) = foldl((m, r) => fael-blank?(r) ? m : nothing?(m) || len(r[0]) < m ? len(r[0]) : m, nothing(), recs);
+  def fael-first-lead(recs) = nil?(recs) ? "" : fael-blank?(recs[0]) ? fael-first-lead(recs[1:]) : recs[0][0];
+  def fael-bodies?(olds, ress) = nil?(olds) ? 1 : olds[0][1] == ress[0][1] && fael-bodies?(olds[1:], ress[1:]);
+  def fael-indents?(olds, ress, mo, mr) = nil?(olds) ? 1 : (fael-blank?(olds[0]) || substring(olds[0][0], mo, len(olds[0][0])) == substring(ress[0][0], mr, len(ress[0][0]))) && fael-indents?(olds[1:], ress[1:], mo, mr);
+  def fael-window?(olds, ress, mo) {
+   let mr = fael-min-lead(ress);
+   fael-bodies?(olds, ress) && !nothing?(mr) && fael-indents?(olds, ress, mo, mr);
+  }
+  // [count first-matching-window] over every k-line window
+  def fael-windows(olds, ress, mo, k, j, last, count, first) = j > last ? [count, first]
+   : fael-window?(olds, take(k, ress), mo) ? fael-windows(olds, ress[1:], mo, k, j + 1, last, count + 1, count == 0 ? j : first)
+   : fael-windows(olds, ress[1:], mo, k, j + 1, last, count, first);
+  def fael-reindent-line(line, from, to) = len(fael-record(line)[1]) == 0 ? line : fat-starts(line, from) ? to ++ substring(line, len(from), len(line)) : line;
+  def fael-reindent(new, from, to) = str-join-with(split-on(new, "\n") |> map(line => fael-reindent-line(line, from, to)), "\n");
+  def fael-indented(t, old, new) {
+   let split = fael-old-lines(old);
+   let olds = fael-records(split[0]);
+   let mo = fael-min-lead(olds);
+   let lines = split-on(t, "\n");
+   let k = len(olds);
+   let m = len(lines);
+   nothing?(mo) || k > m ? [0, t] : fael-indented-in(t, new, split[1], olds, mo, lines, fael-records(lines), k);
+  }
+  def fael-indented-in(t, new, lf, olds, mo, lines, recs, k) {
+   let found = fael-windows(olds, recs, mo, k, 0, len(lines) - k, 0, 0);
+   found[0] == 1 ? fael-indented-at(t, new, lf, olds, mo, lines, recs, k, found) : [found[0], t];
+  }
+  def fael-indented-at(t, new, lf, olds, mo, lines, recs, k, found) {
+   let j = found[1];
+   let window = take(k, drop(j, recs));
+   let starts = fael-starts(lines, 0, []);
+   let last = j + k - 1;
+   let end = starts[last] + len(lines[last]) + (lf == 1 && last < len(lines) - 1 ? 1 : 0);
+   let to = substring(fael-first-lead(window), 0, fael-min-lead(window) ?? 0);
+   let from = substring(fael-first-lead(olds), 0, mo);
+   [1, fael-splice(t, fael-reindent(new, from, to), [starts[j], end])];
+  }
+
+  def fael-try(t, old, new, rung) = rung == 1 ? fael-exact(t, old, new) : rung == 4 ? fael-indented(t, old, new) : fael-normal(t, old, new, rung);
+  def fael-exact(t, old, new) {
+   let count = ne-count(t, old);
+   count == 1 ? [1, ne-replace-first(t, old, new)] : [count, t];
+  }
+  // [status rung count text]: status landed, ambiguous or not-found; the rung named where it settled
+  def fael-land(t, old, new) = fael-climb(t, old, new, 1);
+  def fael-approximate(t, old, new) = fael-climb(t, old, new, 2);
+  def fael-climb(t, old, new, rung) = rung > len(fael-rungs()) ? ["not-found", "", 0, t] : fael-settle(t, old, new, rung, fael-try(t, old, new, rung));
+  def fael-settle(t, old, new, rung, tried) = tried[0] == 1 ? ["landed", fael-rung-name(rung), 1, tried[1]]
+   : tried[0] > 1 ? ["ambiguous", fael-rung-name(rung), tried[0], t]
+   : fael-climb(t, old, new, rung + 1);
+
+  // nearest_span: [start end first-line lines equal-lines text], the k-line resident window whose lines
+  // most often equal the old text's lines at the whitespace-run reading; with none equal, the window that
+  // begins where the old text's first nonblank line shares the longest prefix
+  def fael-key(line) = fael-norm(fat-trim(line), 3)[0];
+  def fael-equal-count(olds, ress) = nil?(olds) || nil?(ress) ? 0 : (len(olds[0]) > 0 && olds[0] == ress[0] ? 1 : 0) + fael-equal-count(olds[1:], ress[1:]);
+  def fael-best(olds, ress, k, j, last, best) = j > last ? best
+   : fael-best(olds, ress[1:], k, j + 1, last, fael-equal-count(olds, take(k, ress)) > best[1] ? [j, fael-equal-count(olds, take(k, ress))] : best);
+  def fael-prefix(a, b, i) = i < len(a) && i < len(b) && str_byte_at(a, i) == str_byte_at(b, i) ? fael-prefix(a, b, i + 1) : i;
+  def fael-first-key(keys, i) = nil?(keys) ? [0, ""] : len(keys[0]) > 0 ? [i, keys[0]] : fael-first-key(keys[1:], i + 1);
+  def fael-longest(keys, want, j, best) = nil?(keys) ? best : fael-longest(keys[1:], want, j + 1, fael-prefix(keys[0], want, 0) > best[1] ? [j, fael-prefix(keys[0], want, 0)] : best);
+  def fael-nearest(t, old) {
+   let lines = split-on(t, "\n");
+   let olds = fael-old-lines(old)[0] |> map(fael-key);
+   let m = len(lines);
+   let k = min2(len(olds), m);
+   let keys = lines |> map(fael-key);
+   let best = fael-best(olds, keys, k, 0, m - k, [0, 0]);
+   let first = fael-first-key(olds, 0);
+   let begin = best[1] > 0 ? best[0] : max2(0, min2(m - k, fael-longest(keys, first[1], 0, [0, 0])[0] - first[0]));
+   let starts = fael-starts(lines, 0, []);
+   let last = begin + k - 1;
+   let start = starts[begin];
+   let end = starts[last] + len(lines[last]);
+   [start, end, begin + 1, k, best[1], substring(t, start, end)];
+  }
+ }
+ 0;
+}

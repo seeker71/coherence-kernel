@@ -7,6 +7,7 @@ import form-stdlib/native-edit.fk;
 import form-stdlib/shell-exec.fk;
 import form-stdlib/bml/form-agent-search.bml;
 import form-stdlib/bml/form-agent-json-query.bml;
+import form-stdlib/bml/form-agent-edit-ladder.bml;
 import form-stdlib/sha256.fk;
 import form-stdlib/hex.fk;
 import form-stdlib/fkwu-op-arity.fk;
@@ -110,22 +111,35 @@ section [form.bml] {
         def fat-sha?(text) = (((Comparable) len(text) == 64) && fat-sha-bytes?(text,0));
         def fat-edit-batch?(args) = ((len(args) >= 5) && ((Comparable) (len(args) % 2) == 1));
         def fat-edit-guarded-batch?(args) = (len(args) >= 4) && ((len(args) % 2) == 0) && fat-sha?(args[1]);
-        def fat-edit(docs, args) = if fat-edit-guarded-batch?(args) then fat-edit-guarded(docs,args[0],args[1],doc => fat-edit-batch(docs,docs,args[0],fat-drop(args,2),1)) else if ((Comparable) len(args) == 4) then fat-edit-sha(docs,args) else if fat-edit-batch?(args) then fat-edit-batch(docs,docs,args[0],args[1:],1) else if (!((Comparable) len(args) == 3)) then fat-fail("edit-needs-path-old-new", docs) else if ((String) args[1] == "") then fat-fail("empty-edit-pattern", docs) else fat-edit-doc(docs, args, fat-find-doc(docs, args[0]));
+        def fat-edit(docs, args) = if fat-edit-guarded-batch?(args) then fat-edit-guarded(docs,args[0],args[1],doc => fat-edit-batch(docs,docs,args[0],fat-drop(args,2),1,[])) else if ((Comparable) len(args) == 4) then fat-edit-sha(docs,args) else if fat-edit-batch?(args) then fat-edit-batch(docs,docs,args[0],args[1:],1,[]) else if (!((Comparable) len(args) == 3)) then fat-fail("edit-needs-path-old-new", docs) else if ((String) args[1] == "") then fat-fail("empty-edit-pattern", docs) else fat-edit-doc(docs, args, fat-find-doc(docs, args[0]));
         // Intermediate documents stay local to this call. A later failure
         // returns the original set, including when an earlier step succeeded.
-        def fat-edit-batch(original,docs,path,pairs,step) = if nil?(pairs) then
-            if ((Value) original == docs) then fat-fail("edit-unchanged: old and new text are identical; no source changed",original) else fat-ok("edited\n",docs)
+        // rungs: [step rung] for each step that landed past the exact bytes.
+        def fat-edit-batch(original,docs,path,pairs,step,rungs) = if nil?(pairs) then
+            if ((Value) original == docs) then fat-fail("edit-unchanged: old and new text are identical; no source changed",original) else fat-ok(fat-edit-batch-out(rungs,(step - 1)),docs)
             else {
                 let result = fat-edit-literal(docs,[path,pairs[0],pairs[1]],fat-find-doc(docs,path));
-                if ((Comparable) fat-exit(result) == 0) then fat-edit-batch(original,fat-documents(result),path,fat-drop(pairs,2),(step + 1))
-                else fat-result(fat-exit(result),json-emit(json-node-object([json-node-pair("failed_edit",json-node-int(step)),json-node-pair("documents_changed",json-node-int(0)),json-node-pair("scope",json-node-string("The numbered literal replacement failed against the intermediate text; all replacements in this call were rolled back."))])),fat-error(result),original);
+                if ((Comparable) fat-exit(result) == 0) then fat-edit-batch(original,fat-documents(result),path,fat-drop(pairs,2),(step + 1),fat-edit-rungs(rungs,step,fat-out(result)))
+                else fat-result(fat-exit(result),json-emit(json-node-object(append([json-node-pair("failed_edit",json-node-int(step)),json-node-pair("documents_changed",json-node-int(0)),json-node-pair("scope",json-node-string("The numbered literal replacement failed against the intermediate text; all replacements in this call were rolled back."))],fat-edit-step-detail(fat-out(result))))),fat-error(result),original);
             };
         def fat-edit-literal(docs,args,doc) = if ((String) args[1] == "") then fat-fail("empty-edit-pattern",docs)
             else if nil?(doc) then fat-fail("resident-document-not-found",docs)
             else {
                 let count = ne-count(doc[2],args[1]);
-                if ((Comparable) count == 0) then fat-fail("edit-not-found",docs) else fat-edit-count(docs,args,doc,count);
+                if ((Comparable) count == 0) then fat-edit-ladder(docs,args,doc) else fat-edit-count(docs,args,doc,count);
             };
+        // Past the exact bytes, form-agent-edit-ladder.bml lands the old text where exactly one place
+        // matches at its strictest rung, names that rung, and refuses two places with their count.
+        def fat-edit-ladder(docs,args,doc) = fat-edit-landed(docs,doc,fael-approximate(doc[2],args[1],args[2]));
+        def fat-edit-landed(docs,doc,landing) = if ((String) landing[0] == "landed") then (if ((String) landing[3] == doc[2]) then fat-fail("edit-unchanged: old and new text are identical; no source changed",docs) else fat-ok(fat-rung-out(landing[1]),fat-put-doc(docs,[doc[0],doc[1],landing[3]])))
+            else if ((String) landing[0] == "ambiguous") then fat-result(2,json-emit(json-node-object([json-node-pair("rung",json-node-string(landing[1])),json-node-pair("matches",json-node-int(landing[2])),json-node-pair("scope",json-node-string("The old text matched more than one place at this rung; nothing changed. Supply a longer span that occurs once."))])),"edit-ambiguous",docs)
+            else fat-fail("edit-not-found",docs);
+        def fat-rung-out(rung) = ("edited\nrung=" + (rung + "\n"));
+        def fat-edit-rungs(rungs,step,out) = if fat-starts(out,"edited\nrung=") then append(rungs,[[step,substring(out,12,(len(out) - 1))]]) else rungs;
+        def fat-edit-batch-out(rungs,steps) = if nil?(rungs) then "edited\n" else if ((Comparable) steps == 1) then fat-rung-out(rungs[0][1]) else ("edited\n" + (fat-join(rungs |> map(r => ("rung=" + (r[1] + (" step=" + r[0].str())))),"\n") + "\n"));
+        def fat-edit-step-detail(out) = if (!faj-valid(out)) then [] else fat-edit-step-pairs(faj-json("edit-step",out));
+        def fat-edit-step-pairs(obj) = if (!(fat-edit-object?(obj) && json-object-has?(obj,"rung"))) then [] else [json-node-pair("rung",json-object-get(obj,"rung")),json-node-pair("matches",json-object-get(obj,"matches"))];
+        def fat-edit-object?(node) = faj-is(node, JSON-OBJECT());
         def fat-edit-guarded(docs,path,digest,apply) = !fat-sha?(digest) ? fat-fail("edit-invalid-sha256",docs) : {
             let doc=fat-find-doc(docs,path);
             nil?(doc) ? fat-fail("resident-document-not-found",docs) : ((String) digest != fat-document-sha(doc)) ? fat-fail("edit-sha256-mismatch",docs) : apply(doc);
@@ -135,7 +149,7 @@ section [form.bml] {
         def fat-edit-count(docs, args, doc, count) = if ((Comparable) count == 0) then fat-edit-identity(docs,args,doc) else if (!((Comparable) count == 1)) then fat-fail("edit-ambiguous", docs) else if ((String) args[1] == args[2]) then fat-fail("edit-unchanged: old and new text are identical; no source changed",docs) else fat-ok("edited\n", fat-put-doc(docs, [doc[0], doc[1], ne-replace-first(doc[2], args[1], args[2])]));
         // A missing literal may name the complete current document instead.
         // Existing literal matches and ambiguous edits retain their meaning.
-        def fat-edit-identity(docs,args,doc) = if (!(fat-sha?(args[1]) && ((String) args[1] == fat-document-sha(doc)))) then fat-fail("edit-not-found",docs) else fat-edit-sha(docs,[args[0],"sha256",args[1],args[2]]);
+        def fat-edit-identity(docs,args,doc) = if (!(fat-sha?(args[1]) && ((String) args[1] == fat-document-sha(doc)))) then fat-edit-ladder(docs,args,doc) else fat-edit-sha(docs,[args[0],"sha256",args[1],args[2]]);
         def fat-write(docs, args, input) = if (!(((Comparable) len(args) == 1) || ((Comparable) len(args) == 2))) then fat-fail("write-needs-new-path-and-text", docs) else if ((String) args[0] == "") then fat-fail("empty-document-path", docs) else if (!nil?(fat-find-doc(docs, args[0]))) then fat-fail("document-exists-use-guarded-edit", docs) else fat-ok("created\n", append(docs, [[("resident:" + args[0]), args[0], if ((Comparable) len(args) == 2) then args[1] else input]]));
 
         // Private tool evidence, derived from the same resident documents the
@@ -145,16 +159,34 @@ section [form.bml] {
         def fat-guard-comparison(source,old) {
             let at = fat-guard-prefix(source,old,0);
             let start = fat-max(0,(at - 32));
-            json-node-object([json-node-pair("scope",json-node-string("old argument compared with the whole resident document at equal byte offsets; no approximate match or edit")),json-node-pair("first_difference_byte",if ((String) source == old) then json-node-null() else json-node-int(at)),json-node-pair("old_byte",fat-guard-byte(old,at)),json-node-pair("resident_byte",fat-guard-byte(source,at)),json-node-pair("context_start_byte",json-node-int(start)),json-node-pair("old_context",json-node-string(substring(old,start,fat-min(len(old),(at + 48))))),json-node-pair("resident_context",json-node-string(substring(source,start,fat-min(len(source),(at + 48)))))]);
+            json-node-object([json-node-pair("scope",json-node-string("old argument compared with the whole resident document at equal byte offsets; approximate landing is unique-or-refuse and named")),json-node-pair("first_difference_byte",if ((String) source == old) then json-node-null() else json-node-int(at)),json-node-pair("old_byte",fat-guard-byte(old,at)),json-node-pair("resident_byte",fat-guard-byte(source,at)),json-node-pair("context_start_byte",json-node-int(start)),json-node-pair("old_context",json-node-string(substring(old,start,fat-min(len(old),(at + 48))))),json-node-pair("resident_context",json-node-string(substring(source,start,fat-min(len(source),(at + 48)))))]);
         }
         def fat-guard-evidence(docs,tool,args,result) = if (nil?(args) || (!fat-has(["edit-not-found","edit-ambiguous","document-exists-use-guarded-edit","edit-sha256-mismatch"],fat-error(result)))) then nothing() else {
             let doc = fat-find-doc(docs,args[0]);
             if (nil?(doc) || (!((((String) tool == "edit") && (((Comparable) len(args) == 3) || (((Comparable) len(args) == 4) || fat-edit-guarded-batch?(args)))) || ((String) tool == "write")))) then nothing() else {
                 let source = doc[2];
                 let base = [json-node-pair("scope",json-node-string("caller-supplied resident documents; tools do not write the filesystem")),json-node-pair("path",json-node-string(doc[1])),json-node-pair("documents_changed",json-node-int((!((Value) docs == fat-documents(result))))),json-node-pair("resident_bytes",json-node-int(len(source))),json-node-pair("resident_sha256",json-node-string(fat-document-sha(doc))),json-node-pair("next",json-node-string(fat-edit-guidance()))];
-                json-node-object(append(base,if ((String) tool == "write") then [] else if (fat-edit-guarded-batch?(args) || ((Comparable) len(args) == 4)) then [json-node-pair("expected_sha256",json-node-string(args[if fat-edit-guarded-batch?(args) then 1 else 2]))] else [json-node-pair("exact_matches",json-node-int(ne-count(source,args[1]))),json-node-pair("old_bytes",json-node-int(len(args[1]))),json-node-pair("whole_document_comparison",fat-guard-comparison(source,args[1]))]));
+                json-node-object(append(base,if ((String) tool == "write") then [] else if (fat-edit-guarded-batch?(args) || ((Comparable) len(args) == 4)) then append([json-node-pair("expected_sha256",json-node-string(args[if fat-edit-guarded-batch?(args) then 1 else 2]))],fat-nearest-pairs(source,args,result)) else append([json-node-pair("exact_matches",json-node-int(ne-count(source,args[1]))),json-node-pair("old_bytes",json-node-int(len(args[1]))),json-node-pair("whole_document_comparison",fat-guard-comparison(source,args[1]))],fat-nearest-pairs(source,args,result))));
             };
         };
+        // A miss at every rung carries the resident line window closest to the failed old text; a
+        // guarded batch names its failed step, whose old text is read against the resident document.
+        def fat-nearest-pairs(source,args,result) = if (!((String) fat-error(result) == "edit-not-found")) then [] else {
+            let old = fat-failed-old(args,result);
+            if ((String) old == "") then [] else [json-node-pair("nearest_span",fat-nearest-node(source,old))];
+        };
+        def fat-failed-step(out) = if (!faj-valid(out)) then 1 else {
+            let obj = faj-json("edit-failure",out);
+            if (fat-edit-object?(obj) && json-object-has?(obj,"failed_edit")) then node_value(json-object-get(obj,"failed_edit")) else 1;
+        };
+        def fat-failed-old(args,result) = if ((Comparable) len(args) == 3) then args[1] else if (!fat-edit-guarded-batch?(args)) then "" else {
+            let at = (2 + (2 * (fat-failed-step(fat-out(result)) - 1)));
+            if ((at < 2) || (at >= len(args))) then "" else args[at];
+        };
+        def fat-nearest-node(source,old) {
+            let near = fael-nearest(source,old);
+            json-node-object([json-node-pair("scope",json-node-string("the resident line window closest to the old text; offsets and text are the resident's own bytes")),json-node-pair("start_byte",json-node-int(near[0])),json-node-pair("end_byte",json-node-int(near[1])),json-node-pair("first_line",json-node-int(near[2])),json-node-pair("lines",json-node-int(near[3])),json-node-pair("equal_lines",json-node-int(near[4])),json-node-pair("text",json-node-string(near[5]))]);
+        }
 
         def fat-window(docs, tool, args, input, unit, amount) = if nil?(args) then fat-window-input(docs, tool, unit, amount, [input, ""]) else if fat-has(["-n", "-c"], args[0]) then if ((len(args) < 2) || (!fat-natural(args[1]))) then fat-fail("window-needs-nonnegative-count", docs) else fat-window(docs, tool, fat-drop(args, 2), input, if ((String) args[0] == "-c") then "bytes" else "lines", str_to_int(args[1])) else if fat-starts(args[0], "-") then fat-fail("unsupported-window-option", docs) else fat-window-input(docs, tool, unit, amount, fat-input(docs, args, input));
         def fat-window-input(docs, tool, unit, amount, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else if ((String) unit == "bytes") then fat-ok(if ((String) tool == "head") then substring(r[0], 0, fat-min(amount, len(r[0]))) else substring(r[0], fat-max(0, (len(r[0]) - amount)), len(r[0])), docs) else fat-ok(fat-line-window(r[0], if ((String) tool == "head") then 0 else fat-max(0, (len(sh-lines(r[0])) - amount)), amount), docs);
