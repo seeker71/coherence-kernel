@@ -9,7 +9,6 @@
 // The review names one next local repair, the first of these the rows show:
 //   split     an open gap whose last three options moved its band nowhere: the lane needs it smaller
 //   lane      options that ended with no lane result (a nonzero lane exit): the lane's own health first
-//   speed     local generation under four IDs a second across the lane's wall time: Observe context, release, and live phase costs.
 //   queue     no open gap: the next band-first gap, written from the work the last rented session did
 //   turn      otherwise: the queue holds work the lane can do; keep it turning
 // The thresholds are instruments, not goals. No provider and no network: the review is the body's own
@@ -36,6 +35,7 @@ section [form.bml] {
   def lfr-real?(row) = ((Comparable) lfr-num0(row, "dry") == 0) && ((Comparable) lfr-num0(row, "test") == 0);
   def lfr-gap-rows(rows, id) = filter(r => (String) lfr-str(r, "gap") == id, rows);
   def lfr-green?(rows, id) = any?(r => (Comparable) lfr-num0(r, "band_green") == 1, lfr-gap-rows(rows, id));
+  def lfr-verified?(row) = lfr-num0(row,"local_verified") == 1;
   def lfr-sum(rows, key) = foldl((acc, r) => acc + lfr-num0(r, key), 0, rows);
   // the best band reading among the rows, or nothing when no band has read yet
   def lfr-max-maybe(a, b) = nothing?(a) ? b : (nothing?(b) ? a : max2(a, b));
@@ -59,7 +59,6 @@ section [form.bml] {
    let failed = len(filter(r => lfr-lane-failed?(r), lfr-last(rows, 6)));
    if (!nil?(stuck)) then ["split", mc-cat(["split ", lfr-str(stuck[0], "id"), " into smaller band-first gaps; its last three options moved its band nowhere"])]
    else if (failed >= 2) then ["lane", mc-cat([failed.str(), " of the last six options ended with no lane result; read their .out.err under .hearth/native-turns and heal the lane"])]
-   else if ((rate > 0) && (rate < 4000)) then ["speed", mc-cat(["local generation runs ", (rate / 1000).str(), ".", ((rate - ((rate / 1000) * 1000)) / 100).str(), " IDs/s across lane wall time; Observe context, release, and live phase costs."])]
    else if nil?(open) then ["queue", "no open gap: write the next band-first gap from the work the last rented session did"]
    else ["turn", mc-cat([len(open).str(), " open gap(s) the lane can take; keep it turning"])];
   }
@@ -70,8 +69,7 @@ section [form.bml] {
     let last = rents[-1];
     let r = lfr-obj(last, "rented");
     let l = lfr-obj(last, "local");
-    let before = if (n > 1) then mc-cat([" (previous ", lfr-num0(rents[-2], "local_share_ppm").str(), " ppm)"]) else "";
-    mc-cat(["[local-flow-review] rented: session ", lfr-str(last, "session"), " output ", lfr-num0(r, "output").str(), ", uncached input ", (lfr-num0(r, "input") + lfr-num0(r, "cache_write")).str(), ", cache read ", lfr-num0(r, "cache_read").str(), "; local generated ", lfr-num0(l, "generated").str(), "; local share ", lfr-num0(last, "local_share_ppm").str(), " ppm", before]);
+    mc-cat(["[local-flow-review] rented: session ", lfr-str(last,"session"), " output ", lfr-show(lfr-num(r,"output")), ", input ", lfr-show(lfr-num(r,"input")), ", cache write ", lfr-show(lfr-num(r,"cache_write")), ", cache read ", lfr-show(lfr-num(r,"cache_read")), "; local generated ", lfr-show(lfr-num(l,"generated")), "; required remote prompts ", lfr-show(lfr-num(last,"required_remote_prompts")), ", tokens ", lfr-show(lfr-num(last,"required_remote_tokens")), "; optional review tokens ", lfr-show(lfr-num(last,"optional_remote_review_tokens"))]);
    };
   }
   def lfr-run() {
@@ -79,16 +77,18 @@ section [form.bml] {
    let queue = lfr-rows(lfr-queue());
    let open = filter(g => !lfr-green?(rows, lfr-str(g, "id")), queue);
    let green = len(filter(r => (Comparable) lfr-num0(r, "band_green") == 1, rows));
+   let verified = len(filter(lfr-verified?,rows));
+   let unknown = len(filter(r => nothing?(lfr-num(r,"local_verified")),rows));
    let ids = lfr-sum(rows, "local_generated_ids");
    let injected = lfr-sum(rows, "local_injected_ids");
    let wall = lfr-sum(filter(r => !nothing?(lfr-num(r, "local_generated_ids")), rows), "wall_ms");
    let rate = lfr-rate-milli(ids, wall);
    let next = lfr-next(open, rows, rate);
-   print_str(mc-cat(["[local-flow-review] local: ", len(rows).str(), " option(s), ", green.str(), " green, ", ids.str(), " generated and ", injected.str(), " injected IDs over ", (wall / 60000).str(), " min of lane wall"]));
+   print_str(mc-cat(["[local-flow-review] local: ", len(rows).str(), " option(s), ", green.str(), " band green, ", verified.str(), " locally verified, ", unknown.str(), " with verification unmeasured; ", ids.str(), " generated and ", injected.str(), " injected IDs over ", (wall / 60000).str(), " min of lane wall"]));
    print_str(lfr-rent-line(lfr-rows(lfr-rent())));
    map(g => print_str(lfr-gap-line(g, rows)), open);
    print_str(mc-cat(["[local-flow-review] next: ", next[0], " — ", next[1]]));
-   let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-n("options", len(rows)), fhn-n("green", green), fhn-n("open_gaps", len(open)), fhn-n("local_generated_ids", ids), fhn-n("local_injected_ids", injected), fhn-n("lane_wall_ms", wall), fhn-n("ids_per_s_milli", rate), fhn-s("next", next[0]), fhn-s("next_text", next[1])]);
+   let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-n("options", len(rows)), fhn-n("green", green), fhn-n("local_verified",verified), fhn-n("local_verification_unknown",unknown), fhn-n("open_gaps", len(open)), fhn-n("local_generated_ids", ids), fhn-n("local_injected_ids", injected), fhn-n("lane_wall_ms", wall), fhn-n("ids_per_s_milli", rate), fhn-s("next", next[0]), fhn-s("next_text", next[1])]);
    fhn-append(lfr-ledger(), json-emit(row) + "\n");
    0;
   }

@@ -56,9 +56,9 @@ section [form.bml] {
   def fcac-open-timed(model, state, checker, context, turns, started) = fcac-open-context(model,fcap-begin-context(state),checker,context,turns,started);
   def fcac-open-context(model,state,checker,context,turns,started) = fcac-resident(fcac-open-budget(model,state,context,turns),state,checker,turns,started);
   def fcac-resident(session,state,checker,turns,started) = fcac-finish-contexts(fcac-loop(session,state,checker,turns,started),checker,turns,started,fcap-turns(state),[0,0,0],1);
-  // A complete action survives an observation that cannot fit. Partial model
-  // replies, failed prefills, failed admission and exhausted reply budgets do
-  // not select renewal. At least one completed reply bounds each residence.
+  // Completed actions and retained no-action attempts survive a full context.
+  // Each renewal needs a counted reply and remaining caller allowance. Failed
+  // admission, prediction, retention and partial prefill retain their owner.
   def fcac-capacity-stop(session,state,reason,started) = append(fcac-finish(session,fcap-terminal(state,reason),started),[state]);
   def fcac-renewable(result,firstTurn,turns) = if (!((Comparable) len(result) == 3)) then 0 else {
    let session = result[0]; let state = result[2];
@@ -68,7 +68,7 @@ section [form.bml] {
   def fcac-context-cost(session,prior) = [(prior[0] + fcms-generated-ids(session)),(prior[1] + fcms-injected-ids(session)),(prior[2] + fcms-observations(session))];
   def fcac-total-result(result,prior) = [result[0],result[1],(result[2] + prior[0]),(result[3] + prior[1]),(result[4] + prior[2])];
   def fcac-context-reading(state,number,live) {
-   let detail = json-node-object([oh-n("context_number",number),oh-n("completed_replies",fcap-turns(state)),oh-s("scope","model context availability; source quality remains caller-checked")]);
+   let detail = json-node-object([oh-n("context_number",number),oh-n("counted_replies",fcap-turns(state)),oh-s("scope","model context availability; source quality remains caller-checked")]);
    oh-reading("native-coding",if fcam-managed(state) then fcam-id(state) else ("code." + host_pid().str()),"model-context",json-node-int(1),json-node-int(live),json-node-int(live),if live then [] else [oh-need("model-context-capacity",detail)],["renew-context"],detail);
   }
   def fcac-renew-release-complete(reason) = (!fat-has(["old-stream-release-incomplete","candidate-stream-release-incomplete"],reason));
@@ -135,22 +135,42 @@ section [form.bml] {
    let noticeEvidence = if (len(frbg-notice(bounded)) > 0) then fcac-retain-reply(frbg-notice(bounded)) else "";
    let selected = fcac-reasoned-answer(bounded);
    print_str(("form-code-reasoning-reserve " + json-emit(json-node-object([fcap-shape-n("reply",(fcap-turns(state) + 1)),fcap-shape-n("requested_initial_tokens",initial),fcap-shape-n("requested_answer_tokens",answer),fcap-shape-n("effective_initial_tokens",initialLimit),fcap-shape-n("effective_answer_tokens",answerLimit),fcap-shape-n("initial_generated_ids",len(fcms-generation-ids(first))),fcap-shape-n("final_generated_ids",len(fcms-generation-ids(final))),fcap-shape-n("observation_prefill_ids",fcms-injected-ids(next)),fcap-shape-s("answer_origin",frbg-origin(bounded)),fcap-shape-n("completion_observed",selected[0]),fcap-shape-s("generation_reason",frbg-reason(bounded)),fcap-shape-s("private_initial_evidence",firstEvidence),fcap-shape-s("private_final_evidence",finalEvidence),fcap-shape-s("private_controller_evidence",noticeEvidence)]))));
-   if selected[0] then fcac-replied(next,state,selected[1],checker,turns,started) else fcac-finish(next,fcap-terminal(state,selected[2]),started);
+   if selected[0] then fcac-replied(next,state,selected[1],checker,turns,started) else fcac-recover-incomplete(next,state,selected[2],finalEvidence,(len(fcms-generation-ids(first)) + len(fcms-generation-ids(final))),((String) frbg-reason(bounded) == "final-generation-incomplete"),checker,turns,started);
   }
   def fcac-generated(generation, state, checker, turns, started) {
    let session = fcms-generation-session(generation);
-   if ((!fcms-stopped?(session)) || (fcms-pending(session) < 0)) then fcac-incomplete(generation,state,started) else fcac-replied(session,state,fat-trim(fcms-generation-text(generation)),checker,turns,started);
+   if ((!fcms-stopped?(session)) || (fcms-pending(session) < 0)) then fcac-incomplete(generation,state,checker,turns,started) else fcac-replied(session,state,fat-trim(fcms-generation-text(generation)),checker,turns,started);
   }
-  def fcac-incomplete(generation,state,started) {
+  def fcac-incomplete(generation,state,checker,turns,started) {
    let session = fcms-generation-session(generation);
    let evidence = fcac-retain-reply(fcms-generation-text(generation));
    let reason = if (fcms-pending(session) < 0) then "generation-incomplete;candidate-retained" else fcac-incomplete-reason(state,len(fcms-generation-ids(generation)),evidence,"generation-incomplete;candidate-retained");
    print_str(("form-code-incomplete " + json-emit(json-node-object([fcap-shape-s("reason",reason),fcap-shape-n("max_reply_tokens",fcap-reply-token-limit(state)),fcap-shape-n("generated_ids",len(fcms-generation-ids(generation))),fcap-shape-s("private_reply_evidence",evidence)]))));
-   fcac-finish(session,fcap-terminal(state,reason),started);
+   fcac-recover-incomplete(session,state,reason,evidence,len(fcms-generation-ids(generation)),(fcac-reply-exhausted(state,len(fcms-generation-ids(generation))) || (fcms-pos(session) >= (fcms-maxpos(session) - 1))),checker,turns,started);
   }
   def fcac-incomplete-reason(state,count,evidence,fallback) = if (!fcac-reply-exhausted(state,count)) then fallback else if ((String) evidence == "") then "reply-token-budget-reached;partial-reply-retention-failed;no-action" else "reply-token-budget-reached;partial-reply-retained;no-action";
+  // An unfinished reply never enters fcap-step. Keep its exact private bytes,
+  // count the attempt, and feed a changed choice through the existing repair
+  // flow. Feedback closes the unfinished turn; only full contexts renew KV.
+  def fcac-incomplete-state(state,cause,evidence,count) {
+   let next = fcap-rework(state,fcap-incomplete-prefix() + json-emit(json-node-object([oh-s("cause",cause),oh-s("role",fcap-stage(state)),oh-n("reply_limit",fcap-reply-token-limit(state)),oh-n("generated_ids",count),oh-s("private_reply_evidence",evidence),oh-s("change","No action from this reply was executed. Keep completed effects, current documents, original goal and checks. Return one smaller complete JSON response for the current role. Describe observed behavior without recopying source hashes already retained natively. For edits, use focused reads and unique spans. An unchanged failure needs a new plan. The caller's token ceiling is unchanged.")])));
+   // A checked candidate needs a shorter review, not another implementation.
+   if (((String) fcap-stage(state) == "review") && (!fcap-repeat(next))) then append(["review"],next[1:]) else next;
+  }
+  def fcac-reply-reading(state,complete,detail) = oh-reading("native-coding",if fcam-managed(state) then fcam-id(state) else ("code." + host_pid().str()),"reply-completion",json-node-int(1),json-node-int(complete),json-node-int(complete),if complete then [] else [oh-need("complete-local-reply",detail)],["smaller-complete-reply"],detail);
+  def fcac-recover-incomplete(session,state,cause,evidence,count,boundary,checker,turns,started) {
+   let retry = (boundary && (frbg-valid-session(session) && ((count > 0) && ((String) evidence != ""))));
+   if (!retry) then fcac-finish(session,fcap-terminal(if (count > 0) then fcap-note-at(state,fcap-stage(state),cause) else state,cause),started) else {
+    let next = fcac-incomplete-state(state,cause,evidence,count);
+    let reading = fcac-reply-reading(next,0,json-node-object([oh-s("cause",cause),oh-s("private_reply_evidence",evidence),oh-n("generated_ids",count),oh-n("remaining_replies",fcac-replies-left(next,turns)),oh-n("actions_executed",0)]));
+    oh-voice(reading);
+    oh-voice(oh-applied(reading,"smaller-complete-reply",json-node-object([oh-s("stage",fcap-stage(next)),oh-s("scope","retained no-action attempt; completion requires a stopped reply and unchanged caller checks")])));
+    fcac-advance(session,next,checker,turns,started);
+   };
+  }
   def fcac-replied(session,state,raw,checker,turns,started) {
    let evidence = fcac-retain-reply(raw);
+   if fat-starts(fcap-evidence(state),fcap-incomplete-prefix()) then oh-voice(fcac-reply-reading(state,1,json-node-object([oh-s("private_reply_evidence",evidence),oh-n("reply_bytes",len(raw)),oh-s("scope","model stopped; JSON admission and task quality are checked separately")]))) else 0;
    let syntax = fcac-syntax-before(state,raw,evidence);
    let next = fcap-native-submission-admitted(fcap-step(state,raw,checker),raw);
    let reobserved = fcac-syntax-after(state,raw,next,syntax);

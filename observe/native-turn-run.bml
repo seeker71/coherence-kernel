@@ -35,7 +35,7 @@ section [form.bml] {
   def nt-dir() = ".hearth/native-turns";
   def nt-str(doc, key) = if json-object-has?(doc, key) then json-string-value(json-object-get(doc, key)) else "";
   def nt-int(doc, key, d) = if json-object-has?(doc, key) then json-int-value(json-object-get(doc, key)) else d;
-  def nt-maybe(doc, key) = if json-object-has?(doc, key) then json-int-value(json-object-get(doc, key)) else nothing();
+  def nt-maybe(doc,key) = !json-object-has?(doc,key) || node_eq(json-object-get(doc,key),json-node-null()) ? nothing() : json-int-value(json-object-get(doc,key));
   def nt-strs(doc, key) = if json-object-has?(doc, key) then nt-values(json-array-elements(json-object-get(doc, key))) else [];
   def nt-values(nodes) = if nil?(nodes) then [] else cons(json-string-value(nodes[0]), nt-values(nodes[1:]));
   def nt-nonempty(xs) = if nil?(xs) then [] else if ((Comparable) len(trim(xs[0])) == 0) then nt-nonempty(xs[1:]) else cons(xs[0], nt-nonempty(xs[1:]));
@@ -208,6 +208,18 @@ section [form.bml] {
   def nt-diff(paths, originals) = if nil?(paths) then "" else mc-cat([nt-diff-one(paths[0], originals[0]), nt-diff(paths[1:], originals[1:])]);
   def nt-diff-one(path, original) { let d = td-diff(original, nt-read(path), 1, 2400); if ((String) d == "") then "" else mc-cat(["--- ", path, "\n", d]); }
   def nt-finding(n, before, after, full, said, status, published, diff, errors, claims) = mc-cat(["Attempt ", n.str(), ": the band read ", nt-reading-text(after), " of ", full.str(), " (it began at ", nt-reading-text(before), "); the lane said ", trim(said), if ((String) status == "") then "" else mc-cat([" with status ", status]), if ((Comparable) published == 0) then "; it published no document." else mc-cat(["; its candidate changed:\n", diff]), if ((Comparable) len(errors) == 0) then "" else mc-cat(["\nThe band did not read; the compiler said:\n", errors]), if ((Comparable) len(claims) == 0) then "" else mc-cat(["\nThe band's claims that did not hold:\n", claims])]);
+  // Only an actual coding invocation establishes its provider-free lane scope.
+  // Caller/coordinator guidance and arbitrary band work remain unattributed.
+  def nt-local-execution?(opts,said) = nt-int(opts,"dry",0) != 1 && nt-int(opts,"test",0) != 1 && !json-object-has?(opts,"candidate") && !json-object-has?(opts,"publish_from") && nt-starts?(said,"lane-exit=");
+  def nt-measured(row,result,opts,said,green,conflict) {
+   let local = nt-local-execution?(opts,said);
+   let verified = local && green && nt-str(result,"status") == "complete" && nt-int(result,"release_ok",0) == 1;
+   let unknown = ["required_remote_prompts","required_remote_tokens","optional_remote_review_prompts","optional_remote_review_tokens","rented_tokens"] |> map(key => nt-reading(key,nothing()));
+   json-node-object(append(json-object-pairs(row),append([
+    fhn-s("checkpoint_id",nt-str(result,"checkpoint_id")),nt-reading("local_generated_ids",nt-maybe(result,"generated_ids")),nt-reading("local_injected_ids",nt-maybe(result,"injected_ids")),nt-reading("local_repairs",nt-maybe(result,"repair_attempts")),nt-reading("lane_release_ok",nt-maybe(result,"release_ok")),fhn-n("local_verified",verified),
+    nt-reading("execution_required_remote_prompts",local ? 0 : nothing()),nt-reading("execution_required_remote_tokens",local ? 0 : nothing()),fhn-s("usage_scope","Actual native coding invocation only; whole-task guidance, coordinator, band and optional review usage require attribution."),fhn-n("source_conflict",conflict)
+   ],unknown)));
+  }
   // one option: ask the lane, publish, read the band; returns (list green row finding)
   def nt-attempt(gap, opts, id, full, band, before, coordinator, request, memory, n) {
    let made = fs_mkdir(nt-dir());
@@ -231,7 +243,7 @@ section [form.bml] {
    let finding = if green then "" else (conflict ? "Source changed during generation; candidate was not published. Refresh the caller's source contract before resuming." : nt-finding(n,before,after,full,said,nt-str(result,"status"),published,nt-diff(nt-strs(gap,"writable"),originals),errors,claims)) + "\nCoding observation: " + nt-str(result,"reason");
    let kept = if published == 0 || (green && !test) then 0 else nt-keep(nt-strs(gap,"writable"),originals,stamp);
    let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", id), fhn-n("option", n), nt-reading("band_before", before), nt-reading("band_after", after), fhn-n("full", full), fhn-n("band_green", if green then 1 else 0), fhn-n("dry", if dry then 1 else 0), fhn-n("test", if test then 1 else 0), fhn-s("coordinated_by", if nt-keeper?(coordinator) then "host-schedule" else "session"), fhn-s("coordinator", coordinator), fhn-n("rented_mind", if nt-keeper?(coordinator) then 0 else 1), fhn-s("request", reqPath), fhn-s("lane", trim(said)), fhn-s("lane_status", nt-str(result, "status")), nt-reading("lane_check_runs", nt-maybe(result, "check_runs")), nt-reading("lane_turns", nt-maybe(result, "turns")), fhn-n("published", published), fhn-n("wall_ms", (now_unix_ms() - started))]);
-   let measured = json-node-object(append(json-object-pairs(row),[fhn-s("checkpoint_id",nt-str(result,"checkpoint_id")),nt-reading("local_generated_ids",nt-maybe(result,"generated_ids")),nt-reading("local_injected_ids",nt-maybe(result,"injected_ids")),nt-reading("local_repairs",nt-maybe(result,"repair_attempts")),json-node-pair("rented_tokens",json-node-null()),fhn-s("usage_scope","local coding counters; coordinator token usage requires its transcript"),fhn-n("source_conflict",conflict)]));
+   let measured = nt-measured(row,result,opts,said,green,conflict);
    let appended = fhn-append(if test then nt-dir() + "/test-ledger.jsonl" else nt-ledger(),json-emit(measured) + "\n");
    print_str("[native-turn] " + json-emit(measured) + "\n");
    [if green then 1 else 0,measured,[finding,nt-str(result,"checkpoint_id"),conflict]];

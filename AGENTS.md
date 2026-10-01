@@ -432,14 +432,22 @@ repair changed, and the native share as published. The next session starts from
 the retained row. A loss-only promotion is not yet a local win over a rented
 answer. Quality is the next reading of the same check.
 
-Aim for less rented reasoning each session and more completed local work. Open
-with `./fkwu observe/local-flow-review.bml` and work its `next`; close by sending
-your transcript path to `observe/session-rent-run.bml`, then review again. Work
-the local lane could take goes to `learn/native-turn-queue.jsonl` as a band-first
-gap, not to you. Prefer high-level rented guidance while Form owns source
-selection, execution, repair and verification in its checkpoint. Give useful
-local choices more room before taking over. Unknown usage stays unknown; unused
-allowance is not consumption. The loop and each meter's job are in the
+Use native substrate lookup, retrieval, calculation and executable recipes
+first. Prefer an observed native answer to model-generated prose about it.
+Local models supply reasoning or generation the native substrate does not yet
+carry; Form owns choice, care, checkpoints, checks and release throughout.
+Optimize verified local completion and quality while reducing required remote
+prompts and tokens. Local tokens have no penalty: give useful local guidance,
+review, repairs, changed prompts and model choices room to succeed in the owned
+checkpoint. Prefer a local guide; repeated changed local attempts can invite
+light remote guidance. Optional remote review may accompany any independently
+successful local step and is outside the work-dependence objective; retain its
+actual spending separately. Needed remote implementation or guidance remains
+required assistance. Open with `./fkwu observe/local-flow-review.bml` and work
+its `next`; close by measuring the actual transcript, then review again. Work
+the local lane could take goes to `learn/native-turn-queue.jsonl` with its
+original checks, sources and retained effects. Unknown usage stays unknown;
+unused allowance is not consumption. The loop and each meter's job are in the
 [direction](docs/form-native-coding.md#direction-toward-zero-rented-coding).
 
 Foreign-language specimens used as input to Form's own compiler remain input
