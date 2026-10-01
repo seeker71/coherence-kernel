@@ -1017,15 +1017,14 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
                 Value::Null
             }
         }
+        // a do binds its lets and defns for the rest of itself only (walk_unit
+        // reads the unit's root do flat)
         Node::Block(kids) => {
             if kids.is_empty() {
                 return Value::Null;
             }
-            let last = kids.len() - 1;
-            for c in &kids[..last] {
-                walk(c, env);
-            }
-            walk(&kids[last], env)
+            let scope = new_frame(Some(env.clone()));
+            walk_flat(kids, &scope)
         }
         Node::Let(name, value) => {
             let v = walk(value, env);
@@ -1332,7 +1331,24 @@ fn run_source(src: &str) -> Value {
     };
     let (root, _) = read_sexp(&toks, 0);
     let env = new_frame(None);
-    walk(&root, &env)
+    walk_unit(&root, &env)
+}
+
+// walk_unit -- the unit's root: a root do reads flat, its lets and defns the unit's.
+fn walk_unit(root: &Rc<Node>, env: &Env) -> Value {
+    match &**root {
+        Node::Block(kids) if !kids.is_empty() => walk_flat(kids, env),
+        _ => walk(root, env),
+    }
+}
+
+// walk_flat -- a do's forms in one scope, the last one's value answering.
+fn walk_flat(kids: &[Rc<Node>], env: &Env) -> Value {
+    let last = kids.len() - 1;
+    for c in &kids[..last] {
+        walk(c, env);
+    }
+    walk(&kids[last], env)
 }
 
 fn read_sources(paths: &[String]) -> Result<String, String> {
