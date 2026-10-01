@@ -14,8 +14,8 @@ surface; it only confirms a recipe computes the same value four ways on the
 
 ## The three
 
-- `go/main.go` (1,548 lines), `rust/src/main.rs` (1,334), `ts/main.ts` (1,656) —
-  counted 2026-09-29. Each keeps ONLY the independent parse + eval core.
+- `go/main.go` (1,463 lines), `rust/src/main.rs` (1,255), `ts/main.ts` (1,569) —
+  counted 2026-10-01. Each keeps ONLY the independent parse + eval core.
 
 Call heads read as fkwu reads them: a head fkwu reserves (its op rows, rewrite
 rows and control forms; `gate/reserved-heads.bml` writes the list beside each
@@ -33,12 +33,14 @@ string floor is the narrow waist (`str_len` / `str_byte_at` / `byte_to_str` /
 `str_concat`); everything above it is shared Form. `nothing` / `nothing?` are
 fkwu natives the walkers do not bind — a band that measures them is fkwu-witnessed.
 
-Build + run (a band is `core` + recipe + the band file, concatenated; bare
-`import "path.fk"` declarations resolve recursively):
+A walker reads the plain Form files named on argv, joins them in order with one
+newline and walks the result as one unit — the contract every sibling kernel keeps.
+It follows no directive and lowers nothing; fkwu hands it a unit's whole closure:
 
 ```
-cd walkers/go && go build -o walker .
-./walker core.fk recipe.fk band.fk      # prints the evaluated root value
+cd walkers/go && go build -o walker . && cd ../..
+./fkwu --closure band.fk band-closure.fk   # from the repo root: one plain-Form file
+walkers/go/walker band-closure.fk          # prints the evaluated root value
 ```
 
 The TS walker runs under `node --experimental-strip-types`; nothing prebuilt is
@@ -48,6 +50,6 @@ builds them first — the kernel reads an absent walker as a suspect one. The
 kernel drives all three itself:
 
 ```
-./fkwu proof/four-way-run-recipe42.fk   # -> 0 (FOUR-WAY; re-run 2026-09-04)
+./fkwu proof/four-way-run-recipe42.fk   # -> 0 (FOUR-WAY; re-run 2026-10-01)
                                         # -> 2 (WALKER-SUSPECT) while a walker is unbuilt
 ```

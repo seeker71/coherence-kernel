@@ -324,11 +324,19 @@ fn diagnose_kernel_panic(message: &str) -> CrashDiagnosis {
             avoidance: "validate the value kind before the native call, or route through an explicit conversion recipe".to_string(),
         };
     }
-    if lower.contains("unbound identifier") || lower.contains("unbound function") {
+    // a raw `section [...]` block walks as a call to an unbound `section`
+    if lower.contains("parse error") || lower == "unbound: section" {
+        return CrashDiagnosis {
+            fatal_kind: "source_compile_failure",
+            likely_root_cause: "the input is not plain Form (a raw BML section or an unbalanced form)".to_string(),
+            avoidance: "prepare the input as plain Form with ./fkwu --closure <unit> <out> from the repo root, then repair the reported source coordinate".to_string(),
+        };
+    }
+    if lower.starts_with("unbound") {
         return CrashDiagnosis {
             fatal_kind: "name_resolution_error",
-            likely_root_cause: "a recipe or route manifest referenced a name that was not bound in the loaded source/prelude set".to_string(),
-            avoidance: "run the route/source check gate and include the defining prelude before serving the manifest".to_string(),
+            likely_root_cause: "a recipe or route manifest referenced a name that was not bound in the plain Form it was handed".to_string(),
+            avoidance: "hand over the unit's whole closure: prepare it with ./fkwu --closure <unit> <out> from the repo root".to_string(),
         };
     }
     if lower.contains("wants") && lower.contains("got") {
@@ -343,13 +351,6 @@ fn diagnose_kernel_panic(message: &str) -> CrashDiagnosis {
             fatal_kind: "bounds_violation",
             likely_root_cause: "a recipe indexed outside the observed collection/string bounds".to_string(),
             avoidance: "check length/bounds before indexing or use a boundary-aware recipe that returns an explicit error value".to_string(),
-        };
-    }
-    if lower.contains("source-compile") || lower.contains("parse error") {
-        return CrashDiagnosis {
-            fatal_kind: "source_compile_failure",
-            likely_root_cause: "source text could not be lowered into a valid Form recipe before execution".to_string(),
-            avoidance: "run the source compiler/check command and repair the reported source coordinate before serving".to_string(),
         };
     }
     CrashDiagnosis {
@@ -2532,37 +2533,6 @@ impl Kernel {
             .get(&n)
             .map(|r| r.children.clone())
             .unwrap_or_default()
-    }
-
-    fn readonly_worker_clone(&self) -> Self {
-        Self {
-            by_shape: self.by_shape.clone(),
-            by_id: self.by_id.clone(),
-            source_attr: self.source_attr.clone(),
-            framebuffer_roots: self.framebuffer_roots.clone(),
-            reading_files: Vec::new(),
-            import_seq: self.import_seq,
-            strs: self.strs.clone(),
-            str_idx: self.str_idx.clone(),
-            f64s: self.f64s.clone(),
-            f64_idx: self.f64_idx.clone(),
-            i64s: self.i64s.clone(),
-            i64_idx: self.i64_idx.clone(),
-            next_inst: self.next_inst,
-            natives: self.natives.clone(),
-            env_natives: self.env_natives.clone(),
-            methods: self.methods.clone(),
-            jit_aliases: self.jit_aliases.clone(),
-            // Dispatch tables are content (built at load); each worker carries
-            // its own copy so routing needs no lock.
-            maps: self.maps.clone(),
-            next_map: self.next_map,
-            switch_tables: self.switch_tables.clone(),
-            active_roots: Vec::new(),
-            unit_roots: self.unit_roots.clone(),
-            unit_view: self.unit_view,
-            trace: None,
-        }
     }
 
     pub(crate) fn trivial_value(&self, n: NodeID) -> Value {
@@ -7274,19 +7244,6 @@ fn read_defn_params(k: &mut Kernel, toks: &[SexpTok], i: usize) -> (NodeID, usiz
     }
 }
 
-// The kernel's surface-verb vocabulary — the verbs build_verb lowers into TYPED
-// nodes (BLOCK/COND/MATH/COMPARE/LOGIC/FNDEF) rather than the FNCALL fallback.
-// These resolve structurally, never as a looked-up function, so the
-// name-resolution gate must seed them as `known` alongside the natives — else a
-// source-compiled recipe that carries an operator as an FNCALL callee (the
-// bundled compile machinery does) is falsely reported unbound. Single source of
-// truth: build_verb's match must handle exactly these (the
-// build_verbs_are_typed_not_fncall test drift-guards it).
-const BUILD_VERBS: &[&str] = &[
-    "do", "let", "if", "defn", "add", "sub", "mul", "div", "mod", "eq", "ne",
-    "lt", "le", "gt", "ge", "and", "or", "not",
-];
-
 fn build_verb(k: &mut Kernel, verb: &str, args: Vec<NodeID>) -> NodeID {
     match verb {
         "do" => k.intern(cat_block(RBLK_DO), args),
@@ -7569,6 +7526,8 @@ fn count_top_level(toks: &[SexpTok]) -> usize {
     count
 }
 
+// The C-ABI/JNI door's evaluator (lib.rs); the CLI runs run_source_mapped.
+#[cfg(feature = "cabi")]
 pub(crate) fn run_source(src: &str) -> Value {
     let mut k = Kernel::new();
     let root = read_root_from_source(&mut k, src);
@@ -7825,12 +7784,12 @@ Subcommands:
   query <path>                         parse any file as a Form object tree
   trace [--expr \"...\" | <file.fk>]     run with arm-dispatch tracing
   fetch <url>                          GET a URL (network resource)
-  run [--stdlib <dir>] <file.fk...>     source-compile section-authored files
-                                       through Form stdlib, then execute
-  serve --port <p> --routes <file> [--upstream <base-url>] [--stdlib <dir>] [--config <path>]\n                                       kernel front-door router: native Form handlers\n                                       for listed paths, fan-out to the Python upstream\n                                       for the rest. --routes may be raw S-expression\n                                       Form or a source-authored `section [...]`\n                                       manifest (source-compiled at load via --stdlib,\n                                       default form-stdlib)
+  serve --port <p> --routes <file> [--upstream <base-url>] [--config <path>]\n                                       kernel front-door router: native Form handlers\n                                       for listed paths, fan-out to the Python upstream\n                                       for the rest. --routes is one plain Form file
 
 Source adapter modes:
-  <file.fk> [more.fk ...]              run .fk files
+  <file.fk> [more.fk ...]              read plain Form files in order as one unit and
+                                       print its value; prepare a unit with its closure
+                                       by ./fkwu --closure <unit> <out> (repo root)
   --expr \"<form-expression>\"          evaluate a Form expression
   --bench                              benchmark run
   --numeric-bench                      numeric kernel comparison"
@@ -8803,34 +8762,30 @@ fn build_route_specs(
     }
 }
 
-// Build a worker's OWN Kernel + Arena from the route program, resolve its own
-// route specs, and return all three. Raw Form manifests still enter as source;
-// Source-authored manifests enter as compiled Form Recipe object graphs produced
-// once by the main thread. The returned arena owns the frames the route closures
-// capture, so it must stay alive alongside the kernel for the worker's lifetime.
+// Build a worker's OWN Kernel + Arena from the plain Form route source, resolve
+// its own route specs, and return all three. The returned arena owns the frames
+// the route closures capture, so it must stay alive alongside the kernel for the
+// worker's lifetime.
 #[cfg(test)]
 fn build_worker_kernel(
-    program: &RouteProgram,
+    routes_source: &str,
     routes_path: &str,
 ) -> Result<(Kernel, Arena, RouteSpecs), String> {
-    let (k, arena, routes, _frame) =
-        build_worker_kernel_with_route_data(program, routes_path, &RouteDataRegistry::default())?;
+    let (k, arena, routes, _frame) = build_worker_kernel_with_route_data(
+        routes_source,
+        routes_path,
+        &RouteDataRegistry::default(),
+    )?;
     Ok((k, arena, routes))
 }
 
 fn build_worker_kernel_with_route_data(
-    program: &RouteProgram,
+    routes_source: &str,
     routes_path: &str,
     route_data: &RouteDataRegistry,
 ) -> Result<(Kernel, Arena, RouteSpecs, FrameId), String> {
     let mut k = Kernel::new();
-    let root = match program {
-        RouteProgram::Source(src) => read_root_from_source(&mut k, src),
-        RouteProgram::RecipeObject(compiled) => {
-            k = compiled.kernel.readonly_worker_clone();
-            compiled.root
-        }
-    };
+    let root = read_root_from_source(&mut k, routes_source);
     let mut arena = Arena::new();
     let root_env = arena.new_frame(None);
     k.active_roots = vec![root];
@@ -9388,7 +9343,6 @@ impl ServeCrashContext {
 // concurrent requests never corrupt one another's state.
 fn worker_loop(
     id: usize,
-    program: Arc<RouteProgram>,
     routes_path: Arc<String>,
     routes_source: Arc<String>,
     route_data: Arc<RouteDataRegistry>,
@@ -9400,11 +9354,11 @@ fn worker_loop(
     let crash_context = ServeCrashContext {
         worker_id: id,
         routes_path: Arc::clone(&routes_path),
-        routes_source,
+        routes_source: Arc::clone(&routes_source),
     };
     crash_context.set_operation("serve-worker-load", format!("worker={} load routes", id));
     let (mut k, mut arena, route_specs, root_env) =
-        match build_worker_kernel_with_route_data(&program, &routes_path, &route_data) {
+        match build_worker_kernel_with_route_data(&routes_source, &routes_path, &route_data) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("serve: worker {} failed to load routes: {}", id, e);
@@ -9506,728 +9460,6 @@ fn worker_loop(
     }
 }
 
-// The form-stdlib preludes a source manifest is source-compiled through, in load
-// order: the ontology loader asks the kernel-native bp table for coordinates,
-// then bml-source.fk names reusable BML source cells, and source-compiler.fk
-// lowers a `section [...]` against those bindings.
-// This is the SAME prelude set + lowering `form/validate.sh prepare_sources`
-// runs to source-compile a `section [...]` file — the router reuses the body's
-// own compiler, not a Rust reimplementation of a source-language parser.
-const SOURCE_COMPILE_PRELUDES: [&str; 7] = [
-    "form-ontology-loader.fk",
-    "line-grammar.fk",
-    "bmf-core.fk",
-    "bmf-grammar.fk",
-    "bml.fk",
-    "bml-source.fk",
-    "source-compiler.fk",
-];
-
-// Source-language model that must be present in the worker kernels whenever a
-// route manifest uses high-level classes/templates. These are compiled into the
-// same Form Recipe object as the manifest in this order. That keeps the runtime
-// carrier explicit: source entry plus Form stdlib language model yields one
-// executable Recipe object whose walk binds KernelHTTPRoute cells.
-const SOURCE_ROUTE_LANGUAGE_PRELUDES: [&str; 15] = [
-    "form-ontology-loader.fk",
-    "line-grammar.fk",
-    "bmf-core.fk",
-    "bmf-grammar.fk",
-    "bml.fk",
-    "bml-source.fk",
-    "source-compiler.fk",
-    "json.fk",
-    "core.fk",
-    "sha256.fk",
-    "choice-receipt.fk",
-    "branch-choice-order.fk",
-    "kernel-http.fk",
-    "bml-route-choice-runtime.fk",
-    "language-model.fk",
-];
-
-// A routes manifest is source-authored (vs raw S-expression) iff it opens a
-// `section [...]` block — the source-compiler's own section marker. The check
-// is the same `section [` line-prefix scan form-source-compile-loop uses to
-// find sections, so "needs lowering" and "has a section" are the one judgement.
-fn manifest_has_source_sections(src: &str) -> bool {
-    src.lines()
-        .any(|line| line.trim_start().starts_with("section ["))
-}
-
-fn source_compile_cwd_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-#[derive(Clone)]
-enum RouteProgram {
-    Source(Arc<String>),
-    RecipeObject(Arc<CompiledRouteProgram>),
-}
-
-struct CompiledRouteProgram {
-    kernel: Kernel,
-    root: NodeID,
-}
-
-// In-process cache of the self-contained BMF bootstrap .fkb, keyed by stdlib dir.
-fn bmf_bootstrap_cache() -> &'static Mutex<std::collections::HashMap<PathBuf, Arc<Vec<u8>>>> {
-    static C: OnceLock<Mutex<std::collections::HashMap<PathBuf, Arc<Vec<u8>>>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-// The BMF bootstrap as ONE self-contained .fkb: the source-compile preludes parsed
-// into a single recipe tree — every defn the source-compiler uses (g-parse, the BML
-// grammar, the verb tables, the ontology loader) bundled in one artifact. The source-
-// compile loads THIS instead of re-reading the .fk preludes live on every section
-// compile, so a stdlib edit can no longer reach into a compile mid-flight: the
-// machinery is PINNED per build. It is emitted-if-stale (any prelude newer than the
-// cached .fkb) by THIS kernel binary, so the binary and the bootstrap can never drift
-// apart — the version mismatch that made a fresh stdlib panic an old kernel is gone.
-// (A residual data-coupling remains: the ontology loader still reads form-ontology.json
-// at load; pinning that DATA into the artifact is a follow-up. The recipes are pinned.)
-fn ensure_bmf_bootstrap(stdlib_abs: &std::path::Path) -> Result<Arc<Vec<u8>>, String> {
-    if let Some(b) = bmf_bootstrap_cache()
-        .lock()
-        .map_err(|_| "bmf bootstrap cache poisoned".to_string())?
-        .get(stdlib_abs)
-    {
-        return Ok(b.clone());
-    }
-    let fkb_path = stdlib_abs.join(".cache").join("bmf-bootstrap.fkb");
-    // The source-compile preludes name entry units; the bootstrap is their
-    // closure, so a dependency their headers declare (fol-bp, through
-    // form-ontology-source-categories.fk) is both compiled in and watched.
-    let entry_paths: Vec<String> = SOURCE_COMPILE_PRELUDES
-        .iter()
-        .map(|n| stdlib_abs.join(n).to_string_lossy().to_string())
-        .collect();
-    let closure = load_form_source_closure(&entry_paths).map_err(|e| {
-        format!("bmf bootstrap: {} (is --stdlib {} correct?)", e, stdlib_abs.display())
-    })?;
-    let prelude_paths: Vec<PathBuf> = closure.iter().map(|(p, _)| PathBuf::from(p)).collect();
-    let fkb_mtime = fs::metadata(&fkb_path).and_then(|m| m.modified()).ok();
-    let stale = match fkb_mtime {
-        None => true,
-        Some(t) => prelude_paths.iter().any(|p| {
-            fs::metadata(p)
-                .and_then(|m| m.modified())
-                .map(|pt| pt > t)
-                .unwrap_or(true)
-        }),
-    };
-    let bytes = if stale {
-        let src = closure
-            .iter()
-            .map(|(_, source)| source.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let emitted = std::thread::Builder::new()
-            .name("bmf-bootstrap-emit".to_string())
-            .stack_size(form_kernel_stack_bytes())
-            .spawn(move || {
-                walk_stack_begin(form_kernel_stack_bytes());
-                let mut k = Kernel::new();
-                let root = read_root_from_source(&mut k, &src);
-                serialize_artifact(&k, root)
-            })
-            .map_err(|e| format!("bmf bootstrap: spawn emit: {}", e))?
-            .join()
-            .map_err(|_| "bmf bootstrap: emit panicked".to_string())?;
-        let _ = fs::create_dir_all(stdlib_abs.join(".cache"));
-        let _ = fs::write(&fkb_path, &emitted); // best-effort disk cache; in-process map is source of truth
-        emitted
-    } else {
-        fs::read(&fkb_path)
-            .map_err(|e| format!("bmf bootstrap: read {}: {}", fkb_path.display(), e))?
-    };
-    let arc = Arc::new(bytes);
-    bmf_bootstrap_cache()
-        .lock()
-        .map_err(|_| "bmf bootstrap cache poisoned".to_string())?
-        .insert(stdlib_abs.to_path_buf(), arc.clone());
-    Ok(arc)
-}
-
-// Run a source-compile driver against the PINNED bootstrap: deserialize the bootstrap
-// .fkb's recipes (binding the machinery), then run the driver in the SAME env, so the
-// driver resolves every name against the pinned machinery — never the live .fk on disk.
-// `(do bootstrap driver)` shares one env: the bootstrap's defns bind, the driver uses them.
-fn run_source_with_bootstrap(
-    name: &str,
-    bootstrap: Arc<Vec<u8>>,
-    driver_body: String,
-) -> Result<(Kernel, Value), String> {
-    let handle = std::thread::Builder::new()
-        .name(name.to_string())
-        .stack_size(form_kernel_stack_bytes())
-        .spawn(move || -> Result<(Kernel, Value), String> {
-            walk_stack_begin(form_kernel_stack_bytes());
-            let mut k = Kernel::new();
-            let bootstrap_root = deserialize_artifact(&mut k, &bootstrap)
-                .map_err(|e| format!("source-compile: load bootstrap: {}", e))?;
-            let driver_root = read_root_from_source(&mut k, &driver_body);
-            let combined = k.intern(cat_block(RBLK_DO), vec![bootstrap_root, driver_root]);
-            let value = execute_root(&mut k, combined);
-            Ok((k, value))
-        })
-        .map_err(|e| format!("source-compile: spawn {} thread: {}", name, e))?;
-    handle
-        .join()
-        .map_err(|_| format!("source-compile: {} panicked", name))?
-}
-
-fn compile_source_section_to_recipe_node(
-    dialect_name: &str,
-    body: &str,
-    stdlib_abs: &std::path::Path,
-) -> Result<(Kernel, NodeID), String> {
-    let bootstrap = ensure_bmf_bootstrap(stdlib_abs)?;
-    let driver_body = format!(
-        "(fsc-compile-section-recipe {} {})",
-        sexp_string_literal(dialect_name),
-        sexp_string_literal(body)
-    );
-    let (kernel, value) =
-        run_source_with_bootstrap("route-section-compile", bootstrap, driver_body)?;
-    match value {
-        Value::Nid(root) => Ok((kernel, root)),
-        _ => Err("source-compile: fsc-compile-section-recipe did not return a recipe".to_string()),
-    }
-}
-
-fn import_recipe_leaf(dst: &mut Kernel, src: &Kernel, nid: NodeID) -> NodeID {
-    if nid.level == LEVEL_TRIVIAL {
-        return match nid.ty {
-            TRIV_INT => dst.intern_trivial_int((nid.inst as i32) as i64),
-            TRIV_INT64 => dst.intern_trivial_int(src.decode_int64(nid.inst)),
-            TRIV_STRING => dst.intern_string(src.name_str(nid.inst)),
-            TRIV_BOOL | TRIV_NULL => nid,
-            TRIV_FLOAT32 => dst.intern_trivial_float32(src.decode_float32(nid.inst)),
-            TRIV_FLOAT64 => dst.intern_trivial_float64(src.decode_float64(nid.inst)),
-            _ => nid,
-        };
-    }
-    nid
-}
-
-fn import_recipe_node(
-    dst: &mut Kernel,
-    src: &Kernel,
-    nid: NodeID,
-    memo: &mut HashMap<NodeID, NodeID>,
-) -> NodeID {
-    if let Some(imported) = memo.get(&nid) {
-        return *imported;
-    }
-    let imported = match src.by_id.get(&nid) {
-        Some(recipe) => {
-            let category = import_recipe_node(dst, src, recipe.category, memo);
-            let children = recipe
-                .children
-                .iter()
-                .map(|child| import_recipe_node(dst, src, *child, memo))
-                .collect();
-            dst.intern(category, children)
-        }
-        None => import_recipe_leaf(dst, src, nid),
-    };
-    memo.insert(nid, imported);
-    imported
-}
-
-fn import_recipe_from(dst: &mut Kernel, src: &Kernel, root: NodeID) -> NodeID {
-    let mut memo = HashMap::new();
-    import_recipe_node(dst, src, root, &mut memo)
-}
-
-fn line_next(src: &str, i: usize) -> usize {
-    match src[i..].find('\n') {
-        Some(offset) => i + offset + 1,
-        None => src.len(),
-    }
-}
-
-fn line_end(src: &str, i: usize) -> usize {
-    match src[i..].find('\n') {
-        Some(offset) => i + offset,
-        None => src.len(),
-    }
-}
-
-fn find_section_from(src: &str, mut i: usize) -> Option<usize> {
-    while i < src.len() {
-        let end = line_end(src, i);
-        let line = &src[i..end];
-        let leading = line.len() - line.trim_start().len();
-        if line.trim_start().starts_with("section [") {
-            return Some(i + leading);
-        }
-        i = line_next(src, i);
-    }
-    None
-}
-
-fn find_section_close(src: &str, body_start: usize) -> Result<usize, String> {
-    let mut i = body_start;
-    let mut depth: i64 = 0;
-    while i < src.len() {
-        let end = line_end(src, i);
-        let line = src[i..end].trim();
-        if line == "}" {
-            if depth == 0 {
-                return Ok(i);
-            }
-            depth -= 1;
-        } else if line.ends_with('{') {
-            depth += 1;
-        }
-        i = line_next(src, i);
-    }
-    Err("source-compile: unterminated section block".to_string())
-}
-
-fn parse_raw_route_segment(k: &mut Kernel, roots: &mut Vec<NodeID>, src: &str) {
-    let toks = tokenize_sexp(src);
-    if toks.is_empty() {
-        return;
-    }
-    let root = if count_top_level(&toks) == 1 {
-        let (root, _) = read_sexp(k, &toks, 0);
-        root
-    } else {
-        let wrapped = format!("(do {})", src);
-        let root = read_root_from_source(k, &wrapped);
-        mark_unit_root(k, root, true);
-        root
-    };
-    roots.push(root);
-}
-
-fn compile_route_source_into_recipe(
-    k: &mut Kernel,
-    roots: &mut Vec<NodeID>,
-    source_label: &str,
-    src: &str,
-    stdlib_abs: &std::path::Path,
-) -> Result<(), String> {
-    let mut cursor = 0;
-    while let Some(section_pos) = find_section_from(src, cursor) {
-        parse_raw_route_segment(k, roots, &src[cursor..section_pos]);
-
-        let dialect_start = section_pos + "section [".len();
-        let dialect_end = src[dialect_start..]
-            .find(']')
-            .map(|offset| dialect_start + offset)
-            .ok_or_else(|| format!("source-compile: {} section missing ]", source_label))?;
-        let open = src[dialect_end..]
-            .find('{')
-            .map(|offset| dialect_end + offset)
-            .ok_or_else(|| format!("source-compile: {} section missing {{", source_label))?;
-        let close = find_section_close(src, open + 1)?;
-        let dialect_name = src[dialect_start..dialect_end].trim();
-        let body = &src[open + 1..close];
-        let (section_kernel, section_root) =
-            compile_source_section_to_recipe_node(dialect_name, body, stdlib_abs)?;
-        let section_root = import_recipe_from(k, &section_kernel, section_root);
-        roots.push(section_root);
-        cursor = line_next(src, close);
-    }
-    parse_raw_route_segment(k, roots, &src[cursor..]);
-    Ok(())
-}
-
-// Source-compile a routes manifest to one in-memory Form Recipe object. This is
-// PATH A: source-compile AT LOAD. The router accepts a source manifest directly,
-// lowers it through the body's own form-stdlib
-// source-compiler, and gives worker kernels an object graph to clone/import from
-// directly. No worker reparses lowered source; no route-runtime serialization or
-// sidecar is required. Source text remains the human entry point, while Form
-// objects are the runtime carrier.
-fn source_compile_manifest_recipe_object(
-    routes_path: &str,
-    stdlib_dir: &str,
-) -> Result<CompiledRouteProgram, String> {
-    let _cwd_guard = source_compile_cwd_lock()
-        .lock()
-        .map_err(|_| "source-compile: cwd lock poisoned".to_string())?;
-
-    // Source compilation shares validate.sh's form/ cwd shape. The compiler
-    // prelude now reads its coordinates from the kernel-native bp table, but
-    // route-language source files may still use repo-relative stdlib paths, so
-    // object compilation temporarily runs from the PARENT of the stdlib dir and
-    // then restores the previous cwd.
-    let stdlib_path = std::path::Path::new(stdlib_dir);
-    let stdlib_abs = stdlib_path
-        .canonicalize()
-        .map_err(|e| format!("source-compile: --stdlib {}: {}", stdlib_dir, e))?;
-    let stdlib_parent = stdlib_abs
-        .parent()
-        .ok_or_else(|| format!("source-compile: --stdlib {} has no parent dir", stdlib_dir))?
-        .to_path_buf();
-    let stdlib_name = stdlib_abs
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "form-stdlib".to_string());
-    let routes_abs = std::path::Path::new(routes_path)
-        .canonicalize()
-        .map_err(|e| format!("source-compile: --routes {}: {}", routes_path, e))?
-        .to_string_lossy()
-        .to_string();
-
-    // Set cwd to the stdlib's parent so the ontology loader's "form-stdlib/..."
-    // relative reads resolve, run the compile, then restore cwd. Restoring is
-    // important: the rest of cli_serve (and the workers) expect the original cwd.
-    let prev_cwd = env::current_dir().map_err(|e| format!("source-compile: read cwd: {}", e))?;
-    // Guard against a surprising layout where the requested stdlib directory
-    // is not the form-stdlib source tree the compiler prelude expects.
-    if stdlib_name != "form-stdlib" {
-        return Err(format!(
-            "source-compile: --stdlib must point at a directory named 'form-stdlib' \
-             (the source-compiler loads form-ontology-loader.fk and source-compiler.fk from it); \
-             got {}",
-            stdlib_abs.display()
-        ));
-    }
-    env::set_current_dir(&stdlib_parent)
-        .map_err(|e| format!("source-compile: chdir {}: {}", stdlib_parent.display(), e))?;
-
-    let compile_result = (|| {
-        let mut k = Kernel::new();
-        let mut roots = Vec::new();
-        // The route-language preludes name entry units; their own `; preludes:`
-        // headers carry the rest (form-ontology-loader.fk reaches fol-bp that
-        // way), so the language is their closure, as Go's route compile loads it.
-        let entry_paths: Vec<String> = SOURCE_ROUTE_LANGUAGE_PRELUDES
-            .iter()
-            .map(|name| stdlib_abs.join(name).to_string_lossy().to_string())
-            .collect();
-        let language = load_form_source_closure(&entry_paths).map_err(|e| {
-            format!(
-                "source-compile: route-language closure: {} (is --stdlib {} correct?)",
-                e, stdlib_dir
-            )
-        })?;
-        for (source_path, source) in &language {
-            compile_route_source_into_recipe(&mut k, &mut roots, source_path, source, &stdlib_abs)?;
-        }
-        let route_source = fs::read_to_string(&routes_abs)
-            .map_err(|e| format!("source-compile: read routes {}: {}", routes_abs, e))?;
-        compile_route_source_into_recipe(
-            &mut k,
-            &mut roots,
-            &routes_abs,
-            &route_source,
-            &stdlib_abs,
-        )?;
-        let root = if roots.len() == 1 {
-            roots[0]
-        } else {
-            k.intern(cat_block(RBLK_DO), roots)
-        };
-        Ok(CompiledRouteProgram { kernel: k, root })
-    })();
-
-    // Restore cwd before propagating any compile error, so a failed compile never
-    // leaves the process in the stdlib's parent.
-    let _ = env::set_current_dir(&prev_cwd);
-    compile_result
-}
-
-// Source-compile an ordinary workload file list to one executable Form Recipe
-// object. This is the non-router sibling of source_compile_manifest_recipe_object:
-// caller-provided files load in order, `section [...]` blocks lower through the
-// Form source compiler, and raw S-expression segments stay raw.
-fn source_compile_file_workload_recipe_object(
-    paths: &[String],
-    stdlib_dir: &str,
-) -> Result<CompiledRouteProgram, String> {
-    let _cwd_guard = source_compile_cwd_lock()
-        .lock()
-        .map_err(|_| "source-compile: cwd lock poisoned".to_string())?;
-    let stdlib_path = std::path::Path::new(stdlib_dir);
-    let stdlib_abs = stdlib_path
-        .canonicalize()
-        .map_err(|e| format!("source-compile: --stdlib {}: {}", stdlib_dir, e))?;
-    let stdlib_parent = stdlib_abs
-        .parent()
-        .ok_or_else(|| format!("source-compile: --stdlib {} has no parent dir", stdlib_dir))?
-        .to_path_buf();
-    let stdlib_name = stdlib_abs
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "form-stdlib".to_string());
-    if stdlib_name != "form-stdlib" {
-        return Err(format!(
-            "source-compile: --stdlib must point at a directory named 'form-stdlib'; got {}",
-            stdlib_abs.display()
-        ));
-    }
-    let input_paths: Result<Vec<PathBuf>, String> = paths
-        .iter()
-        .map(|path| {
-            std::path::Path::new(path)
-                .canonicalize()
-                .map_err(|e| format!("source-compile: input {}: {}", path, e))
-        })
-        .collect();
-    let input_paths = input_paths?;
-
-    let prev_cwd = env::current_dir().map_err(|e| format!("source-compile: read cwd: {}", e))?;
-    env::set_current_dir(&stdlib_parent)
-        .map_err(|e| format!("source-compile: chdir {}: {}", stdlib_parent.display(), e))?;
-
-    let compile_result = (|| {
-        let mut k = Kernel::new();
-        let mut roots = Vec::new();
-        for source_path in &input_paths {
-            let source = fs::read_to_string(source_path)
-                .map_err(|e| format!("source-compile: read {}: {}", source_path.display(), e))?;
-            compile_route_source_into_recipe(
-                &mut k,
-                &mut roots,
-                &source_path.to_string_lossy(),
-                &source,
-                &stdlib_abs,
-            )?;
-        }
-        let root = if roots.len() == 1 {
-            roots[0]
-        } else {
-            k.intern(cat_block(RBLK_DO), roots)
-        };
-        Ok(CompiledRouteProgram { kernel: k, root })
-    })();
-
-    let _ = env::set_current_dir(&prev_cwd);
-    compile_result
-}
-
-// Resolve every name in a compiled route recipe, returning the unresolved ones.
-// The evaluator resolves names LAZILY — it raises `unbound: <name>` only when the
-// walk reaches that node at serve time (RB_IDENT) — so a manifest with a dangling
-// reference compiles to a recipe and only fails in production. This runs the Form
-// resolution walk (form-stdlib/name-check.fk, scope-aware) over the lowered recipe
-// so the dangling reference is found BEFORE anything is served. The resolver IS
-// Form: this loads it into the route kernel and applies its `name-check` closure
-// to the route recipe — no resolution logic duplicated in Rust.
-fn name_check_route_recipe(
-    k: &mut Kernel,
-    stdlib_abs: &std::path::Path,
-    route_root: NodeID,
-) -> Result<Vec<String>, String> {
-    let nc_path = stdlib_abs.join("name-check.fk");
-    let nc_src = fs::read_to_string(&nc_path)
-        .map_err(|e| format!("check: read {}: {}", nc_path.display(), e))?;
-    let nc_root = read_root_from_source(k, &nc_src);
-    let mut a = Arena::new();
-    let env = a.new_frame(None);
-    // Walk name-check.fk so `name-check` / `name-check-clean?` / `nc-*` bind in env.
-    walk_unit(k, &mut a, nc_root, env);
-    // `known` seeds the resolvable set with every kernel native name. The manifest's
-    // own defns are collected from the recipe by name-check's PASS 1; the natives are
-    // NOT in the recipe, so they must be named here or every native call would report.
-    let native_ids: Vec<NameID> = k
-        .natives
-        .keys()
-        .copied()
-        .chain(k.env_natives.keys().copied())
-        .collect();
-    let mut known: Vec<Value> = native_ids
-        .into_iter()
-        .map(|id| Value::Str(Bstr::from(k.name_str(id))))
-        .collect();
-    // Seed the kernel's surface-verb vocabulary (build_verb): operators and
-    // structural verbs resolve as typed nodes, not function lookups, so they are
-    // known, not unbound. Without this the gate false-flags add/sub/…/and/or when
-    // they ride as FNCALL callees in source-compiled machinery (verified: a
-    // manifest using (add 6 2)/(mul 6 2) serves {"sum":8,"prod":12} while the gate
-    // reported those very verbs unbound).
-    known.extend(BUILD_VERBS.iter().map(|v| Value::Str(Bstr::from(*v))));
-    let known_val = Value::List(Arc::new(known));
-    // Apply name-check(route_root, known) directly — the same closure resolution the
-    // serve path uses for route handlers (resolve_route_handler -> arena.lookup).
-    let nc_name = k.intern_string("name-check").inst;
-    let cl = match a.lookup(env, nc_name) {
-        Some(Value::Closure(c)) => c,
-        _ => return Err("check: name-check not bound after loading name-check.fk".to_string()),
-    };
-    if cl.params.len() != 2 {
-        return Err(format!(
-            "check: name-check expects 2 params (program known), found {}",
-            cl.params.len()
-        ));
-    }
-    let frame = a.new_frame_with_capacity(Some(cl.env), 2);
-    a.bind(frame, cl.params[0], Value::Nid(route_root));
-    a.bind(frame, cl.params[1], known_val);
-    let result = walk(k, &mut a, cl.body, frame);
-    let mut unbound: Vec<String> = Vec::new();
-    if let Value::List(xs) = result {
-        for v in xs.iter() {
-            if let Value::Str(s) = v {
-                let name = s.to_string();
-                if !unbound.contains(&name) {
-                    unbound.push(name); // name-check cons-es one entry per reference; dedup
-                }
-            }
-        }
-    }
-    Ok(unbound)
-}
-
-// check --routes <file> [--stdlib <dir>] — source-compile a routes manifest and
-// resolve every name in the lowered recipe BEFORE serving. Exit non-zero, naming
-// the unresolved symbols, if any reference is dangling. This is the compile-time
-// gate the lazy evaluator lacks: a manifest that references an unbound symbol (e.g.
-// production-routes.fk's `health_route_from_class`) becomes a clean error here
-// instead of a serve-time panic — the silent-rot class. CI runs this over the
-// manifests so a dangling reference can never reach main.
-fn cli_check(args: &[String]) -> i32 {
-    let mut routes_path: Option<String> = None;
-    let mut stdlib_dir: String = "form-stdlib".to_string();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--routes" => {
-                if i + 1 >= args.len() {
-                    eprintln!("check: --routes requires an argument");
-                    return 2;
-                }
-                routes_path = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--stdlib" => {
-                if i + 1 >= args.len() {
-                    eprintln!("check: --stdlib requires an argument");
-                    return 2;
-                }
-                stdlib_dir = args[i + 1].clone();
-                i += 2;
-            }
-            other => {
-                eprintln!("check: unknown argument: {}", other);
-                return 2;
-            }
-        }
-    }
-    let routes_path = match routes_path {
-        Some(p) => p,
-        None => {
-            eprintln!("check: --routes <file> is required");
-            return 2;
-        }
-    };
-    let stdlib_abs = match std::path::Path::new(&stdlib_dir).canonicalize() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("check: --stdlib {}: {}", stdlib_dir, e);
-            return 2;
-        }
-    };
-    let mut prog = match source_compile_manifest_recipe_object(&routes_path, &stdlib_dir) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("check: {}", e);
-            return 1;
-        }
-    };
-    match name_check_route_recipe(&mut prog.kernel, &stdlib_abs, prog.root) {
-        Ok(unbound) if unbound.is_empty() => {
-            println!("check: {} — every name resolves (0 unbound)", routes_path);
-            0
-        }
-        Ok(unbound) => {
-            eprintln!(
-                "check: {} — {} unresolved name(s) — would panic at serve time:",
-                routes_path,
-                unbound.len()
-            );
-            for name in &unbound {
-                eprintln!("  unbound: {}", name);
-            }
-            1
-        }
-        Err(e) => {
-            eprintln!("check: {}", e);
-            1
-        }
-    }
-}
-
-#[cfg(test)]
-mod gate_known_set_tests {
-    use super::*;
-
-    // The name-resolution gate seeds `known` with BUILD_VERBS so a source-compiled
-    // operator carried as an FNCALL callee isn't false-flagged unbound. That is only
-    // safe if every BUILD_VERBS entry is a verb build_verb lowers to a TYPED node
-    // (never the FNCALL fallback) — else seeding it would mask a genuinely-unbound
-    // FNCALL of that name. This drift-guards that invariant: add a verb to
-    // BUILD_VERBS without teaching build_verb to specialize it, and this fails.
-    #[test]
-    fn build_verbs_are_typed_not_fncall() {
-        let mut k = Kernel::new();
-        let a = k.intern_trivial_int(2);
-        let b = k.intern_trivial_int(3);
-        // operators + block-verbs take uniform args; `not` is unary.
-        let uniform = [
-            "add", "sub", "mul", "div", "mod", "eq", "ne", "lt", "le", "gt", "ge", "and", "or",
-            "do",
-        ];
-        for v in uniform {
-            let node = build_verb(&mut k, v, vec![a, b]);
-            assert_ne!(
-                k.category(node),
-                cat_fncall(),
-                "build_verb({v}) fell through to FNCALL — the gate would mask a real unbound {v}"
-            );
-        }
-        let not_node = build_verb(&mut k, "not", vec![a]);
-        assert_ne!(k.category(not_node), cat_fncall());
-        // let/if/defn carry special arg shapes (name/params repackaging); they are
-        // structural by construction. Assert the test covers every BUILD_VERBS entry
-        // so a new verb can't be added to the gate's known-set untested.
-        let covered: Vec<&str> = uniform
-            .iter()
-            .copied()
-            .chain(["not", "let", "if", "defn"])
-            .collect();
-        for v in BUILD_VERBS {
-            assert!(
-                covered.contains(v),
-                "BUILD_VERBS has {v} but this test doesn't cover it"
-            );
-        }
-        // and a verb build_verb does NOT know must hit the FNCALL fallback, so the
-        // gate still flags genuinely-unbound names (e.g. health_route_from_class).
-        let unknown = build_verb(&mut k, "health_route_from_class", vec![a, b]);
-        assert_eq!(
-            k.category(unknown),
-            cat_fncall(),
-            "an unknown verb must be FNCALL so the gate can flag it"
-        );
-    }
-}
-
-// Quote a path/string as an S-expression string literal for the compile driver:
-// wrap in double quotes, escaping backslash and double-quote. Paths with a quote
-// or backslash are exotic but must not break the driver's parse.
-fn sexp_string_literal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            _ => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
-}
-
 fn default_route_data_path(routes_path: &str) -> PathBuf {
     let mut path = PathBuf::from(routes_path);
     let stem = path
@@ -10321,12 +9553,6 @@ fn cli_serve(args: &[String]) -> i32 {
     // Default: the host's available parallelism (capped sane), so the box's
     // cores are used out of the box; 0 or unset falls back to the default.
     let mut workers: Option<usize> = None;
-    // --stdlib <dir> points at the form-stdlib directory whose source-compiler a
-    // source-authored manifest is lowered through (PATH A — source-compile at load).
-    // It is used ONLY when the manifest opens a `section [...]` block; a raw
-    // S-expression manifest never touches it. Default: "form-stdlib" relative to
-    // the cwd, the same relative path validate.sh uses.
-    let mut stdlib_dir: String = "form-stdlib".to_string();
     // --host <addr> is the interface the listener binds. Default 127.0.0.1 keeps
     // the loopback-only behavior every existing caller relies on (a local proof
     // harness curls the listener on the same loopback). A FRONT-DOOR deployment
@@ -10410,14 +9636,6 @@ fn cli_serve(args: &[String]) -> i32 {
                 host = args[i + 1].clone();
                 i += 2;
             }
-            "--stdlib" => {
-                if i + 1 >= args.len() {
-                    eprintln!("serve: --stdlib requires a directory argument");
-                    return 2;
-                }
-                stdlib_dir = args[i + 1].clone();
-                i += 2;
-            }
             "--config" => {
                 if i + 1 >= args.len() {
                     eprintln!("serve: --config requires a path argument");
@@ -10464,33 +9682,10 @@ fn cli_serve(args: &[String]) -> i32 {
         }
     };
 
-    // PATH A — source-compile at load. If the manifest is source-authored (opens a
-    // `section [...]` block), lower it ONCE here in the main thread through the
-    // body's own form-stdlib source-compiler into one Form Recipe object. Worker
-    // kernels clone/import from that object graph directly; raw S-expression
-    // manifests keep the existing source reader path.
-    let program = if manifest_has_source_sections(routes_source.as_str()) {
-        match source_compile_manifest_recipe_object(&routes_path, &stdlib_dir) {
-            Ok(compiled) => {
-                eprintln!(
-                    "form-kernel-rust serve: source manifest {} compiled via {} to Form recipe object",
-                    routes_path, stdlib_dir
-                );
-                RouteProgram::RecipeObject(Arc::new(compiled))
-            }
-            Err(e) => {
-                eprintln!("serve: {}", e);
-                return 1;
-            }
-        }
-    } else {
-        RouteProgram::Source(Arc::clone(&routes_source))
-    };
-
     // Validate the manifest ONCE up front (in the main thread) so a broken
     // routes.fk fails fast with a clear message before any worker spins up.
-    // Each worker re-loads the same program into its OWN kernel+arena below.
-    if let Err(e) = build_worker_kernel_with_route_data(&program, &routes_path, &route_data) {
+    // Each worker re-loads the same source into its OWN kernel+arena below.
+    if let Err(e) = build_worker_kernel_with_route_data(&routes_source, &routes_path, &route_data) {
         eprintln!("serve: {}", e);
         return 1;
     }
@@ -10518,16 +9713,13 @@ fn cli_serve(args: &[String]) -> i32 {
     // so N workers serve N requests truly in parallel.
     let (tx, rx) = mpsc::channel::<TcpStream>();
     let rx = Arc::new(Mutex::new(rx));
-    let program = Arc::new(program);
     let route_data = Arc::new(route_data);
     let routes_path_arc = Arc::new(routes_path);
-    let routes_source_arc = Arc::clone(&routes_source);
     let upstream_arc = Arc::new(upstream);
     let router_metrics = Arc::new(Mutex::new(RouterMetrics::default()));
 
     // Spawn the pool. Each worker builds its OWN Kernel + Arena from the route
-    // program (source for raw Form, Recipe object graph for source-authored manifests),
-    // then drains the queue.
+    // source, then drains the queue.
     // Workers get an EXPLICIT generous stack: the kernel's value-walk is a
     // recursive tree-walker, so a deeply self-recursive native handler needs
     // real stack depth. A spawned thread's default stack (~2 MiB on many
@@ -10540,10 +9732,9 @@ fn cli_serve(args: &[String]) -> i32 {
     // generous stack matches the prior behavior rather than promising infinity.)
     let mut handles = Vec::with_capacity(n_workers);
     for id in 0..n_workers {
-        let program = Arc::clone(&program);
         let route_data = Arc::clone(&route_data);
         let routes_path = Arc::clone(&routes_path_arc);
-        let routes_source = Arc::clone(&routes_source_arc);
+        let routes_source = Arc::clone(&routes_source);
         let upstream = Arc::clone(&upstream_arc);
         let rx = Arc::clone(&rx);
         let router_metrics = Arc::clone(&router_metrics);
@@ -10554,7 +9745,6 @@ fn cli_serve(args: &[String]) -> i32 {
             walk_stack_begin(WORKER_STACK_SIZE);
             worker_loop(
                 id,
-                program,
                 routes_path,
                 routes_source,
                 route_data,
@@ -10581,7 +9771,7 @@ fn cli_serve(args: &[String]) -> i32 {
     // Re-resolve the route list once (in the main thread, throwaway kernel)
     // purely to print the startup banner — the workers hold the live copies.
     if let Ok((_, _, route_specs, _)) =
-        build_worker_kernel_with_route_data(&program, &routes_path_arc, &route_data)
+        build_worker_kernel_with_route_data(&routes_source, &routes_path_arc, &route_data)
     {
         eprintln!(
             "form-kernel-rust serve: listening on {}:{} ({} worker{}, {} native route{})",
@@ -12269,15 +11459,48 @@ mod route_spec_tests {
 
     static CONFIG_ISOLATION_LOCK: Mutex<()> = Mutex::new(());
 
-    // Fixtures resolve from this crate's own directory. The source-compile
-    // paths move the process cwd while they run, so a relative "../" read in a
-    // parallel test lands wherever another test's compile left the cwd.
-    fn form_dir_path(rel: &str) -> String {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(rel)
-            .to_string_lossy()
-            .to_string()
+    const API_CATALOG_LABEL: &str = "api-catalog-closure.fk";
+
+    // The route language and the BML front-door catalog as one plain Form text,
+    // prepared once per test run by fkwu (the one lowerer) from the repo root.
+    fn api_catalog_closure() -> &'static str {
+        static CLOSURE: OnceLock<String> = OnceLock::new();
+        CLOSURE.get_or_init(|| {
+            let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let dir = env::temp_dir().join(format!("form-rust-api-catalog-{}", std::process::id()));
+            fs::create_dir_all(&dir).expect("create catalog closure dir");
+            let root = dir.join("root.fk");
+            let units = [
+                "form/form-stdlib/json.fk",
+                "form/form-stdlib/core.fk",
+                "form/form-stdlib/sha256.fk",
+                "form/form-stdlib/choice-receipt.fk",
+                "form/form-stdlib/branch-choice-order.fk",
+                "form/form-stdlib/kernel-http.fk",
+                "form/form-stdlib/bml-route-choice-runtime.fk",
+                "form/form-stdlib/language-model.fk",
+                "form/apps/coherence-network/api.bml",
+            ];
+            let header = format!("; preludes: {}\n", units.join(" "));
+            fs::write(&root, header).expect("write catalog closure root");
+            let out = dir.join(API_CATALOG_LABEL);
+            let fkwu = repo.join("fkwu");
+            let run = std::process::Command::new(&fkwu)
+                .current_dir(&repo)
+                .arg("--closure")
+                .arg(&root)
+                .arg(&out)
+                .output()
+                .expect("run ./fkwu --closure (build ./fkwu at the repo root first)");
+            let source = fs::read_to_string(&out);
+            let _ = fs::remove_dir_all(&dir);
+            assert!(
+                run.status.success(),
+                "fkwu --closure: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            source.expect("read catalog closure")
+        })
     }
 
     struct ExplicitConfigGuard {
@@ -12343,14 +11566,6 @@ mod route_spec_tests {
         }
     }
 
-    fn build_worker_kernel_from_source(
-        src: &str,
-        routes_path: &str,
-    ) -> Result<(Kernel, Arena, RouteSpecs), String> {
-        let program = RouteProgram::Source(Arc::new(src.to_string()));
-        build_worker_kernel(&program, routes_path)
-    }
-
     #[test]
     fn explicit_kernel_config_is_standalone_and_authoritative() {
         let _lock = CONFIG_ISOLATION_LOCK
@@ -12378,19 +11593,8 @@ mod route_spec_tests {
         let cache_key = volatile_coord("github.branch_head_sha", "seeker71/Coherence-Network|main");
         volatile_table().lock().unwrap().cells.remove(&cache_key);
 
-        let manifest = fs::read_to_string(form_dir_path("apps/coherence-network/api.bml"))
-            .expect("read BML front-door catalog");
-        let path = env::temp_dir().join(format!(
-            "form-rust-no-egress-catalog-{}.bml",
-            std::process::id()
-        ));
-        fs::write(&path, manifest).expect("write route manifest copy");
-        let path_str = path.to_string_lossy().to_string();
-        let compiled = source_compile_manifest_recipe_object(&path_str, &form_dir_path("form-stdlib"))
-            .expect("source route manifest compiles");
-        let program = RouteProgram::RecipeObject(Arc::new(compiled));
-        let (mut kernel, mut arena, routes, _) =
-            build_worker_kernel_with_route_data(&program, &path_str, &RouteDataRegistry::default())
+        let (mut kernel, mut arena, routes) =
+            build_worker_kernel(api_catalog_closure(), API_CATALOG_LABEL)
                 .expect("BML route catalog loads");
 
         let headers = vec![("Accept".to_string(), "application/json".to_string())];
@@ -12424,7 +11628,6 @@ mod route_spec_tests {
         );
 
         volatile_table().lock().unwrap().cells.remove(&cache_key);
-        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -12433,7 +11636,7 @@ mod route_spec_tests {
             (defn route_health () "ok")
             (let routes (list (list "/health" route_health)))
         "#;
-        let (_, _, routes) = build_worker_kernel_from_source(src, "path-row-routes.fk")
+        let (_, _, routes) = build_worker_kernel(src, "path-row-routes.fk")
             .expect("path/closure route manifest loads");
         let spec = &routes[0];
 
@@ -12511,7 +11714,7 @@ mod route_spec_tests {
                       "/api/utils/weighted_average" 7
                       "route_weighted_average" "Accept" 0)))
         "#;
-        let (_, _, routes) = build_worker_kernel_from_source(src, "kernel-http-route.fk")
+        let (_, _, routes) = build_worker_kernel(src, "kernel-http-route.fk")
             .expect("KernelHTTPRoute manifest loads");
         let spec = &routes[0];
 
@@ -12524,42 +11727,14 @@ mod route_spec_tests {
         assert_eq!(spec.pressure_budget, 0);
     }
 
-    // Route classes export their methods as `Class_method` closures. The raw
-    // route list consumes the generated handler through a route-data ref, so it
-    // does not rely on a section-local alias escaping into the following Form.
+    // A KernelHTTPRouteDataRef row names its route id and handler closure; the
+    // method, pattern and budget come from the route-data registry.
     #[test]
-    fn source_route_manifest_compiles_to_recipe_object_program() {
-        let manifest = r#"
-            section [form.route] {
-                template RouteCell<TRequest, TResponse> {
-                    member request: TRequest;
-                    member response: TResponse;
-                    member route: KernelHTTPRoute;
-                }
-
-                class HealthRoute : RouteCell<KernelHTTPRequest, KernelHTTPResponse> {
-                    def handle(request) {
-                        "ok";
-                    }
-
-                    route = route_data(health, handle);
-                }
-
-            }
-
-            (let routes (list (kh-route-data-ref "health" HealthRoute_handle)))
+    fn kernel_http_route_data_ref_resolves_from_route_data() {
+        let src = r#"
+            (defn HealthRoute_handle (request) "ok")
+            (let routes (list (list 43007 "health" HealthRoute_handle)))
         "#;
-        let path = env::temp_dir().join(format!(
-            "form-router-source-route-object-{}.fk",
-            std::process::id()
-        ));
-        fs::write(&path, manifest).expect("write source route manifest");
-        let path_str = path.to_string_lossy().to_string();
-        let compiled = source_compile_manifest_recipe_object(&path_str, &form_dir_path("form-stdlib"))
-            .expect("source route manifest compiles to recipe object");
-        assert!(compiled.kernel.by_id.contains_key(&compiled.root));
-
-        let program = RouteProgram::RecipeObject(Arc::new(compiled));
         let route_data = RouteDataRegistry {
             routes: HashMap::from([(
                 "health".to_string(),
@@ -12574,33 +11749,15 @@ mod route_spec_tests {
             )]),
         };
         let (_, _, routes, _) =
-            build_worker_kernel_with_route_data(&program, &path_str, &route_data)
-                .expect("recipe-object route program loads");
+            build_worker_kernel_with_route_data(src, "route-data-ref.fk", &route_data)
+                .expect("route-data ref manifest loads");
         let spec = &routes[0];
         assert_eq!(spec.name, "health");
         assert_eq!(spec.method, "ANY");
         assert_eq!(spec.pattern, "/health");
         assert_eq!(spec.handler_name, "HealthRoute_handle");
         assert_eq!(spec.pressure_budget, 40);
-
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn source_compiled_workload_executes_bml_tending_cells() {
-        let paths = vec![
-            form_dir_path("form-stdlib/core.fk"),
-            form_dir_path("form-stdlib/kernel-http.fk"),
-            form_dir_path("form-stdlib/native-route-goal-cells.bml"),
-            form_dir_path("form-stdlib/queries/native-route-goal-tending.fk"),
-        ];
-        let mut compiled = source_compile_file_workload_recipe_object(&paths, &form_dir_path("form-stdlib"))
-            .expect("source-authored workload compiles");
-        let value = execute_root(&mut compiled.kernel, compiled.root);
-        let rendered = value.display();
-        assert!(rendered.contains("native-route-front-door-loop"));
-        assert!(rendered.contains("author-high-grammar-handler"));
-        assert!(rendered.contains("prove-byte-identity"));
+        assert!(spec.typed_request);
     }
 
     #[test]
@@ -12611,7 +11768,7 @@ mod route_spec_tests {
                 (list 43004 "missing" "GET"
                       "/api/missing" 0 "route_missing" "" 0)))
         "#;
-        let err = match build_worker_kernel_from_source(src, "kernel-http-missing-handler.fk") {
+        let err = match build_worker_kernel(src, "kernel-http-missing-handler.fk") {
             Ok(_) => panic!("missing handler should fail manifest loading"),
             Err(e) => e,
         };
@@ -12709,21 +11866,9 @@ mod route_spec_tests {
     }
 
     #[test]
-    fn source_bml_catalog_template_routes_select_natively_in_rust() {
-        let manifest = fs::read_to_string(form_dir_path("apps/coherence-network/api.bml"))
-            .expect("read BML front-door catalog");
-        let path = env::temp_dir().join(format!(
-            "form-rust-router-template-catalog-{}.bml",
-            std::process::id()
-        ));
-        fs::write(&path, manifest).expect("write route manifest copy");
-        let path_str = path.to_string_lossy().to_string();
-        let compiled = source_compile_manifest_recipe_object(&path_str, &form_dir_path("form-stdlib"))
-            .expect("source route manifest compiles");
-        let program = RouteProgram::RecipeObject(Arc::new(compiled));
-        let (_, _, routes, _) =
-            build_worker_kernel_with_route_data(&program, &path_str, &RouteDataRegistry::default())
-                .expect("BML route catalog loads");
+    fn bml_catalog_template_routes_select_natively_in_rust() {
+        let (_, _, routes) = build_worker_kernel(api_catalog_closure(), API_CATALOG_LABEL)
+            .expect("BML route catalog loads");
 
         let headers = vec![("Accept".to_string(), "application/json".to_string())];
         let probes = vec![
@@ -12765,8 +11910,6 @@ mod route_spec_tests {
                 "{method} {path} should select {name}"
             );
         }
-
-        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -12779,7 +11922,7 @@ mod route_spec_tests {
                 (list 43004 "probe" "HEAD" "/probe" 0 "route_probe" "" 20)
                 (list 43004 "probe-options" "OPTIONS" "/probe" 0 "route_options" "" 0)))
         "#;
-        let (_, _, routes) = build_worker_kernel_from_source(src, "kernel-http-methods.fk")
+        let (_, _, routes) = build_worker_kernel(src, "kernel-http-methods.fk")
             .expect("HEAD/OPTIONS KernelHTTPRoute manifest loads");
 
         assert_eq!(routes[0].method, "HEAD");
@@ -13990,43 +13133,6 @@ fn cli_fetch(args: &[String]) -> i32 {
     }
 }
 
-fn cli_run(args: &[String]) -> i32 {
-    let mut stdlib_dir: String = "form-stdlib".to_string();
-    let mut paths: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--stdlib" => {
-                if i + 1 >= args.len() {
-                    eprintln!("run: --stdlib requires a directory argument");
-                    return 2;
-                }
-                stdlib_dir = args[i + 1].clone();
-                i += 2;
-            }
-            other => {
-                paths.push(other.to_string());
-                i += 1;
-            }
-        }
-    }
-    if paths.is_empty() {
-        eprintln!("usage: form-kernel-rust run [--stdlib <dir>] <file.fk> [more.fk ...]");
-        return 2;
-    }
-    set_crash_trace_context("run", args, None);
-    let mut prog = match source_compile_file_workload_recipe_object(&paths, &stdlib_dir) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("run: {}", e);
-            return 1;
-        }
-    };
-    let value = execute_root(&mut prog.kernel, prog.root);
-    println!("{}", value.display());
-    0
-}
-
 fn cli_binary(args: &[String]) -> i32 {
     if args.is_empty() {
         eprintln!("usage: form-kernel-rust --binary <file.fkb>");
@@ -14166,6 +13272,16 @@ mod crash_diagnostics_tests {
     }
 
     #[test]
+    fn diagnose_raw_section_and_unbound_name_point_at_fkwu_closure() {
+        let raw = diagnose_kernel_panic("unbound: section");
+        assert_eq!(raw.fatal_kind, "source_compile_failure");
+        assert!(raw.avoidance.contains("./fkwu --closure"));
+        let name = diagnose_kernel_panic("unbound: probe-one");
+        assert_eq!(name.fatal_kind, "name_resolution_error");
+        assert!(name.avoidance.contains("./fkwu --closure"));
+    }
+
+    #[test]
     fn crash_trace_records_diagnosis_source_and_operation() {
         set_thread_crash_trace_context(CrashTraceContext {
             mode: "serve-handler".to_string(),
@@ -14218,550 +13334,6 @@ mod crash_diagnostics_tests {
     }
 }
 
-/// Scans one source line for a "; preludes: a.fk b.fk ..." directive the
-/// way fkwu's own fk_src_collect_preludes does: find the literal
-/// "preludes:" token after a comment marker, then walk
-/// whitespace/comma-separated tokens until one doesn't look like a real
-/// dependency. A token counts only when it is the "none" sentinel (declares
-/// an explicit empty prelude list, e.g. tests/now-unix-ms-band.fk) or ends
-/// in ".fk"/".bml" -- anything else silently STOPS the scan instead of
-/// erroring, so a doc comment that merely mentions the word "preludes:"
-/// (this tree has several) is never misread as a directive. Sibling parity
-/// with the fkwu C kernel; unlike fkwu, a ".bml" dependency can't be
-/// lowered here yet, so the caller reports and skips it rather than
-/// silently dropping the symbols it would have defined.
-fn form_prelude_deps(line: &str) -> (Vec<&str>, Vec<&str>) {
-    let mut deps = Vec::new();
-    let mut bml_deps = Vec::new();
-    // ".fk" comments are ";"-led; ".bml" comments are "//"-led (confirmed:
-    // bml-demand-jit-glass.bml declares "// preludes: ..."), and
-    // form-source-compile-file's lowering preserves a .bml's original
-    // comment lines verbatim, so the lowered text this scanner sees still
-    // carries "//", not ";". Recognize whichever marker starts first.
-    let semi = line.find(';');
-    let slashes = line.find("//");
-    let start = match (semi, slashes) {
-        (None, None) => return (deps, bml_deps),
-        (Some(s), None) => s + 1,
-        (None, Some(sl)) => sl + 2,
-        (Some(s), Some(sl)) if s < sl => s + 1,
-        (_, Some(sl)) => sl + 2,
-    };
-    let comment = &line[start..];
-    let needle = "preludes:";
-    let Some(idx) = comment.find(needle) else {
-        return (deps, bml_deps);
-    };
-    let mut rest = &comment[idx + needle.len()..];
-    loop {
-        rest = rest.trim_start_matches([' ', '\t', ',']);
-        if rest.is_empty() {
-            return (deps, bml_deps);
-        }
-        let end = rest.find([' ', '\t', ',']).unwrap_or(rest.len());
-        let (tok, remainder) = rest.split_at(end);
-        rest = remainder;
-        if tok.eq_ignore_ascii_case("none") || tok.eq_ignore_ascii_case("(none)") {
-            return (deps, bml_deps);
-        }
-        if tok.ends_with(".fk") {
-            deps.push(tok);
-        } else if tok.ends_with(".bml") {
-            bml_deps.push(tok);
-        } else {
-            return (deps, bml_deps);
-        }
-    }
-}
-
-fn form_import_path(line: &str) -> Option<&str> {
-    let mut source = line.trim();
-    if let Some(without_semicolon) = source.strip_suffix(';') {
-        source = without_semicolon.trim();
-    }
-    source
-        .strip_prefix("import \"")
-        .and_then(|rest| rest.strip_suffix('"'))
-        .filter(|path| !path.is_empty())
-}
-
-fn resolve_form_import(owner: &Path, imported: &str) -> Result<PathBuf, String> {
-    let import_path = Path::new(imported);
-    let mut candidates = Vec::new();
-    if import_path.is_absolute() {
-        candidates.push(import_path.to_path_buf());
-    } else {
-        candidates.push(
-            owner
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(import_path),
-        );
-        candidates.push(import_path.to_path_buf());
-        if let Some(stripped) = imported.strip_prefix("form/") {
-            candidates.push(PathBuf::from(stripped));
-        }
-        let mut directory = owner.parent().unwrap_or_else(|| Path::new("."));
-        loop {
-            candidates.push(directory.join(import_path));
-            candidates.push(directory.join("form").join(import_path));
-            let Some(parent) = directory.parent() else {
-                break;
-            };
-            if parent == directory {
-                break;
-            }
-            directory = parent;
-        }
-    }
-    for candidate in candidates {
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "import {:?} from {}: file not found",
-        imported,
-        owner.display()
-    ))
-}
-
-// The fixed set of Form units that implement source-compiler.fk's
-// "section [form.bml]" -> plain Form lowering pass (validate.sh's own
-// compiler_chain, same order). fkwu cannot run this chain itself --
-// source-compiler.fk needs host-I/O natives fkwu lacks -- which is why bare
-// fkwu can never parse a raw BML section and validate.sh's prepare_sources
-// instead shells out to a Go kernel to run this chain externally. This
-// kernel doesn't need to shell out to anything: it already implements every
-// native the chain needs, so it runs the lowering on itself, in a
-// throwaway Kernel, the moment it meets a ".bml" prelude it can't otherwise
-// read.
-const FORM_BML_SOURCE_COMPILE_CHAIN: &[&str] = &[
-    "form-stdlib/engine-constants.fk",
-    "form-stdlib/compiler-objects.fk",
-    "form-stdlib/form-ontology-bp.fk",
-    "form-stdlib/form-ontology-source-categories.fk",
-    "form-stdlib/form-ontology-loader.fk",
-    "form-stdlib/line-grammar.fk",
-    "form-stdlib/bmf-core.fk",
-    "form-stdlib/bmf-grammar.fk",
-    "form-stdlib/bml.fk",
-    "form-stdlib/bml-source.fk",
-    "form-stdlib/source-compiler.fk",
-    "form-stdlib/grammars/form-bml.fk",
-    "form-stdlib/grammars/form-lift.fk",
-    "form-stdlib/form-bml-lower.fk",
-    "form-stdlib/source-compiler-text-lens.fk",
-];
-
-fn content_hash_hex(bytes: &[u8]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    // A cache-key hash, not a security digest: two DefaultHasher passes over
-    // disjoint halves of the content widen it past a bare 64-bit collision
-    // risk without pulling in a crypto crate (this repo keeps SHA-256 itself
-    // in form-stdlib/sha256.fk as Form, not a kernel dependency).
-    let mut h1 = DefaultHasher::new();
-    bytes.hash(&mut h1);
-    let mid = bytes.len() / 2;
-    let mut h2 = DefaultHasher::new();
-    bytes[mid..].hash(&mut h2);
-    bytes.len().hash(&mut h2);
-    format!("{:016x}{:016x}", h1.finish(), h2.finish())
-}
-
-// Lowers one whole ".bml" prelude file into plain Form text by running
-// form-source-compile-file (source-compiler.fk) in a fresh, throwaway
-// Kernel -- entirely separate from the kernel the CLI eventually builds to
-// run the caller's own program. The lowering is kept under
-// form-stdlib/.cache/kernel-bml-lowered/ with a key over everything that
-// decides it: the BML's path and bytes, every source in the compiler's loaded
-// closure, and this kernel's own executable. Any change among them is a miss.
-// The directory keeps one lowering per path for this kernel, so a new key
-// replaces the old entry rather than settling beside it.
-fn lower_bml_source(bml_abs_path: &Path) -> Result<String, String> {
-    let body = fs::read(bml_abs_path)
-        .map_err(|error| format!("read {}: {}", bml_abs_path.display(), error))?;
-
-    let mut chain_paths = Vec::with_capacity(FORM_BML_SOURCE_COMPILE_CHAIN.len());
-    for rel in FORM_BML_SOURCE_COMPILE_CHAIN {
-        let resolved = resolve_form_import(bml_abs_path, rel).map_err(|error| {
-            format!(
-                "resolve BML compiler chain {} (needed to lower {}): {}",
-                rel,
-                bml_abs_path.display(),
-                error
-            )
-        })?;
-        chain_paths.push(resolved);
-    }
-    let chain_args: Vec<String> = chain_paths
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
-    let loaded = load_form_source_closure(&chain_args).map_err(|error| {
-        format!(
-            "load BML source-compiler chain for {}: {}",
-            bml_abs_path.display(),
-            error
-        )
-    })?;
-    let mut keyed: Vec<u8> = Vec::new();
-    let mut hash_part = |label: &str, source: &[u8]| {
-        keyed.extend_from_slice(format!("{}:{}{}:", label.len(), label, source.len()).as_bytes());
-        keyed.extend_from_slice(source);
-    };
-    if let Ok(exe) = env::current_exe() {
-        if let Ok(meta) = fs::metadata(&exe) {
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|since| since.as_nanos())
-                .unwrap_or(0);
-            hash_part("kernel", format!("{} {} {}", exe.display(), meta.len(), modified).as_bytes());
-        }
-    }
-    let bml_label = bml_abs_path.display().to_string();
-    hash_part(&bml_label, &body);
-    for (label, source) in &loaded {
-        hash_part(label, source.as_bytes());
-    }
-    let prefix = format!("rust-{}-", &content_hash_hex(bml_label.as_bytes())[..12]);
-    let name = format!("{}{}.fk", prefix, content_hash_hex(&keyed));
-    let cache_dir = chain_paths[0]
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".cache")
-        .join("kernel-bml-lowered");
-    let cache_path = cache_dir.join(&name);
-    if let Ok(cached) = fs::read_to_string(&cache_path) {
-        if !cached.is_empty() {
-            return Ok(cached);
-        }
-    }
-    fs::create_dir_all(&cache_dir)
-        .map_err(|error| format!("create BML lowering cache dir: {}", error))?;
-
-    let out_path = cache_dir.join(format!(
-        ".out-{}-{}.fk",
-        name.trim_end_matches(".fk"),
-        std::process::id()
-    ));
-    let _cleanup = ScopeCleanup {
-        out_path: out_path.clone(),
-    };
-    let driver_src = format!(
-        "(do (form-source-compile-file {:?} {:?}))\n",
-        bml_abs_path.display().to_string(),
-        out_path.display().to_string()
-    );
-    let mut compiler_src: String = loaded
-        .into_iter()
-        .map(|(_, source)| source)
-        .collect::<Vec<_>>()
-        .join("\n");
-    compiler_src.push('\n');
-    compiler_src.push_str(&driver_src);
-    run_source(&compiler_src);
-
-    let lowered = fs::read_to_string(&out_path).unwrap_or_default();
-    if lowered.is_empty() {
-        return Err(format!(
-            "form-source-compile-file produced no output for {}",
-            bml_abs_path.display()
-        ));
-    }
-    if fs::rename(&out_path, &cache_path).is_ok() {
-        if let Ok(entries) = fs::read_dir(&cache_dir) {
-            for entry in entries.flatten() {
-                let entry_name = entry.file_name().to_string_lossy().to_string();
-                if entry_name != name && entry_name.starts_with(&prefix) {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
-    }
-    Ok(lowered)
-}
-
-// Removes the throwaway output file when dropped, on every return path
-// (success or the `?` early-outs above); once renamed into place it names
-// nothing.
-struct ScopeCleanup {
-    out_path: PathBuf,
-}
-impl Drop for ScopeCleanup {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.out_path);
-    }
-}
-
-fn load_form_source_file(
-    path: &Path,
-    display_path: &str,
-    seen: &mut HashSet<PathBuf>,
-    parts: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    let canonical =
-        fs::canonicalize(path).map_err(|error| format!("read {}: {}", path.display(), error))?;
-    if !seen.insert(canonical.clone()) {
-        return Ok(());
-    }
-    let source = fs::read_to_string(&canonical)
-        .map_err(|error| format!("read {}: {}", path.display(), error))?;
-    load_form_source_text(display_path, &canonical, &source, seen, parts)
-}
-
-// Mirrors load_form_source_file for a ".bml" dependency: same
-// dedup-by-canonical-path, same recursive directive handling on the result
-// -- just sourced from lower_bml_source's in-memory text instead of a
-// byte-identical read of the path on disk.
-fn load_form_source_bml_prelude(
-    path: &Path,
-    display_path: &str,
-    seen: &mut HashSet<PathBuf>,
-    parts: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    let canonical =
-        fs::canonicalize(path).map_err(|error| format!("read {}: {}", path.display(), error))?;
-    if !seen.insert(canonical.clone()) {
-        return Ok(());
-    }
-
-    // form-source-compile-file's lowering does NOT preserve a .bml file's
-    // own "// preludes:"/import header the way ";"-comment .fk lowering
-    // preserves its header (verified: the lowered text opens straight on
-    // defns, no comment survives) -- so THIS source's own directives have
-    // to be found and recursed on the RAW file, before lowering discards
-    // them, rather than by scanning the lowered output the way every other
-    // dependency kind is scanned.
-    let raw_body = fs::read_to_string(&canonical)
-        .map_err(|error| format!("read {}: {}", canonical.display(), error))?;
-    for line in raw_body.split('\n') {
-        if let Some(imported) = form_import_path(line) {
-            let dependency = resolve_form_import(&canonical, imported)?;
-            let dependency_display = dependency.display().to_string();
-            load_form_source_file(&dependency, &dependency_display, seen, parts)?;
-            continue;
-        }
-        let (fk_deps, bml_deps) = form_prelude_deps(line);
-        for tok in fk_deps {
-            let dependency = resolve_form_import(&canonical, tok)?;
-            let dependency_display = dependency.display().to_string();
-            load_form_source_file(&dependency, &dependency_display, seen, parts)?;
-        }
-        for tok in bml_deps {
-            let dependency = resolve_form_import(&canonical, tok)?;
-            let dependency_display = dependency.display().to_string();
-            load_form_source_bml_prelude(&dependency, &dependency_display, seen, parts)?;
-        }
-    }
-
-    let lowered = lower_bml_source(&canonical)?;
-    // The lowered text carries no directives of its own to (re-)scan, but
-    // running it through load_form_source_text anyway keeps this path
-    // exactly as defensive as every other loader -- a directive that DID
-    // somehow survive lowering would still be honored, not silently
-    // ignored.
-    load_form_source_text(display_path, &canonical, &lowered, seen, parts)
-}
-
-// Whether a Form string literal is still open at the end of line, given whether
-// one was open at its start: an escape takes the next byte, and a ; outside a
-// string comments out the rest of the line.
-fn form_line_ends_in_string(line: &str, open: bool) -> bool {
-    let bytes = line.as_bytes();
-    let mut inside = open;
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if inside {
-            if c == b'\\' {
-                i += 1;
-            } else if c == b'"' {
-                inside = false;
-            }
-        } else if c == b';' {
-            return false;
-        } else if c == b'"' {
-            inside = true;
-        }
-        i += 1;
-    }
-    inside
-}
-
-// Walks one source's lines for import/prelude directives (recursing into
-// each dependency) and appends the remaining body as one part. Shared by
-// the on-disk (.fk) and lowered-in-memory (.bml) loading paths so both get
-// identical directive handling.
-fn load_form_source_text(
-    display_path: &str,
-    canonical: &Path,
-    source: &str,
-    seen: &mut HashSet<PathBuf>,
-    parts: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    // a line that begins inside a string literal is data, as the reader sees it
-    let mut in_string = false;
-    for line in source.split('\n') {
-        if !in_string && line.trim_start().starts_with("section [") {
-            return Err(format!(
-                "{}: carries a raw \"section [form.bml]\" block -- this kernel runs plain Form, \
-                 not BML, so it can't parse that block directly. It must be lowered through \
-                 form-stdlib/source-compiler.fk first (validate.sh's prepare_sources does this \
-                 automatically; see form-stdlib/AUTHORING.md's \"two-layer trap\")",
-                display_path
-            ));
-        }
-        in_string = form_line_ends_in_string(line, in_string);
-    }
-    let mut body = Vec::new();
-    for line in source.split('\n') {
-        if let Some(imported) = form_import_path(line) {
-            let dependency = resolve_form_import(canonical, imported)?;
-            let dependency_display = dependency.display().to_string();
-            load_form_source_file(&dependency, &dependency_display, seen, parts)?;
-            continue;
-        }
-        let (fk_deps, bml_deps) = form_prelude_deps(line);
-        if !fk_deps.is_empty() || !bml_deps.is_empty() {
-            for tok in fk_deps {
-                let dependency = resolve_form_import(canonical, tok)?;
-                let dependency_display = dependency.display().to_string();
-                load_form_source_file(&dependency, &dependency_display, seen, parts)?;
-            }
-            for tok in bml_deps {
-                let dependency = resolve_form_import(canonical, tok)?;
-                let dependency_display = dependency.display().to_string();
-                load_form_source_bml_prelude(&dependency, &dependency_display, seen, parts)?;
-            }
-        }
-        body.push(line);
-    }
-    for tok in home_links(source, &home_index_for(canonical)) {
-        let dependency = resolve_form_import(canonical, &tok)?;
-        let dependency_display = dependency.display().to_string();
-        if tok.ends_with(".bml") {
-            load_form_source_bml_prelude(&dependency, &dependency_display, seen, parts)?;
-        } else {
-            load_form_source_file(&dependency, &dependency_display, seen, parts)?;
-        }
-    }
-    parts.push((display_path.to_string(), body.join("\n")));
-    Ok(())
-}
-
-// Link by name, the rule every kernel reads from form-stdlib/home-index.txt: a source that
-// calls a name the index lists, and defines no such name itself, loads the name's home unit
-// as if it had preluded it. Comments and string literals are skipped, so a word in prose
-// links nothing.
-fn home_index_for(owner: &Path) -> Vec<(String, String)> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Vec<(String, String)>>>> =
-        std::sync::OnceLock::new();
-    let Ok(path) = resolve_form_import(owner, "form-stdlib/home-index.txt") else {
-        return Vec::new();
-    };
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut guard = cache.lock().unwrap();
-    if let Some(rows) = guard.get(&path) {
-        return rows.clone();
-    }
-    let mut rows = Vec::new();
-    if let Ok(body) = fs::read_to_string(&path) {
-        for line in body.split('\n') {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 2 || fields[0].starts_with('#') {
-                continue;
-            }
-            rows.push((fields[0].to_string(), fields[1].to_string()));
-        }
-    }
-    guard.insert(path, rows.clone());
-    rows
-}
-
-fn home_sym_byte(c: u8) -> bool {
-    !matches!(
-        c,
-        b' ' | b'\t' | b'\n' | b'\r' | b'(' | b')' | b'"' | b';' | b',' | b'[' | b']' | b'{'
-            | b'}' | b'\'' | b'`' | b'=' | b':'
-    )
-}
-
-fn home_links(text: &str, rows: &[(String, String)]) -> Vec<String> {
-    if rows.is_empty() {
-        return Vec::new();
-    }
-    let b = text.as_bytes();
-    let mut used = vec![false; rows.len()];
-    let mut defined = vec![false; rows.len()];
-    let mut prev: &[u8] = &[];
-    let mut call_head = false;
-    let mut i = 0usize;
-    while i < b.len() {
-        let c = b[i];
-        if c == b';' || (c == b'/' && i + 1 < b.len() && b[i + 1] == b'/') {
-            while i < b.len() && b[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if c == b'"' {
-            call_head = false;
-            i += 1;
-            while i < b.len() && b[i] != b'"' {
-                if b[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            i += 1;
-            continue;
-        }
-        if !home_sym_byte(c) {
-            if c == b'(' {
-                call_head = true;
-            } else if !matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
-                call_head = false;
-            }
-            i += 1;
-            continue;
-        }
-        let s = i;
-        while i < b.len() && home_sym_byte(b[i]) {
-            i += 1;
-        }
-        let tok = &b[s..i];
-        for (h, row) in rows.iter().enumerate() {
-            if row.0.as_bytes() == tok {
-                if prev == b"defn" || prev == b"def" {
-                    defined[h] = true;
-                } else if !call_head || !reserved_heads::fkwu_reserved(&row.0) {
-                    used[h] = true;
-                }
-            }
-        }
-        prev = tok;
-        call_head = false;
-    }
-    rows.iter()
-        .enumerate()
-        .filter(|(h, _)| used[*h] && !defined[*h])
-        .map(|(_, row)| row.1.clone())
-        .collect()
-}
-
-fn load_form_source_closure(paths: &[String]) -> Result<Vec<(String, String)>, String> {
-    let mut seen = HashSet::new();
-    let mut parts = Vec::with_capacity(paths.len());
-    for path in paths {
-        load_form_source_file(Path::new(path), path, &mut seen, &mut parts)?;
-    }
-    Ok(parts)
-}
-
 fn main_with_args(args: Vec<String>) -> i32 {
     set_crash_trace_context("startup", &args, None);
     if args.is_empty() {
@@ -14787,11 +13359,9 @@ fn main_with_args(args: Vec<String>) -> i32 {
         "query" => cli_query(&args[1..]),
         "trace" => cli_trace(&args[1..]),
         "fetch" => cli_fetch(&args[1..]),
-        "run" => cli_run(&args[1..]),
         "serve" => cli_serve(&args[1..]),
-        "check" => cli_check(&args[1..]),
         _ => {
-            // Source adapter: --expr or <file.fk> [more.fk ...]
+            // Source adapter: --expr, or plain Form files read in argv order as one unit.
             let mut line_map: Vec<(String, u32)> = Vec::new();
             let src = if args[0] == "--expr" {
                 if args.len() < 2 {
@@ -14800,17 +13370,17 @@ fn main_with_args(args: Vec<String>) -> i32 {
                 }
                 args[1].clone()
             } else {
-                let loaded = match load_form_source_closure(&args) {
-                    Ok(parts) => parts,
-                    Err(error) => {
-                        eprintln!("{}", error);
-                        std::process::exit(1);
-                    }
-                };
-                let mut parts = Vec::with_capacity(loaded.len());
+                let mut parts = Vec::with_capacity(args.len());
                 let mut next_line = 1u32;
-                for (path, source) in loaded {
-                    line_map.push((path, next_line));
+                for path in &args {
+                    let source = match fs::read_to_string(path) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("read {}: {}", path, e);
+                            return 1;
+                        }
+                    };
+                    line_map.push((path.clone(), next_line));
                     // +1 for the join newline between parts.
                     next_line += source.matches('\n').count() as u32 + 1;
                     parts.push(source);
