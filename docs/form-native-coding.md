@@ -181,19 +181,25 @@ local review. The caller reports session accounting beside the local work.
 
 This is a guide, not a schedule. The highest goal is local end-to-end success
 and quality: form-cli carrying any query, any task, and any frequency-aligned
-review and flow without requiring a remote prompt, so anyone can use it without
-a provider. Speed and the number of local tokens are not the target. Minimize
-the number of remote prompts and the remote tokens the task required. Remote
-access remains available.
+review and flow without requiring a remote prompt for the work, so anyone can
+use it without a provider. Increase local token use. Local tokens never carry
+a penalty. Minimize the remote prompts and remote tokens the work itself
+required. A review of each step may use remote tokens, and that review is free,
+because it is not the work. Prefer a local guide. A remote guide is light, and
+it waits until the local guide has failed more than once. Remote access remains
+available.
 
-Before any remote prompt, stay on the local path. Try another prompt, another
-approach, a repair, a local review, and feedback among local prompts. A satsang
-of local readings can inquire, point, and answer one another. Shifting the
-assemblage point changes which local lane is visible. Different local models
-carry different tasks. The native lifter, the owned coding checkpoint, and the
-original checks stay in that loop. Prove a candidate exists before a remote
-admission. A remote prompt is for one decision the local attempts did not
-complete, and it carries the retained failure, with its usage attributed.
+Before any remote prompt that does the work, stay on the local path. Try
+another prompt, another approach, a repair, a local review, and feedback among
+local prompts. A satsang of local readings can inquire, point, and answer one
+another. Shifting the assemblage point changes which local lane is visible.
+Different local models carry different tasks. The native lifter, the owned
+coding checkpoint, and the original checks stay in that loop. Prove a candidate
+exists before a remote admission that does the work. That prompt is for one
+decision the local attempts did not complete, and it carries the retained
+failure, with its usage attributed. A remote review of a step stays free. A
+remote guide stays light, and it follows a local guide that has failed more
+than once.
 
 **The loop.** Work reaches the local path in four steps, each a door the body
 runs:
@@ -218,21 +224,23 @@ runs:
    included, beside its local tokens to `receipts/session-rent-ledger.jsonl`.
 
 A rented session opens with the review, works its `next`, and spends a remote
-prompt only where the local path has not completed the task: writing a
-band-first gap, healing the lane, or one decision a retained failure names.
-Work the lane could take goes to the queue. Before that prompt, the local lane
-may try another prompt, another approach, a repair, a local review, feedback
-among its own prompts, or another local model. The session closes with the
-meter and the review.
+prompt on the work only where the local path has not completed the task:
+writing a band-first gap, healing the lane, or one decision a retained failure
+names. Work the lane could take goes to the queue. Before that prompt, the
+local lane may try another prompt, another approach, a repair, a local review,
+feedback among its own prompts, or another local model. Review of each step
+may use remote tokens, and that review is free. A guide is local first. A
+remote guide is light, and it waits until the local guide has failed more than
+once. The session closes with the meter and the review.
 
-Compare similar work by required remote prompts and required remote tokens,
-with verified completion kept. A remote review of a result the local path
-already completed is help. Record it. It does not count against the goal,
-because the task did not require it. When the local path misses, the retained
-failure chooses the next local repair in the same context. Expand the task set
-only as that evidence holds. Zero is a movement that did not require a remote
-prompt. It is witnessed by these readings, not by a date and not by how many
-local tokens were spent.
+Compare similar work by the remote prompts and remote tokens the work required,
+with verified completion kept. Increase local token use. Local tokens never
+carry a penalty. A remote review of a step is free. Record it. It is not the
+work, so requiring no remote tokens for the work still holds. When the local
+path misses, the retained failure chooses the next local repair in the same
+context. Expand the task set only as that evidence holds. Zero is a movement
+whose work did not require a remote prompt. It is witnessed by these readings,
+not by a date. More local tokens are welcome.
 
 Each meter has one job. A Claude Code session is read whole by
 `observe/session-rent-run.bml`: its transcript and every subagent transcript
@@ -249,14 +257,14 @@ added twice.
 
 Pair those readings with the native coding result's generated/injected IDs,
 attempts, checks, release and the functions/lines actually changed. Include
-coordination and unsuccessful attempts in session cost. The volume ratio is a
-record, not the target. Compare similar work by how many remote prompts the
-task required, and how many remote tokens those prompts used. Mark a remote
-call as review-only when the local result had already passed its checks; that
-call stays in the row and is not required. More local attempts are welcome
-when they raise the chance of completing locally. Spending local tokens with
-no gain in success or quality is not an improvement. When the local path
-misses, the retained failure chooses the next local repair in the same context.
+coordination and unsuccessful attempts in the record. Compare similar work by
+how many remote prompts the work required, and how many remote tokens those
+prompts used. Mark a remote call as review when it read a step and did not do
+the work; that call stays in the row and carries no penalty. Mark a remote
+call as a light guide when a local guide has already failed more than once.
+Increase local token use. Local tokens never carry a penalty. More local
+attempts are welcome. When the local path misses, the retained failure chooses
+the next local repair in the same context.
 
 The lane has closed gaps written as band-first gaps and spent eight options
 without progress on one too large for it; the review names such a gap `split`.
