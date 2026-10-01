@@ -37,24 +37,28 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
 ## Body-wide witnesses
 
 ```text
-./fkwu gate/drift-gates-run.bml          -> drift-gates pass=32767 full=32767 refused=0 (15 rows; a row whose ground did not move sits out)
+./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (17 rows; a row whose ground did not
+                                            move since origin/main sits out and leaves the fold; 2026-10-01 on the gates
+                                            branch: 6 of 17 rows ran, pass=63 full=63 refused=0)
 ./fkwu gate/structural-gate-run.fk       -> structural-gate-v3 [8, 0, 1, 0, 0, 0, 7] then 1
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> docs=35 claims=709 broken=0 (each broken claim named on its own line; 2026-10-01)
+./fkwu observe/door-link-health-run.bml  -> docs=35 claims=720 broken=0 (each broken claim named on its own line; 2026-10-01)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/belief-stamps.bml         -> 74069000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
+./fkwu observe/belief-stamps.bml         -> 70065000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
 observe/tests/belief-rewitness-band      -> 63
-./fkwu form/form-stdlib/release-ledger.bml -> open=26 moving=0, then 26000000
+./fkwu form/form-stdlib/release-ledger.bml -> open=22 moving=0, then 22000000 (2026-10-01)
 learn/tests/homecoming-distillation-corpus-band -> 32767
-value-eq-arena-band 31 · import-carry-band 63 · form-cli-author-high-band 4095
+value-eq-arena-band 31 · import-carry-band 255 · form-cli-author-high-band 4095
+closure-lines-band 31 · sort-band 31   (the queue's two gaps, written by the local lane; 2026-10-01)
+form-cli-landing-band 63   (the landing reads its witness's exit; a red witness holds the landing)
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
 pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · offer-ack-core-band 32767
 control/tests/attempt-band 4095 · file-bytes-band 127   (no PROOF LEVEL line: four-way when the siblings run)
-form-bml-cursor-full-band 105   (FOURTH-ARM ONLY)
+form-bml-cursor-full-band 105   (four-way: it declares no PROOF LEVEL, and Go, Rust, TypeScript and fkwu agree)
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
 form/form-stdlib/tests/primitive-registry-band.fk 47   (2026-10-01, rc 0)
 form/form-stdlib/tests/form-agent-tools-band.bml 524287 (2026-10-01: the resident agent tools over their JSON wire)
@@ -69,7 +73,7 @@ lapse. The release ledger's open rows are the body's named work, each with its w
 A unit lowers by what it carries: any file with a `section [` block — `form.bml`, `form.lift`,
 `form.action`, `form.route`, the `*.bmf` grammar dialects — travels through `bml-floor-compile`
 whatever its extension, as a prelude or as the main file, and fkwu keeps the `.lowfk`/`.fkb` cache
-beside it. Of 530 tracked `.bml` files, 464 carry a `section [form.bml]` block and three carry
+beside it. Of 553 tracked `.bml` files, 487 carry a `section [form.bml]` block and three carry
 `section [form.lift]` (`git ls-files '*.bml' | xargs command grep -a -l '^section \[form.bml\]' | wc -l`,
 read on the tree that carries this line, 2026-10-01; the counts grow with each new unit). `true` and `false` are literals in the
 dialect, and a nested `defn` is a registered function (the two nested-defn bands below).
@@ -80,10 +84,12 @@ refusals all come through it. It reads a section whole, with direct backtracking
 the compiler's own constructors, so a def lowers to the very node its flat Form spelling builds:
 
 ```text
-./fkwu observe/bml-cursor-coverage-run.bml -> files=1373 sections=1018 read=1018 stops=0 refused=0
+./fkwu observe/bml-cursor-coverage-run.bml -> files=1399 sections=1041 read=1041 stops=0 refused=0
                                               (read = sections: every `^section [form.bml|route|action]` line in
-                                              tracked `.bml` and `.fk` files; the counts grow with each new
-                                              unit; read on the tree that carries this line, 2026-10-01)
+                                              the `.bml` and `.fk` files under the root, outside .git, .hearth,
+                                              .claude, .cache, node_modules, target and dist; the counts grow
+                                              with each new unit; read on the tree that carries this line,
+                                              2026-10-01)
                                               a section it refuses is named by line, word and wanted rule
 form-bml-cursor-full-band 105
 ```
@@ -293,17 +299,18 @@ blueprint-authority-band 65535
 
 What answered red, died, or was not witnessed today, so no one leans on it:
 
-- The queue's two open gaps read red until the local lane writes their definitions:
-  `closure-lines-band` 28 rc 1 and `sort-band` 0 rc 1, each pinned `; Verdict 31` (2026-10-01;
-  `./fkwu --check` names the definitions the lane is to write: `cl-unit-at`; `sort-ints`, `sort-by`,
-  `sort-strs`).
 - `form-source-lift` over a mixed module whose first plain form carries a `; preludes:` header writes the
   lifted `import` inside the first section, and its own verification compile stops: `the cursor does not
   read this form.bml section: line 3: import (wanted: topstmt)` (2026-10-01). The five grammar packs it
   lifted carry their imports above the section by hand; `form-source-lift-band` holds no such case yet.
-- `form-cli-allowance-band`, `form-cli-live-band` and `native-tensor-lifecycle-band` compile
-  (`./fkwu --check`, rc 0, 2026-10-01): their `section [form.lift]` preludes now lower. Each reaches
-  the Metal door, so their verdicts (pinned 2047, 255 and 1023) wait on a GPU the voice is not holding.
+- `form-cli-allowance-band`, `form-cli-live-band` and `native-tensor-lifecycle-band` reach the Metal
+  door and were not re-run in the gates pass (it held no GPU). The integrated review's sweep
+  (2026-10-01) read form-cli-allowance 2047 on all four arms, and form-cli-live 255 and
+  native-tensor-lifecycle 1023 on fkwu; those two now declare FOURTH-ARM ONLY, since no sibling carries
+  a `metal_*` door.
+- `form-glass-wait-band` read 246 of 255 on the fkwu-only lane (2026-10-01, several sweeps loading the
+  host): it landed 12 of 20 rests inside half a millisecond and its watched frame did not wake it. A
+  quiet machine is the reading that counts.
 - BML `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111; R78). The lowering's other
   open row stands in the ledger: R96 (lowering time grows with one form's argument count).
 - Windows: the seed's `_WIN32` branch carries its own spawn and wait twins (`fk_win_spawn`,

@@ -228,6 +228,21 @@ The flows run on it:
   that meets it is the turn's own walk through the voice, which hears each step
   of the band that did not hold.
 
+Two carriers meet their surprises the same way outside `live.bml`:
+
+- The landing (`form/form-stdlib/bml/form-cli-landing.bml`, `ld-land`): the
+  witness runs first and its exit is read after the last `[witness] exit=` mark it
+  leaves, so a witness cannot answer for its own exit by printing the mark. A named
+  witness that does not exit 0, or whose launch vanished, holds the landing, and
+  the report says `held: the witness refused (exit N)` (`form-cli-landing-band` 63).
+- The sweep (`form/validate.sh`): every leg runs beside a watch that bounds it. A
+  sibling's deadline is fkwu's own wall time on that band times a factor, between a
+  floor and a ceiling; a leg past it is ended with its whole process tree, its band
+  fails naming the kernel, its streams are kept, and the sweep moves on. Legs run
+  under the host's temp root, so a walk of the checkout never meets a vanishing
+  legs dir; a failing workload's legs move to `.hearth` as its evidence, and every
+  fifo a leg left is released, removed and named in the evidence.
+
 ## Kernel protocol witness
 
 After the normal ground and freshness checks:
@@ -267,10 +282,15 @@ conf toggle printing to stderr — unreadable by the program and uncorrelatable
 in a diagnostic window. When a run surprises, put `(kernel_stat 15)` through
 `(kernel_stat 18)` into the outbound payload before bisecting bytes.
 `observe/tests/import-carry-band.fk` is the regression band for this pulse. It
-prints one line: 63 through the import-lane door cold and the cached door warm.
-The first run after a different fkwu build wrote the fixture unit's image reads
-15: stderr names the foreign `.fkb`, the import lane steps aside, and bits 16 and
-32 (the pulse) do not hold. The next run reads 63 (both re-run 2026-10-01).
+makes the pair's home itself, a fresh directory under `temp_dir` holding copies
+of the fixture unit and floor, and asks a child `./fkwu` to walk the pair there
+twice: cold through the import-lane door (door 1) and warm through the cached
+door (door 2). It answers 255 whatever images another build left in the
+checkout. A pair compiled beside a fixture image that a different fkwu build
+wrote reads 15 on that run: stderr names the foreign `.fkb`, the import lane
+steps aside, and bits 16 and 32 (the pulse) do not hold until the next run. The
+band's own home never holds such an image; a copy of the band that lets another
+build walk the home first reads 143.
 
 ## Integration pattern
 
