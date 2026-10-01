@@ -1528,11 +1528,27 @@ function walkBlock(
     frame.bind(name.inst, value);
     return value;
   }
+  // a do binds its lets and defns for the rest of itself only (walkUnit reads the
+  // unit's root do flat)
+  return walkFlat(k, kids, new Frame(frame));
+}
+
+// walkFlat — a do's forms in one scope, the last one's value answering.
+function walkFlat(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
   let result: Value = { kind: "null" };
   for (const c of kids) {
     result = walk(k, c, frame);
   }
   return result;
+}
+
+// walkUnit — the unit's root: a root do reads flat, its lets and defns the unit's.
+function walkUnit(k: Kernel, node: NodeID, frame: Frame): Value {
+  if (node.level !== Level.TRIVIAL) {
+    const cat = k.category(node);
+    if (cat.type === RBasic.BLOCK && cat.inst === RBlock.DO) return walkFlat(k, k.children(node), frame);
+  }
+  return walk(k, node, frame);
 }
 
 // FNDEF children: [name-trivial, params-SEQUENCE-of-name-trivials, body]
@@ -1647,7 +1663,7 @@ function main(): void {
   const k = new Kernel();
   const frame = new Frame(null);
   const node = readAll(k, src);
-  const value = walk(k, node, frame);
+  const value = walkUnit(k, node, frame);
   console.log(k.render(value));
 }
 

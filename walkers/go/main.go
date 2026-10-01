@@ -345,6 +345,10 @@ type Kernel struct {
 
 	natives      map[NameID]NativeEntry
 	switchTables map[NodeID]*switchTable
+
+	// root — the unit's root, whose do reads flat (its lets and defns are the
+	// unit's); every other do is a lexical scope, as in the kernels.
+	root NodeID
 }
 
 func NewKernel() *Kernel {
@@ -673,6 +677,11 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 			}
 			if len(kids) == 0 {
 				return Value{}
+			}
+			// a do binds its lets and defns for the rest of itself only; the
+			// unit's root do reads flat
+			if n != k.root {
+				env = NewFrame(env)
 			}
 			for i := 0; i < len(kids)-1; i++ {
 				k.walk(kids[i], env)
@@ -1524,6 +1533,7 @@ func main() {
 
 	k := NewKernel()
 	root := readRootFromSource(k, src)
+	k.root = root
 	env := NewFrame(nil)
 	result := k.walk(root, env)
 	fmt.Println(result.String())
