@@ -177,11 +177,14 @@ section [form.bml] {
    };
   };
  }
- def fsl-surface-call(grammar,word,values,local-renderer) {
-  let args = map(value => fsl-surface-walk(grammar,cursor-str(value),"",[],local-renderer),values);
-  let base = nil?(args) ? "" : fsl-surface-base(grammar,args[0]);
+ def fsl-surface-call(grammar,word,values,bindings) {
+  let args = map(value => fsl-surface-walk(grammar,cursor-str(value),"",[],bindings),values);
   if word == "list" then str-join(["[",str-join-with(args,","),"]"])
-  else if len(args) == 1 then match word {
+  else if word == "empty" && nil?(args) then "[]"
+  else {
+  let base = nil?(args) ? "" : fsl-surface-base(grammar,args[0]);
+  if len(args) == 1 then match word {
+   "not" => str-join(["!",base]),
    "head" => str-join([base,"[0]"]),
    "tail" => str-join([base,"[1:]"]),
    "str_len" => str-join(["len(",args[0],")"]),
@@ -203,10 +206,11 @@ section [form.bml] {
    rule[0] == "" ? fail : word == "add" ? str-join(["((Number) ",base," + (Number) ",right,")"]) :
     str-join(["(",rule[2],base," ",rule[0]," ",right,")"]);
   };
+  };
  }
  let fsl-surface-calls = foldl((names,name) => record_set(names,name,1),record_new(0),
-  append(["list","nth","range","head","tail","str_len","str_concat","int_to_str","value_str"],record_keys(fsl-operators)));
- def fsl-surface-walk(grammar,cursor,previous,pieces,local-renderer) {
+  append(["list","empty","nth","range","head","tail","str_len","str_concat","int_to_str","value_str"],record_keys(fsl-operators)));
+ def fsl-surface-walk(grammar,cursor,previous,pieces,bindings) {
   let at = skip-ws(cursor);
   if cur-eof?(at) then str-join(reverse(cons(cur-slice(cursor,cur-pos(at)),pieces))) else {
    let quoted = cur-peek-char(at) == "\"" || cur-peek-char(at) == "'";
@@ -214,13 +218,13 @@ section [form.bml] {
    let after = quoted ? cur-advance(gm-q-scan(cur-advance(at,1),cur-peek(at)),1) :
     !nothing?(name) && m-ok?(name) ? m-cur(name) : cur-advance(at,1);
    let word = cur-slice(at,cur-pos(after)); let open = skip-ws(after);
-   let eligible = previous != "def" && previous != "." && (!local-renderer || word != "int_to_str") &&
+   let eligible = previous != "def" && previous != "." && !any?(name => name == word,bindings) &&
     record_has(fsl-surface-calls,word) && cur-peek-char(open) == "(";
    let parsed = eligible ? fsl-surface-args(grammar,cur-advance(open,1),[]) : nothing();
-   let replacement = nothing?(parsed) ? fail : fsl-surface-call(grammar,word,parsed[1],local-renderer);
+   let replacement = nothing?(parsed) ? fail : fsl-surface-call(grammar,word,parsed[1],bindings);
    let prefix = cur-slice(cursor,cur-pos(at));
-   nothing?(replacement) ? fsl-surface-walk(grammar,after,word,cons(((String) prefix + word),pieces),local-renderer) :
-    fsl-surface-walk(grammar,parsed[0],")",cons(str-join([prefix,cur-slice(after,cur-pos(open)),replacement]),pieces),local-renderer);
+   nothing?(replacement) ? fsl-surface-walk(grammar,after,word,cons(((String) prefix + word),pieces),bindings) :
+    fsl-surface-walk(grammar,parsed[0],")",cons(str-join([prefix,cur-slice(after,cur-pos(open)),replacement]),pieces),bindings);
   };
  }
  def fsl-surface-parts(source,start,read-body) {
@@ -238,8 +242,9 @@ section [form.bml] {
  def fsl-surface-sections(source,start) {
   let grammar = form-bml-grammar();
   str-join(fsl-surface-parts(source,start,body => {
-   let local-renderer = str_find(body,"int_to_str",0) >= 0 && fsl-binding?(fsc-rec-do(fsc-form-bml-lines-recipes-loop(body,0,[])),"int_to_str");
-   fsl-surface-walk(grammar,cursor-str(body),"",[],local-renderer);
+   let names = filter(name => str_find(body,name,0) >= 0,["int_to_str","empty","not"]);
+   let bindings = nil?(names) ? [] : fsl-bound-calls(fsc-rec-do(fsc-form-bml-lines-recipes-loop(body,0,[])),names);
+   fsl-surface-walk(grammar,cursor-str(body),"",[],bindings);
   }));
  }
  // Module imports retain dependency order and loader spelling. Quoted source
@@ -265,15 +270,18 @@ section [form.bml] {
    (node_eq(category,fsc-rec-FNDEF-CAT) && any?(row => row[0] == name,fsc-bml-type-params(node_children(kids[1])))) ||
    any?(child => fsl-binding?(child,name),kids);
  }
- def fsl-semantic-recipe(recipe) = fsl-semantic-recipe-in(recipe,fsl-binding?(recipe,"int_to_str"));
- def fsl-semantic-recipe-in(recipe,shadowed) {
+ def fsl-bound-calls(recipe,names) = filter(name => fsl-binding?(recipe,name),names);
+ def fsl-semantic-recipe(recipe) = fsl-semantic-recipe-in(recipe,fsl-bound-calls(recipe,["int_to_str","empty","not"]));
+ def fsl-semantic-recipe-in(recipe,bindings) {
   let kids = node_children(recipe); let category = node_category(recipe);
   let call = node_eq(category,fsc-rec-FNCALL-CAT);
   let name = call ? fsc-bml-type-name(kids[0]) : fsc-source-primitive-name(category);
-  let args = map(child => fsl-semantic-recipe-in(child,shadowed),call ? kids[1:] : kids);
+  let args = map(child => fsl-semantic-recipe-in(child,bindings),call ? kids[1:] : kids);
   if nil?(kids) then recipe
   else if name == "str_len" then fsc-rec-form-call("len",args)
-  else if name == "int_to_str" && !shadowed then fsc-rec-form-call("value_str",args)
+  else if name == "int_to_str" && !any?(word => word == name,bindings) then fsc-rec-form-call("value_str",args)
+  else if name == "empty" && nil?(args) && !any?(word => word == name,bindings) then fsc-rec-call("list",[])
+  else if name == "not" && !any?(word => word == name,bindings) then fsc-rec-form-call("not",args)
   else if name == "bml-value-tail" then fsc-rec-form-call("tail",args)
   else if name == "bml-value-first" then fsc-rec-form-call("head",args)
   else if name == "bml-value-slice" && len(args) == 3 && node_eq(args[1],intern_trivial_int(1)) &&
@@ -298,7 +306,7 @@ section [form.bml] {
  def fsl-semantic-structure(source) = fsl-surface-parts(form-bml-import-lift(source),0,body =>
   fsl-semantic-recipe(fsc-rec-do(fsc-form-bml-lines-recipes-loop(body,0,[]))));
  def form-bml-semantic-equivalent?(source,candidate) =
-  bml-source-dependencies(source,0) == bml-source-dependencies(candidate,0) &&
+  source == candidate || bml-source-dependencies(source,0) == bml-source-dependencies(candidate,0) &&
    fsl-semantic-structure(source) == fsl-semantic-structure(candidate);
  // Identity before type resolution retains comparison annotations, lexical
  // bindings and call order. Equal recipes receive identical imported context;
@@ -308,7 +316,7 @@ section [form.bml] {
   fsc-rec-do(fsc-form-bml-lines-recipes-loop(body,0,[]));
  });
  def form-bml-surface-equivalent?(source,candidate) =
-  bml-source-dependencies(source,0) == bml-source-dependencies(candidate,0) &&
+  source == candidate || bml-source-dependencies(source,0) == bml-source-dependencies(candidate,0) &&
    fsl-surface-structure(source) == fsl-surface-structure(candidate);
  def form-bml-source-lift(source,owner) = fsl-surface-verify(source,form-bml-import-lift(fsl-surface-sections(source,0)),owner,record_new(0));
  def fsl-surface-verify(source,candidate,owner,discovery) {

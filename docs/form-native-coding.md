@@ -31,6 +31,9 @@ re-reading an unchanged dependency graph. This narrow proof does not produce a
 compiled image; ordinary source admission still resolves imports and validates
 execution.
 
+The lifter turns unshadowed `empty()` into `[]` and `not(value)` into `!value`,
+retaining local constructors and bindings. Identical source bytes discharge
+the identity comparison directly; changed candidates still carry the proof.
 The lifter uses `form-bml-semantic-equivalent?` for the extended surface. It
 additionally normalizes the admitted string-length, standard value-rendering,
 list-first/remainder and explicitly contracted operator forms. This comparison
