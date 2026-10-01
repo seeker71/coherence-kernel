@@ -1,0 +1,404 @@
+// form-cli-code-circle.bml — a local satsang for code. The local candidates of one gap sit in one held
+// circle (form-stdlib/circle.bml's cells, unchanged) and at most one is accepted, with no rented review.
+// One round, in order:
+//   1. audits, zero tokens: only writable paths moved, each moved file keeps the paren and brace balance
+//      it had, a moved .fk file reads clean against fkwu's arities, and a done claim stands on a changed
+//      document;
+//   2. execution: each kept candidate is published over its writable files, its band runs within the
+//      gap's deadline, and the files return to their checkpoint (oac-store, oac-restore) on every path: a
+//      deferred restore holds through a stop, and a publish marker lets the next round restore what a
+//      killed process left;
+//   3. riftcase: among candidates tied at the best reading, a proposer offers inputs from the goal, fkwu
+//      evaluates each input against each candidate on the CPU, agreeing inputs are dropped, and a judge
+//      reads only the goal and the two outputs of each separating input;
+//   4. voices: reviewers on a model or lens other than the writer's read goal, diff, execution pair and
+//      riftcase outputs and answer accept or reject with findings, as CIRCLE-SHARE cells; a reviewer with
+//      the writer's own model and lens keeps silence;
+//   5. cc-circle-consensus per candidate at the threshold, with an execution veto: a band short of full
+//      cannot pass, whatever the votes.
+// A reject travels as a CIRCLE-REFUSAL (audit, execution or voices) carried as evidence. When nothing
+// passes, the circle offers exactly one cc-satsang-pointing with not_command true: the local guide for
+// the ladder's next fresh rung. Each round leaves one cc-circle-receipt whose cost is the voices' local
+// generated IDs, and one row in <root>/rounds.jsonl.
+//
+// Voices, proposer, judge and guide are [name, model, lens, act], where act(packet) answers
+// [verdict-or-value, findings, local IDs]; executor and prober are functions too, so a band scripts the
+// voices and the ladder hands in local models (fccc-qwen-voice).
+import form-stdlib/circle.bml;
+import control/choice-lane-core.fk;
+import form-stdlib/bml/text-diff.bml;
+import form-stdlib/bml/form-cli-code-live.bml;
+section [form.bml] {
+ class FormCliCodeCircle {
+  // ── the gap the circle holds: originals are the documents the lane read ──
+  def fccc-gap(id, goal, originals, writable, band, full, root, deadline) = [id, goal, originals, writable, band, full, root, deadline];
+  def fccc-gap-id(g) = g[0];
+  def fccc-gap-goal(g) = g[1];
+  def fccc-gap-originals(g) = g[2];
+  def fccc-gap-writable(g) = g[3];
+  def fccc-gap-band(g) = g[4];
+  def fccc-gap-full(g) = g[5];
+  def fccc-gap-root(g) = g[6];
+  def fccc-gap-deadline(g) = g[7];
+  // ── a candidate: one rung's documents, who wrote them, and whether its lane claimed done ──
+  def fccc-candidate(id, author, model, lens, docs, claimed, ids) = [id, author, model, lens, docs, claimed, ids];
+  def fccc-cand-id(c) = c[0];
+  def fccc-cand-author(c) = c[1];
+  def fccc-cand-model(c) = c[2];
+  def fccc-cand-lens(c) = c[3];
+  def fccc-cand-docs(c) = c[4];
+  def fccc-cand-claimed(c) = c[5];
+  def fccc-cand-ids(c) = c[6];
+  def fccc-result-int(result, key) = json-object-has?(result, key) && ((String) faj-type(json-object-get(result, key)) == "number") ? json-int-value(json-object-get(result, key)) : 0;
+  // a lane result (form-native-code-v1) as a candidate
+  def fccc-candidate-of-result(id, author, model, lens, result) {
+   let docs = fat-wire-documents(result);
+   let claimed = (fccc-result-int(result, "completed_tasks") > 0) || ((String) fcap-string(result, "status") == "complete");
+   fccc-candidate(id, author, model, lens, (String) fat-wire-error(docs) == "" ? fat-wire-value(docs) : [], claimed, fccc-result-int(result, "generated_ids"));
+  }
+  // ── a voice ──
+  def fccc-voice(name, model, lens, act) = [name, model, lens, act];
+  def fccc-voice-name(v) = v[0];
+  def fccc-voice-act(v) = v[3];
+  def fccc-same-voice?(v, c) = ((String) v[1] == fccc-cand-model(c)) && ((String) v[2] == fccc-cand-lens(c));
+  // ── options: proposer, judge and guide may be [] ──
+  def fccc-opts(voices, threshold, proposer, judge, guide, executor, prober) = [voices, threshold, proposer, judge, guide, executor, prober];
+  def fccc-default-opts(voices, threshold, proposer, judge, guide) = fccc-opts(voices, threshold, proposer, judge, guide, fccc-execute, fccc-probe);
+  def fccc-opt-voices(o) = o[0];
+  def fccc-opt-threshold(o) = o[1];
+  def fccc-opt-proposer(o) = o[2];
+  def fccc-opt-judge(o) = o[3];
+  def fccc-opt-guide(o) = o[4];
+  def fccc-opt-executor(o) = o[5];
+  def fccc-opt-prober(o) = o[6];
+
+  def fccc-call(f, a) = f(a);
+  def fccc-call2(f, a, b) = f(a, b);
+  def fccc-call3(f, a, b, c) = f(a, b, c);
+  // a voice that stops is heard as nothing: its silence is evidence, never the round's end
+  def fccc-try-act(voice, packet) = try fccc-call(fccc-voice-act(voice), packet) else nothing();
+  def fccc-zip(a, b) = (nil?(a) || nil?(b)) ? [] : cons([a[0], b[0]], fccc-zip(a[1:], b[1:]));
+  def fccc-cut(s, n) = len(s) > n ? substring(s, 0, n) : s;
+  def fccc-sum(xs) = foldl((a, x) => a + x, 0, xs);
+  def fccc-ends?(s, tail) = (len(s) >= len(tail)) && ((String) substring(s, len(s) - len(tail), len(s)) == tail);
+  def fccc-starts?(s, head) = (len(s) >= len(head)) && ((String) substring(s, 0, len(head)) == head);
+  def fccc-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : (xs[0] ++ sep ++ fccc-join(xs[1:], sep));
+  def fccc-index(xs, i) = nil?(xs) ? [] : cons([i, xs[0]], fccc-index(xs[1:], i + 1));
+  def fccc-text-of(docs, path) = nil?(fat-find-doc(docs, path)) ? nothing() : fat-find-doc(docs, path)[2];
+  def fccc-same-text?(a, b) = nothing?(a) ? nothing?(b) : (!nothing?(b) && ((String) a == b));
+  def fccc-same-texts?(a, b) = nil?(a) ? nil?(b) : (!nil?(b) && (fccc-same-text?(a[0], b[0]) && fccc-same-texts?(a[1:], b[1:])));
+  def fccc-show(v) = nothing?(v) ? "nothing" : v.str();
+  def fccc-node-or-null(v) = nothing?(v) ? json-node-null() : json-node-string(v);
+
+  // ── 1. audits, zero tokens: "" when a candidate stands, otherwise the reason ──
+  def fccc-bml-surface?(t) = fccc-starts?(t, "section [") || (str_find(t, "\nsection [", 0) >= 0);
+  def fccc-fk?(path, text) = fccc-ends?(path, ".fk") && !fccc-bml-surface?(text);
+  def fccc-kept-doc?(originals, doc) = fccc-same-text?(fccc-text-of(originals, doc[1]), doc[2]);
+  def fccc-moved?(originals, docs, path) = !nothing?(fccc-text-of(docs, path)) && !fccc-same-text?(fccc-text-of(docs, path), fccc-text-of(originals, path));
+  def fccc-balance(docs, path) = nothing?(fccc-text-of(docs, path)) ? "0 0\n" : fat-out(fat-call(docs, "balance", [path], ""));
+  def fccc-arity(docs, path) = fat-call(docs, "arity", [path], "");
+  def fccc-audit(gap, cand) {
+   let originals = fccc-gap-originals(gap);
+   let writable = fccc-gap-writable(gap);
+   let docs = fccc-cand-docs(cand);
+   let foreign = filter(doc => !fat-has(writable, doc[1]) && !fccc-kept-doc?(originals, doc), docs);
+   let moved = filter(path => fccc-moved?(originals, docs, path), writable);
+   if (!nil?(foreign)) then ("touched-non-writable:" ++ foreign[0][1])
+   else if nil?(moved) then (fccc-cand-claimed(cand) ? "done-claim-without-mutation" : "unchanged-candidate")
+   else fccc-audit-moved(originals, docs, moved);
+  }
+  def fccc-audit-moved(originals, docs, moved) = nil?(moved) ? "" : fccc-audit-one(originals, docs, moved[0], moved[1:]);
+  def fccc-audit-one(originals, docs, path, rest) {
+   let before = fccc-balance(originals, path);
+   let after = fccc-balance(docs, path);
+   let arity = fccc-fk?(path, fccc-text-of(docs, path)) ? fccc-arity(docs, path) : [docs, 0, "", ""];
+   if !((String) before == after) then ("balance-moved:" ++ path ++ " " ++ fat-trim(before) ++ " -> " ++ fat-trim(after))
+   else if !(((Comparable) fat-exit(arity) == 0) && (((String) fat-out(arity) == "") && ((String) fat-error(arity) == ""))) then ("arity:" ++ path ++ " " ++ fccc-cut(fat-trim(fat-out(arity) ++ fat-error(arity)), 200))
+   else fccc-audit-moved(originals, docs, rest);
+  }
+
+  // ── 2. execution: publish, band within the deadline, restore on every path ──
+  def fccc-marker(gap) = fccc-gap-root(gap) ++ "/publish-" ++ host_pid().str() ++ ".marker";
+  def fccc-texts(paths) = paths |> map(path => read_file(path));
+  def fccc-put(path, text) = nothing?(text) ? host_path_remove(path) : write_file(path, text);
+  def fccc-restore(paths, texts) = nil?(paths) ? true : {
+   let put = fccc-put(paths[0], texts[0]);
+   let rest = fccc-restore(paths[1:], texts[1:]);
+   fccc-same-text?(read_file(paths[0]), texts[0]) && rest;
+  };
+  def fccc-mark(gap, paths, texts) = write_file(fccc-marker(gap), json-emit(json-node-object([json-node-pair("pid", json-node-int(host_pid())), json-node-pair("paths", json-node-array(map(json-node-string, paths))), json-node-pair("texts", json-node-array(map(fccc-node-or-null, texts)))])) ++ "\n");
+  def fccc-publish(cand, paths) = paths |> map(path => nothing?(fccc-text-of(fccc-cand-docs(cand), path)) ? 0 : write_file(path, fccc-text-of(fccc-cand-docs(cand), path)));
+  // The source must still read as the lane read it; a tree that moved since is never overwritten.
+  def fccc-conflict(gap, paths, texts) = nil?(paths) ? "" : !fccc-same-text?(texts[0], fccc-text-of(fccc-gap-originals(gap), paths[0])) ? ("source-conflict:" ++ paths[0] ++ " changed on disk since the lane read it") : fccc-conflict(gap, paths[1:], texts[1:]);
+  // The checkpoint is a value (oac-store). The restore is deferred, so it runs when the run answers and
+  // when it stops; the marker outlives this process only if the restore did not hold.
+  def fccc-held(gap, cand, paths, checkpoint, run, arg) {
+   let marked = fccc-mark(gap, paths, checkpoint);
+   defer fccc-restore(paths, oac-restore(checkpoint));
+   let put = fccc-publish(cand, paths);
+   fccc-call3(run, gap, cand, arg);
+  }
+  // [answer or nothing, restored, conflict]
+  def fccc-with-published(gap, cand, run, arg) {
+   let paths = fccc-gap-writable(gap);
+   let checkpoint = oac-store(fccc-texts(paths));
+   let conflict = fccc-conflict(gap, paths, checkpoint);
+   if !((String) conflict == "") then [nothing(), true, conflict] else {
+    let answer = try fccc-held(gap, cand, paths, checkpoint, run, arg) else nothing();
+    let restored = fccc-same-texts?(fccc-texts(paths), checkpoint);
+    let cleared = restored ? host_path_remove(fccc-marker(gap)) : 0;
+    [answer, restored, ""];
+   };
+  }
+  // A marker left by a process that no longer lives is a publish whose restore never ran: restore it.
+  def fccc-heal(root) = !fs-is-dir?(root) ? 0 : foldl((n, name) => n + fccc-heal-one(root ++ "/" ++ name, name), 0, fs-list(root));
+  def fccc-heal-one(path, name) = !(fccc-starts?(name, "publish-") && fccc-ends?(name, ".marker")) ? 0 : fccc-heal-marker(path, read_file(path) ?? "");
+  def fccc-heal-marker(path, text) = !faj-valid(text) ? 0 : fccc-heal-row(path, parse-json("publish-marker", text));
+  def fccc-heal-text(node) = (String) faj-type(node) == "null" ? nothing() : json-string-value(node);
+  def fccc-heal-row(path, row) = ((Comparable) host_alive(fccc-result-int(row, "pid")) == 1) ? 0 : {
+   let paths = map(json-string-value, json-array-elements(json-object-get(row, "paths")));
+   let texts = map(fccc-heal-text, json-array-elements(json-object-get(row, "texts")));
+   let restored = fccc-restore(paths, texts);
+   let cleared = restored ? host_path_remove(path) : 0;
+   restored ? 1 : 0;
+  };
+  // a child within its deadline: its exit status, or nothing when it could not start or was stopped
+  def fccc-spawn-wait(argv, out, err, deadline) {
+   let gone = host_path_remove(out);
+   let heard = host_path_remove(err);
+   let pid = host_spawn_at(argv, ["/dev/null", out, err]);
+   pid <= 0 ? nothing() : fccc-wait(pid, host_monotonic_ms() + deadline);
+  }
+  def fccc-wait(pid, until) = ((Comparable) host_alive(pid) != 1) ? host_wait(pid) : (host_monotonic_ms() > until) ? fccc-stop(pid) : fccc-rest(pid, until);
+  def fccc-stop(pid) {
+   host_kill(pid);
+   host_wait(pid);
+   nothing();
+  }
+  def fccc-rest(pid, until) {
+   host_sleep_ms(100);
+   fccc-wait(pid, until);
+  }
+  def fccc-digits-end(s, i) = (i < len(s)) && (str_byte_at(s, i) >= 48) && (str_byte_at(s, i) <= 57) ? fccc-digits-end(s, i + 1) : i;
+  def fccc-number(t) = ((len(t) > 0) && ((Comparable) fccc-digits-end(t, 0) == len(t))) ? str_to_int(t) : nothing();
+  def fccc-last-line(lines, last) = nil?(lines) ? last : fccc-last-line(lines[1:], (Comparable) len(trim(lines[0])) == 0 ? last : trim(lines[0]));
+  def fccc-answered(status, out) = (nothing?(status) || !((Comparable) status == 0)) ? nothing() : fccc-last-line(split-on(read_file(out) ?? "", "\n"), "");
+  def fccc-error-lines(lines, n) = (nil?(lines) || (n <= 0)) ? [] : ((str_find(lines[0], "error", 0) >= 0) && !fccc-starts?(lines[0], "form-organ")) ? cons(fccc-cut(lines[0], 300), fccc-error-lines(lines[1:], n - 1)) : fccc-error-lines(lines[1:], n);
+  def fccc-unheld(line) = fccc-starts?(line, "form-organ health {") && ((str_find(line, "\"organ\":\"live\"", 0) >= 0) && ((str_find(line, "\"stage\":\"observe\"", 0) >= 0) && (str_find(line, "\"health\":0", 0) >= 0)));
+  def fccc-claim-of(line) = faj-valid(substring(line, 18, len(line))) ? ("claim " ++ fcap-string(parse-json("band-reading", substring(line, 18, len(line))), "aspect") ++ " did not hold") : "";
+  def fccc-blocking(gap, status, reading, err) {
+   let lines = split-on(read_file(err) ?? "", "\n");
+   let head = nothing?(status) ? ("the band gave no answer within " ++ fccc-gap-deadline(gap).str() ++ " ms and was stopped") : nothing?(reading) ? ("the band exited " ++ status.str() ++ " with no number") : ("band read " ++ reading.str() ++ " of " ++ fccc-gap-full(gap).str());
+   fccc-join(append([head], append(fccc-error-lines(lines, 3), map(fccc-claim-of, filter(fccc-unheld, lines)))), "\n");
+  }
+  def fccc-band-run(gap, cand, n) {
+   let base = fccc-gap-root(gap) ++ "/band-" ++ host_pid().str() ++ "-" ++ n.str();
+   let status = fccc-spawn-wait(["./fkwu", fccc-gap-band(gap)], base ++ ".out", base ++ ".err", fccc-gap-deadline(gap));
+   let reading = fccc-number(fccc-answered(status, base ++ ".out") ?? "");
+   [reading, fccc-blocking(gap, status, reading, base ++ ".err")];
+  }
+  // the executor: [reading or nothing, blocking pair, restored]
+  def fccc-execute(gap, cand, n) {
+   let held = fccc-with-published(gap, cand, fccc-band-run, n);
+   !((String) held[2] == "") ? [nothing(), held[2], held[1]] : nothing?(held[0]) ? [nothing(), "the publish window stopped before the band answered", held[1]] : [held[0][0], held[0][1], held[1]];
+  }
+
+  // ── 3. riftcase: inputs that separate execution-tied candidates ──
+  def fccc-header-line?(line) = fccc-starts?(line, "import ") || (str_find(line, "preludes:", 0) >= 0);
+  def fccc-header(band) = fccc-join(filter(fccc-header-line?, split-on(read_file(band) ?? "", "\n")), "\n");
+  def fccc-probe-one(gap, input, tag) {
+   let bml = fccc-ends?(fccc-gap-band(gap), ".bml");
+   let path = fccc-gap-root(gap) ++ "/riftcase-" ++ host_pid().str() ++ "-" ++ tag ++ (bml ? ".bml" : ".fk");
+   let body = bml ? ("section [form.bml] {\n" ++ input ++ ";\n}\n") : ("(do\n    " ++ input ++ ")\n");
+   let wrote = write_file(path, fccc-header(fccc-gap-band(gap)) ++ "\n" ++ body);
+   fccc-answered(fccc-spawn-wait(["./fkwu", path], path ++ ".out", path ++ ".err", fccc-gap-deadline(gap)), path ++ ".out");
+  }
+  def fccc-probe-run(gap, cand, arg) = fccc-index(arg[0], 0) |> map(pair => fccc-probe-one(gap, pair[1], arg[1].str() ++ "-" ++ pair[0].str()));
+  // the prober: [outputs, restored]; each output is the last stdout line, or nothing when it stopped
+  def fccc-probe(gap, cand, arg) {
+   let held = fccc-with-published(gap, cand, fccc-probe-run, arg);
+   [nothing?(held[0]) ? map(input => nothing(), arg[0]) : held[0], held[1]];
+  }
+  def fccc-pairs(n, i, j) = i >= n ? [] : j >= n ? fccc-pairs(n, i + 1, i + 2) : cons([i, j], fccc-pairs(n, i, j + 1));
+  def fccc-judge-packet(gap, input, a, b) = json-emit(json-node-object([json-node-pair("role", json-node-string("riftcase-judge")), json-node-pair("goal", json-node-string(fccc-gap-goal(gap))), json-node-pair("input", json-node-string(input)), json-node-pair("a", fccc-node-or-null(a)), json-node-pair("b", fccc-node-or-null(b)), json-node-pair("instruction", json-node-string("Two candidates answered one input differently. Read only the goal and the two outputs. Return {\"vote\":\"a\"|\"b\"|\"neither\",\"findings\":\"what the goal asks for here\"}."))]));
+  def fccc-proposer-packet(gap) = json-emit(json-node-object([json-node-pair("role", json-node-string("riftcase-proposer")), json-node-pair("goal", json-node-string(fccc-gap-goal(gap))), json-node-pair("instruction", json-node-string("Offer up to four input expressions in the band's own surface whose answers the goal decides. Return {\"vote\":\"inputs\",\"findings\":\"[\\\"expr\\\",...]\"} or a list."))]));
+  // [rows, wins per tied candidate, local IDs, restored]; a row is [input, idA, outA, idB, outB, winner]
+  def fccc-riftcase(gap, tied, opts) {
+   let proposer = fccc-opt-proposer(opts);
+   if ((len(tied) < 2) || nil?(proposer)) then [[], map(c => 0, tied), 0, true] else {
+    let offered = fccc-try-act(proposer, fccc-proposer-packet(gap));
+    let inputs = nothing?(offered) ? [] : fccc-inputs(offered);
+    let probed = fccc-index(tied, 0) |> map(pair => fccc-call3(fccc-opt-prober(opts), gap, pair[1], [inputs, pair[0]]));
+    let restored = all?(p => p[1], probed);
+    let outs = map(p => p[0], probed);
+    let rows = foldl((acc, pair) => append(acc, fccc-pair-rows(gap, tied, outs, inputs, pair, opts)), [], fccc-pairs(len(tied), 0, 1));
+    [rows, fccc-index(tied, 0) |> map(pair => len(filter(row => (String) row[5] == fccc-cand-id(pair[1]), rows))), fccc-sum(map(row => row[6], rows)) + (nothing?(offered) ? 0 : offered[2]), restored];
+   };
+  }
+  // a scripted proposer answers the list itself; a model proposer answers vote "inputs" and the list as
+  // JSON in its findings
+  def fccc-strings(xs) = filter(x => (String) value_kind(x) == "string", xs);
+  def fccc-inputs(said) = (String) value_kind(said[0]) == "list" ? fccc-strings(said[0]) : ((String) value_kind(said[1]) == "string") && (faj-valid(said[1]) && fat-wire-array?(parse-json("riftcase-inputs", said[1]))) ? fccc-strings(map(node => fat-wire-string?(node) ? json-string-value(node) : 0, json-array-elements(parse-json("riftcase-inputs", said[1])))) : [];
+  def fccc-pair-rows(gap, tied, outs, inputs, pair, opts) = fccc-index(inputs, 0) |> map(k => fccc-rift-row(gap, tied[pair[0]], tied[pair[1]], k[1], outs[pair[0]][k[0]], outs[pair[1]][k[0]], opts));
+  // agreeing outputs are dropped (winner "agree"); a separating input goes to the judge
+  def fccc-rift-row(gap, a, b, input, oa, ob, opts) = fccc-same-text?(oa, ob) ? [input, fccc-cand-id(a), oa, fccc-cand-id(b), ob, "agree", 0] : fccc-judged(gap, a, b, input, oa, ob, fccc-opt-judge(opts));
+  def fccc-judged(gap, a, b, input, oa, ob, judge) {
+   let said = nil?(judge) ? nothing() : fccc-try-act(judge, fccc-judge-packet(gap, input, oa, ob));
+   let vote = nothing?(said) ? "" : said[0];
+   [input, fccc-cand-id(a), oa, fccc-cand-id(b), ob, (String) vote == "a" ? fccc-cand-id(a) : (String) vote == "b" ? fccc-cand-id(b) : "", nothing?(said) ? 0 : said[2]];
+  }
+  def fccc-separating(rows) = filter(row => !((String) row[5] == "agree"), rows);
+
+  // ── 4. voices ──
+  def fccc-diff(gap, cand) = fccc-join(filter(d => !((String) d == ""), map(path => fccc-diff-one(path, fccc-text-of(fccc-gap-originals(gap), path) ?? "", fccc-text-of(fccc-cand-docs(cand), path)), fccc-gap-writable(gap))), "");
+  def fccc-diff-one(path, before, after) = nothing?(after) ? "" : fccc-diff-text(path, td-diff(before, after, 2, 2400));
+  def fccc-diff-text(path, d) = (String) d == "" ? "" : ("--- " ++ path ++ "\n" ++ d);
+  def fccc-rift-json(rows, id) = filter(row => ((String) row[1] == id) || ((String) row[3] == id), fccc-separating(rows)) |> map(row => json-node-object([json-node-pair("input", json-node-string(row[0])), json-node-pair(row[1], fccc-node-or-null(row[2])), json-node-pair(row[3], fccc-node-or-null(row[4])), json-node-pair("judge_chose", json-node-string(row[5]))]));
+  def fccc-review-packet(gap, cand, standing, rows) = json-emit(json-node-object([
+   json-node-pair("role", json-node-string("circle-review")),
+   json-node-pair("goal", json-node-string(fccc-gap-goal(gap))),
+   json-node-pair("candidate", json-node-string(fccc-cand-id(cand))),
+   json-node-pair("diff", json-node-string(fccc-diff(gap, cand))),
+   json-node-pair("execution", json-node-object([json-node-pair("reading", nothing?(standing[0]) ? json-node-null() : json-node-int(standing[0])), json-node-pair("full", json-node-int(fccc-gap-full(gap))), json-node-pair("blocking", json-node-string(standing[1]))])),
+   json-node-pair("riftcase", json-node-array(fccc-rift-json(rows, fccc-cand-id(cand)))),
+   json-node-pair("instruction", json-node-string("Read the goal, the diff and the execution evidence. Return {\"vote\":\"accept\"|\"reject\",\"findings\":\"what the evidence shows\"}. Execution holds a veto: a band short of full cannot pass, whatever the votes."))]));
+  // a vote: [voice, verdict accept|reject|silence|abstain, findings, local IDs]
+  def fccc-vote(gap, cand, standing, rows, voice) = fccc-same-voice?(voice, cand) ? [fccc-voice-name(voice), "silence", "the writer's own model and lens keep silence", 0] : fccc-heard(voice, fccc-try-act(voice, fccc-review-packet(gap, cand, standing, rows)));
+  def fccc-heard(voice, said) = nothing?(said) ? [fccc-voice-name(voice), "abstain", "the voice stopped", 0] : [fccc-voice-name(voice), fat-has(["accept", "reject"], said[0]) ? said[0] : "abstain", (String) value_kind(said[1]) == "string" ? said[1] : "", said[2]];
+  def fccc-votes-of(votes, verdict) = filter(v => (String) v[1] == verdict, votes);
+  def fccc-voters(votes) = filter(v => fat-has(["accept", "reject"], v[1]), votes) |> map(v => v[0]);
+
+  // ── 5. consensus with the execution veto, refusals, and the one pointing ──
+  def fccc-circle-id(gap) = "circle:code:" ++ fccc-gap-id(gap);
+  def fccc-members(opts) = append(map(fccc-voice-name, fccc-opt-voices(opts)), ["audit", "execution"]);
+  def fccc-veto(gap, cid, id, observer, decision, boundary) = cc-circle-refusal(cid, observer, id, m-project(), [m-witness(), m-see(), m-invite(), m-offer(), m-ask-permission(), m-ask-how()], cc-circle-consensus(cid, id, [observer], 1, 1, decision), boundary);
+  // a standing: [reading, blocking, restored, audit, cand, votes, wins]
+  def fccc-full?(gap, s) = !nothing?(s[0]) && ((Comparable) s[0] == fccc-gap-full(gap));
+  def fccc-consensus-of(gap, cid, s, threshold) = cc-circle-consensus(cid, fccc-cand-id(s[4]), fccc-voters(s[5]), len(fccc-votes-of(s[5], "accept")), threshold, !fccc-full?(gap, s) ? ("execution-veto: " ++ fccc-cut(s[1], 200)) : ("accept " ++ fccc-cand-id(s[4])));
+  def fccc-passes?(gap, cid, s, threshold) = ((String) s[3] == "") && (fccc-full?(gap, s) && cc-consensus-passed?(fccc-consensus-of(gap, cid, s, threshold)));
+  def fccc-refusal-of(gap, cid, s, threshold) {
+   let id = fccc-cand-id(s[4]);
+   let rejects = fccc-votes-of(s[5], "reject");
+   if !((String) s[3] == "") then [fccc-veto(gap, cid, id, "audit", "audit-refusal", s[3])]
+   else if !fccc-full?(gap, s) then [fccc-veto(gap, cid, id, "execution", "execution-veto", s[1])]
+   else if (len(rejects) >= threshold) then [cc-circle-refusal(cid, fccc-join(map(v => v[0], rejects), ","), id, m-project(), [m-witness(), m-see(), m-invite(), m-offer(), m-ask-permission(), m-ask-how()], cc-circle-consensus(cid, id, fccc-voters(s[5]), len(rejects), threshold, "reject"), fccc-cut(fccc-join(map(v => v[2], rejects), " | "), 600))]
+   else [];
+  }
+  def fccc-better?(a, b) = (a[6] > b[6]) || ((a[6] == b[6]) && (len(fccc-votes-of(a[5], "accept")) > len(fccc-votes-of(b[5], "accept"))));
+  def fccc-pick(standings) = foldl((best, s) => nil?(best) ? s : fccc-better?(s, best) ? s : best, [], standings);
+  def fccc-rank-key(s) = nothing?(s[0]) ? -1 : s[0];
+  def fccc-ranked(standings) = fccc-rank-insert-all(standings, []) |> map(s => fccc-cand-id(s[4]));
+  def fccc-rank-insert-all(xs, out) = nil?(xs) ? out : fccc-rank-insert-all(xs[1:], fccc-rank-insert(xs[0], out));
+  def fccc-rank-insert(s, out) = nil?(out) ? [s] : (fccc-rank-key(s) > fccc-rank-key(out[0])) ? cons(s, out) : cons(out[0], fccc-rank-insert(s, out[1:]));
+  def fccc-evidence-line(gap, s) = fccc-cand-id(s[4]) ++ " by " ++ fccc-cand-author(s[4]) ++ ": " ++ (!((String) s[3] == "") ? ("audit refused it (" ++ s[3] ++ ")") : (fccc-cut(split-on(s[1], "\n")[0], 240) ++ "; voices " ++ len(fccc-votes-of(s[5], "accept")).str() ++ " accept, " ++ len(fccc-votes-of(s[5], "reject")).str() ++ " reject" ++ (nil?(fccc-votes-of(s[5], "reject")) ? "" : ("; " ++ fccc-cut(fccc-votes-of(s[5], "reject")[0][2], 200)))));
+  def fccc-rift-line(row) = "On " ++ fccc-cut(row[0], 160) ++ ": " ++ row[1] ++ " answered " ++ fccc-cut(fccc-show(row[2]), 120) ++ ", " ++ row[3] ++ " answered " ++ fccc-cut(fccc-show(row[4]), 120) ++ "; the judge chose " ++ ((String) row[5] == "" ? "neither" : row[5]) ++ ".";
+  def fccc-evidence(gap, standings, rows) = fccc-join(append(map(s => fccc-evidence-line(gap, s), standings), map(fccc-rift-line, fccc-separating(rows))), "\n");
+  def fccc-composed(gap, standings, rows) = fccc-cut("No candidate passed the circle.\n" ++ fccc-evidence(gap, standings, rows) ++ "\nThe next rung keeps the goal and the checks and changes its approach where this evidence points.", 1600);
+  // exactly one pointing: the guide voice's words when it offers them, otherwise the circle's own reading
+  def fccc-pointing(gap, cid, standings, rows, opts) {
+   let guide = fccc-opt-guide(opts);
+   let said = nil?(guide) ? nothing() : fccc-try-act(guide, fccc-composed(gap, standings, rows));
+   let spoken = !nothing?(said) && (((String) value_kind(said[0]) == "string") && (len(fat-trim(said[0])) > 0));
+   [cc-satsang-pointing(cid, spoken ? fccc-voice-name(guide) : "circle", spoken ? fccc-cut(fat-trim(said[0]), 1600) : fccc-composed(gap, standings, rows), "next-rung", cc-strength-reflection(), true), nothing?(said) ? 0 : said[2]];
+  }
+
+  // ── one round ──
+  // executes kept candidates in order and stops publishing once a restore did not hold
+  def fccc-executed(gap, kept, opts, n, restored) = nil?(kept) ? [] : !restored ? [] : {
+   let seen = fccc-call3(fccc-opt-executor(opts), gap, kept[0], n);
+   cons([seen[0], seen[1], seen[2], "", kept[0]], fccc-executed(gap, kept[1:], opts, n + 1, seen[2]));
+  };
+  def fccc-best(executed) = foldl((best, e) => nothing?(e[0]) ? best : nothing?(best) ? e[0] : max2(best, e[0]), nothing(), executed);
+  def fccc-round(gap, cands, opts) {
+   let cid = fccc-circle-id(gap);
+   let threshold = fccc-opt-threshold(opts);
+   let circle = cc-open-cell-satsang-circle(cid, fccc-members(opts), fccc-gap-goal(gap), []);
+   let audits = map(c => fccc-audit(gap, c), cands);
+   let refused = filter(pair => !((String) pair[0] == ""), fccc-zip(audits, cands)) |> map(pair => [nothing(), "", true, pair[0], pair[1]]);
+   let kept = filter(pair => (String) pair[0] == "", fccc-zip(audits, cands)) |> map(pair => pair[1]);
+   let executed = fccc-executed(gap, kept, opts, 0, true);
+   let restoredExec = all?(e => e[2], executed);
+   let best = fccc-best(executed);
+   let tied = filter(e => !nothing?(best) && (!nothing?(e[0]) && ((Comparable) e[0] == best)), executed) |> map(e => e[4]);
+   let rift = restoredExec ? fccc-riftcase(gap, tied, opts) : [[], [], 0, true];
+   let rows = rift[0];
+   let voted = executed |> map(e => [e[0], e[1], e[2], e[3], e[4], fccc-opt-voices(opts) |> map(v => fccc-vote(gap, e[4], e, rows, v)), fccc-wins-of(tied, rift[1], fccc-cand-id(e[4]))]);
+   let standings = append(voted, refused |> map(r => [r[0], r[1], r[2], r[3], r[4], [], 0]));
+   let passing = filter(s => fccc-passes?(gap, cid, s, threshold), voted);
+   let picked = fccc-pick(passing);
+   let consensus = voted |> map(s => fccc-consensus-of(gap, cid, s, threshold));
+   let refusals = foldl((acc, s) => append(acc, fccc-refusal-of(gap, cid, s, threshold)), [], standings);
+   let shares = foldl((acc, s) => append(acc, s[5] |> map(v => cc-circle-share(cid, v[0], (String) v[1] == "silence" ? cc-share-silence() : cc-share-observation(), [fccc-cand-id(s[4]), v[1], v[2]], cc-visibility-circle-only(), cc-export-consent-required()))), [], voted);
+   let pointed = nil?(picked) ? fccc-pointing(gap, cid, standings, rows, opts) : [nothing(), 0];
+   let cost = fccc-sum(foldl((acc, s) => append(acc, map(v => v[3], s[5])), [], voted)) + rift[2] + pointed[1];
+   let receipt = cc-circle-receipt(cid, "circle", nil?(picked) ? fccc-gap-id(gap) : fccc-cand-id(picked[4]), nil?(picked) ? cc-action-refused() : cc-action-integrated(), nil?(picked) ? "no candidate passed; one pointing offered" : ("band full; " ++ len(fccc-votes-of(picked[5], "accept")).str() ++ " of " ++ len(fccc-voters(picked[5])).str() ++ " voices accept"), cost);
+   let restored = restoredExec && rift[3];
+   [nil?(picked) ? "" : fccc-cand-id(picked[4]), nil?(picked) ? [] : picked[4], pointed[0], receipt, fccc-row-of(gap, cid, standings, rows, picked, pointed[0], refusals, cost, restored), refusals, consensus, shares, circle, restored, fccc-ranked(standings)];
+  }
+  def fccc-wins-of(tied, wins, id) = nil?(tied) ? 0 : (String) fccc-cand-id(tied[0]) == id ? wins[0] : fccc-wins-of(tied[1:], wins[1:], id);
+  def fccc-row-of(gap, cid, standings, rows, picked, pointing, refusals, cost, restored) = json-node-object([
+   json-node-pair("schema", json-node-string("form-code-circle-v1")),
+   json-node-pair("rung", json-node-string("circle")),
+   json-node-pair("gap", json-node-string(fccc-gap-id(gap))),
+   json-node-pair("circle", json-node-string(cid)),
+   json-node-pair("candidates", json-node-int(len(standings))),
+   json-node-pair("standings", json-node-array(standings |> map(s => json-node-object([json-node-pair("candidate", json-node-string(fccc-cand-id(s[4]))), json-node-pair("author", json-node-string(fccc-cand-author(s[4]))), json-node-pair("audit", json-node-string(s[3])), json-node-pair("reading", nothing?(s[0]) ? json-node-null() : json-node-int(s[0])), json-node-pair("blocking", json-node-string(fccc-cut(s[1], 600))), json-node-pair("votes", json-node-array(s[5] |> map(v => json-node-object([json-node-pair("voice", json-node-string(v[0])), json-node-pair("vote", json-node-string(v[1]))])))), json-node-pair("riftcase_wins", json-node-int(s[6]))])))),
+   json-node-pair("riftcase", json-node-object([json-node-pair("inputs", json-node-int(len(rows))), json-node-pair("separating", json-node-int(len(fccc-separating(rows)))), json-node-pair("dropped", json-node-int(len(rows) - len(fccc-separating(rows))))])),
+   json-node-pair("accepted", nil?(picked) ? json-node-null() : json-node-string(fccc-cand-id(picked[4]))),
+   json-node-pair("refusals", json-node-int(len(refusals))),
+   json-node-pair("pointing", nothing?(pointing) ? json-node-null() : json-node-string(cc-pointing-text(pointing))),
+   json-node-pair("local_review_ids", json-node-int(cost)),
+   json-node-pair("restored", json-node-int(restored ? 1 : 0))]);
+  def fccc-accepted-id(r) = r[0];
+  def fccc-accepted(r) = r[1];
+  def fccc-pointing-cell(r) = r[2];
+  def fccc-pointing-text(r) = nothing?(r[2]) ? "" : cc-pointing-text(r[2]);
+  def fccc-receipt(r) = r[3];
+  def fccc-row(r) = r[4];
+  def fccc-refusals(r) = r[5];
+  def fccc-consensus(r) = r[6];
+  def fccc-shares(r) = r[7];
+  def fccc-circle(r) = r[8];
+  def fccc-restored(r) = r[9];
+  def fccc-ranking(r) = r[10];
+  // The ladder's rung: heal what a killed round left, hold one round, and keep its row beside the markers.
+  def fccc-circle-rung(gap, cands, opts) {
+   let made = fs-mkdir(fccc-gap-root(gap));
+   let healed = fccc-heal(fccc-gap-root(gap));
+   let r = fccc-round(gap, cands, opts);
+   let kept = sbt-append-count(fccc-gap-root(gap) ++ "/rounds.jsonl", json-emit(json-node-object(append(json-object-pairs(fccc-row(r)), [json-node-pair("healed_markers", json-node-int(healed))]))) ++ "\n");
+   r;
+  }
+
+  // ── a local model as a voice: one direct read-only review over the packet ──
+  // The packet is the voice's one document; its report is {"vote":...,"findings":...} (no verdict key,
+  // so the review lane takes the whole object as the report and this check judges its shape).
+  def fccc-report-check(contract, subject) {
+   let report = subject[1];
+   let obj = faj-valid(report) ? parse-json("circle-vote", report) : json-node-object([]);
+   let vote = fat-wire-object?(obj) ? fcap-string(obj, "vote") : "";
+   if !fat-has(contract, vote) then [0, "Submit one JSON object {\"vote\":\"" ++ fccc-join(contract, "|") ++ "\",\"findings\":\"what the evidence shows\"}."]
+   else if ((Comparable) len(fat-trim(fcap-string(obj, "findings"))) == 0) then [0, "findings must name what the evidence shows."]
+   else [1, "Circle vote shape holds."];
+  }
+  def fccc-source-ok(contract, docs) = [1, "The circle packet is read-only evidence."];
+  def fccc-qwen-act(model, lens, votes, context, turns, packet) {
+   let goal = "You are one voice in a local satsang circle reading a code candidate" ++ ((String) lens == "" ? "" : (" through the " ++ lens ++ " lens")) ++ ". Read the packet and submit the report it asks for.";
+   let result = fcac-admit(model, fcap-open-direct-review(goal, [["circle-packet", "circle-packet.json", packet]]), [fccc-report-check, votes, fccc-source-ok, 0], context, turns);
+   let obj = faj-valid(fcap-report(result[0])) ? parse-json("circle-vote", fcap-report(result[0])) : json-node-object([]);
+   [(String) fcap-stage(result[0]) == "complete" ? fcap-string(obj, "vote") : "abstain", fcap-string(obj, "findings"), result[2]];
+  }
+  def fccc-qwen-voice(name, model, lens, context, turns) = fccc-voice(name, model, lens, packet => fccc-qwen-act(model, lens, ["accept", "reject", "a", "b", "neither"], context, turns, packet));
+  def fccc-qwen-proposer(name, model, lens, context, turns) = fccc-voice(name, model, lens, packet => fccc-qwen-act(model, lens, ["inputs"], context, turns, packet));
+  // physical check, local model on the GPU (never while the voice or LoRA holds it):
+  //   printf 'import form-stdlib/bml/form-cli-code-circle.bml;\nsection [form.bml] {\n fccc-physical-check("qwen38-q4");\n}\n' > .hearth/circle-physical.bml && ./fkwu .hearth/circle-physical.bml
+  def fccc-physical-check(model) {
+   let v = fccc-qwen-voice("physical", model, "compiler", 16384, 6);
+   let packet = json-emit(json-node-object([json-node-pair("role", json-node-string("circle-review")), json-node-pair("goal", json-node-string("Add (defn cl-unit-at (text line) ...) that names the unit above a closure line.")), json-node-pair("diff", json-node-string("--- closure-lines.fk\n@@ -9,1 +9,2 @@\n+    (defn cl-unit-at (text line) (nothing))\n     0)\n")), json-node-pair("execution", json-node-object([json-node-pair("reading", json-node-int(28)), json-node-pair("full", json-node-int(31)), json-node-pair("blocking", json-node-string("band read 28 of 31\nclaim in-b did not hold\nclaim in-a did not hold"))])), json-node-pair("instruction", json-node-string("Return {\"vote\":\"accept\"|\"reject\",\"findings\":\"what the evidence shows\"}."))]));
+   let said = fccc-call(fccc-voice-act(v), packet);
+   print_str(json-emit(json-node-object([json-node-pair("vote", json-node-string(said[0])), json-node-pair("findings", json-node-string(said[1])), json-node-pair("generated_ids", json-node-int(said[2]))])));
+   said;
+  }
+ }
+ 0;
+}
