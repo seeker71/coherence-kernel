@@ -179,15 +179,21 @@ remains null until transcript usage is supplied. Remote access is unchanged.
 admit `fl-local-work()` for task evidence, retained repair, changed choices and
 local review. The caller reports session accounting beside the local work.
 
-This is a guide, not a schedule. The goal is form-cli carrying any query, any
-task, and any frequency-aligned review and flow with zero rented tokens, so
-anyone can use it without a provider. Each session maximizes local tokens and
-minimizes rented tokens. Remote access remains available.
+This is a guide, not a schedule. The highest goal is local end-to-end success
+and quality: form-cli carrying any query, any task, and any frequency-aligned
+review and flow without requiring a remote prompt, so anyone can use it without
+a provider. Speed and the number of local tokens are not the target. Minimize
+the number of remote prompts and the remote tokens the task required. Remote
+access remains available.
 
-The work stays on the local path: the native lifter, the owned coding
-checkpoint, the original checks, and the retained failures. Prove a candidate
-exists before model admission. Rented help is high-level guidance for one
-unresolved decision, carrying that failure, with its usage attributed.
+Before any remote prompt, stay on the local path. Try another prompt, another
+approach, a repair, a local review, and feedback among local prompts. A satsang
+of local readings can inquire, point, and answer one another. Shifting the
+assemblage point changes which local lane is visible. Different local models
+carry different tasks. The native lifter, the owned coding checkpoint, and the
+original checks stay in that loop. Prove a candidate exists before a remote
+admission. A remote prompt is for one decision the local attempts did not
+complete, and it carries the retained failure, with its usage attributed.
 
 **The loop.** Work reaches the local path in four steps, each a door the body
 runs:
@@ -211,20 +217,22 @@ runs:
    (stdin: the transcript path) appends the session's rented tokens, subagents
    included, beside its local tokens to `receipts/session-rent-ledger.jsonl`.
 
-A rented session opens with the review, works its `next`, and spends rented
-tokens only where the local path cannot yet go: writing a band-first gap,
-healing the lane, or one decision a retained failure names. Work the lane could
-take goes to the queue, not to the rented mind. The session closes with the
+A rented session opens with the review, works its `next`, and spends a remote
+prompt only where the local path has not completed the task: writing a
+band-first gap, healing the lane, or one decision a retained failure names.
+Work the lane could take goes to the queue. Before that prompt, the local lane
+may try another prompt, another approach, a repair, a local review, feedback
+among its own prompts, or another local model. The session closes with the
 meter and the review.
 
-After the measurement below, review the local flow against the last comparable
-session. Local tokens should be higher and rented tokens lower. Name the query,
-task, or frequency the local path could not yet carry, and the local door that
-would carry it next. A rented token is justified only when that review shows it
-removed a later rented turn. When the comparison misses, the retained failure
-chooses the next local repair in the same context. Expand the task set only as
-that evidence holds. Zero is a movement whose answer, review and landing show
-no rented-token growth. It is witnessed by these readings, not by a date.
+Compare similar work by required remote prompts and required remote tokens,
+with verified completion kept. A remote review of a result the local path
+already completed is help. Record it. It does not count against the goal,
+because the task did not require it. When the local path misses, the retained
+failure chooses the next local repair in the same context. Expand the task set
+only as that evidence holds. Zero is a movement that did not require a remote
+prompt. It is witnessed by these readings, not by a date and not by how many
+local tokens were spent.
 
 Each meter has one job. A Claude Code session is read whole by
 `observe/session-rent-run.bml`: its transcript and every subagent transcript
@@ -241,11 +249,14 @@ added twice.
 
 Pair those readings with the native coding result's generated/injected IDs,
 attempts, checks, release and the functions/lines actually changed. Include
-coordination and unsuccessful attempts in session cost. Compare similar work:
-local tokens higher, rented tokens lower, verified completion kept. More local
-allowance enables useful work; consuming tokens by itself is no improvement.
-When the comparison misses, the retained failure chooses the next local repair
-in the same context.
+coordination and unsuccessful attempts in session cost. The volume ratio is a
+record, not the target. Compare similar work by how many remote prompts the
+task required, and how many remote tokens those prompts used. Mark a remote
+call as review-only when the local result had already passed its checks; that
+call stays in the row and is not required. More local attempts are welcome
+when they raise the chance of completing locally. Spending local tokens with
+no gain in success or quality is not an improvement. When the local path
+misses, the retained failure chooses the next local repair in the same context.
 
 The lane has closed gaps written as band-first gaps and spent eight options
 without progress on one too large for it; the review names such a gap `split`.
