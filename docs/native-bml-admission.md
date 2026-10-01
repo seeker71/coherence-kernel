@@ -479,10 +479,10 @@ Form belong to their generators or contracts, rather than a filename rewrite.
 `form/form-stdlib/form-lift.bml` supplies lifting guidance to the public
 native `code` controller whenever the supplied sources contain executable
 BML. The same module's session-rent guidance is admitted on every local code
-session. It is a guide, not a schedule. Each session maximizes local tokens
-and minimizes rented tokens, measures provider-token deltas beside local work,
-keeps drafting and repair on the local member, and reviews which query, task,
-or frequency the local flow could not yet carry. The
+session. It is a guide, not a schedule. The target is fewer required remote
+prompts and fewer required remote tokens, and a higher local end-to-end success
+rate. Local token count and speed are not the target. A remote review of a
+result the local path already completed is recorded and is not required. The
 [direction](form-native-coding.md#direction-toward-zero-rented-coding) names
 that review. Coordinator identity (`rented_mind`) and event share do not
 establish zero token use. The controller retains the original sources, writable paths, checks and
