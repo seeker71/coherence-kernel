@@ -192,8 +192,15 @@ reasoning output and total tokens, with the delta since the preceding reading.
 The report names its observed timestamp. A first reading, different transcript
 or decreasing counters starts a baseline with a null delta; absent or incomplete
 usage is never zero. Cached input is part of input, and reasoning output is part
-of output, so neither is added twice. Other provider formats retain the existing
-output measurement until their cumulative counters are supported.
+of output, so neither is added twice. A Claude Code session is read whole by
+`observe/session-rent-run.bml`: its transcript and every subagent transcript
+beside it, one count per `requestId` (input, cache write, cache read, output),
+next to the local voice's drafts for the same session, one row in
+`receipts/session-rent-ledger.jsonl`. Its first row (2026-10-01, a 20,000-request
+coordinating session) reads input 40,000, cache read 2,719,951,909, output
+3,927,684 rented against 2,239 tokens the local voice generated: 569 ppm local.
+Other provider formats retain the existing output measurement until their
+cumulative counters are supported.
 
 Pair those readings with the native coding result's generated/injected IDs,
 attempts, checks, release and the functions/lines actually changed. Include
@@ -202,6 +209,14 @@ aim to halve rented uncached input plus output in each next comparable session,
 while maintaining verified completion. More local allowance enables useful
 work; consuming tokens by itself is no improvement. When a target is missed,
 use the retained failure to choose the next local repair in the same context.
+
+Routine work reaches the local lane as band-first gaps in
+`learn/native-turn-queue.jsonl`: a band proven reachable by a reference solution
+held outside the tree and total over any candidate, and a goal that names each
+definition to add. The lane has closed gaps written that way and spent eight
+turns without progress on one too large for it. A band answers within ten
+minutes or reads nothing (`observe/native-turn-run.bml`), and a day turn keeps
+taking turns while a gap is open and its window has time (`observe/day-turn.bml`).
 
 Ordinary JSON jobs save native binary checkpoints under `.hearth/code-memory/` after completed transitions. Resume uses the same original request and returned checkpoint ID; `turns` adds replies and `context` sizes the admission. Candidate documents, tasks, findings and failed checks survive. Incomplete output never becomes an action. A complete candidate is rechecked before reuse, with zero new model/tool counts and its earlier provenance retained. Exact original goal/documents/writable/checks select that lesson; changed contracts do not. Review recall supplies guidance rather than presenting an old report as new work.
 
