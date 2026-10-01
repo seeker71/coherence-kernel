@@ -1,12 +1,25 @@
 // host-walk.bml — the steps a walk the host's own schedule begins shares with every other such walk.
 //
 // A launchd door runs from the walk checkout, a worktree that keeps its own branch because main is checked out
-// elsewhere. It follows main: hw-sync rebases the branch onto origin/main and realigns the branch on origin; the
-// landing asks "main": 1 so the landed commit fast-forwards main with no session carrying it, and hw-carry at the
-// walk's end carries a landing that stood on the branch, live. hw-build and hw-carrier rebuild
+// elsewhere. One walk at a time holds the checkout (hw-claim): a start makes .hearth/walk.lock, which mkdir makes
+// for one maker only, and writes its pid, stamp and door there. A later start that finds the lock reads its holder:
+// a pid alive (host_alive) that began before the stamp holds it, and the later start ends at once with a
+// [walk-lock] line naming the holder. A holder gone is taken over through a mark only one start can make
+// (<lock>/took-<pid>), and only while the lock still names it. hw-release at the walk's end removes the lock this
+// walk holds, and never another's. It follows main: hw-sync rebases the branch onto origin/main and realigns the
+// branch on origin; the landing asks "main": 1 so the landed commit fast-forwards main with no session carrying it,
+// and hw-carry at the walk's end carries a landing that stood on the branch, live. A sync that names a conflict takes
+// no turn (hw-held-turns): a tree main has left behind would only grow the conflict. hw-build and hw-carrier rebuild
 // the kernel and the Metal carrier into fresh inodes when their sources are newer. hw-native-turn is one engineering
 // turn by the body's own loop (observe/native-turn-run.bml over learn/native-turn-queue.jsonl); hw-paths names what
 // a landing carries for it: the ledgers and every writable file of the queue.
+//
+// The window: a walk's turns live inside it (hw-turns). Each turn reads the window's end on stdin as its wall
+// deadline, {"turns":24,"deadline_ms":<the window's end on host_monotonic_ms>}; the host's monotonic clock is one
+// clock for every process on this host, so the turn reads the same deadline its walk set. A turn begins only while
+// the time left holds one option, as long as the median option the checkout's own ledger measured (hw-room), and
+// only after the host's other checkouts let the one GPU go: a turn waits, inside its window, while a walk door runs
+// in another checkout (hw-yield).
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/meaning-codes.bml;
 import form-stdlib/bml/live.bml;
@@ -17,18 +30,159 @@ section [form.bml] {
   def hw-day() = hw-line(host-exec("date +%F", ""));
   def hw-hhmm() = str_to_int(hw-line(host-exec("date +%H%M", "")));
   def hw-sync(branch) = hw-line(host-exec("git fetch -q origin main " ++ branch ++ " && { git rebase -q origin/main 2>/dev/null || { echo conflict: $(git diff --name-only --diff-filter=U | paste -sd' ' -); git rebase --abort; false; }; } && git push -q --force-with-lease origin HEAD:" ++ branch ++ "; echo sync=$?", ""));
+  def hw-conflicted?(sync) = hw-has?(sync, "conflict:");
+  def hw-held-turns(sync) {
+   let said = print_str("[walk] no turn starts: the branch could not follow main (" ++ sync ++ ")");
+   0;
+  }
   def hw-build() = hw-line(host-exec("if [ fkwu -nt runtime/fkwu-uni.c ]; then echo build=fresh; else cc -O2 -o fkwu.next runtime/fkwu-uni.c && mv fkwu.next fkwu; echo build=$?; fi", ""));
   def hw-carrier() = hw-line(host-exec("if [ form/native/metal/fk-metal-carrier.dylib -nt form/native/metal/fk-metal-carrier.m ]; then echo carrier=fresh; else cc -O2 -dynamiclib -o form/native/metal/fk-metal-carrier.dylib form/native/metal/fk-metal-carrier.m -framework Metal -framework Foundation -fobjc-arc; echo carrier=$?; fi", ""));
-  def hw-native-turn(turns) = hw-reviewed(hw-line(host-exec("./fkwu observe/native-turn-run.bml 2>&1 | grep -F '[native-turn] ' | tail -1", "{\"turns\":" ++ turns.str() ++ "}\n")));
+  // one walk at a time in this checkout
+  def hw-lock() = ".hearth/walk.lock";
+  def hw-owner-path(lock) = lock ++ "/owner";
+  def hw-owner-text(door, pid, at) = "pid=" ++ pid.str() ++ " at=" ++ at.str() ++ " door=" ++ door;
+  def hw-owner(lock) = read_file(hw-owner-path(lock)) ?? "";
+  def hw-owner-door(text) {
+   let at = str_find(text, " door=", 0);
+   at < 0 ? "a start" : trim(substring(text, at + 6, len(text)));
+  }
+  def hw-minutes(ms) = (ms / 60000).str() ++ " min";
+  def hw-since(text, now) {
+   let at = hw-field(text, " at=");
+   nothing?(at) ? "an unstamped while" : hw-minutes(now - at);
+  }
+  // a holder is a pid alive that began no later than the lock's stamp: a pid the host handed out again since is not it
+  def hw-began(pid) {
+   let row = host_process(pid);
+   (String) value_kind(row) != "list" ? nothing() : len(row) < 6 ? nothing() : (String) value_kind(row[5]) != "int" ? nothing() : row[5];
+  }
+  def hw-holds?(pid, at) = (Comparable) host_alive(pid) != 1 ? false : nothing?(at) ? true : nothing?(hw-began(pid)) ? true : hw-began(pid) <= at + 1000;
+  def hw-claim(door) {
+   let home = host_dir_mkdir(".hearth");
+   hw-claim-at(hw-lock(), door, host_pid(), now_unix_ms());
+  }
+  // answers [1, line] when this start holds the lock and [0, line] when it does not; the line names the holder
+  def hw-claim-at(lock, door, pid, now) = (Comparable) host_dir_mkdir(lock) == 1 ? hw-own(lock, door, pid, now, "") : hw-claim-found(lock, door, pid, now, hw-owner(lock));
+  def hw-claim-found(lock, door, pid, now, text) {
+   let holder = hw-field(text, "pid=");
+   nothing?(holder) ? hw-claim-unowned(lock, door, pid, now, text)
+   : hw-holds?(holder, hw-field(text, " at=")) ? [0, "[walk-lock] " ++ door ++ " does not start: " ++ hw-owner-door(text) ++ " (pid " ++ holder.str() ++ ") has walked this checkout for " ++ hw-since(text, now) ++ "; one walk at a time"]
+   : hw-take(lock, door, pid, now, holder.str(), text);
+  }
+  // a lock that names no holder was made this minute by a start still naming itself, or by one that ended there
+  def hw-claim-unowned(lock, door, pid, now, text) = (now / 1000) - file_mtime(lock) < 60 ? [0, "[walk-lock] " ++ door ++ " does not start: another start made the lock this minute and has not named itself yet"] : hw-take(lock, door, pid, now, "unowned", text);
+  def hw-gone-name(text) = (String) text == "" ? "a start that never named itself" : hw-owner-door(text) ++ " pid " ++ hw-field(text, "pid=").str() ++ ", gone";
+  def hw-take(lock, door, pid, now, gone, text) {
+   let marked = (Comparable) host_dir_mkdir(lock ++ "/took-" ++ gone) == 1;
+   marked && (String) hw-owner(lock) == text ? hw-own(lock, door, pid, now, ", taken over from " ++ hw-gone-name(text)) : [0, "[walk-lock] " ++ door ++ " does not start: another start is taking over the lock " ++ hw-gone-name(text) ++ " left"];
+  }
+  def hw-own(lock, door, pid, now, took) {
+   let wrote = write_file_text(hw-owner-path(lock), hw-owner-text(door, pid, now));
+   let holder = hw-field(hw-owner(lock), "pid=");
+   !nothing?(holder) && (Comparable) holder == pid ? [1, "[walk-lock] " ++ door ++ " holds this checkout, pid " ++ pid.str() ++ took] : [0, "[walk-lock] " ++ door ++ " does not start: its lock reads '" ++ hw-owner(lock) ++ "' after its write"];
+  }
+  def hw-release() = hw-release-at(hw-lock(), host_pid());
+  def hw-release-at(lock, pid) {
+   let holder = hw-field(hw-owner(lock), "pid=");
+   !nothing?(holder) && (Comparable) holder == pid ? hw-released(host_dir_rmdir(lock)) : "[walk-lock] kept: the lock names '" ++ hw-owner(lock) ++ "', not pid " ++ pid.str();
+  }
+  def hw-released(rc) = (Comparable) rc == 0 ? "[walk-lock] released" : "[walk-lock] release answered " ++ rc.str();
+  // the window: an option as long as the median real option the checkout's own ledger measured (a dry or test
+  // row is no option), and half an hour before any is measured
+  def hw-ledger() = "receipts/native-turn-ledger.jsonl";
+  def hw-option-unmeasured-ms() = 1800000;
+  def hw-wall(line) = str_find(line, "\"dry\":1", 0) >= 0 ? nothing() : str_find(line, "\"test\":1", 0) >= 0 ? nothing() : hw-field(line, "\"wall_ms\":");
+  def hw-walls(lines) = nil?(lines) ? [] : hw-walls-with(hw-wall(lines[0]), lines[1:]);
+  def hw-walls-with(wall, rest) = nothing?(wall) ? hw-walls(rest) : cons(wall, hw-walls(rest));
+  def hw-insert(x, xs) = nil?(xs) ? [x] : x <= xs[0] ? cons(x, xs) : cons(xs[0], hw-insert(x, xs[1:]));
+  def hw-sorted(xs) = nil?(xs) ? [] : hw-insert(xs[0], hw-sorted(xs[1:]));
+  def hw-option-floor-of(text) {
+   let walls = hw-sorted(hw-walls(split-on(text, "\n")));
+   nil?(walls) ? [hw-option-unmeasured-ms(), "no option measured yet"] : [walls[len(walls) / 2], "the median of " ++ len(walls).str() ++ " measured"];
+  }
+  def hw-option-floor-at(path) = hw-option-floor-of(file_size(path) < 1 ? "" : fhn-read(path));
+  def hw-option-floor() = hw-option-floor-at(hw-ledger());
+  def hw-left(until, now) = until > now ? until - now : 0;
+  def hw-room-at(until, now, floor) = hw-left(until, now) >= floor[0] ? [true, "[walk-window] " ++ hw-minutes(hw-left(until, now)) ++ " left holds an option of " ++ hw-minutes(floor[0]) ++ " (" ++ floor[1] ++ ")"] : [false, "[walk-window] " ++ hw-minutes(hw-left(until, now)) ++ " left cannot hold an option of " ++ hw-minutes(floor[0]) ++ " (" ++ floor[1] ++ "): no turn starts"];
+  def hw-room(until) = hw-room-at(until, host_monotonic_ms(), hw-option-floor());
+  // the walk doors of the host's other checkouts: one model on the one GPU at a time
+  def hw-walk-doors() = ["observe/scheduled-walk.bml", "observe/day-turn.bml", "observe/movement-run.bml", "observe/native-turn-run.bml", "observe/form-cli-code-run.fk", "observe/prompt-draft-run.bml"];
+  def hw-ends?(s, tail) = len(s) < len(tail) ? false : (String) substring(s, len(s) - len(tail), len(s)) == tail;
+  def hw-door-in(arg, doors) = nil?(doors) ? "" : hw-ends?(arg, doors[0]) ? doors[0] : hw-door-in(arg, doors[1:]);
+  def hw-door-of(argv) = (String) value_kind(argv) != "list" ? "" : len(argv) < 2 ? "" : (String) value_kind(argv[1]) != "string" ? "" : hw-door-in(argv[1], hw-walk-doors());
+  def hw-walk-row?(row, here) = (String) value_kind(row) != "list" ? false : len(row) < 5 ? false : (String) value_kind(row[3]) != "string" ? false : (String) row[3] == "" ? false : (String) row[3] == here ? false : (String) hw-door-of(row[4]) != "";
+  def hw-elsewhere-of(rows, here) = nil?(rows) ? [] : hw-walk-row?(rows[0], here) ? cons(rows[0], hw-elsewhere-of(rows[1:], here)) : hw-elsewhere-of(rows[1:], here);
+  def hw-here() {
+   let me = host_process(host_pid());
+   (String) value_kind(me) != "list" ? host_cwd() : len(me) < 4 ? host_cwd() : me[3];
+  }
+  def hw-process-rows(pids) = nil?(pids) ? [] : cons(host_process(pids[0][0]), hw-process-rows(pids[1:]));
+  def hw-elsewhere(here) {
+   let pids = host_processes("fkwu*");
+   (String) value_kind(pids) != "list" ? [] : hw-elsewhere-of(hw-process-rows(pids), here);
+  }
+  def hw-walk-name(row) = hw-door-of(row[4]) ++ " (pid " ++ row[0].str() ++ ") in " ++ row[3];
+  def hw-walk-names(rows) = nil?(rows) ? "" : hw-walk-name(rows[0]) ++ (nil?(rows[1:]) ? "" : ", " ++ hw-walk-names(rows[1:]));
+  // look(here) answers the host's walk rows in other checkouts; the wait rests a minute between looks, and ends
+  // when none walks or when the window no longer holds an option
+  def hw-yield-poll-ms() = 60000;
+  def hw-yield(until) = hw-yield-with(until, hw-elsewhere, hw-option-floor());
+  def hw-yield-with(until, look, floor) = hw-yield-from(until, host_monotonic_ms(), look, floor, hw-here(), look(hw-here()), "");
+  def hw-yield-from(until, began, look, floor, here, others, named) {
+   let room = hw-room-at(until, host_monotonic_ms(), floor);
+   nil?(others) ? hw-yielded(began, named)
+   : !room[0] ? "[walk-yield] " ++ hw-walk-names(others) ++ " still walks, and the window no longer holds an option"
+   : hw-yield-rest(until, began, look, floor, here, (String) named == "" ? hw-walk-names(others) : named);
+  }
+  def hw-yield-rest(until, began, look, floor, here, named) {
+   let rested = host_sleep_ms(hw-yield-poll-ms());
+   hw-yield-from(until, began, look, floor, here, look(here), named);
+  }
+  def hw-yielded(began, named) = (String) named == "" ? "" : "[walk-yield] waited " ++ hw-minutes(host_monotonic_ms() - began) ++ " for " ++ named ++ " to end: one model on the GPU at a time";
+  def hw-ready(until) {
+   let said = hw-say(hw-yield(until));
+   hw-room(until);
+  }
+  // the options a turn reads on stdin: its turn budget, and its wall deadline on the host's monotonic clock
+  def hw-turn-options(turns, deadline) = json-emit(json-node-object([fhn-n("turns", turns), fhn-n("deadline_ms", deadline)]));
+  def hw-native-turn(turns, deadline) = hw-reviewed(hw-turn-lines(host-exec("./fkwu observe/native-turn-run.bml 2>&1", hw-turn-options(turns, deadline) ++ "\n")));
+  // what a turn said, read in Form: its last row ([native-turn] ...) and its walk's verdict ([native-turn:walk] ...);
+  // a turn that said neither is named by its own last line that is not an organ-health reading, so a turn door
+  // that failed is never silent
+  def hw-starts?(s, p) = len(s) < len(p) ? false : (String) substring(s, 0, len(p)) == p;
+  def hw-say(line) = (String) line == "" ? 0 : print_str(line);
+  def hw-turn-lines(out) = hw-turn-keep(split-on(out ?? "", "\n"), "", "", "");
+  def hw-spoken?(line) = (Comparable) len(trim(line)) > 0 && !hw-starts?(line, "form-organ health ");
+  def hw-turn-keep(lines, row, walk, last) = nil?(lines) ? hw-turn-join(row, walk, last) : hw-turn-keep(lines[1:], hw-starts?(lines[0], "[native-turn] ") ? trim(lines[0]) : row, hw-starts?(lines[0], "[native-turn:walk] ") ? trim(lines[0]) : walk, hw-spoken?(lines[0]) ? trim(lines[0]) : last);
+  def hw-turn-join(row, walk, last) = (String) walk == "" && (String) row == "" ? hw-turn-silent(last) : (String) walk == "" ? row : (String) row == "" ? walk : row ++ "\n" ++ walk;
+  def hw-turn-silent(last) = (String) last == "" ? "" : "[native-turn:silent] the turn printed no row; its last line: " ++ substring(last, 0, len(last) > 300 ? 300 : len(last));
   // every turn is followed by the local-flow review (observe/local-flow-review.bml): its row lands with the
   // turn, and its next line is spoken beside the turn's
   def hw-review() = hw-line(host-exec("./fkwu observe/local-flow-review.bml 2>&1 | grep -F '[local-flow-review] next:' | tail -1", ""));
   def hw-reviewed(turn) {
-   print_str(hw-review());
+   let said = hw-say(hw-review());
    turn;
   }
-  // a turn line carries its row; a queue with no open gap answers without one
-  def hw-turned?(line) = str_find(line, "\"gap\":", 0) >= 0;
+  // a turn line carries its row; a queue with no open gap, a gap already full and a silent turn answer without one
+  def hw-turned?(line) = hw-starts?(line, "[native-turn] {") && str_find(line, "\"gap\":", 0) >= 0;
+  // A window's turns. Each begins while ready(until) answers [true, line] (hw-ready: the host's other checkouts let
+  // the GPU go and the time left holds an option), at most `most` (nothing: no count bound); a turn that ran no gap
+  // ends them. take(deadline, n) is the nth turn; land(turn) answers the line its landing spoke ("" when the walk
+  // lands later). Answers the count of turns that ran a gap.
+  def hw-turns(until, most, ready, take, land) = hw-turns-from(until, most, ready, take, land, 0);
+  def hw-turns-from(until, most, ready, take, land, n) {
+   let room = !nothing?(most) && n >= most ? [false, "[walk-window] " ++ n.str() ++ " turn(s): this walk takes no more"] : ready(until);
+   let said = print_str(room[1]);
+   room[0] ? hw-turn-taken(until, most, ready, take, land, n, take(until, n)) : n;
+  }
+  def hw-turn-taken(until, most, ready, take, land, n, turn) {
+   let said = hw-say(turn);
+   hw-turned?(turn) ? hw-turn-landed(until, most, ready, take, land, n, land(turn)) : n;
+  }
+  def hw-turn-landed(until, most, ready, take, land, n, landed) {
+   let said = hw-say(landed);
+   hw-turns-from(until, most, ready, take, land, n + 1);
+  }
   def hw-str(doc, key) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : "";
   def hw-writable(nodes) = nodes |> map(node => node);
   def hw-queue-paths(lines) = nil?(lines) ? [] : (Comparable) len(trim(lines[0])) == 0 ? hw-queue-paths(lines[1:]) : append(hw-writable(json-array-elements(json-object-get(parse-json("queue-row", lines[0]), "writable"))), hw-queue-paths(lines[1:]));
