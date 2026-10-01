@@ -1,97 +1,29 @@
-// local-flow-review.bml — the review that guides each session toward zero rented tokens.
+// local-flow-review.bml — the review that guides each session toward local end-to-end success.
 //
-// Reads what the body already writes: learn/native-turn-queue.jsonl (the local work offered),
-// receipts/native-turn-ledger.jsonl (each local option: band before and after, the lane's exit and
-// status, local generated and injected IDs, wall time) and receipts/session-rent-ledger.jsonl (each
-// rented session beside its local tokens). Prints the review and appends one row to
+// Reads what the body already writes, where the turns ran: learn/native-turn-queue.jsonl (the local work
+// offered); the native-turn ledger of this checkout and of the walk checkout the day-turn schedule names;
+// receipts/session-rent-ledger.jsonl (each rented session beside its local tokens); receipts/remote-guide-ledger.jsonl
+// and receipts/remote-review.jsonl. Prints, per session and per open gap:
+//   local tokens         generated, injected and local review IDs: welcome, grown, never a target
+//   local success        local_verified over gaps attempted; band full and the free review read quality
+//   remote guide         prompts, only where fcgp-earned? held, with their tokens
+//   remote work tokens   zero by construction and by check; null when unknown, never 0
+//   remote review        free, in its own column
+// and the live phase costs of the latest lane option this host holds. Appends one row to
 // receipts/local-flow-review.jsonl, so the next review reads against this one.
 //
 // The review names one next local repair, the first of these the rows show:
+//   contract  an open gap whose checks no candidate can pass: heal the contract, not the lane
+//   guide     an open gap that earned the one light remote guide (fcgp-earned?): one packet, one question
 //   split     an open gap whose last three options moved its band nowhere: the lane needs it smaller
 //   lane      options that ended with no lane result (a nonzero lane exit): the lane's own health first
 //   queue     no open gap: the next band-first gap, written from the work the last rented session did
 //   turn      otherwise: the queue holds work the lane can do; keep it turning
 // The thresholds are instruments, not goals. No provider and no network: the review is the body's own
-// reading of its local tokens.
+// reading of its local work (form-stdlib/bml/local-flow-reading.bml).
 // stdin: nothing.
 // preflight-exec: forbidden
-import form-stdlib/bml/form-cli-heal-native-report.bml;
-import form-stdlib/meaning-codes.bml;
+import form-stdlib/bml/local-flow-reading.bml;
 section [form.bml] {
- class LocalFlowReview {
-  def lfr-queue() = "learn/native-turn-queue.jsonl";
-  def lfr-turns() = "receipts/native-turn-ledger.jsonl";
-  def lfr-rent() = "receipts/session-rent-ledger.jsonl";
-  def lfr-ledger() = "receipts/local-flow-review.jsonl";
-  def lfr-nonempty(xs) = if nil?(xs) then [] else if ((Comparable) len(trim(xs[0])) == 0) then lfr-nonempty(xs[1:]) else cons(xs[0], lfr-nonempty(xs[1:]));
-  def lfr-rows(path) = if (file_size(path) < 1) then [] else map(x => parse-json("review-row", x), lfr-nonempty(split-on(fhn-read(path), "\n")));
-  def lfr-str(doc, key) = if json-object-has?(doc, key) then json-string-value(json-object-get(doc, key)) else "";
-  def lfr-null?(node) = node_eq(node, json-node-null());
-  // a number the row holds, or nothing when the key is absent or null
-  def lfr-num(doc, key) = if (!json-object-has?(doc, key)) then nothing() else if lfr-null?(json-object-get(doc, key)) then nothing() else json-int-value(json-object-get(doc, key));
-  def lfr-num0(doc, key) = lfr-num(doc, key) ?? 0;
-  def lfr-obj(doc, key) = if json-object-has?(doc, key) then json-object-get(doc, key) else json-node-object([]);
-  // ── local work: the lane's options, test and dry runs set aside ──
-  def lfr-real?(row) = ((Comparable) lfr-num0(row, "dry") == 0) && ((Comparable) lfr-num0(row, "test") == 0);
-  def lfr-gap-rows(rows, id) = filter(r => (String) lfr-str(r, "gap") == id, rows);
-  def lfr-green?(rows, id) = any?(r => (Comparable) lfr-num0(r, "band_green") == 1, lfr-gap-rows(rows, id));
-  def lfr-verified?(row) = lfr-num0(row,"local_verified") == 1;
-  def lfr-sum(rows, key) = foldl((acc, r) => acc + lfr-num0(r, key), 0, rows);
-  // the best band reading among the rows, or nothing when no band has read yet
-  def lfr-max-maybe(a, b) = nothing?(a) ? b : (nothing?(b) ? a : max2(a, b));
-  def lfr-best(rows) = foldl((acc, r) => lfr-max-maybe(acc, lfr-num(r, "band_after")), nothing(), rows);
-  def lfr-show(v) = nothing?(v) ? "none" : v.str();
-  def lfr-moved?(row) = !nothing?(lfr-num(row, "band_after")) && (!nothing?(lfr-num(row, "band_before")) && (lfr-num(row, "band_after") > lfr-num(row, "band_before")));
-  def lfr-last(xs, n) = if (len(xs) <= n) then xs else lfr-last(xs[1:], n);
-  def lfr-stuck?(rows) = (len(rows) >= 3) && !any?(r => lfr-moved?(r), lfr-last(rows, 3));
-  def lfr-lane-failed?(row) = !((String) lfr-str(row, "lane") == "lane-exit=0" || (String) lfr-str(row, "lane") == "not-run");
-  def lfr-rate-milli(ids, wall) = if (wall <= 0) then 0 else (ids * 1000000) / wall;
-  // ── one open gap's line: options, band, last lane word ──
-  def lfr-gap-line(gap, rows) {
-   let id = lfr-str(gap, "id");
-   let mine = lfr-gap-rows(rows, id);
-   let last = if nil?(mine) then json-node-object([]) else mine[-1];
-   mc-cat(["[local-flow-review] gap ", id, ": ", len(mine).str(), " option(s), band best ", lfr-show(lfr-best(mine)), " of ", lfr-num0(gap, "full").str(), if nil?(mine) then "" else mc-cat([", last lane ", lfr-str(last, "lane"), " ", lfr-str(last, "lane_status")]), if lfr-stuck?(mine) then ", stuck" else ""]);
-  }
-  // ── the next local repair, by the order above ──
-  def lfr-next(open, rows, rate) {
-   let stuck = filter(g => lfr-stuck?(lfr-gap-rows(rows, lfr-str(g, "id"))), open);
-   let failed = len(filter(r => lfr-lane-failed?(r), lfr-last(rows, 6)));
-   if (!nil?(stuck)) then ["split", mc-cat(["split ", lfr-str(stuck[0], "id"), " into smaller band-first gaps; its last three options moved its band nowhere"])]
-   else if (failed >= 2) then ["lane", mc-cat([failed.str(), " of the last six options ended with no lane result; read their .out.err under .hearth/native-turns and heal the lane"])]
-   else if nil?(open) then ["queue", "no open gap: write the next band-first gap from the work the last rented session did"]
-   else ["turn", mc-cat([len(open).str(), " open gap(s) the lane can take; keep it turning"])];
-  }
-  // ── rent: the last session against the one before ──
-  def lfr-rent-line(rents) {
-   let n = len(rents);
-   if (n == 0) then "[local-flow-review] rented: no session measured yet (observe/session-rent-run.bml at each session's close)" else {
-    let last = rents[-1];
-    let r = lfr-obj(last, "rented");
-    let l = lfr-obj(last, "local");
-    mc-cat(["[local-flow-review] rented: session ", lfr-str(last,"session"), " output ", lfr-show(lfr-num(r,"output")), ", input ", lfr-show(lfr-num(r,"input")), ", cache write ", lfr-show(lfr-num(r,"cache_write")), ", cache read ", lfr-show(lfr-num(r,"cache_read")), "; local generated ", lfr-show(lfr-num(l,"generated")), "; required remote prompts ", lfr-show(lfr-num(last,"required_remote_prompts")), ", tokens ", lfr-show(lfr-num(last,"required_remote_tokens")), "; optional review tokens ", lfr-show(lfr-num(last,"optional_remote_review_tokens"))]);
-   };
-  }
-  def lfr-run() {
-   let rows = filter(r => lfr-real?(r), lfr-rows(lfr-turns()));
-   let queue = lfr-rows(lfr-queue());
-   let open = filter(g => !lfr-green?(rows, lfr-str(g, "id")), queue);
-   let green = len(filter(r => (Comparable) lfr-num0(r, "band_green") == 1, rows));
-   let verified = len(filter(lfr-verified?,rows));
-   let unknown = len(filter(r => nothing?(lfr-num(r,"local_verified")),rows));
-   let ids = lfr-sum(rows, "local_generated_ids");
-   let injected = lfr-sum(rows, "local_injected_ids");
-   let wall = lfr-sum(filter(r => !nothing?(lfr-num(r, "local_generated_ids")), rows), "wall_ms");
-   let rate = lfr-rate-milli(ids, wall);
-   let next = lfr-next(open, rows, rate);
-   print_str(mc-cat(["[local-flow-review] local: ", len(rows).str(), " option(s), ", green.str(), " band green, ", verified.str(), " locally verified, ", unknown.str(), " with verification unmeasured; ", ids.str(), " generated and ", injected.str(), " injected IDs over ", (wall / 60000).str(), " min of lane wall"]));
-   print_str(lfr-rent-line(lfr-rows(lfr-rent())));
-   map(g => print_str(lfr-gap-line(g, rows)), open);
-   print_str(mc-cat(["[local-flow-review] next: ", next[0], " — ", next[1]]));
-   let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-n("options", len(rows)), fhn-n("green", green), fhn-n("local_verified",verified), fhn-n("local_verification_unknown",unknown), fhn-n("open_gaps", len(open)), fhn-n("local_generated_ids", ids), fhn-n("local_injected_ids", injected), fhn-n("lane_wall_ms", wall), fhn-n("ids_per_s_milli", rate), fhn-s("next", next[0]), fhn-s("next_text", next[1])]);
-   fhn-append(lfr-ledger(), json-emit(row) + "\n");
-   0;
-  }
- }
  lfr-run();
 }
