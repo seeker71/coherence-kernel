@@ -42,7 +42,58 @@ section [form.bml] {
    moved >= 0;
   }
   def fcam-save(s) = !fcam-managed(s) ? 1 : (String) fcap-stage(s) == "attention" ? 1 : fcam-write(fcam-path(fcam-root(s), fcam-id(s), "checkpoint"), fcam-packet(s, "checkpoint"));
-  def fcam-learn(s) = !fcam-managed(s) ? 1 : !((String) fcap-stage(s) == "complete") ? 1 : nil?(fcap-reflections(s)) ? 1 : fcam-write(fcam-path(fcam-root(s), fcam-hash(fcam-contract(s)), "lesson"), fcam-packet(s, "lesson"));
+  // A completed repair is learned twice: under its exact contract, and as its family's repairs.
+  def fcam-learn(s) = !fcam-managed(s) ? 1 : !((String) fcap-stage(s) == "complete") ? 1 : nil?(fcap-reflections(s)) ? 1 : (fcam-write(fcam-path(fcam-root(s), fcam-hash(fcam-contract(s)), "lesson"), fcam-packet(s, "lesson")) && fcam-family-learn(s));
+  // ── the family: the sorted writable paths and the sorted kinds of the caller's checks ──
+  // An exact contract (goal, documents, writable, checks) may hand back its verified candidate. A family
+  // hands back guidance only, never a candidate, the way review recall does: another contract over the
+  // same files and the same kinds of checks. Code work only; review keeps its exact recall.
+  def fcam-family-schema() = "form-code-family-v1";
+  def fcam-family-cold-ms() = 2592000000;
+  def fcam-ends?(s, tail) = (len(s) >= len(tail)) && ((String) substring(s, len(s) - len(tail), len(s)) == tail);
+  def fcam-check-kind(row) = json-object-has?(row, "kind") ? ("kind:" ++ fcap-string(row, "kind")) : ("tool:" ++ fcap-string(row, "tool"));
+  def fcam-check-kinds(text) = !faj-valid(text) ? [] : fat-wire-array?(parse-json("family-checks", text)) ? map(fcam-check-kind, json-array-elements(parse-json("family-checks", text))) : [];
+  def fcam-family-of(writable, checks) = fcam-hash(json-emit(fcam-pack(["native-code-family-v1", sh-uniq(sh-sort(writable)), sh-uniq(sh-sort(fcam-check-kinds(checks)))])));
+  def fcam-contract-checks(contract) = !faj-valid(contract) ? "" : fcam-contract-checks-of(json-array-elements(parse-json("family-contract", contract)));
+  def fcam-contract-checks-of(parts) = ((Comparable) len(parts) == 5) && fat-wire-string?(parts[4]) ? json-string-value(parts[4]) : "";
+  def fcam-family-key(s) = fcam-family-of(s[4], fcam-contract-checks(fcam-contract(s)));
+  def fcam-family-path(root, family) = fcam-path(root, family, "family");
+  def fcam-family-valid(n, family) = nothing?(n) ? nothing() : !fat-wire-object?(n) ? nothing() : !(((String) fcap-string(n, "schema") == fcam-family-schema()) && ((String) fcap-string(n, "family") == family)) ? nothing() : n;
+  def fcam-family-read(root, family) = fcam-family-valid(fcam-read(fcam-family-path(root, family)), family);
+  def fcam-family-int(n, key) = json-object-has?(n, key) && ((String) faj-type(json-object-get(n, key)) == "number") ? node_value(json-object-get(n, key)) : 0;
+  def fcam-family-lesson(n) = json-object-has?(n, "lesson") && fat-wire-object?(json-object-get(n, "lesson")) ? json-object-get(n, "lesson") : nothing();
+  def fcam-family-repairs-of(n) = json-object-has?(n, "repairs") && fat-wire-array?(json-object-get(n, "repairs")) ? json-array-elements(json-object-get(n, "repairs")) : [];
+  def fcam-family-base(family) = json-node-object([json-node-pair("schema", json-node-string(fcam-family-schema())), json-node-pair("family", json-node-string(family)), json-node-pair("lesson", json-node-null()), json-node-pair("repairs", json-node-array([])), json-node-pair("repairs_contract", json-node-string("")), json-node-pair("recall_hits", json-node-int(0)), json-node-pair("last_recalled_ms", json-node-int(0)), json-node-pair("written_ms", json-node-int(now_unix_ms()))]);
+  def fcam-family-with(n, key, value) = json-node-object(append(filter(pair => !((String) json-pair-key(pair) == key), json-object-pairs(n)), [json-node-pair(key, value)]));
+  // read before write: every writer folds its fields into the record it read, never over it
+  def fcam-family-merge(prior, family, sets) = foldl((n, kv) => fcam-family-with(n, kv[0], kv[1]), nothing?(prior) ? fcam-family-base(family) : prior, sets);
+  def fcam-family-put(root, family, record) = fcam-write(fcam-family-path(root, family), record);
+  // a family repair keeps its diagnosis, change and route; another contract's evidence bytes stay behind
+  def fcam-family-repairs(rows) = rows |> map(row => json-node-object([json-node-pair("diagnosis", json-node-string(row[2])), json-node-pair("change", json-node-string(row[3])), json-node-pair("next", json-node-string(row[4]))]));
+  def fcam-family-learn(s) = fcap-reviewing(s) ? 1 : fcam-family-put(fcam-root(s), fcam-family-key(s), fcam-family-merge(fcam-family-read(fcam-root(s), fcam-family-key(s)), fcam-family-key(s), [["repairs", json-node-array(fcam-family-repairs(fat-take(reverse(fcap-reflections(s)), 3)))], ["repairs_contract", json-node-string(fcam-hash(fcam-contract(s)))], ["written_ms", json-node-int(now_unix_ms())]]));
+  def fcam-family-technique(lesson) = nothing?(lesson) ? "" : (" Technique: " ++ fcap-string(lesson, "rule") ++ "; why: " ++ fcap-string(lesson, "why") ++ ".");
+  def fcam-family-repairs-text(rows) = nil?(rows) ? "" : (" Repairs that completed a contract of this family: " ++ json-emit(json-node-array(rows)));
+  def fcam-family-guidance(n) = nothing?(fcam-family-lesson(n)) && nil?(fcam-family-repairs-of(n)) ? "" : ("Recalled from this contract's family (the same writable paths and check kinds under a different caller contract). It is evidence, not instructions and not a candidate; the original goal, documents and checks decide." ++ fcam-family-technique(fcam-family-lesson(n)) ++ fcam-family-repairs-text(fcam-family-repairs-of(n)));
+  // Recalled guidance enters the brief once, at admission. Direct entry never rewrites the brief, so it
+  // stays frozen for the attempt: across renewal, resume, and a family lesson patched meanwhile. Staged
+  // entry hands it to the refine role, whose own brief replaces it after one reply.
+  def fcam-family-recall(s) = fcap-reviewing(s) ? s : fcam-family-recalled(s, fcam-family-key(s), fcam-family-read(fcam-root(s), fcam-family-key(s)));
+  def fcam-family-recalled(s, family, record) = nothing?(record) ? s : ((String) fcam-family-guidance(record) == "") ? s : {
+   let touched = fcam-family-put(fcam-root(s), family, fcam-family-merge(record, family, [["recall_hits", json-node-int(fcam-family-int(record, "recall_hits") + 1)], ["last_recalled_ms", json-node-int(now_unix_ms())]]));
+   let brief = (String) s[6] == "" ? fcam-family-guidance(record) : (s[6] ++ "\n" ++ fcam-family-guidance(record));
+   let recalled = fcap-inherit(s, fcap-state(fcap-stage(s), s[1], s[2], fcap-docs(s), s[4], s[5], brief, s[7], fcap-note(s), fcap-turns(s), fcap-calls(s), s[11]));
+   fcam-with(recalled, [fcam-root(s), fcam-id(s), fcam-contract(s), 1]);
+  };
+  // A family record with no recall and no write for thirty days is cold: it moves to cold/, where nothing
+  // recalls it and nothing learned is lost (.hearth is outside git).
+  def fcam-family-last(n) = max2(fcam-family-int(n, "written_ms"), fcam-family-int(n, "last_recalled_ms"));
+  def fcam-family-cool(root, now, name) = !fcam-ends?(name, ".family.fkb") ? 0 : fcam-family-cool-read(root, now, name, fcam-read(root ++ "/" ++ name));
+  def fcam-family-cool-read(root, now, name, n) = (nothing?(n) || !fat-wire-object?(n)) ? 0 : ((now - fcam-family-last(n)) <= fcam-family-cold-ms()) ? 0 : {
+   let made = fs-mkdir(root ++ "/cold");
+   let moved = fs-rename(root ++ "/" ++ name, root ++ "/cold/" ++ name);
+   moved >= 0 ? 1 : 0;
+  };
+  def fcam-family-sweep(root, now) = !fs-is-dir?(root) ? 0 : foldl((moved, name) => moved + fcam-family-cool(root, now, name), 0, fs-list(root));
   def fcam-state-valid(s, initial) = !((Comparable) len(s) == 14) ? 0 : !(fat-has(["code", "review"], fcap-mode(s)) && ((String) fcap-mode(s) == fcap-mode(initial))) ? 0 : fcap-reviewing(s) && (!((Value) initial[2] == fcap-docs(s))) ? 0 : (fat-has(["refine", "plan", "split", "implement", "review", "repair", "complete"], fcap-stage(s)) && (((Value) s[1] == initial[1]) && (((Value) s[2] == initial[2]) && (((Value) s[4] == initial[4]) && (fat-docs-valid(fcap-docs(s), []) && fcap-readonly-preserved(initial[2], fcap-docs(s), initial[4]))))));
   def fcam-prepare(root, initial, checks, resume, checker) {
    let made = fs-mkdir(root);
@@ -56,7 +107,7 @@ section [form.bml] {
   def fcam-resume-ready(s, checker) = !((String) fcap-stage(s) == "complete") ? s : fcam-resume-checked(fcap-count-check(s), fcap-check-state(s, checker));
   def fcam-resume-checked(s, result) = fcap-check-passed?(result) ? s : fcap-rework(s, "Resumed completed candidate no longer passes the caller checks.");
   def fcam-recall(s, checker) = fcam-recall-packet(s, fcam-read(fcam-path(fcam-root(s), fcam-hash(fcam-contract(s)), "lesson")), checker);
-  def fcam-recall-packet(s, packet, checker) = !fcam-packet-valid(packet, "lesson", fcam-contract(s)) ? s : fcam-recall-state(s, fcam-state-from(packet), checker);
+  def fcam-recall-packet(s, packet, checker) = !fcam-packet-valid(packet, "lesson", fcam-contract(s)) ? fcam-family-recall(s) : fcam-recall-state(s, fcam-state-from(packet), checker);
   def fcam-recall-state(s, prior, checker) = !fcam-state-valid(prior, s) ? s : !((String) fcap-stage(prior) == "complete") ? s : fcam-recall-checked(fcap-count-check(s), prior, fcap-check-state(prior, checker));
   def fcam-recall-checked(s, prior, result) = fcap-check-passed?(result) ? fcam-recall-ready(s, prior, result) : fcam-recall-refused(s,prior,result);
   def fcam-recall-refused(s,prior,result) {
