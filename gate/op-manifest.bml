@@ -1,4 +1,10 @@
 // Native Form lens for manifest, table and carrier agreement.
+// Two tables, one meaning per name: the manifest is form-cli's op table (its flt-ops
+// in form-stdlib/form-flatten.fk is generated from it), and flatten/form-flatten.fk
+// is the table fkwu runs (runtime/fkwu-optable.h is generated from it). The lens
+// holds the generated header to its source, every name both tables carry to one
+// arity and one tag, and every manifest row to a name fkwu answers, form-cli's own
+// byte carriers excepted by name; it says which tags those carriers share.
 // Historical implementation comparisons live in git.
 // preludes: form-stdlib/core.fk form-stdlib/table.bml gate/lens-text.bml form-stdlib/native-op-manifest.fk form-stdlib/form-parse.fk form-stdlib/form-flatten.fk
 import form-stdlib/source-compiler.fk;
@@ -60,20 +66,58 @@ section [form.bml] {
 
         def oms-when(cond, msg) = cond ? [msg] : [];
 
+        // ---- the table fkwu runs: flatten/'s compiled rows, (list "name" arity tag) ----
+        def oms-flatten-rows(text) = oms-flatten-rows-go(text, 0, []);
+        def oms-flatten-rows-go(text, from, acc) {
+            let at = str_find(text, "(list \"", from);
+            at < 0 ? reverse(acc) : oms-flatten-row-at(text, at + 7, acc);
+        }
+        def oms-flatten-row-at(text, nameAt, acc) {
+            let nameEnd = str_find(text, "\"", nameAt);
+            let arityEnd = str_find(text, " ", nameEnd + 2);
+            let tagEnd = str_find(text, ")", arityEnd + 1);
+            oms-flatten-rows-go(text, tagEnd, cons([substring(text, nameAt, nameEnd), str_to_int(substring(text, nameEnd + 2, arityEnd)), str_to_int(substring(text, arityEnd + 1, tagEnd))], acc));
+        }
+        def oms-fk-rows(texts) = nom-fkwu-rows(oms-t-optable(texts));
+        // the generated header stands on its source, row for row
+        def oms-optable-errors(texts) {
+            let source = oms-flatten-rows(oms-t-flatten-dir(texts));
+            let header = oms-fk-rows(texts);
+            (Comparable) len(header) == 0 ? ["no fk_optab rows in runtime/fkwu-optable.h"]
+            : append(oms-diff-error(lx-triple-diff(source, header), "in flatten/ flt-ops but not the generated optable (regen via flatten/gen-source-walker-table.fk)"),
+                     oms-diff-error(lx-triple-diff(header, source), "in the generated optable but not flatten/ flt-ops (regen via flatten/gen-source-walker-table.fk)"));
+        }
+        // one name, one meaning across the two tables; a manifest name fkwu does not
+        // answer is one of form-cli's declared byte carriers or a wound
+        def oms-fk-named(fk, name) = filter(r => (String) r[0] == name, fk);
+        def oms-fk-tagged(fk, tag) = filter(r => (Comparable) r[2] == tag, fk);
+        def oms-carrier?(name) = (Comparable) lx-triple-name-in?(oms-carrier-rows(), name) == 1;
+        def oms-cross-errors(nom, fk) = (Comparable) len(nom) == 0 ? [] : append(oms-cross-one(nom[0], fk), oms-cross-errors(nom[1:], fk));
+        def oms-cross-one(r, fk) {
+            let same = oms-fk-named(fk, r[0]);
+            (Comparable) len(same) > 0 ? oms-when(!((Comparable) lx-triple-eq?(same[0], r) == 1), "one name, two meanings: " ++ r[0] ++ " is " ++ lx-py-triple(r) ++ " in the manifest and " ++ lx-py-triple(same[0]) ++ " in fkwu's table")
+            : oms-when(!oms-carrier?(r[0]), "the manifest carries " ++ r[0] ++ " that fkwu's table does not answer: add its flatten/form-flatten.fk row, or name it a form-cli carrier");
+        }
+        // the tags form-cli's carriers share with fkwu, spoken in the reading
+        def oms-shared-tags(fk) = map(r => r[0] ++ "@" ++ r[2].str() ++ "=" ++ tb-join(oms-fk-tagged(fk, r[2]), x => x[0], "/"), filter(r => len(oms-fk-tagged(fk, r[2])) > 0, oms-carrier-rows()));
+
         // ---- all errors over given tables and texts, in the script's order ----
         def oms-errors-with(flt, nom, texts) = append(oms-table-errors(flt, nom),
             append(oms-carrier-errors(oms-carrier-rows(), flt, nom, texts),
             append(oms-obsolete-errors(oms-obsolete(), flt, nom),
-            append(oms-variadic-errors(oms-variadic-rows(), texts), oms-negative-errors(nom)))));
+            append(oms-variadic-errors(oms-variadic-rows(), texts),
+            append(oms-negative-errors(nom),
+            append(oms-optable-errors(texts), oms-cross-errors(nom, oms-fk-rows(texts))))))));
         // read under a root; a missing text is one named error and no further judgment
         def oms-errors(flt, nom, root) {
             let read = oms-read-all(root, oms-text-paths(), []);
             (String) read[0] == "missing" ? ["missing input: " ++ read[1]] : oms-errors-with(flt, nom, read[1]);
         }
+        def oms-fk-reading(root) = nom-fkwu-rows(read_file(root ++ oms-optable()));
 
         // ---- the voice ----
-        def oms-ok-line(n) = "(" ++ n.str() ++ " rows aligned; edit manifest first, then regenerate flt-ops — not the reverse)";
-        def oms-judge(flt, nom, root) = lx-verdict(oms-name(), oms-errors(flt, nom, root), oms-ok-line(len(flt)));
+        def oms-ok-line(n, fk) = "(" ++ n.str() ++ " rows aligned with fkwu's " ++ len(fk).str() ++ " on every name both carry; form-cli's carriers share " ++ tb-join(oms-shared-tags(fk), x => x, " ") ++ "; edit manifest first, then regenerate flt-ops — not the reverse)";
+        def oms-judge(flt, nom, root) = lx-verdict(oms-name(), oms-errors(flt, nom, root), oms-ok-line(len(flt), oms-fk-reading(root)));
         def oms-run() = oms-judge(flt-ops(), nom-ops(), "");
     }
     oms-run();

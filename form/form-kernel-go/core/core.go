@@ -228,21 +228,30 @@ func (v Value) String() string {
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	case VClosure:
-		return "<closure #" + strconv.FormatUint(uint64(v.Cl.Name), 10) + ">"
+		// law 9: a closure and a record print as value_str renders them, the
+		// same words on every kernel — never an internal name id or field count
+		return "<closure>"
 	case VNodeID:
-		return fmt.Sprintf("@%d.%d.%d.%d", v.Nid.Pkg, v.Nid.Level, v.Nid.Type, v.Nid.Inst)
+		return NidText(v.Nid)
 	case VRecord:
-		if v.Rec.BlueprintRec != nil {
-			return fmt.Sprintf("<record @record #%dfields>", len(v.Rec.Fields))
-		}
-		if v.Rec.NoBlueprint {
-			return fmt.Sprintf("<record @0 #%dfields>", len(v.Rec.Fields))
-		}
-		return fmt.Sprintf("<record @%d.%d.%d.%d #%dfields>",
-			v.Rec.Blueprint.Pkg, v.Rec.Blueprint.Level, v.Rec.Blueprint.Type,
-			v.Rec.Blueprint.Inst, len(v.Rec.Fields))
+		return "<record>"
 	}
 	return "?"
+}
+
+// NidText — a NodeID's one rendering, @pkg.level.type.inst. The 1.1.1 trivial-int
+// lane is the int's own leaf, so its inst reads as the signed int it holds, as
+// fkwu renders it: (intern_trivial_int -5) is @1.1.1.-5.
+func NidText(n NodeID) string {
+	return fmt.Sprintf("@%d.%d.%d.%d", n.Pkg, n.Level, n.Type, NidInst(n))
+}
+
+// NidInst — the inst coordinate as node_inst reads it: signed on the trivial-int lane.
+func NidInst(n NodeID) int64 {
+	if n.Pkg == 1 && n.Level == 1 && n.Type == 1 {
+		return int64(int32(n.Inst))
+	}
+	return int64(n.Inst)
 }
 
 func (v Value) AsFloat() float64 {
@@ -266,16 +275,18 @@ func (v Value) AsNid() NodeID {
 	panic(fmt.Sprintf("as_nid: %v", v))
 }
 
-// AsInt — the integer lane's coercion: ints pass through, floats truncate,
-// truth arrives as the 0/1 ints (axiom-1, core-axioms.form). Any other kind is a
-// type-contract violation — str_eq, node_eq, and value_eq are the typed
-// doors for those kinds. Sibling to Rust's as_int and the TS compare lane.
+// AsInt — the integer lane's accessor: only an int passes, truth arriving as the
+// 0/1 ints (axiom-1, core-axioms.form). A float is not an index or a word: it
+// stops, as TS's argInt does, and float_to_int is the one door that turns a
+// float into an integer. Any other kind is a type-contract violation — str_eq,
+// node_eq, and value_eq are the typed doors for those kinds. Sibling to Rust's
+// as_int and TS's argInt.
 func (v Value) AsInt() int64 {
-	switch v.Kind {
-	case VInt:
+	if v.Kind == VInt {
 		return v.Int
-	case VFloat:
-		return int64(v.Float)
+	}
+	if v.Kind == VFloat {
+		panic("as_int: a float is not an integer -- ask value_kind first, or float_to_int")
 	}
 	panic(fmt.Sprintf("as_int: %v", v))
 }

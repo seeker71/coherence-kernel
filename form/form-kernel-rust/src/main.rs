@@ -311,7 +311,7 @@ fn diagnose_kernel_panic(message: &str) -> CrashDiagnosis {
         return CrashDiagnosis {
             fatal_kind: "type_contract_violation",
             likely_root_cause: "a Form/native recipe passed a non-string value to a string-only primitive".to_string(),
-            avoidance: "guard with value_kind/value-kind, convert with value_str, or use null-safe JSON constructors before calling string primitives".to_string(),
+            avoidance: "guard with value_kind, convert with value_str, or use null-safe JSON constructors before calling string primitives".to_string(),
         };
     }
     if lower.starts_with("as_int:")
@@ -2525,7 +2525,7 @@ impl Value {
                 format!("[{}]", parts.join(", "))
             }
             Value::Closure(_) => "<closure>".to_string(),
-            Value::Nid(n) => format!("@{}.{}.{}.{}", n.pkg, n.level, n.ty, n.inst),
+            Value::Nid(n) => format!("@{}.{}.{}.{}", n.pkg, n.level, n.ty, nid_inst(n)),
             Value::Record(_) => "<record>".to_string(),
         }
     }
@@ -2537,10 +2537,15 @@ impl Value {
         }
     }
 
+    // as_int — the integer lane's accessor: only an int passes. A float is not an
+    // index or a word: it stops, as TS's argInt does, and float_to_int is the one
+    // door that turns a float into an integer.
     fn as_int(&self) -> i64 {
         match self {
             Value::Int(n) => *n,
-            Value::Float(f) => *f as i64,
+            Value::Float(_) => {
+                panic!("as_int: a float is not an integer -- ask value_kind first, or float_to_int")
+            }
             _ => panic!("as_int: {:?}", self),
         }
     }
@@ -2940,8 +2945,6 @@ impl Kernel {
         let value_kind_native: NativeFn =
             |_, _, args| Value::Str(value_kind_name(&args[0]).to_string().into());
         self.register_native("value_kind", cat_witness(), value_kind_native);
-        // value-kind is fkwu's second spelling of value_kind, still read by BML callers.
-        self.register_native("value-kind", cat_witness(), value_kind_native);
         // nothing / nothing? — the axiom-1 third value and the one question that sees it,
         // native as on fkwu (tags 137/138): never-was is neither 0 nor empty.
         self.register_native("nothing", cat_witness(), |_, _, _| Value::Null);
@@ -4064,12 +4067,33 @@ impl Kernel {
         // pre-existing ones. All attributed as WITNESS — the substrate
         // attesting to its own structure.
 
-        self.register_native("make_nodeid", cat_witness(), |_, _, args| {
+        // make_nodeid — one range law with fkwu's native node word
+        // (form-stdlib/bml/native-node-word.bml): pkg < 2^6, level < 2^13,
+        // type < 2^12, 0 <= inst < 2^32; the 1.1.1 trivial-int lane takes any
+        // 63-bit int and is that int's own leaf. Outside it the door stops, so no
+        // two coordinates ever collapse onto one identity.
+        self.register_native("make_nodeid", cat_witness(), |k, _, args| {
+            let (p, l, t, i) = (
+                args[0].as_int(),
+                args[1].as_int(),
+                args[2].as_int(),
+                args[3].as_int(),
+            );
+            if p == 1 && l == 1 && t == 1 {
+                return Value::Nid(k.intern_trivial_int(i));
+            }
+            if !(0..1 << 6).contains(&p)
+                || !(0..1 << 13).contains(&l)
+                || !(0..1 << 12).contains(&t)
+                || !(0..1i64 << 32).contains(&i)
+            {
+                panic!("make_nodeid: coordinate is outside the native 64-bit node identity layout");
+            }
             Value::Nid(NodeID {
-                pkg: args[0].as_int() as u32,
-                level: args[1].as_int() as u32,
-                ty: args[2].as_int() as u32,
-                inst: args[3].as_int() as u32,
+                pkg: p as u32,
+                level: l as u32,
+                ty: t as u32,
+                inst: i as u32,
             })
         });
         // bp — resolve a Blueprint name to its NodeID via the generated
@@ -4183,7 +4207,7 @@ impl Kernel {
             Value::Int(args[0].as_nid().ty as i64)
         });
         self.register_native("node_inst", cat_witness(), |_, _, args| {
-            Value::Int(args[0].as_nid().inst as i64)
+            Value::Int(nid_inst(&args[0].as_nid()))
         });
         // value_eq — content identity (value_equal); node_eq is fkwu's second spelling of it (tag 80).
         let value_eq_native: NativeFn = |_, _, args| bool_int(value_equal(&args[0], &args[1]));
@@ -5107,13 +5131,13 @@ fn tokenize_sexp(src: &str) -> Vec<SexpTok> {
                 while i < bytes.len() && bytes[i].is_ascii_digit() {
                     i += 1;
                 }
-                // Float: digits '.' digits, and/or a scientific exponent. The dot
-                // must be followed by a digit so `(.foo bar)` and bare integers stay
-                // legible. The exponent is consumed with OR without a fractional part —
+                // Float: a '.' after the digits (with or without fraction digits, so
+                // `1.` reads 1.0), and/or a scientific exponent, as fkwu's number leaf
+                // reads it. The exponent is consumed with OR without a fractional part —
                 // Python's repr emits e.g. 1e-05 with no decimal point. Sibling-parity:
                 // Go/TS readers parse the same shape.
                 let mut is_float = false;
-                if i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit() {
+                if i < bytes.len() && bytes[i] == b'.' {
                     is_float = true;
                     i += 1; // consume '.'
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -5159,7 +5183,7 @@ fn tokenize_sexp(src: &str) -> Vec<SexpTok> {
                     i += 1;
                 }
                 let mut is_float = false;
-                if i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit() {
+                if i < bytes.len() && bytes[i] == b'.' {
                     is_float = true;
                     i += 1;
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -5240,15 +5264,27 @@ fn unescape(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
             out.push_str(&s[run..i]);
-            match bytes[i + 1] {
-                b'n' => out.push('\n'),
-                b't' => out.push('\t'),
-                b'r' => out.push('\r'),
-                b'\\' => out.push('\\'),
-                b'"' => out.push('"'),
-                c => out.push(c as char),
+            let esc = match bytes[i + 1] {
+                b'n' => Some('\n'),
+                b't' => Some('\t'),
+                b'r' => Some('\r'),
+                b'\\' => Some('\\'),
+                b'"' => Some('"'),
+                _ => None,
+            };
+            match esc {
+                Some(c) => {
+                    out.push(c);
+                    i += 2;
+                }
+                None => {
+                    // Any other backslash stands for itself, as fkwu's fk_smkstr
+                    // reads it: "a\qb" is four bytes. The byte after it starts the
+                    // next verbatim run, so a non-ASCII char there stays whole.
+                    out.push('\\');
+                    i += 1;
+                }
             }
-            i += 2;
             run = i;
             continue;
         }
@@ -5594,6 +5630,17 @@ const INT63_LIMIT: f64 = 4_611_686_018_427_387_904.0;
 
 fn wrap63(n: i64) -> i64 {
     n.wrapping_shl(1) >> 1
+}
+
+// nid_inst — the inst coordinate as node_inst and the rendering read it. The 1.1.1
+// trivial-int lane is the int's own leaf, so its inst reads as the signed int it
+// holds, as fkwu renders it: (intern_trivial_int -5) is @1.1.1.-5.
+fn nid_inst(n: &NodeID) -> i64 {
+    if n.pkg == 1 && n.level == LEVEL_TRIVIAL && n.ty == TRIV_INT {
+        (n.inst as i32) as i64
+    } else {
+        n.inst as i64
+    }
 }
 
 // decimal_prefix_float — str_to_float's one grammar (law 7): leading whitespace, then the

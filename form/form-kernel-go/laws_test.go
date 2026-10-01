@@ -124,6 +124,49 @@ func TestValueStrRendersOneWay(t *testing.T) {
 	if s := (Value{Kind: VList, List: []Value{{Kind: VInt, Int: 1}, {Kind: VNull}}}).String(); s != "[1, nothing]" {
 		t.Errorf("print rendering of a list holding nothing: %q", s)
 	}
+	// print names a record and a closure by kind, the words value_str uses
+	if s := (Value{Kind: VRecord, Rec: &Record{NoBlueprint: true}}).String(); s != "<record>" {
+		t.Errorf("print rendering of a record: %q", s)
+	}
+	if s := (Value{Kind: VClosure, Cl: &Closure{Name: 7}}).String(); s != "<closure>" {
+		t.Errorf("print rendering of a closure: %q", s)
+	}
+}
+
+// The identity constructor keeps fkwu's one range law (native-node-word.bml):
+// outside the 64-bit layout it stops, so no two coordinates share an identity.
+func TestMakeNodeidRangeLaw(t *testing.T) {
+	wantStr(t, `(value_str (make_nodeid 1 2 12 4294967295))`, "@1.2.12.4294967295")
+	wantStr(t, `(value_str (make_nodeid 63 8191 4095 0))`, "@63.8191.4095.0")
+	wantStop(t, "(make_nodeid 1 2 12 4294967296)")
+	wantStop(t, "(make_nodeid 1 2 4096 1)")
+	wantStop(t, "(make_nodeid 1 8192 12 1)")
+	wantStop(t, "(make_nodeid 64 2 12 1)")
+	wantStop(t, "(make_nodeid 1 2 12 (sub 0 1))")
+	wantStop(t, "(make_nodeid (sub 0 1) 2 12 1)")
+	// the trivial-int lane is the int's own leaf, wide ints included
+	wantInt(t, "(eq (make_nodeid 1 1 1 5000000000) (intern_trivial_int 5000000000))", 1)
+	wantInt(t, "(node_value (make_nodeid 1 1 1 4611686018427387903))", 4611686018427387903)
+}
+
+// The reader reads as fkwu's does: any other backslash stands for itself, and a
+// `.` after the digits makes a float with or without fraction digits.
+func TestReaderEscapesAndBareDot(t *testing.T) {
+	wantInt(t, `(str_len "a\qb")`, 4)
+	wantInt(t, `(str_byte_at "a\qb" 1)`, 92)
+	wantInt(t, `(str_len "a\x41b")`, 6)
+	wantInt(t, `(str_len "a\tb")`, 3)
+	wantFloat(t, "5.", 5)
+	wantFloat(t, "(add 1. 1)", 2)
+}
+
+// A float is not an index or a word: an integer door stops on it, as TS's argInt does.
+func TestFloatIsNotAnIndex(t *testing.T) {
+	wantStop(t, `(str_byte_at "abc" 1.9)`)
+	wantStop(t, "(nth (list 4 5 6) 1.9)")
+	wantStop(t, "(byte_to_str 65.7)")
+	wantStop(t, "(bxor 1.5 0)")
+	wantInt(t, "(float_to_int 1.9)", 1)
 }
 
 // Nothing is never a counterfeit: a dead handle or a slice of a file that never was
@@ -150,6 +193,17 @@ func TestAbsenceAnswersNothing(t *testing.T) {
 	f.Close()
 	if v := call("read_file_slice", Value{Kind: VStr, Str: f.Name()}, Value{Kind: VInt, Int: 0}, Value{Kind: VInt, Int: 8}); v.Kind != VStr || v.Str != "ab" {
 		t.Fatalf("EOF-short slice stays honest bytes: kind=%v str=%q", v.Kind, v.Str)
+	}
+	// a negative offset measures no byte: nothing, for a file that is and one that never was
+	if v := call("read_file_slice", Value{Kind: VStr, Str: f.Name()}, Value{Kind: VInt, Int: -5}, Value{Kind: VInt, Int: 1}); v.Kind != VNull {
+		t.Fatalf("negative offset must answer nothing: kind=%v str=%q", v.Kind, v.Str)
+	}
+	if v := call("read_file_slice", Value{Kind: VStr, Str: "/nonexistent-pw-probe"}, Value{Kind: VInt, Int: -1}, Value{Kind: VInt, Int: 4}); v.Kind != VNull {
+		t.Fatalf("negative offset into never-was must answer nothing: kind=%v", v.Kind)
+	}
+	// a slice that asks for no byte is the empty read, as on fkwu, Rust and TS
+	if v := call("read_file_slice", Value{Kind: VStr, Str: f.Name()}, Value{Kind: VInt, Int: 1}, Value{Kind: VInt, Int: 0}); v.Kind != VStr || v.Str != "" {
+		t.Fatalf("a zero-length slice is the empty read: kind=%v str=%q", v.Kind, v.Str)
 	}
 	wantStop(t, "(str_len (nothing))")
 	wantStop(t, "(len (nothing))")
@@ -186,7 +240,7 @@ func TestReleasedNativesAreGone(t *testing.T) {
 		"unregister_jit", "jit_aliased?", "_iter", "_in", "_dict_new", "_dict_get", "_dict_set",
 		"_dict_has", "_dict_keys", "_dict_values", "_len", "form-error", "_plus", "_list_append",
 		"str_line_at", "str_ascii_prefix", "host-read", "host-write", "file_byte_at",
-		"framebuffer-observe-active?", "trace", "dylib_call",
+		"framebuffer-observe-active?", "trace", "dylib_call", "value-kind",
 	} {
 		if _, ok := k.natives[k.internName(name)]; ok {
 			t.Errorf("%s is still a native", name)

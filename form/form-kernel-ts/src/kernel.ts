@@ -171,6 +171,18 @@ export function nodeKey(n: NodeID): string {
   return `${n.pkg}.${n.level}.${n.type}.${n.inst}`;
 }
 
+// nidInst — the inst coordinate as node_inst and the rendering read it. The 1.1.1
+// trivial-int lane is the int's own leaf, so its inst reads as the signed int it holds,
+// as fkwu renders it: (intern_trivial_int -5) is @1.1.1.-5.
+export function nidInst(n: NodeID): number {
+  return n.pkg === 1 && n.level === Level.TRIVIAL && n.type === Triv.INT ? n.inst | 0 : n.inst;
+}
+
+// nidText — a NodeID's one rendering, @pkg.level.type.inst.
+export function nidText(n: NodeID): string {
+  return `@${n.pkg}.${n.level}.${n.type}.${nidInst(n)}`;
+}
+
 function sourceInventorySkipSet(value: Value): Set<string> {
   const skip = new Set<string>();
   if (value.kind !== "list") return skip;
@@ -456,6 +468,17 @@ export class Kernel {
     return this.internTrivialInt64(BigInt(Math.trunc(n)));
   }
 
+  // internTrivialIntValue — an integer value's own leaf, a wide (i64) one kept whole: reading
+  // it through a double first would round 2^62-1 onto a neighbour's leaf.
+  internTrivialIntValue(v: Value | undefined, op: string): NodeID {
+    if (v?.kind === "i64") {
+      const b = v.bigint;
+      return b >= -2147483648n && b <= 2147483647n ? this.internTrivialInt(Number(b)) : this.internTrivialInt64(b);
+    }
+    if (v?.kind === "int") return this.internTrivialInt(v.int);
+    throw new Error(`${op}: expected int, got ${v?.kind ?? "absent"}`);
+  }
+
   internString(s: string): NodeID {
     const idx = this.internName(s);
     return { pkg: 1, level: Level.TRIVIAL, type: Triv.STRING, inst: idx };
@@ -652,7 +675,7 @@ export class Kernel {
       case "closure":
         return "<closure>";
       case "nodeid":
-        return `@${nodeKey(v.nodeid)}`;
+        return nidText(v.nodeid);
       case "ctor":
         return `${v.ctor_name}(${v.args.map((a) => this.renderValue(a, nothing)).join(", ")})`;
       case "record":
@@ -732,8 +755,6 @@ export class Kernel {
       str: valueKindName(args[0] ?? { kind: "null" }),
     });
     this.registerNative("value_kind", valueKindNative);
-    // core.fk's float_to_str still asks the kebab spelling, as fkwu's rewrite row allows
-    this.registerNative("value-kind", valueKindNative);
     // nothing / nothing? — the axiom-1 third value and the one question that sees it,
     // native as on fkwu (tags 137/138): never-was is neither 0 nor empty.
     this.registerNative("nothing", () => ({ kind: "null" }));
@@ -1706,15 +1727,29 @@ export class Kernel {
     });
 
     // Substrate write surface — all attributed as WITNESS.
-    this.registerNative("make_nodeid", (_k, args) => ({
-      kind: "nodeid",
-      nodeid: {
-        pkg: argInt(args, 0),
-        level: argInt(args, 1),
-        type: argInt(args, 2),
-        inst: argInt(args, 3),
-      },
-    }));
+    // make_nodeid — one range law with fkwu's native node word
+    // (form-stdlib/bml/native-node-word.bml): pkg < 2^6, level < 2^13, type < 2^12,
+    // 0 <= inst < 2^32; the 1.1.1 trivial-int lane takes any 63-bit int and is that
+    // int's own leaf. Outside it the door stops, so no two coordinates ever collapse
+    // onto one identity.
+    this.registerNative("make_nodeid", (k, args) => {
+      const pkg = argInt(args, 0);
+      const level = argInt(args, 1);
+      const type = argInt(args, 2);
+      if (pkg === 1 && level === 1 && type === 1) {
+        return { kind: "nodeid", nodeid: k.internTrivialIntValue(args[3], "make_nodeid") };
+      }
+      const inst = argInt(args, 3);
+      if (
+        !(pkg >= 0 && pkg < 2 ** 6) ||
+        !(level >= 0 && level < 2 ** 13) ||
+        !(type >= 0 && type < 2 ** 12) ||
+        !(inst >= 0 && inst < 2 ** 32)
+      ) {
+        throw new Error("make_nodeid: coordinate is outside the native 64-bit node identity layout");
+      }
+      return { kind: "nodeid", nodeid: { pkg, level, type, inst } };
+    });
     // bp — Blueprint name → NodeID, looked up in the generated BP_TABLE.
     // Unknown name resolves to the undefined node (1,2,0,0).
     this.registerNative("bp", (_k, args) => {
@@ -1737,7 +1772,7 @@ export class Kernel {
     });
     this.registerNative("intern_trivial_int", (k, args) => ({
       kind: "nodeid",
-      nodeid: k.internTrivialInt(argInt(args, 0)),
+      nodeid: k.internTrivialIntValue(args[0], "intern_trivial_int"),
     }));
     this.registerNative("intern_trivial_string", (k, args) => ({
       kind: "nodeid",
@@ -1816,7 +1851,7 @@ export class Kernel {
     }));
     this.registerNative("node_inst", (_k, args) => ({
       kind: "int",
-      int: argNodeID(args, 0).inst,
+      int: nidInst(argNodeID(args, 0)),
     }));
     this.registerNative("node_source", (k, args) => {
       const loc = k.sourceAttr.get(nodeKey(argNodeID(args, 0)));

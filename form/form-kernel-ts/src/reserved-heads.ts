@@ -7,7 +7,6 @@
 
 export const FKWU_RESERVED_HEADS: ReadonlySet<string> = new Set([
   "_get",
-  "_plus",
   "abs",
   "add",
   "add_u32",
@@ -264,7 +263,6 @@ export const FKWU_RESERVED_HEADS: ReadonlySet<string> = new Set([
   "terminal_cols",
   "terminal_lines",
   "tls_request",
-  "value-kind",
   "value_eq",
   "value_kind",
   "value_str",

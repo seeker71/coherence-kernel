@@ -8,7 +8,6 @@ package main
 // local binding first.
 var fkwuReservedHeads = fkwuReservedHeadSet([]string{
 	"_get",
-	"_plus",
 	"abs",
 	"add",
 	"add_u32",
@@ -265,7 +264,6 @@ var fkwuReservedHeads = fkwuReservedHeadSet([]string{
 	"terminal_cols",
 	"terminal_lines",
 	"tls_request",
-	"value-kind",
 	"value_eq",
 	"value_kind",
 	"value_str",
