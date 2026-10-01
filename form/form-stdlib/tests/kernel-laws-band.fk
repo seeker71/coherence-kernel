@@ -1,0 +1,236 @@
+; kernel-laws-band.fk -- the laws the pure core pins (docs/kernel-interface.md,
+; "Laws the core pins", 1-8) and the math doors' special cases, asked of every
+; kernel. Prelude-free: each kernel answers from its own natives alone, and each
+; row asks through attempt, so a stop reads as a bit and never ends the band.
+;
+; Verdict 67108863 (26 bits):
+;   1         law 1: integers wrap at 63 bits -- add and mul past 2^62
+;   2         law 1: div of -2^62 by -1 wraps; literals past 2^62 wrap as read
+;   4         law 2: integer div and mod by zero stop, cold
+;   8         law 2 WARM: the same two stops after the defns ran 30000 times, past
+;             the threshold where fkwu's JIT takes them, and an ordinary division
+;             there still answers -- a leaf keeps the law its walker keeps
+;   16        law 3: an order refusal and arithmetic over a non-number stop
+;   32        law 4: math_sqrt rounds correctly -- sqrt 2, a subnormal, -1 is NaN
+;   64        law 5: float mod truncates, the sign of the dividend, as int mod does
+;   128       law 5: the exact remainder -- 1e19 mod 3 is 1 and 1e300 mod 3 is 0,
+;             a subnormal and a 1e308 / 1e-308 pair; |x| < |y| answers x
+;   256       law 5: NaN for a zero divisor, an infinite dividend, a NaN dividend
+;   512       law 6: float_to_int truncates toward zero; an int passes; -2^62 stands
+;   1024      law 6: NaN, 1e19, 2^62 and both infinities stop
+;   2048      law 6: a string, nothing and a list stop
+;   4096      law 6 WARM: the same stops after the defn ran 30000 times; a whole
+;             part inside the range still answers
+;   8192      law 7: the decimal prefix -- whitespace, sign, dot, an exponent only
+;             with a digit
+;   16384     law 7: no hex, no inf, no nan; text with no digit reads 0
+;   32768     law 7: the whole text is read -- 1e400 is Infinity, 131-digit text
+;             and 131-digit source literals read their own values
+;   65536     law 7: a non-string stops
+;   131072    law 8: str_byte_at outside the string answers -1
+;   262144    law 8: str_find on a non-string haystack or needle stops
+;   524288    an index that is not an int (nothing) stops: str_find, str_byte_at,
+;             substring
+;   1048576   math_log: 0 is -Infinity, a negative NaN, Infinity itself, NaN itself,
+;             1 is 0, a subnormal its own logarithm
+;   2097152   math_exp: Infinity, -Infinity, 1e300, -1e300, NaN, 0, 1, past the
+;             subnormal floor, 709.7 -- every one answers, and answers right
+;   4194304   math_pow: an infinite exponent, an infinite base, a zero base, an
+;             exponent past 2^63, a negative base with a fractional exponent
+;   8388608   math_pow: the exact cases -- 2^10, 2^0.5, 10^-2, 2^-1074, 2^1023
+;   16777216  the math doors take numbers only: a string or nothing stops
+;   33554432  a directory that is not there lists as nothing, never as []
+;
+; PROOF LEVEL: FOUR-WAY -- every row is the same answer on fkwu, go, rust and ts.
+; Rows the kernels do not yet share stay out of this verdict until they do:
+; read_file_slice at a negative offset (go answers ""), print of a record or a
+; closure (go writes its blueprint and field count), make_nodeid outside the
+; 64-bit layout (go and rust cast, ts keeps the number, fkwu stops), a byte list
+; holding a non-int (go writes it), cons onto a non-list (ts stops; the others
+; read the pair as a one-element list), math_pow of -1 to an infinity (ts answers
+; NaN, the others 1), and math_exp, math_log and math_pow off their exact cases:
+; on a 400-row grid fkwu answers go's bits on every row, while among the
+; siblings exp and log alone part go from rust on 98 rows and go from ts on 16,
+; and with pow in the row on 288 to 291 -- those three doors carry no bit law yet.
+;
+; WATCHED FAILING, 2026-10-01: the fkwu built from the tree before these laws
+; landed never returns from this band -- math_exp of Infinity doubled its way
+; through an endless loop. With the five math bits set aside it reads 205431:
+; dark 8, 128, 256, 1024, 2048, 4096, 16384, 32768, 262144, 524288 and
+; 33554432. Bit 8 is the warm twin: cold, (div 7 0) stopped there too; hot, the
+; JIT's SDIV answered 0 and its MSUB 7. An fkwu built with the walker's laws but
+; with the leaf's two guards taken out (no zero-divisor branch, no NaN or range
+; branch after FCVTZS) reads 67104759: dark 8 and 4096, the warm twins alone.
+
+(do
+    (defn kl-bit (ok bit) (if ok bit 0))
+    (defn kl-sum (xs acc) (if (eq (len xs) 0) acc (kl-sum (tail xs) (add acc (head xs)))))
+    (defn kl-all (xs) (if (eq (len xs) 0) 1 (if (head xs) (kl-all (tail xs)) 0)))
+    ; a value's one rendering, or STOP when the row stopped
+    (defn kl-v (v) (if (nothing? v) "STOP" (value_str v)))
+    (defn kl-is (v want) (str_eq (kl-v v) want))
+    (defn kl-stop (v) (nothing? v))
+    (defn kl-inf () (div 1.0 0.0))
+    (defn kl-ninf () (sub 0.0 (div 1.0 0.0)))
+    (defn kl-nan () (div 0.0 0.0))
+
+    ; the warm twins: one division, one remainder, one conversion, each a defn the
+    ; JIT takes once it is hot
+    (defn kl-dv (a b) (div a b))
+    (defn kl-md (a b) (mod a b))
+    (defn kl-fi (x) (float_to_int x))
+    (defn kl-warm (n acc)
+        (if (eq n 0) acc
+            (kl-warm (sub n 1) (add acc (add (add (kl-dv n 3) (kl-md n 7)) (kl-fi (mul 0.5 (add n 0.0))))))))
+
+    (defn kernel-laws-band ()
+        (do
+            (let warm (kl-warm 30000 0))
+            (kl-sum (list
+                (kl-bit (kl-all (list
+                    (eq (add 4611686018427387903 1) -4611686018427387904)
+                    (eq (mul 3037000499 3037000499) -5928526807)
+                    (eq (sub 0 4611686018427387904) -4611686018427387904))) 1)
+                (kl-bit (kl-all (list
+                    (eq (div -4611686018427387904 -1) -4611686018427387904)
+                    (eq 9223372036854775807 -1)
+                    (eq 99999999999999999999 -1457092405402533889))) 2)
+                (kl-bit (kl-all (list
+                    (kl-stop (attempt (div 7 0)))
+                    (kl-stop (attempt (mod 7 0))))) 4)
+                (kl-bit (kl-all (list
+                    (eq warm 375085000)
+                    (kl-stop (attempt (kl-dv 7 0)))
+                    (kl-stop (attempt (kl-md 7 0)))
+                    (kl-is (attempt (kl-dv 7 2)) "3")
+                    (kl-is (attempt (kl-md (sub 0 7) 2)) "-1"))) 8)
+                (kl-bit (kl-all (list
+                    (kl-stop (attempt (lt "a" 1)))
+                    (kl-stop (attempt (le 1 (nothing))))
+                    (kl-stop (attempt (add "a" 1)))
+                    (kl-stop (attempt (mul 2.0 "x"))))) 16)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (math_sqrt 2.0)) "1.4142135623730951")
+                    (kl-is (attempt (math_sqrt 1e-310)) "9.999999999999986e-156")
+                    (kl-is (attempt (math_sqrt (sub 0.0 1.0))) "NaN"))) 32)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (mod (sub 0.0 7.5) 2.0)) "-1.5")
+                    (kl-is (attempt (mod 7.5 (sub 0.0 2.0))) "1.5")
+                    (kl-is (attempt (mod (sub 0 7) 2)) "-1"))) 64)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (mod 10000000000000000000.0 3.0)) "1")
+                    (kl-is (attempt (mod 1e300 3.0)) "0")
+                    (kl-is (attempt (mod 5e-324 3.0)) "5e-324")
+                    (kl-is (attempt (mod 1e308 1e-308)) "3.498445546245627e-309")
+                    (kl-is (attempt (mod 2.5 (kl-inf))) "2.5"))) 128)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (mod 7.5 0.0)) "NaN")
+                    (kl-is (attempt (mod (kl-inf) 2.0)) "NaN")
+                    (kl-is (attempt (mod (kl-nan) 2.0)) "NaN"))) 256)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (float_to_int 3.9)) "3")
+                    (kl-is (attempt (float_to_int (sub 0.0 2.9))) "-2")
+                    (kl-is (attempt (float_to_int 7)) "7")
+                    (kl-is (attempt (float_to_int (sub 0.0 4611686018427387904.0))) "-4611686018427387904"))) 512)
+                (kl-bit (kl-all (list
+                    (kl-stop (attempt (float_to_int (kl-nan))))
+                    (kl-stop (attempt (float_to_int 10000000000000000000.0)))
+                    (kl-stop (attempt (float_to_int 4611686018427387904.0)))
+                    (kl-stop (attempt (float_to_int (kl-inf))))
+                    (kl-stop (attempt (float_to_int (kl-ninf)))))) 1024)
+                (kl-bit (kl-all (list
+                    (kl-stop (attempt (float_to_int "x")))
+                    (kl-stop (attempt (float_to_int (nothing))))
+                    (kl-stop (attempt (float_to_int (list 1 2)))))) 2048)
+                (kl-bit (kl-all (list
+                    (kl-stop (attempt (kl-fi (kl-nan))))
+                    (kl-stop (attempt (kl-fi 4611686018427387904.0)))
+                    (kl-stop (attempt (kl-fi (kl-inf))))
+                    (kl-is (attempt (kl-fi (sub 0.0 3.9))) "-3")
+                    (kl-is (attempt (kl-fi 7.75)) "7"))) 4096)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (str_to_float "3.5abc")) "3.5")
+                    (kl-is (attempt (str_to_float " 1.5")) "1.5")
+                    (kl-is (attempt (str_to_float "\t\n+2.5E-1")) "0.25")
+                    (kl-is (attempt (str_to_float ".5")) "0.5")
+                    (kl-is (attempt (str_to_float "5.")) "5")
+                    (kl-is (attempt (str_to_float "1e")) "1")
+                    (kl-is (attempt (str_to_float "1e+3x")) "1000"))) 8192)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (str_to_float "0x10")) "0")
+                    (kl-is (attempt (str_to_float "0x1p3")) "0")
+                    (kl-is (attempt (str_to_float "inf")) "0")
+                    (kl-is (attempt (str_to_float "INFINITY")) "0")
+                    (kl-is (attempt (str_to_float "nan")) "0")
+                    (kl-is (attempt (str_to_float "-")) "0")
+                    (kl-is (attempt (str_to_float ".")) "0")
+                    (kl-is (attempt (str_to_float "abc")) "0"))) 16384)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (str_to_float "1e400")) "Infinity")
+                    (kl-is (attempt (str_to_float "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")) "1e+130")
+                    (kl-is (attempt (str_to_float "0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005")) "5e-131")
+                    (kl-is (attempt 0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005) "5e-131")
+                    (kl-is (attempt 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0) "1e+130"))) 32768)
+                (kl-bit (kl-all (list
+                    (kl-stop (attempt (str_to_float 5)))
+                    (kl-stop (attempt (str_to_float (nothing)))))) 65536)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (str_byte_at "abc" 5)) "-1")
+                    (kl-is (attempt (str_byte_at "abc" 3)) "-1")
+                    (kl-is (attempt (str_byte_at "abc" (sub 0 1))) "-1")
+                    (kl-is (attempt (str_byte_at "abc" 1)) "98"))) 131072)
+                (kl-bit (kl-all (list
+                    (kl-stop (attempt (str_find 5 "a" 0)))
+                    (kl-stop (attempt (str_find "abc" 5 0)))
+                    (kl-stop (attempt (str_find (nothing) "a" 0)))
+                    (kl-stop (attempt (str_find "abc" (nothing) 0))))) 262144)
+                (kl-bit (kl-all (list
+                    (kl-stop (attempt (str_find "abc" "c" (nothing))))
+                    (kl-stop (attempt (str_byte_at "abc" (nothing))))
+                    (kl-stop (attempt (substring "abc" (nothing) 2)))
+                    (kl-stop (attempt (substring "abc" 0 (nothing)))))) 524288)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (math_log 0.0)) "-Infinity")
+                    (kl-is (attempt (math_log (sub 0.0 1.0))) "NaN")
+                    (kl-is (attempt (math_log (kl-inf))) "Infinity")
+                    (kl-is (attempt (math_log (kl-nan))) "NaN")
+                    (kl-is (attempt (math_log 1.0)) "0")
+                    (kl-is (attempt (math_log 10.0)) "2.302585092994046")
+                    (kl-is (attempt (math_log 1e-310)) "-713.8013788281542"))) 1048576)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (math_exp (kl-inf))) "Infinity")
+                    (kl-is (attempt (math_exp (kl-ninf))) "0")
+                    (kl-is (attempt (math_exp 1e300)) "Infinity")
+                    (kl-is (attempt (math_exp (sub 0.0 1e300))) "0")
+                    (kl-is (attempt (math_exp (kl-nan))) "NaN")
+                    (kl-is (attempt (math_exp 0.0)) "1")
+                    (kl-is (attempt (math_exp 1.0)) "2.718281828459045")
+                    (kl-is (attempt (math_exp (sub 0.0 745.2))) "0")
+                    (kl-is (attempt (math_exp 709.7)) "1.6549840276802644e+308"))) 2097152)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (math_pow 2.0 (kl-inf))) "Infinity")
+                    (kl-is (attempt (math_pow 0.5 (kl-inf))) "0")
+                    (kl-is (attempt (math_pow 2.0 (kl-ninf))) "0")
+                    (kl-is (attempt (math_pow (kl-inf) (sub 0.0 1.0))) "0")
+                    (kl-is (attempt (math_pow (kl-ninf) 3.0)) "-Infinity")
+                    (kl-is (attempt (math_pow 0.0 (sub 0.0 1.0))) "Infinity")
+                    (kl-is (attempt (math_pow (kl-nan) 0.0)) "1")
+                    (kl-is (attempt (math_pow 2.0 1e300)) "Infinity")
+                    (kl-is (attempt (math_pow (sub 0.0 8.0) (div 1.0 3.0))) "NaN")
+                    (kl-is (attempt (math_pow (sub 0.0 2.0) 3.0)) "-8"))) 4194304)
+                (kl-bit (kl-all (list
+                    (kl-is (attempt (math_pow 2.0 10.0)) "1024")
+                    (kl-is (attempt (math_pow 2.0 0.5)) "1.4142135623730951")
+                    (kl-is (attempt (math_pow 10.0 (sub 0.0 2.0))) "0.01")
+                    (kl-is (attempt (math_pow 2.0 (sub 0.0 1074.0))) "5e-324")
+                    (kl-is (attempt (math_pow 2.0 1023.0)) "8.98846567431158e+307"))) 8388608)
+                (kl-bit (kl-all (list
+                    (kl-stop (attempt (math_log "x")))
+                    (kl-stop (attempt (math_sqrt "x")))
+                    (kl-stop (attempt (math_exp (nothing))))
+                    (kl-stop (attempt (math_pow 2.0 "x"))))) 16777216)
+                (kl-bit (kl-all (list
+                    (kl-stop (attempt (fs_list "form/form-stdlib/no-such-kernel-laws-dir")))
+                    (str_eq (value_kind (fs_list "form/form-stdlib/locale-rows")) "list"))) 33554432)) 0)))
+
+    (kernel-laws-band))

@@ -416,6 +416,10 @@ static int fk_field_open(void);
 #define FK_HH(p) ((p) >= FK_PAIR_BASE ? fk_fph[(p) - FK_PAIR_BASE] : fk_hh[(p)])
 #define FK_HT(p) ((p) >= FK_PAIR_BASE ? fk_fpt[(p) - FK_PAIR_BASE] : fk_ht[(p)])
 #define FK_POK(p) ((p) >= FK_PAIR_BASE ? ((p) - FK_PAIR_BASE < fk_field_pp()) : ((p) <= fk_hp))
+/* the next pair of a LIST walk: a tail that is a list word (odd) continues; any other tail -- the int a
+ * door's pair carries, (cons 1 5) -- ends the walk at 0, never read as a pair index. Without it print
+ * walked (cons 7 60) into another list's cells and (cons 1 2) into a list that never ended. */
+#define FK_HNEXT(p) ((FK_HT(p) & 1) ? (FK_HT(p) >> 1) : 0)
 #define FK_SO(si) ((si) >= FK_STR_BASE ? fk_fso[(si) - FK_STR_BASE] : fk_so[(si)])
 #define FK_SLEN(si) ((si) >= FK_STR_BASE ? fk_fsl[(si) - FK_STR_BASE] : fk_sl[(si)])
 #define FK_SBYTES(si) ((si) >= FK_STR_BASE ? fk_fsb + fk_fso[(si) - FK_STR_BASE] : fk_sb + fk_so[(si)])
@@ -1019,6 +1023,11 @@ static long long fk_is_str(long long v);
 /* writes a string value's bytes to stdout, no newline (defined with the string pool
  * below -- fk_pv is declared above it and cannot reach fk_sb/fk_so/fk_sl directly) */
 static void fk_put_str(long long v);
+/* print's rendering of a word that is not an int, a float, a string, nothing or a list -- a record, a
+ * closure, a NodeID, a bool: value_str's own text (law 9), never the tagged word underneath */
+static void fk_pv_word_inline(long long v);
+static int fk_is_output_list(long long v);
+static void fk_pv_list(long long v);
 static void fk_pv(long long v) {
     if (v == fk_nothing) {
         printf("nothing\n");
@@ -1036,8 +1045,12 @@ static void fk_pv(long long v) {
     } else {
         if ((v & 1) == 0) {
             fk_pr(v >> 1);
+        } else if (fk_is_output_list(v)) {
+            fk_pv_list(v);
+            putchar(10);
         } else {
-            fk_pr(v);
+            fk_pv_word_inline(v);
+            putchar(10);
         }
     }
 }
@@ -6896,7 +6909,7 @@ static long long fk_list_len_c(long long v) {
     long long n = 0;
     while (p >= 1 && FK_POK(p)) {
         n = n + 1;
-        p = FK_HT(p) >> 1;
+        p = FK_HNEXT(p);
     }
     return n;
 }
@@ -6906,7 +6919,7 @@ static long long fk_list_to_f32(long long v, float *out, long long cap) {
     while (p >= 1 && FK_POK(p) && n < cap) {
         out[n] = (float)fk_num(FK_HH(p));
         n = n + 1;
-        p = FK_HT(p) >> 1;
+        p = FK_HNEXT(p);
     }
     return n;
 }
@@ -8151,61 +8164,274 @@ static double fk_sqrt_d(double x) {
     memcpy(&out, &b, 8);
     return out;
 }
-static double fk_exp_d(double x) {
-    double ln2 = 0.6931471805599453;
-    long long n = (long long)(x / ln2);
-    double r = x - ((double)n) * ln2;
-    while (r > 0.34657359027997264) {
-        r = r - ln2;
-        n = n + 1;
-    }
-    while (r < -0.34657359027997264) {
-        r = r + ln2;
-        n = n - 1;
-    }
-    double term = 1.0;
-    double sum = 1.0;
-    long long k = 1;
-    while (k <= 28) {
-        term = term * r / (double)k;
-        sum = sum + term;
-        k = k + 1;
-    }
-    while (n > 0) {
-        sum = sum * 2.0;
-        n = n - 1;
-    }
-    while (n < 0) {
-        sum = sum * 0.5;
-        n = n + 1;
-    }
-    return sum;
+/* ---- the float laws with no libm: every answer below is read and written as the IEEE word itself ----
+ * A door over a float answers a value in bounded steps, whatever the operand: an infinity, a NaN, a
+ * subnormal and 1e300 each take the same few steps as 1.0. The scaling by 2^n is built from exponent
+ * bits, never by a loop of doublings, so no input can keep the walker from returning. */
+static unsigned long long fk_dbits(double x) {
+    unsigned long long b;
+    memcpy(&b, &x, 8);
+    return b;
 }
-static double fk_log_d(double x) {
-    if (x <= 0.0) {
+static double fk_bitsd(unsigned long long b) {
+    double x;
+    memcpy(&x, &b, 8);
+    return x;
+}
+#define FK_D_SIGN 0x8000000000000000ULL
+#define FK_D_INF 0x7ff0000000000000ULL
+#define FK_D_QNAN 0x7ff8000000000000ULL
+/* f * 2^e, rounded once: a subnormal answer is scaled in two exact steps so the last one rounds it,
+ * and an exponent past the range answers the signed zero or the signed infinity outright */
+static double fk_ldexp_d(double frac, long long e) {
+    if (frac == 0.0 || frac != frac || frac - frac != 0.0) {
+        return frac;
+    }
+    unsigned long long b = fk_dbits(frac);
+    long long be = (long long)((b >> 52) & 0x7ff);
+    if (be == 0) {
+        frac = frac * 4503599627370496.0; /* 2^52: a subnormal operand becomes normal first */
+        b = fk_dbits(frac);
+        be = (long long)((b >> 52) & 0x7ff);
+        e = e - 52;
+    }
+    if (e > 4096) { e = 4096; }
+    if (e < -4096) { e = -4096; }
+    e = e + be - 1023;
+    if (e < -1075) {
+        return fk_bitsd(b & FK_D_SIGN);
+    }
+    if (e > 1023) {
+        return fk_bitsd((b & FK_D_SIGN) | FK_D_INF);
+    }
+    double m = 1.0;
+    if (e < -1022) {
+        e = e + 53;
+        m = 1.0 / 9007199254740992.0; /* 2^-53, exact */
+    }
+    b = (b & ~(0x7ffULL << 52)) | ((unsigned long long)(e + 1023) << 52);
+    return m * fk_bitsd(b);
+}
+/* f = frac * 2^e with |frac| in [0.5, 1); zero, an infinity and NaN answer themselves with e = 0 */
+static double fk_frexp_d(double f, long long *ep) {
+    *ep = 0;
+    if (f == 0.0 || f != f || f - f != 0.0) {
+        return f;
+    }
+    long long adj = 0;
+    unsigned long long b = fk_dbits(f);
+    if (((b >> 52) & 0x7ff) == 0) {
+        f = f * 4503599627370496.0;
+        b = fk_dbits(f);
+        adj = -52;
+    }
+    *ep = adj + (long long)((b >> 52) & 0x7ff) - 1022;
+    b = (b & ~(0x7ffULL << 52)) | (1022ULL << 52);
+    return fk_bitsd(b);
+}
+/* law 5 -- float mod truncates, the sign of the dividend, as integer mod does: the exact remainder
+ * x - trunc(x/y)*y by long division of the two significands (one bit per exponent step, at most
+ * 2098 steps), so 1e300 mod 3 answers its true remainder where x - y*(long long)(x/y) answered 1e300.
+ * NaN when y is zero or either side is NaN or x is infinite; x itself when |x| < |y| (y infinite too). */
+static double fk_fmod_d(double x, double y) {
+    unsigned long long ux = fk_dbits(x);
+    unsigned long long uy = fk_dbits(y);
+    long long ex = (long long)((ux >> 52) & 0x7ff);
+    long long ey = (long long)((uy >> 52) & 0x7ff);
+    unsigned long long sx = ux & FK_D_SIGN;
+    if ((uy << 1) == 0 || y != y || ex == 0x7ff) {
+        return fk_bitsd(FK_D_QNAN);
+    }
+    if ((ux << 1) <= (uy << 1)) {
+        if ((ux << 1) == (uy << 1)) {
+            return fk_bitsd(sx);
+        }
+        return x;
+    }
+    unsigned long long mx;
+    unsigned long long my;
+    unsigned long long d;
+    if (ex == 0) {
+        d = ux << 12;
+        while ((d >> 63) == 0) {
+            ex = ex - 1;
+            d = d << 1;
+        }
+        mx = ux << (unsigned long long)(1 - ex);
+    } else {
+        mx = (ux & 0xfffffffffffffULL) | (1ULL << 52);
+    }
+    if (ey == 0) {
+        d = uy << 12;
+        while ((d >> 63) == 0) {
+            ey = ey - 1;
+            d = d << 1;
+        }
+        my = uy << (unsigned long long)(1 - ey);
+    } else {
+        my = (uy & 0xfffffffffffffULL) | (1ULL << 52);
+    }
+    while (ex > ey) {
+        d = mx - my;
+        if ((d >> 63) == 0) {
+            if (d == 0) {
+                return fk_bitsd(sx);
+            }
+            mx = d;
+        }
+        mx = mx << 1;
+        ex = ex - 1;
+    }
+    d = mx - my;
+    if ((d >> 63) == 0) {
+        if (d == 0) {
+            return fk_bitsd(sx);
+        }
+        mx = d;
+    }
+    while ((mx >> 52) == 0) {
+        mx = mx << 1;
+        ex = ex - 1;
+    }
+    if (ex > 0) {
+        mx = mx - (1ULL << 52);
+        mx = mx | ((unsigned long long)ex << 52);
+    } else {
+        mx = mx >> (unsigned long long)(1 - ex);
+    }
+    return fk_bitsd(mx | sx);
+}
+/* e^x: NaN answers NaN, past 709.78 +Infinity, under -745.13 zero; otherwise x = k ln2 + r with
+ * |r| <= ln2/2 (r carried as hi - lo), the rational approximation on r, and 2^k from exponent bits.
+ * The method and constants are the ones the Go sibling's math.Exp carries. */
+static double fk_exp_d(double x) {
+    if (x != x) {
+        return x;
+    }
+    if (x > 7.09782712893383973096e+02) {
+        return fk_bitsd(FK_D_INF);
+    }
+    if (x < -7.45133219101941108420e+02) {
         return 0.0;
     }
-    double ln2 = 0.6931471805599453;
-    long long e = 0;
-    while (x >= 2.0) {
-        x = x * 0.5;
-        e = e + 1;
+    double ax = x < 0.0 ? 0.0 - x : x;
+    if (ax < 1.0 / 268435456.0) { /* |x| < 2^-28 */
+        return 1.0 + x;
     }
-    while (x < 1.0) {
-        x = x * 2.0;
-        e = e - 1;
+    double kd = x < 0.0 ? 1.44269504088896338700e+00 * x - 0.5 : 1.44269504088896338700e+00 * x + 0.5;
+    long long k = (long long)kd;
+    double kf = (double)k;
+    double hi = x - kf * 6.93147180369123816490e-01;
+    double lo = kf * 1.90821492927058770002e-10;
+    double r = hi - lo;
+    double t = r * r;
+    double c = r - t * (1.66666666666666657415e-01 + t * (-2.77777777770155933842e-03 + t * (6.61375632143793436117e-05 + t * (-1.65339022054652515390e-06 + t * 4.13813679705723846039e-08))));
+    double y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
+    return fk_ldexp_d(y, k);
+}
+/* ln x: NaN and +Infinity answer themselves, a negative x NaN, zero -Infinity; otherwise x = f1 * 2^k
+ * from the exponent bits (a subnormal normalised first), f1 in [sqrt2/2, sqrt2), and the series in
+ * s = f/(2+f). The method and constants are the ones the Go sibling's math.Log carries. */
+static double fk_log_d(double x) {
+    if (x != x) {
+        return x;
     }
-    double z = (x - 1.0) / (x + 1.0);
-    double z2 = z * z;
-    double zp = z;
-    double acc = 0.0;
-    long long k = 0;
-    while (k < 32) {
-        acc = acc + zp / (double)(2 * k + 1);
-        zp = zp * z2;
-        k = k + 1;
+    if (x < 0.0) {
+        return fk_bitsd(FK_D_QNAN);
     }
-    return 2.0 * acc + ((double)e) * ln2;
+    if (x == 0.0) {
+        return fk_bitsd(FK_D_SIGN | FK_D_INF);
+    }
+    if (x - x != 0.0) {
+        return x;
+    }
+    long long ki = 0;
+    double f1 = fk_frexp_d(x, &ki);
+    if (f1 < 7.07106781186547524401e-01) {
+        f1 = f1 * 2.0;
+        ki = ki - 1;
+    }
+    double f = f1 - 1.0;
+    double k = (double)ki;
+    double s = f / (2.0 + f);
+    double s2 = s * s;
+    double s4 = s2 * s2;
+    double t1 = s2 * (6.666666666666735130e-01 + s4 * (2.857142874366239149e-01 + s4 * (1.818357216161805012e-01 + s4 * 1.479819860511658591e-01)));
+    double t2 = s4 * (3.999999999940941908e-01 + s4 * (2.222219843214978396e-01 + s4 * 1.531383769920937332e-01));
+    double rr = t1 + t2;
+    double hfsq = 0.5 * f * f;
+    return k * 6.93147180369123816490e-01 - ((hfsq - (s * (hfsq + rr) + k * 1.90821492927058770002e-10)) - f);
+}
+/* law 7 -- str_to_float reads one grammar on every kernel: leading ASCII whitespace, then the longest
+ * decimal prefix (a sign, digits, one dot, an exponent only when it carries a digit). No hex, no inf,
+ * no nan; text with no digit reads 0.0. The whole string is scanned, and only the prefix reaches
+ * strtod (which rounds it correctly), however long it is: a 130-digit literal reads its own value. */
+static double fk_decimal_prefix(const char *s, long long n) {
+    long long i = 0;
+    while (i < n && (s[i] == FK_CH_SPACE || (s[i] >= FK_CH_TAB && s[i] <= FK_CH_CR))) {
+        i = i + 1;
+    }
+    long long start = i;
+    if (i < n && (s[i] == FK_CH_PLUS || s[i] == FK_CH_DASH)) {
+        i = i + 1;
+    }
+    long long digits = 0;
+    while (i < n && s[i] >= FK_CH_DIGIT0 && s[i] <= FK_CH_DIGIT9) {
+        i = i + 1;
+        digits = digits + 1;
+    }
+    if (i < n && s[i] == FK_CH_DOT) {
+        i = i + 1;
+        while (i < n && s[i] >= FK_CH_DIGIT0 && s[i] <= FK_CH_DIGIT9) {
+            i = i + 1;
+            digits = digits + 1;
+        }
+    }
+    if (digits == 0) {
+        return 0.0;
+    }
+    long long end = i;
+    if (i < n && (s[i] == FK_CH_LOWER_E || s[i] == FK_CH_UPPER_E)) {
+        long long j = i + 1;
+        if (j < n && (s[j] == FK_CH_PLUS || s[j] == FK_CH_DASH)) {
+            j = j + 1;
+        }
+        if (j < n && s[j] >= FK_CH_DIGIT0 && s[j] <= FK_CH_DIGIT9) {
+            while (j < n && s[j] >= FK_CH_DIGIT0 && s[j] <= FK_CH_DIGIT9) {
+                j = j + 1;
+            }
+            end = j;
+        }
+    }
+    char small[128];
+    char *buf = small;
+    long long len = end - start;
+    if (len > 126) {
+        buf = (char *)malloc((fk_size_t)(len + 1));
+        if (buf == 0) {
+            fk_die("str_to_float: out of memory holding a decimal prefix");
+        }
+    }
+    long long j = 0;
+    while (j < len) {
+        buf[j] = s[start + j];
+        j = j + 1;
+    }
+    buf[len] = 0;
+    double out = strtod(buf, 0);
+    if (buf != small) {
+        free(buf);
+    }
+    return out;
+}
+/* the same reader over a string word: a word that is not a string answers 0 and *ok 0 */
+static double fk_decimal_prefix_word(long long sa, int *ok) {
+    if (sa < 0 || !FK_SOK(sa)) {
+        *ok = 0;
+        return 0.0;
+    }
+    *ok = 1;
+    return fk_decimal_prefix((const char *)FK_SBYTES(sa), FK_SLEN(sa));
 }
 
 /* CPython-compatible round(x, ndigits) for finite binary64 values, ndigits >= 0.
@@ -9036,7 +9262,7 @@ static void fk_pv_inline_number(long long v) {
     } else if ((v & 1) == 0) {
         printf("%lld", v >> 1);
     } else {
-        printf("%lld", v);
+        fk_pv_word_inline(v);
     }
 }
 /* The list printer walks nesting on its own stack of open brackets (the cons
@@ -9055,7 +9281,7 @@ static void fk_pv_list(long long v) {
     for (;;) {
         if (p >= 1 && FK_POK(p)) {
             long long item = FK_HH(p);
-            long long next = FK_HT(p) >> 1;
+            long long next = FK_HNEXT(p);
             if (!first) {
                 putchar(FK_CH_COMMA);
                 putchar(FK_CH_SPACE);
@@ -10356,9 +10582,9 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         }
     }
     if (t == 54) {
-        /* float_to_int: the walker's (long long)fk_num(v) << 1 -- one FCVTZS over the operand as a double (an int operand
-         * through SCVTF first, as fk_num reads it), then the tagged word's own 63-bit wrap, so a whole part past 2^62
-         * answers as the walker's int does (kind 36) */
+        /* float_to_int: one FCVTZS over the operand as a double (an int operand through SCVTF first, as fk_num reads
+         * it), kind 36. Law 6 rides the leaf: a NaN, or a whole part outside [-2^62, 2^62), leaves for the overflow
+         * block, and the walker's arm answers -- it stops, as the law says */
         int a = 0;
         int ta = fk_f64_admit(fk_node[i][1], arity, types, &a);
         if (ta == 5 && !fk_f64_word_resolve(&a, &ta, 2)) { return 0; }
@@ -10922,6 +11148,20 @@ static int fk_f64_mov64(unsigned int *words, long long *wn, unsigned int xd, uns
     }
     return 1;
 }
+/* law 2 rides the leaf: an integer div or mod whose divisor reads zero leaves for the overflow block, so the
+ * walker's arm answers that call and stops, as it does cold. ARM64's SDIV answers 0 for a zero divisor and the
+ * MSUB after it the dividend, so an unguarded warm defn answered (div 7 0) = 0 and (mod 7 0) = 7 where the
+ * same call stopped before the JIT took it. A divisor that is a nonzero literal needs no guard. */
+static int fk_f64_emit_divisor_guard(int bn, unsigned int xb, unsigned int *words, long long *wn) {
+    if (bn >= 0 && bn < fk_f64_prog_n && fk_f64_prog[bn].kind == 7 && fk_f64_prog[bn].ilit != 0) {
+        return 1;
+    }
+    if (fk_f64_ovf_n >= FK_F64_OVF_CAP) {
+        return 0;
+    }
+    fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
+    return fk_f64_put(words, wn, 0xB4000000U | xb); /* CBZ Xb, overflow: a zero divisor */
+}
 /* postorder emit; returns the register code holding the node's value, -1 on overflow */
 static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, int *nitemp) {
     fk_f64_node *p = &fk_f64_prog[n];
@@ -11199,16 +11439,25 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         return rd;
     }
     if (p->kind == 36) {
-        /* float_to_int: FCVTZS, then the 63-bit wrap of the walker's tagged word (LSL #1; ASR #1) */
+        /* float_to_int, law 6: NaN leaves (FCMP of the operand with itself is unordered), then FCVTZS, which
+         * saturates; a result that does not survive the 63-bit round trip (LSL #1; ASR #1) lay outside
+         * [-2^62, 2^62) and leaves too. The walker's arm answers a leaving call, and it stops. */
         int ra = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
         if (ra < 0 || ra >= 100) { return -1; }
         fk_f64_release(ra, ntemp, nitemp);
-        if (*nitemp >= 7) { return -1; }
+        if (*nitemp >= 7 || fk_f64_ovf_n + 2 > FK_F64_OVF_CAP) { return -1; }
         int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
         unsigned int xd = (unsigned int)rd;
-        if (!fk_f64_put(words, wn, 0x9E780000U | ((unsigned int)ra << 5) | xd)) { return -1; } /* FCVTZS Xd, Dn */
-        if (!fk_f64_put(words, wn, 0xD37FF800U | (xd << 5) | xd)) { return -1; }            /* LSL Xd, Xd, #1 */
-        if (!fk_f64_put(words, wn, 0x9341FC00U | (xd << 5) | xd)) { return -1; }            /* ASR Xd, Xd, #1 */
+        unsigned int dn = (unsigned int)ra;
+        if (!fk_f64_put(words, wn, 0x1E602000U | (dn << 16) | (dn << 5))) { return -1; }      /* FCMP Dn, Dn */
+        fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
+        if (!fk_f64_put(words, wn, 0x54000006U)) { return -1; }                               /* B.VS overflow: NaN has no integer */
+        if (!fk_f64_put(words, wn, 0x9E780000U | (dn << 5) | xd)) { return -1; }              /* FCVTZS Xd, Dn */
+        if (!fk_f64_put(words, wn, 0xD37FF800U | (xd << 5) | 9U)) { return -1; }              /* LSL X9, Xd, #1 */
+        if (!fk_f64_put(words, wn, 0x9341FC00U | (9U << 5) | 9U)) { return -1; }              /* ASR X9, X9, #1 */
+        if (!fk_f64_put(words, wn, 0xEB00001FU | (xd << 16) | (9U << 5))) { return -1; }      /* CMP X9, Xd */
+        fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
+        if (!fk_f64_put(words, wn, 0x54000001U)) { return -1; }                               /* B.NE overflow: past 63 bits */
         return 100 + rd;
     }
     if (p->kind == 34) {
@@ -11615,6 +11864,7 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
     if (p->kind >= 9 && p->kind <= 12) {
         if (ra < 100 || rb < 100 || *nitemp >= 7) { return -1; }
         unsigned int xa = (unsigned int)(ra - 100), xb = (unsigned int)(rb - 100);
+        if (p->kind == 12 && !fk_f64_emit_divisor_guard(p->b, xb, words, wn)) { return -1; }
         int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
         unsigned int op = p->kind == 9 ? 0x8B000000U : (p->kind == 10 ? 0xCB000000U : (p->kind == 11 ? 0x9B007C00U : 0x9AC00C00U)); /* ADD SUB MADD(xzr) SDIV */
         if (!fk_f64_put(words, wn, op | (xb << 16) | (xa << 5) | (unsigned int)rd)) { return -1; }
@@ -11624,6 +11874,7 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
         /* mod: the quotient into x9, then MSUB Xd, X9, Xb, Xa = a - q*b, the walker's truncating remainder */
         if (ra < 100 || rb < 100 || *nitemp >= 7) { return -1; }
         unsigned int xa = (unsigned int)(ra - 100), xb = (unsigned int)(rb - 100);
+        if (!fk_f64_emit_divisor_guard(p->b, xb, words, wn)) { return -1; }
         int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
         if (!fk_f64_put(words, wn, 0x9AC00C00U | (xb << 16) | (xa << 5) | 9U)) { return -1; }                              /* SDIV X9, Xa, Xb */
         if (!fk_f64_put(words, wn, 0x9B008000U | (xb << 16) | (xa << 10) | (9U << 5) | (unsigned int)rd)) { return -1; } /* MSUB Xd, X9, Xb, Xa */
@@ -12434,7 +12685,7 @@ static long long fk_len_upto(long long v, long long cap) {
     long long n = 0;
     while (p >= 1 && FK_POK(p) && n < cap) {
         n = n + 1;
-        p = FK_HT(p) >> 1;
+        p = FK_HNEXT(p);
     }
     return n;
 }
@@ -12462,6 +12713,14 @@ static int fk_len_cmp(long long i, long long fp, int op, long long *out) {
 /* Only numbers take part in arithmetic: an odd word that is not a float refuses. */
 static void fk_arith_check(long long a, long long b) {
     if (!((fk_isf(a) || (a & 1) == 0) && (fk_isf(b) || (b & 1) == 0))) { fk_stop(FK_ARITH_REFUSAL); }
+}
+/* A math door's operand as a double: an int or a float; any other word refuses, as arithmetic does,
+ * rather than reading a string's or nothing's word as a number some -4.5e18 wide. */
+static double fk_num_only(long long w) {
+    if (!(fk_isf(w) || (w & 1) == 0)) {
+        fk_stop("fkwu: math: only a number has a square root, an exponential, a logarithm or a power -- ask value_kind first");
+    }
+    return fk_num(w);
 }
 /* A branch reads a state (axiom-1): 0 and a float zero are 0; nothing is neither
  * 0 nor 1 and refuses; every other word is 1. */
@@ -12724,6 +12983,9 @@ static long long fk_walk(long long i, long long fp) {
         if (t19 == fk_nothing) {
             fk_stop("fkwu: cons: nothing is not a list -- ask nothing? before consing");
         }
+        /* a tail that is not a list makes a pair, the carrier the two-word doors read (the stage bus's
+         * (cons stage key), a (handle seq) watch); a list walk ends at it (FK_HNEXT), so the pair reads
+         * as the one-element list [h] and its tail is never taken for a pair index */
         fk_vp(t19);
         if (fk_cap == 0) {
             fk_arena();
@@ -12792,7 +13054,7 @@ static long long fk_walk(long long i, long long fp) {
         long long n = 0;
         while (p >= 1 && FK_POK(p)) {
             n = n + 1;
-            p = FK_HT(p) >> 1;
+            p = FK_HNEXT(p);
         }
         return n << 1;
     }
@@ -12804,7 +13066,7 @@ static long long fk_walk(long long i, long long fp) {
         long long l23 = fk_vs[fk_vsp];
         long long p = (l23 & 1) ? l23 >> 1 : 0;
         while (p >= 1 && FK_POK(p) && k23 > 0) {
-            p = FK_HT(p) >> 1;
+            p = FK_HNEXT(p);
             k23 = k23 - 1;
         }
         if (p < 1 || !FK_POK(p) || k23 < 0) {
@@ -14744,29 +15006,84 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     return l;
 }
 /* ---- the float-NodeID surface (tags 195 / 201) ---- */
-/* x^y with the integer part of y squared out exactly and the fractional part
- * through exp(yf*log(x)): pow(2,10) is 1024.0 to the bit, pow(2,0.5) is sqrt 2
- * within the same ULP honesty the other transcendentals carry. */
+/* an odd integer: |y| at or past 2^53 is always even, so no (long long) cast ever meets it */
+static int fk_odd_int_d(double y) {
+    double ay = y < 0.0 ? 0.0 - y : y;
+    if (ay >= 9007199254740992.0) { return 0; }
+    long long yi = (long long)y;
+    return (double)yi == y && (yi & 1) != 0;
+}
+/* x^y: the IEEE special cases first (a zero, an infinite x or y, NaN, |y| past 2^63), so no cast ever
+ * meets an infinity; then the fractional part of y through exp(yf*log(x)) and the integer part by
+ * repeated squaring of x's significand with its exponent carried apart, scaled once at the end from
+ * exponent bits. pow(2,10) is 1024.0 to the bit, pow(2,0.5) is sqrt 2 correctly rounded. The method
+ * and its order of cases are the ones the Go sibling's math.Pow carries. */
 static double fk_pow_d(double x, double y) {
+    double inf = fk_bitsd(FK_D_INF);
     if (y == 0.0 || x == 1.0) { return 1.0; }
-    if (x != x || y != y) { return 0.0 / 0.0; }
-    if (x == 0.0) { return (y < 0.0) ? (1.0 / 0.0) : 0.0; }
-    double ay = (y < 0.0) ? 0.0 - y : y;
-    double yi = (double)(long long)ay;
+    if (y == 1.0) { return x; }
+    if (x != x || y != y) { return fk_bitsd(FK_D_QNAN); }
+    double ax = x < 0.0 ? 0.0 - x : x;
+    if (x == 0.0) {
+        int neg0 = (fk_dbits(x) & FK_D_SIGN) != 0;
+        if (y < 0.0) { return (neg0 && fk_odd_int_d(y)) ? 0.0 - inf : inf; }
+        return (neg0 && fk_odd_int_d(y)) ? x : 0.0;
+    }
+    if (y == inf || y == 0.0 - inf) {
+        if (x == -1.0) { return 1.0; }
+        if ((ax < 1.0) == (y > 0.0)) { return 0.0; }
+        return inf;
+    }
+    if (x == inf || x == 0.0 - inf) {
+        if (x < 0.0) { return fk_pow_d(1.0 / x, 0.0 - y); }
+        return y < 0.0 ? 0.0 : inf;
+    }
+    if (y == 0.5) { return fk_sqrt_d(x); }
+    if (y == -0.5) { return 1.0 / fk_sqrt_d(x); }
+    double ay = y < 0.0 ? 0.0 - y : y;
+    double yi = ay >= 4503599627370496.0 ? ay : (double)(long long)ay;
     double yf = ay - yi;
-    if (x < 0.0 && yf != 0.0) { return 0.0 / 0.0; }
-    double ax = (x < 0.0) ? 0.0 - x : x;
-    double frac = (yf == 0.0) ? 1.0 : fk_exp_d(yf * fk_log_d(ax));
-    double acc = 1.0;
-    double base = x;
+    if (yf != 0.0 && x < 0.0) { return fk_bitsd(FK_D_QNAN); }
+    if (yi >= 9223372036854775808.0) {
+        /* an even integer past every int: x^y over- or underflows unless |x| is 1 */
+        if (x == -1.0) { return 1.0; }
+        if ((ax < 1.0) == (y > 0.0)) { return 0.0; }
+        return inf;
+    }
+    double a1 = 1.0;
+    long long ae = 0;
+    if (yf != 0.0) {
+        if (yf > 0.5) {
+            yf = yf - 1.0;
+            yi = yi + 1.0;
+        }
+        a1 = fk_exp_d(yf * fk_log_d(x));
+    }
+    long long xe = 0;
+    double x1 = fk_frexp_d(x, &xe);
     long long n = (long long)yi;
-    while (n > 0) {
-        if (n & 1) { acc = acc * base; }
-        base = base * base;
+    while (n != 0) {
+        if (xe < -4096 || 4096 < xe) {
+            ae = ae + xe;
+            break;
+        }
+        if ((n & 1) != 0) {
+            a1 = a1 * x1;
+            ae = ae + xe;
+        }
+        x1 = x1 * x1;
+        xe = xe * 2;
+        if (x1 < 0.5) {
+            x1 = x1 + x1;
+            xe = xe - 1;
+        }
         n = n >> 1;
     }
-    double r = acc * frac;
-    return (y < 0.0) ? 1.0 / r : r;
+    if (y < 0.0) {
+        a1 = 1.0 / a1;
+        ae = 0 - ae;
+    }
+    return fk_ldexp_d(a1, ae);
 }
 /* intern a float32 trivial (type 6): the value rounds through float, NaN folds
  * to one quiet NaN and -0.0 to +0.0 as the type-7 door does; nid[3] carries the
@@ -14804,6 +15121,9 @@ static long long fk_intern_float32_node(double d) {
  * way the witnesses refuse a non-float NodeID. mode 1 make_float32, mode 2
  * make_float64, mode 3 math_pi. */
 static long long fk_float_leaf(long long mode, long long x) {
+    if ((mode == 1 || mode == 2) && !(fk_isf(x) || (x & 1) == 0)) {
+        fk_stop("fkwu: make_float: only a number becomes a float leaf -- ask value_kind first");
+    }
     if (mode == 1) { return fk_intern_float32_node(fk_num(x)); }
     if (mode == 2) { return fk_intern_float_node(fk_num(x)); }
     if (mode == 3) { return fk_fbox(3.141592653589793); }
@@ -15279,7 +15599,7 @@ static void fk_valstr_word(long long v, int item) {
             if (!first) { fk_valstr_put(", ", 2); }
             first = 0;
             fk_valstr_word(FK_HH(p), 1);
-            p = FK_HT(p) >> 1;
+            p = FK_HNEXT(p);
         }
         fk_valstr_put("]", 1);
         return;
@@ -15290,6 +15610,15 @@ static long long fk_value_str(long long v) {
     fk_valstr_len = 0;
     fk_valstr_word(v, 0);
     return fk_sbuf(fk_valstr_buf, fk_valstr_len);
+}
+static void fk_pv_word_inline(long long v) {
+    fk_valstr_len = 0;
+    fk_valstr_word(v, 1);
+    long long j = 0;
+    while (j < fk_valstr_len) {
+        putchar((int)(unsigned char)fk_valstr_buf[j]);
+        j = j + 1;
+    }
 }
 /* substring as a standalone word->word primitive (mode 9): the byte-indexed cut of the string word `sword` from `a`
  * to `b`, clamped to [0,len], "" when the range is empty/reversed or `sword` is not a string, then interned. THE ONE
@@ -15312,6 +15641,24 @@ static long long fk_substring_word(long long sword, long long a, long long b) {
     while (j < ln) { fk_sb[fk_sbp + j] = FK_SBYTES(ss)[a + j]; j = j + 1; }
     return fk_strv(fk_sintern(fk_sbp, ln));
 }
+/* Whether a word is a byte list: a list (the empty list too) whose every element is an int. Both
+ * byte doors ask it BEFORE they open the file, so a string, a number, nothing or a list holding a
+ * non-int is refused like a failed open (-1) and a refused write leaves the old bytes standing --
+ * write_file_bytes once truncated the file first and answered 0 for a string. An int element keeps
+ * its low byte (300 writes 44), the meaning all four kernels share. */
+static int fk_byte_list_ok(long long xs) {
+    if (!(xs == 1 || ((xs & 1) && xs > 0 && FK_POK(xs >> 1)))) {
+        return 0;
+    }
+    long long q = xs >> 1;
+    while (q >= 1 && FK_POK(q)) {
+        if ((FK_HH(q) & 1) != 0) {
+            return 0;
+        }
+        q = FK_HNEXT(q);
+    }
+    return 1;
+}
 /* One byte-list writer for every door that puts an int list on disk as raw bytes: tag 61
  * (file_append_bytes) and mode 27 (write_file_bytes). Each element's low byte, in order,
  * through one 8 KiB window. Answers whether every byte went out; *count holds how many did. */
@@ -15327,7 +15674,7 @@ static int fk_write_byte_list(int fd, long long xs, long long *count) {
         }
         tmp[n] = (char)(FK_HH(q) >> 1);
         n = n + 1;
-        q = FK_HT(q) >> 1;
+        q = FK_HNEXT(q);
     }
     int ok = fk_write_all_raw(fd, tmp, n);
     *count = done + n;
@@ -15348,11 +15695,11 @@ static long long fk_fb_door(long long mode, long long x) {
         long long count = 0;
         long long q = x >> 1;
         if ((x & 1) == 0) { return fk_nothing; }
-        while (q >= 1 && FK_POK(q)) { count = count + 1; q = FK_HT(q) >> 1; }
+        while (q >= 1 && FK_POK(q)) { count = count + 1; q = FK_HNEXT(q); }
         unsigned char *buf = (unsigned char *)calloc((size_t)(count > 0 ? count : 1), 1);
         q = x >> 1;
         long long k = 0;
-        while (q >= 1 && FK_POK(q)) { buf[k] = (unsigned char)(FK_HH(q) >> 1); k = k + 1; q = FK_HT(q) >> 1; }
+        while (q >= 1 && FK_POK(q)) { buf[k] = (unsigned char)(FK_HH(q) >> 1); k = k + 1; q = FK_HNEXT(q); }
         long long out = fk_fb_deserialize(buf, count);
         free(buf);
         return out;
@@ -15421,11 +15768,13 @@ static long long fk_fb_door(long long mode, long long x) {
         return lst;
     }
     /* mode 27: write_file_bytes (cons path bytes) -- the file becomes exactly those bytes
-     * (created, or truncated first); answers how many were written, or -1 when the path does
-     * not open or a write falls short. */
+     * (created, or truncated first); answers how many were written, or -1 when the bytes are
+     * not a byte list (asked before the file is touched), the path does not open or a write
+     * falls short. */
     if (mode == 27) {
         long long q = x >> 1;
         if ((x & 1) == 0 || q < 1 || !FK_POK(q)) { return -2; }
+        if (!fk_byte_list_ok(FK_HT(q))) { return -2; }
         static char p[FK_PATH_CAP];
         fk_cstr(FK_HH(q), p, FK_PATH_CAP);
         int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -15907,9 +16256,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long a11 = fk_walk(fk_node[i][1], fp);
         long long b11 = fk_walk(fk_node[i][2], fp);
         if ((a11 | b11) & 1) { fk_arith_check(a11, b11);
-            double x11 = fk_num(a11);
-            double y11 = fk_num(b11);
-            return fk_fbox(x11 - y11 * (double)((long long)(x11 / y11)));
+            /* law 5: the exact truncating remainder, the sign of the dividend (fk_fmod_d) */
+            return fk_fbox(fk_fmod_d(fk_num(a11), fk_num(b11)));
         }
         if ((b11 >> 1) == 0) { fk_stop("fkwu: mod: integer division by zero"); }
         return ((a11 >> 1) % (b11 >> 1)) << 1;
@@ -16015,10 +16363,14 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 28) {
         long long wa28 = fk_walk(fk_node[i][1], fp); fk_vp(wa28); long long sa = fk_stri(wa28);
-        long long k = fk_walk(fk_node[i][2], fp) >> 1; fk_vsp = fk_vsp - 1;
+        long long wk28 = fk_walk(fk_node[i][2], fp); fk_vsp = fk_vsp - 1;
         if (sa < 0 || !FK_SOK(sa)) {
             fk_stop("fkwu: str_byte_at: only a string has bytes -- ask value_kind first");
         }
+        if ((wk28 & 1) != 0) {
+            fk_stop("fkwu: str_byte_at: a byte index is an int -- ask nothing? first");
+        }
+        long long k = wk28 >> 1;
         if (k < 0 || k >= FK_SLEN(sa)) {
             return 0 - 2;
         }
@@ -16049,21 +16401,18 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          *   needle empty                   -> from, once clamped into range
          *   needle longer than what is left-> -1
          *   overlapping occurrences        -> the first
-         *   h or needle not a string       -> -1 (an absence is not a haystack and
-         *                                    not a needle; the three siblings die
-         *                                    here, so no four-way meaning exists
-         *                                    and fkwu answers rather than dying)
+         *   h or needle not a string       -> stops (law 8, all four kernels: an
+         *                                    absence is not a haystack and not a
+         *                                    needle; attempt recovers it, nothing?
+         *                                    asks first)
+         *   from not an int (nothing too)  -> stops, as on the siblings: a word
+         *                                    read as an index it is not was the
+         *                                    old clamp's counterfeit start
          * BYTES, NOT CODEPOINTS. Every index in this dialect is a byte offset --
          * str_byte_at indexes bytes, substring cuts bytes, and the locale rows are
          * Persian, Hebrew, Chinese and Japanese. A `from` snapped up to a character
          * start (which go, rust and ts did until 2026-09-08) skips a needle that
          * begins on a continuation byte, and no ASCII band can say so.
-         *
-         * ONE PLACE THIS ANSWERS WHERE THE RECIPE DOES NOT: a `nothing` from.
-         * `nothing` reads as a hugely negative int, so fstr-find-loop walks up
-         * from nine quintillion below zero and never returns -- measured, a 120 s
-         * probe printed nothing at all. This clamps to 0 and answers. A spin
-         * carries no meaning to break.
          *
          * The two byte pointers are hoisted OUT of the scan: FK_SBYTES is a macro
          * over fk_sb + fk_so[si], and nothing in this loop walks, interns or grows,
@@ -16071,7 +16420,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * compare two extra loads on every position of a 35M-position walk. */
         long long wa30 = fk_walk(fk_node[i][1], fp); fk_vp(wa30);
         long long wb30 = fk_walk(fk_node[i][2], fp); fk_vp(wb30);
-        long long from = fk_walk(fk_node[i][3], fp) >> 1;
+        long long wf30 = fk_walk(fk_node[i][3], fp);
         /* re-read the two strings from the value stack AFTER every walk: a melt
          * inside the `from` expression relocates through fk_vs, and an index taken
          * before it would name a string that has moved. */
@@ -16079,8 +16428,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long sb = fk_stri(fk_vs[fk_vsp - 1]);
         fk_vsp = fk_vsp - 2;
         if (sa < 0 || !FK_SOK(sa) || sb < 0 || !FK_SOK(sb)) {
-            return 0 - 2;
+            fk_stop("fkwu: str_find: only a string is searched and only a string is found -- ask value_kind first");
         }
+        if ((wf30 & 1) != 0) {
+            fk_stop("fkwu: str_find: from is a byte index, an int -- ask nothing? first");
+        }
+        long long from = wf30 >> 1;
         if (from < 0) {
             from = 0;
         }
@@ -16159,45 +16512,58 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_sb[fk_sbp] = (char)b;
         return fk_strv(fk_sintern(fk_sbp, 1));
     }
-    if (t == 34) {
-        return (((fk_walk(fk_node[i][1], fp) >> 1) & (fk_walk(fk_node[i][2], fp) >> 1)) << 1);
-    }
-    if (t == 35) {
-        return (((fk_walk(fk_node[i][1], fp) >> 1) | (fk_walk(fk_node[i][2], fp) >> 1)) << 1);
-    }
-    if (t == 36) {
-        return (((fk_walk(fk_node[i][1], fp) >> 1) ^ (fk_walk(fk_node[i][2], fp) >> 1)) << 1);
-    }
-    if (t == 37) {
-        unsigned int x = (unsigned int)(fk_walk(fk_node[i][1], fp) >> 1);
-        long long n = (fk_walk(fk_node[i][2], fp) >> 1) & 31;
-        return ((long long)(unsigned int)(x << n)) << 1;
-    }
-    if (t == 38) {
-        unsigned int x = (unsigned int)(fk_walk(fk_node[i][1], fp) >> 1);
-        long long n = (fk_walk(fk_node[i][2], fp) >> 1) & 31;
-        return ((long long)(x >> n)) << 1;
-    }
-    if (t == 39) {
-        unsigned long long x = (unsigned int)(fk_walk(fk_node[i][1], fp) >> 1);
-        long long n = (fk_walk(fk_node[i][2], fp) >> 1) & 31;
-        return ((long long)(unsigned int)((x >> n) | (x << (32 - n)))) << 1;
-    }
-    if (t == 40) {
-        unsigned int x = (unsigned int)(fk_walk(fk_node[i][1], fp) >> 1);
-        unsigned int y = (unsigned int)(fk_walk(fk_node[i][2], fp) >> 1);
-        return ((long long)(unsigned int)(x + y)) << 1;
-    }
-    if (t == 41) {
-        unsigned int x = (unsigned int)(fk_walk(fk_node[i][1], fp) >> 1);
-        return ((long long)(unsigned int)(~x)) << 1;
+    if (t >= 34 && t <= 41) {
+        /* the bit doors take ints only: a float, a string or nothing stops, as on the siblings,
+         * where its tagged word once answered as bits (bxor 1.5 0 read the float box's word) */
+        long long ba = fk_walk(fk_node[i][1], fp);
+        long long bb = t == 41 ? 0 : fk_walk(fk_node[i][2], fp);
+        if (((ba | bb) & 1) != 0) {
+            fk_stop("fkwu: bits: only an int has bits -- ask value_kind first");
+        }
+        if (t == 34) {
+            return (((ba >> 1) & (bb >> 1)) << 1);
+        }
+        if (t == 35) {
+            return (((ba >> 1) | (bb >> 1)) << 1);
+        }
+        if (t == 36) {
+            return (((ba >> 1) ^ (bb >> 1)) << 1);
+        }
+        if (t == 37) {
+            unsigned int x = (unsigned int)(ba >> 1);
+            long long n = (bb >> 1) & 31;
+            return ((long long)(unsigned int)(x << n)) << 1;
+        }
+        if (t == 38) {
+            unsigned int x = (unsigned int)(ba >> 1);
+            long long n = (bb >> 1) & 31;
+            return ((long long)(x >> n)) << 1;
+        }
+        if (t == 39) {
+            unsigned long long x = (unsigned int)(ba >> 1);
+            long long n = (bb >> 1) & 31;
+            return ((long long)(unsigned int)((x >> n) | (x << (32 - n)))) << 1;
+        }
+        if (t == 40) {
+            unsigned int x = (unsigned int)(ba >> 1);
+            unsigned int y = (unsigned int)(bb >> 1);
+            return ((long long)(unsigned int)(x + y)) << 1;
+        }
+        unsigned int x41 = (unsigned int)(ba >> 1);
+        return ((long long)(unsigned int)(~x41)) << 1;
     }
     if (t == 43) {
         long long iv43 = fk_walk(fk_node[i][1], fp);
+        if ((iv43 & 1) != 0) {
+            fk_stop("fkwu: intern_trivial_int: only an int is an int leaf -- ask value_kind first");
+        }
         return fk_intern_int_node(iv43);
     }
     if (t == 46) {
         long long sv46 = fk_walk(fk_node[i][1], fp);
+        if (!fk_is_str(sv46)) {
+            fk_stop("fkwu: intern_trivial_string: only a string is a string leaf -- ask value_kind first");
+        }
         return fk_intern_str_node(sv46);
     }
     if (t == 47) {
@@ -16212,20 +16578,35 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long l91 = 0;
         long long ty91 = 0;
         long long in91 = 0;
+        long long odd91 = 0;
         if (q91 >= 1 && FK_POK(q91)) {
+            odd91 = odd91 | FK_HH(q91);
             p91 = FK_HH(q91) >> 1;
-            q91 = FK_HT(q91) >> 1;
+            q91 = FK_HNEXT(q91);
         }
         if (q91 >= 1 && FK_POK(q91)) {
+            odd91 = odd91 | FK_HH(q91);
             l91 = FK_HH(q91) >> 1;
-            q91 = FK_HT(q91) >> 1;
+            q91 = FK_HNEXT(q91);
         }
         if (q91 >= 1 && FK_POK(q91)) {
+            odd91 = odd91 | FK_HH(q91);
             ty91 = FK_HH(q91) >> 1;
-            q91 = FK_HT(q91) >> 1;
+            q91 = FK_HNEXT(q91);
         }
         if (q91 >= 1 && FK_POK(q91)) {
+            odd91 = odd91 | FK_HH(q91);
             in91 = FK_HH(q91) >> 1;
+        }
+        /* the identity constructor answers a NodeID or stops, recoverably: a coordinate that is not an int,
+         * or one outside the 64-bit layout (pkg < 2^6, level < 2^13, type < 2^12, 0 <= inst < 2^32; the
+         * 1.1.1 trivial-int lane takes any 63-bit int), is refused here, where fk_nid_make would end the
+         * process and no attempt could hold it */
+        if ((odd91 & 1) != 0) {
+            fk_stop("fkwu: make_nodeid: a coordinate is an int -- ask value_kind first");
+        }
+        if (!fk_nid_fits(p91, l91, ty91, in91)) {
+            fk_stop("fkwu: make_nodeid: a coordinate is outside the 64-bit node identity layout (pkg < 64, level < 8192, type < 4096, 0 <= inst < 2^32)");
         }
         return fk_make_nodeid(p91, l91, ty91, in91);
     }
@@ -16234,21 +16615,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_intern_bool_node(fk_truth(bv112));
     }
     if (t == 113) {
-        long long sa113 = fk_stri(fk_walk(fk_node[i][1], fp));
-        double fd113 = 0.0;
-        if (sa113 >= 0 && FK_SOK(sa113)) {
-            char tb113[128];
-            long long n113 = FK_SLEN(sa113);
-            if (n113 > 126) {
-                n113 = 126;
-            }
-            long long jj113 = 0;
-            while (jj113 < n113) {
-                tb113[jj113] = FK_SBYTES(sa113)[jj113];
-                jj113 = jj113 + 1;
-            }
-            tb113[n113] = 0;
-            fd113 = strtod(tb113, 0);
+        /* the leaf's value is source text read through law 7's one grammar; any other kind
+         * stops, as on the siblings (a float is made a leaf by make_float64) */
+        int ok113 = 0;
+        double fd113 = fk_decimal_prefix_word(fk_stri(fk_walk(fk_node[i][1], fp)), &ok113);
+        if (!ok113) {
+            fk_stop("fkwu: intern_trivial_float: only source text reads as a float leaf -- make_float64 takes a number");
         }
         /* INTERN, as the name says: the Go proof arm (internTrivialFloat64)
          * dedups by canonical bits -- one quiet NaN, -0.0 folds to +0.0,
@@ -16261,26 +16633,23 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 50) {
         long long sa = fk_node[i][1];
-        if (sa < 0 || !FK_SOK(sa)) {
+        int ok50 = 0;
+        double d50 = fk_decimal_prefix_word(sa, &ok50);
+        if (!ok50) {
             return 0;
         }
-        char tmp[128];
-        long long n = FK_SLEN(sa);
-        if (n > 126) {
-            n = 126;
-        }
-        long long j = 0;
-        while (j < n) {
-            tmp[j] = FK_SBYTES(sa)[j];
-            j = j + 1;
-        }
-        tmp[n] = 0;
-        return fk_fbox(strtod(tmp, 0));
+        return fk_fbox(d50);
     }
     if (t == 52) {
-        double x = fk_num(fk_walk(fk_node[i][1], fp));
-        long long nd = fk_walk(fk_node[i][2], fp) >> 1;
-        return fk_fbox(fk_round_ndigits_decimal(x, nd));
+        long long xw52 = fk_walk(fk_node[i][1], fp);
+        long long nw52 = fk_walk(fk_node[i][2], fp);
+        if (!(fk_isf(xw52) || (xw52 & 1) == 0)) {
+            fk_stop("fkwu: round_ndigits: only a number rounds -- ask value_kind first");
+        }
+        if ((nw52 & 1) != 0 || (nw52 >> 1) < 0) {
+            fk_stop("fkwu: round_ndigits: ndigits is a count of places, an int at or above 0");
+        }
+        return fk_fbox(fk_round_ndigits_decimal(fk_num(xw52), nw52 >> 1));
     }
     if (t == 53) {
         /* a source float literal parses as (53 (24 idx)): constant child,
@@ -16296,44 +16665,44 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (sa < 0 || !FK_SOK(sa)) {
             fk_stop("fkwu: str_to_float: only a string reads as a float -- ask value_kind first");
         }
-        long long fbv53;
-        {
-            char tmp[128];
-            long long n = FK_SLEN(sa);
-            if (n > 126) {
-                n = 126;
-            }
-            long long j = 0;
-            while (j < n) {
-                tmp[j] = FK_SBYTES(sa)[j];
-                j = j + 1;
-            }
-            tmp[n] = 0;
-            fbv53 = fk_fbox(strtod(tmp, 0));
-        }
+        /* law 7: one grammar for a computed str_to_float and a source literal alike, the whole text read */
+        int ok53 = 0;
+        long long fbv53 = fk_fbox(fk_decimal_prefix_word(sa, &ok53));
         if (lit53 && fk_flit_memo != 0) {
             fk_flit_memo[i] = fbv53;
         }
         return fbv53;
     }
     if (t == 54) {
-        return ((long long)fk_num(fk_walk(fk_node[i][1], fp))) << 1;
+        /* law 6: float_to_int truncates toward zero; an int passes through; NaN, a whole part outside
+         * [-2^62, 2^62) and any other kind stop -- an int is 63-bit, and no word is read as a number it is not */
+        long long w54 = fk_walk(fk_node[i][1], fp);
+        if ((w54 & 1) == 0) {
+            return w54;
+        }
+        if (!fk_isf(w54)) {
+            fk_stop("fkwu: float_to_int: only a number reads as an integer -- ask value_kind first");
+        }
+        double d54 = fk_num(w54);
+        if (d54 != d54 || d54 < -4611686018427387904.0 || d54 >= 4611686018427387904.0) {
+            fk_stop("fkwu: float_to_int: this float has no integer -- an int is 63-bit");
+        }
+        return ((long long)d54) << 1;
     }
     if (t == 81) {
-        return fk_fbox(fk_sqrt_d(fk_num(fk_walk(fk_node[i][1], fp))));
+        return fk_fbox(fk_sqrt_d(fk_num_only(fk_walk(fk_node[i][1], fp))));
     }
     if (t == 89) {
-        return fk_fbox(fk_exp_d(fk_num(fk_walk(fk_node[i][1], fp))));
+        return fk_fbox(fk_exp_d(fk_num_only(fk_walk(fk_node[i][1], fp))));
     }
     if (t == 90) {
-        return fk_fbox(fk_log_d(fk_num(fk_walk(fk_node[i][1], fp))));
+        return fk_fbox(fk_log_d(fk_num_only(fk_walk(fk_node[i][1], fp))));
     }
     if (t == 195) {
-        /* math_pow: the three witnesses answer math.Pow; the integer part of the
-         * exponent is squared out exactly (2^10 is 1024.0 to the bit), the
-         * fractional part rides exp(y*log(x)) like the other transcendentals. */
-        double pb195 = fk_num(fk_walk(fk_node[i][1], fp));
-        double pe195 = fk_num(fk_walk(fk_node[i][2], fp));
+        /* math_pow: the three witnesses answer math.Pow, and fk_pow_d carries its method and its
+         * special cases; only numbers take part */
+        double pb195 = fk_num_only(fk_walk(fk_node[i][1], fp));
+        double pe195 = fk_num_only(fk_walk(fk_node[i][2], fp));
         return fk_fbox(fk_pow_d(pb195, pe195));
     }
     if (t == 201) {
@@ -16381,11 +16750,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
              * one raw byte 206 here, as it is through the recipe and on the Go arm;
              * rust and ts cannot HOLD a severed character and answer the absence.
              *
-             * ONE PLACE THIS ANSWERS WHERE THE RECIPE DOES NOT: a `nothing` start.
-             * (sub 2 nothing) is 8999999999999999999, so the recipe halves a range
-             * of nine quintillion and never returns -- measured, an 8 s probe that
-             * printed nothing. A hugely negative start clamps to 0 here and the
-             * slice comes back. A spin carries no meaning to break. */
+             * An index that is not an int (`nothing` too) stops, as on the siblings:
+             * a `nothing` start once read as nine quintillion below zero and clamped
+             * to 0, a counterfeit slice where every other kernel stops. */
             long long rn201 = fk_node[i][3];
             if (rn201 == 0 || fk_node[rn201][0] != 19) {
                 /* (float_leaf 9 x) written by hand: the door's own arity is 2, so
@@ -16394,10 +16761,13 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
             long long ws201 = fk_walk(fk_node[i][2], fp);
             fk_vp(ws201); /* protect the string word across the range walks (which may allocate) */
-            long long a201 = fk_walk(fk_node[rn201][1], fp) >> 1;
-            long long b201 = fk_walk(fk_node[rn201][2], fp) >> 1;
+            long long aw201 = fk_walk(fk_node[rn201][1], fp);
+            long long bw201 = fk_walk(fk_node[rn201][2], fp);
             fk_vsp = fk_vsp - 1;
-            return fk_substring_word(ws201, a201, b201); /* the ONE meaning of the cut; the JIT leaf calls the same */
+            if (((aw201 | bw201) & 1) != 0) {
+                fk_stop("fkwu: substring: a byte index is an int -- ask nothing? first");
+            }
+            return fk_substring_word(ws201, aw201 >> 1, bw201 >> 1); /* the ONE meaning of the cut; the JIT leaf calls the same */
         }
         long long fx201 = fk_walk(fk_node[i][2], fp);
         /* modes 10-16: the SPEAKING family -- the mouth that answers the sense_mic_* ears.
@@ -16492,9 +16862,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         static char p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         long long xs = fk_walk(fk_node[i][2], fp);
-        /* Only a byte list is written. A string or any other kind is refused
-         * like a failed open, never answered as a complete write of nothing. */
-        if (fk_is_str(xs) || !(xs == 1 || ((xs & 1) && xs > 0 && FK_POK(xs >> 1)))) {
+        /* Only a byte list is written (fk_byte_list_ok). A string, any other kind
+         * or a list holding a non-int is refused like a failed open, never
+         * answered as a complete write, and nothing is appended. */
+        if (!fk_byte_list_ok(xs)) {
             return -2;
         }
         int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0666);
@@ -16994,12 +17365,20 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (len <= 0) {
             return fk_sbuf("", 0);
         }
+        if (off < 0) {
+            /* no byte sits before the first: nothing, as the siblings answer -- a negative
+             * offset once failed its seek unseen and read the file's head as the slice */
+            return fk_nothing;
+        }
         int fd = open(p, O_RDBIN);
         if (fd < 0) {
             /* a file that never was answers nothing, matching read_file (t==63) */
             return fk_nothing;
         }
-        lseek(fd, off, 0);
+        if (lseek(fd, off, 0) < 0) {
+            close(fd);
+            return fk_nothing;
+        }
         fk_sinit();
         while (fk_sbp + len > fk_scap_b) {
             fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
@@ -17104,7 +17483,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
         long long key = fk_stri(fk_walk(fk_node[i][2], fp));
         if (r < 1 || r > fk_rp) {
-            return 0;
+            fk_stop("fkwu: record_get: only a record has fields -- ask record? first");
         }
         long long j = 0;
         while (j < fk_rcnt[r]) {
@@ -17121,7 +17500,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long wk66 = fk_walk(fk_node[i][2], fp); fk_vp(wk66); long long key = fk_stri(wk66);
         long long val = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2;
         if (r < 1 || r > fk_rp) {
-            return 0;
+            fk_stop("fkwu: record_set: only a record has fields -- ask record? first");
         }
         long long j = 0;
         while (j < fk_rcnt[r]) {
@@ -17141,7 +17520,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
         long long key = fk_stri(fk_walk(fk_node[i][2], fp));
         if (r < 1 || r > fk_rp) {
-            return 0;
+            fk_stop("fkwu: record_has: only a record has fields -- ask record? first");
         }
         long long j = 0;
         while (j < fk_rcnt[r]) {
@@ -17257,7 +17636,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_host_resolve(fkl_p);
         void *fkl_d = opendir(fkl_p);
         if (fkl_d == 0) {
-            return 1;
+            /* a directory that is not there (or a path that is no directory) answers nothing, as the
+             * siblings answer: the empty list is an empty directory, never an absence */
+            return fk_nothing;
         }
         static char fkl_nb[1048576];
         static long long fkl_no[16384];
@@ -17350,7 +17731,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         return fkl_out;
 #else
-        return 1;
+        return fk_nothing; /* no directory reader on this host: nothing was measured */
 #endif
     }
     if (t == 133) {
@@ -18234,7 +18615,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             } else {
                 fk_pv_inline_number(pel);
             }
-            pp = FK_HT(pp) >> 1;
+            pp = FK_HNEXT(pp);
         }
         putchar(10);
         /* same live-event door as print_str: a driven emitter's line must reach the
