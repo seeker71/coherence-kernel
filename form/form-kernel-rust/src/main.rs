@@ -1601,18 +1601,6 @@ struct ShapeKey {
 // optimization is undone). Future breath: restore via Cow or split tables.
 type NativeFn = fn(&mut Kernel, &mut Arena, &[Value]) -> Value;
 
-// EnvAwareNativeFn — natives that need the caller's env (_dispatch, _dispatch_super).
-// Separate registry path to avoid changing the NativeFn signature across
-// every existing native.
-type EnvAwareNativeFn = fn(&mut Kernel, &mut Arena, FrameId, &[Value]) -> Value;
-
-#[derive(Copy, Clone)]
-struct EnvAwareNativeEntry {
-    name: NameID,
-    category: NodeID,
-    func: EnvAwareNativeFn,
-}
-
 // NativeEntry — a native's function plus the Form category it expresses.
 // Carries Blueprint attribution into the kernel: when the walker dispatches
 // through a native, the trace records the category alongside the FNCALL
@@ -1674,36 +1662,18 @@ pub(crate) struct Kernel {
     i64_idx: HashMap<i64, u32>,
     next_inst: u32,
     natives: HashMap<NameID, NativeEntry>,
-    env_natives: HashMap<NameID, EnvAwareNativeEntry>,
     // methods — the blueprint method table (BML/NUMS reference: methods live
     // on the blueprint/type, shared by all instances, name-dispatched). Keyed
     // by (blueprint NodeID, method-name NameID) → the method's Closure. A
     // record's blueprint tag selects its method set; method_invoke binds
     // `self` to the receiver record.
     methods: HashMap<(NodeID, NameID), Arc<Closure>>,
-    // jit_aliases: Form-function-name → native-name redirect.
-    // When a function call's name is in this map, the walker substitutes
-    // the aliased name before native lookup. Lets a Form recipe DEFINE
-    // an algorithm as canonical truth; a `register_jit` call makes its
-    // calls dispatch to a kernel-resident optimized native. Removing the
-    // entry falls back to walking the Form recipe.
-    jit_aliases: HashMap<NameID, NameID>,
-    // Content-addressed maps — the kernel's O(1) dispatch tables, keyed by the
-    // NodeID (content-address) of the key. A switch (status→phrase, name→handler,
-    // shape→route) becomes a direct NodeID lookup instead of a scan: two
-    // structurally-identical keys land in the same slot because they share a
-    // NodeID. Each (key→value) entry is a recorded edge — the dispatch table is a
-    // content-addressed graph, so the lookup that routes IS the trace that
-    // attests. Per-kernel (a worker builds its own at load).
-    maps: HashMap<i64, HashMap<NodeID, Value>>,
-    next_map: i64,
     // SWITCH recipe cache — source-level BML/Form `match` lowers to
     // RBasic.MATCH/RMatch.SWITCH. Literal arms become direct NodeID→body edges,
     // keyed by the substrate identity of the scrutinee value. The cache key is
     // the match recipe's own content-addressed NodeID, so repeated evaluation
     // pays the table build once and then dispatches by O(1) lookup.
     switch_tables: HashMap<NodeID, SwitchTable>,
-    active_roots: Vec<NodeID>,
     // unit_roots -- the unit roots the reader built, by how walk_unit reads
     // them: UNIT_DO for a source whose one form is a (do ...), UNIT_WRAPPER for
     // the implicit do that holds several top-level forms.
@@ -1780,7 +1750,7 @@ impl Trace {
         self.match_misses += 1;
     }
 
-    pub(crate) fn record_route_choice(&mut self, choice: &RouteChoice<'_>) {
+    fn record_route_choice(&mut self, choice: &RouteChoice<'_>) {
         for decision in &choice.decisions {
             self.record_choice_attempt();
             if decision.selected {
@@ -2149,13 +2119,8 @@ impl Kernel {
             i64_idx: HashMap::new(),
             next_inst: 1,
             natives: HashMap::new(),
-            env_natives: HashMap::new(),
             methods: HashMap::new(),
-            jit_aliases: HashMap::new(),
-            maps: HashMap::new(),
-            next_map: 0,
             switch_tables: HashMap::new(),
-            active_roots: Vec::new(),
             unit_roots: HashMap::new(),
             unit_view: 1,
             trace: None,
@@ -2328,194 +2293,6 @@ impl Kernel {
             ty: TRIV_STRING,
             inst: idx,
         }
-    }
-
-    fn substrate_mark(&self) -> Vec<Value> {
-        vec![
-            Value::Int(self.next_inst as i64),
-            Value::Int(self.strs.len() as i64),
-            Value::Int(self.by_id.len() as i64),
-        ]
-    }
-
-    fn substrate_counts(&self) -> Vec<Value> {
-        vec![
-            Value::Int(self.by_id.len() as i64),
-            Value::Int(self.strs.len() as i64),
-        ]
-    }
-
-    fn substrate_release(&mut self, mark: &[Value]) -> i64 {
-        if mark.len() < 2 {
-            return 0;
-        }
-        let next_mark = mark[0].as_int() as u32;
-        let str_mark = mark[1].as_int() as usize;
-        if next_mark == 0 || str_mark > self.strs.len() {
-            return 0;
-        }
-        let doomed: Vec<NodeID> = self
-            .by_id
-            .keys()
-            .copied()
-            .filter(|nid| nid.pkg == 0 && nid.inst >= next_mark)
-            .collect();
-        for nid in &doomed {
-            self.by_id.remove(nid);
-            self.source_attr.remove(nid);
-            self.switch_tables.remove(nid);
-        }
-        self.by_shape
-            .retain(|_, nid| !(nid.pkg == 0 && nid.inst >= next_mark));
-        for s in self.strs.iter().skip(str_mark) {
-            self.str_idx.remove(s);
-        }
-        self.strs.truncate(str_mark);
-        self.next_inst = next_mark;
-        doomed.len() as i64
-    }
-
-    fn mark_string_node(n: NodeID, live_strings: &mut HashSet<NameID>) {
-        if n.pkg == 1 && n.level == LEVEL_TRIVIAL && n.ty == TRIV_STRING {
-            live_strings.insert(n.inst);
-        }
-    }
-
-    fn mark_node(
-        &self,
-        n: NodeID,
-        live_nodes: &mut HashSet<NodeID>,
-        live_strings: &mut HashSet<NameID>,
-    ) {
-        Self::mark_string_node(n, live_strings);
-        if n.pkg != 0 || live_nodes.contains(&n) {
-            return;
-        }
-        let Some(recipe) = self.by_id.get(&n) else {
-            return;
-        };
-        live_nodes.insert(n);
-        self.mark_node(recipe.category, live_nodes, live_strings);
-        for child in &recipe.children {
-            self.mark_node(*child, live_nodes, live_strings);
-        }
-    }
-
-    fn mark_value(
-        &self,
-        value: &Value,
-        arena: Option<&Arena>,
-        live_nodes: &mut HashSet<NodeID>,
-        live_strings: &mut HashSet<NameID>,
-        live_frames: &mut HashSet<FrameId>,
-    ) {
-        match value {
-            Value::List(xs) => {
-                for item in xs.iter() {
-                    self.mark_value(item, arena, live_nodes, live_strings, live_frames);
-                }
-            }
-            Value::Closure(cl) => {
-                live_strings.insert(cl.name);
-                self.mark_node(cl.body, live_nodes, live_strings);
-                if let Some(a) = arena {
-                    self.mark_frame(a, cl.env, live_nodes, live_strings, live_frames);
-                }
-            }
-            Value::Nid(nid) => self.mark_node(*nid, live_nodes, live_strings),
-            _ => {}
-        }
-    }
-
-    fn mark_frame(
-        &self,
-        arena: &Arena,
-        frame: FrameId,
-        live_nodes: &mut HashSet<NodeID>,
-        live_strings: &mut HashSet<NameID>,
-        live_frames: &mut HashSet<FrameId>,
-    ) {
-        let mut cur = Some(frame);
-        while let Some(id) = cur {
-            if !live_frames.insert(id) {
-                return;
-            }
-            let Some(f) = arena.frames.get(id as usize) else {
-                return;
-            };
-            for (name, value) in &f.bindings {
-                live_strings.insert(*name);
-                self.mark_value(value, Some(arena), live_nodes, live_strings, live_frames);
-            }
-            if let Some(h) = &f.history {
-                for entries in h.values() {
-                    for (_, value) in entries {
-                        self.mark_value(value, Some(arena), live_nodes, live_strings, live_frames);
-                    }
-                }
-            }
-            cur = f.parent;
-        }
-    }
-
-    fn substrate_gc(&mut self, roots: &[Value], stack: Option<(&Arena, FrameId)>) -> Vec<Value> {
-        let mut live_nodes: HashSet<NodeID> = HashSet::new();
-        let mut live_strings: HashSet<NameID> = HashSet::new();
-        let mut live_frames: HashSet<FrameId> = HashSet::new();
-        for name in self.natives.keys() {
-            live_strings.insert(*name);
-        }
-        for (_, (file_id, _, _)) in &self.source_attr {
-            live_strings.insert(*file_id);
-        }
-        for root in &self.active_roots {
-            self.mark_node(*root, &mut live_nodes, &mut live_strings);
-        }
-        for root in roots {
-            self.mark_value(
-                root,
-                stack.map(|(arena, _)| arena),
-                &mut live_nodes,
-                &mut live_strings,
-                &mut live_frames,
-            );
-        }
-        if let Some((arena, frame)) = stack {
-            self.mark_frame(
-                arena,
-                frame,
-                &mut live_nodes,
-                &mut live_strings,
-                &mut live_frames,
-            );
-        }
-        let doomed: Vec<NodeID> = self
-            .by_id
-            .keys()
-            .copied()
-            .filter(|nid| nid.pkg == 0 && !live_nodes.contains(nid))
-            .collect();
-        for nid in &doomed {
-            self.by_id.remove(nid);
-            self.source_attr.remove(nid);
-            self.switch_tables.remove(nid);
-        }
-        self.by_shape
-            .retain(|_, nid| !(nid.pkg == 0 && !live_nodes.contains(nid)));
-        let mut pruned = 0usize;
-        if stack.is_some() {
-            while let Some(idx) = self.strs.len().checked_sub(1) {
-                let name_id = idx as NameID;
-                if live_strings.contains(&name_id) {
-                    break;
-                }
-                if let Some(s) = self.strs.pop() {
-                    self.str_idx.remove(&s);
-                    pruned += 1;
-                }
-            }
-        }
-        vec![Value::Int(doomed.len() as i64), Value::Int(pruned as i64)]
     }
 
     // category -- the recipe row answers first. A composite sits at its
@@ -2726,35 +2503,30 @@ pub(crate) struct Closure {
 }
 
 impl Value {
+    // display — the value as value_str writes it inside a list (law 9, fkwu's rendering).
     pub(crate) fn display(&self) -> String {
+        self.render("null")
+    }
+
+    // shown — the value as print and the final line write it: fkwu prints nothing as
+    // "nothing" at every depth, where value_str writes "null" inside a list.
+    pub(crate) fn shown(&self) -> String {
+        self.render("nothing")
+    }
+
+    fn render(&self, absent: &str) -> String {
         match self {
-            Value::Null => "null".to_string(),
+            Value::Null => absent.to_string(),
             Value::Int(n) => n.to_string(),
             Value::Float(f) => format_float(*f),
             Value::Str(s) => s.to_string(),
             Value::List(xs) => {
-                let parts: Vec<String> = xs.iter().map(|x| x.display()).collect();
+                let parts: Vec<String> = xs.iter().map(|x| x.render(absent)).collect();
                 format!("[{}]", parts.join(", "))
             }
-            Value::Closure(c) => format!("<closure #{}>", c.name),
+            Value::Closure(_) => "<closure>".to_string(),
             Value::Nid(n) => format!("@{}.{}.{}.{}", n.pkg, n.level, n.ty, n.inst),
-            Value::Record(r) => {
-                let rec = r.lock().unwrap();
-                if rec.blueprint_rec.is_some() {
-                    return format!("<record @record #{}fields>", rec.fields.len());
-                }
-                match rec.blueprint {
-                    Some(bp) => format!(
-                        "<record @{}.{}.{}.{} #{}fields>",
-                        bp.pkg,
-                        bp.level,
-                        bp.ty,
-                        bp.inst,
-                        rec.fields.len()
-                    ),
-                    None => format!("<record @0 #{}fields>", rec.fields.len()),
-                }
-            }
+            Value::Record(_) => "<record>".to_string(),
         }
     }
 
@@ -2809,290 +2581,6 @@ impl Value {
             _ => panic!("as_str: {:?}", self),
         }
     }
-}
-
-#[derive(Clone)]
-struct SourceNativeLexicon {
-    keywords: HashSet<String>,
-    properties: HashSet<String>,
-    keyword_kind: String,
-    property_kind: String,
-    name_kind: String,
-    int_kind: String,
-    float_kind: String,
-    string_kind: String,
-    char_kind: String,
-    op_kind: String,
-    ops: Vec<String>,
-    line_comment: String,
-    block_open: String,
-    block_close: String,
-}
-
-fn source_native_str(value: &str) -> Value {
-    Value::Str(value.to_string().into())
-}
-
-fn source_native_empty_list() -> Value {
-    Value::List(vec![].into())
-}
-
-fn source_native_atom(kind: &str, value: &str) -> Value {
-    Value::List(
-        vec![
-            source_native_str("cell"),
-            source_native_str(kind),
-            source_native_str(value),
-            source_native_empty_list(),
-            Value::Null,
-        ]
-        .into(),
-    )
-}
-
-fn source_native_string_set(value: &Value, field: &str) -> HashSet<String> {
-    match value {
-        Value::List(xs) => xs.iter().map(|v| v.as_str().to_string()).collect(),
-        _ => panic!("source_scan_file: {} must be list", field),
-    }
-}
-
-fn source_native_string_list(value: &Value, field: &str) -> Vec<String> {
-    match value {
-        Value::List(xs) => xs.iter().map(|v| v.as_str().to_string()).collect(),
-        _ => panic!("source_scan_file: {} must be list", field),
-    }
-}
-
-fn source_native_field<'a>(xs: &'a [Value], idx: usize, field: &str) -> &'a Value {
-    xs.get(idx)
-        .unwrap_or_else(|| panic!("source_scan_file: lexicon missing {}", field))
-}
-
-fn source_native_field_str(xs: &[Value], idx: usize, field: &str) -> String {
-    source_native_field(xs, idx, field).as_str().to_string()
-}
-
-fn source_native_lexicon_from_value(value: &Value) -> SourceNativeLexicon {
-    let xs = match value {
-        Value::List(xs) => xs,
-        _ => panic!("source_scan_file: lexicon must be a list"),
-    };
-    if xs.len() < 15 || source_native_field_str(xs, 0, "tag") != "source-lexicon" {
-        panic!("source_scan_file: lexicon must be (source-lexicon ...)");
-    }
-    SourceNativeLexicon {
-        keywords: source_native_string_set(source_native_field(xs, 1, "keywords"), "keywords"),
-        properties: source_native_string_set(
-            source_native_field(xs, 2, "properties"),
-            "properties",
-        ),
-        keyword_kind: source_native_field_str(xs, 3, "keyword-kind"),
-        property_kind: source_native_field_str(xs, 4, "property-kind"),
-        name_kind: source_native_field_str(xs, 5, "name-kind"),
-        int_kind: source_native_field_str(xs, 6, "int-kind"),
-        float_kind: source_native_field_str(xs, 7, "float-kind"),
-        string_kind: source_native_field_str(xs, 8, "string-kind"),
-        char_kind: source_native_field_str(xs, 9, "char-kind"),
-        op_kind: source_native_field_str(xs, 10, "op-kind"),
-        ops: source_native_string_list(source_native_field(xs, 11, "ops"), "ops"),
-        line_comment: source_native_field_str(xs, 12, "line-comment"),
-        block_open: source_native_field_str(xs, 13, "block-open"),
-        block_close: source_native_field_str(xs, 14, "block-close"),
-    }
-}
-
-fn source_native_name_kind<'a>(lex: &'a SourceNativeLexicon, value: &str) -> &'a str {
-    if lex.keywords.contains(value) {
-        &lex.keyword_kind
-    } else if lex.properties.contains(value) {
-        &lex.property_kind
-    } else {
-        &lex.name_kind
-    }
-}
-
-fn source_native_name_start(b: u8) -> bool {
-    b.is_ascii_alphabetic() || b == b'_'
-}
-
-fn source_native_name_char(b: u8) -> bool {
-    source_native_name_start(b) || b.is_ascii_digit()
-}
-
-fn source_native_hex_digit(b: u8) -> bool {
-    b.is_ascii_hexdigit()
-}
-
-fn source_native_bin_digit(b: u8) -> bool {
-    matches!(b, b'0' | b'1')
-}
-
-fn source_native_decode_escape(b: u8) -> u8 {
-    match b {
-        b'\\' => b'\\',
-        b'\'' => b'\'',
-        b'"' => b'"',
-        b'n' => b'\n',
-        b't' => b'\t',
-        b'r' => b'\r',
-        b'0' => 0,
-        _ => b,
-    }
-}
-
-fn source_native_scan_quoted(src: &str, i: usize, quote: u8) -> (String, usize) {
-    let bytes = src.as_bytes();
-    let mut j = i + 1;
-    let mut out = String::new();
-    while j < bytes.len() {
-        let c = bytes[j];
-        if c == b'\\' && j + 1 < bytes.len() {
-            out.push(source_native_decode_escape(bytes[j + 1]) as char);
-            j += 2;
-            continue;
-        }
-        if c == quote {
-            return (out, j + 1);
-        }
-        out.push(c as char);
-        j += 1;
-    }
-    (out, j)
-}
-
-fn source_native_skip(src: &str, mut i: usize, lex: &SourceNativeLexicon) -> usize {
-    let bytes = src.as_bytes();
-    while i < bytes.len() {
-        let c = bytes[i];
-        if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
-            i += 1;
-            continue;
-        }
-        if !lex.line_comment.is_empty() && src[i..].starts_with(&lex.line_comment) {
-            i += lex.line_comment.len();
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if !lex.block_open.is_empty()
-            && !lex.block_close.is_empty()
-            && src[i..].starts_with(&lex.block_open)
-        {
-            if let Some(end) = src[i + lex.block_open.len()..].find(&lex.block_close) {
-                i = i + lex.block_open.len() + end + lex.block_close.len();
-                continue;
-            }
-            return bytes.len();
-        }
-        break;
-    }
-    i
-}
-
-fn source_native_scan_text(src: &str, lex: &SourceNativeLexicon) -> Value {
-    let bytes = src.as_bytes();
-    let mut out: Vec<Value> = vec![];
-    let mut i = 0usize;
-    while i < bytes.len() {
-        i = source_native_skip(src, i, lex);
-        if i >= bytes.len() {
-            break;
-        }
-        let c = bytes[i];
-        if c == b'"' {
-            let (value, next) = source_native_scan_quoted(src, i, b'"');
-            out.push(source_native_atom(&lex.string_kind, &value));
-            i = next;
-            continue;
-        }
-        if c == b'\'' {
-            let (value, next) = source_native_scan_quoted(src, i, b'\'');
-            out.push(source_native_atom(&lex.char_kind, &value));
-            i = next;
-            continue;
-        }
-        if c.is_ascii_digit() {
-            let mut j = i + 1;
-            let mut kind = lex.int_kind.as_str();
-            if c == b'0' && j < bytes.len() && matches!(bytes[j], b'x' | b'X') {
-                j += 1;
-                while j < bytes.len() && source_native_hex_digit(bytes[j]) {
-                    j += 1;
-                }
-            } else if c == b'0' && j < bytes.len() && matches!(bytes[j], b'b' | b'B') {
-                j += 1;
-                while j < bytes.len() && source_native_bin_digit(bytes[j]) {
-                    j += 1;
-                }
-            } else {
-                while j < bytes.len() && bytes[j].is_ascii_digit() {
-                    j += 1;
-                }
-                let mut is_float = false;
-                if j < bytes.len()
-                    && bytes[j] == b'.'
-                    && j + 1 < bytes.len()
-                    && bytes[j + 1].is_ascii_digit()
-                {
-                    is_float = true;
-                    j += 1;
-                    while j < bytes.len() && bytes[j].is_ascii_digit() {
-                        j += 1;
-                    }
-                }
-                // scientific-notation exponent, with OR without a fractional part:
-                // Python's repr emits e.g. 1e-05 (no decimal point), so the exponent
-                // must be consumed after a bare integer mantissa too, not only after '.'.
-                if j < bytes.len() && matches!(bytes[j], b'e' | b'E') {
-                    let mut k = j + 1;
-                    if k < bytes.len() && matches!(bytes[k], b'+' | b'-') {
-                        k += 1;
-                    }
-                    if k < bytes.len() && bytes[k].is_ascii_digit() {
-                        is_float = true;
-                        j = k + 1;
-                        while j < bytes.len() && bytes[j].is_ascii_digit() {
-                            j += 1;
-                        }
-                    }
-                }
-                if is_float {
-                    kind = lex.float_kind.as_str();
-                }
-            }
-            out.push(source_native_atom(kind, &src[i..j]));
-            i = j;
-            continue;
-        }
-        if source_native_name_start(c) {
-            let mut j = i + 1;
-            while j < bytes.len() && source_native_name_char(bytes[j]) {
-                j += 1;
-            }
-            let value = &src[i..j];
-            out.push(source_native_atom(
-                source_native_name_kind(lex, value),
-                value,
-            ));
-            i = j;
-            continue;
-        }
-        let mut matched = "";
-        for op in &lex.ops {
-            if src[i..].starts_with(op) {
-                matched = op;
-                break;
-            }
-        }
-        if matched.is_empty() {
-            matched = &src[i..i + 1];
-        }
-        out.push(source_native_atom(&lex.op_kind, matched));
-        i += matched.len();
-    }
-    Value::List(out.into())
 }
 
 // format_float — the canonical kernel float display, shared THREE-WAY. JS /
@@ -3290,64 +2778,6 @@ fn compose_scaled_decimal(kept: &str, n: i64, neg: bool) -> String {
     }
 }
 
-fn native_field_node(
-    k: &mut Kernel,
-    args: &[Value],
-    ty: u32,
-    inst: u32,
-    native_name: &str,
-) -> Value {
-    let kids: Vec<NodeID> = match &args[0] {
-        Value::List(xs) => xs.iter().map(|v| v.as_nid()).collect(),
-        _ => panic!("{}: expected one list of NodeIDs", native_name),
-    };
-    Value::Nid(k.intern(
-        NodeID {
-            pkg: 1,
-            level: LEVEL_BASIC,
-            ty,
-            inst,
-        },
-        kids,
-    ))
-}
-
-macro_rules! native_field_constructor {
-    ($fn_name:ident, $rb_ty:ident, $inst:expr, $native_name:literal) => {
-        fn $fn_name(k: &mut Kernel, _: &mut Arena, args: &[Value]) -> Value {
-            native_field_node(k, args, $rb_ty, $inst, $native_name)
-        }
-    };
-}
-
-native_field_constructor!(native_field_blueprint, RB_FIELD, 1, "field_blueprint");
-native_field_constructor!(native_field_cell, RB_FIELD, 2, "field_cell");
-native_field_constructor!(native_field_carrier, RB_CARRIER, 1, "field_carrier");
-native_field_constructor!(native_field_topology, RB_TOPOLOGY, 1, "field_topology");
-native_field_constructor!(native_field_fiber, RB_FIBER, 1, "field_fiber");
-native_field_constructor!(native_field_region, RB_REGION, 1, "field_region");
-native_field_constructor!(native_field_boundary, RB_BOUNDARY, 1, "field_boundary");
-native_field_constructor!(
-    native_field_neighborhood,
-    RB_NEIGHBORHOOD,
-    1,
-    "field_neighborhood"
-);
-native_field_constructor!(native_field_match, RB_MATCH_FIELD, 1, "field_match");
-native_field_constructor!(native_field_delta, RB_DELTA, 1, "field_delta");
-native_field_constructor!(native_field_resolve, RB_RESOLVE, 1, "field_resolve");
-native_field_constructor!(native_field_commit, RB_COMMIT, 1, "field_commit");
-native_field_constructor!(native_field_step, RB_STEP, 1, "field_step");
-native_field_constructor!(native_field_lift, RB_LIFT, 1, "field_lift");
-native_field_constructor!(native_field_sample, RB_SAMPLE, 1, "field_sample");
-native_field_constructor!(native_field_observe, RB_OBSERVE, 1, "field_observe");
-native_field_constructor!(native_field_intervene, RB_INTERVENE, 1, "field_intervene");
-native_field_constructor!(native_field_residual, RB_RESIDUAL, 1, "field_residual");
-native_field_constructor!(native_field_receipt, RB_RECEIPT, 1, "field_receipt");
-native_field_constructor!(native_field_cost, RB_COST, 1, "field_cost");
-native_field_constructor!(native_field_consent, RB_CONSENT, 1, "field_consent");
-native_field_constructor!(native_field_evidence, RB_EVIDENCE, 1, "field_evidence");
-
 // ---------------------------------------------------------------------------
 // Frame — scope primitive
 // ---------------------------------------------------------------------------
@@ -3385,18 +2815,6 @@ fn binding_at_view(h: &[(u64, Value)], view: u64) -> Value {
 // ---------------------------------------------------------------------------
 
 impl Kernel {
-    fn register_env_native(&mut self, name: &str, category: NodeID, f: EnvAwareNativeFn) {
-        let id = self.intern_string(name).inst;
-        self.env_natives.insert(
-            id,
-            EnvAwareNativeEntry {
-                name: id,
-                category,
-                func: f,
-            },
-        );
-    }
-
     fn register_native(&mut self, name: &str, category: NodeID, f: NativeFn) {
         let id = self.intern_string(name).inst;
         self.natives.insert(
@@ -3423,24 +2841,25 @@ impl Kernel {
         // the trace when the native fires. The kernel knows itself from
         // inside, not only at its Form surface.
 
+        // print writes its arguments, a string as its bytes and any other value as shown(),
+        // then a newline, and answers 0, as fkwu's print (tag 239) does.
         self.register_native("print", cat_call(), |_, _, args| {
             let mut out = std::io::stdout().lock();
             for (i, a) in args.iter().enumerate() {
                 if i > 0 {
                     let _ = out.write_all(b" ");
                 }
-                // a string is its bytes; any other value its rendering
                 match a {
                     Value::Str(s) => {
                         let _ = out.write_all(s);
                     }
                     other => {
-                        let _ = out.write_all(other.display().as_bytes());
+                        let _ = out.write_all(other.shown().as_bytes());
                     }
                 }
             }
             let _ = out.write_all(b"\n");
-            Value::Null
+            Value::Int(0)
         });
         // a string's length is its byte count
         self.register_native("str_len", cat_access(), |_, _, args| match &args[0] {
@@ -3495,19 +2914,6 @@ impl Kernel {
             }
             Value::Str(Bstr::from(&s[a..b]))
         });
-        // char_at is core.fk's recipe on fkwu, (substring s i (add i 1)): one byte, clamped
-        self.register_native("char_at", cat_access(), |_, _, args| {
-            let s = match args.first() {
-                Some(Value::Str(s)) => s.clone(),
-                _ => return Value::Str(String::new().into()),
-            };
-            let i_i = args[1].as_int();
-            if i_i < 0 || i_i as usize >= s.len() {
-                return Value::Str(String::new().into());
-            }
-            let i = i_i as usize;
-            Value::Str(Bstr::from(&s[i..i + 1]))
-        });
         self.register_native("str_concat", cat_method(), |_, _, args| {
             let a = match &args[0] {
                 Value::Str(s) => s.clone(),
@@ -3525,55 +2931,26 @@ impl Kernel {
         self.register_native("form_error", cat_witness(), |_, _, args| {
             panic!("{}", args[0].as_str())
         });
-        self.register_native("form-error", cat_witness(), |_, _, args| {
-            panic!("{}", args[0].as_str())
-        });
-        // value_str — render ANY value as its canonical display string. The
-        // companion str_concat needs for building a response document: int_to_str
-        // truncates a Float to an int (its `_ => as_int()` arm), and str_concat's
-        // as_str() panics on a non-Str. value_str routes through Value::display(),
-        // so a Float renders Python-style (format_float: 0.8125, 1.0), an
-        // Int as its digits, a List as [a, b], a Bool as true/false. This is the
-        // float-correct leaf a JSON-emitting native handler concatenates into the
-        // response body (e.g. production-routes.fk's /api/utils handlers). One
-        // native, all leaf types — core-abstraction-first.
-        // value_str — a value as text, as Go's formValueString writes it: null as "", anything else as
-        // print writes it.
+        // value_str — a value as text: nothing as "", a string as itself, anything else as display().
         self.register_native("value_str", cat_method(), |_, _, args| match &args[0] {
             Value::Null => Value::Str(String::new().into()),
             Value::Str(s) => Value::Str(s.clone()),
             v => Value::Str(v.display().into()),
         });
-        self.register_native("value_kind", cat_witness(), |_, _, args| {
-            Value::Str(value_kind_name(&args[0]).to_string().into())
-        });
+        let value_kind_native: NativeFn =
+            |_, _, args| Value::Str(value_kind_name(&args[0]).to_string().into());
+        self.register_native("value_kind", cat_witness(), value_kind_native);
+        // value-kind is fkwu's second spelling of value_kind, still read by BML callers.
+        self.register_native("value-kind", cat_witness(), value_kind_native);
         // nothing / nothing? — the axiom-1 third value and the one question that sees it,
         // native as on fkwu (tags 137/138): never-was is neither 0 nor empty.
         self.register_native("nothing", cat_witness(), |_, _, _| Value::Null);
         self.register_native("nothing?", cat_witness(), |_, _, args| {
             Value::Int(if matches!(args.first(), Some(Value::Null)) { 1 } else { 0 })
         });
-        self.register_native("value-kind", cat_witness(), |_, _, args| {
-            Value::Str(value_kind_name(&args[0]).to_string().into())
-        });
-        self.register_native("source_scan_file", cat_call(), |_, _, args| {
-            let body = fs::read_to_string(resolve_kernel_host_path(args[0].as_str()))
-                .unwrap_or_else(|e| panic!("source_scan_file: {}", e));
-            let lexicon = source_native_lexicon_from_value(&args[1]);
-            source_native_scan_text(&body, &lexicon)
-        });
-        // pow — integer exponentiation in native code (no Form recursion).
-        // (pow base exp) → base**exp. Negative exponents return 0 (Python's
-        // int**-n is a float; floats on this path are a later breath).
-        self.register_native("pow", cat_method(), |_, _, args| {
-            let base = args[0].as_int();
-            let exp = args[1].as_int();
-            if exp < 0 {
-                Value::Int(0)
-            } else {
-                Value::Int(base.pow(exp as u32))
-            }
-        });
+        // float_leaf is fkwu's mode door (tag 201); a hand-written call reaches no mode a sibling
+        // carries, so it answers nothing, as fkwu answers (float_leaf 9 0).
+        self.register_native("float_leaf", cat_witness(), |_, _, _| Value::Null);
         // --- struct/object primitive (BML reference, rung 2) ----------------
         // A Record is the kernel's first MUTABLE value: a struct/object with
         // identity. Every language's class/struct compiles onto these four
@@ -3853,80 +3230,6 @@ impl Kernel {
             }
             Value::Int(end as i64)
         });
-        // string_bytes exposes the exact UTF-8 carrier bytes, including embedded
-        // NULs, as integer leaves. It is the whole-string twin of str_byte_at.
-        self.register_native("string_bytes", cat_access(), |_, _, args| {
-            Value::List(
-                args[0]
-                    .as_bytes()
-                    .iter()
-                    .map(|byte| Value::Int(i64::from(*byte)))
-                    .collect::<Vec<_>>()
-                    .into(),
-            )
-        });
-        // string_byte_fold keeps the input in the host string pool and invokes
-        // a Form step with each raw UTF-8 byte as an int. The host loop gives
-        // streaming SHA/HMAC a stack bound independent of message length.
-        self.register_native("string_byte_fold", cat_call(), |k, a, args| {
-            let s = args[0].as_bytes().to_vec();
-            let mut acc = args[1].clone();
-            let cl = match &args[2] {
-                Value::Closure(c) => c.clone(),
-                _ => panic!("string_byte_fold: third arg must be a closure"),
-            };
-            if cl.params.len() != 2 {
-                panic!(
-                    "string_byte_fold: step closure wants 2 params (acc byte), got {}",
-                    cl.params.len()
-                );
-            }
-            for byte in s {
-                // `walk` can only reclaim frames created *inside* the call; the
-                // argument frame below already exists at its entry mark. Keep
-                // the host loop stack-disciplined as well, otherwise a 100k
-                // byte hash retains 100k dead call frames. A newly-created
-                // closure is the sole value that can capture this frame, so in
-                // that case preserve it exactly as the walker does.
-                let frame_mark = a.frames.len();
-                let closure_mark = a.closures_created;
-                let call_frame = a.new_frame_with_capacity(Some(cl.env), cl.params.len());
-                a.bind(call_frame, cl.params[0], acc);
-                a.bind(call_frame, cl.params[1], Value::Int(i64::from(byte)));
-                acc = walk(k, a, cl.body, call_frame);
-                if a.closures_created == closure_mark {
-                    a.frames.truncate(frame_mark);
-                }
-            }
-            acc
-        });
-        // Canonical universal-walker image serializer. The compiler accumulates
-        // roots and rows by cons, so both outer lists are emitted in reverse.
-        self.register_native("form_table_text", cat_method(), |_, _, args| {
-            let roots = match &args[0] {
-                Value::List(values) => values,
-                _ => panic!("form_table_text: roots must be a list"),
-            };
-            let rows = match &args[1] {
-                Value::List(values) => values,
-                _ => panic!("form_table_text: rows must be a list"),
-            };
-            let mut fields = Vec::with_capacity(2 + roots.len() + rows.len() * 4);
-            fields.push(roots.len().to_string());
-            for root in roots.iter().rev() {
-                fields.push(root.as_int().to_string());
-            }
-            fields.push(rows.len().to_string());
-            for row in rows.iter().rev() {
-                let Value::List(values) = row else {
-                    panic!("form_table_text: every row must be a list");
-                };
-                for field in values.iter() {
-                    fields.push(field.as_int().to_string());
-                }
-            }
-            Value::Str(fields.join(" ").into())
-        });
         // str_eq OBSERVES the axiom-1 absence instead of refusing it, mirroring the fkwu
         // arm exactly (probed 2026-09-04: nothing equals nothing, and equals neither ""
         // nor any other string, so the emptymask distinction between never-was and empty
@@ -3941,68 +3244,26 @@ impl Kernel {
             }
             bool_int(args[0].as_bytes() == args[1].as_bytes())
         });
-        // int_to_str — value-to-string for trivial leaves. Historical name
-        // (first use: line numbers in traces); semantics is "render
-        // any trivial value as text" so a leaf walker in Form can
-        // pass node_value of any leaf type through it. Multi-target emit
-        // (the universal codec lattice) depends on
-        // string + null passthrough.
-        self.register_native("int_to_str", cat_method(), |_, _, args| match &args[0] {
-            Value::Str(s) => Value::Str(s.clone()),
-            Value::Null => Value::Str("null".to_string().into()),
-            Value::Float(f) => Value::Str(format_float(*f).into()),
-            _ => Value::Str(args[0].as_int().to_string().into()),
-        });
-        self.register_native("str_to_int", cat_method(), |_, _, args| match &args[0] {
-            Value::Str(s) => Value::Int(leading_int(&s.text())),
-            other => Value::Int(leading_int(other.as_str())),
-        });
-        // float_to_int — truncate a float toward zero, exactly Python's int() on a
-        // float. The missing leaf between str_to_float and an integer: it lets a
-        // native handler replicate int(float(x)) (parse a numeric string that may
-        // carry a fraction, then truncate) where str_to_int alone returns 0 on
-        // "3.0". Total: a non-number -> 0. Rust `as i64` truncates toward zero for
-        // both signs, matching int(3.5)=3 and int(-3.5)=-3.
-        self.register_native("float_to_int", cat_method(), |_, _, args| {
-            let f = match &args[0] {
-                Value::Float(x) => *x,
-                Value::Int(i) => *i as f64,
-                _ => 0.0,
-            };
-            Value::Int(f as i64)
-        });
-        // str_to_float — text-to-float leaf, the float sibling of str_to_int.
-        // Total like its sibling (unparseable text -> 0.0), so a handler that
-        // splits a comma-separated query arg into float scores never panics on
-        // a stray token. This is what lets a native route parse arbitrary
-        // float inputs from the request (e.g. weighted_average's values/weights)
-        // and run the real arithmetic in Form, rather than serving a constant.
-        self.register_native("str_to_float", cat_method(), |_, _, args| match &args[0] {
-            Value::Str(s) => Value::Float(s.text().parse().unwrap_or(0.0)),
-            other => Value::Float(other.as_str().parse().unwrap_or(0.0)),
-        });
-        self.register_native("ord", cat_access(), |_, _, args| {
-            let s = args[0].as_bytes();
-            if s.is_empty() {
-                Value::Int(-1)
-            } else {
-                Value::Int(s[0] as i64)
+        // float_to_int truncates toward zero (law 6): a NaN, a float outside the 63-bit
+        // integers or a value that is not a number stops, never a made-up integer.
+        self.register_native("float_to_int", cat_method(), |_, _, args| match &args[0] {
+            Value::Int(i) => Value::Int(*i),
+            Value::Float(x) if x.is_finite() && x.trunc() >= -INT63_LIMIT && x.trunc() < INT63_LIMIT => {
+                Value::Int(x.trunc() as i64)
             }
+            other => panic!("float_to_int: only a finite float within the 63-bit integers reads as an integer, not {:?}", other),
         });
-        // str_byte_at: the i-th raw BYTE of the string (0-255), byte-exact —
-        // the byte twin of char_at (which is rune-aware and answers "" inside a
-        // multibyte char). A string is a UTF-8 byte sequence, so this is the
-        // byte door the string-pool serializer (fks-lit-sp) emits any locale's
-        // script through, matching the emitted walker's byte-indexed char_at.
+        // str_to_float reads one grammar (law 7); only a string reads as a float.
+        self.register_native("str_to_float", cat_method(), |_, _, args| match &args[0] {
+            Value::Str(s) => Value::Float(decimal_prefix_float(s)),
+            other => panic!("str_to_float: only a string reads as a float -- ask value_kind first, not {:?}", other),
+        });
+        // str_byte_at — byte i of the string, -1 outside it (law 8).
         self.register_native("str_byte_at", cat_access(), |_, _, args| {
             let bytes = args[0].as_bytes();
             let i = args[1].as_int();
             if i < 0 || i as usize >= bytes.len() {
-                panic!(
-                    "str_byte_at: bounds out of range index={} len={}",
-                    i,
-                    bytes.len()
-                );
+                return Value::Int(-1);
             }
             Value::Int(bytes[i as usize] as i64)
         });
@@ -4050,16 +3311,8 @@ impl Kernel {
                 Value::Null
             }
         });
-        // len is HONEST cell count. Dicts ride on Value::List tagged with the
-        // string "__dict__", but the tag is in-band: any plain list may carry
-        // that string as pooled DATA (the flatten string pool does, at the
-        // cell where "__dict__" was interned). A marker-sniffing len makes
-        // such a list lie about its length — flt-append's (eq (len xs) 0)
-        // base case then REPLACES the ["__dict__"] tail instead of appending
-        // past it, silently dropping the literal from the pool (the
-        // (24 -1 0 0) orphan-slit wound, 2026-07-17). Python's len(d)
-        // pair-count semantics live in _len, with the rest of the
-        // python-adapter's polymorphic underscore family.
+        // len is the honest cell count; a "__dict__"-tagged list counts every cell, its tag
+        // included, since the tag is in-band data any list may carry.
         self.register_native("len", cat_access(), |_, _, args| match &args[0] {
             Value::List(xs) => Value::Int(xs.len() as i64),
             Value::Str(s) => Value::Int(s.len() as i64),
@@ -4067,27 +3320,7 @@ impl Kernel {
             Value::Null => panic!("len: nothing has no length -- ask nothing? before measuring"),
             _ => Value::Int(0),
         });
-        // _len — the python-adapter's polymorphic length: dict PAIRS, list
-        // elements, string bytes. Python's `len(x)` lowers here (the kernel
-        // `len` stays an honest cell count; see the note above).
-        self.register_native("_len", cat_access(), |_, _, args| match &args[0] {
-            Value::List(xs) => {
-                if let Some(Value::Str(s)) = xs.first() {
-                    if *s == "__dict__" {
-                        return Value::Int(((xs.len() - 1) / 2) as i64);
-                    }
-                }
-                Value::Int(xs.len() as i64)
-            }
-            Value::Str(s) => Value::Int(s.len() as i64),
-            _ => Value::Int(0),
-        });
-        // nth — list subscript by integer index. Sibling-parity with the
-        // TS kernel; the Python emitter generates `(nth xs i)` for
-        // `xs[i]`. `core.fk` has a recursive version that could replace
-        // this once auto-prelude loading lands; keeping it native today
-        // is what closes the parity-suite assign/imperative/substrate
-        // demos against the live binary.
+        // nth — element i of a list, nothing outside it.
         self.register_native("nth", cat_access(), |_, _, args| {
             if let Value::List(xs) = &args[0] {
                 let i = args[1].as_int();
@@ -4100,23 +3333,6 @@ impl Kernel {
         });
         self.register_native("empty", cat_list_nat(), |_, _, _| {
             Value::List(vec![].into())
-        });
-        // _list_append — functional list extension: `(_list_append xs x)` →
-        // a NEW list = xs ++ [x]. The Python adapter lowers the accumulator
-        // idiom `result.append(x)` to `(let result (_list_append result x))`,
-        // rebinding the name to the grown list each pass (Python mutates in
-        // place; the kernel's list is an immutable value, so the name carries
-        // the growth). This is what unblocks the whole class of list-returning
-        // routes — softmax, distributions, vectors — without a class-method
-        // dispatch on a plain list. A non-list receiver yields a single-element
-        // list, matching `[].append(x)` having extended an empty accumulator.
-        self.register_native("_list_append", cat_list_nat(), |_, _, args| {
-            let mut xs = match &args[0] {
-                Value::List(xs) => xs.as_ref().clone(),
-                _ => Vec::new(),
-            };
-            xs.push(args[1].clone());
-            Value::List(Arc::new(xs))
         });
         // _get — one polymorphic accessor over every container shape the
         // Python adapter emits. The emitter lowers BOTH attribute reads
@@ -4191,77 +3407,8 @@ impl Kernel {
             }
             Value::Null
         });
-        // _dispatch — method-call entry. The adapter lowers `obj.m(arg, …)`
-        // to `(_dispatch obj "m" arg …)`. Reads obj's "__class__" field
-        // to find the function bound as `<ClassName>__<methodName>` in
-        // the surrounding scope; calls it with obj as the first argument.
-        // Env-aware so it can look up the method closure in the caller's
-        // frame chain (which is where the lifted method `defn`s landed).
-        //
-        // Inheritance walk: if `<C>__<m>` is not bound, look up `<C>__base`
-        // (a string holding the parent class name); try `<Parent>__<m>`;
-        // continue until a method is found or the chain ends. First match
-        // wins — single inheritance, MRO is just the linear chain. Walking
-        // here keeps every call site honest without the emitter needing to
-        // bake the dispatch order into compile-time call shape.
-        self.register_env_native("_dispatch", cat_call(), |k, a, env, args| {
-            let class_name = if let Value::List(xs) = &args[0] {
-                let mut i = 0;
-                let mut found: Option<String> = None;
-                while i + 1 < xs.len() {
-                    if let Value::Str(key) = &xs[i] {
-                        if *key == "__class__" {
-                            if let Value::Str(c) = &xs[i + 1] {
-                                found = Some(c.to_string());
-                            }
-                            break;
-                        }
-                    }
-                    i += 2;
-                }
-                match found {
-                    Some(c) => c,
-                    None => panic!("_dispatch: receiver record has no '__class__' field"),
-                }
-            } else {
-                panic!("_dispatch: receiver is not a record (got {:?})", args[0]);
-            };
-            let method_name = match &args[1] {
-                Value::Str(s) => s.text().to_string(),
-                _ => panic!("_dispatch: second arg must be the method name string"),
-            };
-            let (qualified, cl) = resolve_method(k, a, env, &class_name, &method_name);
-            // Build the call frame: bind self (args[0]) + the remaining
-            // method args (args[2..]) to the closure's parameters.
-            let call_args: Vec<&Value> =
-                std::iter::once(&args[0]).chain(args[2..].iter()).collect();
-            if cl.params.len() != call_args.len() {
-                panic!(
-                    "_dispatch: arity mismatch on {} (expected {}, got {})",
-                    qualified,
-                    cl.params.len(),
-                    call_args.len()
-                );
-            }
-            let frame = a.new_frame_with_capacity(Some(cl.env), cl.params.len());
-            for (i, p) in cl.params.iter().enumerate() {
-                a.bind(frame, *p, call_args[i].clone());
-            }
-            walk(k, a, cl.body, frame)
-        });
-        // --- Dict natives ---------------------------------------------------
-        // Dicts are first-class but ride on Value::List with a "__dict__"
-        // tag in slot 0, followed by alternating key/value pairs:
-        //   ["__dict__", k0, v0, k1, v1, ...]
-        // Keeps the dict model uniform with how the existing _plus / nth /
-        // subscript path already moves through Value::List, and lets the TS
-        // evaluator (which has no separate Dict variant) share the same
-        // shape across runtimes. Keys may be strings or ints; equality uses
-        // value-level compare (str==str, int==int). Updates are immutable —
-        // _dict_set returns a fresh dict so closures over the original keep
-        // their view. This is enough surface to write a real endpoint
-        // response shape; method-style .update / .pop / .items remain
-        // pending (not blocking #2059 dict transmute work).
+        // A dict rides on Value::List as ["__dict__", k0, v0, k1, v1, ...]; keys meet as
+        // strings or ints (pg_query_rows answers its rows in this shape).
         fn is_dict(v: &Value) -> bool {
             if let Value::List(xs) = v {
                 if let Some(Value::Str(s)) = xs.first() {
@@ -4277,291 +3424,6 @@ impl Kernel {
                 _ => false,
             }
         }
-        self.register_native("_dict_new", cat_list_nat(), |_, _, args| {
-            // (_dict_new k0 v0 k1 v1 ...) — variadic constructor used by
-            // the emitter for dict literals.
-            let mut out = vec![Value::Str("__dict__".to_string().into())];
-            out.extend(args.iter().cloned());
-            Value::List(out.into())
-        });
-        self.register_native("_dict_get", cat_access(), |_, _, args| {
-            if let Value::List(xs) = &args[0] {
-                if let Some(Value::Str(tag)) = xs.first() {
-                    if *tag == "__dict__" {
-                        let mut i = 1;
-                        while i + 1 < xs.len() {
-                            if dict_key_eq(&xs[i], &args[1]) {
-                                return xs[i + 1].clone();
-                            }
-                            i += 2;
-                        }
-                        return Value::Null;
-                    }
-                }
-            }
-            Value::Null
-        });
-        self.register_native("_dict_set", cat_method(), |_, _, args| {
-            // Immutable update — return a new dict; existing references unchanged.
-            if let Value::List(xs) = &args[0] {
-                if let Some(Value::Str(tag)) = xs.first() {
-                    if *tag == "__dict__" {
-                        let mut out = xs.as_ref().clone();
-                        let mut i = 1;
-                        while i + 1 < out.len() {
-                            if dict_key_eq(&out[i], &args[1]) {
-                                out[i + 1] = args[2].clone();
-                                return Value::List(Arc::new(out));
-                            }
-                            i += 2;
-                        }
-                        out.push(args[1].clone());
-                        out.push(args[2].clone());
-                        return Value::List(Arc::new(out));
-                    }
-                }
-            }
-            args[0].clone()
-        });
-        self.register_native("_dict_has", cat_compare(RCMP_EQ), |_, _, args| {
-            if let Value::List(xs) = &args[0] {
-                if let Some(Value::Str(tag)) = xs.first() {
-                    if *tag == "__dict__" {
-                        let mut i = 1;
-                        while i + 1 < xs.len() {
-                            if dict_key_eq(&xs[i], &args[1]) {
-                                return bool_int(true);
-                            }
-                            i += 2;
-                        }
-                    }
-                }
-            }
-            bool_int(false)
-        });
-        self.register_native("_dict_keys", cat_access(), |_, _, args| {
-            if let Value::List(xs) = &args[0] {
-                if let Some(Value::Str(tag)) = xs.first() {
-                    if *tag == "__dict__" {
-                        let mut out = Vec::new();
-                        let mut i = 1;
-                        while i + 1 < xs.len() {
-                            out.push(xs[i].clone());
-                            i += 2;
-                        }
-                        return Value::List(out.into());
-                    }
-                }
-            }
-            Value::List(vec![].into())
-        });
-        self.register_native("_dict_values", cat_access(), |_, _, args| {
-            if let Value::List(xs) = &args[0] {
-                if let Some(Value::Str(tag)) = xs.first() {
-                    if *tag == "__dict__" {
-                        let mut out = Vec::new();
-                        let mut i = 1;
-                        while i + 1 < xs.len() {
-                            out.push(xs[i + 1].clone());
-                            i += 2;
-                        }
-                        return Value::List(out.into());
-                    }
-                }
-            }
-            Value::List(vec![].into())
-        });
-        // (The subscript path is folded into the single polymorphic `_get`
-        // registered above — dict/record/list/str all dispatch on receiver
-        // shape there. A second `register_native("_get", …)` here would
-        // silently shadow it, so the subscript-only version was removed.)
-        // _iter — turn any container into a flat list suitable for the
-        // for-loop emitter's head/tail walk. Lists pass through; dicts
-        // become their keys (Python's `for k in d:`); strings become
-        // one-character strings per byte.
-        self.register_native("_iter", cat_list_nat(), |_, _, args| {
-            if is_dict(&args[0]) {
-                if let Value::List(xs) = &args[0] {
-                    let mut out = Vec::new();
-                    let mut i = 1;
-                    while i + 1 < xs.len() {
-                        out.push(xs[i].clone());
-                        i += 2;
-                    }
-                    return Value::List(out.into());
-                }
-            }
-            if let Value::List(_) = &args[0] {
-                return args[0].clone();
-            }
-            if let Value::Str(s) = &args[0] {
-                return Value::List(Arc::new(
-                    s.as_bytes()
-                        .iter()
-                        .map(|b| Value::Str((*b as char).to_string().into()))
-                        .collect(),
-                ));
-            }
-            Value::List(vec![].into())
-        });
-        // _in — polymorphic membership. (`k in d` → _in d k). For dicts
-        // checks keys; for lists checks elements; for strings checks
-        // substring presence.
-        self.register_native("_in", cat_compare(RCMP_EQ), |_, _, args| {
-            if is_dict(&args[1]) {
-                if let Value::List(xs) = &args[1] {
-                    let mut i = 1;
-                    while i + 1 < xs.len() {
-                        if dict_key_eq(&xs[i], &args[0]) {
-                            return bool_int(true);
-                        }
-                        i += 2;
-                    }
-                    return bool_int(false);
-                }
-            }
-            if let Value::List(xs) = &args[1] {
-                for v in xs.iter() {
-                    match (&args[0], v) {
-                        (Value::Int(a), Value::Int(b)) if *a == *b => return bool_int(true),
-                        (Value::Str(a), Value::Str(b)) if *a == *b => return bool_int(true),
-                        (Value::Float(a), Value::Float(b)) if *a == *b => return bool_int(true),
-                        _ => {}
-                    }
-                }
-                return bool_int(false);
-            }
-            if let (Value::Str(needle), Value::Str(hay)) = (&args[0], &args[1]) {
-                return bool_int(needle.is_empty() || hay.windows(needle.len()).any(|w| w == &needle[..]));
-            }
-            bool_int(false)
-        });
-        // _dispatch_super — super().<m>(args) entry. Adapter lowers
-        // `super().m(args…)` inside a method of class C to
-        // `(_dispatch_super self "C" "m" args…)`. We look up `C__base`
-        // (a string holding the parent class name) and resolve `m`
-        // starting at the parent — the inheritance walk continues from
-        // there. Skipping the receiver's `__class__` is what makes super
-        // different from a normal dispatch: a Dog calling
-        // `super().speak()` always resolves to Animal.speak (or
-        // Animal's chain), even though self.__class__ is "Dog".
-        self.register_env_native("_dispatch_super", cat_call(), |k, a, env, args| {
-            let class_name = match &args[1] {
-                Value::Str(s) => s.clone(),
-                _ => panic!("_dispatch_super: second arg must be the class name string"),
-            };
-            let method_name = match &args[2] {
-                Value::Str(s) => s.text().to_string(),
-                _ => panic!("_dispatch_super: third arg must be the method name string"),
-            };
-            // Look up <ClassName>__base to find the parent class name.
-            let base_key = format!("{}__base", class_name);
-            let base_id = match k.str_idx.get(&base_key).copied() {
-                Some(id) => id,
-                None => panic!(
-                    "_dispatch_super: no '{}' in scope — '{}' has no base class",
-                    base_key, class_name
-                ),
-            };
-            let parent_val = match a.lookup(env, base_id) {
-                Some(v) => v,
-                None => panic!(
-                    "_dispatch_super: '{}' not bound — '{}' has no base class",
-                    base_key, class_name
-                ),
-            };
-            let parent_name = match parent_val {
-                Value::Str(s) => s,
-                _ => panic!("_dispatch_super: '{}' is not a string", base_key),
-            };
-            if parent_name.is_empty() {
-                panic!(
-                    "_dispatch_super: class '{}' has no base class (empty __base)",
-                    class_name
-                );
-            }
-            let (qualified, cl) = resolve_method(k, a, env, &parent_name.text(), &method_name);
-            // First arg is self (args[0]); method args follow at args[3..].
-            let call_args: Vec<&Value> =
-                std::iter::once(&args[0]).chain(args[3..].iter()).collect();
-            if cl.params.len() != call_args.len() {
-                panic!(
-                    "_dispatch_super: arity mismatch on {} (expected {}, got {})",
-                    qualified,
-                    cl.params.len(),
-                    call_args.len()
-                );
-            }
-            let frame = a.new_frame_with_capacity(Some(cl.env), cl.params.len());
-            for (i, p) in cl.params.iter().enumerate() {
-                a.bind(frame, *p, call_args[i].clone());
-            }
-            walk(k, a, cl.body, frame)
-        });
-        // _merge_record — child constructors that chain through
-        // `super().__init__(args)` call the parent constructor (which
-        // returns a full record tagged with `__class__/__base__`), then
-        // merge the parent's data fields into the child's record. This
-        // native strips `__class__/__base__` from the parent record and
-        // appends the remaining (key, value) pairs to the child record.
-        // The child's `__class__/__base__` stays (the receiver's
-        // dispatch identity is the child, not the parent).
-        //
-        // Shape:
-        //   (_merge_record <child-record> <parent-record>)
-        // Returns: a new list with child's full prefix + parent's data fields.
-        self.register_native("_merge_record", cat_access(), |_, _, args| {
-            let child = match &args[0] {
-                Value::List(xs) => xs.as_ref().clone(),
-                _ => panic!("_merge_record: first arg must be a record"),
-            };
-            let parent = match &args[1] {
-                Value::List(xs) => xs,
-                _ => panic!("_merge_record: second arg must be a record"),
-            };
-            let mut out = child;
-            let mut i = 0;
-            while i + 1 < parent.len() {
-                if let Value::Str(key) = &parent[i] {
-                    if *key == "__class__" || *key == "__base__" {
-                        i += 2;
-                        continue;
-                    }
-                    // Skip if the child already has this field — child wins.
-                    let mut child_has = false;
-                    let mut j = 0;
-                    while j + 1 < out.len() {
-                        if let Value::Str(k2) = &out[j] {
-                            if k2 == key {
-                                child_has = true;
-                                break;
-                            }
-                        }
-                        j += 2;
-                    }
-                    if !child_has {
-                        out.push(parent[i].clone());
-                        out.push(parent[i + 1].clone());
-                    }
-                }
-                i += 2;
-            }
-            Value::List(Arc::new(out))
-        });
-        // --- Substrate read primitives — kernel reaches the REST surface ----
-        // The body's substrate lives behind /api/substrate/*. Until now the
-        // kernel could compute over data it was handed but could not pull
-        // its own data from the lattice. http_get + _json_get + _json_to_dict
-        // are the smallest closing breath that lets a .fk recipe stand up
-        // a `?lattice` or `?cell` query end-to-end without a Python shim.
-        //
-        // Why three minimal natives and not a fat client: the substrate's
-        // REST surface is already designed for outside callers (Pydantic
-        // response models, content-type JSON). The kernel just needs to
-        // speak HTTP + JSON well enough to consume those responses; the
-        // structural reasoning still happens in Form code over the dict
-        // values that come back.
-        //
         // http_get(url, headers?, timeout_ms?) → dict. This matches the Go
         // carrier shape used by the BML front-door catalog: status_code, body,
         // error, duration_ms, headers. Form owns response interpretation.
@@ -4571,219 +3433,7 @@ impl Kernel {
             let timeout = form_http_timeout(args.get(2), Duration::from_secs(10));
             external_http_get_value(url, headers, timeout)
         });
-        // _json_get(json_str, key) → str|int|float|bool|null. Parse a top-level
-        // JSON object and extract `obj[key]`. Returns null when key is missing
-        // or the JSON is malformed — same shape http_get uses, so Form code can
-        // chain (let body (http_get url)) (let n (_json_get body "key")).
-        // Only top-level keys; nested traversal lives in Form code via repeated
-        // _json_get on the sub-string.
-        self.register_native("_json_get", cat_access(), |_, _, args| {
-            let body = args[0].as_str();
-            let key = args[1].as_str();
-            let parsed: serde_json::Value = match serde_json::from_str(body) {
-                Ok(v) => v,
-                Err(_) => return Value::Null,
-            };
-            let val = match parsed.get(key) {
-                Some(v) => v,
-                None => return Value::Null,
-            };
-            match val {
-                serde_json::Value::Null => Value::Null,
-                serde_json::Value::Bool(b) => bool_int(*b),
-                serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() {
-                        Value::Int(i)
-                    } else if let Some(f) = n.as_f64() {
-                        Value::Float(f)
-                    } else {
-                        Value::Null
-                    }
-                }
-                serde_json::Value::String(s) => Value::Str(s.clone().into()),
-                // For arrays/objects, return the re-serialized JSON string
-                // so Form code can re-parse with another _json_get call.
-                // Keeps the native surface flat (no recursive Value structure
-                // beyond what the kernel already has) and matches the way
-                // jq pipelines compose at the shell.
-                _ => Value::Str(val.to_string().into()),
-            }
-        });
-        // _json_to_dict(json_str) → __dict__-tagged list (the kernel's dict
-        // shape). Convenience for the common case where the response is a
-        // small flat object — e.g. /api/substrate/lattice/stats returns
-        // {blueprints_total, recipes_total, cells_total} and the calling
-        // Form code wants to address it like a dict.
-        // Only top-level keys; nested objects/arrays come back as JSON
-        // string values (consistent with _json_get).
-        self.register_native("_json_to_dict", cat_method(), |_, _, args| {
-            let body = args[0].as_str();
-            let parsed: serde_json::Value = match serde_json::from_str(body) {
-                Ok(v) => v,
-                Err(_) => return Value::Null,
-            };
-            let obj = match parsed.as_object() {
-                Some(o) => o,
-                None => return Value::Null,
-            };
-            let mut out = vec![Value::Str("__dict__".to_string().into())];
-            for (k, v) in obj {
-                out.push(Value::Str(k.clone().into()));
-                out.push(match v {
-                    serde_json::Value::Null => Value::Null,
-                    serde_json::Value::Bool(b) => bool_int(*b),
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            Value::Int(i)
-                        } else if let Some(f) = n.as_f64() {
-                            Value::Float(f)
-                        } else {
-                            Value::Null
-                        }
-                    }
-                    serde_json::Value::String(s) => Value::Str(s.clone().into()),
-                    _ => Value::Str(v.to_string().into()),
-                });
-            }
-            Value::List(out.into())
-        });
-        // min / max / sum — common Python builtins, and variadic the way
-        // CPython is: one list argument folds over its elements, two or more
-        // arguments fold over the arguments themselves. The multi-argument
-        // shape used to fall through to `args[0]` unexamined, so `(min 7 3)`
-        // answered 7 with no diagnostic — and Go and TS answered 7 too, an
-        // agreed wrong answer the sibling comparison cannot see. sum returns
-        // the integer sum. All three handle empty lists honestly (sum=0,
-        // min/max panic with a clear message matching CPython's TypeError).
-        self.register_native("min", cat_method(), |_, _, args| {
-            Value::Int(fold_extremum(args, "min", false))
-        });
-        self.register_native("max", cat_method(), |_, _, args| {
-            Value::Int(fold_extremum(args, "max", true))
-        });
-        // sum — integer (or float-aware) total of a list. Sibling-parity
-        // with the TS kernel. The earlier compost note pointed at core.fk's
-        // `(defn sum (xs) (foldl plus 0 xs))`, but core.fk is not in the
-        // bootstrap load path today; restoring the native is what keeps
-        // the parity gate honest until auto-prelude lands.
-        self.register_native("sum", cat_method(), |_, _, args| {
-            if let Value::List(xs) = &args[0] {
-                // If any element is a float, promote the running total
-                // to float — matches Python's behaviour for sum([1, 2.5]).
-                let any_float = xs.iter().any(|v| matches!(v, Value::Float(_)));
-                if any_float {
-                    let mut total = 0.0f64;
-                    for v in xs.iter() {
-                        total += v.as_float();
-                    }
-                    return Value::Float(total);
-                }
-                let mut total: i64 = 0;
-                for v in xs.iter() {
-                    total += v.as_int();
-                }
-                return Value::Int(total);
-            }
-            Value::Int(0)
-        });
-        self.register_native("abs", cat_method(), |_, _, args| match &args[0] {
-            Value::Float(f) => Value::Float(f.abs()),
-            _ => {
-                let n = args[0].as_int();
-                Value::Int(if n < 0 { -n } else { n })
-            }
-        });
-        // Polymorphic `+` for Python compilation: int+int→add,
-        // str+str→concat, list+list→concat. The compile-time emitter
-        // can't always determine operand types (variables, function
-        // returns); _plus dispatches at runtime instead.
-        self.register_native("_plus", cat_method(), |_, _, args| {
-            match (&args[0], &args[1]) {
-                (Value::Int(a), Value::Int(b)) => Value::Int(a + b),
-                // Float promotion — matches Python: int+float→float,
-                // float+int→float, float+float→float.
-                (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
-                (Value::Int(a), Value::Float(b)) => Value::Float(*a as f64 + b),
-                (Value::Float(a), Value::Int(b)) => Value::Float(a + *b as f64),
-                // strings join as bytes; a number joins as its text
-                (Value::Str(a), Value::Str(b)) => {
-                    let mut s = a.to_vec();
-                    s.extend_from_slice(b);
-                    Value::Str(s.into())
-                }
-                (Value::Str(a), Value::Int(b)) => {
-                    let mut s = a.to_vec();
-                    s.extend_from_slice(b.to_string().as_bytes());
-                    Value::Str(s.into())
-                }
-                (Value::Int(a), Value::Str(b)) => {
-                    let mut s = a.to_string().into_bytes();
-                    s.extend_from_slice(b);
-                    Value::Str(s.into())
-                }
-                (Value::Str(a), Value::Float(b)) => {
-                    let mut s = a.to_vec();
-                    s.extend_from_slice(format_float(*b).as_bytes());
-                    Value::Str(s.into())
-                }
-                (Value::Float(a), Value::Str(b)) => {
-                    let mut s = format_float(*a).into_bytes();
-                    s.extend_from_slice(b);
-                    Value::Str(s.into())
-                }
-                (Value::List(a), Value::List(b)) => {
-                    let mut out = a.as_ref().clone();
-                    out.extend(b.iter().cloned());
-                    Value::List(Arc::new(out))
-                }
-                _ => panic!("_plus: unsupported operand types"),
-            }
-        });
-        // range(n)        → [0, 1, ..., n-1]
-        // range(a, b)     → [a, a+1, ..., b-1]
-        // range(a, b, s)  → [a, a+s, a+2s, ..., < b] (or > b for negative step)
-        // Opens `for i in range(N):` end-to-end through the kernel —
-        // the most common Python loop idiom. Same semantics as CPython's
-        // range builtin (returning an eager list rather than a lazy
-        // iterator, which the kernel doesn't yet have iterators for).
-        // Sibling-parity with TS kernel; the earlier compost note pointed
-        // at core.fk's recursive (start, end) variant, but core.fk isn't
-        // bootstrap-loaded today, so keeping range native is what keeps
-        // python_range_demo running end-to-end against the native binary.
-        self.register_native("range", cat_list_nat(), |_, _, args| {
-            let (start, stop, step) = match args.len() {
-                1 => (0i64, args[0].as_int(), 1i64),
-                2 => (args[0].as_int(), args[1].as_int(), 1i64),
-                _ => (args[0].as_int(), args[1].as_int(), args[2].as_int()),
-            };
-            let mut out: Vec<Value> = Vec::new();
-            if step == 0 {
-                return Value::List(out.into());
-            }
-            if step > 0 {
-                let mut i = start;
-                while i < stop {
-                    out.push(Value::Int(i));
-                    i += step;
-                }
-            } else {
-                let mut i = start;
-                while i > stop {
-                    out.push(Value::Int(i));
-                    i += step;
-                }
-            }
-            Value::List(out.into())
-        });
-        // ── Python `math` module — a tight kernel-native shape ─────
-        // The Python adapter rewrites `math.sqrt(x)` → `(math_sqrt x)`,
-        // `math.pi` → `(math_pi)`, etc. at parse time, so imports
-        // compile to nothing at runtime. Sibling-parity with the TS
-        // kernel; the entries are tight (sqrt, pi, floor, ceil, pow) —
-        // demonstrably useful for substrate code without enlarging the
-        // bootstrap surface. Each entry returns the same shape CPython
-        // produces so the parity gate's string compare stays honest:
-        // sqrt/pi/pow → Float; floor/ceil → Int (CPython 3 behaviour).
+        // math_sqrt is IEEE fsqrt, correctly rounded (law 4).
         self.register_native("math_sqrt", cat_method(), |_, _, args| {
             Value::Float(args[0].as_float().sqrt())
         });
@@ -4806,17 +3456,6 @@ impl Kernel {
         // parity with the Go + TS kernels. See round_ndigits_decimal above.
         self.register_native("round_ndigits", cat_method(), |_, _, args| {
             Value::Float(round_ndigits_decimal(args[0].as_float(), args[1].as_int()))
-        });
-        // ── Python `typing` module — opaque sentinels ─────────────────
-        // Every typing import (List, Optional, Dict, Tuple, Any, Callable,
-        // Union, Iterable, Iterator, Mapping, Sequence, Set, FrozenSet)
-        // binds to this one native. Type annotations are parse-and-ignored
-        // at compile time, so this never fires in real code; its existence
-        // makes the `from typing import …` binding round-trip honest. Any
-        // accidental runtime reference returns the same opaque string
-        // across CPython, TS eval, and Rust kernel.
-        self.register_native("typing_opaque", cat_method(), |_, _, _args| {
-            Value::Str("<typing>".to_string().into())
         });
         let read_file_text_native: NativeFn =
             // the file's own bytes, binary included (Bstr)
@@ -4918,48 +3557,6 @@ impl Kernel {
             let b = args[1].as_int() as u32;
             Value::Int(a.wrapping_add(b) as i64)
         });
-        // sha256_bytes / bytes_sum / bytes_hash were temporarily added
-        // as natives here but composted: those are composites, not
-        // primitives. SHA-256 lives in form-stdlib/sha256.fk as a Form
-        // recipe over the bitwise primitives above. This proof interpreter
-        // walks composite operations; native compilation uses fkwu.
-        // register_jit form-name-str native-name-str → 1 on bind, 0 if
-        // native-name has no registered native (refuse silent miss).
-        // Inserts (form-name → native-name) into k.jit_aliases. After this,
-        // every (form-name ...) call goes through the aliased native instead
-        // of walking the Form definition. Form recipes are canonical truth;
-        // register_jit is the opt-in that promotes a recipe to host-native
-        // execution. Removing the entry restores the Form walk.
-        //
-        // Discipline: the Form recipe MUST exist (or fall back to closure
-        // lookup at call time); the alias is a dispatch hint, not the
-        // definition. A demo: define `(defn my-count xs ...)` in Form, then
-        // `(register_jit "my-count" "len")` makes (my-count xs) dispatch
-        // through native `len`. Same NodeID-attested result; faster path.
-        self.register_native("register_jit", cat_witness(), |k, _, args| {
-            let form_name = args[0].as_str().to_string();
-            let native_name = args[1].as_str().to_string();
-            let native_id = k.intern_string(&native_name).inst;
-            let exists =
-                k.natives.contains_key(&native_id) || k.env_natives.contains_key(&native_id);
-            if !exists {
-                return Value::Int(0);
-            }
-            let form_id = k.intern_string(&form_name).inst;
-            k.jit_aliases.insert(form_id, native_id);
-            Value::Int(1)
-        });
-        // unregister_jit form-name-str → 1 if removed, 0 if no alias was
-        // bound. Restores the Form-recipe walk path for that name.
-        self.register_native("unregister_jit", cat_witness(), |k, _, args| {
-            let form_name = args[0].as_str().to_string();
-            let form_id = k.intern_string(&form_name).inst;
-            if k.jit_aliases.remove(&form_id).is_some() {
-                Value::Int(1)
-            } else {
-                Value::Int(0)
-            }
-        });
         // recipe_to_bytes nid → list-of-bytes (or null on error).
         //   Serializes a Recipe subtree to the .fkb wire format (string
         //   table + tree) as a byte list — usable over ANY byte channel
@@ -4989,96 +3586,8 @@ impl Kernel {
                 Err(_) => Value::Null,
             }
         });
-        // jit_aliased? form-name-str → 1 if a JIT alias is currently bound
-        // for this name, else 0. Lets Form code introspect dispatch routing.
-        self.register_native("jit_aliased?", cat_compare(RCMP_EQ), |k, _, args| {
-            let form_name = args[0].as_str().to_string();
-            let form_id = k.intern_string(&form_name).inst;
-            if k.jit_aliases.contains_key(&form_id) {
-                Value::Int(1)
-            } else {
-                Value::Int(0)
-            }
-        });
-        // ---- content-addressed maps : O(1) dispatch tables ------------------
-        // The substrate's intrinsic advantage made usable: a switch becomes a
-        // DIRECT lookup by the key's content-address (NodeID), not a scan. Two
-        // structurally-identical keys share a NodeID, so they land in the same
-        // slot — the precomputed structural hash a native compiler must re-pay at
-        // every dispatch. And each (key→value) entry is a recorded edge: the
-        // dispatch table is a content-addressed graph, so routing IS attesting.
-        //
-        // map_new → a fresh map handle (per-kernel).
-        self.register_native("map_new", cat_witness(), |k, _, _args| {
-            k.next_map += 1;
-            let h = k.next_map;
-            k.maps.insert(h, HashMap::new());
-            Value::Int(h)
-        });
-        // map_put h key value → 1 (0 if no such map). The key MUST be a NodeID —
-        // intern it first (intern_trivial_string for a name, intern_node for a
-        // shape); the key's CONTENT decides the slot, not its identity.
-        self.register_native("map_put", cat_witness(), |k, _, args| {
-            let h = args[0].as_int();
-            let key = args[1].as_nid();
-            let val = args[2].clone();
-            match k.maps.get_mut(&h) {
-                Some(m) => {
-                    m.insert(key, val);
-                    Value::Int(1)
-                }
-                None => Value::Int(0),
-            }
-        });
-        // map_get h key → value (or null). O(1) by the key's NodeID. No scan, no
-        // re-hash of the key's bytes — the content-address is the lookup. The
-        // traversal of this one edge is, itself, the trace of what was routed.
-        self.register_native("map_get", cat_witness(), |k, _, args| {
-            let h = args[0].as_int();
-            let key = args[1].as_nid();
-            match k.maps.get(&h).and_then(|m| m.get(&key)) {
-                Some(v) => v.clone(),
-                None => Value::Null,
-            }
-        });
-        // seeded_bytes(seed, count) — deterministic LCG byte stream.
-        // Same (seed, count) → byte-identical output across Go / Rust / TS.
-        // Used by the private-channel protocol to transmit megabytes of
-        // content by transmitting only (seed, count) on the wire; receiver
-        // reconstructs locally. Compression ratio: arbitrary / 16 bytes.
-        // LCG: glibc rand(): state = (state * 1103515245 + 12345) & 0x7FFFFFFF
-        self.register_native("seeded_bytes", cat_call(), |_, _, args| {
-            let seed = args[0].as_int() as u32;
-            let count = args[1].as_int();
-            if count <= 0 {
-                return Value::List(Vec::new().into());
-            }
-            let mut state: u32 = seed;
-            let n = count as usize;
-            let mut out: Vec<Value> = Vec::with_capacity(n);
-            for _ in 0..n {
-                state = state.wrapping_mul(1103515245).wrapping_add(12345) & 0x7FFFFFFF;
-                out.push(Value::Int((state & 0xFF) as i64));
-            }
-            Value::List(out.into())
-        });
-        // sum_bytes_list(list) — sum all integer elements. Used for fast
-        // verification that two cells' large byte-lists agree without
-        // materializing them through the Form recursion. O(n) compiled.
-        self.register_native("sum_bytes_list", cat_call(), |_, _, args| match &args[0] {
-            Value::List(xs) => {
-                let mut s: i64 = 0;
-                for v in xs.iter() {
-                    s = s.wrapping_add(v.as_int());
-                }
-                Value::Int(s)
-            }
-            _ => Value::Int(0),
-        });
         // write_form_binary — emit a Recipe to .fkb in the full artifact
         // format (string table + tree). Sibling to read_form_binary.
-        // Use when source-compile output crosses kernel invocations:
-        // serialize-recipe alone drops string indices.
         self.register_native("write_form_binary", cat_call(), |k, _, args| {
             let path = args[0].as_str().to_string();
             let nid = args[1].as_nid();
@@ -5118,42 +3627,28 @@ impl Kernel {
         };
         self.register_native("host_file_mtime", cat_call(), file_mtime_native);
         self.register_native("file_mtime", cat_call(), file_mtime_native);
-        self.register_native("file_byte_at", cat_call(), |_, _, args| {
-            let offset = args[1].as_int();
-            if offset < 0 {
-                return Value::Int(-1);
-            }
-            let mut file = match fs::File::open(resolve_kernel_host_path(args[0].as_str())) {
-                Ok(file) => file,
-                Err(_) => return Value::Int(-1),
-            };
-            if file.seek(SeekFrom::Start(offset as u64)).is_err() {
-                return Value::Int(-1);
-            }
-            let mut buf = [0u8; 1];
-            match file.read(&mut buf) {
-                Ok(1) => Value::Int(buf[0] as i64),
-                _ => Value::Int(-1),
-            }
-        });
+        // read_file_slice path off len — the slice's own bytes; "" when len asks for none, and
+        // nothing when no byte was measured (a missing file, a negative offset, a read error).
         let read_file_slice_native: NativeFn = |_, _, args| {
             let offset = args[1].as_int();
             let length = args[2].as_int();
-            if offset < 0 || length <= 0 {
+            if length <= 0 {
                 return Value::Str(String::new().into());
+            }
+            if offset < 0 {
+                return Value::Null;
             }
             let mut file = match fs::File::open(resolve_kernel_host_path(args[0].as_str())) {
                 Ok(file) => file,
-                Err(_) => return Value::Str(String::new().into()),
+                Err(_) => return Value::Null,
             };
             if file.seek(SeekFrom::Start(offset as u64)).is_err() {
-                return Value::Str(String::new().into());
+                return Value::Null;
             }
-            let mut buf = vec![0u8; length as usize];
-            match file.read(&mut buf) {
-                // the slice's own bytes: a string is bytes (Bstr), binary included
-                Ok(n) => Value::Str(Bstr::from(&buf[..n])),
-                Err(_) => Value::Str(String::new().into()),
+            let mut buf = Vec::new();
+            match file.take(length as u64).read_to_end(&mut buf) {
+                Ok(_) => Value::Str(Bstr::from(buf)),
+                Err(_) => Value::Null,
             }
         };
         self.register_native("host_file_read_slice", cat_call(), read_file_slice_native);
@@ -5238,7 +3733,7 @@ impl Kernel {
         // (socket_accept listener-handle)  → conn-handle | -1   (BLOCKS)
         // (socket_connect host port)       → conn-handle | -1
         // (socket_send conn bytes-string)  → bytes-sent | -1
-        // (socket_recv conn max-bytes)     → received-string ("" on close)
+        // (socket_recv conn max-bytes)     → the received bytes | "" on close or max <= 0 | nothing
         // (socket_close handle)            → 0 | -1
         self.register_native("socket_listen", cat_call(), |_, _, args| {
             let port = args[0].as_int();
@@ -5306,28 +3801,26 @@ impl Kernel {
                 _ => Value::Int(-1),
             }
         });
+        // A dead handle or a recv error answers nothing, as on fkwu: reading either as "" let a
+        // mid-stream failure pass as the peer's orderly close. One recv reads at most 64 KiB.
         self.register_native("socket_recv", cat_call(), |_, _, args| {
             let h = args[0].as_int();
             let max = args[1].as_int();
+            let s = match socket_lookup(h) {
+                Some(s) => s,
+                None => return Value::Null,
+            };
+            let SocketKind::Stream(m) = &*s else {
+                return Value::Null;
+            };
             if max <= 0 {
                 return Value::Str(String::new().into());
             }
-            let s = match socket_lookup(h) {
-                Some(s) => s,
-                None => return Value::Str(String::new().into()),
-            };
-            match &*s {
-                SocketKind::Stream(m) => {
-                    let mut g = m.lock().unwrap();
-                    let mut buf = vec![0u8; max as usize];
-                    match g.read(&mut buf) {
-                        Ok(n) if n > 0 => {
-                            Value::Str(String::from_utf8_lossy(&buf[..n]).to_string().into())
-                        }
-                        _ => Value::Str(String::new().into()),
-                    }
-                }
-                _ => Value::Str(String::new().into()),
+            let mut g = m.lock().unwrap();
+            let mut buf = vec![0u8; max.min(65536) as usize];
+            match g.read(&mut buf) {
+                Ok(n) => Value::Str(Bstr::from(&buf[..n])),
+                Err(_) => Value::Null,
             }
         });
         self.register_native("socket_close", cat_call(), |_, _, args| {
@@ -5364,20 +3857,6 @@ impl Kernel {
                 .get(&coord)
                 .map(|cell| cell.value.clone())
                 .unwrap_or(Value::Null)
-        });
-        self.register_native("volatile_cell_delete", cat_call(), |_, _, args| {
-            let coord = volatile_coord(args[0].as_str(), args[1].as_str());
-            if volatile_table()
-                .lock()
-                .unwrap()
-                .cells
-                .remove(&coord)
-                .is_some()
-            {
-                Value::Int(1)
-            } else {
-                Value::Int(0)
-            }
         });
         self.register_native("volatile_cell_scan_since", cat_access(), |_, _, args| {
             let namespace = args[0].as_str();
@@ -5684,134 +4163,6 @@ impl Kernel {
             };
             Value::Nid(k.intern(cat, kids))
         });
-        self.register_native(
-            "field_blueprint",
-            cat_field_primitive(RB_FIELD),
-            native_field_blueprint,
-        );
-        self.register_native(
-            "field_cell",
-            cat_field_primitive(RB_FIELD),
-            native_field_cell,
-        );
-        self.register_native(
-            "field_carrier",
-            cat_field_primitive(RB_CARRIER),
-            native_field_carrier,
-        );
-        self.register_native(
-            "field_topology",
-            cat_field_primitive(RB_TOPOLOGY),
-            native_field_topology,
-        );
-        self.register_native(
-            "field_fiber",
-            cat_field_primitive(RB_FIBER),
-            native_field_fiber,
-        );
-        self.register_native(
-            "field_region",
-            cat_field_primitive(RB_REGION),
-            native_field_region,
-        );
-        self.register_native(
-            "field_boundary",
-            cat_field_primitive(RB_BOUNDARY),
-            native_field_boundary,
-        );
-        self.register_native(
-            "field_neighborhood",
-            cat_field_primitive(RB_NEIGHBORHOOD),
-            native_field_neighborhood,
-        );
-        self.register_native(
-            "field_match",
-            cat_field_primitive(RB_MATCH_FIELD),
-            native_field_match,
-        );
-        self.register_native(
-            "field_delta",
-            cat_field_primitive(RB_DELTA),
-            native_field_delta,
-        );
-        self.register_native(
-            "field_resolve",
-            cat_field_primitive(RB_RESOLVE),
-            native_field_resolve,
-        );
-        self.register_native(
-            "field_commit",
-            cat_field_primitive(RB_COMMIT),
-            native_field_commit,
-        );
-        self.register_native(
-            "field_step",
-            cat_field_primitive(RB_STEP),
-            native_field_step,
-        );
-        self.register_native(
-            "field_lift",
-            cat_field_primitive(RB_LIFT),
-            native_field_lift,
-        );
-        self.register_native(
-            "field_sample",
-            cat_field_primitive(RB_SAMPLE),
-            native_field_sample,
-        );
-        self.register_native(
-            "field_observe",
-            cat_field_primitive(RB_OBSERVE),
-            native_field_observe,
-        );
-        self.register_native(
-            "field_intervene",
-            cat_field_primitive(RB_INTERVENE),
-            native_field_intervene,
-        );
-        self.register_native(
-            "field_residual",
-            cat_field_primitive(RB_RESIDUAL),
-            native_field_residual,
-        );
-        self.register_native(
-            "field_receipt",
-            cat_field_primitive(RB_RECEIPT),
-            native_field_receipt,
-        );
-        self.register_native(
-            "field_cost",
-            cat_field_primitive(RB_COST),
-            native_field_cost,
-        );
-        self.register_native(
-            "field_consent",
-            cat_field_primitive(RB_CONSENT),
-            native_field_consent,
-        );
-        self.register_native(
-            "field_evidence",
-            cat_field_primitive(RB_EVIDENCE),
-            native_field_evidence,
-        );
-        self.register_native("substrate_mark", cat_witness(), |k, _, _| {
-            Value::List(k.substrate_mark().into())
-        });
-        self.register_native("substrate_counts", cat_witness(), |k, _, _| {
-            Value::List(k.substrate_counts().into())
-        });
-        self.register_native(
-            "substrate_release",
-            cat_witness(),
-            |k, _, args| match &args[0] {
-                Value::List(mark) => Value::Int(k.substrate_release(mark)),
-                _ => Value::Int(0),
-            },
-        );
-        self.register_native("substrate_gc", cat_witness(), |k, _, args| match &args[0] {
-            Value::List(roots) => Value::List(k.substrate_gc(roots, None).into()),
-            _ => Value::List(k.substrate_gc(&[], None).into()),
-        });
         self.register_native("node_category", cat_witness(), |k, _, args| {
             Value::Nid(k.category(args[0].as_nid()))
         });
@@ -5834,50 +4185,12 @@ impl Kernel {
         self.register_native("node_inst", cat_witness(), |_, _, args| {
             Value::Int(args[0].as_nid().inst as i64)
         });
-        // node_eq — compare two NodeIDs structurally without coercing to int.
-        // The kernel's `eq` (RCMP_EQ) does as_int on both operands, which
-        // panics on NodeIDs. node_eq closes that gap so Form code
-        // can dispatch on Recipe category
-        // by direct NodeID equality. Sibling parity required across Go/TS.
-        self.register_native("node_eq", cat_compare(RCMP_EQ), |_, _, args| {
-            bool_int(args[0].as_nid() == args[1].as_nid())
-        });
-        // value_eq — polymorphic equality across Value kinds. Answers
-        // 1 when both args have the same kind AND compare equal
-        // within that kind. Cross-kind answers 0. Use when a
-        // Form-side function holds tagged values that may be either
-        // strings or NodeIDs — e.g. domain/lens in bmf-symbol-context.
-        self.register_native("value_eq", cat_compare(RCMP_EQ), |_, _, args| {
-            bool_int(value_equal(&args[0], &args[1]))
-        });
-        // intern_node_at — intern a composite Recipe AND record its source
-        // attribution. Engine.fk's parser actions call this so every emitted
-        // Recipe carries (file, line, col) provenance. The satsang teaching:
-        // a cell's state can be traced back to the recipe lines that
-        // authored it — the practice of self-knowing.
-        //
-        // Args: (category, children, file_string, line_int, col_int)
-        // Returns: the interned NodeID (same as intern_node).
-        self.register_native("intern_node_at", cat_witness(), |k, _, args| {
-            let cat = args[0].as_nid();
-            let kids: Vec<NodeID> = match &args[1] {
-                Value::List(v) => v.iter().map(|x| x.as_nid()).collect(),
-                _ => Vec::new(),
-            };
-            let nid = k.intern(cat, kids);
-            let file_nid = k.intern_string(args[2].as_str());
-            let file_id = file_nid.inst;
-            let line = args[3].as_int() as u32;
-            let col = args[4].as_int() as u32;
-            k.source_attr.insert(nid, (file_id, line, col));
-            k.framebuffer_roots.push(nid);
-            Value::Nid(nid)
-        });
-        // fb_record — native provenance primitive (tag 128). core.fk's Form
-        // intern_node_at lowers to (fb_record (intern_node cat kids) file
-        // (line<<16|col)); fkwu (fourth-shim) and TS carry it natively, Go/Rust
-        // previously did not. Records attribution for an already-interned node
-        // and returns it. Args: (nid, file_string, packed_line_col).
+        // value_eq — content identity (value_equal); node_eq is fkwu's second spelling of it (tag 80).
+        let value_eq_native: NativeFn = |_, _, args| bool_int(value_equal(&args[0], &args[1]));
+        self.register_native("value_eq", cat_compare(RCMP_EQ), value_eq_native);
+        self.register_native("node_eq", cat_compare(RCMP_EQ), value_eq_native);
+        // fb_record nid file line<<16|col — records a node's source attribution (fkwu tag 128);
+        // core.fk's intern_node_at is (fb_record (intern_node cat kids) file packed).
         self.register_native("fb_record", cat_witness(), |k, _, args| {
             let nid = args[0].as_nid();
             let file_nid = k.intern_string(args[1].as_str());
@@ -5932,44 +4245,13 @@ impl Kernel {
             k.framebuffer_roots.clear();
             Value::Null
         });
-        // serialize-recipe — walk a Recipe tree, emit a flat byte list
-        // (each byte as Value::Int). Format per node: 5 big-endian u32
-        // values (pkg, level, ty, inst, children_count) + recursively
-        // each child's serialization. Trivials have children_count=0.
-        // The substrate's content-addressing means deserialize re-
-        // creates the same NodeID via intern.
-        self.register_native("serialize-recipe", cat_witness(), |k, _, args| {
-            let mut bytes: Vec<u8> = Vec::new();
-            serialize_nid(k, args[0].as_nid(), &mut bytes);
-            Value::List(Arc::new(
-                bytes.into_iter().map(|b| Value::Int(b as i64)).collect(),
-            ))
-        });
-        // deserialize-recipe — read flat byte list back into a Recipe
-        // tree, re-interning composites so the resulting NodeIDs
-        // collapse to the same identities as the original tree.
-        self.register_native("deserialize-recipe", cat_witness(), |k, _, args| {
-            let bytes: Vec<u8> = match &args[0] {
-                Value::List(xs) => xs.iter().map(|v| v.as_int() as u8).collect(),
-                _ => Vec::new(),
-            };
-            if bytes.len() > FORM_BINARY_MAX_BYTES {
-                return Value::Null;
-            }
-            let scope = k.next_import_scope();
-            let mut budget = FormBinaryDecodeBudget::default();
-            match deserialize_nid(k, &bytes, 0, scope, &mut budget, 0) {
-                Ok((nid, end)) if end == bytes.len() => Value::Nid(nid),
-                _ => Value::Null,
-            }
-        });
-        // write_file_bytes — write a list of byte-values to a path.
-        // Sibling of read_file_bytes (added with PNG binary parser).
+        // write_file_bytes path byte-list → bytes written | -1; a second argument that is not a
+        // list answers nothing and leaves the file as it stood.
         self.register_native("write_file_bytes", cat_call(), |_, _, args| {
             let path = args[0].as_str().to_string();
             let bytes: Vec<u8> = match &args[1] {
                 Value::List(xs) => xs.iter().map(|v| v.as_int() as u8).collect(),
-                _ => Vec::new(),
+                _ => return Value::Null,
             };
             match fs::write(&path, &bytes) {
                 Ok(_) => Value::Int(bytes.len() as i64),
@@ -6019,12 +4301,6 @@ impl Kernel {
         self.register_native("write_file", cat_call(), write_file_text_native);
         self.register_native("write_file_text", cat_call(), write_file_text_native);
 
-        // --- Debug / inspection -----------------------------------------
-        // `trace` — print-and-return. Drop into any Form expression to
-        // inspect a value mid-computation without breaking control flow.
-        // Output goes to stderr so it doesn't pollute the result on stdout.
-        //   (let result (trace (filter even? xs)))
-        //   (trace "label" value)   ; with a label prefix
         // `now_unix_ms` — current wall-clock as a millisecond unix timestamp.
         // External effect (reads the host clock) so it's cat_call. Sibling
         // parity holds on shape, NOT on value: every kernel returns an int,
@@ -6106,83 +4382,6 @@ impl Kernel {
             let _ = out.flush();
             Value::Int(0)
         });
-
-        // No Form category claimed — `trace` is a debug surface, honest
-        // about being outside the structural vocabulary.
-        self.register_native("trace", cat_undefined(), |_, _, args| {
-            if args.len() >= 2 {
-                eprintln!("[trace {}] {}", args[0].as_str(), args[1].display());
-                args[1].clone()
-            } else {
-                eprintln!("[trace] {}", args[0].display());
-                args[0].clone()
-            }
-        });
-    }
-}
-
-// ---------------------------------------------------------------------------
-// resolve_method — walk the inheritance chain to find a method closure.
-//
-// Starts at `class_name`; tries `<C>__<m>`; if not bound, looks up
-// `<C>__base` (a string) and tries the parent. First match wins.
-// Single-inheritance only — MRO is the linear chain. Panics with the
-// full chain walked when no method is found.
-// ---------------------------------------------------------------------------
-
-fn resolve_method(
-    k: &mut Kernel,
-    a: &mut Arena,
-    env: FrameId,
-    class_name: &str,
-    method_name: &str,
-) -> (String, Arc<Closure>) {
-    let mut current = class_name.to_string();
-    let mut chain: Vec<String> = vec![current.clone()];
-    loop {
-        let qualified = format!("{}__{}", current, method_name);
-        if let Some(name_id) = k.str_idx.get(&qualified).copied() {
-            if let Some(val) = a.lookup(env, name_id) {
-                if let Value::Closure(c) = val {
-                    return (qualified, c);
-                }
-            }
-        }
-        // Method not found on `current` — walk to base.
-        let base_key = format!("{}__base", current);
-        let base_id = match k.str_idx.get(&base_key).copied() {
-            Some(id) => id,
-            None => {
-                panic!(
-                    "_dispatch: no method '{}' in inheritance chain [{}]",
-                    method_name,
-                    chain.join(" -> ")
-                );
-            }
-        };
-        let parent_val = match a.lookup(env, base_id) {
-            Some(v) => v,
-            None => {
-                panic!(
-                    "_dispatch: no method '{}' in inheritance chain [{}]",
-                    method_name,
-                    chain.join(" -> ")
-                );
-            }
-        };
-        let parent_name = match parent_val {
-            Value::Str(s) => s,
-            _ => panic!("_dispatch: '{}' is not a string", base_key),
-        };
-        if parent_name.is_empty() {
-            panic!(
-                "_dispatch: no method '{}' in inheritance chain [{}]",
-                method_name,
-                chain.join(" -> ")
-            );
-        }
-        current = parent_name.to_string();
-        chain.push(current.clone());
     }
 }
 
@@ -6276,6 +4475,35 @@ fn value_equal(a: &Value, b: &Value) -> bool {
 // value_equal; an ordering over anything else has no answer.
 fn cmp_number_kind(v: &Value) -> bool {
     matches!(v, Value::Int(_) | Value::Float(_))
+}
+
+// arith — add sub mul div mod over numbers only. A float on either side makes a float, and
+// float mod truncates like integer mod (law 5); integers wrap at 63 bits (law 1), and an
+// integer div or mod by zero stops (law 2).
+fn arith(op: u32, lv: &Value, rv: &Value) -> Value {
+    if matches!(lv, Value::Float(_)) || matches!(rv, Value::Float(_)) {
+        let (l, r) = (lv.as_float(), rv.as_float());
+        return Value::Float(match op {
+            RMATH_PLUS => l + r,
+            RMATH_MINUS => l - r,
+            RMATH_MULTIPLY => l * r,
+            RMATH_DIVIDE => l / r,
+            RMATH_MODULO => l % r,
+            _ => panic!("math.f64: unknown op {}", op),
+        });
+    }
+    let (l, r) = (lv.as_int(), rv.as_int());
+    if r == 0 && (op == RMATH_DIVIDE || op == RMATH_MODULO) {
+        panic!("{}: integer division by zero", if op == RMATH_DIVIDE { "div" } else { "mod" });
+    }
+    Value::Int(wrap63(match op {
+        RMATH_PLUS => l.wrapping_add(r),
+        RMATH_MINUS => l.wrapping_sub(r),
+        RMATH_MULTIPLY => l.wrapping_mul(r),
+        RMATH_DIVIDE => l.wrapping_div(r),
+        RMATH_MODULO => l.wrapping_rem(r),
+        _ => panic!("math: unknown op {}", op),
+    }))
 }
 
 fn walk_match_switch(
@@ -6507,33 +4735,7 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
             RB_MATH => {
                 let lv = walk(k, a, kids[0], env);
                 let rv = walk(k, a, kids[1], env);
-                // Width promotion: if either operand is Float, the result is
-                // Float (matches Python `int + float → float`, and IEEE 754
-                // arithmetic on mixed inputs). Pure int/int stays on the
-                // fast i64 path.
-                if matches!(lv, Value::Float(_)) || matches!(rv, Value::Float(_)) {
-                    let l = lv.as_float();
-                    let r = rv.as_float();
-                    Value::Float(match cat.inst {
-                        RMATH_PLUS => l + r,
-                        RMATH_MINUS => l - r,
-                        RMATH_MULTIPLY => l * r,
-                        RMATH_DIVIDE => l / r,
-                        RMATH_MODULO => l - (l / r).floor() * r,
-                        _ => panic!("math.f64: unknown op {}", cat.inst),
-                    })
-                } else {
-                    let l = lv.as_int();
-                    let r = rv.as_int();
-                    Value::Int(match cat.inst {
-                        RMATH_PLUS => l + r,
-                        RMATH_MINUS => l - r,
-                        RMATH_MULTIPLY => l * r,
-                        RMATH_DIVIDE => l / r,
-                        RMATH_MODULO => l % r,
-                        _ => panic!("math: unknown op {}", cat.inst),
-                    })
-                }
+                arith(cat.inst, &lv, &rv)
             }
             RB_COMPARE => {
                 let lv = walk(k, a, kids[0], env);
@@ -6701,36 +4903,10 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                 Value::Closure(cl)
             }
             RB_FNCALL => {
-                let raw_name = k.ident_id(kids[0]);
-                // JIT alias: if a Form function-name is JIT-registered, swap to
-                // the aliased native-name before native lookup. Form recipes are
-                // the canonical truth; `register_jit form-name native-name` opts
-                // calls into a kernel-resident optimized native.
-                let name = k.jit_aliases.get(&raw_name).copied().unwrap_or(raw_name);
+                let name = k.ident_id(kids[0]);
                 // (attempt x): x is walked under a recover point, never before — fkwu's mode 28.
-                if kids.len() == 2 && k.name_str(raw_name) == "attempt" {
+                if kids.len() == 2 && k.name_str(name) == "attempt" {
                     return attempt(k, a, kids[1], env);
-                }
-                // Env-aware natives first — they need the caller env.
-                let env_ne_opt = k.env_natives.get(&name).copied();
-                if let Some(ne) = env_ne_opt {
-                    if a.lookup(env, name).is_none() {
-                        let mut args = Vec::with_capacity(kids.len() - 1);
-                        for arg in &kids[1..] {
-                            args.push(walk(k, a, *arg, env));
-                        }
-                        if ne.category.ty != RB_UNDEFINED {
-                            if let Some(t) = &mut k.trace {
-                                t.record(ne.category.ty, ne.category.inst);
-                            }
-                        }
-                        let native_name = k.name_str(ne.name).to_string();
-                        if let Some(t) = &mut k.trace {
-                            t.record_native(&native_name);
-                        }
-                        let _form_frame = FormStackFrame::push(native_name);
-                        return (ne.func)(k, a, env, &args);
-                    }
                 }
                 // A present native answers its name, as on fkwu and TS: a Form
                 // definition of the same name is a fallback for a kernel without
@@ -6739,7 +4915,7 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                 // the head: the one call-position reading every arm gives. Copy the
                 // entry out so the natives-map borrow releases before we call &mut k.
                 let ne_opt = k.natives.get(&name).copied().filter(|_| {
-                    reserved_heads::fkwu_reserved(k.name_str(raw_name)) || !a.has_local(env, raw_name)
+                    reserved_heads::fkwu_reserved(k.name_str(name)) || !a.has_local(env, name)
                 });
                 if let Some(ne) = ne_opt {
                     let mut args = Vec::with_capacity(kids.len() - 1);
@@ -6763,12 +4939,9 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                     let _form_frame = FormStackFrame::push(native_name);
                     return (ne.func)(k, a, &args);
                 }
-                // Closure lookup uses the ORIGINAL function-name (not the JIT-
-                // aliased one) — the user defined this function and wants to
-                // call THEIR version when no JIT mapping resolved a native.
                 let callee = a
-                    .lookup(env, raw_name)
-                    .unwrap_or_else(|| panic!("unbound function: {}", k.name_str(raw_name)));
+                    .lookup(env, name)
+                    .unwrap_or_else(|| panic!("unbound function: {}", k.name_str(name)));
                 let cl = match callee {
                     Value::Closure(c) => c,
                     _ => panic!("not callable: {}", k.name_str(name)),
@@ -7096,8 +5269,14 @@ fn read_sexp(k: &mut Kernel, toks: &[SexpTok], i: usize) -> (NodeID, usize) {
     let t = &toks[i];
     match t.kind {
         "INT" => {
-            let n: i64 = t.value.parse().unwrap();
-            (k.intern_trivial_int(n), i + 1)
+            // a literal reads as a 63-bit integer (law 1), wrapping as fkwu's tagged word does
+            let n: i128 = t.value.parse().unwrap_or_else(|e| {
+                panic!(
+                    "parse error: bad integer literal {:?} at line {}, col {}: {}",
+                    t.value, t.line, t.col, e
+                )
+            });
+            (k.intern_trivial_int(wrap63(n as i64)), i + 1)
         }
         "FLOAT" => {
             let f: f64 = t.value.parse().unwrap_or_else(|e| {
@@ -7410,59 +5589,58 @@ fn cat_access() -> NodeID {
         inst: 1,
     }
 }
-// fold_extremum — the shared body of the `min` / `max` natives. One list
-// argument folds over its elements; anything else folds over the arguments
-// themselves, so `(max a b)` compares instead of returning `a`. Every element
-// reads through as_int, the same integer lane Go's AsInt and TS's
-// listElemInt use. `name` only spells the empty-list panic.
-fn fold_extremum(args: &[Value], name: &str, want_max: bool) -> i64 {
-    let list_arm = match (args.len(), &args[0]) {
-        (1, Value::List(xs)) => Some(xs.clone()),
-        _ => None,
-    };
-    let xs: &[Value] = match &list_arm {
-        Some(xs) => {
-            if xs.is_empty() {
-                panic!("{name}: empty list");
-            }
-            xs
-        }
-        None => args,
-    };
-    let mut best = xs[0].as_int();
-    for v in &xs[1..] {
-        let x = v.as_int();
-        if (want_max && x > best) || (!want_max && x < best) {
-            best = x;
-        }
-    }
-    best
+// Integers are 63-bit two's complement, [-2^62, 2^62), on every kernel (law 1).
+const INT63_LIMIT: f64 = 4_611_686_018_427_387_904.0;
+
+fn wrap63(n: i64) -> i64 {
+    n.wrapping_shl(1) >> 1
 }
 
-// leading_int — str_to_int's reading, the one core.fk's str_to_int gives fkwu:
-// leading space, tab, LF and CR skipped, one leading "-" negates, and the digits
-// run to the first non-digit. Text with no digits reads 0; the fold wraps at 64
-// bits like every i64 fold.
-fn leading_int(s: &str) -> i64 {
-    let b = s.as_bytes();
+// decimal_prefix_float — str_to_float's one grammar (law 7): leading whitespace, then the
+// longest decimal prefix [+-] digits [. digits] [e [+-] digits]; no hex, no inf or nan, and
+// text with no digits reads 0.0.
+fn decimal_prefix_float(s: &[u8]) -> f64 {
+    let digits_from = |mut j: usize| {
+        while j < s.len() && s[j].is_ascii_digit() {
+            j += 1;
+        }
+        j
+    };
     let mut i = 0;
-    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') {
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
         i += 1;
     }
-    let neg = i < b.len() && b[i] == b'-';
-    if neg {
+    let start = i;
+    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
         i += 1;
     }
-    let mut n: i64 = 0;
-    while i < b.len() && b[i].is_ascii_digit() {
-        n = n.wrapping_mul(10).wrapping_add((b[i] - b'0') as i64);
-        i += 1;
+    let int_end = digits_from(i);
+    let mut seen = int_end > i;
+    i = int_end;
+    if i < s.len() && s[i] == b'.' {
+        let frac_end = digits_from(i + 1);
+        if frac_end > i + 1 {
+            seen = true;
+            i = frac_end;
+        }
     }
-    if neg {
-        n.wrapping_neg()
-    } else {
-        n
+    if !seen {
+        return 0.0;
     }
+    if i < s.len() && (s[i] == b'e' || s[i] == b'E') {
+        let mut j = i + 1;
+        if j < s.len() && (s[j] == b'+' || s[j] == b'-') {
+            j += 1;
+        }
+        let exp_end = digits_from(j);
+        if exp_end > j {
+            i = exp_end;
+        }
+    }
+    std::str::from_utf8(&s[start..i])
+        .ok()
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(0.0)
 }
 
 fn cat_method() -> NodeID {
@@ -7478,14 +5656,6 @@ fn cat_list_nat() -> NodeID {
         pkg: 1,
         level: LEVEL_BASIC,
         ty: RB_LIST,
-        inst: 1,
-    }
-}
-fn cat_field_primitive(ty: u32) -> NodeID {
-    NodeID {
-        pkg: 1,
-        level: LEVEL_BASIC,
-        ty,
         inst: 1,
     }
 }
@@ -7609,10 +5779,7 @@ pub(crate) fn read_root_from_source(k: &mut Kernel, src: &str) -> NodeID {
 fn execute_root(k: &mut Kernel, root: NodeID) -> Value {
     let mut a = Arena::new();
     let env = a.new_frame(None);
-    k.active_roots = vec![root];
-    let value = walk_unit(k, &mut a, root, env);
-    k.substrate_gc(&[value.clone()], Some((&a, env)));
-    value
+    walk_unit(k, &mut a, root, env)
 }
 
 // --- Native implementations — same recursive shape as the Form versions.
@@ -7759,9 +5926,7 @@ fn run_source_traced(src: &str) -> (Value, Trace) {
     mark_unit_root(&mut k, root, !single);
     let mut a = Arena::new();
     let env = a.new_frame(None);
-    k.active_roots = vec![root];
     let value = walk_unit(&mut k, &mut a, root, env);
-    k.substrate_gc(&[value.clone()], Some((&a, env)));
     let trace = k.trace.take().unwrap_or_default();
     (value, trace)
 }
@@ -8788,7 +6953,6 @@ fn build_worker_kernel_with_route_data(
     let root = read_root_from_source(&mut k, routes_source);
     let mut arena = Arena::new();
     let root_env = arena.new_frame(None);
-    k.active_roots = vec![root];
     let _ = walk_unit(&mut k, &mut arena, root, root_env);
     let route_specs = build_route_specs(&mut k, &arena, root_env, routes_path, route_data)?;
     // root_env is returned so the --form serve path can resolve kh-serve / routes
@@ -10999,33 +9163,6 @@ fn router_context_data(
 }
 
 #[cfg(test)]
-mod byte_fold_tests {
-    use super::*;
-
-    #[test]
-    fn string_byte_fold_keeps_the_arena_bounded_for_100k_bytes() {
-        let payload = "a".repeat(100_000);
-        let source = format!(
-            "(do (defn sum-byte (acc byte) (add acc byte)) (string_byte_fold \"{}\" 0 sum-byte))",
-            payload
-        );
-        let mut kernel = Kernel::new();
-        let root = read_root_from_source(&mut kernel, &source);
-        let mut arena = Arena::new();
-        let env = arena.new_frame(None);
-
-        let value = walk(&mut kernel, &mut arena, root, env);
-
-        assert_eq!(value.as_int(), 9_700_000);
-        assert!(
-            arena.frames.len() <= 2,
-            "100k-byte fold retained {} arena frames",
-            arena.frames.len()
-        );
-    }
-}
-
-#[cfg(test)]
 mod router_context_tests {
     use super::*;
 
@@ -13155,7 +11292,7 @@ fn cli_binary(args: &[String]) -> i32 {
         }
     };
     let value = execute_root(&mut k, root);
-    println!("{}", value.display());
+    println!("{}", value.shown());
     0
 }
 
@@ -13394,7 +11531,7 @@ fn main_with_args(args: Vec<String>) -> i32 {
             };
             set_crash_trace_context(mode, &args, Some(&src));
             let result = run_source_mapped(&src, &line_map);
-            println!("{}", result.display());
+            println!("{}", result.shown());
             0
         }
     }
@@ -13510,29 +11647,6 @@ impl FormBinaryDecodeBudget {
     }
 }
 
-fn serialize_nid(k: &Kernel, nid: NodeID, bytes: &mut Vec<u8>) {
-    if let Some(recipe) = k.by_id.get(&nid) {
-        push_u32(bytes, FORM_BINARY_COMPOSITE);
-        serialize_nid(k, recipe.category, bytes);
-        push_u32(bytes, recipe.children.len() as u32);
-        for &c in &recipe.children {
-            serialize_nid(k, c, bytes);
-        }
-    } else if nid.level == LEVEL_TRIVIAL && nid.ty == TRIV_FLOAT64 {
-        push_u32(bytes, FORM_BINARY_FLOAT64);
-        bytes.extend_from_slice(&k.decode_float64(nid.inst).to_le_bytes());
-    } else if nid.level == LEVEL_TRIVIAL && nid.ty == TRIV_INT64 {
-        push_u32(bytes, FORM_BINARY_INT64);
-        bytes.extend_from_slice(&k.decode_int64(nid.inst).to_le_bytes());
-    } else {
-        push_u32(bytes, FORM_BINARY_LEAF);
-        push_u32(bytes, nid.pkg);
-        push_u32(bytes, nid.level);
-        push_u32(bytes, nid.ty);
-        push_u32(bytes, nid.inst);
-    }
-}
-
 struct FormBinaryStringTable {
     strings: Vec<String>,
     indexes: HashMap<u32, u32>,
@@ -13591,61 +11705,6 @@ fn serialize_nid_with_strings(
         } else {
             push_u32(bytes, nid.inst);
         }
-    }
-}
-
-fn deserialize_nid(
-    k: &mut Kernel,
-    bytes: &[u8],
-    pos: usize,
-    scope: u32,
-    budget: &mut FormBinaryDecodeBudget,
-    depth: usize,
-) -> Result<(NodeID, usize), String> {
-    budget.enter(depth)?;
-    let (tag, p) = read_u32(bytes, pos)?;
-    match tag {
-        FORM_BINARY_FLOAT64 => {
-            let (value, p) = read_f64_le(bytes, p)?;
-            Ok((k.intern_trivial_float64(value), p))
-        }
-        FORM_BINARY_INT64 => {
-            let (value, p) = read_i64_le(bytes, p)?;
-            Ok((k.intern_trivial_int(value), p))
-        }
-        FORM_BINARY_LEAF => {
-            let (pkg, p) = read_u32(bytes, p)?;
-            let (level, p) = read_u32(bytes, p)?;
-            let (ty, p) = read_u32(bytes, p)?;
-            let (inst, p) = read_u32(bytes, p)?;
-            Ok((
-                k.remap_imported_leaf(
-                    scope,
-                    NodeID {
-                        pkg,
-                        level,
-                        ty,
-                        inst,
-                    },
-                ),
-                p,
-            ))
-        }
-        FORM_BINARY_COMPOSITE => {
-            let (category, p) = deserialize_nid(k, bytes, p, scope, budget, depth + 1)?;
-            let (count, mut p) = read_u32(bytes, p)?;
-            if count > FORM_BINARY_MAX_CHILDREN {
-                return Err("form binary: maximum child count exceeded".to_string());
-            }
-            let mut children = Vec::with_capacity(count as usize);
-            for _ in 0..count {
-                let (c, np) = deserialize_nid(k, bytes, p, scope, budget, depth + 1)?;
-                children.push(c);
-                p = np;
-            }
-            Ok((k.intern(category, children), p))
-        }
-        _ => Err(format!("form binary: unknown node tag {}", tag)),
     }
 }
 

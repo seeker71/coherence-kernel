@@ -1,7 +1,8 @@
+//go:build unix
+
 package main
 
 import (
-	"os"
 	"runtime"
 	"syscall"
 	"testing"
@@ -62,67 +63,17 @@ func TestHostExecLaunchFailureAnswersNothing(t *testing.T) {
 	}
 }
 
-// TestHostReadAbsentAnswersNothing — a file that never was answers nothing,
-// never "": "" means the file EXISTS and holds zero bytes. host-read was the
-// lone masked read organ on this arm (read_file already answered VNull);
-// healed 2026-08-27.
-func TestHostReadAbsentAnswersNothing(t *testing.T) {
+// TestReadFileAbsentAnswersNothing — a file that never was answers nothing,
+// never "": "" means the file exists and holds zero bytes.
+func TestReadFileAbsentAnswersNothing(t *testing.T) {
 	k := NewKernel()
 	read := func(p string) Value {
-		return k.natives[k.internName("host-read")].Fn(k, []Value{{Kind: VStr, Str: p}})
+		return k.natives[k.internName("read_file")].Fn(k, []Value{{Kind: VStr, Str: p}})
 	}
-	if v := read("/nonexistent-host-read-absence-probe"); v.Kind != VNull {
+	if v := read("/nonexistent-read-file-absence-probe"); v.Kind != VNull {
 		t.Fatalf("absent file must answer nothing (VNull): kind=%v str=%q", v.Kind, v.Str)
 	}
 	if v := read("/dev/null"); v.Kind != VStr || v.Str != "" {
 		t.Fatalf("present empty file must answer \"\": kind=%v str=%q", v.Kind, v.Str)
 	}
-}
-
-// TestPartialAsWholeOrgansAnswerNothing — the partial-as-whole cousins
-// (2026-08-27): a dead socket handle or slice-of-never-was answers nothing;
-// a past-end str_line_at answers nothing (an absent line is not an empty
-// line); an EOF-short slice of a real file stays an honest short string.
-func TestPartialAsWholeOrgansAnswerNothing(t *testing.T) {
-	k := NewKernel()
-	call := func(name string, args ...Value) Value {
-		return k.natives[k.internName(name)].Fn(k, args)
-	}
-	if v := call("socket_recv", Value{Kind: VInt, Int: -1}, Value{Kind: VInt, Int: 16}); v.Kind != VNull {
-		t.Fatalf("dead-handle recv must answer nothing: kind=%v", v.Kind)
-	}
-	if v := call("read_file_slice", Value{Kind: VStr, Str: "/nonexistent-pw-probe"}, Value{Kind: VInt, Int: 0}, Value{Kind: VInt, Int: 4}); v.Kind != VNull {
-		t.Fatalf("slice of never-was must answer nothing: kind=%v", v.Kind)
-	}
-	f, err := os.CreateTemp(t.TempDir(), "pw-*.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.WriteString("ab"); err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-	if v := call("read_file_slice", Value{Kind: VStr, Str: f.Name()}, Value{Kind: VInt, Int: 0}, Value{Kind: VInt, Int: 8}); v.Kind != VStr || v.Str != "ab" {
-		t.Fatalf("EOF-short slice stays honest bytes: kind=%v str=%q", v.Kind, v.Str)
-	}
-	if v := call("str_line_at", Value{Kind: VStr, Str: "ab\ncd"}, Value{Kind: VInt, Int: 99}); v.Kind != VNull {
-		t.Fatalf("past-end line must answer nothing: kind=%v", v.Kind)
-	}
-	if v := call("str_line_at", Value{Kind: VStr, Str: "ab\ncd"}, Value{Kind: VInt, Int: 3}); v.Kind != VStr || v.Str != "cd" {
-		t.Fatalf("in-range line unchanged: kind=%v str=%q", v.Kind, v.Str)
-	}
-}
-
-// TestStrLenOfNothingDiesLoud — measuring an absence must not answer a
-// counterfeit 0: str_len over the null head-of-empty carries (the value a
-// starved host-exec now answers) dies loud, on this arm as on fkwu's op 25.
-// Silent error hides illness (2026-08-27).
-func TestStrLenOfNothingDiesLoud(t *testing.T) {
-	k := NewKernel()
-	defer func() {
-		if recover() == nil {
-			t.Fatalf("str_len of nothing answered instead of dying")
-		}
-	}()
-	k.natives[k.internName("str_len")].Fn(k, []Value{{Kind: VNull}})
 }

@@ -5,8 +5,7 @@
 // Usage:
 //   tsx src/main.ts --binary file.fkb
 //   tsx src/main.ts --emit-binary out.fkb file.fk...
-//   tsx src/main.ts --expr "(+ 1 2)"
-//   tsx src/main.ts trace (--expr <expr> | file.fk)
+//   tsx src/main.ts --expr "(add 1 2)"
 //   tsx src/main.ts file.fk...
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -19,11 +18,10 @@ import {
   Frame,
   Kernel,
   serializeRecipeArtifact,
-  Trace,
+  type Value,
   walkUnit,
 } from "./kernel.ts";
 import { createNodeKernelHost } from "./node-host.ts";
-// sources are read as latin1: one code unit per byte, the kernel's byte strings (byte-host.ts)
 import { textToBstr } from "./byte-host.ts";
 import { readAll, readForm } from "./reader.ts";
 
@@ -79,7 +77,7 @@ async function writeKernelCrashTrace(err: unknown): Promise<string | null> {
     source_tail: source.slice(Math.max(0, source.length - 2000)),
     js_stack: stack ?? null,
     // Innermost frame first — the Form-level call chain live at the crash.
-    form_stack: crashKernel === null ? [] : [...crashKernel.formStack].reverse(),
+    form_stack: crashKernel === null ? [] : crashKernel.formStackLabels().reverse(),
   };
   try {
     await writeFile(path, `${JSON.stringify(report, null, 2)}\n`);
@@ -94,19 +92,9 @@ async function main(): Promise<void> {
   setCrashTraceContext("startup", args);
   if (args.length === 0) {
     console.error(
-      "usage: tsx src/main.ts (--binary file.fkb | --emit-binary out.fkb file.fk... | --expr <expr> | trace ... | file.fk...); a unit's closure as one plain Form file: ./fkwu --closure <unit> <out> (repo root)",
+      "usage: tsx src/main.ts (--binary file.fkb | --emit-binary out.fkb file.fk... | --expr <expr> | file.fk...); a unit's closure as one plain Form file: ./fkwu --closure <unit> <out> (repo root)",
     );
     process.exit(2);
-  }
-
-  if (args[0] === "--bench" || args[0] === "--compiled" || args[0] === "--numeric-bench") {
-    console.error("Native compilation runs through Form: ./fkwu <file.fk|file.bml>. Native JIT witness: ./fkwu form/form-stdlib/tests/jit-leaf-inram-band.fk");
-    process.exit(2);
-  }
-
-  if (args[0] === "trace") {
-    await runTrace(args.slice(1));
-    return;
   }
 
   const k = new Kernel(createNodeKernelHost());
@@ -121,10 +109,7 @@ async function main(): Promise<void> {
     }
     setCrashTraceContext("binary", args);
     const root = deserializeRecipeArtifact(k, await readFile(path));
-    k.setActiveRoots([root]);
-    const value = walkUnit(k, root, frame);
-    k.substrateGC([value], frame);
-    console.log(k.render(value));
+    writeResult(k, walkUnit(k, root, frame));
     return;
   }
 
@@ -150,12 +135,10 @@ async function main(): Promise<void> {
       console.error("--expr requires an argument");
       process.exit(2);
     }
-    setCrashTraceContext("expr", args, expr);
-    const node = readForm(k, expr);
-    k.setActiveRoots([node]);
-    const value = walkUnit(k, node, frame);
-    k.substrateGC([value], frame);
-    console.log(k.render(value));
+    // argv arrives as text; the kernel's strings are its UTF-8 bytes (byte-host.ts)
+    const src = textToBstr(expr);
+    setCrashTraceContext("expr", args, src);
+    writeResult(k, walkUnit(k, readForm(k, src), frame));
     return;
   }
 
@@ -194,50 +177,12 @@ async function main(): Promise<void> {
   setCrashTraceContext("source", args, src);
   const node = readAll(k, src);
   k.readingFiles = [];
-  k.setActiveRoots([node]);
-  const value = walkUnit(k, node, frame);
-  k.substrateGC([value], frame);
-  console.log(k.render(value));
+  writeResult(k, walkUnit(k, node, frame));
 }
 
-// runTrace — execute with arm-dispatch tracing enabled, emit JSON report
-// with the result, elapsed time, and per-arm dispatch counts including
-// native Blueprint attribution. Sibling-parity with Rust/Go kernels.
-async function runTrace(args: string[]): Promise<void> {
-  if (args.length === 0) {
-    console.error("usage: tsx src/main.ts trace [--expr <expr> | <file.fk>]");
-    process.exit(2);
-  }
-  let src: string;
-  if (args[0] === "--expr") {
-    if (args[1] === undefined) {
-      console.error("--expr requires an argument");
-      process.exit(2);
-    }
-    src = textToBstr(args[1]);
-  } else {
-    src = await readFile(args[0]!, "latin1");
-  }
-  setCrashTraceContext("trace", args, src);
-
-  const k = new Kernel(createNodeKernelHost());
-  crashKernel = k;
-  k.trace = new Trace();
-  const frame = new Frame(null);
-  const node = readAll(k, src);
-  k.setActiveRoots([node]);
-  const start = process.hrtime.bigint();
-  const value = walkUnit(k, node, frame);
-  k.substrateGC([value], frame);
-  const elapsedNs = Number(process.hrtime.bigint() - start);
-
-  const report = {
-    result: k.render(value),
-    elapsed_us: Math.round(elapsedNs / 1000),
-    elapsed_human: `${(elapsedNs / 1000).toFixed(2)}µs`,
-    trace: k.trace.toJSON(),
-  };
-  console.log(JSON.stringify(report, null, 2));
+// The result line is the value's own bytes, written the way print writes them (byte-host.ts).
+function writeResult(k: Kernel, value: Value): void {
+  k.host.writeStdout?.(`${k.render(value)}\n`);
 }
 
 function runKernelCli(): void {
@@ -308,19 +253,31 @@ function kernelHeapMb(): number {
   return Math.floor(totalmem() / 1048576 / 2);
 }
 
-function runOnDeepStack(): void {
-  let online = false;
-  const worker = new Worker(new URL(import.meta.url), {
+function kernelWorker(execArgv: string[]): Worker {
+  return new Worker(new URL(import.meta.url), {
     workerData: {
       marker: KERNEL_WORKER_MARKER,
       argv: process.argv.slice(2),
     } satisfies KernelWorkerData,
     resourceLimits: { stackSizeMb: kernelStackMb(), maxOldGenerationSizeMb: kernelHeapMb() },
-    // Inherited --stack-size flags would re-lift the worker's V8 limit away
-    // from its real stack and re-open the silent-SIGSEGV door; scrub them,
-    // keep everything else (loader registrations ride execArgv).
-    execArgv: process.execArgv.filter((a) => !/^--stack[-_]size/.test(a)),
+    execArgv,
   });
+}
+
+function runOnDeepStack(): void {
+  let online = false;
+  // Inherited --stack-size flags would re-lift the worker's V8 limit away
+  // from its real stack and re-open the silent-SIGSEGV door; scrub them,
+  // keep everything else (loader registrations ride execArgv).
+  const inherited = process.execArgv.filter((a) => !/^--stack[-_]size/.test(a));
+  let worker: Worker;
+  try {
+    worker = kernelWorker(inherited);
+  } catch {
+    // a per-process flag (--prof, a log file) a worker refuses stays with this process;
+    // the worker keeps only the loader registrations
+    worker = kernelWorker(inherited.filter((a) => /^--(import|loader|experimental-|require|conditions)/.test(a)));
+  }
   worker.on("online", () => {
     online = true;
   });

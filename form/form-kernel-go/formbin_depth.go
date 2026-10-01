@@ -58,10 +58,10 @@ func deserializeFormbinDepth(k *Kernel, body []byte, start int, table []string, 
 	if err != nil {
 		return NodeID{}, start, fmt.Errorf("form binary: attention trace: %w", err)
 	}
-	defer trace.Close()
-	fmt.Fprintf(os.Stderr, "form binary: adaptive depth evidence=%s\n", trace.Name())
 	encoder := json.NewEncoder(trace)
 	completed := false
+	// A completed decode leaves nothing behind; a decode that did not complete
+	// keeps its trace as the evidence a repair follows, and names it.
 	defer func() {
 		phase, reason := "interrupted", "decode did not complete"
 		if completed {
@@ -72,6 +72,12 @@ func deserializeFormbinDepth(k *Kernel, body []byte, start int, table []string, 
 		if err := encoder.Encode(map[string]any{"schema": "formbin-depth-attention-v2", "phase": phase, "engine": "fkwu", "cursor": end, "input_bytes": len(body), "decoder_elapsed_ms": time.Since(started).Milliseconds(), "error": reason}); err != nil && decodeErr == nil {
 			decodeErr = fmt.Errorf("form binary: final attention trace: %w", err)
 		}
+		trace.Close()
+		if completed && decodeErr == nil {
+			os.Remove(trace.Name())
+			return
+		}
+		fmt.Fprintf(os.Stderr, "form binary: adaptive depth evidence=%s\n", trace.Name())
 	}()
 	if err := encoder.Encode(map[string]any{"schema": "formbin-depth-attention-v2", "phase": "starting", "engine": "fkwu", "cursor": start, "input_bytes": len(body), "started_unix_ms": started.UnixMilli()}); err != nil {
 		return NodeID{}, start, err

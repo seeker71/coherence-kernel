@@ -16,7 +16,7 @@
 
 import { BP_TABLE } from "./bp_table.ts";
 import { FKWU_RESERVED_HEADS } from "./reserved-heads.ts";
-import { byteHost, bstrToBytes, bytesToBstr, bstrToText, isWide, jsonLeavesToBstr } from "./byte-host.ts";
+import { byteHost, bstrToBytes, bytesToBstr, isWide } from "./byte-host.ts";
 import CATEGORY_CONTRACT from "../../category-contract.json" with { type: "json" };
 import {
   EMPTY_KERNEL_HOST,
@@ -127,65 +127,16 @@ export interface NodeID {
 
 export const Level = Object.freeze(CATEGORY_CONTRACT.level);
 
-// LevelValue — any concrete level constant. Used by universe-polymorphic
-// FNDEFs (#22) to bind level-parameters at specialization time.
-export type LevelValue = (typeof Level)[keyof typeof Level];
-
 // RBasic — loaded from the canonical machine-readable category contract.
-//
-// Higher-math arms (slots 70+) — substrate cells govern their semantics:
-//   QUOTIENT (70): canonicalization under an equivalence relation.
-//     The category instance carries the equivalence family code;
-//     children are [carrier-recipe, equivalence-recipe].
 export const RBasic = Object.freeze(CATEGORY_CONTRACT.r_basic);
 
-// Sibling categories beside the walker's arms. Each alias projects one slot of
-// the shared category contract by name; cross-kernel agreement requires every
-// implementation to use the same numbering.
-//   FORMAT / NUMERIC — format-recipe-driven numeric leaves: NUMERIC carries the
-//     VALUE and its format identity, distinct from MATH (operations).
-//   LANGUAGE — grammar production nodes.
-//   EQUIVALENCE — distinct from both QUOTIENT and INDUCTIVE.
-export const RBasicFormat = RBasic.FORMAT;
-export const RBasicNumeric = RBasic.NUMERIC;
-export const RBasicLanguage = RBasic.LANGUAGE;
-export const RBasicEquivalence = RBasic.EQUIVALENCE;
-
-// Triv — trivial RTypes.
-//
-// Backward-compat: `INT` keeps slot 1 (aliased to INT32 in this kernel).
-// New typed numerics get higher slots. Wide types (64-bit) route through
-// per-type overflow tables; ≤32-bit types encode inline in NodeID.inst.
-//
-// The cross-kernel numbering lives in form/category-contract.json and
-// form/contracts/numeric-formats.canonical.json.
+// Triv — trivial RTypes, numbered in form/category-contract.json. INT (= INT32) encodes
+// inline in NodeID.inst, INT64 and FLOAT64 through per-kernel overflow tables, FLOAT32
+// inline as its bits.
 export const Triv = Object.freeze(CATEGORY_CONTRACT.triv);
 
-// MATH instance encoding — width-aware. The low nibble carries the op
-// (PLUS/MINUS/MUL/DIV/MOD); the high nibble carries the width marker so
-// MATH.PLUS_F64 is a distinct NodeID from MATH.PLUS_I32.
-//
-//   inst = (width_marker << 4) | op_marker
-//
-//   width_marker  0=i32 (default)  1=i8  2=i16  3=i64
-//                 4=u8  5=u16  6=u32  7=u64
-//                 8=f32  9=f64
-//   op_marker     1=PLUS 2=MINUS 3=MUL 4=DIV 5=MOD
-export const RMathWidth = Object.freeze(CATEGORY_CONTRACT.instances.math_width);
-
+// MATH instance: the op (PLUS/MINUS/MUL/DIV/MOD); the operands' kinds choose the fold.
 export const RMath = Object.freeze(CATEGORY_CONTRACT.instances.math);
-
-export function mathInst(width: number, op: number): number {
-  return ((width & 0xf) << 4) | (op & 0xf);
-}
-
-export function mathWidth(inst: number): number {
-  return (inst >> 4) & 0xf;
-}
-
-export function mathOp(inst: number): number {
-  return inst & 0xf;
-}
 export const RCmp = Object.freeze(CATEGORY_CONTRACT.instances.compare);
 export const RLogic = Object.freeze(CATEGORY_CONTRACT.instances.logic);
 export const RCond = Object.freeze(CATEGORY_CONTRACT.instances.cond);
@@ -205,6 +156,8 @@ interface Recipe {
   readonly children: readonly NodeID[];
 }
 
+const NO_CHILDREN: readonly NodeID[] = [];
+
 // Stable, content-addressed hash key for a recipe. Same shape ⇒ same key.
 function recipeKey(category: NodeID, children: readonly NodeID[]): string {
   let k = `C|${category.pkg}.${category.level}.${category.type}.${category.inst}`;
@@ -216,13 +169,6 @@ function recipeKey(category: NodeID, children: readonly NodeID[]): string {
 
 export function nodeKey(n: NodeID): string {
   return `${n.pkg}.${n.level}.${n.type}.${n.inst}`;
-}
-
-function nodeFromKey(key: string): NodeID {
-  const [pkg = 0, level = 0, type = 0, inst = 0] = key
-    .split(".")
-    .map((part) => Number(part));
-  return { pkg, level, type, inst };
 }
 
 function sourceInventorySkipSet(value: Value): Set<string> {
@@ -244,308 +190,7 @@ function sourceInventoryRow(relPath: string, loc: number): Value {
   };
 }
 
-// Pack a NodeID into a single number for fast Map keys when pkg ≤ 255 and
-// inst ≤ 2^32 — the common case. Uses BigInt encoding to keep all 4 u32s.
-// In the hot path we use `nodeKey` (string) since V8's Map for string
-// keys is well-optimized and BigInt conversions in inner loops are slow.
-
 export type NativeFn = (k: Kernel, args: Value[]) => Value;
-
-// EnvAwareNativeFn — natives that need the caller's env.
-// Separate registry path to avoid changing the NativeFn signature across
-// every existing native.
-export type EnvAwareNativeFn = (
-  k: Kernel,
-  env: Frame,
-  args: Value[],
-) => Value;
-
-export interface EnvAwareNativeEntry {
-  readonly name: NameID;
-  readonly category: NodeID;
-  readonly fn: EnvAwareNativeFn;
-}
-
-// NativeEntry — a native's function plus the Form category it expresses.
-// Carries Blueprint attribution into the kernel: when the walker dispatches
-// through a native, the trace records the category alongside the FNCALL
-// arm. UNDEFINED is the honest marker for natives whose Form attribution
-// hasn't been settled yet.
-export interface NativeEntry {
-  readonly name: NameID;
-  readonly category: NodeID;
-  readonly fn: NativeFn;
-}
-
-// Trace — per-(arm, inst) dispatch counters. Sibling-parity with the Go and
-// Rust kernels' Trace structures. Hot path stays free when trace is
-// undefined. Storing (ty, inst) instead of just ty surfaces typed-numeric
-// distribution — MATH.PLUS_F64 becomes distinguishable from MATH.PLUS_I32
-// in the report.
-export interface TraceJSON {
-  readonly total_walks: number;
-  readonly arms: readonly {
-    readonly arm_ty: number;
-    readonly arm_name: string;
-    readonly count: number;
-  }[];
-  readonly variants: readonly {
-    readonly arm_ty: number;
-    readonly arm_inst: number;
-    readonly arm_name: string;
-    readonly arm_variant_name: string;
-    readonly count: number;
-  }[];
-  readonly functions: readonly {
-    readonly name: string;
-    readonly count: number;
-  }[];
-  readonly natives: readonly {
-    readonly name: string;
-    readonly count: number;
-  }[];
-  readonly choice_attempts: number;
-  readonly choice_successes: number;
-  readonly choice_failures: number;
-  readonly choice_success_rate: number;
-  readonly match_lookups: number;
-  readonly match_hits: number;
-  readonly match_defaults: number;
-  readonly match_misses: number;
-}
-
-export class Trace {
-  totalWalks = 0;
-  // Key: encoded as (ty << 32) | inst — JS Map handles this as a number key.
-  // Since JS numbers are doubles (53-bit mantissa), this is safe for any
-  // u32 ty + u32 inst combination that fits in 53 bits (well beyond our use).
-  armCounts = new Map<number, number>();
-  fnCounts = new Map<string, number>();
-  nativeCounts = new Map<string, number>();
-  choiceAttempts = 0;
-  choiceSuccesses = 0;
-  choiceFailures = 0;
-  matchLookups = 0;
-  matchHits = 0;
-  matchDefaults = 0;
-  matchMisses = 0;
-
-  private static encodeKey(ty: number, inst: number): number {
-    // ty * 2^32 + inst — fits in JS number safely for our slot ranges.
-    return ty * 0x100000000 + inst;
-  }
-  private static decodeKey(k: number): { ty: number; inst: number } {
-    const ty = Math.floor(k / 0x100000000);
-    const inst = k - ty * 0x100000000;
-    return { ty, inst };
-  }
-
-  record(armTy: number, armInst: number): void {
-    this.totalWalks++;
-    const k = Trace.encodeKey(armTy, armInst);
-    this.armCounts.set(k, (this.armCounts.get(k) ?? 0) + 1);
-  }
-
-  recordFn(name: string): void {
-    this.fnCounts.set(name, (this.fnCounts.get(name) ?? 0) + 1);
-  }
-
-  recordNative(name: string): void {
-    this.nativeCounts.set(name, (this.nativeCounts.get(name) ?? 0) + 1);
-  }
-
-  recordMatchLookup(): void {
-    this.matchLookups++;
-  }
-
-  recordMatchHit(): void {
-    this.matchHits++;
-  }
-
-  recordMatchDefault(): void {
-    this.matchDefaults++;
-  }
-
-  recordMatchMiss(): void {
-    this.matchMisses++;
-  }
-
-  static armName(armTy: number): string {
-    switch (armTy) {
-      case RBasic.BLOCK: return "BLOCK";
-      case RBasic.COND: return "COND";
-      case RBasic.MATH: return "MATH";
-      case RBasic.COMPARE: return "COMPARE";
-      case RBasic.LOGIC: return "LOGIC";
-      case RBasic.MATCH: return "MATCH";
-      case RBasic.CHOICE_MATCH: return "CHOICE_MATCH";
-      case RBasic.IDENT: return "IDENT";
-      case RBasic.FNDEF: return "FNDEF";
-      case RBasic.FNCALL: return "FNCALL";
-      case RBasic.LIST: return "LIST";
-      case RBasic.WITNESS: return "WITNESS";
-      case RBasic.CALL: return "CALL";
-      case RBasic.ACCESS: return "ACCESS";
-      case RBasic.METHOD: return "METHOD";
-      case RBasic.TRANSMUTE: return "TRANSMUTE";
-      case RBasic.FIELD: return "FIELD";
-      case RBasic.CARRIER: return "CARRIER";
-      case RBasic.TOPOLOGY: return "TOPOLOGY";
-      case RBasic.FIBER: return "FIBER";
-      case RBasic.REGION: return "REGION";
-      case RBasic.BOUNDARY: return "BOUNDARY";
-      case RBasic.NEIGHBORHOOD: return "NEIGHBORHOOD";
-      case RBasic.MATCH_FIELD: return "MATCH_FIELD";
-      case RBasic.DELTA: return "DELTA";
-      case RBasic.FIELD_RESOLVE: return "FIELD_RESOLVE";
-      case RBasic.COMMIT: return "COMMIT";
-      case RBasic.STEP: return "STEP";
-      case RBasic.LIFT: return "LIFT";
-      case RBasic.SAMPLE: return "SAMPLE";
-      case RBasic.OBSERVE: return "OBSERVE";
-      case RBasic.INTERVENE: return "INTERVENE";
-      case RBasic.RESIDUAL: return "RESIDUAL";
-      case RBasic.RECEIPT: return "RECEIPT";
-      case RBasic.COST: return "COST";
-      case RBasic.CONSENT: return "CONSENT";
-      case RBasic.EVIDENCE: return "EVIDENCE";
-      default: return "OTHER";
-    }
-  }
-
-  /// Variant name — readable label for an (arm_ty, arm_inst) pair.
-  /// Returns "MATH.PLUS", "COMPARE.LE", "BLOCK.LET", etc. For MATH in
-  /// the TS kernel the inst encodes (width<<4)|op, so the variant becomes
-  /// "MATH.PLUS_I32" / "MATH.MINUS_F64" etc. Sibling-parity with the
-  /// Rust + Go kernels for the basic (width=0) cases.
-  static armVariantName(armTy: number, armInst: number): string {
-    const base = Trace.armName(armTy);
-    let variant = "";
-    switch (armTy) {
-      case RBasic.MATH: {
-        const width = (armInst >> 4) & 0xf;
-        const op = armInst & 0xf;
-        let opName = "";
-        switch (op) {
-          case RMath.PLUS: opName = "PLUS"; break;
-          case RMath.MINUS: opName = "MINUS"; break;
-          case RMath.MUL: opName = "MUL"; break;
-          case RMath.DIV: opName = "DIV"; break;
-          case RMath.MOD: opName = "MOD"; break;
-        }
-        if (!opName) break;
-        const widthName = (() => {
-          switch (width) {
-            case RMathWidth.I32: return ""; // default; matches Rust/Go bare names
-            case RMathWidth.I8: return "I8";
-            case RMathWidth.I16: return "I16";
-            case RMathWidth.I64: return "I64";
-            case RMathWidth.U8: return "U8";
-            case RMathWidth.U16: return "U16";
-            case RMathWidth.U32: return "U32";
-            case RMathWidth.U64: return "U64";
-            case RMathWidth.F32: return "F32";
-            case RMathWidth.F64: return "F64";
-            default: return "";
-          }
-        })();
-        variant = widthName ? `${opName}_${widthName}` : opName;
-        break;
-      }
-      case RBasic.COMPARE:
-        switch (armInst) {
-          case RCmp.EQ: variant = "EQ"; break;
-          case RCmp.NE: variant = "NE"; break;
-          case RCmp.LT: variant = "LT"; break;
-          case RCmp.LE: variant = "LE"; break;
-          case RCmp.GT: variant = "GT"; break;
-          case RCmp.GE: variant = "GE"; break;
-        }
-        break;
-      case RBasic.LOGIC:
-        switch (armInst) {
-          case RLogic.AND: variant = "AND"; break;
-          case RLogic.OR: variant = "OR"; break;
-          case RLogic.NOT: variant = "NOT"; break;
-        }
-        break;
-      case RBasic.COND:
-        switch (armInst) {
-          case RCond.IF_THEN: variant = "IF"; break;
-          case RCond.IF_THEN_ELSE: variant = "IF_ELSE"; break;
-        }
-        break;
-      case RBasic.BLOCK:
-        switch (armInst) {
-          case RBlock.DO: variant = "DO"; break;
-          case RBlock.SEQUENCE: variant = "SEQ"; break;
-          case RBlock.LET: variant = "LET"; break;
-        }
-        break;
-      case RBasic.MATCH:
-        switch (armInst) {
-          case RMatch.SWITCH: variant = "SWITCH"; break;
-        }
-        break;
-    }
-    return variant ? `${base}.${variant}` : base;
-  }
-
-  toJSON(): TraceJSON {
-    // Per-(ty, inst) records — preserves typed-numeric distribution.
-    const variants = Array.from(this.armCounts.entries())
-      .map(([k, count]) => {
-        const { ty, inst } = Trace.decodeKey(k);
-        return {
-          arm_ty: ty,
-          arm_inst: inst,
-          arm_name: Trace.armName(ty),
-          arm_variant_name: Trace.armVariantName(ty, inst),
-          count,
-        };
-      })
-      .sort((a, b) => b.count - a.count);
-
-    // Per-ty aggregate — backward-compatible coarser shape.
-    const byTy = new Map<number, number>();
-    for (const [k, count] of this.armCounts) {
-      const { ty } = Trace.decodeKey(k);
-      byTy.set(ty, (byTy.get(ty) ?? 0) + count);
-    }
-    const arms = Array.from(byTy.entries())
-      .map(([armTy, count]) => ({
-        arm_ty: armTy,
-        arm_name: Trace.armName(armTy),
-        count,
-      }))
-      .sort((a, b) => b.count - a.count);
-    const functions = Array.from(this.fnCounts.entries())
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count);
-    const natives = Array.from(this.nativeCounts.entries())
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count);
-
-    return {
-      total_walks: this.totalWalks,
-      arms,        // aggregated by ty (backward-compatible)
-      variants,    // full (ty, inst) granularity
-      functions,
-      natives,
-      choice_attempts: this.choiceAttempts,
-      choice_successes: this.choiceSuccesses,
-      choice_failures: this.choiceFailures,
-      choice_success_rate:
-        this.choiceAttempts > 0
-          ? this.choiceSuccesses / this.choiceAttempts
-          : 0,
-      match_lookups: this.matchLookups,
-      match_hits: this.matchHits,
-      match_defaults: this.matchDefaults,
-      match_misses: this.matchMisses,
-    };
-  }
-}
 
 interface SwitchArm {
   pattern: NodeID;
@@ -558,49 +203,8 @@ interface SwitchTable {
   defaultBody?: NodeID;
 }
 
-// Native-attribution category constructors. Each names the Form-shape a
-// native expresses; the walker records them in the trace when the native
-// fires. Mirrors Rust/Go kernel's cat_call / cat_witness / cat_access /
-// cat_method / cat_list_nat / cat_undefined.
-export function catCall(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.CALL, inst: 1 };
-}
-export function catWitness(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.WITNESS, inst: 1 };
-}
-export function catAccess(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.ACCESS, inst: 1 };
-}
-export function catMethod(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.METHOD, inst: 1 };
-}
-export function catListNat(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.LIST, inst: 1 };
-}
-export function catTransmute(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.TRANSMUTE, inst: 1 };
-}
-export function catField(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.FIELD, inst: 1 };
-}
-export function catFieldPrimitive(type: number): NodeID {
-  return { pkg: 1, level: Level.BASIC, type, inst: 1 };
-}
-export function catDelta(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.DELTA, inst: 1 };
-}
-export function catReceipt(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.RECEIPT, inst: 1 };
-}
-export function catResidual(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.RESIDUAL, inst: 1 };
-}
-export function catCompareEq(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.COMPARE, inst: RCmp.EQ };
-}
-export function catUndefined(): NodeID {
-  return { pkg: 1, level: Level.BASIC, type: RBasic.UNDEFINED, inst: 0 };
-}
+// The category an imported leaf from another scope is re-interned under.
+const UNDEFINED_CATEGORY: NodeID = { pkg: 1, level: Level.BASIC, type: RBasic.UNDEFINED, inst: 0 };
 
 // Host effects are injected at construction. The Node worker-backed socket
 // and HTTP carriers live in node-host.ts and never enter the browser graph.
@@ -609,14 +213,16 @@ export class Kernel {
   // and by NodeID (nodeKey) for walker access.
   private byKey = new Map<string, NodeID>();
   byID = new Map<string, Recipe>();
+  // the same rows by the NodeID object intern handed out: the walker's lookup, no key built
+  private readonly recipeByNode = new Map<NodeID, Recipe>();
   private nextInst = 1; // next instance number for composites
   private sourceAttr = new Map<string, { file: NameID; line: number; col: number }>();
-  // formStack — the Form-level call chain currently live (closure and
-  // native names, innermost last; closure labels carry file:line:col when
-  // the body recipe is attributed). Pushed at dispatch, popped on the
+  // formStack — the Form-level call chain currently live (closures and
+  // native names, innermost last). Pushed at dispatch, popped on the
   // success path only — after a throw the frames that were live at the
-  // crash remain for the top-level catch to surface.
-  formStack: string[] = [];
+  // crash remain for the top-level catch to surface; a closure is named
+  // only then (formStackLabels).
+  formStack: (string | Closure)[] = [];
   // stopSeq — stops an attempt has caught, the id of each stop line
   stopSeq = 0;
   // readingFiles — line map for the source currently being read:
@@ -649,22 +255,24 @@ export class Kernel {
     }
   }
 
+  // formStackLabels — the live Form call chain as labels, innermost last.
+  formStackLabels(): string[] {
+    return this.formStack.map((f) => (typeof f === "string" ? f : this.formFrameLabel(f.name, f.body)));
+  }
+
   // formStackDisplay — the live Form call chain, innermost first, capped.
   formStackDisplay(max: number): string {
-    if (this.formStack.length === 0) return "";
-    const total = this.formStack.length;
-    const frames: string[] = [];
-    for (let i = total - 1; i >= 0 && frames.length < max; i--) {
-      frames.push(this.formStack[i]!);
-    }
-    let out = frames.join(" < ");
+    const labels = this.formStackLabels();
+    const total = labels.length;
+    if (total === 0) return "";
+    let out = labels.slice(Math.max(0, total - max)).reverse().join(" < ");
     if (total > max) out += ` … (+${total - max} more)`;
     return out;
   }
 
   // formFrameLabel — a closure frame's display label: the function name,
   // plus file:line:col when the body recipe carries source attribution.
-  formFrameLabel(name: NameID, body: NodeID): string {
+  private formFrameLabel(name: NameID, body: NodeID): string {
     let label = this.nameStr(name);
     const loc = this.sourceAttr.get(nodeKey(body));
     if (loc !== undefined) {
@@ -673,7 +281,6 @@ export class Kernel {
     return label;
   }
   private importSeq = 1;
-  private activeRoots: NodeID[] = [];
   private framebufferRoots: NodeID[] = [];
   // unitRoots — the unit roots the reader built, by how walkUnit reads them:
   // UNIT_DO for a source whose one form is a (do ...), UNIT_WRAPPER for the
@@ -687,7 +294,7 @@ export class Kernel {
   closuresCreated = 0;
   // voiced — the organ-health readings this process has already spoken.
   private readonly voiced = new Set<string>();
-  // listCopies — list elements cons and tail have copied in this run.
+  // listCopies — list elements cons has copied in this run.
   private listCopies = 0;
 
   // String table — substrate strings + identifier names share this table.
@@ -704,27 +311,15 @@ export class Kernel {
   //   - +Inf and -Inf keep distinct identity
   private i64s: bigint[] = [];
   private i64Idx = new Map<bigint, number>();
-  private u64s: bigint[] = [];
-  private u64Idx = new Map<bigint, number>();
   private f64s: number[] = [];
   private f64Idx = new Map<string, number>(); // keyed by IEEE bit pattern as hex
 
-  // Natives — map from NameID to NativeEntry (fn + Blueprint category).
-  // Lookup is u32-keyed. The category lets the walker record which
-  // Form-shape a native expresses, alongside the FNCALL arm.
-  natives = new Map<NameID, NativeEntry>();
-  envNatives = new Map<NameID, EnvAwareNativeEntry>();
+  // Natives — the native function each NameID calls.
+  natives = new Map<NameID, NativeFn>();
   // methods — the blueprint method table (BML/NUMS reference: methods live on
   // the blueprint/type, shared by all instances, name-dispatched). Keyed by
   // `${nodeKey(blueprint)}:${nameID}` → the method's Closure.
   methods = new Map<string, Closure>();
-
-  // jitAliases — Form-function-name → native-name redirect. When a
-  // function call's name is in this map, the walker substitutes the
-  // aliased name before native lookup. Form recipes are canonical
-  // truth; `register_jit` opts a call into a kernel-resident optimized
-  // native. Removing the entry restores the Form walk.
-  jitAliases = new Map<NameID, NameID>();
 
   // SWITCH recipe cache — source-level BML/Form `match` lowers to
   // RBasic.MATCH/RMatch.SWITCH. Literal arms are direct NodeID→body edges,
@@ -732,22 +327,19 @@ export class Kernel {
   // the match recipe's own content-addressed NodeID.
   switchTables = new Map<string, SwitchTable>();
 
-  // Optional tracing — undefined for hot-path runs, set by trace
-  // subcommand. Sibling-parity with Go/Rust kernels.
-  trace?: Trace;
-
-  // Optional per-CTOR dispatch counter for Language-cell evaluators
-  // that have their own dispatch loop rather than going through `walk()`.
-  // Surfaces a language adapter's structural shape at its own altitude.
-  ctorCounts?: Map<string, number>;
-
   readonly host: KernelHost;
   // the last failure of the pg_* and config_* doors, as pg_last_error reads it
   private pgLastError = "";
 
+  // the call heads the walker asks by NameID: attempt, and the heads fkwu reserves
+  readonly attemptName: NameID;
+  readonly reservedHeads: ReadonlySet<NameID>;
+
   constructor(host: KernelHost = EMPTY_KERNEL_HOST) {
     // strings are bytes inside the kernel; text meets them only at the host (byte-host.ts)
     this.host = byteHost(host);
+    this.attemptName = this.internName("attempt");
+    this.reservedHeads = new Set([...FKWU_RESERVED_HEADS].map((name) => this.internName(name)));
     this.registerNatives();
   }
 
@@ -766,21 +358,15 @@ export class Kernel {
       type: category.type,
       inst: this.nextInst++,
     };
+    const recipe: Recipe = { category, children };
     this.byKey.set(k, nid);
-    this.byID.set(nodeKey(nid), { category, children });
+    this.byID.set(nodeKey(nid), recipe);
+    this.recipeByNode.set(nid, recipe);
     return nid;
   }
 
   nextImportScope(): number {
     return this.importSeq++;
-  }
-
-  setActiveRoots(roots: readonly NodeID[]): void {
-    this.activeRoots = [...roots];
-  }
-
-  pushActiveRoot(root: NodeID): void {
-    this.activeRoots.push(root);
   }
 
   // markUnitRoot — the reader names each do it hands back as a unit root:
@@ -832,8 +418,9 @@ export class Kernel {
     this.host.writeStderr?.(`form-organ health ${JSON.stringify(row)}\n`);
   }
 
-  // noteListCopy — cons and tail copy the list they are given; past the
-  // budget the kernel says so once: a list that shared its tail would not copy.
+  // noteListCopy — a cons copies a list when it branches off a view that is not its
+  // buffer's longest, or meets a list built as an array; past the budget the kernel
+  // says so once.
   noteListCopy(n: number): void {
     const before = this.listCopies;
     this.listCopies = before + n;
@@ -841,17 +428,17 @@ export class Kernel {
       this.voiceOrgan(
         "list",
         "copy-budget",
-        `cons and tail copy at most ${LIST_COPY_BUDGET} list elements in one run`,
+        `cons copies at most ${LIST_COPY_BUDGET} list elements in one run`,
         `copied ${this.listCopies} list elements`,
         "shared-tail-list",
-        "cons and tail copy the whole list they are given; a list that shares its tail would make both constant-time",
+        "cons branches off shorter views of one list many times; each branch copies the cells it keeps",
       );
     }
   }
 
   remapImportedLeaf(scope: number, nid: NodeID): NodeID {
     if (nid.pkg !== 0) return nid;
-    return this.intern(catUndefined(), [
+    return this.intern(UNDEFINED_CATEGORY, [
       this.internTrivialInt(scope),
       this.internTrivialInt(nid.level),
       this.internTrivialInt(nid.type),
@@ -859,20 +446,9 @@ export class Kernel {
     ]);
   }
 
+  // internTrivialInt — inline while the value fits the 32-bit inst slot, the INT64 table past
+  // it; both decode back to the one integer kind.
   internTrivialInt(n: number): NodeID {
-    // Mirrors the Go kernel (main.go internTrivialInt): inline while the value
-    // fits the 32-bit inst slot, overflow into the i64 table once it crosses
-    // the int32 ceiling. Before this the overflow branch did not exist and the
-    // value was silently truncated by `(n | 0)` — 3045007003 came back as
-    // -1249960293, so every language-neutral node id (all of them sit above
-    // 2^31) was destroyed by a round trip through a recipe. Go's comment states
-    // the intent plainly: "Both paths decode back to Value{VInt, int64} … so
-    // callers and arithmetic never see the storage split."
-    //
-    // Remaining seam, named rather than papered over: Go decodes both paths to
-    // its int kind, while this kernel decodes Triv.INT64 to the `i64` bigint
-    // kind, which 78 sites depend on (make_int64 among them). Aligning THAT is
-    // a larger change than stopping the data loss, and is not attempted here.
     if (n >= -2147483648 && n <= 2147483647) {
       const inst = (n | 0) >>> 0;
       return { pkg: 1, level: Level.TRIVIAL, type: Triv.INT, inst };
@@ -891,55 +467,6 @@ export class Kernel {
 
   internTrivialNull(): NodeID {
     return { pkg: 1, level: Level.TRIVIAL, type: Triv.NULL, inst: 0 };
-  }
-
-  // ---- Typed numerics — inline (≤32 bit) ----
-
-  internTrivialInt8(n: number): NodeID {
-    const v = (n << 24) >> 24; // sign-extend
-    return {
-      pkg: 1,
-      level: Level.TRIVIAL,
-      type: Triv.INT8,
-      inst: v >>> 0,
-    };
-  }
-
-  internTrivialInt16(n: number): NodeID {
-    const v = (n << 16) >> 16;
-    return {
-      pkg: 1,
-      level: Level.TRIVIAL,
-      type: Triv.INT16,
-      inst: v >>> 0,
-    };
-  }
-
-  internTrivialUint8(n: number): NodeID {
-    return {
-      pkg: 1,
-      level: Level.TRIVIAL,
-      type: Triv.UINT8,
-      inst: n & 0xff,
-    };
-  }
-
-  internTrivialUint16(n: number): NodeID {
-    return {
-      pkg: 1,
-      level: Level.TRIVIAL,
-      type: Triv.UINT16,
-      inst: n & 0xffff,
-    };
-  }
-
-  internTrivialUint32(n: number): NodeID {
-    return {
-      pkg: 1,
-      level: Level.TRIVIAL,
-      type: Triv.UINT32,
-      inst: n >>> 0,
-    };
   }
 
   internTrivialFloat32(f: number): NodeID {
@@ -961,18 +488,6 @@ export class Kernel {
     this.i64s.push(n);
     this.i64Idx.set(n, idx);
     return { pkg: 1, level: Level.TRIVIAL, type: Triv.INT64, inst: idx };
-  }
-
-  internTrivialUint64(n: bigint): NodeID {
-    if (n < 0n) throw new Error(`uint64: negative value ${n}`);
-    const existing = this.u64Idx.get(n);
-    if (existing !== undefined) {
-      return { pkg: 1, level: Level.TRIVIAL, type: Triv.UINT64, inst: existing };
-    }
-    const idx = this.u64s.length;
-    this.u64s.push(n);
-    this.u64Idx.set(n, idx);
-    return { pkg: 1, level: Level.TRIVIAL, type: Triv.UINT64, inst: idx };
   }
 
   internTrivialFloat64(f: number): NodeID {
@@ -1014,12 +529,6 @@ export class Kernel {
     return v;
   }
 
-  decodeUint64(inst: number): bigint {
-    const v = this.u64s[inst];
-    if (v === undefined) throw new Error(`uint64: bad index ${inst}`);
-    return v;
-  }
-
   decodeFloat64(inst: number): number {
     const v = this.f64s[inst];
     if (v === undefined) throw new Error(`float64: bad index ${inst}`);
@@ -1032,11 +541,6 @@ export class Kernel {
     return new Float32Array(buf)[0]!;
   }
 
-  // boxValue — wrap a NodeID into a Value-of-kind-nodeid for native returns.
-  boxValue(n: NodeID): Value {
-    return { kind: "nodeid", nodeid: n };
-  }
-
   internName(s: string): NameID {
     const existing = this.strIdx.get(s);
     if (existing !== undefined) return existing;
@@ -1046,162 +550,23 @@ export class Kernel {
     return idx;
   }
 
-  substrateMark(): Value[] {
-    return [
-      { kind: "int", int: this.nextInst },
-      { kind: "int", int: this.strs.length },
-      { kind: "int", int: this.byID.size },
-    ];
-  }
-
-  substrateCounts(): Value[] {
-    return [
-      { kind: "int", int: this.byID.size },
-      { kind: "int", int: this.strs.length },
-    ];
-  }
-
-  substrateRelease(mark: Value[]): number {
-    const next = mark[0]?.kind === "int" ? mark[0].int : 0;
-    const strLen = mark[1]?.kind === "int" ? mark[1].int : -1;
-    if (next <= 0 || strLen < 0 || strLen > this.strs.length) return 0;
-    let released = 0;
-    for (const key of Array.from(this.byID.keys())) {
-      const nid = nodeFromKey(key);
-      if (nid.pkg === 0 && nid.inst >= next) {
-        this.byID.delete(key);
-        this.sourceAttr.delete(key);
-        this.switchTables.delete(key);
-        released += 1;
-      }
-    }
-    for (const [key, nid] of Array.from(this.byKey.entries())) {
-      if (nid.pkg === 0 && nid.inst >= next) {
-        this.byKey.delete(key);
-      }
-    }
-    for (let i = strLen; i < this.strs.length; i += 1) {
-      const s = this.strs[i];
-      if (s !== undefined) this.strIdx.delete(s);
-    }
-    this.strs.length = strLen;
-    this.nextInst = next;
-    this.switchTables.clear();
-    return released;
-  }
-
-  private markStringNode(n: NodeID, liveStrings: Set<NameID>): void {
-    if (n.pkg === 1 && n.level === Level.TRIVIAL && n.type === Triv.STRING) {
-      liveStrings.add(n.inst);
-    }
-  }
-
-  private markNode(n: NodeID, liveNodes: Set<string>, liveStrings: Set<NameID>): void {
-    this.markStringNode(n, liveStrings);
-    const key = nodeKey(n);
-    if (n.pkg !== 0 || liveNodes.has(key)) return;
-    const recipe = this.byID.get(key);
-    if (recipe === undefined) return;
-    liveNodes.add(key);
-    this.markNode(recipe.category, liveNodes, liveStrings);
-    for (const child of recipe.children) {
-      this.markNode(child, liveNodes, liveStrings);
-    }
-  }
-
-  private markValue(
-    value: Value,
-    liveNodes: Set<string>,
-    liveStrings: Set<NameID>,
-    liveFrames: Set<Frame>,
-  ): void {
-    if (value.kind === "list") {
-      for (const item of value.list) this.markValue(item, liveNodes, liveStrings, liveFrames);
-    } else if (value.kind === "closure") {
-      liveStrings.add(value.closure.name);
-      this.markNode(value.closure.body, liveNodes, liveStrings);
-      this.markFrame(value.closure.env, liveNodes, liveStrings, liveFrames);
-    } else if (value.kind === "nodeid") {
-      this.markNode(value.nodeid, liveNodes, liveStrings);
-    }
-  }
-
-  private markFrame(
-    frame: Frame | null,
-    liveNodes: Set<string>,
-    liveStrings: Set<NameID>,
-    liveFrames: Set<Frame>,
-  ): void {
-    for (let cur = frame; cur !== null; cur = cur.parent) {
-      if (liveFrames.has(cur)) return;
-      liveFrames.add(cur);
-      for (const [name, value] of cur.entries()) {
-        liveStrings.add(name);
-        this.markValue(value, liveNodes, liveStrings, liveFrames);
-      }
-      if (cur.history !== undefined) {
-        for (const h of cur.history.values()) {
-          for (const e of h) this.markValue(e.val, liveNodes, liveStrings, liveFrames);
-        }
-      }
-    }
-  }
-
-  substrateGC(roots: readonly Value[], stack: Frame | null = null): Value[] {
-    const liveNodes = new Set<string>();
-    const liveStrings = new Set<NameID>();
-    const liveFrames = new Set<Frame>();
-    for (const name of this.natives.keys()) liveStrings.add(name);
-    for (const loc of this.sourceAttr.values()) liveStrings.add(loc.file);
-    for (const root of this.activeRoots) this.markNode(root, liveNodes, liveStrings);
-    for (const root of roots) this.markValue(root, liveNodes, liveStrings, liveFrames);
-    this.markFrame(stack, liveNodes, liveStrings, liveFrames);
-    let freed = 0;
-    for (const key of Array.from(this.byID.keys())) {
-      const nid = nodeFromKey(key);
-      if (nid.pkg === 0 && !liveNodes.has(key)) {
-        this.byID.delete(key);
-        this.sourceAttr.delete(key);
-        this.switchTables.delete(key);
-        freed += 1;
-      }
-    }
-    for (const [key, nid] of Array.from(this.byKey.entries())) {
-      if (nid.pkg === 0 && !liveNodes.has(nodeKey(nid))) {
-        this.byKey.delete(key);
-      }
-    }
-    let pruned = 0;
-    if (stack !== null) {
-      while (this.strs.length > 0) {
-        const idx = this.strs.length - 1;
-        if (liveStrings.has(idx)) break;
-        const s = this.strs.pop();
-        if (s !== undefined) this.strIdx.delete(s);
-        pruned += 1;
-      }
-    }
-    return [
-      { kind: "int", int: freed },
-      { kind: "int", int: pruned },
-    ];
-  }
-
   // category — the recipe row answers first. A composite sits at its
   // category's level, so one interned over a trivial-level category is at
   // level 1 too; only a NodeID with no row answers itself.
   category(n: NodeID): NodeID {
-    const r = this.byID.get(nodeKey(n));
+    const r = this.recipeAt(n);
     return r ? r.category : n;
   }
 
   children(n: NodeID): readonly NodeID[] {
-    const r = this.byID.get(nodeKey(n));
-    return r ? r.children : [];
+    const r = this.recipeAt(n);
+    return r ? r.children : NO_CHILDREN;
   }
 
+  // recipeAt — a composite's row: the NodeID intern handed out answers by identity, any
+  // other spelling of the same coordinates (make_nodeid, a decoded artifact) by its key.
   recipeAt(n: NodeID): Recipe | undefined {
-    return this.byID.get(nodeKey(n));
+    return this.recipeByNode.get(n) ?? this.byID.get(nodeKey(n));
   }
 
   trivialValue(n: NodeID): Value {
@@ -1226,28 +591,10 @@ export class Kernel {
         return boolInt(n.inst !== 0);
       case Triv.NULL:
         return { kind: "null" };
-      case Triv.INT8: {
-        const u = n.inst >>> 0;
-        const i = u > 0x7f ? (u | 0xffffff00) | 0 : u;
-        return { kind: "i8", int: i };
-      }
-      case Triv.INT16: {
-        const u = n.inst >>> 0;
-        const i = u > 0x7fff ? (u | 0xffff0000) | 0 : u;
-        return { kind: "i16", int: i };
-      }
-      case Triv.UINT8:
-        return { kind: "u8", int: n.inst & 0xff };
-      case Triv.UINT16:
-        return { kind: "u16", int: n.inst & 0xffff };
-      case Triv.UINT32:
-        return { kind: "u32", int: n.inst >>> 0 };
       case Triv.INT64:
-        return { kind: "i64", bigint: this.decodeInt64(n.inst) };
-      case Triv.UINT64:
-        return { kind: "u64", bigint: this.decodeUint64(n.inst) };
+        return intOrWide(this.decodeInt64(n.inst));
       case Triv.FLOAT32:
-        return { kind: "f32", float: this.decodeFloat32(n.inst) };
+        return { kind: "f64", float: this.decodeFloat32(n.inst) };
       case Triv.FLOAT64:
         return { kind: "f64", float: this.decodeFloat64(n.inst) };
       default:
@@ -1281,38 +628,35 @@ export class Kernel {
     return s;
   }
 
+  // render — a value as print and the CLI write it: an absence reads "nothing" at any depth.
   render(v: Value): string {
+    return this.renderValue(v, "nothing");
+  }
+
+  // renderValue — the one rendering (law 9); `nothing` spells an absence inside a list, where
+  // fkwu's value_str writes "null" and its print "nothing". Strings are bare, records "<record>".
+  renderValue(v: Value, nothing: string): string {
     switch (v.kind) {
       case "null":
-        return "null";
+        return nothing;
       case "int":
-      case "i8":
-      case "i16":
-      case "u8":
-      case "u16":
-      case "u32":
         return String(v.int);
       case "i64":
-      case "u64":
         return String(v.bigint);
-      case "f32":
       case "f64":
         return formatFloat(v.float);
       case "str":
-        // Bare, not JSON-quoted — the Go (Value.String) and Rust
-        // (Value::display) siblings render strings without quotes, and
-        // band outputs are byte-compared across kernels.
         return v.str;
       case "list":
-        return "[" + v.list.map((x) => this.render(x)).join(", ") + "]";
+        return "[" + v.list.map((x) => this.renderValue(x, nothing)).join(", ") + "]";
       case "closure":
         return "<closure>";
       case "nodeid":
         return `@${nodeKey(v.nodeid)}`;
       case "ctor":
-        return `${v.ctor_name}(${v.args.map((a) => this.render(a)).join(", ")})`;
+        return `${v.ctor_name}(${v.args.map((a) => this.renderValue(a, nothing)).join(", ")})`;
       case "record":
-        return `<record @${v.record.blueprintRecord !== undefined ? "record" : v.record.blueprint === null ? "0" : nodeKey(v.record.blueprint)} #${v.record.fields.length}fields>`;
+        return "<record>";
     }
   }
 
@@ -1327,47 +671,20 @@ export class Kernel {
     return this.host.resolveReadPath?.(path) ?? path;
   }
 
-  private registerNative(name: string, category: NodeID, fn: NativeFn): void {
-    const id = this.internName(name);
-    this.natives.set(id, { name: id, category, fn });
-  }
-
-  private registerEnvNative(
-    name: string,
-    category: NodeID,
-    fn: EnvAwareNativeFn,
-  ): void {
-    const id = this.internName(name);
-    this.envNatives.set(id, { name: id, category, fn });
-  }
-
-  // setNative — public registration helper for language adapters that
-  // need to extend the native map. Default category is UNDEFINED
-  // (honest about unsettled Form attribution); pass an explicit category
-  // to opt in.
-  setNative(name: string, fn: NativeFn, category: NodeID = catUndefined()): void {
-    const id = this.internName(name);
-    this.natives.set(id, { name: id, category, fn });
+  private registerNative(name: string, fn: NativeFn): void {
+    this.natives.set(this.internName(name), fn);
   }
 
   private registerNatives(): void {
-    // Blueprint attribution discipline (mirrors Rust/Go kernels):
-    //   catCall      — invoke external effect (I/O, tool)
-    //   catAccess    — read property / field
-    //   catMethod    — transform on a cell-like value
-    //   catCompareEq — equality (str_eq)
-    //   catListNat   — construct/destructure a List
-    //   catWitness   — substrate self-attestation
-    //   catUndefined — honest "no Form category settled yet"
-
-    this.registerNative("print", catCall(), (_k, args) => {
-      const parts = args.map((a) => this.renderForPrint(a));
+    // print writes its values and one newline and answers 0, as fkwu's print does
+    this.registerNative("print", (_k, args) => {
+      const parts = args.map((a) => this.render(a));
       this.host.writeStdout?.(parts.join(" ") + "\n");
-      return { kind: "null" };
+      return { kind: "int", int: 0 };
     });
     // String ops
     // a string is bytes, one code unit each (byte-host.ts): its length is its byte count
-    this.registerNative("str_len", catAccess(), (_k, args) => ({
+    this.registerNative("str_len", (_k, args) => ({
       kind: "int",
       int: argStr(args, 0).length,
     }));
@@ -1392,7 +709,7 @@ export class Kernel {
     //
     // A string is bytes here as on fkwu (byte-host.ts), so every cut, one that
     // severs a multi-byte character included, is the same bytes fkwu holds.
-    this.registerNative("substring", catAccess(), (_k, args) => {
+    this.registerNative("substring", (_k, args) => {
       const v = args[0];
       if (v?.kind !== "str") return { kind: "str", str: "" };
       const n = v.str.length;
@@ -1403,56 +720,27 @@ export class Kernel {
       if (b <= a) return { kind: "str", str: "" };
       return { kind: "str", str: v.str.slice(a, b) };
     });
-    // char_at is core.fk's recipe on fkwu, (substring s i (add i 1)): one byte, clamped
-    this.registerNative("char_at", catAccess(), (_k, args) => {
-      const s = argStr(args, 0);
-      const i = argInt(args, 1);
-      if (i < 0 || i >= s.length) return { kind: "str", str: "" };
-      return { kind: "str", str: s[i]! };
-    });
-    this.registerNative("str_concat", catMethod(), (_k, args) => ({
+    this.registerNative("str_concat", (_k, args) => ({
       kind: "str",
       str: argStr(args, 0) + argStr(args, 1),
     }));
-    this.registerNative("form_error", catWitness(), (_k, args) => {
-      throw new Error(argStr(args, 0));
-    });
-    this.registerNative("form-error", catWitness(), (_k, args) => {
+    this.registerNative("form_error", (_k, args) => {
       throw new Error(argStr(args, 0));
     });
     const valueKindNative = (_k: Kernel, args: Value[]): Value => ({
       kind: "str",
       str: valueKindName(args[0] ?? { kind: "null" }),
     });
-    this.registerNative("value_kind", catWitness(), valueKindNative);
-    this.registerNative("value-kind", catWitness(), valueKindNative);
+    this.registerNative("value_kind", valueKindNative);
+    // core.fk's float_to_str still asks the kebab spelling, as fkwu's rewrite row allows
+    this.registerNative("value-kind", valueKindNative);
     // nothing / nothing? — the axiom-1 third value and the one question that sees it,
     // native as on fkwu (tags 137/138): never-was is neither 0 nor empty.
-    this.registerNative("nothing", catWitness(), () => ({ kind: "null" }));
-    this.registerNative("nothing?", catWitness(), (_k, args) =>
+    this.registerNative("nothing", () => ({ kind: "null" }));
+    this.registerNative("nothing?", (_k, args) =>
       ({ kind: "int", int: args[0]?.kind === "null" ? 1 : 0 }));
-    this.registerNative("source_scan_file", catCall(), (_k, args) => {
-      const read = this.host.readTextFile;
-      if (read === undefined) throw new Error("source_scan_file: host carrier unavailable");
-      return sourceNativeScanText(
-        read(this.hostReadPath(argStr(args, 0))),
-        sourceNativeLexiconFromValue(args[1]!),
-      );
-    });
-    // pow — integer exponentiation in native code (no Form recursion).
-    // (pow base exp) → base**exp. Negative exponents return 0 (Python's
-    // int**-n is a float; floats on this path are a later breath).
-    this.registerNative("pow", catMethod(), (_k, args) => {
-      // integer power; float args coerce to int (truncate) to match Go/Rust
-      // AsInt() — pow is the integer power, math_pow the IEEE float power.
-      // The product wraps at 64 bits as Go's int64 loop does.
-      const base = listElemInt(args[0]!, "pow");
-      const exp = listElemInt(args[1]!, "pow");
-      if (exp < 0n) return { kind: "int", int: 0 };
-      let result = 1n;
-      for (let i = 0n; i < exp; i++) result = BigInt.asIntN(64, result * base);
-      return intOrWide(result);
-    });
+    // float_leaf is fkwu's own door (tag 201) under its rewrite rows; called by hand it answers nothing
+    this.registerNative("float_leaf", () => ({ kind: "null" }));
     // --- struct/object primitive (BML reference, rung 2) ----------------
     // A Record is the kernel's first MUTABLE value: a struct/object with
     // identity. Every language's class/struct compiles onto these natives.
@@ -1463,7 +751,7 @@ export class Kernel {
     // work as on any record, record_blueprint reads back 0, and no method
     // dispatches on it. fkwu keeps the blueprint operand verbatim, and 0 is
     // the body's most common record shape (a plain field map).
-    this.registerNative("record_new", catMethod(), (k, args) => {
+    this.registerNative("record_new", (k, args) => {
       recordConstructions += 1;
       const a0 = args[0];
       const owner = a0?.kind === "record" ? a0.record : undefined;
@@ -1480,7 +768,7 @@ export class Kernel {
     });
     // record_get — (record_get rec "field") → value, or 0 when the record
     // carries no such field: fkwu's answer, which the body reads as eq(v, 0).
-    this.registerNative("record_get", catAccess(), (k, args) => {
+    this.registerNative("record_get", (k, args) => {
       const r = args[0]!;
       if (r.kind !== "record") throw new Error("record_get: not a record");
       const v = recordGet(r.record, k.internName(argStr(args, 1)));
@@ -1488,21 +776,21 @@ export class Kernel {
     });
     // record_set — (record_set rec "field" value) → the record (mutated in
     // place; shared identity means all holders see it). BML's `self.x = v`.
-    this.registerNative("record_set", catMethod(), (k, args) => {
+    this.registerNative("record_set", (k, args) => {
       const r = args[0]!;
       if (r.kind !== "record") throw new Error("record_set: not a record");
       recordSet(r.record, k.internName(argStr(args, 1)), args[2]!);
       return r;
     });
     // record_has — (record_has rec "field") → bool.
-    this.registerNative("record_has", catAccess(), (k, args) => {
+    this.registerNative("record_has", (k, args) => {
       const r = args[0]!;
       if (r.kind !== "record") return boolInt(false);
       const v = recordGet(r.record, k.internName(argStr(args, 1)));
       return boolInt(v !== undefined);
     });
     // record_blueprint — (record_blueprint rec) → the blueprint NodeID.
-    this.registerNative("record_blueprint", catAccess(), (_k, args) => {
+    this.registerNative("record_blueprint", (_k, args) => {
       const r = args[0]!;
       if (r.kind !== "record") throw new Error("record_blueprint: not a record");
       if (r.record.blueprintRecord !== undefined) {
@@ -1512,11 +800,11 @@ export class Kernel {
       return { kind: "nodeid", nodeid: r.record.blueprint };
     });
     // record? — (record? v) → bool type predicate.
-    this.registerNative("record?", catAccess(), (_k, args) => boolInt(args[0]!.kind === "record"));
+    this.registerNative("record?", (_k, args) => boolInt(args[0]!.kind === "record"));
     // record_keys — (record_keys rec) → list of field-name strings, in
     // insertion order. Lets Form enumerate a record used as a hash map
     // (e.g. cell-log-store.fk's keydir for compaction).
-    this.registerNative("record_keys", catAccess(), (k, args) => {
+    this.registerNative("record_keys", (k, args) => {
       const r = args[0]!;
       if (r.kind !== "record") return { kind: "list", list: [] };
       return {
@@ -1529,7 +817,7 @@ export class Kernel {
     // name-dispatched. The keystone that makes a Record a real object.
     //
     // method_define — (method_define blueprint "name" closure) → blueprint.
-    this.registerNative("method_define", catMethod(), (k, args) => {
+    this.registerNative("method_define", (k, args) => {
       const cl = args[2]!;
       if (cl.kind !== "closure") {
         throw new Error("method_define: third arg must be a closure");
@@ -1540,7 +828,7 @@ export class Kernel {
       return args[0]!;
     });
     // method_has — (method_has record-or-blueprint "name") → bool.
-    this.registerNative("method_has", catAccess(), (k, args) => {
+    this.registerNative("method_has", (k, args) => {
       const a0 = args[0]!;
       let bp: NodeID;
       if (a0.kind === "record") {
@@ -1554,7 +842,7 @@ export class Kernel {
     // method_invoke — (method_invoke record "name" arg1 ...) → value.
     // Dispatches by the record's blueprint; the method's FIRST param is the
     // receiver (Python `self`), remaining params bind to call args.
-    this.registerNative("method_invoke", catMethod(), (k, args) => {
+    this.registerNative("method_invoke", (k, args) => {
       const a0 = args[0]!;
       if (a0.kind !== "record") {
         throw new Error("method_invoke: first arg must be a record");
@@ -1593,7 +881,7 @@ export class Kernel {
     // str_find — JS-level substring search starting at index `from`.
     // (str_find s needle from) → int (index or -1). Whole search in this
     // JS String.indexOf call; no Form callback per byte, no Form recursion.
-    this.registerNative("str_find", catAccess(), (_k, args) => {
+    this.registerNative("str_find", (_k, args) => {
       const s = argStr(args, 0);
       const needle = argStr(args, 1);
       const bytes = bstrToBytes(s);
@@ -1629,7 +917,7 @@ export class Kernel {
     // Class codes: 0=ws, 1=digit, 2=alpha, 3=identifier-char,
     //              4=non-quote-non-escape, 5=non-newline,
     //              6=json-string-safe (code unit >= 0x20, not quote/backslash).
-    this.registerNative("scan_run", catAccess(), (_k, args) => {
+    this.registerNative("scan_run", (_k, args) => {
       const bytes = bstrToBytes(argStr(args, 0));
       const from = Math.max(0, argInt(args, 1));
       const cls = argInt(args, 2);
@@ -1697,50 +985,6 @@ export class Kernel {
       }
       return { kind: "int", int: end };
     });
-    // string_byte_fold(text, init, step) streams raw UTF-8 bytes through a
-    // two-argument closure (acc, byte-int). Unlike string_bytes + a Form list
-    // recursion, the byte list never exists and host stack depth is constant.
-    // Embedded NUL and multibyte text are carried byte-for-byte.
-    this.registerNative("string_byte_fold", catCall(), (k, args) => {
-      const bytes = bstrToBytes(argStr(args, 0));
-      let acc = args[1]!;
-      const fnVal = args[2]!;
-      if (fnVal.kind !== "closure") {
-        throw new Error("string_byte_fold: third arg must be a closure");
-      }
-      const closure = fnVal.closure;
-      if (closure.params.length !== 2) {
-        throw new Error(
-          `string_byte_fold: step closure wants 2 params (acc byte), got ${closure.params.length}`,
-        );
-      }
-      for (const byte of bytes) {
-        const callFrame = new Frame(closure.env);
-        callFrame.bind(closure.params[0]!, acc);
-        callFrame.bind(closure.params[1]!, { kind: "int", int: byte });
-        acc = walk(k, closure.body, callFrame);
-      }
-      return acc;
-    });
-    // Canonical universal-walker image serializer. Roots and rows are built by
-    // cons in reverse order; the host loop emits the exact flat integer image.
-    this.registerNative("form_table_text", catMethod(), (_k, args) => {
-      const roots = argList(args, 0);
-      const rows = argList(args, 1);
-      const fields: string[] = [String(roots.length)];
-      for (let i = roots.length - 1; i >= 0; i--) {
-        fields.push(String(listElemInt(roots[i]!, "form_table_text root")));
-      }
-      fields.push(String(rows.length));
-      for (let i = rows.length - 1; i >= 0; i--) {
-        const row = rows[i]!;
-        if (row.kind !== "list") throw new Error("form_table_text: every row must be a list");
-        for (const field of row.list) {
-          fields.push(String(listElemInt(field, "form_table_text field")));
-        }
-      }
-      return { kind: "str", str: fields.join(" ") };
-    });
     // str_eq OBSERVES the axiom-1 absence instead of refusing it, mirroring the fkwu
     // arm exactly (probed 2026-09-04: nothing equals nothing, and equals neither ""
     // nor any other string, so the emptymask distinction between never-was and empty
@@ -1749,146 +993,89 @@ export class Kernel {
     // absence out loud. A walk that meets a file which left between the listing
     // and the read answers here as fkwu does ("not a model"), so this witness
     // stays in step with the primary kernel.
-    this.registerNative("str_eq", catCompareEq(), (_k, args) =>
+    this.registerNative("str_eq", (_k, args) =>
       args[0]?.kind === "null" || args[1]?.kind === "null"
         ? boolInt(args[0]?.kind === "null" && args[1]?.kind === "null")
         : boolInt(argStr(args, 0) === argStr(args, 1)),
     );
-    // int_to_str — value-to-string for trivial leaves. Historical name
-    // (first use: line numbers in traces); semantics is "render
-    // any trivial value as text" so a leaf walker in Form can
-    // pass node_value of any leaf type through it. Multi-target emit
-    // (the universal codec lattice) depends on
-    // string + null passthrough.
-    this.registerNative("int_to_str", catMethod(), (_k, args) => {
-      const v = args[0]!;
-      if (v.kind === "str") return { kind: "str", str: v.str ?? "" };
-      if (v.kind === "null") return { kind: "str", str: "null" };
-      if (v.kind === "f32" || v.kind === "f64") return { kind: "str", str: formatFloat(v.float) };
-      if (v.kind === "i64" || v.kind === "u64") return { kind: "str", str: String(v.bigint) };
-      return { kind: "str", str: String(argInt(args, 0)) };
-    });
-    // value_str — a value as text, as Go's formValueString writes it: null as "", anything else as
-    // print writes it.
-    this.registerNative("value_str", catMethod(), (_k, args) => {
+    // value_str — a value as text (law 9): nothing as "", anything else as renderValue writes it.
+    this.registerNative("value_str", (_k, args) => {
       const v = args[0];
-      return { kind: "str", str: v === undefined || v.kind === "null" ? "" : this.renderForPrint(v) };
+      return { kind: "str", str: v === undefined || v.kind === "null" ? "" : this.renderValue(v, "null") };
     });
-    this.registerNative("str_to_int", catMethod(), (_k, args) => leadingInt(argStr(args, 0)));
-    // str_to_float — text-to-float leaf, total (unparseable -> 0.0). Number()
-    // over parseFloat() for sibling parity: "3.5abc" is unparseable in the
-    // Go/Rust kernels, so it must be 0.0 here too.
-    this.registerNative("str_to_float", catMethod(), (_k, args) => {
-      const f = Number(argStr(args, 0).trim());
-      return { kind: "f64", float: Number.isFinite(f) ? f : 0.0 };
+    // str_to_float reads one grammar (law 7): leading whitespace, the longest decimal prefix,
+    // no hex, no inf/nan; text with no decimal prefix reads 0.0.
+    this.registerNative("str_to_float", (_k, args) => {
+      const m = FLOAT_PREFIX.exec(argStr(args, 0));
+      return { kind: "f64", float: m === null ? 0 : Number(m[1]) };
     });
-    // float_to_int — truncate a float toward zero, exactly Python's int() on
-    // a float. Total: a non-number -> 0. Sibling parity with Go and Rust.
-    this.registerNative("float_to_int", catMethod(), (_k, args) => {
+    // float_to_int truncates toward zero; NaN, a value outside the integer range or a
+    // non-number stops (law 6).
+    this.registerNative("float_to_int", (_k, args) => {
       const v = args[0];
-      const f = v?.kind === "f32" || v?.kind === "f64" ? v.float : v?.kind === "int" ? v.int : 0;
-      return { kind: "int", int: Math.trunc(f) };
+      if (v?.kind === "int" || v?.kind === "i64") return v;
+      if (v?.kind !== "f64") throw new Error(`float_to_int: only a number truncates, got ${v?.kind ?? "nothing"}`);
+      const t = Math.trunc(v.float);
+      if (!(t >= -INT_LIMIT && t < INT_LIMIT)) throw new Error(`float_to_int: ${formatFloat(v.float)} has no integer`);
+      return intOrWide(BigInt(t));
     });
-    this.registerNative("ord", catAccess(), (_k, args) => {
-      const s = argStr(args, 0);
-      return { kind: "int", int: s.length === 0 ? -1 : s.charCodeAt(0) };
-    });
-    // str_byte_at: the i-th BYTE of the string (0-255) -- a string is bytes, one
-    // code unit each, so this is the unit itself; the byte door the string-pool
-    // serializer (fks-lit-sp) emits any locale's script through.
-    this.registerNative("str_byte_at", catAccess(), (_k, args) => {
+    // str_byte_at: the i-th BYTE of the string (0-255), -1 out of range (law 8).
+    this.registerNative("str_byte_at", (_k, args) => {
       const s = argStr(args, 0);
       const i = argInt(args, 1);
-      if (i < 0 || i >= s.length) {
-        throw new Error(`str_byte_at: bounds out of range index=${i} len=${s.length}`);
-      }
-      return { kind: "int", int: s.charCodeAt(i) & 0xff };
+      return { kind: "int", int: i < 0 || i >= s.length ? -1 : s.charCodeAt(i) & 0xff };
     });
-    // string_bytes(text) → the string's bytes as integer leaves; the
-    // whole-string twin of str_byte_at, embedded NULs included.
-    this.registerNative("string_bytes", catAccess(), (_k, args) => ({
-      kind: "list",
-      list: Array.from(bstrToBytes(argStr(args, 0)), (byte): Value => ({
-        kind: "int",
-        int: byte,
-      })),
-    }));
-    this.registerNative("byte_to_str", catAccess(), (_k, args) => {
+    this.registerNative("byte_to_str", (_k, args) => {
       const b = argInt(args, 0);
       return { kind: "str", str: b >= 0 && b <= 255 ? String.fromCharCode(b) : "" };
     });
-    // input_byte — byte i of the staged input, 0 outside it, as fkwu reads
-    // its staged buffer. This kernel stages no input, so every byte is 0.
-    this.registerNative("input_byte", catAccess(), () => ({ kind: "int", int: 0 }));
-    // List ops
-    this.registerNative("list", catListNat(), (_k, args) => ({
-      kind: "list",
-      list: args.slice(),
-    }));
-    this.registerNative("cons", catListNat(), (k, args) => {
+    // input_byte — this kernel stages no input: every byte is unavailable.
+    this.registerNative("input_byte", () => ({ kind: "null" }));
+    // List ops: cons, head, tail, nth and len run on SharedList in constant time.
+    this.registerNative("list", (_k, args) => new SharedList(args.reverse(), args.length));
+    this.registerNative("cons", (k, args) => {
       const head = args[0] ?? { kind: "null" };
       // nothing is not a list: consing onto it is a stop, as on fkwu
       if (args[1]?.kind === "null") throw new Error("cons: nothing is not a list -- ask nothing? before consing");
-      const tail = argList(args, 1);
-      k.noteListCopy(tail.length);
-      return { kind: "list", list: [head, ...tail] };
+      const xs = args[1];
+      if (xs?.kind !== "list") throw new Error(`cons: expected list, got ${xs?.kind ?? "absent"}`);
+      const tail = sharedList(k, xs);
+      // the longest view of a buffer grows it in place; any other view copies its own cells
+      if (tail.buf.length === tail.n) {
+        tail.buf.push(head);
+        return new SharedList(tail.buf, tail.n + 1);
+      }
+      k.noteListCopy(tail.n);
+      const buf = tail.buf.slice(0, tail.n);
+      buf.push(head);
+      return new SharedList(buf, tail.n + 1);
     });
     // A receiver that is not a list answers null, as nth does; the tail of a list is a list.
-    this.registerNative("head", catListNat(), (_k, args) => {
+    this.registerNative("head", (_k, args) => {
+      const xs = args[0];
+      return xs?.kind === "list" ? listAt(xs, 0) : { kind: "null" };
+    });
+    this.registerNative("tail", (k, args) => {
       const xs = args[0];
       if (xs?.kind !== "list") return { kind: "null" };
-      return xs.list[0] ?? { kind: "null" };
+      const shared = sharedList(k, xs);
+      return new SharedList(shared.buf, Math.max(0, shared.n - 1));
     });
-    this.registerNative("tail", catListNat(), (k, args) => {
-      const xs = args[0];
-      if (xs?.kind !== "list") return { kind: "null" };
-      k.noteListCopy(xs.list.length);
-      return { kind: "list", list: xs.list.slice(1) };
-    });
-    // len is HONEST cell count. Dicts ride on list values tagged with the
-    // string "__dict__", but the tag is in-band: any plain list may carry
-    // that string as pooled DATA (the flatten string pool does, at the cell
-    // where "__dict__" was interned). A marker-sniffing len makes such a
-    // list lie about its length — flt-append's (eq (len xs) 0) base case
-    // then REPLACES the ["__dict__"] tail instead of appending past it,
-    // silently dropping the literal from the pool (the (24 -1 0 0)
-    // orphan-slit wound, 2026-07-17). Python's len(d) pair-count semantics
-    // live in _len, with the rest of the python-adapter's polymorphic
-    // underscore family.
-    this.registerNative("len", catAccess(), (_k, args) => {
+    // len is the honest cell count: a list's cells, a string's bytes.
+    this.registerNative("len", (_k, args) => {
       const v = args[0];
-      if (v?.kind === "list") return { kind: "int", int: v.list.length };
+      if (v?.kind === "list") return { kind: "int", int: listLength(v) };
       if (v?.kind === "str") return { kind: "int", int: v.str.length };
       // nothing is not an empty collection: its length is a stop, as on fkwu
       if (v?.kind === "null") throw new Error("len: nothing has no length -- ask nothing? before measuring");
       return { kind: "int", int: 0 };
     });
-    // _len — the python-adapter's polymorphic length: dict PAIRS, list
-    // elements, string bytes. Python's len(x) lowers here (the kernel len
-    // stays an honest cell count; see the note above).
-    this.registerNative("_len", catAccess(), (_k, args) => {
-      const v = args[0];
-      if (v?.kind === "list") {
-        if (
-          v.list.length > 0 &&
-          v.list[0]!.kind === "str" &&
-          v.list[0]!.str === "__dict__"
-        ) {
-          return { kind: "int", int: (v.list.length - 1) / 2 };
-        }
-        return { kind: "int", int: v.list.length };
-      }
-      if (v?.kind === "str") return { kind: "int", int: v.str.length };
-      return { kind: "int", int: 0 };
-    });
     // A receiver that is not a list answers null, as Go and Rust answer.
-    this.registerNative("nth", catAccess(), (_k, args) => {
+    this.registerNative("nth", (_k, args) => {
       const xs = args[0];
-      if (xs?.kind !== "list") return { kind: "null" };
-      const i = argInt(args, 1);
-      return xs.list[i] ?? { kind: "null" };
+      return xs?.kind === "list" ? listAt(xs, argInt(args, 1)) : { kind: "null" };
     });
-    this.registerNative("empty", catListNat(), () => ({ kind: "list", list: [] }));
+    this.registerNative("empty", () => new SharedList([], 0));
     // _list_append — functional list extension: (_list_append xs x) → a NEW
     // list = xs ++ [x]. Sibling-parity with Rust + Go. The Python adapter
     // lowers the accumulator idiom `result.append(x)` to
@@ -1896,98 +1083,26 @@ export class Kernel {
     // list each pass — what unblocks list-returning routes (softmax, vectors).
     // A non-list receiver yields a single-element list, matching an append
     // onto an empty accumulator.
-    this.registerNative("_list_append", catListNat(), (_k, args) => {
+    this.registerNative("_list_append", (_k, args) => {
       const base = args[0]?.kind === "list" ? args[0].list : [];
       const x = args[1] ?? { kind: "null" };
       return { kind: "list", list: [...base, x] };
     });
-    // --- Dict natives — sibling-parity with Rust _dict_* + _get + _in ---
-    // Dicts are first-class but ride on Value{kind:"list"} with a
-    // "__dict__" tag in slot 0 followed by alternating key/value pairs:
-    //   ["__dict__", k0, v0, k1, v1, ...]
-    // Keys can be strings or ints; equality uses value-level compare.
-    // Updates are immutable: _dict_set returns a fresh dict.
-    // Plain boolean predicate (not a TS type guard) so the kind narrowing
-    // after the dict branch still allows the regular "list" path through.
-    const isDictValue = (v: Value): boolean =>
-      v.kind === "list" &&
-      v.list.length > 0 &&
-      v.list[0]!.kind === "str" &&
-      v.list[0]!.str === "__dict__";
-    const dictKeyEq = (a: Value, b: Value): boolean => {
-      if (a.kind === "str" && b.kind === "str") return a.str === b.str;
-      if (a.kind === "int" && b.kind === "int") return a.int === b.int;
-      return false;
-    };
-    this.registerNative("_dict_new", catListNat(), (_k, args) => ({
-      kind: "list",
-      list: [{ kind: "str", str: "__dict__" }, ...args],
-    }));
-    // Local helper to access the underlying list of a dict-shaped value
-    // without losing type info — TS narrows away the "list" branch after
-    // the boolean predicate, so this cast is the cheapest reconciliation.
-    const dictList = (v: Value): Value[] => (v as { kind: "list"; list: Value[] }).list;
-    this.registerNative("_dict_get", catAccess(), (_k, args) => {
-      const d = args[0]!;
-      const key = args[1]!;
-      if (!isDictValue(d)) return { kind: "null" };
-      const xs = dictList(d);
-      for (let i = 1; i + 1 < xs.length; i += 2) {
-        if (dictKeyEq(xs[i]!, key)) return xs[i + 1]!;
-      }
-      return { kind: "null" };
-    });
-    this.registerNative("_dict_set", catMethod(), (_k, args) => {
-      const d = args[0]!;
-      const key = args[1]!;
-      const val = args[2]!;
-      if (!isDictValue(d)) return d;
-      const out = dictList(d).slice();
-      for (let i = 1; i + 1 < out.length; i += 2) {
-        if (dictKeyEq(out[i]!, key)) {
-          out[i + 1] = val;
-          return { kind: "list", list: out };
-        }
-      }
-      out.push(key, val);
-      return { kind: "list", list: out };
-    });
-    this.registerNative("_dict_has", catCompareEq(), (_k, args) => {
-      const d = args[0]!;
-      const key = args[1]!;
-      if (!isDictValue(d)) return boolInt(false);
-      const xs = dictList(d);
-      for (let i = 1; i + 1 < xs.length; i += 2) {
-        if (dictKeyEq(xs[i]!, key)) return boolInt(true);
-      }
-      return boolInt(false);
-    });
-    this.registerNative("_dict_keys", catAccess(), (_k, args) => {
-      const d = args[0]!;
-      if (!isDictValue(d)) return { kind: "list", list: [] };
-      const xs = dictList(d);
-      const out: Value[] = [];
-      for (let i = 1; i + 1 < xs.length; i += 2) out.push(xs[i]!);
-      return { kind: "list", list: out };
-    });
-    this.registerNative("_dict_values", catAccess(), (_k, args) => {
-      const d = args[0]!;
-      if (!isDictValue(d)) return { kind: "list", list: [] };
-      const xs = dictList(d);
-      const out: Value[] = [];
-      for (let i = 1; i + 1 < xs.length; i += 2) out.push(xs[i + 1]!);
-      return { kind: "list", list: out };
-    });
-    // _get — polymorphic subscript. Dispatches list[i]/str[i] to nth and
-    // dict[k] to _dict_get. The Python emitter compiles subscript to
-    // (_get value index) so the same .fk runs over either container.
-    this.registerNative("_get", catAccess(), (_k, args) => {
+    // _get — polymorphic subscript over a "__dict__"-tagged pair list (dict[k]), a record
+    // alist (string key), a list index or a string byte.
+    this.registerNative("_get", (_k, args) => {
       const v = args[0]!;
       const idx = args[1]!;
-      if (isDictValue(v)) {
-        const xs = dictList(v);
+      if (v.kind === "list" && v.list[0]?.kind === "str" && v.list[0].str === "__dict__") {
+        const xs = v.list;
         for (let i = 1; i + 1 < xs.length; i += 2) {
-          if (dictKeyEq(xs[i]!, idx)) return xs[i + 1]!;
+          const key = xs[i]!;
+          if (
+            (key.kind === "str" && idx.kind === "str" && key.str === idx.str) ||
+            (key.kind === "int" && idx.kind === "int" && key.int === idx.int)
+          ) {
+            return xs[i + 1]!;
+          }
         }
         return { kind: "null" };
       }
@@ -2015,55 +1130,6 @@ export class Kernel {
       }
       return { kind: "null" };
     });
-    // _iter — turn any container into a flat list suitable for the
-    // for-loop emitter's head/tail walk. Lists pass through; dicts
-    // become their keys (Python's `for k in d:`); strings split per char.
-    this.registerNative("_iter", catListNat(), (_k, args) => {
-      const v = args[0]!;
-      if (isDictValue(v)) {
-        const xs = dictList(v);
-        const out: Value[] = [];
-        for (let i = 1; i + 1 < xs.length; i += 2) out.push(xs[i]!);
-        return { kind: "list", list: out };
-      }
-      if (v.kind === "list") return v;
-      if (v.kind === "str") {
-        return {
-          kind: "list",
-          list: v.str.split("").map((c) => ({ kind: "str", str: c }) as Value),
-        };
-      }
-      return { kind: "list", list: [] };
-    });
-    // _in — polymorphic membership. (`k in d` → _in d k). Dict keys,
-    // list elements, or substring presence in a string.
-    this.registerNative("_in", catCompareEq(), (_k, args) => {
-      const needle = args[0]!;
-      const hay = args[1]!;
-      if (isDictValue(hay)) {
-        const xs = dictList(hay);
-        for (let i = 1; i + 1 < xs.length; i += 2) {
-          if (dictKeyEq(xs[i]!, needle))
-            return boolInt(true);
-        }
-        return boolInt(false);
-      }
-      if (hay.kind === "list") {
-        for (const v of hay.list) {
-          if (
-            (needle.kind === "int" && v.kind === "int" && needle.int === v.int) ||
-            (needle.kind === "str" && v.kind === "str" && needle.str === v.str)
-          ) {
-            return boolInt(true);
-          }
-        }
-        return boolInt(false);
-      }
-      if (needle.kind === "str" && hay.kind === "str") {
-        return boolInt(hay.str.includes(needle.str));
-      }
-      return boolInt(false);
-    });
     // --- Substrate read primitives — kernel reaches the REST surface ----
     // Sibling-parity with the Go/Rust http_get carrier. The walker remains
     // synchronous through a worker-backed Node HTTP client; no shell/curl
@@ -2071,7 +1137,7 @@ export class Kernel {
     //
     // http_get(url, headers?, timeout_ms?) → __dict__:
     // status_code, body, error, duration_ms, headers.
-    this.registerNative("http_get", catCall(), (_k, args) => {
+    this.registerNative("http_get", (_k, args) => {
       const url = argStr(args, 0);
       const headers: globalThis.Record<string, string[]> = {};
       if (args[1]?.kind === "list") {
@@ -2128,115 +1194,9 @@ export class Kernel {
         ],
       };
     });
-    // _json_get(json_str, key) → str|int|float|null. Parse a top-level
-    // JSON object and extract obj[key]. Returns null on miss / parse error.
-    // Nested objects come back as JSON strings so Form code composes via
-    // repeated _json_get (jq-pipeline shape).
-    this.registerNative("_json_get", catAccess(), (_k, args) => {
-      const body = argStr(args, 0);
-      const key = argStr(args, 1);
-      let parsed: unknown;
-      try {
-        parsed = jsonLeavesToBstr(JSON.parse(bstrToText(body)));
-      } catch {
-        return { kind: "null" };
-      }
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return { kind: "null" };
-      }
-      const v = (parsed as globalThis.Record<string, unknown>)[key];
-      if (v === undefined || v === null) return { kind: "null" };
-      if (typeof v === "boolean") return boolInt(v);
-      if (typeof v === "number") {
-        return Number.isInteger(v)
-          ? { kind: "int", int: v }
-          : { kind: "f64", float: v };
-      }
-      if (typeof v === "string") return { kind: "str", str: v };
-      // Arrays / nested objects: re-serialize so the caller can re-parse.
-      return { kind: "str", str: JSON.stringify(v) };
-    });
-    // _json_to_dict(json_str) → __dict__-tagged list. Convenience for the
-    // common /api/substrate/lattice/stats shape — a flat object the caller
-    // wants to address as a dict directly. Nested values come back as JSON
-    // string children, consistent with _json_get.
-    this.registerNative("_json_to_dict", catMethod(), (_k, args) => {
-      const body = argStr(args, 0);
-      let parsed: unknown;
-      try {
-        parsed = jsonLeavesToBstr(JSON.parse(bstrToText(body)));
-      } catch {
-        return { kind: "null" };
-      }
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return { kind: "null" };
-      }
-      const out: Value[] = [{ kind: "str", str: "__dict__" }];
-      for (const [k, v] of Object.entries(parsed)) {
-        out.push({ kind: "str", str: k });
-        if (v === null) out.push({ kind: "null" });
-        else if (typeof v === "boolean") out.push(boolInt(v));
-        else if (typeof v === "number") {
-          out.push(
-            Number.isInteger(v)
-              ? { kind: "int", int: v }
-              : { kind: "f64", float: v },
-          );
-        } else if (typeof v === "string") out.push({ kind: "str", str: v });
-        else out.push({ kind: "str", str: JSON.stringify(v) });
-      }
-      return { kind: "list", list: out };
-    });
-    // Common Python builtins. Sibling-parity with Rust + Go: elements read
-    // through the same integer lane as Rust's as_int (ints widen,
-    // floats truncate, i64/u64 pass through), so wide literals survive
-    // aggregation — a raw `.int` read on an i64 element is undefined and
-    // silently drops the value (the choice-receipt-band divergence).
-    // min/max are variadic the way CPython is: one list argument folds over
-    // its elements, two or more arguments fold over the arguments themselves.
-    // The multi-argument shape used to fall through to `args[0]` unexamined,
-    // so `(min 7 3)` answered 7 with no diagnostic — and Go and Rust answered
-    // 7 too, an agreed wrong answer the sibling comparison cannot see.
-    this.registerNative("min", catMethod(), (_k, args) =>
-      intOrWide(foldExtremum(args, "min", false)),
-    );
-    this.registerNative("max", catMethod(), (_k, args) =>
-      intOrWide(foldExtremum(args, "max", true)),
-    );
-    this.registerNative("sum", catMethod(), (_k, args) => {
-      const v = args[0];
-      if (v?.kind === "list") {
-        // Float promotion mirrors Rust: any float element makes the total
-        // a float (Python's sum([1, 2.5]) behaviour).
-        const anyFloat = v.list.some((e) => e.kind === "f32" || e.kind === "f64");
-        if (anyFloat) {
-          let total = 0;
-          for (const e of v.list) total += expectFloat(e, "sum");
-          return { kind: "f64", float: total };
-        }
-        let total = 0n;
-        for (const e of v.list) total += listElemInt(e, "sum");
-        return intOrWide(total);
-      }
-      return { kind: "int", int: 0 };
-    });
-    this.registerNative("abs", catMethod(), (_k, args) => {
-      // abs preserves type — float in, float out; int in, int out — sibling-parity
-      // with Go (VFloat -> math.Abs) and Rust (Value::Float(f) -> f.abs()). IEEE
-      // float abs is core, not a special case routed around.
-      const v = args[0];
-      if (v?.kind === "f64" || v?.kind === "f32") {
-        return { kind: "f64", float: Math.abs(v.float) };
-      }
-      if (v?.kind === "i64" || v?.kind === "u64") {
-        return intOrWide(BigInt.asIntN(64, v.bigint < 0n ? -v.bigint : v.bigint));
-      }
-      const n = argInt(args, 0);
-      return { kind: "int", int: n < 0 ? -n : n };
-    });
     // Polymorphic `+` for Python: int+int=add, str+str=concat,
     // str+int / int+str = concat-via-stringify, list+list=concat.
-    this.registerNative("_plus", catMethod(), (_k, args) => {
+    this.registerNative("_plus", (_k, args) => {
       const a = args[0];
       const b = args[1];
       if (a?.kind === "int" && b?.kind === "int") return { kind: "int", int: a.int + b.int };
@@ -2259,56 +1219,23 @@ export class Kernel {
       if (a?.kind === "list" && b?.kind === "list") return { kind: "list", list: [...a.list, ...b.list] };
       throw new Error(`_plus: unsupported operand types`);
     });
-    // range(n) / range(a,b) / range(a,b,s) — eager list of integers.
-    // Matches CPython semantics. Sibling-parity with Rust + Go kernels.
-    this.registerNative("range", catListNat(), (_k, args) => {
-      let start = 0, stop = 0, step = 1;
-      if (args.length === 1) {
-        stop = argInt(args, 0);
-      } else if (args.length === 2) {
-        start = argInt(args, 0);
-        stop = argInt(args, 1);
-      } else {
-        start = argInt(args, 0);
-        stop = argInt(args, 1);
-        step = argInt(args, 2);
-      }
-      const out: Value[] = [];
-      if (step === 0) return { kind: "list", list: out };
-      if (step > 0) {
-        for (let i = start; i < stop; i += step) out.push({ kind: "int", int: i });
-      } else {
-        for (let i = start; i > stop; i += step) out.push({ kind: "int", int: i });
-      }
-      return { kind: "list", list: out };
-    });
-    // ── Python `math` module — a tight kernel-native shape ─────────
-    // The Python adapter rewrites `math.sqrt(x)` → `(math_sqrt x)`,
-    // `math.pi` → `(math_pi)`, etc. at parse time, so imports compile to
-    // nothing at runtime. Sibling-parity with the Rust kernel; the
-    // entries are deliberately tight (sqrt, pi, floor, ceil, pow) —
-    // demonstrably useful for substrate code without enlarging the
-    // bootstrap surface.
-    this.registerNative("math_sqrt", catMethod(), (_k, args) => {
+    // math_sqrt is IEEE fsqrt, correctly rounded (law 4); the rest are the host's libm.
+    this.registerNative("math_sqrt", (_k, args) => {
       return { kind: "f64", float: Math.sqrt(argFloat(args, 0)) };
     });
-    this.registerNative("math_pi", catMethod(), () => ({
-      kind: "f64",
-      float: Math.PI,
-    }));
     // math.pow — always returns float, matching CPython's behaviour.
     // (CPython's `math.pow(2, 3)` returns `8.0`, not `8`. The built-in
     // `pow()` would return int for int arguments; we don't expose that.)
-    this.registerNative("math_pow", catMethod(), (_k, args) => {
+    this.registerNative("math_pow", (_k, args) => {
       return {
         kind: "f64",
         float: Math.pow(argFloat(args, 0), argFloat(args, 1)),
       };
     });
-    this.registerNative("math_log", catMethod(), (_k, args) => {
+    this.registerNative("math_log", (_k, args) => {
       return { kind: "f64", float: Math.log(argFloat(args, 0)) };
     });
-    this.registerNative("math_exp", catMethod(), (_k, args) => {
+    this.registerNative("math_exp", (_k, args) => {
       return { kind: "f64", float: Math.exp(argFloat(args, 0)) };
     });
     // round_ndigits(x, n) — CPython `round(x, n)` for floats, EXACTLY.
@@ -2316,24 +1243,12 @@ export class Kernel {
     // the exact decimal value of the double half-to-even at n fractional
     // places (n >= 0), matching CPython bit-for-bit. Sibling-parity with the
     // Rust + Go kernels. See roundNdigitsDecimal above.
-    this.registerNative("round_ndigits", catMethod(), (_k, args) => {
+    this.registerNative("round_ndigits", (_k, args) => {
       return {
         kind: "f64",
         float: roundNdigitsDecimal(argFloat(args, 0), argInt(args, 1)),
       };
     });
-    // ── Python `typing` module — opaque sentinels ───────────────────
-    // Every typing import (List, Optional, Dict, Tuple, Any, Callable,
-    // Union, Iterable, Iterator, Mapping, Sequence, Set, FrozenSet) binds
-    // to this single native. Type annotations are parse-and-ignored at
-    // compile time, so this never fires in real code; its existence makes
-    // the `from typing import …` binding round-trip honest. Any accidental
-    // runtime reference returns the same opaque string in all three
-    // runtimes (CPython, TS eval, Rust kernel).
-    this.registerNative("typing_opaque", catMethod(), () => ({
-      kind: "str",
-      str: "<typing>",
-    }));
     // File I/O
     const readFileTextNative = (_k: Kernel, args: Value[]): Value => {
       try {
@@ -2344,10 +1259,10 @@ export class Kernel {
         return { kind: "null" };
       }
     };
-    this.registerNative("host_file_read_text", catCall(), readFileTextNative);
-    this.registerNative("read_file", catCall(), readFileTextNative);
+    this.registerNative("host_file_read_text", readFileTextNative);
+    this.registerNative("read_file", readFileTextNative);
     // Byte-level host file read — returns a list of ints (0-255), one per byte.
-    this.registerNative("read_file_bytes", catCall(), (_k, args) => {
+    this.registerNative("read_file_bytes", (_k, args) => {
       try {
         const read = this.host.readBinaryFile;
         if (read === undefined) return { kind: "null" };
@@ -2365,7 +1280,7 @@ export class Kernel {
     // inventory primitive. Returns rows of [relative-path, line-count].
     // Form owns classification and aggregation; the kernel only exposes
     // filesystem walking and text line counts as primitive observation.
-    this.registerNative("source_inventory", catCall(), (_k, args) => {
+    this.registerNative("source_inventory", (_k, args) => {
       try {
         const inventory = this.host.sourceInventory;
         if (inventory === undefined) return { kind: "null" };
@@ -2385,7 +1300,7 @@ export class Kernel {
     // invocation. lc-divergence-is-the-doorway: this native intentionally
     // violates sibling parity when invoked — the divergence is the
     // substrate's signal of live field-touch.
-    this.registerNative("random_bytes", catCall(), (_k, args) => {
+    this.registerNative("random_bytes", (_k, args) => {
       const n = argInt(args, 0);
       if (n <= 0) return { kind: "list", list: [] };
       try {
@@ -2408,80 +1323,42 @@ export class Kernel {
     // word, as Go's and Rust's operators do (bitwiseInt); the _u32 doors
     // narrow to a 32-bit word so SHA-256-style recipes compose round
     // functions over machine words.
-    this.registerNative("band", catMethod(), (_k, args) =>
+    this.registerNative("band", (_k, args) =>
       bitwiseInt(args, (a, b) => a & b, (a, b) => a & b),
     );
-    this.registerNative("bor", catMethod(), (_k, args) =>
+    this.registerNative("bor", (_k, args) =>
       bitwiseInt(args, (a, b) => a | b, (a, b) => a | b),
     );
-    this.registerNative("bxor", catMethod(), (_k, args) =>
+    this.registerNative("bxor", (_k, args) =>
       bitwiseInt(args, (a, b) => a ^ b, (a, b) => a ^ b),
     );
-    this.registerNative("bnot_u32", catMethod(), (_k, args) => ({
+    this.registerNative("bnot_u32", (_k, args) => ({
       kind: "int",
       int: ~argInt(args, 0) >>> 0,
     }));
-    this.registerNative("shl_u32", catMethod(), (_k, args) => ({
+    this.registerNative("shl_u32", (_k, args) => ({
       kind: "int",
       int: (argInt(args, 0) << (argInt(args, 1) & 31)) >>> 0,
     }));
-    this.registerNative("shr_u32", catMethod(), (_k, args) => ({
+    this.registerNative("shr_u32", (_k, args) => ({
       kind: "int",
       int: argInt(args, 0) >>> (argInt(args, 1) & 31),
     }));
-    this.registerNative("rotr_u32", catMethod(), (_k, args) => {
+    this.registerNative("rotr_u32", (_k, args) => {
       const a = argInt(args, 0) >>> 0;
       const n = argInt(args, 1) & 31;
       return { kind: "int", int: ((a >>> n) | (a << (32 - n))) >>> 0 };
     });
     // add_u32: modular 32-bit addition — SHA-256's round constants
     // and message schedule both require this discipline.
-    this.registerNative("add_u32", catMethod(), (_k, args) => ({
+    this.registerNative("add_u32", (_k, args) => ({
       kind: "int",
       int: (argInt(args, 0) + argInt(args, 1)) >>> 0,
     }));
-    // SHA-256 lives in form-stdlib/sha256.fk. This proof interpreter walks
-    // composite operations; Form running on fkwu owns native compilation.
-    // register_jit form-name-str native-name-str → 1 on bind, 0 if
-    // native-name has no registered native (refuse silent miss).
-    // Inserts (form-name → native-name) into k.jitAliases. After this,
-    // every (form-name ...) call goes through the aliased native instead
-    // of walking the Form definition. Form recipes are canonical truth;
-    // register_jit binds an existing primitive alias; it performs no
-    // compilation. Removing the entry restores the Form walk.
-    this.registerNative("register_jit", catWitness(), (k, args) => {
-      const formName = argStr(args, 0);
-      const nativeName = argStr(args, 1);
-      const nativeID = k.internName(nativeName);
-      if (!k.natives.has(nativeID) && !k.envNatives.has(nativeID)) {
-        return { kind: "int", int: 0 };
-      }
-      const formID = k.internName(formName);
-      k.jitAliases.set(formID, nativeID);
-      return { kind: "int", int: 1 };
-    });
-    // unregister_jit form-name-str → 1 if removed, 0 if no alias was
-    // bound. Restores the Form-recipe walk path for that name.
-    this.registerNative("unregister_jit", catWitness(), (k, args) => {
-      const formName = argStr(args, 0);
-      const formID = k.internName(formName);
-      if (k.jitAliases.has(formID)) {
-        k.jitAliases.delete(formID);
-        return { kind: "int", int: 1 };
-      }
-      return { kind: "int", int: 0 };
-    });
-    // jit_aliased? form-name-str → 1 if a JIT alias is currently bound
-    // for this name, else 0. Lets Form code introspect dispatch routing.
-    this.registerNative("jit_aliased?", catCompareEq(), (k, args) => {
-      const formName = argStr(args, 0);
-      const formID = k.internName(formName);
-      return { kind: "int", int: k.jitAliases.has(formID) ? 1 : 0 };
-    });
     // recipe_to_bytes nid → list-of-bytes (or null on error).
     //   Serializes a Recipe subtree to the .fkb wire format as a byte
     //   list — usable over any byte channel without a file detour.
-    this.registerNative("recipe_to_bytes", catWitness(), (k, args) => {
+    this.registerNative("recipe_to_bytes", (k, args) => {
       const nid = argNodeID(args, 0);
       const bytes = serializeRecipeArtifact(k, nid);
       const out: Value[] = new Array(bytes.length);
@@ -2491,7 +1368,7 @@ export class Kernel {
       return { kind: "list", list: out };
     });
     // bytes_to_recipe bytes-list → nid (or null on parse error).
-    this.registerNative("bytes_to_recipe", catWitness(), (k, args) => {
+    this.registerNative("bytes_to_recipe", (k, args) => {
       const a0 = args[0];
       if (!a0 || a0.kind !== "list") return { kind: "null" };
       const bytes = new Uint8Array(a0.list.length);
@@ -2506,38 +1383,7 @@ export class Kernel {
         return { kind: "null" };
       }
     });
-    // seeded_bytes(seed, count) — deterministic LCG byte stream.
-    // Same (seed, count) → byte-identical output across Go / Rust / TS.
-    // glibc rand(): state = (state * 1103515245 + 12345) & 0x7FFFFFFF
-    // BigInt used because intermediate product exceeds Number safe range.
-    this.registerNative("seeded_bytes", catCall(), (_k, args) => {
-      const count = argInt(args, 1);
-      if (count <= 0) return { kind: "list", list: [] };
-      let state = BigInt(argInt(args, 0)) & 0x7FFFFFFFn;
-      const A = 1103515245n;
-      const C = 12345n;
-      const M = 0x7FFFFFFFn;
-      const F = 0xFFn;
-      const out: Value[] = new Array(count);
-      for (let i = 0; i < count; i++) {
-        state = (state * A + C) & M;
-        out[i] = { kind: "int", int: Number(state & F) };
-      }
-      return { kind: "list", list: out };
-    });
-    // sum_bytes_list(list) — fast O(n) compiled sum, used by the
-    // private-channel protocol to verify large payloads agree without
-    // walking the list through interpreted Form recursion.
-    this.registerNative("sum_bytes_list", catCall(), (_k, args) => {
-      const a = args[0]!;
-      if (a.kind !== "list") return { kind: "int", int: 0 };
-      let s = 0;
-      for (const v of a.list) {
-        if (v.kind === "int") s += v.int;
-      }
-      return { kind: "int", int: s };
-    });
-    this.registerNative("read_form_binary", catCall(), (k, args) => {
+    this.registerNative("read_form_binary", (k, args) => {
       try {
         const read = this.host.readBinaryFile;
         if (read === undefined) return { kind: "null" };
@@ -2549,7 +1395,7 @@ export class Kernel {
         return { kind: "null" };
       }
     });
-    this.registerNative("write_form_binary", catCall(), (k, args) => {
+    this.registerNative("write_form_binary", (k, args) => {
       try {
         const write = this.host.writeBinaryFile;
         if (write === undefined) return { kind: "int", int: -1 };
@@ -2568,8 +1414,8 @@ export class Kernel {
         return { kind: "int", int: -1 };
       }
     };
-    this.registerNative("host_file_size", catCall(), fileSizeNative);
-    this.registerNative("file_size", catCall(), fileSizeNative);
+    this.registerNative("host_file_size", fileSizeNative);
+    this.registerNative("file_size", fileSizeNative);
     // file_mtime — modification time in unix seconds; -1 if missing.
     // Sibling parity with Go + Rust file_mtime; powers Form-side cache
     // layers that regenerate .fkb projections when source files drift.
@@ -2581,37 +1427,25 @@ export class Kernel {
         return { kind: "int", int: -1 };
       }
     };
-    this.registerNative("host_file_mtime", catCall(), fileMtimeNative);
-    this.registerNative("file_mtime", catCall(), fileMtimeNative);
-    this.registerNative("file_byte_at", catCall(), (_k, args) => {
-      const offset = argInt(args, 1);
-      if (offset < 0) return { kind: "int", int: -1 };
-      try {
-        const read = this.host.readBinarySlice;
-        if (read === undefined) return { kind: "int", int: -1 };
-        const bytes = read(this.hostReadPath(argStr(args, 0)), offset, 1);
-        return { kind: "int", int: bytes.length === 1 ? bytes[0]! : -1 };
-      } catch {
-        return { kind: "int", int: -1 };
-      }
-    });
+    this.registerNative("host_file_mtime", fileMtimeNative);
+    this.registerNative("file_mtime", fileMtimeNative);
+    // A slice that could not be read answers nothing; "" is a read of zero bytes.
     const readFileSliceNative = (_k: Kernel, args: Value[]): Value => {
       const offset = argInt(args, 1);
       const length = argInt(args, 2);
-      if (offset < 0 || length <= 0) return { kind: "str", str: "" };
-      let bytes: Uint8Array;
+      if (length <= 0) return { kind: "str", str: "" };
+      if (offset < 0) return { kind: "null" };
+      const read = this.host.readBinarySlice;
+      if (read === undefined) return { kind: "null" };
       try {
-        const read = this.host.readBinarySlice;
-        if (read === undefined) return { kind: "str", str: "" };
-        bytes = read(this.hostReadPath(argStr(args, 0)), offset, length);
+        // the slice's own bytes: a string is bytes (byte-host.ts), binary included
+        return { kind: "str", str: bytesToBstr(read(this.hostReadPath(argStr(args, 0)), offset, length)) };
       } catch {
-        return { kind: "str", str: "" };
+        return { kind: "null" };
       }
-      // the slice's own bytes: a string is bytes (byte-host.ts), binary included
-      return { kind: "str", str: bytesToBstr(bytes) };
     };
-    this.registerNative("host_file_read_slice", catCall(), readFileSliceNative);
-    this.registerNative("read_file_slice", catCall(), readFileSliceNative);
+    this.registerNative("host_file_read_slice", readFileSliceNative);
+    this.registerNative("read_file_slice", readFileSliceNative);
 
     // --- Filesystem CRUD natives — real directories + files ----------
     // Sibling parity across Go/Rust/TS. Predicates return 1/0; mutations
@@ -2627,8 +1461,8 @@ export class Kernel {
         return { kind: "int", int: 0 };
       }
     };
-    this.registerNative("host_path_exists", catCall(), fsExistsNative);
-    this.registerNative("fs_exists", catCall(), fsExistsNative);
+    this.registerNative("host_path_exists", fsExistsNative);
+    this.registerNative("fs_exists", fsExistsNative);
     const fsIsDirNative = (_k: Kernel, args: Value[]): Value => {
       try {
         return {
@@ -2639,8 +1473,8 @@ export class Kernel {
         return { kind: "int", int: 0 };
       }
     };
-    this.registerNative("host_path_is_dir", catCall(), fsIsDirNative);
-    this.registerNative("fs_is_dir", catCall(), fsIsDirNative);
+    this.registerNative("host_path_is_dir", fsIsDirNative);
+    this.registerNative("fs_is_dir", fsIsDirNative);
     // One atomic mkdir, as fkwu's tag 56: 1 when this call created the directory, 0 when it
     // already stood or could not be made — the answer a lock directory reads.
     const fsMkdirNative = (_k: Kernel, args: Value[]): Value => {
@@ -2653,8 +1487,8 @@ export class Kernel {
         return { kind: "int", int: 0 };
       }
     };
-    this.registerNative("host_dir_mkdir", catCall(), fsMkdirNative);
-    this.registerNative("fs_mkdir", catCall(), fsMkdirNative);
+    this.registerNative("host_dir_mkdir", fsMkdirNative);
+    this.registerNative("fs_mkdir", fsMkdirNative);
     const fsRmdirNative = (_k: Kernel, args: Value[]): Value => {
       try {
         const path = argStr(args, 0);
@@ -2668,8 +1502,8 @@ export class Kernel {
         return { kind: "int", int: -1 };
       }
     };
-    this.registerNative("host_dir_rmdir", catCall(), fsRmdirNative);
-    this.registerNative("fs_rmdir", catCall(), fsRmdirNative);
+    this.registerNative("host_dir_rmdir", fsRmdirNative);
+    this.registerNative("fs_rmdir", fsRmdirNative);
     const fsRemoveNative = (_k: Kernel, args: Value[]): Value => {
       try {
         const path = argStr(args, 0);
@@ -2683,8 +1517,8 @@ export class Kernel {
         return { kind: "int", int: -1 };
       }
     };
-    this.registerNative("host_path_remove", catCall(), fsRemoveNative);
-    this.registerNative("fs_remove", catCall(), fsRemoveNative);
+    this.registerNative("host_path_remove", fsRemoveNative);
+    this.registerNative("fs_remove", fsRemoveNative);
     const fsRenameNative = (_k: Kernel, args: Value[]): Value => {
       try {
         const rename = this.host.renamePath;
@@ -2695,8 +1529,8 @@ export class Kernel {
         return { kind: "int", int: -1 };
       }
     };
-    this.registerNative("host_path_rename", catCall(), fsRenameNative);
-    this.registerNative("fs_rename", catCall(), fsRenameNative);
+    this.registerNative("host_path_rename", fsRenameNative);
+    this.registerNative("fs_rename", fsRenameNative);
     const fsListNative = (_k: Kernel, args: Value[]): Value => {
       try {
         // sort by name for cross-kernel parity (Go's os.ReadDir is
@@ -2709,13 +1543,13 @@ export class Kernel {
         return { kind: "null" };
       }
     };
-    this.registerNative("host_dir_list", catCall(), fsListNative);
-    this.registerNative("fs_list", catCall(), fsListNative);
+    this.registerNative("host_dir_list", fsListNative);
+    this.registerNative("fs_list", fsListNative);
 
     // write_file_bytes — sibling of read_file_bytes; writes a byte list.
     // Sibling-parity with form-kernel-go + form-kernel-rust. Values out of
     // 0..255 truncate per Go's `byte(v.Int)` and Rust's `as u8`.
-    this.registerNative("write_file_bytes", catCall(), (_k, args) => {
+    this.registerNative("write_file_bytes", (_k, args) => {
       try {
         const path = argStr(args, 0);
         const list = argList(args, 1);
@@ -2750,8 +1584,8 @@ export class Kernel {
         return { kind: "int", int: -1 };
       }
     };
-    this.registerNative("host_file_append_bytes", catCall(), fileAppendBytesNative);
-    this.registerNative("file_append_bytes", catCall(), fileAppendBytesNative);
+    this.registerNative("host_file_append_bytes", fileAppendBytesNative);
+    this.registerNative("file_append_bytes", fileAppendBytesNative);
     // Host text output. Byte codecs still use write_file_bytes in kernels
     // that expose it; text compilers do not need to materialize byte lists.
     const writeFileTextNative = (_k: Kernel, args: Value[]): Value => {
@@ -2765,34 +1599,34 @@ export class Kernel {
         return { kind: "int", int: -1 };
       }
     };
-    this.registerNative("host_file_write_text", catCall(), writeFileTextNative);
-    this.registerNative("write_file", catCall(), writeFileTextNative);
-    this.registerNative("write_file_text", catCall(), writeFileTextNative);
+    this.registerNative("host_file_write_text", writeFileTextNative);
+    this.registerNative("write_file", writeFileTextNative);
+    this.registerNative("write_file_text", writeFileTextNative);
 
     // --- Socket natives — L1 physical layer for inter-cell IO ---------
     // Sibling parity with form-kernel-go + form-kernel-rust: REAL TCP. The
     // synchronous worker-thread shim (see socketCall above) gives the TS
     // kernel blocking listen/accept/connect/send/recv/close identical in
     // surface and behavior to the Go (net.Listen/Dial) and Rust (std::net)
-    // kernels. Handle = int (≥0 success, -1 error); socket_recv returns the
-    // received string ("" on close/error). The worker spawns lazily on first
-    // socket use, so non-socket programs pay nothing.
-    this.registerNative("socket_listen", catCall(), (_k, args) => ({
+    // kernels. Handle = int (≥0 success, -1 error); socket_recv answers the
+    // received string, or nothing on close or error. The worker spawns lazily
+    // on first socket use, so non-socket programs pay nothing.
+    this.registerNative("socket_listen", (_k, args) => ({
       kind: "int",
       int: socketNumber(this.host, { op: "listen", port: argInt(args, 0) }),
     }));
     // (socket_port listener-handle) → bound TCP port | -1 — sibling of the
     // Go/Rust native; reports an ephemeral (port 0) listener's OS-assigned
     // port for single-process loopback.
-    this.registerNative("socket_port", catCall(), (_k, args) => ({
+    this.registerNative("socket_port", (_k, args) => ({
       kind: "int",
       int: socketNumber(this.host, { op: "port", h: argInt(args, 0) }),
     }));
-    this.registerNative("socket_accept", catCall(), (_k, args) => ({
+    this.registerNative("socket_accept", (_k, args) => ({
       kind: "int",
       int: socketNumber(this.host, { op: "accept", h: argInt(args, 0) }),
     }));
-    this.registerNative("socket_connect", catCall(), (_k, args) => ({
+    this.registerNative("socket_connect", (_k, args) => ({
       kind: "int",
       int: socketNumber(this.host, {
         op: "connect",
@@ -2800,7 +1634,7 @@ export class Kernel {
         port: argInt(args, 1),
       }),
     }));
-    this.registerNative("socket_send", catCall(), (_k, args) => ({
+    this.registerNative("socket_send", (_k, args) => ({
       kind: "int",
       int: socketNumber(this.host, {
         op: "send",
@@ -2808,7 +1642,7 @@ export class Kernel {
         text: argStr(args, 1),
       }),
     }));
-    this.registerNative("socket_recv", catCall(), (_k, args) => {
+    this.registerNative("socket_recv", (_k, args) => {
       const max = argInt(args, 1);
       if (max <= 0) return { kind: "str", str: "" };
       const received = callSocket(this.host, {
@@ -2816,9 +1650,9 @@ export class Kernel {
         h: argInt(args, 0),
         max,
       });
-      return { kind: "str", str: typeof received === "string" ? received : "" };
+      return typeof received === "string" ? { kind: "str", str: received } : { kind: "null" };
     });
-    this.registerNative("socket_close", catCall(), (_k, args) => {
+    this.registerNative("socket_close", (_k, args) => {
       const h = argInt(args, 0);
       if (h < 0) return { kind: "int", int: -1 };
       return { kind: "int", int: socketNumber(this.host, { op: "close", h }) };
@@ -2838,19 +1672,7 @@ export class Kernel {
       return call(operation);
     };
     // a parameter travels as text, as the Go native hands pgx its value
-    const pgParam = (v: Value): string | null => {
-      switch (v.kind) {
-        case "null":
-          return null;
-        case "str":
-          return v.str;
-        case "f32":
-        case "f64":
-          return formatFloat(v.float);
-        default:
-          return this.renderForPrint(v);
-      }
-    };
+    const pgParam = (v: Value): string | null => (v.kind === "null" ? null : this.renderValue(v, "null"));
     // one SQL run on a handle; params, when a list, travel by Parse/Bind/Execute
     const pgRun = (op: string, handle: Value | undefined, sql: string, params: Value | undefined): KernelPgAnswer => {
       const answer = pgCall({
@@ -2861,8 +1683,8 @@ export class Kernel {
       });
       return answer.error === "unknown connection handle" ? { error: `${op}: unknown connection handle` } : answer;
     };
-    this.registerNative("pg_last_error", catCall(), () => ({ kind: "str", str: this.pgLastError }));
-    this.registerNative("pg_connect", catCall(), (_k, args) => {
+    this.registerNative("pg_last_error", () => ({ kind: "str", str: this.pgLastError }));
+    this.registerNative("pg_connect", (_k, args) => {
       const url = argStr(args, 0).trim();
       if (!url.startsWith("postgres://") && !url.startsWith("postgresql://")) {
         return pgAnswer("pg_connect: database.url is not a PostgreSQL URL", { kind: "int", int: -1 });
@@ -2871,29 +1693,20 @@ export class Kernel {
       if (answer.error !== undefined) return pgAnswer(answer.error, { kind: "int", int: -1 });
       return pgAnswer("", { kind: "int", int: answer.handle ?? -1 });
     });
-    this.registerNative("pg_ping", catCall(), (_k, args) => {
+    this.registerNative("pg_ping", (_k, args) => {
       const answer = pgRun("pg_ping", args[0], "SELECT 1", undefined);
       return pgAnswer(answer.error ?? "", boolInt(answer.error === undefined));
     });
-    this.registerNative("pg_close", catCall(), (_k, args) => {
+    this.registerNative("pg_close", (_k, args) => {
       const answer = pgCall({ op: "close", h: argInt(args, 0) });
       return { kind: "int", int: answer.error === undefined ? 0 : -1 };
     });
-    this.registerNative("pg_exec", catCall(), (_k, args) => {
+    this.registerNative("pg_exec", (_k, args) => {
       const answer = pgRun("pg_exec", args[0], argStr(args, 1), args[2]);
       if (answer.error !== undefined) return pgAnswer(answer.error, { kind: "int", int: -1 });
       return pgAnswer("", intOrWide(pgTagCount(answer.tag ?? "")));
     });
-    this.registerNative("pg_query", catCall(), (_k, args) => {
-      const answer = pgRun("pg_query", args[0], argStr(args, 1), args[2]);
-      if (answer.error !== undefined) return pgAnswer(answer.error, { kind: "str", str: "ERR" });
-      const fields = answer.fields ?? [];
-      const text = (answer.rows ?? [])
-        .map((row) => row.map((cell, i) => pgCellText(pgCell(fields[i]?.oid ?? 25, cell))).join("\t"))
-        .join("\n");
-      return pgAnswer("", { kind: "str", str: text });
-    });
-    this.registerNative("pg_query_rows", catCall(), (_k, args) => {
+    this.registerNative("pg_query_rows", (_k, args) => {
       const answer = pgRun("pg_query_rows", args[0], argStr(args, 1), args[2]);
       if (answer.error !== undefined) return pgAnswer(answer.error, { kind: "list", list: [] });
       const fields = answer.fields ?? [];
@@ -2909,7 +1722,7 @@ export class Kernel {
       }));
       return pgAnswer("", { kind: "list", list: rows });
     });
-    this.registerNative("config_database_url", catCall(), () => {
+    this.registerNative("config_database_url", () => {
       try {
         const url = kernelConfigDatabaseUrl(kernelConfigLoad(this.host));
         if (url.length > 0) return pgAnswer("", { kind: "str", str: url });
@@ -2918,7 +1731,7 @@ export class Kernel {
         return pgAnswer(error instanceof Error ? error.message : String(error), { kind: "str", str: "" });
       }
     });
-    this.registerNative("config_value_or", catCall(), (_k, args) => {
+    this.registerNative("config_value_or", (_k, args) => {
       const fallback = args[1] ?? { kind: "null" };
       try {
         return kernelConfigValue(kernelConfigLookup(kernelConfigLoad(this.host), argStr(args, 0)), fallback);
@@ -2928,7 +1741,7 @@ export class Kernel {
     });
 
     // Substrate write surface — all attributed as WITNESS.
-    this.registerNative("make_nodeid", catWitness(), (_k, args) => ({
+    this.registerNative("make_nodeid", (_k, args) => ({
       kind: "nodeid",
       nodeid: {
         pkg: argInt(args, 0),
@@ -2939,7 +1752,7 @@ export class Kernel {
     }));
     // bp — Blueprint name → NodeID, looked up in the generated BP_TABLE.
     // Unknown name resolves to the undefined node (1,2,0,0).
-    this.registerNative("bp", catWitness(), (_k, args) => {
+    this.registerNative("bp", (_k, args) => {
       const name = argStr(args, 0);
       const entry = BP_TABLE[name];
       if (entry === undefined) {
@@ -2957,15 +1770,15 @@ export class Kernel {
       const [pkg, level, type, inst] = entry;
       return { kind: "nodeid", nodeid: { pkg, level, type, inst } };
     });
-    this.registerNative("intern_trivial_int", catWitness(), (k, args) => ({
+    this.registerNative("intern_trivial_int", (k, args) => ({
       kind: "nodeid",
       nodeid: k.internTrivialInt(argInt(args, 0)),
     }));
-    this.registerNative("intern_trivial_string", catWitness(), (k, args) => ({
+    this.registerNative("intern_trivial_string", (k, args) => ({
       kind: "nodeid",
       nodeid: k.internString(argStr(args, 0)),
     }));
-    this.registerNative("intern_trivial_bool", catWitness(), (k, args) => ({
+    this.registerNative("intern_trivial_bool", (k, args) => ({
       kind: "nodeid",
       nodeid: k.internTrivialBool(truthy(args[0]!)),
     }));
@@ -2975,17 +1788,17 @@ export class Kernel {
     // total like str_to_int. Sibling of intern_trivial_int / intern_trivial_string;
     // exposes the existing internTrivialFloat64 to Form code so the python-bmf
     // float-literal lift can build a PY-BMF-FLOAT leaf.
-    this.registerNative("intern_trivial_float", catWitness(), (k, args) => ({
+    this.registerNative("intern_trivial_float", (k, args) => ({
       kind: "nodeid",
       nodeid: k.internTrivialFloat64(Number(argStr(args, 0)) || 0),
     }));
-    this.registerNative("float_value", catMethod(), (k, args) => {
+    this.registerNative("float_value", (k, args) => {
       const n = argNodeID(args, 0);
-      if (n.type === Triv.FLOAT32) return { kind: "f32", float: k.decodeFloat32(n.inst) };
+      if (n.type === Triv.FLOAT32) return { kind: "f64", float: k.decodeFloat32(n.inst) };
       if (n.type === Triv.FLOAT64) return { kind: "f64", float: k.decodeFloat64(n.inst) };
       throw new Error("float_value expects a float NodeID");
     });
-    this.registerNative("intern_node", catWitness(), (k, args) => {
+    this.registerNative("intern_node", (k, args) => {
       const cat = argNodeID(args, 0);
       const kids = argList(args, 1).map((v) => {
         if (v.kind !== "nodeid")
@@ -2994,95 +1807,11 @@ export class Kernel {
       });
       return { kind: "nodeid", nodeid: k.intern(cat, kids) };
     });
-    const fieldNode = (
-      nativeName: string,
-      categoryType: number,
-      categoryInst: number,
-    ): NativeFn => (k, args) => {
-      const kids = argList(args, 0).map((v) => {
-        if (v.kind !== "nodeid") {
-          throw new Error(`${nativeName}: children must be nodeids`);
-        }
-        return v.nodeid;
-      });
-      return {
-        kind: "nodeid",
-        nodeid: k.intern(
-          { pkg: 1, level: Level.BASIC, type: categoryType, inst: categoryInst },
-          kids,
-        ),
-      };
-    };
-    const fieldConstructors: Array<[string, number, number]> = [
-      ["field_blueprint", RBasic.FIELD, 1],
-      ["field_cell", RBasic.FIELD, 2],
-      ["field_carrier", RBasic.CARRIER, 1],
-      ["field_topology", RBasic.TOPOLOGY, 1],
-      ["field_fiber", RBasic.FIBER, 1],
-      ["field_region", RBasic.REGION, 1],
-      ["field_boundary", RBasic.BOUNDARY, 1],
-      ["field_neighborhood", RBasic.NEIGHBORHOOD, 1],
-      ["field_match", RBasic.MATCH_FIELD, 1],
-      ["field_delta", RBasic.DELTA, 1],
-      ["field_resolve", RBasic.FIELD_RESOLVE, 1],
-      ["field_commit", RBasic.COMMIT, 1],
-      ["field_step", RBasic.STEP, 1],
-      ["field_lift", RBasic.LIFT, 1],
-      ["field_sample", RBasic.SAMPLE, 1],
-      ["field_observe", RBasic.OBSERVE, 1],
-      ["field_intervene", RBasic.INTERVENE, 1],
-      ["field_residual", RBasic.RESIDUAL, 1],
-      ["field_receipt", RBasic.RECEIPT, 1],
-      ["field_cost", RBasic.COST, 1],
-      ["field_consent", RBasic.CONSENT, 1],
-      ["field_evidence", RBasic.EVIDENCE, 1],
-    ];
-    for (const [nativeName, categoryType, categoryInst] of fieldConstructors) {
-      this.registerNative(
-        nativeName,
-        catFieldPrimitive(categoryType),
-        fieldNode(nativeName, categoryType, categoryInst),
-      );
-    }
-    this.registerNative("substrate_mark", catWitness(), (k, _args) => ({
-      kind: "list",
-      list: k.substrateMark(),
-    }));
-    this.registerNative("substrate_counts", catWitness(), (k, _args) => ({
-      kind: "list",
-      list: k.substrateCounts(),
-    }));
-    this.registerNative("substrate_release", catWitness(), (k, args) => ({
-      kind: "int",
-      int: k.substrateRelease(argList(args, 0)),
-    }));
-    this.registerNative("substrate_gc", catWitness(), (k, args) => ({
-      kind: "list",
-      list: k.substrateGC(argList(args, 0)),
-    }));
-    this.registerNative("intern_node_at", catWitness(), (k, args) => {
-      const cat = argNodeID(args, 0);
-      const kids = argList(args, 1).map((v) => {
-        if (v.kind !== "nodeid")
-          throw new Error("intern_node_at: children must be nodeids");
-        return v.nodeid;
-      });
-      const nid = k.intern(cat, kids);
-      const file = k.internName(argStr(args, 2));
-      k.sourceAttr.set(nodeKey(nid), {
-        file,
-        line: argInt(args, 3),
-        col: argInt(args, 4),
-      });
-      k.activeRoots.push(nid);
-      k.framebufferRoots.push(nid);
-      return { kind: "nodeid", nodeid: nid };
-    });
     // fb_record — native provenance primitive (tag 128). Records source
     // attribution for an already-interned node, retains it as a framebuffer
     // root, and returns the same node. The packed coordinate is
     // line<<16|col, matching Go, Rust, and the fkwu fourth arm.
-    this.registerNative("fb_record", catWitness(), (k, args) => {
+    this.registerNative("fb_record", (k, args) => {
       const nid = argNodeID(args, 0);
       const file = k.internName(argStr(args, 1));
       const packed = argInt(args, 2);
@@ -3091,41 +1820,40 @@ export class Kernel {
         line: packed >>> 16,
         col: packed & 0xffff,
       });
-      k.activeRoots.push(nid);
       k.framebufferRoots.push(nid);
       return { kind: "nodeid", nodeid: nid };
     });
-    this.registerNative("node_category", catWitness(), (k, args) => ({
+    this.registerNative("node_category", (k, args) => ({
       kind: "nodeid",
       nodeid: k.category(argNodeID(args, 0)),
     }));
-    this.registerNative("node_children", catWitness(), (k, args) => {
+    this.registerNative("node_children", (k, args) => {
       const kids = k.children(argNodeID(args, 0));
       return {
         kind: "list",
         list: kids.map((c) => ({ kind: "nodeid", nodeid: c } as Value)),
       };
     });
-    this.registerNative("node_value", catWitness(), (k, args) =>
+    this.registerNative("node_value", (k, args) =>
       k.trivialValue(argNodeID(args, 0)),
     );
-    this.registerNative("node_pkg", catWitness(), (_k, args) => ({
+    this.registerNative("node_pkg", (_k, args) => ({
       kind: "int",
       int: argNodeID(args, 0).pkg,
     }));
-    this.registerNative("node_level", catWitness(), (_k, args) => ({
+    this.registerNative("node_level", (_k, args) => ({
       kind: "int",
       int: argNodeID(args, 0).level,
     }));
-    this.registerNative("node_type", catWitness(), (_k, args) => ({
+    this.registerNative("node_type", (_k, args) => ({
       kind: "int",
       int: argNodeID(args, 0).type,
     }));
-    this.registerNative("node_inst", catWitness(), (_k, args) => ({
+    this.registerNative("node_inst", (_k, args) => ({
       kind: "int",
       int: argNodeID(args, 0).inst,
     }));
-    this.registerNative("node_source", catWitness(), (k, args) => {
+    this.registerNative("node_source", (k, args) => {
       const loc = k.sourceAttr.get(nodeKey(argNodeID(args, 0)));
       if (!loc) return { kind: "list", list: [] };
       return {
@@ -3137,13 +1865,13 @@ export class Kernel {
         ],
       };
     });
-    this.registerNative("framebuffer-events", catWitness(), (k, _args) => ({
+    this.registerNative("framebuffer-events", (k, _args) => ({
       kind: "list",
       list: k.framebufferRoots
         .filter((nid) => k.sourceAttr.has(nodeKey(nid)))
         .map((nid) => ({ kind: "nodeid", nodeid: nid }) as Value),
     }));
-    this.registerNative("framebuffer-event-rows", catWitness(), (k, _args) => {
+    this.registerNative("framebuffer-event-rows", (k, _args) => {
       const rows = k.framebufferRoots
         .filter((nid) => k.sourceAttr.has(nodeKey(nid)))
         .map((nid) => {
@@ -3189,7 +1917,7 @@ export class Kernel {
         }) as Value),
       };
     });
-    this.registerNative("framebuffer-counts", catWitness(), (k, _args) => {
+    this.registerNative("framebuffer-counts", (k, _args) => {
       const counts = new Map<string, { file: string; line: number; col: number; count: number }>();
       for (const nid of k.framebufferRoots) {
         const loc = k.sourceAttr.get(nodeKey(nid));
@@ -3220,94 +1948,31 @@ export class Kernel {
         }) as Value),
       };
     });
-    this.registerNative("framebuffer-clear", catWitness(), (k, _args) => {
+    this.registerNative("framebuffer-clear", (k, _args) => {
       k.sourceAttr.clear();
       k.framebufferRoots = [];
       return { kind: "null" };
     });
-    // node_eq — structural compare of two NodeIDs by their four
-    // components. Sibling parity with Go's node_eq + Rust's node_eq,
-    // including the catCompare(eq) attribution both siblings declare.
-    this.registerNative("node_eq", catCompareEq(), (_k, args) => {
-      const a = argNodeID(args, 0);
-      const b = argNodeID(args, 1);
-      const equal =
-        a.pkg === b.pkg &&
-        a.level === b.level &&
-        a.type === b.type &&
-        a.inst === b.inst;
-      return boolInt(equal);
-    });
-    // value_eq — polymorphic equality across Value kinds. Answers 1
-    // when both args have the same kind AND compare equal within that
-    // kind. Cross-kind answers 0. Use when a Form-side function
-    // holds tagged values that may be either strings or NodeIDs —
-    // e.g. domain/lens in bmf-symbol-context.
-    this.registerNative("value_eq", catCompareEq(), (_k, args) => {
-      const a = args[0]!;
-      const b = args[1]!;
-      return boolInt(valueEqual(a, b));
-    });
-    this.registerNative("serialize-recipe", catWitness(), (k, args) => {
-      const out: number[] = [];
-      serializeNode(k, argNodeID(args, 0), out);
-      return {
-        kind: "list",
-        list: out.map((byte) => ({ kind: "int", int: byte } as Value)),
-      };
-    });
-    this.registerNative("deserialize-recipe", catWitness(), (k, args) => {
-      const raw = argList(args, 0);
-      if (raw.length > FORM_BINARY_MAX_BYTES) {
-        throw new Error("form binary: maximum artifact size exceeded");
-      }
-      const bytes = Uint8Array.from(raw.map((v) => {
-        if (v.kind !== "int") throw new Error("deserialize-recipe: bytes must be ints");
-        return v.int & 0xff;
-      }));
-      const [root, end] = deserializeRawNode(
-        k,
-        bytes,
-        0,
-        k.nextImportScope(),
-        { nodes: 0 },
-        0,
-      );
-      if (end !== bytes.length) throw new Error("deserialize-recipe: trailing bytes");
-      return { kind: "nodeid", nodeid: root };
-    });
-
-    // Typed-numeric construction and decoding — attributed as WITNESS
-    // (substrate-write for typed trivials) and METHOD (value conversion).
-    this.registerNative("make_int8", catWitness(), (k, args) => k.boxValue(k.internTrivialInt8(argInt(args, 0))));
-    this.registerNative("make_int16", catWitness(), (k, args) => k.boxValue(k.internTrivialInt16(argInt(args, 0))));
-    this.registerNative("make_int32", catWitness(), (k, args) => k.boxValue(k.internTrivialInt(argInt(args, 0))));
-    this.registerNative("make_int64", catWitness(), (k, args) => k.boxValue(k.internTrivialInt64(argBigInt(args, 0))));
-    this.registerNative("make_uint8", catWitness(), (k, args) => k.boxValue(k.internTrivialUint8(argInt(args, 0))));
-    this.registerNative("make_uint16", catWitness(), (k, args) => k.boxValue(k.internTrivialUint16(argInt(args, 0))));
-    this.registerNative("make_uint32", catWitness(), (k, args) => k.boxValue(k.internTrivialUint32(argInt(args, 0))));
-    this.registerNative("make_uint64", catWitness(), (k, args) => k.boxValue(k.internTrivialUint64(argBigInt(args, 0))));
-    this.registerNative("make_float32", catWitness(), (k, args) => k.boxValue(k.internTrivialFloat32(argFloat(args, 0))));
-    this.registerNative("make_float64", catWitness(), (k, args) => k.boxValue(k.internTrivialFloat64(argFloat(args, 0))));
-
-    // Width-conversion casts — TRANSMUTE: present a value through a different
-    // numeric Blueprint without changing its underlying identity. Same content
-    // viewed through a different width. The canonical example the user named
-    // for typed numerics: a recipe declares "a number"; at the call site the
-    // specific type is recorded; a cast presents the value through a different
-    // Blueprint while preserving identity through content-addressing.
-    this.registerNative("i64", catTransmute(), (_k, args) => ({ kind: "i64", bigint: argBigInt(args, 0) }));
-    this.registerNative("u64", catTransmute(), (_k, args) => ({ kind: "u64", bigint: argBigInt(args, 0) }));
-    this.registerNative("f32", catTransmute(), (_k, args) => ({ kind: "f32", float: Math.fround(argFloat(args, 0)) }));
-    this.registerNative("f64", catTransmute(), (_k, args) => ({ kind: "f64", float: argFloat(args, 0) }));
-    this.registerNative("i32", catTransmute(), (_k, args) => ({ kind: "int", int: argInt(args, 0) | 0 }));
+    // value_eq — content identity within a kind, cross-kind 0 (valueEqual); node_eq is the
+    // same door on fkwu (tag 80), so it answers the same on any two values.
+    const valueEqNative = (_k: Kernel, args: Value[]): Value => boolInt(valueEqual(args[0]!, args[1]!));
+    this.registerNative("value_eq", valueEqNative);
+    this.registerNative("node_eq", valueEqNative);
+    this.registerNative("make_float32", (k, args) => ({
+      kind: "nodeid",
+      nodeid: k.internTrivialFloat32(argFloat(args, 0)),
+    }));
+    this.registerNative("make_float64", (k, args) => ({
+      kind: "nodeid",
+      nodeid: k.internTrivialFloat64(argFloat(args, 0)),
+    }));
 
     // `now_unix_ms` — current wall-clock as a millisecond unix timestamp.
     // External effect (reads the host clock) so it's catCall. Sibling
     // parity holds on shape, NOT on value: every kernel returns an int,
     // every kernel's int is > a recent past epoch — but the exact
     // milliseconds diverge between invocations. Bands check shape only.
-    this.registerNative("now_unix_ms", catCall(), (_k, _args) => ({
+    this.registerNative("now_unix_ms", (_k, _args) => ({
       kind: "int",
       int: Date.now(),
     }));
@@ -3323,21 +1988,21 @@ export class Kernel {
       kind: "str",
       str: (this.host.tempDirectory?.() ?? "/tmp").replace(/\/+$/, "") || "/tmp",
     });
-    this.registerNative("host_temp_dir", catCall(), tempDirNative);
-    this.registerNative("temp_dir", catCall(), tempDirNative);
+    this.registerNative("host_temp_dir", tempDirNative);
+    this.registerNative("temp_dir", tempDirNative);
     // host_pid, host_monotonic_ms, host_cwd — this process's id, a monotonic millisecond clock and
     // its working directory: the doors fkwu carries as tags 160, 182 and 29. Parity holds on shape,
     // not value: each leg is its own process, and only differences between two clock readings mean
     // anything (fkwu counts from boot, the siblings from their own start).
-    this.registerNative("host_pid", catCall(), (_k, _args) => {
+    this.registerNative("host_pid", (_k, _args) => {
       const pid = this.host.processId?.();
       return pid === undefined ? { kind: "null" } : { kind: "int", int: pid };
     });
-    this.registerNative("host_monotonic_ms", catCall(), (_k, _args) => {
+    this.registerNative("host_monotonic_ms", (_k, _args) => {
       const ms = this.host.monotonicMs?.();
       return ms === undefined ? { kind: "null" } : { kind: "int", int: Math.floor(ms) };
     });
-    this.registerNative("host_cwd", catCall(), (_k, _args) => {
+    this.registerNative("host_cwd", (_k, _args) => {
       const dir = this.host.workingDirectory?.();
       return dir === undefined ? { kind: "null" } : { kind: "str", str: dir };
     });
@@ -3347,7 +2012,7 @@ export class Kernel {
     // tag 64 (record_new): the record-construction clock, every record this process has made,
     // which compaction never lowers. This kernel counts the same event where it happens. A key
     // this kernel does not measure answers nothing, never a zero it did not read.
-    this.registerNative("kernel_stat", catWitness(), (_k, args) => {
+    this.registerNative("kernel_stat", (_k, args) => {
       const key = args[0];
       return key?.kind === "int" && key.int === 164
         ? { kind: "int", int: recordConstructions }
@@ -3357,7 +2022,7 @@ export class Kernel {
     // 1 the pid, 2 the start-ms. This kernel holds those three words of its own page; fkwu's
     // further words count fkwu's own tissue and are not claimed here. Any other pid, or a host
     // with no process id, answers the empty list, fkwu's answer where no page can be read.
-    this.registerNative("kernel_live", catWitness(), (_k, args) => {
+    this.registerNative("kernel_live", (_k, args) => {
       const pid = this.host.processId?.();
       const asked = args[0];
       if (pid === undefined || asked?.kind !== "int" || asked.int !== pid) {
@@ -3374,7 +2039,7 @@ export class Kernel {
     });
     // print_str s writes the string's bytes and one newline to stdout and answers 0, as fkwu
     // does. A value that is not a string writes the newline alone.
-    this.registerNative("print_str", catCall(), (_k, args) => {
+    this.registerNative("print_str", (_k, args) => {
       const s = args[0];
       this.host.writeStdout?.((s?.kind === "str" ? s.str : "") + "\n");
       return { kind: "int", int: 0 };
@@ -3382,7 +2047,7 @@ export class Kernel {
 
     // `unix_ms_to_iso_utc` — render a millisecond instant as the
     // second-resolution ISO UTC string the Go carrier emits.
-    this.registerNative("unix_ms_to_iso_utc", catCall(), (_k, args) => ({
+    this.registerNative("unix_ms_to_iso_utc", (_k, args) => ({
       kind: "str",
       str: `${new Date(argInt(args, 0)).toISOString().slice(0, 19)}Z`,
     }));
@@ -3390,29 +2055,23 @@ export class Kernel {
     // ── volatile cells — the RAM organ as a kernel resource ──
     // In-process volatile KV with update timestamps, mirroring the Go
     // carrier (server.go registerHostIONatives): put returns 1, get
-    // returns the stored value or null, delete returns 1/0, scan_since
-    // returns (key value updated_ms) triples for one namespace, and
-    // prune_before returns the count of cells released.
-    this.registerNative("volatile_cell_put", catCall(), (_k, args) => {
+    // returns the stored value or null, scan_since returns (key value
+    // updated_ms) triples for one namespace, and prune_before returns the
+    // count of cells released.
+    this.registerNative("volatile_cell_put", (_k, args) => {
       volatileCells.set(volatileCoord(argStr(args, 0), argStr(args, 1)), {
         updatedMs: Date.now(),
         value: args[2] ?? { kind: "null" },
       });
       return { kind: "int", int: 1 };
     });
-    this.registerNative("volatile_cell_get", catAccess(), (_k, args) => {
+    this.registerNative("volatile_cell_get", (_k, args) => {
       const cell = volatileCells.get(
         volatileCoord(argStr(args, 0), argStr(args, 1)),
       );
       return cell ? cell.value : { kind: "null" };
     });
-    this.registerNative("volatile_cell_delete", catCall(), (_k, args) => {
-      const had = volatileCells.delete(
-        volatileCoord(argStr(args, 0), argStr(args, 1)),
-      );
-      return { kind: "int", int: had ? 1 : 0 };
-    });
-    this.registerNative("volatile_cell_scan_since", catAccess(), (_k, args) => {
+    this.registerNative("volatile_cell_scan_since", (_k, args) => {
       const prefix = `${argStr(args, 0)}\x00`;
       const since = argInt(args, 1);
       const out: Value[] = [];
@@ -3429,7 +2088,7 @@ export class Kernel {
       }
       return { kind: "list", list: out };
     });
-    this.registerNative("volatile_cell_prune_before", catCall(), (_k, args) => {
+    this.registerNative("volatile_cell_prune_before", (_k, args) => {
       const prefix = `${argStr(args, 0)}\x00`;
       const before = argInt(args, 1);
       let pruned = 0;
@@ -3441,54 +2100,6 @@ export class Kernel {
       }
       return { kind: "int", int: pruned };
     });
-
-    // Debug — no Form category claimed; honest about being outside the
-    // structural vocabulary.
-    this.registerNative("trace", catUndefined(), (_k, args) => {
-      if (args.length >= 2) {
-        const label = args[0]?.kind === "str" ? args[0].str : "trace";
-        this.host.writeStderr?.(
-          `[trace ${label}] ${this.renderForPrint(args[1] ?? { kind: "null" })}\n`,
-        );
-        return args[1] ?? { kind: "null" };
-      }
-      const v = args[0] ?? { kind: "null" };
-      this.host.writeStderr?.(`[trace] ${this.renderForPrint(v)}\n`);
-      return v;
-    });
-  }
-
-
-  private renderForPrint(v: Value): string {
-    switch (v.kind) {
-      case "null":
-        return "null";
-      case "int":
-      case "i8":
-      case "i16":
-      case "u8":
-      case "u16":
-      case "u32":
-        return String(v.int);
-      case "i64":
-      case "u64":
-        return String(v.bigint);
-      case "f32":
-      case "f64":
-        return formatFloat(v.float);
-      case "str":
-        return v.str;
-      case "list":
-        return "[" + v.list.map((x) => this.renderForPrint(x)).join(", ") + "]";
-      case "closure":
-        return "<closure>";
-      case "nodeid":
-        return `@${nodeKey(v.nodeid)}`;
-      case "ctor":
-        return `${v.ctor_name}(${v.args.map((a) => this.render(a)).join(", ")})`;
-      case "record":
-        return `<record @${v.record.blueprintRecord !== undefined ? "record" : v.record.blueprint === null ? "0" : nodeKey(v.record.blueprint)} #${v.record.fields.length}fields>`;
-    }
   }
 }
 
@@ -3503,32 +2114,16 @@ function volatileCoord(namespace: string, key: string): string {
 function argInt(args: Value[], i: number): number {
   const v = args[i];
   if (!v) throw new Error(`arg ${i}: missing`);
-  if (
-    v.kind === "int" ||
-    v.kind === "i8" ||
-    v.kind === "i16" ||
-    v.kind === "u8" ||
-    v.kind === "u16" ||
-    v.kind === "u32"
-  )
-    return v.int;
-  if (v.kind === "i64" || v.kind === "u64") return Number(v.bigint);
+  if (v.kind === "int") return v.int;
+  if (v.kind === "i64") return Number(v.bigint);
   throw new Error(`arg ${i}: expected int-like, got ${v.kind}`);
 }
 function argFloat(args: Value[], i: number): number {
   const v = args[i];
   if (!v) throw new Error(`arg ${i}: missing`);
-  if (v.kind === "f32" || v.kind === "f64") return v.float;
-  if (
-    v.kind === "int" ||
-    v.kind === "i8" ||
-    v.kind === "i16" ||
-    v.kind === "u8" ||
-    v.kind === "u16" ||
-    v.kind === "u32"
-  )
-    return v.int;
-  if (v.kind === "i64" || v.kind === "u64") return Number(v.bigint);
+  if (v.kind === "f64") return v.float;
+  if (v.kind === "int") return v.int;
+  if (v.kind === "i64") return Number(v.bigint);
   throw new Error(`arg ${i}: expected number, got ${v.kind}`);
 }
 
@@ -3650,21 +2245,6 @@ function composeScaledDecimal(kept: string, n: number, neg: boolean): string {
   return neg ? "-" + body : body;
 }
 
-function argBigInt(args: Value[], i: number): bigint {
-  const v = args[i];
-  if (!v) throw new Error(`arg ${i}: missing`);
-  if (v.kind === "i64" || v.kind === "u64") return v.bigint;
-  if (
-    v.kind === "int" ||
-    v.kind === "i8" ||
-    v.kind === "i16" ||
-    v.kind === "u8" ||
-    v.kind === "u16" ||
-    v.kind === "u32"
-  )
-    return BigInt(v.int);
-  throw new Error(`arg ${i}: expected integer, got ${v.kind}`);
-}
 function argStr(args: Value[], i: number): string {
   const v = args[i];
   if (v?.kind !== "str") throw new Error(`arg ${i}: expected str, got ${v?.kind ?? "absent"}`);
@@ -3681,38 +2261,15 @@ function argNodeID(args: Value[], i: number): NodeID {
   return v.nodeid;
 }
 
-// listElemInt — the integer lane's element read for aggregating natives
-// (min/max/sum): ints widen, floats truncate, i64/u64 pass
-// through. Sibling to Go/Rust Value.AsInt, carried in bigint so values
-// wider than int32 (#2922 literals) survive aggregation exactly.
-function listElemInt(v: Value, op: string): bigint {
-  if (v.kind === "f32" || v.kind === "f64") return BigInt(Math.trunc(v.float));
-  return expectBigInt(v, op);
-}
+// The integer range (law 1): 63-bit two's complement, [-2^62, 2^62), on every kernel.
+const INT_BITS = 63;
+const INT_LIMIT = 2 ** 62;
 
-// foldExtremum — the shared body of the `min` / `max` natives. One list
-// argument folds over its elements; anything else folds over the arguments
-// themselves, so `(max a b)` compares instead of returning `a`. Every element
-// reads through listElemInt, the same integer lane Go's AsInt and Rust's
-// as_int use. `op` only spells the empty-list error.
-function foldExtremum(args: Value[], op: string, wantMax: boolean): bigint {
-  const v = args[0];
-  let xs: Value[] = args;
-  if (args.length === 1 && v?.kind === "list") {
-    if (v.list.length === 0) throw new Error(`${op}: empty list`);
-    xs = v.list;
-  }
-  let best = listElemInt(xs[0]!, op);
-  for (let i = 1; i < xs.length; i++) {
-    const x = listElemInt(xs[i]!, op);
-    if (wantMax ? x > best : x < best) best = x;
-  }
-  return best;
-}
+// str_to_float's grammar (law 7): C-locale leading whitespace, then the longest decimal prefix.
+const FLOAT_PREFIX = /^[ \t\n\v\f\r]*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)/;
 
-// intOrWide — render an aggregate back as the plain int kind when it fits
-// the exact-double range (the walkers print the same decimal), keeping the
-// i64 kind only when the value genuinely needs it.
+// intOrWide — an integer as the plain int kind when a double holds it exactly, the i64 kind
+// (a bigint) past 2^53.
 function intOrWide(total: bigint): Value {
   const n = Number(total);
   return Number.isSafeInteger(n)
@@ -3720,9 +2277,8 @@ function intOrWide(total: bigint): Value {
     : { kind: "i64", bigint: total };
 }
 
-// bitwiseInt — band/bor/bxor over the int64 word, as Go's and Rust's
-// operators combine it. A safe integer splits into a signed high half and an
-// unsigned low 32-bit half, each inside JS's 32-bit operators; an operand
+// bitwiseInt — band/bor/bxor over the integer word. A safe integer splits into a signed
+// high half and an unsigned low 32-bit half, each inside JS's 32-bit operators; an operand
 // past 2^53 takes BigInt.
 function bitwiseInt(
   args: Value[],
@@ -3731,7 +2287,7 @@ function bitwiseInt(
 ): Value {
   const x = args[0];
   const y = args[1];
-  if (x?.kind !== "i64" && x?.kind !== "u64" && y?.kind !== "i64" && y?.kind !== "u64") {
+  if (x?.kind !== "i64" && y?.kind !== "i64") {
     const a = argInt(args, 0);
     const b = argInt(args, 1);
     if (Number.isSafeInteger(a) && Number.isSafeInteger(b)) {
@@ -3741,27 +2297,7 @@ function bitwiseInt(
       return { kind: "int", int: word(aHi, bHi) * 0x100000000 + lo };
     }
   }
-  return intOrWide(BigInt.asIntN(64, wide(expectBigInt(x!, "bitwise"), expectBigInt(y!, "bitwise"))));
-}
-
-// leadingInt — str_to_int's reading, the one core.fk's str_to_int gives fkwu:
-// leading space, tab, LF and CR skipped, one leading "-" negates, and the
-// digits run to the first non-digit. Text with no digits reads 0. Up to 15
-// digits a number holds the value exactly; a longer run is read in BigInt and
-// wraps at 64 bits like every int64 fold.
-function leadingInt(s: string): Value {
-  let i = 0;
-  while (i < s.length && (s[i] === " " || s[i] === "\t" || s[i] === "\n" || s[i] === "\r")) i++;
-  const neg = s[i] === "-";
-  if (neg) i++;
-  let j = i;
-  while (j < s.length && s[j]! >= "0" && s[j]! <= "9") j++;
-  if (j - i <= 15) {
-    const n = j === i ? 0 : Number(s.slice(i, j));
-    return { kind: "int", int: neg ? 0 - n : n };
-  }
-  const digits = BigInt(s.slice(i, j));
-  return intOrWide(BigInt.asIntN(64, neg ? -digits : digits));
+  return intOrWide(BigInt.asIntN(INT_BITS, wide(expectBigInt(x!, "bitwise"), expectBigInt(y!, "bitwise"))));
 }
 
 // pgDsn — postgres://user[:password]@host[:port][/database][?options], read as the pg floor reads it:
@@ -3831,22 +2367,6 @@ function pgCell(oid: number, text: string | null): Value {
 function pgRfc3339(text: string): string {
   const at = text.indexOf(" ");
   return `${at < 0 ? text : `${text.slice(0, at)}T${text.slice(at + 1)}`}Z`;
-}
-
-// pgCellText — a read cell written as Go's formValueString writes it into pg_query's page
-function pgCellText(v: Value): string {
-  switch (v.kind) {
-    case "f64":
-      return formatFloat(v.float);
-    case "i64":
-      return String(v.bigint);
-    case "int":
-      return String(v.int);
-    case "str":
-      return v.str;
-    default:
-      return "";
-  }
 }
 
 // the row count a command tag carries: its last word when that is a number, 0 otherwise
@@ -3961,15 +2481,8 @@ function valueKindName(v: Value): string {
     case "null":
       return "null";
     case "int":
-    case "i8":
-    case "i16":
-    case "u8":
-    case "u16":
-    case "u32":
     case "i64":
-    case "u64":
       return "int";
-    case "f32":
     case "f64":
       return "float";
     case "str":
@@ -3993,17 +2506,50 @@ function valueKindName(v: Value): string {
 // Values — runtime tagged values
 // ---------------------------------------------------------------------------
 
+// SharedList — a list whose cells stand reversed in buf, the head at buf[n-1]: tail is the
+// same buffer one shorter, and cons onto the longest view of a buffer pushes in place, so
+// cons, head, tail, nth and len take constant time. `list` reads it forward, once.
+export class SharedList {
+  readonly kind = "list" as const;
+  private forward: Value[] | undefined;
+  constructor(
+    readonly buf: Value[],
+    readonly n: number,
+  ) {}
+  get list(): Value[] {
+    if (this.forward === undefined) {
+      const out: Value[] = new Array(this.n);
+      for (let i = 0; i < this.n; i++) out[i] = this.buf[this.n - 1 - i]!;
+      this.forward = out;
+    }
+    return this.forward;
+  }
+}
+
+// sharedList — a list value as a SharedList; a list built as an array is copied once.
+function sharedList(k: Kernel, v: { kind: "list"; list: Value[] }): SharedList {
+  if (v instanceof SharedList) return v;
+  const xs = v.list;
+  k.noteListCopy(xs.length);
+  return new SharedList(xs.slice().reverse(), xs.length);
+}
+
+function listLength(v: { kind: "list"; list: Value[] }): number {
+  return v instanceof SharedList ? v.n : v.list.length;
+}
+
+// listAt — cell i of a list, nothing outside it.
+function listAt(v: { kind: "list"; list: Value[] }, i: number): Value {
+  if (v instanceof SharedList) return i >= 0 && i < v.n ? v.buf[v.n - 1 - i]! : { kind: "null" };
+  return v.list[i] ?? { kind: "null" };
+}
+
+// An integer is one kind (law 1) held two ways: a JS number while a double holds it
+// exactly ("int"), a bigint past 2^53 ("i64"). A float is a double.
 export type Value =
   | { kind: "null" }
-  | { kind: "int"; int: number } // INT32 (alias kept for backward-compat)
-  | { kind: "i8"; int: number }
-  | { kind: "i16"; int: number }
-  | { kind: "u8"; int: number }
-  | { kind: "u16"; int: number }
-  | { kind: "u32"; int: number }
+  | { kind: "int"; int: number }
   | { kind: "i64"; bigint: bigint }
-  | { kind: "u64"; bigint: bigint }
-  | { kind: "f32"; float: number }
   | { kind: "f64"; float: number }
   | { kind: "str"; str: string }
   | { kind: "list"; list: Value[] }
@@ -4034,241 +2580,6 @@ export interface Record {
   fields: { name: NameID; val: Value }[];
 }
 
-interface SourceNativeLexicon {
-  keywords: Set<string>;
-  properties: Set<string>;
-  keywordKind: string;
-  propertyKind: string;
-  nameKind: string;
-  intKind: string;
-  floatKind: string;
-  stringKind: string;
-  charKind: string;
-  opKind: string;
-  ops: string[];
-  lineComment: string;
-  blockOpen: string;
-  blockClose: string;
-}
-
-function sourceNativeAtom(kind: string, value: string): Value {
-  return {
-    kind: "list",
-    list: [
-      { kind: "str", str: "cell" },
-      { kind: "str", str: kind },
-      { kind: "str", str: value },
-      { kind: "list", list: [] },
-      { kind: "null" },
-    ],
-  };
-}
-
-function sourceNativeStringList(value: Value, field: string): string[] {
-  if (value.kind !== "list") throw new Error(`source_scan_file: ${field} must be list`);
-  return value.list.map((item) => {
-    if (item.kind !== "str") throw new Error(`source_scan_file: ${field} item must be string`);
-    return item.str;
-  });
-}
-
-function sourceNativeField(xs: Value[], idx: number, field: string): Value {
-  const value = xs[idx];
-  if (value === undefined) throw new Error(`source_scan_file: lexicon missing ${field}`);
-  return value;
-}
-
-function sourceNativeFieldStr(xs: Value[], idx: number, field: string): string {
-  const value = sourceNativeField(xs, idx, field);
-  if (value.kind !== "str") throw new Error(`source_scan_file: lexicon ${field} must be string`);
-  return value.str;
-}
-
-function sourceNativeLexiconFromValue(value: Value): SourceNativeLexicon {
-  if (value.kind !== "list") throw new Error("source_scan_file: lexicon must be a list");
-  const xs = value.list;
-  if (xs.length < 15 || sourceNativeFieldStr(xs, 0, "tag") !== "source-lexicon") {
-    throw new Error("source_scan_file: lexicon must be (source-lexicon ...)");
-  }
-  return {
-    keywords: new Set(sourceNativeStringList(sourceNativeField(xs, 1, "keywords"), "keywords")),
-    properties: new Set(sourceNativeStringList(sourceNativeField(xs, 2, "properties"), "properties")),
-    keywordKind: sourceNativeFieldStr(xs, 3, "keyword-kind"),
-    propertyKind: sourceNativeFieldStr(xs, 4, "property-kind"),
-    nameKind: sourceNativeFieldStr(xs, 5, "name-kind"),
-    intKind: sourceNativeFieldStr(xs, 6, "int-kind"),
-    floatKind: sourceNativeFieldStr(xs, 7, "float-kind"),
-    stringKind: sourceNativeFieldStr(xs, 8, "string-kind"),
-    charKind: sourceNativeFieldStr(xs, 9, "char-kind"),
-    opKind: sourceNativeFieldStr(xs, 10, "op-kind"),
-    ops: sourceNativeStringList(sourceNativeField(xs, 11, "ops"), "ops"),
-    lineComment: sourceNativeFieldStr(xs, 12, "line-comment"),
-    blockOpen: sourceNativeFieldStr(xs, 13, "block-open"),
-    blockClose: sourceNativeFieldStr(xs, 14, "block-close"),
-  };
-}
-
-function sourceNativeNameKind(lex: SourceNativeLexicon, value: string): string {
-  if (lex.keywords.has(value)) return lex.keywordKind;
-  if (lex.properties.has(value)) return lex.propertyKind;
-  return lex.nameKind;
-}
-
-function sourceNativeNameStart(code: number): boolean {
-  return (code >= 97 && code <= 122) || (code >= 65 && code <= 90) || code === 95;
-}
-
-function sourceNativeNameChar(code: number): boolean {
-  return sourceNativeNameStart(code) || (code >= 48 && code <= 57);
-}
-
-function sourceNativeHexDigit(code: number): boolean {
-  return (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
-}
-
-function sourceNativeBinDigit(code: number): boolean {
-  return code === 48 || code === 49;
-}
-
-function sourceNativeDecodeEscape(ch: string): string {
-  if (ch === "\\") return "\\";
-  if (ch === "'") return "'";
-  if (ch === "\"") return "\"";
-  if (ch === "n") return "\n";
-  if (ch === "t") return "\t";
-  if (ch === "r") return "\r";
-  if (ch === "0") return "\0";
-  return ch;
-}
-
-function sourceNativeScanQuoted(src: string, i: number, quote: string): [string, number] {
-  let j = i + 1;
-  let out = "";
-  while (j < src.length) {
-    const c = src[j]!;
-    if (c === "\\" && j + 1 < src.length) {
-      out += sourceNativeDecodeEscape(src[j + 1]!);
-      j += 2;
-      continue;
-    }
-    if (c === quote) return [out, j + 1];
-    out += c;
-    j++;
-  }
-  return [out, j];
-}
-
-function sourceNativeSkip(src: string, i: number, lex: SourceNativeLexicon): number {
-  while (i < src.length) {
-    const c = src.charCodeAt(i);
-    if (c === 32 || c === 9 || c === 10 || c === 13) {
-      i++;
-      continue;
-    }
-    if (lex.lineComment !== "" && src.startsWith(lex.lineComment, i)) {
-      i += lex.lineComment.length;
-      while (i < src.length && src.charCodeAt(i) !== 10) i++;
-      continue;
-    }
-    if (lex.blockOpen !== "" && lex.blockClose !== "" && src.startsWith(lex.blockOpen, i)) {
-      const end = src.indexOf(lex.blockClose, i + lex.blockOpen.length);
-      if (end < 0) return src.length;
-      i = end + lex.blockClose.length;
-      continue;
-    }
-    break;
-  }
-  return i;
-}
-
-function sourceNativeScanText(src: string, lex: SourceNativeLexicon): Value {
-  const out: Value[] = [];
-  let i = 0;
-  while (i < src.length) {
-    i = sourceNativeSkip(src, i, lex);
-    if (i >= src.length) break;
-    const c = src.charCodeAt(i);
-    if (src[i] === "\"") {
-      const [value, next] = sourceNativeScanQuoted(src, i, "\"");
-      out.push(sourceNativeAtom(lex.stringKind, value));
-      i = next;
-      continue;
-    }
-    if (src[i] === "'") {
-      const [value, next] = sourceNativeScanQuoted(src, i, "'");
-      out.push(sourceNativeAtom(lex.charKind, value));
-      i = next;
-      continue;
-    }
-    if (c >= 48 && c <= 57) {
-      let j = i + 1;
-      let kind = lex.intKind;
-      if (c === 48 && j < src.length && (src[j] === "x" || src[j] === "X")) {
-        j++;
-        while (j < src.length && sourceNativeHexDigit(src.charCodeAt(j))) j++;
-      } else if (c === 48 && j < src.length && (src[j] === "b" || src[j] === "B")) {
-        j++;
-        while (j < src.length && sourceNativeBinDigit(src.charCodeAt(j))) j++;
-      } else {
-        while (j < src.length) {
-          const code = src.charCodeAt(j);
-          if (code < 48 || code > 57) break;
-          j++;
-        }
-        if (j < src.length && src[j] === "." && j + 1 < src.length) {
-          const afterDot = src.charCodeAt(j + 1);
-          if (afterDot >= 48 && afterDot <= 57) {
-            kind = lex.floatKind;
-            j++;
-            while (j < src.length) {
-              const code = src.charCodeAt(j);
-              if (code < 48 || code > 57) break;
-              j++;
-            }
-            if (j < src.length && (src[j] === "e" || src[j] === "E")) {
-              let k = j + 1;
-              if (k < src.length && (src[k] === "+" || src[k] === "-")) k++;
-              if (k < src.length) {
-                const expFirst = src.charCodeAt(k);
-                if (expFirst >= 48 && expFirst <= 57) {
-                  j = k + 1;
-                  while (j < src.length) {
-                    const code = src.charCodeAt(j);
-                    if (code < 48 || code > 57) break;
-                    j++;
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-      out.push(sourceNativeAtom(kind, src.slice(i, j)));
-      i = j;
-      continue;
-    }
-    if (sourceNativeNameStart(c)) {
-      let j = i + 1;
-      while (j < src.length && sourceNativeNameChar(src.charCodeAt(j))) j++;
-      const value = src.slice(i, j);
-      out.push(sourceNativeAtom(sourceNativeNameKind(lex, value), value));
-      i = j;
-      continue;
-    }
-    let matched = "";
-    for (const op of lex.ops) {
-      if (src.startsWith(op, i)) {
-        matched = op;
-        break;
-      }
-    }
-    if (matched === "") matched = src[i] ?? "";
-    out.push(sourceNativeAtom(lex.opKind, matched));
-    i += matched.length || 1;
-  }
-  return { kind: "list", list: out };
-}
-
 export function recordGet(r: Record, name: NameID): Value | undefined {
   for (let i = r.fields.length - 1; i >= 0; i--) {
     if (r.fields[i]!.name === name) return r.fields[i]!.val;
@@ -4297,8 +2608,8 @@ export interface Closure {
 // Frame — scope primitive
 // ---------------------------------------------------------------------------
 
-// LIST_COPY_BUDGET — the list elements cons and tail may copy in one run
-// before the kernel voices the cost (Kernel.noteListCopy).
+// LIST_COPY_BUDGET — the list elements cons may copy in one run before the
+// kernel voices the cost (Kernel.noteListCopy).
 const LIST_COPY_BUDGET = 2 ** 28;
 
 // bindingAtView — what a rebound unit name held at a unit version: the latest
@@ -4323,22 +2634,30 @@ export class Frame {
   // version it took effect at (the first at 0).
   history: Map<NameID, { v: number; val: Value }[]> | undefined;
 
+  // index — a frame past FRAME_SCAN bindings (the unit's globals) finds a name by map
+  private index: Map<NameID, number> | undefined;
+
   constructor(parent: Frame | null = null) {
     this.parent = parent;
   }
 
+  private find(name: NameID): number {
+    return this.index === undefined ? this.keys.indexOf(name) : (this.index.get(name) ?? -1);
+  }
+
   bind(name: NameID, value: Value): void {
-    const idx = this.keys.indexOf(name);
+    const idx = this.find(name);
     if (idx >= 0) {
       this.vals[idx] = value;
       return;
     }
     this.keys.push(name);
     this.vals.push(value);
-  }
-
-  entries(): readonly [NameID, Value][] {
-    return this.keys.map((key, i) => [key, this.vals[i] ?? { kind: "null" }]);
+    if (this.index !== undefined) {
+      this.index.set(name, this.keys.length - 1);
+    } else if (this.keys.length > FRAME_SCAN) {
+      this.index = new Map(this.keys.map((key, i) => [key, i]));
+    }
   }
 
   // lookup — the nearest binding. A rebound unit name answers what the unit
@@ -4349,7 +2668,7 @@ export class Frame {
     let view = 0;
     while (frame !== null) {
       if (view === 0) view = frame.view;
-      const idx = frame.keys.indexOf(name);
+      const idx = frame.find(name);
       if (idx >= 0) {
         if (view !== 0 && frame.history !== undefined) {
           const h = frame.history.get(name);
@@ -4363,13 +2682,13 @@ export class Frame {
   }
 
   hasOwn(name: NameID): boolean {
-    return this.keys.indexOf(name) >= 0;
+    return this.find(name) >= 0;
   }
 
   // rebind — a later unit let: the name takes the new value, and the history
   // keeps what each unit version held.
   rebind(name: NameID, value: Value, version: number): void {
-    const idx = this.keys.indexOf(name);
+    const idx = this.find(name);
     if (idx < 0) {
       this.bind(name, value);
       return;
@@ -4389,12 +2708,14 @@ export class Frame {
   hasLocal(name: NameID): boolean {
     let frame: Frame | null = this;
     while (frame !== null && frame.parent !== null) {
-      if (frame.keys.indexOf(name) >= 0) return true;
+      if (frame.find(name) >= 0) return true;
       frame = frame.parent;
     }
     return false;
   }
 }
+
+const FRAME_SCAN = 16;
 
 // ---------------------------------------------------------------------------
 // Walker — recipe → value
@@ -4449,17 +2770,9 @@ export function walk(k: Kernel, node: NodeID, frame: Frame): Value {
       result = k.trivialValue(node);
       break;
     }
-    const cat = k.category(node);
-    const kids = k.children(node);
-
-    // Tracing hook: when k.trace is set, record arm dispatch. Pure
-    // counter increment — no allocation, no IO. Sibling-parity with the
-    // Rust and Go kernels. Records (ty, inst) so typed-numeric
-    // distribution stays distinguishable.
-    if (k.trace !== undefined) {
-      k.trace.record(cat.type, cat.inst);
-    }
-
+    const row = k.recipeAt(node);
+    const cat = row === undefined ? node : row.category;
+    const kids = row === undefined ? NO_CHILDREN : row.children;
     if (cat.type === RBasic.COND) {
       const arm = condArm(k, cat.inst, kids, frame);
       if (arm === null) {
@@ -4493,12 +2806,10 @@ export function walk(k: Kernel, node: NodeID, frame: Frame): Value {
       }
       const closure = step.closure;
       frame = closureFrame(k, closure, kids, frame);
-      k.trace?.recordFn(k.nameStr(closure.name));
-      const label = k.formFrameLabel(closure.name, closure.body);
       if (pushed) {
-        k.formStack[k.formStack.length - 1] = label;
+        k.formStack[k.formStack.length - 1] = closure;
       } else {
-        k.formStack.push(label);
+        k.formStack.push(closure);
         pushed = true;
       }
       node = closure.body;
@@ -4547,7 +2858,7 @@ function walkNode(
       return walkFnDef(k, kids, frame);
     case RBasic.LIST: {
       const items = kids.map((c) => walk(k, c, frame));
-      return { kind: "list", list: items };
+      return new SharedList(items.reverse(), items.length);
     }
     case RBasic.INDUCTIVE:
       // INDUCTIVE recipes are type definitions. Walking one yields the
@@ -4562,10 +2873,6 @@ function walkNode(
       // reasoning over equivalence-class types can address them.
       return { kind: "nodeid", nodeid: node };
     case RBasic.ALIAS:
-      // ALIAS recipes (#8) — children: [name-trivial, target-nodeid].
-      // Walking returns the target NodeID so alias resolution is transparent.
-      if (kids.length >= 2) return { kind: "nodeid", nodeid: kids[1]! };
-      return { kind: "nodeid", nodeid: node };
     case RBasic.BLANKET:
     case RBasic.PROJECT:
     case RBasic.GENERATIVE:
@@ -4579,12 +2886,8 @@ function walkNode(
       // Higher-architecture recipes — walking returns the NodeID itself,
       // letting downstream code reason structurally without crashing on
       // recipes whose semantics are interpreted by the Form cells that
-      // build them (blanket, project, generative, proof, vector, parallel).
-      // TRANSMUTE follows the same passthrough pattern: the substrate
-      // identity of the value is preserved through the cast/view; consumers
-      // that want the concrete cast semantics can use the typed-numeric
-      // natives (i32, i64, f32, f64, u64, ...) which already carry the
-      // TRANSMUTE Blueprint attribution in the trace.
+      // build them (alias, blanket, project, generative, proof, vector,
+      // parallel, transmute).
       return { kind: "nodeid", nodeid: node };
     default:
       throw new Error(`walk: unsupported RBasic type ${cat.type}`);
@@ -4736,22 +3039,8 @@ function switchKeyFromValue(k: Kernel, value: Value): NodeID | undefined {
       return k.internTrivialNull();
     case "int":
       return k.internTrivialInt(value.int);
-    case "i8":
-      return k.internTrivialInt8(value.int);
-    case "i16":
-      return k.internTrivialInt16(value.int);
-    case "u8":
-      return k.internTrivialUint8(value.int);
-    case "u16":
-      return k.internTrivialUint16(value.int);
-    case "u32":
-      return k.internTrivialUint32(value.int);
     case "i64":
       return k.internTrivialInt64(value.bigint);
-    case "u64":
-      return k.internTrivialUint64(value.bigint);
-    case "f32":
-      return k.internTrivialFloat32(value.float);
     case "f64":
       return k.internTrivialFloat64(value.float);
     case "str":
@@ -4772,185 +3061,51 @@ function walkMatchSwitch(
   if (kids.length < 1 || (kids.length - 1) % 2 !== 0) {
     throw new Error("match: SWITCH expects scrutinee plus pattern/body pairs");
   }
-  k.trace?.recordMatchLookup();
   const scrutinee = walk(k, kids[0]!, frame);
   const table = switchTableFor(k, node, kids);
   const key = switchKeyFromValue(k, scrutinee);
   if (key !== undefined) {
     const body = table.cases.get(nodeKey(key));
-    if (body !== undefined) {
-      k.trace?.recordMatchHit();
-      return walk(k, body, frame);
-    }
+    if (body !== undefined) return walk(k, body, frame);
   }
   for (const arm of table.dynamicArms) {
-    if (valueEqual(walk(k, arm.pattern, frame), scrutinee)) {
-      k.trace?.recordMatchHit();
-      return walk(k, arm.body, frame);
-    }
+    if (valueEqual(walk(k, arm.pattern, frame), scrutinee)) return walk(k, arm.body, frame);
   }
-  if (table.defaultBody !== undefined) {
-    k.trace?.recordMatchDefault();
-    return walk(k, table.defaultBody, frame);
-  }
-  k.trace?.recordMatchMiss();
+  if (table.defaultBody !== undefined) return walk(k, table.defaultBody, frame);
   throw new Error(`match: exhausted without a matching arm for ${k.render(scrutinee)}`);
 }
 
 function expectInt(v: Value, op: string): number {
-  // A bare integer literal wider than int32 walks in as an i64 (overflow
-  // table). Read here it becomes a JS number, exact to 2^53 — the same
-  // widening expectFloat performs; walkMath and walkCompare take i64
-  // operands through expectBigInt instead, exact across int64.
-  if (v.kind === "i64" || v.kind === "u64") return Number(v.bigint);
-  if (
-    v.kind !== "int" &&
-    v.kind !== "i8" &&
-    v.kind !== "i16" &&
-    v.kind !== "u8" &&
-    v.kind !== "u16" &&
-    v.kind !== "u32"
-  )
-    throw new Error(`${op}: expected int-like, got ${v.kind}`);
-  return v.int;
+  if (v.kind === "int") return v.int;
+  if (v.kind === "i64") return Number(v.bigint);
+  throw new Error(`${op}: expected int-like, got ${v.kind}`);
 }
 
 function expectFloat(v: Value, op: string): number {
-  if (v.kind === "f32" || v.kind === "f64") return v.float;
-  if (
-    v.kind === "int" ||
-    v.kind === "i8" ||
-    v.kind === "i16" ||
-    v.kind === "u8" ||
-    v.kind === "u16" ||
-    v.kind === "u32"
-  )
-    return v.int;
-  if (v.kind === "i64" || v.kind === "u64") return Number(v.bigint);
+  if (v.kind === "f64") return v.float;
+  if (v.kind === "int") return v.int;
+  if (v.kind === "i64") return Number(v.bigint);
   throw new Error(`${op}: expected number-like, got ${v.kind}`);
 }
 
 function expectBigInt(v: Value, op: string): bigint {
-  if (v.kind === "i64" || v.kind === "u64") return v.bigint;
-  if (
-    v.kind === "int" ||
-    v.kind === "i8" ||
-    v.kind === "i16" ||
-    v.kind === "u8" ||
-    v.kind === "u16" ||
-    v.kind === "u32"
-  )
-    return BigInt(v.int);
+  if (v.kind === "i64") return v.bigint;
+  if (v.kind === "int") return BigInt(v.int);
   throw new Error(`${op}: expected integer-like, got ${v.kind}`);
 }
 
+// walkMath — add/sub/mul/div/mod over the operands' own kinds: any float operand makes the
+// fold a float fold; integers fold exactly and wrap at 63 bits (law 1). Integer div/mod
+// truncate toward zero and stop on a zero divisor (law 2); float mod truncates too (law 5).
 function walkMath(
   k: Kernel,
-  inst: number,
+  op: number,
   kids: readonly NodeID[],
   frame: Frame,
 ): Value {
   if (kids.length < 2) throw new Error("math: need at least 2 args");
-  const width = mathWidth(inst);
-  const op = mathOp(inst);
-
-  // Float64 — typed path, no boxing inside the loop.
-  if (width === RMathWidth.F64) {
-    let acc = expectFloat(walk(k, kids[0]!, frame), "math.f64");
-    for (let i = 1; i < kids.length; i++) {
-      const x = expectFloat(walk(k, kids[i]!, frame), "math.f64");
-      switch (op) {
-        case RMath.PLUS:
-          acc = acc + x;
-          break;
-        case RMath.MINUS:
-          acc = acc - x;
-          break;
-        case RMath.MUL:
-          acc = acc * x;
-          break;
-        case RMath.DIV:
-          acc = acc / x;
-          break;
-        case RMath.MOD:
-          acc = acc - Math.floor(acc / x) * x;
-          break;
-        default:
-          throw new Error(`math.f64: unknown op ${op}`);
-      }
-    }
-    return { kind: "f64", float: acc };
-  }
-
-  // Float32 — same shape, narrow to f32 at boundary.
-  if (width === RMathWidth.F32) {
-    let acc = expectFloat(walk(k, kids[0]!, frame), "math.f32");
-    for (let i = 1; i < kids.length; i++) {
-      const x = expectFloat(walk(k, kids[i]!, frame), "math.f32");
-      switch (op) {
-        case RMath.PLUS:
-          acc = Math.fround(acc + x);
-          break;
-        case RMath.MINUS:
-          acc = Math.fround(acc - x);
-          break;
-        case RMath.MUL:
-          acc = Math.fround(acc * x);
-          break;
-        case RMath.DIV:
-          acc = Math.fround(acc / x);
-          break;
-        case RMath.MOD:
-          acc = Math.fround(acc - Math.floor(acc / x) * x);
-          break;
-        default:
-          throw new Error(`math.f32: unknown op ${op}`);
-      }
-    }
-    return { kind: "f32", float: acc };
-  }
-
-  // Int64 / Uint64 — typed path via BigInt.
-  if (width === RMathWidth.I64 || width === RMathWidth.U64) {
-    let acc = expectBigInt(walk(k, kids[0]!, frame), "math.i64");
-    for (let i = 1; i < kids.length; i++) {
-      const x = expectBigInt(walk(k, kids[i]!, frame), "math.i64");
-      switch (op) {
-        case RMath.PLUS:
-          acc = acc + x;
-          break;
-        case RMath.MINUS:
-          acc = acc - x;
-          break;
-        case RMath.MUL:
-          acc = acc * x;
-          break;
-        case RMath.DIV:
-          if (x === 0n) throw new Error("division by zero");
-          acc = acc / x;
-          break;
-        case RMath.MOD:
-          if (x === 0n) throw new Error("modulo by zero");
-          acc = acc % x;
-          break;
-        default:
-          throw new Error(`math.i64: unknown op ${op}`);
-      }
-    }
-    return width === RMathWidth.I64
-      ? { kind: "i64", bigint: acc }
-      : { kind: "u64", bigint: acc };
-  }
-
-  // Default integer path — the bare-width op (`add`/`+`/`sub`/… with no
-  // width-encoded inst). Go and Rust fold it in int64 (`a * b`, `a + b`), so
-  // `(mul 100000 100000)` is 10000000000 on every kernel, not a Math.imul-
-  // wrapped 1410065408. Float promotion: when any operand walks to a float at
-  // runtime, the whole fold is f64 — matching the Rust + Go MATH arms, which
-  // dispatch on the actual operand kind rather than the encoded width
-  // (int+float→float, float+float→float).
   const vals = kids.map((kid) => walk(k, kid!, frame));
-  if (vals.some((v) => v.kind === "f32" || v.kind === "f64")) {
+  if (vals.some((v) => v.kind === "f64")) {
     let facc = expectFloat(vals[0]!, "math.f64");
     for (let i = 1; i < vals.length; i++) {
       const x = expectFloat(vals[i]!, "math.f64");
@@ -4968,7 +3123,7 @@ function walkMath(
           facc = facc / x;
           break;
         case RMath.MOD:
-          facc = facc - Math.floor(facc / x) * x;
+          facc = facc % x;
           break;
         default:
           throw new Error(`math.f64: unknown op ${op}`);
@@ -4976,10 +3131,10 @@ function walkMath(
     }
     return { kind: "f64", float: facc };
   }
-  // Integers fold in JS numbers while every step stays within ±(2^53−1),
-  // where a double is exact. An operand carried as a bigint, or a step that
-  // leaves that range, refolds the whole expression in int64 (foldInt64).
-  if (vals.some((v) => v.kind === "i64" || v.kind === "u64")) return foldInt64(op, vals);
+  // Integers fold in JS numbers while every step stays within ±(2^53−1), where a double
+  // is exact. An operand carried as a bigint, or a step that leaves that range, refolds
+  // the whole expression in BigInt (foldWide).
+  if (vals.some((v) => v.kind === "i64")) return foldWide(op, vals);
   let acc = expectInt(vals[0]!, "math.int");
   for (let i = 1; i < vals.length; i++) {
     const x = expectInt(vals[i]!, "math.int");
@@ -5006,16 +3161,15 @@ function walkMath(
       default:
         throw new Error(`math.int: unknown op ${op}`);
     }
-    if (!Number.isSafeInteger(acc)) return foldInt64(op, vals);
+    if (!Number.isSafeInteger(acc)) return foldWide(op, vals);
   }
   return { kind: "int", int: acc };
 }
 
-// foldInt64 — the bare-width integer fold past 2^53: BigInt steps wrapped to
-// 64 bits, as Go's and Rust's int64 arithmetic wraps. BigInt `/` and `%`
-// truncate toward zero, as theirs do. The answer is a plain int again when a
-// number holds it exactly.
-function foldInt64(op: number, vals: readonly Value[]): Value {
+// foldWide — the integer fold past 2^53: BigInt steps wrapped to the 63-bit word (law 1).
+// BigInt `/` and `%` truncate toward zero. The answer is a plain int again when a number
+// holds it exactly.
+function foldWide(op: number, vals: readonly Value[]): Value {
   let acc = expectBigInt(vals[0]!, "math.int");
   for (let i = 1; i < vals.length; i++) {
     const x = expectBigInt(vals[i]!, "math.int");
@@ -5040,7 +3194,7 @@ function foldInt64(op: number, vals: readonly Value[]): Value {
       default:
         throw new Error(`math.int: unknown op ${op}`);
     }
-    acc = BigInt.asIntN(64, acc);
+    acc = BigInt.asIntN(INT_BITS, acc);
   }
   return intOrWide(acc);
 }
@@ -5080,7 +3234,7 @@ function walkCompare(
     throw new Error("order: only numbers have an order -- ask value_kind before lt/le/gt/ge");
   }
   let r: boolean;
-  if (av.kind === "f32" || av.kind === "f64" || bv.kind === "f32" || bv.kind === "f64") {
+  if (av.kind === "f64" || bv.kind === "f64") {
     const a = expectFloat(av, "compare");
     const b = expectFloat(bv, "compare");
     switch (op) {
@@ -5092,7 +3246,7 @@ function walkCompare(
       case RCmp.GE: r = a >= b; break;
       default: throw new Error(`compare: unknown op ${op}`);
     }
-  } else if (av.kind === "i64" || av.kind === "u64" || bv.kind === "i64" || bv.kind === "u64") {
+  } else if (av.kind === "i64" || bv.kind === "i64") {
     const a = expectBigInt(av, "compare");
     const b = expectBigInt(bv, "compare");
     switch (op) {
@@ -5120,34 +3274,25 @@ function walkCompare(
   return boolInt(r);
 }
 
-// cmpNumberKind — the kinds the compare lane coerces: every int and float
-// width. eq/ne over anything else is valueEqual; an ordering over anything
-// else has no answer.
+// cmpNumberKind — the kinds the compare lane coerces: an integer or a float. eq/ne over
+// anything else is valueEqual; an ordering over anything else has no answer.
 function cmpNumberKind(v: Value): boolean {
-  return isNumericValue(v);
-}
-
-function isIntegerValue(v: Value): boolean {
-  return isNumericValue(v) && v.kind !== "f32" && v.kind !== "f64";
+  return v.kind === "int" || v.kind === "i64" || v.kind === "f64";
 }
 
 // valueEqual — content identity (axiom-3: same composition is the same cell).
 // value_eq answers it, and eq/ne answer it wherever a non-number takes part.
-// Integers compare across their widths and floats across theirs, as the one
-// Int kind and the one Float kind of the Go and Rust kernels do; an integer
-// never equals a float, however alike they read, and a NaN is the NaN it was
-// built as. Strings meet by text, NodeIDs by coordinates, lists by their items,
-// however the lists were built. Records and closures are places (record_set
-// writes into one), so a place equals only itself. Siblings to Go's valueEqual,
-// Rust's value_equal and fkwu's fk_veq.
+// An integer never equals a float, however alike they read, and a NaN is the
+// NaN it was built as. Strings meet by text, NodeIDs by coordinates, lists by
+// their items, however the lists were built. Records and closures are places
+// (record_set writes into one), so a place equals only itself. Sibling to
+// fkwu's fk_veq.
 function valueEqual(a: Value, b: Value): boolean {
-  if (isIntegerValue(a) && isIntegerValue(b)) {
-    if (a.kind === "i64" || a.kind === "u64" || b.kind === "i64" || b.kind === "u64") {
-      return numericToBig(a) === numericToBig(b);
-    }
-    return numericToNum(a) === numericToNum(b);
+  if ((a.kind === "int" || a.kind === "i64") && (b.kind === "int" || b.kind === "i64")) {
+    if (a.kind === "int" && b.kind === "int") return a.int === b.int;
+    return expectBigInt(a, "value_eq") === expectBigInt(b, "value_eq");
   }
-  if ((a.kind === "f32" || a.kind === "f64") && (b.kind === "f32" || b.kind === "f64")) {
+  if (a.kind === "f64" && b.kind === "f64") {
     return a.float === b.float || (Number.isNaN(a.float) && Number.isNaN(b.float));
   }
   if (a.kind !== b.kind) return false;
@@ -5157,11 +3302,13 @@ function valueEqual(a: Value, b: Value): boolean {
     case "str":
       return a.str === (b as { str: string }).str;
     case "list": {
-      const bl = (b as { list: Value[] }).list;
-      return (
-        a.list === bl ||
-        (a.list.length === bl.length && a.list.every((item, idx) => valueEqual(item, bl[idx]!)))
-      );
+      // lengths first: (eq xs (empty)), nil?'s question, never walks the cells
+      const bl = b as { kind: "list"; list: Value[] };
+      const n = listLength(a);
+      if (n !== listLength(bl)) return false;
+      if (a instanceof SharedList && bl instanceof SharedList && a.buf === bl.buf) return true;
+      for (let i = 0; i < n; i++) if (!valueEqual(listAt(a, i), listAt(bl, i))) return false;
+      return true;
     }
     case "record":
       return a.record === (b as { record: Record }).record;
@@ -5181,63 +3328,6 @@ function valueEqual(a: Value, b: Value): boolean {
   }
 }
 
-function isNumericValue(
-  v: Value,
-): v is
-  | { kind: "int"; int: number }
-  | { kind: "i8"; int: number }
-  | { kind: "i16"; int: number }
-  | { kind: "u8"; int: number }
-  | { kind: "u16"; int: number }
-  | { kind: "u32"; int: number }
-  | { kind: "i64"; bigint: bigint }
-  | { kind: "u64"; bigint: bigint }
-  | { kind: "f32"; float: number }
-  | { kind: "f64"; float: number } {
-  return (
-    v.kind === "int" ||
-    v.kind === "i8" ||
-    v.kind === "i16" ||
-    v.kind === "u8" ||
-    v.kind === "u16" ||
-    v.kind === "u32" ||
-    v.kind === "i64" ||
-    v.kind === "u64" ||
-    v.kind === "f32" ||
-    v.kind === "f64"
-  );
-}
-
-function numericToNum(v: Value): number {
-  if (v.kind === "f32" || v.kind === "f64") return v.float;
-  if (v.kind === "i64" || v.kind === "u64") return Number(v.bigint);
-  if (
-    v.kind === "int" ||
-    v.kind === "i8" ||
-    v.kind === "i16" ||
-    v.kind === "u8" ||
-    v.kind === "u16" ||
-    v.kind === "u32"
-  )
-    return v.int;
-  throw new Error(`numericToNum: ${v.kind} is not numeric`);
-}
-
-function numericToBig(v: Value): bigint {
-  if (v.kind === "i64" || v.kind === "u64") return v.bigint;
-  if (v.kind === "f32" || v.kind === "f64") return BigInt(Math.trunc(v.float));
-  if (
-    v.kind === "int" ||
-    v.kind === "i8" ||
-    v.kind === "i16" ||
-    v.kind === "u8" ||
-    v.kind === "u16" ||
-    v.kind === "u32"
-  )
-    return BigInt(v.int);
-  throw new Error(`numericToBig: ${v.kind} is not numeric`);
-}
-
 // truthy — a branch reads a state (axiom-1): 0 and a float zero are 0,
 // nothing is neither 0 nor 1 and refuses, and every other value is 1.
 function truthy(v: Value): boolean {
@@ -5245,16 +3335,9 @@ function truthy(v: Value): boolean {
     case "null":
       throw new Error("if: nothing is neither 0 nor 1 -- ask nothing? before branching");
     case "int":
-    case "i8":
-    case "i16":
-    case "u8":
-    case "u16":
-    case "u32":
       return v.int !== 0;
     case "i64":
-    case "u64":
       return v.bigint !== 0n;
-    case "f32":
     case "f64":
       return v.float !== 0;
     default:
@@ -5319,7 +3402,6 @@ function blockScope(k: Kernel, kids: readonly NodeID[], frame: Frame): Frame {
     const c = kids[i]!;
     const kind = kinds[i]!;
     if (kind === BLOCK_KIND_LET) {
-      if (k.trace !== undefined) k.trace.record(RBasic.BLOCK, RBlock.LET);
       const letKids = k.children(c);
       const value = letValue(k, letKids, scope);
       if (scope === frame || k.closuresCreated !== mark) {
@@ -5382,7 +3464,6 @@ function letValue(k: Kernel, kids: readonly NodeID[], frame: Frame): Value {
 // unit version, so a closure defined before it keeps the binding it was made
 // under, as fkwu's hold per reference keeps it.
 function bindLet(k: Kernel, node: NodeID, frame: Frame): Value {
-  if (k.trace !== undefined) k.trace.record(RBasic.BLOCK, RBlock.LET);
   const kids = k.children(node);
   const value = letValue(k, kids, frame);
   const name = kids[0]!.inst;
@@ -5409,7 +3490,6 @@ export function walkUnit(k: Kernel, node: NodeID, frame: Frame): Value {
   if (kind !== BLOCK_KIND_DO) return walk(k, node, frame);
   const mark = k.unitRoots.get(nodeKey(node));
   if (mark === UNIT_DO) return walkUnitDo(k, node, frame);
-  if (k.trace !== undefined) k.trace.record(RBasic.BLOCK, k.category(node).inst);
   let result: Value = { kind: "null" };
   for (const c of k.children(node)) {
     result =
@@ -5423,7 +3503,6 @@ export function walkUnit(k: Kernel, node: NodeID, frame: Frame): Value {
 }
 
 function walkUnitDo(k: Kernel, node: NodeID, frame: Frame): Value {
-  if (k.trace !== undefined) k.trace.record(RBasic.BLOCK, k.category(node).inst);
   let leading = true;
   let result: Value = { kind: "null" };
   for (const c of k.children(node)) {
@@ -5514,56 +3593,24 @@ function resolveCall(
 
   if (calleeName !== null) {
     const rawName = calleeName;
-    // JIT alias: if this Form function-name is JIT-registered, swap to
-    // the aliased native-name before native lookup. Form recipes are
-    // canonical truth; `register_jit form-name native-name` opts calls
-    // into a kernel-resident optimized native.
-    const aliased = k.jitAliases.get(rawName);
-    const dispatchName = aliased !== undefined ? aliased : rawName;
     // (attempt x): x is walked under a recover point, never before — fkwu's mode 28.
-    if (kids.length === 2 && k.nameStr(rawName) === "attempt") {
+    if (kids.length === 2 && rawName === k.attemptName) {
       return { value: attempt(k, kids[1]!, frame) };
-    }
-    // Env-aware natives first — they need the caller's env.
-    const envNe = k.envNatives.get(dispatchName);
-    if (envNe !== undefined && frame.lookup(dispatchName) === undefined) {
-      const envArgs: Value[] = [];
-      for (let i = 1; i < kids.length; i++) {
-        envArgs.push(walk(k, kids[i]!, frame));
-      }
-      if (envNe.category.type !== RBasic.UNDEFINED) {
-        k.trace?.record(envNe.category.type, envNe.category.inst);
-      }
-      k.trace?.recordNative(k.nameStr(envNe.name));
-      k.formStack.push(k.nameStr(envNe.name));
-      const envOut = envNe.fn(k, frame, envArgs);
-      k.formStack.pop();
-      return { value: envOut };
     }
     // Native dispatch. A local binding of the name (a parameter, a let) is
     // nearer than the native unless fkwu reserves the head: the one
     // call-position reading every arm gives.
-    const ne = k.natives.get(dispatchName);
-    if (ne !== undefined && (FKWU_RESERVED_HEADS.has(k.nameStr(rawName)) || !frame.hasLocal(rawName))) {
+    const native = k.natives.get(rawName);
+    if (native !== undefined && (k.reservedHeads.has(rawName) || !frame.hasLocal(rawName))) {
       const args: Value[] = [];
       for (let i = 1; i < kids.length; i++) {
         args.push(walk(k, kids[i]!, frame));
       }
-      // Native Blueprint attribution — record the Form category the
-      // native expresses alongside the FNCALL arm. The kernel knows
-      // itself even when the call leaves Form-land.
-      if (k.trace !== undefined && ne.category.type !== RBasic.UNDEFINED) {
-        k.trace.record(ne.category.type, ne.category.inst);
-      }
-      k.trace?.recordNative(k.nameStr(ne.name));
-      k.formStack.push(k.nameStr(ne.name));
-      const neOut = ne.fn(k, args);
+      k.formStack.push(k.nameStr(rawName));
+      const out = native(k, args);
       k.formStack.pop();
-      return { value: neOut };
+      return { value: out };
     }
-    // Closure via frame — use the ORIGINAL function-name (not the JIT-
-    // aliased one): the user defined this function under rawName and
-    // wants their version when no JIT mapping resolved a native.
     const v = frame.lookup(rawName);
     if (v === undefined) {
       throw new Error(`call: unbound ${k.nameStr(rawName)}`);
@@ -5603,10 +3650,6 @@ function closureFrame(
     callFrame.bind(closure.params[i]!, v);
   }
   return callFrame;
-}
-
-function nodeIDKey(nid: NodeID): string {
-  return `${nid.pkg}.${nid.level}.${nid.type}.${nid.inst}`;
 }
 
 const FORM_BINARY_MAGIC_V1 = asciiBytes("FORMBIN1");
@@ -5692,32 +3735,6 @@ function readI64LE(bytes: Uint8Array, pos: number): [bigint, number] {
   return [view.getBigInt64(0, true), pos + 8];
 }
 
-function serializeNode(k: Kernel, nid: NodeID, out: number[]): void {
-  const recipe = k.recipeAt(nid);
-  if (recipe) {
-    pushU32(out, FORM_BINARY_COMPOSITE);
-    serializeNode(k, recipe.category, out);
-    pushU32(out, recipe.children.length);
-    for (const child of recipe.children) serializeNode(k, child, out);
-    return;
-  }
-  if (nid.level === Level.TRIVIAL && nid.type === Triv.FLOAT64) {
-    pushU32(out, FORM_BINARY_FLOAT64);
-    pushF64LE(out, k.decodeFloat64(nid.inst));
-    return;
-  }
-  if (nid.level === Level.TRIVIAL && nid.type === Triv.INT64) {
-    pushU32(out, FORM_BINARY_INT64);
-    pushI64LE(out, k.decodeInt64(nid.inst));
-    return;
-  }
-  pushU32(out, FORM_BINARY_LEAF);
-  pushU32(out, nid.pkg);
-  pushU32(out, nid.level);
-  pushU32(out, nid.type);
-  pushU32(out, nid.inst);
-}
-
 interface FormBinaryStringTable {
   strings: string[];
   indexes: Map<number, number>;
@@ -5768,57 +3785,6 @@ function serializeNodeWithStrings(k: Kernel, nid: NodeID, out: number[], table: 
   } else {
     pushU32(out, nid.inst);
   }
-}
-
-function deserializeRawNode(
-  k: Kernel,
-  bytes: Uint8Array,
-  pos: number,
-  scope: number,
-  budget: FormBinaryDecodeBudget,
-  depth: number,
-): [NodeID, number] {
-  enterFormBinaryNode(budget, depth);
-  let tag: number;
-  [tag, pos] = readU32(bytes, pos);
-  if (tag === FORM_BINARY_FLOAT64) {
-    let value: number;
-    [value, pos] = readF64LE(bytes, pos);
-    return [k.internTrivialFloat64(value), pos];
-  }
-  if (tag === FORM_BINARY_INT64) {
-    let value: bigint;
-    [value, pos] = readI64LE(bytes, pos);
-    return [k.internTrivialInt64(value), pos];
-  }
-  if (tag === FORM_BINARY_LEAF) {
-    let pkg: number;
-    let level: number;
-    let type: number;
-    let inst: number;
-    [pkg, pos] = readU32(bytes, pos);
-    [level, pos] = readU32(bytes, pos);
-    [type, pos] = readU32(bytes, pos);
-    [inst, pos] = readU32(bytes, pos);
-    return [k.remapImportedLeaf(scope, { pkg, level, type, inst }), pos];
-  }
-  if (tag !== FORM_BINARY_COMPOSITE) {
-    throw new Error(`form binary: unknown node tag ${tag}`);
-  }
-  let category: NodeID;
-  [category, pos] = deserializeRawNode(k, bytes, pos, scope, budget, depth + 1);
-  let count: number;
-  [count, pos] = readU32(bytes, pos);
-  if (count > FORM_BINARY_MAX_CHILDREN) {
-    throw new Error("form binary: maximum child count exceeded");
-  }
-  const children: NodeID[] = [];
-  for (let i = 0; i < count; i++) {
-    let child: NodeID;
-    [child, pos] = deserializeRawNode(k, bytes, pos, scope, budget, depth + 1);
-    children.push(child);
-  }
-  return [k.intern(category, children), pos];
 }
 
 function deserializeNode(

@@ -55,18 +55,6 @@ export function bstrToText(s: string): string {
   return isWide(s) ? s : DECODER.decode(bstrToBytes(s));
 }
 
-// JSON leaves arrive as text; each string leaf becomes its bytes.
-export function jsonLeavesToBstr(v: unknown): unknown {
-  if (typeof v === "string") return textToBstr(v);
-  if (Array.isArray(v)) return v.map(jsonLeavesToBstr);
-  if (v !== null && typeof v === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, x] of Object.entries(v)) out[textToBstr(k)] = jsonLeavesToBstr(x);
-    return out;
-  }
-  return v;
-}
-
 function opt<A extends unknown[], R>(
   f: ((...a: A) => R) | undefined,
   wrap: (g: (...a: A) => R) => (...a: A) => R,

@@ -11,6 +11,7 @@
 // internal items (Value, run_source, sub-modules) are reachable from lib.rs
 // without duplicating the kernel.
 #[path = "main.rs"]
+#[allow(dead_code)] // the CLI and serve halves of main.rs are unreachable from the C-ABI door
 mod kernel;
 
 // Re-export every public-within-crate item at the crate root. The sibling
@@ -34,7 +35,7 @@ mod cabi {
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     /// Evaluate a Form recipe source string; return the final value rendered as
-    /// the kernel's `display()` text — the exact text the CLI prints. The
+    /// the kernel's `shown()` text — the exact text the CLI prints. The
     /// returned heap C string MUST be freed with `form_eval_free`. A panic, a
     /// null pointer, or non-UTF-8 input comes back as a string starting "ERR:"
     /// (never a crash across the FFI boundary).
@@ -45,7 +46,7 @@ mod cabi {
                 return "ERR: null source".to_string();
             }
             match unsafe { CStr::from_ptr(src) }.to_str() {
-                Ok(s) => kernel::run_source(s).display(),
+                Ok(s) => kernel::run_source(s).shown(),
                 Err(_) => "ERR: source not valid UTF-8".to_string(),
             }
         }))
@@ -86,7 +87,7 @@ mod cabi {
                     .unwrap_or(std::ptr::null_mut());
             }
         };
-        let out = catch_unwind(AssertUnwindSafe(|| kernel::run_source(&input).display()))
+        let out = catch_unwind(AssertUnwindSafe(|| kernel::run_source(&input).shown()))
             .unwrap_or_else(|_| "ERR: kernel panic".to_string());
         env.new_string(out)
             .map(|s| s.into_raw())

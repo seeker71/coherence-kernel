@@ -489,8 +489,8 @@ class WorkerCarriers {
     this.socketWorker!.postMessage(operation);
     Atomics.wait(control, 0, 0);
     const value = Atomics.load(control, 1);
-    if (operation.op !== "recv") return value;
-    if (value <= 0) return "";
+    // a recv that met a close or an error has no string to give
+    if (operation.op !== "recv" || value <= 0) return value;
     return UTF8_DECODER.decode(this.socketData!.subarray(0, value));
   }
 
