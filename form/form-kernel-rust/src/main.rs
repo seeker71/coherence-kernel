@@ -12213,6 +12213,25 @@ mod sibling_law_tests {
         .ok()
     }
 
+    // stop_text -- the words src's walk stopped by, or None when it answered.
+    fn stop_text(src: &str) -> Option<String> {
+        let src = src.to_string();
+        match std::panic::catch_unwind(move || {
+            let mut k = Kernel::new();
+            let root = read_root_from_source(&mut k, &src);
+            execute_root(&mut k, root)
+        }) {
+            Ok(_) => None,
+            Err(payload) => Some(if let Some(s) = payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<a stop that carries no words>".to_string()
+            }),
+        }
+    }
+
     fn int(src: &str) -> i64 {
         match eval(src) {
             Some(Value::Int(n)) => n,
@@ -12295,7 +12314,16 @@ mod sibling_law_tests {
 
     #[test]
     fn round_ndigits_counts_places() {
-        assert!(eval("(round_ndigits 1.25 -1)").is_none(), "a negative count stops");
+        // a negative count stops by name, never through an allocation's capacity
+        // overflow (the stop it took before the guard)
+        match stop_text("(round_ndigits 1.25 -1)") {
+            Some(text) => assert!(
+                text.contains("round_ndigits: ndigits is a count of places"),
+                "(round_ndigits 1.25 -1) stopped by {:?}, want a stop by name",
+                text
+            ),
+            None => panic!("(round_ndigits 1.25 -1) answered, want a stop by name"),
+        }
         match eval("(round_ndigits 2.675 2)") {
             Some(Value::Float(f)) => assert_eq!(f, 2.67),
             other => panic!("round_ndigits 2.675 2: {:?}", other),
