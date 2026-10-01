@@ -1,20 +1,30 @@
-; host-walk-band.bml — the walk's window, its lock and its turns, with no model and no git.
+; host-walk-band.bml — the walk's window, its lock, its turns, its sync and its publish window, with no model;
+; git runs only over a scratch origin under temp_dir.
 ;
-; Verdict 32767 = 1 options | 2 claims | 4 refuses | 8 takes-gone | 16 takes-reused | 32 one-taker | 64 unowned
+; Verdict 2097151 = 1 options | 2 claims | 4 refuses | 8 takes-gone | 16 takes-reused | 32 one-taker | 64 unowned
 ;   | 128 releases | 256 floor | 512 unmeasured | 1024 room | 2048 turn-lines | 4096 turns | 8192 elsewhere
-;   | 16384 yield
+;   | 16384 yield | 32768 sync | 65536 reviewed | 131072 idle | 262144 stale-mark | 524288 publish
+;   | 1048576 heal
 ;
 ; A turn reads {"turns":24,"deadline_ms":<the window's end on host_monotonic_ms>} on stdin. One walk holds a
 ; checkout's lock: a fresh claim holds it, a living holder refuses a later start and is named, a gone holder (a
 ; pid that ended, or a pid the host handed out again after the stamp) is taken over by one start only, a lock that
-; names no holder yet refuses for its first minute, and only the holder releases it. The window's option is the
+; names no holder yet refuses for its first minute, and only the holder releases it. A take's mark names its maker:
+; a mark whose maker is gone, or one a minute old that names none, is cleared once and the lock taken; a fresh mark
+; with no maker yet, and one whose maker lives, refuse and name it. The window's option is the
 ; median real option of recorded ledger rows (form-stdlib/tests/fixtures/host-walk-ledger.jsonl: ten rows of the
 ; walk checkout's receipts/native-turn-ledger.jsonl, one of them dry), copied under temp_dir and read back from
 ; there; with none measured it is half an hour. A turn's lines keep its last row and its walk's verdict, and a turn
 ; that printed neither is named by its last line that is not an organ-health reading. The turns
-; loop hands each turn the window's end, stops at a turn that ran no gap, at its count bound, and when the window is
-; not ready. Walk doors in other checkouts are read from host_process rows, never this checkout's own, and the
-; yield neither waits when none walks nor when the window holds no option.
+; loop hands each turn the window's end, stops at a turn that ran no gap, after an idle turn lands (no local IDs
+; generated and the band where it was, or a row that does not read), at its count bound, and when the window is not ready; only a turn that ran a
+; gap is reviewed. Walk doors (and the session learner) in other checkouts are read from host_process rows, never
+; this checkout's own, and the yield neither waits when none walks nor when the window holds no option. The sync,
+; over a scratch origin whose ledgers merge as a union: a dirty ledger row with main moved follows main and keeps
+; the row; a real conflict names its file, holds, and leaves the tree as it was; a rebase refused by an untracked
+; file reads dirty, never conflict. The publish window restores the checkpoint when its run answers and when it
+; stops, clears its marker, refuses a moved tree and a marker this pid already holds; a killed publish's marker heals
+; its own bytes back, keeps a later writer's bytes and its marker, and an unreadable marker goes.
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- host_alive, host_process and host_processes are fkwu doors; the reference
 ; kernels only reserve their names (form-kernel-go/reserved_heads.go), so their walk of this band has no holder to
@@ -141,10 +151,10 @@ section [form.bml] {
   }
   def hwb-proc(pid, cwd, argv) = [pid, 1, "/x/fkwu", cwd, argv, 1000, 0];
   def hwb-elsewhere(ctx) {
-   let rows = [hwb-proc(11, "/elsewhere", ["./fkwu", "observe/movement-run.bml"]), hwb-proc(12, "/here", ["./fkwu", "observe/native-turn-run.bml"]), hwb-proc(13, "/elsewhere", ["./fkwu", "observe/ear-live-native.fk"]), 3, [14, 1, "/x/fkwu", "/elsewhere"], hwb-proc(15, "", ["./fkwu", "observe/day-turn.bml"]), hwb-proc(16, "/walk", ["/walk/fkwu", "/walk/observe/scheduled-walk.bml"])];
+   let rows = [hwb-proc(11, "/elsewhere", ["./fkwu", "observe/movement-run.bml"]), hwb-proc(12, "/here", ["./fkwu", "observe/native-turn-run.bml"]), hwb-proc(13, "/elsewhere", ["./fkwu", "observe/ear-live-native.fk"]), 3, [14, 1, "/x/fkwu", "/elsewhere"], hwb-proc(15, "", ["./fkwu", "observe/day-turn.bml"]), hwb-proc(16, "/walk", ["/walk/fkwu", "/walk/observe/scheduled-walk.bml"]), hwb-proc(17, "/live", ["./fkwu", "observe/native-session-learning-run.fk"])];
    let found = hw-elsewhere-of(rows, "/here");
    let live = hw-elsewhere(hw-here());
-   hwb-bit(((Comparable) len(found) == 2) && ((Comparable) found[0][0] == 11) && ((Comparable) found[1][0] == 16) && ((String) hw-walk-names([found[0]]) == "observe/movement-run.bml (pid 11) in /elsewhere") && ((Comparable) len(hw-elsewhere-of(live, hw-here())) == len(live)) && ((Comparable) len(hw-elsewhere-of(live, "")) == len(live)));
+   hwb-bit(((Comparable) len(found) == 3) && ((Comparable) found[0][0] == 11) && ((Comparable) found[1][0] == 16) && ((Comparable) found[2][0] == 17) && ((String) hw-walk-names([found[0]]) == "observe/movement-run.bml (pid 11) in /elsewhere") && ((Comparable) len(hw-elsewhere-of(live, hw-here())) == len(live)) && ((Comparable) len(hw-elsewhere-of(live, "")) == len(live)));
   }
   def hwb-yield(ctx) {
    let floor = [1412860, "the median of 9 measured"];
@@ -154,10 +164,123 @@ section [form.bml] {
    let spent = host_monotonic_ms() - began;
    hwb-bit(((String) quiet == "") && ((String) walking == "[walk-yield] observe/movement-run.bml (pid 11) in /elsewhere still walks, and the window no longer holds an option") && (spent < hw-yield-poll-ms()));
   }
+  // ── the sync, over a scratch origin under temp_dir ──
+  def hwb-sh(dir, cmd) = hw-line(host-exec("cd '" ++ dir ++ "' && { " ++ cmd ++ " ; } 2>/dev/null", ""));
+  def hwb-git-setup() = "git init -q --bare origin.git && git clone -q origin.git main && cd main && git config user.email band@host && git config user.name band && mkdir receipts && printf 'receipts/*.jsonl merge=union\\n' > .gitattributes && printf '{\"r\":0}\\n' > receipts/ledger.jsonl && printf 'one\\ntwo\\n' > src.txt && git add -A && git commit -q -m base && git branch -M main && git push -q origin main && cd .. && git clone -q origin.git walk && cd walk && git config user.email walk@host && git config user.name walk && git checkout -q -b walk && git push -q origin walk && echo ready";
+  def hwb-main-moves() = "cd main && printf '{\"r\":1}\\n' >> receipts/ledger.jsonl && git commit -q -am main1 && git push -q origin main && cd ../walk && printf '{\"r\":\"walk\"}\\n' >> receipts/ledger.jsonl && echo ready";
+  def hwb-both-edit() = "cd walk && git commit -q -am row && printf 'one\\nWALK\\n' > src.txt && git commit -q -am walk-src && cd ../main && printf 'one\\nMAIN\\n' > src.txt && git commit -q -am main-src && git push -q origin main && cd ../walk && printf '{\"r\":\"walk-2\"}\\n' >> receipts/ledger.jsonl && echo ready";
+  def hwb-untracked() = "cd walk && git checkout -q -- receipts/ledger.jsonl && git reset -q --hard origin/main && cd ../main && printf 'new\\n' > newfile.txt && git add newfile.txt && git commit -q -m main-new && git push -q origin main && cd ../walk && printf 'mine\\n' > newfile.txt && echo ready";
+  def hwb-sync(ctx) {
+   let root = hwb-root(ctx) ++ "/sync";
+   let made = host_dir_mkdir(root);
+   let walk = root ++ "/walk";
+   let ready = hwb-sh(root, hwb-git-setup());
+   let moved = hwb-sh(root, hwb-main-moves());
+   let dirty = hwb-sh(walk, hw-sync-command("walk"));
+   let ledger = read_file(walk ++ "/receipts/ledger.jsonl") ?? "";
+   let crossed = hwb-sh(root, hwb-both-edit());
+   let conflict = hwb-sh(walk, hw-sync-command("walk"));
+   let kept = read_file(walk ++ "/src.txt") ?? "";
+   let rebasing = host_path_exists(walk ++ "/.git/rebase-merge");
+   let row = hwb-has?(read_file(walk ++ "/receipts/ledger.jsonl") ?? "", "walk-2");
+   let placed = hwb-sh(root, hwb-untracked());
+   let refused = hwb-sh(walk, hw-sync-command("walk"));
+   hwb-bit(((String) ready == "ready") && ((String) moved == "ready") && hwb-has?(dirty, "sync=0") && (!hw-conflicted?(dirty)) && ((String) ledger == "{\"r\":0}\n{\"r\":1}\n{\"r\":\"walk\"}\n") && ((String) crossed == "ready") && hwb-has?(conflict, "conflict: src.txt") && hwb-has?(conflict, "sync=1") && hw-conflicted?(conflict) && ((String) kept == "one\nWALK\n") && ((Comparable) rebasing == 0) && row && ((String) placed == "ready") && hwb-has?(refused, "dirty: ?? newfile.txt") && hwb-has?(refused, "sync=1") && (!hw-conflicted?(refused)));
+  }
+  // ── only a turn that ran a gap is reviewed ──
+  def hwb-review-mark(mark) {
+   let wrote = write_file_text(mark, "reviewed\n");
+   "[local-flow-review] next: scripted";
+  }
+  def hwb-reviewed(ctx) {
+   let mark = hwb-root(ctx) ++ "/reviewed";
+   let none = hw-reviewed-by("[native-turn] no open gap", () => hwb-review-mark(mark));
+   let quiet = host_path_exists(mark);
+   let turned = hw-reviewed-by("[native-turn] " ++ hwb-rows()[8], () => hwb-review-mark(mark));
+   hwb-bit(((String) none == "[native-turn] no open gap") && ((Comparable) quiet == 0) && ((Comparable) host_path_exists(mark) == 1) && hwb-has?(turned, "closure-unit-line"));
+  }
+  // ── an idle turn lands and ends the window's turns ──
+  def hwb-row-turn(row) = "[native-turn] " ++ row ++ "\n[native-turn:walk] g declined after 1 option(s); findings carried forward: 1";
+  // a row that names a gap but does not read as one
+  def hwb-unread-row() = "[native-turn] {broken \"gap\": 1";
+  def hwb-refusal() ="{\"gap\":\"g\",\"option\":1,\"band_before\":7,\"band_after\":7,\"local_generated_ids\":0,\"lane_reason\":\"caller-check-unmeetable\"}";
+  def hwb-idle(ctx) {
+   let until = 55555;
+   // bounded at five, so a walk that spins on idle turns reads 5 here rather than holding the band
+   let landed = hw-turns(until, 5, hwb-ready, (deadline, n) => hwb-row-turn(hwb-refusal()), turn => "[landed] " ++ len(turn).str());
+   let unread = hw-turns(until, 2, hwb-ready, (deadline, n) => hwb-unread-row(), turn => "");
+   let moved = hwb-row-turn("{\"gap\":\"g\",\"band_before\":7,\"band_after\":9,\"local_generated_ids\":0}");
+   let spent = hwb-row-turn("{\"gap\":\"g\",\"band_before\":7,\"band_after\":7,\"local_generated_ids\":12}");
+   let none = hwb-row-turn("{\"gap\":\"g\",\"band_before\":null,\"band_after\":null,\"local_generated_ids\":null}");
+   hwb-bit(((Comparable) landed == 1) && ((Comparable) unread == 1) && ((String) hw-idle-why(hwb-unread-row()) == "its row did not read") && hw-idle?(hwb-row-turn(hwb-refusal())) && (!hw-idle?(moved)) && (!hw-idle?(spent)) && hw-idle?(none) && (!hw-idle?("[native-turn] no open gap")) && (!hw-idle?(hwb-turn-out())));
+  }
+  // ── a take's mark names its maker; a stale mark is cleared once ──
+  def hwb-marked(lock, gone, by) {
+   let mark = lock ++ "/took-" ++ gone.str();
+   let made = host_dir_mkdir(mark);
+   let named = (String) by == "" ? 0 : write_file_text(mark ++ "/by", by);
+   lock;
+  }
+  def hwb-stale-mark(ctx) {
+   let gone = hwb-gone-pid();
+   let text = nothing?(gone) ? "" : hw-owner-text("scheduled-walk", gone, now_unix_ms());
+   let a = nothing?(gone) ? "" : hwb-marked(hwb-placed(ctx, "stale-gone", text), gone, hw-owner-text("day-turn", gone, now_unix_ms()));
+   let ca = nothing?(gone) ? [0, ""] : hw-claim-at(a, "day-turn", hwb-self(), now_unix_ms());
+   let b = nothing?(gone) ? "" : hwb-marked(hwb-placed(ctx, "stale-old", text), gone, "");
+   let cb = nothing?(gone) ? [0, ""] : hw-claim-at(b, "day-turn", hwb-self(), now_unix_ms() + 120000);
+   let c = nothing?(gone) ? "" : hwb-marked(hwb-placed(ctx, "stale-live", text), gone, hw-owner-text("scheduled-walk", hwb-self(), now_unix_ms()));
+   let cc = nothing?(gone) ? [1, ""] : hw-claim-at(c, "day-turn", hwb-self(), now_unix_ms() + 120000);
+   hwb-bit(((Comparable) ca[0] == 1) && hwb-has?(ca[1], "taken over from scheduled-walk pid " ++ gone.str()) && ((Comparable) hw-field(hw-owner(a), "pid=") == hwb-self()) && ((Comparable) cb[0] == 1) && ((Comparable) hw-field(hw-owner(b), "pid=") == hwb-self()) && ((Comparable) cc[0] == 0) && hwb-has?(cc[1], "another start is taking over the lock") && hwb-has?(cc[1], "(scheduled-walk, pid " ++ hwb-self().str() ++ ")") && ((String) hw-owner(c) == text));
+  }
+  // ── the publish window: restored when its run answers and when it stops ──
+  def hwb-stop-while(f, text) = (String) (read_file(f) ?? "") == text ? form_error("host-walk band: the run stops while the candidate stands") : [read_file(f)];
+  def hwb-publish(ctx) {
+   let dir = hwb-root(ctx) ++ "/publish";
+   let f = hwb-root(ctx) ++ "/published.txt";
+   let wrote = write_file_text(f, "A\n");
+   let marker = hw-marker(dir);
+   let seen = hw-with-published(dir, [f], ["A\n"], ["B\n"], () => [read_file(f)]);
+   let after = read_file(f);
+   let cleared = host_path_exists(marker);
+   let stopped = hw-with-published(dir, [f], ["A\n"], ["C\n"], () => hwb-stop-while(f, "C\n"));
+   let held = read_file(f);
+   let moved = hw-with-published(dir, [f], ["X\n"], ["D\n"], () => [read_file(f)]);
+   let kept = read_file(f);
+   let planted = write_file_text(marker, "{}\n");
+   let blocked = hw-with-published(dir, [f], ["A\n"], ["E\n"], () => [read_file(f)]);
+   let unmarked = host_path_remove(marker);
+   hwb-bit(((Value) seen[0] == ["B\n"]) && seen[1] && ((String) seen[2] == "") && ((String) after == "A\n") && ((Comparable) cleared == 0) && nothing?(stopped[0]) && stopped[1] && ((String) stopped[2] == "") && ((String) held == "A\n") && hwb-has?(moved[2], "source-conflict") && ((String) kept == "A\n") && hwb-has?(blocked[2], "marker-held") && ((String) (read_file(f) ?? "") == "A\n"));
+  }
+  // ── a killed publish heals: its own bytes return, a later writer's stay ──
+  def hwb-heal(ctx) {
+   let dir = hwb-root(ctx) ++ "/heal";
+   let made = host_dir_mkdir(dir);
+   let gone = hwb-gone-pid();
+   let own = hwb-root(ctx) ++ "/heal-own.txt";
+   let same = hwb-root(ctx) ++ "/heal-same.txt";
+   let other = hwb-root(ctx) ++ "/heal-other.txt";
+   let held = hwb-root(ctx) ++ "/heal-held.txt";
+   let killed = dir ++ "/publish-" ++ value_str(gone) ++ ".marker";
+   let w1 = write_file_text(own, "B\n");
+   let w2 = write_file_text(same, "A\n");
+   let w3 = write_file_text(other, "Z\n");
+   let w4 = write_file_text(held, "B\n");
+   let m1 = write_file_text(killed, hw-marker-text(gone, now_unix_ms(), [own, same, other], ["A\n", "A\n", "A\n"], ["B\n", "B\n", "B\n"]));
+   let first = hw-heal-publishes(dir);
+   let back = read_file(own);
+   let stays = read_file(other);
+   let marked = host_path_exists(killed);
+   let settled = write_file_text(other, "A\n");
+   let parent = host_process(hwb-self())[1];
+   let m2 = write_file_text(dir ++ "/publish-" ++ parent.str() ++ ".marker", hw-marker-text(parent, now_unix_ms(), [held], ["A\n"], ["B\n"]));
+   let m3 = write_file_text(dir ++ "/publish-1.marker", "{\"pid\":");
+   let second = hw-heal-publishes(dir);
+   hwb-bit((!nothing?(gone)) && ((Comparable) first[0] == 0) && ((Comparable) len(first[1]) == 1) && hwb-has?(first[1][0], "heal-other.txt holds bytes the killed publish did not write") && ((String) back == "A\n") && ((String) stays == "Z\n") && ((Comparable) marked == 1) && ((Comparable) second[0] == 2) && nil?(second[1]) && ((Comparable) host_path_exists(killed) == 0) && ((Comparable) host_path_exists(dir ++ "/publish-1.marker") == 0) && ((Comparable) host_path_exists(dir ++ "/publish-" ++ parent.str() ++ ".marker") == 1) && ((String) read_file(held) == "B\n") && hwb-has?(hw-heal-line(first), "heal-other.txt"));
+  }
  }
  let ctx = hwb-fresh();
  nothing?(ctx) ? form_error("host-walk band needs a fresh directory under temp_dir") : 0;
- let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield]]);
+ let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield], ["sync", 32768, 1, hwb-sync], ["reviewed", 65536, 1, hwb-reviewed], ["idle", 131072, 1, hwb-idle], ["stale-mark", 262144, 1, hwb-stale-mark], ["publish", 524288, 1, hwb-publish], ["heal", 1048576, 1, hwb-heal]]);
  host_dir_rmdir(hwb-root(ctx));
  verdict;
 }

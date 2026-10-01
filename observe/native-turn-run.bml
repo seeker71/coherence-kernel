@@ -2,24 +2,36 @@
 //
 // Reads learn/native-turn-queue.jsonl (id, goal, writable, band, full, and optionally document_context "catalog"
 // for a writable file larger than the voice's context) and takes the open gap with the fewest
-// attempts in receipts/native-turn-ledger.jsonl. Runs the gap's band in its own fresh kernel; when it already
+// attempts in receipts/native-turn-ledger.jsonl. A gap whose latest real row is the lane's rung-0 refusal
+// (caller-check-unmeetable) under the checks the queue still holds waits on its contract, and the walk's own pick
+// passes it by; a gap asked for by name is taken. Runs the gap's band in its own fresh kernel; when it already
 // reads full the gap is closed and nothing runs. Otherwise the turn is a backtrack walk (oac-backtrack-walk,
 // control/choice-lane-core.fk) with a caller-sized local attempt allowance (six by default). The first hands the goal to the native code lane
 // (observe/form-cli-code-run.fk: local Qwen in one native session, no rented fallback) with the writable sources
 // as documents and the gap's own read-only checks, then runs the band again. An option whose band did not turn
-// green is a backtrack point, not an end: it keeps its candidate under .hearth/native-turns, restores the source,
-// and acks a node carrying what it saw (the band's reading, the lane's status, the candidate's diff, and the
-// compiler's own words when the band did not read). Further options resume the same checkpoint under the
+// green is a backtrack point, not an end: it keeps its candidate under .hearth/native-turns, and acks a node
+// carrying what it saw (the band's reading, the lane's status, the candidate's diff, and the compiler's own words
+// when the band did not read). The candidate stands in the tree only inside hw-with-published
+// (form-stdlib/bml/host-walk.bml): a marker read back first, the restore deferred, so a stop restores the source and
+// a kill leaves a marker the next start heals. Further options resume the same checkpoint under the
 // unchanged original request, with that finding as an identified feedback event. A green option keeps its
 // edit for the landing and ends the walk. Each option lands its own row: gap, option, band before and after
-// (null when the band printed no number), full, band_green, and who began the turn, read from the host's own
-// process table. Coordinator identity is attribution, not token usage; unmeasured rented tokens remain null.
+// (null when the band printed no number), full, band_green, the lane's reason and blocking check, the digest of
+// the checks it ran under, the session that began it when the caller names one, and who began the turn, read from
+// the host's own process table. Coordinator identity is attribution, not token usage; unmeasured rented tokens
+// remain null.
+// The wall deadline: {"deadline_ms":<host_monotonic_ms>} (the walk's window end). No option starts once the time
+// left cannot hold the walk's option floor (hw-option-floor), and the lane is stopped at the deadline: its row
+// reads lane "lane-deadline" and lane_reason "deadline", and its output and any candidate stay under
+// .hearth/native-turns. With no deadline the lane runs to its end.
 // A test turn ({"test":1}) writes its rows to .hearth/native-turns/test-ledger.jsonl and always restores the
 // source, so a turn begun by a session can learn what the lane can do without closing a gap the nights must close.
 // {"publish_from":"<lane output>"} publishes a result already on disk instead of asking the lane (a test of the path);
 // {"candidate":"<file>"} publishes that file's text as the gap's first writable document (a test of one candidate).
-// stdin, optional: {"gap":"<id>","dry":1,"test":1,"model":"qwen38-q8","context":16384,"turns":64,"attempts":6}; dry skips the lane.
+// stdin, optional: {"gap":"<id>","dry":1,"test":1,"model":"qwen38-q8","context":16384,"turns":64,"attempts":6,
+// "deadline_ms":0,"session":"<the caller's session id>"}; dry skips the lane.
 // preflight-exec: forbidden
+import form-stdlib/bml/host-walk.bml;
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/meaning-codes.bml;
 import control/offer-ack-core.fk;
@@ -32,7 +44,7 @@ section [form.bml] {
  class NativeTurn {
   def nt-queue() = "learn/native-turn-queue.jsonl";
   def nt-ledger() = "receipts/native-turn-ledger.jsonl";
-  def nt-dir() = ".hearth/native-turns";
+  def nt-dir() = hw-turn-dir();
   def nt-str(doc, key) = if json-object-has?(doc, key) then json-string-value(json-object-get(doc, key)) else "";
   def nt-int(doc, key, d) = if json-object-has?(doc, key) then json-int-value(json-object-get(doc, key)) else d;
   def nt-maybe(doc,key) = !json-object-has?(doc,key) || node_eq(json-object-get(doc,key),json-node-null()) ? nothing() : json-int-value(json-object-get(doc,key));
@@ -45,7 +57,26 @@ section [form.bml] {
   // the open gap with the fewest real attempts, in queue order among equals, so one gap the lane cannot yet
   // close does not hold the others
   def nt-attempts(id, rows) = if nil?(rows) then 0 else ((if (((String) nt-str(rows[0], "gap") == id) && ((Comparable) nt-int(rows[0], "dry", 0) == 0)) then 1 else 0) + nt-attempts(id, rows[1:]));
-  def nt-open(queue, done, want) = if nil?(queue) then [] else if ((((String) want == "") || ((String) nt-str(queue[0], "id") == want)) && ((Comparable) nt-green?(nt-str(queue[0], "id"), done) == 0)) then cons(queue[0], nt-open(queue[1:], done, want)) else nt-open(queue[1:], done, want);
+  // the checks a gap runs under, read as one number: the queue row's checks, emitted canonically and folded
+  def nt-digest-from(s, i, n, d) = if (i >= n) then d else nt-digest-from(s, (i + 1), n, (((d * 131) + str_byte_at(s, i)) % 2147483647));
+  def nt-digest(s) = nt-digest-from(s, 0, len(s), 7).str();
+  def nt-checks-digest(gap) = nt-digest(json-emit(if json-object-has?(gap, "checks") then json-object-get(gap, "checks") else json-node-array([])));
+  // a gap waits on its contract when its latest real row (not dry, not a test) is the lane's rung-0 refusal under
+  // the checks the queue still holds; a new check, or a healed one, opens it again
+  def nt-real?(row) = (((Comparable) nt-int(row, "dry", 0) == 0) && ((Comparable) nt-int(row, "test", 0) == 0));
+  def nt-latest-real(id, rows, found) = if nil?(rows) then found else nt-latest-real(id, rows[1:], if (((String) nt-str(rows[0], "gap") == id) && nt-real?(rows[0])) then [rows[0]] else found);
+  def nt-unmeetable-reason() = "caller-check-unmeetable";
+  def nt-refused-under?(row, digest) = (((String) nt-str(row, "lane_reason") == nt-unmeetable-reason()) && ((String) nt-str(row, "checks_digest") == digest));
+  def nt-waits?(gap, done) {
+   let last = nt-latest-real(nt-str(gap, "id"), done, []);
+   if nil?(last) then false else nt-refused-under?(last[0], nt-checks-digest(gap));
+  }
+  def nt-open(queue, done, want) = if nil?(queue) then [] else if ((((String) want == "") || ((String) nt-str(queue[0], "id") == want)) && ((Comparable) nt-green?(nt-str(queue[0], "id"), done) == 0) && (((String) want != "") || !nt-waits?(queue[0], done))) then cons(queue[0], nt-open(queue[1:], done, want)) else nt-open(queue[1:], done, want);
+  def nt-waiting(queue, done) = if nil?(queue) then [] else if (((Comparable) nt-green?(nt-str(queue[0], "id"), done) == 0) && nt-waits?(queue[0], done)) then cons(nt-str(queue[0], "id"), nt-waiting(queue[1:], done)) else nt-waiting(queue[1:], done);
+  def nt-none-open(queue, done) {
+   let waiting = nt-waiting(queue, done);
+   if nil?(waiting) then "[native-turn] no open gap\n" else mc-cat(["[native-turn] no open gap: ", nt-comma(waiting), " wait(s) on its contract (the lane refused a caller check no candidate can meet, and the queue still holds that check)\n"]);
+  }
   def nt-least(gaps, done, best) = if nil?(gaps) then best else nt-least(gaps[1:], done, if (nil?(best) || (nt-attempts(nt-str(gaps[0], "id"), done) < nt-attempts(nt-str(best[0], "id"), done))) then [gaps[0]] else best);
   def nt-pick(queue, done, want) = nt-least(nt-open(queue, done, want), done, []);
   // a band reads its number only when its run exits 0 with a number on its last line; anything else is a fold
@@ -141,11 +172,21 @@ section [form.bml] {
   def nt-request(gap, opts, goal) = json-node-object([fhn-s("goal",goal),json-node-pair("documents",json-node-array(nt-docs(nt-sources(gap)))),json-node-pair("writable",json-node-array(nt-strings(nt-strs(gap,"writable")))),json-node-pair("checks",json-node-array(append(if json-object-has?(gap,"checks") then json-array-elements(json-object-get(gap,"checks")) else [],nt-balances(nt-strs(gap,"writable"))))),fhn-s("model",if json-object-has?(opts,"model") then nt-str(opts,"model") else "qwen38-q8"),fhn-n("context",nt-int(opts,"context",16384)),fhn-n("turns",nt-int(opts,"turns",64)),fhn-s("document_context",nt-context(gap)),fhn-s("code_entry","direct"),fhn-n("weight_training",0)]);
   def nt-continued(request,memory,id) = nil?(memory) ? request : json-node-object(append(json-object-pairs(request),[
    fhn-s("resume",memory[-1][1]),json-node-pair("feedback",json-node-object([fhn-s("id",id),fhn-s("text",memory[-1][0] + "\nKeep the original goal, candidate and checks. Diagnose this observation; choose a different repair if the same failure remains. Use focused reads for missing evidence and native repair/lift tools where applicable. Complete the pending task and review after verification.")]))]));
-  def nt-code(request,out) {
+  // the lane runs to its end, or, with a wall deadline, until the deadline: then it is stopped (SIGTERM), reaped,
+  // and reads lane-deadline. The wait rests a second between looks.
+  def nt-lane-poll-ms() = 1000;
+  def nt-lane-wait(pid, until) = if ((Comparable) until <= 0) then host_wait(pid) else if ((Comparable) host_alive(pid) != 1) then host_wait(pid) else if (host_monotonic_ms() > until) then nt-band-stop(pid) else nt-lane-rest(pid, until);
+  def nt-lane-rest(pid, until) {
+   host_sleep_ms(nt-lane-poll-ms());
+   nt-lane-wait(pid, until);
+  }
+  def nt-lane-said(status) = if nothing?(status) then nt-lane-deadline() else mc-cat(["lane-exit=", status.str()]);
+  def nt-lane-deadline() = "lane-deadline";
+  def nt-code(request,out,until) {
    let input = request + ".stdin";
    write_file_text(input,"@" + request + "\n");
    let pid = host_spawn_at(["./fkwu","observe/form-cli-code-run.fk"],[input,out,out + ".err"]);
-   pid <= 0 ? "lane-launch-unavailable" : "lane-exit=" + host_wait(pid).str();
+   pid <= 0 ? "lane-launch-unavailable" : nt-lane-said(nt-lane-wait(pid, until));
   }
   // the lane keeps its documents in its own session and the caller publishes them: find the result line, write each
   // final document whose path is writable, and read the lane's status beside it
@@ -156,8 +197,6 @@ section [form.bml] {
    faj-valid(r) ? parse-json("code-result",r) : json-node-object([fhn-s("status","attention"),fhn-s("reason","No complete valid native coding result; exact evidence retained at " + outPath)]);
   }
   def nt-has(xs, x) = if nil?(xs) then 0 else if ((String) xs[0] == x) then 1 else nt-has(xs[1:], x);
-  def nt-publish(docs, writable, n) = if nil?(docs) then n else nt-publish(docs[1:], writable, if ((Comparable) nt-has(writable, nt-str(docs[0], "path")) == 1) then nt-publish-one(docs[0], n) else n);
-  def nt-publish-one(doc, n) { let w = write_file_text(nt-str(doc, "path"), nt-str(doc, "text")); (n + 1); }
   // {"candidate":"<path>"}: the text at <path> stands as the lane's document for the gap's first writable file
   def nt-candidate-result(gap, path) = json-node-object([fhn-s("status", "candidate"), json-node-pair("documents", json-node-array([json-node-object([fhn-s("path", nt-strs(gap, "writable")[0]), fhn-s("text", nt-read(path))])]))]);
   def nt-docs-of(result) = if json-object-has?(result, "documents") then json-array-elements(json-object-get(result, "documents")) else [];
@@ -165,14 +204,24 @@ section [form.bml] {
   def nt-texts(paths) = if nil?(paths) then [] else cons(nt-read(paths[0]), nt-texts(paths[1:]));
   def nt-originals(request,paths) = map(path => nt-str(filter(doc => nt-str(doc,"path") == path,json-array-elements(json-object-get(request,"documents")))[0],"text"),paths);
   def nt-publishable(result,opts,conflict) = !conflict && (json-object-has?(opts,"candidate") || (nt-str(result,"status") == "complete" && nt-int(result,"release_ok",0) == 1));
-  // keep the candidate beside the turn, then return each file to its checkpoint (oac-restore)
-  def nt-keep(paths, originals, stamp) = if nil?(paths) then 0 else nt-keep-next(write_file_text(mc-cat([nt-dir(), "/", stamp, "-", nt-base(paths[0]), ".candidate"]), nt-read(paths[0])), write_file_text(paths[0], originals[0]), paths, originals, stamp);
-  def nt-keep-next(kept, restored, paths, originals, stamp) = (1 + nt-keep(paths[1:], originals[1:], stamp));
+  // the candidate: per writable path, the lane's document for it, or nothing when the lane wrote none
+  def nt-doc-for(docs, path) = if nil?(docs) then nothing() else if ((String) nt-str(docs[0], "path") == path) then nt-str(docs[0], "text") else nt-doc-for(docs[1:], path);
+  def nt-candidate(docs, paths) = map(path => nt-doc-for(docs, path), paths);
+  def nt-written(cand) = len(filter(t => !nothing?(t), cand));
+  // the texts the publish writes: the candidate's where it has one, the checkpoint's elsewhere
+  def nt-over(cand, originals) = if nil?(cand) then [] else cons(cand[0] ?? originals[0], nt-over(cand[1:], originals[1:]));
+  // every candidate that differs from its checkpoint is kept beside the turn, published or not
+  def nt-keep(paths, cand, originals, stamp) = if nil?(paths) then 0 else (nt-keep-one(paths[0], cand[0], originals[0], stamp) + nt-keep(paths[1:], cand[1:], originals[1:], stamp));
+  def nt-keep-one(path, text, original, stamp) = if (nothing?(text) || ((String) text == original)) then 0 else nt-kept(write_file_text(mc-cat([nt-dir(), "/", stamp, "-", nt-base(path), ".candidate"]), text));
+  def nt-kept(wrote) = 1;
   def nt-run() {
    let line = trim(stdin-text());
    let opts = if ((String) line == "") then json-node-object([]) else parse-json("native-turn-options", line);
-   let picked = nt-pick(nt-rows(nt-queue()), nt-rows(nt-ledger()), nt-str(opts, "gap"));
-   if nil?(picked) then print_str("[native-turn] no open gap\n") else nt-turn(picked[0], opts);
+   let healed = hw-say(hw-heal());
+   let queue = nt-rows(nt-queue());
+   let done = nt-rows(nt-ledger());
+   let picked = nt-pick(queue, done, nt-str(opts, "gap"));
+   if nil?(picked) then print_str(nt-none-open(queue, done)) else nt-turn(picked[0], opts);
   }
   def nt-turn(gap, opts) {
    let id = nt-str(gap, "id");
@@ -183,19 +232,26 @@ section [form.bml] {
    if ((Comparable) before == full) then print_str(mc-cat(["[native-turn] ", id, " already reads ", full.str(), "\n"])) else nt-walk(gap, opts, id, full, band, before, coordinator);
   }
   def nt-local-attempts(opts) = max2(1,nt-int(opts,"attempts",6));
+  // the wall deadline the caller set (0: none); an option starts only while the time left holds the walk's option
+  // floor, the median real option this checkout's ledger measured (hw-option-floor)
+  def nt-deadline(opts) = nt-int(opts, "deadline_ms", 0);
+  def nt-room?(opts, floor) = ((Comparable) nt-deadline(opts) <= 0) || ((host_monotonic_ms() + floor[0]) <= nt-deadline(opts));
+  def nt-window-text(opts, floor) = mc-cat(["the window's end left ", hw-minutes(hw-left(nt-deadline(opts), host_monotonic_ms())), ", short of an option of ", hw-minutes(floor[0]), " (", floor[1], ")"]);
   // The original request is one value throughout the walk; feedback never rewrites its contract.
   def nt-walk(gap, opts, id, full, band, before, coordinator) {
    let request = nt-request(gap,opts,nt-str(gap,"goal") + "\nInitial execution evidence:\n" + nt-band-errors() + "\n" + nt-band-claims());
-   let w = oac-backtrack-walk(map(i => nt-option,(0 .. nt-local-attempts(opts))),[gap,opts,id,full,band,before,coordinator,request],[]);
+   let floor = hw-option-floor();
+   let w = oac-backtrack-walk(map(i => nt-option,(0 .. nt-local-attempts(opts))),[gap,opts,id,full,band,before,coordinator,request,floor],[]);
    let landed = ((Comparable) oac-one?(oac-backtrack-ack(w)) == 1);
    let carried = len(oac-backtrack-memory(w));
-   print_str(mc-cat(["[native-turn:walk] ", id, if landed then " green after " else " declined after ", (if landed then (carried + 1) else carried).str(), " option(s); findings carried forward: ", carried.str(), "\n"]));
+   let closed = if (landed || nt-room?(opts, floor)) then "" else mc-cat(["; ", nt-window-text(opts, floor)]);
+   print_str(mc-cat(["[native-turn:walk] ", id, if landed then " green after " else " declined after ", (if landed then (carried + 1) else carried).str(), " option(s); findings carried forward: ", carried.str(), closed, "\n"]));
   }
   def nt-option(offered) {
    let a = oac-option-args(offered);
    let memory = oac-option-memory(offered);
    let gap = a[0];
-   if !nil?(memory) && (memory[-1][1] == "" || memory[-1][2]) then oac-nothing() else {
+   if !nil?(memory) && (memory[-1][1] == "" || memory[-1][2]) then oac-nothing() else if !nt-room?(a[1], a[8]) then oac-nothing() else {
     let r = nt-attempt(gap,a[1],a[2],a[3],a[4],a[5],a[6],a[7],memory,len(memory) + 1);
     r[0] == 1 ? oac-one(r[1]) : oac-node(r[2]);
    };
@@ -204,9 +260,6 @@ section [form.bml] {
   // a band reading as text: a band that printed no number reads nothing — the file did not compile or the band stopped
   def nt-reading-text(v) = if nothing?(v) then "nothing (the band printed no number: the source did not compile or the band stopped)" else v.str();
   def nt-reading(key, v) = if nothing?(v) then json-node-pair(key, json-node-null()) else fhn-n(key, v);
-  // the candidate's change against its checkpoint, read in Form (form-stdlib/bml/text-diff.bml)
-  def nt-diff(paths, originals) = if nil?(paths) then "" else mc-cat([nt-diff-one(paths[0], originals[0]), nt-diff(paths[1:], originals[1:])]);
-  def nt-diff-one(path, original) { let d = td-diff(original, nt-read(path), 1, 2400); if ((String) d == "") then "" else mc-cat(["--- ", path, "\n", d]); }
   def nt-finding(n, before, after, full, said, status, published, diff, errors, claims) = mc-cat(["Attempt ", n.str(), ": the band read ", nt-reading-text(after), " of ", full.str(), " (it began at ", nt-reading-text(before), "); the lane said ", trim(said), if ((String) status == "") then "" else mc-cat([" with status ", status]), if ((Comparable) published == 0) then "; it published no document." else mc-cat(["; its candidate changed:\n", diff]), if ((Comparable) len(errors) == 0) then "" else mc-cat(["\nThe band did not read; the compiler said:\n", errors]), if ((Comparable) len(claims) == 0) then "" else mc-cat(["\nThe band's claims that did not hold:\n", claims])]);
   // Only an actual coding invocation establishes its provider-free lane scope.
   // Caller/coordinator guidance and arbitrary band work remain unattributed.
@@ -220,29 +273,46 @@ section [form.bml] {
     nt-reading("execution_required_remote_prompts",local ? 0 : nothing()),nt-reading("execution_required_remote_tokens",local ? 0 : nothing()),fhn-s("usage_scope","Actual native coding invocation only; whole-task guidance, coordinator, band and optional review usage require attribution."),fhn-n("source_conflict",conflict)
    ],unknown)));
   }
-  // one option: ask the lane, publish, read the band; returns (list green row finding)
+  // the candidate's change against its checkpoint, read in Form from the texts themselves (form-stdlib/bml/text-diff.bml)
+  def nt-diff-texts(paths, cand, originals) = if nil?(paths) then "" else mc-cat([if nothing?(cand[0]) then "" else nt-diff-text(paths[0], originals[0], cand[0]), nt-diff-texts(paths[1:], cand[1:], originals[1:])]);
+  def nt-diff-text(path, original, text) { let d = td-diff(original, text, 1, 2400); if ((String) d == "") then "" else mc-cat(["--- ", path, "\n", d]); }
+  // the band's reading while the candidate stands, wrapped so a band that read nothing stays apart from a stop
+  def nt-band-under(band, full) = [nt-band(band, full)];
+  // the lane's reason, and the reason the walk gives a lane it stopped at the deadline
+  def nt-lane-reason(said, result) = if ((String) said == nt-lane-deadline()) then "deadline" else nt-str(result, "reason");
+  def nt-node-or-null(doc, key) = if json-object-has?(doc, key) then json-object-get(doc, key) else json-node-null();
+  def nt-session(opts) = if json-object-has?(opts, "session") then [fhn-s("session", nt-str(opts, "session"))] else [];
+  // one option: ask the lane, publish inside hw-with-published, read the band; returns (list green row finding)
   def nt-attempt(gap, opts, id, full, band, before, coordinator, request, memory, n) {
    let made = fs_mkdir(nt-dir());
    let stamp = mc-cat([id, "-", now_unix_ms().str()]);
    let reqPath = mc-cat([nt-dir(), "/", stamp, ".json"]);
    let wrote = write_file_text(reqPath,json-emit(nt-continued(request,memory,stamp)));
-   let originals = nt-originals(request,nt-strs(gap,"writable"));
+   let paths = nt-strs(gap,"writable");
+   let originals = nt-originals(request,paths);
    let started = now_unix_ms();
    let dry = ((Comparable) nt-int(opts, "dry", 0) == 1);
    let outPath = if json-object-has?(opts, "publish_from") then nt-str(opts, "publish_from") else mc-cat([nt-dir(), "/", stamp, ".out"]);
-   let said = if (dry || (json-object-has?(opts,"publish_from") || json-object-has?(opts,"candidate"))) then "not-run" else nt-code(reqPath,outPath);
+   let said = if (dry || (json-object-has?(opts,"publish_from") || json-object-has?(opts,"candidate"))) then "not-run" else nt-code(reqPath,outPath,nt-deadline(opts));
    let result = if dry then json-node-object([]) else if json-object-has?(opts, "candidate") then nt-candidate-result(gap, nt-str(opts, "candidate")) else nt-result-of(outPath);
-   let conflict = ((Value) originals != nt-texts(nt-strs(gap,"writable")));
+   let conflict = ((Value) originals != nt-texts(paths));
    let ready = nt-publishable(result,opts,conflict);
-   let published = ready ? nt-publish(nt-docs-of(result),nt-strs(gap,"writable"),0) : 0;
-   let after = published > 0 ? nt-band(band,full) : before;
+   let cand = nt-candidate(nt-docs-of(result), paths);
+   let published = if ready then nt-written(cand) else 0;
+   let window = if (published > 0) then hw-with-published(nt-dir(), paths, originals, nt-over(cand, originals), () => nt-band-under(band, full)) else [[before], true, ""];
+   let refused = window[2];
+   let after = if nothing?(window[0]) then nothing() else window[0][0];
+   let shown = if ((String) refused == "") then published else 0;
    let errors = if nothing?(after) then nt-band-errors() else "";
-   let green = ready && published > 0 && (((Comparable) after == full) && (!((Comparable) before == full)));
+   let green = ready && shown > 0 && (((Comparable) after == full) && (!((Comparable) before == full)));
    let test = ((Comparable) nt-int(opts, "test", 0) == 1);
+   // a green option keeps its edit for the landing: the candidate stands again once the window restored it
+   let landed = if (green && !test) then hw-put-all(paths, nt-over(cand, originals)) else 0;
    let claims = if green then "" else nt-band-claims();
-   let finding = if green then "" else (conflict ? "Source changed during generation; candidate was not published. Refresh the caller's source contract before resuming." : nt-finding(n,before,after,full,said,nt-str(result,"status"),published,nt-diff(nt-strs(gap,"writable"),originals),errors,claims)) + "\nCoding observation: " + nt-str(result,"reason");
-   let kept = if published == 0 || (green && !test) then 0 else nt-keep(nt-strs(gap,"writable"),originals,stamp);
-   let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", id), fhn-n("option", n), nt-reading("band_before", before), nt-reading("band_after", after), fhn-n("full", full), fhn-n("band_green", if green then 1 else 0), fhn-n("dry", if dry then 1 else 0), fhn-n("test", if test then 1 else 0), fhn-s("coordinated_by", if nt-keeper?(coordinator) then "host-schedule" else "session"), fhn-s("coordinator", coordinator), fhn-n("rented_mind", if nt-keeper?(coordinator) then 0 else 1), fhn-s("request", reqPath), fhn-s("lane", trim(said)), fhn-s("lane_status", nt-str(result, "status")), nt-reading("lane_check_runs", nt-maybe(result, "check_runs")), nt-reading("lane_turns", nt-maybe(result, "turns")), fhn-n("published", published), fhn-n("wall_ms", (now_unix_ms() - started))]);
+   let reason = nt-lane-reason(said, result);
+   let finding = if green then "" else (conflict ? "Source changed during generation; candidate was not published. Refresh the caller's source contract before resuming." : mc-cat([nt-finding(n,before,after,full,said,nt-str(result,"status"),shown,nt-diff-texts(paths,cand,originals),errors,claims), if ((String) refused == "") then "" else mc-cat(["\nThe candidate was not published: ", refused])])) + "\nCoding observation: " + reason;
+   let kept = nt-keep(paths, cand, originals, stamp);
+   let row = json-node-object(append([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", id), fhn-n("option", n), nt-reading("band_before", before), nt-reading("band_after", after), fhn-n("full", full), fhn-n("band_green", if green then 1 else 0), fhn-n("dry", if dry then 1 else 0), fhn-n("test", if test then 1 else 0), fhn-s("coordinated_by", if nt-keeper?(coordinator) then "host-schedule" else "session"), fhn-s("coordinator", coordinator), fhn-n("rented_mind", if nt-keeper?(coordinator) then 0 else 1), fhn-s("request", reqPath), fhn-s("lane", trim(said)), fhn-s("lane_status", nt-str(result, "status")), fhn-s("lane_reason", reason), json-node-pair("blocking_check", nt-node-or-null(result, "blocking_check")), fhn-s("checks_digest", nt-checks-digest(gap)), nt-reading("lane_check_runs", nt-maybe(result, "check_runs")), nt-reading("lane_turns", nt-maybe(result, "turns")), fhn-n("published", shown), fhn-s("publish_refused", refused), fhn-n("restored", if window[1] then 1 else 0), fhn-n("candidates_kept", kept), fhn-n("wall_ms", (now_unix_ms() - started))], nt-session(opts)));
    let measured = nt-measured(row,result,opts,said,green,conflict);
    let appended = fhn-append(if test then nt-dir() + "/test-ledger.jsonl" else nt-ledger(),json-emit(measured) + "\n");
    print_str("[native-turn] " + json-emit(measured) + "\n");

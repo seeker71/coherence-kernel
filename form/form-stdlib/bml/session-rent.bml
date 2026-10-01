@@ -4,9 +4,10 @@
 // turn meter and the flow meter read the same set, so the three agree on one session.
 // Local: the voice's drafts for the same session (receipts/draft-ledger.jsonl, keyed by session id)
 // and the coding lane's IDs from the native-turn rows that session began (their "session" field),
-// read where turns run: this checkout and the walk checkout launchd turns in (sr-turn-rows).
+// read where turns run: this checkout and the walk checkout launchd turns in (sr-turn-rows). While
+// no turn row names a session, the lane columns read null.
 // The share is the walk's measure: local generated / (local generated + rented output), in parts
-// per million; injected IDs are reported beside it.
+// per million, over what is known; injected IDs are reported beside it.
 import form-stdlib/form-cli-movement.bml;
 import form-stdlib/form-fs.fk;
 import form-stdlib/bml/form-cli-guide-packet.bml;
@@ -91,26 +92,29 @@ section [form.bml] {
     // the first checkout named keeps a row both hold
     def sr-turn-rows-from(dirs) = foldl((held, dir) => sr-merge(held, sr-fresh(held, map(row => sr-tagged(dir, row), fcgp-rows(sr-ledger-at(dir))))), [], dirs);
     def sr-turn-rows() = sr-turn-rows-from(sr-checkouts());
-    // the coding lane's options a session began: [options, generated, injected]
-    def sr-lane(session, rows) {
-        let mine = fcgp-of(rows, "session", session);
-        [len(mine), fcgp-known(mine, "local_generated_ids"), fcgp-known(mine, "local_injected_ids")];
-    }
+    // the coding lane's options a session began: [options, generated, injected]. A turn row names its session only
+    // when the session that began it said so ({"session":...} on native-turn-run's stdin); while no row in the set
+    // names any session, which options a session began is unknown, and the reading is nothing, never 0.
+    def sr-lane-known?(rows) = any?(r => fcgp-present?(r, "session"), rows);
+    def sr-lane(session, rows) = !sr-lane-known?(rows) ? nothing() : sr-lane-of(fcgp-of(rows, "session", session));
+    def sr-lane-of(mine) = [len(mine), fcgp-known(mine, "local_generated_ids"), fcgp-known(mine, "local_injected_ids")];
+    def sr-lane-field(lane, i) = nothing?(lane) ? "null" : int_to_str(lane[i]);
+    // the share over what is known: with the lane unknown it counts the drafts alone, a lower bound
     def sr-row-with(main, draftLedger, turnRows) {
         let files = sr-files(main);
         let rented = sr-rented(files, [0, 0, 0, 0, 0], rtm-seen-none());
         let session = sr-session(main);
         let local = sr-local(session, file_size(draftLedger) < 1 ? [] : split-on(read_file(draftLedger), "\n"), 0, 0);
         let lane = sr-lane(session, turnRows);
-        let generated = local[1] + lane[1];
+        let generated = local[1] + (nothing?(lane) ? 0 : lane[1]);
         let share = (generated + rented[3]) == 0 ? 0 : (generated * 1000000) / (generated + rented[3]);
         str-join(["{\"at_unix_ms\":", int_to_str(now_unix_ms()), ",\"session\":\"", session,
             "\",\"rented\":{\"requests\":", int_to_str(rented[4]), ",\"input\":", int_to_str(rented[0]),
             ",\"cache_write\":", int_to_str(rented[1]), ",\"cache_read\":", int_to_str(rented[2]),
             ",\"output\":", int_to_str(rented[3]), ",\"transcripts\":", int_to_str(len(files)),
             "},\"local\":{\"drafts\":", int_to_str(local[0]), ",\"generated\":", int_to_str(local[1]),
-            ",\"lane_options\":", int_to_str(lane[0]), ",\"lane_generated\":", int_to_str(lane[1]),
-            ",\"lane_injected\":", int_to_str(lane[2]),
+            ",\"lane_options\":", sr-lane-field(lane, 0), ",\"lane_generated\":", sr-lane-field(lane, 1),
+            ",\"lane_injected\":", sr-lane-field(lane, 2),
             "},\"local_share_ppm\":", int_to_str(share), "}"]);
     }
     def sr-row(main, draftLedger) = sr-row-with(main, draftLedger, sr-turn-rows());
