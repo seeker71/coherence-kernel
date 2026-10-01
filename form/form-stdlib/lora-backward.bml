@@ -191,8 +191,10 @@ section [form.bml] {
         def lbw-of-back(tri) = if nil?(tri) then [] else lbw-of-back-row(tri[0], lbw-of-back(tri[1:]));
         def lbw-of-solve(k, y) = lbw-of-back(lbw-of-eliminate(lbw-of-aug(k, y)));
         def lbw-of-combine(hs, c, acc) = if nil?(hs) then acc else lbw-of-combine(hs[1:], c[1:], lbw-axpy-go(acc, hs[0], c[0], []));
-        // A: the detector, ridge relative to the mean squared norm of the sites
-        def lbw-of-detector(hs, ys, ridge) = if nil?(hs) then [] else lbw-of-combine(hs, lbw-of-solve(lbw-of-ridge(lbw-of-gram(hs), ridge), ys), lbw-zeros(len(hs[0]), []));
+        // A: the detector, ridge relative to the mean squared norm of the sites. The ridged Gram
+        // matrix k depends on the sites alone, so every labelling of the same sites shares it.
+        def lbw-of-detector-k(hs, k, ys) = if nil?(hs) then [] else lbw-of-combine(hs, lbw-of-solve(k, ys), lbw-zeros(len(hs[0]), []));
+        def lbw-of-detector(hs, ys, ridge) = if nil?(hs) then [] else lbw-of-detector-k(hs, lbw-of-ridge(lbw-of-gram(hs), ridge), ys);
         // B: the emitter along the opening token's head row
         def lbw-of-emitter(w, gain) = if (lbw-dot-go(w, w, 0.0) <= 0.0) then nothing() else lbw-scale(w, (gain / lbw-dot-go(w, w, 0.0)));
         def lbw-of-scores(a, hs) = map(h => lbw-dot-go(a, h, 0.0), hs);
@@ -242,6 +244,117 @@ section [form.bml] {
         def lbw-of-refine(w, gain, b, rows, rounds, rivals-of, row-of) = if ((rounds <= 0) || nothing?(b)) then [b, rows] else lbw-of-refine-with(w, gain, b, rows, rounds, rivals-of, row-of, filter(r => !any?(q => (Comparable) q[0] == r[0], rows), rivals-of(b)));
         def lbw-of-refine-with(w, gain, b, rows, rounds, rivals-of, row-of, fresh) = if nil?(fresh) then [b, rows] else lbw-of-refine-next(w, gain, rounds, rivals-of, row-of, append(rows, map(r => [r[0], row-of(r[0])], fresh)));
         def lbw-of-refine-next(w, gain, rounds, rivals-of, row-of, rows) = lbw-of-refine(w, gain, lbw-of-selective(w, map(r => r[1], rows), gain), rows, (rounds - 1), rivals-of, row-of);
+    }
+    0;
+}
+//////////////////////////////////////////////////////////////////////
+// WHAT A FIT KNOWS. With n sites in d dimensions and n no larger than d,
+// the dual ridge above interpolates ANY labelling: on the sites it was
+// fitted on, the separation (mean score at the openings minus mean score
+// elsewhere) comes out near 1 for the true labels and for labels that mean
+// nothing alike. That number is a property of the problem's shape, never a
+// reading of the voice.
+//
+// What the activation knows is read where the fit never looked. The sites
+// split by group (a trace row: sites of one row share its prompt, so they
+// stay together); the detector is fitted on the kept groups and scored on
+// the held-out ones. The same solver is fitted on the kept sites with their
+// labels scrambled — each scramble a permutation, so the count of openings
+// is kept — and scored on the held-out sites against their true labels.
+// The floor is the largest held-out separation any scramble reaches. A
+// yieldpoint is read only when the true held-out separation stands above
+// it; labels with no relation to the activation clear it by chance about
+// once in (scrambles + 1). A side with no opening, or no other choice,
+// cannot be measured and answers nothing.
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraOpeningKnowing {
+        def lbw-of-iota-go(i, acc) = if (i < 0) then acc else lbw-of-iota-go((i - 1), cons(i, acc));
+        def lbw-of-iota(n) = lbw-of-iota-go((n - 1), []);
+        def lbw-of-at(xs, idx) = map(i => xs[i], idx);
+        def lbw-of-mean(xs) = if nil?(xs) then nothing() else (foldl((acc, x) => acc + x, 0.0, xs) / (len(xs) + 0.0));
+        def lbw-of-side(scores, ys, positive) = if nil?(scores) then [] else if ((Comparable) (if (ys[0] > 0.5) then 1 else 0) == positive) then cons(scores[0], lbw-of-side(scores[1:], ys[1:], positive)) else lbw-of-side(scores[1:], ys[1:], positive);
+        def lbw-of-separation-of(at, off) = if nothing?(at) then nothing() else if nothing?(off) then nothing() else (at - off);
+        def lbw-of-separation(scores, ys) = lbw-of-separation-of(lbw-of-mean(lbw-of-side(scores, ys, 1)), lbw-of-mean(lbw-of-side(scores, ys, 0)));
+        // The held-out reading is standardized: the separation over the pooled spread of the two
+        // sides. A detector fitted to labels that mean nothing has a larger norm, so its raw
+        // separation can outgrow the true one while its spread grows faster; in spread units the
+        // comparison holds whatever the detector's scale.
+        def lbw-of-variance(xs) = lbw-of-variance-of(xs, lbw-of-mean(xs));
+        def lbw-of-variance-of(xs, m) = if nothing?(m) then nothing() else (foldl((acc, x) => acc + ((x - m) * (x - m)), 0.0, xs) / (len(xs) + 0.0));
+        def lbw-of-spread(at, off) = math_sqrt(((lbw-of-variance(at) + lbw-of-variance(off)) / 2.0));
+        def lbw-of-standardized-of(at, off, spread) = if (spread <= 0.0) then nothing() else ((lbw-of-mean(at) - lbw-of-mean(off)) / spread);
+        def lbw-of-standardized(scores, ys) = lbw-of-standardized-at(lbw-of-side(scores, ys, 1), lbw-of-side(scores, ys, 0));
+        def lbw-of-standardized-at(at, off) = if (nil?(at) || nil?(off)) then nothing() else lbw-of-standardized-of(at, off, lbw-of-spread(at, off));
+        // groups in order of first appearance
+        def lbw-of-distinct(gs, seen) = if nil?(gs) then reverse(seen) else lbw-of-distinct(gs[1:], if any?(s => (Comparable) s == gs[0], seen) then seen else cons(gs[0], seen));
+        def lbw-of-index-go(xs, x, i) = if nil?(xs) then (0 - 1) else if ((Comparable) xs[0] == x) then i else lbw-of-index-go(xs[1:], x, (i + 1));
+        // held out: every third group in order (the third, the sixth, ...); with two groups, the second
+        def lbw-of-held-group?(k, n) = if (n >= 3) then (if ((Comparable) (k % 3) == 2) then 1 else 0) else if (((Comparable) n == 2) && ((Comparable) k == 1)) then 1 else 0;
+        // [kept site indices, held-out site indices] for one group id per site
+        def lbw-of-split(gs) {
+            let groups = lbw-of-distinct(gs, []);
+            let held = map(g => lbw-of-held-group?(lbw-of-index-go(groups, g, 0), len(groups)), gs);
+            let idx = lbw-of-iota(len(gs));
+            [filter(i => (Comparable) held[i] == 0, idx), filter(i => (Comparable) held[i] == 1, idx)];
+        }
+        // The j-th scramble: the labels reordered by a key hashed from (site, j) — an odd multiplier
+        // modulo 2^32 is a bijection, so the keys are distinct and the order is a permutation; the
+        // count of openings is kept. A stride walk would not do: on labels with a period (one
+        // opening per row) a stride can give the true labels back.
+        def lbw-of-key(i, j) = (((i * 7919) + (j * 104729)) * 2654435761) % 4294967296;
+        def lbw-of-insert-by(x, sorted) = if nil?(sorted) then [x] else if (x[0] < sorted[0][0]) then cons(x, sorted) else cons(sorted[0], lbw-of-insert-by(x, sorted[1:]));
+        def lbw-of-scramble(ys, j) = map(p => p[1], foldl((acc, i) => lbw-of-insert-by([lbw-of-key(i, j), ys[i]], acc), [], lbw-of-iota(len(ys))));
+        def lbw-of-larger(m, x) = if nothing?(x) then m else if nothing?(m) then x else if (x > m) then x else m;
+        def lbw-of-largest(xs) = foldl((m, x) => lbw-of-larger(m, x), nothing(), xs);
+        def lbw-of-above(x, floor) = if nothing?(x) then 0 else if nothing?(floor) then 0 else if (x > floor) then 1 else 0;
+        // one labelling of the kept sites: [its separation on them, its standardized separation on
+        // the held-out sites read against their true labels]
+        def lbw-of-labelling(khs, k, labels, hhs, hys) {
+            let a = lbw-of-detector-k(khs, k, labels);
+            [lbw-of-separation(lbw-of-scores(a, khs), labels), lbw-of-standardized(lbw-of-scores(a, hhs), hys)];
+        }
+        // [in-sample separation, held-out standardized separation, in-sample floor, held-out floor,
+        //  scrambles, kept sites, held-out sites, read] for sites hs, labels ys, one group id per site
+        def lbw-of-knowing(hs, ys, gs, ridge, scrambles) {
+            let split = lbw-of-split(gs);
+            let khs = lbw-of-at(hs, split[0]);
+            if nil?(khs) then [nothing(), nothing(), nothing(), nothing(), scrambles, 0, len(split[1]), 0] else lbw-of-knowing-k(khs, lbw-of-at(ys, split[0]), lbw-of-at(hs, split[1]), lbw-of-at(ys, split[1]), lbw-of-ridge(lbw-of-gram(khs), ridge), scrambles);
+        }
+        def lbw-of-knowing-k(khs, kys, hhs, hys, k, scrambles) {
+            let truth = lbw-of-labelling(khs, k, kys, hhs, hys);
+            let floors = map(j => lbw-of-labelling(khs, k, lbw-of-scramble(kys, (j + 1)), hhs, hys), lbw-of-iota(scrambles));
+            let inner = lbw-of-largest(map(f => f[0], floors));
+            let outer = lbw-of-largest(map(f => f[1], floors));
+            [truth[0], truth[1], inner, outer, scrambles, len(khs), len(hhs), lbw-of-above(truth[1], outer)];
+        }
+    }
+    0;
+}
+//////////////////////////////////////////////////////////////////////
+// THE CONTROLS AN OPENING LEADS TO. The contract's in-stream verbs, the
+// one list the training lanes read: the dataset door admits a control
+// only under one of them, and the Qwen head's learned control IDs are
+// this list in order after the control-open ID. "observation" is never
+// among them: Form writes observations, the voice never does.
+//
+// A learned control-open ID expands to the bare "<|form:" and the voice
+// spells the verb itself. What it spells joins the stream like any text;
+// lbw-of-after-open names what Form answers in place of a control whose
+// verb is not the contract's, with the reasons the grammar's dispatch
+// gives, so a voice-spelled observation never enters the stream as Form's.
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraControls {
+        def lbw-of-verbs() = ["recipe-birth", "recipe-exec", "choice", "eval", "knowledge-query", "node-get", "node-make", "node-select"];
+        def lbw-of-verb?(verb) = any?(v => (String) v == verb, lbw-of-verbs());
+        def lbw-of-control-open(verb) = "<|form:" ++ verb ++ "|>";
+        // "" when the verb is the contract's; otherwise the observation Form writes in its place
+        def lbw-of-refusal(verb) = if ((String) verb == "observation") then "observations-come-from-form" else ("unknown-verb:" ++ verb);
+        def lbw-of-after-open(verb) = if lbw-of-verb?(verb) then "" else ("<|form:observation|>nothing=" ++ lbw-of-refusal(verb) ++ ";<|/form:observation|>");
+        // the text Form writes for an emitted control ID: first (the control-open ID) is the bare
+        // opening, first + 1 + k the opening of the k-th verb, and any other id is nothing
+        def lbw-of-control-text-at(first, id) = if ((Comparable) id == first) then "<|form:" else if ((id > first) && (id <= (first + len(lbw-of-verbs())))) then lbw-of-control-open(lbw-of-verbs()[((id - first) - 1)]) else nothing();
     }
     0;
 }
