@@ -1,0 +1,140 @@
+// form-cli-code-turn-guard.bml — the lane reads its own tool turns before it spends another reply on them.
+//
+// A window of the last FctgWindow tool turns, each three digests: the call (tool, arguments, input), its
+// result (exit, stdout, stderr) and the resident documents after it. The call is read as the edit ladder
+// reads an old text, at its whitespace-run rung: an echocall (a reply that spells the same call in other
+// whitespace and gets the same result) is the same experiment, however a seeded decode respelled it.
+// stillstreak counts the turns since the last document change whose call and result already stood earlier
+// in that same span, so read A, edit E, edit E, read A, edit E reads 0 0 1 2 3: an interleaved repeat
+// counts, a changed document opens a new span (an edit and then the same read is a new experiment).
+// The thresholds are instruments, tuned on
+// receipts: at 2 the lane swerves (the observation names the repeat), at 3 it replans (the policy's own
+// no-progress route), at 4 the attempt ends with its candidate retained, so the walk swerves instead of
+// spending the rest of the turns.
+//
+// Before a call reaches the policy, two shapes other agents' voices speak are read in Form's own: a tool
+// name with a namespace or another case ("functions.read", "Read") resolves when exactly one native tool
+// reads the same, and arguments given as an alias object ({"file_path","old_string","new_string"}) or with
+// number and boolean items become the native string array. Every repair is a row with the call's sha256
+// before and after; a repair grants no authority (role, writable paths and guards still decide), and a
+// call that cannot be read lists every failing field with what it received.
+//
+// A failed caller assertion's counterexample is the row and its actual result. The documents it was
+// checked against are not part of it: they stand beside it in checked_documents, so the same failure over
+// changed bytes still reads as the same failure (fctg-assertion-core, the policy's one hook).
+import form-stdlib/bml/form-agent-tool-wire.bml;
+import form-stdlib/sha256.fk;
+import form-stdlib/hex.fk;
+section [form.bml] {
+ class FormCliCodeTurnGuard {
+  field FctgWindow = 30;
+  field FctgShown = 160;
+  def fctg-swerve-at() = 2;
+  def fctg-replan-at() = 3;
+  def fctg-end-at() = 4;
+  def fctg-sha(text) = hex-encode(sha256-stream-string(text));
+  def fctg-strings(xs) = xs |> map(json-node-string);
+
+  // ── the window ──────────────────────────────────────────────────────────
+  def fctg-canonical(text) = fael-norm(text, 3)[0];
+  def fctg-docs-digest(docs) = fctg-sha(str-join(docs |> map(d => d[1] ++ "\n" ++ fctg-sha(d[2]) ++ "\n")));
+  def fctg-entry(tool, args, input, exit, out, err, docs) = [
+   fctg-sha(json-emit(json-node-array([json-node-string(tool), json-node-array(fctg-strings(args |> map(fctg-canonical))), json-node-string(fctg-canonical(input))]))),
+   fctg-sha(json-emit(json-node-array([json-node-int(exit), json-node-string(out), json-node-string(err)]))),
+   fctg-docs-digest(docs)];
+  def fctg-push(window, entry) = drop(max2(0, len(window) + 1 - FctgWindow()), append(window, [entry]));
+  // the trailing run of entries that share the newest documents digest
+  def fctg-span(window) = nil?(window) ? [] : fctg-span-of(reverse(window), reverse(window)[0][2], []);
+  def fctg-span-of(rev, docs, out) = nil?(rev) || rev[0][2] != docs ? out : fctg-span-of(rev[1:], docs, cons(rev[0], out));
+  def fctg-stillstreak(window) = fctg-streak(fctg-span(window), [], 0);
+  def fctg-seen?(seen, e) = any?(p => p[0] == e[0] && p[1] == e[1], seen);
+  def fctg-streak(span, seen, n) = nil?(span) ? n : fctg-streak(span[1:], cons(span[0], seen), fctg-seen?(seen, span[0]) ? n + 1 : n);
+  // the action a streak crossing selects: "" below the swerve, then swerve, replan, end
+  def fctg-action(before, after) = after <= before ? "" : after >= fctg-end-at() ? "end" : after == fctg-replan-at() ? "replan" : after == fctg-swerve-at() ? "swerve" : "";
+  def fctg-swerve-note(streak, tool, near) = "Turn guard: the same " ++ tool ++ " call returned the same result again with no document change since (stillstreak " ++ streak.str()
+   ++ "). Repeating it is not progress. Change the approach: use the resident bytes the evidence shows" ++ (nothing?(near) ? "" : " (nearest_span below holds the closest resident lines)")
+   ++ ", or choose another tool or plan. " ++ (nothing?(near) ? "" : "nearest_span=" ++ json-emit(near) ++ " ");
+
+  // ── tool names ──────────────────────────────────────────────────────────
+  def fctg-lower(s) = str-join(fctg-lower-go(s, 0, len(s), []));
+  def fctg-lower-go(s, i, n, out) = i >= n ? reverse(out) : fctg-lower-go(s, i + 1, n, cons(byte_to_str(fctg-lower-byte(str_byte_at(s, i))), out));
+  def fctg-lower-byte(b) = b >= 65 && b <= 90 ? b + 32 : b;
+  def fctg-sep?(b) = b == 46 || b == 47 || b == 58;
+  def fctg-last-sep(s, i, at) = i >= len(s) ? at : fctg-last-sep(s, i + 1, fctg-sep?(str_byte_at(s, i)) ? i : at);
+  def fctg-key(name) {
+   let t = fat-trim(name);
+   fctg-lower(substring(t, fctg-last-sep(t, 0, 0 - 1) + 1, len(t)));
+  }
+  // [status resolved candidates]: exact; repaired when exactly one native name reads the same after trim,
+  // namespace and case; ambiguous when several do; unknown when none does
+  def fctg-name(name, names) = fat-has(names, name) ? ["exact", name, [name]] : fctg-name-of(filter(n => fctg-key(n) == fctg-key(name), names));
+  def fctg-name-of(found) = len(found) == 1 ? ["repaired", found[0], found] : len(found) > 1 ? ["ambiguous", "", found] : ["unknown", "", []];
+
+  // ── arguments ───────────────────────────────────────────────────────────
+  def fctg-path-keys() = ["path", "file_path", "filePath", "file", "filename"];
+  // canonical slots per tool, [name aliases required]
+  def fctg-shape(tool) = tool == "edit" ? [["path", fctg-path-keys(), 1], ["old", ["old", "old_string", "oldText", "old_text", "old_str"], 1], ["new", ["new", "new_string", "newText", "new_text", "new_str"], 1]]
+   : tool == "read" || tool == "cat" ? [["path", fctg-path-keys(), 1]]
+   : tool == "write" ? [["path", fctg-path-keys(), 1], ["text", ["text", "content", "contents"], 0]]
+   : [];
+  def fctg-shown(text) = len(text) <= FctgShown() ? text : substring(text, 0, FctgShown()) ++ "...(" ++ len(text).str() ++ " bytes)";
+  def fctg-scalar?(node) = fat-wire-string?(node) || faj-type(node) == "number" || faj-type(node) == "boolean";
+  def fctg-scalar(node) = fat-wire-string?(node) ? node_value(node) : json-emit(node);
+  // [status strings failures fields]: status exact, repaired or refused; failures [field received why]
+  def fctg-args(tool, node) = fat-wire-array?(node) ? fctg-array(node_children(node), 0, [], [], [])
+   : fat-wire-object?(node) && !nil?(fctg-shape(tool)) ? fctg-object(fctg-shape(tool), json-object-pairs(node))
+   : ["refused", [], [["arguments", fctg-shown(json-emit(node)), "must be an array of strings"]], []];
+  def fctg-array(items, i, out, failures, fields) = nil?(items) ? (nil?(failures) ? [nil?(fields) ? "exact" : "repaired", reverse(out), [], reverse(fields)] : ["refused", [], reverse(failures), []])
+   : fat-wire-string?(items[0]) ? fctg-array(items[1:], i + 1, cons(node_value(items[0]), out), failures, fields)
+   : fctg-scalar?(items[0]) ? fctg-array(items[1:], i + 1, cons(fctg-scalar(items[0]), out), failures, cons("arguments[" ++ i.str() ++ "]", fields))
+   : fctg-array(items[1:], i + 1, out, cons(["arguments[" ++ i.str() ++ "]", fctg-shown(json-emit(items[0])), "must be a string"], failures), fields);
+  def fctg-known(shape) = foldl((acc, slot) => append(acc, slot[1]), [], shape);
+  def fctg-object(shape, pairs) {
+   let unknown = filter(p => !fat-has(fctg-known(shape), json-pair-key(p)), pairs) |> map(p => [json-pair-key(p), fctg-shown(json-emit(json-pair-value(p))), "is not an argument of this tool"]);
+   let slots = shape |> map(slot => fctg-slot(slot, filter(p => fat-has(slot[1], json-pair-key(p)), pairs)));
+   let failures = append(unknown, foldl((acc, r) => nothing?(r[1]) ? acc : append(acc, [r[1]]), [], slots));
+   nil?(failures) ? ["repaired", foldl((acc, r) => nothing?(r[0]) ? acc : append(acc, [r[0]]), [], slots), [], pairs |> map(p => json-pair-key(p))] : ["refused", [], failures, []];
+  }
+  // [value failure] for one slot; either may be nothing
+  def fctg-slot(slot, given) = len(given) > 1 ? [nothing(), [slot[0], fctg-shown(json-emit(json-node-object(given))), "is given more than once"]]
+   : nil?(given) ? [nothing(), slot[2] == 1 ? [slot[0], "absent", "is required"] : nothing()]
+   : fctg-scalar?(json-pair-value(given[0])) ? [fctg-scalar(json-pair-value(given[0])), nothing()]
+   : [nothing(), [json-pair-key(given[0]), fctg-shown(json-emit(json-pair-value(given[0]))), "must be a string"]];
+  def fctg-failure-text(f) = f[0] ++ "=" ++ f[1] ++ " (" ++ f[2] ++ ")";
+  def fctg-arguments-note(tool, failures) = "Tool arguments must be an array of strings. Received: " ++ str-join-with(failures |> map(fctg-failure-text), "; ") ++ ". "
+   ++ (tool == "edit" ? fat-edit-guidance() : tool == "write" ? "write arguments are [path] with the new text as input, or [path,text]." : "read and cat take [path].");
+
+  // ── the call as received, and as admitted ───────────────────────────────
+  def fctg-row(method, before, after, from, to, fields) = json-emit(json-node-object([json-node-pair("method", json-node-string(method)),
+   json-node-pair("before_sha256", json-node-string(fctg-sha(before))), json-node-pair("after_sha256", json-node-string(fctg-sha(after))),
+   json-node-pair("tool_before", json-node-string(from)), json-node-pair("tool_after", json-node-string(to)), json-node-pair("fields", json-node-array(fctg-strings(fields))),
+   json-node-pair("scope", json-node-string("call shape only; role, writable paths, guards and caller checks decide as before"))]));
+  // [text rows refusal]: the call text the policy reads, the repair rows, and a refusal note ("" when none)
+  def fctg-repair(raw, names) = !faj-valid(raw) ? [raw, [], ""] : fctg-repair-obj(raw, names, parse-json("turn-guard-call", raw));
+  def fctg-repair-obj(raw, names, obj) = !(fat-wire-object?(obj) && json-object-has?(obj, "tool") && fat-wire-string?(json-object-get(obj, "tool"))) ? [raw, [], ""]
+   : fctg-repair-named(raw, obj, fctg-name(node_value(json-object-get(obj, "tool")), names), names);
+  def fctg-repair-named(raw, obj, named, names) = named[0] == "ambiguous" ? [raw, [], "Tool name \"" ++ node_value(json-object-get(obj, "tool")) ++ "\" reads as more than one native tool: " ++ str-join-with(named[2], ", ") ++ ". Use one exact name."]
+   : named[0] == "unknown" ? [raw, [], "Unknown tool \"" ++ fctg-shown(node_value(json-object-get(obj, "tool"))) ++ "\". Native tools: " ++ str-join-with(names, ", ") ++ "."]
+   : fctg-repair-args(raw, obj, named, json-object-has?(obj, "arguments") ? fctg-args(named[1], json-object-get(obj, "arguments")) : ["absent", [], [], []]);
+  def fctg-repair-args(raw, obj, named, args) = args[0] == "refused" ? [raw, [], fctg-arguments-note(named[1], args[2])]
+   : named[0] == "exact" && args[0] != "repaired" ? [raw, [], ""]
+   : fctg-rebuilt(raw, named, args, json-emit(json-node-object(json-object-pairs(obj) |> map(p => fctg-pair(p, named, args)))));
+  def fctg-pair(p, named, args) = json-pair-key(p) == "tool" ? json-node-pair("tool", json-node-string(named[1]))
+   : json-pair-key(p) == "arguments" && args[0] == "repaired" ? json-node-pair("arguments", json-node-array(fctg-strings(args[1])))
+   : p;
+  def fctg-rebuilt(raw, named, args, text) = [text, append(named[0] == "repaired" ? [fctg-row("native-tool-name-repair", raw, text, fctg-tool-of(raw), named[1], ["tool"])] : [],
+   args[0] == "repaired" ? [fctg-row("native-tool-argument-repair", raw, text, fctg-tool-of(raw), named[1], args[3])] : []), ""];
+  def fctg-tool-of(raw) = node_value(json-object-get(parse-json("turn-guard-call", raw), "tool"));
+
+  // ── the counterexample ──────────────────────────────────────────────────
+  def fctg-assertion-prefix() = "Failed caller assertion: ";
+  def fctg-assertion-core(node) = !fat-wire-string?(node) ? node : fctg-assertion-text(node, node_value(node));
+  def fctg-assertion-text(node, text) = !fat-starts(text, fctg-assertion-prefix()) ? node : fctg-assertion-at(node, text, str_find(text, " actual=", 0));
+  // the first " actual=" whose remainder is one whole JSON value: a row's own strings cannot end there
+  def fctg-assertion-at(node, text, at) = at < 0 ? node : faj-valid(substring(text, at + 8, len(text))) ? fctg-assertion-of(node, text, at, parse-json("failed-assertion-actual", substring(text, at + 8, len(text))))
+   : fctg-assertion-at(node, text, str_find(text, " actual=", at + 1));
+  def fctg-assertion-of(node, text, at, actual) = !(fat-wire-object?(actual) && json-object-has?(actual, "document_catalog")) ? node
+   : json-node-string(substring(text, 0, at + 8) ++ json-emit(json-node-object(filter(p => json-pair-key(p) != "document_catalog", json-object-pairs(actual)))));
+ }
+ 0;
+}
