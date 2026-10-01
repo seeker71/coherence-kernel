@@ -25397,6 +25397,82 @@ static int fk_run_bml(const char *path, long long arg) {
     fk_heat_report();
     return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
 }
+static int fk_closure_put(int fd, const char *bytes, long long n) {
+    long long at = 0;
+    while (at < n) {
+        long long put = write(fd, bytes + at, (unsigned long)(n - at));
+        if (put < 0 && errno == EINTR) continue;
+        if (put <= 0) return 0;
+        at += put;
+    }
+    return 1;
+}
+/* --closure <unit> <out>: write the plain-Form closure this runner walks --
+ * every unit resolved, lowered, home-linked and joined in dependency order,
+ * each segment headed by "; unit: <path>". A proof sibling reads exactly
+ * this text and lowers nothing itself. Prints the unit count. */
+static int fk_run_closure(const char *path, const char *out) {
+    char hash[FK_SRC_HASH_CAP], temporary[FK_PATH_CAP + 32], line[64];
+    long long unit_mtime = 0, units = 0, pos = 0;
+    if (fk_unit_lowers(path)) {
+        long long src_m = fk_path_mtime_raw(path), low_len = 0;
+        if (src_m <= 0) {
+            fk_diag_path("error", path, "closure source is missing or not stat-readable");
+            return 2;
+        }
+        char *low = fk_bml_lower_to_mem(path, &low_len);
+        if (low == 0 || !fk_src_load_unit_buffer(path, low, low_len, src_m, hash,
+                FK_SRC_HASH_CAP, &unit_mtime)) {
+            return 2;
+        }
+    } else if (!fk_src_load_unit(path, hash, FK_SRC_HASH_CAP, &unit_mtime)) {
+        return 2;
+    }
+    if (fk_path_len(out) >= FK_PATH_CAP) {
+        fk_diag_path("error", out, "closure output path exceeds buffer");
+        return 2;
+    }
+    sprintf(temporary, "%s.tmp.%lld", out, (long long)getpid());
+    int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) {
+        fk_diag_path("error", out, "closure output could not be opened");
+        return 2;
+    }
+    int ok = 1;
+    while (ok && pos < fk_slen) {
+        long long d = 0, at = -1, next = fk_slen;
+        while (d < fk_src_dep_count) {
+            long long off = fk_src_dep_text_off[d];
+            if (fk_src_dep_text_len[d] > 0) {
+                if (off == pos) at = d;
+                else if (off > pos && off < next) next = off;
+            }
+            d = d + 1;
+        }
+        if (at < 0) {
+            ok = fk_closure_put(fd, fk_srctext + pos, next - pos);
+            pos = next;
+            continue;
+        }
+        long long len = fk_src_dep_text_len[at];
+        ok = fk_closure_put(fd, "; unit: ", 8) &&
+             fk_closure_put(fd, fk_src_dep_path[at], fk_path_len(fk_src_dep_path[at])) &&
+             fk_closure_put(fd, "\n", 1) &&
+             fk_closure_put(fd, fk_srctext + pos, len) &&
+             (fk_srctext[pos + len - 1] == '\n' || fk_closure_put(fd, "\n", 1));
+        pos = pos + len;
+        units = units + 1;
+    }
+    if (close(fd) != 0) ok = 0;
+    if (!ok || rename(temporary, out) != 0) {
+        unlink(temporary);
+        fk_diag_path("error", out, "closure output could not be written");
+        return 2;
+    }
+    int n = sprintf(line, "%lld\n", units);
+    fk_closure_put(1, line, n);
+    return 0;
+}
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
     fk_stack_base = &fk_stack_here;
@@ -25419,6 +25495,9 @@ static int fk_run(int argc, char **argv) {
         }
         fk_diag_path("error", argv[2], "--check reads .fk and .bml units");
         return 2;
+    }
+    if (argc >= 4 && fk_cstr_eq(argv[1], "--closure")) {
+        return fk_run_closure(argv[2], argv[3]);
     }
     if (argc > 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH) {
         fk_stage_input(argv[3]);
