@@ -16555,8 +16555,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             unsigned int y = (unsigned int)(bb >> 1);
             return ((long long)(unsigned int)(x + y)) << 1;
         }
-        unsigned int x41 = (unsigned int)(ba >> 1);
-        return ((long long)(unsigned int)(~x41)) << 1;
+        if (t == 41) {
+            unsigned int x41 = (unsigned int)(ba >> 1);
+            return ((long long)(unsigned int)(~x41)) << 1;
+        }
     }
     if (t == 43) {
         long long iv43 = fk_walk(fk_node[i][1], fp);
