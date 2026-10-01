@@ -5,8 +5,9 @@
 //   {"witness":"<a command to run and show, or empty>",
 //    "paths":["file", ...], "subject":"<commit subject>", "body":"<commit body>",
 //    "restart":"origin/main" (optional), "main":1 (optional: the landed commit also fast-forwards main)}
-// The witness runs first and its output is shown. The drift gates run next as
-// a child fkwu; a refused gate lands nothing. Then host git adds the named
+// The witness runs first, its output is shown, and its exit is read: a named
+// witness that does not exit 0, or whose launch vanished, lands nothing. The
+// drift gates run next as a child fkwu; a refused gate lands nothing. Then host git adds the named
 // paths, commits with exactly subject, blank line, body, and pushes the
 // current branch to its own name on origin; the push answers with its own
 // exit, so a commit that did not reach origin reads held, never landed. Every crossing to a child process
@@ -90,7 +91,31 @@ section [form.bml] {
    let output = (String) fhn-read(fhn-stage-path(job, "gates", ".out")) + fhn-read(fhn-stage-path(job, "gates", ".err"));
    [status, output, job];
   }
-  def ld-held-why(green, misses, paths, subject, ready, commitOk, pushOk) = ready && (commitOk && pushOk) ? "landed" : ready && commitOk ? "push-did-not-reach-origin" : ready ? "the-commit-did-not-take" : !green ? "a-gate-refused" : misses > 0 ? "an-edit-found-no-place" : nil?(paths) ? "no-paths" : (String) subject == "" ? "no-subject" : "held";
+  // The witness: the named command runs in its own subshell with its stderr
+  // folded in, and its exit is the last line it leaves (the carrier shape of
+  // gate/drift-gates.bml dg-wrap). The exit is read after the LAST mark, so a
+  // witness that prints the mark itself cannot answer for its own exit. No
+  // witness named reads [shown "", exit nothing] and holds nothing; a named
+  // witness whose launch vanished (host-exec answers nothing) has no exit, and
+  // an exit that did not arrive is never a pass.
+  def ld-witness-mark() = "[witness] exit=";
+  def ld-witness-wrap(witness) = "( " ++ witness ++ " ) 2>&1; printf '\\n" ++ ld-witness-mark() ++ "%s\\n' $?";
+  def ld-rfind(s, needle, from, last) {
+   let i = str_find(s, needle, from);
+   i < 0 ? last : ld-rfind(s, needle, i + 1, i);
+  }
+  def ld-digit?(c) = (ord(c) >= 48) && (ord(c) <= 57);
+  def ld-digits(s, i, acc, seen) = i >= len(s) ? (seen > 0 ? acc : nothing()) : ld-digit?(char_at(s, i)) ? ld-digits(s, i + 1, (acc * 10) + (ord(char_at(s, i)) - 48), 1) : (seen > 0 ? acc : nothing());
+  def ld-witness-rc(out) {
+   let at = ld-rfind(out, ld-witness-mark(), 0, 0 - 1);
+   at < 0 ? nothing() : ld-digits(out, at + len(ld-witness-mark()), 0, 0);
+  }
+  def ld-witness-read(out) = nothing?(out) ? ["[witness] the launch vanished: no exit arrived", nothing()] : [out, ld-witness-rc(out)];
+  def ld-witness-run(witness) = (String) witness == "" ? ["", nothing()] : ld-witness-read(host-exec(ld-witness-wrap(witness), ""));
+  def ld-witness-ok?(witness, rc) = ((String) witness == "") || ((!nothing?(rc)) && ((Comparable) rc == 0));
+  def ld-witness-said(rc) = nothing?(rc) ? "no exit arrived" : "exit " ++ rc.str();
+  def ld-held-why(witnessOk, green, misses, paths, subject, ready, commitOk, pushOk) = ready && (commitOk && pushOk) ? "landed" : ready && commitOk ? "push-did-not-reach-origin" : ready ? "the-commit-did-not-take" : !witnessOk ? "the-witness-refused" : !green ? "a-gate-refused" : misses > 0 ? "an-edit-found-no-place" : nil?(paths) ? "no-paths" : (String) subject == "" ? "no-subject" : "held";
+  def ld-landing-line(why, witnessRc) = (String) why == "landed" ? "landed" : (String) why == "push-did-not-reach-origin" ? "held: the push did not reach origin" : (String) why == "the-commit-did-not-take" ? "held: the commit did not take" : (String) why == "the-witness-refused" ? "held: the witness refused (" ++ ld-witness-said(witnessRc) ++ ")" : (String) why == "a-gate-refused" ? "held: a gate refused" : (String) why == "an-edit-found-no-place" ? "held: an edit missed" : "held: no paths or no subject";
   def ld-health(subject, why, landed) = oh-reading(ld-organ(), (String) subject == "" ? "landing" : subject, "origin", json-node-string("landed"), json-node-string(why), json-node-int(landed ? 1 : 0), landed ? [] : [oh-need(why, json-node-string(ld-message-path()))], ["retry-push", "heal-the-tree", "name-the-paths"], oh-reference(ld-message-path()));
   // Answers list(report, readings): the landing's own report text and the health
   // it spoke. A caller already inside a census window lands without a child
@@ -103,13 +128,15 @@ section [form.bml] {
    let witness = ld-str(request, "witness");
    let paths = ld-paths(request);
    let subject = ld-str(request, "subject");
-   let witnessOut0 = (String) witness == "" ? "" : host-exec(witness ++ " 2>&1", "");
-   let witnessOut = witnessOut0 ?? "";
+   let witnessRun = ld-witness-run(witness);
+   let witnessOut = witnessRun[0];
+   let witnessRc = witnessRun[1];
+   let witnessOk = ld-witness-ok?(witness, witnessRc);
    let gateRun = ld-gates();
    let gateStatus = gateRun[0];
    let gates = gateRun[1];
    let green = ld-gates-ok(gateStatus, gates);
-   let ready = green && (((Comparable) misses == 0) && ((!nil?(paths)) && (!((String) subject == ""))));
+   let ready = witnessOk && (green && (((Comparable) misses == 0) && ((!nil?(paths)) && (!((String) subject == "")))));
    // the message lives under .form-heal, which a fresh checkout does not have yet: make it before writing
    let spool = fs_mkdir(".form-heal");
    let saved0 = write_file_text(ld-message-path(), subject ++ "\n\n" ++ ld-str(request, "body") ++ "\n");
@@ -130,9 +157,9 @@ section [form.bml] {
    // reaches main; a main that moved meanwhile answers non-fast-forward, and the branch landing stands
    let mained0 = pushOk && ((Comparable) ld-int(request, "main") == 1) ? host-exec("out=$(git push origin HEAD:main 2>&1); code=$?; printf '[main] exit=%s %s\\n' \"$code\" \"$(printf '%s' \"$out\" | tail -n 1)\"", "") : "";
    let mained = mained0 ?? "";
-   let why = ld-held-why(green, misses, paths, subject, ready, commitOk, pushOk);
+   let why = ld-held-why(witnessOk, green, misses, paths, subject, ready, commitOk, pushOk);
    let readings = oh-voice-all([ld-health(subject, why, ready && (commitOk && pushOk))]);
-   [((String) witnessOut == "" ? "" : "[witness] " ++ witness ++ "\n" ++ witnessOut ++ "\n") ++ ((String) restarted == "" ? "" : "[restart] " ++ restarted ++ "\n") ++ "[files] written=" ++ written.str() ++ " appended=" ++ appendedFiles.str() ++ " edit-misses=" ++ misses.str() ++ "\n" ++ "[gates] exit=" ++ gateStatus ++ " evidence=" ++ gateRun[2] ++ "\n" ++ ld-tail(gates, 120) ++ "\n" ++ "[landing] " ++ (ready && (commitOk && pushOk) ? "landed" : ready && commitOk ? "held: the push did not reach origin" : ready ? "held: the commit did not take" : !green ? "held: a gate refused" : misses > 0 ? "held: an edit missed" : "held: no paths or no subject") ++ "\n" ++ (ready ? added ++ committed ++ "\n" ++ pushed2 ++ "\n" ++ ((String) reunion == "not-asked" ? "" : "[reunion] " ++ reunion ++ "\n") ++ mained : ""), readings];
+   [((String) witness == "" ? "" : "[witness] " ++ witness ++ "\n" ++ witnessOut ++ "\n") ++ ((String) restarted == "" ? "" : "[restart] " ++ restarted ++ "\n") ++ "[files] written=" ++ written.str() ++ " appended=" ++ appendedFiles.str() ++ " edit-misses=" ++ misses.str() ++ "\n" ++ "[gates] exit=" ++ gateStatus ++ " evidence=" ++ gateRun[2] ++ "\n" ++ ld-tail(gates, 120) ++ "\n" ++ "[landing] " ++ ld-landing-line(why, witnessRc) ++ "\n" ++ (ready ? added ++ committed ++ "\n" ++ pushed2 ++ "\n" ++ ((String) reunion == "not-asked" ? "" : "[reunion] " ++ reunion ++ "\n") ++ mained : ""), readings];
   }
   def ld-run() {
    let window = fmrc-open("land", "witness gates commit push", ld-source(), 1, 1);
