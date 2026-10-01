@@ -1,0 +1,175 @@
+// form-cli-code-lesson-review.bml — after every rung of the ladder, green or not, one local review voice
+// reads the rung's continuity packet and the ladder's finding, and may leave at most one technique lesson
+// for the contract's family (form-cli-code-memory.bml). The curation rules stand as code audits, never as
+// the voice's own judgement:
+//   read before write      the family's lesson is shown; a new lesson patches it and names its digest;
+//   one rule, one why      a generalizable rule plus one clause of why: no document hashes, no host
+//                          paths, no second sentence;
+//   no environment verdict a lesson saying a tool or the environment does not work is refused;
+//   no failure as method   a rung that did not verify may teach only kind=avoid.
+// The same call turns the rung into one corpus row for the native LoRA lane (native-session-code.bml):
+// verified when the band read full and the circle accepted, otherwise a failed row that teaches by
+// contrast only. Cold family lessons move to cold/.
+//
+// A voice is [name, model, act]; act(prompt) answers [reply, local generated IDs]. A band scripts it;
+// fclr-qwen-voice hands in a local model through the native review lane.
+import form-stdlib/bml/native-session-code.bml;
+import form-stdlib/bml/form-cli-code-live.bml;
+section [form.bml] {
+ class FormCliCodeLessonReview {
+  // ── one rung, as the ladder hands it over ──
+  def fclr-rung(id, packet, reading, full, accepted, finding) = [id, packet, reading, full, accepted, finding];
+  def fclr-rung-id(r) = r[0];
+  def fclr-rung-packet(r) = r[1];
+  def fclr-rung-reading(r) = r[2];
+  def fclr-rung-full(r) = r[3];
+  def fclr-rung-accepted(r) = r[4];
+  def fclr-rung-finding(r) = r[5];
+  def fclr-rung-state(r) = fcam-state-from(fclr-rung-packet(r));
+  def fclr-rung-verified?(r) = nsc-rung-verified(fclr-rung-reading(r), fclr-rung-full(r), fclr-rung-accepted(r));
+  def fclr-voice(name, model, act) = [name, model, act];
+  def fclr-call(f, a) = f(a);
+  def fclr-cut(s, n) = len(s) > n ? substring(s, 0, n) : s;
+
+  // ── the audits ──
+  def fclr-fold(b) = (b >= 65) && (b <= 90) ? b + 32 : b;
+  def fclr-at?(s, i, w, j) = j >= len(w) ? true : (i + j) >= len(s) ? false : ((Comparable) fclr-fold(str_byte_at(s, i + j)) == fclr-fold(str_byte_at(w, j))) && fclr-at?(s, i, w, j + 1);
+  def fclr-find?(s, w, i) = (i + len(w)) > len(s) ? false : fclr-at?(s, i, w, 0) || fclr-find?(s, w, i + 1);
+  def fclr-says?(s, words) = any?(w => fclr-find?(s, w, 0), words);
+  def fclr-environment-words() = ["does not work", "doesn't work", "do not work", "don't work", "not working", "is broken", "are broken", "cannot be used", "can't be used", "never works", "is unavailable", "not supported", "is useless", "always fails"];
+  def fclr-host-words() = ["/Users/", "/private/", "/tmp/", "/var/", ".hearth/"];
+  def fclr-hex?(b) = ((b >= 48) && (b <= 57)) || ((b >= 97) && (b <= 102)) || ((b >= 65) && (b <= 70));
+  def fclr-hex-run(s, i, run, most) = i >= len(s) ? max2(run, most) : fclr-hex?(str_byte_at(s, i)) ? fclr-hex-run(s, i + 1, run + 1, most) : fclr-hex-run(s, i + 1, 0, max2(run, most));
+  // a rule reads across contracts: one line, short, no digest, no host path
+  def fclr-general?(rule) = (len(rule) <= 360) && ((str_find(rule, "\n", 0) < 0) && ((fclr-hex-run(rule, 0, 0, 0) < 16) && !fclr-says?(rule, fclr-host-words())));
+  def fclr-one-clause?(why) = (len(why) <= 200) && ((str_find(why, ". ", 0) < 0) && ((str_find(why, ";", 0) < 0) && (str_find(why, "\n", 0) < 0)));
+  def fclr-prior-lesson(prior) = nothing?(prior) ? nothing() : fcam-family-lesson(prior);
+  def fclr-prior-digest(prior) = nothing?(fclr-prior-lesson(prior)) ? "" : fcap-string(fclr-prior-lesson(prior), "digest");
+  // the first audit a lesson fails, or "" when it stands
+  def fclr-audit(lesson, verified, prior) {
+   let rule = fat-trim(fcap-string(lesson, "rule"));
+   let why = fat-trim(fcap-string(lesson, "why"));
+   let kind = fcap-string(lesson, "kind");
+   let read = fcap-string(lesson, "read");
+   if (((Comparable) len(rule) == 0) || (((Comparable) len(why) == 0) || !fat-has(["method", "avoid"], kind))) then "lesson-shape"
+   else if fclr-says?(rule ++ " " ++ why, fclr-environment-words()) then "environment-claim"
+   else if !fclr-general?(rule) then "lesson-not-general"
+   else if !fclr-one-clause?(why) then "why-not-one-clause"
+   else if (((String) kind == "method") && !verified) then "unresolved-failure-as-method"
+   else if !((String) read == fclr-prior-digest(prior)) then (nothing?(fclr-prior-lesson(prior)) ? "read-names-no-lesson" : "unread-prior-lesson")
+   else "";
+  }
+  // [status, lesson or nothing]: silent, refused:<audit>, or admitted
+  def fclr-decide(reply, verified, prior) {
+   if !faj-valid(reply) then ["refused:reply-not-json", nothing()] else {
+    let obj = parse-json("lesson-review", reply);
+    let lesson = fat-wire-object?(obj) && json-object-has?(obj, "lesson") ? json-object-get(obj, "lesson") : json-node-null();
+    if ((String) faj-type(lesson) == "null") then ["silent", nothing()]
+    else if !fat-wire-object?(lesson) then ["refused:lesson-shape", nothing()]
+    else fclr-decided(lesson, fclr-audit(lesson, verified, prior));
+   };
+  }
+  def fclr-decided(lesson, reason) = (String) reason == "" ? ["admitted", lesson] : ["refused:" ++ reason, nothing()];
+  def fclr-digest(lesson) = fcam-hash(fat-trim(fcap-string(lesson, "rule")) ++ "\n" ++ fat-trim(fcap-string(lesson, "why")) ++ "\n" ++ fcap-string(lesson, "kind"));
+  // a family holds one lesson: a second patches the first, carrying its digest and the patch count
+  def fclr-lesson-node(lesson, verified, prior) = json-node-object([
+   json-node-pair("rule", json-node-string(fat-trim(fcap-string(lesson, "rule")))),
+   json-node-pair("why", json-node-string(fat-trim(fcap-string(lesson, "why")))),
+   json-node-pair("kind", json-node-string(fcap-string(lesson, "kind"))),
+   json-node-pair("source_outcome", json-node-string(verified ? "verified" : "failed")),
+   json-node-pair("digest", json-node-string(fclr-digest(lesson))),
+   json-node-pair("patches", json-node-int(nothing?(fclr-prior-lesson(prior)) ? 0 : (fcam-family-int(fclr-prior-lesson(prior), "patches") + 1))),
+   json-node-pair("prior_digest", json-node-string(fclr-prior-digest(prior))),
+   json-node-pair("written_ms", json-node-int(now_unix_ms()))]);
+  def fclr-write(root, family, prior, lesson, verified) {
+   let node = fclr-lesson-node(lesson, verified, prior);
+   let put = fcam-family-put(root, family, fcam-family-merge(prior, family, [["lesson", node], ["written_ms", json-node-int(now_unix_ms())]]));
+   !put ? ["refused:write-refused", ""] : [nothing?(fclr-prior-lesson(prior)) ? "written" : "patched", fcap-string(node, "digest")];
+  }
+
+  // ── what the voice reads ──
+  def fclr-instruction() = "Return {\"lesson\":null} or {\"lesson\":{\"rule\":\"...\",\"why\":\"...\",\"kind\":\"method|avoid\",\"read\":\"...\"}}. A lesson is one generalizable rule plus one clause of why, about technique on this family of files and checks, never about this contract's bytes. read names the digest of family_lesson when one is shown, and is empty otherwise: patch that lesson rather than add another. Never say a tool or the environment does not work. A rung that did not verify may teach only kind=avoid.";
+  def fclr-prompt(rung, state, prior) = json-emit(json-node-object([
+   json-node-pair("role", json-node-string("lesson-review")),
+   json-node-pair("goal", json-node-string(state[1])),
+   json-node-pair("writable", json-node-array(map(json-node-string, state[4]))),
+   json-node-pair("outcome", json-node-string(fclr-rung-verified?(rung) ? "verified" : "failed")),
+   json-node-pair("band", json-node-object([json-node-pair("reading", nothing?(fclr-rung-reading(rung)) ? json-node-null() : json-node-int(fclr-rung-reading(rung))), json-node-pair("full", json-node-int(fclr-rung-full(rung)))])),
+   json-node-pair("circle_accepted", json-node-int(fclr-rung-accepted(rung))),
+   json-node-pair("finding", json-node-string(fclr-cut(fclr-rung-finding(rung), 1600))),
+   json-node-pair("repairs", json-node-array(fcam-family-repairs(fat-take(reverse(fcap-reflections(state)), 3)))),
+   json-node-pair("family_lesson", nothing?(fclr-prior-lesson(prior)) ? json-node-null() : fclr-prior-lesson(prior)),
+   json-node-pair("instruction", json-node-string(fclr-instruction()))]));
+
+  // ── one review: [status, digest, local IDs, family] ──
+  def fclr-review(root, rung, voice) {
+   let state = fclr-rung-state(rung);
+   let family = fcam-family-key(state);
+   let prior = fcam-family-read(root, family);
+   let verified = fclr-rung-verified?(rung);
+   let reply = try fclr-call(voice[2], fclr-prompt(rung, state, prior)) else nothing();
+   let decided = nothing?(reply) ? ["refused:voice-stopped", nothing()] : fclr-decide(reply[0], verified, prior);
+   let written = nothing?(decided[1]) ? [decided[0], ""] : fclr-write(root, family, prior, decided[1], verified);
+   [written[0], written[1], nothing?(reply) ? 0 : reply[1], family];
+  }
+  def fclr-status(r) = r[0];
+  def fclr-lesson-digest(r) = r[1];
+  def fclr-ids(r) = r[2];
+  def fclr-family(r) = r[3];
+  // ── after every rung: the lesson review, the corpus row, the cold sweep ──
+  // A rung whose lane left no continuity packet (fcam-read answered nothing) has nothing to review or
+  // teach; the sweep still runs.
+  def fclr-packet?(packet) = !nothing?(packet) && (fat-wire-object?(packet) && ((String) fcap-string(packet, "schema") == "form-code-continuity-v1"));
+  def fclr-after-rung(root, home, rung, voice, kick) = fclr-packet?(fclr-rung-packet(rung)) ? fclr-after-packet(root, home, rung, voice, kick) : [["refused:packet-absent", "", 0, ""], ["", "no-packet"], fcam-family-sweep(root, now_unix_ms())];
+  def fclr-after-packet(root, home, rung, voice, kick) {
+   let review = fclr-review(root, rung, voice);
+   let ex = nsc-rung-example(fclr-rung-id(rung), fclr-rung-packet(rung), fclr-rung-reading(rung), fclr-rung-full(rung), fclr-rung-accepted(rung), fclr-rung-finding(rung));
+   let row = nsc-rung-observe(home, ex, kick);
+   let swept = fcam-family-sweep(root, now_unix_ms());
+   [review, row, swept];
+  }
+  def fclr-row(r) = json-node-object([
+   json-node-pair("lesson_review", json-node-string(fclr-status(r[0]))),
+   json-node-pair("lesson_digest", json-node-string(fclr-lesson-digest(r[0]))),
+   json-node-pair("lesson_review_ids", json-node-int(fclr-ids(r[0]))),
+   json-node-pair("family", json-node-string(fclr-family(r[0]))),
+   json-node-pair("corpus_row", json-node-string((String) value_kind(r[1][0]) == "string" ? r[1][0] : "")),
+   json-node-pair("cold_moved", json-node-int(r[2]))]);
+
+  // ── a local model as the lesson voice: one direct read-only review over the prompt ──
+  // The report is the lesson JSON; the same audits run inside the lane, so the voice repairs its own
+  // lesson there before the review decides.
+  def fclr-report-check(contract, subject) {
+   let report = subject[1];
+   if !faj-valid(report) then [0, "Submit one JSON object: " ++ fclr-instruction()] else {
+    let decided = fclr-decide(report, contract[0], contract[1]);
+    fat-starts(decided[0], "refused:") ? [0, "The lesson was refused by audit " ++ substring(decided[0], 8, len(decided[0])) ++ ". " ++ fclr-instruction()] : [1, "Lesson shape and audits hold."];
+   };
+  }
+  def fclr-source-ok(contract, docs) = [1, "The rung packet is read-only evidence."];
+  // The prompt carries the outcome and the family lesson it shows, so the lane's report check audits the
+  // reply against exactly what the voice read.
+  def fclr-qwen-act(model, context, turns, prompt) {
+   let obj = parse-json("lesson-prompt", prompt);
+   let verified = (String) fcap-string(obj, "outcome") == "verified";
+   let prior = fat-wire-object?(json-object-get(obj, "family_lesson")) ? json-node-object([json-node-pair("lesson", json-object-get(obj, "family_lesson"))]) : nothing();
+   let state = fcap-open-direct-review("Read the rung packet and submit the lesson report it asks for.", [["rung-packet", "rung-packet.json", prompt]]);
+   let result = fcac-admit(model, state, [fclr-report-check, [verified, prior], fclr-source-ok, 0], context, turns);
+   [(String) fcap-stage(result[0]) == "complete" ? fcap-report(result[0]) : "{\"lesson\":null}", result[2]];
+  }
+  def fclr-qwen-voice(name, model, context, turns) = fclr-voice(name, model, prompt => fclr-qwen-act(model, context, turns, prompt));
+  // physical check, local model on the GPU (never while the voice or LoRA holds it):
+  //   printf 'import form-stdlib/bml/form-cli-code-lesson-review.bml;\nsection [form.bml] {\n fclr-physical-check("qwen38-q8");\n}\n' > .hearth/lesson-physical.bml && ./fkwu .hearth/lesson-physical.bml
+  def fclr-physical-check(model) {
+   let root = temp_dir() ++ "/form-lesson-physical-" ++ now_unix_ms().str();
+   let made = fs-mkdir(root);
+   let docs = [["closure-lines.fk", "closure-lines.fk", "(do\n    0)\n"]];
+   let s = fcam-with(fcap-open-direct-code("Add (defn cl-unit-at (text line) ...) inside the (do ...) before the final 0.", docs, ["closure-lines.fk"]), [root, "physical-check", fcam-scope("Add (defn cl-unit-at (text line) ...) inside the (do ...) before the final 0.", docs, ["closure-lines.fk"], "[{\"tool\":\"balance\",\"arguments\":[\"closure-lines.fk\"],\"stdout\":\"0 0\\n\"}]"), 0]);
+   let rung = fclr-rung("physical-check", fcam-packet(s, "checkpoint"), 28, 31, 0, "The band read 28 of 31: a stub answered nothing for every line, so the three nothing claims held and the two unit claims did not.");
+   let r = fclr-review(root, rung, fclr-qwen-voice("lesson-voice", model, 16384, 6));
+   print_str(json-emit(fclr-row([r, [""], 0])));
+   r;
+  }
+ }
+ 0;
+}
