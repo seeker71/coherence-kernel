@@ -58,27 +58,41 @@ section [form.bml] {
 //
 // THE OPENING FIT — the head's first learned Form control.
 //
-// A site is [prompt, system, prefix span texts, label, verb] (form-token-lora.bml's
-// ftlr-sites): a point in a traced completion where the voice chose what came next,
-// labelled 1 where it opened a control.  For each site the local Qwen prefills the
-// chat prompt and the prefix spans, each span encoded on its own (the canonical
-// tokenization of an in-stream control), and Form reads three things back: the
-// output-normalized activation the head reads, the residual it was normalized from,
-// and the base logits of the winner and of the opening token.  The opening token is
-// the first token of the control encoded alone, "<|form:VERB|>"; every verb shares it.
+// A site is [prompt, system, prefix span texts, label, verb, trace line]
+// (form-token-lora.bml's ftlr-sites): a point in a traced completion where the voice
+// chose what came next, labelled 1 where it opened a control.  For each site the local
+// Qwen prefills the chat turn (the trace's system turn when it carries one, then the
+// prompt) and the prefix spans, each span encoded on its own (the canonical tokenization
+// of an in-stream control), and Form reads three things back: the output-normalized
+// activation the head reads, the residual it was normalized from, and the base logits of
+// the winner and of the opening token.  The opening token is the first token of the
+// control encoded alone, "<|form:VERB|>"; every verb shares it.
 //
-// lora-backward.bml's lbw-of-fit solves A (detector) and B (emitter along the head's
-// row for the opening token) in Form; qlh-write-vectors crystallizes them and
-// qlh-admit opens them on the device.  The second pass restores each site's residual
-// and asks the head again, plain and adapted: the plain answer must be the first
-// pass's winner (the restore is faithful), and the adapted answer is the reading —
-// how many opening sites now open, and how many other sites now open wrongly.
+// The sites split by trace row (lora-backward.bml lbw-of-split). lbw-of-fit solves A
+// (detector) and B (emitter along the head's row for the opening token) on the kept rows
+// only; qlh-write-vectors crystallizes them and qlh-admit opens them on the device.  The
+// second pass restores each site's residual and asks the head again, plain and adapted:
+// the plain answer must be the first pass's winner (the restore is faithful), and the
+// adapted answer is the path's reading — how many opening sites now open and how many
+// other sites now open wrongly, on all sites and on the held-out rows apart.
+//
+// Whether the activation itself tells an opening apart is a different reading. With fewer
+// sites than the activation is wide, the ridge interpolates any labelling, so a detector
+// scores near 1 at the openings it was fitted on and near 0 elsewhere whatever the labels
+// meant. lbw-of-knowing reads it held out instead, beside the same solver fitted on
+// scrambled labels; yieldpoint_read is 1 only when the held-out separation stands above
+// that scrambled floor.
+//
+// The answer is ["read", [[key, integer], ...]] (a fraction carried as *_milli; a measure
+// that could not be read is left out), or ["refused", reason]: no-control-id-rows,
+// no-head-row, no-site-within-span, site-reading-did-not-arrive, no-kept-site,
+// fit-not-finite, adapter-not-admitted.
 //
 // Every number crosses the device boundary once, as bytes Form decodes; the GGUF
 // stays read-only and the adapter is an overlay on the activation.
 section [form.bml] {
     def qlt-openings-path() = ".hearth/form-token-lora/qwen-openings.safetensors";
-    def qlt-control-open(verb) = "<|form:" + (verb + "|>");
+    def qlt-control-open(verb) = lbw-of-control-open(verb);
     // Qwen3.8's text spells "<|form:VERB|>" in seven to nine tokens and its first is "<"
     // (id 27 on the observed GGUF): the text opening is a common token every verb shares.
     def qlt-text-opening-id(src, verb) = q35-encode(src, qlt-control-open(verb))[0];
@@ -88,36 +102,41 @@ section [form.bml] {
     // control-open ID — "a Form control opens here", one token where the text spends four
     // before the verb — and the next ones, in the contract's verb order, as one ID per verb
     // for the rank-K stone. Form expands an emitted ID into the control's canonical text.
-    // The first PAD is read from the file, never compiled in.
-    def qlt-control-verbs() = ["recipe-birth", "recipe-exec", "choice", "eval", "knowledge-query", "node-get", "node-make", "node-select"];
+    // The first PAD is read from the file, never compiled in. The verbs are the contract's one
+    // list (lora-backward.bml lbw-of-verbs), the same the dataset door admits a control under.
+    def qlt-control-verbs() = lbw-of-verbs();
     // One linear walk of the token table with the GGUF's own cursor (a lookup by id walks from
     // the start, so 243 lookups cost 243 walks): the start of the [PAD run that reaches the end.
     def qlt-pad-at?(src, at) = gmt-token-len(src, at) >= 4 && (Comparable) gmt-token-byte(src, at, 0) == 91 && (Comparable) gmt-token-byte(src, at, 1) == 80 && (Comparable) gmt-token-byte(src, at, 2) == 65 && (Comparable) gmt-token-byte(src, at, 3) == 68;
     def qlt-first-pad-walk(src, at, id, n, start) = id >= n ? start : qlt-first-pad-walk(src, gmt-token-next(src, at), id + 1, n, qlt-pad-at?(src, at) ? (start < 0 ? id : start) : 0 - 1);
+    // A table with no [PAD run reaching its end has no control-ID rows: the reading did not
+    // arrive, so it is nothing — never an id one past the last row.
     def qlt-first-pad(src) = {
         let start = qlt-first-pad-walk(src, gmt-tokens-first(src), 0, gmt-vocab-n(src), 0 - 1);
-        start < 0 ? gmt-vocab-n(src) : start;
+        start < 0 ? nothing() : start;
     };
     def qlt-verb-index(verbs, verb, i) = (Comparable) len(verbs) == 0 ? 0 - 1 : (String) verbs[0] == verb ? i : qlt-verb-index(verbs[1:], verb, i + 1);
     def qlt-control-open-id(src) = qlt-first-pad(src);
-    def qlt-control-id(src, verb) = {
-        let k = qlt-verb-index(qlt-control-verbs(), verb, 0);
-        let first = qlt-first-pad(src);
-        k < 0 || first + 1 + k >= gmt-vocab-n(src) ? 0 - 1 : first + 1 + k;
-    };
+    def qlt-control-id(src, verb) = qlt-control-id-at(src, qlt-verb-index(qlt-control-verbs(), verb, 0), qlt-first-pad(src));
+    def qlt-control-id-at(src, k, first) = nothing?(first) ? nothing() : k < 0 ? nothing() : first + 1 + k >= gmt-vocab-n(src) ? nothing() : first + 1 + k;
     // The text Form writes into the stream for an emitted control ID, or nothing for any other
-    // id. `first` is qlt-first-pad(src), read once per session by the caller.
-    def qlt-control-text-at(first, id) = (Comparable) id == first ? "<|form:" : id > first && id <= first + len(qlt-control-verbs()) ? qlt-control-open(qlt-control-verbs()[id - first - 1]) : nothing();
-    // target "control-id" asks for the learned control-open ID every verb shares; anything
-    // else the text opening
+    // id. `first` is qlt-first-pad(src), read once per session by the caller. After the bare
+    // opening the voice spells the verb itself; the decoder answers lbw-of-after-open(verb) in
+    // place of a verb that is not the contract's, "observation" first among them.
+    def qlt-control-text-at(first, id) = nothing?(first) ? nothing() : nothing?(id) ? nothing() : lbw-of-control-text-at(first, id);
+    // target "control-id" asks for the learned control-open ID every verb shares (nothing when
+    // the table has none); anything else the text opening
     def qlt-opening-id-for(src, verb, target) = (String) target == "control-id" ? qlt-control-open-id(src) : qlt-text-opening-id(src, verb);
-    def qlt-opening-id(src, verb) = qlt-text-opening-id(src, verb);
-    def qlt-site-ids(src, site) = foldl((acc, t) => tkz-cat(acc, q35-encode(src, t)), q35-chat-ids(src, site[0]), site[2]);
+    // the chat turn a site is prefilled under: the trace's system turn first when it carries one,
+    // as the Llama lane's segment rows frame it
+    def qlt-chat-ids(src, prompt, system) = (Comparable) len(system) == 0 ? q35-chat-ids(src, prompt) : tkz-cat(q35-one(q35-special-id(src, "<|im_start|>")), tkz-cat(q35-encode(src, "system\n"), tkz-cat(q35-encode(src, system), tkz-cat(q35-one(q35-special-id(src, "<|im_end|>")), tkz-cat(q35-encode(src, "\n"), q35-chat-ids(src, prompt))))));
+    def qlt-site-ids(src, site) = foldl((acc, t) => tkz-cat(acc, q35-encode(src, t)), qlt-chat-ids(src, site[0], site[1]), site[2]);
     def qlt-f32-at(buf, i) = ln-f32-decode(ln-u32-le(metal_buf_read(buf, i * 4, 4), 0));
     // the head's row for one token, dequantized on the device by the embedding-row kernel.
     // The dispatch lands only in an open batch, which the read then submits and waits on; a
     // row that reads back all zero did not arrive and answers nothing, never a zero emitter.
-    def qlt-head-row(ctx, id) = q38e-index(kth-tv-ty(ctx[6])) < 0 ? empty() : {
+    // An id that is no integer, or past the head's last row, is refused before any dispatch.
+    def qlt-head-row(ctx, id) = !((String) value_kind(id) == "int") ? empty() : id < 0 || id >= kth-tv-r(ctx[6]) ? empty() : q38e-index(kth-tv-ty(ctx[6])) < 0 ? empty() : {
         let d = ctx[2][0];
         let out = metal_buf_alloc(d * 4);
         metal_batch_concurrent();
@@ -172,18 +191,22 @@ section [form.bml] {
         let aside = metal_buf_write(bs[28], top * 4, qlt-f32-bytes([0.0 - 1.0e30]));
         lift <= floor ? reverse(acc) : qlt-rivals-go(ctx, k - 1, floor, cons([top, lift], acc));
     };
-    def qlt-mean(xs) = (Comparable) len(xs) == 0 ? 0.0 : foldl((acc, x) => acc + x, 0.0, xs) / (len(xs) + 0.0);
-    def qlt-pick(xs, ys, want) = (Comparable) len(xs) == 0 ? empty() : (Comparable) ys[0] == want ? cons(xs[0], qlt-pick(xs[1:], ys[1:], want)) : qlt-pick(xs[1:], ys[1:], want);
     // one row per held site: [label, base winner, restored plain winner, adapted winner]
     def qlt-rows(ls, bs, as, ds) = (Comparable) len(ls) == 0 ? empty() : cons([ls[0], bs[0][2], as[0][0], ds[0][0]], qlt-rows(ls[1:], bs[1:], as[1:], ds[1:]));
     def qlt-tally(rows, o, positive, k) = foldl((acc, r) => acc + ((positive ? r[0] > 0.5 : r[0] < 0.5) && (Comparable) r[k] == o ? 1 : 0), 0, rows);
+    def qlt-positives(rows) = foldl((acc, r) => acc + (r[0] > 0.5 ? 1 : 0), 0, rows);
+    def qlt-faithful(rows) = foldl((acc, r) => acc + ((Comparable) r[1] == r[2] ? 1 : 0), 0, rows);
     def qlt-first-verb(sites) = (Comparable) len(sites) == 0 ? "recipe-birth" : (Comparable) sites[0][3] == 1 ? sites[0][4] : qlt-first-verb(sites[1:]);
     def qlt-verbs-agree(src, sites, o, target) = foldl((acc, s) => acc && ((Comparable) s[3] == 0 || (Comparable) qlt-opening-id-for(src, s[4], target) == o), 1, sites);
-    // The reading: [sites, held, opening sites, opened before, opened after, wrong before,
-    // wrong after, restores faithful, gain, mean score at openings, mean score elsewhere,
-    // opening id, every verb shares the opening, artifact bytes, rivals taken out,
-    // largest lift any other token still takes]
-    def qlt-opening-reading(sites, rows, fit, labels, o, agree, bytes, taken, left) = [len(sites), len(rows), foldl((acc, r) => acc + (r[0] > 0.5 ? 1 : 0), 0, rows), qlt-tally(rows, o, 1, 1), qlt-tally(rows, o, 1, 3), qlt-tally(rows, o, 0, 1), qlt-tally(rows, o, 0, 3), foldl((acc, r) => acc + ((Comparable) r[1] == r[2] ? 1 : 0), 0, rows), fit[3], qlt-mean(qlt-pick(fit[2], labels, 1.0)), qlt-mean(qlt-pick(fit[2], labels, 0.0)), o, agree, bytes, taken, left];
+    def qlt-refused(reason) = ["refused", reason];
+    // scrambled labellings fitted beside the true one: labels that mean nothing clear the floor
+    // by chance about once in sixteen
+    def qlt-scrambles() = 15;
+    def qlt-milli(x) = nothing?(x) ? nothing() : float_to_int(x * 1000.0);
+    // The reading as [key, integer] pairs, a measure that could not be read left out. rows are
+    // [label, base winner, restored winner, adapted winner]; split is [kept, held out] indices;
+    // fit is qlt-selective's; knowing is lbw-of-knowing's.
+    def qlt-opening-reading(rows, split, fit, knowing, o, agree, bytes, nsites) = filter(p => !nothing?(p[1]), [["sites", nsites], ["held", len(rows)], ["kept_sites", len(split[0])], ["heldout_sites", len(split[1])], ["opening_sites", qlt-positives(rows)], ["heldout_openings", qlt-positives(lbw-of-at(rows, split[1]))], ["opened_before", qlt-tally(rows, o, 1, 1)], ["opened_after", qlt-tally(rows, o, 1, 3)], ["wrong_before", qlt-tally(rows, o, 0, 1)], ["wrong_after", qlt-tally(rows, o, 0, 3)], ["heldout_opened_after", qlt-tally(lbw-of-at(rows, split[1]), o, 1, 3)], ["heldout_wrong_after", qlt-tally(lbw-of-at(rows, split[1]), o, 0, 3)], ["restores_faithful", qlt-faithful(rows)], ["gain_milli", qlt-milli(fit[3])], ["separation_in_sample_milli", qlt-milli(knowing[0])], ["scramble_in_sample_milli", qlt-milli(knowing[2])], ["separation_heldout_milli", qlt-milli(knowing[1])], ["scramble_heldout_milli", qlt-milli(knowing[3])], ["scrambles", knowing[4]], ["yieldpoint_read", knowing[7]], ["opening_id", o], ["one_opening_for_every_verb", agree ? 1 : 0], ["artifact_bytes", bytes], ["rivals_taken", fit[4]], ["largest_rival_lift_milli", qlt-milli(fit[5])], ["selective_refused", fit[6]]]);
     // ctx from q38-open-span(path, maxpos, span): a site longer than the span is not held.
     // The rank-one adapter carries one emitter, so it learns one opening: the text opening
     // every verb shares, or (target "control-id") the learned control-open ID;
@@ -192,29 +215,75 @@ section [form.bml] {
     // head's view read on the device; [0, 0] keeps the plain emitter along the opening's row.
     def qlt-opening-fit(ctx, src, sites, path, ridge, margin, target, refine) = {
         let o = qlt-opening-id-for(src, qlt-first-verb(sites), target);
-        let agree = (String) target == "control-id" ? 1 : qlt-verbs-agree(src, sites, o, target);
-        let held = filter(p => len(p[1]) <= q38-ctx-span(ctx), map(s => [s, qlt-site-ids(src, s)], sites));
-        let w = o < 0 ? empty() : qlt-head-row(ctx, o);
-        let base = map(p => qlt-site-reading(ctx, p[1], o), held);
-        let labels = map(p => p[0][3] + 0.0, held);
-        (Comparable) len(w) == 0 || (Comparable) len(held) == 0 || any?(r => (Comparable) len(r) == 0, base) ? [] : qlt-opening-fitted(ctx, sites, base, labels, qlt-selective(ctx, w, o, margin, refine, lbw-of-fit(map(r => r[0], base), labels, map(r => r[3] - r[4], base), w, ridge, margin)), path, o, agree);
+        nothing?(o) ? qlt-refused("no-control-id-rows") : qlt-opening-fit-at(ctx, src, sites, path, ridge, margin, target, refine, o);
     };
-    // fit with its emitter made selective: [A, B, scores, gain, rivals taken, largest lift left]
+    def qlt-opening-fit-at(ctx, src, sites, path, ridge, margin, target, refine, o) = {
+        let w = qlt-head-row(ctx, o);
+        let held = (Comparable) len(w) == 0 ? empty() : filter(p => len(p[1]) <= q38-ctx-span(ctx), map(s => [s, qlt-site-ids(src, s)], sites));
+        (Comparable) len(w) == 0 ? qlt-refused("no-head-row") : (Comparable) len(held) == 0 ? qlt-refused("no-site-within-span") : qlt-opening-read(ctx, held, w, path, ridge, margin, refine, o, (String) target == "control-id" ? 1 : qlt-verbs-agree(src, sites, o, target), len(sites));
+    };
+    def qlt-opening-read(ctx, held, w, path, ridge, margin, refine, o, agree, nsites) = {
+        let base = map(p => qlt-site-reading(ctx, p[1], o), held);
+        any?(r => (Comparable) len(r) == 0, base) ? qlt-refused("site-reading-did-not-arrive") : qlt-opening-split(ctx, map(p => p[0], held), base, w, path, ridge, margin, refine, o, agree, nsites);
+    };
+    // A and B fitted on the kept rows only; the knowing read beside them on every held site
+    def qlt-opening-split(ctx, sites, base, w, path, ridge, margin, refine, o, agree, nsites) = {
+        let labels = map(s => s[3] + 0.0, sites);
+        let groups = map(s => s[5], sites);
+        let hs = map(r => r[0], base);
+        let split = lbw-of-split(groups);
+        let kept = split[0];
+        (Comparable) len(kept) == 0 ? qlt-refused("no-kept-site") : qlt-opening-fitted(ctx, base, labels, split, qlt-selective(ctx, w, o, margin, refine, lbw-of-fit(lbw-of-at(hs, kept), lbw-of-at(labels, kept), lbw-of-at(map(r => r[3] - r[4], base), kept), w, ridge, margin)), lbw-of-knowing(hs, labels, groups, ridge, qlt-scrambles()), path, o, agree, nsites);
+    };
+    // The fit with its emitter made selective: [A, B, scores, gain, rivals taken, largest lift
+    // left, selective refused]. When the rivals' directions leave nothing of the opening's row
+    // (lbw-of-selective answers nothing), B stays the plain emitter and the reading says so:
+    // no rival taken, selective refused 1.
     def qlt-selective(ctx, w, o, margin, refine, fit) = {
         let refined = lbw-of-refine(w, fit[3], fit[1], empty(), refine[0], b => qlt-rivals(ctx, b, o, refine[1], 0.5 * margin), j => qlt-head-row(ctx, j));
-        let b = nothing?(refined[0]) ? fit[1] : refined[0];
-        let left = qlt-rivals(ctx, b, o, 1, 0.0);
-        [fit[0], b, fit[2], fit[3], len(refined[1]), (Comparable) len(left) == 0 ? 0.0 : left[0][1]];
+        let refused = nothing?(refined[0]) ? 1 : 0;
+        let b = (Comparable) refused == 1 ? fit[1] : refined[0];
+        let left = nothing?(b) ? empty() : qlt-rivals(ctx, b, o, 1, 0.0);
+        [fit[0], b, fit[2], fit[3], (Comparable) refused == 1 ? 0 : len(refined[1]), (Comparable) len(left) == 0 ? 0.0 : left[0][1], refused];
     };
     // Only a whole, finite pair is crystallized: a NaN never reaches the f32 writer or the device.
     def qlt-finite?(xs) = nothing?(xs) ? 0 : (Comparable) len(xs) > 0 && foldl((acc, x) => acc && abs(x) < 3.0e38, 1, xs);
-    def qlt-opening-fitted(ctx, sites, base, labels, fit, path, o, agree) = !(qlt-finite?(fit[0]) && qlt-finite?(fit[1])) ? [] : {
+    def qlt-opening-fitted(ctx, base, labels, split, fit, knowing, path, o, agree, nsites) = !(qlt-finite?(fit[0]) && qlt-finite?(fit[1])) ? qlt-refused("fit-not-finite") : {
         let bytes = qlh-write-vectors(path, fit[0], fit[1]);
         let adapter = qlh-admit(path);
         let again = map(r => qlt-head-again(ctx, r[1], [], o), base);
         let adapted = (Comparable) qlh-admitted?(adapter) == 1 ? map(r => qlt-head-again(ctx, r[1], adapter, o), base) : [];
         let closed = qlh-close(adapter);
-        (Comparable) len(adapted) == 0 ? [] : qlt-opening-reading(sites, qlt-rows(labels, base, again, adapted), fit, labels, o, agree, bytes, fit[4], fit[5]);
+        (Comparable) len(adapted) == 0 ? qlt-refused("adapter-not-admitted") : ["read", qlt-opening-reading(qlt-rows(labels, base, again, adapted), split, fit, knowing, o, agree, bytes, nsites)];
+    };
+    0;
+}
+//
+// THE LAYER OVERLAY'S KERNELS, read against Form's own arithmetic. A small fixture
+// through qlh-rr-apply, read back and compared with lora-backward.bml's transposed
+// walks; a second apply asks for one token past the record's capacity and must not
+// land. [applied, outputs, largest difference, freed, applied past capacity]. No
+// model is opened; the band and the run door's kernels lane both read this one walk.
+section [form.bml] {
+    def qlt-rr-values(n, seed, scale) = map(i => ((((i * 37) + (seed * 13)) % 101) - 50) * scale, lbw-of-iota(n));
+    def qlt-rr-reference(a, b, x, y, din, rank, dout, ntok, scale) = (Comparable) ntok == 0 ? empty() : append(lbw-axpy-go(take(dout, y), lbw-tmv(b, rank, dout, lbw-tmv(a, din, rank, take(din, x))), scale, empty()), qlt-rr-reference(a, b, drop(din, x), drop(dout, y), din, rank, dout, ntok - 1, scale));
+    def qlt-rr-check(din, rank, dout, ntok, scale) = {
+        let a = qlt-rr-values(din * rank, 1, 0.01);
+        let b = qlt-rr-values(rank * dout, 2, 0.02);
+        let x = qlt-rr-values(din * ntok, 3, 0.03);
+        let y = qlt-rr-values(dout * ntok, 4, 0.05);
+        let rec = qlh-rr-open(4, qlt-f32-bytes(a), qlt-f32-bytes(b), din, rank, dout, scale, ntok);
+        let xh = metal_buf_alloc(din * ntok * 4);
+        let yh = metal_buf_alloc(dout * ntok * 4);
+        let wx = metal_buf_write(xh, 0, qlt-f32-bytes(x));
+        let wy = metal_buf_write(yh, 0, qlt-f32-bytes(y));
+        metal_batch_concurrent();
+        let applied = qlh-rr-apply(rec, xh, yh, ntok);
+        let over = qlh-rr-apply(rec, xh, yh, ntok + 1);
+        let device = qlt-f32s(metal_buf_read(yh, 0, dout * ntok * 4), dout * ntok);
+        let freed = sum([qlh-rr-close(rec), metal_buf_free(xh), metal_buf_free(yh)]);
+        let expected = qlt-rr-reference(a, b, x, y, din, rank, dout, ntok, scale);
+        [applied, len(device), (Comparable) len(device) == len(expected) ? lbw-maxabs(lbw-sub(device, expected)) : 0.0 - 1.0, freed, over];
     };
     0;
 }

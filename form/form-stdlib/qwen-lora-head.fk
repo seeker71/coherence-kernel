@@ -70,9 +70,11 @@ section [form.bml] {
 // A record carries its own compiled pipelines, so q38-pipes keeps every identity it has:
 //   [slot, dot-pipe, add-pipe, A, B, u, din, rank, dout, scale-bits, ntok-capacity]
 // An adapted layer table is the opened one with each layer's record list appended (linear
-// 14 -> 15 entries, full 11 -> 12); close and the ok?-checks keep reading ctx[3], the
-// original. The hook inside qwen35-dense-token-handle.fk that enqueues a record after its
-// projection is the one edit that file needs; it is named in this stone's handoff.
+// 14 -> 15 entries, full 11 -> 12), built by qlh-rr-table, which refuses a record that could
+// not carry the context's span or sits on a slot its layer lacks; close and the ok?-checks keep
+// reading ctx[3], the original. The hook inside qwen35-dense-token-handle.fk that enqueues a
+// record after its projection is the one edit that file needs; it is named in this stone's
+// handoff.
 section [form.bml] {
     def qlh-rr-dot-msl(fname) = "kernel void " + (fname + " (device const float* x [[buffer(0)]], device const float* a [[buffer(1)]], device float* u [[buffer(2)]], constant uint& din [[buffer(3)]], constant uint& rank [[buffer(4)]], constant uint& ntok [[buffer(5)]], uint g [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { if (g >= rank * ntok) return; uint t = g / rank; uint k = g - t * rank; float acc = 0.0f; for (uint i = lane; i < din; i += 32u) { acc = acc + a[i * rank + k] * x[t * din + i]; } acc = metal::simd_sum(acc); if (lane == 0u) u[t * rank + k] = acc; }");
     def qlh-rr-add-msl(fname) = "kernel void " + (fname + " (device float* y [[buffer(0)]], device const float* b [[buffer(1)]], device const float* u [[buffer(2)]], constant uint& dout [[buffer(3)]], constant uint& rank [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant float& scale [[buffer(6)]], uint gid [[thread_position_in_grid]]) { if (gid >= dout * ntok) return; uint t = gid / dout; uint j = gid - t * dout; float acc = 0.0f; for (uint k = 0u; k < rank; ++k) { acc = acc + u[t * rank + k] * b[k * dout + j]; } y[gid] = y[gid] + scale * acc; }");
@@ -106,6 +108,22 @@ section [form.bml] {
     } : 0;
     // an adapted layer table: each layer's record list appended (records-by-layer[l] may be [])
     def qlh-rr-lays(lays, records) = (Comparable) len(lays) == 0 ? empty() : cons(append(lays[0], [records[0]]), qlh-rr-lays(lays[1:], records[1:]));
+    // A table is built only for records the forward can carry whole. qlh-rr-apply answers 0 for a
+    // span longer than a record's u holds, and a hook discards that answer, so a long prefill would
+    // drop the overlay without a word: every record must hold the context's span. And a record must
+    // sit on a slot its layer carries — ssm_out (13) on linear layers only, attn_output (10) on
+    // full ones only (a linear layer's slot 10 is a gate tensor), ffn_down (4) on every layer.
+    // "" when the records hold, otherwise the first reason with its layer.
+    def qlh-rr-slot-fits?(slot, full) = (Comparable) slot == 4 ? 1 : (Comparable) slot == 10 ? (full ? 1 : 0) : (Comparable) slot == 13 ? (full ? 0 : 1) : 0;
+    def qlh-rr-record-reason(rec, l, interval, span) = (Comparable) qlh-rr-valid?(rec) == 0 ? "invalid-record:" + l.str() : rec[10] < span ? "span-exceeds-capacity:" + l.str() : (Comparable) qlh-rr-slot-fits?(rec[0], kth-full?(l, interval)) == 0 ? "slot-kind:" + (l.str() + (":" + rec[0].str())) : "";
+    def qlh-rr-layer-reason(recs, l, interval, span) = foldl((acc, rec) => (Comparable) len(acc) > 0 ? acc : qlh-rr-record-reason(rec, l, interval, span), "", recs);
+    def qlh-rr-refusal-go(records, l, interval, span) = (Comparable) len(records) == 0 ? "" : {
+        let here = qlh-rr-layer-reason(records[0], l, interval, span);
+        (Comparable) len(here) > 0 ? here : qlh-rr-refusal-go(records[1:], l + 1, interval, span);
+    };
+    def qlh-rr-refusal(records, interval, span) = qlh-rr-refusal-go(records, 0, interval, span);
+    // the adapted table for a context of `span` tokens, or nothing when a record would not hold
+    def qlh-rr-table(lays, records, interval, span) = !((Comparable) len(lays) == len(records)) ? nothing() : (Comparable) len(qlh-rr-refusal(records, interval, span)) > 0 ? nothing() : qlh-rr-lays(lays, records);
     // the record list a hook reads from an adapted layer (linear 15 entries, full 12)
     def qlh-rr-of(lay) = (Comparable) len(lay) == 15 ? lay[14] : (Comparable) len(lay) == 12 ? lay[11] : empty();
     def qlh-rr-slot-apply(lay, slot, xh, yh, ntok) = foldl((acc, rec) => acc + ((Comparable) rec[0] == slot ? qlh-rr-apply(rec, xh, yh, ntok) : 0), 0, qlh-rr-of(lay));

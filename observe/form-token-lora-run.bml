@@ -7,17 +7,23 @@
 //    "refine_rounds":3, "rivals":8}
 //
 // census  reads the traces through form-token-lora.bml into .hearth/form-token-lora/data-<ms>:
-//         train.jsonl, valid.jsonl, census.json. Model-free.
+//         train.jsonl, valid.jsonl, census.json. Model-free. A row off the contract is refused
+//         with its reason; no replayer stands in this door yet, so every admitted answer is
+//         counted in observations_unverified, never trusted silently.
 // llama   does the census, then trains the native Llama-3.2-3B voice lane (native-lora-train.bml,
 //         in this process, no crossing) from the parent adapter for `steps` rounds into a fresh
 //         output directory. Observation spans are masked out of the loss; prose and controls are
 //         taught. The trainer scores the held-out rows before and after (validation) and grades
-//         each held-out row (assessment-before/after.json); this door reads both back.
+//         each held-out row (assessment-before/after.json); this door reads both back. It trains
+//         only when every file it hands the trainer read back whole.
 // qwen    reads the sites (every point in a traced completion where the voice chose what came
 //         next), prefills each on the local Qwen3.8, fits the rank-one head adapter toward the
-//         control opening (qwen-lora-train.fk qlt-opening-fit), admits it and reads how many
-//         opening sites now open and how many other sites now open wrongly. target "control-id"
-//         fits toward the learned control-open ID (the GGUF's first [PAD] row) instead.
+//         control opening on the kept trace rows (qwen-lora-train.fk qlt-opening-fit), admits it
+//         and reads how many opening sites now open and how many other sites now open wrongly,
+//         held-out rows apart. That is a path reading. Whether the activation tells an opening
+//         apart is yieldpoint_read: the held-out separation above the floor fifteen scrambled
+//         labellings reach with the same solver. target "control-id" fits toward the learned
+//         control-open ID (the GGUF's first [PAD] row) instead.
 // kernels runs the layer-LoRA overlay's two Metal kernels (qwen-lora-head.fk qlh-rr-*) on a
 //         small fixture and compares them with Form's own arithmetic. No model is opened.
 //
@@ -63,18 +69,21 @@ section [form.bml] {
    [traces, data, c];
   }
   // ---- llama: the native voice lane ----
+  // The lane trains only on rows that read back whole: ready is 1 only when a train and a
+  // held-out row exist and train.jsonl, valid.jsonl and census.json each read back at the size
+  // written. The assessment file is held to the same read-back before the trainer starts.
   def ftlrr-llama(opts) {
    let held = ftlrr-census(opts);
    let c = held[2];
-   (Comparable) c[8] == 0 ? ftlr-ledger-row(c, held[0], held[1], [ftlr-s("lane", "llama"), ftlr-s("result", "not-ready: needs at least one train and one held-out row")]) : ftlrr-llama-ready(opts, held);
+   (Comparable) c[8] == 0 ? ftlr-ledger-row(c, held[0], held[1], [ftlr-s("lane", "llama"), ftlr-s("result", "not-ready: needs one train and one held-out row, each file read back whole")]) : ftlrr-llama-assessed(opts, held, ftlr-write(held[1] ++ "/assessment.json", ftlrr-assessment(held[1])));
   }
+  def ftlrr-assessment(data) = "[" ++ foldl((acc, l) => (Comparable) len(acc) == 0 ? l : acc ++ "," ++ l, "", ftlrr-lines(data ++ "/valid.jsonl")) ++ "]\n";
+  def ftlrr-llama-assessed(opts, held, short) = (Comparable) len(short) > 0 ? ftlr-ledger-row(held[2], held[0], held[1], [ftlr-s("lane", "llama"), ftlr-s("result", "not-ready: " ++ short)]) : ftlrr-llama-ready(opts, held);
   def ftlrr-llama-ready(opts, held) {
    let data = held[1];
    let parent = ftlrr-str(opts, "parent", "form/form-stdlib/adapters/llama-3.2-3b-voice-native");
    let steps = ftlrr-num(opts, "steps", 2);
-   let valid = ftlrr-lines(data ++ "/valid.jsonl");
    let assessment = data ++ "/assessment.json";
-   let wa = write_file_text(assessment, "[" ++ foldl((acc, l) => (Comparable) len(acc) == 0 ? l : acc ++ "," ++ l, "", valid) ++ "]\n");
    let out = ftlrr-root() ++ "/llama-" ++ now_unix_ms().str();
    let request = ftlrr-with(ntr-request(mr-path(mr-find("llama32-3b-mlx-4bit")), parent, data, out, steps, ftlrr-num(opts, "batch", 1), ftlrr-num(opts, "learning_rate", 0.0001), 1, ftlrr-layers(parent)), "assessment", json-node-string(assessment));
    let started = now_unix_ms();
@@ -95,7 +104,10 @@ section [form.bml] {
    let p = ftlrr-take(pos, cap / 2);
    append(p, ftlrr-take(neg, cap - len(p)));
   }
-  def ftlrr-reading-pairs(r) = (Comparable) len(r) == 0 ? [ftlr-s("result", "refused: no head row, no held site, or a site reading that did not arrive")] : [ftlr-n("sites", r[0]), ftlr-n("held", r[1]), ftlr-n("opening_sites", r[2]), ftlr-n("opened_before", r[3]), ftlr-n("opened_after", r[4]), ftlr-n("wrong_before", r[5]), ftlr-n("wrong_after", r[6]), ftlr-n("restores_faithful", r[7]), ftlr-n("gain_milli", ftlrr-milli(r[8])), ftlr-n("score_openings_milli", ftlrr-milli(r[9])), ftlr-n("score_elsewhere_milli", ftlrr-milli(r[10])), ftlr-n("opening_id", r[11]), ftlr-n("one_opening_for_every_verb", r[12] ? 1 : 0), ftlr-n("artifact_bytes", r[13]), ftlr-n("rivals_taken", r[14]), ftlr-n("largest_rival_lift_milli", ftlrr-milli(r[15])), ftlr-s("artifact", qlt-openings-path())];
+  // The reading's pairs go into the ledger as they are; a refusal goes in with its reason. The
+  // path's numbers (opened, wrong, restores) say the adapter lands; only yieldpoint_read (the
+  // held-out separation above the scrambled floor) says the activation tells an opening apart.
+  def ftlrr-reading-pairs(r) = (String) r[0] == "read" ? append(map(p => ftlr-n(p[0], p[1]), r[1]), [ftlr-s("split", "by-trace-row"), ftlr-s("artifact", qlt-openings-path())]) : [ftlr-s("result", "refused:" ++ r[1])];
   def ftlrr-qwen(opts) {
    let held = ftlrr-census(opts);
    let sites = ftlrr-cap(ftlr-trace-sites(held[0]), ftlrr-num(opts, "max_sites", 24));
@@ -105,43 +117,23 @@ section [form.bml] {
    let started = now_unix_ms();
    let ctx = (Comparable) len(sites) == 0 ? [] : q38-open-span(model, span + 8, span);
    let refine = [ftlrr-num(opts, "refine_rounds", 3), ftlrr-num(opts, "rivals", 8)];
-   let reading = len(ctx) < 10 ? [] : qlt-opening-fit(ctx, ctx[7], sites, qlt-openings-path(), ftlrr-num(opts, "ridge", 0.001), ftlrr-num(opts, "margin", 1.0), target, refine);
+   let reading = (Comparable) len(sites) == 0 ? qlt-refused("no-sites") : len(ctx) < 10 ? qlt-refused("model-not-opened") : qlt-opening-fit(ctx, ctx[7], sites, qlt-openings-path(), ftlrr-num(opts, "ridge", 0.001), ftlrr-num(opts, "margin", 1.0), target, refine);
    let closed = len(ctx) < 10 ? 0 : q38-close(ctx, []);
    let shown = print(["form-token-lora-qwen", reading]);
    ftlr-ledger-row(held[2], held[0], held[1], append([ftlr-s("lane", "qwen"), ftlr-s("model", model), ftlr-s("target", target), ftlr-n("rent_tokens", 0), ftlr-n("wall_ms", now_unix_ms() - started)], ftlrr-reading-pairs(reading)));
   }
   // ---- kernels: the layer-LoRA overlay's two Metal kernels against Form's own arithmetic ----
-  // A small fixture (din 64, rank 4, dout 48, three tokens) through qlh-rr-apply, read back
-  // and compared with lora-backward.bml's transposed walks. No model is opened.
-  def ftlrr-values(n, seed, scale) = map(i => ((((i * 37) + (seed * 13)) % 101) - 50) * scale, ftlrr-iota(n));
-  def ftlrr-iota-go(i, acc) = i < 0 ? acc : ftlrr-iota-go(i - 1, cons(i, acc));
-  def ftlrr-iota(n) = ftlrr-iota-go(n - 1, []);
-  def ftlrr-bytes(xs) = foldl((acc, x) => acc ++ md-le32(md-f32-bits(x)), "", xs);
-  def ftlrr-reference(a, b, x, y, din, rank, dout, ntok, scale) = (Comparable) ntok == 0 ? [] : append(lbw-axpy-go(take(dout, y), lbw-tmv(b, rank, dout, lbw-tmv(a, din, rank, take(din, x))), scale, []), ftlrr-reference(a, b, drop(din, x), drop(dout, y), din, rank, dout, ntok - 1, scale));
+  // qwen-lora-train.fk qlt-rr-check on a small fixture (din 64, rank 4, dout 48, three tokens),
+  // the same walk form-token-lora-metal-band.bml holds. No model is opened.
   def ftlrr-kernels(opts) {
    let din = 64;
    let rank = 4;
    let dout = 48;
    let ntok = 3;
-   let scale = 2.5;
-   let a = ftlrr-values(din * rank, 1, 0.01);
-   let b = ftlrr-values(rank * dout, 2, 0.02);
-   let x = ftlrr-values(din * ntok, 3, 0.03);
-   let y = ftlrr-values(dout * ntok, 4, 0.05);
-   let rec = qlh-rr-open(4, ftlrr-bytes(a), ftlrr-bytes(b), din, rank, dout, scale, ntok);
-   let xh = metal_buf_alloc(din * ntok * 4);
-   let yh = metal_buf_alloc(dout * ntok * 4);
-   let wx = metal_buf_write(xh, 0, ftlrr-bytes(x));
-   let wy = metal_buf_write(yh, 0, ftlrr-bytes(y));
-   metal_batch_concurrent();
-   let applied = qlh-rr-apply(rec, xh, yh, ntok);
-   let device = qlt-f32s(metal_buf_read(yh, 0, dout * ntok * 4), dout * ntok);
-   let freed = sum([qlh-rr-close(rec), metal_buf_free(xh), metal_buf_free(yh)]);
-   let expected = ftlrr-reference(a, b, x, y, din, rank, dout, ntok, scale);
-   let diff = (Comparable) len(device) == len(expected) ? lbw-maxabs(lbw-sub(device, expected)) : -1.0;
-   let held = applied == 1 && diff >= 0.0 && diff < 0.0001;
-   let shown = print(["form-token-lora-kernels", "applied", applied, "outputs", len(device), "max_abs_difference", diff, "held", held ? 1 : 0, "freed", freed]);
-   ftlr-append(ftlr-ledger(), json-emit(json-node-object([ftlr-n("at_unix_ms", now_unix_ms()), ftlr-s("lane", "kernels"), ftlr-n("din", din), ftlr-n("rank", rank), ftlr-n("dout", dout), ftlr-n("tokens", ntok), ftlr-n("max_abs_difference_nano", float_to_int(diff * 1000000000.0)), ftlr-n("held", held ? 1 : 0)])) ++ "\n");
+   let r = qlt-rr-check(din, rank, dout, ntok, 2.5);
+   let held = r[0] == 1 && r[2] >= 0.0 && r[2] < 0.0001 && r[4] == 0;
+   let shown = print(["form-token-lora-kernels", "applied", r[0], "outputs", r[1], "max_abs_difference", r[2], "applied_past_capacity", r[4], "held", held ? 1 : 0, "freed", r[3]]);
+   ftlr-append(ftlr-ledger(), json-emit(json-node-object([ftlr-n("at_unix_ms", now_unix_ms()), ftlr-s("lane", "kernels"), ftlr-n("din", din), ftlr-n("rank", rank), ftlr-n("dout", dout), ftlr-n("tokens", ntok), ftlr-n("max_abs_difference_nano", float_to_int(r[2] * 1000000000.0)), ftlr-n("applied_past_capacity", r[4]), ftlr-n("held", held ? 1 : 0)])) ++ "\n");
   }
   def ftlrr-census-lane(opts) {
    let held = ftlrr-census(opts);
