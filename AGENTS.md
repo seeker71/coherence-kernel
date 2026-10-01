@@ -322,11 +322,11 @@ Then verify it runs the body — a **real cell**, native:
 `fkwu <file.fk>` runs Form source straight through the kernel's own source-runner (multi-function,
 cross-calls, lists, recursion). The direction of travel is the native walker proven on `fkwu`, with the C seed
 made smaller until it disappears. The Go/Rust/TS kernels under `form/form-kernel-{go,rust,ts}/` are **four-way proof
-siblings only** — never the runtime; you never run the body on them. The minimal walkers under `walkers/` are the
-recipe witnesses `proof/four-way-run-recipe42.fk` host-execs. They validate a kernel change and nothing else:
+siblings only** — never the runtime; you never run the body on them. They validate a kernel change and nothing else:
 `form/validate.sh` and the landing checks ask `gate/kernel-change.bml` whether a kernel source (`runtime/`, `walkers/`,
 `form/form-kernel-{go,rust,ts}/`) moved since origin/main, and only then builds and runs them; otherwise every
-band answers its pin on fkwu alone. Their speed is no goal. Most work lands in BML and Form, not in any kernel.
+band answers its pin on fkwu alone. Their speed is no goal. The minimal walkers under `walkers/` are the recipe
+witnesses `proof/four-way-run-recipe42.fk` host-execs. Most work lands in BML and Form, not in any kernel.
 The landing report excludes the sibling conformance row when no kernel moved;
 its fold covers only the checks actually run. Missing proof-tool dependencies
 do not become Form runtime dependencies.
