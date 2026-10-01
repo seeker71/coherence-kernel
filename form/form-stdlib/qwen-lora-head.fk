@@ -1,53 +1,40 @@
 // qwen-lora-head.fk — local Qwen-width rank-one adapter artifact and admission.
 //
 // A and B are float32 safetensors, both width 5120: Qwen3.8's declared
-// output-normalized hidden width.  The bytes are minted entirely by Form from
-// the already-local corpus, then handed to q38-lora-rank1-open.  That opens
+// output-normalized hidden width. Learned bytes are handed to
+// q38-lora-rank1-open. That opens
 // independent Metal buffers; it cannot write the GGUF mmap or output.weight.
 //
-// The initial seed is not a quality or voice claim.  The local Form trainer can
-// later replace it with measured vectors through this same admission door.
+// An absent learned artifact remains absent. Training supplies measured vectors;
+// admission does not invent a corpus-derived substitute.
 //
 import form-stdlib/lora-adapter.bml;
 import native/metal/qwen35-dense-token-handle.fk;
 section [form.bml] {
     def qlh-width() = 5120;
     def qlh-rank() = 1;
-    def qlh-path() = ".form-qwen-lora-head.safetensors";
-    def qlh-corpus-path() = ".form-lora-corpus";
     def qlh-a-name() = "model.output.weight.lora_a";
     def qlh-b-name() = "model.output.weight.lora_b";
-    def qlh-fallback() = "form native observation carries a local voice home";
-    def qlh-source() = file_size(qlh-corpus-path()) > 0 ? read_file(qlh-corpus-path()) : qlh-fallback();
-    def qlh-byte(s, i) = str_byte_at(s, i % len(s));
-    // Both vectors remain small: the seed proves physical admission without
-    // presenting a corpus hash as a learned gradient.
-    def qlh-a-value(s, i) = ((qlh-byte(s, i) + i) % 31 - 15 + 0.0) / 1048576.0;
-    def qlh-b-value(s, i) = ((qlh-byte(s, i + 97) + i * 3) % 31 - 15 + 0.0) / 16777216.0;
-    def qlh-values-go(s, kind, i, n, acc) = i >= n ? reverse(acc) : qlh-values-go(s, kind, i + 1, n, cons((Comparable) kind == 0 ? qlh-a-value(s, i) : qlh-b-value(s, i), acc));
-    def qlh-values(s, kind) = qlh-values-go(s, kind, 0, qlh-width(), empty());
     def qlh-tensors(a, b) = [[qlh-a-name(), [qlh-width(), qlh-rank()], a], [qlh-b-name(), [qlh-rank(), qlh-width()], b]];
-    // The artifact door accepts learned vectors as well as the deterministic
-    // seed.  Training remains wholly in Form: this function only crystallizes
-    // the two vectors that the local trainer has already formed.
-    def qlh-write-vectors(path, a, b) = ln-write(path, qlh-tensors(a, b));
-    def qlh-write(path, source) = qlh-write-vectors(path, qlh-values(source, 0), qlh-values(source, 1));
+    // Training remains in Form; this door crystallizes its measured vectors.
+    def qlh-write-vectors(path, a, b) = len(a) == qlh-width() && len(b) == qlh-width() && all?(value=>ln-f32-finite?(value),append(a,b)) ? ln-write(path, qlh-tensors(a, b)) : nothing;
     def qlh-tensor-bytes(path, name) = {
         let h = la-header(path);
         let start = ln-tensor-begin(h, name);
         start < 0 ? "" : read_file_slice(path, 8 + (la-header-len(path) + start), qlh-width() * 4);
     };
-    def qlh-whole?(path) = {
+    def qlh-finite-bytes?(raw, i, n) = value_kind(raw) != "string" || len(raw) < n * 4 ? 0 : i >= n ? 1 : ln-u32-le(raw,i * 4) / ln-f32-mantissa-scale() % (ln-f32-special-exponent() + 1) == ln-f32-special-exponent() ? 0 : qlh-finite-bytes?(raw,i + 1,n);
+    def qlh-material(path) = {
         let c = la-census(path);
-        (Comparable) c[1] == 1 && ((Comparable) c[2] == 1 && ((String) c[3] == "f32" && ((Comparable) c[7] == 1 && ((Comparable) len(qlh-tensor-bytes(path, qlh-a-name())) == qlh-width() * 4 && (Comparable) len(qlh-tensor-bytes(path, qlh-b-name())) == qlh-width() * 4)))) ? 1 : 0;
+        if !(c[1] == 1 && c[2] == 1 && c[3] == "f32" && c[7] == 1) then [] else {
+            let a = qlh-tensor-bytes(path,qlh-a-name()); let b = qlh-tensor-bytes(path,qlh-b-name());
+            len(a) == qlh-width() * 4 && len(b) == qlh-width() * 4 && qlh-finite-bytes?(a,0,qlh-width()) && qlh-finite-bytes?(b,0,qlh-width()) ? [a,b] : [];
+        };
     };
-    def qlh-admit(path) = (Comparable) qlh-whole?(path) == 1 ? q38-lora-rank1-open(qlh-tensor-bytes(path, qlh-a-name()), qlh-tensor-bytes(path, qlh-b-name()), qlh-width(), md-f32-bits(1.0)) : empty();
+    def qlh-whole?(path) = !nil?(qlh-material(path));
+    def qlh-admit(path) { let material = qlh-material(path); nil?(material) ? [] : q38-lora-rank1-open(material[0],material[1],qlh-width(),md-f32-bits(1.0)); }
     def qlh-admitted?(adapter) = q38-lora-rank1-valid?(adapter, qlh-width());
     def qlh-close(adapter) = q38-lora-rank1-close(adapter);
-    // Consumers preserve an already whole learned artifact.  Mint remains the
-    // explicit seed-writing door above; running a local proof never erases a
-    // trained adapter.
-    def qlh-ensure(path) = (Comparable) qlh-whole?(path) == 1 ? file_size(path) : qlh-write(path, qlh-source());
     0;
 }
 //

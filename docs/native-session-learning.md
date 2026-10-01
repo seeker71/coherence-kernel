@@ -168,22 +168,33 @@ Normal training preparation requests related rehearsal through this same flow
 and incorporates accepted examples in the actual gradient batch. Retaining a
 new verified example wakes the worker, which also revisits the last candidate's
 open needs. Each serialized drain retains one native event reader across its
-rounds. The first attendance reads the existing history; subsequent attendances
-consume newly appended complete records and retain the current observations.
+rounds. A new worker resumes a matching `evidence-reader.jsonl` checkpoint;
+without one, its first attendance reads the existing history. Subsequent
+attendances consume newly appended complete records and retain current observations.
 Attention selects the candidate's live needs directly from retained JSON views.
 Each distinct need reads its retained delivery once per attendance; repeated
 signals share that request. Historical delivery payloads stay views, and only
 the selected observation identity and evidence enter care.
-Each source-catalog reading observes a home's shared configuration and assessment
+Source discovery runs only when the candidate has a current evidence need.
+Semantic selection precedes proof work: unselected references make no validity
+claim, while offered and received targets retain source, assessment, binding and
+held-out checks. Each source-catalog reading observes a home's shared configuration and assessment
 once, alongside each row's own record, withdrawal and assessment. Delivery still
 rechecks those references. The shared JSON codec joins escaped spans in balanced
 passes, preserving source bytes without repeatedly copying the growing prefix.
 Each read uses the file extent observed at entry, leaving later appends for the
 next attendance. Incomplete records and admission diagnostics remain with the
 reader. The `evidence-reader` event records source extent, consumed bytes,
-reader identity, read duration and total attendance duration, so event reading
-can be distinguished from source discovery and care. A new worker reads the
-history again; the cursor is currently process-local.
+reader identity, checkpoint bytes, restore duration, read duration and total attendance duration,
+so event reading can be distinguished from source discovery and care.
+The owned reader release publishes a changed checkpoint once per drain, rather
+than copying its current state every training round. Its health event carries
+restore and publication timings and any refused publication's resource need.
+The checkpoint atomically retains the offset, unfinished record, admission
+count and complete current observations in the reclaimable JSON view lane.
+Its header, row count, complete records and source anchors must match before
+reuse. The source's append-only generation remains authoritative: rewriting
+earlier bytes requires renewal, as it does for an already open reader.
 
 The reader indexes current observations by their exact `(organ, flow, aspect)`
 key through Form's keyed map. It supplies the matching prior observation to
@@ -282,20 +293,39 @@ The existing code and repair checks remain the decision at each such request.
 
 ## Learning for the Qwen answering model
 
-`form/form-stdlib/qwen-lora-head.fk` mints a Qwen-width rank-one output-head
-adapter (float32 safetensors A and B, width 5120) from the already-local corpus
-and admits it to the model through independent Metal buffers, so the GGUF
-mapping stays unwritten. `form/form-stdlib/qwen-lora-train.fk` fits one
-activation-space rank-one update from a normalized hidden state of the locally
-mapped Qwen model, solving the least-squares step in Form. Both run inside
-`fkwu` and make no provider call. The automatic session worker described above
-still selects Llama 3B.
+`form/form-stdlib/bml/qwen-form-learning.bml` captures teacher-forced model IDs and normalized
+hidden states while the native cursor executes a supplied sequence of Form controls.
+Recipe birth and execution share their original owner and observation context.
+Only a completed, verified sequence supplies targets. Runtime observations enter
+the same KV stream but stay outside gradients. `form/form-stdlib/bml/qwen-head-learning.bml`
+learns both vectors of the rank-one residual `h + (A·h) B` through the frozen
+Qwen output projection. Native RAM Metal computes stable cross-entropy and
+the transposed projection gradient for Q8_0 or float32 weights. Local `choice`
+tries smaller steps when loss does not descend. Owned buffers and pipelines
+retain partial admission and release outcomes.
 
-The initial seed is not a quality or voice claim, and the fitted update is a
-real weight artifact change without being a language-quality claim: only a
-held-out generation evaluation decides quality. Validation targets never enter
-gradient updates, and a candidate stays **unpromoted** until independent
-evidence promotes it.
+`form/form-stdlib/qwen-lora-head.fk` writes measured float32 safetensors A and B
+at Qwen width 5120 and admits them through independent buffers; the GGUF
+mapping stays unwritten. An absent artifact stays absent. There is no hash-corpus
+seed or artificial target. The automatic session worker still selects Llama 3B.
+
+`form-run ./fkwu observe/qwen-form-learning-run.bml` accepts one JSON request:
+
+```json
+{"model":"qwen38-q8","adapter":".hearth/candidate.safetensors","examples":[{"prompt":"Keep 7 in a native integer cell.","controls":["<|form:node|>{\"op\":\"create\",\"value\":7}<|/form:node|>"]}],"heldout":[{"prompt":"Create a native integer cell containing forty-three and acknowledge the observation."}],"rounds":3,"rate":0.25,"attempts":10,"tokens":96,"reserve":1024}
+```
+
+The door admits one model, renews independent conversation states for examples
+and held-out answers, writes the candidate and retains verified control sequences
+and decoded A/B evidence at
+`ADAPTER.report.json`. Callers supply verified controls; authoring those controls
+has its own attribution. No provider call or external training runtime occurs.
+The same candidate can be selected explicitly with `generate --adapter PATH`,
+including with `--reasoning`. Independent enquiries stay outside gradients.
+Read the actual answers and native observations before selecting a candidate;
+training loss and successful release establish their narrower claims.
+Diagnostic events carry counts and the private report path; the report owns
+the original prompts, controls and answers.
 
 The native session cells live in `form/form-stdlib/native-session-learning.bml`
 (learner), `native-session-memory.bml` (journal and state),

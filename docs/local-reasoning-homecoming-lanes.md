@@ -2,11 +2,39 @@
 
 `generate --reasoning N --tokens M <enquiry>` in the source-backed form-cli owns
 one local Qwen session. During its initial stage, decoded model bytes enter the
-scannerless Form cursor. A recipe-birth control creates an affine signed-i32
-Form node; an execution control addresses it; an ordered choice can continue
+scannerless Form cursor. A recipe-birth control creates a numeric BML or affine
+signed-i32 Form node; an execution control addresses it; an ordered choice can continue
 from an unavailable address to an available recipe. Form emits Metal in RAM,
 admits one pipeline per recipe identity, and reuses that pipeline for later
 inputs. Zero and one are ordinary observed values.
+
+`bml-f32;expr=x < 0 ? x * x : math_sqrt(x) + 2` uses the same BMF cursor and
+expression grammar as executable BML. Pure numeric arithmetic, comparisons,
+conditional expressions and supported math functions lower into a float32
+Metal expression. Unary negation works on names, calls and groups as well as
+numeric literals. `input=[-3,0,4,9]` maps the recipe in one parallel dispatch;
+the observed result is `[9,2,4,5]`. Scalar inputs reuse the same program.
+Unsupported or effectful expressions return absence. Nonfinite inputs and
+results supply no numeric answer.
+
+`<|form:node|>JSON<|/form:node|>` operates directly on native immutable content:
+
+```json
+{"op":"create","value":42}
+{"op":"create","category":"@31.2.0.72","children":[42,"text",{"node":"@address"}]}
+{"op":"read","node":"@address"}
+{"op":"select","node":"@address","index":-1}
+```
+
+Creation returns the actual coordinate, category and children. Reads resolve
+native content, including content created by another owner. Selection returns
+the actual child; negative indices count from the end. Missing content and
+out-of-range indices remain absence. The response releases its lookup references;
+interned substrate content remains available. Integer and boolean coordinates
+carry their complete literal meaning. Other coordinates resolve actual stored
+payloads; they do not invent missing content or composite children.
+Native composite, string and float64 coordinates index their storage slot;
+a missing or mismatched slot returns absence without scanning the field.
 
 The same reasoning cursor accepts
 `<|form:nodeid-knowledge-query|>concept=exact-key<|/form:nodeid-knowledge-query|>`.
@@ -16,14 +44,16 @@ route returns `nothing` without a repository-wide search; malformed requests,
 stale evidence and ambiguity retain their distinct signals. Lookup counts and
 the `substrate-lookup` framebuffer stage belong to this response owner. Requests
 can alternate with recipe creation and execution in the same context. This is
-explicit source retrieval; it does not expose arbitrary graph mutation or direct
-persisted NodeID routing.
+explicit source retrieval. Native node controls use live substrate coordinates;
+they do not replace the persisted source routing identity.
 
 The pending model ID enters KV once, followed only by the new observation IDs.
 The original model output IDs remain intact. After executable thoughts, the
 reserved final stage receives actual computed results and composes the answer.
+It can still request native work through the same control owner.
 A budget or resource refusal retains its evidence and owner. Release checks
-account for the recipe pipeline, scalar buffer, model state and model context.
+account for recipe pipelines, scalar and vector buffers, lookup references,
+model state and model context. An incomplete release remains its own outcome.
 
 The implementation is [the microthought owner](../form/form-stdlib/bml/form-cli-microthought.bml),
 [the generic stream hook](../form/form-stdlib/form-cli-recipe-exec-session.fk),
@@ -82,10 +112,10 @@ its result at the executing cell; stateful work should reuse its compiled
 program while observing each new effect. Live frames should explain where time,
 memory and crossings go and direct care to the actual cost.
 
-Today the executable recipe grammar is affine signed-i32, with explicit current
-source lookup in its reasoning stream. General BML recipes, arbitrary node
-reading and creation, CPU/Metal parity, learned Form control IDs, broader model
-quality and fully owned reclaimable native storage remain substantive work. Fixed pretrained
+Today the reasoning stream can retrieve current source, create/read/select native
+nodes and execute pure numeric BML expressions over scalars or arrays in RAM Metal.
+Effectful general BML recipes, CPU/Metal parity, dedicated learned Form IDs,
+broader model quality and fully owned reclaimable native storage remain substantive work. Fixed pretrained
 Qwen weights still require their model-specific ID mapping. Native training
 can move that boundary toward Form's own cells; renaming the existing codec
 would not accomplish it. Ordinary local generation also still pays model
@@ -93,8 +123,16 @@ admission, GPU prefill and per-layer submission costs. The framebuffer gives
 those next movements their evidence.
 
 [Native session learning](native-session-learning.md) carries verified lessons
-into the native Llama 3B learner. The Qwen response owner can take an explicitly
-admitted compatible adapter; a serving Qwen adapter that improves these Form
-control choices has not yet been demonstrated. [Live diagnostics](live-dynamic-diagnostics.md) carries
+into the native Llama 3B learner. The compatible Qwen head learner captures
+verified Form controls, trains both rank-one vectors through the actual frozen
+projection, and evaluates base and adapted answers on independent enquiries.
+Multi-control examples retain the same owner from birth through execution and
+train only after the complete sequence has been observed successfully.
+`observe/qwen-form-learning-run.bml` owns that local movement, sharing one admitted
+model across independent conversation states. Runtime observation IDs never
+become targets. `generate --adapter PATH` explicitly selects a finite candidate.
+Observed node creation and recipe execution succeeded with both base and adapted Qwen;
+lower training loss establishes learning without establishing a quality gain.
+[Live diagnostics](live-dynamic-diagnostics.md) carries
 observations and care. Their mechanisms and the quality of resulting answers
 have separate evidence.

@@ -1,0 +1,100 @@
+// Verified Form controls supervise the compatible Qwen head. Teacher-forced
+// model IDs and runtime observations share KV, but only teacher IDs are targets.
+// Captured hidden states are frozen; training never replays or alters their KV.
+import form-stdlib/bml/qwen-head-learning.bml;
+import form-stdlib/bml/form-cli-microthought.bml;
+import form-stdlib/bml/form-cli-model-renew.bml;
+import form-stdlib/model-registry.bml;
+section [form.bml] {
+ class QwenFormLearning {
+  def qfl-capture(session,owner,ids,acc) {
+   if nil?(ids) then [session,reverse(acc)] else {
+    let ctx = fcms-ctx(session); let raw = metal_buf_read(ctx[1][1],0,ctx[2][0] * 4);
+    let hidden = qlt-f32s(raw,ctx[2][0]); let id = ids[0]; let pos = fcms-pos(session);
+    if len(hidden) != ctx[2][0] || pos >= fcms-maxpos(session) then [fcms-refuse(session,"training-context-or-hidden-refused"),reverse(acc)] else {
+     let predicted = fcms-forward(session,id,pos);
+     let advanced = predicted < 0 ? fcms-refuse(session,"training-forward-refused") : fcms-with-stream(session,pos + 1,-1,0,fcms-generated-ids(session),fcms-injected-ids(session),fcms-observations(session));
+     let chunk = ftdb-text(fcms-src(session),[id]); let observed = fmc-feed(owner,0,chunk)[2];
+     let next = len(observed) > 0 && fcms-live?(advanced) ? fmc-inject(owner,advanced,observed) : advanced;
+     fcms-live?(next) ? qfl-capture(next,owner,ids[1:],cons([hidden,id],acc)) : [next,reverse(cons([hidden,id],acc))];
+    };
+   };
+  }
+  def qfl-control(session,owner,control) {
+   let before = len(fmc-get(owner,"frames")); let ids = fcmo-text-ids(session,control);
+    if !fcms-live?(session) || nothing?(ids) || nil?(ids) then [fcms-refuse(session,"training-control-codec-unavailable"),[],0] else {
+    let captured = qfl-capture(session,owner,ids,[]); let result = fmc-get(owner,"last");
+    let verified = fcms-live?(captured[0]) && len(fmc-get(owner,"frames")) == before + 1 && oh-has(["node","ready","value","lookup"],result[0]);
+    [captured[0],verified ? captured[1] : [],verified];
+   };
+  }
+  def qfl-train(owner,samples,rate,attempts) = samples |> map(sample=>qhl-step(owner,sample[0],sample[1],rate,attempts));
+  def qfl-loss(owner,samples) {
+   let a = record_get(owner,"a"); let b = record_get(owner,"b"); let readings = samples |> map(sample=>qhl-point(owner,sample[0],sample[1],a,b,0));
+   nil?(readings) || any?(reading=>nothing?(reading),readings) ? nothing : sum(readings |> map(reading=>reading[0][0])) / len(readings);
+  }
+  def qfl-prompt(row) = fmc-teaching() + "\n" + oh-str(row,"prompt");
+  def qfl-renew(flow,row) {
+   let before = fbro-snapshot(); let renewed = fcmr-replace-with-profile(record_get(flow,"session"),qfl-prompt(row),"response");
+   let next = fcmr-session(renewed); let healthy = fcmr-changed(renewed) && fcmr-reason(renewed) == "fresh-stream-same-weights";
+   record_set(flow,"session",healthy ? next : fcms-refuse(next,fcmr-reason(renewed)));
+   fbro-stage-observed-stream("qwen-form-learning","independent-stream","learning","local-qwen","same-weights","independent-enquiry","local",before,fbro-snapshot(),"weight-admissions",0,healthy ? "renewed" : "refused","form/form-stdlib/bml/qwen-form-learning.bml",1,1);
+   record_get(flow,"session");
+  }
+  def qfl-thought(flow) { let owner = fmc-open(fcms-maxpos(record_get(flow,"session"))); record_set(flow,"thoughts",cons(owner,record_get(flow,"thoughts"))); owner; }
+  def qfl-evaluate(flow,row,tokens,adapter) {
+   let renewed = qfl-renew(flow,row);
+   let session = len(adapter) > 0 && nil?(fcmd-carrier(renewed)) ? fcms-attach-adapter(renewed,adapter) : renewed;
+   record_set(flow,"session",session); let owner = qfl-thought(flow); let generated = fmc-generate-owned(owner,session,tokens);
+   record_set(flow,"session",fcms-generation-session(generated)); let released = fmc-release(owner);
+   if !released then record_set(flow,"session",fcms-refuse(record_get(flow,"session"),"evaluation-thought-release-incomplete")) else 0;
+    json-node-object([oh-s("prompt",oh-str(row,"prompt")),oh-s("text",fcms-generation-text(generated)),oh-n("stopped",fcms-stopped?(record_get(flow,"session"))),oh-s("status",fcms-status(record_get(flow,"session"))),oh-n("generated_ids",len(fcms-generation-ids(generated))),oh-n("injected_ids",len(fcms-injected-ids(record_get(flow,"session")))),json-node-pair("execution",fmc-evidence(owner))]);
+  }
+  def qfl-example(flow,row) {
+    let session = qfl-renew(flow,row); let owner = qfl-thought(flow);
+    let captured = json-array-elements(oh-get(row,"controls")) |> map(control=>{
+     let next = qfl-control(record_get(flow,"session"),owner,node_value(control)); record_set(flow,"session",next[0]); next;
+    });
+    let verified = all?(next=>next[2],captured); let samples = verified ? captured |> foldl((acc,next)=>append(acc,next[1]),[]) : []; let released = fmc-release(owner);
+    record_set(flow,"training",append(record_get(flow,"training"),[json-node-object([oh-s("prompt",oh-str(row,"prompt")),json-node-pair("controls",oh-get(row,"controls")),oh-n("supervised_tokens",len(samples)),oh-n("injected_ids",len(fcms-injected-ids(record_get(flow,"session")))),oh-n("verified",verified && released),json-node-pair("execution",fmc-evidence(owner))])]));
+    if !verified || !released then record_set(flow,"session",fcms-refuse(record_get(flow,"session"),released ? "unverified-training-control" : "training-thought-release-incomplete")) else 0;
+    verified && released ? samples : [];
+  }
+   def qfl-example?(row) = oh-text(row,"prompt") && oh-array(row,"controls") && len(json-array-elements(oh-get(row,"controls"))) > 0 && all?(control=>node_pkg(control) == 1 && node_level(control) == 1 && node_type(control) == 2,json-array-elements(oh-get(row,"controls")));
+   def qfl-request?(request) {
+    if !node_eq(node_category(request),JSON-OBJECT()) || !oh-text(request,"model") || !oh-text(request,"adapter") || !oh-array(request,"examples") || !oh-array(request,"heldout") then 0 else {
+     let examples = json-array-elements(oh-get(request,"examples")); let heldout = json-array-elements(oh-get(request,"heldout"));
+     !nil?(examples) && !nil?(heldout) && all?(qfl-example?,examples) && all?(row=>oh-text(row,"prompt"),heldout) && all?(key=>fnc-field?(request,key,1) && node_value(oh-get(request,key)) > 0,["rounds","attempts","tokens","reserve"]) && fmr-number?(oh-get(request,"rate")) && node_value(oh-get(request,"rate")) > 0;
+    };
+   }
+   def qfl-voice(report,artifact,retained) {
+    let reading = json-node-object(["status","supervised_tokens","accepted_steps","release_ok","provider_calls","weight_admissions"] |> map(key=>json-node-pair(key,oh-get(report,key))));
+    let evidence = json-node-object([oh-s("report",artifact + ".report.json"),oh-n("retained",retained > 0)]);
+    oh-voice(oh-reading("qwen-form-learning",artifact,"verified-control-learning",json-node-string("candidate, independent decoded evidence and released resources"),reading,json-node-int(oh-str(report,"status") == "candidate-evaluated" && retained > 0),[],["read-heldout-answers","adjust-local-examples"],evidence)); report;
+   }
+   def qfl-run(request) {
+   if !qfl-request?(request) then json-node-object([oh-s("status","nothing"),oh-s("reason","learning-request-shape")]) else {
+    let path = mr-path(mr-find(oh-str(request,"model"))); let examples = json-array-elements(oh-get(request,"examples")); let heldout = json-array-elements(oh-get(request,"heldout"));
+    let reserve = node_value(oh-get(request,"reserve")) + ((append(examples,heldout) |> map(row=>len(qfl-prompt(row)))) |> foldl((largest,count)=>max2(largest,count),0));
+     let flow = record_new(0,"session",fcms-open-reserved(path,qfl-prompt(examples[0]),reserve,"response"),"thoughts",[],"training",[],"learner",nothing);
+    let base = heldout |> map(row=>qfl-evaluate(flow,row,node_value(oh-get(request,"tokens")),""));
+    let samples = examples |> map(row=>qfl-example(flow,row)) |> foldl((acc,rows)=>append(acc,rows),[]);
+    let learner = fcms-live?(record_get(flow,"session")) && !nil?(samples) ? qhl-open(fcms-ctx(record_get(flow,"session"))) : nothing; record_set(flow,"learner",learner);
+    let admitted = !nothing?(learner) && record_get(learner,"ready");
+    if admitted then qhl-seed(learner,samples[0][0]) else 0;
+    let before = admitted ? qfl-loss(learner,samples) : nothing;
+    let losses = admitted ? range(0,node_value(oh-get(request,"rounds"))) |> map(round=>{ qfl-train(learner,samples,node_value(oh-get(request,"rate")),node_value(oh-get(request,"attempts"))); qfl-loss(learner,samples); }) : [];
+    let artifact = oh-str(request,"adapter"); let wrote = admitted && !nothing?(before) && all?(loss=>!nothing?(loss),losses) ? qhl-write(learner,artifact) : 0;
+    let learnerReleased = nothing?(learner) ? 1 : qhl-close(learner);
+    let ready = !nothing?(wrote) && wrote > 0 && qlh-whole?(artifact) && learnerReleased;
+    if !ready then record_set(flow,"session",fcms-refuse(record_get(flow,"session"),"learning-artifact-or-release-refused")) else 0;
+    let adapted = ready ? heldout |> map(row=>qfl-evaluate(flow,row,node_value(oh-get(request,"tokens")),artifact)) : [];
+    let thoughtsReleased = all?(owner=>fmc-release(owner),record_get(flow,"thoughts")); let modelReleased = fcms-release-ok?(record_get(flow,"session"));
+     let report = json-node-object([oh-s("status",ready && thoughtsReleased && modelReleased ? "candidate-evaluated" : "nothing"),oh-s("reason",fcms-reason(record_get(flow,"session"))),oh-s("model",path),oh-s("adapter",artifact),oh-n("supervised_tokens",len(samples)),oh-n("accepted_steps",nothing?(learner) ? 0 : record_get(learner,"steps")),json-node-pair("before_loss",nothing?(before) ? json-node-null() : make_float64(before)),json-node-pair("round_losses",json-node-array(losses |> map(loss=>nothing?(loss) ? json-node-null() : make_float64(loss)))),json-node-pair("training",json-node-array(record_get(flow,"training"))),json-node-pair("base",json-node-array(base)),json-node-pair("adapted",json-node-array(adapted)),oh-n("release_ok",learnerReleased && thoughtsReleased && modelReleased),oh-n("provider_calls",0),oh-n("weight_admissions",fcms-resident?(record_get(flow,"session")))]);
+     let retained = write_file(artifact + ".report.json",json-emit-precise(report));
+     qfl-voice(report,artifact,retained);
+   };
+  }
+ }
+ 0;
+}

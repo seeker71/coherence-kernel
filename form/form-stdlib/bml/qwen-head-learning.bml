@@ -1,0 +1,78 @@
+// Exact rank-one head gradients on verified next-token targets. Both vectors
+// learn through the frozen projection used by native decoding. Loss descent
+// admits a candidate step; held-out decoded behavior decides serving quality.
+import form-stdlib/qwen-lora-train.fk;
+import form-stdlib/bml/metal-jit.bml;
+import form-stdlib/q8-0-msl.fk;
+import control/offer-ack-core.fk;
+import observe/framebuffer-runtime-observation.fk;
+section [form.bml] {
+ class QwenHeadLearning {
+  def qhl-pairs(xs,ys) = nil?(xs) ? [] : cons([xs[0],ys[0]],qhl-pairs(xs[1:],ys[1:]));
+  def qhl-threads() = 256;
+  def qhl-kernel-names() = ["form_head_ce","form_head_transpose"];
+  def qhl-msl() = "#include <metal_stdlib>\nusing namespace metal;\n" + q80-msl-spine() + q80-msl-weight() +
+   "kernel void form_head_ce(device const float* z [[buffer(0)]],device float* g [[buffer(1)]],device float* result [[buffer(2)]],constant uint& n [[buffer(3)]],constant uint& target [[buffer(4)]],uint t [[thread_index_in_threadgroup]]) { threadgroup float maxima[256],sums[256]; float m=-INFINITY; for(uint v=t;v<n;v+=256) m=max(m,z[v]); maxima[t]=m; threadgroup_barrier(mem_flags::mem_threadgroup); for(uint d=128;d>0;d>>=1){if(t<d) maxima[t]=max(maxima[t],maxima[t+d]); threadgroup_barrier(mem_flags::mem_threadgroup);} m=maxima[0]; float s=0; for(uint v=t;v<n;v+=256) s+=exp(z[v]-m); sums[t]=s; threadgroup_barrier(mem_flags::mem_threadgroup); for(uint d=128;d>0;d>>=1){if(t<d) sums[t]+=sums[t+d]; threadgroup_barrier(mem_flags::mem_threadgroup);} s=sums[0]; for(uint v=t;v<n;v+=256) g[v]=exp(z[v]-m)/s-(v==target?1.0f:0.0f); if(t==0){result[0]=m+log(s)-z[target];result[1]=exp(z[target]-m)/s;result[2]=z[target]>=m?1.0f:0.0f;result[3]=s;} }\n" +
+   "kernel void form_head_transpose(device const uchar* w [[buffer(0)]],device const float* g [[buffer(1)]],device float* dh [[buffer(2)]],constant uint& rows [[buffer(3)]],constant uint& cols [[buffer(4)]],constant uint& format [[buffer(5)]],uint group [[threadgroup_position_in_grid]],uint t [[thread_index_in_threadgroup]]) { threadgroup float sums[8][32]; uint c=group*32+t%32,part=t/32; float acc=0; if(c<cols) for(uint v=part;v<rows;v+=8){uint at=v*cols+c;float weight=format==8?q80_w(w,at):((device const float*)w)[at];acc+=weight*g[v];} sums[part][t%32]=acc;threadgroup_barrier(mem_flags::mem_threadgroup);if(part==0&&c<cols){for(uint p=1;p<8;p++)acc+=sums[p][t%32];dh[c]=acc;} }\n";
+  def qhl-open(ctx) {
+   let width = ctx[2][0]; let vocab = ctx[2][19]; let format = kth-tv-ty(ctx[6]);
+   if !(format == 8 || format == 0) then nothing else {
+    let source = qhl-msl(); let programs = qhl-kernel-names() |> map(name=>mj-memory(source,name));
+    let buffers = [width * 4,vocab * 4,vocab * 4,16,width * 4] |> map(size=>metal_buf_alloc(size));
+    // A refused partial admission still returns its owner for release.
+    record_new(0,"context",ctx,"programs",programs,"buffers",buffers,"ready",!any?(p=>nothing?(p),programs) && !any?(h=>h <= 0,buffers),"a",[],"b",[],"steps",0,"trace","qwen-head-learning:" + host_pid().str());
+   };
+  }
+  def qhl-close(owner) {
+   // Reads have already waited; zero also means there is no open batch to submit.
+   let synchronized = metal_sync() >= 0; let buffers = record_get(owner,"buffers");
+   let left = synchronized ? buffers |> map(h=>h <= 0 || metal_buf_free(h) == 1 ? 0 : h) : buffers;
+   record_set(owner,"buffers",left);
+    let programs = synchronized ? record_get(owner,"programs") |> map(p=>nothing?(p) || mj-release(p) == 1 ? nothing : p) : record_get(owner,"programs");
+   record_set(owner,"programs",programs); record_set(owner,"ready",0);
+   all?(h=>h == 0,left) && all?(p=>nothing?(p),programs);
+  }
+  def qhl-point(owner,h,target,a,b,gradient) {
+   let ctx = record_get(owner,"context"); let width = ctx[2][0]; let vocab = ctx[2][19]; let buffers = record_get(owner,"buffers");
+    if !record_get(owner,"ready") || len(h) != width || len(a) != width || len(b) != width || !all?(values=>all?(value=>ln-f32-finite?(value),values),[h,a,b]) || value_kind(target) != "int" || target < 0 || target >= vocab then nothing else {
+    let before = fbro-snapshot(); let scalar = qlt-dot(a,h); let adjusted = qhl-pairs(h,b) |> map(pair=>pair[0] + scalar * pair[1]);
+     let wrote = all?(value=>ln-f32-finite?(value),adjusted) ? metal_buf_write(buffers[0],0,adjusted) : 0; metal_batch_concurrent();
+    let projected = wrote == width * 4 ? q38-mv(ctx[0],ctx[6],buffers[0],buffers[1],1) : 0;
+    let programs = record_get(owner,"programs");
+    let reduced = projected == 1 ? mj-enqueue(programs[0],md-bind16([buffers[1],buffers[2],buffers[3]],[vocab,target],qhl-threads(),0,1,1),1) : 0;
+    let differentiated = gradient && reduced == 1 ? mj-enqueue(programs[1],md-bind16([kth-tv-h(ctx[6]),buffers[2],buffers[4]],[vocab,width,kth-tv-ty(ctx[6])],qhl-threads(),0,1,1),(width + 31) / 32) : !gradient;
+    let reading = reduced == 1 ? qlt-f32s(metal_buf_read(buffers[3],0,16),4) : [];
+    let derivative = gradient && differentiated == 1 ? qlt-f32s(metal_buf_read(buffers[4],0,width * 4),width) : [];
+     let healthy = len(reading) == 4 && all?(value=>ln-f32-finite?(value),reading) && (!gradient || len(derivative) == width && all?(value=>ln-f32-finite?(value),derivative));
+    fbro-stage-observed-stream(record_get(owner,"trace"),gradient ? "head-gradient" : "head-loss","learning","native-qwen-lora","frozen-head","verified-target","local",before,fbro-snapshot(),"projection-elements",vocab * width,healthy ? "observed" : "refused","form/form-stdlib/bml/qwen-head-learning.bml",1,1);
+    healthy ? [reading,derivative,scalar] : nothing;
+   };
+  }
+  def qhl-seed(owner,h) {
+   let norm = qlt-dot(h,h);
+   if norm <= 0 then nothing else {
+    record_set(owner,"a",h |> map(value=>value / norm)); record_set(owner,"b",h |> map(value=>0.0)); owner;
+   };
+  }
+  def qhl-candidate(owner,h,target,a,b,point,rate) {
+   let direction = point[1]; let ds = qlt-dot(direction,b);
+   let a1 = qhl-pairs(a,h) |> map(pair=>pair[0] - rate * ds * pair[1]);
+   let b1 = qhl-pairs(b,direction) |> map(pair=>pair[0] - rate * point[2] * pair[1]);
+   let next = qhl-point(owner,h,target,a1,b1,0);
+   nothing?(next) || next[0][0] >= point[0][0] ? nothing : [a1,b1,next[0],rate];
+  }
+  def qhl-step(owner,h,target,rate,attempts) {
+   let a = record_get(owner,"a"); let b = record_get(owner,"b"); let point = qhl-point(owner,h,target,a,b,1);
+   if nothing?(point) then nothing else {
+    let options = range(0,attempts) |> map(index=>ignored=>qhl-candidate(owner,h,target,a,b,point,rate / math_pow(2.0,index + 0.0)));
+    let result = choice(options,0);
+    if nothing?(result) then nothing else {
+     record_set(owner,"a",result[0]); record_set(owner,"b",result[1]); record_set(owner,"steps",record_get(owner,"steps") + 1);
+     [point[0],result[2],result[3]];
+    };
+   };
+  }
+  def qhl-write(owner,path) = qlh-write-vectors(path,record_get(owner,"a"),record_get(owner,"b"));
+ }
+ 0;
+}

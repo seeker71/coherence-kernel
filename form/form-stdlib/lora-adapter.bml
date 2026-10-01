@@ -4,9 +4,9 @@
 // tensor with dtype, shape and byte span, then the bytes. Read natively:
 // the low-rank pairs, the layers they touch, the rank, the dtype, and
 // whether header + spans equal the file (structurally whole, axiom-3).
-// The training log's last iteration is read the same way. Applying the
-// delta inside the walker's projections is the next stone; today the
-// body sees the adapter it trained.
+// The training log's last iteration is read the same way. Native numeric
+// readers and writers supply measured tensors to their training and serving
+// owners; the census describes the artifact rather than its answer quality.
 import form/form-stdlib/core.fk;
 import form/form-stdlib/form-fs.fk;
 import form/form-stdlib/line-grammar.fk;
@@ -104,31 +104,37 @@ section [form.bml] {
 //////////////////////////////////////////////////////////////////////
 // THE NUMBERS, AND THE WRITER. Below the header census: the body decodes
 // the adapter's float32 tensors natively (sign, exponent, mantissa by
-// integer arithmetic; powers of two by exact doubling), computes a
+// integer arithmetic; powers of two by native math), computes a
 // low-rank delta B(A x) itself, and writes an adapter file in the same
 // format — header JSON plus little-endian floats — that it reads back
 // whole. That round trip is the LoRA writer HOMECOMING names.
 //////////////////////////////////////////////////////////////////////
 section [form.bml] {
     class FormLoraNumbers {
-        def ln-pow2(n) = if ((Comparable) n == 0) then 1.0 else if (n > 0) then (2.0 * ln-pow2((n - 1))) else (ln-pow2((n + 1)) / 2.0);
+        def ln-pow2(n) = math_pow(2.0,n + 0.0);
         def ln-u32-le(bytes, i) = (str_byte_at(bytes, i) + ((str_byte_at(bytes, (i + 1)) * 256) + ((str_byte_at(bytes, (i + 2)) * 65536) + (str_byte_at(bytes, (i + 3)) * 16777216))));
+        def ln-f32-sign-bit() = 2147483648;
+        def ln-f32-mantissa-scale() = 8388608;
+        def ln-f32-special-exponent() = 255;
+        def ln-f32-bias() = 127;
+        def ln-f32-subnormal-exponent() = -149;
         def ln-f32-decode(u) {
-            let sign = if (u >= 2147483648) then 0.0 else 1.0;
-            let body = if (u >= 2147483648) then (u - 2147483648) else u;
-            let e = (body / 8388608);
-            let m = (body % 8388608);
-            let mag = if ((Comparable) e == 0) then 0.0 else ((1.0 + ((m + 0.0) / 8388608.0)) * ln-pow2((e - 127)));
-            if ((Comparable) sign == 1.0) then mag else (0.0 - mag);
+            let negative = u >= ln-f32-sign-bit(); let body = negative ? u - ln-f32-sign-bit() : u;
+            let e = body / ln-f32-mantissa-scale(); let m = body % ln-f32-mantissa-scale();
+            let mag = e == 0 ? (m + 0.0) * ln-pow2(ln-f32-subnormal-exponent()) : e == ln-f32-special-exponent() ? nothing : (1.0 + (m + 0.0) / (ln-f32-mantissa-scale() + 0.0)) * ln-pow2(e - ln-f32-bias());
+            nothing?(mag) ? nothing : negative ? -1.0 * mag : mag;
         }
         def ln-exp-of(a, e) = if (a < 1.0) then ln-exp-of((a * 2.0), (e - 1)) else if (a >= 2.0) then ln-exp-of((a / 2.0), (e + 1)) else e;
+        def ln-round-even(x) { let whole = float_to_int(x); let part = x - (whole + 0.0); whole + (part > 0.5 || part == 0.5 && whole % 2 == 1 ? 1 : 0); }
         def ln-f32-encode(x) {
-            let neg = if (x < 0.0) then 1 else 0;
-            let a = if ((Comparable) neg == 1) then (0.0 - x) else x;
-            let e = if ((Comparable) a == 0.0) then 0 else ln-exp-of(a, 0);
-            let m = if ((Comparable) a == 0.0) then 0 else float_to_int(round((((a / ln-pow2(e)) - 1.0) * 8388608.0)));
-            ((neg * 2147483648) + (((if ((Comparable) a == 0.0) then 0 else (e + 127)) * 8388608) + m));
+            let negative = x < 0.0; let a = negative ? - x : x; let scale = ln-f32-mantissa-scale();
+            let body = !(x >= 0.0 || x < 0.0) ? ln-f32-special-exponent() * scale + scale / 2 : a >= ln-pow2(128) ? ln-f32-special-exponent() * scale : a == 0.0 ? 0 : a < ln-pow2(1 - ln-f32-bias()) ? ln-round-even(a / ln-pow2(ln-f32-subnormal-exponent())) : {
+                let e = ln-exp-of(a,0); let m = ln-round-even((a / ln-pow2(e) - 1.0) * (scale + 0.0));
+                (e + ln-f32-bias()) * scale + m;
+            };
+            body + (negative ? ln-f32-sign-bit() : 0);
         }
+        def ln-f32-finite?(x) = (value_kind(x) == "int" || value_kind(x) == "float") && ln-f32-encode(x) / ln-f32-mantissa-scale() % (ln-f32-special-exponent() + 1) != ln-f32-special-exponent();
         def ln-u32-bytes(u) = [(u % 256), ((u / 256) % 256), ((u / 65536) % 256), ((u / 16777216) % 256)];
         def ln-floats-bytes(xs) = if ((Comparable) len(xs) == 0) then [] else append(ln-u32-bytes(ln-f32-encode(xs[0])), ln-floats-bytes(xs[1:]));
         // read n floats of a tensor at byte offset `begin` past the header

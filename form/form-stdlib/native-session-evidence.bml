@@ -47,13 +47,16 @@ section [form.bml] {
   def nse-best(rows,score,held) = nil?(rows) ? held : nsm-num(rows[0],"feature_overlap") > score ? nse-best(rows[1:],nsm-num(rows[0],"feature_overlap"),[rows[0]]) : nse-best(rows[1:],score,(Comparable) nsm-num(rows[0],"feature_overlap") == score ? append(held,[rows[0]]) : held);
   def nse-scan(sources,query,held,skill,found,rejected) = nil?(sources) ? json-node-object([json-node-pair("sources",json-node-array(nse-best(found,0,[]))),json-node-pair("eligible",json-node-array(found)),json-node-pair("examined",json-node-array(rejected)),nsm-s("match_basis","native-rag-features;strongest-shared-over-union;ties-retained;bound-answer-or-observed-outcome")]) : nse-scan-one(sources[0],sources[1:],query,held,skill,found,rejected);
   def nse-scan-one(source,rest,query,held,skill,found,rejected) {
-   let record = nsm-json(nsm-str(source,"path")); let example = oh-get(record,"example");
-   let features = re-semantic-features(nse-prompt(example));
-   let common = nse-common(query,features);
-   let unchanged = nss-source-current(source);
-   let reason = !unchanged ? "source-or-assessment-changed" : !nse-record-valid(record) ? "missing-bound-observed-target" : !nse-assessment-known(source) ? "source-assessment-unavailable" : nse-record-overlap(record,append(held,nse-source-held(source))) ? "assessment-excluded" : !((String) nsm-skill(nsm-str(record,"route")) == skill) ? "different-skill" : nil?(common) ? "no-shared-prompt-feature" : "eligible";
+    let record = nsm-json(nsm-str(source,"path")); let example = oh-get(record,"example");
+    let sameSkill = nsm-skill(nsm-str(record,"route")) == skill;
+    let features = sameSkill ? re-semantic-features(nse-prompt(example)) : [];
+    let common = nse-common(query,features);
+    // Semantic selection precedes costly proof work. Unselected references make
+    // no validity claim; every offered target still receives the complete checks.
+    let selected = sameSkill && !nil?(common); let unchanged = selected && nss-source-current(source);
+    let reason = !sameSkill ? "unselected-different-skill" : nil?(common) ? "unselected-no-shared-prompt-feature" : !unchanged ? "source-or-assessment-changed" : !nse-record-valid(record) ? "missing-bound-observed-target" : !nse-assessment-known(source) ? "source-assessment-unavailable" : nse-record-overlap(record,append(held,nse-source-held(source))) ? "assessment-excluded" : "eligible";
    let overlap = nil?(common) ? 0.0 : ((1.0 * len(common)) / ((len(query) + len(features)) - len(common)));
-   let reference = oh-set(oh-set(oh-set(source,"row_sha256",json-node-string(nsm-hash(json-emit-precise(example)))),"matched_features",json-node-array(oh-strings(common))),"feature_overlap",json-precise-float(overlap));
+   let reference = reason == "eligible" ? oh-set(oh-set(oh-set(source,"row_sha256",json-node-string(nsm-hash(json-emit-precise(example)))),"matched_features",json-node-array(oh-strings(common))),"feature_overlap",json-precise-float(overlap)) : source;
    nse-scan(rest,query,held,skill,(String) reason == "eligible" ? append(found,[reference]) : found,append(rejected,[oh-set(source,"reason",json-node-string(reason))]));
   }
   // Context is resident data: home, source references, query, held-out rows, skill.
@@ -71,33 +74,50 @@ section [form.bml] {
    let fresh = oh-reading(oh-str(reading,"organ"),oh-str(reading,"flow"),oh-str(reading,"aspect"),json-node-int(1),json-node-int(len(rows) > 0),json-node-int(len(rows) > 0),nil?(rows) ? json-array-elements(oh-get(reading,"needs")) : [],oh-values(json-array-elements(oh-get(reading,"offers"))),evidence);
    oh-set(fresh,"care_of",json-node-string(oh-str(reading,"id")));
   }
-  def nse-reader(home) = ohs-open(nsm-at(home,"events.jsonl"),"session-learning-evidence");
-  def nse-attend(home) { let reader = nse-reader(home); let result = nse-attend-reader(home,reader); ohs-close(reader); result; }
+   def nse-reader-checkpoint(home) = nsm-at(home,"evidence-reader.jsonl");
+   def nse-reader(home) {
+    let started = host_monotonic_ms(); let reader = ohs-open-cached(nsm-at(home,"events.jsonl"),"session-learning-evidence",nse-reader-checkpoint(home));
+    record_set(reader,"checkpoint_read_ms",host_monotonic_ms() - started);
+    record_set(reader,"checkpoint_offset",record_get(reader,"state") == "checkpoint-restored" ? record_get(reader,"offset") : nothing); reader;
+   }
+   def nse-reader-close(home,reader) {
+    let started = host_monotonic_ms(); let path = nse-reader-checkpoint(home); let offset = record_get(reader,"offset");
+    let changed = record_get(reader,"checkpoint_offset") != offset || file_size(path) <= 0;
+    let saved = changed ? ohs-checkpoint(reader,path) : file_size(path);
+    let evidence = json-node-object([nsm-s("path",path),nsm-n("offset",offset),nsm-n("bytes",nothing?(saved) ? 0 : saved),nsm-n("restored_ms",record_get(reader,"checkpoint_read_ms")),nsm-n("publication_ms",host_monotonic_ms() - started),nsm-n("changed",changed)]);
+    nsm-event(home,"evidence-checkpoint",[json-node-pair("health",oh-reading("session-learning",home,"evidence-checkpoint",json-node-int(1),json-node-int(!nothing?(saved)),json-node-int(!nothing?(saved)),nothing?(saved) ? [oh-need("checkpoint-publication",oh-reference(path))] : [],["resume-source","retry-publication"],evidence))]);
+    ohs-close(reader);
+   }
+  def nse-attend(home) { let reader = nse-reader(home); defer nse-reader-close(home,reader); nse-attend-reader(home,reader); }
   // The serialized learner owns this reader across rounds. Each update sees
   // the file extent at entry; later appends remain for its next observation.
   def nse-attend-reader(home,reader) {
    let started = host_monotonic_ms();
    let dir = nsm-str(nsm-state(home),"last_row");
    let made = nsm-init(home);
-   let sources = nss-catalog(home);
-   let held = nse-valid(home,dir);
-   let revision = nse-revision(sources,held,dir);
-   let made = fs-mkdir(nsm-at(home,"evidence-requests"));
+    let made = fs-mkdir(nsm-at(home,"evidence-requests"));
    let extent = file_size(ohs-path(reader));
    let readStarted = host_monotonic_ms();
    let read = ohs-update(reader,extent > 0 ? extent : 1);
-   let readMs = host_monotonic_ms() - readStarted;
-   let current = ohv-age(record_get(reader,"current"),now_unix_ms());
+    let readMs = host_monotonic_ms() - readStarted;
+    let checkpoint = max2(0,file_size(nse-reader-checkpoint(home)));
+    let current = ohv-age(record_get(reader,"current"),now_unix_ms());
+    let needed = any?(row=>nse-need-key(row,dir) != "",current);
+    let sources = needed ? nss-catalog(home) : []; let held = needed ? nse-valid(home,dir) : [];
+    let revision = needed ? nse-revision(sources,held,dir) : "";
    let rows = nse-attend-rows(home,dir,sources,held,revision,current,[]);
    let result = nsm-atomic(nsm-at(home,"evidence-current.json"),json-node-object([nsm-s("candidate_row",dir),nsm-s("revision",revision),json-node-pair("requests",json-node-array(rows))]));
-   nsm-event(home,"evidence-reader",[nsm-s("reader",record_get(reader,"identity")),nsm-s("state",record_get(reader,"state")),nsm-n("source_bytes",record_get(reader,"extent")),nsm-n("read_bytes",record_get(reader,"read_bytes")),nsm-n("offset",record_get(reader,"offset")),nsm-n("pending_bytes",len(record_get(reader,"pending"))),nsm-n("invalid_records",record_get(reader,"invalid_records")),nsm-n("current_rows",len(current)),nsm-n("read_ms",readMs),nsm-n("attend_ms",host_monotonic_ms() - started)]);
+    nsm-event(home,"evidence-reader",[nsm-s("reader",record_get(reader,"identity")),nsm-s("state",record_get(reader,"state")),nsm-n("source_bytes",record_get(reader,"extent")),nsm-n("read_bytes",record_get(reader,"read_bytes")),nsm-n("offset",record_get(reader,"offset")),nsm-n("pending_bytes",len(record_get(reader,"pending"))),nsm-n("invalid_records",record_get(reader,"invalid_records")),nsm-n("current_rows",len(current)),nsm-n("checkpoint_bytes",checkpoint),nsm-n("checkpoint_read_ms",record_get(reader,"checkpoint_read_ms")),nsm-n("read_ms",readMs),nsm-n("attend_ms",host_monotonic_ms() - started)]);
    result;
   }
-  def nse-attend-rows(home,dir,sources,held,revision,rows,done) = nil?(rows) ? done : nse-attend-row(home,dir,sources,held,revision,rows[0],rows[1:],done);
-  def nse-attend-row(home,dir,sources,held,revision,row,rest,done) {
-   let relevant = ohv-str(row,"organ") == "session-learning" && ohv-str(row,"flow") == dir && ohv-pain(row);
-   let needs = relevant ? (jv-items(jv-get(row,"needs")) |> filter(need => oh-has(nse-resources(),ohv-str(need,"resource")))) : [];
-   let key = nil?(needs) ? "" : ohv-str(jv-get(needs[0],"detail"),"row_sha256");
+   def nse-attend-rows(home,dir,sources,held,revision,rows,done) = nil?(rows) ? done : nse-attend-row(home,dir,sources,held,revision,rows[0],rows[1:],done);
+   def nse-need-key(row,dir) {
+    let relevant = ohv-str(row,"organ") == "session-learning" && ohv-str(row,"flow") == dir && ohv-pain(row);
+    let needs = relevant ? (jv-items(jv-get(row,"needs")) |> filter(need => oh-has(nse-resources(),ohv-str(need,"resource")))) : [];
+    nil?(needs) ? "" : ohv-str(jv-get(needs[0],"detail"),"row_sha256");
+   }
+   def nse-attend-row(home,dir,sources,held,revision,row,rest,done) {
+    let key = nse-need-key(row,dir);
    if key == "" then nse-attend-rows(home,dir,sources,held,revision,rest,done) else {
     let requestKey = nsm-hash(dir + key);
     // Repeated signals share one current need. Select before materializing a
