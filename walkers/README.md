@@ -14,8 +14,18 @@ surface; it only confirms a recipe computes the same value four ways on the
 
 ## The three
 
-- `go/main.go` (1,463 lines), `rust/src/main.rs` (1,255), `ts/main.ts` (1,569) —
-  counted 2026-10-01. Each keeps ONLY the independent parse + eval core.
+- `go/main.go`, `rust/src/main.rs`, `ts/main.ts`. Each keeps ONLY the independent
+  parse + eval core.
+
+A witness that answers by other laws than the kernels witnesses nothing, so each
+walker holds the laws of `docs/kernel-interface.md` its surface reaches: integers
+are 63-bit two's complement, literals included (law 1); integer `div`/`mod` by zero
+stops (law 2); float `mod` truncates (law 5); a float renders the one way
+(`1e-05`, `1e+06`, `-0`) and a closure prints `<closure>` (law 9); a float is not
+an index; `make_nodeid` keeps the native node word's range law. The reader reads
+as fkwu's does: `\n \t \r \" \\` are the escapes and any other backslash stands for
+itself; a `.` after the digits makes a float (`5.` is 5.0). `bp` is not a walker
+native: its one meaning is the Form resolution in `form/form-stdlib/form-ontology-bp.fk`.
 
 Call heads read as fkwu reads them: a head fkwu reserves (its op rows, rewrite
 rows and control forms; `gate/reserved-heads.bml` writes the list beside each
@@ -50,6 +60,9 @@ builds them first — the kernel reads an absent walker as a suspect one. The
 kernel drives all three itself:
 
 ```
-./fkwu proof/four-way-run-recipe42.fk   # -> 0 (FOUR-WAY; re-run 2026-10-01)
+./fkwu proof/four-way-run-recipe42.fk   # -> 0 (FOUR-WAY) with the three walkers built
                                         # -> 2 (WALKER-SUSPECT) while a walker is unbuilt
 ```
+
+The cell hands fkwu's leg in as the constant 42 over a recipe of `(add 40 2)`, so its
+fkwu leg cannot fail; the leg that can is the walkers'.

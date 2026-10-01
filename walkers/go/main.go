@@ -168,8 +168,13 @@ func (v Value) String() string {
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	case VClosure:
-		return "<closure #" + strconv.FormatUint(uint64(v.Cl.Name), 10) + ">"
+		// law 9: the kernels' one word, never an internal name id
+		return "<closure>"
 	case VNodeID:
+		// the 1.1.1 trivial-int lane reads its inst as the signed int it holds
+		if v.Nid.Pkg == 1 && v.Nid.Level == 1 && v.Nid.Type == 1 {
+			return fmt.Sprintf("@1.1.1.%d", int32(v.Nid.Inst))
+		}
 		return fmt.Sprintf("@%d.%d.%d.%d", v.Nid.Pkg, v.Nid.Level, v.Nid.Type, v.Nid.Inst)
 	}
 	return "?"
@@ -185,17 +190,36 @@ func (v Value) AsFloat() float64 {
 	panic(fmt.Sprintf("AsFloat: %v", v))
 }
 
+// AsInt — only an int passes; a float is not an index or a word, as on the kernels.
 func (v Value) AsInt() int64 {
-	switch v.Kind {
-	case VInt:
+	if v.Kind == VInt {
 		return v.Int
-	case VFloat:
-		return int64(v.Float)
 	}
 	panic(fmt.Sprintf("as_int: %v", v))
 }
 
-// FormatFloatJS — JS String(number) semantics: shortest round-trippable form.
+// wrap63 — law 1: an integer is 63-bit two's complement, [-2^62, 2^62).
+func wrap63(n int64) int64 { return (n << 1) >> 1 }
+
+// intLiteral reads an integer literal the way fkwu's reader does: the digits
+// fold in a wrapping word, then the value wraps to 63 bits.
+func intLiteral(s string) int64 {
+	neg := len(s) > 0 && s[0] == '-'
+	var u uint64
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			u = u*10 + uint64(s[i]-'0')
+		}
+	}
+	n := int64(u)
+	if neg {
+		n = -n
+	}
+	return wrap63(n)
+}
+
+// FormatFloatJS — the one float rendering (law 9): strconv's shortest 'g', an
+// exponent below 1e-4 and from 1e+06, as fkwu's fk_fmt_float_js writes it.
 func FormatFloatJS(f float64) string {
 	if math.IsNaN(f) {
 		return "NaN"
@@ -525,22 +549,27 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 				case RMathDivide:
 					return Value{Kind: VFloat, Float: l / r}
 				case RMathModulo:
-					return Value{Kind: VFloat, Float: l - math.Floor(l/r)*r}
+					// law 5: truncated, the sign of the dividend, as integer mod is
+					return Value{Kind: VFloat, Float: math.Mod(l, r)}
 				}
 			}
 			a := lv.AsInt()
 			b := rv.AsInt()
+			// law 1: integers are 63-bit two's complement; law 2: div/mod by zero stops
+			if b == 0 && (cat.Inst == RMathDivide || cat.Inst == RMathModulo) {
+				panic("integer division by zero")
+			}
 			switch cat.Inst {
 			case RMathPlus:
-				return Value{Kind: VInt, Int: a + b}
+				return Value{Kind: VInt, Int: wrap63(a + b)}
 			case RMathMinus:
-				return Value{Kind: VInt, Int: a - b}
+				return Value{Kind: VInt, Int: wrap63(a - b)}
 			case RMathMultiply:
-				return Value{Kind: VInt, Int: a * b}
+				return Value{Kind: VInt, Int: wrap63(a * b)}
 			case RMathDivide:
-				return Value{Kind: VInt, Int: a / b}
+				return Value{Kind: VInt, Int: wrap63(a / b)}
 			case RMathModulo:
-				return Value{Kind: VInt, Int: a % b}
+				return Value{Kind: VInt, Int: wrap63(a % b)}
 			}
 
 		case RBasicCompare:
@@ -983,8 +1012,9 @@ func tokenizeSexp(src string) []sexpToken {
 				i++
 			}
 			isFloat := false
-			// Fractional part: `.` followed by at least one digit.
-			if i < len(src) && src[i] == '.' && i+1 < len(src) && src[i+1] >= '0' && src[i+1] <= '9' {
+			// Fractional part: a `.` after the digits makes a float, with or
+			// without fraction digits (`1.` reads 1.0), as fkwu's number leaf reads it.
+			if i < len(src) && src[i] == '.' {
 				isFloat = true
 				i++ // consume '.'
 				for i < len(src) && src[i] >= '0' && src[i] <= '9' {
@@ -1043,7 +1073,8 @@ func unescapeStr(s string) string {
 			case '"':
 				out = append(out, '"')
 			default:
-				out = append(out, s[i+1])
+				// any other backslash stands for itself, as fkwu's fk_smkstr reads it
+				out = append(out, '\\', s[i+1])
 			}
 			i++
 			continue
@@ -1060,8 +1091,7 @@ func (k *Kernel) readSexpr(toks []sexpToken, i int) (NodeID, int) {
 	t := toks[i]
 	switch t.kind {
 	case "INT":
-		n, _ := strconv.ParseInt(t.value, 10, 64)
-		return k.internTrivialInt(n), i + 1
+		return k.internTrivialInt(intLiteral(t.value)), i + 1
 	case "FLOAT":
 		f, err := strconv.ParseFloat(t.value, 64)
 		if err != nil {
@@ -1371,13 +1401,18 @@ func (k *Kernel) registerNatives() {
 	// make_nodeid — the substrate write door: four integer coordinates become
 	// a NodeID value, identity-by-content (eq/value_eq compare coordinates,
 	// never the minting site). Body faithful to form-kernel-go's native.
-	k.registerNative("make_nodeid", func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VNodeID, Nid: NodeID{
-			Pkg:   uint32(args[0].AsInt()),
-			Level: uint32(args[1].AsInt()),
-			Type:  uint32(args[2].AsInt()),
-			Inst:  uint32(args[3].AsInt()),
-		}}
+	// make_nodeid — the kernels' one range law (native-node-word.bml): pkg < 2^6,
+	// level < 2^13, type < 2^12, 0 <= inst < 2^32; the 1.1.1 trivial-int lane takes
+	// any 63-bit int and is that int's own leaf. Outside it the door stops.
+	k.registerNative("make_nodeid", func(k *Kernel, args []Value) Value {
+		p, l, t, i := args[0].AsInt(), args[1].AsInt(), args[2].AsInt(), args[3].AsInt()
+		if p == 1 && l == 1 && t == 1 {
+			return Value{Kind: VNodeID, Nid: k.internTrivialInt(i)}
+		}
+		if p < 0 || p >= 1<<6 || l < 0 || l >= 1<<13 || t < 0 || t >= 1<<12 || i < 0 || i >= 1<<32 {
+			panic("make_nodeid: coordinate is outside the native 64-bit node identity layout")
+		}
+		return Value{Kind: VNodeID, Nid: NodeID{Pkg: uint32(p), Level: uint32(l), Type: uint32(t), Inst: uint32(i)}}
 	})
 
 	// intern_node — the composite write door: category NodeID + child NodeIDs

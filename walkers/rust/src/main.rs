@@ -188,7 +188,6 @@ enum Value {
 }
 
 struct Closure {
-    name: String,
     params: Vec<String>,
     body: Rc<Node>,
     // Captured definition environment, chained for lexical scope.
@@ -207,16 +206,19 @@ impl Value {
                 let parts: Vec<String> = xs.iter().map(|x| x.display()).collect();
                 format!("[{}]", parts.join(", "))
             }
-            Value::Closure(c) => format!("<closure #{}>", c.name),
+            // law 9: the kernels' one word, never an internal name
+            Value::Closure(_) => "<closure>".to_string(),
+            // the 1.1.1 trivial-int lane reads its inst as the signed int it holds
+            Value::Nid(n) if n.pkg == 1 && n.level == 1 && n.ty == 1 => format!("@1.1.1.{}", n.inst as i32),
             Value::Nid(n) => format!("@{}.{}.{}.{}", n.pkg, n.level, n.ty, n.inst),
         }
     }
 
+    // only an int passes; a float is not an index or a word, as on the kernels
     fn as_int(&self) -> i64 {
         match self {
             Value::Int(n) => *n,
-            Value::Float(f) => *f as i64,
-            _ => panic!("as_int: not a number"),
+            _ => panic!("as_int: not an integer"),
         }
     }
 
@@ -240,8 +242,9 @@ impl Value {
     }
 }
 
-// Faithful copy of the full kernel's format_float — Rust's default {} for an
-// f64, with NaN/Infinity normalized to the three-way-agreed spellings.
+// Faithful copy of the full kernel's format_float, the one float rendering
+// (law 9): the shortest digits that read back, with an exponent (signed, at least
+// two digits) below 1e-4 and from 1e+06, fixed between; -0 keeps its sign.
 fn format_float(f: f64) -> String {
     if f.is_nan() {
         return "NaN".to_string();
@@ -253,7 +256,51 @@ fn format_float(f: f64) -> String {
             "-Infinity".to_string()
         };
     }
-    format!("{}", f)
+    let shortest = format!("{:e}", f);
+    let length = shortest.split('e').next().unwrap_or("").chars().filter(|c| c.is_ascii_digit()).count();
+    let rounded = format!("{:.*e}", length.saturating_sub(1), f);
+    let sci = if rounded.parse::<f64>() == Ok(f) { rounded } else { shortest };
+    let (mantissa, exp_text) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+    let exp: i32 = exp_text.parse().unwrap_or(0);
+    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
+    let mut out = String::new();
+    if mantissa.starts_with('-') {
+        out.push('-');
+    }
+    if exp < -4 || exp >= 6 {
+        out.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if exp < 0 { '-' } else { '+' });
+        out.push_str(&format!("{:02}", exp.abs()));
+    } else if exp < 0 {
+        out.push_str("0.");
+        for _ in 0..(-exp - 1) {
+            out.push('0');
+        }
+        out.push_str(&digits);
+    } else {
+        let point = exp as usize + 1;
+        if digits.len() <= point {
+            out.push_str(&digits);
+            for _ in 0..(point - digits.len()) {
+                out.push('0');
+            }
+        } else {
+            out.push_str(&digits[..point]);
+            out.push('.');
+            out.push_str(&digits[point..]);
+        }
+    }
+    out
+}
+
+// wrap63 — law 1: an integer is 63-bit two's complement, [-2^62, 2^62).
+fn wrap63(n: i64) -> i64 {
+    n.wrapping_shl(1) >> 1
 }
 
 // A comparison/logic answer acknowledges with the 0/1 integer states
@@ -429,13 +476,11 @@ fn tokenize_sexp(src: &str) -> Vec<SexpTok> {
                 while i < bytes.len() && bytes[i].is_ascii_digit() {
                     i += 1;
                 }
-                // Float: digits '.' digits, and/or a scientific exponent. The dot
-                // must be followed by a digit so `(.foo bar)` and bare integers stay
-                // legible. The exponent is consumed with OR without a fractional part —
-                // Python's repr emits e.g. 1e-05 with no decimal point. Sibling-parity:
-                // Go/TS readers parse the same shape.
+                // Float: a '.' after the digits (with or without fraction digits, so
+                // `1.` reads 1.0), and/or a scientific exponent, as fkwu's number leaf
+                // reads it. The exponent is consumed with OR without a fractional part.
                 let mut is_float = false;
-                if i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit() {
+                if i < bytes.len() && bytes[i] == b'.' {
                     is_float = true;
                     i += 1; // consume '.'
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -481,7 +526,7 @@ fn tokenize_sexp(src: &str) -> Vec<SexpTok> {
                     i += 1;
                 }
                 let mut is_float = false;
-                if i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit() {
+                if i < bytes.len() && bytes[i] == b'.' {
                     is_float = true;
                     i += 1;
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -559,15 +604,26 @@ fn unescape(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
             out.push_str(&s[run..i]);
-            match bytes[i + 1] {
-                b'n' => out.push('\n'),
-                b't' => out.push('\t'),
-                b'r' => out.push('\r'),
-                b'\\' => out.push('\\'),
-                b'"' => out.push('"'),
-                c => out.push(c as char),
+            let esc = match bytes[i + 1] {
+                b'n' => Some('\n'),
+                b't' => Some('\t'),
+                b'r' => Some('\r'),
+                b'\\' => Some('\\'),
+                b'"' => Some('"'),
+                _ => None,
+            };
+            match esc {
+                Some(c) => {
+                    out.push(c);
+                    i += 2;
+                }
+                None => {
+                    // any other backslash stands for itself, as fkwu's fk_smkstr
+                    // reads it; the byte after it starts the next verbatim run
+                    out.push('\\');
+                    i += 1;
+                }
             }
-            i += 2;
             run = i;
             continue;
         }
@@ -591,8 +647,14 @@ fn read_sexp(toks: &[SexpTok], i: usize) -> (Rc<Node>, usize) {
     let t = &toks[i];
     match t.kind {
         "INT" => {
-            let n: i64 = t.value.parse().unwrap();
-            (Rc::new(Node::Int(n)), i + 1)
+            // a literal reads as a 63-bit integer (law 1), wrapping as fkwu's tagged word does
+            let n: i128 = t.value.parse().unwrap_or_else(|e| {
+                panic!(
+                    "parse error: bad integer literal {:?} at line {}, col {}: {}",
+                    t.value, t.line, t.col, e
+                )
+            });
+            (Rc::new(Node::Int(wrap63(n as i64))), i + 1)
         }
         "FLOAT" => {
             let f: f64 = t.value.parse().unwrap_or_else(|e| {
@@ -838,20 +900,26 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
                     OP_MINUS => l - r,
                     OP_MUL => l * r,
                     OP_DIV => l / r,
-                    OP_MOD => l - (l / r).floor() * r,
+                    // law 5: truncated, the sign of the dividend, as integer mod is
+                    OP_MOD => l % r,
                     _ => unreachable!(),
                 })
             } else {
                 let l = lv.as_int();
                 let r = rv.as_int();
-                Value::Int(match *op {
-                    OP_PLUS => l + r,
-                    OP_MINUS => l - r,
-                    OP_MUL => l * r,
-                    OP_DIV => l / r,
-                    OP_MOD => l % r,
+                // law 2: an integer div or mod by zero stops
+                if r == 0 && (*op == OP_DIV || *op == OP_MOD) {
+                    panic!("integer division by zero");
+                }
+                // law 1: integers wrap at 63 bits
+                Value::Int(wrap63(match *op {
+                    OP_PLUS => l.wrapping_add(r),
+                    OP_MINUS => l.wrapping_sub(r),
+                    OP_MUL => l.wrapping_mul(r),
+                    OP_DIV => l.wrapping_div(r),
+                    OP_MOD => l.wrapping_rem(r),
                     _ => unreachable!(),
-                })
+                }))
             }
         }
         Node::Compare(op, a, b) => {
@@ -943,7 +1011,6 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
         }
         Node::Fndef(name, params, body) => {
             let cl = Rc::new(Closure {
-                name: name.clone(),
                 params: params.clone(),
                 body: body.clone(),
                 env: env.clone(),
@@ -1033,12 +1100,27 @@ fn call_native(name: &str, args: &[Value]) -> Option<Value> {
         // become a NodeID value, identity-by-content (eq/value_eq compare
         // coordinates, never the minting site). Body faithful to the full
         // kernel's register_native("make_nodeid", ...).
-        "make_nodeid" => Some(Value::Nid(NodeID {
-            pkg: args[0].as_int() as u32,
-            level: args[1].as_int() as u32,
-            ty: args[2].as_int() as u32,
-            inst: args[3].as_int() as u32,
-        })),
+        // The kernels' one range law (native-node-word.bml): pkg < 2^6, level <
+        // 2^13, type < 2^12, 0 <= inst < 2^32. The 1.1.1 trivial-int lane is the
+        // int's own leaf; this witness carries it inline across the int32 range
+        // only, and stops past it rather than answer a neighbour's identity.
+        "make_nodeid" => {
+            let (p, l, t, i) = (args[0].as_int(), args[1].as_int(), args[2].as_int(), args[3].as_int());
+            if p == 1 && l == 1 && t == 1 {
+                if i < i32::MIN as i64 || i > i32::MAX as i64 {
+                    panic!("make_nodeid: a trivial int past 32 bits is beyond this witness");
+                }
+                return Some(Value::Nid(NodeID { pkg: 1, level: 1, ty: 1, inst: (i as i32) as u32 }));
+            }
+            if !(0..1 << 6).contains(&p)
+                || !(0..1 << 13).contains(&l)
+                || !(0..1 << 12).contains(&t)
+                || !(0..1i64 << 32).contains(&i)
+            {
+                panic!("make_nodeid: coordinate is outside the native 64-bit node identity layout");
+            }
+            Some(Value::Nid(NodeID { pkg: p as u32, level: l as u32, ty: t as u32, inst: i as u32 }))
+        }
         // intern_node — the composite write door: category NodeID + child
         // NodeIDs content-address into the substrate (same shape ⇒ same
         // NodeID; a fresh shape mints pkg 0, the category's level/ty, and the

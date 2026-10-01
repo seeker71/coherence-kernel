@@ -15,8 +15,9 @@
 //   • eq ne lt le gt ge   • if let do   • defn + user calls (closures)
 //   • head tail cons nil(=null/empty) not and or   • str_concat str_eq
 //   • the BMF s-expression parse and the RBasic op dispatch
-//   • plus list/nth/len and node_eq/value_eq/bp so a real four-way manifest
-//     band (eq-shape-band.fk → 524287) can verify, not just an ad-hoc band.
+//   • plus list/nth/len and node_eq/value_eq. `bp` is not here: its one
+//     meaning is the Form resolution in form-ontology-bp.fk (law 10), never a
+//     table a witness carries.
 //   • make_nodeid — a NodeID value, identity-by-content (the eq law of the
 //     fkwu tag-102 heal)
 //
@@ -160,16 +161,6 @@ export function catCompareEq(): NodeID {
 export function catUndefined(): NodeID {
   return { pkg: 1, level: Level.BASIC, type: RBasic.UNDEFINED, inst: 0 };
 }
-
-// BP_TABLE — minimal subset exercised by the verification band. The full
-// kernel generates the whole table from the ontology; here only the names the
-// pure-op surface's verification touches need to resolve. `bp` fails loud on an
-// unknown name (sibling parity: Go/Rust panic), so this is honest, not a
-// silent fallback.
-const BP_TABLE: Record<string, [number, number, number, number]> = {
-  add: [1, 2, 12, 1],
-  mul: [1, 2, 12, 3],
-};
 
 export type NativeFn = (k: Kernel, args: Value[]) => Value;
 
@@ -389,7 +380,7 @@ export class Kernel {
         return String(v.bigint);
       case "f32":
       case "f64":
-        return String(v.float);
+        return formatFloat(v.float);
       case "str":
         // Bare, not JSON-quoted — the Go (Value.String) and Rust
         // (Value::display) siblings render strings without quotes, and band
@@ -399,8 +390,12 @@ export class Kernel {
         return "[" + v.list.map((x) => this.render(x)).join(", ") + "]";
       case "closure":
         return "<closure>";
-      case "nodeid":
-        return `@${nodeKey(v.nodeid)}`;
+      case "nodeid": {
+        // the 1.1.1 trivial-int lane reads its inst as the signed int it holds
+        const n = v.nodeid;
+        const inst = n.pkg === 1 && n.level === Level.TRIVIAL && n.type === Triv.INT ? n.inst | 0 : n.inst;
+        return `@${n.pkg}.${n.level}.${n.type}.${inst}`;
+      }
     }
   }
 
@@ -473,21 +468,6 @@ export class Kernel {
     this.registerNative("empty", catListNat(), () => ({ kind: "list", list: [] }));
     // axiom-1's third state, first-class: the ground, not a missing 0.
     this.registerNative("nothing", catListNat(), () => ({ kind: "null" }));
-    // bp — Blueprint name → NodeID, looked up in BP_TABLE. Unknown name fails
-    // loud (sibling parity: Go/Rust panic) — the substrate never invents a
-    // NodeID for an unknown name.
-    this.registerNative("bp", catWitness(), (_k, args) => {
-      const name = argStr(args, 0);
-      const entry = BP_TABLE[name];
-      if (entry === undefined) {
-        throw new Error(
-          `bp: unregistered blueprint name ${JSON.stringify(name)} — ` +
-            `the substrate never invents a NodeID for an unknown name.`,
-        );
-      }
-      const [pkg, level, type, inst] = entry;
-      return { kind: "nodeid", nodeid: { pkg, level, type, inst } };
-    });
     this.registerNative("node_eq", catCompareEq(), (_k, args) => {
       const a = argNodeID(args, 0);
       const b = argNodeID(args, 1);
@@ -506,15 +486,29 @@ export class Kernel {
     // make_nodeid — the substrate write door: four integer coordinates become
     // a NodeID value, identity-by-content (eq/value_eq compare coordinates,
     // never the minting site). Body faithful to form-kernel-ts's native.
-    this.registerNative("make_nodeid", catWitness(), (_k, args) => ({
-      kind: "nodeid",
-      nodeid: {
-        pkg: argInt(args, 0),
-        level: argInt(args, 1),
-        type: argInt(args, 2),
-        inst: argInt(args, 3),
-      },
-    }));
+    // make_nodeid — the kernels' one range law (native-node-word.bml): pkg < 2^6,
+    // level < 2^13, type < 2^12, 0 <= inst < 2^32; the 1.1.1 trivial-int lane takes
+    // any 63-bit int and is that int's own leaf. Outside it the door stops.
+    this.registerNative("make_nodeid", catWitness(), (k, args) => {
+      const pkg = argInt(args, 0);
+      const level = argInt(args, 1);
+      const type = argInt(args, 2);
+      if (pkg === 1 && level === 1 && type === 1) {
+        const v = args[3];
+        if (v?.kind === "i64") return { kind: "nodeid", nodeid: k.internTrivialInt64(v.bigint) };
+        return { kind: "nodeid", nodeid: k.internTrivialInt(argInt(args, 3)) };
+      }
+      const inst = argInt(args, 3);
+      if (
+        !(pkg >= 0 && pkg < 2 ** 6) ||
+        !(level >= 0 && level < 2 ** 13) ||
+        !(type >= 0 && type < 2 ** 12) ||
+        !(inst >= 0 && inst < 2 ** 32)
+      ) {
+        throw new Error("make_nodeid: coordinate is outside the native 64-bit node identity layout");
+      }
+      return { kind: "nodeid", nodeid: { pkg, level, type, inst } };
+    });
     // intern_node — the composite write door: category NodeID + child NodeIDs
     // content-address into the intern table (same shape ⇒ same NodeID; a fresh
     // shape mints pkg 0, the category's level/type, and the next inst). Body
@@ -689,28 +683,26 @@ function tokenize(src: string): Token[] {
       i++;
       continue;
     }
-    if (c === '"' || c === "'") {
-      const quote = c;
+    // A string is double-quoted; \n \t \r \" \\ are its escapes, and any other
+    // backslash stands for itself, as fkwu's fk_smkstr and the TS kernel's reader read it.
+    if (c === '"') {
       const start = i;
       i++;
       let s = "";
-      while (i < src.length && src[i] !== quote) {
+      while (i < src.length && src[i] !== '"') {
         if (src[i] === "\\" && i + 1 < src.length) {
           const next = src[i + 1];
-          if (next === "n") s += "\n";
-          else if (next === "r") s += "\r";
-          else if (next === "t") s += "\t";
-          else if (next === "\\") s += "\\";
-          else if (next === '"') s += '"';
-          else if (next === "'") s += "'";
-          else s += next ?? "";
-          i += 2;
-          continue;
+          const esc = next === "n" ? "\n" : next === "t" ? "\t" : next === "r" ? "\r" : next === '"' || next === "\\" ? next : "";
+          if (esc !== "") {
+            s += esc;
+            i += 2;
+            continue;
+          }
         }
         s += src[i];
         i++;
       }
-      if (src[i] !== quote) throw new Error(`unterminated string at ${start}`);
+      if (src[i] !== '"') throw new Error(`unterminated string at ${start}`);
       i++;
       toks.push({ kind: "str", text: s, pos: start });
       continue;
@@ -734,10 +726,11 @@ function tokenize(src: string): Token[] {
     const text = src.slice(start, i);
     if (/^-?\d+$/.test(text)) {
       toks.push({ kind: "int", text, pos: start });
-    } else if (/^-?\d+\.\d+(e-?\d+)?$/i.test(text) || /^-?\d+e-?\d+$/i.test(text)) {
-      // ← the scientific-notation float case. `1e-05` / `6.66e-15` are floats;
-      //   an independent lexer that stopped at `e` (no decimal point) would
-      //   diverge here — the bug this four-walker witness exists to catch.
+    } else if (/^-?\d+(\.\d*)?([eE][+-]?\d+)?$/.test(text)) {
+      // fkwu's number leaf: digits, then a "." (with or without fraction digits) or a
+      // signed exponent makes it a float. `1e-05` / `6.66e-15` / `5.` are floats; an
+      // independent lexer that stopped at `e` (no decimal point) would diverge here —
+      // the bug this four-walker witness exists to catch.
       toks.push({ kind: "float", text, pos: start });
     } else {
       toks.push({ kind: "ident", text, pos: start });
@@ -779,7 +772,9 @@ export function readAll(k: Kernel, src: string): NodeID {
 function readOne(k: Kernel, s: ParseState): NodeID {
   const t = consume(s);
   if (t.kind === "int") {
-    const big = BigInt(t.text);
+    // Read exactly via BigInt, wrapped to the 63-bit integer word (law 1) as fkwu's
+    // literal reader wraps it. The int32 range interns inline, wider through INT64.
+    const big = BigInt.asIntN(INT_BITS, BigInt(t.text));
     if (big >= -2147483648n && big <= 2147483647n) {
       return k.internTrivialInt(Number(big));
     }
@@ -1134,6 +1129,63 @@ function expectBigInt(v: Value, op: string): bigint {
   throw new Error(`${op}: expected integer-like, got ${v.kind}`);
 }
 
+// The integer range (law 1): 63-bit two's complement, [-2^62, 2^62), on every kernel.
+const INT_BITS = 63;
+
+// intOrWide — an integer as the plain int kind when a double holds it exactly, the i64 kind
+// (a bigint) past 2^53.
+function intOrWide(total: bigint): Value {
+  const n = Number(total);
+  return Number.isSafeInteger(n) ? { kind: "int", int: n } : { kind: "i64", bigint: total };
+}
+
+// foldWide — the integer fold past 2^53: BigInt steps wrapped to the 63-bit word (law 1).
+// BigInt `/` and `%` truncate toward zero.
+function foldWide(op: number, vals: readonly Value[]): Value {
+  let acc = expectBigInt(vals[0]!, "math.int");
+  for (let i = 1; i < vals.length; i++) {
+    const x = expectBigInt(vals[i]!, "math.int");
+    switch (op) {
+      case RMath.PLUS: acc = acc + x; break;
+      case RMath.MINUS: acc = acc - x; break;
+      case RMath.MUL: acc = acc * x; break;
+      case RMath.DIV:
+        if (x === 0n) throw new Error("division by zero");
+        acc = acc / x;
+        break;
+      case RMath.MOD:
+        if (x === 0n) throw new Error("modulo by zero");
+        acc = acc % x;
+        break;
+      default: throw new Error(`math.int: unknown op ${op}`);
+    }
+    acc = BigInt.asIntN(INT_BITS, acc);
+  }
+  return intOrWide(acc);
+}
+
+// The one float rendering (law 9), byte for byte the TS kernel's formatFloat and fkwu's
+// fk_fmt_float_js: the shortest digits that round-trip, an exponent (signed, at least two
+// digits) below 1e-4 and from 1e+06, fixed notation between; -0 keeps its sign.
+function formatFloat(f: number): string {
+  if (Number.isNaN(f)) return "NaN";
+  if (f === Infinity) return "Infinity";
+  if (f === -Infinity) return "-Infinity";
+  const sign = f < 0 || Object.is(f, -0) ? "-" : "";
+  const sci = Math.abs(f).toExponential();
+  const at = sci.indexOf("e");
+  const digits = sci.slice(0, at).replace(".", "");
+  const exp = Number(sci.slice(at + 1));
+  if (exp < -4 || exp >= 6) {
+    const rest = digits.length > 1 ? `.${digits.slice(1)}` : "";
+    return `${sign}${digits.charAt(0)}${rest}e${exp < 0 ? "-" : "+"}${String(Math.abs(exp)).padStart(2, "0")}`;
+  }
+  if (exp < 0) return `${sign}0.${"0".repeat(-exp - 1)}${digits}`;
+  const point = exp + 1;
+  if (digits.length <= point) return `${sign}${digits}${"0".repeat(point - digits.length)}`;
+  return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
+}
+
 function walkMath(
   k: Kernel,
   inst: number,
@@ -1153,7 +1205,7 @@ function walkMath(
         case RMath.MINUS: acc = acc - x; break;
         case RMath.MUL: acc = acc * x; break;
         case RMath.DIV: acc = acc / x; break;
-        case RMath.MOD: acc = acc - Math.floor(acc / x) * x; break;
+        case RMath.MOD: acc = acc % x; break; // law 5: truncated, the dividend's sign
         default: throw new Error(`math.f64: unknown op ${op}`);
       }
     }
@@ -1169,7 +1221,7 @@ function walkMath(
         case RMath.MINUS: acc = Math.fround(acc - x); break;
         case RMath.MUL: acc = Math.fround(acc * x); break;
         case RMath.DIV: acc = Math.fround(acc / x); break;
-        case RMath.MOD: acc = Math.fround(acc - Math.floor(acc / x) * x); break;
+        case RMath.MOD: acc = Math.fround(acc % x); break;
         default: throw new Error(`math.f32: unknown op ${op}`);
       }
     }
@@ -1214,12 +1266,16 @@ function walkMath(
         case RMath.MINUS: facc = facc - x; break;
         case RMath.MUL: facc = facc * x; break;
         case RMath.DIV: facc = facc / x; break;
-        case RMath.MOD: facc = facc - Math.floor(facc / x) * x; break;
+        case RMath.MOD: facc = facc % x; break; // law 5: truncated, the dividend's sign
         default: throw new Error(`math.f64: unknown op ${op}`);
       }
     }
     return { kind: "f64", float: facc };
   }
+  // Integers fold in JS numbers while every step stays within ±(2^53−1), where a double
+  // is exact. An operand carried as a bigint, or a step that leaves that range, refolds
+  // the whole expression in BigInt wrapped to the 63-bit word (law 1), as the TS kernel does.
+  if (vals.some((v) => v.kind === "i64" || v.kind === "u64")) return foldWide(op, vals);
   let acc = expectInt(vals[0]!, "math.int");
   for (let i = 1; i < vals.length; i++) {
     const x = expectInt(vals[i]!, "math.int");
@@ -1237,6 +1293,7 @@ function walkMath(
         break;
       default: throw new Error(`math.int: unknown op ${op}`);
     }
+    if (!Number.isSafeInteger(acc)) return foldWide(op, vals);
   }
   return { kind: "int", int: acc };
 }
