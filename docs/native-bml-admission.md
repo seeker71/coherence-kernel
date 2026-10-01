@@ -214,17 +214,24 @@ ordinary prose do not introduce dependencies. Imports can name `.fk` files that
 themselves carry BML sections. An `import Name;` inside a section declares a
 language abstraction and is distinct from a module dependency.
 
-The executable door lowers through `bml-floor-compile.fk` in a RAM pipe. Form
+The executable door lowers through one long-lived `bml-floor-compile.fk` child
+per runner, over a RAM pipe: the child serves every unit the runner lowers and
+reads each source once per process, reusing that reading while the same bytes
+stand under the same home rows (`fsc-bml-file-reading`). The child pins its
+compiler at the first request; a later request that finds the compiler's bytes
+changed answers `@bml-floor-stale`, and the runner opens a fresh child. Form
 owns the source manifest for the optional `.lowfk` memo: the exact owner and
 working context and selected registry, imported source and compiler bytes, and absent earlier lookup
 candidates. The checkout carrier checks the packet, publishes it atomically and
 rejects incomplete or changed observations. The native `.fkb` image retains its
 own dependency identity checks. Changing an erased source annotation can change
 the emitted caller and therefore invalidates the lowering memo.
-Each source discovery publishes a `bml-discovery-ms` framebuffer cell carrying
+Each source reading publishes a `bml-discovery-ms` framebuffer cell carrying
 the source path and elapsed milliseconds. This measures local fingerprinting,
-lowering, dependency directives and exported contracts, excluding recursive
-dependency admission and function-home selection.
+lowering, dependency directives, exported contracts and function-home
+selection, excluding recursive dependency admission. A reused reading publishes
+no cell; the child's closing `@bml-floor-served <units> read <r> reused <h>`
+line counts both.
 
 Source admission still compiles a whole unit synchronously. On-demand
 specialization and complete portable native emission remain
