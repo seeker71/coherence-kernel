@@ -183,6 +183,9 @@ enum Value {
     Float(f64),
     Str(Rc<str>),
     List(Rc<Vec<Value>>),
+    // a pair: cells made by cons onto a word that is not a list, and that word, as
+    // the kernels keep it. List readers end before the word; tail and value_eq see it.
+    Pair(Rc<Vec<Value>>, Rc<Value>),
     Closure(Rc<Closure>),
     Nid(NodeID),
 }
@@ -202,7 +205,7 @@ impl Value {
             Value::Int(n) => n.to_string(),
             Value::Float(f) => format_float(*f),
             Value::Str(s) => s.to_string(),
-            Value::List(xs) => {
+            Value::List(xs) | Value::Pair(xs, _) => {
                 let parts: Vec<String> = xs.iter().map(|x| x.display()).collect();
                 format!("[{}]", parts.join(", "))
             }
@@ -327,6 +330,12 @@ fn value_equal(a: &Value, b: &Value) -> bool {
                 || (xs.len() == ys.len()
                     && xs.iter().zip(ys.iter()).all(|(x, y)| value_equal(x, y)))
         }
+        // a pair meets only a pair with the same tail word
+        (Value::Pair(xs, wx), Value::Pair(ys, wy)) => {
+            value_equal(wx, wy)
+                && xs.len() == ys.len()
+                && xs.iter().zip(ys.iter()).all(|(x, y)| value_equal(x, y))
+        }
         (Value::Nid(x), Value::Nid(y)) => x == y,
         (Value::Closure(x), Value::Closure(y)) => Rc::ptr_eq(x, y),
         _ => false,
@@ -356,6 +365,8 @@ enum Node {
     Block(Vec<Rc<Node>>),
     // (let name value)
     Let(String, Rc<Node>),
+    // (let name value body) -- name bound over body alone; the body answers
+    LetIn(String, Rc<Node>, Rc<Node>),
     // (defn name (params...) body)
     Fndef(String, Vec<String>, Rc<Node>),
     // (name args...) — native or user closure call
@@ -765,8 +776,20 @@ fn build_verb(verb: &str, args: Vec<Rc<Node>>) -> Rc<Node> {
         "do" => Rc::new(Node::Block(args)),
         "let" => {
             // (let <ident> <value>) — args[0] is an Ident node; take its name.
+            // (let <ident> <value> <body>) binds the name over its body alone
+            // and answers the body, as fkwu reads it.
+            if args.len() < 2 || args.len() > 3 {
+                panic!(
+                    "parse error: let takes (let name value) or (let name value body), got {} forms",
+                    args.len()
+                );
+            }
             let name = ident_name(&args[0]);
-            Rc::new(Node::Let(name, args[1].clone()))
+            if args.len() == 3 {
+                Rc::new(Node::LetIn(name, args[1].clone(), args[2].clone()))
+            } else {
+                Rc::new(Node::Let(name, args[1].clone()))
+            }
         }
         "if" => {
             if args.len() == 2 {
@@ -1009,6 +1032,12 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
             env_bind(env, name.clone(), v.clone());
             v
         }
+        Node::LetIn(name, value, body) => {
+            let v = walk(value, env);
+            let scope = new_frame(Some(env.clone()));
+            env_bind(&scope, name.clone(), v);
+            walk(body, &scope)
+        }
         Node::Fndef(name, params, body) => {
             let cl = Rc::new(Closure {
                 params: params.clone(),
@@ -1065,26 +1094,38 @@ fn call_native(name: &str, args: &[Value]) -> Option<Value> {
         "empty" => Some(Value::List(Rc::new(vec![]))),
         // axiom-1's third state, first-class: the ground, not a missing 0.
         "nothing" => Some(Value::Null),
+        // cons onto a word that is not a list makes a pair, as the kernels make one;
+        // consing onto nothing stops
         "cons" => {
             let mut out = vec![args[0].clone()];
-            if let Value::List(rest) = &args[1] {
-                out.extend(rest.iter().cloned());
-            }
-            Some(Value::List(Rc::new(out)))
+            Some(match &args[1] {
+                Value::List(rest) => {
+                    out.extend(rest.iter().cloned());
+                    Value::List(Rc::new(out))
+                }
+                Value::Pair(rest, word) => {
+                    out.extend(rest.iter().cloned());
+                    Value::Pair(Rc::new(out), word.clone())
+                }
+                Value::Null => panic!("cons: nothing is not a list -- ask nothing? before consing"),
+                word => Value::Pair(Rc::new(out), Rc::new(word.clone())),
+            })
         }
-        "head" => Some(if let Value::List(xs) = &args[0] {
+        "head" => Some(if let Value::List(xs) | Value::Pair(xs, _) = &args[0] {
             xs.first().cloned().unwrap_or(Value::Null)
         } else {
             Value::Null
         }),
-        "tail" => Some(if let Value::List(xs) = &args[0] {
-            Value::List(Rc::new(if xs.is_empty() {
+        "tail" => Some(match &args[0] {
+            Value::List(xs) => Value::List(Rc::new(if xs.is_empty() {
                 vec![]
             } else {
                 xs[1..].to_vec()
-            }))
-        } else {
-            Value::Null
+            })),
+            // the tail of a pair's last cell is its word
+            Value::Pair(xs, word) if xs.len() <= 1 => (**word).clone(),
+            Value::Pair(xs, word) => Value::Pair(Rc::new(xs[1..].to_vec()), word.clone()),
+            _ => Value::Null,
         }),
         "str_concat" => {
             let s = format!("{}{}", str_of(&args[0]), str_of(&args[1]));
@@ -1223,7 +1264,7 @@ fn call_native(name: &str, args: &[Value]) -> Option<Value> {
         // to the full kernel's natives. They sit just past the named surface but
         // are the same pure list shape and are what a real manifest band
         // (verdict 7) folds over; kept minimal: no dict tag.
-        "nth" => Some(if let Value::List(xs) = &args[0] {
+        "nth" => Some(if let Value::List(xs) | Value::Pair(xs, _) = &args[0] {
             let i = args[1].as_int();
             if i < 0 || (i as usize) >= xs.len() {
                 Value::Null
@@ -1245,6 +1286,8 @@ fn call_native(name: &str, args: &[Value]) -> Option<Value> {
                 }
                 Value::Int(xs.len() as i64)
             }
+            // a pair's cells end before its word
+            Value::Pair(xs, _) => Value::Int(xs.len() as i64),
             Value::Str(s) => Value::Int(s.len() as i64),
             _ => Value::Int(0),
         }),
