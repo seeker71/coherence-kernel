@@ -1,0 +1,85 @@
+// voice-admission-run.bml — one small tool task through the real lane admits a voice for a role.
+//
+// The task: a resident document whose last line reads state=cold; the voice reads it, changes that line to
+// state=warm with one guarded edit, keeps every other byte, and returns task=done. The caller check is the
+// lane's own tail over the expected document (fat-call), so the check is met by construction: a refusal is
+// the voice's, never the contract's. The lane runs in its own fresh kernel (observe/form-cli-code-run.fk:
+// the local voice in one native session, no rented fallback) under a wall deadline. One row lands in
+// receipts/voice-admission.jsonl: voice, role, passed (complete, released, and the returned document is the
+// expected one), the lane's status and reason, generated and injected IDs, turns, wall ms and the artifact's
+// mtime. mr-session-ready? (form-stdlib/model-registry.bml) reads 1 only for a passing row newer than the
+// artifact.
+// stdin, one JSON line: {"voice":"qwen38-q4","role":"write-code","context":8192,"turns":8,"deadline_ms":1800000}
+// {"dry":1} writes the request, prints it and its check, and opens no model; no row lands.
+// A physical check: it needs the local GPU and a quiet machine.
+// preflight-exec: forbidden
+import form-stdlib/bml/form-cli-heal-native-report.bml;
+import form-stdlib/bml/form-agent-tools.bml;
+import form-stdlib/bml/form-agent-json-query.bml;
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/meaning-codes.bml;
+import form-stdlib/model-registry.bml;
+section [form.bml] {
+ class VoiceAdmission {
+  def va-dir() = ".hearth/voice-admission";
+  def va-doc() = "admission/state.txt";
+  def va-before() = "# a voice admission fixture\nmode=resident\nstate=cold\n";
+  def va-after() = "# a voice admission fixture\nmode=resident\nstate=warm\n";
+  def va-goal() = "Read admission/state.txt. Its last line reads state=cold. Change that line to state=warm with one guarded edit, keep every other byte, then report task=done.";
+  def va-str(doc, key, d) = if json-object-has?(doc, key) then json-string-value(json-object-get(doc, key)) else d;
+  def va-int(doc, key, d) = if json-object-has?(doc, key) then json-int-value(json-object-get(doc, key)) else d;
+  def va-tail() = ["-n", "1", va-doc()];
+  // what the lane's own tail prints over the expected document
+  def va-expected() = fat-out(fat-call([[va-doc(), va-doc(), va-after()]], "tail", va-tail(), ""));
+  def va-check() = json-node-object([fhn-s("tool", "tail"), json-node-pair("arguments", json-node-array(map(a => json-node-string(a), va-tail()))), fhn-s("stdout", va-expected())]);
+  def va-request(voice, opts) = json-node-object([fhn-s("goal", va-goal()), json-node-pair("documents", json-node-array([json-node-object([fhn-s("id", va-doc()), fhn-s("path", va-doc()), fhn-s("text", va-before())])])), json-node-pair("writable", json-node-array([json-node-string(va-doc())])), json-node-pair("checks", json-node-array([va-check()])), fhn-s("model", voice), fhn-n("context", va-int(opts, "context", 8192)), fhn-n("turns", va-int(opts, "turns", 8)), fhn-s("document_context", "full"), fhn-s("code_entry", "direct"), fhn-n("weight_training", 0)]);
+  // a lane that does not answer within its deadline is stopped and reads nothing: a stall
+  def va-wait(pid, until) = if ((Comparable) host_alive(pid) != 1) then host_wait(pid) else if (host_monotonic_ms() > until) then va-stop(pid) else va-rest(pid, until);
+  def va-stop(pid) {
+   host_kill(pid);
+   host_wait(pid);
+   nothing();
+  }
+  def va-rest(pid, until) {
+   host_sleep_ms(500);
+   va-wait(pid, until);
+  }
+  def va-result-line(lines, found) = if nil?(lines) then found else va-result-line(lines[1:], if (str_find(lines[0], "\"schema\":\"form-native-code-v1\"", 0) >= 0) then lines[0] else found);
+  def va-result(out) {
+   let r = trim(va-result-line(split-on(if (file_size(out) > 0) then fhn-read(out) else "", "\n"), ""));
+   if (((Comparable) len(r) > 0) && faj-valid(r)) then parse-json("admission-result", r) else json-node-object([]);
+  }
+  def va-returned(result) = foldl((found, d) => if ((String) va-str(d, "path", "") == va-doc()) then va-str(d, "text", "") else found, "", if json-object-has?(result, "documents") then json-array-elements(json-object-get(result, "documents")) else []);
+  def va-passed?(result) = ((String) va-str(result, "status", "") == "complete") && ((Comparable) va-int(result, "release_ok", 0) == 1) && ((String) va-returned(result) == va-after());
+  def va-maybe(key, doc, field) = if json-object-has?(doc, field) then json-node-pair(key, json-object-get(doc, field)) else json-node-pair(key, json-node-null());
+  def va-admit(voice, role, opts) {
+   let made = fs_mkdir(".hearth");
+   let dir = fs_mkdir(va-dir());
+   let stamp = mc-cat([voice, "-", role, "-", now_unix_ms().str()]);
+   let req = mc-cat([va-dir(), "/", stamp, ".json"]);
+   let wrote = write_file_text(req, json-emit(va-request(voice, opts)));
+   if ((Comparable) va-int(opts, "dry", 0) == 1) then print_str(mc-cat(["[voice-admission] dry: ", voice, " for ", role, "; request ", req, "; check tail -n 1 expects ", json-emit(json-node-string(va-expected())), "; no model opened, no row written"])) else va-run-lane(voice, role, opts, req, stamp);
+  }
+  def va-run-lane(voice, role, opts, req, stamp) {
+   let input = req + ".stdin";
+   let out = mc-cat([va-dir(), "/", stamp, ".out"]);
+   let fed = write_file_text(input, "@" + req + "\n");
+   let started = now_unix_ms();
+   let pid = host_spawn_at(["./fkwu", "observe/form-cli-code-run.fk"], [input, out, out + ".err"]);
+   let exit = if (pid <= 0) then nothing() else va-wait(pid, (host_monotonic_ms() + va-int(opts, "deadline_ms", 1800000)));
+   let result = va-result(out);
+   let passed = (!nothing?(exit)) && ((Comparable) exit == 0) && va-passed?(result);
+   let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("voice", voice), fhn-s("role", role), fhn-n("passed", if passed then 1 else 0), fhn-s("task", "guarded-edit-then-done"), fhn-s("lane", if (pid <= 0) then "lane-launch-unavailable" else if nothing?(exit) then "lane-stalled-past-deadline" else mc-cat(["lane-exit=", exit.str()])), fhn-s("status", va-str(result, "status", "")), fhn-s("reason", va-str(result, "reason", "")), va-maybe("generated_ids", result, "generated_ids"), va-maybe("injected_ids", result, "injected_ids"), va-maybe("turns", result, "turns"), fhn-n("wall_ms", (now_unix_ms() - started)), fhn-n("artifact_mtime_s", file_mtime(mr-path(mr-find(voice)))), fhn-s("request", req)]);
+   let appended = fhn-append(mr-admission-path(), json-emit(row) + "\n");
+   print_str(mc-cat(["[voice-admission] ", json-emit(row), if ((String) appended == "appended") then "" else mc-cat([" (row not written: ", appended, ")"])]));
+  }
+  def va-run() {
+   let line = trim(stdin-text());
+   let opts = if (((Comparable) len(line) > 0) && faj-valid(line)) then parse-json("voice-admission", line) else json-node-object([]);
+   let voice = va-str(opts, "voice", "");
+   let role = va-str(opts, "role", "write-code");
+   if ((String) voice == "") then print_str("signal=nothing reason=voice-required") else if ((String) mr-name(mr-find(voice)) == "") then print_str(mc-cat(["signal=nothing reason=voice-not-in-registry voice=", voice])) else if (!mr-in-chain?(voice, role)) then print_str(mc-cat(["signal=nothing reason=voice-not-in-role-chain voice=", voice, " role=", role])) else va-admit(voice, role, opts);
+  }
+ }
+ va-run();
+}

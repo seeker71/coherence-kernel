@@ -42,6 +42,58 @@ section [form.bml] {
         def mr-side?(path, suffix) = mr-file?(((String) path + suffix));
         def mr-ready-kv(k, v) = (k + ("=" + v.str()));
         def mr-readiness(r) = (mr-ready-kv("artifact", mr-file?(mr-path(r))) + (" " + (mr-ready-kv("seal", mr-side?(mr-path(r), mr-suffix-seal())) + (" " + (mr-ready-kv("tokfast", mr-side?(mr-path(r), mr-suffix-tokfast())) + (" " + mr-ready-kv("crystal", mr-side?(mr-path(r), mr-suffix-crystal()))))))));
+
+        // Voices by role. A role names its voices in order; the ladder takes the first ready one and swerves
+        // to the next. Readiness is behavior, not a name: the artifact and its seal, codec index and crystal
+        // are present, the GGUF architecture is wired, and a passing admission row for (voice, role) in
+        // receipts/voice-admission.jsonl is newer than the artifact. An admission row comes from one small
+        // tool task through the real lane (observe/voice-admission-run.bml). The caller adds the third
+        // condition, the fit: the packed prompt plus the minimum completion replies within the context.
+        def mr-chain-rows() = [["write-code", ["qwen38-q8", "qwen38-q4", "katcoder"]], ["diagnose", ["qwen38-q8"]], ["triage", ["qwen38-q4"]], ["fast-review", ["qwen38-q4"]], ["propose-inputs", ["qwen38-q4"]], ["summarize", ["qwen38-q4"]]];
+        def mr-chain-names(role) = (tb-first(mr-chain-rows(),r => ((String) r[0] == role)) ?? [role, []])[1];
+        def mr-chain(role) = map(name => mr-find(name), mr-chain-names(role));
+        def mr-in-chain?(name, role) = any?(n => ((String) n == name), mr-chain-names(role));
+        def mr-admission-path() = "receipts/voice-admission.jsonl";
+        def mr-sides-ready?(r) = if ((String) mr-path(r) == "") then 0 else if ((Comparable) mr-file?(mr-path(r)) == 0) then 0 else if ((Comparable) mr-side?(mr-path(r), mr-suffix-seal()) == 0) then 0 else if ((Comparable) mr-side?(mr-path(r), mr-suffix-tokfast()) == 0) then 0 else mr-side?(mr-path(r), mr-suffix-crystal());
+        // today's lane rule without the name prefix: sealed sidecars and a wired architecture
+        def mr-artifact-ready?(r) = mr-artifact-ready-with(r, w => mr-wired?(mr-arch(w)));
+        def mr-artifact-ready-with(r, wired) = if ((Comparable) mr-sides-ready?(r) == 0) then 0 else wired(r);
+        // admission rows are read as text: one JSON object per line, written by the admission door
+        def mr-quoted(key, value) = ((String) byte_to_str(34) + (key + ((String) byte_to_str(34) + (":" + ((String) byte_to_str(34) + (value + byte_to_str(34)))))));
+        def mr-digit?(b) = ((b >= 48) && (b <= 57));
+        def mr-digits(s, i, acc) = if ((i < len(s)) && mr-digit?(str_byte_at(s, i))) then mr-digits(s, (i + 1), ((acc * 10) + (str_byte_at(s, i) - 48))) else acc;
+        def mr-int-after(line, key) {
+            let mark = ((String) byte_to_str(34) + (key + ((String) byte_to_str(34) + ":")));
+            let at = str_find(line, mark, 0);
+            if ((at < 0) || ((at + len(mark)) >= len(line))) then nothing() else if mr-digit?(str_byte_at(line, (at + len(mark)))) then mr-digits(line, (at + len(mark)), 0) else nothing();
+        }
+        def mr-admits?(line, name, role, sinceMs) = ((str_find(line, mr-quoted("voice", name), 0) >= 0) && ((str_find(line, mr-quoted("role", role), 0) >= 0) && (((Comparable) (mr-int-after(line, "passed") ?? 0) == 1) && ((mr-int-after(line, "at_unix_ms") ?? 0) > sinceMs))));
+        def mr-admitted-from?(text, name, role, sinceMs, from) {
+            let found = str_find(text, byte_to_str(10), from);
+            let end = if (found < 0) then len(text) else found;
+            if (from >= len(text)) then false else if mr-admits?(substring(text, from, end), name, role, sinceMs) then true else mr-admitted-from?(text, name, role, sinceMs, (end + 1));
+        }
+        def mr-admitted?(name, role, path, sinceMs) = if (file_size(path) < 1) then 0 else if mr-admitted-from?(read_file(path), name, role, sinceMs, 0) then 1 else 0;
+        // the admission row is read first: without one no header is opened
+        def mr-row-ready-with(r, role, path, wired) = if ((String) mr-path(r) == "") then 0 else if ((Comparable) mr-admitted?(mr-name(r), role, path, (file_mtime(mr-path(r)) * 1000)) == 0) then 0 else mr-artifact-ready-with(r, wired);
+        def mr-session-ready-with(name, role, path, wired) = if (!mr-in-chain?(name, role)) then 0 else mr-row-ready-with(mr-find(name), role, path, wired);
+        def mr-session-ready-at(name, role, path) = mr-session-ready-with(name, role, path, w => mr-wired?(mr-arch(w)));
+        def mr-session-ready?(name, role) = mr-session-ready-at(name, role, mr-admission-path());
+        def mr-first-ready(role) = tb-first(mr-chain(role),r => ((Comparable) mr-session-ready?(mr-name(r), role) == 1)) ?? mr-none();
+        def mr-context-fits?(promptIds, replyTokens, minimumReplies, context) = ((promptIds + (replyTokens * minimumReplies)) <= context);
+
+        // Cooldown. A voice whose lane died (nonzero exit, release incomplete, stall) rests one, two, then
+        // four rungs, then gets one probe; a failed probe declares it unavailable. A success resets it.
+        // events: [rung, ok] oldest first. Answers [state, rungs-left, failures]; the ladder speaks it as an
+        // organ-health 'voice-health' reading. The backoff steps are instruments.
+        def mr-backoff(fails) = if (fails <= 0) then 0 else if ((Comparable) fails == 1) then 1 else if ((Comparable) fails == 2) then 2 else 4;
+        def mr-fails(events) = foldl((n, e) => if ((Comparable) e[1] == 1) then 0 else (n + 1), 0, events);
+        def mr-cooldown(events, rung) {
+            let fails = mr-fails(events);
+            let last = if nil?(events) then 0 else events[(len(events) - 1)][0];
+            let left = max2(0, (((last + mr-backoff(fails)) + 1) - rung));
+            if ((Comparable) fails == 0) then ["ready", 0, 0] else if (fails >= 4) then ["unavailable", 0, fails] else if (left > 0) then ["cooling", left, fails] else if ((Comparable) fails == 3) then ["probe", 0, fails] else ["ready", 0, fails];
+        }
     }
     0;
 }
