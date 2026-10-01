@@ -1,0 +1,71 @@
+// fb-findings-run.bml — what the body is waiting on, read off the live bus: for the local agent's turns
+// and any session without the glass.
+//
+// float_leaf(31, cons(cursor, 0)) answers (next lapped holes now_us row ...): up to 4096 rows of 13 ints
+// from the cursor on, the records the ring lapped or held as holes, and the bus's own clock; a cursor
+// below 0 answers the head; no row means caught up, nothing means no bus. float_leaf(32, id) answers
+// the text the bus interned for an id. Each batch's stages and outcomes are named before
+// stage-vitality.bml folds it, and an outcome named by a FbfHeldWords word folds as StvHeld; the pids
+// kernel_live_pids answers are the alive ones. It prints the bus reading, the ranked findings, the
+// organs by wane and the coverage (pids that spoke in the window / alive pids), and answers the need:
+//   need=<organ> <wane>ms/s <finding> <stage> <key>
+//   ./fkwu observe/fb-findings-run.bml </dev/null
+import form-stdlib/core.fk;
+import form-stdlib/bml/stage-vitality.bml;
+section [form.bml] {
+ class FbFindings {
+  def FbfShown() = 12;
+  def FbfOrgans() = 6;
+  def FbfHeldWords() = ["held", "ok"];
+  def fbf-tail(cursor) = float_leaf(31, cons(cursor, 0));
+  def fbf-id-name(id) = float_leaf(32, id);
+  def fbf-distinct(ids) = foldl((out, id) => any?(x => x == id, out) ? out : cons(id, out), [], ids);
+  def fbf-name(s, namer, ids) = stv-named(s, filter(id => nothing?(stv-get(stv-names(s), [id], nothing())), ids)
+   |> map(id => [id, namer(id)]) |> filter(p => value_kind(p[1]) == "string"));
+  def fbf-held?(s, id) {
+   let named = stv-get(stv-names(s), [id], nothing());
+   !nothing?(named) && any?(word => word == named[0], FbfHeldWords());
+  }
+  def fbf-fold(s, namer, rows) {
+   let outcomes = fbf-distinct(map(stv-outcome, rows));
+   let named = fbf-name(s, namer, append(fbf-distinct(map(stv-stage, rows)), outcomes));
+   let held = filter(id => fbf-held?(named, id), outcomes);
+   stv-take(named, nil?(held) ? rows : map(r => any?(x => x == stv-outcome(r), held) ? stv-set(r, 9, StvHeld()) : r, rows), nothing());
+  }
+  // [state cursor rows lost now]: every batch from the cursor up to the head the reading began at, folded
+  // as it arrives; a writer faster than the fold is read to that head and no further
+  def fbf-drain(door, namer, s, cursor, head, seen, lost, now) {
+   let answer = cursor >= head ? nothing() : door(cursor);
+   let rows = nothing?(answer) ? [] : answer[4:];
+   nil?(rows) || answer[0] <= cursor ? [s, cursor, seen, lost, nothing?(answer) ? now : answer[3]]
+   : fbf-drain(door, namer, fbf-fold(s, namer, rows), answer[0], head, seen + len(rows), lost + answer[1] + answer[2], answer[3]);
+  }
+  def fbf-finding(s, f) = str-join(["  ", f[0], " ", stv-ms(f[2]), "ms ", stv-name(s, f[3]), " ", stv-key-text(s, f[4]), " pid=", f[6].str(),
+   f[7] > 0 ? " age=" ++ stv-ms(f[7]) ++ "ms" : "", nothing?(f[8]) || f[8] == 0 ? "" : " bound=" ++ stv-ms(f[8]) ++ "ms/" ++ f[9],
+   f[10] > 1 ? " n=" ++ f[10].str() : "", f[1] == 1 ? " dim" : ""]);
+  def fbf-organ(o) = "  " ++ o[0] ++ " " ++ stv-ms(o[1]) ++ "ms/s stake=" ++ stv-ms(o[2]) ++ "ms";
+  // the reading's lines, the need last
+  def fbf-reading(door, namer, alive) {
+   let begun = door(0 - 1);
+   let drained = fbf-drain(door, namer, stv-empty(), 0, begun[0], 0, 0, begun[3]);
+   let s = stv-take(drained[0], [], alive);
+   let now = max2(stv-clock(s), drained[4]);
+   let overs = stv-overstays(s, now);
+   let findings = stv-ranked(s, now, overs);
+   let organs = stv-organs-of(s, now, overs);
+   let named = fbf-name(s, namer, fbf-distinct(map(f => f[4], take(FbfShown(), findings))));
+   let cover = stv-coverage(named, now);
+   append(append(["bus rows=" ++ drained[2].str() ++ " cursor=" ++ drained[1].str() ++ " lost=" ++ drained[3].str(), "findings=" ++ len(findings).str()],
+    append(map(f => fbf-finding(named, f), take(FbfShown(), findings)), cons("organs=" ++ len(organs).str(), map(fbf-organ, take(FbfOrgans(), organs))))),
+    ["coverage=" ++ cover[0].str() ++ "/" ++ cover[1].str(), stv-need-of(named, organs, findings)]);
+  }
+  def fbf-said(n, printed) = n + 1;
+  def fbf-run() {
+   let lines = nothing?(fbf-tail(0 - 1)) ? ["bus=unread: float_leaf 31 answered nothing for the head", "need=unread"]
+    : fbf-reading(fbf-tail, fbf-id-name, kernel_live_pids());
+   let said = foldl((n, line) => fbf-said(n, print_str(line)), 0, lines[:-1]);
+   lines[-1];
+  }
+ }
+ fbf-run();
+}
