@@ -5,21 +5,29 @@
 // for one maker only, and writes its pid, stamp and door there. A later start that finds the lock reads its holder:
 // a pid alive (host_alive) that began before the stamp holds it, and the later start ends at once with a
 // [walk-lock] line naming the holder. A holder gone is taken over through a mark only one start can make
-// (<lock>/took-<pid>), and only while the lock still names it. hw-release at the walk's end removes the lock this
-// walk holds, and never another's. It follows main: hw-sync rebases the branch onto origin/main and realigns the
-// branch on origin; the landing asks "main": 1 so the landed commit fast-forwards main with no session carrying it,
-// and hw-carry at the walk's end carries a landing that stood on the branch, live. A sync that names a conflict takes
-// no turn (hw-held-turns): a tree main has left behind would only grow the conflict. hw-build and hw-carrier rebuild
-// the kernel and the Metal carrier into fresh inodes when their sources are newer. hw-native-turn is one engineering
-// turn by the body's own loop (observe/native-turn-run.bml over learn/native-turn-queue.jsonl); hw-paths names what
-// a landing carries for it: the ledgers and every writable file of the queue.
+// (<lock>/took-<pid>), and only while the lock still names it. The mark names its maker (<mark>/by): a mark whose
+// maker no longer holds, or one a minute old that names none, is a take that died midway, and the next start
+// clears it once (through <mark>/clear, which one start makes) and takes the lock. hw-release at the walk's end
+// removes the lock this walk holds, and never another's. It follows main: hw-sync rebases the branch onto
+// origin/main with its own rows set aside and returned (--autostash; receipts/*.jsonl merge as a union), and
+// realigns the branch on origin; the landing asks "main": 1 so the landed commit fast-forwards main with no session
+// carrying it, and hw-carry at the walk's end carries a landing that stood on the branch, live. A sync names
+// "conflict:" only when git names an unmerged file, and such a sync takes no turn (hw-held-turns): a tree main has
+// left behind would only grow the conflict. A rebase refused for any other reason names "dirty:" and the tree's
+// status, and the turns go on over the tree as it stands. hw-build and hw-carrier rebuild the kernel and the Metal
+// carrier into fresh inodes when their sources are newer. hw-native-turn is one engineering turn by the body's own
+// loop (observe/native-turn-run.bml over learn/native-turn-queue.jsonl); hw-paths names what a landing carries for
+// it: the ledgers and every writable file of the queue. A turn's candidate stands in the tree only inside
+// hw-with-published, which restores it on every path a process lives through; hw-heal-publishes returns what a
+// killed publish left, and each walk heals before it syncs.
 //
 // The window: a walk's turns live inside it (hw-turns). Each turn reads the window's end on stdin as its wall
 // deadline, {"turns":24,"deadline_ms":<the window's end on host_monotonic_ms>}; the host's monotonic clock is one
-// clock for every process on this host, so the turn reads the same deadline its walk set. A turn begins only while
-// the time left holds one option, as long as the median option the checkout's own ledger measured (hw-room), and
-// only after the host's other checkouts let the one GPU go: a turn waits, inside its window, while a walk door runs
-// in another checkout (hw-yield).
+// clock for every process on this host, so the turn reads the same deadline its walk set, starts no option the
+// time left cannot hold, and stops its lane at the deadline. A turn begins only while the time left holds one
+// option, as long as the median option the checkout's own ledger measured (hw-room), and only after the host's
+// other checkouts let the one GPU go: a turn waits, inside its window, while a walk door or the session learner
+// runs in another checkout (hw-yield).
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/meaning-codes.bml;
 import form-stdlib/bml/live.bml;
@@ -29,7 +37,10 @@ section [form.bml] {
   def hw-branch() = hw-line(host-exec("git rev-parse --abbrev-ref HEAD", ""));
   def hw-day() = hw-line(host-exec("date +%F", ""));
   def hw-hhmm() = str_to_int(hw-line(host-exec("date +%H%M", "")));
-  def hw-sync(branch) = hw-line(host-exec("git fetch -q origin main " ++ branch ++ " && { git rebase -q origin/main 2>/dev/null || { echo conflict: $(git diff --name-only --diff-filter=U | paste -sd' ' -); git rebase --abort; false; }; } && git push -q --force-with-lease origin HEAD:" ++ branch ++ "; echo sync=$?", ""));
+  // the branch follows main with the tree's own rows set aside and returned; "conflict:" names unmerged files only,
+  // and a rebase refused for another reason names "dirty:" and what the tree holds
+  def hw-sync-command(branch) = "git fetch -q origin main " ++ branch ++ " && { git rebase -q --autostash origin/main >/dev/null 2>&1 || { u=$(git diff --name-only --diff-filter=U | paste -sd' ' -); if [ -n \"$u\" ]; then echo conflict: $u; git rebase --abort >/dev/null 2>&1; else echo dirty: $(git status --porcelain | paste -sd' ' -); fi; false; }; } && git push -q --force-with-lease origin HEAD:" ++ branch ++ "; echo sync=$?";
+  def hw-sync(branch) = hw-line(host-exec(hw-sync-command(branch), ""));
   def hw-conflicted?(sync) = hw-has?(sync, "conflict:");
   def hw-held-turns(sync) {
    let said = print_str("[walk] no turn starts: the branch could not follow main (" ++ sync ++ ")");
@@ -70,12 +81,31 @@ section [form.bml] {
    : hw-take(lock, door, pid, now, holder.str(), text);
   }
   // a lock that names no holder was made this minute by a start still naming itself, or by one that ended there
-  def hw-claim-unowned(lock, door, pid, now, text) = (now / 1000) - file_mtime(lock) < 60 ? [0, "[walk-lock] " ++ door ++ " does not start: another start made the lock this minute and has not named itself yet"] : hw-take(lock, door, pid, now, "unowned", text);
+  def hw-claim-unowned(lock, door, pid, now, text) = hw-age-s(lock, now) < 60 ? [0, "[walk-lock] " ++ door ++ " does not start: another start made the lock this minute and has not named itself yet"] : hw-take(lock, door, pid, now, "unowned", text);
   def hw-gone-name(text) = (String) text == "" ? "a start that never named itself" : hw-owner-door(text) ++ " pid " ++ hw-field(text, "pid=").str() ++ ", gone";
-  def hw-take(lock, door, pid, now, gone, text) {
-   let marked = (Comparable) host_dir_mkdir(lock ++ "/took-" ++ gone) == 1;
-   marked && (String) hw-owner(lock) == text ? hw-own(lock, door, pid, now, ", taken over from " ++ hw-gone-name(text)) : [0, "[walk-lock] " ++ door ++ " does not start: another start is taking over the lock " ++ hw-gone-name(text) ++ " left"];
+  // the take's mark names its maker, so a take that died midway never strands the lock
+  def hw-mark-by(mark) = mark ++ "/by";
+  def hw-mark-maker(mark) = read_file(hw-mark-by(mark)) ?? "";
+  def hw-take(lock, door, pid, now, gone, text) = hw-take-marked(lock, door, pid, now, text, lock ++ "/took-" ++ gone, true);
+  def hw-take-marked(lock, door, pid, now, text, mark, again) = (Comparable) host_dir_mkdir(mark) == 1 ? hw-take-made(lock, door, pid, now, text, mark) : again && hw-mark-stale?(mark, now) ? hw-take-clear(lock, door, pid, now, text, mark) : hw-taking(door, text, mark);
+  def hw-take-made(lock, door, pid, now, text, mark) {
+   let named = write_file_text(hw-mark-by(mark), hw-owner-text(door, pid, now));
+   (String) hw-owner(lock) == text ? hw-own(lock, door, pid, now, ", taken over from " ++ hw-gone-name(text)) : hw-taking(door, text, mark);
   }
+  def hw-taking(door, text, mark) = [0, "[walk-lock] " ++ door ++ " does not start: another start is taking over the lock " ++ hw-gone-name(text) ++ " left" ++ hw-maker-name(hw-mark-maker(mark))];
+  def hw-maker-name(by) = nothing?(hw-field(by, "pid=")) ? "" : " (" ++ hw-owner-door(by) ++ ", pid " ++ hw-field(by, "pid=").str() ++ ")";
+  // seconds since a path last changed; a path that is not there (or reads no time) is no age at all
+  def hw-age-s(path, now) = hw-age-of(file_mtime(path), now);
+  def hw-age-of(at, now) = (String) value_kind(at) != "int" ? 0 : at <= 0 ? 0 : (now / 1000) - at;
+  // a mark is stale when its maker no longer holds, or when it is a minute old and names no maker
+  def hw-mark-stale?(mark, now) {
+   let by = hw-mark-maker(mark);
+   nothing?(hw-field(by, "pid=")) ? hw-age-s(mark, now) >= 60 : !hw-holds?(hw-field(by, "pid="), hw-field(by, " at="));
+  }
+  // one start clears a stale mark: the one that makes <mark>/clear (or finds a clear a minute old, whose maker
+  // died between its two steps); the mark goes, and the take goes once more
+  def hw-take-clear(lock, door, pid, now, text, mark) = (Comparable) host_dir_mkdir(mark ++ "/clear") == 1 || hw-age-s(mark ++ "/clear", now) >= 60 ? hw-take-cleared(lock, door, pid, now, text, mark, host_dir_rmdir(mark)) : hw-taking(door, text, mark);
+  def hw-take-cleared(lock, door, pid, now, text, mark, gone) = hw-take-marked(lock, door, pid, now, text, mark, false);
   def hw-own(lock, door, pid, now, took) {
    let wrote = write_file_text(hw-owner-path(lock), hw-owner-text(door, pid, now));
    let holder = hw-field(hw-owner(lock), "pid=");
@@ -105,8 +135,9 @@ section [form.bml] {
   def hw-left(until, now) = until > now ? until - now : 0;
   def hw-room-at(until, now, floor) = hw-left(until, now) >= floor[0] ? [true, "[walk-window] " ++ hw-minutes(hw-left(until, now)) ++ " left holds an option of " ++ hw-minutes(floor[0]) ++ " (" ++ floor[1] ++ ")"] : [false, "[walk-window] " ++ hw-minutes(hw-left(until, now)) ++ " left cannot hold an option of " ++ hw-minutes(floor[0]) ++ " (" ++ floor[1] ++ "): no turn starts"];
   def hw-room(until) = hw-room-at(until, host_monotonic_ms(), hw-option-floor());
-  // the walk doors of the host's other checkouts: one model on the one GPU at a time
-  def hw-walk-doors() = ["observe/scheduled-walk.bml", "observe/day-turn.bml", "observe/movement-run.bml", "observe/native-turn-run.bml", "observe/form-cli-code-run.fk", "observe/prompt-draft-run.bml"];
+  // the walk doors of the host's other checkouts, and the session learner that trains on the GPU (its worker and
+  // the session door that hands it a teaching and waits for it to settle): one model on the one GPU at a time
+  def hw-walk-doors() = ["observe/scheduled-walk.bml", "observe/day-turn.bml", "observe/movement-run.bml", "observe/native-turn-run.bml", "observe/form-cli-code-run.fk", "observe/prompt-draft-run.bml", "observe/native-session-learning-run.fk", "observe/form-cli-session-home-embody-run.fk"];
   def hw-ends?(s, tail) = len(s) < len(tail) ? false : (String) substring(s, len(s) - len(tail), len(s)) == tail;
   def hw-door-in(arg, doors) = nil?(doors) ? "" : hw-ends?(arg, doors[0]) ? doors[0] : hw-door-in(arg, doors[1:]);
   def hw-door-of(argv) = (String) value_kind(argv) != "list" ? "" : len(argv) < 2 ? "" : (String) value_kind(argv[1]) != "string" ? "" : hw-door-in(argv[1], hw-walk-doors());
@@ -156,19 +187,35 @@ section [form.bml] {
   def hw-turn-keep(lines, row, walk, last) = nil?(lines) ? hw-turn-join(row, walk, last) : hw-turn-keep(lines[1:], hw-starts?(lines[0], "[native-turn] ") ? trim(lines[0]) : row, hw-starts?(lines[0], "[native-turn:walk] ") ? trim(lines[0]) : walk, hw-spoken?(lines[0]) ? trim(lines[0]) : last);
   def hw-turn-join(row, walk, last) = (String) walk == "" && (String) row == "" ? hw-turn-silent(last) : (String) walk == "" ? row : (String) row == "" ? walk : row ++ "\n" ++ walk;
   def hw-turn-silent(last) = (String) last == "" ? "" : "[native-turn:silent] the turn printed no row; its last line: " ++ substring(last, 0, len(last) > 300 ? 300 : len(last));
-  // every turn is followed by the local-flow review (observe/local-flow-review.bml): its row lands with the
-  // turn, and its next line is spoken beside the turn's
+  // a turn that ran a gap is followed by the local-flow review (observe/local-flow-review.bml): its row lands with
+  // the turn, and its next line is spoken beside the turn's. A turn that ran none lands nothing, so it is not
+  // reviewed: its review row would stand in the tracked tree with no landing to carry it, and the turn's own line
+  // already says why it ran none.
   def hw-review() = hw-line(host-exec("./fkwu observe/local-flow-review.bml 2>&1 | grep -F '[local-flow-review] next:' | tail -1", ""));
-  def hw-reviewed(turn) {
-   let said = hw-say(hw-review());
+  def hw-reviewed(turn) = hw-reviewed-by(turn, hw-review);
+  def hw-reviewed-by(turn, review) {
+   let said = hw-turned?(turn) ? hw-say(review()) : 0;
    turn;
   }
   // a turn line carries its row; a queue with no open gap, a gap already full and a silent turn answer without one
   def hw-turned?(line) = hw-starts?(line, "[native-turn] {") && str_find(line, "\"gap\":", 0) >= 0;
+  // the row a turn's lines carry ("" when none), and why the turn was idle ("" when it was not): its last option
+  // generated no local IDs and left the band where the turn found it (a rung-0 refusal, a lane that never launched,
+  // an option the deadline stopped), or its row does not read, so what it spent is unknown and another turn could
+  // only repeat it
+  def hw-row-of(turn) = hw-row-in(split-on(turn ?? "", "\n"));
+  def hw-row-in(lines) = nil?(lines) ? "" : hw-starts?(lines[0], "[native-turn] {") ? substring(lines[0], 14, len(lines[0])) : hw-row-in(lines[1:]);
+  def hw-row-node(row, key) = json-object-has?(row, key) ? json-object-get(row, key) : json-node-null();
+  def hw-row-int(row, key) = node_eq(hw-row-node(row, key), json-node-null()) ? nothing() : json-int-value(hw-row-node(row, key));
+  def hw-idle-row?(row) = ((Comparable) (hw-row-int(row, "local_generated_ids") ?? 0) == 0) && ((String) json-emit(hw-row-node(row, "band_before")) == json-emit(hw-row-node(row, "band_after")));
+  def hw-unread-why() = "its row did not read";
+  def hw-idle-why-of(row) = !json-object-has?(row, "gap") ? hw-unread-why() : hw-idle-row?(row) ? "it generated no local IDs and moved no band" : "";
+  def hw-idle-why(turn) = (String) hw-row-of(turn) == "" ? "" : (try hw-idle-why-of(parse-json("turn-row", hw-row-of(turn))) else hw-unread-why());
+  def hw-idle?(turn) = (String) hw-idle-why(turn) != "";
   // A window's turns. Each begins while ready(until) answers [true, line] (hw-ready: the host's other checkouts let
   // the GPU go and the time left holds an option), at most `most` (nothing: no count bound); a turn that ran no gap
-  // ends them. take(deadline, n) is the nth turn; land(turn) answers the line its landing spoke ("" when the walk
-  // lands later). Answers the count of turns that ran a gap.
+  // ends them, and so does an idle turn once it lands. take(deadline, n) is the nth turn; land(turn) answers the
+  // line its landing spoke ("" when the walk lands later). Answers the count of turns that ran a gap.
   def hw-turns(until, most, ready, take, land) = hw-turns-from(until, most, ready, take, land, 0);
   def hw-turns-from(until, most, ready, take, land, n) {
    let room = !nothing?(most) && n >= most ? [false, "[walk-window] " ++ n.str() ++ " turn(s): this walk takes no more"] : ready(until);
@@ -177,7 +224,12 @@ section [form.bml] {
   }
   def hw-turn-taken(until, most, ready, take, land, n, turn) {
    let said = hw-say(turn);
-   hw-turned?(turn) ? hw-turn-landed(until, most, ready, take, land, n, land(turn)) : n;
+   !hw-turned?(turn) ? n : hw-idle?(turn) ? hw-turn-idle(n, hw-idle-why(turn), land(turn)) : hw-turn-landed(until, most, ready, take, land, n, land(turn));
+  }
+  def hw-turn-idle(n, why, landed) {
+   let said = hw-say(landed);
+   let told = print_str("[walk-window] the turn was idle (" ++ why ++ "): this window takes no more turns");
+   n + 1;
   }
   def hw-turn-landed(until, most, ready, take, land, n, landed) {
    let said = hw-say(landed);
@@ -188,6 +240,77 @@ section [form.bml] {
   def hw-queue-paths(lines) = nil?(lines) ? [] : (Comparable) len(trim(lines[0])) == 0 ? hw-queue-paths(lines[1:]) : append(hw-writable(json-array-elements(json-object-get(parse-json("queue-row", lines[0]), "writable"))), hw-queue-paths(lines[1:]));
   def hw-paths() = cons(json-node-string("receipts/draft-ledger.jsonl"), cons(json-node-string("receipts/native-turn-ledger.jsonl"), cons(json-node-string("receipts/local-flow-review.jsonl"), file_size("learn/native-turn-queue.jsonl") < 1 ? [] : hw-queue-paths(split-on(fhn-read("learn/native-turn-queue.jsonl"), "\n")))));
   def hw-movement(request) = host-exec("./fkwu observe/movement-run.bml 2>&1", json-emit(request) ++ "\n");
+  // ── a candidate in the tracked tree: published inside one door, restored on every path ──
+  // hw-with-published(dir, paths, before, texts, run) writes a marker (<dir>/publish-<pid>.marker: the pid, its
+  // stamp, the paths, their checkpoint texts and the bytes this publish writes) and reads it back, publishes the
+  // texts over the paths, answers run() while they stand, and returns the checkpoint in a deferred step, so a stop
+  // inside run restores too. Nothing is published over a tree that moved from its checkpoint, over a marker this pid
+  // already holds (an earlier restore that did not hold), or before the marker reads back. A kill skips the defer;
+  // the marker outlives it, and hw-heal-publishes(dir) at the next start returns each path still holding the
+  // killed publish's own bytes to its checkpoint. Bytes another writer left stay, and so does their marker.
+  // Answers [run's answer, or nothing when it stopped; restored; "" or why nothing was published].
+  def hw-turn-dir() = ".hearth/native-turns";
+  def hw-marker(dir) = dir ++ "/publish-" ++ host_pid().str() ++ ".marker";
+  def hw-text-node(t) = nothing?(t) ? json-node-null() : json-node-string(t);
+  def hw-node-text(n) = node_eq(n, json-node-null()) ? nothing() : json-string-value(n);
+  def hw-strings(xs) = xs |> map(x => hw-text-node(x));
+  def hw-marker-text(pid, at, paths, before, texts) = json-emit(json-node-object([fhn-n("pid", pid), fhn-n("at", at), json-node-pair("paths", json-node-array(hw-strings(paths))), json-node-pair("before", json-node-array(hw-strings(before))), json-node-pair("published", json-node-array(hw-strings(texts)))])) ++ "\n";
+  def hw-same?(a, b) = nothing?(a) ? nothing?(b) : (!nothing?(b) && ((String) a == b));
+  def hw-all-same?(paths, texts) = nil?(paths) ? nil?(texts) : (!nil?(texts) && hw-same?(read_file(paths[0]), texts[0]) && hw-all-same?(paths[1:], texts[1:]));
+  def hw-put(path, text) = nothing?(text) ? host_path_remove(path) : write_file_text(path, text);
+  def hw-put-all(paths, texts) = nil?(paths) ? 0 : hw-put-next(hw-put(paths[0], texts[0]), paths, texts);
+  def hw-put-next(put, paths, texts) = hw-put-all(paths[1:], texts[1:]);
+  def hw-marked?(marker, text) {
+   let wrote = write_file_text(marker, text);
+   (String) (read_file(marker) ?? "") == text;
+  }
+  def hw-with-published(dir, paths, before, texts, run) {
+   let made = host_dir_mkdir(dir);
+   let marker = hw-marker(dir);
+   (Comparable) host_path_exists(marker) == 1 ? [nothing(), hw-all-same?(paths, before), "marker-held: " ++ marker ++ " was left by an earlier publish under this pid"]
+   : !hw-all-same?(paths, before) ? [nothing(), true, "source-conflict: the tree moved from its checkpoint"]
+   : !hw-marked?(marker, hw-marker-text(host_pid(), now_unix_ms(), paths, before, texts)) ? [nothing(), true, "marker-unwritten: " ++ marker]
+   : hw-published-window(marker, paths, before, texts, run);
+  }
+  def hw-held(paths, before, texts, run) {
+   defer hw-put-all(paths, before);
+   let put = hw-put-all(paths, texts);
+   run();
+  }
+  def hw-published-window(marker, paths, before, texts, run) {
+   let answer = try hw-held(paths, before, texts, run) else nothing();
+   let restored = hw-all-same?(paths, before);
+   let cleared = restored ? host_path_remove(marker) : 0;
+   [answer, restored, ""];
+  }
+  // A marker whose publisher no longer holds (or names this very process, which has published nothing yet) is a
+  // publish whose restore never ran. Each path is read: its checkpoint bytes need nothing, the publish's own bytes
+  // return to the checkpoint, any other bytes are a later writer's and stay, and so does the marker. A marker that
+  // does not read was never read back, so no publish followed it, and it goes. Answers [markers cleared, conflicts].
+  def hw-heal-publishes(dir) = (Comparable) host_path_is_dir(dir) != 1 ? [0, []] : foldl((acc, name) => hw-heal-add(acc, hw-heal-name(dir, name)), [0, []], fs_list(dir) ?? []);
+  def hw-heal-add(acc, one) = [acc[0] + one[0], append(acc[1], one[1])];
+  def hw-heal-name(dir, name) = hw-starts?(name, "publish-") && hw-ends?(name, ".marker") ? hw-heal-marker(dir ++ "/" ++ name, read_file(dir ++ "/" ++ name) ?? "") : [0, []];
+  def hw-heal-marker(path, text) = try hw-heal-row(path, parse-json("publish-marker", text)) else hw-heal-unread(path);
+  def hw-heal-unread(path) = (Comparable) host_path_remove(path) == 0 ? [1, []] : [0, ["heal-conflict: " ++ path ++ " does not read and could not be removed"]];
+  def hw-heal-texts(row, key) = json-array-elements(json-object-get(row, key)) |> map(n => hw-node-text(n));
+  def hw-heal-live?(row) = (Comparable) hw-row-int(row, "pid") != host_pid() && hw-holds?(hw-row-int(row, "pid"), hw-row-int(row, "at"));
+  def hw-heal-row(path, row) = hw-heal-live?(row) ? [0, []] : hw-heal-paths(path, hw-heal-texts(row, "paths"), hw-heal-texts(row, "before"), hw-heal-texts(row, "published"));
+  def hw-heal-paths(path, paths, before, own) {
+   let said = hw-heal-each(paths, before, own);
+   nil?(said) && ((Comparable) host_path_remove(path) == 0) ? [1, []] : [0, said];
+  }
+  def hw-heal-each(paths, before, own) = nil?(paths) ? [] : append(hw-heal-path(paths[0], before[0], own[0]), hw-heal-each(paths[1:], before[1:], own[1:]));
+  def hw-heal-path(path, before, own) {
+   let now = read_file(path);
+   hw-same?(now, before) ? [] : !hw-same?(now, own) ? ["heal-conflict: " ++ path ++ " holds bytes the killed publish did not write; they stay"] : hw-heal-put(path, before);
+  }
+  def hw-heal-put(path, before) {
+   let put = hw-put(path, before);
+   hw-same?(read_file(path), before) ? [] : ["heal-conflict: " ++ path ++ " did not return to its checkpoint"];
+  }
+  def hw-heal-line(healed) = (Comparable) healed[0] == 0 && nil?(healed[1]) ? "" : "[walk-heal] " ++ healed[0].str() ++ " killed publish(es) returned to their checkpoint" ++ (nil?(healed[1]) ? "" : "; " ++ hw-join(healed[1], "; "));
+  def hw-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ hw-join(xs[1:], sep);
+  def hw-heal() = hw-heal-line(hw-heal-publishes(hw-turn-dir()));
   // A landing that stood on the branch (main moved while its turn ran, or no turn landed after it) is carried
   // at the walk's end, live (form-stdlib/bml/live.bml): the branch follows main, the gates whose ground moved
   // read the rebased tree, and main fast-forwards. Each is a step spoken as it lands. A fast-forward refused

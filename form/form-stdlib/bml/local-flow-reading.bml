@@ -7,10 +7,12 @@
 // contracted or guided. The columns per session and per open gap come from
 // form-stdlib/bml/form-cli-guide-packet.bml. Three readings live here:
 //   lfr-contract-why   a gap whose checks no candidate can pass: the lane refused an unmeetable caller check
-//                      (its result's blocking_check reads meetable 0, or differs from what the lane's own
-//                      tool prints only in shape), the band reads a candidate full that a check still refuses,
-//                      or the contract moved under the walk. The row's own fields are read first, then the
-//                      lane result in the option's output, in the checkout where the turn ran.
+//                      (its reason, or its blocking_check's verdict "unmeetable" as the check witness records it,
+//                      or a check that differs from what the lane's own tool prints only in shape), the band
+//                      reads a candidate full that a check still refuses, or the contract moved under the walk.
+//                      The row's own fields are read first (native-turn-run writes lane_reason and
+//                      blocking_check), then the lane result in the option's output, in the checkout where the
+//                      turn ran.
 //   lfr-phases         the live phase costs of one option: the row's own phase_ms when the lane wrote one,
 //                      else its output folded from form-code stamps and form-peer stage lines
 //   lfr-next           the one next local repair: contract, guide, split, lane, landing, queue or turn
@@ -51,7 +53,8 @@ section [form.bml] {
   def lfr-moved?(row) = !nothing?(lfr-num(row, "band_after")) && (!nothing?(lfr-num(row, "band_before")) && (lfr-num(row, "band_after") > lfr-num(row, "band_before")));
   def lfr-last(xs, n) = if (len(xs) <= n) then xs else lfr-last(xs[1:], n);
   def lfr-stuck?(rows) = (len(rows) >= 3) && !any?(r => lfr-moved?(r), lfr-last(rows, 3));
-  def lfr-lane-failed?(row) = !((String) lfr-str(row, "lane") == "lane-exit=0" || (String) lfr-str(row, "lane") == "not-run");
+  // a lane the walk stopped at its window's deadline did not fail; the walk chose to end it
+  def lfr-lane-failed?(row) = !((String) lfr-str(row, "lane") == "lane-exit=0" || (String) lfr-str(row, "lane") == "not-run" || (String) lfr-str(row, "lane") == "lane-deadline");
   def lfr-where(row) = if ((String) lfr-str(row, "checkout") == "") then "this checkout" else lfr-str(row, "checkout");
   // ── the lane's own output for a row, in the checkout where its turn ran ──
   def lfr-out-path(row) {
@@ -76,7 +79,7 @@ section [form.bml] {
    let block = lfr-blocking(row, result);
    let full = lfr-num(gap, "full");
    if lfr-unmeetable?(row, result) then mc-cat(["the lane refused a caller check no candidate can meet", lfr-pair(block)])
-   else if ((Comparable) (lfr-num(block, "meetable") ?? 1) == 0) then mc-cat(["its caller check cannot be met", lfr-pair(block)])
+   else if ((String) lfr-str(block, "verdict") == "unmeetable") then mc-cat(["its caller check cannot be met", lfr-pair(block)])
    else if ((Comparable) (lfr-num(block, "shape_only") ?? 0) == 1) then mc-cat(["its caller check differs from what the lane's own tool prints only in shape", lfr-pair(block)])
    else if ((!nothing?(full)) && ((Comparable) (lfr-num(row, "candidate_band") ?? (0 - 1)) == full) && ((Comparable) lfr-num0(row, "band_green") == 0)) then "its checks refuse a candidate the band reads full"
    else if ((Comparable) lfr-num0(row, "contract_moved") == 1) then "its contract moved under the walk"
@@ -203,9 +206,13 @@ section [form.bml] {
   }
   // ── sessions: the latest row of each, the last three ──
   def lfr-sessions(rents) = foldl((acc, r) => append(filter(x => !((String) lfr-str(x, "session") == lfr-str(r, "session")), acc), [r]), [], rents);
+  // a turn row names its session only when the session that began it said so; while no row names any, which
+  // options a session began is unknown, and its lane columns read null, never 0
+  def lfr-lane-keys() = ["lane_options", "lane_generated_ids", "lane_injected_ids"];
+  def lfr-lane-known(c, rows) = if any?(r => fcgp-present?(r, "session"), rows) then c else json-node-object(map(p => if fcgp-member?(lfr-lane-keys(), json-pair-key(p)) then json-node-pair(json-pair-key(p), json-node-null()) else p, json-object-pairs(c)));
   def lfr-session-line(rent, rows, guides, reviews) {
    let id = lfr-str(rent, "session");
-   let c = fcgp-session-columns(id, rent, fcgp-of(rows, "session", id), fcgp-of(guides, "session", id), fcgp-of(reviews, "session", id));
+   let c = lfr-lane-known(fcgp-session-columns(id, rent, fcgp-of(rows, "session", id), fcgp-of(guides, "session", id), fcgp-of(reviews, "session", id)), rows);
    let r = lfr-obj(rent, "rented");
    mc-cat(["[local-flow-review] session ", id, ": local tokens: drafts ", fcgp-show(lfr-num(c, "draft_generated_ids")), " generated, lane ", fcgp-show(lfr-num(c, "lane_options")), " option(s) ", fcgp-show(lfr-num(c, "lane_generated_ids")), " generated + ", fcgp-show(lfr-num(c, "lane_injected_ids")), " injected; local_verified ", fcgp-show(lfr-num(c, "gaps_local_verified")), " of ", fcgp-show(lfr-num(c, "gaps_attempted")), " gap(s) attempted (", fcgp-show(lfr-num(c, "gaps_unread")), " unread); remote guide prompts ", fcgp-show(lfr-num(c, "remote_guide_prompts")), "; remote work tokens ", fcgp-show(lfr-num(c, "required_remote_tokens")), "; remote review ", fcgp-show(lfr-num(c, "remote_review_rows")), " row(s); whole-session remote reading: output ", fcgp-show(lfr-num(r, "output")), ", uncached input ", fcgp-show(fcgp-plus(lfr-num(r, "input"), lfr-num(r, "cache_write"))), ", cache read ", fcgp-show(lfr-num(r, "cache_read")), "; required remote prompts ", fcgp-show(lfr-num(rent, "required_remote_prompts")), ", tokens ", fcgp-show(lfr-num(rent, "required_remote_tokens")), "; optional review tokens ", fcgp-show(lfr-num(rent, "optional_remote_review_tokens"))]);
   }
