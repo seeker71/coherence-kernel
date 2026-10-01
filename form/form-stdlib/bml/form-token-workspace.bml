@@ -10,17 +10,19 @@
 //            field by its address, the body's doors (every native the runtime carries, ftw-doors)
 //            and every function the body defines (run by the body's own runtime on the unit that
 //            defines it, ftw-body-call)
-// Whatever a control makes (a born recipe, a made node, an eval's value, a def or a let) persists
+// Whatever a control makes (a born recipe, a made node, an eval's value, a def or a let) is kept
 // as a named cell through form-stdlib/persistence.fk in its scope's domain: its name, the domain,
 // a provenance blueprint (kind, request, reply, control ordinal, the address it was spoken as) and
 // the value itself as a recipe tree (ftw-encode). The same value is the same tree by composition
-// identity, so a cell read back re-collapses to the same NodeIDs. A lineage's scopes share one
-// store file, the global scope has its own:
-//   <root>/lineage-<lineage>.fkb   form-token/local/<request>/<reply>, form-token/request/<request>,
-//                                  form-token/lineage/<lineage>
+// identity, so a cell read back re-collapses to the same NodeIDs. The local scope lives with its
+// reply, in memory; a lineage's request and lineage scopes share one store file, the global scope
+// has its own:
+//   <root>/lineage-<lineage>.fkb   form-token/request/<request>, form-token/lineage/<lineage>
 //   <root>/global.fkb              form-token/global
-// A workspace with no root keeps its stores in memory (a band, a trace replay); its global scope is
-// then the substrate and what it wrote itself.
+// A store is held newest first with an index by name and by spoken address, read again only when
+// its file changed, and written whole through a fresh file renamed over it. A workspace with no
+// root keeps every store in memory (a band, a trace replay); its global scope is then the
+// substrate and what it wrote itself.
 //
 // Addresses. A composite's address (@p.l.t.i) is its cell in the host field, which every kernel on
 // the host shares while the field lives, so node_at reaches it from any process; a cell also keeps
@@ -61,7 +63,7 @@ section [form.bml] {
   // an id names a file: a byte outside a-z A-Z 0-9 - _ . reads as -
   def ftw-id-byte(b) = ((b >= 97) && (b <= 122)) || ((b >= 65) && (b <= 90)) || ((b >= 48) && (b <= 57)) || (b == 45) || (b == 95) || (b == 46) ? b : 45;
   def ftw-safe(id) = str-join(map(i => byte_to_str(ftw-id-byte(str_byte_at(id, i))), range(0, len(id))));
-  def ftw-make(root, lineage, request) = record_new(0, "root", root, "lineage", lineage, "request", request, "reply", ftw-fresh-id("rp-"), "stores", record_new(0), "mem", record_new(0), "ordinal", 0, "touched", "", "decoded", record_new(0));
+  def ftw-make(root, lineage, request) = record_new(0, "root", root, "lineage", lineage, "request", request, "reply", ftw-fresh-id("rp-"), "stores", record_new(0), "checked", record_new(0), "ordinal", 0, "touched", "", "decoded", record_new(0));
   // A workspace under root (a directory; "" keeps it in memory). The caller passes the request's
   // lineage id; a request with none starts its own lineage, keyed by its own id.
   def ftw-open(root, lineage, request) {
@@ -81,6 +83,7 @@ section [form.bml] {
   def ftw-next-reply(ws) {
    record_set(ws, "reply", ftw-fresh-id("rp-"));
    record_set(ws, "ordinal", 0);
+   record_set(record_get(ws, "stores"), "local", nothing());
    ws;
   }
 
@@ -91,26 +94,55 @@ section [form.bml] {
    else if scope == "request" then "form-token/request/" ++ ftw-request(ws)
    else "form-token/local/" ++ ftw-request(ws) ++ "/" ++ ftw-reply(ws);
   }
-  def ftw-store-key(ws, scope) = scope == "global" ? "global" : "lineage-" ++ ftw-lineage(ws);
+  def ftw-store-key(ws, scope) = scope == "local" ? "local" : scope == "global" ? "global" : "lineage-" ++ ftw-lineage(ws);
+  def ftw-in-memory?(ws, key) = !ftw-persistent?(ws) || (key == "local");
   def ftw-store-path(ws, key) = ftw-root(ws) ++ "/" ++ key ++ ".fkb";
   // a file read once per change: its size and mtime stamp the cells held from it
   def ftw-stamp(path) {
    let size = file_size(path);
    size < 1 ? "" : size.str() ++ ":" ++ value_str(file_mtime(path));
   }
-  // every cell of a store, in the order written
-  def ftw-cells(ws, key) = ftw-persistent?(ws) ? ftw-file-cells(ws, key, ftw-store-path(ws, key)) : ftw-mem-cells(ws, key);
-  def ftw-mem-cells(ws, key) = ftw-get(record_get(ws, "mem"), key) ?? [];
-  def ftw-file-cells(ws, key, path) {
-   let stamp = ftw-stamp(path);
+  // A store as held: [stamp, cells newest first, index]. The index lists a store's cells newest
+  // first under n:<name> and under a:<the address the value was spoken as>, so a lookup reads only
+  // the cells of its own name.
+  def ftw-held-empty() = ["", [], record_new(0)];
+  def ftw-held(ws, key) = ftw-in-memory?(ws, key) ? (ftw-get(record_get(ws, "stores"), key) ?? ftw-held-empty()) : ftw-file-held(ws, key, ftw-store-path(ws, key));
+  def ftw-cells(ws, key) = ftw-held(ws, key)[1];
+  def ftw-index(ws, key) = ftw-held(ws, key)[2];
+  def ftw-indexed(ws, key, entry) = ftw-get(ftw-index(ws, key), entry) ?? [];
+  // A file is asked for its stamp at most once per ftw-check-ms: a lookup inside one control reads
+  // the store it already holds, and what another process wrote is read by the next control.
+  def ftw-check-ms() = 250;
+  def ftw-file-held(ws, key, path) {
    let held = ftw-get(record_get(ws, "stores"), key);
-   if len(stamp) == 0 then []
-   else if !nothing?(held) && (held[0] == stamp) then held[1]
-   else ftw-cells-hold(ws, key, stamp, map(m => channel-msg-payload(m), channel-read(path)));
+   let at = ftw-get(record_get(ws, "checked"), key);
+   if !nothing?(held) && !nothing?(at) && ((host_monotonic_ms() - at) < ftw-check-ms()) then held
+   else ftw-file-read(ws, key, path, held, ftw-stamp(path));
   }
-  def ftw-cells-hold(ws, key, stamp, cells) {
-   record_set(record_get(ws, "stores"), key, [stamp, cells]);
-   cells;
+  def ftw-file-read(ws, key, path, held, stamp) {
+   let checked = record_set(record_get(ws, "checked"), key, host_monotonic_ms());
+   if len(stamp) == 0 then ftw-hold-store(ws, key, ftw-held-empty())
+   else if !nothing?(held) && (held[0] == stamp) then held
+   else ftw-hold-store(ws, key, ftw-held-of(stamp, reverse(map(m => channel-msg-payload(m), channel-read(path)))));
+  }
+  def ftw-hold-store(ws, key, held) {
+   record_set(record_get(ws, "stores"), key, held);
+   held;
+  }
+  def ftw-held-of(stamp, cells) {
+   let index = record_new(0);
+   let filled = foldl((acc, c) => ftw-index-add(index, c), 0, reverse(cells));
+   [stamp, cells, index];
+  }
+  def ftw-index-add(index, c) {
+   ftw-index-put(index, "n:" ++ cell-name(c), c);
+   ftw-index-put(index, "a:" ++ ftw-cell-spoken(c), c);
+   0;
+  }
+  def ftw-index-put(index, entry, c) = record_set(index, entry, cons(c, ftw-get(index, entry) ?? []));
+  def ftw-held-add(held, stamp, cell) {
+   let added = ftw-index-add(held[2], cell);
+   [stamp, cons(cell, held[1]), held[2]];
   }
   def ftw-join-path(made, part) = made == "" ? (part == "" ? "/" : part) : made == "/" ? "/" ++ part : made ++ "/" ++ part;
   def ftw-mkdir-step(made, part) {
@@ -121,16 +153,23 @@ section [form.bml] {
   // every directory of path, one level at a time
   def ftw-mkdirs(path) = foldl((made, part) => ftw-mkdir-step(made, part), "", split-on(path, "/"));
   def ftw-store-write(ws, key, cell) {
-   if ftw-persistent?(ws) then ftw-file-write(ws, key, cell) else record_set(record_get(ws, "mem"), key, append(ftw-mem-cells(ws, key), [cell]));
+   if ftw-in-memory?(ws, key) then ftw-hold-store(ws, key, ftw-held-add(ftw-held(ws, key), "", cell)) else ftw-file-write(ws, key, cell);
    cell;
   }
-  // the file is read again after a write, so a cell another process wrote meanwhile is held too
+  // The store is read fresh (a cell another process wrote meanwhile is kept), the cell added, and
+  // the whole store written to a fresh file renamed over the old one; what was written is held, so
+  // no write reads the file back. Two processes writing one store in the same moment keep the
+  // later writer's whole store.
   def ftw-file-write(ws, key, cell) {
    let path = ftw-store-path(ws, key);
    let made = ftw-mkdirs(ftw-root(ws));
-   if file_size(path) < 1 then channel-create(path) else 0;
-   channel-append(path, channel-message(cell));
-   record_set(record_get(ws, "stores"), key, nothing());
+   let fresh = ftw-file-read(ws, key, path, ftw-get(record_get(ws, "stores"), key), ftw-stamp(path));
+   let held = ftw-held-add(fresh, "", cell);
+   let part = path ++ ".w" ++ host_pid().str();
+   let wrote = write_form_binary(part, intern_node(CHANNEL-V0, reverse(map(c => channel-message(c), held[1]))));
+   let moved = fs_rename(part, path);
+   let checked = record_set(record_get(ws, "checked"), key, host_monotonic_ms());
+   ftw-hold-store(ws, key, [ftw-stamp(path), held[1], held[2]]);
    0;
   }
 
@@ -163,7 +202,7 @@ section [form.bml] {
   def ftw-visible-any?(ws, c) = any?(s => ftw-visible?(ws, s, c), ftw-scopes());
   def ftw-newest(cells, pred) = nil?(cells) ? nothing() : pred(cells[0]) ? cells[0] : ftw-newest(cells[1:], pred);
   // the newest cell of name scope sees, or nothing
-  def ftw-find(ws, scope, name) = ftw-newest(reverse(ftw-cells(ws, ftw-store-key(ws, scope))), c => (cell-name(c) == name) && ftw-visible?(ws, scope, c));
+  def ftw-find(ws, scope, name) = ftw-newest(ftw-indexed(ws, ftw-store-key(ws, scope), "n:" ++ name), c => ftw-visible?(ws, scope, c));
   // [cell, scope] through the chain local -> request -> lineage -> global, or nothing
   def ftw-resolve(ws, name) = ftw-resolve-in(ws, ftw-scopes(), name);
   def ftw-resolve-in(ws, scopes, name) = nil?(scopes) ? nothing() : ftw-resolve-at(ws, scopes, name, ftw-find(ws, scopes[0], name));
@@ -187,7 +226,7 @@ section [form.bml] {
    value;
   }
   // the names a scope sees, nearest and newest first; "" reads every scope
-  def ftw-names-in(ws, scope) = map(c => cell-name(c), filter(c => ftw-visible?(ws, scope, c), reverse(ftw-cells(ws, ftw-store-key(ws, scope)))));
+  def ftw-names-in(ws, scope) = map(c => cell-name(c), filter(c => ftw-visible?(ws, scope, c), ftw-cells(ws, ftw-store-key(ws, scope))));
   def ftw-names(ws, scope) = ftw-distinct(scope == "" ? foldl((acc, s) => append(acc, ftw-names-in(ws, s)), [], ftw-scopes()) : ftw-names-in(ws, scope), []);
 
   // ── reuse ────────────────────────────────────────────────────────────
@@ -227,10 +266,11 @@ section [form.bml] {
    else nothing();
   }
   def ftw-same(coord, node) = nothing?(node) ? nothing() : ftw-coord(node) == coord ? node : nothing();
-  // the newest visible cell spoken at coord: this lineage's stores first, then the global one
+  // the newest visible cell spoken at coord: this reply's, then this lineage's, then the global one
   def ftw-cell-at(ws, coord) {
-   let mine = ftw-newest(reverse(ftw-cells(ws, ftw-store-key(ws, "request"))), c => (ftw-cell-spoken(c) == coord) && ftw-visible-any?(ws, c));
-   nothing?(mine) ? ftw-newest(reverse(ftw-cells(ws, "global")), c => ftw-cell-spoken(c) == coord) : mine;
+   let entry = "a:" ++ coord;
+   let mine = ftw-newest(ftw-indexed(ws, "local", entry), c => ftw-visible-any?(ws, c)) ?? ftw-newest(ftw-indexed(ws, ftw-store-key(ws, "request"), entry), c => ftw-visible-any?(ws, c));
+   mine ?? ftw-newest(ftw-indexed(ws, "global", entry), c => 1);
   }
   // a cell's value as a node: the node it holds, or its recipe tree
   def ftw-cell-node(ws, c) {
@@ -264,7 +304,8 @@ section [form.bml] {
    else if kind == "record" then intern_node(ftw-cat("ftw-record"), ftw-encode-pairs(v, record_keys(v)))
    else intern_node(ftw-cat("ftw-opaque"), [intern_trivial_string(kind)]);
   }
-  def ftw-encode-pairs(r, keys) = nil?(keys) ? [] : cons(intern_trivial_string(keys[0]), cons(ftw-encode(record_get(r, keys[0])), ftw-encode-pairs(r, keys[1:])));
+  // a key is encoded by its own kind, so a record keyed by numbers keeps its keys as numbers
+  def ftw-encode-pairs(r, keys) = nil?(keys) ? [] : cons(ftw-encode(keys[0]), cons(ftw-encode(record_get(r, keys[0])), ftw-encode-pairs(r, keys[1:])));
   def ftw-decode(node) {
    let name = ftw-leaf?(node) ? "" : ftw-cat-name(node_category(node));
    let kids = node_children(node);
@@ -278,7 +319,7 @@ section [form.bml] {
   }
   def ftw-decode-pairs(r, kids) {
    if len(kids) < 2 then r else {
-    record_set(r, node_value(kids[0]), ftw-decode(kids[1]));
+    record_set(r, ftw-decode(kids[0]), ftw-decode(kids[1]));
     ftw-decode-pairs(r, kids[2:]);
    };
   }
@@ -304,6 +345,13 @@ section [form.bml] {
    f(vals);
   }
   def ftw-door-names() = record_keys(ftw-doors());
+  // The host field is every live kernel's: field_reset resets it only when the body's own roster
+  // holds no other living kernel, and otherwise answers [field-shared, the pids that hold it] and
+  // leaves it untouched.
+  def ftw-field-reset() {
+   let others = filter(p => p != host_pid(), kernel_live_pids() ?? []);
+   nil?(others) ? field_reset() : ["field-shared", others];
+  }
   def ftw-doors-0() = [
    ["read_line", 0, v => read_line()], ["isatty", 0, v => isatty()], ["self_source", 0, v => self_source()],
    ["framebuffer-events", 0, v => framebuffer-events()], ["framebuffer-clear", 0, v => framebuffer-clear()],
@@ -313,7 +361,7 @@ section [form.bml] {
    ["host_cpu_busy_us", 0, v => host_cpu_busy_us()], ["host_vm_stat", 0, v => host_vm_stat()],
    ["host_load_avg", 0, v => host_load_avg()], ["host_disk_stat", 0, v => host_disk_stat()],
    ["host_pid", 0, v => host_pid()], ["host_cwd", 0, v => host_cwd()], ["kernel_live_pids", 0, v => kernel_live_pids()],
-   ["metal_live", 0, v => metal_live()], ["gift_roster_names", 0, v => gift_roster_names()], ["field_reset", 0, v => field_reset()],
+   ["metal_live", 0, v => metal_live()], ["gift_roster_names", 0, v => gift_roster_names()], ["field_reset", 0, v => ftw-field-reset()],
    ["host_temp_dir", 0, v => host_temp_dir()], ["temp_dir", 0, v => temp_dir()], ["metal_matvec_fixture", 0, v => metal_matvec_fixture()],
    ["metal_sync", 0, v => metal_sync()], ["metal_status", 0, v => metal_status()], ["metal_batch_concurrent", 0, v => metal_batch_concurrent()],
    ["metal_submit", 0, v => metal_submit()], ["sense_mic_count", 0, v => sense_mic_count()], ["sense_cam_count", 0, v => sense_cam_count()],
@@ -389,96 +437,190 @@ section [form.bml] {
    ["make_nodeid", 4, v => make_nodeid(v[0], v[1], v[2], v[3])]];
 
   // ── the body's functions, run by the body's own runtime ──────────────
-  // A function the body defines is run on the unit that defines it: a child fkwu compiles a small
-  // door unit (the carrier, the home unit, one call), which the runtime keeps compiled by its
-  // text, reads its arguments as one recipe tree and writes its answer as one. A name's homes are
-  // every library unit that defines it, read off the disk once per process; a run door (a unit
-  // whose name ends in -run) is not a library, since importing it would run it.
+  // A function the body defines is run on the unit that defines it: a child fkwu runs a small
+  // door unit (the carrier, the home unit, one call), which the runtime keeps compiled by its text
+  // under the checkout's own .hearth/form-tokens/doors. The child's stdin is /dev/null; it reads
+  // its arguments as one recipe tree from a ticket named after its own pid, writes its answer
+  // ([1, value] or [0, reason]) as one, and what it prints is the call's printed text.
+  // Time is a backtrack point, not a fence: the call is one alternative raced against the
+  // control's deadline. A child still running when the deadline comes is stopped (host_kill, then
+  // KILL) and reaped, and the call answers body-call-timeout; every file a call made is removed on
+  // every path.
+  // A name's homes are the library units that define it, read off the disk once per process. A run
+  // door (a unit named -run) is not a library, nor is a unit whose section ends in a top-level call:
+  // importing it runs that call (a stdin door, a compile). A name only such units define answers
+  // runs-on-import.
   def ftw-home-roots() = [["form/form-stdlib", "form-stdlib/"], ["control", "control/"], ["cognition", "cognition/"]];
   def ftw-home-skips() = ["tests", ".cache", "seedbank", "node_modules", "target"];
-  def ftw-homes(name) {
+  // [library homes, homes that run on import]
+  def ftw-homes-of(name) {
    let homes = record_get(FTW-HELD, "homes");
    let held = ftw-get(homes, name);
    if !nothing?(held) then held else ftw-homes-hold(homes, name, ftw-homes-scan(name));
   }
+  def ftw-homes(name) = ftw-homes-of(name)[0];
+  def ftw-import-homes(name) = ftw-homes-of(name)[1];
   def ftw-homes-hold(homes, name, found) {
    record_set(homes, name, found);
    found;
   }
-  def ftw-homes-scan(name) = ftw-name-like?(name) ? append(ftw-homes-with(".bml", ["def " ++ name ++ "("]), ftw-homes-with(".fk", ["def " ++ name ++ "(", "(defn " ++ name ++ " "])) : [];
+  def ftw-homes-scan(name) {
+   let found = ftw-name-like?(name) ? append(ftw-homes-with(".bml", ["def " ++ name ++ "("]), ftw-homes-with(".fk", ["def " ++ name ++ "(", "(defn " ++ name ++ " "])) : [];
+   [map(f => f[0], filter(f => f[1] == 0, found)), map(f => f[0], filter(f => f[1] == 1, found))];
+  }
   def ftw-name-like?(name) = (len(name) > 0) && (str_find(name, " ", 0) < 0) && (str_find(name, "(", 0) < 0) && (str_find(name, "$", 0) < 0);
   def ftw-homes-with(suffix, needles) = foldl((acc, root) => append(acc, ftw-homes-under(root, suffix, needles)), [], ftw-home-roots());
+  // [home, 1 when the unit runs on import] per unit under root that defines the name
   def ftw-homes-under(root, suffix, needles) {
    let rows = fs_is_dir(root[0]) == 1 ? (source_inventory(root[0], suffix, ftw-home-skips()) ?? []) : [];
-   map(r => root[1] ++ r[0], filter(r => ftw-library?(r[0]) && ftw-defines?(root[0] ++ "/" ++ r[0], needles), rows));
+   let defining = filter(r => !ftw-run-door?(r[0]) && ftw-defines?(root[0] ++ "/" ++ r[0], needles), rows);
+   map(r => [root[1] ++ r[0], ftw-runs-on-import?(read_file(root[0] ++ "/" ++ r[0]) ?? "") ? 1 : 0], defining);
   }
   def ftw-defines?(path, needles) {
    let text = read_file(path) ?? "";
    any?(n => str_find(text, n, 0) >= 0, needles);
   }
-  def ftw-library?(rel) = !(ftw-ends?(rel, "-run.bml") || ftw-ends?(rel, "-run.fk"));
+  def ftw-run-door?(rel) = ftw-ends?(rel, "-run.bml") || ftw-ends?(rel, "-run.fk");
+  // A section that ends in a top-level call runs it on import: its last statement before the
+  // closing brace is a call (a name, then its arguments), and the line before it closes a statement.
+  def ftw-runs-on-import?(text) {
+   let lines = filter(l => len(l) > 0, map(l => trim(l), split-on(text, byte_to_str(10))));
+   let n = len(lines);
+   (n >= 3) && (lines[n - 1] == "}") && ftw-call-line?(lines[n - 2]) && (ftw-ends?(lines[n - 3], "}") || ftw-ends?(lines[n - 3], ";"));
+  }
+  def ftw-call-line?(line) {
+   let open = str_find(line, "(", 0);
+   (open > 0) && ftw-ends?(line, ");") && ftw-name-head?(substring(line, 0, open)) && !ftw-starts?(line, "def ") && !ftw-starts?(line, "let ");
+  }
+  def ftw-name-head?(text) = (str_byte_at(text, 0) >= 97) && (str_byte_at(text, 0) <= 122) && all?(i => ftw-name-byte?(str_byte_at(text, i)), range(0, len(text)));
+  def ftw-name-byte?(b) = ((b >= 97) && (b <= 122)) || ((b >= 48) && (b <= 57)) || (b == 45) || (b == 95) || (b == 63) || (b == 33);
   // the carriers a door unit imports: the workspace alone for plain values; the verbs when a
   // walker function crosses (form-token-verbs.bml wraps it as a native function there)
   def ftw-lean-carrier() = "form-stdlib/bml/form-token-workspace.bml";
   def ftw-fkwu() = fs_exists(host_cwd() ++ "/fkwu") == 1 ? host_cwd() ++ "/fkwu" : "fkwu";
-  def ftw-doors-dir() = temp_dir() ++ "/form-token-doors";
+  // the checkout's own door units: a unit's identity is its path, so each checkout compiles its own
+  def ftw-doors-dir() = host_cwd() ++ "/.hearth/form-tokens/doors";
   def ftw-hash(text) = ftw-hash-at(text, 0, len(text), 5381, 7);
   def ftw-hash-at(text, i, n, a, b) = i >= n ? a.str() ++ "-" ++ b.str() : ftw-hash-at(text, i + 1, n, ((a * 33) + str_byte_at(text, i)) % 2147483647, ((b * 131) + str_byte_at(text, i)) % 1000000007);
   def ftw-arg-list(arity) = str-join-with(map(i => "vals[" ++ i.str() ++ "]", range(0, arity)), ", ");
-  def ftw-serve-name(carrier) = carrier == ftw-lean-carrier() ? "ftw-serve" : "ftv-serve";
-  def ftw-unit-text(home, name, arity, carrier) = "import " ++ carrier ++ ";\nimport " ++ home ++ ";\nsection [form.bml] {\n " ++ ftw-serve-name(carrier) ++ "(vals => " ++ name ++ "(" ++ ftw-arg-list(arity) ++ "));\n}\n";
-  // [1, value] when the body's own run answered, [0, reason] when none of the name's homes did
-  def ftw-body-call(name, vals, carrier) {
+  def ftw-serve-name(carrier) = carrier == ftw-lean-carrier() ? "ftw-serve-at" : "ftv-serve-at";
+  def ftw-unit-text(home, name, arity, carrier, dir) = "import " ++ carrier ++ ";\nimport " ++ home ++ ";\nsection [form.bml] {\n " ++ ftw-serve-name(carrier) ++ "(\"" ++ dir ++ "\", vals => " ++ name ++ "(" ++ ftw-arg-list(arity) ++ "));\n}\n";
+  // the units a checkout keeps compiled: the newest ftw-doors-kept() (an image weighs 1 to 23 MB);
+  // an older one leaves with its image, its lowering and its symbols when a new one is written
+  def ftw-doors-kept() = 8;
+  def ftw-door-unit(dir, text) {
+   let unit = dir ++ "/door-" ++ ftw-hash(text) ++ ".bml";
+   let wrote = (read_file(unit) ?? "") == text ? 0 : ftw-door-write(dir, unit, text);
+   unit;
+  }
+  def ftw-door-write(dir, unit, text) {
+   let units = map(n => dir ++ "/" ++ n, filter(n => ftw-starts?(n, "door-") && ftw-ends?(n, ".bml"), fs_list(dir) ?? []));
+   let pruned = ftw-doors-prune(units, len(units) - (ftw-doors-kept() - 1));
+   write_file(unit, text);
+  }
+  def ftw-doors-prune(units, extra) = (extra <= 0) || nil?(units) ? 0 : ftw-doors-prune-oldest(units, extra, foldl((old, u) => file_mtime(u) < file_mtime(old) ? u : old, units[0], units));
+  def ftw-doors-prune-oldest(units, extra, oldest) {
+   let gone = map(s => file_size(oldest ++ s) >= 0 ? fs_remove(oldest ++ s) : 0, ["", ".fkb", ".lowfk", ".sym"]);
+   ftw-doors-prune(filter(u => u != oldest, units), extra - 1);
+  }
+  // [1, value, printed] when the body's own run answered; [0, reason, printed] when none of the
+  // name's homes did by the deadline (host_monotonic_ms)
+  def ftw-body-call(name, vals, carrier, deadline) {
    let homes = ftw-homes(name);
-   if nil?(homes) then [0, "unknown-name:" ++ name] else ftw-body-call-homes(name, vals, carrier, homes);
+   if !nil?(homes) then ftw-body-call-homes(name, vals, carrier, homes, deadline)
+   else if !nil?(ftw-import-homes(name)) then [0, "runs-on-import:" ++ name, ""]
+   else [0, "unknown-name:" ++ name, ""];
   }
   // each home is an alternative, offered in order; one whose run does not answer fails, and the
   // next is tried; when none answers, the last reason stands
-  def ftw-body-call-homes(name, vals, carrier, homes) {
-   let last = record_new(0, "why", "body-call-unanswered:" ++ name);
-   let alts = map(home => args => ftw-body-alt(name, vals, carrier, home, last), homes);
+  def ftw-body-call-homes(name, vals, carrier, homes, deadline) {
+   let last = record_new(0, "why", "body-call-unanswered:" ++ name, "printed", "");
+   let alts = map(home => args => ftw-body-alt(name, vals, carrier, home, deadline, last), homes);
    let picked = try oac-choice(alts, 0) catch nothing();
-   nothing?(picked) ? [0, record_get(last, "why")] : picked;
+   nothing?(picked) ? [0, record_get(last, "why"), record_get(last, "printed")] : picked;
   }
-  def ftw-body-alt(name, vals, carrier, home, last) {
-   let answer = ftw-body-run(name, vals, carrier, home);
-   answer[0] == 1 ? answer : ftw-body-failed(last, answer[1] ++ ":" ++ name);
+  def ftw-body-alt(name, vals, carrier, home, deadline, last) {
+   let answer = host_monotonic_ms() >= deadline ? [0, "body-call-timeout", ""] : ftw-body-run(name, vals, carrier, home, deadline);
+   answer[0] == 1 ? answer : ftw-body-failed(last, answer[1] ++ ":" ++ name, answer[2]);
   }
-  def ftw-body-failed(last, why) {
+  def ftw-body-failed(last, why, printed) {
    record_set(last, "why", why);
+   record_set(last, "printed", printed);
    fail;
   }
-  def ftw-body-run(name, vals, carrier, home) {
+  def ftw-body-run(name, vals, carrier, home, deadline) {
    let dir = ftw-doors-dir();
-   let made = fs_is_dir(dir) == 1 ? 0 : fs_mkdir(dir);
-   let text = ftw-unit-text(home, name, len(vals), carrier);
-   let unit = dir ++ "/door-" ++ ftw-hash(text) ++ ".bml";
-   let wrote = (read_file(unit) ?? "") == text ? 0 : write_file(unit, text);
-   let stem = dir ++ "/call-" ++ host_pid().str() ++ "-" ++ ftw-next-seq().str();
-   let sent = write_form_binary(stem ++ ".in.fkb", ftw-encode(vals));
-   let said = host-exec("'" ++ ftw-fkwu() ++ "' '" ++ unit ++ "' 2>/dev/null", stem ++ ".in.fkb\n" ++ stem ++ ".out.fkb\n") ?? "";
-   let answer = ftw-said(said, stem ++ ".out.fkb");
-   let gone = [fs_remove(stem ++ ".in.fkb"), file_size(stem ++ ".out.fkb") >= 0 ? fs_remove(stem ++ ".out.fkb") : 0];
+   let made = ftw-mkdirs(dir);
+   let unit = ftw-door-unit(dir, ftw-unit-text(home, name, len(vals), carrier, dir));
+   let said = dir ++ "/said-" ++ host_pid().str() ++ "-" ++ ftw-next-seq().str() ++ ".txt";
+   let pid = host_spawn_at([ftw-fkwu(), unit], ["/dev/null", said, "/dev/null"]);
+   let answer = nothing?(pid) || (pid <= 0) ? [0, "body-call-unborn", ""] : ftw-body-child(dir, pid, vals, said, deadline);
+   let gone = file_size(said) >= 0 ? fs_remove(said) : 0;
    answer;
   }
-  def ftw-said(said, out) {
-   if str_find(said, "ftw-served ok", 0) >= 0 then [1, ftw-decode(read_form_binary(out))]
-   else if str_find(said, "ftw-served stopped", 0) >= 0 then [0, "body-call-stopped"]
-   else [0, "body-call-unanswered"];
+  def ftw-ticket(dir, pid) = dir ++ "/call-" ++ pid.str();
+  def ftw-body-child(dir, pid, vals, said, deadline) {
+   let stem = ftw-ticket(dir, pid);
+   let held = record_set(FTW-HELD, "child", pid);
+   let sent = write_form_binary(stem ++ ".in.part", ftw-encode(vals));
+   let moved = fs_rename(stem ++ ".in.part", stem ++ ".in.fkb");
+   let ended = ftw-wait-child(pid, deadline);
+   let status = ended == 1 ? host_wait(pid) : ftw-stop-child(pid);
+   let answer = ended == 1 ? ftw-said(stem ++ ".out.fkb") : [0, "body-call-timeout"];
+   let printed = ended == 1 ? ftw-all-but-last-line(read_file(said) ?? "") : (read_file(said) ?? "");
+   let gone = map(s => file_size(stem ++ s) >= 0 ? fs_remove(stem ++ s) : 0, [".in.part", ".in.fkb", ".out.part", ".out.fkb"]);
+   [answer[0], answer[1], printed];
   }
-  // the child's side: the two transfer paths on stdin, the arguments decoded (and wrapped), the
-  // call, the answer encoded, and the last line saying which
-  def ftw-serve(f) = ftw-serve-with(f, vals => vals);
-  def ftw-serve-with(f, wrap) {
-   let argsPath = trim(read_line() ?? "");
-   let outPath = trim(read_line() ?? "");
-   let vals = wrap(ftw-decode(read_form_binary(argsPath)));
-   let held = try [f(vals)] catch nothing();
-   if nothing?(held) then print_str("ftw-served stopped") else ftw-served(outPath, held[0]);
+  // the pid the last body call ran in
+  def ftw-last-child() = ftw-get(FTW-HELD, "child") ?? 0;
+  // 1 once the child is gone (an ended child that is not yet reaped reads gone), 0 at the deadline
+  def ftw-wait-child(pid, deadline) = host_alive(pid) != 1 ? 1 : host_monotonic_ms() >= deadline ? 0 : ftw-wait-child-again(pid, deadline);
+  def ftw-wait-child-again(pid, deadline) {
+   host_sleep_ms(ftw-poll-ms(deadline));
+   ftw-wait-child(pid, deadline);
   }
-  def ftw-served(outPath, value) {
-   write_form_binary(outPath, ftw-encode(value));
-   print_str("ftw-served ok");
+  def ftw-poll-ms(deadline) = (deadline - host_monotonic_ms()) < 20 ? 2 : 10;
+  // stopped and reaped: TERM, two seconds, then KILL
+  def ftw-stop-child(pid) {
+   let asked = host_kill(pid);
+   let ended = ftw-wait-child(pid, host_monotonic_ms() + 2000);
+   let forced = ended == 1 ? 0 : host_wait(host_spawn_quiet(["/bin/kill", "-KILL", pid.str()]));
+   host_wait(pid);
+  }
+  def ftw-said(out) {
+   let back = file_size(out) > 0 ? (try ftw-decode(read_form_binary(out)) catch nothing()) : nothing();
+   if nothing?(back) then [0, "body-call-unanswered"]
+   else if value_kind(back) != "list" then [0, "body-call-unanswered"]
+   else if back[0] == 1 then [1, back[1]]
+   else [0, back[1]];
+  }
+  // the child prints its section's value last; what it printed before that is the call's
+  def ftw-all-but-last-line(text) {
+   let body = ftw-ends?(text, byte_to_str(10)) ? substring(text, 0, len(text) - 1) : text;
+   let cut = ftw-last-newline(body, 0, -1);
+   cut < 0 ? "" : substring(body, 0, cut);
+  }
+  def ftw-last-newline(text, from, last) {
+   let at = str_find(text, byte_to_str(10), from);
+   at < 0 ? last : ftw-last-newline(text, at + 1, at);
+  }
+  // The child's side: the ticket named after its own pid (the parent writes it just after the
+  // birth), the arguments decoded (and wrapped), the call, and the answer encoded.
+  def ftw-ticket-patience-ms() = 10000;
+  def ftw-serve-at(dir, f) = ftw-serve-with(dir, f, vals => vals);
+  def ftw-serve-with(dir, f, wrap) {
+   let stem = ftw-ticket(dir, host_pid());
+   let came = ftw-wait-file(stem ++ ".in.fkb", host_monotonic_ms() + ftw-ticket-patience-ms());
+   let held = came == 1 ? (try [f(wrap(ftw-decode(read_form_binary(stem ++ ".in.fkb"))))] catch nothing()) : nothing();
+   let answer = came != 1 ? [0, "body-call-unasked"] : nothing?(held) ? [0, "body-call-stopped"] : [1, held[0]];
+   let wrote = write_form_binary(stem ++ ".out.part", ftw-encode(answer));
+   let moved = fs_rename(stem ++ ".out.part", stem ++ ".out.fkb");
+   0;
+  }
+  def ftw-wait-file(path, deadline) = file_size(path) > 0 ? 1 : host_monotonic_ms() >= deadline ? 0 : ftw-wait-file-again(path, deadline);
+  def ftw-wait-file-again(path, deadline) {
+   host_sleep_ms(2);
+   ftw-wait-file(path, deadline);
   }
  }
  0;

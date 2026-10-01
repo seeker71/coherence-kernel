@@ -16,9 +16,12 @@
 // observation follows at the end of the quantum the control closed in. Both commit the pending
 // ID once and prefill the observation into the same KV stream (fcms-inline-bml-observation-ids).
 //
-// The lanes share one workspace (form-token-workspace.bml) under .hearth/form-tokens/workspace:
-// FTG-DEFAULT is this process's request, its own lineage until a lane that knows its conversation
-// or task binds it (ftg-bind). Each control is numbered before it runs, and the crossing ledger
+// The lanes share one workspace (form-token-workspace.bml) under the checkout's
+// .hearth/form-tokens/workspace. FTG-DEFAULT is this process's request. Its lineage is the lane's
+// own, one per lane and checkout (code, voice, reasoning; lanes for a process that names none), so
+// every earlier request of the lane is reachable today; a lane that knows its conversation or task
+// binds it (ftg-bind: the coding lane binds its managed task as the request, so a resumed task
+// reads its own request scope). Each control is numbered before it runs, and the crossing ledger
 // keeps, per crossing, whether the control touched what an earlier control or an earlier request
 // made (touched); ftg-ledger-reading reads the ledger back for the census.
 import form-stdlib/bml/form-token-verbs.bml;
@@ -26,7 +29,7 @@ import form-stdlib/form-cli-recipe-exec-session.fk;
 import form-stdlib/json.fk;
 import form-stdlib/hearth.bml;
 section [form.bml] {
- let FTG-DEFAULT = ftv-session-in(ftw-open(ftw-hearth-root(), "", ""));
+ let FTG-DEFAULT = ftv-session-in(ftw-open(ftw-hearth-root(), "lanes", ""));
  class FormTokenGrammar {
   def ftg-verbs() = ["recipe-birth", "recipe-exec", "recipe-import", "choice", "eval", "knowledge-query", "node-get", "node-make", "node-select"];
   def ftg-stream-verbs() = append(ftg-verbs(), ["nodeid-knowledge-query"]);
@@ -47,12 +50,35 @@ section [form.bml] {
   }
   def ftg-session() = FTG-DEFAULT;
   def ftg-session-fresh() = ftv-session();
+  // a lane's workspace under root: the lane is the lineage, this process a fresh request in it
+  def ftg-lane-ws(root, lane) = ftw-open(root, lane, "");
+  // The process's session in the lane's lineage. Unless a lane bound it, the first lane to ask
+  // names the lineage; the request stays the process's own.
+  def ftg-lane-session(lane) {
+   let ws = ftv-ws(FTG-DEFAULT);
+   if (record_get(FTG-DEFAULT, "bound") == 1) || (ftw-lineage(ws) == ftw-safe(lane)) then 0 else record_set(FTG-DEFAULT, "ws", ftw-open(ftw-root(ws), lane, ftw-request(ws)));
+   FTG-DEFAULT;
+  }
   // a lane that knows its request's lineage (a conversation, a task) binds the lanes' workspace to
   // it; "" for the request starts a fresh one in that lineage
   def ftg-bind(lineage, request) {
    record_set(FTG-DEFAULT, "ws", ftw-open(ftw-hearth-root(), lineage, request));
+   record_set(FTG-DEFAULT, "bound", 1);
    FTG-DEFAULT;
   }
+  // binds once per (lineage, request): a lane asks at every quantum, and only a change rebinds
+  def ftg-bind-once(lineage, request) {
+   let key = lineage ++ "|" ++ request;
+   if record_get(FTG-DEFAULT, "bound-key") == key then FTG-DEFAULT else ftg-bind-keyed(lineage, request, key);
+  }
+  def ftg-bind-keyed(lineage, request, key) {
+   let bound = ftg-bind(lineage, request);
+   record_set(FTG-DEFAULT, "bound-key", key);
+   FTG-DEFAULT;
+  }
+  // one control in a lane's workspace under root, as the lane runs it: plain values in and out, so
+  // another process reaches it as a body function
+  def ftg-lane-observe(root, lane, verb, payload) = ftg-observe-with(ftv-session-in(ftg-lane-ws(root, lane)), verb, payload);
 
   // ── running a verb ───────────────────────────────────────────────────
   def ftg-observe(verb, payload) = ftg-observe-with(FTG-DEFAULT, verb, payload);
@@ -195,8 +221,9 @@ section [form.bml] {
   // generation a reply of its own. A sampled session keeps its own walk.
   def ftg-generate(session, budget) = !nil?(fcsam-owner(session)) ? fcms-generate(session, budget) : ftg-generate-with(ftg-pulsing(ftg-intercept-with(512, ftg-next-reply())), session, budget, "voice");
   def ftg-next-reply() {
-   ftw-next-reply(ftv-ws(FTG-DEFAULT));
-   FTG-DEFAULT;
+   let session = ftg-lane-session("voice");
+   ftw-next-reply(ftv-ws(session));
+   session;
   }
   def ftg-generate-with(icpt, session, budget, lane) {
    let moved = frxs-run-protocol-with-injector(session, budget, 0, icpt, ftg-feed, frxs-observe-none, (s, text) => ftg-inject(icpt, s, text));
@@ -246,7 +273,8 @@ section [form.bml] {
   // resumed live. The stdout line names verbs and byte counts, never the control bytes, so a
   // reader of the lane's transcript counts the voice's controls once, in the reply.
   def ftg-quantum-answer(session, stops, items, nextf) {
-   let answered = map(c => len(c[3]) > 0 ? [c[3], ""] : ftg-observe-touched(FTG-DEFAULT, c[0], ftg-json-unescape(c[1])), items);
+   let lane = ftg-lane-session("code");
+   let answered = map(c => len(c[3]) > 0 ? [c[3], ""] : ftg-observe-touched(lane, c[0], ftg-json-unescape(c[1])), items);
    let results = map(a => a[0], answered);
    let ids = fcms-inline-bml-observation-ids(session, ftv-join(map(r => ftg-observation(r), results), byte_to_str(10)));
    let room = nothing?(ids) ? 0 : (fcms-pos(session) + len(ids) + 2) < fcms-maxpos(session);
@@ -358,9 +386,9 @@ section [form.bml] {
 
   // ── teaching ─────────────────────────────────────────────────────────
   def ftg-bml-teaching() = " BML names can contain hyphens. Space infix and conditional operators, as in c * c - e * e and flag ? yes : no. unknown-name identifies a missing binding; inspect spelling and operator spacing before changing numerical inputs. Discover reusable native libraries with <|form:recipe-import|>?<|/form:recipe-import|>, then import an observed name with the same verb. Callable exports supply recipe names and executable addresses. A node-get address identifies data, not a callable; node(\"actual-coordinate-from-enquiry\") reads that data. Its functions are callable as recipe(\"LIBRARY.EXPORT\")(input). In recipe-exec, input is one BML expression; group several arguments in one list [first,second,third]. Replace catalog example names with the enquiry's actual values and coordinates. Reuse an available verified library before constructing another implementation; its output can pass directly into another call.";
-  def ftg-teaching() = "Form answers controls inside your stream. Write <|form:VERB|>PAYLOAD<|/form:VERB|> and stop there: before your next token Form adds <|form:observation|>RESULT<|/form:observation|>, where RESULT is value=...; recipe=@...; node=@...; or nothing=reason;. A nothing is evidence, not an answer. Whatever you make stays in your workspace: every later control, and every later request of this conversation, reaches it by name or by its @address. eval runs BML with the body's whole environment, its functions, its doors (files, processes, the clock, nodes) and every name you made: <|form:eval|>17 * 23 + 4<|/form:eval|>, <|form:eval|>let xs = [1,2,3]; xs |> map(x => x * x) |> sum<|/form:eval|>, then <|form:eval|>len(xs) + it<|/form:eval|>, where it is your last value. A let or def is a name; begin a payload with global: to share it beyond this conversation or local: to keep it to this reply. knowledge-query reads this body's sources: <|form:knowledge-query|>microthought codec<|/form:knowledge-query|>. node-make interns a node from a category and children, named or not: <|form:node-make|>p = pair;3,4<|/form:node-make|>. node-get reads one: <|form:node-get|>p<|/form:node-get|> answers value=[kind, value, [children]];, and <|form:node-get|>@p.l.t.i;100..200<|/form:node-get|> reads a window of a large one. node-select answers the first candidate n whose predicate holds: <|form:node-select|>kids(n)[0] > 3;p,@p.l.t.i<|/form:node-select|>. recipe-birth makes a recipe, also from a BML function: <|form:recipe-birth|>sq = bml;x => x * x + 1<|/form:recipe-birth|>, run with <|form:recipe-exec|>sq;input=5;carrier=auto<|/form:recipe-exec|> or as sq(5) in eval; <|form:choice|>@p.l.t.i,sq;input=5;carrier=auto<|/form:choice|> runs the first that answers a value. A value too large to show answers node=@address with a summary; reach its parts with node-get. Copy addresses exactly from observations. One control at a time; prefer Form's observation to a guess, then answer the enquiry." + ftg-bml-teaching();
+  def ftg-teaching() = "Form answers controls inside your stream. Write <|form:VERB|>PAYLOAD<|/form:VERB|> and stop there: before your next token Form adds <|form:observation|>RESULT<|/form:observation|>, where RESULT is value=...; recipe=@...; node=@...; or nothing=reason;. A nothing is evidence, not an answer. Whatever you make stays in your workspace: every later control, and every later request of this lane, reaches it by name or by its @address. eval runs BML with the body's whole environment, its functions, its doors (files, processes, the clock, nodes) and every name you made: <|form:eval|>17 * 23 + 4<|/form:eval|>, <|form:eval|>let xs = [1,2,3]; xs |> map(x => x * x) |> sum<|/form:eval|>, then <|form:eval|>len(xs) + it<|/form:eval|>, where it is your last value. A let or def is a name; begin a payload with global: to share it beyond this lane or local: to keep it to this reply. knowledge-query reads this body's sources: <|form:knowledge-query|>microthought codec<|/form:knowledge-query|>. node-make interns a node from a category and children, named or not: <|form:node-make|>p = pair;3,4<|/form:node-make|>. node-get reads one: <|form:node-get|>p<|/form:node-get|> answers value=[kind, value, [children]];, and <|form:node-get|>@p.l.t.i;100..200<|/form:node-get|> reads a window of a large one. node-select answers the first candidate n whose predicate holds: <|form:node-select|>kids(n)[0] > 3;p,@p.l.t.i<|/form:node-select|>. recipe-birth makes a recipe, also from a BML function: <|form:recipe-birth|>sq = bml;x => x * x + 1<|/form:recipe-birth|>, run with <|form:recipe-exec|>sq;input=5;carrier=auto<|/form:recipe-exec|> or as sq(5) in eval; <|form:choice|>@p.l.t.i,sq;input=5;carrier=auto<|/form:choice|> runs the first that answers a value. A value too large to show answers node=@address with a summary; reach its parts with node-get. A name you made comes before any word of the body's, so choose names you mean to keep using. What print writes is the observation's first words. A control answers within a minute: past it the walk answers nothing=eval-stopped:deadline and a body function still running is stopped (nothing=body-call-timeout:NAME). carrier=metal runs only while reasoning; elsewhere it answers nothing=carrier-unavailable. field_reset resets the field every live kernel shares, so while another kernel lives it answers [field-shared, pids] and changes nothing. Copy addresses exactly from observations. One control at a time; prefer Form's observation to a guess, then answer the enquiry." + ftg-bml-teaching();
   // The coding lane's reply is one JSON object; its controls live inside a JSON string value.
-  def ftg-coding-teaching() = "Form also answers controls you write inside a JSON string value of your reply. Close the control and pause: within your next few tokens Form adds the observation, so <|form:eval|>17 * 23 + 4<|/form:eval|> is followed by <|form:observation|>value=395;<|/form:observation|>, which you read but never copy into the JSON. Keep a control short; one too long to read back whole answers nothing. Verbs: eval (BML with the body's whole environment: its functions, files, processes and every name an earlier control or turn made), knowledge-query (this body's sources), node-make, node-get, node-select, recipe-birth, recipe-exec and choice. A let or def in eval, or NAME = before a node-make or recipe-birth payload, names what you make; later controls and later turns use it by name or by its @address, and global: before a payload shares it beyond this task. Escape quotes inside a payload as JSON requires. Ask Form for arithmetic, lookups and file reads instead of guessing; the reply stays one JSON object." + ftg-bml-teaching();
+  def ftg-coding-teaching() = "Form also answers controls you write inside a JSON string value of your reply. Close the control and pause: within your next few tokens Form adds the observation, so <|form:eval|>17 * 23 + 4<|/form:eval|> is followed by <|form:observation|>value=395;<|/form:observation|>, which you read but never copy into the JSON. Keep a control short; one too long to read back whole answers nothing. Verbs: eval (BML with the body's whole environment: its functions, files, processes and every name an earlier control or turn made), knowledge-query (this body's sources), node-make, node-get, node-select, recipe-birth, recipe-exec and choice. A let or def in eval, or NAME = before a node-make or recipe-birth payload, names what you make; later controls, later turns and later coding tasks use it by name or by its @address (your names come before the body's own words), and global: before a payload shares it beyond the coding lane. What print writes comes back in the observation. A control answers within a minute, or answers nothing=eval-stopped:deadline. Escape quotes inside a payload as JSON requires. Ask Form for arithmetic, lookups and file reads instead of guessing; the reply stays one JSON object." + ftg-bml-teaching();
  }
  0;
 }
