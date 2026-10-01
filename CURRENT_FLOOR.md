@@ -37,7 +37,7 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
 ## Body-wide witnesses
 
 ```text
-./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (17 rows; a row whose ground did not
+./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (18 rows; a row whose ground did not
                                             move since origin/main sits out and leaves the fold; 2026-10-01 on the gates
                                             branch: 6 of 17 rows ran, pass=63 full=63 refused=0)
 ./fkwu gate/structural-gate-run.fk       -> structural-gate-v3 [8, 0, 1, 0, 0, 0, 7] then 1
@@ -262,6 +262,7 @@ what they mean ([`docs/str-find-one-meaning.md`](docs/str-find-one-meaning.md)).
 
 ```text
 substring-one-meaning-band 4095 · str-find-one-meaning-band 8191     (both drift-gate rows)
+kernel-laws-band 2147483647     laws 1-9 of docs/kernel-interface.md, four-way (a drift-gate row)
 core-substring-equivalence-band 2047 · substring-native-band 511
 line-grammar-search-equivalence-band 8191 · core-str-find-equivalence-band 2047
 meaning-codes-table-band 255

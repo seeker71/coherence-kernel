@@ -66,7 +66,8 @@ Go, Rust and TS (law 10).
 `form/form-stdlib/tests/kernel-laws-band.fk` asks laws 1–9 of all four arms, each row
 under `attempt`, prelude-free; its head names every bit. Read with
 `cd form && FORM_VALIDATE_SIBLINGS=1 ./validate.sh form-stdlib/tests/kernel-laws-band.fk`
-(2026-10-01: `2147483647` on fkwu, Go, Rust and TS):
+(2026-10-01: `2147483647` on fkwu, Go, Rust and TS). The drift gates' `kernel-laws` row
+(`gate/drift-gates.bml`) reads fkwu's answer at every landing that moves a kernel:
 
 | law | stands | band bits |
 |---|---|---|
