@@ -2,6 +2,9 @@
 // in the same KV stream. Form observations remain distinct from model output.
 // The owner retains recipes, RAM pipelines and one scalar buffer until release.
 // Control bytes are model output; returned values and lifecycle events are Form evidence.
+// Affine recipes born here run on Metal; every other verb of form-token-grammar.bml (eval,
+// knowledge-query, node-*, BML recipes) runs in the owner's token session, in the same stream.
+import form-stdlib/bml/form-token-grammar.bml;
 import form-stdlib/form-recipe-birth-token.fk;
 import form-stdlib/form-cli-recipe-exec-session.fk;
 import form-stdlib/bml/metal-jit.bml;
@@ -14,7 +17,7 @@ import form-stdlib/form-nodeid-knowledge-routed-query.fk;
 section [form.bml] {
  class FormCliMicrothought {
   def fmc-open(reserve) = fmc-open-with-knowledge(reserve,fknsc-public-context(fhcs-default-root(),fknq-default-artifact(),1,fknq-max-frame-bytes()),fknqr-public-strict-executor);
-  def fmc-open-with-knowledge(reserve,context,executor) = record_new(0,"recipes",record_new(0),"pipelines",mj-thought-table(),"addresses",[],"buffer",0,"pending",0,"uncertain",0,"answer-reserve",0,"yield-session",nothing(),"frames",[],"injections",[],"window","","reserve",reserve,"crossings",0,"executions",0,"admissions",0,"reuses",0,"knowledge-context",context,"knowledge-executor",executor,"knowledge-lookups",0,"released",0,"last",["nothing","unrequested",0,0,""],"events",[],"trace",("microthought:" + host_pid().str()));
+  def fmc-open-with-knowledge(reserve,context,executor) = record_new(0,"recipes",record_new(0),"pipelines",mj-thought-table(),"addresses",[],"buffer",0,"pending",0,"uncertain",0,"answer-reserve",0,"yield-session",nothing(),"frames",[],"injections",[],"window","","reserve",reserve,"crossings",0,"executions",0,"admissions",0,"reuses",0,"knowledge-context",context,"knowledge-executor",executor,"knowledge-lookups",0,"tokens",ftv-session(),"released",0,"last",["nothing","unrequested",0,0,""],"events",[],"trace",("microthought:" + host_pid().str()));
   def fmc-get(owner,key) = record_get(owner,key);
   def fmc-set(owner,key,value) = record_set(owner,key,value);
   def fmc-add(owner,key) = fmc-set(owner,key,fmc-get(owner,key) + 1);
@@ -108,20 +111,35 @@ section [form.bml] {
     };
    };
   }
-  def fmc-action(owner,kind,frame,payload) = fmc-get(owner,"released") ? fmc-result(owner,"nothing","microthought-owner-released",0,0,"") : kind == "recipe-birth" ? fmc-birth(owner,frame) : kind == "nodeid-knowledge-query" ? fmc-knowledge(owner,frame) : (kind == "recipe-exec" || kind == "choice") ? fmc-request(owner,kind,payload) : fmc-result(owner,"nothing","unknown-form-control",0,0,"");
-  // Keep only an opening-prefix suffix until a control starts. One complete
-  // control per model chunk prevents an observation from splitting a model ID.
+  def fmc-action(owner,kind,frame,payload) = fmc-get(owner,"released") ? fmc-result(owner,"nothing","microthought-owner-released",0,0,"") : kind == "nodeid-knowledge-query" ? fmc-knowledge(owner,frame) : !fmc-metal?(owner,kind,payload) ? fmc-token(owner,kind,payload) : kind == "recipe-birth" ? fmc-birth(owner,frame) : fmc-request(owner,kind,payload);
+  // Metal carries affine births and requests whose every address this owner admitted.
+  def fmc-metal?(owner,kind,payload) {
+   let split = str_find(payload,";",0);
+   let addresses = split < 1 ? [] : split-on(substring(payload,0,split),",");
+   if kind == "recipe-birth" then ftv-starts?(payload,"affine-i32;")
+   else if (kind == "recipe-exec") || (kind == "choice") then (len(addresses) > 0) && all?(a => record_has(fmc-get(owner,"recipes"),a),addresses)
+   else 0;
+  }
+  def fmc-token(owner,kind,payload) {
+   let before = fbro-snapshot();
+   let text = ftg-observe-with(fmc-get(owner,"tokens"),kind,payload);
+   let status = ftg-result-kind(text);
+   let result = fmc-record(owner,[status == "nothing" ? "nothing" : "observed",ftg-result-body(text),0,status == "nothing" ? 0 : 1,"",text]);
+   fmc-stage(owner,"form-token",before,len(payload),result[0]);
+   result;
+  }
+  // The shared stream window (ftg-window) keeps an opening-prefix suffix until a control
+  // starts. One complete control per model chunk keeps an observation from splitting a model ID.
   def fmc-feed(owner,cursor,chunk) {
-   let prefix = "<|form:"; let joined = ((String) fmc-get(owner,"window") + chunk); let at = str_find(joined,prefix,0);
-   let window = at < 0 ? substring(joined,len(joined) >= len(prefix) ? len(joined) - len(prefix) + 1 : 0,len(joined)) : substring(joined,at,len(joined));
-   let kindEnd = str_find(window,"|>",len(prefix)); let kind = kindEnd < 0 ? "" : substring(window,len(prefix),kindEnd);
-   let close = ("<|/form:" + (kind + "|>")); let end = kindEnd < 0 ? -1 : str_find(window,close,kindEnd + 2);
-   let tooLong = len(window) > fmc-get(owner,"reserve");
-   fmc-set(owner,"window",(end >= 0 || tooLong) ? "" : window);
-   let observed = at < 0 || (end < 0 && !tooLong) ? "" : {
-    let result = tooLong ? fmc-result(owner,"nothing","control-exceeds-observation-reserve",0,0,"") : str_find(substring(window,end + len(close),len(window)),prefix,0) >= 0 ? fmc-result(owner,"nothing","multiple-controls-in-one-model-id",0,0,"") : fmc-action(owner,kind,substring(window,0,end + len(close)),substring(window,kindEnd + 2,end));
-    if (end >= 0) then fmc-set(owner,"frames",cons(substring(window,0,end + len(close)),fmc-get(owner,"frames"))) else 0;
-    fmc-add(owner,"crossings"); let text = fmc-render(result); fmc-set(owner,"injections",cons(text,fmc-get(owner,"injections"))); text;
+   let w = ftg-window(fmc-get(owner,"window"),chunk,fmc-get(owner,"reserve"));
+   fmc-set(owner,"window",w[0]);
+   let observed = w[1] == "held" ? "" : {
+    let result = w[1] == "too-long" ? fmc-result(owner,"nothing","control-exceeds-observation-reserve",0,0,"") : w[1] == "multiple" ? fmc-result(owner,"nothing","multiple-controls-in-one-model-id",0,0,"") : fmc-action(owner,w[2],w[3],w[4]);
+    if (len(w[3]) > 0) then fmc-set(owner,"frames",cons(w[3],fmc-get(owner,"frames"))) else 0;
+    fmc-add(owner,"crossings");
+    let text = fmc-render(result);
+    fmc-set(owner,"injections",cons(text,fmc-get(owner,"injections")));
+    text;
    };
    [cursor,chunk,observed];
   }
@@ -141,7 +159,7 @@ section [form.bml] {
    fmc-set(owner,"released",complete); fmc-stage(owner,"release",before,len(results),complete ? "released" : "incomplete"); complete;
   }
   def fmc-inject(owner,session,text) {
-   let ids = fcms-inline-bml-observation-ids(session,text);
+   let ids = fcms-inline-bml-observation-ids(session,ftg-envelope(text));
    if nothing?(ids) then fcms-refuse(session,"microthought-model-codec-unavailable") else if fmc-get(owner,"uncertain") then fcms-refuse(session,"microthought-execution-unresolved") else if (fcms-pos(session) + len(ids) + fmc-get(owner,"answer-reserve") >= fcms-maxpos(session)) then {
     fmc-set(owner,"yield-session",session);
     fcms-refuse(session,"microthought-observation-reserve-exhausted");
@@ -170,14 +188,15 @@ section [form.bml] {
   }
   def fmc-final-task(owner) {
    let observed = reverse(fmc-get(owner,"events")) |> filter(row => row[0] == "value") |> map(row => json-node-int(row[2]));
-   ("Complete the original enquiry in its requested format using the attributed source observations already supplied in this context. Observed successful Form values, in execution order: " + (json-emit(json-node-array(observed)) + (". Last operation status: " + (json-emit(fmc-event-evidence(take(5,fmc-get(owner,"last")))) + ". Keep runtime feedback separate from the final answer; include protocol text only if the person requested it."))));
+   let answered = reverse(fmc-get(owner,"events")) |> filter(row => row[0] == "observed") |> map(row => json-node-string(row[5]));
+   ("Complete the original enquiry in its requested format using the attributed source observations already supplied in this context. Observed successful Form values, in execution order: " + (json-emit(json-node-array(observed)) + (". Other Form observations, in order: " + (json-emit(json-node-array(answered)) + (". Last operation status: " + (json-emit(fmc-event-evidence(take(5,fmc-get(owner,"last")))) + ". Keep runtime feedback separate from the final answer; include protocol text only if the person requested it."))))));
   }
   def fmc-event-evidence(row) = json-node-object(append([oh-s("status",row[0]),oh-s("reason",row[1]),oh-n("value",row[2]),oh-n("present",row[3]),oh-s("recipe",row[4])],len(row) > 5 ? [oh-s("source_observation",row[5])] : []));
   def fmc-evidence(owner) {
    let events = json-node-array(map(fmc-event-evidence,reverse(fmc-get(owner,"events"))));
-   json-node-object([oh-n("crossings",fmc-get(owner,"crossings")),oh-n("executions",fmc-get(owner,"executions")),oh-n("knowledge_lookups",fmc-get(owner,"knowledge-lookups")),oh-n("jit_admissions",fmc-get(owner,"admissions")),oh-n("jit_reuses",fmc-get(owner,"reuses")),oh-n("release_ok",fmc-get(owner,"released")),oh-s("carrier","ram-metal-jit"),oh-s("recipe_scope","affine-signed-i32"),json-node-pair("observations",events)]);
+   json-node-object([oh-n("crossings",fmc-get(owner,"crossings")),oh-n("executions",fmc-get(owner,"executions")),oh-n("knowledge_lookups",fmc-get(owner,"knowledge-lookups")),oh-n("jit_admissions",fmc-get(owner,"admissions")),oh-n("jit_reuses",fmc-get(owner,"reuses")),oh-n("release_ok",fmc-get(owner,"released")),oh-s("carrier","ram-metal-jit"),oh-s("recipe_scope","affine-signed-i32"),oh-n("form_token_calls",record_get(fmc-get(owner,"tokens"),"calls")),oh-n("form_token_refusals",record_get(fmc-get(owner,"tokens"),"refusals")),json-node-pair("controls",json-node-array(map(json-node-string,reverse(fmc-get(owner,"frames"))))),json-node-pair("observations",events)]);
   }
-  def fmc-teaching() = "During reasoning prefer Form's current source evidence over guessing. Write <|form:nodeid-knowledge-query|>concept=exact-key<|/form:nodeid-knowledge-query|> for an existing concept route. Form returns an attributed current-source observation; absence, ambiguity and stale evidence remain distinct and are not answers. You may also ask Form to compute signed-i32 affine recipes. Write <|form:recipe-birth|>affine-i32;mul=3;add=7<|/form:recipe-birth|> with your coefficients. Form returns recipe=@address; after birth and value=number; after execution. Wait for that runtime observation. Then write <|form:recipe-exec|>@address;input=5;carrier=metal<|/form:recipe-exec|> using that exact address. To try alternatives in order, use <|form:choice|>@first,@second;input=5;carrier=metal<|/form:choice|>. Form executes until a value is observed; zero and one are values. Close each control and wait for its observation before requesting another. Reuse returned recipes or birth another as needed. Form observations supply computed evidence; a request alone supplies none. End with the answer to the enquiry.";
+  def fmc-teaching() = "During reasoning prefer Form's current source evidence over guessing. Write <|form:nodeid-knowledge-query|>concept=exact-key<|/form:nodeid-knowledge-query|> for an existing concept route. Form returns an attributed current-source observation; absence, ambiguity and stale evidence remain distinct and are not answers. " + (ftg-teaching() + " Affine signed-i32 recipes also run on Metal: <|form:recipe-birth|>affine-i32;mul=3;add=7<|/form:recipe-birth|>, then <|form:recipe-exec|>@address;input=5;carrier=metal<|/form:recipe-exec|> with the exact returned address; <|form:choice|>@first,@second;input=5;carrier=metal<|/form:choice|> tries addresses in order until a value is observed; zero and one are values. A request alone supplies no evidence. End with the answer to the enquiry.");
  }
  0;
 }
