@@ -8207,17 +8207,66 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
     free(resp);
     return ans;
 }
+/* Correctly rounded binary64 sqrt with no libm: the integer root of the
+ * mantissa scaled to 106 bits rounds to nearest exactly as IEEE fsqrt does
+ * (the JIT's fsqrt and the siblings' sqrt), so walker and JIT agree. */
 static double fk_sqrt_d(double x) {
-    if (x <= 0.0) {
-        return 0.0;
+    unsigned long long b, m, q;
+    unsigned __int128 rem, root, one;
+    long long e;
+    double out;
+    if (x != x || x == 0.0) {
+        return x;
     }
-    double g = x >= 1.0 ? x : 1.0;
-    long long i = 0;
-    while (i < 32) {
-        g = 0.5 * (g + x / g);
-        i = i + 1;
+    if (x < 0.0) {
+        double z = 0.0;
+        return z / z;
     }
-    return g;
+    if (x > 1.7976931348623157e308) {
+        return x;
+    }
+    memcpy(&b, &x, 8);
+    e = (long long)((b >> 52) & 0x7ff);
+    m = b & 0xfffffffffffffULL;
+    if (e == 0) {
+        e = 1;
+        while (!(m & 0x10000000000000ULL)) {
+            m <<= 1;
+            e = e - 1;
+        }
+    } else {
+        m |= 0x10000000000000ULL;
+    }
+    e = e - 1075;
+    if (e & 1) {
+        m <<= 1;
+        e = e - 1;
+    }
+    rem = (unsigned __int128)m << 52;
+    e = e - 52;
+    root = 0;
+    one = (unsigned __int128)1 << 104;
+    while (one != 0) {
+        if (rem >= root + one) {
+            rem = rem - (root + one);
+            root = (root >> 1) + one;
+        } else {
+            root = root >> 1;
+        }
+        one = one >> 2;
+    }
+    q = (unsigned long long)root;
+    if (rem > root) {
+        q = q + 1;
+    }
+    e = e / 2;
+    if (q == (1ULL << 53)) {
+        q = q >> 1;
+        e = e + 1;
+    }
+    b = ((unsigned long long)(e + 1075) << 52) | (q & 0xfffffffffffffULL);
+    memcpy(&out, &b, 8);
+    return out;
 }
 static double fk_exp_d(double x) {
     double ln2 = 0.6931471805599453;
@@ -12652,7 +12701,7 @@ static long long fk_walk(long long i, long long fp) {
          * IEEE comparison, and only numbers have an order -- an odd word that
          * is not a float refuses by name, as the Go/Rust/TS lanes do. */
         if ((a5 | b5) & 1) {
-            if (!((fk_isf(a5) || (a5 & 1) == 0) && (fk_isf(b5) || (b5 & 1) == 0))) { fk_die(FK_ORDER_REFUSAL); }
+            if (!((fk_isf(a5) || (a5 & 1) == 0) && (fk_isf(b5) || (b5 & 1) == 0))) { fk_stop(FK_ORDER_REFUSAL); }
             return (fk_num(a5) <= fk_num(b5)) ? 2 : 0;
         }
         return (a5 <= b5) ? 2 : 0;
@@ -13254,7 +13303,7 @@ static long long fk_walk(long long i, long long fp) {
             bl = fk_walk(fk_node[i][2], fp);
         }
         if ((al | bl) & 1) {
-            if (!((fk_isf(al) || (al & 1) == 0) && (fk_isf(bl) || (bl & 1) == 0))) { fk_die(FK_ORDER_REFUSAL); }
+            if (!((fk_isf(al) || (al & 1) == 0) && (fk_isf(bl) || (bl & 1) == 0))) { fk_stop(FK_ORDER_REFUSAL); }
             return (fk_num(al) < fk_num(bl)) ? 2 : 0;
         }
         return (al < bl) ? 2 : 0;
@@ -15897,6 +15946,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if ((a10 | b10) & 1) { fk_arith_check(a10, b10);
             return fk_fbox(fk_num(a10) / fk_num(b10));
         }
+        if ((b10 >> 1) == 0) { fk_stop("fkwu: div: integer division by zero"); }
         return ((a10 >> 1) / (b10 >> 1)) << 1;
     }
     if (t == 11) {
@@ -15907,6 +15957,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             double y11 = fk_num(b11);
             return fk_fbox(x11 - y11 * (double)((long long)(x11 / y11)));
         }
+        if ((b11 >> 1) == 0) { fk_stop("fkwu: mod: integer division by zero"); }
         return ((a11 >> 1) % (b11 >> 1)) << 1;
     }
     if (t == 15) {
@@ -17608,12 +17659,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_inv_walk(r202, r202, s202, fk_walk(fk_node[i][3], fp));
         return fk_inv_rows;
     }
-    if (t == 200) {
-        return 0;
-    }
-    if (t == 202) {
-        return 1;
-    }
     if (t == 120) {
         return fk_socket_listen_native(fk_walk(fk_node[i][1], fp) >> 1) << 1;
     }
@@ -18049,7 +18094,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
         }
-        return 0;
+        return fk_nothing;
     }
     if (t == 147) {
         /* node_at: the census atom. The value-node table is the body's own
