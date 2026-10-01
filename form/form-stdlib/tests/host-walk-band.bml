@@ -1,10 +1,10 @@
 ; host-walk-band.bml — the walk's window, its lock, its turns, its sync and its publish window, with no model;
 ; git runs only over a scratch origin under temp_dir.
 ;
-; Verdict 2097151 = 1 options | 2 claims | 4 refuses | 8 takes-gone | 16 takes-reused | 32 one-taker | 64 unowned
+; Verdict 4194303 = 1 options | 2 claims | 4 refuses | 8 takes-gone | 16 takes-reused | 32 one-taker | 64 unowned
 ;   | 128 releases | 256 floor | 512 unmeasured | 1024 room | 2048 turn-lines | 4096 turns | 8192 elsewhere
 ;   | 16384 yield | 32768 sync | 65536 reviewed | 131072 idle | 262144 stale-mark | 524288 publish
-;   | 1048576 heal
+;   | 1048576 heal | 2097152 sync-rows
 ;
 ; A turn reads {"turns":24,"deadline_ms":<the window's end on host_monotonic_ms>} on stdin. One walk holds a
 ; checkout's lock: a fresh claim holds it, a living holder refuses a later start and is named, a gone holder (a
@@ -22,7 +22,9 @@
 ; this checkout's own, and the yield neither waits when none walks nor when the window holds no option. The sync,
 ; over a scratch origin whose ledgers merge as a union: a dirty ledger row with main moved follows main and keeps
 ; the row; a real conflict names its file, holds, and leaves the tree as it was; a rebase refused by an untracked
-; file reads dirty, never conflict. The publish window restores the checkpoint when its run answers and when it
+; file reads dirty, never conflict; a dirty source while main changed the same line reads dirty, and the tree keeps
+; its bytes with no stash entry and no unmerged path. Rows that would not merge as a union (a row in a ledger main
+; deleted, a row in a ledger git reads as binary) read dirty the same way. The publish window restores the checkpoint when its run answers and when it
 ; stops, clears its marker, refuses a moved tree and a marker this pid already holds; a killed publish's marker heals
 ; its own bytes back, keeps a later writer's bytes and its marker, and an unreadable marker goes.
 ;
@@ -170,6 +172,8 @@ section [form.bml] {
   def hwb-main-moves() = "cd main && printf '{\"r\":1}\\n' >> receipts/ledger.jsonl && git commit -q -am main1 && git push -q origin main && cd ../walk && printf '{\"r\":\"walk\"}\\n' >> receipts/ledger.jsonl && echo ready";
   def hwb-both-edit() = "cd walk && git commit -q -am row && printf 'one\\nWALK\\n' > src.txt && git commit -q -am walk-src && cd ../main && printf 'one\\nMAIN\\n' > src.txt && git commit -q -am main-src && git push -q origin main && cd ../walk && printf '{\"r\":\"walk-2\"}\\n' >> receipts/ledger.jsonl && echo ready";
   def hwb-untracked() = "cd walk && git checkout -q -- receipts/ledger.jsonl && git reset -q --hard origin/main && cd ../main && printf 'new\\n' > newfile.txt && git add newfile.txt && git commit -q -m main-new && git push -q origin main && cd ../walk && printf 'mine\\n' > newfile.txt && echo ready";
+  // a source the walk left dirty while main changed the same line: set aside, it would come back conflicted
+  def hwb-dirty-source() = "cd walk && rm -f newfile.txt && git checkout -q -- receipts/ledger.jsonl && git reset -q --hard origin/main && printf 'one\\nWALKDIRTY\\n' > src.txt && printf '{\"r\":\"walk-3\"}\\n' >> receipts/ledger.jsonl && cd ../main && git pull -q origin main && printf 'one\\nMAIN2\\n' > src.txt && git commit -q -am main-src2 && git push -q origin main && echo ready";
   def hwb-sync(ctx) {
    let root = hwb-root(ctx) ++ "/sync";
    let made = host_dir_mkdir(root);
@@ -185,7 +189,33 @@ section [form.bml] {
    let row = hwb-has?(read_file(walk ++ "/receipts/ledger.jsonl") ?? "", "walk-2");
    let placed = hwb-sh(root, hwb-untracked());
    let refused = hwb-sh(walk, hw-sync-command("walk"));
-   hwb-bit(((String) ready == "ready") && ((String) moved == "ready") && hwb-has?(dirty, "sync=0") && (!hw-conflicted?(dirty)) && ((String) ledger == "{\"r\":0}\n{\"r\":1}\n{\"r\":\"walk\"}\n") && ((String) crossed == "ready") && hwb-has?(conflict, "conflict: src.txt") && hwb-has?(conflict, "sync=1") && hw-conflicted?(conflict) && ((String) kept == "one\nWALK\n") && ((Comparable) rebasing == 0) && row && ((String) placed == "ready") && hwb-has?(refused, "dirty: ?? newfile.txt") && hwb-has?(refused, "sync=1") && (!hw-conflicted?(refused)));
+   let soiled = hwb-sh(root, hwb-dirty-source());
+   let seam = hwb-sh(walk, hw-sync-command("walk"));
+   let stashed = hwb-sh(walk, "git stash list | wc -l | tr -d ' '");
+   let unmerged = hwb-sh(walk, "git diff --name-only --diff-filter=U | wc -l | tr -d ' '");
+   let source = read_file(walk ++ "/src.txt") ?? "";
+   let rows = hwb-has?(read_file(walk ++ "/receipts/ledger.jsonl") ?? "", "walk-3");
+   hwb-bit(((String) ready == "ready") && ((String) moved == "ready") && hwb-has?(dirty, "sync=0") && (!hw-conflicted?(dirty)) && ((String) ledger == "{\"r\":0}\n{\"r\":1}\n{\"r\":\"walk\"}\n") && ((String) crossed == "ready") && hwb-has?(conflict, "conflict: src.txt") && hwb-has?(conflict, "sync=1") && hw-conflicted?(conflict) && ((String) kept == "one\nWALK\n") && ((Comparable) rebasing == 0) && row && ((String) placed == "ready") && hwb-has?(refused, "dirty: ?? newfile.txt") && hwb-has?(refused, "sync=1") && (!hw-conflicted?(refused)) && ((String) soiled == "ready") && hwb-has?(seam, "dirty: M src.txt") && hwb-has?(seam, "sync=1") && ((String) stashed == "0") && ((String) unmerged == "0") && ((String) source == "one\nWALKDIRTY\n") && rows);
+  }
+  // ── rows that would not merge as a union stay in the tree: a ledger main deleted, a ledger git reads as binary ──
+  def hwb-rows-setup() = "git init -q --bare origin.git && git clone -q origin.git main && cd main && git config user.email band@host && git config user.name band && mkdir receipts && printf 'receipts/*.jsonl merge=union\\n' > .gitattributes && printf '{\"g\":0}\\n' > receipts/gone.jsonl && printf '{\"b\":0}\\n\\000\\n' > receipts/bin.jsonl && git add -A && git commit -q -m base && git branch -M main && git push -q origin main && cd .. && git clone -q origin.git walk && cd walk && git config user.email walk@host && git config user.name walk && git checkout -q -b walk && git push -q origin walk && echo ready";
+  def hwb-rows-gone() = "cd walk && printf '{\"g\":\"walk\"}\\n' >> receipts/gone.jsonl && cd ../main && git rm -q receipts/gone.jsonl && git commit -q -m main-gone && git push -q origin main && echo ready";
+  def hwb-rows-binary() = "cd walk && git checkout -q -- receipts/gone.jsonl && git reset -q --hard origin/main && printf '{\"b\":\"walk\"}\\n' >> receipts/bin.jsonl && cd ../main && printf '{\"b\":\"main\"}\\n' >> receipts/bin.jsonl && git commit -q -am main-bin && git push -q origin main && echo ready";
+  // what a sync left behind: stash entries, then unmerged paths ("0 0" when it left neither)
+  def hwb-left() = "echo $(git stash list | wc -l) $(git diff --name-only --diff-filter=U | wc -l)";
+  def hwb-sync-rows(ctx) {
+   let root = hwb-root(ctx) ++ "/sync-rows";
+   let made = host_dir_mkdir(root);
+   let walk = root ++ "/walk";
+   let ready = hwb-sh(root, hwb-rows-setup());
+   let deleted = hwb-sh(root, hwb-rows-gone());
+   let gone = hwb-sh(walk, hw-sync-command("walk"));
+   let goneLeft = hwb-sh(walk, hwb-left());
+   let goneRow = hwb-has?(read_file(walk ++ "/receipts/gone.jsonl") ?? "", "walk");
+   let appended = hwb-sh(root, hwb-rows-binary());
+   let binary = hwb-sh(walk, hw-sync-command("walk"));
+   let binaryLeft = hwb-sh(walk, hwb-left());
+   hwb-bit(((String) ready == "ready") && ((String) deleted == "ready") && hwb-has?(gone, "dirty: M receipts/gone.jsonl") && hwb-has?(gone, "sync=1") && (!hw-conflicted?(gone)) && ((String) goneLeft == "0 0") && goneRow && ((String) appended == "ready") && hwb-has?(binary, "dirty: M receipts/bin.jsonl") && hwb-has?(binary, "sync=1") && ((String) binaryLeft == "0 0"));
   }
   // ── only a turn that ran a gap is reviewed ──
   def hwb-review-mark(mark) {
@@ -280,7 +310,7 @@ section [form.bml] {
  }
  let ctx = hwb-fresh();
  nothing?(ctx) ? form_error("host-walk band needs a fresh directory under temp_dir") : 0;
- let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield], ["sync", 32768, 1, hwb-sync], ["reviewed", 65536, 1, hwb-reviewed], ["idle", 131072, 1, hwb-idle], ["stale-mark", 262144, 1, hwb-stale-mark], ["publish", 524288, 1, hwb-publish], ["heal", 1048576, 1, hwb-heal]]);
+ let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield], ["sync", 32768, 1, hwb-sync], ["reviewed", 65536, 1, hwb-reviewed], ["idle", 131072, 1, hwb-idle], ["stale-mark", 262144, 1, hwb-stale-mark], ["publish", 524288, 1, hwb-publish], ["heal", 1048576, 1, hwb-heal], ["sync-rows", 2097152, 1, hwb-sync-rows]]);
  host_dir_rmdir(hwb-root(ctx));
  verdict;
 }
