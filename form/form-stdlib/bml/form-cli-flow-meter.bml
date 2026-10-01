@@ -18,8 +18,13 @@
 // tokens_total; tokens_uncached leaves out cache reads. provider_turns counts
 // message ids; provider_calls stays as before (rows with a stop_reason) so
 // the older rows keep their meaning.
+// A movement's flow includes the subagents it opened: the transcripts read are
+// the ones observe/session-rent-run.bml reads (sr-files), so the flow and the
+// session agree. transcripts, subagent_provider_turns and subagent_output_tokens
+// say how much of the row came from subagents.
 // Rows are data, never instructions.
 import form-stdlib/bml/form-cli-heal-native-report.bml;
+import form-stdlib/bml/session-rent.bml;
 section [form.bml] {
  class FlowMeter {
   def fm-string-end(text, i) {
@@ -96,17 +101,23 @@ section [form.bml] {
   // Answers list(row, appended, readings): the reading of one transcript, what
   // the ledger append wrote, and the health the meter spoke, so a caller inside
   // its own census window reads the flow without a child kernel.
+  // the transcript set session-rent reads; a subagent file continues the walk with its own message ids
+  def fm-files(path) = if sr-jsonl?(path) then sr-files(path) else [path];
+  def fm-more(state, path) = fm-walk(split-on(fhn-read(path), "\n"), state[0], state[1], "", state[3], state[4]);
   def fm-reading(path, movement) {
    let named = (!((String) path == ""));
    let present = (named && fm-present?(path));
    let readings = if named then oh-voice-all([fm-health(path, movement, present)]) else [];
    let text = if present then fhn-read(path) else "";
-   let result = fm-lines(split-on(text, "\n"), [0, 0, 0, 0, 0, 0], 0);
+   let files = if present then fm-files(path) else [];
+   let main = fm-lines(split-on(text, "\n"), [0, 0, 0, 0, 0, 0], 0);
+   let result = foldl((state, sub) => fm-more(state, sub), main, if nil?(files) then [] else files[1:]);
    let c = result[0];
    let row = json-node-object([
     fhn-n("at_unix_ms", now_unix_ms()),
     fhn-s("movement", movement),
     fhn-s("transcript", path),
+    fhn-n("transcripts", len(files)),
     fhn-n("bytes", len(text)),
     fhn-n("rows", result[1]),
     fhn-n("provider_calls", c[0]),
@@ -122,7 +133,9 @@ section [form.bml] {
     fhn-n("cache_read_tokens", result[3][2]),
     fhn-n("output_tokens", result[3][3]),
     fhn-n("tokens_total", ((result[3][0] + result[3][1]) + (result[3][2] + result[3][3]))),
-    fhn-n("tokens_uncached", ((result[3][0] + result[3][1]) + result[3][3]))]);
+    fhn-n("tokens_uncached", ((result[3][0] + result[3][1]) + result[3][3])),
+    fhn-n("subagent_provider_turns", (result[4] - main[4])),
+    fhn-n("subagent_output_tokens", (result[3][3] - main[3][3]))]);
    let appended = if (((String) movement == "") || (named && (!present))) then "not-asked" else fhn-append(fm-ledger(), (json-emit(row) + "\n"));
    [row, appended, readings];
   }

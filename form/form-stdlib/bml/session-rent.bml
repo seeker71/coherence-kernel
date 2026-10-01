@@ -1,10 +1,15 @@
 // session-rent.bml — one rented session's spend beside the local tokens that served it.
 // Rented: every billed request in the session's transcript and its subagents' transcripts,
-// read once per requestId (input, cache write, cache read, output). Local: the voice's drafts
-// for the same session (receipts/draft-ledger.jsonl, keyed by session id). The share is the
-// walk's measure: local / (local + rented output), in parts per million.
+// read once per requestId (input, cache write, cache read, output). sr-files names that set; the
+// turn meter and the flow meter read the same set, so the three agree on one session.
+// Local: the voice's drafts for the same session (receipts/draft-ledger.jsonl, keyed by session id)
+// and the coding lane's IDs from the native-turn rows that session began (their "session" field),
+// read where turns run: this checkout and the walk checkout launchd turns in (sr-turn-rows).
+// The share is the walk's measure: local generated / (local generated + rented output), in parts
+// per million; injected IDs are reported beside it.
 import form-stdlib/form-cli-movement.bml;
 import form-stdlib/form-fs.fk;
+import form-stdlib/bml/form-cli-guide-packet.bml;
 section [form.bml] {
     def sr-fields() = ["input_tokens","cache_creation_input_tokens","cache_read_input_tokens","output_tokens"];
     def sr-field(text, usageAt, rowEnd, name) {
@@ -58,17 +63,55 @@ section [form.bml] {
         let base = substring(main, fs-last-slash(main) + 1, len(main));
         substring(base, 0, len(base) - 6);
     }
-    def sr-row(main, draftLedger) {
+    // ── where turns run: this checkout, and the walk checkout the day-turn schedule names ──
+    def sr-turn-ledger() = "receipts/native-turn-ledger.jsonl";
+    def sr-day-turn-plist() = "docs/launchd/earth.hati.day-turn.plist";
+    def sr-plist-dir(text) {
+        let key = str_find(text, "<key>WorkingDirectory</key>", 0);
+        let open = key < 0 ? 0 - 1 : str_find(text, "<string>", key);
+        let close = open < 0 ? 0 - 1 : str_find(text, "</string>", open);
+        close < 0 ? "" : substring(text, open + 8, close);
+    }
+    def sr-walk-dir() = file_size(sr-day-turn-plist()) < 1 ? "" : sr-plist-dir(read_file(sr-day-turn-plist()));
+    // "" is this checkout; the walk checkout joins when it is another directory that exists
+    def sr-checkouts() {
+        let walk = sr-walk-dir();
+        (String) walk == "" || (String) walk == host_cwd() || (Comparable) fs_is_dir(walk) != 1 ? [""] : ["", walk];
+    }
+    def sr-ledger-at(dir) = (String) dir == "" ? sr-turn-ledger() : dir ++ "/" ++ sr-turn-ledger();
+    def sr-tagged(dir, row) = json-node-object(append(json-object-pairs(row), [fhn-s("checkout", dir)]));
+    def sr-key(row) = fcgp-show(fcgp-num(row, "at_unix_ms")) ++ "|" ++ fcgp-str(row, "gap") ++ "|" ++ fcgp-show(fcgp-num(row, "option"));
+    def sr-at(row) = fcgp-num(row, "at_unix_ms") ?? 0;
+    def sr-merge(a, b) = nil?(a) ? b : nil?(b) ? a : sr-at(b[0]) < sr-at(a[0]) ? cons(b[0], sr-merge(a, b[1:])) : cons(a[0], sr-merge(a[1:], b));
+    def sr-fresh(held, rows) {
+        let keys = map(r => sr-key(r), held);
+        filter(r => !fcgp-member?(keys, sr-key(r)), rows);
+    }
+    // every checkout's rows, each tagged with its checkout, one row per at_unix_ms+gap+option, in time order;
+    // the first checkout named keeps a row both hold
+    def sr-turn-rows-from(dirs) = foldl((held, dir) => sr-merge(held, sr-fresh(held, map(row => sr-tagged(dir, row), fcgp-rows(sr-ledger-at(dir))))), [], dirs);
+    def sr-turn-rows() = sr-turn-rows-from(sr-checkouts());
+    // the coding lane's options a session began: [options, generated, injected]
+    def sr-lane(session, rows) {
+        let mine = fcgp-of(rows, "session", session);
+        [len(mine), fcgp-known(mine, "local_generated_ids"), fcgp-known(mine, "local_injected_ids")];
+    }
+    def sr-row-with(main, draftLedger, turnRows) {
         let files = sr-files(main);
         let rented = sr-rented(files, [0, 0, 0, 0, 0], rtm-seen-none());
         let session = sr-session(main);
         let local = sr-local(session, file_size(draftLedger) < 1 ? [] : split-on(read_file(draftLedger), "\n"), 0, 0);
-        let share = (local[1] + rented[3]) == 0 ? 0 : (local[1] * 1000000) / (local[1] + rented[3]);
+        let lane = sr-lane(session, turnRows);
+        let generated = local[1] + lane[1];
+        let share = (generated + rented[3]) == 0 ? 0 : (generated * 1000000) / (generated + rented[3]);
         str-join(["{\"at_unix_ms\":", int_to_str(now_unix_ms()), ",\"session\":\"", session,
             "\",\"rented\":{\"requests\":", int_to_str(rented[4]), ",\"input\":", int_to_str(rented[0]),
             ",\"cache_write\":", int_to_str(rented[1]), ",\"cache_read\":", int_to_str(rented[2]),
             ",\"output\":", int_to_str(rented[3]), ",\"transcripts\":", int_to_str(len(files)),
             "},\"local\":{\"drafts\":", int_to_str(local[0]), ",\"generated\":", int_to_str(local[1]),
+            ",\"lane_options\":", int_to_str(lane[0]), ",\"lane_generated\":", int_to_str(lane[1]),
+            ",\"lane_injected\":", int_to_str(lane[2]),
             "},\"local_share_ppm\":", int_to_str(share), "}"]);
     }
+    def sr-row(main, draftLedger) = sr-row-with(main, draftLedger, sr-turn-rows());
 }

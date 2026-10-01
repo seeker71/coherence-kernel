@@ -10,7 +10,14 @@
 //
 // Cache reads are separated from the rest throughout: they are the cheapest
 // tokens and the largest number, and a total that hides them flatters nothing.
+//
+// A turn that fans out to subagents is not cheap: the reading reads the same
+// transcript set as observe/session-rent-run.bml (sr-files: the transcript and
+// every subagent transcript beside it). Each subagent transcript belongs to the
+// turn whose asking opened at or before its first timestamp, and its share is
+// shown apart in that turn's row, so the turns sum to the session's own reading.
 import form-stdlib/bml/form-cli-heal-native-report.bml;
+import form-stdlib/bml/session-rent.bml;
 section [form.bml] {
  class FormCliTurnMeter {
   def ftm-has?(line, key) = (str_find(line, key, 0) >= 0);
@@ -33,20 +40,25 @@ section [form.bml] {
   def ftm-message-id(line) { let at = str_find(line, "\"id\":\"msg_", 0); if ((at < 0) || (at > 600)) then "" else substring(line, (at + 6), ftm-string-end(line, (at + 6))); }
   def ftm-opening(line) = ftm-cut(ftm-content(line));
   def ftm-cut(text) = if (len(text) > 72) then (substring(text, 0, 72) + "…") else text;
-  // a turn: opening, provider messages, input, cache write, cache read, output
-  def ftm-open(opening) = [opening, 0, 0, 0, 0, 0];
+  // a turn: opening, provider messages, input, cache write, cache read, output, opened at, subagent
+  // messages, subagent output, subagent transcripts
+  def ftm-open-at(opening, at) = [opening, 0, 0, 0, 0, 0, at, 0, 0, 0];
+  def ftm-open(opening) = ftm-open-at(opening, 0);
   def ftm-add(turn, line) = [turn[0], (turn[1] + 1),
    (turn[2] + ftm-int-after(line, "\"input_tokens\":", str_find(line, "\"usage\":{", 0))),
    (turn[3] + ftm-int-after(line, "\"cache_creation_input_tokens\":", str_find(line, "\"usage\":{", 0))),
    (turn[4] + ftm-int-after(line, "\"cache_read_input_tokens\":", str_find(line, "\"usage\":{", 0))),
-   (turn[5] + ftm-int-after(line, "\"output_tokens\":", str_find(line, "\"usage\":{", 0)))];
+   (turn[5] + ftm-int-after(line, "\"output_tokens\":", str_find(line, "\"usage\":{", 0))), turn[6], turn[7], turn[8], turn[9]];
+  // a row's timestamp read as its digits: ISO times of one shape order as their digits do
+  def ftm-stamp(line) { let at = str_find(line, "\"timestamp\":\"", 0); if (at < 0) then 0 else ftm-stamp-digits(line, (at + 13), 0); }
+  def ftm-stamp-digits(s, i, acc) = if ((i >= len(s)) || ((Comparable) str_byte_at(s, i) == 34)) then acc else ftm-stamp-digits(s, (i + 1), if ftm-digit?(str_byte_at(s, i)) then ((acc * 10) + (str_byte_at(s, i) - 48)) else acc);
   def ftm-spoken?(turn) = (turn[1] > 0);
   def ftm-close(turns, turn) = if ftm-spoken?(turn) then cons(turn, turns) else turns;
   def ftm-walk(lines, turns, turn, lastId) {
    if nil?(lines) then ftm-close(turns, turn) else ftm-walk-line(lines[1:], turns, turn, lastId, lines[0]);
   }
   def ftm-walk-line(rest, turns, turn, lastId, line) {
-   if ftm-asking?(line) then ftm-walk(rest, ftm-close(turns, turn), ftm-open(ftm-opening(line)), lastId)
+   if ftm-asking?(line) then ftm-walk(rest, ftm-close(turns, turn), ftm-open-at(ftm-opening(line), ftm-stamp(line)), lastId)
    else if (!ftm-assistant?(line)) then ftm-walk(rest, turns, turn, lastId)
    else ftm-walk-fresh(rest, turns, turn, lastId, line, ftm-message-id(line));
   }
@@ -66,15 +78,46 @@ section [form.bml] {
    fhn-n("cache_read", turn[4]),
    fhn-n("output", turn[5]),
    fhn-n("uncached", ftm-uncached(turn)),
-   fhn-n("total", ftm-total(turn))]);
+   fhn-n("total", ftm-total(turn)),
+   fhn-n("subagent_messages", turn[7]),
+   fhn-n("subagent_output", turn[8]),
+   fhn-n("subagent_transcripts", turn[9])]);
   def ftm-rows(turns, i) = if nil?(turns) then [] else cons(ftm-row(turns[0], i), ftm-rows(turns[1:], (i + 1)));
   def ftm-sum(turns, f) = if nil?(turns) then 0 else (f(turns[0]) + ftm-sum(turns[1:], f));
+  // ── subagents: one transcript read as one share, credited to the turn that opened it ──
+  def ftm-first-stamp(lines) = if nil?(lines) then 0 else if (ftm-stamp(lines[0]) > 0) then ftm-stamp(lines[0]) else ftm-first-stamp(lines[1:]);
+  def ftm-sub-walk(lines, turn, lastId) {
+   if nil?(lines) then turn else ftm-sub-line(lines[1:], turn, lastId, lines[0]);
+  }
+  def ftm-sub-line(rest, turn, lastId, line) {
+   if (!ftm-assistant?(line)) then ftm-sub-walk(rest, turn, lastId) else ftm-sub-fresh(rest, turn, lastId, line, ftm-message-id(line));
+  }
+  def ftm-sub-fresh(rest, turn, lastId, line, id) {
+   if (((String) id == "") || ((String) id == lastId)) then ftm-sub-walk(rest, turn, lastId) else ftm-sub-walk(rest, ftm-add(turn, line), id);
+  }
+  def ftm-sub(path) {
+   let lines = split-on(if (file_size(path) > 0) then fhn-read(path) else "", "\n");
+   ftm-sub-walk(lines, ftm-open-at(path, ftm-first-stamp(lines)), "");
+  }
+  def ftm-credit(turn, sub) = [turn[0], (turn[1] + sub[1]), (turn[2] + sub[2]), (turn[3] + sub[3]), (turn[4] + sub[4]), (turn[5] + sub[5]), turn[6], (turn[7] + sub[1]), (turn[8] + sub[5]), (turn[9] + 1)];
+  // the last asking at or before the subagent's first timestamp; the first turn when none is
+  def ftm-owner(turns, at, i, best) = if nil?(turns) then best else ftm-owner(turns[1:], at, (i + 1), if (turns[0][6] <= at) then i else best);
+  def ftm-credit-at(turns, i, sub, k) = if nil?(turns) then [] else cons(if ((Comparable) k == i) then ftm-credit(turns[0], sub) else turns[0], ftm-credit-at(turns[1:], i, sub, (k + 1)));
+  def ftm-with-sub(turns, sub) = if nil?(turns) then [ftm-credit(ftm-open-at("(subagents before any asking)", 0), sub)] else ftm-credit-at(turns, ftm-owner(turns, sub[6], 0, 0), sub, 0);
+  // the transcript set session-rent reads: the transcript and every subagent transcript beside it
+  def ftm-files(path) = if (((String) path == "") || (file_size(path) < 1)) then [] else if sr-jsonl?(path) then sr-files(path) else [path];
+  def ftm-turns-of(files) = foldl((turns, sub) => ftm-with-sub(turns, ftm-sub(sub)), ftm-turns(if nil?(files) then "" else fhn-read(files[0])), if nil?(files) then [] else files[1:]);
+  def ftm-turns-at(path) = ftm-turns-of(ftm-files(path));
   def ftm-reading(path) {
-   let text = if (file_size(path) > 0) then fhn-read(path) else "";
-   let turns = ftm-turns(text);
+   let files = ftm-files(path);
+   let turns = ftm-turns-of(files);
    json-node-object([
     fhn-s("transcript", path),
+    fhn-n("transcripts", len(files)),
     fhn-n("turns", len(turns)),
+    fhn-n("provider_messages", ftm-sum(turns, t => t[1])),
+    fhn-n("output", ftm-sum(turns, t => t[5])),
+    fhn-n("subagent_output", ftm-sum(turns, t => t[8])),
     fhn-n("uncached", ftm-sum(turns, ftm-uncached)),
     fhn-n("total", ftm-sum(turns, ftm-total)),
     json-node-pair("per_turn", json-node-array(ftm-rows(turns, 1)))]);
