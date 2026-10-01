@@ -157,8 +157,9 @@ else
         cat "$W/compile.err" >&2; printf '%s\n' 'build: native recipe compilation refused' >&2; exit 1;
     }
     cat "$W/compile.err" >&2
-    regular_copy "${recipe%.fk}.fkb" "$candidate.fkb"
-    regular_copy "${recipe%.fk}.sym" "$candidate.sym"
+    # The recipe is section-bearing, so its image is <recipe>.fkb beside it (fk_run_bml's naming).
+    regular_copy "$recipe.fkb" "$candidate.fkb"
+    regular_copy "$recipe.sym" "$candidate.sym"
     (cd "$BODY" && "$W/source-fkwu" form/form-stdlib/bml/form-cli-source-closure.bml) < "$W/verify.request" > "$W/verify-after.log"
     form_cli_native_write_platform_attestation "$W/platform.attestation" "$W/bootstrap.attestation" "$slug" "$candidate" "$candidate.fkb" "$candidate.sym"
 fi
