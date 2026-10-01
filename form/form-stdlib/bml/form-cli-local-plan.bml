@@ -2,9 +2,9 @@
 // is queued.
 //
 // A request (id, title, problem, needs, where, files, evidence: the shape learn/local-requests.jsonl holds) is handed
-// to a local voice with the body's two honest bands and one queue row as its examples. The voice answers three
-// blocks: <plan> (a JSON object: id, band, full, writable, sources, definitions, checks), <goal> and <band> (the band
-// file's text). Form reads the plan and verifies it natively, cheapest first, before any queue row is written:
+// to a local voice with the body's two honest bands and one queue row as its examples. The voice answers <plan> (a
+// JSON object: id, band, full, writable, sources, definitions, checks), <goal>, <band> (the band file's text) and
+// <reference> (the definitions as it expects the lane to write them). Form reads the plan and verifies it natively, cheapest first, before any queue row is written:
 //   (6) shape: the plan reads; its id is a fresh kebab word; its band is a new file in form/form-stdlib/tests; full is
 //       2^k - 1 and the band's head declares "Verdict <full>" (validate.sh's own reading); the goal names each
 //       definition; a definition the file lacks carries its params; the band loads each writable file
@@ -16,6 +16,9 @@
 //       open
 //   (1)+(3) with each named definition a stub, once answering nothing and once its first argument, the band exits 0
 //       within the deadline, prints a number, and that number is below full: it reads any candidate and fails a stub
+//   (7) reachable, when the voice gives a <reference> block: with its definitions standing the band reads full, so
+//       the band, the goal and some candidate agree; the reference stays in the scratch tree, never with the lane,
+//       and a plan without one lands with reachable null
 // The scratch trees live under the caller's scratch directory: fkwu resolves a prelude in the "form/" root nearest
 // the band before the checkout's own form/, so a stubbed copy of a writable file stands there and the checkout is
 // never touched until the plan is verified.
@@ -111,7 +114,9 @@ section [form.bml] {
   def flp-exists?(path) = file_size(path) >= 0;
   def flp-is-dir?(path) = (Comparable) fs_is_dir(path) == 1;
   def flp-def-line?(line) = flp-starts?(trim(line), "def ") || flp-starts?(trim(line), "(defn ");
-  def flp-catalog(text) = flp-join(map(l => flp-head(trim(l), 160), filter(l => flp-def-line?(l), flp-lines(text))), "\n");
+  // each definition's signature: its line up to " = " or " {", 120 bytes at most, 4000 in all
+  def flp-signature(line) = flp-head(flp-cut-at(flp-cut-at(trim(line), " = "), " {"), 120);
+  def flp-catalog(text) = flp-head(flp-join(map(l => flp-signature(l), filter(l => flp-def-line?(l), flp-lines(text))), "\n"), 4000);
   def flp-file-block(req, path) = if (!flp-exists?(path)) then mc-cat(["The file ", path, " does not exist yet.\n\n"]) else if flp-is-dir?(path) then mc-cat([path, " is a directory.\n\n"]) else flp-file-text(path, fhn-read(path), flp-where-lines(req, path));
   // a file larger than the window shows its head, the lines the request's where names, and every definition's line
   def flp-file-text(path, text, at) = if (len(text) <= flp-doc-bytes()) then mc-cat(["The file ", path, " reads:\n", text, "\n\n"]) else mc-cat(["The file ", path, " (", len(text).str(), " bytes) begins:\n", flp-head(text, if nil?(at) then flp-doc-bytes() else 3000), "\n", mc-cat(map(n => flp-excerpt(text, n), at)), "... and its definitions, one line each:\n", flp-catalog(text), "\n\n"]);
@@ -133,11 +138,11 @@ section [form.bml] {
   def flp-queue-lines(path) = if (file_size(path) < 1) then [] else filter(l => (len(trim(l)) > 0), flp-lines(fhn-read(path)));
   def flp-queue-rows(path) = map(l => if fcgp-object-line?(trim(l)) then parse-json("queue-row", trim(l)) else json-node-object([]), flp-queue-lines(path));
   def flp-example-row(queue) = foldl((found, l) => if (str_find(l, "\"id\":\"sort-home\"", 0) >= 0) then mc-cat(["--- the queue row of sort-band.fk in learn/native-turn-queue.jsonl\n", l, "\n"]) else found, "", flp-queue-lines(queue));
-  def flp-intro() = "You are the planner of the coherence-kernel body, running on the body's own Mac. The request below names something the body needs. Write it as one band-first gap that the body's local coding lane can close: a band file that measures the change, and a goal that tells the lane exactly what to write. You do not write the implementation; the lane does, and the band decides when it is done. Form verifies your plan before it is queued: the band must run on fkwu and print a number, read below full today, and read below full when each definition you name is a stub.";
+  def flp-intro() = "You are the planner of the coherence-kernel body, running on the body's own Mac. The request below names something the body needs. Write it as one band-first gap that the body's local coding lane can close: a band file that measures the change, and a goal that tells the lane exactly what to write. You do not write the implementation; the lane does, and the band decides when it is done. Form verifies your plan before it is queued: the band must run on fkwu and print a number, read below full today, read below full when each definition you name is a stub, and read full when your own reference definitions stand.";
   def flp-form-words() = "A band is a Form file in form/form-stdlib/tests/ named <name>-band.fk. Its head is ';' comment lines: what it proves, then '; Verdict N', then '; preludes: form-stdlib/core.fk <each writable file, relative to form/>' (a file under form/ drops the form/ prefix; a .bml file is named the same way, and its definition def f(a, b) = ... is called from the band as (f a b)). Its body is one (do ...) whose last form adds one power of two per claim, so N, the full reading, is 1, 3, 7, 15, 31 or 63.\nRules for an honest band:\n- Every claim fails when a named definition is a stub answering (nothing) or answering its first argument: each claim asks for a value no stub gives.\n- The band ends with a number for any answer at all: read an answer's kind with (value_kind x) before taking its parts; never call head, tail or nth on a value you have not checked is a list long enough; never compare strings with lt. true and false are the ints 1 and 0, and (if c ...) stops when c is nothing, so compare an answer with (eq x true) or (eq x 1) rather than branching on it.\n- Each clause of the goal is checked by at least one claim. Keep it small: two to five claims over the definitions of one file.\nForm words: (do a b ... last) answers last; (let name value) binds inside a do; (defn name (args) body) defines; (if c then else) always has both arms; (and a b) (or a b) (not a); (eq a b) (lt a b) (le a b) (gt a b) (ge a b); (add a b) (sub a b) (mul a b) (div a b) (mod a b); (list ...) (cons x xs) (head xs) (tail xs) (nil? xs) (nth xs i) (len xs) (map f xs); (str_eq a b) (str_concat a b) (str_len s) (str_find s pat from) (substring s from to) (str_byte_at s i) (byte_to_str b); (value_kind x) answers \"int\", \"string\", \"list\", \"null\" (for nothing) and so on; (nothing) and (nothing? x). A negative number is (sub 0 n).";
-  def flp-reply-shape() = "Reply with exactly these three blocks and nothing else:\n<plan>\n{\"id\":\"<a new kebab id>\",\"band\":\"form/form-stdlib/tests/<name>-band.fk\",\"full\":<the sum of the claim bits>,\"writable\":[\"<the one file the lane edits>\"],\"sources\":[<read-only files the lane needs, or none>],\"definitions\":[{\"name\":\"<a definition the goal adds or changes>\",\"params\":[\"<its parameters>\"]}],\"checks\":[{\"tool\":\"rg\",\"arguments\":[\"-c\",\"-F\",\"(defn <name>\",\"<the writable file>\"],\"stdout\":\"1\\n\"}]}\n</plan>\n<goal>\nThe lane's goal: the file, then each definition with its parameters and exactly what it answers, in the words of the queue row above; then what the lane must leave as it is.\n</goal>\n<band>\nthe band file's whole text\n</band>\nChecks are read-only tool calls with their exact stdout. For a .fk file a definition is found by \"(defn <name>\"; for a .bml file by \"def <name>(\". A head -n K check over a file that exists must print exactly that file's first K lines today.";
+  def flp-reply-shape() = "Reply with exactly these four blocks and nothing else:\n<plan>\n{\"id\":\"<a new kebab id>\",\"band\":\"form/form-stdlib/tests/<name>-band.fk\",\"full\":<the sum of the claim bits>,\"writable\":[\"<the one file the lane edits>\"],\"sources\":[<read-only files the lane needs, or none>],\"definitions\":[{\"name\":\"<a definition the goal adds or changes>\",\"params\":[\"<its parameters>\"]}],\"checks\":[{\"tool\":\"rg\",\"arguments\":[\"-c\",\"-F\",\"(defn <name>\",\"<the writable file>\"],\"stdout\":\"1\\n\"}]}\n</plan>\n<goal>\nThe lane's goal: the file, then each definition with its parameters and exactly what it answers, in the words of the queue row above; then what the lane must leave as it is.\n</goal>\n<band>\nthe band file's whole text\n</band>\n<reference>\neach definition the plan names, written whole as you expect the lane to write it\n</reference>\nForm stands the <reference> definitions in a scratch copy of the file and checks that the band reads full with them, so the gap is reachable; the lane never sees them. Checks are read-only tool calls with their exact stdout. For a .fk file a definition is found by \"(defn <name>\"; for a .bml file by \"def <name>(\". A head -n K check over a file that exists must print exactly that file's first K lines today.";
   def flp-lens-text(lens) = if ((String) lens == "narrow") then "Lens: narrow. Earlier plans failed the same way twice. Make the gap smaller: the one definition the request needs most, two or three claims, each asking for a value no stub can give." else if ((String) lens == "edit") then "Lens: an existing definition. Read the request as an edit of a definition the file already has: name that definition, keep its parameters, and let each claim call it the way its callers do and fail on today's answer." else "Lens: band first. Write the band before the goal: one claim per clause of the change, then a goal that names each definition with its parameters and what it answers.";
-  def flp-feedback-block(feedback, prior) = if ((Comparable) len(trim(feedback)) == 0) then "" else mc-cat(["\nYour previous plan was refused by Form's verification. The exact failure:\n", feedback, "\n\nYour previous reply:\n", flp-head(prior, flp-prior-bytes()), "\n\nWrite the whole reply again with that failure removed. Keep what held.\n"]);
+  def flp-feedback-block(feedback, prior) = if ((Comparable) len(trim(feedback)) == 0) then "" else mc-cat(["\nYour previous plan was refused by Form's verification. The exact failure:\n", feedback, if ((Comparable) len(trim(prior)) == 0) then "" else mc-cat(["\n\nYour previous reply:\n", flp-head(prior, flp-prior-bytes())]), "\n\nWrite the whole reply again with that failure removed. Keep what held.\n"]);
   def flp-packet(req, lens, feedback, prior, queue) = mc-cat([flp-intro(), "\n\n", flp-form-words(), "\n\nTwo honest bands of the body, and the queue row the lane read for the first:\n", flp-example("form/form-stdlib/tests/sort-band.fk"), flp-example("form/form-stdlib/tests/closure-lines-band.fk"), flp-example-row(queue), "\n", flp-lens-text(lens), "\n\nThe request:\n", flp-request-text(req), "\n", flp-files-block(req), flp-feedback-block(feedback, prior), "\n", flp-reply-shape()]);
   // ── the reply: <plan>, <goal> and <band> ──
   def flp-unfence(s) {
@@ -152,8 +157,8 @@ section [form.bml] {
    let b = if (a < 0) then -1 else str_find(t, close, (a + len(open)));
    if ((a < 0) || (b < 0)) then nothing() else flp-unfence(substring(t, (a + len(open)), b));
   }
-  // a plan: [id, band, full, writable, sources, definitions, checks node, goal, band text]
-  def flp-plan(id, band, full, writable, sources, defs, checks, goal, text) = [id, band, full, writable, sources, defs, checks, goal, text];
+  // a plan: [id, band, full, writable, sources, definitions, checks node, goal, band text, reference text]
+  def flp-plan(id, band, full, writable, sources, defs, checks, goal, text, reference) = [id, band, full, writable, sources, defs, checks, goal, text, reference];
   def flp-p-id(p) = p[0];
   def flp-p-band(p) = p[1];
   def flp-p-full(p) = p[2];
@@ -163,6 +168,7 @@ section [form.bml] {
   def flp-p-checks(p) = p[6];
   def flp-p-goal(p) = p[7];
   def flp-p-text(p) = p[8];
+  def flp-p-reference(p) = p[9];
   // a definition: [name, params or nothing, file]
   def flp-default-file(writable) = if nil?(writable) then "" else writable[0];
   def flp-def-of(n, writable) = if fcgp-str-node?(n) then [json-string-value(n), nothing(), flp-default-file(writable)] else if (!fcgp-object?(n)) then ["", nothing(), ""] else [fcgp-str(n, "name"), if fcgp-present?(n, "params") then flp-strings(json-object-get(n, "params")) else nothing(), if ((Comparable) len(fcgp-str(n, "file")) > 0) then fcgp-str(n, "file") else flp-default-file(writable)];
@@ -172,17 +178,19 @@ section [form.bml] {
    let head = flp-block(reply, "plan");
    let goal = flp-block(reply, "goal");
    let band = flp-block(reply, "band");
-   if nothing?(head) then ["plan-unreadable", "The reply has no <plan>...</plan> block.", []] else if (!faj-valid(head)) then ["plan-unreadable", mc-cat(["The <plan> block is not one valid JSON object: ", flp-head(head, 300)]), []] else if nothing?(band) then ["band-unreadable", "The reply has no <band>...</band> block holding the band file's text.", []] else flp-parsed(parse-json("local-plan", head), goal, band);
+   let reference = flp-block(reply, "reference") ?? "";
+   if nothing?(head) then ["plan-unreadable", "The reply has no <plan>...</plan> block.", []] else if (!faj-valid(head)) then ["plan-unreadable", mc-cat(["The <plan> block is not one valid JSON object: ", flp-head(head, 300)]), []] else if nothing?(band) then ["band-unreadable", "The reply has no <band>...</band> block holding the band file's text.", []] else flp-parsed(parse-json("local-plan", head), goal, band, reference);
   }
-  def flp-parsed(obj, goal, band) {
+  def flp-parsed(obj, goal, band, reference) {
    let writable = if fcgp-object?(obj) then flp-strs(obj, "writable") else [];
-   if (!fcgp-object?(obj)) then ["plan-unreadable", "The <plan> block is JSON but not an object.", []] else ["", "", flp-plan(fcgp-str(obj, "id"), fcgp-str(obj, "band"), fcgp-num(obj, "full"), writable, flp-strs(obj, "sources"), flp-defs-of(obj, writable), fcgp-node(obj, "checks"), trim(if nothing?(goal) then fcgp-str(obj, "goal") else goal), (band ++ "\n"))];
+   if (!fcgp-object?(obj)) then ["plan-unreadable", "The <plan> block is JSON but not an object.", []] else ["", "", flp-plan(fcgp-str(obj, "id"), fcgp-str(obj, "band"), fcgp-num(obj, "full"), writable, flp-strs(obj, "sources"), flp-defs-of(obj, writable), fcgp-node(obj, "checks"), trim(if nothing?(goal) then fcgp-str(obj, "goal") else goal), (band ++ "\n"), reference)];
   }
-  // ── a verdict: [rung, kind, text, reading today, stub readings]; rung 0 holds ──
-  def flp-held() = [0, "", "", nothing(), []];
-  def flp-refused(rung, kind, text) = [rung, kind, text, nothing(), []];
+  // ── a verdict: [rung, kind, text, reading today, stub readings, reading with the reference]; rung 0 holds ──
+  def flp-held() = [0, "", "", nothing(), [], nothing()];
+  def flp-refused(rung, kind, text) = [rung, kind, text, nothing(), [], nothing()];
   def flp-held?(v) = (Comparable) v[0] == 0;
-  def flp-with-readings(v, before, stubs) = [v[0], v[1], v[2], before, stubs];
+  def flp-with-readings(v, before, stubs) = [v[0], v[1], v[2], before, stubs, v[5]];
+  def flp-reach(v, before, stubs, reached) = [v[0], v[1], v[2], before, stubs, reached];
   // ── (6) shape ──
   def flp-pow2?(n) = if (n < 1) then false else if ((Comparable) n == 1) then true else if (!((Comparable) (n % 2) == 0)) then false else flp-pow2?((n / 2));
   def flp-full-ok?(full) = if nothing?(full) then false else if (!((String) value_kind(full) == "int")) then false else flp-pow2?((full + 1));
@@ -361,9 +369,10 @@ section [form.bml] {
    let close = if (open < 0) then -1 else str_find(text, ")", open);
    if ((open < 0) || (close < 0)) then [] else flp-words(substring(text, (open + 1), close));
   }
-  def flp-fk-replace(text, d, flavor, at) {
+  // a definition stands in a file's text: make answers its text from the params the file (or, new, the plan) gives
+  def flp-fk-replace(text, d, make, at) {
    let end = flp-sexp-end(text, at, 0, false);
-   if (end < 0) then nothing() else mc-cat([substring(text, 0, at), flp-fk-def(d[0], flp-fk-params-at(text, at, d[0]), flavor), substring(text, end, len(text))]);
+   if (end < 0) then nothing() else mc-cat([substring(text, 0, at), make(flp-fk-params-at(text, at, d[0])), substring(text, end, len(text))]);
   }
   // a new definition stands before the do's final 0
   def flp-final-zero(text) {
@@ -371,13 +380,13 @@ section [form.bml] {
    let ls = flp-line-start(text, t);
    if flp-starts?(trim(substring(text, ls, t)), "0)") then ls else -1;
   }
-  def flp-fk-insert(text, d, flavor) {
+  def flp-fk-insert(text, d, make) {
    let at = flp-final-zero(text);
-   if (at < 0) then nothing() else mc-cat([substring(text, 0, at), substring(text, at, flp-indent-end(text, at)), flp-fk-def(d[0], d[1] ?? [], flavor), "\n", substring(text, at, len(text))]);
+   if (at < 0) then nothing() else mc-cat([substring(text, 0, at), substring(text, at, flp-indent-end(text, at)), make(d[1] ?? []), "\n", substring(text, at, len(text))]);
   }
-  def flp-fk-stub(text, d, flavor) {
+  def flp-fk-place(text, d, make) {
    let at = str_find(text, flp-fk-mark(d[0]), 0);
-   if (at >= 0) then flp-fk-replace(text, d, flavor, at) else flp-fk-insert(text, d, flavor);
+   if (at >= 0) then flp-fk-replace(text, d, make, at) else flp-fk-insert(text, d, make);
   }
   // a BML definition runs to the next line at its own indentation or less, and takes a closing brace at its own
   def flp-bml-end(text, from, width) {
@@ -390,43 +399,54 @@ section [form.bml] {
    if (ls >= len(text)) then len(text) else if ((Comparable) ie == le) then flp-bml-end(text, ls, width) else if ((ie - ls) > width) then flp-bml-end(text, ls, width) else if (((Comparable) (ie - ls) == width) && flp-starts?(substring(text, ie, le), "}")) then (if (le < len(text)) then (le + 1) else le) else ls;
   }
   def flp-paren-close(t, i, depth) = if (i >= len(t)) then -1 else if ((Comparable) str_byte_at(t, i) == 40) then flp-paren-close(t, (i + 1), (depth + 1)) else if ((Comparable) str_byte_at(t, i) == 41) then (if (depth <= 1) then i else flp-paren-close(t, (i + 1), (depth - 1))) else flp-paren-close(t, (i + 1), depth);
-  def flp-bml-replace(text, d, flavor, at) {
+  def flp-bml-replace(text, d, make, at) {
    let ls = flp-line-start(text, at);
    let open = (at + len(flp-bml-mark(d[0]))) - 1;
    let close = flp-paren-close(text, open, 0);
    let end = flp-bml-end(text, at, (at - ls));
-   if (close < 0) then nothing() else mc-cat([substring(text, 0, ls), substring(text, ls, at), flp-bml-def(d[0], substring(text, (open + 1), close), flavor), "\n", substring(text, end, len(text))]);
+   if (close < 0) then nothing() else mc-cat([substring(text, 0, ls), substring(text, ls, at), make(substring(text, (open + 1), close)), "\n", substring(text, end, len(text))]);
   }
   // the start of the first line whose first non-blank bytes are mark
   def flp-line-with(text, mark, ls) = if (ls >= len(text)) then -1 else if flp-starts?(substring(text, flp-indent-end(text, ls), flp-line-end(text, ls)), mark) then ls else flp-line-with(text, mark, (flp-line-end(text, ls) + 1));
-  def flp-bml-insert-at(text, d, flavor, ls) {
+  def flp-bml-insert-at(text, d, make, ls) {
    let le = flp-line-end(text, ls);
    let cut = if (le < len(text)) then (le + 1) else le;
-   mc-cat([substring(text, 0, cut), substring(text, ls, flp-indent-end(text, ls)), " ", flp-bml-def(d[0], flp-join(d[1] ?? [], ", "), flavor), "\n", substring(text, cut, len(text))]);
+   mc-cat([substring(text, 0, cut), substring(text, ls, flp-indent-end(text, ls)), " ", make(flp-join(d[1] ?? [], ", ")), "\n", substring(text, cut, len(text))]);
   }
-  def flp-bml-insert(text, d, flavor) {
+  def flp-bml-insert(text, d, make) {
    let c = flp-line-with(text, "class ", 0);
    let s = if (c >= 0) then c else flp-line-with(text, "section [", 0);
-   if (s < 0) then nothing() else flp-bml-insert-at(text, d, flavor, s);
+   if (s < 0) then nothing() else flp-bml-insert-at(text, d, make, s);
   }
-  def flp-bml-stub(text, d, flavor) {
+  def flp-bml-place(text, d, make) {
    let at = flp-bml-find(text, d[0], 0);
-   if (at >= 0) then flp-bml-replace(text, d, flavor, at) else flp-bml-insert(text, d, flavor);
+   if (at >= 0) then flp-bml-replace(text, d, make, at) else flp-bml-insert(text, d, make);
   }
   def flp-blank(bml) = if bml then "section [form.bml] {\n class LocalPlanStub {\n }\n 0;\n}\n" else "(do\n    0)\n";
-  def flp-stub-def(text, d, bml, flavor) = if nothing?(text) then text else if bml then flp-bml-stub(text, d, flavor) else flp-fk-stub(text, d, flavor);
-  def flp-stubbed(plan, w, flavor) {
+  def flp-stub-def(text, d, bml, flavor) = if nothing?(text) then text else if bml then flp-bml-place(text, d, raw => flp-bml-def(d[0], raw, flavor)) else flp-fk-place(text, d, params => flp-fk-def(d[0], params, flavor));
+  // the planner's reference: each definition's whole text as its <reference> block writes it
+  def flp-file-bml?(w) = if flp-exists?(w) then flp-bml-surface?(fhn-read(w)) else flp-ends?(w, ".bml");
+  def flp-ref-text(ref, d, bml) {
+   let at = if bml then flp-bml-find(ref, d[0], 0) else str_find(ref, flp-fk-mark(d[0]), 0);
+   let end = if (at < 0) then -1 else if bml then flp-bml-end(ref, at, (at - flp-line-start(ref, at))) else flp-sexp-end(ref, at, 0, false);
+   if ((at < 0) || (end < 0)) then nothing() else trim(substring(ref, at, end));
+  }
+  def flp-ref-def(text, d, bml, ref) {
+   let body = flp-ref-text(ref, d, bml);
+   if (nothing?(text) || nothing?(body)) then nothing() else if bml then flp-bml-place(text, d, raw => body) else flp-fk-place(text, d, params => body);
+  }
+  // a writable file's text with each of its plan definitions placed by place(text, definition, bml)
+  def flp-standing(plan, w, place) {
    let here = flp-exists?(w);
    let original = if here then fhn-read(w) else "";
    let bml = if here then flp-bml-surface?(original) else flp-ends?(w, ".bml");
-   foldl((t, d) => flp-stub-def(t, d, bml, flavor), if here then original else flp-blank(bml), filter(d => ((String) d[2] == w), flp-p-defs(plan)));
+   foldl((t, d) => place(t, d, bml), if here then original else flp-blank(bml), filter(d => ((String) d[2] == w), flp-p-defs(plan)));
   }
-  // a stubbed copy stands where fkwu looks first: the scratch tree's own form/ root
+  def flp-stubbed(plan, w, flavor) = flp-standing(plan, w, (t, d, bml) => flp-stub-def(t, d, bml, flavor));
+  // a placed copy stands where fkwu looks first: the scratch tree's own form/ root; "" when it stands, else the file
   def flp-stub-path(w) = if flp-starts?(w, "form/") then w else mc-cat(["form/", w]);
-  def flp-stub-file(plan, root, w, flavor) {
-   let text = flp-stubbed(plan, w, flavor);
-   if nothing?(text) then w else flp-stub-placed(root, w, text);
-  }
+  def flp-tree-file(root, w, text) = if nothing?(text) then w else flp-stub-placed(root, w, text);
+  def flp-stub-file(plan, root, w, flavor) = flp-tree-file(root, w, flp-stubbed(plan, w, flavor));
   def flp-stub-placed(root, w, text) {
    let a = flp-put(flp-at(root, flp-stub-path(w)), text);
    let b = if flp-starts?(w, "form/") then 0 else flp-put(flp-at(root, w), text);
@@ -442,7 +462,7 @@ section [form.bml] {
    let r = flp-band-run(path, flp-ctx-deadline(ctx));
    let full = flp-p-full(plan);
    if ((Comparable) r[1] == 1) then flp-refused(1, mc-cat(["band-deadline:", flavor]), mc-cat(["With each named definition a stub ", flp-stub-words(flavor), ", the band did not end within ", (flp-ctx-deadline(ctx) / 1000).str(), " s; a band ends for any candidate."]))
-   else if nothing?(r[0]) then flp-refused(1, mc-cat(["band-no-number:", flavor]), mc-cat(["With each named definition a stub ", flp-stub-words(flavor), ", the band did not exit 0 with a number on its last line, so it cannot read a candidate.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2]]) else " It printed no number."]))
+   else if nothing?(r[0]) then flp-refused(1, mc-cat(["band-no-number:", flavor]), if (str_find(r[2], "error", 0) >= 0) then mc-cat(["The band does not compile on fkwu (each named definition standing as a stub ", flp-stub-words(flavor), "), so it cannot read a candidate. fkwu said:\n", r[2]]) else mc-cat(["With each named definition a stub ", flp-stub-words(flavor), ", the band did not exit 0 with a number on its last line, so it cannot read a candidate.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2]]) else " It printed no number: a band ends with a number for any answer."]))
    else if (r[0] >= full) then flp-with-readings(flp-refused(3, mc-cat(["band-full-under-stub:", flavor]), mc-cat(["With each named definition a stub ", flp-stub-words(flavor), ", the band still reads ", r[0].str(), " of ", full.str(), ": its claims do not test the definitions. Each claim must ask for a value the stub cannot give."])), nothing(), [r[0]])
    else flp-with-readings(flp-held(), nothing(), [r[0]]);
   }
@@ -470,7 +490,28 @@ section [form.bml] {
   }
   def flp-verify-bands(plan, ctx, tree) {
    let open = flp-open(plan, ctx, tree);
-   if (!flp-held?(open)) then open else flp-stubs(plan, ctx, tree, open[3]);
+   let stubbed = if flp-held?(open) then flp-stubs(plan, ctx, tree, open[3]) else open;
+   if (!flp-held?(stubbed)) then stubbed else flp-reference(plan, ctx, tree, stubbed);
+  }
+  // ── (7) reachable: with the planner's own <reference> definitions standing, the band reads full ──
+  // The reference is a witness that some candidate the goal describes turns the band full; it stays in the
+  // scratch tree and never reaches the lane. A plan without one lands unwitnessed (reachable null).
+  def flp-reference(plan, ctx, tree, v) {
+   let ref = flp-p-reference(plan);
+   let missing = flp-first(flp-p-defs(plan), d => nothing?(flp-ref-text(ref, d, flp-file-bml?(d[2]))));
+   if ((Comparable) len(trim(ref)) == 0) then v
+   else if (!nothing?(missing)) then flp-with-readings(flp-refused(7, mc-cat(["reference-missing:", missing[0]]), mc-cat(["The <reference> block holds no definition of ", missing[0], ": write each definition the plan names, whole, beginning '(defn ", missing[0], " ' for a .fk file or 'def ", missing[0], "(' for a .bml file."])), v[3], v[4])
+   else flp-reference-read(plan, ctx, mc-cat([tree, "/reference"]), v);
+  }
+  def flp-reference-read(plan, ctx, root, v) {
+   let unplaced = flp-first(map(w => flp-tree-file(root, w, flp-standing(plan, w, (t, d, bml) => flp-ref-def(t, d, bml, flp-p-reference(plan)))), flp-p-writable(plan)), s => ((Comparable) len(s) > 0));
+   let path = flp-at(root, flp-p-band(plan));
+   let put = flp-put(path, flp-p-text(plan));
+   let r = if nothing?(unplaced) then flp-band-run(path, flp-ctx-deadline(ctx)) else [nothing(), 0, ""];
+   let full = flp-p-full(plan);
+   if (!nothing?(unplaced)) then flp-with-readings(flp-refused(7, mc-cat(["reference-site:", unplaced]), mc-cat(["Form could not stand the <reference> definitions in ", unplaced, "."])), v[3], v[4])
+   else if (nothing?(r[0]) || (!((Comparable) r[0] == full))) then flp-reach(flp-refused(7, "unreachable", mc-cat(["With your <reference> definitions standing, the band reads ", flp-show(r[0]), " of ", full.str(), ": the band, the goal and the reference disagree, so no candidate the goal describes turns the band full.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2]]) else ""])), v[3], v[4], r[0])
+   else flp-reach(v, v[3], v[4], r[0]);
   }
   // ── one option of the walk ──
   // memory entries: [finding, outcome, lens, voice, reply, row, prompt IDs, generated IDs]
@@ -491,7 +532,7 @@ section [form.bml] {
   def flp-index(xs, x, i) = if nil?(xs) then -1 else if ((String) xs[0] == x) then i else flp-index(xs[1:], x, (i + 1));
   def flp-spent(memory, slot) = foldl((n, m) => (n + m[slot]), 0, memory);
   def flp-ask(voice, packet, name, n) = voice(packet, name, n);
-  def flp-option-row(req, n, way, feedback, v, plan, said, started, stamp) = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", flp-req-id(req)), fhn-n("option", n), fhn-s("rung", way[2]), fhn-s("voice", way[0]), fhn-s("lens", way[1]), fhn-s("approach_digest", flp-sha(mc-cat([way[0], "|", way[1], "|", feedback]))), fhn-s("outcome_digest", flp-sha(if flp-held?(v) then "verified" else v[1])), fhn-s("verdict", if flp-held?(v) then "verified" else "refused"), fhn-n("verify_rung", v[0]), fhn-s("kind", v[1]), fhn-s("failure", flp-head(v[2], 1200)), fhn-s("plan_id", if nil?(plan) then "" else flp-p-id(plan)), fhn-s("band", if nil?(plan) then "" else flp-p-band(plan)), fcgp-maybe("band_before", v[3]), json-node-pair("stub_readings", json-node-array(map(x => json-node-int(x), v[4]))), fhn-n("band_green", if flp-held?(v) then 1 else 0), fhn-s("voice_status", said[0]), fhn-n("local_generated_ids", said[3]), fhn-n("local_injected_ids", said[2]), fhn-n("remote_prompts", 0), fhn-s("scratch", stamp), fhn-n("wall_ms", (now_unix_ms() - started))]);
+  def flp-option-row(req, n, way, feedback, v, plan, said, started, stamp) = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", flp-req-id(req)), fhn-n("option", n), fhn-s("rung", way[2]), fhn-s("voice", way[0]), fhn-s("lens", way[1]), fhn-s("approach_digest", flp-sha(mc-cat([way[0], "|", way[1], "|", feedback]))), fhn-s("outcome_digest", flp-sha(if flp-held?(v) then "verified" else v[1])), fhn-s("verdict", if flp-held?(v) then "verified" else "refused"), fhn-n("verify_rung", v[0]), fhn-s("kind", v[1]), fhn-s("failure", flp-head(v[2], 1200)), fhn-s("plan_id", if nil?(plan) then "" else flp-p-id(plan)), fhn-s("band", if nil?(plan) then "" else flp-p-band(plan)), fcgp-maybe("band_before", v[3]), json-node-pair("stub_readings", json-node-array(map(x => json-node-int(x), v[4]))), fcgp-maybe("reference_reading", v[5]), fhn-n("band_green", if flp-held?(v) then 1 else 0), fhn-s("voice_status", said[0]), fhn-n("local_generated_ids", said[3]), fhn-n("local_injected_ids", said[2]), fhn-n("remote_prompts", 0), fhn-s("scratch", stamp), fhn-s("reply", if (len(said) > 4) then said[4] else ""), fhn-n("wall_ms", (now_unix_ms() - started))]);
   def flp-finding(n, way, v) = mc-cat(["Verification (", v[0].str(), ") refused option ", n.str(), " (", v[1], "): ", v[2]]);
   def flp-attempt(req, ctx, memory) {
    let n = len(memory) + 1;
@@ -509,7 +550,7 @@ section [form.bml] {
    let row = flp-option-row(req, n, way, feedback, v, parsed[2], said, started, stamp);
    let logged = fhn-append(flp-ctx-ledger(ctx), json-emit(row) ++ "\n");
    let spoken = print_str("[local-plan] " ++ json-emit(row));
-   if flp-held?(v) then [1, flp-land(parsed[2], req, ctx, planner, row)] else [0, [flp-finding(n, way, v), v[1], way[1], way[0], said[1], row, said[2], said[3]]];
+   if flp-held?(v) then [1, flp-land(parsed[2], req, ctx, append(planner, [json-node-pair("reachable", if nothing?(v[5]) then json-node-null() else json-node-int(1))]), row)] else [0, [flp-finding(n, way, v), v[1], way[1], way[0], said[1], row, said[2], said[3]]];
   }
   // ── the landing: the band at its path, the row at the queue's end ──
   def flp-land(plan, req, ctx, planner, optionRow) {
@@ -526,11 +567,17 @@ section [form.bml] {
   }
   def flp-options(n) = if (n <= 0) then [] else cons(flp-option, flp-options((n - 1)));
   // answers [status, landing or [], findings, guide reading, guide packet path]
-  def flp-walk(req, ctx) {
-   let w = oac-backtrack-walk(flp-options(flp-ctx-attempts(ctx)), [req, ctx], []);
+  def flp-walk(req, ctx) = flp-walk-from(req, ctx, []);
+  // a walk that resumes the findings an earlier walk of the same request left: nothing learned is dropped, and the
+  // next option hears the last refusal, its reply, and the same swerve rule
+  def flp-walk-from(req, ctx, memory) {
+   let w = oac-backtrack-walk(flp-options(flp-ctx-attempts(ctx)), [req, ctx], memory);
    let memory = oac-backtrack-memory(w);
    if ((Comparable) oac-one?(oac-backtrack-ack(w)) == 1) then ["queued", oac-payload(oac-backtrack-ack(w)), memory, json-node-null(), ""] else flp-declined(req, ctx, memory);
   }
+  // the memory an earlier walk's refused rows give, oldest first; read(path) answers a kept reply's text
+  def flp-row-finding(r) = mc-cat(["Verification (", flp-show(fcgp-num(r, "verify_rung")), ") refused option ", flp-show(fcgp-num(r, "option")), " (", fcgp-str(r, "kind"), "): ", fcgp-str(r, "failure")]);
+  def flp-memory-of(rows, id, read) = map(r => [flp-row-finding(r), fcgp-str(r, "kind"), fcgp-str(r, "lens"), fcgp-str(r, "voice"), read(fcgp-str(r, "reply")), r, (fcgp-num(r, "local_injected_ids") ?? 0), (fcgp-num(r, "local_generated_ids") ?? 0)], filter(r => (((String) fcgp-str(r, "request") == id) && ((String) fcgp-str(r, "verdict") == "refused")), rows));
   def flp-guide-question() = "Which change of approach would let the local planner write a band-first gap for this request that Form verifies?";
   def flp-declined(req, ctx, memory) {
    let rows = map(m => m[5], memory);
