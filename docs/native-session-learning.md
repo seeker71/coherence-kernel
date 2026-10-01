@@ -296,7 +296,10 @@ The existing code and repair checks remain the decision at each such request.
 `form/form-stdlib/bml/qwen-form-learning.bml` captures teacher-forced model IDs and normalized
 hidden states while the native cursor executes a supplied sequence of Form controls.
 Recipe birth and execution share their original owner and observation context.
-Only a completed sequence with observed KV injection supplies targets. Runtime observations enter
+Only a completed sequence with successful delivered results and observed KV
+injection supplies targets. An injected refusal is evidence, not a successful
+control target, including when hardware completed its work but its output
+exceeded the observation envelope. Runtime observations enter
 the same KV stream but stay outside gradients. `form/form-stdlib/bml/qwen-head-learning.bml`
 learns both vectors of the rank-one residual `h + (A·h) B` through the frozen
 Qwen output projection. Native RAM Metal computes stable cross-entropy and
