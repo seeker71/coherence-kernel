@@ -1,0 +1,143 @@
+// Authored definition spans, read by the BMF cursor. Levels describe syntax,
+// not quality. Quoted specimens and comments do not become definitions/calls.
+import form-stdlib/bmf-grammar.fk;
+import form-stdlib/bml-source.fk;
+import form-stdlib/bml/string-join.bml;
+import form-stdlib/bml/native-source-inventory.bml;
+import gate/lens-text.bml;
+section [form.bml] {
+ class SourceAbstraction {
+  def sa-home() = ".hearth/abstraction-flow";
+  def sa-path(leaf) = sa-home() + ("/" + leaf);
+  def sa-prepare() { fs_mkdir(".hearth"); fs_mkdir(sa-home()); }
+  def sa-json(value) = json-node-array(map(x => value_kind(x) == "list" ? sa-json(x) : value_kind(x) == "string" ? json-node-string(x) : json-node-int(x),value));
+  def sa-value(node) = node_eq(node_category(node),JSON-ARRAY()) ? map(sa-value,json-array-elements(node)) : node_value(node);
+  def sa-write(path,value) = sa-write-node(path,sa-json(value));
+  def sa-write-node(path,node) {
+   let temp = path + ("." + host_pid().str());
+   write_form_binary(temp,node) > 0 && fs_rename(temp,path) == 0 ? path : form_error("abstraction observation publication failed");
+  }
+  def sa-read(path) = file_size(path) < 0 ? [] : sa-value(read_form_binary(path));
+  def sa-lines(s) = len(s) == 0 ? 0 : lx-count(s,"\n") + (str_byte_at(s,len(s) - 1) == 10 ? 0 : 1);
+  def sa-skip(c,raw) {
+   let at = skip-ws(c);
+   raw && cur-peek(at) == 59 ? sa-skip(skip-line-comment(at),raw) : at;
+  }
+  // [word, start, after]; strings have an empty word but retain their span.
+  def sa-next(c,raw) {
+   let at = sa-skip(c,raw); let ch = cur-peek(at);
+   let quoted = ch == 34 || ch == 39;
+   let name = cp-in-class?(ch,"bmlname");
+   let end = cur-eof?(at) ? at : quoted ? cur-advance(gm-q-scan(cur-advance(at,1),ch),1) :
+    name ? m-cur(match-pat(p-run("bmlname"),at,caps-empty())) : cur-advance(at,1);
+   [quoted ? "" : cur-slice(at,cur-pos(end)),cur-pos(at),end];
+  }
+  def sa-low() = ["add","sub","mul","div","mod","eq","ne","lt","le","gt","ge","and","or","not","str_eq","str_concat","str_len","list","nth","head","tail","int_to_str","value_str"];
+  def sa-rich() = ["choice","try","catch","repeat","retry","match","using","for","yield","fail","stop","undo","store"];
+  def sa-in(word,words) = any?(x => (String) x == word,words);
+  def sa-level(raw,low,rich) = raw ? "form" : low > 0 ? "bml-primitive-spelling" : rich > 0 ? "bml-composed" : "bml-expression";
+  // Scan the whole body once. Balanced braces/parens and expression terminators
+  // own the boundary; punctuation inside a string or comment never closes it.
+  def sa-body(c,raw,stack,low,rich,previous,finish) {
+   let t = sa-next(c,raw); let w = t[0];
+   if cur-eof?(sa-skip(c,raw)) then [cur-pos(t[2]),low,rich] else {
+    let opened = w == "(" || w == "[" || w == "{";
+    let closed = w == ")" || w == "]" || w == "}";
+    let more = opened ? cons(w == "(" ? ")" : w == "[" ? "]" : "}",stack) : closed ? stack[1:] : stack;
+    let primitive = (w == "(" && sa-in(previous,sa-low())) || (raw && previous == "(" && sa-in(w,sa-low()));
+    let high = sa-in(w,sa-rich()) || (w == ">" && previous == "=");
+    (w == finish && (closed ? len(stack) == 1 : nil?(stack))) ? [cur-pos(t[2]),low + primitive,rich + high] :
+     sa-body(t[2],raw,more,low + primitive,rich + high,w,finish);
+   };
+  }
+  // row: name, level, first line, span lines, primitive spellings, rich constructs.
+  def sa-defs(s,c,raw,previous,line,out) {
+   let t = sa-next(c,raw); let w = t[0];
+   let at-line = line + lx-count(substring(s,cur-pos(c),t[1]),"\n");
+   if cur-eof?(sa-skip(c,raw)) then reverse(out)
+   else if (!raw && w == "def") || (raw && w == "defn" && previous == "(") then {
+    let name = sa-next(t[2],raw);
+    let header = sa-header(name[2],raw,[]);
+    if nothing?(header) then sa-defs(s,name[2],raw,"",at-line,out) else {
+    let body = sa-body(header[0],raw,header[1],0,0,"",raw ? ")" : nil?(header[1]) ? ";" : "}");
+    let start = raw ? max2(0,t[1] - 1) : t[1];
+    let span = substring(s,start,body[0]);
+    let row = [name[0],sa-level(raw,body[1],body[2]),at-line,sa-lines(span),body[1],body[2]];
+    let inner = substring(s,cur-pos(header[0]),body[0] - 1);
+    let nested = str_find(inner,raw ? "defn" : "def",0) < 0 ? [] :
+     sa-defs(inner,cursor-str(inner),raw,"",line + lx-count(substring(s,cur-pos(c),cur-pos(header[0])),"\n"),[]);
+    sa-defs(s,cur-advance(c,body[0] - cur-pos(c)),raw,"",line + lx-count(substring(s,cur-pos(c),body[0]),"\n"),append(reverse(nested),cons(row,out)));
+    };
+   } else sa-defs(s,t[2],w == "section" && cur-peek(sa-skip(t[2],raw)) == 91 ? false : raw,w,at-line + lx-count(cur-slice(cur-advance(c,t[1] - cur-pos(c)),cur-pos(t[2])),"\n"),out);
+  }
+  def sa-header(c,raw,stack) {
+   let t = sa-next(c,raw); let w = t[0];
+   if cur-eof?(sa-skip(c,raw)) || (w == ";" && nil?(stack)) then nothing()
+   else if nil?(stack) && (w == "=" || w == "{") then [t[2],w == "{" ? ["}"] : []]
+   else if raw && w == ")" && len(stack) == 1 then [t[2],[")"]]
+   else sa-header(t[2],raw,w == "(" ? cons(")",stack) : w == ")" ? stack[1:] : stack);
+  }
+  // C function definitions: a top-level parameter group followed by a body.
+  // Preprocessor directives, aggregates and prototypes have separate shapes.
+  def sa-directive(c) {
+   let end = skip-line-comment(c);
+   let s = surf-payload(cur-surface(c)); let i = cur-pos(end);
+   i > 1 && str_byte_at(s,i - 2) == 92 ? sa-directive(end) : end;
+  }
+  def sa-host(s,c,previous,line,out) {
+   let t = sa-next(c,false); let w = t[0];
+   let at-line = line + lx-count(substring(s,cur-pos(c),t[1]),"\n");
+   if cur-eof?(sa-skip(c,false)) then reverse(out)
+   else if w == "#" then {
+    let end = sa-directive(t[2]);
+    sa-host(s,end,"",line + lx-count(substring(s,cur-pos(c),cur-pos(end)),"\n"),out);
+   } else if w == "(" && previous != "" then {
+    let params = sa-body(t[2],false,[")"],0,0,"",")");
+    let after = sa-next(cur-advance(c,params[0] - cur-pos(c)),false);
+    let body = after[0] == "{" ? sa-body(after[2],false,["}"],0,0,"","}") : params;
+    let next = cur-advance(c,body[0] - cur-pos(c));
+    sa-host(s,next,"",line + lx-count(substring(s,cur-pos(c),body[0]),"\n"),after[0] == "{" ?
+     cons([previous,"host-c",at-line,sa-lines(substring(s,t[1],body[0])),0,0],out) : out);
+   } else if w == "{" then {
+    let body = sa-body(t[2],false,["}"],0,0,"","}");
+    sa-host(s,cur-advance(c,body[0] - cur-pos(c)),"",line + lx-count(substring(s,cur-pos(c),body[0]),"\n"),out);
+   } else sa-host(s,t[2],w,at-line,out);
+  }
+  def sa-scope(path) = str_find(path,"/tests/",0) >= 0 || str_find(path,"/fixtures/",0) >= 0 || str_find(path,"gate/",0) == 0 ? "verification" :
+   str_find(path,"receipts/",0) == 0 || str_find(path,"examples/",0) == 0 || str_find(path,"form/form-samples/",0) == 0 ? "specimen" : "body";
+  def sa-eligible(path) = fs-suffix?(path,".fk") || fs-suffix?(path,".bml") || fs-suffix?(path,".c") || fs-suffix?(path,".h");
+  // File row: path, content fingerprint, physical lines, scope, definitions.
+  def sa-file(path,source,cached,prior-text) {
+   !nsi-exact(path,source) ? form_error("abstraction source unread: " + path) :
+    !nil?(cached) && (String) source == prior-text && cached[5] == 3 ? cached :
+    [path,bml-source-fingerprint(source),sa-lines(source),sa-scope(path),
+     fs-suffix?(path,".c") || fs-suffix?(path,".h") ? sa-host(source,cursor-str(source),"",1,[]) :
+      sa-defs(source,cursor-str(source),!fs-suffix?(path,".bml"),"",1,[]),3];
+  }
+  def sa-refresh() = sa-refresh-in(nsi-text(nsi-git()));
+  def sa-refresh-in(inventory) {
+   sa-prepare();
+   let started = host_monotonic_ms();
+   let paths = filter(path => sa-eligible(path) && fs_exists(path),split-on(inventory,byte_to_str(0)));
+   let retained = file_size(sa-path("source.fkb")) < 0 ? json-node-array([]) : read_form_binary(sa-path("source.fkb"));
+   let previous = sa-value(retained);
+   let prior-texts = sa-read(sa-path("source-text.fkb"));
+   let loaded = host_monotonic_ms();
+   let cached = foldl((index,row) => record_set(index,row[0],row),record_new(0),previous);
+   let nodes = foldl((index,node) => record_set(index,node_value(node_children(node)[0]),node),record_new(0),node_children(retained));
+   let text-index = foldl((index,row) => record_set(index,row[0],row[1]),record_new(0),prior-texts);
+   let texts = map(path => [path,read_file(path)],paths);
+   let files = map(row => sa-file(row[0],row[1],record_has(cached,row[0]) ? record_get(cached,row[0]) : [],
+    record_has(text-index,row[0]) ? record_get(text-index,row[0]) : ""),texts);
+   let scanned = host_monotonic_ms();
+   let changed = (Value) files != previous;
+   changed && !nil?(previous) ? fs_rename(sa-path("source.fkb"),sa-path("source-previous.fkb")) : 0;
+   changed ? sa-write-node(sa-path("source.fkb"),json-node-array(map(row =>
+    record_has(cached,row[0]) && (Value) row == record_get(cached,row[0]) ? record_get(nodes,row[0]) : sa-json(row),files))) : "";
+   (Value) texts != prior-texts ? sa-write(sa-path("source-text.fkb"),texts) : "";
+   print_str(str-join(["abstraction refresh: read-ms=",(loaded - started).str()," scan-ms=",(scanned - loaded).str()," retain-ms=",(host_monotonic_ms() - scanned).str(),"\n"]));
+   fb_record(intern_node(intern_trivial_string("abstraction-census-ms"),[intern_trivial_int(host_monotonic_ms() - started)]),self_source(),0);
+   files;
+  }
+ }
+}

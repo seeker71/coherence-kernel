@@ -1,0 +1,99 @@
+// The guide joins fresh authored spans to named execution windows. Ambiguous
+// names and changed source remain visible, never assigned by a flattened line.
+import form-stdlib/bml/flow-observation.bml;
+import form-stdlib/bml/form-source-lift.bml;
+section [form.bml] {
+ class AbstractionFlow {
+  def af-levels() = ["host-c","form","bml-primitive-spelling","bml-expression","bml-composed"];
+  def af-definitions(files) = foldl((out,file) => append(map(d => append([file[0],file[1],file[3]],d),file[4]),out),[],files);
+  def af-insert(row,rows,k) = nil?(rows) || row[k] > rows[0][k] ? cons(row,rows) : cons(rows[0],af-insert(row,rows[1:],k));
+  def af-top(rows,k,n) = foldl((out,row) => take(n,af-insert(row,out,k)),[],rows);
+  def af-index(defs) = foldl((index,d) => record_set(index,d[3],cons(d,record_has(index,d[3]) ? record_get(index,d[3]) : [])),record_new(0),defs);
+  def af-locate(index,hashes,row) {
+   let candidates = record_has(index,row[1]) ? record_get(index,row[1]) : [];
+   let direct = filter(d => d[0] == row[2],candidates);
+   let selected = len(direct) == 1 ? direct : candidates;
+   len(selected) != 1 ? [len(selected) == 0 ? "unattributed" : "ambiguous","",""] :
+    !record_has(hashes,selected[0][0]) || record_get(hashes,selected[0][0]) != selected[0][1] ? ["stale",selected[0][0],""] : [selected[0][4],selected[0][0],selected[0][5]];
+  }
+  def af-runs() = map(name => sa-read(sa-path(name)),filter(name => str_find(name,"run-",0) == 0 && fs-suffix?(name,".fkb"),fs_list(sa-home())));
+  def af-joined(run,index) {
+   let hashes = foldl((m,row) => record_set(m,row[0],row[1]),record_new(0),run[4]);
+   map(row => append(row,af-locate(index,hashes,row)),run[8]);
+  }
+  def af-sum(rows,k) = foldl((n,row) => n + row[k],0,rows);
+  def af-same-sources(a,b) {
+   let index = foldl((m,row) => record_set(m,row[0],row[1]),record_new(0),b);
+   len(a) == len(b) && all?(row => record_has(index,row[0]) && record_get(index,row[0]) == row[1],a);
+  }
+  def af-summary(files) {
+   let defs = af-definitions(files); let index = af-index(defs);
+   let prior = af-definitions(sa-read(sa-path("source-previous.fkb")));
+   let lines = str-join(map(scope => {
+    let units = filter(f => f[3] == scope,files);
+    let selected = filter(d => d[2] == scope,defs);
+    str-join([scope,": files=",len(units).str()," physical-lines=",af-sum(units,2).str(),"\n",
+     str-join(map(level => {
+      let rows = filter(d => d[4] == level,selected);
+      let before = filter(d => d[4] == level && d[2] == scope,prior);
+      str-join(["  ",level,": functions=",len(rows).str()," definition-lines=",af-sum(rows,6).str()," delta-functions=",nil?(prior) ? "unmeasured" : (len(rows) - len(before)).str()," delta-lines=",nil?(prior) ? "unmeasured" : (af-sum(rows,6) - af-sum(before,6)).str()," primitive-spellings=",af-sum(rows,7).str(),"\n"]);
+     },af-levels()))]);
+   },["body","verification","specimen"]));
+   lines + str-join(map(run => af-run-summary(run,index),af-runs()));
+  }
+  def af-run-summary(run,index) = run[0] != "complete" ? str-join([run[1]," ",run[2],": ",run[0],"; retained start",len(run) >= 7 ? " process-exit=" + run[5].str() : "","\n"]) : {
+   let rows = af-joined(run,index);
+   let old = sa-read(fo-file(run[1],run[2]) + ".previous");
+   let delta = !nil?(old) && old[0] == "complete" ? str-join([" previous-ms=",old[5].str()," source-set=",af-same-sources(old[4],run[4]) ? "same" : "changed"]) : "";
+   str-join([run[1]," ",run[2],": elapsed-ms=",run[5].str()," cpu-us=",run[6].str(),delta,"\n",
+    len(run) >= 14 ? str-join(["  admission+execution-ms=",run[13].str()," process-exit=",run[12].str(),"\n"]) : "",
+    "  counters: observed=",af-sum(rows,0).str()," window=",run[7].str(),"; same process, entry counts; no per-function timing or child coverage\n",
+    "  host-c: call counters unmeasured\n",str-join(map(level => {
+     let selected = filter(row => row[10] == level,rows);
+     str-join(["  ",level,": used-functions=",len(selected).str()," entries=",af-sum(selected,0).str()," ram-jit-entries=",af-sum(selected,9).str(),"\n"]);
+    },append(af-levels()[1:],["unattributed","ambiguous","stale"]))),
+    "  attention by observed entries:\n",str-join(map(row => str-join(["    ",row[0].str()," ",row[1]," ",row[10]," ",row[11],"\n"]),af-top(rows,0,8))),
+    "  discovery frames retained=",len(run[9]).str()," total-new-frames=",run[10].str()," retained-root-window=",run[11].str(),"\n",
+    str-join(map(row => str-join(["    ",row[1].str(),"ms ",row[0],"\n"]),af-top(run[9],1,5)))]);
+  };
+  def af-guide() = af-publish(sa-refresh());
+  def af-publish(files) {
+   let report = af-summary(files);
+   write_file_text(sa-path("guide.txt"),report);
+   fb_record(intern_node(intern_trivial_string("abstraction-guide"),[intern_trivial_string(sa-path("guide.txt")),intern_trivial_int(len(files)),intern_trivial_int(af-sum(files,2))]),self_source(),0);
+   report;
+  }
+  // A source-backed round uses the compiler directly, then runs its result in
+  // fkwu with an owned measurement around the original top-level expression.
+  // Dependencies remain native imports; their admission is outside this window.
+  def af-round(owner,input) {
+   sa-refresh();
+   let source = fsc-bml-read-source(owner);
+   let lowered = fo-measure("compilation",owner,() => form-source-compile-text(source,owner));
+   let dependencies = bml-source-dependencies(str-join([bml-source-prelude-prefix(source),lowered]),1);
+   let paths = map(token => {
+    let found = bml-source-resolution(bml-source-candidates(owner,token),[]);
+    nothing?(found[0]) ? form_error("observation import unavailable: " + token) : bml-source-absolute(found[0]);
+   },dependencies);
+   let parsed = fsl-module(fsl-parse(lowered),[],[]);
+   let body = str-join-with(map(n => af-form(n),parsed[1]),"\n");
+   let job = sa-path("work-" + (bml-source-fingerprint(owner) + ".fk"));
+   let quoted = json-emit(json-node-string(owner));
+   let program = str-join(["; preludes: form-stdlib/bml/flow-observation.bml ",str-join-with(paths," "),"\n(do\n(let $abstraction-window (fo-open \"end-to-end\" ",quoted,"))\n(let $abstraction-answer (do\n",body,"\n))\n(fo-close $abstraction-window)\n$abstraction-answer)\n"]);
+   write_file_text(job,program) != len(program) ? form_error("observation source write failed") : {
+    let pending = fo-open("end-to-end",owner);
+    let started = host_monotonic_ms();
+    let pid = host_spawn_at(["./fkwu",job],[input,"",""]);
+    let exit = nothing?(pid) || pid <= 0 ? -1 : host_wait(pid);
+    let elapsed = host_monotonic_ms() - started;
+    let observed = sa-read(fo-file("end-to-end",owner));
+    sa-write(fo-file("end-to-end",owner),observed[0] == "complete" ? append(observed,[exit,elapsed]) :
+     append(cons("failed",observed[1:]),[exit,elapsed]));
+    print_str(af-guide());
+    exit == 0 ? 0 : form_error("observed run failed; retained source and open window: " + job);
+   };
+  }
+  def af-form(n) = fsl-string?(n) ? json-emit(json-node-string(fsc-unescape-str(substring(fsl-word(n),1,len(fsl-word(n)) - 1)))) :
+   fsl-word(n) != "" ? fsl-word(n) : str-join(["(",str-join-with(map(af-form,fsl-kids(n))," "),")"]);
+ }
+}
