@@ -1,0 +1,521 @@
+; dsv4-kernels-band.bml -- the DeepSeek-V4 driver's kernel set (form-stdlib/dsv4-kernels.fk): every source opens with the two fp pragmas, every kernel compiles on this Mac's GPU
+; through metal_pipeline once, and each kernel answers small deterministic inputs the way the oracle's fp64 arithmetic does.
+;
+; WHAT THIS PINS. dsv4-kernels.fk composes the restored emitters (mla-msl, dsv4-hc-msl, dsv4-moe-msl, dsv4-stack-real, dsv4-mla-real, dsv4-compressor, dsv4-kv-cache, mxfp8/mxfp4/iq2xxs/
+; q8-0/q2k and the order-match lanes) into ten units and adds the kernels the dispatch graph still needed (F16 embedding row, 32-lane F16 matvec, in-place RoPE, MXFP4 and IQ2_XXS expert
+; matvecs by device ids, id-weighted SwiGLU, slot sum, device argmax). This band writes the Form-built fixture (86 tensors, 1,515,232 bytes) under temp_dir, maps its tensors through
+; dsv4-bind.fk, feeds each kernel Park-Miller inputs rounded to f32 (so the GPU and the reference see the same numbers) and compares with the oracle's own functions on the same file
+; (dsv4-oracle-reference.bml, dsv4-numeric-reference.bml: fp64, no production MLA/HC/MoE recipe imported). The gate is the oracle harness's: nd = max|gpu - ref| / max|ref| below max(8 ne, 3e-5);
+; ne is the envelope a 1.4e-5 per-layer tilt opens in the reference (metal_dsv4_stack_oracle.sh above cmpOra, history 8a6f123d3^, read 2026-10-03) and a kernel alone is held to the floor 3e-5
+; (that harness holds its THIS-LAYER-ALONE gates there). Every output buffer is pre-filled with 0x5A bytes (f32 1.5e16, no value of any run) so a kernel that never ran reads as a huge nd.
+;
+; Verdict 1023 when every claim lands:
+;   1     text: every one of the ten sources starts with the pragma pair exactly, none uses `using namespace`, no kernel name repeats inside the six graph units, and the catalogue read from
+;         the sources is 95 kernels
+;   2     device: every kernel of every unit compiles through metal_pipeline (95 handles, all positive); a second open of the same sources returns the same 95 handles (compile once,
+;         handle kept)
+;   4     the pragmas bite on this device: the probe kernel a*b+c on a = b = 1 + 2^-12, c = -1 reads 973078528 (the unfused word) when wrapped by dkr-wrap and 973079552 (the fma word) when the
+;         same text is compiled without the pragma pair
+;   8     dense: the F16 embedding row (exact), the F16 matvec in both forms (compensated one thread and the lane fold) on blk.1.hc_attn_fn, the MXFP8 matvec on blk.0.attn_q_a, the grouped MXFP8
+;         matvec on blk.0.attn_output_a, and the four Q8_0 forms on the three-block fixture row, each within the gate of the oracle
+;   16    norms, rope and KV round: the weighted RMSNorm (wide and one thread), the head norm (wide and one thread), RoPE forward and inverse at layer 0 (plain base) and layer 1 (compressed base,
+;         YaRN ramp) against the oracle's own rotation factors, the KV fp8+f16 round (one thread and parallel) against dfo-kv-round
+;   32    attention: the three-stage split (scores, stats in both forms, acc) and the single mixed kernel over raw plus compressed arenas against dnr-heads, the no-compressed case, the cache append
+;         at a position and its refusal at the cap
+;   64    hyper-connection: broadcast, the wide no-weight norm, the Sinkhorn split (seq4) with fixture scale and base against dnr-hc-split, the stream sum, hc_post with an asymmetric combine
+;         against dnr-hc-post, the output-head gates
+;   128   MoE: biased top-k with the sentinel expert refused and the unbiased weights, the hash lookup of layer 0 and its weights, the clamped SwiGLU by ids (the clamp bites), the MXFP4 expert matvec
+;         by ids (gate/up shared input, down per-slot input) and the IQ2_XXS expert matvec by ids against dfo-expert-matrix, the slot sum
+;   256   the compressor's four kernels against the author twin dsv4-compressor.fk (the oracle holds no compressor: this is a twin, not an independent reference) at ratio 4 (coff 2) and ratio 2
+;         (coff 1): state, pool, norm, shift; and the device argmax (ties keep the earlier index, an all-NaN vector answers 0xFFFFFFFF, one group of 1024 threads over 129,280 values)
+;   512   the checks can fail: a transposed combine matrix reads far from the GPU's hc_post, the clamp forced off reads far from the GPU's id SwiGLU, weights taken from the biased score read far
+;         from the GPU's router weights, an unrun buffer reads as the sentinel, and the gate refuses a wrong length
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- every bit past 1 needs a live Metal device behind metal_pipeline and the handle door, bit 4 compiles two probe sources, and the fixture is written and read as a binary
+; file (write_file, read_file_slice). Light GPU: kernels of a few hundred threads over a 1.5 MB fixture. Never maps a model; writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk form-stdlib/dsv4-compressor.fk form-stdlib/f16-decode.fk form/form-stdlib/bml/dsv4-oracle-reference.bml
+section [form.bml] {
+ class Dsv4KernelsBand {
+  def dkb-bit(held, bit) = held ? bit : 0;
+  def dkb-has?(s, part) = str_find(s, part, 0) >= 0;
+  def dkb-q8-path() = "form/form-stdlib/tests/fixtures/q8-0-three-blocks.bin";
+  // Park-Miller inputs rounded to f32: the GPU is fed exactly the numbers the reference reads
+  def dkb-r32(x) = ln-f32-decode(md-f32-bits(x));
+  def dkb-xg(seed, i, n, amp) = i == n ? [] : cons(dkb-r32(amp * (1.0 * ((dsv4-pm-at(seed, i) / 256 % 20001) - 10000)) / 10000.0), dkb-xg(seed, i + 1, n, amp));
+  def dkb-x(seed, n, amp) = dkb-xg(seed, 0, n, amp);
+  def dkb-g(c, k) = record_get(c, k);
+  def dkb-vh(c, name) = record_get(dkb-g(c, "ix"), name)[1];
+  def dkb-p(c, name) = record_get(dkb-g(c, "ps"), name);
+  def dkb-plain(c, name) = dfo-plain(dkb-g(c, "r"), name, 0);
+  // one reading: print it and answer whether it is inside the gate
+  def dkb-chk(label, gpu, ref) {
+   let nd = dkr-nd(gpu, ref);
+   let said = print_str("  " ++ label ++ " nd " ++ nd.str());
+   nd < dkr-floor();
+  }
+  def dkb-rows(xs, w) = len(xs) == 0 ? [] : cons(xs[0:w], dkb-rows(xs[w:], w));
+  def dkb-cat(xss) = len(xss) == 0 ? [] : append(xss[0], dkb-cat(xss[1:]));
+
+  // ---- 1 ----------------------------------------------------------------------------------------------
+  def dkb-no-using?(us) = len(us) == 0 ? true : (!dkb-has?(us[0][1], "using namespace") && dkb-no-using?(us[1:]));
+  def dkb-all-pragma?(us) = len(us) == 0 ? true : (dkr-pragma-first?(us[0][1]) && dkb-all-pragma?(us[1:]));
+  def dkb-text() {
+   let us = dkr-units();
+   let names = dkr-all-names(us);
+   len(us) == 10 && dkb-all-pragma?(us) && dkb-no-using?(us) && !dkr-dup?(dkr-all-names(dkr-graph-units())) && len(names) == 95
+    && dkr-pragmas() == "#pragma clang fp reassociate(off)\n#pragma clang fp contract(off)\n";
+  }
+
+  // ---- 2 ----------------------------------------------------------------------------------------------
+  def dkb-hs(ps, names) = len(names) == 0 ? [] : cons(record_get(ps, names[0]), dkb-hs(ps, names[1:]));
+  def dkb-positive?(hs) = len(hs) == 0 ? true : (hs[0] > 0 && dkb-positive?(hs[1:]));
+  def dkb-unit-hs(ps, us) = len(us) == 0 ? [] : append(dkb-hs(ps, dkr-kernel-names(us[0][1])), dkb-unit-hs(ps, us[1:]));
+  def dkb-compiled(first, second, us) {
+   let a = dkb-unit-hs(first, us);
+   let b = dkb-unit-hs(second, us);
+   len(a) == 95 && dkb-positive?(a) && a == b;
+  }
+
+  // ---- 4: the contraction probe, compiled with and without the pragma pair
+  def dkb-probe-body() = "kernel void form_dsv4_contract_probe(device const float* v [[buffer(0)]], device float* out [[buffer(1)]], uint i [[thread_position_in_grid]]) { if (i != 0u) return; float p = v[0] * v[1]; out[0] = p + v[2]; } ";
+  def dkb-probe-word(src) {
+   let pipe = metal_pipeline(src, "form_dsv4_contract_probe");
+   let reg = dkr-reg-new();
+   let a = 1.000244140625;
+   let vb = dkr-buf-f32(reg, [a, a, 0.0 - 1.0]);
+   let ob = dkr-buf-empty(reg, 1);
+   let e = dkr-go(pipe, [vb, ob], [], 1);
+   let raw = metal_buf_read(ob, 0, 4);
+   let w = dkr-u32-at(raw, 0);
+   let left = dkr-reg-free(reg);
+   pipe > 0 && e == 1 && len(left) == 0 ? w : 0 - 1;
+  }
+  def dkb-pragma-bites() = dkb-probe-word(dkr-wrap(dkr-inc() ++ dkb-probe-body())) == 973078528 && dkb-probe-word(dkr-inc() ++ dkb-probe-body()) == 973079552;
+
+  // ---- 8: dense
+  def dkb-dense-embed(c) {
+   let reg = dkb-g(c, "reg");
+   let out = dkr-buf-empty(reg, 256);
+   let e = dkr-go(dkb-p(c, "form_dsv4_embed_f16"), [dkb-vh(c, "token_embd.weight"), out], [5, 256], 256);
+   e == 1 && dkb-chk("embed row 5 (exact)", dkr-read(out, 256), dfo-plain(dkb-g(c, "r"), "token_embd.weight", 5));
+  }
+  def dkb-dense-f16(c) {
+   let reg = dkb-g(c, "reg");
+   let x = dkb-x(11, 1024, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let h = dkb-vh(c, "blk.1.hc_attn_fn.weight");
+   let o1 = dkr-buf-empty(reg, 24);
+   let o2 = dkr-buf-empty(reg, 24);
+   let e1 = dkr-go(dkb-p(c, "form_dsv4_f16_matvec_lane"), [h, xb, o1], [24, 1024], 24 * 32);
+   let e2 = dkr-go(dkb-p(c, "form_dsv4_f16_matvec"), [h, xb, o2], [24, 1024], 24);
+   let ref = dfo-f16-matrix(dkb-g(c, "r"), "blk.1.hc_attn_fn.weight", x);
+   e1 == 1 && e2 == 1 && dkb-chk("f16 matvec lane 24x1024", dkr-read(o1, 24), ref) && dkb-chk("f16 matvec compensated 24x1024", dkr-read(o2, 24), ref);
+  }
+  def dkb-dense-mx8(c) {
+   let reg = dkb-g(c, "reg");
+   let x = dkb-x(12, 256, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let o1 = dkr-buf-empty(reg, 64);
+   let e1 = dkr-go(dkb-p(c, "form_dsv4_mx8_matvec"), [dkb-vh(c, "blk.0.attn_q_a.weight"), xb, o1], [64, 256, 16384], 64 * 32);
+   let o2 = dkr-buf-empty(reg, 64);
+   let e2 = dkr-go(dkb-p(c, "form_dsv4_mx8_matvec_grouped"), [dkb-vh(c, "blk.0.attn_output_a.weight"), xb, o2], [64, 128, 8192, 32], 64 * 32);
+   e1 == 1 && e2 == 1 && dkb-chk("mxfp8 matvec blk.0.attn_q_a 64x256", dkr-read(o1, 64), dfo-mx8(dkb-g(c, "r"), "blk.0.attn_q_a.weight", x))
+    && dkb-chk("mxfp8 grouped blk.0.attn_output_a 2 groups of 32 rows", dkr-read(o2, 64), dfo-out-a(dkb-g(c, "r"), "blk.0.attn_output_a.weight", x, dfo-geometry(dkb-g(c, "r"))));
+  }
+  // the one Q8_0 row of three blocks: d_b * sum q_i x_i in fp64
+  def dkb-q8-f16(src, b) = dfo-f16(str_byte_at(src, 34 * b) + 256 * str_byte_at(src, 34 * b + 1));
+  def dkb-q8-s8(v) = v >= 128 ? v - 256 : v;
+  def dkb-q8-block(src, b, x, i, acc) = i == 32 ? acc : dkb-q8-block(src, b, x, i + 1, acc + (1.0 * dkb-q8-s8(str_byte_at(src, 34 * b + 2 + i))) * x[32 * b + i]);
+  def dkb-q8-ref(src, x, b, acc) = b == 3 ? acc : dkb-q8-ref(src, x, b + 1, acc + dkb-q8-f16(src, b) * dkb-q8-block(src, b, x, 0, 0.0));
+  def dkb-dense-q8(c) {
+   let reg = dkb-g(c, "reg");
+   let src = read_file_slice(dkb-q8-path(), 0, 102);
+   let wb = dkr-buf-bytes(reg, src);
+   let x = dkb-x(71, 96, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let o1 = dkr-buf-empty(reg, 1);
+   let o2 = dkr-buf-empty(reg, 1);
+   let o3 = dkr-buf-empty(reg, 1);
+   let o4 = dkr-buf-empty(reg, 1);
+   let e1 = dkr-go(dkb-p(c, "form_dsv4_q80_matvec_1t"), [wb, xb, o1], [1, 96], 1);
+   let e2 = dkr-go(dkb-p(c, "form_dsv4_q80_matvec_lane"), [wb, xb, o2], [1, 96], 32);
+   let e3 = dkr-go(dkb-p(c, "form_dsv4_q80_matvec_grouped"), [wb, xb, o3], [1, 96, 96, 1], 32);
+   let e4 = dkr-go(dkb-p(c, "form_dsv4_q80_matvec_grouped_wide"), [wb, xb, o4], [1, 96, 96, 1], 32);
+   let ref = [dkb-q8-ref(src, x, 0, 0.0)];
+   e1 == 1 && e2 == 1 && e3 == 1 && e4 == 1 && dkb-chk("q8_0 one thread", dkr-read(o1, 1), ref) && dkb-chk("q8_0 lane", dkr-read(o2, 1), ref)
+    && dkb-chk("q8_0 grouped", dkr-read(o3, 1), ref) && dkb-chk("q8_0 grouped wide", dkr-read(o4, 1), ref);
+  }
+  def dkb-dense(c) = dkb-dense-embed(c) && dkb-dense-f16(c) && dkb-dense-mx8(c) && dkb-dense-q8(c);
+
+  // ---- 16: norms, rope, kv round
+  def dkb-eps() = 0.000001;
+  def dkb-norms(c) {
+   let reg = dkb-g(c, "reg");
+   let x = dkb-x(21, 256, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let wh = dkb-vh(c, "blk.0.attn_norm.weight");
+   let o1 = dkr-buf-empty(reg, 256);
+   let o2 = dkr-buf-empty(reg, 256);
+   let e1 = dkr-go-tg(dkb-p(c, "form_mla_rmsnorm_wide_f32"), [xb, wh, o1], [256, dkr-f(dkb-eps())], 1, 256);
+   let e2 = dkr-go(dkb-p(c, "form_mla_rmsnorm_f32"), [xb, wh, o2], [256, dkr-f(dkb-eps())], 1);
+   let ref = dnr-rms-weight(x, dkb-plain(c, "blk.0.attn_norm.weight"), dkb-eps());
+   let q = dkb-x(22, 256, 2.0);
+   let qb = dkr-buf-f32(reg, q);
+   let o3 = dkr-buf-empty(reg, 256);
+   let o4 = dkr-buf-empty(reg, 256);
+   let e3 = dkr-go-tg(dkb-p(c, "form_mla_headrms_wide_f32"), [qb, o3], [2, 128, dkr-f(dkb-eps())], 2, 128);
+   let e4 = dkr-go(dkb-p(c, "form_mla_headrms_f32"), [qb, o4], [2, 128, dkr-f(dkb-eps())], 2);
+   let ref2 = dnr-head-rms(q, 128, dkb-eps());
+   e1 == 1 && e2 == 1 && e3 == 1 && e4 == 1 && dkb-chk("rmsnorm wide 256 (blk.0.attn_norm gain)", dkr-read(o1, 256), ref) && dkb-chk("rmsnorm one thread 256", dkr-read(o2, 256), ref)
+    && dkb-chk("head rmsnorm wide 2x128", dkr-read(o3, 256), ref2) && dkb-chk("head rmsnorm one thread 2x128", dkr-read(o4, 256), ref2);
+  }
+  // rope at layer il, position pos, direction inv (0 forward, 1 inverse): the kernel's table against the oracle's factors (the file's own rope parameters)
+  def dkb-rope-one(c, il, pos, inv) {
+   let reg = dkb-g(c, "reg");
+   let v = dkb-x(23 + il, 256, 2.0);
+   let vb = dkr-buf-f32(reg, v);
+   let fb = dkr-buf-f32(reg, dkr-layer-freqs(dkb-g(c, "m"), il));
+   let sign = inv == 1 ? 0.0 - 1.0 : 1.0;
+   let e = dkr-go(dkb-p(c, "form_dsv4_rope_f32"), [vb, fb], [2, 128, 64, dkr-f(1.0 * pos), dkr-f(sign)], 2 * 32);
+   let rp = dfo-rope-params(dkb-g(c, "r"), il);
+   let ref = dfo-rope-heads(v, 128, 64, dfo-rope-factors(rp, 64, pos, inv));
+   e == 1 && dkb-chk("rope layer " ++ il.str() ++ " pos " ++ pos.str() ++ (inv == 1 ? " inverse" : " forward"), dkr-read(vb, 256), ref);
+  }
+  def dkb-rope(c) = dkb-rope-one(c, 0, 3, 0) && dkb-rope-one(c, 0, 7, 1) && dkb-rope-one(c, 1, 3, 0) && dkb-rope-one(c, 1, 11, 1) && dkb-rope-one(c, 2, 5, 0);
+  def dkb-kvround(c) {
+   let reg = dkb-g(c, "reg");
+   let v = dkb-x(24, 128, 3.0);
+   let vb = dkr-buf-f32(reg, v);
+   let o1 = dkr-buf-empty(reg, 128);
+   let o2 = dkr-buf-empty(reg, 128);
+   let e1 = dkr-go(dkb-p(c, "form_dsv4_kv_fp8_f16_round"), [vb, o1], [128, 64], 1);
+   let e2 = dkr-go-tg(dkb-p(c, "form_dsv4_kv_fp8_f16_round_par"), [vb, o2], [128, 64], 1, 128);
+   let ref = dfo-kv-round(v, 128, 64);
+   e1 == 1 && e2 == 1 && dkb-chk("kv fp8+f16 round one thread", dkr-read(o1, 128), ref) && dkb-chk("kv fp8+f16 round parallel", dkr-read(o2, 128), ref);
+  }
+  def dkb-norm-rope(c) = dkb-norms(c) && dkb-rope(c) && dkb-kvround(c);
+
+  // ---- 32: attention
+  def dkb-scale() = dkb-r32(1.0 / math_sqrt(128.0));
+  def dkb-attn-split(c, label, nrows, ncomp, seed) {
+   let reg = dkb-g(c, "reg");
+   let hd = 128;
+   let nh = 2;
+   let tot = nrows + ncomp;
+   let q = dkb-x(seed, nh * hd, 2.0);
+   let rows = dkb-x(seed + 1, nrows * hd, 2.0);
+   let crows = ncomp == 0 ? [] : dkb-x(seed + 2, ncomp * hd, 2.0);
+   let qb = dkr-buf-f32(reg, q);
+   let rb = dkr-buf-f32(reg, rows);
+   let cb = ncomp == 0 ? rb : dkr-buf-f32(reg, crows);
+   let sk = dkb-vh(c, "blk.1.attn_sinks.weight");
+   let sco = dkr-buf-empty(reg, nh * tot);
+   let ex = dkr-buf-empty(reg, nh * tot);
+   let inv = dkr-buf-empty(reg, nh);
+   let out1 = dkr-buf-empty(reg, nh * hd);
+   let out2 = dkr-buf-empty(reg, nh * hd);
+   let sc = dkr-f(dkb-scale());
+   let e1 = dkr-go(dkb-p(c, "form_mla_attend_scores"), [qb, rb, cb, sco], [nh, hd, nrows, ncomp, sc], nh * tot);
+   let e2 = dkr-go(dkb-p(c, "form_mla_attend_stats"), [sco, sk, ex, inv], [nh, tot], nh);
+   let e3 = dkr-go(dkb-p(c, "form_mla_attend_acc"), [rb, cb, ex, inv, out1], [nh, hd, nrows, ncomp], nh * hd);
+   let ref = dnr-heads(q, append(dkb-rows(rows, hd), dkb-rows(crows, hd)), hd, dkb-scale(), dkb-plain(c, "blk.1.attn_sinks.weight"));
+   let ok1 = e1 == 1 && e2 == 1 && e3 == 1 && dkb-chk(label ++ " split (stats one thread)", dkr-read(out1, nh * hd), ref);
+   let sco2 = dkr-buf-empty(reg, nh * tot);
+   let ex2 = dkr-buf-empty(reg, nh * tot);
+   let inv2 = dkr-buf-empty(reg, nh);
+   let f1 = dkr-go(dkb-p(c, "form_mla_attend_scores"), [qb, rb, cb, sco2], [nh, hd, nrows, ncomp, sc], nh * tot);
+   let f2 = dkr-go(dkb-p(c, "form_mla_attend_stats_sg"), [sco2, sk, ex2, inv2], [nh, tot], nh * 32);
+   let f3 = dkr-go(dkb-p(c, "form_mla_attend_acc"), [rb, cb, ex2, inv2, out2], [nh, hd, nrows, ncomp], nh * hd);
+   let ok2 = f1 == 1 && f2 == 1 && f3 == 1 && dkb-chk(label ++ " split (stats on a simdgroup)", dkr-read(out2, nh * hd), ref);
+   let out3 = dkr-buf-empty(reg, nh * hd);
+   let g1 = dkr-go(dkb-p(c, "form_mla_attend_mixed_f32"), [qb, rb, cb, out3, sk], [nh, hd, nrows, ncomp, sc], nh);
+   let ok3 = g1 == 1 && dkb-chk(label ++ " single mixed kernel", dkr-read(out3, nh * hd), ref);
+   ok1 && ok2 && ok3;
+  }
+  def dkb-append(c) {
+   let reg = dkb-g(c, "reg");
+   let arena = dkr-buf-empty(reg, 4 * 128);
+   let row = dkb-x(34, 128, 2.0);
+   let rb = dkr-buf-f32(reg, row);
+   let e1 = dkr-go(dkb-p(c, "form_dkv_append_f32"), [rb, arena], [128, 2, 4], 128);
+   let e2 = dkr-go(dkb-p(c, "form_dkv_append_f32"), [rb, arena], [128, 4, 4], 128);
+   let all = dkr-read(arena, 512);
+   let at2 = all[256:384];
+   e1 == 1 && e2 == 1 && at2 == row && all[0] > 1.0e15 && all[128] > 1.0e15 && all[384] > 1.0e15 && all[511] > 1.0e15;
+  }
+  def dkb-attn(c) = dkb-attn-split(c, "attention 5 raw + 3 compressed", 5, 3, 31) && dkb-attn-split(c, "attention 4 raw, none compressed", 4, 0, 37) && dkb-append(c);
+
+  // ---- 64: hyper-connection
+  def dkb-eps-hc() = 0.000001;
+  def dkb-hc(c) {
+   let reg = dkb-g(c, "reg");
+   let resid = dkb-x(41, 1024, 2.0);
+   let x = dkb-x(42, 256, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let rb = dkr-buf-f32(reg, resid);
+   let o1 = dkr-buf-empty(reg, 1024);
+   let e1 = dkr-go(dkb-p(c, "form_hc_broadcast_f32"), [xb, o1], [4, 256], 1024);
+   let ok1 = e1 == 1 && dkb-chk("hc broadcast 4x256", dkr-read(o1, 1024), dkb-cat([x, x, x, x]));
+   let o2 = dkr-buf-empty(reg, 1024);
+   let e2 = dkr-go-tg(dkb-p(c, "form_hc_rmsnorm_nw_wide_f32"), [rb, o2], [1024, dkr-f(dkb-eps())], 1, 256);
+   let ok2 = e2 == 1 && dkb-chk("hc rmsnorm no weight wide 1024", dkr-read(o2, 1024), dnr-rms(resid, dkb-eps()));
+   // the split: asymmetric mix, fixture scale and base
+   let mix = dkb-x(43, 24, 2.0);
+   let mb = dkr-buf-f32(reg, mix);
+   let o3 = dkr-buf-empty(reg, 24);
+   let e3 = dkr-go(dkb-p(c, "form_hc_split_seq4_f32"), [mb, dkb-vh(c, "blk.1.hc_attn_scale.weight"), dkb-vh(c, "blk.1.hc_attn_base.weight"), o3], [4, 20, dkr-f(dkb-eps-hc())], 1);
+   let split = dnr-hc-split(mix, dkb-plain(c, "blk.1.hc_attn_scale.weight"), dkb-plain(c, "blk.1.hc_attn_base.weight"), 4, 20, dkb-eps-hc());
+   let ok3 = e3 == 1 && dkb-chk("hc split sinkhorn 20 iterations (seq4)", dkr-read(o3, 24), split);
+   let sg = dkr-read(o3, 24);
+   let pre = sg[0:4];
+   let post = sg[4:8];
+   let comb = sg[8:24];
+   let wb = dkr-buf-f32(reg, pre);
+   let o4 = dkr-buf-empty(reg, 256);
+   let e4 = dkr-go(dkb-p(c, "form_hc_wsum_f32"), [rb, wb, o4], [4, 256], 256);
+   let ok4 = e4 == 1 && dkb-chk("hc stream sum 4x256", dkr-read(o4, 256), dnr-hc-weighted(resid, pre, 256, 4));
+   let block = dkb-x(44, 256, 2.0);
+   let bb = dkr-buf-f32(reg, block);
+   let pb = dkr-buf-f32(reg, post);
+   let cbuf = dkr-buf-f32(reg, comb);
+   let o5 = dkr-buf-empty(reg, 1024);
+   let e5 = dkr-go(dkb-p(c, "form_hc_post_f32"), [bb, rb, pb, cbuf, o5], [4, 256], 1024);
+   let ok5 = e5 == 1 && dkb-chk("hc post 4x256 with the asymmetric combine", dkr-read(o5, 1024), dnr-hc-post(block, resid, post, comb, 256, 4));
+   let hp = dkb-x(45, 4, 2.0);
+   let hb = dkr-buf-f32(reg, hp);
+   let o6 = dkr-buf-empty(reg, 4);
+   let e6 = dkr-go(dkb-p(c, "form_hc_headw_f32"), [hb, dkb-vh(c, "output_hc_scale.weight"), dkb-vh(c, "output_hc_base.weight"), o6], [4, dkr-f(dkb-eps-hc())], 4);
+   let ref6 = dnr-gates(dnr-mix(hp, dkb-plain(c, "output_hc_base.weight"), dkb-plain(c, "output_hc_scale.weight")[0], 0, 4, 0), 1.0, dkb-eps-hc());
+   let ok6 = e6 == 1 && dkb-chk("hc output-head weights", dkr-read(o6, 4), ref6);
+   ok1 && ok2 && ok3 && ok4 && ok5 && ok6;
+  }
+
+  // ---- 128: MoE
+  def dkb-wscale() = 1.5;
+  def dkb-sum(xs) = len(xs) == 0 ? 0.0 : xs[0] + dkb-sum(xs[1:]);
+  def dkb-topk(c) {
+   let reg = dkb-g(c, "reg");
+   let logits = [0.30, 0.34, 0.0 - 2.0, 3.0];
+   let lb = dkr-buf-f32(reg, logits);
+   let bias = dkb-vh(c, "blk.1.exp_probs_b.bias");
+   let probs = dkr-buf-empty(reg, 4);
+   let sc = dkr-buf-empty(reg, 4);
+   let ids = dkr-buf-empty(reg, 2);
+   let wts = dkr-buf-empty(reg, 2);
+   let e1 = dkr-go(dkb-p(c, "form_dsv4_topk_probs"), [lb, bias, probs, sc], [4], 4);
+   let e2 = dkr-go(dkb-p(c, "form_dsv4_topk_select"), [probs, sc, ids, wts], [4, 2, dkr-f(dkb-wscale())], 1);
+   let pr = dfo-probs(logits);
+   let biasRef = dkb-plain(c, "blk.1.exp_probs_b.bias");
+   let sel = dnr-top(dnr-add(pr, biasRef), 2);
+   let raw = dnr-gather(pr, sel);
+   let w = dnr-router-weights(raw, dfo-max(dnr-sum(raw), 0.00006103515625), dkb-wscale());
+   let gi = dkr-read-u32(ids, 2);
+   // expert 3 has the largest probability by far and carries the -1e30 sentinel: the selection must refuse it, and the two chosen are distinct
+   e1 == 1 && e2 == 1 && gi == sel && dkb-chk("router probs", dkr-read(probs, 4), pr) && dkb-chk("router weights (unbiased probs, top-k by biased score)", dkr-read(wts, 2), w) && !dkr-member?(3, sel) && sel[0] != sel[1] && pr[3] > pr[0] && pr[3] > pr[1];
+  }
+  def dkb-topk-falsifier(c) {
+   let logits = [0.30, 0.34, 0.0 - 2.0, 3.0];
+   let pr = dfo-probs(logits);
+   let biasRef = dkb-plain(c, "blk.1.exp_probs_b.bias");
+   let scored = dnr-add(pr, biasRef);
+   let sel = dnr-top(scored, 2);
+   let raw = dnr-gather(pr, sel);
+   let good = dnr-router-weights(raw, dnr-sum(raw), dkb-wscale());
+   let rawb = dnr-gather(scored, sel);
+   let bad = dnr-router-weights(rawb, dnr-sum(rawb), dkb-wscale());
+   dkr-nd(good, bad) > 0.0001;
+  }
+  def dkb-hash(c) {
+   let reg = dkb-g(c, "reg");
+   let ids = dkr-buf-empty(reg, 2);
+   let e1 = dkr-go(dkb-p(c, "form_dsv4_hash_select"), [dkb-vh(c, "blk.0.ffn_gate_tid2eid.weight"), ids], [5, 2], 2);
+   let gi = dkr-read-u32(ids, 2);
+   let ref = dfo-i32-row(dkb-g(c, "r"), "blk.0.ffn_gate_tid2eid.weight", 5);
+   let logits = [0.5, 0.0 - 1.0, 0.25, 1.75];
+   let lb = dkr-buf-f32(reg, logits);
+   let probs = dkr-buf-empty(reg, 4);
+   let wts = dkr-buf-empty(reg, 2);
+   let e2 = dkr-go(dkb-p(c, "form_dsv4_hash_probs"), [lb, probs], [4], 4);
+   let e3 = dkr-go(dkb-p(c, "form_dsv4_hash_wts"), [probs, ids, wts], [2, dkr-f(dkb-wscale())], 1);
+   let pr = dfo-probs(logits);
+   let raw = dnr-gather(pr, ref);
+   let w = dnr-router-weights(raw, dfo-max(dnr-sum(raw), 0.00006103515625), dkb-wscale());
+   e1 == 1 && e2 == 1 && e3 == 1 && gi == ref && len(ref) == 2 && ref[0] != ref[1] && dkb-chk("hash probs", dkr-read(probs, 4), pr) && dkb-chk("hash weights", dkr-read(wts, 2), w);
+  }
+  def dkb-swiglu(c) {
+   let reg = dkb-g(c, "reg");
+   let gate = dkb-x(55, 32, 12.0);
+   let up = dkb-x(56, 32, 12.0);
+   let w = [dkb-r32(0.7), dkb-r32(1.3)];
+   let gb = dkr-buf-f32(reg, gate);
+   let ub = dkr-buf-f32(reg, up);
+   let wb = dkr-buf-f32(reg, w);
+   let out = dkr-buf-empty(reg, 32);
+   let e = dkr-go(dkb-p(c, "form_dsv4_swiglu_id"), [gb, ub, wb, out], [16, 2, dkr-f(10.0)], 32);
+   let ref = append(dnr-mid(gate[0:16], up[0:16], w[0], 10.0), dnr-mid(gate[16:32], up[16:32], w[1], 10.0));
+   e == 1 && dkb-chk("swiglu by ids, lim 10 (gate and up reach +-12)", dkr-read(out, 32), ref);
+  }
+  def dkb-swiglu-falsifier() {
+   let gate = dkb-x(55, 32, 12.0);
+   let up = dkb-x(56, 32, 12.0);
+   let w = [dkb-r32(0.7), dkb-r32(1.3)];
+   let on = append(dnr-mid(gate[0:16], up[0:16], w[0], 10.0), dnr-mid(gate[16:32], up[16:32], w[1], 10.0));
+   let off = append(dnr-mid(gate[0:16], up[0:16], w[0], 0.0), dnr-mid(gate[16:32], up[16:32], w[1], 0.0));
+   dkr-nd(on, off) > 0.001;
+  }
+  // an expert matvec by ids: kernel against dfo-expert-matrix per slot
+  def dkb-expert-ref(c, key, ids, x, xs, rows, slot) = slot == len(ids) ? [] : append(dfo-expert-matrix(dkb-g(c, "r"), key, ids[slot], xs == 0 ? x : x[slot * xs:(slot + 1) * xs]), dkb-expert-ref(c, key, ids, x, xs, rows, slot + 1));
+  def dkb-expert-one(c, label, kernel, key, ids, x, xs, rows, cols) {
+   let reg = dkb-g(c, "reg");
+   let ib = dkr-buf-u32(reg, ids);
+   let xb = dkr-buf-f32(reg, x);
+   let out = dkr-buf-empty(reg, len(ids) * rows);
+   let e = dkr-go(dkb-p(c, kernel), [dkb-vh(c, key), xb, out, ib], [rows, cols, len(ids), xs], len(ids) * rows * 32);
+   e == 1 && dkb-chk(label, dkr-read(out, len(ids) * rows), dkb-expert-ref(c, key, ids, x, xs, rows, 0));
+  }
+  def dkb-experts(c) {
+   let x256 = dkb-x(52, 256, 2.0);
+   let mids = dkb-x(53, 128, 2.0);
+   let mids256 = dkb-x(57, 512, 2.0);
+   dkb-expert-one(c, "mxfp4 gate by ids [2,0] blk.1 (shared input)", "form_dsv4_mx4_matvec_id", "blk.1.ffn_gate_exps.weight", [2, 0], x256, 0, 64, 256)
+    && dkb-expert-one(c, "mxfp4 up by ids [3,1] blk.2 (shared input)", "form_dsv4_mx4_matvec_id", "blk.2.ffn_up_exps.weight", [3, 1], x256, 0, 64, 256)
+    && dkb-expert-one(c, "mxfp4 down by ids [2,0] blk.1 (input per slot)", "form_dsv4_mx4_matvec_id", "blk.1.ffn_down_exps.weight", [2, 0], mids, 64, 256, 64)
+    && dkb-expert-one(c, "iq2_xxs gate by ids [1,3] blk.0 (shared input)", "form_dsv4_iq2_matvec_id", "blk.0.ffn_gate_exps.weight", [1, 3], x256, 0, 256, 256)
+    && dkb-expert-one(c, "iq2_xxs down by ids [3,0] blk.0 (input per slot)", "form_dsv4_iq2_matvec_id", "blk.0.ffn_down_exps.weight", [3, 0], mids256, 256, 256, 256);
+  }
+  def dkb-sumslots(c) {
+   let reg = dkb-g(c, "reg");
+   let down = dkb-x(58, 32, 2.0);
+   let shared = dkb-x(59, 16, 2.0);
+   let db = dkr-buf-f32(reg, down);
+   let sb = dkr-buf-f32(reg, shared);
+   let out = dkr-buf-empty(reg, 16);
+   let e = dkr-go(dkb-p(c, "form_dsv4_sum_slots"), [db, sb, out], [16, 2], 16);
+   e == 1 && dkb-chk("slot sum plus shared", dkr-read(out, 16), dnr-add(dnr-add(down[0:16], down[16:32]), shared));
+  }
+  def dkb-moe(c) = dkb-topk(c) && dkb-hash(c) && dkb-swiglu(c) && dkb-experts(c) && dkb-sumslots(c);
+
+  // ---- 256: compressor against its twin, argmax
+  // the flat F16 ape of a layer: ratio rows of width floats
+  def dkb-ape-rows(c, key, k, n) = k == n ? [] : append(dfo-plain(dkb-g(c, "r"), key, k), dkb-ape-rows(c, key, k + 1, n));
+  def dkb-comp-feed(c, il, ratio, width, hd, pos, tw, skv, ssc, kvs, scs, ape) {
+   // one token: state write on the device and the twin's update, same inputs
+   let reg = dkb-g(c, "reg");
+   let kvb = dkr-buf-f32(reg, kvs[pos]);
+   let scb = dkr-buf-f32(reg, scs[pos]);
+   let apeh = dkb-vh(c, "blk." ++ il.str() ++ ".attn_compressor_ape.weight");
+   let row = dcp-row(ratio, pos);
+   let e = dkr-go(dkb-p(c, "form_dsv4_comp_state_f32"), [kvb, scb, apeh, skv, ssc], [width, row, pos % ratio], width);
+   e == 1 ? dcp-update(tw, ratio, hd, pos, kvs[pos], scs[pos], ape) : nothing();
+  }
+  def dkb-comp-run(c, il, ratio, seed) {
+   let reg = dkb-g(c, "reg");
+   let hd = 128;
+   let coff = dcp-coff(ratio);
+   let width = coff * hd;
+   let n = dcp-nrows(ratio) * width;
+   let skv = dkr-buf-empty(reg, n);
+   let ssc = dkr-buf-empty(reg, n);
+   let e0 = dkr-go(dkb-p(c, "form_dsv4_comp_init_f32"), [skv, ssc], [n], n);
+   let tw0 = dcp-state-new(ratio, hd);
+   let kvs = dkb-rows(dkb-x(seed, ratio * width, 2.0), width);
+   let scs = dkb-rows(dkb-x(seed + 1, ratio * width, 2.0), width);
+   let ape = dkb-ape-rows(c, "blk." ++ il.str() ++ ".attn_compressor_ape.weight", 0, ratio);
+   let tw1 = dkb-comp-feed(c, il, ratio, width, hd, 0, tw0, skv, ssc, kvs, scs, ape);
+   let tw2 = dkb-comp-feed(c, il, ratio, width, hd, 1, tw1, skv, ssc, kvs, scs, ape);
+   let tw3 = ratio == 2 ? tw2 : dkb-comp-feed(c, il, ratio, width, hd, 2, tw2, skv, ssc, kvs, scs, ape);
+   let tw4 = ratio == 2 ? tw3 : dkb-comp-feed(c, il, ratio, width, hd, 3, tw3, skv, ssc, kvs, scs, ape);
+   let okState = e0 == 1 && !nothing?(tw4) && dkb-chk("compressor state ratio " ++ ratio.str() ++ " kv", dkr-read(skv, n), dcp-state-kv(tw4)) && dkb-chk("compressor state ratio " ++ ratio.str() ++ " score", dkr-read(ssc, n), dcp-state-score(tw4));
+   let pooled = dkr-buf-empty(reg, hd);
+   let e1 = dkr-go(dkb-p(c, "form_dsv4_comp_pool_f32"), [skv, ssc, pooled], [hd, ratio], hd);
+   let refPool = dcp-pool(tw4, ratio, hd);
+   let okPool = e1 == 1 && dkb-chk("compressor pool ratio " ++ ratio.str(), dkr-read(pooled, hd), refPool);
+   let normed = dkr-buf-empty(reg, hd);
+   let e2 = dkr-go-tg(dkb-p(c, "form_mla_rmsnorm_wide_f32"), [pooled, dkb-vh(c, "blk." ++ il.str() ++ ".attn_compressor_norm.weight"), normed], [hd, dkr-f(dkb-eps())], 1, 128);
+   let refNorm = dcp-norm(refPool, dkb-plain(c, "blk." ++ il.str() ++ ".attn_compressor_norm.weight"), dkb-eps());
+   let okNorm = e2 == 1 && dkb-chk("compressor norm ratio " ++ ratio.str(), dkr-read(normed, hd), refNorm);
+   let e3 = dkr-go(dkb-p(c, "form_dsv4_comp_shift_f32"), [skv, ssc], [width, ratio], ratio * width);
+   let sh = dcp-shift(tw4, ratio, hd);
+   let okShift = ratio == 2 ? true : (e3 == 1 && dkb-chk("compressor shift ratio 4 kv", dkr-read(skv, n), dcp-state-kv(sh)) && dkb-chk("compressor shift ratio 4 score", dkr-read(ssc, n), dcp-state-score(sh)));
+   okState && okPool && okNorm && okShift;
+  }
+  // the argmax: ties, the earlier index, an all-NaN vector, and a vocabulary-sized vector with one group of 1024
+  def dkb-argmax-run(c, vals, tpg) {
+   let reg = dkb-g(c, "reg");
+   let xb = dkr-buf-f32(reg, vals);
+   let oi = dkr-buf-empty(reg, 1);
+   let ov = dkr-buf-empty(reg, 1);
+   let e = dkr-go-tg(dkb-p(c, "form_dsv4_argmax_f32"), [xb, oi, ov], [len(vals)], 1, tpg);
+   e == 1 ? [dkr-read-u32(oi, 1)[0], dkr-read(ov, 1)[0]] : [0 - 1, 0.0];
+  }
+  def dkb-set(xs, i, v) = append(xs[0:i], cons(v, xs[i + 1:]));
+  def dkb-argmax(c) {
+   let reg = dkb-g(c, "reg");
+   let base = dkb-x(81, 1000, 1.0);
+   let tied = dkb-set(dkb-set(dkb-set(base, 700, 5.0), 300, 5.0), 999, 4.9);
+   let a1 = dkb-argmax-run(c, tied, 256);
+   let a2 = dkb-argmax-run(c, dkb-set(dkb-x(82, 32, 1.0), 17, 3.0), 256);
+   let nanv = [2143289344, 2143289344, 2143289344, 2143289344, 2143289344, 2143289344, 2143289344, 2143289344];
+   let nb = dkr-buf-u32(reg, nanv);
+   let oi = dkr-buf-empty(reg, 1);
+   let ov = dkr-buf-empty(reg, 1);
+   let en = dkr-go-tg(dkb-p(c, "form_dsv4_argmax_f32"), [nb, oi, ov], [8], 1, 256);
+   let nanIdx = dkr-read-u32(oi, 1)[0];
+   // 129,280 values (the real vocabulary): all equal (the earlier index must win), then one larger value written at 100,000
+   let big = dkr-buf-empty(reg, 129280);
+   let oi2 = dkr-buf-empty(reg, 1);
+   let ov2 = dkr-buf-empty(reg, 1);
+   let eb1 = dkr-go-tg(dkb-p(c, "form_dsv4_argmax_f32"), [big, oi2, ov2], [129280], 1, 1024);
+   let tieIdx = dkr-read-u32(oi2, 1)[0];
+   let wr = metal_buf_write(big, 400000, dkr-f32-bytes([2.0e16]));
+   let eb2 = dkr-go-tg(dkb-p(c, "form_dsv4_argmax_f32"), [big, oi2, ov2], [129280], 1, 1024);
+   let bigIdx = dkr-read-u32(oi2, 1)[0];
+   let said = print_str("  argmax tied " ++ a1.str() ++ " small " ++ a2.str() ++ " nan " ++ nanIdx.str() ++ " vocab tie " ++ tieIdx.str() ++ " vocab planted " ++ bigIdx.str());
+   a1[0] == 300 && a1[1] == 5.0 && a2[0] == 17 && a2[1] == 3.0 && en == 1 && nanIdx == 4294967295 && eb1 == 1 && tieIdx == 0 && eb2 == 1 && bigIdx == 100000;
+  }
+  def dkb-comp-argmax(c) = dkb-comp-run(c, 1, 4, 61) && dkb-comp-run(c, 2, 2, 65) && dkb-argmax(c);
+
+  // ---- 512: the checks can fail
+  def dkb-transposed(comb) = [comb[0], comb[4], comb[8], comb[12], comb[1], comb[5], comb[9], comb[13], comb[2], comb[6], comb[10], comb[14], comb[3], comb[7], comb[11], comb[15]];
+  def dkb-falsifiers(c) {
+   let resid = dkb-x(41, 1024, 2.0);
+   let mix = dkb-x(43, 24, 2.0);
+   let split = dnr-hc-split(mix, dkb-plain(c, "blk.1.hc_attn_scale.weight"), dkb-plain(c, "blk.1.hc_attn_base.weight"), 4, 20, dkb-eps-hc());
+   let block = dkb-x(44, 256, 2.0);
+   let post = split[4:8];
+   let comb = split[8:24];
+   let right = dnr-hc-post(block, resid, post, comb, 256, 4);
+   let wrong = dnr-hc-post(block, resid, post, dkb-transposed(comb), 256, 4);
+   let sentinelBuf = dkr-f32s(dkr-sentinel(16), 4);
+   dkr-nd(right, wrong) > 0.001 && dkb-topk-falsifier(c) && dkb-swiglu-falsifier() && sentinelBuf[0] > 1.0e15 && dkr-nd(sentinelBuf, [0.1, 0.1, 0.1, 0.1]) > 1.0e9
+    && dkr-nd([1.0, 2.0], [1.0, 2.0, 3.0]) > 1.0e29 && dkr-nd([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == 0.0 && !dkr-within?([1.0, 2.0, 3.0001], [1.0, 2.0, 3.0]);
+  }
+ }
+ let root = temp_dir() ++ "/dsv4-kernels-band-" ++ now_unix_ms().str();
+ let path = root ++ ".gguf";
+ let wrote = dfx-write(path);
+ let r = dfo-open(path);
+ let m = dvl-open(read_file_slice(path, 0, 7168));
+ let live0 = dvb-live();
+ let views = dvb-open(path, dvb-plan-all(m));
+ let ix = dvb-index(views);
+ let reg = dkr-reg-new();
+ let all = dkr-open-pipes(dkr-units());
+ let c = record_new(0, "r", r, "m", m, "ix", ix, "ps", all, "reg", reg);
+ let c1 = dkb-bit(try dkb-text() catch false, 1);
+ let again = dkr-open-pipes(dkr-units());
+ let c2 = dkb-bit(try dkb-compiled(all, again, dkr-units()) catch false, 2);
+ let c4 = dkb-bit(try dkb-pragma-bites() catch false, 4);
+ let c8 = dkb-bit(try dkb-dense(c) catch false, 8);
+ let c16 = dkb-bit(try dkb-norm-rope(c) catch false, 16);
+ let c32 = dkb-bit(try dkb-attn(c) catch false, 32);
+ let c64 = dkb-bit(try dkb-hc(c) catch false, 64);
+ let c128 = dkb-bit(try dkb-moe(c) catch false, 128);
+ let c256 = dkb-bit(try dkb-comp-argmax(c) catch false, 256);
+ let c512 = dkb-bit(try dkb-falsifiers(c) catch false, 512);
+ let leftBufs = dkr-reg-free(reg);
+ let leftViews = nothing?(views) ? [] : dvb-close(views);
+ let removed = host_path_remove(path);
+ print_str("dsv4-kernels-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " wrote " ++ wrote.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512;
+}
