@@ -455,7 +455,15 @@ checkpoint. Prefer a local guide; repeated changed local attempts can invite
 light remote guidance. Optional remote review may accompany any independently
 successful local step and is outside the work-dependence objective; retain its
 actual spending separately. Needed remote implementation or guidance remains
-required assistance. Open with `./fkwu observe/local-flow-review.bml` and work
+required assistance. Every rented contribution is a local reproduction target,
+including planning, source selection, request authoring, diagnosis, implementation,
+measurement, review and landing. Required assistance leaves an owned capability
+gap with original intent, inputs, sources, checks, findings and completed effects;
+improve the local prompt, tool, harness or model choice and replay that task.
+Ground guidance in the current enquiry and relevant source; earlier observations
+keep their task and source scope. Aggregate counters guide attention, while the
+particular task's checks and observed behavior establish its completion.
+Open with `./fkwu observe/local-flow-review.bml` and work
 its `next`; close by measuring the actual transcript, then review again. Work
 the local lane could take goes to `learn/native-turn-queue.jsonl` with its
 original checks, sources and retained effects. Unknown usage stays unknown;
