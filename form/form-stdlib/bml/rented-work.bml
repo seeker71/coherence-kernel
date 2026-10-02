@@ -1,0 +1,76 @@
+// Caller-declared work/review phases over complete cumulative usage samples.
+// Guidance and diagnosis required to complete work remain work. Optional
+// review is separate; unattributed samples are never silently reassigned.
+import form-stdlib/bml/rented-usage.bml;
+import form-stdlib/form-fs.fk;
+import form-stdlib/spool-bell-transport.fk;
+section [form.bml] {
+ class RentedWork {
+  def rw-roles() = ["work","review","unknown"];
+  def rw-role?(role) = any?(held => held == role,rw-roles());
+  def rw-tag() = "rented-work-state-v1";
+  def rw-state-valid(state) = len(state) == 9 && state[0] == rw-tag() && rw-session?(state[1]) && value_kind(state[2]) == "string" && rw-role?(state[3]) && len(state[4]) == 2 && len(state[5]) == 2 && ru-valid(state[4][1]) && ru-valid(state[5][1]) && value_kind(state[7]) == "int" && state[7] >= 0 && (state[8] == 0 || state[8] == 1) && len(state[6]) == 3 && all?(ru-valid,state[6]) && ru-delta(state[4][1],state[5][1]) == ru-add(state[6][0],ru-add(state[6][1],state[6][2]));
+  def rw-open(session,transcript,role,sample) = !rw-role?(role) || nothing?(sample) ? form_error("rented work needs a role and complete opening sample") : [rw-tag(),session,transcript,role,sample,sample,[ru-zero(),ru-zero(),ru-zero()],0,0];
+  def rw-step(state,sample,role) {
+   !rw-role?(role) || nothing?(sample) ? form_error("rented work sample or role unavailable") : {
+    let delta=ru-delta(state[5][1],sample[1]);
+    nothing?(delta) || ru-time-before(sample[0],state[5][0],0) ? form_error("rented usage counters or time moved backwards; retain the original session") : {
+     let totals=0 .. len(rw-roles()) |> map(i => rw-roles()[i] == state[3] ? ru-add(state[6][i],delta) : state[6][i]);
+     [rw-tag(),state[1],state[2],role,state[4],sample,totals,state[7] + (sample != state[5] ? 1 : 0),state[8]];
+    };
+   };
+  }
+  def rw-report(state) = jv-object([jv-s("schema","rented-work-session-v1"),jv-s("session",state[1]),jv-s("transcript",state[2]),jv-s("from",state[4][0]),jv-s("through",state[5][0]),jv-s("status",state[8] ? "closed" : "open"),jv-s("basis","caller-declared phases between complete cumulative usage samples"),jv-pair("work",ru-object(state[6][0])),jv-pair("optional_review",ru-object(state[6][1])),jv-pair("unclassified",ru-object(state[6][2])),jv-pair("all_roles",ru-object(ru-add(state[6][0],ru-add(state[6][1],state[6][2])))),jv-n("sample_transitions",state[7]),jv-s("scope","Named work session inside one Codex transcript; model calls and role independence are not inferred from token counts.")]);
+  def rw-session?(name) = len(name) > 0 && all?(i => str_find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.",byte_to_str(str_byte_at(name,i)),0) >= 0,0 .. len(name)) && name != "." && name != "..";
+  def rw-home() = ".hearth/rented-work";
+  def rw-path(session) = rw-home() + "/" + session + ".json";
+  def rw-ledger() = "receipts/rented-work-sessions.jsonl";
+  def rw-pack-sample(sample) = jv-array([jv-string(sample[0]),jv-array(sample[1] |> map(jv-int))]);
+  def rw-pack(state) = jv-array([jv-string(state[0]),jv-string(state[1]),jv-string(state[2]),jv-string(state[3]),rw-pack-sample(state[4]),rw-pack-sample(state[5]),jv-array(state[6] |> map(values => jv-array(values |> map(jv-int)))),jv-int(state[7]),jv-int(state[8])]);
+  def rw-unpack-sample(view) { let values=jv-items(view); [jv-value(values[0]),jv-items(values[1]) |> map(jv-value)]; }
+  def rw-unpack(view) {
+   let values=jv-items(view);
+   len(values) != 9 ? form_error("rented work state needs its complete schema") : [jv-value(values[0]),jv-value(values[1]),jv-value(values[2]),jv-value(values[3]),rw-unpack-sample(values[4]),rw-unpack-sample(values[5]),jv-items(values[6]) |> map(row => jv-items(row) |> map(jv-value)),jv-value(values[7]),jv-value(values[8])];
+  }
+  def rw-save(state) {
+   !rw-state-valid(state) ? form_error("rented work state counters do not reconcile") : 1;
+   fs_mkdir(".hearth"); fs_mkdir(rw-home());
+   let path=rw-path(state[1]); let stage=path + ".writing-" + host_pid().str();
+   let text=jv-emit(rw-pack(state)); let wrote=write_file(stage,text);
+   wrote == len(text) && file_size(stage) == len(text) && read_file(stage) == text && fs-rename(stage,path) == 0 ? state : form_error("rented work state publication failed");
+  }
+  def rw-publish(state) = rw-publish-at(state,rw-ledger());
+  def rw-publish-at(state,ledger) {
+   let row=jv-emit(rw-report(state)) + "\n";
+   let prior=file_size(ledger) > 0 ? read_file(ledger) : "";
+   str_find(prior,row,0) >= 0 ? state : {
+    let size=len(prior); let wrote=sbt-append-count(ledger,row);
+    wrote == len(row) && file_size(ledger) >= size + len(row) ? state : form_error("rented work ledger append failed; closed state remains available");
+   };
+  }
+  def rw-read(session) {
+   let path=rw-path(session);
+   let state=file_size(path) > 0 ? rw-unpack(jvp-parse(read_file(path))) : nothing;
+   nothing?(state) || !rw-state-valid(state) || state[1] != session ? form_error("rented work session has no admitted state") : state;
+  }
+  def rw-request(request) {
+   let session=jv-str(request,"session"); let action=jv-str(request,"action");
+   !rw-session?(session) ? form_error("rented work needs a filesystem-safe session identity") : !any?(held => held == action,["begin","mark","read","close"]) ? form_error("rented work action needs begin, mark, read or close") : action == "begin" ? {
+    file_size(rw-path(session)) >= 0 ? form_error("rented work session already exists; resume it") : rw-save(rw-open(session,jv-str(request,"transcript"),jv-str(request,"role"),ru-read(jv-str(request,"transcript"))));
+   } : {
+    let state=rw-read(session);
+    state[8] ? (action == "close" ? rw-publish(state) : state) : action == "read" ? state : action == "mark" || action == "close" ? {
+     let role=action == "close" ? state[3] : jv-str(request,"role");
+     let next=rw-step(state,ru-read(state[2]),role);
+     let saved=rw-save(action == "close" ? [next[0],next[1],next[2],next[3],next[4],next[5],next[6],next[7],1] : next);
+     action == "close" ? rw-publish(saved) : saved;
+    } : form_error("rented work action needs begin, mark, read or close");
+   };
+  }
+  def rw-review() {
+   let rows=file_size(rw-ledger()) > 0 ? split-on(read_file(rw-ledger()),"\n") |> filter(line => len(line) > 0) |> map(jvp-parse) : [];
+   let sessions=foldl((held,row) => append(filter(prior => jv-str(prior,"session") != jv-str(row,"session"),held),[row]),[],rows);
+   drop(max2(0,len(sessions) - 3),sessions) |> map(row => print(["rented-work-session",jv-str(row,"session"),"work_output",jv-str(jv-get(row,"work"),"output_tokens"),"review_output",jv-str(jv-get(row,"optional_review"),"output_tokens"),"unclassified_output",jv-str(jv-get(row,"unclassified"),"output_tokens"),"through",jv-str(row,"through")]));
+  }
+ }
+}

@@ -492,6 +492,10 @@ closing a movement: the phase census (is your work freezing ice or leaving gas?)
 ice-miss lanes (did you reuse or rebuild?), the ledger, and your own token spend read from
 your own transcript (`observe/session-rent-run.bml` for a Claude Code session,
 `observe/rented-turn-meter-run.fk` for Codex).
+Codex work sessions also use `observe/rented-work-run.bml`: begin in `work`,
+mark independent optional `review` before it starts, and close the measured
+interval. Required guidance and repairs remain work; unattributed usage stays
+unknown. The door and sovereignty milestones live in `docs/form-native-coding.md`.
 Every prompt talks to the field first (Urs, 2026-09-01): its kernel question goes to the
 hearth (`./fkwu observe/hearth-ask-send.fk`, turn/kind/body on stdin) and the
 resident's answer contributes when one stands. A `signal=nothing` reply names the
