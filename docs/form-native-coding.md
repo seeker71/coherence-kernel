@@ -163,6 +163,18 @@ Each generated reply consumes `turns`, including tool reads and retained no-acti
 
 `form-cli-code-live.bml` owns reply completion; `form-cli-code-policy.bml` owns repair and replanning. A truncated reply never reaches tool admission. Its failure travels with the original goal, current candidate, checks and private evidence path. The same cause, role and reply ceiling remain the same counterexample even when the private path or generated count changes. A checked candidate first retries its review role with a shorter response; retained native identities need not be copied into prose. An unchanged failure after that changed instruction requires a new plan. A stopped reply re-observes completion through the framebuffer; JSON validity and task quality retain their separate checks.
 
+When an observation exceeds the current decoder capacity before prefill, its
+exact bytes are retained privately and the live stream receives a compact
+signal requesting focused source queries. The native cursor stops after the
+first ID that exceeds available capacity, before changing KV; exact fits and
+cursor failures remain distinct. Original documents, pending tasks,
+completed effects and checks stay in the same checkpoint. A checked candidate
+stays in review. The signal reports actual admission, with no weight admission
+or context replacement; if that signal also cannot fit, the existing renewal
+choice handles the retained state. Partial prefill and other generation
+failures keep their own release handling. A repeated capacity issue against the
+same source identities invites a new plan, independent of its receipt path.
+
 This applies the distinction between truncated tool-call recovery and execution in [Hermes's truncation controller](https://github.com/NousResearch/hermes-agent/blob/main/agent/turn_truncation.py), and the focus on meaningful repeated outcomes in [OpenClaw's loop detection](https://docs.openclaw.ai/tools/loop-detection). Form uses its own owned state, live signals and caller allowances. [OpenClaw's agent loop](https://docs.openclaw.ai/concepts/agent-loop) also separates finished tool results from an unfinished continuation; Form's checkpoints preserve completed actions before admitting feedback. These are native BML flows in the existing process.
 
 ### The local lane's stages
@@ -292,6 +304,38 @@ cached input, output, reasoning and total, with the comparable delta. A first
 reading, different transcript or decreasing counters starts a baseline.
 Cached input belongs to input; reasoning belongs to output. Neither is added
 twice. Absent or incomplete usage is never zero.
+
+For Codex work sessions, `observe/rented-work-run.bml` separates required work,
+optional review and unclassified usage. Send one JSON line with `action`,
+`session` and, at `begin`, `transcript` and `role`. `mark` settles the current
+phase before changing its role; `read` reads the retained sample; `close`
+settles the last phase and publishes an idempotent session row in
+`receipts/rented-work-sessions.jsonl`. Roles are `work`, `review`, `unknown`.
+Guidance, diagnosis and implementation needed for completion are work.
+An independent optional review stays separate. Roles are caller declarations,
+not an inference from token volume, model identity or a tool call. The row's
+`from` and `through` delimit its measured interval; missing historical role
+evidence belongs to the unclassified column.
+
+```json
+{"action":"begin","session":"native-source-wave","transcript":"/absolute/path/to/rollout.jsonl","role":"work"}
+```
+
+`local-flow-review.bml` reads the latest published phase rows alongside local
+completion evidence. Codex cumulative counters are the authoritative quantity;
+repeated call-local usage events are not summed as separate expenditure. A
+complete invalid sample stays unknown, and an unfinished row waits for its
+newline. State publication verifies its bytes and role totals reconcile to the
+cumulative delta. Local tokens carry no penalty.
+
+The sovereignty milestones are complete local source lookup and task planning,
+locally authored edits that pass the original execution checks, local repair
+and review within the same owned checkpoint, and local publication with
+observed release. Advance these on representative repository tasks, retaining
+failed attempts as well as completions. Zero required rented work is established
+for a task only when its full local path completes without required remote
+guidance or repair; a provider-free model invocation alone does not establish
+that outcome. Optional remote review remains available and separately measured.
 
 Compare comparable tasks using actual quality, verified completion, required
 remote prompts/tokens and the functions/lines changed. Retain unsuccessful
