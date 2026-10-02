@@ -107,11 +107,36 @@ section [form.bml] {
         // ---- the convolution table: every Conv and ConvTranspose, with how it is set ----
         // (name w b K stride padbegin padend dil group transposed? in0)
         def vv-first-or(xs, d) = if ((Comparable) len(xs) == 0) then d else xs[0];
+        // ---- the name-resolution layer: one name for a node, whichever exporter wrote the file ----
+        // The newer torch exporter names every node after the module that holds it
+        // (`/enc_p/encoder/attn_layers.2/conv_q/Conv`). The older one numbers them serially
+        // (`Conv_816`) and leaves the module's name only on the WEIGHTS it reads
+        // (`enc_p.encoder.attn_layers.2.conv_q.weight`) — and, for the fused weight-norm kernels
+        // that have no name at all, on the BIAS beside them. Both say the same thing, so the pass
+        // reads the node's own inputs and spells the newer name from them: dots become slashes,
+        // a number clings to the segment before it (`attn_layers` `2` is `attn_layers.2`), and the
+        // node's op closes it. A node that already carries a slash-name keeps it, untouched, so a
+        // newer export resolves exactly as it always did.
+        def vv-digits-go(s, i) = if (i >= len(s)) then 1 else if (str_byte_at(s, i) < 48) then 0 else if (str_byte_at(s, i) > 57) then 0 else vv-digits-go(s, (i + 1));
+        def vv-digits?(s) = if ((Comparable) len(s) == 0) then 0 else vv-digits-go(s, 0);
+        // segments are kept newest first, so the number that follows a name is glued onto the head
+        def vv-segs-add(acc, part) = if ((Comparable) len(acc) == 0) then [part] else if ((Comparable) vv-digits?(part) == 1) then cons(vv-s([acc[0], ".", part]), acc[1:]) else cons(part, acc);
+        def vv-segs-go(s, i, acc) {
+            let at = str_find(s, ".", i);
+            if (at < 0) then vv-segs-add(acc, substring(s, i, len(s))) else vv-segs-go(s, (at + 1), vv-segs-add(acc, substring(s, i, at)));
+        }
+        def vv-ends?(s, suf) = if (len(s) < len(suf)) then 0 else if ((String) substring(s, (len(s) - len(suf)), len(s)) == suf) then 1 else 0;
+        def vv-stem(nm) = if ((Comparable) vv-ends?(nm, ".weight") == 1) then substring(nm, 0, (len(nm) - 7)) else if ((Comparable) vv-ends?(nm, ".bias") == 1) then substring(nm, 0, (len(nm) - 5)) else "";
+        def vv-canon(nm, w, b, op) {
+            let sw = vv-stem(w);
+            let stem = if ((Comparable) len(sw) > 0) then sw else vv-stem(b);
+            if ((Comparable) len(nm) > 0) then (if ((Comparable) str_byte_at(nm, 0) == 47) then nm else if ((Comparable) len(stem) == 0) then nm else vv-s(["/", vo-join(reverse(vv-segs-go(stem, 0, [])), "/"), "/", op])) else nm;
+        }
         def vv-ct-row(path, f, tf) {
             let a = vo-n-attrs(path, f);
             let ins = vo-n-inputs(path, f);
             let pads = vo-a-ints(a, "pads");
-            [vo-n-name(path, f), ins[1], if (len(ins) >= 3) then ins[2] else "", vv-first-or(vo-a-ints(a, "kernel_shape"), 1), vv-first-or(vo-a-ints(a, "strides"), 1), if ((Comparable) len(pads) == 0) then 0 else pads[0], if ((Comparable) len(pads) == 0) then 0 else pads[1], vv-first-or(vo-a-ints(a, "dilations"), 1), vo-a-int(a, "group", 1), tf, ins[0]];
+            [vv-canon(vo-n-name(path, f), ins[1], if (len(ins) >= 3) then ins[2] else "", if ((Comparable) tf == 1) then "ConvTranspose" else "Conv"), ins[1], if (len(ins) >= 3) then ins[2] else "", vv-first-or(vo-a-ints(a, "kernel_shape"), 1), vv-first-or(vo-a-ints(a, "strides"), 1), if ((Comparable) len(pads) == 0) then 0 else pads[0], if ((Comparable) len(pads) == 0) then 0 else pads[1], vv-first-or(vo-a-ints(a, "dilations"), 1), vo-a-int(a, "group", 1), tf, ins[0]];
         }
         def vv-ctab-step(path, fs, acc, op) = if ((String) op == "Conv") then vv-ctab-go(path, fs[1:], cons(vv-ct-row(path, fs[0], 0), acc)) else if ((String) op == "ConvTranspose") then vv-ctab-go(path, fs[1:], cons(vv-ct-row(path, fs[0], 1), acc)) else vv-ctab-go(path, fs[1:], acc);
         def vv-ctab-go(path, fs, acc) = if ((Comparable) len(fs) == 0) then reverse(acc) else vv-ctab-step(path, fs, acc, vo-n-op(path, fs[0]));
@@ -156,10 +181,46 @@ section [form.bml] {
             let n = if ((Comparable) len(r) == 0) then vo-node-by-out(path, nodes, nm) else [];
             if (len(r) >= 1) then vv-imax(vv-ints-of-row(path, r)) else if (d <= 0) then 0 else if ((Comparable) len(n) == 0) then 0 else vv-padchain(path, nodes, rows, vo-n-in(path, n, 0), (d - 1));
         }
-        def vv-ffn-pad-of(path, nodes, rows, cnm) {
-            let c = vo-node-by-name(path, nodes, cnm);
-            let p = if ((Comparable) len(c) == 0) then [] else vo-node-by-out(path, nodes, vo-n-in(path, c, 0));
-            if ((Comparable) len(p) == 0) then 0 else if ((String) vo-n-op(path, p) == "Pad") then vv-padchain(path, nodes, rows, vo-n-in(path, p, 1), 12) else 0;
+        // The older exporter folds that Pad into the Conv's own pads and writes no Pad node at all;
+        // then the Conv's pad IS the amount, and the one Pad-free answer is the node's own.
+        def vv-ffn-pad-of(path, nodes, rows, ctab, cnm) {
+            let r = vv-crow-go(ctab, cnm);
+            let p = if ((Comparable) len(r) == 0) then [] else vo-node-by-out(path, nodes, vv-cin0(r));
+            if ((Comparable) len(r) == 0) then 0 else if ((Comparable) len(p) == 0) then vv-cpb(r) else if ((String) vo-n-op(path, p) == "Pad") then vv-padchain(path, nodes, rows, vo-n-in(path, p, 1), 12) else vv-cpb(r);
+        }
+
+        // ---- scalars the older exporter leaves without a name: found by what consumes them ----
+        // The newer export names them for where they sit (`/enc_p/Constant_output_0`); the older
+        // one makes them initializers with serial names. What stays the same is the graph around
+        // them, so each is asked of its consumer. A name that is there is still read first.
+        def vv-by-op-go(path, fs, op, acc) = if ((Comparable) len(fs) == 0) then reverse(acc) else vv-by-op-go(path, fs[1:], op, if ((String) vo-n-op(path, fs[0]) == op) then cons(fs[0], acc) else acc);
+        def vv-by-op(path, nodes, op) = vv-by-op-go(path, nodes, op, []);
+        def vv-in-is?(path, f, i, nm) = if ((Comparable) len(vo-n-inputs(path, f)) <= i) then 0 else if ((String) vo-n-in(path, f, i) == nm) then 1 else 0;
+        def vv-find-in(path, fs, i, nm) = if ((Comparable) len(fs) == 0) then [] else if ((Comparable) vv-in-is?(path, fs[0], i, nm) == 1) then fs[0] else vv-find-in(path, fs[1:], i, nm);
+        def vv-first-row-name(rows, xs) = if ((Comparable) len(xs) == 0) then "" else if ((Comparable) vv-has-row?(rows, xs[0]) == 1) then xs[0] else vv-first-row-name(rows, xs[1:]);
+        // the first number a node reads out of the table; an absence is 0.0, which the open refuses
+        def vv-const-of(path, rows, f) {
+            let nm = if ((Comparable) len(f) == 0) then "" else vv-first-row-name(rows, vo-n-inputs(path, f));
+            if ((Comparable) len(nm) == 0) then 0.0 else vv-f1(path, rows, nm);
+        }
+        def vv-prod-of(path, nodes, f, i) = if ((Comparable) len(f) == 0) then [] else vo-node-by-out(path, nodes, vo-n-in(path, f, i));
+        // the layernorm's epsilon: the number the Add before the first Sqrt adds to the variance
+        def vv-eps-struct(path, nodes, rows) {
+            let sq = vv-by-op(path, nodes, "Sqrt");
+            if ((Comparable) len(sq) == 0) then 0.0 else vv-const-of(path, rows, vv-prod-of(path, nodes, sq[0], 0));
+        }
+        // the embedding's scale: what the Mul after the embedding Gather multiplies by
+        def vv-escale-struct(path, nodes, rows) {
+            let g = vv-find-in(path, vv-by-op(path, nodes, "Gather"), 0, "sid");
+            let m = if ((Comparable) len(g) == 0) then [] else vv-find-in(path, vv-by-op(path, nodes, "Mul"), 0, vo-n-out(path, g, 0));
+            vv-const-of(path, rows, m);
+        }
+        // the vocoder's divisor: the Div that closes the first residual sum, found backwards from
+        // the second upsample (Div -> LeakyRelu -> ConvTranspose)
+        def vv-decdiv-struct(path, nodes, rows, ctab) {
+            let u = vv-crow-go(ctab, "/dec/ups.1/ConvTranspose");
+            let lk = if ((Comparable) len(u) == 0) then [] else vo-node-by-out(path, nodes, vv-cin0(u));
+            vv-const-of(path, rows, vv-prod-of(path, nodes, lk, 0));
         }
 
         // ---- the elementwise affine at the end of the duration chain ----
@@ -169,7 +230,9 @@ section [form.bml] {
         // the Mul what it multiplies by, and then asking whether THAT is a number or an Exp of one.
         def vv-exp-all(xs) = if ((Comparable) len(xs) == 0) then [] else cons(math_exp(xs[0]), vv-exp-all(xs[1:]));
         def vv-ea-pair(path, nodes, rows) {
-            let mn = vo-node-by-name(path, nodes, "/dp/flows.0/Mul");
+            let mnn = vo-node-by-name(path, nodes, "/dp/flows.0/Mul");
+            let sbn = if ((Comparable) len(mnn) == 0) then vv-find-in(path, vv-by-op(path, nodes, "Sub"), 1, "dp.flows.0.m") else [];
+            let mn = if ((Comparable) len(mnn) == 0) then (if ((Comparable) len(sbn) == 0) then [] else vv-find-in(path, vv-by-op(path, nodes, "Mul"), 0, vo-n-out(path, sbn, 0))) else mnn;
             let en = if ((Comparable) len(mn) == 0) then "" else vo-n-in(path, mn, 1);
             let direct = if ((Comparable) len(en) == 0) then 0 else vv-has-row?(rows, en);
             let ex = if ((Comparable) direct == 1) then [] else if ((Comparable) len(en) == 0) then [] else vo-node-by-out(path, nodes, en);
@@ -178,12 +241,31 @@ section [form.bml] {
         }
         // the spline's own numbers, read from the first ConvFlow the file carries
         def vv-cf-first(st) = vv-cf-list(st)[0].str();
-        def vv-spline-of(path, rows, ctab, f0) {
+        // The spline's four constants sit in the graph as the numbers its comparisons and its
+        // sums read: the tail bounds are the second input of the first GreaterOrEqual and
+        // LessOrEqual, the minimum width/derivative is what the Add after the first Softplus adds,
+        // and the search epsilon is what an Add adds to a Gather's answer.
+        def vv-sp-struct(path, nodes, rows) {
+            let lo = vv-const-of(path, rows, vv-by-op(path, nodes, "GreaterOrEqual")[0]);
+            let hi = vv-const-of(path, rows, vv-by-op(path, nodes, "LessOrEqual")[0]);
+            let sp = vv-by-op(path, nodes, "Softplus");
+            let ad = if ((Comparable) len(sp) == 0) then [] else vv-find-in(path, vv-by-op(path, nodes, "Add"), 0, vo-n-out(path, sp[0], 0));
+            [lo, hi, vv-const-of(path, rows, ad), vv-seps-struct(path, nodes, rows)];
+        }
+        def vv-outs-of(path, fs) = if ((Comparable) len(fs) == 0) then [] else cons(vo-n-out(path, fs[0], 0), vv-outs-of(path, fs[1:]));
+        def vv-member?(xs, nm) = if ((Comparable) len(xs) == 0) then 0 else if ((String) xs[0] == nm) then 1 else vv-member?(xs[1:], nm);
+        def vv-ins0-of(path, fs) = if ((Comparable) len(fs) == 0) then [] else cons(vo-n-in(path, fs[0], 0), vv-ins0-of(path, fs[1:]));
+        // the first Add that puts a table number onto a Gather's answer and hands the sum to an
+        // Expand — the spline's bin-edge search epsilon (an Add of a Gather alone is also how the
+        // graph counts positions, and that one is not an epsilon)
+        def vv-add-after-go(path, rows, adds, outs, exps) = if ((Comparable) len(adds) == 0) then [] else if ((Comparable) vv-member?(outs, vo-n-in(path, adds[0], 0)) == 0) then vv-add-after-go(path, rows, adds[1:], outs, exps) else if ((Comparable) vv-has-row?(rows, vo-n-in(path, adds[0], 1)) == 0) then vv-add-after-go(path, rows, adds[1:], outs, exps) else if ((Comparable) vv-member?(exps, vo-n-out(path, adds[0], 0)) == 0) then vv-add-after-go(path, rows, adds[1:], outs, exps) else adds[0];
+        def vv-seps-struct(path, nodes, rows) = vv-const-of(path, rows, vv-add-after-go(path, rows, vv-by-op(path, nodes, "Add"), vv-outs-of(path, vv-by-op(path, nodes, "Gather")), vv-ins0-of(path, vv-by-op(path, nodes, "Expand"))));
+        def vv-spline-of(path, nodes, rows, ctab, f0) {
             let np = vv-s(["/dp/flows.", f0, "/"]);
             let nb = ((vo-dims(vo-find(rows, vv-s(["dp.flows.", f0, ".proj.bias"])))[0] + 1) / 3);
             let fc = vo-dims(vo-find(rows, vv-s(["dp.flows.", f0, ".pre.weight"])))[0];
             let ok = if ((Comparable) vv-has-row?(rows, vv-s([np, "Constant_18_output_0"])) == 0) then 0 else if ((Comparable) vv-has-row?(rows, vv-s([np, "Constant_19_output_0"])) == 0) then 0 else if ((Comparable) vv-has-row?(rows, vv-s([np, "Constant_83_output_0"])) == 0) then 0 else vv-has-row?(rows, vv-s([np, "Constant_193_output_0"]));
-            if ((Comparable) ok == 0) then [] else [vv-f1(path, rows, vv-s([np, "Constant_18_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_19_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_83_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_193_output_0"])), nb, math_sqrt((1.0 * fc))];
+            if ((Comparable) ok == 0) then (append(vv-sp-struct(path, nodes, rows), [nb, math_sqrt((1.0 * fc))])) else [vv-f1(path, rows, vv-s([np, "Constant_18_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_19_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_83_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_193_output_0"])), nb, math_sqrt((1.0 * fc))];
         }
         def vv-sp-lo(st) = vv-spline(st)[0];
         def vv-sp-hi(st) = vv-spline(st)[1];
@@ -204,13 +286,13 @@ section [form.bml] {
             let latab = vv-la-go(path, nodes, []);
             let zero = metal_buf_alloc(16384);
             let epsn = "/enc_p/encoder/norm_layers_1.0/Constant_1_output_0";
-            let eps = if ((Comparable) vv-has-row?(rows, epsn) == 1) then vv-f1(path, rows, epsn) else 0.0;
-            let sc = if ((Comparable) vv-has-row?(rows, "/enc_p/Constant_output_0") == 1) then vv-f1(path, rows, "/enc_p/Constant_output_0") else 0.0;
-            let dd = if ((Comparable) vv-has-row?(rows, "/dec/Constant_output_0") == 1) then vv-f1(path, rows, "/dec/Constant_output_0") else 0.0;
-            let fp = vv-ffn-pad-of(path, nodes, rows, "/enc_p/encoder/ffn_layers.0/conv_1/Conv");
+            let eps = if ((Comparable) vv-has-row?(rows, epsn) == 1) then vv-f1(path, rows, epsn) else vv-eps-struct(path, nodes, rows);
+            let sc = if ((Comparable) vv-has-row?(rows, "/enc_p/Constant_output_0") == 1) then vv-f1(path, rows, "/enc_p/Constant_output_0") else vv-escale-struct(path, nodes, rows);
+            let dd = if ((Comparable) vv-has-row?(rows, "/dec/Constant_output_0") == 1) then vv-f1(path, rows, "/dec/Constant_output_0") else vv-decdiv-struct(path, nodes, rows, ctab);
+            let fp = vv-ffn-pad-of(path, nodes, rows, ctab, "/enc_p/encoder/ffn_layers.0/conv_1/Conv");
             let ea = vv-ea-pair(path, nodes, rows);
             let f0 = vv-cf0-of(ctab, 0, 32, []);
-            let sp = if ((Comparable) len(f0) == 0) then [] else vv-spline-of(path, rows, ctab, f0[0].str());
+            let sp = if ((Comparable) len(f0) == 0) then [] else vv-spline-of(path, nodes, rows, ctab, f0[0].str());
             [path, rows, pipes, whole, hs, ctab, zero, eps, sc, fp, latab, dd, ea, sp];
         }
         // the ConvFlow indices the file actually carries, newest first — read before the state exists
@@ -219,8 +301,8 @@ section [form.bml] {
         // a scalar the table did not hold is an absence, and an absence does not render as silence
         def vv-pipes-ok-go(ps) = if ((Comparable) len(ps) == 0) then 1 else if (ps[0] <= 0) then 0 else vv-pipes-ok-go(ps[1:]);
         def vv-open-ok?(st) = if (vv-whole(st) <= 0) then 0 else if ((Comparable) vv-pipes-ok-go(st[2]) == 0) then 0 else vv-scalars-ok?(st);
-        def vv-scalars-ok?(st) = if (vv-eps(st) <= 0.0) then 0 else if (vv-escale(st) <= 0.0) then 0 else if (vv-decdiv(st) <= 0.0) then 0 else if (vv-ffnpad(st) <= 0) then 0 else if (len(vv-eapair(st)) < 2) then 0 else if (len(vv-spline(st)) < 6) then 0 else 1;
-        def vv-open-why(st) = if (vv-whole(st) <= 0) then "the model file did not map" else if ((Comparable) vv-pipes-ok-go(st[2]) == 0) then "a kernel did not compile" else if (vv-eps(st) <= 0.0) then "no layernorm epsilon in this export" else if (vv-escale(st) <= 0.0) then "no embedding scale in this export" else if (vv-decdiv(st) <= 0.0) then "no vocoder divisor in this export" else if (vv-ffnpad(st) <= 0) then "the feed-forward padding did not resolve" else if (len(vv-eapair(st)) < 2) then "the duration affine's exp did not resolve" else if (len(vv-spline(st)) < 6) then "the spline's own constants did not resolve" else "";
+        def vv-scalars-ok?(st) = if (vv-eps(st) <= 0.0) then 0 else if (vv-escale(st) <= 0.0) then 0 else if (vv-decdiv(st) <= 0.0) then 0 else if (vv-ffnpad(st) <= 0) then 0 else if (len(vv-eapair(st)) < 2) then 0 else if (len(vv-spline(st)) < 6) then 0 else if (vv-sp-seps(st) <= 0.0) then 0 else if (vv-sp-minb(st) <= 0.0) then 0 else if (vv-sp-hi(st) <= vv-sp-lo(st)) then 0 else 1;
+        def vv-open-why(st) = if (vv-whole(st) <= 0) then "the model file did not map" else if ((Comparable) vv-pipes-ok-go(st[2]) == 0) then "a kernel did not compile" else if (vv-eps(st) <= 0.0) then "no layernorm epsilon in this export" else if (vv-escale(st) <= 0.0) then "no embedding scale in this export" else if (vv-decdiv(st) <= 0.0) then "no vocoder divisor in this export" else if (vv-ffnpad(st) <= 0) then "the feed-forward padding did not resolve" else if (len(vv-eapair(st)) < 2) then "the duration affine's exp did not resolve" else if (len(vv-spline(st)) < 6) then "the spline's own constants did not resolve" else if (vv-sp-seps(st) <= 0.0) then "the spline's own constants did not resolve" else if (vv-sp-minb(st) <= 0.0) then "the spline's own constants did not resolve" else if (vv-sp-hi(st) <= vv-sp-lo(st)) then "the spline's own constants did not resolve" else "";
 
         // ---- the dispatches ----
         def vv-go(st, pi, bind, threads) = metal_enqueue(vv-pipe(st, pi), bind, threads);
