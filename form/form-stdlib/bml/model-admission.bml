@@ -22,12 +22,13 @@
 // code lane, learning, prompt lookup and every probe queue alike. A process holding several sessions keeps one note line
 // per file; a file this process already holds is shared with itself, never waited on.
 //
-// Memory is read from the OS (memory_pressure, sysctl hw.memsize): it counts every process and framework, not only ours.
-// The reserve is FORM_MODEL_RESERVE_PCT of memory (default 10). Decode contention is the GPU time-slicing between live
+// Room is the memory governor's to say (memory-governor.bml reads Mach's own count of every process's pages): this queue
+// supplies the order, the shared-file rule and the lease the governor lists as pending, since loads are admitted one at a
+// time and the next sees the pages of the one before. Decode contention is the GPU time-slicing between live
 // processes; batching many requests through one resident owner is the next structural step (the body's resident owner,
 // observe/native-model-dual-resident-live-run.fk, is its seed).
 //////////////////////////////////////////////////////////////////////
-// preludes: form-stdlib/bml/parse.bml form-stdlib/bml/order.bml
+// preludes: form-stdlib/bml/parse.bml form-stdlib/bml/order.bml form-stdlib/bml/memory-governor.bml
 section [form.bml] {
  class ModelAdmission {
   // ---- the queue on disk: one directory per ticket, named by when and by whom, so byte order is arrival order ---------
@@ -93,17 +94,18 @@ section [form.bml] {
   def adm-peer-resident?(root, pid, path) = adm-residents(root) |> any?(r => r[1] |> any?(line => trim(line) == path));
 
   // ---- the decision ----------------------------------------------------------------------------------------------------------
-  def adm-cost(bytes, peerMapped) = peerMapped ? 0 : bytes;
-  def adm-fits?(free, cost, reserve) = (free - cost) >= reserve;
-  def adm-gib(n) = int_to_str(n / 1073741824) ++ " GiB";
-  // [1, line] admitted: first in line and the load fits; [0, line] still waiting, with the reason
-  def adm-try-at(root, ticket, door, pid, path, bytes, free, reserve, peerMapped) {
+  // What a load takes beyond the page cache: the weights are one physical copy however many processes map them (measured
+  // 2026-10-02, a second mapper of a 6 GiB file added 0.0 GiB), so a file a live process already holds costs only the
+  // session's own KV state and scratch (mg-kv-margin); a file nobody holds costs its bytes too.
+  def adm-need(bytes, held) = (held ? 0 : bytes) + mg-kv-margin();
+  // [1, line] admitted: first in line and the machine has room (the memory governor, memory-governor.bml, is the one
+  // authority on room: it reads every process's pages); [0, line] still waiting, with the reason
+  def adm-try-at(root, ticket, door, pid, path, bytes, granted, reason, held) {
    let at = adm-position(root, ticket);
-   let cost = adm-cost(bytes, peerMapped);
    nothing?(at) ? [0, door ++ " has no ticket in the queue"] :
    at > 0 ? [0, door ++ " queued at " ++ int_to_str(at + 1) ++ " of " ++ int_to_str(len(adm-tickets(root))) ++ ": a load is ahead of it"] :
-   !adm-fits?(free, cost, reserve) ? [0, door ++ " waits for memory: " ++ adm-gib(free) ++ " free, the load adds " ++ adm-gib(cost) ++ " and the reserve is " ++ adm-gib(reserve)] :
-   adm-admitted(root, door, pid, path, peerMapped);
+   !granted ? [0, door ++ " waits for memory: " ++ reason] :
+   adm-admitted(root, door, pid, path, held);
   }
   def adm-admitted(root, door, pid, path, peerMapped) {
    let noted = adm-note-add(root, pid, path);
@@ -111,30 +113,22 @@ section [form.bml] {
   }
   def adm-loaded-at(root, ticket) = host_dir_rmdir(adm-queue(root) ++ "/" ++ ticket);
 
-  // ---- the host's own truth --------------------------------------------------------------------------------------------------
-  def adm-memsize() = parse-int(trim(host-exec("sysctl -n hw.memsize", ""))) ?? 0;
-  // free memory as the OS counts it: every process and framework, not only this one
-  def adm-free-pct() {
-   let text = host-exec("memory_pressure -Q", "");
-   let at = str_find(text, "free percentage: ", 0);
-   at < 0 ? nothing() : parse-int(substring(text, at + 17, digits-end(text, at + 17)));
-  }
-  def adm-free-bytes() {
-   let pct = adm-free-pct();
-   nothing?(pct) ? nothing() : (adm-memsize() / 100) * pct;
-  }
-  def adm-reserve-pct() = parse-int(trim(host-exec("printenv FORM_MODEL_RESERVE_PCT", ""))) ?? 10;
-  def adm-reserve-bytes() = (adm-memsize() / 100) * adm-reserve-pct();
+  // ---- who else holds the file -----------------------------------------------------------------------------------------------
   // another live process maps this very file: its pages are shared, not loaded again
   def adm-peers(path, pid) = split-on(trim(host-exec("lsof -t '" ++ path ++ "' 2>/dev/null", "")), "\n") |> map(p => parse-int(p)) |> filter(p => !nothing?(p) && (p != pid) && adm-alive?(p));
+  // the file is held by some other live process, by its notes or by the OS's own list of who has it open
+  def adm-held-elsewhere?(root, pid, path) = (adm-residents(root) |> any?(r => (r[0] != pid) && (r[1] |> any?(line => trim(line) == path)))) || !nil?(adm-peers(path, pid));
 
   // ---- the process's own turn in the queue -----------------------------------------------------------------------------------
   def adm-wait-at(root, ticket, door, pid, path, bytes, deadline) {
-   let peer = adm-peer-resident?(root, pid, path) || !nil?(adm-peers(path, pid));
-   let free = adm-free-bytes();
-   let tried = nothing?(free) ? [0, door ++ " cannot read the OS memory state"] : adm-try-at(root, ticket, door, pid, path, bytes, free, adm-reserve-bytes(), peer);
+   let held = adm-peer-resident?(root, pid, path) || !nil?(adm-peers(path, pid));
+   let verdict = mg-ask(adm-need(bytes, held));
+   let tried = adm-try-at(root, ticket, door, pid, path, bytes, mg-granted?(verdict), verdict[1], held);
    tried[0] == 1 ? tried : (now_unix_ms() >= deadline ? tried : adm-pause(root, ticket, door, pid, path, bytes, deadline));
   }
+  // for the open's own governor ask: the weights cost nothing when another process holds the file, or this process
+  // already holds it for an earlier session; this open's own note is one line, so two lines mean an earlier holder
+  def adm-held-already?(path) = adm-held-elsewhere?(adm-root(), host_pid(), path) || (len(adm-note-lines(adm-root(), host_pid()) |> filter(line => trim(line) == path)) >= 2);
   def adm-pause(root, ticket, door, pid, path, bytes, deadline) {
    let slept = host_sleep_ms(2000);
    adm-wait-at(root, ticket, door, pid, path, bytes, deadline);
