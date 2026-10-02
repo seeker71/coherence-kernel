@@ -1,0 +1,482 @@
+// band-truth.bml — what a band's head says it prints, and the most its claims can sum to.
+//
+// Every gate trusts a band's number against the full its head declares (`; Verdict n`, validate.sh's
+// fk_band_declared_verdict: the first `Verdict <digits>` on a `;` line of the leading comment block). The
+// declared full is only as true as the claims behind it. This reads both without running the band:
+//   the declared full   the pin in the head;
+//   the claims          one of three readings, in this order: the band's own `live-claims(` list in code
+//                       (name, bit, want, run), else the head's inline list (`Verdict 7 = 1 runs | 2 refuses`,
+//                       `= 1+2+4`), else the head's table rows (`;   4   text`, `;   - 4: text`, `... -> 100`).
+// A table row may name a range (`1..512`, `262144 .. 2147483648`: the powers of two from one to the other) or
+// carry several `N text` chunks on a line (apart by three spaces or more, or ` · `, ascending powers of two).
+// A pin of nothing but ones over rows numbered 1..n is a decimal-digit fold numbered by position. A head that
+// carries none of these readings is `unreadable` with its reason; it is never read as fine. A table that the
+// rows lay out in a shape the reader cannot follow still names its bits: a pin bit that no weight carries but
+// a row or a range anywhere in the head names is no missing claim.
+//
+// A reading returns lines; the door (observe/band-truth-run.bml) prints them. A line is
+//   flaw <class> <path> pin=<n> max=<m> <detail>      max is the most the claims sum to, ? when the flaw is not a sum
+//   unreadable <path> reason=<no-pin | mask-only | no-table | inline-unparsed> [pin=<n>]
+//   seen read-above-full <gap> rows=<n> full=<f> read=<m> (...)   history, not a flaw
+// Flaw classes:
+// head-unmet    the claims cannot sum to the head: max < pin, and a pin bit is named by no claim
+// claims-over   the claims can sum above the head: max > pin, so a band that holds every claim reads above its full
+// bad-bits      the weights are not distinct powers of two: a count of ones, powers of ten, or a repeat. A band that
+//               keeps a decimal fold or a count on purpose says `; FOLD: decimal` or `; FOLD: count` on a line of
+//               its head, which silences that kind's line and no other
+// head-too-big  the pin is at or above 2^53, where a verdict fold stops being exact
+// list-drift    two readings of one band's claims disagree (code list against head list, or the head's
+//               "(n bits)" against its claims)
+// copy-drift    a second copy of a band's full (a queue row's full in learn/native-turn-queue.jsonl, a
+//               form/fourth-arm-bands.txt row) differs from its head pin, or names a band that is absent: the
+//               shape of the 7-against-3 gap, where the band grew a claim and the queue's copy stayed 3
+//               (learn/local-requests.jsonl frq-d4e99b19283ce2e7)
+// The ledger (receipts/native-turn-ledger.jsonl) only grows, so a gap whose rows read above their full is named
+// once as `seen`, evidence of what happened, and counts in no flaw.
+//
+// Weights are read as integers up to 18 digits; a longer run is no weight. The head ends at its first code
+// line, as validate.sh reads it. A claim the door reads only from the head is documentation of the band; a
+// code list is what the band prints, so a flaw against a code list is the stronger finding.
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
+section [form.bml] {
+ class BandTruth {
+  def bt-digit?(b) = b >= 48 && b <= 57;
+  def bt-digits-end(s, i) = i < len(s) && bt-digit?(str_byte_at(s, i)) ? bt-digits-end(s, i + 1) : i;
+  def bt-spaces-end(s, i) = i < len(s) && str_byte_at(s, i) == 32 ? bt-spaces-end(s, i + 1) : i;
+  def bt-blank?(s) = bt-blank-from(s, 0);
+  def bt-blank-from(s, i) = i >= len(s) ? true : (str_byte_at(s, i) == 32 || str_byte_at(s, i) == 9 || str_byte_at(s, i) == 13) && bt-blank-from(s, i + 1);
+  def bt-byte(s, i) = i >= 0 && i < len(s) ? str_byte_at(s, i) : 0;
+  def bt-has?(s, part) = str_find(s, part, 0) >= 0;
+  def bt-starts?(s, p) = len(s) >= len(p) && ((String) substring(s, 0, len(p)) == p);
+  def bt-ends?(s, t) = len(s) >= len(t) && ((String) substring(s, len(s) - len(t), len(s)) == t);
+  def bt-int(s) = len(s) > 0 && len(s) <= 18 ? str_to_int(s) : nothing();
+  def bt-str(v) = nothing?(v) ? "?" : v.str();
+
+  // ---- powers
+  def bt-pow-up(w, p, step) = p > w ? false : p == w ? true : bt-pow-up(w, p * step, step);
+  def bt-pow2?(w) = !nothing?(w) && w > 0 && bt-pow-up(w, 1, 2);
+  def bt-pow10?(w) = !nothing?(w) && w > 0 && bt-pow-up(w, 1, 10);
+  def bt-all?(ws, test) = nil?(ws) ? true : test(ws[0]) && bt-all?(ws[1:], test);
+  def bt-one?(w) = !nothing?(w) && w == 1;
+  def bt-sum(ws) = nil?(ws) ? 0 : ws[0] + bt-sum(ws[1:]);
+  def bt-dup?(ws) = nil?(ws) ? false : bt-member?(ws[1:], ws[0]) || bt-dup?(ws[1:]);
+  def bt-member?(ws, w) = nil?(ws) ? false : ws[0] == w || bt-member?(ws[1:], w);
+  // 2^53 = 9007199254740992 has 16 digits: seventeen digits or more is above it
+  def bt-big?(digits) = len(digits) > 16 || (len(digits) == 16 && str_to_int(digits) >= 9007199254740992);
+
+  // ---- the head: the leading `;` block, blank lines inside it, ended by the first code line
+  def bt-line-end(src, at) {
+   let e = str_find(src, "\n", at);
+   e < 0 ? len(src) : e;
+  }
+  def bt-head-from(src, at, acc) {
+   let e = bt-line-end(src, at);
+   let line = substring(src, at, e);
+   at >= len(src) ? reverse(acc)
+   : len(line) > 0 && str_byte_at(line, 0) == 59 ? bt-head-from(src, e + 1, cons(line, acc))
+   : bt-blank?(line) ? bt-head-from(src, e + 1, cons("", acc))
+   : reverse(acc);
+  }
+  def bt-head(src) = bt-head-from(src, 0, []);
+
+  // the first `Verdict <digits>` on a line: the digits' span, or nothing
+  def bt-pin-in(line, from) {
+   let i = str_find(line, "Verdict ", from);
+   let e = i < 0 ? 0 : bt-digits-end(line, i + 8);
+   i < 0 ? nothing() : e > i + 8 ? [i + 8, e] : bt-pin-in(line, i + 1);
+  }
+  // [line index, digits start, digits end] of the head's first pin, or nothing
+  def bt-pin-at(lines, idx) {
+   let hit = nil?(lines) ? nothing() : bt-pin-in(lines[0], 0);
+   nil?(lines) ? nothing() : nothing?(hit) ? bt-pin-at(lines[1:], idx + 1) : [idx, hit[0], hit[1]];
+  }
+
+  // ---- table rows: [line index, kind, indent, weight digits]. The kinds: `lead` (a digit run opens the
+  // line), `dash` (`- 4:`) and `arrow` (the line ends `-> 100`). A row that opens a table sits at least
+  // two spaces in after `;`, so prose that opens on a year or a count in a one-space comment is no row;
+  // inside a table a row may sit nearer the margin (right-aligned numbers). A lead row may carry more than
+  // one weight: `a..b` (or `a .. b`) names the bits from a to b, each double the one before, and further
+  // `N text` chunks on the line (apart by three spaces or more, or by ` · `) count while they ascend.
+  def bt-back-digits(line, end) = end > 0 && bt-digit?(str_byte_at(line, end - 1)) ? bt-back-digits(line, end - 1) : end;
+  def bt-trim-end(line, end) = end > 0 && str_byte_at(line, end - 1) == 32 ? bt-trim-end(line, end - 1) : end;
+  def bt-arrow-weight(line) {
+   let end = bt-trim-end(line, len(line));
+   let start = bt-back-digits(line, end);
+   let gap = bt-trim-end(line, start);
+   start < end && gap >= 2 && start > gap && str_byte_at(line, gap - 1) == 62 && str_byte_at(line, gap - 2) == 45 ? substring(line, start, end) : nothing();
+  }
+  def bt-indent(line) = bt-spaces-end(line, 1) - 1;
+  def bt-sep(line, from) {
+   let a = str_find(line, "   ", from);
+   let b = str_find(line, " · ", from);
+   a < 0 ? b : b < 0 ? a : b < a ? b : a;
+  }
+  def bt-more(line, from, prev, acc) {
+   let g = bt-sep(line, from);
+   let k = g < 0 ? 0 : (bt-byte(line, g + 1) == 32 ? bt-spaces-end(line, g) : g + 4);
+   let e = g < 0 ? 0 : bt-digits-end(line, k);
+   let w = e > k ? bt-int(substring(line, k, e)) : nothing();
+   g < 0 ? reverse(acc)
+   : e > k && (e >= len(line) || str_byte_at(line, e) == 32) && bt-pow2?(w) && w > prev ? bt-more(line, e, w, cons(substring(line, k, e), acc))
+   : bt-more(line, k, prev, acc);
+  }
+  def bt-span-bits(w, top, acc) = nothing?(w) || nothing?(top) || w > top || w < 1 ? reverse(acc) : bt-span-bits(w * 2, top, cons(w.str(), acc));
+  // the bits of `lo..hi` read at `at` (the first `.`), or [] when it is no range of powers of two
+  def bt-range(line, lo, at) {
+   let k = bt-spaces-end(line, at + 2);
+   let f = bt-digits-end(line, k);
+   let hi = f > k ? bt-int(substring(line, k, f)) : nothing();
+   bt-pow2?(bt-int(lo)) && bt-pow2?(hi) ? bt-span-bits(bt-int(lo), hi, []) : [];
+  }
+  def bt-dots?(line, k) = bt-byte(line, k) == 46 && bt-byte(line, k + 1) == 46;
+  def bt-row(line, floor) {
+   let i = bt-spaces-end(line, 1);
+   let dash = bt-byte(line, i) == 45 && bt-byte(line, i + 1) == 32;
+   let j = dash ? bt-spaces-end(line, i + 2) : i;
+   let e = bt-digits-end(line, j);
+   let first = e > j ? substring(line, j, e) : "";
+   let follow = e >= len(line) ? 32 : str_byte_at(line, e);
+   let k = bt-spaces-end(line, e);
+   let arrow = bt-arrow-weight(line);
+   let span = !dash && e > j && bt-dots?(line, k) ? bt-range(line, first, k) : [];
+   let w = bt-int(first);
+   i - 1 < floor ? nothing()
+   : e > j && dash && follow == 58 ? ["dash", i - 1, [first]]
+   : !nil?(span) ? ["lead", i - 1, span]
+   : e > j && !dash && (follow == 32 || follow == 58) ? ["lead", i - 1, nothing?(w) ? [first] : cons(first, bt-more(line, e, w, []))]
+   : !nothing?(arrow) ? ["arrow", i - 1, [arrow]]
+   : nothing();
+  }
+  // A table is a region: rows, the lines that wrap a row's text (indented two or more past the region's
+  // first row, or only `;`), and nothing else. A row-shaped line indented more than two past the first
+  // row is a wrapped line that opens on a number, not a row. Prose at or left of the rows ends the region.
+  def bt-close(cur, regs) = nil?(cur) ? regs : cons(reverse(cur), regs);
+  def bt-regions(lines, idx, cur, base, regs) {
+   let line = nil?(lines) ? "" : lines[0];
+   let row = nil?(lines) || len(line) == 0 ? nothing() : bt-row(line, nil?(cur) ? 2 : 0);
+   let is_row = !nothing?(row) && (nil?(cur) || row[1] <= base + 2);
+   let wraps = !nil?(cur) && (len(line) == 0 || bt-blank-from(line, 1) || bt-indent(line) >= base + 2);
+   nil?(lines) ? reverse(bt-close(cur, regs))
+   : is_row ? bt-regions(lines[1:], idx + 1, cons([idx, row[0], row[1], row[2]], cur), nil?(cur) ? row[1] : base, regs)
+   : wraps ? bt-regions(lines[1:], idx + 1, cur, base, regs)
+   : bt-regions(lines[1:], idx + 1, [], -1, bt-close(cur, regs));
+  }
+  def bt-flat(lists) = nil?(lists) ? [] : append(lists[0], bt-flat(lists[1:]));
+  def bt-kind-count(rows, k) = len(filter(r => (String) r[1] == k, rows));
+  def bt-dominant(rows) = bt-kind-count(rows, "lead") >= bt-kind-count(rows, "dash") && bt-kind-count(rows, "lead") >= bt-kind-count(rows, "arrow") ? "lead"
+   : bt-kind-count(rows, "dash") >= bt-kind-count(rows, "arrow") ? "dash" : "arrow";
+  // the claim table: every region that carries two or more weights (a table the pin or a separator line
+  // splits is still one table), of the kind that has the most rows
+  def bt-table(lines) {
+   let all = bt-flat(filter(r => len(bt-flat(map(x => x[3], r))) > 1, bt-regions(lines, 0, [], -1, [])));
+   nil?(all) ? [] : filter(r => (String) r[1] == bt-dominant(all), all);
+  }
+
+  // ---- the bits a head names beyond its table rows: the weights of every row-shaped line, wherever it
+  // sits, and the `a..b` ranges of powers of two that prose states. A claim laid out in a shape the table does not read
+  // (several columns, a range in a sentence) is still named, so a pin bit that no weight carries but the
+  // head does name is a layout the door cannot read, never a missing claim.
+  def bt-word-byte?(b) = bt-digit?(b) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95;
+  def bt-ranges-line(line, i, acc) {
+   let e = bt-digits-end(line, i);
+   let k = bt-spaces-end(line, e);
+   let lone = i >= len(line) ? false : bt-digit?(str_byte_at(line, i)) && (i == 0 || !bt-word-byte?(str_byte_at(line, i - 1)));
+   let span = lone && bt-dots?(line, k) ? bt-range(line, substring(line, i, e), k) : [];
+   i >= len(line) ? acc
+   : !lone ? bt-ranges-line(line, i + 1, acc)
+   : bt-ranges-line(line, e, append(map(s => bt-int(s), span), acc));
+  }
+  def bt-ranges(lines) = nil?(lines) ? [] : append(bt-ranges-line(lines[0], 0, []), bt-ranges(lines[1:]));
+  def bt-row-weights(lines) {
+   let row = nil?(lines) || len(lines[0]) == 0 ? nothing() : bt-row(lines[0], 2);
+   nil?(lines) ? [] : append(nothing?(row) ? [] : row[2], bt-row-weights(lines[1:]));
+  }
+  def bt-named(lines) = append(map(s => bt-int(s), bt-row-weights(lines)), bt-ranges(lines));
+
+  // the set bits of a pin, largest first
+  def bt-powers-up(p, top, acc) = p > top ? acc : bt-powers-up(p * 2, top, cons(p, acc));
+  def bt-setbits(rem, ps) = nil?(ps) ? [] : rem >= ps[0] ? cons(ps[0], bt-setbits(rem - ps[0], ps[1:])) : bt-setbits(rem, ps[1:]);
+  def bt-join(xs) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0].str() : xs[0].str() ++ " " ++ bt-join(xs[1:]);
+
+  // ---- the inline list: `Verdict 7 = 1 runs | 2 refuses | 4 collections`, carried on by lines that open `|`
+  def bt-bar-lines(lines, idx) {
+   let line = nil?(lines) ? "" : lines[0];
+   let at = bt-spaces-end(line, 1);
+   nil?(lines) ? "" : bt-byte(line, at) == 124 ? " " ++ substring(line, at, len(line)) ++ bt-bar-lines(lines[1:], idx + 1) : "";
+  }
+  def bt-segment(seg) {
+   let t = substring(seg, bt-spaces-end(seg, 0), len(seg));
+   let e = bt-digits-end(t, 0);
+   e > 0 && (e >= len(t) || str_byte_at(t, e) == 32 || str_byte_at(t, e) == 59 || str_byte_at(t, e) == 44 || str_byte_at(t, e) == 46) ? substring(t, 0, e) : nothing();
+  }
+  def bt-segments(parts) = nil?(parts) ? [] : cons(bt-segment(parts[0]), bt-segments(parts[1:]));
+  // [weights] or nothing (no `=` after the pin) or [] never; an unparsed segment is "bad"
+  def bt-inline(lines, pin) {
+   let line = lines[pin[0]];
+   let k = bt-spaces-end(line, pin[2]);
+   let body = substring(line, k + 1, len(line)) ++ bt-bar-lines(lines[pin[0] + 1:], 0);
+   bt-byte(line, k) == 61 ? bt-segments(bt-flat(map(part => split-on(part, "+"), split-on(body, "|")))) : nothing();
+  }
+
+  // ---- the code list: live-claims(flow, ctx, [["name", bit, want, run], ...]) in the band's own code
+  def bt-call-at(src, from) {
+   let i = str_find(src, "live-claims(", from);
+   i < 0 ? nothing() : (i >= 4 && ((String) substring(src, i - 4, i) == "def ")) ? bt-call-at(src, i + 1) : i;
+  }
+  def bt-entries(src, at, stop, acc) {
+   let q = str_find(src, "[\"", at);
+   let close = q < 0 ? -1 : str_find(src, "\"", q + 2);
+   let p = close < 0 ? 0 : close + 1;
+   let p2 = bt-byte(src, p) == 44 ? bt-spaces-end(src, p + 1) : p;
+   let e = bt-digits-end(src, p2);
+   q < 0 || q > stop || close < 0 ? reverse(acc)
+   : bt-entries(src, close + 1, stop, cons(e > p2 ? substring(src, p2, e) : nothing(), acc));
+  }
+  def bt-code-list(src) {
+   let i = bt-call-at(src, 0);
+   let stop = nothing?(i) ? -1 : str_find(src, "]]", i);
+   nothing?(i) || stop < 0 ? nothing() : bt-entries(src, i, stop, []);
+  }
+
+  // ---- reading a list of weight strings
+  def bt-ws(strs) = map(s => bt-int(s), strs);
+  def bt-readable?(strs) = !nil?(strs) && bt-all?(strs, s => !nothing?(s) && !nothing?(bt-int(s)));
+  def bt-kind(ws) = bt-all?(ws, w => bt-pow2?(w)) && !bt-dup?(ws) ? "bits"
+   : len(ws) > 1 && bt-all?(ws, w => bt-one?(w)) ? "count"
+   : bt-all?(ws, w => bt-pow10?(w)) && !bt-dup?(ws) ? "decimal"
+   : bt-dup?(ws) ? "overlap" : "mixed";
+  def bt-flaw(cls, path, pin, top, detail) = "flaw " ++ cls ++ " " ++ path ++ " pin=" ++ bt-str(pin) ++ " max=" ++ bt-str(top) ++ " " ++ detail;
+  def bt-bad-bits-why(kind) = kind == "count" ? " (every claim weighs 1: the number counts claims and does not name which failed)"
+   : kind == "decimal" ? " (powers of ten: a decimal-digit fold, exact only below 2^53)"
+   : kind == "overlap" ? " (a weight repeats: two claims share a bit)"
+   : " (not distinct powers of two)";
+
+  // judge one reading of the claims against the pin: [flaw lines]
+  // `mentioned` are the bits the head names beyond its weights (bt-mentions), [] for a code list: a pin
+  // bit that no weight carries is a missing claim only when the head names it nowhere
+  def bt-judge(path, pin, strs, spot, mentioned, declared) {
+   let ws = bt-ws(strs);
+   let top = bt-sum(ws);
+   let kind = bt-kind(ws);
+   let spread = spot ++ " " ++ len(ws).str() ++ " claims, " ++ kind ++ " weights";
+   let bad = kind == "bits" || (String) declared == kind ? [] : [bt-flaw("bad-bits", path, pin, top, spread ++ bt-bad-bits-why(kind))];
+   let want = nothing?(pin) ? [] : bt-setbits(pin, bt-powers-up(1, pin, []));
+   let lacking = filter(b => !bt-member?(ws, b), want);
+   let unnamed = filter(b => !bt-member?(mentioned, b), lacking);
+   let extra = filter(w => !nothing?(w) && !bt-member?(want, w), ws);
+   let order = nothing?(pin) ? []
+    : kind == "bits" && top < pin ? (nil?(unnamed) ? [] : [bt-flaw("head-unmet", path, pin, top, spread ++ ": no claim carries pin bit(s) " ++ bt-join(unnamed) ++ ", so the band cannot read its own full")])
+    : kind == "bits" && top > pin ? [bt-flaw("claims-over", path, pin, top, spread ++ ": claims weigh " ++ bt-join(extra) ++ ", which the pin lacks, so a band that holds every claim reads above its full")]
+    : top < pin ? [bt-flaw("head-unmet", path, pin, top, spread ++ ": the claims sum to less than the head, so the band cannot read its own full")]
+    : top > pin ? [bt-flaw("claims-over", path, pin, top, spread ++ ": the claims sum to more than the head, so a band that holds every claim reads above its full")]
+    : [];
+   append(bad, order);
+  }
+
+  // A band that keeps a decimal-digit fold or a count of ones on purpose says so in its head, on a line of
+  // its own: `; FOLD: decimal` or `; FOLD: count`. The declaration silences only that kind's bad-bits
+  // line; the sums are still judged against the pin.
+  def bt-fold-declared(lines) {
+   let line = nil?(lines) ? "" : lines[0];
+   let at = bt-spaces-end(line, 1);
+   let word = bt-starts?(substring(line, at, len(line)), "FOLD: ") ? substring(line, at + 6, len(line)) : "";
+   nil?(lines) ? "" : len(word) > 0 ? (bt-starts?(word, "decimal") ? "decimal" : bt-starts?(word, "count") ? "count" : "") : bt-fold-declared(lines[1:]);
+  }
+
+  // the bits a head names for itself: `(11 bits)` right after the pin
+  def bt-bits-named(line, at) {
+   let k = str_find(line, "(", at);
+   let e = k < 0 ? 0 : bt-digits-end(line, k + 1);
+   k >= 0 && k <= at + 1 && e > k + 1 && ((String) substring(line, e, e + 6) == " bits)") ? bt-int(substring(line, k + 1, e)) : nothing();
+  }
+
+  def bt-line-no(idx) = "L" ++ (idx + 1).str();
+  def bt-span(rows) = nil?(rows) ? "" : "rows " ++ bt-line-no(rows[0][0]) ++ "-" ++ bt-line-no(reverse(rows)[0][0]);
+  def bt-mask-only?(pin) = !nothing?(pin) && bt-pow-up(pin + 1, 1, 2);
+
+  // a pin of nothing but ones (`111111111`) over rows numbered 1..n is a decimal-digit fold whose rows are
+  // numbered by digit position: row k weighs 10^(k-1)
+  def bt-ones-from(d, i) = i >= len(d) ? true : str_byte_at(d, i) == 49 && bt-ones-from(d, i + 1);
+  def bt-count-up?(ws, n) = nil?(ws) ? true : !nothing?(ws[0]) && ws[0] == n && bt-count-up?(ws[1:], n + 1);
+  def bt-zeros(n) = n <= 0 ? "" : "0" ++ bt-zeros(n - 1);
+  def bt-positional?(strs, digits) = len(digits) > 1 && bt-ones-from(digits, 0) && len(strs) == len(digits) && bt-count-up?(bt-ws(strs), 1);
+  def bt-positions(strs) = map(s => "1" ++ bt-zeros(bt-int(s) - 1), strs);
+
+  // two readings of one band's claims that disagree: [flaw lines]
+  def bt-drift(path, pin, primary, others) {
+   let mine = bt-sum(bt-ws(primary));
+   let theirs = nil?(others) ? 0 : bt-sum(bt-ws(others[0][1]));
+   nil?(others) ? []
+   : theirs == mine && len(others[0][1]) == len(primary) ? bt-drift(path, pin, primary, others[1:])
+   : cons(bt-flaw("list-drift", path, pin, mine, "the code list holds " ++ len(primary).str() ++ " claims summing " ++ mine.str() ++ " and the " ++ others[0][0] ++ " holds " ++ len(others[0][1]).str() ++ " summing " ++ theirs.str()), bt-drift(path, pin, primary, others[1:]));
+  }
+
+  def bt-format(at, code_ok, inline_ok, rows_ok, inline, pin) = nothing?(at) ? "unpinned"
+   : code_ok ? "code-list" : inline_ok ? "head-inline" : rows_ok ? "head-table"
+   : !nothing?(inline) ? "inline-unparsed" : bt-mask-only?(pin) ? "mask-only" : "no-table";
+
+  // the audit of one band: [format, lines]; format is one of
+  //   unpinned | code-list | head-inline | head-table | mask-only | no-table | inline-unparsed
+  def bt-audit(path, src) {
+   let lines = bt-head(src);
+   let at = bt-pin-at(lines, 0);
+   let digits = nothing?(at) ? "" : substring(lines[at[0]], at[1], at[2]);
+   let pin = bt-int(digits);
+   let code = nothing?(at) ? nothing() : bt-code-list(src);
+   let inline = nothing?(at) ? nothing() : bt-inline(lines, at);
+   let rows = nothing?(at) ? [] : bt-table(lines);
+   let table_ws = bt-flat(map(r => r[3], rows));
+   let positional = bt-positional?(table_ws, digits);
+   let row_ws = positional ? bt-positions(table_ws) : table_ws;
+   let named = nothing?(at) ? nothing() : bt-bits-named(lines[at[0]], at[2]);
+   let too_big = !nothing?(at) && bt-big?(digits) ? [bt-flaw("head-too-big", path, pin, "?", "the pin " ++ digits ++ " is at or above 2^53 (9007199254740992), where a verdict fold stops being exact")] : [];
+   let code_ok = !nothing?(code) && bt-readable?(code);
+   let inline_ok = !nothing?(inline) && bt-readable?(inline);
+   let rows_ok = len(row_ws) > 1 && bt-readable?(row_ws);
+   let primary = code_ok ? code : inline_ok ? inline : rows_ok ? row_ws : [];
+   let spot = code_ok ? "code list" : inline_ok ? "head " ++ bt-line-no(at[0]) ++ " list" : rows_ok ? "head " ++ bt-span(rows) ++ (positional ? " numbered by decimal-digit position" : "") : "";
+   let fmt = bt-format(at, code_ok, inline_ok, rows_ok, inline, pin);
+   let mentioned = nil?(primary) || code_ok ? [] : bt-named(lines);
+   let judged = nil?(primary) ? [] : bt-judge(path, pin, primary, spot, mentioned, bt-fold-declared(lines));
+   let seen_inline = code_ok && inline_ok ? [["head " ++ bt-line-no(at[0]) ++ " list", inline]] : [];
+   let seen_rows = code_ok && rows_ok ? [["head " ++ bt-span(rows), row_ws]] : [];
+   let drift = nil?(primary) ? [] : bt-drift(path, pin, primary, append(seen_inline, seen_rows));
+   let bits = nothing?(named) || nil?(primary) || len(primary) == named ? []
+    : [bt-flaw("list-drift", path, pin, bt-sum(bt-ws(primary)), "the head names " ++ named.str() ++ " bits and its " ++ spot ++ " holds " ++ len(primary).str() ++ " claims")];
+   let unread = (String) fmt == "unpinned" ? ["unreadable " ++ path ++ " reason=no-pin"]
+    : nil?(primary) ? ["unreadable " ++ path ++ " reason=" ++ fmt ++ " pin=" ++ digits]
+    : [];
+   [fmt, append(append(too_big, judged), append(append(drift, bits), unread))];
+  }
+
+  // the pin a file's head declares: digits, "" for a head with none, nothing for a file that is absent
+  def bt-pin-of(src) {
+   let lines = nothing?(src) ? [] : bt-head(src);
+   let at = bt-pin-at(lines, 0);
+   nothing?(src) ? nothing() : nothing?(at) ? "" : substring(lines[at[0]], at[1], at[2]);
+  }
+
+  // ---- second copies of a full
+  // a queue row: `{"full":31,"id":"x", ... "band":"path" ...}`
+  def bt-after(line, key) {
+   let k = str_find(line, key, 0);
+   k < 0 ? nothing() : k + len(key);
+  }
+  def bt-queue-row(line) {
+   let f = bt-after(line, "\"full\":");
+   let b = bt-after(line, "\"band\":\"");
+   let i = bt-after(line, "\"id\":\"");
+   [nothing?(f) ? "" : substring(line, f, bt-digits-end(line, f)),
+    nothing?(b) ? "" : substring(line, b, str_find(line, "\"", b)),
+    nothing?(i) ? "?" : substring(line, i, str_find(line, "\"", i))];
+  }
+  // [flaw or unreadable lines] for each queue row against the pin of its band
+  def bt-queue(lines, readpin) {
+   let row = nil?(lines) ? nothing() : bt-queue-row(lines[0]);
+   let pin = nothing?(row) || len(row[1]) == 0 ? nothing() : readpin(row[1]);
+   nil?(lines) ? []
+   : append(
+      nothing?(row) ? []
+      : len(row[2]) == 0 || len(row[0]) == 0 ? []
+      : len(row[1]) == 0 ? ["unreadable queue-row:" ++ row[2] ++ " reason=no-band full=" ++ row[0]]
+      : nothing?(pin) ? [bt-flaw("copy-drift", "queue-row:" ++ row[2], bt-int(row[0]), "?", "learn/native-turn-queue.jsonl names band " ++ row[1] ++ ", which is absent")]
+      : (String) pin == "" ? ["unreadable queue-row:" ++ row[2] ++ " reason=band-unpinned band=" ++ row[1] ++ " full=" ++ row[0]]
+      : (String) pin == row[0] ? []
+      : [bt-flaw("copy-drift", "queue-row:" ++ row[2], bt-int(pin), "?", "learn/native-turn-queue.jsonl holds full " ++ row[0] ++ " and the band's head pins " ++ pin ++ " (" ++ row[1] ++ "): a turn asks the band to read a number it can no longer print")],
+      bt-queue(lines[1:], readpin));
+  }
+
+  // a fourth-arm-bands.txt row `<stem> fks <verdict>`: the band is form/form-stdlib/tests/<stem>.fk|.bml or
+  // <stem>-band.fk|.bml (fourth_band_stem), read for the first that stands
+  def bt-stem-paths(stem) = ["form/form-stdlib/tests/" ++ stem ++ ".fk", "form/form-stdlib/tests/" ++ stem ++ ".bml", "form/form-stdlib/tests/" ++ stem ++ "-band.fk", "form/form-stdlib/tests/" ++ stem ++ "-band.bml"];
+  def bt-first-pin(paths, readpin) {
+   let pin = nil?(paths) ? nothing() : readpin(paths[0]);
+   nil?(paths) ? nothing() : nothing?(pin) ? bt-first-pin(paths[1:], readpin) : [paths[0], pin];
+  }
+  // a band with no pin in its head is held to its code list instead: the registered verdict must be what the
+  // list sums to
+  def bt-code-sum-of(path) {
+   let code = bt-code-list(read_file(path) ?? "");
+   !nothing?(code) && bt-readable?(code) ? bt-sum(bt-ws(code)) : nothing();
+  }
+  def bt-manifest-row(line, readpin) {
+   let cols = split-on(line, " ");
+   let hit = len(cols) < 3 ? nothing() : bt-first-pin(bt-stem-paths(cols[0]), readpin);
+   let listed = nothing?(hit) ? nothing() : (String) hit[1] == "" ? bt-code-sum-of(hit[0]) : nothing();
+   len(line) == 0 || str_byte_at(line, 0) == 35 || len(cols) < 3 ? []
+   : nothing?(hit) ? [bt-flaw("copy-drift", "manifest-row:" ++ cols[0], bt-int(cols[2]), "?", "form/fourth-arm-bands.txt registers " ++ cols[2] ++ " for a band that stands at none of its four spellings under form/form-stdlib/tests/")]
+   : (String) hit[1] == "" && nothing?(listed) ? ["unreadable manifest-row:" ++ cols[0] ++ " reason=band-unpinned band=" ++ hit[0] ++ " registered=" ++ cols[2]]
+   : (String) hit[1] == "" ? (listed == bt-int(cols[2]) ? [] : [bt-flaw("copy-drift", "manifest-row:" ++ cols[0], listed, listed, "form/fourth-arm-bands.txt registers " ++ cols[2] ++ " and the code list of " ++ hit[0] ++ " sums to " ++ listed.str())])
+   : (String) hit[1] == cols[2] ? []
+   : [bt-flaw("copy-drift", "manifest-row:" ++ cols[0], bt-int(hit[1]), "?", "form/fourth-arm-bands.txt registers " ++ cols[2] ++ " and the head of " ++ hit[0] ++ " pins " ++ hit[1])];
+  }
+  def bt-manifest(lines, readpin) = nil?(lines) ? [] : append(bt-manifest-row(lines[0], readpin), bt-manifest(lines[1:], readpin));
+
+  // ---- what the ledger saw: a native turn row (receipts/native-turn-ledger.jsonl) that read a band above the
+  // full its queue row held. The ledger only grows, so this is history, not a flaw that can be healed: the
+  // door names each such gap once as `seen` and the flaw lines above say whether the cause still stands.
+  def bt-key-int(line, key) {
+   let k = bt-after(line, key);
+   let e = nothing?(k) ? 0 : bt-digits-end(line, k);
+   nothing?(k) || e <= k ? nothing() : bt-int(substring(line, k, e));
+  }
+  def bt-key-str(line, key) {
+   let k = bt-after(line, key);
+   nothing?(k) ? nothing() : substring(line, k, str_find(line, "\"", k));
+  }
+  def bt-higher(a, b) = nothing?(a) ? b : nothing?(b) ? a : a > b ? a : b;
+  def bt-ledger-row(line) {
+   let gap = bt-key-str(line, "\"gap\":\"");
+   let full = bt-key-int(line, "\"full\":");
+   let high = bt-higher(bt-key-int(line, "\"band_before\":"), bt-key-int(line, "\"band_after\":"));
+   nothing?(gap) || nothing?(full) || nothing?(high) || high <= full ? nothing() : [gap, full, high];
+  }
+  def bt-above-rows(lines) {
+   let row = nil?(lines) ? nothing() : bt-ledger-row(lines[0]);
+   nil?(lines) ? [] : nothing?(row) ? bt-above-rows(lines[1:]) : cons(row, bt-above-rows(lines[1:]));
+  }
+  def bt-seen-gap(rows, gap) = filter(r => (String) r[0] == gap, rows);
+  def bt-seen-line(rows) = "seen read-above-full " ++ rows[0][0] ++ " rows=" ++ len(rows).str() ++ " full=" ++ rows[0][1].str() ++ " read=" ++ foldl((m, r) => r[2] > m ? r[2] : m, 0, rows).str() ++ " (receipts/native-turn-ledger.jsonl: a turn read this gap's band above the full its queue row held)";
+  def bt-seen(rows) {
+   let mine = nil?(rows) ? [] : bt-seen-gap(rows, rows[0][0]);
+   nil?(rows) ? [] : cons(bt-seen-line(mine), bt-seen(filter(r => (String) r[0] != rows[0][0], rows)));
+  }
+  def bt-history() = bt-seen(bt-above-rows(bt-file-lines("receipts/native-turn-ledger.jsonl")));
+
+  // ---- the report: every band's lines as they are read, then the second copies, then the totals
+  def bt-pin-at-path(path) = bt-pin-of(read_file(path));
+  def bt-file-lines(path) = filter(l => len(l) > 0, split-on(read_file(path) ?? "", "\n"));
+  def bt-copies() = append(bt-queue(bt-file-lines("learn/native-turn-queue.jsonl"), bt-pin-at-path), bt-manifest(bt-file-lines("form/fourth-arm-bands.txt"), bt-pin-at-path));
+  def bt-print-all(lines) = nil?(lines) ? 0 : print_str(lines[0]) + bt-print-all(lines[1:]);
+  def bt-flaws-in(lines) = len(filter(l => bt-starts?(l, "flaw "), lines));
+  def bt-walk(paths, fmts, flaws) {
+   let src = nil?(paths) ? nothing() : read_file(paths[0]);
+   let got = nil?(paths) || nothing?(src) ? nothing() : bt-audit(paths[0], src);
+   let shown = nothing?(got) ? 0 : bt-print-all(got[1]);
+   nil?(paths) ? [fmts, flaws]
+   : nothing?(src) ? bt-walk(paths[1:], cons("absent", fmts), flaws)
+   : bt-walk(paths[1:], cons(got[0], fmts), flaws + bt-flaws-in(got[1]));
+  }
+  def bt-count(fmts, name) = len(filter(f => (String) f == name, fmts));
+  def bt-formats(fmts) = "band-truth formats code-list=" ++ bt-count(fmts, "code-list").str() ++ " head-inline=" ++ bt-count(fmts, "head-inline").str()
+   ++ " head-table=" ++ bt-count(fmts, "head-table").str() ++ " mask-only=" ++ bt-count(fmts, "mask-only").str()
+   ++ " no-table=" ++ bt-count(fmts, "no-table").str() ++ " inline-unparsed=" ++ bt-count(fmts, "inline-unparsed").str()
+   ++ " unpinned=" ++ bt-count(fmts, "unpinned").str() ++ " absent=" ++ bt-count(fmts, "absent").str();
+  def bt-summary(fmts, flaws, seen) {
+   let readable = bt-count(fmts, "code-list") + bt-count(fmts, "head-inline") + bt-count(fmts, "head-table");
+   "band-truth bands=" ++ len(fmts).str() ++ " readable=" ++ readable.str() ++ " unreadable=" ++ (len(fmts) - readable - bt-count(fmts, "absent")).str() ++ " absent=" ++ bt-count(fmts, "absent").str() ++ " seen=" ++ seen.str() ++ " flaws=" ++ flaws.str();
+  }
+  // prints and answers the number of flaws; `extra` are the second-copy and ledger lines already read
+  def bt-report(paths, extra) {
+   let got = bt-walk(paths, [], 0);
+   let shown = bt-print-all(extra);
+   let flaws = got[1] + bt-flaws-in(extra);
+   let seen = len(filter(l => bt-starts?(l, "seen "), extra));
+   let formats = print_str(bt-formats(got[0]));
+   let summary = print_str(bt-summary(got[0], flaws, seen));
+   flaws;
+  }
+  // the door's ending: a flagged tree stops with the count, so its exit reads nonzero; a clean one answers 0
+  def bt-finish(flaws) = flaws > 0 ? form_error("band-truth: " ++ flaws.str() ++ " flaw(s) flagged") : 0;
+ }
+}
