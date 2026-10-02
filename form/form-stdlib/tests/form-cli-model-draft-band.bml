@@ -1,0 +1,374 @@
+; form-cli-model-draft-band.bml -- prompt-lookup drafting reads its whole verdict with no model and no GPU: the
+; n-gram index, the lookup, the accept/reject accounting, the greedy-exactness contract and the wiring into the
+; session door, all against a scripted model whose verify is fake.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- its closure reaches the Metal handle door (qwen35-dense-token-handle.fk) and the stage bus, which no sibling kernel carries
+;
+; preludes: form-stdlib/core.fk form-stdlib/bml/form-cli-code-session.bml
+;
+; The scripted model is a record with the two kinds of state a hybrid Qwen has. Its KV is positional: a verify at
+; pos truncates the context to pos and appends, so rows past the accepted ones are stale and overwritten. Its
+; recurrent state r is NOT rewound by pos: every consumed ID folds into it, and only the mark and restore the
+; lane takes put it back. The argmax after an ID is the model's bigram table when it knows the ID, and
+; 200 + (r mod 13) when it does not, so a lane that forgets to restore, or restores and then re-runs the wrong
+; IDs, reads a different reply: claim 128 holds the band to that sensitivity.
+;
+; Three fixtures (the model's table is the script; the prompt is what the lane had read):
+;   A  the prompt carries a file the reply copies, with one deviation (23 -> 40) and a stop ID inside the file,
+;      so drafts are accepted, cut short, and cut at the stop
+;   B  nothing is copied: every argmax past the prompt depends on r, drafts come only from repeats
+;   C  a cycle the reply copies without end: drafts are accepted in full
+;
+; Verdict 32767 when every claim lands:
+;   1     the index: the 3-gram wins over the 2-gram, the latest occurrence wins, the tail is matched at the pending ID,
+;         a miss answers nothing() and `lookup ?? []` is a span of 1
+;   2     the lookup is capped by k and ends at the pending ID (index n of history followed by pending); feed counts
+;   4     acceptance is the longest agreeing prefix; a draft is cut before any stop ID; the cap is left-2, then
+;         maxpos, then the span
+;   8     one step's calls: nothing drafted is one verify; a full accept is mark and verify; a short accept is mark,
+;         verify, restore and an advance over the accepted prefix; a draft shorter than the minimum is dropped
+;   16    fcmdr-walk's [ids pending pos stopped] equal fcms-walk-by's over the same scripted predictions, for every
+;         draft width and quantum width of the grid and three fixtures
+;   32    whole replies (quanta joined by the boundary forward) equal the token-wise reply for every draft width
+;         (0, 1, 2, 3, 5) and quantum width of the grid: drafting changes how many forwards a reply costs, never
+;         the reply; drafts were accepted and cut short on fixture A, and accepted in full on C
+;   64    the accounting: the position moved equals steps + accepted, the history holds the prompt plus
+;         what was consumed, verifies equal steps when none was refused, and width 0 drafts nothing
+;   128   the band can see a missing restore: the same walk with a restore that does nothing reads a different
+;         reply on fixture B
+;   256   a surprise is a choice point: a draft verify that refuses, a mark that refuses and an advance that refuses
+;         each land the reply as a span of 1 (the reply is the width-0 reply); every option refused refuses the
+;         session with the findings of both
+;   512   a stop is never drafted: no verify input past the first carries a stop ID, and a reply whose accepted
+;         draft ends on the stop ID stops with it pending and pos where the token-wise walk leaves it
+;   1024  the session door: the live hook is off; the lane is sampled over draft over greedy; the owner's slot keeps
+;         the slots before it as their owners read them and survives the session's updates
+;   2048  the quantum over a session moves the same fields as the greedy quantum (pos, pending, stopped, generated);
+;         the boundary forward is the verify and lands the same pending as the token-wise forward
+;   4096  ownership: a spare is counted by its positive handles, a partial spare is refused, and an owner with no
+;         spare closes with nothing to free
+;   8192  the span and maxpos caps hold in a walk: no verify input is longer than the span, and a tight maxpos
+;         leaves the reply the same
+;   16384 the physical run's reading (observe/prompt-lookup-run.bml): the four splits of 8 IDs, the agreement count, IDs
+;         per second, logits bytes that must all arrive and all be equal, the verdict that opens only on identical,
+;         equal and faster, and the last verdict of the rows read
+;
+; The physical claims (the span kernels give row t the same bytes whatever the split; the lane is faster) are not
+; this band's: tests/q8-0-mma-prefix-band.fk holds the matmul, observe/prompt-lookup-run.bml the stack.
+section [form.bml] {
+ class FormCliModelDraftBand {
+  def db-bit(ok, bit) = ok ? bit : 0;
+  def db-all(xs) = nil?(xs) ? 1 : (xs[0] ? db-all(xs[1:]) : 0);
+  def db-stops() = [7, 8];
+  // ── the scripted model ──
+  // keyed by digits: an int key does not tell one entry from another in a record
+  def db-table(pairs) = foldl((t, p) => record_set(t, p[0].str(), p[1]), record_new(0), pairs);
+  def db-fixture-a() = [[1, 2, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 7, 3, 4, 20], db-table([[20, 21], [21, 22], [22, 23], [23, 40], [40, 24], [24, 25], [25, 26], [26, 27], [27, 28], [28, 29], [29, 7]])];
+  def db-fixture-b() = [[1, 2, 3, 4], db-table([])];
+  def db-fixture-c() = [[1, 20, 21, 22, 23, 20, 21, 22, 23, 20, 21, 22, 23, 20], db-table([[20, 21], [21, 22], [22, 23], [23, 20]])];
+  def db-fixture(i) = i == 0 ? db-fixture-a() : i == 1 ? db-fixture-b() : db-fixture-c();
+  def db-fold(r, ids) = nil?(ids) ? r : db-fold((r * 31 + ids[0] + 7) % 100003, ids[1:]);
+  def db-new(fixture, mode) {
+   let m = record_new(0, "r", db-fold(0, fixture[0]), "ctx", fixture[0], "markr", 0, "calls", [], "inputs", [], "ends", [], "table", fixture[1], "mode", mode, "restores", 0);
+   m;
+  }
+  def db-mode(m) = record_get(m, "mode");
+  def db-logged(m, entry) = record_set(m, "calls", append(record_get(m, "calls"), [entry]));
+  def db-pred(m, x) = record_has(record_get(m, "table"), x.str()) ? record_get(record_get(m, "table"), x.str()) : 200 + record_get(m, "r") % 13;
+  def db-rows(m, ids, out) = nil?(ids) ? out : db-rows-next(m, ids, out, record_set(m, "r", (record_get(m, "r") * 31 + ids[0] + 7) % 100003));
+  def db-rows-next(m, ids, out, ate) = db-rows(m, ids[1:], append(out, [db-pred(m, ids[0])]));
+  def db-seat(m, pos, ids) = record_set(m, "ctx", append(take(pos, record_get(m, "ctx")), ids));
+  def db-refuses?(m, ids, pos) = ((String) db-mode(m) == "refuse-all") || (((String) db-mode(m) == "refuse-draft") && (len(ids) > 1)) || (pos > len(record_get(m, "ctx")));
+  def db-verify(m, ids, pos) {
+   db-logged(m, ["v", len(ids)]);
+   record_set(m, "inputs", append(record_get(m, "inputs"), [ids]));
+   record_set(m, "ends", append(record_get(m, "ends"), [pos + len(ids)]));
+   db-refuses?(m, ids, pos) ? nothing() : db-verified(m, ids, pos);
+  }
+  def db-verified(m, ids, pos) {
+   db-seat(m, pos, ids);
+   db-rows(m, ids, []);
+  }
+  def db-advance(m, ids, pos) {
+   db-logged(m, ["a", len(ids)]);
+   db-seat(m, pos, ids);
+   record_set(m, "r", db-fold(record_get(m, "r"), ids));
+   (String) db-mode(m) == "refuse-advance" ? 0 : 1;
+  }
+  def db-mark(m) {
+   db-logged(m, ["m"]);
+   record_set(m, "markr", record_get(m, "r"));
+   (String) db-mode(m) == "refuse-mark" ? 0 : 1;
+  }
+  def db-restore(m) {
+   db-logged(m, ["r"]);
+   record_set(m, "restores", record_get(m, "restores") + 1);
+   (String) db-mode(m) == "skip-restore" ? 1 : db-restored(m);
+  }
+  def db-restored(m) {
+   record_set(m, "r", record_get(m, "markr"));
+   1;
+  }
+  def db-io(m) = fcmdr-io((ids, pos) => db-verify(m, ids, pos), (ids, pos) => db-advance(m, ids, pos), (u) => db-mark(m), (u) => db-restore(m));
+  // the token-wise forward the walk's reference takes: one ID, its argmax
+  def db-forward(m, s, id, pos) {
+   let rows = db-verify(m, [id], pos);
+   nothing?(rows) ? -1 : rows[0];
+  }
+  def db-pending(m) = db-pred(m, record_get(m, "ctx")[-1]);
+  def db-session(m, maxpos) = fcms-session("live", "band", "", "", [], [], maxpos, len(record_get(m, "ctx")), db-pending(m), 0, 0, 0, 0, 0);
+  def db-owner(m, kmax, span) {
+   let o = fcmdr-new(kmax, 2, span, []);
+   fcmdr-feed(o, record_get(m, "ctx"));
+   o;
+  }
+  def db-calls(m) = record_get(m, "calls");
+  def db-kinds(calls) = nil?(calls) ? [] : cons(calls[0][0], db-kinds(calls[1:]));
+  def db-widths(calls) = nil?(calls) ? [] : cons(len(calls[0]) > 1 ? calls[0][1] : 0, db-widths(calls[1:]));
+  // ── 1: the index ──
+  def db-index() {
+   let o = fcmdr-new(3, 2, 8, []);
+   fcmdr-feed(o, [10, 11, 12, 13, 14, 10, 11, 12]);
+   let three = fcmdr-lookup(o, 13, 3);
+   let miss = fcmdr-lookup(o, 99, 3);
+   let two = fcmdr-new(3, 2, 8, []);
+   fcmdr-feed(two, [1, 2, 3, 4, 5, 9, 3]);
+   let fallback = fcmdr-lookup(two, 4, 3);
+   let latest = fcmdr-new(3, 2, 8, []);
+   fcmdr-feed(latest, [5, 6, 7, 1, 5, 6, 7, 2, 5, 6]);
+   let newest = fcmdr-lookup(latest, 7, 3);
+   let run = fcmdr-new(3, 2, 8, []);
+   fcmdr-feed(run, [3, 3, 3]);
+   let repeat = fcmdr-lookup(run, 3, 3);
+   let none = fcmdr-new(3, 2, 8, []);
+   three == [14, 10, 11] && nothing?(miss) && (miss ?? []) == [] && fallback == [5, 9, 3] && newest == [2, 5, 6] && repeat == [3] && nothing?(fcmdr-lookup(none, 5, 3)) && nothing?(fcmdr-lookup(o, 13, 0));
+  }
+  // ── 2: caps and counts ──
+  def db-lookup-caps() {
+   let o = fcmdr-new(3, 2, 8, []);
+   fcmdr-feed(o, [10, 11, 12, 13, 14, 10, 11, 12]);
+   let fed = fcmdr-n(o);
+   fcmdr-lookup(o, 13, 2) == [14, 10] && fcmdr-lookup(o, 13, 1) == [14] && fcmdr-lookup(o, 13, 5) == [14, 10, 11, 12, 13] && fed == 8 && fcmdr-feed(o, []) == 0 && fcmdr-n(o) == 8 && fcmdr-feed(nothing(), [1]) == 0;
+  }
+  // ── 4: acceptance, the stop cut, the caps ──
+  def db-accept() {
+   let o = fcmdr-new(3, 2, 8, []);
+   let capped = fcmdr-new(3, 2, 3, []);
+   fcmdr-accepted([4, 5, 6], [4, 5, 9, 1], 0) == 2 && fcmdr-accepted([4, 5, 6], [4, 5, 6, 1], 0) == 3 && fcmdr-accepted([4, 5, 6], [9, 5, 6, 1], 0) == 0
+   && fcmdr-cut([4, 5, 7, 9], db-stops()) == [4, 5] && fcmdr-cut([7, 4], db-stops()) == [] && fcmdr-cut([4, 5], db-stops()) == [4, 5]
+   && fcmdr-cap(o, 10, 4, 100) == 2 && fcmdr-cap(o, 10, 5, 100) == 3 && fcmdr-cap(o, 10, 9, 100) == 3 && fcmdr-cap(o, 10, 3, 100) == 1 && fcmdr-cap(o, 10, 2, 100) == 0
+   && fcmdr-cap(o, 98, 9, 100) == 1 && fcmdr-cap(capped, 10, 9, 100) == 2 && fcmdr-cap(fcmdr-new(0, 2, 8, []), 10, 9, 100) == 0;
+  }
+  // ── 8: one step's calls ──
+  // history [5, 10, 11, 12, 13, 4, 5] and pending 10: the tail "5 10" was seen, 11 12 13 followed it
+  def db-step-fixture(table) = [[5, 10, 11, 12, 13, 4, 5], db-table(table)];
+  def db-step-run(table, left) {
+   let m = db-new(db-step-fixture(table), "ok");
+   let o = db-owner(m, 3, 8);
+   let step = fcmdr-step(o, db-io(m), 10, 7, left, db-stops(), 100);
+   [step, db-calls(m), o];
+  }
+  def db-steps() {
+   let full = db-step-run([[10, 11], [11, 12], [12, 13], [13, 99]], 5);
+   let short = db-step-run([[10, 11], [11, 12], [12, 55], [13, 99]], 5);
+   let none = db-step-run([[10, 11]], 3);
+   let tiny = db-step-run([[10, 11], [11, 12], [12, 13], [13, 99]], 4);
+   db-kinds(full[1]) == ["m", "v"] && db-widths(full[1]) == [0, 4] && full[0][0] == [10, 11, 12, 13] && full[0][1] == 99
+   && db-kinds(short[1]) == ["m", "v", "r", "a"] && db-widths(short[1]) == [0, 4, 0, 3] && short[0][0] == [10, 11, 12] && short[0][1] == 55
+   && db-kinds(none[1]) == ["v"] && db-widths(none[1]) == [1] && none[0][0] == [10] && none[0][1] == 11
+   && db-kinds(tiny[1]) == ["m", "v"] && db-widths(tiny[1]) == [0, 3]
+   && fcmdr-counts(full[2]) == [1, 1, 3, 3, 0, 1, 1, 1, 0] && fcmdr-counts(short[2]) == [1, 1, 3, 2, 1, 1, 1, 1, 0] && fcmdr-counts(none[2]) == [1, 1, 0, 0, 0, 0, 0, 0, 0];
+  }
+  // ── 16, 32, 64: the walks and replies ──
+  def db-quantum-ref(m, s, stops, width) {
+   let walked = fcms-walk-by((ss, id, pos) => db-forward(m, ss, id, pos), s, fcms-pending(s), fcms-pos(s), width, stops, [], width + 1, 1, 0);
+   [walked, fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(walked[0]), fcms-injected-ids(s), fcms-observations(s))];
+  }
+  def db-reply-ref(m, s, stops, width, cap, out) {
+   let q = db-quantum-ref(m, s, stops, width);
+   let s2 = q[1];
+   let out2 = append(out, q[0][0]);
+   let ended = fcms-stopped?(s2) || len(out2) >= cap;
+   ended ? [out2, s2] : db-reply-ref(m, db-boundary-ref(m, s2, stops), stops, width, cap, out2);
+  }
+  def db-boundary-ref(m, s, stops) = db-boundary-moved(s, stops, db-forward(m, s, fcms-pending(s), fcms-pos(s)));
+  def db-boundary-moved(s, stops, pending) = fcms-with-stream(s, fcms-pos(s) + 1, pending, pending < 0 ? 1 : q38-stop?(pending, stops), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s));
+  def db-reply(o, io, s, stops, width, cap, out) {
+   let g = fcacs-draft-quantum-with(s, o, io, stops, width);
+   let s2 = fcms-generation-session(g);
+   let out2 = append(out, fcms-generation-ids(g));
+   let ended = !fcms-live?(s2) || fcms-stopped?(s2) || len(out2) >= cap;
+   ended ? [out2, s2] : db-reply(o, io, fcacs-next-with(s2, stops, io), stops, width, cap, out2);
+  }
+  def db-run(fixture, mode, kmax, span, width, cap, maxpos) {
+   let m = db-new(db-fixture(fixture), mode);
+   let o = db-owner(m, kmax, span);
+   let r = db-reply(o, db-io(m), fcmdr-with-owner(db-session(m, maxpos), o), db-stops(), width, cap, []);
+   [r, m, o];
+  }
+  def db-run-ref(fixture, width, cap, maxpos) {
+   let m = db-new(db-fixture(fixture), "ok");
+   [db-reply-ref(m, db-session(m, maxpos), db-stops(), width, cap, []), m];
+  }
+  def db-fields(s) = [fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-generated-ids(s), fcms-live?(s)];
+  def db-same(a, b) = a[0][0] == b[0][0] && db-fields(a[0][1]) == db-fields(b[0][1]);
+  // one quantum from the same start, both ways
+  def db-contract-one(fixture, kmax, width) {
+   let m1 = db-new(db-fixture(fixture), "ok");
+   let m2 = db-new(db-fixture(fixture), "ok");
+   let o = db-owner(m1, kmax, 8);
+   let s = db-session(m1, 400);
+   let a = fcmdr-walk(o, db-io(m1), fcms-pending(s), fcms-pos(s), width, db-stops(), 400, []);
+   let b = fcms-walk-by((ss, id, pos) => db-forward(m2, ss, id, pos), s, fcms-pending(s), fcms-pos(s), width, db-stops(), [], width + 1, 1, 0);
+   a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && (String) a[4] == "";
+  }
+  def db-grid(f) = db-grid-k(f, [0, 1, 2, 3, 5], [1, 2, 3, 4, 5, 6, 8], [0, 1, 2]);
+  def db-grid-k(f, ks, ws, fx) = nil?(ks) ? [] : append(db-grid-w(f, ks[0], ws, fx), db-grid-k(f, ks[1:], ws, fx));
+  def db-grid-w(f, k, ws, fx) = nil?(ws) ? [] : append(db-grid-f(f, k, ws[0], fx), db-grid-w(f, k, ws[1:], fx));
+  def db-grid-f(f, k, w, fx) = nil?(fx) ? [] : cons(f(fx[0], k, w), db-grid-f(f, k, w, fx[1:]));
+  def db-reply-one(fixture, kmax, width) {
+   let a = db-run(fixture, "ok", kmax, 8, width, 40, 400);
+   let b = db-run-ref(fixture, width, 40, 400);
+   db-same(a, b) ? 1 : 0;
+  }
+  def db-drafted() {
+   let a = db-run(0, "ok", 3, 8, 6, 40, 400);
+   let c = db-run(2, "ok", 3, 8, 6, 40, 400);
+   let counts = fcmdr-counts(a[2]);
+   let cc = fcmdr-counts(c[2]);
+   counts[3] > 0 && counts[4] > 0 && cc[3] > cc[4] && cc[3] > 5;
+  }
+  // ── 64: the accounting ──
+  def db-account-one(fixture, kmax, width) {
+   let m = db-new(db-fixture(fixture), "ok");
+   let start = len(record_get(m, "ctx"));
+   let o = db-owner(m, kmax, 8);
+   let r = db-reply(o, db-io(m), fcmdr-with-owner(db-session(m, 400), o), db-stops(), width, 40, []);
+   let c = fcmdr-counts(o);
+   let moved = fcms-pos(r[1]) - start;
+   moved == c[0] + c[3] && fcmdr-n(o) == start + moved && c[1] == c[0] && c[8] == 0 && (kmax > 0 || (c[2] == 0 && c[5] == 0 && c[4] == 0));
+  }
+  // ── 128: the band sees a missing restore ──
+  def db-sensitive() {
+   let good = db-run(1, "ok", 3, 8, 6, 40, 400);
+   let bad = db-run(1, "skip-restore", 3, 8, 6, 40, 400);
+   let ref = db-run-ref(1, 6, 40, 400);
+   fcmdr-counts(bad[2])[4] > 0 && db-same(good, ref) && !(db-same(bad, ref));
+  }
+  // ── 256: a surprise is a choice point ──
+  def db-surprise-mode(mode) {
+   let a = db-run(0, mode, 3, 8, 6, 40, 400);
+   let k0 = db-run(0, "ok", 0, 8, 6, 40, 400);
+   db-same(a, k0) ? 1 : 0;
+  }
+  def db-refusals() {
+   let drafts = db-run(0, "refuse-draft", 3, 8, 6, 40, 400);
+   let marks = db-run(0, "refuse-mark", 3, 8, 6, 40, 400);
+   let advances = db-run(0, "refuse-advance", 3, 8, 6, 40, 400);
+   let all = db-run(0, "refuse-all", 3, 8, 6, 40, 400);
+   let plain = db-run(0, "refuse-all", 0, 8, 6, 40, 400);
+   let first = fcmdr-counts(drafts[2]);
+   db-surprise-mode("refuse-draft") == 1 && db-surprise-mode("refuse-mark") == 1 && db-surprise-mode("refuse-advance") == 1
+   && first[1] > first[0] && fcmdr-counts(drafts[2])[8] == 0 && !fcms-live?(all[0][1]) && fcms-pending(all[0][1]) == -1
+   && (String) fcms-reason(all[0][1]) == "draft-verify-refused>plain-verify-refused" && !fcms-live?(plain[0][1]) && (String) fcms-reason(plain[0][1]) == "plain-verify-refused"
+   && db-draft-then-plain-reason();
+  }
+  // the first option's finding rides into the refusal: one step with a draft and every option refused
+  def db-draft-then-plain-reason() {
+   let m = db-new(db-step-fixture([[10, 11], [11, 12], [12, 13], [13, 99]]), "refuse-all");
+   let o = db-owner(m, 3, 8);
+   let step = fcmdr-step(o, db-io(m), 10, 7, 5, db-stops(), 100);
+   nil?(step[0]) && step[1] == -1 && (String) step[2] == "draft-verify-refused>plain-verify-refused" && fcmdr-counts(o)[8] == 1;
+  }
+  // ── 512: a stop is never drafted ──
+  // a stop prediction stays pending and is never consumed, so no verify input holds one
+  def db-no-stop-input(inputs) = nil?(inputs) ? 1 : (db-tail-clear(inputs[0]) ? db-no-stop-input(inputs[1:]) : 0);
+  def db-tail-clear(ids) = nil?(ids) ? 1 : ((q38-stop?(ids[0], db-stops()) == 1) ? 0 : db-tail-clear(ids[1:]));
+  def db-stops-held() {
+   let a = db-run(0, "ok", 3, 8, 4, 40, 400);
+   let wide = db-run(0, "ok", 3, 8, 8, 40, 400);
+   let ref = db-run-ref(0, 8, 40, 400);
+   let r = wide[0][1];
+   db-no-stop-input(record_get(a[1], "inputs")) && db-no-stop-input(record_get(wide[1], "inputs")) && db-same(wide, ref) && fcms-stopped?(r) && q38-stop?(fcms-pending(r), db-stops()) == 1;
+  }
+  // ── 1024: the session door ──
+  def db-session-door() {
+   let m = db-new(db-fixture(0), "ok");
+   let plain = db-session(m, 400);
+   let o = db-owner(m, 3, 8);
+   let owned = fcmdr-with-owner(plain, o);
+   let moved = fcms-with-stream(owned, 20, 21, 0, 5, 0, 0);
+   let refused = fcms-refuse(owned, "band");
+   let sampled = fcsam-with-owner(owned, ["sampler"]);
+   fcmdr-bump(o, "steps", 99);
+   fcmdr-live() == 0 && nothing?(fcmdr-owner(plain)) && (String) fcacs-lane(plain) == "greedy" && (String) fcacs-lane(owned) == "draft" && (String) fcacs-lane(sampled) == "sampled"
+   && len(owned) == 19 && nil?(fcmd-carrier(owned)) && nil?(fcsam-owner(owned)) && nothing?(fcmo-owner(owned)) && fcmdr-counts(fcmdr-owner(moved))[0] == 99
+   && fcmdr-counts(fcmdr-owner(refused))[0] == 99 && fcms-pos(moved) == 20 && fcms-pending(moved) == 21 && (String) fcms-reason(refused) == "band"
+   && len(fcmdr-with-owner(fcsam-with-owner(plain, ["sampler"]), o)) == 19 && nothing?(fcmo-owner(fcmdr-with-owner(fcsam-with-owner(plain, ["sampler"]), o)));
+  }
+  // ── 2048: the quantum and the boundary over a session ──
+  def db-quantum-session(fixture, kmax, width) {
+   let m1 = db-new(db-fixture(fixture), "ok");
+   let m2 = db-new(db-fixture(fixture), "ok");
+   let o = db-owner(m1, kmax, 8);
+   let s = fcmdr-with-owner(db-session(m1, 400), o);
+   let g = fcacs-draft-quantum-with(s, o, db-io(m1), db-stops(), width);
+   let ref = db-quantum-ref(m2, db-session(m2, 400), db-stops(), width);
+   let after = fcms-generation-session(g);
+   let boundary = fcacs-next-with(after, db-stops(), db-io(m1));
+   let reference = db-boundary-ref(m2, ref[1], db-stops());
+   fcms-generation-ids(g) == ref[0][0] && db-fields(after) == db-fields(ref[1]) && fcms-live?(after) && db-fields(boundary) == db-fields(reference) && fcmdr-n(o) == fcms-pos(boundary);
+  }
+  def db-sessions() = db-all(db-grid(db-quantum-session));
+  // ── 4096: ownership ──
+  def db-ownership() {
+   let o = fcmdr-new(3, 2, 8, []);
+   let spare = [[0, 0], [5, 6], [0, 0], [7, 8]];
+   let held = fcmdr-new(3, 2, 8, spare);
+   fcmdr-owned(o) == 0 && fcmdr-close(o) == 0 && fcmdr-owned(nothing()) == 0 && fcmdr-close(nothing()) == 0 && q38dv-spare-owned(spare) == 4 && fcmdr-owned(held) == 4
+   && q38dv-spare-ok?(spare) == 1 && q38dv-spare-ok?([[0, 0], [5, 0]]) == 0 && q38dv-spare-ok?([[0, 3]]) == 0 && q38dv-spare-ok?([]) == 1;
+  }
+  // ── 8192: span and maxpos ──
+  // the cycle never stops, so a 24-ID reply from a 14-ID prompt consumes positions 14 through 36
+  def db-span-held() {
+   let a = db-run(2, "ok", 5, 3, 8, 40, 400);
+   let ref = db-run-ref(2, 8, 40, 400);
+   let widest = db-widest(record_get(a[1], "inputs"), 0);
+   let tight = db-run(2, "ok", 5, 8, 6, 24, 37);
+   let tref = db-run-ref(2, 6, 24, 37);
+   widest <= 3 && widest > 1 && db-same(a, ref) && db-same(tight, tref) && db-widest(record_get(tight[1], "ends"), 0) <= 37 && fcmdr-counts(tight[2])[3] > 0;
+  }
+  def db-widest(inputs, best) = nil?(inputs) ? best : db-widest(inputs[1:], db-size(inputs[0]) > best ? db-size(inputs[0]) : best);
+  def db-size(x) = (String) value_kind(x) == "int" ? x : len(x);
+  // ── 16384: the physical run's reading ──
+  def db-reading() {
+   let chunks = fcmdr-chunks([1, 2, 3, 4, 5, 6, 7, 8]);
+   len(chunks) == 4 && chunks[0] == [[1, 2, 3, 4, 5, 6, 7, 8]] && len(chunks[1]) == 8 && chunks[1][0] == [1] && chunks[1][7] == [8] && chunks[2] == [[1, 2, 3], [4, 5, 6, 7, 8]] && chunks[3] == [[1, 2, 3, 4, 5], [6, 7, 8]]
+   && fcmdr-agree([1, 2, 3], [1, 9, 3]) == 2 && fcmdr-agree([1, 2], [1, 2, 3]) == 2 && fcmdr-agree([], [1]) == 0
+   && fcmdr-milli(64, 32000) == 2000 && fcmdr-milli(64, 0) == 0 && fcmdr-milli(0, 100) == 0
+   && fcmdr-bytes-equal(["ab", "ab", "ab"]) == 1 && fcmdr-bytes-equal(["ab", nothing()]) == 0 && fcmdr-bytes-equal(["ab", "ac"]) == 0 && fcmdr-bytes-equal([]) == 0 && fcmdr-bytes-equal([nothing(), "ab"]) == 0
+   && (String) fcmdr-verdict(1, 1, 1) == "open" && (String) fcmdr-verdict(0, 1, 1) == "hold" && (String) fcmdr-verdict(1, 0, 1) == "hold" && (String) fcmdr-verdict(1, 1, 0) == "hold"
+   && (String) fcmdr-last-verdict([]) == "none" && (String) fcmdr-last-verdict(["{\"kind\":\"model-free\",\"draft_band\":1}"]) == "none" && (String) fcmdr-last-verdict(["{\"verdict\":\"open\"}", "{\"kind\":\"model-free\"}"]) == "open" && (String) fcmdr-last-verdict(["{\"verdict\":\"hold\"}", "{\"identical\":1,\"verdict\":\"open\"}"]) == "open" && (String) fcmdr-last-verdict(["{\"verdict\":\"open\"}", "{\"verdict\":\"hold\"}"]) == "hold";
+  }
+ }
+ let index = db-index();
+ let caps = db-lookup-caps();
+ let accept = db-accept();
+ let steps = db-steps();
+ let contract = db-all(db-grid(db-contract-one));
+ let replies = db-all(db-grid(db-reply-one));
+ let drafted = db-drafted();
+ let account = db-all(db-grid(db-account-one));
+ let sensitive = db-sensitive();
+ let refusals = db-refusals();
+ let stops = db-stops-held();
+ let door = db-session-door();
+ let sessions = db-sessions();
+ let owned = db-ownership();
+ let span = db-span-held();
+ let reading = db-reading();
+ let verdict =db-bit(index, 1) + db-bit(caps, 2) + db-bit(accept, 4) + db-bit(steps, 8) + db-bit(contract, 16) + db-bit(replies && drafted, 32) + db-bit(account, 64)
+  + db-bit(sensitive, 128) + db-bit(refusals, 256) + db-bit(stops, 512) + db-bit(door, 1024) + db-bit(sessions, 2048) + db-bit(owned, 4096) + db-bit(span, 8192) + db-bit(reading, 16384);
+ print_str("form-cli-model-draft-band " ++ verdict.str() ++ " index=" ++ (index ? "1" : "0") ++ " caps=" ++ (caps ? "1" : "0") ++ " accept=" ++ (accept ? "1" : "0") ++ " steps=" ++ (steps ? "1" : "0") ++ " contract=" ++ (contract ? "1" : "0") ++ " replies=" ++ (replies ? "1" : "0") ++ " drafted=" ++ (drafted ? "1" : "0") ++ " account=" ++ (account ? "1" : "0") ++ " sensitive=" ++ (sensitive ? "1" : "0") ++ " refusals=" ++ (refusals ? "1" : "0") ++ " stops=" ++ (stops ? "1" : "0") ++ " door=" ++ (door ? "1" : "0") ++ " sessions=" ++ (sessions ? "1" : "0") ++ " owned=" ++ (owned ? "1" : "0") ++ " span=" ++ (span ? "1" : "0") ++ " reading=" ++ (reading ? "1" : "0"));
+ verdict;
+}

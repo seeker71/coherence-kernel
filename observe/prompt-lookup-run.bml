@@ -1,0 +1,140 @@
+// prompt-lookup-run.bml — does copying drafts from the prompt make the local decode faster, and is it the same reply?
+//
+// The physical half of prompt-lookup drafting (form-stdlib/bml/form-cli-model-draft.bml). Everything that needs no
+// model is held by form-stdlib/tests/form-cli-model-draft-band.bml (16383) and the matmul claim by
+// form-stdlib/tests/q8-0-mma-prefix-band.fk (63). This door reads the rest on the real model, one command, on a
+// quiet machine (about 35 minutes, since it measures tok/s):
+//
+//   printf 'physical\n' | ./fkwu observe/prompt-lookup-run.bml
+//
+// On a fixture coding prompt that carries a file (form/form-stdlib/closure-lines.fk) and asks for it back with one
+// line added, three fresh qwen38-q8 sessions each decode `ids` IDs (64) in the code lane's quanta of 4, through the
+// lane's own fcacs-quantum and fcacs-next:
+//   tokenwise  the lane as it runs today (ps[29] matvec per position)
+//   k0         the drafted lane with nothing drafted: every position a span of 1 through the verify
+//   k3         the drafted lane with copied drafts of up to 3 IDs
+// It then reads the same 8 IDs at one position under four splits of the span (one of 8, eight of 1, 3 then 5, 5 then
+// 3), marked and restored, and compares the logits bytes the head wrote.
+//
+// One row is appended to receipts/prompt-lookup.jsonl (at_unix_ms, model, fixture, ids_n, width; identical (the k0
+// and k3 ID lists are equal); split_equal (the logits bytes are equal across the four splits) and split_digest;
+// tokenwise_agree (positions where the token-wise and k0 IDs agree, of tokenwise_ids_n; reported, not gated, since
+// the span matmul and the decode matvec are two arithmetics); ms_*, tok_s_milli_* (IDs per second, times 1000);
+// the draft counters of k3 (steps, verifies, drafted, accepted, reruns, marks, lookups, found, refused); faster
+// (k3 took less wall time than tokenwise); released (every session released clean); verdict "open" when identical,
+// split_equal and faster all read 1, else "hold"). The lane stays off (fcmdr-live, form-cli-model-draft.bml) until
+// a row reads "open" and a landing reads it; if k0 runs slower than tokenwise, the gate is k3 against tokenwise,
+// which is what faster reads.
+//
+// Before the model opens the door reads the host's fkwu and form-cli processes: while a door that holds a model
+// runs (form-cli-code-run, native-turn-run, day-turn, scheduled-walk, native-lora, form-token-eval-run, another
+// prompt-lookup-run) or a form-cli verb that asks a local model, it names them and asks nothing. The day-turn walk
+// holds the GPU from 12:30 to 15:00.
+//
+// Anything but a `physical` line on stdin (a terminal, /dev/null, empty) loads no model: it reads the receipts and
+// says what is pending.
+// preflight-exec: forbidden
+import form-stdlib/bml/form-cli-code-session.bml;
+import form-stdlib/bml/form-token-eval.bml;
+import form-stdlib/bml/form-cli-heal-native-io.bml;
+import form-stdlib/model-registry.bml;
+section [form.bml] {
+ class PromptLookupRun {
+  def plr-model() = "qwen38-q8";
+  def plr-ledger() = "receipts/prompt-lookup.jsonl";
+  def plr-file() = "form/form-stdlib/closure-lines.fk";
+  def plr-ids() = 64;
+  def plr-width() = 4;
+  def plr-profile() = "knowledge-query";
+  def plr-prompt() = "Below is a Form file. Reply with the whole file again, exactly as it is, with one line added at the top: ; reviewed\n\n" ++ (read_file(plr-file()) ?? "");
+  // ── the rows so far ──
+  def plr-rows() = file_size(plr-ledger()) < 1 ? [] : filter(l => len(trim(l)) > 0, split-on(fhn-read(plr-ledger()), "\n"));
+  def plr-pending() {
+   let rows = plr-rows();
+   print_str("prompt-lookup-run rows=" ++ len(rows).str() ++ " last_verdict=" ++ fcmdr-last-verdict(rows) ++ " live=" ++ fcmdr-live().str() ++ " (a quiet machine: printf 'physical\\n' | ./fkwu observe/prompt-lookup-run.bml, about 35 minutes)");
+   0;
+  }
+  // ── the GPU gate: [pid, what it holds] for each other process that holds a model ──
+  def plr-holding(argv, cli) {
+   let door = fte-holding(argv, cli);
+   (String) door != "" ? door : foldl((found, w) => ((String) found == "") && ((String) value_kind(w) == "string") && (str_find(w, "prompt-lookup-run", 0) >= 0) ? "prompt-lookup-run" : found, "", (String) value_kind(argv) == "list" ? argv : []);
+  }
+  def plr-holder(row, cli) = (String) value_kind(row) != "list" ? [0, ""] : len(row) < 5 ? [0, ""] : (Comparable) row[0] == host_pid() ? [0, ""] : [row[0], plr-holding(row[4], cli)];
+  def plr-processes(name) {
+   let pids = host_processes(name);
+   (String) value_kind(pids) != "list" ? [] : map(p => host_process(p[0]), pids);
+  }
+  def plr-held() = filter(h => !((String) h[1] == ""), append(map(r => plr-holder(r, false), plr-processes("fkwu*")), map(r => plr-holder(r, true), plr-processes("form-cli*"))));
+  def plr-wait(held) {
+   print_str("[prompt-lookup-run] the GPU is held by " ++ str-join-with(map(h => h[1] ++ " (pid " ++ h[0].str() ++ ")", held), ", ") ++ ": the physical run waits for a quiet GPU");
+   0;
+  }
+  // ── one arm: a fresh session on the fixture, decoded by the lane's own quantum and boundary ──
+  // kmax < 0 is the lane as it runs today; 0 and up attach the draft owner at that width.
+  def plr-open(path, kmax) {
+   let opened = fcms-open-with-profile(path, plr-prompt(), 4096, plr-profile());
+   kmax < 0 ? opened : fcacs-attach-draft-with(opened, plr-prompt(), plr-profile(), kmax);
+  }
+  def plr-decode(s, stops, n, out) {
+   let g = fcacs-quantum(s, stops, plr-width());
+   let s2 = fcms-generation-session(g);
+   let out2 = append(out, fcms-generation-ids(g));
+   len(out2) >= n || fcms-stopped?(s2) || !fcms-live?(s2) ? [take(n, out2), s2] : plr-decode(fcacs-next(s2, stops), stops, n, out2);
+  }
+  def plr-arm(path, name, kmax) {
+   let s = plr-open(path, kmax);
+   let began = now_unix_ms();
+   let r = fcms-live?(s) ? plr-decode(s, fcacs-stops(s, qsx-load(fcms-path(s))), plr-ids(), []) : [[], s];
+   let ms = now_unix_ms() - began;
+   [name, r[0], ms, r[1]];
+  }
+  def plr-milli(arm) = fcmdr-milli(len(arm[1]), arm[2]);
+  // ── span-split invariance across the stack, on the k0 session, marked and restored around each split ──
+  def plr-split(s, chunks) {
+   let owner = fcmdr-owner(s);
+   q38dv-mark(fcms-ctx(s), fcms-sts(s), fcmdr-spare(owner));
+   let bytes = q38dv-logits(fcms-ctx(s), fcms-sts(s), fcmd-carrier(s), chunks, fcms-pos(s));
+   q38dv-restore(fcms-ctx(s), fcms-sts(s), fcmdr-spare(owner));
+   bytes;
+  }
+  def plr-splits(s, ids) = map(c => plr-split(s, c), fcmdr-chunks(take(8, ids)));
+  def plr-digest(bytes) = nothing?(bytes) || nothing?(bytes[0]) ? "" : hex-encode(sha256-stream-string(bytes[0]));
+  // ── the row ──
+  def plr-counts(owner) {
+   let c = fcmdr-counts(owner);
+   nil?(c) ? [0, 0, 0, 0, 0, 0, 0, 0, 0] : c;
+  }
+  def plr-row(at, path, tw, k0, k3, split, released) {
+   let identical = (k0[1] == k3[1]) && (len(k0[1]) > 0) ? 1 : 0;
+   let equal = fcmdr-bytes-equal(split);
+   let faster = k3[2] < tw[2] ? 1 : 0;
+   let c = plr-counts(fcmdr-owner(k3[3]));
+   json-node-object([fhn-n("at_unix_ms", at), fhn-s("model", plr-model()), fhn-s("fixture", plr-file()), fhn-n("ids_n", len(k3[1])), fhn-n("width", plr-width()), fhn-n("kmax", fcmdr-width()),
+    fhn-n("identical", identical), fhn-n("split_equal", equal), fhn-s("split_digest", plr-digest(split)),
+    fhn-n("tokenwise_ids_n", len(tw[1])), fhn-n("tokenwise_agree", fcmdr-agree(tw[1], k0[1])),
+    fhn-n("ms_tokenwise", tw[2]), fhn-n("ms_k0", k0[2]), fhn-n("ms_k3", k3[2]),
+    fhn-n("tok_s_milli_tokenwise", plr-milli(tw)), fhn-n("tok_s_milli_k0", plr-milli(k0)), fhn-n("tok_s_milli_k3", plr-milli(k3)),
+    fhn-n("steps", c[0]), fhn-n("verifies", c[1]), fhn-n("drafted", c[2]), fhn-n("accepted", c[3]), fhn-n("reruns", c[4]), fhn-n("marks", c[5]), fhn-n("lookups", c[6]), fhn-n("found", c[7]), fhn-n("refused", c[8]),
+    fhn-n("faster", faster), fhn-n("released", released), fhn-s("verdict", fcmdr-verdict(identical, equal, faster))]);
+  }
+  def plr-physical() {
+   let path = mr-path(mr-find(plr-model()));
+   let tw = plr-arm(path, "tokenwise", -1);
+   let k0 = plr-arm(path, "k0", 0);
+   let k3 = plr-arm(path, "k3", fcmdr-width());
+   let split = fcms-live?(k0[3]) ? plr-splits(k0[3], tw[1]) : [];
+   let released = fcms-release-ok?(tw[3]) + fcms-release-ok?(k0[3]) + fcms-release-ok?(k3[3]);
+   let row = plr-row(now_unix_ms(), path, tw, k0, k3, split, released == 3 ? 1 : 0);
+   print_str("prompt-lookup-row " ++ json-emit(row));
+   let appended = fhn-append(plr-ledger(), json-emit(row) ++ "\n");
+   print_str("prompt-lookup-verdict " ++ fcmdr-last-verdict([json-emit(row)]) ++ " " ++ appended);
+   0;
+  }
+  def plr-run() {
+   let ask = isatty() == 1 ? nothing() : read_line();
+   nothing?(ask) || trim(ask) != "physical" ? plr-pending() : plr-gated(plr-held());
+  }
+  def plr-gated(held) = nil?(held) ? plr-physical() : plr-wait(held);
+ }
+ plr-run();
+}

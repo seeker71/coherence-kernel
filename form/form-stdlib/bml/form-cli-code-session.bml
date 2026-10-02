@@ -6,6 +6,11 @@
 // IDs it injected; code.decode, code.tool and code.check are spoken by form-cli-code-swerve.bml. Every
 // stage name's organ is "code", so stage-vitality.bml folds their costs, overstays and retreads live. A
 // kernel without the bus answers nothing; the lane goes on unchanged.
+//
+// A quantum decodes by one of three lanes (fcacs-lane): sampled when the session owns a sampler, draft when it
+// owns a draft owner (prompt-lookup drafting, form-cli-model-draft.bml; none is attached while fcmdr-live reads
+// 0, so the live lane decodes token-wise), else greedy token-wise. The draft lane keeps fcms-walk's contract
+// (tests/form-cli-model-draft-band.bml) and its boundary forward runs through the same verify.
 import form-stdlib/form-cli-model-session.fk;
 section [form.bml] {
  class FormCliCodeSession {
@@ -15,9 +20,30 @@ section [form.bml] {
   // Admission and the bootstrap prefill are one native call; their stage carries the prompt's IDs.
   def fcacs-open-staged(path, prompt, context, profile) {
    let open = fcacs-stage-open("code.prefill", "bootstrap");
-   let session = fcms-open-with-profile(path, prompt, context, profile);
+   let opened = fcms-open-with-profile(path, prompt, context, profile);
+   // Prompt-lookup drafting (form-cli-model-draft.bml) attaches only while its hook reads on; a session that
+   // cannot take the owner stays the token-wise greedy session it opened as.
+   let session = (Comparable) fcmdr-live() == 1 ? fcacs-attach-draft(opened, prompt, profile) : opened;
    let closed = fcacs-stage-close(open, fcacs-stage-word(session), fcms-prompt-ids(session), 0);
    session;
+  }
+  // The owner needs the spare recurrent state (one allocation, counted, freed by fcms-release-ok?) and the
+  // prompt's IDs to look copies up in: a second CPU-only tokenisation of the same segments through the
+  // session's own index. Either missing, the partial allocation is freed and the session is returned as it was.
+  def fcacs-attach-draft(s, prompt, profile) = fcacs-attach-draft-with(s, prompt, profile, fcmdr-width());
+  // kmax is the draft width: 0 is the same lane with nothing drafted (every position a span of 1), the arm
+  // observe/prompt-lookup-run.bml reads the drafted one against.
+  def fcacs-attach-draft-with(s, prompt, profile, kmax) = !fcms-live?(s) ? s : fcacs-attached(s, q38dv-spare(fcms-ctx(s)), fcmo-segment-ids(s, fcmg-chat-segments-profile(prompt, profile, qsx-load(fcms-path(s)))), kmax);
+  def fcacs-attached(s, spare, ids, kmax) = (q38dv-spare-ok?(spare) && (q38dv-spare-owned(spare) > 0) && !nothing?(ids)) ? fcacs-owned(s, spare, ids, kmax) : fcacs-unattached(s, spare);
+  def fcacs-unattached(s, spare) {
+   metal_sync();
+   q38dv-free(spare);
+   s;
+  }
+  def fcacs-owned(s, spare, ids, kmax) {
+   let owner = fcmdr-new(kmax, fcmdr-min(), q38-ctx-span(fcms-ctx(s)), spare);
+   fcmdr-feed(owner, ids);
+   fcmdr-with-owner(s, owner);
   }
   def fcacs-stops(s, crystal) = [gmt-u32(fcms-src(s), "tokenizer.ggml.eos_token_id"), crystal[2]];
   def fcacs-segments(pending, stopped, text, crystal) = [qtlc-id-segment(fcms-crossing-prefix-ids(pending, stopped, crystal[2], 1)), qtlc-id-segment(crystal[6]), qtlc-id-segment([crystal[1]]), qtlc-text-segment("tool\n"), qtlc-text-segment(text), qtlc-id-segment([crystal[2]]), qtlc-id-segment(crystal[6]), qtlc-id-segment([crystal[1]]), qtlc-id-segment(crystal[7]), qtlc-id-segment([crystal[3]]), qtlc-id-segment(crystal[8]), qtlc-id-segment([crystal[4]]), qtlc-id-segment(crystal[8])];
@@ -36,14 +62,38 @@ section [form.bml] {
    let closed = fcacs-stage-close(open, fcacs-stage-word(after), (fcms-injected-ids(after) - fcms-injected-ids(s)), 0);
    after;
   }
-  def fcacs-observed(s, walked) = if (!((String) walked[0] == "done")) then fcacs-refuse(s, "coding-tokenizer-index-refused") else if nil?(walked[2]) then fcacs-refuse(s,"coding-observation-empty") else fcms-observe-ids(s, reverse(walked[2]), "coding-observation-context-capacity");
-  def fcacs-next(s, stops) {
-   let pending = fcms-forward(s,fcms-pending(s),fcms-pos(s));
+  def fcacs-observed(s, walked) = if (!((String) walked[0] == "done")) then fcacs-refuse(s, "coding-tokenizer-index-refused") else if nil?(walked[2]) then fcacs-refuse(s,"coding-observation-empty") else fcacs-fed(fcms-observe-ids(s, reverse(walked[2]), "coding-observation-context-capacity"), reverse(walked[2]));
+  // The IDs an observation put into the context are what the voice copies from: the draft owner takes them in
+  // (a session without one, or one the observation refused, takes nothing).
+  def fcacs-fed(after, ids) {
+   fcms-live?(after) ? fcmdr-feed(fcmdr-owner(after), ids) : 0;
+   after;
+  }
+  // The boundary between quanta forwards the pending ID: through the verify when the session decodes drafted,
+  // so one arithmetic runs every position of a reply; token-wise otherwise.
+  def fcacs-next(s, stops) = fcacs-next-with(s, stops, (String) fcacs-lane(s) == "draft" ? fcacs-draft-io(s, fcmdr-owner(s)) : nothing());
+  // io is the draft walk's verify and its companions, or nothing() for the token-wise forward.
+  def fcacs-next-with(s, stops, io) {
+   let pending = nothing?(io) ? fcms-forward(s,fcms-pending(s),fcms-pos(s)) : fcmdr-forward(fcmdr-owner(s), io, fcms-pending(s), fcms-pos(s));
    fcms-with-stream(s, (fcms-pos(s) + 1), pending, if (pending < 0) then 1 else q38-stop?(pending, stops), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s));
   }
   // A session that owns a sampler draws each quantum from the head's own logits (form-cli-model-sampling.bml);
-  // its presence set was cleared once when the reply began, never per quantum. Otherwise greedy argmax.
-  def fcacs-quantum(s, stops, width) = if nil?(fcsam-owner(s)) then fcacs-greedy-quantum(s, stops, width) else fcacs-sampled-quantum(s, stops, width);
+  // its presence set was cleared once when the reply began, never per quantum. A session that owns a draft
+  // (form-cli-model-draft.bml; none while fcmdr-live reads 0) decodes greedy through the span verify with
+  // copied drafts. Otherwise greedy argmax, token-wise.
+  def fcacs-lane(s) = !nil?(fcsam-owner(s)) ? "sampled" : !nothing?(fcmdr-owner(s)) ? "draft" : "greedy";
+  def fcacs-quantum(s, stops, width) = fcacs-lane-quantum(fcacs-lane(s), s, stops, width);
+  def fcacs-lane-quantum(lane, s, stops, width) = (String) lane == "sampled" ? fcacs-sampled-quantum(s, stops, width) : (String) lane == "draft" ? fcacs-draft-quantum(s, stops, width) : fcacs-greedy-quantum(s, stops, width);
+  // The verify, advance, mark and restore the walk calls, over this session's context, state and spare.
+  def fcacs-draft-io(s, owner) = fcmdr-io((ids, pos) => q38dv-verify(fcms-ctx(s), fcms-sts(s), fcmd-carrier(s), ids, pos), (ids, pos) => q38dv-advance(fcms-ctx(s), fcms-sts(s), ids, pos), (u) => q38dv-mark(fcms-ctx(s), fcms-sts(s), fcmdr-spare(owner)), (u) => q38dv-restore(fcms-ctx(s), fcms-sts(s), fcmdr-spare(owner)));
+  def fcacs-draft-quantum(s, stops, width) = fcacs-draft-quantum-with(s, fcmdr-owner(s), fcacs-draft-io(s, fcmdr-owner(s)), stops, width);
+  // fcacs-greedy-quantum's result from the drafted walk: the same fields move, a refusal refuses the session.
+  def fcacs-draft-quantum-with(s, owner, io, stops, width) {
+   let walked = fcmdr-walk(owner, io, fcms-pending(s), fcms-pos(s), width, stops, fcms-maxpos(s), []);
+   let ids = walked[0];
+   let next = fcms-with-stream(s, walked[2], walked[1], walked[3], (fcms-generated-ids(s) + len(ids)), fcms-injected-ids(s), fcms-observations(s));
+   fcms-generation("", ids, (String) walked[4] == "" ? next : fcms-refuse(next, walked[4]));
+  }
   def fcacs-greedy-quantum(s, stops, width) {
    // The coding owner publishes one real progress frame per quantum. Avoid
    // restarting the generic 1/2/4/8 pulse series for every coding chunk.
