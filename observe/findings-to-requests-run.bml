@@ -4,18 +4,26 @@
 //   {"path":"<findings.json>","origin":"<label>","ledger":"<jsonl>"}   feed one document; origin defaults to its
 //                                                                     file name, ledger to learn/local-requests.jsonl
 //   {"closures":"<closures.json>","ledger":"<jsonl>"}                 close the rows whose witness the gate reads
-//   {"check":1,"ledger":"<jsonl>"}                                     read every closed row through the gate again
-//   {"moot":1,"reviewed":{"<document>":"<commit>"},"ledger":"<jsonl>","dry":1}
-//                                                                     read every pending and moved row for the code its
-//                                                                     where cites (git diff -U0 from its seentip, the
-//                                                                     row's own else the reviewed map's, to HEAD): a row
-//                                                                     whose cited span changed and whose added code line
-//                                                                     passes the closing gate keeps that line as its
-//                                                                     fixborn and reads moved, which the planner takes
-//                                                                     after every pending row; an open_issues statement
-//                                                                     reads statement and names the files its words carry.
-//                                                                     A row is never closed here and none is deleted;
-//                                                                     "dry":1 reads and saves nothing
+//   {"check":1,"ledger":"<jsonl>","head":"<commit>"}                  read every closed row through the gate again, and
+//                                                                     every moot row: its fixborn through the gate, its
+//                                                                     band's text against its sha, its band on fkwu
+//   {"sight":1,"reviewed":{"<document>":"<commit>"},"ledger":"<jsonl>","head":"<commit>","dry":1}
+//                                                                     read every pending, moved and moot row for the code
+//                                                                     its where cites (git diff -U0 from its seentip, the
+//                                                                     row's own else the reviewed map's, to HEAD, or to
+//                                                                     "head" when one is named): a row whose cited span
+//                                                                     changed and whose added code line passes the closing
+//                                                                     gate keeps that line, and the definition it stands
+//                                                                     in, as its fixborn and reads moved, which the
+//                                                                     planner takes after every pending row; a fixborn
+//                                                                     proved earlier stays while the sight cannot read
+//                                                                     (unseen), so a pass without the reviewed map changes
+//                                                                     no moved row; an open_issues statement reads
+//                                                                     statement and names the files its words carry. A row
+//                                                                     is never closed here and none is deleted; "dry":1
+//                                                                     reads and saves nothing. The committed ledger's
+//                                                                     reviewed map is {"integrated-review":"6e3b5d313",
+//                                                                     "survey":"a0c5c01e5"}
 // A document is read whole by form-stdlib/bml/findings-requests.bml; each request it gives that the ledger does not
 // already hold is appended, its seen derived from the document's own commit lists (git asked for each list's tip).
 // After each feed, the answers of every document fed on this stdin (done[] and deferred[]) stand on the rows they
@@ -25,9 +33,11 @@
 // fkwu answer by argv (the seentip, the witness at HEAD and at the seentip, the line it stands on, the band's bit,
 // the pickaxe commit). A check reads every closed row through the same gate and names each that no longer holds.
 // One line answers each input: a feed's read, refuted, verdicts, joined, requests, new, present, appended, the
-// answers it added and the ledger's statuses; a closing's outcomes; a check's statuses, holding and reopen; a moot
-// pass's rows, the sight of each pending or moved row (standing, moved, gone, unseen), the fixborns found, the moot and
-// statement rows and the ledger's statuses.
+// answers it added and the ledger's statuses; a closing's outcomes; a check's statuses, holding and reopen, and the
+// moot rows holding and reopen; a sight pass's rows, the sight of each open row (sight_standing, sight_moved,
+// sight_gone, sight_unseen), the fixborns found, the rows turned back (demoted), the unreadable line of the ledger
+// (0 when it is sound) and the ledger's statuses. A save writes nothing over a ledger with a line that is not whole
+// or a row this run never read (saved=0).
 // preflight-exec: forbidden
 import form-stdlib/bml/findings-requests.bml;
 import form-stdlib/bml/form-agent-json-query.bml;
@@ -48,7 +58,9 @@ section [form.bml] {
   // fed: [ledger, records] for each document fed on this stdin
   def ftr-each(lines, fed, n) = if nil?(lines) then n else ftr-next(lines[1:], ftr-one(ftr-opts(lines[0]), fed), n);
   def ftr-next(lines, r, n) = ftr-each(lines, r[1], (n + r[0]));
-  def ftr-one(opts, fed) = if frq-some?(frq-text(opts, "closures")) then [ftr-close(ftr-ledger(opts), frq-text(opts, "closures")), fed] else if ((Comparable) frq-int(opts, "check", 0) == 1) then [ftr-check(ftr-ledger(opts)), fed] else if ((Comparable) frq-int(opts, "moot", 0) == 1) then [ftr-moot(ftr-ledger(opts), frq-get(opts, "reviewed"), frq-int(opts, "dry", 0)), fed] else ftr-feed(ftr-ledger(opts), frq-text(opts, "path"), frq-text(opts, "origin"), fed);
+  // the git reader: the checkout's own HEAD, or the commit "head" names
+  def ftr-reader(opts) = if frq-some?(frq-text(opts, "head")) then frq-git-at(frq-text(opts, "head")) else frq-git();
+  def ftr-one(opts, fed) = if frq-some?(frq-text(opts, "closures")) then [ftr-close(ftr-ledger(opts), frq-text(opts, "closures")), fed] else if ((Comparable) frq-int(opts, "check", 0) == 1) then [ftr-check(ftr-ledger(opts), ftr-reader(opts)), fed] else if ((Comparable) frq-int(opts, "sight", 0) == 1) then [ftr-sight(ftr-ledger(opts), frq-get(opts, "reviewed"), frq-int(opts, "dry", 0), ftr-reader(opts)), fed] else ftr-feed(ftr-ledger(opts), frq-text(opts, "path"), frq-text(opts, "origin"), fed);
   def ftr-statuses(rows) {
    let c = frq-status-counts(rows);
    ftr-n("pending", c[0]) ++ ftr-n("context", c[1]) ++ ftr-n("answered", c[2]) ++ ftr-n("handed", c[3]) ++ ftr-n("no_action", c[4]) ++ ftr-n("closed", c[5]) ++ ftr-n("moved", c[6]) ++ ftr-n("moot", c[7]) ++ ftr-n("statement", c[8]);
@@ -84,22 +96,24 @@ section [form.bml] {
    ftr-say(frq-label-of(path) ++ ftr-n("closures", len(closures)) ++ ftr-outcome("closed", os, "closed") ++ ftr-outcome("refused_path", os, "refused:path") ++ ftr-outcome("refused_unseen", os, "refused:unseen") ++ ftr-outcome("refused_witness", os, "refused:witness") ++ ftr-outcome("refused_stood_before", os, "refused:stood-before") ++ ftr-outcome("refused_comment", os, "refused:comment") ++ ftr-outcome("refused_band", os, "refused:band") ++ ftr-outcome("refused_commit", os, "refused:commit") ++ ftr-outcome("refused_inside_review", os, "refused:inside-review") ++ ftr-outcome("already", os, "already") ++ ftr-n("unknown", r[2]) ++ ftr-n("saved", saved));
    1;
   }
-  // ── moot: every pending and moved row read for the code it cites ──
-  def ftr-moot(ledger, reviews, dry) {
+  // ── sight: every open row read for the code it cites ──
+  def ftr-sight(ledger, reviews, dry, g) {
    let rows = frq-rows(ledger);
-   let r = frq-pass(rows, reviews, frq-git());
+   let r = frq-pass(rows, reviews, g);
    let changed = !((String) frq-lines(r[0]) == frq-lines(rows));
+   let unsound = frq-unsound-line(ledger);
    let saved = if (changed && ((Comparable) dry == 0)) then frq-save(ledger, r[0]) else 0;
-   let c = frq-status-counts(r[0]);
-   ftr-say("moot" ++ ftr-n("rows", len(rows)) ++ ftr-outcome("standing", r[1], "standing") ++ ftr-outcome("moved", r[1], "moved") ++ ftr-n("fixborn", r[2]) ++ ftr-n("moot", c[7]) ++ ftr-outcome("gone", r[1], "gone") ++ ftr-outcome("unseen", r[1], "unseen") ++ ftr-n("statements", c[8]) ++ ftr-statuses(r[0]) ++ ftr-n("saved", saved));
+   ftr-say("sight" ++ ftr-n("rows", len(rows)) ++ ftr-outcome("sight_standing", r[1], "standing") ++ ftr-outcome("sight_moved", r[1], "moved") ++ ftr-outcome("sight_gone", r[1], "gone") ++ ftr-outcome("sight_unseen", r[1], "unseen") ++ ftr-n("fixborn", r[2]) ++ ftr-n("demoted", r[3]) ++ ftr-n("unreadable", unsound) ++ ftr-statuses(r[0]) ++ ftr-n("saved", saved));
    1;
   }
   // ── check ──
-  def ftr-check(ledger) {
+  def ftr-check(ledger, g) {
    let rows = frq-rows(ledger);
-   let read = frq-recheck(rows, frq-git());
+   let read = frq-recheck(rows, g);
    let broken = filter(x => !((String) x[1] == "closed"), read);
-   ftr-say("check" ++ ftr-n("rows", len(rows)) ++ ftr-n("whole", len(filter(frq-whole?, rows))) ++ ftr-statuses(rows) ++ ftr-n("holding", (len(read) - len(broken))) ++ " reopen=" ++ str-join-with(map(x => x[0] ++ ":" ++ x[1], broken), ","));
+   let moots = frq-moot-recheck(rows, g);
+   let loose = filter(x => !((String) x[1] == "holds"), moots);
+   ftr-say("check" ++ ftr-n("rows", len(rows)) ++ ftr-n("whole", len(filter(frq-whole?, rows))) ++ ftr-statuses(rows) ++ ftr-n("holding", (len(read) - len(broken))) ++ " reopen=" ++ str-join-with(map(x => x[0] ++ ":" ++ x[1], broken), ",") ++ ftr-n("moot_holding", (len(moots) - len(loose))) ++ " moot_reopen=" ++ str-join-with(map(x => x[0] ++ ":" ++ x[1], loose), ","));
    1;
   }
  }

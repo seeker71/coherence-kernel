@@ -69,11 +69,14 @@ form-bml-cursor-full-band 105   (four-way: it declares no PROOF LEVEL, and Go, R
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
 form/form-stdlib/tests/primitive-registry-band.fk 47   (2026-10-01, rc 0)
 form/form-stdlib/tests/form-agent-tools-band.bml 524287 (2026-10-01: the resident agent tools over their JSON wire)
-form/form-stdlib/tests/findings-requests-band.bml 131071 · form/form-stdlib/tests/form-cli-local-plan-band.bml 16777215
+form/form-stdlib/tests/findings-requests-band.bml 1048575 · form/form-stdlib/tests/form-cli-local-plan-band.bml 33554431
                                             (2026-10-02, rc 0: the feeder reads whether the code a request cites moved since its
-                                            review, git hunks plus the closing gate and no model, and the planner retires a request
-                                            its own band shows healed after one option; the dry planner's first pick is a standing
-                                            request: echo '{"next":1,"dry":1}' | ./fkwu observe/local-plan-run.bml)
+                                            review, git hunks plus the closing gate and no model, and keeps the definition the
+                                            change landed in; the planner proposes a request moot only when the voice's band names
+                                            that definition and reads full today and below full under both stubs, and the row reads
+                                            moot only while its fixborn stands; {"check":1} runs a moot row's kept band again; the
+                                            dry planner's first pick is a standing request:
+                                            echo '{"next":1,"dry":1}' | ./fkwu observe/local-plan-run.bml)
 ```
 
 Every tracked cell's `witnessed:` stamp is read into the belief lens, oldest first; the re-witness door
