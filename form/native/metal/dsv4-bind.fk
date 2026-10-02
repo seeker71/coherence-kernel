@@ -1,0 +1,109 @@
+// dsv4-bind.fk -- the DeepSeek-V4 driver's weight views: one no-copy mapping a tensor, planned from the header, opened and released by Form.
+//
+// WHAT THE DRIVER MAPS. Qwen's lane maps each tensor of its file with metal_buf_from_file at the tensor's absolute offset and its priced length
+// (kth-tv-at, native/metal/kat-token-handle.fk:192): the carrier mmaps the file's own pages MAP_PRIVATE, hands Metal a no-copy buffer over the
+// page-aligned span, and clips the view it exposes to exactly [off, off + len) (fk-metal-carrier.m, fk_metal_buf_from_file_external: the view
+// starts at off - base and a read or write past view_len is refused). DeepSeek's lane does the same, per tensor, through the plan below. A tensor is
+// one handle, so a view never straddles a neighbour and an expert stack (up to 1.14 GB) is one mapping the kernels index by expert.
+//
+// THE PLAN IS DATA, COMPUTED FROM THE LAYOUT AND NEVER FROM A MAPPING. dvb-plan-all lists every tensor of the table (name, type, dims, absolute
+// offset, priced bytes); dvb-plan-driver lists the ones the driver binds: the six globals, and for each layer the 23 tensors every layer carries, the
+// compressor's four when its ratio is nonzero, and its one routing tensor (1,202 for the 43-layer files: 6 + 2 x 24 + 41 x 28). The 126 indexer
+// tensors a ratio-4 layer carries, and the 78 draft-layer tensors of the reap25 file, are in the table and not in the driver's plan. A plan with a tensor
+// the table lacks, or a type the body does not price, is refused (nothing). The plan's handle count must stay under the carrier's wall of 65,535
+// (FK_BUF_SLOT_MAX, fk-metal-carrier.m:361): 1,202 is under it by 64,333.
+//
+// THE CHECKS A PLAN MUST PASS BEFORE ANYTHING IS MAPPED (pure arithmetic, run over a real 85 GB file's plan without opening it): its ranges are
+// disjoint, inside the file, and the full plan covers the data region exactly: it starts at the data base, each gap between consecutive ranges is the
+// GGUF alignment padding (under 32 bytes) and the last range reaches the end of the file.
+//
+// OPEN AND RELEASE. dvb-open maps a plan and answers one view per entry, or answers nothing after freeing what it had mapped (a refused map, a range
+// past the file, a plan over the handle wall). A view is [name, handle, type, dims, absolute offset, bytes]; dvb-tv gives the [handle, rows, cols, type]
+// shape of Qwen's tensor views (kth-tv-h, kth-tv-r, kth-tv-c, kth-tv-ty read it). dvb-close frees in synced rounds and answers the handles still held,
+// because the carrier refuses metal_buf_free while work naming a buffer is unsettled and fkwu's native wrapper reads that refusal as 0
+// (reference: metal_buf_free refusal reads 0): the caller reads metal_live after, and a nonempty answer here is a leak that would otherwise be silent.
+//
+// FOR THE NEXT STAGE (the kernels this lane emits): metal_pipeline compiles with default options. Without `#pragma clang fp reassociate(off)` and
+// `#pragma clang fp contract(off)` at the top of each source, the 'bit-identical' eight-thread Q8_0 twin read 8 ulps from the one-thread kernel
+// (witnessed by form-stdlib/tests/ds4-order-match-band.bml). Every DeepSeek kernel the driver emits carries those two lines.
+//
+// Proven by: native/metal/tests/dsv4-bind-band.bml (the fixture mapped, read back, clipped and released; the two real files' plans from their headers).
+import form-stdlib/core.fk;
+import form-stdlib/dsv4-layout.fk;
+section [form.bml] {
+    def dvb-handle-wall() = 65535;
+    def dvb-align() = 32;
+
+    // ---- the plan: [name, type, dims, absolute offset, bytes] -------------------------------------------
+    def dvb-p-name(p) = p[0];
+    def dvb-p-type(p) = p[1];
+    def dvb-p-dims(p) = p[2];
+    def dvb-p-abs(p) = p[3];
+    def dvb-p-bytes(p) = p[4];
+    def dvb-p-end(p) = p[3] + p[4];
+    def dvb-of-row(r) = [r[0], r[1], r[2], r[4], r[5]];
+    def dvb-rows-plan(rows) = len(rows) == 0 ? [] : cons(dvb-of-row(rows[0]), dvb-rows-plan(rows[1:]));
+    // every tensor of the table, in the file's table order
+    def dvb-plan-all(m) = dvb-rows-plan(record_get(m, "rows"));
+    def dvb-names-present?(ix, names) = len(names) == 0 ? true : (dvl-has?(ix, names[0]) && dvb-names-present?(ix, names[1:]));
+    def dvb-names-plan(ix, names) = len(names) == 0 ? [] : cons(dvb-of-row(dvl-row-of(ix, names[0])), dvb-names-plan(ix, names[1:]));
+    def dvb-priced?(plan) = len(plan) == 0 ? true : (plan[0][4] > 0 && dvb-priced?(plan[1:]));
+    // the tensors the driver binds, globals first then each layer's names in order; nothing when one is missing, unpriced, or the count passes the wall
+    def dvb-plan-driver(m) {
+        let ix = record_get(m, "index");
+        let names = dvl-driver-names(m);
+        dvb-names-present?(ix, names) ? dvb-driver-checked(dvb-names-plan(ix, names)) : nothing();
+    }
+    def dvb-driver-checked(plan) = (dvb-priced?(plan) && len(plan) <= dvb-handle-wall()) ? plan : nothing();
+    def dvb-plan-bytes(plan) = len(plan) == 0 ? 0 : plan[0][4] + dvb-plan-bytes(plan[1:]);
+    def dvb-plan-names(plan) = len(plan) == 0 ? [] : cons(plan[0][0], dvb-plan-names(plan[1:]));
+
+    // ---- the checks, over the plan alone ---------------------------------------------------------------
+    def dvb-merge(a, b) = len(a) == 0 ? b : len(b) == 0 ? a : (a[0][3] <= b[0][3] ? cons(a[0], dvb-merge(a[1:], b)) : cons(b[0], dvb-merge(a, b[1:])));
+    def dvb-sort(xs) = len(xs) <= 1 ? xs : dvb-merge(dvb-sort(xs[0:len(xs) / 2]), dvb-sort(xs[len(xs) / 2:]));
+    def dvb-disjoint-sorted?(s) = len(s) < 2 ? true : (s[1][3] >= dvb-p-end(s[0]) && dvb-disjoint-sorted?(s[1:]));
+    def dvb-disjoint?(plan) = dvb-disjoint-sorted?(dvb-sort(plan));
+    def dvb-inside?(plan, extent) = len(plan) == 0 ? true : (plan[0][3] >= 0 && plan[0][4] > 0 && dvb-p-end(plan[0]) <= extent && dvb-inside?(plan[1:], extent));
+    // each gap between consecutive ranges is alignment padding and no more
+    def dvb-gaps-sorted?(s) = len(s) < 2 ? true : ((s[1][3] - dvb-p-end(s[0])) < dvb-align() && dvb-gaps-sorted?(s[1:]));
+    def dvb-covers-sorted?(s, base, extent) = len(s) > 0 && s[0][3] == base && dvb-disjoint-sorted?(s) && dvb-gaps-sorted?(s)
+        && dvb-p-end(s[len(s) - 1]) <= extent && (extent - dvb-p-end(s[len(s) - 1])) < dvb-align();
+    def dvb-covers?(plan, base, extent) = dvb-covers-sorted?(dvb-sort(plan), base, extent);
+    // the bytes of the data region the plan's ranges do not hold: alignment padding only, when the plan covers
+    def dvb-padding(plan, base, extent) = (extent - base) - dvb-plan-bytes(plan);
+
+    // ---- open and release -------------------------------------------------------------------------------
+    // a view is [name, handle, type, dims, absolute offset, bytes]
+    def dvb-v-name(v) = v[0];
+    def dvb-v-h(v) = v[1];
+    def dvb-v-type(v) = v[2];
+    def dvb-v-dims(v) = v[3];
+    def dvb-v-abs(v) = v[4];
+    def dvb-v-bytes(v) = v[5];
+    // Qwen's tensor-view shape: [handle, rows (second dimension), cols (first), type]
+    def dvb-tv(v) = [v[1], len(v[3]) > 1 ? v[3][1] : 1, v[3][0], v[2]];
+    def dvb-d2(v) = len(v[3]) > 2 ? v[3][2] : 1;
+    def dvb-read(v, off, n) = metal_buf_read(v[1], off, n);
+    def dvb-handles(views) = len(views) == 0 ? [] : cons(views[0][1], dvb-handles(views[1:]));
+    // free once: the handles the carrier did not release (it answers 1 for a release, and a refusal reads as anything else)
+    def dvb-free-once(hs) = len(hs) == 0 ? [] : (hs[0] <= 0 ? dvb-free-once(hs[1:]) : (metal_buf_free(hs[0]) == 1 ? dvb-free-once(hs[1:]) : cons(hs[0], dvb-free-once(hs[1:]))));
+    def dvb-free-rounds(hs, left) = (len(hs) == 0 || left == 0) ? hs : { let rem = dvb-free-once(hs); let synced = metal_sync(); dvb-free-rounds(rem, left - 1); };
+    // the handles still held after four synced rounds (empty: every mapping released)
+    def dvb-close(views) = dvb-free-rounds(dvb-handles(views), 4);
+    def dvb-refused(acc) {
+        let held = dvb-close(reverse(acc));
+        nothing();
+    }
+    def dvb-open-go(path, plan, acc) = len(plan) == 0 ? reverse(acc) : {
+        let h = metal_buf_from_file(path, plan[0][3], plan[0][4]);
+        h > 0 ? dvb-open-go(path, plan[1:], cons([plan[0][0], h, plan[0][1], plan[0][2], plan[0][3], plan[0][4]], acc)) : dvb-refused(acc);
+    };
+    // map every entry of a plan over the file at `path`: one view each, or nothing (what was mapped is freed first)
+    def dvb-open(path, plan) = len(plan) > dvb-handle-wall() ? nothing() : dvb-open-go(path, plan, []);
+    def dvb-index-go(views, ix) = len(views) == 0 ? ix : { record_set(ix, views[0][0], views[0]); dvb-index-go(views[1:], ix); };
+    def dvb-index(views) = dvb-index-go(views, record_new(0));
+    // the carrier's counters: live buffers and, of those, file mappings (metal_live words 2 and 4); -1 when Metal is not up
+    def dvb-live() = len(metal_live()) > 4 ? metal_live()[2] : 0 - 1;
+    def dvb-mapped() = len(metal_live()) > 4 ? metal_live()[4] : 0 - 1;
+    0;
+}
