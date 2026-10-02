@@ -1,0 +1,263 @@
+// dsv4-layer.fk -- ONE DeepSeek-V4 layer's forward as Metal dispatches, held in Form: hc_pre, the MLA attention half (with the compressor), hc_post, then the FFN half.
+//
+// WHAT RUNS. The dispatch graph of one block at one position, in the order the oracle computes it, as enqueues over the handles dsv4-open.fk opened and the pipelines dsv4-kernels.fk compiled
+// (the carrier runs enqueues in order, so no barrier is set; nothing here syncs: the caller syncs and reads). The residual is the four hyper-connection streams, hc x n_embd f32, in the scratch
+// buffer `resid`; a block reads it and leaves its output in `resid` (the attention half writes `resid-next`, the FFN half reads it and writes `resid` back).
+//   attention half (dsv4-layer-attn):
+//     hc_pre      rmsnorm of the 4 streams (no weight, one group of 256), the F16 fn matvec [hc x e to 24] (compensated, one thread a row), the Sinkhorn split (n_hc 4, 20 iterations, fixture or
+//                 file scale and base), the stream sum with the pre gates -> hc-cur
+//     MLA         attn_norm; q_a (MXFP8) and its norm; q_b; the per-head norm; RoPE in place at pos; kv (MXFP8), its norm, RoPE, the fp8+f16 round of the row, the append into the raw arena at pos;
+//                 on a compressing block: the two F16 projections of the compressor from the same attn_norm, the state write (with the position's ape bias), and at (pos + 1) mod ratio == 0 the pool, the
+//                 shift (ratio 4), the norm, RoPE at comp_pos = pos + 1 - ratio with the compressed table, the round and the append into the compressed rows; then the three-stage attention over the
+//                 pos + 1 raw rows and the (pos + 1) / ratio compressed rows with the sink in the denominator only; the inverse RoPE; the grouped output_a; output_b
+//     hc_post     out[dst] = block * post[dst] + sum over src of comb[dst + src n_hc] residual[src], read straight from the split buffer (no buffer offsets)
+//   FFN half (dsv4-layer-ffn):
+//     hc_pre      the same, with hc_ffn_*; ffn_norm
+//     router      the F16 gate_inp matvec; layer routes by the hash table (blk.N.ffn_gate_tid2eid: token row of I32 ids, weights sqrt(softplus) of the logits, normalised over the chosen) or by the
+//                 biased top-k (selection by prob + exp_probs_b, weight the UNBIASED prob; a -1e30 bias refuses an expert), both scaled by deepseek4.expert_weights_scale over the 2^-14 floor
+//     experts     gate and up by the device ids (MXFP4 or IQ2_XXS by the stack's own type), the clamped SwiGLU times the router weight with the block's own clamp from
+//                 deepseek4.swiglu_clamp_exp, the down by ids with one input a slot; the slot sum; the shared expert (three MXFP8 matvecs and the unweighted clamped SwiGLU) added
+//     hc_post     as above, into `resid`
+//
+// WHAT IS REFUSED, so a caller reads nothing and not a plausible wrong layer: n_hc other than 4 (the split kernel is the n_hc 4 form), a dense tensor that is not MXFP8, a router or hyper-connection
+// matrix that is not F16, an expert tensor whose type has no ids kernel (the real IQ2XXS file's Q2_K down has none yet: Q2_K is compiled in dsv4-kernels.fk and not wired here), a position at or past
+// the capacity, a ratio-4 block past position 2047 (the indexer stops being inert there: dsv4-compressor.fk, ds4.c:12822), a head width the fp8 round or the grouped output cannot tile.
+//
+// THE ROPE TABLES are written once by dsv4-prepare (plain for ratio 0, compressed for every other ratio). THE COMPRESSOR'S ROW is counted in the same position's attention (the runner appends it
+// before attention counts: metal_dsv4_stack.sh compStep, history).
+//
+// Proven by: native/metal/tests/dsv4-layer-band.bml (the fixture's three blocks, ratios 0, 4 and 2, hashed and biased, against the oracle's own layer arithmetic and, for the compressor, against the
+// author twin).
+import form-stdlib/core.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/equireach.fk;
+import form-stdlib/gguf-meta.fk;
+import form-stdlib/metal-door.fk;
+import form-stdlib/lora-adapter.bml;
+import form-stdlib/dsv4-layout.fk;
+import form-stdlib/dsv4-kernels.fk;
+import native/metal/dsv4-bind.fk;
+import native/metal/dsv4-open.fk;
+section [form.bml] {
+    // ---- names and handles ----------------------------------------------------------------------------------
+    def dkl-name(il, leaf) = "blk." ++ il.str() ++ "." ++ leaf;
+    def dkl-m(ctx) = dso-geo(ctx);
+    def dkl-w(ctx, il, leaf) = dso-handle(ctx, dkl-name(il, leaf));
+    def dkl-view(ctx, il, leaf) = dso-view(ctx, dkl-name(il, leaf));
+    def dkl-b(ctx, name) = dso-buf(ctx, name);
+    def dkl-p(ctx, name) = dso-pipe(ctx, name);
+    def dkl-has?(ctx, il, leaf) = record_has(dso-vx(ctx), dkl-name(il, leaf));
+    def dkl-g(ctx, key) = record_get(dkl-m(ctx), key);
+    def dkl-l(ctx, il, key) = dvl-l(dkl-m(ctx), il, key);
+    def dkl-f(x) = md-f32-bits(x);
+    // a weight's matvec shape from its view: rows = second dimension, cols = first, bytes read by the kernel at nel = rows x cols
+    def dkl-rows(v) = len(v[3]) > 1 ? v[3][1] : 1;
+    def dkl-cols(v) = v[3][0];
+    def dkl-type(v) = v[2];
+    // the block's SwiGLU clamp: element il of the f32 array deepseek4.swiglu_clamp_exp in the header
+    def dkl-clamp(ctx, il) {
+        let src = ctx[7];
+        let off = gmt-find(src, "deepseek4.swiglu_clamp_exp");
+        off == gmt-absent() ? 0.0 : ln-f32-decode(eqr-le(src, gm-arr-elem-off(src, off, il), 4));
+    }
+
+    // ---- admission ------------------------------------------------------------------------------------------
+    def dkl-all?(xs) = len(xs) == 0 ? true : (xs[0] && dkl-all?(xs[1:]));
+    def dkl-dense-ok?(ctx, il, leaves) = len(leaves) == 0 ? true : (dkl-type(dkl-view(ctx, il, leaves[0])) == 41 && dkl-dense-ok?(ctx, il, leaves[1:]));
+    def dkl-f16-ok?(ctx, il, leaves) = len(leaves) == 0 ? true : (dkl-type(dkl-view(ctx, il, leaves[0])) == 1 && dkl-f16-ok?(ctx, il, leaves[1:]));
+    def dkl-expert-type-ok?(ty) = ty == 40 || ty == 16;
+    def dkl-supported?(ctx, il) {
+        let m = dkl-m(ctx);
+        let hd = record_get(m, "hd");
+        let nrot = record_get(m, "nrot");
+        let nh = record_get(m, "nh");
+        let ng = record_get(m, "ng");
+        record_get(m, "hc") == 4 && il >= 0 && il < record_get(m, "layers-n") && (nh % ng) == 0 && ((nh * hd / ng) % 32) == 0 && ((hd - nrot) % 64) == 0 && (nrot % 2) == 0 && hd <= 1024 && hd >= 32 && (hd % 32) == 0
+         && dkl-dense-ok?(ctx, il, ["attn_q_a.weight", "attn_q_b.weight", "attn_kv.weight", "attn_output_a.weight", "attn_output_b.weight", "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight"])
+         && dkl-f16-ok?(ctx, il, ["ffn_gate_inp.weight", "hc_attn_fn.weight", "hc_ffn_fn.weight"])
+         && dkl-expert-type-ok?(dkl-l(ctx, il, "gate-type")) && dkl-expert-type-ok?(dkl-l(ctx, il, "up-type")) && dkl-expert-type-ok?(dkl-l(ctx, il, "down-type"))
+         && dkl-l(ctx, il, "nexp") >= record_get(m, "used") && dkl-l(ctx, il, "router-rows") >= dkl-l(ctx, il, "nexp");
+    }
+
+    // ---- the rope tables, once -----------------------------------------------------------------------------------
+    def dsv4-prepare(ctx) {
+        let m = dkl-m(ctx);
+        let a = metal_buf_write(dkl-b(ctx, "rope-plain"), 0, dkr-f32-bytes(dkr-rope-table(m, false)));
+        let b = metal_buf_write(dkl-b(ctx, "rope-comp"), 0, dkr-f32-bytes(dkr-rope-table(m, true)));
+        (a >= 0 && b >= 0) ? 1 : 0;
+    }
+
+    // ---- hyper-connection pre: the streams to one block input --------------------------------------------------------
+    // src is the residual buffer name; kind is "attn" or "ffn". Four enqueues.
+    def dkl-hc-pre(ctx, il, kind, src) {
+        let m = dkl-m(ctx);
+        let hc = record_get(m, "hc");
+        let e = record_get(m, "e");
+        let mix = record_get(m, "mix");
+        let hce = hc * e;
+        let eps = dkl-f(record_get(m, "eps"));
+        let r1 = dkr-go-tg(dkl-p(ctx, "form_hc_rmsnorm_nw_wide_f32"), [dkl-b(ctx, src), dkl-b(ctx, "hc-flat")], [hce, eps], 1, 256);
+        let r2 = dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec"), [dkl-w(ctx, il, "hc_" ++ kind ++ "_fn.weight"), dkl-b(ctx, "hc-flat"), dkl-b(ctx, "hc-mix")], [mix, hce], mix);
+        let r3 = dkr-go(dkl-p(ctx, "form_hc_split_seq4_f32"), [dkl-b(ctx, "hc-mix"), dkl-w(ctx, il, "hc_" ++ kind ++ "_scale.weight"), dkl-w(ctx, il, "hc_" ++ kind ++ "_base.weight"), dkl-b(ctx, "hc-split")], [hc, record_get(m, "iters"), dkl-f(record_get(m, "hc-eps"))], 1);
+        let r4 = dkr-go(dkl-p(ctx, "form_hc_wsum_f32"), [dkl-b(ctx, src), dkl-b(ctx, "hc-split"), dkl-b(ctx, "hc-cur")], [hc, e], e);
+        [r1, r2, r3, r4];
+    }
+    def dkl-hc-post(ctx, block, src, dst) {
+        let m = dkl-m(ctx);
+        [dkr-go(dkl-p(ctx, "form_dsv4_hc_post_split"), [dkl-b(ctx, block), dkl-b(ctx, src), dkl-b(ctx, "hc-split"), dkl-b(ctx, dst)], [record_get(m, "hc"), record_get(m, "e")], record_get(m, "hc") * record_get(m, "e"))];
+    }
+    // the weighted norm in one group of 256 threads: out = (x / rms) * weight
+    def dkl-norm(ctx, x, wh, out, n) = dkr-go-tg(dkl-p(ctx, "form_mla_rmsnorm_wide_f32"), [dkl-b(ctx, x), wh, dkl-b(ctx, out)], [n, dkl-f(dkl-g(ctx, "eps"))], 1, 256);
+    // an MXFP8 matvec of the weight view v: y = W x
+    def dkl-mx8(ctx, v, x, y) = dkr-go(dkl-p(ctx, "form_dsv4_mx8_matvec"), [v[1], dkl-b(ctx, x), dkl-b(ctx, y)], [dkl-rows(v), dkl-cols(v), dkl-rows(v) * dkl-cols(v)], dkl-rows(v) * 32);
+    // rope in place over nh heads at pos with a table buffer and a sign (+1 forward, -1 inverse)
+    def dkl-rope(ctx, buf, table, nh, pos, sign) {
+        let hd = dkl-g(ctx, "hd");
+        let nrot = dkl-g(ctx, "nrot");
+        dkr-go(dkl-p(ctx, "form_dsv4_rope_f32"), [dkl-b(ctx, buf), dkl-b(ctx, table)], [nh, hd, nrot, dkl-f(1.0 * pos), dkl-f(sign)], nh * (nrot / 2));
+    }
+
+    // ---- the compressor: one token ---------------------------------------------------------------------------------------
+    // the two F16 projections of attn_norm, the state write, and on a boundary the pooled row appended to the compressed arena; answers the list of enqueue results
+    def dkl-compress(ctx, sts, il, pos, cap) {
+        let m = dkl-m(ctx);
+        let hd = record_get(m, "hd");
+        let nrot = record_get(m, "nrot");
+        let e = record_get(m, "e");
+        let ratio = dkl-l(ctx, il, "ratio");
+        let coff = dkl-l(ctx, il, "coff");
+        let width = coff * hd;
+        let row = ratio == 4 ? ratio + (pos % ratio) : (pos % ratio);
+        let kvw = dkl-view(ctx, il, "attn_compressor_kv.weight");
+        let gtw = dkl-view(ctx, il, "attn_compressor_gate.weight");
+        let skv = sts[il][1];
+        let ssc = sts[il][2];
+        let r1 = dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec_lane"), [kvw[1], dkl-b(ctx, "xn"), dkl-b(ctx, "comp-kv")], [dkl-rows(kvw), dkl-cols(kvw)], dkl-rows(kvw) * 32);
+        let r2 = dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec_lane"), [gtw[1], dkl-b(ctx, "xn"), dkl-b(ctx, "comp-gate")], [dkl-rows(gtw), dkl-cols(gtw)], dkl-rows(gtw) * 32);
+        let r3 = dkr-go(dkl-p(ctx, "form_dsv4_comp_state_f32"), [dkl-b(ctx, "comp-kv"), dkl-b(ctx, "comp-gate"), dkl-w(ctx, il, "attn_compressor_ape.weight"), skv, ssc], [width, row, pos % ratio], width);
+        ((pos + 1) % ratio) != 0 ? [r1, r2, r3] : append([r1, r2, r3], dkl-compress-emit(ctx, sts, il, pos, cap, ratio, width));
+    }
+    def dkl-compress-emit(ctx, sts, il, pos, cap, ratio, width) {
+        let m = dkl-m(ctx);
+        let hd = record_get(m, "hd");
+        let nrot = record_get(m, "nrot");
+        let skv = sts[il][1];
+        let ssc = sts[il][2];
+        let idx = (pos + 1) / ratio - 1;
+        let r1 = dkr-go(dkl-p(ctx, "form_dsv4_comp_pool_f32"), [skv, ssc, dkl-b(ctx, "comp-pool")], [hd, ratio], hd);
+        let r2 = ratio == 4 ? dkr-go(dkl-p(ctx, "form_dsv4_comp_shift_f32"), [skv, ssc], [width, ratio], ratio * width) : 1;
+        let r3 = dkl-norm(ctx, "comp-pool", dkl-w(ctx, il, "attn_compressor_norm.weight"), "comp-normed", hd);
+        let r4 = dkl-rope(ctx, "comp-normed", "rope-comp", 1, pos + 1 - ratio, 1.0);
+        let r5 = dkr-go-tg(dkl-p(ctx, "form_dsv4_kv_fp8_f16_round_par"), [dkl-b(ctx, "comp-normed"), dkl-b(ctx, "comp-q")], [hd, nrot], 1, hd);
+        let r6 = dkr-go(dkl-p(ctx, "form_dkv_append_f32"), [dkl-b(ctx, "comp-q"), sts[il][3]], [hd, idx, dvl-comp-rows(m, il, cap)], hd);
+        ratio == 4 ? [r1, r2, r3, r4, r5, r6] : [r1, r3, r4, r5, r6];
+    }
+
+    // ---- the attention half ---------------------------------------------------------------------------------------------------
+    // reads `resid`, leaves the block's post-attention streams in `resid-next`; answers the dispatches enqueued, or nothing
+    def dsv4-layer-attn(ctx, sts, il, pos, cap) = (dkl-supported?(ctx, il) && pos >= 0 && pos < cap && !(dkl-l(ctx, il, "ratio") == 4 && pos >= 2048)) ? dkl-attn-go(ctx, sts, il, pos, cap) : nothing();
+    def dkl-attn-go(ctx, sts, il, pos, cap) {
+        let m = dkl-m(ctx);
+        let hd = record_get(m, "hd");
+        let nh = record_get(m, "nh");
+        let nrot = record_get(m, "nrot");
+        let e = record_get(m, "e");
+        let qr = record_get(m, "qr");
+        let ratio = dkl-l(ctx, il, "ratio");
+        let comp = dkl-l(ctx, il, "compressed");
+        let table = ratio == 0 ? "rope-plain" : "rope-comp";
+        let pre = dkl-hc-pre(ctx, il, "attn", "resid");
+        let n1 = dkl-norm(ctx, "hc-cur", dkl-w(ctx, il, "attn_norm.weight"), "xn", e);
+        let qa = dkl-mx8(ctx, dkl-view(ctx, il, "attn_q_a.weight"), "xn", "q-latent");
+        let kv = dkl-mx8(ctx, dkl-view(ctx, il, "attn_kv.weight"), "xn", "kv-raw");
+        let compl = comp ? dkl-compress(ctx, sts, il, pos, cap) : [];
+        let n2 = dkl-norm(ctx, "q-latent", dkl-w(ctx, il, "attn_q_a_norm.weight"), "q-latn", qr);
+        let n3 = dkl-norm(ctx, "kv-raw", dkl-w(ctx, il, "attn_kv_a_norm.weight"), "kv-n", hd);
+        let qb = dkl-mx8(ctx, dkl-view(ctx, il, "attn_q_b.weight"), "q-latn", "q");
+        let hn = dkr-go-tg(dkl-p(ctx, "form_mla_headrms_wide_f32"), [dkl-b(ctx, "q"), dkl-b(ctx, "q-n")], [nh, hd, dkl-f(record_get(m, "eps"))], nh, hd < 256 ? hd : 256);
+        let rq = dkl-rope(ctx, "q-n", table, nh, pos, 1.0);
+        let rk = dkl-rope(ctx, "kv-n", table, 1, pos, 1.0);
+        let kr = dkr-go-tg(dkl-p(ctx, "form_dsv4_kv_fp8_f16_round_par"), [dkl-b(ctx, "kv-n"), dkl-b(ctx, "kv-q")], [hd, nrot], 1, hd);
+        let ap = dkr-go(dkl-p(ctx, "form_dkv_append_f32"), [dkl-b(ctx, "kv-q"), sts[il][0]], [hd, pos, cap], hd);
+        let nrows = pos + 1;
+        let ncomp = comp ? (pos + 1) / ratio : 0;
+        let ntot = nrows + ncomp;
+        let crows = ncomp > 0 ? sts[il][3] : sts[il][0];
+        let scale = dkl-f(1.0 / math_sqrt(1.0 * hd));
+        let a1 = dkr-go(dkl-p(ctx, "form_mla_attend_scores"), [dkl-b(ctx, "q-n"), sts[il][0], crows, dkl-b(ctx, "att-score")], [nh, hd, nrows, ncomp, scale], nh * ntot);
+        let a2 = dkr-go(dkl-p(ctx, "form_mla_attend_stats_sg"), [dkl-b(ctx, "att-score"), dkl-w(ctx, il, "attn_sinks.weight"), dkl-b(ctx, "att-exp"), dkl-b(ctx, "att-inv")], [nh, ntot], nh * 32);
+        let a3 = dkr-go(dkl-p(ctx, "form_mla_attend_acc"), [sts[il][0], crows, dkl-b(ctx, "att-exp"), dkl-b(ctx, "att-inv"), dkl-b(ctx, "heads")], [nh, hd, nrows, ncomp], nh * hd);
+        let ri = dkl-rope(ctx, "heads", table, nh, pos, 0.0 - 1.0);
+        let oa = dkl-view(ctx, il, "attn_output_a.weight");
+        let o1 = dkr-go(dkl-p(ctx, "form_dsv4_mx8_matvec_grouped"), [oa[1], dkl-b(ctx, "heads"), dkl-b(ctx, "low")], [dkl-rows(oa), dkl-cols(oa), dkl-rows(oa) * dkl-cols(oa), dkl-rows(oa) / record_get(m, "ng")], dkl-rows(oa) * 32);
+        let o2 = dkl-mx8(ctx, dkl-view(ctx, il, "attn_output_b.weight"), "low", "attn-out");
+        let post = dkl-hc-post(ctx, "attn-out", "resid", "resid-next");
+        let all = append(pre, append([n1, qa, kv], append(compl, append([n2, n3, qb, hn, rq, rk, kr, ap, a1, a2, a3, ri, o1, o2], post))));
+        dkl-all?(dkl-ones(all)) ? len(all) : nothing();
+    }
+    def dkl-ones(xs) = len(xs) == 0 ? [] : cons(xs[0] == 1, dkl-ones(xs[1:]));
+
+    // ---- the FFN half --------------------------------------------------------------------------------------------------------------
+    def dkl-expert-kernel(ty) = ty == 40 ? "form_dsv4_mx4_matvec_id" : "form_dsv4_iq2_matvec_id";
+    def dkl-route(ctx, il, token) {
+        let m = dkl-m(ctx);
+        let used = record_get(m, "used");
+        let rows = dkl-l(ctx, il, "router-rows");
+        let wscale = dkl-f(record_get(m, "wscale"));
+        dkl-l(ctx, il, "hashed") ? [
+            dkr-go(dkl-p(ctx, "form_dsv4_hash_select"), [dkl-w(ctx, il, "ffn_gate_tid2eid.weight"), dkl-b(ctx, "expert-ids")], [token, used], used),
+            dkr-go(dkl-p(ctx, "form_dsv4_hash_probs"), [dkl-b(ctx, "router-logits"), dkl-b(ctx, "router-probs")], [rows], rows),
+            dkr-go(dkl-p(ctx, "form_dsv4_hash_wts"), [dkl-b(ctx, "router-probs"), dkl-b(ctx, "expert-ids"), dkl-b(ctx, "expert-weights")], [used, wscale], 1)
+        ] : [
+            dkr-go(dkl-p(ctx, "form_dsv4_topk_probs"), [dkl-b(ctx, "router-logits"), dkl-w(ctx, il, "exp_probs_b.bias"), dkl-b(ctx, "router-probs"), dkl-b(ctx, "router-score")], [rows], rows),
+            dkr-go(dkl-p(ctx, "form_dsv4_topk_select"), [dkl-b(ctx, "router-probs"), dkl-b(ctx, "router-score"), dkl-b(ctx, "expert-ids"), dkl-b(ctx, "expert-weights")], [rows, used, wscale], 1)
+        ];
+    }
+    def dkl-experts(ctx, il) {
+        let m = dkl-m(ctx);
+        let used = record_get(m, "used");
+        let e = record_get(m, "e");
+        let hidden = dkl-l(ctx, il, "hidden");
+        let lim = dkl-f(dkl-clamp(ctx, il));
+        let gt = dkl-l(ctx, il, "gate-type");
+        let ut = dkl-l(ctx, il, "up-type");
+        let dt = dkl-l(ctx, il, "down-type");
+        [dkr-go(dkl-p(ctx, dkl-expert-kernel(gt)), [dkl-w(ctx, il, "ffn_gate_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xgate"), dkl-b(ctx, "expert-ids")], [hidden, e, used, 0], used * hidden * 32),
+         dkr-go(dkl-p(ctx, dkl-expert-kernel(ut)), [dkl-w(ctx, il, "ffn_up_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xup"), dkl-b(ctx, "expert-ids")], [hidden, e, used, 0], used * hidden * 32),
+         dkr-go(dkl-p(ctx, "form_dsv4_swiglu_id"), [dkl-b(ctx, "xgate"), dkl-b(ctx, "xup"), dkl-b(ctx, "expert-weights"), dkl-b(ctx, "xmid")], [hidden, used, lim], used * hidden),
+         dkr-go(dkl-p(ctx, dkl-expert-kernel(dt)), [dkl-w(ctx, il, "ffn_down_exps.weight"), dkl-b(ctx, "xmid"), dkl-b(ctx, "xdown"), dkl-b(ctx, "expert-ids")], [e, hidden, used, hidden], used * e * 32)];
+    }
+    def dkl-shared(ctx, il) {
+        let m = dkl-m(ctx);
+        let sh = record_get(m, "sh");
+        let lim = dkl-f(dkl-clamp(ctx, il));
+        [dkl-mx8(ctx, dkl-view(ctx, il, "ffn_gate_shexp.weight"), "xn", "shared-gate"),
+         dkl-mx8(ctx, dkl-view(ctx, il, "ffn_up_shexp.weight"), "xn", "shared-up"),
+         dkr-go(dkl-p(ctx, "form_dsv4_swiglu_f32"), [dkl-b(ctx, "shared-gate"), dkl-b(ctx, "shared-up"), dkl-b(ctx, "shared-mid")], [sh, dkl-f(1.0), lim], sh),
+         dkl-mx8(ctx, dkl-view(ctx, il, "ffn_down_shexp.weight"), "shared-mid", "shared-down")];
+    }
+    // reads `resid-next`, leaves the block's output streams in `resid`; token is the id the hash table of a hashed block is read with
+    def dsv4-layer-ffn(ctx, il, token) = dkl-supported?(ctx, il) ? dkl-ffn-go(ctx, il, token) : nothing();
+    def dkl-ffn-go(ctx, il, token) {
+        let m = dkl-m(ctx);
+        let e = record_get(m, "e");
+        let used = record_get(m, "used");
+        let rows = dkl-l(ctx, il, "router-rows");
+        let pre = dkl-hc-pre(ctx, il, "ffn", "resid-next");
+        let n1 = dkl-norm(ctx, "hc-cur", dkl-w(ctx, il, "ffn_norm.weight"), "xn", e);
+        let rt = dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec_lane"), [dkl-w(ctx, il, "ffn_gate_inp.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "router-logits")], [rows, e], rows * 32);
+        let route = dkl-route(ctx, il, token);
+        let ex = dkl-experts(ctx, il);
+        let sh = dkl-shared(ctx, il);
+        let sm = dkr-go(dkl-p(ctx, "form_dsv4_sum_slots"), [dkl-b(ctx, "xdown"), dkl-b(ctx, "shared-down"), dkl-b(ctx, "ffn-out")], [e, used], e);
+        let post = dkl-hc-post(ctx, "ffn-out", "resid-next", "resid");
+        let all = append(pre, append([n1, rt], append(route, append(ex, append(sh, append([sm], post))))));
+        dkl-all?(dkl-ones(all)) ? len(all) : nothing();
+    }
+    // the whole block: attention then FFN
+    def dsv4-layer(ctx, sts, il, pos, token, cap) {
+        let a = dsv4-layer-attn(ctx, sts, il, pos, cap);
+        nothing?(a) ? nothing() : { let f = dsv4-layer-ffn(ctx, il, token); nothing?(f) ? nothing() : a + f; };
+    }
+    0;
+}

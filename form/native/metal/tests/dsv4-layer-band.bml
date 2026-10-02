@@ -1,0 +1,238 @@
+; dsv4-layer-band.bml -- ONE DeepSeek-V4 layer's forward on the Metal door, on the Form-built fixture, against the oracle's own layer arithmetic: the three blocks (ratio 0 hashed with IQ2_XXS
+; experts, ratio 4 and ratio 2 with the biased top-k, MXFP4 experts and the compressor), every stage of the attention half and the FFN half, over four positions.
+;
+; WHAT THIS PINS. native/metal/dsv4-layer.fk enqueues one block at one position over the handles dsv4-open.fk opened (hc_pre, the MLA half with the compressor, hc_post, the FFN half). This band
+; opens the fixture it writes under temp_dir (1,515,232 bytes) at capacity 8, writes the two rope tables, and runs four tokens (5, 17, 3, 22) through the three blocks two ways:
+;   ALONE   each block is fed the REFERENCE's own input at that position (the previous block's fp64 output, rounded to f32 by the write), so one block's disagreement is its own and does not compound
+;           (the oracle harness's THIS-LAYER-ALONE gate: nd = max|gpu - ref| / max|ref| below the 3e-5 floor of max(8 ne, 3e-5), metal_dsv4_stack_oracle.sh above cmpOra, history 8a6f123d3^);
+;   CHAINED the GPU feeds itself (block 0 -> 1 -> 2 at each position, its own residual and its own caches), held to the chain gate max(8 x 1.4e-5, 3e-5) = 1.12e-4.
+; The reference is dsv4-oracle-reference.bml (dfo-attention-half, dfo-ffn: fp64, independent of every production MLA/HC/MoE recipe) on the same file, with the raw KV history it keeps, threaded here.
+; THE ONE LEG THE ORACLE DOES NOT HAVE IS THE COMPRESSOR. The oracle holds no compressed lane. Its attention is the arithmetic of a union of rows, so the reference gives it the raw history plus the
+; compressed rows the author twin dsv4-compressor.fk produces (the twin's pool and norm, then the oracle's own rotation at comp_pos with the compressed base and YaRN ramp, then the oracle's own fp8+f16
+; round). The compressed legs (block 1 at position 3, block 2 at positions 1 to 3) are therefore pinned to the TWIN, not to an independent oracle: a wrong compressor recipe that the twin shares would
+; pass. Everything else in the reference is the oracle's.
+;
+; Verdict 255 when every claim lands:
+;   1     the cell and its refusals: every block of the fixture is supported; the dispatch counts are pinned (block 0: attention 22, FFN 19 with three routing dispatches; blocks 1 and 2: FFN 18, attention
+;         25 plus the compressor's 3 a token and 6 (ratio 4) or 5 (ratio 2) at a boundary); a position at the capacity, a block out of range and a ratio-4 block at position 2048 each answer nothing and
+;         touch no buffer (a sentinel in the output stays)
+;   2     block 0 (hashed routing, ratio 0, IQ2_XXS experts) alone at positions 0 to 3, KV growing 1 to 4 rows: xn, the roped query, the cached row, the attention heads (inverse roped), output_a, attn_out,
+;         the post-attention streams, ffn_cur, ffn_norm, the router logits, the experts the hash table names (exactly), the router weights, the shared expert, the FFN sum and the output streams, each in the gate
+;   4     block 1 (biased top-k, ratio 4, MXFP4 experts, the -1e30 sentinel expert refused) alone at positions 0 to 2: the compressed lane is empty there, so this leg is the oracle's alone, stage for stage
+;   8     block 2 (biased top-k, ratio 2) alone at position 0, the same
+;   16    the compressor legs, against the oracle's arithmetic over the twin's rows: block 1 at position 3 (the first compressed row, attention over 4 raw + 1 compressed) and block 2 at positions 1 to 3
+;         (rows 1 and 2), every stage in the gate, and the compressed arena itself (rotated, rounded rows) equal to the reference's rows
+;   32    chained: the GPU feeds itself through the three blocks at four positions, each block's output streams against the reference chain within the chain gate; every disagreement is printed
+;   64    the checks can fail: at each compressed row the reference WITHOUT the row reads far from the GPU's attention heads (so the compressed legs witness the lane), a block fed an input tilted by 1e-4
+;         reads outside the gate, and a block fed through the embedding path agrees with the reference's own embedding input exactly
+;   128   release: dsv4-close in synced rounds leaves no handle and metal_live reads what it read before the open
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind the handle door; the fixture is written and read as a binary file. Light GPU: 12 block runs of a few hundred threads over a 1.5 MB
+; fixture, one tilted run, three chained passes. Never maps a model; writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/dsv4-layer.fk form-stdlib/dsv4-compressor.fk form-stdlib/f16-decode.fk form/form-stdlib/bml/dsv4-oracle-reference.bml
+section [form.bml] {
+ class Dsv4LayerBand {
+  def dlb-bit(held, bit) = held ? bit : 0;
+  def dlb-tokens() = [5, 17, 3, 22];
+  def dlb-chain-bound() = 0.000112;
+  def dlb-ratio(c, il) = dvl-l(record_get(c, "m"), il, "ratio");
+  def dlb-hd(c) = record_get(record_get(c, "m"), "hd");
+  def dlb-nrot(c) = record_get(record_get(c, "m"), "nrot");
+  def dlb-eps() = 0.000001;
+  def dlb-pre(il) = "blk." ++ il.str() ++ ".";
+  def dlb-ctx(c) = record_get(c, "ctx");
+  def dlb-rd(ctx, name, n) = dkr-read(dso-buf(ctx, name), n);
+  def dlb-flat(rows) = len(rows) == 0 ? [] : append(rows[0], dlb-flat(rows[1:]));
+  def dlb-ape-rows(r, key, k, n) = k == n ? [] : append(dfo-plain(r, key, k), dlb-ape-rows(r, key, k + 1, n));
+
+  // ---- the reference: the oracle's layer over a raw history and the compressed rows of the twin ----------------------------------------------
+  // a block's reference state is [raw rows, compressed rows, twin state]; the twin state is nothing on a block without a compressor
+  def dlb-ls-new(c, il) = [[], [], dlb-ratio(c, il) == 0 ? nothing() : dcp-state-new(dlb-ratio(c, il), dlb-hd(c))];
+  // the twin's step on this position's attn_norm: its two F16 projections come from the oracle's own matrix reader
+  def dlb-comp-step(c, il, pos, resid, ls) {
+   let r = record_get(c, "r");
+   let g = record_get(c, "g");
+   let p = dlb-pre(il);
+   let pre = dfo-hc-pre(r, p, "attn", resid, g);
+   let xn = dnr-rms-weight(record_get(pre, "cur"), dfo-plain(r, p ++ "attn_norm.weight", 0), dlb-eps());
+   let ratio = dlb-ratio(c, il);
+   dcp-step(ls[2], ratio, dlb-hd(c), pos, dfo-f16-matrix(r, p ++ "attn_compressor_kv.weight", xn), dfo-f16-matrix(r, p ++ "attn_compressor_gate.weight", xn),
+    dlb-ape-rows(r, p ++ "attn_compressor_ape.weight", 0, ratio), dfo-plain(r, p ++ "attn_compressor_norm.weight", 0), dlb-eps());
+  }
+  // the twin's normed pooled row, rotated at comp_pos with the compressed table by the oracle's own factors and rounded by the oracle's own fp8+f16 round
+  def dlb-comp-row(c, il, pos, normed) {
+   let r = record_get(c, "r");
+   let ratio = dlb-ratio(c, il);
+   dfo-kv-round(dfo-rope-heads(normed, dlb-hd(c), dlb-nrot(c), dfo-rope-factors(dfo-rope-params(r, il), dlb-nrot(c), pos + 1 - ratio, 0)), dlb-hd(c), dlb-nrot(c));
+  }
+  // one block: [a, f, out, raw rows after, compressed rows after, twin state after, raw rows before, compressed rows before]
+  def dlb-ref-layer(c, il, pos, token, resid, ls) {
+   let r = record_get(c, "r");
+   let g = record_get(c, "g");
+   let ratio = dlb-ratio(c, il);
+   let step = ratio == 0 ? nothing() : dlb-comp-step(c, il, pos, resid, ls);
+   let emitted = (ratio == 0 || len(step[1]) == 0) ? false : true;
+   let comp1 = emitted ? append(ls[1], [dlb-comp-row(c, il, pos, step[1])]) : ls[1];
+   let a = dfo-attention-half(r, dlb-pre(il), resid, g, il, pos, append(ls[0], comp1));
+   let f = dfo-ffn(r, dlb-pre(il), record_get(a, "after_attn_hc"), g, token, il);
+   [a, f, record_get(f, "out_hc"), append(ls[0], [record_get(a, "kv")]), comp1, ratio == 0 ? nothing() : step[0], ls[0], ls[1]];
+  }
+  def dlb-ref-layers(c, pos, token, lss, il, resid) = il == 3 ? [[], []] : {
+   let lr = dlb-ref-layer(c, il, pos, token, resid, lss[il]);
+   let rest = dlb-ref-layers(c, pos, token, lss, il + 1, lr[2]);
+   [cons(lr, rest[0]), cons([lr[3], lr[4], lr[5]], rest[1])];
+  };
+  // over the positions: [resid0, [block records]] each
+  def dlb-ref-run(c, pos, lss) = pos == len(dlb-tokens()) ? [] : {
+   let r = record_get(c, "r");
+   let embed = dfo-plain(r, "token_embd.weight", dlb-tokens()[pos]);
+   let resid0 = dnr-flat(dnr-fill(4, embed));
+   let layers = dlb-ref-layers(c, pos, dlb-tokens()[pos], lss, 0, resid0);
+   cons([resid0, layers[0]], dlb-ref-run(c, pos + 1, layers[1]));
+  };
+  def dlb-ref-start(c) = dlb-ref-run(c, 0, [dlb-ls-new(c, 0), dlb-ls-new(c, 1), dlb-ls-new(c, 2)]);
+  def dlb-lr(ref, pos, il) = ref[pos][1][il];
+  def dlb-input(ref, pos, il) = il == 0 ? ref[pos][0] : ref[pos][1][il - 1][2];
+
+  // ---- one block run against its reference -----------------------------------------------------------------------------------------------
+  def dlb-attn-triples(ctx, a) = [["xn", dlb-rd(ctx, "xn", 256), record_get(a, "xn")], ["q", dlb-rd(ctx, "q-n", 256), record_get(a, "q")], ["kv", dlb-rd(ctx, "kv-q", 128), record_get(a, "kv")],
+   ["heads", dlb-rd(ctx, "heads", 256), record_get(a, "heads")], ["low", dlb-rd(ctx, "low", 64), record_get(a, "low")], ["attn_out", dlb-rd(ctx, "attn-out", 256), record_get(a, "attn_out")],
+   ["after_attn", dlb-rd(ctx, "resid-next", 1024), record_get(a, "after_attn_hc")]];
+  def dlb-ffn-triples(ctx, f) = [["ffn_cur", dlb-rd(ctx, "hc-cur", 256), record_get(f, "ffn_cur")], ["ffn_norm", dlb-rd(ctx, "xn", 256), record_get(f, "ffn_norm")],
+   ["logits", dlb-rd(ctx, "router-logits", 4), record_get(f, "router_logits")], ["w", dlb-rd(ctx, "expert-weights", 2), record_get(f, "expert_w")], ["shared", dlb-rd(ctx, "shared-down", 256), record_get(f, "shared")],
+   ["ffn_out", dlb-rd(ctx, "ffn-out", 256), record_get(f, "ffn_out")], ["out_hc", dlb-rd(ctx, "resid", 1024), record_get(f, "out_hc")]];
+  def dlb-nds(ts) = len(ts) == 0 ? [] : cons(dkr-nd(ts[0][1], ts[0][2]), dlb-nds(ts[1:]));
+  def dlb-labels(ts, nds) = len(ts) == 0 ? "" : (ts[0][0] ++ " " ++ nds[0].str() ++ "  " ++ dlb-labels(ts[1:], nds[1:]));
+  def dlb-below(nds, bound) = len(nds) == 0 ? true : (nds[0] < bound && dlb-below(nds[1:], bound));
+  def dlb-read-ids(ctx) = dkr-read-u32(dso-buf(ctx, "expert-ids"), 2);
+  def dlb-write-resid(ctx, xs) = metal_buf_write(dso-buf(ctx, "resid"), 0, dkr-f32-bytes(xs));
+  // the embedding path of block 0's input: the token's row, broadcast to the four streams
+  def dlb-embed-in(ctx, token) {
+   let e1 = dkr-go(dso-pipe(ctx, "form_dsv4_embed_f16"), [dso-handle(ctx, "token_embd.weight"), dso-buf(ctx, "hc-cur")], [token, 256], 256);
+   let e2 = dkr-go(dso-pipe(ctx, "form_hc_broadcast_f32"), [dso-buf(ctx, "hc-cur"), dso-buf(ctx, "resid")], [4, 256], 1024);
+   e1 == 1 && e2 == 1;
+  }
+  // at an emission position keep the disagreement the reference WITHOUT the compressed row would show against the GPU's heads (the falsifier of the compressed legs)
+  def dlb-noted(c, fal, il, pos, input, lr, heads) {
+   let ratio = dlb-ratio(c, il);
+   (ratio > 0 && (pos + 1) % ratio == 0) ? record_set(fal, "nc-" ++ il.str() ++ "-" ++ pos.str(), dkr-nd(heads, record_get(dfo-attention-half(record_get(c, "r"), dlb-pre(il), input, record_get(c, "g"), il, pos, lr[6]), "heads"))) : 0;
+  }
+  // the block il at pos against lr, fed `input` (a list of 1024 f32, or nothing: the embedding path); sts holds that block's caches
+  def dlb-run(c, label, il, pos, input, lr, sts, fal) {
+   let ctx = dlb-ctx(c);
+   let token = dlb-tokens()[pos];
+   let fed = nothing?(input) ? dlb-embed-in(ctx, token) : (dlb-write-resid(ctx, input) >= 0);
+   let n1 = dsv4-layer-attn(ctx, sts, il, pos, 8);
+   let s1 = metal_sync();
+   let ta = dlb-attn-triples(ctx, lr[0]);
+   let nda = dlb-nds(ta);
+   let heads = dlb-rd(ctx, "heads", 256);
+   let n2 = dsv4-layer-ffn(ctx, il, token);
+   let s2 = metal_sync();
+   let tf = dlb-ffn-triples(ctx, lr[1]);
+   let ndf = dlb-nds(tf);
+   let ids = dlb-read-ids(ctx);
+   let refIds = record_get(lr[1], "selected");
+   let ncomp = dlb-ratio(c, il) == 0 ? 0 : (pos + 1) / dlb-ratio(c, il);
+   let compNd = ncomp == 0 ? 0.0 : dkr-nd(dkr-read(sts[il][3], ncomp * dlb-hd(c)), dlb-flat(lr[4]));
+   let noted = nothing?(input) ? 0 : dlb-noted(c, fal, il, pos, input, lr, heads);
+   let enq = record_set(fal, "enq-" ++ il.str() ++ "-" ++ pos.str(), [n1, n2]);
+   let said = print_str("  " ++ label ++ " block " ++ il.str() ++ " pos " ++ pos.str() ++ " enq " ++ n1.str() ++ "+" ++ n2.str() ++ " ids " ++ ids.str() ++ "/" ++ refIds.str() ++ "  " ++ dlb-labels(ta, nda) ++ dlb-labels(tf, ndf) ++ (ncomp == 0 ? "" : "comp_rows " ++ compNd.str()));
+   fed && !nothing?(n1) && !nothing?(n2) && ids == refIds && dlb-below(nda, dkr-floor()) && dlb-below(ndf, dkr-floor()) && compNd < dkr-floor();
+  }
+  def dlb-alone(c, ref, il, pos, sts, fal) = dlb-run(c, "alone", il, pos, il == 0 ? nothing() : dlb-input(ref, pos, il), dlb-lr(ref, pos, il), sts, fal);
+
+  // ---- 1: counts and refusals -----------------------------------------------------------------------------------------------------------------
+  def dlb-enq(fal, il, pos) = record_get(fal, "enq-" ++ il.str() ++ "-" ++ pos.str());
+  def dlb-counts(fal) = dlb-enq(fal, 0, 0) == [22, 19] && dlb-enq(fal, 1, 0) == [25, 18] && dlb-enq(fal, 1, 2) == [25, 18] && dlb-enq(fal, 1, 3) == [31, 18] && dlb-enq(fal, 2, 0) == [25, 18]
+   && dlb-enq(fal, 2, 1) == [30, 18] && dlb-enq(fal, 2, 2) == [25, 18] && dlb-enq(fal, 2, 3) == [30, 18];
+  def dlb-supported(c) = dkl-supported?(dlb-ctx(c), 0) && dkl-supported?(dlb-ctx(c), 1) && dkl-supported?(dlb-ctx(c), 2) && !dkl-supported?(dlb-ctx(c), 3) && !dkl-supported?(dlb-ctx(c), 0 - 1);
+  // a refusal answers nothing and leaves the output buffer as the caller left it
+  def dlb-refusals(c, sts) {
+   let ctx = dlb-ctx(c);
+   let w = metal_buf_write(dso-buf(ctx, "resid-next"), 0, dkr-sentinel(4096));
+   let a = dsv4-layer-attn(ctx, sts, 0, 8, 8);
+   let b = dsv4-layer-attn(ctx, sts, 3, 0, 8);
+   let d = dsv4-layer-attn(ctx, sts, 1, 2048, 4096);
+   let e = dsv4-layer-ffn(ctx, 3, 5);
+   let s = metal_sync();
+   let after = dlb-rd(ctx, "resid-next", 1024);
+   nothing?(a) && nothing?(b) && nothing?(d) && nothing?(e) && after[0] > 1.0e15 && after[1023] > 1.0e15;
+  }
+
+  // ---- 32: chained -------------------------------------------------------------------------------------------------------------------------------
+  def dlb-chain-layer(c, ref, il, pos, sts) {
+   let ctx = dlb-ctx(c);
+   let token = dlb-tokens()[pos];
+   let n1 = dsv4-layer-attn(ctx, sts, il, pos, 8);
+   let n2 = dsv4-layer-ffn(ctx, il, token);
+   let s = metal_sync();
+   let nd = dkr-nd(dlb-rd(ctx, "resid", 1024), dlb-lr(ref, pos, il)[2]);
+   let ids = dlb-read-ids(ctx);
+   let said = print_str("  chained block " ++ il.str() ++ " pos " ++ pos.str() ++ " out_hc nd " ++ nd.str() ++ " ids " ++ ids.str() ++ "/" ++ record_get(dlb-lr(ref, pos, il)[1], "selected").str());
+   !nothing?(n1) && !nothing?(n2) && nd < dlb-chain-bound() && ids == record_get(dlb-lr(ref, pos, il)[1], "selected");
+  }
+  def dlb-chain-pos(c, ref, pos, sts) {
+   let ctx = dlb-ctx(c);
+   let fed = dlb-embed-in(ctx, dlb-tokens()[pos]);
+   fed && dlb-chain-layer(c, ref, 0, pos, sts) && dlb-chain-layer(c, ref, 1, pos, sts) && dlb-chain-layer(c, ref, 2, pos, sts);
+  }
+  def dlb-chain(c, ref, sts) = dlb-chain-pos(c, ref, 0, sts) && dlb-chain-pos(c, ref, 1, sts) && dlb-chain-pos(c, ref, 2, sts) && dlb-chain-pos(c, ref, 3, sts);
+
+  // ---- 64: the checks can fail -----------------------------------------------------------------------------------------------------------------------
+  def dlb-tilt(xs, i) = len(xs) == 0 ? [] : cons(xs[0] * (1.0 + ((i % 2) == 0 ? 0.0001 : 0.0 - 0.0001)), dlb-tilt(xs[1:], i + 1));
+  def dlb-tilted(c, ref, sts) {
+   let ctx = dlb-ctx(c);
+   let lr = dlb-lr(ref, 0, 0);
+   let w = dlb-write-resid(ctx, dlb-tilt(ref[0][0], 0));
+   let n1 = dsv4-layer-attn(ctx, sts, 0, 0, 8);
+   let n2 = dsv4-layer-ffn(ctx, 0, dlb-tokens()[0]);
+   let s = metal_sync();
+   let nd = dkr-nd(dlb-rd(ctx, "resid", 1024), lr[2]);
+   let said = print_str("  tilted by 1e-4: block 0 pos 0 out_hc nd " ++ nd.str());
+   !nothing?(n1) && !nothing?(n2) && nd > dkr-floor();
+  }
+  // the embedding path agrees with the reference's own embedding input
+  def dlb-embedding(c, ref) {
+   let ctx = dlb-ctx(c);
+   let fed = dlb-embed-in(ctx, dlb-tokens()[0]);
+   let s = metal_sync();
+   fed && dlb-rd(ctx, "resid", 1024) == ref[0][0];
+  }
+  def dlb-far(fal, key) = record_has(fal, key) && record_get(fal, key) > 0.0001;
+  def dlb-witnessed(fal) = dlb-far(fal, "nc-1-3") && dlb-far(fal, "nc-2-1") && dlb-far(fal, "nc-2-3");
+ }
+ let root = temp_dir() ++ "/dsv4-layer-band-" ++ now_unix_ms().str();
+ let path = root ++ ".gguf";
+ let wrote = dfx-write(path);
+ let r = dfo-open(path);
+ let live0 = dvb-live();
+ let mapped0 = dvb-mapped();
+ let ctx = dsv4-open-span(path, 8, 1);
+ let opened = len(ctx) == 13;
+ let m = opened ? ctx[2] : nothing();
+ let c = record_new(0, "r", r, "g", dfo-geometry(r), "m", m, "ctx", ctx);
+ let prep = opened ? dsv4-prepare(ctx) : 0;
+ let stsA = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
+ let stsB = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
+ let stsT = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
+ let ref = dlb-ref-start(c);
+ let fal = record_new(0);
+ let said = print_str("reference built: " ++ len(ref).str() ++ " positions");
+ let r2 = try opened && dlb-alone(c, ref, 0, 0, stsA, fal) && dlb-alone(c, ref, 0, 1, stsA, fal) && dlb-alone(c, ref, 0, 2, stsA, fal) && dlb-alone(c, ref, 0, 3, stsA, fal) catch false;
+ let r4 = try opened && dlb-alone(c, ref, 1, 0, stsA, fal) && dlb-alone(c, ref, 1, 1, stsA, fal) && dlb-alone(c, ref, 1, 2, stsA, fal) catch false;
+ let r8 = try opened && dlb-alone(c, ref, 2, 0, stsA, fal) catch false;
+ let r16 = try opened && dlb-alone(c, ref, 1, 3, stsA, fal) && dlb-alone(c, ref, 2, 1, stsA, fal) && dlb-alone(c, ref, 2, 2, stsA, fal) && dlb-alone(c, ref, 2, 3, stsA, fal) catch false;
+ let c2 = dlb-bit(r2, 2);
+ let c4 = dlb-bit(r4, 4);
+ let c8 = dlb-bit(r8, 8);
+ let c16 = dlb-bit(r16, 16);
+ let c1 = dlb-bit(try opened && dlb-supported(c) && dlb-counts(fal) && dlb-refusals(c, stsA) catch false, 1);
+ let c32 = dlb-bit(try opened && dlb-chain(c, ref, stsB) catch false, 32);
+ let c64 = dlb-bit(try opened && dlb-witnessed(fal) && dlb-tilted(c, ref, stsT) && dlb-embedding(c, ref) catch false, 64);
+ let left = opened ? dsv4-close(ctx, append(stsA, append(stsB, stsT))) : [0];
+ let c128 = dlb-bit(try opened && len(left) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
+ let removed = host_path_remove(path);
+ print_str("dsv4-layer-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " nocomp " ++ (record_has(fal, "nc-1-3") ? record_get(fal, "nc-1-3").str() : "none") ++ "/" ++ (record_has(fal, "nc-2-1") ? record_get(fal, "nc-2-1").str() : "none") ++ "/" ++ (record_has(fal, "nc-2-3") ? record_get(fal, "nc-2-3").str() : "none") ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ dvb-mapped().str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128;
+}
