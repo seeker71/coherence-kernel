@@ -7,7 +7,7 @@
 ; holds it to the oracle's own reading of the SAME bytes (dsv4-oracle-reference.bml dfo-mx8, dfo-out-a and dfo-expert-matrix, each keyed on the tensor's own type), which the fixture band holds to the
 ; carvers. The gate is the oracle harness's floor: nd = max|gpu - ref| / max|ref| below 3e-5 for a kernel alone.
 ;
-; Verdict 255 when every claim lands:
+; Verdict 511 when every claim lands:
 ;   1     text and device: the graph's units now carry the Q8_0 kernels and form_dsv4_q2k_matvec_id, every one of them opens with the pragma pair, no kernel name repeats in the graph, and every pipeline of the
 ;         graph (the catalogue read from the sources) compiles to a positive handle and a second open returns the same handles
 ;   2     Q8_0 dense, each form on the variant's own tensors: the lane matvec on blk.0.attn_q_a (64 x 256), blk.1.attn_kv (128 x 256), output.weight (32 x 256) and blk.2.ffn_down_shexp (256 x 32, one block a
@@ -15,10 +15,14 @@
 ;   4     Q2_K experts by ids: blk.1 down experts [2, 0] and blk.2 down experts [3, 1] with one input a slot (256 rows over 256 columns), and the same stack read as a gate (the shared input), each slot against the
 ;         oracle's expert reading; IQ2_XXS gate by ids on blk.2 (a layer that was MXFP4 in the first fixture) the same
 ;   8     determinism: every kernel above, run twice into fresh buffers, writes the same bytes
-;   16    wrong type routed: the IQ2_XXS id kernel over a Q2_K stack, the MXFP8 matvec over a Q8_0 tensor and the Q8_0 lane over an MXFP8-sized read each read far from the oracle (nd above 0.01)
-;   32    a Q2_K scale mis-read: the same kernel text with the scale nibble read as the min (sc / 16 where q2k_umod(sc, 16) stands) reads far from the oracle (nd above 0.01)
-;   64    a Q8_0 block stride off by one: q80_w with 33 bytes where 34 stand reads far from the oracle on a tensor of eight blocks a row, and the control (the unplanted text) in the gate
+;   16    wrong type routed, each plant named for what it reads: the IQ2_XXS id kernel over a Q2_K stack and the MXFP4 kernel over an IQ2_XXS stack read a wrong NUMBER (finite, nd above 0.01); the MXFP8
+;         matvec over a Q8_0 tensor reads NOT A NUMBER (a non-finite word, the failure value 1e30)
+;   32    a Q2_K scale mis-read: the same kernel text with the scale nibble read as the min (sc / 16 where q2k_umod(sc, 16) stands) reads a wrong NUMBER (finite, nd 0.85), the control in the gate
+;   64    Q8_0 plants of both kinds: a block stride off by one (q80_w with 33 bytes where 34 stand) reads NOT A NUMBER on a tensor of eight blocks a row (a scale lands on code bytes), and codes read
+;         unsigned (q6k_s8 dropped, strides and scales right) read a wrong NUMBER (finite): so the band separates a wrong answer from a non-answer
 ;   128   a kernel that never ran reads as the sentinel: an output buffer left untouched by a dispatch of zero threads is 1.5e16 and reads far from the oracle; and the band's own gate refuses a short read
+;   256   rows of SEVERAL blocks: a third file (the second fixture's census with four expert stacks given wider columns over the same cells; the second fixture and its digest are not touched) holds Q2_K down
+;         stacks and IQ2_XXS gate stacks at 4 blocks a row (1024 columns) and 8 (2048), each against the oracle with the shared input and with one input a slot, eight readings (the real file's rows are 8 and 16 blocks)
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind metal_pipeline and the handle door, and the fixture is written and read as a binary file (write_file, read_file_slice).
 ; Light GPU: kernels of a few hundred threads over a 1.8 MB fixture. Never maps a model; writes only under temp_dir and removes what it made.
@@ -43,6 +47,9 @@ section [form.bml] {
   }
   def dqk-chk(label, gpu, ref) = dqk-nd(label, gpu, ref) < dkr-floor();
   def dqk-far(label, gpu, ref) = dqk-nd(label, gpu, ref) > 0.01;
+  // a wrong answer that is a NUMBER (finite, far) is told from one that is not a number at all (a NaN or an infinity reads the failure value 1e30): the plants name which they are
+  def dqk-finite-far(label, gpu, ref) { let nd = dqk-nd(label, gpu, ref); nd > 0.01 && nd < 1.0e29; }
+  def dqk-nonfinite(label, gpu, ref) = dqk-nd(label, gpu, ref) >= 1.0e29;
   def dqk-rows(c, key) = nth(nth(dfo-tensor(dqk-g(c, "r"), key), 1), 1);
   def dqk-cols(c, key) = head(nth(dfo-tensor(dqk-g(c, "r"), key), 1));
 
@@ -142,9 +149,9 @@ section [form.bml] {
    let o2 = dkr-buf-empty(reg, 64);
    let e2 = dkr-go(dqk-p(c, "form_dsv4_mx4_matvec_id"), [dqk-vh(c, "blk.0.ffn_gate_exps.weight"), xb, o2, dkr-buf-u32(reg, [1, 3])], [256, 256, 2, 0], 2 * 256 * 32);
    len(wrongExp) == 512 && e == 1 && e2 == 1
-    && dqk-far("IQ2_XXS kernel over the Q2_K stack", wrongExp, dqk-expert-ref(c, key, [2, 0], mids, 256, 0))
-    && dqk-far("MXFP8 matvec over the Q8_0 tensor", dkr-read(o, 64), dfo-mx8(dqk-g(c, "r"), "blk.0.attn_q_a.weight", x))
-    && dqk-far("MXFP4 kernel over the IQ2_XXS stack", append(dkr-read(o2, 512)[0:0], dkr-read(o2, 512)), dqk-expert-ref(c, "blk.0.ffn_gate_exps.weight", [1, 3], x, 0, 0));
+    && dqk-finite-far("IQ2_XXS kernel over the Q2_K stack (a wrong NUMBER)", wrongExp, dqk-expert-ref(c, key, [2, 0], mids, 256, 0))
+    && dqk-nonfinite("MXFP8 matvec over the Q8_0 tensor (not a number: Q8_0 bytes read as MXFP8 exponents)", dkr-read(o, 64), dfo-mx8(dqk-g(c, "r"), "blk.0.attn_q_a.weight", x))
+    && dqk-finite-far("MXFP4 kernel over the IQ2_XXS stack (a wrong NUMBER)", dkr-read(o2, 512), dqk-expert-ref(c, "blk.0.ffn_gate_exps.weight", [1, 3], x, 0, 0));
   }
 
   // ---- 32 / 64: planted kernel texts (a copy of the emitted source with one claim dropped, compiled fresh; the tree's text is not touched)
@@ -158,7 +165,7 @@ section [form.bml] {
    let ref = dqk-expert-ref(c, key, [2, 0], mids, 256, 0);
    let good = dqk-expert-run(c, dqk-p(c, "form_dsv4_q2k_matvec_id"), key, [2, 0], mids, 256, 256, 256);
    let bad = pipe > 0 ? dqk-expert-run(c, pipe, key, [2, 0], mids, 256, 256, 256) : [];
-   !dqk-has?(planted, "float ds = d * float(q2k_umod(sc, 16u));") && dqk-has?(planted, "float(sc / 16u)") && pipe > 0 && len(bad) == 512 && dqk-chk("control: the unplanted Q2_K text", good, ref) && dqk-far("Q2_K scale nibble read as the min", bad, ref);
+   !dqk-has?(planted, "float ds = d * float(q2k_umod(sc, 16u));") && dqk-has?(planted, "float(sc / 16u)") && pipe > 0 && len(bad) == 512 && dqk-chk("control: the unplanted Q2_K text", good, ref) && dqk-finite-far("Q2_K scale nibble read as the min (a wrong NUMBER)", bad, ref);
   }
   def dqk-stride-off(c) {
    let planted = dqk-stride-plant();
@@ -170,7 +177,43 @@ section [form.bml] {
    let o = dkr-buf-empty(reg, 64);
    let e = pipe > 0 ? dkr-go(pipe, [dqk-vh(c, key), xb, o], [64, 256], 64 * 32) : 0;
    let ref = dfo-mx8(dqk-g(c, "r"), key, x);
-   !dqk-has?(planted, "uint b = blk * 34u;") && dqk-has?(planted, "uint b = blk * 33u;") && pipe > 0 && e == 1 && dqk-far("Q8_0 block stride 33 for 34", dkr-read(o, 64), ref);
+   !dqk-has?(planted, "uint b = blk * 34u;") && dqk-has?(planted, "uint b = blk * 33u;") && pipe > 0 && e == 1 && dqk-nonfinite("Q8_0 block stride 33 for 34 (not a number: a block's scale lands on code bytes)", dkr-read(o, 64), ref);
+  }
+  // a Q8_0 plant whose error is a finite NUMBER: the codes read unsigned (q6k_s8 dropped), the scales and strides right
+  def dqk-unsigned-plant() = dqk-replace(dkr-unit-q8(), "int q = q6k_s8(int(qb[b + 2u + i]));", "int q = int(qb[b + 2u + i]);");
+  def dqk-unsigned-codes(c) {
+   let planted = dqk-unsigned-plant();
+   let pipe = metal_pipeline(planted, "form_dsv4_q80_matvec_lane");
+   let reg = dqk-g(c, "reg");
+   let key = "blk.0.attn_q_a.weight";
+   let x = dqk-x(12, 256, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let o = dkr-buf-empty(reg, 64);
+   let e = pipe > 0 ? dkr-go(pipe, [dqk-vh(c, key), xb, o], [64, 256], 64 * 32) : 0;
+   !dqk-has?(planted, "int q = q6k_s8(int(qb[b + 2u + i]));") && dqk-has?(planted, "int q = int(qb[b + 2u + i]);") && pipe > 0 && e == 1
+    && dqk-finite-far("Q8_0 codes read unsigned (a wrong NUMBER)", dkr-read(o, 64), dfo-mx8(dqk-g(c, "r"), key, x));
+  }
+
+  // ---- 256: rows of SEVERAL blocks (the real file's down stack is 8 blocks a row, its gate and up 16; the fixture's rows are one block)
+  // A third file, written under temp_dir and read by the oracle and the device alike: the second fixture's census with four expert stacks given wider columns over the same cells (the sizes do not move):
+  // blk.1 down and gate [1024, 64, 4] (4 blocks a row), blk.2 down and gate [2048, 32, 4] (8 blocks a row), Q2_K down and IQ2_XXS gate, the shared input (xstride 0) and one input a slot. The second
+  // fixture itself, and its pinned digest, are not touched.
+  def dqk-retype-dims(specs, name, dims) = len(specs) == 0 ? [] : cons(specs[0][0] == name ? [specs[0][0], specs[0][1], dims, specs[0][3], specs[0][4], specs[0][5]] : specs[0], dqk-retype-dims(specs[1:], name, dims));
+  def dqk-wide-specs() = dqk-retype-dims(dqk-retype-dims(dqk-retype-dims(dqk-retype-dims(dfx-v-specs(), "blk.1.ffn_down_exps.weight", [1024, 64, 4]), "blk.1.ffn_gate_exps.weight", [1024, 64, 4]),
+   "blk.2.ffn_down_exps.weight", [2048, 32, 4]), "blk.2.ffn_gate_exps.weight", [2048, 32, 4]);
+  def dqk-multiblock(c) {
+   let x4 = dqk-x(61, 1024, 2.0);
+   let x8 = dqk-x(62, 2048, 2.0);
+   let s4 = dqk-x(63, 2048, 2.0);
+   let s8 = dqk-x(64, 4096, 2.0);
+   dqk-expert-one(c, "q2_k 4 blocks a row, one input a slot: blk.1 down [2,0]", "form_dsv4_q2k_matvec_id", "blk.1.ffn_down_exps.weight", [2, 0], s4, 1024)
+    && dqk-expert-one(c, "q2_k 4 blocks a row, shared input: blk.1 down [1,3]", "form_dsv4_q2k_matvec_id", "blk.1.ffn_down_exps.weight", [1, 3], x4, 0)
+    && dqk-expert-one(c, "q2_k 8 blocks a row, shared input: blk.2 down [3,1]", "form_dsv4_q2k_matvec_id", "blk.2.ffn_down_exps.weight", [3, 1], x8, 0)
+    && dqk-expert-one(c, "q2_k 8 blocks a row, one input a slot: blk.2 down [0,2]", "form_dsv4_q2k_matvec_id", "blk.2.ffn_down_exps.weight", [0, 2], s8, 2048)
+    && dqk-expert-one(c, "iq2_xxs 4 blocks a row, shared input: blk.1 gate [1,3]", "form_dsv4_iq2_matvec_id", "blk.1.ffn_gate_exps.weight", [1, 3], x4, 0)
+    && dqk-expert-one(c, "iq2_xxs 4 blocks a row, one input a slot: blk.1 gate [3,2]", "form_dsv4_iq2_matvec_id", "blk.1.ffn_gate_exps.weight", [3, 2], s4, 1024)
+    && dqk-expert-one(c, "iq2_xxs 8 blocks a row, one input a slot: blk.2 gate [0,2]", "form_dsv4_iq2_matvec_id", "blk.2.ffn_gate_exps.weight", [0, 2], s8, 2048)
+    && dqk-expert-one(c, "iq2_xxs 8 blocks a row, shared input: blk.2 gate [2,1]", "form_dsv4_iq2_matvec_id", "blk.2.ffn_gate_exps.weight", [2, 1], x8, 0);
   }
 
   // ---- 128: a kernel that never ran reads as the sentinel
@@ -203,11 +246,19 @@ section [form.bml] {
  let c8 = dqk-bit(try dqk-twice(c) catch false, 8);
  let c16 = dqk-bit(try dqk-wrong-type(c) catch false, 16);
  let c32 = dqk-bit(try dqk-scale-misread(c) catch false, 32);
- let c64 = dqk-bit(try dqk-stride-off(c) catch false, 64);
+ let c64 = dqk-bit(try dqk-stride-off(c) && dqk-unsigned-codes(c) catch false, 64);
  let c128 = dqk-bit(try dqk-sentinel(c) catch false, 128);
+ let widePath = root ++ "-wide.gguf";
+ let wroteWide = write_file(widePath, dfx-image(dqk-wide-specs()));
+ let rW = dfo-open(widePath);
+ let mW = dvl-open(read_file_slice(widePath, 0, 7168));
+ let viewsW = dvb-open(widePath, dvb-plan-all(mW));
+ let cW = record_new(0, "r", rW, "m", mW, "ix", dvb-index(viewsW), "ps", all, "reg", reg);
+ let c256 = dqk-bit(try dqk-multiblock(cW) catch false, 256);
  let leftBufs = dkr-reg-free(reg);
  let leftViews = nothing?(views) ? [] : dvb-close(views);
- let removed = host_path_remove(path);
- print_str("dsv4-kernels-q8q2-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " wrote " ++ wrote.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128;
+ let leftWide = nothing?(viewsW) ? [] : dvb-close(viewsW);
+ let removed = host_path_remove(path) + host_path_remove(widePath);
+ print_str("dsv4-kernels-q8q2-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " wrote " ++ wrote.str() ++ "/" ++ wroteWide.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ "/" ++ len(leftWide).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256;
 }
