@@ -1,0 +1,117 @@
+; q2k-msl-band.fk — the Q2_K Metal kernels the body emits (q2k-msl.fk) answer q2k-dequant.fk's own values on this
+; Mac's GPU, from the same two seeded blocks q2k-dequant-band.fk pins against ds4.c's q2_k_value_f32.
+;
+; WHY THE GATE IS SPLIT, NOT LOOSENED (carried from the 2026-07-30 device run, where 135 of 512 weights differed
+; and the instinct to look at the kernel was wrong): block 0 has d = 1.0 and dmin = 0.5, both exact in f16 and f32,
+; so every product is exactly representable and the device must equal the recipe BIT FOR BIT. Block 1 has an
+; awkward f16 d (0x3555) and a NEGATIVE dmin (0xB400): the recipe runs Form's fp64 and the kernel runs f32, so the
+; two must round differently, and the claim is f32's own granularity, 8 ulps (relative 9.537e-7). The device output
+; is pre-filled with NaN bytes, so a kernel that never runs cannot pass by leaving zeros.
+;
+; THE FIXTURE is form/form-stdlib/tests/fixtures/q2k-two-blocks.bin (168 bytes). Nothing here maps a model file.
+;
+; Verdict 255 when the transcription is honest:
+;   1    the emitted unit carries the spine, q2k_w at ds4's struct offsets (scales@0 qs@16 d@80 dmin@82, 84-byte
+;        block) and both kernels by name
+;   2    alignment is honest: 256 and 512 are admissible, 255 and 100 are not
+;   4    the unit mints both pipelines on the device
+;   8    block 0 (exact constants): all 256 device weights equal q2k-dequant.fk's, bit for bit
+;   16   block 1 (awkward d, negative dmin): all 256 device weights within 8 f32 ulps of q2k-dequant.fk's
+;   32   the slot-mapped matvec (2 rows of one block each, 256 columns) is within cols * 2^-24 plus the weights' own
+;        8 ulps of the fp64 sum of magnitudes, every row
+;   64   THE FALSIFIER: the contiguous-stride reading (q_base = group*16, read inside the block, groups 0..3)
+;        disagrees with the device output on block 0, so the exact claim of bit 8 is a claim about the fold
+;        and not about easy data
+;   128  the fixture reaches the device unchanged (read back byte for byte)
+;
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door; no sibling kernel carries metal_pipeline). Light GPU: two
+; small kernels, 512 threads and 64 threads.
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/metal-door.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml form-stdlib/q2k-dequant.fk form-stdlib/q2k-msl.fk
+
+(do
+    (defn q2mb-score (ok bit) (if ok bit 0))
+    (defn q2mb-file () "form/form-stdlib/tests/fixtures/q2k-two-blocks.bin")
+    (defn q2mb-src () (read_file_slice (q2mb-file) 0 168))
+    (defn q2mb-has? (hay needle) (if (ge (str_find hay needle 0) 0) 1 0))
+    (defn q2mb-abs (v) (if (lt v 0.0) (sub 0.0 v) v))
+    (defn q2mb-f (bytes i) (ln-f32-decode (ln-u32-le bytes (mul 4 i))))
+    ; NaN bytes: 0xFFFFFFFF is a NaN in f32
+    (defn q2mb-nan-bytes (n acc) (if (le n 0) acc (q2mb-nan-bytes (sub n 1) (str_concat acc (str_concat (byte_to_str 255) (str_concat (byte_to_str 255) (str_concat (byte_to_str 255) (byte_to_str 255))))))))
+
+    ; the device weights (bytes of 512 f32) against the recipe: lo..hi, exact when rel is 0.0
+    (defn q2mb-within? (bytes src i hi rel)
+        (if (ge i hi) 1
+            (do (let want (q2k-at src 0 i))
+                (let got (q2mb-f bytes i))
+                (if (le (q2mb-abs (sub got want)) (mul rel (add (q2mb-abs want) 0.000000000001)))
+                    (q2mb-within? bytes src (add i 1) hi rel) 0))))
+    (defn q2mb-exact? (bytes src i hi)
+        (if (ge i hi) 1
+            (if (eq (q2mb-f bytes i) (q2k-at src 0 i)) (q2mb-exact? bytes src (add i 1) hi) 0)))
+
+    ; the falsifier's rival value at block 0: q_base = group*16
+    (defn q2mb-naive-q (src i)
+        (q2k-mod (div (eqr-at src (add (q2k-qs-off) (add (mul (q2k-group i) 16) (q2k-l i))))
+                      (q2k-pow2 (q2k-shift i))) 4))
+    (defn q2mb-naive-at (src i)
+        (sub (mul (mul (q2k-d src 0) (q2k-scale src 0 i)) (q2mb-naive-q src i))
+             (mul (q2k-dmin src 0) (q2k-min src 0 i))))
+    (defn q2mb-differs? (bytes src i hi)
+        (if (ge i hi) 0
+            (if (eq (q2mb-f bytes i) (q2mb-naive-at src i)) (q2mb-differs? bytes src (add i 1) hi) 1)))
+
+    ; x for the matvec: fractions of 13, one per column
+    (defn q2mb-x (j) (div (add (sub (mod (add (mul j 29) 7) 97) 48) 0.0) 13.0))
+    (defn q2mb-xrow (j acc) (if (ge j 256) acc (q2mb-xrow (add j 1) (str_concat acc (md-le32 (md-f32-bits (q2mb-x j)))))))
+    ; fp64 (sum, sum of magnitudes) of row r (block r) against x
+    (defn q2mb-sums (src r j s a)
+        (if (ge j 256) (list s a)
+            (do (let t (mul (q2k-at src 0 (add (mul r 256) j)) (q2mb-x j)))
+                (q2mb-sums src r (add j 1) (add s t) (add a (q2mb-abs t))))))
+
+    ; Form's own recipe for a block-r weight, with the fixture's two blocks as one tensor from base 0
+    (defn q2mb-matvec-ok? (bytes src r)
+        (do (let sa (q2mb-sums src r 0 0.0 0.0))
+            (let got (q2mb-f bytes r))
+            (le (q2mb-abs (sub got (nth sa 0)))
+                (mul (add (mul 256.0 0.000000059604644775390625) 0.00000095367431640625) (add (nth sa 1) 0.000000000001)))))
+
+    (defn q2mb-unit ()
+        (str_concat "#include <metal_stdlib>\n" (str_concat (q2km-msl-helpers) (q2km-msl-appendix))))
+
+    (defn q2k-msl-band ()
+        (do
+            (let src (q2mb-src))
+            (let unit (q2mb-unit))
+            (let c0 (q2mb-score (if (and (gt (str_len src) 167)
+                                     (and (eq (q2mb-has? unit "q2k_w(device const uchar* qb") 1)
+                                      (and (eq (q2mb-has? unit "form_q2k_dequant_f32") 1)
+                                       (and (eq (q2mb-has? unit "form_q2k_matvec_slot_f32") 1)
+                                        (and (eq (q2mb-has? unit "blk * 84u") 1)
+                                         (and (eq (q2mb-has? unit "qb[b + 80u]") 1)
+                                              (eq (q2mb-has? unit "qb[b + 82u]") 1))))))) 1 0) 1))
+            (let c1 (q2mb-score (if (and (eq (q2km-admissible? 256) 1) (and (eq (q2km-admissible? 512) 1)
+                                     (and (eq (q2km-admissible? 255) 0) (eq (q2km-admissible? 100) 0)))) 1 0) 2))
+            (let pd (metal_pipeline unit "form_q2k_dequant_f32"))
+            (let pm (metal_pipeline unit "form_q2k_matvec_slot_f32"))
+            (let c2 (q2mb-score (if (and (gt pd 0) (gt pm 0)) 1 0) 4))
+            (let qh (metal_buf_alloc 168))
+            (let wq (metal_buf_write qh 0 src))
+            (let wh (metal_buf_alloc 2048))
+            (let wn (metal_buf_write wh 0 (q2mb-nan-bytes 512 "")))
+            (let xh (metal_buf_alloc 1024))
+            (let wx (metal_buf_write xh 0 (q2mb-xrow 0 "")))
+            (let yh (metal_buf_alloc 8))
+            (let wy (metal_buf_write yh 0 (q2mb-nan-bytes 2 "")))
+            (let e1 (metal_enqueue pd (md-bind (list qh wh) (list 0 512)) 512))
+            (let e2 (metal_enqueue pm (md-bind16 (list qh xh yh) (list 2 256) 32 0 0 0) 64))
+            (let s (metal_sync))
+            (let wbytes (metal_buf_read wh 0 2048))
+            (let ybytes (metal_buf_read yh 0 8))
+            (let c3 (q2mb-score (if (and (eq e1 1) (and (ge s 0) (eq (q2mb-exact? wbytes src 0 256) 1))) 1 0) 8))
+            (let c4 (q2mb-score (if (and (eq e1 1) (eq (q2mb-within? wbytes src 256 512 0.0000009537) 1)) 1 0) 16))
+            (let c5 (q2mb-score (if (and (eq e2 1) (and (eq (q2mb-matvec-ok? ybytes src 0) 1) (eq (q2mb-matvec-ok? ybytes src 1) 1))) 1 0) 32))
+            (let c6 (q2mb-score (eq (q2mb-differs? wbytes src 0 64) 1) 64))
+            (let c7 (q2mb-score (str_eq (metal_buf_read qh 0 168) src) 128))
+            (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7)))))))))
+    (q2k-msl-band))
