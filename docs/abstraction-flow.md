@@ -60,10 +60,15 @@ retains admission-plus-execution wall time and process exit. Instrumentation
 entry overhead remains visible. Calls omitted by the runtime ledger stay outside
 its coverage rather than becoming zero-cost work.
 
-The guide joins names to authored definitions, prefers a unique matching source
-path and checks its retained fingerprint. Flattened line numbers never establish
-source identity. Ambiguous, missing and changed definitions stay separate from
-attributed use. Discovery times guide cost reductions; entry counts identify
+The guide joins names to authored definitions, compares absolute source paths
+and checks the retained fingerprint. For a cached merged unit, the executing
+window reads live definition offsets through `kernel_ast` and matches exact
+module bytes to recover the physical owner. Only observed ambiguous names need
+this recovery; its small origin rows travel with the window. Generated lambdas
+carry their module attribution in a separate `generated` category without an
+invented authored span. Flattened line numbers never establish source identity.
+Missing or changed evidence directs attention to admission and source recovery.
+Discovery times guide cost reductions; entry counts identify
 frequently exercised code to inspect, not expensive code by themselves.
 
 Current source, the preceding source census, and current/previous windows per

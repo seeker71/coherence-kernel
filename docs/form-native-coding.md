@@ -314,8 +314,12 @@ settles the last phase and publishes an idempotent session row in
 Guidance, diagnosis and implementation needed for completion are work.
 An independent optional review stays separate. Roles are caller declarations,
 not an inference from token volume, model identity or a tool call. The row's
-`from` and `through` delimit its measured interval; missing historical role
-evidence belongs to the unclassified column.
+`from` and `through` delimit its measured interval. Missing historical role
+evidence invites recovery from the retained task transcript. A retrospective
+declaration keeps its source packet, timestamps and rationale; required work
+may be conservatively charged in full, without inventing recorded phase
+transitions or optional review. Until recovered, unclassified usage remains
+visible and the human reading does not present its work or review as zero.
 
 ```json
 {"action":"begin","session":"native-source-wave","transcript":"/absolute/path/to/rollout.jsonl","role":"work"}

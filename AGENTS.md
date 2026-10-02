@@ -459,7 +459,9 @@ required assistance. Open with `./fkwu observe/local-flow-review.bml` and work
 its `next`; close by measuring the actual transcript, then review again. Work
 the local lane could take goes to `learn/native-turn-queue.jsonl` with its
 original checks, sources and retained effects. Unknown usage stays unknown;
-unused allowance is not consumption. The loop and each meter's job are in the
+unused allowance is not consumption. An unknown or unavailable reading invites
+repair of its evidence path: bind the actual owner, recover retained observations
+and re-observe. Preserve uncertainty until that evidence arrives. The loop and each meter's job are in the
 [direction](docs/form-native-coding.md#direction-toward-zero-rented-coding).
 
 Foreign-language specimens used as input to Form's own compiler remain input
