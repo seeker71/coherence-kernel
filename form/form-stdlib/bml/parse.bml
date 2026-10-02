@@ -2,76 +2,69 @@
 // parse.bml — the body's one reading of a scalar: text becomes an int, a float or a bool, or nothing().
 //
 // Urs, 2026-10-02, meeting `parse_int` where the body's word is str_to_int: "stdlib and BML shall know how to
-// parse any primitive and any cell of any type." The natives already read (str_to_int, str_to_float), but each
-// reads whatever it is handed, and every caller guarded it with a digit walk of its own: ten files each wrote
-// their own digits-end. Here the walk and the guard are said once, light enough to prelude anywhere (it needs
-// only trim from line-grammar.fk). A reading that did not arrive is nothing(), never 0 and never -1
-// (axiom 1; teachings/surprise-is-a-choice-point.md).
+// parse any primitive and any cell of any type." The natives read (str_to_int, str_to_float), but each reads
+// whatever it is handed, and ten files had each written a digit walk of their own to guard it. Here the guard is
+// said once, in the cursor's own named classes (digit, sign, the e of an exponent) and light enough to prelude
+// anywhere. A reading that did not arrive is nothing(), never 0 and never -1 (axiom 1,
+// teachings/surprise-is-a-choice-point.md); the reader that tries one reading and then the next is `??`.
 //
 //   digits-end(s, i)      the index where the run of digits starting at i ends (i when there is none)
 //   parse-int(text)       "42" "-7" "+3"              -> int, or nothing()
 //   parse-float(text)     "3.5" "-1e-3" "2E+4" "7"    -> float, or nothing()
 //   parse-number(text)    an int when it reads as one, else a float, else nothing()
 //   parse-bool(text)      "true" "false"              -> 1 / 0, or nothing()
+//   as-int / as-float / as-bool (value)   a value of any scalar kind read as that kind, or nothing()
+//   float-text(v)         a float written so it reads back a float (7.0, not 7)
 //
-// Whitespace around a scalar is not part of it. For structured text (JSON, cells, any value stored or streamed)
-// see codec.bml, which stands on this.
+// Whitespace around a scalar is not part of it. For structured text (JSON, lists, cells, anything stored or
+// streamed) see codec.bml, which stands on this.
 //////////////////////////////////////////////////////////////////////
-// preludes: form-stdlib/line-grammar.fk
+// preludes: form-stdlib/line-grammar.fk form-stdlib/bml/string-join.bml
 section [form.bml] {
  class FormParse {
-  // ---- the digit walk, once ----------------------------------------------------
-  def pr-digit?(b) = (b >= 48) && (b <= 57);
-  def pr-digits-end(s, i) = (i < len(s)) && pr-digit?(str_byte_at(s, i)) ? pr-digits-end(s, i + 1) : i;
-  def digits-end(s, i) = pr-digits-end(s, i);
-  def pr-sign-end(s) = (len(s) > 0) && ((str_byte_at(s, 0) == 45) || (str_byte_at(s, 0) == 43)) ? 1 : 0;
-  def pr-unsigned(s) = pr-sign-end(s) == 1 ? substring(s, 1, len(s)) : s;
-  def pr-neg?(s) = (len(s) > 0) && (str_byte_at(s, 0) == 45);
+  // ---- a run of one named class ----------------------------------------------------
+  def run-end(s, i, in-class) = (i < len(s)) && in-class(ord(char_at(s, i))) ? run-end(s, i + 1, in-class) : i;
+  def digits-end(s, i) = run-end(s, i, is-digit-cp);
+  def sign-at(s, i) = match char_at(s, i) { "-" | "+" => 1, _ => 0 };
+  def unsigned(t) = match char_at(t, 0) { "+" => substring(t, 1, len(t)), _ => t };
 
-  // ---- int ---------------------------------------------------------------------
-  def pr-int?(t) = (len(t) > pr-sign-end(t)) && (pr-digits-end(t, pr-sign-end(t)) == len(t));
+  // ---- int: [sign] digits -------------------------------------------------------------
+  def int-shape?(t) = (len(t) > sign-at(t, 0)) && (digits-end(t, sign-at(t, 0)) == len(t));
   def parse-int(text) {
    let t = trim(text);
-   pr-int?(t) ? (pr-neg?(t) ? str_to_int(t) : str_to_int(pr-unsigned(t))) : nothing();
+   int-shape?(t) ? str_to_int(unsigned(t)) : nothing();
   }
 
-  // ---- float: [sign] digits [. digits] [e|E [sign] digits] -----------------------
-  def pr-frac-end(s, i) = (i < len(s)) && (str_byte_at(s, i) == 46) ? pr-digits-end(s, i + 1) : i;
-  def pr-exp-digits(s, i) {
-   let j = (i < len(s)) && ((str_byte_at(s, i) == 45) || (str_byte_at(s, i) == 43)) ? i + 1 : i;
-   let k = pr-digits-end(s, j);
-   k > j ? k : i - 1;
+  // ---- float: [sign] digits [. digits] [e|E [sign] digits] ------------------------------
+  def frac-end(s, i) = char_at(s, i) == "." ? digits-end(s, i + 1) : i;
+  def exp-end(s, i) = match char_at(s, i) { "e" | "E" => exp-digits-end(s, i + 1), _ => i };
+  // an exponent with no digits ends nowhere: -1 is past every length
+  def exp-digits-end(s, j) {
+   let k = digits-end(s, j + sign-at(s, j));
+   k > j + sign-at(s, j) ? k : -1;
   }
-  def pr-exp-end(s, i) = (i < len(s)) && ((str_byte_at(s, i) == 101) || (str_byte_at(s, i) == 69)) ? pr-exp-digits(s, i + 1) : i;
-  def pr-float-end(s) = pr-exp-end(s, pr-frac-end(s, pr-digits-end(s, pr-sign-end(s))));
-  def pr-float?(t) = (pr-digits-end(t, pr-sign-end(t)) > pr-sign-end(t)) && (pr-float-end(t) == len(t));
+  def float-end(s) = exp-end(s, frac-end(s, digits-end(s, sign-at(s, 0))));
+  def float-shape?(t) = (digits-end(t, sign-at(t, 0)) > sign-at(t, 0)) && (float-end(t) == len(t));
   def parse-float(text) {
    let t = trim(text);
-   pr-float?(t) ? str_to_float(t) : nothing();
+   float-shape?(t) ? str_to_float(t) : nothing();
   }
 
-  // ---- number and bool ---------------------------------------------------------
-  def parse-number(text) {
-   let t = trim(text);
-   pr-int?(t) ? parse-int(t) : parse-float(t);
-  }
-  def parse-bool(text) {
-   let t = trim(text);
-   ((String) t == "true") || ((String) t == "True") || ((String) t == "TRUE") ? 1 : ((String) t == "false") || ((String) t == "False") || ((String) t == "FALSE") ? 0 : nothing();
-  }
-  def pr-nothing?(t) = ((String) t == "nothing") || ((String) t == "null");
+  // ---- number and bool -------------------------------------------------------------------
+  def parse-number(text) = parse-int(text) ?? parse-float(text);
+  def parse-bool(text) = match trim(text) { "true" | "True" | "TRUE" => 1, "false" | "False" | "FALSE" => 0, _ => nothing() };
+  def nothing-word?(t) = match t { "nothing" | "null" => true, _ => false };
 
-  // ---- a float written so it reads back a float, and the join of a list of texts ------
-  def pr-float-text(v) {
+  // ---- a float written so it reads back a float -------------------------------------------
+  def float-text(v) {
    let t = value_str(v);
-   (str_find(t, ".", 0) >= 0) || (str_find(t, "e", 0) >= 0) || (str_find(t, "E", 0) >= 0) || (str_find(t, "n", 0) >= 0) ? t : (t ++ ".0");
+   [".", "e", "E", "n"] |> any?(mark => str_find(t, mark, 0) >= 0) ? t : (t ++ ".0");
   }
-  def pr-join(xs, sep) = nil?(xs) ? "" : (nil?(xs[1:]) ? xs[0] : (xs[0] ++ sep ++ pr-join(xs[1:], sep)));
 
-  // ---- between the scalar kinds ------------------------------------------------------
-  def pr-as-int(v) = (String) value_kind(v) == "int" ? v : ((String) value_kind(v) == "float" ? float_to_int(v) : ((String) value_kind(v) == "string" ? parse-int(v) : nothing()));
-  def pr-as-float(v) = (String) value_kind(v) == "float" ? v : ((String) value_kind(v) == "int" ? v + 0.0 : ((String) value_kind(v) == "string" ? parse-float(v) : nothing()));
-  def pr-as-bool(v) = (String) value_kind(v) == "int" ? ((v != 0) ? 1 : 0) : ((String) value_kind(v) == "float" ? ((v != 0.0) ? 1 : 0) : ((String) value_kind(v) == "string" ? parse-bool(v) : nothing()));
+  // ---- between the scalar kinds ------------------------------------------------------------
+  def as-int(v) = match value_kind(v) { "int" => v, "float" => float_to_int(v), "string" => parse-int(v), _ => nothing() };
+  def as-float(v) = match value_kind(v) { "float" => v, "int" => v + 0.0, "string" => parse-float(v), _ => nothing() };
+  def as-bool(v) = match value_kind(v) { "int" => v != 0 ? 1 : 0, "float" => v != 0.0 ? 1 : 0, "string" => parse-bool(v), _ => nothing() };
  }
  0;
 }
