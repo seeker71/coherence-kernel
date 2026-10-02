@@ -6,6 +6,7 @@ import form-stdlib/native-llama-voice.bml;
 import form-stdlib/bml/form-token-grammar.bml;
 import form-stdlib/role-prompts.bml;
 import form-stdlib/bml/local-run.bml;
+import form-stdlib/bml/model-admission.bml;
 section [form.bml] {
  class FormCliNativeVoice {
   def fcnv-default-model() = mr-name(mr-for-role("answer"));
@@ -32,6 +33,7 @@ section [form.bml] {
    else if (((String) path == "") || (!mr-file?(path))) then fcnv-none("unavailable",path,"registry-model-artifact-absent")
    else {
     let session = fcms-open-with-profile(path,packet,context,fcnv-profile());
+    let loaded = adm-loaded();
     let generated = ftg-generate(session,limit);
     let released = fcms-release-ok?(fcms-generation-session(generated));
     fcnv-read(generated,released,path);
@@ -57,6 +59,7 @@ section [form.bml] {
   // follows a refusal is then the first inference of the walk, not a second.
   def fcnv-lora-spoken(base,adapter,packet,limit) {
    let session = nlg-open-at(base,adapter,"");
+   let loaded = adm-loaded();
    let promptIds = len(nlt-chat(session[1],packet));
    let slice = nlg-chunk(session[0],promptIds,0);
    if (slice <= 0) then fcnv-lora-declined(base,adapter,promptIds,nlg-close(session)) else fcnv-lora-spoken-at(base,adapter,packet,limit,session,promptIds);
@@ -76,8 +79,17 @@ section [form.bml] {
   }
   def fcnv-lane(request) = if json-object-has?(request,"lane") then json-string-value(json-object-get(request,"lane")) else "";
   def fcnv-adapter(request) = if json-object-has?(request,"adapter") then json-string-value(json-object-get(request,"adapter")) else fcnv-adapter-default();
-  // Every ask is recorded where it is made (local-run.bml); the result is the voice's, unchanged.
-  def fcnv-ask(packet,request) = fcnv-recorded(fcnv-ask-run(packet,request));
+  // Every ask queues for its weights (model-admission.bml: loads are admitted oldest first when the OS has headroom, the
+  // weights another process already maps cost nothing again, and the slot frees when the open completes so decode runs
+  // alongside the next load) and is recorded where it is made (local-run.bml); the result is the voice's, unchanged. An
+  // ask not admitted within admission_wait_ms (default ten minutes) answers unavailable and names why.
+  def fcnv-model-path(request) = if ((String) fcnv-lane(request) == "lora") then nlg-base() else mr-path(mr-find(if json-object-has?(request,"model") then json-string-value(json-object-get(request,"model")) else fcnv-default-model()));
+  def fcnv-ask(packet,request) = fcnv-held(packet,request,adm-admit("fcnv-ask",fcnv-model-path(request),fcnv-number(request,"admission_wait_ms",600000)));
+  def fcnv-held(packet,request,claim) = if (claim[0] == 1) then fcnv-ask-held(packet,request) else fcnv-recorded(fcnv-none("unavailable",fcnv-model-path(request),("model-queued: " ++ claim[1])));
+  def fcnv-ask-held(packet,request) {
+   defer adm-release();
+   fcnv-recorded(fcnv-ask-run(packet,request));
+  }
   def fcnv-recorded(result) {
    let kept = local-run-record(result);
    result;
