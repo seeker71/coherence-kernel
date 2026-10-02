@@ -11,7 +11,8 @@
 // A row carries prompt (the question) and completion (the first control, the bytes a voice
 // authors); observation text is Form's and is kept apart in observations and in stream, the
 // same-KV shape a voice sees (control, then the injected observation, then the answer). One
-// case in eight of each family is marked split=heldout.
+// case in eight of each family is marked split=heldout, except a case whose question a train row also
+// asks (that row trains).
 //
 // Run from the repository root:  print -r -- write | ./fkwu form/form-stdlib/bml/form-token-traces.bml
 // Without "write" on stdin the module only defines its functions.
@@ -19,7 +20,12 @@ import form-stdlib/bml/form-token-grammar.bml;
 section [form.bml] {
  class FormTokenTraces {
   def ftr-corpus() = "learn/form-token-traces.jsonl";
-  def ftr-split(i) = (i % 8) == 7 ? "heldout" : "train";
+  // The eighth row of each family is held out, unless a row that trains asks the same question: a
+  // held-out question that a train row also asks is taught under another id, so that row trains
+  // (it stays in the corpus; nothing is dropped). `trained` is the questions of the rows in a train
+  // slot over every family (ftr-trained-questions).
+  def ftr-held-slot?(i) = (i % 8) == 7;
+  def ftr-split(i, question, trained) = ftr-held-slot?(i) && !any?(q => q == question, trained) ? "heldout" : "train";
   def ftr-next(seed) = ((seed * 1103515245) + 12345) % 2147483648;
   def ftr-pick(seed, lo, hi) = lo + (ftr-next(seed) % ((hi - lo) + 1));
   def ftr-nums(seed, k, lo, hi) = k <= 0 ? [] : cons(ftr-pick(seed, lo, hi), ftr-nums(ftr-next(seed), k - 1, lo, hi));
@@ -54,15 +60,20 @@ section [form.bml] {
   }
   def ftr-stream(controls, obs, answer) = nil?(controls) ? answer : controls[0] ++ byte_to_str(10) ++ ftg-observation(obs[0]) ++ byte_to_str(10) ++ ftr-stream(controls[1:], obs[1:], answer);
   def ftr-strings(xs) = json-node-array(map(x => json-node-string(x), xs));
-  def ftr-row(c, run, answer, i) = json-node-object([json-node-pair("id", json-node-string("ftr-" ++ c[0] ++ "-" ++ i.str())), json-node-pair("family", json-node-string(c[0])), json-node-pair("verb", json-node-string(run[0][0])), json-node-pair("verbs", ftr-strings(run[0])), json-node-pair("split", json-node-string(ftr-split(i))), json-node-pair("question", json-node-string(c[1])), json-node-pair("controls", ftr-strings(run[1])), json-node-pair("observations", ftr-strings(map(r => ftg-observation(r), run[2]))), json-node-pair("answer", json-node-string(answer)), json-node-pair("prompt", json-node-string(c[1])), json-node-pair("completion", json-node-string(run[1][0])), json-node-pair("stream", json-node-string(ftr-stream(run[1], run[2], answer))), json-node-pair("verified", json-node-int(1)), json-node-pair("replayed", json-node-int(1)), json-node-pair("rented_tokens", json-node-int(0))]);
-  // [rows, rejected] for one family's cases, numbered from 0
-  def ftr-family(cases) = ftr-family-at(cases, 0, [], 0);
-  def ftr-family-at(cases, i, rows, rejected) {
-   if nil?(cases) then [reverse(rows), rejected] else {
+  def ftr-row(c, run, answer, i, split) = json-node-object([json-node-pair("id", json-node-string("ftr-" ++ c[0] ++ "-" ++ i.str())), json-node-pair("family", json-node-string(c[0])), json-node-pair("verb", json-node-string(run[0][0])), json-node-pair("verbs", ftr-strings(run[0])), json-node-pair("split", json-node-string(split)), json-node-pair("question", json-node-string(c[1])), json-node-pair("controls", ftr-strings(run[1])), json-node-pair("observations", ftr-strings(map(r => ftg-observation(r), run[2]))), json-node-pair("answer", json-node-string(answer)), json-node-pair("prompt", json-node-string(c[1])), json-node-pair("completion", json-node-string(run[1][0])), json-node-pair("stream", json-node-string(ftr-stream(run[1], run[2], answer))), json-node-pair("verified", json-node-int(1)), json-node-pair("replayed", json-node-int(1)), json-node-pair("rented_tokens", json-node-int(0))]);
+  // [picks, rejected] for one family's cases; a pick is [case, run, answer] for a case that verified
+  def ftr-family(cases) = ftr-family-at(cases, [], 0);
+  def ftr-family-at(cases, picks, rejected) {
+   if nil?(cases) then [reverse(picks), rejected] else {
     let v = ftr-verify(cases[0]);
-    if v[2] then ftr-family-at(cases[1:], i + 1, cons(json-emit(ftr-row(cases[0], v[0], v[1], i)), rows), rejected) else ftr-family-at(cases[1:], i, rows, rejected + 1);
+    if v[2] then ftr-family-at(cases[1:], cons([cases[0], v[0], v[1]], picks), rejected) else ftr-family-at(cases[1:], picks, rejected + 1);
    };
   }
+  // the questions of the picks that sit in a train slot, numbered from 0 within the family
+  def ftr-slot-questions(picks, i) = nil?(picks) ? [] : ftr-held-slot?(i) ? ftr-slot-questions(picks[1:], i + 1) : cons(picks[0][0][1], ftr-slot-questions(picks[1:], i + 1));
+  def ftr-trained-questions(families) = foldl((acc, picks) => append(acc, ftr-slot-questions(picks, 0)), [], families);
+  // a family's picks as written lines, numbered from 0, each with the split its question allows
+  def ftr-lines(picks, i, trained) = nil?(picks) ? [] : cons(json-emit(ftr-row(picks[0][0], picks[0][1], picks[0][2], i, ftr-split(i, picks[0][0][1], trained))), ftr-lines(picks[1:], i + 1, trained));
 
   // ── eval: arithmetic, comparison, text, lists, recursion, floats, refusals ──
   def ftr-arith(i) {
@@ -313,8 +324,15 @@ section [form.bml] {
    ["recipe-choice", map(i => ftr-recipe-choice(i), range(0, 10))],
    ["recipe-bml", map(i => ftr-recipe-bml(i), range(0, 30))]];
   // [family, written, rejected, rows]
-  def ftr-build() = map(f => ftr-built(f[0], ftr-family(f[1])), ftr-families());
-  def ftr-built(name, done) = [name, len(done[0]), done[1], done[0]];
+  def ftr-build() {
+   let done = map(f => [f[0], ftr-family(f[1])], ftr-families());
+   let trained = ftr-trained-questions(map(d => d[1][0], done));
+   map(d => ftr-built(d[0], d[1], trained), done);
+  }
+  def ftr-built(name, done, trained) {
+   let lines = ftr-lines(done[0], 0, trained);
+   [name, len(lines), done[1], lines];
+  }
   def ftr-write() {
    let built = ftr-build();
    let lines = foldl((acc, f) => append(acc, f[3]), [], built);
