@@ -44,7 +44,7 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> docs=35 claims=768 broken=0 (each broken claim named on its own line; 2026-10-02)
+./fkwu observe/door-link-health-run.bml  -> docs=35 claims=769 broken=0 (each broken claim named on its own line; 2026-10-02)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
 ./fkwu observe/band-truth-run.bml        -> bands=314 readable=146 unreadable=168 absent=0 seen=1 flaws=0, exit 0
@@ -60,15 +60,20 @@ observe/tests/belief-rewitness-band      -> 63
 learn/tests/homecoming-distillation-corpus-band -> 32767
 value-eq-arena-band 31 · import-carry-band 255 · form-cli-author-high-band 4095
 closure-lines-band 31 · sort-band 31   (the queue's two gaps, written by the local lane; 2026-10-01)
-memory-governor-band 1048575  (form/form-stdlib/bml/memory-governor.bml asks the whole machine, not one process, before a
+memory-governor-band 67108863 (form/form-stdlib/bml/memory-governor.bml asks the whole machine, not one process, before a
                                 Qwen session opens, a renewal allocates a second KV state, a walk turn begins or the planner
                                 opens its voice; the weights themselves are one physical copy in the page cache for every
                                 kernel that maps the file, measured 2026-10-02; a grant is a lease other processes see
-                                (/private/tmp/form-memory-leases/<pid>.lease, one lock, the same weights file counted once,
-                                pending bytes counted for 180 s, a dead pid's file removed), each defect planted and read below
-                                its head; observe/memory-governor-run.bml prints the reading and the live leases)
-form-cli-code-low-memory-band 511  (a running coding lane saves its checkpoint and ends with host-memory-low when the machine
-                                runs low, continues on a roomy or unreadable reading; the walk reads it as a choice point)
+                                (/private/tmp/form-memory-leases/<pid>.lease, one lock a slow holder keeps, the same weights file
+                                counted once, pending bytes counted for 180 s with a renewal's second KV state stamped on its own
+                                and given back, rows range-checked, a dead pid's file removed, an unmakeable directory guarded by
+                                one reading); each defect planted and read below its head; observe/memory-governor-run.bml prints
+                                the reading, the live leases and a lease-aware verdict)
+form-cli-code-low-memory-band 1023  (a running coding lane saves its checkpoint and ends with host-memory-low when the machine
+                                runs low, continues on a roomy or unreadable reading, and a lane that spent its turns keeps that
+                                ending; the walk reads it as a choice point)
+native-turn-ladder-band 262143 · local-flow-reading-band 32767  (a memory ending, host-memory-low or host-memory-held:*, is no
+                                tried approach and no option of the review; its checkpoint is the resume's target, with no failure text)
 host-walk-band 2147483647     (the walk's turn waits for memory within the window and a held answer takes no turn)
 form-cli-landing-band 16383   (the landing and the walk read every child's exit from `host_wait` through
                                 `host-child.bml` (`hch-run`), never from a printed mark; a red witness holds the landing)
