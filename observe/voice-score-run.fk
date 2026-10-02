@@ -1,0 +1,82 @@
+// voice-score-run.fk — hear a spoken track back and score it, entirely inside the body.
+//
+// A directory of short WAV chunks (NNNN.wav, any RIFF rate: native-wav.bml reads the RIFF and Metal
+// resamples each window to the ear's 16 kHz) is paired line by line with the text each chunk was
+// given. The native Whisper (large-v3-turbo safetensors, the registry's native-speech-stt row) is
+// opened ONCE and hears every chunk alone, the way the ear hears a window; voice-score.bml counts
+// the word and character error between the given text and the heard text.
+//
+// stdin, one value per line:  directory   chunks file   language (en pt fa id ...)   output tsv
+//
+// The tsv carries idx, word errors, words, given text, heard text, char errors, chars — the first
+// five columns are the shape perline2.py wrote, so the two read side by side. Rows are appended as
+// they are heard and a run that meets the output file again skips the rows already in it: a run the
+// host stopped is resumed, never retried blind. The summary is read back from the tsv, so it is the
+// whole file's, not only this run's.
+//
+// GPU etiquette: this opens the Metal carrier. Take .hearth/gpu.lock (mkdir) before the run and
+// rmdir it after; a refused mkdir means another client is on the device.
+//
+// preflight-exec: forbidden
+import form-stdlib/native-whisper-transcribe.bml;
+import form-stdlib/voice-score.bml;
+section [form.bml] {
+    def vsr-line() = {
+        let value = read_line();
+        nothing?(value) ? "" : trim(value);
+    };
+    def vsr-name(dir, i) = dir + ("/" + ((1000 + i).str() + ".wav"));
+    // the text of line i (0-based), "" past the end
+    def vsr-ref(text, from, i) = from >= len(text) ? "" : vsr-ref-at(text, from, i, str_find(text, vsc-nl(), from));
+    def vsr-ref-at(text, from, i, at) = at < 0 ? (i <= 0 ? substring(text, from, len(text)) : "") : i <= 0 ? substring(text, from, at) : vsr-ref(text, at + 1, i - 1);
+    def vsr-lines(text) = vsr-count-go(text, 0, 0);
+    def vsr-count-go(text, from, n) = from >= len(text) ? n : vsr-count-at(text, from, n, str_find(text, vsc-nl(), from));
+    def vsr-count-at(text, from, n, at) = at < 0 ? n + 1 : vsr-count-go(text, at + 1, n + 1);
+    // the heard text of one chunk; digital silence is not shown to the model (the ear's own rule)
+    def vsr-hear(st, decoder, language, path, seed) = {
+        let wav = nwa-open(path);
+        let level = nwa-level-state(wav);
+        let heard = (Comparable) level[1] == 0.0 ? "" : nwt-text(nwt-loop(st, decoder, wav, language, 0, [], 0, [0, 0, 0, 0], seed, "", "", "")[1]);
+        let closed = nwa-close(wav);
+        heard;
+    };
+    def vsr-clean(s) = trim(vsr-tabs(s, 0, ""));
+    def vsr-tabs(s, i, acc) = i >= len(s) ? acc : vsr-tabs(s, i + 1, acc ++ (((Comparable) str_byte_at(s, i) == 9) || ((Comparable) str_byte_at(s, i) == 10) ? " " : substring(s, i, i + 1)));
+    def vsr-walk(st, decoder, language, dir, refs, n, i, out, done, seed, heard_count) = i >= n ? heard_count : vsr-chunk(st, decoder, language, dir, refs, n, i, out, done, seed, heard_count, vsr-ref(refs, 0, i));
+    def vsr-chunk(st, decoder, language, dir, refs, n, i, out, done, seed, heard_count, given) = {
+        let skip = ((Comparable) len(trim(given)) == 0) || vsc-has?(done, i) || ((Comparable) file_size(vsr-name(dir, i)) <= 0);
+        skip ? vsr-walk(st, decoder, language, dir, refs, n, i + 1, out, done, seed, heard_count) : vsr-heard(st, decoder, language, dir, refs, n, i, out, done, seed, heard_count, given);
+    };
+    def vsr-heard(st, decoder, language, dir, refs, n, i, out, done, seed, heard_count, given) = {
+        let t0 = host_monotonic_ms();
+        let heard = vsr-clean(vsr-hear(st, decoder, language, vsr-name(dir, i), seed + i));
+        let s = vsc-score(given, heard);
+        let wrote = nwd-append(out, vsc-row-text(i, s, vsr-clean(given), heard));
+        let ms = host_monotonic_ms() - t0;
+        let shown = print_str(i.str() + " " + s[0].str() + "/" + s[1].str() + " " + ms.str() + " ms");
+        vsr-walk(st, decoder, language, dir, refs, n, i + 1, out, done, seed, heard_count + 1);
+    };
+    let dir = vsr-line();
+    let chunks = vsr-line();
+    let lang = vsr-line();
+    let out = vsr-line();
+    let refs = read_file(chunks);
+    let before = nothing?(read_file(out)) ? "" : read_file(out);
+    let done = vsc-done(before);
+    let base = nws-base();
+    let st = nws-open(base, nws-tokenizer());
+    let decoder = nwd-open();
+    let language = (Comparable) len(lang) == 0 ? -1 : nwd-language(lang, take(eng-languages(st), nwd-langs()), 0);
+    print_str("whisper " + base);
+    print_str("language " + (lang + (" chunks " + (vsr-lines(refs).str() + (" already heard " + len(done).str())))));
+    let started = host_monotonic_ms();
+    let heard_now = vsr-walk(st, decoder, language, dir, refs, vsr-lines(refs), 0, out, done, now_unix_ms() % 2147483647, 0);
+    let closed = nwd-close(decoder);
+    let model = nws-close(st);
+    let sums = vsc-sum(read_file(out));
+    let seconds = (host_monotonic_ms() - started) / 1000;
+    let retained = metal_live()[2];
+    print_str("heard " + heard_now.str() + " chunks in " + seconds.str() + " s, retained buffers " + retained.str());
+    print_str(vsc-summary(lang, sums));
+    0;
+}
