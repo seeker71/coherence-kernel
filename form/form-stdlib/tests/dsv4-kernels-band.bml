@@ -9,10 +9,10 @@
 ; ne is the envelope a 1.4e-5 per-layer tilt opens in the reference (metal_dsv4_stack_oracle.sh above cmpOra, history 8a6f123d3^, read 2026-10-03) and a kernel alone is held to the floor 3e-5
 ; (that harness holds its THIS-LAYER-ALONE gates there). Every output buffer is pre-filled with 0x5A bytes (f32 1.5e16, no value of any run) so a kernel that never ran reads as a huge nd.
 ;
-; Verdict 4095 when every claim lands:
+; Verdict 16383 when every claim lands:
 ;   1     text: every one of the ten sources starts with the pragma pair exactly, none uses `using namespace`, no kernel name repeats inside the six graph units, and the catalogue read from
-;         the sources is 97 kernels
-;   2     device: every kernel of every unit compiles through metal_pipeline (97 handles, all positive); a second open of the same sources returns the same 97 handles (compile once,
+;         the sources is 100 kernels
+;   2     device: every kernel of every unit compiles through metal_pipeline (100 handles, all positive); a second open of the same sources returns the same 100 handles (compile once,
 ;         handle kept)
 ;   4     the pragmas bite on this device: the probe kernel a*b+c on a = b = 1 + 2^-12, c = -1 reads 973078528 (the unfused word) when wrapped by dkr-wrap and 973079552 (the fma word) when the
 ;         same text is compiled without the pragma pair
@@ -32,6 +32,11 @@
 ;         from the GPU's router weights, an unrun buffer reads as the sentinel, and the gate refuses a wrong length
 ;   1024  a NaN or an infinity is a failure, never a stop: a buffer holding NaN, +Inf and -Inf words reads back (the decoder answers null for them), and dkr-nd answers the failure value 1e30 for each
 ;         form, in either side, with dkr-nd-why naming the failing stage ("non-finite GPU reading at index 0 of 4"); finite readings (the compressor's -1e30 included) are unchanged
+;   4096  the router's softplus that keeps its digits (form_dsv4_softplus_s, form_dsv4_hash_probs_s, form_dsv4_topk_probs_s: softplus(z) = max(z, 0) + log1p(exp(-|z|)), log1p an eight-term series
+;         below 0.1 and log(u) (e / (u - 1)) above): over z = -20 to +20 in steps of 0.25 against the oracle's fp64 (dfo-probs, dfo-softplus) every probability is within 2e-7 relative (read
+;         9.2e-8), every softplus within 3e-7 (1.4e-7), z = -7 and z = -9 within 1e-7 (4.5e-8, 6.6e-8), and the top-k variant's probabilities equal the hash variant's
+;   8192  the control: the restored form (form_dsv4_hash_probs, ln(1 + exp(z)) in f32) on the same sweep reads 2.7e-5 at z = -7, 1.1e-4 at z = -9, wrong by the whole value from z = -17 down
+;         (max 1.0), and at least 100 times the new form's error at -7 and -9
 ;   2048  the NaN scan: form_dsv4_nan_count counts the non-finite words of an f32 buffer by their exponent bits: a vector holding one NaN and one +Inf reads 2, a clean vector 0, the compressor's -1e30 and
 ;         the unrun 1.5e16 sentinel 0, 129,280 values (one group of 1024 threads) with one NaN at the last place 1; the argmax over a vector holding one NaN still answers an index (it skips the NaN: the
 ;         reason the scan exists); dkr-logits-clean? is true only for a counted zero, and false for a vector with a NaN and for a pipeline that was not made
@@ -67,7 +72,7 @@ section [form.bml] {
   def dkb-text() {
    let us = dkr-units();
    let names = dkr-all-names(us);
-   len(us) == 10 && dkb-all-pragma?(us) && dkb-no-using?(us) && !dkr-dup?(dkr-all-names(dkr-graph-units())) && len(names) == 97
+   len(us) == 10 && dkb-all-pragma?(us) && dkb-no-using?(us) && !dkr-dup?(dkr-all-names(dkr-graph-units())) && len(names) == 100
     && dkr-pragmas() == "#pragma clang fp reassociate(off)\n#pragma clang fp contract(off)\n";
   }
 
@@ -78,7 +83,7 @@ section [form.bml] {
   def dkb-compiled(first, second, us) {
    let a = dkb-unit-hs(first, us);
    let b = dkb-unit-hs(second, us);
-   len(a) == 97 && dkb-positive?(a) && a == b;
+   len(a) == 100 && dkb-positive?(a) && a == b;
   }
 
   // ---- 4: the contraction probe, compiled with and without the pragma pair
@@ -539,6 +544,44 @@ section [form.bml] {
     && dkr-logits-clean?(pipe, nb, 64) == false && dkr-logits-clean?(pipe, big, 129280) == false
     && dkr-logits-clean?(pipe, dkr-buf-u32(reg, base), 1000) == true && dkr-logits-clean?(0, nb, 64) == false && nothing?(dkr-nan-count(0, nb, 64));
   }
+  // ---- 4096 and 8192: the router's softplus that keeps its digits, and the old form as the control
+  // z from -20 to +20 in steps of 0.25 (161 values, -7 at index 52 and -9 at index 44), each exactly representable in f32
+  def dkb-zs(k) = k == 161 ? [] : cons((1.0 * (k - 80)) / 4.0, dkb-zs(k + 1));
+  def dkb-rel(g, r) = len(g) == 0 ? [] : cons(dkr-abs(g[0] - r[0]) / r[0], dkb-rel(g[1:], r[1:]));
+  def dkb-map-sp(zs) = len(zs) == 0 ? [] : cons(dfo-softplus(zs[0]), dkb-map-sp(zs[1:]));
+  // [old probability errors, new probability errors, new softplus errors, hash/topk variants agree] over the sweep, relative to the oracle's fp64
+  def dkb-sweep(c) {
+   let reg = dkb-g(c, "reg");
+   let z = dkb-zs(0);
+   let n = len(z);
+   let zb = dkr-buf-f32(reg, z);
+   let o1 = dkr-buf-empty(reg, n);
+   let o2 = dkr-buf-empty(reg, n);
+   let o3 = dkr-buf-empty(reg, n);
+   let o4 = dkr-buf-empty(reg, n);
+   let o5 = dkr-buf-empty(reg, n);
+   let bias = dkr-buf-f32(reg, dkb-zeros(n));
+   let e1 = dkr-go(dkb-p(c, "form_dsv4_hash_probs"), [zb, o1], [n], n);
+   let e2 = dkr-go(dkb-p(c, "form_dsv4_hash_probs_s"), [zb, o2], [n], n);
+   let e3 = dkr-go(dkb-p(c, "form_dsv4_softplus_s"), [zb, o3], [n], n);
+   let e4 = dkr-go(dkb-p(c, "form_dsv4_topk_probs_s"), [zb, bias, o4, o5], [n], n);
+   let refP = dfo-probs(z);
+   let hashS = dkr-read(o2, n);
+   [dkb-rel(dkr-read(o1, n), refP), dkb-rel(hashS, refP), dkb-rel(dkr-read(o3, n), dkb-map-sp(z)), e1 == 1 && e2 == 1 && e3 == 1 && e4 == 1 && dkr-read(o4, n) == hashS && dkr-read(o5, n) == hashS];
+  }
+  def dkb-zeros(n) = n == 0 ? [] : cons(0.0, dkb-zeros(n - 1));
+  // the new form: every probability within 2e-7 relative of the oracle's (the reading is 9.2e-8, 1.5 f32 epsilons) and every softplus within 3e-7 (1.4e-7), -7 and -9 within 1e-7 (4.5e-8, 6.6e-8)
+  def dkb-softplus-new(c) {
+   let s = dkb-sweep(c);
+   let said = print_str("  softplus sweep -20..20: new prob max " ++ dkr-maxabs(s[1]).str() ++ " softplus max " ++ dkr-maxabs(s[2]).str() ++ " z=-7 " ++ s[1][52].str() ++ " z=-9 " ++ s[1][44].str());
+   len(s[1]) == 161 && s[3] && dkr-all-finite?(s[1]) && dkr-maxabs(s[1]) < 0.0000002 && dkr-maxabs(s[2]) < 0.0000003 && s[1][52] < 0.0000001 && s[1][44] < 0.0000001;
+  }
+  // the control: the restored form (ln(1 + exp(z)) in f32) on the same sweep reads 2.7e-5 at z = -7, 1.1e-4 at z = -9 and is wrong by the whole value from z = -17 down (1 + exp(z) is 1)
+  def dkb-softplus-old(c) {
+   let s = dkb-sweep(c);
+   let said = print_str("  softplus control, the restored form: max " ++ dkr-maxabs(s[0]).str() ++ " z=-7 " ++ s[0][52].str() ++ " z=-9 " ++ s[0][44].str() ++ " z=-20 " ++ s[0][0].str());
+   s[0][52] > 0.00001 && s[0][44] > 0.0001 && dkr-maxabs(s[0]) > 0.5 && s[0][52] > 100.0 * s[1][52] && s[0][44] > 100.0 * s[1][44];
+  }
   def dkb-transposed(comb) = [comb[0], comb[4], comb[8], comb[12], comb[1], comb[5], comb[9], comb[13], comb[2], comb[6], comb[10], comb[14], comb[3], comb[7], comb[11], comb[15]];
   def dkb-falsifiers(c) {
    let resid = dkb-x(41, 1024, 2.0);
@@ -578,9 +621,11 @@ section [form.bml] {
  let c512 = dkb-bit(try dkb-falsifiers(c) catch false, 512);
  let c1024 = dkb-bit(try dkb-nonfinite(c) catch false, 1024);
  let c2048 = dkb-bit(try dkb-nan-scan(c) catch false, 2048);
+ let c4096 = dkb-bit(try dkb-softplus-new(c) catch false, 4096);
+ let c8192 = dkb-bit(try dkb-softplus-old(c) catch false, 8192);
  let leftBufs = dkr-reg-free(reg);
  let leftViews = nothing?(views) ? [] : dvb-close(views);
  let removed = host_path_remove(path);
- print_str("dsv4-kernels-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " wrote " ++ wrote.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048;
+ print_str("dsv4-kernels-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " " ++ c4096.str() ++ " " ++ c8192.str() ++ " wrote " ++ wrote.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048 + c4096 + c8192;
 }
