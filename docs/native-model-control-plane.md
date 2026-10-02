@@ -192,12 +192,34 @@ DeepSeek server and the page cache could each pass their own check and together 
   process's pages): a request for `need` bytes is granted when wired + need stays within 60 percent of the
   machine's memory, available - need stays above the larger of 8 GiB and a tenth of it, and the compressor holds at
   most a quarter of it; a reading that did not arrive grants nothing. `observe/memory-governor-run.bml` prints the
-  machine's reading and, given `{"need_gib":N,"who":"..."}`, the verdict (band: `memory-governor-band` 1023). It is
-  asked before a Qwen session opens its weights (`fcms-open-context`), before a renewal allocates its second KV
-  state (`fcmr-prepare`), before a walk turn begins (`hw-ready`, which waits no later than the window's last
-  moment a turn could still start) and before the planner opens its voice (`lpr-ask`). A held answer is a choice
-  point: the session opens nothing and names `host-memory-held`, the renewal leaves the owner as it was and the lane
-  ends with a reason through its checkpoint, the walk takes no turn.
+  machine's reading, the live leases and, given `{"need_gib":N,"who":"..."}`, the verdict (band:
+  `memory-governor-band` 1048575). It is asked before a Qwen session opens its weights (`fcms-open-context`), before a
+  renewal allocates its second KV state (`fcmr-prepare`), before a walk turn begins (`hw-ready`, which waits no later
+  than the window's last moment a turn could still start) and before the planner opens its voice (`lpr-ask`). A held
+  answer is a choice point: the session opens nothing and names `host-memory-held`, the renewal leaves the owner as it
+  was and the lane ends with a reason through its checkpoint, the walk takes no turn.
+- **Leases: a promise another process can see before the pages show in the reading.** One reading is not enough (two
+  processes that start together can both see room), so a grant is a lease: `/private/tmp/form-memory-leases/<pid>.lease`,
+  one JSON line `{pid, who, key, shared, private, granted_unix_ms}`. `key` names the shared thing (the model file's
+  path, `""` for none), `shared` its bytes (the weights' file size), `private` the bytes only this process owns (KV
+  state, scratch, margin). `mg-lease` reads the leases and the machine under one lock (`dir-lock.bml`: a directory
+  only one maker makes, its owner's pid inside, a dead or overlong holder taken over, released in a deferred step so a
+  stop releases it too), removes the file of every dead pid, and judges `private` + `shared` (unless a live lease already
+  holds the same key: the weights are one physical copy in the page cache) + the pending bytes of every other lease
+  granted less than 180 s ago through the same policy. Granted writes the lease; held writes nothing and names why.
+  A process's lease is its whole promise (the same key restates it, key `""` adds a renewal's second KV state to it,
+  `mg-release` removes it where the session closes). Doors that open models take leases: `fcms-open-context` (key = the
+  model path, released at the session's close or when the open gives up), `fcmr-prepare`, `lpr-ask`. The walk's own
+  pre-check (`hw-ready`) stays a bare wait: its child lane takes the real lease in its own process. Proven
+  model-free in `memory-governor-band` with each defect planted (no lock, a key counted twice, pending ignored, a dead
+  lease never removed, a lock never released on a stop) and read below its head.
+- **A lane that already holds memory gives it back.** `fcac-loop` (`form-cli-code-live.bml`) is entered once at each
+  turn boundary and asks `mg-low?` of the machine (available below half the reserve, wired above 80 percent, or the
+  compressor above 40 percent): a low reading saves the checkpoint and ends the lane through `fcac-finish` with the
+  reason `host-memory-low`, its session released at the settle, so a later walk resumes the checkpoint and no model
+  token is spent. A roomy reading, or one that did not arrive, continues unchanged. The walk reads that ending as a
+  choice point (`hw-memory-low?`): not idle, not an unknown spend, no option spent (`nt-memory-low?`), its wall no
+  option's measure, and the next turn's `hw-ready` waits for the machine. Band: `form-cli-code-low-memory-band` 511.
 
 ## Present floor and direction
 
