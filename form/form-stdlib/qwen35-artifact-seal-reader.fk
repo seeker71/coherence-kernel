@@ -29,11 +29,42 @@ section [form.bml] {
         let fields = qaf-seal-fields(path);
         (Comparable) file_size(path) == fields[0] && (Comparable) len(fields[1]) == 64 ? 1 : 0;
     };
-    def qaf-seal-verdict(path) = !((Comparable) qaf-seal-valid?(path) == 1) ? 0 : {
-        let fields = qaf-seal-fields(path);
-        let digest = saj-file-digest(path, fields[0]);
-        (Comparable) len(digest) == 0 ? 2 : (String) qaf-string-hex(digest) == fields[1] ? 1 : 0;
+    // A full pass hashes the whole artifact (149 s for the 27B, stamped model-session-seal-begin to -complete, and it was
+    // paid again at every open by every process). The witness stays a full pass; what is spared is repeating it for a file
+    // that has not moved. After a full pass that agreed with the seal, the file's identity as the OS states it (size,
+    // mtime, inode), the seal digest and the time are kept beside the model (<model>.form-seal-verified). The next open
+    // trusts that note only for the same identity, the same seal digest and within a day; any change, or the day passing,
+    // is a full pass again. A note is never made from anything but a full pass that read 1.
+    def qaf-verified-path-for(path) = (path + ".form-seal-verified");
+    def qaf-verified-prefix() = "qaf-verified1:";
+    def qaf-verified-ttl-s() = 86400;
+    def qaf-chomp(text) = (Comparable) len(text) > 0 && (String) substring(text, len(text) - 1, len(text)) == "\n" ? substring(text, 0, len(text) - 1) : text;
+    def qaf-identity(path) = qaf-chomp(host-exec(("stat -f '%z:%m:%i' '" + (path + "'")), ""));
+    def qaf-verified-line(path, hex, now-s) = (qaf-verified-prefix() + (qaf-identity(path) + (":" + (int_to_str(now-s) + (":" + hex)))));
+    def qaf-verified-tail-fresh?(tail, hex, now-s) = {
+        let colon = str_find(tail, ":", 0);
+        let at = colon < 0 ? -1 : str_to_int(substring(tail, 0, colon));
+        colon < 0 ? false : ((String) substring(tail, colon + 1, len(tail)) == hex) && ((now-s - at) >= 0) && ((now-s - at) < qaf-verified-ttl-s());
     };
+    def qaf-verified-fresh?(path, hex, now-s) = {
+        let text = (Comparable) fs-exists?(qaf-verified-path-for(path)) == 1 ? qaf-chomp(fs-read-text(qaf-verified-path-for(path))) : "";
+        let head = (qaf-verified-prefix() + (qaf-identity(path) + ":"));
+        (Comparable) len(text) > len(head) && (String) substring(text, 0, len(head)) == head ? qaf-verified-tail-fresh?(substring(text, len(head), len(text)), hex, now-s) : false;
+    };
+    def qaf-verified-keep(path, hex, now-s, verdict) = {
+        let kept = write_file_text(qaf-verified-path-for(path), qaf-verified-line(path, hex, now-s));
+        verdict;
+    };
+    def qaf-seal-verdict-full(path, fields, now-s) = {
+        let digest = saj-file-digest(path, fields[0]);
+        let verdict = (Comparable) len(digest) == 0 ? 2 : (String) qaf-string-hex(digest) == fields[1] ? 1 : 0;
+        (Comparable) verdict == 1 ? qaf-verified-keep(path, fields[1], now-s, verdict) : verdict;
+    };
+    def qaf-seal-verdict-at(path, now-s) = !((Comparable) qaf-seal-valid?(path) == 1) ? 0 : {
+        let fields = qaf-seal-fields(path);
+        qaf-verified-fresh?(path, fields[1], now-s) ? 1 : qaf-seal-verdict-full(path, fields, now-s);
+    };
+    def qaf-seal-verdict(path) = qaf-seal-verdict-at(path, now_unix_ms() / 1000);
     def qaf-verify-sealed-file(path) = (Comparable) qaf-seal-verdict(path) == 1 ? 1 : 0;
     0;
 }
