@@ -12,6 +12,7 @@ import form-stdlib/sha256.fk;
 import form-stdlib/hex.fk;
 import form-stdlib/fkwu-op-arity.fk;
 import form-stdlib/source-compiler.fk;
+import form-stdlib/bml/source-abstraction.bml;
 section [form.bml] {
     class FormAgentTools {
         field FatByteTab = 9;
@@ -34,8 +35,9 @@ section [form.bml] {
         field FatAwkLastField = 9;
         def fat-fk-suffix() = ".fk";
         def fat-bml-open() = "section [";
-        def fat-tools() = append(tc-agent-tool-names(), ["balance", "arity", "bml-syntax"]);
+        def fat-tools() = append(tc-agent-tool-names(), ["balance", "arity", "bml-syntax", "bml-api"]);
         def fat-tool?(name) = fat-has(fat-tools(), name);
+        def fat-readonly(name) = fat-tool?(name) && !fat-has(["edit","write"],name);
         def fat-input(docs, paths, input) = if nil?(paths) then [input, ""] else fat-input-files(docs, paths, "");
         def fat-input-files(docs, paths, out) = if nil?(paths) then [out, ""] else fat-input-doc(docs, paths, out, fat-find-doc(docs, paths[0]));
         def fat-input-doc(docs, paths, out, doc) = if nil?(doc) then ["", "resident-document-not-found"] else fat-input-files(docs, paths[1:], ((String) out + doc[2]));
@@ -59,6 +61,7 @@ section [form.bml] {
             else if ((String) tool == "balance") then fat-balance(docs, args, input)
             else if ((String) tool == "arity") then fat-arity(docs, args, input)
             else if ((String) tool == "bml-syntax") then fat-bml-syntax(docs, args, input)
+            else if ((String) tool == "bml-api") then fat-bml-api(docs,args,input)
             else fat-text-options(docs, tool, args, input, []);
         def fat-command(docs, command, input) = if (!fat-text?(command)) then fat-fail("invalid-command-value", docs) else if (len(command) > FatMaxBytes()) then fat-fail("command-limit", docs) else fat-command-argv(docs, input, fat-argv(command));
         def fat-command-argv(docs, input, parsed) = if (!((String) parsed[1] == "")) then fat-fail(parsed[1], docs) else if nil?(parsed[0]) then fat-fail("missing-tool", docs) else fat-call(docs, parsed[0][0], parsed[0][1:], input);
@@ -95,6 +98,39 @@ section [form.bml] {
             let errors=drop(max2(0,len(roots) - (kernel_stat(13) - start)),roots) |> filter(n => node_eq(node_category(n),fsc-compiler-error-cat));
             fat-fail(nil?(errors) ? "bml-syntax-refused; original documents preserved" : "bml-syntax-refused: " + node_value(node_children(errors[-1])[0]),docs);
         }
+        // Current declarations answer library questions; the caller's execution
+        // checks establish whether its program imports and uses them correctly.
+        def fat-api-paths() = ["form/form-stdlib/core.fk","form/form-stdlib/line-grammar.fk","form/form-stdlib/bml/string-join.bml"];
+        def fat-api-header(text,row) {
+            let prefix=str-join-with(split-on(text,"\n")[0:row[2] - 1],"\n");
+            let cursor=cur-advance(cursor-str(text),len(prefix) + (row[2] > 1 ? 1 : 0));
+            let token=sa-next(cursor,true); let raw=token[0]=="(";
+            let declared=raw ? sa-next(token[2],true) : token;
+            let named=sa-next(declared[2],raw); let header=sa-header(named[2],raw,[]);
+            nothing?(header) || named[0]!=row[0] ? nothing() : substring(text,token[1],cur-pos(header[0]));
+        }
+        def fat-api-source(path,text,names,prior,current) = nothing?(text) ? [] : {
+            let cached=record_has(prior,path) ? record_get(prior,path) : [];
+            let reading=!nil?(cached) && cached[0]==text ? cached : [text,hex-encode(sha256-stream-string(text)),sa-defs(text,cursor-str(text),true,"",1,[])];
+            record_set(current,path,reading);
+            reading[2] |> filter(row => fat-has(names,row[0])) |> map(row => [row[0],path,row[2],reading[1],fat-api-header(text,row)]) |> filter(row => !nothing?(row[4]));
+        };
+        def fat-api-declaration(row) = json-node-object([json-node-pair("path",json-node-string(row[1])),json-node-pair("line",json-node-int(row[2])),json-node-pair("source_sha256",json-node-string(row[3])),json-node-pair("declaration",json-node-string(row[4]))]);
+        def fat-bml-api(docs,args,input) = nil?(args) || input != "" ? fat-fail("bml-api-needs-symbol-arguments-and-empty-input",docs) : {
+            let started=host_monotonic_ms();
+            let prior=record_has(fat-api-held,"current") ? record_get(fat-api-held,"current") : record_new(0);
+            let current=record_new(0);
+            let providers=fat-api-paths() |> map(path => [path,read_file(path)]);
+            let held=docs |> map(doc => fat-api-source(doc[1],doc[2],args,prior,current));
+            let floor=providers |> map(source => fat-api-source(source[0],source[1],args,prior,current));
+            record_set(fat-api-held,"current",current);
+            let rows=foldl((all,one) => append(all,one),[],append(held,floor));
+            let symbols=args |> map(name => json-node-object([json-node-pair("symbol",json-node-string(name)),json-node-pair("declarations",json-node-array(rows |> filter(row => row[0]==name) |> map(fat-api-declaration)))]));
+            let missing=providers |> filter(source => nothing?(source[1])) |> map(source => json-node-string(source[0]));
+            let result=json-node-object([json-node-pair("scope",json-node-string("current resident and floor-library declarations; bindings and behavior require execution")),json-node-pair("symbols",json-node-array(symbols)),json-node-pair("unavailable_sources",json-node-array(missing))]);
+            fb_record(intern_node(intern_trivial_string("bml-api"),[intern_trivial_int(host_monotonic_ms() - started),intern_trivial_int(len(rows)),intern_trivial_int(len(providers))]),"form-agent-tools",0);
+            append(fat-result(0,json-emit(result) + "\n","",docs)[0:5],[len(providers)]);
+        };
         def fat-ar-text(t) = fat-ar-lines(t, reverse(fat-ar-forms(t, 0, len(t), [])[1]));
         def fat-ar-lines(t, found) = if nil?(found) then "" else ((String) fat-ar-line-of(t, found[0]) + fat-ar-lines(t, found[1:]));
         def fat-ar-line-of(t, f) = ("line " + (fat-ar-line(t, 0, f[0], 1).str() + (": (" + (f[1] + (" ...) takes " + (f[2].str() + (", given " + (f[3].str() + "\n"))))))));
@@ -256,4 +292,5 @@ section [form.bml] {
         def fat-jq-parsed(docs, options, ast, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else fat-jq-evaluated(docs, options, faj-each(ast, if far-get(options, "s", 0) then [faj-array(r[0])] else r[0], far-get(options, "vars", [])));
         def fat-jq-evaluated(docs, options, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else fat-result(if far-get(options, "e", 0) then if nil?(r[0]) then 4 else if faj-truth(fat-reverse(r[0])[0]) then 0 else 1 else 0, faj-render(r[0], far-get(options, "r", 0)), "", docs);
     }
+    let fat-api-held=record_new(0);
 }

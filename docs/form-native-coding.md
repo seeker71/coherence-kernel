@@ -105,6 +105,19 @@ publishes its cause through the live framebuffer and returns the current attempt
 compiler diagnostic to the tool caller. This checks syntax; imported bindings
 and behavior still need the original execution checks.
 
+`bml-api` with `arguments:[symbol names]` and empty input returns exact current
+declaration headers, source paths, lines and hashes from resident documents and
+the core, line-grammar and string-join libraries. It supplies names and argument
+order without asking a model. Empty declarations state this lookup's coverage;
+they do not establish universal absence. The three local library reads are
+reported as crossings. Documents stay unchanged; no model or process is opened.
+Imports and behavior still need execution evidence. Tool availability and coding
+permissions derive from the same native catalog.
+Declaration scans and hashes are reused only for byte-identical source in the
+current process. Changed source replaces its reading; sources outside the current
+resident catalog and floor libraries leave the memo. Each lookup publishes
+its elapsed time, declaration count and file crossings into the live framebuffer.
+
 Word checks are exactly `{kind:"word-range",path,minimum,maximum}` for a document, or `field` instead of `path` for a top-level report string. Inclusive nonnegative bounds use the shared ASCII-whitespace counter, including headings. Missing text differs from empty text. Failure supplies observed count and repair direction; count agreement does not establish content quality. Report checks take the report on stdin, have no document access and accept no `input` override. The additional `{kind:"provider-usage-sequences"}` report assertion takes no other field; `form/form-stdlib/bml/form-cli-code-request.bml` (`fcaq-replay-check`) owns its meaning.
 
 ### Direct implementation entry
@@ -114,6 +127,17 @@ Word checks are exactly `{kind:"word-range",path,minimum,maximum}` for a documen
 ### Resident instruction context
 
 Every admission receives the shared Form meanings in `bml/form-cli-qwen-meaning.bml`. BML coding also receives `form-lift.bml` guidance and the available repair instructions. A later role instruction may reference exact text already delivered in that resident context; incomplete observations never mark it delivered. Renewal/resume supplies the current instructions again. Delivery establishes context availability, not that the generated work followed it.
+
+Coding retains the latest native source verification with its exact document
+identities. Admission reports whether those identities still match the current
+candidate. A source change leaves the older reading attributed to its own
+version. Caller feedback remains earlier evidence: a repaired condition must be
+checked against current source before it is reported as still present. Passing
+assertions and a review finding retain their separate scopes.
+Resuming completed work reruns the caller's checks and retains that fresh
+reading, including the exact cause when execution needs repair.
+Its checkpoint and exact lesson share one payload digest; each durable envelope
+keeps its own kind and verified write.
 
 ### Resident context and source queries
 
@@ -379,6 +403,16 @@ Coding completion requires a changed candidate and passing caller checks. Review
 A definition check is `{kind:"definition",path,function,cases:[[input,expected],...]}` for one unary integer function in the existing definition grammar, for example `module calc { fn bump(x) = add(x,1); }`. It admits pure arithmetic/comparisons without recursion, division, unknown bindings or effects. It executes each case as native nodes; it is not a general repository compiler.
 
 Embedding callers can use `fcac-run(model,goal,documents,writable,[checker,contract],context,turns)`. The callback receives `(contract,candidateDocuments)` and returns `[passed,observationString]`. `fcac-review` takes `[reportChecker,reportContract,sourceChecker,sourceContract]`; the report callback receives `(contract,[documents,report])`. Source-only `verify` needs the optional last pair. These lower-level calls are fresh/unmanaged; the JSON door supplies continuity. Callback behavior and effects belong to the caller.
+
+A native application can retain the managed request flow through
+`fcaq-managed-with(request,residentDocuments,[checker,contract])` after validating
+its request and admitting its documents. It shares checkpoint preparation,
+feedback, model choice, local repair, learning and release with the JSON door.
+The application supplies the callback; model output cannot select it. The
+callback preserves the original assertions and scope while observing the actual
+operation. Its failure enters the same repair movement at `verify`, implementation
+completion and final submission. Executable snapshots and their effects belong
+to that caller; an observed candidate does not publish the source files.
 
 ### Attach native repair to the review loop
 
