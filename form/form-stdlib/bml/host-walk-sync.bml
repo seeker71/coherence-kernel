@@ -1,0 +1,129 @@
+// host-walk-sync.bml — the branch follows main; the kernel and the Metal carrier are rebuilt when their sources are newer.
+//
+// It follows main: hw-sync rebases the branch onto origin/main with its own rows set aside and returned
+// (--autostash), and realigns the branch on origin. Only rows that merge as a union are set aside (a modified
+// receipts/*.jsonl main still holds, read as text), so nothing comes back with an edge to conflict on; any other
+// change in the tree is named "dirty:" with the tree left as it stands, never stashed onto the stash stack this
+// checkout shares with every worktree of the repo. A sync names "conflict:" only when git names an unmerged file (a
+// replay that conflicts, or rows that came back unmerged), and such a sync takes no turn (hw-held-turns): a tree
+// main has left behind would only grow the conflict. A "dirty:" sync leaves no unmerged path, and the turns go on
+// over the tree as it stands; the walk's log names what holds it from main. hw-sync is a flow of git steps whose
+// rows Form reads (hw-sync-at). hw-build and hw-carrier rebuild the kernel and the Metal carrier into fresh inodes
+// when their sources are newer.
+// What it needs: host-walk-text.bml (hw-line, hw-rc-text, hw-has?, hw-ends?) and host-child.bml (every git step is
+// an argv child with its exit read from the host).
+import form-stdlib/bml/host-walk-text.bml;
+import form-stdlib/bml/host-child.bml;
+section [form.bml] {
+ class HostWalkSync {
+  // The branch follows main with the tree's own rows set aside and returned. Only rows that merge as a union are
+  // set aside: a modification of a file git merges as a union (.gitattributes: receipts/*.jsonl), which main still
+  // holds as a blob and git reads as text. Anything else the tree holds (a source, a row in a ledger main deleted
+  // or renamed, a ledger git reads as binary) comes back from a stash with an edge to conflict on, so it is named
+  // "dirty:" and the tree stays as it stands, never stashed. "conflict:" names unmerged files only: a replay that
+  // conflicts (the rebase is aborted), or rows that came back unmerged after a rebase git counted done, read once
+  // more after it. A rebase refused for another reason names "dirty:" and the status.
+  //
+  // The flow is git steps by argv, each answering its exit from the host, and Form reads their rows (every step's
+  // full output stays under <io>/sync-<step>.out). The answer is the text a sync has always said: "" or one line
+  // ("dirty: <rows>", "conflict: <files>", "conflict: <files>, as the set-aside rows returned"), then "sync=<exit>".
+  // A step whose child was never born reads "sync=nothing". Rows come from `status --porcelain -z`, so a name is
+  // never quoted and a rename (R or C) carries its second field.
+  def hw-sync-at(io, dir, branch) = hw-sync-said(hw-sync-fetch(io, dir, branch));
+  def hw-sync-in(dir, branch) = hw-sync-at(hch-dir(), dir, branch);
+  def hw-sync(branch) = hw-line(hw-sync-in(".", branch));
+  def hw-sync-said(r) = (String) r[0] == "" ? "sync=" ++ hw-rc-text(r[1]) : r[0] ++ "\nsync=" ++ hw-rc-text(r[1]);
+  // every step answers [lines, exit]; a step that fails ends the flow with its own exit
+  def hw-sync-fetch(io, dir, branch) {
+   let fetched = hch-git-in(io, dir, "sync-fetch", ["fetch", "-q", "origin", "main", branch]);
+   hch-ok?(fetched) ? hw-sync-tree(io, dir, branch) : ["", fetched[0]];
+  }
+  def hw-sync-tree(io, dir, branch) {
+   let rows = hw-porcelain(io, dir, "sync-status", ["status", "--porcelain", "-z", "--untracked-files=no"]);
+   let kept = filter(row => !hw-aside?(io, dir, row), rows);
+   nil?(kept) ? hw-sync-rebase(io, dir, branch) : [hw-dirty-line(hw-rows-text(kept)), 1];
+  }
+  def hw-sync-rebase(io, dir, branch) {
+   let rebased = hch-git-in(io, dir, "sync-rebase", ["rebase", "-q", "--autostash", "origin/main"]);
+   hch-ok?(rebased) ? hw-sync-returned(io, dir, branch) : hw-sync-refused(io, dir);
+  }
+  // a rebase git refused: a named unmerged file is a conflict (the rebase is aborted); anything else is dirty,
+  // named by the whole status, untracked files included
+  def hw-sync-refused(io, dir) {
+   let unmerged = hw-unmerged(io, dir);
+   (String) unmerged == "" ? [hw-dirty-line(hw-rows-text(hw-porcelain(io, dir, "sync-status-all", ["status", "--porcelain", "-z"]))), 1] : hw-sync-aborted(io, dir, unmerged);
+  }
+  def hw-sync-aborted(io, dir, unmerged) {
+   let aborted = hch-git-in(io, dir, "sync-abort", ["rebase", "--abort"]);
+   ["conflict: " ++ unmerged, 1];
+  }
+  // rows that came back unmerged after a rebase git counted done
+  def hw-sync-returned(io, dir, branch) {
+   let unmerged = hw-unmerged(io, dir);
+   (String) unmerged == "" ? hw-sync-push(io, dir, branch) : ["conflict: " ++ unmerged ++ ", as the set-aside rows returned", 1];
+  }
+  def hw-sync-push(io, dir, branch) {
+   let pushed = hch-git-in(io, dir, "sync-push", ["push", "-q", "--force-with-lease", "origin", "HEAD:" ++ branch]);
+   ["", pushed[0]];
+  }
+  def hw-unmerged(io, dir) = hw-names-text(hch-git-quiet-in(io, dir, "sync-unmerged", ["diff", "--name-only", "-z", "--diff-filter=U"])[1]);
+  def hw-nul() = byte_to_str(0);
+  def hw-fields(text) = filter(f => (Comparable) len(f) > 0, split-on(text ?? "", hw-nul()));
+  def hw-names-text(text) = hch-join(hw-fields(text), " ");
+  // a status row: [XY, path, the path a rename or copy came from ("" for any other row)]
+  def hw-porcelain(io, dir, step, args) = hw-rows-of(hw-fields(hch-git-quiet-in(io, dir, step, args)[1]));
+  def hw-moved-from?(rec) = len(rec) > 1 && (((String) substring(rec, 0, 1) == "R") || ((String) substring(rec, 0, 1) == "C") || ((String) substring(rec, 1, 2) == "R") || ((String) substring(rec, 1, 2) == "C"));
+  def hw-rows-of(recs) = nil?(recs) ? [] : len(recs[0]) < 4 ? hw-rows-of(recs[1:]) : hw-moved-from?(recs[0]) ? cons([substring(recs[0], 0, 2), substring(recs[0], 3, len(recs[0])), nil?(recs[1:]) ? "" : recs[1]], hw-rows-of(recs[2:])) : cons([substring(recs[0], 0, 2), substring(recs[0], 3, len(recs[0])), ""], hw-rows-of(recs[1:]));
+  def hw-row-text(row) = (String) row[2] == "" ? row[0] ++ " " ++ row[1] : row[0] ++ " " ++ row[2] ++ " -> " ++ row[1];
+  // the rows as one line the way an unquoted `echo` said them: single spaces, none at the ends
+  def hw-collapse(s) = hch-join(filter(w => (Comparable) len(w) > 0, split-on(s, " ")), " ");
+  def hw-rows-text(rows) = hw-collapse(hch-join(rows |> map(row => hw-row-text(row)), " "));
+  def hw-dirty-line(text) = (String) text == "" ? "dirty:" : "dirty: " ++ text;
+  // A row is set aside only when it merges as a union: a modification (" M", "M ", "MM") of a file whose merge
+  // attribute is union, that main still holds as a blob, and that git reads as text against main
+  def hw-aside-kind?(xy) = ((String) xy == " M") || ((String) xy == "M ") || ((String) xy == "MM");
+  def hw-aside?(io, dir, row) = hw-aside-kind?(row[0]) && hw-union?(io, dir, row[1]) && hw-main-blob?(io, dir, row[1]) && hw-text-diff?(io, dir, row[1]);
+  def hw-union?(io, dir, path) = hw-ends?(hw-line(hch-git-quiet-in(io, dir, "sync-attr", ["check-attr", "merge", "--", path])[1]), ": merge: union");
+  def hw-main-blob?(io, dir, path) = (String) hw-line(hch-git-quiet-in(io, dir, "sync-blob", ["cat-file", "-t", "origin/main:" ++ path])[1]) == "blob";
+  def hw-text-diff?(io, dir, path) {
+   let numstat = hch-git-quiet-in(io, dir, "sync-numstat", ["diff", "--numstat", "origin/main", "--", path])[1];
+   len(numstat) == 0 || ((String) substring(numstat, 0, 1) != "-");
+  }
+  def hw-conflicted?(sync) = nothing?(sync) ? false : any?(line => {
+   let marker = "conflict:";
+   let at = str_find(line, marker, 0);
+   at >= 0 && trim(substring(line, at + len(marker), len(line))) != "";
+  }, split-on(sync, "\n"));
+  def hw-held-turns(sync) {
+   let refusal = "rebase-refused:";
+   let detail = hw-conflicted?(sync) ? str-join-with(
+    split-on(sync, "\n") |> filter(hw-conflicted?) |> map(line => {
+     let marker = "conflict:";
+     let at = str_find(line, marker, 0);
+     trim(substring(line, at + len(marker), len(line)));
+    }), ", ") : {
+     let text = str-join-with(split-on(sync, "\n") |> map(trim), "; ");
+     str_find(text, refusal, 0) == 0 ? text : refusal + " " + text;
+    };
+   print_str("[walk] no turn starts: the branch could not follow main (" + detail + ")");
+   0;
+  }
+  // A product is fresh when it stands and is newer than its source (file_mtime, whole seconds: a source touched in
+  // the product's own second rebuilds). Otherwise the compiler runs through the child door; the kernel is built beside
+  // itself and renamed over fkwu (a new inode, never a write into the live binary). The answer is "<name>=fresh" or
+  // "<name>=<the compiler's exit>"; a compiler that was never born reads "<name>=nothing".
+  def hw-mtime(path) = file_mtime(path);
+  def hw-mtime-int?(at) = (String) value_kind(at) == "int" && at > 0;
+  def hw-fresh?(product, source) = hw-mtime-int?(hw-mtime(product)) && (!hw-mtime-int?(hw-mtime(source)) || hw-mtime(product) > hw-mtime(source));
+  def hw-make(io, name, product, source, argv, built) = hw-fresh?(product, source) ? name ++ "=fresh" : hw-made(io, name, product, built, hch-run-in(io, name, argv, "", nothing()));
+  def hw-made(io, name, product, built, run) = name ++ "=" ++ hw-rc-text(hch-ok?(run) ? hw-placed(product, built) : run[0]);
+  // the compiler wrote `built`; it takes the product's place (a compiler that wrote the product itself needs none)
+  def hw-placed(product, built) = (String) built == product ? 0 : host_path_rename(built, product);
+  def hw-build-argv() = ["cc", "-O2", "-o", "fkwu.next", "runtime/fkwu-uni.c"];
+  def hw-build-at(io) = hw-make(io, "build", "fkwu", "runtime/fkwu-uni.c", hw-build-argv(), "fkwu.next");
+  def hw-build() = hw-build-at(hch-dir());
+  def hw-carrier-argv() = ["cc", "-O2", "-dynamiclib", "-o", "form/native/metal/fk-metal-carrier.dylib", "form/native/metal/fk-metal-carrier.m", "-framework", "Metal", "-framework", "Foundation", "-fobjc-arc"];
+  def hw-carrier-at(io) = hw-make(io, "carrier", "form/native/metal/fk-metal-carrier.dylib", "form/native/metal/fk-metal-carrier.m", hw-carrier-argv(), "form/native/metal/fk-metal-carrier.dylib");
+  def hw-carrier() = hw-carrier-at(hch-dir());
+ }
+}

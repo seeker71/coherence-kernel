@@ -1,12 +1,22 @@
 ; host-walk-band.bml — the walk's window, its lock, its turns, its sync, its children, its clock and its publish
 ; window, with no model; git runs only over a scratch origin under temp_dir.
 ;
-; Verdict 2147483647 = 1 options | 2 claims | 4 refuses | 8 takes-gone | 16 takes-reused | 32 one-taker | 64 unowned
+; Verdict 8589934591 = 1 options | 2 claims | 4 refuses | 8 takes-gone | 16 takes-reused | 32 one-taker | 64 unowned
 ;   | 128 releases | 256 floor | 512 unmeasured | 1024 room | 2048 turn-lines | 4096 turns | 8192 elsewhere
 ;   | 16384 yield | 32768 sync | 65536 reviewed | 131072 idle | 262144 stale-mark | 524288 publish
 ;   | 1048576 heal | 2097152 sync-rows | 4194304 publish-absent | 8388608 band-after | 16777216 planned
 ;   | 33554432 queue-paths | 67108864 spawn | 134217728 clock | 268435456 sync-lease | 536870912 replanned
-;   | 1073741824 memory
+;   | 1073741824 memory | 2147483648 split | 4294967296 part-size
+;
+; split and part-size: form-stdlib/bml/host-walk.bml is an aggregator that imports its parts (host-walk-<seam>.bml) and holds
+; no definition. Each part is a file the local lane can read whole inside its window, so the claim "part-size" holds
+; every part the aggregator imports under 12000 bytes, the aggregator free of definitions, and no host-walk-*.bml file in
+; form-stdlib/bml standing unimported. The limit is derived: the day option's 13411-ID read of the 38058-byte file read
+; 0.352 IDs per byte (waveF critic), so 12000 bytes are about 4.2k IDs and two reads of a part, or one re-read, take about
+; 8.5k of the 16384 positions, which leaves the lane's prompt of about 2.4k IDs and its answer room. The claim "split"
+; reads the definitions of those parts and holds the names of form-stdlib/tests/fixtures/host-walk-defs.txt: a name
+; no part holds ("gone") or one held twice turns it red and the band prints the name. It pins names only: a definition
+; the local lane edits or adds changes no fixture row, and its behaviour is held by the other claims of this band.
 ;
 ; memory: before a turn the walk asks the machine for 26 GiB of weights and an 8 GiB KV margin (memory-governor.bml),
 ; waits no later than the window's last moment a turn could begin (until minus the option floor), and a held answer
@@ -647,10 +657,63 @@ section [form.bml] {
   }
   def hwb-pad4(n) = n < 10 ? "000" ++ n.str() : n < 100 ? "00" ++ n.str() : n < 1000 ? "0" ++ n.str() : n.str();
   def hwb-clock(ctx) = hwb-bit(hwb-zones(ctx) && hwb-instants-hold(hwb-instants()) && nothing?(hw-hhmm-in(nothing(), 1790883000000)) && ((String) hw-day-in(nothing(), 1790883000000) == "") && hwb-host-clock(ctx));
+  // ── the split: the parts hold the walk's definitions, and each part is a file the local lane can read whole ──
+  // The aggregator (host-walk.bml) imports the parts (`import form-stdlib/bml/host-walk-<seam>.bml;`), holds no definition,
+  // and every part stays under hwb-sp-limit bytes: the local lane's window is 16384 positions, and a file it cannot read
+  // whole is a file it cannot edit (a day turn once read host-walk.bml six times, each read filling the window); the
+  // limit leaves room for two reads of a part (header above).
+  def hwb-sp-aggregator() = "form/form-stdlib/bml/host-walk.bml";
+  def hwb-sp-pins() = "form/form-stdlib/tests/fixtures/host-walk-defs.txt";
+  def hwb-sp-limit() = 12000;
+  def hwb-sp-starts?(s, p) = (len(s) >= len(p)) && ((String) substring(s, 0, len(p)) == p);
+  // the part files the aggregator imports, as paths from the repo root
+  def hwb-sp-part-paths(lines) = nil?(lines) ? [] : hwb-sp-starts?(lines[0], "import form-stdlib/bml/host-walk-") ? cons("form/" ++ substring(trim(lines[0]), 7, len(trim(lines[0])) - 1), hwb-sp-part-paths(lines[1:])) : hwb-sp-part-paths(lines[1:]);
+  def hwb-sp-parts() = hwb-sp-part-paths(split-on(read_file(hwb-sp-aggregator()) ?? "", "\n"));
+  // the definitions of a text: [name, text] for each `  def name(` line, its text running to the next definition, comment or close
+  def hwb-sp-name(line) = substring(line, 6, str_find(line, "(", 6));
+  def hwb-sp-ends?(l) = hwb-sp-starts?(l, "  //") || hwb-sp-starts?(l, " }") || hwb-sp-starts?(l, "}") || hwb-sp-starts?(l, "section") || hwb-sp-starts?(l, "import") || hwb-sp-starts?(l, "//") || hwb-sp-starts?(l, " class");
+  def hwb-sp-close(cur, out) = nothing?(cur) ? out : cons(cur, out);
+  def hwb-sp-scan(lines, cur, out) = nil?(lines) ? hwb-sp-close(cur, out)
+   : hwb-sp-starts?(lines[0], "  def ") ? hwb-sp-scan(lines[1:], [hwb-sp-name(lines[0]), lines[0]], hwb-sp-close(cur, out))
+   : hwb-sp-ends?(lines[0]) ? hwb-sp-scan(lines[1:], nothing(), hwb-sp-close(cur, out))
+   : hwb-sp-scan(lines[1:], nothing?(cur) ? nothing() : [cur[0], cur[1] ++ "\n" ++ lines[0]], out);
+  def hwb-sp-defs-of(text) = hwb-sp-scan(split-on(text, "\n"), nothing(), []);
+  def hwb-sp-defs(paths) = nil?(paths) ? [] : append(hwb-sp-defs-of(read_file(paths[0]) ?? ""), hwb-sp-defs(paths[1:]));
+  // the pinned names: one per line in the fixture, comment lines begin with #
+  def hwb-sp-pins-of(lines) = nil?(lines) ? [] : ((Comparable) len(trim(lines[0])) == 0) || hwb-sp-starts?(lines[0], "#") ? hwb-sp-pins-of(lines[1:]) : cons(trim(lines[0]), hwb-sp-pins-of(lines[1:]));
+  def hwb-sp-held?(defs, name) = nil?(defs) ? false : ((String) defs[0][0] == name) || hwb-sp-held?(defs[1:], name);
+  // the pinned names no part holds, and the names held twice (a duplicate definition name hangs the compiler)
+  def hwb-sp-gone(pins, defs) = nil?(pins) ? [] : hwb-sp-held?(defs, pins[0]) ? hwb-sp-gone(pins[1:], defs) : cons(pins[0], hwb-sp-gone(pins[1:], defs));
+  def hwb-sp-twice(defs) = nil?(defs) ? [] : hwb-sp-held?(defs[1:], defs[0][0]) ? cons(defs[0][0], hwb-sp-twice(defs[1:])) : hwb-sp-twice(defs[1:]);
+  def hwb-sp-said(lines) = nil?(lines) ? 0 : hwb-sp-said-next(print_str(lines[0]), lines[1:]);
+  def hwb-sp-said-next(said, rest) = hwb-sp-said(rest);
+  def hwb-sp-names-said(what, names) = nil?(names) ? [] : cons("[host-walk-band] split: " ++ what ++ " " ++ names[0], hwb-sp-names-said(what, names[1:]));
+  // 2147483648: the parts hold every pinned definition name and hold none twice; a definition added or edited is free (a body
+  // is held by the claims of the walk's behaviour), a name dropped or renamed says "gone" until its fixture row is edited
+  def hwb-split(ctx) {
+   let parts = hwb-sp-parts();
+   let defs = hwb-sp-defs(parts);
+   let pins = hwb-sp-pins-of(split-on(read_file(hwb-sp-pins()) ?? "", "\n"));
+   let gone = hwb-sp-gone(pins, defs);
+   let twice = hwb-sp-twice(defs);
+   let said = hwb-sp-said(append(hwb-sp-names-said("gone", gone), hwb-sp-names-said("twice", twice)));
+   hwb-bit((!nil?(parts)) && (!nil?(defs)) && (!nil?(pins)) && nil?(gone) && nil?(twice));
+  }
+  def hwb-sp-listed?(path, paths) = nil?(paths) ? false : ((String) paths[0] == path) || hwb-sp-listed?(path, paths[1:]);
+  def hwb-sp-oversize(paths) = nil?(paths) ? [] : (file_size(paths[0]) > 0) && (file_size(paths[0]) < hwb-sp-limit()) ? hwb-sp-oversize(paths[1:]) : cons("[host-walk-band] part-size: " ++ paths[0] ++ " reads " ++ file_size(paths[0]).str() ++ " bytes (the limit is " ++ hwb-sp-limit().str() ++ ")", hwb-sp-oversize(paths[1:]));
+  def hwb-sp-outside(names, parts) = filter(n => hwb-sp-starts?(n, "host-walk-") && hw-ends?(n, ".bml") && !hwb-sp-listed?("form/form-stdlib/bml/" ++ n, parts), names);
+  // 4294967296: every part the aggregator imports reads and is under the limit, the aggregator holds no definition, and no
+  // host-walk-*.bml file stands beside it unimported (a part the claim above and this one do not see)
+  def hwb-part-size(ctx) {
+   let parts = hwb-sp-parts();
+   let outside = hwb-sp-outside(fs_list("form/form-stdlib/bml") ?? [], parts);
+   let said = hwb-sp-said(append(hwb-sp-oversize(parts), hwb-sp-names-said("unimported", outside)));
+   hwb-bit((!nil?(parts)) && nil?(hwb-sp-oversize(parts)) && (file_size(hwb-sp-aggregator()) > 0) && (file_size(hwb-sp-aggregator()) < hwb-sp-limit()) && nil?(hwb-sp-defs-of(read_file(hwb-sp-aggregator()) ?? "")) && nil?(outside));
+  }
  }
  let ctx = hwb-fresh();
  nothing?(ctx) ? form_error("host-walk band needs a fresh directory under temp_dir") : 0;
- let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield], ["sync", 32768, 1, hwb-sync], ["reviewed", 65536, 1, hwb-reviewed], ["idle", 131072, 1, hwb-idle], ["stale-mark", 262144, 1, hwb-stale-mark], ["publish", 524288, 1, hwb-publish], ["heal", 1048576, 1, hwb-heal], ["sync-rows", 2097152, 1, hwb-sync-rows], ["publish-absent", 4194304, 1, hwb-publish-absent], ["band-after", 8388608, 1, hwb-band-after], ["planned", 16777216, 1, hwb-planned], ["queue-paths", 33554432, 1, hwb-queue-paths], ["spawn", 67108864, 1, hwb-spawn], ["clock", 134217728, 1, hwb-clock], ["sync-lease", 268435456, 1, hwb-sync-lease], ["replanned", 536870912, 1, hwb-replanned], ["memory", 1073741824, 1, hwb-memory]]);
+ let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield], ["sync", 32768, 1, hwb-sync], ["reviewed", 65536, 1, hwb-reviewed], ["idle", 131072, 1, hwb-idle], ["stale-mark", 262144, 1, hwb-stale-mark], ["publish", 524288, 1, hwb-publish], ["heal", 1048576, 1, hwb-heal], ["sync-rows", 2097152, 1, hwb-sync-rows], ["publish-absent", 4194304, 1, hwb-publish-absent], ["band-after", 8388608, 1, hwb-band-after], ["planned", 16777216, 1, hwb-planned], ["queue-paths", 33554432, 1, hwb-queue-paths], ["spawn", 67108864, 1, hwb-spawn], ["clock", 134217728, 1, hwb-clock], ["sync-lease", 268435456, 1, hwb-sync-lease], ["replanned", 536870912, 1, hwb-replanned], ["memory", 1073741824, 1, hwb-memory], ["split", 2147483648, 1, hwb-split], ["part-size", 4294967296, 1, hwb-part-size]]);
  host_dir_rmdir(hwb-root(ctx));
  verdict;
 }

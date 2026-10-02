@@ -1,0 +1,71 @@
+// host-walk-turns.bml — a turn's row read in Form, and the window's turns loop.
+//
+// What it holds: why a turn was idle or unknown (hw-idle-why, hw-unknown-line), a lane that gave its memory back read
+// as a choice point (hw-memory-low?), and the loop that takes a window's turns until one ran no gap, one was idle,
+// the count bound was reached, or the window is not ready (hw-turns). A lane that gave its memory back
+// (lane_reason host-memory-low) is read as a choice point, neither idle nor unknown: the window goes on and the next
+// turn waits for the machine (hw-ready, host-walk-window.bml).
+// What it needs: host-walk-text.bml (hw-starts?, hw-say, hw-row-node, hw-row-int, hw-row-str), host-walk-turn.bml
+// (hw-turned?, hw-planned-in?) and memory-governor.bml (mg-memory-ending?, mg-memory-held?).
+import form-stdlib/bml/host-walk-text.bml;
+import form-stdlib/bml/host-walk-turn.bml;
+import form-stdlib/bml/memory-governor.bml;
+section [form.bml] {
+ class HostWalkTurns {
+  // the row a turn's lines carry ("" when none), and why the turn was idle ("" when it was not). A turn is idle when
+  // its last option left the band where the turn found it and spent nothing: its lane generated a known 0 local IDs
+  // (a rung-0 refusal is one), or wrote no count because it was refused at rung 0 or never launched. A row that does
+  // not read is idle too: what it spent is unknown and another turn could only repeat it. A lane that crashed or
+  // met the deadline writes no count (local_generated_ids null): its spend is unknown, never read as 0, so it is
+  // not idle and the window goes on (hw-unknown-line names it).
+  def hw-row-of(turn) = hw-row-in(split-on(turn ?? "", "\n"));
+  def hw-row-in(lines) = nil?(lines) ? "" : hw-starts?(lines[0], "[native-turn] {") ? substring(lines[0], 14, len(lines[0])) : hw-row-in(lines[1:]);
+  def hw-band-unmoved?(row) = (String) json-emit(hw-row-node(row, "band_before")) == json-emit(hw-row-node(row, "band_after"));
+  // A lane that gave its memory back (host-memory-low, form-cli-code-live.bml fcac-memory-stop) is a choice point: its
+  // checkpoint is saved, the turn spent no option and failed no gap, so it is neither idle nor unknown: the window
+  // goes on, and the next turn's hw-ready waits for the machine (hw-memory-room) before it begins.
+  // (the one word the walk's readers share is mg-memory-ending?: host-memory-low, or host-memory-held:<why> when the
+  // session open or a renewal's second state was refused and nothing opened)
+  def hw-memory-low?(row) = mg-memory-ending?(hw-row-str(row, "lane_reason"));
+  def hw-memory-low-why(row) = mg-memory-held?(hw-row-str(row, "lane_reason")) ? "its lane was refused memory (host-memory-held) and opened nothing: no option was spent and no gap failed" : "its lane gave its memory back (host-memory-low) with its checkpoint saved: no option was spent and no gap failed";
+  def hw-spent-none-why(row) = hw-memory-low?(row) ? "" : !nothing?(hw-row-int(row, "local_generated_ids")) ? ((Comparable) hw-row-int(row, "local_generated_ids") == 0 ? "it generated no local IDs and moved no band" : "") : (String) hw-row-str(row, "lane_reason") == "caller-check-unmeetable" ? "its lane refused at rung 0 and it moved no band" : (String) hw-row-str(row, "lane") == "lane-launch-unavailable" ? "its lane never launched and it moved no band" : "";
+  def hw-unread-why() = "its row did not read";
+  def hw-idle-why-of(row) = !json-object-has?(row, "gap") ? hw-unread-why() : hw-band-unmoved?(row) ? hw-spent-none-why(row) : "";
+  def hw-idle-why(turn) = (String) hw-row-of(turn) == "" ? "" : (try hw-idle-why-of(parse-json("turn-row", hw-row-of(turn))) else hw-unread-why());
+  def hw-idle?(turn) = (String) hw-idle-why(turn) != "";
+  // a turn that moved no band and whose lane wrote no count, for no reason that reads idle: its spend is unknown
+  def hw-unknown-why-of(row) = json-object-has?(row, "gap") && hw-memory-low?(row) ? hw-memory-low-why(row) : hw-unknown-spend-why-of(row);
+  def hw-unknown-spend-why-of(row) = json-object-has?(row, "gap") && hw-band-unmoved?(row) && nothing?(hw-row-int(row, "local_generated_ids")) && ((String) hw-spent-none-why(row) == "") ? "its spend is unknown (lane " ++ hw-row-str(row, "lane") ++ " wrote no local ID count)" : "";
+  def hw-unknown-said(why) = (String) why == "" ? "" : "[walk-window] " ++ why ++ ": not read as idle, the window goes on";
+  def hw-unknown-line(turn) = (String) hw-row-of(turn) == "" ? "" : hw-unknown-said(try hw-unknown-why-of(parse-json("turn-row", hw-row-of(turn))) else "");
+  // A window's turns. Each begins while ready(until) answers [true, line] (hw-ready: the host's other checkouts let
+  // the GPU go and the time left holds an option), at most `most` (nothing: no count bound); a turn that ran no gap
+  // ends them (landing a plan it queued), and so does an idle turn once it lands. take(deadline, n) is the nth turn; land(turn) answers the
+  // line its landing spoke ("" when the walk lands later). Answers the count of turns that ran a gap.
+  def hw-turns(until, most, ready, take, land) = hw-turns-from(until, most, ready, take, land, 0);
+  def hw-turns-from(until, most, ready, take, land, n) {
+   let room = !nothing?(most) && n >= most ? [false, "[walk-window] " ++ n.str() ++ " turn(s): this walk takes no more"] : ready(until);
+   let said = print_str(room[1]);
+   room[0] ? hw-turn-taken(until, most, ready, take, land, n, take(until, n)) : n;
+  }
+  def hw-turn-taken(until, most, ready, take, land, n, turn) {
+   let said = hw-say(turn);
+   !hw-turned?(turn) ? hw-turn-unturned(n, turn, land) : hw-idle?(turn) ? hw-turn-idle(n, hw-idle-why(turn), land(turn)) : hw-turn-landed(until, most, ready, take, land, n, land(turn), hw-unknown-line(turn));
+  }
+  // a turn that ran no gap ends the turns; a plan it queued (its band and queue row) still lands with it
+  def hw-turn-unturned(n, turn, land) {
+   let said = hw-planned-in?(turn) ? hw-say(land(turn)) : 0;
+   n;
+  }
+  def hw-turn-idle(n, why, landed) {
+   let said = hw-say(landed);
+   let told = print_str("[walk-window] the turn was idle (" ++ why ++ "): this window takes no more turns");
+   n + 1;
+  }
+  def hw-turn-landed(until, most, ready, take, land, n, landed, unknown) {
+   let said = hw-say(landed);
+   let told = hw-say(unknown);
+   hw-turns-from(until, most, ready, take, land, n + 1);
+  }
+ }
+}
