@@ -1,0 +1,110 @@
+; dsv4-moe-msl.fk — the DeepSeek-V4-Flash routed-MoE EXPERT FOLD, lifted to Metal the BODY emits, and the
+; ONE translation unit that carries the whole MoE (this fold + the router of dsv4-router-msl.fk).
+;
+; WHY THIS EXISTS. dsv4-router-msl.fk emits the router DECISION (which experts, what weight). This file emits
+; the arithmetic that decision drives: the clamped SwiGLU expert fold, the matvecs that project into and out
+; of each expert, the weighted accumulation of the chosen experts, and the shared expert added alongside.
+; Together they are the FFN half of a DeepSeek-V4-Flash layer that no prior GPU cell in this body computes
+; (moe-msl.fk is Mixtral's plainer top-2-of-8; this is the sqrt-softplus / biased-select / clamped-SwiGLU
+; shape of ds4.c). Proven on the CPU by dsv4-forward.fk (band 63); this is that same arithmetic, on the GPU.
+;
+; THE CLAMP IS LOAD-BEARING (ds4.c:10430). The expert (and the shared) activation is NOT plain SwiGLU:
+;   gate is clamped ABOVE only         g' = min(gate, lim)                       (dsv4-cl-hi)
+;   up   is clamped to [-lim, +lim]    u' = clamp(up, -lim, lim)                 (dsv4-cl-lo . dsv4-cl-hi)
+;   mid  = silu(g') * u' * w                                                      (dsv4-mid)
+; the clamp is DISABLED when lim <= 1e-6 (ds4's `if (clamp > 1.0e-6f)`). Flip the clamp off and a fold whose
+; gate or up exceeds lim changes — the band's falsifier (dm-clamp-bites?) drives a value past lim and demands
+; the difference. `snugcause`: a fold tested only on values inside [-lim,lim] cannot witness the clamp.
+;
+; THE EXPERT GATHER IS THE CARRIER'S, host-side (moe-msl.fk's finding, reused). The router returns ids to the
+; host; the host binds THAT expert's gate/up/down buffers into the ordinary matvec — `t.off + e*nb02`, a
+; number the host already holds. Zero new gather MSL. It costs one round trip per layer, a decode-only bargain
+; named in moe-msl.fk; a prefill would want a device-side gather. Stated as a radius, not sold as general.
+;
+; THE ACCUMULATION FOLD (asktoll / no memset). The chosen experts are summed by SET-then-ADD, never memset:
+; the first chosen expert's output is written by form_dsv4_scale_f32 (a=1), the rest and the shared expert by
+; form_dsv4_axpy_f32 (a=1). So the accumulator is defined by a real dispatch, and an unrun accumulate cannot
+; masquerade as a computed zero (edgedrop/zerobirth). The expert weight w is folded INSIDE the SwiGLU mid
+; (matching dsv4-mid), so the accumulate scalar is a pure 1.0 — the weighting and the summing stay separable.
+; The recipe's dsv4-topk conses head-first (sel consumed 2nd-best-first); the router writes ids in that order,
+; so summing ids[0],ids[1],... reproduces (0 + E[sel0]) + E[sel1] bit-for-bit — the closeness is not an order
+; artefact.
+;
+; THE DETERMINISM DISCIPLINE (as mla-msl.fk). The dm_ spine transcribes THIS body's own numerics — tn-exp
+; (14-term Taylor, argument halving), fln (atanh series over the reduced mantissa, the exp/mantissa split of
+; trig.fk), tn-sqrt (50-iter Newton), and the RIGHT-fold dot (tb-dot walks columns descending). No
+; metal::exp / metal::log / metal::sqrt is called. So the only gap from the fp64 recipe is working precision;
+; the gate is a derived f32 bound (selfgauge), not a vendor-transcendental tolerance. ONE `#include
+; <metal_stdlib>`, NO `using namespace metal;` (this body's own `round`/`abs` go ambiguous otherwise — the
+; q6k-msl.fk / mla-msl.fk lesson). The spine is emitted ONCE for the whole unit; the router fragment
+; (dsv4-router-msl.fk) is appended and defines no spine, so nothing is ever double-defined.
+;
+; THE RADIUS (aporon). NOT bit-exact; NOT the real dims (toy E=8, ff=6, ne=4, nused=2; V4-Flash is E=4096,
+; 256 experts top-8, and a wider ff); NOT the quantised expert weights (MXFP4/IQ2 — this fold consumes f32
+; experts; a GPU IQ2 dequant does not yet exist and is named as the dependency a real ffn_down_exps block
+; needs); NOT whole-model residency. This is the routed + shared FFN arithmetic, on the GPU, once, at toy
+; width, bit-close to the proven CPU recipe stage by stage.
+;
+; Kin: dsv4-forward.fk (dsv4-mid / dsv4-expert-out / dsv4-routed-moe / dsv4-shared — the fp64 recipe this
+; equals), dsv4-router-msl.fk (the router this fold routes; appended here), mla-msl.fk (the emit idiom, the
+; matvec whose descending fold this shares, the no-using-namespace rule), moe-msl.fk (the host-side gather
+; and the scale/axpy no-memset accumulation this reuses).
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/mla-attn.fk form-stdlib/dsv4-hc.fk form-stdlib/dsv4-forward.fk form-stdlib/dsv4-router-msl.fk
+;
+; Proven by: form-stdlib/tests/dsv4-moe-msl-band.fk (the fold + routing meaning read back into Form, pinned,
+;            with the clamp and bias-asymmetry falsifiers) and form/native/metal/metal_moe_gpu.sh (the GPU).
+
+(do
+    ; ================= the clamped-SwiGLU meaning, read back into Form =================
+    ; What form_dsv4_swiglu_f32 computes, elementwise, in the recipe's order. These delegate to
+    ; dsv4-forward.fk's proven dsv4-cl-hi / dsv4-cl-lo / dsv4-mid so the band pins ONE definition, and the
+    ; falsifier below drives a value past lim so the clamp is witnessed, not assumed.
+    (defn dm-cl-hi (x lim) (dsv4-cl-hi x lim))
+    (defn dm-cl-lo (x lim) (dsv4-cl-lo x lim))
+    (defn dm-mid (gate up w lim) (dsv4-mid gate up w lim))
+    ; THE FALSIFIER, in Form: the same fold with the clamp forced OFF (lim below the 1e-6 sill). The band
+    ; asserts it DIFFERS from the clamped fold on a witness where gate/up exceed lim.
+    (defn dm-mid-noclamp (gate up w) (dsv4-mid gate up w 0.0))
+
+    ; ================= the emitted MSL =================
+
+    ; --- the numerics spine, emitted ONCE. dm_abs/dm_sqrt/dm_exp/dm_dot are mla-msl.fk's spine (the same
+    ;     tn-abs / tn-sqrt / tn-exp / tb-dot this body proves); dm_ln transcribes trig.fk's fln (exponent
+    ;     count + atanh series over the mantissa); dm_silu is ln-silu = x/(1+e^-x); dm_cl_hi/dm_cl_lo are the
+    ;     ds4 clamp with its 1e-6 disable sill. ---
+    (defn dsv4-moe-msl-spine ()
+        "static inline float dm_abs(float x) { return (x < 0.0f) ? -x : x; } static inline float dm_sqrt(float v) { if (v <= 0.0f) return 0.0f; float g = v; for (int n = 0; n < 50; ++n) { g = 0.5f * (g + v / g); } return g; } static inline float dm_exp_small(float x) { float term = 1.0f; float acc = 1.0f; for (int n = 1; n <= 14; ++n) { term = term * (x / float(n)); acc = acc + term; } return acc; } static inline float dm_pow2k(float v, int k) { for (int i = 0; i < k; ++i) v = v * v; return v; } static inline float dm_exp(float x) { float a = x; int k = 0; while (dm_abs(a) > 0.5f) { a = a * 0.5f; k = k + 1; } return dm_pow2k(dm_exp_small(a), k); } static inline float dm_ln(float x) { float a = x; int e = 0; if (a >= 1.0f) { while (a >= 2.0f) { a = a * 0.5f; e = e + 1; } } else { while (a < 1.0f) { a = a * 2.0f; e = e - 1; } } float m = a; float z = (m - 1.0f) / (m + 1.0f); float z2 = z * z; float zpow = z; float acc = 0.0f; for (int j = 0; j < 14; ++j) { float t = (zpow * z2) / float(2 * (j + 1) + 1); acc = acc + t; zpow = zpow * z2; } float lnm = 2.0f * (z + acc); return float(e) * 0.6931471805599453f + lnm; } static inline float dm_silu(float x) { return x / (1.0f + dm_exp(-x)); } static inline float dm_cl_hi(float x, float lim) { if (lim > 0.000001f) { return (x > lim) ? lim : x; } return x; } static inline float dm_cl_lo(float x, float lim) { if (lim > 0.000001f) { return (x < -lim) ? -lim : x; } return x; } static inline float dm_dot(device const float* a, device const float* b, uint n) { float acc = 0.0f; for (int c = int(n) - 1; c >= 0; --c) acc = a[uint(c)] * b[uint(c)] + acc; return acc; } ")
+
+    ; --- kernel: plain f32 matvec (tb-matvec). Row r per thread; the column loop DESCENDS so the fold is
+    ;     tb-dot's RIGHT fold, bit-identical to mla-msl.fk's matvec. Serves gate_inp->logits and every
+    ;     expert / shared gate/up/down projection. ---
+    (defn dsv4-matvec-body ()
+        "kernel void form_dsv4_matvec_f32(device const float* W [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; float acc = 0.0f; for (int c = int(cols) - 1; c >= 0; --c) acc = W[r * cols + uint(c)] * x[uint(c)] + acc; y[r] = acc; } ")
+
+    ; --- kernel: the clamped-SwiGLU mid (dsv4-mid). One thread per hidden element j. gate clamped above,
+    ;     up clamped to [-lim,lim], out = silu(g')*u'*w with w the router weight (1.0 for the shared). ---
+    (defn dsv4-swiglu-body ()
+        "kernel void form_dsv4_swiglu_f32(device const float* gate [[buffer(0)]], device const float* up [[buffer(1)]], device float* out [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& w [[buffer(4)]], constant float& lim [[buffer(5)]], uint j [[thread_position_in_grid]]) { if (j >= n) return; float g = dm_cl_hi(gate[j], lim); float u = dm_cl_lo(dm_cl_hi(up[j], lim), lim); out[j] = (dm_silu(g) * u) * w; } ")
+
+    ; --- kernel: y = a*x. The FIRST chosen expert's contribution, which SETS the accumulator (no memset). ---
+    (defn dsv4-scale-body ()
+        "kernel void form_dsv4_scale_f32(device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant float& a [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; y[i] = a * x[i]; } ")
+
+    ; --- kernel: y = y + a*x. Every chosen expert after the first, and the shared expert. A named temporary
+    ;     so no fma contraction can silently re-associate (the harness also compiles -ffp-contract=off). ---
+    (defn dsv4-axpy-body ()
+        "kernel void form_dsv4_axpy_f32(device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant float& a [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float p = a * x[i]; y[i] = y[i] + p; } ")
+
+    ; --- ONE translation unit: the body's one metal_stdlib, the spine once, the four fold kernels, then the
+    ;     router (dsv4-router-msl.fk) appended. A carrier compiles exactly this; it composes nothing itself. ---
+    (defn dsv4-moe-msl-unit ()
+        (str_concat "#include <metal_stdlib>\n"
+        (str_concat (dsv4-moe-msl-spine)
+        (str_concat (dsv4-matvec-body)
+        (str_concat (dsv4-swiglu-body)
+        (str_concat (dsv4-scale-body)
+        (str_concat (dsv4-axpy-body)
+                    (dsv4-router-body "form_dsv4_router_f32"))))))))
+
+    0)

@@ -1,0 +1,214 @@
+; dsv4-hc-msl.fk — DeepSeek-V4-Flash hyper-connections (dsv4-hc.fk) lifted to Metal kernels the BODY emits.
+;
+; WHY THIS EXISTS. Stone 25 proved the HC recipe on the CPU (dsv4-hc.fk, band 63, against an independent
+; fp64 transcription of ds4.c to 1e-9). HC is CORE: DeepSeek-V4-Flash runs its WHOLE forward pass inside
+; n_hc=4 parallel streams — the residual stream IS the HC state, every sublayer is wrapped by a learned
+; hc_pre / hc_post, the head collapses the streams. It was CPU-only. A real DeepSeek token needs HC on the
+; GPU. This file is that: the stream broadcast, the no-weight RMSNorm, the fn matvec, the 20-iteration
+; Sinkhorn split, the stream-reduce, the block-inject/combine-mix post (with its load-bearing transpose),
+; and the output-head weights — each a Metal kernel, every character authored here.
+;
+; THE ARITHMETIC IS THE RECIPE'S, TO THE ASSOCIATION. The determinism discipline mla-msl.fk carried onto
+; the GPU is carried here: this file does NOT call metal::exp or metal::sqrt. It transcribes tn-exp (14-term
+; Taylor with argument halving), tn-sqrt (Newton, 50 iters from the value), and ln-sigmoid (1/(1+exp(-x)))
+; into Metal, and it matches the FOLD DIRECTION of every reduction: tb-dot is a RIGHT fold (so hc_dot walks
+; columns DESCENDING), ln-sumsq-acc / tn-sum / tb-weighted-acc are LEFT folds (so those loops ASCEND). The
+; consequence: the ONLY difference between this body's fp64 answer and the GPU's f32 answer is the WORKING
+; PRECISION — f32 vs fp64 over an identical operation graph — not a different approximation and not a
+; different summation order. So the gate is a derived f32 bound, not a vendor-transcendental tolerance.
+; `selfgauge`. (HC has no trig — no RoPE — so the only transcendental is exp, inside sigmoid and softmax.)
+;
+; THE COMBINE-MATRIX TRANSPOSE (edgedrop — the one subtle offset). hc_split STORES the Sinkhorn combine
+; flat as c[src + dst*n_hc] (dst outer), exactly as ds4.c:9620 writes it. hc_post READS comb[dst + src*n_hc]
+; (ds4.c:9786) — the TRANSPOSE. form_hc_post_f32 therefore indexes comb[dst + src*n_hc] while accumulating
+; over src. Undetectable on a symmetric matrix, wrong on every real weight. Both the read-back band and the
+; GPU harness carry an asymmetric combine so this offset bites (mla-msl's read-back lesson).
+;
+; THE SLOT (asktoll). form_hc_split_f32 is ONE thread: the 20-iteration Sinkhorn is a sequential
+; row/column normalization over a tiny n_hc*n_hc (16 at real width) matrix — one lane owns it, its scratch
+; a private array capped at HC_MAX_C. form_hc_post_f32 is one thread per dst stream (n_hc threads); the
+; per-stream post[dst] is a lane constant read once. broadcast/wsum/matvec/rmsnorm are the ordinary GPU
+; shapes (one thread per output element / output row / one thread), kept order-identical to the recipe.
+;
+; NO `using namespace metal;`, ONE `#include <metal_stdlib>`. Same discipline mla-msl.fk / q6k-msl.fk keep:
+; a second `using namespace metal;` makes this body's own `round` ambiguous and the unit stops compiling.
+; This file makes ZERO metal:: library calls (exp and sqrt are transcribed), so nothing needs qualifying.
+;
+; THE RADIUS THIS CELL SPEAKS FOR (aporon) — read it before believing the gate.
+;   * NOT bit-exact. f32 vs fp64 over the exp series cannot be bit-exact; the claim is agreement within a
+;     stated f32 bound on an asymmetric n_hc=4 combine that exercises the transpose (a symmetric combine
+;     cannot witness it — the read-back band's own edgedrop).
+;   * NOT the real dims. The demo is n_hc=4, n_embd=3 for the components and the full pre/post/head slice.
+;     V4-Flash is n_hc=4, n_embd=4096, fn [16384,24], 43 layers x two HC pairs (attn+ffn) + an output head.
+;     The kernels are dim-generic (n_hc/n_embd/iters/rows/cols are runtime uniforms) but no gate here has
+;     SEEN the real dims. form_hc_split_f32's private c array is capped at HC_MAX_C (64 = 8*8); above n_hc=8
+;     it is WRONG, not slow. V4-Flash's n_hc=4 (16 entries) is far inside.
+;   * NOT the fp8/f16 stream encodings ds4 stores its streams in, NOT the attention/FFN/MoE the HC wraps,
+;     NOT a resident real weight tensor, NOT a token. Same gaps dsv4-hc.fk's radius names. This is the HC
+;     wrapper's arithmetic, on the GPU, once, at toy embd width. `block_out` here is invented.
+;   * The 20 Sinkhorn iterations are threaded as a runtime uniform, never defaulted — an unrun iteration is
+;     not a computed zero (edgedrop). iters=20 vs iters=1 differ 1.7e-2 at these dims (Stone 25); the count
+;     is load-bearing and both proofs pin it.
+;
+; Kin: dsv4-hc.fk (the CPU recipe this equals), mla-msl.fk / q6k-msl.fk (the emit idiom, the slot
+; discipline, the read-back gate, the no-header rule), transformer-numerics.fk / llama-numerics.fk (the
+; deterministic series this transcribes), dsv4-hc-demo.fk (the shared toy fixture and the fp64 references).
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/dsv4-hc-msl-band.fk (the emitted text: one header, no using-namespace, one
+;            spine, every kernel present, the structural index — the pre/post/comb offsets and the transpose
+;            read — mapped against the recipe's own slicing) and form/native/metal/metal_hc_gpu.sh (the GPU,
+;            Mac-only: broadcast, the Sinkhorn split, the pre stream-reduce, the post with its transpose,
+;            and the output-head collapse against the fp64 recipe within the f32 bound).
+
+(do
+    ; ================= the structural index maps, read back into Form =================
+    ; The offsets the emitted kernels compute, in Form, so dsv4-hc-msl-band.fk can falsify the TEXT's
+    ; indexing against dsv4-hc.fk's own slicing (pre at 0, post at n_hc, comb at 2*n_hc; comb STORED at
+    ; src+dst*n_hc, READ at dst+src*n_hc) rather than trust the C string got them right. A transposed
+    ; offset that compiles and runs is the failure this guards.
+    (defn hcm-pre-off  (i) i)                              ; pre[i] lives at split[i]
+    (defn hcm-post-off (n_hc i) (add n_hc i))              ; post[i] lives at split[n_hc + i]
+    (defn hcm-comb-off (n_hc idx) (add (mul 2 n_hc) idx))  ; comb[idx] lives at split[2*n_hc + idx]
+    (defn hcm-c-idx    (src dst n_hc) (add src (mul dst n_hc)))  ; the STORE index (dst outer), ds4.c:9620
+    (defn hcm-c-tidx   (dst src n_hc) (add dst (mul src n_hc)))  ; the READ index (the transpose), ds4.c:9786
+
+    ; ================= the emitted MSL =================
+    ; One fragment per meaning, composed by str_concat, so a diff of the emitted text points at a recipe.
+
+    ; --- the numerics spine: abs, Newton sqrt (tn-sqrt), Taylor exp (tn-exp), sigmoid (ln-sigmoid), and the
+    ;     RIGHT-fold dot (tb-dot). Emitted ONCE for the whole unit. No trig: HC has no RoPE. ---
+    (defn hc-msl-spine ()
+        "static inline float hc_abs(float x) { return (x < 0.0f) ? -x : x; } static inline float hc_sqrt(float v) { if (v <= 0.0f) return 0.0f; float g = v; for (int n = 0; n < 50; ++n) { g = 0.5f * (g + v / g); } return g; } static inline float hc_exp_small(float x) { float term = 1.0f; float acc = 1.0f; for (int n = 1; n <= 14; ++n) { term = term * (x / float(n)); acc = acc + term; } return acc; } static inline float hc_pow2k(float v, int k) { for (int i = 0; i < k; ++i) v = v * v; return v; } static inline float hc_exp(float x) { float a = x; int k = 0; while (hc_abs(a) > 0.5f) { a = a * 0.5f; k = k + 1; } return hc_pow2k(hc_exp_small(a), k); } static inline float hc_sigmoid(float x) { return 1.0f / (1.0f + hc_exp(-x)); } static inline float hc_dot(device const float* a, device const float* b, uint n) { float acc = 0.0f; for (int c = int(n) - 1; c >= 0; --c) acc = a[uint(c)] * b[uint(c)] + acc; return acc; } ")
+
+    ; --- kernel: hc_from_plain_embedding (ds4.c:9764). The token starts every stream equal: out[h*n_embd+d]
+    ;     = x[d]. One thread per output element; d = gid mod n_embd. ---
+    (defn hc-broadcast-body ()
+        "kernel void form_hc_broadcast_f32(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], constant uint& n_hc [[buffer(2)]], constant uint& n_embd [[buffer(3)]], uint gid [[thread_position_in_grid]]) { uint total = n_hc * n_embd; if (gid >= total) return; uint d = gid % n_embd; out[gid] = x[d]; } ")
+
+    ; --- kernel: the UNWEIGHTED RMSNorm (rms_norm_no_weight, ds4.c:6628 / ln-rmsnorm with g=1). One thread;
+    ;     sumsq is ln-sumsq-acc's LEFT fold (ascending); out = x * (1/rms). Serves hc_pre and the head. ---
+    (defn hc-rmsnorm-nw-body ()
+        "kernel void form_hc_rmsnorm_nw_f32(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& eps [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i != 0u) return; float sumsq = 0.0f; for (uint j = 0u; j < n; ++j) sumsq = sumsq + x[j] * x[j]; float ms = sumsq / float(n); float inv = 1.0f / hc_sqrt(ms + eps); for (uint j = 0u; j < n; ++j) out[j] = x[j] * inv; } ")
+
+    ; --- THE SAME NORM, SPLIT SO THE HALF THAT CAN BE PARALLEL IS. Profiling named this kernel the
+    ;     single most expensive thing in the stack — 1878 us a call, against 22 us for a routed-expert
+    ;     matvec over 8.4 million quantised weights. The reason is `if (i != 0u) return`: ONE GPU thread
+    ;     walking 16 384 elements twice. The sum-of-squares must stay one ascending chain, because its
+    ;     association is the recipe's; the SCALE-AND-WRITE has no association at all and was serial only
+    ;     because it shared a kernel with the fold. Split, the write becomes one thread per element and
+    ;     the answer is bit-identical. `inv` travels between them in a one-float buffer.
+    ; THE FOLD, ACROSS ONE SIMDGROUP. ds4 accumulates this sum of squares in DOUBLE (ds4.c:6629), so a
+    ; single f32 chain of 16 384 terms is not the faithful shape — it is the least accurate one
+    ; available, and it was also the slowest kernel in the stack. Thirty-two lanes each fold a
+    ; CONTIGUOUS slice ascending, then metal::simd_sum combines them: the chain per lane drops 32x and
+    ; the shorter chains lose less, which moves the answer TOWARD ds4's double rather than away.
+    ; That is a claim about accuracy, so it is measured against the reference's stream, never assumed.
+    (defn hc-rmsnorm-nw-reduce-body ()
+        "kernel void form_hc_rmsnorm_nw_reduce_f32(device const float* x [[buffer(0)]], device float* inv [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& eps [[buffer(3)]], uint lane [[thread_position_in_grid]]) { if (lane >= 32u) return; uint per = (n + 31u) / 32u; uint lo = lane * per; uint hi = (lo + per < n) ? (lo + per) : n; float s = 0.0f; for (uint j = lo; j < hi; ++j) s = s + x[j] * x[j]; float sumsq = metal::simd_sum(s); if (lane != 0u) return; float ms = sumsq / float(n); inv[0] = 1.0f / hc_sqrt(ms + eps); } ")
+    ; The same row folded the way metal/norm.metal folds it: one threadgroup, every thread striding the
+    ; row, simd_sum then a simd_sum over the simdgroups' partials, and the scale applied in the SAME
+    ; kernel. Thirty-two lanes over a 16384-wide row left each lane 512 deep and cost a second dispatch
+    ; to spend what the first one found; the oracle does neither.
+    (defn hc-rmsnorm-nw-wide-body ()
+        "kernel void form_hc_rmsnorm_nw_wide_f32(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& eps [[buffer(3)]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]]) { threadgroup float sh[32]; if (sgitg == 0u) sh[tiisg] = 0.0f; float s = 0.0f; for (uint j = tpitg.x; j < n; j += ntg.x) { float v = x[j]; s = s + v * v; } s = metal::simd_sum(s); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) sh[sgitg] = s; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); s = metal::simd_sum(sh[tiisg]); float inv = 1.0f / hc_sqrt(s / float(n) + eps); if ((n & 3u) == 0u) { uint n4 = n >> 2u; for (uint j = tpitg.x; j < n4; j += ntg.x) { float4 xv = float4(*(device const packed_float4*)(x + 4u * j)); float4 r; r.x = xv.x * inv; r.y = xv.y * inv; r.z = xv.z * inv; r.w = xv.w * inv; *(device packed_float4*)(out + 4u * j) = packed_float4(r); } return; } for (uint j = tpitg.x; j < n; j += ntg.x) out[j] = x[j] * inv; } ")
+    (defn hc-rmsnorm-nw-apply-body ()
+        "kernel void form_hc_rmsnorm_nw_apply_f32(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], device const float* inv [[buffer(2)]], constant uint& n [[buffer(3)]], uint j [[thread_position_in_grid]]) { if (j >= n) return; out[j] = x[j] * inv[0]; } ")
+
+    ; --- kernel: plain f32 matvec (tb-matvec), the fn projection fn.flat. Row r per thread; the dot is
+    ;     tb-dot's RIGHT fold, so the column loop DESCENDS. Serves hc_pre's fn and the output head's fn. ---
+    (defn hc-matvec-body ()
+        "kernel void form_hc_matvec_f32(device const float* W [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; float acc = 0.0f; for (int c = int(cols) - 1; c >= 0; --c) acc = W[r * cols + uint(c)] * x[uint(c)] + acc; y[r] = acc; } ")
+
+    ; --- kernel: THE SPLIT (hc_split_sinkhorn_one, ds4.c:9592). ONE thread. mix is 2*n_hc + n_hc*n_hc wide.
+    ;     out is the split-flat vector: pre (n_hc), post (n_hc), comb (n_hc*n_hc, STORED c[src+dst*n_hc]).
+    ;       pre[i]  = sigmoid(mix[i]*pre_scale + base[i]) + eps
+    ;       post[i] = 2*sigmoid(mix[n_hc+i]*post_scale + base[n_hc+i])
+    ;       comb    = Sinkhorn( mix[2n_hc..]*comb_scale + base[2n_hc..] ): row-softmax(+eps), then a column
+    ;                 normalization, then iters-1 rounds of (row-normalize, column-normalize), every
+    ;                 normalization /(sum+eps). Sums ASCEND (tn-sum's left fold). c scratch capped HC_MAX_C. ---
+    (defn hc-split-body ()
+        "kernel void form_hc_split_f32(device const float* mix [[buffer(0)]], device const float* scale [[buffer(1)]], device const float* base [[buffer(2)]], device float* out [[buffer(3)]], constant uint& n_hc [[buffer(4)]], constant uint& iters [[buffer(5)]], constant float& eps [[buffer(6)]], uint t [[thread_position_in_grid]]) { threadgroup float c[HC_MAX_C]; if (t >= n_hc) return; float pre_scale = scale[0]; float post_scale = scale[1]; float comb_scale = scale[2]; { uint a = t; float z = mix[a] * pre_scale + base[a]; out[a] = hc_sigmoid(z) + eps; } { uint off = n_hc + t; float z = mix[off] * post_scale + base[off]; out[off] = 2.0f * hc_sigmoid(z); } uint nn = n_hc * n_hc; { uint dst = t; float row_max = -1.0e30f; for (uint src = 0u; src < n_hc; ++src) { uint idx = src + dst * n_hc; uint off = 2u * n_hc + idx; float v = mix[off] * comb_scale + base[off]; c[idx] = v; if (v > row_max) row_max = v; } float row_sum = 0.0f; for (uint src = 0u; src < n_hc; ++src) { uint idx = src + dst * n_hc; float v = hc_exp(c[idx] - row_max); c[idx] = v; row_sum = row_sum + v; } float rinv = 1.0f / row_sum; for (uint src = 0u; src < n_hc; ++src) { uint idx = src + dst * n_hc; c[idx] = c[idx] * rinv + eps; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); { uint src = t; float s = 0.0f; for (uint dst = 0u; dst < n_hc; ++dst) s = s + c[src + dst * n_hc]; float cinv = 1.0f / (s + eps); for (uint dst = 0u; dst < n_hc; ++dst) c[src + dst * n_hc] = c[src + dst * n_hc] * cinv; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint it = 1u; it < iters; ++it) { { uint dst = t; float s = 0.0f; for (uint src = 0u; src < n_hc; ++src) s = s + c[src + dst * n_hc]; float rinv = 1.0f / (s + eps); for (uint src = 0u; src < n_hc; ++src) c[src + dst * n_hc] = c[src + dst * n_hc] * rinv; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); { uint src = t; float s = 0.0f; for (uint dst = 0u; dst < n_hc; ++dst) s = s + c[src + dst * n_hc]; float cinv = 1.0f / (s + eps); for (uint dst = 0u; dst < n_hc; ++dst) c[src + dst * n_hc] = c[src + dst * n_hc] * cinv; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } for (uint k = t; k < nn; k += n_hc) out[2u * n_hc + k] = c[k]; } ")
+
+    ; --- kernel: THE SPLIT WITH THE MATRIX IN REGISTERS (n_hc = 4 only). Two things were measured on the
+    ;     stack before this was written, and the first one was wrong.
+    ;     form_hc_split_f32 spreads a 4x4 Sinkhorn over n_hc = 4 threads and pays 2*iters = 40 threadgroup
+    ;     barriers. FORM_DS4_DOUBLE priced it at 21.9 us a call against a 1.1 us dispatch (the FORM_DS4_PAD
+    ;     slope), 83 calls a token: 1.8 ms of a 40 ms token, on four threads. The obvious read is that the
+    ;     fences are the cost. THEY ARE NOT. The same arithmetic on one thread with c still in threadgroup
+    ;     memory ran the token 40.4 -> 45.2 ms: removing all 40 barriers made it WORSE. What the barriers
+    ;     were hiding is that every normalization pass is a read-modify-write of threadgroup memory and the
+    ;     next pass cannot start until it lands — 40 DEPENDENT memory round trips, ~550 ns each, with one
+    ;     small threadgroup on the device and nothing else in flight to hide them behind.
+    ;     So the matrix has to leave memory. At n_hc = 4 it is sixteen floats; with every loop bound a
+    ;     literal the compiler unrolls them, every index becomes a constant, and c[16] lives in registers.
+    ;     Then a normalization pass is register arithmetic and the chain has no memory in it at all.
+    ;     Every expression and every fold direction is the parallel kernel's: rows ascend over src, columns
+    ;     ascend over dst, the +eps lands where it landed. Bit-exactness is the gate, and n_hc != 4 keeps
+    ;     the parallel kernel — this is a specialization, not a replacement. ---
+    ; --- THE SINKHORN IS NOT ON THE PATH IT WAS EMITTED ON. hc-split-seq4 writes twenty-four floats and
+    ;     the block that follows it reads FOUR: hc_wsum takes out[0..n_hc-1], the pre weights, and
+    ;     nothing else until hc_post — at the far end of the sublayer — asks for the post weights and
+    ;     the sixteen combine weights. So twenty of the twenty-four are computed in front of a barrier
+    ;     that only four of them need to stand behind, and the twenty are the expensive ones: iters
+    ;     rounds of a 4x4 Sinkhorn on ONE thread, which FORM_DS4_DOUBLE prices at 0.8 ms of a 39 ms
+    ;     token over 86 asks.
+    ;     Cut where the readers already cut. `pre4` is the two sigmoid loops, letter for letter; `comb4`
+    ;     is everything after them, letter for letter, reading and writing the same slots. Together they
+    ;     write exactly what seq4 writes, and seq4 stays in the unit as the A/B. What the split buys is
+    ;     placement: the carrier emits comb4 beside the sublayer's own big matvecs, where it reads a
+    ;     `mix` written before the last barrier and writes a slice nothing in flight touches, so the
+    ;     hazard tracker lets it run underneath them instead of in front of them. ---
+    (defn hc-split-pre4-body ()
+        "kernel void form_hc_split_pre4_f32(device const float* mix [[buffer(0)]], device const float* scale [[buffer(1)]], device const float* base [[buffer(2)]], device float* out [[buffer(3)]], constant uint& n_hc [[buffer(4)]], constant float& eps [[buffer(5)]], uint g [[thread_position_in_grid]]) { if (g != 0u) return; float pre_scale = scale[0]; float post_scale = scale[1]; for (uint t = 0u; t < 4u; ++t) { float z = mix[t] * pre_scale + base[t]; out[t] = hc_sigmoid(z) + eps; } for (uint t = 0u; t < 4u; ++t) { uint off = 4u + t; float z = mix[off] * post_scale + base[off]; out[off] = 2.0f * hc_sigmoid(z); } } ")
+
+    (defn hc-split-comb4-body ()
+        "kernel void form_hc_split_comb4_f32(device const float* mix [[buffer(0)]], device const float* scale [[buffer(1)]], device const float* base [[buffer(2)]], device float* out [[buffer(3)]], constant uint& n_hc [[buffer(4)]], constant uint& iters [[buffer(5)]], constant float& eps [[buffer(6)]], uint g [[thread_position_in_grid]]) { if (g != 0u) return; thread float c[16]; float comb_scale = scale[2]; for (uint dst = 0u; dst < 4u; ++dst) { float row_max = -1.0e30f; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; uint off = 8u + idx; float v = mix[off] * comb_scale + base[off]; c[idx] = v; if (v > row_max) row_max = v; } float row_sum = 0.0f; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; float v = hc_exp(c[idx] - row_max); c[idx] = v; row_sum = row_sum + v; } float rinv = 1.0f / row_sum; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; c[idx] = c[idx] * rinv + eps; } } for (uint src = 0u; src < 4u; ++src) { float s = 0.0f; for (uint dst = 0u; dst < 4u; ++dst) s = s + c[src + dst * 4u]; float cinv = 1.0f / (s + eps); for (uint dst = 0u; dst < 4u; ++dst) c[src + dst * 4u] = c[src + dst * 4u] * cinv; } for (uint it = 1u; it < iters; ++it) { for (uint dst = 0u; dst < 4u; ++dst) { float s = 0.0f; for (uint src = 0u; src < 4u; ++src) s = s + c[src + dst * 4u]; float rinv = 1.0f / (s + eps); for (uint src = 0u; src < 4u; ++src) c[src + dst * 4u] = c[src + dst * 4u] * rinv; } for (uint src = 0u; src < 4u; ++src) { float s = 0.0f; for (uint dst = 0u; dst < 4u; ++dst) s = s + c[src + dst * 4u]; float cinv = 1.0f / (s + eps); for (uint dst = 0u; dst < 4u; ++dst) c[src + dst * 4u] = c[src + dst * 4u] * cinv; } } for (uint k = 0u; k < 16u; ++k) out[8u + k] = c[k]; } ")
+
+    (defn hc-split-seq4-body ()
+        "kernel void form_hc_split_seq4_f32(device const float* mix [[buffer(0)]], device const float* scale [[buffer(1)]], device const float* base [[buffer(2)]], device float* out [[buffer(3)]], constant uint& n_hc [[buffer(4)]], constant uint& iters [[buffer(5)]], constant float& eps [[buffer(6)]], uint g [[thread_position_in_grid]]) { if (g != 0u) return; thread float c[16]; float pre_scale = scale[0]; float post_scale = scale[1]; float comb_scale = scale[2]; for (uint t = 0u; t < 4u; ++t) { float z = mix[t] * pre_scale + base[t]; out[t] = hc_sigmoid(z) + eps; } for (uint t = 0u; t < 4u; ++t) { uint off = 4u + t; float z = mix[off] * post_scale + base[off]; out[off] = 2.0f * hc_sigmoid(z); } for (uint dst = 0u; dst < 4u; ++dst) { float row_max = -1.0e30f; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; uint off = 8u + idx; float v = mix[off] * comb_scale + base[off]; c[idx] = v; if (v > row_max) row_max = v; } float row_sum = 0.0f; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; float v = hc_exp(c[idx] - row_max); c[idx] = v; row_sum = row_sum + v; } float rinv = 1.0f / row_sum; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; c[idx] = c[idx] * rinv + eps; } } for (uint src = 0u; src < 4u; ++src) { float s = 0.0f; for (uint dst = 0u; dst < 4u; ++dst) s = s + c[src + dst * 4u]; float cinv = 1.0f / (s + eps); for (uint dst = 0u; dst < 4u; ++dst) c[src + dst * 4u] = c[src + dst * 4u] * cinv; } for (uint it = 1u; it < iters; ++it) { for (uint dst = 0u; dst < 4u; ++dst) { float s = 0.0f; for (uint src = 0u; src < 4u; ++src) s = s + c[src + dst * 4u]; float rinv = 1.0f / (s + eps); for (uint src = 0u; src < 4u; ++src) c[src + dst * 4u] = c[src + dst * 4u] * rinv; } for (uint src = 0u; src < 4u; ++src) { float s = 0.0f; for (uint dst = 0u; dst < 4u; ++dst) s = s + c[src + dst * 4u]; float cinv = 1.0f / (s + eps); for (uint dst = 0u; dst < 4u; ++dst) c[src + dst * 4u] = c[src + dst * 4u] * cinv; } } for (uint k = 0u; k < 16u; ++k) out[8u + k] = c[k]; } ")
+
+    ; --- kernel: hc_weighted_sum_one (ds4.c:9673), the stream-reduce. out[d] = sum_h streams[h*n_embd+d]*w[h].
+    ;     One thread per embd d; the sum ASCENDS over h (tb-weighted-acc's left fold). Serves hc_pre's input
+    ;     reduce and the output head's collapse. ---
+    (defn hc-wsum-body ()
+        "kernel void form_hc_wsum_f32(device const float* streams [[buffer(0)]], device const float* w [[buffer(1)]], device float* out [[buffer(2)]], constant uint& n_hc [[buffer(3)]], constant uint& n_embd [[buffer(4)]], uint d [[thread_position_in_grid]]) { if (d >= n_embd) return; float acc = 0.0f; for (uint h = 0u; h < n_hc; ++h) acc = acc + streams[h * n_embd + d] * w[h]; out[d] = acc; } ")
+
+    ; --- kernel: hc_post_one (ds4.c:9772), block-inject + combine-mix. THE SLOT: one thread per dst stream;
+    ;     post[dst] is a lane constant. new[dst][d] = block_out[d]*post[dst] + sum_src comb[dst+src*n_hc]*
+    ;     residual[src][d]. THE TRANSPOSE: comb is stored c[src+dst*n_hc] but read comb[dst+src*n_hc]. The
+    ;     stream sum ASCENDS over src (left fold); the block term is added last (tb-vec-add order). ---
+    ; ONE THREAD PER (dst, d), not per dst. The old slot gave this kernel n_hc THREADS — four, on a
+    ;     device with thousands of lanes — each walking 4096 elements, and profiling caught it at
+    ;     1461 us a call, second only to the norm above. The `d` loop is pure elementwise: every d is
+    ;     independent, so unrolling it across threads changes nothing about the arithmetic. The `src`
+    ;     sum, which IS the recipe's left fold, stays inside one thread and still ascends. Bit-identical.
+    (defn hc-post-body ()
+        "kernel void form_hc_post_f32(device const float* block_out [[buffer(0)]], device const float* residual [[buffer(1)]], device const float* post [[buffer(2)]], device const float* comb [[buffer(3)]], device float* out [[buffer(4)]], constant uint& n_hc [[buffer(5)]], constant uint& n_embd [[buffer(6)]], uint gid [[thread_position_in_grid]]) { uint total = n_hc * n_embd; if (gid >= total) return; uint dst = gid / n_embd; uint d = gid - dst * n_embd; float acc = 0.0f; for (uint src = 0u; src < n_hc; ++src) acc = acc + comb[dst + src * n_hc] * residual[src * n_embd + d]; out[gid] = block_out[d] * post[dst] + acc; } ")
+
+    ; --- kernel: the output head's per-stream weights (output_hc_head_one, ds4.c:13876):
+    ;     w[i] = sigmoid(pre[i]*scale + base[i]) + eps. One thread per stream. The head collapse itself is
+    ;     rmsnorm_nw -> matvec (fn) -> this -> wsum, composed by the carrier. ---
+    (defn hc-headw-body ()
+        "kernel void form_hc_headw_f32(device const float* pre [[buffer(0)]], device const float* scale [[buffer(1)]], device const float* base [[buffer(2)]], device float* out [[buffer(3)]], constant uint& n_hc [[buffer(4)]], constant float& eps [[buffer(5)]], uint i [[thread_position_in_grid]]) { if (i >= n_hc) return; float z = pre[i] * scale[0] + base[i]; out[i] = hc_sigmoid(z) + eps; } ")
+
+    ; --- ONE translation unit: the body's one metal_stdlib, the HC_MAX_C cap, the spine once, then the
+    ;     seven kernels. A carrier compiles exactly this; it composes nothing itself. ---
+    (defn hc-msl-unit ()
+        (str_concat "#include <metal_stdlib>\n#define HC_MAX_C 64\n"
+        (str_concat (hc-msl-spine)
+        (str_concat (hc-broadcast-body)
+        (str_concat (hc-rmsnorm-nw-body)
+        (str_concat (hc-rmsnorm-nw-reduce-body)
+        (str_concat (hc-rmsnorm-nw-apply-body)
+        (str_concat (hc-rmsnorm-nw-wide-body)
+        (str_concat (hc-matvec-body)
+        (str_concat (hc-split-body)
+        (str_concat (hc-split-seq4-body)
+        (str_concat (hc-split-pre4-body)
+        (str_concat (hc-split-comb4-body)
+        (str_concat (hc-wsum-body)
+        (str_concat (hc-post-body) (hc-headw-body))))))))))))))))
+
+    0)
