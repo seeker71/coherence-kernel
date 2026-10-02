@@ -23,11 +23,24 @@
 // The walk reads the clock at every application, so a runaway that branches instead of deepening
 // answers nothing=eval-stopped:deadline; a body call still running at the deadline is stopped and
 // answers nothing=body-call-timeout:<name>; a stop inside the walk (the runtime's own depth guard,
-// a door that stops) answers nothing=eval-stopped. The stream goes on after each.
+// a door that stops) answers nothing=eval-stopped. The stream goes on after each. A door that
+// waits answers by the deadline too: host_sleep_ms and host_wait wait no longer; host_capture,
+// host-exec and the network doors (http_get, tls_request, sock_request) run in a child that is
+// stopped at it (TERM, then KILL, reaped) and answer nothing=door-timeout:<door>. Only the doors
+// that wait on a descriptor of this process have no deadline (ftv-unbounded-doors: socket_accept,
+// socket_recv, a fifo opened by file_open and read by file_read): no child can wait for them.
 //
-// What a control prints (print, print_str, a body call's own output) never reaches the lane's
-// stdout, which is the lane's protocol channel: it is the observation's first words, then the
-// value's.
+// The lane's stdin and stdout are its protocol channel, and a control reaches neither. What a
+// control prints (print, print_str, a body call's own output, what a process it started said) never
+// reaches the lane's stdout: it is the observation's first words, then the value's. A process a
+// control starts (host_spawn, host_spawn_quiet, host_spawn_at with a stream left to the parent,
+// host_capture, host-exec) reads /dev/null and speaks into a file, read back into those words when
+// the control waits for it (host_wait) or ends. read_line, and any door given a path that names
+// /dev/stdin, answer nothing=stdin-is-the-lanes; any door given a path that names /dev/stdout
+// answers nothing=stdout-is-the-lanes (the lane's descriptors by their device paths, read after
+// . and .. and doubled slashes; a link to one is the voice's own). input_byte reads the unit's
+// source, never stdin. A shell that host-exec runs is stopped alone: a pipeline's other members
+// finish by themselves.
 //
 // One rendering rule, and it is no restriction: a value whose words would outgrow the observation
 // answers node=@<address> <summary>; — the address of its own recipe tree, so node-get reaches
@@ -293,8 +306,9 @@ section [form.bml] {
   def ftv-bound-value(session, bound) = bound[1] == "recipe" ? (ftv-recipe-of(session, bound[0]) ?? bound[0]) : bound[0];
 
   // ── the walk ─────────────────────────────────────────────────────────
-  // one walk: its session, its failure, its deadline and what it printed (newest first)
-  def ftv-ctx(session) = record_new(0, "session", session, "refused", "", "deadline", host_monotonic_ms() + ftv-patience(session), "printed", []);
+  // one walk: its session, its failure, its deadline, what it printed (newest first) and the
+  // processes it spawned that speak into a capture file ([pid, file], ftv-spawn)
+  def ftv-ctx(session) = record_new(0, "session", session, "refused", "", "deadline", host_monotonic_ms() + ftv-patience(session), "printed", [], "spawned", []);
   def ftv-session-of(ctx) = record_get(ctx, "session");
   def ftv-refused?(ctx) = len(record_get(ctx, "refused")) > 0;
   def ftv-deadline-reason() = "eval-stopped:deadline";
@@ -539,14 +553,90 @@ section [form.bml] {
   def ftv-bind(params, vals, env) = nil?(params) ? env : ftv-bind(params[1:], vals[1:], cons([params[0], vals[0]], env));
   def ftv-fn-name(f) = record_get(f, "name") == "" ? "lambda" : record_get(f, "name");
   // A door acts in this process; one that stops answers its name. print_str speaks into the
-  // observation, never onto the lane's stdout. A door that waits (host_sleep_ms, host_wait) waits
-  // no longer than the control's deadline.
+  // observation, never onto the lane's stdout. The lane's stdin and stdout are its protocol
+  // channel, and a control reaches neither: read_line and a path that names one of them answer
+  // nothing=stdin-is-the-lanes or nothing=stdout-is-the-lanes, and a process a control starts
+  // reads /dev/null and speaks into a file. A door that waits answers by the control's deadline:
+  // host_sleep_ms and host_wait wait no longer; host_capture, host-exec and the network doors that
+  // run in a child (http_get, tls_request, sock_request) are stopped at it and answer
+  // nothing=door-timeout:<door>. Only a door that waits on a descriptor of this process
+  // (ftv-unbounded-doors) has no deadline.
   def ftv-door(ctx, name, vals) {
    if len(vals) != ftw-door-arity(name) then ftv-refuse(ctx, "arity:" ++ name)
    else if name == "print_str" then ftv-print(ctx, vals)
-   else if (name == "host_sleep_ms") && ftv-int?(vals[0]) then ftv-sleep(ctx, vals[0])
-   else if (name == "host_wait") && ftv-int?(vals[0]) && (ftw-wait-child(vals[0], record_get(ctx, "deadline")) == 0) then ftv-refuse(ctx, ftv-deadline-reason())
+   else if name == "read_line" then ftv-refuse(ctx, "stdin-is-the-lanes")
+   else if ftv-lane-path-reason(name, vals) != "" then ftv-refuse(ctx, ftv-lane-path-reason(name, vals))
+   else ftv-door-timed(ctx, name, vals);
+  }
+  def ftv-door-timed(ctx, name, vals) {
+   if (name == "host_sleep_ms") && ftv-int?(vals[0]) then ftv-sleep(ctx, vals[0])
+   else if (name == "host_wait") && ftv-int?(vals[0]) then ftv-wait(ctx, vals[0])
+   else if name == "host_spawn" then ftv-spawn(ctx, vals[0], ["", "", ""])
+   else if name == "host_spawn_quiet" then ftv-spawn(ctx, vals[0], ["", "/dev/null", "/dev/null"])
+   else if (name == "host_spawn_at") && ftv-list?(vals[1]) && (len(vals[1]) == 3) && all?(x => ftv-str?(x), vals[1]) then ftv-spawn(ctx, vals[0], vals[1])
+   else if name == "host_capture" then ftv-process(ctx, name, vals[0], "")
+   else if (name == "host-exec") && ftv-str?(vals[0]) then ftv-process(ctx, name, ["/bin/sh", "-c", vals[0]], ftv-str?(vals[1]) ? vals[1] : "")
+   else if any?(d => d == name, ftv-remote-doors()) then ftv-remote(ctx, name, vals)
    else ftv-door-run(ctx, name, vals);
+  }
+  // doors that wait on a descriptor of this process: a socket this process listens on or reads, a
+  // fifo it opens. No child can wait for them, so the deadline does not reach them.
+  def ftv-unbounded-doors() = ["socket_accept", "socket_recv", "file_open", "file_read"];
+  def ftv-remote-doors() = ["http_get", "tls_request", "sock_request"];
+  // The lane's descriptors by their device paths, after . and .. and doubled slashes are read: a
+  // door that opens a file refuses them. (A link to one is the voice's own doing.)
+  def ftv-lane-in-paths() = ["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"];
+  def ftv-lane-out-paths() = ["/dev/stdout", "/dev/fd/1", "/proc/self/fd/1"];
+  def ftv-path-doors() = ["write_file", "write_file_text", "write_file_bytes", "host_file_write_text", "file_append_bytes", "host_file_append_bytes", "write_form_binary", "fs_truncate", "file_open", "read_file", "host_file_read_text", "read_file_bytes", "read_file_slice", "host_file_read_slice", "read_form_binary"];
+  def ftv-path-norm(p) = ftv-str?(p) && ftv-starts?(p, "/") ? "/" ++ ftv-join(reverse(foldl((acc, x) => (len(x) == 0) || (x == ".") ? acc : x == ".." ? (nil?(acc) ? acc : acc[1:]) : cons(x, acc), [], split-on(p, "/"))), "/") : p;
+  def ftv-path-reason(p) = any?(x => x == ftv-path-norm(p), ftv-lane-in-paths()) ? "stdin-is-the-lanes" : any?(x => x == ftv-path-norm(p), ftv-lane-out-paths()) ? "stdout-is-the-lanes" : "";
+  // "" when no path a door is given names a lane descriptor; else the reason
+  def ftv-lane-path-reason(name, vals) {
+   let paths = name == "host_spawn_at" ? (ftv-list?(vals[1]) ? vals[1] : []) : any?(d => d == name, ftv-path-doors()) ? [vals[0]] : [];
+   let reasons = filter(r => r != "", map(p => ftv-path-reason(p), filter(p => ftv-str?(p), paths)));
+   nil?(reasons) ? "" : reasons[0];
+  }
+  // A process a control starts reads /dev/null and speaks into a capture file, unless the control
+  // gave it somewhere to speak; the file is read back into the observation's printed text when the
+  // control waits for the process (host_wait), or when the control ends. Answers the pid.
+  def ftv-spawn(ctx, argv, streams) {
+   let made = ftw-mkdirs(ftw-doors-dir());
+   let file = ftw-doors-dir() ++ "/spawn-" ++ host_pid().str() ++ "-" ++ ftw-next-seq().str() ++ ".txt";
+   let speaks = streams[1] == "";
+   let pid = host_spawn_at(argv, [streams[0] == "" ? "/dev/null" : streams[0], speaks ? file : streams[1], streams[2]]);
+   if speaks && ftv-int?(pid) && (pid > 0) then record_set(ctx, "spawned", cons([pid, file], record_get(ctx, "spawned"))) else 0;
+   pid;
+  }
+  def ftv-wait(ctx, pid) {
+   if ftw-wait-child(pid, record_get(ctx, "deadline")) == 0 then ftv-refuse(ctx, ftv-deadline-reason()) else ftv-waited(ctx, pid, host_wait(pid));
+  }
+  def ftv-waited(ctx, pid, status) {
+   let drained = ftv-spawn-drain(ctx, filter(e => e[0] == pid, record_get(ctx, "spawned")));
+   status;
+  }
+  // what the spawned processes in entries said joins printed, and their files go
+  def ftv-spawn-drain(ctx, entries) {
+   let said = map(e => ftv-spawn-take(ctx, e), entries);
+   record_set(ctx, "spawned", filter(e => !any?(x => x[0] == e[0], entries), record_get(ctx, "spawned")));
+   0;
+  }
+  def ftv-spawn-take(ctx, e) {
+   ftv-printed(ctx, read_file(e[1]) ?? "");
+   if file_size(e[1]) >= 0 then fs_remove(e[1]) else 0;
+   0;
+  }
+  // the end of a control: what its processes said by now is its printed text
+  def ftv-end(ctx) = ftv-spawn-drain(ctx, record_get(ctx, "spawned"));
+  // host_capture and host-exec: run to their end by the deadline, or stopped at it
+  def ftv-process(ctx, door, argv, input) {
+   let ran = ftw-run-process(argv, input, record_get(ctx, "deadline"));
+   if ran[0] == 1 then ran[1] else if ran[0] == 0 then ftv-refuse(ctx, "door-timeout:" ++ door) else nothing();
+  }
+  // a network door runs in a child by the deadline
+  def ftv-remote(ctx, name, vals) {
+   let answer = ftw-native-call(name, vals, record_get(ctx, "deadline"));
+   let said = ftv-printed(ctx, answer[2]);
+   answer[0] == 1 ? answer[1] : ftv-refuse(ctx, answer[1]);
   }
   def ftv-door-run(ctx, name, vals) {
    let held = try [ftw-door-call(name, vals)] catch nothing();
@@ -597,6 +687,7 @@ section [form.bml] {
   def ftv-call-fn(session, f, vals, speaks) {
    let ctx = ftv-ctx(session);
    let value = ftv-guarded(ctx, () => ftv-apply(ctx, f, vals));
+   let ended = ftv-end(ctx);
    let said = speaks == 1 ? map(t => print_str(t), reverse(record_get(ctx, "printed"))) : [];
    value;
   }
@@ -871,6 +962,7 @@ section [form.bml] {
   // A value the control answered is also the session's observation (the microthought owner
   // reads it as the control's evidence), kept as the value itself with a function as "function".
   def ftv-settle(ctx, value) {
+   let ended = ftv-end(ctx);
    let session = ftv-session-of(ctx);
    let result = ftv-refused?(ctx) ? ftv-nothing(record_get(ctx, "refused")) : ftv-speak-settled(ctx, ftv-keep-value(session, value));
    if ftv-starts?(result, "value=") then record_set(session, "observed", ftv-observation-value(value)) else 0;
@@ -1134,6 +1226,7 @@ section [form.bml] {
    let ctx = ftv-ctx(session);
    let alts = map(node => args => ftv-holds?(ctx, body, node, seen) ? node : fail, nodes);
    let picked = try oac-choice(alts, 0) catch nothing();
+   let ended = ftv-end(ctx);
    if !nothing?(picked) then ftv-made(session, "", "", "node", picked)
    else if len(record_get(seen, "why")) > 0 then ftv-nothing(record_get(seen, "why"))
    else ftv-nothing("no-candidate-holds");
@@ -1262,6 +1355,7 @@ section [form.bml] {
    let body = ftv-parse-expr(ftv-at-rewrite(source));
    let ctx = ftv-ctx(session);
    let made = nothing?(body) ? nothing() : ftv-guarded(ctx, () => ftv-ev(ctx, body, []));
+   let ended = ftv-end(ctx);
    if nothing?(body) then ["parse-refused", nothing()]
    else if ftv-refused?(ctx) then [record_get(ctx, "refused"), nothing()]
    else if !ftv-closure?(made) then ["recipe-not-a-function", nothing()]
