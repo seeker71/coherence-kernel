@@ -1,0 +1,207 @@
+; dsv4-hc.fk — Hyper-Connections, the residual-stream structure DeepSeek-V4-Flash
+; runs its whole forward pass inside. NOT a plain residual `x = x + block(x)`. The
+; state is n_hc parallel streams (n_hc = 4 in V4-Flash), and every sublayer is
+; wrapped by a learned, per-token PRE step that mixes the streams down to one input
+; vector and a POST step that re-scatters the block's output back across the streams
+; through a doubly-stochastic combine matrix produced by a Sinkhorn normalization.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk
+;
+; ---------------------------------------------------------------------------
+; ESSENTIALITY (grounded, not guessed). ds4.c:13848 forward_first_token_cpu — the
+; reference's own FIRST-TOKEN path — is entirely HC-shaped: it embeds the token,
+; hc_from_plain_embedding broadcasts it to n_hc streams (ds4.c:9764), then EVERY
+; layer runs hc_pre_from_state_one before attention (ds4.c:9723) and hc_post_one
+; after (ds4.c:9772), and layer_ffn_one is wrapped the same way. output_hc_head_one
+; (ds4.c:13876) collapses the streams before the vocab projection. There is no
+; residual connection in this model that is NOT a hyper-connection. HC is CORE — a
+; correct first token cannot be produced without it. (By contrast the compressor and
+; the indexer are never called on forward_first_token_cpu; they are long-context
+; accelerators. See receipts/2026-07-22-dsv4-subsystems.md.)
+;
+; ---------------------------------------------------------------------------
+; PROVENANCE. Read from ds4-engine (MIT) at /Users/ursmuff/models/ds4-engine —
+; ds4.c's CPU reference, not from a paper:
+;   ds4.c:9592  hc_split_sinkhorn_one       pre/post weights + the Sinkhorn combine
+;   ds4.c:9673  hc_weighted_sum_one         the stream-reduce
+;   ds4.c:9690  hc_pre_from_state_one       rms(no weight) -> matvec fn -> split -> reduce
+;   ds4.c:9764  hc_from_plain_embedding     broadcast the embedding to n_hc streams
+;   ds4.c:9772  hc_post_one                 inject block output + combine-mix the streams
+;   ds4.c:13876 output_hc_head_one          final collapse of the streams
+; Nothing is copied; the arithmetic is re-derived on this body's own proven
+; primitives (ln-rmsnorm, tb-matvec, ln-sigmoid, tn-exp-map/tn-max/tn-sum,
+; tb-weighted-acc). `boundborrow`: ds4 targets a GB10; no layout, no f16, no fp8
+; crossed over — only the shape of the computation. This body is fp64 throughout.
+;
+; ---------------------------------------------------------------------------
+; THE TENSORS (Stone 21's manifest, receipts/2026-07-22-deepseek-manifest.md), and
+; how the dims are PREDICTED by this arithmetic — a falsifier that holds:
+;   hc_{attn,ffn}_fn   [16384, 24]  = [n_hc*n_embd , 2*n_hc + n_hc*n_hc]
+;                                      16384 = 4*4096 ; 24 = 8 + 16
+;   hc_{attn,ffn}_base [24]         = one bias per split output
+;   hc_{attn,ffn}_scale [3]         = [pre_scale, post_scale, comb_scale]
+;   output_hc_{fn,base,scale} [16384,4]/[4]/[1]  — the head emits only n_hc pre-weights
+; A reading in which the fn output width were anything but 2*n_hc + n_hc*n_hc leaves
+; the [24] and [3] tensors without a consumer. The manifest and this algebra agree.
+;
+; ---------------------------------------------------------------------------
+; THE COMBINE-MATRIX TRANSPOSE (edgedrop — do not miss it). hc_split_sinkhorn_one
+; STORES the combine matrix flat as c[src + dst*n_hc] (ds4.c:9620, dst outer). But
+; hc_post_one READS it as comb[dst + src*n_hc] (ds4.c:9786, "addressed as [dst,src]").
+; The same flat position is written (src,dst) and read (dst,src): the mix in the post
+; step uses the TRANSPOSE of the Sinkhorn-normalized matrix. Below, the combine matrix
+; is carried as a list of dst-rows (comb-rows[dst][src] = c[src + dst*n_hc]); hc-post
+; therefore reads COLUMN dst across the rows (hc-col), which is exactly comb[dst+src*n_hc].
+; Getting this backwards is undetectable on a symmetric matrix and wrong on every other.
+;
+; NOT here: YaRN is irrelevant to HC (no rope). The Sinkhorn iteration count is fixed
+; at 20 in V4-Flash (deepseek4.hyper_connection.sinkhorn_iterations); it is a PARAMETER
+; here and the band pins it. An unrun iteration is not a computed zero (edgedrop):
+; iters is threaded explicitly, never defaulted.
+
+; ===========================================================================
+; small elementwise helpers (kept local so the recipe depends only on proven prims)
+; ===========================================================================
+; v_i * s + b_i  (affine)
+(defn hc-vaffine (v s b)
+  (if (eq (len v) 0) (empty)
+      (cons (add (mul (head v) s) (head b))
+            (hc-vaffine (tail v) s (tail b)))))
+; add a scalar to each element
+(defn hc-vadds (v s)
+  (if (eq (len v) 0) (empty) (cons (add (head v) s) (hc-vadds (tail v) s))))
+; elementwise a_i / b_i
+(defn hc-vdiv (a b)
+  (if (eq (len a) 0) (empty)
+      (cons (div (head a) (head b)) (hc-vdiv (tail a) (tail b)))))
+; sigmoid(v_i) + eps, and 2*sigmoid(v_i)
+(defn hc-vsig-eps (v eps)
+  (if (eq (len v) 0) (empty) (cons (add (ln-sigmoid (head v)) eps) (hc-vsig-eps (tail v) eps))))
+(defn hc-vsig2 (v)
+  (if (eq (len v) 0) (empty) (cons (mul 2.0 (ln-sigmoid (head v))) (hc-vsig2 (tail v)))))
+; column j of a list of rows -> the j-th element of each row
+(defn hc-col (rows j)
+  (if (eq (len rows) 0) (empty) (cons (nth (head rows) j) (hc-col (tail rows) j))))
+; elementwise sum of a list of equal-length rows
+(defn hc-rowsum (rows acc)
+  (if (eq (len rows) 0) acc (hc-rowsum (tail rows) (tb-vec-add acc (head rows)))))
+
+; ===========================================================================
+; the Sinkhorn normalization on the combine matrix, carried as dst-rows.
+; row-softmax (max-shift), then a column normalization, then (iters-1) rounds of
+; (row-normalize, column-normalize). Every normalization is /(sum + eps).
+; ===========================================================================
+; one row: softmax with +eps  (ds4.c:9627-9639)
+(defn hc-row-softmax (row eps)
+  (do (let m (tn-max row))
+      (let e (tn-exp-map (tn-sub-scalar row m)))
+      (hc-vadds (tn-scale e (div 1.0 (tn-sum e))) eps)))
+(defn hc-map-row-softmax (rows eps)
+  (if (eq (len rows) 0) (empty)
+      (cons (hc-row-softmax (head rows) eps) (hc-map-row-softmax (tail rows) eps))))
+; row-normalize: each row / (rowsum + eps)   (ds4.c:9651-9657)
+(defn hc-row-norm (rows eps)
+  (if (eq (len rows) 0) (empty)
+      (cons (tn-scale (head rows) (div 1.0 (add (tn-sum (head rows)) eps)))
+            (hc-row-norm (tail rows) eps))))
+; column-normalize: each column / (colsum + eps)  (ds4.c:9642-9648 / 9659-9665)
+(defn hc-col-norm-div (rows cs)
+  (if (eq (len rows) 0) (empty)
+      (cons (hc-vdiv (head rows) cs) (hc-col-norm-div (tail rows) cs))))
+(defn hc-col-norm (rows eps)
+  (hc-col-norm-div rows (hc-vadds (hc-rowsum rows (tb-zeros (len (head rows)))) eps)))
+; iters-1 rounds of (col-norm . row-norm)
+(defn hc-sink-iter (rows n eps)
+  (if (eq n 0) rows
+      (hc-sink-iter (hc-col-norm (hc-row-norm rows eps) eps) (sub n 1) eps)))
+; comb-raw (scaled+biased) rows -> Sinkhorn-normalized dst-rows
+(defn hc-sinkhorn-comb (raw iters eps)
+  (hc-sink-iter (hc-col-norm (hc-map-row-softmax raw eps) eps) (sub iters 1) eps))
+
+; ===========================================================================
+; build the comb-raw dst-rows from the comb slice of mix/base:
+;   raw[dst][src] = mix[2n_hc + src + dst*n_hc]*comb_scale + base[same]
+; ===========================================================================
+(defn hc-comb-raw (mixc basec dst n_hc cs)
+  (if (eq dst n_hc) (empty)
+      (cons (hc-vaffine (tb-vslice mixc (mul dst n_hc) n_hc) cs (tb-vslice basec (mul dst n_hc) n_hc))
+            (hc-comb-raw mixc basec (add dst 1) n_hc cs))))
+
+; ===========================================================================
+; THE SPLIT (ds4.c:9592). mix is 2*n_hc + n_hc*n_hc wide. Returns a record
+; (pre post comb-rows): pre and post are n_hc-vectors; comb-rows is n_hc dst-rows.
+;   pre[i]  = sigmoid(mix[i]*pre_scale + base[i]) + eps
+;   post[i] = 2*sigmoid(mix[n_hc+i]*post_scale + base[n_hc+i])
+;   comb    = Sinkhorn( mix[2n_hc..]*comb_scale + base[2n_hc..] )
+; ===========================================================================
+(defn hc-split (mix scale base n_hc iters eps)
+  (do (let ps (nth scale 0))
+      (let qs (nth scale 1))
+      (let cs (nth scale 2))
+      (let pre  (hc-vsig-eps (hc-vaffine (tb-vslice mix 0 n_hc) ps (tb-vslice base 0 n_hc)) eps))
+      (let post (hc-vsig2   (hc-vaffine (tb-vslice mix n_hc n_hc) qs (tb-vslice base n_hc n_hc))))
+      (let raw  (hc-comb-raw (tb-drop (mul 2 n_hc) mix) (tb-drop (mul 2 n_hc) base) 0 n_hc cs))
+      (list pre post (hc-sinkhorn-comb raw iters eps))))
+(defn hc-split-pre  (s) (nth s 0))
+(defn hc-split-post (s) (nth s 1))
+(defn hc-split-comb (s) (nth s 2))
+; the flat 2n_hc + n_hc*n_hc vector, in ds4's out[] order — for agreement checks
+(defn hc-rowsum-cat (rows)  ; concatenate rows (flatten [dst][src])
+  (if (eq (len rows) 0) (empty) (tb-cat (head rows) (hc-rowsum-cat (tail rows)))))
+(defn hc-split-flat (s)
+  (tb-cat (hc-split-pre s)
+          (tb-cat (hc-split-post s) (hc-rowsum-cat (hc-split-comb s)))))
+
+; ===========================================================================
+; hc_from_plain_embedding (ds4.c:9764): the token starts every stream equal.
+; ===========================================================================
+(defn hc-broadcast (n_hc x) (if (eq n_hc 0) (empty) (cons x (hc-broadcast (sub n_hc 1) x))))
+
+; ===========================================================================
+; hc_weighted_sum_one (ds4.c:9673): reduce the streams to one vector by `weights`.
+; ===========================================================================
+(defn hc-wsum (rows weights) (tb-weighted-acc weights rows (tb-zeros (len (head rows)))))
+
+; ===========================================================================
+; hc_pre_from_state_one (ds4.c:9690): normalize the flat HC state, project the
+; control vector through fn, split it, reduce the streams by the pre-weights.
+; `fn` is the list of 2n_hc+n_hc*n_hc output rows (each n_hc*n_embd wide).
+; Returns (input post comb-rows): input feeds attention/ffn; post/comb feed hc-post.
+; ===========================================================================
+(defn hc-flat (rows)  ; flatten the stream rows into one n_hc*n_embd vector
+  (if (eq (len rows) 0) (empty) (tb-cat (head rows) (hc-flat (tail rows)))))
+(defn hc-pre (fn scale base residual-rows n_hc iters eps)
+  (do (let flat (ln-rmsnorm (hc-flat residual-rows) (hc-broadcast (len (hc-flat residual-rows)) 1.0) eps))
+      (let mix (tb-matvec fn flat))
+      (let s (hc-split mix scale base n_hc iters eps))
+      (list (hc-wsum residual-rows (hc-split-pre s)) (hc-split-post s) (hc-split-comb s))))
+(defn hc-pre-input (p) (nth p 0))
+(defn hc-pre-post  (p) (nth p 1))
+(defn hc-pre-comb  (p) (nth p 2))
+
+; ===========================================================================
+; hc_post_one (ds4.c:9772): new stream dst = block_out * post[dst]  +
+;   sum_src comb[dst + src*n_hc] * residual[src]. With comb-rows carrying
+;   comb[src + dst*n_hc], comb[dst + src*n_hc] is COLUMN dst of comb-rows (the
+;   transpose). Returns the n_hc new stream rows.
+; ===========================================================================
+(defn hc-post-row (block-out residual-rows post comb-rows dst)
+  (tb-vec-add (tn-scale block-out (nth post dst))
+              (hc-wsum residual-rows (hc-col comb-rows dst))))
+(defn hc-post-loop (block-out residual-rows post comb-rows dst n_hc)
+  (if (eq dst n_hc) (empty)
+      (cons (hc-post-row block-out residual-rows post comb-rows dst)
+            (hc-post-loop block-out residual-rows post comb-rows (add dst 1) n_hc))))
+(defn hc-post (block-out residual-rows post comb-rows n_hc)
+  (hc-post-loop block-out residual-rows post comb-rows 0 n_hc))
+
+; ===========================================================================
+; output_hc_head_one (ds4.c:13876): collapse the streams to one embedding.
+;   flat = rms(no weight) ; pre = fn·flat ; w[i] = sigmoid(pre[i]*scale + base[i]) + eps
+;   out = weighted_sum(streams, w).  fn is n_hc output rows.
+; ===========================================================================
+(defn hc-out-head (fn scale base inp-rows eps)
+  (do (let flat (ln-rmsnorm (hc-flat inp-rows) (hc-broadcast (len (hc-flat inp-rows)) 1.0) eps))
+      (let pre (tb-matvec fn flat))
+      (let w (hc-vsig-eps (hc-vaffine pre (nth scale 0) base) eps))
+      (hc-wsum inp-rows w)))

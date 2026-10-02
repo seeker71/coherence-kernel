@@ -1,0 +1,161 @@
+; dsv4-hc-msl-band.fk — the read-back gate for dsv4-hc-msl.fk. Verdict 63 when all six claims cross.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/dsv4-hc.fk form-stdlib/dsv4-hc-msl.fk
+;
+; WHAT THIS BAND PROVES (the mla-msl.fk / q6k-msl.fk read-back discipline, in Form). The emitted MSL is a
+; STRING; a transposed comb offset or a flipped fold direction compiles and runs and produces plausible
+; numbers. So the band does not trust the string — it re-derives each kernel's arithmetic in Form,
+; STRUCTURED THE WAY THE MSL IS (the flat combine c[src+dst*n_hc], the DESCENDING dot that mirrors tb-dot's
+; right fold, the ASCENDING stream-reduce, the transpose READ comb[dst+src*n_hc] via the emitter's own
+; hcm-c-tidx), and demands it equal dsv4-hc.fk's recipe BIT FOR BIT (fp64). The structural offsets (pre at
+; hcm-pre-off, post at hcm-post-off, comb at hcm-comb-off, the storage hcm-c-idx and the transpose
+; hcm-c-tidx) are the emitter's OWN declared index — tying the mirror to those helpers means editing them to
+; match a broken kernel breaks the "== recipe" tie.
+;
+; WHAT IT DOES NOT PROVE (aporon): the f32 GPU numbers (that is metal_hc_gpu.sh), the emitted text's
+; header/using-namespace/kernel-presence discipline (that is the harness's grep gates), the real dims, the
+; fp8/f16 stream encodings, the wrapped attention/FFN, or the resident weights. This band is the fp64
+; correspondence between the transcription and the recipe; the GPU witness is the f32 correspondence between
+; the compiled kernel and the recipe.
+;
+;   bit  1  THE SPLIT-FLAT LAYOUT READS BACK: extracting pre/post/comb from the recipe's hc-split-flat via
+;           the emitter's hcm-pre-off / hcm-post-off / hcm-comb-off + hcm-c-idx reconstructs hc-split-pre /
+;           -post / -comb bit for bit. Falsifies a kernel that lays the split out in any other order.
+;   bit  2  THE DESCENDING DOT (fn matvec fold) READS BACK: a Form mirror of hc_dot's DESCENDING accumulate
+;           equals tb-dot's right fold bit for bit on operands spanning past fp64's 2^53 (an ascending
+;           mirror would give a different number). Pins the fn projection's summation order.
+;   bit  4  THE NO-WEIGHT RMSNORM READS BACK: a Form mirror (ascending sum-of-squares, out = x*(1/rms))
+;           equals ln-rmsnorm(x, ones, eps) bit for bit.
+;   bit  8  THE STREAM-REDUCE READS BACK, AND THE FOLD BITES: a Form mirror of form_hc_wsum_f32's ASCENDING
+;           left fold equals hc-wsum bit for bit; AND on a magnitude-spanning stream set the ascending
+;           mirror differs from a descending fold — the direction is load-bearing, and mine is the recipe's.
+;   bit 16  THE POST TRANSPOSE READS BACK, AND IS LOAD-BEARING: a Form mirror of form_hc_post_f32 (reading
+;           the flat combine at hcm-c-tidx = dst+src*n_hc, ascending src, block term added last) equals
+;           hc-post bit for bit; AND hc-post over the combine vs over its transpose differ > 1e-3 (the
+;           combine is asymmetric). Falsifies reading comb[dst+src*n_hc] as comb[src+dst*n_hc].
+;   bit 32  THE 20 ITERATIONS ARE REAL: after 20 Sinkhorn iterations every row-sum AND column-sum of the
+;           4x4 combine is 1 to 1e-4 (doubly stochastic — a plain softmax makes only rows sum to 1); and
+;           the combine at iters=20 differs from iters=1 by > 1e-3. An unrun iteration is not a computed zero.
+
+(do
+    (defn hcmb-vmaxdiff (a b)
+        (if (eq (len a) 0) 0.0
+            (do (let d (tn-abs (sub (head a) (head b))))
+                (let r (hcmb-vmaxdiff (tail a) (tail b)))
+                (if (gt d r) d r))))
+    (defn hcmb-maxdiff (as bs)
+        (if (eq (len as) 0) 0.0
+            (do (let d (hcmb-vmaxdiff (head as) (head bs)))
+                (let r (hcmb-maxdiff (tail as) (tail bs)))
+                (if (gt d r) d r))))
+    (defn hcmb-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (hcmb-flat (tail rows)))))
+    (defn hcmb-dev1 (v) (if (eq (len v) 0) 0.0 (do (let d (tn-abs (sub (head v) 1.0))) (let r (hcmb-dev1 (tail v))) (if (gt d r) d r))))
+    ; transpose a square list-of-rows
+    (defn hcmb-tpose-loop (rows j n) (if (eq j n) (empty) (cons (hc-col rows j) (hcmb-tpose-loop rows (add j 1) n))))
+    (defn hcmb-tpose (rows n) (hcmb-tpose-loop rows 0 n))
+
+    ; ---- mirror of hc_dot: DESCENDING accumulate, acc = a[i]*b[i] + acc, i from n-1 down to 0 ----
+    (defn hcmb-dot-acc (a b i acc)
+        (if (lt i 0) acc (hcmb-dot-acc a b (sub i 1) (add (mul (nth a i) (nth b i)) acc))))
+    (defn hcmb-dot-desc (a b) (hcmb-dot-acc a b (sub (len a) 1) 0.0))
+
+    ; ---- mirror of form_hc_rmsnorm_nw_f32: ascending sum-of-squares, out = x*(1/rms) ----
+    (defn hcmb-sumsq (xs i n acc) (if (ge i n) acc (hcmb-sumsq xs (add i 1) n (add acc (mul (nth xs i) (nth xs i))))))
+    (defn hcmb-scale (xs inv i n) (if (ge i n) (empty) (cons (mul (nth xs i) inv) (hcmb-scale xs inv (add i 1) n))))
+    (defn hcmb-rmsnorm-nw (xs eps)
+        (do (let n (len xs))
+            (let ss (hcmb-sumsq xs 0 n 0.0))
+            (let ms (div ss (mul n 1.0)))
+            (let inv (div 1.0 (tn-sqrt (add ms eps))))
+            (hcmb-scale xs inv 0 n)))
+
+    ; ---- mirror of form_hc_wsum_f32: out[d] = sum_h rows[h][d]*w[h], ASCENDING over h from acc 0 ----
+    (defn hcmb-wsum-d (rows w d h n_hc acc)
+        (if (ge h n_hc) acc (hcmb-wsum-d rows w d (add h 1) n_hc (add acc (mul (nth (nth rows h) d) (nth w h))))))
+    (defn hcmb-wsum (rows w d0 n_embd n_hc)
+        (if (ge d0 n_embd) (empty) (cons (hcmb-wsum-d rows w d0 0 n_hc 0.0) (hcmb-wsum rows w (add d0 1) n_embd n_hc))))
+    ; a DESCENDING variant (for the fold-direction falsifier only)
+    (defn hcmb-wsum-d-desc (rows w d h acc)
+        (if (lt h 0) acc (hcmb-wsum-d-desc rows w d (sub h 1) (add acc (mul (nth (nth rows h) d) (nth w h))))))
+
+    ; ---- mirror of form_hc_post_f32: block_out[d]*post[dst] + sum_src comb[dst+src*n_hc]*residual[src][d],
+    ;      reading the FLAT combine at the emitter's transpose index hcm-c-tidx, ascending src, block last ----
+    (defn hcmb-post-d (blk pd resid combflat dst d src n_hc acc)
+        (if (ge src n_hc) (add (mul (nth blk d) pd) acc)
+            (hcmb-post-d blk pd resid combflat dst d (add src 1) n_hc
+                (add acc (mul (nth combflat (hcm-c-tidx dst src n_hc)) (nth (nth resid src) d))))))
+    (defn hcmb-post-row (blk pd resid combflat dst n_hc n_embd d)
+        (if (ge d n_embd) (empty) (cons (hcmb-post-d blk pd resid combflat dst d 0 n_hc 0.0) (hcmb-post-row blk pd resid combflat dst n_hc n_embd (add d 1)))))
+    (defn hcmb-post (blk resid post combflat n_hc n_embd dst)
+        (if (ge dst n_hc) (empty) (cons (hcmb-post-row blk (nth post dst) resid combflat dst n_hc n_embd 0) (hcmb-post blk resid post combflat n_hc n_embd (add dst 1)))))
+
+    (let eps 0.000001)
+    (let iters 20)
+    (let n4 4)
+
+    ; ===== fixtures at n_hc=4, n_embd=3 (identical to dsv4-hc-band.fk's proven fixture) =====
+    (let mix (list 0.3 -0.7 0.5 0.1 -0.2 0.6 -0.4 0.8 0.2 -0.5 0.9 -0.1 -0.3 0.7 0.1 -0.6 0.4 -0.2 -0.8 0.5 0.1 0.3 -0.4 0.6))
+    (let scale (list 1.3 0.7 1.1))
+    (let base (list 0.05 -0.1 0.2 0.0 0.1 -0.05 0.15 -0.2 0.0 0.1 -0.1 0.05 -0.05 0.2 0.0 0.1 0.15 -0.1 0.05 0.0 0.1 0.0 -0.15 0.2))
+    (let resid (list (list 0.5 -0.3 0.9) (list -0.4 0.7 -0.1) (list 0.2 0.1 -0.8) (list 0.6 -0.5 0.3)))
+    (let blk (list 0.35 -0.25 0.65))
+
+    (let s4 (hc-split mix scale base n4 iters eps))
+    (let split-flat (hc-split-flat s4))
+    (let pre-rec  (hc-split-pre s4))
+    (let post-rec (hc-split-post s4))
+    (let comb-rec (hc-split-comb s4))            ; dst-rows
+    (let comb-flat (hc-rowsum-cat comb-rec))     ; flat c[src+dst*n_hc]
+
+    ; --- claim 1: the split-flat layout reads back via the emitter's offsets ---
+    ; pre[i] at hcm-pre-off, post[i] at hcm-post-off, comb[src+dst*n] at hcm-comb-off(hcm-c-idx)
+    (defn hcmb-take-off (flat off i n) (if (ge i n) (empty) (cons (nth flat (add off i)) (hcmb-take-off flat off (add i 1) n))))
+    (let pre-lay  (hcmb-take-off split-flat (hcm-pre-off 0) 0 n4))
+    (let post-lay (hcmb-take-off split-flat (hcm-post-off n4 0) 0 n4))
+    ; comb row dst reconstructed from split-flat at hcm-comb-off(hcm-c-idx src dst)
+    (defn hcmb-comb-row (flat dst src n_hc) (if (ge src n_hc) (empty) (cons (nth flat (hcm-comb-off n_hc (hcm-c-idx src dst n_hc))) (hcmb-comb-row flat dst (add src 1) n_hc))))
+    (defn hcmb-comb-lay (flat dst n_hc) (if (ge dst n_hc) (empty) (cons (hcmb-comb-row flat dst 0 n_hc) (hcmb-comb-lay flat (add dst 1) n_hc))))
+    (let comb-lay (hcmb-comb-lay split-flat 0 n4))
+    (let c1a (hcmb-vmaxdiff pre-lay pre-rec))
+    (let c1b (hcmb-vmaxdiff post-lay post-rec))
+    (let c1c (hcmb-maxdiff comb-lay comb-rec))
+    (let c1 (if (eq c1a 0.0) (if (eq c1b 0.0) (if (eq c1c 0.0) 1 0) 0) 0))
+
+    ; --- claim 2: the descending dot reads back (magnitudes past 2^53 so the fold direction matters) ---
+    (let da (list 100000000000000000.0 1.0 1.0 -100000000000000000.0 1.0 1.0))
+    (let db (list 1.0 1.0 1.0 1.0 1.0 1.0))
+    (let c2 (if (eq (tn-abs (sub (hcmb-dot-desc da db) (tb-dot da db))) 0.0) 2 0))
+
+    ; --- claim 4: the no-weight rmsnorm reads back (== ln-rmsnorm with unit gains) ---
+    (let rn-x (list 0.5 -0.3 0.9 -0.4 0.7 -0.1 0.2 0.1 -0.8 0.6 -0.5 0.3))
+    (let rn-mirror (hcmb-rmsnorm-nw rn-x eps))
+    (let rn-recipe (ln-rmsnorm rn-x (hc-broadcast (len rn-x) 1.0) eps))
+    (let c4 (if (eq (hcmb-vmaxdiff rn-mirror rn-recipe) 0.0) 4 0))
+
+    ; --- claim 8: the stream-reduce reads back, and its fold direction bites ---
+    (let wsum-mirror (hcmb-wsum resid pre-rec 0 3 n4))
+    (let wsum-recipe (hc-wsum resid pre-rec))
+    (let c8a (hcmb-vmaxdiff wsum-mirror wsum-recipe))
+    ; fold falsifier: on a magnitude-spanning stream set ascending != descending
+    (let sr-rows (list (list 100000000000000000.0) (list 1.0) (list -100000000000000000.0) (list 1.0)))
+    (let sr-w (list 1.0 1.0 1.0 1.0))
+    (let sr-asc  (hcmb-wsum-d sr-rows sr-w 0 0 n4 0.0))
+    (let sr-desc (hcmb-wsum-d-desc sr-rows sr-w 0 (sub n4 1) 0.0))
+    (let c8 (if (eq c8a 0.0) (if (gt (tn-abs (sub sr-asc sr-desc)) 0.5) 8 0) 0))
+
+    ; --- claim 16: the post transpose reads back, and is load-bearing ---
+    (let post-mirror (hcmb-post blk resid post-rec comb-flat n4 3 0))
+    (let post-recipe (hc-post blk resid post-rec comb-rec n4))
+    (let c16a (hcmb-maxdiff post-mirror post-recipe))
+    (let post-t (hc-post blk resid post-rec (hcmb-tpose comb-rec n4) n4))
+    (let c16b (hcmb-maxdiff post-recipe post-t))
+    (let c16 (if (eq c16a 0.0) (if (gt c16b 0.001) 16 0) 0))
+
+    ; --- claim 32: the 20 iterations are real (doubly stochastic; iters=20 != iters=1) ---
+    (let rowsums (list (tn-sum (nth comb-rec 0)) (tn-sum (nth comb-rec 1)) (tn-sum (nth comb-rec 2)) (tn-sum (nth comb-rec 3))))
+    (let colsums (hc-rowsum comb-rec (tb-zeros 4)))
+    (let s4-one (hc-split mix scale base n4 1 eps))
+    (let iters-diff (hcmb-vmaxdiff (hc-rowsum-cat comb-rec) (hc-rowsum-cat (hc-split-comb s4-one))))
+    (let c32 (if (lt (hcmb-dev1 rowsums) 0.0001) (if (lt (hcmb-dev1 colsums) 0.0001) (if (gt iters-diff 0.001) 32 0) 0) 0))
+
+    (add c1 (add c2 (add c4 (add c8 (add c16 c32))))))
