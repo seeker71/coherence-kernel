@@ -24,15 +24,19 @@
 // hw-with-published, which restores it on every path a process lives through; hw-heal-publishes returns what a
 // killed publish left, and each walk heals before it syncs.
 //
-// No step of the walk is a shell line. Every child is an argv spawned through form-stdlib/bml/host-child.bml: its
-// stdin is a file, its stdout and stderr share one file, and the exit is read from the host. The whole of what each
-// child said stays under .hearth/walk-io/<step>.{in,out,exit}, and the run before it under <step>.prev.* (turn, plan,
-// review, gates, movement, build, carrier, push, sync-*), so a turn, a review or a gate that failed leaves its
-// evidence for the findings feeder, and a failed turn can be replayed by hand with the very options it read. A turn
-// or a plan still running half an hour past its window's end is hung, and the child door stops it (hw-backstop-ms),
-// so a hung child no longer holds the walk's lock. hw-sync is a flow of git steps whose rows Form reads
-// (hw-sync-at). The day and the hour come from the host's own zone (the footer of /etc/localtime) and the unix
-// clock, with no child (hw-day, hw-hhmm).
+// No step the walk itself begins is a shell line. Every such child is an argv spawned through
+// form-stdlib/bml/host-child.bml: its stdin is a file, its stdout and stderr share one file, and the exit is read from
+// the host. (The movement it begins lands through form-cli-landing.bml, which keeps two shell crossings of its own,
+// named there.) The whole of what each child said stays under .hearth/walk-io/<step>.{in,out,exit}, and the run before
+// it under <step>.prev.* (turn, plan, review, gates, movement, build, carrier, push, sync-*), so a turn, a review or a
+// gate that failed leaves its evidence for the findings feeder, and a failed turn can be replayed by hand with the
+// very options it read. Every such child carries a deadline, and the child door stops a child past it together with
+// its lineage, so a hung child no longer holds the walk's lock: a turn or a plan half an hour past its window's end
+// (hw-backstop-ms), the review, the gates, the movement, the drafts and the page two hours after they began
+// (hch-step-backstop-ms), a git step half an hour (hch-git-backstop-ms). A plan the door stopped is named in the
+// walk's log ([local-plan:stopped]), as a turn it stopped is ([native-turn:silent]). hw-sync is a flow of git steps
+// whose rows Form reads (hw-sync-at). The day and the hour come from the host's own zone (the footer of
+// /etc/localtime) and the unix clock, with no child (hw-day, hw-hhmm).
 //
 // The window: a walk's turns live inside it (hw-turns). Each turn reads the window's end on stdin as its wall
 // deadline, {"turns":24,"deadline_ms":<the window's end on host_monotonic_ms>}; the host's monotonic clock is one
@@ -68,11 +72,12 @@ section [form.bml] {
   }
   def hw-letter?(b) = ((b >= 65) && (b <= 90)) || ((b >= 97) && (b <= 122));
   def hw-letters-end(s, i) = (i < len(s)) && hw-letter?(str_byte_at(s, i)) ? hw-letters-end(s, i + 1) : i;
-  // where the zone's name ends: "<+08>" through its ">", or a run of three letters or more; 0 when it reads neither
+  // where the zone's name ends: "<+08>" through its ">" (a name between the brackets), or a run of three letters or
+  // more; 0 when it reads neither
   def hw-posix-name-end(f) {
    let angle = len(f) > 0 && ((Comparable) str_byte_at(f, 0) == 60);
    let close = angle ? str_find(f, ">", 0) : -1;
-   angle ? (close < 0 ? 0 : close + 1) : (hw-letters-end(f, 0) >= 3 ? hw-letters-end(f, 0) : 0);
+   angle ? (close < 2 ? 0 : close + 1) : (hw-letters-end(f, 0) >= 3 ? hw-letters-end(f, 0) : 0);
   }
   // "[+-]hh[:mm[:ss]]" as seconds, nothing() for anything else (a daylight name or rule after it included)
   def hw-posix-seconds(t) {
@@ -80,11 +85,12 @@ section [form.bml] {
    let signed = len(t) > 0 && (((Comparable) str_byte_at(t, 0) == 45) || ((Comparable) str_byte_at(t, 0) == 43));
    hw-posix-parts(sign, split-on(signed ? substring(t, 1, len(t)) : t, ":"));
   }
+  // a zone is within a day of UTC: hours up to 24, minutes and seconds under 60; any other reading backtracks
   def hw-posix-parts(sign, parts) {
    let h = hw-number(parts[0]);
    let m = len(parts) > 1 ? hw-number(parts[1]) : 0;
    let s = len(parts) > 2 ? hw-number(parts[2]) : 0;
-   len(parts) > 3 || nothing?(h) || nothing?(m) || nothing?(s) ? nothing() : sign * ((h * 3600) + (m * 60) + s);
+   len(parts) > 3 || nothing?(h) || nothing?(m) || nothing?(s) ? nothing() : (h > 24 || m > 59 || s > 59) ? nothing() : sign * ((h * 3600) + (m * 60) + s);
   }
   // the zone's offset east of UTC in ms from a POSIX footer: the sign of the POSIX offset is inverted
   def hw-zone-of-footer(f) {
@@ -100,7 +106,7 @@ section [form.bml] {
    let signed = len(t) == 5 && (((Comparable) str_byte_at(t, 0) == 45) || ((Comparable) str_byte_at(t, 0) == 43));
    let h = signed ? hw-number(substring(t, 1, 3)) : nothing();
    let m = signed ? hw-number(substring(t, 3, 5)) : nothing();
-   nothing?(h) || nothing?(m) ? nothing() : sign * ((h * 3600) + (m * 60)) * 1000;
+   nothing?(h) || nothing?(m) ? nothing() : (h > 24 || m > 59) ? nothing() : sign * ((h * 3600) + (m * 60)) * 1000;
   }
   def hw-zone-ms() {
    let footer = hw-zone-of-tz(read_file(hw-tz-path()));
@@ -357,7 +363,12 @@ section [form.bml] {
   // hear the window's end and stop their own lanes there, so a turn or plan still running hw-backstop-ms after
   // that is hung, and the child door stops it (its output to that point stays in .hearth/walk-io).
   def hw-backstop-ms() = 1800000;
-  def hw-turn-run(turns, deadline) = hch-run("turn", ["./fkwu", "observe/native-turn-run.bml"], hw-turn-options(turns, deadline) ++ "\n", deadline + hw-backstop-ms());
+  // hw-turn-run-of(io, argv, ...) is the one place a turn's child is begun: its stdin is the options, its deadline the
+  // window's end plus the backstop. The argv is a seam so a band can begin a stub in the turn's place and read that the
+  // deadline reaches the door (form-stdlib/tests/host-walk-band.bml, claim "spawn").
+  def hw-turn-argv() = ["./fkwu", "observe/native-turn-run.bml"];
+  def hw-turn-run-of(io, argv, turns, deadline) = hch-run-in(io, "turn", argv, hw-turn-options(turns, deadline) ++ "\n", deadline + hw-backstop-ms());
+  def hw-turn-run(turns, deadline) = hw-turn-run-of(hch-dir(), hw-turn-argv(), turns, deadline);
   def hw-turn-once(turns, deadline) = hw-reviewed(hw-turn-lines(hch-said(hw-turn-run(turns, deadline))));
   // A queue with no open gap is planned inside the same window: the local planner (observe/local-plan-run.bml) takes
   // the next pending request in learn/local-requests.jsonl, a local voice writes it as a band-first gap, and Form
@@ -367,7 +378,15 @@ section [form.bml] {
   def hw-plan-options(deadline) = json-emit(json-node-object([fhn-n("next", 1), fhn-n("until_ms", deadline)]));
   def hw-plan-line(out) = hw-plan-keep(split-on(out ?? "", "\n"), "");
   def hw-plan-keep(lines, last) = nil?(lines) ? last : hw-plan-keep(lines[1:], hw-starts?(lines[0], "[local-plan") && !hw-starts?(lines[0], "[local-plan:voice]") ? trim(lines[0]) : last);
-  def hw-plan(deadline) = hw-plan-line(hch-said(hch-run("plan", ["./fkwu", "observe/local-plan-run.bml"], hw-plan-options(deadline) ++ "\n", deadline + hw-backstop-ms())));
+  def hw-plan-argv() = ["./fkwu", "observe/local-plan-run.bml"];
+  def hw-plan-run-of(io, argv, deadline) = hch-run-in(io, "plan", argv, hw-plan-options(deadline) ++ "\n", deadline + hw-backstop-ms());
+  // A plan the door stopped at its backstop leaves the door's own line ("[host-child] deadline: ..."), which
+  // hw-plan-line drops as it drops every line that is not a planner row, so the walk's log would say only "no open
+  // gap". The answer names it: "[local-plan:stopped] deadline: ...". A plan that had queued its gap before it hung
+  // keeps its result line, so the turn that follows still lands it.
+  def hw-plan-answer(run) = hw-plan-or-stopped(run, hw-plan-line(hch-said(run)));
+  def hw-plan-or-stopped(run, line) = nothing?(run[0]) && ((String) run[2] != "") && !hw-planned?(line) ? "[local-plan:stopped] " ++ run[2] : line;
+  def hw-plan(deadline) = hw-plan-answer(hw-plan-run-of(hch-dir(), hw-plan-argv(), deadline));
   def hw-no-gap?(turn) = str_find(turn ?? "", "[native-turn] no open gap", 0) >= 0;
   def hw-planned?(line) = hw-starts?(line, "[local-plan:result] ") && str_find(line, "\"status\":\"queued\"", 0) >= 0;
   def hw-native-turn(turns, deadline) = hw-turn-planned(hw-turn-once(turns, deadline), deadline, hw-plan, () => hw-turn-once(turns, deadline));
@@ -393,7 +412,7 @@ section [form.bml] {
   // the turn, and its next line is spoken beside the turn's. A turn that ran none lands nothing, so it is not
   // reviewed: its review row would stand in the tracked tree with no landing to carry it, and the turn's own line
   // already says why it ran none.
-  def hw-review() = hw-line(hch-last(hch-said(hch-run("review", ["./fkwu", "observe/local-flow-review.bml"], "", nothing())), "[local-flow-review] next:"));
+  def hw-review() = hw-line(hch-last(hch-said(hch-run("review", ["./fkwu", "observe/local-flow-review.bml"], "", hch-by(hch-step-backstop-ms()))), "[local-flow-review] next:"));
   def hw-reviewed(turn) = hw-reviewed-by(turn, hw-review);
   def hw-reviewed-by(turn, review) {
    let said = hw-turned?(turn) ? hw-say(review()) : 0;
@@ -457,7 +476,7 @@ section [form.bml] {
   def hw-queue-row-paths(row) = append(hw-writable(json-array-elements(json-object-get(row, "writable"))), (String) hw-str(row, "band") == "" ? [] : [json-node-string(hw-str(row, "band"))]);
   def hw-queue-paths(lines) = nil?(lines) ? [] : (Comparable) len(trim(lines[0])) == 0 ? hw-queue-paths(lines[1:]) : append(hw-queue-row-paths(parse-json("queue-row", lines[0])), hw-queue-paths(lines[1:]));
   def hw-paths() = cons(json-node-string("receipts/draft-ledger.jsonl"), cons(json-node-string("receipts/native-turn-ledger.jsonl"), cons(json-node-string("receipts/local-flow-review.jsonl"), cons(json-node-string("learn/native-turn-queue.jsonl"), file_size("learn/native-turn-queue.jsonl") < 1 ? [] : hw-queue-paths(split-on(fhn-read("learn/native-turn-queue.jsonl"), "\n"))))));
-  def hw-movement(request) = hch-said(hch-run("movement", ["./fkwu", "observe/movement-run.bml"], json-emit(request) ++ "\n", nothing()));
+  def hw-movement(request) = hch-said(hch-run("movement", ["./fkwu", "observe/movement-run.bml"], json-emit(request) ++ "\n", hch-by(hch-step-backstop-ms())));
   // ── a candidate in the tracked tree: published inside one door, restored on every path ──
   // hw-with-published(dir, paths, before, texts, run) writes a marker (<dir>/publish-<pid>.marker: the pid, its
   // stamp, the paths, their checkpoint texts and the bytes this publish writes) and reads it back, publishes the
@@ -554,7 +573,7 @@ section [form.bml] {
   }
   // the gates' own summary: every row that ran passed and none refused
   def hw-gates-green?(line) = (!nothing?(hw-field(line, "pass="))) && ((Comparable) hw-field(line, "pass=") == hw-field(line, "full=")) && ((Comparable) hw-field(line, "refused=") == 0);
-  def hw-gates() = hw-line(hch-last(hch-run-quiet("gates", ["./fkwu", "gate/drift-gates-run.bml"], "", nothing())[1], "drift-gates pass="));
+  def hw-gates() = hw-line(hch-last(hch-run-quiet("gates", ["./fkwu", "gate/drift-gates-run.bml"], "", hch-by(hch-step-backstop-ms()))[1], "drift-gates pass="));
   def hw-has?(out, word) = (!nothing?(out)) && (str_find(out, word, 0) >= 0);
   def hw-synced?(out, branch) = hw-has?(out, "sync=0");
   def hw-green?(line, branch) = hw-gates-green?(line);
