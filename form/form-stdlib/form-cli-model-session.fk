@@ -29,6 +29,8 @@
 //
 import form-stdlib/form-cli-model-generate.fk;
 import form-stdlib/model-registry.bml;
+import form-stdlib/form-cli-model-ds4.fk;
+import form-stdlib/dsv4-lease.fk;
 import form-stdlib/bml/form-cli-model-admission.bml;
 import form-stdlib/bml/model-admission.bml;
 import form-stdlib/bml/form-cli-model-observation.bml;
@@ -63,7 +65,10 @@ section [form.bml] {
     def fcms-none(reason) = fcms-session("nothing", reason, "", "", [], [], 0, 0, -1, 0, 0, 0, 0, 0);
     def fcms-with-stream(s, pos, pending, stopped, generated, injected, observations) = fcmd-inherit(s, fcms-session(fcms-status(s), fcms-reason(s), fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), pos, pending, stopped, fcms-prompt-ids(s), generated, injected, observations));
     def fcms-refuse(s, reason) = fcmd-inherit(s, fcms-session("nothing", reason, fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
-    def fcms-forward(s, id, pos) = fcmd-forward(fcms-ctx(s), fcms-sts(s), fcmd-carrier(s), id, pos);
+    // A DeepSeek-V4 session holds the driver's context (thirteen slots, the layout RECORD in slot 2; Qwen's slot 2 is a list) and the driver's state rows: its step is the driver's decode
+    // (form-cli-model-ds4.fk). Every other session takes the step it always took.
+    def fcms-ds4?(s) = len(fcms-ctx(s)) == 13 && (String) value_kind(fcms-ctx(s)[2]) == "record";
+    def fcms-forward(s, id, pos) = fcms-ds4?(s) ? fcds-forward(fcms-ctx(s), fcms-sts(s), id, pos) : fcmd-forward(fcms-ctx(s), fcms-sts(s), fcmd-carrier(s), id, pos);
     def fcms-refresh-head(s) = {
         let pending = fcmd-pending(fcms-ctx(s), fcmd-carrier(s), fcms-pending(s));
         let next = fcms-with-stream(s, fcms-pos(s), pending, 0, fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s));
@@ -101,7 +106,9 @@ section [form.bml] {
     // The grant is a lease (mg-lease): a promise other processes see before the pages show in the machine's reading,
     // keyed by the model file so a second process mapping the same weights is charged its private bytes only. The
     // lease goes where the session closes (fcms-release-ok?) or where this open gives up.
-    def fcms-weights-bytes(path) = file_size(path) < 0 ? 0 : file_size(path);
+    // The shared bytes the lease promises: the file's size for every file but a DeepSeek-V4 GGUF (dsv4-lease.fk: that file is mapped and touched in part, so its figure is the derived working
+    // set, derived and not measured). The call below keeps its text; what it is asked changes only for a deepseek4 file.
+    def fcms-weights-bytes(path) = dls-weights-bytes(path);
     def fcms-memory-need(path) = fcms-weights-bytes(path) + mg-kv-margin();
     def fcms-memory-held(path, v) = {
         let said = print_str(mg-line("model session " ++ path, mg-need-of(v, fcms-memory-need(path)), v));
@@ -111,6 +118,11 @@ section [form.bml] {
         let granted = mg-lease("model session " ++ path, path, fcms-weights-bytes(path), mg-kv-margin());
         mg-granted?(granted) ? fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) : fcms-memory-held(path, granted);
     };
+    // A DeepSeek-V4 file, reached only past the lane gate below (mr-wired? reads the registry's row for the arch, 0 until the validation window has run): the DeepSeek tokenizer's raw ids, the lease
+    // for the derived working set at this session's capacity, the driver's open, state and prefill (form-cli-model-ds4.fk). A refusal before the context exists gave the lease back there; after it, the
+    // context and state stay in the record for fcms-release-ok?, as the Qwen door leaves them.
+    def fcms-open-ds4(path, src, prompt, requested-maxpos, reserve) = fcms-ds4-session(path, src, fcds-open-parts(path, src, prompt, requested-maxpos, reserve));
+    def fcms-ds4-session(path, src, parts) = (String) parts[0] == "live" ? fcms-session("live", parts[1], path, src, parts[2], parts[3], parts[4], parts[5], parts[6], 0, parts[7], 0, 0, 0) : len(parts[2]) > 0 ? fcms-session("nothing", parts[1], path, src, parts[2], parts[3], parts[4], parts[5], parts[6], 0, parts[7], 0, 0, 0) : fcms-none(parts[1]);
     def fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) = {
         let span = fcma-span(prompt-count);
         let _span = q38oo-stage(("model-session-prefill-span-" + span.str()), 8388624);
@@ -183,7 +195,7 @@ section [form.bml] {
             // admission by the lane table, never a literal: an arch
             // whose lane is not yet wired into this door refuses
             // TYPED, naming the lane that would serve it.
-            !((Comparable) mr-wired?(arch) == 1) ? fcms-none(("lane-unwired:" + (mr-lane-for(arch) + (":" + arch)))) : {
+            !((Comparable) mr-wired?(arch) == 1) ? fcms-none(("lane-unwired:" + (mr-lane-for(arch) + (":" + arch)))) : (String) arch == "deepseek4" ? fcms-open-ds4(path, src, prompt, requested-maxpos, reserve) : {
                 let _crystal-begin = fcmg-live-stage("model-session-tokenizer-crystal-begin", 8388616);
                 let x = qsx-load(path);
                 let _crystal-complete = fcmg-live-stage("model-session-tokenizer-crystal-complete", 8388617);
@@ -257,12 +269,19 @@ section [form.bml] {
     def fcms-generation-text(g) = g[1];
     def fcms-generation-ids(g) = g[2];
     def fcms-generation-session(g) = g[3];
-    def fcms-generate(s, n) = !((Comparable) fcms-live?(s) == 1) || n <= 0 ? fcms-generation("", [], s) : !nil?(fcsam-owner(s)) ? fcms-generate-sampled(s, n) : {
+    def fcms-generate(s, n) = !((Comparable) fcms-live?(s) == 1) || n <= 0 ? fcms-generation("", [], s) : fcms-ds4?(s) ? fcms-generate-ds4(s, n) : !nil?(fcsam-owner(s)) ? fcms-generate-sampled(s, n) : {
         let stops = fcmo-stops(s);
         let walked = fcms-walk(s, fcms-pending(s), fcms-pos(s), n, stops, [], 1, 1, 0);
         let ids = walked[0];
         let next = fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
         fcms-generation(ftdb-text(fcms-src(s), ids), ids, next);
+    };
+    // The DeepSeek-V4 walk: the same walk (fcms-walk takes the session's own step, which is the driver's decode), the header's own stop ids, the DeepSeek tokenizer's decode. Greedy: the sampler is not wired here.
+    def fcms-generate-ds4(s, n) = {
+        let walked = fcms-walk(s, fcms-pending(s), fcms-pos(s), n, fcds-stops(fcms-src(s)), [], 1, 1, 0);
+        let ids = walked[0];
+        let next = fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
+        fcms-generation(fcds-text(fcms-src(s), ids), ids, next);
     };
     def fcms-generate-sampled(s, n) = {
         let walked = fcsam-run(s, fcsam-owner(s), fcms-ctx(s)[1][28], fcms-forward, fcms-decode-pulse, fcms-pos(s), n, fcmo-stops(s));
@@ -338,15 +357,17 @@ fcms-refuse(s, "observation-prefill-refused") : fcms-refresh-head(fcms-with-stre
     };
     // Injects one typed Form observation into the SAME q38 state. It returns a
     // session whose pending ID is the first prediction after the observation.
-    def fcms-observe(s, text) = fcms-observe-ids(s, fcms-observation-ids(s, text), "observation-context-window-refused");
-    def fcms-observe-direct-answer(s, text) = fcms-observe-ids(s, fcms-direct-answer-observation-ids(s, text), "direct-answer-context-window-refused");
+    // A DeepSeek-V4 session takes no observation yet (the crossing is Qwen's ChatML; the driver has no template here): a typed refusal that keeps the context for its release.
+    def fcms-ds4-observation-refused(s) = fcms-refuse(s, "ds4-observation-not-wired");
+    def fcms-observe(s, text) = fcms-ds4?(s) ? fcms-ds4-observation-refused(s) : fcms-observe-ids(s, fcms-observation-ids(s, text), "observation-context-window-refused");
+    def fcms-observe-direct-answer(s, text) = fcms-ds4?(s) ? fcms-ds4-observation-refused(s) : fcms-observe-ids(s, fcms-direct-answer-observation-ids(s, text), "direct-answer-context-window-refused");
     // Form-native execution-token shape: compact BML enters the same generated
     // stream without paying a second role template. It remains a named choice,
     // not a replacement for ordinary tool-role observations.
-    def fcms-observe-inline-bml(s, text) = fcms-observe-ids(s, fcms-inline-bml-observation-ids(s, text), "inline-bml-observation-context-window-refused");
+    def fcms-observe-inline-bml(s, text) = fcms-ds4?(s) ? fcms-ds4-observation-refused(s) : fcms-observe-ids(s, fcms-inline-bml-observation-ids(s, text), "inline-bml-observation-context-window-refused");
     // Grammar/execution rejection enters at the pending token's exact position.
     // The rejected prediction is not included in ids and never reaches q38-forward.
-    def fcms-observe-rejection(s, text) = fcms-observe-ids(s, fcms-rejection-observation-ids(s, text), "rejection-observation-context-window-refused");
+    def fcms-observe-rejection(s, text) = fcms-ds4?(s) ? fcms-ds4-observation-refused(s) : fcms-observe-ids(s, fcms-rejection-observation-ids(s, text), "rejection-observation-context-window-refused");
     def fcms-release-ok?(s) = {
         let dropped = adm-drop(fcms-path(s));
         let cursor-released = fcmo-release-index(s);
