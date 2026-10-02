@@ -208,33 +208,53 @@ same source identities invites a new plan, independent of its receipt path.
 
 #### The observation cap, the renewal reserve and the repeat across contexts
 
-A native tool result whose stdout is larger than the **observation cap** does not enter the decoder whole, though it
-would fit: the cap is a fifth of the window, at least 1024 IDs, counted in bytes at 3 per ID (host-walk.bml's whole read
-measured 2.84), so 3276 IDs and 9828 bytes at 16384 positions. The stream takes the bounded note instead, through the
-same focus path as the capacity signal above: the read's exit, byte and line counts and sha256, its first 12 and last 6
-lines, and the window to read next, `{"tool":"sed","arguments":["-n","A,Bp",path]}` with at most `window_lines` lines so
-that one window fits under the cap, plus an `rg -n -F` form to find a symbol. The exact observation stays in private
-evidence, the document stays whole in the tools, and a read that worked counts no repair (a window refusal is a failure
-the lane repairs, and carries the same excerpt). A verification or check note is never bounded: failed-check evidence
-stays complete. The bounded state is saved before the whole read is, so no checkpoint holds it, and a checkpoint that
-does (a lane out of replies saves what it has) is bounded again when a lane opens on it.
+A native tool result (stdout and stderr together) larger than the **observation cap** does not enter the decoder whole,
+though it would fit: the cap is a fifth of the window, at least 1024 IDs, counted in bytes at 3 per ID (the whole read
+of host-walk.bml at the 12:30 day turn, before f-split cut that file, measured 2.84), so 3276 IDs and 9828 bytes at
+16384 positions. The cap counts bytes, not IDs: digit-dense or escaped output just under it can cost near one
+ID per byte, so the window refusal above stays behind it, and a cap on measured IDs waits for the sealed tokenizer's
+count. The stream takes the bounded note instead, through the same focus path as the capacity signal above: the
+result's exit, byte and line counts and sha256, its stderr clipped, its first 12 and last 6 lines, and the way to read
+on. After a whole `read` or `cat` of a lane document the result's lines are the document's, so the note names the window
+to read next, `{"tool":"sed","arguments":["-n","A,Bp",path]}` with at most `window_lines` lines so that one window fits
+under the cap, plus an `rg -n -F` form to find a symbol. After any other call (rg, sed, jq, head, tail) the lines count
+the result, not the document, so the note names no window and says to run a narrower query. A line longer than 200
+bytes is shown by its first 200. The exact observation stays in private evidence (the note says so only when the write
+landed, else it says the bytes were not retained), the document stays whole in the tools, and a read that worked counts
+no repair and reads as a healthy organ reading with no need (a window refusal is a failure the lane repairs, and
+carries the same excerpt). A verification or check note is never bounded: failed-check evidence stays complete.
+
+What a bounded result leaves behind is bounded too. The note replaces the observation; a failing result (exit above 1
+or any stderr) also wrote its whole note into the repair's failure evidence and pending rows, and those become the
+bounded note, so the decoder is handed the excerpt once and a 37580-byte read with a stderr stays under the cap. That
+repair counts once, and a second identical failure is counted by the call count (the policy's third), the evidence no
+longer being the whole text it compares. The tool history that detects a repeated call holds a stdout over 2048 bytes
+as its sha256 and byte count and a stderr as its first 200 bytes and its digest, so no checkpoint holds the read: it
+holds the bounded note, the digested history, and the document itself in its documents. A checkpoint written before
+that (a lane out of replies saves what it has) is bounded and digested again when a lane opens on it.
 
 A renewal prompt must leave room for a reply and the next observation, the **renewal reserve**: an eighth of the window,
 at least 1024 IDs and at most a quarter, whether or not the caller sets a reply ceiling. A refusal is a choice point,
-not an exit: the trigger note is bounded and the renewal asked once more, and when nothing in the prompt can be
-bounded the lane ends with `native-context-renewal-prompt-caller-capacity-refused` after one tokenization. It never
-renews into the overflow that stopped it. The `form-code-context` row names `renewal_attempts`.
+not an exit, for both reasons a bounded trigger cures, no room for the reply (`prompt-caller-capacity-refused`) and a
+prompt over the whole window (`prompt-context-window-refused`): the trigger note is bounded and the renewal asked once
+more, and when nothing in the prompt can be bounded the lane ends with
+`native-context-renewal-prompt-caller-capacity-refused` (or the window reason) after one tokenization. It never renews
+into the overflow that stopped it. The lane continues with the state the renewal built its prompt from, and the
+`form-code-context` row names `renewal_attempts`.
 
 A fresh context is sight regained, except where the call's bytes never reached a context. An observation that was
 refused or bounded marks the swerve record **unsighted**, and the next context keeps its context number and the
 policy's count of the same call in a row, so the same read over the same result keeps counting across renewals:
 the policy's no-progress route at the third, the swerve at the third, the replan at the fourth, the end at the fifth.
 Without the mark each renewal restarted both counts and the same read stayed silent however often it came back. The
-mark clears as soon as a context has observed anything.
+mark clears as soon as a context has observed anything. That cross-context carry serves a context that ends before it
+decodes another reply (an unadmitted note, a reply-capacity stop); a lane whose focus note is admitted decodes its next
+reply in the same context, where the same read counts 1, 2, 3 by the in-context count and the guards close on the third.
 
-`form-cli-code-bounded-note-band` (8191) replays the 12:30 day option's retained replies and form-code-context rows
+`form-cli-code-bounded-note-band` (524287) replays the 12:30 day option's retained replies and form-code-context rows
 (`form/form-stdlib/tests/fixtures/form-cli-code-day-option.jsonl`) through these paths with the decoder and the renewer
-scripted. What it cannot show is the clock: the seconds returned are read on the next physical option.
+scripted, and drives the renewal loop (`fcac-finish-contexts-with`) with a scripted loop port and renewer; no model
+runs. What it cannot show is the clock: the seconds returned are read on the next physical option.
 
 This applies the distinction between truncated tool-call recovery and execution in [Hermes's truncation controller](https://github.com/NousResearch/hermes-agent/blob/main/agent/turn_truncation.py), and the focus on meaningful repeated outcomes in [OpenClaw's loop detection](https://docs.openclaw.ai/tools/loop-detection). Form uses its own owned state, live signals and caller allowances. [OpenClaw's agent loop](https://docs.openclaw.ai/concepts/agent-loop) also separates finished tool results from an unfinished continuation; Form's checkpoints preserve completed actions before admitting feedback. These are native BML flows in the existing process.
 
@@ -257,7 +277,7 @@ Each stage below is a BML organ with its own band; none of the bands opens a mod
   already decoded decodes again seeded from that content, the lane's phases speak on the stage bus, and the
   last replies are kept for the deliverable. A context that has observed nothing is fresh sight unless the record is
   unsighted (an observation that never entered a context). `form-cli-code-swerve-band` 4095,
-  `form-cli-code-bounded-note-band` 8191.
+  `form-cli-code-bounded-note-band` 524287.
 - **The circle** (`form-cli-code-circle.bml`): the local satsang for code. Candidates are published over a toy
   copy of the gap and their band runs in a `./fkwu` child under a deadline; voices other than the writer's
   judge, execution vetoes consensus, refusals are evidence, and exactly one pointing comes back when nothing

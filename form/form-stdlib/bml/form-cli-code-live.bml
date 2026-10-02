@@ -2,11 +2,13 @@
 // No process, HTTP, Ollama or rented fallback is invoked by this module.
 // A lane that already holds memory gives it back when the machine runs low: at each turn boundary (fcac-loop) a low
 // reading saves the checkpoint and ends the lane with the reason host-memory-low (fcac-memory-stop).
-// A tool result larger than the observation cap (a fraction of the window), or than the room the context has left, does
-// not enter the decoder whole: fcac-focus-observation puts its bounded note there (head, tail, counts and the sed window
-// to read next; the exact bytes in private evidence). A renewal whose prompt cannot hold a reply and the next observation
-// is refused (fcac-renewal-fits), retried once with the trigger bounded (fcac-renew-with), else it ends the lane with the
-// named reason: the lane never renews into the overflow that stopped it.
+// A tool result (stdout and stderr together) larger than the observation cap (a fraction of the window), or than the room
+// the context has left, does not enter the decoder whole: fcac-focus-observation puts its bounded note there (head, tail,
+// counts, stderr, and the sed window to read next after a whole read; the exact bytes in private evidence), and the
+// failure evidence and tool history that would repeat the read are bounded with it. A renewal whose prompt cannot hold a
+// reply and the next observation, or is over the whole window, is refused (fcac-renewal-fits), retried once with the
+// trigger bounded (fcac-renew-with), else it ends the lane with the named reason (fcac-finish-contexts-with): the lane
+// never renews into the overflow that stopped it.
 import form-stdlib/bml/form-cli-code-memory.bml;
 import form-stdlib/bml/form-cli-code-session.bml;
 import form-stdlib/bml/form-cli-code-swerve.bml;
@@ -88,7 +90,9 @@ section [form.bml] {
   def fcac-renewal-reserve(session) = fat-min(fat-max(1024,(fcms-maxpos(session) / 8)),(fcms-maxpos(session) / 4));
   def fcac-renewal-fits(session,promptIds,contract) = if (promptIds >= (fcms-maxpos(session) - fat-max(1,fcac-renewal-reserve(session)))) then 0 else fcac-current-reply-fits(fcms-with-stream(session,promptIds,0,0,0,0,0),contract[0],contract[1]);
   def fcac-renewal-ending(reason) = ("native-context-renewal-" + reason);
-  def fcac-room-refused?(renewed) = ((!fcmr-changed(renewed)) && ((String) fcmr-reason(renewed) == "prompt-caller-capacity-refused"));
+  // the two refusals a bounded trigger can cure: no room for the reply and next observation (prompt-caller-capacity-refused),
+  // and a prompt over the whole window (prompt-context-window-refused)
+  def fcac-room-refused?(renewed) = ((!fcmr-changed(renewed)) && fat-has(["prompt-caller-capacity-refused","prompt-context-window-refused"],(String) fcmr-reason(renewed)));
   // A refusal is a choice point: the prompt is bounded where it can be (the trigger note, when it is a tool result larger
   // than the observation cap) and asked again, once; refused again, or when nothing in it can be bounded, the renewal
   // result carries the refusal and the lane ends with its named reason. Answers [renewal result, state the renewal
@@ -103,11 +107,15 @@ section [form.bml] {
     [renewer(session,fcac-bootstrap-budget(again,turns),fcac-profile(again),fcac-renewal-fits,[again,turns]),again,2];
    };
   }
-  def fcac-finish-contexts(result,checker,turns,started,firstTurn,prior,number) = if (!fcac-renewable(result,firstTurn,turns)) then fcac-total-result(fcac-settle(result,started),prior) else {
+  // The two ports the renewal loop stands on: the turn a renewed context takes (session, state, checker, turns, started) and
+  // the renewal (session, state, turns, answering [renewal result, state its prompt was built from, attempts]). A band
+  // hands in its own pair to read what the lane continues with and how it ends, with no model.
+  def fcac-finish-contexts(result,checker,turns,started,firstTurn,prior,number) = fcac-finish-contexts-with(result,checker,turns,started,firstTurn,prior,number,fcac-loop,fcac-renew);
+  def fcac-finish-contexts-with(result,checker,turns,started,firstTurn,prior,number,loop,renew) = if (!fcac-renewable(result,firstTurn,turns)) then fcac-total-result(fcac-settle(result,started),prior) else {
    let session = result[0]; let state = result[2];
    let reading = fcac-context-reading(state,number,0);
    oh-voice(reading); oh-voice(oh-response(reading,"renew-context"));
-   let renewal = fcac-renew(session,state,turns);
+   let renewal = renew(session,state,turns);
    let renewed = renewal[0]; let next = renewal[1];
    // Renewal returns the sole current owner, including on partial failure.
    // The old session is used below only for its retained cost counters.
@@ -124,7 +132,7 @@ section [form.bml] {
     let released = fcms-release-ok?(fresh);
     fcac-total-result(fcac-settled(ended,started,(released && fcac-renew-release-complete(reason))),spent);
    } else {
-    fcac-finish-contexts(fcac-loop(fresh,next,checker,turns,started),checker,turns,started,fcap-turns(next),spent,(number + 1));
+    fcac-finish-contexts-with(loop(fresh,next,checker,turns,started),checker,turns,started,fcap-turns(next),spent,(number + 1),loop,renew);
    };
   };
   def fcac-settle(result,started) = fcac-settled(result,started,fcms-release-ok?(result[0]));
@@ -290,15 +298,18 @@ section [form.bml] {
    if fcap-done(next) then fcac-finish(session,next,started) else if ((fcap-turns(next) < turns) && (fcac-observation-over-cap?(session,next) == 1)) then fcac-focus-observation(session,next,fcap-cause-cap(),checker,turns,started,seams) else if (!fcam-save(next)) then fcac-finish(session,fcap-terminal(next,"checkpoint-write-refused;candidate-retained"),started) else if (fcap-turns(next) >= turns) then loop(session,next,checker,turns,started) else fcac-observe-next(session,next,checker,turns,started,seams);
   }
   // The observation cap: a fifth of the window, at least 1024 IDs; bytes at 3 per ID (host-walk.bml's whole read
-  // measured 2.84 bytes per ID). A tool result whose stdout is larger enters the stream as its bounded note, though it
-  // would fit: the day option's two 13.4k-ID reads cost 1372 s of injection and left the context no room to act.
+  // measured 2.84 bytes per ID). A tool result whose stdout and stderr together are larger enters the stream as its
+  // bounded note, though it would fit: the day option's two 13.4k-ID reads cost 1372 s of injection and left the context
+  // no room to act. The cap counts bytes, not IDs: digit-dense or escaped output just under it can cost near one ID per
+  // byte (Qwen reads digits singly), so the window refusal (the decoder's capacity check) still stands behind it, and a
+  // cap on measured IDs waits for the sealed tokenizer's count.
   def fcac-cap-ids-for(maxpos) = fat-max(1024,(maxpos / 5));
   def fcac-cap-bytes-for(maxpos) = (fcac-cap-ids-for(maxpos) * 3);
   def fcac-observation-cap-ids(session) = fcac-cap-ids-for(fcms-maxpos(session));
   def fcac-observation-cap-bytes(session) = fcac-cap-bytes-for(fcms-maxpos(session));
   def fcac-observation-over?(state,capBytes) {
    let result = fcap-observation-result(state);
-   if nothing?(result) then 0 else if (len(fcap-result-stdout(result)) > capBytes) then 1 else 0;
+   if nothing?(result) then 0 else if ((len(fcap-result-stdout(result)) + len(fcap-result-stderr(result))) > capBytes) then 1 else 0;
   }
   def fcac-observation-over-cap?(session,state) = fcac-observation-over?(state,fcac-observation-cap-bytes(session));
   // The state with its note bounded when that note is a tool result over the cap, else nothing(): the renewal's retry
@@ -319,7 +330,8 @@ section [form.bml] {
   // only its note changes. An observation the context could not take (the window) is the failure the lane repairs.
   def fcac-observation-capacity-state(state,evidence,cause,capBytes) {
    let note=fcap-observation-capacity-prefix() + json-emit(fcap-observation-detail(state,evidence,cause,capBytes));
-   let next=fcsw-mark-unsighted(if ((String) cause == fcap-cause-cap()) then fcsw-with-note(state,note) else fcap-rework(state,note));
+   let moved=if ((String) cause == fcap-cause-cap()) then fcsw-with-note(state,note) else fcap-rework(state,note);
+   let next=fcsw-mark-unsighted(fcap-with-held-signature(fcap-bounded-failure(state,moved,note,capBytes)));
    fcap-stage(state) == "review" && ((String) cause != fcap-cause-cap()) && !fcap-repeat(next) ? append(["review"],next[1:]) : next;
   }
   def fcac-focus-observation(session,state,cause,checker,turns,started,seams) {
@@ -327,7 +339,9 @@ section [form.bml] {
    let raw=fcac-observation-budget(state,turns); let evidence=fcac-retain-reply(raw);
    let next=fcac-observation-capacity-state(state,evidence,cause,fcac-observation-cap-bytes(session));
    let detail=json-node-object([oh-s("cause",cause),oh-n("observation_bytes",len(raw)),oh-n("remaining_positions",fcac-reply-room(session)),oh-s("private_observation_evidence",evidence)]);
-   let reading=oh-reading("native-coding",fcam-managed(state) ? fcam-id(state) : "code." + host_pid().str(),"observation-context",json-node-int(1),json-node-int(0),json-node-int(0),[oh-need("focused-source-observation",detail)],["focus-source"],detail);
+   // a read that worked and was bounded (the cap) is a healthy reading with no need; the window refusal is the need
+   let bounded=((String) cause == fcap-cause-cap());
+   let reading=oh-reading("native-coding",fcam-managed(state) ? fcam-id(state) : "code." + host_pid().str(),"observation-context",json-node-int(1),json-node-int(bounded ? 1 : 0),json-node-int(bounded ? 1 : 0),bounded ? [] : [oh-need("focused-source-observation",detail)],["focus-source"],detail);
    oh-voice(reading); oh-voice(oh-response(reading,"focus-source"));
    !fcam-save(next) ? fcac-finish(session,fcap-terminal(next,"checkpoint-write-refused;candidate-retained"),started) : {
     let after=observe(session,fcac-observation-budget(next,turns),fcac-reasoning?(next));
