@@ -1,0 +1,127 @@
+; dsv4-proof-emission-band.bml — the Form-native DeepSeek V4 shader and manifest emission door, from its request to the device.
+;
+; WHAT THIS PINS. observe/dsv4-proof-emission-run.bml composes the eleven DeepSeek V4 Metal shader streams in RAM from the
+; Form emitters (dsv4-mla-real, dsv4-stack-real, dsv4-layer-real, dsv4-forward-real, dsv4-token, the hc/moe/router/ffn
+; units and metal-fp32-compensated) and reads the model's GGUF header into a manifest. Nothing here maps a model:
+; the manifest reads the header (about 5 MB) and the shaders read nothing. The device bits compile and run emitted kernels
+; on this Mac's GPU with a few hundred threads. Nothing here replaces the physical validation of the whole stack; this is what a
+; physical run takes as its input, held so that a change in an emitter is read before a run.
+;
+; Verdict 127 when every claim lands:
+;   1     the eleven shader entries each answer rc 0 with a complete MSL .. END stream (embed, mla-unit, mx8-matvec, mla-core,
+;         hc-unit, mx4-matvec, iq2-matvec, router-f16, ffn-unit, stack-ffn-unit, stack-kv-unit)
+;   2     the streams carry 1, 14, 2, 4, 13, 1, 11, 1, 7, 16 and 15 kernels (85 in all)
+;   4     the two admitted precision compositions append the compensated fragment (hc-unit + hc-precision: 14 kernels and
+;         form_dsv4_hc_rms_precise; mla-core-msl + core-precision: 6 kernels, form_dsv4_mx8_precise and form_dsv4_rms_precise),
+;         and the plain streams carry neither
+;   8     requests that must refuse answer rc 1 with no MSL: a precision a shader does not admit, an unknown shader, a wrong
+;         header and a request missing its last NUL
+;   16    the manifest of the real model's header: magic read, version 3, 1,406 tensors, 71 KV pairs, tensor infos 5,248,946 to
+;         5,339,719, data at 5,339,744, 1,406 T rows, ends END then 0
+;   32    every kernel of the eleven streams compiles on the device (85 pipelines; compile only)
+;   64    emitted kernels run on the device: form_hc_broadcast_f32 copies a 16-value stream into four exactly, and
+;         form_hc_rmsnorm_nw_f32 equals Form's fp64 root-mean-square normalization within 1e-6 relative
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- the door carries a Darwin ARM64 in-RAM native organ (jit_leaf_inram), bit 16 reads the model
+; header (a host-local path outside the tree) and bits 32 and 64 use the Metal handle doors; no sibling kernel answers these.
+// preludes: form-stdlib/core.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml form-stdlib/model-registry.bml
+section [form.bml] {
+ class Dsv4ProofEmissionBand {
+  def dpe-bit(held, bit) = held ? bit : 0;
+  def dpe-has?(s, part) = str_find(s, part, 0) >= 0;
+  def dpe-shaders() = ["dsv4-embed-msl", "dsv4-mla-unit", "dsv4-mx8-matvec-msl", "dsv4-mla-core-msl", "dsv4-hc-unit", "dsv4-mx4-matvec-msl", "dsv4-iq2-matvec-msl", "dsv4-router-f16-msl", "dsv4-ffn-unit", "dsv4-stack-ffn-unit", "dsv4-stack-kv-unit"];
+  def dpe-kernels() = [1, 14, 2, 4, 13, 1, 11, 1, 7, 16, 15];
+  // the door, asked once: its stdout and its exit
+  def dpe-door(request) = host-exec("printf '" ++ request ++ "' | ./fkwu observe/dsv4-proof-emission-run.bml 2>/dev/null; echo RC=$?", "") ?? "";
+  def dpe-shader-request(name, detail) = "DSE1\\0shader\\0" ++ name ++ "\\0" ++ detail ++ "\\0END\\0";
+  def dpe-stream(name, detail) = dpe-door(dpe-shader-request(name, detail));
+  // the MSL between the MSL marker and the END marker
+  def dpe-msl(out) {
+   let at = str_find(out, "\nMSL\n", 0);
+   let end = at < 0 ? -1 : str_find(out, "\nEND\n", at);
+   (at < 0 || end < 0) ? "" : substring(out, at + 5, end);
+  }
+  def dpe-ident?(b) = (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 95;
+  def dpe-name-end(s, i) = (i < len(s) && dpe-ident?(str_byte_at(s, i))) ? dpe-name-end(s, i + 1) : i;
+  def dpe-names(s, from, acc) {
+   let at = str_find(s, "kernel void ", from);
+   at < 0 ? reverse(acc) : dpe-names(s, dpe-name-end(s, at + 12), cons(substring(s, at + 12, dpe-name-end(s, at + 12)), acc));
+  }
+  def dpe-count(name, detail) = len(dpe-names(dpe-msl(dpe-stream(name, detail)), 0, []));
+
+  // ---- 1, 2
+  def dpe-complete?(name) {
+   let out = dpe-stream(name, "");
+   dpe-has?(out, "RC=0") && len(dpe-msl(out)) > 200 && dpe-has?(out, "\nEND\n0\nRC=0");
+  }
+  def dpe-all-complete(i) = i == len(dpe-shaders()) ? true : (dpe-complete?(dpe-shaders()[i]) && dpe-all-complete(i + 1));
+  def dpe-counts-ok(i) = i == len(dpe-shaders()) ? true : (dpe-count(dpe-shaders()[i], "") == dpe-kernels()[i] && dpe-counts-ok(i + 1));
+
+  // ---- 4
+  def dpe-precision() {
+   let hc = dpe-stream("dsv4-hc-unit", "hc-precision");
+   let core = dpe-stream("dsv4-mla-core-msl", "core-precision");
+   let plain-hc = dpe-stream("dsv4-hc-unit", "");
+   let plain-core = dpe-stream("dsv4-mla-core-msl", "");
+   dpe-has?(hc, "RC=0") && dpe-has?(core, "RC=0") && len(dpe-names(dpe-msl(hc), 0, [])) == 14 && len(dpe-names(dpe-msl(core), 0, [])) == 6
+    && dpe-has?(dpe-msl(hc), "form_dsv4_hc_rms_precise") && dpe-has?(dpe-msl(core), "form_dsv4_mx8_precise") && dpe-has?(dpe-msl(core), "form_dsv4_rms_precise")
+    && !dpe-has?(dpe-msl(plain-hc), "precise") && !dpe-has?(dpe-msl(plain-core), "precise");
+  }
+
+  // ---- 8
+  def dpe-refused?(out) = dpe-has?(out, "RC=1") && !dpe-has?(out, "\nMSL\n");
+  def dpe-refusals() = dpe-refused?(dpe-stream("dsv4-embed-msl", "hc-precision")) && dpe-refused?(dpe-stream("nope", ""))
+   && dpe-refused?(dpe-door("DSE9\\0shader\\0dsv4-embed-msl\\0\\0END\\0")) && dpe-refused?(dpe-door("DSE1\\0shader\\0dsv4-embed-msl\\0\\0END"));
+
+  // ---- 16
+  def dpe-t-rows(s, from, n) { let at = str_find(s, "\nT ", from); at < 0 ? n : dpe-t-rows(s, at + 3, n + 1); }
+  def dpe-manifest() {
+   let path = mr-path(mr-find("ds4flash"));
+   let out = dpe-door("DSE1\\0manifest\\0" ++ path ++ "\\0\\0END\\0");
+   dpe-has?(out, "RC=0") && dpe-has?(out, "\nMAGICOK 1\n") && dpe-has?(out, "\nVERSION 3\n") && dpe-has?(out, "\nNTENSORS 1406\n") && dpe-has?(out, "\nNKV 71\n")
+    && dpe-has?(out, "\nTINFOSTART 5248946\n") && dpe-has?(out, "\nTINFOEND 5339719\n") && dpe-has?(out, "\nDATABASE 5339744\n")
+    && dpe-t-rows(out, 0, 0) == 1406 && dpe-has?(out, "\nEND\n0\nRC=0");
+  }
+
+  // ---- 32: every kernel compiles (no dispatch)
+  def dpe-compile-names(src, names, i) = i == len(names) ? true : (metal_pipeline(src, names[i]) > 0 && dpe-compile-names(src, names, i + 1));
+  def dpe-compile-stream(name) {
+   let src = dpe-msl(dpe-stream(name, ""));
+   len(src) > 200 && dpe-compile-names(src, dpe-names(src, 0, []), 0);
+  }
+  def dpe-compile-all(i) = i == len(dpe-shaders()) ? true : (dpe-compile-stream(dpe-shaders()[i]) && dpe-compile-all(i + 1));
+
+  // ---- 64: two emitted kernels run
+  def dpe-f32s(i, n, acc) = i == n ? acc : dpe-f32s(i + 1, n, acc ++ md-le32(md-f32-bits(dpe-x(i))));
+  def dpe-x(i) = (((i * 5) % 11) - 5 + 0.0) / 2.0;
+  def dpe-f(bytes, i) = ln-f32-decode(ln-u32-le(bytes, 4 * i));
+  def dpe-broadcast-ok(bytes, i) = i == 64 ? true : (dpe-f(bytes, i) == dpe-x(i % 16) && dpe-broadcast-ok(bytes, i + 1));
+  def dpe-sumsq(i, n, acc) = i == n ? acc : dpe-sumsq(i + 1, n, acc + (dpe-x(i) * dpe-x(i)));
+  def dpe-norm-ok(bytes, inv, i) = i == 16 ? true : (abs(dpe-f(bytes, i) - (dpe-x(i) * inv)) <= (0.000001 * (1.0 + abs(dpe-x(i) * inv))) && dpe-norm-ok(bytes, inv, i + 1));
+  def dpe-device() {
+   let src = dpe-msl(dpe-stream("dsv4-hc-unit", ""));
+   let pb = metal_pipeline(src, "form_hc_broadcast_f32");
+   let pn = metal_pipeline(src, "form_hc_rmsnorm_nw_f32");
+   let xh = metal_buf_alloc(64);
+   let wx = metal_buf_write(xh, 0, dpe-f32s(0, 16, ""));
+   let oh = metal_buf_alloc(256);
+   let nh = metal_buf_alloc(64);
+   let eps = 0.00001;
+   let e1 = metal_enqueue(pb, md-bind([xh, oh], [4, 16]), 64);
+   let e2 = metal_enqueue(pn, md-bind([xh, nh], [16, md-f32-bits(eps)]), 1);
+   let s = metal_sync();
+   let inv = 1.0 / math_sqrt((dpe-sumsq(0, 16, 0.0) / 16.0) + eps);
+   pb > 0 && pn > 0 && e1 == 1 && e2 == 1 && s >= 0 && dpe-broadcast-ok(metal_buf_read(oh, 0, 256), 0) && dpe-norm-ok(metal_buf_read(nh, 0, 64), inv, 0);
+  }
+ }
+ // a claim that stops reads as a dark bit, not as a stopped band
+ let c1 = dpe-bit(try dpe-all-complete(0) catch false, 1);
+ let c2 = dpe-bit(try dpe-counts-ok(0) catch false, 2);
+ let c4 = dpe-bit(try dpe-precision() catch false, 4);
+ let c8 = dpe-bit(try dpe-refusals() catch false, 8);
+ let c16 = dpe-bit(try dpe-manifest() catch false, 16);
+ let c32 = dpe-bit(try dpe-compile-all(0) catch false, 32);
+ let c64 = dpe-bit(try dpe-device() catch false, 64);
+ print_str("dsv4-proof-emission-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64;
+}

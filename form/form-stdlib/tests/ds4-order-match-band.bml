@@ -1,0 +1,143 @@
+; ds4-order-match-band.bml — the kernels that reproduce ds4's ARITHMETIC ORDER (ds4-order-match.fk) answer to a Form reference of
+; that order on this Mac's GPU.
+;
+; ds4-order-match.fk's header has said 'Proven by: tests/ds4-order-match-band.fk' while no band of that name stood at the cut
+; parent (the proof was the shell runner under FORM_DS4_MATCH_ORDER=1, against ds4's own numbers). This band is what a Form cell
+; can hold with no ds4 process and no model: the activation quantiser and the Q8_0 row dot, with ds4's accumulator structure
+; (ds4.c:7051 and :6814, read for shape and never imported), against a reference written here in Form over the same three real
+; Q8_0 blocks the other Q8_0 bands use (tests/fixtures/q8-0-three-blocks.bin, 102 bytes: one row of 96 columns).
+;
+; THE REFERENCE. Every f32 operation is an fp64 operation followed by the oracle's round-to-nearest-even to f32
+; (dfo-round32, dsv4-oracle-reference.bml); a product of two f32 is exact in fp64, so the multiply and the fma see one rounding
+; each (the fma's sum is rounded in fp64 and then in f32, a double rounding that cannot show on these data and is named here).
+; The quantiser rounds half to EVEN (metal::rint), the order is a0/a1 pairs of blocks with an odd tail into a0 and the reduction
+; is vaddvq's tree (t0 + t1) + (t2 + t3).
+;
+; Verdict 255 when every claim lands:
+;   1     the shape constants: 4 NEON lanes, 2 accumulators, 8 elements a step, a 32-element Q8_0 block of 34 bytes, 4 products a
+;         int dot lane
+;   2     the emitted bodies carry their kernels (quantize, ordered, ordered8, the ds4 matvec) and the appendix holds them all
+;   4     the unit of the quantiser, the ordered dot and its eight-thread twin mints three pipelines on the device
+;   8     the device quantiser equals the Form reference: 96 int8 values and 3 block scales, bit for bit (block 0 scales by 1,
+;         block 1 by 2 and every odd half is an exact tie, block 2 is awkward)
+;   16    the device ordered dot (one thread a row) equals the Form reference of ds4's order, bit for bit
+;   32    the eight-thread twin equals the one-thread kernel, bit for bit (its header says it is bit-identical; this holds it)
+;   64    the data discriminates: a left fold in element order disagrees with the ordered result in at least one bit, and
+;         round-half-away disagrees with the device quantiser on at least one tie, so bits 8 and 16 are claims about ds4's order
+;   128   an unrun kernel cannot pass: the outputs are pre-filled with 0x5A bytes (an f32 of 1.5e16) and every one is overwritten
+;         with a value inside the range of this run
+;
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door; no sibling kernel carries metal_pipeline). Light GPU: 3 + 1 + 8 threads.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml form-stdlib/f16-decode.fk form-stdlib/ds4-order-match.fk form-stdlib/bml/dsv4-oracle-reference.bml
+section [form.bml] {
+ class Ds4OrderMatchBand {
+  def dob-bit(held, bit) = held ? bit : 0;
+  def dob-has?(s, part) = str_find(s, part, 0) >= 0;
+  def dob-abs(v) = v < 0.0 ? 0.0 - v : v;
+  def dob-r(x) = dfo-round32(x);
+  def dob-fixture() = read_file_slice("form/form-stdlib/tests/fixtures/q8-0-three-blocks.bin", 0, 102);
+
+  // ---- the activation: three blocks of 32, each an exact f32 value
+  def dob-raw(i) = i < 32 ? (i == 0 ? 127.0 : ((((i * 37) % 121) - 60) + 0.5))
+   : i < 64 ? (i == 32 ? 63.5 : (((((i - 32) * 29) % 253) - 126) + 0.0) / 4.0)
+   : ((((((i - 64) * 53) % 201) - 100) + 0.0) / 17.0);
+  def dob-x(i) = dob-r(dob-raw(i));
+  def dob-xbytes(i, acc) = i == 96 ? acc : dob-xbytes(i + 1, acc ++ md-le32(md-f32-bits(dob-x(i))));
+
+  // ---- the reference quantiser (ds4.c:7051): d = amax / 127, id = 1 / d, v = rint(x * id) clamped
+  def dob-amax(i, end, acc) = i == end ? acc : dob-amax(i + 1, end, dob-abs(dob-x(i)) > acc ? dob-abs(dob-x(i)) : acc);
+  def dob-d(b) = dob-r(dob-amax(b * 32, (b * 32) + 32, 0.0) / 127.0);
+  def dob-id(b) = dob-d(b) == 0.0 ? 0.0 : dob-r(1.0 / dob-d(b));
+  def dob-clamp(v) = v > 127 ? 127 : (v < -128 ? -128 : v);
+  def dob-even(v) = dob-clamp(dfo-round-even(v));
+  // half away from zero, the wrong rounding the header names
+  def dob-away(v) = v < 0.0 ? 0 - floor((0.0 - v) + 0.5) : floor(v + 0.5);
+  def dob-q(i) = dob-even(dob-r(dob-x(i) * dob-id(i / 32)));
+  def dob-qaway(i) = dob-clamp(dob-away(dob-r(dob-x(i) * dob-id(i / 32))));
+  def dob-signed(byte) = byte >= 128 ? byte - 256 : byte;
+
+  // ---- the reference Q8_0 row: block b's f16 scale and 32 signed weights
+  def dob-h(src, b) = str_byte_at(src, 34 * b) + (256 * str_byte_at(src, (34 * b) + 1));
+  def dob-w(src, b, j) = dob-signed(str_byte_at(src, (34 * b) + 2 + j));
+  def dob-s(src, b) = dob-r(fd-f16(dob-h(src, b)) * dob-d(b));
+  // the int dot of lane l in block b: products at 4l..4l+3 and 16+4l..16+4l+3, exact
+  def dob-dot(src, b, l, k, acc) = k == 4 ? acc
+   : dob-dot(src, b, l, k + 1, acc + (dob-w(src, b, (4 * l) + k) * dob-q((32 * b) + (4 * l) + k)) + (dob-w(src, b, 16 + (4 * l) + k) * dob-q((32 * b) + 16 + (4 * l) + k)));
+  def dob-fma(a, b, c) = dob-r((a * b) + c);
+  // accumulators a0 (even blocks) and a1 (odd blocks), per lane; the tail block lands in a0
+  def dob-acc(src, blocks, parity, l) = dob-acc-from(src, blocks, parity, l, parity, 0.0);
+  def dob-acc-from(src, blocks, parity, l, b, acc) = b >= blocks ? acc
+   : dob-acc-from(src, blocks, parity, l, b + 2, dob-fma(dob-dot(src, b, l, 0, 0) + 0.0, dob-s(src, b), acc));
+  def dob-ordered(src, blocks) {
+   let t0 = dob-r(dob-acc(src, blocks, 0, 0) + dob-acc(src, blocks, 1, 0));
+   let t1 = dob-r(dob-acc(src, blocks, 0, 1) + dob-acc(src, blocks, 1, 1));
+   let t2 = dob-r(dob-acc(src, blocks, 0, 2) + dob-acc(src, blocks, 1, 2));
+   let t3 = dob-r(dob-acc(src, blocks, 0, 3) + dob-acc(src, blocks, 1, 3));
+   dob-r(dob-r(t0 + t1) + dob-r(t2 + t3));
+  }
+  // the wrong association: one accumulator, blocks in order, products added one block at a time, no lanes
+  def dob-left(src, blocks, b, acc) = b == blocks ? acc
+   : dob-left(src, blocks, b + 1, dob-fma(dob-dot(src, b, 0, 0, 0) + dob-dot(src, b, 1, 0, 0) + dob-dot(src, b, 2, 0, 0) + dob-dot(src, b, 3, 0, 0) + 0.0, dob-s(src, b), acc));
+
+  def dob-f(bytes, i) = ln-f32-decode(ln-u32-le(bytes, 4 * i));
+  def dob-finite?(v) = v == v && dob-abs(v) < 1000000000000.0;
+  // a sentinel of n bytes: 0x5A, which reads as the f32 1.5e16, outside any value this run can produce
+  def dob-nan(n, acc) = n <= 0 ? acc : dob-nan(n - 1, acc ++ "Z");
+  def dob-q-equal(xq, i) = i == 96 ? true : ((dob-signed(str_byte_at(xq, i)) == dob-q(i)) && dob-q-equal(xq, i + 1));
+  def dob-q-differs-from-away(xq, i) = i == 96 ? false : ((dob-signed(str_byte_at(xq, i)) != dob-qaway(i)) || dob-q-differs-from-away(xq, i + 1));
+  def dob-s-equal(xs, b) = b == 3 ? true : (dob-f(xs, b) == dob-d(b) && dob-s-equal(xs, b + 1));
+
+  // THE PRAGMAS ARE PART OF THE CLAIM. metal_pipeline compiles with the default options (fast math on, multiply-add contraction on;
+  // the carrier's own header says so and says the fix belongs to the cell). Witnessed 2026-10-02 on this data: without these two
+  // lines the eight-thread twin read 8 ulps from the one-thread kernel (the compiler reassociated its closing tree), with them it is
+  // bit for bit. The order-match claim is about an association, so the unit says it keeps it.
+  def dob-unit() = "#include <metal_stdlib>\n#pragma clang fp reassociate(off)\n#pragma clang fp contract(off)\n" ++ dom-q8a-quantize-body() ++ dom-q80-ordered-body() ++ dom-q80-ordered8-body();
+
+  // ---- 1, 2
+  def dob-shape() = dom-neon-lanes() == 4 && dom-neon-accs() == 2 && dom-step() == 8 && dom-q8-block() == 32 && dom-q8-block-bytes() == 34 && dom-dot-lane-span() == 4;
+  def dob-bodies() = dob-has?(dom-q8a-quantize-body(), "form_dsv4_q8a_quantize_f32") && dob-has?(dom-q80-ordered-body(), "form_dsv4_q80_matvec_ordered")
+   && dob-has?(dom-q80-ordered8-body(), "form_dsv4_q80_matvec_ordered8") && dob-has?(dom-q80-mv-ds4-body(), "form_dsv4_q80_matvec_ds4")
+   && dob-has?(dom-msl-appendix(), "form_dsv4_q8a_quantize_f32") && dob-has?(dom-msl-appendix(), "form_dsv4_q80_matvec_ordered8") && dob-has?(dom-msl-appendix(), "form_dsv4_q80_matvec_ds4");
+
+  // ---- the device run, once: answers (xq xs y1 y8 ok)
+  def dob-run() {
+   let src = dob-fixture();
+   let unit = dob-unit();
+   let pq = metal_pipeline(unit, "form_dsv4_q8a_quantize_f32");
+   let po = metal_pipeline(unit, "form_dsv4_q80_matvec_ordered");
+   let p8 = metal_pipeline(unit, "form_dsv4_q80_matvec_ordered8");
+   let qh = metal_buf_alloc(102);
+   let w1 = metal_buf_write(qh, 0, src);
+   let xh = metal_buf_alloc(384);
+   let w2 = metal_buf_write(xh, 0, dob-xbytes(0, ""));
+   let qx = metal_buf_alloc(96);
+   let w3 = metal_buf_write(qx, 0, dob-nan(96, ""));
+   let sx = metal_buf_alloc(12);
+   let w4 = metal_buf_write(sx, 0, dob-nan(12, ""));
+   let y1 = metal_buf_alloc(4);
+   let w5 = metal_buf_write(y1, 0, dob-nan(4, ""));
+   let y8 = metal_buf_alloc(4);
+   let w6 = metal_buf_write(y8, 0, dob-nan(4, ""));
+   let e1 = metal_enqueue(pq, md-bind([xh, qx, sx], [96]), 3);
+   let s1 = metal_sync();
+   let e2 = metal_enqueue(po, md-bind([qh, qx, sx, y1], [1, 96]), 1);
+   let e3 = metal_enqueue(p8, md-bind16([qh, qx, sx, y8], [1, 96], 32, 0, 0, 0), 32);
+   let s2 = metal_sync();
+   [pq, po, p8, metal_buf_read(qx, 0, 96), metal_buf_read(sx, 0, 12), metal_buf_read(y1, 0, 4), metal_buf_read(y8, 0, 4), (e1 == 1 && e2 == 1 && e3 == 1 && s1 >= 0 && s2 >= 0) ? 1 : 0];
+  }
+ }
+ // a claim that stops reads as a dark bit, not as a stopped band
+ let run = try dob-run() catch [0, 0, 0, "", "", "", "", 0];
+ let src = dob-fixture();
+ let reference = try dob-ordered(src, 3) catch -1.0;
+ let c1 = dob-bit(try dob-shape() catch false, 1);
+ let c2 = dob-bit(try dob-bodies() catch false, 2);
+ let c4 = dob-bit(run[0] > 0 && run[1] > 0 && run[2] > 0, 4);
+ let c8 = dob-bit(try (run[7] == 1 && dob-q-equal(run[3], 0) && dob-s-equal(run[4], 0)) catch false, 8);
+ let c16 = dob-bit(try (run[7] == 1 && dob-f(run[5], 0) == reference) catch false, 16);
+ let c32 = dob-bit(try (run[7] == 1 && run[5] == run[6]) catch false, 32);
+ let c64 = dob-bit(try (dob-q-differs-from-away(run[3], 0) && (dob-left(src, 3, 0, 0.0) != reference)) catch false, 64);
+ let c128 = dob-bit(try (run[7] == 1 && dob-finite?(dob-f(run[5], 0)) && dob-finite?(dob-f(run[6], 0)) && dob-finite?(dob-f(run[4], 0)) && dob-finite?(dob-f(run[4], 1)) && dob-finite?(dob-f(run[4], 2))) catch false, 128);
+ print_str("ds4-order-match-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128;
+}
