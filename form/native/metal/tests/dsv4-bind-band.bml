@@ -1,0 +1,155 @@
+; dsv4-bind-band.bml -- the DeepSeek-V4 driver's weight views: the fixture's 86 tensors mapped one view each, read back through Metal as the generator's bytes,
+; clipped to their own ranges and released; and the plans of the two real files computed from their headers alone, with no file mapped.
+;
+; WHAT THIS PINS. native/metal/dsv4-bind.fk plans a view per tensor from the layout (form-stdlib/dsv4-layout.fk) and opens them with metal_buf_from_file, the door
+; Qwen's lane maps its weights through (the carrier mmaps the file MAP_PRIVATE with no copy and exposes exactly [off, off + len)). This band maps ONLY the fixture it
+; writes under temp_dir (1,515,232 bytes) and frees every handle in its own synced round, reading metal_live before and after. The two real files are never opened for
+; mapping: their plans are computed from the 8 MB header windows and checked as arithmetic (disjoint, inside the file, covering the data region exactly), and the
+; carrier's mapping counter is read to stay where it was.
+;
+; Verdict 511 when every claim lands:
+;   1     the fixture's plan: 86 tensors in the table, the driver binds all 86; the ranges equal the generator's offsets and priced lengths (7,168 plus each offset),
+;         are disjoint, inside the 1,515,232-byte file, start at the data base and end at the end of the file (the full plan covers the data region exactly)
+;   2     the fixture opens: 86 mappings, 86 distinct positive handles, the carrier's live buffers and file mappings each up by 86, the Qwen-shaped tensor view of
+;         token_embd.weight is [handle, 32, 256, 1] and an expert stack's third dimension reads 4
+;   4     every view reads back as the generator says: all 86 tensors, whole, through metal_buf_read, equal the generator's bytes and equal the file's own bytes at the
+;         planned range
+;   8     the view is clipped to its range: for the first, a middle and the last tensor, one byte past the end, the last two bytes read as three, and a negative offset
+;         are each refused (never a neighbour's byte), while the first and last byte inside read as the file's bytes
+;   16    release: dvb-close answers no handle still held, and the carrier's live buffers and file mappings read what they read before the open (86 freed in a synced round)
+;   32    the IQ2XXS file's plan, from its 8 MB header window and nothing mapped: 1,328 tensors, 1,202 driver views (under the 65,535 wall by 64,333), the 126 left out all
+;         indexer tensors; disjoint, inside the 86,720,111,488 bytes, the full plan covering the data region (base 5,333,824) exactly: the ranges hold all but 1,764
+;         bytes of it (alignment padding, under 32 a gap) and the last ends at the file's end; the driver's 1,202 views hold 86,263,310,172 bytes; every row's bytes
+;         equal the oracle's pricing or the Q8_0 and Q2_K block formulas
+;   64    the reap25 file's plan, the same way: 1,406 tensors, 1,202 driver views, the 204 left out being 126 indexer and 78 draft-layer tensors, covering the data region
+;         (base 5,339,744) of the 91,321,404,640 bytes exactly (all but 1,928 bytes of padding held), the driver's 1,202 views holding 79,849,072,476 bytes, every
+;         row's bytes equal to the oracle's own dfo-tensor-size
+;   128   nothing was mapped for the real files: the carrier's file-mapping counter is the same before and after both plans, and each plan was computed from a
+;         window of 8,388,608 bytes of a file ten thousand times larger
+;   256   the plan can refuse: a range shifted back one byte reads overlapping, a plan against a file one byte short reads outside, a tensor dropped from the full plan reads
+;         as a gap, a header with an unpriced type gives no driver plan, and a map past the end of the file is refused by the carrier, answers nothing and leaves the
+;         counters where they were
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind the handle door (metal_buf_from_file, metal_buf_read, metal_buf_free, metal_live) and bits 32
+; to 128 read the two model files' headers (host-local paths outside the tree). No weight of a real file is read.
+; The band writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form/form-stdlib/bml/dsv4-oracle-reference.bml
+section [form.bml] {
+ class Dsv4BindBand {
+  def dbb-bit(held, bit) = held ? bit : 0;
+  def dbb-iq2() = "/Users/ursmuff/models/ds4-engine/gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf";
+  def dbb-reap() = "/Users/ursmuff/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf";
+  def dbb-has?(s, part) = str_find(s, part, 0) >= 0;
+  def dbb-g(m, key) = record_get(m, key);
+
+  // ---- 1
+  def dbb-rows-match(plan, specs, offs, i) = i == len(specs) ? true : (plan[i][0] == specs[i][0] && plan[i][1] == specs[i][1] && plan[i][2] == specs[i][2] && plan[i][3] == 7168 + offs[i] && plan[i][4] == dfx-tbytes(specs[i][1], specs[i][2]) && dbb-rows-match(plan, specs, offs, i + 1));
+  def dbb-fix-plan(m, specs, extent) {
+   let all = dvb-plan-all(m);
+   let driver = dvb-plan-driver(m);
+   len(all) == 86 && !nothing?(driver) && len(driver) == 86 && dbb-rows-match(all, specs, dfx-offsets(specs, 0), 0) && dvb-plan-names(driver) != dvb-plan-names(all)
+    && dvb-disjoint?(all) && dvb-inside?(all, extent) && dvb-covers?(all, 7168, extent) && dvb-padding(all, 7168, extent) == (extent - 7168) - dvb-plan-bytes(all)
+    && extent == 1515232 && dvb-plan-bytes(all) <= 1508064;
+  }
+
+  // ---- 2 (the views are opened outside the claims, so a stopped claim cannot leak a mapping)
+  def dbb-distinct(hs) = len(hs) == 0 ? true : (hs[0] > 0 && !dbb-member(hs[0], hs[1:]) && dbb-distinct(hs[1:]));
+  def dbb-member(x, xs) = len(xs) == 0 ? false : (xs[0] == x || dbb-member(x, xs[1:]));
+  def dbb-opened(views, live0, mapped0) {
+   let ix = dvb-index(views);
+   let embd = dvb-tv(record_get(ix, "token_embd.weight"));
+   let gate = record_get(ix, "blk.1.ffn_gate_exps.weight");
+   !nothing?(views) && len(views) == 86 && dbb-distinct(dvb-handles(views)) && dvb-live() == live0 + 86 && dvb-mapped() == mapped0 + 86
+    && embd[1] == 32 && embd[2] == 256 && embd[3] == 1 && embd[0] == record_get(ix, "token_embd.weight")[1] && dvb-d2(gate) == 4;
+  }
+
+  // ---- 4
+  def dbb-bytes-at(path, views, specs, i) = i == len(specs) ? true : {
+   let v = views[i];
+   let want = dfx-tensor-bytes(specs[i]);
+   let got = dvb-read(v, 0, v[5]);
+   str_len(got) == v[5] && str_eq(got, want) && str_eq(want, read_file_slice(path, v[4], v[5])) && dbb-bytes-at(path, views, specs, i + 1);
+  };
+
+  // ---- 8
+  def dbb-refused(v, off, n) = try (str_len(dvb-read(v, off, n)) != n) catch true;
+  def dbb-clipped(path, v) {
+   let last = v[5] - 1;
+   let first = dvb-read(v, 0, 1);
+   let tail = dvb-read(v, last, 1);
+   dbb-refused(v, v[5], 1) && dbb-refused(v, last - 1, 3) && dbb-refused(v, 0 - 1, 1) && dbb-refused(v, v[5] + 1, 1)
+    && str_eq(first, read_file_slice(path, v[4], 1)) && str_eq(tail, read_file_slice(path, v[4] + last, 1));
+  }
+  def dbb-clip(path, views) = dbb-clipped(path, views[0]) && dbb-clipped(path, views[43]) && dbb-clipped(path, views[85]);
+
+  // ---- 32 and 64: a real file's plan
+  def dbb-indexer?(name) = dbb-has?(name, "indexer");
+  def dbb-omitted(allNames, driverNames, ix) = len(allNames) == 0 ? [] : (dbb-member(allNames[0], driverNames) ? dbb-omitted(allNames[1:], driverNames, ix) : cons(allNames[0], dbb-omitted(allNames[1:], driverNames, ix)));
+  def dbb-count-where(names, kind) = len(names) == 0 ? 0 : (dbb-kind?(names[0], kind) ? 1 : 0) + dbb-count-where(names[1:], kind);
+  def dbb-kind?(name, kind) = kind == "indexer" ? dbb-has?(name, "indexer") : dbb-has?(name, "dspark.");
+  // a row's bytes by a pricing that is not gguf-manifest's: the oracle's, else the Q8_0 and Q2_K block formulas
+  def dbb-cells(ds) = len(ds) == 0 ? 1 : ds[0] * dbb-cells(ds[1:]);
+  def dbb-price(ty, ds) = ty == 8 ? dbb-cells(ds) / 32 * 34 : ty == 10 ? dbb-cells(ds) / 256 * 84 : dfo-tensor-size([ty, ds, 0]);
+  def dbb-priced-ok(plan) = len(plan) == 0 ? true : (plan[0][4] == dbb-price(plan[0][1], plan[0][2]) && dbb-priced-ok(plan[1:]));
+  def dbb-real(m, src, extent, base, tensors, omittedIndexer, omittedDraft, padding, driverBytes) {
+   let all = dvb-plan-all(m);
+   let driver = dvb-plan-driver(m);
+   let omitted = dbb-omitted(dvb-plan-names(all), dvb-plan-names(driver), 0);
+   str_len(src) == 8388608 && dbb-g(m, "data-base") == base && len(all) == tensors && !nothing?(driver) && len(driver) == 1202 && len(driver) <= dvb-handle-wall() && (dvb-handle-wall() - len(driver)) == 64333
+    && len(omitted) == omittedIndexer + omittedDraft && dbb-count-where(omitted, "indexer") == omittedIndexer && dbb-count-where(omitted, "dspark") == omittedDraft
+    && dvb-disjoint?(all) && dvb-inside?(all, extent) && dvb-covers?(all, base, extent) && dvb-disjoint?(driver) && dvb-inside?(driver, extent)
+    && dvb-padding(all, base, extent) == padding && dvb-plan-bytes(driver) == driverBytes && dvb-priced?(all) && dbb-priced-ok(all);
+  }
+
+  // ---- 128
+  def dbb-unmapped(mapped0, mapped1, mapped2, live0, live2) = mapped0 == mapped1 && mapped1 == mapped2 && live0 == live2 && mapped0 >= 0;
+
+  // ---- 256
+  def dbb-shift(plan, i, by) = len(plan) == 0 ? [] : cons(i == 0 ? [plan[0][0], plan[0][1], plan[0][2], plan[0][3] + by, plan[0][4]] : plan[0], dbb-shift(plan[1:], i - 1, by));
+  def dbb-without(plan, i) = len(plan) == 0 ? [] : (i == 0 ? plan[1:] : cons(plan[0], dbb-without(plan[1:], i - 1)));
+  def dbb-retype(specs, name, ty) = len(specs) == 0 ? [] : cons(specs[0][0] == name ? [specs[0][0], ty, specs[0][2], specs[0][3], specs[0][4], specs[0][5]] : specs[0], dbb-retype(specs[1:], name, ty));
+  def dbb-negatives(path, m, specs, extent, live0, mapped0) {
+   let all = dvb-plan-all(m);
+   let unpricedHeader = dfx-header(dbb-retype(specs, "blk.1.ffn_gate_inp.weight", 31));
+   let past = append(all, [["ghost", 1, [64], extent - 10, 100]]);
+   let opened = dvb-open(path, past);
+   dvb-disjoint?(all) && (!dvb-disjoint?(dbb-shift(all, 5, 0 - 1))) && dvb-inside?(all, extent) && (!dvb-inside?(all, extent - 1))
+    && dvb-covers?(all, 7168, extent) && (!dvb-covers?(dbb-without(all, 40), 7168, extent)) && (!dvb-covers?(dbb-without(all, 0), 7168, extent))
+    && nothing?(dvb-plan-driver(dvl-open(unpricedHeader))) && (!nothing?(dvb-plan-driver(m)))
+    && nothing?(opened) && dvb-live() == live0 && dvb-mapped() == mapped0;
+  }
+ }
+ let root = temp_dir() ++ "/dsv4-bind-band-" ++ now_unix_ms().str();
+ let fixPath = root ++ ".gguf";
+ let specs = dfx-specs();
+ let wrote = dfx-write(fixPath);
+ let extent = file_size(fixPath);
+ let fixSrc = read_file_slice(fixPath, 0, 7168);
+ let m = dvl-open(fixSrc);
+ let live0 = dvb-live();
+ let mapped0 = dvb-mapped();
+ let plan = dvb-plan-all(m);
+ let views = dvb-open(fixPath, plan);
+ let c2 = dbb-bit(try dbb-opened(views, live0, mapped0) catch false, 2);
+ let c4 = dbb-bit(try dbb-bytes-at(fixPath, views, specs, 0) catch false, 4);
+ let c8 = dbb-bit(try dbb-clip(fixPath, views) catch false, 8);
+ let left = nothing?(views) ? [] : dvb-close(views);
+ let c16 = dbb-bit(try nothing?(views) == false && len(left) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 16);
+ let c1 = dbb-bit(try wrote == 1515232 && dbb-fix-plan(m, specs, extent) catch false, 1);
+ let mappedBefore = dvb-mapped();
+ let liveBefore = dvb-live();
+ let iq2Src = dvl-src(dbb-iq2());
+ let iq2 = dvl-open(iq2Src);
+ let mappedMid = dvb-mapped();
+ let reapSrc = dvl-src(dbb-reap());
+ let reap = dvl-open(reapSrc);
+ let mappedAfter = dvb-mapped();
+ let liveAfter = dvb-live();
+ let c32 = dbb-bit(try dbb-real(iq2, iq2Src, 86720111488, 5333824, 1328, 126, 0, 1764, 86263310172) catch false, 32);
+ let c64 = dbb-bit(try dbb-real(reap, reapSrc, 91321404640, 5339744, 1406, 126, 78, 1928, 79849072476) catch false, 64);
+ let c128 = dbb-bit(try dbb-unmapped(mappedBefore, mappedMid, mappedAfter, liveBefore, liveAfter) && str_len(iq2Src) == 8388608 && str_len(reapSrc) == 8388608 catch false, 128);
+ let c256 = dbb-bit(try dbb-negatives(fixPath, m, specs, extent, live0, mapped0) catch false, 256);
+ let removed = host_path_remove(fixPath);
+ print_str("dsv4-bind-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ dvb-mapped().str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256;
+}
