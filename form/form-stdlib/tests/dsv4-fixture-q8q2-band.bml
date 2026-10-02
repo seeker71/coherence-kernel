@@ -1,0 +1,263 @@
+; dsv4-fixture-q8q2-band.bml -- the second DeepSeek-V4 fixture: the first one's census in the tensor types of the real IQ2XXS file (Q8_0 dense, IQ2_XXS gate and up experts, Q2_K down experts),
+; and the oracle's fp64 reading of those types held to two other hands.
+;
+; WHAT THIS PINS. form-stdlib/dsv4-fixture-gguf.fk dfx-v-write writes the same 86 tensors in the same order from the same seeds as the first fixture with every MXFP8 tensor retyped Q8_0 over
+; its own dims and the experts of every layer retyped IQ2_XXS (gate and up, [256, 256, 4]) and Q2_K (down, [256, 256, 4]); the first fixture (dfx-write) is untouched and its digest is the one
+; the first band pins. The oracle (dsv4-oracle-reference.bml) reads the new types by the tensor's OWN type from the file: dfo-ref-q80, dfo-ref-q80-out-a and dfo-q2k, and its admission lists accept
+; 8 and 10 beside 41, 40 and 16. The truth for them is the oracle's fp64 dequant of the same blocks; this band holds that dequant to the body's carvers (q8-0-msl.fk's q80-flat-at, q2k-dequant.fk's
+; q2k-at, which is ds4.c:3466's own recipe, bit for bit against ds4 on 512 of 512 elements) so the oracle is not its own witness. Nothing here opens a model or the GPU.
+;
+; Verdict 255 when every claim lands:
+;   1     built: the writer's byte count is the file's size, the size is the data base 7,168 plus the data region the layout promises, the file begins GGUF version 3, 86 tensors and 36 pairs
+;   2     the census through the table: 25 Q8_0 (8), 6 IQ2_XXS (16), 3 Q2_K (10), 17 F16, 34 F32, 1 I32 and no MXFP8 or MXFP4, every row's type, dims, offset and priced bytes (gm-bytes) as the writer set them;
+;         the layout reads gate 16, up 16, down 10 and hidden 256 on all three layers, is consistent, has nothing unpriced and 24 28 28 driver tensors
+;   4     every tensor's bytes read from the file equal what the generator says and every pad is zero; the whole file's SHA-256 is pinned and a second build is the same file
+;   8     the first fixture's pinned digest still reads b90181a1...1353b5e (its generator did not move) and its Q8_0-free census is unchanged (25 MXFP8, 6 MXFP4, 3 IQ2_XXS, no type 8 or 10)
+;   16    the oracle admits the file (dfo-open, dfo-admit-model 1, dfo-admit-position 0 and 4095) and its geometry is the one built
+;   32    the oracle's Q8_0 matrix (blk.0.attn_q_a, 256 -> 64; blk.1.attn_kv; output.weight; the shared down) equals a dot over the carver's own weights (q80-flat-at), within 1e-12 of the row peak,
+;         and the grouped output factor (attn_output_a, two groups of rank 32) equals the carver's dot over its own group's slice
+;   64    the oracle's Q2_K expert (blk.1.ffn_down_exps experts 0, 2 and 3; blk.2 expert 1) equals a dot over the carver's own weights (q2k-at), within 1e-12 of the row peak; the weights are sane
+;         (every Q8_0 scale in [2^-13, 2^-11), every Q2_K d in [2^-10, 2^-8) and dmin in [2^-11, 2^-9), the oracle's readings finite and under 8 on a ramp)
+;   128   the checks can fail: a Q8_0 block stride read as 33 bytes, a Q2_K min read as the scale, a flipped byte inside a Q2_K scale byte and a flipped Q8_0 code each read far from the carver or
+;         from the unflipped oracle; a copy cut short and an expert tensor retyped to an unpriced type are refused by the oracle
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- the fixture is written and read as a binary file through write_file and read_file_slice (rust and ts hand back a different file there) and a SHA-256 is taken
+; through the Form-emitted CPU door (a Darwin ARM64 in-RAM native). The band writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/gguf-tensor-index.fk form-stdlib/ds4-tensor-table.fk form-stdlib/f16-decode.fk form-stdlib/q2k-dequant.fk form-stdlib/q8-0-msl.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk form/form-stdlib/bml/dsv4-oracle-reference.bml form-stdlib/bml/sha256-owned.bml
+section [form.bml] {
+ class Dsv4FixtureQ8q2Band {
+  def dqb-bit(held, bit) = held ? bit : 0;
+  def dqb-hex(d, i) = i == len(d) ? "" : (substring("0123456789abcdef", str_byte_at(d, i) / 16, (str_byte_at(d, i) / 16) + 1) ++ substring("0123456789abcdef", str_byte_at(d, i) % 16, (str_byte_at(d, i) % 16) + 1) ++ dqb-hex(d, i + 1));
+  def dqb-sha(path) { let d = record_get(sho-file(path), "digest"); len(d) == 32 ? dqb-hex(d, 0) : ""; }
+  def dqb-pinned() = "PIN";
+  def dqb-first-pinned() = "b90181a115536345bbbe503098c1418d38403c9616555d98d343241ce1353b5e";
+  def dqb-src(path) = eqr-of-file(path, 0, file_size(path));
+  def dqb-abs(x) = x < 0.0 ? 0.0 - x : x;
+  // one pass with the best so far (a recursion that called itself twice a level would take 2^n steps)
+  def dqb-peak-go(xs, best) = len(xs) == 0 ? best : dqb-peak-go(xs[1:], dqb-abs(xs[0]) > best ? dqb-abs(xs[0]) : best);
+  def dqb-peak(xs) = dqb-peak-go(xs, 0.0);
+  def dqb-maxdiff(a, b, i, best) = i == len(a) ? best : dqb-maxdiff(a, b, i + 1, dqb-abs(a[i] - b[i]) > best ? dqb-abs(a[i] - b[i]) : best);
+  def dqb-nd(a, b) = (len(a) != len(b) || len(a) == 0) ? 1.0e30 : dqb-maxdiff(a, b, 0, 0.0) / (dqb-peak(b) > 0.0 ? dqb-peak(b) : 1.0);
+  def dqb-ramp(n, k) = n == 0 ? [] : cons(((k % 7) - 3) * 0.125 + 0.0625, dqb-ramp(n - 1, k + 1));
+  def dqb-count(path, ty) { let src = dqb-src(path); ds4t-live-count-go(src, egg-tinfo-start(src), egg-tensor-count(src), ty, 0); }
+
+  // ---- 1
+  def dqb-built(path, wrote, specs) {
+   let head = read_file_slice(path, 0, 8);
+   let src = dqb-src(path);
+   wrote == file_size(path) && file_size(path) == 7168 + dfx-data-size(specs)
+    && str_byte_at(head, 0) == 71 && str_byte_at(head, 1) == 71 && str_byte_at(head, 2) == 85 && str_byte_at(head, 3) == 70 && str_byte_at(head, 4) == 3 && str_byte_at(head, 5) == 0
+    && egg-tensor-count(src) == 86 && egg-kv-count(src) == 36 && egg-data-base(src, 32) == 7168;
+  }
+
+  // ---- 2
+  def dqb-dims-ok(src, off, ds, k) = k == len(ds) ? true : (egg-ti-dim(src, off, k) == ds[k] && dqb-dims-ok(src, off, ds, k + 1));
+  def dqb-row-ok(src, off, s, o) = gm-name(src, off) == s[0] && egg-ti-type(src, off) == s[1] && egg-ti-ndims(src, off) == len(s[2]) && dqb-dims-ok(src, off, s[2], 0)
+   && egg-ti-dataoff(src, off) == o && (o % 32) == 0 && gm-bytes(src, off) == dfx-tbytes(s[1], s[2]) && gm-priced?(s[1]) == 1;
+  def dqb-rows-ok(src, off, specs, offs, i) = i == len(specs) ? (off == egg-tinfo-end(src)) : (dqb-row-ok(src, off, specs[i], offs[i]) && dqb-rows-ok(src, egg-ti-next(src, off), specs, offs, i + 1));
+  def dqb-all-layers(m, key, v, il) = il == 3 ? true : (dvl-l(m, il, key) == v && dqb-all-layers(m, key, v, il + 1));
+  def dqb-census(path, specs) {
+   let src = dqb-src(path);
+   let m = dvl-open(src);
+   dqb-rows-ok(src, egg-tinfo-start(src), specs, dfx-offsets(specs, 0), 0)
+    && dqb-count(path, 8) == 25 && dqb-count(path, 16) == 6 && dqb-count(path, 10) == 3 && dqb-count(path, 1) == 17 && dqb-count(path, 0) == 34 && dqb-count(path, 26) == 1
+    && dqb-count(path, 41) == 0 && dqb-count(path, 40) == 0
+    && dqb-all-layers(m, "gate-type", 16, 0) && dqb-all-layers(m, "up-type", 16, 0) && dqb-all-layers(m, "down-type", 10, 0) && dqb-all-layers(m, "hidden", 256, 0) && dqb-all-layers(m, "nexp", 4, 0)
+    && dvl-consistent?(m) && dvl-unpriced(m) == 0 && len(dvl-l(m, 0, "names")) == 24 && len(dvl-l(m, 1, "names")) == 28 && len(dvl-l(m, 2, "names")) == 28
+    && dvl-type(record_get(m, "index"), "output.weight") == 8 && dvl-type(record_get(m, "index"), "blk.2.attn_output_a.weight") == 8 && dvl-type(record_get(m, "index"), "token_embd.weight") == 1;
+  }
+
+  // ---- 4
+  def dqb-zero-run(path, at, n) { let pad = read_file_slice(path, at, n); n == 0 ? true : (str_len(pad) == n && str_eq(pad, dfx-pad(n))); }
+  def dqb-bytes-at(path, base, specs, offs, i) {
+   let s = specs[i];
+   let n = dfx-tbytes(s[1], s[2]);
+   let padn = dfx-align(n) - n;
+   i == len(specs) - 1 ? str_eq(read_file_slice(path, base + offs[i], n), dfx-tensor-bytes(s))
+    : (str_eq(read_file_slice(path, base + offs[i], n), dfx-tensor-bytes(s)) && dqb-zero-run(path, base + offs[i] + n, padn) && dqb-bytes-at(path, base, specs, offs, i + 1));
+  }
+  def dqb-bytes(path, specs) = dqb-bytes-at(path, 7168, specs, dfx-offsets(specs, 0), 0);
+  def dqb-same(a, b) {
+   let sa = read_file_slice(a, 0, file_size(a));
+   let sb = read_file_slice(b, 0, file_size(b));
+   file_size(a) == file_size(b) && str_eq(sa, sb) && dqb-sha(a) == dqb-sha(b) && dqb-sha(a) != "" && dqb-sha(a) == dqb-pinned();
+  }
+
+  // ---- 8
+  def dqb-first-fixture(path) {
+   let wrote = dfx-write(path);
+   let ok = dqb-sha(path) == dqb-first-pinned() && dqb-count(path, 41) == 25 && dqb-count(path, 40) == 6 && dqb-count(path, 16) == 3 && dqb-count(path, 8) == 0 && dqb-count(path, 10) == 0 && wrote == 1515232;
+   let gone = host_path_remove(path);
+   ok;
+  }
+
+  // ---- 16
+  def dqb-oracle-admits(path) {
+   let r = dfo-open(path);
+   let g = dfo-geometry(r);
+   dfo-admit-model(r) == 1 && dfo-admit-position(r, 0) == 1 && dfo-admit-position(r, 4095) == 1
+    && record_get(g, "e") == 256 && record_get(g, "nh") == 2 && record_get(g, "hd") == 128 && record_get(g, "nrot") == 64 && record_get(g, "ng") == 2 && record_get(g, "hc") == 4;
+  }
+
+  // ---- 32 / 64: the oracle's fp64 reading against a dot over the carvers' own weights
+  // the carver's row dots: Q8_0 by q80-flat-at over the tensor's data base, Q2_K by q2k-at over the expert's base
+  def dqb-q80-dot(src, base, cols, row, x, i, acc) = i == cols ? acc : dqb-q80-dot(src, base, cols, row, x, i + 1, acc + (q80-flat-at(src, base, row * cols + i) * x[i]));
+  def dqb-q80-rows(src, base, cols, row, end, x) = row == end ? [] : cons(dqb-q80-dot(src, base, cols, row, x, 0, 0.0), dqb-q80-rows(src, base, cols, row + 1, end, x));
+  def dqb-q2k-dot(src, base, cols, row, x, i, acc) = i == cols ? acc : dqb-q2k-dot(src, base, cols, row, x, i + 1, acc + (q2k-at(src, base, row * cols + i) * x[i]));
+  def dqb-q2k-rows(src, base, cols, row, end, x) = row == end ? [] : cons(dqb-q2k-dot(src, base, cols, row, x, 0, 0.0), dqb-q2k-rows(src, base, cols, row + 1, end, x));
+  def dqb-dims(r, key) = nth(dfo-tensor(r, key), 1);
+  def dqb-q80-vs(path, r, key) {
+   let src = dqb-src(path);
+   let d = dqb-dims(r, key);
+   let cols = d[0];
+   let rows = d[1];
+   let x = dqb-ramp(cols, 0);
+   let a = dfo-mx8(r, key, x);
+   let b = dqb-q80-rows(src, dfo-abs(r, dfo-tensor(r, key)), cols, 0, rows, x);
+   let nd = dqb-nd(a, b);
+   let said = print_str("  oracle Q8_0 " ++ key ++ " rows " ++ rows.str() ++ " nd against the carver " ++ nd.str() ++ " peak " ++ dqb-peak(a).str());
+   len(a) == rows && nd < 1.0e-12 && dqb-peak(a) > 0.0;
+  }
+  // the grouped factor: group g's rows read x's slice g; the carver's dot over the same slice
+  def dqb-group-rows(src, base, cols, rank, g, groups, x) = g == groups ? [] : append(dqb-q80-rows(src, base, cols, g * rank, (g + 1) * rank, dnr-take(dnr-drop(x, g * cols), cols)), dqb-group-rows(src, base, cols, rank, g + 1, groups, x));
+  def dqb-q80-grouped(path, r, key) {
+   let src = dqb-src(path);
+   let d = dqb-dims(r, key);
+   let cols = d[0];
+   let rows = d[1];
+   let g = dfo-geometry(r);
+   let x = dqb-ramp(2 * cols, 3);
+   let a = dfo-out-a(r, key, x, g);
+   let b = dqb-group-rows(src, dfo-abs(r, dfo-tensor(r, key)), cols, record_get(g, "rank"), 0, record_get(g, "ng"), x);
+   let nd = dqb-nd(a, b);
+   let said = print_str("  oracle Q8_0 grouped " ++ key ++ " rows " ++ rows.str() ++ " nd against the carver " ++ nd.str());
+   len(a) == rows && nd < 1.0e-12 && dqb-peak(a) > 0.0;
+  }
+  def dqb-q2k-vs(path, r, key, expert) {
+   let src = dqb-src(path);
+   let t = dfo-tensor(r, key);
+   let d = nth(t, 1);
+   let cols = d[0];
+   let rows = d[1];
+   let stride = rows * (cols / 256) * 84;
+   let x = dqb-ramp(cols, expert);
+   let a = dfo-expert-matrix(r, key, expert, x);
+   let b = dqb-q2k-rows(src, dfo-abs(r, t) + expert * stride, cols, 0, rows, x);
+   let nd = dqb-nd(a, b);
+   let said = print_str("  oracle Q2_K " ++ key ++ " expert " ++ expert.str() ++ " rows " ++ rows.str() ++ " nd against the carver " ++ nd.str() ++ " peak " ++ dqb-peak(a).str());
+   len(a) == rows && nd < 1.0e-12 && dqb-peak(a) > 0.0 && dqb-peak(a) < 8.0;
+  }
+  def dqb-oracle-q80(path) {
+   let r = dfo-open(path);
+   dqb-q80-vs(path, r, "blk.0.attn_q_a.weight") && dqb-q80-vs(path, r, "blk.1.attn_kv.weight") && dqb-q80-vs(path, r, "output.weight") && dqb-q80-vs(path, r, "blk.2.ffn_down_shexp.weight")
+    && dqb-q80-grouped(path, r, "blk.1.attn_output_a.weight");
+  }
+  // sanity of the encodings across every block of a tensor: the scale bytes decode inside the band
+  def dqb-f16-in(src, at, lo, hi) { let v = fd-f16(eqr-u16(src, at)); v >= lo && v < hi; }
+  def dqb-q80-scales(src, base, blk, n) = blk == n ? true : (dqb-f16-in(src, base + blk * 34, 0.0001220703125, 0.000488281250) && dqb-q80-scales(src, base, blk + 1, n));
+  def dqb-q2k-scales(src, base, blk, n) = blk == n ? true : (dqb-f16-in(src, base + blk * 84 + 80, 0.0009765625, 0.00390625) && dqb-f16-in(src, base + blk * 84 + 82, 0.00048828125, 0.001953125) && dqb-q2k-scales(src, base, blk + 1, n));
+  def dqb-oracle-q2k(path) {
+   let r = dfo-open(path);
+   let src = dqb-src(path);
+   let q = dfo-tensor(r, "blk.1.attn_q_b.weight");
+   let dn = dfo-tensor(r, "blk.2.ffn_down_exps.weight");
+   dqb-q2k-vs(path, r, "blk.1.ffn_down_exps.weight", 0) && dqb-q2k-vs(path, r, "blk.1.ffn_down_exps.weight", 2) && dqb-q2k-vs(path, r, "blk.1.ffn_down_exps.weight", 3) && dqb-q2k-vs(path, r, "blk.2.ffn_down_exps.weight", 1)
+    && dqb-q80-scales(src, dfo-abs(r, q), 0, (64 * 128) / 32) && dqb-q2k-scales(src, dfo-abs(r, dn), 0, (256 * 256 * 4) / 256);
+  }
+
+  // ---- 128: the checks can fail
+  // a Q8_0 matrix whose block stride is read as 33 bytes: the carver's dot over that wrong stride is far from the oracle
+  def dqb-q80-bad-dot(src, base, cols, row, x, i, acc) = i == cols ? acc : dqb-q80-bad-dot(src, base, cols, row, x, i + 1, acc + (q80-flat-at(src, base + ((row * cols + i) / 32) * (0 - 1), row * cols + i) * x[i]));
+  def dqb-stride-33(path, r) {
+   let src = dqb-src(path);
+   let key = "blk.0.attn_q_a.weight";
+   let t = dfo-tensor(r, key);
+   let x = dqb-ramp(256, 0);
+   let a = dfo-mx8(r, key, x);
+   let bad = [dqb-q80-bad-dot(src, dfo-abs(r, t), 256, 0, x, 0, 0.0), dqb-q80-bad-dot(src, dfo-abs(r, t), 256, 1, x, 0, 0.0)];
+   let said = print_str("  stride 33: nd " ++ dqb-nd(bad, [a[0], a[1]]).str());
+   dqb-nd(bad, [a[0], a[1]]) > 0.01;
+  }
+  // a Q2_K whose min is read as the scale (low nibble twice) reads far from the oracle's row
+  def dqb-q2k-minscale-at(src, base, i) {
+   let b = q2k-block-base(base, i);
+   (q2k-d(src, b) * q2k-scale(src, b, i) * q2k-q(src, b, i)) - (q2k-dmin(src, b) * q2k-scale(src, b, i));
+  }
+  def dqb-q2k-bad-dot(src, base, cols, row, x, i, acc) = i == cols ? acc : dqb-q2k-bad-dot(src, base, cols, row, x, i + 1, acc + (dqb-q2k-minscale-at(src, base, row * cols + i) * x[i]));
+  def dqb-min-as-scale(path, r) {
+   let src = dqb-src(path);
+   let key = "blk.1.ffn_down_exps.weight";
+   let t = dfo-tensor(r, key);
+   let x = dqb-ramp(256, 0);
+   let a = dfo-expert-matrix(r, key, 0, x);
+   let bad = [dqb-q2k-bad-dot(src, dfo-abs(r, t), 256, 0, x, 0, 0.0), dqb-q2k-bad-dot(src, dfo-abs(r, t), 256, 1, x, 0, 0.0)];
+   let said = print_str("  Q2_K min read as scale: nd " ++ dqb-nd(bad, [a[0], a[1]]).str());
+   dqb-nd(bad, [a[0], a[1]]) > 0.01;
+  }
+  def dqb-flip(s, k, by) = substring(s, 0, k) ++ byte_to_str((str_byte_at(s, k) + by) % 256) ++ substring(s, k + 1, str_len(s));
+  def dqb-spec-at(specs, name, i) = specs[i][0] == name ? i : dqb-spec-at(specs, name, i + 1);
+  def dqb-retype(specs, name, ty) = len(specs) == 0 ? [] : cons(specs[0][0] == name ? [specs[0][0], ty, specs[0][2], specs[0][3], specs[0][4], specs[0][5]] : specs[0], dqb-retype(specs[1:], name, ty));
+  def dqb-refuses(path) = try (dfo-admit-model(dfo-open(path)) == 0) catch true;
+  // a flipped byte inside a Q2_K scale byte (expert 0 of blk.1's down stack, block 0, scales[3]) and a flipped Q8_0 code (blk.0.attn_q_a, row 0, element 5)
+  def dqb-negatives(root, path, specs) {
+   let whole = read_file_slice(path, 0, file_size(path));
+   let offs = dfx-offsets(specs, 0);
+   let iq = dqb-spec-at(specs, "blk.1.ffn_down_exps.weight", 0);
+   let iw = dqb-spec-at(specs, "blk.0.attn_q_a.weight", 0);
+   let atq = 7168 + offs[iq] + 3;
+   let atw = 7168 + offs[iw] + 2 + 5;
+   let fq = root ++ "-flipq.gguf";
+   let fw = root ++ "-flipw.gguf";
+   let cut = root ++ "-cut.gguf";
+   let ret = root ++ "-retyped.gguf";
+   let w1 = write_file(fq, dqb-flip(whole, atq, 16));
+   let w2 = write_file(fw, dqb-flip(whole, atw, 64));
+   let w3 = write_file(cut, substring(whole, 0, 1000000));
+   let w4 = write_file(ret, dfx-image(dqb-retype(specs, "blk.1.ffn_down_exps.weight", 12)));
+   let r0 = dfo-open(path);
+   let rq = dfo-open(fq);
+   let rw = dfo-open(fw);
+   let x = dqb-ramp(256, 0);
+   let q0 = dfo-expert-matrix(r0, "blk.1.ffn_down_exps.weight", 0, x);
+   let q1 = dfo-expert-matrix(rq, "blk.1.ffn_down_exps.weight", 0, x);
+   let a0 = dfo-mx8(r0, "blk.0.attn_q_a.weight", x);
+   let a1 = dfo-mx8(rw, "blk.0.attn_q_a.weight", x);
+   let said = print_str("  flipped Q2_K scale byte: expert row 0 moves " ++ dqb-abs(q1[0] - q0[0]).str() ++ " of " ++ dqb-peak(q0).str() ++ "; flipped Q8_0 code: row 0 moves " ++ dqb-abs(a1[0] - a0[0]).str() ++ " of " ++ dqb-peak(a0).str());
+   let caught = dqb-abs(q1[0] - q0[0]) > 0.001 * dqb-peak(q0) && dqb-abs(a1[0] - a0[0]) > 0.0001 * dqb-peak(a0) && dqb-refuses(cut) && dqb-refuses(ret);
+   let x1 = host_path_remove(fq);
+   let x2 = host_path_remove(fw);
+   let x3 = host_path_remove(cut);
+   let x4 = host_path_remove(ret);
+   caught && w1 == str_len(whole) && w2 == str_len(whole) && w3 == 1000000 && x1 == 0 && x2 == 0 && x3 == 0 && x4 == 0;
+  }
+ }
+ let root = temp_dir() ++ "/dsv4-fixture-q8q2-band-" ++ now_unix_ms().str();
+ let pathA = root ++ "-a.gguf";
+ let pathB = root ++ "-b.gguf";
+ let pathF = root ++ "-first.gguf";
+ let specs = dfx-v-specs();
+ let wroteA = dfx-v-write(pathA);
+ let wroteB = dfx-v-write(pathB);
+ let said = print_str("variant fixture " ++ wroteA.str() ++ " bytes, data region " ++ dfx-data-size(specs).str() ++ ", sha " ++ dqb-sha(pathA));
+ let t0 = now_unix_ms();
+ let c1 = dqb-bit(try dqb-built(pathA, wroteA, specs) catch false, 1);
+ let k1 = print_str("  claim 1 at " ++ (now_unix_ms() - t0).str() ++ " ms");
+ let c2 = dqb-bit(try dqb-census(pathA, specs) catch false, 2);
+ let k2 = print_str("  claim 2 at " ++ (now_unix_ms() - t0).str() ++ " ms");
+ let c4 = dqb-bit(try dqb-bytes(pathA, specs) && dqb-same(pathA, pathB) catch false, 4);
+ let k4 = print_str("  claim 4 at " ++ (now_unix_ms() - t0).str() ++ " ms");
+ let c8 = dqb-bit(try dqb-first-fixture(pathF) catch false, 8);
+ let k8 = print_str("  claim 8 at " ++ (now_unix_ms() - t0).str() ++ " ms");
+ let c16 = dqb-bit(try dqb-oracle-admits(pathA) catch false, 16);
+ let k16 = print_str("  claim 16 at " ++ (now_unix_ms() - t0).str() ++ " ms");
+ let c32 = dqb-bit(try dqb-oracle-q80(pathA) catch false, 32);
+ let k32 = print_str("  claim 32 at " ++ (now_unix_ms() - t0).str() ++ " ms");
+ let c64 = dqb-bit(try dqb-oracle-q2k(pathA) catch false, 64);
+ let k64 = print_str("  claim 64 at " ++ (now_unix_ms() - t0).str() ++ " ms");
+ let c128 = dqb-bit(try dqb-stride-33(pathA, dfo-open(pathA)) && dqb-min-as-scale(pathA, dfo-open(pathA)) && dqb-negatives(root, pathA, specs) catch false, 128);
+ let digest = dqb-sha(pathA);
+ let r1 = host_path_remove(pathA);
+ let r2 = host_path_remove(pathB);
+ print_str("dsv4-fixture-q8q2-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " sha " ++ digest ++ " removed " ++ r1.str() ++ r2.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128;
+}
