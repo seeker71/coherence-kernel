@@ -1,0 +1,195 @@
+// dsv4-layout.fk -- what the DeepSeek-V4 driver must know about a model, read from its GGUF HEADER and nothing else.
+//
+// The Metal driver opens a file of 80 to 90 GB. Everything it needs before the first token is in the header: the widths, the layer
+// table (each layer's compression ratio, routing regime, expert count and types, tensor set), the KV cache's shape and its bytes
+// a token, and the size of every scratch buffer. This cell computes them from an equireach source over the header window (the
+// metadata block and the tensor table; the driver and the bands pass 8 MB of a real file, or exactly the header bytes of the
+// fixture). No weight byte is read here and no tensor is mapped: the table rows carry offsets and priced lengths, and the driver's
+// binder (native/metal/dsv4-bind.fk) plans its views from them.
+//
+// WHERE EACH FIGURE COMES FROM, so a reader can check it against the file and not against this cell:
+//   widths           the metadata keys deepseek4.* (embedding_length, attention.head_count, key_length, rope.dimension_count,
+//                    attention.q_lora_rank, output_group_count, output_lora_rank, hyper_connection.count, expert_used_count,
+//                    vocab_size); the shared expert's width from blk.0.ffn_gate_shexp.weight, never from a key.
+//   layer table      deepseek4.attention.compress_ratios (one i32 a layer, one more for the next-token layer, which the driver does
+//                    not run), and the tensor table: a layer is HASHED when it carries ffn_gate_tid2eid.weight and BIASED when it
+//                    carries exp_probs_b.bias; it COMPRESSES when it carries attn_compressor_*; its stored experts and hidden width
+//                    are the dims of ffn_gate_exps.weight (a pruned build stores fewer experts than its router has rows, so both
+//                    are kept); its three expert tensors keep their own types (a layer can mix them).
+//   coff             the compressor's overlap factor is read from attn_compressor_kv.weight's second dimension over the head width
+//                    (2 at ratio 4, 1 otherwise in every file read so far), never assumed from the ratio.
+//   KV cache         one latent row of key_length f32 a token a layer is both key and value (dsv4-kv-cache.fk), so a token costs
+//                    layers x key_length x 4 bytes: 88,064 over the real file's 43 layers. A compressing layer adds
+//                    cap/ratio + 1 compressed rows of the same width, and a compressor state and score of (coff x ratio) rows of
+//                    (coff x key_length) f32 each (32,768 B each at ratio 4, 262,144 B at ratio 128 on the real file).
+//   scratch          the activations of the dispatch graph, f32: the residual is hc x n_embd (65,536 B on the real file), the
+//                    query is heads x key_length (131,072 B), the logits are vocab (517,120 B). The list is in dvl-buffers.
+//
+// THE 43-OR-46 QUESTION. The control plane says the reap25 build has 46 layers; the oracle's json and the receipts say 43. The
+// header answers: deepseek4.block_count reads 43, the tensors blk.0 to blk.42 are the layers, and the 46 is 43 plus the three
+// dspark.* draft layers (dspark.0, dspark.1, dspark.2) that follow the blocks in the table. dvl-draft-layers counts them.
+//
+// Proven by: form-stdlib/tests/dsv4-layout-band.bml (the fixture's exact header bytes, and the two real files' 8 MB header windows).
+import form-stdlib/core.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/equireach.fk;
+import form-stdlib/equireach-gguf.fk;
+import form-stdlib/gguf-meta.fk;
+import form-stdlib/gguf-manifest.fk;
+section [form.bml] {
+    // ---- the window: the table of the largest real file ends under 5.4 MB, the metadata with its tokenizer inside it
+    def dvl-window() = 8388608;
+    def dvl-src(path) = eqr-of-file(path, 0, file_size(path) < dvl-window() ? file_size(path) : dvl-window());
+
+    // ---- the tensor table, every row, priced by the reader's own geometry ------------------------------------
+    // a row is [name, ggml type, dims, relative offset, absolute offset, priced bytes]; priced bytes is 0 for a type the body does not price
+    def dvl-dims(src, off, k, n) = k == n ? [] : cons(egg-ti-dim(src, off, k), dvl-dims(src, off, k + 1, n));
+    def dvl-row(src, off, base) = [gm-name(src, off), egg-ti-type(src, off), dvl-dims(src, off, 0, egg-ti-ndims(src, off)), egg-ti-dataoff(src, off), base + egg-ti-dataoff(src, off), gm-bytes(src, off)];
+    def dvl-rows-go(src, off, n, base) = n == 0 ? [] : cons(dvl-row(src, off, base), dvl-rows-go(src, egg-ti-next(src, off), n - 1, base));
+    def dvl-rows(src) = dvl-rows-go(src, egg-tinfo-start(src), egg-tensor-count(src), egg-data-base(src, 32));
+    def dvl-r-name(r) = r[0];
+    def dvl-r-type(r) = r[1];
+    def dvl-r-dims(r) = r[2];
+    def dvl-r-rel(r) = r[3];
+    def dvl-r-abs(r) = r[4];
+    def dvl-r-bytes(r) = r[5];
+    // name -> row, one record, so a lookup is not a walk
+    def dvl-index-go(rows, ix) = len(rows) == 0 ? ix : { record_set(ix, rows[0][0], rows[0]); dvl-index-go(rows[1:], ix); };
+    def dvl-index(rows) = dvl-index-go(rows, record_new(0));
+    def dvl-has?(ix, name) = record_has(ix, name);
+    def dvl-row-of(ix, name) = record_get(ix, name);
+    // a dimension of a named tensor (1 for a missing trailing dimension), or -1 when the tensor is absent
+    def dvl-dim(ix, name, k) = dvl-has?(ix, name) ? (len(dvl-r-dims(dvl-row-of(ix, name))) > k ? dvl-r-dims(dvl-row-of(ix, name))[k] : 1) : 0 - 1;
+    def dvl-type(ix, name) = dvl-has?(ix, name) ? dvl-r-type(dvl-row-of(ix, name)) : 0 - 1;
+
+    // ---- the metadata ------------------------------------------------------------------------------------
+    def dvl-key(src, key) = gmt-u32(src, "deepseek4." ++ key);
+    def dvl-fkey(src, key) = gmt-f32(src, "deepseek4." ++ key);
+    def dvl-arr-go(src, off, i, n) = i == n ? [] : cons(eqr-le(src, gm-arr-elem-off(src, off, i), egg-vtype-size(gmt-arr-etype(src, off))), dvl-arr-go(src, off, i + 1, n));
+    // an integer array by key ([] when the key is absent)
+    def dvl-ints(src, key) = {
+        let off = gmt-find(src, key);
+        off == gmt-absent() ? [] : dvl-arr-go(src, off, 0, gmt-arr-count(src, off));
+    };
+
+    // ---- the tensors a driver binds, by name -------------------------------------------------------------
+    def dvl-attn-leaves() = ["attn_norm.weight", "attn_q_a.weight", "attn_q_a_norm.weight", "attn_q_b.weight", "attn_kv.weight", "attn_kv_a_norm.weight", "attn_sinks.weight", "attn_output_a.weight", "attn_output_b.weight"];
+    def dvl-hc-leaves() = ["hc_attn_fn.weight", "hc_attn_scale.weight", "hc_attn_base.weight", "hc_ffn_fn.weight", "hc_ffn_scale.weight", "hc_ffn_base.weight"];
+    def dvl-ffn-leaves() = ["ffn_norm.weight", "ffn_gate_inp.weight", "ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight", "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight"];
+    def dvl-comp-leaves() = ["attn_compressor_kv.weight", "attn_compressor_gate.weight", "attn_compressor_ape.weight", "attn_compressor_norm.weight"];
+    def dvl-global-names() = ["token_embd.weight", "output_hc_fn.weight", "output_hc_scale.weight", "output_hc_base.weight", "output_norm.weight", "output.weight"];
+    def dvl-prefixed(p, leaves) = len(leaves) == 0 ? [] : cons(p ++ leaves[0], dvl-prefixed(p, leaves[1:]));
+    def dvl-prefix(il) = "blk." ++ il.str() ++ ".";
+
+    // ---- one layer ---------------------------------------------------------------------------------------
+    def dvl-count-present(ix, names) = len(names) == 0 ? 0 : (dvl-has?(ix, names[0]) ? 1 : 0) + dvl-count-present(ix, names[1:]);
+    // the indexer is the top-k selector of the ratio-4 compressor; no driver in this stage dispatches it (the oldest run's radius never
+    // reaches its 512-row sill), so its tensors are present in the table and absent from the driver's set
+    def dvl-indexer-names(p) = [p ++ "indexer.attn_q_b.weight", p ++ "indexer.proj.weight", p ++ "indexer_compressor_kv.weight", p ++ "indexer_compressor_gate.weight", p ++ "indexer_compressor_ape.weight", p ++ "indexer_compressor_norm.weight"];
+    def dvl-layer(ix, e, hd, ratio, il) {
+        let p = dvl-prefix(il);
+        let comp = dvl-count-present(ix, dvl-prefixed(p, dvl-comp-leaves())) == 4;
+        let hashed = dvl-has?(ix, p ++ "ffn_gate_tid2eid.weight");
+        let route = hashed ? p ++ "ffn_gate_tid2eid.weight" : p ++ "exp_probs_b.bias";
+        let gate = p ++ "ffn_gate_exps.weight";
+        let names = append(dvl-prefixed(p, dvl-attn-leaves()), append(comp ? dvl-prefixed(p, dvl-comp-leaves()) : [], append([route], append(dvl-prefixed(p, dvl-ffn-leaves()), dvl-prefixed(p, dvl-hc-leaves())))));
+        let kvw = p ++ "attn_compressor_kv.weight";
+        record_new(0, "il", il, "ratio", ratio, "compressed", comp, "hashed", hashed, "route", route,
+            "coff", comp ? dvl-dim(ix, kvw, 1) / hd : 0, "ape-rows", comp ? dvl-dim(ix, p ++ "attn_compressor_ape.weight", 1) : 0,
+            "nexp", dvl-dim(ix, gate, 2), "hidden", dvl-dim(ix, gate, 1), "router-rows", dvl-dim(ix, p ++ "ffn_gate_inp.weight", 1),
+            "gate-type", dvl-type(ix, gate), "up-type", dvl-type(ix, p ++ "ffn_up_exps.weight"), "down-type", dvl-type(ix, p ++ "ffn_down_exps.weight"),
+            "indexer", dvl-count-present(ix, dvl-indexer-names(p)),
+            "names", names, "missing", len(names) - dvl-count-present(ix, names));
+    }
+    def dvl-layers-go(ix, e, hd, ratios, il, n) = il == n ? [] : cons(dvl-layer(ix, e, hd, il < len(ratios) ? ratios[il] : 0 - 1, il), dvl-layers-go(ix, e, hd, ratios, il + 1, n));
+
+    // ---- the model ---------------------------------------------------------------------------------------
+    // the layers after the blocks that the table carries under another prefix (dspark.0, dspark.1, ...), counted from the table
+    def dvl-draft-go(ix, i) = dvl-has?(ix, "dspark." ++ i.str() ++ ".attn_norm.weight") ? dvl-draft-go(ix, i + 1) : i;
+    def dvl-draft-layers(ix) = dvl-draft-go(ix, 0);
+    // the blocks the table carries, counted from blk.0 up while attn_norm exists: the layers as the TENSORS say
+    def dvl-blocks-go(ix, i) = dvl-has?(ix, dvl-prefix(i) ++ "attn_norm.weight") ? dvl-blocks-go(ix, i + 1) : i;
+    def dvl-table-blocks(ix) = dvl-blocks-go(ix, 0);
+    // open a model from its header source: the whole layout in one record
+    def dvl-open(src) {
+        let rows = dvl-rows(src);
+        let ix = dvl-index(rows);
+        let nl = dvl-key(src, "block_count");
+        let e = dvl-key(src, "embedding_length");
+        let hd = dvl-key(src, "attention.key_length");
+        let ratios = dvl-ints(src, "deepseek4.attention.compress_ratios");
+        let layers = dvl-layers-go(ix, e, hd, ratios, 0, nl);
+        record_new(0, "arch", gmt-str(src, "general.architecture"), "rows", rows, "index", ix, "tensors", len(rows), "data-base", egg-data-base(src, 32),
+            "layers-n", nl, "e", e, "nh", dvl-key(src, "attention.head_count"), "hd", hd, "vd", dvl-key(src, "attention.value_length"),
+            "nrot", dvl-key(src, "rope.dimension_count"), "qr", dvl-key(src, "attention.q_lora_rank"), "ng", dvl-key(src, "attention.output_group_count"),
+            "rank", dvl-key(src, "attention.output_lora_rank"), "hc", dvl-key(src, "hyper_connection.count"), "iters", dvl-key(src, "hyper_connection.sinkhorn_iterations"),
+            "vocab", dvl-key(src, "vocab_size"), "used", dvl-key(src, "expert_used_count"), "experts-kv", dvl-key(src, "expert_count"), "sliding-window", dvl-key(src, "attention.sliding_window"),
+            "sh", dvl-dim(ix, "blk.0.ffn_gate_shexp.weight", 1), "mix", (dvl-key(src, "hyper_connection.count") * dvl-key(src, "hyper_connection.count")) + (2 * dvl-key(src, "hyper_connection.count")),
+            "eps", dvl-fkey(src, "attention.layer_norm_rms_epsilon"), "hc-eps", dvl-fkey(src, "hyper_connection.epsilon"), "rope-base", dvl-fkey(src, "rope.freq_base"),
+            "rope-factor", dvl-fkey(src, "rope.scaling.factor"), "compress-base", dvl-fkey(src, "attention.compress_rope_freq_base"), "orig-ctx", dvl-key(src, "rope.scaling.original_context_length"),
+            "beta-fast", dvl-fkey(src, "rope.scaling.yarn_beta_fast"), "beta-slow", dvl-fkey(src, "rope.scaling.yarn_beta_slow"), "wscale", dvl-fkey(src, "expert_weights_scale"),
+            "ratios", ratios, "layers", layers, "table-blocks", dvl-table-blocks(ix), "draft-layers", dvl-draft-layers(ix));
+    }
+    def dvl-layer-at(m, il) = record_get(m, "layers")[il];
+    def dvl-l(m, il, key) = record_get(dvl-layer-at(m, il), key);
+
+    // ---- the KV cache ------------------------------------------------------------------------------------
+    // one latent row (key_length f32) per token per layer, key and value both
+    def dvl-row-bytes(m) = record_get(m, "hd") * 4;
+    def dvl-kv-bytes-per-token(m) = record_get(m, "layers-n") * dvl-row-bytes(m);
+    def dvl-raw-arena-bytes(m, cap) = cap * dvl-row-bytes(m);
+    // a compressing layer's compressed rows: one per ratio raw tokens, and one more for the row being formed
+    def dvl-comp-rows(m, il, cap) = dvl-l(m, il, "ratio") > 0 ? (cap / dvl-l(m, il, "ratio")) + 1 : 0;
+    def dvl-comp-arena-bytes(m, il, cap) = dvl-comp-rows(m, il, cap) * dvl-row-bytes(m);
+    // the compressor's running state and its score are each (coff x ratio) rows of (coff x key_length) f32
+    def dvl-state-bytes(m, il) = dvl-l(m, il, "compressed") ? (dvl-l(m, il, "coff") * dvl-l(m, il, "ratio")) * (dvl-l(m, il, "coff") * record_get(m, "hd")) * 4 : 0;
+    def dvl-layer-kv-bytes(m, il, cap) = dvl-raw-arena-bytes(m, cap) + dvl-comp-arena-bytes(m, il, cap) + (2 * dvl-state-bytes(m, il));
+    def dvl-kv-total-go(m, il, cap) = il == record_get(m, "layers-n") ? 0 : dvl-layer-kv-bytes(m, il, cap) + dvl-kv-total-go(m, il + 1, cap);
+    def dvl-kv-total(m, cap) = dvl-kv-total-go(m, 0, cap);
+
+    // ---- the scratch: one named f32 buffer per activation of the dispatch graph --------------------------
+    def dvl-max-layer-go(m, il, key, best) = il == record_get(m, "layers-n") ? best : dvl-max-layer-go(m, il + 1, key, dvl-l(m, il, key) > best ? dvl-l(m, il, key) : best);
+    def dvl-max-layer(m, key) = dvl-max-layer-go(m, 0, key, 0);
+    def dvl-max-comp-width(m) = {
+        let hd = record_get(m, "hd");
+        dvl-max-layer(m, "coff") * hd;
+    };
+    // [name, bytes] in the order the graph meets them; the expert buffers are sized for the widest layer
+    def dvl-buffers(m) {
+        let e = record_get(m, "e");
+        let hd = record_get(m, "hd");
+        let qdim = record_get(m, "nh") * hd;
+        let hce = record_get(m, "hc") * e;
+        [["resid", hce * 4], ["resid-next", hce * 4], ["hc-flat", hce * 4], ["hc-mix", record_get(m, "mix") * 4], ["hc-cur", e * 4], ["xn", e * 4],
+         ["q-latent", record_get(m, "qr") * 4], ["q", qdim * 4], ["kv-row", hd * 4], ["heads", qdim * 4], ["low", record_get(m, "ng") * record_get(m, "rank") * 4], ["attn-out", e * 4],
+         ["comp-gate", dvl-max-comp-width(m) * 4], ["comp-kv", dvl-max-comp-width(m) * 4],
+         ["router-logits", dvl-max-layer(m, "router-rows") * 4], ["router-probs", dvl-max-layer(m, "router-rows") * 4], ["expert-ids", record_get(m, "used") * 4], ["expert-weights", record_get(m, "used") * 4],
+         ["expert-gate", dvl-max-layer(m, "hidden") * 4], ["expert-up", dvl-max-layer(m, "hidden") * 4], ["expert-mid", dvl-max-layer(m, "hidden") * 4], ["expert-down", e * 4],
+         ["shared-gate", record_get(m, "sh") * 4], ["shared-up", record_get(m, "sh") * 4], ["shared-mid", record_get(m, "sh") * 4], ["shared-down", e * 4],
+         ["head-cur", e * 4], ["logits", record_get(m, "vocab") * 4]];
+    }
+    def dvl-buffer-bytes(bufs, name) = len(bufs) == 0 ? 0 - 1 : bufs[0][0] == name ? bufs[0][1] : dvl-buffer-bytes(bufs[1:], name);
+    def dvl-sum-bufs(bufs) = len(bufs) == 0 ? 0 : bufs[0][1] + dvl-sum-bufs(bufs[1:]);
+    def dvl-scratch-bytes(m) = dvl-sum-bufs(dvl-buffers(m));
+    // the layers' whole tensor census under the driver's set, and what the file holds that no driver here maps
+    def dvl-driver-names-go(m, il) = il == record_get(m, "layers-n") ? [] : append(dvl-l(m, il, "names"), dvl-driver-names-go(m, il + 1));
+    def dvl-driver-names(m) = append(dvl-global-names(), dvl-driver-names-go(m, 0));
+
+    // ---- does the header agree with itself ---------------------------------------------------------------
+    // a layer COMPRESSES exactly when its ratio is nonzero, and then the ape's second dimension is the ratio and coff is 1 or 2; every tensor the
+    // driver binds is in the table; the stored experts cover the selected count and the router has a row for each stored expert
+    def dvl-layer-consistent?(m, il) {
+        let l = dvl-layer-at(m, il);
+        let ratio = record_get(l, "ratio");
+        let comp = record_get(l, "compressed");
+        ratio >= 0 && (comp ? (ratio > 0 && record_get(l, "ape-rows") == ratio && (record_get(l, "coff") == 1 || record_get(l, "coff") == 2)) : ratio == 0)
+         && record_get(l, "missing") == 0 && record_get(l, "nexp") > 0 && record_get(l, "nexp") >= record_get(m, "used") && record_get(l, "router-rows") >= record_get(l, "nexp") && record_get(l, "hidden") > 0;
+    }
+    def dvl-consistent-go(m, il) = il == record_get(m, "layers-n") ? true : (dvl-layer-consistent?(m, il) && dvl-consistent-go(m, il + 1));
+    def dvl-consistent?(m) = record_get(m, "layers-n") > 0 && len(record_get(m, "ratios")) >= record_get(m, "layers-n") && len(record_get(m, "layers")) == record_get(m, "layers-n")
+        && record_get(m, "table-blocks") == record_get(m, "layers-n") && record_get(m, "e") > 0 && record_get(m, "hd") > 0 && record_get(m, "sh") > 0 && dvl-consistent-go(m, 0);
+    // rows whose type the body does not price (priced bytes 0): a driver must refuse a plan with any
+    def dvl-unpriced-go(rows, n) = len(rows) == 0 ? n : dvl-unpriced-go(rows[1:], rows[0][5] == 0 ? n + 1 : n);
+    def dvl-unpriced(m) = dvl-unpriced-go(record_get(m, "rows"), 0);
+    0;
+}
