@@ -30,10 +30,11 @@
 // generic delta rule would have ended the run as stage-delta before the probe could say 'stack'.
 // The stream stage's estimate is the expert cache (every new expert the 24 ids meet grows wired memory), and a logits leg without its prompt ids is a named 'waits' row in the log and no run.
 //
-// WHAT THE DRIVER CANNOT RUN YET (dvr-gaps, read from the header, printed by the dry plan): the dense Q8_0 tensors (q_a, q_b, kv, output_a, output_b, the shared expert's three: type 8, not 41), the Q8_0
-// output.weight (the head reads 41), the Q2_K down experts (type 10, the block reads 40 or 16), and the ds4 order-match Q8_0 and Q2_K units the recorded stream needs; the reap25 header reads none. In detail: dsv4-layer.fk runs MXFP8 dense tensors (type 41) and MXFP4 or IQ2_XXS experts (types 40 and 16). The IQ2XXS
-// file holds Q8_0 dense tensors (type 8) and Q2_K down experts (type 10): their kernels are compiled (dsv4-kernels.fk) and not wired into a block, so the first layer stage refuses and the window aborts
-// with stage-refused before it has measured a wired byte of a layer. The plan names the gaps so the window is not spent finding them.
+// WHAT THE DRIVER CANNOT RUN YET (dvr-gaps = dsv4-layout.fk dvl-driver-gaps, read from the header, printed by the dry plan): every tensor of the header whose type its role has no kernel for, from the layout's one
+// table of the types each role may carry (a dense projection MXFP8 or Q8_0, an expert stack MXFP4, IQ2_XXS or Q2_K, the routers and the embedding F16, the norms F32). Since driver stage 4 the layer and the head
+// run the real IQ2XXS file's Q8_0 dense and output tensors and its Q2_K down stacks, so that header reads NO gap, as the reap25 header and both fixtures do; a header holding a type outside the table (a doctored
+// one, or another build) reads one line a tensor type. The plan names the gaps so the window is not spent finding them. The ordering question (ds4's own Q8_0 and Q2_K order against the driver's lanes) is a note
+// the plan prints beside it (dvr-notes), never a gap: it is what the window's stream leg and tie budget measure.
 //
 // THE RECORDED REFERENCES (read from the recording, never recomputed): the logits of ds4's dump on its 14-token chat-templated prompt (the JSON is pinned by SHA-256; the recording does not carry
 // the 14 prompt ids, so that leg runs when the caller supplies them as logits_prompt_ids and waits otherwise), judged by Pearson r, top-10 overlap and the TIE BUDGET (the reference's top-two margin
@@ -110,7 +111,7 @@ section [form.bml] {
   def dvr-stages(m, opts) {
    let cap = dvr-int(opts, "cap", dvr-default-cap());
    let c = dvr-int(opts, "cache_experts", dls-cache-experts());
-   [["compile", dvr-bound(), "the six graph units' kernels compile (the carrier keys a pipeline by its source)"],
+   [["compile", dvr-bound(), "the seven graph units' kernels compile (the carrier keys a pipeline by its source)"],
     ["map", dvr-est-map(m, cap), "dsv4-open-span maps the driver's 1,202 tensors (no copy, demand-paged) and allocates the scratch"],
     ["state", dvl-kv-total(m, cap), "the KV arenas and the compressors' state for the capacity"],
     ["wirespan", dvr-slice(m), "ONE dispatch reading ONE expert slice of layer 0's gate stack: wired grows by the slice or by the stack"],
@@ -121,37 +122,23 @@ section [form.bml] {
   }
 
   // ---- what the driver cannot run yet, from the header alone ------------------------------------------------------------------------
-  def dvr-dense-leaves() = ["attn_q_a.weight", "attn_q_b.weight", "attn_kv.weight", "attn_output_a.weight", "attn_output_b.weight", "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight"];
-  def dvr-f16-leaves() = ["ffn_gate_inp.weight", "hc_attn_fn.weight", "hc_ffn_fn.weight"];
+  // ONE AUTHORITY: the layout's table of the types each role may carry (dsv4-layout.fk dvl-dense-types, dvl-expert-types, dvl-driver-gaps) is what the layer's admission and the head read, so this door asks
+  // the layout and keeps no list of its own: a gap is a tensor of the header whose type the driver has no kernel for (or whose block type does not tile its columns). The distinct lines, the head's first
+  // then each layer's; EMPTY when the driver can run every tensor its blocks and its head bind (the reap25 header, the IQ2XXS file's, both fixtures).
   def dvr-member?(x, xs) = len(xs) == 0 ? false : (xs[0] == x || dvr-member?(x, xs[1:]));
-  def dvr-leaf-gap(ixm, il, leaf, okTypes, need) {
-   let ty = dvl-type(ixm, dvl-prefix(il) ++ leaf);
-   dvr-member?(ty, okTypes) ? [] : [leaf ++ " type " ++ ty.str() ++ " (the block reads " ++ need ++ ")"];
-  }
-  def dvr-leaves-gaps(ixm, il, leaves, okTypes, need) = len(leaves) == 0 ? [] : append(dvr-leaf-gap(ixm, il, leaves[0], okTypes, need), dvr-leaves-gaps(ixm, il, leaves[1:], okTypes, need));
-  def dvr-layer-gaps(m, il) {
-   let ix = record_get(m, "index");
-   append(dvr-leaves-gaps(ix, il, dvr-dense-leaves(), [41], "MXFP8 (type 41)"),
-    append(dvr-leaves-gaps(ix, il, dvr-f16-leaves(), [1], "F16 (type 1)"),
-     append(dvr-leaves-gaps(ix, il, ["ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight"], [40, 16], "MXFP4 or IQ2_XXS (types 40, 16)"), [])));
-  }
-  def dvr-uniq(xs) = len(xs) == 0 ? [] : (dvr-member?(xs[0], xs[1:]) ? dvr-uniq(xs[1:]) : cons(xs[0], dvr-uniq(xs[1:])));
-  def dvr-gaps-go(m, il, n) = il == n ? [] : append(dvr-layer-gaps(m, il), dvr-gaps-go(m, il + 1, n));
-  // the distinct gaps over every layer, with the layers they hold on counted by the caller if it wants (the distinct text is what the lead acts on)
-  // the head's tensors against what dsv4-token-handle.fk dth-head-ok? reads: [name, the types it reads, what it reads]
-  def dvr-head-rows() = [["token_embd.weight", [1], "F16 (type 1)"], ["output_hc_fn.weight", [1], "F16 (type 1)"], ["output_hc_scale.weight", [0], "F32 (type 0)"], ["output_hc_base.weight", [0], "F32 (type 0)"],
-   ["output_norm.weight", [0], "F32 (type 0)"], ["output.weight", [41], "MXFP8 (type 41)"]];
-  def dvr-head-gaps-go(ix, rows) = len(rows) == 0 ? [] : append(dvr-member?(dvl-type(ix, rows[0][0]), rows[0][1]) ? [] : [rows[0][0] ++ " type " ++ dvl-type(ix, rows[0][0]).str() ++ " (the head reads " ++ rows[0][2] ++ ")"], dvr-head-gaps-go(ix, rows[1:]));
-  def dvr-head-gaps(m) = dvr-head-gaps-go(record_get(m, "index"), dvr-head-rows());
-  // the recorded stream was order-matched with ds4's own Q8_0 and Q2_K dequant order: its units (dkr-unit-ds4q8, dkr-unit-ds4q2k) are compiled by the kernels band and are not in the graph units
-  def dvr-order-note() = "the recorded stream was order-matched with ds4's Q8_0 and Q2_K order (the ds4q8 and ds4q2k units): compiled in dsv4-kernels.fk, not in dkr-graph-units, with the q80_matvec and q2k_matvec_experts kernels the dense, head and down tensors need";
-  def dvr-has-q?(gaps) = len(gaps) == 0 ? false : (dvr-str-has?(gaps[0], " type 8 (") || dvr-str-has?(gaps[0], " type 10 (") || dvr-has-q?(gaps[1:]));
+  def dvr-dense-leaves() = dvl-dense-leaves();
+  def dvr-layer-gaps(m, il) = dvl-layer-gaps(m, il);
+  def dvr-head-gaps(m) = dvl-head-gaps(m);
+  def dvr-gaps(m) = dvl-driver-gaps(m);
   def dvr-str-has?(s, part) = str_find(s, part, 0) >= 0;
-  // the distinct gaps over every layer, then the head's, then the order note when a Q8_0 or Q2_K tensor is among them (empty when the driver can run the file)
-  def dvr-gaps(m) {
-   let found = append(dvr-uniq(dvr-gaps-go(m, 0, record_get(m, "layers-n"))), dvr-head-gaps(m));
-   dvr-has-q?(found) ? append(found, [dvr-order-note()]) : found;
-  }
+  // A NOTE, NOT A GAP. The recorded stream was earned by ds4 on the IQ2XXS file: ds4 quantises the activation of a Q8_0 dense matvec to int8 per 32-block and dots in integers (ds4.c:6814, :7051), reads
+  // Q2_K in a plain ascending f32 sum (:3480) and its F16 dots on two NEON accumulators. The driver's lanes read f32 activations and sum by lane tree (each within 3e-5 of the oracle's fp64 on the fixture),
+  // so on a near tie the greedy stream can differ from ds4's by that rounding alone (ds4-order-match.fk's header records a third-step margin of 0.0197 of 24 logits on the earlier lane); the ds4 order lanes
+  // (dkr-unit-ds4q8, dkr-unit-ds4q2k: compiled by the kernels band, not in the graph) are what to wire if the window's stream leg and tie budget say so. That is a MEASUREMENT the window exists to make: it does not
+  // stop the window from running, so it is printed in the plan and never counted among the gaps.
+  def dvr-has-q-types?(m) = dvl-type-in?(dvl-type(record_get(m, "index"), "output.weight"), [8]) || dvl-type-in?(dvl-type(record_get(m, "index"), "blk.0.ffn_down_exps.weight"), [10]);
+  def dvr-order-note() = "note, not a gap: the recorded stream was earned with ds4's own order (Q8_0 activations quantised to int8 per 32-block, Q2_K in a plain ascending sum); the driver's lanes read f32 activations and sum by lane tree, so a near-tie token may differ: the stream leg and the tie budget are what measure it, and the ds4q8 and ds4q2k units are the lanes to wire if they say so";
+  def dvr-notes(m) = dvr-has-q-types?(m) ? [dvr-order-note()] : [];
 
   // ---- the processes: who else holds the GPU -------------------------------------------------------------------------------------------
   def dvr-validate-row?(row, mine) = (String) value_kind(row) == "list" && len(row) >= 5 && !flp-pid-in?(mine, row[0]) && (String) value_kind(row[4]) == "list" && len(row[4]) >= 2 && (String) value_kind(row[4][1]) == "string" && flp-ends?(row[4][1], "observe/dsv4-validate-run.bml");
@@ -198,6 +185,7 @@ section [form.bml] {
        "[dsv4-validate] references: recorded logits " ++ dvr-logits-path() ++ " (" ++ dvr-logits-bytes().str() ++ " B, SHA-256 " ++ dvr-logits-sha() ++ "); the stream " ++ dvr-ids-json(dvr-stream()) ++ " for the raw prompt " ++ dvr-ids-json(dvr-prompt()),
        "[dsv4-validate] logits leg: " ++ (len(logitsIds) > 0 ? "will run on the " ++ len(logitsIds).str() ++ " prompt ids supplied" : "WAITS: the recording does not carry its 14 chat-templated prompt ids; supply them as logits_prompt_ids"),
        "[dsv4-validate] the driver cannot run yet: " ++ (len(gaps) == 0 ? "nothing named by the header" : flp-join(gaps, "; ")),
+       "[dsv4-validate] ordering: " ++ (len(dvr-notes(m)) == 0 ? "the file holds no Q8_0 output or Q2_K down tensor, so ds4's own order is not in question" : dvr-notes(m)[0]),
        "[dsv4-validate] receipt: one dated row appended to " ++ dvr-text(opts, "receipt", dvr-receipt-path()),
        "[dsv4-validate] budget " ++ (dvr-budget-ms() / 60000).str() ++ " minutes, abort at " ++ (dvr-abort-ms() / 60000).str(),
        "[dsv4-validate] DRY ends: " ++ (len(dvr-stages(m, opts)) + len(layers) - 1).str() ++ " stages would run"])));
