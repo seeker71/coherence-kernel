@@ -97,7 +97,13 @@ their separate stages; this census does not measure every host function.
 <|form:recipe-import|>training-cost<|/form:recipe-import|>
 ```
 
-The returned catalog supplies the input contract. `recipe("training-cost.plan")`
+The returned catalog supplies the input contract. Import returns each callable
+name with its executable address; data coordinates remain inputs to `node`.
+`recipe-exec` takes one BML expression, grouping multiple values in one list.
+Its target accepts a name, address or BML expression selecting an owned recipe
+reference. Target selection and input evaluation share the same pure budget;
+the selected callable retains its original dependencies and usage trace.
+`recipe("training-cost.plan")`
 fits latency and estimated additional memory, then selects the largest admissible
 observed row for each offered budget. Coefficients pass directly between native
 functions. The same library solves positive-definite systems of the supplied
@@ -130,6 +136,9 @@ caller-offered scenarios. Pure results retain their typed observations, includin
 absence inside a list; opaque functions retain only their rendered label.
 Refused controls emit their reason as an organ signal immediately and return
 that same observation to the decoding context for the next local choice.
+An unadmitted registered recipe names its required library import. The final
+response stage continues in the same KV context with the original enquiry and
+native observations; its handoff does not copy those observations again.
 The [numerical receipt](../receipts/native-training-cost-library.json) retains two
 actual worker datasets, independent coefficient and residual checks, a
 four-dimensional system and the observed function census. Ordinary BML and the

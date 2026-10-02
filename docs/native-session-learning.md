@@ -303,8 +303,11 @@ exceeded the observation envelope. Runtime observations enter
 the same KV stream but stay outside gradients. `form/form-stdlib/bml/qwen-head-learning.bml`
 learns both vectors of the rank-one residual `h + (A·h) B` through the frozen
 Qwen output projection. Native RAM Metal computes stable cross-entropy and
-the transposed projection gradient for Q8_0 or float32 weights. Local `choice`
-tries smaller steps when loss does not descend. Owned buffers and pipelines
+the transposed projection gradient for Q8_0 or float32 weights. Each round
+averages the gradients of every verified target at one frozen checkpoint.
+Local `choice` tries smaller rates and commits only a finite descent in the
+whole target set's mean loss. A refused candidate restores both vectors;
+`accepted_steps` counts committed batch updates. Owned buffers and pipelines
 retain partial admission and release outcomes. Observation-token meters read
 the session's actual numeric counters; generated model IDs remain a separate list.
 
@@ -330,6 +333,17 @@ Read the actual answers and native observations before selecting a candidate;
 training loss and successful release establish their narrower claims.
 Diagnostic events carry counts and the private report path; the report owns
 the original prompts, controls and answers.
+
+The [numerical-library learning witness](../receipts/native-library-learning.json)
+records verified controls, whole-target loss and complete native answers on new
+budget cases. It keeps base and adapted answers separate. The current candidate
+has no observed decoded quality gain and is not promoted; finite loss descent
+does not establish useful serving behavior.
+The source-backed base-model completion in that receipt discovers and imports
+the library, executes the planner in its decoding context and returns the
+checked JSON selection `[null,158,231]` for `[0.5,4,8]` GiB. It completes and
+releases with zero provider calls. That observed completion is separate from
+the adapter comparison; its memory inputs remain worker estimates.
 
 The native session cells live in `form/form-stdlib/native-session-learning.bml`
 (learner), `native-session-memory.bml` (journal and state),

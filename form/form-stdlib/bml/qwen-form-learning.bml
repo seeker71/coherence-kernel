@@ -29,7 +29,35 @@ section [form.bml] {
    };
   }
   def qfl-arrived?(result) = result[0] == "lookup" || oh-has(["value","recipe","node"],ftg-result-kind(fmc-render(result)));
-  def qfl-train(owner,samples,rate,attempts) = samples |> map(sample=>qhl-step(owner,sample[0],sample[1],rate,attempts));
+  def qfl-directions(owner,samples,a,b) {
+   let zero=map(ignored=>0.0,a);
+   let total=foldl((sum,sample)=>nothing?(sum) ? nothing : {
+    let point=qhl-point(owner,sample[0],sample[1],a,b,1);
+    nothing?(point) ? nothing : {
+     let ds=qlt-dot(point[1],b);
+     let da=qhl-pairs(sample[0],sum[0]) |> map(pair=>pair[1] + ds*pair[0]);
+     let db=qhl-pairs(point[1],sum[1]) |> map(pair=>pair[1] + point[2]*pair[0]);
+     [da,db];
+    };
+   },[zero,zero],samples);
+   nothing?(total) || nil?(samples) ? nothing : map(vector=>map(value=>value/len(samples),vector),total);
+  }
+  def qfl-candidate(owner,samples,a,b,direction,before,rate) {
+   record_set(owner,"a",qhl-pairs(a,direction[0]) |> map(pair=>pair[0] - rate*pair[1]));
+   record_set(owner,"b",qhl-pairs(b,direction[1]) |> map(pair=>pair[0] - rate*pair[1]));
+   let after=qfl-loss(owner,samples);
+   if nothing?(after) || after >= before then { record_set(owner,"a",a); record_set(owner,"b",b); nothing; } else after;
+  }
+  def qfl-train(owner,samples,rate,attempts) {
+   let a=record_get(owner,"a"); let b=record_get(owner,"b"); let before=qfl-loss(owner,samples);
+   let direction=nothing?(before) ? nothing : qfl-directions(owner,samples,a,b);
+   let options=nothing?(direction) ? [] : range(0,attempts) |> map(index=>ignored=>qfl-candidate(owner,samples,a,b,direction,before,rate/math_pow(2.0,index + 0.0)));
+   let result=nil?(options) ? nothing : choice(options,0);
+   if !nothing?(result) then record_set(owner,"steps",record_get(owner,"steps") + 1) else 0;
+   let observed=json-node-object([json-node-pair("before",nothing?(before) ? json-node-null() : make_float64(before)),json-node-pair("after",nothing?(result) ? json-node-null() : make_float64(result)),oh-n("targets",len(samples)),oh-n("checkpoint_retained",nothing?(result))]);
+   oh-voice(oh-reading("qwen-form-learning",record_get(owner,"trace"),"batch-step",json-node-string("finite whole-target loss descent"),observed,json-node-int(!nothing?(result)),nothing?(result) ? [oh-need("inspect-batch-gradient-or-rate",observed)] : [],["revise-rate","retain-checkpoint"],observed));
+   nothing?(result) ? before : result;
+  }
   def qfl-loss(owner,samples) {
    let a = record_get(owner,"a"); let b = record_get(owner,"b"); let readings = samples |> map(sample=>qhl-point(owner,sample[0],sample[1],a,b,0));
    nil?(readings) || any?(reading=>nothing?(reading),readings) ? nothing : sum(readings |> map(reading=>reading[0][0])) / len(readings);
@@ -85,7 +113,7 @@ section [form.bml] {
     let admitted = !nothing?(learner) && record_get(learner,"ready");
     if admitted then qhl-seed(learner,samples[0][0]) else 0;
     let before = admitted ? qfl-loss(learner,samples) : nothing;
-    let losses = admitted ? range(0,node_value(oh-get(request,"rounds"))) |> map(round=>{ qfl-train(learner,samples,node_value(oh-get(request,"rate")),node_value(oh-get(request,"attempts"))); qfl-loss(learner,samples); }) : [];
+    let losses = admitted ? range(0,node_value(oh-get(request,"rounds"))) |> map(round=>qfl-train(learner,samples,node_value(oh-get(request,"rate")),node_value(oh-get(request,"attempts")))) : [];
     let artifact = oh-str(request,"adapter"); let wrote = admitted && !nothing?(before) && all?(loss=>!nothing?(loss),losses) ? qhl-write(learner,artifact) : 0;
     let learnerReleased = nothing?(learner) ? 1 : qhl-close(learner);
     let ready = !nothing?(wrote) && wrote > 0 && qlh-whole?(artifact) && learnerReleased;
