@@ -1,0 +1,95 @@
+// host-walk-publish.bml — a candidate in the tracked tree: published inside one door, restored on every path, healed when a kill skipped it.
+//
+// A turn's candidate stands in the tree only inside hw-with-published, which restores it on every path a process
+// lives through; hw-heal-publishes returns what a killed publish left, and each walk heals before it syncs.
+// What it holds: the publish window (hw-with-published, hw-band-after), the checkpoint of a tree (hw-tree, hw-over) and
+// the heal of a killed publish (hw-heal-publishes, hw-heal).
+// What it needs: host-walk-text.bml (hw-starts?, hw-ends?, hw-row-int) and host-walk-lock.bml (hw-holds?: a marker whose
+// publisher still holds is not a killed publish).
+import form-stdlib/bml/host-walk-text.bml;
+import form-stdlib/bml/host-walk-lock.bml;
+section [form.bml] {
+ class HostWalkPublish {
+  // ── a candidate in the tracked tree: published inside one door, restored on every path ──
+  // hw-with-published(dir, paths, before, texts, run) writes a marker (<dir>/publish-<pid>.marker: the pid, its
+  // stamp, the paths, their checkpoint texts and the bytes this publish writes) and reads it back, publishes the
+  // texts over the paths, answers run() while they stand, and returns the checkpoint in a deferred step, so a stop
+  // inside run restores too. Nothing is published over a tree that moved from its checkpoint, over a marker this pid
+  // already holds (an earlier restore that did not hold), or before the marker reads back. A kill skips the defer;
+  // the marker outlives it, and hw-heal-publishes(dir) at the next start returns each path still holding the
+  // killed publish's own bytes to its checkpoint. Bytes another writer left stay, and so does their marker.
+  // Answers [run's answer, or nothing when it stopped; restored; "" or why nothing was published].
+  def hw-turn-dir() = ".hearth/native-turns";
+  def hw-marker(dir) = dir ++ "/publish-" ++ host_pid().str() ++ ".marker";
+  def hw-text-node(t) = nothing?(t) ? json-node-null() : json-node-string(t);
+  def hw-node-text(n) = node_eq(n, json-node-null()) ? nothing() : json-string-value(n);
+  def hw-strings(xs) = xs |> map(x => hw-text-node(x));
+  def hw-marker-text(pid, at, paths, before, texts) = json-emit(json-node-object([fhn-n("pid", pid), fhn-n("at", at), json-node-pair("paths", json-node-array(hw-strings(paths))), json-node-pair("before", json-node-array(hw-strings(before))), json-node-pair("published", json-node-array(hw-strings(texts)))])) ++ "\n";
+  def hw-same?(a, b) = nothing?(a) ? nothing?(b) : (!nothing?(b) && ((String) a == b));
+  def hw-all-same?(paths, texts) = nil?(paths) ? nil?(texts) : (!nil?(texts) && hw-same?(read_file(paths[0]), texts[0]) && hw-all-same?(paths[1:], texts[1:]));
+  def hw-put(path, text) = nothing?(text) ? host_path_remove(path) : write_file_text(path, text);
+  def hw-put-all(paths, texts) = nil?(paths) ? 0 : hw-put-next(hw-put(paths[0], texts[0]), paths, texts);
+  def hw-put-next(put, paths, texts) = hw-put-all(paths[1:], texts[1:]);
+  def hw-marked?(marker, text) {
+   let wrote = write_file_text(marker, text);
+   (String) (read_file(marker) ?? "") == text;
+  }
+  def hw-with-published(dir, paths, before, texts, run) {
+   let made = host_dir_mkdir(dir);
+   let marker = hw-marker(dir);
+   (Comparable) host_path_exists(marker) == 1 ? [nothing(), hw-all-same?(paths, before), "marker-held: " ++ marker ++ " was left by an earlier publish under this pid"]
+   : !hw-all-same?(paths, before) ? [nothing(), true, "source-conflict: the tree moved from its checkpoint"]
+   : !hw-marked?(marker, hw-marker-text(host_pid(), now_unix_ms(), paths, before, texts)) ? [nothing(), true, "marker-unwritten: " ++ marker]
+   : hw-published-window(marker, paths, before, texts, run);
+  }
+  def hw-held(paths, before, texts, run) {
+   defer hw-put-all(paths, before);
+   let put = hw-put-all(paths, texts);
+   run();
+  }
+  def hw-published-window(marker, paths, before, texts, run) {
+   let answer = try hw-held(paths, before, texts, run) else nothing();
+   let restored = hw-all-same?(paths, before);
+   let cleared = restored ? host_path_remove(marker) : 0;
+   [answer, restored, ""];
+  }
+  // A publish's checkpoint is the tree as it stands, absence included: each path's bytes, or nothing where no file
+  // stands, so a writable path the lane creates publishes and is absent again after the window (hw-put removes it).
+  def hw-tree(paths) = paths |> map(p => read_file(p));
+  // the texts a publish writes: the candidate's where it names one, the checkpoint's elsewhere; an absent path the
+  // candidate does not name stays absent
+  def hw-over(cand, before) = nil?(cand) ? [] : cons(cand[0] ?? before[0], hw-over(cand[1:], before[1:]));
+  // what a publish window says of the band, [ran, reading]: the band ran under the candidate only when something
+  // was published and the door did not refuse it, and then it reads run's first answer (nothing when the run
+  // stopped). A refused or empty publish ran no band: the reading stays where it was before.
+  def hw-band-after(window, published, before) = (published > 0) && ((String) window[2] == "") ? [true, nothing?(window[0]) ? nothing() : window[0][0]] : [false, before];
+  // A marker whose publisher no longer holds (or names this very process, which has published nothing yet) is a
+  // publish whose restore never ran. Each path is read: its checkpoint bytes need nothing, the publish's own bytes
+  // return to the checkpoint, any other bytes are a later writer's and stay, and so does the marker. A marker that
+  // does not read was never read back, so no publish followed it, and it goes. Answers [markers cleared, conflicts].
+  def hw-heal-publishes(dir) = (Comparable) host_path_is_dir(dir) != 1 ? [0, []] : foldl((acc, name) => hw-heal-add(acc, hw-heal-name(dir, name)), [0, []], fs_list(dir) ?? []);
+  def hw-heal-add(acc, one) = [acc[0] + one[0], append(acc[1], one[1])];
+  def hw-heal-name(dir, name) = hw-starts?(name, "publish-") && hw-ends?(name, ".marker") ? hw-heal-marker(dir ++ "/" ++ name, read_file(dir ++ "/" ++ name) ?? "") : [0, []];
+  def hw-heal-marker(path, text) = try hw-heal-row(path, parse-json("publish-marker", text)) else hw-heal-unread(path);
+  def hw-heal-unread(path) = (Comparable) host_path_remove(path) == 0 ? [1, []] : [0, ["heal-conflict: " ++ path ++ " does not read and could not be removed"]];
+  def hw-heal-texts(row, key) = json-array-elements(json-object-get(row, key)) |> map(n => hw-node-text(n));
+  def hw-heal-live?(row) = (Comparable) hw-row-int(row, "pid") != host_pid() && hw-holds?(hw-row-int(row, "pid"), hw-row-int(row, "at"));
+  def hw-heal-row(path, row) = hw-heal-live?(row) ? [0, []] : hw-heal-paths(path, hw-heal-texts(row, "paths"), hw-heal-texts(row, "before"), hw-heal-texts(row, "published"));
+  def hw-heal-paths(path, paths, before, own) {
+   let said = hw-heal-each(paths, before, own);
+   nil?(said) && ((Comparable) host_path_remove(path) == 0) ? [1, []] : [0, said];
+  }
+  def hw-heal-each(paths, before, own) = nil?(paths) ? [] : append(hw-heal-path(paths[0], before[0], own[0]), hw-heal-each(paths[1:], before[1:], own[1:]));
+  def hw-heal-path(path, before, own) {
+   let now = read_file(path);
+   hw-same?(now, before) ? [] : !hw-same?(now, own) ? ["heal-conflict: " ++ path ++ " holds bytes the killed publish did not write; they stay"] : hw-heal-put(path, before);
+  }
+  def hw-heal-put(path, before) {
+   let put = hw-put(path, before);
+   hw-same?(read_file(path), before) ? [] : ["heal-conflict: " ++ path ++ " did not return to its checkpoint"];
+  }
+  def hw-heal-line(healed) = (Comparable) healed[0] == 0 && nil?(healed[1]) ? "" : "[walk-heal] " ++ healed[0].str() ++ " killed publish(es) returned to their checkpoint" ++ (nil?(healed[1]) ? "" : "; " ++ hw-join(healed[1], "; "));
+  def hw-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ hw-join(xs[1:], sep);
+  def hw-heal() = hw-heal-line(hw-heal-publishes(hw-turn-dir()));
+ }
+}

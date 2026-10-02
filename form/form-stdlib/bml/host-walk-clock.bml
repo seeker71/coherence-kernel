@@ -1,0 +1,95 @@
+// host-walk-clock.bml — the day and the hour from the host's own zone, with no child.
+//
+// What it holds: the footer of /etc/localtime read as a POSIX zone (hw-zone-ms), the civil date of a day count
+// (hw-civil), and the day and the hour in that zone (hw-day, hw-hhmm). The day and the hour come from the host's own
+// zone (the footer of /etc/localtime) and the unix clock, with no child. The one fallback is `date +%z`, an argv
+// child through host-child.bml, and only when the footer does not read.
+// What it needs: parse.bml (parse-int, the one scalar door), host-walk-text.bml and host-child.bml (hch-read).
+import form-stdlib/bml/parse.bml;
+import form-stdlib/bml/host-walk-text.bml;
+import form-stdlib/bml/host-child.bml;
+section [form.bml] {
+ class HostWalkClock {
+  // ── the clock, with no child ──
+  // The host's zone is the footer of its TZif file (/etc/localtime): a POSIX zone string such as "WITA-8" or
+  // "<+08>-8" (the sign is west of UTC, so "-8" is eight hours east). A footer that carries a daylight rule, or a
+  // file that does not read, backtracks to `date +%z` (an argv child, not a shell); when that says nothing too the
+  // zone is nothing(), and the day reads "" and the hour reads 0 (hw-hhmm), which is no on-hour for any door.
+  // TZ in the environment is not read: the walk's launchd doors set only PATH.
+  def hw-tz-path() = "/etc/localtime";
+  def hw-rfind(s, needle, from, last) {
+   let i = str_find(s, needle, from);
+   i < 0 ? last : hw-rfind(s, needle, i + 1, i);
+  }
+  def hw-tz-footer(tz) {
+   let end = len(tz) - 1;
+   let body = end > 3 && ((String) substring(tz, 0, 4) == "TZif") && ((Comparable) str_byte_at(tz, end) == 10);
+   let from = body ? hw-rfind(substring(tz, 0, end), "\n", 0, -1) : -1;
+   from < 0 ? nothing() : substring(tz, from + 1, end);
+  }
+  def hw-letter?(b) = ((b >= 65) && (b <= 90)) || ((b >= 97) && (b <= 122));
+  def hw-letters-end(s, i) = (i < len(s)) && hw-letter?(str_byte_at(s, i)) ? hw-letters-end(s, i + 1) : i;
+  // where the zone's name ends: "<+08>" through its ">" (a name between the brackets), or a run of three letters or
+  // more; 0 when it reads neither
+  def hw-posix-name-end(f) {
+   let angle = len(f) > 0 && ((Comparable) str_byte_at(f, 0) == 60);
+   let close = angle ? str_find(f, ">", 0) : -1;
+   angle ? (close < 2 ? 0 : close + 1) : (hw-letters-end(f, 0) >= 3 ? hw-letters-end(f, 0) : 0);
+  }
+  // "[+-]hh[:mm[:ss]]" as seconds, nothing() for anything else (a daylight name or rule after it included)
+  def hw-posix-seconds(t) {
+   let sign = len(t) > 0 && ((Comparable) str_byte_at(t, 0) == 45) ? -1 : 1;
+   let signed = len(t) > 0 && (((Comparable) str_byte_at(t, 0) == 45) || ((Comparable) str_byte_at(t, 0) == 43));
+   hw-posix-parts(sign, split-on(signed ? substring(t, 1, len(t)) : t, ":"));
+  }
+  // a zone is within a day of UTC: hours up to 24, minutes and seconds under 60; any other reading backtracks
+  def hw-posix-parts(sign, parts) {
+   let h = parse-int(parts[0]);
+   let m = len(parts) > 1 ? parse-int(parts[1]) : 0;
+   let s = len(parts) > 2 ? parse-int(parts[2]) : 0;
+   len(parts) > 3 || nothing?(h) || nothing?(m) || nothing?(s) ? nothing() : (h > 24 || m > 59 || s > 59) ? nothing() : sign * ((h * 3600) + (m * 60) + s);
+  }
+  // the zone's offset east of UTC in ms from a POSIX footer: the sign of the POSIX offset is inverted
+  def hw-zone-of-footer(f) {
+   let at = nothing?(f) ? 0 : hw-posix-name-end(f);
+   let west = at <= 0 ? nothing() : hw-posix-seconds(substring(f, at, len(f)));
+   nothing?(west) ? nothing() : (0 - west) * 1000;
+  }
+  def hw-zone-of-tz(tz) = hw-zone-of-footer(hw-tz-footer(tz ?? ""));
+  // `date +%z` reads "+0800"
+  def hw-zone-of-z(z) {
+   let t = trim(z ?? "");
+   let sign = len(t) == 5 && ((Comparable) str_byte_at(t, 0) == 45) ? -1 : 1;
+   let signed = len(t) == 5 && (((Comparable) str_byte_at(t, 0) == 45) || ((Comparable) str_byte_at(t, 0) == 43));
+   let h = signed ? parse-int(substring(t, 1, 3)) : nothing();
+   let m = signed ? parse-int(substring(t, 3, 5)) : nothing();
+   nothing?(h) || nothing?(m) ? nothing() : (h > 24 || m > 59) ? nothing() : sign * ((h * 3600) + (m * 60)) * 1000;
+  }
+  def hw-zone-ms() {
+   let footer = hw-zone-of-tz(read_file(hw-tz-path()));
+   nothing?(footer) ? hw-zone-of-z(hch-read(["/bin/date", "+%z"])) : footer;
+  }
+  // the civil date of a day count since 1970 (the era arithmetic form-stdlib/perception-rows.bml pr-civil folds)
+  def hw-civil(days) {
+   let z = days + 719468;
+   let era = z / 146097;
+   let doe = z - (era * 146097);
+   let yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365;
+   let doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100));
+   let mp = ((5 * doy) + 2) / 153;
+   let dd = doy - (((153 * mp) + 2) / 5) + 1;
+   let mm = mp < 10 ? mp + 3 : mp - 9;
+   [yoe + (era * 400) + (mm <= 2 ? 1 : 0), mm, dd];
+  }
+  def hw-pad2(n) = n < 10 ? "0" ++ n.str() : n.str();
+  // local time is the unix ms shifted by the zone: its day, and its hour and minute as hhmm
+  def hw-day-of(local) = hw-day-text(hw-civil(local / 86400000));
+  def hw-day-text(c) = c[0].str() ++ "-" ++ hw-pad2(c[1]) ++ "-" ++ hw-pad2(c[2]);
+  def hw-hhmm-of(local) = ((local / 3600000) % 24) * 100 + ((local / 60000) % 60);
+  def hw-day-in(zone, now) = nothing?(zone) ? "" : hw-day-of(now + zone);
+  def hw-hhmm-in(zone, now) = nothing?(zone) ? nothing() : hw-hhmm-of(now + zone);
+  def hw-day() = hw-day-in(hw-zone-ms(), now_unix_ms());
+  // the hour as hhmm; 0 when the zone did not read: a door names an unread hour 0000, and 0000 is no on-hour
+  def hw-hhmm() = hw-hhmm-in(hw-zone-ms(), now_unix_ms()) ?? 0;
+ }
+}

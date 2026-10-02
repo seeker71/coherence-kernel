@@ -1,0 +1,63 @@
+// host-walk-carry.bml — what a landing carries, and the carry of a landing that stood on the branch.
+//
+// hw-paths names what a landing carries for a turn: the ledgers and every writable file of the queue. The landing asks
+// "main": 1 so the landed commit fast-forwards main with no session carrying it, and hw-carry at the walk's end
+// carries a landing that stood on the branch, live.
+// What it holds: the paths of a landing (hw-paths) and its movement (hw-movement), the gates' reading (hw-gates), the push
+// and what a moved main means (hw-push, hw-main-moved?), and the carry (hw-carry).
+// What it needs: parse.bml (parse-int), host-walk-text.bml (hw-line, hw-field, hw-has?, hw-rc-text), host-walk-sync.bml
+// (hw-sync), host-child.bml (the gates, the push and the movement are argv children) and live.bml (live-do, live-repair).
+import form-stdlib/bml/parse.bml;
+import form-stdlib/bml/host-walk-text.bml;
+import form-stdlib/bml/host-walk-sync.bml;
+import form-stdlib/bml/host-child.bml;
+import form-stdlib/bml/live.bml;
+section [form.bml] {
+ class HostWalkCarry {
+  def hw-branch() = hw-line(hch-read(["git", "rev-parse", "--abbrev-ref", "HEAD"]));
+  def hw-str(doc, key) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : "";
+  def hw-writable(nodes) = nodes |> map(node => node);
+  // each queued gap lands its writable files and its band: a plan the walk made carries the band its voice wrote
+  def hw-queue-row-paths(row) = append(hw-writable(json-array-elements(json-object-get(row, "writable"))), (String) hw-str(row, "band") == "" ? [] : [json-node-string(hw-str(row, "band"))]);
+  def hw-queue-paths(lines) = nil?(lines) ? [] : (Comparable) len(trim(lines[0])) == 0 ? hw-queue-paths(lines[1:]) : append(hw-queue-row-paths(parse-json("queue-row", lines[0])), hw-queue-paths(lines[1:]));
+  def hw-paths() = cons(json-node-string("receipts/draft-ledger.jsonl"), cons(json-node-string("receipts/native-turn-ledger.jsonl"), cons(json-node-string("receipts/local-flow-review.jsonl"), cons(json-node-string("learn/native-turn-queue.jsonl"), file_size("learn/native-turn-queue.jsonl") < 1 ? [] : hw-queue-paths(split-on(fhn-read("learn/native-turn-queue.jsonl"), "\n"))))));
+  def hw-movement(request) = hch-said(hch-run("movement", ["./fkwu", "observe/movement-run.bml"], json-emit(request) ++ "\n", hch-by(hch-step-backstop-ms())));
+  // A landing that stood on the branch (main moved while its turn ran, or no turn landed after it) is carried
+  // at the walk's end, live (form-stdlib/bml/live.bml): the branch follows main, the gates whose ground moved
+  // read the rebased tree, and main fast-forwards. Each is a step spoken as it lands. A fast-forward refused
+  // because main moved meanwhile is met at once: the branch follows main again, the gates read again, and the
+  // push goes again, twice at most. A rebase that conflicts meets no repair: it holds, naming its files.
+  def hw-ahead() = parse-int(hw-line(hch-read(["git", "rev-list", "--count", "origin/main..HEAD"])));
+  // the gates' own summary: every row that ran passed and none refused
+  def hw-gates-green?(line) = (!nothing?(hw-field(line, "pass="))) && ((Comparable) hw-field(line, "pass=") == hw-field(line, "full=")) && ((Comparable) hw-field(line, "refused=") == 0);
+  def hw-gates() = hw-line(hch-last(hch-run-quiet("gates", ["./fkwu", "gate/drift-gates-run.bml"], "", hch-by(hch-step-backstop-ms()))[1], "drift-gates pass="));
+  def hw-synced?(out, branch) = hw-has?(out, "sync=0");
+  def hw-green?(line, branch) = hw-gates-green?(line);
+  // The push says one line and its exit: "<line>\nmain=<exit>". The line is the one that names a rejection when
+  // git said one ("! [rejected] ... (fetch first)": the last line of a rejected push is a hint that names none of
+  // the words hw-main-moved? looks for, so the moved main it would repair went unread), else the push's last line.
+  def hw-rejection-words() = ["[rejected]", "fetch first", "non-fast-forward"];
+  def hw-push-line(text, said) = (String) hch-last-of(hch-matching(text, hw-rejection-words())) != "" ? hch-last-of(hch-matching(text, hw-rejection-words())) : hch-tail-line(said);
+  def hw-push-at(io, dir) = hw-push-read(hch-git-in(io, dir, "push", ["push", "-q", "origin", "HEAD:main"]));
+  def hw-push-read(run) = hw-push-line(run[1], hch-said(run)) ++ "\nmain=" ++ hw-rc-text(run[0]);
+  def hw-push(branch) = hw-line(hw-push-at(hch-dir(), "."));
+  def hw-pushed?(out, branch) = hw-has?(out, "main=0");
+  def hw-main-moved?(out, branch) = hw-has?(out, "fetch first") || hw-has?(out, "non-fast-forward") || hw-has?(out, "rejected");
+  // the repair a moved main meets: follow it again, and read the gates over what the rebase brought
+  def hw-follow(branch) = hw-synced?(hw-sync(branch), branch) && hw-gates-green?(hw-gates()) ? branch : nothing();
+  def hw-carry(branch) {
+   let sync = live-do("walk", "follow main", branch, hw-sync, hw-synced?, []);
+   let ahead = hw-ahead();
+   (Comparable) sync[0] == 0 ? "[carry] held: " ++ sync[1]
+   : nothing?(ahead) ? "[carry] " ++ sync[1] ++ " held: the branch's lead over main did not read"
+   : (Comparable) ahead == 0 ? "[carry] " ++ sync[1] ++ " even with main"
+   : hw-carry-gated(sync[1], ahead, live-do("walk", "gates", branch, hw-gates-of, hw-green?, []));
+  }
+  def hw-gates-of(branch) = hw-gates();
+  def hw-carry-gated(sync, ahead, gates) {
+   (Comparable) gates[0] == 0 ? "[carry] " ++ sync ++ " ahead=" ++ ahead.str() ++ " held: " ++ gates[1]
+   : hw-carried(sync, ahead, gates[1], live-do("walk", "fast-forward main", hw-branch(), hw-push, hw-pushed?, [live-repair("follow main again", hw-main-moved?, hw-follow), live-repair("follow main again", hw-main-moved?, hw-follow)]));
+  }
+  def hw-carried(sync, ahead, gates, push) = "[carry] " ++ sync ++ " ahead=" ++ ahead.str() ++ " " ++ gates ++ " " ++ push[1] ++ ((Comparable) len(push[2]) == 0 ? "" : " then main=0 after " ++ push[2]) ++ ((Comparable) push[0] == 1 ? "" : " held");
+ }
+}

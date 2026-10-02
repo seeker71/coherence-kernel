@@ -1,0 +1,85 @@
+// host-walk-lock.bml — one walk at a time holds the checkout.
+//
+// A launchd door runs from the walk checkout, a worktree that keeps its own branch because main is checked out
+// elsewhere. One walk at a time holds the checkout (hw-claim): a start makes .hearth/walk.lock, which mkdir makes
+// for one maker only, and writes its pid, stamp and door there. A later start that finds the lock reads its holder:
+// a pid alive (host_alive) that began before the stamp holds it, and the later start ends at once with a
+// [walk-lock] line naming the holder. A holder gone is taken over through a mark only one start can make
+// (<lock>/took-<pid>), and only while the lock still names it. The mark names its maker (<mark>/by): a mark whose
+// maker no longer holds, or one a minute old that names none, is a take that died midway, and the next start
+// clears it once (through <mark>/clear, which one start makes) and takes the lock. hw-release at the walk's end
+// removes the lock this walk holds, and never another's.
+// What it needs: host-walk-text.bml (hw-field, hw-minutes). No child is begun here: the lock is mkdir and files.
+import form-stdlib/bml/host-walk-text.bml;
+section [form.bml] {
+ class HostWalkLock {
+  // one walk at a time in this checkout
+  def hw-lock() = ".hearth/walk.lock";
+  def hw-owner-path(lock) = lock ++ "/owner";
+  def hw-owner-text(door, pid, at) = "pid=" ++ pid.str() ++ " at=" ++ at.str() ++ " door=" ++ door;
+  def hw-owner(lock) = read_file(hw-owner-path(lock)) ?? "";
+  def hw-owner-door(text) {
+   let at = str_find(text, " door=", 0);
+   at < 0 ? "a start" : trim(substring(text, at + 6, len(text)));
+  }
+  def hw-since(text, now) {
+   let at = hw-field(text, " at=");
+   nothing?(at) ? "an unstamped while" : hw-minutes(now - at);
+  }
+  // a holder is a pid alive that began no later than the lock's stamp: a pid the host handed out again since is not it
+  def hw-began(pid) {
+   let row = host_process(pid);
+   (String) value_kind(row) != "list" ? nothing() : len(row) < 6 ? nothing() : (String) value_kind(row[5]) != "int" ? nothing() : row[5];
+  }
+  def hw-holds?(pid, at) = (Comparable) host_alive(pid) != 1 ? false : nothing?(at) ? true : nothing?(hw-began(pid)) ? true : hw-began(pid) <= at + 1000;
+  def hw-claim(door) {
+   let home = host_dir_mkdir(".hearth");
+   hw-claim-at(hw-lock(), door, host_pid(), now_unix_ms());
+  }
+  // answers [1, line] when this start holds the lock and [0, line] when it does not; the line names the holder
+  def hw-claim-at(lock, door, pid, now) = (Comparable) host_dir_mkdir(lock) == 1 ? hw-own(lock, door, pid, now, "") : hw-claim-found(lock, door, pid, now, hw-owner(lock));
+  def hw-claim-found(lock, door, pid, now, text) {
+   let holder = hw-field(text, "pid=");
+   nothing?(holder) ? hw-claim-unowned(lock, door, pid, now, text)
+   : hw-holds?(holder, hw-field(text, " at=")) ? [0, "[walk-lock] " ++ door ++ " does not start: " ++ hw-owner-door(text) ++ " (pid " ++ holder.str() ++ ") has walked this checkout for " ++ hw-since(text, now) ++ "; one walk at a time"]
+   : hw-take(lock, door, pid, now, holder.str(), text);
+  }
+  // a lock that names no holder was made this minute by a start still naming itself, or by one that ended there
+  def hw-claim-unowned(lock, door, pid, now, text) = hw-age-s(lock, now) < 60 ? [0, "[walk-lock] " ++ door ++ " does not start: another start made the lock this minute and has not named itself yet"] : hw-take(lock, door, pid, now, "unowned", text);
+  def hw-gone-name(text) = (String) text == "" ? "a start that never named itself" : hw-owner-door(text) ++ " pid " ++ hw-field(text, "pid=").str() ++ ", gone";
+  // the take's mark names its maker, so a take that died midway never strands the lock
+  def hw-mark-by(mark) = mark ++ "/by";
+  def hw-mark-maker(mark) = read_file(hw-mark-by(mark)) ?? "";
+  def hw-take(lock, door, pid, now, gone, text) = hw-take-marked(lock, door, pid, now, text, lock ++ "/took-" ++ gone, true);
+  def hw-take-marked(lock, door, pid, now, text, mark, again) = (Comparable) host_dir_mkdir(mark) == 1 ? hw-take-made(lock, door, pid, now, text, mark) : again && hw-mark-stale?(mark, now) ? hw-take-clear(lock, door, pid, now, text, mark) : hw-taking(door, text, mark);
+  def hw-take-made(lock, door, pid, now, text, mark) {
+   let named = write_file_text(hw-mark-by(mark), hw-owner-text(door, pid, now));
+   (String) hw-owner(lock) == text ? hw-own(lock, door, pid, now, ", taken over from " ++ hw-gone-name(text)) : hw-taking(door, text, mark);
+  }
+  def hw-taking(door, text, mark) = [0, "[walk-lock] " ++ door ++ " does not start: another start is taking over the lock " ++ hw-gone-name(text) ++ " left" ++ hw-maker-name(hw-mark-maker(mark))];
+  def hw-maker-name(by) = nothing?(hw-field(by, "pid=")) ? "" : " (" ++ hw-owner-door(by) ++ ", pid " ++ hw-field(by, "pid=").str() ++ ")";
+  // seconds since a path last changed; a path that is not there (or reads no time) is no age at all
+  def hw-age-s(path, now) = hw-age-of(file_mtime(path), now);
+  def hw-age-of(at, now) = (String) value_kind(at) != "int" ? 0 : at <= 0 ? 0 : (now / 1000) - at;
+  // a mark is stale when its maker no longer holds, or when it is a minute old and names no maker
+  def hw-mark-stale?(mark, now) {
+   let by = hw-mark-maker(mark);
+   nothing?(hw-field(by, "pid=")) ? hw-age-s(mark, now) >= 60 : !hw-holds?(hw-field(by, "pid="), hw-field(by, " at="));
+  }
+  // one start clears a stale mark: the one that makes <mark>/clear (or finds a clear a minute old, whose maker
+  // died between its two steps); the mark goes, and the take goes once more
+  def hw-take-clear(lock, door, pid, now, text, mark) = (Comparable) host_dir_mkdir(mark ++ "/clear") == 1 || hw-age-s(mark ++ "/clear", now) >= 60 ? hw-take-cleared(lock, door, pid, now, text, mark, host_dir_rmdir(mark)) : hw-taking(door, text, mark);
+  def hw-take-cleared(lock, door, pid, now, text, mark, gone) = hw-take-marked(lock, door, pid, now, text, mark, false);
+  def hw-own(lock, door, pid, now, took) {
+   let wrote = write_file_text(hw-owner-path(lock), hw-owner-text(door, pid, now));
+   let holder = hw-field(hw-owner(lock), "pid=");
+   !nothing?(holder) && (Comparable) holder == pid ? [1, "[walk-lock] " ++ door ++ " holds this checkout, pid " ++ pid.str() ++ took] : [0, "[walk-lock] " ++ door ++ " does not start: its lock reads '" ++ hw-owner(lock) ++ "' after its write"];
+  }
+  def hw-release() = hw-release-at(hw-lock(), host_pid());
+  def hw-release-at(lock, pid) {
+   let holder = hw-field(hw-owner(lock), "pid=");
+   !nothing?(holder) && (Comparable) holder == pid ? hw-released(host_dir_rmdir(lock)) : "[walk-lock] kept: the lock names '" ++ hw-owner(lock) ++ "', not pid " ++ pid.str();
+  }
+  def hw-released(rc) = (Comparable) rc == 0 ? "[walk-lock] released" : "[walk-lock] release answered " ++ rc.str();
+ }
+}

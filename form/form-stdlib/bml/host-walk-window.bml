@@ -1,0 +1,90 @@
+// host-walk-window.bml — a walk's turns live inside a window; a turn begins only when the window, the GPU and the memory hold it.
+//
+// The window: a walk's turns live inside it (hw-turns, host-walk-turns.bml). Each turn reads the window's end on stdin
+// as its wall deadline, {"turns":24,"deadline_ms":<the window's end on host_monotonic_ms>}; the host's monotonic clock
+// is one clock for every process on this host, so the turn reads the same deadline its walk set, starts no option the
+// time left cannot hold, and stops its lane at the deadline. A turn begins only while the time left holds one
+// option, as long as the median option the checkout's own ledger measured (hw-room), and only after the host's
+// other checkouts let the one GPU go: a turn waits, inside its window, while a walk door or the session learner
+// runs in another checkout (hw-yield). A turn also begins only once the machine has the memory for a voice (hw-memory-room,
+// a bare wait: the child lane takes the lease); hw-ready is the one question a turn asks before it begins.
+// What it holds: the option floor and the room (hw-option-floor, hw-room), the walk doors of other checkouts and the
+// yield to them (hw-walk-doors, hw-yield), the memory a turn waits for (hw-turn-need, hw-memory-room), and hw-ready.
+// What it needs: host-walk-text.bml (hw-field, hw-minutes, hw-ends?, hw-say) and memory-governor.bml (mg-*).
+import form-stdlib/bml/host-walk-text.bml;
+import form-stdlib/bml/memory-governor.bml;
+section [form.bml] {
+ class HostWalkWindow {
+  // the window: an option as long as the median real option the checkout's own ledger measured (a dry or test
+  // row is no option), and half an hour before any is measured
+  def hw-ledger() = "receipts/native-turn-ledger.jsonl";
+  def hw-option-unmeasured-ms() = 1800000;
+  def hw-wall(line) = str_find(line, "\"dry\":1", 0) >= 0 ? nothing() : str_find(line, "\"test\":1", 0) >= 0 ? nothing() : str_find(line, "\"lane_reason\":\"host-memory-", 0) >= 0 ? nothing() : hw-field(line, "\"wall_ms\":");
+  def hw-walls(lines) = nil?(lines) ? [] : hw-walls-with(hw-wall(lines[0]), lines[1:]);
+  def hw-walls-with(wall, rest) = nothing?(wall) ? hw-walls(rest) : cons(wall, hw-walls(rest));
+  def hw-insert(x, xs) = nil?(xs) ? [x] : x <= xs[0] ? cons(x, xs) : cons(xs[0], hw-insert(x, xs[1:]));
+  def hw-sorted(xs) = nil?(xs) ? [] : hw-insert(xs[0], hw-sorted(xs[1:]));
+  def hw-option-floor-of(text) {
+   let walls = hw-sorted(hw-walls(split-on(text, "\n")));
+   nil?(walls) ? [hw-option-unmeasured-ms(), "no option measured yet"] : [walls[len(walls) / 2], "the median of " ++ len(walls).str() ++ " measured"];
+  }
+  def hw-option-floor-at(path) = hw-option-floor-of(file_size(path) < 1 ? "" : fhn-read(path));
+  def hw-option-floor() = hw-option-floor-at(hw-ledger());
+  def hw-left(until, now) = until > now ? until - now : 0;
+  def hw-room-at(until, now, floor) = hw-left(until, now) >= floor[0] ? [true, "[walk-window] " ++ hw-minutes(hw-left(until, now)) ++ " left holds an option of " ++ hw-minutes(floor[0]) ++ " (" ++ floor[1] ++ ")"] : [false, "[walk-window] " ++ hw-minutes(hw-left(until, now)) ++ " left cannot hold an option of " ++ hw-minutes(floor[0]) ++ " (" ++ floor[1] ++ "): no turn starts"];
+  def hw-room(until) = hw-room-at(until, host_monotonic_ms(), hw-option-floor());
+  // the walk doors of the host's other checkouts, the local planner (observe/local-plan-run.bml, which opens a plan
+  // voice), the prompt-lookup run (observe/prompt-lookup-run.bml, which opens Qwen sessions to time them), and the
+  // session learner that trains on the GPU (its worker and the session door that hands it a teaching and waits for
+  // it to settle): one model on the one GPU at a time
+  def hw-walk-doors() = ["observe/scheduled-walk.bml", "observe/day-turn.bml", "observe/movement-run.bml", "observe/native-turn-run.bml", "observe/form-cli-code-run.fk", "observe/prompt-draft-run.bml", "observe/local-plan-run.bml", "observe/prompt-lookup-run.bml", "observe/native-session-learning-run.fk", "observe/form-cli-session-home-embody-run.fk"];
+  def hw-door-in(arg, doors) = nil?(doors) ? "" : hw-ends?(arg, doors[0]) ? doors[0] : hw-door-in(arg, doors[1:]);
+  def hw-door-of(argv) = (String) value_kind(argv) != "list" ? "" : len(argv) < 2 ? "" : (String) value_kind(argv[1]) != "string" ? "" : hw-door-in(argv[1], hw-walk-doors());
+  def hw-walk-row?(row, here) = (String) value_kind(row) != "list" ? false : len(row) < 5 ? false : (String) value_kind(row[3]) != "string" ? false : (String) row[3] == "" ? false : (String) row[3] == here ? false : (String) hw-door-of(row[4]) != "";
+  def hw-elsewhere-of(rows, here) = nil?(rows) ? [] : hw-walk-row?(rows[0], here) ? cons(rows[0], hw-elsewhere-of(rows[1:], here)) : hw-elsewhere-of(rows[1:], here);
+  def hw-here() {
+   let me = host_process(host_pid());
+   (String) value_kind(me) != "list" ? host_cwd() : len(me) < 4 ? host_cwd() : me[3];
+  }
+  def hw-process-rows(pids) = nil?(pids) ? [] : cons(host_process(pids[0][0]), hw-process-rows(pids[1:]));
+  def hw-elsewhere(here) {
+   let pids = host_processes("fkwu*");
+   (String) value_kind(pids) != "list" ? [] : hw-elsewhere-of(hw-process-rows(pids), here);
+  }
+  def hw-walk-name(row) = hw-door-of(row[4]) ++ " (pid " ++ row[0].str() ++ ") in " ++ row[3];
+  def hw-walk-names(rows) = nil?(rows) ? "" : hw-walk-name(rows[0]) ++ (nil?(rows[1:]) ? "" : ", " ++ hw-walk-names(rows[1:]));
+  // look(here) answers the host's walk rows in other checkouts; the wait rests a minute between looks, and ends
+  // when none walks or when the window no longer holds an option
+  def hw-yield-poll-ms() = 60000;
+  def hw-yield(until) = hw-yield-with(until, hw-elsewhere, hw-option-floor());
+  def hw-yield-with(until, look, floor) = hw-yield-from(until, host_monotonic_ms(), look, floor, hw-here(), look(hw-here()), "");
+  def hw-yield-from(until, began, look, floor, here, others, named) {
+   let room = hw-room-at(until, host_monotonic_ms(), floor);
+   nil?(others) ? hw-yielded(began, named)
+   : !room[0] ? "[walk-yield] " ++ hw-walk-names(others) ++ " still walks, and the window no longer holds an option"
+   : hw-yield-rest(until, began, look, floor, here, (String) named == "" ? hw-walk-names(others) : named);
+  }
+  def hw-yield-rest(until, began, look, floor, here, named) {
+   let rested = host_sleep_ms(hw-yield-poll-ms());
+   hw-yield-from(until, began, look, floor, here, look(here), named);
+  }
+  def hw-yielded(began, named) = (String) named == "" ? "" : "[walk-yield] waited " ++ hw-minutes(host_monotonic_ms() - began) ++ " for " ++ named ++ " to end: one model on the GPU at a time";
+  // A turn opens a 27B voice (about 26 GiB of weights, mapped from the file) and a KV state; before it begins, the
+  // machine is asked (memory-governor.bml), as it is asked about another checkout's GPU door. The walk waits no
+  // longer than the window can spare, the last moment a turn could still begin, and ends held with the reason said:
+  // a held walk is a window that took no turn, never a host that fell over. The walk's own check holds no lease: this
+  // process opens no model, and the child lane it begins (native-turn-run.bml, over the session door) takes the real
+  // one, keyed by the model file, in its own process; a lease taken here would be a promise by a pid that holds nothing.
+  def hw-turn-need() = (26 * mg-gib()) + mg-kv-margin();
+  def hw-memory-room(until, room) = hw-memory-room-with(until, room, (who, need, by) => mg-wait(who, need, by));
+  def hw-memory-room-with(until, room, wait) {
+   let v = wait("walk turn", hw-turn-need(), until - hw-option-floor()[0]);
+   mg-granted?(v) ? room : [false, "[walk-window] " ++ mg-line("walk turn", hw-turn-need(), v) ++ ": no turn starts"];
+  }
+  def hw-ready(until) {
+   let said = hw-say(hw-yield(until));
+   let room = hw-room(until);
+   room[0] ? hw-memory-room(until, room) : room;
+  }
+ }
+}
