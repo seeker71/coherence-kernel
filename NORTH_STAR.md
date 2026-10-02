@@ -17,7 +17,10 @@ that removes future rent ([`docs/rent-to-zero-goal.form`](docs/rent-to-zero-goal
 penalty and are to grow; a remote review of locally done work is free; a remote guide is light and comes only after
 the local guide has failed more than once; the remote tokens that do the work go to zero. Every session opens and
 closes with `./fkwu observe/local-flow-review.bml`, and measures itself at its close through
-`observe/session-rent-run.bml`.
+`./fkwu observe/session-rent-run.bml` (no argument: it finds this session and every other session of this repo's
+checkouts, measures each one whose transcripts moved, and shows the progression). The progression across all measured
+sessions is read alone by `./fkwu observe/session-progress-run.bml`; every local generation records itself at the
+voice door (`form-stdlib/bml/local-run.bml`), so the local share counts what was actually spent.
 
 How the body is built and where each organ lives: [`MANIFEST.md`](MANIFEST.md). What stands today:
 [`CURRENT_FLOOR.md`](CURRENT_FLOOR.md).
