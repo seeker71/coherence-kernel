@@ -188,6 +188,55 @@ section [form.bml] {
     def dvl-consistent-go(m, il) = il == record_get(m, "layers-n") ? true : (dvl-layer-consistent?(m, il) && dvl-consistent-go(m, il + 1));
     def dvl-consistent?(m) = record_get(m, "layers-n") > 0 && len(record_get(m, "ratios")) >= record_get(m, "layers-n") && len(record_get(m, "layers")) == record_get(m, "layers-n")
         && record_get(m, "table-blocks") == record_get(m, "layers-n") && record_get(m, "e") > 0 && record_get(m, "hd") > 0 && record_get(m, "sh") > 0 && dvl-consistent-go(m, 0);
+    // ---- what the driver can run, by the tensor's own GGUF type ------------------------------------------------------------------
+    // ONE table of the types each ROLE may carry, read by the layer (native/metal/dsv4-layer.fk: admission and the kernel a tensor meets), the head (dsv4-token-handle.fk) and the validation
+    // window (the gap list it prints): a dense projection is MXFP8 planes (41) or Q8_0 blocks (8), a routed expert stack MXFP4 (40), IQ2_XXS (16) or Q2_K (10), a router or hyper-connection matrix
+    // and the embedding F16 (1), every norm, gain, bias and sink F32 (0), the hash table I32 (26). A role is read per tensor from the file's own table, never from the build's name or the arch.
+    def dvl-dense-types() = [41, 8];
+    def dvl-expert-types() = [40, 16, 10];
+    def dvl-f16-types() = [1];
+    def dvl-f32-types() = [0];
+    def dvl-i32-types() = [26];
+    def dvl-type-in?(ty, tys) = len(tys) == 0 ? false : (tys[0] == ty || dvl-type-in?(ty, tys[1:]));
+    def dvl-dense-leaves() = ["attn_q_a.weight", "attn_q_b.weight", "attn_kv.weight", "attn_output_a.weight", "attn_output_b.weight", "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight"];
+    def dvl-expert-leaves() = ["ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight"];
+    def dvl-f16-leaves() = ["ffn_gate_inp.weight", "hc_attn_fn.weight", "hc_ffn_fn.weight"];
+    def dvl-f32-leaves() = ["attn_norm.weight", "attn_q_a_norm.weight", "attn_kv_a_norm.weight", "attn_sinks.weight", "ffn_norm.weight", "hc_attn_scale.weight", "hc_attn_base.weight", "hc_ffn_scale.weight", "hc_ffn_base.weight"];
+    def dvl-comp-f16-leaves() = ["attn_compressor_kv.weight", "attn_compressor_gate.weight", "attn_compressor_ape.weight"];
+    // the columns a type can tile: a block format reads whole blocks along the first dimension (Q8_0 and MXFP8 and MXFP4 32, IQ2_XXS and Q2_K 256)
+    def dvl-block-cols(ty) = (ty == 16 || ty == 10) ? 256 : ((ty == 8 || ty == 40 || ty == 41) ? 32 : 1);
+    // one tensor's gap: [] when its type is in the role's list (and, for a block type, its columns tile), else one line naming the tensor, its type and what the role reads
+    def dvl-role-gap(ix, p, leaf, tys, need) {
+        let ty = dvl-type(ix, p ++ leaf);
+        (dvl-type-in?(ty, tys) && (dvl-dim(ix, p ++ leaf, 0) % dvl-block-cols(ty)) == 0) ? [] : [leaf ++ " type " ++ ty.str() ++ " (the driver reads " ++ need ++ ")"];
+    }
+    def dvl-roles-gaps(ix, p, leaves, tys, need) = len(leaves) == 0 ? [] : append(dvl-role-gap(ix, p, leaves[0], tys, need), dvl-roles-gaps(ix, p, leaves[1:], tys, need));
+    def dvl-need-dense() = "MXFP8 (41) or Q8_0 (8)";
+    def dvl-need-expert() = "MXFP4 (40), IQ2_XXS (16) or Q2_K (10)";
+    // the gaps of one layer, from the header alone: every tensor the layer binds against the types its role can carry
+    def dvl-layer-gaps(m, il) {
+        let ix = record_get(m, "index");
+        let p = dvl-prefix(il);
+        let l = dvl-layer-at(m, il);
+        append(dvl-roles-gaps(ix, p, dvl-dense-leaves(), dvl-dense-types(), dvl-need-dense()),
+         append(dvl-roles-gaps(ix, p, dvl-expert-leaves(), dvl-expert-types(), dvl-need-expert()),
+          append(dvl-roles-gaps(ix, p, dvl-f16-leaves(), dvl-f16-types(), "F16 (1)"),
+           append(dvl-roles-gaps(ix, p, dvl-f32-leaves(), dvl-f32-types(), "F32 (0)"),
+            append(record_get(l, "compressed") ? append(dvl-roles-gaps(ix, p, dvl-comp-f16-leaves(), dvl-f16-types(), "F16 (1)"), dvl-roles-gaps(ix, p, ["attn_compressor_norm.weight"], dvl-f32-types(), "F32 (0)")) : [],
+             record_get(l, "hashed") ? dvl-roles-gaps(ix, p, ["ffn_gate_tid2eid.weight"], dvl-i32-types(), "I32 (26)") : dvl-roles-gaps(ix, p, ["exp_probs_b.bias"], dvl-f32-types(), "F32 (0)"))))));
+    }
+    // the output head and the embedding
+    def dvl-head-gaps(m) {
+        let ix = record_get(m, "index");
+        append(dvl-roles-gaps(ix, "", ["token_embd.weight", "output_hc_fn.weight"], dvl-f16-types(), "F16 (1)"),
+         append(dvl-roles-gaps(ix, "", ["output_hc_scale.weight", "output_hc_base.weight", "output_norm.weight"], dvl-f32-types(), "F32 (0)"),
+          dvl-roles-gaps(ix, "", ["output.weight"], dvl-dense-types(), dvl-need-dense())));
+    }
+    def dvl-gaps-go(m, il, n) = il == n ? [] : append(dvl-layer-gaps(m, il), dvl-gaps-go(m, il + 1, n));
+    def dvl-uniq-go(xs, seen) = len(xs) == 0 ? [] : (dvl-has-text?(seen, xs[0]) ? dvl-uniq-go(xs[1:], seen) : cons(xs[0], dvl-uniq-go(xs[1:], cons(xs[0], seen))));
+    def dvl-has-text?(xs, t) = len(xs) == 0 ? false : (xs[0] == t || dvl-has-text?(xs[1:], t));
+    // every gap the driver would meet on this header (the head's, then each layer's), the distinct lines: EMPTY when the driver can run every tensor its blocks and its head bind
+    def dvl-driver-gaps(m) = dvl-uniq-go(append(dvl-head-gaps(m), dvl-gaps-go(m, 0, record_get(m, "layers-n"))), []);
     // rows whose type the body does not price (priced bytes 0): a driver must refuse a plan with any
     def dvl-unpriced-go(rows, n) = len(rows) == 0 ? n : dvl-unpriced-go(rows[1:], rows[0][5] == 0 ? n + 1 : n);
     def dvl-unpriced(m) = dvl-unpriced-go(record_get(m, "rows"), 0);

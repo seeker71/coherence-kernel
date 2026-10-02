@@ -16,13 +16,17 @@
 //     router      the F16 gate_inp matvec; the probabilities by form_dsv4_hash_probs_s / form_dsv4_topk_probs_s (softplus as max(z, 0) + log1p(exp(-|z|)): the restored ln(1 + exp(z)) lost digits
 //                 for negative z, 1.1e-4 off at z = -9); layer routes by the hash table (blk.N.ffn_gate_tid2eid: token row of I32 ids, weights sqrt(softplus) of the logits, normalised over the chosen) or by the
 //                 biased top-k (selection by prob + exp_probs_b, weight the UNBIASED prob; a -1e30 bias refuses an expert), both scaled by deepseek4.expert_weights_scale over the 2^-14 floor
-//     experts     gate and up by the device ids (MXFP4 or IQ2_XXS by the stack's own type), the clamped SwiGLU times the router weight with the block's own clamp from
-//                 deepseek4.swiglu_clamp_exp, the down by ids with one input a slot; the slot sum; the shared expert (three MXFP8 matvecs and the unweighted clamped SwiGLU) added
+//     experts     gate and up by the device ids (MXFP4, IQ2_XXS or Q2_K by the stack's own type), the clamped SwiGLU times the router weight with the block's own clamp from
+//                 deepseek4.swiglu_clamp_exp, the down by ids with one input a slot; the slot sum; the shared expert (three dense matvecs, MXFP8 or Q8_0 by the tensor's type, and the unweighted clamped SwiGLU) added
 //     hc_post     as above, into `resid`
 //
-// WHAT IS REFUSED, so a caller reads nothing and not a plausible wrong layer: n_hc other than 4 (the split kernel is the n_hc 4 form), a dense tensor that is not MXFP8, a router or hyper-connection
-// matrix that is not F16, an expert tensor whose type has no ids kernel (the real IQ2XXS file's Q2_K down has none yet: Q2_K is compiled in dsv4-kernels.fk and not wired here), a position at or past
-// the capacity, a ratio-4 block past position 2047 (the indexer stops being inert there: dsv4-compressor.fk, ds4.c:12822), a head width the fp8 round or the grouped output cannot tile.
+// EVERY TENSOR IS READ BY ITS OWN GGUF TYPE (the view's slot 2, from the file's table; the allowed types are the layout's one table, dsv4-layout.fk dvl-dense-types and dvl-expert-types): a dense
+// projection is MXFP8 (41: the planar matvec and its grouped form) or Q8_0 (8: the 34-byte block lane and its grouped form, the real IQ2XXS file's attention, shared-expert and output tensors), a
+// routed expert stack MXFP4 (40), IQ2_XXS (16) or Q2_K (10: the real file's down stacks), each stack its own, so a file that mixes them (the real one does: gate and up 16, down 10) is run as it is.
+//
+// WHAT IS REFUSED, so a caller reads nothing and not a plausible wrong layer: n_hc other than 4 (the split kernel is the n_hc 4 form), a dense tensor of a type that is neither MXFP8 nor Q8_0, an expert
+// tensor of a type with no ids kernel, a block type whose first dimension its block does not tile (32 for Q8_0, MXFP8 and MXFP4; 256 for IQ2_XXS and Q2_K), a router or hyper-connection matrix that is not F16,
+// a position at or past the capacity, a ratio-4 block past position 2047 (the indexer stops being inert there: dsv4-compressor.fk, ds4.c:12822), a head width the fp8 round or the grouped output cannot tile.
 //
 // THE ROPE TABLES are written once by dsv4-prepare (plain for ratio 0, compressed for every other ratio). THE COMPRESSOR'S ROW is counted in the same position's attention (the runner appends it
 // before attention counts: metal_dsv4_stack.sh compStep, history).
@@ -64,9 +68,14 @@ section [form.bml] {
 
     // ---- admission ------------------------------------------------------------------------------------------
     def dkl-all?(xs) = len(xs) == 0 ? true : (xs[0] && dkl-all?(xs[1:]));
-    def dkl-dense-ok?(ctx, il, leaves) = len(leaves) == 0 ? true : (dkl-type(dkl-view(ctx, il, leaves[0])) == 41 && dkl-dense-ok?(ctx, il, leaves[1:]));
+    // EACH TENSOR IS READ BY ITS OWN TYPE: the types a role may carry are the layout's one table (dvl-dense-types, dvl-expert-types: dsv4-layout.fk), the type is the one the file's table gave THAT tensor
+    // (a view's slot 2), and a block type must tile its first dimension (dvl-block-cols). A dense projection is MXFP8 or Q8_0, an expert stack MXFP4, IQ2_XXS or Q2_K, in any mix a file holds.
+    def dkl-tile-ok?(v) = (dkl-cols(v) % dvl-block-cols(dkl-type(v))) == 0;
+    def dkl-dense-view-ok?(v) = dvl-type-in?(dkl-type(v), dvl-dense-types()) && dkl-tile-ok?(v);
+    def dkl-dense-ok?(ctx, il, leaves) = len(leaves) == 0 ? true : (dkl-dense-view-ok?(dkl-view(ctx, il, leaves[0])) && dkl-dense-ok?(ctx, il, leaves[1:]));
     def dkl-f16-ok?(ctx, il, leaves) = len(leaves) == 0 ? true : (dkl-type(dkl-view(ctx, il, leaves[0])) == 1 && dkl-f16-ok?(ctx, il, leaves[1:]));
-    def dkl-expert-type-ok?(ty) = ty == 40 || ty == 16;
+    def dkl-expert-type-ok?(ty) = dvl-type-in?(ty, dvl-expert-types());
+    def dkl-experts-ok?(ctx, il, leaves) = len(leaves) == 0 ? true : (dkl-expert-type-ok?(dkl-type(dkl-view(ctx, il, leaves[0]))) && dkl-tile-ok?(dkl-view(ctx, il, leaves[0])) && dkl-experts-ok?(ctx, il, leaves[1:]));
     def dkl-supported?(ctx, il) {
         let m = dkl-m(ctx);
         let hd = record_get(m, "hd");
@@ -74,9 +83,9 @@ section [form.bml] {
         let nh = record_get(m, "nh");
         let ng = record_get(m, "ng");
         record_get(m, "hc") == 4 && il >= 0 && il < record_get(m, "layers-n") && (nh % ng) == 0 && ((nh * hd / ng) % 32) == 0 && ((hd - nrot) % 64) == 0 && (nrot % 2) == 0 && hd <= 1024 && hd >= 32 && (hd % 32) == 0
-         && dkl-dense-ok?(ctx, il, ["attn_q_a.weight", "attn_q_b.weight", "attn_kv.weight", "attn_output_a.weight", "attn_output_b.weight", "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight"])
-         && dkl-f16-ok?(ctx, il, ["ffn_gate_inp.weight", "hc_attn_fn.weight", "hc_ffn_fn.weight"])
-         && dkl-expert-type-ok?(dkl-l(ctx, il, "gate-type")) && dkl-expert-type-ok?(dkl-l(ctx, il, "up-type")) && dkl-expert-type-ok?(dkl-l(ctx, il, "down-type"))
+         && dkl-dense-ok?(ctx, il, dvl-dense-leaves())
+         && dkl-f16-ok?(ctx, il, dvl-f16-leaves())
+         && dkl-experts-ok?(ctx, il, dvl-expert-leaves())
          && dkl-l(ctx, il, "nexp") >= record_get(m, "used") && dkl-l(ctx, il, "router-rows") >= dkl-l(ctx, il, "nexp");
     }
 
@@ -111,6 +120,16 @@ section [form.bml] {
     def dkl-norm(ctx, x, wh, out, n) = dkr-go-tg(dkl-p(ctx, "form_mla_rmsnorm_wide_f32"), [dkl-b(ctx, x), wh, dkl-b(ctx, out)], [n, dkl-f(dkl-g(ctx, "eps"))], 1, 256);
     // an MXFP8 matvec of the weight view v: y = W x
     def dkl-mx8(ctx, v, x, y) = dkr-go(dkl-p(ctx, "form_dsv4_mx8_matvec"), [v[1], dkl-b(ctx, x), dkl-b(ctx, y)], [dkl-rows(v), dkl-cols(v), dkl-rows(v) * dkl-cols(v)], dkl-rows(v) * 32);
+    // a Q8_0 matvec of the weight view v (blocks of an f16 scale and 32 signed bytes, one simdgroup a row): y = W x
+    def dkl-q80(ctx, v, x, y) = dkr-go(dkl-p(ctx, "form_dsv4_q80_matvec_lane"), [v[1], dkl-b(ctx, x), dkl-b(ctx, y)], [dkl-rows(v), dkl-cols(v)], dkl-rows(v) * 32);
+    // THE DENSE MATVEC BY THE TENSOR'S OWN TYPE (the view's slot 2, read from the file's table): MXFP8 (41) or Q8_0 (8). A type no kernel reads answers 0, and the block refuses (nothing) before it reads a plausible wrong layer.
+    def dkl-dense(ctx, v, x, y) = dkl-type(v) == 41 ? dkl-mx8(ctx, v, x, y) : (dkl-type(v) == 8 ? dkl-q80(ctx, v, x, y) : 0);
+    // the grouped output factor by the tensor's type: row r reads the activation group r / rank (rank = rows / ng); the two grouped kernels share their constants
+    def dkl-dense-grouped(ctx, v, x, y) {
+        let rank = dkl-rows(v) / record_get(dkl-m(ctx), "ng");
+        let kernel = dkl-type(v) == 41 ? "form_dsv4_mx8_matvec_grouped" : (dkl-type(v) == 8 ? "form_dsv4_q80_matvec_grouped" : "");
+        str_len(kernel) == 0 ? 0 : dkr-go(dkl-p(ctx, kernel), [v[1], dkl-b(ctx, x), dkl-b(ctx, y)], [dkl-rows(v), dkl-cols(v), dkl-rows(v) * dkl-cols(v), rank], dkl-rows(v) * 32);
+    }
     // rope in place over nh heads at pos with a table buffer and a sign (+1 forward, -1 inverse)
     def dkl-rope(ctx, buf, table, nh, pos, sign) {
         let hd = dkl-g(ctx, "hd");
@@ -169,12 +188,12 @@ section [form.bml] {
         let table = ratio == 0 ? "rope-plain" : "rope-comp";
         let pre = dkl-hc-pre(ctx, il, "attn", "resid");
         let n1 = dkl-norm(ctx, "hc-cur", dkl-w(ctx, il, "attn_norm.weight"), "xn", e);
-        let qa = dkl-mx8(ctx, dkl-view(ctx, il, "attn_q_a.weight"), "xn", "q-latent");
-        let kv = dkl-mx8(ctx, dkl-view(ctx, il, "attn_kv.weight"), "xn", "kv-raw");
+        let qa = dkl-dense(ctx, dkl-view(ctx, il, "attn_q_a.weight"), "xn", "q-latent");
+        let kv = dkl-dense(ctx, dkl-view(ctx, il, "attn_kv.weight"), "xn", "kv-raw");
         let compl = comp ? dkl-compress(ctx, sts, il, pos, cap) : [];
         let n2 = dkl-norm(ctx, "q-latent", dkl-w(ctx, il, "attn_q_a_norm.weight"), "q-latn", qr);
         let n3 = dkl-norm(ctx, "kv-raw", dkl-w(ctx, il, "attn_kv_a_norm.weight"), "kv-n", hd);
-        let qb = dkl-mx8(ctx, dkl-view(ctx, il, "attn_q_b.weight"), "q-latn", "q");
+        let qb = dkl-dense(ctx, dkl-view(ctx, il, "attn_q_b.weight"), "q-latn", "q");
         let hn = dkr-go-tg(dkl-p(ctx, "form_mla_headrms_wide_f32"), [dkl-b(ctx, "q"), dkl-b(ctx, "q-n")], [nh, hd, dkl-f(record_get(m, "eps"))], nh, hd < 256 ? hd : 256);
         let rq = dkl-rope(ctx, "q-n", table, nh, pos, 1.0);
         let rk = dkl-rope(ctx, "kv-n", table, 1, pos, 1.0);
@@ -190,8 +209,8 @@ section [form.bml] {
         let a3 = dkr-go(dkl-p(ctx, "form_mla_attend_acc"), [sts[il][0], crows, dkl-b(ctx, "att-exp"), dkl-b(ctx, "att-inv"), dkl-b(ctx, "heads")], [nh, hd, nrows, ncomp], nh * hd);
         let ri = dkl-rope(ctx, "heads", table, nh, pos, 0.0 - 1.0);
         let oa = dkl-view(ctx, il, "attn_output_a.weight");
-        let o1 = dkr-go(dkl-p(ctx, "form_dsv4_mx8_matvec_grouped"), [oa[1], dkl-b(ctx, "heads"), dkl-b(ctx, "low")], [dkl-rows(oa), dkl-cols(oa), dkl-rows(oa) * dkl-cols(oa), dkl-rows(oa) / record_get(m, "ng")], dkl-rows(oa) * 32);
-        let o2 = dkl-mx8(ctx, dkl-view(ctx, il, "attn_output_b.weight"), "low", "attn-out");
+        let o1 = dkl-dense-grouped(ctx, oa, "heads", "low");
+        let o2 = dkl-dense(ctx, dkl-view(ctx, il, "attn_output_b.weight"), "low", "attn-out");
         let post = dkl-hc-post(ctx, "attn-out", "resid", "resid-next");
         let all = append(pre, append([n1, qa, kv], append(compl, append([n2, n3, qb, hn, rq, rk, kr, ap, a1, a2, a3, ri, o1, o2], post))));
         dkl-all?(dkl-ones(all)) ? len(all) : nothing();
@@ -199,7 +218,8 @@ section [form.bml] {
     def dkl-ones(xs) = len(xs) == 0 ? [] : cons(xs[0] == 1, dkl-ones(xs[1:]));
 
     // ---- the FFN half --------------------------------------------------------------------------------------------------------------
-    def dkl-expert-kernel(ty) = ty == 40 ? "form_dsv4_mx4_matvec_id" : "form_dsv4_iq2_matvec_id";
+    // the routed-expert matvec by the stack's own type: MXFP4 (40), Q2_K (10), else IQ2_XXS (16; admission refuses every other type before a dispatch)
+    def dkl-expert-kernel(ty) = ty == 40 ? "form_dsv4_mx4_matvec_id" : (ty == 10 ? "form_dsv4_q2k_matvec_id" : "form_dsv4_iq2_matvec_id");
     def dkl-route(ctx, il, token) {
         let m = dkl-m(ctx);
         let used = record_get(m, "used");
@@ -232,10 +252,10 @@ section [form.bml] {
         let m = dkl-m(ctx);
         let sh = record_get(m, "sh");
         let lim = dkl-f(dkl-clamp(ctx, il));
-        [dkl-mx8(ctx, dkl-view(ctx, il, "ffn_gate_shexp.weight"), "xn", "shared-gate"),
-         dkl-mx8(ctx, dkl-view(ctx, il, "ffn_up_shexp.weight"), "xn", "shared-up"),
+        [dkl-dense(ctx, dkl-view(ctx, il, "ffn_gate_shexp.weight"), "xn", "shared-gate"),
+         dkl-dense(ctx, dkl-view(ctx, il, "ffn_up_shexp.weight"), "xn", "shared-up"),
          dkr-go(dkl-p(ctx, "form_dsv4_swiglu_f32"), [dkl-b(ctx, "shared-gate"), dkl-b(ctx, "shared-up"), dkl-b(ctx, "shared-mid")], [sh, dkl-f(1.0), lim], sh),
-         dkl-mx8(ctx, dkl-view(ctx, il, "ffn_down_shexp.weight"), "shared-mid", "shared-down")];
+         dkl-dense(ctx, dkl-view(ctx, il, "ffn_down_shexp.weight"), "shared-mid", "shared-down")];
     }
     // reads `resid-next`, leaves the block's output streams in `resid`; token is the id the hash table of a hashed block is read with
     def dsv4-layer-ffn(ctx, il, token) = dkl-supported?(ctx, il) ? dkl-ffn-go(ctx, il, token) : nothing();

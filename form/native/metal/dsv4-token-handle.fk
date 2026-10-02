@@ -6,7 +6,7 @@
 //   dsv4-head           the output head, seven enqueues, in the order the oracle's logits are computed (dnr-hc-head, dnr-rms-weight, dnr-matvec):
 //                         rms of the four streams (no weight, one group of 256) -> hc-flat; the F16 output_hc_fn matvec [hc x e to hc] -> hc-mix; the head gates
 //                         w[i] = sigmoid(pre[i] x scale + base[i]) + hc_eps (form_hc_headw_f32) -> head-w; the stream sum -> head-cur; output_norm (weighted, one group of 256) -> xn;
-//                         output.weight (MXFP8) [e to vocab] -> LOGITS; the device argmax (one group of 1024 threads) -> argmax-idx, argmax-val
+//                         output.weight (MXFP8 or Q8_0, by the tensor's own type: dkl-dense) [e to vocab] -> LOGITS; the device argmax (one group of 1024 threads) -> argmax-idx, argmax-val
 //   dsv4-forward-state  embed and every block at one position (no head): what a prompt position needs, since only the last position's answer is read
 //   dsv4-prefill-span-sliced  token-major over a span of ids, the head enqueued ONCE after the last token; answers [next id, next position]
 //   dsv4-decode         one step: embed, every block, head, argmax: the next id
@@ -20,7 +20,7 @@
 // writes a buffer from the host between enqueues: the rope tables were written once by dsv4-prepare, and the hash table of a hashed block is read on the device by the token id carried as a constant.
 //
 // WHAT IS REFUSED, so a caller reads nothing and not a plausible wrong token: a context whose blocks are not all supported (dsv4-layer.fk dkl-supported?), whose head tensors are not what the head kernels read
-// (output_hc_fn F16 [hc x e, hc]; scale and base F32; output_norm F32 [e]; token_embd F16 [e, vocab]; output.weight MXFP8 [e, vocab]), a position at or past the capacity the context was opened for, a ratio-4
+// (output_hc_fn F16 [hc x e, hc]; scale and base F32; output_norm F32 [e]; token_embd F16 [e, vocab]; output.weight MXFP8 or Q8_0 [e, vocab], its columns tiled by the block), a position at or past the capacity the context was opened for, a ratio-4
 // block at position 2048 or later (dsv4-layer.fk), an id outside the vocabulary, an empty span. Admission is checked before the first enqueue, so a refusal touches no buffer and advances no cache.
 // The head uses `eps` for the stream rms and `hyper_connection.epsilon` for the gates, as the layer's hc_pre does; the fixture holds the two equal (1e-6), so a file where they differ is not witnessed here.
 //
@@ -51,7 +51,7 @@ section [form.bml] {
          && dth-type(ctx, "output_hc_scale.weight") == 0 && dth-type(ctx, "output_hc_base.weight") == 0 && dth-dims(ctx, "output_hc_base.weight") == [hc]
          && dth-type(ctx, "output_norm.weight") == 0 && dth-dims(ctx, "output_norm.weight") == [e]
          && dth-type(ctx, "token_embd.weight") == 1 && dth-dims(ctx, "token_embd.weight") == [e, vocab]
-         && dth-type(ctx, "output.weight") == 41 && dth-dims(ctx, "output.weight") == [e, vocab]
+         && dvl-type-in?(dth-type(ctx, "output.weight"), dvl-dense-types()) && dth-dims(ctx, "output.weight") == [e, vocab] && (e % dvl-block-cols(dth-type(ctx, "output.weight"))) == 0
          && hc == 4 && vocab > 0 && vocab <= 1048576;
     }
     def dth-blocks-ok?(ctx, il) = il == record_get(dso-geo(ctx), "layers-n") ? true : (dkl-supported?(ctx, il) && dth-blocks-ok?(ctx, il + 1));
@@ -89,7 +89,7 @@ section [form.bml] {
         let r3 = dkr-go(dkl-p(ctx, "form_hc_headw_f32"), [dkl-b(ctx, "hc-mix"), dso-handle(ctx, "output_hc_scale.weight"), dso-handle(ctx, "output_hc_base.weight"), dkl-b(ctx, "head-w")], [hc, dkl-f(record_get(m, "hc-eps"))], hc);
         let r4 = dkr-go(dkl-p(ctx, "form_hc_wsum_f32"), [dkl-b(ctx, "resid"), dkl-b(ctx, "head-w"), dkl-b(ctx, "head-cur")], [hc, e], e);
         let r5 = dkl-norm(ctx, "head-cur", dso-handle(ctx, "output_norm.weight"), "xn", e);
-        let r6 = dkl-mx8(ctx, ov, "xn", "logits");
+        let r6 = dkl-dense(ctx, ov, "xn", "logits");
         let r7 = dkr-go-tg(dkl-p(ctx, "form_dsv4_argmax_f32"), [dkl-b(ctx, "logits"), dkl-b(ctx, "argmax-idx"), dkl-b(ctx, "argmax-val")], [vocab], 1, 1024);
         (w0 >= 0 && r1 == 1 && r2 == 1 && r3 == 1 && r4 == 1 && r5 == 1 && r6 == 1 && r7 == 1) ? 7 : nothing();
     }

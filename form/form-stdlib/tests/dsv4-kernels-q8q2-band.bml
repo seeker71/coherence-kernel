@@ -1,0 +1,213 @@
+; dsv4-kernels-q8q2-band.bml -- the DeepSeek-V4 driver's Q8_0 and Q2_K lanes, kernel by kernel on the GPU, against the oracle's fp64 dequant of the same blocks of the second fixture (Q8_0 dense,
+; IQ2_XXS gate and up, Q2_K down).
+;
+; WHAT THIS PINS. The real IQ2XXS file's dense tensors are Q8_0 (blocks of an f16 scale and 32 signed bytes) and its down experts Q2_K (84-byte blocks of 256). dsv4-kernels.fk now compiles the Q8_0
+; unit in the driver's graph (the plain one-thread matvec, the 32-lane matvec, the grouped output factor) and adds the Q2_K expert matvec by device ids (form_dsv4_q2k_matvec_id). This band writes
+; the variant fixture (dsv4-fixture-gguf.fk dfx-v-write, 86 tensors, 1,778,144 bytes) under temp_dir, maps its tensors through dsv4-bind.fk, feeds each kernel Park-Miller inputs rounded to f32 and
+; holds it to the oracle's own reading of the SAME bytes (dsv4-oracle-reference.bml dfo-mx8, dfo-out-a and dfo-expert-matrix, each keyed on the tensor's own type), which the fixture band holds to the
+; carvers. The gate is the oracle harness's floor: nd = max|gpu - ref| / max|ref| below 3e-5 for a kernel alone.
+;
+; Verdict 255 when every claim lands:
+;   1     text and device: the graph's units now carry the Q8_0 kernels and form_dsv4_q2k_matvec_id, every one of them opens with the pragma pair, no kernel name repeats in the graph, and every pipeline of the
+;         graph (the catalogue read from the sources) compiles to a positive handle and a second open returns the same handles
+;   2     Q8_0 dense, each form on the variant's own tensors: the lane matvec on blk.0.attn_q_a (64 x 256), blk.1.attn_kv (128 x 256), output.weight (32 x 256) and blk.2.ffn_down_shexp (256 x 32, one block a
+;         row), the one-thread matvec on blk.0.attn_q_a, and the grouped output factor on blk.1.attn_output_a (two groups of 32 rows over 128 columns), each within the gate of the oracle
+;   4     Q2_K experts by ids: blk.1 down experts [2, 0] and blk.2 down experts [3, 1] with one input a slot (256 rows over 256 columns), and the same stack read as a gate (the shared input), each slot against the
+;         oracle's expert reading; IQ2_XXS gate by ids on blk.2 (a layer that was MXFP4 in the first fixture) the same
+;   8     determinism: every kernel above, run twice into fresh buffers, writes the same bytes
+;   16    wrong type routed: the IQ2_XXS id kernel over a Q2_K stack, the MXFP8 matvec over a Q8_0 tensor and the Q8_0 lane over an MXFP8-sized read each read far from the oracle (nd above 0.01)
+;   32    a Q2_K scale mis-read: the same kernel text with the scale nibble read as the min (sc / 16 where q2k_umod(sc, 16) stands) reads far from the oracle (nd above 0.01)
+;   64    a Q8_0 block stride off by one: q80_w with 33 bytes where 34 stand reads far from the oracle on a tensor of eight blocks a row, and the control (the unplanted text) in the gate
+;   128   a kernel that never ran reads as the sentinel: an output buffer left untouched by a dispatch of zero threads is 1.5e16 and reads far from the oracle; and the band's own gate refuses a short read
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind metal_pipeline and the handle door, and the fixture is written and read as a binary file (write_file, read_file_slice).
+; Light GPU: kernels of a few hundred threads over a 1.8 MB fixture. Never maps a model; writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk form-stdlib/dsv4-compressor.fk form-stdlib/f16-decode.fk form/form-stdlib/bml/dsv4-oracle-reference.bml
+section [form.bml] {
+ class Dsv4KernelsQ8q2Band {
+  def dqk-bit(held, bit) = held ? bit : 0;
+  def dqk-has?(s, part) = str_find(s, part, 0) >= 0;
+  // Park-Miller inputs rounded to f32: the GPU is fed exactly the numbers the reference reads
+  def dqk-r32(x) = ln-f32-decode(md-f32-bits(x));
+  def dqk-xg(seed, i, n, amp) = i == n ? [] : cons(dqk-r32(amp * (1.0 * ((dsv4-pm-at(seed, i) / 256 % 20001) - 10000)) / 10000.0), dqk-xg(seed, i + 1, n, amp));
+  def dqk-x(seed, n, amp) = dqk-xg(seed, 0, n, amp);
+  def dqk-g(c, k) = record_get(c, k);
+  def dqk-vh(c, name) = record_get(dqk-g(c, "ix"), name)[1];
+  def dqk-p(c, name) = record_get(dqk-g(c, "ps"), name);
+  def dqk-replace(s, from, to) { let p = str_find(s, from, 0); p < 0 ? s : substring(s, 0, p) ++ to ++ substring(s, p + str_len(from), str_len(s)); }
+  // one reading: print it and answer the disagreement with the oracle
+  def dqk-nd(label, gpu, ref) {
+   let nd = dkr-nd(gpu, ref);
+   let said = print_str("  " ++ label ++ " nd " ++ nd.str() ++ (nd >= 1.0e29 ? " (" ++ dkr-nd-why(gpu, ref) ++ ")" : ""));
+   nd;
+  }
+  def dqk-chk(label, gpu, ref) = dqk-nd(label, gpu, ref) < dkr-floor();
+  def dqk-far(label, gpu, ref) = dqk-nd(label, gpu, ref) > 0.01;
+  def dqk-rows(c, key) = nth(nth(dfo-tensor(dqk-g(c, "r"), key), 1), 1);
+  def dqk-cols(c, key) = head(nth(dfo-tensor(dqk-g(c, "r"), key), 1));
+
+  // ---- 1: text and device
+  def dqk-names(units) = len(units) == 0 ? [] : append(dkr-kernel-names(units[0][1]), dqk-names(units[1:]));
+  def dqk-all-pragma?(us) = len(us) == 0 ? true : (dkr-pragma-first?(us[0][1]) && dqk-all-pragma?(us[1:]));
+  def dqk-hs(ps, names) = len(names) == 0 ? [] : cons(record_get(ps, names[0]), dqk-hs(ps, names[1:]));
+  def dqk-positive?(hs) = len(hs) == 0 ? true : (hs[0] > 0 && dqk-positive?(hs[1:]));
+  def dqk-text-device(c, again) {
+   let us = dkr-graph-units();
+   let names = dqk-names(us);
+   let a = dqk-hs(dqk-g(c, "ps"), names);
+   let b = dqk-hs(again, names);
+   let said = print_str("  graph units " ++ len(us).str() ++ ", kernels " ++ len(names).str());
+   dqk-all-pragma?(us) && !dkr-dup?(names) && dqk-has?(dkr-unit-experts(), "form_dsv4_q2k_matvec_id") && dqk-has?(dkr-unit-q8(), "form_dsv4_q80_matvec_lane") && dqk-has?(dkr-unit-q8(), "form_dsv4_q80_matvec_grouped")
+    && len(names) == 72 && len(a) == len(names) && dqk-positive?(a) && a == b;
+  }
+
+  // ---- 2: Q8_0 dense
+  def dqk-q80-lane(c, pipeName, key, seed, once) {
+   let reg = dqk-g(c, "reg");
+   let rows = dqk-rows(c, key);
+   let cols = dqk-cols(c, key);
+   let x = dqk-x(seed, cols, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let o = dkr-buf-empty(reg, rows);
+   let e = dkr-go(dqk-p(c, pipeName), [dqk-vh(c, key), xb, o], [rows, cols], pipeName == "form_dsv4_q80_matvec_1t" ? rows : rows * 32);
+   e == 1 && dqk-chk("q8_0 " ++ pipeName ++ " " ++ key ++ " " ++ rows.str() ++ "x" ++ cols.str(), dkr-read(o, rows), dfo-mx8(dqk-g(c, "r"), key, x));
+  }
+  def dqk-q80-grouped(c, key, seed) {
+   let reg = dqk-g(c, "reg");
+   let rows = dqk-rows(c, key);
+   let cols = dqk-cols(c, key);
+   let x = dqk-x(seed, 2 * cols, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let o = dkr-buf-empty(reg, rows);
+   let e = dkr-go(dqk-p(c, "form_dsv4_q80_matvec_grouped"), [dqk-vh(c, key), xb, o], [rows, cols, rows * cols, rows / 2], rows * 32);
+   e == 1 && dqk-chk("q8_0 grouped " ++ key ++ " 2 groups of " ++ (rows / 2).str() ++ " rows", dkr-read(o, rows), dfo-out-a(dqk-g(c, "r"), key, x, dfo-geometry(dqk-g(c, "r"))));
+  }
+  def dqk-dense(c) = dqk-q80-lane(c, "form_dsv4_q80_matvec_lane", "blk.0.attn_q_a.weight", 12, 0) && dqk-q80-lane(c, "form_dsv4_q80_matvec_lane", "blk.1.attn_kv.weight", 13, 0)
+   && dqk-q80-lane(c, "form_dsv4_q80_matvec_lane", "output.weight", 14, 0) && dqk-q80-lane(c, "form_dsv4_q80_matvec_lane", "blk.2.ffn_down_shexp.weight", 15, 0)
+   && dqk-q80-lane(c, "form_dsv4_q80_matvec_1t", "blk.0.attn_q_a.weight", 12, 0) && dqk-q80-grouped(c, "blk.1.attn_output_a.weight", 16);
+
+  // ---- 4: Q2_K and IQ2_XXS experts by ids
+  def dqk-expert-ref(c, key, ids, x, xs, slot) = slot == len(ids) ? [] : append(dfo-expert-matrix(dqk-g(c, "r"), key, ids[slot], xs == 0 ? x : x[slot * xs:(slot + 1) * xs]), dqk-expert-ref(c, key, ids, x, xs, slot + 1));
+  def dqk-expert-run(c, pipe, key, ids, x, xs, rows, cols) {
+   let reg = dqk-g(c, "reg");
+   let ib = dkr-buf-u32(reg, ids);
+   let xb = dkr-buf-f32(reg, x);
+   let out = dkr-buf-empty(reg, len(ids) * rows);
+   let e = dkr-go(pipe, [dqk-vh(c, key), xb, out, ib], [rows, cols, len(ids), xs], len(ids) * rows * 32);
+   e == 1 ? dkr-read(out, len(ids) * rows) : [];
+  }
+  def dqk-expert-one(c, label, kernel, key, ids, x, xs) {
+   let rows = dqk-rows(c, key);
+   let cols = dqk-cols(c, key);
+   dqk-chk(label, dqk-expert-run(c, dqk-p(c, kernel), key, ids, x, xs, rows, cols), dqk-expert-ref(c, key, ids, x, xs, 0));
+  }
+  def dqk-experts(c) {
+   let x256 = dqk-x(52, 256, 2.0);
+   let mids = dqk-x(57, 512, 2.0);
+   dqk-expert-one(c, "q2_k down by ids [2,0] blk.1 (input per slot)", "form_dsv4_q2k_matvec_id", "blk.1.ffn_down_exps.weight", [2, 0], mids, 256)
+    && dqk-expert-one(c, "q2_k down by ids [3,1] blk.2 (input per slot)", "form_dsv4_q2k_matvec_id", "blk.2.ffn_down_exps.weight", [3, 1], mids, 256)
+    && dqk-expert-one(c, "q2_k as a gate by ids [1,3] blk.0 (shared input)", "form_dsv4_q2k_matvec_id", "blk.0.ffn_down_exps.weight", [1, 3], x256, 0)
+    && dqk-expert-one(c, "iq2_xxs gate by ids [0,2] blk.2 (shared input)", "form_dsv4_iq2_matvec_id", "blk.2.ffn_gate_exps.weight", [0, 2], x256, 0)
+    && dqk-expert-one(c, "iq2_xxs up by ids [3,1] blk.1 (shared input)", "form_dsv4_iq2_matvec_id", "blk.1.ffn_up_exps.weight", [3, 1], x256, 0);
+  }
+
+  // ---- 8: determinism: the same bytes twice
+  def dqk-bytes(xs) = dkr-f32-bytes(xs);
+  def dqk-twice(c) {
+   let reg = dqk-g(c, "reg");
+   let x = dqk-x(12, 256, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let a1 = dkr-buf-empty(reg, 64);
+   let a2 = dkr-buf-empty(reg, 64);
+   let e1 = dkr-go(dqk-p(c, "form_dsv4_q80_matvec_lane"), [dqk-vh(c, "blk.0.attn_q_a.weight"), xb, a1], [64, 256], 64 * 32);
+   let e2 = dkr-go(dqk-p(c, "form_dsv4_q80_matvec_lane"), [dqk-vh(c, "blk.0.attn_q_a.weight"), xb, a2], [64, 256], 64 * 32);
+   let mids = dqk-x(57, 512, 2.0);
+   let q1 = dqk-expert-run(c, dqk-p(c, "form_dsv4_q2k_matvec_id"), "blk.1.ffn_down_exps.weight", [2, 0], mids, 256, 256, 256);
+   let q2 = dqk-expert-run(c, dqk-p(c, "form_dsv4_q2k_matvec_id"), "blk.1.ffn_down_exps.weight", [2, 0], mids, 256, 256, 256);
+   let r1 = dkr-read(a1, 64);
+   let r2 = dkr-read(a2, 64);
+   e1 == 1 && e2 == 1 && len(r1) == 64 && dqk-bytes(r1) == dqk-bytes(r2) && len(q1) == 512 && dqk-bytes(q1) == dqk-bytes(q2);
+  }
+
+  // ---- 16: wrong type routed
+  def dqk-wrong-type(c) {
+   let reg = dqk-g(c, "reg");
+   let mids = dqk-x(57, 512, 2.0);
+   let x = dqk-x(12, 256, 2.0);
+   let key = "blk.1.ffn_down_exps.weight";
+   let wrongExp = dqk-expert-run(c, dqk-p(c, "form_dsv4_iq2_matvec_id"), key, [2, 0], mids, 256, 256, 256);
+   let xb = dkr-buf-f32(reg, x);
+   let o = dkr-buf-empty(reg, 64);
+   let e = dkr-go(dqk-p(c, "form_dsv4_mx8_matvec"), [dqk-vh(c, "blk.0.attn_q_a.weight"), xb, o], [64, 256, 16384], 64 * 32);
+   let o2 = dkr-buf-empty(reg, 64);
+   let e2 = dkr-go(dqk-p(c, "form_dsv4_mx4_matvec_id"), [dqk-vh(c, "blk.0.ffn_gate_exps.weight"), xb, o2, dkr-buf-u32(reg, [1, 3])], [256, 256, 2, 0], 2 * 256 * 32);
+   len(wrongExp) == 512 && e == 1 && e2 == 1
+    && dqk-far("IQ2_XXS kernel over the Q2_K stack", wrongExp, dqk-expert-ref(c, key, [2, 0], mids, 256, 0))
+    && dqk-far("MXFP8 matvec over the Q8_0 tensor", dkr-read(o, 64), dfo-mx8(dqk-g(c, "r"), "blk.0.attn_q_a.weight", x))
+    && dqk-far("MXFP4 kernel over the IQ2_XXS stack", append(dkr-read(o2, 512)[0:0], dkr-read(o2, 512)), dqk-expert-ref(c, "blk.0.ffn_gate_exps.weight", [1, 3], x, 0, 0));
+  }
+
+  // ---- 32 / 64: planted kernel texts (a copy of the emitted source with one claim dropped, compiled fresh; the tree's text is not touched)
+  def dqk-scale-plant() = dqk-replace(dkr-unit-experts(), "float ds = d * float(q2k_umod(sc, 16u));", "float ds = d * float(sc / 16u);");
+  def dqk-stride-plant() = dqk-replace(dkr-unit-q8(), "uint b = blk * 34u;", "uint b = blk * 33u;");
+  def dqk-scale-misread(c) {
+   let planted = dqk-scale-plant();
+   let pipe = metal_pipeline(planted, "form_dsv4_q2k_matvec_id");
+   let mids = dqk-x(57, 512, 2.0);
+   let key = "blk.1.ffn_down_exps.weight";
+   let ref = dqk-expert-ref(c, key, [2, 0], mids, 256, 0);
+   let good = dqk-expert-run(c, dqk-p(c, "form_dsv4_q2k_matvec_id"), key, [2, 0], mids, 256, 256, 256);
+   let bad = pipe > 0 ? dqk-expert-run(c, pipe, key, [2, 0], mids, 256, 256, 256) : [];
+   !dqk-has?(planted, "float ds = d * float(q2k_umod(sc, 16u));") && dqk-has?(planted, "float(sc / 16u)") && pipe > 0 && len(bad) == 512 && dqk-chk("control: the unplanted Q2_K text", good, ref) && dqk-far("Q2_K scale nibble read as the min", bad, ref);
+  }
+  def dqk-stride-off(c) {
+   let planted = dqk-stride-plant();
+   let pipe = metal_pipeline(planted, "form_dsv4_q80_matvec_lane");
+   let reg = dqk-g(c, "reg");
+   let key = "blk.0.attn_q_a.weight";
+   let x = dqk-x(12, 256, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let o = dkr-buf-empty(reg, 64);
+   let e = pipe > 0 ? dkr-go(pipe, [dqk-vh(c, key), xb, o], [64, 256], 64 * 32) : 0;
+   let ref = dfo-mx8(dqk-g(c, "r"), key, x);
+   !dqk-has?(planted, "uint b = blk * 34u;") && dqk-has?(planted, "uint b = blk * 33u;") && pipe > 0 && e == 1 && dqk-far("Q8_0 block stride 33 for 34", dkr-read(o, 64), ref);
+  }
+
+  // ---- 128: a kernel that never ran reads as the sentinel
+  def dqk-sentinel(c) {
+   let reg = dqk-g(c, "reg");
+   let key = "blk.0.attn_q_a.weight";
+   let x = dqk-x(12, 256, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let o = dkr-buf-empty(reg, 64);
+   let ref = dfo-mx8(dqk-g(c, "r"), key, x);
+   let got = dkr-read(o, 64);
+   got[0] > 1.0e15 && dqk-far("an unrun output buffer", got, ref) && dkr-nd(got[0:3], ref) > 1.0e29;
+  }
+ }
+ let root = temp_dir() ++ "/dsv4-kernels-q8q2-band-" ++ now_unix_ms().str();
+ let path = root ++ ".gguf";
+ let wrote = dfx-v-write(path);
+ let r = dfo-open(path);
+ let m = dvl-open(read_file_slice(path, 0, 7168));
+ let live0 = dvb-live();
+ let views = dvb-open(path, dvb-plan-all(m));
+ let ix = dvb-index(views);
+ let reg = dkr-reg-new();
+ let all = dkr-open-pipes(dkr-graph-units());
+ let c = record_new(0, "r", r, "m", m, "ix", ix, "ps", all, "reg", reg);
+ let again = dkr-open-pipes(dkr-graph-units());
+ let c1 = dqk-bit(try dqk-text-device(c, again) catch false, 1);
+ let c2 = dqk-bit(try dqk-dense(c) catch false, 2);
+ let c4 = dqk-bit(try dqk-experts(c) catch false, 4);
+ let c8 = dqk-bit(try dqk-twice(c) catch false, 8);
+ let c16 = dqk-bit(try dqk-wrong-type(c) catch false, 16);
+ let c32 = dqk-bit(try dqk-scale-misread(c) catch false, 32);
+ let c64 = dqk-bit(try dqk-stride-off(c) catch false, 64);
+ let c128 = dqk-bit(try dqk-sentinel(c) catch false, 128);
+ let leftBufs = dkr-reg-free(reg);
+ let leftViews = nothing?(views) ? [] : dvb-close(views);
+ let removed = host_path_remove(path);
+ print_str("dsv4-kernels-q8q2-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " wrote " ++ wrote.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128;
+}
