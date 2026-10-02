@@ -20,7 +20,8 @@
 //   <root>/lineage-<lineage>.fkb   form-token/request/<request>, form-token/lineage/<lineage>
 //   <root>/global.fkb              form-token/global
 // A store is held newest first with an index by name and by spoken address, read again only when
-// its file changed, and written whole through a fresh file renamed over it. A workspace with no
+// its file changed, and written whole through a fresh file renamed over it, by one process at a
+// time (the store's .lock directory, ftw-lock-take: every lane writes the global store). A workspace with no
 // root keeps every store in memory (a band, a trace replay); its global scope is then the
 // substrate and what it wrote itself.
 //
@@ -159,11 +160,15 @@ section [form.bml] {
   }
   // The store is read fresh (a cell another process wrote meanwhile is kept), the cell added, and
   // the whole store written to a fresh file renamed over the old one; what was written is held, so
-  // no write reads the file back. Two processes writing one store in the same moment keep the
-  // later writer's whole store.
+  // no write reads the file back. One process at a time does that for a store: it holds
+  // <store>.lock (a directory only one maker makes, ftw-lock-take) from the read to the rename, and
+  // a stop releases it too (defer).
   def ftw-file-write(ws, key, cell) {
    let path = ftw-store-path(ws, key);
    let made = ftw-mkdirs(ftw-root(ws));
+   let lock = path ++ ".lock";
+   let taken = ftw-lock-take(lock, host_monotonic_ms() + ftw-lock-patience-ms(), 0);
+   defer ftw-lock-release(lock);
    let fresh = ftw-file-read(ws, key, path, ftw-get(record_get(ws, "stores"), key), ftw-stamp(path));
    let held = ftw-held-add(fresh, "", cell);
    let part = path ++ ".w" ++ host_pid().str();
@@ -172,6 +177,58 @@ section [form.bml] {
    let checked = record_set(record_get(ws, "checked"), key, host_monotonic_ms());
    ftw-hold-store(ws, key, [ftw-stamp(path), held[1], held[2]]);
    0;
+  }
+  // ── one writer at a time ─────────────────────────────────────────────
+  // The lock is a directory (one level, which only one maker makes) holding its holder's
+  // owner file: "pid=<pid> at=<unix ms>". A waiter backs off (host_sleep_ms, doubling to a cap)
+  // and tries again. A lock whose holder is gone (host_alive), or has held it longer than the
+  // patience, or a wait that has used the patience, is taken over through a mark inside the lock
+  // that only one taker can make (<lock>/took-<holder>), while the lock still names that holder;
+  // a mark older than the patience (a taker that ended) is removed. A lock is released only by
+  // the pid it names, so a holder that was taken over from never removes the taker's lock.
+  def ftw-lock-patience-ms() = 10000;
+  def ftw-lock-owner-path(lock) = lock ++ "/owner";
+  def ftw-lock-owner(lock) = read_file(ftw-lock-owner-path(lock)) ?? "";
+  def ftw-lock-text() = "pid=" ++ host_pid().str() ++ " at=" ++ now_unix_ms().str();
+  def ftw-lock-field(text, key) {
+   let at = str_find(text, key, 0);
+   at < 0 ? nothing() : ftw-lock-digits(text, at + len(key), at + len(key));
+  }
+  def ftw-lock-digits(text, from, i) = (i < len(text)) && (str_byte_at(text, i) >= 48) && (str_byte_at(text, i) <= 57) ? ftw-lock-digits(text, from, i + 1) : i > from ? str_to_int(substring(text, from, i)) : nothing();
+  def ftw-lock-take(lock, deadline, tries) = fs_mkdir(lock) == 1 ? ftw-lock-own(lock) : ftw-lock-found(lock, deadline, tries, ftw-lock-owner(lock));
+  def ftw-lock-own(lock) {
+   write_file_text(ftw-lock-owner-path(lock), ftw-lock-text());
+   1;
+  }
+  def ftw-lock-found(lock, deadline, tries, text) = ftw-lock-stale?(lock, deadline, text) ? ftw-lock-takeover(lock, deadline, tries, text) : ftw-lock-again(lock, deadline, tries);
+  def ftw-lock-again(lock, deadline, tries) {
+   host_sleep_ms(ftw-lock-backoff(tries));
+   ftw-lock-take(lock, deadline, tries + 1);
+  }
+  // 1, 2, 4 ... 32 ms
+  def ftw-lock-backoff(tries) = tries >= 5 ? 32 : [1, 2, 4, 8, 16][tries];
+  // the holder is gone, or has held it longer than the patience (an owner not yet written reads
+  // the lock's own age), or this wait has used its patience
+  def ftw-lock-stale?(lock, deadline, text) {
+   let pid = ftw-lock-field(text, "pid=");
+   let at = ftw-lock-field(text, " at=");
+   if host_monotonic_ms() >= deadline then 1
+   else if nothing?(pid) || nothing?(at) then ((now_unix_ms() / 1000) - file_mtime(lock)) * 1000 > ftw-lock-patience-ms() / 5
+   else host_alive(pid) != 1 || ((now_unix_ms() - at) > ftw-lock-patience-ms());
+  }
+  def ftw-lock-takeover(lock, deadline, tries, text) {
+   let pid = ftw-lock-field(text, "pid=");
+   let mark = lock ++ "/took-" ++ (nothing?(pid) ? "unowned" : pid.str());
+   if (fs_mkdir(mark) == 1) && (ftw-lock-owner(lock) == text) then ftw-lock-own(lock)
+   else ftw-lock-unmark(lock, mark, deadline, tries);
+  }
+  def ftw-lock-unmark(lock, mark, deadline, tries) {
+   if ((now_unix_ms() / 1000) - file_mtime(mark)) * 1000 > ftw-lock-patience-ms() then host_dir_rmdir(mark) else 0;
+   ftw-lock-again(lock, deadline, tries);
+  }
+  def ftw-lock-release(lock) {
+   let holder = ftw-lock-field(ftw-lock-owner(lock), "pid=");
+   !nothing?(holder) && (holder == host_pid()) ? host_dir_rmdir(lock) : 0;
   }
 
   // ── cells ────────────────────────────────────────────────────────────
